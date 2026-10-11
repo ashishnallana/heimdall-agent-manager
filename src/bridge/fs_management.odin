@@ -706,7 +706,7 @@ bridge_fs_run_dir_root :: proc(instance_id: string) -> (root: string, ok: bool) 
 	run_dir := bridge_runtime_default_run_dir(id)
 	defer delete(run_dir, context.allocator)
 	base_root := strings.trim_right(bridge_config.local_endpoint_run_dir, "/")
-	if base_root == "" do base_root = "/tmp/heimdall-bridge-local"
+	if base_root == "" do base_root = bridge_scratch_local_default(context.temp_allocator)
 	base_raw := strings.concatenate({base_root, "/instances"}, context.allocator)
 	defer delete(base_raw, context.allocator)
 	// Canonicalize the instances base (symlink-resolve its existing prefix) BEFORE

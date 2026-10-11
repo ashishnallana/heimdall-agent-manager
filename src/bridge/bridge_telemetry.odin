@@ -75,7 +75,8 @@ bridge_telemetry_hydrate_template :: proc(template_text, bridge_id, hostname, po
 bridge_telemetry_conf_path :: proc(bridge_id: string, allocator := context.allocator) -> string {
 	safe_id := bridge_runtime_safe_part(bridge_id)
 	defer delete(safe_id)
-	return fmt.aprintf("/tmp/heimdall-telegraf-%s.conf", safe_id, allocator = allocator)
+	root := bridge_scratch_root(context.temp_allocator)
+	return fmt.aprintf("%s/heimdall-telegraf-%s.conf", root, safe_id, allocator = allocator)
 }
 
 bridge_telemetry_status :: proc() -> bool {

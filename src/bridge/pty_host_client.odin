@@ -536,7 +536,7 @@ pty_host_reply_delete :: proc(r: Pty_Host_Reply) {
 // retain an identity suffix so multiple bridges never share a daemon.
 pty_host_socket_path :: proc() -> string {
 	base := strings.trim_right(bridge_config.local_endpoint_run_dir, "/")
-	if base == "" do base = "/tmp/heimdall-bridge-local"
+	if base == "" do base = bridge_scratch_local_default(context.temp_allocator)
 	// A daemon serves exactly one bridge. Use the directory identity when
 	// available; otherwise put the identity in the name for shared run dirs.
 	id := pty_host_bridge_identity()

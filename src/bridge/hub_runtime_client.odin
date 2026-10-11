@@ -2414,7 +2414,7 @@ bridge_runtime_find_on_path :: proc(name: string) -> string {
 
 bridge_runtime_default_run_dir :: proc(instance_id: string) -> string {
 	base := strings.trim_right(bridge_config.local_endpoint_run_dir, "/")
-	if base == "" do base = "/tmp/heimdall-bridge-local"
+	if base == "" do base = bridge_scratch_local_default(context.temp_allocator)
 	return strings.concatenate({base, "/instances/", bridge_runtime_safe_part(instance_id)})
 }
 

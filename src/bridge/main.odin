@@ -336,7 +336,7 @@ bridge_config_from_args :: proc(args: []string) -> Bridge_Config {
 		chunk_bytes = contracts.BRIDGE_WS_DEFAULT_CHUNK_BYTES,
 		bootstrap_cache_max_bytes = 256 * 1024 * 1024,
 		local_endpoint_port = 0,
-		local_endpoint_run_dir = "/tmp/heimdall-bridge-local",
+		local_endpoint_run_dir = bridge_scratch_local_default(),
 		local_proxy_enabled = true,
 	}
 

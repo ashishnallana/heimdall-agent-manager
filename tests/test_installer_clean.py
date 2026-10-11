@@ -289,6 +289,9 @@ if me=='sv-enable':
         commands=self.commands()
         self.assertIn(['sv-enable','ham-bridge'],commands)
         self.assertIn(['sv','restart',str(svc)],commands)
+        # The service is enabled only AFTER enrollment restarted it, so the enrolling
+        # process is never displaced by the service connecting with the same identity.
+        self.assertGreater(commands.index(['sv-enable','ham-bridge']),commands.index(['sv','restart',str(svc)]))
         self.assertFalse(any(c[0] in ('systemctl','launchctl') for c in commands))
         self.assertEqual((self.state(name)/'bridge-token').stat().st_mode&0o777,0o600)
         # One Termux install serves one Hub: a second Hub is refused before anything is touched.

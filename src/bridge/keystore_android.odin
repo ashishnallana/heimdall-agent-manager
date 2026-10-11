@@ -272,25 +272,27 @@ keystore_android_aad :: proc(bridge_id: string) -> []u8 {
 // Writes data to path with mode 0600 via a temp file + rename, so a crash never
 // leaves a truncated sealed file behind.
 @(private = "file")
-keystore_android_write_file :: proc(path: string, data: []u8) -> bool {
-	dir := path[:strings.last_index_byte(path, '/') + 1]
-	if os.make_directory_all(dir) != nil && !os.exists(dir) do return false
+keystore_android_write_file :: proc(path: string, data: []u8) -> (ok: bool, reason: string) {
+	dir := path[:max(strings.last_index_byte(path, '/'), 0)]
+	if mk_err := os.make_directory_all(dir); mk_err != nil && !os.exists(dir) {
+		return false, fmt.tprintf("mkdir %s: %v", dir, mk_err)
+	}
 	tmp := strings.concatenate({path, ".tmp"}, context.temp_allocator)
 	_ = os.remove(tmp)
 	f, open_err := os.open(tmp, {.Write, .Create, .Excl, .Trunc}, {.Read_User, .Write_User})
-	if open_err != nil do return false
+	if open_err != nil do return false, fmt.tprintf("open %s: %v", tmp, open_err)
 	n, write_err := os.write(f, data)
 	sync_err := os.sync(f)
 	os.close(f)
 	if write_err != nil || n != len(data) || sync_err != nil {
 		_ = os.remove(tmp)
-		return false
+		return false, fmt.tprintf("write/fsync %s: write=%v n=%d/%d sync=%v", tmp, write_err, n, len(data), sync_err)
 	}
-	if os.rename(tmp, path) != nil {
+	if rn_err := os.rename(tmp, path); rn_err != nil {
 		_ = os.remove(tmp)
-		return false
+		return false, fmt.tprintf("rename %s -> %s: %v", tmp, path, rn_err)
 	}
-	return true
+	return true, ""
 }
 
 // keystore_android_alias_listed asks `termux-keystore list` whether alias
@@ -388,8 +390,8 @@ keystore_android_store_vault_key :: proc(bridge_id: string, key_hex: string) -> 
 	aes.seal_gcm(&gcm, ct, tag, nonce, keystore_android_aad(bridge_id), transmute([]u8)key_hex)
 	aes.reset_gcm(&gcm)
 
-	if !keystore_android_write_file(path, sealed[:]) {
-		fmt.eprintfln("ERROR: could not write the sealed vault key %s; the vault key was NOT persisted.", path)
+	if write_ok, why := keystore_android_write_file(path, sealed[:]); !write_ok {
+		fmt.eprintfln("ERROR: could not write the sealed vault key %s (%s); the vault key was NOT persisted.", path, why)
 		return false, KEYSTORE_ERR_ANDROID_WRITE
 	}
 	// Reopen what landed on disk, exactly as a restarted bridge will.

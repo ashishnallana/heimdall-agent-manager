@@ -112,7 +112,12 @@ bridge_provider_catalog_publish :: proc(snapshot: ^Bridge_Provider_Catalog_Snaps
 bridge_provider_catalog_save :: proc(etag, catalog_json: string) -> bool {
 	path := bridge_provider_catalog_path()
 	defer delete(path)
-	if slash := strings.last_index_byte(path, '/'); slash > 0 do _ = os.make_directory_all(path[:slash])
+	if slash := strings.last_index_byte(path, '/'); slash > 0 {
+		if mk_err := os.make_directory_all(path[:slash]); mk_err != nil && !os.exists(path[:slash]) {
+			fmt.eprintfln("bridge provider catalog: cannot create cache directory %s: %v", path[:slash], mk_err)
+			return false
+		}
+	}
 	b := strings.builder_make()
 	strings.write_string(&b, "{\"catalog_etag\":\"")
 	bridge_runtime_write_json_string(&b, etag)
@@ -123,8 +128,12 @@ bridge_provider_catalog_save :: proc(etag, catalog_json: string) -> bool {
 	defer delete(payload)
 	tmp := strings.concatenate({path, ".tmp"})
 	defer delete(tmp)
-	if os.write_entire_file(tmp, transmute([]byte)payload) != nil do return false
-	if os.rename(tmp, path) != nil {
+	if w_err := os.write_entire_file(tmp, transmute([]byte)payload); w_err != nil {
+		fmt.eprintfln("bridge provider catalog: cannot write cache %s: %v", tmp, w_err)
+		return false
+	}
+	if rn_err := os.rename(tmp, path); rn_err != nil {
+		fmt.eprintfln("bridge provider catalog: cannot rename cache %s -> %s: %v", tmp, path, rn_err)
 		_ = os.remove(tmp)
 		return false
 	}
@@ -247,7 +256,9 @@ bridge_provider_catalog_handle_frame :: proc(conn: ^ws.Connection, frame_type, t
 	catalog_json := extract_json_string(text, "catalog_json", "")
 	defer delete(catalog_json)
 	if !bridge_provider_catalog_apply(etag, catalog_json) {
-		fmt.println("bridge provider catalog rejected: malformed body or sha256 mismatch")
+		// bridge_provider_catalog_save prints its own reason when the cache write
+		// is what failed; a silent false here means the body itself was bad.
+		fmt.println("bridge provider catalog rejected: malformed body, sha256 mismatch, or cache not persisted (see above)")
 	}
 	return true
 }

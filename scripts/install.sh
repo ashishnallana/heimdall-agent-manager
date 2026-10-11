@@ -505,16 +505,13 @@ PY
       plutil -lint "$service_file" >/dev/null
       launchctl bootstrap "gui/$uid" "$service_file" ;;
     runit)
-      # Give runsvdir (5 s scan) time to attach a runsv before enabling, so
-      # sv-enable does not race it with "unable to open supervise/ok".
+      # Give runsvdir (5 s scan) time to attach a runsv before anything uses
+      # `sv` on this directory. The service itself stays DOWN until enrollment
+      # has finished: runit restarts a token-less bridge every second, so an
+      # enabled service would connect the moment the token file appears and the
+      # Hub would drop the enrolling process mid vault delivery.
       local waited=0
-      until [ -d "$runit_dir/supervise" ] || [ "$waited" -ge "${HEIMDALL_RUNSV_WAIT:-10}" ]; do waited=$((waited+1)); sleep 1; done
-      if command -v sv-enable >/dev/null; then sv-enable ham-bridge
-      else rm -f "$runit_dir/down"; sv up "$runit_dir"; fi
-      local tries=0
-      until sv status "$runit_dir" 2>/dev/null | grep -q '^run:'; do
-        tries=$((tries+1)); [ "$tries" -lt 15 ] || break; sleep 1
-      done ;;
+      until [ -d "$runit_dir/supervise" ] || [ "$waited" -ge "${HEIMDALL_RUNSV_WAIT:-10}" ]; do waited=$((waited+1)); sleep 1; done ;;
   esac
   if [ "$enrollment" = yes ]; then
     if "$noninteractive"; then
@@ -522,6 +519,16 @@ PY
       printf 'Run: %q\n' "$state_dir/enroll.sh"
     else enroll; log OK 'Browser-approved enrollment complete'; fi
   else log OK 'Existing enrollment preserved'; fi
+  if [ "$svc" = runit ]; then
+    # Enable only now (after enrollment, or at once when none runs): removes the
+    # down file for future boots and starts the service if enrollment did not.
+    if command -v sv-enable >/dev/null; then sv-enable ham-bridge
+    else rm -f "$runit_dir/down"; sv up "$runit_dir"; fi
+    local tries=0
+    until sv status "$runit_dir" 2>/dev/null | grep -q '^run:'; do
+      tries=$((tries+1)); [ "$tries" -lt 15 ] || break; sleep 1
+    done
+  fi
   step '6 / 6 · Ready'
   case "$svc" in
     systemd)

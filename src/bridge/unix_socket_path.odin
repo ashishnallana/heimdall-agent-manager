@@ -16,7 +16,8 @@ bridge_unix_socket_bounded_path :: proc(path: string) -> string {
 	for b in transmute([]byte)path {
 		hash = (hash ~ u64(b)) * 1099511628211
 	}
-	return fmt.aprintf("/tmp/heimdall-%d/%016x.sock", posix.geteuid(), hash)
+	root := bridge_scratch_root(context.temp_allocator)
+	return fmt.aprintf("%s/heimdall-%d/%016x.sock", root, posix.geteuid(), hash)
 }
 
 // A fallback lives outside the configured run directory, so create an owner-only
@@ -25,7 +26,8 @@ bridge_unix_socket_prepare_parent :: proc(path: string) -> bool {
 	slash := strings.last_index_byte(path, '/')
 	if slash <= 0 do return false
 	dir := path[:slash]
-	fallback := fmt.aprintf("/tmp/heimdall-%d", posix.geteuid())
+	root := bridge_scratch_root(context.temp_allocator)
+	fallback := fmt.aprintf("%s/heimdall-%d", root, posix.geteuid())
 	defer delete(fallback)
 	if dir != fallback {
 		err := os.make_directory_all(dir)
