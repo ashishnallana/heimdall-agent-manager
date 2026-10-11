@@ -112,10 +112,6 @@ if [[ -n "$CHAIN" ]]; then
   EXTRA+=(--chain "$CHAIN")
 fi
 
-PROD_FLAG="--prod"
-if [[ "${*:-}" =~ "--no-prod" ]] || [[ "${HEIMDALL_PREVIEW_PROD:-1}" == "0" ]]; then
-  PROD_FLAG=""
-fi
 
 UPSTREAM_FLAG=""
 if [[ -n "${HEIMDALL_PREVIEW_UPSTREAM:-}" ]]; then
@@ -139,7 +135,7 @@ for attempt in 0 1 2 3; do
     --port "$CUR_PORT" \
     --label "$LABEL" \
     --cwd "$REPO" \
-    --cmd "node \"$SCRIPT_DIR/dev-preview.mjs\" --port $CUR_PORT --vite-port $CUR_VITE_PORT --root \"$REPO\" --ham-ctl \"$HAM_CTL\" ${UPSTREAM_FLAG} ${PROD_FLAG}")"
+    --cmd "node \"$SCRIPT_DIR/dev-preview.mjs\" --port $CUR_PORT --vite-port $CUR_VITE_PORT --root \"$REPO\" --ham-ctl \"$HAM_CTL\" ${UPSTREAM_FLAG}")"
 
   SID="$(printf '%s' "$START_RESPONSE" | json 'print(d.get("data",{}).get("data",{}).get("session",{}).get("session_id",""))' 2>/dev/null || true)"
   if [[ -n "$SID" ]]; then

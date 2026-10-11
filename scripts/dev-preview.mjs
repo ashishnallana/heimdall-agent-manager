@@ -37,7 +37,6 @@ const PORT = Number(argValue('--port', process.env.HEIMDALL_PREVIEW_PORT || '517
 const VITE_PORT = Number(argValue('--vite-port', process.env.HEIMDALL_VITE_PORT || '5174'));
 let sessionId = argValue('--session-id', process.env.HEIMDALL_PREVIEW_SESSION_ID || '');
 const UPSTREAM = new URL(argValue('--upstream', process.env.HEIMDALL_PREVIEW_UPSTREAM || 'http://127.0.0.1:8080'));
-const isProd = process.argv.includes('--prod') || process.env.HEIMDALL_PREVIEW_PROD === '1';
 
 /** Forward `/api/v1/...` and `/_dev/...` to local ham-dev-proxy (127.0.0.1:8080). */
 function proxyApi(req, res, targetPath) {
@@ -92,6 +91,18 @@ function logRequest(req, res, targetUrl) {
   });
 }
 
+// The Hub serves previews under one of two shapes, and which one is live is the
+// Hub's choice, not ours (see the heimdall-preview-setup skill):
+//   preview-origin mode : <preview_origin>/p/<sid>/
+//   legacy mode         : <ui_origin>/api/v1/preview/<sid>/
+// Vite's --base must match the shape the BROWSER actually loads, because every
+// module URL it emits is absolute. Hardcoding the legacy shape on a Hub running
+// preview-origin mode makes the document load from /p/<sid>/ while its scripts
+// point at /api/v1/preview/<sid>/ — which that origin does not serve, so the
+// whole module graph 404s (e.g. GET .../@react-refresh -> 404). So: read the
+// session's real preview_url and take its path.
+let discoveredPrefix = '';
+
 /** Find this session's ID from ham-ctl shell list or state file */
 function discoverSessionId(port) {
   const stateFile = path.join(ROOT, '.dev-preview-session');
@@ -117,6 +128,7 @@ function discoverSessionId(port) {
       const sessions = data?.data?.data?.sessions || data?.data?.sessions || [];
       const match = sessions.find((s) => s.server_port === port && s.status === 'running');
       if (match && match.session_id) {
+        discoveredPrefix = previewPathFrom(match.preview_url);
         return match.session_id;
       }
     } catch {}
@@ -124,12 +136,32 @@ function discoverSessionId(port) {
   return '';
 }
 
+/** Path component of a preview_url, normalised to a trailing slash. */
+function previewPathFrom(previewUrl) {
+  if (!previewUrl) return '';
+  try {
+    const p = new URL(previewUrl).pathname || '';
+    if (!p || p === '/') return '';
+    return p.endsWith('/') ? p : `${p}/`;
+  } catch {
+    return '';
+  }
+}
+
+/** The prefix the browser loads under. Explicit flag > discovered > legacy. */
+function resolveBasePrefix(sid) {
+  const explicit = previewPathFrom(argValue('--preview-url', process.env.HEIMDALL_PREVIEW_URL || ''));
+  if (explicit) return explicit;
+  if (discoveredPrefix) return discoveredPrefix;
+  return sid ? `/api/v1/preview/${sid}/` : '/';
+}
+
 let viteProcess = null;
 let viteReady = false;
 let pendingRequests = [];
 
 function startVite(sid) {
-  const base = sid ? `/api/v1/preview/${sid}/` : '/';
+  const base = basePrefix || '/';
   console.log(`[dev-preview] launching internal Vite on 127.0.0.1:${VITE_PORT} with base: ${base}`);
 
   const args = [
@@ -145,8 +177,13 @@ function startVite(sid) {
     stdio: ['inherit', 'pipe', 'pipe'],
     env: {
       ...process.env,
-      VITE_API_BASE: isProd ? '' : (process.env.VITE_API_BASE ?? '.'),
-      VITE_BASE_API: isProd ? '' : (process.env.VITE_BASE_API ?? '.'),
+      VITE_API_BASE: process.env.VITE_API_BASE ?? '.',
+      VITE_BASE_API: process.env.VITE_BASE_API ?? '.',
+      // index.html interpolates these; nothing reads them in dev, but leaving
+      // them undefined makes Vite warn on every HTML request (30+ lines of
+      // "%VITE_HEIMDALL_LOGIN_URL% is not defined" noise per page load).
+      VITE_HEIMDALL_LOGIN_URL: process.env.VITE_HEIMDALL_LOGIN_URL ?? '',
+      VITE_HEIMDALL_LOGOUT_URL: process.env.VITE_HEIMDALL_LOGOUT_URL ?? '',
       FORCE_COLOR: '1',
     },
   });
@@ -215,31 +252,39 @@ if (!sessionId) {
   }
 }
 
+const basePrefix = resolveBasePrefix(sessionId);
+// Legacy shape is still accepted on the way IN, so a client that was handed the
+// old URL keeps working even when Vite is based on the preview-origin shape.
+const legacyPrefix = sessionId ? `/api/v1/preview/${sessionId}` : '';
+const prefixesIn = [basePrefix.replace(/\/$/, ''), legacyPrefix].filter(Boolean);
+console.log(`[dev-preview] browser base prefix: ${basePrefix}`);
+
+/** Strip whichever known preview prefix the request arrived with. */
+function stripPrefix(urlPath) {
+  for (const p of prefixesIn) {
+    if (urlPath === p) return '/';
+    if (urlPath.startsWith(p + '/')) return urlPath.slice(p.length) || '/';
+  }
+  return urlPath;
+}
+
 startVite(sessionId);
 
 // Start the reverse proxy server on PORT
 const server = http.createServer((req, res) => {
   const handler = () => {
-    const basePrefix = sessionId ? `/api/v1/preview/${sessionId}` : '';
     let targetPath = req.url || '/';
+    const cleanPath = stripPrefix(targetPath);
 
-    // Normalize path by stripping preview prefix if present
-    let cleanPath = targetPath;
-    if (basePrefix && cleanPath.startsWith(basePrefix)) {
-      cleanPath = cleanPath.slice(basePrefix.length) || '/';
-    }
-
-    // Forward API and dev-auth routes directly to local ham-dev-proxy (8080)
+    // Forward API and dev-auth routes directly to the local ham-dev-proxy
     if (cleanPath.startsWith('/api/v1/') || cleanPath.startsWith('/_dev/')) {
       proxyApi(req, res, cleanPath);
       return;
     }
 
-    // If incoming request doesn't have the base prefix, prepend it so Vite router matches
-    if (basePrefix && !targetPath.startsWith(basePrefix)) {
-      if (!targetPath.startsWith('/')) targetPath = '/' + targetPath;
-      targetPath = `${basePrefix}${targetPath}`;
-    }
+    // Re-express every request in the prefix Vite is based on, whichever
+    // prefix (or none) it arrived with.
+    targetPath = basePrefix.replace(/\/$/, '') + (cleanPath.startsWith('/') ? cleanPath : '/' + cleanPath);
 
     logRequest(req, res, targetPath);
 
@@ -317,12 +362,8 @@ const server = http.createServer((req, res) => {
 
 // Relay WebSocket upgrades (API WebSockets to ham-dev-proxy, HMR to Vite)
 server.on('upgrade', (req, clientSocket, head) => {
-  const basePrefix = sessionId ? `/api/v1/preview/${sessionId}` : '';
   let targetPath = req.url || '/';
-  let cleanPath = targetPath;
-  if (basePrefix && cleanPath.startsWith(basePrefix)) {
-    cleanPath = cleanPath.slice(basePrefix.length) || '/';
-  }
+  const cleanPath = stripPrefix(targetPath);
 
   // Forward API WebSockets (e.g. /api/v1/user-ws, /api/v1/lsp/, /api/v1/shells/.../stream) to ham-dev-proxy (8080)
   if (cleanPath.startsWith('/api/v1/')) {
@@ -383,10 +424,8 @@ server.on('upgrade', (req, clientSocket, head) => {
     return;
   }
 
-  if (basePrefix && !targetPath.startsWith(basePrefix)) {
-    if (!targetPath.startsWith('/')) targetPath = '/' + targetPath;
-    targetPath = `${basePrefix}${targetPath}`;
-  }
+  // HMR socket must reach Vite under the prefix it is based on.
+  targetPath = basePrefix.replace(/\/$/, '') + (cleanPath.startsWith('/') ? cleanPath : '/' + cleanPath);
 
   console.log(`[dev-preview] WebSocket upgrade for ${req.url} -> forwarding to Vite ${targetPath}`);
 
@@ -424,6 +463,6 @@ server.listen(PORT, '127.0.0.1', () => {
   console.log(`[dev-preview] listening on http://127.0.0.1:${PORT}`);
   console.log(`[dev-preview] proxying to Vite on http://127.0.0.1:${VITE_PORT}`);
   if (sessionId) {
-    console.log(`[dev-preview] base path: /api/v1/preview/${sessionId}/`);
+    console.log(`[dev-preview] base path: ${basePrefix}`);
   }
 });

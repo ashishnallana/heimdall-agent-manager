@@ -1223,9 +1223,9 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
                 const s = String(task.status || '').toLowerCase();
                 const badgeCls =
                   s === 'finishing'
-                    ? 'bg-amber-500/20 text-amber-500 border border-amber-500/30 font-semibold'
+                    ? 'bg-warning-soft text-warning border border-warning/30 font-semibold'
                     : s === 'pausing'
-                      ? 'bg-cyan-500/20 text-cyan-500 border border-cyan-500/30 font-semibold'
+                      ? 'bg-info-soft text-info border border-info/30 font-semibold'
                       : 'bg-neutral-soft text-muted';
                 return (
                   <span

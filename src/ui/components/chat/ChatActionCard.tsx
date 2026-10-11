@@ -121,9 +121,9 @@ export const SingleActionCard: React.FC<SingleActionCardProps> = ({
           data-debug-id={`action-card-status-${actionId}`}
           className={`shrink-0 inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium border capitalize ${
             status === 'accepted'
-              ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-500'
+              ? 'border-success/40 bg-success-soft text-success'
               : status === 'rejected'
-              ? 'border-rose-500/40 bg-rose-500/10 text-rose-500'
+              ? 'border-danger/40 bg-danger-soft text-danger'
               : 'border-warning/40 bg-warning/10 text-warning'
           }`}
         >
