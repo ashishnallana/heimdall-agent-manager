@@ -179,6 +179,123 @@ In `nix-homelab-config` or any NixOS flake:
 }
 ```
 
+### 1.6a Preview origin (recommended when previews are enabled)
+
+Shell-session previews (`ham-ctl shell serve --port N`) run code from your projects in the
+browser. Served from the hub's own origin, that code has your full hub privileges. Serve previews
+from a **separate origin** instead:
+
+```bash
+ham-hub ... \
+  --ui-origin      https://hub.example.com \
+  --preview-origin https://hub-preview.example.com   # empty = previews stay on the hub origin
+```
+
+The hub then returns every preview link as `preview_url = <preview-origin>/p/<session-id>/`, and
+**any request for that host is answered only by the preview relay**. Hub APIs, UI and assets are
+never served there. Point the preview host at the **hub API listener directly**: a UI/static layer with an
+SPA fallback would swallow `/p/…`. As defense in depth, proxy only `/p/` and return 404 for everything else.
+
+**Requirements**
+
+1. **DNS + TLS:** one record for `hub-preview.example.com` pointing at the same reverse proxy. A normal
+   (HTTP-01) certificate is enough.
+2. **Authentik:** create a **separate** Proxy Provider and Application for `hub-preview.example.com`:
+   - *Mode:* **Forward auth (single application)**. This gives a host-only cookie, so the preview
+     host's cookie never authenticates the hub. Do **not** use domain-level mode here.
+   - *Authorization flow:* an implicit-consent flow (the redirect must complete silently inside the
+     preview iframe).
+   - **"Intercept header authentication": OFF.** Otherwise Authentik consumes the `Authorization`
+     header that your previewed apps send to their own backends.
+   - Bind the same users/group that may use Heimdall. The hub additionally enforces that each
+     preview is opened only by the session owner.
+3. **Reverse proxy:** forward auth in front of the hub, **overriding** the identity headers. The hub
+   trusts `X-authentik-*` only from `--trusted-proxy-cidr` addresses, and the proxy must never pass
+   through client-supplied values.
+4. **Same-site note:** if the preview host shares the hub's registrable domain (as in this example),
+   the hub's CSRF guard (Origin / `Sec-Fetch-Site` checks on mutating requests and WebSocket handshakes)
+   is what stops previewed code from acting through your browser session. Keep `--ui-origin` set
+   correctly. Keep the Authentik session cookie `HttpOnly` and, if possible, host-only.
+
+**nginx (NixOS) example**
+
+```nix
+services.nginx.virtualHosts."hub-preview.example.com" = {
+  enableACME = true;
+  forceSSL = true;
+  # Authentik embedded/standalone outpost endpoints for this host
+  locations."/outpost.goauthentik.io" = {
+    proxyPass = "http://127.0.0.1:9000/outpost.goauthentik.io";
+    extraConfig = ''
+      proxy_set_header Host $host;
+      proxy_set_header X-Original-URL $scheme://$http_host$request_uri;
+      proxy_pass_request_body off;
+      proxy_set_header Content-Length "";
+      auth_request_set $auth_cookie $upstream_http_set_cookie;
+      add_header Set-Cookie $auth_cookie;
+    '';
+  };
+  locations."@goauthentik_proxy_signin".extraConfig = ''
+    internal;
+    add_header Set-Cookie $auth_cookie;
+    return 302 /outpost.goauthentik.io/start?rd=$scheme://$http_host$request_uri;
+  '';
+  # Only preview paths reach the hub; everything else is 404 at the edge.
+  locations."/".return = "404";
+  locations."/p/" = {
+    proxyPass = "http://127.0.0.1:8081";   # the hub API listener, not a UI/static layer
+    proxyWebsockets = true;
+    extraConfig = ''
+      auth_request     /outpost.goauthentik.io/auth/nginx;
+      error_page 401 = @goauthentik_proxy_signin;
+      auth_request_set $auth_cookie $upstream_http_set_cookie;
+      add_header Set-Cookie $auth_cookie;
+
+      # OVERRIDE identity headers from the auth response; never pass client values.
+      auth_request_set $ak_username $upstream_http_x_authentik_username;
+      auth_request_set $ak_name     $upstream_http_x_authentik_name;
+      auth_request_set $ak_email    $upstream_http_x_authentik_email;
+      proxy_set_header X-authentik-username $ak_username;
+      proxy_set_header X-authentik-name     $ak_name;
+      proxy_set_header X-authentik-email    $ak_email;
+
+      proxy_set_header Host $host;          # the hub dispatches on Host
+      proxy_buffering off;                  # streaming / SSE through the relay
+      proxy_read_timeout 1h;
+    '';
+  };
+};
+```
+
+**Caddy example**
+
+```caddy
+hub-preview.example.com {
+	route {
+		reverse_proxy /outpost.goauthentik.io/* http://127.0.0.1:9000
+		forward_auth http://127.0.0.1:9000 {
+			uri /outpost.goauthentik.io/auth/caddy
+			copy_headers X-Authentik-Username X-Authentik-Name X-Authentik-Email
+			trusted_proxies private_ranges
+		}
+		reverse_proxy /p/* 127.0.0.1:8081 {
+			flush_interval -1
+		}
+		respond 404
+	}
+}
+```
+Caddy's `copy_headers` sets these headers from the auth response. **Verify on your Caddy version** that a
+client-supplied `X-Authentik-Username` is replaced or removed (send one with curl while signed in and check
+the hub's access log). The hub must never see a client-chosen identity.
+
+**Check it**
+
+```bash
+curl -sI https://hub-preview.example.com/p/anything/     # signed out: 302 to Authentik
+# In a signed-in browser: https://hub-preview.example.com/api/v1/me must be 404, never hub JSON.
+```
+
 ### 1.7 Single-user / VPN setup with dev-proxy (no TLS cert required)
 
 > **When to use this:** You are the only user, the hub is reachable only through a
