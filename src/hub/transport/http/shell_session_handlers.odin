@@ -508,6 +508,9 @@ shell_session_preview_proxy_handler :: proc(ctx: rawptr, req: Request, client: n
 	// Streaming relay: forward upstream bytes to client as they arrive.
 	// cond_wait / cond_wait_with_timeout blocks efficiently until tunnel_deliver/close_stream
 	// signals stream.cond; no sleep-poll and no full-response buffer.
+	response_head_pending := make([dynamic]byte, 0, 4096, heap)
+	defer delete(response_head_pending)
+	response_head_done := false
 	for {
 		sync.mutex_lock(&stream.mu)
 		for len(stream.chunks) == 0 && !stream.closed {
@@ -557,18 +560,35 @@ shell_session_preview_proxy_handler :: proc(ctx: rawptr, req: Request, client: n
 		done := stream.closed
 		sync.mutex_unlock(&stream.mu)
 
-		// Relay each chunk verbatim; loop until fully written (partial-write guard).
+		// Plain HTTP buffers only the response head so security-sensitive headers can be
+		// filtered even when CRLFCRLF is split across tunnel chunks. WebSockets bypass it.
 		write_ok := true
+		head_overflow := false
 		for chunk in to_write {
-			if write_ok {
-				write_ok = _preview_write_all(client, chunk)
+			if write_ok && !head_overflow {
+				if response_head_done {
+					write_ok = _preview_write_all(client, chunk)
+				} else {
+					filtered, complete, overflow := _preview_response_head_feed(
+						&response_head_pending, chunk, session_prefix, session.server_port, is_ws_upgrade,
+					)
+					if overflow {
+						head_overflow = true
+						write_ok = _preview_write_all(client, transmute([]byte)filtered)
+						delete(filtered, runtime.heap_allocator())
+					} else if complete {
+						response_head_done = true
+						write_ok = _preview_write_all(client, transmute([]byte)filtered)
+						delete(filtered, runtime.heap_allocator())
+					}
+				}
 			}
 			delete(chunk)
 		}
 		delete(to_write)
 
-		if !write_ok {
-			// Client disconnected mid-stream.
+		if !write_ok || head_overflow {
+			// Tear down on a client write failure or an oversized upstream head.
 			if is_ws_upgrade {
 				// XM-2: close-once — the pump goroutine may have already sent tunnel_close.
 				if _preview_ws_ctrl_try_close(ws_ctrl) {
@@ -590,7 +610,20 @@ shell_session_preview_proxy_handler :: proc(ctx: rawptr, req: Request, client: n
 			return
 		}
 
-		if done do break
+		if done {
+			// A non-empty head cut off by EOF is malformed and may contain unfiltered
+			// security-sensitive headers. Never forward it to the browser.
+			if !response_head_done {
+				eof_response := _preview_response_head_eof(response_head_pending[:])
+				if eof_response != "" {
+					write_ok := _preview_write_all(client, transmute([]byte)eof_response)
+					delete(eof_response, runtime.heap_allocator())
+					if !write_ok do return
+				}
+				clear(&response_head_pending)
+			}
+			break
+		}
 	}
 
 	// Normal completion: upstream closed the connection.
@@ -616,6 +649,201 @@ shell_session_preview_proxy_handler :: proc(ctx: rawptr, req: Request, client: n
 }
 
 // --- preview tunnel helpers ---
+
+PREVIEW_RESPONSE_HEAD_MAX :: 64 * 1024
+PREVIEW_BAD_GATEWAY_RESPONSE :: "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+
+_preview_rewrite_location :: proc(value, prefix: string, server_port: int) -> string {
+	if value == prefix || strings.has_prefix(value, strings.concatenate({prefix, "/"}, context.temp_allocator)) {
+		return strings.clone(value, runtime.heap_allocator())
+	}
+	local_hosts := []string{"127.0.0.1", "localhost"}
+	schemes := []string{"http", "https"}
+	for host in local_hosts {
+		for scheme in schemes {
+			base := fmt.tprintf("%s://%s:%d", scheme, host, server_port)
+			if len(value) >= len(base) && strings.equal_fold(value[:len(base)], base) {
+				rest := value[len(base):]
+				if rest == "" || rest[0] == '/' || rest[0] == '?' || rest[0] == '#' {
+					return strings.concatenate({prefix, rest}, runtime.heap_allocator())
+				}
+			}
+		}
+	}
+	if strings.has_prefix(value, "/") && !strings.has_prefix(value, "//") {
+		return strings.concatenate({prefix, value}, runtime.heap_allocator())
+	}
+	return strings.clone(value, runtime.heap_allocator())
+}
+
+_preview_filter_set_cookie :: proc(value, prefix: string) -> string {
+	parts := strings.split(value, ";")
+	defer delete(parts)
+	b := strings.builder_make(runtime.heap_allocator())
+	if len(parts) > 0 do strings.write_string(&b, strings.trim_space(parts[0]))
+	found_path := false
+	for part in parts[1:] {
+		attr := strings.trim_space(part)
+		name := attr
+		if eq := strings.index_byte(attr, '='); eq >= 0 do name = strings.trim_space(attr[:eq])
+		if strings.equal_fold(name, "domain") do continue
+		strings.write_string(&b, "; ")
+		if strings.equal_fold(name, "path") {
+			strings.write_string(&b, "Path=")
+			strings.write_string(&b, prefix)
+			strings.write_byte(&b, '/')
+			found_path = true
+		} else {
+			strings.write_string(&b, attr)
+		}
+	}
+	if !found_path {
+		strings.write_string(&b, "; Path=")
+		strings.write_string(&b, prefix)
+		strings.write_byte(&b, '/')
+	}
+	return strings.to_string(b)
+}
+
+_preview_filter_response_head :: proc(head, prefix: string, server_port: int) -> string {
+	lines := strings.split(head, "\n")
+	defer delete(lines)
+	b := strings.builder_make(runtime.heap_allocator())
+	for raw_line in lines {
+		line := raw_line
+		if strings.has_suffix(line, "\r") do line = line[:len(line)-1]
+		if line == "" do break
+		colon := strings.index_byte(line, ':')
+		name := line
+		if colon >= 0 do name = line[:colon]
+		if colon >= 0 && strings.equal_fold(name, "service-worker-allowed") do continue
+		if colon >= 0 && strings.equal_fold(name, "set-cookie") {
+			filtered := _preview_filter_set_cookie(strings.trim_space(line[colon+1:]), prefix)
+			strings.write_string(&b, line[:colon+1]); strings.write_byte(&b, ' '); strings.write_string(&b, filtered); delete(filtered, runtime.heap_allocator())
+		} else if colon >= 0 && strings.equal_fold(name, "location") {
+			filtered := _preview_rewrite_location(strings.trim_space(line[colon+1:]), prefix, server_port)
+			strings.write_string(&b, line[:colon+1]); strings.write_byte(&b, ' '); strings.write_string(&b, filtered); delete(filtered, runtime.heap_allocator())
+		} else {
+			strings.write_string(&b, line)
+		}
+		strings.write_string(&b, "\r\n")
+	}
+	strings.write_string(&b, "\r\n")
+	return strings.to_string(b)
+}
+
+_preview_response_token_byte :: proc(b: byte) -> bool {
+	if b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9' do return true
+	switch b {
+	case '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~':
+		return true
+	}
+	return false
+}
+
+_preview_response_head_status_code :: proc(head: string) -> (int, bool) {
+	// Validate bytes and line framing before interpreting any header names.
+	for b, i in transmute([]byte)head {
+		if b == '\r' && (i+1 >= len(head) || head[i+1] != '\n') do return 0, false
+		if b == 0x7f || (b < 0x20 && b != '\t' && b != '\r' && b != '\n') do return 0, false
+	}
+	line_end := strings.index_byte(head, '\n')
+	if line_end < 0 do return 0, false
+	line := head[:line_end]
+	if strings.has_suffix(line, "\r") do line = line[:len(line)-1]
+	if len(line) < 12 do return 0, false
+	if line[:8] != "HTTP/1.0" && line[:8] != "HTTP/1.1" do return 0, false
+	if line[8] != ' ' do return 0, false
+	i := 9
+	if line[i] < '0' || line[i] > '9' || line[i+1] < '0' || line[i+1] > '9' || line[i+2] < '0' || line[i+2] > '9' do return 0, false
+	if len(line) > 12 && line[12] != ' ' do return 0, false
+
+	lines := strings.split(head, "\n")
+	defer delete(lines)
+	saw_end := false
+	for raw_header in lines[1:] {
+		header := raw_header
+		if strings.has_suffix(header, "\r") do header = header[:len(header)-1]
+		if header == "" {
+			saw_end = true
+			break
+		}
+		if header[0] == ' ' || header[0] == '\t' do return 0, false
+		colon := strings.index_byte(header, ':')
+		if colon <= 0 do return 0, false
+		for b in transmute([]byte)header[:colon] {
+			if !_preview_response_token_byte(b) do return 0, false
+		}
+	}
+	if !saw_end do return 0, false
+	code := int(line[i]-'0')*100 + int(line[i+1]-'0')*10 + int(line[i+2]-'0')
+	return code, true
+}
+
+_preview_response_head_end :: proc(data: string) -> int {
+	lf_end := strings.index(data, "\n\n")
+	mixed_end := strings.index(data, "\n\r\n")
+	if lf_end >= 0 && (mixed_end < 0 || lf_end < mixed_end) do return lf_end + 2
+	if mixed_end >= 0 do return mixed_end + 3
+	return -1
+}
+
+_preview_response_head_eof :: proc(pending: []byte) -> string {
+	if len(pending) == 0 do return ""
+	return strings.clone(PREVIEW_BAD_GATEWAY_RESPONSE, runtime.heap_allocator())
+}
+
+_preview_response_head_feed :: proc(pending: ^[dynamic]byte, chunk: []byte, prefix: string, server_port: int, bypass := false) -> (string, bool, bool) {
+	if bypass {
+		return strings.clone(string(chunk), runtime.heap_allocator()), true, false
+	}
+	append(pending, ..chunk)
+	all := string(pending[:])
+	cursor := 0
+	final_head_end := -1
+	interim_count := 0
+	for {
+		end := _preview_response_head_end(all[cursor:])
+		if end < 0 do break
+		head_end := cursor + end
+		if head_end > PREVIEW_RESPONSE_HEAD_MAX {
+			return strings.clone(PREVIEW_BAD_GATEWAY_RESPONSE, runtime.heap_allocator()), false, true
+		}
+		status_code, valid := _preview_response_head_status_code(all[cursor:head_end])
+		if !valid {
+			return strings.clone(PREVIEW_BAD_GATEWAY_RESPONSE, runtime.heap_allocator()), false, true
+		}
+		if status_code < 100 || status_code >= 200 || status_code == 101 {
+			final_head_end = head_end
+			break
+		}
+		interim_count += 1
+		if interim_count > 5 {
+			return strings.clone(PREVIEW_BAD_GATEWAY_RESPONSE, runtime.heap_allocator()), false, true
+		}
+		cursor = head_end
+	}
+	if final_head_end < 0 {
+		if len(pending) > PREVIEW_RESPONSE_HEAD_MAX {
+			return strings.clone(PREVIEW_BAD_GATEWAY_RESPONSE, runtime.heap_allocator()), false, true
+		}
+		return "", false, false
+	}
+	b := strings.builder_make(runtime.heap_allocator())
+	cursor = 0
+	for cursor < final_head_end {
+		end := _preview_response_head_end(all[cursor:])
+		head_end := cursor + end
+		filtered := _preview_filter_response_head(all[cursor:head_end], prefix, server_port)
+		strings.write_string(&b, filtered)
+		delete(filtered, runtime.heap_allocator())
+		cursor = head_end
+	}
+	strings.write_string(&b, all[final_head_end:])
+	result := strings.to_string(b)
+	clear(pending)
+	return result, true, false
+}
 
 _preview_tunnel_open_json :: proc(stream_id, session_id, client_ip: string) -> string {
 	b := strings.builder_make()
