@@ -1,5 +1,6 @@
 import { heimdallApi } from '../heimdallApi';
-import { ApiError, cookieJsonFetch, cookieJsonFetchEnvelope, cookieMutation } from '../cookieFetch';
+import { ApiError, cookieJsonFetch, cookieJsonFetchEnvelope, cookieMutation, customQueryError } from '../cookieFetch';
+import { announcePaneVaultLocked } from '../../utils/vaultLockedError';
 import { encryptVaultText, VAULT_ARMOR_PREFIX, getActiveVaultKey } from '../../utils/vaultContent';
 import { selectIsVaultUnlocked } from '../../store/vaultSlice';
 import { encryptShellStreamPayload } from '../../components/shells/useShellStream';
@@ -352,7 +353,7 @@ export const shellsApi = heimdallApi.injectEndpoints({
           const session: ShellSession = data?.session ?? data;
           return { data: session };
         } catch (error: any) {
-          return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
+          return { error: customQueryError(error) as any };
         }
       },
       invalidatesTags: [{ type: 'ShellSessions' as const, id: 'LIST' }],
@@ -418,7 +419,9 @@ export const shellsApi = heimdallApi.injectEndpoints({
           const session: ShellSession = data?.session ?? data;
           return { data: session };
         } catch (error: any) {
-          return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
+          // T10: a 423 vault_locked reaches the pane showing this session.
+          announcePaneVaultLocked(sessionId, customQueryError(error));
+          return { error: customQueryError(error) as any };
         }
       },
       invalidatesTags: (_result, _err, { sessionId }) => [
@@ -530,7 +533,9 @@ export const shellsApi = heimdallApi.injectEndpoints({
           const res = await cookieMutation(`/shells/${encodeURIComponent(sessionId)}/input`, 'POST', payload);
           return { data: res || { ok: true } };
         } catch (error: any) {
-          return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
+          // T10: a 423 vault_locked reaches the pane showing this session.
+          announcePaneVaultLocked(sessionId, customQueryError(error));
+          return { error: customQueryError(error) as any };
         }
       },
     }),

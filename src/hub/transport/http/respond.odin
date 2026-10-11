@@ -55,6 +55,7 @@ status_for_error :: proc(code: domain.Error_Code) -> int {
 	case .Rate_Limited: return 429
 	case .Not_Implemented: return 501
 	case .Internal_Error: return 500
+	case .Vault_Locked: return 423 // RFC 4918 Locked: retryable once the bridge is unsealed
 	case .None: return 200
 	}
 	return 500

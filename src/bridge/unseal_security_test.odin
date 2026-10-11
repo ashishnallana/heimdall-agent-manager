@@ -42,9 +42,10 @@ import cfg_lib "odin_test:lib/config"
 // resolve `~/` through DIFFERENT functions:
 //
 //   - `bridge_expand_home` (provider_store.odin:342-349) reads HOME only;
-//   - `cfg_lib.expand_home` (src/lib/config/config.odin:251-254), which
-//     `bridge_read_vault_key` (main.odin:785) actually calls, prefers
-//     HEIMDALL_HOME and only falls back to HOME.
+//   - `cfg_lib.expand_home` (src/lib/config/config.odin), which the per-bridge
+//     vault_configured marker path resolves through (the bridge no longer reads
+//     the legacy key file at all, REQ-T5-1), prefers HEIMDALL_HOME and only falls
+//     back to HOME.
 //
 // Redirecting HOME alone therefore leaves the real key reachable whenever
 // HEIMDALL_HOME is set in the environment. It is unset on the current host, which
@@ -355,6 +356,11 @@ test_security_unseal_transitions_locked_to_unlocked :: proc(t: ^testing.T) {
 	bridge_workspace_vault_configured = true
 	defer { bridge_workspace_vault_configured = false }
 
+	// bridge_vault_status / bridge_read_vault_key resolve the running bridge's own key.
+	own_id, _ := keystore_test_bridge_ids()
+	prev_daemon_id := keystore_test_set_daemon_id(own_id)
+	defer bridge_config.daemon_id = prev_daemon_id
+
 	bridge_vault_lock()
 	testing.expect_value(t, bridge_vault_status(), Vault_Status.Locked)
 	testing.expect_value(t, bridge_vault_status_string(), "locked")
@@ -362,7 +368,9 @@ test_security_unseal_transitions_locked_to_unlocked :: proc(t: ^testing.T) {
 	unseal_nonce_cache_clear(&g_unseal_nonce_cache)
 	bridge_unseal_init()
 
-	bridge_id := "brg_sec_lifecycle_test"
+	// A successful unseal persists the key under bridge_id: test-only (REQ-T5-4).
+	bridge_id, _ := keystore_test_bridge_ids()
+	defer keystore_lock_and_purge(bridge_id)
 	bridge_pub_hex := bridge_get_public_key_hex()
 	test_key := "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
 	now_ms := time.to_unix_nanoseconds(time.now()) / 1_000_000
@@ -406,7 +414,9 @@ test_security_anti_replay_duplicate_nonce_rejected :: proc(t: ^testing.T) {
 	unseal_nonce_cache_clear(&g_unseal_nonce_cache)
 	bridge_unseal_init()
 
-	bridge_id := "brg_sec_replay_test"
+	// A successful unseal persists the key under bridge_id: test-only (REQ-T5-4).
+	bridge_id, _ := keystore_test_bridge_ids()
+	defer keystore_lock_and_purge(bridge_id)
 	bridge_pub_hex := bridge_get_public_key_hex()
 	test_key := "11223344556677889900aabbccddeeff11223344556677889900aabbccddeeff"
 	now_ms := time.to_unix_nanoseconds(time.now()) / 1_000_000
@@ -445,7 +455,9 @@ test_security_clock_skew_validation_rejects_stale_and_future :: proc(t: ^testing
 	unseal_nonce_cache_clear(&g_unseal_nonce_cache)
 	bridge_unseal_init()
 
-	bridge_id := "brg_sec_skew_test"
+	// A successful unseal persists the key under bridge_id: test-only (REQ-T5-4).
+	bridge_id, _ := keystore_test_bridge_ids()
+	defer keystore_lock_and_purge(bridge_id)
 	bridge_pub_hex := bridge_get_public_key_hex()
 	test_key := "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
 	now_ms := time.to_unix_nanoseconds(time.now()) / 1_000_000
@@ -530,7 +542,9 @@ test_security_tampering_timestamp_or_ciphertext_tag_failure :: proc(t: ^testing.
 	unseal_nonce_cache_clear(&g_unseal_nonce_cache)
 	bridge_unseal_init()
 
-	bridge_id := "brg_sec_tamper_test"
+	// A successful unseal persists the key under bridge_id: test-only (REQ-T5-4).
+	bridge_id, _ := keystore_test_bridge_ids()
+	defer keystore_lock_and_purge(bridge_id)
 	bridge_pub_hex := bridge_get_public_key_hex()
 	test_key := "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
 	now_ms := time.to_unix_nanoseconds(time.now()) / 1_000_000
@@ -577,8 +591,8 @@ test_security_self_hosted_unconfigured_executes_unencrypted_without_errors :: pr
 	defer bridge_vault_test_sandbox_close(&sb)
 	if !sandbox_ok do return
 
-	keystore_lock_and_purge()
-	defer keystore_lock_and_purge()
+	bridge_vault_lock()
+	defer bridge_vault_lock()
 
 	prev_env, had_env := os.lookup_env("HEIMDALL_VAULT_KEY", context.temp_allocator)
 	defer {

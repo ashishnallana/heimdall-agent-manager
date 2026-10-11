@@ -3,6 +3,12 @@
 fail() { printf '\n[ERROR] %s\n' "$*" >&2; exit 1; }
 log() { printf '[%s] %s\n' "$1" "$2"; }
 step() { printf '\n── %s ──\n' "$*"; }
+# Termux (Android) exports TERMUX_VERSION and keeps $PREFIX in the app's data dir.
+is_termux() {
+  [ -n "${TERMUX_VERSION:-}" ] && return 0
+  case "${PREFIX:-}" in /data/data/com.termux|/data/data/com.termux/*) return 0 ;; esac
+  return 1
+}
 usage() {
   cat <<'HELP'
 Heimdall Bridge installer — Linux systemd / macOS LaunchAgent
@@ -133,6 +139,11 @@ PY
   local os arch uid
   case "$(uname -s)" in Linux) os=linux ;; Darwin) os=darwin ;; *) fail 'Supported platforms: Linux and macOS.' ;; esac
   case "$(uname -m)" in x86_64|amd64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; *) fail 'Supported architectures: amd64 and arm64.' ;; esac
+  # On Android the vault key is sealed with the Android Keystore; there is no
+  # plaintext fallback, so refuse before installing anything (SELF_HOSTING.md, Termux).
+  if is_termux; then
+    command -v termux-keystore >/dev/null || fail 'Termux detected but termux-keystore is missing. Install the Termux:API app, then run: pkg install termux-api'
+  fi
   uid="$(id -u)"
   [ "$uid" != 0 ] || fail 'Run as your login user without sudo; this installs a user service.'
   local state_root="$HOME/.config/heimdall/bridges" state_dir="$HOME/.config/heimdall/bridges/$service_name"

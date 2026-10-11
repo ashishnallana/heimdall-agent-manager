@@ -150,7 +150,7 @@ bridge_shell_input_handler :: proc(ctx: rawptr, req: Request) -> Response {
 		sink_override = h.agents.bridge_command_sink
 	}
 
-	sent, err := bridge_service.send_shell_input(h.bridges, auth_ctx, bridge_id, shell_id, data, enc_b64, sink_override)
+	sent, err := bridge_service.send_shell_input(h.bridges, auth_ctx, bridge_id, shell_id, data, enc_b64, sink_override, wait_for_result = true)
 	if !sent do return respond_error(err, req.request_id)
 
 	return respond_success("{\"ok\":true}", req.request_id, auth_ctx_server_time(req))
@@ -1715,6 +1715,15 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
 			if session_id != "" && data_b64 != "" && flag_ok {
 				shell_session_svc.shell_session_broadcast_output(h.shell_sessions, session_id, data_b64, is_encrypted, json_bool(text, "is_snapshot"), bridge_id)
 			}
+		}
+	case "shell_pty_vault_locked":
+		// T10 (REQ-T10-3): the bridge refused a pane's input or suspended its output
+		// because its vault is locked. Relayed to that pane's viewers as a typed
+		// `vault_locked` error frame; ownership is checked in the service.
+		if h.shell_sessions != nil {
+			session_id := json_string(text, "session_id")
+			defer delete(session_id)
+			shell_session_svc.shell_session_broadcast_vault_locked(h.shell_sessions, session_id, bridge_id)
 		}
 	case "pane_resync_required":
 		if h.shell_sessions != nil {

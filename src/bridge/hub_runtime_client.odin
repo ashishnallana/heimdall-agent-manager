@@ -28,14 +28,93 @@ Vault_Status :: enum {
 	Unlocked,
 }
 
+// bridge_workspace_vault_configured caches "this bridge has been unsealed at least
+// once". It is only ever set through bridge_vault_set_configured, which also keeps
+// the on-disk marker in step; tests may still poke it directly.
 bridge_workspace_vault_configured: bool
 
-bridge_vault_set_configured :: proc(configured: bool) {
+// bridge_vault_bridge_dir is the per-bridge state directory,
+// ~/.config/heimdall/bridges/<bridge_id>/ (trailing slash included). Several
+// bridges can run on one machine under different accounts and must never share
+// vault state, so everything vault-related a bridge persists is keyed by its id
+// (REQ-T3-6). ok is false for an empty id or one that is not a single safe path
+// segment, so a hostile or corrupt daemon_id can never escape the directory.
+bridge_vault_bridge_dir :: proc(bridge_id: string, allocator := context.allocator) -> (dir: string, ok: bool) {
+	if !bridge_vault_is_safe_bridge_id(bridge_id) do return "", false
+	rel := strings.concatenate({"~/.config/heimdall/bridges/", bridge_id, "/"}, context.temp_allocator)
+	expanded := cfg_lib.expand_home(rel)
+	defer delete(expanded)
+	return strings.clone(expanded, allocator), true
+}
+
+// bridge_vault_configured_marker_path is the restart-proof record that this
+// bridge's vault was configured (REQ-T3-1). The file holds only the ISO-8601 UTC
+// time it was first written — never key material — so a bridge restarted without
+// its key reports `locked` instead of `disabled`. Lock keeps it; only vault.reset
+// removes it.
+bridge_vault_configured_marker_path :: proc(bridge_id: string, allocator := context.allocator) -> (path: string, ok: bool) {
+	dir := bridge_vault_bridge_dir(bridge_id, context.temp_allocator) or_return
+	return strings.concatenate({dir, "vault_configured"}, allocator), true
+}
+
+// bridge_vault_is_safe_bridge_id: a non-empty single path segment of
+// [A-Za-z0-9_.-], never "." or "..". Shared by the per-bridge state directory
+// and the per-bridge keyring/Keychain names (keystore_bridge_id_ok).
+bridge_vault_is_safe_bridge_id :: proc(bridge_id: string) -> bool {
+	if bridge_id == "" || bridge_id == "." || bridge_id == ".." do return false
+	for c in transmute([]u8)bridge_id {
+		switch c {
+		case 'a' ..= 'z', 'A' ..= 'Z', '0' ..= '9', '_', '-', '.':
+		case:
+			return false
+		}
+	}
+	return true
+}
+
+// bridge_vault_marker_present reports whether bridge_id has a configured marker.
+// Another bridge's marker on the same machine never counts.
+bridge_vault_marker_present :: proc(bridge_id: string) -> bool {
+	path := bridge_vault_configured_marker_path(bridge_id, context.temp_allocator) or_return
+	return os.exists(path)
+}
+
+// bridge_vault_set_configured is the one place that decides "configured"
+// (REQ-T3-3): the unseal path and the marker-read path both go through it.
+// true writes bridge_id's marker if it is missing (an existing one keeps its
+// original timestamp); false removes it. The in-memory flag always follows
+// `configured`; the return value says whether the marker now matches it.
+bridge_vault_set_configured :: proc(bridge_id: string, configured: bool) -> bool {
 	bridge_workspace_vault_configured = configured
+	path, path_ok := bridge_vault_configured_marker_path(bridge_id, context.temp_allocator)
+	// No usable id means no marker can exist for it: clearing trivially holds,
+	// setting cannot be persisted.
+	if !path_ok do return !configured
+	if !configured {
+		if !os.exists(path) do return true
+		return os.remove(path) == nil
+	}
+	if os.exists(path) do return true
+	return bridge_vault_write_configured_marker(path)
+}
+
+@(private = "file")
+bridge_vault_write_configured_marker :: proc(path: string) -> bool {
+	dir := path[:strings.last_index_byte(path, '/') + 1]
+	if os.make_directory_all(dir) != nil && !os.exists(dir) do return false
+	c_path := strings.clone_to_cstring(path)
+	defer delete(c_path)
+	// O_EXCL: two racing unseals must not interleave writes, and a file that
+	// appeared meanwhile already says "configured".
+	fd := posix.open(c_path, {.WRONLY, .CREAT, .EXCL, .CLOEXEC}, {.IRUSR, .IWUSR})
+	if fd < 0 do return posix.errno() == .EEXIST
+	defer posix.close(fd)
+	content := fmt.tprintf("%s\n", action_scheduler_format_rfc3339_utc(bridge_now_unix_ms()))
+	return posix.write(fd, raw_data(content), uint(len(content))) == len(content)
 }
 
 bridge_vault_is_workspace_configured :: proc() -> bool {
-	if bridge_workspace_vault_configured do return true
+	// The operator override wins over every persisted signal, both ways.
 	if env_val, found := os.lookup_env("HEIMDALL_VAULT_CONFIGURED", context.temp_allocator); found {
 		trimmed := strings.trim_space(env_val)
 		if trimmed == "1" || strings.equal_fold(trimmed, "true") || strings.equal_fold(trimmed, "configured") {
@@ -45,27 +124,39 @@ bridge_vault_is_workspace_configured :: proc() -> bool {
 			return false
 		}
 	}
-	path := cfg_lib.expand_home("~/.config/heimdall/vault_key")
-	defer delete(path)
-	c_path := strings.clone_to_cstring(path)
-	defer delete(c_path)
-	st: posix.stat_t
-	if posix.stat(c_path, &st) == .OK {
+	if bridge_workspace_vault_configured do return true
+
+	// The Darwin Keychain item outlives a restart the same way the marker does
+	// (keystore_persisted_vault_item_present is always false on Linux, where a
+	// present @u key is readable and already reports Unlocked). Both are this
+	// bridge's own: the legacy, machine-wide ~/.config/heimdall/vault_key is no
+	// longer a signal (REQ-T5-1).
+	bridge_id := bridge_config.daemon_id
+	if bridge_vault_marker_present(bridge_id) || keystore_persisted_vault_item_present(bridge_id) {
+		bridge_vault_set_configured(bridge_id, true)
 		return true
 	}
 	return false
 }
 
 bridge_vault_status :: proc() -> Vault_Status {
-	key, ok := bridge_read_vault_key()
-	if ok {
-		delete(key)
-		return .Unlocked
-	}
-	if bridge_vault_is_workspace_configured() {
-		return .Locked
-	}
-	return .Disabled
+	status, key := bridge_vault_status_and_key()
+	if status == .Unlocked do delete(key)
+	return status
+}
+
+// bridge_vault_status_and_key resolves the tri-state AND hands back the key it
+// read, so a gate that needs both decides on one read rather than two (a key that
+// vanished between them must not turn Unlocked into a plaintext path). key is only
+// set — and only owned by the caller — when status is .Unlocked.
+//
+// Gates must branch on status, never on "a key is present": a missing key means
+// Disabled only when the bridge was never configured; a configured bridge with no
+// key is Locked and must fail closed (T9).
+bridge_vault_status_and_key :: proc() -> (status: Vault_Status, key: string) {
+	if k, ok := bridge_read_vault_key(); ok do return .Unlocked, k
+	if bridge_vault_is_workspace_configured() do return .Locked, ""
+	return .Disabled, ""
 }
 
 bridge_vault_status_string :: proc(status: Maybe(Vault_Status) = nil) -> string {
@@ -1072,8 +1163,9 @@ bridge_hub_handle_command :: proc(conn: ^ws.Connection, text: string) {
 		defer delete(command_id)
 		now_ms := time.to_unix_nanoseconds(time.now()) / 1_000_000
 		ok, err_msg := bridge_unseal_decrypt_and_verify(text, bridge_config.daemon_id, now_ms)
-		if ok {
-			bridge_workspace_vault_configured = true
+		if ok && !bridge_vault_set_configured(bridge_config.daemon_id, true) {
+			// The unseal itself succeeded; only a restart would forget it was configured.
+			fmt.eprintln("WARN: could not persist this bridge's vault_configured marker under ~/.config/heimdall/bridges/<bridge_id>/; after a restart it will report the vault as disabled instead of locked.")
 		}
 
 		b := strings.builder_make()
@@ -1115,7 +1207,9 @@ bridge_hub_handle_command :: proc(conn: ^ws.Connection, text: string) {
 			_ = bridge_hub_send(conn, res)
 		}
 		// bridge_vault_lock() above always succeeds (it drops the in-memory key and
-		// the keyring entry), so the report is unconditional here.
+		// the keyring entry), so the report is unconditional here. It keeps the
+		// vault_configured marker, so this reports "locked", not "disabled"
+		// (REQ-T3-2); only the bridge-local vault.reset op clears it.
 		bridge_hub_send_vault_status(conn)
 		return
 	}
@@ -1525,17 +1619,43 @@ bridge_runtime_apply_update :: proc(
 }
 
 bridge_hub_handle_agent_pty_input :: proc(conn: ^ws.Connection, text: string) {
-	command_id := extract_json_string(text, "command_id", "")
+	temp := runtime.default_temp_allocator_temp_begin()
+	defer runtime.default_temp_allocator_temp_end(temp)
+	command_id := extract_json_string(text, "command_id", "", context.temp_allocator)
 	if cached, ok := bridge_runtime_cached_command(command_id); ok {
 		if conn != nil do _ = bridge_hub_send(conn, cached)
 		return
 	}
-	payload, has_payload := bridge_provider_json_extract_object(text, "payload")
-	instance_id := extract_json_string(text, "agent_instance_id", "")
-	if instance_id == "" && has_payload do instance_id = extract_json_string(payload, "agent_instance_id", "")
+	payload, has_payload := bridge_provider_json_extract_object(text, "payload", context.temp_allocator)
+	instance_id := extract_json_string(text, "agent_instance_id", "", context.temp_allocator)
+	if instance_id == "" && has_payload do instance_id = extract_json_string(payload, "agent_instance_id", "", context.temp_allocator)
 
-	data := extract_json_string(text, "data", "")
-	if data == "" && has_payload do data = extract_json_string(payload, "data", "")
+	data := extract_json_string(text, "data", "", context.temp_allocator)
+	if data == "" && has_payload do data = extract_json_string(payload, "data", "", context.temp_allocator)
+
+	// T10 (REQ-T10-1): same tri-state gate as shell_pty_input. The current hub sends
+	// agent-pane keystrokes as `shell_pty_input` (agent_service.agent_pty_input_command_json),
+	// but this legacy type is still dispatched and carries PLAINTEXT `data` only — it has
+	// no encrypted form. So it is accepted only where plaintext is: a never-configured
+	// (Disabled) bridge. Locked answers vault_locked; Unlocked refuses plaintext.
+	vault_status := bridge_vault_status()
+	switch vault_status {
+	case .Locked:
+		fmt.println("bridge agent_pty_input rejected: vault_locked for instance", instance_id)
+		bridge_pty_input_reply_vault_locked(conn, command_id, instance_id)
+		return
+	case .Unlocked:
+		fmt.println("bridge agent_pty_input rejected: plaintext input on an unlocked vault (use encrypted shell_pty_input) for instance", instance_id)
+		if command_id != "" {
+			result := bridge_command_result_error_json(command_id, "invalid_vault_key")
+			defer delete(result)
+			bridge_runtime_cache_command(command_id, result)
+			if conn != nil do _ = bridge_hub_send(conn, result)
+		}
+		return
+	case .Disabled:
+		// Never configured: plaintext input is allowed by design.
+	}
 
 	ok := bridge_pty_host_deliver_raw_input(instance_id, data)
 	if !ok do fmt.println("bridge agent_pty_input delivery failed for instance", instance_id)
@@ -1612,19 +1732,35 @@ bridge_hub_handle_shell_pty_input :: proc(conn: ^ws.Connection, text: string) {
 	if data_b64 == "" && has_payload do data_b64 = extract_json_string(payload, "data_b64", "", context.temp_allocator)
 	encrypted, flag_ok := jsonx.extract_bool_literal(text, "is_encrypted")
 	if !flag_ok && has_payload { encrypted, flag_ok = jsonx.extract_bool_literal(payload, "is_encrypted") }
-	key_hex, vault_active := bridge_read_vault_key()
-	defer if vault_active do delete(key_hex)
+	// T9 (REQ-T9-1): same tri-state gate as shell_start. Keystrokes are execution
+	// too, so a Locked bridge drops them whatever the payload claims to be.
+	vault_status, key_hex := bridge_vault_status_and_key()
+	defer if vault_status == .Unlocked do delete(key_hex)
 	data := ""
 	decoded_ok := false
-	if flag_ok && encrypted && vault_active {
-		armored := strings.concatenate({VAULT_ARMOR_PREFIX, data_b64}, context.temp_allocator)
-		data, decoded_ok = bridge_decrypt_vault_ciphertext_hex(armored, key_hex, context.temp_allocator)
-	} else if flag_ok && !encrypted && !vault_active && !bridge_vault_is_workspace_configured() {
-		decoded, err := base64.decode(data_b64, allocator = context.temp_allocator)
-		if err == nil { data = string(decoded); decoded_ok = true }
+	reject_reason := "invalid payload or vault encryption mode"
+	switch vault_status {
+	case .Locked:
+		reject_reason = "vault_locked"
+	case .Unlocked:
+		if flag_ok && encrypted {
+			armored := strings.concatenate({VAULT_ARMOR_PREFIX, data_b64}, context.temp_allocator)
+			data, decoded_ok = bridge_decrypt_vault_ciphertext_hex(armored, key_hex, context.temp_allocator)
+		}
+	case .Disabled:
+		// Never configured: plaintext input is allowed by design.
+		if flag_ok && !encrypted {
+			decoded, err := base64.decode(data_b64, allocator = context.temp_allocator)
+			if err == nil { data = string(decoded); decoded_ok = true }
+		}
 	}
 	if !decoded_ok {
-		fmt.println("bridge shell_pty_input rejected: invalid payload or vault encryption mode for shell", shell_id)
+		fmt.println("bridge shell_pty_input rejected:", reject_reason, "for shell", shell_id)
+		if vault_status == .Locked {
+			// T10: typed refusal so the hub/UI can show "locked" rather than a crash.
+			bridge_pty_input_reply_vault_locked(conn, command_id, shell_id)
+			return
+		}
 		if command_id != "" {
 			result := bridge_command_result_json(command_id, "failed", "")
 			defer delete(result)
@@ -2662,6 +2798,42 @@ bridge_instance_status_json :: proc(instance_id: string) -> string {
 	return strings.to_string(b)
 }
 
+// g_bridge_hub_enroll_only_runtime marks the `ham-bridge enroll` process, which
+// brings up the Hub WebSocket only to receive the vault key and then restarts the
+// registered service and exits (REQ-T2-3).
+g_bridge_hub_enroll_only_runtime: bool
+
+bridge_hub_set_enroll_only_runtime :: proc(enabled: bool) {
+	sync.atomic_store(&g_bridge_hub_enroll_only_runtime, enabled)
+}
+
+bridge_hub_is_enroll_only_runtime :: proc() -> bool {
+	return sync.atomic_load(&g_bridge_hub_enroll_only_runtime)
+}
+
+// bridge_hub_vault_status_for_report is the vault_status this process tells the hub.
+//
+// The enroll-only runtime always says "locked", even after it has received and
+// stored the key. It holds that key only until it restarts the service and exits,
+// so an "unlocked" from it would describe a process that is about to vanish, and
+// the approval page would confirm the bridge unsealed even when the restarted
+// service could not read the persisted key. Saying "locked" (rather than sending
+// nothing, which the hub ignores) also overwrites an "unlocked" left over from a
+// previous run of this bridge. The hub can then only see "unlocked" once the
+// restarted service's on-connect heartbeat (bridge_hub_runtime_loop) reports
+// what it actually read back from the keyring / Keychain.
+bridge_hub_vault_status_for_report :: proc() -> string {
+	return bridge_vault_status_string(bridge_vault_status_reported(bridge_hub_is_enroll_only_runtime()))
+}
+
+// bridge_vault_status_reported is the decision above, with the process-wide flag
+// as a parameter so tests can exercise it without flipping state that concurrent
+// frame tests read.
+bridge_vault_status_reported :: proc(enroll_only: bool) -> Vault_Status {
+	if enroll_only do return .Locked
+	return bridge_vault_status()
+}
+
 // bridge_vault_status_report_json is the IMMEDIATE vault report (REQ-BVS-1), sent
 // right after a successful unseal or lock so the UI does not wait up to a heartbeat
 // interval to see the new state.
@@ -2677,7 +2849,7 @@ bridge_instance_status_json :: proc(instance_id: string) -> string {
 bridge_vault_status_report_json :: proc() -> string {
 	b := strings.builder_make()
 	strings.write_string(&b, "{\"type\":\"bridge_vault_status\",\"protocol_version\":1,\"vault_status\":\"")
-	bridge_runtime_write_json_string(&b, bridge_vault_status_string())
+	bridge_runtime_write_json_string(&b, bridge_hub_vault_status_for_report())
 	strings.write_string(&b, "\"}")
 	return strings.to_string(b)
 }
@@ -2689,6 +2861,9 @@ bridge_vault_status_report_json :: proc() -> string {
 // no socket to write to.
 bridge_hub_send_vault_status :: proc(conn: ^ws.Connection) {
 	if conn == nil do return
+	// The enroll-only runtime would report the key it is about to exit with; the
+	// restarted service's on-connect heartbeat is the report that counts.
+	if bridge_hub_is_enroll_only_runtime() do return
 	frame := bridge_vault_status_report_json()
 	defer delete(frame)
 	_ = bridge_hub_send(conn, frame)
@@ -2704,7 +2879,7 @@ bridge_hub_heartbeat_json :: proc() -> string {
 	// REQ-BVS-1: read the vault tri-state BEFORE taking bridge_runtime_mutex.
 	// bridge_vault_status() touches the kernel keyring and the filesystem, and no
 	// blocking I/O belongs inside a lock the per-instance reporters also contend on.
-	vault_status := bridge_vault_status_string()
+	vault_status := bridge_hub_vault_status_for_report()
 	now := bridge_runtime_now_ms()
 	sync.mutex_lock(&bridge_runtime_mutex)
 	defer sync.mutex_unlock(&bridge_runtime_mutex)
@@ -3051,6 +3226,49 @@ bridge_command_result_json :: proc(command_id, status, runtime_status: string) -
 	}
 	strings.write_string(&b, "}}")
 	return strings.to_string(b)
+}
+
+// bridge_command_result_error_json is a FAILED command_result that names why (T10,
+// REQ-T10-2): the hub maps a known error_code (e.g. `vault_locked`) to a typed API error
+// instead of the generic 500. The code sits in payload next to status, where the hub
+// already reads status from. Caller owns the result.
+bridge_command_result_error_json :: proc(command_id, error_code: string) -> string {
+	b := strings.builder_make()
+	strings.write_string(&b, "{\"type\":\"command_result\",\"protocol_version\":1,\"command_id\":\"")
+	bridge_runtime_write_json_string(&b, command_id)
+	strings.write_string(&b, "\",\"payload\":{\"status\":\"failed\",\"error_code\":\"")
+	bridge_runtime_write_json_string(&b, error_code)
+	strings.write_string(&b, "\"}}")
+	return strings.to_string(b)
+}
+
+// bridge_pty_vault_locked_frame_json is the typed in-stream signal (T10, REQ-T10-3) that
+// a pane's input or output was refused because this bridge's vault is locked. The hub
+// relays it to the pane's viewers as an `error` frame with code `vault_locked`, so the
+// UI never has to parse the human-readable banner. Caller owns the result.
+bridge_pty_vault_locked_frame_json :: proc(session_id: string, allocator := context.allocator) -> string {
+	b := strings.builder_make(allocator)
+	strings.write_string(&b, "{\"type\":\"shell_pty_vault_locked\",\"session_id\":\"")
+	bridge_runtime_write_json_string(&b, session_id)
+	strings.write_string(&b, "\",\"error_code\":\"vault_locked\"}")
+	return strings.to_string(b)
+}
+
+// bridge_pty_input_reply_vault_locked answers a keystroke refused by a Locked vault:
+// the command_result carries error_code `vault_locked` (cached like any result, so a
+// retried command_id gets the same answer) and the pane gets the typed stream frame.
+bridge_pty_input_reply_vault_locked :: proc(conn: ^ws.Connection, command_id, session_id: string) {
+	if command_id != "" {
+		result := bridge_command_result_error_json(command_id, "vault_locked")
+		defer delete(result)
+		bridge_runtime_cache_command(command_id, result)
+		if conn != nil do _ = bridge_hub_send(conn, result)
+	}
+	if session_id != "" && conn != nil {
+		frame := bridge_pty_vault_locked_frame_json(session_id)
+		defer delete(frame)
+		_ = bridge_hub_send(conn, frame)
+	}
 }
 
 bridge_command_result_payload_json :: proc(command_id, status, result_json: string) -> string {
@@ -3447,6 +3665,8 @@ Bridge_Shell_Restart_Result :: struct {
 	command_id: string     `json:"command_id"`,
 	ok:         bool       `json:"ok"`,
 	pid:        Maybe(int) `json:"pid,omitempty"`,
+	// T10: machine-readable refusal reason (e.g. `vault_locked`); empty on success.
+	error_code: string     `json:"error_code,omitempty"`,
 }
 
 Bridge_Shell_Logs_Command :: struct {
@@ -3639,9 +3859,24 @@ bridge_hub_handle_shell_start :: proc(conn: ^ws.Connection, text: string) {
 	decrypted_env: [][2]string = nil
 	has_decrypted_env := false
 
-	key_hex, vault_active := bridge_read_vault_key()
+	// T9 (REQ-T9-1): gate on the vault STATE, not on "a key is present". Keying it on
+	// the key alone made a Locked bridge (configured, key absent) indistinguishable
+	// from a never-configured one, so it ran the hub-supplied plaintext `cmd`.
+	vault_status, key_hex := bridge_vault_status_and_key()
+	vault_active := vault_status == .Unlocked
 	defer if vault_active do delete(key_hex)
-	if vault_active {
+	switch vault_status {
+	case .Locked:
+		// Fail closed before anything below can reach `cmd`: with no key there is no
+		// way to authenticate the request, and plaintext is never acceptable from a
+		// bridge that has been configured. `vault_locked` is the stable code the fs
+		// handlers already use (REQ-T9-2).
+		send_error(conn, session_id, command_id, "unauthorized: vault locked", "vault_locked")
+		return
+	case .Disabled:
+		// Never configured: encryption is optional by design, so the plaintext
+		// cmd/cwd from the wire are used as-is.
+	case .Unlocked:
 		if cmd_wire.enc_spec == "" || !strings.has_prefix(cmd_wire.enc_spec, VAULT_ARMOR_PREFIX) {
 			send_error(conn, session_id, command_id, "unauthorized: missing or invalid vault enc_spec", "invalid_vault_key")
 			return
@@ -4281,13 +4516,14 @@ bridge_hub_handle_shell_restart :: proc(conn: ^ws.Connection, text: string) {
 	// when a restart fails — the hub does not advance its row on a failure either.
 	new_run_seq := cmd.run_seq
 
-	send_result :: proc(conn: ^ws.Connection, session_id, command_id: string, ok: bool, pid: int) {
+	send_result :: proc(conn: ^ws.Connection, session_id, command_id: string, ok: bool, pid: int, error_code := "") {
 		res := Bridge_Shell_Restart_Result{
 			type       = "shell_restart_result",
 			session_id = session_id,
 			command_id = command_id,
 			ok         = ok,
 			pid        = pid if ok else nil,
+			error_code = error_code,
 		}
 		if data, err := json.marshal(res, allocator = context.temp_allocator); err == nil {
 			if conn != nil do _ = bridge_hub_send(conn, string(data))
@@ -4296,6 +4532,15 @@ bridge_hub_handle_shell_restart :: proc(conn: ^ws.Connection, text: string) {
 
 	if session_id == "" {
 		send_result(conn, session_id, command_id, false, 0)
+		return
+	}
+
+	// T9: a restart re-executes the stored cmd on the hub's say-so alone, so a Locked
+	// bridge must refuse it exactly as it refuses a fresh shell_start. T10: the reply
+	// names the reason in error_code so the hub answers a typed 423, not a 500.
+	if bridge_vault_status() == .Locked {
+		fmt.println("bridge shell_restart rejected: vault_locked for session", session_id)
+		send_result(conn, session_id, command_id, false, 0, "vault_locked")
 		return
 	}
 

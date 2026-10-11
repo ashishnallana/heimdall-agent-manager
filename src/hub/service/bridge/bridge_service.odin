@@ -443,7 +443,11 @@ shell_pty_resize_command_json :: proc(command_id, shell_id: string, rows, cols: 
 	return strings.to_string(b)
 }
 
-send_shell_input :: proc(service: ^Bridge_Service, auth: contracts.Auth_Context, bridge_id, shell_id, data: string, enc_b64: string = "", sink_override: project_service.Bridge_Command_Sink = {}) -> (bool, domain.Domain_Error) {
+// send_shell_input relays keystrokes to the bridge. wait_for_result (REST callers)
+// waits for the bridge's command_result so a typed refusal such as `vault_locked`
+// comes back as a typed error; the WebSocket pane path stays fire-and-forget and
+// learns of a locked vault from the bridge's in-stream `shell_pty_vault_locked` frame.
+send_shell_input :: proc(service: ^Bridge_Service, auth: contracts.Auth_Context, bridge_id, shell_id, data: string, enc_b64: string = "", sink_override: project_service.Bridge_Command_Sink = {}, wait_for_result := false) -> (bool, domain.Domain_Error) {
 	if strings.trim_space(shell_id) == "" {
 		return false, domain.domain_error(.Validation_Failed, "shell_id is required")
 	}
@@ -470,14 +474,12 @@ send_shell_input :: proc(service: ^Bridge_Service, auth: contracts.Auth_Context,
 	cmd_json := shell_pty_input_command_json(cmd_id, shell_id, data, enc_b64)
 	defer delete(cmd_json)
 
-	sent, send_err := project_service.bridge_command_send_runtime(
-		sink,
-		project_service.Runtime_Command{
-			bridge_id = bridge.bridge_id,
-			command_id = cmd_id,
-			body_json = cmd_json,
-		},
-	)
+	command := project_service.Runtime_Command{
+		bridge_id = bridge.bridge_id,
+		command_id = cmd_id,
+		body_json = cmd_json,
+	}
+	sent, send_err := project_service.bridge_command_send_runtime_checked(sink, command, wait_for_result)
 	if !sent do return false, send_err
 	return true, domain.Domain_Error{}
 }

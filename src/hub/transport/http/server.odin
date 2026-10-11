@@ -256,6 +256,7 @@ status_text :: proc(status: int) -> string {
 	case 202: return "Accepted"
 	case 204: return "No Content"
 	case 301: return "Moved Permanently"
+	case 302: return "Found"
 	case 304: return "Not Modified"
 	case 400: return "Bad Request"
 	case 401: return "Unauthorized"

@@ -251,6 +251,8 @@ bridge_agent_route :: proc(method, params: string) -> Bridge_Agent_Route {
 		return Bridge_Agent_Route{kind = .Local, local_op = "vault.get"}
 	case "agent.vault.lock":
 		return Bridge_Agent_Route{kind = .Local, local_op = "vault.lock"}
+	case "agent.vault.reset":
+		return Bridge_Agent_Route{kind = .Local, local_op = "vault.reset"}
 
 	// ---- telemetry -------------------------------------------------------------
 	case "agent.telemetry.agents_count":
@@ -299,7 +301,7 @@ bridge_agent_method_allowed :: proc(method: string) -> bool {
 	     // shell sessions (bridge-local block on a hub-created run)
 	     "agent.shell.wait",
 	     // vault commands (bridge-local)
-	     "agent.vault.status", "agent.vault.get", "agent.vault.lock",
+	     "agent.vault.status", "agent.vault.get", "agent.vault.lock", "agent.vault.reset",
 	     // telemetry (bridge-local)
 	     "agent.telemetry.agents_count":
 		return true
@@ -418,6 +420,7 @@ bridge_local_handle_agent_local_op :: proc(request_id, op, params: string, rec: 
 		bridge_vault_lock()
 		return bridge_local_response_data(request_id, "{\"ok\":true,\"status\":\"locked\"}")
 	}
+	if op == "vault.reset" do return bridge_vault_reset_response(request_id)
 	if op == "vault.get" {
 		key, ok := bridge_read_vault_key()
 		if !ok {
@@ -511,4 +514,20 @@ bridge_agent_json_array_objects :: proc(array: string) -> []string {
 		if ch == '}' { depth -= 1; if depth == 0 && start >= 0 { append(&out, array[start:i + 1]); start = -1 } }
 	}
 	return out[:]
+}
+
+// bridge_vault_reset_response serves the bridge-local vault.reset op (REQ-T3-2):
+// the one way to make an encrypted bridge report "disabled" again. Unlike
+// vault.lock it also removes the vault_configured marker. The hub learns the new
+// state from the next heartbeat; it has no command that reaches this path.
+bridge_vault_reset_response :: proc(request_id: string) -> string {
+	if !bridge_vault_reset() {
+		return bridge_local_response_error(request_id, "internal", "vault key purged, but this bridge's vault_configured marker (~/.config/heimdall/bridges/<bridge_id>/vault_configured) could not be removed; the bridge still reports locked")
+	}
+	b := strings.builder_make()
+	defer strings.builder_destroy(&b)
+	strings.write_string(&b, "{\"ok\":true,\"status\":\"")
+	strings.write_string(&b, bridge_vault_status_string())
+	strings.write_string(&b, "\",\"marker_removed\":true,\"note\":\"vault.reset purged the vault key and removed this bridge's ~/.config/heimdall/bridges/<bridge_id>/vault_configured marker: it reports the vault as disabled (no encryption) until it is unsealed again. HEIMDALL_VAULT_CONFIGURED still takes precedence. To only drop the key and keep reporting locked, use vault.lock.\"}")
+	return bridge_local_response_data(request_id, strings.to_string(b))
 }

@@ -1,6 +1,7 @@
 import * as daemonApi from '../daemonApi';
 import { applyAgentRuntimeEvent, loadKnownAgents, mapAgent, mergeKnownAndLiveAgents, storeKnownAgents, upsertKnownAgentRecord } from '../agentCatalog';
-import { apiErrorText, cookieMutation, cookieJsonFetch, cookieJsonFetchEnvelope } from '../cookieFetch';
+import { apiErrorText, cookieMutation, cookieJsonFetch, cookieJsonFetchEnvelope, customQueryError } from '../cookieFetch';
+import { announcePaneVaultLocked } from '../../utils/vaultLockedError';
 import { heimdallApi, withSessionQuery } from '../heimdallApi';
 
 export interface GetAgentPaneArgs {
@@ -567,7 +568,9 @@ export const agentsApi = heimdallApi.injectEndpoints({
           const res = await cookieMutation(`/agent-instances/${encodeURIComponent(agentInstanceId)}/input`, 'POST', { data });
           return { data: res || { ok: true } };
         } catch (error: any) {
-          return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
+          // T10: a 423 vault_locked reaches the pane showing this agent.
+          announcePaneVaultLocked(agentInstanceId, customQueryError(error));
+          return { error: customQueryError(error) as any };
         }
       },
     }),

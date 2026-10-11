@@ -8,6 +8,7 @@ import { patchMemoryCachesFromWs } from './endpoints/memory';
 import { bridgeSupportApi } from './endpoints/bridgeSupport';
 import { upsertTaskInList, upsertTaskLogEvent } from './taskCache';
 import { attentionEventReceived } from '../store/attentionSlice';
+import { announcePaneVaultLocked } from '../utils/vaultLockedError';
 import { GUIDE_AGENT_ID, appendMessage, chatEventReceived, patchChatMessageStatus } from '../store/chatSlice';
 import { wsChainViewRefreshRequested } from '../store/chainViewSlice';
 import { wsRefreshRequested } from '../store/homeSlice';
@@ -840,6 +841,9 @@ export function handleUserWsEvent(dispatch: any, payload: any, ctx: WsCtx = {}) 
     case 'shell_status':
     case 'shell_session_exited':
       invalidateShellSession(dispatch, String(payload?.session_id || ''), String(payload?.chain_id || ''));
+      // T10: a start the bridge refused because its vault is locked carries
+      // error_code "vault_locked"; route it to the pane showing that session.
+      announcePaneVaultLocked(String(payload?.session_id || ''), payload);
       return;
     default:
       return;

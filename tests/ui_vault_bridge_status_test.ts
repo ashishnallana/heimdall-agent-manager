@@ -47,6 +47,7 @@ import {
   resolveBridgeVaultStatus,
   canLockBridgeVault,
   canUnlockBridgeVault,
+  canConfigureBridgeVault,
   BRIDGE_VAULT_STATUS_TONE,
   BRIDGE_VAULT_STATUSES,
   type BridgeVaultStatus,
@@ -155,6 +156,24 @@ test('REQ-BVS-3: lock/unlock affordances follow the state', () => {
   for (const s of ['Unlocked', 'NotRunning', 'NotConfigured'] as BridgeVaultStatus[]) {
     assert.equal(canUnlockBridgeVault(s), false, `${s} offers no unseal`);
   }
+});
+
+test('REQ-T4-1: canConfigureBridgeVault — all five states x ownerHasVault', () => {
+  let cells = 0;
+  for (const s of BRIDGE_VAULT_STATUSES) {
+    for (const ownerHasVault of [true, false]) {
+      assert.equal(
+        canConfigureBridgeVault(s, ownerHasVault),
+        s === 'NotConfigured' && ownerHasVault,
+        `status=${s} ownerHasVault=${ownerHasVault}`,
+      );
+      cells++;
+    }
+  }
+  assert.equal(cells, 10, 'the table is 5x2 — guards against a silently shrunk matrix');
+  // Configure is a third affordance, not a change to the other two.
+  assert.equal(canUnlockBridgeVault('NotConfigured'), false, 'NotConfigured still offers no plain Unlock');
+  assert.equal(canLockBridgeVault('NotConfigured'), false, 'Lock stays disabled for NotConfigured');
 });
 
 // --------------------------------------------------------------------------------
@@ -303,4 +322,78 @@ test('the vault CryptoKey is rehydrated exactly once at startup from main.tsx', 
     src.indexOf('initializeVaultPersistence(store.dispatch)') < src.indexOf('ReactDOM.createRoot'),
     'rehydration starts before the app is mounted',
   );
+});
+
+// --------------------------------------------------------------------------------
+// 5. REQ-T4-2/REQ-T4-3: the per-bridge "Configure encryption" button.
+// --------------------------------------------------------------------------------
+
+function readPanelSource(): string {
+  return fs.readFileSync('src/ui/components/settings/BridgeSettingsPanel.tsx', 'utf8');
+}
+
+test('REQ-T4-1: ownerHasVault is the same expression that configures the client vault', () => {
+  const src = readPanelSource();
+  assert.ok(
+    src.includes('const ownerHasVault = Boolean(isConfigured || vaultEnvelope?.encrypted_vault_key);'),
+    'ownerHasVault mirrors the client-configured expression',
+  );
+  assert.ok(src.includes('isConfigured: ownerHasVault,'), 'clientVaultStatus is derived from the same value');
+});
+
+test('REQ-T4-2: a row renders "Configure encryption" exactly when canConfigureBridgeVault is true', () => {
+  const src = readPanelSource();
+  const rowsStart = src.indexOf('bridgeRows.map');
+  const rowsEnd = src.indexOf('{unsealSuccessMsg ?', rowsStart);
+  const rows = src.slice(rowsStart, rowsEnd);
+
+  assert.ok(
+    rows.includes('const configureAllowed = canConfigureBridgeVault(status, ownerHasVault);'),
+    'the row gate is the pure helper with the owner-vault input',
+  );
+  // The button lives in the TRUE branch of `configureAllowed ? ... : ...`, and the
+  // plain Unlock in the false branch — so it can appear for no other state.
+  const branch = rows.indexOf('{configureAllowed ? (');
+  const elseBranch = rows.indexOf(') : (', branch);
+  assert.ok(branch > 0 && elseBranch > branch, 'Configure / Unlock are the two arms of one ternary');
+  const configureArm = rows.slice(branch, elseBranch);
+  const unlockArm = rows.slice(elseBranch, rows.indexOf('\n                  )}', elseBranch));
+  assert.ok(configureArm.includes('Configure encryption'), 'the true arm is the Configure button');
+  assert.ok(configureArm.includes('data-debug-id={`bridge-row-configure-btn-${id}`}'), 'it carries the per-bridge debug id');
+  assert.ok(configureArm.includes('variant="primary"'), 'it is the primary action');
+  assert.ok(configureArm.includes('handleBridgeConfigure(id)'), 'it runs the configure path');
+  assert.ok(!unlockArm.includes('Configure encryption'), 'the Unlock arm never shows Configure');
+  assert.ok(unlockArm.includes('handleBridgeUnlock(id)'), 'the false arm is the existing Unlock');
+  assert.equal((src.match(/Configure encryption/g) || []).length, 2, 'one description sentence + one button label');
+
+  // Row description for the configurable case.
+  assert.ok(
+    src.includes(
+      'Encryption is enabled for your account but this bridge has no key yet. Configure it to encrypt files and terminal streams on this machine.',
+    ),
+  );
+  assert.ok(rows.includes('BRIDGE_VAULT_CONFIGURABLE_DESCRIPTION'), 'the row uses it when configurable');
+
+  // Lock is untouched: still gated purely by canLockBridgeVault (false for NotConfigured).
+  assert.ok(rows.includes('disabled={Boolean(busy) || !canLockBridgeVault(status)}'));
+  // "Enable Encryption" remains a client-Disabled-only control.
+  const enable = src.indexOf('Enable Encryption');
+  const enableGuard = src.lastIndexOf("{clientVaultStatus === 'Disabled' && (", enable);
+  assert.ok(enableGuard > 0 && src.slice(enableGuard, enable).split('<Button').length === 2,
+    'Enable Encryption is rendered only under clientVaultStatus === Disabled');
+});
+
+test('REQ-T4-2/REQ-T4-3: Configure reuses the Unlock path, or the ONE master-password prompt scoped to the bridge', () => {
+  const src = readPanelSource();
+  const start = src.indexOf('const handleBridgeConfigure');
+  const end = src.indexOf('const handleUnlockClick', start);
+  assert.ok(start > 0 && end > start, 'handleBridgeConfigure exists');
+  const body = src.slice(start, end);
+  assert.ok(body.includes('promptForUnsealKey(bridgeId)'), 'a locked client opens the prompt for THIS bridge');
+  assert.ok(!body.includes('promptForUnsealKey(null)'), 'it never widens to every bridge');
+  assert.ok(body.includes('handleBridgeUnlock(bridgeId)'), 'with a key in hand it is exactly the row Unlock');
+  assert.ok(!body.includes('unsealBridgeE2EE'), 'no second unseal implementation');
+  assert.ok(!body.includes('lockVault'), 'configuring a bridge never locks this client');
+  // No second key-entry surface: the master-password modal is still the only one.
+  assert.equal((src.match(/type="password"/g) || []).length, 1, 'exactly one password input');
 });

@@ -4,6 +4,7 @@ import { useSelector } from 'react-redux';
 import { apiAbsoluteUrl } from '../../api/apiBase';
 import { decryptShellStreamPayload, encryptShellStreamPayload } from '../shells/useShellStream';
 import { VAULT_ARMOR_PREFIX, bytesToBase64, getActiveVaultKey } from '../../utils/vaultContent';
+import { isVaultLockedError } from '../../utils/vaultLockedError.ts';
 
 const HEARTBEAT_INTERVAL_MS = 30000;
 const INITIAL_RECONNECT_DELAY_MS = 1000;
@@ -25,7 +26,8 @@ type AgentStreamMsg =
   | { type: 'stream_ready'; session_id?: string; agent_instance_id?: string; [key: string]: any }
   | { type: 'stream_closed'; session_id?: string; agent_instance_id?: string; exit_code?: number; [key: string]: any }
   | { type: 'status'; status: string }
-  | { type: 'error'; message: string };
+  // T10: `code`/`bridge_id` are set for typed errors (e.g. vault_locked).
+  | { type: 'error'; message: string; code?: string; bridge_id?: string; session_id?: string };
 
 export type UseAgentStreamOptions = {
   agentInstanceId: string | null | undefined;
@@ -39,6 +41,13 @@ export type UseAgentStreamOptions = {
   onStreamReady?: (info?: { sessionId?: string; agentInstanceId?: string; [key: string]: any }) => void;
   onStreamClosed?: (info?: { sessionId?: string; agentInstanceId?: string; exitCode?: number; [key: string]: any }) => void;
   onError?: (message: string) => void;
+  /**
+   * T10 (REQ-T10-3): the hub reported this pane's bridge vault as locked (a typed
+   * `error` frame or a `vault_locked` close reason). Receives the raw frame/close so
+   * the caller can classify it with isVaultLockedError / vaultLockedBridgeId. Such a
+   * signal is NOT also reported through onError.
+   */
+  onVaultLocked?: (signal: unknown) => void;
   onClose?: () => void;
   isVaultUnlocked?: boolean;
 };
@@ -106,6 +115,7 @@ export function useAgentStream({
   onStreamReady,
   onStreamClosed,
   onError,
+  onVaultLocked,
   onClose,
   isVaultUnlocked: propIsVaultUnlocked,
 }: UseAgentStreamOptions): UseAgentStreamResult {
@@ -171,6 +181,8 @@ export function useAgentStream({
   useEffect(() => { onStreamReadyRef.current = onStreamReady; }, [onStreamReady]);
   useEffect(() => { onStreamClosedRef.current = onStreamClosed; }, [onStreamClosed]);
   useEffect(() => { onErrorRef.current = onError; }, [onError]);
+  const onVaultLockedRef = useRef(onVaultLocked);
+  useEffect(() => { onVaultLockedRef.current = onVaultLocked; }, [onVaultLocked]);
   useEffect(() => { onCloseRef.current = onClose; }, [onClose]);
 
   const clearHeartbeat = () => {
@@ -394,7 +406,11 @@ export function useAgentStream({
           } else if (msg.type === 'status') {
             onStatusRef.current?.(msg.status);
           } else if (msg.type === 'error') {
-            onErrorRef.current?.(msg.message);
+            if (isVaultLockedError(msg)) {
+              onVaultLockedRef.current?.(msg);
+            } else {
+              onErrorRef.current?.(msg.message);
+            }
           }
         };
 
@@ -417,9 +433,22 @@ export function useAgentStream({
           }
         };
 
-        socket.onclose = () => {
+        socket.onclose = (event: CloseEvent) => {
           paneQueue.cancel();
           if (activeConnectIdRef.current !== connectId) return;
+          if (isVaultLockedError({ reason: event?.reason })) {
+            // T10: a locked vault is not a transport failure — no reconnect storm and
+            // no fallback to polling; the pane shows its locked overlay instead.
+            clearHeartbeat();
+            clearMicroNudgeTimer();
+            clearStreamReadyFallbackTimer();
+            isStreamReadyRef.current = false;
+            setIsStreamReady(false);
+            pendingKeyEventsRef.current = [];
+            setConnected(false);
+            onVaultLockedRef.current?.(event);
+            return;
+          }
           clearHeartbeat();
           clearMicroNudgeTimer();
           clearStreamReadyFallbackTimer();

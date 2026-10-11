@@ -96,10 +96,12 @@ bridge_prespawn_rmdir_all :: proc(dir: string) {
 // The vault key is deliberately NOT injected here. It used to be, but the env is
 // built once at spawn and never refreshed, so after an operator rotates the key a
 // running agent's env held the OLD value — and because ctl checks
-// $HEIMDALL_VAULT_KEY (source 2) before ~/.config/heimdall/vault_key (source 3),
-// that stale value WON over the correct file and decryption failed silently for
-// the rest of the instance's life. ctl now resolves the key at invocation time
-// from the file, or from the bridge via agent.vault.get, so it is always live.
+// $HEIMDALL_VAULT_KEY (source 2) before its own ~/.config/heimdall/vault_key
+// (source 3; ham-ctl side only — the bridge itself no longer reads that shared
+// file, it holds a per-bridge key in the keyring/Keychain), that stale value WON
+// over the correct key and decryption failed silently for the rest of the
+// instance's life. ctl now resolves the key at invocation time from its file, or
+// from this bridge via agent.vault.get, so it is always live.
 //
 // The caller owns the returned slice and each string.
 bridge_prespawn_env :: proc(run_dir, bridge_endpoint, agent_token, instance_id: string) -> []string {

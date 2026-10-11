@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo, type FormEvent } from 'react';
+import React, { useState, useCallback, useEffect, useMemo, useRef, type FormEvent } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import {
   Button,
@@ -46,10 +46,12 @@ import {
   resolveBridgeVaultStatus,
   canLockBridgeVault,
   canUnlockBridgeVault,
+  canConfigureBridgeVault,
   BRIDGE_VAULT_STATUS_TONE,
   type BridgeVaultStatus,
 } from '../../utils/bridgeVaultStatus';
 import VaultOnboardingModal from './VaultOnboardingModal';
+import { VAULT_LOCKED_SETTINGS_DESCRIPTION } from '../../utils/vaultLockedError';
 
 // REQ-BVS-3: the visible wording for each of the five per-bridge states. The state is
 // carried by these WORDS, not by the pill colour — `Unknown` is neutral and says so,
@@ -65,10 +67,16 @@ const BRIDGE_VAULT_STATUS_LABEL: Record<BridgeVaultStatus, string> = {
 const BRIDGE_VAULT_STATUS_DESCRIPTION: Record<BridgeVaultStatus, string> = {
   NotRunning: 'Bridge is offline. Its vault state cannot be determined and it holds no key.',
   NotConfigured: 'Encryption is not configured on this bridge. Files and terminal streams run unencrypted.',
-  Locked: 'Vault is locked on this bridge. Unseal it to resume encrypted file and terminal access.',
+  Locked: VAULT_LOCKED_SETTINGS_DESCRIPTION,
   Unlocked: 'Vault is unsealed on this bridge. Files and terminal chunks are encrypted with AES-256-GCM.',
   Unknown: 'This bridge has not reported a vault state (older build). Treated as unknown, not unlocked.',
 };
+
+// REQ-T4-2: a NotConfigured bridge whose owner HAS a vault is not "unencrypted by
+// choice" — it simply has not been given the key yet, so the row says so and offers
+// to configure it rather than describing a dead end.
+const BRIDGE_VAULT_CONFIGURABLE_DESCRIPTION =
+  'Encryption is enabled for your account but this bridge has no key yet. Configure it to encrypt files and terminal streams on this machine.';
 
 /** Reads the bridge id out of whichever casing the API happened to use. */
 function bridgeIdOf(bridge: Bridge | undefined | null): string {
@@ -84,12 +92,23 @@ export interface BridgeSettingsPanelProps {
   bridges?: Bridge[];
   selectedBridgeId?: string;
   onOpenVaultSetup?: () => void;
+  /**
+   * T10 (REQ-T10-3): with `selectedBridgeId`, start that row's unseal once on mount —
+   * the SAME path as its Unlock / Configure button (the active key, or the existing
+   * master-password prompt scoped to this bridge). Used by a locked pane's
+   * "Unlock vault" button; there is no second key-entry surface.
+   */
+  autoUnseal?: boolean;
+  /** Fired after an unseal payload was delivered to a bridge. */
+  onBridgeUnsealed?: (bridgeId: string) => void;
 }
 
 export default function BridgeSettingsPanel({
   bridges: propBridges,
   selectedBridgeId,
   onOpenVaultSetup,
+  autoUnseal = false,
+  onBridgeUnsealed,
 }: BridgeSettingsPanelProps) {
   const dispatch = useDispatch();
   const queryBridgesResult = useListBridgesQuery(undefined, { skip: Boolean(propBridges && propBridges.length > 0) });
@@ -108,8 +127,11 @@ export default function BridgeSettingsPanel({
   // client-scoped concerns it genuinely answers: whether encryption is configured at
   // all, and whether this client currently holds a key it could send to a bridge.
   // Per-bridge state comes from `bridge.vault_status` via `resolveBridgeVaultStatus`.
+  // REQ-T4-1: "the owner has a vault" — the same expression that decides whether this
+  // client's encryption is configured at all. Gates per-bridge "Configure encryption".
+  const ownerHasVault = Boolean(isConfigured || vaultEnvelope?.encrypted_vault_key);
   const clientVaultStatus: VaultStatus = resolveVaultStatus({
-    isConfigured: Boolean(isConfigured || vaultEnvelope?.encrypted_vault_key),
+    isConfigured: ownerHasVault,
     isUnlocked,
   });
 
@@ -170,6 +192,9 @@ export default function BridgeSettingsPanel({
   // flipped optimistically in local state (REQ-BVS-4: a failed lock must not look like
   // a success). Invalidating the tag also refreshes the copy held by a parent that
   // passed `bridges` in as a prop.
+  const onBridgeUnsealedRef = useRef(onBridgeUnsealed);
+  useEffect(() => { onBridgeUnsealedRef.current = onBridgeUnsealed; }, [onBridgeUnsealed]);
+
   const refreshBridges = useCallback(() => {
     dispatch(bridgeSupportApi.util.invalidateTags([{ type: 'Bridges' as const, id: 'LIST' }]) as any);
   }, [dispatch]);
@@ -267,6 +292,7 @@ export default function BridgeSettingsPanel({
       await unsealBridgeE2EE(bridgeId, pubKey, activeKey);
       setBridgeNotice((prev) => ({ ...prev, [bridgeId]: 'Unseal payload delivered to this bridge.' }));
       refreshBridges();
+      onBridgeUnsealedRef.current?.(bridgeId);
     } catch (err: any) {
       setBridgeError((prev) => ({
         ...prev,
@@ -280,6 +306,33 @@ export default function BridgeSettingsPanel({
       });
     }
   }, [refreshBridges, promptForUnsealKey]);
+
+  /**
+   * REQ-T4-2/REQ-T4-3: configures a NotConfigured bridge by unsealing it — the SAME
+   * path as the row's Unlock. The one difference is a locked client: Unlock can only
+   * send a key the client already holds, whereas Configure opens the existing
+   * master-password prompt scoped to this one bridge, so the operator is never sent
+   * to the client-scoped "Unlock this client" (which unseals every bridge).
+   */
+  const handleBridgeConfigure = useCallback((bridgeId: string) => {
+    if (!bridgeId) return;
+    if (!(getActiveBridgeVaultKeyMaterial() || getActiveVaultKey())) {
+      setBridgeError((prev) => ({ ...prev, [bridgeId]: '' }));
+      promptForUnsealKey(bridgeId);
+      return;
+    }
+    void handleBridgeUnlock(bridgeId);
+  }, [handleBridgeUnlock, promptForUnsealKey]);
+
+  // T10: a locked pane's "Unlock vault" opens this panel scoped to its bridge and
+  // goes straight into that row's unseal — Configure's logic, which is Unlock when a
+  // key is held and the scoped master-password prompt when not. Once per mount.
+  const autoUnsealStartedRef = useRef(false);
+  useEffect(() => {
+    if (!autoUnseal || !selectedBridgeId || autoUnsealStartedRef.current) return;
+    autoUnsealStartedRef.current = true;
+    handleBridgeConfigure(selectedBridgeId);
+  }, [autoUnseal, selectedBridgeId, handleBridgeConfigure]);
 
   const handleUnlockClick = useCallback(async () => {
     setUnlockError('');
@@ -397,6 +450,7 @@ export default function BridgeSettingsPanel({
           }
           await unsealBridgeE2EE(bridgeId, pubKey, unsealHex);
           unsealedCount++;
+          onBridgeUnsealedRef.current?.(bridgeId);
         } catch (bridgeErr: any) {
           // REQ-UNSEAL-4: a failed unseal is reported, not just logged to a console
           // nobody is reading, and never retried with a weaker payload.
@@ -620,6 +674,9 @@ export default function BridgeSettingsPanel({
             // Unseal needs a key in hand; a locked client has none to send.
             const clientHoldsKey = clientVaultStatus === 'Unlocked';
             const unlockAllowed = canUnlockBridgeVault(status) && clientHoldsKey;
+            // REQ-T4-2: shown even while this client is locked (REQ-T4-3) — clicking it
+            // then asks for the master password for this bridge only.
+            const configureAllowed = canConfigureBridgeVault(status, ownerHasVault);
             const unlockBlockedReason = !canUnlockBridgeVault(status)
               ? status === 'Unlocked'
                 ? 'Already unsealed.'
@@ -646,7 +703,9 @@ export default function BridgeSettingsPanel({
                     </StatusPill>
                   </div>
                   <p className="mt-1 text-xs text-muted leading-relaxed break-words">
-                    {BRIDGE_VAULT_STATUS_DESCRIPTION[status]}
+                    {configureAllowed
+                      ? BRIDGE_VAULT_CONFIGURABLE_DESCRIPTION
+                      : BRIDGE_VAULT_STATUS_DESCRIPTION[status]}
                   </p>
                   {rowError ? (
                     <p
@@ -667,19 +726,39 @@ export default function BridgeSettingsPanel({
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2">
-                  <Button
-                    variant="primary"
-                    size="sm"
-                    loading={busy === 'unlock'}
-                    disabled={Boolean(busy) || !unlockAllowed}
-                    title={unlockAllowed ? 'Send this client\u2019s vault key to the bridge' : unlockBlockedReason}
-                    data-debug-id="bridge-vault-row-unlock-btn"
-                    className="min-h-[44px] min-w-[44px] touch-manipulation w-full sm:w-auto"
-                    onClick={() => void handleBridgeUnlock(id)}
-                  >
-                    <Icon name="lock" size="sm" className="mr-1.5" />
-                    Unlock
-                  </Button>
+                  {configureAllowed ? (
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      loading={busy === 'unlock'}
+                      disabled={Boolean(busy)}
+                      title={
+                        clientHoldsKey
+                          ? 'Send this client\u2019s vault key to the bridge'
+                          : 'Enter your master password to give this bridge its key'
+                      }
+                      data-debug-id={`bridge-row-configure-btn-${id}`}
+                      className="min-h-[44px] min-w-[44px] touch-manipulation w-full sm:w-auto"
+                      onClick={() => handleBridgeConfigure(id)}
+                    >
+                      <Icon name="lock" size="sm" className="mr-1.5" />
+                      Configure encryption
+                    </Button>
+                  ) : (
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      loading={busy === 'unlock'}
+                      disabled={Boolean(busy) || !unlockAllowed}
+                      title={unlockAllowed ? 'Send this client\u2019s vault key to the bridge' : unlockBlockedReason}
+                      data-debug-id="bridge-vault-row-unlock-btn"
+                      className="min-h-[44px] min-w-[44px] touch-manipulation w-full sm:w-auto"
+                      onClick={() => void handleBridgeUnlock(id)}
+                    >
+                      <Icon name="lock" size="sm" className="mr-1.5" />
+                      Unlock
+                    </Button>
+                  )}
                   {/*
                     REQ-BVS-5: per-bridge Lock calls `lockBridge(id)` ONLY. It must never
                     dispatch `lockVault()` — this client stays unlocked and every other
