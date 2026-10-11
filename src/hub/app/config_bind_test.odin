@@ -18,4 +18,18 @@ test_preview_origin_validation :: proc(t: ^testing.T) {
 	testing.expect(t, !ok)
 	_, ok, _ = normalize_preview_origin("https://hub.example/", "https://hub.example")
 	testing.expect(t, !ok)
+	invalid_origins := []string{
+		"https://",
+		"https:///",
+		"https://preview.example?x=1",
+		"https://preview.example#x",
+		"https://user@preview.example",
+		"https://preview.example:",
+		"https://preview.example:70000",
+	}
+	for invalid in invalid_origins {
+		_, case_ok, case_message := normalize_preview_origin(invalid, "https://hub.example")
+		testing.expect(t, !case_ok)
+		testing.expect(t, strings.contains(case_message, "--preview-origin"))
+	}
 }

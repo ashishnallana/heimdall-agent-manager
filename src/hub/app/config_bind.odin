@@ -1,6 +1,7 @@
 package app
 
 import "core:strings"
+import "core:strconv"
 
 Hub_Config :: struct {
 	paddle_environment: string,
@@ -107,10 +108,37 @@ normalize_preview_origin :: proc(preview_origin, ui_origin: string) -> (string, 
 	if !strings.has_prefix(strings.to_lower(preview_origin, context.temp_allocator), "https://") {
 		return "", false, "--preview-origin must start with https://"
 	}
-	canonical := strings.trim_right(preview_origin, "/")
-	host := canonical[len("https://"):]
-	if host == "" || strings.contains(host, "/") {
+	canonical := preview_origin
+	if len(canonical) > len("https://") && strings.has_suffix(canonical, "/") do canonical = canonical[:len(canonical)-1]
+	authority := canonical[len("https://"):]
+	if authority == "" || strings.contains_any(authority, "/?#@ \t\r\n") {
 		return "", false, "--preview-origin must contain only scheme and host[:port] (no path)"
+	}
+	host := authority
+	port := ""
+	if strings.has_prefix(authority, "[") {
+		close := strings.index_byte(authority, ']')
+		if close <= 1 || (close + 1 < len(authority) && authority[close+1] != ':') {
+			return "", false, "--preview-origin must contain a valid host[:port]"
+		}
+		host = authority[1:close]
+		if close + 1 < len(authority) do port = authority[close+2:]
+	} else if colon := strings.last_index_byte(authority, ':'); colon >= 0 {
+		if strings.index_byte(authority, ':') != colon {
+			return "", false, "--preview-origin IPv6 hosts must use brackets"
+		}
+		host, port = authority[:colon], authority[colon+1:]
+	}
+	if host == "" {
+		return "", false, "--preview-origin must contain a non-empty host"
+	}
+	if port != "" {
+		port_number, port_ok := strconv.parse_int(port)
+		if !port_ok || port_number < 1 || port_number > 65535 {
+			return "", false, "--preview-origin port must be between 1 and 65535"
+		}
+	} else if strings.has_suffix(authority, ":") {
+		return "", false, "--preview-origin must contain a valid host[:port]"
 	}
 	ui_canonical := strings.trim_right(ui_origin, "/")
 	if ui_canonical != "" && strings.equal_fold(canonical, ui_canonical) {
