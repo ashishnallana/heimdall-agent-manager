@@ -90,7 +90,7 @@ function PreviewFrame({ tab, hidden }: { tab: PreviewTab; hidden: boolean }) {
   // Read-only: the watcher above owns the polling for this session, and this
   // subscribes to the same RTK Query cache entry — so this costs no extra request
   // and only drives the "Starting…" overlay.
-  const { data: session } = useGetShellSessionQuery({ sessionId: tab.sessionId });
+  const { data: session, isError: sessionLoadFailed } = useGetShellSessionQuery({ sessionId: tab.sessionId });
   const status = session?.status;
   // Draft is what the user is typing; it only becomes the iframe URL on submit, so
   // the frame does not reload on every keystroke.
@@ -99,10 +99,10 @@ function PreviewFrame({ tab, hidden }: { tab: PreviewTab; hidden: boolean }) {
   // that does not depend on reaching into the frame's contentWindow.
   const [reloadKey, setReloadKey] = useState(0);
   const previewBaseUrl = useMemo(
-    () => session ? previewAccessUrl(session) : `/api/v1/preview/${encodeURIComponent(tab.sessionId)}/`,
-    [session, tab.sessionId],
+    () => session ? previewAccessUrl(session) : '',
+    [session],
   );
-  const src = `${previewBaseUrl}${tab.currentPath}`;
+  const src = session ? `${previewBaseUrl}${tab.currentPath}` : '';
   const isCrossOrigin = useMemo(() => {
     if (typeof window === 'undefined') return false;
     try {
@@ -301,18 +301,25 @@ function PreviewFrame({ tab, hidden }: { tab: PreviewTab; hidden: boolean }) {
 
       {/* Frame */}
       <div className="relative min-h-0 flex-1 bg-surface">
-        {status === 'starting' ? (
+        {!session ? (
+          <div className="absolute inset-0 grid place-items-center text-xs text-muted">
+            {sessionLoadFailed ? 'Preview details unavailable.' : 'Loading preview…'}
+          </div>
+        ) : status === 'starting' ? (
           <div className="absolute inset-0 grid place-items-center text-xs text-muted">Starting…</div>
         ) : null}
-        <iframe
-          ref={iframeRef}
-          // Remounting on reloadKey IS the refresh.
-          key={`${tab.sessionId}:${reloadKey}`}
-          src={src}
-          title={`Preview: ${tab.label}`}
-          className="h-full w-full border-0"
-          sandbox="allow-same-origin allow-scripts allow-forms allow-popups"
-        />
+        {session ? (
+          <iframe
+            ref={iframeRef}
+            // Remounting on reloadKey IS the refresh. Crucially, the frame does
+            // not exist until its canonical preview_url has loaded from the Hub.
+            key={`${tab.sessionId}:${reloadKey}`}
+            src={src}
+            title={`Preview: ${tab.label}`}
+            className="h-full w-full border-0"
+            sandbox="allow-same-origin allow-scripts allow-forms allow-popups"
+          />
+        ) : null}
       </div>
     </div>
   );
