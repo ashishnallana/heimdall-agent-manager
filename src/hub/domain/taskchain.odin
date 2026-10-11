@@ -182,12 +182,18 @@ Task_Chain_Directory :: struct {
 	updated_at:    string,
 }
 
+Fleet_Bridge_Model :: struct {
+	provider: string,
+	model: string,
+}
+
 Task_Chain_Fleet :: struct {
 	task_chain_id:    Task_Chain_ID,
 	agent_id:         string,
 	capacity:         int,
 	min_warm:         int,
 	idle_ttl_seconds: int,
+	bridge_models_json: string,
 	// provider/model are the per-role provider selection for JIT-provisioned
 	// instances. "" means inherit the standard resolution order.
 	provider:   string,

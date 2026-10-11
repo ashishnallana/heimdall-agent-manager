@@ -23,22 +23,21 @@ import {
   normalizeBridgeCapabilities,
   useListBridgesQuery,
   useListBridgeProvidersQuery,
-  useListAgentBridgeSupportQuery,
-  usePatchAgentBridgeSupportMutation,
 } from '../../api/endpoints/bridgeSupport';
-import { isRevokedBridge } from '../../utils/taskBridgePin';
+import { effectiveChainBridgeId, isRevokedBridge } from '../../utils/taskBridgePin';
 import {
   activeTasksByRole,
   changedFleetEntries,
   detectLiveInstanceRuntimeMismatch,
   fleetApplyRequests,
   fleetProviderCapabilities,
-  flattenProviderModelDrafts,
+  resolvedFleetProviderModel,
   getOriginalFleetCapacity,
   getOriginalProviderModel,
   hasCustomRuntimeOverrides,
   liveInstancesByRole,
   nextModelOnProviderChange,
+  providerModelModified,
   restartAffectedEntries,
   seedPerBridgeProviderModelDrafts,
   seedProviderModelDrafts,
@@ -49,7 +48,7 @@ import {
   type FleetProviderModel,
   type FleetRestartSummary,
 } from './fleetSelection';
-import { useListAgentIdentitiesQuery } from '../../api/endpoints/agents';
+import { useListAgentIdentitiesQuery, useListAgentInstancesQuery } from '../../api/endpoints/agents';
 
 export function formatFleetRoleName(agentId?: string, identities?: any[]): string {
   if (!agentId) return 'Worker';
@@ -207,17 +206,22 @@ const BridgeRuntimeRow: React.FC<BridgeRuntimeRowProps> = ({
 }) => {
   const bId = String(bridge.bridge_id || bridge.bridgeId || bridge.id || '');
   const providersQuery = useListBridgeProvidersQuery({ bridgeId: bId }, { skip: !bId });
-  const agentSupportQuery = useListAgentBridgeSupportQuery({ agentId }, { skip: !agentId });
+  const instancesQuery = useListAgentInstancesQuery({ agentId, limit: 1000 }, { skip: !agentId });
 
   const capabilities = useMemo<FleetProviderCapability[]>(() => {
     const fromQuery = fleetProviderCapabilities(providersQuery.data);
-    if (fromQuery.length > 0) return fromQuery;
+    if (providersQuery.data) return fromQuery;
     return normalizeBridgeCapabilities(bridge);
   }, [providersQuery.data, bridge]);
 
-  const effectiveProvider = draftPT?.provider || '';
-  const effectiveModel = draftPT?.model || '';
+  const resolved = resolvedFleetProviderModel(draftPT, capabilities);
+  const effectiveProvider = resolved.provider;
+  const effectiveModel = resolved.model;
   const modelOptions = modelOptionsForProvider(capabilities, effectiveProvider);
+  const bridgeInstances = (instancesQuery.data?.instances || []).filter(
+    (instance: any) => String(instance.bridge_id || instance.bridgeId || '') === bId &&
+      !['failed', 'terminated', 'stopped'].includes(String(instance.runtime_status || instance.runtimeStatus || ''))
+  );
 
   const status = String(bridge.status || bridge.runtime_status || '').toLowerCase();
   const isOnline = status === 'online' || status === 'connected';
@@ -243,7 +247,6 @@ const BridgeRuntimeRow: React.FC<BridgeRuntimeRowProps> = ({
             ({host})
           </span>
         </div>
-        <span className="text-[10px] text-muted shrink-0">Auto inherits defaults</span>
       </div>
 
       <div className="grid grid-cols-2 gap-2">
@@ -252,7 +255,7 @@ const BridgeRuntimeRow: React.FC<BridgeRuntimeRowProps> = ({
             Provider
           </span>
           <Select
-            data-debug-id={`fleet-provider-select-${agentId}`}
+            data-debug-id={`fleet-provider-select-${agentId}-${bId}`}
             value={effectiveProvider}
             onChange={(v) => onProviderChange(v, capabilities)}
             disabled={disabled}
@@ -260,7 +263,8 @@ const BridgeRuntimeRow: React.FC<BridgeRuntimeRowProps> = ({
             width="full"
             aria-label={`Provider for ${roleName} on ${label}`}
             options={[
-              { value: '', label: 'Auto (inherit)' },
+              ...(!effectiveProvider ? [{ value: '', label: 'Unavailable' }] :
+                capabilities.some((cap) => cap.provider === effectiveProvider) ? [] : [{ value: effectiveProvider, label: effectiveProvider }]),
               ...capabilities.map((cap) => ({ value: cap.provider, label: cap.provider })),
             ]}
           />
@@ -270,20 +274,26 @@ const BridgeRuntimeRow: React.FC<BridgeRuntimeRowProps> = ({
             Model
           </span>
           <Select
-            data-debug-id={`fleet-model-select-${agentId}`}
+            data-debug-id={`fleet-model-select-${agentId}-${bId}`}
             value={effectiveModel}
-            onChange={onModelChange}
+            onChange={(model) => { onProviderChange(effectiveProvider, capabilities); onModelChange(model); }}
             disabled={effectiveProvider === '' || disabled}
             size="sm"
             width="full"
             aria-label={`Model model for ${roleName} on ${label}`}
             options={[
-              { value: '', label: 'Auto (inherit)' },
+              ...(!effectiveModel ? [{ value: '', label: 'Unavailable' }] :
+                modelOptions.includes(effectiveModel) ? [] : [{ value: effectiveModel, label: effectiveModel }]),
               ...modelOptions.map((model) => ({ value: model, label: model })),
             ]}
           />
         </div>
       </div>
+      {bridgeInstances.map((instance: any) => (
+        <div key={instance.agent_instance_id || instance.agentInstanceId} className="text-[11px] text-muted">
+          {instance.display_name || instance.displayName || instance.agent_instance_id || instance.agentInstanceId}: {instance.provider} / {instance.model}
+        </div>
+      ))}
     </div>
   );
 };
@@ -329,19 +339,19 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
   const liveInstancesByRoleMap = useMemo(() => liveInstancesByRole(members), [members]);
   const activeTasksByRoleMap = useMemo(() => activeTasksByRole(tasks, members), [tasks, members]);
 
-  // Provider/model options come from the chain's first bridge directory; chains
-  // without a bridge keep the capacity-only drawer.
-  const directories = (chainDetailQuery.data?.chain?.directories || []) as any[];
-  const bridgeId = directories.length > 0 ? String(directories[0]?.bridgeId || '') : '';
+  // Use the same effective bridge as reconciliation for role-wide settings.
+  const allInstancesQuery = useListAgentInstancesQuery({ limit: 1000 });
   const bridgesQuery = useListBridgesQuery(undefined, { pollingInterval: 120000 });
   const activeBridges = useMemo(() => {
     return (bridgesQuery.data?.bridges || []).filter((b: any) => !isRevokedBridge(b));
   }, [bridgesQuery.data?.bridges]);
 
+  const bridgeId = effectiveChainBridgeId(chainDetailQuery.data?.chain, allInstancesQuery.data?.instances || [], activeBridges);
+
   const bridgesToRender = useMemo(() => {
     if (activeBridges.length > 0) return activeBridges;
     if (bridgeId) {
-      return [{ bridge_id: bridgeId, label: 'Primary Bridge', machine_hostname: 'localhost', status: 'online' }];
+      return [{ bridge_id: bridgeId, label: bridgeId, status: 'online' }];
     }
     return [];
   }, [activeBridges, bridgeId]);
@@ -353,7 +363,6 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
   );
 
   const dispatch = useDispatch();
-  const [patchAgentBridgeSupport] = usePatchAgentBridgeSupportMutation();
   const [updateFleet, { isLoading: isUpdating }] = useUpdateTaskChainFleetMutation();
   const [selectedNewAgentId, setSelectedNewAgentId] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
@@ -454,7 +463,7 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
             ...roleDrafts,
             [bId]: {
               provider,
-              model: nextModelOnProviderChange(currentModel, provider, capabilities),
+              model: nextModelOnProviderChange(currentModel, provider, capabilities) || modelOptionsForProvider(capabilities, provider)[0] || '',
             },
           },
         };
@@ -475,7 +484,7 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
           [agentId]: {
             ...roleDrafts,
             [bId]: {
-              provider: roleDrafts[bId]?.provider ?? '',
+              provider: roleDrafts[bId]?.provider || '',
               model,
             },
           },
@@ -555,29 +564,6 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
       setRestartSummary(null);
       setIsApplying(true);
       try {
-        // Persist per-bridge overrides via usePatchAgentBridgeSupportMutation
-        const bridgePatchPromises: Promise<any>[] = [];
-        for (const cf of changedFleets) {
-          const roleDrafts = draftProviderModels[cf.agentId];
-          if (roleDrafts && typeof roleDrafts === 'object' && !('provider' in roleDrafts)) {
-            for (const [bId, pt] of Object.entries(roleDrafts)) {
-              if (bId && bId !== 'default') {
-                bridgePatchPromises.push(
-                  patchAgentBridgeSupport({
-                    agentId: cf.agentId,
-                    bridgeId: bId,
-                    providerProfile: pt.provider || '',
-                    model: pt.model || '',
-                  }).unwrap().catch((err: any) => {
-                    console.warn(`Failed to patch bridge support for ${cf.agentId} on ${bId}:`, err);
-                  })
-                );
-              }
-            }
-          }
-        }
-        await Promise.all(bridgePatchPromises);
-
         const requests = fleetApplyRequests(changedFleets, restartAffected);
         const results = await Promise.all(
           requests.map(async (cf) => {
@@ -587,6 +573,7 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
               capacity: cf.capacity,
               provider: cf.provider,
               model: cf.model,
+              bridgeModels: cf.bridgeModels,
               restartLiveInstances: cf.restartLiveInstances,
             }).unwrap();
             return {
@@ -628,8 +615,7 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
       isApplying,
       changedFleets,
       draftProviderModels,
-      patchAgentBridgeSupport,
-      updateFleet,
+        updateFleet,
       chainId,
       dispatch,
       refetch,
@@ -768,30 +754,13 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
               const activeCount = fleet.active_count ?? fleet.activeCount ?? 0;
               const isSaturated = activeCount >= effectiveCapacity;
 
-              const origProviderModel = getOriginalProviderModel(rawFleets, agentId);
               const roleDraftMap = draftProviderModels[agentId] || {};
-              const flatDraftPT =
-                flattenProviderModelDrafts({ [agentId]: roleDraftMap }, bridgeId)[agentId] || {
-                  provider: '',
-                  model: '',
-                };
-              const effectiveProvider = flatDraftPT.provider || fleet.provider || '';
-              const effectiveModel = flatDraftPT.model || fleet.model || '';
               const capacityModified = origCapacity === null || effectiveCapacity !== origCapacity;
-              const providerModified = effectiveProvider !== origProviderModel.provider;
-              const tierModified = effectiveModel !== origProviderModel.model;
-              const isModified = capacityModified || providerModified || tierModified;
-
+              const runtimeModified = providerModelModified(rawFleets, agentId, draftProviderModels, bridgeId);
+              const isModified = capacityModified || runtimeModified;
               const pendingParts: string[] = [];
-              if (capacityModified) {
-                pendingParts.push(`${origCapacity ?? 0} → ${effectiveCapacity}`);
-              }
-              if (providerModified) {
-                pendingParts.push(`provider ${origProviderModel.provider || 'auto'} → ${effectiveProvider || 'auto'}`);
-              }
-              if (tierModified) {
-                pendingParts.push(`model ${origProviderModel.model || 'auto'} → ${effectiveModel || 'auto'}`);
-              }
+              if (capacityModified) pendingParts.push(`${origCapacity ?? 0} → ${effectiveCapacity}`);
+              if (runtimeModified) pendingParts.push('Provider/model settings changed');
 
               const liveInstances = liveInstancesByRoleMap[agentId] || [];
               const activeTasks = activeTasksByRoleMap[agentId] || [];
@@ -1146,8 +1115,10 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
                         </span>
                       </div>
                       <div className="font-mono text-[11px] text-muted">
-                        provider {role.originalProvider || 'auto'} → {role.provider || 'auto'} · model{' '}
-                        {role.originalModel || 'auto'} → {role.model || 'auto'}
+                        {role.bridgeModels ? Object.entries(role.bridgeModels).map(([id, selection]) => {
+                          const bridge = bridgesToRender.find((bridge: any) => String(bridge.bridge_id || bridge.bridgeId || bridge.id || '') === id);
+                          return <div key={id}>{bridge?.label || bridge?.machine_hostname || id}: {selection.provider} / {selection.model}</div>;
+                        }) : <span>{role.provider || role.originalProvider} / {role.model || role.originalModel}</span>}
                       </div>
                     </li>
                   );

@@ -2,7 +2,22 @@ package http
 
 import "core:strings"
 import "core:testing"
+import json "core:encoding/json"
 import domain "odin_test:hub/domain"
+
+@(test)
+test_fleet_bridge_models_wire_roundtrip :: proc(t: ^testing.T) {
+	fleet := domain.Task_Chain_Fleet{bridge_models_json = `{"bridge-a":{"provider":"codex","model":"model-a"},"bridge-b":{"provider":"claude","model":"model-b"}}`}
+	b := strings.builder_make()
+	defer strings.builder_destroy(&b)
+	write_fleet_json(&b, fleet)
+	parsed: Task_Chain_Fleet_Wire
+	err := json.unmarshal((transmute([]u8) strings.to_string(b)), &parsed, allocator = context.temp_allocator)
+	if !testing.expect(t, err == nil, "fleet response is valid JSON") do return
+	testing.expect_value(t, len(parsed.bridge_models), 2)
+	testing.expect_value(t, parsed.bridge_models["bridge-a"].provider, "codex")
+	testing.expect_value(t, parsed.bridge_models["bridge-b"].model, "model-b")
+}
 
 @(test)
 test_write_fleet_json :: proc(t: ^testing.T) {

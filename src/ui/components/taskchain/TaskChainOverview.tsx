@@ -60,7 +60,7 @@ import {
   launchModelsFor,
   launchableBridgeRows,
 } from '../../utils/bridgeLaunchOptions';
-import { taskBridgeDisplay, taskBridgeOptions } from '../../utils/taskBridgePin';
+import { effectiveChainBridgeId, taskBridgeDisplay, taskBridgeOptions } from '../../utils/taskBridgePin';
 import { useIsMobile } from '../shell/responsive';
 import ChainActiveServersPanel from '../shells/ChainActiveServersPanel';
 import { writeRightSidebarOpen } from '../../utils/clientPersistence';
@@ -509,8 +509,14 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
   // REQ-TB-5: options + name resolution for the per-task bridge pin (create-task
   // select, task-detail chip, and the change-bridge modal share this list).
   const bridgePinOptions = React.useMemo(
-    () => taskBridgeOptions(bridgesQuery.data?.bridges || []),
-    [bridgesQuery.data],
+    () => {
+      const bridges = bridgesQuery.data?.bridges || [];
+      const options = taskBridgeOptions(bridges);
+      const effective = taskBridgeDisplay(effectiveChainBridgeId(chain, allInstances, bridges), bridges);
+      options[0] = { value: '', label: effective.inherited ? 'Unavailable' : effective.label };
+      return options;
+    },
+    [bridgesQuery.data, chain, allInstances],
   );
   const selectedAddBridge = addBridgeRows.find((row) => row.bridgeId === addBridgeId)?.bridge;
   // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
@@ -1063,9 +1069,10 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
     // TODO(FIX): Replace loose fallback chain with canonical typed schema property
     const taskId = task.taskId || task.id;
     const isExpanded = Boolean(expandedTaskIds[taskId]);
-    // REQ-TB-5: the task's bridge pin — name resolved from the owner's bridges,
-    // '(inherited)' when the task carries no pin.
-    const taskBridge = taskBridgeDisplay(task.bridgeId, bridgesQuery.data?.bridges || []);
+    const taskBridge = taskBridgeDisplay(
+      task.bridgeId || task.bridge_id || effectiveChainBridgeId(chain, allInstances, bridgesQuery.data?.bridges || []),
+      bridgesQuery.data?.bridges || []
+    );
     const taskCommentAttachments = commentAttachments[taskId] || [];
     const taskCommentUploading = taskCommentAttachments.some((item) => item.status === 'uploading');
     const taskCommentFailed = taskCommentAttachments.some((item) => item.status === 'error');
@@ -1189,11 +1196,7 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
 
               <span data-debug-id={`taskchain-task-bridge-${taskId}`} className="inline-flex items-center gap-1">
                 bridge:{' '}
-                {taskBridge.inherited ? (
-                  <span className="text-faint">(inherited)</span>
-                ) : (
-                  <span className="font-semibold text-primary">{taskBridge.label}</span>
-                )}
+                <span className="font-semibold text-primary">{taskBridge.inherited ? 'Unavailable' : taskBridge.label}</span>
                 <button
                   type="button"
                   data-debug-id={`taskchain-task-edit-bridge-btn-${taskId}`}

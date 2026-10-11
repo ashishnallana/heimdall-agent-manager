@@ -2949,6 +2949,7 @@ remove_chain_directory :: proc(service: ^Taskchain_Service, auth: contracts.Auth
 // --- Fleet Management (REQ-FLEET-SCHEMA-1, REQ-FLEET-API-CLI-1) ---
 
 Upsert_Fleet_Input :: struct {
+	bridge_models_json: string,
 	chain_id:         domain.Task_Chain_ID,
 	agent_id:         string,
 	capacity:         int,
@@ -2979,8 +2980,27 @@ upsert_fleet :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, 
 	idle_ttl := input.idle_ttl_seconds
 	if idle_ttl <= 0 do idle_ttl = 600
 
+	bridge_models := input.bridge_models_json
+	if bridge_models == "" {
+		prior, prior_err := iface.taskchain_list_fleets_by_chain(service.repo, chain.chain_id, chain.owner_user_id)
+		if prior_err.code != .None do return {}, prior_err
+		defer if prior_err.code == .None do delete(prior)
+		for row in prior { if row.agent_id == trimmed_agent { bridge_models = row.bridge_models_json; break } }
+	} else {
+		entries: map[string]domain.Fleet_Bridge_Model
+		if json.unmarshal((transmute([]u8) bridge_models), &entries, allocator = context.temp_allocator) != nil do return {}, domain.domain_error(.Validation_Failed, "invalid bridge_models")
+		for bridge_id, selection in entries {
+			if service.agent_service == nil do return {}, domain.domain_error(.Internal_Error, "agent service unavailable")
+			bridge, found, _ := iface.bridge_get_bridge(service.agent_service.bridges, bridge_id)
+			if !found || bridge.owner_user_id != chain.owner_user_id do return {}, domain.domain_error(.Not_Found, "bridge not found")
+			if selection.provider == "" || selection.model == "" do return {}, domain.domain_error(.Validation_Failed, "bridge provider and model are required")
+			_, valid, validation_err := agent.validate_provider_model_intersection(service.agent_service, bridge_id, selection.provider, selection.model)
+			if !valid do return {}, validation_err
+		}
+	}
 	now := platform.clock_now(service.clock)
 	fleet := domain.Task_Chain_Fleet{
+		bridge_models_json = bridge_models,
 		task_chain_id    = chain.chain_id,
 		agent_id         = trimmed_agent,
 		capacity         = capacity,

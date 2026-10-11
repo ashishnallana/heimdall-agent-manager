@@ -668,7 +668,7 @@ test('seedPerBridgeProviderModelDrafts maps per-bridge provider/model for active
   assert.deepEqual(drafts, {
     agt_worker: {
       brg_alpha: { provider: 'claude', model: 'smart' },
-      brg_beta: { provider: '', model: '' },
+      brg_beta: { provider: 'claude', model: 'smart' },
     },
     agt_reviewer: {
       brg_alpha: { provider: '', model: '' },
@@ -719,7 +719,9 @@ test('changedFleetEntries detects changes from per-bridge drafts', () => {
     'brg_main',
   );
   assert.deepEqual(entries, [
-    { agentId: 'agt_worker', capacity: 2, provider: 'claude', model: 'opus' },
+    { agentId: 'agt_worker', capacity: 2, provider: '', model: '', bridgeModels: {
+      brg_main: { provider: 'claude', model: 'opus' },
+    } },
   ]);
 });
 

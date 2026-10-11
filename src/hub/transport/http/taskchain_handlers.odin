@@ -259,6 +259,7 @@ Fleet_Restart_Failure :: struct {
 }
 
 Task_Chain_Fleet_Wire :: struct {
+	bridge_models: map[string]domain.Fleet_Bridge_Model `json:"bridge_models"`,
 	task_chain_id:          string                         `json:"task_chain_id"`,
 	agent_id:               string                         `json:"agent_id"`,
 	capacity:               int                            `json:"capacity"`,
@@ -608,7 +609,10 @@ make_chain_fleet_wire :: proc(
 	if restart_failures != nil {
 		restart_failures_maybe = restart_failures^
 	}
+	bridge_models := make(map[string]domain.Fleet_Bridge_Model, context.temp_allocator)
+	if f.bridge_models_json != "" { _ = json.unmarshal((transmute([]u8) f.bridge_models_json), &bridge_models, allocator = context.temp_allocator) }
 	return Task_Chain_Fleet_Wire{
+		bridge_models = bridge_models,
 		task_chain_id          = string(f.task_chain_id),
 		agent_id               = f.agent_id,
 		capacity               = f.capacity,
@@ -1957,6 +1961,8 @@ upsert_chain_fleet_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	idle_ttl_seconds := json_int_field(req.body, "idle_ttl_seconds", 600)
 	provider := json_string(req.body, "provider")
 	model := json_string(req.body, "model")
+	bridge_models, bridge_models_present := jsonx.extract_raw_object(req.body, "bridge_models", top_level_only = true, allocator = context.temp_allocator)
+	if jsonx.has_key(req.body, "bridge_models", top_level_only = true) && !bridge_models_present do return respond_error(domain.domain_error(.Validation_Failed, "bridge_models must be an object"), req.request_id)
 	// Optional user-confirmed restart of the role's live instances when this PUT
 	// actually changes the role's provider/model. Absent or malformed values keep the
 	// historical flag-less behavior (persist only), so only a well-formed JSON
@@ -1969,7 +1975,7 @@ upsert_chain_fleet_handler :: proc(ctx: rawptr, req: Request) -> Response {
 		defer if prior_err.code == .None do delete(prior_fleets)
 		for prior in prior_fleets {
 			if prior.agent_id == role {
-				restart_role_instances = fleet_provider_model_changed(prior.provider, prior.model, provider, model)
+				restart_role_instances = fleet_provider_model_changed(prior.provider, prior.model, provider, model) || (bridge_models_present && prior.bridge_models_json != bridge_models)
 				break
 			}
 		}
@@ -1982,6 +1988,7 @@ upsert_chain_fleet_handler :: proc(ctx: rawptr, req: Request) -> Response {
 		idle_ttl_seconds = idle_ttl_seconds,
 		provider         = provider,
 		model             = model,
+		bridge_models_json = bridge_models,
 	})
 	if err.code != .None do return respond_error(err, req.request_id)
 	restarted_ids := make([dynamic]string)
@@ -2005,7 +2012,12 @@ upsert_chain_fleet_handler :: proc(ctx: rawptr, req: Request) -> Response {
 				// relaunch_instance is the primitive that persists the NEW provider/model
 				// verbatim on the same instance id ("" resolves through the standard
 				// inheritance order) and re-sends the launch command.
-				if _, relaunched, relaunch_err := agent_service.relaunch_instance(h.agents, auth_ctx, inst, provider, model); relaunched {
+				selected_provider, selected_model := taskchain_service.fleet_model_on_bridge(fleet, inst.bridge_id)
+				launch_provider, launch_model := taskchain_service.resolve_fleet_launch_model(h.taskchains, inst.bridge_id, selected_provider, selected_model)
+				defer delete(launch_provider)
+				defer delete(launch_model)
+				if inst.provider == launch_provider && inst.model == launch_model do continue
+				if _, relaunched, relaunch_err := agent_service.relaunch_instance(h.agents, auth_ctx, inst, launch_provider, launch_model); relaunched {
 					append(&restarted_ids, inst.agent_instance_id)
 				} else {
 					// Clone: relaunch path messages can come from fmt.tprintf (temp memory).

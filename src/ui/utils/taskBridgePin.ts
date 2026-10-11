@@ -14,6 +14,22 @@
 
 export const TASK_BRIDGE_INHERIT_LABEL = 'Inherit (coordinator bridge)';
 
+/** Match the hub's chain bridge resolution before applying a task pin. */
+export function effectiveChainBridgeId(chain: any, instances: any[], bridges: any[]): string {
+  const instanceId = (instance: any) => String(instance?.agent_instance_id || instance?.agentInstanceId || '');
+  const coordinatorId = String(chain?.coordinator_agent_instance_id || chain?.coordinatorAgentInstanceId || '');
+  const coordinator = instances.find((instance) => instanceId(instance) === coordinatorId);
+  if (bridgeIdOf(coordinator)) return bridgeIdOf(coordinator);
+  for (const member of chain?.members || []) {
+    const instance = instances.find((instance) => instanceId(instance) === instanceId(member));
+    if (bridgeIdOf(instance)) return bridgeIdOf(instance);
+  }
+  const chainInstance = instances.find((instance) =>
+    String(instance.chain_id || instance.chainId || '') === String(chain?.chain_id || chain?.chainId || chain?.id || '') && bridgeIdOf(instance)
+  );
+  return bridgeIdOf(chainInstance) || bridgeIdOf(chain?.directories?.[0]) || bridgeIdOf(bridges?.[0]);
+}
+
 function bridgeIdOf(bridge: any): string {
   return String(bridge?.bridge_id || bridge?.bridgeId || bridge?.id || '');
 }

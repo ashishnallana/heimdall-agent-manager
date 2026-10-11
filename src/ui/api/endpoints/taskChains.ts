@@ -28,6 +28,7 @@ export type UpdateTaskChainInput = {
 };
 
 export interface TaskChainFleet {
+  bridge_models?: Record<string, { provider: string; model: string }>;
   task_chain_id?: string;
   taskChainId?: string;
   agent_id: string;
@@ -51,6 +52,7 @@ export interface TaskChainFleet {
 
 function normalizeFleet(f: any): TaskChainFleet {
   return {
+    bridge_models: f.bridge_models || {},
     task_chain_id: f.task_chain_id || f.taskChainId || '',
     taskChainId: f.taskChainId || f.task_chain_id || '',
     agent_id: f.agent_id || f.agentId || '',
@@ -104,10 +106,12 @@ export const taskChainsApi = heimdallApi.injectEndpoints({
       model?: string;
       /** Ask the hub to relaunch this role's live instances with the new provider/model. */
       restartLiveInstances?: boolean;
+      bridgeModels?: Record<string, { provider: string; model: string }>;
     }>({
-      queryFn: async ({ chainId, agentId, capacity, minWarm, idleTtlSeconds, provider, model, restartLiveInstances }) => {
+      queryFn: async ({ chainId, agentId, capacity, minWarm, idleTtlSeconds, provider, model, restartLiveInstances, bridgeModels }) => {
         try {
           const body: any = { capacity, provider: provider ?? '', model: model ?? '' };
+          if (bridgeModels !== undefined) body.bridge_models = bridgeModels;
           if (minWarm !== undefined) body.min_warm = minWarm;
           if (idleTtlSeconds !== undefined) body.idle_ttl_seconds = idleTtlSeconds;
           // Only a true flag reaches the wire: flag-less bodies stay byte-identical

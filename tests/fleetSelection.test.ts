@@ -9,9 +9,54 @@ import {
   summarizeFleetRestartResults,
   providerModelModified,
   changedFleetEntries,
+  resolvedFleetProviderModel,
+  seedPerBridgeProviderModelDrafts,
   type FleetProviderModel,
   type ChangedFleetEntry,
 } from '../src/ui/components/tasks/fleetSelection.ts';
+import { effectiveChainBridgeId } from '../src/ui/utils/taskBridgePin.ts';
+
+test('fleet launch display resolves concrete settings and preserves explicit choices', () => {
+  const capabilities = [{ provider: 'codex', models: ['model-a', 'model-b'] }];
+  assert.deepEqual(resolvedFleetProviderModel({ provider: '', model: '' }, capabilities), { provider: 'codex', model: 'model-a' });
+  assert.deepEqual(resolvedFleetProviderModel({ provider: '', model: 'model-b' }, capabilities), { provider: 'codex', model: 'model-b' });
+  assert.deepEqual(resolvedFleetProviderModel({ provider: 'missing', model: 'pinned' }, capabilities), { provider: 'missing', model: 'pinned' });
+  assert.deepEqual(resolvedFleetProviderModel({ provider: '', model: '' }, []), { provider: '', model: '' });
+});
+
+test('per-bridge fleet changes survive seeding and Apply without flattening', () => {
+  const fleets = [{ agent_id: 'worker', capacity: 1, provider: 'codex', model: 'model-a', bridge_models: {
+    second: { provider: 'claude', model: 'model-c' },
+  } }];
+  const drafts = seedPerBridgeProviderModelDrafts(fleets, [{ bridge_id: 'first' }, { bridge_id: 'second' }], 'first');
+  assert.deepEqual(drafts.worker.second, { provider: 'claude', model: 'model-c' });
+  assert.deepEqual(changedFleetEntries(fleets, { worker: 1 }, drafts, fleets, 'first'), []);
+  drafts.worker.second.model = 'model-d';
+  const changed = changedFleetEntries(fleets, { worker: 1 }, drafts, fleets, 'first');
+  assert.equal(changed.length, 1);
+  assert.equal(changed[0].model, 'model-a');
+  assert.equal(changed[0].bridgeModels?.first, undefined, 'unchanged role defaults must remain role-wide');
+  assert.equal(fleetApplyRequests(changed, changed)[0].bridgeModels?.second.model, 'model-d');
+  assert.equal(providerModelModified(fleets, 'worker', drafts, 'first'), true);
+});
+
+test('capacity edits preserve unrendered bridge selections without pinning resolved defaults', () => {
+  const fleets = [{ agent_id: 'worker', capacity: 1, provider: 'codex', model: 'model-a', bridge_models: {
+    unrendered: { provider: 'claude', model: 'model-c' },
+  } }];
+  const drafts = seedPerBridgeProviderModelDrafts(fleets, [{ bridge_id: 'first' }], 'first');
+  const changed = changedFleetEntries(fleets, { worker: 2 }, drafts, fleets, 'first');
+  assert.deepEqual(changed[0].bridgeModels, fleets[0].bridge_models);
+});
+
+test('bridge display follows coordinator, member, directory and owner bridge resolution', () => {
+  const instances = [{ agent_instance_id: 'coord', bridge_id: 'actual' }, { agent_instance_id: 'worker', bridge_id: 'member' }];
+  const chain = { coordinatorAgentInstanceId: 'coord', members: [{ agentInstanceId: 'worker' }], directories: [{ bridgeId: 'directory' }] };
+  assert.equal(effectiveChainBridgeId(chain, instances, [{ bridge_id: 'fallback' }]), 'actual');
+  assert.equal(effectiveChainBridgeId({ ...chain, coordinatorAgentInstanceId: '' }, instances, []), 'member');
+  assert.equal(effectiveChainBridgeId({ directories: chain.directories }, [], []), 'directory');
+  assert.equal(effectiveChainBridgeId({}, [], [{ bridge_id: 'fallback' }]), 'fallback');
+});
 
 // ---------------------------------------------------------------------------
 // detectLiveInstanceRuntimeMismatch tests (REQ-FLEET-MISMATCH-MODAL-1)

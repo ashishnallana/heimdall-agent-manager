@@ -56,6 +56,7 @@ test_taskchain_fleet_sqlite_lifecycle :: proc(t: ^testing.T) {
 
 	// 2. Upsert fleet with provider/model (REQ-FLEET-PT-1)
 	fleet1 := domain.Task_Chain_Fleet{
+		bridge_models_json = `{"brg_one":{"provider":"codex","model":"model-one"}}`,
 		task_chain_id    = cid,
 		agent_id         = "agt_worker",
 		capacity         = 3,
@@ -85,6 +86,7 @@ test_taskchain_fleet_sqlite_lifecycle :: proc(t: ^testing.T) {
 		testing.expect_value(t, fleets1[0].idle_ttl_seconds, 300)
 		testing.expect_value(t, fleets1[0].provider, "claude")
 		testing.expect_value(t, fleets1[0].model, "smart")
+		testing.expect_value(t, fleets1[0].bridge_models_json, fleet1.bridge_models_json)
 	}
 
 	// 3b. Re-running migrations on a populated DB must succeed without data loss

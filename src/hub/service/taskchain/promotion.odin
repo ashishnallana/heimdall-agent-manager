@@ -1,6 +1,7 @@
 package taskchain
 
 import "core:fmt"
+import json "core:encoding/json"
 import "core:strings"
 import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
@@ -253,11 +254,21 @@ task_effective_bridge_is_online :: proc(service: ^Taskchain_Service, chain: doma
 
 // jit_provision_agent_instance launches a new instance of agent_id for the chain
 // using agent_service.create_instance and the task's effective bridge.
-jit_provision_agent_instance :: proc(service: ^Taskchain_Service, chain: domain.Task_Chain, task: domain.Task, agent_id: string, role: string, provider: string, model: string) -> string {
+jit_provision_agent_instance :: proc(service: ^Taskchain_Service, chain: domain.Task_Chain, task: domain.Task, agent_id: string, role: string, provider: string, model: string, bridge_models_json: string = "") -> string {
 	if service == nil || service.agent_service == nil do return ""
 
 	bridge_id, project_id := task_effective_bridge(service, chain, task)
 	if bridge_id == "" do return ""
+
+	selected_provider, selected_model := fleet_model_on_bridge(domain.Task_Chain_Fleet{
+		provider = provider, model = model, bridge_models_json = bridge_models_json,
+	}, bridge_id)
+
+	// Fleet rows may omit launch settings. Instance creation deliberately requires
+	// explicit settings, so resolve those omissions on the selected bridge first.
+	launch_provider, launch_model := resolve_fleet_launch_model(service, bridge_id, selected_provider, selected_model)
+	defer delete(launch_provider)
+	defer delete(launch_model)
 
 	auth := contracts.Auth_Context{
 		user_id   = string(chain.owner_user_id),
@@ -267,8 +278,8 @@ jit_provision_agent_instance :: proc(service: ^Taskchain_Service, chain: domain.
 	input := agent.Create_Instance_Input{
 		agent_id   = agent_id,
 		bridge_id  = bridge_id,
-		provider   = provider,
-		model       = model,
+		provider   = launch_provider,
+		model       = launch_model,
 		chain_id   = string(chain.chain_id),
 		project_id = project_id,
 	}
@@ -278,6 +289,41 @@ jit_provision_agent_instance :: proc(service: ^Taskchain_Service, chain: domain.
 		return ""
 	}
 	return strings.clone(inst.agent_instance_id)
+}
+
+fleet_bridge_models_for_agent :: proc(fleets: []domain.Task_Chain_Fleet, agent_id: string) -> string {
+	for fleet in fleets { if fleet.agent_id == agent_id do return fleet.bridge_models_json }
+	return ""
+}
+
+fleet_model_on_bridge :: proc(fleet: domain.Task_Chain_Fleet, bridge_id: string) -> (string, string) {
+	if fleet.bridge_models_json != "" {
+		entries: map[string]domain.Fleet_Bridge_Model
+		if json.unmarshal((transmute([]u8) fleet.bridge_models_json), &entries, allocator = context.temp_allocator) == nil {
+			if selection, found := entries[bridge_id]; found { return selection.provider, selection.model }
+		}
+	}
+	return fleet.provider, fleet.model
+}
+
+// Catalog order is rank then id, matching the bridge provider-status UI.
+// Explicit selections are preserved: an unavailable selection must fail rather
+// than silently launch a different provider or model.
+resolve_fleet_launch_model :: proc(service: ^Taskchain_Service, bridge_id, provider, model: string) -> (string, string) {
+	if provider != "" && model != "" do return strings.clone(provider), strings.clone(model)
+	if service == nil || service.agent_service == nil || service.agent_service.providers == nil do return strings.clone(provider), strings.clone(model)
+	catalog, err := iface.provider_catalog_list(service.agent_service.providers)
+	if err.code != .None do return strings.clone(provider), strings.clone(model)
+	defer domain.provider_catalog_destroy(catalog)
+	for entry in catalog {
+		if entry.state != "active" || (provider != "" && entry.provider != provider) do continue
+		for candidate in entry.models {
+			if candidate.state != "active" || (model != "" && candidate.model_id != model) do continue
+			_, ok, _ := agent.validate_provider_model_intersection(service.agent_service, bridge_id, entry.provider, candidate.model_id)
+			if ok do return strings.clone(entry.provider), strings.clone(candidate.model_id)
+		}
+	}
+	return strings.clone(provider), strings.clone(model)
 }
 
 instance_is_crashed_or_dead :: proc(service: ^Taskchain_Service, chain_instances: []domain.Agent_Instance, instance_id: string) -> bool {
@@ -431,7 +477,7 @@ allocate_or_jit_worker_instance :: proc(service: ^Taskchain_Service, chain: doma
 		return strings.clone(chosen_instance_id), true
 	} else if live_count < capacity {
 		fleet_provider, fleet_model := fleet_provider_model_for_agent(fleets, target_agent_id)
-		new_instance_id := jit_provision_agent_instance(service, chain, task, target_agent_id, "worker", fleet_provider, fleet_model)
+		new_instance_id := jit_provision_agent_instance(service, chain, task, target_agent_id, "worker", fleet_provider, fleet_model, fleet_bridge_models_for_agent(fleets, target_agent_id))
 		if new_instance_id != "" {
 			return new_instance_id, true
 		}
@@ -580,7 +626,7 @@ allocate_or_jit_reviewer_instance :: proc(service: ^Taskchain_Service, chain: do
 		return strings.clone(chosen_reviewer_id), true
 	} else if live_count < capacity {
 		fleet_provider, fleet_model := fleet_provider_model_for_agent(fleets, target_agent_id)
-		new_instance_id := jit_provision_agent_instance(service, chain, task, target_agent_id, "reviewer", fleet_provider, fleet_model)
+		new_instance_id := jit_provision_agent_instance(service, chain, task, target_agent_id, "reviewer", fleet_provider, fleet_model, fleet_bridge_models_for_agent(fleets, target_agent_id))
 		if new_instance_id != "" {
 			return new_instance_id, true
 		}
@@ -814,7 +860,7 @@ dynamic_fleet_schedule :: proc(service: ^Taskchain_Service, chain: domain.Task_C
 			}
 		} else if live_count < capacity {
 			fleet_provider, fleet_model := fleet_provider_model_for_agent(fleets, target_agent_id)
-			new_instance_id := jit_provision_agent_instance(service, chain, cand, target_agent_id, "worker", fleet_provider, fleet_model)
+			new_instance_id := jit_provision_agent_instance(service, chain, cand, target_agent_id, "worker", fleet_provider, fleet_model, fleet_bridge_models_for_agent(fleets, target_agent_id))
 			if new_instance_id != "" {
 				defer delete(new_instance_id)
 				ensure_chain_member(service, chain, new_instance_id, target_agent_id)
@@ -947,7 +993,7 @@ dynamic_fleet_schedule :: proc(service: ^Taskchain_Service, chain: domain.Task_C
 				}
 			} else if live_count < capacity {
 				fleet_provider, fleet_model := fleet_provider_model_for_agent(fleets, rev_agent_id)
-				new_instance_id := jit_provision_agent_instance(service, chain, t, rev_agent_id, "reviewer", fleet_provider, fleet_model)
+				new_instance_id := jit_provision_agent_instance(service, chain, t, rev_agent_id, "reviewer", fleet_provider, fleet_model, fleet_bridge_models_for_agent(fleets, rev_agent_id))
 				if new_instance_id != "" {
 					defer delete(new_instance_id)
 					ensure_chain_member(service, chain, new_instance_id, rev_agent_id)

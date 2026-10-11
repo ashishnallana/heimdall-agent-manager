@@ -20,6 +20,22 @@ export interface FleetProviderCapability {
   models: string[];
 }
 
+/** Resolve an omitted fleet selection in the same catalog order as JIT launch. */
+export function resolvedFleetProviderModel(
+  selection: FleetProviderModel,
+  capabilities: FleetProviderCapability[],
+): FleetProviderModel {
+  if (selection.provider && selection.model) return { ...selection };
+  for (const capability of capabilities) {
+    if (selection.provider && selection.provider !== capability.provider) continue;
+    const model = selection.model
+      ? capability.models.find((model) => model === selection.model)
+      : capability.models[0];
+    if (model) return { provider: capability.provider, model };
+  }
+  return { ...selection };
+}
+
 /**
  * Provider/model options from a bridge providers payload. The live
  * GET /bridges/:id/provider-status is normalized to literal active model ids.
@@ -45,6 +61,7 @@ export function fleetProviderCapabilities(providersPayload: any): FleetProviderC
 }
 
 export interface ChangedFleetEntry {
+  bridgeModels?: Record<string, FleetProviderModel>;
   agentId: string;
   capacity: number;
   provider: string;
@@ -123,11 +140,7 @@ export function seedPerBridgeProviderModelDrafts(
     for (const b of bridges || []) {
       const bId = String(b.bridge_id || b.bridgeId || b.id || '');
       if (!bId) continue;
-      if (bId === preferredBridgeId || (!preferredBridgeId && (bridges || []).length === 1)) {
-        result[aid][bId] = { ...basePT };
-      } else {
-        result[aid][bId] = { provider: '', model: '' };
-      }
+      result[aid][bId] = { ...(f.bridge_models?.[bId] || basePT) };
     }
     if (preferredBridgeId && !result[aid][preferredBridgeId]) {
       result[aid][preferredBridgeId] = { ...basePT };
@@ -202,14 +215,28 @@ export function changedFleetEntries(
     const origCapacity = getOriginalFleetCapacity(rawFleets, aid);
     const origPT = getOriginalProviderModel(rawFleets, aid);
     const capacityChanged = origCapacity === null || effectiveCapacity !== origCapacity;
-    const providerChanged = draftPT !== undefined && draftPT.provider !== origPT.provider;
-    const tierChanged = draftPT !== undefined && draftPT.model !== origPT.model;
-    if (capacityChanged || providerChanged || tierChanged) {
+    const roleDraft = draftProviderModels[aid];
+    const perBridge = roleDraft && !('provider' in roleDraft) ? roleDraft as Record<string, FleetProviderModel> : undefined;
+    const originalFleet = (rawFleets || []).find((f) => fleetAgentId(f) === aid);
+    const bridgeChanged = perBridge && Object.entries(perBridge).some(([id, selection]) => {
+      const original = originalFleet?.bridge_models?.[id] || origPT;
+      return selection.provider !== original.provider || selection.model !== original.model;
+    });
+    const providerChanged = !perBridge && draftPT !== undefined && draftPT.provider !== origPT.provider;
+    const tierChanged = !perBridge && draftPT !== undefined && draftPT.model !== origPT.model;
+    if (capacityChanged || providerChanged || tierChanged || bridgeChanged) {
       list.push({
         agentId: aid,
         capacity: effectiveCapacity,
-        provider: draftPT ? draftPT.provider : origPT.provider,
-        model: draftPT ? draftPT.model : origPT.model,
+        provider: perBridge ? origPT.provider : draftPT ? draftPT.provider : origPT.provider,
+        model: perBridge ? origPT.model : draftPT ? draftPT.model : origPT.model,
+        ...(perBridge ? { bridgeModels: {
+          ...originalFleet?.bridge_models,
+          ...Object.fromEntries(Object.entries(perBridge).filter(([id, pt]) =>
+            pt.provider && pt.model && (originalFleet?.bridge_models?.[id] ||
+              pt.provider !== origPT.provider || pt.model !== origPT.model)
+          )),
+        } } : {}),
       });
     }
   }
@@ -289,6 +316,14 @@ export function providerModelModified(
   const draft = flat[agentId] ?? (draftProviderModels[agentId] && 'provider' in (draftProviderModels[agentId] as any) ? (draftProviderModels[agentId] as FleetProviderModel) : undefined);
   if (!draft) return false;
   const orig = getOriginalProviderModel(rawFleets, agentId);
+  const roleDraft = draftProviderModels[agentId];
+  if (roleDraft && !('provider' in roleDraft)) {
+    const fleet = (rawFleets || []).find((f) => fleetAgentId(f) === agentId);
+    return Object.entries(roleDraft).some(([id, pt]) => {
+      const original = fleet?.bridge_models?.[id] || orig;
+      return pt.provider !== original.provider || pt.model !== original.model;
+    });
+  }
   return draft.provider !== orig.provider || draft.model !== orig.model;
 }
 
@@ -311,6 +346,7 @@ export function restartAffectedEntries(
 }
 
 export interface FleetApplyRequest {
+  bridgeModels?: Record<string, FleetProviderModel>;
   agentId: string;
   capacity: number;
   provider: string;
@@ -336,6 +372,7 @@ export function fleetApplyRequests(
       provider: entry.provider,
       model: entry.model,
     };
+    if (entry.bridgeModels) request.bridgeModels = entry.bridgeModels;
     if (restartIds.has(entry.agentId)) request.restartLiveInstances = true;
     return request;
   });

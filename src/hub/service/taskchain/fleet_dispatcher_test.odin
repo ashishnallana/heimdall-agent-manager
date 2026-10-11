@@ -3595,3 +3595,78 @@ test_fsm_reviewer_auto_binding_and_jit_on_in_validation :: proc(t: ^testing.T) {
 
 
 
+
+@(test)
+test_fleet_reconcile_resolves_bridge_models_without_manual_configuration :: proc(t: ^testing.T) {
+	db_path := fmt.tprintf("/tmp/fleet_launch_defaults_%d.db", os.get_pid())
+	os.remove(db_path)
+	defer os.remove(db_path)
+	conn, opened, _ := sqlite.open(db_path)
+	if !testing.expect(t, opened) do return
+	defer sqlite.close(&conn)
+	migrated, _ := sqlite.run_migrations(&conn)
+	if !testing.expect(t, migrated) do return
+	tc_impl: sqlite.Taskchain_Repo_SQLite
+	tc_repo := sqlite.new_taskchain_repository(&tc_impl, &conn)
+	ag_impl: sqlite.Agent_Repo_SQLite
+	ag_repo := sqlite.new_agent_repository(&ag_impl, &conn)
+	br_impl: sqlite.Bridge_Repo_SQLite
+	br_repo := sqlite.new_bridge_repository(&br_impl, &conn)
+	co_impl: sqlite.Content_Repo_SQLite
+	co_repo := sqlite.new_content_repository(&co_impl, &conn)
+	provider_impl: sqlite.Provider_Repo_SQLite
+	providers := sqlite.new_provider_repository(&provider_impl, &conn)
+	owner := domain.User_ID("fleet_defaults_owner")
+	chain := domain.Task_Chain{chain_id="fleet_defaults_chain",owner_user_id=owner,title="Defaults",publish_state=.Published,status=.Active}
+	_, _, _ = iface.taskchain_save_chain(&tc_repo, chain)
+	_, _, _ = iface.bridge_save_bridge(&br_repo, domain.Bridge{bridge_id="fleet_defaults_bridge",owner_user_id=owner,status=.Online})
+	_, _, _ = iface.agent_save(&ag_repo, domain.Agent{agent_id="fleet_defaults_worker",owner_user_id=owner,name="Worker",slug="worker"})
+	_, _ = iface.bridge_provider_status_upsert(&providers, domain.Bridge_Provider_Status{bridge_id="fleet_defaults_bridge",provider="codex",state="present"})
+	_, _ = iface.bridge_provider_setting_upsert(&providers, domain.Bridge_Provider_Setting{bridge_id="fleet_defaults_bridge",provider="codex",enabled=true})
+	registry: project_service.Bridge_Runtime_Registry
+	project_service.bridge_runtime_registry_mark_live(&registry, "fleet_defaults_bridge", false, "")
+	sink := project_service.Bridge_Command_Sink{send_runtime_command=proc(ctx: rawptr, cmd: project_service.Runtime_Command) -> (bool, domain.Domain_Error) {return true, {}}}
+	clock := platform.real_clock()
+	ids := platform.real_id_generator()
+	ag_service := agent_service.new_agent_service_with_runtime(&ag_repo, &br_repo, nil, &co_repo, &tc_repo, sink, &registry, &clock, &ids)
+	ag_service.providers = &providers
+	svc := new_taskchain_service_with_runtime(&tc_repo, &ag_repo, sink, &clock, &ids)
+	svc.agent_service = &ag_service
+	task := domain.Task{task_id="fleet_defaults_task",chain_id=chain.chain_id,owner_user_id=owner,title="Work",status=.Queued,publish_state=.Published,assignee_ref_json=`{"type":"agent_id","agent_id":"fleet_defaults_worker"}`,reviewer_refs_json="[]",bridge_id="fleet_defaults_bridge"}
+	_, _, _ = iface.taskchain_save_task(&tc_repo, task)
+	_ = reconcile_chain(&svc, chain)
+	saved, found, _ := iface.taskchain_get_task(&tc_repo, task.task_id)
+	if !testing.expect(t, found) do return
+	iid := primary_assignee_instance(saved.assignee_ref_json)
+	defer delete(iid)
+	if !testing.expect(t, iid != "", "reconcile binds a concrete instance without a provider/model edit") do return
+	inst, exists, _ := iface.agent_get_instance(&ag_repo, iid)
+	testing.expect(t, exists)
+	testing.expect_value(t, inst.provider, "codex")
+	testing.expect_value(t, inst.model, "gpt-5.6-sol")
+	testing.expect_value(t, inst.bridge_id, "fleet_defaults_bridge")
+	fleet := domain.Task_Chain_Fleet{task_chain_id=chain.chain_id,agent_id="fleet_defaults_worker",capacity=2,bridge_models_json=`{"fleet_defaults_bridge":{"provider":"codex","model":"gpt-5.6-terra"}}`}
+	auth := contracts.Auth_Context{user_id=string(owner),kind=.User_Token}
+	_, save_err := upsert_fleet(&svc, auth, Upsert_Fleet_Input{chain_id=chain.chain_id,agent_id=fleet.agent_id,capacity=2,bridge_models_json=fleet.bridge_models_json})
+	testing.expect_value(t, save_err.code, domain.Error_Code.None)
+	preserved, preserve_err := upsert_fleet(&svc, auth, Upsert_Fleet_Input{chain_id=chain.chain_id,agent_id=fleet.agent_id,capacity=3})
+	testing.expect_value(t, preserve_err.code, domain.Error_Code.None)
+	testing.expect_value(t, preserved.bridge_models_json, fleet.bridge_models_json)
+	_, invalid_err := upsert_fleet(&svc, auth, Upsert_Fleet_Input{chain_id=chain.chain_id,agent_id=fleet.agent_id,capacity=2,bridge_models_json=`{"fleet_defaults_bridge":{"provider":"codex","model":"unknown"}}`})
+	testing.expect_value(t, invalid_err.code, domain.Error_Code.Unprocessable_Entity)
+	second_task := task
+	second_task.task_id = "fleet_defaults_second_task"
+	_, _, _ = iface.taskchain_save_task(&tc_repo, second_task)
+	_ = reconcile_chain(&svc, chain)
+	second_saved, _, _ := iface.taskchain_get_task(&tc_repo, second_task.task_id)
+	second := primary_assignee_instance(second_saved.assignee_ref_json)
+	defer delete(second)
+	if !testing.expect(t, second != "", "bridge-specific selection provisions") do return
+	second_inst, _, _ := iface.agent_get_instance(&ag_repo, second)
+	testing.expect_value(t, second_inst.model, "gpt-5.6-terra")
+	p, m := resolve_fleet_launch_model(&svc, "fleet_defaults_bridge", "claude", "pinned")
+	defer delete(p)
+	defer delete(m)
+	testing.expect_value(t, p, "claude")
+	testing.expect_value(t, m, "pinned")
+}
