@@ -986,3 +986,48 @@ Logs: `tail -f "$PREFIX/var/log/sv/ham-bridge/current"`. Status: `sv status ham-
 If the bridge reports `locked` after a restart (for example after Termux:API was
 reinstalled, which wipes its Keystore keys), unseal it again from
 **Settings → Bridges → Unseal**.
+
+### Self-update
+
+A Termux bridge updates only to the `termux-arm64` bundle. It never falls back to
+`linux-arm64`, because that glibc bundle dies under Android's seccomp filter
+(`set_robust_list`, SIGSYS) and leaves a bridge that cannot restart.
+
+- **Release target.** The termux bundle is built with
+  `-define:HAM_RELEASE_TARGET=termux-arm64`. Its bridge reports `target: termux-arm64`
+  in its hello, and the Hub stores it as `os: termux`, `arch: arm64`. A `linux-*` build
+  that finds itself under Termux also reports `termux-<arch>`, but it **refuses**
+  self-update: reinstall it with `install.sh`.
+- **Hub catalog.** The Hub resolves updates from the manifest at
+  `HEIMDALL_UPDATE_MANIFEST_PATH`. Add a `termux-arm64` entry under `targets` that
+  points to `heimdall-local-termux-arm64-<tag>.tar.gz` and gives its `SHA256SUMS`
+  digest:
+
+  ```json
+  {"version": "0.3.30", "targets": {
+    "linux-arm64":  {"tarball_url": ".../heimdall-local-linux-arm64-v0.3.30.tar.gz",  "sha256": "..."},
+    "termux-arm64": {"tarball_url": ".../heimdall-local-termux-arm64-v0.3.30.tar.gz", "sha256": "..."}}}
+  ```
+
+  If the manifest has no `termux-arm64` entry, **Settings → Bridges** shows
+  "v0.3.30 not available for termux-arm64" (`update_artifact_available: false`), and
+  starting an update is rejected with "not available for this target".
+- **Upgrade the Hub first.** Hubs at v0.3.29 or older do not know `termux-arm64`. They
+  refuse the hello of a newer Termux bridge with "unsupported bridge target", so the
+  bridge stays offline until the Hub is upgraded.
+- **Defence in depth.**
+  - The bridge refuses a `download_url` whose file name is another target's
+    `heimdall-local-<target>` bundle.
+  - Under Termux, `apply-bridge-update.sh` refuses any staged bundle whose
+    `METADATA.json` target is not `termux-*`, before it stops anything.
+  - The bridge runs the staged bundle's copy of that script, so this also covers
+    v0.3.29 Termux bridges, which still report `linux-arm64`.
+- **Service.** `apply-bridge-update.sh` drives the runit service with
+  `sv down` / `sv up "$PREFIX/var/service/ham-bridge"` and never calls `systemctl`.
+  `sv down` keeps runsv from restarting the old binary while it is being replaced.
+  On a failed health check it rolls back and runs `sv up` again.
+- **`heimdall update`.** Uses the same target. On GitHub it reports
+  "<tag> is not available for target termux-arm64" when the release has no termux
+  asset. On a `--hub` mirror it aborts when `SHA256SUMS` has no
+  `heimdall-local-termux-arm64.tar.gz` entry. It brackets the binary swap with
+  `sv down|up` instead of systemctl.

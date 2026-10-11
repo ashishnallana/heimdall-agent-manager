@@ -12,6 +12,8 @@ import {
   formatBridgeVersion,
   formatLatestVersion,
   isBridgeUpdating,
+  isUpdateUnavailableForTarget,
+  updateAvailabilityLabel,
   shouldWarnActiveTasks,
   getActiveTaskCount,
 } from '../src/ui/components/settings/bridgeUpdate.ts';
@@ -92,6 +94,31 @@ test('formatLatestVersion correctly formats latest version indicator', () => {
     'latest',
     'Should default to latest for null bridge',
   );
+});
+
+// REQ-T13-4: a release without a bundle for the bridge's target (e.g. a
+// termux-arm64 bridge on a release that only ships linux-arm64) is shown as
+// "not available for <target>", never as an installable update.
+test('update availability copy names the target when no bundle exists for it', () => {
+  const termux = { update_available: true, update_artifact_available: false, latest_version: '0.3.30', target: 'termux-arm64' };
+  assert.equal(isUpdateUnavailableForTarget(termux), true);
+  assert.equal(updateAvailabilityLabel(termux), 'v0.3.30 not available for termux-arm64');
+  assert.equal(
+    updateAvailabilityLabel({ ...termux, target: '' }),
+    'v0.3.30 not available for this target',
+  );
+  const installable = { ...termux, update_artifact_available: true };
+  assert.equal(isUpdateUnavailableForTarget(installable), false);
+  assert.equal(updateAvailabilityLabel(installable), 'Update available: v0.3.30');
+  // Hubs that predate the field omit it: keep the existing behaviour.
+  assert.equal(isUpdateUnavailableForTarget({ update_available: true }), false);
+  assert.equal(isUpdateUnavailableForTarget({ update_available: false, update_artifact_available: false }), false);
+  assert.equal(isUpdateUnavailableForTarget(null), false);
+
+  const panel = fs.readFileSync(BRIDGES_PANEL_PATH, 'utf8');
+  assert.match(panel, /data-debug-id=\{`settings-bridge-update-unavailable-\$\{id\}`\}/, 'unavailable badge has a debug id');
+  assert.match(panel, /data-debug-id=\{`settings-bridge-target-\$\{id\}`\}/, 'target is shown in the bridge row');
+  assert.match(fs.readFileSync(BRIDGE_SUPPORT_API_PATH, 'utf8'), /update_artifact_available\?: boolean/, 'Bridge type carries update_artifact_available');
 });
 
 test('isBridgeUpdating identifies active update stages', () => {

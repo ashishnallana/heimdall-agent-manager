@@ -17,6 +17,7 @@ import "core:crypto/hash"
 import "core:encoding/hex"
 import "core:fmt"
 import "core:os"
+import "core:strconv"
 import "core:strings"
 import "core:time"
 import contracts "odin_test:contracts"
@@ -66,7 +67,11 @@ Manager_Update_Plan :: struct {
 	unit:        string, // systemd user unit (Linux)
 	label:       string, // launchd label (Darwin)
 	plist_path:  string,
+	runit_dir:   string, // termux-services service dir (Termux); replaces unit when set
 }
+
+// The runit service install.sh creates on Termux ($PREFIX/var/service/<name>).
+MANAGER_RUNIT_SERVICE :: "ham-bridge"
 
 manager_print_update_usage :: proc() {
 	fmt.println("usage: heimdall update [--check] [--version <tag>] [--hub <url>]")
@@ -127,7 +132,30 @@ manager_update_build_plan :: proc(args: []string, platform: Manager_Platform) ->
 	}
 	plan.version = strings.trim_space(manager_option_value(args, "--version", ""))
 	plan.check_only = manager_has_flag(args, "--check")
-	plan.target = fmt.tprintf("%s-%s", manager_os_string(), manager_arch_string())
+	// REQ-T13-3: the same target resolution as the bridge. The termux bundle
+	// carries HAM_RELEASE_TARGET=termux-arm64; a linux build running under
+	// Termux must not fetch either bundle, since it cannot tell how it was
+	// installed. Never fall back from termux-* to linux-*: the glibc bundle
+	// dies on Android's seccomp filter.
+	termux_version := os.get_env("TERMUX_VERSION", context.temp_allocator)
+	prefix := os.get_env("PREFIX", context.temp_allocator)
+	on_termux := contracts.termux_env_detected(termux_version, prefix)
+	native := fmt.tprintf("%s-%s", manager_os_string(), manager_arch_string())
+	target, update_blocked := contracts.release_target_resolve(contracts.RELEASE_TARGET, native, on_termux)
+	if update_blocked {
+		fmt.eprintfln("heimdall update: this heimdall runs under Termux but is not the %s build; self-update is refused.", target)
+		fmt.eprintln("  Reinstall with install.sh, which installs the Termux bundle.")
+		return plan, false
+	}
+	plan.target = strings.clone(target)
+	if on_termux {
+		// termux-services supervises the bridge; there is no systemd here.
+		plan.runit_dir = fmt.aprintf("%s/var/service/%s", prefix, MANAGER_RUNIT_SERVICE)
+		if override := strings.trim_space(os.get_env("HEIMDALL_MANAGER_UPDATE_RUNIT_DIR", context.temp_allocator)); override != "" {
+			plan.runit_dir = strings.clone(override)
+		}
+		plan.unit = plan.runit_dir
+	}
 
 	config_path := manager_config_path(args)
 	plan.stage_root = fmt.tprintf("%s/updates", manager_dir_of(config_path))
@@ -174,10 +202,25 @@ Manager_Update_Release :: struct {
 	tarball_name: string,
 }
 
+// manager_update_tarball_name is the release asset for target, versioned for
+// GitHub releases (heimdall-local-<target>-<tag>.tar.gz), unversioned on a
+// mirror (tag == "").
+manager_update_tarball_name :: proc(target, tag: string) -> string {
+	if tag == "" do return fmt.tprintf("heimdall-local-%s.tar.gz", target)
+	return fmt.tprintf("heimdall-local-%s-%s.tar.gz", target, tag)
+}
+
+// manager_update_release_lists_asset reports whether a GitHub release JSON
+// body names asset among its files (a quoted exact file name).
+manager_update_release_lists_asset :: proc(release_json, asset: string) -> bool {
+	return strings.contains(release_json, fmt.tprintf("\"%s\"", asset))
+}
+
 // manager_update_fetch_latest_version queries the GitHub Releases manifest
-// for the newest (or pinned) release tag. ok=false means the caller must
-// abort; the error paths print diagnostics.
-manager_update_fetch_latest_version :: proc(plan: ^Manager_Update_Plan, pin: string) -> (string, bool) {
+// for the newest (or pinned) release tag, and whether that release ships the
+// bundle for plan.target (REQ-T13-3): (tag, has_target, ok). ok=false means
+// the caller must abort; the error paths print diagnostics.
+manager_update_fetch_latest_version :: proc(plan: ^Manager_Update_Plan, pin: string) -> (string, bool, bool) {
 	path := fmt.tprintf("/repos/%s/releases/latest", MANAGER_UPDATE_GITHUB_REPO)
 	if pin != "" {
 		path = fmt.tprintf("/repos/%s/releases/tags/%s", MANAGER_UPDATE_GITHUB_REPO, pin)
@@ -187,7 +230,7 @@ manager_update_fetch_latest_version :: proc(plan: ^Manager_Update_Plan, pin: str
 	resp, ok := http.request_with_headers_timeout("GET", MANAGER_UPDATE_API_BASE, path, "", headers[:], MANAGER_UPDATE_MANIFEST_TIMEOUT_MS)
 	if !ok {
 		fmt.eprintfln("heimdall update: could not reach %s (no HTTP response) — check network/proxy", MANAGER_UPDATE_API_BASE)
-		return "", false
+		return "", false, false
 	}
 	defer delete(resp.body)
 	switch resp.status {
@@ -195,19 +238,20 @@ manager_update_fetch_latest_version :: proc(plan: ^Manager_Update_Plan, pin: str
 		tag := manager_extract_json_string(resp.body, "tag_name", "")
 		if tag == "" {
 			fmt.eprintln("heimdall update: release manifest has no tag_name — aborting")
-			return "", false
+			return "", false, false
 		}
-		return strings.clone(tag), true
+		has_target := manager_update_release_lists_asset(resp.body, manager_update_tarball_name(plan.target, tag))
+		return strings.clone(tag), has_target, true
 	case 404:
 		if pin != "" {
 			fmt.eprintfln("heimdall update: release %q not found on %s", pin, MANAGER_UPDATE_GITHUB_REPO)
 		} else {
 			fmt.eprintfln("heimdall update: no published release found on %s yet — nothing to update to", MANAGER_UPDATE_GITHUB_REPO)
 		}
-		return "", false
+		return "", false, false
 	case:
 		fmt.eprintfln("heimdall update: manifest request failed with HTTP %d — %s", resp.status, resp.body)
-		return "", false
+		return "", false, false
 	}
 }
 
@@ -215,16 +259,21 @@ manager_update_resolve_release :: proc(plan: ^Manager_Update_Plan) -> (Manager_U
 	release := Manager_Update_Release{}
 	switch plan.source.kind {
 	case .GitHub:
-		tag, ok := manager_update_fetch_latest_version(plan, plan.version)
+		tag, has_target, ok := manager_update_fetch_latest_version(plan, plan.version)
 		if !ok do return release, false
+		if !has_target && !manager_update_versions_equal(tag, contracts.APP_VERSION) {
+			fmt.eprintfln("heimdall update: release %s is not available for target %s — nothing to install", tag, plan.target)
+			delete(tag)
+			return release, false
+		}
 		release.version = tag
-		release.tarball_name = fmt.tprintf("heimdall-local-%s-%s.tar.gz", plan.target, tag)
+		release.tarball_name = manager_update_tarball_name(plan.target, tag)
 		base := fmt.tprintf("%s/%s/releases/download/%s", MANAGER_UPDATE_DOWNLOAD_BASE, MANAGER_UPDATE_GITHUB_REPO, tag)
 		release.tarball_url = fmt.tprintf("%s/%s", base, release.tarball_name)
 		release.sums_url = fmt.tprintf("%s/SHA256SUMS", base)
 	case .Mirror:
 		release.version = plan.version
-		release.tarball_name = fmt.tprintf("heimdall-local-%s.tar.gz", plan.target)
+		release.tarball_name = manager_update_tarball_name(plan.target, "")
 		release.tarball_url = fmt.tprintf("%s/%s", plan.source.mirror_base, release.tarball_name)
 		release.sums_url = fmt.tprintf("%s/SHA256SUMS", plan.source.mirror_base)
 	}
@@ -239,12 +288,17 @@ manager_update_check :: proc(plan: ^Manager_Update_Plan) -> int {
 	fmt.printfln("  current version: %s", contracts.APP_VERSION)
 	switch plan.source.kind {
 	case .GitHub:
-		tag, ok := manager_update_fetch_latest_version(plan, plan.version)
+		tag, has_target, ok := manager_update_fetch_latest_version(plan, plan.version)
 		if !ok do return 1
 		defer delete(tag)
+		fmt.printfln("  target:          %s", plan.target)
 		fmt.printfln("  latest release:  %s", tag)
 		if manager_update_versions_equal(tag, contracts.APP_VERSION) {
 			fmt.println("  status:          up to date")
+			return 0
+		}
+		if !has_target {
+			fmt.printfln("  status:          %s is not available for target %s", tag, plan.target)
 			return 0
 		}
 		fmt.println("  status:          update available (run: heimdall update)")
@@ -330,6 +384,22 @@ manager_update_prepare_stage_inner :: proc(plan: ^Manager_Update_Plan, release: 
 		return false
 	}
 
+	sums_data, serr := os.read_entire_file(sums_path, context.allocator)
+	if serr != nil {
+		fmt.eprintln("heimdall update: cannot read downloaded SHA256SUMS — aborting")
+		return false
+	}
+	defer delete(sums_data)
+	// REQ-T13-3: a release without this target's bundle is "not available for
+	// this target". Checked before the tarball download, and never retried
+	// with another target's bundle.
+	expected := manager_update_parse_checksum(string(sums_data), release.tarball_name)
+	if expected == "" {
+		fmt.eprintfln("heimdall update: release %s is not available for target %s (SHA256SUMS has no entry for %s) — aborting", release.version if release.version != "" else "(mirror)", plan.target, release.tarball_name)
+		return false
+	}
+	defer delete(expected)
+
 	fmt.printfln("heimdall update: downloading %s", release.tarball_url)
 	status, dl_ok = http.download_to_file(release.tarball_url, tarball_path, MANAGER_UPDATE_TIMEOUT_MS)
 	if !dl_ok || status != 200 {
@@ -340,18 +410,6 @@ manager_update_prepare_stage_inner :: proc(plan: ^Manager_Update_Plan, release: 
 	// Verify the checksum BEFORE anything is extracted (fail-closed, the same
 	// contract as install.sh: a corrupt or hostile tarball never reaches the
 	// filesystem as an installed binary).
-	sums_data, serr := os.read_entire_file(sums_path, context.allocator)
-	if serr != nil {
-		fmt.eprintln("heimdall update: cannot read downloaded SHA256SUMS — aborting")
-		return false
-	}
-	defer delete(sums_data)
-	expected := manager_update_parse_checksum(string(sums_data), release.tarball_name)
-	if expected == "" {
-		fmt.eprintfln("heimdall update: SHA256SUMS has no entry for %s — aborting before extraction", release.tarball_name)
-		return false
-	}
-	defer delete(expected)
 	actual, hash_ok := manager_update_sha256_hex(tarball_path)
 	if !hash_ok {
 		fmt.eprintln("heimdall update: cannot hash downloaded tarball — aborting")
@@ -509,12 +567,62 @@ manager_update_swap_all :: proc(plan: ^Manager_Update_Plan, bundle_bin: string, 
 // ---- service stop/start around the swap ----
 
 manager_update_service_state :: proc(plan: ^Manager_Update_Plan) -> Manager_Service_State {
+	if plan.runit_dir != "" {
+		out, _, ok := manager_run_capture({"sv", "status", plan.runit_dir})
+		defer if out != "" do delete(out)
+		return manager_parse_sv_status(out, ok)
+	}
 	return manager_service_state(plan.platform, plan.unit, plan.label, plan.plist_path)
+}
+
+// manager_runit_verb_argv maps the lifecycle verbs onto termux-services.
+// `sv down` (not a plain kill) keeps runsv from respawning the old binary while
+// it is being swapped; `sv up` brings it back.
+manager_runit_verb_argv :: proc(verb, runit_dir: string) -> []string {
+	sv_verb: string
+	switch verb {
+	case "stop":
+		sv_verb = "down"
+	case "start":
+		sv_verb = "up"
+	case "restart":
+		sv_verb = "restart"
+	case:
+		return nil
+	}
+	argv := make([dynamic]string, 0, 3)
+	append(&argv, "sv", sv_verb, runit_dir)
+	return argv[:]
+}
+
+// manager_parse_sv_status reads runit's `sv status` line, e.g.
+// "run: /…/ham-bridge: (pid 123) 45s; run: log: (pid 98) 300s" or
+// "down: /…/ham-bridge: 3s, normally up".
+manager_parse_sv_status :: proc(out: string, ok: bool) -> Manager_Service_State {
+	state := Manager_Service_State{detail = "unavailable"}
+	if !ok do return state
+	line := strings.trim_space(out)
+	if nl := strings.index_byte(line, '\n'); nl >= 0 do line = line[:nl]
+	state.loaded = strings.has_prefix(line, "run:") || strings.has_prefix(line, "down:") || strings.has_prefix(line, "finish:")
+	state.active = strings.has_prefix(line, "run:")
+	state.detail = "active" if state.active else "inactive"
+	if i := strings.index(line, "(pid "); i >= 0 {
+		rest := line[i + len("(pid "):]
+		if j := strings.index_byte(rest, ')'); j > 0 {
+			if pid, pok := strconv.parse_int(rest[:j], 10); pok do state.pid = pid
+		}
+	}
+	return state
 }
 
 manager_update_service_verb :: proc(plan: ^Manager_Update_Plan, verb: string) -> bool {
 	state := manager_update_service_state(plan)
-	argv := manager_service_verb_argv(verb, plan.unit, plan.label, plan.plist_path, plan.platform, manager_current_uid(), state.loaded)
+	argv: []string
+	if plan.runit_dir != "" {
+		argv = manager_runit_verb_argv(verb, plan.runit_dir)
+	} else {
+		argv = manager_service_verb_argv(verb, plan.unit, plan.label, plan.plist_path, plan.platform, manager_current_uid(), state.loaded)
+	}
 	if len(argv) == 0 {
 		fmt.eprintfln("heimdall update: no service command for %q on this platform", verb)
 		return false

@@ -728,10 +728,10 @@ send_bridge_update :: proc(
 	}
 
 	info := resolve_bridge_update_info(service.catalog, bridge)
-	if strings.trim_space(info.download_url) == "" || strings.trim_space(info.sha256) == "" {
+	if !info.artifact_available {
 		return "", false, domain.domain_error(
 			.Validation_Failed,
-			fmt.tprintf("no verified update artifact is available for bridge target %s", info.target),
+			fmt.tprintf("update %s is not available for this target (%s): no verified update artifact", info.latest_version, info.target),
 		)
 	}
 	effective_version := target_version

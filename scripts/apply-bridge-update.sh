@@ -82,7 +82,7 @@ while [[ $# -gt 0 ]]; do
       echo "  --bridge-port PORT    Port bridge listens on for health check (default: 49323)"
       echo "  --hub-url URL         Central Hub URL"
       echo "  --health-timeout SEC  Healthcheck probe timeout in seconds (default: 30)"
-      echo "  --service-name NAME   Systemd unit or launchd label (auto-detected by default)"
+      echo "  --service-name NAME   Systemd unit, launchd label or Termux runit service (auto-detected by default)"
       echo "  --bridge-pid PID      Exact bridge process to stop"
       echo "  --pty-host-socket PATH  Bridge-owned PTY daemon socket"
       echo "  --stop-pty-hosts-only   Only clean up this bridge’s PTY hosts"
@@ -127,6 +127,16 @@ log() {
 
 log_err() {
   printf '[apply-bridge-update] [%s] ERROR: %s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$*" >&2
+}
+
+# Termux (Android) exports TERMUX_VERSION and keeps $PREFIX in the app's data
+# dir (same test as install.sh). There is no systemd there: install.sh
+# registers the bridge as the termux-services (runit) service
+# $PREFIX/var/service/ham-bridge, so the service is driven with `sv`.
+is_termux() {
+  [ -n "${TERMUX_VERSION:-}" ] && return 0
+  case "${PREFIX:-}" in /data/data/com.termux|/data/data/com.termux/*) return 0 ;; esac
+  return 1
 }
 
 # Stop only this bridge's hosts, including old unlinked binaries, and their
@@ -271,9 +281,34 @@ for binary in ham-bridge ham-ctl heimdall ham-pty-host; do
   fi
 done
 
+# REQ-T13-3: under Termux only a termux-* bundle may be installed. The glibc
+# linux-* bundle dies on Android's seccomp filter (set_robust_list -> SIGSYS),
+# so installing it would leave a bridge that can never restart. The bridge runs
+# the staged bundle's copy of this script, so this also protects bridges that
+# predate the termux release target and still ask the Hub for linux-arm64.
+# A bundle without METADATA.json is refused too: its target cannot be proven.
+if is_termux; then
+  staged_target="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("target", ""))' \
+    "$STAGE_BIN/../METADATA.json" 2>/dev/null || true)"
+  case "$staged_target" in
+    termux-*) log "  BUNDLE_TARGET:  $staged_target" ;;
+    *)
+      log_err "Refusing to install the ${staged_target:-unidentified} bundle under Termux; only termux-* bundles run on Android. Reinstall with install.sh."
+      exit 1
+      ;;
+  esac
+fi
+
 # Resolve the owning service before stopping the bridge. Older installations do
 # not export HEIMDALL_BRIDGE_SERVICE_NAME; match the installed executable instead
 # of assuming the legacy unit name. A renamed bridge-id service works unchanged.
+# On Termux the runit run file is matched the same way (install.sh writes it to
+# exec the installed ham-bridge).
+RUNIT_DIR=''
+if [ -z "$SERVICE_NAME" ] && [ -z "$RESTART_HOOK" ] && is_termux && [ -n "${PREFIX:-}" ] \
+  && grep -Fqs -- "$DATA_DIR/bin/ham-bridge" "$PREFIX/var/service/ham-bridge/run"; then
+  SERVICE_NAME=ham-bridge
+fi
 if [ -z "$SERVICE_NAME" ] && [ -z "$RESTART_HOOK" ]; then
   SERVICE_NAME="$(python3 - "$DATA_DIR" <<'PY_SERVICE'
 import pathlib, plistlib, shlex, sys
@@ -304,7 +339,12 @@ log "  SERVICE_NAME:   ${SERVICE_NAME:-standalone}"
 
 # Fail before stopping or replacing anything if an explicitly managed service
 # cannot be found. Never relaunch its binary without its config and credentials.
-if [ -n "$SERVICE_NAME" ] && [ -z "$RESTART_HOOK" ]; then
+if [ -n "$SERVICE_NAME" ] && [ -z "$RESTART_HOOK" ] && is_termux; then
+  RUNIT_DIR="${PREFIX:-}/var/service/$SERVICE_NAME"
+  command -v sv >/dev/null || { log_err "termux-services (sv) not found; cannot manage $SERVICE_NAME"; exit 1; }
+  [ -f "$RUNIT_DIR/run" ] || { log_err "Managed runit service not found: $RUNIT_DIR"; exit 1; }
+  log "  RUNIT_DIR:      $RUNIT_DIR"
+elif [ -n "$SERVICE_NAME" ] && [ -z "$RESTART_HOOK" ]; then
   if [[ "$(uname -s)" = Darwin ]]; then
     launchctl print "gui/$(id -u)/$SERVICE_NAME" >/dev/null
   else
@@ -331,7 +371,13 @@ stop_service() {
     [ -x "$STOP_HOOK" ] || { log_err "Stop hook is not executable: $STOP_HOOK"; return 1; }
     "$STOP_HOOK" "$BRIDGE_PID"
   elif [[ "$BRIDGE_PID" =~ ^[1-9][0-9]*$ ]]; then
-    kill -TERM "$BRIDGE_PID" 2>/dev/null || true
+    # Under runit, `sv down` (which TERMs the supervised bridge) also keeps
+    # runsv from respawning the old binary while it is being replaced.
+    if [ -n "$RUNIT_DIR" ]; then
+      sv down "$RUNIT_DIR" || kill -TERM "$BRIDGE_PID" 2>/dev/null || true
+    else
+      kill -TERM "$BRIDGE_PID" 2>/dev/null || true
+    fi
     deadline=$((SECONDS + 10))
     while bridge_pid_running "$BRIDGE_PID" && [ "$SECONDS" -lt "$deadline" ]; do
       sleep 0.1
@@ -340,6 +386,8 @@ stop_service() {
       log_err "Bridge PID $BRIDGE_PID did not exit after SIGTERM"
       return 1
     fi
+  elif [ -n "$RUNIT_DIR" ]; then
+    sv down "$RUNIT_DIR"
   elif [ -n "$SERVICE_NAME" ] && [[ "$(uname -s)" = Darwin ]]; then
     launchctl kill SIGTERM "gui/$(id -u)/$SERVICE_NAME"
   elif [ -n "$SERVICE_NAME" ]; then
@@ -356,6 +404,8 @@ start_service() {
   if [ -n "$RESTART_HOOK" ]; then
     [ -x "$RESTART_HOOK" ] || { log_err "Restart hook is not executable: $RESTART_HOOK"; return 1; }
     "$RESTART_HOOK"
+  elif [ -n "$RUNIT_DIR" ]; then
+    sv up "$RUNIT_DIR"
   elif [ -n "$SERVICE_NAME" ] && [[ "$(uname -s)" = Darwin ]]; then
     launchctl kickstart -k "gui/$(id -u)/$SERVICE_NAME"
   elif [ -n "$SERVICE_NAME" ]; then

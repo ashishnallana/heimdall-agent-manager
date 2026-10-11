@@ -1404,6 +1404,23 @@ bridge_hub_handle_update_command :: proc(conn: ^ws.Connection, text: string) {
 	}
 }
 
+// bridge_update_target_refusal returns why this bridge must not apply the
+// bundle at download_url, or "" when it may (temp-allocated).
+bridge_update_target_refusal :: proc(download_url: string) -> string {
+	target, blocked := bridge_release_target()
+	return bridge_update_target_refusal_for(target, blocked, download_url)
+}
+
+bridge_update_target_refusal_for :: proc(target: string, update_blocked: bool, download_url: string) -> string {
+	if update_blocked {
+		return fmt.tprintf("self-update refused: this bridge runs under Termux but is not the %s build; reinstall with install.sh to get the %s bundle", target, target)
+	}
+	if contracts.release_asset_names_other_target(download_url, target) {
+		return fmt.tprintf("self-update refused: the offered bundle is not built for this bridge's target %s", target)
+	}
+	return ""
+}
+
 bridge_runtime_apply_update :: proc(
 	conn: ^ws.Connection,
 	command_id, target_version, download_url, sha256: string,
@@ -1412,6 +1429,12 @@ bridge_runtime_apply_update :: proc(
 ) -> (bool, string) {
 	if strings.trim_space(download_url) == "" {
 		return false, "missing download_url"
+	}
+	// REQ-T13-1: refuse before draining or downloading anything. Installing a
+	// bundle for another target would leave the bridge unable to start (the
+	// glibc linux-* bundle dies on Android's seccomp filter) with no way back.
+	if refusal := bridge_update_target_refusal(download_url); refusal != "" {
+		return false, refusal
 	}
 
 	// 1. Drain active tasks if not forced
@@ -3331,8 +3354,20 @@ bridge_arch_string :: proc() -> string {
 	}
 }
 
+// bridge_target_string is the release target this bridge reports to the Hub
+// and updates from (REQ-T13-1): the compile-time HAM_RELEASE_TARGET (the
+// termux-arm64 bundle), else <os>-<arch>. A linux-* build running under Termux
+// reports termux-<arch> so the Hub never resolves the glibc bundle for it.
 bridge_target_string :: proc() -> string {
-	return fmt.tprintf("%s-%s", bridge_os_string(), bridge_arch_string())
+	target, _ := bridge_release_target()
+	return target
+}
+
+// bridge_release_target also reports whether self-update must be refused
+// because this binary was not built for the platform it runs on.
+bridge_release_target :: proc() -> (target: string, update_blocked: bool) {
+	native := fmt.tprintf("%s-%s", bridge_os_string(), bridge_arch_string())
+	return contracts.release_target_resolve(contracts.RELEASE_TARGET, native, keystore_android_selected())
 }
 
 bridge_hub_hello_json :: proc() -> string {

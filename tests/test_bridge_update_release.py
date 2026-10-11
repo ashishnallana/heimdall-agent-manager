@@ -23,7 +23,7 @@ class BridgeUpdateReleaseTests(unittest.TestCase):
         for path in (self.home, self.data/'bin', self.stage/'bin', self.mock):
             path.mkdir(parents=True, exist_ok=True)
         self.env = dict(os.environ, HOME=str(self.home), PATH=str(self.mock)+':'+os.environ['PATH'])
-        for key in ('SERVICE_NAME', 'HEIMDALL_BRIDGE_SERVICE_NAME', 'RESTART_HOOK', 'STOP_HOOK', 'BRIDGE_PID'):
+        for key in ('SERVICE_NAME', 'HEIMDALL_BRIDGE_SERVICE_NAME', 'RESTART_HOOK', 'STOP_HOOK', 'BRIDGE_PID', 'TERMUX_VERSION', 'PREFIX'):
             self.env.pop(key, None)
         self.log = self.root/'commands.jsonl'
         self.env['UPDATE_TEST_LOG'] = str(self.log)
@@ -106,6 +106,96 @@ with open(os.environ['UPDATE_TEST_LOG'], 'a') as f: f.write(json.dumps(sys.argv[
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertFalse(self.log.exists())
         self.assertTrue(self.shim.exists())
+
+    # REQ-T13-3: Termux has no systemd. The bridge is the termux-services
+    # (runit) service $PREFIX/var/service/ham-bridge, driven with sv.
+    def termux(self):
+        prefix = self.root/'termux-prefix'
+        runit = prefix/'var/service/ham-bridge'
+        runit.mkdir(parents=True)
+        self.write(runit/'run', '#!/bin/sh\nexec "'+str(self.data/'bin/ham-bridge')+'" --hub https://hub.example\n')
+        self.stub('sv', """#!/usr/bin/env python3
+import json, os, sys
+with open(os.environ['UPDATE_TEST_LOG'], 'a') as f: f.write(json.dumps(['sv']+sys.argv[1:])+'\\n')
+""")
+        self.stub('systemctl', """#!/usr/bin/env python3
+import json, os, sys
+with open(os.environ['UPDATE_TEST_LOG'], 'a') as f: f.write(json.dumps(['systemctl']+sys.argv[1:])+'\\n')
+sys.exit(1)
+""")
+        (self.stage/'METADATA.json').write_text(json.dumps({'product': 'heimdall-local', 'target': 'termux-arm64'}))
+        return runit, dict(TERMUX_VERSION='0.118.0', PREFIX=str(prefix))
+
+    def test_termux_refuses_non_termux_bundle_before_stopping(self):
+        _, env = self.termux()
+        old = (self.data/'bin/ham-bridge').read_bytes()
+        for metadata in ({'target': 'linux-arm64'}, None):
+            with self.subTest(metadata=metadata):
+                if metadata is None:
+                    (self.stage/'METADATA.json').unlink()
+                else:
+                    (self.stage/'METADATA.json').write_text(json.dumps(metadata))
+                result = self.apply(HEIMDALL_BRIDGE_SERVICE_NAME='ham-bridge', **env)
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn('only termux-* bundles run on Android', result.stdout)
+                self.assertEqual((self.data/'bin/ham-bridge').read_bytes(), old)
+                self.assertFalse(self.log.exists(), 'service never touched')
+
+    def test_linux_ignores_bundle_target_metadata(self):
+        (self.stage/'METADATA.json').write_text(json.dumps({'target': 'linux-amd64'}))
+        result = self.apply()
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_termux_runit_service_restarts_with_sv_never_systemctl(self):
+        runit, env = self.termux()
+        result = self.apply(HEIMDALL_BRIDGE_SERVICE_NAME='ham-bridge', **env)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        commands = self.commands()
+        self.assertEqual(commands, [['sv', 'down', str(runit)], ['sv', 'up', str(runit)]])
+        self.assertEqual(subprocess.check_output([str(self.data/'bin/ham-bridge')], text=True).strip(), 'new')
+
+    def test_termux_runit_service_is_discovered_from_run_file(self):
+        runit, env = self.termux()
+        result = self.apply(**env)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn('SERVICE_NAME:   ham-bridge', result.stdout)
+        self.assertEqual(self.commands(), [['sv', 'down', str(runit)], ['sv', 'up', str(runit)]])
+
+    def test_termux_rollback_uses_sv(self):
+        runit, env = self.termux()
+        old = (self.data/'bin/ham-bridge').read_bytes()
+        result = self.apply(HEIMDALL_BRIDGE_SERVICE_NAME='ham-bridge', UPDATE_TEST_HTTP='503', **env)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertEqual((self.data/'bin/ham-bridge').read_bytes(), old)
+        commands = self.commands()
+        self.assertFalse([c for c in commands if c[0] == 'systemctl'], commands)
+        self.assertEqual(commands.count(['sv', 'up', str(runit)]), 2)
+
+    def test_termux_missing_runit_service_fails_before_replacing_binaries(self):
+        runit, env = self.termux()
+        (runit/'run').unlink()
+        old = (self.data/'bin/ham-bridge').read_bytes()
+        result = self.apply(HEIMDALL_BRIDGE_SERVICE_NAME='ham-bridge', **env)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn('Managed runit service not found', result.stdout)
+        self.assertEqual((self.data/'bin/ham-bridge').read_bytes(), old)
+        self.assertFalse(self.log.exists())
+
+    def test_termux_bridge_pid_is_stopped_through_sv_down(self):
+        runit, env = self.termux()
+        bridge = subprocess.Popen(['sleep', '30'])
+        self.addCleanup(bridge.kill)
+        # The sv stub records the call; a real `sv down` TERMs the supervised
+        # bridge, which the stub emulates by killing the PID it was given.
+        self.stub('sv', """#!/usr/bin/env python3
+import json, os, signal, sys
+with open(os.environ['UPDATE_TEST_LOG'], 'a') as f: f.write(json.dumps(['sv']+sys.argv[1:])+'\\n')
+if sys.argv[1] == 'down': os.kill(int(os.environ['BRIDGE_PID']), signal.SIGTERM)
+""")
+        result = self.apply(HEIMDALL_BRIDGE_SERVICE_NAME='ham-bridge', BRIDGE_PID=str(bridge.pid), **env)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(self.commands()[0], ['sv', 'down', str(runit)])
+        self.assertEqual(bridge.wait(timeout=5), -15)
 
     def start_host(self, binary, socket, marker):
         source = """#!/usr/bin/env python3

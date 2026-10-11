@@ -136,6 +136,10 @@
       # Built for linux_arm64 from either Linux host (Odin cross-codegens
       # natively; the wrapper is pkgsCross, the same set mkReleasePtyHost uses).
       # The linux-* release attrs above stay glibc-static and untouched.
+      # HAM_RELEASE_TARGET=termux-arm64 (src/contracts/release_target.odin) makes
+      # the bridge hello, Hub update catalog and `heimdall update` resolve the
+      # termux bundle instead of linux-arm64, whose glibc dies under Android's
+      # seccomp filter (REQ-T13-1).
       mkTermuxOdinPackage = pkgs: odin: name: srcDir:
         let
           muslCc = pkgs.pkgsCross.aarch64-multiplatform-musl.stdenv.cc;
@@ -151,8 +155,8 @@
             runHook preBuild
             mkdir -p $out/bin
             ODIN_CLANG_PATH=${muslCc}/bin/${muslCc.targetPrefix}cc \
-              odin build ${srcDir} -target:linux_arm64 -collection:odin_test=src -define:HAM_APP_VERSION=${appVersion} -out:$out/bin/${name} \
-              -extra-linker-flags:"-static -no-pie"
+              odin build ${srcDir} -target:linux_arm64 -collection:odin_test=src -define:HAM_APP_VERSION=${appVersion} -define:HAM_RELEASE_TARGET=termux-arm64 \
+              -out:$out/bin/${name} -extra-linker-flags:"-static -no-pie"
             runHook postBuild
           '';
         };

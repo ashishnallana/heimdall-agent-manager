@@ -48,6 +48,7 @@ import "core:os"
 import "core:strings"
 import "core:sync"
 import "core:time"
+import contracts "odin_test:contracts"
 
 KEYSTORE_ANDROID_TOOL          :: "termux-keystore"
 KEYSTORE_ANDROID_ALIAS_PREFIX  :: "heimdall-bridge-"
@@ -101,8 +102,7 @@ keystore_android_mem_remember :: proc(bridge_id, key_hex: string) -> bool {
 // keystore_android_env_says_termux: TERMUX_VERSION is set (termux-exec exports it
 // to every Termux process) or $PREFIX lives in the Termux app's data directory.
 keystore_android_env_says_termux :: proc(termux_version, prefix: string) -> bool {
-	if strings.trim_space(termux_version) != "" do return true
-	return strings.has_prefix(prefix, "/data/data/com.termux/") || prefix == "/data/data/com.termux"
+	return contracts.termux_env_detected(termux_version, prefix)
 }
 
 keystore_android_selected :: proc() -> bool {

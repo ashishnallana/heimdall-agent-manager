@@ -31,6 +31,10 @@ Bridge_Update_Info :: struct {
 	target:            string,
 	download_url:      string,
 	sha256:            string,
+	// artifact_available is false when the catalog has no verified bundle for
+	// target (REQ-T13-2). There is never a fallback to another target: a
+	// termux-arm64 bridge given the glibc linux-arm64 bundle cannot start.
+	artifact_available: bool,
 }
 
 Bridge_Update_Catalog :: struct {
@@ -56,6 +60,10 @@ normalize_bridge_target :: proc(os_name, arch_name: string) -> string {
 // while older clients may still send separate os/arch values. Only targets for
 // which release artifacts exist are accepted; display strings such as
 // "Linux 6.18.49 amd64" must never become artifact lookup keys.
+//
+// termux-* is its own platform (os "termux"), not linux: the Termux bundle is
+// a static-musl build and the glibc linux-* bundle dies under Android's
+// seccomp filter, so the stored machine_os must keep the two apart.
 canonical_bridge_platform :: proc(os_name, arch_name, target: string) -> (canonical_os, canonical_arch: string, ok: bool) {
 	candidate := strings.to_lower(strings.trim_space(target), context.temp_allocator)
 	if candidate == "" {
@@ -70,6 +78,8 @@ canonical_bridge_platform :: proc(os_name, arch_name, target: string) -> (canoni
 		return "darwin", "amd64", true
 	case "darwin-arm64", "darwin-aarch64":
 		return "darwin", "arm64", true
+	case "termux-arm64", "termux-aarch64":
+		return "termux", "arm64", true
 	}
 	return "", "", false
 }
@@ -194,6 +204,10 @@ resolve_bridge_update_info :: proc(catalog: ^Bridge_Update_Catalog, bridge: doma
 		}
 	}
 
+	// update_available still means "a newer release exists"; artifact_available
+	// says whether that release can be installed on this target. Together they
+	// let the UI say "not available for this target" instead of "up to date".
+	artifact_available := strings.trim_space(download_url) != "" && strings.trim_space(sha256) != ""
 	avail := is_bridge_update_available(bridge.version, bridge.commit_sha, latest_version, latest_commit_sha)
 
 	return Bridge_Update_Info{
@@ -203,5 +217,6 @@ resolve_bridge_update_info :: proc(catalog: ^Bridge_Update_Catalog, bridge: doma
 		target = target,
 		download_url = download_url,
 		sha256 = sha256,
+		artifact_available = artifact_available,
 	}
 }

@@ -233,6 +233,23 @@ def test_tarball_without_pty_host(ctx):
         f'METADATA.json binaries mismatch: {metadata["binaries"]}')
 
 
+def test_termux_build_carries_release_target(ctx):
+    """T13: only the termux Odin builds define HAM_RELEASE_TARGET=termux-arm64.
+
+    Without it the termux bundle reports linux-arm64 and self-updates to the
+    glibc bundle, which dies under Android's seccomp (REQ-T13-1)."""
+    flake = (ROOT/'flake.nix').read_text()
+    def block(name):
+        start = flake.index(f'      {name} = ')
+        end = flake.index('\n\n', start)
+        return flake[start:end]
+    termux = block('mkTermuxOdinPackage')
+    assert '-define:HAM_RELEASE_TARGET=termux-arm64' in termux, termux
+    assert 'HAM_RELEASE_TARGET' not in block('mkReleaseOdinPackage'), 'linux/darwin builds keep the native target'
+    contracts = (ROOT/'src/contracts/release_target.odin').read_text()
+    assert '#config(HAM_RELEASE_TARGET, "")' in contracts, 'define name matches the contracts #config'
+
+
 def test_termux_tarball_target(ctx):
     """T12: termux-arm64 is a release target with the linux-* layout."""
     base = ctx['work'] / 'termux-tarball'
@@ -5076,6 +5093,7 @@ def main() -> int:
          test_release_tarball_is_portable),
         ('storeless execution gate has teeth (REQ-INST-16)', test_storeless_exec_has_teeth),
         ('termux-arm64 tarball target (T12)', test_termux_tarball_target),
+        ('termux build carries its release target (T13)', test_termux_build_carries_release_target),
         ('seccomp probe denylist is bionic-verified (T12)',
          test_seccomp_probe_denylist_is_bionic_verified),
         ('seccomp probe never passes untraced (T12)', test_seccomp_probe_never_passes_untraced),

@@ -245,3 +245,53 @@ test_bridge_update_catalog_tracking_allocator_clean :: proc(t: ^testing.T) {
 		testing.fail_now(t, "Bad free detected in bridge update catalog resolution")
 	}
 }
+
+// REQ-T13-2: termux-arm64 is its own platform. Its hello is accepted, stored as
+// os "termux", and resolved to the termux bundle only -- never to linux-arm64.
+@(test)
+test_bridge_update_catalog_termux_target_never_falls_back_to_linux :: proc(t: ^testing.T) {
+	os_name, arch_name, ok := canonical_bridge_platform("", "", "termux-arm64")
+	testing.expect(t, ok, "termux-arm64 hello target accepted")
+	testing.expect_value(t, os_name, "termux")
+	testing.expect_value(t, arch_name, "arm64")
+	os_name, arch_name, ok = canonical_bridge_platform("linux", "aarch64", "Termux-AArch64")
+	testing.expect(t, ok, "termux-aarch64 spelling accepted and authoritative over os/arch")
+	testing.expect_value(t, os_name, "termux")
+	testing.expect_value(t, arch_name, "arm64")
+	testing.expect_value(t, normalize_bridge_target("termux", "arm64"), "termux-arm64")
+
+	termux := domain.Bridge{machine_os = "termux", machine_arch = "arm64", version = "0.3.29"}
+	linux := domain.Bridge{machine_os = "linux", machine_arch = "arm64", version = "0.3.29"}
+
+	// A release that predates the termux bundle: newer, but not installable here.
+	old_path := fmt.tprintf("/tmp/test_catalog_termux_old_%d_%d.json", os.get_pid(), time.now()._nsec)
+	old_manifest := `{"version":"0.3.30","commit_sha":"c30","targets":{"linux-arm64":{"tarball_url":"https://example.com/heimdall-local-linux-arm64-v0.3.30.tar.gz","sha256":"hash_linux_arm64"}}}`
+	testing.expect(t, os.write_entire_file(old_path, transmute([]byte)old_manifest) == nil, "wrote manifest without termux")
+	defer os.remove(old_path)
+	cat := Bridge_Update_Catalog{manifest_path = old_path}
+
+	info := resolve_bridge_update_info(&cat, termux)
+	testing.expect_value(t, info.target, "termux-arm64")
+	testing.expect(t, info.update_available, "a newer release exists")
+	testing.expect(t, !info.artifact_available, "but it is not available for termux-arm64")
+	testing.expect_value(t, info.download_url, "")
+	testing.expect_value(t, info.sha256, "")
+
+	linux_info := resolve_bridge_update_info(&cat, linux)
+	testing.expect(t, linux_info.artifact_available, "linux-arm64 still resolves its own bundle")
+
+	// A release that ships the termux bundle: each target gets its own asset.
+	new_path := fmt.tprintf("/tmp/test_catalog_termux_new_%d_%d.json", os.get_pid(), time.now()._nsec)
+	new_manifest := `{"version":"0.3.31","commit_sha":"c31","targets":{"linux-arm64":{"tarball_url":"https://example.com/heimdall-local-linux-arm64-v0.3.31.tar.gz","sha256":"hash_linux_arm64"},"termux-arm64":{"tarball_url":"https://example.com/heimdall-local-termux-arm64-v0.3.31.tar.gz","sha256":"hash_termux_arm64"}}}`
+	testing.expect(t, os.write_entire_file(new_path, transmute([]byte)new_manifest) == nil, "wrote manifest with termux")
+	defer os.remove(new_path)
+	cat.manifest_path = new_path
+
+	info = resolve_bridge_update_info(&cat, termux)
+	testing.expect(t, info.artifact_available, "termux bundle available")
+	testing.expect_value(t, info.download_url, "https://example.com/heimdall-local-termux-arm64-v0.3.31.tar.gz")
+	testing.expect_value(t, info.sha256, "hash_termux_arm64")
+	linux_info = resolve_bridge_update_info(&cat, linux)
+	testing.expect_value(t, linux_info.download_url, "https://example.com/heimdall-local-linux-arm64-v0.3.31.tar.gz")
+	testing.expect_value(t, linux_info.sha256, "hash_linux_arm64")
+}

@@ -28,6 +28,27 @@ export function formatLatestVersion(bridge: Partial<Bridge> | null | undefined):
 }
 
 /**
+ * REQ-T13-4: a newer release exists but ships no bundle for this bridge's
+ * release target (e.g. termux-arm64). Older hubs omit the field, so only an
+ * explicit `false` counts.
+ */
+export function isUpdateUnavailableForTarget(bridge: Partial<Bridge> | null | undefined): boolean {
+  return Boolean(bridge?.update_available) && bridge?.update_artifact_available === false;
+}
+
+/**
+ * Copy for the update badge: "Update available: v0.3.31" or
+ * "v0.3.31 not available for termux-arm64".
+ */
+export function updateAvailabilityLabel(bridge: Partial<Bridge> | null | undefined): string {
+  const latest = formatLatestVersion(bridge);
+  if (isUpdateUnavailableForTarget(bridge)) {
+    return `${latest} not available for ${bridge?.target || 'this target'}`;
+  }
+  return `Update available: ${latest}`;
+}
+
+/**
  * Checks whether an update is actively in progress on the bridge.
  */
 export function isBridgeUpdating(bridge: Partial<Bridge> | null | undefined): boolean {

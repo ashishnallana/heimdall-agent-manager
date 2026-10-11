@@ -23,6 +23,8 @@ import {
   isBridgeUpdating,
   bridgeUpdateStatusLabel,
   getActiveTaskCount,
+  isUpdateUnavailableForTarget,
+  updateAvailabilityLabel,
 } from './bridgeUpdate';
 import BridgeSettingsPanel from './BridgeSettingsPanel';
 
@@ -180,6 +182,7 @@ export default function BridgesPanel() {
               const hasVersion = Boolean(bridge?.version || bridge?.commit_sha);
               const versionLabel = formatBridgeVersion(bridge);
               const latestLabel = formatLatestVersion(bridge);
+              const updateUnavailable = isUpdateUnavailableForTarget(bridge);
 
               return (
                 <div key={id} data-debug-id={`settings-bridge-row-${id}`} className="rounded-xl border border-subtle bg-surface-raised/30 p-3 sm:px-3 sm:py-2.5">
@@ -205,8 +208,16 @@ export default function BridgesPanel() {
                           </span>
                         ) : null}
 
-                        {/* Prominent Update Available badge */}
-                        {bridge?.update_available ? (
+                        {/* Prominent Update Available badge; muted when the release has no bundle for this target (REQ-T13-4) */}
+                        {updateUnavailable ? (
+                          <span
+                            data-debug-id={`settings-bridge-update-unavailable-${id}`}
+                            className="inline-flex items-center gap-1 rounded-full border border-subtle bg-surface-raised/40 px-2 py-0.5 text-[10px] text-muted whitespace-nowrap"
+                            title={`The latest release (${latestLabel}) ships no bundle for ${bridge?.target || 'this target'}; this bridge stays on its current version.`}
+                          >
+                            <span>{updateAvailabilityLabel(bridge)}</span>
+                          </span>
+                        ) : bridge?.update_available ? (
                           <span
                             data-debug-id={`settings-bridge-update-available-${id}`}
                             className="inline-flex items-center gap-1 rounded-full border border-accent/40 bg-accent-soft px-2 py-0.5 text-[10px] font-medium text-accent whitespace-nowrap"
@@ -251,6 +262,7 @@ export default function BridgesPanel() {
                         <span>host: <span className="text-primary">{bridge?.machine_hostname || bridge?.hostname || '—'}</span></span>
                         <span>os: <span className="text-primary">{bridge?.machine_os || bridge?.os || '—'}</span></span>
                         <span>arch: <span className="text-primary">{bridge?.machine_arch || bridge?.arch || '—'}</span></span>
+                        <span>target: <span data-debug-id={`settings-bridge-target-${id}`} className="font-mono text-primary">{bridge?.target || '—'}</span></span>
                         <span>caps: <span data-debug-id={`settings-bridge-caps-${id}`} className="text-primary">{capabilitiesLabel(bridge)}</span></span>
                         <span>instances: <span className="text-primary">{bridge?.active_instance_count ?? bridge?.instance_count ?? bridge?.instances?.length ?? 0}</span></span>
                         <span>last seen: <span className="text-primary">{bridge?.last_seen_at ? new Date(bridge.last_seen_at).toLocaleString() : '—'}</span></span>
@@ -316,9 +328,10 @@ export default function BridgesPanel() {
                       ) : (
                         <>
                           <Button
-                            variant={bridge?.update_available ? 'primary' : 'secondary'}
+                            variant={bridge?.update_available && !updateUnavailable ? 'primary' : 'secondary'}
                             size="sm"
                             data-debug-id={`settings-bridge-update-btn-${id}`}
+                            title={updateUnavailable ? updateAvailabilityLabel(bridge) : undefined}
                             disabled={!isReady || isUpdating}
                             onClick={() => {
                               setUpdateModalBridge(bridge);

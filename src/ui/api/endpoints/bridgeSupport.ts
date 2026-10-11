@@ -29,6 +29,8 @@ export interface Bridge {
   build_timestamp?: string;
   target?: string;
   update_available?: boolean;
+  /** REQ-T13-2: false when the latest release ships no bundle for `target` (e.g. termux-arm64). */
+  update_artifact_available?: boolean;
   latest_version?: string;
   latest_commit_sha?: string;
   update_status?: 'idle' | 'downloading' | 'validating' | 'restarting' | 'healthy' | 'complete' | 'failed' | string;

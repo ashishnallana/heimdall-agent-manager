@@ -2165,9 +2165,10 @@ write_bridge_json :: proc(b: ^strings.Builder, br: domain.Bridge, agents: ^agent
 	strings.write_string(b, "\",\"updated_at\":\""); write_handler_json_string(b, br.updated_at)
 	strings.write_string(b, "\",\"revoked_at\":\""); write_handler_json_string(b, br.revoked_at)
 	update_info := bridge_service.resolve_bridge_update_info(catalog, br)
-	target := bridge_service.normalize_bridge_target(br.machine_os, br.machine_arch)
-	strings.write_string(b, "\",\"target\":\""); write_handler_json_string(b, target)
+	strings.write_string(b, "\",\"target\":\""); write_handler_json_string(b, update_info.target)
 	strings.write_string(b, "\",\"update_available\":"); strings.write_string(b, "true" if update_info.update_available else "false")
+	// REQ-T13-2: false when the latest release ships no bundle for `target`.
+	strings.write_string(b, ",\"update_artifact_available\":"); strings.write_string(b, "true" if update_info.artifact_available else "false")
 	strings.write_string(b, ",\"latest_version\":\""); write_handler_json_string(b, update_info.latest_version)
 	strings.write_string(b, "\",\"latest_commit_sha\":\""); write_handler_json_string(b, update_info.latest_commit_sha)
 	strings.write_string(b, "\",\"telemetry_enabled\":\""); write_handler_json_string(b, br.telemetry_enabled if br.telemetry_enabled != "" else "inherit")

@@ -16,6 +16,7 @@ import "core:strings"
 import "core:testing"
 import "core:thread"
 import "core:time"
+import contracts "odin_test:contracts"
 
 // ---- pure helpers ----
 
@@ -255,6 +256,7 @@ manager_update_test_mock_start :: proc(
 	t: ^testing.T,
 	tarball_path, tarball_name, digest: string,
 	sums_digest: string,
+	max_requests := 2,
 ) -> (^Manager_Update_Test_Mock, int, ^thread.Thread) {
 	raw, rerr := os.read_entire_file(tarball_path, context.allocator)
 	testing.expect(t, rerr == nil, "fixture tarball readable")
@@ -272,7 +274,7 @@ manager_update_test_mock_start :: proc(
 	}
 	mock := new(Manager_Update_Test_Mock)
 	mock.listener = listener
-	mock.max_requests = 2
+	mock.max_requests = max_requests
 	mock.tarball_response = make([dynamic]byte, 0, len(tarball_head) + len(raw))
 	append(&mock.tarball_response, ..transmute([]byte)tarball_head)
 	append(&mock.tarball_response, ..raw)
@@ -437,4 +439,76 @@ test_manager_update_resolve_release_mirror_urls :: proc(t: ^testing.T) {
 	testing.expect(t, release.tarball_name == "heimdall-local-linux-amd64.tar.gz", "mirror tarball is unversioned")
 	testing.expect(t, release.tarball_url == "http://127.0.0.1:49999/heimdall-local-linux-amd64.tar.gz", "mirror tarball url")
 	testing.expect(t, release.sums_url == "http://127.0.0.1:49999/SHA256SUMS", "mirror sums url")
+}
+
+// REQ-T13-3: a release whose SHA256SUMS has no bundle for this target is "not
+// available for this target". Only SHA256SUMS is fetched -- no tarball of any
+// other target is downloaded -- and nothing is staged.
+@(test)
+test_manager_update_prepare_stage_target_not_available :: proc(t: ^testing.T) {
+	dir := manager_test_tmp_dir("update-stage-termux-missing")
+	defer manager_test_cleanup(dir)
+	tarball_path, digest := manager_update_test_build_tarball(t, dir, "linux-arm64")
+	defer delete(digest)
+
+	mock, port, handle := manager_update_test_mock_start(t, tarball_path, "heimdall-local-linux-arm64.tar.gz", digest, digest, max_requests = 1)
+	if mock == nil do return
+	defer manager_update_test_mock_join(mock, handle)
+
+	plan, release := manager_update_test_stage_plan(dir, port, "termux-arm64")
+	defer delete(plan.source.mirror_base)
+	testing.expect_value(t, release.tarball_name, "heimdall-local-termux-arm64.tar.gz")
+	testing.expect(t, !manager_update_prepare_stage(&plan, &release), "missing target aborts")
+	testing.expect_value(t, mock.served, 1)
+	testing.expect(t, !manager_path_exists(plan.stage_root), "staging directory removed")
+}
+
+@(test)
+test_manager_update_tarball_name_and_release_assets :: proc(t: ^testing.T) {
+	testing.expect_value(t, manager_update_tarball_name("termux-arm64", "v0.3.30"), "heimdall-local-termux-arm64-v0.3.30.tar.gz")
+	testing.expect_value(t, manager_update_tarball_name("termux-arm64", ""), "heimdall-local-termux-arm64.tar.gz")
+	body := `{"tag_name":"v0.3.30","assets":[{"name":"heimdall-local-linux-arm64-v0.3.30.tar.gz"},{"name": "SHA256SUMS"}]}`
+	testing.expect(t, manager_update_release_lists_asset(body, "heimdall-local-linux-arm64-v0.3.30.tar.gz"), "linux asset listed")
+	testing.expect(t, !manager_update_release_lists_asset(body, "heimdall-local-termux-arm64-v0.3.30.tar.gz"), "termux asset not listed")
+	testing.expect(t, !manager_update_release_lists_asset(body, "heimdall-local-linux-arm64-v0.3.3.tar.gz"), "exact name only")
+}
+
+// REQ-T13-3: on Termux the swap is bracketed by `sv down|up`, never systemctl.
+@(test)
+test_manager_update_runit_service :: proc(t: ^testing.T) {
+	dir := "/data/data/com.termux/files/usr/var/service/ham-bridge"
+	argv := manager_runit_verb_argv("stop", dir)
+	defer delete(argv)
+	testing.expect_value(t, len(argv), 3)
+	if len(argv) == 3 {
+		testing.expect_value(t, argv[0], "sv")
+		testing.expect_value(t, argv[1], "down")
+		testing.expect_value(t, argv[2], dir)
+	}
+	up := manager_runit_verb_argv("start", dir)
+	defer delete(up)
+	if len(up) == 3 do testing.expect_value(t, up[1], "up")
+	testing.expect(t, manager_runit_verb_argv("enable", dir) == nil, "unknown verb yields no command")
+
+	running := manager_parse_sv_status("run: /data/data/com.termux/files/usr/var/service/ham-bridge: (pid 4242) 45s; run: log: (pid 98) 300s\n", true)
+	testing.expect(t, running.loaded && running.active, "run: is active")
+	testing.expect_value(t, running.pid, 4242)
+	down := manager_parse_sv_status("down: /data/data/com.termux/files/usr/var/service/ham-bridge: 3s, normally up\n", true)
+	testing.expect(t, down.loaded && !down.active, "down: is loaded but inactive")
+	missing := manager_parse_sv_status("", false)
+	testing.expect(t, !missing.loaded && !missing.active, "sv failure is neither loaded nor active")
+}
+
+// REQ-T13-3: a linux build that finds itself under Termux refuses to plan an
+// update at all rather than resolving linux-* (or guessing termux-*).
+@(test)
+test_manager_update_build_plan_refuses_linux_build_on_termux :: proc(t: ^testing.T) {
+	when contracts.RELEASE_TARGET == "" && ODIN_OS == .Linux {
+		prev, had_prev := os.lookup_env("TERMUX_VERSION", context.allocator)
+		defer if had_prev do delete(prev)
+		testing.expect(t, os.set_env("TERMUX_VERSION", "0.118.0") == nil, "set TERMUX_VERSION")
+		defer if had_prev { _ = os.set_env("TERMUX_VERSION", prev) } else { _ = os.unset_env("TERMUX_VERSION") }
+		_, ok := manager_update_build_plan({"update"}, .Linux)
+		testing.expect(t, !ok, "plan refused for a non-termux build on Termux")
+	}
 }

@@ -403,6 +403,56 @@ test_bridge_update_handler_missing_artifact_fails_before_dispatch :: proc(t: ^te
 	testing.expect(t, !f.sink_rec.sent, "no update command dispatched")
 }
 
+// REQ-T13-2: a termux-arm64 Bridge on a release that only ships linux-arm64 is
+// told the update is not available for its target; nothing is dispatched and
+// the listing carries the target plus update_artifact_available:false.
+@(test)
+test_bridge_update_termux_target_without_artifact_not_available :: proc(t: ^testing.T) {
+	f := setup_update_test_fixture(t, "termux_no_artifact")
+	defer teardown_update_test_fixture(f)
+
+	manifest_path := fmt.tprintf("/tmp/test_termux_manifest_%d_%d.json", os.get_pid(), time.now()._nsec)
+	manifest := `{"version":"0.3.30","commit_sha":"c30","targets":{"linux-arm64":{"tarball_url":"https://example.com/heimdall-local-linux-arm64-v0.3.30.tar.gz","sha256":"hash_linux_arm64"}}}`
+	testing.expect(t, os.write_entire_file(manifest_path, transmute([]byte)manifest) == nil, "wrote manifest")
+	defer os.remove(manifest_path)
+
+	bridge, ok, _ := iface.bridge_get_bridge(&f.br_repo, f.bridge_id)
+	testing.expect(t, ok, "got bridge")
+	bridge.status = .Online
+	bridge.machine_os = "termux"
+	bridge.machine_arch = "arm64"
+	bridge.version = "0.3.29"
+	_, save_ok, _ := iface.bridge_save_bridge(&f.br_repo, bridge)
+	testing.expect(t, save_ok, "saved online termux bridge")
+	_, accept_ok, _ := bridge_runtime_service.runtime_accept_hello(&f.registry, f.bridge_id, 1, "")
+	testing.expect(t, accept_ok, "accepted bridge in registry")
+
+	catalog := bridge_service.Bridge_Update_Catalog{manifest_path = manifest_path}
+	f.br_svc.catalog = &catalog
+
+	b := strings.builder_make()
+	defer strings.builder_destroy(&b)
+	write_bridge_json(&b, bridge, nil, &catalog)
+	out := strings.to_string(b)
+	testing.expect(t, strings.contains(out, "\"target\":\"termux-arm64\""), "termux target serialized")
+	testing.expect(t, strings.contains(out, "\"update_available\":true"), "newer release reported")
+	testing.expect(t, strings.contains(out, "\"update_artifact_available\":false"), "not available for this target")
+
+	req := Request{
+		method = "POST",
+		path = fmt.tprintf("/api/v1/bridges/%s/update", f.bridge_id),
+		body = `{"target_version":"latest","force":true}`,
+		request_id = "req_termux_no_artifact",
+		remote_addr = "127.0.0.1:4444",
+		headers = UPDATE_TEST_HEADERS[:],
+	}
+	resp := bridge_update_handler(rawptr(&f.bh), req)
+	testing.expect_value(t, resp.status, 400)
+	testing.expect(t, strings.contains(resp.body, "not available for this target (termux-arm64)"), "target named in error")
+	testing.expect(t, !strings.contains(resp.body, "linux-arm64"), "never offers the linux bundle")
+	testing.expect(t, !f.sink_rec.sent, "no update command dispatched")
+}
+
 @(test)
 test_bridge_update_failure_progress_is_persisted :: proc(t: ^testing.T) {
 	f := setup_update_test_fixture(t, "failed_progress")
