@@ -76,6 +76,11 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE_SCRIPT = ROOT / 'scripts' / 'release' / 'package-local-binary-tarball.sh'
 STORELESS_SCRIPT = ROOT / 'scripts' / 'release' / 'storeless-exec.sh'
+SECCOMP_PROBE_SCRIPT = ROOT / 'scripts' / 'release' / 'android-seccomp-probe.sh'
+# android-seccomp-probe.sh contract: 1 = denylisted syscall (or control not
+# rejected), 3 = could not trace at all.
+SECCOMP_PROBE_VIOLATION = 1
+SECCOMP_PROBE_UNTRACEABLE = 3
 INSTALLER_SMOKE_SCRIPT = ROOT / 'scripts' / 'ci' / 'installer-smoke.sh'
 # storeless-exec.sh contract: the static control exits 42, and 70 means no
 # clean-environment mechanism could be validated.
@@ -226,6 +231,20 @@ def test_tarball_without_pty_host(ctx):
     assert 'bin/openssl' not in names, 'openssl must not ship when not bundled'
     assert sorted(metadata['binaries']) == ['ham-bridge', 'ham-ctl', 'heimdall'], (
         f'METADATA.json binaries mismatch: {metadata["binaries"]}')
+
+
+def test_termux_tarball_target(ctx):
+    """T12: termux-arm64 is a release target with the linux-* layout."""
+    base = ctx['work'] / 'termux-tarball'
+    base.mkdir()
+    res, tarball = package_tarball(base, target='termux-arm64')
+    assert res.returncode == 0, f'termux-arm64 packaging failed:\n{res.stderr}'
+    assert tarball.name == 'heimdall-local-termux-arm64.tar.gz', tarball
+    names, _, metadata = read_tarball(tarball)
+    for entry in ('bin/ham-bridge', 'bin/ham-ctl', 'bin/heimdall', 'bin/ham-pty-host',
+                  'scripts/apply-bridge-update.sh', 'README.md', 'LICENSE', 'METADATA.json'):
+        assert entry in names, f'entry {entry} missing from termux tarball'
+    assert metadata['target'] == 'termux-arm64', metadata['target']
 
 
 def test_packaging_error_cases(ctx):
@@ -3227,6 +3246,105 @@ def test_storeless_exec_has_teeth(ctx):
         'because the binary could not find its loader')
 
 
+# ---- 4c. Android seccomp probe (T12) ------------------------------------------
+#
+# Android 15/Termux SIGSYS-killed the glibc-static linux-arm64 ham-bridge at
+# set_robust_list before main. The termux-arm64 bundle is musl-static, and
+# scripts/release/android-seccomp-probe.sh is the gate the release workflow
+# runs on it (with the glibc linux-arm64 ham-bridge as its negative control).
+# These tests pin the probe's own contract: it rejects glibc, passes a binary
+# that makes none of the denylisted calls, never passes without a trace, and
+# its denylist stays the bionic-verified one.
+
+def test_seccomp_probe_denylist_is_bionic_verified(ctx):
+    text = SECCOMP_PROBE_SCRIPT.read_text(encoding='utf-8')
+    m = re.search(r"^DENYLIST='([^']*)'", text, re.M)
+    assert m, 'android-seccomp-probe.sh must define DENYLIST'
+    denied = set(m.group(1).split('|'))
+    assert denied == {'set_robust_list', 'rseq', 'clone3', 'io_uring_[a-z_]+', 'add_key',
+                      'keyctl', 'request_key', 'memfd_secret'}, sorted(denied)
+    # Allowed by Android 12 and 15 app policy; statx is called at runtime by
+    # Odin's core:os, so denying it would fail every correct binary.
+    for allowed in ('statx', 'membarrier', 'personality', 'setns', 'unshare'):
+        assert allowed not in denied, f'{allowed} is allowed on Android; must not be denylisted'
+    for source in ('SECCOMP_ALLOWLIST_COMMON.TXT', 'android-12.0.0_r1', 'android-15.0.0_r1',
+                   'set_robust_list'):
+        assert source in text, f'probe must cite {source}'
+
+
+def test_seccomp_probe_never_passes_untraced(ctx):
+    """A strace that traces nothing is an error (3), never a pass."""
+    if platform.system() != 'Linux':
+        raise Skip('seccomp probe is Linux-specific')
+    fake = ctx['work'] / 'fake-strace-bin'
+    fake.mkdir()
+    (fake / 'strace').write_text('#!/bin/sh\nexit 0\n')
+    (fake / 'strace').chmod(0o755)
+    control = write_static_control(ctx['work'] / 'seccomp-untraced-control')
+    env = dict(os.environ, PATH=f'{fake}:{os.environ.get("PATH", "")}')
+    res = run(['bash', SECCOMP_PROBE_SCRIPT, 'check', control], env=env, timeout=60)
+    assert res.returncode == SECCOMP_PROBE_UNTRACEABLE, (
+        f'untraced probe must exit {SECCOMP_PROBE_UNTRACEABLE}, got {res.returncode}:\n{res.stderr}')
+    res = run(['bash', SECCOMP_PROBE_SCRIPT, 'control', control], env=env, timeout=60)
+    assert res.returncode == SECCOMP_PROBE_UNTRACEABLE, (
+        f'untraced control must exit {SECCOMP_PROBE_UNTRACEABLE}, got {res.returncode}:\n{res.stderr}')
+
+
+def glibc_control_binary():
+    """A glibc binary for the negative leg: on a glibc host, /bin/true. glibc
+    (static or dynamic) registers a robust list for the main thread at start-up,
+    which is exactly what the device killed."""
+    res = run(['getconf', 'GNU_LIBC_VERSION'], timeout=10)
+    if res.returncode != 0 or not res.stdout.startswith('glibc'):
+        raise Skip('host libc is not glibc; no glibc negative control available')
+    for candidate in ('/bin/true', '/usr/bin/true'):
+        if Path(candidate).is_file():
+            return Path(candidate)
+    raise Skip('no /bin/true on this glibc host')
+
+
+def test_seccomp_probe_has_teeth(ctx):
+    """Differential: the same probe must PASS the static control (exit 42,
+    no libc at all) and REJECT a glibc binary naming set_robust_list."""
+    if platform.system() != 'Linux':
+        raise Skip('seccomp probe is Linux-specific')
+    need_tool('strace')
+    control = write_static_control(ctx['work'] / 'seccomp-static-control')
+    res = run(['bash', SECCOMP_PROBE_SCRIPT, 'check', control], timeout=60)
+    assert res.returncode == 0, (
+        f'probe rejected the libc-free static control (rc={res.returncode}):\n{res.stderr}')
+    glibc = glibc_control_binary()
+    res = run(['bash', SECCOMP_PROBE_SCRIPT, 'check', glibc], timeout=60)
+    assert res.returncode == SECCOMP_PROBE_VIOLATION, (
+        f'probe passed glibc {glibc} (rc={res.returncode}); it has no teeth:\n{res.stderr}')
+    assert 'set_robust_list' in res.stderr, res.stderr
+    res = run(['bash', SECCOMP_PROBE_SCRIPT, 'control', glibc], timeout=60)
+    assert res.returncode == 0, f'control mode did not accept glibc rejection:\n{res.stderr}'
+    res = run(['bash', SECCOMP_PROBE_SCRIPT, 'control', control], timeout=60)
+    assert res.returncode == SECCOMP_PROBE_VIOLATION, (
+        f'control mode must fail when the control is NOT rejected:\n{res.stderr}')
+
+
+def test_termux_release_binaries_pass_seccomp_probe(ctx):
+    """The real termux-arm64 Odin binaries, where this host can run them."""
+    if host_target() != 'linux-arm64':
+        raise Skip('termux-arm64 binaries execute only on an aarch64 Linux host')
+    if shutil.which('nix') is None:
+        raise Skip(RELEASE_ATTRS_SKIP_REASON)
+    need_tool('strace')
+    attrs = ['release-termux-ham-bridge', 'release-termux-ham-ctl', 'release-termux-heimdall']
+    res = run(['nix', 'build', *[f'.#{a}' for a in attrs], '--print-out-paths', '--no-link'],
+              cwd=ROOT, timeout=1800)
+    assert res.returncode == 0, f'nix build of termux attrs failed:\n{res.stderr}'
+    outs = [l for l in res.stdout.splitlines() if l.startswith('/nix/store/')]
+    binaries = [str(Path(out) / 'bin' / name)
+                for out, name in zip(outs, ('ham-bridge', 'ham-ctl', 'heimdall'))]
+    for binary in binaries:
+        scan_binary_for_nix_references(Path(binary), Path(binary).name)
+    res = run(['bash', SECCOMP_PROBE_SCRIPT, 'check', *binaries], timeout=300)
+    assert res.returncode == 0, f'termux binaries failed the seccomp probe:\n{res.stderr}'
+
+
 # ---- 5. documentation regression ----------------------------------------------
 
 def part2_text():
@@ -4957,6 +5075,13 @@ def main() -> int:
         ('release tarball: package + storeless execution (REQ-INST-16)',
          test_release_tarball_is_portable),
         ('storeless execution gate has teeth (REQ-INST-16)', test_storeless_exec_has_teeth),
+        ('termux-arm64 tarball target (T12)', test_termux_tarball_target),
+        ('seccomp probe denylist is bionic-verified (T12)',
+         test_seccomp_probe_denylist_is_bionic_verified),
+        ('seccomp probe never passes untraced (T12)', test_seccomp_probe_never_passes_untraced),
+        ('seccomp probe has teeth (T12)', test_seccomp_probe_has_teeth),
+        ('termux release binaries pass seccomp probe (T12)',
+         test_termux_release_binaries_pass_seccomp_probe),
         ('SELF_HOSTING.md Part 2 installer docs', test_self_hosting_documents_installer),
         ('README installer pointer', test_readme_points_at_installer),
         ('service units set PATH, both writers (REQ-INST-26)',

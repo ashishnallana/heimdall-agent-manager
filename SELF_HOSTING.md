@@ -902,12 +902,21 @@ Re-enrollment is only needed if the token file is lost or the bridge is revoked.
 ## Appendix — Bridge on Android (Termux)
 
 A bridge can run on an Android phone or tablet inside [Termux](https://termux.dev),
-supervised by `termux-services` (runit). Termux is Linux userland, so this uses the
-`linux_arm64` `ham-bridge` build. The bridge detects Termux at run time from
-`TERMUX_VERSION` or a `$PREFIX` under `/data/data/com.termux`.
+supervised by `termux-services` (runit). It uses the dedicated `termux-arm64` release
+bundle (`heimdall-local-termux-arm64-<version>.tar.gz`, from v0.3.29). The bridge detects
+Termux at run time from `TERMUX_VERSION` or a `$PREFIX` under `/data/data/com.termux`.
+
+**Why a separate bundle:** Android runs every app process, Termux included, under a
+seccomp allowlist derived from bionic, and kills the process (`SIGSYS`) on any other
+syscall. The `linux-arm64` binaries are statically linked against glibc, which calls
+`set_robust_list` at process start before `main`. Android blocks that call, so they die
+on launch. The `termux-arm64` bundle has the same binaries linked statically against
+musl, which makes no blocked call at start-up. Each release checks this in CI with
+`scripts/release/android-seccomp-probe.sh`.
 
 ### Requirements
 
+- Android 12 or newer (tested on Android 15), aarch64.
 - The **Termux:API** Android app (from the same source as Termux itself, F-Droid or
   GitHub; the two must match), plus the matching package, and `termux-services`:
 
@@ -949,7 +958,7 @@ re-checks the file itself before restarting the service. A restarted bridge then
 ### Install and enroll
 
 The installer supports Termux directly. It verifies `termux-keystore` and
-`termux-services`, installs the `linux_arm64` binaries, creates the runit service
+`termux-services`, installs the `termux-arm64` bundle, creates the runit service
 `$PREFIX/var/service/ham-bridge` (`run` + `log/run`, same environment as the systemd
 unit), enables it with `sv-enable`, and enrolls:
 
@@ -958,6 +967,10 @@ pkg install curl python socat termux-api termux-services   # then restart Termux
 curl -fsSL https://raw.githubusercontent.com/tanmayv/heimdall-agent-manager/main/scripts/install.sh \
   | bash -s -- --hub https://hub.example.com
 ```
+
+If you pass `--version` for a release older than v0.3.29, which has no Termux bundle, the
+installer prints a WARN and installs `linux-arm64` instead. That bundle will not start
+under Android's seccomp, so drop `--version` or pass a newer release.
 
 One Termux install runs **one** Hub: the released bridge restarts exactly
 `$PREFIX/var/service/ham-bridge` after enrollment, so a second `--hub` is refused until

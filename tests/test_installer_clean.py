@@ -49,7 +49,7 @@ if os.environ.get('MOCK_SOCKET'):
 """)
         self.env.update(PYTHONPATH=str(self.mock),MOCK_SOCKET='1')
         self.stub('id', '#!/bin/sh\necho 1000\n')
-        self.stub('uname', '#!/bin/sh\nif [ "$1" = -s ]; then echo "$MOCK_OS"; else echo x86_64; fi\n')
+        self.stub('uname', '#!/bin/sh\nif [ "$1" = -s ]; then echo "$MOCK_OS"; else echo "${MOCK_ARCH:-x86_64}"; fi\n')
         self.stub('socat', '#!/bin/sh\nexit 0\n')
         manager = '''#!/usr/bin/env python3
 import json, os, pathlib, sys
@@ -63,16 +63,22 @@ if pathlib.Path(sys.argv[0]).name=='launchctl':
 '''
         for tool in ('systemctl', 'launchctl', 'plutil'):
             self.stub(tool, manager)
+        # MOCK_RELEASES overrides the release list; MOCK_SUM_TARGETS names the
+        # bundles a release's SHA256SUMS lists; BAD_SUM (all) or BAD_SUM_TARGET
+        # (one target) corrupts digests. Archive downloads append to downloads.
         self.stub('curl', '''#!/usr/bin/env python3
 import hashlib, os, pathlib, sys
 r=pathlib.Path(os.environ['MOCK_ROOT']); a=sys.argv[1:]; out=pathlib.Path(a[a.index('--output')+1]); url=a[a.index('--output')-1]
 if '/releases?' in url:
-    out.write_text('[{"tag_name":"vtest","prerelease":true,"assets":[{"name":"SHA256SUMS"},{"name":"heimdall-local-linux-amd64-vtest.tar.gz"},{"name":"heimdall-local-darwin-amd64-vtest.tar.gz"}]}]')
+    out.write_text(os.environ.get('MOCK_RELEASES') or '[{"tag_name":"vtest","prerelease":true,"assets":[{"name":"SHA256SUMS"},{"name":"heimdall-local-linux-amd64-vtest.tar.gz"},{"name":"heimdall-local-darwin-amd64-vtest.tar.gz"},{"name":"heimdall-local-linux-arm64-vtest.tar.gz"}]}]')
 elif url.endswith('/SHA256SUMS'):
-    name=(r/'archive-name').read_text(); digest=hashlib.sha256((r/'bundle').read_bytes()).hexdigest()
-    out.write_text(('0'*64 if os.environ.get('BAD_SUM') else digest)+'  '+name+'\\n')
+    version=url.rsplit('/',2)[1]; digest=hashlib.sha256((r/'bundle').read_bytes()).hexdigest()
+    targets=os.environ.get('MOCK_SUM_TARGETS','linux-amd64,darwin-amd64,linux-arm64,darwin-arm64').split(',')
+    bad=lambda t: os.environ.get('BAD_SUM') or os.environ.get('BAD_SUM_TARGET')==t
+    out.write_text(''.join(('0'*64 if bad(t) else digest)+'  heimdall-local-'+t+'-'+version+'.tar.gz\\n' for t in targets))
 else:
-    (r/'archive-name').write_text(url.rsplit('/',1)[1]); out.write_bytes((r/'bundle').read_bytes())
+    with (r/'downloads').open('a') as f: f.write(url.rsplit('/',1)[1]+'\\n')
+    out.write_bytes((r/'bundle').read_bytes())
 ''')
         bridge = b'''#!/usr/bin/env bash
 if [ "$1" = enroll ]; then
@@ -112,7 +118,7 @@ pathlib.Path(os.environ['MOCK_ROOT']+'/ctl.json').write_text(json.dumps({'args':
         prefix=self.root/'prefix'; (prefix/'var/service').mkdir(parents=True,exist_ok=True); (prefix/'bin').mkdir(exist_ok=True)
         (prefix/'share/termux-services').mkdir(parents=True,exist_ok=True)
         svlogger=prefix/'share/termux-services/svlogger'; svlogger.write_text('#!/bin/sh\nexit 0\n'); svlogger.chmod(0o755)
-        self.env.update(TERMUX_VERSION='0.118.1', PREFIX=str(prefix), HEIMDALL_RUNSV_WAIT='0')
+        self.env.update(TERMUX_VERSION='0.118.1', PREFIX=str(prefix), HEIMDALL_RUNSV_WAIT='0', MOCK_ARCH='aarch64')
         self.stub('termux-keystore','#!/bin/sh\nexit 0\n')
         self.stub('pgrep','#!/bin/sh\nexit 0\n')  # runsvdir is running
         sv='''#!/usr/bin/env python3
@@ -251,6 +257,65 @@ if me=='sv-enable':
         self.run_install('--hub','https://hub.mundus.in','--uninstall')
         self.assertFalse(svc.exists()); self.assertFalse((self.data(name)/'bin').exists())
         self.assertTrue((self.state(name)/'bridge-token').exists())
+
+    def downloads(self):
+        p=self.root/'downloads'
+        return p.read_text().split() if p.exists() else []
+
+    @staticmethod
+    def releases(*entries):
+        """A GitHub release list, newest first: (tag, [bundle targets])."""
+        return json.dumps([{'tag_name':tag,'assets':[{'name':'SHA256SUMS'}]+[
+            {'name':f'heimdall-local-{t}-{tag}.tar.gz'} for t in targets]} for tag,targets in entries])
+
+    def test_termux_downloads_termux_bundle(self):
+        # T12: glibc-static linux-* binaries are SIGSYS-killed under Android's
+        # seccomp, so Termux must fetch the musl termux-* bundle. The picker
+        # prefers an older release that has it over a newer one that does not.
+        self.termux()
+        self.env.update(MOCK_SUM_TARGETS='linux-arm64,termux-arm64',
+                        MOCK_RELEASES=self.releases(('v9',['linux-arm64']),('v8',['linux-arm64','termux-arm64'])))
+        out=self.run_install('--hub','https://hub.mundus.in','--keep-enrollment')
+        self.assertEqual(self.downloads(),['heimdall-local-termux-arm64-v8.tar.gz'])
+        self.assertNotIn('[WARN]',out)
+
+    def test_termux_dry_run_plans_termux_bundle(self):
+        self.termux()
+        out=self.run_install('--hub','https://hub.mundus.in','--dry-run','--version','v1')
+        self.assertIn('Download heimdall-local-termux-arm64-v1.tar.gz (or heimdall-local-linux-arm64 if the release has none)',out)
+
+    def test_termux_falls_back_to_linux_bundle_with_warning(self):
+        # An explicit --version predating the Termux bundle: SHA256SUMS lists no
+        # termux-* entry, so install linux-* and say it will not run.
+        self.termux()
+        self.env['MOCK_SUM_TARGETS']='linux-arm64,linux-amd64'
+        out=self.run_install('--hub','https://hub.mundus.in','--version','v0.3.28','--keep-enrollment')
+        self.assertEqual(self.downloads(),['heimdall-local-linux-arm64-v0.3.28.tar.gz'])
+        self.assertIn('[WARN] Release v0.3.28 has no termux-arm64 bundle',out)
+        self.assertIn('set_robust_list',out)
+        # The picker falls back too when no listed release has a Termux bundle.
+        (self.root/'downloads').unlink()
+        self.env['MOCK_RELEASES']=self.releases(('v7',['linux-arm64']))
+        out=self.run_install('--hub','https://hub.mundus.in','--keep-enrollment')
+        self.assertEqual(self.downloads(),['heimdall-local-linux-arm64-v7.tar.gz'])
+        self.assertIn('[WARN] Release v7 has no termux-arm64 bundle',out)
+
+    def test_termux_bundle_checksum_is_enforced(self):
+        # The termux entry of SHA256SUMS is the one verified: a bad termux digest
+        # fails closed even though the linux entry would match.
+        self.termux()
+        self.env.update(MOCK_SUM_TARGETS='linux-arm64,termux-arm64',BAD_SUM_TARGET='termux-arm64')
+        out=self.run_install('--hub','https://hub.mundus.in','--version','v8','--keep-enrollment',success=False)
+        self.assertIn('SHA-256 verification failed',out)
+        self.assertEqual(self.downloads(),['heimdall-local-termux-arm64-v8.tar.gz'])
+        self.assertFalse((self.root/'prefix/var/service/ham-bridge').exists())
+
+    def test_linux_never_takes_termux_bundle(self):
+        self.env.update(MOCK_ARCH='aarch64',MOCK_SUM_TARGETS='linux-arm64,termux-arm64',
+                        MOCK_RELEASES=self.releases(('v8',['linux-arm64','termux-arm64'])))
+        out=self.run_install('--hub','http://localhost:8080')
+        self.assertEqual(self.downloads(),['heimdall-local-linux-arm64-v8.tar.gz'])
+        self.assertNotIn('[WARN]',out)
 
     def test_missing_hub(self):
         self.assertIn('--hub is required',self.run_install('--dry-run',success=False))

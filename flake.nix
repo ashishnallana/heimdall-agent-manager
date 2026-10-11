@@ -120,6 +120,43 @@
         '';
       };
 
+      # T12: the termux-arm64 bundle's Odin binaries. Android's app seccomp
+      # allowlist is bionic-derived and SIGSYS-kills a process on syscalls bionic
+      # never makes; static glibc calls set_robust_list unconditionally in
+      # __libc_setup_tls (device trace, Android 15: execve, brk, brk,
+      # set_tid_address, set_robust_list -> SIGSYS SYS_SECCOMP), so NO
+      # glibc-static binary starts under Termux. musl registers no robust list at
+      # start-up, uses clone (not clone3) and never calls rseq.
+      # Odin hard-codes `-lpthread -lm -lc` on its link line and links through
+      # `clang`, unless ODIN_CLANG_PATH names another driver (Odin
+      # src/linker.cpp). Pointing it at the musl cross cc-wrapper makes that
+      # wrapper supply musl's crt1/crti/crtn, libc.a and libgcc -- libgcc matters
+      # on aarch64, where musl's long-double code calls the soft-float __*tf3
+      # helpers. -static -no-pie: a plain static ELF, no PT_INTERP.
+      # Built for linux_arm64 from either Linux host (Odin cross-codegens
+      # natively; the wrapper is pkgsCross, the same set mkReleasePtyHost uses).
+      # The linux-* release attrs above stay glibc-static and untouched.
+      mkTermuxOdinPackage = pkgs: odin: name: srcDir:
+        let
+          muslCc = pkgs.pkgsCross.aarch64-multiplatform-musl.stdenv.cc;
+        in
+        pkgs.stdenv.mkDerivation {
+          pname = "release-termux-${name}";
+          version = appVersion;
+          src = ./.;
+          nativeBuildInputs = [ odin ];
+          dontConfigure = true;
+          dontInstall = true;
+          buildPhase = ''
+            runHook preBuild
+            mkdir -p $out/bin
+            ODIN_CLANG_PATH=${muslCc}/bin/${muslCc.targetPrefix}cc \
+              odin build ${srcDir} -target:linux_arm64 -collection:odin_test=src -define:HAM_APP_VERSION=${appVersion} -out:$out/bin/${name} \
+              -extra-linker-flags:"-static -no-pie"
+            runHook postBuild
+          '';
+        };
+
       mkOdinUiPackage = pkgs: pkgs.buildNpmPackage {
         pname = "heimdall";
         version = appVersion;
@@ -295,6 +332,14 @@
           release-ham-ctl = mkReleaseOdinPackage pkgs odin "ham-ctl" "src/ctl";
           release-heimdall = mkReleaseOdinPackage pkgs odin "heimdall" "src/manager";
           release-ham-pty-host = mkReleasePtyHost pkgs;
+        } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          # T12: termux-arm64 bundle (musl-static Odin binaries; see
+          # mkTermuxOdinPackage). Its pty host is release-ham-pty-host, already
+          # musl-static, built on the aarch64-linux runner.
+          release-termux-ham-bridge = mkTermuxOdinPackage pkgs odin "ham-bridge" "src/bridge";
+          release-termux-ham-ctl = mkTermuxOdinPackage pkgs odin "ham-ctl" "src/ctl";
+          release-termux-heimdall = mkTermuxOdinPackage pkgs odin "heimdall" "src/manager";
+        } // {
           bc-test-agent = self.packages.${system}.ham-test-agent;
           default = self.packages.${system}.ham-hub;
         });

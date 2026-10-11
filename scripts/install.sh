@@ -166,6 +166,12 @@ PY
     command -v termux-keystore >/dev/null || fail 'Termux detected but termux-keystore is missing. Install the Termux:API app, then run: pkg install termux-api'
     svc=runit
   elif [ "$os" = darwin ]; then svc=launchd; fi
+  # Release bundle target. Android's app seccomp SIGSYS-kills the glibc-static
+  # linux-* binaries at start-up (set_robust_list), so Termux takes the
+  # musl-static termux-* bundle, falling back to linux-* only for releases that
+  # predate it (v0.3.29); see SELF_HOSTING.md, Termux.
+  local target="$os-$arch" fallback_target=''
+  if [ "$svc" = runit ]; then target="termux-$arch"; fallback_target="$os-$arch"; fi
   uid="$(id -u)"
   [ "$uid" != 0 ] || fail 'Run as your login user without sudo; this installs a user service.'
   local state_root="$HOME/.config/heimdall/bridges" state_dir="$HOME/.config/heimdall/bridges/$service_name"
@@ -238,7 +244,7 @@ PY
     log PLAN "Replace $service_file ($svc); enrollment=$enrollment; matching legacy migration=$migrate"
     [ "$svc" != runit ] || log PLAN "Create runit service $runit_dir (run, log/run) and sv-enable ham-bridge."
     log PLAN 'Choose two free loopback ports; create a per-Hub ham-ctl wrapper and service.'
-    log PLAN "Download heimdall-local-$os-$arch-${version:-LATEST}.tar.gz and verify SHA256SUMS."
+    log PLAN "Download heimdall-local-$target-${version:-LATEST}.tar.gz${fallback_target:+ (or heimdall-local-$fallback_target if the release has none)} and verify SHA256SUMS."
     return
   fi
   command -v curl >/dev/null || fail 'curl is required.'
@@ -257,25 +263,34 @@ PY
   if [ -z "$version" ]; then
     # The repository also publishes prereleases, excluded by /releases/latest.
     download 'https://api.github.com/repos/tanmayv/heimdall-agent-manager/releases?per_page=30' "$work_dir/releases.json"
-    version="$(python3 - "$work_dir/releases.json" "$os-$arch" <<'PY'
+    # Newest release carrying the preferred target's bundle; only when no
+    # listed release has one, the newest carrying the fallback target's.
+    version="$(python3 - "$work_dir/releases.json" "$target" "$fallback_target" <<'PY'
 import json, sys
 releases = json.load(open(sys.argv[1]))
 if not isinstance(releases, list): sys.exit('GitHub did not return a release list; pass --version TAG.')
-for release in releases:
-    tag = release.get('tag_name', '')
-    assets = {a.get('name') for a in release.get('assets', [])}
-    if not release.get('draft') and {'SHA256SUMS', 'heimdall-local-'+sys.argv[2]+'-'+tag+'.tar.gz'} <= assets:
-        print(tag)
-        break
-else: sys.exit('No published release bundle for this platform. Pass --version TAG.')
+for target in filter(None, sys.argv[2:]):
+    for release in releases:
+        tag = release.get('tag_name', '')
+        assets = {a.get('name') for a in release.get('assets', [])}
+        if not release.get('draft') and {'SHA256SUMS', 'heimdall-local-'+target+'-'+tag+'.tar.gz'} <= assets:
+            print(tag)
+            sys.exit()
+sys.exit('No published release bundle for this platform. Pass --version TAG.')
 PY
 )"
   fi
   [[ "$version" =~ ^[a-zA-Z0-9._-]+$ ]] || fail 'Invalid release tag.'
-  local archive="heimdall-local-$os-$arch-$version.tar.gz" base="https://github.com/tanmayv/heimdall-agent-manager/releases/download/$version"
+  local archive="heimdall-local-$target-$version.tar.gz" base="https://github.com/tanmayv/heimdall-agent-manager/releases/download/$version"
   log INFO "Downloading $version"
-  download "$base/$archive" "$work_dir/$archive"
+  # SHA256SUMS first: it lists every bundle of the release, so it also tells
+  # whether this release ships the preferred (Termux) bundle at all.
   download "$base/SHA256SUMS" "$work_dir/SHA256SUMS"
+  if [ -n "$fallback_target" ] && ! awk -v n="$archive" '{ sub(/^\*/, "", $2) } $2 == n { found = 1 } END { exit !found }' "$work_dir/SHA256SUMS"; then
+    log WARN "Release $version has no $target bundle; installing heimdall-local-$fallback_target instead. Its glibc binaries are killed by Android's seccomp at start-up (set_robust_list); Termux bundles ship from v0.3.29 -- re-run without --version or pass a newer one."
+    archive="heimdall-local-$fallback_target-$version.tar.gz"
+  fi
+  download "$base/$archive" "$work_dir/$archive"
   python3 - "$work_dir" "$archive" <<'PY'
 import hashlib, pathlib, sys, tarfile
 root = pathlib.Path(sys.argv[1]); name = sys.argv[2]

@@ -129,6 +129,13 @@ jobs:
           - target: linux-arm64
             runner: ubuntu-24.04-arm
             nix_system: aarch64-linux
+          # T12: Android/Termux. Same layout as linux-arm64, but the Odin
+          # binaries are musl-static (release-termux-* attrs): Android's app
+          # seccomp SIGSYS-kills glibc-static at set_robust_list.
+          - target: termux-arm64
+            runner: ubuntu-24.04-arm
+            nix_system: aarch64-linux
+            odin_attr_prefix: release-termux-
           - target: darwin-amd64
             runner: macos-15-intel
             nix_system: x86_64-darwin
@@ -169,11 +176,13 @@ jobs:
             echo "runner Nix system mismatch: expected ${{ matrix.nix_system }}, got $actual_system" >&2
             exit 1
           fi
+          # matrix.odin_attr_prefix is set in-file (termux-* only), not event data.
+          odin="${{ matrix.odin_attr_prefix || 'release-' }}"
           nix build \
-            .#release-ham-bridge \
-            .#release-ham-ctl \
+            ".#${odin}ham-bridge" \
+            ".#${odin}ham-ctl" \
             .#release-ham-pty-host \
-            .#release-heimdall \
+            ".#${odin}heimdall" \
             --print-out-paths \
             --no-link | tee "$RUNNER_TEMP/nix-paths.txt"
           paths=()
@@ -226,7 +235,7 @@ jobs:
       # this re-checks the final tarball and adds the execution proof that scan
       # alone cannot give. (matrix.target is defined in-file, not event data.)
       - name: Verify release binaries are portable (Linux)
-        if: ${{ startsWith(matrix.target, 'linux-') }}
+        if: ${{ startsWith(matrix.target, 'linux-') || startsWith(matrix.target, 'termux-') }}
         shell: bash
         run: |
           set -euo pipefail
@@ -266,6 +275,28 @@ jobs:
           [ -n "$out" ] || { echo "FAIL: ham-pty-host --help printed nothing storeless" >&2; exit 1; }
           echo "$out" | head -3
 
+      # T12: the termux bundle must start under Android's app seccomp policy.
+      # scripts/release/android-seccomp-probe.sh straces --version/--help and
+      # fails on any syscall that policy kills (the list and its AOSP sources
+      # are in the script). The negative control comes FIRST: the glibc-static
+      # linux-arm64 ham-bridge -- the exact binary SIGSYS-killed on a real
+      # Android 15 device -- must be rejected for set_robust_list, or the probe
+      # is proving nothing and the step fails.
+      - name: Verify Termux binaries pass the Android seccomp probe
+        if: ${{ startsWith(matrix.target, 'termux-') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq strace
+          control="$(nix build .#release-ham-bridge --print-out-paths --no-link)/bin/ham-bridge"
+          scripts/release/android-seccomp-probe.sh control "$control"
+          work="$RUNNER_TEMP/seccomp-probe"
+          rm -rf "$work"; mkdir -p "$work"
+          tar -xzf "dist/heimdall-local-${{ matrix.target }}.tar.gz" -C "$work"
+          scripts/release/android-seccomp-probe.sh check \
+            "$work/bin/ham-bridge" "$work/bin/ham-ctl" "$work/bin/heimdall" "$work/bin/ham-pty-host"
+
       - name: Verify release binaries are portable (macOS)
         if: ${{ startsWith(matrix.target, 'darwin-') }}
         shell: bash
@@ -302,6 +333,8 @@ jobs:
           - target: linux-amd64
             runner: ubuntu-24.04
           - target: linux-arm64
+            runner: ubuntu-24.04-arm
+          - target: termux-arm64
             runner: ubuntu-24.04-arm
           - target: darwin-amd64
             runner: macos-15-intel
@@ -363,6 +396,7 @@ jobs:
             heimdall-local-darwin-amd64.tar.gz
             heimdall-local-linux-amd64.tar.gz
             heimdall-local-linux-arm64.tar.gz
+            heimdall-local-termux-arm64.tar.gz
           )
           versioned=()
           for tarball in "${expected[@]}"; do
@@ -402,6 +436,7 @@ jobs:
           - heimdall-local-darwin-amd64-$VERSION.tar.gz
           - heimdall-local-linux-amd64-$VERSION.tar.gz
           - heimdall-local-linux-arm64-$VERSION.tar.gz
+          - heimdall-local-termux-arm64-$VERSION.tar.gz (Android/Termux; musl-static)
           - SHA256SUMS
           NOTES
           release_flags=()

@@ -31,7 +31,10 @@ heimdall_out="$6"
 ham_pty_host_out="${7:-}"
 
 case "$target" in
-  darwin-arm64|darwin-amd64|linux-amd64|linux-arm64) ;;
+  # termux-arm64 (T12): Android/Termux bundle. Same ELF layout and the same
+  # fully-static gate as linux-*, but the Odin binaries are musl-static
+  # (Android's app seccomp SIGSYS-kills glibc-static at set_robust_list).
+  darwin-arm64|darwin-amd64|linux-amd64|linux-arm64|termux-arm64) ;;
   *) echo "unsupported release target: $target" >&2; exit 2 ;;
 esac
 
@@ -151,7 +154,7 @@ for staged in "$stage"/bin/*; do
   case "$magic" in
     7f454c46)
       case "$target" in
-        linux-*) gate_linux_elf "$staged" ;;
+        linux-*|termux-*) gate_linux_elf "$staged" ;;
         *) echo "error: ELF binary $staged staged for $target" >&2; exit 1 ;;
       esac ;;
     cffaedfe|cefaedfe|cafebabe|cafebabf|feedface|feedfacf)
