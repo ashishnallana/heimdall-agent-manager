@@ -206,7 +206,7 @@ bridge_command_dispatch_drop_stale_queue_locked :: proc(queue: ^[dynamic]Bridge_
 // deadline, cost, coalescing, and retry contract.
 bridge_command_spec :: proc(command_type: string) -> (Bridge_Command_Spec, bool) {
 	switch command_type {
-	case "bridge_heartbeat_ack", "provider_catalog_version":
+	case "bridge_heartbeat_ack", "provider_catalog_version", "agent_instance_status_ack", "connection_replaced":
 		return Bridge_Command_Spec{priority = .Control, queued = false, timeout_ms = 1000, cost_units = 1}, true
 	case "provider_catalog":
 		return Bridge_Command_Spec{priority = .Control, key_kind = .Provider_Discovery, queued = false, timeout_ms = 5000, cost_units = 2}, true

@@ -22,10 +22,10 @@ Hello_Result :: struct {
 	generation: int,
 }
 
-runtime_accept_hello :: proc(registry: ^project_service.Bridge_Runtime_Registry, bridge_id: string, protocol_version: int, validation_ws_url: string, owner_user_id: string = "") -> (Hello_Result, bool, domain.Domain_Error) {
+runtime_accept_hello :: proc(registry: ^project_service.Bridge_Runtime_Registry, bridge_id: string, protocol_version: int, validation_ws_url: string, owner_user_id: string = "", replaced_farewell: string = "") -> (Hello_Result, bool, domain.Domain_Error) {
 	if protocol_version != PROTOCOL_VERSION do return Hello_Result{}, false, domain.domain_error(.Validation_Failed, "unsupported bridge protocol_version")
 	if bridge_id == "" do return Hello_Result{}, false, domain.domain_error(.Validation_Failed, "bridge_id is required")
-	replaced, generation, admitted := project_service.bridge_runtime_registry_accept_live(registry, bridge_id, validation_ws_url != "", validation_ws_url, owner_user_id)
+	replaced, generation, admitted := project_service.bridge_runtime_registry_accept_live(registry, bridge_id, validation_ws_url != "", validation_ws_url, owner_user_id, replaced_farewell)
 	if !admitted do return Hello_Result{}, false, domain.domain_error(.Bridge_Busy, "hub live bridge capacity is exhausted")
 	return Hello_Result{accepted = true, replaced_existing = replaced, generation = generation}, true, domain.Domain_Error{}
 }

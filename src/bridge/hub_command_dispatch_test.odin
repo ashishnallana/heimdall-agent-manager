@@ -1,7 +1,9 @@
 package main
 
 import "core:strings"
+import "core:sync"
 import "core:testing"
+import ws "odin_test:lib/ws"
 
 @(test)
 bridge_dispatch_queue_take_transfers_job_ownership :: proc(t: ^testing.T) {
@@ -191,5 +193,120 @@ bridge_dispatch_resolve_id_rejects_idless_non_wake_commands :: proc(t: ^testing.
 		defer delete(id)
 		testing.expectf(t, !ok, "%s without id must resolve ok=false", command_type)
 		testing.expect_value(t, id, "")
+	}
+}
+
+@(test)
+bridge_dispatch_spec_accepts_status_ack_and_connection_replaced :: proc(t: ^testing.T) {
+	// Both are hub->bridge control frames handled on the reader (queued=false), so
+	// bridge_command_dispatch returns false and they fall through to
+	// bridge_hub_handle_command instead of drawing an unknown_command reply.
+	for command_type in ([]string{"agent_instance_status_ack", "connection_replaced"}) {
+		spec, known := bridge_command_spec(command_type)
+		testing.expectf(t, known, "%s must be a known hub frame", command_type)
+		testing.expectf(t, !spec.queued, "%s must not be queued", command_type)
+		testing.expectf(t, !spec.requires_id, "%s must not require an id", command_type)
+	}
+}
+
+@(test)
+bridge_hub_replaced_backoff_next_doubles_to_cap :: proc(t: ^testing.T) {
+	expected := []int{30, 60, 120, 240, 300, 300}
+	prev := 0
+	for want in expected {
+		prev = bridge_hub_replaced_backoff_next(prev)
+		testing.expect_value(t, prev, want)
+	}
+}
+
+@(test)
+bridge_hub_connection_replaced_sets_backoff_and_status_ack_is_noop :: proc(t: ^testing.T) {
+	// The only test touching the replaced flag/backoff globals; restore them after.
+	saved_flag := sync.atomic_load(&bridge_hub_replaced_flag)
+	saved_backoff := sync.atomic_load(&bridge_hub_replaced_backoff_s)
+	defer {
+		sync.atomic_store(&bridge_hub_replaced_flag, saved_flag)
+		sync.atomic_store(&bridge_hub_replaced_backoff_s, saved_backoff)
+	}
+	sync.atomic_store(&bridge_hub_replaced_flag, false)
+	sync.atomic_store(&bridge_hub_replaced_backoff_s, 0)
+	conn: ws.Connection
+
+	// agent_instance_status_ack: silent no-op, touches no reconnect state.
+	bridge_hub_handle_command(&conn, `{"type":"agent_instance_status_ack","protocol_version":1,"payload":{"agent_instance_id":"inst_1","applied":true}}`)
+	testing.expect(t, !sync.atomic_load(&bridge_hub_replaced_flag), "status ack must not flag a replacement")
+
+	replaced_frame := `{"type":"connection_replaced","protocol_version":1,"payload":{"reason":"newer_bridge_connection"}}`
+	bridge_hub_handle_command(&conn, replaced_frame)
+	testing.expect(t, sync.atomic_load(&bridge_hub_replaced_flag), "connection_replaced flags the reconnect loop")
+	// The hub answers every frame on a stale socket; repeats on one connection do not double.
+	bridge_hub_handle_command(&conn, replaced_frame)
+	backoff, replaced := bridge_hub_take_replaced_backoff()
+	testing.expect(t, replaced)
+	testing.expect_value(t, backoff, 30)
+
+	// Consecutive replaced connections double.
+	bridge_hub_handle_command(&conn, replaced_frame)
+	backoff, replaced = bridge_hub_take_replaced_backoff()
+	testing.expect(t, replaced)
+	testing.expect_value(t, backoff, 60)
+
+	// A connection that closes without replacement resets the backoff.
+	backoff, replaced = bridge_hub_take_replaced_backoff()
+	testing.expect(t, !replaced)
+	testing.expect_value(t, backoff, 0)
+	bridge_hub_handle_command(&conn, replaced_frame)
+	backoff, replaced = bridge_hub_take_replaced_backoff()
+	testing.expect(t, replaced)
+	testing.expect_value(t, backoff, 30)
+}
+
+// Every frame type the hub writes to a bridge runtime socket. Derived (2026-10-11)
+// by enumerating the frame builders in src/hub/** whose output goes to a bridge:
+//   - `"type":"<x>"` literals (escaped and raw-string) in builders sent via
+//     bridge_command_send_runtime / send_runtime_command(_wait) /
+//     write_ws_text_frame_locked on the bridge socket;
+//   - command_type values fed to the generic builders bridge_fs_command_json,
+//     project_fs_command_json, project_vcs_command_json, instance_fs_command_json
+//     (bridge_fs_relay / project_handle_vcs_write / Project_*_Command literals).
+// Excluded: hub->UI websocket frames (chat_event, resource_changed, output, screen,
+// status, stream_ready/closed, shell_session_*, lsp_* to the browser, user_ws_ready)
+// and the handshake frames bridge_ready/bridge_error, which hub_runtime_client
+// consumes before dispatch. Adding a new hub->bridge command requires updating BOTH
+// this list and bridge_command_spec.
+HUB_TO_BRIDGE_RUNTIME_FRAME_TYPES := []string{
+	// control / acks
+	"bridge_heartbeat_ack", "agent_instance_status_ack", "connection_replaced",
+	"provider_catalog", "provider_catalog_version",
+	// bridge lifecycle
+	"bridge_lock", "bridge_unseal", "set_telemetry", "bridge_update", "provider_discover",
+	// agents
+	"launch_agent", "launch_provider_test", "stop_agent", "wake_agent",
+	"get_agent_pane", "capture_agent_pane",
+	"notify_agent_message", "notify_title_nudge", "notify_task_nudge", "notify_shell_run", "task_status_changed_notify",
+	// lsp
+	"lsp_start", "lsp_stop", "lsp_send",
+	// shell
+	"shell_pty_input", "shell_pty_resize", "shell_start", "shell_background", "shell_capture", "shell_get_pane",
+	"shell_kill", "shell_logs", "shell_restart", "shell_set_port", "shell_signal",
+	"shell_stream_attach", "shell_stream_detach",
+	// tunnels / preview proxy
+	"tunnel_open", "tunnel_data", "tunnel_close", "proxy_data", "proxy_close",
+	// filesystem
+	"validate_project_path", "fs_list_dir", "fs_stat", "fs_read_file", "fs_make_dir", "fs_create_file",
+	"fs_write_file", "fs_batch_write", "fs_move", "fs_delete", "fs_find_files", "fs_grep",
+	"agent_run_dir_list", "agent_run_dir_read",
+	// vcs
+	"vcs_capabilities", "vcs_status", "vcs_files", "vcs_diff", "vcs_log", "vcs_commit_diff", "vcs_workspaces",
+	"vcs_stage", "vcs_unstage", "vcs_revert", "vcs_save_file", "vcs_commit", "vcs_upload", "vcs_push", "vcs_sync", "vcs_pull",
+}
+
+@(test)
+bridge_dispatch_spec_covers_every_hub_to_bridge_frame :: proc(t: ^testing.T) {
+	// A hub frame missing from bridge_command_spec draws unknown_command and is
+	// dropped (the wake_agent/status-ack regressions after 551b0ba6).
+	for command_type in HUB_TO_BRIDGE_RUNTIME_FRAME_TYPES {
+		_, known := bridge_command_spec(command_type)
+		testing.expectf(t, known, "hub->bridge frame %q is missing from bridge_command_spec", command_type)
 	}
 }

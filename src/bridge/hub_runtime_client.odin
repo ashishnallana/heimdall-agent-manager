@@ -267,6 +267,46 @@ bridge_hub_connection_teardown :: proc(conn: ^ws.Connection) {
 	ws.close(conn)
 }
 
+// connection_replaced handling: the hub sends it on the OLD socket when the same
+// bridge id reconnects ("newest connection wins"). A flat 500ms reconnect would make
+// two processes sharing one identity flap forever, so a replaced connection waits a
+// long, doubling backoff instead. The reader sets the flag and the next backoff; the
+// reconnect loop consumes them. Atomic because they cross the handler/loop boundary.
+BRIDGE_HUB_REPLACED_BACKOFF_MIN_S :: 30
+BRIDGE_HUB_REPLACED_BACKOFF_MAX_S :: 300
+bridge_hub_replaced_flag: bool
+bridge_hub_replaced_backoff_s: int
+
+// bridge_hub_replaced_backoff_next returns the backoff after one more consecutive
+// replacement: 30s first, doubling, capped at 300s.
+bridge_hub_replaced_backoff_next :: proc(prev_s: int) -> int {
+	if prev_s <= 0 do return BRIDGE_HUB_REPLACED_BACKOFF_MIN_S
+	return min(prev_s * 2, BRIDGE_HUB_REPLACED_BACKOFF_MAX_S)
+}
+
+// bridge_hub_note_connection_replaced records a replacement and returns the backoff
+// (seconds) the reconnect loop will wait once this connection closes. The hub answers
+// EVERY frame on a stale socket with connection_replaced, so repeats on the same
+// connection neither advance the backoff again nor report first=true.
+bridge_hub_note_connection_replaced :: proc() -> (backoff_s: int, first: bool) {
+	if sync.atomic_load(&bridge_hub_replaced_flag) do return sync.atomic_load(&bridge_hub_replaced_backoff_s), false
+	next := bridge_hub_replaced_backoff_next(sync.atomic_load(&bridge_hub_replaced_backoff_s))
+	sync.atomic_store(&bridge_hub_replaced_backoff_s, next)
+	sync.atomic_store(&bridge_hub_replaced_flag, true)
+	return next, true
+}
+
+// bridge_hub_take_replaced_backoff is called once per closed READY connection. It
+// returns the backoff to wait if that connection was replaced; otherwise the
+// connection ended normally, so the consecutive-replacement backoff resets to 0.
+bridge_hub_take_replaced_backoff :: proc() -> (backoff_s: int, replaced: bool) {
+	if sync.atomic_exchange(&bridge_hub_replaced_flag, false) {
+		return sync.atomic_load(&bridge_hub_replaced_backoff_s), true
+	}
+	sync.atomic_store(&bridge_hub_replaced_backoff_s, 0)
+	return 0, false
+}
+
 bridge_hub_runtime_worker :: proc() {
 	if strings.trim_space(bridge_config.daemon_url) == "" || strings.trim_space(bridge_config.bridge_token) == "" {
 		fmt.println("bridge hub runtime disabled: missing daemon_url or bridge_token (has the bridge enrolled? check the bridge_token/--bridge-token-file)")
@@ -369,6 +409,14 @@ bridge_hub_runtime_worker :: proc() {
 			// does not have, and would additionally start running it on the two paths
 			// below that never had a ready connection.
 			bridge_lsp_stop_all()
+			if backoff_s, replaced := bridge_hub_take_replaced_backoff(); replaced {
+				// Never exit here: under systemd Restart=always that would just
+				// restart the process and keep the flapping.
+				fmt.printfln("bridge hub runtime: connection closed after replacement, reconnecting in %ds…", backoff_s)
+				bridge_hub_connection_teardown(&conn)
+				time.sleep(time.Duration(backoff_s) * time.Second)
+				continue
+			}
 			fmt.println("bridge hub runtime: connection closed, reconnecting…")
 		} else if got_error {
 			delete(hub_catalog_etag)
@@ -556,6 +604,19 @@ bridge_hub_handle_command :: proc(conn: ^ws.Connection, text: string) {
 		}
 		schedules_version := extract_json_int(text, "schedules_version", 0)
 		bridge_action_scheduler_notify_version(schedules_version)
+		return
+	}
+	if type == "agent_instance_status_ack" {
+		// The hub acks every agent status report; the bridge relies on periodic
+		// re-reports rather than acks, so this is deliberately a no-op.
+		return
+	}
+	if type == "connection_replaced" {
+		backoff_s, first := bridge_hub_note_connection_replaced()
+		if !first do return
+		reason := extract_json_string(text, "reason", "unknown")
+		defer delete(reason)
+		fmt.printfln("bridge hub runtime: connection replaced by a newer connection for this bridge id (reason=%s); another bridge process may be running with the same identity — backing off %ds", reason, backoff_s)
 		return
 	}
 	if type == "bridge_update" {

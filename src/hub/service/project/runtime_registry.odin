@@ -6,6 +6,7 @@ import "core:strings"
 import "core:sync"
 import "core:time"
 import domain "odin_test:hub/domain"
+import ws "odin_test:lib/ws"
 
 Runtime_Registry_Limits :: struct {
 	live_bridges: int,
@@ -52,6 +53,7 @@ Bridge_Runtime_Connection :: struct {
 	references: int, // registry.metadata_mutex
 	retired: bool, // atomic
 	writer_mutex: sync.Mutex,
+	farewell_sent: bool, // writer_mutex; see bridge_runtime_connection_send_farewell
 	retire_mutex: sync.Mutex,
 	state_mutex: sync.Mutex,
 	instances: map[string]Runtime_Instance_State,
@@ -207,7 +209,31 @@ bridge_runtime_connection_retire :: proc(r: ^Bridge_Runtime_Registry, c: ^Bridge
 	bridge_runtime_connection_release(r, c)
 }
 
-bridge_runtime_registry_accept_live :: proc(r: ^Bridge_Runtime_Registry, bridge_id: string, adapter: bool, url: string, owner: string = "") -> (replaced: bool, generation: int, ok: bool) {
+// bridge_runtime_connection_send_farewell writes one final text frame (the hub's
+// connection_replaced notice) to a SUPERSEDED connection's own socket, at most once
+// per connection however many paths race to say it.
+//
+// Writer discipline: it holds THIS (old) connection's writer_mutex — never the
+// replacement's — and reads c.socket under it. Every writer serializes on that mutex,
+// and quiesce zeroes c.socket while holding it, before the reader may close the fd;
+// so a non-zero socket seen here is still this connection's descriptor and the frame
+// cannot interleave with another write or land on a reused fd. retired is NOT
+// checked: the caller is by definition talking to a retired connection. A writer
+// already blocked on a stalled peer delays this by at most the 5s Send_Timeout that
+// set_command_socket installs.
+bridge_runtime_connection_send_farewell :: proc(c: ^Bridge_Runtime_Connection, text: string) -> bool {
+	if c == nil || text == "" do return false
+	sync.lock(&c.writer_mutex)
+	defer sync.unlock(&c.writer_mutex)
+	if c.farewell_sent || c.socket == net.TCP_Socket(0) do return false
+	c.farewell_sent = true
+	return ws.write_server_text(c.socket, text, false) == .Ok
+}
+
+// replaced_farewell, when set, is delivered to the superseded connection (if any)
+// before its retirement shuts the socket down — once the shutdown has run, nothing
+// can reach that peer any more.
+bridge_runtime_registry_accept_live :: proc(r: ^Bridge_Runtime_Registry, bridge_id: string, adapter: bool, url: string, owner: string = "", replaced_farewell: string = "") -> (replaced: bool, generation: int, ok: bool) {
 	if r == nil || bridge_id == "" do return false, 0, false
 	sync.lock(&r.metadata_mutex)
 	old, exists := r.connections[bridge_id]
@@ -232,7 +258,11 @@ bridge_runtime_registry_accept_live :: proc(r: ^Bridge_Runtime_Registry, bridge_
 	r.connection_count += 1
 	generation = c.generation
 	sync.unlock(&r.metadata_mutex)
-	if exists do bridge_runtime_connection_retire(r, old)
+	if exists {
+		// The registry's lease keeps old alive until retire releases it below.
+		_ = bridge_runtime_connection_send_farewell(old, replaced_farewell)
+		bridge_runtime_connection_retire(r, old)
+	}
 	return exists, generation, true
 }
 

@@ -1212,7 +1212,7 @@ bridge_ws_upgrade_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_Soc
 	if !found { _ = write_ws_text_frame(client, bridge_ws_error_payload(lookup_err.message)); return }
 	defer domain.bridge_destroy(&admitted_bridge)
 	if body_bridge_id != "" && body_bridge_id != admitted_bridge.bridge_id { _ = write_ws_text_frame(client, bridge_ws_error_payload("bridge_id does not match bearer token")); return }
-	hello, hello_ok, hello_err := bridge_runtime_service.runtime_accept_hello(h.bridge_runtime_registry, admitted_bridge.bridge_id, json_int(hello_text, "protocol_version", 1), validation_url, string(admitted_bridge.owner_user_id))
+	hello, hello_ok, hello_err := bridge_runtime_service.runtime_accept_hello(h.bridge_runtime_registry, admitted_bridge.bridge_id, json_int(hello_text, "protocol_version", 1), validation_url, string(admitted_bridge.owner_user_id), bridge_connection_replaced_payload())
 	if !hello_ok { _ = write_ws_text_frame(client, bridge_ws_error_payload(hello_err.message)); return }
 	connection := project_service.bridge_runtime_connection_acquire(h.bridge_runtime_registry, admitted_bridge.bridge_id, hello.generation)
 	if connection == nil do return
@@ -1451,7 +1451,7 @@ bridge_ws_runtime_loop :: proc(
 			reason = read_reason
 			return
 		}
-		if !bridge_ws_process_frame(h, bridge_id, connection_generation, client, &reassemblies, text) {
+		if !bridge_ws_process_frame(h, bridge_id, connection_generation, client, &reassemblies, text, (^project_service.Bridge_Runtime_Connection)(reader.control_context)) {
 			// process_frame refuses a frame either because a newer connection replaced
 			// this one (it says so on the wire via bridge_connection_replaced_payload)
 			// or because dispatch rejected it. Distinguish the two: a replacement is
@@ -1462,13 +1462,20 @@ bridge_ws_runtime_loop :: proc(
 	}
 }
 
-bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connection_generation: int, client: net.TCP_Socket, reassemblies: ^[dynamic]Bridge_Chunk_Reassembly, raw_text: string) -> bool {
+// connection is this reader's own registry connection (nil in unit tests that drive
+// frames without a registered socket).
+bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connection_generation: int, client: net.TCP_Socket, reassemblies: ^[dynamic]Bridge_Chunk_Reassembly, raw_text: string, connection: ^project_service.Bridge_Runtime_Connection = nil) -> bool {
 	temp := runtime.default_temp_allocator_temp_begin()
 	defer runtime.default_temp_allocator_temp_end(temp)
 	text := raw_text
 	if project_service.bridge_runtime_registry_generation(h.bridge_runtime_registry, bridge_id) != connection_generation {
 		delete(text)
-		_ = write_ws_text_frame_locked(h, bridge_id, client, bridge_connection_replaced_payload())
+		// A newer hello normally delivers connection_replaced while retiring us
+		// (accept_live). This covers the window where we observe the generation flip
+		// before that retirement runs. It must go to OUR socket under OUR writer mutex:
+		// write_ws_text_frame_locked resolves bridge_id to the NEW connection and so
+		// could never reach this one. send_farewell is once-only per connection.
+		_ = project_service.bridge_runtime_connection_send_farewell(connection, bridge_connection_replaced_payload())
 		return false
 	}
 	type := json_string(text, "type")
