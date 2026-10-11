@@ -4662,8 +4662,25 @@ bridge_tunnel_data_drain_outgoing :: proc(conn: ^ws.Connection) {
 	delete(items)
 }
 
+// bridge_preview_dial_loopback connects to a preview server without ever leaving the
+// loopback interface. IPv4 remains the preferred path; IPv6 is tried only when the
+// IPv4 connection fails.
+bridge_preview_dial_loopback :: proc(port: int) -> (net.TCP_Socket, bool) {
+	tcp_conn, dial_err := net.dial_tcp_from_address_and_port(net.IP4_Loopback, port)
+	if dial_err == nil {
+		return tcp_conn, true
+	}
+
+	tcp_conn, dial_err = net.dial_tcp_from_address_and_port(net.IP6_Loopback, port)
+	if dial_err == nil {
+		return tcp_conn, true
+	}
+
+	return net.TCP_Socket(0), false
+}
+
 // bridge_hub_handle_tunnel_open handles a tunnel_open command from the hub.
-// Validates session ownership, dials 127.0.0.1:{server_port}, and starts the TCP→WS pump.
+// Validates session ownership, dials loopback:{server_port}, and starts the TCP→WS pump.
 bridge_hub_handle_tunnel_open :: proc(conn: ^ws.Connection, text: string) {
 	stream_id  := extract_json_string(text, "stream_id", "")
 	session_id := extract_json_string(text, "session_id", "")
@@ -4709,10 +4726,9 @@ bridge_hub_handle_tunnel_open :: proc(conn: ^ws.Connection, text: string) {
 		return
 	}
 
-	// Security: only dial loopback.
-	addr := net.IP4_Loopback // {127, 0, 0, 1}
-	tcp_conn, dial_err := net.dial_tcp_from_address_and_port(addr, session.server_port)
-	if dial_err != nil {
+	// Security: only dial IPv4 or IPv6 loopback.
+	tcp_conn, connected := bridge_preview_dial_loopback(session.server_port)
+	if !connected {
 		_send_tunnel_close(conn, stream_id, "port_closed")
 		delete(stream_id)
 		delete(session_id)
