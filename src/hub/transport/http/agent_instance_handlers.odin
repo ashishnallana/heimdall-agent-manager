@@ -28,7 +28,7 @@ agent_instance_input_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	data := json_string(req.body, "data")
 	defer delete(data)
 
-	sent, err := agent_service.agent_service_send_pty_input(h.agents, auth_ctx, instance_id, data)
+	sent, err := agent_service.agent_service_send_pty_input(h.agents, auth_ctx, instance_id, data, wait_for_result = true)
 	if !sent do return respond_error(err, req.request_id)
 
 	return respond_success("{\"ok\":true}", req.request_id, auth_ctx_server_time(req))

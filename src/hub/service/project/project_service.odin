@@ -6,6 +6,7 @@ import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 import ownership "odin_test:hub/service/ownership"
 import platform "odin_test:hub/platform"
+import jsonx "odin_test:lib/jsonx"
 
 Validate_Project_Path_Command :: struct {
 	type: string,
@@ -84,6 +85,34 @@ bridge_command_send_runtime :: proc(sink: Bridge_Command_Sink, command: Runtime_
 bridge_command_send_runtime_wait :: proc(sink: Bridge_Command_Sink, command: Runtime_Command, timeout_ms: int) -> (string, bool, domain.Domain_Error) {
 	if sink.send_runtime_command_wait == nil do return "", false, domain.domain_error(.Bridge_Offline, "bridge command sink is not connected")
 	return sink.send_runtime_command_wait(sink.ctx, command, timeout_ms)
+}
+
+// PTY_INPUT_REPLY_TIMEOUT_MS bounds how long a REST keystroke waits for the bridge's
+// command_result. The bridge answers input synchronously, so this only matters when
+// the bridge is wedged.
+PTY_INPUT_REPLY_TIMEOUT_MS :: 5000
+
+// bridge_command_send_runtime_checked sends a command and, when wait_for_result is set
+// and the sink can wait, reads the bridge's command_result so a TYPED refusal surfaces to the caller
+// (T10, REQ-T10-2: `vault_locked` -> domain.Vault_Locked / HTTP 423) instead of
+// being dropped on the floor by a fire-and-forget send. Any other outcome keeps the
+// fire-and-forget contract: delivered == true. A sink without a wait proc (older
+// wiring, test doubles) falls back to the plain send.
+bridge_command_send_runtime_checked :: proc(sink: Bridge_Command_Sink, command: Runtime_Command, wait_for_result: bool, timeout_ms := PTY_INPUT_REPLY_TIMEOUT_MS) -> (bool, domain.Domain_Error) {
+	if !wait_for_result || sink.send_runtime_command_wait == nil do return bridge_command_send_runtime(sink, command)
+	reply, ok, err := bridge_command_send_runtime_wait(sink, command, timeout_ms)
+	if !ok do return false, err
+	defer delete(reply)
+	return bridge_reply_refusal(reply, command.bridge_id)
+}
+
+// bridge_reply_refusal maps a bridge reply's `error_code` to a typed domain error.
+// ok is true when the reply carries no code with a typed mapping.
+bridge_reply_refusal :: proc(reply, bridge_id: string) -> (ok: bool, err: domain.Domain_Error) {
+	code := jsonx.extract_string(reply, "error_code", allocator = context.temp_allocator)
+	if code == "" do return true, {}
+	if typed, mapped := domain.bridge_refusal_error(code, bridge_id); mapped do return false, typed
+	return true, {}
 }
 
 

@@ -245,7 +245,7 @@ shell_session_input_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	defer delete(enc_b64)
 
 	sink_override: project_service.Bridge_Command_Sink = {}
-	sent, err := bridge_service.send_shell_input(h.bridges, auth_ctx, session.bridge_id, session_id, data, enc_b64, sink_override)
+	sent, err := bridge_service.send_shell_input(h.bridges, auth_ctx, session.bridge_id, session_id, data, enc_b64, sink_override, wait_for_result = true)
 	if !sent do return respond_error(err, req.request_id)
 	return respond_success("{\"ok\":true}", req.request_id, auth_ctx_server_time(req))
 }

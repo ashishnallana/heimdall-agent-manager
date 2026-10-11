@@ -110,11 +110,15 @@ export const BRIDGE_VAULT_STATUSES: readonly BridgeVaultStatus[] = [
 
 /**
  * T9 (REQ-T9-2): a LOCKED bridge refuses hub-driven commands with the stable code
- * `vault_locked` and reason "unauthorized: vault locked". The hub forwards the reason
- * inside its error message rather than the code, so both spellings are matched. Pure
- * so the shell dialogs can share it and `node --test` can pin it.
+ * `vault_locked` and reason "unauthorized: vault locked". T10 (REQ-T10-2): the hub now
+ * answers that refusal as HTTP 423 with `error.code === "vault_locked"`; older hubs
+ * forwarded only the reason inside a 500's message. All three are matched. Pure so the
+ * shell dialogs can share it and `node --test` can pin it.
  */
 export function isBridgeVaultLockedError(error: unknown): boolean {
+  const e = error as any;
+  if (e?.data?.error?.code === 'vault_locked' || e?.code === 'vault_locked') return true;
+  if (e?.status === 423 || e?.originalStatus === 423) return true;
   return /vault[_ ]locked/i.test(describeApiError(error));
 }
 

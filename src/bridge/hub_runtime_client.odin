@@ -1619,17 +1619,43 @@ bridge_runtime_apply_update :: proc(
 }
 
 bridge_hub_handle_agent_pty_input :: proc(conn: ^ws.Connection, text: string) {
-	command_id := extract_json_string(text, "command_id", "")
+	temp := runtime.default_temp_allocator_temp_begin()
+	defer runtime.default_temp_allocator_temp_end(temp)
+	command_id := extract_json_string(text, "command_id", "", context.temp_allocator)
 	if cached, ok := bridge_runtime_cached_command(command_id); ok {
 		if conn != nil do _ = bridge_hub_send(conn, cached)
 		return
 	}
-	payload, has_payload := bridge_provider_json_extract_object(text, "payload")
-	instance_id := extract_json_string(text, "agent_instance_id", "")
-	if instance_id == "" && has_payload do instance_id = extract_json_string(payload, "agent_instance_id", "")
+	payload, has_payload := bridge_provider_json_extract_object(text, "payload", context.temp_allocator)
+	instance_id := extract_json_string(text, "agent_instance_id", "", context.temp_allocator)
+	if instance_id == "" && has_payload do instance_id = extract_json_string(payload, "agent_instance_id", "", context.temp_allocator)
 
-	data := extract_json_string(text, "data", "")
-	if data == "" && has_payload do data = extract_json_string(payload, "data", "")
+	data := extract_json_string(text, "data", "", context.temp_allocator)
+	if data == "" && has_payload do data = extract_json_string(payload, "data", "", context.temp_allocator)
+
+	// T10 (REQ-T10-1): same tri-state gate as shell_pty_input. The current hub sends
+	// agent-pane keystrokes as `shell_pty_input` (agent_service.agent_pty_input_command_json),
+	// but this legacy type is still dispatched and carries PLAINTEXT `data` only — it has
+	// no encrypted form. So it is accepted only where plaintext is: a never-configured
+	// (Disabled) bridge. Locked answers vault_locked; Unlocked refuses plaintext.
+	vault_status := bridge_vault_status()
+	switch vault_status {
+	case .Locked:
+		fmt.println("bridge agent_pty_input rejected: vault_locked for instance", instance_id)
+		bridge_pty_input_reply_vault_locked(conn, command_id, instance_id)
+		return
+	case .Unlocked:
+		fmt.println("bridge agent_pty_input rejected: plaintext input on an unlocked vault (use encrypted shell_pty_input) for instance", instance_id)
+		if command_id != "" {
+			result := bridge_command_result_error_json(command_id, "invalid_vault_key")
+			defer delete(result)
+			bridge_runtime_cache_command(command_id, result)
+			if conn != nil do _ = bridge_hub_send(conn, result)
+		}
+		return
+	case .Disabled:
+		// Never configured: plaintext input is allowed by design.
+	}
 
 	ok := bridge_pty_host_deliver_raw_input(instance_id, data)
 	if !ok do fmt.println("bridge agent_pty_input delivery failed for instance", instance_id)
@@ -1730,6 +1756,11 @@ bridge_hub_handle_shell_pty_input :: proc(conn: ^ws.Connection, text: string) {
 	}
 	if !decoded_ok {
 		fmt.println("bridge shell_pty_input rejected:", reject_reason, "for shell", shell_id)
+		if vault_status == .Locked {
+			// T10: typed refusal so the hub/UI can show "locked" rather than a crash.
+			bridge_pty_input_reply_vault_locked(conn, command_id, shell_id)
+			return
+		}
 		if command_id != "" {
 			result := bridge_command_result_json(command_id, "failed", "")
 			defer delete(result)
@@ -3197,6 +3228,49 @@ bridge_command_result_json :: proc(command_id, status, runtime_status: string) -
 	return strings.to_string(b)
 }
 
+// bridge_command_result_error_json is a FAILED command_result that names why (T10,
+// REQ-T10-2): the hub maps a known error_code (e.g. `vault_locked`) to a typed API error
+// instead of the generic 500. The code sits in payload next to status, where the hub
+// already reads status from. Caller owns the result.
+bridge_command_result_error_json :: proc(command_id, error_code: string) -> string {
+	b := strings.builder_make()
+	strings.write_string(&b, "{\"type\":\"command_result\",\"protocol_version\":1,\"command_id\":\"")
+	bridge_runtime_write_json_string(&b, command_id)
+	strings.write_string(&b, "\",\"payload\":{\"status\":\"failed\",\"error_code\":\"")
+	bridge_runtime_write_json_string(&b, error_code)
+	strings.write_string(&b, "\"}}")
+	return strings.to_string(b)
+}
+
+// bridge_pty_vault_locked_frame_json is the typed in-stream signal (T10, REQ-T10-3) that
+// a pane's input or output was refused because this bridge's vault is locked. The hub
+// relays it to the pane's viewers as an `error` frame with code `vault_locked`, so the
+// UI never has to parse the human-readable banner. Caller owns the result.
+bridge_pty_vault_locked_frame_json :: proc(session_id: string, allocator := context.allocator) -> string {
+	b := strings.builder_make(allocator)
+	strings.write_string(&b, "{\"type\":\"shell_pty_vault_locked\",\"session_id\":\"")
+	bridge_runtime_write_json_string(&b, session_id)
+	strings.write_string(&b, "\",\"error_code\":\"vault_locked\"}")
+	return strings.to_string(b)
+}
+
+// bridge_pty_input_reply_vault_locked answers a keystroke refused by a Locked vault:
+// the command_result carries error_code `vault_locked` (cached like any result, so a
+// retried command_id gets the same answer) and the pane gets the typed stream frame.
+bridge_pty_input_reply_vault_locked :: proc(conn: ^ws.Connection, command_id, session_id: string) {
+	if command_id != "" {
+		result := bridge_command_result_error_json(command_id, "vault_locked")
+		defer delete(result)
+		bridge_runtime_cache_command(command_id, result)
+		if conn != nil do _ = bridge_hub_send(conn, result)
+	}
+	if session_id != "" && conn != nil {
+		frame := bridge_pty_vault_locked_frame_json(session_id)
+		defer delete(frame)
+		_ = bridge_hub_send(conn, frame)
+	}
+}
+
 bridge_command_result_payload_json :: proc(command_id, status, result_json: string) -> string {
 	b := strings.builder_make()
 	strings.write_string(&b, "{\"type\":\"command_result\",\"protocol_version\":1,\"command_id\":\"")
@@ -3591,6 +3665,8 @@ Bridge_Shell_Restart_Result :: struct {
 	command_id: string     `json:"command_id"`,
 	ok:         bool       `json:"ok"`,
 	pid:        Maybe(int) `json:"pid,omitempty"`,
+	// T10: machine-readable refusal reason (e.g. `vault_locked`); empty on success.
+	error_code: string     `json:"error_code,omitempty"`,
 }
 
 Bridge_Shell_Logs_Command :: struct {
@@ -4440,13 +4516,14 @@ bridge_hub_handle_shell_restart :: proc(conn: ^ws.Connection, text: string) {
 	// when a restart fails — the hub does not advance its row on a failure either.
 	new_run_seq := cmd.run_seq
 
-	send_result :: proc(conn: ^ws.Connection, session_id, command_id: string, ok: bool, pid: int) {
+	send_result :: proc(conn: ^ws.Connection, session_id, command_id: string, ok: bool, pid: int, error_code := "") {
 		res := Bridge_Shell_Restart_Result{
 			type       = "shell_restart_result",
 			session_id = session_id,
 			command_id = command_id,
 			ok         = ok,
 			pid        = pid if ok else nil,
+			error_code = error_code,
 		}
 		if data, err := json.marshal(res, allocator = context.temp_allocator); err == nil {
 			if conn != nil do _ = bridge_hub_send(conn, string(data))
@@ -4459,11 +4536,11 @@ bridge_hub_handle_shell_restart :: proc(conn: ^ws.Connection, text: string) {
 	}
 
 	// T9: a restart re-executes the stored cmd on the hub's say-so alone, so a Locked
-	// bridge must refuse it exactly as it refuses a fresh shell_start. This reply type
-	// carries no error field; the log line is the reason.
+	// bridge must refuse it exactly as it refuses a fresh shell_start. T10: the reply
+	// names the reason in error_code so the hub answers a typed 423, not a 500.
 	if bridge_vault_status() == .Locked {
 		fmt.println("bridge shell_restart rejected: vault_locked for session", session_id)
-		send_result(conn, session_id, command_id, false, 0)
+		send_result(conn, session_id, command_id, false, 0, "vault_locked")
 		return
 	}
 

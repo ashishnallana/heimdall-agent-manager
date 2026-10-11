@@ -6,6 +6,7 @@ import { shellResizeFrame } from './shellStreamFrames.ts';
 import { getActiveVaultKey } from '../../store/vaultSlice.ts';
 import { importRawKeyHex, AES_GCM_NONCE_BYTES, AES_GCM_TAG_BYTES } from '../../utils/vaultCrypto.ts';
 import { bytesToBase64, base64ToBytes, VAULT_ARMOR_PREFIX, MIN_ARMOR_PAYLOAD_BYTES } from '../../utils/vaultContent.ts';
+import { isVaultLockedError } from '../../utils/vaultLockedError.ts';
 
 const HEARTBEAT_INTERVAL_MS = 30000;
 const INITIAL_RECONNECT_DELAY_MS = 1000;
@@ -19,7 +20,8 @@ type ShellStreamMsg =
   | { type: 'stream_ready'; session_id?: string; [key: string]: any }
   | { type: 'stream_closed'; session_id?: string; exit_code?: number; [key: string]: any }
   | { type: 'status'; status: string }
-  | { type: 'error'; message: string };
+  // T10: `code`/`bridge_id` are set for typed errors (e.g. vault_locked).
+  | { type: 'error'; message: string; code?: string; bridge_id?: string; session_id?: string };
 
 export type UseShellStreamOptions = {
   sessionId: string | null;
@@ -29,6 +31,13 @@ export type UseShellStreamOptions = {
   onStreamReady?: (info?: { sessionId?: string; [key: string]: any }) => void;
   onStreamClosed?: (info?: { sessionId?: string; exitCode?: number; [key: string]: any }) => void;
   onError?: (message: string) => void;
+  /**
+   * T10 (REQ-T10-3): the hub reported this pane's bridge vault as locked (a typed
+   * `error` frame or a `vault_locked` close reason). Receives the raw frame/close so
+   * the caller can classify it with isVaultLockedError / vaultLockedBridgeId. Such a
+   * signal is NOT also reported through onError.
+   */
+  onVaultLocked?: (signal: unknown) => void;
   onClose?: () => void;
   /**
    * REQ-SHELL-18 — the pane's CURRENT geometry, read at the moment the socket opens.
@@ -198,6 +207,7 @@ export function useShellStream({
   onStreamReady,
   onStreamClosed,
   onError,
+  onVaultLocked,
   onClose,
   getGeometry,
   isVaultUnlocked: propIsVaultUnlocked,
@@ -229,6 +239,8 @@ export function useShellStream({
   useEffect(() => { onStreamReadyRef.current = onStreamReady; }, [onStreamReady]);
   useEffect(() => { onStreamClosedRef.current = onStreamClosed; }, [onStreamClosed]);
   useEffect(() => { onErrorRef.current = onError; }, [onError]);
+  const onVaultLockedRef = useRef(onVaultLocked);
+  useEffect(() => { onVaultLockedRef.current = onVaultLocked; }, [onVaultLocked]);
   useEffect(() => { onCloseRef.current = onClose; }, [onClose]);
   useEffect(() => { getGeometryRef.current = getGeometry; }, [getGeometry]);
 
@@ -514,8 +526,13 @@ export function useShellStream({
             console.log('[useShellStream] received status frame:', msg.status);
             onStatusRef.current?.(msg.status);
           } else if (msg.type === 'error') {
-            console.error('[useShellStream] received error frame from server:', msg.message);
-            onErrorRef.current?.(msg.message);
+            if (isVaultLockedError(msg)) {
+              console.warn('[useShellStream] bridge vault is locked for session:', (msg as any).session_id);
+              onVaultLockedRef.current?.(msg);
+            } else {
+              console.error('[useShellStream] received error frame from server:', msg.message);
+              onErrorRef.current?.(msg.message);
+            }
           } else if ((msg as any).type === 'ready') {
             console.log('[useShellStream] received ready frame for session:', (msg as any).session_id);
           }
@@ -560,6 +577,13 @@ export function useShellStream({
           setIsStreamReady(false);
           pendingKeyEventsRef.current = [];
           setConnected(false);
+
+          // T10: a locked vault is not a transport failure — no reconnect storm; the
+          // pane shows its locked overlay and re-attaches after the unseal.
+          if (isVaultLockedError({ reason: event.reason })) {
+            onVaultLockedRef.current?.(event);
+            return;
+          }
 
           // Auto-reconnect with exponential backoff if not explicitly stopped
           if (!stoppedRef.current && enabled && reconnectAttemptsRef.current < MAX_RECONNECT_ATTEMPTS) {

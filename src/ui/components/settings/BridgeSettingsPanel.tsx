@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo, type FormEvent } from 'react';
+import React, { useState, useCallback, useEffect, useMemo, useRef, type FormEvent } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import {
   Button,
@@ -51,6 +51,7 @@ import {
   type BridgeVaultStatus,
 } from '../../utils/bridgeVaultStatus';
 import VaultOnboardingModal from './VaultOnboardingModal';
+import { VAULT_LOCKED_SETTINGS_DESCRIPTION } from '../../utils/vaultLockedError';
 
 // REQ-BVS-3: the visible wording for each of the five per-bridge states. The state is
 // carried by these WORDS, not by the pill colour — `Unknown` is neutral and says so,
@@ -66,7 +67,7 @@ const BRIDGE_VAULT_STATUS_LABEL: Record<BridgeVaultStatus, string> = {
 const BRIDGE_VAULT_STATUS_DESCRIPTION: Record<BridgeVaultStatus, string> = {
   NotRunning: 'Bridge is offline. Its vault state cannot be determined and it holds no key.',
   NotConfigured: 'Encryption is not configured on this bridge. Files and terminal streams run unencrypted.',
-  Locked: 'Vault is locked on this bridge. Unseal it to resume encrypted file and terminal access.',
+  Locked: VAULT_LOCKED_SETTINGS_DESCRIPTION,
   Unlocked: 'Vault is unsealed on this bridge. Files and terminal chunks are encrypted with AES-256-GCM.',
   Unknown: 'This bridge has not reported a vault state (older build). Treated as unknown, not unlocked.',
 };
@@ -91,12 +92,23 @@ export interface BridgeSettingsPanelProps {
   bridges?: Bridge[];
   selectedBridgeId?: string;
   onOpenVaultSetup?: () => void;
+  /**
+   * T10 (REQ-T10-3): with `selectedBridgeId`, start that row's unseal once on mount —
+   * the SAME path as its Unlock / Configure button (the active key, or the existing
+   * master-password prompt scoped to this bridge). Used by a locked pane's
+   * "Unlock vault" button; there is no second key-entry surface.
+   */
+  autoUnseal?: boolean;
+  /** Fired after an unseal payload was delivered to a bridge. */
+  onBridgeUnsealed?: (bridgeId: string) => void;
 }
 
 export default function BridgeSettingsPanel({
   bridges: propBridges,
   selectedBridgeId,
   onOpenVaultSetup,
+  autoUnseal = false,
+  onBridgeUnsealed,
 }: BridgeSettingsPanelProps) {
   const dispatch = useDispatch();
   const queryBridgesResult = useListBridgesQuery(undefined, { skip: Boolean(propBridges && propBridges.length > 0) });
@@ -180,6 +192,9 @@ export default function BridgeSettingsPanel({
   // flipped optimistically in local state (REQ-BVS-4: a failed lock must not look like
   // a success). Invalidating the tag also refreshes the copy held by a parent that
   // passed `bridges` in as a prop.
+  const onBridgeUnsealedRef = useRef(onBridgeUnsealed);
+  useEffect(() => { onBridgeUnsealedRef.current = onBridgeUnsealed; }, [onBridgeUnsealed]);
+
   const refreshBridges = useCallback(() => {
     dispatch(bridgeSupportApi.util.invalidateTags([{ type: 'Bridges' as const, id: 'LIST' }]) as any);
   }, [dispatch]);
@@ -277,6 +292,7 @@ export default function BridgeSettingsPanel({
       await unsealBridgeE2EE(bridgeId, pubKey, activeKey);
       setBridgeNotice((prev) => ({ ...prev, [bridgeId]: 'Unseal payload delivered to this bridge.' }));
       refreshBridges();
+      onBridgeUnsealedRef.current?.(bridgeId);
     } catch (err: any) {
       setBridgeError((prev) => ({
         ...prev,
@@ -307,6 +323,16 @@ export default function BridgeSettingsPanel({
     }
     void handleBridgeUnlock(bridgeId);
   }, [handleBridgeUnlock, promptForUnsealKey]);
+
+  // T10: a locked pane's "Unlock vault" opens this panel scoped to its bridge and
+  // goes straight into that row's unseal — Configure's logic, which is Unlock when a
+  // key is held and the scoped master-password prompt when not. Once per mount.
+  const autoUnsealStartedRef = useRef(false);
+  useEffect(() => {
+    if (!autoUnseal || !selectedBridgeId || autoUnsealStartedRef.current) return;
+    autoUnsealStartedRef.current = true;
+    handleBridgeConfigure(selectedBridgeId);
+  }, [autoUnseal, selectedBridgeId, handleBridgeConfigure]);
 
   const handleUnlockClick = useCallback(async () => {
     setUnlockError('');
@@ -424,6 +450,7 @@ export default function BridgeSettingsPanel({
           }
           await unsealBridgeE2EE(bridgeId, pubKey, unsealHex);
           unsealedCount++;
+          onBridgeUnsealedRef.current?.(bridgeId);
         } catch (bridgeErr: any) {
           // REQ-UNSEAL-4: a failed unseal is reported, not just logged to a console
           // nobody is reading, and never retried with a weaker payload.

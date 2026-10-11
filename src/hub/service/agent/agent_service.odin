@@ -784,7 +784,11 @@ shell_pty_input_command_json :: agent_pty_input_command_json
 // agent_service_send_pty_input forwards keystrokes to the instance's bridge. `data` is
 // plaintext and `enc_b64` is vault ciphertext; exactly one of them is normally set — see
 // agent_pty_input_command_json above for why the ciphertext is relayed rather than decrypted.
-agent_service_send_pty_input :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, instance_id: string, data: string, enc_b64: string = "") -> (bool, domain.Domain_Error) {
+//
+// wait_for_result (REST callers, T10 REQ-T10-2) waits for the bridge's command_result so a
+// `vault_locked` refusal returns as a typed error; the pane WebSocket stays fire-and-forget
+// and is told by the bridge's in-stream `shell_pty_vault_locked` frame instead.
+agent_service_send_pty_input :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, instance_id: string, data: string, enc_b64: string = "", wait_for_result := false) -> (bool, domain.Domain_Error) {
 	inst, ok, err := get_instance(service, auth, instance_id)
 	if !ok do return false, err
 
@@ -798,14 +802,13 @@ agent_service_send_pty_input :: proc(service: ^Agent_Service, auth: contracts.Au
 	}
 
 	cmd_json := agent_pty_input_command_json(cmd_id, instance_id, data, enc_b64)
-	sent, send_err := project_service.bridge_command_send_runtime(
-		service.bridge_command_sink,
-		project_service.Runtime_Command{
-			bridge_id = inst.bridge_id,
-			command_id = cmd_id,
-			body_json = cmd_json,
-		},
-	)
+	defer delete(cmd_json)
+	command := project_service.Runtime_Command{
+		bridge_id = inst.bridge_id,
+		command_id = cmd_id,
+		body_json = cmd_json,
+	}
+	sent, send_err := project_service.bridge_command_send_runtime_checked(service.bridge_command_sink, command, wait_for_result)
 	if !sent do return false, send_err
 
 	return true, domain.Domain_Error{}

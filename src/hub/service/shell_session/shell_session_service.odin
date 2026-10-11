@@ -433,6 +433,56 @@ shell_session_broadcast_stream_closed :: proc(svc: ^Shell_Session_Service, sessi
 	}
 }
 
+// shell_session_broadcast_vault_locked relays a bridge's typed `shell_pty_vault_locked`
+// signal (T10, REQ-T10-3) to every viewer of the pane as
+//   {"type":"error","code":"vault_locked","bridge_id":…,"session_id":…,"message":…}
+// so agent and shell panes switch to their locked overlay without parsing the banner.
+// Same ownership check as output: a bridge may only speak for streams it owns.
+shell_session_broadcast_vault_locked :: proc(svc: ^Shell_Session_Service, session_id, source_bridge_id: string) {
+	if svc == nil || session_id == "" || source_bridge_id == "" do return
+	if !shell_session_bridge_owns_stream(svc, session_id, source_bridge_id) do return
+	sockets := _copy_viewers(svc, session_id)
+	defer delete(sockets)
+	if len(sockets) == 0 do return
+	frame := _vault_locked_frame_json(session_id, source_bridge_id)
+	defer delete(frame)
+	for sock in sockets {
+		result := shell_session_write_viewer_frame(svc, session_id, sock, frame)
+		_log_viewer_write("vault_locked", session_id, result, len(frame))
+		if _viewer_write_ends_session(result) {
+			// The queue/worker has already woken the reader. It owns detach.
+		}
+	}
+}
+
+// _publish_start_refused is the exit event the started-event comment in
+// shell_session_create promises: the `starting` trace published before the bridge
+// round trip is corrected on the same channel when the start fails, rather than
+// left looking live until the next list refresh. A typed refusal (vault_locked)
+// carries its code; anything else is a plain failed exit.
+_publish_start_refused :: proc(svc: ^Shell_Session_Service, owner, session_id: string, err: domain.Domain_Error, bridge_id: string) {
+	if svc == nil || svc.events == nil do return
+	code := domain.VAULT_LOCKED_ERROR_CODE if err.code == .Vault_Locked else ""
+	evt := _shell_exited_event_json(session_id, domain.Shell_Session_Status_Failed, 0, false, code, bridge_id)
+	events.publish_owned(svc.events, owner, evt)
+}
+
+// _vault_locked_frame_json is the viewer-facing typed error frame. `message` keeps the
+// shape older clients already render for {type:"error"}; `code` is what new ones match.
+_vault_locked_frame_json :: proc(session_id, bridge_id: string) -> string {
+	b := strings.builder_make()
+	strings.write_string(&b, "{\"type\":\"error\",\"code\":\"")
+	strings.write_string(&b, domain.VAULT_LOCKED_ERROR_CODE)
+	strings.write_string(&b, "\",\"bridge_id\":\"")
+	contracts.write_json_string(&b, bridge_id)
+	strings.write_string(&b, "\",\"session_id\":\"")
+	contracts.write_json_string(&b, session_id)
+	strings.write_string(&b, "\",\"message\":\"")
+	contracts.write_json_string(&b, domain.VAULT_LOCKED_MESSAGE)
+	strings.write_string(&b, "\"}")
+	return strings.to_string(b)
+}
+
 // --- CRUD service procs (T5) ---
 
 Shell_Session_Create_Input :: struct {
@@ -749,6 +799,7 @@ shell_session_create :: proc(svc: ^Shell_Session_Service, auth: contracts.Auth_C
 		session.status      = domain.Shell_Session_Status_Failed
 		session.finished_at = platform.clock_now(svc.clock)
 		_, _ = iface.shell_session_upsert(svc.repo, session)
+		_publish_start_refused(svc, string(owner), session_id, reply_err, session.bridge_id)
 		return session, false, reply_err
 	}
 	defer delete(reply)
@@ -757,7 +808,9 @@ shell_session_create :: proc(svc: ^Shell_Session_Service, auth: contracts.Auth_C
 		session.status      = domain.Shell_Session_Status_Failed
 		session.finished_at = platform.clock_now(svc.clock)
 		_, _ = iface.shell_session_upsert(svc.repo, session)
-		return session, false, _bridge_failure(reply, "bridge failed to start shell session")
+		start_err := _bridge_failure(reply, "bridge failed to start shell session", session.bridge_id)
+		_publish_start_refused(svc, string(owner), session_id, start_err, session.bridge_id)
+		return session, false, start_err
 	}
 
 	session.pid             = _json_int(reply, "pid", 0)
@@ -1261,7 +1314,7 @@ shell_session_restart :: proc(svc: ^Shell_Session_Service, auth: contracts.Auth_
 	if !reply_ok do return session, false, reply_err
 	defer delete(reply)
 
-	if !_json_bool(reply, "ok") do return session, false, _bridge_failure(reply, "bridge failed to restart shell session")
+	if !_json_bool(reply, "ok") do return session, false, _bridge_failure(reply, "bridge failed to restart shell session", session.bridge_id)
 
 	session.status           = domain.Shell_Session_Status_Running
 	session.pid              = _json_int(reply, "pid", session.pid)
@@ -1356,7 +1409,7 @@ shell_session_set_port :: proc(svc: ^Shell_Session_Service, auth: contracts.Auth
 		if reason == "session_not_found" {
 			return session, false, domain.domain_error(.Not_Found, "session not found")
 		}
-		return session, false, _bridge_failure(reply, "bridge failed to set the shell session port")
+		return session, false, _bridge_failure(reply, "bridge failed to set the shell session port", session.bridge_id)
 	}
 
 	// Not an upsert: it keeps the existing port when the new one is 0, so
@@ -1462,7 +1515,7 @@ shell_session_get_log :: proc(svc: ^Shell_Session_Service, auth: contracts.Auth_
 		if code == SHELL_OUTPUT_RECLAIMED_CODE {
 			return {}, false, domain.domain_error(.Gone, "output no longer available: reclaimed by the bridge retention window")
 		}
-		return {}, false, _bridge_failure(reply, "bridge failed to retrieve shell logs")
+		return {}, false, _bridge_failure(reply, "bridge failed to retrieve shell logs", session.bridge_id)
 	}
 
 	lines_raw   := _json_array_raw(reply, "lines")
@@ -1497,7 +1550,7 @@ shell_session_capture :: proc(svc: ^Shell_Session_Service, auth: contracts.Auth_
 	if !reply_ok do return {}, false, reply_err
 	defer delete(reply)
 
-	if !_json_bool(reply, "ok") do return {}, false, _bridge_failure(reply, "bridge failed to capture shell session")
+	if !_json_bool(reply, "ok") do return {}, false, _bridge_failure(reply, "bridge failed to capture shell session", session.bridge_id)
 
 	content := _json_str(reply, "content")
 	rows    := _json_int(reply, "rows", 24)
@@ -2407,7 +2460,15 @@ _json_str :: proc(body, key: string, allocator := context.allocator) -> string {
 // The guard on the delete is not defensive noise: `_json_str` returns a non-allocated ""
 // literal when the key is absent, so an unconditional delete is a bad free on exactly the
 // case this proc exists to handle — a bridge reply with no `error` field at all.
-_bridge_failure :: proc(reply, fallback: string) -> domain.Domain_Error {
+//
+// T10 (REQ-T10-2): a refusal that names a known `error_code` (today: `vault_locked`)
+// becomes the TYPED error for it — HTTP 423 with details.bridge_id — instead of the
+// generic 500, so the client can tell "locked" from a crash. Unknown codes and replies
+// with no code keep the 500 below.
+_bridge_failure :: proc(reply, fallback: string, bridge_id := "") -> domain.Domain_Error {
+	if code := _json_str(reply, "error_code", context.temp_allocator); code != "" {
+		if typed, ok := domain.bridge_refusal_error(code, bridge_id); ok do return typed
+	}
 	reason := _json_str(reply, "error")
 	if reason == "" do return domain.domain_error(.Internal_Error, fallback)
 	defer delete(reason)
@@ -2461,13 +2522,22 @@ _shell_session_started_event_json :: proc(session_id, kind, status, chain_id: st
 	return strings.to_string(b)
 }
 
-_shell_exited_event_json :: proc(session_id, status: string, exit_code: int, exit_code_set: bool) -> string {
+_shell_exited_event_json :: proc(session_id, status: string, exit_code: int, exit_code_set: bool, error_code := "", bridge_id := "") -> string {
 	b := strings.builder_make()
 	strings.write_string(&b, "{\"type\":\"shell_session_exited\",\"session_id\":\"")
 	contracts.write_json_string(&b, session_id)
 	strings.write_string(&b, "\",\"status\":\"")
 	contracts.write_json_string(&b, status)
 	strings.write_string(&b, "\"")
+	// T10 (REQ-T10-2/3): a start the bridge REFUSED names why on the user-WS channel
+	// too, so a client that only hears events can still show the locked overlay.
+	if error_code != "" {
+		strings.write_string(&b, ",\"error_code\":\"")
+		contracts.write_json_string(&b, error_code)
+		strings.write_string(&b, "\",\"bridge_id\":\"")
+		contracts.write_json_string(&b, bridge_id)
+		strings.write_string(&b, "\"")
+	}
 	if exit_code_set {
 		strings.write_string(&b, ",\"exit_code\":")
 		strings.write_int(&b, exit_code)

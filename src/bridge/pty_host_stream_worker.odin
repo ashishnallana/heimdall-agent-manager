@@ -622,7 +622,8 @@ _bridge_pty_stream_deliver_or_queue :: proc(worker: ^Bridge_PTY_Stream_Worker, f
 }
 
 // bridge_pty_stream_emit_frame encodes data chunk to base64 and formats shell_pty_output JSON.
-// When vault status is Locked, it emits a locked warning banner and suppresses raw stream bytes.
+// When vault status is Locked, it emits a locked warning banner plus a typed shell_pty_vault_locked
+// frame (once per lock) and suppresses raw stream bytes.
 // When Unlocked, it encrypts the chunk with AES-256-GCM using a monotonic counter nonce and the is_encrypted flag.
 // When Disabled (or unconfigured fallback), it emits plaintext data_b64 without encryption or delay.
 bridge_pty_stream_emit_frame :: proc(worker: ^Bridge_PTY_Stream_Worker, session_id: string, data: []byte) {
@@ -658,6 +659,9 @@ bridge_pty_stream_emit_frame :: proc(worker: ^Bridge_PTY_Stream_Worker, session_
 	strings.write_string(&b, "}")
 		frame := strings.to_string(b)
 		_bridge_pty_stream_deliver_or_queue(worker, frame, heap, session_id)
+		// T10 (REQ-T10-3): the banner is for scrollback; this typed frame is what the
+		// hub relays as a `vault_locked` error so the pane can switch to its overlay.
+		_bridge_pty_stream_deliver_or_queue(worker, bridge_pty_vault_locked_frame_json(session_id, heap), heap, session_id)
 		return
 
 	case .Unlocked:

@@ -110,6 +110,23 @@ export async function cookieMutation(path: string, method: string = 'POST', data
 }
 
 /**
+ * customQueryError builds the RTK `CUSTOM_ERROR` a `queryFn` returns, keeping the
+ * hub's machine-readable `code` and HTTP status beside the message. T10: without
+ * them a typed refusal (HTTP 423 `vault_locked`) collapses into free text and the UI
+ * can no longer tell a locked bridge from any other failure.
+ */
+export function customQueryError(error: unknown): { status: 'CUSTOM_ERROR'; error: string; code?: string; originalStatus?: number } {
+  const e = error as any;
+  const out: { status: 'CUSTOM_ERROR'; error: string; code?: string; originalStatus?: number } = {
+    status: 'CUSTOM_ERROR',
+    error: String(e?.message || e),
+  };
+  if (typeof e?.code === 'string' && e.code) out.code = e.code;
+  if (typeof e?.status === 'number') out.originalStatus = e.status;
+  return out;
+}
+
+/**
  * apiErrorText turns whatever a `queryFn`-based mutation's `.unwrap()` rejects with
  * into a human-readable string.
  *

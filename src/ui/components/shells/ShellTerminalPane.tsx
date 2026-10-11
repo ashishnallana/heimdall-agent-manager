@@ -26,7 +26,10 @@ import { useTheme } from '../../store/themeSlice';
 import { useShellPaneSubscription } from '../../hooks/useShellPaneSubscription';
 import { useFetchExperimentsQuery } from '../../api/endpoints/settings';
 import { useShellStream } from './useShellStream';
+import { usePaneVaultLock } from './usePaneVaultLock';
+import VaultLockedOverlay from './VaultLockedOverlay';
 import {
+  useRestartShellMutation,
   useSendShellInputMutation,
   useSendShellResizeMutation,
 } from '../../api/endpoints/shells';
@@ -95,6 +98,20 @@ export function ShellTerminalPane({
   });
 
   // --------------------------------------------------------------------------
+  // T10 (REQ-T10-3): VAULT LOCK — same shared overlay and state as the agent pane.
+  // Signals: a vault_locked stream frame / close (below), a REST input or restart
+  // answered 423, or the refused-start exit event (both announced for this session).
+  // --------------------------------------------------------------------------
+  const resumeAfterUnsealRef = useRef<() => void>(() => {});
+  const vaultLock = usePaneVaultLock({
+    bridgeId: session.bridge_id,
+    sessionId: session.session_id,
+    onResume: () => resumeAfterUnsealRef.current(),
+  });
+  const vaultLockedRef = useRef(vaultLock.locked);
+  useEffect(() => { vaultLockedRef.current = vaultLock.locked; }, [vaultLock.locked]);
+
+  // --------------------------------------------------------------------------
   // STREAMING PATH: Low-latency WebSocket streaming without term.reset()
   // --------------------------------------------------------------------------
   const {
@@ -148,6 +165,10 @@ export function ShellTerminalPane({
         return;
       }
       writeStreamBytes(term, bytes);
+    },
+    onVaultLocked: (signal) => {
+      // A locked vault is not a stream failure: no fallback to polling.
+      vaultLock.report(signal);
     },
     onError: () => {
       console.error('[ShellTerminalPane] stream onError -> triggering setFallbackToPolling(true)');
@@ -255,6 +276,18 @@ export function ShellTerminalPane({
     reconnectStream();
     refetch();
   }, [reconnectStream, refetch]);
+
+  // T10: after an unseal, a live session re-attaches; an interactive shell whose START
+  // was refused (failed, never ran) is started again — the "retry the stream start".
+  // A `run`/`server` is not re-executed on the operator's behalf.
+  const [restartShell] = useRestartShellMutation();
+  resumeAfterUnsealRef.current = () => {
+    if (!isRunning && isTerminal && session.status === 'failed') {
+      void restartShell({ sessionId: session.session_id });
+      return;
+    }
+    handleRetry();
+  };
 
   // Unified input handler cleanly routing between streaming and legacy polling.
   //
@@ -395,6 +428,8 @@ export function ShellTerminalPane({
     }
 
     const dataDisposable = term.onData((data) => {
+      // T10: input is refused while the bridge vault is locked — the overlay says so.
+      if (vaultLockedRef.current) return;
       handleInputRef.current(data);
     });
 
@@ -575,7 +610,7 @@ export function ShellTerminalPane({
   // A drop no longer repaints the pane (that would reset scrollback), so the user needs to be
   // told the stream is down rather than watching a frozen terminal. A thin banner, deliberately
   // not the covering overlay below: the existing content stays readable.
-  const showReconnectingBanner = isStreamEnabled && !streamConnected && isRunning && !isBridgeUnreachable;
+  const showReconnectingBanner = isStreamEnabled && !streamConnected && isRunning && !isBridgeUnreachable && !vaultLock.locked;
   const showUnreachableOverlay = isBridgeUnreachable && !output && !streamConnected;
   const showUnreachableBanner = isBridgeUnreachable && (Boolean(output) || streamConnected);
   const showConnecting = !output && !streamConnected && (session.status === 'starting' || isLoading);
@@ -616,7 +651,9 @@ export function ShellTerminalPane({
         </div>
       )}
 
-      {showUnreachableOverlay ? (
+      {vaultLock.locked ? (
+        <VaultLockedOverlay bridgeId={vaultLock.bridgeId} onUnsealed={vaultLock.markUnsealed} />
+      ) : showUnreachableOverlay ? (
         <div
           data-debug-id="shell-terminal-unreachable"
           className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-canvas/95 p-6 text-center text-xs"

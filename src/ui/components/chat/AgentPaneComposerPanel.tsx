@@ -10,9 +10,11 @@ const Terminal = (xtermObj.Terminal || xtermObj['default']?.Terminal || xtermObj
 const fitAddonObj = fitAddonModule as Record<string, any>;
 const FitAddon = (fitAddonObj.FitAddon || fitAddonObj['default']?.FitAddon || fitAddonObj['default']) as typeof FitAddonType;
 import { useAgentPaneSubscription } from '../../hooks/useAgentPaneSubscription';
-import { useSendAgentPaneInputMutation, useSendAgentPaneResizeMutation } from '../../api/endpoints/agents';
+import { useFetchAgentInstanceQuery, useSendAgentPaneInputMutation, useSendAgentPaneResizeMutation } from '../../api/endpoints/agents';
 import { useFetchExperimentsQuery } from '../../api/endpoints/settings';
 import { useAgentStream } from './useAgentStream';
+import { usePaneVaultLock } from '../shells/usePaneVaultLock';
+import VaultLockedOverlay from '../shells/VaultLockedOverlay';
 import { useTheme } from '../../store/themeSlice';
 import Icon from '../Icon';
 import { readPinnedMonitorAgents, addPinnedMonitorAgent, removePinnedMonitorAgent } from '../../utils/clientPersistence';
@@ -153,6 +155,26 @@ export function AgentPaneComposerPanel({
   }, [isStarting]);
 
   // --------------------------------------------------------------------------
+  // T10 (REQ-T10-3): VAULT LOCK. A locked bridge refuses this pane's input; the pane
+  // shows the shared locked overlay (scrollback stays visible underneath), drops
+  // keystrokes, and re-attaches its stream once the bridge is unsealed. The bridge
+  // comes from the cached instance row; a vault_locked frame's bridge_id wins.
+  // --------------------------------------------------------------------------
+  const { data: instanceData } = useFetchAgentInstanceQuery(
+    { instanceId: agentInstanceId || '' },
+    { skip: !agentInstanceId },
+  );
+  const instanceBridgeId: string | undefined = instanceData?.instance?.bridge_id || undefined;
+  const resumeAfterUnsealRef = useRef<() => void>(() => {});
+  const vaultLock = usePaneVaultLock({
+    bridgeId: instanceBridgeId,
+    sessionId: agentInstanceId,
+    onResume: () => resumeAfterUnsealRef.current(),
+  });
+  const vaultLockedRef = useRef(vaultLock.locked);
+  useEffect(() => { vaultLockedRef.current = vaultLock.locked; }, [vaultLock.locked]);
+
+  // --------------------------------------------------------------------------
   // STREAMING PATH: Low-latency WebSocket streaming without term.reset()
   // --------------------------------------------------------------------------
   const {
@@ -200,6 +222,10 @@ export function AgentPaneComposerPanel({
         setStreamRuntimeStatus(status);
       }
     },
+    onVaultLocked: (signal) => {
+      // A locked vault is not a stream failure: no fallback to polling.
+      vaultLock.report(signal);
+    },
     onError: () => {
       // Graceful fallback: If WebSocket encounters error, fall back to polling
       if (isStreamingExperimentEnabled) {
@@ -215,6 +241,16 @@ export function AgentPaneComposerPanel({
   });
 
   const isStreamingActive = isStreamingExperimentEnabled && streamConnected && !fallbackToPolling;
+
+  // After an unseal: re-attach the stream (it may have been closed for vault_locked),
+  // or, on the polling path, refetch the pane so it repaints at once.
+  resumeAfterUnsealRef.current = () => {
+    if (isStreamingExperimentEnabled && !fallbackToPolling) {
+      reconnectStream();
+    } else {
+      refetchRef.current?.();
+    }
+  };
 
   // Track runCount, startedAt, and isStarting to reset stream on agent restart (REQ-STREAM-RECONNECT-27)
   const prevRunCountRef = useRef<number | undefined>(runCount);
@@ -283,6 +319,8 @@ export function AgentPaneComposerPanel({
   // Unified input handler cleanly routing between streaming and legacy polling
   const handleInput = useCallback(
     (data: string) => {
+      // T10: input is refused while the bridge vault is locked — the overlay says so.
+      if (vaultLockedRef.current) return;
       if (isStreamingActive) {
         // STREAMING: Send keystrokes directly over WebSocket without debounce (<10ms latency)
         sendStreamInput(data);
@@ -290,6 +328,7 @@ export function AgentPaneComposerPanel({
         // LEGACY POLLING: HTTP POST with 50ms debounced capture refetch
         const targetId = agentInstanceIdRef.current;
         if (targetId) {
+          // A 423 from this POST is announced to the pane by the mutation itself.
           sendAgentPaneInput({ agentInstanceId: targetId, data }).catch(() => {});
         }
         if (keystrokeDebounceTimerRef.current) {
@@ -616,6 +655,11 @@ export function AgentPaneComposerPanel({
             </div>
           )}
         </div>
+
+        {/* T10: locked-vault overlay over the terminal; scrollback stays visible beneath. */}
+        {vaultLock.locked ? (
+          <VaultLockedOverlay bridgeId={vaultLock.bridgeId} onUnsealed={vaultLock.markUnsealed} />
+        ) : null}
 
         {/* Accessible fallback & static verification pre element */}
         <pre
