@@ -362,9 +362,9 @@ PY
   bridge_port="${ports% *}"; endpoint_port="${ports#* }"
   log OK "Bridge: 127.0.0.1:$bridge_port · Agent endpoint: 127.0.0.1:$endpoint_port"
   # Render with proper escaping for spaces, XML, shell, and systemd specifiers.
-  python3 - "$svc" "$service_file" "$service_name" "$hub_url" "$bin_dir" "$state_dir" "$data_dir" "$bridge_port" "$endpoint_port" "$PATH" "${PREFIX:-}" <<'PY'
+  python3 - "$svc" "$service_file" "$service_name" "$hub_url" "$bin_dir" "$state_dir" "$data_dir" "$bridge_port" "$endpoint_port" "$PATH" "${PREFIX:-}" "${TERMUX_VERSION:-}" <<'PY'
 import json, pathlib, plistlib, shlex, shutil, sys
-svc, file, name, hub, bin_dir, state, data, port, endpoint, path, prefix = sys.argv[1:]
+svc, file, name, hub, bin_dir, state, data, port, endpoint, path, prefix, termux_version = sys.argv[1:]
 osname = 'darwin' if svc == 'launchd' else 'linux'
 args=[bin_dir+'/ham-bridge','--hub',hub,'--config',state+'/config.toml','--bridge-token-file',state+'/bridge-token','--data-dir',data,'--bind-host','127.0.0.1','--port',port,'--local-endpoint-port',endpoint,'--local-run-dir',data+'/run']
 config = pathlib.Path(state)/'config.toml'
@@ -380,8 +380,14 @@ env['HEIMDALL_HAM_CTL_BIN']=str(wrapper)
 if svc=='runit':
     # termux-services run file: exec the bridge under runsv with the same
     # environment the systemd unit would carry; stderr joins stdout for svlogd.
+    # runsvdir usually inherits the login shell's TERMUX_VERSION/PREFIX, but the
+    # bridge selects its Android keystore backend and the update script its runit
+    # path from exactly those two, so export them explicitly: an environment
+    # without them would silently pick the Linux keyring (seccomp-killed) path.
     run=pathlib.Path(file)
     text='#!'+prefix+'/bin/sh\nexec 2>&1\n'
+    text+='export PREFIX='+shlex.quote(prefix)+'\n'
+    text+='export TERMUX_VERSION='+shlex.quote(termux_version or 'installed')+'\n'
     text+=''.join('export '+k+'='+shlex.quote(v)+'\n' for k,v in env.items())
     text+='exec '+' '.join(shlex.quote(a) for a in args)+'\n'
     run.write_text(text); run.chmod(0o755)

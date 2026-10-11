@@ -239,6 +239,7 @@ if me=='sv-enable':
         self.assertTrue(os.access(run,os.X_OK)); self.assertTrue(text.startswith('#!'+str(prefix)+'/bin/sh\n'))
         self.assertIn(str(self.data(name)/'bin/ham-bridge'),text); self.assertIn('--hub https://hub.mundus.in',text)
         self.assertIn('export HEIMDALL_BRIDGE_SERVICE_NAME=ham-bridge\n',text)
+        self.assertIn('export PREFIX='+shlex.quote(str(prefix))+'\n',text); self.assertIn('export TERMUX_VERSION=0.118.1\n',text)
         self.assertIn('export HEIMDALL_HAM_CTL_BIN='+shlex.quote(str(self.data(name)/'bin'/('ham-ctl-'+name))),text)
         self.assertTrue((svc/'log/run').exists()); self.assertFalse((svc/'down').exists())
         self.assertEqual((svc/'hub-url').read_text(),'https://hub.mundus.in\n')
