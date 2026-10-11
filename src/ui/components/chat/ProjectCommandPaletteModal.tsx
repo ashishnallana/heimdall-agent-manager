@@ -18,12 +18,20 @@ export interface ProjectCommandPaletteModalProps {
   initialQuery?: string;
 }
 
+// These were five arbitrary hues (purple/amber/emerald/cyan/indigo) from the
+// raw Tailwind palette. The theme carries a single accent plus semantic status
+// tones, so a five-hue rainbow cannot be expressed in it without inventing
+// colors that belong to no theme. The chips are already labelled with their
+// category, so the label carries the distinction and the chip carries the
+// theme. Semantic tones are reserved for status, not taxonomy.
+const CATEGORY_CHIP = 'bg-info-soft text-accent border-info-soft';
+
 const CATEGORY_COLORS: Record<CommandCategory, string> = {
-  LSP: 'bg-purple-500/15 text-purple-400 border-purple-500/20',
-  Search: 'bg-amber-500/15 text-amber-400 border-amber-500/20',
-  File: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/20',
-  View: 'bg-cyan-500/15 text-cyan-400 border-cyan-500/20',
-  Directory: 'bg-indigo-500/15 text-indigo-400 border-indigo-500/20',
+  LSP: CATEGORY_CHIP,
+  Search: CATEGORY_CHIP,
+  File: CATEGORY_CHIP,
+  View: CATEGORY_CHIP,
+  Directory: CATEGORY_CHIP,
 };
 
 export function ProjectCommandPaletteModal({

@@ -68,7 +68,7 @@ export function ProviderTestRunModal({ setup, target, onClose }: ProviderTestRun
           <div data-debug-id="provider-test-run-output" className="h-80 overflow-hidden rounded-xl border border-subtle bg-black">
             <AgentPaneComposerPanel agentInstanceId={run.agent_instance_id} isExpanded isActiveTab runtimeStatus={state === 'detecting' ? 'running' : state} hideHeader className="h-full" />
           </div>
-        ) : <div className="flex h-80 items-center justify-center rounded-xl border border-subtle bg-black text-sm text-zinc-400"><Spinner size="sm" />&nbsp; Waiting for bridge…</div>}
+        ) : <div className="flex h-80 items-center justify-center rounded-xl border border-subtle bg-black text-sm text-muted"><Spinner size="sm" />&nbsp; Waiting for bridge…</div>}
         {state === 'awaiting_validation' ? <div data-debug-id="provider-test-awaiting-validation" className="rounded-xl border border-success/30 bg-success-soft p-3 text-sm text-primary">The agent called <code className="font-mono text-success">start-success</code>. Inspect the live terminal, then validate the run. It remains alive until you do.</div> : null}
         {state === 'stopped' ? <div data-debug-id="provider-test-stopped" className="rounded-xl border border-subtle bg-surface-raised/40 p-3 text-sm text-muted">Validation was session-only. No result was persisted.</div> : null}
         {error ? <div role="alert" className="rounded-xl border border-danger/30 bg-danger-soft p-3 text-sm text-danger">{error}</div> : null}

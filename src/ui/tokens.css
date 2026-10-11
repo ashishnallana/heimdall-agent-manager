@@ -35,14 +35,20 @@
   --color-text-muted: #999999;
   --color-text-faint: #6b6b6b;
 
-  /* Accent decision (02-tokens.md §1): the declared brand blue / focus color. */
-  --color-accent: #0099ff;
+  /* Accent decision (02-tokens.md §1): the declared brand accent / focus color.
+   * Gold, shared with the Heimdall landing page and docs site, so the product
+   * and the marketing surfaces read as one brand. */
+  --color-accent: #d2a965;
   --color-accent-fg: #000000;
 
   --color-success: #22c55e;
   --color-warning: #f59e0b;
   --color-danger: #ef4444;
-  --color-info: var(--color-accent);
+  /* Info stays blue and is NOT tied to the accent. Gold sits at the same
+   * luminance as the amber warning (1.02 contrast between them), so a gold
+   * `info` would be near-indistinguishable from `warning` at a glance and for
+   * colour-vision deficiency. Branding is gold; status language is unchanged. */
+  --color-info: #0099ff;
 
   --color-focus-ring: color-mix(in oklab, var(--color-accent), transparent 65%);
 
@@ -214,7 +220,7 @@
   --color-text-primary: #ffffff;
   --color-text-muted: #999999;
   --color-text-faint: #6b6b6b;
-  --color-accent: #0099ff;
+  --color-accent: #d2a965;
   --color-accent-fg: #000000;
   --color-success: #22c55e;
   --color-warning: #f59e0b;

@@ -299,7 +299,7 @@ export default function SearchInFilesDrawer({
           {searchResult?.scopesDeduplicatedOut && searchResult.scopesDeduplicatedOut.length > 0 ? (
             <span
               data-debug-id={`${debugPrefix}-dedup-note`}
-              className="text-[10px] text-amber-500 font-medium"
+              className="text-[10px] text-warning font-medium"
               title={searchResult.scopesDeduplicatedOut.map((s) => s.label).join(', ')}
             >
               ({searchResult.scopesDeduplicatedOut.length} nested scope deduplicated)
@@ -351,7 +351,7 @@ export default function SearchInFilesDrawer({
               >
                 <span className="truncate">{scope.label}</span>
                 {isDeduped ? (
-                  <span className="text-[9px] text-amber-500 font-mono" title="Nested subtree deduplicated">
+                  <span className="text-[9px] text-warning font-mono" title="Nested subtree deduplicated">
                     [dedup]
                   </span>
                 ) : null}
@@ -640,7 +640,7 @@ function HighlightedMatchLine({
         <span>{prefix}</span>
         <mark
           data-debug-id="search-in-files-match-highlight"
-          className="bg-amber-500/25 text-amber-500 font-semibold px-0.5 rounded-xs"
+          className="bg-warning-soft text-warning font-semibold px-0.5 rounded-xs"
         >
           {matched || query}
         </mark>
@@ -668,7 +668,7 @@ function HighlightedMatchLine({
           <span>{trimmed.slice(0, start)}</span>
           <mark
             data-debug-id="search-in-files-match-highlight"
-            className="bg-amber-500/25 text-amber-500 font-semibold px-0.5 rounded-xs"
+            className="bg-warning-soft text-warning font-semibold px-0.5 rounded-xs"
           >
             {trimmed.slice(start, end)}
           </mark>
