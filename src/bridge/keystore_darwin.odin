@@ -226,3 +226,10 @@ keystore_lock_and_purge :: proc(bridge_id: string) {
 	_ = keystore_unlink_vault_key(bridge_id)
 	keystore_wipe_in_memory_vault_key()
 }
+
+// The Android/Termux keystore backend is a Linux-only compilation unit
+// (keystore_android.odin, #+build linux). Shared callers such as
+// bridge_release_target() ask whether it is selected; on macOS it never is.
+keystore_android_selected :: proc() -> bool {
+	return false
+}

@@ -225,9 +225,17 @@ if me=='sv-enable':
     def test_termux_requires_running_runsvdir(self):
         prefix=self.termux(); self.stub('pgrep','#!/bin/sh\nexit 1\n')
         out=self.run_install('--hub','https://hub.mundus.in',success=False)
-        self.assertIn('termux-services is not running',out); self.assertIn('start-services.sh',out)
+        self.assertIn('termux-services does not appear to be running',out); self.assertIn('start-services.sh',out)
         self.assertFalse((prefix/'var/service/ham-bridge').exists())
         self.assertFalse(any(c[0] in ('sv','sv-enable') for c in self.commands()))
+        # A live supervise/ok fifo of any service (e.g. a previous install's log service) proves the supervisor.
+        (prefix/'var/service/sshd/supervise').mkdir(parents=True); (prefix/'var/service/sshd/supervise/ok').touch()
+        self.run_install('--hub','https://hub.mundus.in','--dry-run')
+        self.assertIn('Checking Hub',self.run_install('--hub','https://hub.mundus.in'))
+        # Without any proof, the operator override is honoured.
+        import shutil; shutil.rmtree(prefix/'var/service/sshd'); shutil.rmtree(prefix/'var/service/ham-bridge')
+        self.env['HEIMDALL_ASSUME_RUNSVDIR']='1'
+        self.run_install('--hub','https://hub.mundus.in','--keep-enrollment'); del self.env['HEIMDALL_ASSUME_RUNSVDIR']
 
     def test_hub_unreachable_is_explicit_and_installs_nothing(self):
         self.env['MOCK_HUB_DOWN']='1'

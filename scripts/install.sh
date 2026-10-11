@@ -12,12 +12,21 @@ is_termux() {
 # termux-services supervises with runsvdir, started by a login shell or a Termux
 # restart after `pkg install termux-services`; without it nothing ever starts.
 runsvdir_running() {
-  if command -v pgrep >/dev/null; then pgrep -x runsvdir >/dev/null; return; fi
-  local f
-  for f in /proc/[0-9]*/cmdline; do
-    case "$(tr '\0' ' ' < "$f" 2>/dev/null)" in runsvdir\ *|*/runsvdir\ *) return 0 ;; esac
+  # 1. Functional proof: a supervised service has a live supervise/ok fifo
+  #    (runsv creates it; a stopped runsvdir leaves none). This also covers a
+  #    previous ham-bridge install's log service. Android hides other apps'
+  #    processes and Termux may lack pgrep, so this comes before any scan.
+  local ok f
+  for ok in "${PREFIX:-/nonexistent}"/var/service/*/supervise/ok "${PREFIX:-/nonexistent}"/var/service/*/log/supervise/ok; do
+    [ -e "$ok" ] && return 0
   done
-  return 1
+  # 2. Process scan (pgrep, else own-UID /proc).
+  if command -v pgrep >/dev/null && pgrep -f runsvdir >/dev/null 2>&1; then return 0; fi
+  for f in /proc/[0-9]*/cmdline; do
+    case "$(tr '\0' ' ' < "$f" 2>/dev/null)" in *runsvdir*) return 0 ;; esac
+  done
+  # 3. Operator override when the checks cannot see the supervisor.
+  [ "${HEIMDALL_ASSUME_RUNSVDIR:-0}" = 1 ]
 }
 usage() {
   cat <<'HELP'
@@ -286,7 +295,7 @@ PY
   case "$svc" in
     systemd) systemctl --user show-environment >/dev/null || fail 'No systemd user session. Run in your login session.' ;;
     launchd) launchctl print "gui/$uid" >/dev/null || fail 'No launchd GUI session. Run as the logged-in macOS user.' ;;
-    runit) runsvdir_running || fail 'termux-services is not running (no runsvdir process). Run: . $PREFIX/etc/profile.d/start-services.sh — or restart Termux — then re-run the installer.' ;;
+    runit) runsvdir_running || fail 'termux-services does not appear to be running (no supervised service and no runsvdir process). Run: . $PREFIX/etc/profile.d/start-services.sh — or restart Termux — then re-run. If `sv status` works for another service, re-run with HEIMDALL_ASSUME_RUNSVDIR=1.' ;;
   esac
   local work_dir lock_dir="$state_root/.install-lock"
   mkdir -p "$state_root"

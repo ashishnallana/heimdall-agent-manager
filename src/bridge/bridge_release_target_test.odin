@@ -1,3 +1,7 @@
+#+build linux
+// These tests force the Termux keystore path (keystore_android_test_force),
+// which only exists in the Linux build; contracts.release_target_resolve itself
+// is platform-neutral and covered here on Linux.
 package main
 
 import "core:fmt"
