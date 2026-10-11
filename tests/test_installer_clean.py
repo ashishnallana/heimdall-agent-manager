@@ -68,7 +68,13 @@ if pathlib.Path(sys.argv[0]).name=='launchctl':
         # (one target) corrupts digests. Archive downloads append to downloads.
         self.stub('curl', '''#!/usr/bin/env python3
 import hashlib, os, pathlib, sys
-r=pathlib.Path(os.environ['MOCK_ROOT']); a=sys.argv[1:]; out=pathlib.Path(a[a.index('--output')+1]); url=a[a.index('--output')-1]
+r=pathlib.Path(os.environ['MOCK_ROOT']); a=sys.argv[1:]; url=[x for x in a if x.startswith('http')][0]
+if url.endswith('/api/v1/health'):
+    with (r/'hub-checks').open('a') as f: f.write(url+'\\n')
+    if os.environ.get('MOCK_HUB_DOWN'):
+        sys.stderr.write('curl: (6) Could not resolve host: '+url.split('/')[2]+'\\n'); sys.exit(6)
+    sys.stdout.write('302'); sys.exit(0)
+out=pathlib.Path(a[a.index('--output')+1])
 if '/releases?' in url:
     out.write_text(os.environ.get('MOCK_RELEASES') or '[{"tag_name":"vtest","prerelease":true,"assets":[{"name":"SHA256SUMS"},{"name":"heimdall-local-linux-amd64-vtest.tar.gz"},{"name":"heimdall-local-darwin-amd64-vtest.tar.gz"},{"name":"heimdall-local-linux-arm64-vtest.tar.gz"}]}]')
 elif url.endswith('/SHA256SUMS'):
@@ -222,6 +228,35 @@ if me=='sv-enable':
         self.assertIn('termux-services is not running',out); self.assertIn('start-services.sh',out)
         self.assertFalse((prefix/'var/service/ham-bridge').exists())
         self.assertFalse(any(c[0] in ('sv','sv-enable') for c in self.commands()))
+
+    def test_hub_unreachable_is_explicit_and_installs_nothing(self):
+        self.env['MOCK_HUB_DOWN']='1'
+        out=self.run_install('--hub','https://hub.mundus.in',success=False)
+        self.assertIn('Checking Hub https://hub.mundus.in (up to 20s)',out)
+        self.assertIn('not reachable',out); self.assertIn('Could not resolve host: hub.mundus.in',out)
+        self.assertEqual((self.root/'hub-checks').read_text().strip(),'https://hub.mundus.in/api/v1/health')
+        self.assertFalse(self.downloads()); self.assertFalse(self.data('heimdall-bridge-hub-mundus-in').exists())
+        self.assertFalse((self.home/'.config/heimdall/bridges/.install-lock').exists())
+
+    def test_hub_check_runs_before_download(self):
+        self.run_install('--hub','http://localhost:8080')
+        self.assertEqual((self.root/'hub-checks').read_text().strip(),'http://localhost:8080/api/v1/health')
+        self.assertEqual(self.downloads(),['heimdall-local-linux-amd64-vtest.tar.gz'])
+
+    def test_release_tarball_cache_avoids_redownload(self):
+        cache=self.home/'.cache/heimdall/releases/heimdall-local-linux-amd64-vtest.tar.gz'
+        cache.parent.mkdir(parents=True); stale=cache.parent/'heimdall-local-linux-amd64-vold.tar.gz'; stale.write_bytes(b'old')
+        self.run_install('--hub','http://localhost:8080')
+        self.assertTrue(cache.exists()); self.assertEqual(cache.read_bytes(),(self.root/'bundle').read_bytes())
+        self.assertFalse(stale.exists())   # older versions of the same target are pruned
+        self.assertEqual(self.downloads(),['heimdall-local-linux-amd64-vtest.tar.gz'])
+        out=self.run_install('--hub','http://localhost:8080','--keep-enrollment')
+        self.assertIn('Using cached heimdall-local-linux-amd64-vtest.tar.gz',out)
+        self.assertEqual(self.downloads(),['heimdall-local-linux-amd64-vtest.tar.gz'])   # no second download
+        # A cached file whose hash no longer matches the release is replaced by a fresh download.
+        cache.write_bytes(b'stale'); self.run_install('--hub','http://localhost:8080','--keep-enrollment')
+        self.assertEqual(self.downloads(),['heimdall-local-linux-amd64-vtest.tar.gz']*2)
+        self.assertEqual(cache.read_bytes(),(self.root/'bundle').read_bytes())
 
     def test_termux_dry_run_plans_runit(self):
         prefix=self.termux()

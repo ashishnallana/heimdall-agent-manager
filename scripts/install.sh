@@ -29,6 +29,9 @@ Without --hub, asks on the terminal. Existing enrollment prompts before re-enrol
 --non-interactive preserves existing enrollment and prints a command for new enrollment.
 --uninstall removes only this Hub's service and binaries; credentials/data are kept.
 Requires bash, python3, curl, tar; HTTPS bridges also require socat.
+The Hub is checked first (20 s budget, exact failure reason). Verified release
+tarballs are cached in ${XDG_CACHE_HOME:-~/.cache}/heimdall/releases and reused
+when their SHA-256 still matches the release's SHA256SUMS.
 Termux (Android): also requires the Termux:API app with `pkg install termux-api termux-services`;
 one Termux install runs one Hub as the runit service `ham-bridge`.
 Run as your login user, without sudo.
@@ -44,6 +47,37 @@ prompt() {
 download() {
   curl --fail --location --silent --show-error --connect-timeout 15 \
     --max-time 600 --speed-limit 1024 --speed-time 60 "$1" --output "$2"
+}
+# Large downloads show curl's progress bar on a terminal; quiet otherwise.
+download_progress() {
+  local quiet=--silent
+  [ -t 2 ] && quiet=--progress-bar
+  curl --fail --location $quiet --show-error --connect-timeout 15 \
+    --max-time 600 --speed-limit 1024 --speed-time 60 "$1" --output "$2"
+}
+HUB_CONNECT_TIMEOUT_SECONDS=20
+# Explicit Hub reachability check before anything is installed: one fixed
+# budget, a visible timer on a terminal, and curl's exact reason on failure
+# (DNS, TLS verification, refused, timeout) instead of a silent hang or an
+# unexplained half-second failure. Any HTTP answer counts: a Hub behind
+# forward-auth redirects unauthenticated requests, which still proves TCP+TLS.
+wait_for_hub() {
+  local url="$hub_url/api/v1/health" err="$work_dir/hub-check.err" out="$work_dir/hub-check.code" ticks=0 pid
+  log INFO "Checking Hub $hub_url (up to ${HUB_CONNECT_TIMEOUT_SECONDS}s)"
+  curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+    --connect-timeout "$HUB_CONNECT_TIMEOUT_SECONDS" --max-time "$HUB_CONNECT_TIMEOUT_SECONDS" \
+    "$url" > "$out" 2> "$err" &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    sleep 0.5; ticks=$((ticks+1))
+    [ ! -t 2 ] || printf '\r  waiting for Hub… %2ds / %ds ' "$((ticks/2))" "$HUB_CONNECT_TIMEOUT_SECONDS" >&2
+  done
+  [ ! -t 2 ] || printf '\r%40s\r' '' >&2
+  if wait "$pid"; then
+    log OK "Hub reachable: HTTP $(cat "$out") after $((ticks/2))s"
+  else
+    fail "Hub $hub_url not reachable (gave up after $((ticks/2))s of ${HUB_CONNECT_TIMEOUT_SECONDS}s): $(tr -d '\n' < "$err")"
+  fi
 }
 # Released ham-bridge binaries restart the legacy service after enrollment.
 # Scope a compatibility shim to this enrollment invocation; never affect the host PATH.
@@ -260,6 +294,7 @@ PY
   trap "$(printf 'rmdir %q' "$lock_dir")" EXIT
   work_dir="$(mktemp -d "${TMPDIR:-/tmp}/heimdall-install.XXXXXX")"
   trap "$(printf 'rm -rf %q; rmdir %q' "$work_dir" "$lock_dir")" EXIT
+  wait_for_hub
   if [ -z "$version" ]; then
     # The repository also publishes prereleases, excluded by /releases/latest.
     download 'https://api.github.com/repos/tanmayv/heimdall-agent-manager/releases?per_page=30' "$work_dir/releases.json"
@@ -290,7 +325,24 @@ PY
     log WARN "Release $version has no $target bundle; installing heimdall-local-$fallback_target instead. Its glibc binaries are killed by Android's seccomp at start-up (set_robust_list); Termux bundles ship from v0.3.29 -- re-run without --version or pass a newer one."
     archive="heimdall-local-$fallback_target-$version.tar.gz"
   fi
-  download "$base/$archive" "$work_dir/$archive"
+  # Reuse a previously verified tarball of this exact release when its SHA-256
+  # still matches the release's SHA256SUMS; otherwise download (with a progress
+  # bar on a terminal). The cache only ever holds GitHub-release bundles.
+  local cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/heimdall/releases"
+  mkdir -p "$cache_dir"; chmod 700 "$cache_dir"
+  if [ -f "$cache_dir/$archive" ] && python3 - "$work_dir/SHA256SUMS" "$cache_dir/$archive" "$archive" <<'PY'
+import hashlib, pathlib, sys
+sums, cached, name = sys.argv[1:]
+entries = [line.split() for line in pathlib.Path(sums).read_text().splitlines()]
+expected = [a[0] for a in entries if len(a)==2 and a[1].lstrip('*')==name]
+sys.exit(0 if len(expected)==1 and hashlib.sha256(pathlib.Path(cached).read_bytes()).hexdigest()==expected[0] else 1)
+PY
+  then
+    cp "$cache_dir/$archive" "$work_dir/$archive"
+    log OK "Using cached $archive (SHA-256 matches release $version; no download)"
+  else
+    download_progress "$base/$archive" "$work_dir/$archive"
+  fi
   python3 - "$work_dir" "$archive" <<'PY'
 import hashlib, pathlib, sys, tarfile
 root = pathlib.Path(sys.argv[1]); name = sys.argv[2]
@@ -310,6 +362,12 @@ with tarfile.open(root/name) as t:
         (root/'apply-bridge-update.sh').write_bytes(t.extractfile(scripts[0]).read())
 PY
   log OK 'Release checksum and bundle verified'
+  # Keep the verified bundle for next time; drop older versions of this target.
+  cp "$work_dir/$archive" "$cache_dir/$archive.tmp" && mv -f "$cache_dir/$archive.tmp" "$cache_dir/$archive"
+  local old cache_prefix="${archive%-"$version".tar.gz}"
+  for old in "$cache_dir/$cache_prefix"-*.tar.gz; do
+    [ "$old" = "$cache_dir/$archive" ] || rm -f "$old"
+  done
   step '3 / 6 · Replace this Hub’s service'
   remove_service "$service_file" "$service_name"
   if "$migrate"; then remove_service "$legacy_file" "$legacy_name"; fi
