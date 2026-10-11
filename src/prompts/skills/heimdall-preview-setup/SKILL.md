@@ -21,7 +21,13 @@ Use this skill whenever a Heimdall user should see or test an HTTP app that you 
    ```
 
    `--port` is optional for a server session, but required to make that session previewable. The Hub exposes the session to its owner without opening an inbound port on the machine.
-4. Copy the Hub-returned `preview_url` from the `ham-ctl shell` output or shell-session JSON and present it to the user **verbatim**. Never build a URL from `server_port` or the session id, and never send the user a localhost URL.
+4. Share the link the Hub gives you. `ham-ctl shell serve` (and `ham-ctl shell show <sid>`, any time later) prints a line such as:
+
+   ```text
+   Preview: https://heimdall-preview.example.com/p/sh_18dd.../
+   ```
+
+   Send that URL to the user **verbatim**. It is also the `preview_url` field of the shell-session JSON. You never need to know the preview origin yourself: the Hub builds `preview_url` from its own `--preview-origin` configuration and picks the right form. Never build a URL from `server_port` or the session id, and never send the user a localhost URL. If no `Preview:` line appears, the session has no declared port; start it with `--port`.
 
 The URL has one of two forms:
 
@@ -44,9 +50,9 @@ Both modes retain a session path prefix, so the application rules below apply to
 The upstream receives its original method, path below the session prefix, query, and body. It sees `Host: 127.0.0.1:<declared-port>` plus:
 
 - `X-Forwarded-Host`, `X-Forwarded-Proto: https`, `X-Forwarded-Prefix`, and `X-Forwarded-For`;
-- browser `Origin`, `Authorization`, common CSRF headers, conditional/content headers, and WebSocket negotiation headers when applicable.
+- browser `Origin`, `Authorization` (in legacy mode only non-Bearer schemes such as Basic; see below), common CSRF headers, conditional/content headers, and WebSocket negotiation headers when applicable.
 
-In legacy mode, browser `Origin` is the Hub origin and `Cookie` is never forwarded. On the preview origin, `Origin` is the preview origin, `Authorization` is left for the app, `OPTIONS` reaches the app, and application cookies are forwarded after all `authentik_*` cookies are removed. `X-authentik-*` headers never reach the app in either mode.
+In legacy mode, browser `Origin` is the Hub origin, `Cookie` is never forwarded, and an `Authorization: Bearer ...` header is consumed by the Hub's own authentication before forwarding (an unknown Bearer token is rejected with `401`), so only non-Bearer schemes such as Basic reach the app. On the preview origin, `Origin` is the preview origin, `Authorization` is left for the app, `OPTIONS` reaches the app, and application cookies are forwarded after all `authentik_*` cookies are removed. `X-authentik-*` headers never reach the app in either mode.
 
 Use `X-Forwarded-Prefix` when generating absolute URLs. The Hub rewrites root/local `Location` responses under the active session prefix, forces each `Set-Cookie` `Path` to that prefix, drops its `Domain`, and strips `Service-Worker-Allowed`. Prefer relative URLs anyway.
 
@@ -84,7 +90,7 @@ The sidebar uses the session's `preview_url`. A stopped session remains open and
 | `404` for `/assets/...` | The build emitted root-absolute paths. Configure `base: './'`, `homepage: "."`, or `<base href="./">`, rebuild, and restart. |
 | `port_closed` | The declared port does not match the listener, or the process is not listening. Bind the exact port to `127.0.0.1`; `::1` is supported only as fallback. |
 | WebSocket `403` | The dev server is rejecting the public Origin or forwarded Host. Prefer a production build; otherwise allow the public preview/Hub origin and trust the forwarded headers in preview mode. |
-| API `401` | Check which mode is active. Legacy strips cookies; preview-origin strips only Authentik cookies. Confirm the API accepts the forwarded authorization scheme and that both sessions share an owner. |
+| API `401` | Check which mode is active. Legacy strips cookies and cannot carry `Authorization: Bearer` (the Hub consumes or rejects it); use the preview origin, or a frontend proxy/BFF that adds the token server-side. Preview-origin strips only Authentik cookies and forwards `Authorization`. Also confirm both sessions share an owner. |
 | Redirect loop | Trust `X-Forwarded-Proto`, `X-Forwarded-Host`, and `X-Forwarded-Prefix`; emit relative redirects when possible. |
 | Refused to frame / X-Frame-Options | Remove `X-Frame-Options: DENY` and restrictive `frame-ancestors` for this preview build. |
 
