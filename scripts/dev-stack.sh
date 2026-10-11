@@ -174,7 +174,7 @@ enroll() {
   local enroll_pid=$!
 
   # Wait for the user code the bridge printed. Taking the last field of the
-  # "enter the code" line keeps this independent of the code's alphabet and width.
+  # "enter the code" (older bridges) / "Enter device code" (current) line keeps this independent of the code's alphabet and width.
   local code=""
   local i
   for i in $(seq 1 30); do
@@ -183,7 +183,7 @@ enroll() {
     # Without it the assignment fails and the whole script exits silently, with the
     # enrollment half-started and no diagnostic. That is exactly what happened the
     # first time this ran.
-    code="$(grep -a 'enter the code' "$log" 2>/dev/null | tail -1 | awk '{print $NF}' || true)"
+    code="$(grep -aiE 'enter (the|device) code' "$log" 2>/dev/null | tail -1 | awk '{print $NF}' || true)"
     [ -n "$code" ] && break
     kill -0 "$enroll_pid" 2>/dev/null || break
     sleep 1

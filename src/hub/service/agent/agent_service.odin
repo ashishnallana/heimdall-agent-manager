@@ -1544,12 +1544,15 @@ Wake_Agent_Run_Entry :: struct {
 // should be running (started fresh, or restarted) and stop[] names the agent
 // instances that should be stopped (were running, task no longer actionable). One
 // command is sent per (chain × bridge). Shape:
-//   {"type":"wake_agent","chain_id":"<id>","payload":{"run":[{"agent_instance_id":"..","task_id":"..","role":"..","provider":"..","model":".."}],"stop":["..",..]}}
+//   {"type":"wake_agent","protocol_version":1,"command_id":"<id>","chain_id":"<id>","payload":{"run":[{"agent_instance_id":"..","task_id":"..","role":"..","provider":"..","model":".."}],"stop":["..",..]}}
+// command_id is required: wake_agent is a queued command on the bridge, and the
+// bridge's dispatcher rejects queued commands without one (missing_command_id).
 // provider/model are optional per entry (omitted when empty) so the bridge restarts
 // the instance on its saved provider/model rather than the bridge defaults (REQ-33).
-wake_agent_command_json :: proc(chain_id: string, run: []Wake_Agent_Run_Entry, stop: []string) -> string {
+wake_agent_command_json :: proc(command_id, chain_id: string, run: []Wake_Agent_Run_Entry, stop: []string) -> string {
 	b := strings.builder_make()
-	strings.write_string(&b, "{\"type\":\"wake_agent\",\"chain_id\":\""); write_service_json_string(&b, chain_id)
+	strings.write_string(&b, "{\"type\":\"wake_agent\",\"protocol_version\":1,\"command_id\":\""); write_service_json_string(&b, command_id)
+	strings.write_string(&b, "\",\"chain_id\":\""); write_service_json_string(&b, chain_id)
 	strings.write_string(&b, "\",\"payload\":{\"run\":[")
 	for entry, i in run {
 		if i > 0 do strings.write_string(&b, ",")

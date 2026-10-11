@@ -1638,6 +1638,17 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
 		command_id := json_string(text, "command_id")
 		_ = bridge_runtime_service.runtime_command_result_for_connection(h.bridge_runtime_registry, bridge_id, connection_generation, command_id, text)
 		if type == "command_result" && h.agents != nil do agent_service.apply_reconfiguration_command_result(h.agents, bridge_id, command_id, text)
+		if type == "command_result" && command_id == "" {
+			// An id-less failure cannot be matched to any pending command; log it so
+			// hub/bridge protocol drift (e.g. missing_command_id) is visible.
+			status := json_string(text, "status")
+			if status == "failed" {
+				error_code := json_string(text, "error_code")
+				fmt.eprintln("hub: bridge", bridge_id, "rejected command without id:", error_code)
+				delete(error_code)
+			}
+			delete(status)
+		}
 		delete(command_id)
 	case "pane_capture_result":
 		if json_int(text, "protocol_version", 0) != 1 do return true

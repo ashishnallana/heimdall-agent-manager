@@ -1483,7 +1483,7 @@ reconcile_chain :: proc(service: ^Taskchain_Service, chain: domain.Task_Chain) -
 		stop_entries := stops[bridge_id]
 		if len(run_entries) == 0 && len(stop_entries) == 0 do continue
 		cmd_id := platform.generate_id(service.ids, "cmd_")
-		body   := agent.wake_agent_command_json(string(chain.chain_id), run_entries[:], stop_entries[:])
+		body   := agent.wake_agent_command_json(cmd_id, string(chain.chain_id), run_entries[:], stop_entries[:])
 		_, _ = project.bridge_command_send_runtime(service.bridge_command_sink,
 			project.Runtime_Command{bridge_id = bridge_id, command_id = cmd_id, body_json = body})
 	}

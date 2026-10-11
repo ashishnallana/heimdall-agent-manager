@@ -153,3 +153,43 @@ bridge_child_process_budget_is_explicit_and_bounded :: proc(t: ^testing.T) {
 	testing.expect(t, bridge_command_may_spawn_process("lsp_start"))
 	testing.expect(t, !bridge_command_may_spawn_process("shell_kill"), "recovery commands retain their reserved lane")
 }
+
+@(test)
+bridge_dispatch_resolve_id_synthesizes_for_idless_wake_agent :: proc(t: ^testing.T) {
+	// An older hub sends wake_agent without command_id; rejecting it with
+	// missing_command_id silently kills reconcile auto start/stop.
+	text := `{"type":"wake_agent","chain_id":"chain_1","payload":{"run":[],"stop":["inst_1"]}}`
+	first, ok := bridge_command_dispatch_resolve_id("wake_agent", text)
+	defer delete(first)
+	testing.expect(t, ok, "id-less wake_agent must not be rejected")
+	testing.expectf(t, strings.has_prefix(first, "bridge_wake_"), "synthesized id has bridge_wake_ prefix; got %q", first)
+	second, ok2 := bridge_command_dispatch_resolve_id("wake_agent", text)
+	defer delete(second)
+	testing.expect(t, ok2)
+	testing.expect(t, first != second, "synthesized ids are unique so the claim table never dedups two wakes")
+}
+
+@(test)
+bridge_dispatch_resolve_id_prefers_hub_ids :: proc(t: ^testing.T) {
+	id, ok := bridge_command_dispatch_resolve_id("wake_agent", `{"type":"wake_agent","protocol_version":1,"command_id":"cmd_x","chain_id":"c"}`)
+	defer delete(id)
+	testing.expect(t, ok)
+	testing.expect_value(t, id, "cmd_x")
+	req, req_ok := bridge_command_dispatch_resolve_id("stop_agent", `{"type":"stop_agent","request_id":"req_1"}`)
+	defer delete(req)
+	testing.expect(t, req_ok)
+	testing.expect_value(t, req, "req_1")
+}
+
+@(test)
+bridge_dispatch_resolve_id_rejects_idless_non_wake_commands :: proc(t: ^testing.T) {
+	// The wake_agent tolerance must not leak into any other queued command.
+	for command_type in ([]string{"stop_agent", "launch_agent", "notify_agent_message"}) {
+		text := strings.concatenate({`{"type":"`, command_type, `","payload":{}}`})
+		defer delete(text)
+		id, ok := bridge_command_dispatch_resolve_id(command_type, text)
+		defer delete(id)
+		testing.expectf(t, !ok, "%s without id must resolve ok=false", command_type)
+		testing.expect_value(t, id, "")
+	}
+}

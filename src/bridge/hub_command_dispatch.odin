@@ -411,6 +411,30 @@ bridge_command_dispatch_protocol_error_json :: proc(command_id, error_code: stri
 	return strings.to_string(b)
 }
 
+// bridge_wake_synth_counter numbers the ids synthesized for id-less wake_agent
+// frames; process-local, which matches the lifetime of the dispatch claim table.
+bridge_wake_synth_counter: u64
+
+// bridge_command_dispatch_resolve_id returns the queued command's id: command_id,
+// else request_id. Every queued command requires one, except that an id-less
+// wake_agent gets a synthesized local "bridge_wake_<n>" id so a new bridge keeps
+// servicing reconcile auto start/stop from an older hub that predates
+// wake_agent.command_id. ok=false means the caller must reject with
+// missing_command_id. The returned id is owned by the caller (context allocator).
+bridge_command_dispatch_resolve_id :: proc(command_type, text: string) -> (id: string, ok: bool) {
+	id = extract_json_string(text, "command_id", "")
+	if id != "" do return id, true
+	delete(id)
+	id = extract_json_string(text, "request_id", "")
+	if id != "" do return id, true
+	delete(id)
+	if command_type == "wake_agent" {
+		n := sync.atomic_add(&bridge_wake_synth_counter, 1) + 1
+		return fmt.aprintf("bridge_wake_%d", n), true
+	}
+	return "", false
+}
+
 bridge_command_dispatch :: proc(conn: ^ws.Connection, text: string, generation: i64) -> bool {
 	command_type := extract_json_string(text, "type", "")
 	defer delete(command_type)
@@ -423,13 +447,9 @@ bridge_command_dispatch :: proc(conn: ^ws.Connection, text: string, generation: 
 	}
 	if !spec.queued do return false
 	class := spec.class
-	command_id := extract_json_string(text, "command_id", "")
-	if command_id == "" {
-		delete(command_id)
-		command_id = extract_json_string(text, "request_id", "")
-	}
+	command_id, id_ok := bridge_command_dispatch_resolve_id(command_type, text)
 	defer delete(command_id)
-	if command_id == "" {
+	if !id_ok {
 		protocol_error := bridge_command_dispatch_protocol_error_json("", "missing_command_id")
 		defer delete(protocol_error)
 		_ = bridge_hub_send(conn, protocol_error)
