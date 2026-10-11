@@ -26,7 +26,8 @@ class InstallerTests(unittest.TestCase):
         self.mock = self.root / 'mock'
         self.mock.mkdir()
         self.log = self.root / 'commands.jsonl'
-        self.env = dict(os.environ, HOME=str(self.home), PATH=str(self.mock)+':'+os.environ['PATH'],
+        base = {k: v for k, v in os.environ.items() if not k.startswith('HEIMDALL_')}
+        self.env = dict(base, HOME=str(self.home), PATH=str(self.mock)+':'+os.environ['PATH'],
                         MOCK_ROOT=str(self.root), MOCK_OS='Linux',
                         XDG_RUNTIME_DIR=str(self.root/'runtime'), DBUS_SESSION_BUS_ADDRESS='',
                         HEIMDALL_NON_INTERACTIVE='1')
@@ -82,7 +83,8 @@ if [ "$1" = enroll ]; then
   done
   printf 'credential\\n' > "$token"
   printf 'approved by     alice\\n'
-  if [ "$MOCK_OS" = Linux ]; then systemctl --user restart heimdall-bridge
+  if [ -n "${TERMUX_VERSION:-}" ] && [ -d "$PREFIX/var/service/ham-bridge" ]; then sv restart "$PREFIX/var/service/ham-bridge"
+  elif [ "$MOCK_OS" = Linux ]; then systemctl --user restart heimdall-bridge
   else launchctl kickstart -k gui/1000/works.earendil.heimdall-bridge; fi
 fi
 '''
@@ -104,6 +106,28 @@ pathlib.Path(os.environ['MOCK_ROOT']+'/ctl.json').write_text(json.dumps({'args':
 
     def stub(self, name, text):
         p=self.mock/name; p.write_text(text); p.chmod(0o755)
+
+    def termux(self):
+        """Model a Termux install: $PREFIX with termux-services and Termux:API present."""
+        prefix=self.root/'prefix'; (prefix/'var/service').mkdir(parents=True,exist_ok=True); (prefix/'bin').mkdir(exist_ok=True)
+        (prefix/'share/termux-services').mkdir(parents=True,exist_ok=True)
+        svlogger=prefix/'share/termux-services/svlogger'; svlogger.write_text('#!/bin/sh\nexit 0\n'); svlogger.chmod(0o755)
+        self.env.update(TERMUX_VERSION='0.118.1', PREFIX=str(prefix))
+        self.stub('termux-keystore','#!/bin/sh\nexit 0\n')
+        sv='''#!/usr/bin/env python3
+import json, os, pathlib, sys
+r=pathlib.Path(os.environ['MOCK_ROOT']); me=pathlib.Path(sys.argv[0]).name
+with (r/'commands.jsonl').open('a') as f: f.write(json.dumps([me]+sys.argv[1:])+'\\n')
+root=pathlib.Path(os.environ['PREFIX'])/'var/service'
+if me=='sv' and sys.argv[1]=='status':
+    d=pathlib.Path(sys.argv[2]); d=d if d.is_absolute() else root/sys.argv[2]
+    print('run: ham-bridge: (pid 123) 2s' if (d/'run').exists() and not (d/'down').exists() else 'down: ham-bridge: 1s')
+if me=='sv-enable':
+    down=root/sys.argv[1]/'down'
+    if down.exists(): down.unlink()
+'''
+        self.stub('sv',sv); self.stub('sv-enable',sv)
+        return prefix
 
     def run_install(self, *args, answers=None, success=True):
         if answers is None:
@@ -170,14 +194,55 @@ pathlib.Path(os.environ['MOCK_ROOT']+'/ctl.json').write_text(json.dumps({'args':
                 self.assertIn('pkg install termux-api',out)
                 self.assertFalse(self.log.exists())
                 for k in env: del self.env[k]
-        # With Termux:API present the check passes and the install proceeds.
-        self.env['TERMUX_VERSION']='0.118.1'
-        self.stub('termux-keystore','#!/bin/sh\nexit 0\n')
+        # With Termux:API and termux-services present the check passes and the install proceeds.
+        self.termux()
         self.assertNotIn('termux-keystore',self.run_install('--hub','https://hub.mundus.in','--dry-run'))
         # A desktop Linux $PREFIX (e.g. /usr/local) is not Termux.
         del self.env['TERMUX_VERSION']; (self.mock/'termux-keystore').unlink()
         self.env['PREFIX']='/usr/local'
         self.run_install('--hub','https://hub.mundus.in','--dry-run')
+
+    def test_termux_requires_termux_services(self):
+        self.termux(); (self.mock/'sv').unlink()
+        self.assertIn('termux-services is required',self.run_install('--hub','https://hub.mundus.in','--dry-run',success=False))
+        self.termux(); self.env['PREFIX']=str(self.root/'empty-prefix')
+        self.assertIn('service directory not found',self.run_install('--hub','https://hub.mundus.in','--dry-run',success=False))
+        self.assertFalse(self.log.exists())
+
+    def test_termux_dry_run_plans_runit(self):
+        prefix=self.termux()
+        out=self.run_install('--hub','https://hub.mundus.in','--dry-run')
+        self.assertIn('runit service: '+str(prefix/'var/service/ham-bridge'),out)
+        self.assertIn('sv-enable ham-bridge',out)
+        self.assertFalse((prefix/'var/service/ham-bridge').exists())
+        self.assertFalse(self.log.exists())
+
+    def test_termux_runit_install_enroll_and_uninstall(self):
+        prefix=self.termux(); name='heimdall-bridge-hub-mundus-in'; svc=prefix/'var/service/ham-bridge'
+        out=self.run_install('--hub','https://hub.mundus.in',answers=[])
+        self.assertIn('approved by     alice',out); self.assertIn('runit service running: ham-bridge',out)
+        run=svc/'run'; text=run.read_text()
+        self.assertTrue(os.access(run,os.X_OK)); self.assertTrue(text.startswith('#!'+str(prefix)+'/bin/sh\n'))
+        self.assertIn(str(self.data(name)/'bin/ham-bridge'),text); self.assertIn('--hub https://hub.mundus.in',text)
+        self.assertIn('export HEIMDALL_BRIDGE_SERVICE_NAME=ham-bridge\n',text)
+        self.assertIn('export HEIMDALL_HAM_CTL_BIN='+shlex.quote(str(self.data(name)/'bin'/('ham-ctl-'+name))),text)
+        self.assertTrue((svc/'log/run').exists()); self.assertFalse((svc/'down').exists())
+        self.assertEqual((svc/'hub-url').read_text(),'https://hub.mundus.in\n')
+        commands=self.commands()
+        self.assertIn(['sv-enable','ham-bridge'],commands)
+        self.assertIn(['sv','restart',str(svc)],commands)
+        self.assertFalse(any(c[0] in ('systemctl','launchctl') for c in commands))
+        self.assertEqual((self.state(name)/'bridge-token').stat().st_mode&0o777,0o600)
+        # One Termux install serves one Hub: a second Hub is refused before anything is touched.
+        out=self.run_install('--hub','http://localhost:8080','--dry-run',success=False)
+        self.assertIn('one bridge service',out); self.assertFalse(self.state('heimdall-bridge-localhost-8080').exists())
+        # Re-install replaces the service (down, then recreated and enabled again).
+        self.run_install('--hub','https://hub.mundus.in','--keep-enrollment')
+        self.assertIn(['sv','down',str(svc)],self.commands()); self.assertTrue(run.exists()); self.assertFalse((svc/'down').exists())
+        # Uninstall removes the service directory and binaries, keeps the enrollment.
+        self.run_install('--hub','https://hub.mundus.in','--uninstall')
+        self.assertFalse(svc.exists()); self.assertFalse((self.data(name)/'bin').exists())
+        self.assertTrue((self.state(name)/'bridge-token').exists())
 
     def test_missing_hub(self):
         self.assertIn('--hub is required',self.run_install('--dry-run',success=False))

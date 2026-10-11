@@ -948,28 +948,25 @@ re-checks the file itself before restarting the service. A restarted bridge then
 
 ### Install and enroll
 
-```bash
-# 1. Install ham-bridge, ham-pty-host and ham-ctl (linux_arm64) into $PREFIX/bin.
-# 2. Create the runit service (name: ham-bridge).
-mkdir -p "$PREFIX/var/service/ham-bridge/log"
-ln -sf "$PREFIX/share/termux-services/svlogger" "$PREFIX/var/service/ham-bridge/log/run"
-cat > "$PREFIX/var/service/ham-bridge/run" <<'RUN'
-#!/data/data/com.termux/files/usr/bin/sh
-export HEIMDALL_HAM_PTY_HOST_BIN="$PREFIX/bin/ham-pty-host"
-export HEIMDALL_BRIDGE_PTY_HOST=true
-export HEIMDALL_HAM_CTL_BIN="$PREFIX/bin/ham-ctl"
-exec ham-bridge \
-    --hub https://hub.example.com \
-    --bridge-token-file "$HOME/.config/heimdall/bridge-token" 2>&1
-RUN
-chmod +x "$PREFIX/var/service/ham-bridge/run"
-sv-enable ham-bridge
+The installer supports Termux directly. It verifies `termux-keystore` and
+`termux-services`, installs the `linux_arm64` binaries, creates the runit service
+`$PREFIX/var/service/ham-bridge` (`run` + `log/run`, same environment as the systemd
+unit), enables it with `sv-enable`, and enrolls:
 
-# 3. Enroll. On approval the bridge seals the delivered vault key, reads it back
-#    through the Keystore, and runs `sv restart "$PREFIX/var/service/ham-bridge"`.
-ham-bridge enroll --hub https://hub.example.com \
-    --bridge-token-file ~/.config/heimdall/bridge-token
+```bash
+pkg install curl python socat termux-api termux-services   # then restart Termux once
+curl -fsSL https://raw.githubusercontent.com/tanmayv/heimdall-agent-manager/main/scripts/install.sh \
+  | bash -s -- --hub https://hub.example.com
 ```
+
+One Termux install runs **one** Hub: the released bridge restarts exactly
+`$PREFIX/var/service/ham-bridge` after enrollment, so a second `--hub` is refused until
+the first is removed (`install.sh --hub <url> --uninstall`, which keeps the enrollment).
+Per-Hub config lives in `~/.config/heimdall/bridges/<name>/`, binaries and data in
+`~/.local/share/heimdall/bridges/<name>/`.
+
+On approval the bridge seals the delivered vault key, reads it back through the
+Keystore, and runs `sv restart "$PREFIX/var/service/ham-bridge"`.
 
 Logs: `tail -f "$PREFIX/var/log/sv/ham-bridge/current"`. Status: `sv status ham-bridge`.
 
