@@ -39,8 +39,19 @@ passthrough.delete('flow');
 const EXECUTOR = `api/v3/flows/executor/${encodeURIComponent(SLUG)}/`
   + `?query=${encodeURIComponent(passthrough.toString())}`;
 
-/** The stock Authentik UI for this flow — the escape hatch if we cannot render something. */
-const STOCK_URL = `/if/flow/${encodeURIComponent(SLUG)}/${location.search}`;
+/**
+ * The stock Authentik UI for this flow — the escape hatch if we cannot render something.
+ *
+ * `stock=1` is load-bearing: without it nginx redirects /if/flow/<slug>/ straight back here,
+ * so the "use the standard page" link would bounce to this page instead of escaping to
+ * Authentik. Our own `flow` marker is dropped too — left in, it would be re-prepended on
+ * every bounce and the query string would grow a `flow=` per click.
+ */
+const STOCK_URL = (() => {
+  const q = new URLSearchParams(passthrough);
+  q.set('stock', '1');
+  return `/if/flow/${encodeURIComponent(SLUG)}/?${q}`;
+})();
 
 async function getChallenge() {
   const r = await fetch(EXECUTOR, { headers: { Accept: 'application/json' }, credentials: 'same-origin' });
