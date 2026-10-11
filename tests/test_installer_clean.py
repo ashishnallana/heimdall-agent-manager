@@ -112,8 +112,9 @@ pathlib.Path(os.environ['MOCK_ROOT']+'/ctl.json').write_text(json.dumps({'args':
         prefix=self.root/'prefix'; (prefix/'var/service').mkdir(parents=True,exist_ok=True); (prefix/'bin').mkdir(exist_ok=True)
         (prefix/'share/termux-services').mkdir(parents=True,exist_ok=True)
         svlogger=prefix/'share/termux-services/svlogger'; svlogger.write_text('#!/bin/sh\nexit 0\n'); svlogger.chmod(0o755)
-        self.env.update(TERMUX_VERSION='0.118.1', PREFIX=str(prefix))
+        self.env.update(TERMUX_VERSION='0.118.1', PREFIX=str(prefix), HEIMDALL_RUNSV_WAIT='0')
         self.stub('termux-keystore','#!/bin/sh\nexit 0\n')
+        self.stub('pgrep','#!/bin/sh\nexit 0\n')  # runsvdir is running
         sv='''#!/usr/bin/env python3
 import json, os, pathlib, sys
 r=pathlib.Path(os.environ['MOCK_ROOT']); me=pathlib.Path(sys.argv[0]).name
@@ -208,6 +209,13 @@ if me=='sv-enable':
         self.termux(); self.env['PREFIX']=str(self.root/'empty-prefix')
         self.assertIn('service directory not found',self.run_install('--hub','https://hub.mundus.in','--dry-run',success=False))
         self.assertFalse(self.log.exists())
+
+    def test_termux_requires_running_runsvdir(self):
+        prefix=self.termux(); self.stub('pgrep','#!/bin/sh\nexit 1\n')
+        out=self.run_install('--hub','https://hub.mundus.in',success=False)
+        self.assertIn('termux-services is not running',out); self.assertIn('start-services.sh',out)
+        self.assertFalse((prefix/'var/service/ham-bridge').exists())
+        self.assertFalse(any(c[0] in ('sv','sv-enable') for c in self.commands()))
 
     def test_termux_dry_run_plans_runit(self):
         prefix=self.termux()

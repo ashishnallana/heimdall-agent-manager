@@ -9,6 +9,16 @@ is_termux() {
   case "${PREFIX:-}" in /data/data/com.termux|/data/data/com.termux/*) return 0 ;; esac
   return 1
 }
+# termux-services supervises with runsvdir, started by a login shell or a Termux
+# restart after `pkg install termux-services`; without it nothing ever starts.
+runsvdir_running() {
+  if command -v pgrep >/dev/null; then pgrep -x runsvdir >/dev/null; return; fi
+  local f
+  for f in /proc/[0-9]*/cmdline; do
+    case "$(tr '\0' ' ' < "$f" 2>/dev/null)" in runsvdir\ *|*/runsvdir\ *) return 0 ;; esac
+  done
+  return 1
+}
 usage() {
   cat <<'HELP'
 Heimdall Bridge installer — Linux systemd / macOS LaunchAgent / Termux runit
@@ -236,7 +246,7 @@ PY
   case "$svc" in
     systemd) systemctl --user show-environment >/dev/null || fail 'No systemd user session. Run in your login session.' ;;
     launchd) launchctl print "gui/$uid" >/dev/null || fail 'No launchd GUI session. Run as the logged-in macOS user.' ;;
-    runit) ;; # sv and the service directory were verified above; runsvdir is checked when the service starts.
+    runit) runsvdir_running || fail 'termux-services is not running (no runsvdir process). Run: . $PREFIX/etc/profile.d/start-services.sh — or restart Termux — then re-run the installer.' ;;
   esac
   local work_dir lock_dir="$state_root/.install-lock"
   mkdir -p "$state_root"
@@ -407,6 +417,10 @@ PY
       plutil -lint "$service_file" >/dev/null
       launchctl bootstrap "gui/$uid" "$service_file" ;;
     runit)
+      # Give runsvdir (5 s scan) time to attach a runsv before enabling, so
+      # sv-enable does not race it with "unable to open supervise/ok".
+      local waited=0
+      until [ -d "$runit_dir/supervise" ] || [ "$waited" -ge "${HEIMDALL_RUNSV_WAIT:-10}" ]; do waited=$((waited+1)); sleep 1; done
       if command -v sv-enable >/dev/null; then sv-enable ham-bridge
       else rm -f "$runit_dir/down"; sv up "$runit_dir"; fi
       local tries=0
