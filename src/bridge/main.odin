@@ -869,7 +869,8 @@ bridge_read_vault_key :: proc() -> (string, bool) {
 		}
 	}
 
-	// b) This bridge's persisted key: Linux kernel keyring @u, macOS login Keychain
+	// b) This bridge's persisted key: Linux kernel keyring @u, macOS login Keychain,
+	//    or the Termux sealed file unwrapped by the Android Keystore
 	if key_k, ok := keystore_read_keyring_vault_key(bridge_config.daemon_id); ok {
 		return key_k, true
 	}

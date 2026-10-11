@@ -898,3 +898,81 @@ Manual path (sections 2.2–2.10, for source/air-gapped setups):
 ### Subsequent runs
 The bridge reads `--bridge-token-file` on startup and reconnects automatically.
 Re-enrollment is only needed if the token file is lost or the bridge is revoked.
+
+## Appendix — Bridge on Android (Termux)
+
+A bridge can run on an Android phone or tablet inside [Termux](https://termux.dev),
+supervised by `termux-services` (runit). Termux is Linux userland, so this uses the
+`linux_arm64` `ham-bridge` build. The bridge detects Termux at run time from
+`TERMUX_VERSION` or a `$PREFIX` under `/data/data/com.termux`.
+
+### Requirements
+
+- The **Termux:API** Android app (from the same source as Termux itself, F-Droid or
+  GitHub; the two must match), plus the matching package, and `termux-services`:
+
+  ```bash
+  pkg install termux-api termux-services
+  # Restart Termux once so the service daemon starts.
+  ```
+
+- `termux-keystore` must work. The installer refuses to run on Termux without it.
+
+### How the vault key is stored on Android
+
+Termux has no kernel keyring (no keyutils, and app processes are seccomp-blocked
+from it), and the bridge never writes a plaintext key file. Instead:
+
+1. On the first unseal, the bridge creates a non-exportable RSA-2048 key in the
+   Android Keystore under the alias `heimdall-bridge-<bridge_id>`.
+2. It signs a fixed per-bridge label with that key and derives an AES-256 key
+   (HKDF-SHA256) from the signature.
+3. It seals the vault key with AES-256-GCM into
+   `~/.config/heimdall/bridges/<bridge_id>/vault_key.sealed` (mode `0600`).
+
+On restart the bridge re-derives the AES key through the Keystore and unwraps the
+file once; after that the key is served from the bridge's locked memory. The file is useless without this device's Keystore key. Several bridges on one
+device each get their own alias and their own file.
+
+**Fail closed:** if `termux-keystore` is missing, fails or times out, the vault key
+is not persisted (enrollment aborts and purges it). Each unseal also signs twice and
+refuses if the two signatures differ, then reopens the file it wrote; enrollment
+re-checks the file itself before restarting the service. A restarted bridge then reports
+`locked`, and a WARN in its log points at **Settings → Bridges → Unseal**.
+
+| Action | Effect on Android |
+|--------|-------------------|
+| Unseal (Settings → Bridges) | Writes `vault_key.sealed`; creates the Keystore key on first use, or when `termux-keystore list` shows it was removed. If signing fails while the key still exists, the unseal fails and the existing key and file are left untouched |
+| Lock (`vault.lock`) | Deletes `vault_key.sealed` and wipes the key from memory; the Keystore key stays |
+| Reset (`vault.reset`) | As lock, and also `termux-keystore delete heimdall-bridge-<bridge_id>` |
+
+### Install and enroll
+
+```bash
+# 1. Install ham-bridge, ham-pty-host and ham-ctl (linux_arm64) into $PREFIX/bin.
+# 2. Create the runit service (name: ham-bridge).
+mkdir -p "$PREFIX/var/service/ham-bridge/log"
+ln -sf "$PREFIX/share/termux-services/svlogger" "$PREFIX/var/service/ham-bridge/log/run"
+cat > "$PREFIX/var/service/ham-bridge/run" <<'RUN'
+#!/data/data/com.termux/files/usr/bin/sh
+export HEIMDALL_HAM_PTY_HOST_BIN="$PREFIX/bin/ham-pty-host"
+export HEIMDALL_BRIDGE_PTY_HOST=true
+export HEIMDALL_HAM_CTL_BIN="$PREFIX/bin/ham-ctl"
+exec ham-bridge \
+    --hub https://hub.example.com \
+    --bridge-token-file "$HOME/.config/heimdall/bridge-token" 2>&1
+RUN
+chmod +x "$PREFIX/var/service/ham-bridge/run"
+sv-enable ham-bridge
+
+# 3. Enroll. On approval the bridge seals the delivered vault key, reads it back
+#    through the Keystore, and runs `sv restart "$PREFIX/var/service/ham-bridge"`.
+ham-bridge enroll --hub https://hub.example.com \
+    --bridge-token-file ~/.config/heimdall/bridge-token
+```
+
+Logs: `tail -f "$PREFIX/var/log/sv/ham-bridge/current"`. Status: `sv status ham-bridge`.
+
+If the bridge reports `locked` after a restart (for example after Termux:API was
+reinstalled, which wipes its Keystore keys), unseal it again from
+**Settings → Bridges → Unseal**.

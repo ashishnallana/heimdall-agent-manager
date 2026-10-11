@@ -161,6 +161,24 @@ pathlib.Path(os.environ['MOCK_ROOT']+'/ctl.json').write_text(json.dumps({'args':
             self.run_install('--hub',hub,'--dry-run',success=False)
         self.assertFalse(self.log.exists())
 
+    def test_termux_requires_termux_keystore(self):
+        for env in ({'TERMUX_VERSION':'0.118.1'},{'PREFIX':'/data/data/com.termux/files/usr'}):
+            with self.subTest(env=env):
+                self.env.update(env)
+                out=self.run_install('--hub','https://hub.mundus.in','--dry-run',success=False)
+                self.assertIn('termux-keystore is missing',out)
+                self.assertIn('pkg install termux-api',out)
+                self.assertFalse(self.log.exists())
+                for k in env: del self.env[k]
+        # With Termux:API present the check passes and the install proceeds.
+        self.env['TERMUX_VERSION']='0.118.1'
+        self.stub('termux-keystore','#!/bin/sh\nexit 0\n')
+        self.assertNotIn('termux-keystore',self.run_install('--hub','https://hub.mundus.in','--dry-run'))
+        # A desktop Linux $PREFIX (e.g. /usr/local) is not Termux.
+        del self.env['TERMUX_VERSION']; (self.mock/'termux-keystore').unlink()
+        self.env['PREFIX']='/usr/local'
+        self.run_install('--hub','https://hub.mundus.in','--dry-run')
+
     def test_missing_hub(self):
         self.assertIn('--hub is required',self.run_install('--dry-run',success=False))
         self.assertIn('localhost-8888',self.run_install('--dry-run',answers=['http://localhost:8888']))

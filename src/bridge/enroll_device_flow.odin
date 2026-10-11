@@ -34,6 +34,7 @@ import "core:crypto/hash"
 import base64 "core:encoding/base64"
 import "core:encoding/hex"
 import "core:fmt"
+import "core:mem"
 import "core:os"
 import "core:strings"
 import "core:sync"
@@ -774,18 +775,52 @@ bridge_enroll_try_open_approval_url :: proc(url: string) -> bool {
 	}
 }
 
+// BRIDGE_ENROLL_RUNIT_SERVICE is the termux-services (runit) service name; its
+// run directory is $PREFIX/var/service/ham-bridge.
+BRIDGE_ENROLL_RUNIT_SERVICE :: "ham-bridge"
+
+// bridge_enroll_runit_service_dir: Termux has no systemd, so a bridge there is
+// supervised by termux-services. Returns the service directory (temp-allocated)
+// when it exists; `sv` takes it as an absolute path, so the restart does not
+// depend on SVDIR, which only Termux login shells export.
+bridge_enroll_runit_service_dir :: proc() -> (dir: string, ok: bool) {
+	prefix, found := os.lookup_env("PREFIX", context.temp_allocator)
+	if !found || prefix == "" do return "", false
+	dir = strings.concatenate({prefix, "/var/service/", BRIDGE_ENROLL_RUNIT_SERVICE}, context.temp_allocator)
+	if !os.is_dir(dir) do return "", false
+	return dir, true
+}
+
+// bridge_enroll_restart_argv is the command that restarts the registered service
+// (temp-allocated), or nil where none is supported. runit_dir is non-empty only
+// for a Termux runit service.
+bridge_enroll_restart_argv :: proc(runit_dir: string) -> []string {
+	when ODIN_OS == .Linux {
+		if runit_dir != "" {
+			argv := make([]string, 3, context.temp_allocator)
+			argv[0], argv[1], argv[2] = "sv", "restart", runit_dir
+			return argv
+		}
+		argv := make([]string, 4, context.temp_allocator)
+		argv[0], argv[1], argv[2], argv[3] = "systemctl", "--user", "restart", "heimdall-bridge"
+		return argv
+	} else when ODIN_OS == .Darwin {
+		argv := make([]string, 4, context.temp_allocator)
+		argv[0], argv[1], argv[2] = "launchctl", "kickstart", "-k"
+		argv[3] = fmt.tprintf("gui/%d/works.earendil.heimdall-bridge", int(posix.getuid()))
+		return argv
+	} else {
+		return nil
+	}
+}
+
 // bridge_enroll_restart_service hands the persisted credential to the already
 // registered service. It invokes no shell.
 bridge_enroll_restart_service :: proc() -> bool {
-	argv: []string
-	when ODIN_OS == .Linux {
-		argv = []string{"systemctl", "--user", "restart", "heimdall-bridge"}
-	} else when ODIN_OS == .Darwin {
-		service := fmt.tprintf("gui/%d/works.earendil.heimdall-bridge", int(posix.getuid()))
-		defer delete(service)
-		argv = []string{"launchctl", "kickstart", "-k", service}
-	} else {
-		fmt.eprintln("bridge enroll: automatic service restart is supported only on Linux and macOS")
+	runit_dir, _ := bridge_enroll_runit_service_dir() // "" unless the service dir exists
+	argv := bridge_enroll_restart_argv(runit_dir)
+	if argv == nil {
+		fmt.eprintln("bridge enroll: automatic service restart is supported only on Linux (systemd or Termux runit) and macOS")
 		return false
 	}
 	state, stdout, stderr, err := os.process_exec(os.Process_Desc{command = argv}, context.allocator)
@@ -793,14 +828,33 @@ bridge_enroll_restart_service :: proc() -> bool {
 	defer if len(stderr) > 0 do delete(stderr)
 	if err != nil || !state.success {
 		fmt.eprintln("bridge enroll: credential saved, but the registered service could not be restarted.")
-		when ODIN_OS == .Linux {
-			fmt.eprintln("  Start it manually with: systemctl --user restart heimdall-bridge")
-		} else when ODIN_OS == .Darwin {
-			fmt.eprintfln("  Start it manually with: launchctl kickstart -k gui/%d/works.earendil.heimdall-bridge", int(posix.getuid()))
-		}
+		fmt.eprintfln("  Start it manually with: %s", strings.join(argv, " ", context.temp_allocator))
 		return false
 	}
 	return true
+}
+
+// bridge_enroll_vault_key_persisted reports whether a restarted bridge would find
+// bridge_id's vault key in the OS store. Under Termux the key is also cached in
+// this process's memory, so the check unwraps the sealed FILE through the
+// Keystore and bypasses that cache.
+bridge_enroll_vault_key_persisted :: proc(bridge_id: string) -> bool {
+	key: string
+	persisted: bool
+	when ODIN_OS == .Linux {
+		if keystore_android_selected() {
+			key, persisted = keystore_android_read_sealed_file(bridge_id)
+		} else {
+			key, persisted = keystore_read_keyring_vault_key(bridge_id)
+		}
+	} else {
+		key, persisted = keystore_read_keyring_vault_key(bridge_id)
+	}
+	if len(key) > 0 {
+		mem.zero_explicit(raw_data(key), len(key))
+		delete(key)
+	}
+	return persisted
 }
 
 // Bring up only the Hub WebSocket, not either bridge-local listener. This can
@@ -824,11 +878,13 @@ bridge_enroll_wait_for_vault_delivery :: proc(args: []string, bridge_id: string)
 			// The restarted service is a NEW process: it is unsealed only if it can
 			// read the key back from the OS store, so prove that before restarting.
 			when ODIN_OS == .Linux || ODIN_OS == .Darwin {
-				key, persisted := keystore_read_keyring_vault_key(bridge_id)
-				if len(key) > 0 do delete(key)
-				if !persisted {
+				if !bridge_enroll_vault_key_persisted(bridge_id) {
 					when ODIN_OS == .Linux {
-						fmt.eprintln("bridge enroll FAILED: the vault key was decrypted but could not be persisted in the Linux user keyring.")
+						if keystore_android_selected() {
+							fmt.eprintln("bridge enroll FAILED: the vault key was decrypted but could not be sealed with the Android Keystore (termux-keystore).")
+						} else {
+							fmt.eprintln("bridge enroll FAILED: the vault key was decrypted but could not be persisted in the Linux user keyring.")
+						}
 					} else {
 						fmt.eprintln("bridge enroll FAILED: the vault key was decrypted but could not be persisted in the macOS login keychain.")
 					}

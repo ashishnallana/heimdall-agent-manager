@@ -7,6 +7,10 @@ package main
 // for that exact description, never request_key(), which walks the
 // thread/process/session keyrings a bridge may have inherited from another
 // (REQ-T5-6). The mlock'd in-memory buffer is per process, i.e. per bridge.
+//
+// Under Termux (keystore_android_selected) every public proc below hands off to
+// the Android Keystore backend in keystore_android.odin before any keyring
+// syscall is made: the keyring is seccomp-blocked there and must not be probed.
 
 import "core:c"
 import "core:encoding/hex"
@@ -167,6 +171,7 @@ keystore_search_vault_key :: proc(bridge_id: string) -> (key_id: int, ok: bool) 
 // and falls back gracefully to process-isolated JIT memory (mlock'd buffer) without failing startup (REQ-VAULT-HARDEN-9).
 // An id that cannot name a key stores nothing anywhere (KEYSTORE_ERR_BAD_BRIDGE_ID).
 keystore_store_vault_key :: proc(bridge_id: string, key_hex: string) -> (ok: bool, err_code: int) {
+	if keystore_android_selected() do return keystore_android_store_vault_key(bridge_id, key_hex)
 	if !bridge_is_valid_hex_key(key_hex) {
 		return false, -1
 	}
@@ -198,6 +203,7 @@ keystore_store_vault_key :: proc(bridge_id: string, key_hex: string) -> (ok: boo
 
 // Retrieves bridge_id's vault key from the Linux kernel user keyring (@u) via KEYCTL_SEARCH / keyctl_read.
 keystore_read_keyring_vault_key :: proc(bridge_id: string, allocator := context.allocator) -> (key_hex: string, ok: bool) {
+	if keystore_android_selected() do return keystore_android_read_vault_key(bridge_id, allocator)
 	key_id := keystore_search_vault_key(bridge_id) or_return
 
 	buf: [128]u8
@@ -231,6 +237,7 @@ keystore_read_keyring_vault_key :: proc(bridge_id: string, allocator := context.
 // Revokes and unlinks bridge_id's vault key from KEY_SPEC_USER_KEYRING via keyctl_unlink.
 // Another bridge's key is never found, so never touched.
 keystore_unlink_vault_key :: proc(bridge_id: string) -> bool {
+	if keystore_android_selected() do return keystore_android_unlink_vault_key(bridge_id)
 	key_id := keystore_search_vault_key(bridge_id) or_return
 
 	// Revoke to immediately invalidate
@@ -243,7 +250,10 @@ keystore_unlink_vault_key :: proc(bridge_id: string) -> bool {
 
 // The Darwin Keychain item can exist yet be unreadable; a present @u key is always
 // readable and already reports Unlocked, so there is nothing extra to detect here.
+// Under Termux a sealed file proves the vault was configured even when the
+// Keystore cannot unwrap it right now.
 keystore_persisted_vault_item_present :: proc(bridge_id: string) -> bool {
+	if keystore_android_selected() do return keystore_android_persisted_vault_item_present(bridge_id)
 	return false
 }
 

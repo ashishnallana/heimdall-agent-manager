@@ -298,7 +298,8 @@ bridge_decrypt_embedded_vault_tokens :: proc(text: string, allocator := context.
 }
 
 // Explicitly lock and purge this bridge's unsealed vault key material from the
-// kernel keyring / Keychain and RAM; other bridges' keys are untouched (REQ-T5-3).
+// kernel keyring / Keychain / Termux sealed file and RAM; other bridges' keys
+// are untouched (REQ-T5-3).
 // The vault_configured marker stays, so a locked bridge keeps reporting "locked"
 // rather than "disabled" across restarts (REQ-T3-2).
 bridge_vault_lock :: proc() {
@@ -308,9 +309,13 @@ bridge_vault_lock :: proc() {
 // Turns vault encryption off for this bridge: purges the key like a lock AND
 // forgets that the vault was ever configured, so it reports "disabled" until the
 // next unseal. Bridge-local only (agent vault.reset op); the hub never triggers it.
-// Returns false if the marker could not be removed.
+// Returns false if the marker could not be removed. Under Termux it also deletes
+// this bridge's Android Keystore key, so the next unseal generates a fresh one.
 bridge_vault_reset :: proc() -> bool {
 	bridge_vault_lock()
+	when ODIN_OS == .Linux {
+		if keystore_android_selected() do _ = keystore_android_delete_keystore_key(bridge_config.daemon_id)
+	}
 	return bridge_vault_set_configured(bridge_config.daemon_id, false)
 }
 
