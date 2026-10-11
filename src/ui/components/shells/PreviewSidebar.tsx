@@ -18,13 +18,13 @@ import { useGetShellSessionQuery } from '../../api/endpoints/shells';
 import {
   closeTab,
   focusTab,
-  previewUrlFor,
   selectActivePreviewTabId,
   selectPreviewOpenSeq,
   selectPreviewTabs,
   setTabPath,
   type PreviewTab,
 } from '../../store/previewTabsSlice';
+import { previewAccessUrl } from './shellModel';
 
 // A session that is no longer running can never serve the iframe, so its tab is
 // closed for the user instead of leaving a dead frame behind.
@@ -98,7 +98,19 @@ function PreviewFrame({ tab, hidden }: { tab: PreviewTab; hidden: boolean }) {
   // Bumped to force a remount of the iframe — the only reliable same-origin reload
   // that does not depend on reaching into the frame's contentWindow.
   const [reloadKey, setReloadKey] = useState(0);
-  const src = useMemo(() => previewUrlFor(tab), [tab]);
+  const previewBaseUrl = useMemo(
+    () => session ? previewAccessUrl(session) : `/api/v1/preview/${encodeURIComponent(tab.sessionId)}/`,
+    [session, tab.sessionId],
+  );
+  const src = `${previewBaseUrl}${tab.currentPath}`;
+  const isCrossOrigin = useMemo(() => {
+    if (typeof window === 'undefined') return false;
+    try {
+      return new URL(previewBaseUrl, window.location.origin).origin !== window.location.origin;
+    } catch {
+      return false;
+    }
+  }, [previewBaseUrl]);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   // Local nav stack so the back button can go to the previous path, not just root.
   const navStackRef = useRef<string[]>([]);
@@ -107,6 +119,18 @@ function PreviewFrame({ tab, hidden }: { tab: PreviewTab; hidden: boolean }) {
   // Keep the draft in step when the path changes from outside this input (a tab
   // reopened at a remembered path, say).
   useEffect(() => { setDraft(tab.currentPath); }, [tab.currentPath]);
+
+  // A cross-origin frame is intentionally opaque. Its navigation history is the
+  // paths submitted through our own URL bar, so initialize that local history
+  // once per tab/origin mode without ever touching contentWindow.
+  useEffect(() => {
+    if (!isCrossOrigin) return;
+    navStackRef.current = [tab.currentPath];
+    setCanGoBack(false);
+  // `currentPath` is the initial value only; subsequent changes are appended by
+  // submitPath/handleBack and must not reset the stack.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isCrossOrigin, tab.sessionId]);
 
   // Terminate active network connections, audio/video playback, and worker threads
   // in the embedded document when the frame is unmounted.
@@ -126,6 +150,7 @@ function PreviewFrame({ tab, hidden }: { tab: PreviewTab; hidden: boolean }) {
   useEffect(() => {
     const iframe = iframeRef.current;
     if (!iframe) return;
+    if (isCrossOrigin) return;
     navStackRef.current = [];
     setCanGoBack(false);
 
@@ -176,7 +201,7 @@ function PreviewFrame({ tab, hidden }: { tab: PreviewTab; hidden: boolean }) {
       detachInnerWindow();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reloadKey, tab.sessionId]);
+  }, [isCrossOrigin, reloadKey, tab.sessionId]);
 
   const handleBack = () => {
     const stack = navStackRef.current;
@@ -187,6 +212,11 @@ function PreviewFrame({ tab, hidden }: { tab: PreviewTab; hidden: boolean }) {
       navStackRef.current = stack;
       setCanGoBack(stack.length > 1);
       setDraft(prev);
+      if (isCrossOrigin) {
+        dispatch(setTabPath({ sessionId: tab.sessionId, path: prev }));
+        setReloadKey((key) => key + 1);
+        return;
+      }
       // Prefer the iframe's own history so SPA state is preserved.
       try {
         iframeRef.current?.contentWindow?.history.back();
@@ -200,7 +230,16 @@ function PreviewFrame({ tab, hidden }: { tab: PreviewTab; hidden: boolean }) {
 
   const submitPath = (event: React.FormEvent) => {
     event.preventDefault();
-    dispatch(setTabPath({ sessionId: tab.sessionId, path: draft }));
+    const path = draft.replace(/^\/+/, '');
+    if (isCrossOrigin) {
+      const currentStack = navStackRef.current;
+      if (currentStack[currentStack.length - 1] !== path) {
+        const next = [...currentStack, path];
+        navStackRef.current = next.length > MAX_NAV_STACK ? next.slice(next.length - MAX_NAV_STACK) : next;
+      }
+      setCanGoBack(navStackRef.current.length > 1);
+    }
+    dispatch(setTabPath({ sessionId: tab.sessionId, path }));
     setReloadKey((key) => key + 1);
   };
 
@@ -247,6 +286,17 @@ function PreviewFrame({ tab, hidden }: { tab: PreviewTab; hidden: boolean }) {
           data-debug-id={`preview-sidebar-url-${tab.sessionId}`}
           className="min-w-0 flex-1 rounded border border-subtle bg-surface px-2 py-1 font-mono text-[11px] text-primary placeholder:text-faint focus:outline-none focus:ring-1 focus:ring-accent"
         />
+        {isCrossOrigin ? (
+          <button
+            type="button"
+            onClick={() => window.open(previewBaseUrl, '_blank', 'noopener,noreferrer')}
+            title="If the preview asks you to sign in, open it in a new tab once."
+            data-debug-id={`preview-sidebar-sign-in-${tab.sessionId}`}
+            className="shrink-0 rounded border border-subtle px-2 py-1 text-[10px] font-medium text-muted hover:bg-neutral-soft hover:text-primary"
+          >
+            Sign in / open in new tab
+          </button>
+        ) : null}
       </form>
 
       {/* Frame */}

@@ -478,6 +478,7 @@ export function previewUnavailableReason(session: ShellSession): string {
  * and would be dead text in a browser.
  */
 export function previewAccessUrl(session: ShellSession): string {
+  if (session.preview_url) return session.preview_url;
   const origin = typeof window === 'undefined' ? '' : window.location.origin;
   return `${origin}/api/v1/preview/${encodeURIComponent(session.session_id)}/`;
 }

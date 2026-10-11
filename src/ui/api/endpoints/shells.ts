@@ -36,6 +36,7 @@ export type ShellSession = {
   exit_code: number | null;
   exit_code_set: boolean;
   server_port: number;
+  preview_url?: string;
   preview_enabled: boolean;
   // `finished_at` IS serialised by write_shell_session_json
   // (shell_session_rest_handlers.odin:55) and was missing here; a terminal row's
