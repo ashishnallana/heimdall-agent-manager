@@ -206,3 +206,4 @@ rather than guessing:
 - `heimdall-ctl-communication` — read/send chat, agent-to-agent, naming the conversation.
 - `memory-management-workflow` — propose durable memories and choose their scope.
 - `search-command` — search the Hub for conversations, tasks, comments, memories, and more.
+- `heimdall-preview-setup` — share a localhost web app with the user via the Heimdall preview (`preview_url`).
