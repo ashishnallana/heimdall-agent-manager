@@ -184,20 +184,20 @@ test('Command Palette includes Settings options and opens SettingsModal directly
 // ---------------------------------------------------------------------------
 
 test('resolveSettingsTab extracts corresponding tabs from deep link routes', () => {
-  assert.equal(resolveSettingsTab('/settings'), 'appearance');
-  assert.equal(resolveSettingsTab('/settings/'), 'appearance');
+  assert.equal(resolveSettingsTab('/settings'), '');
+  assert.equal(resolveSettingsTab('/settings/'), '');
   assert.equal(resolveSettingsTab('/settings/appearance'), 'appearance');
   assert.equal(resolveSettingsTab('/settings/bridges'), 'bridges');
   assert.equal(resolveSettingsTab('/settings/notifications'), 'notifications');
   assert.equal(resolveSettingsTab('/settings/providers'), 'providers');
   assert.equal(resolveSettingsTab('/settings/projects'), 'projects');
   assert.equal(resolveSettingsTab('/settings/experimental'), 'experimental');
-  assert.equal(resolveSettingsTab('/settings/general'), 'appearance');
+  assert.equal(resolveSettingsTab('/settings/general'), '');
   assert.equal(resolveSettingsTab('/settings/browser'), 'browser');
   assert.equal(resolveSettingsTab('/settings/models'), 'models');
   assert.equal(resolveSettingsTab('/settings/workspace'), 'workspace');
   assert.equal(resolveSettingsTab('/settings/labs'), 'labs');
-  assert.equal(resolveSettingsTab('/home'), 'appearance');
+  assert.equal(resolveSettingsTab('/home'), '');
 
   // Deep link hash routes (REQ-SET-FIX-4)
   assert.equal(resolveSettingsTab('#/settings/vault'), 'vault');
@@ -217,9 +217,9 @@ test('normalizeSettingsTab aliases active routes and retires removed placeholder
   assert.equal(normalizeSettingsTab('labs'), 'experimental');
   assert.equal(normalizeSettingsTab('appearance'), 'appearance');
   assert.equal(normalizeSettingsTab('notifications'), 'notifications');
-  assert.equal(normalizeSettingsTab('general'), 'appearance');
-  assert.equal(normalizeSettingsTab(), 'appearance');
-  assert.equal(normalizeSettingsTab(undefined), 'appearance');
+  assert.equal(normalizeSettingsTab('general'), 'account');
+  assert.equal(normalizeSettingsTab(), 'account');
+  assert.equal(normalizeSettingsTab(undefined), 'account');
   assert.equal(normalizeSettingsTab('vault'), 'vault');
   assert.equal(normalizeSettingsTab('lsp'), 'lsp');
   assert.equal(normalizeSettingsTab('user-tokens'), 'user-tokens');

@@ -63,6 +63,7 @@ import ExperimentalPanel from '../settings/ExperimentalPanel';
 import VaultPanel from '../settings/VaultPanel';
 import VaultOnboardingModal from '../settings/VaultOnboardingModal';
 import SettingsModal from '../settings/SettingsModal';
+import { resolveSettingsTab } from '../../utils/settingsRouting';
 import {
   selectIsVaultConfigured,
   selectIsVaultUnlocked,
@@ -303,13 +304,7 @@ const SETTINGS_NAV = [
   { path: '/settings/experimental', label: 'Experimental' },
 ];
 
-export function resolveSettingsTab(path: string): string {
-  const clean = (path.startsWith('#') ? path.slice(1) : path).split('?')[0];
-  if (!clean.startsWith('/settings')) return 'appearance';
-  const sub = clean.slice('/settings'.length).replace(/^\//, '').split('/')[0] || '';
-  if (!sub || sub === 'general') return 'appearance';
-  return sub;
-}
+export { resolveSettingsTab };
 
 function decodeSegment(value: string): string {
   try { return decodeURIComponent(value); } catch (_err) { return value; }
@@ -1566,7 +1561,7 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
         break;
       case 'settings':
       case 'settings-modal':
-        setSettingsModalTab('appearance');
+        setSettingsModalTab('');
         setSettingsModalOpenState(true);
         break;
       case 'settings-appearance':
@@ -1796,7 +1791,7 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
                     ? (e) => {
                         e.preventDefault();
                         if (isMobile) setDrawerOpen(false);
-                        setSettingsModalTab('appearance');
+                        setSettingsModalTab('');
                         setSettingsModalOpen(true);
                       }
                     : isMobile

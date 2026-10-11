@@ -107,6 +107,31 @@ export async function decryptEmbeddedVaultTokens(
 }
 
 /**
+ * Plaintext for copying a message body to the clipboard: never the raw ciphertext.
+ *
+ * Armored and embedded vault tokens are decrypted with `key`; any token that cannot be
+ * decrypted (no key, wrong key, corrupt payload) is masked with the locked placeholder.
+ * Unencrypted bodies are returned unchanged.
+ */
+export async function resolveCopyableVaultText(
+  text: string,
+  key?: string | CryptoKey | null,
+): Promise<string> {
+  if (typeof text !== 'string' || !containsVaultArmored(text)) return text;
+  let result = text;
+  if (key) {
+    try {
+      result = isVaultArmored(text)
+        ? await decryptVaultText(text, key)
+        : await decryptEmbeddedVaultTokens(text, key);
+    } catch {
+      result = text;
+    }
+  }
+  return maskVaultArmored(result);
+}
+
+/**
  * Declarative object transformer: encrypts specified string fields of an object in-place or clone.
  * Unencrypted/non-targeted fields and already-armored fields are preserved intact.
  *

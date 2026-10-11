@@ -15,6 +15,7 @@ import LspPanel from './LspPanel';
 import UserTokensPanel from './UserTokensPanel';
 import TemplatesPanel from './TemplatesPanel';
 import AccountPanel from './AccountPanel';
+import { normalizeSettingsTab } from '../../utils/settingsRouting';
 
 export interface SettingsCategory {
   id: string;
@@ -90,14 +91,7 @@ export function getVisibleSettingsCategories(lspEnabled: boolean): SettingsCateg
   return SETTINGS_CATEGORIES.filter((category) => category.id !== 'lsp' || lspEnabled);
 }
 
-export function normalizeSettingsTab(tab?: string): string {
-  if (!tab || tab === 'general') return 'appearance';
-  if (tab === 'bridges') return 'workspace';
-  if (tab === 'providers') return 'models';
-  if (tab === 'labs') return 'experimental';
-  if (tab === 'browser' || tab === 'shortcuts' || tab === 'feedback') return 'appearance';
-  return tab;
-}
+export { normalizeSettingsTab };
 
 export interface SettingsUser {
   user_id?: string;
@@ -149,6 +143,8 @@ export function SettingsModal({
       setActiveTab(normalizedTab);
       setMobileSection(normalizedTab);
     } else {
+      // No tab named: desktop lands on the default category, mobile on the category list.
+      setActiveTab(normalizeSettingsTab());
       setMobileSection(null);
     }
   }, [initialTab, open]);

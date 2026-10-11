@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useDispatch } from 'react-redux';
 import {
   Badge,
@@ -698,10 +699,14 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
 
   if (!isOpen) return null;
 
-  return (
+  // Portaled to <body> on the shared `z-modal` layer (same as Modal / SettingsModal):
+  // rendered inline from ChainHeader / TaskChainOverview it sat inside the shell, where
+  // the fixed mobile sidebar rail painted over its left edge and the BottomDock over its
+  // footer. As a body-level overlay mounted after the shell it covers both.
+  return createPortal(
     <div
       data-debug-id="fleet-management-drawer-backdrop"
-      className="fixed inset-x-0 top-0 app-viewport-height z-50 flex justify-end bg-surface-overlay/80 backdrop-blur-sm transition-opacity"
+      className="fixed inset-x-0 top-0 app-viewport-height z-modal flex justify-end bg-surface-overlay/80 backdrop-blur-sm transition-opacity"
       onMouseDown={(e) => {
         backdropPressStartedRef.current = e.target === e.currentTarget;
       }}
@@ -711,7 +716,10 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
     >
       <div
         data-debug-id="fleet-management-drawer"
-        className="flex h-full w-full max-w-md flex-col bg-surface border-l border-subtle shadow-panel overflow-hidden"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Fleet Management"
+        className="flex h-full w-full md:max-w-md flex-col bg-surface md:border-l md:border-subtle shadow-panel overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Drawer Header */}
@@ -777,17 +785,22 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
                       : 'border-subtle bg-surface-secondary/30'
                   }`}
                 >
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <div className="grid h-8 w-8 place-items-center rounded-lg bg-accent/10 text-accent font-bold text-xs uppercase">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <div className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-accent/10 text-accent font-bold text-xs uppercase">
                         {roleName.slice(0, 2)}
                       </div>
-                      <div>
-                        <h4 className="text-xs font-bold text-primary flex items-center gap-1.5">
-                          {roleName}
-                          <span className="font-mono text-[10px] text-muted font-normal">({agentId})</span>
+                      <div className="min-w-0">
+                        <h4 className="text-xs font-bold text-primary flex min-w-0 flex-wrap items-center gap-x-1.5">
+                          <span className="min-w-0 break-words">{roleName}</span>
+                          <span
+                            className="min-w-0 max-w-full truncate font-mono text-[10px] text-muted font-normal"
+                            title={agentId}
+                          >
+                            ({agentId})
+                          </span>
                         </h4>
-                        <div className="flex items-center gap-1 text-[11px] text-muted font-mono mt-0.5">
+                        <div className="flex flex-wrap items-center gap-1 text-[11px] text-muted font-mono mt-0.5">
                           <span className="text-accent">{renderSlotDots(activeCount, effectiveCapacity)}</span>
                           <span>{activeCount}/{effectiveCapacity} active</span>
                           {isModified && (
@@ -801,7 +814,7 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
                         </div>
                       </div>
                     </div>
-                    <Badge tone={isSaturated ? 'warning' : 'neutral'}>
+                    <Badge tone={isSaturated ? 'warning' : 'neutral'} className="shrink-0 whitespace-nowrap">
                       {isSaturated ? 'Saturated' : 'Available'}
                     </Badge>
                   </div>
@@ -1155,6 +1168,7 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
           </Modal>
         )}
       </div>
-    </div>
+    </div>,
+    document.body
   );
 };

@@ -9,6 +9,8 @@ import {
   containsVaultArmored,
   decryptVaultText,
   decryptEmbeddedVaultTokens,
+  resolveCopyableVaultText,
+  maskVaultArmored,
 } from '../../utils/vaultContent';
 import { selectActiveVaultKey } from '../../store/vaultSlice';
 import { extractMessageOptions } from './types';
@@ -85,6 +87,27 @@ function DefaultMessageBody({ body }: { body: string }) {
     return <Markdown source={sanitized} compact copyAll={false} />;
   }
   return <Markdown source={decrypted !== null ? decrypted : body} compact copyAll={false} />;
+}
+
+// The copy text is resolved ahead of the click: iOS Safari rejects a clipboard write made
+// after an `await` in the handler, so decrypting on click would fail on mobile. Until the
+// plaintext is ready the button holds the masked body, so ciphertext is never copied.
+function MessageCopyButton({ debugId, body, className }: { debugId: string; body: string; className?: string }) {
+  const activeKey = useSelector(selectActiveVaultKey);
+  const [text, setText] = useState(() => maskVaultArmored(body));
+
+  useEffect(() => {
+    let mounted = true;
+    setText(maskVaultArmored(body));
+    resolveCopyableVaultText(body, activeKey).then((res) => {
+      if (mounted) setText(res);
+    });
+    return () => {
+      mounted = false;
+    };
+  }, [body, activeKey]);
+
+  return <ChatHoverCopyButton debugId={debugId} text={text} className={className} />;
 }
 
 export default function ChatMessageList({
@@ -320,7 +343,7 @@ export default function ChatMessageList({
                   )}
                   {!hideCardChrome && (
                     <div data-debug-id={`${debugPrefix}-message-actions-${message.messageId}`} className="mt-1 flex min-h-11 w-full items-center justify-end gap-1.5 text-[10px] text-faint sm:min-h-8">
-                      <ChatHoverCopyButton debugId={`${debugPrefix}-message-copy-btn-${message.messageId}`} text={message.body} className="rounded-full border border-subtle bg-surface/80 shadow-lg" />
+                      <MessageCopyButton debugId={`${debugPrefix}-message-copy-btn-${message.messageId}`} body={message.body} className="rounded-full border border-subtle bg-surface/80 shadow-lg" />
                       {timestamp.label ? <time data-debug-id={`${debugPrefix}-message-${message.messageId}-time`} dateTime={timestamp.iso} title={timestamp.iso}>{timestamp.label}</time> : null}
                       {message.isUser && delivery.glyph ? (
                         <span data-debug-id={`${debugPrefix}-message-${message.messageId}-status`} title={delivery.label} className={delivery.tone}>{delivery.glyph} {delivery.label}</span>

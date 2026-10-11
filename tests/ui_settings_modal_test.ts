@@ -570,9 +570,9 @@ test('AppShell routing integration ensures settings routes resolve without crash
   );
 
   // Deep link route resolution (REQ-SET-FIX-5: /settings and /settings/general default to appearance)
-  assert.equal(resolveSettingsTab('/settings'), 'appearance');
-  assert.equal(resolveSettingsTab('/settings/'), 'appearance');
-  assert.equal(resolveSettingsTab('/settings/general'), 'appearance');
+  assert.equal(resolveSettingsTab('/settings'), '');
+  assert.equal(resolveSettingsTab('/settings/'), '');
+  assert.equal(resolveSettingsTab('/settings/general'), '');
   assert.equal(resolveSettingsTab('/settings/appearance'), 'appearance');
   assert.equal(resolveSettingsTab('/settings/bridges'), 'bridges');
   assert.equal(resolveSettingsTab('/settings/notifications'), 'notifications');
@@ -600,8 +600,8 @@ test('AppShell routing integration ensures settings routes resolve without crash
   assert.equal(normalizeSettingsTab('user-tokens'), 'user-tokens');
   assert.equal(normalizeSettingsTab('templates'), 'templates');
   assert.equal(normalizeSettingsTab('projects'), 'projects');
-  assert.equal(normalizeSettingsTab('general'), 'appearance');
-  assert.equal(normalizeSettingsTab(), 'appearance');
+  assert.equal(normalizeSettingsTab('general'), 'account');
+  assert.equal(normalizeSettingsTab(), 'account');
 
   // Command palette integration
   const settingsNav = DEFAULT_NAV.find((item) => item.label === 'Settings');
@@ -620,4 +620,28 @@ test('AppShell routing integration ensures settings routes resolve without crash
     content.includes('window.history.back()'),
     'Must call window.history.back() when closing from a settings route',
   );
+});
+
+test('sidebar Settings and palette settings open the landing view, not Appearance (REQ-3)', () => {
+  const shell = fs.readFileSync(path.join(REPO_ROOT, 'src/ui/components/shell/AppShell.tsx'), 'utf8');
+  const modal = fs.readFileSync(SETTINGS_MODAL_PATH, 'utf8');
+
+  // Sidebar nav item: no hard-coded tab.
+  const navStart = shell.indexOf('data-debug-id="shell-secondary-nav"');
+  assert.ok(navStart >= 0, 'secondary nav must exist');
+  const navBlock = shell.slice(navStart, navStart + 1200);
+  assert.ok(navBlock.includes("setSettingsModalTab('')"), 'sidebar Settings must open with no tab');
+  assert.ok(!navBlock.includes("setSettingsModalTab('appearance')"), 'sidebar Settings must not force Appearance');
+
+  // Palette: settings/settings-modal open landing; theme actions still go to Appearance.
+  assert.match(shell, /case 'settings':\s*case 'settings-modal':\s*setSettingsModalTab\(''\);/);
+  assert.match(shell, /case 'settings-appearance':\s*case 'change-theme':\s*setSettingsModalTab\('appearance'\);/);
+
+  // No-tab open: desktop resets to the default category, mobile resets to the category list.
+  assert.ok(modal.includes('setActiveTab(normalizeSettingsTab());'), 'no-tab open must reset desktop tab to default');
+  assert.equal(normalizeSettingsTab(), 'account');
+
+  // Routing helpers come from the shared module the tests exercise (no private copies).
+  assert.ok(!shell.includes('export function resolveSettingsTab'), 'AppShell must not keep a private resolveSettingsTab');
+  assert.ok(!modal.includes('export function normalizeSettingsTab'), 'SettingsModal must not keep a private normalizeSettingsTab');
 });

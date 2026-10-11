@@ -98,9 +98,10 @@ const PATHS: Record<IconName, ReactElement> = {
   plus: <path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" />,
   pencil: <path d="M12 20h9M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" />,
   gear: (
-    <g fill="none" stroke="currentColor" strokeWidth={1.8}>
-      <circle cx={12} cy={12} r={3.2} />
-      <path d="M12 2.5v2.4M12 19.1v2.4M4.2 7l2 1.2M17.8 15.8l2 1.2M4.2 17l2-1.2M17.8 8.2l2-1.2" strokeLinecap="round" />
+    // Eight-toothed cog outline with a centre hole (the old circle + spokes read as a sun).
+    <g fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinejoin="round">
+      <path d="M9.84 5.03 10.38 2.54h3.24l.54 2.49 1.25.51 2.13-1.38 2.3 2.3-1.38 2.13.51 1.25 2.49.54v3.24l-2.49.54-.51 1.25 1.38 2.13-2.3 2.3-2.13-1.38-1.25.51-.54 2.49h-3.24l-.54-2.49-1.25-.51-2.13 1.38-2.3-2.3 1.38-2.13-.51-1.25-2.49-.54v-3.24l2.49-.54.51-1.25-1.38-2.13 2.3-2.3 2.13 1.38z" />
+      <circle cx={12} cy={12} r={3} />
     </g>
   ),
   chat: <path d="M4 5.5h16v11H9l-4 3.5v-3.5H4z" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinejoin="round" />,
