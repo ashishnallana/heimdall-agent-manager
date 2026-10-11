@@ -1,0 +1,1063 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <!-- No zooming on mobile: user-scalable=no covers Android; iOS needs the 16px
+       input font-size in .field, since it ignores the meta since iOS 10. -->
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>Sign in · Heimdall</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      /* Same warm dark palette as landing-page/index.html */
+      --bg: #0e0d0b;
+      --bg-raise: #14120f;
+      --bg-field: #181612;
+      --line: rgba(236, 231, 223, 0.07);
+      --line-strong: rgba(236, 231, 223, 0.16);
+      --text: #ece7df;
+      --text-muted: #9c958b;
+      --text-faint: #5f5a53;
+      --accent: #d2a965;
+      --accent-line: rgba(210, 169, 101, 0.45);
+      --danger: #e08a7a;
+      --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; }
+
+    /*
+      Digital-rain backdrop. Fixed behind everything, and masked so the middle of the
+      viewport — where the card sits — stays clear and the form keeps its contrast.
+      Content below is given position/z-index so it layers above the canvas.
+    */
+    #rain {
+      position: fixed; inset: 0; width: 100%; height: 100%;
+      z-index: 0; pointer-events: none; opacity: .3;
+      -webkit-mask-image: radial-gradient(ellipse 46% 52% at 50% 50%, transparent 0%, transparent 42%, #000 100%);
+              mask-image: radial-gradient(ellipse 46% 52% at 50% 50%, transparent 0%, transparent 42%, #000 100%);
+    }
+    header, main, footer { position: relative; z-index: 1; }
+    @media (prefers-reduced-motion: reduce) { #rain { opacity: .22; } }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font-sans);
+      font-size: 14px;
+      -webkit-font-smoothing: antialiased;
+      display: flex;
+      flex-direction: column;
+      min-height: 100vh;
+    }
+    a { color: inherit; text-decoration: none; }
+
+    header { padding: 22px 24px; }
+    .brand {
+      display: inline-flex; align-items: center; gap: 8px;
+      font-family: var(--font-mono); font-size: 13px; font-weight: 500;
+      letter-spacing: .12em; text-transform: uppercase; color: var(--text);
+    }
+    .brand svg { width: 20px; height: 20px; }
+
+    main {
+      flex: 1; display: flex; align-items: center; justify-content: center;
+      padding: 24px 16px 48px;
+    }
+    .card { width: 100%; max-width: 346px; }
+
+    h1 { font-size: 20px; font-weight: 500; letter-spacing: -0.01em; line-height: 1.3; }
+    .tagline { font-size: 20px; font-weight: 400; color: var(--text-faint); letter-spacing: -0.01em; line-height: 1.3; }
+    /* The flow title, mirroring Authentik's flow `title` field. */
+    .flow-title { font-size: 20px; font-weight: 500; letter-spacing: -0.01em; line-height: 1.3; }
+    .flow-sub { font-size: 13px; color: var(--text-faint); margin-top: 6px; line-height: 1.5; }
+
+    /* The head owns the gap, so steps that hide the SSO block keep breathing room. */
+    .flow-head { margin-bottom: 26px; }
+    .sso { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
+    .sso button {
+      position: relative;
+      display: flex; align-items: center; justify-content: center; gap: 8px;
+      height: 34px; border-radius: 4px; border: 1px solid transparent;
+      background: var(--bg-raise); color: var(--text-muted);
+      font: 500 13px var(--font-sans);
+    }
+    .sso button svg { width: 15px; height: 15px; }
+    .sso button:disabled { cursor: not-allowed; opacity: .45; }
+    .sso button:disabled .g-mark { filter: grayscale(1); }
+
+    .soon {
+      font-family: var(--font-mono); font-size: 10px; letter-spacing: .08em;
+      text-transform: uppercase; color: var(--text-faint);
+      text-align: center; margin-top: 8px;
+    }
+
+    .divider {
+      display: flex; align-items: center; gap: 10px; margin: 22px 0 18px;
+      color: var(--text-faint); font-size: 11px; font-family: var(--font-mono);
+      letter-spacing: .08em; text-transform: uppercase;
+    }
+    .divider::before, .divider::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+
+    form { display: flex; flex-direction: column; }
+    label { font-size: 12px; font-weight: 500; color: var(--text-muted); margin-bottom: 8px; }
+    .field + label { margin-top: 16px; }
+    .label-row { display: flex; justify-content: space-between; align-items: baseline; margin-top: 16px; }
+    .label-row label { margin: 0 0 8px; }
+    .label-row a, .label-row .disabled-link { font-size: 12px; color: var(--text-faint); }
+    .label-row a:hover { color: var(--text-muted); }
+
+    .field {
+      height: 36px; width: 100%; padding: 0 10px;
+      background: transparent; color: var(--text);
+      border: 1px solid var(--line-strong); border-radius: 4px;
+      /* 16px, not 14: below 16 iOS Safari zooms the page when the field takes focus. */
+      font: 400 16px var(--font-sans);
+      outline: none; transition: border-color .15s;
+    }
+    .field::placeholder { color: var(--text-faint); }
+    .field:focus { border-color: var(--accent-line); }
+
+    .ident-chip {
+      display: flex; align-items: center; justify-content: space-between;
+      height: 36px; padding: 0 10px; border-radius: 4px;
+      background: var(--bg-raise); color: var(--text); font-size: 14px;
+    }
+    .ident-who { display: flex; align-items: center; gap: 8px; min-width: 0; }
+    .ident-who .uid-display { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    /* Authentik ships a ready-made avatar per user as a data: URI on every challenge. */
+    .uid-avatar { width: 20px; height: 20px; border-radius: 50%; flex: none; display: block; }
+    .ident-chip button {
+      background: none; border: 0; color: var(--text-faint); cursor: pointer;
+      font: 400 12px var(--font-sans); flex: none; padding-left: 8px;
+    }
+    .ident-chip button:hover { color: var(--text-muted); }
+
+    .primary {
+      margin-top: 20px; height: 36px; border-radius: 4px; border: 0;
+      background: var(--bg-raise); color: var(--text);
+      font: 500 14px var(--font-sans); cursor: pointer;
+      transition: background .15s;
+    }
+    .primary:hover { background: #1d1a15; }
+    .primary:focus-visible { outline: 1px solid var(--accent-line); outline-offset: 2px; }
+
+    .error { color: var(--danger); font-size: 12px; margin-top: 10px; min-height: 0; }
+    .error:empty { display: none; }
+
+    .alt { margin-top: 22px; text-align: center; font-size: 13px; color: var(--text); }
+    .alt .disabled-link { color: var(--text-faint); cursor: not-allowed; }
+
+    .step[hidden] { display: none; }
+    .step-title { font-size: 15px; font-weight: 500; margin: 22px 0 6px; }
+    .secondary {
+      margin-top: 8px; height: 36px; border-radius: 4px; border: 1px solid var(--line-strong);
+      background: transparent; color: var(--text-muted); font: 500 14px var(--font-sans); cursor: pointer;
+    }
+    .secondary:hover { color: var(--text); }
+    .qr { margin: 6px auto 0; width: 152px; height: 152px; padding: 10px; background: var(--text); border-radius: 4px; }
+    .qr svg { width: 100%; height: 100%; display: block; }
+    .secret {
+      display: block; text-align: center; margin-top: 6px; font-family: var(--font-mono);
+      font-size: 12px; line-height: 1.7; letter-spacing: .06em; color: var(--text-muted);
+      user-select: all; word-spacing: .2em;
+    }
+    .hint { font-size: 12px; color: var(--text-faint); margin: -2px 0 10px; line-height: 1.45; }
+    .hint.center { text-align: center; margin: 16px 0 0; }
+    .hint a:hover { color: var(--text-muted); }
+    .field.code { font-family: var(--font-mono); font-size: 18px; letter-spacing: .5em; text-align: center; height: 44px; }
+
+    /* Checkbox prompt, matching Authentik's `type: checkbox` prompt. */
+    .check {
+      display: flex; align-items: flex-start; gap: 10px; margin-top: 4px;
+      padding: 12px; border: 1px solid var(--line-strong); border-radius: 4px;
+      cursor: pointer;
+    }
+    .check input { margin: 1px 0 0; width: 15px; height: 15px; accent-color: var(--accent); flex: none; }
+    .check span { font-size: 13px; line-height: 1.45; color: var(--text); }
+
+    /* Recovery codes, from the static authenticator stage (6 codes). */
+    .codes {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+      margin: 4px 0 0; padding: 12px; border-radius: 4px;
+      background: var(--bg-raise); list-style: none;
+    }
+    .codes li {
+      font-family: var(--font-mono); font-size: 13px; line-height: 1.6; letter-spacing: .06em;
+      color: var(--text); text-align: center; user-select: all;
+    }
+    .warn {
+      font-size: 12px; color: var(--accent); line-height: 1.45;
+      margin-top: 10px; padding-left: 10px; border-left: 1px solid var(--accent-line);
+    }
+    .ghost-link {
+      margin-top: 10px; text-align: center; font-size: 12px; color: var(--text-faint);
+      background: none; border: 0; cursor: pointer; font-family: var(--font-sans);
+    }
+    .ghost-link:hover { color: var(--text-muted); }
+
+    footer {
+      padding: 20px 16px 22px; text-align: center;
+      font-size: 12px; color: var(--text-faint);
+    }
+    footer a:hover { color: var(--text-muted); }
+  </style>
+</head>
+<body>
+  <canvas id="rain" aria-hidden="true"></canvas>
+
+  <header>
+    <span class="brand" aria-label="Heimdall">
+      <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <circle cx="12" cy="12" r="9.5" stroke="var(--accent)" stroke-width="1.2"/>
+        <circle cx="12" cy="12" r="3" fill="var(--accent)"/>
+        <path d="M12 2.5v4M12 17.5v4M2.5 12h4M17.5 12h4" stroke="var(--accent)" stroke-width="1.2" stroke-linecap="round" opacity=".6"/>
+      </svg>
+      Heimdall
+    </span>
+  </header>
+
+  <main>
+    <!-- Every stage renders into this card; app.js replaces its children per challenge. -->
+    <div class="card" id="card">
+      <p class="hint" style="text-align:center">Loading…</p>
+    </div>
+  </main>
+
+  <footer>
+    <a href="#">Terms of Service</a> and <a href="#">Privacy Policy</a>
+  </footer>
+
+  <script>
+// ---- QR encoder (see qr.js; verified by qr.test.mjs against qrencode + zbarimg) ----
+/*
+ * Minimal QR encoder — byte mode, error-correction level M, versions 1..15.
+ *
+ * Needed because the TOTP setup stage hands us an `otpauth://` URI and nothing else: the
+ * QR has to be produced in the browser. External scripts are not an option on the Authentik
+ * origin, so this is deliberately dependency-free.
+ *
+ * Correctness is not self-evident for this algorithm, so it is checked against `qrencode`
+ * and round-tripped through `zbarimg` in qr.test.mjs rather than eyeballed.
+ */
+
+// EC level M. Per version: [ecCodewordsPerBlock, group1Blocks, group1DataCw, group2Blocks, group2DataCw]
+const EC_M = {
+  1:  [10, 1, 16, 0, 0],
+  2:  [16, 1, 28, 0, 0],
+  3:  [26, 1, 44, 0, 0],
+  4:  [18, 2, 32, 0, 0],
+  5:  [24, 2, 43, 0, 0],
+  6:  [16, 4, 27, 0, 0],
+  7:  [18, 4, 31, 0, 0],
+  8:  [22, 2, 38, 2, 39],
+  9:  [22, 3, 36, 2, 37],
+  10: [26, 4, 43, 1, 44],
+  11: [30, 1, 50, 4, 51],
+  12: [22, 6, 36, 2, 37],
+  13: [22, 8, 37, 1, 38],
+  14: [24, 4, 40, 5, 41],
+  15: [24, 5, 41, 5, 42],
+};
+
+// Alignment pattern centre coordinates per version (version 1 has none).
+const ALIGN = {
+  1: [], 2: [6, 18], 3: [6, 22], 4: [6, 26], 5: [6, 30], 6: [6, 34],
+  7: [6, 22, 38], 8: [6, 24, 42], 9: [6, 26, 46], 10: [6, 28, 50],
+  11: [6, 30, 54], 12: [6, 32, 58], 13: [6, 34, 62], 14: [6, 26, 46, 66],
+  15: [6, 26, 48, 70],
+};
+
+// ---- GF(256) for Reed-Solomon, primitive polynomial 0x11d --------------------
+const EXP = new Uint8Array(512), LOG = new Uint8Array(256);
+(() => {
+  let x = 1;
+  for (let i = 0; i < 255; i++) {
+    EXP[i] = x; LOG[x] = i;
+    x <<= 1;
+    if (x & 0x100) x ^= 0x11d;
+  }
+  for (let i = 255; i < 512; i++) EXP[i] = EXP[i - 255];
+})();
+const mul = (a, b) => (a === 0 || b === 0) ? 0 : EXP[LOG[a] + LOG[b]];
+
+function rsGenerator(degree) {
+  let poly = [1];
+  for (let i = 0; i < degree; i++) {
+    const next = new Array(poly.length + 1).fill(0);
+    for (let j = 0; j < poly.length; j++) {
+      next[j] ^= mul(poly[j], EXP[i]);
+      next[j + 1] ^= poly[j];
+    }
+    poly = next;
+  }
+  // Built in ascending powers, so the leading 1 ends up last. rsRemainder wants the leading
+  // coefficient first — reverse before returning.
+  return poly.reverse();
+}
+
+function rsRemainder(data, degree) {
+  const gen = rsGenerator(degree);
+  const rem = new Array(degree).fill(0);
+  for (const byte of data) {
+    const factor = byte ^ rem[0];
+    rem.shift(); rem.push(0);
+    for (let i = 0; i < degree; i++) rem[i] ^= mul(gen[i + 1], factor);
+  }
+  return rem;
+}
+
+// ---- Bit helpers -------------------------------------------------------------
+class Bits {
+  constructor() { this.bits = []; }
+  push(value, length) {
+    for (let i = length - 1; i >= 0; i--) this.bits.push((value >>> i) & 1);
+  }
+  get length() { return this.bits.length; }
+}
+
+const totalDataCodewords = (v) => {
+  const [ec, b1, d1, b2, d2] = EC_M[v];
+  return b1 * d1 + b2 * d2;
+};
+
+function chooseVersion(byteLen) {
+  for (let v = 1; v <= 15; v++) {
+    const countBits = v < 10 ? 8 : 16;
+    const need = 4 + countBits + byteLen * 8;
+    if (need <= totalDataCodewords(v) * 8) return v;
+  }
+  throw new Error('qr: payload too long for version 15 at EC level M');
+}
+
+// ---- Codeword assembly -------------------------------------------------------
+function buildCodewords(bytes, version) {
+  const [ecPerBlock, b1, d1, b2, d2] = EC_M[version];
+  const capacity = totalDataCodewords(version) * 8;
+  const bs = new Bits();
+  bs.push(0b0100, 4);                                   // byte mode
+  bs.push(bytes.length, version < 10 ? 8 : 16);         // character count
+  for (const b of bytes) bs.push(b, 8);
+  bs.push(0, Math.min(4, capacity - bs.length));        // terminator
+  while (bs.length % 8) bs.bits.push(0);                // pad to a byte boundary
+
+  const data = [];
+  for (let i = 0; i < bs.length; i += 8) {
+    let byte = 0;
+    for (let j = 0; j < 8; j++) byte = (byte << 1) | bs.bits[i + j];
+    data.push(byte);
+  }
+  const pads = [0xec, 0x11];
+  for (let i = 0; data.length < capacity / 8; i++) data.push(pads[i % 2]);
+
+  // Split into blocks, compute EC per block, then interleave both.
+  const blocks = [], ecBlocks = [];
+  let pos = 0;
+  for (let i = 0; i < b1 + b2; i++) {
+    const size = i < b1 ? d1 : d2;
+    const block = data.slice(pos, pos + size);
+    pos += size;
+    blocks.push(block);
+    ecBlocks.push(rsRemainder(block, ecPerBlock));
+  }
+  const out = [];
+  const maxData = Math.max(d1, d2);
+  for (let i = 0; i < maxData; i++) for (const b of blocks) if (i < b.length) out.push(b[i]);
+  for (let i = 0; i < ecPerBlock; i++) for (const b of ecBlocks) out.push(b[i]);
+  return out;
+}
+
+// ---- Matrix ------------------------------------------------------------------
+function buildMatrix(version, codewords, mask) {
+  const size = version * 4 + 17;
+  const m = Array.from({ length: size }, () => new Array(size).fill(null));
+  const reserved = Array.from({ length: size }, () => new Array(size).fill(false));
+
+  const setF = (r, c, v) => { if (r >= 0 && r < size && c >= 0 && c < size) { m[r][c] = v; reserved[r][c] = true; } };
+
+  // Finder patterns plus their separators.
+  for (const [br, bc] of [[0, 0], [0, size - 7], [size - 7, 0]]) {
+    for (let r = -1; r <= 7; r++) for (let c = -1; c <= 7; c++) {
+      const inner = r >= 0 && r <= 6 && c >= 0 && c <= 6;
+      const on = inner && (r === 0 || r === 6 || c === 0 || c === 6 || (r >= 2 && r <= 4 && c >= 2 && c <= 4));
+      setF(br + r, bc + c, on ? 1 : 0);
+    }
+  }
+  // Timing patterns.
+  for (let i = 8; i < size - 8; i++) { setF(6, i, i % 2 === 0 ? 1 : 0); setF(i, 6, i % 2 === 0 ? 1 : 0); }
+  // Alignment patterns, skipping those that collide with finders.
+  const centers = ALIGN[version];
+  for (const r of centers) for (const c of centers) {
+    if ((r <= 8 && c <= 8) || (r <= 8 && c >= size - 9) || (r >= size - 9 && c <= 8)) continue;
+    for (let dr = -2; dr <= 2; dr++) for (let dc = -2; dc <= 2; dc++) {
+      const on = Math.max(Math.abs(dr), Math.abs(dc)) !== 1;
+      setF(r + dr, c + dc, on ? 1 : 0);
+    }
+  }
+  setF(size - 8, 8, 1);                                  // dark module
+  // Reserve the format areas, which are written after masking. Mark them only — writing a
+  // value here would clobber the timing modules at (6,8) and (8,6), which fall inside this
+  // span and are not format positions, so nothing would put them back.
+  const keep = (r, c) => { reserved[r][c] = true; };
+  for (let i = 0; i < 9; i++) { keep(8, i); keep(i, 8); }
+  for (let i = 0; i < 8; i++) { keep(8, size - 1 - i); keep(size - 1 - i, 8); }
+  // Version information blocks, versions 7 and up.
+  if (version >= 7) {
+    let rem = version;
+    for (let i = 0; i < 12; i++) rem = (rem << 1) ^ ((rem >>> 11) * 0x1f25);
+    const vbits = (version << 12) | rem;
+    for (let i = 0; i < 18; i++) {
+      const bit = (vbits >>> i) & 1;
+      setF(Math.floor(i / 3), size - 11 + (i % 3), bit);
+      setF(size - 11 + (i % 3), Math.floor(i / 3), bit);
+    }
+  }
+
+  // Data placement: two-column zigzag from the bottom right, skipping column 6.
+  let bitIndex = 0, upward = true;
+  for (let right = size - 1; right >= 1; right -= 2) {
+    if (right === 6) right = 5;
+    for (let step = 0; step < size; step++) {
+      const r = upward ? size - 1 - step : step;
+      for (const c of [right, right - 1]) {
+        if (reserved[r][c]) continue;
+        let bit = 0;
+        if (bitIndex < codewords.length * 8) {
+          bit = (codewords[bitIndex >>> 3] >>> (7 - (bitIndex & 7))) & 1;
+        }
+        bitIndex++;
+        m[r][c] = bit ^ (maskBit(mask, r, c) ? 1 : 0);
+      }
+    }
+    upward = !upward;
+  }
+
+  // Format information: EC level M is 0b00, combined with the mask, BCH(15,5) protected.
+  const fmtData = (0b00 << 3) | mask;
+  let rem = fmtData;
+  for (let i = 0; i < 10; i++) rem = (rem << 1) ^ ((rem >>> 9) * 0x537);
+  const fmt = ((fmtData << 10) | rem) ^ 0x5412;
+  // Copy 1 runs down column 8 then left along row 8; copy 2 runs right along row 8 and up
+  // column 8. Note the spec is written in (x, y) — these are [row][col], so they look
+  // transposed against it.
+  for (let i = 0; i <= 5; i++) m[i][8] = (fmt >>> i) & 1;
+  m[7][8] = (fmt >>> 6) & 1;
+  m[8][8] = (fmt >>> 7) & 1;
+  m[8][7] = (fmt >>> 8) & 1;
+  for (let i = 9; i < 15; i++) m[8][14 - i] = (fmt >>> i) & 1;
+  for (let i = 0; i < 8; i++) m[8][size - 1 - i] = (fmt >>> i) & 1;
+  for (let i = 8; i < 15; i++) m[size - 15 + i][8] = (fmt >>> i) & 1;
+  m[size - 8][8] = 1;
+
+  return m;
+}
+
+function maskBit(mask, r, c) {
+  switch (mask) {
+    case 0: return (r + c) % 2 === 0;
+    case 1: return r % 2 === 0;
+    case 2: return c % 3 === 0;
+    case 3: return (r + c) % 3 === 0;
+    case 4: return (Math.floor(r / 2) + Math.floor(c / 3)) % 2 === 0;
+    case 5: return ((r * c) % 2) + ((r * c) % 3) === 0;
+    case 6: return (((r * c) % 2) + ((r * c) % 3)) % 2 === 0;
+    case 7: return (((r + c) % 2) + ((r * c) % 3)) % 2 === 0;
+  }
+}
+
+// ---- Mask penalty (ISO/IEC 18004 section 8.8.2) -------------------------------
+function penalty(m) {
+  const n = m.length;
+  let score = 0;
+
+  // Rule 1: runs of five or more same-coloured modules in a row or column.
+  for (const transposed of [false, true]) {
+    for (let a = 0; a < n; a++) {
+      let run = 1;
+      for (let b = 1; b < n; b++) {
+        const cur = transposed ? m[b][a] : m[a][b];
+        const prev = transposed ? m[b - 1][a] : m[a][b - 1];
+        if (cur === prev) { run++; if (run === 5) score += 3; else if (run > 5) score++; }
+        else run = 1;
+      }
+    }
+  }
+  // Rule 2: 2x2 blocks of one colour.
+  for (let r = 0; r < n - 1; r++) for (let c = 0; c < n - 1; c++) {
+    const v = m[r][c];
+    if (v === m[r][c + 1] && v === m[r + 1][c] && v === m[r + 1][c + 1]) score += 3;
+  }
+  // Rule 3: the 1:1:3:1:1 finder-like pattern with four light modules either side.
+  const A = [1, 0, 1, 1, 1, 0, 1, 0, 0, 0, 0];
+  const B = [0, 0, 0, 0, 1, 0, 1, 1, 1, 0, 1];
+  const matches = (get, i) => {
+    let a = true, b = true;
+    for (let k = 0; k < 11; k++) { const v = get(i + k); if (v !== A[k]) a = false; if (v !== B[k]) b = false; }
+    return a || b;
+  };
+  for (let r = 0; r < n; r++) for (let c = 0; c + 11 <= n; c++) if (matches((i) => m[r][i], c)) score += 40;
+  for (let c = 0; c < n; c++) for (let r = 0; r + 11 <= n; r++) if (matches((i) => m[i][c], r)) score += 40;
+  // Rule 4: deviation of dark-module proportion from 50%.
+  let dark = 0;
+  for (const row of m) for (const v of row) dark += v;
+  const pct = (dark * 100) / (n * n);
+  score += Math.floor(Math.abs(pct - 50) / 5) * 10;
+  return score;
+}
+
+/** Encode `text` and return the module matrix as an array of rows of 0/1. */
+function qrMatrix(text) {
+  const bytes = Array.from(new TextEncoder().encode(text));
+  const version = chooseVersion(bytes.length);
+  const codewords = buildCodewords(bytes, version);
+  let best = null, bestScore = Infinity;
+  for (let mask = 0; mask < 8; mask++) {
+    const m = buildMatrix(version, codewords, mask);
+    const s = penalty(m);
+    if (s < bestScore) { bestScore = s; best = m; }
+  }
+  return best;
+}
+
+  </script>
+  <script>
+/*
+ * Drives Authentik's flow executor and renders each stage as the approved Heimdall design.
+ *
+ * Protocol, captured from auth.brolabs.ai on 2025.12.4 (see the task notes):
+ *   GET  /api/v3/flows/executor/<slug>/?query=<urlencoded original query>  -> challenge JSON
+ *   POST  same URL with the stage response                                 -> 302 back to it
+ *   then GET again for the next challenge. Terminal challenge is xak-flow-redirect.
+ * No CSRF token is involved; the session rides on the authentik_session cookie, which is why
+ * this page must be served from the same origin as Authentik.
+ */
+
+// ---- Element helpers ---------------------------------------------------------
+// Text always goes in via textContent: labels, placeholders and error strings come from
+// the server and from blueprints, and must never be interpolated into markup.
+function el(tag, props = {}, kids = []) {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(props)) {
+    if (v === undefined || v === null || v === false) continue;
+    if (k === 'text') n.textContent = v;
+    else if (k === 'cls') n.className = v;
+    else if (k === 'html') throw new Error('refusing to set innerHTML');
+    else if (k.startsWith('on')) n.addEventListener(k.slice(2), v);
+    else if (k in n && k !== 'list') n[k] = v;
+    else n.setAttribute(k, v);
+  }
+  for (const kid of [].concat(kids)) if (kid) n.append(kid);
+  return n;
+}
+const card = () => document.getElementById('card');
+
+// ---- Flow endpoint -----------------------------------------------------------
+const params = new URLSearchParams(location.search);
+const SLUG = params.get('flow') || document.body.dataset.flow || 'default-authentication-flow';
+
+// Everything except our own `flow` marker is the flow's original query, which Authentik
+// needs verbatim — it carries `?next=` for forward-auth and `?itoken=` for invites.
+const passthrough = new URLSearchParams(location.search);
+passthrough.delete('flow');
+const EXECUTOR = `api/v3/flows/executor/${encodeURIComponent(SLUG)}/`
+  + `?query=${encodeURIComponent(passthrough.toString())}`;
+
+/** The stock Authentik UI for this flow — the escape hatch if we cannot render something. */
+const STOCK_URL = `/if/flow/${encodeURIComponent(SLUG)}/${location.search}`;
+
+async function getChallenge() {
+  const r = await fetch(EXECUTOR, { headers: { Accept: 'application/json' }, credentials: 'same-origin' });
+  if (!r.ok) throw new Error(`executor GET ${r.status}`);
+  return r.json();
+}
+
+async function postChallenge(payload) {
+  const r = await fetch(EXECUTOR, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    credentials: 'same-origin',
+    body: JSON.stringify(payload),
+  });
+  // A POST answers 302 back to the executor; fetch follows it, so the body is usually the
+  // next challenge already. Re-GET when it is not (or when the body is not JSON).
+  if (!r.ok) throw new Error(`executor POST ${r.status}`);
+  try {
+    const j = await r.json();
+    return j && j.component ? j : getChallenge();
+  } catch { return getChallenge(); }
+}
+
+// ---- Shared pieces -----------------------------------------------------------
+function flowHead(challenge, subtitle) {
+  // flow_info.title is the blueprint's own flow title, so copy edits there flow through.
+  const title = challenge.flow_info?.title || 'Heimdall';
+  return el('div', { cls: 'flow-head' }, [
+    el('h1', { cls: 'flow-title', text: title }),
+    subtitle ? el('p', { cls: 'flow-sub', text: subtitle }) : null,
+  ]);
+}
+
+/** The "Signing in as <user>" chip, using the avatar the challenge supplies. */
+function identityChip(challenge) {
+  if (!challenge.pending_user) return null;
+  const who = el('span', { cls: 'ident-who' }, [
+    challenge.pending_user_avatar
+      ? el('img', { cls: 'uid-avatar', src: challenge.pending_user_avatar, alt: '', 'aria-hidden': 'true' })
+      : null,
+    el('span', { cls: 'uid-display', text: challenge.pending_user }),
+  ]);
+  return el('div', {}, [
+    el('label', { text: 'Signing in as' }),
+    el('div', { cls: 'ident-chip' }, [
+      who,
+      el('button', { type: 'button', text: 'Change', onclick: () => { location.href = location.pathname + location.search; } }),
+    ]),
+  ]);
+}
+
+/** Server-side validation messages for one field, e.g. "Invalid password". */
+function fieldError(challenge, key) {
+  const errs = challenge.response_errors?.[key];
+  if (!errs?.length) return null;
+  return el('p', { cls: 'error', text: errs.map((e) => e.string).join(' ') });
+}
+
+/** Errors not tied to a field we rendered — never silently swallow them. */
+function otherErrors(challenge, handledKeys) {
+  const all = challenge.response_errors || {};
+  const rest = Object.keys(all).filter((k) => !handledKeys.includes(k));
+  if (!rest.length) return null;
+  return el('p', { cls: 'error', text: rest.map((k) => all[k].map((e) => e.string).join(' ')).join(' ') });
+}
+
+function submitButton(label) {
+  return el('button', { cls: 'primary', type: 'submit', text: label });
+}
+
+function busy(form, on) {
+  form.querySelectorAll('button, input').forEach((n) => { n.disabled = on; });
+}
+
+/** Wire a form so submit() runs, errors surface, and the next challenge renders. */
+function onSubmit(form, build) {
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const payload = build();
+    if (!payload) return;
+    busy(form, true);
+    try {
+      render(await postChallenge(payload));
+    } catch (err) {
+      busy(form, false);
+      form.append(el('p', { cls: 'error', text: `Something went wrong (${err.message}). ` }),
+        el('p', { cls: 'hint center' }, [el('a', { href: STOCK_URL, text: 'Use the standard sign-in page' })]));
+    }
+  });
+  return form;
+}
+
+// ---- Stage renderers ---------------------------------------------------------
+const STAGES = {
+  'ak-stage-identification': (c) => {
+    const label = (c.user_fields || ['username']).map((f) => ({ email: 'Email', username: 'username' }[f] || f))
+      .join(' or ').replace(/^./, (s) => s.toUpperCase());
+    const input = el('input', { cls: 'field', id: 'uid', type: 'text', name: 'uid_field',
+      autocomplete: 'username', placeholder: `Your ${label.toLowerCase()}`, autofocus: true });
+    const form = el('form', { novalidate: true }, [
+      el('label', { for: 'uid', text: label }),
+      input,
+      fieldError(c, 'uid_field'),
+      otherErrors(c, ['uid_field']),
+      submitButton('Continue'),
+    ]);
+    return [
+      flowHead(c, 'Command your agent fleet'),
+      ssoBlock(c),
+      onSubmit(form, () => ({ component: c.component, uid_field: input.value.trim() })),
+      signupLine(c),
+    ];
+  },
+
+  'ak-stage-password': (c) => {
+    const input = el('input', { cls: 'field', id: 'pw', type: 'password', name: 'password',
+      autocomplete: 'current-password', placeholder: 'Your password', autofocus: true });
+    const form = el('form', { novalidate: true }, [
+      identityChip(c),
+      el('div', { cls: 'label-row' }, [
+        el('label', { for: 'pw', text: 'Password' }),
+        // Shown disabled: this instance has no recovery flow, so the stock UI offers no
+        // such link either. Becomes a real link once one is configured.
+        el('span', { cls: 'disabled-link', 'aria-disabled': 'true',
+          title: 'No recovery flow is configured yet', text: 'Forgot password?' }),
+      ]),
+      input,
+      fieldError(c, 'password'),
+      otherErrors(c, ['password']),
+      submitButton('Continue'),
+    ]);
+    return [flowHead(c, 'Command your agent fleet'), onSubmit(form, () => ({ component: c.component, password: input.value }))];
+  },
+
+  // One challenge carries every enrolled factor. Picking "recovery code" is not another
+  // endpoint — it is this same stage with a different selected_challenge.
+  'ak-stage-authenticator-validate': (c, view) => {
+    const devices = c.device_challenges || [];
+    const pick = (cls) => devices.find((d) => d.device_class === cls);
+    const useStatic = view === 'static' && pick('static');
+    const device = useStatic ? pick('static') : (pick('totp') || devices[0]);
+    if (!device) return [flowHead(c), el('p', { cls: 'hint', text: 'No usable second factor is configured.' }),
+      el('p', { cls: 'hint center' }, [el('a', { href: STOCK_URL, text: 'Use the standard sign-in page' })])];
+
+    const isTotp = device.device_class === 'totp';
+    const input = isTotp
+      ? el('input', { cls: 'field code', id: 'code', type: 'text', inputmode: 'numeric',
+          autocomplete: 'one-time-code', maxLength: 6, placeholder: '000000', autofocus: true })
+      : el('input', { cls: 'field', id: 'code', type: 'text', autocomplete: 'one-time-code',
+          placeholder: 'xxxxxxxx', style: 'font-family:var(--font-mono);letter-spacing:.08em', autofocus: true });
+    if (isTotp) input.addEventListener('input', () => { input.value = input.value.replace(/\D/g, '').slice(0, 6); });
+
+    const other = isTotp ? pick('static') : pick('totp');
+    const form = el('form', { novalidate: true }, [
+      identityChip(c),
+      el('label', { for: 'code', style: 'margin-top:16px', text: isTotp ? 'Authentication code' : 'Recovery code' }),
+      el('p', { cls: 'hint', text: isTotp
+        ? 'Enter the 6-digit code from your authenticator app.'
+        : 'Enter one of the recovery codes you saved when you set up two-factor authentication. Each code works once.' }),
+      input,
+      fieldError(c, 'code'),
+      otherErrors(c, ['code']),
+      submitButton('Verify'),
+      other ? el('p', { cls: 'hint center' }, [
+        el('a', { href: '#', text: isTotp ? 'Use a recovery code instead' : 'Use your authenticator app instead',
+          onclick: (e) => { e.preventDefault(); render(c, isTotp ? 'static' : 'totp'); } }),
+      ]) : null,
+    ]);
+    return [flowHead(c, 'Command your agent fleet'),
+      onSubmit(form, () => ({ component: c.component, selected_challenge: device, code: input.value.trim() }))];
+  },
+
+  // Generic: one renderer for every prompt stage, driven by the fields array.
+  'ak-stage-prompt': (c) => {
+    const fields = [...(c.fields || [])].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+    const inputs = new Map();
+    const nodes = [];
+    for (const f of fields) {
+      if (f.type === 'static') {
+        nodes.push(el('h2', { cls: 'step-title', style: nodes.length ? '' : 'margin-top:0', text: f.label }));
+        if (f.placeholder) nodes.push(el('p', { cls: 'hint', text: f.placeholder }));
+        continue;
+      }
+      if (f.type === 'checkbox') {
+        const box = el('input', { type: 'checkbox', id: `f-${f.field_key}` });
+        inputs.set(f.field_key, () => box.checked);
+        nodes.push(el('label', { cls: 'check', for: `f-${f.field_key}` }, [box, el('span', { text: f.label })]));
+      } else {
+        const type = { password: 'password', email: 'email', number: 'number' }[f.type] || 'text';
+        const auto = { password: 'new-password', email: 'email', username: 'username' }[f.type] || 'on';
+        const input = el('input', { cls: 'field', id: `f-${f.field_key}`, type, autocomplete: auto,
+          placeholder: f.placeholder || '', value: f.initial_value || '', autofocus: nodes.length === 0 });
+        inputs.set(f.field_key, () => input.value);
+        nodes.push(el('label', { for: `f-${f.field_key}`, style: nodes.length ? 'margin-top:16px' : '', text: f.label }));
+        if (f.sub_text) nodes.push(el('p', { cls: 'hint', text: f.sub_text }));
+        nodes.push(input);
+      }
+      const err = fieldError(c, f.field_key);
+      if (err) nodes.push(err);
+    }
+    nodes.push(otherErrors(c, fields.map((f) => f.field_key)));
+    nodes.push(submitButton('Continue'));
+    const form = el('form', { novalidate: true }, nodes);
+    return [flowHead(c, 'Create your Heimdall account.'),
+      onSubmit(form, () => {
+        const out = { component: c.component };
+        for (const [k, read] of inputs) out[k] = read();
+        return out;
+      })];
+  },
+
+  'ak-stage-authenticator-totp': (c) => {
+    const secret = new URL(c.config_url).searchParams.get('secret') || '';
+    const input = el('input', { cls: 'field code', id: 'code', type: 'text', inputmode: 'numeric',
+      autocomplete: 'one-time-code', maxLength: 6, placeholder: '000000', autofocus: true });
+    input.addEventListener('input', () => { input.value = input.value.replace(/\D/g, '').slice(0, 6); });
+    const form = el('form', { novalidate: true }, [
+      el('h2', { cls: 'step-title', style: 'margin-top:0', text: 'Set up authenticator' }),
+      el('p', { cls: 'hint', text: 'Scan the QR code with an authenticator app (1Password, Google Authenticator, Authy…), then enter the code it shows.' }),
+      qrNode(c.config_url),
+      el('p', { cls: 'hint center', style: 'margin:10px 0 0', text: "Can't scan? Enter this key manually:" }),
+      el('code', { cls: 'secret', text: secret.replace(/(.{4})/g, '$1 ').trim() }),
+      el('label', { for: 'code', style: 'margin-top:16px', text: 'Authentication code' }),
+      input,
+      fieldError(c, 'code'),
+      otherErrors(c, ['code']),
+      submitButton('Continue'),
+    ]);
+    return [flowHead(c, 'Create your Heimdall account.'),
+      onSubmit(form, () => ({ component: c.component, code: input.value.trim() }))];
+  },
+
+  'ak-stage-authenticator-static': (c) => {
+    const list = el('ul', { cls: 'codes' }, (c.codes || []).map((code) => el('li', { text: code })));
+    const form = el('form', { novalidate: true }, [
+      el('h2', { cls: 'step-title', style: 'margin-top:0', text: 'Save your recovery codes' }),
+      el('p', { cls: 'hint', text: 'Use one of these if you lose access to your authenticator app. Each code works once.' }),
+      list,
+      el('p', { cls: 'warn', text: 'These are shown only once. Copy them somewhere safe before you continue.' }),
+      submitButton('I have saved these codes'),
+      otherErrors(c, []),
+    ]);
+    return [flowHead(c, 'Create your Heimdall account.'), onSubmit(form, () => ({ component: c.component }))];
+  },
+
+  'ak-stage-access-denied': (c) => [
+    flowHead(c),
+    el('h2', { cls: 'step-title', style: 'margin-top:0', text: 'Access denied' }),
+    el('p', { cls: 'hint', text: c.error_message || 'This sign-in cannot continue.' }),
+    el('p', { cls: 'hint center' }, [el('a', { href: STOCK_URL, text: 'Use the standard sign-in page' })]),
+  ],
+};
+
+function ssoBlock(c) {
+  // `sources` is empty on this instance, so there is nothing to drive yet. The buttons are
+  // shown disabled deliberately rather than hidden; they light up when a source is configured.
+  const sources = c.sources || [];
+  const btn = (name, mark) => el('button', {
+    type: 'button', disabled: !sources.length,
+    title: sources.length ? `Continue with ${name}` : `${name} sign-in is coming soon`,
+  }, [mark, document.createTextNode(name)]);
+  return el('div', { id: 'sso-block' }, [
+    el('div', { cls: 'sso' }, [btn('Google', brandMark('google')), btn('GitHub', brandMark('github'))]),
+    sources.length ? null : el('p', { cls: 'soon', text: 'SSO coming soon' }),
+    el('div', { cls: 'divider', text: 'or' }),
+  ]);
+}
+
+function signupLine(c) {
+  // Enrolment is invite-only on this instance, so there is no self-service sign-up to link to.
+  return el('p', { cls: 'alt' }, [
+    document.createTextNode("Don't have an account? "),
+    el('span', { cls: 'disabled-link', 'aria-disabled': 'true', title: 'Sign-up is invite-only', text: 'Sign up' }),
+  ]);
+}
+
+function brandMark(which) {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('aria-hidden', 'true');
+  const paths = which === 'google'
+    ? [['#4285F4', 'M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.27-4.74 3.27-8.1z'],
+       ['#34A853', 'M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84A11 11 0 0 0 12 23z'],
+       ['#FBBC05', 'M5.84 14.1A6.6 6.6 0 0 1 5.5 12c0-.73.13-1.43.34-2.1V7.06H2.18A11 11 0 0 0 1 12c0 1.77.43 3.45 1.18 4.94l3.66-2.84z'],
+       ['#EA4335', 'M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84C6.71 7.3 9.14 5.38 12 5.38z']]
+    : [['currentColor', 'M12 .5C5.65.5.5 5.65.5 12a11.5 11.5 0 0 0 7.86 10.92c.58.1.79-.25.79-.56v-2c-3.2.7-3.87-1.37-3.87-1.37-.52-1.33-1.28-1.69-1.28-1.69-1.04-.71.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.76 2.7 1.25 3.36.96.1-.75.4-1.25.73-1.54-2.55-.29-5.24-1.28-5.24-5.69 0-1.26.45-2.29 1.19-3.1-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.17 1.18a11 11 0 0 1 5.77 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.81 1.19 1.84 1.19 3.1 0 4.42-2.69 5.39-5.26 5.68.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56A11.5 11.5 0 0 0 23.5 12C23.5 5.65 18.35.5 12 .5z']];
+  if (which === 'google') svg.classList.add('g-mark');
+  for (const [fill, d] of paths) {
+    const p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    p.setAttribute('fill', fill); p.setAttribute('d', d);
+    svg.append(p);
+  }
+  return svg;
+}
+
+/** Render the otpauth URI as a QR, drawn from the matrix our encoder produces. */
+function qrNode(configUrl) {
+  const box = el('div', { cls: 'qr', 'aria-label': 'Authenticator QR code' });
+  try {
+    const m = qrMatrix(configUrl);
+    const n = m.length;
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', `0 0 ${n} ${n}`);
+    svg.setAttribute('shape-rendering', 'crispEdges');
+    let d = '';
+    for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) if (m[r][c]) d += `M${c} ${r}h1v1h-1z`;
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', d);
+    path.setAttribute('fill', '#0e0d0b');
+    svg.append(path);
+    box.append(svg);
+  } catch (err) {
+    // The manual key below is a complete fallback, so a QR failure must not block setup.
+    box.append(el('p', { cls: 'hint center', text: 'QR unavailable — use the key below.' }));
+  }
+  return box;
+}
+
+// ---- Dispatch ----------------------------------------------------------------
+function render(challenge, view) {
+  if (challenge.component === 'xak-flow-redirect') {
+    location.href = challenge.to || '/';
+    return;
+  }
+  const renderer = STAGES[challenge.component];
+  const host = card();
+  host.replaceChildren();
+  if (!renderer) {
+    // REQ-L3-6: never dead-end on a stage we do not know. Hand the user to the stock UI,
+    // which can render every stage Authentik ships.
+    host.append(
+      flowHead(challenge),
+      el('h2', { cls: 'step-title', style: 'margin-top:0', text: 'One more step' }),
+      el('p', { cls: 'hint', text: 'This step needs the standard sign-in page.' }),
+      el('p', { cls: 'hint center' }, [el('a', { href: STOCK_URL, text: 'Continue there' })]),
+    );
+    console.warn('unhandled flow stage', challenge.component, challenge);
+    return;
+  }
+  for (const node of [].concat(renderer(challenge, view))) if (node) host.append(node);
+  host.querySelector('[autofocus]')?.focus();
+}
+
+(async function start() {
+  try {
+    render(await getChallenge());
+  } catch (err) {
+    card().replaceChildren(
+      el('h1', { cls: 'flow-title', text: 'Sign in' }),
+      el('p', { cls: 'hint', style: 'margin-top:14px', text: `Could not reach the sign-in service (${err.message}).` }),
+      el('p', { cls: 'hint center' }, [el('a', { href: STOCK_URL, text: 'Use the standard sign-in page' })]),
+    );
+  }
+})();
+
+  </script>
+  <script>
+    (function () {
+      // The rain block came from the mock, where `$` was defined by its own script.
+      const $ = (id) => document.getElementById(id);
+    // ---- Digital-rain backdrop -----------------------------------------
+    // Katakana columns falling in the landing-page accent, deliberately dim.
+    //
+    // The canvas is CLEARED and every trail redrawn each frame. The usual trick — painting a
+    // translucent background over the last frame — cannot be used here: that blend converges
+    // on the background without reaching it, and once a step rounds to less than one 8-bit
+    // level the glyph stops fading and sticks forever as a faint block. Redrawing is a few
+    // hundred more fillText calls per frame and leaves no residue at all.
+    (function rain() {
+      const cv = $('rain'), ctx = cv.getContext('2d');
+      const GLYPHS = 'アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲン0123456789';
+      const SIZE = 17;                      // grid cell: column width and row pitch
+      const FONT = 14;                      // glyph slightly smaller than the cell, so rows breathe
+      const TRAIL = 14;                     // glyphs per column, head included
+      const calm = matchMedia('(prefers-reduced-motion: reduce)').matches;
+      let cols = 0, drops = [], w = 0, h = 0;
+
+      function resize() {
+        const dpr = Math.min(devicePixelRatio || 1, 2);
+        w = innerWidth; h = innerHeight;
+        cv.width = w * dpr; cv.height = h * dpr;
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        cols = Math.ceil(w / SIZE);
+        // Only some columns rain at a time, and each falls at its own rate. Both are what
+        // keep the field sparse and irregular rather than a solid curtain of glyphs.
+        // `y` spreads over the full height so the backdrop is populated from the first frame.
+        drops = Array.from({ length: cols }, () => newDrop(Math.random() * (h / SIZE), Math.random() < 0.55));
+      }
+
+      const rnd = () => GLYPHS[(Math.random() * GLYPHS.length) | 0];
+      function newDrop(y, active) {
+        return {
+          y, active,
+          speed: 0.45 + Math.random() * 0.5,
+          lastRow: Math.floor(y),
+          // The glyphs of this column's trail, head first. Shifted in lockstep with the head
+          // as it advances, so a character stays fixed in its screen cell for the whole of
+          // its fade; a new one is drawn only when a fresh head enters that cell.
+          chars: Array.from({ length: TRAIL }, rnd),
+        };
+      }
+
+      function draw() {
+        ctx.clearRect(0, 0, w, h);
+        ctx.font = `${FONT}px "JetBrains Mono", ui-monospace, monospace`;
+        ctx.textBaseline = 'top';
+
+        for (let i = 0; i < cols; i++) {
+          const d = drops[i];
+          if (!d.active) continue;
+
+          // Snap to the row grid: speeds are fractional so columns fall at different rates,
+          // but a glyph must land on a cell boundary or consecutive characters overlap.
+          const row = Math.floor(d.y);
+          if (row !== d.lastRow) {
+            d.chars.unshift(rnd());
+            d.chars.length = TRAIL;
+            d.lastRow = row;
+          }
+          const x = i * SIZE;
+          for (let k = 0; k < TRAIL; k++) {
+            const y = (row - k) * SIZE;
+            if (y < -SIZE || y > h) continue;
+            ctx.fillStyle = k === 0
+              ? 'rgba(236, 231, 223, 0.55)'                                  // leading glyph
+              : `rgba(210, 169, 101, ${(0.44 * (1 - k / TRAIL)).toFixed(3)})`; // --accent, fading
+            ctx.fillText(d.chars[k], x, y);
+          }
+
+          d.y += d.speed;
+          // Once the whole trail is below the fold, retire the column; it returns later.
+          if ((row - TRAIL) * SIZE > h) {
+            if (Math.random() < 0.04) drops[i] = newDrop(-Math.random() * 20, true);
+            else if (Math.random() < 0.02) d.active = false;
+          }
+        }
+        // Occasionally wake an idle column so the field keeps renewing itself.
+        if (Math.random() < 0.08) {
+          const j = (Math.random() * cols) | 0;
+          if (drops[j] && !drops[j].active) drops[j] = newDrop(-Math.random() * 20, true);
+        }
+      }
+
+      // --- Continuity across navigations -------------------------------
+      // Stepping between stages in this mock is a hash change, so the loop simply keeps
+      // running. The real frontend may navigate for real, which would restart the rain and
+      // read as a jarring reset. So the field is checkpointed to sessionStorage and resumed
+      // where it left off, advanced by however long the gap actually was.
+      const KEY = 'heimdall.rain';
+      const FRAME_MS = 55;
+
+      function save() {
+        try {
+          sessionStorage.setItem(KEY, JSON.stringify({ t: Date.now(), w, drops }));
+        } catch { /* private mode, quota, blocked storage: a restart is an acceptable fallback */ }
+      }
+      function restore() {
+        try {
+          const s = JSON.parse(sessionStorage.getItem(KEY) || 'null');
+          // Only resume a checkpoint from the same width and the recent past; otherwise the
+          // column layout would not line up, or the gap is long enough that a fresh field
+          // is no more jarring than a stale one.
+          if (!s || s.w !== w || !Array.isArray(s.drops) || s.drops.length !== cols) return 0;
+          if (Date.now() - s.t > 60000) return 0;
+          // Reject a checkpoint written by an older build, whose drops carry no glyph trail.
+          if (!s.drops.every((d) => Array.isArray(d.chars) && d.chars.length === TRAIL)) return 0;
+          drops = s.drops;
+          return Math.min(Math.round((Date.now() - s.t) / FRAME_MS), 200);  // frames to catch up
+        } catch { return 0; }
+      }
+
+      addEventListener('resize', resize);
+      resize();
+      // Resume where the last page left off, advancing positions by however long the gap was.
+      // Only the arithmetic is replayed, not the painting — one draw() renders a full trail,
+      // so there is nothing to accumulate and no warm-up to do.
+      const catchUp = restore();
+      if (catchUp) for (const d of drops) { if (d.active) d.y += d.speed * catchUp; }
+      draw();
+      addEventListener('pagehide', save);
+      addEventListener('visibilitychange', () => { if (document.hidden) save(); });
+
+      if (calm) return;                       // reduced motion: keep that static field, no loop
+      let last = 0;
+      (function loop(t) {
+        requestAnimationFrame(loop);
+        if (t - last < 55) return;   // ~18fps: the classic cadence, and cheap
+        last = t;
+        draw();
+      })(0);
+    })();
+    })();
+  </script>
+</body>
+</html>

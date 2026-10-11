@@ -1,0 +1,716 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <!--
+    No zooming on mobile. `user-scalable=no` covers Android; iOS Safari has ignored it since
+    iOS 10, where the actual trigger is focusing an input whose font-size is under 16px — so
+    `.field` is 16px below. Both are needed; neither alone is enough.
+  -->
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>Sign in · Heimdall</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      /* Same warm dark palette as landing-page/index.html */
+      --bg: #0e0d0b;
+      --bg-raise: #14120f;
+      --bg-field: #181612;
+      --line: rgba(236, 231, 223, 0.07);
+      --line-strong: rgba(236, 231, 223, 0.16);
+      --text: #ece7df;
+      --text-muted: #9c958b;
+      --text-faint: #5f5a53;
+      --accent: #d2a965;
+      --accent-line: rgba(210, 169, 101, 0.45);
+      --danger: #e08a7a;
+      --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; }
+
+    /*
+      Digital-rain backdrop. Fixed behind everything, and masked so the middle of the
+      viewport — where the card sits — stays clear and the form keeps its contrast.
+      Content below is given position/z-index so it layers above the canvas.
+    */
+    #rain {
+      position: fixed; inset: 0; width: 100%; height: 100%;
+      z-index: 0; pointer-events: none; opacity: .3;
+      -webkit-mask-image: radial-gradient(ellipse 46% 52% at 50% 50%, transparent 0%, transparent 42%, #000 100%);
+              mask-image: radial-gradient(ellipse 46% 52% at 50% 50%, transparent 0%, transparent 42%, #000 100%);
+    }
+    header, main, footer { position: relative; z-index: 1; }
+    @media (prefers-reduced-motion: reduce) { #rain { opacity: .22; } }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font-sans);
+      font-size: 14px;
+      -webkit-font-smoothing: antialiased;
+      display: flex;
+      flex-direction: column;
+      min-height: 100vh;
+    }
+    a { color: inherit; text-decoration: none; }
+
+    header { padding: 22px 24px; }
+    .brand {
+      display: inline-flex; align-items: center; gap: 8px;
+      font-family: var(--font-mono); font-size: 13px; font-weight: 500;
+      letter-spacing: .12em; text-transform: uppercase; color: var(--text);
+    }
+    .brand svg { width: 20px; height: 20px; }
+
+    main {
+      flex: 1; display: flex; align-items: center; justify-content: center;
+      padding: 24px 16px 48px;
+    }
+    .card { width: 100%; max-width: 346px; }
+
+    h1 { font-size: 20px; font-weight: 500; letter-spacing: -0.01em; line-height: 1.3; }
+    .tagline { font-size: 20px; font-weight: 400; color: var(--text-faint); letter-spacing: -0.01em; line-height: 1.3; }
+    /* The flow title, mirroring Authentik's flow `title` field. */
+    .flow-title { font-size: 20px; font-weight: 500; letter-spacing: -0.01em; line-height: 1.3; }
+    .flow-sub { font-size: 13px; color: var(--text-faint); margin-top: 6px; line-height: 1.5; }
+
+    /* The head owns the gap, so steps that hide the SSO block keep breathing room. */
+    .flow-head { margin-bottom: 26px; }
+    .sso { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
+    .sso button {
+      position: relative;
+      display: flex; align-items: center; justify-content: center; gap: 8px;
+      height: 34px; border-radius: 4px; border: 1px solid transparent;
+      background: var(--bg-raise); color: var(--text-muted);
+      font: 500 13px var(--font-sans);
+    }
+    .sso button svg { width: 15px; height: 15px; }
+    .sso button:disabled { cursor: not-allowed; opacity: .45; }
+    .sso button:disabled .g-mark { filter: grayscale(1); }
+
+    .soon {
+      font-family: var(--font-mono); font-size: 10px; letter-spacing: .08em;
+      text-transform: uppercase; color: var(--text-faint);
+      text-align: center; margin-top: 8px;
+    }
+
+    .divider {
+      display: flex; align-items: center; gap: 10px; margin: 22px 0 18px;
+      color: var(--text-faint); font-size: 11px; font-family: var(--font-mono);
+      letter-spacing: .08em; text-transform: uppercase;
+    }
+    .divider::before, .divider::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+
+    form { display: flex; flex-direction: column; }
+    label { font-size: 12px; font-weight: 500; color: var(--text-muted); margin-bottom: 8px; }
+    .field + label { margin-top: 16px; }
+    .label-row { display: flex; justify-content: space-between; align-items: baseline; margin-top: 16px; }
+    .label-row label { margin: 0 0 8px; }
+    .label-row a, .label-row .disabled-link { font-size: 12px; color: var(--text-faint); }
+    .label-row a:hover { color: var(--text-muted); }
+
+    .field {
+      height: 36px; width: 100%; padding: 0 10px;
+      background: transparent; color: var(--text);
+      border: 1px solid var(--line-strong); border-radius: 4px;
+      /* 16px, not 14: below 16 iOS Safari zooms the page when the field takes focus. */
+      font: 400 16px var(--font-sans);
+      outline: none; transition: border-color .15s;
+    }
+    .field::placeholder { color: var(--text-faint); }
+    .field:focus { border-color: var(--accent-line); }
+
+    .ident-chip {
+      display: flex; align-items: center; justify-content: space-between;
+      height: 36px; padding: 0 10px; border-radius: 4px;
+      background: var(--bg-raise); color: var(--text); font-size: 14px;
+    }
+    .ident-who { display: flex; align-items: center; gap: 8px; min-width: 0; }
+    .ident-who .uid-display { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    /* Authentik ships a ready-made avatar per user as a data: URI on every challenge. */
+    .uid-avatar { width: 20px; height: 20px; border-radius: 50%; flex: none; display: block; }
+    .ident-chip button {
+      background: none; border: 0; color: var(--text-faint); cursor: pointer;
+      font: 400 12px var(--font-sans); flex: none; padding-left: 8px;
+    }
+    .ident-chip button:hover { color: var(--text-muted); }
+
+    .primary {
+      margin-top: 20px; height: 36px; border-radius: 4px; border: 0;
+      background: var(--bg-raise); color: var(--text);
+      font: 500 14px var(--font-sans); cursor: pointer;
+      transition: background .15s;
+    }
+    .primary:hover { background: #1d1a15; }
+    .primary:focus-visible { outline: 1px solid var(--accent-line); outline-offset: 2px; }
+
+    .error { color: var(--danger); font-size: 12px; margin-top: 10px; min-height: 0; }
+    .error:empty { display: none; }
+
+    .alt { margin-top: 22px; text-align: center; font-size: 13px; color: var(--text); }
+    .alt .disabled-link { color: var(--text-faint); cursor: not-allowed; }
+
+    .step[hidden] { display: none; }
+    .step-title { font-size: 15px; font-weight: 500; margin: 22px 0 6px; }
+    .secondary {
+      margin-top: 8px; height: 36px; border-radius: 4px; border: 1px solid var(--line-strong);
+      background: transparent; color: var(--text-muted); font: 500 14px var(--font-sans); cursor: pointer;
+    }
+    .secondary:hover { color: var(--text); }
+    .qr { margin: 6px auto 0; width: 152px; height: 152px; padding: 10px; background: var(--text); border-radius: 4px; }
+    .qr svg { width: 100%; height: 100%; display: block; }
+    .secret {
+      display: block; text-align: center; margin-top: 6px; font-family: var(--font-mono);
+      font-size: 12px; line-height: 1.7; letter-spacing: .06em; color: var(--text-muted);
+      user-select: all; word-spacing: .2em;
+    }
+    .hint { font-size: 12px; color: var(--text-faint); margin: -2px 0 10px; line-height: 1.45; }
+    .hint.center { text-align: center; margin: 16px 0 0; }
+    .hint a:hover { color: var(--text-muted); }
+    .field.code { font-family: var(--font-mono); font-size: 18px; letter-spacing: .5em; text-align: center; height: 44px; }
+
+    /* Checkbox prompt, matching Authentik's `type: checkbox` prompt. */
+    .check {
+      display: flex; align-items: flex-start; gap: 10px; margin-top: 4px;
+      padding: 12px; border: 1px solid var(--line-strong); border-radius: 4px;
+      cursor: pointer;
+    }
+    .check input { margin: 1px 0 0; width: 15px; height: 15px; accent-color: var(--accent); flex: none; }
+    .check span { font-size: 13px; line-height: 1.45; color: var(--text); }
+
+    /* Recovery codes, from the static authenticator stage (6 codes). */
+    .codes {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+      margin: 4px 0 0; padding: 12px; border-radius: 4px;
+      background: var(--bg-raise); list-style: none;
+    }
+    .codes li {
+      font-family: var(--font-mono); font-size: 13px; line-height: 1.6; letter-spacing: .06em;
+      color: var(--text); text-align: center; user-select: all;
+    }
+    .warn {
+      font-size: 12px; color: var(--accent); line-height: 1.45;
+      margin-top: 10px; padding-left: 10px; border-left: 1px solid var(--accent-line);
+    }
+    .ghost-link {
+      margin-top: 10px; text-align: center; font-size: 12px; color: var(--text-faint);
+      background: none; border: 0; cursor: pointer; font-family: var(--font-sans);
+    }
+    .ghost-link:hover { color: var(--text-muted); }
+
+    footer {
+      padding: 20px 16px 22px; text-align: center;
+      font-size: 12px; color: var(--text-faint);
+    }
+    footer a:hover { color: var(--text-muted); }
+  </style>
+</head>
+<body>
+  <canvas id="rain" aria-hidden="true"></canvas>
+
+  <header>
+    <a class="brand" href="#identify" aria-label="Heimdall">
+      <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <circle cx="12" cy="12" r="9.5" stroke="var(--accent)" stroke-width="1.2"/>
+        <circle cx="12" cy="12" r="3" fill="var(--accent)"/>
+        <path d="M12 2.5v4M12 17.5v4M2.5 12h4M17.5 12h4" stroke="var(--accent)" stroke-width="1.2" stroke-linecap="round" opacity=".6"/>
+      </svg>
+      Heimdall
+    </a>
+  </header>
+
+  <main>
+    <div class="card">
+      <!-- ================================================================
+           LOGIN FLOW — Authentik `default-authentication-flow`
+           identification -> password -> mfa-validation(skip if none) -> login
+           ================================================================ -->
+      <div id="head-login" class="flow-head">
+        <h1>Welcome to Heimdall</h1>
+        <p class="tagline">Command your agent fleet</p>
+      </div>
+
+      <div id="sso-block">
+        <div class="sso">
+          <button type="button" disabled title="Google sign-in is coming soon" aria-label="Continue with Google (coming soon)">
+            <svg class="g-mark" viewBox="0 0 24 24" aria-hidden="true">
+              <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.27-4.74 3.27-8.1z"/>
+              <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84A11 11 0 0 0 12 23z"/>
+              <path fill="#FBBC05" d="M5.84 14.1A6.6 6.6 0 0 1 5.5 12c0-.73.13-1.43.34-2.1V7.06H2.18A11 11 0 0 0 1 12c0 1.77.43 3.45 1.18 4.94l3.66-2.84z"/>
+              <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84C6.71 7.3 9.14 5.38 12 5.38z"/>
+            </svg>
+            Google
+          </button>
+          <button type="button" disabled title="GitHub sign-in is coming soon" aria-label="Continue with GitHub (coming soon)">
+            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="M12 .5C5.65.5.5 5.65.5 12a11.5 11.5 0 0 0 7.86 10.92c.58.1.79-.25.79-.56v-2c-3.2.7-3.87-1.37-3.87-1.37-.52-1.33-1.28-1.69-1.28-1.69-1.04-.71.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.76 2.7 1.25 3.36.96.1-.75.4-1.25.73-1.54-2.55-.29-5.24-1.28-5.24-5.69 0-1.26.45-2.29 1.19-3.1-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.17 1.18a11 11 0 0 1 5.77 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.81 1.19 1.84 1.19 3.1 0 4.42-2.69 5.39-5.26 5.68.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56A11.5 11.5 0 0 0 23.5 12C23.5 5.65 18.35.5 12 .5z"/>
+            </svg>
+            GitHub
+          </button>
+        </div>
+        <p class="soon">SSO coming soon</p>
+        <div class="divider">or</div>
+      </div>
+
+      <!-- Login 1: identification stage -->
+      <form id="step-ident" class="step" novalidate>
+        <label for="uid">Email or username</label>
+        <input class="field" id="uid" name="uid_field" type="text" autocomplete="username" placeholder="Your email or username" autofocus>
+        <p class="error" id="ident-error"></p>
+        <button class="primary" type="submit">Continue</button>
+      </form>
+
+      <!-- Login 2: password stage (order 20) -->
+      <form id="step-password" class="step" hidden novalidate>
+        <label>Signing in as</label>
+        <div class="ident-chip">
+          <span class="ident-who"><img class="uid-avatar" alt="" aria-hidden="true"><span class="uid-display"></span></span>
+          <button type="button" class="change-uid">Change</button>
+        </div>
+        <!--
+          No recovery flow is configured on this instance: the identification challenge comes
+          back with no recovery slug, so Authentik's own UI renders no such link either.
+          Shown disabled rather than removed, so the slot is visible once a recovery flow exists.
+        -->
+        <div class="label-row">
+          <label for="pw">Password</label>
+          <span class="disabled-link" aria-disabled="true" title="No recovery flow is configured yet">Forgot password?</span>
+        </div>
+        <input class="field" id="pw" name="password" type="password" autocomplete="current-password" placeholder="Your password">
+        <p class="error" id="pw-error"></p>
+        <button class="primary" type="submit">Continue</button>
+      </form>
+
+      <!--
+        Login 3: default-authentication-mfa-validation (order 30).
+        device_classes = totp + static, not_configured_action = skip — a user with no
+        enrolled device never sees this step, which is why there is no opt-in here.
+      -->
+      <form id="step-totp" class="step" hidden novalidate>
+        <label>Signing in as</label>
+        <div class="ident-chip">
+          <span class="ident-who"><img class="uid-avatar" alt="" aria-hidden="true"><span class="uid-display"></span></span>
+          <button type="button" class="change-uid">Change</button>
+        </div>
+        <label for="code" style="margin-top:16px">Authentication code</label>
+        <p class="hint">Enter the 6-digit code from your authenticator app.</p>
+        <input class="field code" id="code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" placeholder="000000">
+        <p class="error" id="totp-error"></p>
+        <button class="primary" type="submit">Verify</button>
+        <a class="hint center" href="#recovery" title="Recovery codes">Use a recovery code instead</a>
+      </form>
+
+      <!--
+        Login 3b: NOT a separate stage. `ak-stage-authenticator-validate` returns both factors
+        in one challenge as `device_challenges` (device_class `totp` and `static`); choosing a
+        recovery code just means posting the same stage with a different `selected_challenge`.
+        Two screens is a UX choice on top of one server-side stage.
+      -->
+      <form id="step-recovery" class="step" hidden novalidate>
+        <label>Signing in as</label>
+        <div class="ident-chip">
+          <span class="ident-who"><img class="uid-avatar" alt="" aria-hidden="true"><span class="uid-display"></span></span>
+          <button type="button" class="change-uid">Change</button>
+        </div>
+        <label for="rec-code" style="margin-top:16px">Recovery code</label>
+        <p class="hint">Enter one of the recovery codes you saved when you set up two-factor authentication. Each code works once.</p>
+        <input class="field" id="rec-code" type="text" autocomplete="one-time-code" placeholder="xxxxxxxx" style="font-family:var(--font-mono);letter-spacing:.08em">
+        <p class="error" id="rec-error"></p>
+        <button class="primary" type="submit">Verify</button>
+        <a class="hint center" href="#totp" title="Authenticator code">Use your authenticator app instead</a>
+      </form>
+
+      <!-- ================================================================
+           ENROLLMENT FLOW — Authentik `brolabs-invite-enrollment` (invite only)
+           invitation(5) -> credentials(10) -> details(15) -> totp-optin(17)
+           -> user-write(20) -> totp-setup(25) -> static-setup(26) -> login(100)
+           ================================================================ -->
+      <div id="head-enroll" class="flow-head" hidden>
+        <h1 class="flow-title">You have been invited to Brolabs</h1>
+        <p class="flow-sub">Create your Heimdall account. <span id="enroll-progress"></span></p>
+      </div>
+
+      <!-- Enroll 1: prompt stage `brolabs-invite-enrollment-prompt-credentials` (order 10) -->
+      <form id="step-credentials" class="step" hidden novalidate>
+        <label for="en-username">Username</label>
+        <input class="field" id="en-username" type="text" autocomplete="username" placeholder="Username">
+        <label for="en-password" style="margin-top:16px">Password</label>
+        <input class="field" id="en-password" type="password" autocomplete="new-password" placeholder="Password">
+        <label for="en-password2" style="margin-top:16px">Password (repeat)</label>
+        <input class="field" id="en-password2" type="password" autocomplete="new-password" placeholder="Password (repeat)">
+        <p class="error" id="cred-error"></p>
+        <button class="primary" type="submit">Continue</button>
+      </form>
+
+      <!-- Enroll 2: prompt stage `brolabs-invite-enrollment-prompt-details` (order 15) -->
+      <form id="step-details" class="step" hidden novalidate>
+        <label for="en-name">Name</label>
+        <input class="field" id="en-name" type="text" autocomplete="name" placeholder="Name">
+        <label for="en-email" style="margin-top:16px">Email</label>
+        <input class="field" id="en-email" type="email" autocomplete="email" placeholder="Email">
+        <p class="error" id="details-error"></p>
+        <button class="primary" type="submit">Continue</button>
+      </form>
+
+      <!--
+        Enroll 3: prompt stage `brolabs-totp-optin` (order 17).
+        A static explainer prompt plus one checkbox prompt `enable_totp`, defaulted OFF.
+        Copy is taken verbatim from 40-totp.yaml.
+      -->
+      <form id="step-optin" class="step" hidden novalidate>
+        <h2 class="step-title" style="margin-top:0">Two-factor authentication</h2>
+        <p class="hint">If you turn this on you will scan a QR code with an authenticator app, then be shown a set of one-time recovery codes to keep somewhere safe. You will need a code from the app each time you sign in. You can also turn this on later from your account settings.</p>
+        <label class="check" for="enable-totp">
+          <input type="checkbox" id="enable-totp">
+          <span>Set up two-factor authentication now (recommended)</span>
+        </label>
+        <p class="error" id="optin-error"></p>
+        <button class="primary" type="submit">Continue</button>
+      </form>
+
+      <!-- Enroll 4: stock `default-authenticator-totp-setup` (order 25, skipped if unchecked) -->
+      <form id="step-setup" class="step" hidden novalidate>
+        <h2 class="step-title" style="margin-top:0">Set up authenticator</h2>
+        <p class="hint">Scan the QR code with an authenticator app (1Password, Google Authenticator, Authy…), then enter the code it shows.</p>
+        <div class="qr" aria-label="QR code placeholder"><svg viewBox="0 0 29 29" id="qr-svg" shape-rendering="crispEdges"></svg></div>
+        <p class="hint center" style="margin:10px 0 0">Can't scan? Enter this key manually:</p>
+        <!-- The real key is the `secret=` parameter of the stage's otpauth:// config_url: 32 base32 chars. -->
+        <code class="secret">MZXW 6YTB OI5D CMRT GQZT ENBV GY3T IMZU</code>
+        <label for="setup-code" style="margin-top:16px">Authentication code</label>
+        <input class="field code" id="setup-code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="000000">
+        <p class="error" id="setup-error"></p>
+        <button class="primary" type="submit">Continue</button>
+      </form>
+
+      <!-- Enroll 5: stock `default-authenticator-static-setup` (order 26, token_count 6) -->
+      <form id="step-codes" class="step" hidden novalidate>
+        <h2 class="step-title" style="margin-top:0">Save your recovery codes</h2>
+        <p class="hint">Use one of these if you lose access to your authenticator app. Each code works once.</p>
+        <ul class="codes" id="code-list"></ul>
+        <p class="warn">These are shown only once. Copy them somewhere safe before you continue.</p>
+        <button class="primary" type="submit">I have saved these codes</button>
+        <button class="ghost-link" type="button" id="copy-codes">Copy all codes</button>
+        <p class="error" id="codes-error"></p>
+      </form>
+
+      <!-- Enroll 6: `brolabs-invite-enrollment-user-login` (order 100) -->
+      <div id="step-done" class="step" hidden>
+        <h2 class="step-title" style="margin-top:0">You're all set</h2>
+        <p class="hint" id="done-text"></p>
+        <button class="secondary" type="button" id="restart" style="margin-top:14px">Start over</button>
+      </div>
+
+      <p class="alt" id="alt-signup">
+        Don't have an account?
+        <span class="disabled-link" aria-disabled="true" title="Sign-up is invite-only">Sign up</span>
+      </p>
+    </div>
+  </main>
+
+  <footer>
+    <a href="#identify">Terms of Service</a> and <a href="#identify">Privacy Policy</a>
+  </footer>
+
+  <script>
+    // Mock only: mirrors the two Authentik flows without submitting anywhere.
+    // Login:      #identify -> #password -> #totp (or #recovery)
+    // Enrollment: #enroll -> #enroll-details -> #enroll-totp -> #enroll-setup
+    //             -> #enroll-codes -> #enroll-done
+    const STEPS = {
+      identify:        { el: 'step-ident',       flow: 'login'  },
+      password:        { el: 'step-password',    flow: 'login'  },
+      totp:            { el: 'step-totp',        flow: 'login'  },
+      recovery:        { el: 'step-recovery',    flow: 'login'  },
+      'enroll':        { el: 'step-credentials', flow: 'enroll', progress: 'Step 1 of 3' },
+      'enroll-details':{ el: 'step-details',     flow: 'enroll', progress: 'Step 2 of 3' },
+      'enroll-totp':   { el: 'step-optin',       flow: 'enroll', progress: 'Step 3 of 3' },
+      'enroll-setup':  { el: 'step-setup',       flow: 'enroll' },
+      'enroll-codes':  { el: 'step-codes',       flow: 'enroll' },
+      'enroll-done':   { el: 'step-done',        flow: 'enroll' },
+    };
+    const FOCUS = {
+      identify: 'uid', password: 'pw', totp: 'code', recovery: 'rec-code',
+      'enroll': 'en-username', 'enroll-details': 'en-name', 'enroll-setup': 'setup-code',
+    };
+    const $ = (id) => document.getElementById(id);
+    let user = '';
+
+    // Stands in for the challenge's `pending_user_avatar`, which Authentik returns as a
+    // data: URI — a flat circle carrying the user's initials. The real frontend uses the
+    // server's value directly; this only reproduces its shape so the mock looks right.
+    function pendingUserAvatar(name) {
+      const letters = (name || '?').replace(/[^A-Za-z0-9]+/g, ' ').trim().split(/\s+/);
+      const initials = (letters.length > 1
+        ? letters[0][0] + letters[1][0]
+        : (letters[0] || '?').slice(0, 2)).toUpperCase();
+      // Hue from the name so a given user keeps a stable colour between steps.
+      let hash = 0;
+      for (const ch of name || '') hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
+      const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">`
+        + `<circle cx="32" cy="32" r="32" fill="hsl(${hash % 360} 32% 42%)"/>`
+        + `<text x="50%" y="50%" fill="#fff" font-family="Inter,Helvetica,Arial,sans-serif"`
+        + ` font-size="28" text-anchor="middle" dominant-baseline="middle" dy=".1em">${initials}</text></svg>`;
+      return 'data:image/svg+xml;base64,' + btoa(svg);
+    }
+
+    function show(name) {
+      const step = STEPS[name] || STEPS.identify;
+      for (const [k, s] of Object.entries(STEPS)) $(s.el).hidden = s !== step;
+
+      const isLogin = step.flow === 'login';
+      $('head-login').hidden = !isLogin;
+      $('head-enroll').hidden = isLogin;
+      // SSO and the sign-up line belong to the identification stage only.
+      $('sso-block').hidden = name !== 'identify';
+      $('alt-signup').hidden = !isLogin;
+      $('enroll-progress').textContent = step.progress || '';
+
+      if (isLogin && name !== 'identify' && !user) user = 'demo@brolabs.ai';
+      document.querySelectorAll('.uid-display').forEach((el) => { el.textContent = user; });
+      const avatar = pendingUserAvatar(user);
+      document.querySelectorAll('.uid-avatar').forEach((el) => { el.src = avatar; });
+      document.querySelectorAll('.error').forEach((el) => { el.textContent = ''; });
+      if (FOCUS[name]) $(FOCUS[name]).focus();
+    }
+    function go(name) {
+      if (location.hash === '#' + name) show(name); else location.hash = name;
+    }
+    const current = () => (STEPS[location.hash.slice(1)] ? location.hash.slice(1) : 'identify');
+    window.addEventListener('hashchange', () => show(current()));
+
+    // ---- Login flow ----------------------------------------------------
+    $('step-ident').addEventListener('submit', (e) => {
+      e.preventDefault();
+      user = $('uid').value.trim();
+      if (!user) { $('ident-error').textContent = 'Enter your email or username.'; $('uid').focus(); return; }
+      go('password');
+    });
+    document.querySelectorAll('.change-uid').forEach((b) => b.addEventListener('click', () => {
+      $('pw').value = ''; $('code').value = ''; $('rec-code').value = '';
+      go('identify');
+    }));
+    $('step-password').addEventListener('submit', (e) => {
+      e.preventDefault();
+      if (!$('pw').value) { $('pw-error').textContent = 'Enter your password.'; $('pw').focus(); return; }
+      // Demo routing. In Authentik the MFA stage is skipped outright for a user with no
+      // enrolled device (not_configured_action: skip), so there is nothing to show.
+      if (/mfa|totp/i.test(user)) { go('totp'); return; }
+      $('pw-error').textContent = 'Preview mock: signed in. This account has no authenticator, so the MFA step is skipped.';
+    });
+    $('step-totp').addEventListener('submit', (e) => {
+      e.preventDefault();
+      $('totp-error').textContent = $('code').value.length === 6
+        ? 'Preview mock: sign-in is not wired up yet.'
+        : 'Enter the 6-digit code.';
+      $('code').focus();
+    });
+    $('step-recovery').addEventListener('submit', (e) => {
+      e.preventDefault();
+      $('rec-error').textContent = $('rec-code').value.trim()
+        ? 'Preview mock: sign-in is not wired up yet.'
+        : 'Enter one of your recovery codes.';
+      $('rec-code').focus();
+    });
+
+    // ---- Enrollment flow -----------------------------------------------
+    $('step-credentials').addEventListener('submit', (e) => {
+      e.preventDefault();
+      const u = $('en-username').value.trim(), p = $('en-password').value, p2 = $('en-password2').value;
+      // The prompt stage itself compares password against password_repeat.
+      if (!u) { $('cred-error').textContent = 'Choose a username.'; $('en-username').focus(); return; }
+      if (!p) { $('cred-error').textContent = 'Choose a password.'; $('en-password').focus(); return; }
+      if (p !== p2) { $('cred-error').textContent = 'Passwords do not match.'; $('en-password2').focus(); return; }
+      user = u;
+      go('enroll-details');
+    });
+    $('step-details').addEventListener('submit', (e) => {
+      e.preventDefault();
+      if (!$('en-name').value.trim()) { $('details-error').textContent = 'Enter your name.'; $('en-name').focus(); return; }
+      if (!$('en-email').value.trim()) { $('details-error').textContent = 'Enter your email.'; $('en-email').focus(); return; }
+      go('enroll-totp');
+    });
+    $('step-optin').addEventListener('submit', (e) => {
+      e.preventDefault();
+      // The `brolabs-totp-requested` policy skips both setup stages when the box is unticked.
+      go($('enable-totp').checked ? 'enroll-setup' : 'enroll-done');
+    });
+    $('step-setup').addEventListener('submit', (e) => {
+      e.preventDefault();
+      if ($('setup-code').value.length !== 6) { $('setup-error').textContent = 'Enter the 6-digit code.'; $('setup-code').focus(); return; }
+      go('enroll-codes');
+    });
+    $('setup-code').addEventListener('input', () => {
+      $('setup-code').value = $('setup-code').value.replace(/\D/g, '').slice(0, 6);
+    });
+    $('code').addEventListener('input', () => {
+      $('code').value = $('code').value.replace(/\D/g, '').slice(0, 6);
+    });
+    $('step-codes').addEventListener('submit', (e) => { e.preventDefault(); go('enroll-done'); });
+    $('copy-codes').addEventListener('click', () => {
+      const text = [...$('code-list').children].map((li) => li.textContent).join('\n');
+      navigator.clipboard?.writeText(text).then(
+        () => { $('codes-error').style.color = 'var(--text-faint)'; $('codes-error').textContent = 'Copied.'; },
+        () => { $('codes-error').style.color = 'var(--danger)'; $('codes-error').textContent = 'Could not copy — select the codes manually.'; },
+      );
+    });
+    $('restart').addEventListener('click', () => { user = ''; go('identify'); });
+
+    // Placeholder recovery codes. Shape matches what the static setup stage actually returns:
+    // 6 codes of 12 mixed-case alphanumeric characters, e.g. "7hQ2mTvK4pLa".
+    $('code-list').innerHTML = ['7hQ2mTvK4pLa', 'Rb9xNcE1yWdF', '3kZpQvB8tMnJ', 'Xy6LrDs0gHcV', 'Tn5wKqJ2fPbZ', 'Ad8vMxR7eSlQ']
+      .map((c) => `<li>${c}</li>`).join('');
+
+    // Decorative QR placeholder: finder patterns + seeded noise.
+    (function drawQr() {
+      const svg = $('qr-svg'); let r = 0x9e3779b9, rects = '';
+      const finder = (x, y) => { rects += `<path d="M${x} ${y}h7v7h-7zM${x+1} ${y+1}v5h5v-5zM${x+2} ${y+2}h3v3h-3z" fill-rule="evenodd"/>`; };
+      finder(0, 0); finder(22, 0); finder(0, 22);
+      // xorshift32: a plain LCG loses its low bits to float precision in JS and draws almost nothing.
+      const next = () => { r ^= r << 13; r ^= r >>> 17; r ^= r << 5; return r >>> 0; };
+      for (let y = 0; y < 29; y++) for (let x = 0; x < 29; x++) {
+        if ((x < 8 && y < 8) || (x > 20 && y < 8) || (x < 8 && y > 20)) continue;
+        if (next() % 2) rects += `<rect x="${x}" y="${y}" width="1" height="1"/>`;
+      }
+      svg.innerHTML = `<g fill="#0e0d0b">${rects}</g>`;
+    })();
+
+    $('done-text').textContent = 'Preview mock: Authentik would sign you in here and send you on to Heimdall.';
+    show(current());
+
+    // ---- Digital-rain backdrop -----------------------------------------
+    // Katakana columns falling in the landing-page accent, deliberately dim.
+    //
+    // The canvas is CLEARED and every trail redrawn each frame. The usual trick — painting a
+    // translucent background over the last frame — cannot be used here: that blend converges
+    // on the background without reaching it, and once a step rounds to less than one 8-bit
+    // level the glyph stops fading and sticks forever as a faint block. Redrawing is a few
+    // hundred more fillText calls per frame and leaves no residue at all.
+    (function rain() {
+      const cv = $('rain'), ctx = cv.getContext('2d');
+      const GLYPHS = 'アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲン0123456789';
+      const SIZE = 17;                      // grid cell: column width and row pitch
+      const FONT = 14;                      // glyph slightly smaller than the cell, so rows breathe
+      const TRAIL = 14;                     // glyphs per column, head included
+      const calm = matchMedia('(prefers-reduced-motion: reduce)').matches;
+      let cols = 0, drops = [], w = 0, h = 0;
+
+      function resize() {
+        const dpr = Math.min(devicePixelRatio || 1, 2);
+        w = innerWidth; h = innerHeight;
+        cv.width = w * dpr; cv.height = h * dpr;
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        cols = Math.ceil(w / SIZE);
+        // Only some columns rain at a time, and each falls at its own rate. Both are what
+        // keep the field sparse and irregular rather than a solid curtain of glyphs.
+        // `y` spreads over the full height so the backdrop is populated from the first frame.
+        drops = Array.from({ length: cols }, () => newDrop(Math.random() * (h / SIZE), Math.random() < 0.55));
+      }
+
+      const rnd = () => GLYPHS[(Math.random() * GLYPHS.length) | 0];
+      function newDrop(y, active) {
+        return {
+          y, active,
+          speed: 0.45 + Math.random() * 0.5,
+          lastRow: Math.floor(y),
+          // The glyphs of this column's trail, head first. Shifted in lockstep with the head
+          // as it advances, so a character stays fixed in its screen cell for the whole of
+          // its fade; a new one is drawn only when a fresh head enters that cell.
+          chars: Array.from({ length: TRAIL }, rnd),
+        };
+      }
+
+      function draw() {
+        ctx.clearRect(0, 0, w, h);
+        ctx.font = `${FONT}px "JetBrains Mono", ui-monospace, monospace`;
+        ctx.textBaseline = 'top';
+
+        for (let i = 0; i < cols; i++) {
+          const d = drops[i];
+          if (!d.active) continue;
+
+          // Snap to the row grid: speeds are fractional so columns fall at different rates,
+          // but a glyph must land on a cell boundary or consecutive characters overlap.
+          const row = Math.floor(d.y);
+          if (row !== d.lastRow) {
+            d.chars.unshift(rnd());
+            d.chars.length = TRAIL;
+            d.lastRow = row;
+          }
+          const x = i * SIZE;
+          for (let k = 0; k < TRAIL; k++) {
+            const y = (row - k) * SIZE;
+            if (y < -SIZE || y > h) continue;
+            ctx.fillStyle = k === 0
+              ? 'rgba(236, 231, 223, 0.55)'                                  // leading glyph
+              : `rgba(210, 169, 101, ${(0.44 * (1 - k / TRAIL)).toFixed(3)})`; // --accent, fading
+            ctx.fillText(d.chars[k], x, y);
+          }
+
+          d.y += d.speed;
+          // Once the whole trail is below the fold, retire the column; it returns later.
+          if ((row - TRAIL) * SIZE > h) {
+            if (Math.random() < 0.04) drops[i] = newDrop(-Math.random() * 20, true);
+            else if (Math.random() < 0.02) d.active = false;
+          }
+        }
+        // Occasionally wake an idle column so the field keeps renewing itself.
+        if (Math.random() < 0.08) {
+          const j = (Math.random() * cols) | 0;
+          if (drops[j] && !drops[j].active) drops[j] = newDrop(-Math.random() * 20, true);
+        }
+      }
+
+      // --- Continuity across navigations -------------------------------
+      // Stepping between stages in this mock is a hash change, so the loop simply keeps
+      // running. The real frontend may navigate for real, which would restart the rain and
+      // read as a jarring reset. So the field is checkpointed to sessionStorage and resumed
+      // where it left off, advanced by however long the gap actually was.
+      const KEY = 'heimdall.rain';
+      const FRAME_MS = 55;
+
+      function save() {
+        try {
+          sessionStorage.setItem(KEY, JSON.stringify({ t: Date.now(), w, drops }));
+        } catch { /* private mode, quota, blocked storage: a restart is an acceptable fallback */ }
+      }
+      function restore() {
+        try {
+          const s = JSON.parse(sessionStorage.getItem(KEY) || 'null');
+          // Only resume a checkpoint from the same width and the recent past; otherwise the
+          // column layout would not line up, or the gap is long enough that a fresh field
+          // is no more jarring than a stale one.
+          if (!s || s.w !== w || !Array.isArray(s.drops) || s.drops.length !== cols) return 0;
+          if (Date.now() - s.t > 60000) return 0;
+          // Reject a checkpoint written by an older build, whose drops carry no glyph trail.
+          if (!s.drops.every((d) => Array.isArray(d.chars) && d.chars.length === TRAIL)) return 0;
+          drops = s.drops;
+          return Math.min(Math.round((Date.now() - s.t) / FRAME_MS), 200);  // frames to catch up
+        } catch { return 0; }
+      }
+
+      addEventListener('resize', resize);
+      resize();
+      // Resume where the last page left off, advancing positions by however long the gap was.
+      // Only the arithmetic is replayed, not the painting — one draw() renders a full trail,
+      // so there is nothing to accumulate and no warm-up to do.
+      const catchUp = restore();
+      if (catchUp) for (const d of drops) { if (d.active) d.y += d.speed * catchUp; }
+      draw();
+      addEventListener('pagehide', save);
+      addEventListener('visibilitychange', () => { if (document.hidden) save(); });
+
+      if (calm) return;                       // reduced motion: keep that static field, no loop
+      let last = 0;
+      (function loop(t) {
+        requestAnimationFrame(loop);
+        if (t - last < 55) return;   // ~18fps: the classic cadence, and cheap
+        last = t;
+        draw();
+      })(0);
+    })();
+  </script>
+</body>
+</html>
