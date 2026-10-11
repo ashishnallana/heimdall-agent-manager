@@ -215,3 +215,35 @@ test('approval page wires the restart confirmation and the inline Unseal now', (
   assert.match(source, /publicKey = await fetchBridgePublicKey\(targetBridgeId\)/);
   assert.doesNotMatch(source, /The bridge is enrolled and unsealed\./);
 });
+
+test('REQ-T4-4: nothing but a restarted bridge reporting `unlocked` is ever confirmed', () => {
+  for (const vault of ['disabled', 'locked', '', 'garbage', undefined]) {
+    let sealedPolls = 0;
+    for (let poll = 0; poll < RESTART_SEALED_CONFIRM_POLLS + 2; poll++) {
+      for (const expired of [false, true]) {
+        const decision = enrollmentRestartConfirmation(
+          restartInput({ rows: [{ bridge_id: 'brg_1', status: 'online', vault_status: vault }], sealedPolls, expired }),
+        );
+        assert.notEqual(decision.outcome, 'confirmed', `vault_status=${String(vault)} poll=${poll} expired=${expired}`);
+      }
+      sealedPolls = enrollmentRestartConfirmation(
+        restartInput({ rows: [{ bridge_id: 'brg_1', status: 'online', vault_status: vault }], sealedPolls }),
+      ).sealedPolls;
+    }
+  }
+});
+
+test('REQ-T4-4: the green unsealed banner is gated on the confirmed phase only', () => {
+  const source = fs.readFileSync(
+    path.join(repoRoot, 'src/ui/components/enrollment/BridgeEnrollmentApprovalPage.tsx'),
+    'utf8',
+  );
+  const banner = source.indexOf('title="Bridge restarted and confirmed unsealed"');
+  const gate = source.lastIndexOf('{delivery.phase', banner);
+  assert.equal(source.slice(gate, banner).split('\n')[0].trim(), "{delivery.phase === 'confirmed' && (");
+  // `confirmed` is entered only from the restart-confirmation decision.
+  assert.equal((source.match(/setDelivery\(\{ phase: 'confirmed' \}\)/g) || []).length, 1);
+  assert.match(source, /if \(decision\.outcome === 'confirmed'\) \{\s*setDelivery\(\{ phase: 'confirmed' \}\)/);
+  // No other banner may claim the vault is unsealed.
+  assert.equal((source.match(/unsealed"/g) || []).length, 1);
+});

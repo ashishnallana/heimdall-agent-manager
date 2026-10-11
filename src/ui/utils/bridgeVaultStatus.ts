@@ -89,6 +89,16 @@ export function canUnlockBridgeVault(status: BridgeVaultStatus): boolean {
   return status === 'Locked' || status === 'Unknown';
 }
 
+/**
+ * REQ-T4-1: "Configure encryption" is offered for an online bridge that has no key
+ * yet, but only when the OWNER has a vault to give it — `ownerHasVault` is "this
+ * client's vault is configured". Without an owner vault there is no key to send, and
+ * the client-scoped "Enable Encryption" is the right control instead.
+ */
+export function canConfigureBridgeVault(status: BridgeVaultStatus, ownerHasVault: boolean): boolean {
+  return status === 'NotConfigured' && ownerHasVault;
+}
+
 /** All five states, in the order the UI documents them. */
 export const BRIDGE_VAULT_STATUSES: readonly BridgeVaultStatus[] = [
   'NotRunning',
@@ -97,3 +107,20 @@ export const BRIDGE_VAULT_STATUSES: readonly BridgeVaultStatus[] = [
   'Unlocked',
   'Unknown',
 ] as const;
+
+/**
+ * T9 (REQ-T9-2): a LOCKED bridge refuses hub-driven commands with the stable code
+ * `vault_locked` and reason "unauthorized: vault locked". The hub forwards the reason
+ * inside its error message rather than the code, so both spellings are matched. Pure
+ * so the shell dialogs can share it and `node --test` can pin it.
+ */
+export function isBridgeVaultLockedError(error: unknown): boolean {
+  return /vault[_ ]locked/i.test(describeApiError(error));
+}
+
+/** Best-effort message text from an RTK Query / fetch error, '' when there is none. */
+export function describeApiError(error: unknown): string {
+  const e = error as any;
+  const candidate = e?.data?.error?.message ?? e?.data?.error ?? e?.data?.message ?? e?.error ?? e?.message;
+  return typeof candidate === 'string' ? candidate : '';
+}
