@@ -57,6 +57,25 @@ export function buildRouteHash(pathname: string, search: string): string {
   return `#${normalizedPath}${normalizedSearch}`;
 }
 
+// Path-form device routes that a direct document hit should land on. Matched as
+// the trailing segments of the document path so a sub-path deployment still folds.
+const LEGACY_DEVICE_ROUTE = /(\/device\/add|\/device\/providers(?:\/[^/]+)?)\/?$/;
+
+// Legacy deep-link migration target: for a document opened at a real path-based
+// route (an old `/workspace/...` bookmark, or a direct `/device/add?code=...` /
+// `/device/providers[/<bridge>]` hit served by an SPA fallback) with no hash
+// route, returns the `#`-prefixed hash that route belongs in. Returns null when
+// the location is already hash-routed or is not a foldable route.
+export function legacyPathRouteHash(pathname: string, search: string, hash: string): string | null {
+  if (hash && hash.length > 1) return null; // already hash-routed
+  if (!pathname) return null;
+  const workspaceAt = pathname.indexOf('/workspace');
+  if (workspaceAt >= 0) return buildRouteHash(pathname.slice(workspaceAt) || '/workspace', search);
+  const device = LEGACY_DEVICE_ROUTE.exec(pathname);
+  if (device) return buildRouteHash(device[1], search);
+  return null;
+}
+
 export function navigateTo(href: string): void {
   window.location.hash = href.startsWith('#') ? href.slice(1) : href;
 }

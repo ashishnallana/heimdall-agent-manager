@@ -51,9 +51,13 @@ import http "odin_test:lib/http_client"
 // family design §9.3 names, so the design's paths are stale and these are not.
 BRIDGE_ENROLL_AUTHORIZE_PATH :: "/api/v1/device/authorize"
 BRIDGE_ENROLL_TOKEN_PATH :: "/api/v1/device/token"
-// Stable authenticated web route. The UI uses the Hub's stored bridge key only
-// after the operator confirms its fingerprint against this terminal.
-BRIDGE_ENROLL_PAGE_PATH :: "/#/device/add"
+// Path-form entry to the approval page. The Hub 302s it to the UI hash route
+// `/#/device/add[?code=…]` (GET /api/v1/device/add). A path, not the hash route
+// itself, because a forward-auth login round trip (`rd=<url>`) keeps path and
+// query but drops the `#` fragment, so a hash link landed on Home after login.
+// The UI uses the Hub's stored bridge key only after the operator confirms its
+// fingerprint against this terminal.
+BRIDGE_ENROLL_PAGE_PATH :: "/api/v1/device/add"
 BRIDGE_ENROLL_REFRESH_PATH :: "/api/v1/device/bridge-refresh"
 
 // 32 bytes for the PKCE verifier (RFC 7636 §4.1 permits 43-128 chars; 32 raw
@@ -244,11 +248,13 @@ bridge_enroll_approval_url :: proc(ui_origin: string, allocator := context.alloc
 	return strings.concatenate({ui_origin, BRIDGE_ENROLL_PAGE_PATH}, allocator)
 }
 
-// The automatic same-machine convenience carries the short code in a fragment.
-// Browsers do not send fragments in HTTP requests or Referer headers, so the Hub
-// and reverse-proxy logs see only the UI root. The SPA consumes and removes
-// the code query while retaining the route fragment. The terminal prints the
-// stable URL for phone/manual enrollment.
+// The automatic same-machine convenience carries the short code in the query so
+// it survives a forward-auth login round trip (a fragment would be dropped). The
+// short code is not a credential on its own — approval still needs a signed-in
+// user and the fingerprint confirmation — and the Hub's redirect only forwards a
+// canonicalised code. The SPA consumes and removes the code query while retaining
+// the route fragment. The terminal prints the stable URL for phone/manual
+// enrollment.
 bridge_enroll_automatic_approval_url :: proc(
 	ui_origin, user_code: string,
 	allocator := context.allocator,
@@ -802,6 +808,9 @@ bridge_enroll_restart_service :: proc() -> bool {
 // the ephemeral enrollment keypair held by this process.
 bridge_enroll_wait_for_vault_delivery :: proc(args: []string, bridge_id: string) -> bool {
 	bridge_enrollment_unseal_reset()
+	// REQ-T2-3: this process exits right after the restart below, so it must not be
+	// the one that tells the hub the vault is unlocked. See bridge_hub_vault_status_for_report.
+	bridge_hub_set_enroll_only_runtime(true)
 	bridge_config = bridge_config_from_args(args)
 	if strings.trim_space(bridge_config.bridge_token) == "" || bridge_config.daemon_id != bridge_id {
 		fmt.eprintln("bridge enroll FAILED: the saved credential could not be loaded for vault delivery")
@@ -812,11 +821,17 @@ bridge_enroll_wait_for_vault_delivery :: proc(args: []string, bridge_id: string)
 	fmt.printfln("  waiting up to %ds for encrypted vault delivery…", BRIDGE_ENROLL_VAULT_WAIT_SECONDS)
 	for _ in 0..<BRIDGE_ENROLL_VAULT_WAIT_SECONDS * 10 {
 		if bridge_enrollment_unseal_was_received() {
-			when ODIN_OS == .Linux {
+			// The restarted service is a NEW process: it is unsealed only if it can
+			// read the key back from the OS store, so prove that before restarting.
+			when ODIN_OS == .Linux || ODIN_OS == .Darwin {
 				key, persisted := keystore_read_keyring_vault_key()
 				if len(key) > 0 do delete(key)
 				if !persisted {
-					fmt.eprintln("bridge enroll FAILED: the vault key was decrypted but could not be persisted in the Linux user keyring.")
+					when ODIN_OS == .Linux {
+						fmt.eprintln("bridge enroll FAILED: the vault key was decrypted but could not be persisted in the Linux user keyring.")
+					} else {
+						fmt.eprintln("bridge enroll FAILED: the vault key was decrypted but could not be persisted in the macOS login keychain.")
+					}
 					fmt.eprintln("  The service was not restarted because it would start locked.")
 					return false
 				}
@@ -981,10 +996,6 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 				if !bridge_enroll_wait_for_vault_delivery(args, cred.bridge_id) {
 					keystore_lock_and_purge()
 					return false
-				}
-				when ODIN_OS == .Darwin {
-					fmt.eprintln("  macOS cannot carry the in-memory vault key across the service restart.")
-					fmt.eprintln("  Unlock this bridge again from Settings → Bridges after it reconnects.")
 				}
 			}
 			if !bridge_enroll_restart_service() {

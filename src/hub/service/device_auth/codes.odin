@@ -94,3 +94,31 @@ hex_encode :: proc(data: []byte) -> string {
 }
 
 HEX_DIGITS :: "0123456789abcdef"
+
+// normalize_user_code canonicalises a human- or URL-supplied user code to the
+// stored "XXXX-XXXX" lookup key. Case is folded and whitespace/dashes are
+// ignored; every remaining byte must be a USER_CODE_ALPHABET symbol and there
+// must be exactly USER_CODE_LENGTH of them. Anything else — including stray
+// punctuation, control bytes or an overlong value — is rejected rather than
+// stripped, so the result is always rebuilt from validated symbols and never
+// carries a byte of the input through. Returns ("", false) when invalid; the
+// result is allocated with `allocator`.
+normalize_user_code :: proc(raw: string, allocator := context.allocator) -> (string, bool) {
+	symbols: [USER_CODE_LENGTH]u8
+	count := 0
+	for i := 0; i < len(raw); i += 1 {
+		c := raw[i]
+		switch c {
+		case ' ', '\t', '-':
+			continue
+		case 'a' ..= 'z':
+			c -= 'a' - 'A'
+		}
+		if strings.index_byte(USER_CODE_ALPHABET, c) < 0 do return "", false
+		if count == USER_CODE_LENGTH do return "", false
+		symbols[count] = c
+		count += 1
+	}
+	if count != USER_CODE_LENGTH do return "", false
+	return strings.concatenate({string(symbols[:4]), "-", string(symbols[4:])}, allocator), true
+}

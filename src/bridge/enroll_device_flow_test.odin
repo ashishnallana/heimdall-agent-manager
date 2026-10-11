@@ -58,24 +58,26 @@ bridge_enroll_test_rmdir :: proc(path: string) {
 enroll_approval_url_is_stable_and_code_free :: proc(t: ^testing.T) {
 	url := bridge_enroll_approval_url("https://heimdall.example.com")
 	defer delete(url)
-	testing.expect_value(t, url, "https://heimdall.example.com/#/device/add")
+	testing.expect_value(t, url, "https://heimdall.example.com/api/v1/device/add")
 	testing.expect(t, !strings.contains(url, "?"), "the stable URL must carry no query")
-	testing.expect(t, strings.has_suffix(url, "#/device/add"), "the stable URL must use the UI hash route")
+	testing.expect(t, !strings.contains(url, "#"), "the stable URL must be a path: a forward-auth login drops the fragment")
 	for forbidden in ([?]string{"user_code", "device_code", "bpk", "state", "callback", "access_token"}) {
 		testing.expectf(t, !strings.contains(url, forbidden), "approval URL leaked %s", forbidden)
 	}
 }
 
 @(test)
-enroll_automatic_approval_url_uses_a_browser_only_fragment :: proc(t: ^testing.T) {
+enroll_automatic_approval_url_survives_a_login_redirect :: proc(t: ^testing.T) {
 	automatic := bridge_enroll_automatic_approval_url("https://heimdall.example.com", "ABCD-2345")
 	defer delete(automatic)
-	testing.expect(t, automatic == "https://heimdall.example.com/#/device/add?code=ABCD-2345")
-	fragment_at := strings.index_byte(automatic, '#')
-	testing.expect(t, fragment_at > 0, "code must be after the fragment marker")
-	testing.expect(t, !strings.contains(automatic[:fragment_at], "code="), "code must not be sent to the server")
+	testing.expect_value(t, automatic, "https://heimdall.example.com/api/v1/device/add?code=ABCD-2345")
+	// Only path + query survive a forward-auth `rd=` round trip; a fragment would
+	// strand the operator on Home after login.
+	testing.expect(t, !strings.contains(automatic, "#"), "the code must not ride in a fragment")
+	for forbidden in ([?]string{"device_code", "bpk", "state", "callback", "access_token"}) {
+		testing.expectf(t, !strings.contains(automatic, forbidden), "automatic URL leaked %s", forbidden)
+	}
 }
-
 
 @(test)
 enroll_pkce_challenge_matches_rfc7636_vector :: proc(t: ^testing.T) {

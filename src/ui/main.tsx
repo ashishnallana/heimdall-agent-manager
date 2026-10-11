@@ -5,7 +5,7 @@ import AppShell from './components/shell/AppShell';
 import ElectronDeviceAuthGate, { installElectronApiFetchBridge } from './components/ElectronDeviceAuthGate';
 import ToastViewport from './components/ToastViewport';
 import { store } from './store/store';
-import { buildRouteHash } from './utils/appLocation';
+import { legacyPathRouteHash } from './utils/appLocation';
 import { registerNotificationServiceWorker } from './services/notificationService';
 import { resubscribeOnLoad } from './services/pushSubscriptionService';
 import { selectNotificationsState } from './store/notificationsSlice';
@@ -15,19 +15,18 @@ import './debugCapture';
 import './styles.css';
 
 // Legacy deep-link migration: if the app was opened at a real path-based route
-// (e.g. an old bookmark `.../workspace/chains/X/tasks/Y?...`) with no hash, fold
-// that route into the hash and reset the document path to the app root. This keeps
-// the loaded document at index.html so an Electron file:// refresh always works,
-// while preserving the intended route.
+// (e.g. an old bookmark `.../workspace/chains/X/tasks/Y?...`, or a direct
+// `/device/add?code=...` / `/device/providers/<bridge>` hit) with no hash, fold
+// that route into the hash. Only the fragment is replaced (a fragment-only URL
+// resolves against the current document), so routing reads the hash from then
+// on and an Electron file:// refresh always reloads the same document. See
+// legacyPathRouteHash for the folding rules.
 (function migrateLegacyPathRoute() {
   try {
     if (typeof window === 'undefined') return;
     const { pathname, search, hash } = window.location;
-    if (hash && hash.length > 1) return; // already hash-routed
-    if (!pathname || !pathname.includes('/workspace')) return;
-    const idx = pathname.indexOf('/workspace');
-    const routePath = pathname.slice(idx) || '/workspace';
-    window.history.replaceState(window.history.state || {}, '', buildRouteHash(routePath, search));
+    const target = legacyPathRouteHash(pathname, search, hash);
+    if (target) window.history.replaceState(window.history.state || {}, '', target);
   } catch (_err) {
     // Non-fatal: fall back to default routing.
   }

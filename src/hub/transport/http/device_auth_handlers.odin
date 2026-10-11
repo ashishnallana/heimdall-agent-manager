@@ -3,6 +3,9 @@
 // Public: POST /api/v1/device/authorize (no auth — the device is not yet
 // authenticated).
 //
+// Public redirect: GET /api/v1/device/add — the path-form entry the bridge
+// prints, folded into the UI hash route (see device_add_redirect_handler).
+//
 // Trusted-proxy-authenticated (ELDA-2/HBR-5): GET /api/v1/device (HTML page),
 // POST /api/v1/device/verify, POST /api/v1/device/approve. These refuse with
 // 401 when the request did not arrive through the trusted proxy.
@@ -27,6 +30,9 @@ Device_Auth_Handlers :: struct {
 	// every use of it is guarded and non-blocking.
 	push:              ^push_service.Push_Service,
 	public_app_origin: string,
+	// --ui-origin. Prefixes the /api/v1/device/add redirect target; empty means
+	// a relative Location (UI served by the Hub itself).
+	ui_origin:         string,
 }
 
 // device_authorize_handler is the public POST /api/v1/device/authorize endpoint.
@@ -78,6 +84,42 @@ device_page_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	_, ok, auth_resp := require_auth(handlers.auth, req)
 	if !ok do return auth_resp
 	return Response{status = 200, content_type = "text/html; charset=utf-8", body = device_auth.DEVICE_PAGE_HTML}
+}
+
+// DEVICE_ADD_UI_ROUTE is the UI hash route of the bridge-enrollment approval page.
+DEVICE_ADD_UI_ROUTE :: "/#/device/add"
+
+// device_add_redirect_handler is GET /api/v1/device/add, the URL `ham-bridge
+// enroll` prints and opens. It exists because the approval page lives behind a
+// hash route: a forward-auth login round trip (`rd=<scheme://host/path?query>`)
+// preserves path and query but the browser never sends the `#` fragment, so a
+// `/#/device/add?code=…` link landed on Home after login. The path form
+// survives the round trip and this 302 restores the hash route.
+//
+// No auth here: it only redirects, and the page it targets authenticates
+// itself. The code is re-derived by normalize_user_code and only that canonical
+// XXXX-XXXX form is written into Location — an absent or invalid code is
+// dropped, never echoed, so the header cannot carry injected bytes.
+device_add_redirect_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	handlers := (^Device_Auth_Handlers)(ctx)
+	headers := make([]contracts.HTTP_Header, 1)
+	// query_value returns either a slice of the query or a fresh decode, so it
+	// cannot be freed uniformly: keep it on the temp allocator.
+	raw_code: string
+	{
+		context.allocator = context.temp_allocator
+		raw_code = query_value(req.query, "code")
+	}
+	headers[0] = contracts.HTTP_Header{name = "Location", value = device_add_redirect_location(handlers.ui_origin, raw_code)}
+	return Response{status = 302, content_type = "text/plain; charset=utf-8", body = "", headers = headers}
+}
+
+// device_add_redirect_location builds the 302 target for device_add_redirect_handler.
+device_add_redirect_location :: proc(ui_origin, raw_code: string, allocator := context.temp_allocator) -> string {
+	base := strings.trim_right(ui_origin, "/")
+	code, ok := device_auth.normalize_user_code(raw_code, context.temp_allocator)
+	if !ok do return strings.concatenate({base, DEVICE_ADD_UI_ROUTE}, allocator)
+	return strings.concatenate({base, DEVICE_ADD_UI_ROUTE, "?code=", code}, allocator)
 }
 
 // device_verify_handler shows the requesting device's info for the given
