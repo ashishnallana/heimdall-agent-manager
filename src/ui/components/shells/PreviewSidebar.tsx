@@ -143,7 +143,7 @@ function PreviewFrame({ tab, hidden }: { tab: PreviewTab; hidden: boolean }) {
         } catch { /* ignore */ }
       }
     };
-  }, []);
+  }, [previewBaseUrl, reloadKey]);
 
   // Sync URL bar from iframe navigation (load, hash changes, and popstate).
   // Works because the preview URL (/api/v1/preview/…) is same-origin with the hub.
@@ -201,7 +201,7 @@ function PreviewFrame({ tab, hidden }: { tab: PreviewTab; hidden: boolean }) {
       detachInnerWindow();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isCrossOrigin, reloadKey, tab.sessionId]);
+  }, [isCrossOrigin, previewBaseUrl, reloadKey, tab.sessionId]);
 
   const handleBack = () => {
     const stack = navStackRef.current;
