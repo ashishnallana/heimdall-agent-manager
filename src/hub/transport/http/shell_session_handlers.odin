@@ -415,7 +415,17 @@ shell_session_preview_proxy_handler :: proc(ctx: rawptr, req: Request, client: n
 
 	// Build and send raw HTTP request as tunnel_data frames (≤48KB base64 chunks).
 	// XM-2: pass is_ws_upgrade so WebSocket headers are forwarded and Connection:close suppressed.
-	raw_req := _preview_build_http_request(req.method, forwarded_path, req.query, req.headers, req.body, session.server_port, is_ws_upgrade)
+	client_addr := _preview_client_addr(req.remote_addr)
+	defer delete(client_addr)
+	forward_context := Preview_Forward_Context{
+		prefix      = session_prefix,
+		host        = header_value(req.headers, "Host"),
+		// The public preview route is HTTPS in supported deployments; no hub config
+		// currently carries the external request scheme.
+		proto       = "https",
+		client_addr = client_addr,
+	}
+	raw_req := _preview_build_http_request(req.method, forwarded_path, req.query, req.headers, req.body, session.server_port, forward_context, is_ws_upgrade)
 	defer delete(raw_req)
 	raw_bytes := transmute([]byte)raw_req
 	// CHUNK_SIZE IS A RAW-BYTE FIGURE AND IT DOES *NOT* FIT ONE WS FRAME. THAT IS FINE
@@ -643,9 +653,33 @@ _preview_tunnel_close_json :: proc(stream_id, reason: string) -> string {
 	return strings.to_string(b)
 }
 
+Preview_Forward_Context :: struct {
+	prefix:      string,
+	host:        string,
+	proto:       string,
+	client_addr: string,
+}
+
+// _preview_client_addr removes a transport port without truncating an unbracketed IPv6
+// address. The HTTP server normally supplies an address-only value, but tests and
+// alternate callers may provide host:port.
+_preview_client_addr :: proc(remote_addr: string, allocator := context.allocator) -> string {
+	if len(remote_addr) > 0 && remote_addr[0] == '[' {
+		if closing := strings.index_byte(remote_addr, ']'); closing > 0 {
+			return strings.clone(remote_addr[1:closing], allocator)
+		}
+	}
+	if strings.count(remote_addr, ":") == 1 {
+		if colon := strings.last_index_byte(remote_addr, ':'); colon >= 0 {
+			return strings.clone(remote_addr[:colon], allocator)
+		}
+	}
+	return strings.clone(remote_addr, allocator)
+}
+
 // XM-2: is_ws_upgrade=true suppresses the hardcoded "Connection: close" and passes
 // through the WebSocket negotiation headers so the upstream can issue a valid 101.
-_preview_build_http_request :: proc(method, fwd_path, query: string, headers: []contracts.HTTP_Header, body: string, server_port: int, is_ws_upgrade: bool = false) -> string {
+_preview_build_http_request :: proc(method, fwd_path, query: string, headers: []contracts.HTTP_Header, body: string, server_port: int, forward: Preview_Forward_Context = {}, is_ws_upgrade: bool = false) -> string {
 	b := strings.builder_make()
 	strings.write_string(&b, method)
 	strings.write_byte(&b, ' ')
@@ -660,14 +694,36 @@ _preview_build_http_request :: proc(method, fwd_path, query: string, headers: []
 	if !is_ws_upgrade {
 		strings.write_string(&b, "Connection: close\r\n")
 	}
+	forward_headers := []struct{name, value: string}{
+		{"X-Forwarded-Host", forward.host},
+		{"X-Forwarded-Proto", forward.proto},
+		{"X-Forwarded-Prefix", forward.prefix},
+		{"X-Forwarded-For", forward.client_addr},
+	}
+	for hdr in forward_headers {
+		if hdr.value == "" do continue
+		strings.write_string(&b, hdr.name)
+		strings.write_string(&b, ": ")
+		strings.write_string(&b, hdr.value)
+		strings.write_string(&b, "\r\n")
+	}
 	for hdr in headers {
 		lower := strings.to_lower(hdr.name)
 		defer delete(lower)
 		pass := false
 		switch lower {
 		case "accept", "accept-encoding", "accept-language", "content-type", "content-length",
-		     "cache-control", "range", "if-none-match", "if-modified-since":
+		     "cache-control", "range", "if-none-match", "if-modified-since", "if-match",
+		     "if-unmodified-since", "content-encoding", "user-agent", "referer", "origin",
+		     "x-csrf-token", "x-csrftoken", "x-xsrf-token", "x-requested-with":
 			pass = true
+		// Shared-origin hub auth consumes Bearer credentials before this builder runs,
+		// so this currently benefits non-Bearer schemes such as Basic only.
+		case "authorization":
+			pass = true
+		// Never forward hub credentials or identity assertions into an untrusted preview.
+		case "cookie":
+			pass = false
 		// XM-2: WebSocket negotiation headers must reach the upstream verbatim so it can
 		// compute Sec-WebSocket-Accept and issue a valid 101 Switching Protocols.
 		case "upgrade", "connection",
@@ -675,6 +731,7 @@ _preview_build_http_request :: proc(method, fwd_path, query: string, headers: []
 		     "sec-websocket-protocol", "sec-websocket-extensions":
 			pass = is_ws_upgrade
 		}
+		if strings.has_prefix(lower, "x-authentik-") do pass = false
 		if pass {
 			strings.write_string(&b, hdr.name)
 			strings.write_string(&b, ": ")

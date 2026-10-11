@@ -197,7 +197,16 @@ bridge_proxy_handle_open :: proc(h: ^Bridge_Handlers, origin_bridge_id, text: st
 		delete(headers)
 	}
 	fwd_path := path == "" ? "/" : path
-	raw_req := _preview_build_http_request(method, fwd_path, query, headers[:], "", session.server_port, false)
+	prefix := strings.concatenate({"/proxy/", target_session_id})
+	defer delete(prefix)
+	forward_context := Preview_Forward_Context{
+		prefix      = prefix,
+		// This hub-side relay does not know the originating bridge's local endpoint port.
+		host        = "",
+		proto       = "http",
+		client_addr = "127.0.0.1",
+	}
+	raw_req := _preview_build_http_request(method, fwd_path, query, headers[:], "", session.server_port, forward_context, false)
 	defer delete(raw_req)
 
 	bridge_proxy_send_tunnel_bytes(h, session.bridge_id, stream_id, transmute([]byte)raw_req)
