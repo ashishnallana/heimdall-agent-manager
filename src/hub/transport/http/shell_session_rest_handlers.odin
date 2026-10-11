@@ -16,6 +16,8 @@ Shell_Session_Rest_Handlers :: struct {
 	// derive the bridge-offline presentation state below. Nothing on this path writes
 	// to it.
 	bridge_runtime_registry: ^project_service.Bridge_Runtime_Registry,
+	preview_origin: string,
+	ui_origin: string,
 }
 
 // --- bridge-offline session state (REQ-SHELL-10 work item 3) ------------------
@@ -70,7 +72,16 @@ shell_session_status_unknown :: proc(registry: ^project_service.Bridge_Runtime_R
 
 // --- JSON serialization ---
 
-write_shell_session_json :: proc(b: ^strings.Builder, s: domain.Shell_Session, registry: ^project_service.Bridge_Runtime_Registry = nil) {
+shell_session_preview_url :: proc(s: domain.Shell_Session, preview_origin, ui_origin: string) -> string {
+	if s.server_port <= 0 do return strings.clone("")
+	if preview_origin != "" {
+		return strings.concatenate({strings.trim_right(preview_origin, "/"), "/p/", s.session_id, "/"})
+	}
+	base := strings.trim_right(ui_origin, "/")
+	return strings.concatenate({base, "/api/v1/preview/", s.session_id, "/"})
+}
+
+write_shell_session_json :: proc(b: ^strings.Builder, s: domain.Shell_Session, registry: ^project_service.Bridge_Runtime_Registry = nil, preview_origin: string = "", ui_origin: string = "") {
 	strings.write_string(b, "{\"session_id\":\"")
 	write_handler_json_string(b, s.session_id)
 	strings.write_string(b, "\",\"owner_user_id\":\"")
@@ -101,6 +112,11 @@ write_shell_session_json :: proc(b: ^strings.Builder, s: domain.Shell_Session, r
 	}
 	strings.write_string(b, fmt.tprintf(",\"pid\":%d", s.pid))
 	strings.write_string(b, fmt.tprintf(",\"server_port\":%d", s.server_port))
+	preview_url := shell_session_preview_url(s, preview_origin, ui_origin)
+	defer delete(preview_url)
+	strings.write_string(b, ",\"preview_url\":\"")
+	write_handler_json_string(b, preview_url)
+	strings.write_string(b, "\"")
 	if s.background {
 		strings.write_string(b, ",\"background\":true")
 	} else {
@@ -188,7 +204,7 @@ shell_session_create_handler :: proc(ctx: rawptr, req: Request) -> Response {
 
 	b := strings.builder_make()
 	strings.write_string(&b, "{\"ok\":true,\"session\":")
-	write_shell_session_json(&b, session, h.bridge_runtime_registry)
+	write_shell_session_json(&b, session, h.bridge_runtime_registry, h.preview_origin, h.ui_origin)
 	strings.write_string(&b, "}")
 	body := strings.to_string(b)
 	return respond_success(body, req.request_id, auth_ctx_server_time(req))
@@ -221,7 +237,7 @@ shell_session_background_handler :: proc(ctx: rawptr, req: Request) -> Response 
 
 	b := strings.builder_make()
 	strings.write_string(&b, "{\"ok\":true,\"session\":")
-	write_shell_session_json(&b, session, h.bridge_runtime_registry)
+	write_shell_session_json(&b, session, h.bridge_runtime_registry, h.preview_origin, h.ui_origin)
 	strings.write_string(&b, "}")
 	body := strings.to_string(b)
 	return respond_success(body, req.request_id, auth_ctx_server_time(req))
@@ -247,7 +263,7 @@ shell_session_list_by_bridge_handler :: proc(ctx: rawptr, req: Request) -> Respo
 	defer domain.shell_sessions_destroy(sessions)
 	defer delete(next_cursor)
 
-	body := _shell_session_list_json(sessions[:], next_cursor, h.bridge_runtime_registry)
+	body := _shell_session_list_json(sessions[:], next_cursor, h.bridge_runtime_registry, h.preview_origin, h.ui_origin)
 	return respond_success(body, req.request_id, auth_ctx_server_time(req))
 }
 
@@ -267,7 +283,7 @@ shell_session_list_by_project_handler :: proc(ctx: rawptr, req: Request) -> Resp
 	defer domain.shell_sessions_destroy(sessions)
 	defer delete(next_cursor)
 
-	body := _shell_session_list_json(sessions[:], next_cursor, h.bridge_runtime_registry)
+	body := _shell_session_list_json(sessions[:], next_cursor, h.bridge_runtime_registry, h.preview_origin, h.ui_origin)
 	return respond_success(body, req.request_id, auth_ctx_server_time(req))
 }
 
@@ -307,7 +323,7 @@ shell_session_list_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	defer domain.shell_sessions_destroy(sessions)
 	defer delete(next_cursor)
 
-	body := _shell_session_list_json(sessions[:], next_cursor, h.bridge_runtime_registry)
+	body := _shell_session_list_json(sessions[:], next_cursor, h.bridge_runtime_registry, h.preview_origin, h.ui_origin)
 	return respond_success(body, req.request_id, auth_ctx_server_time(req))
 }
 
@@ -328,7 +344,7 @@ shell_session_get_handler :: proc(ctx: rawptr, req: Request) -> Response {
 
 	b := strings.builder_make()
 	strings.write_string(&b, "{\"ok\":true,\"session\":")
-	write_shell_session_json(&b, session, h.bridge_runtime_registry)
+	write_shell_session_json(&b, session, h.bridge_runtime_registry, h.preview_origin, h.ui_origin)
 	strings.write_string(&b, "}")
 	body := strings.to_string(b)
 	return respond_success(body, req.request_id, auth_ctx_server_time(req))
@@ -407,7 +423,7 @@ shell_session_restart_handler :: proc(ctx: rawptr, req: Request) -> Response {
 
 	b := strings.builder_make()
 	strings.write_string(&b, "{\"ok\":true,\"session\":")
-	write_shell_session_json(&b, session, h.bridge_runtime_registry)
+	write_shell_session_json(&b, session, h.bridge_runtime_registry, h.preview_origin, h.ui_origin)
 	strings.write_string(&b, "}")
 	body := strings.to_string(b)
 	return respond_success(body, req.request_id, auth_ctx_server_time(req))
@@ -446,7 +462,7 @@ shell_session_set_port_handler :: proc(ctx: rawptr, req: Request) -> Response {
 
 	b := strings.builder_make()
 	strings.write_string(&b, "{\"ok\":true,\"session\":")
-	write_shell_session_json(&b, session, h.bridge_runtime_registry)
+	write_shell_session_json(&b, session, h.bridge_runtime_registry, h.preview_origin, h.ui_origin)
 	strings.write_string(&b, "}")
 	body := strings.to_string(b)
 	return respond_success(body, req.request_id, auth_ctx_server_time(req))
@@ -536,12 +552,12 @@ shell_session_pane_handler :: proc(ctx: rawptr, req: Request) -> Response {
 
 // --- private ---
 
-_shell_session_list_json :: proc(sessions: []domain.Shell_Session, next_cursor: string, registry: ^project_service.Bridge_Runtime_Registry = nil) -> string {
+_shell_session_list_json :: proc(sessions: []domain.Shell_Session, next_cursor: string, registry: ^project_service.Bridge_Runtime_Registry = nil, preview_origin: string = "", ui_origin: string = "") -> string {
 	b := strings.builder_make()
 	strings.write_string(&b, "{\"ok\":true,\"sessions\":[")
 	for s, i in sessions {
 		if i > 0 do strings.write_string(&b, ",")
-		write_shell_session_json(&b, s, registry)
+		write_shell_session_json(&b, s, registry, preview_origin, ui_origin)
 	}
 	strings.write_string(&b, "],\"next_cursor\":\"")
 	write_handler_json_string(&b, next_cursor)

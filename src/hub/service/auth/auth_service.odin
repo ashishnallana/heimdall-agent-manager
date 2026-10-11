@@ -305,6 +305,16 @@ resolve_auth :: proc(service: ^Auth_Service, req: Auth_Request) -> (contracts.Au
 		if strings.has_prefix(token, "hut_") do return verify_user_api_token(service, token)
 		return contracts.Auth_Context{}, false, domain.domain_error(.Unauthenticated, "unsupported bearer token")
 	}
+	return resolve_trusted_proxy_auth(service, req)
+}
+
+// resolve_trusted_proxy_auth intentionally ignores Authorization. Preview-host
+// applications own that header; identity comes exclusively from the trusted
+// reverse proxy and its configured username header.
+resolve_trusted_proxy_auth :: proc(service: ^Auth_Service, req: Auth_Request) -> (contracts.Auth_Context, bool, domain.Domain_Error) {
+	if service == nil || service.users == nil {
+		return contracts.Auth_Context{}, false, domain.domain_error(.Internal_Error, "auth service is not configured")
+	}
 	if !remote_addr_trusted(req.remote_addr, service.config.trusted_proxy_cidrs) {
 		return contracts.Auth_Context{}, false, domain.domain_error(.Unauthenticated, "request did not come from a trusted proxy")
 	}

@@ -16,6 +16,48 @@ require_auth :: proc(auth: ^auth_service.Auth_Service, req: Request) -> (contrac
 	return ctx, true, Response{}
 }
 
+require_trusted_proxy_auth :: proc(auth: ^auth_service.Auth_Service, req: Request) -> (contracts.Auth_Context, bool, Response) {
+	ctx, ok, err := auth_service.resolve_trusted_proxy_auth(auth, auth_service.Auth_Request{
+		remote_addr = req.remote_addr,
+		query = req.query,
+		body = req.body,
+		headers = req.headers,
+	})
+	if !ok do return contracts.Auth_Context{}, false, respond_error(err, req.request_id)
+	return ctx, true, Response{}
+}
+
+csrf_origin_equal :: proc(left, right: string) -> bool {
+	return strings.equal_fold(strings.trim_right(strings.trim_space(left), "/"), strings.trim_right(strings.trim_space(right), "/"))
+}
+
+csrf_decide :: proc(method: string, headers: []contracts.HTTP_Header, ui_origin: string, is_upgrade: bool) -> (bool, string) {
+	if ui_origin == "" do return true, ""
+	cookie := header_value(headers, "Cookie")
+	origin := header_value(headers, "Origin")
+	if is_upgrade && cookie != "" {
+		if origin == "" do return false, "WebSocket requests with cookies require Origin"
+		if !csrf_origin_equal(origin, ui_origin) do return false, "WebSocket Origin does not match the UI origin"
+	}
+	if !is_upgrade && (strings.equal_fold(method, "GET") || strings.equal_fold(method, "HEAD") || strings.equal_fold(method, "OPTIONS")) {
+		return true, ""
+	}
+	sec_fetch_site := header_value(headers, "Sec-Fetch-Site")
+	if sec_fetch_site != "" {
+		if strings.equal_fold(sec_fetch_site, "same-origin") do return true, ""
+		if !is_upgrade && strings.equal_fold(sec_fetch_site, "none") && strings.equal_fold(header_value(headers, "Sec-Fetch-Mode"), "navigate") {
+			return true, ""
+		}
+		return false, "Sec-Fetch-Site is not same-origin"
+	}
+	if origin != "" {
+		if csrf_origin_equal(origin, ui_origin) do return true, ""
+		return false, "Origin does not match the UI origin"
+	}
+	if cookie == "" do return true, ""
+	return false, "requests with cookies require same-origin browser metadata"
+}
+
 reject_query_or_body_token :: proc(req: Request) -> (bool, Response) {
 	if auth_service.token_in_query_or_body(req.query, req.body) {
 		return true, respond_error(domain.domain_error(.Unauthenticated, "bearer tokens must use the Authorization header"), req.request_id)

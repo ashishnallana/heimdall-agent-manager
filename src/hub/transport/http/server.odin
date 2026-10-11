@@ -14,6 +14,15 @@ MAX_HTTP_REQUEST_BYTES :: 80 * 1024 * 1024
 Server_Config :: struct {
 	bind_host: string,
 	port: int,
+	preview_origin: string,
+	ui_origin: string,
+	preview_ctx: rawptr,
+	preview_handler: Upgrade_Handler_Proc,
+}
+
+Server_State :: struct {
+	router: ^Router,
+	config: Server_Config,
 }
 
 serve :: proc(router: ^Router, config: Server_Config) -> bool {
@@ -28,16 +37,17 @@ serve :: proc(router: ^Router, config: Server_Config) -> bool {
 	}
 	defer net.close(listener)
 	fmt.println("ham-hub listening", config.bind_host, config.port)
+	state := Server_State{router = router, config = config}
 	for {
 		client, source, accept_err := net.accept_tcp(listener)
 		if accept_err != nil do continue
-		thread.run_with_poly_data3(client, source, router, handle_client_thread)
+		thread.run_with_poly_data3(client, source, &state, handle_client_thread)
 	}
 }
 
-handle_client_thread :: proc(client: net.TCP_Socket, source: net.Endpoint, router: ^Router) { handle_client(client, source, router) }
+handle_client_thread :: proc(client: net.TCP_Socket, source: net.Endpoint, state: ^Server_State) { handle_client(client, source, state.router, state.config) }
 
-handle_client :: proc(client: net.TCP_Socket, source: net.Endpoint, router: ^Router) {
+handle_client :: proc(client: net.TCP_Socket, source: net.Endpoint, router: ^Router, config: Server_Config = {}) {
 	defer net.close(client)
 	// Per-request arena. Every allocation this request makes — the parsed request
 	// strings, handler JSON builders, the response body, and the repository row
@@ -78,11 +88,24 @@ handle_client :: proc(client: net.TCP_Socket, source: net.Endpoint, router: ^Rou
 		remote_addr = net.address_to_string_allocator(source.address),
 		headers = headers,
 	}
+	// The preview origin is a separate security boundary. Dispatch it before
+	// OPTIONS and every router path so no Hub API can ever be reached by Host.
+	if config.preview_origin != "" && preview_origin_host_matches(header_value(headers, "Host"), config.preview_origin) {
+		context.allocator = heap
+		if config.preview_handler != nil do config.preview_handler(config.preview_ctx, req_obj, client)
+		return
+	}
+	is_upgrade := ascii_equal_fold(header_value(headers, "Upgrade"), "websocket")
+	if allowed, reason := csrf_decide(method, headers, config.ui_origin, is_upgrade); !allowed {
+		body := fmt.tprintf("{\"error\":{\"code\":\"csrf_rejected\",\"message\":\"%s\"}}", reason)
+		write_http_response(client, Response{status = 403, content_type = "application/json", body = body})
+		return
+	}
 	if method == "OPTIONS" {
 		write_http_response(client, Response{status = 204, content_type = "text/plain", body = ""})
 		return
 	}
-	if ascii_equal_fold(header_value(headers, "Upgrade"), "websocket") {
+	if is_upgrade {
 		// Upgraded connections are long-lived, so the WS read loop and everything it
 		// allocates over the connection's lifetime must run on the persistent heap,
 		// NOT this request arena (which is freed only at disconnect). Assigning
@@ -104,6 +127,17 @@ handle_client :: proc(client: net.TCP_Socket, source: net.Endpoint, router: ^Rou
 	context.allocator = req_allocator
 	resp := router_dispatch(router, req_obj)
 	write_http_response(client, resp)
+}
+
+preview_origin_host_matches :: proc(host, preview_origin: string) -> bool {
+	if preview_origin == "" do return false
+	expected := preview_origin
+	if strings.has_prefix(strings.to_lower(expected, context.temp_allocator), "https://") do expected = expected[len("https://"):]
+	expected = strings.trim_right(expected, "/")
+	actual := strings.trim_space(host)
+	if strings.has_suffix(strings.to_lower(expected, context.temp_allocator), ":443") do expected = expected[:len(expected)-4]
+	if strings.has_suffix(strings.to_lower(actual, context.temp_allocator), ":443") do actual = actual[:len(actual)-4]
+	return strings.equal_fold(actual, expected)
 }
 
 
@@ -221,6 +255,7 @@ status_text :: proc(status: int) -> string {
 	case 201: return "Created"
 	case 202: return "Accepted"
 	case 204: return "No Content"
+	case 301: return "Moved Permanently"
 	case 304: return "Not Modified"
 	case 400: return "Bad Request"
 	case 401: return "Unauthorized"

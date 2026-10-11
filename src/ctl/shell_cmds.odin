@@ -42,6 +42,8 @@ ctl_agentmode_shell :: proc(endpoint, token: string, tokens, args: []string) {
 		ctl_shell_restart(endpoint, token, tokens, args)
 	case "set-port":
 		ctl_shell_set_port(endpoint, token, tokens, args)
+	case "show":
+		ctl_shell_show(endpoint, token, tokens, args)
 	case "list":
 		ctl_shell_list(endpoint, token, tokens, args)
 	case "log":
@@ -62,6 +64,40 @@ ctl_shell_rest :: proc(endpoint, token, method, path, body: string) {
 		json_kv("path", path),
 		json_kv("body", body),
 	))
+}
+
+ctl_shell_preview_url_from_response :: proc(response: string) -> string {
+	parsed, err := json.parse(transmute([]byte)response)
+	if err != nil do return ""
+	defer json.destroy_value(parsed)
+	node, ok := parsed.(json.Object)
+	if !ok do return ""
+	for _ in 0 ..< 4 {
+		if session, got := node["session"].(json.Object); got {
+			if value, present := session["preview_url"].(json.String); present do return strings.clone(string(value))
+		}
+		if value, present := node["preview_url"].(json.String); present do return strings.clone(string(value))
+		inner, got := node["data"].(json.Object)
+		if !got do break
+		node = inner
+	}
+	return ""
+}
+
+ctl_shell_rest_with_preview :: proc(endpoint, token, method, path, body: string) {
+	response, ok := ctl_agent_local_call(endpoint, token, "agent.rest.request", json_object(
+		json_kv("http_method", method),
+		json_kv("path", path),
+		json_kv("body", body),
+	))
+	if !ok {
+		fmt.println(`{"ok":false,"message":"local Bridge endpoint is not reachable"}`)
+		return
+	}
+	fmt.println(response)
+	preview_url := ctl_shell_preview_url_from_response(response)
+	defer if preview_url != "" do delete(preview_url)
+	if preview_url != "" do fmt.println("Preview:", preview_url)
 }
 
 ctl_shell_attach_enc_spec :: proc(args: []string, cmd_str, cwd_str: string, fields: ^[dynamic]string) {
@@ -108,7 +144,7 @@ ctl_shell_start :: proc(endpoint, token: string, tokens, args: []string) {
 	if v := option_value(args, "--chain", ""); v != "" do append(&fields, json_kv("chain_id", v))
 	if v := option_value(args, "--agent", ""); v != "" do append(&fields, json_kv("agent_instance_id", v))
 	ctl_shell_attach_enc_spec(args, cmd_val, cwd_val, &fields)
-	ctl_shell_rest(endpoint, token, "POST",
+	ctl_shell_rest_with_preview(endpoint, token, "POST",
 		fmt.tprintf("/api/v1/bridges/%s/shells", safe_path_part(bridge_id)),
 		json_object_from_slice(fields[:]))
 }
@@ -343,7 +379,7 @@ ctl_shell_serve :: proc(endpoint, token: string, tokens, args: []string) {
 	if v := ctl_shell_uint_flag(args, "--port", ""); v != "" do append(&fields, json_kv_raw("server_port", v))
 	ctl_shell_attach_enc_spec(args, cmd, cwd_val, &fields)
 
-	ctl_shell_rest(endpoint, token, "POST",
+	ctl_shell_rest_with_preview(endpoint, token, "POST",
 		fmt.tprintf("/api/v1/bridges/%s/shells", safe_path_part(bridge_id)),
 		json_object_from_slice(fields[:]))
 }
@@ -446,9 +482,20 @@ ctl_shell_set_port :: proc(endpoint, token: string, tokens, args: []string) {
 		port = raw
 	}
 
-	ctl_shell_rest(endpoint, token, "POST",
+	ctl_shell_rest_with_preview(endpoint, token, "POST",
 		fmt.tprintf("/api/v1/shells/%s/port", safe_path_part(sid)),
 		json_object(json_kv_raw("server_port", port)))
+}
+
+// show — GET /api/v1/shells/{session_id}
+ctl_shell_show :: proc(endpoint, token: string, tokens, args: []string) {
+	sid := pos(tokens, 1)
+	if sid == "" {
+		fmt.println(`{"ok":false,"message":"shell show requires <session_id>"}`)
+		return
+	}
+	ctl_shell_rest_with_preview(endpoint, token, "GET",
+		fmt.tprintf("/api/v1/shells/%s", safe_path_part(sid)), "")
 }
 
 // list — GET /api/v1/shells with optional filters
@@ -580,6 +627,7 @@ print_help_shell :: proc() {
 	fmt.println("        --port 0 and --clear are the same request. Refused on a session")
 	fmt.println("        that has exited, and on a session you do not own.")
 	fmt.println("        Prints the updated session.")
+	fmt.println("  show    <session_id>                 Show one session and its Preview URL.")
 	fmt.println("  list  [--bridge <id>] [--project <id>] [--chain <id>] [--agent <id>] [--status <s>]")
 	fmt.println("        [--limit N] [--cursor <c>]")
 	fmt.println("        With NO flags: every shell you own, across every bridge, paginated.")
@@ -588,7 +636,7 @@ print_help_shell :: proc() {
 	fmt.println("        scoped, so it is deliberately absent from bridge- and chain-narrowed")
 	fmt.println("        listings; --agent is the filter that names its scope.")
 	fmt.println("        --status accepts a concrete status or the groups live | finished.")
-	fmt.println("        Prints table: session_id, kind, label, status, pid, server_port, uptime")
+	fmt.println("        Prints sessions including preview_url when a port is declared.")
 	fmt.println("  log     <session_id> [--offset N] [--limit N] [--grep <pattern>]")
 	fmt.println("        Stream log lines; response: {lines, truncated, total_lines}")
 	fmt.println("  capture <session_id>                 Snapshot current terminal screen content.")
@@ -600,6 +648,9 @@ print_help_shell :: proc() {
 	fmt.println("  Bridge endpoint, which relays it to the Hub on your behalf.")
 	fmt.println("")
 	fmt.println("REACHING A SERVER SESSION OVER HTTP")
+	fmt.println("  When the Hub has a preview origin configured, serve/start/show print its")
+	fmt.println("  canonical Preview URL. Use that URL exactly; do not construct a preview path.")
+	fmt.println("")
 	fmt.println("  A session started with --kind server --port N is reachable from this host")
 	fmt.println("  through the Bridge's local endpoint. No inbound port is opened on either")
 	fmt.println("  machine and no user token or browser session is involved:")

@@ -264,6 +264,8 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 		shell_repo          = &graph.shell_session_repo,
 		bridge_command_sink = bridge_command_sink,
 		experiments         = &graph.experiment_repo,
+		preview_origin      = config.preview_origin,
+		preview_legacy_path = config.preview_legacy_path,
 	}
 	// REQ-LSP-RLY-1. The registry is plain in-memory state: an LSP session lives
 	// exactly as long as its browser socket, so there is no table and nothing to
@@ -280,6 +282,8 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 	graph.shell_session_rest_handlers = http.Shell_Session_Rest_Handlers{
 		auth           = &graph.auth,
 		shell_sessions = &graph.shell_session_service,
+		preview_origin = config.preview_origin,
+		ui_origin      = config.ui_origin,
 		// REQ-SHELL-10 work item 3: read-only, to derive the bridge-offline session
 		// state the serializer reports.
 		bridge_runtime_registry = &graph.bridge_runtime_registry,

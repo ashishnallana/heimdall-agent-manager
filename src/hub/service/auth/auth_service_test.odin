@@ -2,6 +2,42 @@ package auth
 
 import "core:mem"
 import "core:testing"
+import contracts "odin_test:contracts"
+import domain "odin_test:hub/domain"
+import platform "odin_test:hub/platform"
+import iface "odin_test:hub/repository/iface"
+import user_service "odin_test:hub/service/user"
+
+auth_test_get_user :: proc(ctx: rawptr, user_id: domain.User_ID) -> (domain.User, bool, domain.Domain_Error) {
+	if string(user_id) != "alice" do return domain.User{}, false, domain.domain_error(.Not_Found, "user not found")
+	return domain.User{user_id = user_id, name = "alice", display_name = "Alice", status = .Active}, true, domain.Domain_Error{}
+}
+
+@(test)
+test_resolve_trusted_proxy_auth_ignores_application_bearer :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	repo := iface.User_Repository{get_by_id = auth_test_get_user}
+	clock := platform.real_clock()
+	users := user_service.new_user_service_basic(&repo, &clock, nil)
+	cidrs := []string{"127.0.0.1/32"}
+	service := new_auth_service(Trusted_Proxy_Config{
+		username_header = "X-authentik-username",
+		trusted_proxy_cidrs = cidrs,
+	}, &users)
+	headers := []contracts.HTTP_Header{
+		{name = "X-authentik-username", value = "alice"},
+		{name = "Authorization", value = "Bearer app-jwt"},
+	}
+	ctx, ok, _ := resolve_trusted_proxy_auth(&service, Auth_Request{remote_addr = "127.0.0.1", headers = headers})
+	testing.expect(t, ok)
+	testing.expect_value(t, ctx.user_id, "alice")
+	_, hub_ok, _ := resolve_auth(&service, Auth_Request{remote_addr = "127.0.0.1", headers = headers})
+	testing.expect(t, !hub_ok)
+	_, untrusted_ok, _ := resolve_trusted_proxy_auth(&service, Auth_Request{remote_addr = "10.0.0.1", headers = headers})
+	testing.expect(t, !untrusted_ok)
+	_, missing_ok, _ := resolve_trusted_proxy_auth(&service, Auth_Request{remote_addr = "127.0.0.1"})
+	testing.expect(t, !missing_ok)
+}
 
 @(test)
 test_extract_body_instance_id_basic :: proc(t: ^testing.T) {

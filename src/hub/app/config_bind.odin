@@ -1,5 +1,7 @@
 package app
 
+import "core:strings"
+
 Hub_Config :: struct {
 	paddle_environment: string,
 	paddle_api_key: string,
@@ -28,6 +30,10 @@ Hub_Config :: struct {
 	// Empty is deliberately invalid for bridge enrollment: the bridge refuses to
 	// guess a UI hostname from the Hub API hostname.
 	ui_origin: string,
+	// Browser-isolated origin used exclusively for shell previews. Empty keeps
+	// the legacy same-origin preview path as the canonical URL.
+	preview_origin: string,
+	preview_legacy_path: bool,
 	device_auth_expires_in: int,
 	device_auth_interval: int,
 	device_auth_rate_limit: int,
@@ -81,6 +87,8 @@ default_config :: proc() -> Hub_Config {
 		login_url = "",
 		logout_url = "https://auth.example.com/application/o/heimdall/end-session/",
 		ui_origin = "",
+		preview_origin = "",
+		preview_legacy_path = true,
 		device_auth_expires_in = 300,
 		device_auth_interval = 5,
 		device_auth_rate_limit = 10,
@@ -90,4 +98,23 @@ default_config :: proc() -> Hub_Config {
 		vapid_subject = "mailto:12tanmayvijay@gmail.com",
 		public_app_origin = "https://heimdall.mundus.in",
 	}
+}
+
+// normalize_preview_origin validates the public preview origin and returns a
+// heap-owned canonical value without a trailing slash.
+normalize_preview_origin :: proc(preview_origin, ui_origin: string) -> (string, bool, string) {
+	if preview_origin == "" do return "", true, ""
+	if !strings.has_prefix(strings.to_lower(preview_origin, context.temp_allocator), "https://") {
+		return "", false, "--preview-origin must start with https://"
+	}
+	canonical := strings.trim_right(preview_origin, "/")
+	host := canonical[len("https://"):]
+	if host == "" || strings.contains(host, "/") {
+		return "", false, "--preview-origin must contain only scheme and host[:port] (no path)"
+	}
+	ui_canonical := strings.trim_right(ui_origin, "/")
+	if ui_canonical != "" && strings.equal_fold(canonical, ui_canonical) {
+		return "", false, "--preview-origin must differ from --ui-origin"
+	}
+	return strings.clone(canonical), true, ""
 }

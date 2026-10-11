@@ -1,5 +1,6 @@
 package app
 
+import "core:fmt"
 import "core:thread"
 import http "odin_test:hub/transport/http"
 
@@ -17,7 +18,15 @@ run :: proc(config: Hub_Config) -> (bool, string) {
 	// A heap COPY would be unsafe: the graph's services store pointers back into
 	// this graph's own fields, so a copy would alias the original anyway.
 	thread.run_with_data(rawptr(&graph), reaper_thread_entry)
-	served := http.serve(&graph.router, http.Server_Config{bind_host = config.bind_host, port = config.port})
+	if config.ui_origin == "" do fmt.eprintln("ham-hub WARNING: --ui-origin is empty; CSRF protection is disabled")
+	served := http.serve(&graph.router, http.Server_Config{
+		bind_host = config.bind_host,
+		port = config.port,
+		preview_origin = config.preview_origin,
+		ui_origin = config.ui_origin,
+		preview_ctx = rawptr(&graph.shell_session_stream_handlers),
+		preview_handler = http.preview_origin_handler,
+	})
 	if !served do return false, "hub server failed"
 	return true, "hub server stopped"
 }

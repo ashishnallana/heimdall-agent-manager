@@ -27,6 +27,8 @@ Shell_Session_Stream_Handlers :: struct {
 	shell_repo:          ^iface.Shell_Session_Repository,
 	bridge_command_sink: project_service.Bridge_Command_Sink,
 	experiments:         ^iface.Experiment_Repository,
+	preview_origin:      string,
+	preview_legacy_path: bool,
 }
 
 shell_stream_experiment_enabled :: proc(repo: ^iface.Experiment_Repository, owner_user_id: string) -> bool {
@@ -301,15 +303,65 @@ PREVIEW_WS_HEARTBEAT :: 30 * time.Second
 // bytes to the client as they arrive rather than buffering the full response.
 // XM-2: when the request carries Upgrade: websocket a second goroutine pumps bytes from
 // the client socket to the bridge for full bidirectionality (HMR, WS backends, etc.).
+preview_origin_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_Socket) {
+	// The preview host has exactly one public namespace. In particular, Hub API,
+	// health and static paths are deliberately unreachable on this Host.
+	if !strings.has_prefix(req.path, "/p/") {
+		write_http_response(client, Response{status = 404, content_type = "text/plain", body = "not found"})
+		return
+	}
+	session_id := path_part(req.path, 2)
+	if session_id == "" {
+		write_http_response(client, Response{status = 404, content_type = "text/plain", body = "not found"})
+		return
+	}
+	prefix := strings.concatenate({"/p/", session_id}, context.temp_allocator)
+	if req.path == prefix {
+		write_http_response(client, Response{
+			status = 301,
+			content_type = "text/plain",
+			body = "redirecting",
+			headers = []contracts.HTTP_Header{{name = "Location", value = strings.concatenate({prefix, "/"}, context.temp_allocator)}},
+		})
+		return
+	}
+	if !strings.has_prefix(req.path, strings.concatenate({prefix, "/"}, context.temp_allocator)) {
+		write_http_response(client, Response{status = 404, content_type = "text/plain", body = "not found"})
+		return
+	}
+	shell_session_preview_proxy_handler(ctx, req, client)
+}
+
+preview_legacy_path_allowed :: proc(preview_origin: string, enabled: bool) -> bool {
+	return preview_origin == "" || enabled
+}
+
+preview_owner_allowed :: proc(session_owner, user_id: string) -> bool {
+	return session_owner == user_id
+}
+
 shell_session_preview_proxy_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_Socket) {
 	h := (^Shell_Session_Stream_Handlers)(ctx)
 	heap := runtime.heap_allocator()
+	is_preview_origin := strings.has_prefix(req.path, "/p/")
+	if !is_preview_origin && !preview_legacy_path_allowed(h.preview_origin, h.preview_legacy_path) {
+		write_upgrade_error(client, respond_error(domain.domain_error(.Not_Found, "route not found"), req.request_id))
+		return
+	}
 
-	// Standard session auth. (unchanged)
-	auth_ctx, auth_ok, auth_resp := require_auth(h.auth, req)
+	// Preview-host identity comes only from the trusted reverse proxy, leaving an
+	// application's own Authorization header untouched for its upstream.
+	auth_ctx: contracts.Auth_Context
+	auth_ok: bool
+	auth_resp: Response
+	if is_preview_origin {
+		auth_ctx, auth_ok, auth_resp = require_trusted_proxy_auth(h.auth, req)
+	} else {
+		auth_ctx, auth_ok, auth_resp = require_auth(h.auth, req)
+	}
 	if !auth_ok { write_upgrade_error(client, auth_resp); return }
 
-	session_id := path_part(req.path, 4)
+	session_id := path_part(req.path, 2 if is_preview_origin else 4)
 	if session_id == "" {
 		write_upgrade_error(client, respond_error(domain.domain_error(.Not_Found, "session not found"), req.request_id))
 		return
@@ -331,7 +383,7 @@ shell_session_preview_proxy_handler :: proc(ctx: rawptr, req: Request, client: n
 		return
 	}
 	defer domain.shell_session_destroy(session)
-	if session.owner_user_id != string(auth_ctx.user_id) {
+	if !preview_owner_allowed(session.owner_user_id, string(auth_ctx.user_id)) {
 		write_upgrade_error(client, Response{status = 403, content_type = "application/json", body = "{\"error\":\"session is owned by another user\"}"})
 		return
 	}
@@ -399,8 +451,8 @@ shell_session_preview_proxy_handler :: proc(ctx: rawptr, req: Request, client: n
 	stream := shell_session_svc.shell_session_tunnel_register(h.shell_sessions, stream_id)
 	defer shell_session_svc.shell_session_tunnel_unregister(h.shell_sessions, stream_id)
 
-	// Compute forwarded path (strip /api/v1/preview/{session_id}). (unchanged)
-	session_prefix := strings.concatenate({"/api/v1/preview/", session_id})
+	// Compute forwarded path using the active public namespace.
+	session_prefix := strings.concatenate({"/p/" if is_preview_origin else "/api/v1/preview/", session_id})
 	defer delete(session_prefix)
 	forwarded_path := req.path[len(session_prefix):]
 	if forwarded_path == "" do forwarded_path = "/"
@@ -424,6 +476,8 @@ shell_session_preview_proxy_handler :: proc(ctx: rawptr, req: Request, client: n
 		// currently carries the external request scheme.
 		proto       = "https",
 		client_addr = client_addr,
+		forward_cookies = is_preview_origin,
+		add_referrer_policy = is_preview_origin,
 	}
 	raw_req := _preview_build_http_request(req.method, forwarded_path, req.query, req.headers, req.body, session.server_port, forward_context, is_ws_upgrade)
 	defer delete(raw_req)
@@ -560,8 +614,8 @@ shell_session_preview_proxy_handler :: proc(ctx: rawptr, req: Request, client: n
 		done := stream.closed
 		sync.mutex_unlock(&stream.mu)
 
-		// Plain HTTP buffers only the response head so security-sensitive headers can be
-		// filtered even when CRLFCRLF is split across tunnel chunks. WebSockets bypass it.
+		// Buffer the first response head so security-sensitive headers are filtered even
+		// when CRLFCRLF is split across tunnel chunks. This includes WS handshakes.
 		write_ok := true
 		head_overflow := false
 		for chunk in to_write {
@@ -570,7 +624,7 @@ shell_session_preview_proxy_handler :: proc(ctx: rawptr, req: Request, client: n
 					write_ok = _preview_write_all(client, chunk)
 				} else {
 					filtered, complete, overflow := _preview_response_head_feed(
-						&response_head_pending, chunk, session_prefix, session.server_port, is_ws_upgrade,
+						&response_head_pending, chunk, session_prefix, session.server_port, forward_context.add_referrer_policy,
 					)
 					if overflow {
 						head_overflow = true
@@ -705,10 +759,11 @@ _preview_filter_set_cookie :: proc(value, prefix: string) -> string {
 	return strings.to_string(b)
 }
 
-_preview_filter_response_head :: proc(head, prefix: string, server_port: int) -> string {
+_preview_filter_response_head :: proc(head, prefix: string, server_port: int, add_referrer_policy := false) -> string {
 	lines := strings.split(head, "\n")
 	defer delete(lines)
 	b := strings.builder_make(runtime.heap_allocator())
+	has_referrer_policy := false
 	for raw_line in lines {
 		line := raw_line
 		if strings.has_suffix(line, "\r") do line = line[:len(line)-1]
@@ -717,6 +772,7 @@ _preview_filter_response_head :: proc(head, prefix: string, server_port: int) ->
 		name := line
 		if colon >= 0 do name = line[:colon]
 		if colon >= 0 && strings.equal_fold(name, "service-worker-allowed") do continue
+		if colon >= 0 && strings.equal_fold(name, "referrer-policy") do has_referrer_policy = true
 		if colon >= 0 && strings.equal_fold(name, "set-cookie") {
 			filtered := _preview_filter_set_cookie(strings.trim_space(line[colon+1:]), prefix)
 			strings.write_string(&b, line[:colon+1]); strings.write_byte(&b, ' '); strings.write_string(&b, filtered); delete(filtered, runtime.heap_allocator())
@@ -728,6 +784,7 @@ _preview_filter_response_head :: proc(head, prefix: string, server_port: int) ->
 		}
 		strings.write_string(&b, "\r\n")
 	}
+	if add_referrer_policy && !has_referrer_policy do strings.write_string(&b, "Referrer-Policy: same-origin\r\n")
 	strings.write_string(&b, "\r\n")
 	return strings.to_string(b)
 }
@@ -793,10 +850,7 @@ _preview_response_head_eof :: proc(pending: []byte) -> string {
 	return strings.clone(PREVIEW_BAD_GATEWAY_RESPONSE, runtime.heap_allocator())
 }
 
-_preview_response_head_feed :: proc(pending: ^[dynamic]byte, chunk: []byte, prefix: string, server_port: int, bypass := false) -> (string, bool, bool) {
-	if bypass {
-		return strings.clone(string(chunk), runtime.heap_allocator()), true, false
-	}
+_preview_response_head_feed :: proc(pending: ^[dynamic]byte, chunk: []byte, prefix: string, server_port: int, add_referrer_policy := false) -> (string, bool, bool) {
 	append(pending, ..chunk)
 	all := string(pending[:])
 	cursor := 0
@@ -834,7 +888,7 @@ _preview_response_head_feed :: proc(pending: ^[dynamic]byte, chunk: []byte, pref
 	for cursor < final_head_end {
 		end := _preview_response_head_end(all[cursor:])
 		head_end := cursor + end
-		filtered := _preview_filter_response_head(all[cursor:head_end], prefix, server_port)
+		filtered := _preview_filter_response_head(all[cursor:head_end], prefix, server_port, add_referrer_policy && head_end == final_head_end)
 		strings.write_string(&b, filtered)
 		delete(filtered, runtime.heap_allocator())
 		cursor = head_end
@@ -886,6 +940,24 @@ Preview_Forward_Context :: struct {
 	host:        string,
 	proto:       string,
 	client_addr: string,
+	forward_cookies: bool,
+	add_referrer_policy: bool,
+}
+
+_preview_filter_cookie_header :: proc(value: string) -> string {
+	b := strings.builder_make()
+	first := true
+	remaining := value
+	for part in strings.split_iterator(&remaining, ";") {
+		cookie := strings.trim_space(part)
+		name := cookie
+		if eq := strings.index_byte(cookie, '='); eq >= 0 do name = strings.trim_space(cookie[:eq])
+		if strings.has_prefix(strings.to_lower(name, context.temp_allocator), "authentik_") do continue
+		if !first do strings.write_string(&b, "; ")
+		strings.write_string(&b, cookie)
+		first = false
+	}
+	return strings.to_string(b)
 }
 
 // _preview_client_addr removes a transport port without truncating an unbracketed IPv6
@@ -951,6 +1023,16 @@ _preview_build_http_request :: proc(method, fwd_path, query: string, headers: []
 			pass = true
 		// Never forward hub credentials or identity assertions into an untrusted preview.
 		case "cookie":
+			if forward.forward_cookies {
+				filtered_cookie := _preview_filter_cookie_header(hdr.value)
+				if filtered_cookie != "" {
+					strings.write_string(&b, hdr.name)
+					strings.write_string(&b, ": ")
+					strings.write_string(&b, filtered_cookie)
+					strings.write_string(&b, "\r\n")
+				}
+				delete(filtered_cookie)
+			}
 			pass = false
 		// XM-2: WebSocket negotiation headers must reach the upstream verbatim so it can
 		// compute Sec-WebSocket-Accept and issue a valid 101 Switching Protocols.

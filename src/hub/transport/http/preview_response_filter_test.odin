@@ -206,16 +206,48 @@ test_preview_response_head_feed_unsolicited_continue :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_preview_response_head_feed_websocket_101_passthrough :: proc(t: ^testing.T) {
+test_preview_response_head_feed_websocket_101_filters_head_and_preserves_frame :: proc(t: ^testing.T) {
 	pending := make([dynamic]byte, 0, 64)
 	defer delete(pending)
 	wire := "HTTP/1.1 101 Switching Protocols\r\nService-Worker-Allowed: /\r\nSet-Cookie: raw=1; Path=/\r\nLocation: /raw\r\n\r\n\x81\x02ok"
-	result, complete, overflow := _preview_response_head_feed(&pending, transmute([]byte)wire, PREVIEW_TEST_PREFIX, PREVIEW_TEST_PORT, true)
+	result, complete, overflow := _preview_response_head_feed(&pending, transmute([]byte)wire, PREVIEW_TEST_PREFIX, PREVIEW_TEST_PORT)
 	defer delete(result, runtime.heap_allocator())
 	testing.expect(t, complete)
 	testing.expect(t, !overflow)
-	testing.expect_value(t, result, wire)
+	testing.expect(t, !strings.contains(result, "Service-Worker-Allowed"))
+	testing.expect(t, strings.contains(result, "Set-Cookie: raw=1; Path=/api/v1/preview/ss_1/\r\n"))
+	testing.expect(t, strings.contains(result, "Location: /api/v1/preview/ss_1/raw\r\n"))
+	testing.expect(t, strings.has_suffix(result, "\x81\x02ok"))
 	testing.expect_value(t, len(pending), 0)
+}
+
+@(test)
+test_preview_response_head_feed_websocket_non_101_is_still_filtered :: proc(t: ^testing.T) {
+	pending := make([dynamic]byte, 0, 64)
+	defer delete(pending)
+	wire := "HTTP/1.1 403 Forbidden\r\nService-Worker-Allowed: /\r\nSet-Cookie: denied=1; Path=/; Domain=example.com\r\n\r\ndenied"
+	result, complete, rejected := _preview_response_head_feed(&pending, transmute([]byte)wire, PREVIEW_TEST_PREFIX, PREVIEW_TEST_PORT)
+	defer delete(result, runtime.heap_allocator())
+	testing.expect(t, complete)
+	testing.expect(t, !rejected)
+	testing.expect(t, strings.has_prefix(result, "HTTP/1.1 403 Forbidden\r\n"))
+	testing.expect(t, !strings.contains(result, "Service-Worker-Allowed"))
+	testing.expect(t, strings.contains(result, "Set-Cookie: denied=1; Path=/api/v1/preview/ss_1/\r\n"))
+	testing.expect(t, !strings.contains(strings.to_lower(result, context.temp_allocator), "domain="))
+	testing.expect(t, strings.has_suffix(result, "\r\n\r\ndenied"))
+}
+
+@(test)
+test_preview_response_head_feed_websocket_malformed_101_is_502 :: proc(t: ^testing.T) {
+	pending := make([dynamic]byte, 0, 64)
+	defer delete(pending)
+	wire := "HTTP/1.1 101 Switching Protocols\r\nSet-Cookie: unsafe=1\r\nMalformed Header\r\n\r\n"
+	result, complete, rejected := _preview_response_head_feed(&pending, transmute([]byte)wire, PREVIEW_TEST_PREFIX, PREVIEW_TEST_PORT)
+	defer delete(result, runtime.heap_allocator())
+	testing.expect_value(t, result, PREVIEW_BAD_GATEWAY_RESPONSE)
+	testing.expect(t, !complete)
+	testing.expect(t, rejected)
+	testing.expect(t, !strings.contains(strings.to_lower(result, context.temp_allocator), "set-cookie"))
 }
 
 @(test)

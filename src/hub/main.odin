@@ -29,6 +29,12 @@ main :: proc() {
 		return
 	}
 	parse_args(&config)
+	normalized_preview_origin, preview_ok, preview_error := app.normalize_preview_origin(config.preview_origin, config.ui_origin)
+	if !preview_ok {
+		fmt.eprintln(preview_error)
+		os.exit(2)
+	}
+	config.preview_origin = normalized_preview_origin
 	ok, message := app.run(config)
 	if !ok {
 		fmt.eprintln(message)
@@ -232,6 +238,19 @@ parse_args :: proc(config: ^app.Hub_Config) {
 			config.logout_url = strings.clone(os.args[i + 1]); i += 1
 		} else if arg == "--ui-origin" && i + 1 < len(os.args) {
 			config.ui_origin = strings.clone(os.args[i + 1]); i += 1
+		} else if arg == "--preview-origin" && i + 1 < len(os.args) {
+			config.preview_origin = strings.clone(os.args[i + 1]); i += 1
+		} else if arg == "--preview-legacy-path" && i + 1 < len(os.args) {
+			value := strings.to_lower(os.args[i + 1], context.temp_allocator)
+			if value == "true" {
+				config.preview_legacy_path = true
+			} else if value == "false" {
+				config.preview_legacy_path = false
+			} else {
+				fmt.eprintln("--preview-legacy-path must be true or false")
+				os.exit(2)
+			}
+			i += 1
 		} else if arg == "--public-app-origin" && i + 1 < len(os.args) {
 			config.public_app_origin = strings.clone(os.args[i + 1]); i += 1
 		} else if arg == "--reaper-interval-seconds" && i + 1 < len(os.args) {
