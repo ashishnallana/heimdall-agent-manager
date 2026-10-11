@@ -14,7 +14,7 @@ import { useDispatch, useSelector } from 'react-redux';
 import { Drawer } from '@ui';
 import Icon from '../Icon';
 import { TOUCH_TARGET_CLASS, useIsMobile } from '../shell/responsive';
-import { useGetShellSessionQuery } from '../../api/endpoints/shells';
+import { useGetShellSessionQuery, useRestartShellMutation } from '../../api/endpoints/shells';
 import {
   closeTab,
   focusTab,
@@ -24,10 +24,9 @@ import {
   setTabPath,
   type PreviewTab,
 } from '../../store/previewTabsSlice';
-import { previewAccessUrl } from './shellModel';
+import { previewAccessUrl, relativeTime } from './shellModel';
+import { ShellLogViewer } from './ShellLogViewer';
 
-// A session that is no longer running can never serve the iframe, so its tab is
-// closed for the user instead of leaving a dead frame behind.
 const DEAD_STATUSES = new Set(['exited', 'killed', 'failed']);
 
 const MIN_WIDTH = 320;
@@ -43,7 +42,9 @@ function readStoredWidth(): number {
   return DEFAULT_WIDTH;
 }
 
-// Watches one open tab's session and closes the tab once the session stops running.
+// Keeps one subscription alive per open tab, including while the sidebar is
+// collapsed. Terminal sessions deliberately remain open so their final state and
+// output stay available until the user explicitly closes the tab.
 //
 // REQ-SHELL-6 §6: no pollingInterval. The comment that used to sit here was correct at
 // the time — it said a WS-only implementation "would never fire" because the hub emits
@@ -54,13 +55,7 @@ function readStoredWidth(): number {
 // which forces this very query to refetch. The gap was never the event; it was that
 // the UI listened for a type nothing produced.
 function usePreviewTabLiveness(sessionId: string) {
-  const dispatch = useDispatch();
-  const { data: session } = useGetShellSessionQuery({ sessionId });
-  const status = session?.status;
-
-  useEffect(() => {
-    if (status && DEAD_STATUSES.has(status)) dispatch(closeTab(sessionId));
-  }, [dispatch, sessionId, status]);
+  useGetShellSessionQuery({ sessionId });
 }
 
 // One watcher per open tab, rendered in EVERY branch below — collapsed rail and
@@ -70,6 +65,20 @@ function usePreviewTabLiveness(sessionId: string) {
 function PreviewTabWatcher({ sessionId }: { sessionId: string }) {
   usePreviewTabLiveness(sessionId);
   return null;
+}
+
+function PreviewTabStatusDot({ sessionId }: { sessionId: string }) {
+  const { data: session } = useGetShellSessionQuery({ sessionId });
+  const stopped = Boolean(session?.status && DEAD_STATUSES.has(session.status));
+  const label = session ? `${session.status} session` : 'Loading session status';
+  return (
+    <span
+      title={label}
+      aria-label={label}
+      data-debug-id={`preview-sidebar-status-${sessionId}`}
+      className={`h-1.5 w-1.5 shrink-0 rounded-full ${stopped ? 'bg-faint' : session ? 'bg-success' : 'bg-muted'}`}
+    />
+  );
 }
 
 function getIframeRelativePath(win: Window, sessionId: string): string {
@@ -92,6 +101,9 @@ function PreviewFrame({ tab, hidden }: { tab: PreviewTab; hidden: boolean }) {
   // and only drives the "Starting…" overlay.
   const { data: session, isError: sessionLoadFailed } = useGetShellSessionQuery({ sessionId: tab.sessionId });
   const status = session?.status;
+  const stopped = Boolean(status && DEAD_STATUSES.has(status));
+  const [viewMode, setViewMode] = useState<'preview' | 'output'>('preview');
+  const [restartShell, restartState] = useRestartShellMutation();
   // Draft is what the user is typing; it only becomes the iframe URL on submit, so
   // the frame does not reload on every keystroke.
   const [draft, setDraft] = useState(tab.currentPath);
@@ -143,7 +155,7 @@ function PreviewFrame({ tab, hidden }: { tab: PreviewTab; hidden: boolean }) {
         } catch { /* ignore */ }
       }
     };
-  }, [previewBaseUrl, reloadKey]);
+  }, [previewBaseUrl, reloadKey, stopped]);
 
   // Sync URL bar from iframe navigation (load, hash changes, and popstate).
   // Works because the preview URL (/api/v1/preview/…) is same-origin with the hub.
@@ -201,7 +213,7 @@ function PreviewFrame({ tab, hidden }: { tab: PreviewTab; hidden: boolean }) {
       detachInnerWindow();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isCrossOrigin, previewBaseUrl, reloadKey, tab.sessionId]);
+  }, [isCrossOrigin, previewBaseUrl, reloadKey, stopped, tab.sessionId]);
 
   const handleBack = () => {
     const stack = navStackRef.current;
@@ -255,60 +267,101 @@ function PreviewFrame({ tab, hidden }: { tab: PreviewTab; hidden: boolean }) {
         onSubmit={submitPath}
         className="flex items-center gap-1 border-b border-subtle bg-surface-raised px-2 py-1.5"
       >
-        <button
-          type="button"
-          title="Back"
-          aria-label="Back"
-          data-debug-id={`preview-sidebar-back-${tab.sessionId}`}
-          disabled={!canGoBack}
-          onClick={handleBack}
-          className="grid h-6 w-6 shrink-0 place-items-center rounded text-muted hover:bg-neutral-soft hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          <Icon name="arrow-left" size={13} />
-        </button>
-        <button
-          type="button"
-          title="Reload preview"
-          aria-label="Reload preview"
-          data-debug-id={`preview-sidebar-refresh-${tab.sessionId}`}
-          onClick={() => setReloadKey((key) => key + 1)}
-          className="grid h-6 w-6 shrink-0 place-items-center rounded text-muted hover:bg-neutral-soft hover:text-primary"
-        >
-          <Icon name="refresh" size={13} />
-        </button>
-        <span className="shrink-0 select-none font-mono text-[10px] text-faint">:{tab.port}/</span>
-        <input
-          type="text"
-          value={draft}
-          onChange={(event) => setDraft(event.target.value)}
-          placeholder="path inside the server, e.g. docs/index.html"
-          aria-label="Preview path"
-          data-debug-id={`preview-sidebar-url-${tab.sessionId}`}
-          className="min-w-0 flex-1 rounded border border-subtle bg-surface px-2 py-1 font-mono text-[11px] text-primary placeholder:text-faint focus:outline-none focus:ring-1 focus:ring-accent"
-        />
-        {isCrossOrigin ? (
-          <button
-            type="button"
-            onClick={() => window.open(previewBaseUrl, '_blank', 'noopener,noreferrer')}
-            title="If the preview asks you to sign in, open it in a new tab once."
-            data-debug-id={`preview-sidebar-sign-in-${tab.sessionId}`}
-            className="shrink-0 rounded border border-subtle px-2 py-1 text-[10px] font-medium text-muted hover:bg-neutral-soft hover:text-primary"
-          >
-            Sign in / open in new tab
-          </button>
-        ) : null}
+        <div className="flex shrink-0 rounded border border-subtle bg-surface p-0.5 text-[10px]">
+          {(['preview', 'output'] as const).map((mode) => (
+            <button
+              key={mode}
+              type="button"
+              aria-pressed={viewMode === mode}
+              onClick={() => setViewMode(mode)}
+              data-debug-id={`preview-sidebar-mode-${mode}-${tab.sessionId}`}
+              className={`rounded px-1.5 py-0.5 ${viewMode === mode ? 'bg-neutral-soft font-semibold text-primary' : 'text-faint hover:text-muted'}`}
+            >
+              {mode === 'output' ? 'Stdout' : 'Preview'}
+            </button>
+          ))}
+        </div>
+        {viewMode === 'preview' ? (
+          <>
+            <button
+              type="button"
+              title="Back"
+              aria-label="Back"
+              data-debug-id={`preview-sidebar-back-${tab.sessionId}`}
+              disabled={!canGoBack || stopped}
+              onClick={handleBack}
+              className="grid h-6 w-6 shrink-0 place-items-center rounded text-muted hover:bg-neutral-soft hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <Icon name="arrow-left" size={13} />
+            </button>
+            <button
+              type="button"
+              title="Reload preview"
+              aria-label="Reload preview"
+              data-debug-id={`preview-sidebar-refresh-${tab.sessionId}`}
+              disabled={stopped}
+              onClick={() => setReloadKey((key) => key + 1)}
+              className="grid h-6 w-6 shrink-0 place-items-center rounded text-muted hover:bg-neutral-soft hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <Icon name="refresh" size={13} />
+            </button>
+            <span className="shrink-0 select-none font-mono text-[10px] text-faint">:{tab.port}/</span>
+            <input
+              type="text"
+              value={draft}
+              onChange={(event) => setDraft(event.target.value)}
+              disabled={stopped}
+              placeholder="path inside the server, e.g. docs/index.html"
+              aria-label="Preview path"
+              data-debug-id={`preview-sidebar-url-${tab.sessionId}`}
+              className="min-w-0 flex-1 rounded border border-subtle bg-surface px-2 py-1 font-mono text-[11px] text-primary placeholder:text-faint focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50"
+            />
+            {isCrossOrigin && !stopped ? (
+              <button
+                type="button"
+                onClick={() => window.open(previewBaseUrl, '_blank', 'noopener,noreferrer')}
+                title="If the preview asks you to sign in, open it in a new tab once."
+                data-debug-id={`preview-sidebar-sign-in-${tab.sessionId}`}
+                className="shrink-0 rounded border border-subtle px-2 py-1 text-[10px] font-medium text-muted hover:bg-neutral-soft hover:text-primary"
+              >
+                Sign in / open in new tab
+              </button>
+            ) : null}
+          </>
+        ) : <span className="min-w-0 flex-1 text-right text-[10px] text-faint">Session output</span>}
       </form>
 
-      {/* Frame */}
-      <div className="relative min-h-0 flex-1 bg-surface">
+      {/* Preview stays mounted while Output is selected, avoiding an unnecessary reload. */}
+      <div className={`relative min-h-0 flex-1 bg-surface ${viewMode === 'output' ? 'hidden' : ''}`}>
         {!session ? (
           <div className="absolute inset-0 grid place-items-center text-xs text-muted">
             {sessionLoadFailed ? 'Preview details unavailable.' : 'Loading preview…'}
           </div>
+        ) : stopped ? (
+          <div data-debug-id={`preview-sidebar-stopped-${tab.sessionId}`} className="absolute inset-0 grid place-items-center p-6">
+            <div className="w-full max-w-sm rounded-xl border border-subtle bg-surface-raised p-5 text-center shadow-sm">
+              <div className="text-sm font-semibold text-primary">Session stopped</div>
+              <div className="mt-1 truncate text-xs text-muted">{session.label || session.cmd || session.session_id}</div>
+              <div className="mt-3 flex flex-wrap justify-center gap-1.5 text-[10px] text-muted">
+                <span className="rounded bg-neutral-soft px-2 py-0.5">{session.status}</span>
+                {session.exit_code_set || session.exit_code != null ? (
+                  <span className="rounded bg-neutral-soft px-2 py-0.5">exit code {session.exit_code ?? 'unknown'}</span>
+                ) : null}
+                <span className="rounded bg-neutral-soft px-2 py-0.5">
+                  stopped {relativeTime(session.finished_at || session.last_activity_at) || 'recently'}
+                </span>
+              </div>
+              <div className="mt-4 flex justify-center gap-2">
+                <button type="button" onClick={() => setViewMode('output')} className="rounded bg-accent px-3 py-1.5 text-xs font-semibold text-on-accent hover:opacity-90">View output</button>
+                <button type="button" disabled={restartState.isLoading} onClick={() => void restartShell({ sessionId: session.session_id })} className="rounded border border-subtle px-3 py-1.5 text-xs font-semibold text-muted hover:bg-neutral-soft disabled:opacity-40">{restartState.isLoading ? 'Restarting…' : 'Restart'}</button>
+                <button type="button" onClick={() => dispatch(closeTab(tab.sessionId))} className="rounded border border-subtle px-3 py-1.5 text-xs font-semibold text-muted hover:bg-neutral-soft">Close tab</button>
+              </div>
+            </div>
+          </div>
         ) : status === 'starting' ? (
           <div className="absolute inset-0 grid place-items-center text-xs text-muted">Starting…</div>
         ) : null}
-        {session ? (
+        {session && !stopped ? (
           <iframe
             ref={iframeRef}
             // Remounting on reloadKey IS the refresh. Crucially, the frame does
@@ -321,6 +374,17 @@ function PreviewFrame({ tab, hidden }: { tab: PreviewTab; hidden: boolean }) {
           />
         ) : null}
       </div>
+      {viewMode === 'output' ? (
+        <div className="min-h-0 flex-1 overflow-auto bg-surface p-2">
+          {session ? (
+            <ShellLogViewer session={session} showSessionVerbs={false} />
+          ) : (
+            <div className="grid h-full place-items-center text-xs text-muted">
+              {sessionLoadFailed ? 'Output details unavailable.' : 'Loading output…'}
+            </div>
+          )}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -363,6 +427,7 @@ function PreviewTabStrip({
                 title={`${tab.label}:${tab.port}`}
                 className={`max-w-[140px] truncate ${touch ? 'min-h-11' : ''}`}
               >
+                <PreviewTabStatusDot sessionId={tab.sessionId} />
                 {tab.label}
                 <span className="ml-1 font-mono text-[10px] text-faint">:{tab.port}</span>
               </button>
@@ -471,6 +536,9 @@ export function PreviewSidebar() {
         >
           <Icon name="panel-right" size={16} />
           <span className="text-xs font-bold">{tabs.length}</span>
+          <span className="flex items-center gap-0.5" aria-label="Preview tab statuses">
+            {tabs.map((tab) => <PreviewTabStatusDot key={`mobile-status:${tab.sessionId}`} sessionId={tab.sessionId} />)}
+          </span>
         </button>
         </>
       );
@@ -520,6 +588,9 @@ export function PreviewSidebar() {
           <Icon name="panel-right" size={15} />
         </button>
         <span className="rounded bg-accent/15 px-1 text-[10px] font-bold text-accent">{tabs.length}</span>
+        <span className="flex flex-col items-center gap-1" aria-label="Preview tab statuses">
+          {tabs.map((tab) => <PreviewTabStatusDot key={`rail-status:${tab.sessionId}`} sessionId={tab.sessionId} />)}
+        </span>
       </aside>
     );
   }
