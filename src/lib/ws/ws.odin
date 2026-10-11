@@ -90,16 +90,65 @@ connect_with_bearer :: proc(ws_url, bearer_token: string) -> (Connection, bool) 
 	return Connection{socket = socket, secure = false, connected = true, pending_texts = make([dynamic]string), pending_bytes = pending_bytes}, true
 }
 
+// WS_HANDSHAKE_DEADLINE_DEFAULT bounds the whole TLS WebSocket connect: socat
+// spawn, DNS, TCP, TLS handshake and the HTTP 101 reply. It used to be a
+// hard-coded 5 s while plain HTTP requests get 20 s (http_client
+// DEFAULT_TIMEOUT_MS); on a phone network that gap made enrollment succeed and
+// the follow-on WebSocket fail every time. Override: HAM_WS_HANDSHAKE_TIMEOUT_MS.
+WS_HANDSHAKE_DEADLINE_DEFAULT :: 20 * time.Second
+
+handshake_deadline :: proc() -> time.Duration {
+	raw := strings.trim_space(os.get_env("HAM_WS_HANDSHAKE_TIMEOUT_MS", context.temp_allocator))
+	return handshake_deadline_from(raw)
+}
+
+handshake_deadline_from :: proc(raw: string) -> time.Duration {
+	if raw == "" do return WS_HANDSHAKE_DEADLINE_DEFAULT
+	ms, ok := strconv.parse_int(raw)
+	if !ok || ms <= 0 do return WS_HANDSHAKE_DEADLINE_DEFAULT
+	return time.Duration(ms) * time.Millisecond
+}
+
+// last_connect_error is the reason the most recent TLS connect failed, for the
+// caller's log line: "timed out" and "rejected: <status line>" are different
+// problems and the generic "cannot connect" message hid which one it was.
+_last_connect_error: string
+_last_connect_error_mu: sync.Mutex
+
+set_last_connect_error :: proc(reason: string) {
+	sync.mutex_lock(&_last_connect_error_mu)
+	defer sync.mutex_unlock(&_last_connect_error_mu)
+	if len(_last_connect_error) > 0 do delete(_last_connect_error)
+	_last_connect_error = strings.clone(reason)
+}
+
+last_connect_error :: proc(allocator := context.temp_allocator) -> string {
+	sync.mutex_lock(&_last_connect_error_mu)
+	defer sync.mutex_unlock(&_last_connect_error_mu)
+	return strings.clone(_last_connect_error, allocator)
+}
+
+handshake_failure_reason :: proc(response: string, timed_out: bool, deadline: time.Duration, host: string, port: u16, allocator := context.temp_allocator) -> string {
+	if len(strings.trim_space(response)) == 0 {
+		if timed_out do return fmt.aprintf("handshake timed out after %v with no response from %s:%d (DNS, TCP, TLS or upgrade did not complete; raise HAM_WS_HANDSHAKE_TIMEOUT_MS if the link is slow)", deadline, host, port, allocator = allocator)
+		return fmt.aprintf("TLS relay closed before any handshake response from %s:%d (TLS verification or connection failure)", host, port, allocator = allocator)
+	}
+	line := response
+	if nl := strings.index(line, "\r\n"); nl >= 0 do line = line[:nl]
+	if len(line) > 120 do line = line[:120]
+	return fmt.aprintf("handshake rejected by %s:%d: %s", host, port, line, allocator = allocator)
+}
+
 connect_tls_with_bearer :: proc(host: string, port: u16, path, bearer_token: string) -> (Connection, bool) {
 	stdin_r, stdin_w, stdin_err := os.pipe()
-	if stdin_err != nil do return {}, false
+	if stdin_err != nil { set_last_connect_error("pipe creation failed"); return {}, false }
 	stdout_r, stdout_w, stdout_err := os.pipe()
 	if stdout_err != nil { _ = os.close(stdin_r); _ = os.close(stdin_w); return {}, false }
 	cmd := tls_client_command(host, port)
 	process, start_err := os.process_start(os.Process_Desc{command = cmd, stdin = stdin_r, stdout = stdout_w})
 	_ = os.close(stdin_r)
 	_ = os.close(stdout_w)
-	if start_err != nil { _ = os.close(stdin_w); _ = os.close(stdout_r); return {}, false }
+	if start_err != nil { set_last_connect_error(fmt.tprintf("could not start the TLS relay %s: %v", cmd[0], start_err)); _ = os.close(stdin_w); _ = os.close(stdout_r); return {}, false }
 
 	auth_header := ""
 	if strings.trim_space(bearer_token) != "" {
@@ -115,6 +164,7 @@ connect_tls_with_bearer :: proc(host: string, port: u16, path, bearer_token: str
 	)
 	_, send_err := os.write(stdin_w, transmute([]byte)request)
 	if send_err != nil {
+		set_last_connect_error("could not write the handshake to the TLS relay")
 		_ = os.close(stdin_w)
 		_ = os.close(stdout_r)
 		_ = os.process_kill(process)
@@ -125,21 +175,24 @@ connect_tls_with_bearer :: proc(host: string, port: u16, path, bearer_token: str
 	data := make([dynamic]byte)
 	defer delete(data)
 	buf: [4096]byte
-	deadline := time.to_unix_nanoseconds(time.now()) + i64(5 * time.Second)
+	budget := handshake_deadline()
+	deadline := time.to_unix_nanoseconds(time.now()) + i64(budget)
+	timed_out := true
 	for time.to_unix_nanoseconds(time.now()) < deadline {
 		if ready, pipe_err := os.pipe_has_data(stdout_r); pipe_err != nil {
 			break
 		} else if ready {
 			n, read_err := os.read(stdout_r, buf[:])
-			if read_err != nil || n <= 0 do break
+			if read_err != nil || n <= 0 { timed_out = false; break }
 			append(&data, ..buf[:n])
-			if strings.contains(string(data[:]), "\r\n\r\n") do break
+			if strings.contains(string(data[:]), "\r\n\r\n") { timed_out = false; break }
 		} else {
 			time.sleep(10 * time.Millisecond)
 		}
 	}
 	response := string(data[:])
 	if !(strings.has_prefix(response, "HTTP/1.1 101") || strings.has_prefix(response, "HTTP/1.0 101")) {
+		set_last_connect_error(handshake_failure_reason(response, timed_out, budget, host, port))
 		_ = os.close(stdin_w)
 		_ = os.close(stdout_r)
 		_ = os.process_kill(process)

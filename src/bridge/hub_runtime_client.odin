@@ -425,7 +425,7 @@ bridge_hub_runtime_worker :: proc() {
 		}
 		conn, ok := ws.connect_with_bearer(ws_url, bridge_config.bridge_token)
 		if !ok {
-			log_failure(&last_failure, &attempts, fmt.tprintf("cannot connect WS %s — proxy/tunnel down, hub unreachable, or TLS failed", ws_url))
+			log_failure(&last_failure, &attempts, fmt.tprintf("cannot connect WS %s — %s", ws_url, ws.last_connect_error()))
 			time.sleep(500 * time.Millisecond)
 			continue
 		}
