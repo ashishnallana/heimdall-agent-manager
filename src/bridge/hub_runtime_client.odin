@@ -28,14 +28,91 @@ Vault_Status :: enum {
 	Unlocked,
 }
 
+// bridge_workspace_vault_configured caches "this bridge has been unsealed at least
+// once". It is only ever set through bridge_vault_set_configured, which also keeps
+// the on-disk marker in step; tests may still poke it directly.
 bridge_workspace_vault_configured: bool
 
-bridge_vault_set_configured :: proc(configured: bool) {
+// bridge_vault_bridge_dir is the per-bridge state directory,
+// ~/.config/heimdall/bridges/<bridge_id>/ (trailing slash included). Several
+// bridges can run on one machine under different accounts and must never share
+// vault state, so everything vault-related a bridge persists is keyed by its id
+// (REQ-T3-6). ok is false for an empty id or one that is not a single safe path
+// segment, so a hostile or corrupt daemon_id can never escape the directory.
+bridge_vault_bridge_dir :: proc(bridge_id: string, allocator := context.allocator) -> (dir: string, ok: bool) {
+	if !bridge_vault_is_safe_bridge_id(bridge_id) do return "", false
+	rel := strings.concatenate({"~/.config/heimdall/bridges/", bridge_id, "/"}, context.temp_allocator)
+	expanded := cfg_lib.expand_home(rel)
+	defer delete(expanded)
+	return strings.clone(expanded, allocator), true
+}
+
+// bridge_vault_configured_marker_path is the restart-proof record that this
+// bridge's vault was configured (REQ-T3-1). The file holds only the ISO-8601 UTC
+// time it was first written — never key material — so a bridge restarted without
+// its key reports `locked` instead of `disabled`. Lock keeps it; only vault.reset
+// removes it.
+bridge_vault_configured_marker_path :: proc(bridge_id: string, allocator := context.allocator) -> (path: string, ok: bool) {
+	dir := bridge_vault_bridge_dir(bridge_id, context.temp_allocator) or_return
+	return strings.concatenate({dir, "vault_configured"}, allocator), true
+}
+
+@(private = "file")
+bridge_vault_is_safe_bridge_id :: proc(bridge_id: string) -> bool {
+	if bridge_id == "" || bridge_id == "." || bridge_id == ".." do return false
+	for c in transmute([]u8)bridge_id {
+		switch c {
+		case 'a' ..= 'z', 'A' ..= 'Z', '0' ..= '9', '_', '-', '.':
+		case:
+			return false
+		}
+	}
+	return true
+}
+
+// bridge_vault_marker_present reports whether bridge_id has a configured marker.
+// Another bridge's marker on the same machine never counts.
+bridge_vault_marker_present :: proc(bridge_id: string) -> bool {
+	path := bridge_vault_configured_marker_path(bridge_id, context.temp_allocator) or_return
+	return os.exists(path)
+}
+
+// bridge_vault_set_configured is the one place that decides "configured"
+// (REQ-T3-3): the unseal path and the marker-read path both go through it.
+// true writes bridge_id's marker if it is missing (an existing one keeps its
+// original timestamp); false removes it. The in-memory flag always follows
+// `configured`; the return value says whether the marker now matches it.
+bridge_vault_set_configured :: proc(bridge_id: string, configured: bool) -> bool {
 	bridge_workspace_vault_configured = configured
+	path, path_ok := bridge_vault_configured_marker_path(bridge_id, context.temp_allocator)
+	// No usable id means no marker can exist for it: clearing trivially holds,
+	// setting cannot be persisted.
+	if !path_ok do return !configured
+	if !configured {
+		if !os.exists(path) do return true
+		return os.remove(path) == nil
+	}
+	if os.exists(path) do return true
+	return bridge_vault_write_configured_marker(path)
+}
+
+@(private = "file")
+bridge_vault_write_configured_marker :: proc(path: string) -> bool {
+	dir := path[:strings.last_index_byte(path, '/') + 1]
+	if os.make_directory_all(dir) != nil && !os.exists(dir) do return false
+	c_path := strings.clone_to_cstring(path)
+	defer delete(c_path)
+	// O_EXCL: two racing unseals must not interleave writes, and a file that
+	// appeared meanwhile already says "configured".
+	fd := posix.open(c_path, {.WRONLY, .CREAT, .EXCL, .CLOEXEC}, {.IRUSR, .IWUSR})
+	if fd < 0 do return posix.errno() == .EEXIST
+	defer posix.close(fd)
+	content := fmt.tprintf("%s\n", action_scheduler_format_rfc3339_utc(bridge_now_unix_ms()))
+	return posix.write(fd, raw_data(content), uint(len(content))) == len(content)
 }
 
 bridge_vault_is_workspace_configured :: proc() -> bool {
-	if bridge_workspace_vault_configured do return true
+	// The operator override wins over every persisted signal, both ways.
 	if env_val, found := os.lookup_env("HEIMDALL_VAULT_CONFIGURED", context.temp_allocator); found {
 		trimmed := strings.trim_space(env_val)
 		if trimmed == "1" || strings.equal_fold(trimmed, "true") || strings.equal_fold(trimmed, "configured") {
@@ -45,6 +122,17 @@ bridge_vault_is_workspace_configured :: proc() -> bool {
 			return false
 		}
 	}
+	if bridge_workspace_vault_configured do return true
+
+	// The Darwin Keychain item outlives a restart the same way the marker does
+	// (keystore_persisted_vault_item_present is always false on Linux, where a
+	// present @u key is readable and already reports Unlocked).
+	bridge_id := bridge_config.daemon_id
+	if bridge_vault_marker_present(bridge_id) || keystore_persisted_vault_item_present() {
+		bridge_vault_set_configured(bridge_id, true)
+		return true
+	}
+
 	path := cfg_lib.expand_home("~/.config/heimdall/vault_key")
 	defer delete(path)
 	c_path := strings.clone_to_cstring(path)
@@ -1072,8 +1160,9 @@ bridge_hub_handle_command :: proc(conn: ^ws.Connection, text: string) {
 		defer delete(command_id)
 		now_ms := time.to_unix_nanoseconds(time.now()) / 1_000_000
 		ok, err_msg := bridge_unseal_decrypt_and_verify(text, bridge_config.daemon_id, now_ms)
-		if ok {
-			bridge_workspace_vault_configured = true
+		if ok && !bridge_vault_set_configured(bridge_config.daemon_id, true) {
+			// The unseal itself succeeded; only a restart would forget it was configured.
+			fmt.eprintln("WARN: could not persist this bridge's vault_configured marker under ~/.config/heimdall/bridges/<bridge_id>/; after a restart it will report the vault as disabled instead of locked.")
 		}
 
 		b := strings.builder_make()
@@ -1115,7 +1204,9 @@ bridge_hub_handle_command :: proc(conn: ^ws.Connection, text: string) {
 			_ = bridge_hub_send(conn, res)
 		}
 		// bridge_vault_lock() above always succeeds (it drops the in-memory key and
-		// the keyring entry), so the report is unconditional here.
+		// the keyring entry), so the report is unconditional here. It keeps the
+		// vault_configured marker, so this reports "locked", not "disabled"
+		// (REQ-T3-2); only the bridge-local vault.reset op clears it.
 		bridge_hub_send_vault_status(conn)
 		return
 	}

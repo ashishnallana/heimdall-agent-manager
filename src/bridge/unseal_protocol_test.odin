@@ -12,7 +12,8 @@ import "core:sync"
 import "core:testing"
 import "core:time"
 
-@(private = "file")
+// Package-visible so other suites (vault_configured_marker_test.odin) can drive
+// the real hub `bridge_unseal` frame instead of duplicating the sealing code.
 test_create_unseal_envelope :: proc(
 	bridge_id: string,
 	bridge_pub_hex: string,

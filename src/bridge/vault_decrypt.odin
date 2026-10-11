@@ -297,9 +297,20 @@ bridge_decrypt_embedded_vault_tokens :: proc(text: string, allocator := context.
 	return strings.to_string(b)
 }
 
-// Explicitly lock and purge unsealed vault key material from kernel keyring and RAM
+// Explicitly lock and purge unsealed vault key material from kernel keyring and RAM.
+// The vault_configured marker stays, so a locked bridge keeps reporting "locked"
+// rather than "disabled" across restarts (REQ-T3-2).
 bridge_vault_lock :: proc() {
 	keystore_lock_and_purge()
+}
+
+// Turns vault encryption off for this bridge: purges the key like a lock AND
+// forgets that the vault was ever configured, so it reports "disabled" until the
+// next unseal. Bridge-local only (agent vault.reset op); the hub never triggers it.
+// Returns false if the marker could not be removed.
+bridge_vault_reset :: proc() -> bool {
+	bridge_vault_lock()
+	return bridge_vault_set_configured(bridge_config.daemon_id, false)
 }
 
 // Explicitly wipe unsealed vault key material on bridge shutdown

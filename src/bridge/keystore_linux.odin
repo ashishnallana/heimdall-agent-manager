@@ -257,6 +257,12 @@ keystore_unlink_vault_key :: proc() -> bool {
 	return u_err == 0 && res == 0
 }
 
+// The Darwin Keychain item can exist yet be unreadable; a present @u key is always
+// readable and already reports Unlocked, so there is nothing extra to detect here.
+keystore_persisted_vault_item_present :: proc() -> bool {
+	return false
+}
+
 // Purges kernel keyring and wipes all in-memory unsealed buffers on bridge lock / shutdown.
 keystore_lock_and_purge :: proc() {
 	_ = keystore_unlink_vault_key()

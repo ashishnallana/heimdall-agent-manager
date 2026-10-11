@@ -191,6 +191,14 @@ keystore_read_keyring_vault_key :: proc(allocator := context.allocator) -> (key_
 	return strings.clone(candidate, allocator), true
 }
 
+// Reports whether the Keychain still holds the vault item, without reading its
+// secret (so no ACL prompt). An item the process can no longer read — e.g. after
+// a self-update changed the binary's identity — still proves the vault was
+// configured, so bridge_vault_status reports "locked" rather than "disabled".
+keystore_persisted_vault_item_present :: proc() -> bool {
+	return keychain_find_vault_item(nil) == KEYCHAIN_ERR_SEC_SUCCESS
+}
+
 // Deletes the persisted Keychain item and wipes the in-memory key. Returns true
 // when no item remains (deleted now, or there was none).
 keystore_unlink_vault_key :: proc() -> bool {

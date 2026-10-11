@@ -197,13 +197,17 @@ load :: proc(path: string) -> (Load_Result, bool) {
 }
 
 expand_home :: proc(path: string) -> string {
+	// Only the "~" case hands `home` itself back; every other path owns a fresh
+	// string, so the lookup is freed here instead of leaking on each call.
 	home := os.get_env_alloc("HEIMDALL_HOME", context.allocator)
 	if home == "" {
+		delete(home)
 		home = os.get_env_alloc("HOME", context.allocator)
 	}
 	if path == "~" {
 		if home != "" do return home
 	}
+	defer delete(home)
 	if strings.has_prefix(path, "~/") {
 		if home != "" do return strings.concatenate({home, "/", path[2:]})
 	}
