@@ -336,16 +336,12 @@ preview_legacy_path_allowed :: proc(preview_origin: string, enabled: bool) -> bo
 	return preview_origin == "" || enabled
 }
 
-preview_owner_allowed :: proc(session_owner, user_id: string) -> bool {
-	return session_owner == user_id
-}
-
 shell_session_preview_proxy_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_Socket) {
 	h := (^Shell_Session_Stream_Handlers)(ctx)
 	heap := runtime.heap_allocator()
 	is_preview_origin := strings.has_prefix(req.path, "/p/")
 	if !is_preview_origin && !preview_legacy_path_allowed(h.preview_origin, h.preview_legacy_path) {
-		write_upgrade_error(client, respond_error(domain.domain_error(.Not_Found, "route not found"), req.request_id))
+		write_stream_error(client, respond_error(domain.domain_error(.Not_Found, "route not found"), req.request_id))
 		return
 	}
 
@@ -359,11 +355,11 @@ shell_session_preview_proxy_handler :: proc(ctx: rawptr, req: Request, client: n
 	} else {
 		auth_ctx, auth_ok, auth_resp = require_auth(h.auth, req)
 	}
-	if !auth_ok { write_upgrade_error(client, auth_resp); return }
+	if !auth_ok { write_stream_error(client, auth_resp); return }
 
 	session_id := path_part(req.path, 2 if is_preview_origin else 4)
 	if session_id == "" {
-		write_upgrade_error(client, respond_error(domain.domain_error(.Not_Found, "session not found"), req.request_id))
+		write_stream_error(client, respond_error(domain.domain_error(.Not_Found, "session not found"), req.request_id))
 		return
 	}
 
@@ -375,18 +371,14 @@ shell_session_preview_proxy_handler :: proc(ctx: rawptr, req: Request, client: n
 	// path the distinction decides whether an operator goes looking at the database.
 	session, found, repo_err := iface.shell_session_get(h.shell_repo, string(auth_ctx.user_id), session_id)
 	if repo_err.code != .None {
-		write_upgrade_error(client, respond_error(repo_err, req.request_id))
+		write_stream_error(client, respond_error(repo_err, req.request_id))
 		return
 	}
 	if !found {
-		write_upgrade_error(client, respond_error(domain.domain_error(.Not_Found, "session not found"), req.request_id))
+		write_stream_error(client, respond_error(domain.domain_error(.Not_Found, "session not found"), req.request_id))
 		return
 	}
 	defer domain.shell_session_destroy(session)
-	if !preview_owner_allowed(session.owner_user_id, string(auth_ctx.user_id)) {
-		write_upgrade_error(client, Response{status = 403, content_type = "application/json", body = "{\"error\":\"session is owned by another user\"}"})
-		return
-	}
 	if session.status != "running" {
 		write_upgrade_error(client, Response{status = 409, content_type = "application/json", body = "{\"error\":\"session is not running\"}"})
 		return

@@ -2,6 +2,7 @@ package app
 
 import "core:strings"
 import "core:strconv"
+import "core:net"
 
 Hub_Config :: struct {
 	paddle_environment: string,
@@ -122,6 +123,9 @@ normalize_preview_origin :: proc(preview_origin, ui_origin: string) -> (string, 
 			return "", false, "--preview-origin must contain a valid host[:port]"
 		}
 		host = authority[1:close]
+		if _, ipv6_ok := net.parse_ip6_address(host); !ipv6_ok {
+			return "", false, "--preview-origin must contain a valid IPv6 host"
+		}
 		if close + 1 < len(authority) do port = authority[close+2:]
 	} else if colon := strings.last_index_byte(authority, ':'); colon >= 0 {
 		if strings.index_byte(authority, ':') != colon {
@@ -131,6 +135,9 @@ normalize_preview_origin :: proc(preview_origin, ui_origin: string) -> (string, 
 	}
 	if host == "" {
 		return "", false, "--preview-origin must contain a non-empty host"
+	}
+	if !strings.has_prefix(authority, "[") && !preview_origin_host_valid(host) {
+		return "", false, "--preview-origin must contain a valid hostname or IP address"
 	}
 	if port != "" {
 		port_number, port_ok := strconv.parse_int(port)
@@ -145,4 +152,24 @@ normalize_preview_origin :: proc(preview_origin, ui_origin: string) -> (string, 
 		return "", false, "--preview-origin must differ from --ui-origin"
 	}
 	return strings.clone(canonical), true, ""
+}
+
+preview_origin_host_valid :: proc(host: string) -> bool {
+	if len(host) == 0 || len(host) > 253 do return false
+	if _, ok := net.parse_ip4_address(host); ok do return true
+	numeric_address := true
+	label_start := 0
+	for i in 0..<len(host) {
+		c := host[i]
+		if c == '.' {
+			label_len := i - label_start
+			if label_len == 0 || label_len > 63 || host[label_start] == '-' || host[i-1] == '-' do return false
+			label_start = i + 1
+			continue
+		}
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-') do return false
+		if c < '0' || c > '9' do numeric_address = false
+	}
+	label_len := len(host) - label_start
+	return !numeric_address && label_len > 0 && label_len <= 63 && host[label_start] != '-' && host[len(host)-1] != '-'
 }
