@@ -9,7 +9,6 @@ import "core:os"
 import "core:strings"
 import "core:sync"
 import "core:testing"
-import cfg_lib "odin_test:lib/config"
 
 @(test)
 test_on_connect_heartbeat_reports_persisted_vault_after_restart :: proc(t: ^testing.T) {
@@ -30,18 +29,23 @@ test_on_connect_heartbeat_reports_persisted_vault_after_restart :: proc(t: ^test
 	}
 	os.unset_env("HEIMDALL_VAULT_KEY")
 
-	keystore_set_mock_syscall_error(0)
-	keystore_lock_and_purge()
-	defer keystore_lock_and_purge()
+	// The restarted service reads its OWN bridge's key (REQ-T5-2), test-only here.
+	id_a, _ := keystore_test_bridge_ids()
+	prev_daemon_id := keystore_test_set_daemon_id(id_a)
+	defer bridge_config.daemon_id = prev_daemon_id
 
-	ok, err := keystore_store_vault_key(KEYSTORE_SEC_TEST_KEY_1)
+	keystore_set_mock_syscall_error(0)
+	keystore_lock_and_purge(id_a)
+	defer keystore_lock_and_purge(id_a)
+
+	ok, err := keystore_store_vault_key(id_a, KEYSTORE_SEC_TEST_KEY_1)
 	testing.expect(t, ok, "store must succeed")
 	testing.expect_value(t, err, 0)
 
 	// Simulate the restart: the new process has an empty in-memory buffer, so the
 	// only copy left is the persisted one, and it must be exactly what was stored.
 	keystore_wipe_in_memory_vault_key()
-	persisted, persisted_ok := keystore_read_keyring_vault_key()
+	persisted, persisted_ok := keystore_read_keyring_vault_key(id_a)
 	testing.expect(t, persisted_ok, "the OS store must still hold the key after the memory wipe")
 	defer if persisted_ok do delete(persisted)
 	testing.expect_value(t, persisted, KEYSTORE_SEC_TEST_KEY_1)
@@ -51,22 +55,12 @@ test_on_connect_heartbeat_reports_persisted_vault_after_restart :: proc(t: ^test
 	defer delete(hb)
 	testing.expect(t, strings.contains(hb, "\"vault_status\":\"unlocked\""), "on-connect heartbeat must report the key read back from the OS store")
 
-	// A host with the deprecated ~/.config/heimdall/vault_key file stays unlocked
-	// after a purge by design (bridge_read_vault_key falls back to it), so the
-	// negative half only holds where that file is absent.
-	if !vault_restart_test_legacy_key_file_present() {
-		keystore_lock_and_purge()
-		hb_after := bridge_hub_heartbeat_json()
-		defer delete(hb_after)
-		testing.expect(t, !strings.contains(hb_after, "\"vault_status\":\"unlocked\""), "after purge the on-connect heartbeat must not report unlocked")
-	}
-}
-
-@(private = "file")
-vault_restart_test_legacy_key_file_present :: proc() -> bool {
-	path := cfg_lib.expand_home("~/.config/heimdall/vault_key")
-	defer delete(path)
-	return os.exists(path)
+	// The bridge no longer falls back to the legacy ~/.config/heimdall/vault_key
+	// (REQ-T5-1), so after a purge nothing can report unlocked, on any host.
+	keystore_lock_and_purge(id_a)
+	hb_after := bridge_hub_heartbeat_json()
+	defer delete(hb_after)
+	testing.expect(t, !strings.contains(hb_after, "\"vault_status\":\"unlocked\""), "after purge the on-connect heartbeat must not report unlocked")
 }
 
 @(test)

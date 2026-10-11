@@ -310,7 +310,8 @@ bridge_unseal_decrypt_and_verify :: proc(
 		return false, "invalid decrypted key format: expected 32 raw bytes or 64 hex chars"
 	}
 
-	store_ok, _ := keystore_store_vault_key(key_hex)
+	// Persisted under this bridge's own id (REQ-T5-2); bridge_id == local_bridge_id here.
+	store_ok, _ := keystore_store_vault_key(local_bridge_id, key_hex)
 	if !store_ok {
 		return false, "failed to store unsealed vault key in secure keystore"
 	}

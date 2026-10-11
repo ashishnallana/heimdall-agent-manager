@@ -13,14 +13,15 @@ KEYSTORE_ERR_ENOKEY   :: 126
 // The login-keychain generic-password item that carries the unsealed vault key
 // across process restarts. The in-memory buffer below stays the hot path; the
 // Keychain is only the persistence layer, the macOS counterpart of the Linux @u
-// keyring.
+// keyring. There is one item per bridge: the account is the bridge id
+// (REQ-T5-1), so bridges of the same macOS user never share or purge each
+// other's key.
 //
 // A TEST BUILD NEVER NAMES THE PRODUCTION ITEM. Every suite that stores a key
 // (keystore, unseal, vault-decrypt) runs keystore_store_vault_key and
 // keystore_lock_and_purge, so on a developer's Mac a shared name would overwrite
 // and then delete that machine's real enrolled key.
 KEYCHAIN_SERVICE_VAULT :: "works.earendil.heimdall-bridge.vault.test" when ODIN_TEST else "works.earendil.heimdall-bridge.vault"
-KEYCHAIN_ACCOUNT_VAULT :: "vault_key"
 
 // OSStatus values from <Security/SecBase.h>.
 KEYCHAIN_ERR_SEC_SUCCESS        :: 0
@@ -59,36 +60,41 @@ keystore_set_mock_syscall_error :: proc(errno: int) {
 	_keystore_mock_syscall_errno = errno
 }
 
-// Looks up the vault item. A nil `item` is a valid out: the lookup then only tests
-// for existence. The caller CFReleases a returned item.
+// Looks up bridge_id's vault item. A nil `item` is a valid out: the lookup then
+// only tests for existence. The caller CFReleases a returned item. An id that
+// cannot name an item (keystore_bridge_id_ok) is never found.
 @(private = "file")
-keychain_find_vault_item :: proc(item: ^rawptr, password_len: ^u32 = nil, password_data: ^rawptr = nil) -> i32 {
+keychain_find_vault_item :: proc(bridge_id: string, item: ^rawptr, password_len: ^u32 = nil, password_data: ^rawptr = nil) -> i32 {
 	if _keystore_mock_syscall_errno != 0 do return i32(_keystore_mock_syscall_errno)
+	if !keystore_bridge_id_ok(bridge_id) do return KEYCHAIN_ERR_SEC_ITEM_NOT_FOUND
+	account := strings.clone_to_cstring(bridge_id, context.temp_allocator)
 	return SecKeychainFindGenericPassword(
 		nil,
 		u32(len(KEYCHAIN_SERVICE_VAULT)), KEYCHAIN_SERVICE_VAULT,
-		u32(len(KEYCHAIN_ACCOUNT_VAULT)), KEYCHAIN_ACCOUNT_VAULT,
+		u32(len(bridge_id)), account,
 		password_len, password_data, item,
 	)
 }
 
-// Upserts the vault item in the default (login) keychain.
+// Upserts bridge_id's vault item in the default (login) keychain. The caller has
+// checked keystore_bridge_id_ok.
 @(private = "file")
-keychain_write_vault_key :: proc(key_hex: string) -> i32 {
+keychain_write_vault_key :: proc(bridge_id: string, key_hex: string) -> i32 {
 	if _keystore_mock_syscall_errno != 0 do return i32(_keystore_mock_syscall_errno)
 
 	item: rawptr
-	status := keychain_find_vault_item(&item)
+	status := keychain_find_vault_item(bridge_id, &item)
 	if status == KEYCHAIN_ERR_SEC_SUCCESS {
 		defer CFRelease(item)
 		return SecKeychainItemModifyAttributesAndData(item, nil, u32(len(key_hex)), raw_data(key_hex))
 	}
 	if status != KEYCHAIN_ERR_SEC_ITEM_NOT_FOUND do return status
 
+	account := strings.clone_to_cstring(bridge_id, context.temp_allocator)
 	return SecKeychainAddGenericPassword(
 		nil,
 		u32(len(KEYCHAIN_SERVICE_VAULT)), KEYCHAIN_SERVICE_VAULT,
-		u32(len(KEYCHAIN_ACCOUNT_VAULT)), KEYCHAIN_ACCOUNT_VAULT,
+		u32(len(bridge_id)), account,
 		u32(len(key_hex)), raw_data(key_hex),
 		nil,
 	)
@@ -152,12 +158,14 @@ keystore_wipe_in_memory_vault_key :: proc() {
 // denied access), logs a warning and falls back to memory only, as the Linux path
 // does for a restricted kernel keyring: this process stays unsealed, a restart
 // starts locked. err_code is the OSStatus (or mock errno) of the failed call.
-keystore_store_vault_key :: proc(key_hex: string) -> (ok: bool, err_code: int) {
+// An id that cannot name an item stores nothing anywhere (KEYSTORE_ERR_BAD_BRIDGE_ID).
+keystore_store_vault_key :: proc(bridge_id: string, key_hex: string) -> (ok: bool, err_code: int) {
 	if !bridge_is_valid_hex_key(key_hex) {
 		return false, -1
 	}
+	if !keystore_bridge_id_ok(bridge_id) do return false, KEYSTORE_ERR_BAD_BRIDGE_ID
 
-	status := keychain_write_vault_key(key_hex)
+	status := keychain_write_vault_key(bridge_id, key_hex)
 	mem_ok := keystore_store_in_memory_vault_key(key_hex)
 	if status != KEYCHAIN_ERR_SEC_SUCCESS {
 		fmt.eprintfln(
@@ -169,13 +177,13 @@ keystore_store_vault_key :: proc(key_hex: string) -> (ok: bool, err_code: int) {
 	return mem_ok, 0
 }
 
-// Retrieves the vault key persisted in the login keychain (the Darwin counterpart
-// of the Linux @u keyring read), so a freshly restarted service sees it through
-// bridge_read_vault_key / bridge_vault_status.
-keystore_read_keyring_vault_key :: proc(allocator := context.allocator) -> (key_hex: string, ok: bool) {
+// Retrieves bridge_id's vault key persisted in the login keychain (the Darwin
+// counterpart of the Linux @u keyring read), so a freshly restarted service sees
+// it through bridge_read_vault_key / bridge_vault_status.
+keystore_read_keyring_vault_key :: proc(bridge_id: string, allocator := context.allocator) -> (key_hex: string, ok: bool) {
 	password_len: u32
 	password_data: rawptr
-	if keychain_find_vault_item(nil, &password_len, &password_data) != KEYCHAIN_ERR_SEC_SUCCESS {
+	if keychain_find_vault_item(bridge_id, nil, &password_len, &password_data) != KEYCHAIN_ERR_SEC_SUCCESS {
 		return "", false
 	}
 	// The Keychain hands back its own copy; zero it before giving it back so the
@@ -191,29 +199,30 @@ keystore_read_keyring_vault_key :: proc(allocator := context.allocator) -> (key_
 	return strings.clone(candidate, allocator), true
 }
 
-// Reports whether the Keychain still holds the vault item, without reading its
+// Reports whether the Keychain still holds bridge_id's vault item, without reading its
 // secret (so no ACL prompt). An item the process can no longer read — e.g. after
 // a self-update changed the binary's identity — still proves the vault was
 // configured, so bridge_vault_status reports "locked" rather than "disabled".
-keystore_persisted_vault_item_present :: proc() -> bool {
-	return keychain_find_vault_item(nil) == KEYCHAIN_ERR_SEC_SUCCESS
+keystore_persisted_vault_item_present :: proc(bridge_id: string) -> bool {
+	return keychain_find_vault_item(bridge_id, nil) == KEYCHAIN_ERR_SEC_SUCCESS
 }
 
-// Deletes the persisted Keychain item and wipes the in-memory key. Returns true
-// when no item remains (deleted now, or there was none).
-keystore_unlink_vault_key :: proc() -> bool {
+// Deletes bridge_id's persisted Keychain item and wipes the in-memory key.
+// Returns true when no item remains for it (deleted now, or there was none).
+// Another bridge's item is never touched.
+keystore_unlink_vault_key :: proc(bridge_id: string) -> bool {
 	keystore_wipe_in_memory_vault_key()
 
 	item: rawptr
-	status := keychain_find_vault_item(&item)
+	status := keychain_find_vault_item(bridge_id, &item)
 	if status == KEYCHAIN_ERR_SEC_ITEM_NOT_FOUND do return true
 	if status != KEYCHAIN_ERR_SEC_SUCCESS do return false
 	defer CFRelease(item)
 	return SecKeychainItemDelete(item) == KEYCHAIN_ERR_SEC_SUCCESS
 }
 
-// Purges the Keychain item and the in-memory unsealed buffer on bridge lock / shutdown.
-keystore_lock_and_purge :: proc() {
-	_ = keystore_unlink_vault_key()
+// Purges bridge_id's Keychain item and the in-memory unsealed buffer on bridge lock / shutdown.
+keystore_lock_and_purge :: proc(bridge_id: string) {
+	_ = keystore_unlink_vault_key(bridge_id)
 	keystore_wipe_in_memory_vault_key()
 }

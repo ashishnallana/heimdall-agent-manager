@@ -16,7 +16,13 @@ import "core:sys/posix"
 import "core:testing"
 import "core:time"
 
-VAULT_MARKER_TEST_BRIDGE_ID :: "brg_t3_marker_test"
+// The marker and the keyring/Keychain key share this process's test-only bridge
+// id, so no real bridge's state is reachable (REQ-T5-4).
+@(private = "file")
+vault_marker_test_bridge_id :: proc() -> string {
+	id, _ := keystore_test_bridge_ids()
+	return id
+}
 
 // Process-wide state these tests mutate, captured so close() restores it exactly.
 @(private = "file")
@@ -49,10 +55,10 @@ vault_marker_test_open :: proc(t: ^testing.T, label: string) -> (env: Vault_Mark
 
 	os.unset_env("HEIMDALL_VAULT_KEY")
 	os.unset_env("HEIMDALL_VAULT_CONFIGURED")
-	bridge_config.daemon_id = VAULT_MARKER_TEST_BRIDGE_ID
+	bridge_config.daemon_id = vault_marker_test_bridge_id()
 	bridge_workspace_vault_configured = false
 	keystore_set_mock_syscall_error(0)
-	keystore_lock_and_purge()
+	keystore_lock_and_purge(vault_marker_test_bridge_id())
 
 	env.sb, ok = bridge_vault_test_sandbox_open(t, label)
 	return
@@ -60,7 +66,7 @@ vault_marker_test_open :: proc(t: ^testing.T, label: string) -> (env: Vault_Mark
 
 @(private = "file")
 vault_marker_test_close :: proc(env: ^Vault_Marker_Test_Env) {
-	keystore_lock_and_purge()
+	keystore_lock_and_purge(vault_marker_test_bridge_id())
 	bridge_vault_test_sandbox_close(&env.sb)
 
 	bridge_workspace_vault_configured = env.prev_flag
@@ -116,8 +122,8 @@ test_vault_set_configured_writes_private_timestamp_marker :: proc(t: ^testing.T)
 	defer vault_marker_test_close(&env)
 	if !ok do return
 
-	testing.expect(t, bridge_vault_set_configured(VAULT_MARKER_TEST_BRIDGE_ID, true), "set_configured(true) must persist the marker")
-	path, _ := bridge_vault_configured_marker_path(VAULT_MARKER_TEST_BRIDGE_ID, context.temp_allocator)
+	testing.expect(t, bridge_vault_set_configured(vault_marker_test_bridge_id(), true), "set_configured(true) must persist the marker")
+	path, _ := bridge_vault_configured_marker_path(vault_marker_test_bridge_id(), context.temp_allocator)
 
 	st: posix.stat_t
 	testing.expect_value(t, posix.stat(strings.clone_to_cstring(path, context.temp_allocator), &st), posix.result.OK)
@@ -133,7 +139,7 @@ test_vault_set_configured_writes_private_timestamp_marker :: proc(t: ^testing.T)
 
 	// A second unseal keeps the first-configured timestamp rather than rewriting it.
 	time.sleep(1100 * time.Millisecond)
-	testing.expect(t, bridge_vault_set_configured(VAULT_MARKER_TEST_BRIDGE_ID, true), "repeat set_configured(true) must succeed")
+	testing.expect(t, bridge_vault_set_configured(vault_marker_test_bridge_id(), true), "repeat set_configured(true) must succeed")
 	again, _ := os.read_entire_file(path, context.allocator)
 	defer delete(again)
 	testing.expect_value(t, strings.trim_space(string(again)), content)
@@ -148,7 +154,7 @@ test_vault_restart_with_marker_and_no_key_reports_locked :: proc(t: ^testing.T) 
 	// Marker absent + no key -> Disabled.
 	testing.expect_value(t, bridge_vault_status(), Vault_Status.Disabled)
 
-	testing.expect(t, bridge_vault_set_configured(VAULT_MARKER_TEST_BRIDGE_ID, true), "marker write must succeed")
+	testing.expect(t, bridge_vault_set_configured(vault_marker_test_bridge_id(), true), "marker write must succeed")
 	vault_marker_test_simulate_restart()
 
 	// Marker present + no key -> Locked, adopted back into the in-memory flag.
@@ -173,7 +179,7 @@ test_vault_marker_of_another_bridge_does_not_count :: proc(t: ^testing.T) {
 
 	testing.expect(t, bridge_vault_set_configured("brg_some_other_bridge", true), "marker write must succeed")
 	vault_marker_test_simulate_restart()
-	testing.expect(t, !bridge_vault_marker_present(VAULT_MARKER_TEST_BRIDGE_ID), "this bridge has no marker")
+	testing.expect(t, !bridge_vault_marker_present(vault_marker_test_bridge_id()), "this bridge has no marker")
 	testing.expect_value(t, bridge_vault_status(), Vault_Status.Disabled)
 
 	// An unenrolled bridge (empty id) never sees any marker either.
@@ -189,12 +195,12 @@ test_vault_configured_env_override_beats_marker :: proc(t: ^testing.T) {
 	defer vault_marker_test_close(&env)
 	if !ok do return
 
-	testing.expect(t, bridge_vault_set_configured(VAULT_MARKER_TEST_BRIDGE_ID, true), "marker write must succeed")
+	testing.expect(t, bridge_vault_set_configured(vault_marker_test_bridge_id(), true), "marker write must succeed")
 	vault_marker_test_simulate_restart()
 	_ = os.set_env("HEIMDALL_VAULT_CONFIGURED", "false")
 	testing.expect_value(t, bridge_vault_status(), Vault_Status.Disabled)
 
-	testing.expect(t, bridge_vault_set_configured(VAULT_MARKER_TEST_BRIDGE_ID, false), "marker removal must succeed")
+	testing.expect(t, bridge_vault_set_configured(vault_marker_test_bridge_id(), false), "marker removal must succeed")
 	vault_marker_test_simulate_restart()
 	_ = os.set_env("HEIMDALL_VAULT_CONFIGURED", "true")
 	testing.expect_value(t, bridge_vault_status(), Vault_Status.Locked)
@@ -206,14 +212,14 @@ test_vault_lock_keeps_marker_and_reset_removes_it :: proc(t: ^testing.T) {
 	defer vault_marker_test_close(&env)
 	if !ok do return
 
-	testing.expect(t, bridge_vault_set_configured(VAULT_MARKER_TEST_BRIDGE_ID, true), "marker write must succeed")
-	stored, _ := keystore_store_vault_key(TEST_VAULT_KEY_HEX)
+	testing.expect(t, bridge_vault_set_configured(vault_marker_test_bridge_id(), true), "marker write must succeed")
+	stored, _ := keystore_store_vault_key(vault_marker_test_bridge_id(), TEST_VAULT_KEY_HEX)
 	testing.expect(t, stored, "key store must succeed")
 	testing.expect_value(t, bridge_vault_status(), Vault_Status.Unlocked)
 
 	// Lock (hub bridge_lock and local vault.lock both call this) keeps the marker.
 	bridge_vault_lock()
-	testing.expect(t, bridge_vault_marker_present(VAULT_MARKER_TEST_BRIDGE_ID), "lock must keep the marker")
+	testing.expect(t, bridge_vault_marker_present(vault_marker_test_bridge_id()), "lock must keep the marker")
 	vault_marker_test_simulate_restart()
 	testing.expect_value(t, bridge_vault_status(), Vault_Status.Locked)
 
@@ -223,13 +229,13 @@ test_vault_lock_keeps_marker_and_reset_removes_it :: proc(t: ^testing.T) {
 	testing.expect_value(t, route.local_op, "vault.reset")
 	testing.expect(t, bridge_agent_method_allowed("agent.vault.reset"), "vault.reset must be dispatchable")
 
-	_, _ = keystore_store_vault_key(TEST_VAULT_KEY_HEX)
+	_, _ = keystore_store_vault_key(vault_marker_test_bridge_id(), TEST_VAULT_KEY_HEX)
 	resp := bridge_vault_reset_response("req_t3_reset")
 	defer delete(resp)
 	testing.expect(t, strings.contains(resp, "\"ok\":true,\"data\":{\"ok\":true,\"status\":\"disabled\""), fmt.tprintf("reset response must report disabled, got %s", resp))
 	testing.expect(t, strings.contains(resp, "\"marker_removed\":true"), "reset response must say the marker is gone")
 	testing.expect(t, strings.contains(resp, "\"note\":\""), "reset response must document what it did")
-	testing.expect(t, !bridge_vault_marker_present(VAULT_MARKER_TEST_BRIDGE_ID), "reset must remove the marker")
+	testing.expect(t, !bridge_vault_marker_present(vault_marker_test_bridge_id()), "reset must remove the marker")
 	_, key_left := bridge_read_vault_key()
 	testing.expect(t, !key_left, "reset must purge the key")
 	vault_marker_test_simulate_restart()
@@ -245,7 +251,7 @@ test_vault_hub_unseal_frame_persists_marker :: proc(t: ^testing.T) {
 	unseal_nonce_cache_clear(&g_unseal_nonce_cache)
 	bridge_unseal_init()
 	now_ms := time.to_unix_nanoseconds(time.now()) / 1_000_000
-	envelope := test_create_unseal_envelope(VAULT_MARKER_TEST_BRIDGE_ID, bridge_get_public_key_hex(), TEST_VAULT_KEY_HEX, now_ms, "nonce_t3_marker_01")
+	envelope := test_create_unseal_envelope(vault_marker_test_bridge_id(), bridge_get_public_key_hex(), TEST_VAULT_KEY_HEX, now_ms, "nonce_t3_marker_01")
 	defer delete(envelope)
 	// A command id of its own, so the handler's command cache cannot replay
 	// another test's result.
@@ -254,10 +260,10 @@ test_vault_hub_unseal_frame_persists_marker :: proc(t: ^testing.T) {
 	bridge_hub_handle_command(nil, frame)
 
 	testing.expect_value(t, bridge_vault_status(), Vault_Status.Unlocked)
-	testing.expect(t, bridge_vault_marker_present(VAULT_MARKER_TEST_BRIDGE_ID), "a successful hub unseal must persist this bridge's marker")
+	testing.expect(t, bridge_vault_marker_present(vault_marker_test_bridge_id()), "a successful hub unseal must persist this bridge's marker")
 
 	// The full scenario: unsealed, then the key is lost on restart -> locked.
-	keystore_lock_and_purge()
+	keystore_lock_and_purge(vault_marker_test_bridge_id())
 	vault_marker_test_simulate_restart()
 	testing.expect_value(t, bridge_vault_status(), Vault_Status.Locked)
 }

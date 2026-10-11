@@ -528,6 +528,6 @@ bridge_vault_reset_response :: proc(request_id: string) -> string {
 	defer strings.builder_destroy(&b)
 	strings.write_string(&b, "{\"ok\":true,\"status\":\"")
 	strings.write_string(&b, bridge_vault_status_string())
-	strings.write_string(&b, "\",\"marker_removed\":true,\"note\":\"vault.reset purged the vault key and removed this bridge's ~/.config/heimdall/bridges/<bridge_id>/vault_configured marker: it reports the vault as disabled (no encryption) until it is unsealed again. HEIMDALL_VAULT_CONFIGURED or a legacy ~/.config/heimdall/vault_key still take precedence. To only drop the key and keep reporting locked, use vault.lock.\"}")
+	strings.write_string(&b, "\",\"marker_removed\":true,\"note\":\"vault.reset purged the vault key and removed this bridge's ~/.config/heimdall/bridges/<bridge_id>/vault_configured marker: it reports the vault as disabled (no encryption) until it is unsealed again. HEIMDALL_VAULT_CONFIGURED still takes precedence. To only drop the key and keep reporting locked, use vault.lock.\"}")
 	return bridge_local_response_data(request_id, strings.to_string(b))
 }

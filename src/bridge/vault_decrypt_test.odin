@@ -114,73 +114,85 @@ test_bridge_vault_embedded_decryption_suite :: proc(t: ^testing.T) {
 	}
 }
 
+// REQ-T5-1: the machine-wide ~/.config/heimdall/vault_key is shared by every
+// bridge of the OS user, so the bridge ignores it: it is neither a key source
+// nor proof that the vault is configured, and nothing is migrated from it into
+// this bridge's keyring entry.
 @(test)
-test_bridge_read_vault_key_from_disk :: proc(t: ^testing.T) {
-	// HEIMDALL_VAULT_KEY is a PROCESS-GLOBAL. keystore_test_mutex alone does not
-	// serialise this test against the ~29 env-mutating tests that hold
-	// bridge_test_config_mutex instead - two disjoint locks exclude nobody, so those
-	// two sets raced on one shared value (iss_18db48473fc5cb6d, 2026-10-04).
-	// Taken OUTERMOST, before keystore_test_mutex: the acquisition graph stays acyclic.
+test_bridge_ignores_legacy_vault_key_file :: proc(t: ^testing.T) {
+	// HEIMDALL_VAULT_KEY / HEIMDALL_VAULT_CONFIGURED and HOME are PROCESS-GLOBALS:
+	// bridge_test_config_mutex OUTERMOST, then keystore_test_mutex
+	// (iss_18db48473fc5cb6d, 2026-10-04).
 	sync.mutex_lock(&bridge_test_config_mutex)
 	defer sync.mutex_unlock(&bridge_test_config_mutex)
 	sync.mutex_lock(&keystore_test_mutex)
 	defer sync.mutex_unlock(&keystore_test_mutex)
 
-	keystore_lock_and_purge()
-	defer keystore_lock_and_purge()
+	id_a, _ := keystore_test_bridge_ids()
+	prev_daemon_id := keystore_test_set_daemon_id(id_a)
+	defer bridge_config.daemon_id = prev_daemon_id
+	prev_flag := bridge_workspace_vault_configured
+	defer bridge_workspace_vault_configured = prev_flag
+	bridge_workspace_vault_configured = false
 
-	prev_env, had_env := os.lookup_env("HEIMDALL_VAULT_KEY", context.allocator)
+	keystore_set_mock_syscall_error(0)
+	keystore_lock_and_purge(id_a)
+	defer keystore_lock_and_purge(id_a)
+
+	prev_key, had_key := os.lookup_env("HEIMDALL_VAULT_KEY", context.allocator)
+	prev_configured, had_configured := os.lookup_env("HEIMDALL_VAULT_CONFIGURED", context.allocator)
 	defer {
-		if had_env {
-			_ = os.set_env("HEIMDALL_VAULT_KEY", prev_env)
-			delete(prev_env)
+		if had_key {
+			_ = os.set_env("HEIMDALL_VAULT_KEY", prev_key)
+			delete(prev_key)
 		} else {
 			_ = os.unset_env("HEIMDALL_VAULT_KEY")
 		}
+		if had_configured {
+			_ = os.set_env("HEIMDALL_VAULT_CONFIGURED", prev_configured)
+			delete(prev_configured)
+		} else {
+			_ = os.unset_env("HEIMDALL_VAULT_CONFIGURED")
+		}
 	}
 	os.unset_env("HEIMDALL_VAULT_KEY")
+	os.unset_env("HEIMDALL_VAULT_CONFIGURED")
 
-	// This test used to write its fixture over the OPERATOR'S REAL key: it resolved
-	// the true `~/.config/heimdall/vault_key`, O_TRUNC'd it, wrote a dummy key on
-	// top, and put the original back only from a `defer` — with an `os.remove(path)`
-	// on the error branch. `defer` does not run on a panic, abort, timeout or
-	// SIGKILL, so a run that died at the wrong moment DESTROYED the credential
-	// outright. That is strictly worse than the rename in unseal_security_test.odin,
-	// which at least left the bytes on disk under a backup name (iss_18db4d8f4b153b62).
-	//
-	// The sandbox redirects HOME and HEIMDALL_HOME, so `cfg_lib.expand_home` below
-	// resolves inside a temp dir and the real key is unreachable by construction.
-	// Nothing of the operator's is in scope any more, so there is no longer anything
-	// to back up or restore — the read-and-restore block this replaces is gone, not
-	// merely hardened.
-	sb, sandbox_ok := bridge_vault_test_sandbox_open(t, "read_from_disk")
+	// The sandbox redirects HOME and HEIMDALL_HOME, so the file written below lives
+	// in a temp dir and the operator's real one is unreachable (iss_18db4d8f4b153b62).
+	sb, sandbox_ok := bridge_vault_test_sandbox_open(t, "legacy_file_ignored")
 	defer bridge_vault_test_sandbox_close(&sb)
 	if !sandbox_ok do return
 
 	// Only heap-allocated when expansion actually happened; see the note on the
-	// guarded deletes in unseal_security_test.odin. The sandbox above sets both
-	// HOME and HEIMDALL_HOME, so expansion normally does happen -- the guard keeps
-	// this correct if the sandbox ever fails to open rather than freeing a literal.
+	// guarded deletes in unseal_security_test.odin.
 	key_rel := "~/.config/heimdall/vault_key"
 	path := cfg_lib.expand_home(key_rel)
 	defer if raw_data(path) != raw_data(key_rel) do delete(path)
+	testing.expect(t, strings.has_prefix(path, sb.dir), "the legacy key path must resolve inside the sandbox")
 
-	test_key := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	c_path := strings.clone_to_cstring(path)
 	defer delete(c_path)
-
 	fd := posix.open(c_path, posix.O_Flags{.CREAT, .WRONLY, .TRUNC}, posix.mode_t{.IRUSR, .IWUSR})
-	if fd >= 0 {
-		_ = posix.write(fd, raw_data(test_key), len(test_key))
-		_ = posix.close(fd)
-	}
+	testing.expect(t, fd >= 0, "writing the sandboxed legacy key file must succeed")
+	if fd < 0 do return
+	legacy_key: string = TEST_VAULT_KEY_HEX
+	_ = posix.write(fd, raw_data(legacy_key), len(legacy_key))
+	_ = posix.close(fd)
 
 	key, ok := bridge_read_vault_key()
-	testing.expect(t, ok, "bridge_read_vault_key should read disk key")
-	if ok {
-		testing.expect_value(t, key, test_key)
-		delete(key)
-	}
+	if ok do delete(key)
+	testing.expect(t, !ok, "a valid 0600 legacy key file must NOT be read by the bridge")
+
+	persisted, migrated := keystore_read_keyring_vault_key(id_a)
+	if migrated do delete(persisted)
+	testing.expect(t, !migrated, "the legacy key file must NOT be migrated into this bridge's keyring entry")
+
+	configured, _, key_length := bridge_vault_key_status()
+	testing.expect(t, !configured, "vault.status must not report the legacy file as a configured key")
+	testing.expect_value(t, key_length, 0)
+	testing.expect(t, !bridge_vault_is_workspace_configured(), "the legacy file must not count as configured")
+	testing.expect_value(t, bridge_vault_status(), Vault_Status.Disabled)
 }
 
 @(test)
@@ -195,14 +207,17 @@ test_bridge_vault_tri_state_lifecycle :: proc(t: ^testing.T) {
 	sync.mutex_lock(&keystore_test_mutex)
 	defer sync.mutex_unlock(&keystore_test_mutex)
 
-	keystore_lock_and_purge()
-	defer keystore_lock_and_purge()
+	id_a, _ := keystore_test_bridge_ids()
+	prev_daemon_id := keystore_test_set_daemon_id(id_a)
+	defer bridge_config.daemon_id = prev_daemon_id
 
-	// bridge_vault_status() falls back to bridge_read_vault_key(), which resolves
-	// ~/.config/heimdall/vault_key through cfg_lib.expand_home. Without this
-	// redirect it finds the OPERATOR'S REAL KEY and reports Unlocked at step 2,
-	// where this test requires Locked -- so the test both read a real credential
-	// and only passed on hosts that happened not to have one. Opened INSIDE
+	keystore_lock_and_purge(id_a)
+	defer keystore_lock_and_purge(id_a)
+
+	// bridge_vault_status() used to fall back to the operator's REAL
+	// ~/.config/heimdall/vault_key and report Unlocked at step 2. The bridge no
+	// longer reads that file (REQ-T5-1), but the sandbox stays so the per-bridge
+	// vault_configured marker path is a temp dir too. Opened INSIDE
 	// bridge_test_config_mutex, which is already held outermost above.
 	sb, sandbox_ok := bridge_vault_test_sandbox_open(t, "tri_state")
 	defer bridge_vault_test_sandbox_close(&sb)
@@ -230,7 +245,7 @@ test_bridge_vault_tri_state_lifecycle :: proc(t: ^testing.T) {
 	testing.expect_value(t, bridge_vault_status_string(), "locked")
 
 	// 3. When unsealed / key is set -> Unlocked
-	keystore_store_vault_key(TEST_VAULT_KEY_HEX)
+	keystore_store_vault_key(id_a, TEST_VAULT_KEY_HEX)
 	testing.expect_value(t, bridge_vault_status(), Vault_Status.Unlocked)
 	testing.expect_value(t, bridge_vault_status_string(), "unlocked")
 
@@ -255,8 +270,12 @@ test_bridge_fs_rejects_when_vault_locked :: proc(t: ^testing.T) {
 	sync.mutex_lock(&keystore_test_mutex)
 	defer sync.mutex_unlock(&keystore_test_mutex)
 
-	keystore_lock_and_purge()
-	defer keystore_lock_and_purge()
+	id_a, _ := keystore_test_bridge_ids()
+	prev_daemon_id := keystore_test_set_daemon_id(id_a)
+	defer bridge_config.daemon_id = prev_daemon_id
+
+	keystore_lock_and_purge(id_a)
+	defer keystore_lock_and_purge(id_a)
 
 	// Same reason as test_bridge_vault_tri_state_lifecycle: the Locked assertion
 	// below is only true if bridge_read_vault_key() cannot find a key on disk.

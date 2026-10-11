@@ -824,7 +824,7 @@ bridge_enroll_wait_for_vault_delivery :: proc(args: []string, bridge_id: string)
 			// The restarted service is a NEW process: it is unsealed only if it can
 			// read the key back from the OS store, so prove that before restarting.
 			when ODIN_OS == .Linux || ODIN_OS == .Darwin {
-				key, persisted := keystore_read_keyring_vault_key()
+				key, persisted := keystore_read_keyring_vault_key(bridge_id)
 				if len(key) > 0 do delete(key)
 				if !persisted {
 					when ODIN_OS == .Linux {
@@ -994,12 +994,12 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 			fmt.println("  nothing secret was written to config.toml (audit F2)")
 			if cred.vault_delivery_expected {
 				if !bridge_enroll_wait_for_vault_delivery(args, cred.bridge_id) {
-					keystore_lock_and_purge()
+					keystore_lock_and_purge(cred.bridge_id)
 					return false
 				}
 			}
 			if !bridge_enroll_restart_service() {
-				if cred.vault_delivery_expected do keystore_lock_and_purge()
+				if cred.vault_delivery_expected do keystore_lock_and_purge(cred.bridge_id)
 				return false
 			}
 			fmt.println("  registered bridge service restarted with the new credential")

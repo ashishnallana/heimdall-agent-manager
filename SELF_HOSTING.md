@@ -536,8 +536,11 @@ heimdall status
 
 The installer starts the registered service before enrollment. Enrollment opens
 only a temporary Hub connection, so it does not collide with the service's local
-ports. On Linux the delivered vault key is stored in the user keyring before the
-service restart. On macOS, unlock the restarted bridge from **Settings → Bridges**.
+ports. The delivered vault key is persisted before the service restart, per
+bridge: on Linux in the user keyring as `heimdall:vault_key:<bridge_id>`, on macOS
+in the login Keychain (service `works.earendil.heimdall-bridge.vault`, account
+`<bridge_id>`). Several bridges enrolled on one machine therefore never share,
+overwrite, or purge each other's key.
 
 For a non-desktop Linux host, enable lingering so the user service survives logout:
 
@@ -678,14 +681,11 @@ bridge still carrying one is told to re-enroll rather than given a generic rejec
 
 **Step 3 — Configure vault encryption**
 
-After enrollment, use the primary `heimdall` command to store the 64-character
-hexadecimal vault key. It writes `~/.config/heimdall/vault_key` with strict `0600`
-permissions; use `status` to confirm configuration without displaying the key.
-
-```bash
-heimdall vault set-key <64-hex>
-heimdall vault status
-```
+The bridge receives its vault key from the browser: enrollment delivers it, and a
+bridge that starts locked is unsealed from **Settings → Bridges → Unseal**. The
+bridge keeps the key in its own per-bridge keyring/Keychain entry (see above). It
+does **not** read `~/.config/heimdall/vault_key`: that file is shared by every
+bridge of the OS user, so a bridge that only has it starts locked until unsealed.
 
 **Step 4 — Start (or restart) the bridge normally**
 

@@ -850,8 +850,14 @@ bridge_now_unix_ms :: proc() -> i64 {
 	return time.to_unix_nanoseconds(time.now()) / 1_000_000
 }
 
+// Resolves the running bridge's vault key. The keyring/Keychain lookup is scoped
+// to bridge_config.daemon_id, so another bridge of the same OS user is never read
+// (REQ-T5-2). The machine-wide ~/.config/heimdall/vault_key is deliberately NOT a
+// source any more (REQ-T5-1): it would be shared by every bridge on the host. It
+// remains a ham-ctl-side source only (src/ctl/vault.odin).
 bridge_read_vault_key :: proc() -> (string, bool) {
-	// a) Check HEIMDALL_VAULT_KEY env var
+	// a) Check HEIMDALL_VAULT_KEY env var. Global to the process environment, so a
+	// single-bridge development convenience, not a per-bridge store.
 	if env_val, found := os.lookup_env("HEIMDALL_VAULT_KEY", context.temp_allocator); found {
 		trimmed := strings.trim_space(env_val)
 		if trimmed != "" {
@@ -863,8 +869,8 @@ bridge_read_vault_key :: proc() -> (string, bool) {
 		}
 	}
 
-	// b) Check Linux kernel keyring @u (KEY_SPEC_USER_KEYRING)
-	if key_k, ok := keystore_read_keyring_vault_key(); ok {
+	// b) This bridge's persisted key: Linux kernel keyring @u, macOS login Keychain
+	if key_k, ok := keystore_read_keyring_vault_key(bridge_config.daemon_id); ok {
 		return key_k, true
 	}
 
@@ -872,61 +878,14 @@ bridge_read_vault_key :: proc() -> (string, bool) {
 	if key_m, ok := keystore_read_in_memory_vault_key(); ok {
 		return key_m, true
 	}
-
-	// d) Deprecate reading from ~/.config/heimdall/vault_key
-	path := cfg_lib.expand_home("~/.config/heimdall/vault_key")
-	defer delete(path)
-	c_path := strings.clone_to_cstring(path)
-	defer delete(c_path)
-
-	st: posix.stat_t
-	if posix.stat(c_path, &st) != .OK do return "", false
-
-	all_perms := posix.mode_t{.IRUSR, .IWUSR, .IXUSR, .IRGRP, .IWGRP, .IXGRP, .IROTH, .IWOTH, .IXOTH}
-	valid_perms := (st.st_mode & all_perms) == posix.mode_t{.IRUSR, .IWUSR}
-	if !valid_perms do return "", false
-
-	data, err := os.read_entire_file(path, context.allocator)
-	if err != nil do return "", false
-	defer delete(data)
-
-	trimmed := strings.trim_space(string(data))
-	if len(trimmed) != 64 || !bridge_is_valid_hex_key(trimmed) do return "", false
-
-	fmt.eprintln("WARN: Reading vault key from ~/.config/heimdall/vault_key is deprecated for security. Use Linux kernel keyring (@u) or HEIMDALL_VAULT_KEY.")
-	// Automatically migrate disk key into kernel keyring / process-locked memory cache
-	keystore_store_vault_key(trimmed)
-
-	return strings.clone(trimmed), true
+	return "", false
 }
 
+// permissions_valid is kept for the vault.status wire shape; with no on-disk key
+// source left it simply mirrors `configured`.
 bridge_vault_key_status :: proc() -> (configured: bool, permissions_valid: bool, key_length: int) {
-	if key, ok := bridge_read_vault_key(); ok {
-		defer delete(key)
-		return true, true, len(key)
-	}
-
-	path := cfg_lib.expand_home("~/.config/heimdall/vault_key")
-	defer delete(path)
-	c_path := strings.clone_to_cstring(path)
-	defer delete(c_path)
-
-	st: posix.stat_t
-	if posix.stat(c_path, &st) != .OK {
-		return false, false, 0
-	}
-
-	all_perms := posix.mode_t{.IRUSR, .IWUSR, .IXUSR, .IRGRP, .IWGRP, .IXGRP, .IROTH, .IWOTH, .IXOTH}
-	permissions_valid = (st.st_mode & all_perms) == posix.mode_t{.IRUSR, .IWUSR}
-
-	data, err := os.read_entire_file(path, context.allocator)
-	if err != nil {
-		return false, permissions_valid, 0
-	}
-	defer delete(data)
-
-	trimmed := strings.trim_space(string(data))
-	key_length = len(trimmed)
-	configured = key_length == 64 && bridge_is_valid_hex_key(trimmed)
-	return configured, permissions_valid, key_length
+	key, ok := bridge_read_vault_key()
+	if !ok do return false, false, 0
+	defer delete(key)
+	return true, true, len(key)
 }

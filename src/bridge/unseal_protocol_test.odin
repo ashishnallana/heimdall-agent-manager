@@ -90,11 +90,18 @@ test_unseal_protocol_success_and_unlock :: proc(t: ^testing.T) {
 	os.unset_env("HEIMDALL_VAULT_KEY")
 	defer os.unset_env("HEIMDALL_VAULT_KEY")
 
+	// bridge_read_vault_key resolves the running bridge's own key.
+	own_id, _ := keystore_test_bridge_ids()
+	prev_daemon_id := keystore_test_set_daemon_id(own_id)
+	defer bridge_config.daemon_id = prev_daemon_id
+
 	bridge_vault_lock()
 	unseal_nonce_cache_clear(&g_unseal_nonce_cache)
 	bridge_unseal_init()
 
-	bridge_id := "brg_local_test"
+	// A successful unseal persists the key under bridge_id: test-only (REQ-T5-4).
+	bridge_id, _ := keystore_test_bridge_ids()
+	defer keystore_lock_and_purge(bridge_id)
 	bridge_pub_hex := bridge_get_public_key_hex()
 	test_key := "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
 	now_ms := time.to_unix_nanoseconds(time.now()) / 1_000_000
@@ -127,7 +134,9 @@ test_unseal_protocol_anti_replay_rejection :: proc(t: ^testing.T) {
 	unseal_nonce_cache_clear(&g_unseal_nonce_cache)
 	bridge_unseal_init()
 
-	bridge_id := "brg_local_test"
+	// A successful unseal persists the key under bridge_id: test-only (REQ-T5-4).
+	bridge_id, _ := keystore_test_bridge_ids()
+	defer keystore_lock_and_purge(bridge_id)
 	bridge_pub_hex := bridge_get_public_key_hex()
 	test_key := "11223344556677889900aabbccddeeff11223344556677889900aabbccddeeff"
 	now_ms := time.to_unix_nanoseconds(time.now()) / 1_000_000
@@ -155,7 +164,9 @@ test_unseal_protocol_clock_skew_expiration :: proc(t: ^testing.T) {
 	unseal_nonce_cache_clear(&g_unseal_nonce_cache)
 	bridge_unseal_init()
 
-	bridge_id := "brg_local_test"
+	// A successful unseal persists the key under bridge_id: test-only (REQ-T5-4).
+	bridge_id, _ := keystore_test_bridge_ids()
+	defer keystore_lock_and_purge(bridge_id)
 	bridge_pub_hex := bridge_get_public_key_hex()
 	test_key := "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
 	now_ms := time.to_unix_nanoseconds(time.now()) / 1_000_000
@@ -194,7 +205,9 @@ test_unseal_protocol_tamper_rejection :: proc(t: ^testing.T) {
 	unseal_nonce_cache_clear(&g_unseal_nonce_cache)
 	bridge_unseal_init()
 
-	bridge_id := "brg_local_test"
+	// A successful unseal persists the key under bridge_id: test-only (REQ-T5-4).
+	bridge_id, _ := keystore_test_bridge_ids()
+	defer keystore_lock_and_purge(bridge_id)
 	bridge_pub_hex := bridge_get_public_key_hex()
 	test_key := "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
 	now_ms := time.to_unix_nanoseconds(time.now()) / 1_000_000

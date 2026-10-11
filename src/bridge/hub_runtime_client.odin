@@ -57,7 +57,9 @@ bridge_vault_configured_marker_path :: proc(bridge_id: string, allocator := cont
 	return strings.concatenate({dir, "vault_configured"}, allocator), true
 }
 
-@(private = "file")
+// bridge_vault_is_safe_bridge_id: a non-empty single path segment of
+// [A-Za-z0-9_.-], never "." or "..". Shared by the per-bridge state directory
+// and the per-bridge keyring/Keychain names (keystore_bridge_id_ok).
 bridge_vault_is_safe_bridge_id :: proc(bridge_id: string) -> bool {
 	if bridge_id == "" || bridge_id == "." || bridge_id == ".." do return false
 	for c in transmute([]u8)bridge_id {
@@ -126,19 +128,12 @@ bridge_vault_is_workspace_configured :: proc() -> bool {
 
 	// The Darwin Keychain item outlives a restart the same way the marker does
 	// (keystore_persisted_vault_item_present is always false on Linux, where a
-	// present @u key is readable and already reports Unlocked).
+	// present @u key is readable and already reports Unlocked). Both are this
+	// bridge's own: the legacy, machine-wide ~/.config/heimdall/vault_key is no
+	// longer a signal (REQ-T5-1).
 	bridge_id := bridge_config.daemon_id
-	if bridge_vault_marker_present(bridge_id) || keystore_persisted_vault_item_present() {
+	if bridge_vault_marker_present(bridge_id) || keystore_persisted_vault_item_present(bridge_id) {
 		bridge_vault_set_configured(bridge_id, true)
-		return true
-	}
-
-	path := cfg_lib.expand_home("~/.config/heimdall/vault_key")
-	defer delete(path)
-	c_path := strings.clone_to_cstring(path)
-	defer delete(c_path)
-	st: posix.stat_t
-	if posix.stat(c_path, &st) == .OK {
 		return true
 	}
 	return false

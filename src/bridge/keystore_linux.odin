@@ -1,5 +1,13 @@
 package main
 
+// Linux persistence for the unsealed vault key: one `user` key per bridge in the
+// kernel user keyring (@u, KEY_SPEC_USER_KEYRING), described as
+// "heimdall:vault_key:<bridge_id>" so bridges of the same OS user never share or
+// purge each other's key (REQ-T5-1). Lookups use only KEYCTL_SEARCH rooted at @u
+// for that exact description, never request_key(), which walks the
+// thread/process/session keyrings a bridge may have inherited from another
+// (REQ-T5-6). The mlock'd in-memory buffer is per process, i.e. per bridge.
+
 import "core:c"
 import "core:encoding/hex"
 import "core:fmt"
@@ -20,7 +28,7 @@ KEYCTL_READ           :: 11
 KEYCTL_INVALIDATE     :: 21
 
 KEY_TYPE_USER         :: "user"
-KEY_DESC_VAULT        :: "heimdall:vault_key"
+KEY_DESC_VAULT_PREFIX :: "heimdall:vault_key:"
 
 KEYSTORE_ERR_EPERM    :: 1
 KEYSTORE_ERR_EACCES   :: 13
@@ -51,24 +59,6 @@ sys_add_key :: proc "contextless" (type: cstring, description: cstring, payload:
 		transmute(uintptr)payload,
 		uintptr(plen),
 		transmute(uintptr)int(ringid),
-	)
-	if ret < 0 {
-		return -1, -ret
-	}
-	return ret, 0
-}
-
-@(private="file")
-sys_request_key :: proc "contextless" (type: cstring, description: cstring, callout_info: cstring, dest_keyring: i32) -> (int, int) {
-	if _keystore_mock_syscall_errno != 0 {
-		return -1, _keystore_mock_syscall_errno
-	}
-	ret := linux.syscall(
-		linux.SYS_request_key,
-		transmute(uintptr)type,
-		transmute(uintptr)description,
-		transmute(uintptr)callout_info,
-		transmute(uintptr)int(dest_keyring),
 	)
 	if ret < 0 {
 		return -1, -ret
@@ -147,16 +137,43 @@ keystore_wipe_in_memory_vault_key :: proc() {
 	}
 }
 
-// Stores the vault key in the Linux kernel user session keyring (@u / KEY_SPEC_USER_KEYRING).
+// The @u description of bridge_id's vault key (temp-allocated); ok is false for
+// an id that cannot name one (keystore_bridge_id_ok).
+@(private="file")
+keystore_key_description :: proc(bridge_id: string) -> (desc: cstring, ok: bool) {
+	if !keystore_bridge_id_ok(bridge_id) do return nil, false
+	return strings.clone_to_cstring(strings.concatenate({KEY_DESC_VAULT_PREFIX, bridge_id}, context.temp_allocator), context.temp_allocator), true
+}
+
+// Finds bridge_id's vault key in @u (and keyrings linked under it) by exact
+// description. Deliberately not request_key(): see the file header.
+@(private="file")
+keystore_search_vault_key :: proc(bridge_id: string) -> (key_id: int, ok: bool) {
+	key_desc := keystore_key_description(bridge_id) or_return
+	key_type := cstring(KEY_TYPE_USER)
+	found, err := sys_keyctl(
+		KEYCTL_SEARCH,
+		transmute(uintptr)int(KEY_SPEC_USER_KEYRING),
+		transmute(uintptr)key_type,
+		transmute(uintptr)key_desc,
+		0,
+	)
+	if err != 0 || found <= 0 do return 0, false
+	return found, true
+}
+
+// Stores bridge_id's vault key in the Linux kernel user keyring (@u / KEY_SPEC_USER_KEYRING).
 // If syscall returns EPERM, ENOSYS, or EACCES (container/sandbox restriction), logs a warning
 // and falls back gracefully to process-isolated JIT memory (mlock'd buffer) without failing startup (REQ-VAULT-HARDEN-9).
-keystore_store_vault_key :: proc(key_hex: string) -> (ok: bool, err_code: int) {
+// An id that cannot name a key stores nothing anywhere (KEYSTORE_ERR_BAD_BRIDGE_ID).
+keystore_store_vault_key :: proc(bridge_id: string, key_hex: string) -> (ok: bool, err_code: int) {
 	if !bridge_is_valid_hex_key(key_hex) {
 		return false, -1
 	}
+	key_desc, desc_ok := keystore_key_description(bridge_id)
+	if !desc_ok do return false, KEYSTORE_ERR_BAD_BRIDGE_ID
 
 	key_type := cstring(KEY_TYPE_USER)
-	key_desc := cstring(KEY_DESC_VAULT)
 	payload := transmute([]u8)key_hex
 
 	_, err := sys_add_key(key_type, key_desc, raw_data(payload), c.size_t(len(payload)), KEY_SPEC_USER_KEYRING)
@@ -179,27 +196,9 @@ keystore_store_vault_key :: proc(key_hex: string) -> (ok: bool, err_code: int) {
 	return true, 0
 }
 
-// Retrieves the vault key from the Linux kernel user keyring (@u) via request_key / keyctl_read.
-keystore_read_keyring_vault_key :: proc(allocator := context.allocator) -> (key_hex: string, ok: bool) {
-	key_type := cstring(KEY_TYPE_USER)
-	key_desc := cstring(KEY_DESC_VAULT)
-
-	// Try request_key first
-	key_id, err := sys_request_key(key_type, key_desc, nil, KEY_SPEC_USER_KEYRING)
-	if err != 0 || key_id <= 0 {
-		// Try search in KEY_SPEC_USER_KEYRING directly
-		search_id, s_err := sys_keyctl(
-			KEYCTL_SEARCH,
-			transmute(uintptr)int(KEY_SPEC_USER_KEYRING),
-			transmute(uintptr)key_type,
-			transmute(uintptr)key_desc,
-			0,
-		)
-		if s_err != 0 || search_id <= 0 {
-			return "", false
-		}
-		key_id = search_id
-	}
+// Retrieves bridge_id's vault key from the Linux kernel user keyring (@u) via KEYCTL_SEARCH / keyctl_read.
+keystore_read_keyring_vault_key :: proc(bridge_id: string, allocator := context.allocator) -> (key_hex: string, ok: bool) {
+	key_id := keystore_search_vault_key(bridge_id) or_return
 
 	buf: [128]u8
 	read_len, r_err := sys_keyctl(
@@ -229,25 +228,10 @@ keystore_read_keyring_vault_key :: proc(allocator := context.allocator) -> (key_
 	return "", false
 }
 
-// Unlinks the vault key from KEY_SPEC_USER_KEYRING via keyctl_unlink.
-keystore_unlink_vault_key :: proc() -> bool {
-	key_type := cstring(KEY_TYPE_USER)
-	key_desc := cstring(KEY_DESC_VAULT)
-
-	key_id, err := sys_request_key(key_type, key_desc, nil, KEY_SPEC_USER_KEYRING)
-	if err != 0 || key_id <= 0 {
-		search_id, s_err := sys_keyctl(
-			KEYCTL_SEARCH,
-			transmute(uintptr)int(KEY_SPEC_USER_KEYRING),
-			transmute(uintptr)key_type,
-			transmute(uintptr)key_desc,
-			0,
-		)
-		if s_err != 0 || search_id <= 0 {
-			return false
-		}
-		key_id = search_id
-	}
+// Revokes and unlinks bridge_id's vault key from KEY_SPEC_USER_KEYRING via keyctl_unlink.
+// Another bridge's key is never found, so never touched.
+keystore_unlink_vault_key :: proc(bridge_id: string) -> bool {
+	key_id := keystore_search_vault_key(bridge_id) or_return
 
 	// Revoke to immediately invalidate
 	_, _ = sys_keyctl(KEYCTL_REVOKE, uintptr(key_id))
@@ -259,12 +243,12 @@ keystore_unlink_vault_key :: proc() -> bool {
 
 // The Darwin Keychain item can exist yet be unreadable; a present @u key is always
 // readable and already reports Unlocked, so there is nothing extra to detect here.
-keystore_persisted_vault_item_present :: proc() -> bool {
+keystore_persisted_vault_item_present :: proc(bridge_id: string) -> bool {
 	return false
 }
 
-// Purges kernel keyring and wipes all in-memory unsealed buffers on bridge lock / shutdown.
-keystore_lock_and_purge :: proc() {
-	_ = keystore_unlink_vault_key()
+// Purges bridge_id's kernel keyring entry and wipes all in-memory unsealed buffers on bridge lock / shutdown.
+keystore_lock_and_purge :: proc(bridge_id: string) {
+	_ = keystore_unlink_vault_key(bridge_id)
 	keystore_wipe_in_memory_vault_key()
 }
