@@ -2662,6 +2662,42 @@ bridge_instance_status_json :: proc(instance_id: string) -> string {
 	return strings.to_string(b)
 }
 
+// g_bridge_hub_enroll_only_runtime marks the `ham-bridge enroll` process, which
+// brings up the Hub WebSocket only to receive the vault key and then restarts the
+// registered service and exits (REQ-T2-3).
+g_bridge_hub_enroll_only_runtime: bool
+
+bridge_hub_set_enroll_only_runtime :: proc(enabled: bool) {
+	sync.atomic_store(&g_bridge_hub_enroll_only_runtime, enabled)
+}
+
+bridge_hub_is_enroll_only_runtime :: proc() -> bool {
+	return sync.atomic_load(&g_bridge_hub_enroll_only_runtime)
+}
+
+// bridge_hub_vault_status_for_report is the vault_status this process tells the hub.
+//
+// The enroll-only runtime always says "locked", even after it has received and
+// stored the key. It holds that key only until it restarts the service and exits,
+// so an "unlocked" from it would describe a process that is about to vanish, and
+// the approval page would confirm the bridge unsealed even when the restarted
+// service could not read the persisted key. Saying "locked" (rather than sending
+// nothing, which the hub ignores) also overwrites an "unlocked" left over from a
+// previous run of this bridge. The hub can then only see "unlocked" once the
+// restarted service's on-connect heartbeat (bridge_hub_runtime_loop) reports
+// what it actually read back from the keyring / Keychain.
+bridge_hub_vault_status_for_report :: proc() -> string {
+	return bridge_vault_status_string(bridge_vault_status_reported(bridge_hub_is_enroll_only_runtime()))
+}
+
+// bridge_vault_status_reported is the decision above, with the process-wide flag
+// as a parameter so tests can exercise it without flipping state that concurrent
+// frame tests read.
+bridge_vault_status_reported :: proc(enroll_only: bool) -> Vault_Status {
+	if enroll_only do return .Locked
+	return bridge_vault_status()
+}
+
 // bridge_vault_status_report_json is the IMMEDIATE vault report (REQ-BVS-1), sent
 // right after a successful unseal or lock so the UI does not wait up to a heartbeat
 // interval to see the new state.
@@ -2677,7 +2713,7 @@ bridge_instance_status_json :: proc(instance_id: string) -> string {
 bridge_vault_status_report_json :: proc() -> string {
 	b := strings.builder_make()
 	strings.write_string(&b, "{\"type\":\"bridge_vault_status\",\"protocol_version\":1,\"vault_status\":\"")
-	bridge_runtime_write_json_string(&b, bridge_vault_status_string())
+	bridge_runtime_write_json_string(&b, bridge_hub_vault_status_for_report())
 	strings.write_string(&b, "\"}")
 	return strings.to_string(b)
 }
@@ -2689,6 +2725,9 @@ bridge_vault_status_report_json :: proc() -> string {
 // no socket to write to.
 bridge_hub_send_vault_status :: proc(conn: ^ws.Connection) {
 	if conn == nil do return
+	// The enroll-only runtime would report the key it is about to exit with; the
+	// restarted service's on-connect heartbeat is the report that counts.
+	if bridge_hub_is_enroll_only_runtime() do return
 	frame := bridge_vault_status_report_json()
 	defer delete(frame)
 	_ = bridge_hub_send(conn, frame)
@@ -2704,7 +2743,7 @@ bridge_hub_heartbeat_json :: proc() -> string {
 	// REQ-BVS-1: read the vault tri-state BEFORE taking bridge_runtime_mutex.
 	// bridge_vault_status() touches the kernel keyring and the filesystem, and no
 	// blocking I/O belongs inside a lock the per-instance reporters also contend on.
-	vault_status := bridge_vault_status_string()
+	vault_status := bridge_hub_vault_status_for_report()
 	now := bridge_runtime_now_ms()
 	sync.mutex_lock(&bridge_runtime_mutex)
 	defer sync.mutex_unlock(&bridge_runtime_mutex)

@@ -60,7 +60,7 @@ import { useDispatch, useSelector } from 'react-redux';
 import { Button, Input, Icon, Select } from '@ui';
 
 import { cookieJsonFetch, cookieMutation } from '../../api/cookieFetch';
-import { unsealBridgeE2EE } from '../../api/endpoints/bridges';
+import { fetchBridgePublicKey, unsealBridgeE2EE } from '../../api/endpoints/bridges';
 import { useGetUserVaultQuery } from '../../api/endpoints/userVault';
 import {
   getActiveVaultKey,
@@ -78,8 +78,11 @@ import {
 import { canUnsealWithKey } from '../../utils/vaultBridgeUnseal';
 import {
   approvedBridgeIsOnline,
+  enrollmentContinueAvailable,
+  enrollmentRestartConfirmation,
   navigateEnrollmentProviderSetup,
   nextAvailableBridgeLabel,
+  RESTART_CONFIRMATION_TIMEOUT_SECONDS,
 } from './bridgeEnrollmentCompletion';
 import {
   bridgeApprovalBlocked,
@@ -136,12 +139,28 @@ interface VerifyPayload {
 type DeliveryState =
   | { phase: 'idle' }
   | { phase: 'not-needed' }
-  | { phase: 'need-password' }
+  | { phase: 'need-password'; target: UnsealTarget }
   | { phase: 'waiting-for-bridge'; secondsLeft: number }
-  | { phase: 'delivering' }
+  | { phase: 'delivering'; target: UnsealTarget }
   | { phase: 'delivered' }
+  | { phase: 'confirming-restart'; secondsLeft: number }
+  | { phase: 'confirmed' }
+  | {
+      phase: 'restart-unconfirmed';
+      reason: 'sealed' | 'timed-out';
+      vaultStatus: string;
+      error?: string;
+    }
   | { phase: 'failed'; message: string }
   | { phase: 'timed-out' };
+
+/**
+ * Which process a vault key is wrapped for. `enrollment` is the CLI process whose
+ * key the operator confirmed against the terminal; `restarted` is the registered
+ * service it hands over to, whose ephemeral key is whatever it advertises now —
+ * the same steady-state path Settings → Bridges uses.
+ */
+type UnsealTarget = 'enrollment' | 'restarted';
 
 /**
  * How long to wait for the just-approved bridge to connect before giving up
@@ -458,10 +477,67 @@ export default function BridgeEnrollmentApprovalPage() {
     }
   }, []);
 
-  /** Encrypts the vault key to the operator-confirmed bridge key. */
+  /**
+   * After the enrolling process has the key it persists it, restarts the
+   * registered service and exits. Poll until the RESTARTED service reports
+   * itself unsealed, so the page never claims more than it has seen (REQ-T2-4).
+   */
+  const confirmRestart = useCallback(
+    async (targetBridgeId: string) => {
+      const deadline = Date.now() + RESTART_CONFIRMATION_TIMEOUT_SECONDS * 1000;
+      let sealedPolls = 0;
+      for (;;) {
+        const secondsLeft = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+        setDelivery({ phase: 'confirming-restart', secondsLeft });
+
+        let rows: unknown = null;
+        let advertised = '';
+        try {
+          const unwrapped = unwrap(await cookieJsonFetch('/bridges'));
+          rows = Array.isArray(unwrapped) ? unwrapped : unwrapped?.bridges;
+          advertised = await fetchBridgePublicKey(targetBridgeId);
+        } catch {
+          // A transient poll failure is not a verdict; the deadline still applies.
+        }
+
+        const decision = enrollmentRestartConfirmation({
+          rows,
+          bridgeId: targetBridgeId,
+          enrollmentPublicKey: hubKey,
+          advertisedPublicKey: advertised,
+          sealedPolls,
+          expired: Date.now() >= deadline,
+        });
+        sealedPolls = decision.sealedPolls;
+        if (decision.outcome === 'confirmed') {
+          setDelivery({ phase: 'confirmed' });
+          return;
+        }
+        if (decision.outcome === 'sealed' || decision.outcome === 'timed-out') {
+          setDelivery({
+            phase: 'restart-unconfirmed',
+            reason: decision.outcome,
+            vaultStatus: decision.vaultStatus,
+          });
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, BRIDGE_POLL_INTERVAL_MS));
+      }
+    },
+    [hubKey],
+  );
+
+  /**
+   * Encrypts the vault key for one bridge process. `enrollment` uses the
+   * operator-confirmed key; `restarted` uses the key the service advertises now.
+   */
   const deliverVaultKey = useCallback(
-    async (targetBridgeId: string, vaultKeyMaterial: string | CryptoKey) => {
-      if (!bridgeKeyReady || !fingerprintConfirmed) {
+    async (
+      targetBridgeId: string,
+      vaultKeyMaterial: string | CryptoKey,
+      target: UnsealTarget = 'enrollment',
+    ) => {
+      if (target === 'enrollment' && (!bridgeKeyReady || !fingerprintConfirmed)) {
         setDelivery({
           phase: 'failed',
           message:
@@ -470,19 +546,50 @@ export default function BridgeEnrollmentApprovalPage() {
         return;
       }
 
-      setDelivery({ phase: 'delivering' });
+      setDelivery({ phase: 'delivering', target });
       try {
-        const result = await unsealBridgeE2EE(targetBridgeId, hubKey, vaultKeyMaterial);
+        let publicKey = hubKey;
+        if (target === 'restarted') {
+          publicKey = await fetchBridgePublicKey(targetBridgeId);
+          if (!publicKey) {
+            throw new Error('The bridge advertised no public key — it may have gone offline.');
+          }
+        }
+        const result = await unsealBridgeE2EE(targetBridgeId, publicKey, vaultKeyMaterial);
         if (result && (result as any).ok === false) {
           throw new Error(String((result as any).error || 'the bridge refused the unseal'));
         }
-        setDelivery({ phase: 'delivered' });
       } catch (err: any) {
-        setDelivery({ phase: 'failed', message: String(err?.message || err) });
+        const message = String(err?.message || err);
+        if (target === 'restarted') {
+          // Enrollment already finished: stay on the warning, with the reason.
+          setDelivery({
+            phase: 'restart-unconfirmed',
+            reason: 'sealed',
+            vaultStatus: '',
+            error: message,
+          });
+        } else {
+          setDelivery({ phase: 'failed', message });
+        }
+        return;
       }
+      if (target === 'enrollment') setDelivery({ phase: 'delivered' });
+      await confirmRestart(targetBridgeId);
     },
-    [bridgeKeyReady, fingerprintConfirmed, hubKey],
+    [bridgeKeyReady, fingerprintConfirmed, hubKey, confirmRestart],
   );
+
+  /** "Unseal now": wrap the key for the restarted service, or ask for the password. */
+  const unsealRestartedBridge = useCallback(async () => {
+    if (!bridgeId) return;
+    const active = getActiveBridgeVaultKeyMaterial() || getActiveVaultKey();
+    if (isUnlocked && active && canUnsealWithKey(active)) {
+      await deliverVaultKey(bridgeId, active, 'restarted');
+      return;
+    }
+    setDelivery({ phase: 'need-password', target: 'restarted' });
+  }, [bridgeId, isUnlocked, deliverVaultKey]);
 
   /** Obtains the vault key without ever degrading to a weaker payload. */
   const startDelivery = useCallback(
@@ -500,7 +607,7 @@ export default function BridgeEnrollmentApprovalPage() {
       }
       // A hardened or IndexedDB-restored handle cannot be wrapped, which is the
       // expected case rather than a malfunction. Ask the operator.
-      setDelivery({ phase: 'need-password' });
+      setDelivery({ phase: 'need-password', target: 'enrollment' });
     },
     [isUnlocked, deliverVaultKey, vaultEnvelope, vaultQuery.isLoading, waitForAuthenticatedBridge],
   );
@@ -509,7 +616,9 @@ export default function BridgeEnrollmentApprovalPage() {
     async (e: FormEvent) => {
       e.preventDefault();
       if (!masterPassword || !vaultEnvelope || !bridgeId) return;
-      setDelivery({ phase: 'delivering' });
+      const target: UnsealTarget =
+        delivery.phase === 'need-password' ? delivery.target : 'enrollment';
+      setDelivery({ phase: 'delivering', target });
       try {
         const derived = await deriveKeyFromPassword(
           masterPassword,
@@ -534,15 +643,17 @@ export default function BridgeEnrollmentApprovalPage() {
         dispatch(setVaultUnlocked({ key: handle, rememberSession }));
         setActiveBridgeVaultKeyMaterial(unsealHex);
         setMasterPassword('');
-        await deliverVaultKey(bridgeId, unsealHex);
+        await deliverVaultKey(bridgeId, unsealHex, target);
       } catch (err: any) {
-        setDelivery({
-          phase: 'failed',
-          message: String(err?.message || 'That password did not unlock the vault.'),
-        });
+        const message = String(err?.message || 'That password did not unlock the vault.');
+        if (target === 'restarted') {
+          setDelivery({ phase: 'restart-unconfirmed', reason: 'sealed', vaultStatus: '', error: message });
+        } else {
+          setDelivery({ phase: 'failed', message });
+        }
       }
     },
-    [masterPassword, vaultEnvelope, bridgeId, rememberSession, dispatch, deliverVaultKey],
+    [masterPassword, vaultEnvelope, bridgeId, rememberSession, dispatch, deliverVaultKey, delivery],
   );
 
   // ── The decision ────────────────────────────────────────────────────────
@@ -832,12 +943,49 @@ export default function BridgeEnrollmentApprovalPage() {
           )}
           {delivery.phase === 'delivering' && (
             <Banner tone="warn" title="Delivering the vault key…">
-              Encrypting to the key from your link and sending it through the Hub as ciphertext.
+              {delivery.target === 'restarted'
+                ? 'Encrypting to the key the restarted bridge advertises and sending it through the Hub as ciphertext.'
+                : 'Encrypting to the key from your link and sending it through the Hub as ciphertext.'}
             </Banner>
           )}
-          {delivery.phase === 'delivered' && (
-            <Banner tone="ok" title="Vault key delivered.">
-              The bridge is enrolled and unsealed.
+          {(delivery.phase === 'delivered' || delivery.phase === 'confirming-restart') && (
+            <Banner tone="warn" title="Vault key delivered, waiting for the bridge to restart and confirm…">
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                <Icon name="refresh" size={16} className="animate-spin" />
+                The enrolling process received the key and is restarting the bridge service, which must
+                unseal itself from the saved key.
+                {delivery.phase === 'confirming-restart' && <> Giving up in {delivery.secondsLeft}s.</>}
+              </span>
+            </Banner>
+          )}
+          {delivery.phase === 'confirmed' && (
+            <Banner tone="ok" title="Bridge restarted and confirmed unsealed">
+              The bridge is enrolled, and its restarted service reports the vault unlocked.
+            </Banner>
+          )}
+          {delivery.phase === 'restart-unconfirmed' && (
+            <Banner
+              tone="warn"
+              title={
+                delivery.reason === 'sealed'
+                  ? 'The bridge restarted but is still sealed.'
+                  : 'Could not confirm the bridge unsealed after restarting.'
+              }
+            >
+              <p style={{ margin: '0 0 8px' }}>
+                {delivery.reason === 'sealed'
+                  ? `It reports its vault ${delivery.vaultStatus || 'locked'}, so it could not read the saved key.`
+                  : `The restarted service did not report an unlocked vault within ${RESTART_CONFIRMATION_TIMEOUT_SECONDS}s.`}{' '}
+                The enrollment itself succeeded.
+              </p>
+              {delivery.error && <p style={{ margin: '0 0 8px' }}>{delivery.error}</p>}
+              <Button
+                data-debug-id="enrollment-unseal-now-btn"
+                variant="primary"
+                onClick={() => void unsealRestartedBridge()}
+              >
+                Unseal now
+              </Button>
             </Banner>
           )}
           {delivery.phase === 'not-needed' && (
@@ -845,8 +993,13 @@ export default function BridgeEnrollmentApprovalPage() {
               The bridge authenticated successfully.
             </Banner>
           )}
-          {decision === 'approved' && bridgeConnected &&
-          (delivery.phase === 'delivered' || delivery.phase === 'not-needed') && bridgeId ? (
+          {decision === 'approved' && bridgeConnected && bridgeId &&
+          enrollmentContinueAvailable(
+            delivery.phase,
+            delivery.phase === 'need-password' || delivery.phase === 'delivering'
+              ? delivery.target
+              : undefined,
+          ) ? (
             <Button
               variant="primary"
               data-debug-id="enrollment-continue-provider-selection-btn"
