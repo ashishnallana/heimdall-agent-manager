@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useSelector } from 'react-redux';
 import { Modal, Select } from '@ui';
 import { useCreateShellMutation } from '../../api/endpoints/shells';
+import { describeApiError, isBridgeVaultLockedError } from '../../utils/bridgeVaultStatus';
 import type { ShellSessionKind } from '../../api/endpoints/shells';
 import { useListBridgesQuery } from '../../api/endpoints/bridgeSupport';
 import { bridgeIdOf, bridgeIsOnline, bridgeLabel } from '../../utils/bridgeLaunchOptions';
@@ -226,7 +227,9 @@ export function NewShellDialog({ bridgeId, chainId, onClose, onCreated }: NewShe
 
           {createState.isError && (
             <div className="rounded border border-danger/40 bg-danger/10 px-2 py-1.5 text-xs text-danger">
-              {String((createState.error as any)?.error || 'Failed to create shell session')}
+              {isBridgeVaultLockedError(createState.error)
+                ? 'This bridge\'s vault is locked. Unseal it from bridge settings to run commands.'
+                : (describeApiError(createState.error) || 'Failed to create shell session')}
             </div>
           )}
         </form>

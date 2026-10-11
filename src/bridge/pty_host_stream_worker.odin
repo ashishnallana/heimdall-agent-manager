@@ -635,10 +635,9 @@ bridge_pty_stream_emit_frame :: proc(worker: ^Bridge_PTY_Stream_Worker, session_
 	defer runtime.default_temp_allocator_temp_end(temp)
 	heap := runtime.heap_allocator()
 
-	key_hex, vault_active := bridge_read_vault_key()
+	status, key_hex := bridge_vault_status_and_key()
+	vault_active := status == .Unlocked
 	defer if vault_active do delete(key_hex)
-	status := Vault_Status.Disabled
-	if vault_active { status = .Unlocked } else if bridge_vault_is_workspace_configured() { status = .Locked }
 	#partial switch status {
 	case .Locked:
 		if worker != nil {
