@@ -29,6 +29,7 @@ import {
 } from '../../api/endpoints/agents';
 import { useCreateArtifactMutation } from '../../api/endpoints/artifacts';
 import { useFetchProjectQuery } from '../../api/endpoints/projects';
+import { useFetchExperimentsQuery } from '../../api/endpoints/settings';
 import { useGetAgentsLiveQuery } from '../../api/endpoints/agentsLive';
 import { ArtifactAttachmentPreview } from '../ArtifactAttachmentPreview';
 import {
@@ -76,6 +77,7 @@ import { useIsBelowTailwindSm, useIsMobile } from '../shell/responsive';
 import { artifactKindForFile, artifactLinkFromResponse, artifactMimeForFile, artifactUploadName, clipboardFilesFromEvent } from '../../utils/artifactUpload';
 import { describeCron, formatInTimeZone, timeZoneLabel } from '../actions/scheduleUtils';
 import type { ChatDeliveryStatus, ChatMessage, ChatTimestamp } from './types';
+import { resolveProjectVcsExperiment } from './projectVcsExperiment';
 
 // e2e conversation thread for /conversations/{agentInstanceId}. Cookie-auth,
 // hub-native. Fetches messages via /api/v1/chats/{id}/messages, sends via POST,
@@ -589,6 +591,11 @@ export default function ConversationThreadPage({ agentInstanceId: routeInstanceI
   // Project the conversation/instance is scoped to — powers the Files (project
   // directory browser) tab. Prefer the live instance, fall back to conversation.
   const projectId = String(instance ? (instance.project_id ?? instance.projectId ?? '') : (conversation?.project_id || conversation?.projectId || ''));
+  const experimentsQuery = useFetchExperimentsQuery();
+  const projectVcsExperimentState = resolveProjectVcsExperiment(
+    experimentsQuery.isLoading ? undefined : (experimentsQuery.data?.flags ?? []),
+  );
+  const projectVcsEnabled = projectVcsExperimentState === 'enabled';
   // Project display name for the composer chip (falls back to the id).
   const projectQuery = useFetchProjectQuery({ projectId }, { skip: !projectId });
   const projectName = String(projectQuery.data?.project?.name || projectQuery.data?.project?.display_name || projectId || '').trim();
@@ -877,6 +884,18 @@ export default function ConversationThreadPage({ agentInstanceId: routeInstanceI
       setRightPanel('closed');
     }
   }, [agentInstanceId, chainId, isMobile]);
+
+  // A stale URL or persisted VCS tab may outlive experiment access. Wait until
+  // flags have loaded so an enabled deep-link is preserved, then fail closed to
+  // the same Tasks/Files fallback used by the panel renderer.
+  useEffect(() => {
+    if (projectVcsExperimentState !== 'disabled' || rightPanel !== 'vcs') return;
+    const fallback: RightSidebarTab = chainId ? 'tasks' : (projectId || agentInstanceId) ? 'files' : 'tasks';
+    setRightPanel(fallback);
+    writeRightSidebarOpen(true, { chainId, instanceId: agentInstanceId });
+    writeRightSidebarTab(fallback, { chainId, instanceId: agentInstanceId });
+    syncUrlPanel(fallback);
+  }, [projectVcsExperimentState, rightPanel, chainId, projectId, agentInstanceId]);
 
   // Global Cmd+P / Ctrl+P shortcut to trigger Quick Open across the conversation page (REQ-UI-GLOBAL-CMDP-EVERYWHERE)
   useEffect(() => {
@@ -1800,7 +1819,7 @@ export default function ConversationThreadPage({ agentInstanceId: routeInstanceI
     const hasChain = Boolean(chainId);
     const hasTasks = Boolean(chainId);
     const hasFiles = Boolean(projectId || chainId || agentInstanceId);
-    const hasVcs = Boolean(projectId);
+    const hasVcs = Boolean(projectId) && projectVcsEnabled;
     // The file-explorer tab is labeled with a folder icon + the resource name.
     const filesLabel = projectName || 'Files';
     const active: RightSidebarTab =
@@ -1879,18 +1898,19 @@ export default function ConversationThreadPage({ agentInstanceId: routeInstanceI
               projectId={projectId}
               bridgeId={instanceBridgeId}
               agentInstanceId={agentInstanceId}
+              projectVcsEnabled={projectVcsEnabled}
               onClose={closeRightPanel}
               onSelectTask={(taskId) => {
                 if (taskId) setFocusedTaskId(taskId);
                 selectRightPanelTab('tasks');
               }}
-              onOpenFileDiff={(filePath) => {
+              onOpenFileDiff={projectVcsEnabled ? (filePath) => {
                 selectRightPanelTab('vcs');
                 setVcsFileToOpen(filePath);
-              }}
-              onOpenVcsFiles={() => {
+              } : undefined}
+              onOpenVcsFiles={projectVcsEnabled ? () => {
                 selectRightPanelTab('vcs');
-              }}
+              } : undefined}
               isMobile={isMobilePanel}
             />
           ) : active === 'files' && hasFiles ? (
@@ -1920,6 +1940,7 @@ export default function ConversationThreadPage({ agentInstanceId: routeInstanceI
               key={`vcs:${projectId}`}
               projectId={projectId}
               bridgeId={instanceBridgeId}
+              experimentEnabled={projectVcsEnabled}
               onClose={closeRightPanel}
               isMobile={isMobilePanel}
               onOpenDirectory={() => selectRightPanelTab('files')}

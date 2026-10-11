@@ -151,6 +151,9 @@ def test_chain_overview_panel_sections() -> None:
     # Section 3: VCS Changes
     require("VCS Changes" in src, "Must include VCS Changes section header")
     require('data-debug-id="chain-overview-section-vcs"' in src, "Must have data-debug-id for VCS section")
+    require("projectVcsEnabled ? (" in src, "VCS section must render only when the Project/VCS experiment is enabled")
+    require("skip: !projectVcsEnabled || !projectId" in src,
+            "Both VCS polling queries must skip when the Project/VCS experiment is disabled")
     require("vcsModifiedCount" in src, "Must calculate vcsModifiedCount")
     require("vcsStagedCount" in src, "Must calculate vcsStagedCount")
     require("vcsUntrackedCount" in src, "Must calculate vcsUntrackedCount")

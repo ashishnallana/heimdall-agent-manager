@@ -117,6 +117,7 @@ type SaveFeedback = { type: 'success' | 'error'; message: string } | null;
 
 export type ProjectVcsPanelProps = {
   projectId: string;
+  experimentEnabled: boolean;
   bridgeId?: string;
   onClose?: () => void;
   isMobile?: boolean;
@@ -130,6 +131,7 @@ export type ProjectVcsPanelProps = {
 
 export default function ProjectVcsPanel({
   projectId,
+  experimentEnabled,
   bridgeId = '',
   debugPrefix = 'project-vcs',
   isMobile = false,
@@ -141,7 +143,10 @@ export default function ProjectVcsPanel({
   // diff — toggled by activePane, instead of the side-by-side two-pane layout.
   const isSinglePane = isMobile;
   // ---- Capabilities (drives every feature gate) -----------------------------
-  const capsQ = useGetVcsCapabilitiesQuery({ projectId, bridgeId }, { skip: !projectId });
+  const capsQ = useGetVcsCapabilitiesQuery(
+    { projectId, bridgeId },
+    { skip: !experimentEnabled || !projectId },
+  );
   const caps = capsQ.data;
   const hasVcs = Boolean(caps?.ok && str(caps?.provider));
   const supportedActions = caps?.supported_actions ?? [];
@@ -174,7 +179,7 @@ export default function ProjectVcsPanel({
   // ---- Changed files --------------------------------------------------------
   const filesQ = useListVcsFilesQuery(
     { projectId, bridgeId, limit: 500 },
-    { skip: !projectId || !hasVcs },
+    { skip: !experimentEnabled || !projectId || !hasVcs },
   );
   const files: VcsChangedFile[] = filesQ.data?.files ?? [];
 
@@ -229,7 +234,7 @@ export default function ProjectVcsPanel({
   const [logError, setLogError] = useState('');
 
   const loadLog = useCallback(async (opts?: { append?: boolean }) => {
-    if (!projectId || !can('log')) return;
+    if (!experimentEnabled || !projectId || !can('log')) return;
     const append = Boolean(opts?.append);
     setLogLoading(true);
     setLogError('');
@@ -248,7 +253,7 @@ export default function ProjectVcsPanel({
     } finally {
       setLogLoading(false);
     }
-  }, [projectId, bridgeId, can, triggerLog, logCursor, worktreeArg]);
+  }, [experimentEnabled, projectId, bridgeId, can, triggerLog, logCursor, worktreeArg]);
 
   // (Re)load the log when the Log tab opens or the active worktree changes.
   useEffect(() => {
@@ -263,6 +268,7 @@ export default function ProjectVcsPanel({
 
   const onToggleAmend = useCallback(async (checked: boolean) => {
     setIsAmend(checked);
+    if (!experimentEnabled) return;
     if (checked && !commitMessage.trim()) {
       if (logEntries.length > 0 && logEntries[0]?.subject) {
         setCommitMessage(logEntries[0].subject);
@@ -277,7 +283,7 @@ export default function ProjectVcsPanel({
         }
       }
     }
-  }, [commitMessage, logEntries, can, projectId, bridgeId, worktreeArg, triggerLog]);
+  }, [experimentEnabled, commitMessage, logEntries, can, projectId, bridgeId, worktreeArg, triggerLog]);
 
   const handleCommit = useCallback(async () => {
     const msg = commitMessage.trim();
@@ -371,7 +377,7 @@ export default function ProjectVcsPanel({
   // ---- Workspaces -----------------------------------------------------------
   const workspacesQ = useListVcsWorkspacesQuery(
     { projectId, bridgeId, worktree_path: worktreeArg },
-    { skip: !projectId || !hasVcs || !can('workspaces') },
+    { skip: !experimentEnabled || !projectId || !hasVcs || !can('workspaces') },
   );
   const workspaces = workspacesQ.data?.workspaces ?? [];
   const activeWorkspaceLabel = useMemo(() => {
@@ -400,7 +406,7 @@ export default function ProjectVcsPanel({
   // An explicit opts.file overrides the selectedCommitFile state, so a file click can
   // diff the just-clicked path without waiting for the state update to settle.
   const loadCommitDiff = useCallback(async (opts?: { append?: boolean; file?: string | null }) => {
-    if (!projectId || !diffBaseRef) return;
+    if (!experimentEnabled || !projectId || !diffBaseRef) return;
     const append = Boolean(opts?.append);
     const fileArg = opts && 'file' in opts ? opts.file : selectedCommitFile;
     setCommitDiffLoading(true);
@@ -423,11 +429,11 @@ export default function ProjectVcsPanel({
     } finally {
       setCommitDiffLoading(false);
     }
-  }, [projectId, bridgeId, diffBaseRef, diffHeadRef, commitCursor, triggerCommitDiff, worktreeArg, selectedCommitFile]);
+  }, [experimentEnabled, projectId, bridgeId, diffBaseRef, diffHeadRef, commitCursor, triggerCommitDiff, worktreeArg, selectedCommitFile]);
 
   // loadCommitDiffFiles loads the flat list of files changed between the two refs.
   const loadCommitDiffFiles = useCallback(async () => {
-    if (!projectId || !diffBaseRef) return;
+    if (!experimentEnabled || !projectId || !diffBaseRef) return;
     setCommitDiffFilesLoading(true);
     setCommitDiffFilesError('');
     try {
@@ -445,7 +451,7 @@ export default function ProjectVcsPanel({
     } finally {
       setCommitDiffFilesLoading(false);
     }
-  }, [projectId, bridgeId, diffBaseRef, diffHeadRef, triggerListCommitDiffFiles, worktreeArg]);
+  }, [experimentEnabled, projectId, bridgeId, diffBaseRef, diffHeadRef, triggerListCommitDiffFiles, worktreeArg]);
 
   // Selecting a commit sets it as the diff base (head defaults to the working copy) and
   // clears any prior file selection + stale file list/hunks.
@@ -489,6 +495,7 @@ export default function ProjectVcsPanel({
   // ---- Loading / empty states ----------------------------------------------
   const wrapperCls = 'relative flex h-full min-h-0 w-full flex-col bg-surface';
 
+  if (!experimentEnabled) return null;
   if (!projectId) {
     return (
       <div data-debug-id={`${debugPrefix}-panel`} className={wrapperCls}>
@@ -918,6 +925,7 @@ export default function ProjectVcsPanel({
                   <VcsFileEditor
                     key={`${selectedFile.path}:${selectedFile.staged ? 's' : 'u'}`}
                     projectId={projectId}
+                    experimentEnabled={experimentEnabled}
                     bridgeId={bridgeId}
                     file={selectedFile}
                     worktreePath={activeWorktreePath}
@@ -1084,6 +1092,7 @@ type SaveArgs = { projectId: string; bridgeId?: string; file: string; content: s
 
 function VcsFileEditor({
   projectId,
+  experimentEnabled,
   bridgeId,
   file,
   worktreePath,
@@ -1091,6 +1100,7 @@ function VcsFileEditor({
   debugPrefix,
 }: {
   projectId: string;
+  experimentEnabled: boolean;
   bridgeId: string;
   file: VcsChangedFile;
   worktreePath: string | null;
@@ -1108,12 +1118,15 @@ function VcsFileEditor({
   // truncated → we drop to a read-only view so a Save can't drop its tail.
   const contentQ = useReadProjectFileQuery(
     { projectId, bridgeId, path: file.path, limit: EDIT_READ_LIMIT },
-    { skip: isDeleted },
+    { skip: !experimentEnabled || isDeleted },
   );
   // Diff hunks — used to render the read-only "original" side of the diff editor
   // (and the deleted-file view). For an added file the hunks are the whole file as
   // additions, so this also drives "view changes" of newly-added files.
-  const diffHunksQ = useGetVcsDiffQuery({ projectId, bridgeId, file: file.path }, { skip: !file.path });
+  const diffHunksQ = useGetVcsDiffQuery(
+    { projectId, bridgeId, file: file.path },
+    { skip: !experimentEnabled || !file.path },
+  );
   const diffHunks: VcsDiffHunk[] = diffHunksQ.data?.hunks ?? [];
 
   const notViewable = Boolean(contentQ.data && !contentQ.data.viewable);

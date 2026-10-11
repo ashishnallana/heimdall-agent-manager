@@ -66,6 +66,7 @@ export interface ChainOverviewPanelProps {
   projectId: string;
   bridgeId?: string;
   agentInstanceId?: string;
+  projectVcsEnabled: boolean;
   onClose?: () => void;
   onSelectTask?: (taskId: string) => void;
   onOpenFileDiff?: (filePath: string) => void;
@@ -328,6 +329,7 @@ export default function ChainOverviewPanel({
   projectId,
   bridgeId = '',
   agentInstanceId,
+  projectVcsEnabled,
   onClose,
   onSelectTask,
   onOpenFileDiff,
@@ -376,13 +378,13 @@ export default function ChainOverviewPanel({
   );
 
   const vcsStatusQuery = useGetProjectVcsStatusQuery(projectId, {
-    skip: !projectId,
+    skip: !projectVcsEnabled || !projectId,
     pollingInterval: 30000,
   });
 
   const vcsFilesQuery = useListVcsFilesQuery(
     { projectId, bridgeId, limit: 100 },
-    { skip: !projectId, pollingInterval: 30000 }
+    { skip: !projectVcsEnabled || !projectId, pollingInterval: 30000 }
   );
 
   const [startInstanceMutation] = useStartInstanceMutation();
@@ -1083,6 +1085,7 @@ export default function ChainOverviewPanel({
       </section>
 
       {/* SECTION 3: VCS Changes */}
+      {projectVcsEnabled ? (
       <section data-debug-id="chain-overview-section-vcs" className="space-y-2.5">
         <div className="flex items-center justify-between">
           <button
@@ -1198,6 +1201,7 @@ export default function ChainOverviewPanel({
           </div>
         )}
       </section>
+      ) : null}
 
       {/* SECTION 6: Fleet Terminals */}
       <section data-debug-id="chain-overview-section-fleet-terminals" className="space-y-2.5">

@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useFetchExperimentsQuery, useSetExperimentMutation } from '../../api/endpoints/settings';
 import { apiErrorText } from '../../api/cookieFetch';
+import { PROJECT_VCS_EXPERIMENT_KEY } from '../chat/projectVcsExperiment';
 import { PageShell, Panel, Toggle } from '@ui';
 
 // REQ-EXP-2: Experimental flags panel. Absent key from the API means disabled —
@@ -15,6 +16,11 @@ const KNOWN_FLAGS: Array<{ key: string; label: string; description: string }> = 
     key: 'streaming_terminal_pane',
     label: 'Streaming Terminal Pane',
     description: 'Real-time WebSocket streaming for interactive shell and agent terminal panes. Reduces interaction latency from 500ms to sub-10ms with native VT100 scrollback.',
+  },
+  {
+    key: PROJECT_VCS_EXPERIMENT_KEY,
+    label: 'Project/VCS',
+    description: 'Experimental Project and version-control features in conversations and chain overviews.',
   },
 ];
 
