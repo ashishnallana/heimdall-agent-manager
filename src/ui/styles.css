@@ -821,3 +821,41 @@ body {
   padding: 0.75rem;
   overflow-x: auto;
 }
+
+/* Sidebar update badge: a glowing pulse around the border while it shows the
+   version on load, then it settles to a plain icon (the class is removed). */
+@keyframes update-badge-glow {
+  0%, 100% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--color-accent), transparent 35%);
+  }
+  50% {
+    box-shadow: 0 0 0 5px color-mix(in oklab, var(--color-accent), transparent 85%), 0 0 14px 2px color-mix(in oklab, var(--color-accent), transparent 55%);
+  }
+}
+
+.update-badge-glow {
+  animation: update-badge-glow 1.4s ease-in-out infinite;
+}
+
+@keyframes update-badge-settle {
+  from {
+    box-shadow: 0 0 0 4px color-mix(in oklab, var(--color-accent), transparent 85%), 0 0 12px 2px color-mix(in oklab, var(--color-accent), transparent 60%);
+  }
+  to {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
+.update-badge-settle {
+  animation: update-badge-settle 600ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .update-badge-glow {
+    animation: none;
+    box-shadow: 0 0 0 2px color-mix(in oklab, var(--color-accent), transparent 50%);
+  }
+  .update-badge-settle {
+    animation: none;
+  }
+}

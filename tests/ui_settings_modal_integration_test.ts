@@ -85,10 +85,10 @@ test('AppShell.tsx imports SettingsModal and mounts it with required props', () 
 });
 
 // ---------------------------------------------------------------------------
-// 2. Desktop Sidebar Settings Click Integration
+// 2. Sidebar user-row Settings entry point
 // ---------------------------------------------------------------------------
 
-test('Desktop sidebar Settings NavItem click opens SettingsModal without page navigation', () => {
+test('Sidebar user row opens SettingsModal without page navigation', () => {
   const content = fs.readFileSync(APP_SHELL_PATH, 'utf-8');
 
   // NavItem must accept an optional onClick handler
@@ -97,23 +97,19 @@ test('Desktop sidebar Settings NavItem click opens SettingsModal without page na
     'NavItem component must accept onClick prop',
   );
 
-  // In shell-secondary-nav, clicking settings prevents default and opens modal
+  // The sidebar has no Settings nav entry: the user row (and its avatar when the
+  // sidebar is collapsed) is the entry point and opens the modal on Account.
   assert.ok(
-    content.includes('data-debug-id="shell-secondary-nav"'),
-    'Must have shell-secondary-nav container',
+    !content.includes('data-debug-id="shell-secondary-nav"'),
+    'Settings nav entry must be removed from the sidebar',
   );
   assert.ok(
-    content.includes('item.path.startsWith(\'/settings\')'),
-    'Secondary nav must check for /settings path',
+    content.includes('data-debug-id="shell-open-account"') && content.includes('data-debug-id="shell-open-account-collapsed"'),
+    'User row and collapsed avatar must both open settings',
   );
   assert.ok(
-    content.includes('setSettingsModalOpen(true)') ||
-      content.includes('setSettingsModalOpenState(true)'),
-    'Secondary nav Settings click must open SettingsModal',
-  );
-  assert.ok(
-    content.includes('active={settingsModalOpen || isRouteActive(path, item.path)}'),
-    'Sidebar Settings NavItem must remain visually active while modal is open',
+    content.includes("const openAccountSettings = () => { if (isMobile) setDrawerOpen(false); setSettingsModalTab('account'); setSettingsModalOpen(true); };"),
+    'User row must open SettingsModal on the Account tab',
   );
 });
 

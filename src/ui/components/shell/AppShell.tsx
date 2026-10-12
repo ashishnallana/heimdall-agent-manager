@@ -19,6 +19,9 @@ import { useListSidebarConversationsQuery, type SidebarConversation } from '../.
 import { useGetAgentsLiveQuery, type LiveProject } from '../../api/endpoints/agentsLive';
 import { useFetchTaskChainGroupsQuery } from '../../api/endpoints/tasks';
 import { useListBridgesQuery } from '../../api/endpoints/bridgeSupport';
+import { useGetAccountBillingQuery } from '../../api/endpoints/accountBilling';
+import SidebarUpdateBadge from './SidebarUpdateBadge';
+import type { PendingBridgeUpdate } from '../settings/bridgeUpdate';
 import { unsealAllConnectedBridges } from '../../api/endpoints/bridges';
 import { buildRouteHash, getRoutePathname, getRouteSearch } from '../../utils/appLocation';
 import {
@@ -168,9 +171,7 @@ const NAV_ROUTES: ShellRoute[] = [
   { path: '/memory', label: 'Memory', icon: 'spark', description: 'Durable facts, habits & skills for your agents', group: 'primary' },
   { path: '/shells', label: 'Shells', icon: 'terminal', description: 'Every shell session your bridges are running', group: 'primary' },
   { path: '/chains', label: 'Task Chains', icon: 'tasks', description: 'Multi-agent task chains grouped by project', group: 'primary' },
-  { path: '/library', label: 'Library', icon: 'device', description: 'Artifacts and files', group: 'primary' },
   { path: '/issues', label: 'Issues', icon: 'alert', description: 'Reported issues across projects, agents, and bridges', group: 'primary' },
-  { path: '/settings/bridges', label: 'Settings', icon: 'gear', description: 'Bridges, providers, user tokens, projects, and memory', group: 'secondary' },
 ];
 
 function routeFromLocation(): string {
@@ -1310,6 +1311,21 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
   const [launchModalProject, setLaunchModalProject] = useState<{ projectId: string; name: string } | null>(null);
   const [settingsModalOpen, setSettingsModalOpenState] = useState<boolean>(() => routeFromLocation().startsWith('/settings'));
   const [settingsModalTab, setSettingsModalTab] = useState<string>(() => resolveSettingsTab(routeFromLocation()));
+  // Opens Workspace Settings and scrolls to the Bridge's Update button once the
+  // modal has rendered it (the modal mounts asynchronously after opening).
+  const openBridgeUpdate = (update: PendingBridgeUpdate) => {
+    if (isMobile) setDrawerOpen(false);
+    setSettingsModalTab('bridges');
+    setSettingsModalOpen(true);
+    const target = `[data-debug-id="settings-bridge-update-btn-${CSS.escape(update.bridgeId)}"]`;
+    const deadline = Date.now() + 3000;
+    const seek = () => {
+      const el = document.querySelector<HTMLElement>(target);
+      if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); el.focus({ preventScroll: true }); return; }
+      if (Date.now() < deadline) window.requestAnimationFrame(seek);
+    };
+    window.requestAnimationFrame(seek);
+  };
 
   const setSettingsModalOpen = useCallback((open: boolean) => {
     setSettingsModalOpenState(open);
@@ -1497,6 +1513,12 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
   // (toggled), main is full-width, and a bottom tab bar replaces sidebar chrome.
   const viewport = useViewport();
   const isMobile = viewport === 'mobile';
+  // Subscription tier shown under the account row. Hubs without billing answer
+  // with an error, so the row simply stays hidden there.
+  const billingQuery = useGetAccountBillingQuery(user?.user_id || '', { skip: !user?.user_id });
+  const planLabel = billingQuery.data?.plan_label || '';
+  // The user row (and its avatar when collapsed) is the sidebar's only Settings entry point.
+  const openAccountSettings = () => { if (isMobile) setDrawerOpen(false); setSettingsModalTab('account'); setSettingsModalOpen(true); };
   // Close the mobile drawer whenever the route changes.
   useEffect(() => { setDrawerOpen(false); }, [path]);
 
@@ -1616,7 +1638,6 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
   }, []);
 
   const primary = NAV_ROUTES.filter((item) => item.group === 'primary');
-  const secondary = NAV_ROUTES.filter((item) => item.group === 'secondary');
   const conversationTree = useMemo(() => buildProjectConversationTree(conversations, liveProjects), [conversations, liveProjects]);
   const totalUnread = conversationTree.reduce((sum, project) => sum + project.unreadCount, 0);
   const isEffectiveCollapsed = isMobile ? !drawerOpen : collapsed;
@@ -1668,6 +1689,19 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
     );
   }
 
+  const userAvatar = (
+    <span data-debug-id="shell-user-ws-owner" data-ws-status={wsStatus} title={wsConnected ? 'User WS · live' : wsStatus === 'error' ? 'User WS · error' : 'User WS · connecting'} className={`grid h-7 w-7 shrink-0 place-items-center rounded-full bg-neutral-soft text-caption font-bold text-muted`}>
+      {(displayName || 'U').slice(0, 1).toUpperCase()}
+      <span className="absolute ml-5 mt-5">
+        <StatusDot
+          className="ring-2 ring-surface"
+          tone={wsConnected ? 'success' : wsStatus === 'error' ? 'danger' : 'pending'}
+          pulse={!wsConnected && wsStatus !== 'error'}
+          label={wsConnected ? 'User WS live' : wsStatus === 'error' ? 'User WS error' : 'User WS connecting'}
+        />
+      </span>
+    </span>
+  );
   return (
     /* REQ-KBD-2: was `fixed inset-0 … h-full`. `inset-0` pinned this box's BOTTOM edge to
        the layout viewport, which iOS never shrinks for a soft keyboard, and `h-full` on a
@@ -1701,9 +1735,12 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
       >
         <div className={`flex items-center gap-3 ${isMobile && isEffectiveCollapsed ? 'p-1.5' : 'p-3'} ${isEffectiveCollapsed ? 'justify-center' : 'justify-between'}`}>
           {!isEffectiveCollapsed && (
-            <a href={shellHash('/home')} data-debug-id="shell-brand" className="min-w-0 rounded-xl px-2 py-1 hover:bg-neutral-soft">
-              <span className="block truncate text-sm font-black tracking-tight text-primary">Heimdall</span>
-            </a>
+            <div className="flex min-w-0 items-center gap-2">
+              <a href={shellHash('/home')} data-debug-id="shell-brand" className="min-w-0 rounded-xl px-2 py-1 hover:bg-neutral-soft">
+                <span className="block truncate text-sm font-black tracking-tight text-primary">Heimdall</span>
+              </a>
+              <SidebarUpdateBadge onOpen={openBridgeUpdate} />
+            </div>
           )}
           <button
             data-debug-id="shell-sidebar-collapse-toggle"
@@ -1779,48 +1816,24 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
         </div>
 
         <div className={`border-t border-subtle ${isMobile && isEffectiveCollapsed ? 'p-1.5' : 'p-3'}`}>
-          <nav data-debug-id="shell-secondary-nav" className="mb-2 space-y-0.5" aria-label="Settings destinations">
-            {secondary.map((item) => (
-              <NavItem
-                key={item.path}
-                item={item}
-                active={settingsModalOpen || isRouteActive(path, item.path)}
-                collapsed={isEffectiveCollapsed}
-                onClick={
-                  item.path.startsWith('/settings')
-                    ? (e) => {
-                        e.preventDefault();
-                        if (isMobile) setDrawerOpen(false);
-                        setSettingsModalTab('');
-                        setSettingsModalOpen(true);
-                      }
-                    : isMobile
-                    ? () => setDrawerOpen(false)
-                    : undefined
-                }
-              />
-            ))}
-          </nav>
           <div data-debug-id="shell-global-ownership-points" className={`flex items-center gap-2 rounded-xl px-2 py-1.5 ${isEffectiveCollapsed ? 'justify-center' : ''}`}>
-            <span data-debug-id="shell-user-ws-owner" data-ws-status={wsStatus} title={wsConnected ? 'User WS · live' : wsStatus === 'error' ? 'User WS · error' : 'User WS · connecting'} className={`grid h-7 w-7 shrink-0 place-items-center rounded-full bg-neutral-soft text-caption font-bold text-muted`}>
-              {(displayName || 'U').slice(0, 1).toUpperCase()}
-              <span className="absolute ml-5 mt-5">
-                <StatusDot
-                  className="ring-2 ring-surface"
-                  tone={wsConnected ? 'success' : wsStatus === 'error' ? 'danger' : 'pending'}
-                  pulse={!wsConnected && wsStatus !== 'error'}
-                  label={wsConnected ? 'User WS live' : wsStatus === 'error' ? 'User WS error' : 'User WS connecting'}
-                />
-              </span>
-            </span>
+            {isEffectiveCollapsed ? (
+              <button type="button" data-debug-id="shell-open-account-collapsed" aria-label="Open account settings" title="Account & settings" onClick={openAccountSettings} className="rounded-full focus-visible:outline-none focus-visible:shadow-focus hover:opacity-80">{userAvatar}</button>
+            ) : userAvatar}
             {!isEffectiveCollapsed && (
-              <button type="button" data-debug-id="shell-open-account" aria-label="Open account settings" onClick={() => { if (isMobile) setDrawerOpen(false); setSettingsModalTab('account'); setSettingsModalOpen(true); }} className="min-w-0 flex-1 rounded-lg text-left focus-visible:outline-none focus-visible:shadow-focus hover:bg-neutral-soft">
+              <button type="button" data-debug-id="shell-open-account" aria-label="Open account settings" onClick={openAccountSettings} className="min-w-0 flex-1 rounded-lg text-left focus-visible:outline-none focus-visible:shadow-focus hover:bg-neutral-soft">
                 <div data-debug-id="shell-current-user-owner" className="truncate text-[12px] font-semibold text-primary">{displayName}</div>
                 <div className="truncate text-[10.5px] text-muted">{user.email || user.user_id || ''}</div>
               </button>
             )}
             {logoutUrl && !isEffectiveCollapsed && <a data-debug-id="auth-logout-link" href={logoutUrl} title="Sign out" className="shrink-0 rounded-lg p-1.5 text-muted hover:bg-neutral-soft hover:text-primary"><Icon name="close" size={14} /></a>}
           </div>
+          {!isEffectiveCollapsed && planLabel ? (
+            <button type="button" data-debug-id="shell-subscription-tier" aria-label={`Subscription: ${planLabel}. Open account settings`} onClick={openAccountSettings} className="mt-1 flex w-full items-center gap-2 rounded-lg px-2 py-1 text-left text-[11px] text-muted hover:bg-neutral-soft hover:text-primary focus-visible:outline-none focus-visible:shadow-focus">
+              <Icon name="sparkle" size={12} className="shrink-0 text-accent" />
+              <span className="truncate">Plan · <span className="font-semibold text-primary">{planLabel}</span></span>
+            </button>
+          ) : null}
         </div>
       </aside>
 

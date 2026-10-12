@@ -91,3 +91,23 @@ export function shouldWarnActiveTasks(bridge: Partial<Bridge> | null | undefined
 export function getActiveTaskCount(bridge: Partial<Bridge> | null | undefined): number {
   return bridge?.active_instance_count ?? bridge?.instance_count ?? 0;
 }
+
+/** A connected, online bridge that can install a newer release right now. */
+export interface PendingBridgeUpdate { bridgeId: string; latestVersion: string; label: string }
+
+/**
+ * Bridges the sidebar update badge should advertise: connected and online,
+ * reporting `update_available`, with a bundle for their target, and not already
+ * mid-update. Sorted so the newest advertised version comes first.
+ */
+export function pendingBridgeUpdates(bridges: Partial<Bridge>[] | null | undefined): PendingBridgeUpdate[] {
+  return (Array.isArray(bridges) ? bridges : [])
+    .filter((bridge) => String(bridge?.status || '').trim().toLowerCase() === 'online' && (bridge as any)?.runtime_connected === true)
+    .filter((bridge) => Boolean(bridge?.update_available) && !isUpdateUnavailableForTarget(bridge) && !isBridgeUpdating(bridge))
+    .map((bridge) => {
+      const bridgeId = String(bridge?.bridge_id || (bridge as any)?.id || '');
+      return { bridgeId, latestVersion: bridge?.latest_version || '', label: bridge?.label || bridge?.machine_hostname || bridge?.hostname || bridgeId };
+    })
+    .filter((update) => update.bridgeId !== '')
+    .sort((a, b) => b.latestVersion.localeCompare(a.latestVersion, undefined, { numeric: true }));
+}

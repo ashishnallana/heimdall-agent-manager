@@ -622,16 +622,12 @@ test('AppShell routing integration ensures settings routes resolve without crash
   );
 });
 
-test('sidebar Settings and palette settings open the landing view, not Appearance (REQ-3)', () => {
+test('palette settings open the landing view, not Appearance (REQ-3)', () => {
   const shell = fs.readFileSync(path.join(REPO_ROOT, 'src/ui/components/shell/AppShell.tsx'), 'utf8');
   const modal = fs.readFileSync(SETTINGS_MODAL_PATH, 'utf8');
 
-  // Sidebar nav item: no hard-coded tab.
-  const navStart = shell.indexOf('data-debug-id="shell-secondary-nav"');
-  assert.ok(navStart >= 0, 'secondary nav must exist');
-  const navBlock = shell.slice(navStart, navStart + 1200);
-  assert.ok(navBlock.includes("setSettingsModalTab('')"), 'sidebar Settings must open with no tab');
-  assert.ok(!navBlock.includes("setSettingsModalTab('appearance')"), 'sidebar Settings must not force Appearance');
+  // The sidebar Settings nav item was removed; the user row opens Settings instead.
+  assert.ok(!shell.includes('data-debug-id="shell-secondary-nav"'), 'sidebar Settings nav entry is removed');
 
   // Palette: settings/settings-modal open landing; theme actions still go to Appearance.
   assert.match(shell, /case 'settings':\s*case 'settings-modal':\s*setSettingsModalTab\(''\);/);

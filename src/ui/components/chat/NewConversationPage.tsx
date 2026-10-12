@@ -93,7 +93,7 @@ export default function NewConversationPage({ footer }: { embedded?: boolean; fo
   const agents = agentsQuery.data?.agents || [];
   const projects = projectsQuery.data?.projects || [];
   const bridges = bridgesQuery.data?.bridges || [];
-  const favoriteIds = [...(preferences.data?.favorite_agent_ids || [])].sort((a, b) => { const rank = (id: string) => agents.find(agent => agent.agent_id === id)?.slug === 'coordinator' ? 0 : agents.find(agent => agent.agent_id === id)?.slug === 'soloist' ? 1 : 2; return rank(a) - rank(b); });
+  const favoriteIds = [...(preferences.data?.favorite_agent_ids || [])].sort((a, b) => { const rank = (id: string) => { const slug = agents.find(agent => agent.agent_id === id)?.slug; return slug === 'soloist' ? 0 : slug === 'coordinator' ? 1 : 2; }; return rank(a) - rank(b); });
   const pinnedIds = preferences.data?.pinned_agent_ids || [];
   const favoritesFull = favoriteIds.length >= 6;
   const support = useListAgentBridgeSupportQuery({ agentId }, { skip: !agentId });
