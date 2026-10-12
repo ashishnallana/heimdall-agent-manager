@@ -68,6 +68,27 @@ main :: proc() {
 		return
 	}
 
+	// --probe-hub <url>: reach the Hub through the bridge's OWN transport
+	// (socat/openssl TLS relay), not curl. The installer runs this after the
+	// download and before touching any service, because curl succeeding while
+	// this path fails is exactly what a phone showed.
+	if has_flag(os.args, "--probe-hub") {
+		raw := option_value(os.args, "--probe-hub", "")
+		api_base, origin_ok := bridge_enroll_hub_url(raw)
+		if !origin_ok {
+			fmt.eprintln("probe-hub: --probe-hub needs the Hub API origin, e.g. https://hub.example.com")
+			os.exit(2)
+		}
+		started := time.now()
+		resp, sent := http.request_with_headers_timeout("GET", api_base, "/api/v1/health", "", nil, http.DEFAULT_TIMEOUT_MS)
+		if !sent {
+			fmt.eprintfln("probe-hub FAILED: no HTTP response from %s/api/v1/health through the bridge transport (%s) after %v — check that socat is installed and works, TLS trust (HAM_TLS_CA_FILE), and the network", api_base, "s_client" if bridge_tls_backend_is_socat() == false else "socat", time.since(started))
+			os.exit(1)
+		}
+		fmt.printfln("probe-hub OK: %s/api/v1/health -> HTTP %d via %s in %v", api_base, resp.status, "s_client" if bridge_tls_backend_is_socat() == false else "socat", time.since(started))
+		return
+	}
+
 	if len(os.args) > 1 && os.args[1] == "enroll" {
 		if strings.trim_space(option_value(os.args, "--hub", os.get_env("HAM_BRIDGE_HUB_URL", context.allocator))) == "" {
 			fmt.eprintln("ham-bridge enroll requires --hub <https://your-hub-url> (or HAM_BRIDGE_HUB_URL)")

@@ -87,6 +87,11 @@ else:
     out.write_bytes((r/'bundle').read_bytes())
 ''')
         bridge = b'''#!/usr/bin/env bash
+if [ "$1" = --probe-hub ]; then
+  printf '%s\\n' "$2" > "$MOCK_ROOT/probe-hub"
+  if [ -n "${MOCK_PROBE_FAIL:-}" ]; then echo "probe-hub FAILED: no HTTP response" >&2; exit 1; fi
+  echo "probe-hub OK: $2/api/v1/health -> HTTP 200 via socat"; exit 0
+fi
 if [ "$1" = enroll ]; then
   shift
   while [ "$#" -gt 0 ]; do
@@ -246,6 +251,18 @@ if me=='sv-enable':
         self.assertEqual((self.root/'hub-checks').read_text().strip(),'https://hub.mundus.in/api/v1/health')
         self.assertFalse(self.downloads()); self.assertFalse(self.data('heimdall-bridge-hub-mundus-in').exists())
         self.assertFalse((self.home/'.config/heimdall/bridges/.install-lock').exists())
+
+    def test_bridge_transport_preflight_blocks_before_replacing_service(self):
+        name='heimdall-bridge-localhost-8080'
+        self.run_install('--hub','http://localhost:8080')
+        unit=self.home/'.config/systemd/user'/f'{name}.service'; before=unit.read_text()
+        self.assertEqual((self.root/'probe-hub').read_text().strip(),'http://localhost:8080')
+        self.env['MOCK_PROBE_FAIL']='1'
+        out=self.run_install('--hub','http://localhost:8080','--keep-enrollment',success=False)
+        self.assertIn('cannot reach http://localhost:8080 through its own TLS transport',out)
+        self.assertEqual(unit.read_text(),before)           # service untouched
+        self.assertFalse(any('stop' in c for c in self.commands()[len(self.commands())-1:]))
+        del self.env['MOCK_PROBE_FAIL']
 
     def test_hub_check_runs_before_download(self):
         self.run_install('--hub','http://localhost:8080')

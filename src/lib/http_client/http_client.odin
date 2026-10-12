@@ -104,12 +104,20 @@ request_tls_with_headers :: proc(method, host: string, port: u16, path, body: st
 	req := build_http_request(method, host, port, path, body, extra_headers, include_port_in_host)
 	defer delete(req)
 	_, write_err := os.write(stdin_w, transmute([]byte)req)
-	_ = os.close(stdin_w)
 	if write_err != nil {
+		_ = os.close(stdin_w)
 		_ = os.process_kill(process)
 		_, _ = os.process_wait(process)
 		return {}, false
 	}
+	// Keep socat's stdin OPEN until we are done reading. Closing it right after
+	// the request half-closes the relay: socat then gives the other side only
+	// its default 0.5 s grace (-t) before exiting, so any Hub whose first
+	// byte takes longer than that to arrive (a Cloudflare-fronted Hub from a
+	// phone, for instance) produced "no HTTP response" although the request
+	// had been sent. The request carries Connection: close and
+	// response_complete() ends the read, so nothing waits on EOF.
+	defer os.close(stdin_w)
 
 	deadline := time.to_unix_nanoseconds(time.now()) + i64(time.Duration(timeout_ms if timeout_ms > 0 else DEFAULT_TIMEOUT_MS) * time.Millisecond)
 	data := make([dynamic]byte, 0, 8192)

@@ -121,7 +121,7 @@ PY
     # failed. The registration/readiness steps below start and verify the service.
     log WARN 'Enrollment succeeded; the bridge could not restart its service itself. Continuing with service start and readiness checks.'
   else
-    [ "$status" -eq 0 ] || fail "Enrollment failed (status $status). Re-run with --re-enroll."
+    [ "$status" -eq 0 ] || fail "Enrollment failed (status $status). The service is installed but not running. Re-run the installer with --re-enroll, or enroll later with $state_dir/enroll.sh and then start the service (runit: sv-enable ham-bridge; systemd: systemctl --user restart $service_name)."
   fi
   [ -s "$token_file" ] || fail 'Enrollment did not write a credential.'
   chmod 600 "$token_file"
@@ -380,6 +380,13 @@ with tarfile.open(root/name) as t:
         (root/'apply-bridge-update.sh').write_bytes(t.extractfile(scripts[0]).read())
 PY
   log OK 'Release checksum and bundle verified'
+  # Preflight through the BRIDGE's own transport (socat/openssl TLS relay),
+  # before any service is replaced: curl reaching the Hub says nothing about
+  # whether this binary can.
+  chmod 700 "$work_dir/ham-bridge"
+  if ! "$work_dir/ham-bridge" --probe-hub "$hub_url"; then
+    fail "The downloaded ham-bridge cannot reach $hub_url through its own TLS transport although curl could. On Termux: pkg install socat ca-certificates; otherwise check socat and TLS trust. Nothing was replaced."
+  fi
   # Keep the verified bundle for next time; drop older versions of this target.
   cp "$work_dir/$archive" "$cache_dir/$archive.tmp" && mv -f "$cache_dir/$archive.tmp" "$cache_dir/$archive"
   local old cache_prefix="${archive%-"$version".tar.gz}"
