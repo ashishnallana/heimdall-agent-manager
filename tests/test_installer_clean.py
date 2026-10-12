@@ -87,6 +87,7 @@ else:
     out.write_bytes((r/'bundle').read_bytes())
 ''')
         bridge = b'''#!/usr/bin/env bash
+if [ "$1" = --version ]; then echo "ham-bridge ${MOCK_BRIDGE_VERSION:-0.3.36} protocol 1 bridge 1 ws 1"; exit 0; fi
 if [ "$1" = --probe-hub ]; then
   printf '%s\\n' "$2" > "$MOCK_ROOT/probe-hub"
   if [ -n "${MOCK_PROBE_FAIL:-}" ]; then echo "probe-hub FAILED: no HTTP response" >&2; exit 1; fi
@@ -263,6 +264,16 @@ if me=='sv-enable':
         self.assertEqual(unit.read_text(),before)           # service untouched
         self.assertFalse(any('stop' in c for c in self.commands()[len(self.commands())-1:]))
         del self.env['MOCK_PROBE_FAIL']
+
+    def test_transport_preflight_skipped_for_bridges_before_0_3_36(self):
+        self.env['MOCK_BRIDGE_VERSION']='0.3.35'
+        out=self.run_install('--hub','http://localhost:8080')
+        self.assertIn('predates --probe-hub (0.3.36); transport preflight skipped',out)
+        self.assertFalse((self.root/'probe-hub').exists())
+        del self.env['MOCK_BRIDGE_VERSION']
+        self.env['MOCK_BRIDGE_VERSION']='0.3.40'
+        self.run_install('--hub','http://localhost:8080','--keep-enrollment')
+        self.assertTrue((self.root/'probe-hub').exists())
 
     def test_hub_check_runs_before_download(self):
         self.run_install('--hub','http://localhost:8080')

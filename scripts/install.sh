@@ -384,8 +384,16 @@ PY
   # before any service is replaced: curl reaching the Hub says nothing about
   # whether this binary can.
   chmod 700 "$work_dir/ham-bridge"
-  if ! "$work_dir/ham-bridge" --probe-hub "$hub_url"; then
-    fail "The downloaded ham-bridge cannot reach $hub_url through its own TLS transport although curl could. On Termux: pkg install socat ca-certificates; otherwise check socat and TLS trust. Nothing was replaced."
+  # --probe-hub exists from 0.3.36; an older bridge ignores unknown flags and
+  # would start as a daemon in the foreground, so gate on the binary's version.
+  local bridge_version
+  bridge_version="$("$work_dir/ham-bridge" --version 2>/dev/null | awk '{print $2}')"
+  if [ -n "$bridge_version" ] && [ "$(printf '%s\n0.3.36\n' "$bridge_version" | sort -V | head -n1)" = "0.3.36" ]; then
+    if ! "$work_dir/ham-bridge" --probe-hub "$hub_url"; then
+      fail "The downloaded ham-bridge cannot reach $hub_url through its own TLS transport although curl could. On Termux: pkg install socat ca-certificates; otherwise check socat and TLS trust. Nothing was replaced."
+    fi
+  else
+    log INFO "Bridge ${bridge_version:-unknown} predates --probe-hub (0.3.36); transport preflight skipped."
   fi
   # Keep the verified bundle for next time; drop older versions of this target.
   cp "$work_dir/$archive" "$cache_dir/$archive.tmp" && mv -f "$cache_dir/$archive.tmp" "$cache_dir/$archive"
