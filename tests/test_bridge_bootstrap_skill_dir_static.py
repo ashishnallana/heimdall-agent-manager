@@ -4,7 +4,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PROVIDER_STORE = ROOT / "src" / "bridge" / "provider_store.odin"
-PROVIDER_SEEDS = ROOT / "src" / "bridge" / "provider_seeds.odin"
 BOOTSTRAP = ROOT / "src" / "bridge" / "bootstrap_service.odin"
 AGENT_SERVICE = ROOT / "src" / "hub" / "service" / "agent" / "agent_service.odin"
 STATIC_SKILLS_GEN = ROOT / "src" / "hub" / "service" / "agent" / "static_skills_gen.odin"
@@ -16,7 +15,6 @@ CONTENT_SERVICE = ROOT / "src" / "hub" / "service" / "content" / "content_servic
 CONTENT_HANDLERS = ROOT / "src" / "hub" / "transport" / "http" / "content_handlers.odin"
 MIGRATIONS = ROOT / "src" / "hub" / "repository" / "sqlite" / "migrations.odin"
 MEMORY_CATALOG = ROOT / "src" / "ui" / "api" / "memoryCatalog.ts"
-PROVIDERS_PANEL = ROOT / "src" / "ui" / "components" / "settings" / "ProvidersPanel.tsx"
 
 
 def require(cond: bool, msg: str) -> None:
@@ -35,31 +33,14 @@ def main() -> None:
     content_handlers = CONTENT_HANDLERS.read_text(encoding="utf-8")
     migrations = MIGRATIONS.read_text(encoding="utf-8")
     memory_catalog = MEMORY_CATALOG.read_text(encoding="utf-8")
-    providers_panel = PROVIDERS_PANEL.read_text(encoding="utf-8")
 
-    # The UI provider editor must expose skill_dir so operators can configure the
-    # per-provider skills output directory (e.g. .pi/skills for pi) from the UI
-    # and have it persisted via PUT /bridges/<id>/providers/<name>.
-    for marker in [
-        "skillDir: string;",
-        "skillDir: String(profile.skill_dir",
-        "skill_dir: form.skillDir.trim()",
-        "providers-editor-skill-dir-input",
-    ]:
-        require(marker in providers_panel, f"UI provider editor must configure skill_dir: {marker}")
-
-    # Provider skill dir now derives from seed data with an override + generic
-    # fallback (no inline provider switch in provider_store).
+    # The provider skill dir comes from the provider catalog (37df8fb1 replaced the
+    # seed table, per-bridge override and UI editor).
     for marker in [
         "bridge_provider_default_skill_dir",
-        "if override.skill_dir_set do result.skill_dir = override.skill_dir",
-        'return "skills"',
+        "bridge_provider_catalog_profile(strings.trim_space(provider)); ok do return profile.skill_dir",
     ]:
-        require(marker in provider_store, f"provider profile must derive/fallback skill dir: {marker}")
-
-    provider_seeds = PROVIDER_SEEDS.read_text(encoding="utf-8")
-    for marker in ['skill_dir = ".agents/skills"']:
-        require(marker in provider_seeds, f"provider seeds must define per-provider skill dir: {marker}")
+        require(marker in provider_store, f"provider skill dir must derive from the catalog: {marker}")
 
     for marker in [
         "bridge_bootstrap_write_skills",

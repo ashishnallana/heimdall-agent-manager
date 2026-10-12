@@ -43,7 +43,7 @@ bridge_bootstrap_fetch_and_materialize :: proc(hub_url, bridge_token, instance_i
 	resp, ok := bridge_http_request_retry("GET", hub_url, path, "", headers[:], http.DEFAULT_TIMEOUT_MS)
 	if !ok || resp.status != 200 do return false
 	_ = bridge_make_directory_all(run_dir)
-	content := extract_json_string(resp.body, "content", strings.concatenate({"# Agent bootstrap\n\nInstance: ", instance_id, "\n"}))
+	content := bridge_bootstrap_decrypt_owned(extract_json_string(resp.body, "content", strings.concatenate({"# Agent bootstrap\n\nInstance: ", instance_id, "\n"})))
 	agents_md_name := bridge_bootstrap_agents_md_name(provider)
 	bridge_bootstrap_cleanup_stale_agents_md(run_dir, agents_md_name)
 	if os.write_entire_file(strings.concatenate({strings.trim_right(run_dir, "/"), "/", agents_md_name}), content) != nil do return false
@@ -52,6 +52,7 @@ bridge_bootstrap_fetch_and_materialize :: proc(hub_url, bridge_token, instance_i
 		delete(mem_content)
 		mem_content = extract_json_string(resp.body, "MEMORY.md", "")
 	}
+	mem_content = bridge_bootstrap_decrypt_owned(mem_content)
 	has_mem := mem_content != ""
 	if has_mem {
 		mem_path := strings.concatenate({strings.trim_right(run_dir, "/"), "/MEMORY.md"})
@@ -80,8 +81,9 @@ bridge_bootstrap_write_skills :: proc(run_dir, provider, body: string) -> []stri
 	if skills_array, ok := bridge_provider_json_extract_array(body, "skills"); ok {
 		for obj in bridge_provider_json_top_level_objects(skills_array) {
 			name := bridge_provider_json_extract_string(obj, "name", "")
-			content := bridge_provider_json_extract_string(obj, "content", "")
-			path := bridge_bootstrap_skill_relative_path(provider, name)
+			content := bridge_bootstrap_decrypt_owned(bridge_provider_json_extract_string(obj, "content", ""))
+			plain_name := bridge_decrypt_embedded_vault_tokens(name)
+			path := bridge_bootstrap_skill_relative_path(provider, plain_name)
 			if bridge_bootstrap_write_skill_file(run_dir, path, content) do append(&written, path)
 		}
 	}
@@ -825,6 +827,11 @@ bridge_bootstrap_build_file_set :: proc(manifest_json: string, d: Bridge_Bootstr
 		bridge_bootstrap_free_file_set(files)
 		return nil, Bridge_Bootstrap_Result{ok = false, stage = "assemble", detail = "failed to assemble AGENTS.md from cached fragments"}
 	}
+	// The hub holds no vault key, so encrypted template variables (project name,
+	// description, ...), memories and skills reach the bridge as vault:v1 tokens.
+	// Decrypt each file's content here, the one point every bootstrap file passes
+	// through, so the agent never reads raw ciphertext.
+	agents_md = bridge_bootstrap_decrypt_owned(agents_md)
 	agents_md_name := bridge_bootstrap_agents_md_name(provider)
 	append(&files, Bridge_Bootstrap_File{file_id = strings.clone(agents_md_name), relative_path = strings.clone(agents_md_name), kind = "AGENTS_MD", content = agents_md, mode = 0o644})
 
@@ -848,6 +855,7 @@ bridge_bootstrap_build_file_set :: proc(manifest_json: string, d: Bridge_Bootstr
 					bridge_bootstrap_free_file_set(files)
 					return nil, Bridge_Bootstrap_Result{ok = false, stage = "assemble", detail = "memory blob missing from cache"}
 				}
+				content = bridge_bootstrap_decrypt_owned(content)
 				append(&files, Bridge_Bootstrap_File{file_id = strings.clone(rel_path), relative_path = rel_path, kind = "MEMORY_MD", content = content, mode = 0o644})
 			}
 			delete(kind)
@@ -866,8 +874,12 @@ bridge_bootstrap_build_file_set :: proc(manifest_json: string, d: Bridge_Bootstr
 				bridge_bootstrap_free_file_set(files)
 				return nil, Bridge_Bootstrap_Result{ok = false, stage = "assemble", detail = "skill blob missing from cache"}
 			}
-			path := bridge_bootstrap_skill_relative_path(provider, name)
-			delete(name); delete(h)
+			content = bridge_bootstrap_decrypt_owned(content)
+			// No locked marker for the name: it becomes a directory, and distinct
+			// ciphertext keeps distinct skills from colliding on one path.
+			plain_name := bridge_decrypt_embedded_vault_tokens(name)
+			path := bridge_bootstrap_skill_relative_path(provider, plain_name)
+			delete(plain_name); delete(name); delete(h)
 			if strings.trim_space(path) == "" { delete(path); delete(content); continue }
 			append(&files, Bridge_Bootstrap_File{file_id = strings.clone(path), relative_path = path, kind = "SKILL", content = content, mode = 0o644})
 		}
@@ -893,6 +905,16 @@ bridge_bootstrap_build_file_set :: proc(manifest_json: string, d: Bridge_Bootstr
 	append(&files, Bridge_Bootstrap_File{file_id = strings.clone("heimdall-bootstrap-manifest.json"), relative_path = strings.clone("heimdall-bootstrap-manifest.json"), kind = "MANIFEST", content = strings.to_string(mb), mode = 0o644})
 
 	return files, Bridge_Bootstrap_Result{ok = true, stage = "done"}
+}
+
+// bridge_bootstrap_decrypt_owned decrypts embedded vault tokens in an owned
+// string, frees the original and returns the result. Tokens left undecryptable
+// because the vault is locked become VAULT_LOCKED_MARKER.
+bridge_bootstrap_decrypt_owned :: proc(text: string) -> string {
+	if !strings.contains(text, VAULT_ARMOR_PREFIX) do return text
+	out := bridge_decrypt_embedded_vault_tokens(text, locked_marker = VAULT_LOCKED_MARKER)
+	delete(text)
+	return out
 }
 
 bridge_bootstrap_free_file_set :: proc(files: [dynamic]Bridge_Bootstrap_File) {
@@ -1188,7 +1210,7 @@ bridge_bootstrap_fetch_manifest_and_materialize :: proc(hub_url, bridge_token, i
 
 	append(&files, Bridge_Bootstrap_File{
 		file_id = strings.clone(agents_md_name), relative_path = strings.clone(agents_md_name),
-		kind = "AGENTS_MD", content = strings.clone(strings.to_string(agents_md_b)), mode = 0o644,
+		kind = "AGENTS_MD", content = bridge_bootstrap_decrypt_owned(strings.clone(strings.to_string(agents_md_b))), mode = 0o644,
 	})
 
 	for s_obj in skill_objs {
@@ -1198,10 +1220,11 @@ bridge_bootstrap_fetch_manifest_and_materialize :: proc(hub_url, bridge_token, i
 		if cache != nil {
 			got, found := bootstrap_cache_get(cache, h)
 			if !found { delete(name); delete(h); return false }
-			content = got
+			content = bridge_bootstrap_decrypt_owned(got)
 		}
-		path := bridge_bootstrap_skill_relative_path(provider, name)
-		delete(name); delete(h)
+		plain_name := bridge_decrypt_embedded_vault_tokens(name)
+		path := bridge_bootstrap_skill_relative_path(provider, plain_name)
+		delete(plain_name); delete(name); delete(h)
 		if strings.trim_space(path) == "" { delete(path); if content != "" do delete(content); continue }
 		// content is an owned clone from the cache; hand ownership to the file entry.
 		append(&files, Bridge_Bootstrap_File{file_id = strings.clone(path), relative_path = path, kind = "SKILL", content = content, mode = 0o644})
@@ -1225,7 +1248,7 @@ bridge_bootstrap_fetch_manifest_and_materialize :: proc(hub_url, bridge_token, i
 					delete(h)
 					return false
 				}
-				content = got
+				content = bridge_bootstrap_decrypt_owned(got)
 			}
 			delete(h)
 			append(&files, Bridge_Bootstrap_File{file_id = strings.clone(rel_path), relative_path = rel_path, kind = "MEMORY_MD", content = content, mode = 0o644})

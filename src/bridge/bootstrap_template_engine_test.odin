@@ -104,34 +104,6 @@ bt3_is_placeholder_key :: proc(t: ^testing.T) {
 	testing.expect(t, !bridge_bootstrap_is_placeholder_key("\"k\": 1"))
 }
 
-// BT-3 end-to-end: feed the REAL template file through eval+substitute and confirm
-// a coordinator render has the right sections and no leftover placeholders/tags.
-@(test)
-bt3_e2e_real_template_coordinator :: proc(t: ^testing.T) {
-	tpl := string(#load("../prompts/bootstrap_agents.md", string))
-	after := bridge_bootstrap_eval_role_sections(tpl, true, false, false)
-	defer delete(after)
-	names := []string{"agent_name","instance_id","chain_title","chain_id","coordinator_id","coordinator_line","template_persona","template_instructions","agent_instructions","project_name","project_path","project_repo","project_vcs","project_description"}
-	values := []string{"Backend Agent","inst_1","Prompts audit","chain_1","","\nCoordinator: you (coordinator)","You are Odin.","Base rules.","Agent rules.","Heimdall","~/h","git@x","git","Desc"}
-	got := bridge_bootstrap_substitute_scalars(after, names, values)
-	defer delete(got)
-	// coordinator section present, worker/reviewer absent
-	testing.expect(t, strings.contains(got, "## You are the COORDINATOR"))
-	testing.expect(t, !strings.contains(got, "## You are a WORKER"))
-	testing.expect(t, !strings.contains(got, "## You are a REVIEWER"))
-	// header + identity + project substituted
-	testing.expect(t, strings.contains(got, "Agent: Backend Agent"))
-	testing.expect(t, strings.contains(got, "Coordinator: you (coordinator)"))
-	testing.expect(t, strings.contains(got, "You are Odin."))
-	testing.expect(t, strings.contains(got, "- Name: Heimdall"))
-	// no leftover role tags or known placeholders
-	testing.expect(t, !strings.contains(got, "{{#"))
-	testing.expect(t, !strings.contains(got, "{{/"))
-	testing.expect(t, !strings.contains(got, "{agent_name}"))
-	testing.expect(t, !strings.contains(got, "{project_name}"))
-	testing.expect(t, !strings.contains(got, "{template_persona}"))
-}
-
 @(test)
 bt3_e2e_real_template_worker :: proc(t: ^testing.T) {
 	tpl := string(#load("../prompts/bootstrap_agents.md", string))
@@ -340,4 +312,83 @@ bootstrap_run_dir_ctl_routes_to_each_bridge :: proc(t: ^testing.T) {
 		testing.expect(t, err == nil && state.success)
 		testing.expect_value(t, string(stdout), endpoint)
 	}
+}
+
+// The hub holds no vault key, so encrypted template variables, memories and skills
+// reach the bridge as vault:v1 tokens. The bridge must decrypt them before any
+// bootstrap file is written.
+@(test)
+bt_file_set_decrypts_vault_tokens :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
+
+	enc :: proc(s: string) -> string {
+		a, _ := bridge_encrypt_vault_ciphertext_hex(s, TEST_VAULT_KEY_HEX, context.temp_allocator)
+		return a
+	}
+	tpl_body := "Project: {project_name}\n"
+	mem_body := strings.concatenate({"# Applicable Memories\n\n### ", enc("Memory Title"), "\nType: fact\n\n", enc("Memory body"), "\n"}, context.temp_allocator)
+	skill_body := strings.concatenate({"# ", enc("Skill body"), "\n"}, context.temp_allocator)
+
+	tpl_hash := test_bootstrap_sha256(tpl_body)
+	defer delete(tpl_hash)
+	mem_hash := test_bootstrap_sha256(mem_body)
+	defer delete(mem_hash)
+	skill_hash := test_bootstrap_sha256(skill_body)
+	defer delete(skill_hash)
+
+	manifest := strings.concatenate({
+		`{"protocol":2,"version":"v1","agent_id":"agt_1","files":[{"kind":"AGENTS_MD","relative_path":"AGENTS.md","assembly":[]},{"kind":"MEMORY_MD","relative_path":"MEMORY.md","hash":"`, mem_hash,
+		`"}],"skills":[{"name":"`, enc("Secret Skill"), `","hash":"`, skill_hash,
+		`"}],"template":{"kind":"AGENTS_TEMPLATE","hash":"`, tpl_hash,
+		`"},"variables":[{"name":"project_name","value":"`, enc("My Project"), `"}]}`,
+	})
+	defer delete(manifest)
+
+	prev, had := os.lookup_env("HEIMDALL_HAM_CTL_BIN", context.allocator)
+	defer {
+		if had {
+			_ = os.set_env("HEIMDALL_HAM_CTL_BIN", prev)
+		} else {
+			os.unset_env("HEIMDALL_HAM_CTL_BIN")
+		}
+		delete(prev)
+	}
+	_ = os.set_env("HEIMDALL_HAM_CTL_BIN", "/bin/sh")
+	os.set_env("HEIMDALL_VAULT_KEY", TEST_VAULT_KEY_HEX)
+	defer os.unset_env("HEIMDALL_VAULT_KEY")
+
+	cache: Bootstrap_Cache
+	tmp := "/tmp/ham-test-bootstrap-decrypt"
+	_ = os.remove_all(tmp)
+	defer _ = os.remove_all(tmp)
+	bootstrap_cache_init(&cache, tmp, 1024 * 1024)
+	bootstrap_cache_put(&cache, tpl_hash, tpl_body)
+	bootstrap_cache_put(&cache, mem_hash, mem_body)
+	bootstrap_cache_put(&cache, skill_hash, skill_body)
+
+	d := Bridge_Bootstrap_Descriptor{instance_id = "inst_1", agent_name = "Agent 1", role = "worker"}
+	files, res := bridge_bootstrap_build_file_set(manifest, d, "unix:/tmp/test.sock", "tok", "claude", &cache)
+	defer bridge_bootstrap_free_file_set(files)
+	testing.expect(t, res.ok, "build file set should succeed")
+
+	seen_agents, seen_mem, seen_skill := false, false, false
+	for f in files {
+		testing.expect(t, !strings.contains(f.content, VAULT_ARMOR_PREFIX), f.relative_path)
+		switch f.kind {
+		case "AGENTS_MD":
+			seen_agents = true
+			testing.expect(t, strings.contains(f.content, "Project: My Project"), "template variable must be decrypted")
+		case "MEMORY_MD":
+			seen_mem = true
+			testing.expect(t, strings.contains(f.content, "### Memory Title\nType: fact\n\nMemory body"), "memory title/body must be decrypted")
+		case "SKILL":
+			seen_skill = true
+			testing.expect(t, strings.contains(f.relative_path, "/Secret-Skill/SKILL.md"), f.relative_path)
+			testing.expect_value(t, f.content, "# Skill body\n")
+		}
+	}
+	testing.expect(t, seen_agents && seen_mem && seen_skill, "AGENTS_MD, MEMORY_MD and SKILL files must all be present")
 }

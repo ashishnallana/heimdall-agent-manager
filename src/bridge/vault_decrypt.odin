@@ -224,21 +224,45 @@ bridge_encrypt_vault_ciphertext_hex :: proc(plaintext: string, key_hex: string, 
 	return bridge_encrypt_vault_ciphertext(plaintext, skey.ptr[:VAULT_KEY_BYTES], allocator)
 }
 
+// VAULT_LOCKED_MARKER replaces a vault token that cannot be decrypted because no
+// vault key is available, for callers that opt in via locked_marker (bootstrap
+// files). Raw ciphertext in an agent's AGENTS.md/MEMORY.md reads as garbage and
+// hides the real problem; this names it.
+VAULT_LOCKED_MARKER :: "[encrypted: bridge vault locked]"
+
+// bridge_vault_token_end returns the end index of the 'vault:v1:<base64>' token
+// starting at idx (base64 alphabet, including the URL-safe '-' and '_').
+bridge_vault_token_end :: proc(text: string, idx: int) -> int {
+	tok_end := idx + len(VAULT_ARMOR_PREFIX)
+	for tok_end < len(text) {
+		switch text[tok_end] {
+		case 'A'..='Z', 'a'..='z', '0'..='9', '+', '/', '=', '-', '_':
+			tok_end += 1
+		case:
+			return tok_end
+		}
+	}
+	return tok_end
+}
+
 // bridge_decrypt_embedded_vault_tokens scans text for embedded 'vault:v1:<base64>' tokens,
 // decrypting each with AES-256-GCM using the vault key read via bridge_read_vault_key().
 // Active key material is held in mlock'd + MADV_DONTDUMP memory and zeroed on exit.
 // On success, the token is replaced with the decrypted plaintext.
 // On decryption failure (e.g. invalid base64 or bad tag), the token is replaced with '[Encrypted]'.
-// If the vault key is unconfigured or text contains no tokens, a copy of text is returned as-is.
+// A bare 'vault:v1:' with no payload is prose that mentions the prefix, not a token,
+// and is kept verbatim.
+// If no vault key is available, each token is replaced with locked_marker, or the
+// text is returned unchanged when locked_marker is empty (the default).
 // Caller owns the returned string.
-bridge_decrypt_embedded_vault_tokens :: proc(text: string, allocator := context.allocator) -> string {
+bridge_decrypt_embedded_vault_tokens :: proc(text: string, allocator := context.allocator, locked_marker := "") -> string {
 	if !strings.contains(text, VAULT_ARMOR_PREFIX) {
 		return strings.clone(text, allocator)
 	}
 
 	key_hex, key_ok := bridge_read_vault_key()
 	if !key_ok {
-		return strings.clone(text, allocator)
+		return bridge_replace_embedded_vault_tokens(text, nil, locked_marker, allocator)
 	}
 	defer {
 		mem.zero_explicit(raw_data(key_hex), len(key_hex))
@@ -247,15 +271,25 @@ bridge_decrypt_embedded_vault_tokens :: proc(text: string, allocator := context.
 
 	skey, s_ok := secure_key_alloc(VAULT_KEY_BYTES)
 	if !s_ok {
-		return strings.clone(text, allocator)
+		return bridge_replace_embedded_vault_tokens(text, nil, locked_marker, allocator)
 	}
 	defer secure_key_wipe_and_free(&skey)
 
 	if !bridge_hex_decode_to_buf(skey.ptr[:VAULT_KEY_BYTES], key_hex) {
-		return strings.clone(text, allocator)
+		return bridge_replace_embedded_vault_tokens(text, nil, locked_marker, allocator)
 	}
 
-	raw_key := skey.ptr[:VAULT_KEY_BYTES]
+	return bridge_replace_embedded_vault_tokens(text, skey.ptr[:VAULT_KEY_BYTES], locked_marker, allocator)
+}
+
+// bridge_replace_embedded_vault_tokens does the token scan for
+// bridge_decrypt_embedded_vault_tokens. With a nil raw_key every token becomes
+// locked_marker, or the text is cloned unchanged if locked_marker is empty.
+@(private = "file")
+bridge_replace_embedded_vault_tokens :: proc(text: string, raw_key: []u8, locked_marker: string, allocator := context.allocator) -> string {
+	if raw_key == nil && locked_marker == "" {
+		return strings.clone(text, allocator)
+	}
 
 	b := strings.builder_make(allocator)
 	remaining := text
@@ -265,30 +299,18 @@ bridge_decrypt_embedded_vault_tokens :: proc(text: string, allocator := context.
 			strings.write_string(&b, remaining)
 			break
 		}
+		strings.write_string(&b, remaining[:idx])
 
-		// Write prefix before token
-		if idx > 0 {
-			strings.write_string(&b, remaining[:idx])
-		}
-
-		// Scan token boundary: "vault:v1:" + base64 alphabet [A-Za-z0-9+/=]
-		tok_start := idx
-		tok_end := idx + len(VAULT_ARMOR_PREFIX)
-		tok_loop: for tok_end < len(remaining) {
-			switch remaining[tok_end] {
-			case 'A'..='Z', 'a'..='z', '0'..='9', '+', '/', '=', '-', '_':
-				tok_end += 1
-			case:
-				break tok_loop
-			}
-		}
-
-		token := remaining[tok_start:tok_end]
-		plaintext, dec_ok := bridge_decrypt_vault_ciphertext(token, raw_key, context.temp_allocator)
-		if dec_ok {
-			strings.write_string(&b, plaintext)
-		} else {
-			strings.write_string(&b, "[Encrypted]")
+		tok_end := bridge_vault_token_end(remaining, idx)
+		token := remaining[idx:tok_end]
+		switch {
+		case tok_end == idx + len(VAULT_ARMOR_PREFIX):
+			strings.write_string(&b, token)
+		case raw_key == nil:
+			strings.write_string(&b, locked_marker)
+		case:
+			plaintext, dec_ok := bridge_decrypt_vault_ciphertext(token, raw_key, context.temp_allocator)
+			strings.write_string(&b, plaintext if dec_ok else "[Encrypted]")
 		}
 
 		remaining = remaining[tok_end:]

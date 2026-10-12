@@ -312,3 +312,40 @@ test_bridge_fs_rejects_when_vault_locked :: proc(t: ^testing.T) {
 
 	bridge_workspace_vault_configured = false
 }
+
+// A bare 'vault:v1:' (prose mentioning the prefix) is kept verbatim, and with no
+// vault key an opted-in caller gets the locked marker instead of raw ciphertext.
+@(test)
+test_bridge_vault_embedded_locked_marker_and_bare_prefix :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
+
+	armored, _ := bridge_encrypt_vault_ciphertext_hex("Secret", TEST_VAULT_KEY_HEX)
+	defer delete(armored)
+	text := strings.concatenate({"prefix `vault:v1:` then ", armored, "."})
+	defer delete(text)
+
+	os.set_env("HEIMDALL_VAULT_KEY", TEST_VAULT_KEY_HEX)
+	{
+		got := bridge_decrypt_embedded_vault_tokens(text, locked_marker = VAULT_LOCKED_MARKER)
+		defer delete(got)
+		testing.expect_value(t, got, "prefix `vault:v1:` then Secret.")
+	}
+
+	// An explicitly invalid HEIMDALL_VAULT_KEY makes bridge_read_vault_key fail
+	// without falling through to the keyring, so no key is available.
+	os.set_env("HEIMDALL_VAULT_KEY", "not-a-key")
+	defer os.unset_env("HEIMDALL_VAULT_KEY")
+	{
+		got := bridge_decrypt_embedded_vault_tokens(text, locked_marker = VAULT_LOCKED_MARKER)
+		defer delete(got)
+		testing.expect_value(t, got, strings.concatenate({"prefix `vault:v1:` then ", VAULT_LOCKED_MARKER, "."}, context.temp_allocator))
+	}
+	{
+		got := bridge_decrypt_embedded_vault_tokens(text)
+		defer delete(got)
+		testing.expect_value(t, got, text)
+	}
+}
