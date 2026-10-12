@@ -130,12 +130,16 @@ for x in s: x.close()
 PY
 )"
   p1="${ports% *}"; p2="${ports#* }"
+  mkdir -p "$work/home" "$work/tmp"
+  # Backstops so this can never hang a CI job: `timeout` ends strace (and with
+  # -I 1 strace handles the signal at once and detaches), and the tracee is
+  # killed by its own PID from the trace below. The first version killed only
+  # the strace PID and `wait`ed; on the release runner that waited forever.
   HEIMDALL_BRIDGE_PTY_HOST=false HOME="$work/home" TMPDIR="$work/tmp" \
-    strace -f -o "$trace" "$bin" --daemon-url http://127.0.0.1:9 --bridge-token probe-token \
+    timeout -k 5 90 strace -f -I 1 -o "$trace" "$bin" --daemon-url http://127.0.0.1:9 --bridge-token probe-token \
       --bind-host 127.0.0.1 --port "$p1" --local-endpoint-port "$p2" --local-run-dir "$work/run" \
       --data-dir "$work/data" >"$out" 2>&1 &
   svc=$!
-  mkdir -p "$work/home" "$work/tmp"
   # Wait for both listeners, then connect to each so accept() actually runs.
   python3 - "$p1" "$p2" "$out" <<'PY'
 import socket, sys, time, re, os
@@ -164,7 +168,13 @@ if unix:
 print(f"probe-serve: tcp:{p1}={'ok' if ok1 else 'NO'} tcp:{p2}={'ok' if ok2 else 'NO'} unix={'ok' if ok3 else ('NO ('+str(unix)+')')}", file=sys.stderr)
 PY
   sleep 1
-  kill "$svc" 2>/dev/null || true; wait "$svc" 2>/dev/null || true
+  # Stop the bridge (tracee PID = first PID column in the trace), then strace.
+  tracee="$(grep -m1 -oE '^[0-9]+' "$trace" 2>/dev/null || true)"
+  [ -z "$tracee" ] || kill -TERM "$tracee" 2>/dev/null || true
+  kill -TERM "$svc" 2>/dev/null || true
+  for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$svc" 2>/dev/null || break; sleep 1; done
+  kill -KILL "$svc" 2>/dev/null || true; [ -z "$tracee" ] || kill -KILL "$tracee" 2>/dev/null || true
+  wait "$svc" 2>/dev/null || true
   rc=0
   if ! grep -Eq '^([0-9]+ +)?execve\(.*\) = 0$' "$trace"; then log "FAIL: strace could not trace $bin"; rm -rf "$work"; exit 3; fi
   a4="$(grep -cE '^([0-9]+ +)?accept4\(' "$trace" || true)"; a1="$(grep -cE '^([0-9]+ +)?accept\(' "$trace" || true)"
