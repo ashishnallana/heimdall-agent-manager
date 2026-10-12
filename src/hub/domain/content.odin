@@ -205,6 +205,7 @@ Artifact_List_Filter :: struct {
 TEMPLATE_COORDINATOR_ID :: "tmpl_coordinator"
 TEMPLATE_WORKER_ID :: "tmpl_worker"
 TEMPLATE_REVIEWER_ID :: "tmpl_reviewer"
+TEMPLATE_SOLOIST_ID :: "tmpl_soloist"
 TEMPLATE_EMPTY_ID :: "tmpl_empty"
 TEMPLATE_CURATOR_ID :: "tmpl_curator"
 TEMPLATE_CURATOR :: TEMPLATE_CURATOR_ID

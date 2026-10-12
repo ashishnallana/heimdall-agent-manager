@@ -129,7 +129,7 @@ update_agent :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, agen
 agent_template_available :: proc(service: ^Agent_Service, owner: domain.User_ID, template_id: string) -> bool {
 	if template_id == "" do return false
 	switch template_id {
-	case domain.TEMPLATE_EMPTY_ID, domain.TEMPLATE_COORDINATOR_ID, domain.TEMPLATE_WORKER_ID, domain.TEMPLATE_REVIEWER_ID, domain.TEMPLATE_CURATOR_ID:
+	case domain.TEMPLATE_EMPTY_ID, domain.TEMPLATE_COORDINATOR_ID, domain.TEMPLATE_WORKER_ID, domain.TEMPLATE_REVIEWER_ID, domain.TEMPLATE_SOLOIST_ID, domain.TEMPLATE_CURATOR_ID:
 		return true
 	}
 	if service.content == nil do return false
@@ -1782,8 +1782,11 @@ bootstrap_write_template_and_variables_json :: proc(b: ^strings.Builder, templat
 // bootstrap_template_identity_fields fetches the agent's template persona +
 // instructions for the identity fragment. Returns empty strings when the agent
 // has no template or the lookup misses (miss treated as empty, never an error).
+// Built-in templates resolve to their compiled-in src/templates/*.md content so
+// rows seeded by older migrations cannot shadow the current text.
 bootstrap_template_identity_fields :: proc(service: ^Agent_Service, agent: domain.Agent) -> (persona: string, instructions: string) {
 	if strings.trim_space(agent.template_id) == "" do return "", ""
+	if builtin, ok := domain.builtin_template(agent.template_id); ok do return builtin.persona, builtin.instructions
 	if service == nil || service.content == nil do return "", ""
 	tmpl, ok, _ := iface.content_get_template(service.content, agent.template_id)
 	if !ok do return "", ""

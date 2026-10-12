@@ -16,18 +16,19 @@ fake_content_get_template_none :: proc(ctx: rawptr, id: string) -> (domain.Templ
 	return {}, false, domain.domain_error(.Not_Found, "template not found")
 }
 
-// Fake content repository returning all 4 built-ins already to test deduplication.
+// Fake content repository returning the built-ins already to test deduplication.
 fake_content_list_templates_with_builtins :: proc(ctx: rawptr, owner: domain.User_ID) -> ([]domain.Template, domain.Domain_Error) {
-	out := make([]domain.Template, 4)
+	out := make([]domain.Template, 5)
 	out[0] = domain.Template{template_id = domain.TEMPLATE_COORDINATOR_ID, is_system = true, name = "coordinator"}
 	out[1] = domain.Template{template_id = domain.TEMPLATE_WORKER_ID, is_system = true, name = "worker"}
 	out[2] = domain.Template{template_id = domain.TEMPLATE_REVIEWER_ID, is_system = true, name = "reviewer"}
 	out[3] = domain.Template{template_id = domain.TEMPLATE_EMPTY_ID, is_system = true, name = "empty"}
+	out[4] = domain.Template{template_id = domain.TEMPLATE_SOLOIST_ID, is_system = true, name = "soloist"}
 	return out, {}
 }
 
 @(test)
-test_list_templates_includes_all_four_builtins_without_duplication :: proc(t: ^testing.T) {
+test_list_templates_includes_all_builtins_without_duplication :: proc(t: ^testing.T) {
 	repo := iface.Content_Repository{list_templates = fake_content_list_templates_empty, get_template = fake_content_get_template_none}
 	service := new_content_service(&repo, nil, nil, nil, nil, nil, nil)
 
@@ -39,6 +40,7 @@ test_list_templates_includes_all_four_builtins_without_duplication :: proc(t: ^t
 	has_worker := false
 	has_reviewer := false
 	has_empty := false
+	has_soloist := false
 	has_stale_reviewer := false
 
 	for tmpl in templates {
@@ -66,6 +68,12 @@ test_list_templates_includes_all_four_builtins_without_duplication :: proc(t: ^t
 			testing.expect_value(t, tmpl.name, "empty")
 			testing.expect_value(t, strings.contains(tmpl.instructions, "Role: General Agent"), true)
 		}
+		if tmpl.template_id == domain.TEMPLATE_SOLOIST_ID {
+			has_soloist = true
+			testing.expect_value(t, tmpl.is_system, true)
+			testing.expect_value(t, tmpl.name, "soloist")
+			testing.expect_value(t, strings.contains(tmpl.instructions, "Role: Soloist"), true)
+		}
 		if tmpl.template_id == "tmpl_system_reviewer" do has_stale_reviewer = true
 	}
 
@@ -73,8 +81,9 @@ test_list_templates_includes_all_four_builtins_without_duplication :: proc(t: ^t
 	testing.expect_value(t, has_worker, true)
 	testing.expect_value(t, has_reviewer, true)
 	testing.expect_value(t, has_empty, true)
+	testing.expect_value(t, has_soloist, true)
 	testing.expect_value(t, has_stale_reviewer, false)
-	testing.expect_value(t, len(templates), 4)
+	testing.expect_value(t, len(templates), 5)
 
 	// Now verify deduplication when repository already contains the templates
 	repo_dedup := iface.Content_Repository{list_templates = fake_content_list_templates_with_builtins, get_template = fake_content_get_template_none}
@@ -83,11 +92,11 @@ test_list_templates_includes_all_four_builtins_without_duplication :: proc(t: ^t
 	templates_dedup, err_dedup := list_templates(&service_dedup, contracts.Auth_Context{user_id = "user_1"})
 	defer delete(templates_dedup)
 	testing.expect_value(t, err_dedup.code, domain.Error_Code.None)
-	testing.expect_value(t, len(templates_dedup), 4)
+	testing.expect_value(t, len(templates_dedup), 5)
 }
 
 @(test)
-test_get_template_all_four_builtins :: proc(t: ^testing.T) {
+test_get_template_all_builtins :: proc(t: ^testing.T) {
 	repo := iface.Content_Repository{list_templates = fake_content_list_templates_empty, get_template = fake_content_get_template_none}
 	service := new_content_service(&repo, nil, nil, nil, nil, nil, nil)
 	auth := contracts.Auth_Context{user_id = "user_1"}
@@ -122,10 +131,18 @@ test_get_template_all_four_builtins :: proc(t: ^testing.T) {
 	testing.expect_value(t, err_emp.code, domain.Error_Code.None)
 	testing.expect_value(t, emp.name, "empty")
 	testing.expect_value(t, emp.is_system, true)
+
+	// Soloist
+	solo, ok_solo, err_solo := get_template(&service, auth, domain.TEMPLATE_SOLOIST_ID)
+	testing.expect_value(t, ok_solo, true)
+	testing.expect_value(t, err_solo.code, domain.Error_Code.None)
+	testing.expect_value(t, solo.name, "soloist")
+	testing.expect_value(t, solo.is_system, true)
+	testing.expect_value(t, strings.contains(solo.instructions, "do all of its work yourself"), true)
 }
 
 @(test)
-test_template_available_all_four_builtins :: proc(t: ^testing.T) {
+test_template_available_all_builtins :: proc(t: ^testing.T) {
 	repo := iface.Content_Repository{list_templates = fake_content_list_templates_empty, get_template = fake_content_get_template_none}
 	service := new_content_service(&repo, nil, nil, nil, nil, nil, nil)
 
@@ -133,6 +150,7 @@ test_template_available_all_four_builtins :: proc(t: ^testing.T) {
 	testing.expect_value(t, template_available(&service, "user_1", domain.TEMPLATE_WORKER_ID), true)
 	testing.expect_value(t, template_available(&service, "user_1", domain.TEMPLATE_REVIEWER_ID), true)
 	testing.expect_value(t, template_available(&service, "user_1", domain.TEMPLATE_EMPTY_ID), true)
+	testing.expect_value(t, template_available(&service, "user_1", domain.TEMPLATE_SOLOIST_ID), true)
 	testing.expect_value(t, template_available(&service, "user_1", "tmpl_system_reviewer"), false)
 	testing.expect_value(t, template_available(&service, "user_1", "tmpl_non_existent"), false)
 }

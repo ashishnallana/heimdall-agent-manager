@@ -102,11 +102,12 @@ test_provision_seeds_canonical_agents_and_conversation_project :: proc(t: ^testi
 	testing.expect_value(t, ok, true)
 	testing.expect_value(t, err.code, domain.Error_Code.None)
 
-	// Exactly 3 canonical agents seeded
-	testing.expect_value(t, len(astore.agents), 3)
+	// Exactly 4 canonical agents seeded
+	testing.expect_value(t, len(astore.agents), 4)
 	testing.expect_value(t, count_agents_by_slug(&astore, created.user_id, COORDINATOR_AGENT_SLUG), 1)
 	testing.expect_value(t, count_agents_by_slug(&astore, created.user_id, WORKER_AGENT_SLUG), 1)
 	testing.expect_value(t, count_agents_by_slug(&astore, created.user_id, REVIEWER_AGENT_SLUG), 1)
+	testing.expect_value(t, count_agents_by_slug(&astore, created.user_id, SOLOIST_AGENT_SLUG), 1)
 
 	// Canonical agent templates
 	coord, coord_ok := find_agent_by_slug(&astore, created.user_id, COORDINATOR_AGENT_SLUG)
@@ -123,6 +124,11 @@ test_provision_seeds_canonical_agents_and_conversation_project :: proc(t: ^testi
 	testing.expect_value(t, reviewer_ok, true)
 	testing.expect_value(t, reviewer.template_id, domain.TEMPLATE_REVIEWER_ID)
 	testing.expect_value(t, reviewer.name, REVIEWER_AGENT_SLUG)
+
+	soloist, soloist_ok := find_agent_by_slug(&astore, created.user_id, SOLOIST_AGENT_SLUG)
+	testing.expect_value(t, soloist_ok, true)
+	testing.expect_value(t, soloist.template_id, domain.TEMPLATE_SOLOIST_ID)
+	testing.expect_value(t, soloist.name, SOLOIST_AGENT_SLUG)
 
 	// Dedicated Conversation project seeded
 	testing.expect_value(t, len(pstore.projects), 1)
@@ -152,10 +158,11 @@ test_ensure_canonical_resources_idempotent :: proc(t: ^testing.T) {
 	ensure_canonical_resources(&service, "user_x")
 	ensure_canonical_resources(&service, "user_x")
 
-	testing.expect_value(t, len(astore.agents), 3)
+	testing.expect_value(t, len(astore.agents), 4)
 	testing.expect_value(t, count_agents_by_slug(&astore, "user_x", COORDINATOR_AGENT_SLUG), 1)
 	testing.expect_value(t, count_agents_by_slug(&astore, "user_x", WORKER_AGENT_SLUG), 1)
 	testing.expect_value(t, count_agents_by_slug(&astore, "user_x", REVIEWER_AGENT_SLUG), 1)
+	testing.expect_value(t, count_agents_by_slug(&astore, "user_x", SOLOIST_AGENT_SLUG), 1)
 	testing.expect_value(t, len(pstore.projects), 1)
 	testing.expect_value(t, count_projects_by_slug(&pstore, "user_x", CONVERSATION_PROJECT_SLUG), 1)
 }
@@ -183,10 +190,11 @@ test_create_user_explicit_seeds_canonical_resources :: proc(t: ^testing.T) {
 	testing.expect_value(t, ok, true)
 	testing.expect_value(t, err.code, domain.Error_Code.None)
 
-	testing.expect_value(t, len(astore.agents), 3)
+	testing.expect_value(t, len(astore.agents), 4)
 	testing.expect_value(t, count_agents_by_slug(&astore, created.user_id, COORDINATOR_AGENT_SLUG), 1)
 	testing.expect_value(t, count_agents_by_slug(&astore, created.user_id, WORKER_AGENT_SLUG), 1)
 	testing.expect_value(t, count_agents_by_slug(&astore, created.user_id, REVIEWER_AGENT_SLUG), 1)
+	testing.expect_value(t, count_agents_by_slug(&astore, created.user_id, SOLOIST_AGENT_SLUG), 1)
 	testing.expect_value(t, len(pstore.projects), 1)
 	testing.expect_value(t, count_projects_by_slug(&pstore, created.user_id, CONVERSATION_PROJECT_SLUG), 1)
 }

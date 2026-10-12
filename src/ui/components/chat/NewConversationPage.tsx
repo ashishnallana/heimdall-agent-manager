@@ -22,7 +22,7 @@ import RuntimeConfigurationOptions, { type RuntimeSelection } from './RuntimeCon
 type Attachment = { localId: string; id?: string; file: File; name: string; status: 'uploading' | 'uploaded' | 'error'; error?: string };
 function message(e: any) { return String(e?.error || e?.message || apiErrorText(e)); }
 const label = (name: string, fallback: string) => isVaultArmored(name) ? 'Locked name' : name || fallback;
-const workflowLabel = (agent: any) => agent?.slug === 'coordinator' ? 'Multi-agent workflow' : agent?.slug === 'worker' ? 'Single-agent workflow' : '';
+const workflowLabel = (agent: any) => agent?.slug === 'coordinator' ? 'Multi-agent workflow' : agent?.slug === 'soloist' ? 'Single-agent workflow' : '';
 
 const GREETINGS = [
   { text: 'Hello', lang: 'en' }, { text: 'Hey', lang: 'en' },
@@ -93,7 +93,7 @@ export default function NewConversationPage({ footer }: { embedded?: boolean; fo
   const agents = agentsQuery.data?.agents || [];
   const projects = projectsQuery.data?.projects || [];
   const bridges = bridgesQuery.data?.bridges || [];
-  const favoriteIds = [...(preferences.data?.favorite_agent_ids || [])].sort((a, b) => { const rank = (id: string) => agents.find(agent => agent.agent_id === id)?.slug === 'coordinator' ? 0 : agents.find(agent => agent.agent_id === id)?.slug === 'worker' ? 1 : 2; return rank(a) - rank(b); });
+  const favoriteIds = [...(preferences.data?.favorite_agent_ids || [])].sort((a, b) => { const rank = (id: string) => agents.find(agent => agent.agent_id === id)?.slug === 'coordinator' ? 0 : agents.find(agent => agent.agent_id === id)?.slug === 'soloist' ? 1 : 2; return rank(a) - rank(b); });
   const pinnedIds = preferences.data?.pinned_agent_ids || [];
   const favoritesFull = favoriteIds.length >= 6;
   const support = useListAgentBridgeSupportQuery({ agentId }, { skip: !agentId });
@@ -228,7 +228,7 @@ export default function NewConversationPage({ footer }: { embedded?: boolean; fo
         const agent = agents.find(a => a.agent_id === id); const selected = id === agentId;
         return <button key={id} type="button" data-debug-id={`new-convo-favorite-agent-${id}`} aria-pressed={selected} disabled={!hydrated || sending || !agent || agent.state !== 'active'} onClick={() => chooseAgent(id)} className={`relative flex min-h-20 min-w-0 flex-col items-start justify-center gap-2 rounded-2xl border px-2 py-3 text-left sm:flex-row sm:items-center sm:gap-3 sm:px-4 ${selected ? 'border-accent bg-accent/10' : 'border-subtle bg-surface hover:bg-neutral-soft'} disabled:opacity-50`}>
           <Icon name={agent?.slug === 'coordinator' ? 'tasks' : 'bot'} size={20} className={selected ? 'text-accent' : 'text-muted'} />
-          <span className="min-w-0 w-full sm:flex-1"><span className="block truncate text-xs font-medium text-primary sm:text-base"><VaultText value={agent?.name === 'coordinator' ? 'Coordinator' : agent?.name === 'worker' ? 'Worker' : agent?.name || id} fallback="Agent" /></span>{workflowLabel(agent) ? <span className="block text-[11px] text-muted sm:text-xs">{workflowLabel(agent)}</span> : null}{agent?.state !== 'active' ? <span className="text-xs text-muted">Unavailable</span> : null}</span>
+          <span className="min-w-0 w-full sm:flex-1"><span className="block truncate text-xs font-medium text-primary sm:text-base"><VaultText value={agent?.name === 'coordinator' ? 'Coordinator' : agent?.name === 'soloist' ? 'Soloist' : agent?.name || id} fallback="Agent" /></span>{workflowLabel(agent) ? <span className="block text-[11px] text-muted sm:text-xs">{workflowLabel(agent)}</span> : null}{agent?.state !== 'active' ? <span className="text-xs text-muted">Unavailable</span> : null}</span>
           {selected ? <Icon name="check" size={14} className="absolute right-2 top-2 text-accent" /> : null}
         </button>;
       })}</div>
@@ -252,7 +252,7 @@ export default function NewConversationPage({ footer }: { embedded?: boolean; fo
     </div>
     <Modal open={settingsOpen} onOpenChange={setSettingsOpen} title="Agent settings" size="lg" data-debug-id="new-convo-runtime-modal"><Modal.Body><RuntimeConfigurationOptions bridges={bridges} selection={runtime} onChange={chooseRuntime} disabled={sending} debugPrefix="new-convo" /><p className="mt-4 text-xs text-muted">The agent starts when you send your first message.</p></Modal.Body></Modal>
     <Modal open={favoritesOpen} onOpenChange={setFavoritesOpen} title="Favorite agents" size="lg" data-debug-id="new-convo-favorites-modal"><Modal.Body>
-      <p data-debug-id="new-convo-favorite-limit" className="mb-3 text-xs text-muted">{favoriteIds.length} / 6 favorites. Coordinator and Worker occupy two permanent slots.{favoritesFull ? ' Remove a favorite to add another.' : ''}</p>
+      <p data-debug-id="new-convo-favorite-limit" className="mb-3 text-xs text-muted">{favoriteIds.length} / 6 favorites. Coordinator and Soloist occupy two permanent slots.{favoritesFull ? ' Remove a favorite to add another.' : ''}</p>
       {managementError ? <p role="alert" className="mb-3 text-sm text-danger">{managementError}</p> : null}
       <input data-debug-id="new-convo-favorite-search-input" value={favoriteSearch} onChange={e => setFavoriteSearch(e.target.value)} placeholder="Search existing agents…" className="mb-3 min-h-11 w-full rounded-xl border border-subtle bg-surface px-3 text-base text-primary sm:text-sm" />
       <div className="max-h-64 space-y-2 overflow-auto">{agents.filter(a => (a.state === 'active' || favoriteIds.includes(a.agent_id)) && label(a.name, a.agent_id).toLowerCase().includes(favoriteSearch.toLowerCase())).map(a => {

@@ -25,7 +25,7 @@ launch_preferences_read :: proc(service: ^User_Service, owner: string) -> (Conve
  // Only exact seeded identities are pinned; user-created agents using a similar
  // template remain removable. Provisioning reserves these canonical slugs.
  for agent in agents {
-  if agent.slug == COORDINATOR_AGENT_SLUG || agent.slug == WORKER_AGENT_SLUG {
+  if agent.slug == COORDINATOR_AGENT_SLUG || agent.slug == SOLOIST_AGENT_SLUG {
    id := strings.clone(agent.agent_id, context.temp_allocator)
    known := false; for pinned_id in pinned { if pinned_id == id { known = true; break } }
    if !known { append(&pinned, id); append(&favorites, id) }
@@ -95,13 +95,13 @@ set_agent_favorite_locked :: proc(service: ^User_Service, auth: contracts.Auth_C
  if !found do return {}, false, err
  defer launch_agent_destroy(&agent)
  if string(agent.owner_user_id) != auth.user_id do return {}, false, domain.domain_error(.Not_Found, "agent not found")
- if !favorite && (agent.slug == COORDINATOR_AGENT_SLUG || agent.slug == WORKER_AGENT_SLUG) do return {}, false, domain.domain_error(.Conflict, "Coordinator and Worker are permanent favorites")
+ if !favorite && (agent.slug == COORDINATOR_AGENT_SLUG || agent.slug == SOLOIST_AGENT_SLUG) do return {}, false, domain.domain_error(.Conflict, "Coordinator and Soloist are permanent favorites")
  if favorite && agent.state != .Active do return {}, false, domain.domain_error(.Conflict, "archived agents cannot be added to favorites")
  prefs, read_err := launch_preferences_read(service, auth.user_id)
  if read_err.code != .None do return {}, false, read_err
  already_favorite := false; for id in prefs.favorite_agent_ids { if id == agent_id { already_favorite = true; break } }
  if favorite && !already_favorite && len(prefs.favorite_agent_ids) >= MAX_FAVORITE_AGENTS do return {}, false, domain.domain_error(.Conflict, "You can have up to 6 favorite agents. Remove a favorite before adding another.")
- if !favorite { for id in prefs.pinned_agent_ids { if id == agent_id do return {}, false, domain.domain_error(.Conflict, "Coordinator and Worker are permanent favorites") } }
+ if !favorite { for id in prefs.pinned_agent_ids { if id == agent_id do return {}, false, domain.domain_error(.Conflict, "Coordinator and Soloist are permanent favorites") } }
  ids := make([dynamic]string, context.temp_allocator)
  for id in prefs.favorite_agent_ids { if id != agent_id do append(&ids, id) }
  if favorite do append(&ids, strings.clone(agent_id, context.temp_allocator))

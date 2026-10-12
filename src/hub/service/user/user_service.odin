@@ -10,7 +10,7 @@ User_Service :: struct {
  launch_preferences_mutex: sync.Mutex,
  bridges: ^iface.Bridge_Repository,
 	users:    ^iface.User_Repository,
-	// agents lets provisioning seed canonical durable agents ('coordinator', 'worker', 'reviewer')
+	// agents lets provisioning seed canonical durable agents ('coordinator', 'worker', 'reviewer', 'soloist')
 	// for new users so first-time users always have agents to start. Optional (nil in tests that
 	// only exercise user CRUD); seeding is skipped when nil.
 	agents:   ^iface.Agent_Repository,
@@ -39,6 +39,9 @@ new_user_service :: proc{new_user_service_full, new_user_service_compat, new_use
 COORDINATOR_AGENT_SLUG :: "coordinator"
 WORKER_AGENT_SLUG      :: "worker"
 REVIEWER_AGENT_SLUG    :: "reviewer"
+// SOLOIST_AGENT_SLUG is the single-agent-workflow identity: it coordinates its own task chain
+// but does all the work itself, using tasks only to track it.
+SOLOIST_AGENT_SLUG     :: "soloist"
 
 CONVERSATION_PROJECT_SLUG :: "conversation"
 CONVERSATION_PROJECT_NAME :: "Conversation"
@@ -54,14 +57,15 @@ Canonical_Agent_Spec :: struct {
 	template_id: string,
 }
 
-CANONICAL_AGENTS :: [3]Canonical_Agent_Spec{
+CANONICAL_AGENTS :: [4]Canonical_Agent_Spec{
 	{name = COORDINATOR_AGENT_SLUG, slug = COORDINATOR_AGENT_SLUG, template_id = domain.TEMPLATE_COORDINATOR_ID},
 	{name = WORKER_AGENT_SLUG,      slug = WORKER_AGENT_SLUG,      template_id = domain.TEMPLATE_WORKER_ID},
 	{name = REVIEWER_AGENT_SLUG,    slug = REVIEWER_AGENT_SLUG,    template_id = domain.TEMPLATE_REVIEWER_ID},
+	{name = SOLOIST_AGENT_SLUG,     slug = SOLOIST_AGENT_SLUG,     template_id = domain.TEMPLATE_SOLOIST_ID},
 }
 
-// ensure_canonical_resources seeds the 3 canonical durable agents (coordinator,
-// worker, reviewer) and the dedicated Conversation project for owner if they do
+// ensure_canonical_resources seeds the 4 canonical durable agents (coordinator,
+// worker, reviewer, soloist) and the dedicated Conversation project for owner if they do
 // not exist yet. Idempotent and best-effort: provisioning a user must never fail
 // because resource seeding did. No-op when the respective repositories are not wired.
 ensure_canonical_resources :: proc(service: ^User_Service, owner: domain.User_ID) {
@@ -70,7 +74,7 @@ ensure_canonical_resources :: proc(service: ^User_Service, owner: domain.User_ID
 
 	now := platform.clock_now(service.clock)
 
-	// 1. Seed canonical durable agents (coordinator, worker, reviewer)
+	// 1. Seed canonical durable agents (coordinator, worker, reviewer, soloist)
 	if service.agents != nil {
 		existing, list_err := iface.agent_list_by_owner(service.agents, owner, 200, "")
 		if list_err.code == .None {
