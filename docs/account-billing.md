@@ -29,18 +29,18 @@ POST https://<hub-host>/api/v1/billing/paddle/webhook
 
 Configure subscription lifecycle notifications (`subscription.created`, `subscription.updated`, `subscription.activated`, `subscription.trialing`, `subscription.past_due`, `subscription.paused`, `subscription.resumed`, `subscription.canceled`). The receiver processes signed `subscription.*` snapshots and acknowledges other signed notification types without changing access.
 
-In the reverse proxy, exempt **only this webhook route and POST method** from the Authentik login redirect. Preserve the raw body and `Paddle-Signature` header. Apply a 1 MiB body limit at the proxy as well; the handler refuses larger bodies but the shared HTTP reader has a larger artifact-upload limit. Keep account, checkout, and portal routes authenticated. If your deployment sets CSP, permit the Paddle script and checkout frames according to Paddle's integration requirements.
+In the reverse proxy, exempt **only this webhook route and POST method** from the Authentik login redirect. Preserve the raw body and `Paddle-Signature` header. Apply a 1 MiB body limit at the proxy as well; the handler refuses larger bodies but the shared HTTP reader has a larger artifact-upload limit. Keep account, checkout, and portal routes authenticated. Checkout leaves the authenticated origin for Paddle's default payment URL, so no Paddle script or frame CSP exemption is needed on the hub.
 
 ## API and purchase flow
 
 - `GET /api/v1/account/billing` returns the current authenticated user's plan display metadata, effective parameters, eligible offers, billing dates/state, and public checkout configuration. New users receive persisted Free defaults at provisioning; this read also initializes any missing rows.
-- `POST /api/v1/account/billing/checkout` accepts only an `offer_id`. The hub resolves its approved price and creates a Paddle transaction containing a random, persisted checkout reference. Paddle.js opens that transaction in an overlay. Checkout creation does not grant entitlements.
+- `POST /api/v1/account/billing/checkout` accepts only an `offer_id`. The hub resolves its approved price and creates a Paddle transaction containing a random, persisted checkout reference. It returns `transaction_id` and Paddle's `checkout_url`; the hub and the browser both require HTTPS, no embedded credentials, and exactly one `_ptxn` equal to that transaction before the browser navigates there with `window.location.assign()`. Paddle.js is not loaded on the authenticated origin. Checkout creation does not grant entitlements.
 - `POST /api/v1/account/billing/portal` creates a temporary Paddle customer portal URL from the authenticated account's persisted customer mapping. Links are not stored or cached.
 - `POST /api/v1/billing/paddle/webhook` verifies HMAC-SHA256 against original request bytes with timestamp bounds, then atomically applies subscription state, resolved parameters, and the event deduplication record.
 
-Webhooks link new subscriptions through a server-created checkout reference, not email or arbitrary client account metadata. Later updates resolve by stored subscription ID. Unmapped subscriptions, unknown prices, and mismatched customers are rejected for operator review/retry. Repeated checkout clicks reuse a prepared transaction; concurrent preparation is rejected. Ambiguous API failures retain the reservation for 20 minutes rather than immediately risking another transaction.
+Webhooks link new subscriptions through a server-created checkout reference, not email or arbitrary client account metadata. Later updates resolve by stored subscription ID. Unmapped subscriptions, unknown prices, and mismatched customers are rejected for operator review/retry. Repeated checkout clicks reuse a prepared transaction and re-fetch its validated checkout URL instead of creating another; concurrent preparation is rejected. Ambiguous API failures retain the reservation for 20 minutes rather than immediately risking another transaction.
 
-The Account page polls pending checkout state and refreshes on focus. Browser completion events only trigger refresh; only persisted webhook state changes the displayed plan and parameters.
+The Account page polls pending checkout state and refreshes on focus after the user returns from Paddle; only persisted webhook state changes the displayed plan and parameters.
 
 ## Persistence and custom plans
 
@@ -75,7 +75,7 @@ The next account read resolves and persists the effective values. Set an overrid
 
 ## Verification
 
-Tests cover database restart persistence, owner isolation, custom plan parameters, explicit zero/false overrides, stale/duplicate events, rejected prices with rollback, grace expiry, account-bound checkout/portal logic, raw-byte signatures and microsecond event ordering, UI checkout callbacks, and portal URL validation.
+Tests cover database restart persistence, owner isolation, custom plan parameters, explicit zero/false overrides, stale/duplicate events, rejected prices with rollback, grace expiry, account-bound checkout/portal logic, raw-byte signatures and microsecond event ordering, checkout URL validation and redirect, and portal URL validation.
 
 A built hub can run the isolated HTTP smoke test:
 
@@ -85,4 +85,4 @@ HEIMDALL_BILLING_TEST_BINARY=/path/to/ham-hub python3 tests/test_account_billing
 
 The test creates a temporary database and loopback listener, uses a fake webhook secret, and never contacts Paddle or an existing bridge. A real sandbox purchase still requires configuring your Paddle credentials and notification destination. Before paid rollout, finish reconciliation, identity migration policy, refunds/chargebacks policy, and the deployment checklist in [the subscription plan](plans/paddle-subscriptions-checklist.md).
 
-Paddle references: [server-created transactions](https://developer.paddle.com/api-reference/transactions/create-transaction/), [Paddle.js transaction checkout](https://developer.paddle.com/paddle-js/methods/paddle-checkout-open/), [signature verification](https://developer.paddle.com/webhooks/about/signature-verification/), and [customer portal sessions](https://developer.paddle.com/api-reference/customer-portals/create-customer-portal-session/).
+Paddle references: [server-created transactions](https://developer.paddle.com/api-reference/transactions/create-transaction/), [signature verification](https://developer.paddle.com/webhooks/about/signature-verification/), and [customer portal sessions](https://developer.paddle.com/api-reference/customer-portals/create-customer-portal-session/).

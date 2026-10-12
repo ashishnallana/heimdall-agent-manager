@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { describeEntitlements } from '../src/ui/utils/accountEntitlements.ts';
-import { openPaddleCheckout, clearPaddleCheckoutHandler, validatePortalUrl } from '../src/ui/services/paddleCheckout.ts';
+import { redirectToCheckout, validateCheckoutUrl, validatePortalUrl } from '../src/ui/services/paddleCheckout.ts';
 
 test('user parameters describe custom bridge counts and explicit streaming grants', () => {
   assert.equal(describeEntitlements({ max_bridges: 0, terminal_streaming_enabled: false }), '0 bridges · Terminal streaming not included');
@@ -10,40 +10,25 @@ test('user parameters describe custom bridge counts and explicit streaming grant
   assert.equal(describeEntitlements({ max_bridges: 12, terminal_streaming_enabled: true }), '12 bridges · Terminal streaming included');
 });
 
-test('checkout opens only the server transaction and treats completion as a notification', async () => {
-  const dom = new JSDOM('<!doctype html><html><head></head><body></body></html>');
-  const oldWindow = globalThis.window;
-  const oldDocument = globalThis.document;
-  Object.assign(globalThis, { window: dom.window, document: dom.window.document });
-  const calls: unknown[] = [];
-  let callback: (event: { name: string }) => void = () => {};
-  let completed = 0;
-  (dom.window as any).Paddle = {
-    Environment: { set: (env: string) => calls.push(env) },
-    Initialize: (options: any) => { calls.push(options.token); callback = options.eventCallback; },
-    Checkout: { open: (options: any) => calls.push(options) },
-  };
-  try {
-    await openPaddleCheckout({ transactionId: 'txn_server123', clientToken: 'test_browser_token', environment: 'sandbox', theme: 'dark', onCompleted: () => completed++ });
-    assert.deepEqual(calls, ['sandbox', 'test_browser_token', { transactionId: 'txn_server123', settings: { displayMode: 'overlay', theme: 'dark' } }]);
-    callback({ name: 'checkout.loaded' });
-    assert.equal(completed, 0);
-    callback({ name: 'checkout.completed' });
-    assert.equal(completed, 1);
-    clearPaddleCheckoutHandler();
-    callback({ name: 'checkout.completed' });
-    assert.equal(completed, 1, 'closed account panels do not retain callbacks');
-    const abort = new AbortController();
-    abort.abort();
-    const before = calls.length;
-    await assert.rejects(openPaddleCheckout({ transactionId: 'txn_server123', clientToken: 'test_browser_token', environment: 'sandbox', theme: 'dark', signal: abort.signal, onCompleted: () => {} }), { name: 'AbortError' });
-    assert.equal(calls.length, before, 'switching away from the account cancels a pending checkout');
-    await assert.rejects(openPaddleCheckout({ transactionId: 'pri_arbitrary', clientToken: 'test_browser_token', environment: 'sandbox', theme: 'dark', onCompleted: () => {} }), /not configured/);
-    await assert.rejects(openPaddleCheckout({ transactionId: 'txn_server123', clientToken: 'live_other', environment: 'live', theme: 'dark', onCompleted: () => {} }), /Refresh the page/);
-  } finally {
-    Object.assign(globalThis, { window: oldWindow, document: oldDocument });
-    dom.window.close();
+test('checkout redirects to the validated Paddle URL without loading Paddle.js', () => {
+  const dom = new JSDOM('<!doctype html><html><head></head><body></body></html>', { url: 'https://hub.example.test/settings' });
+  const assigned: string[] = [];
+  const location = { assign: (url: string) => assigned.push(url) };
+  const url = 'https://www.brolabs.ai/heimdall/checkout?_ptxn=txn_01m4qhm8k14vqm92dwdbh8a8xh';
+  redirectToCheckout({ transaction_id: 'txn_01m4qhm8k14vqm92dwdbh8a8xh', checkout_url: url }, location);
+  assert.deepEqual(assigned, [url]);
+  assert.throws(() => redirectToCheckout({ transaction_id: 'txn_server123', checkout_url: 'https://pay.example.test/?_ptxn=txn_other' }, location), /Invalid checkout link/);
+  assert.equal(assigned.length, 1, 'rejected links never navigate');
+  assert.equal(dom.window.document.querySelectorAll('script').length, 0, 'no Paddle.js on the authenticated origin');
+  dom.window.close();
+});
+
+test('checkout links reject untrusted destinations and transaction mismatches', () => {
+  assert.equal(validateCheckoutUrl('https://pay.example.test/checkout?a=1&_ptxn=txn_abc', 'txn_abc'), 'https://pay.example.test/checkout?a=1&_ptxn=txn_abc');
+  for (const url of ['', 'not a url', 'javascript:alert(1)//?_ptxn=txn_abc', 'http://pay.example.test/?_ptxn=txn_abc', 'https://user:pass@pay.example.test/?_ptxn=txn_abc', 'https://pay.example.test@evil.test/?_ptxn=txn_evil', 'https://pay.example.test/', 'https://pay.example.test/?_ptxn=txn_other', 'https://pay.example.test/?_ptxn=txn_abcd', 'https://pay.example.test/?_ptxn=txn_abc&_ptxn=txn_abc', 'https://pay.example.test/#?_ptxn=txn_abc']) {
+    assert.throws(() => validateCheckoutUrl(url, 'txn_abc'), /Invalid checkout link/, url);
   }
+  assert.throws(() => validateCheckoutUrl('https://pay.example.test/?_ptxn=pri_abc', 'pri_abc'), /Invalid checkout link/);
 });
 
 test('portal links reject spoofed origins and non-HTTPS URLs', () => {

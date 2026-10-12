@@ -36,7 +36,7 @@ export const accountBillingApi = heimdallApi.injectEndpoints({
         catch (error) { return { error: { status: 'CUSTOM_ERROR', error: (error as Error).message } }; }
       },
     }),
-    createAccountCheckout: build.mutation<{ transaction_id: string }, string>({
+    createAccountCheckout: build.mutation<{ transaction_id: string; checkout_url: string }, string>({
       queryFn: async (offerId) => {
         try { return { data: await cookieMutation('/account/billing/checkout', 'POST', { offer_id: offerId }) }; }
         catch (error) { return { error: { status: 'CUSTOM_ERROR', error: (error as Error).message } }; }

@@ -4,11 +4,9 @@ import type { SettingsUser } from './SettingsModal';
 import { describeEntitlements } from '../../utils/accountEntitlements';
 import { useGetAccountBillingQuery, useCreateAccountCheckoutMutation, useCreateAccountPortalMutation } from '../../api/endpoints/accountBilling';
 import { apiErrorText } from '../../api/cookieFetch';
-import { openPaddleCheckout, clearPaddleCheckoutHandler, validatePortalUrl } from '../../services/paddleCheckout';
-import { useTheme } from '../../store/themeSlice';
+import { redirectToCheckout, validatePortalUrl } from '../../services/paddleCheckout';
 
 export default function AccountPanel({ user }: { user: SettingsUser | null }) {
-  const [awaitingActivation, setAwaitingActivation] = useState(false);
   const [pollPending, setPollPending] = useState(false);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -19,32 +17,33 @@ export default function AccountPanel({ user }: { user: SettingsUser | null }) {
     activeUser.current = user?.user_id;
     const controller = new AbortController();
     checkoutAbort.current = controller;
-    setAwaitingActivation(false); setPollPending(false); setError(''); setBusy(false);
-    clearPaddleCheckoutHandler();
-    return () => { controller.abort(); activeUser.current = undefined; clearPaddleCheckoutHandler(); };
+    setPollPending(false); setError(''); setBusy(false);
+    return () => { controller.abort(); activeUser.current = undefined; };
   }, [user?.user_id]);
-  const { theme } = useTheme();
-  const billingQuery = useGetAccountBillingQuery(user?.user_id || '', { skip: !user?.user_id, pollingInterval: awaitingActivation || pollPending ? 5000 : 0, refetchOnFocus: true, refetchOnMountOrArgChange: true });
+  const billingQuery = useGetAccountBillingQuery(user?.user_id || '', { skip: !user?.user_id, pollingInterval: pollPending ? 5000 : 0, refetchOnFocus: true, refetchOnMountOrArgChange: true });
   const [createCheckout] = useCreateAccountCheckoutMutation();
   const [createPortal] = useCreateAccountPortalMutation();
   const subscription = billingQuery.currentData;
   useEffect(() => {
     setPollPending(Boolean(subscription?.checkout_pending));
-    if (subscription && !subscription.checkout_pending) setAwaitingActivation(false);
   }, [subscription]);
 
   async function upgrade(offerId: string) {
     if (!subscription) return;
     const owner = user?.user_id;
     const signal = checkoutAbort.current.signal;
+    let leaving = false;
     setBusy(true); setError('');
     try {
       const result = await createCheckout(offerId).unwrap();
-      if (activeUser.current !== owner) return;
-      await openPaddleCheckout({ transactionId: result.transaction_id, clientToken: subscription.client_token, environment: subscription.environment, theme: theme.appearance, signal, onCompleted: () => { setAwaitingActivation(true); void billingQuery.refetch(); } });
-      void billingQuery.refetch();
+      if (signal.aborted || activeUser.current !== owner) return;
+      // Leave the authenticated origin for Paddle's approved checkout page. On
+      // return, checkout_pending keeps this panel polling until the webhook
+      // fulfills the subscription.
+      redirectToCheckout(result);
+      leaving = true;
     } catch (err) { if (!signal.aborted && activeUser.current === owner) setError(apiErrorText(err, 'Could not open checkout.')); }
-    finally { if (activeUser.current === owner) setBusy(false); }
+    finally { if (!leaving && activeUser.current === owner) setBusy(false); }
   }
 
   async function manageSubscription() {
@@ -100,7 +99,7 @@ export default function AccountPanel({ user }: { user: SettingsUser | null }) {
           {subscription.cancels_at && <p className="mt-3 text-xs text-muted">Cancels {new Date(subscription.cancels_at).toLocaleDateString()}</p>}
           {subscription.status === 'past_due' && <p className="mt-3 text-sm text-danger">Payment needs attention. Update your payment method to keep your subscription active.</p>}
           {subscription.status === 'paused' && <p className="mt-3 text-xs text-muted">Subscription paused.</p>}
-          {awaitingActivation && subscription.checkout_pending && <p className="mt-3 text-sm text-muted" role="status">Payment received. Waiting for subscription confirmation…</p>}
+          {subscription.checkout_pending && <p className="mt-3 text-sm text-muted" role="status">Checkout started. Your plan updates here once Paddle confirms payment.</p>}
           {!subscription.checkout_enabled && <p className="mt-4 text-xs text-muted">Billing setup is in progress. Upgrades are not available yet.</p>}
           {(subscription.offers || []).map((offer) => <div key={offer.offer_id} className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-subtle pt-4">
             <div><h4 className="text-sm font-semibold text-primary">{offer.plan_label}</h4><p className="mt-1 text-xs text-muted">{describeEntitlements(offer.entitlements)}</p></div>
