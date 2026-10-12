@@ -623,9 +623,22 @@ function identityChip(challenge) {
     el('label', { text: 'Signing in as' }),
     el('div', { cls: 'ident-chip' }, [
       who,
-      el('button', { type: 'button', text: 'Change', onclick: () => { location.href = location.pathname + location.search; } }),
+      el('button', { type: 'button', text: 'Change', onclick: () => { location.href = changeUserUrl(challenge); } }),
     ]),
   ]);
+}
+
+/**
+ * Where "Change" goes. Reloading is not enough: the pending user lives in the flow plan in
+ * the Authentik session, so the executor would hand back the same password stage. The
+ * cancel view (flow_info.cancel_url, what the stock UI's "Not you?" uses) drops the plan,
+ * then honours a relative `next` — so it lands back here, with the original query
+ * (`?next=`, `?itoken=`) intact, at a fresh identification stage.
+ */
+function changeUserUrl(challenge) {
+  const url = new URL(challenge.flow_info?.cancel_url || '/flows/-/cancel/', location.origin);
+  url.searchParams.set('next', location.pathname + location.search);
+  return url.pathname + url.search;
 }
 
 /** Server-side validation messages for one field, e.g. "Invalid password". */
