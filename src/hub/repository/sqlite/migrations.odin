@@ -378,9 +378,11 @@ MIGRATION_077_SOLOIST_AGENT :: #load("migrations/077_soloist_agent.sql", string)
 
 MIGRATION_078_DROP_STALE_BUILTIN_TEMPLATE_ROWS :: #load("migrations/078_drop_stale_builtin_template_rows.sql", string)
 
+MIGRATION_079_REPAIR_PROVIDER_CATALOG_ETAG :: #load("migrations/079_repair_provider_catalog_etag.sql", string)
+
 MIGRATION_075_CONVERSATION_LAUNCH_PREFERENCES :: #load("migrations/075_conversation_launch_preferences.sql", string)
 
-migration_order :: [82]string {
+migration_order :: [83]string {
 	"001_foundation.sql",
 	"002_owner_scoped_core.sql",
 	"003_device_tokens.sql",
@@ -463,6 +465,7 @@ migration_order :: [82]string {
 	"076_fleet_bridge_models.sql",
 	"077_soloist_agent.sql",
 	"078_drop_stale_builtin_template_rows.sql",
+	"079_repair_provider_catalog_etag.sql",
 }
 
 run_migrations :: proc(
@@ -883,6 +886,7 @@ migration_sql :: proc(name, migrations_dir: string) -> string {
 	if name == "066_antigravity_trust_detection.sql" do return strings.clone(MIGRATION_066_ANTIGRAVITY_TRUST_DETECTION)
 	if name == "067_codex_sandbox_and_models.sql" do return strings.clone(MIGRATION_067_CODEX_SANDBOX_AND_MODELS)
 	if name == "070_free_one_bridge.sql" do return strings.clone(MIGRATION_070_FREE_ONE_BRIDGE)
+	if name == "079_repair_provider_catalog_etag.sql" do return strings.clone(MIGRATION_079_REPAIR_PROVIDER_CATALOG_ETAG)
 	if name == "078_drop_stale_builtin_template_rows.sql" do return strings.clone(MIGRATION_078_DROP_STALE_BUILTIN_TEMPLATE_ROWS)
 	if name == "077_soloist_agent.sql" do return strings.clone(MIGRATION_077_SOLOIST_AGENT)
 	if name == "076_fleet_bridge_models.sql" do return strings.clone(MIGRATION_076_FLEET_BRIDGE_MODELS)
