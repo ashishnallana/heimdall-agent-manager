@@ -3279,7 +3279,7 @@ def test_seccomp_probe_denylist_is_bionic_verified(ctx):
     assert m, 'android-seccomp-probe.sh must define DENYLIST'
     denied = set(m.group(1).split('|'))
     assert denied == {'set_robust_list', 'rseq', 'clone3', 'io_uring_[a-z_]+', 'add_key',
-                      'keyctl', 'request_key', 'memfd_secret'}, sorted(denied)
+                      'keyctl', 'request_key', 'memfd_secret', 'accept'}, sorted(denied)
     # Allowed by Android 12 and 15 app policy; statx is called at runtime by
     # Odin's core:os, so denying it would fail every correct binary.
     for allowed in ('statx', 'membarrier', 'personality', 'setns', 'unshare'):

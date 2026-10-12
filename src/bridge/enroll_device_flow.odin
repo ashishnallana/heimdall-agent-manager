@@ -827,12 +827,22 @@ bridge_enroll_restart_service :: proc() -> bool {
 	defer if len(stdout) > 0 do delete(stdout)
 	defer if len(stderr) > 0 do delete(stderr)
 	if err != nil || !state.success {
-		fmt.eprintln("bridge enroll: credential saved, but the registered service could not be restarted.")
-		fmt.eprintfln("  Start it manually with: %s", strings.join(argv, " ", context.temp_allocator))
+		fmt.eprintln("bridge enroll: enrollment SUCCEEDED and the credential (and the delivered vault key) are saved, but the registered service could not be restarted.")
+		fmt.eprintfln("  command: %s (exit %d, err %v)", strings.join(argv, " ", context.temp_allocator), state.exit_code, err)
+		if out := strings.trim_space(string(stdout)); out != "" do fmt.eprintfln("  stdout: %s", out)
+		if se := strings.trim_space(string(stderr)); se != "" do fmt.eprintfln("  stderr: %s", se)
+		fmt.eprintfln("  Start it manually with: %s — then check its log; the vault key stays persisted, no re-enrollment needed.", strings.join(argv, " ", context.temp_allocator))
+		bridge_enroll_service_start_failed = true
 		return false
 	}
 	return true
 }
+
+// Set when enrollment itself completed (credential and, if delivered, the
+// vault key are persisted) and only the service restart failed. main maps it
+// to exit code 3 so an installer can distinguish "enrolled, service down" from
+// "not enrolled" instead of telling the operator to re-enroll.
+bridge_enroll_service_start_failed: bool
 
 // bridge_enroll_vault_key_persisted reports whether a restarted bridge would find
 // bridge_id's vault key in the OS store. Under Termux the key is also cached in
@@ -1055,7 +1065,8 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 				}
 			}
 			if !bridge_enroll_restart_service() {
-				if cred.vault_delivery_expected do keystore_lock_and_purge(cred.bridge_id)
+				// The key (when delivered) was verified persisted above; a restart
+				// failure is an operational problem, not a reason to destroy it.
 				return false
 			}
 			fmt.println("  registered bridge service restarted with the new credential")

@@ -87,7 +87,7 @@ bridge_local_endpoint_start_loopback :: proc(config: Bridge_Local_Endpoint_Confi
 
 bridge_local_endpoint_accept_unix_loop :: proc(listener: posix.FD) {
 	for {
-		client := posix.accept(listener, nil, nil)
+		client := bridge_accept_unix(listener)
 		if client < 0 do continue
 		thread.run_with_poly_data(client, bridge_local_endpoint_unix_client_thread)
 	}

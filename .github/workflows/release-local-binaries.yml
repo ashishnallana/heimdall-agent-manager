@@ -296,6 +296,10 @@ jobs:
           tar -xzf "dist/heimdall-local-${{ matrix.target }}.tar.gz" -C "$work"
           scripts/release/android-seccomp-probe.sh check \
             "$work/bin/ham-bridge" "$work/bin/ham-ctl" "$work/bin/heimdall" "$work/bin/ham-pty-host"
+          # T17: --version never accepts a connection; run the bridge as a service
+          # and connect to its listeners so accept(2) vs accept4(2) is actually
+          # exercised (SIGSYS __NR_accept on a real device, v0.3.32).
+          scripts/release/android-seccomp-probe.sh serve "$work/bin/ham-bridge"
 
       - name: Verify release binaries are portable (macOS)
         if: ${{ startsWith(matrix.target, 'darwin-') }}

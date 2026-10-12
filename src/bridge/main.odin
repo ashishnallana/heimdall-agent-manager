@@ -78,7 +78,7 @@ main :: proc() {
 			fmt.eprintln("    ham-bridge enroll --hub https://your-hub-url [--bridge-token-file PATH] [--headless]")
 			os.exit(1)
 		}
-		if !bridge_enroll_device_command(os.args) do os.exit(1)
+		if !bridge_enroll_device_command(os.args) do os.exit(3 if bridge_enroll_service_start_failed else 1)
 		return
 	}
 	if has_flag(os.args, "--bridge-wrapper-supervisor") || (len(os.args) > 1 && os.args[1] == "wrapper-supervisor") {

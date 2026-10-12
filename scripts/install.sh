@@ -116,7 +116,13 @@ PY
     --data-dir "$data_dir" --port "$bridge_port" --local-endpoint-port "$endpoint_port" \
     --local-run-dir "$run_dir" || status=$?
   rm -rf "$compat"
-  [ "$status" -eq 0 ] || fail "Enrollment failed (status $status). Re-run with --re-enroll."
+  if [ "$status" -eq 3 ] && [ -s "$token_file" ]; then
+    # ham-bridge exit 3: enrolled and persisted, only its own service restart
+    # failed. The registration/readiness steps below start and verify the service.
+    log WARN 'Enrollment succeeded; the bridge could not restart its service itself. Continuing with service start and readiness checks.'
+  else
+    [ "$status" -eq 0 ] || fail "Enrollment failed (status $status). Re-run with --re-enroll."
+  fi
   [ -s "$token_file" ] || fail 'Enrollment did not write a credential.'
   chmod 600 "$token_file"
 }

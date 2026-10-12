@@ -45,6 +45,10 @@ usage: android-seccomp-probe.sh check <binary> [binary...]
 
 check    Trace `<binary> --version` and `<binary> --help` under strace -f and
          exit 1 if any denylisted syscall appears (offending lines printed).
+serve    Start `<ham-bridge>` as an isolated service (unreachable hub, loopback
+         listeners, temp run dir) under strace -f, connect to its TCP and Unix
+         endpoints so the listeners actually accept, then stop it and apply the
+         same denylist to the whole runtime trace (exit codes as for check).
 control  Negative control: exit 0 only if the probe REJECTS <glibc-binary> and
          names set_robust_list, proving the probe can see what killed the
          device. Exit 1 if the probe passes it.
@@ -54,7 +58,11 @@ Exit codes: 0 pass, 1 denylisted syscall found (or control not rejected),
 USAGE
 }
 
-DENYLIST='set_robust_list|rseq|clone3|io_uring_[a-z_]+|add_key|keyctl|request_key|memfd_secret'
+# accept: bionic implements accept() as accept4(), so plain accept(2) is not
+# allowlisted — observed as SIGSYS __NR_accept on an Android 15 device when the
+# bridge's Unix listener (libc accept via musl) took its first connection.
+# accept4 is allowed and is what the pattern deliberately does not match.
+DENYLIST='set_robust_list|rseq|clone3|io_uring_[a-z_]+|add_key|keyctl|request_key|memfd_secret|accept'
 # A syscall strace cannot name is printed as syscall_0x<nr>; it may be a newer
 # denylisted one, so it fails too rather than slipping through undecoded.
 PATTERN="^([0-9]+ +)?(<\\.\\.\\. +)?(${DENYLIST}|syscall_0x[0-9a-f]+)[ (]"
@@ -101,7 +109,7 @@ check_binary() {
 cmd="$1"; shift
 case "$cmd" in
   -h|--help) usage; exit 0 ;;
-  check|control) ;;
+  check|control|serve) ;;
   *) usage; exit 2 ;;
 esac
 [ "$#" -ge 1 ] || { usage; exit 2; }
@@ -109,6 +117,64 @@ command -v strace >/dev/null 2>&1 || { log 'FAIL: strace is required'; exit 3; }
 for bin in "$@"; do
   [ -f "$bin" ] && [ -x "$bin" ] || { log "FAIL: not an executable file: $bin"; exit 2; }
 done
+
+if [ "$cmd" = serve ]; then
+  [ "$#" -eq 1 ] || { usage; exit 2; }
+  bin="$1"; work="$(mktemp -d)"; trace="$work/trace"; out="$work/stdout"
+  ports="$(python3 - <<'PY'
+import socket
+s=[socket.socket() for _ in range(2)]
+for x in s: x.bind(('127.0.0.1',0))
+print(*(x.getsockname()[1] for x in s))
+for x in s: x.close()
+PY
+)"
+  p1="${ports% *}"; p2="${ports#* }"
+  HEIMDALL_BRIDGE_PTY_HOST=false HOME="$work/home" TMPDIR="$work/tmp" \
+    strace -f -o "$trace" "$bin" --daemon-url http://127.0.0.1:9 --bridge-token probe-token \
+      --bind-host 127.0.0.1 --port "$p1" --local-endpoint-port "$p2" --local-run-dir "$work/run" \
+      --data-dir "$work/data" >"$out" 2>&1 &
+  svc=$!
+  mkdir -p "$work/home" "$work/tmp"
+  # Wait for both listeners, then connect to each so accept() actually runs.
+  python3 - "$p1" "$p2" "$out" <<'PY'
+import socket, sys, time, re, os
+p1, p2, outp = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
+def poke(connect):
+    for _ in range(100):
+        try:
+            s = connect(); s.settimeout(1)
+            try: s.sendall(b"GET /probe HTTP/1.0\r\n\r\n"); s.recv(64)
+            except Exception: pass
+            s.close(); return True
+        except Exception: time.sleep(0.1)
+    return False
+ok1 = poke(lambda: socket.create_connection(('127.0.0.1', p1), timeout=1))
+ok2 = poke(lambda: socket.create_connection(('127.0.0.1', p2), timeout=1))
+unix = None
+for _ in range(50):
+    m = re.search(r'local endpoint unix:(\S+)', open(outp).read() if os.path.exists(outp) else '')
+    if m: unix = m.group(1); break
+    time.sleep(0.1)
+ok3 = False
+if unix:
+    def cu():
+        s = socket.socket(socket.AF_UNIX); s.connect(unix); return s
+    ok3 = poke(cu)
+print(f"probe-serve: tcp:{p1}={'ok' if ok1 else 'NO'} tcp:{p2}={'ok' if ok2 else 'NO'} unix={'ok' if ok3 else ('NO ('+str(unix)+')')}", file=sys.stderr)
+PY
+  sleep 1
+  kill "$svc" 2>/dev/null || true; wait "$svc" 2>/dev/null || true
+  rc=0
+  if ! grep -Eq '^([0-9]+ +)?execve\(.*\) = 0$' "$trace"; then log "FAIL: strace could not trace $bin"; rm -rf "$work"; exit 3; fi
+  a4="$(grep -cE '^([0-9]+ +)?accept4\(' "$trace" || true)"; a1="$(grep -cE '^([0-9]+ +)?accept\(' "$trace" || true)"
+  log "serve: accept4 calls=$a4 accept calls=$a1"
+  if grep -E "$PATTERN" "$trace"; then rc=1; fi
+  # The probe itself kills the service at the end; only a seccomp-style kill counts.
+  if grep -E '^([0-9]+ +)?\+\+\+ killed by SIGSYS' "$trace"; then rc=1; fi
+  if [ "$rc" -ne 0 ]; then log "FAIL: $(basename "$bin") runtime makes syscalls Android's app seccomp kills (see lines above)"; else log "ok: $(basename "$bin") runtime (listeners exercised) is clean"; fi
+  rm -rf "$work"; exit "$rc"
+fi
 
 if [ "$cmd" = control ]; then
   [ "$#" -eq 1 ] || { usage; exit 2; }
