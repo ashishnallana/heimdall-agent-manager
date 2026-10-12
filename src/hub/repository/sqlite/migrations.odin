@@ -384,9 +384,11 @@ MIGRATION_080_COPILOT_LAUNCH_RECIPE :: #load("migrations/080_copilot_launch_reci
 
 MIGRATION_081_ANTIGRAVITY_MODELS :: #load("migrations/081_antigravity_models.sql", string)
 
+MIGRATION_082_PI_PROVIDER :: #load("migrations/082_pi_provider.sql", string)
+
 MIGRATION_075_CONVERSATION_LAUNCH_PREFERENCES :: #load("migrations/075_conversation_launch_preferences.sql", string)
 
-migration_order :: [85]string {
+migration_order :: [86]string {
 	"001_foundation.sql",
 	"002_owner_scoped_core.sql",
 	"003_device_tokens.sql",
@@ -472,6 +474,7 @@ migration_order :: [85]string {
 	"079_repair_provider_catalog_etag.sql",
 	"080_copilot_launch_recipe.sql",
 	"081_antigravity_models.sql",
+	"082_pi_provider.sql",
 }
 
 run_migrations :: proc(
@@ -892,6 +895,7 @@ migration_sql :: proc(name, migrations_dir: string) -> string {
 	if name == "066_antigravity_trust_detection.sql" do return strings.clone(MIGRATION_066_ANTIGRAVITY_TRUST_DETECTION)
 	if name == "067_codex_sandbox_and_models.sql" do return strings.clone(MIGRATION_067_CODEX_SANDBOX_AND_MODELS)
 	if name == "070_free_one_bridge.sql" do return strings.clone(MIGRATION_070_FREE_ONE_BRIDGE)
+	if name == "082_pi_provider.sql" do return strings.clone(MIGRATION_082_PI_PROVIDER)
 	if name == "081_antigravity_models.sql" do return strings.clone(MIGRATION_081_ANTIGRAVITY_MODELS)
 	if name == "080_copilot_launch_recipe.sql" do return strings.clone(MIGRATION_080_COPILOT_LAUNCH_RECIPE)
 	if name == "079_repair_provider_catalog_etag.sql" do return strings.clone(MIGRATION_079_REPAIR_PROVIDER_CATALOG_ETAG)

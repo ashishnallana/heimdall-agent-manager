@@ -6,7 +6,7 @@ export type ProviderTestRunState = 'starting' | 'detecting' | 'awaiting_validati
 
 export interface ProviderModelStatus { model_id: string; label: string; state: 'active' | 'deprecated' }
 export interface BridgeProviderStatus {
-  provider: 'claude' | 'codex' | 'copilot' | 'antigravity';
+  provider: 'claude' | 'codex' | 'copilot' | 'antigravity' | 'pi';
   display_name: string; icon_url: string; catalog_state: 'active' | 'deprecated';
   state: DetectionState; binary_path: string; version_text: string; checked_at: string | null;
   enabled: boolean; models: ProviderModelStatus[];

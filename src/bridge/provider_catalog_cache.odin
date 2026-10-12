@@ -56,12 +56,22 @@ bridge_provider_catalog_path :: proc() -> string {
 	return strings.concatenate({strings.trim_right(expanded, "/"), "/bridge/provider_catalog.json"})
 }
 
+// bridge_provider_catalog_name_supported accepts any well-formed provider slug
+// (lowercase letters, digits, and inner dashes, at most 32 bytes). The Hub's
+// catalog is the source of truth for which providers exist, so adding one needs
+// no Bridge release. Bridges up to v0.3.39 hard-coded exactly four names and
+// reject a catalog that adds a provider, keeping their cached copy instead.
 bridge_provider_catalog_name_supported :: proc(name: string) -> bool {
-	return name == "claude" || name == "codex" || name == "copilot" || name == "antigravity"
+	if len(name) == 0 || len(name) > 32 do return false
+	if name[0] == '-' || name[len(name) - 1] == '-' do return false
+	for c in transmute([]u8)name {
+		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-') do return false
+	}
+	return true
 }
 
 bridge_provider_catalog_valid :: proc(catalog: Bridge_Provider_Catalog_Wire) -> bool {
-	if len(catalog.providers) != 4 do return false
+	if len(catalog.providers) == 0 do return false
 	for provider, i in catalog.providers {
 		if !bridge_provider_catalog_name_supported(provider.provider) do return false
 		if strings.trim_space(provider.display_name) == "" || strings.trim_space(provider.binary) == "" do return false
