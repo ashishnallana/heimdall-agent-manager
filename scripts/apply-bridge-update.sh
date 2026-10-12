@@ -5,6 +5,43 @@
 
 set -euo pipefail
 
+# --- Leave the bridge's process group ----------------------------------------
+# The bridge starts this script as a plain child, so it shares the bridge's
+# process group, and this script makes the bridge exit. launchd kills every
+# process left in a job's process group when the job's main process exits
+# (unless the plist sets AbandonProcessGroup, which older installs lack), so on
+# macOS the supervisor died between stopping the bridge and restarting it,
+# leaving the bridge down on the old version or with no bin/ at all. systemd
+# units use KillMode=process; a new session is harmless there and under runit.
+# Re-exec into a new session before doing anything. exec keeps the PID, so a
+# caller that waits on this script still waits for the whole update.
+# The PTY-only cleanup mode runs synchronously under the live bridge: skip it.
+detach_from_bridge_session() {
+  [ -z "${HEIMDALL_UPDATE_SUPERVISOR_DETACHED:-}" ] || return 0
+  local arg
+  for arg in "$@"; do
+    case "$arg" in --stop-pty-hosts-only|-h|--help) return 0 ;; esac
+  done
+  export HEIMDALL_UPDATE_SUPERVISOR_DETACHED=1
+  # setsid(2) fails only for a process-group leader; fork once in that case.
+  # python3 is already required below (service lookup, PTY host cleanup).
+  if python3 -c '' >/dev/null 2>&1; then
+    exec python3 -c '
+import os, sys
+if os.getsid(0) != os.getpid():
+    try:
+        os.setsid()
+    except OSError:
+        if os.fork():
+            os._exit(0)
+        os.setsid()
+os.execv(sys.argv[1], sys.argv[1:])
+' "$BASH" "$0" "$@"
+  fi
+  echo "[apply-bridge-update] WARNING: python3 unavailable; cannot leave the bridge's process group" >&2
+}
+detach_from_bridge_session "$@"
+
 # --- Configuration & Defaults ------------------------------------------------
 DATA_DIR="${DATA_DIR:-$HOME/.local/share/heimdall}"
 STAGE_DIR="${STAGE_DIR:-}"
@@ -258,6 +295,7 @@ log "  HEALTH_URL:     $HEALTH_URL"
 log "  HEALTH_METHOD:  $HEALTH_METHOD"
 log "  HEALTH_TIMEOUT: ${HEALTH_TIMEOUT}s"
 log "  BRIDGE_PID:     ${BRIDGE_PID:-unset}"
+log "  SESSION:        ${HEIMDALL_UPDATE_SUPERVISOR_DETACHED:+detached }pgid $(ps -o pgid= -p $$ 2>/dev/null | tr -d '[:space:]')"
 
 # Locate staged binaries
 STAGE_BIN=""

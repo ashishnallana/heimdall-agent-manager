@@ -486,7 +486,7 @@ if svc=='runit':
     text+='exec '+' '.join(shlex.quote(a) for a in args)+'\n'
     run.write_text(text); run.chmod(0o755)
 elif osname=='darwin':
-    plist={'Label':name,'ProgramArguments':args,'EnvironmentVariables':env,'RunAtLoad':True,'KeepAlive':{'SuccessfulExit':False},'ThrottleInterval':5,'StandardOutPath':data+'/logs/bridge.out.log','StandardErrorPath':data+'/logs/bridge.err.log'}
+    plist={'Label':name,'ProgramArguments':args,'EnvironmentVariables':env,'RunAtLoad':True,'KeepAlive':{'SuccessfulExit':False},'AbandonProcessGroup':True,'ThrottleInterval':5,'StandardOutPath':data+'/logs/bridge.out.log','StandardErrorPath':data+'/logs/bridge.err.log'}
     pathlib.Path(file).write_bytes(plistlib.dumps(plist))
 else:
     def quote(s): return '"'+s.replace('\\','\\\\').replace('"','\\"').replace('%','%%')+'"'

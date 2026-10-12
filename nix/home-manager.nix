@@ -451,6 +451,9 @@ in
             EnvironmentVariables = bridgeEnvironmentFor entry.config;
             RunAtLoad = true;
             KeepAlive = { Crashed = true; SuccessfulExit = false; };
+            # Like KillMode=process on Linux: the PTY host and the update supervisor
+            # must outlive the bridge process instead of dying with its group.
+            AbandonProcessGroup = true;
             StandardOutPath = "${entry.config.logDir}/${entry.serviceName}.out.log";
             StandardErrorPath = "${entry.config.logDir}/${entry.serviceName}.err.log";
           };

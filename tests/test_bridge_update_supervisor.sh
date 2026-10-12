@@ -6,6 +6,7 @@
 # 2. Process crash on restart -> automated rollback to bin.bak
 # 3. Default OPTIONS readiness probe -> atomic replacement and cleanup
 # 4. PID-scoped stop leaves an unrelated bridge-like process alive
+# 5. Supervisor survives its service manager killing the bridge's process group
 
 set -euo pipefail
 
@@ -238,5 +239,71 @@ UNRELATED_PID=""
 wait "$SERVER_PID" 2>/dev/null || true
 SERVER_PID=""
 echo "PASS: Test 4 passed!"
+
+echo "=== Test 5: Supervisor survives the bridge's process group being killed ==="
+# launchd kills every process left in a job's process group when the job's main
+# process exits. Model that: a fake bridge leads its own process group and starts
+# the supervisor as a plain child (as the real bridge does), and the stop hook
+# kills that whole group. The restart hook only runs if the supervisor survived.
+# Run once as shipped, and once with self-detach suppressed as a negative
+# control proving the harness really kills an undetached supervisor.
+GROUP_KILL_HOOK="$TMP_DIR/group-kill-hook"
+cat > "$GROUP_KILL_HOOK" <<'HOOK'
+#!/usr/bin/env bash
+kill -TERM -- "-$(cat "$GROUP_FILE")" 2>/dev/null || true
+exit 0
+HOOK
+chmod +x "$GROUP_KILL_HOOK"
+MARK_HOOK="$TMP_DIR/mark-hook"
+cat > "$MARK_HOOK" <<'HOOK'
+#!/usr/bin/env bash
+touch "$RESTART_MARKER"
+HOOK
+chmod +x "$MARK_HOOK"
+
+run_group_kill_case() {
+  local dir="$1" detached_env="$2"
+  mkdir -p "$dir/data/bin" "$dir/stage/bin"
+  echo "old-v1.0" > "$dir/data/bin/ham-bridge"
+  echo "new-v2.0" > "$dir/stage/bin/ham-bridge"
+  GROUP_FILE="$dir/pgid" RESTART_MARKER="$dir/restarted" \
+    HEIMDALL_UPDATE_SUPERVISOR_DETACHED="$detached_env" \
+    python3 -c '
+import os, sys
+os.setpgid(0, 0)
+with open(os.environ["GROUP_FILE"], "w") as f: f.write(str(os.getpgrp()))
+os.execvp("bash", ["bash", "-c", "\"$@\" & while :; do sleep 1; done", "fake-bridge"] + sys.argv[1:])
+' "$SUPERVISOR" --data-dir "$dir/data" --stage-dir "$dir/stage" \
+      --bridge-port 58905 --health-timeout 1 \
+      --stop-hook "$GROUP_KILL_HOOK" --restart-hook "$MARK_HOOK" \
+      >"$dir/out.log" 2>&1 &
+  local fake_bridge=$!
+  for _ in $(seq 1 100); do
+    [ -f "$dir/data/logs/update_rollback.log" ] && break
+    sleep 0.1
+  done
+  wait "$fake_bridge" 2>/dev/null || true
+}
+
+export GROUP_FILE RESTART_MARKER
+run_group_kill_case "$TMP_DIR/t5" ""
+if [ ! -f "$TMP_DIR/t5/restarted" ] || [ ! -f "$TMP_DIR/t5/data/logs/update_rollback.log" ]; then
+  echo "FAIL: supervisor did not survive the bridge's process group being killed" >&2
+  cat "$TMP_DIR/t5/out.log" >&2
+  exit 1
+fi
+grep -q "SESSION:        detached" "$TMP_DIR/t5/out.log" || {
+  echo "FAIL: supervisor did not report a detached session" >&2; cat "$TMP_DIR/t5/out.log" >&2; exit 1; }
+
+run_group_kill_case "$TMP_DIR/t5-control" "1"
+if [ -f "$TMP_DIR/t5-control/restarted" ]; then
+  echo "FAIL: negative control: an undetached supervisor was expected to be killed with the group" >&2
+  exit 1
+fi
+if [ -n "$(ls -A "$TMP_DIR/t5-control/data/bin" 2>/dev/null)" ] && [ "$(cat "$TMP_DIR/t5-control/data/bin/ham-bridge" 2>/dev/null)" = "new-v2.0" ]; then
+  echo "FAIL: negative control unexpectedly completed the update" >&2
+  exit 1
+fi
+echo "PASS: Test 5 passed!"
 
 echo "ALL SUPERVISOR TESTS PASSED SUCCESSFULLY!"

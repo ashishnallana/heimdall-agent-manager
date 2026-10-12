@@ -456,6 +456,8 @@ if me=='sv-enable':
         self.run_install('--hub','http://127.0.0.1:8081',answers=[])
         plist=plistlib.loads((self.home/'Library/LaunchAgents'/f'{name}.plist').read_bytes())
         self.assertEqual(plist['Label'],name)
+        # Like KillMode=process: the update supervisor and PTY host outlive the bridge.
+        self.assertIs(plist.get('AbandonProcessGroup'),True)
         self.assertEqual(plist['EnvironmentVariables']['HEIMDALL_BRIDGE_SERVICE_NAME'],name)
         args=plist['ProgramArguments']; port=args[args.index('--local-endpoint-port')+1]
         self.assertEqual(plist['EnvironmentVariables']['HEIMDALL_BRIDGE_ENDPOINT'],'tcp:127.0.0.1:'+port)
