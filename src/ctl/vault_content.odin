@@ -127,7 +127,7 @@ VAULT_HINT_BAD_KEY  :: "(configured vault key cannot decrypt this value — see 
 
 // Decrypt an armored field if key is configured, or return fallback formatted string:
 // '[Encrypted: vault:v1:...] (<remedy hint>)' if key is unconfigured or decryption fails.
-// The hint distinguishes the two causes: an unconfigured key needs `vault set-key`, whereas a
+// The hint distinguishes the two causes: an unconfigured key needs the bridge unsealed, whereas a
 // configured-but-wrong key would be actively misdiagnosed by a "not configured" message.
 ctl_decrypt_or_fallback_armored :: proc(val: string, key_hex: string, key_configured: bool, allocator := context.allocator) -> string {
 	if !is_vault_armored(val) {

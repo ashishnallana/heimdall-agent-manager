@@ -1,13 +1,12 @@
 package main
 
-// REQ-VAULT-2 — source 4 of ctl_read_vault_key: the local bridge, via
+// REQ-VAULT-2 — source 3 of ctl_read_vault_key: the local bridge, via
 // agent.vault.get.
 //
-// Why this file exists. Sources 1-3 (--vault-key, $HEIMDALL_VAULT_KEY, the key
-// file) are all fixed at or before the moment an agent is spawned. An agent spawned
-// before the operator ran `ham-ctl vault set-key` therefore could never decrypt
-// anything for the rest of its life. Source 4 asks the bridge, which holds the key
-// live, so the agent's NEXT invocation succeeds with no respawn.
+// Why this file exists. Sources 1 and 2 (--vault-key, $HEIMDALL_VAULT_KEY) are
+// fixed at or before the moment an agent is spawned. The bridge holds the key live
+// (it is unsealed from the UI), so asking it means an agent spawned before the
+// unseal succeeds on its NEXT invocation with no respawn.
 //
 // Two things are tested at different depths:
 //   - the parsing/validation rules, against ctl_vault_key_from_response directly,
@@ -19,7 +18,7 @@ package main
 //     proves the bridge was never consulted.
 //
 // Every test that can observe key state opens the REQ-VAULT-4 sandbox, so none of
-// them reads or writes the operator's real ~/.config/heimdall/vault_key.
+// them is affected by the host's env or live bridge.
 
 import "core:fmt"
 import "core:net"
@@ -230,7 +229,7 @@ test_vault_bridge_response_key_length_alone_is_not_a_key :: proc(t: ^testing.T) 
 
 // ── env gating (ctl_vault_key_from_bridge) ────────────────────────────────────
 
-// Hub mode: no endpoint, so source 4 must not even be attempted and behaviour is
+// Hub mode: no endpoint, so the bridge source must not even be attempted and behaviour is
 // exactly as it was before this change.
 @(test)
 test_vault_bridge_no_endpoint_configured :: proc(t: ^testing.T) {
@@ -285,8 +284,8 @@ test_vault_bridge_unreachable_endpoint :: proc(t: ^testing.T) {
 
 // ── the real socket path, end to end through ctl_read_vault_key ───────────────
 
-// THE HEADLINE CASE: no flag, no env, no key file — exactly an agent spawned before
-// the operator set a key — and ctl_read_vault_key still resolves, from the bridge.
+// THE HEADLINE CASE: no flag, no env — exactly an agent spawned before the bridge
+// was unsealed — and ctl_read_vault_key still resolves, from the bridge.
 @(test)
 test_vault_read_key_falls_through_to_bridge :: proc(t: ^testing.T) {
 	sync.mutex_lock(&vault_test_mutex)
@@ -308,10 +307,10 @@ test_vault_read_key_falls_through_to_bridge :: proc(t: ^testing.T) {
 	os_set("HEIMDALL_BRIDGE_ENDPOINT", fb.endpoint)
 	os_set("HEIMDALL_AGENT_TOKEN", "hlat_tok")
 
-	// The sandbox guarantees no key file and no HEIMDALL_VAULT_KEY, and no args are
-	// passed, so sources 1-3 all genuinely fail here.
+	// The sandbox guarantees no HEIMDALL_VAULT_KEY, and no args are passed, so
+	// sources 1 and 2 are genuinely absent here.
 	key, ok := ctl_read_vault_key(nil)
-	testing.expect(t, ok, "with no flag/env/file, the bridge must supply the key")
+	testing.expect(t, ok, "with no flag/env, the bridge must supply the key")
 	defer if ok do delete(key)
 	testing.expect_value(t, key, VAULT_BRIDGE_TEST_KEY)
 
@@ -323,44 +322,10 @@ test_vault_read_key_falls_through_to_bridge :: proc(t: ^testing.T) {
 	)
 }
 
-// The file must still WIN over the bridge: source 3 before source 4. The fake bridge
-// offers a different key, so reading the file's key proves the ordering.
-@(test)
-test_vault_file_takes_precedence_over_bridge :: proc(t: ^testing.T) {
-	sync.mutex_lock(&vault_test_mutex)
-	defer sync.mutex_unlock(&vault_test_mutex)
-	sb := ctl_vault_test_sandbox_open("bridge-file-precedence")
-	defer ctl_vault_test_sandbox_close(&sb)
-
-	file_key := "aaaabbbbccccddddaaaabbbbccccddddaaaabbbbccccddddaaaabbbbccccdddd"
-	ctl_vault_set_key([]string{file_key}, nil)
-
-	bridge_key := "1111222233334444111122223333444411112222333344441111222233334444"
-	data := ctl_vault_test_key_data(bridge_key)
-	defer delete(data)
-	body := ctl_vault_test_ok_envelope(data)
-	defer delete(body)
-	fb, started := ctl_vault_fake_bridge_start(body)
-	testing.expect(t, started, "fake bridge must start")
-	if !started do return
-	defer ctl_vault_fake_bridge_stop(fb)
-
-	// The sandbox already captured and cleared both of these and restores them on
-	// close, so this test only has to set what it wants.
-	os_set("HEIMDALL_BRIDGE_ENDPOINT", fb.endpoint)
-	os_set("HEIMDALL_AGENT_TOKEN", "hlat_tok")
-
-	key, ok := ctl_read_vault_key(nil)
-	testing.expect(t, ok, "the key file must still resolve")
-	defer if ok do delete(key)
-	testing.expect_value(t, key, file_key)
-	testing.expect(t, !fb.got_call, "a readable key file must not reach the bridge at all")
-}
-
 // ── short-circuit preservation (the strictest requirement) ────────────────────
 
-// An explicitly supplied but INVALID --vault-key must reject immediately: not the
-// file, not the bridge. The fake bridge here holds a perfectly valid key, so if the
+// An explicitly supplied but INVALID --vault-key must reject immediately, without
+// asking the bridge. The fake bridge here holds a perfectly valid key, so if the
 // short-circuit regressed this test would see ok=true and fb.got_call=true.
 @(test)
 test_vault_invalid_flag_does_not_reach_bridge :: proc(t: ^testing.T) {
@@ -368,11 +333,6 @@ test_vault_invalid_flag_does_not_reach_bridge :: proc(t: ^testing.T) {
 	defer sync.mutex_unlock(&vault_test_mutex)
 	sb := ctl_vault_test_sandbox_open("bridge-shortcircuit-flag")
 	defer ctl_vault_test_sandbox_close(&sb)
-
-	// A VALID key file too, so this also re-proves the flag does not fall through to
-	// the file — the original semantics, now with a fourth source behind it.
-	good_file_key := "aaaabbbbccccddddaaaabbbbccccddddaaaabbbbccccddddaaaabbbbccccdddd"
-	ctl_vault_set_key([]string{good_file_key}, nil)
 
 	data := ctl_vault_test_key_data(VAULT_BRIDGE_TEST_KEY)
 	defer delete(data)
@@ -400,9 +360,6 @@ test_vault_invalid_env_does_not_reach_bridge :: proc(t: ^testing.T) {
 	defer sync.mutex_unlock(&vault_test_mutex)
 	sb := ctl_vault_test_sandbox_open("bridge-shortcircuit-env")
 	defer ctl_vault_test_sandbox_close(&sb)
-
-	good_file_key := "aaaabbbbccccddddaaaabbbbccccddddaaaabbbbccccddddaaaabbbbccccdddd"
-	ctl_vault_set_key([]string{good_file_key}, nil)
 
 	data := ctl_vault_test_key_data(VAULT_BRIDGE_TEST_KEY)
 	defer delete(data)
@@ -432,34 +389,27 @@ test_vault_invalid_env_does_not_reach_bridge :: proc(t: ^testing.T) {
 	testing.expect(t, !fb.got_call, "a valid env key must not reach the bridge either")
 }
 
-// ── env helpers ───────────────────────────────────────────────────────────────
-// Local to this file so it adds nothing to vault_test.odin, which REQ-VAULT-4 owns.
-// These capture PRESENCE as well as value, for the same reason the REQ-VAULT-4
-// sandbox does: restoring an absent variable as "" would turn "unset" into "set but
-// empty" for every test that runs afterwards.
-
-
-// ── source 3 failure modes reaching source 4 (the ratified fall-through) ──────
+// ── the legacy key file is not a source ───────────────────────────────────────
 //
-// These pin the four branches at vault.odin's source-3 block. They are about the
-// KEY FILE, which is a different thing from the bridge-RESPONSE validation tested
-// above: here the file is what is broken, and the assertion is that ctl goes on to
-// ask the bridge instead of hard-failing.
+// A valid 0600 ~/.config/heimdall/vault_key must neither be read nor shadow the
+// bridge: the bridge's key is returned and the bridge is consulted.
 
 @(test)
-test_vault_bad_permissions_file_falls_through_to_bridge :: proc(t: ^testing.T) {
+test_vault_legacy_file_does_not_shadow_bridge :: proc(t: ^testing.T) {
 	sync.mutex_lock(&vault_test_mutex)
 	defer sync.mutex_unlock(&vault_test_mutex)
-	sb := ctl_vault_test_sandbox_open("bridge-badperms")
+	sb := ctl_vault_test_sandbox_open("bridge-legacy-file")
 	defer ctl_vault_test_sandbox_close(&sb)
 
-	// A perfectly valid key, but world-readable: source 3 refuses it, as it always
-	// has. What is new is that refusing is not the end of the story.
 	path := cfg_lib.expand_home("~/.config/heimdall/vault_key")
 	defer delete(path)
-	other := "aaaabbbbccccddddaaaabbbbccccddddaaaabbbbccccddddaaaabbbbccccdddd"
-	testing.expect(t, os.write_entire_file(path, transmute([]byte)other) == nil, "write key file")
-	_ = posix.chmod(strings.clone_to_cstring(path, context.temp_allocator), posix.mode_t{.IRUSR, .IWUSR, .IRGRP, .IROTH})
+	if !strings.has_prefix(path, sb.dir) {
+		testing.expect(t, false, fmt.tprintf("vault key path must resolve inside the sandbox %s, got %s", sb.dir, path))
+		return
+	}
+	file_key := "aaaabbbbccccddddaaaabbbbccccddddaaaabbbbccccddddaaaabbbbccccdddd"
+	testing.expect(t, os.write_entire_file(path, transmute([]byte)file_key) == nil, "write legacy key file")
+	_ = posix.chmod(strings.clone_to_cstring(path, context.temp_allocator), posix.mode_t{.IRUSR, .IWUSR})
 
 	data := ctl_vault_test_key_data(VAULT_BRIDGE_TEST_KEY)
 	defer delete(data)
@@ -473,61 +423,39 @@ test_vault_bad_permissions_file_falls_through_to_bridge :: proc(t: ^testing.T) {
 	os_set("HEIMDALL_AGENT_TOKEN", "hlat_tok")
 
 	key, ok := ctl_read_vault_key(nil)
-	testing.expect(t, ok, "a 0644 key file must fall through to the bridge, not hard-fail")
+	testing.expect(t, ok, "the bridge must supply the key")
 	defer if ok do delete(key)
-	// The BRIDGE's key, not the unreadable file's — proof of which source answered.
 	testing.expect_value(t, key, VAULT_BRIDGE_TEST_KEY)
-	testing.expect(t, fb.got_call, "the bridge must have been consulted")
+	testing.expect(t, fb.got_call, "the bridge must have been consulted despite the legacy file")
 }
 
+// `vault status` forwards the bridge's agent.vault.status data verbatim.
 @(test)
-test_vault_malformed_file_falls_through_to_bridge :: proc(t: ^testing.T) {
-	// Each of these is a 0600 file that source 3 cannot turn into a key: wrong
-	// length, non-hex, empty, and outright garbage.
-	bad := []string{
-		"0123456789abcdef",
-		"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
-		"",
-		"this is not a vault key at all",
+test_vault_status_forwards_bridge_view :: proc(t: ^testing.T) {
+	sync.mutex_lock(&vault_test_mutex)
+	defer sync.mutex_unlock(&vault_test_mutex)
+	sb := ctl_vault_test_sandbox_open("bridge-status")
+	defer ctl_vault_test_sandbox_close(&sb)
+
+	status_data := "{\"status\":\"unlocked\",\"vault_status\":\"unlocked\",\"configured\":true,\"permissions_valid\":true,\"key_length\":64}"
+	body := ctl_vault_test_ok_envelope(status_data)
+	defer delete(body)
+	fb, started := ctl_vault_fake_bridge_start(body)
+	testing.expect(t, started, "fake bridge must start")
+	if !started do return
+	defer ctl_vault_fake_bridge_stop(fb)
+	os_set("HEIMDALL_BRIDGE_ENDPOINT", fb.endpoint)
+	os_set("HEIMDALL_AGENT_TOKEN", "hlat_tok")
+
+	bridge := ctl_vault_status_bridge_json()
+	defer delete(bridge)
+	// The extractor re-serialises the object, so assert on members, not key order.
+	testing.expect(t, strings.has_prefix(bridge, "{\"available\":true,\"status\":{"), "a reachable bridge must be reported available with its status")
+	for member in ([]string{"\"status\":\"unlocked\"", "\"configured\":true", "\"key_length\":64"}) {
+		testing.expectf(t, strings.contains(bridge, member), "bridge status must forward %s, got %s", member, bridge)
 	}
-	for content, i in bad {
-		sync.mutex_lock(&vault_test_mutex)
-		sb := ctl_vault_test_sandbox_open("bridge-malformed")
-
-		path := cfg_lib.expand_home("~/.config/heimdall/vault_key")
-		testing.expect(t, os.write_entire_file(path, transmute([]byte)content) == nil, "write key file")
-		_ = posix.chmod(strings.clone_to_cstring(path, context.temp_allocator), posix.mode_t{.IRUSR, .IWUSR})
-		delete(path)
-
-		data := ctl_vault_test_key_data(VAULT_BRIDGE_TEST_KEY)
-		body := ctl_vault_test_ok_envelope(data)
-		fb, started := ctl_vault_fake_bridge_start(body)
-		testing.expect(t, started, "fake bridge must start")
-		if started {
-			os_set("HEIMDALL_BRIDGE_ENDPOINT", fb.endpoint)
-			os_set("HEIMDALL_AGENT_TOKEN", "hlat_tok")
-
-			key, ok := ctl_read_vault_key(nil)
-			testing.expect(t, ok, fmt.tprintf("malformed key file %d must fall through to the bridge", i))
-			if ok {
-				testing.expect_value(t, key, VAULT_BRIDGE_TEST_KEY)
-				delete(key)
-			}
-			testing.expect(t, fb.got_call, fmt.tprintf("bridge must be consulted for malformed file %d", i))
-			ctl_vault_fake_bridge_stop(fb)
-		}
-		delete(body)
-		delete(data)
-
-		ctl_vault_test_sandbox_close(&sb)
-		sync.mutex_unlock(&vault_test_mutex)
-	}
+	testing.expect(t, strings.contains(ctl_vault_fake_bridge_request(fb), "agent.vault.status"), "status must use agent.vault.status")
 }
-
-// And the complement, so the fall-through cannot be mistaken for "the bridge always
-// wins": a VALID key file is used as-is and the bridge is never consulted, even
-// though the bridge holds a different key. Already covered by
-// test_vault_file_takes_precedence_over_bridge above.
 
 // ── env helpers ───────────────────────────────────────────────────────────────
 // Thin wrappers so the intent reads at the call site. Restoring is the sandbox's

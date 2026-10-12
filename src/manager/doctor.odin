@@ -435,7 +435,7 @@ manager_doctor_command :: proc(args: []string) -> int {
 			append(&checks, Manager_Check{name = "config dir", status = .Fail, detail = fmt.tprintf("%s is not writable", config_dir)})
 		}
 	} else {
-		append(&checks, Manager_Check{name = "config dir", status = .Warn, detail = fmt.tprintf("%s missing (created by heimdall enroll)", config_dir)})
+		append(&checks, Manager_Check{name = "config dir", status = .Warn, detail = fmt.tprintf("%s missing (created by ham-bridge enroll)", config_dir)})
 	}
 
 	// Data directory writability (bridge writes bootstrap cache/artifacts here).

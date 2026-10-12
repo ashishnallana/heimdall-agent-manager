@@ -1,7 +1,8 @@
 // heimdall: user-facing management CLI for non-hub Heimdall nodes.
 // REQ-DIST-2/REQ-DIST-3 (task_18d8becfe6c85dd1): CLI core and lifecycle
 // operations. Subcommands: enroll, status, start, stop, restart, logs, doctor,
-// update, vault.
+// update. (The old `vault` group managed a machine-wide key file that nothing
+// reads any more; bridges are unsealed per bridge from Settings -> Bridges.)
 //
 // This binary is the smaller sibling of ham-ctl: it owns only what a plain
 // (non-hub) node needs — enrollment against a Hub and local lifecycle of the
@@ -79,8 +80,6 @@ main :: proc() {
 			return
 		}
 		os.exit(manager_update_command(args))
-	case "vault":
-		os.exit(manager_vault_command(args[2:], args))
 	case:
 		fmt.eprintfln("heimdall: unknown command %q", command)
 		manager_print_usage()
@@ -108,13 +107,12 @@ manager_print_usage :: proc() {
 	fmt.println("  logs      Show bridge service logs ([-n N] [-f|--follow])")
 	fmt.println("  doctor    Diagnose this node: ports, permissions, harnesses, service unit")
 	fmt.println("  update    Check for and apply in-place binary updates ([--check] [--version <tag>] [--hub <url>])")
-	fmt.println("  vault     Manage the local zero-knowledge vault key (status/set-key/show/clear)")
 	fmt.println("")
 	fmt.println("Global options:")
 	fmt.println("  --config <path>   config.toml to read/update; default $HEIMDALL_HOME/config.toml,")
 	fmt.println("                    else $XDG_CONFIG_HOME/heimdall/config.toml, else ~/.config/heimdall/config.toml")
 	fmt.println("")
-	fmt.println("Run 'heimdall enroll --help', 'heimdall logs --help', 'heimdall update --help' or 'heimdall vault --help' for command options.")
+	fmt.println("Run 'heimdall enroll --help', 'heimdall logs --help' or 'heimdall update --help' for command options.")
 }
 
 // manager_print_enroll_usage tells an operator where enrollment went.

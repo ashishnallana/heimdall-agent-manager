@@ -2915,42 +2915,24 @@ def test_heimdall_status_schema(ctx):
     assert '(this binary)' in out and 'heimdall' in out
 
 
-def test_heimdall_vault_lifecycle(ctx):
+def test_heimdall_vault_removed(ctx):
+    # REQ-T6-2: `heimdall vault` managed a machine-wide key file that nothing reads
+    # any more; bridges are unsealed per bridge from Settings -> Bridges. The group
+    # is gone, so it must be an unknown command and must not create a key file.
     if 'heimdall_bin' not in ctx:
         raise Skip('heimdall binary was not built')
     binary = ctx['heimdall_bin']
     config = ctx['work'] / 'vault-home' / 'config.toml'
     vault_key_file = config.parent / 'vault_key'
-    vault_key = '0123456789abcdef' * 4
 
-    res = run([binary, 'vault', '--help'], timeout=30)
-    assert res.returncode == 0, f'heimdall vault --help exited {res.returncode}:\n{res.stderr}'
-    for command in ('status', 'set-key', 'show', 'clear'):
-        assert f'  {command}' in res.stdout, f'vault help missing {command!r} subcommand'
+    for argv in (['vault'], ['vault', 'status'], ['vault', 'set-key', '0123456789abcdef' * 4]):
+        res = run([binary, *argv, '--config', str(config)], timeout=30)
+        assert res.returncode != 0, f'heimdall {" ".join(argv)} must fail, exited 0:\n{res.stdout}'
+        assert 'unknown command' in res.stderr, f'heimdall {argv[0]} must be an unknown command:\n{res.stderr}'
+    assert not vault_key_file.exists(), 'no heimdall command may create a vault key file'
 
-    res = run([binary, 'vault', 'status', '--config', str(config)], timeout=30)
-    assert res.returncode == 0, f'heimdall vault status exited {res.returncode}:\n{res.stderr}'
-    for field in ('heimdall vault status', f'key file:    {vault_key_file}',
-                  'configured:  no', 'permissions: n/a (file missing)', 'key length:  0'):
-        assert field in res.stdout, f'vault status missing {field!r}'
-
-    res = run([binary, 'vault', 'set-key', vault_key, '--config', str(config)], timeout=30)
-    assert res.returncode == 0, f'heimdall vault set-key exited {res.returncode}:\n{res.stderr}'
-    assert vault_key_file.read_text(encoding='utf-8') == vault_key + '\n'
-    assert vault_key_file.stat().st_mode & 0o777 == 0o600, 'vault key file must use mode 0600'
-
-    res = run([binary, 'vault', 'show', '--config', str(config)], timeout=30)
-    assert res.returncode == 0, f'heimdall vault show exited {res.returncode}:\n{res.stderr}'
-    assert f'key:         {vault_key[:4]}...{vault_key[-4:]}' in res.stdout
-    assert vault_key not in res.stdout, 'vault show must mask the full key by default'
-
-    res = run([binary, 'vault', 'show', '--reveal', '--config', str(config)], timeout=30)
-    assert res.returncode == 0, f'heimdall vault show --reveal exited {res.returncode}:\n{res.stderr}'
-    assert f'key:         {vault_key}' in res.stdout
-
-    res = run([binary, 'vault', 'clear', '--config', str(config)], timeout=30)
-    assert res.returncode == 0, f'heimdall vault clear exited {res.returncode}:\n{res.stderr}'
-    assert not vault_key_file.exists(), 'vault clear must remove the vault key file'
+    res = run([binary, '--help'], timeout=30)
+    assert 'vault' not in res.stdout, 'heimdall --help must not list a vault command'
 
 
 # ---- 4b. release portability gate (REQ-INST-16) -------------------------------
@@ -3399,8 +3381,10 @@ def test_self_hosting_documents_installer(ctx):
     # And the ceremony that cannot happen any more: a token "shown only once".
     assert 'shown only once' not in part2, (
         'Part 2 still promises a one-time token ceremony that no longer exists')
-    assert part2.count('heimdall vault set-key <64-hex>') >= 2, (
-        'Part 2 must document vault setup in quick-install and bridge setup flows')
+    assert 'set-key' not in part2, (
+        'Part 2 must not document the removed vault set-key command')
+    assert 'Settings → Bridges → Unseal' in part2, (
+        'Part 2 must document unsealing each bridge from the UI')
     for target in ('linux-amd64', 'linux-arm64', 'darwin-amd64', 'darwin-arm64'):
         asset = f'heimdall-local-{target}.tar.gz'
         assert asset in part2, f'mirror layout must name {asset}'
@@ -5079,7 +5063,7 @@ def main() -> int:
         ('build heimdall (nix develop / odin)', build_heimdall),
         ('heimdall --version schema', test_heimdall_version_schema),
         ('heimdall status schema', test_heimdall_status_schema),
-        ('heimdall vault lifecycle', test_heimdall_vault_lifecycle),
+        ('heimdall vault removed', test_heimdall_vault_removed),
         ('release build skips when Nix is absent (REQ-INST-16)',
          test_release_build_skips_without_nix),
         ('release gate rejects Nix wrapper scripts (REQ-INST-16)',

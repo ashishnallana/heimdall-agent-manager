@@ -63,7 +63,7 @@ The landing page follows a single-page narrative optimized for instant technical
 3. **Hero Walkthrough Media Frame** (Dedicated responsive window placeholder for `hero-demo.gif` recording)
 4. **Grounded Architectural Capabilities** (6 concrete engineering guarantees: Native Odin, ~20MB RAM, outbound-only tunnels, AES-GCM vault, review gates, BYOA harness)
 5. **The 5 Core Feature Pillars** (Deep-dive breakdown with problems, solutions, architecture diagrams, and workflows)
-6. **Quick Start & CLI Cheatsheet** (`curl`, `heimdall vault`, `ham-bridge enroll --ui` browser approval, service management)
+6. **Quick Start & CLI Cheatsheet** (`curl`, `ham-bridge enroll --ui` browser approval, per-bridge unseal in the UI, service management)
 7. **Developer FAQ** (Remote access without SSH/VPN, BYOA multi-device fleet, invite model, self-hosting)
 8. **Clean Terminal Footer** (System status, Discord, GitHub, Docs, MIT License)
 
@@ -176,7 +176,7 @@ A dedicated, responsive media window designed to showcase a live product walkthr
 - **The Heimdall Solution**:
   - Client-side Zero-Knowledge encryption: all data leaving your machine is wrapped in 256-bit AES-GCM envelopes (`vault:v1:...`).
   - The central Hub is zero-knowledge: it coordinates tasks and logs without ever seeing your repository code, prompts, or API keys in plaintext.
-  - Encryption keys stay strictly on your local machine (`~/.config/heimdall/vault_key`, mode `0600`).
+  - Encryption keys stay strictly on your own devices: the browser holds the master-password-wrapped key, and each bridge keeps its own key in the OS keyring/Keychain after you unseal it.
 
 ### Pillar 4: Zero-Config Remote Access (No SSH, No VPN, No Port Forwarding)
 - **The Problem**: Accessing your development workstation or homelab agent fleet on the go requires brittle SSH tunnels, dynamic DNS, Tailscale/VPN configs, or punching holes in router firewalls.
@@ -200,19 +200,16 @@ A dedicated, responsive media window designed to showcase a live product walkthr
 # 1. Install via frictionless one-liner
 curl -fsSL https://get.heimdall.dev/install.sh | bash
 
-# 2. Configure local Zero-Knowledge Vault Key (mode 0600)
-heimdall vault set-key <64-character-hex-key>
-
-# 3. Enroll your local node — approve it in a browser, no token to copy
+# 2. Enroll your local node — approve it in a browser, no token to copy
 ham-bridge enroll --ui https://heimdall.yourdomain.com
 #    Prints an approval link; open it on any device and approve. A short code is
 #    printed as a fallback when the link cannot be opened. Add --headless if this
 #    machine has no browser. --ui is the UI ORIGIN (scheme + host, no path).
 
-# 4. Inspect daemon status and multi-device connections
+# 3. Inspect daemon status and multi-device connections
 heimdall status
 
-# 5. Manage local bridge service lifecycle
+# 4. Manage local bridge service lifecycle
 heimdall start
 heimdall logs -f
 heimdall doctor

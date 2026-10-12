@@ -80,11 +80,11 @@ async function copyTextToClipboard(text: string): Promise<boolean> {
 const VAULT_KEY_PROTECTED_LABEL = 'Protected in WebCrypto (non-extractable)';
 
 /**
- * Bridge setup command template. The `<hex-vault-key>` placeholder is literal and
- * deliberate -- the operator substitutes their own key. Display and clipboard both
- * read this one constant so what is shown is exactly what is copied.
+ * How bridges get the key. There is no CLI step: the browser delivers the key to each
+ * bridge from Settings -> Bridges, and no key file exists on the bridge host.
  */
-const VAULT_BRIDGE_CMD_TEMPLATE = 'ham-ctl vault set-key <hex-vault-key>';
+const VAULT_BRIDGE_INSTRUCTIONS =
+  'Bridges receive the key from this browser. Open Settings → Bridges and use Unseal (or Configure encryption) on each bridge you want to encrypt.';
 
 function extractVaultRecord(record: any) {
   if (!record) return null;
@@ -137,7 +137,6 @@ export default function VaultPanel() {
 
   // Unlocked State View
   const [isKeyVisible, setIsKeyVisible] = useState(false);
-  const [copiedBridgeCmd, setCopiedBridgeCmd] = useState(false);
 
   // Initialize 12 recovery words on mount
   useEffect(() => {
@@ -161,14 +160,6 @@ export default function VaultPanel() {
       setTimeout(() => setCopiedWords(false), 2000);
     }
   }, [recoveryWords]);
-
-  const handleCopyBridgeCmd = useCallback(async () => {
-    const ok = await copyTextToClipboard(VAULT_BRIDGE_CMD_TEMPLATE);
-    if (ok) {
-      setCopiedBridgeCmd(true);
-      setTimeout(() => setCopiedBridgeCmd(false), 2000);
-    }
-  }, []);
 
   // Setup Wizard Submit Handler
   async function handleSetupSubmit(e: FormEvent) {
@@ -753,30 +744,10 @@ export default function VaultPanel() {
 
         {/* Bridge Setup Instructions */}
         <div data-debug-id="vault-bridge-instructions" className="mt-6 space-y-3 rounded-2xl border border-subtle bg-surface-raised/30 p-5">
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <h4 className="text-sm font-semibold text-primary">Bridge Setup Instructions</h4>
-              <p className="mt-1 text-xs text-muted">
-                To allow Heimdall Bridges to decrypt secrets for task execution, set the Vault Key on your bridge host:
-              </p>
-            </div>
-            <Button
-              size="sm"
-              variant="secondary"
-              data-debug-id="vault-bridge-cmd-copy-btn"
-              onClick={handleCopyBridgeCmd}
-            >
-              <Icon name="copy" size="sm" />
-              {copiedBridgeCmd ? 'Copied Command!' : 'Copy CLI Command'}
-            </Button>
-          </div>
-
-          <div
-            data-debug-id="vault-bridge-cmd-display"
-            className="break-all rounded-xl border border-subtle bg-surface-raised/60 p-3 font-mono text-xs text-accent select-all"
-          >
-            {VAULT_BRIDGE_CMD_TEMPLATE}
-          </div>
+          <h4 className="text-sm font-semibold text-primary">Bridge Setup Instructions</h4>
+          <p data-debug-id="vault-bridge-cmd-display" className="text-xs text-muted">
+            {VAULT_BRIDGE_INSTRUCTIONS}
+          </p>
 
           <p className="text-xs text-faint">
             Once configured, Bridge tasks and agents will be able to securely decrypt environment secrets.

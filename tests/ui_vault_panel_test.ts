@@ -114,7 +114,6 @@ test('VaultPanel.tsx implements Setup Wizard, Unlock dialog, and hex Vault Key v
     'vault-key-copy-btn',
     'vault-bridge-instructions',
     'vault-bridge-cmd-display',
-    'vault-bridge-cmd-copy-btn',
   ];
 
   for (const debugId of requiredDebugIds) {
@@ -124,12 +123,15 @@ test('VaultPanel.tsx implements Setup Wizard, Unlock dialog, and hex Vault Key v
     );
   }
 
-  // Verify CLI Bridge setup command template
-  assert.match(
-    content,
-    /ham-ctl vault set-key/,
-    'VaultPanel.tsx must include copyable ham-ctl vault set-key command',
+  // Bridges are unsealed from Settings -> Bridges; there is no CLI key command.
+  assert.ok(
+    content.includes(
+      'Bridges receive the key from this browser. Open Settings → Bridges and use Unseal (or Configure encryption) on each bridge you want to encrypt.',
+    ),
+    'VaultPanel.tsx must point bridge setup at Settings → Bridges',
   );
+  assert.doesNotMatch(content, /ham-ctl vault set-?key/, 'VaultPanel.tsx must not mention the removed vault key command');
+  assert.ok(!content.includes('vault-bridge-cmd-copy-btn'), 'VaultPanel.tsx must not offer a CLI command to copy');
 
   // Verify 12 recovery words grid logic
   assert.match(

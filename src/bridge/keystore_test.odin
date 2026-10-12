@@ -169,3 +169,14 @@ test_keystore_test_build_refuses_non_test_bridge_ids :: proc(t: ^testing.T) {
 	testing.expect(t, id_a != id_b && strings.has_prefix(id_b, id_a), "test ids A and B are distinct")
 	testing.expect(t, keystore_bridge_id_ok(id_a) && keystore_bridge_id_ok(id_b), "the test ids are accepted")
 }
+
+// REQ-T6-6: the default "local-daemon" id of an unenrolled bridge, and any id that is
+// not a Hub-issued `brg_` id, can never name a persisted key, in any build.
+@(test)
+test_keystore_refuses_unenrolled_bridge_ids :: proc(t: ^testing.T) {
+	for id in ([]string{"local-daemon", "", "brg_", "daemon_1", "BRG_18dd7ec8c8dec6d0", "../brg_x"}) {
+		testing.expectf(t, !keystore_bridge_id_is_enrolled(id), "%q must not be accepted as an enrolled bridge id", id)
+		testing.expectf(t, !keystore_bridge_id_ok(id), "%q must not name a persisted key", id)
+	}
+	testing.expect(t, keystore_bridge_id_is_enrolled("brg_18dd7ec8c8dec6d0"), "a Hub-issued brg_ id is enrolled")
+}

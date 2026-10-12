@@ -569,7 +569,7 @@ test_manager_unit_hub_check :: proc(t: ^testing.T) {
 			config_hub = "",
 			config_readable = true,
 			want_status = .Warn,
-			want_contains = []string{"/etc/heimdall/config.toml", "empty [wrapper] daemon_url", "heimdall enroll"},
+			want_contains = []string{"/etc/heimdall/config.toml", "empty [wrapper] daemon_url", "ham-bridge enroll"},
 		},
 		{
 			name = "empty config hub without a unit flag warns as not enrolled",
@@ -577,7 +577,7 @@ test_manager_unit_hub_check :: proc(t: ^testing.T) {
 			config_hub = "",
 			config_readable = true,
 			want_status = .Warn,
-			want_contains = []string{"/etc/heimdall/config.toml", "empty [wrapper] daemon_url", "heimdall enroll"},
+			want_contains = []string{"/etc/heimdall/config.toml", "empty [wrapper] daemon_url", "ham-bridge enroll"},
 		},
 		{
 			// config.odin:833 sentinel: the node was never enrolled. The unit
@@ -590,7 +590,7 @@ test_manager_unit_hub_check :: proc(t: ^testing.T) {
 			config_hub = default_hub,
 			config_readable = true,
 			want_status = .Warn,
-			want_contains = []string{default_hub, "https://hub.internal:9000", "/etc/heimdall/config.toml", "heimdall enroll"},
+			want_contains = []string{default_hub, "https://hub.internal:9000", "/etc/heimdall/config.toml", "ham-bridge enroll"},
 			want_absent = []string{"placeholder"},
 		},
 		{
@@ -599,7 +599,7 @@ test_manager_unit_hub_check :: proc(t: ^testing.T) {
 			config_hub = default_hub,
 			config_readable = true,
 			want_status = .Warn,
-			want_contains = []string{default_hub, "/etc/heimdall/config.toml", "heimdall enroll"},
+			want_contains = []string{default_hub, "/etc/heimdall/config.toml", "ham-bridge enroll"},
 		},
 	}
 	for c in cases {

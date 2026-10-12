@@ -1811,7 +1811,7 @@ print_help_overview :: proc() {
 	fmt.println("  shell       Manage PTY/shell sessions on the Bridge host (start/kill/signal/restart/list/log/capture)")
 	fmt.println("  issue       Issues, bugs, and blockers (list, show, create, update, comment, vote, unvote)")
 	fmt.println("  projects    Manage projects (list, show, create, update)")
-	fmt.println("  vault       Manage the local zero-knowledge vault key (status, set-key, show, clear)")
+	fmt.println("  vault       Report the vault key source: env override and bridge status (status)")
 	fmt.println("  context     One-shot snapshot of this instance (chain, task, unread)")
 	fmt.println("  start-success  Signal this instance is ready")
 	fmt.println("")

@@ -514,12 +514,7 @@ system `PATH`.
 **Then enroll and let it hand off to the registered service:**
 
 ```bash
-# 1. Configure vault encryption, so there is a key to unlock when you approve.
-#    Replace the placeholder with your 64-character hexadecimal vault key.
-heimdall vault set-key <64-hex>
-heimdall vault status
-
-# 2. On this device: enroll. Nothing is created on the hub
+# 1. On this device: enroll. Nothing is created on the hub
 #    first, and there is no token to copy between machines — this machine prints a
 #    link and a short code, you approve it in a browser, and the credential is
 #    delivered here directly. Writes ~/.config/heimdall/bridge-token (mode 0600)
@@ -530,7 +525,7 @@ heimdall vault status
 #    key, restarts the registered service, and exits.
 ham-bridge enroll --hub https://hub.example.com
 
-# 3. From a second shell: enrollment, service state, hub connection, versions
+# 2. From a second shell: enrollment, service state, hub connection, versions
 heimdall status
 ```
 
@@ -681,11 +676,23 @@ bridge still carrying one is told to re-enroll rather than given a generic rejec
 
 **Step 3 — Configure vault encryption**
 
-The bridge receives its vault key from the browser: enrollment delivers it, and a
-bridge that starts locked is unsealed from **Settings → Bridges → Unseal**. The
-bridge keeps the key in its own per-bridge keyring/Keychain entry (see above). It
-does **not** read `~/.config/heimdall/vault_key`: that file is shared by every
-bridge of the OS user, so a bridge that only has it starts locked until unsealed.
+Vault encryption is set up in the UI, not on the command line:
+
+1. Enable encryption once: **Settings → Bridges → Enable Encryption**, and choose
+   the master password that protects the vault key in your browser.
+2. Unseal each bridge from **Settings → Bridges → Unseal**. The browser delivers the
+   key to that bridge (enrollment does the same for a bridge approved while the vault
+   is unlocked), and the bridge keeps it in its own per-bridge keyring/Keychain entry
+   (see above), so a restart does not need another unseal.
+
+Agents spawned by a bridge get the key from that bridge on demand (`ham-ctl` asks
+it over the local socket), so they pick up an unseal without a respawn.
+`HEIMDALL_VAULT_KEY=<64-hex>` is honoured by `ham-ctl` only as a **single-bridge
+development override**; do not use it for normal operation.
+
+There is no key file and no `vault` command in the `heimdall` CLI any more. An old
+`~/.config/heimdall/vault_key` left over from earlier releases is ignored (it is not
+deleted); you may remove it.
 
 **Step 4 — Start (or restart) the bridge normally**
 
@@ -898,6 +905,8 @@ Manual path (sections 2.2–2.10, for source/air-gapped setups):
 ### Subsequent runs
 The bridge reads `--bridge-token-file` on startup and reconnects automatically.
 Re-enrollment is only needed if the token file is lost or the bridge is revoked.
+
+---
 
 ## Appendix — Bridge on Android (Termux)
 

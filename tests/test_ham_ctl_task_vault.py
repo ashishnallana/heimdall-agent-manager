@@ -3,14 +3,14 @@
 
 Verifies:
 1. Static contract verification:
-   - ctl_read_vault_key in src/ctl/vault.odin resolves HEIMDALL_VAULT_KEY, --vault-key flag, and ~/.config/heimdall/vault_key (0600 mode).
+   - ctl_read_vault_key in src/ctl/vault.odin resolves --vault-key, HEIMDALL_VAULT_KEY, then the local bridge (agent.vault.get); never ~/.config/heimdall/vault_key.
    - Transparent encryption on write in src/ctl/agent_mode.odin & src/ctl/tasks.odin (create, update, comment).
    - Transparent decryption on read in src/ctl/agent_mode.odin & src/ctl/tasks.odin (show, list, comments).
    - Safe unconfigured fallback [Encrypted: vault:v1:...].
 2. Odin unit test suite:
    - 'odin test src/ctl -collection:odin_test=src' passes cleanly with 0 errors.
 3. Live end-to-end CLI round-trip (if Bridge runtime is active):
-   - ham-ctl task create -> stores armored in DB -> ham-ctl task show decrypts -> ham-ctl vault clear -> ham-ctl task show shows encrypted fallback.
+   - ham-ctl task create -> stores armored in DB -> ham-ctl task show decrypts -> (HEIMDALL_VAULT_KEY switched to a different key) -> ham-ctl task show shows encrypted fallback.
 """
 
 import json
@@ -26,6 +26,8 @@ CTL_AGENT_MODE = ROOT / "src" / "ctl" / "agent_mode.odin"
 CTL_VAULT_CONTENT = ROOT / "src" / "ctl" / "vault_content.odin"
 
 TEST_KEY_HEX = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+# A different valid key: decrypting TEST_KEY_HEX ciphertext with it must fall back.
+OTHER_KEY_HEX = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
 
 
 def require(condition: bool, message: str) -> None:
@@ -121,15 +123,9 @@ def test_live_cli_roundtrip() -> None:
     env["HEIMDALL_AGENT_TOKEN"] = token
     env["HEIMDALL_AGENT_INSTANCE_ID"] = inst_id
 
-    # Step 1: Set vault key
-    res_set = subprocess.run(
-        [str(bin_ctl), "vault", "set-key", TEST_KEY_HEX],
-        cwd=ROOT,
-        env=env,
-        capture_output=True,
-        text=True,
-    )
-    require(res_set.returncode == 0, f"vault set-key failed: {res_set.stderr}")
+    # Step 1: Use the test key via the explicit env override (no key file, and the
+    # live bridge's own key is not touched).
+    env["HEIMDALL_VAULT_KEY"] = TEST_KEY_HEX
 
     chain_id = "chain_18d892527be5e57f"
     task_title = "Vault Zero-Knowledge Live Roundtrip Task"
@@ -202,15 +198,8 @@ def test_live_cli_roundtrip() -> None:
         require(res_list_dec.returncode == 0, f"task list failed: {res_list_dec.stderr}")
         require(task_title in res_list_dec.stdout, "task list must contain decrypted title")
 
-        # Step 6: Clear vault key
-        res_clear = subprocess.run(
-            [str(bin_ctl), "vault", "clear"],
-            cwd=ROOT,
-            env=env,
-            capture_output=True,
-            text=True,
-        )
-        require(res_clear.returncode == 0, f"vault clear failed: {res_clear.stderr}")
+        # Step 6: Switch to a different key, so the test key is no longer available
+        env["HEIMDALL_VAULT_KEY"] = OTHER_KEY_HEX
 
         # Step 7: Show task without vault key -> graceful fallback [Encrypted: vault:v1:...]
         res_show_enc = subprocess.run(
@@ -229,13 +218,6 @@ def test_live_cli_roundtrip() -> None:
         # Step 8: Clean up test task (cancel it)
         _ = subprocess.run(
             [str(bin_ctl), "task", "status", task_id, "--status", "cancelled"],
-            cwd=ROOT,
-            env=env,
-            capture_output=True,
-            text=True,
-        )
-        _ = subprocess.run(
-            [str(bin_ctl), "vault", "clear"],
             cwd=ROOT,
             env=env,
             capture_output=True,
