@@ -101,7 +101,7 @@ bridge_vault_set_configured :: proc(bridge_id: string, configured: bool) -> bool
 @(private = "file")
 bridge_vault_write_configured_marker :: proc(path: string) -> bool {
 	dir := path[:strings.last_index_byte(path, '/') + 1]
-	if os.make_directory_all(dir) != nil && !os.exists(dir) do return false
+	if bridge_make_directory_all(dir) != nil && !os.exists(dir) do return false
 	c_path := strings.clone_to_cstring(path)
 	defer delete(c_path)
 	// O_EXCL: two racing unseals must not interleave writes, and a file that
@@ -1459,7 +1459,7 @@ bridge_runtime_apply_update :: proc(
 	updates_dir := fmt.tprintf("%s/updates", data_dir)
 	stage_dir := fmt.tprintf("%s/updates/stage", data_dir)
 	_ = os.remove_all(stage_dir)
-	if os.make_directory_all(stage_dir) != nil {
+	if bridge_make_directory_all(stage_dir) != nil {
 		return false, fmt.tprintf("cannot create staging directory %s", stage_dir)
 	}
 
@@ -1545,7 +1545,7 @@ bridge_runtime_apply_update :: proc(
 		found := false
 		for c in candidates {
 			if os.exists(c) {
-				_ = os.make_directory_all(stage_bin_dir)
+				_ = bridge_make_directory_all(stage_bin_dir)
 				if bridge_update_copy_file(c, bridge_binary) {
 					found = true
 					break
@@ -1568,7 +1568,7 @@ bridge_runtime_apply_update :: proc(
 	}
 
 	// 7. Locate supervisor script scripts/apply-bridge-update.sh
-	_ = os.make_directory_all(updates_dir)
+	_ = bridge_make_directory_all(updates_dir)
 	supervisor_target := fmt.tprintf("%s/apply-bridge-update.sh", updates_dir)
 	supervisor_found := false
 	script_candidates := []string{
@@ -2166,7 +2166,7 @@ bridge_runtime_launch_agent :: proc(command_id, command_json: string, deadline_n
 	run_dir := bridge_runtime_default_run_dir(instance_id)
 	// The bridge is the sole writer of run_dir contents: bootstrap materialization
 	// below clean-slates and writes the assembled file set directly.
-	_ = os.make_directory_all(run_dir)
+	_ = bridge_make_directory_all(run_dir)
 	endpoint, endpoint_ok := bridge_runtime_ensure_local_endpoint()
 	if !endpoint_ok do return false, "local endpoint unavailable"
 	bridge_runtime_set_status(instance_id, "starting", "active")
@@ -2209,7 +2209,7 @@ bridge_runtime_launch_provider_test :: proc(command_id, command_json: string) ->
 	bridge_runtime_clear_stop_intent(instance_id)
 	run_dir := bridge_runtime_default_run_dir(instance_id)
 	defer delete(run_dir)
-	_ = os.make_directory_all(run_dir)
+	_ = bridge_make_directory_all(run_dir)
 	endpoint, endpoint_ok := bridge_runtime_ensure_local_endpoint()
 	if !endpoint_ok do return false, "local endpoint unavailable"
 	bridge_runtime_set_status(instance_id, "starting", "active")

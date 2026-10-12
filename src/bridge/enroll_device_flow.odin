@@ -525,7 +525,7 @@ bridge_write_secret_file :: proc(path, value: string) -> bool {
 	}
 	if slash := strings.last_index_byte(target, '/'); slash > 0 {
 		dir := target[:slash]
-		_ = os.make_directory_all(dir)
+		_ = bridge_make_directory_all(dir)
 		_ = os.chmod(dir, os.Permissions{.Read_User, .Write_User, .Execute_User})
 	}
 	tmp := strings.concatenate({target, ".tmp"}, context.temp_allocator)

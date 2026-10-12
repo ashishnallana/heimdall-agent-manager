@@ -223,7 +223,7 @@ bridge_agent_token_store_load_file :: proc(path: string) {
 bridge_agent_token_store_save_locked :: proc() {
 	path := bridge_agent_token_store_path()
 	defer delete(path)
-	if slash := strings.last_index_byte(path, '/'); slash > 0 { _ = os.make_directory_all(path[:slash]) }
+	if slash := strings.last_index_byte(path, '/'); slash > 0 { _ = bridge_make_directory_all(path[:slash]) }
 	b := strings.builder_make()
 	defer strings.builder_destroy(&b)
 	for rec in bridge_local_token_records {

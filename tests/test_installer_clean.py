@@ -94,6 +94,7 @@ if [ "$1" = enroll ]; then
     shift 2
   done
   printf 'credential\\n' > "$token"
+  printf '%s\\n' "${HEIMDALL_HAM_PTY_HOST_BIN:-unset}" > "$MOCK_ROOT/enroll-env"
   printf 'approved by     alice\\n'
   if [ -n "${TERMUX_VERSION:-}" ] && [ -d "$PREFIX/var/service/ham-bridge" ]; then sv restart "$PREFIX/var/service/ham-bridge"
   elif [ "$MOCK_OS" = Linux ]; then systemctl --user restart heimdall-bridge
@@ -404,6 +405,7 @@ if me=='sv-enable':
         name='heimdall-bridge-localhost-8080'
         out=self.run_install('--hub','http://localhost:8080',answers=[])
         self.assertIn('approved by     alice',out)
+        self.assertEqual((self.root/'enroll-env').read_text().strip(),str(self.data(name)/'bin/ham-pty-host'))
         token=self.state(name)/'bridge-token'; token.write_text('keep-me')
         out=self.run_install('--hub','http://localhost:8080',answers=['n'])
         self.assertIn('Re-enroll this bridge?',out); self.assertEqual(token.read_text(),'keep-me')

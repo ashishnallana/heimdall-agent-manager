@@ -170,7 +170,7 @@ bridge_provider_probe_targets :: proc(filter: []string) -> [dynamic]Bridge_Provi
 bridge_provider_paths_save_unlocked :: proc() -> bool {
 	path := bridge_provider_paths_path()
 	defer delete(path)
-	if slash := strings.last_index_byte(path, '/'); slash > 0 do _ = os.make_directory_all(path[:slash])
+	if slash := strings.last_index_byte(path, '/'); slash > 0 do _ = bridge_make_directory_all(path[:slash])
 	wire := Bridge_Provider_Path_Store_Wire{providers = bridge_provider_paths[:]}
 	bytes, err := json.marshal(wire, json.Marshal_Options{pretty = true, use_spaces = true, spaces = 2}, context.temp_allocator)
 	if err != nil do return false

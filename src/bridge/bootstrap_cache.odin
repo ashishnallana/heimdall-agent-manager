@@ -49,7 +49,7 @@ bootstrap_cache_init :: proc(cache: ^Bootstrap_Cache, base_dir: string, max_byte
 	cache.max_bytes = max_bytes if max_bytes > 0 else 256 * 1024 * 1024
 	cache.items = make(map[string]Bootstrap_Cache_Item)
 	cache.total_bytes = 0
-	_ = os.make_directory_all(cache.blobs_dir)
+	_ = bridge_make_directory_all(cache.blobs_dir)
 
 	if handle, err := os.open(cache.blobs_dir); err == nil {
 		defer os.close(handle)
@@ -114,7 +114,7 @@ bootstrap_manifest_store_path :: proc(cache: ^Bootstrap_Cache, agent_id, role, p
 bootstrap_manifest_store_save :: proc(cache: ^Bootstrap_Cache, agent_id, role, provider, project, etag, manifest_json: string) -> bool {
 	dir := bootstrap_manifest_store_dir(cache)
 	defer delete(dir)
-	_ = os.make_directory_all(dir)
+	_ = bridge_make_directory_all(dir)
 	path := bootstrap_manifest_store_path(cache, agent_id, role, provider, project)
 	defer delete(path)
 	body := strings.concatenate({"ETag: ", etag, "\n", manifest_json})
@@ -187,7 +187,7 @@ bootstrap_cache_put :: proc(cache: ^Bootstrap_Cache, hash_str, body: string) -> 
 	tmp_path := strings.concatenate({cache.blobs_dir, "/", tmp_filename})
 	defer delete(tmp_path)
 
-	_ = os.make_directory_all(cache.blobs_dir)
+	_ = bridge_make_directory_all(cache.blobs_dir)
 	if os.write_entire_file(tmp_path, body) != nil {
 		_ = os.remove(tmp_path)
 		return false

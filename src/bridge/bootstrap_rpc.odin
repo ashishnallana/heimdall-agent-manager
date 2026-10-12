@@ -111,7 +111,7 @@ bridge_bootstrap_fileset_store_write_run_dir :: proc(instance_id, run_dir: strin
 		full := strings.concatenate({clean, "/", rel})
 		if slash := strings.last_index_byte(full, '/'); slash > 0 {
 			parent := full[:slash]
-			_ = os.make_directory_all(parent)
+			_ = bridge_make_directory_all(parent)
 		}
 		write_err := os.write_entire_file(full, transmute([]byte)f.content)
 		if f.mode == 0o755 && write_err == nil {

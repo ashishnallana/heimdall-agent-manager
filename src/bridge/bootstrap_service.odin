@@ -42,7 +42,7 @@ bridge_bootstrap_fetch_and_materialize :: proc(hub_url, bridge_token, instance_i
 	headers := [?]http.Header{{name = "Authorization", value = strings.concatenate({"Bearer ", bridge_token})}}
 	resp, ok := bridge_http_request_retry("GET", hub_url, path, "", headers[:], http.DEFAULT_TIMEOUT_MS)
 	if !ok || resp.status != 200 do return false
-	_ = os.make_directory_all(run_dir)
+	_ = bridge_make_directory_all(run_dir)
 	content := extract_json_string(resp.body, "content", strings.concatenate({"# Agent bootstrap\n\nInstance: ", instance_id, "\n"}))
 	agents_md_name := bridge_bootstrap_agents_md_name(provider)
 	bridge_bootstrap_cleanup_stale_agents_md(run_dir, agents_md_name)
@@ -96,7 +96,7 @@ bridge_bootstrap_write_skills :: proc(run_dir, provider, body: string) -> []stri
 
 bridge_bootstrap_materialize_local_provider_test :: proc(run_dir, bridge_endpoint, agent_token, instance_id, provider: string) -> bool {
 	if strings.trim_space(run_dir) == "" || strings.trim_space(bridge_endpoint) == "" || strings.trim_space(agent_token) == "" || strings.trim_space(instance_id) == "" do return false
-	_ = os.make_directory_all(run_dir)
+	_ = bridge_make_directory_all(run_dir)
 	content := strings.concatenate({"# Provider test bootstrap\n\nInstance: ", instance_id, "\nProvider: ", provider, "\n\nThis is a temporary Heimdall provider smoke-test run. Report readiness with `./.heimdall/bin/ham-ctl start-success` after the provider is usable.\n"})
 	agents_md_name := bridge_bootstrap_agents_md_name(provider)
 	bridge_bootstrap_cleanup_stale_agents_md(run_dir, agents_md_name)
@@ -186,7 +186,7 @@ bridge_bootstrap_write_skill_file :: proc(run_dir, relative_path, content: strin
 	if strings.has_prefix(relative_path, "/") || strings.contains(relative_path, "..") do return false
 	full_path := strings.concatenate({strings.trim_right(run_dir, "/"), "/", relative_path})
 	if slash := strings.last_index_byte(full_path, '/'); slash > 0 {
-		_ = os.make_directory_all(full_path[:slash])
+		_ = bridge_make_directory_all(full_path[:slash])
 	}
 	return os.write_entire_file(full_path, content) == nil
 }
@@ -227,7 +227,7 @@ bridge_bootstrap_write_ham_ctl_wrapper :: proc(run_dir, bridge_endpoint, agent_t
 		return false
 	}
 	bin_dir := strings.concatenate({strings.trim_right(run_dir, "/"), "/.heimdall/bin"})
-	_ = os.make_directory_all(bin_dir)
+	_ = bridge_make_directory_all(bin_dir)
 	wrapper_path := strings.concatenate({bin_dir, "/ham-ctl"})
 	_ = posix.unlink(cstring(raw_data(wrapper_path)))
 	b := strings.builder_make()
@@ -942,7 +942,7 @@ bridge_bootstrap_materialize_run_dir :: proc(manifest_json: string, d: Bridge_Bo
 		// Ensure parent dirs (skills live under nested dirs; ctl shim under .heimdall/bin).
 		if slash := strings.last_index_byte(full, '/'); slash > 0 {
 			parent := full[:slash]
-			_ = os.make_directory_all(parent)
+			_ = bridge_make_directory_all(parent)
 		}
 		if os.write_entire_file(full, transmute([]byte)f.content) != nil {
 			return Bridge_Bootstrap_Result{ok = false, stage = "write_run_dir", detail = strings.concatenate({"failed to write ", rel})}

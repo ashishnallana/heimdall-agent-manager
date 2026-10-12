@@ -1268,7 +1268,7 @@ bridge_fs_make_dir :: proc(requested: string, sandbox_root: string = "") -> Brid
 		}
 		return Bridge_Fs_Mkdir_Result{ok = false, path = canonical, within_root = true, error_code = "path_exists_not_dir", message = "A non-directory already exists at this path"}
 	}
-	if err := os.make_directory_all(canonical); err != nil {
+	if err := bridge_make_directory_all(canonical); err != nil {
 		return Bridge_Fs_Mkdir_Result{ok = false, path = canonical, within_root = true, error_code = "mkdir_failed", message = "Could not create directory"}
 	}
 	return Bridge_Fs_Mkdir_Result{ok = true, path = canonical, created = true, within_root = true}

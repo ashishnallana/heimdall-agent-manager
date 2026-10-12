@@ -129,7 +129,7 @@ bridge_shell_exited_outbox_write :: proc(data_dir, session_id, event_json: strin
 
 	dir := bridge_shell_exited_outbox_dir(data_dir)
 	defer delete(dir)
-	_ = os.make_directory_all(dir)
+	_ = bridge_make_directory_all(dir)
 
 	path := bridge_shell_exited_outbox_path(data_dir, session_id, run_seq)
 	tmp := strings.concatenate({path, ".tmp"})

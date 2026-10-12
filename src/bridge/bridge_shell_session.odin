@@ -863,7 +863,7 @@ Shell_Session_Spec :: struct {
 bridge_shell_session_save_spec :: proc(data_dir: string, s: Bridge_Shell_Session) {
 	dir := bridge_shell_session_spec_dir(data_dir)
 	defer delete(dir)
-	_ = os.make_directory_all(dir)
+	_ = bridge_make_directory_all(dir)
 
 	path := strings.concatenate({dir, "/", s.session_id, ".json"})
 	defer delete(path)

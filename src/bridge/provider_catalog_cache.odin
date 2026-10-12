@@ -113,7 +113,7 @@ bridge_provider_catalog_save :: proc(etag, catalog_json: string) -> bool {
 	path := bridge_provider_catalog_path()
 	defer delete(path)
 	if slash := strings.last_index_byte(path, '/'); slash > 0 {
-		if mk_err := os.make_directory_all(path[:slash]); mk_err != nil && !os.exists(path[:slash]) {
+		if mk_err := bridge_make_directory_all(path[:slash]); mk_err != nil && !os.exists(path[:slash]) {
 			fmt.eprintfln("bridge provider catalog: cannot create cache directory %s: %v", path[:slash], mk_err)
 			return false
 		}

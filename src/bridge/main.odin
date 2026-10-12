@@ -245,7 +245,7 @@ bridge_config_merge :: proc(existing, hub_url, bridge_token, bridge_id: string) 
 
 bridge_write_enrolled_config :: proc(path, hub_url, bridge_token, bridge_id: string) -> bool {
 	if strings.trim_space(path) == "" || strings.trim_space(hub_url) == "" do return false
-	if slash := strings.last_index_byte(path, '/'); slash > 0 { _ = os.make_directory_all(path[:slash]) }
+	if slash := strings.last_index_byte(path, '/'); slash > 0 { _ = bridge_make_directory_all(path[:slash]) }
 	existing := ""
 	if data, err := os.read_entire_file(path, context.allocator); err == nil {
 		existing = string(data)
@@ -257,7 +257,7 @@ bridge_write_enrolled_config :: proc(path, hub_url, bridge_token, bridge_id: str
 
 bridge_write_token_file :: proc(path, token: string) -> bool {
 	if strings.trim_space(path) == "" || strings.trim_space(token) == "" do return false
-	if slash := strings.last_index_byte(path, '/'); slash > 0 { _ = os.make_directory_all(path[:slash]) }
+	if slash := strings.last_index_byte(path, '/'); slash > 0 { _ = bridge_make_directory_all(path[:slash]) }
 	content := strings.concatenate({strings.trim_space(token), "\n"})
 	defer delete(content)
 	err := os.write_entire_file(path, content, os.Permissions{.Read_User, .Write_User})

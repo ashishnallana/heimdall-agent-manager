@@ -30,7 +30,7 @@ bridge_unix_socket_prepare_parent :: proc(path: string) -> bool {
 	fallback := fmt.aprintf("%s/heimdall-%d", root, posix.geteuid())
 	defer delete(fallback)
 	if dir != fallback {
-		err := os.make_directory_all(dir)
+		err := bridge_make_directory_all(dir)
 		if err != nil && err != .Exist do return false
 		cdir := strings.clone_to_cstring(dir)
 		defer delete(cdir)

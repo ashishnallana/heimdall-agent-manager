@@ -108,7 +108,10 @@ pathlib.Path(path).chmod(0o700)
 PY
   done
   local status=0
-  PATH="$compat:$PATH" "$bin_dir/ham-bridge" enroll --hub "$hub_url" \
+  # Same tool paths the service's unit/run file exports, so the enrolling
+  # process can start the PTY host and ham-ctl too (it was "ham-pty-host Not_Exist").
+  PATH="$compat:$bin_dir:$PATH" HEIMDALL_HAM_PTY_HOST_BIN="$bin_dir/ham-pty-host" HEIMDALL_BRIDGE_PTY_HOST=true \
+    HEIMDALL_HAM_CTL_BIN="$bin_dir/ham-ctl" "$bin_dir/ham-bridge" enroll --hub "$hub_url" \
     --bridge-token-file "$token_file" --config "$state_dir/config.toml" \
     --data-dir "$data_dir" --port "$bridge_port" --local-endpoint-port "$endpoint_port" \
     --local-run-dir "$run_dir" || status=$?

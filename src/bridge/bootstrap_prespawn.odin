@@ -59,7 +59,7 @@ bridge_prespawn_clean_slate :: proc(run_dir: string) {
 	dir := strings.trim_right(run_dir, "/")
 	if strings.trim_space(dir) == "" do return
 	bridge_prespawn_rmdir_all(dir)
-	_ = os.make_directory_all(dir)
+	_ = bridge_make_directory_all(dir)
 }
 
 // bridge_prespawn_rmdir_all removes the entire directory tree rooted at dir

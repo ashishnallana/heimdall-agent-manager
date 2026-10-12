@@ -274,7 +274,7 @@ keystore_android_aad :: proc(bridge_id: string) -> []u8 {
 @(private = "file")
 keystore_android_write_file :: proc(path: string, data: []u8) -> (ok: bool, reason: string) {
 	dir := path[:max(strings.last_index_byte(path, '/'), 0)]
-	if mk_err := os.make_directory_all(dir); mk_err != nil && !os.exists(dir) {
+	if mk_err := bridge_make_directory_all(dir); mk_err != nil && !os.exists(dir) {
 		return false, fmt.tprintf("mkdir %s: %v", dir, mk_err)
 	}
 	tmp := strings.concatenate({path, ".tmp"}, context.temp_allocator)
