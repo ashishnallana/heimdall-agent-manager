@@ -428,11 +428,26 @@ endpoint_from_resolution_output :: proc(output: string, port: int) -> (net.Endpo
 //   - anything else   -> `socat OPENSSL-CONNECT` (DEFAULT; full-duplex, no teardown).
 // SHARED CONTRACT: identical rule to src/lib/ws/ws.odin and the bridge's
 // bridge_tls_backend_is_socat (src/bridge/fs_management.odin) — keep in sync.
+// Either helper must be on PATH for ANY outbound https:// call through this client
+// to work, including the hub's own (src/hub/service/billing) — see the ham-hub
+// runtimeInputs in flake.nix.
 tls_client_command :: proc(host: string, port: u16) -> []string {
-	clean_host := host_trim_brackets(host)
 	ca_file := strings.trim_space(os.get_env("HAM_TLS_CA_FILE", context.temp_allocator))
-	backend := strings.to_lower(strings.trim_space(os.get_env("HAM_TLS_BACKEND", context.temp_allocator)))
-	if backend == "s_client" {
+	return tls_client_command_for_backend(os.get_env("HAM_TLS_BACKEND", context.temp_allocator), host, port, ca_file)
+}
+
+// tls_client_command_for_backend is the pure core of tls_client_command with the
+// backend toggle and CA path passed in explicitly. Splitting it out lets unit tests
+// pin a specific backend deterministically WITHOUT mutating the global
+// HAM_TLS_BACKEND env (the Odin test runner executes tests concurrently, so env
+// mutation would race other tests' transport selection) — same reason as the
+// bridge's bridge_hub_chunk_frames_with_payload. `backend` is normalized here
+// (trimmed + lowercased) rather than by the caller, so the raw env value and a
+// test-supplied value cannot diverge; only the exact value "s_client" selects the
+// legacy path.
+tls_client_command_for_backend :: proc(backend: string, host: string, port: u16, ca_file: string) -> []string {
+	clean_host := host_trim_brackets(host)
+	if strings.to_lower(strings.trim_space(backend), context.temp_allocator) == "s_client" {
 		return openssl_s_client_command(clean_host, port, ca_file)
 	}
 	return socat_openssl_command(clean_host, port, ca_file)
@@ -464,7 +479,11 @@ openssl_s_client_command :: proc(clean_host: string, port: u16, ca_file: string)
 // mirrors -servername), cafile=<ca> when HAM_TLS_CA_FILE is set (else OpenSSL's
 // default CA store, like s_client with no -CAfile). NEVER emit verify=0.
 socat_openssl_command :: proc(clean_host: string, port: u16, ca_file: string) -> []string {
-	opts := strings.builder_make()
+	// Temp allocator: the argv is consumed immediately by os.process_start in the same
+	// frame, and ca_file above is already temp-allocated, so the returned strings were
+	// always temp-lived. On the default allocator this builder leaked on every https
+	// call -- a per-request leak in a long-running hub.
+	opts := strings.builder_make(context.temp_allocator)
 	fmt.sbprintf(&opts, "OPENSSL-CONNECT:%s:%d", clean_host, port)
 	fmt.sbprintf(&opts, ",snihost=%s", clean_host)
 	strings.write_string(&opts, ",verify=1")

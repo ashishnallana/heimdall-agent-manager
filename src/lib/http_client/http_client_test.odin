@@ -44,6 +44,45 @@ build_http_request_request_line_and_single_content_type :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(req, "Content-Length: 1\r\n"))
 }
 
+// ---- TLS transport selection (REQ-4/REQ-5: both helpers must be packaged) ----
+//
+// These pin the SHARED CONTRACT the ham-hub/ham-bridge runtimeInputs are sized
+// against: socat is the default and openssl is the s_client fallback, so a package
+// that ships only one of them breaks outbound https for one of the two settings.
+// They go through the pure tls_client_command_for_backend rather than setting
+// HAM_TLS_BACKEND, because the test runner is concurrent and env is process-global.
+
+@(test)
+tls_backend_defaults_to_socat :: proc(t: ^testing.T) {
+	// Unset/empty, the explicit default, odd casing+spacing, and an unknown value
+	// must ALL select socat — only the exact "s_client" may divert.
+	backends := [?]string{"", "socat", " SOCAT ", "openssl", "unknown"}
+	for backend in backends {
+		cmd := tls_client_command_for_backend(backend, "hub.brolabs.ai", 443, "")
+		defer delete(cmd)
+		testing.expect_value(t, len(cmd), 3)
+		testing.expect_value(t, cmd[0], "socat")
+		testing.expect_value(t, cmd[1], "STDIO")
+		testing.expect_value(t, cmd[2], "OPENSSL-CONNECT:hub.brolabs.ai:443,snihost=hub.brolabs.ai,verify=1,commonname=hub.brolabs.ai")
+	}
+}
+
+@(test)
+tls_backend_s_client_uses_openssl :: proc(t: ^testing.T) {
+	backends := [?]string{"s_client", " S_Client "}
+	for backend in backends {
+		cmd := tls_client_command_for_backend(backend, "hub.brolabs.ai", 443, "/etc/ssl/ca.pem")
+		defer delete(cmd)
+		testing.expect_value(t, cmd[0], "openssl")
+		testing.expect_value(t, cmd[1], "s_client")
+		joined := strings.join(cmd, " ")
+		defer delete(joined)
+		testing.expect(t, strings.contains(joined, "-verify_return_error"), joined)
+		testing.expect(t, strings.contains(joined, "-CAfile /etc/ssl/ca.pem"), joined)
+		testing.expect(t, strings.has_suffix(joined, "-connect hub.brolabs.ai:443"), joined)
+	}
+}
+
 // ---- download_to_file (REQ-DIST-4: heimdall update) ----
 
 @(test)

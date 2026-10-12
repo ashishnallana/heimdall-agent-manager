@@ -295,7 +295,14 @@
           odin = mkOdin pkgs;
         in
         {
-          ham-hub = mkOdinPackageWithRuntime pkgs odin "ham-hub" "src/hub" [ pkgs.sqlite ];
+          # sqlite backs the hub repository. openssl + socat are the OUTBOUND https
+          # transport: the hub's own REST calls (e.g. the Paddle billing API) go through
+          # src/lib/http_client, which terminates TLS by launching `socat` (the default)
+          # or `openssl s_client` (HAM_TLS_BACKEND=s_client). Without both on the wrapped
+          # PATH every outbound https call fails at subprocess spawn — the hub never
+          # reaches the remote and reports a generic "could not contact" error. Same
+          # shared contract as ham-bridge below; keep the two in sync.
+          ham-hub = mkOdinPackageWithRuntime pkgs odin "ham-hub" "src/hub" [ pkgs.sqlite pkgs.openssl pkgs.socat ];
           # SOCAT-1: socat is the DEFAULT bridge->hub TLS transport (HAM_TLS_BACKEND),
           # openssl stays for the s_client fallback (and socat's own OpenSSL engine).
           # curl handles release downloads; all three are runtimeInputs so the
