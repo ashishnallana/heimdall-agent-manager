@@ -13,6 +13,12 @@ bridge_scratch_root :: proc(allocator := context.allocator) -> string {
 		t := strings.trim_right(strings.trim_space(raw), "/")
 		if strings.has_prefix(t, "/") do return strings.clone(t, allocator)
 	}
+	// Termux without TMPDIR (a service started outside a login shell): /tmp does
+	// not exist there, but $PREFIX/tmp always does.
+	if prefix, found := os.lookup_env("PREFIX", context.temp_allocator); found {
+		pf := strings.trim_right(strings.trim_space(prefix), "/")
+		if strings.has_prefix(pf, "/data/data/com.termux") do return strings.concatenate({pf, "/tmp"}, allocator)
+	}
 	return strings.clone("/tmp", allocator)
 }
 

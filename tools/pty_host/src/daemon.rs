@@ -64,12 +64,26 @@ struct TeeWriter {
 
 impl TeeWriter {
     /// Open (or create) `path` in append mode. Returns `None` on I/O error.
+    ///
+    /// The parent directory is created first: on a fresh install the first
+    /// session's tee path pointed into a directory nobody had made yet, so
+    /// `openat` returned ENOENT and that session's saved output was lost
+    /// (only later sessions, whose directory existed by then, were kept).
     fn open(path: &str) -> Option<Self> {
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .ok()?;
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            if !parent.as_os_str().is_empty() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    eprintln!("[ham-pty-host] tee directory {} could not be created: {e}", parent.display());
+                }
+            }
+        }
+        let file = match std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("[ham-pty-host] tee open failed for {path}: {e}; output will not be saved");
+                return None;
+            }
+        };
         let written = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
         Some(TeeWriter { file, path: path.to_string(), written })
     }

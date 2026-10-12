@@ -464,6 +464,9 @@ if svc=='runit':
     text='#!'+prefix+'/bin/sh\nexec 2>&1\n'
     text+='export PREFIX='+shlex.quote(prefix)+'\n'
     text+='export TERMUX_VERSION='+shlex.quote(termux_version or 'installed')+'\n'
+    # Services started by runsvdir may lack the login shell's TMPDIR; without it
+    # the bridge and PTY host fall back to /tmp, which Android does not have.
+    text+='export TMPDIR='+shlex.quote(prefix+'/tmp')+'\n'
     text+=''.join('export '+k+'='+shlex.quote(v)+'\n' for k,v in env.items())
     text+='exec '+' '.join(shlex.quote(a) for a in args)+'\n'
     run.write_text(text); run.chmod(0o755)

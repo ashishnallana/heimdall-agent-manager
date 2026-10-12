@@ -4094,6 +4094,12 @@ bridge_hub_handle_shell_start :: proc(conn: ^ws.Connection, text: string) {
 		spawn_env = bridge_shell_run_env()
 	}
 
+	// The PTY host appends the session's output to tee_path; make sure its
+	// directory exists before the request (a fresh install's first session
+	// lost its saved output to ENOENT when nothing had created it yet).
+	if slash := strings.last_index_byte(tee_path, '/'); slash > 0 {
+		_ = bridge_make_directory_all(tee_path[:slash])
+	}
 	req := Pty_Host_Spawn_Request{
 		instance         = strings.clone(spawn_instance),
 		argv             = cloned_argv,
