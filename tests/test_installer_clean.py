@@ -26,7 +26,10 @@ class InstallerTests(unittest.TestCase):
         self.mock = self.root / 'mock'
         self.mock.mkdir()
         self.log = self.root / 'commands.jsonl'
-        base = {k: v for k, v in os.environ.items() if not k.startswith('HEIMDALL_')}
+        # The installer treats DEBIAN_FRONTEND=noninteractive (set on GitHub's Ubuntu runners) as
+        # --non-interactive, so leaking it would skip every prompt-driven branch under test.
+        base = {k: v for k, v in os.environ.items()
+                if not k.startswith('HEIMDALL_') and k != 'DEBIAN_FRONTEND'}
         self.env = dict(base, HOME=str(self.home), PATH=str(self.mock)+':'+os.environ['PATH'],
                         MOCK_ROOT=str(self.root), MOCK_OS='Linux',
                         XDG_RUNTIME_DIR=str(self.root/'runtime'), DBUS_SESSION_BUS_ADDRESS='',
