@@ -139,6 +139,7 @@ export function WorkbenchPaneView({
           onToggleMaximize={onToggleMaximize}
           onClosePane={onClosePane}
           onTabDragStart={onTabDragStart}
+          isMobile={isMobile}
         />
       </div>
 

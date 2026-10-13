@@ -220,7 +220,9 @@ export function ConversationThreadPage({
     onPublishComments: handlePublishComments,
   };
 
-  if (withWindowTiling) {
+  // Mobile flattens everything into one side-scrolling pane pager, so the
+  // window-level tiling layer is skipped there.
+  if (withWindowTiling && !(explicitIsMobile ?? isMobileViewport)) {
     return (
       <section
         data-debug-id="conversation-thread-page"

@@ -34,6 +34,8 @@ export interface WorkbenchTabStripProps {
   onClosePane: () => void;
   onReorderTabs?: (fromIndex: number, toIndex: number) => void;
   onTabDragStart?: (tabId: string, event: React.PointerEvent) => void;
+  /** Mobile: panes are flat, side-scrolling pages — split directions collapse to "New Pane". */
+  isMobile?: boolean;
 }
 
 export function WorkbenchTabStrip({
@@ -49,8 +51,11 @@ export function WorkbenchTabStrip({
   onSplitPane,
   onToggleMaximize,
   onClosePane,
-  onTabDragStart,
+  onTabDragStart: onTabDragStartProp,
+  isMobile = false,
 }: WorkbenchTabStripProps) {
+  // Tab drag-to-split has no meaning in the flat mobile pager.
+  const onTabDragStart = isMobile ? undefined : onTabDragStartProp;
   const [menuOpen, setMenuOpen] = React.useState(false);
   const runAndClose = (fn: () => void) => {
     setMenuOpen(false);
@@ -205,53 +210,70 @@ export function WorkbenchTabStrip({
             </Menu.Item>
           ) : null}
           <Menu.Separator />
-          <Menu.Label>Split</Menu.Label>
-          <Menu.Item
-            data-debug-id={`workbench-pane-split-right-${paneId}`}
-            onClick={() => runAndClose(() => onSplitPane('right'))}
-          >
-            <Icon name="panel-right" size={15} />
-            <span>Split Right</span>
-          </Menu.Item>
-          <Menu.Item
-            data-debug-id={`workbench-pane-split-bottom-${paneId}`}
-            onClick={() => runAndClose(() => onSplitPane('bottom'))}
-          >
-            <Icon name="chevron-down" size={15} />
-            <span>Split Down</span>
-          </Menu.Item>
-          <Menu.Item
-            data-debug-id={`workbench-pane-split-left-${paneId}`}
-            onClick={() => runAndClose(() => onSplitPane('left'))}
-          >
-            <Icon name="panel-left" size={15} />
-            <span>Split Left</span>
-          </Menu.Item>
-          <Menu.Item
-            data-debug-id={`workbench-pane-split-top-${paneId}`}
-            onClick={() => runAndClose(() => onSplitPane('top'))}
-          >
-            <Icon name="chevron-up" size={15} />
-            <span>Split Up</span>
-          </Menu.Item>
-          <Menu.Separator />
-          <Menu.Item
-            data-debug-id={`workbench-pane-maximize-action-${paneId}`}
-            onClick={() => runAndClose(onToggleMaximize)}
-          >
-            <Icon name={isMaximized ? 'minimize' : 'maximize'} size={15} />
-            <span>{isMaximized ? 'Restore Pane' : 'Maximize Pane'}</span>
-          </Menu.Item>
+          {isMobile ? (
+            <Menu.Item
+              data-debug-id={`workbench-pane-new-pane-action-${paneId}`}
+              onClick={() => runAndClose(() => onSplitPane('right'))}
+            >
+              <Icon name="plus" size={15} />
+              <span>New Pane</span>
+            </Menu.Item>
+          ) : (
+            <>
+            <Menu.Label>Split</Menu.Label>
+            <Menu.Item
+              data-debug-id={`workbench-pane-split-right-${paneId}`}
+              onClick={() => runAndClose(() => onSplitPane('right'))}
+            >
+              <Icon name="panel-right" size={15} />
+              <span>Split Right</span>
+            </Menu.Item>
+            <Menu.Item
+              data-debug-id={`workbench-pane-split-bottom-${paneId}`}
+              onClick={() => runAndClose(() => onSplitPane('bottom'))}
+            >
+              <Icon name="chevron-down" size={15} />
+              <span>Split Down</span>
+            </Menu.Item>
+            <Menu.Item
+              data-debug-id={`workbench-pane-split-left-${paneId}`}
+              onClick={() => runAndClose(() => onSplitPane('left'))}
+            >
+              <Icon name="panel-left" size={15} />
+              <span>Split Left</span>
+            </Menu.Item>
+            <Menu.Item
+              data-debug-id={`workbench-pane-split-top-${paneId}`}
+              onClick={() => runAndClose(() => onSplitPane('top'))}
+            >
+              <Icon name="chevron-up" size={15} />
+              <span>Split Up</span>
+            </Menu.Item>
+            </>
+          )}
+          {!isMobile ? (
+            <>
+              <Menu.Separator />
+              <Menu.Item
+                data-debug-id={`workbench-pane-maximize-action-${paneId}`}
+                onClick={() => runAndClose(onToggleMaximize)}
+              >
+                <Icon name={isMaximized ? 'minimize' : 'maximize'} size={15} />
+                <span>{isMaximized ? 'Restore Pane' : 'Maximize Pane'}</span>
+              </Menu.Item>
+            </>
+          ) : null}
           {!isSinglePane ? (
             <Menu.Item
               data-debug-id={`workbench-pane-close-action-${paneId}`}
               onClick={() => runAndClose(onClosePane)}
             >
               <Icon name="trash" size={15} />
-              <span>Remove from Split</span>
+              <span>{isMobile ? 'Close Pane' : 'Remove from Split'}</span>
             </Menu.Item>
           ) : null}
         </Menu>
+        {!isMobile ? (
         <button
           type="button"
           onClick={onToggleMaximize}
@@ -266,6 +288,7 @@ export function WorkbenchTabStrip({
         >
           <Icon name={isMaximized ? 'minimize' : 'maximize'} size={12} />
         </button>
+        ) : null}
         {!isSinglePane ? (
           <button
             type="button"

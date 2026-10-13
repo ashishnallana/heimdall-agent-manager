@@ -2762,87 +2762,112 @@ export function AgentChatPane({
               <span>Agent settings</span>
             </Menu.Item>
             <Menu.Separator />
-            <Menu.Label>Split</Menu.Label>
-            <Menu.Item
-              data-debug-id="conversation-split-right-action"
-              onClick={() => {
-                setHeaderActionsOpen(false);
-                if (onSplitPane) {
-                  onSplitPane('right');
-                } else {
-                  dispatch(
-                    splitWorkbenchPane({
-                      workspaceKey: effectiveWorkspaceKey,
-                      targetPaneId: paneId,
-                      direction: 'right',
-                    }),
-                  );
-                }
-              }}
-            >
-              <Icon name="panel-right" size={15} />
-              <span>Split Right</span>
-            </Menu.Item>
-            <Menu.Item
-              data-debug-id="conversation-split-down-action"
-              onClick={() => {
-                setHeaderActionsOpen(false);
-                if (onSplitPane) {
-                  onSplitPane('bottom');
-                } else {
-                  dispatch(
-                    splitWorkbenchPane({
-                      workspaceKey: effectiveWorkspaceKey,
-                      targetPaneId: paneId,
-                      direction: 'bottom',
-                    }),
-                  );
-                }
-              }}
-            >
-              <Icon name="chevron-down" size={15} />
-              <span>Split Down</span>
-            </Menu.Item>
-            <Menu.Item
-              data-debug-id="conversation-split-left-action"
-              onClick={() => {
-                setHeaderActionsOpen(false);
-                if (onSplitPane) {
-                  onSplitPane('left');
-                } else {
-                  dispatch(
-                    splitWorkbenchPane({
-                      workspaceKey: effectiveWorkspaceKey,
-                      targetPaneId: paneId,
-                      direction: 'left',
-                    }),
-                  );
-                }
-              }}
-            >
-              <Icon name="panel-left" size={15} />
-              <span>Split Left</span>
-            </Menu.Item>
-            <Menu.Item
-              data-debug-id="conversation-split-up-action"
-              onClick={() => {
-                setHeaderActionsOpen(false);
-                if (onSplitPane) {
-                  onSplitPane('top');
-                } else {
-                  dispatch(
-                    splitWorkbenchPane({
-                      workspaceKey: effectiveWorkspaceKey,
-                      targetPaneId: paneId,
-                      direction: 'top',
-                    }),
-                  );
-                }
-              }}
-            >
-              <Icon name="chevron-up" size={15} />
-              <span>Split Up</span>
-            </Menu.Item>
+            <Menu.Label>{isMobile ? 'Panes' : 'Split'}</Menu.Label>
+            {isMobile ? (
+              <Menu.Item
+                data-debug-id="conversation-new-pane-action"
+                onClick={() => {
+                  setHeaderActionsOpen(false);
+                  if (onSplitPane) {
+                    onSplitPane('right');
+                  } else {
+                    dispatch(
+                      splitWorkbenchPane({
+                        workspaceKey: effectiveWorkspaceKey,
+                        targetPaneId: paneId,
+                        direction: 'right',
+                      }),
+                    );
+                  }
+                }}
+              >
+                <Icon name="plus" size={15} />
+                <span>New Pane</span>
+              </Menu.Item>
+            ) : (
+              <>
+              <Menu.Item
+                data-debug-id="conversation-split-right-action"
+                onClick={() => {
+                  setHeaderActionsOpen(false);
+                  if (onSplitPane) {
+                    onSplitPane('right');
+                  } else {
+                    dispatch(
+                      splitWorkbenchPane({
+                        workspaceKey: effectiveWorkspaceKey,
+                        targetPaneId: paneId,
+                        direction: 'right',
+                      }),
+                    );
+                  }
+                }}
+              >
+                <Icon name="panel-right" size={15} />
+                <span>Split Right</span>
+              </Menu.Item>
+              <Menu.Item
+                data-debug-id="conversation-split-down-action"
+                onClick={() => {
+                  setHeaderActionsOpen(false);
+                  if (onSplitPane) {
+                    onSplitPane('bottom');
+                  } else {
+                    dispatch(
+                      splitWorkbenchPane({
+                        workspaceKey: effectiveWorkspaceKey,
+                        targetPaneId: paneId,
+                        direction: 'bottom',
+                      }),
+                    );
+                  }
+                }}
+              >
+                <Icon name="chevron-down" size={15} />
+                <span>Split Down</span>
+              </Menu.Item>
+              <Menu.Item
+                data-debug-id="conversation-split-left-action"
+                onClick={() => {
+                  setHeaderActionsOpen(false);
+                  if (onSplitPane) {
+                    onSplitPane('left');
+                  } else {
+                    dispatch(
+                      splitWorkbenchPane({
+                        workspaceKey: effectiveWorkspaceKey,
+                        targetPaneId: paneId,
+                        direction: 'left',
+                      }),
+                    );
+                  }
+                }}
+              >
+                <Icon name="panel-left" size={15} />
+                <span>Split Left</span>
+              </Menu.Item>
+              <Menu.Item
+                data-debug-id="conversation-split-up-action"
+                onClick={() => {
+                  setHeaderActionsOpen(false);
+                  if (onSplitPane) {
+                    onSplitPane('top');
+                  } else {
+                    dispatch(
+                      splitWorkbenchPane({
+                        workspaceKey: effectiveWorkspaceKey,
+                        targetPaneId: paneId,
+                        direction: 'top',
+                      }),
+                    );
+                  }
+                }}
+              >
+                <Icon name="chevron-up" size={15} />
+                <span>Split Up</span>
+              </Menu.Item>
+              </>
+            )}
             <Menu.Item
               data-debug-id="conversation-replace-with-new-action"
               onClick={() => {
@@ -2880,7 +2905,7 @@ export function AgentChatPane({
                 }}
               >
                 <Icon name="close" size={15} />
-                <span>Remove from Split</span>
+                <span>{isMobile ? 'Close Pane' : 'Remove from Split'}</span>
               </Menu.Item>
             ) : null}
             <Menu.Separator />

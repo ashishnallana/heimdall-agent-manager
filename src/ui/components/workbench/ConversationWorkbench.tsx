@@ -3,7 +3,7 @@ import { useDispatch, useSelector } from 'react-redux';
 import { TilingContainer } from '../../tiling/TilingContainer';
 import { getContentPaneIds } from '../../tiling/paneTreeState';
 import { getSplitDirection, resolvePaneTarget } from '../../tiling/dragUtils';
-import type { RenderPaneProps, SplitDirection } from '../../tiling/types';
+import type { PaneTreeState, RenderPaneProps, SplitDirection } from '../../tiling/types';
 import {
   buildWorkbenchTabId,
   resolveLegacyPanelToSurfaceKind,
@@ -631,6 +631,20 @@ export function ConversationWorkbench({
       }}
       className="flex h-full min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden bg-canvas"
     >
+      {isMobile ? (
+        <MobilePanePager
+          tree={workspaceState.tree}
+          renderPane={renderPane}
+          onFocusPane={(paneId) =>
+            dispatch(
+              setFocusedWorkbenchPane({
+                workspaceKey: effectiveWorkspaceKey,
+                paneId,
+              }),
+            )
+          }
+        />
+      ) : (
       <TilingContainer<TabbedPaneState>
         treeState={workspaceState.tree}
         renderPane={renderPane}
@@ -654,6 +668,104 @@ export function ConversationWorkbench({
         paneDividers={true}
         className="h-full w-full flex-1 min-h-0"
       />
+      )}
+    </div>
+  );
+}
+
+/**
+ * Mobile layout: every content pane of the 2D split tree is flattened (in tree
+ * order) into a full-width page of a horizontal, scroll-snapping pager. Splits
+ * are not shown; "New Pane" appends a page. The focused pane is scrolled into
+ * view, and swiping to a page focuses it.
+ */
+function MobilePanePager({
+  tree,
+  renderPane,
+  onFocusPane,
+}: {
+  tree: PaneTreeState<TabbedPaneState>;
+  renderPane: (props: RenderPaneProps<TabbedPaneState>) => React.ReactNode;
+  onFocusPane: (paneId: string) => void;
+}) {
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const paneIds = getContentPaneIds(tree);
+  const focusedPaneId = tree.focusedPaneId;
+  const focusedIndex = Math.max(0, paneIds.indexOf(focusedPaneId));
+  const paneKey = paneIds.join('|');
+
+  // Bring the focused pane into view (e.g. after "New Pane" or opening a surface).
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || el.clientWidth === 0) return;
+    const currentIndex = Math.round(el.scrollLeft / el.clientWidth);
+    if (currentIndex !== focusedIndex) {
+      el.scrollTo({ left: focusedIndex * el.clientWidth, behavior: 'smooth' });
+    }
+  }, [focusedIndex, paneKey]);
+
+  // Swiping to a page focuses that pane (debounced to the scroll settling).
+  const settleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (settleTimer.current) clearTimeout(settleTimer.current);
+  }, []);
+  const handleScroll = () => {
+    if (settleTimer.current) clearTimeout(settleTimer.current);
+    settleTimer.current = setTimeout(() => {
+      const el = scrollRef.current;
+      if (!el || el.clientWidth === 0) return;
+      const index = Math.round(el.scrollLeft / el.clientWidth);
+      const paneId = paneIds[index];
+      if (paneId && paneId !== focusedPaneId) onFocusPane(paneId);
+    }, 120);
+  };
+
+  const isSinglePane = paneIds.length <= 1;
+
+  return (
+    <div className="relative flex h-full min-h-0 w-full flex-1 flex-col">
+      <div
+        ref={scrollRef}
+        data-debug-id="workbench-mobile-pager"
+        onScroll={handleScroll}
+        className="no-scrollbar flex h-full min-h-0 w-full flex-1 snap-x snap-mandatory overflow-x-auto overflow-y-hidden overscroll-x-contain"
+      >
+        {paneIds.map((paneId) => {
+          const pane = tree.panes[paneId];
+          if (!pane || pane.kind !== 'content') return null;
+          return (
+            <div
+              key={paneId}
+              data-pane-id={paneId}
+              data-debug-id={`workbench-mobile-page-${paneId}`}
+              className="flex h-full min-h-0 w-full min-w-full shrink-0 snap-start snap-always flex-col overflow-hidden"
+            >
+              {renderPane({
+                paneId,
+                value: pane.value,
+                isFocused: paneId === focusedPaneId,
+                isMaximized: false,
+                isSinglePane,
+              } as RenderPaneProps<TabbedPaneState>)}
+            </div>
+          );
+        })}
+      </div>
+      {!isSinglePane ? (
+        <div
+          data-debug-id="workbench-mobile-pager-dots"
+          className="pointer-events-none absolute inset-x-0 bottom-1 flex justify-center gap-1.5"
+        >
+          {paneIds.map((paneId, i) => (
+            <span
+              key={paneId}
+              className={`h-1.5 rounded-full transition-all ${
+                i === focusedIndex ? 'w-4 bg-accent' : 'w-1.5 bg-current text-muted opacity-40'
+              }`}
+            />
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }
