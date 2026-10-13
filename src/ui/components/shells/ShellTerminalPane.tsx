@@ -408,10 +408,6 @@ export function ShellTerminalPane({
     terminalRef.current = term;
     fitAddonRef.current = fitAddon;
 
-    // Close the small mount-order gap without waiting for layout. Bytes that arrived after
-    // consumeRestorationData but before terminalRef was installed may contain terminal queries.
-    flushPendingOutput();
-
     const replayToXterm = (data: string | Uint8Array, onDone?: () => void) => {
       const finishWrite = beginTerminalWrite(pendingWritesRef);
       term.write(data, () => {
@@ -431,6 +427,12 @@ export function ShellTerminalPane({
     const resizeDisposable = term.onResize(({ cols, rows }) => {
       handleResizeRef.current(rows, cols);
     });
+
+    // Close the small mount-order gap without waiting for layout. This MUST happen after
+    // onData is subscribed: buffered startup bytes can contain Neovim's terminal queries, and
+    // parsing them before the reply channel exists silently drops the answers. A later remount
+    // appeared to fix the blank pane only because its protocol handler won that race.
+    flushPendingOutput();
 
     // Track manual scroll-up so a repaint does not yank the viewport back down.
     term.onScroll(() => {
