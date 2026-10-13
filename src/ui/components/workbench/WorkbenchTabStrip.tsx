@@ -1,5 +1,5 @@
 import React from 'react';
-import { Icon, type IconName } from '@ui';
+import { Icon, Menu, type IconName } from '@ui';
 import type { SplitDirection } from '../../tiling/types';
 import {
   NEW_TAB_ID,
@@ -51,6 +51,17 @@ export function WorkbenchTabStrip({
   onClosePane,
   onTabDragStart,
 }: WorkbenchTabStripProps) {
+  const [menuOpen, setMenuOpen] = React.useState(false);
+  const runAndClose = (fn: () => void) => {
+    setMenuOpen(false);
+    fn();
+  };
+  const activeClosableTabId =
+    activeTabId &&
+    activeTabId !== NEW_TAB_ID &&
+    tabs.some((t) => t.id === activeTabId && t.closable !== false)
+      ? activeTabId
+      : null;
   const showNewTabPill =
     (activeTabId === NEW_TAB_ID || tabs.length === 0) &&
     !tabs.some((t) => t.id === NEW_TAB_ID);
@@ -157,48 +168,90 @@ export function WorkbenchTabStrip({
         </button>
       </div>
 
-      {/* Right Pane Split / Maximize / Close Controls */}
+      {/* Right Pane Controls: overflow (⋮) menu with split / maximize / close actions */}
       <div className="ml-1 flex shrink-0 items-center gap-0.5">
-        <button
-          type="button"
-          onClick={() => onSplitPane('right')}
-          title="Split Right"
-          aria-label="Split pane right"
-          data-debug-id={`workbench-pane-split-right-${paneId}`}
-          className="grid h-6 w-6 place-items-center rounded text-muted hover:bg-neutral-soft hover:text-primary"
+        <Menu
+          align="end"
+          label="Pane options"
+          open={menuOpen}
+          onOpenChange={setMenuOpen}
+          className="w-56 max-w-[calc(100vw-2rem)] z-30"
+          trigger={
+            <button
+              type="button"
+              title="More options"
+              aria-label="Pane options"
+              data-debug-id={`workbench-pane-overflow-menu-btn-${paneId}`}
+              className="grid h-6 w-6 place-items-center rounded text-muted hover:bg-neutral-soft hover:text-primary"
+            >
+              <Icon name="more-vertical" size={14} />
+            </button>
+          }
         >
-          <Icon name="panel-right" size={12} />
-        </button>
-        <button
-          type="button"
-          onClick={() => onSplitPane('bottom')}
-          title="Split Down"
-          aria-label="Split pane down"
-          data-debug-id={`workbench-pane-split-bottom-${paneId}`}
-          className="grid h-6 w-6 place-items-center rounded text-muted hover:bg-neutral-soft hover:text-primary"
-        >
-          <Icon name="chevron-down" size={12} />
-        </button>
-        <button
-          type="button"
-          onClick={() => onSplitPane('left')}
-          title="Split Left"
-          aria-label="Split pane left"
-          data-debug-id={`workbench-pane-split-left-${paneId}`}
-          className="hidden sm:grid h-6 w-6 place-items-center rounded text-muted hover:bg-neutral-soft hover:text-primary"
-        >
-          <Icon name="chevron-left" size={12} />
-        </button>
-        <button
-          type="button"
-          onClick={() => onSplitPane('top')}
-          title="Split Up"
-          aria-label="Split pane top"
-          data-debug-id={`workbench-pane-split-top-${paneId}`}
-          className="hidden sm:grid h-6 w-6 place-items-center rounded text-muted hover:bg-neutral-soft hover:text-primary"
-        >
-          <Icon name="chevron-up" size={12} />
-        </button>
+          <Menu.Item
+            data-debug-id={`workbench-pane-new-tab-action-${paneId}`}
+            onClick={() => runAndClose(onOpenNewTab)}
+          >
+            <Icon name="plus" size={15} />
+            <span>New Tab</span>
+          </Menu.Item>
+          {activeClosableTabId ? (
+            <Menu.Item
+              data-debug-id={`workbench-pane-close-tab-action-${paneId}`}
+              onClick={() => runAndClose(() => onCloseTab(activeClosableTabId))}
+            >
+              <Icon name="close" size={15} />
+              <span>Close Tab</span>
+            </Menu.Item>
+          ) : null}
+          <Menu.Separator />
+          <Menu.Label>Split</Menu.Label>
+          <Menu.Item
+            data-debug-id={`workbench-pane-split-right-${paneId}`}
+            onClick={() => runAndClose(() => onSplitPane('right'))}
+          >
+            <Icon name="panel-right" size={15} />
+            <span>Split Right</span>
+          </Menu.Item>
+          <Menu.Item
+            data-debug-id={`workbench-pane-split-bottom-${paneId}`}
+            onClick={() => runAndClose(() => onSplitPane('bottom'))}
+          >
+            <Icon name="chevron-down" size={15} />
+            <span>Split Down</span>
+          </Menu.Item>
+          <Menu.Item
+            data-debug-id={`workbench-pane-split-left-${paneId}`}
+            onClick={() => runAndClose(() => onSplitPane('left'))}
+          >
+            <Icon name="panel-left" size={15} />
+            <span>Split Left</span>
+          </Menu.Item>
+          <Menu.Item
+            data-debug-id={`workbench-pane-split-top-${paneId}`}
+            onClick={() => runAndClose(() => onSplitPane('top'))}
+          >
+            <Icon name="chevron-up" size={15} />
+            <span>Split Up</span>
+          </Menu.Item>
+          <Menu.Separator />
+          <Menu.Item
+            data-debug-id={`workbench-pane-maximize-action-${paneId}`}
+            onClick={() => runAndClose(onToggleMaximize)}
+          >
+            <Icon name={isMaximized ? 'minimize' : 'maximize'} size={15} />
+            <span>{isMaximized ? 'Restore Pane' : 'Maximize Pane'}</span>
+          </Menu.Item>
+          {!isSinglePane ? (
+            <Menu.Item
+              data-debug-id={`workbench-pane-close-action-${paneId}`}
+              onClick={() => runAndClose(onClosePane)}
+            >
+              <Icon name="trash" size={15} />
+              <span>Remove from Split</span>
+            </Menu.Item>
+          ) : null}
+        </Menu>
         <button
           type="button"
           onClick={onToggleMaximize}

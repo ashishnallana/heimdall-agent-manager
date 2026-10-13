@@ -491,13 +491,19 @@ describe('Tier 5 Adversarial Audit — Focus Area 2: AgentChatPane Follow-up Req
       });
       assert.deepEqual(closedTabs, ['files', 'agentChat__inst-1']);
 
-      // Click + button, 4 split buttons, maximize button, and close pane button
+      // Click + button, then the 4 split actions in the ⋮ overflow menu, maximize button, and close pane button
       await act(async () => {
         (container.querySelector('[data-debug-id="workbench-pane-new-tab-btn-pane-strip-1"]') as HTMLElement).click();
-        (container.querySelector('[data-debug-id="workbench-pane-split-right-pane-strip-1"]') as HTMLElement).click();
-        (container.querySelector('[data-debug-id="workbench-pane-split-bottom-pane-strip-1"]') as HTMLElement).click();
-        (container.querySelector('[data-debug-id="workbench-pane-split-left-pane-strip-1"]') as HTMLElement).click();
-        (container.querySelector('[data-debug-id="workbench-pane-split-top-pane-strip-1"]') as HTMLElement).click();
+      });
+      for (const dir of ['right', 'bottom', 'left', 'top']) {
+        await act(async () => {
+          (container.querySelector('[data-debug-id="workbench-pane-overflow-menu-btn-pane-strip-1"]') as HTMLElement).click();
+        });
+        await act(async () => {
+          (dom.window.document.querySelector(`[data-debug-id="workbench-pane-split-${dir}-pane-strip-1"]`) as HTMLElement).click();
+        });
+      }
+      await act(async () => {
         (container.querySelector('[data-debug-id="workbench-pane-maximize-pane-strip-1"]') as HTMLElement).click();
         (container.querySelector('[data-debug-id="workbench-pane-close-pane-strip-1"]') as HTMLElement).click();
       });
