@@ -17,7 +17,7 @@ import {
 } from '../src/ui/components/shells/streamingMode.ts';
 import {
   beginTerminalWrite,
-  shouldForwardTerminalData,
+  dispatchTerminalData,
 } from '../src/ui/components/shells/terminalWriteAccounting.ts';
 import { shellResizeFrame } from '../src/ui/components/shells/shellStreamFrames.ts';
 
@@ -27,17 +27,16 @@ function writeToTerminal(term: any, data: string | Uint8Array): Promise<void> {
   return new Promise((resolve) => term.write(data, () => resolve()));
 }
 
-test('live PTY terminal-query replies are forwarded while replay replies stay suppressed', async () => {
+test('xterm protocol replies are always forwarded unless the vault is locked', async () => {
   const term = new Terminal({ cols: 80, rows: 24 });
   const pendingWrites = { current: 0 };
-  const pendingReplays = { current: 0 };
   const forwarded: string[] = [];
   term.onData((data: string) => {
-    if (shouldForwardTerminalData(pendingReplays)) forwarded.push(data);
+    dispatchTerminalData(data, false, (payload) => forwarded.push(payload));
   });
 
   await new Promise<void>((resolve) => {
-    const finish = beginTerminalWrite('live', pendingWrites, pendingReplays);
+    const finish = beginTerminalWrite(pendingWrites);
     // Neovim brackets its background-color probe with a terminal-status query.
     term.write('\x1b[?1049h\x1b]11;?\x07\x1b[5n', () => {
       finish();
@@ -46,17 +45,20 @@ test('live PTY terminal-query replies are forwarded while replay replies stay su
   });
   assert.ok(forwarded.includes('\x1b[0n'), 'live DSR response must return to the PTY');
   assert.equal(pendingWrites.current, 0);
-  assert.equal(pendingReplays.current, 0);
 
   forwarded.length = 0;
   await new Promise<void>((resolve) => {
-    const finish = beginTerminalWrite('replay', pendingWrites, pendingReplays);
+    const finish = beginTerminalWrite(pendingWrites);
     term.write('\x1b[5n', () => {
       finish();
       resolve();
     });
   });
-  assert.deepEqual(forwarded, [], 'saved-state replay must not inject synthetic input');
+  assert.deepEqual(forwarded, ['\x1b[0n'], 'protocol replies must not depend on write provenance');
+
+  const locked: string[] = [];
+  assert.equal(dispatchTerminalData('secret', true, (data) => locked.push(data)), false);
+  assert.deepEqual(locked, [], 'a locked vault must still refuse terminal input');
 });
 
 function renderedLines(term: any): string[] {

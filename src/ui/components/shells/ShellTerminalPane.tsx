@@ -15,7 +15,7 @@ import {
 } from './streamingMode';
 import {
   beginTerminalWrite,
-  shouldForwardTerminalData,
+  dispatchTerminalData,
 } from './terminalWriteAccounting';
 
 const xtermObj = xtermModule as Record<string, any>;
@@ -77,7 +77,6 @@ export function ShellTerminalPane({
   const serializeAddonRef = useRef<SerializeAddonType | null>(null);
   const isExplicitlyClosedRef = useRef(false);
   const isSizedRef = useRef(false);
-  const pendingReplaysRef = useRef(0);
   const pendingWritesRef = useRef(0);
   const [isSized, setIsSized] = useState(false);
 
@@ -214,7 +213,7 @@ export function ShellTerminalPane({
     // Live output is not replay, even when it enters the alternate buffer. Full-screen
     // applications issue terminal queries in the same chunk and xterm emits their replies
     // synchronously from `write`; suppressing those replies makes Neovim time out with E1568.
-    const finishWrite = beginTerminalWrite('live', pendingWritesRef, pendingReplaysRef);
+    const finishWrite = beginTerminalWrite(pendingWritesRef);
     term.write(bytes, () => {
       finishWrite();
       const buffer = term.buffer.active;
@@ -412,7 +411,7 @@ export function ShellTerminalPane({
     fitAddonRef.current = fitAddon;
 
     const replayToXterm = (data: string | Uint8Array, onDone?: () => void) => {
-      const finishWrite = beginTerminalWrite('replay', pendingWritesRef, pendingReplaysRef);
+      const finishWrite = beginTerminalWrite(pendingWritesRef);
       term.write(data, () => {
         finishWrite();
         onDone?.();
@@ -420,11 +419,11 @@ export function ShellTerminalPane({
     };
 
     const dataDisposable = term.onData((data) => {
-      // Suppress synthetic terminal query responses triggered during snapshot/delta replay.
-      if (!shouldForwardTerminalData(pendingReplaysRef)) return;
-      // T10: input is refused while the bridge vault is locked — the overlay says so.
-      if (vaultLockedRef.current) return;
-      handleInputRef.current(data);
+      // Terminal-generated replies (OSC color reports, DSR, device attributes) use the same
+      // channel as keystrokes and must reach the PTY. Only a locked vault suppresses input.
+      dispatchTerminalData(data, vaultLockedRef.current, (payload) => {
+        handleInputRef.current(payload);
+      });
     });
 
     const resizeDisposable = term.onResize(({ cols, rows }) => {
