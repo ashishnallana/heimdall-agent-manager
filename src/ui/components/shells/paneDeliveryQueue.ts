@@ -56,13 +56,54 @@ export class PaneDeliveryQueue {
   }
 }
 
+const ALT_HIDDEN_PREFIX = '\x1b[?1049h\x1b[?25l';
+const ALT_PREFIX = '\x1b[?1049h';
+const REPAINT_PREFIX = '\x1b[2J\x1b[H';
+
 /** Format an opaque captured grid after the UI decrypts it. */
 export function repaintCapturedScreen(bytes: Uint8Array, row = -1, col = -1): Uint8Array {
   const lines = new TextDecoder().decode(bytes).split(/\r?\n/);
   while (lines.length && lines[lines.length - 1].trim() === '') lines.pop();
   const body = lines.join('\r\n');
   const cursor = row >= 0 && col >= 0 ? `\x1b[${row + 1};${col + 1}H` : '';
-  return new TextEncoder().encode(`\x1b[2J\x1b[H${body}${body ? '\r\n' : ''}${cursor}`);
+  if (body.startsWith(ALT_HIDDEN_PREFIX)) {
+    return new TextEncoder().encode(
+      `${ALT_HIDDEN_PREFIX}${REPAINT_PREFIX}${body.slice(ALT_HIDDEN_PREFIX.length)}${cursor}`
+    );
+  }
+  if (body.startsWith(ALT_PREFIX)) {
+    return new TextEncoder().encode(
+      `${ALT_PREFIX}${REPAINT_PREFIX}${body.slice(ALT_PREFIX.length)}${cursor}`
+    );
+  }
+  return new TextEncoder().encode(`${REPAINT_PREFIX}${body}${cursor}`);
+}
+
+/**
+ * Ensure bridge 0->1 catch-up snapshot frames (`is_snapshot: true`) carry an idempotent
+ * erase-screen + cursor-home prefix so they repaint in place instead of appending duplicate
+ * lines at the current cursor position and polluting scrollback.
+ */
+export function normalizeSnapshotBytes(bytes: Uint8Array): Uint8Array {
+  const decoded = new TextDecoder().decode(bytes);
+  if (
+    decoded.startsWith(REPAINT_PREFIX) ||
+    decoded.startsWith(`${ALT_PREFIX}${REPAINT_PREFIX}`) ||
+    decoded.startsWith(`${ALT_HIDDEN_PREFIX}${REPAINT_PREFIX}`)
+  ) {
+    return bytes;
+  }
+  if (decoded.startsWith(ALT_HIDDEN_PREFIX)) {
+    return new TextEncoder().encode(
+      `${ALT_HIDDEN_PREFIX}${REPAINT_PREFIX}${decoded.slice(ALT_HIDDEN_PREFIX.length)}`
+    );
+  }
+  if (decoded.startsWith(ALT_PREFIX)) {
+    return new TextEncoder().encode(
+      `${ALT_PREFIX}${REPAINT_PREFIX}${decoded.slice(ALT_PREFIX.length)}`
+    );
+  }
+  return new TextEncoder().encode(`${REPAINT_PREFIX}${decoded}`);
 }
 
 /** Keep pasted input inside the Hub's frame budget without splitting a surrogate pair. */

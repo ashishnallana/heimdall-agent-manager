@@ -73,6 +73,8 @@ export function ShellTerminalPane({
   const serializeAddonRef = useRef<SerializeAddonType | null>(null);
   const isExplicitlyClosedRef = useRef(false);
   const isSizedRef = useRef(false);
+  const pendingReplaysRef = useRef(0);
+  const pendingWritesRef = useRef(0);
   const [isSized, setIsSized] = useState(false);
 
   const isTerminal = session.kind === 'shell';
@@ -205,9 +207,24 @@ export function ShellTerminalPane({
     if (term.options.convertEol) {
       term.options.convertEol = false;
     }
+    // Check if this chunk is a screen repaint (\x1b[2J\x1b[H or \x1b[?1049h) so synthetic
+    // terminal query replies from xterm.js are suppressed during replay.
+    const isRepaintPrefix =
+      bytes.length >= 6 &&
+      bytes[0] === 0x1b &&
+      bytes[1] === 0x5b &&
+      ((bytes[2] === 0x32 && bytes[3] === 0x4a) || (bytes[2] === 0x3f && bytes[3] === 0x31));
+    if (isRepaintPrefix) {
+      pendingReplaysRef.current += 1;
+    }
+    pendingWritesRef.current += 1;
     term.write(bytes, () => {
+      if (isRepaintPrefix) {
+        pendingReplaysRef.current = Math.max(0, pendingReplaysRef.current - 1);
+      }
+      pendingWritesRef.current = Math.max(0, pendingWritesRef.current - 1);
       const buffer = term.buffer.active;
-      if (!userScrolledUpRef.current && buffer.baseY > 0) {
+      if (!userScrolledUpRef.current && buffer.type !== 'alternate' && buffer.baseY > 0) {
         term.scrollToBottom();
       }
     });
@@ -397,37 +414,22 @@ export function ShellTerminalPane({
 
     term.open(container);
     term.focus();
-    if (session.kind === 'shell') {
-      term.write('\x1b[?25h');
-    }
     terminalRef.current = term;
     fitAddonRef.current = fitAddon;
 
-    // Restore saved snapshot and unmounted deltas if present
-    if (restorationData) {
-      if (restorationData.snapshot) {
-        term.write(restorationData.snapshot, () => {
-          if (restorationData.deltaChunks && restorationData.deltaChunks.length > 0) {
-            for (const chunk of restorationData.deltaChunks) {
-              term.write(chunk);
-            }
-          }
-          if (restorationData.savedViewportY !== undefined && restorationData.savedViewportY >= 0) {
-            try {
-              term.scrollToLine(restorationData.savedViewportY);
-              const buffer = term.buffer.active;
-              userScrolledUpRef.current = buffer.viewportY < buffer.baseY;
-            } catch { /* ignore */ }
-          }
-        });
-      } else if (restorationData.deltaChunks && restorationData.deltaChunks.length > 0) {
-        for (const chunk of restorationData.deltaChunks) {
-          term.write(chunk);
-        }
-      }
-    }
+    const replayToXterm = (data: string | Uint8Array, onDone?: () => void) => {
+      pendingReplaysRef.current += 1;
+      pendingWritesRef.current += 1;
+      term.write(data, () => {
+        pendingReplaysRef.current = Math.max(0, pendingReplaysRef.current - 1);
+        pendingWritesRef.current = Math.max(0, pendingWritesRef.current - 1);
+        onDone?.();
+      });
+    };
 
     const dataDisposable = term.onData((data) => {
+      // Suppress synthetic terminal query responses triggered during snapshot/delta replay.
+      if (pendingReplaysRef.current > 0) return;
       // T10: input is refused while the bridge vault is locked — the overlay says so.
       if (vaultLockedRef.current) return;
       handleInputRef.current(data);
@@ -443,6 +445,54 @@ export function ShellTerminalPane({
       userScrolledUpRef.current = buffer.viewportY < buffer.baseY;
     });
 
+    // Fit terminal dimensions BEFORE replaying saved snapshot so full-screen TUI snapshots
+    // (such as Neovim in alternate buffer mode) do not wrap or clip against the 80x24 default.
+    try {
+      if (container.clientWidth > 0 && container.clientHeight > 0) {
+        fitAddon.fit();
+        term.resize(Math.max(term.cols, 40), term.rows);
+        isSizedRef.current = true;
+        setIsSized(true);
+      } else if (restorationData && restorationData.cols > 0 && restorationData.rows > 0) {
+        term.resize(Math.max(restorationData.cols, 40), Math.max(restorationData.rows, 1));
+      }
+    } catch { /* ignore */ }
+
+    const snapshotHidesCursor = Boolean(
+      restorationData?.snapshot &&
+        (restorationData.snapshot.includes('\x1b[?1049h') ||
+          restorationData.snapshot.includes('\x1b[?25l'))
+    );
+    if (session.kind === 'shell' && !snapshotHidesCursor) {
+      replayToXterm('\x1b[?25h');
+    }
+
+    // Restore saved snapshot and unmounted deltas if present
+    if (restorationData) {
+      if (restorationData.snapshot) {
+        replayToXterm(restorationData.snapshot, () => {
+          if (restorationData.deltaChunks && restorationData.deltaChunks.length > 0) {
+            for (const chunk of restorationData.deltaChunks) {
+              replayToXterm(chunk);
+            }
+          }
+          if (restorationData.savedViewportY !== undefined && restorationData.savedViewportY >= 0) {
+            try {
+              if (term.buffer.active.type !== 'alternate') {
+                term.scrollToLine(restorationData.savedViewportY);
+              }
+              const buffer = term.buffer.active;
+              userScrolledUpRef.current = buffer.viewportY < buffer.baseY;
+            } catch { /* ignore */ }
+          }
+        });
+      } else if (restorationData.deltaChunks && restorationData.deltaChunks.length > 0) {
+        for (const chunk of restorationData.deltaChunks) {
+          replayToXterm(chunk);
+        }
+      }
+    }
+
     const dispatchResize = () => {
       try {
         if (container.clientWidth > 0 && container.clientHeight > 0) {
@@ -453,8 +503,8 @@ export function ShellTerminalPane({
           if (!isSizedRef.current) {
             isSizedRef.current = true;
             setIsSized(true);
-            flushPendingOutput();
           }
+          flushPendingOutput();
         }
       } catch { /* ignore */ }
     };
@@ -531,7 +581,15 @@ export function ShellTerminalPane({
         // Discarding it here is what made a backgrounded-then-closed-then-reopened tab lose
         // output silently. A pane that WAS sized has already flushed, so the buffer is empty and
         // the snapshot below is the whole story — no double replay either way.
-        if (!isExplicitlyClosedRef.current && terminalSessionRegistry.isSessionActive(currentSessionId) && serializeAddonRef.current && isSizedRef.current) {
+        const canSaveSnapshot =
+          pendingWritesRef.current === 0 || !terminalSessionRegistry.get(currentSessionId)?.snapshot;
+        if (
+          !isExplicitlyClosedRef.current &&
+          terminalSessionRegistry.isSessionActive(currentSessionId) &&
+          serializeAddonRef.current &&
+          isSizedRef.current &&
+          canSaveSnapshot
+        ) {
           try {
             const serialized = serializeAddonRef.current.serialize();
             const viewportY = term.buffer.active.viewportY;

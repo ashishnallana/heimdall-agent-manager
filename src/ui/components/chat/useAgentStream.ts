@@ -1,4 +1,4 @@
-import { PaneDeliveryQueue, repaintCapturedScreen, splitPaneInput } from '../shells/paneDeliveryQueue.ts';
+import { PaneDeliveryQueue, normalizeSnapshotBytes, repaintCapturedScreen, splitPaneInput } from '../shells/paneDeliveryQueue.ts';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSelector } from 'react-redux';
 import { apiAbsoluteUrl } from '../../api/apiBase';
@@ -20,7 +20,7 @@ function toBase64(str: string): string {
 }
 
 type AgentStreamMsg =
-  | { type: 'output'; data_b64: string; is_encrypted: boolean }
+  | { type: 'output'; data_b64: string; is_encrypted: boolean; is_snapshot?: boolean }
   | { type: 'screen'; data_b64: string; is_encrypted: boolean; cursor_row?: number; cursor_col?: number }
   | { type: 'ready'; agent_instance_id?: string; session_id?: string }
   | { type: 'stream_ready'; session_id?: string; agent_instance_id?: string; [key: string]: any }
@@ -336,7 +336,7 @@ export function useAgentStream({
                 const raw = atob(data_b64);
                 const bytes = new Uint8Array(raw.length);
                 for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
-                onOutputRef.current?.(bytes);
+                onOutputRef.current?.(msg.is_snapshot ? normalizeSnapshotBytes(bytes) : bytes);
               } catch { socket.close(4007, 'invalid pane base64'); }
               return;
             }
@@ -350,7 +350,7 @@ export function useAgentStream({
                   try {
                     const bytes = await decryptShellStreamPayload(enc_b64, keyToUse);
                     if (activeConnectIdRef.current !== connectId || socket.readyState !== WebSocket.OPEN) return;
-                    onOutputRef.current?.(bytes);
+                    onOutputRef.current?.(msg.is_snapshot ? normalizeSnapshotBytes(bytes) : bytes);
                   } catch { socket.close(4007, 'pane decryption failed'); }
                 }
               }).catch(() => { /* ignore queue errors */ }));

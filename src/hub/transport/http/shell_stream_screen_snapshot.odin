@@ -136,11 +136,21 @@ _shell_screen_repaint_text :: proc(pane_output: string, cursor_row: int = -1, cu
 	body := _shell_screen_lf_to_crlf(trimmed)
 	defer delete(body)
 
+	alt_prefix := ""
+	rest_body := body
+	if strings.has_prefix(body, "\x1b[?1049h\x1b[?25l") {
+		alt_prefix = "\x1b[?1049h\x1b[?25l"
+		rest_body = body[len("\x1b[?1049h\x1b[?25l"):]
+	} else if strings.has_prefix(body, "\x1b[?1049h") {
+		alt_prefix = "\x1b[?1049h"
+		rest_body = body[len("\x1b[?1049h"):]
+	}
+
 	if cursor_row >= 0 && cursor_col >= 0 {
 		cup := fmt.tprintf("\x1b[%d;%dH", cursor_row + 1, cursor_col + 1)
-		return strings.concatenate({SHELL_SCREEN_REPAINT_PREFIX, body, cup})
+		return strings.concatenate({alt_prefix, SHELL_SCREEN_REPAINT_PREFIX, rest_body, cup})
 	}
-	return strings.concatenate({SHELL_SCREEN_REPAINT_PREFIX, body})
+	return strings.concatenate({alt_prefix, SHELL_SCREEN_REPAINT_PREFIX, rest_body})
 }
 
 // shell_stream_screen_payload_b64 builds the base64 body of a single-frame `screen` payload.

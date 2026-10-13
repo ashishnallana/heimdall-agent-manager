@@ -305,3 +305,19 @@ test_reqfix3_all_blank_screen_with_real_cursor_is_cup_only :: proc(t: ^testing.T
 	defer delete(got_absent)
 	testing.expect_value(t, got_absent, "")
 }
+
+@(test)
+test_alt_screen_payload_switches_to_1049h_before_erase_and_home :: proc(t: ^testing.T) {
+	lines := []string{"\x1b[?1049h~", "~", "-- NORMAL --"}
+	got := bridge_pty_stream_screen_payload(lines, 2, 0)
+	defer delete(got)
+
+	testing.expect_value(t, got, "\x1b[?1049h\x1b[2J\x1b[H~\r\n~\r\n-- NORMAL --\x1b[3;1H")
+
+	// Also verify bridge_pty_host_screen_to_output preserves \x1b[?1049h when truncated by line_limit
+	out, count, trunc := bridge_pty_host_screen_to_output(lines, 2)
+	defer delete(out)
+	testing.expect(t, trunc, "truncated when line_limit < len(lines)")
+	testing.expect_value(t, count, 2)
+	testing.expect_value(t, out, "\x1b[?1049h~\n-- NORMAL --")
+}

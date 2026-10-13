@@ -1,4 +1,4 @@
-import { PaneDeliveryQueue, repaintCapturedScreen, splitPaneInput } from './paneDeliveryQueue.ts';
+import { PaneDeliveryQueue, normalizeSnapshotBytes, repaintCapturedScreen, splitPaneInput } from './paneDeliveryQueue.ts';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSelector } from 'react-redux';
 import { apiAbsoluteUrl } from '../../api/apiBase.ts';
@@ -14,7 +14,7 @@ const MAX_RECONNECT_DELAY_MS = 5000;
 const MAX_RECONNECT_ATTEMPTS = 3;
 
 type ShellStreamMsg =
-  | { type: 'output'; data_b64: string; is_encrypted: boolean }
+  | { type: 'output'; data_b64: string; is_encrypted: boolean; is_snapshot?: boolean }
   | { type: 'screen'; data_b64: string; is_encrypted: boolean; cursor_row?: number; cursor_col?: number }
   | { type: 'ready'; session_id?: string }
   | { type: 'stream_ready'; session_id?: string; [key: string]: any }
@@ -422,7 +422,7 @@ export function useShellStream({
                 const raw = atob(data_b64);
                 const bytes = new Uint8Array(raw.length);
                 for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
-                onOutputRef.current?.(bytes);
+                onOutputRef.current?.(msg.is_snapshot ? normalizeSnapshotBytes(bytes) : bytes);
               } catch (err) {
                 console.error('[useShellStream] base64 decode failed for plaintext output frame:', err);
                 socket.close(4007, 'invalid pane base64');
@@ -439,7 +439,7 @@ export function useShellStream({
                   try {
                     const bytes = await decryptShellStreamPayload(enc_b64, activeKey);
                     if (activeConnectIdRef.current !== connectId || socket.readyState !== WebSocket.OPEN) return;
-                    onOutputRef.current?.(bytes);
+                    onOutputRef.current?.(msg.is_snapshot ? normalizeSnapshotBytes(bytes) : bytes);
                   } catch (err) {
                     console.error('[useShellStream] decryption failed for output frame:', err);
                     socket.close(4007, 'pane decryption failed');

@@ -646,7 +646,13 @@ bridge_pty_host_screen_to_output :: proc(lines: []string, line_limit: int) -> (o
 		trunc = true
 	}
 	tail := lines[start:]
-	return strings.join(tail, "\n"), len(tail), trunc
+	joined := strings.join(tail, "\n")
+	if start > 0 && len(lines) > 0 && strings.has_prefix(lines[0], "\x1b[?1049h") {
+		defer delete(joined)
+		prefix := "\x1b[?1049h\x1b[?25l" if strings.has_prefix(lines[0], "\x1b[?1049h\x1b[?25l") else "\x1b[?1049h"
+		return strings.concatenate({prefix, joined}), len(tail), trunc
+	}
+	return joined, len(tail), trunc
 }
 
 // bridge_pty_host_pane_hash computes the SHA256 hex string for pane content.

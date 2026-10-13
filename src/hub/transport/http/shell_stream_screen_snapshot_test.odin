@@ -879,3 +879,13 @@ test_adv_write_screen_frame_malformed_json_reply :: proc(t: ^testing.T) {
 	testing.expect(t, !strings.contains(got_str, "cursor_row"), "cursor_row omitted when absent from reply")
 	testing.expect(t, !strings.contains(got_str, "cursor_col"), "cursor_col omitted when absent from reply")
 }
+
+@(test)
+test_alt_screen_repaint_emits_1049h_before_erase_screen_prefix :: proc(t: ^testing.T) {
+	// Alternate screen prefix (\x1b[?1049h) must be emitted BEFORE \x1b[2J\x1b[H so xterm.js
+	// enters the alternate buffer first and does not erase the normal (primary) buffer.
+	got := _shell_screen_repaint_text("\x1b[?1049h\x1b[?25l~\n~\n-- NORMAL --\n", 2, 0)
+	defer delete(got)
+
+	testing.expect_value(t, got, "\x1b[?1049h\x1b[?25l\x1b[2J\x1b[H~\r\n~\r\n-- NORMAL --\x1b[3;1H")
+}

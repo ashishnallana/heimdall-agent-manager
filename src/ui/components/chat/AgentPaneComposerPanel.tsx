@@ -97,7 +97,7 @@ export function AgentPaneComposerPanel({
   }, [agentInstanceId, isPinned, onPin]);
   const [terminalDimensions, setTerminalDimensions] = useState<{ cols: number; rows: number }>({
     cols: 80,
-    rows: 120,
+    rows: 24,
   });
 
   // Track if panel has been expanded at least once or started, to lazily initialize xterm
@@ -206,16 +206,18 @@ export function AgentPaneComposerPanel({
         streamBufferRef.current.push(bytes);
         onStreamOutputRef.current?.();
       }
+      hasReceivedOutputRef.current = true;
       const term = terminalRef.current;
       if (!term) return;
-      if (!hasReceivedOutputRef.current) {
-        hasReceivedOutputRef.current = true;
-        term.reset();
+      if (term.options.convertEol) {
+        term.options.convertEol = false;
       }
-      term.write(bytes);
-      if (!userScrolledUpRef.current) {
-        term.scrollToBottom();
-      }
+      term.write(bytes, () => {
+        const buffer = term.buffer.active;
+        if (!userScrolledUpRef.current && buffer.type !== 'alternate' && buffer.baseY > 0) {
+          term.scrollToBottom();
+        }
+      });
     },
     onStatus: (status) => {
       if (status) {
@@ -292,7 +294,7 @@ export function AgentPaneComposerPanel({
     isActiveTab,
     runtimeStatus,
     width: terminalDimensions.cols,
-    lineLimit: terminalDimensions.rows,
+    lineLimit: 120,
   });
 
   const [sendAgentPaneInput] = useSendAgentPaneInputMutation();
@@ -346,7 +348,7 @@ export function AgentPaneComposerPanel({
   const handleResize = useCallback(
     (rows: number, cols: number) => {
       const effectiveCols = Math.max(cols, 80);
-      const effectiveRows = Math.max(rows, 24);
+      const effectiveRows = Math.max(rows, 1);
       if (isStreamingActive) {
         sendStreamResize(effectiveRows, effectiveCols);
       } else {
@@ -401,8 +403,8 @@ export function AgentPaneComposerPanel({
           term.options.fontSize = Math.max(6, (term.options.fontSize ?? 12) - 1);
           fitAddon.fit();
         }
-        // Guarantee minimum usable dimensions (minimum 80 cols, 24 rows)
-        term.resize(Math.max(term.cols, 80), Math.max(term.rows, 24));
+        // Guarantee minimum usable width while fitting container rows accurately for TUIs
+        term.resize(Math.max(term.cols, 80), Math.max(term.rows, 1));
       }
       if (term.rows > 0 && term.cols > 0) {
         handleResizeRef.current(term.rows, term.cols);
@@ -482,16 +484,22 @@ export function AgentPaneComposerPanel({
     // Initial write if output already present in streaming/legacy mode, or startup indicator
     if (streamBufferRef.current.length > 0) {
       hasReceivedOutputRef.current = true;
+      if (term.options.convertEol) {
+        term.options.convertEol = false;
+      }
       for (const chunk of streamBufferRef.current) {
         term.write(chunk);
       }
-      if (!userScrolledUpRef.current) {
+      const buffer = term.buffer.active;
+      if (!userScrolledUpRef.current && buffer.type !== 'alternate' && buffer.baseY > 0) {
         term.scrollToBottom();
       }
     } else if (!isStreamingActive && output) {
+      term.options.convertEol = true;
       term.reset();
       term.write('\x1b[?25l' + output, () => {
-        if (!userScrolledUpRef.current) {
+        const buffer = term.buffer.active;
+        if (!userScrolledUpRef.current && buffer.baseY > 0) {
           term.scrollToBottom();
         }
       });

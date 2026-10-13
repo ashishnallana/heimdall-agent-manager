@@ -394,11 +394,28 @@ bridge_pty_stream_screen_payload :: proc(lines: []string, cursor_row: int, curso
 	defer delete(trimmed)
 	body := _bridge_pty_stream_lf_to_crlf(trimmed)
 
+	alt_prefix := ""
+	rest_body := body
+	if strings.has_prefix(body, "\x1b[?1049h\x1b[?25l") {
+		alt_prefix = "\x1b[?1049h\x1b[?25l\x1b[2J\x1b[H"
+		rest_body = body[len("\x1b[?1049h\x1b[?25l"):]
+	} else if strings.has_prefix(body, "\x1b[?1049h") {
+		alt_prefix = "\x1b[?1049h\x1b[2J\x1b[H"
+		rest_body = body[len("\x1b[?1049h"):]
+	}
+
 	if cursor_row >= 0 && cursor_col >= 0 {
 		defer delete(body)
 		// tprintf lands in the temp allocator; concatenate copies it out, so the CUP is never freed here.
 		cup := fmt.tprintf("\x1b[%d;%dH", cursor_row + 1, cursor_col + 1)
+		if alt_prefix != "" {
+			return strings.concatenate({alt_prefix, rest_body, cup})
+		}
 		return strings.concatenate({body, cup})
+	}
+	if alt_prefix != "" {
+		defer delete(body)
+		return strings.concatenate({alt_prefix, rest_body})
 	}
 	return body
 }

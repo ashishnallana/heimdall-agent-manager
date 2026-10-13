@@ -2,7 +2,12 @@ import './helpers/vaultEndpointHarness.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as xtermModule from '@xterm/xterm';
-import { PaneDeliveryQueue, repaintCapturedScreen, splitPaneInput } from '../src/ui/components/shells/paneDeliveryQueue.ts';
+import {
+  PaneDeliveryQueue,
+  normalizeSnapshotBytes,
+  repaintCapturedScreen,
+  splitPaneInput,
+} from '../src/ui/components/shells/paneDeliveryQueue.ts';
 import { encryptShellStreamPayload, decryptShellStreamPayload } from '../src/ui/components/shells/useShellStream.ts';
 
 const Terminal = (xtermModule as any).Terminal ?? (xtermModule as any).default.Terminal;
@@ -76,4 +81,70 @@ test('large pasted input is bounded and preserves Unicode at chunk boundaries', 
     assert.ok(Buffer.byteLength(part, 'utf8') < 32 * 1024);
     assert.equal(new TextDecoder().decode(new TextEncoder().encode(part)), part);
   }
+});
+
+test('test_repaintCapturedScreen_full_height_tui_does_not_scroll_top_row_off_screen', async () => {
+  // Arrange: 24-row Neovim-style full-height TUI screen where row 0 is line 1 and row 23 is status bar
+  const term = new Terminal({ cols: 80, rows: 24, convertEol: false });
+  const rows = Array.from({ length: 24 }, (_, i) =>
+    i === 0 ? '1   fn main() {' : i === 23 ? '-- NORMAL --                                            1,1           All' : `~`
+  );
+
+  // Act: format and write captured screen
+  const payload = repaintCapturedScreen(text(rows.join('\n')), 0, 4);
+  await write(term, payload);
+
+  // Assert: row 0 is still intact (not scrolled off by a trailing CRLF) and baseY is 0
+  assert.equal(term.buffer.active.baseY, 0);
+  assert.equal(term.buffer.active.getLine(0).translateToString(true), '1   fn main() {');
+  assert.equal(
+    term.buffer.active.getLine(23).translateToString(true),
+    '-- NORMAL --                                            1,1           All'
+  );
+  assert.equal(term.buffer.active.cursorY, 0);
+  assert.equal(term.buffer.active.cursorX, 4);
+  term.dispose();
+});
+
+test('test_repaintCapturedScreen_alt_buffer_switches_before_erase_and_restores_primary_on_exit', async () => {
+  // Arrange: primary buffer has shell history
+  const term = new Terminal({ cols: 80, rows: 24, convertEol: false });
+  await write(term, text('user@host:~$ nvim file.rs\r\n'));
+  assert.equal(term.buffer.active.type, 'normal');
+
+  // Act 1: receive an alternate-screen snapshot (\x1b[?1049h prefix from vt.rs)
+  const altCapture = repaintCapturedScreen(
+    text('\x1b[?1049h\x1b[?25l1   pub struct Screen {\n~\n-- NORMAL --'),
+    0,
+    4
+  );
+  await write(term, altCapture);
+
+  // Assert 1: xterm is in alternate buffer with TUI rendered
+  assert.equal(term.buffer.active.type, 'alternate');
+  assert.equal(term.buffer.active.getLine(0).translateToString(true), '1   pub struct Screen {');
+  assert.equal(term.buffer.active.getLine(2).translateToString(true), '-- NORMAL --');
+
+  // Act 2: exit Neovim (\x1b[?1049l)
+  await write(term, text('\x1b[?1049l\x1b[?25h'));
+
+  // Assert 2: xterm returns to normal buffer and original shell prompt was NOT erased by \x1b[2J
+  assert.equal(term.buffer.active.type, 'normal');
+  assert.equal(term.buffer.active.getLine(0).translateToString(true), 'user@host:~$ nvim file.rs');
+  term.dispose();
+});
+
+test('test_normalizeSnapshotBytes_makes_bridge_snapshot_idempotent_without_scrollback_duplication', async () => {
+  const term = new Terminal({ cols: 80, rows: 4, convertEol: false });
+  const rawBridgeSnapshot = text('row1\r\nrow2\r\nrow3\r\nrow4\x1b[4;5H');
+
+  // Act: write normalized bridge catch-up snapshot twice
+  await write(term, normalizeSnapshotBytes(rawBridgeSnapshot));
+  await write(term, normalizeSnapshotBytes(rawBridgeSnapshot));
+
+  // Assert: baseY stays 0 (no duplicate lines pushed into scrollback)
+  assert.equal(term.buffer.active.baseY, 0);
+  assert.equal(term.buffer.active.getLine(0).translateToString(true), 'row1');
+  assert.equal(term.buffer.active.getLine(3).translateToString(true), 'row4');
+  term.dispose();
 });
