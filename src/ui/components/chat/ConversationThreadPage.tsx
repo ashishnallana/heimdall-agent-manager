@@ -13,6 +13,7 @@ import { getRouteSearch } from '../../utils/appLocation';
 import { resolveWorkbenchWorkspaceKey } from '../../utils/clientPersistence';
 import { encryptVaultText } from '../../utils/vaultContent';
 import { resolveProjectVcsExperiment } from './projectVcsExperiment';
+import { resolveProjectBridgeShellCwd } from '../shells/interactiveShellLaunch';
 import { ConversationWorkbench } from '../workbench/ConversationWorkbench';
 import { WindowTilingHost } from '../windowTiling/WindowTilingHost';
 
@@ -102,7 +103,7 @@ export function ConversationThreadPage({
       'Agent Chat',
   );
 
-  const { data: projectData } = useFetchProjectQuery(
+  const { data: projectData, isLoading: isProjectLoading, isFetching: isProjectFetching } = useFetchProjectQuery(
     { projectId },
     { skip: !projectId },
   );
@@ -121,6 +122,8 @@ export function ConversationThreadPage({
       instance?.working_dir ||
       '',
   );
+  const shellDefaultCwd = resolveProjectBridgeShellCwd(project, bridgeId);
+  const shellCwdReady = !projectId || (!isProjectLoading && !isProjectFetching);
   const projectVcsEnabled = useMemo(
     () => resolveProjectVcsExperiment(experimentsData?.flags) === 'enabled',
     [experimentsData?.flags],
@@ -206,6 +209,8 @@ export function ConversationThreadPage({
     projectName: projectName || undefined,
     bridgeId: bridgeId || undefined,
     defaultCwd: defaultCwd || undefined,
+    shellDefaultCwd,
+    shellCwdReady,
     projectVcsEnabled,
     directories,
     members,

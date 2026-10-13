@@ -117,13 +117,10 @@ function WorkbenchNewTabLauncherBody({
       return;
     }
     if (kind === 'shell') {
-      const firstShell = liveSessions[0];
       onSelectSurface({
         kind: 'shell',
-        sessionId: firstShell?.session_id,
-        title: firstShell
-          ? shellTitle(firstShell)
-          : meta.defaultTitle({ sessionId: undefined }),
+        sessionId: 'new',
+        title: meta.defaultTitle({ sessionId: undefined }),
       });
       return;
     }

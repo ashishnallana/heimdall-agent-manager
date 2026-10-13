@@ -166,6 +166,7 @@ export interface CreateShellArgs {
   label?: string;
   server_port?: number;
   chain_id?: string;
+  project_id?: string;
   // REQ-SHELL-ENC-8: Encrypted shell spawn authorization envelope (vault:v1:...)
   // containing { cmd, cwd, timestamp, nonce } for zero-trust bridge verification.
   enc_spec?: string;

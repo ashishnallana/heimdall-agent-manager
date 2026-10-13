@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useSelector } from 'react-redux';
 import { Modal, Select } from '@ui';
 import { useCreateShellMutation } from '../../api/endpoints/shells';
@@ -6,12 +6,16 @@ import { describeApiError, isBridgeVaultLockedError } from '../../utils/bridgeVa
 import { VAULT_LOCKED_SHELL_START_MESSAGE } from '../../utils/vaultLockedError';
 import type { ShellSessionKind } from '../../api/endpoints/shells';
 import { useListBridgesQuery } from '../../api/endpoints/bridgeSupport';
+import { useFetchProjectQuery } from '../../api/endpoints/projects';
 import { bridgeIdOf, bridgeIsOnline, bridgeLabel } from '../../utils/bridgeLaunchOptions';
+import { resolveProjectBridgeShellCwd } from './interactiveShellLaunch';
 
 interface NewShellDialogProps {
   // T11-UI-2: optional. When the caller has no bridge in hand the dialog picks one
   // itself from the bridge dropdown below, so nobody has to paste a raw bridge id.
   bridgeId?: string;
+  projectId?: string;
+  defaultCwd?: string;
   // T11-UI-3: optional. Callers that already know their chain (the chain overview)
   // pass it; the sidebar tab does not, and the dialog then tags the new shell with
   // whichever chain the main view currently has focused.
@@ -38,10 +42,10 @@ const FORM_ID = 'new-shell-dialog-form';
 const FIELD_CLASS =
   'min-h-[44px] w-full rounded border border-subtle bg-surface px-2 py-1.5 text-xs text-primary placeholder:text-faint focus:outline-none focus:ring-1 focus:ring-accent';
 
-export function NewShellDialog({ bridgeId, chainId, onClose, onCreated }: NewShellDialogProps) {
+export function NewShellDialog({ bridgeId, projectId, defaultCwd, chainId, onClose, onCreated }: NewShellDialogProps) {
   const [kind, setKind] = useState<ShellSessionKind>('shell');
   const [cmd, setCmd] = useState('');
-  const [cwd, setCwd] = useState('');
+  const [cwd, setCwd] = useState(defaultCwd || '');
   const [label, setLabel] = useState('');
   const [port, setPort] = useState('');
   const [selectedBridgeId, setSelectedBridgeId] = useState(bridgeId || '');
@@ -52,6 +56,25 @@ export function NewShellDialog({ bridgeId, chainId, onClose, onCreated }: NewShe
   const effectiveChainId = chainId || focusedChainId;
 
   const bridgesQuery = useListBridgesQuery();
+  const projectQuery = useFetchProjectQuery(
+    { projectId: projectId || '' },
+    { skip: !projectId },
+  );
+  const cwdEditedRef = useRef(false);
+  const previousBridgeRef = useRef(selectedBridgeId);
+
+  useEffect(() => {
+    const bridgeChanged = previousBridgeRef.current !== selectedBridgeId;
+    if (bridgeChanged) {
+      previousBridgeRef.current = selectedBridgeId;
+      cwdEditedRef.current = false;
+    }
+    if (cwdEditedRef.current) return;
+    const nextDefault =
+      resolveProjectBridgeShellCwd(projectQuery.data?.project, selectedBridgeId) ||
+      (selectedBridgeId === bridgeId ? String(defaultCwd || '').trim() : '');
+    setCwd(nextDefault);
+  }, [bridgeId, defaultCwd, projectQuery.data, selectedBridgeId]);
   // Revoked bridges can't host a shell, so they never reach the dropdown; online
   // ones sort first so the default pick is a bridge that can actually answer.
   const bridges: any[] = useMemo(() => {
@@ -90,6 +113,7 @@ export function NewShellDialog({ bridgeId, chainId, onClose, onCreated }: NewShe
         label: label || undefined,
         server_port: port ? Number(port) : undefined,
         chain_id: effectiveChainId || undefined,
+        project_id: projectId || undefined,
       }).unwrap();
       onCreated?.(session.session_id);
       onClose();
@@ -184,7 +208,10 @@ export function NewShellDialog({ bridgeId, chainId, onClose, onCreated }: NewShe
               type="text"
               placeholder="e.g. ~/my-project"
               value={cwd}
-              onChange={(e) => setCwd(e.target.value)}
+              onChange={(e) => {
+                cwdEditedRef.current = true;
+                setCwd(e.target.value);
+              }}
               className={FIELD_CLASS}
             />
           </div>

@@ -48,6 +48,8 @@ export interface ConversationWorkbenchProps {
   projectName?: string;
   bridgeId?: string;
   defaultCwd?: string;
+  shellDefaultCwd?: string;
+  shellCwdReady?: boolean;
   projectVcsEnabled?: boolean;
   directories?: any[];
   members?: any[];
@@ -69,6 +71,8 @@ export function ConversationWorkbench({
   projectName,
   bridgeId,
   defaultCwd,
+  shellDefaultCwd,
+  shellCwdReady,
   projectVcsEnabled = true,
   directories,
   members,
@@ -463,6 +467,8 @@ export function ConversationWorkbench({
           projectName={projectName}
           bridgeId={bridgeId}
           defaultCwd={defaultCwd}
+          shellDefaultCwd={shellDefaultCwd}
+          shellCwdReady={shellCwdReady}
           projectVcsEnabled={projectVcsEnabled}
           directories={directories}
           members={members}
@@ -590,6 +596,8 @@ export function ConversationWorkbench({
       bridgeId,
       chainId,
       defaultCwd,
+      shellDefaultCwd,
+      shellCwdReady,
       directories,
       dispatch,
       effectiveWorkspaceKey,

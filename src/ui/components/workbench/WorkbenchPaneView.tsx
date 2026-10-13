@@ -28,6 +28,8 @@ export interface WorkbenchPaneViewProps {
   projectName?: string;
   bridgeId?: string;
   defaultCwd?: string;
+  shellDefaultCwd?: string;
+  shellCwdReady?: boolean;
   projectVcsEnabled?: boolean;
   directories?: any[];
   members?: any[];
@@ -80,6 +82,8 @@ export function WorkbenchPaneView({
   projectName,
   bridgeId,
   defaultCwd,
+  shellDefaultCwd,
+  shellCwdReady = true,
   projectVcsEnabled = true,
   directories,
   members,
@@ -246,7 +250,9 @@ export function WorkbenchPaneView({
                   projectId={projectId}
                   chainId={chainId}
                   agentInstanceId={tab.agentInstanceId || primaryAgentInstanceId}
-                  defaultCwd={tab.currentPath || defaultCwd}
+                  defaultCwd={tab.currentPath || shellDefaultCwd}
+                  cwdReady={shellCwdReady}
+                  autoCreate={!tab.sessionId || tab.sessionId === 'new'}
                   isActiveTab={isActive}
                   onSelectSession={(nextSessionId) =>
                     onUpdateTabParams(tab.id, { sessionId: nextSessionId })

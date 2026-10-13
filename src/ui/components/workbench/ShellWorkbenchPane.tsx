@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useDispatch } from 'react-redux';
 import { Badge, Button, Icon, Spinner, StatusPill } from '@ui';
 import {
@@ -15,6 +15,8 @@ import { ShellTerminalPane } from '../shells/ShellTerminalPane';
 import { ShellLogViewer } from '../shells/ShellLogViewer';
 import { NewShellDialog } from '../shells/NewShellDialog';
 import { SetShellPortDialog } from '../shells/SetShellPortDialog';
+import { buildInteractiveShellRequest } from '../shells/interactiveShellLaunch';
+import { describeApiError } from '../../utils/bridgeVaultStatus';
 import {
   isTerminal,
   kindLabel,
@@ -30,6 +32,8 @@ export interface ShellWorkbenchPaneProps {
   chainId?: string;
   agentInstanceId?: string;
   defaultCwd?: string;
+  cwdReady?: boolean;
+  autoCreate?: boolean;
   isActiveTab?: boolean;
   onSelectSession?: (sessionId: string) => void;
   onOpenPreview?: (session: ShellSession) => void;
@@ -40,6 +44,9 @@ export function ShellWorkbenchPane({
   bridgeId,
   projectId,
   chainId,
+  defaultCwd,
+  cwdReady = true,
+  autoCreate = false,
   onSelectSession,
   onOpenPreview,
 }: ShellWorkbenchPaneProps) {
@@ -60,10 +67,10 @@ export function ShellWorkbenchPane({
   useEffect(() => {
     if (sessionId) {
       setSelectedSessionId(sessionId);
-    } else if (!selectedSessionId && sessions.length > 0) {
+    } else if (!autoCreate && !selectedSessionId && sessions.length > 0) {
       setSelectedSessionId(sessions[0].session_id);
     }
-  }, [sessionId, selectedSessionId, sessions]);
+  }, [autoCreate, sessionId, selectedSessionId, sessions]);
 
   const { data: singleSessionData } = useGetShellSessionQuery(
     { sessionId: selectedSessionId },
@@ -77,7 +84,7 @@ export function ShellWorkbenchPane({
     return sessions.find((s) => s.session_id === selectedSessionId) || null;
   }, [singleSessionData, sessions, selectedSessionId]);
 
-  const [, { isLoading: isCreatingShell }] = useCreateShellMutation();
+  const [createShell, { isLoading: isCreatingShell, error: createShellError }] = useCreateShellMutation();
   const [killShell, { isLoading: isKilling }] = useKillShellMutation();
   const [restartShell, { isLoading: isRestarting }] = useRestartShellMutation();
   const [signalShell, { isLoading: isSignaling }] = useSignalShellMutation();
@@ -85,6 +92,8 @@ export function ShellWorkbenchPane({
   const [showNewShellDialog, setShowNewShellDialog] = useState(false);
   const [showPortDialog, setShowPortDialog] = useState(false);
   const [viewMode, setViewMode] = useState<'terminal' | 'log'>('terminal');
+  const autoCreateAttemptedRef = useRef(false);
+  const [autoCreateFailed, setAutoCreateFailed] = useState(false);
 
   useEffect(() => {
     if (!activeSession) return;
@@ -103,6 +112,28 @@ export function ShellWorkbenchPane({
     },
     [onSelectSession],
   );
+
+  const startInteractiveShell = useCallback(async () => {
+    if (!bridgeId || isCreatingShell) return;
+    setAutoCreateFailed(false);
+    try {
+      const session = await createShell(buildInteractiveShellRequest({
+        bridgeId,
+        cwd: defaultCwd,
+        chainId,
+        projectId,
+      })).unwrap();
+      handleSelectSession(session.session_id);
+    } catch {
+      setAutoCreateFailed(true);
+    }
+  }, [bridgeId, chainId, createShell, defaultCwd, handleSelectSession, isCreatingShell, projectId]);
+
+  useEffect(() => {
+    if (!autoCreate || !cwdReady || sessionId || !bridgeId || autoCreateAttemptedRef.current) return;
+    autoCreateAttemptedRef.current = true;
+    void startInteractiveShell();
+  }, [autoCreate, bridgeId, cwdReady, sessionId, startInteractiveShell]);
 
   const handleOpenPreview = useCallback(
     (session: ShellSession) => {
@@ -289,11 +320,31 @@ export function ShellWorkbenchPane({
           >
             <Icon name="terminal" size={24} className="text-muted" />
             <div className="space-y-1">
-              <p className="text-sm font-semibold text-primary">No shell session selected</p>
+              <p className="text-sm font-semibold text-primary">
+                {isCreatingShell
+                  ? 'Starting interactive shell…'
+                  : autoCreateFailed
+                    ? 'Could not start shell'
+                    : 'No shell session selected'}
+              </p>
               <p className="text-xs text-muted max-w-xs">
-                Start a new interactive shell or server session on your bridge to run commands directly inside the workbench.
+                {autoCreateFailed
+                  ? describeApiError(createShellError) || 'The bridge did not start the interactive shell.'
+                  : 'Start a new interactive shell or server session on your bridge to run commands directly inside the workbench.'}
               </p>
             </div>
+            {autoCreateFailed ? (
+              <Button
+                size="sm"
+                variant="primary"
+                data-debug-id="workbench-shell-auto-retry-btn"
+                disabled={isCreatingShell}
+                onClick={() => void startInteractiveShell()}
+              >
+                <Icon name="refresh" size={14} />
+                <span>Retry</span>
+              </Button>
+            ) : null}
             <Button
               size="sm"
               variant="primary"
@@ -310,6 +361,8 @@ export function ShellWorkbenchPane({
       {showNewShellDialog ? (
         <NewShellDialog
           bridgeId={bridgeId}
+          projectId={projectId}
+          defaultCwd={defaultCwd}
           chainId={chainId}
           onClose={() => setShowNewShellDialog(false)}
           onCreated={(createdSessionId) => {
