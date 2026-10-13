@@ -23,7 +23,7 @@
           import nixpkgs { inherit system; };
 
       # Keep appVersion in sync with src/contracts/protocol.odin APP_VERSION.
-      appVersion = "0.3.43";
+      appVersion = "0.3.44";
       npmDepsHash = "sha256-Klo1aAukmRdhGs49sdC2seuHY5rmdId01m955BDqrl8=";
 
       mkOdinPackage = pkgs: odin: name: srcDir: pkgs.stdenv.mkDerivation {
