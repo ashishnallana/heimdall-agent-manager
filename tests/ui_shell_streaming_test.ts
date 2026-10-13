@@ -15,6 +15,10 @@ import {
   resolveStreamRenderMode,
   resolveStreamingMode,
 } from '../src/ui/components/shells/streamingMode.ts';
+import {
+  beginTerminalWrite,
+  shouldForwardTerminalData,
+} from '../src/ui/components/shells/terminalWriteAccounting.ts';
 import { shellResizeFrame } from '../src/ui/components/shells/shellStreamFrames.ts';
 
 const Terminal = (xtermModule as any).Terminal || (xtermModule as any).default?.Terminal || (xtermModule as any).default;
@@ -22,6 +26,38 @@ const Terminal = (xtermModule as any).Terminal || (xtermModule as any).default?.
 function writeToTerminal(term: any, data: string | Uint8Array): Promise<void> {
   return new Promise((resolve) => term.write(data, () => resolve()));
 }
+
+test('live PTY terminal-query replies are forwarded while replay replies stay suppressed', async () => {
+  const term = new Terminal({ cols: 80, rows: 24 });
+  const pendingWrites = { current: 0 };
+  const pendingReplays = { current: 0 };
+  const forwarded: string[] = [];
+  term.onData((data: string) => {
+    if (shouldForwardTerminalData(pendingReplays)) forwarded.push(data);
+  });
+
+  await new Promise<void>((resolve) => {
+    const finish = beginTerminalWrite('live', pendingWrites, pendingReplays);
+    // Neovim brackets its background-color probe with a terminal-status query.
+    term.write('\x1b[?1049h\x1b]11;?\x07\x1b[5n', () => {
+      finish();
+      resolve();
+    });
+  });
+  assert.ok(forwarded.includes('\x1b[0n'), 'live DSR response must return to the PTY');
+  assert.equal(pendingWrites.current, 0);
+  assert.equal(pendingReplays.current, 0);
+
+  forwarded.length = 0;
+  await new Promise<void>((resolve) => {
+    const finish = beginTerminalWrite('replay', pendingWrites, pendingReplays);
+    term.write('\x1b[5n', () => {
+      finish();
+      resolve();
+    });
+  });
+  assert.deepEqual(forwarded, [], 'saved-state replay must not inject synthetic input');
+});
 
 function renderedLines(term: any): string[] {
   const out: string[] = [];

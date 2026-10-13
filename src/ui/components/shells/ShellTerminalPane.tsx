@@ -13,6 +13,10 @@ import {
   resolveStreamRenderMode,
   resolveStreamingMode,
 } from './streamingMode';
+import {
+  beginTerminalWrite,
+  shouldForwardTerminalData,
+} from './terminalWriteAccounting';
 
 const xtermObj = xtermModule as Record<string, any>;
 const Terminal = (xtermObj.Terminal || xtermObj['default']?.Terminal || xtermObj['default']) as typeof TerminalType;
@@ -207,22 +211,12 @@ export function ShellTerminalPane({
     if (term.options.convertEol) {
       term.options.convertEol = false;
     }
-    // Check if this chunk is a screen repaint (\x1b[2J\x1b[H or \x1b[?1049h) so synthetic
-    // terminal query replies from xterm.js are suppressed during replay.
-    const isRepaintPrefix =
-      bytes.length >= 6 &&
-      bytes[0] === 0x1b &&
-      bytes[1] === 0x5b &&
-      ((bytes[2] === 0x32 && bytes[3] === 0x4a) || (bytes[2] === 0x3f && bytes[3] === 0x31));
-    if (isRepaintPrefix) {
-      pendingReplaysRef.current += 1;
-    }
-    pendingWritesRef.current += 1;
+    // Live output is not replay, even when it enters the alternate buffer. Full-screen
+    // applications issue terminal queries in the same chunk and xterm emits their replies
+    // synchronously from `write`; suppressing those replies makes Neovim time out with E1568.
+    const finishWrite = beginTerminalWrite('live', pendingWritesRef, pendingReplaysRef);
     term.write(bytes, () => {
-      if (isRepaintPrefix) {
-        pendingReplaysRef.current = Math.max(0, pendingReplaysRef.current - 1);
-      }
-      pendingWritesRef.current = Math.max(0, pendingWritesRef.current - 1);
+      finishWrite();
       const buffer = term.buffer.active;
       if (!userScrolledUpRef.current && buffer.type !== 'alternate' && buffer.baseY > 0) {
         term.scrollToBottom();
@@ -418,18 +412,16 @@ export function ShellTerminalPane({
     fitAddonRef.current = fitAddon;
 
     const replayToXterm = (data: string | Uint8Array, onDone?: () => void) => {
-      pendingReplaysRef.current += 1;
-      pendingWritesRef.current += 1;
+      const finishWrite = beginTerminalWrite('replay', pendingWritesRef, pendingReplaysRef);
       term.write(data, () => {
-        pendingReplaysRef.current = Math.max(0, pendingReplaysRef.current - 1);
-        pendingWritesRef.current = Math.max(0, pendingWritesRef.current - 1);
+        finishWrite();
         onDone?.();
       });
     };
 
     const dataDisposable = term.onData((data) => {
       // Suppress synthetic terminal query responses triggered during snapshot/delta replay.
-      if (pendingReplaysRef.current > 0) return;
+      if (!shouldForwardTerminalData(pendingReplaysRef)) return;
       // T10: input is refused while the bridge vault is locked — the overlay says so.
       if (vaultLockedRef.current) return;
       handleInputRef.current(data);
