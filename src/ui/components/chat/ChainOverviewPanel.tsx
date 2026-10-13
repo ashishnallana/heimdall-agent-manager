@@ -725,19 +725,19 @@ export default function ChainOverviewPanel({
                     >
                       {name}
                     </span>
-                    <span className="shrink-0 text-[10px] uppercase tracking-wide text-faint">
-                      {isCoordinator ? 'coordinator' : role}
-                    </span>
-                    <span className="min-w-0 flex-1 truncate text-[11px] text-muted">
+                    <span
+                      className="min-w-0 flex-1 truncate text-[11px] text-muted"
+                      title={currentTask ? String(currentTask.title || currentTask.id || '') : 'No task'}
+                    >
                       {currentTask ? (
-                        <VaultText value={currentTask.title} as="span" className="truncate" />
+                        <VaultText value={currentTask.title || currentTask.id} as="span" className="truncate" />
                       ) : (
-                        <span className="text-faint">{rawStatus}</span>
+                        <span className="text-faint">No task</span>
                       )}
                     </span>
 
                     <div
-                      className="flex shrink-0 items-center gap-0.5 opacity-60 group-hover:opacity-100"
+                      className="hidden shrink-0 items-center gap-0.5 group-hover:flex group-focus-within:flex"
                       onClick={(e) => e.stopPropagation()}
                     >
                       <button
