@@ -19,12 +19,11 @@ import { ShellLogViewer } from './ShellLogViewer';
  *
  *     .Run    = {key = {.Agent_Instance}, forbidden = {.Chain}}
  *     .Server = {key = {.Chain, .Bridge}, forbidden = {.Agent_Instance}}
- *     .Shell  = {key = {.Bridge},         forbidden = {.Chain, .Agent_Instance}}
+ *     .Shell  = {key = {.Bridge}, optional = {.Chain}, forbidden = {.Agent_Instance}}
  *
- * `Chain` appears in the scope key of SERVER ALONE, so a list narrowed by chain_id can
- * only ever come back with servers — a run or a shell leaking in is impossible one layer
- * below this component rather than merely filtered out inside it. Adding `status=live`
- * narrows to the non-terminal ones, which is the whole of §4's set in ONE request.
+ * A list narrowed by chain_id returns servers and chain-attached shells — never runs —
+ * and activeServersOf keeps only the servers. Adding `status=live` narrows to the
+ * non-terminal ones, which is the whole of §4's set in ONE request.
  *
  * WHY THE CHAIN SUMMARY IS THE RIGHT HOME. It is not one option among several: chain is
  * in no other kind's scope key, so the chain summary is the only mounted surface whose

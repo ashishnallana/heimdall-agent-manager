@@ -55,7 +55,7 @@ shell_session_kind_from_string :: proc(s: string) -> (Shell_Session_Kind, bool) 
 //
 //   run    — AGENT scoped.            Keyed by agent_instance_id.
 //   server — TASK CHAIN + BRIDGE.     Keyed by chain_id AND bridge_id.
-//   shell  — BRIDGE scoped.           Keyed by bridge_id alone.
+//   shell  — BRIDGE scoped.           Keyed by bridge_id; chain_id optional.
 //
 // This is ONE definition, in the same spirit as SHELL_SESSION_TERMINAL_STATUSES
 // below: the service validates against it, the repository builds its list
@@ -73,6 +73,9 @@ Shell_Session_Scope_Column :: enum {
 //   key       — the columns that IDENTIFY a session of this kind. Each must be
 //               non-empty, and a list narrowed by one of these columns may
 //               legitimately return this kind.
+//   optional  — columns this kind MAY carry but does not require. When set, a
+//               list narrowed by that column returns the session (the column's
+//               value still has to match); when empty it is simply absent.
 //   forbidden — the columns this kind does NOT use. Each must be EMPTY, rather
 //               than filled with noise, and a list narrowed by one of them must
 //               never return this kind.
@@ -81,15 +84,20 @@ Shell_Session_Scope_Column :: enum {
 // physically lives on a bridge and (bridge_id, session_id) is the table's
 // primary key, so bridge_id is always populated. For `run` it simply is not the
 // SCOPE key — which is why it is in neither set for that kind.
+//
+// A `shell` may optionally be attached to a task chain (chain_id) so it shows up
+// in that chain's workbench; it stays bridge-scoped and is never chain-reaped
+// (_reap_kill_if_eligible only kills servers).
 Shell_Session_Scope_Rule :: struct {
 	key:       bit_set[Shell_Session_Scope_Column],
+	optional:  bit_set[Shell_Session_Scope_Column],
 	forbidden: bit_set[Shell_Session_Scope_Column],
 }
 
 SHELL_SESSION_SCOPE_RULES := [Shell_Session_Kind]Shell_Session_Scope_Rule{
 	.Run    = {key = {.Agent_Instance},   forbidden = {.Chain}},
 	.Server = {key = {.Chain, .Bridge},   forbidden = {.Agent_Instance}},
-	.Shell  = {key = {.Bridge},           forbidden = {.Chain, .Agent_Instance}},
+	.Shell  = {key = {.Bridge},           optional = {.Chain}, forbidden = {.Agent_Instance}},
 }
 
 shell_session_scope_rule :: proc(kind: Shell_Session_Kind) -> Shell_Session_Scope_Rule {
@@ -118,13 +126,13 @@ shell_session_scope_column_name :: proc(col: Shell_Session_Scope_Column) -> stri
 }
 
 // shell_session_kinds_scoped_by returns the kinds a list narrowed by `col` may
-// return: those whose scope key includes that column. A kind that forbids the
-// column, or merely does not key on it, is excluded — which is what stops a
-// by-chain listing from handing back agent-scoped runs.
+// return: those whose scope key or optional set includes that column. A kind
+// that forbids the column, or does not use it at all, is excluded — which is
+// what stops a by-chain listing from handing back agent-scoped runs.
 shell_session_kinds_scoped_by :: proc(col: Shell_Session_Scope_Column, out: ^[len(Shell_Session_Kind)]string) -> []string {
 	n := 0
 	for rule, kind in SHELL_SESSION_SCOPE_RULES {
-		if col in rule.key {
+		if col in rule.key || col in rule.optional {
 			out[n] = shell_session_kind_string[kind]
 			n += 1
 		}

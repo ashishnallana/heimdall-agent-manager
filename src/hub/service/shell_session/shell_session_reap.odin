@@ -41,15 +41,12 @@ SHELL_SESSION_REAP_MAX_ROWS :: 512
 // A, called from the task chain's terminal transition, and it returns how many kills it
 // recorded.
 //
-// THE KIND FILTER IS THE QUERY'S, NOT MINE, AND THAT IS THE POINT. list_by_chain narrows
-// on chain_id AND on the kinds whose scope key includes .Chain (repo_sqlite's
+// THE KIND FILTER IS THE QUERY'S, AND _reap_kill_if_eligible IS THE GATE. list_by_chain
+// narrows on chain_id AND on the kinds that use .Chain (repo_sqlite's
 // shell_session_kind_scope_clause, built from domain.SHELL_SESSION_SCOPE_RULES). Server
-// is the only kind keyed by .Chain, so this listing CANNOT return a run or a shell —
-// not because this proc filters them out, but because REQ-SHELL-1's descriptor makes a
-// by-chain listing meaningless for the other two. A client-side kind check here would be
-// a second spelling of a rule that already has one.
-// _reap_kill_if_eligible re-asserts it anyway, as defence against a future scope-table
-// edit rather than as the primary guarantee.
+// keys on .Chain and a shell may optionally carry it, so this listing can return a
+// chain-attached shell — but never a run. _reap_kill_if_eligible kills servers only,
+// so a user's chain-attached interactive shell is never reaped with the chain.
 //
 // status = "live" comes from the same place: the repository translates it from
 // domain.SHELL_SESSION_TERMINAL_STATUSES, so "already terminal" is excluded by the

@@ -161,6 +161,16 @@ test('AC2b NEGATIVE: the panel set is empty when every server is terminal', () =
   assert.deepEqual(activeServersOf(rows), [], 'a chain whose servers all finished shows none');
 });
 
+test('AC2b NEGATIVE: a chain-attached live shell is not listed as a server', () => {
+  // A shell may carry chain_id, so a chain-narrowed page can include it; the servers
+  // panel must still show servers only.
+  const rows = [
+    S({ session_id: 'sh_srv', kind: 'server', status: 'running' }),
+    S({ session_id: 'sh_sh', kind: 'shell', status: 'running', chain_id: 'chain_1' }),
+  ];
+  assert.deepEqual(activeServersOf(rows).map((r) => r.session_id), ['sh_srv']);
+});
+
 /* ---------------- §2 pin / unpin sequencing ---------------- */
 
 const marker = (sessionId, createdUnixMs) => ({ messageId: `msg_${sessionId}`, sessionId, createdUnixMs });

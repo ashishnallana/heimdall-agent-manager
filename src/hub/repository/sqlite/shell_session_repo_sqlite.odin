@@ -302,6 +302,10 @@ shell_session_list_by_project_sqlite :: proc(ctx: rawptr, owner_user_id, project
 }
 
 shell_session_list_by_chain_sqlite :: proc(ctx: rawptr, owner_user_id, chain_id, status_filter, cursor: string, limit: int) -> ([dynamic]domain.Shell_Session, string, domain.Domain_Error) {
+	// An empty chain id names no chain. `shell` carries chain_id as an OPTIONAL
+	// scope column, so binding chain_id='' here would hand back every unattached
+	// shell; answer "nothing" instead of widening the listing.
+	if chain_id == "" do return nil, "", domain.Domain_Error{}
 	return shell_session_list_generic(ctx, "chain_id", {shell_session_kind_scope_clause(.Chain)}, owner_user_id, chain_id, status_filter, cursor, limit)
 }
 
@@ -359,8 +363,9 @@ shell_session_list_generic :: proc(ctx: rawptr, scope_col: string, kind_clauses:
 	append(&clauses, shell_session_eq(scope_col, scope_val))
 	// REQ-SHELL-1 §6. Before this, list_by_chain(owner, "") returned every session
 	// with an empty chain_id — i.e. all the agent-scoped runs and bridge-scoped
-	// shells — to a caller asking about a chain. Restricting to the kinds that key
-	// on the column closes that: a by-chain listing can only ever return servers.
+	// shells — to a caller asking about a chain. Restricting to the kinds that use
+	// the column closes that: a by-chain listing returns servers and chain-attached
+	// shells, never runs.
 	for c in kind_clauses do append(&clauses, c)
 	// Through the same translator as the owner-wide list, so `status=live` and
 	// `status=finished` work identically on all four list routes.

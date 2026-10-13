@@ -277,8 +277,8 @@ check "a run started by a USER is rejected (run is agent-only)" "403" \
   "$(api_code POST "/api/v1/bridges/$B_ID/shells" "{\"kind\":\"run\",\"cmd\":\"echo nope\",\"agent_instance_id\":\"$AGENT_IID\"}")"
 check "a server with no chain_id is rejected" "400" \
   "$(api_code POST "/api/v1/bridges/$B_ID/shells" "{\"kind\":\"server\",\"cmd\":\"sleep 1\"}")"
-check "a shell carrying a chain_id is rejected" "400" \
-  "$(api_code POST "/api/v1/bridges/$B_ID/shells" "{\"kind\":\"shell\",\"chain_id\":\"$CHAIN_ID\"}")"
+check "a shell carrying an agent_instance_id is rejected" "400" \
+  "$(api_code POST "/api/v1/bridges/$B_ID/shells" "{\"kind\":\"shell\",\"agent_instance_id\":\"$AGENT_IID\"}")"
 check "a server carrying an agent_instance_id is rejected" "400" \
   "$(api_code POST "/api/v1/bridges/$B_ID/shells" "{\"kind\":\"server\",\"cmd\":\"sleep 1\",\"chain_id\":\"$CHAIN_ID\",\"agent_instance_id\":\"$AGENT_IID\"}")"
 

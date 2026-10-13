@@ -591,10 +591,10 @@ test_t10_unadoptable_entries_are_refused :: proc(t: ^testing.T) {
 	fx: Fx10; fx10_make(&fx); defer fx10_free(&fx)
 
 	no_owner := entry10(Entry10{session_id = "sh_no_owner", owner = " "}); defer delete(no_owner)
-	// kind=shell is BRIDGE scoped and forbids chain_id, so this entry contradicts its
-	// own kind's scope rule.
+	// kind=shell is BRIDGE scoped and forbids agent_instance_id, so this entry
+	// contradicts its own kind's scope rule.
 	bad_scope_src := entry10(Entry10{session_id = "sh_bad_scope"}); defer delete(bad_scope_src)
-	bad_scope, _ := strings.replace(bad_scope_src, "\"chain_id\":\"\"", "\"chain_id\":\"chain_x\"", 1)
+	bad_scope, _ := strings.replace(bad_scope_src, "\"agent_instance_id\":\"\"", "\"agent_instance_id\":\"inst_x\"", 1)
 	defer delete(bad_scope)
 	unknown_kind := entry10(Entry10{session_id = "sh_bad_kind", kind = "agent"}); defer delete(unknown_kind)
 	// A terminal status in an inventory is refused: ending a session belongs to the

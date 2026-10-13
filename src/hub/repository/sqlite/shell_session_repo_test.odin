@@ -269,12 +269,17 @@ test_shell_session_scope_validation :: proc(t: ^testing.T) {
 	col5, missing5, ok5 := domain.shell_session_validate_scope(bad_server)
 	testing.expect(t, !ok5 && missing5, "server without a chain_id is rejected")
 	testing.expect_value(t, col5, "chain_id")
+	// A shell MAY carry a chain_id (optional scope column), so it stays valid.
+	chain_shell := shell_test_session("s6", "u", "brg_1", domain.Shell_Session_Kind_Shell)
+	chain_shell.chain_id = "chain_1"
+	_, _, chain_shell_ok := domain.shell_session_validate_scope(chain_shell)
+	testing.expect(t, chain_shell_ok, "shell carrying an optional chain_id is valid")
 	// Negative: a forbidden scope column populated with noise instead of left empty.
-	noisy_shell := shell_test_session("s6", "u", "brg_1", domain.Shell_Session_Kind_Shell)
-	noisy_shell.chain_id = "chain_1"
+	noisy_shell := shell_test_session("s6b", "u", "brg_1", domain.Shell_Session_Kind_Shell)
+	noisy_shell.agent_instance_id = "inst_1"
 	col6, missing6, ok6 := domain.shell_session_validate_scope(noisy_shell)
-	testing.expect(t, !ok6 && !missing6, "shell carrying a chain_id is rejected")
-	testing.expect_value(t, col6, "chain_id")
+	testing.expect(t, !ok6 && !missing6, "shell carrying an agent_instance_id is rejected")
+	testing.expect_value(t, col6, "agent_instance_id")
 	noisy_server := shell_test_session("s7", "u", "brg_1", domain.Shell_Session_Kind_Server)
 	noisy_server.chain_id = "chain_1"
 	noisy_server.agent_instance_id = "inst_1"
@@ -908,12 +913,12 @@ test_t9_live_by_kind_excludes_every_terminal_status :: proc(t: ^testing.T) {
 	testing.expect_value(t, rows[0].session_id, "srv_live")
 }
 // AC3 IN ITS STRONGEST FORM. The chain reap's candidate query is list_by_chain, which
-// AND-s in a kind clause derived from domain.SHELL_SESSION_SCOPE_RULES. Server is the
-// only kind keyed by .Chain, so a run or a shell CANNOT be returned — even one wrongly
-// carrying a chain_id, which is what is seeded here. The service also refuses them, but
-// this is the layer at which they are unreachable rather than merely refused.
+// AND-s in a kind clause derived from domain.SHELL_SESSION_SCOPE_RULES. Server keys on
+// .Chain and a shell may optionally carry it, so a run CANNOT be returned — even one
+// wrongly carrying a chain_id, which is what is seeded here — while a chain-attached
+// shell is listed (the reap's _reap_kill_if_eligible still kills servers only).
 @(test)
-test_t9_by_chain_can_only_ever_return_servers :: proc(t: ^testing.T) {
+test_t9_by_chain_never_returns_runs :: proc(t: ^testing.T) {
 	conn, ok := t9_db(t, "scope")
 	if !ok { close(&conn); return }
 	defer close(&conn)
@@ -927,10 +932,10 @@ test_t9_by_chain_can_only_ever_return_servers :: proc(t: ^testing.T) {
 	rows, _, err := iface.shell_session_list_by_chain(&repo, "usr_t9", "chain_1", domain.Shell_Session_Status_Group_Live, "", 100)
 	defer domain.shell_sessions_destroy(rows)
 	testing.expect_value(t, err.code, domain.Error_Code.None)
-	testing.expect_value(t, len(rows), 1)
-	testing.expect_value(t, rows[0].session_id, "srv_1")
+	testing.expect_value(t, len(rows), 2)
+	testing.expect(t, t9_has(rows, "srv_1"),    "a by-chain listing returns the chain's server")
+	testing.expect(t, t9_has(rows, "shell_1"),  "a by-chain listing returns a chain-attached shell")
 	testing.expect(t, !t9_has(rows, "run_1"),   "a by-chain listing must never return a run")
-	testing.expect(t, !t9_has(rows, "shell_1"), "a by-chain listing must never return a shell")
 }
 // --- Consolidated from shell_session_req12_repo_test.odin ---
 @(private = "file")

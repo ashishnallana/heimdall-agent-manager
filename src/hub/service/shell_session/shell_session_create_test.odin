@@ -221,15 +221,15 @@ test_shell_session_create_rejects_scope_columns_a_kind_does_not_use :: proc(t: ^
 	fixture_make(&fx)
 	defer fixture_free(&fx)
 
-	// shell is BRIDGE scoped; chain and agent must be left empty rather than
-	// filled with noise that later reads would treat as real scope.
+	// shell is BRIDGE scoped with an OPTIONAL chain_id; agent_instance_id must be
+	// left empty rather than filled with noise that later reads would treat as scope.
 	_, ok, err := shell_session_create(&fx.svc, test_auth(), Shell_Session_Create_Input{
-		bridge_id = "brg_1",
-		kind      = domain.Shell_Session_Kind_Shell,
-		cmd       = "zsh",
-		chain_id  = "chain_1",
+		bridge_id         = "brg_1",
+		kind              = domain.Shell_Session_Kind_Shell,
+		cmd               = "zsh",
+		agent_instance_id = "inst_1",
 	})
-	testing.expect(t, !ok, "a shell carrying a chain_id is rejected")
+	testing.expect(t, !ok, "a shell carrying an agent_instance_id is rejected")
 	testing.expect_value(t, err.code, domain.Error_Code.Validation_Failed)
 
 	_, ok2, _ := shell_session_create(&fx.svc, test_auth(), Shell_Session_Create_Input{
