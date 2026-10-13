@@ -45,6 +45,10 @@ export interface WorkbenchPaneViewProps {
   onOpenOrFocusTab: (tab: Partial<WorkbenchTabState> & { kind: WorkbenchSurfaceKind }) => void;
   onOpenInRightSplit?: (tab: Partial<WorkbenchTabState> & { kind: WorkbenchSurfaceKind }) => void;
   onUpdateTabParams: (tabId: string, patch: Partial<WorkbenchTabState>) => void;
+  onReplaceTab?: (
+    tabId: string,
+    tab: Partial<WorkbenchTabState> & { kind: WorkbenchSurfaceKind },
+  ) => void;
   onSplitPane: (direction: SplitDirection) => void;
   onToggleMaximize: () => void;
   onClosePane: () => void;
@@ -93,6 +97,7 @@ export function WorkbenchPaneView({
   onOpenOrFocusTab,
   onOpenInRightSplit,
   onUpdateTabParams,
+  onReplaceTab,
   onSplitPane,
   onToggleMaximize,
   onClosePane,
@@ -190,10 +195,16 @@ export function WorkbenchPaneView({
                     })
                   }
                   onSwitchAgent={(nextAgentId, nextTitle) =>
-                    onUpdateTabParams(tab.id, {
-                      agentInstanceId: nextAgentId,
-                      ...(nextTitle ? { title: nextTitle } : {}),
-                    })
+                    onReplaceTab
+                      ? onReplaceTab(tab.id, {
+                          kind: 'agentChat',
+                          agentInstanceId: nextAgentId,
+                          ...(nextTitle ? { title: nextTitle } : {}),
+                        })
+                      : onUpdateTabParams(tab.id, {
+                          agentInstanceId: nextAgentId,
+                          ...(nextTitle ? { title: nextTitle } : {}),
+                        })
                   }
                   onSplitPane={onSplitPane}
                   onReplaceWithNew={onOpenNewTab}

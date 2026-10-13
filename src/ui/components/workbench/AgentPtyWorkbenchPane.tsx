@@ -127,6 +127,9 @@ export function AgentPtyWorkbenchPane({
       );
     }
 
+    // Within a task chain, only chain participants may be selected.
+    if (chainId) return options;
+
     for (const p of liveData || []) {
       if (projectId && p?.projectId && p.projectId !== projectId) continue;
       for (const c of p?.chains || []) {
@@ -157,6 +160,7 @@ export function AgentPtyWorkbenchPane({
   }, [
     agentInstanceId,
     chainData?.chain?.members,
+    chainId,
     conversationsData,
     displayName,
     instance?.role,

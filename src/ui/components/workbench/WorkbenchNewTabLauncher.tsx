@@ -198,14 +198,14 @@ function WorkbenchNewTabLauncherBody({
           })}
         </div>
 
-        {/* Chain Agents Quick Pick (Chat or PTY) */}
-        {(chainMembers.length > 0 || liveAgents.length > 0) ? (
+        {/* Chain Agents Quick Pick (Chat or PTY) — restricted to chain participants when in a chain */}
+        {(chainMembers.length > 0 || (!chainId && liveAgents.length > 0)) ? (
           <div className="space-y-2">
             <h4 className="text-[11px] font-semibold uppercase tracking-wider text-muted">
-              Agents (Chat or Interactive PTY)
+              {chainId ? 'Chain Agents (Chat or Interactive PTY)' : 'Agents (Chat or Interactive PTY)'}
             </h4>
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-              {(chainMembers.length > 0 ? chainMembers : liveAgents.slice(0, 6)).map((agent: any) => {
+              {(chainId ? chainMembers : liveAgents.slice(0, 6)).map((agent: any) => {
                 const instId = String(agent.agentInstanceId || agent.agent_instance_id || '');
                 if (!instId) return null;
                 const name = String(agent.displayName || agent.display_name || instId);

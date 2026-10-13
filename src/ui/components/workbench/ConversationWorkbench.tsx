@@ -19,6 +19,7 @@ import {
   openNewTabView,
   openOrFocusWorkbenchTab,
   replaceNewTabWithSurface,
+  replaceWorkbenchTab,
   resizeWorkbenchSplit,
   selectActiveWorkspaceKey,
   selectWorkspaceWorkbench,
@@ -362,11 +363,37 @@ export function ConversationWorkbench({
     [dispatch, effectiveWorkspaceKey, workspaceState?.tree],
   );
 
+  // Chain participant guard: inside a task chain, agent chats / PTYs may only be
+  // opened for chain members (task_chain_members, keyed by agent_instance_id).
+  const chainParticipantIds = React.useMemo(() => {
+    if (!chainId) return null;
+    const ids = new Set<string>();
+    for (const m of members || []) {
+      const id = String(m?.agentInstanceId || m?.agent_instance_id || '').trim();
+      if (id) ids.add(id);
+    }
+    // Members not loaded yet: don't block, the primary agent is always allowed.
+    if (ids.size === 0) return null;
+    if (primaryAgentInstanceId) ids.add(primaryAgentInstanceId);
+    return ids;
+  }, [chainId, members, primaryAgentInstanceId]);
+
+  const isAllowedTab = useCallback(
+    (tab: Partial<WorkbenchTabState> & { kind?: WorkbenchSurfaceKind }) => {
+      if (!chainParticipantIds) return true;
+      if (tab.kind !== 'agentChat' && tab.kind !== 'agentPty') return true;
+      const id = String(tab.agentInstanceId || primaryAgentInstanceId || '').trim();
+      return chainParticipantIds.has(id);
+    },
+    [chainParticipantIds, primaryAgentInstanceId],
+  );
+
   const handleOpenInRightSplit = useCallback(
     (
       sourcePaneId: string,
       tab: Partial<WorkbenchTabState> & { kind: WorkbenchSurfaceKind },
     ) => {
+      if (!isAllowedTab(tab)) return;
       const tree = workspaceState?.tree;
       const targetTabId = buildWorkbenchTabId(tab);
 
@@ -415,7 +442,7 @@ export function ConversationWorkbench({
         }),
       );
     },
-    [dispatch, effectiveWorkspaceKey, workspaceState?.tree],
+    [dispatch, effectiveWorkspaceKey, isAllowedTab, workspaceState?.tree],
   );
 
   const renderPane = useCallback(
@@ -479,16 +506,18 @@ export function ConversationWorkbench({
               }),
             )
           }
-          onReplaceNewTab={(tab: Partial<WorkbenchTabState> & { kind: WorkbenchSurfaceKind }) =>
+          onReplaceNewTab={(tab: Partial<WorkbenchTabState> & { kind: WorkbenchSurfaceKind }) => {
+            if (!isAllowedTab(tab)) return;
             dispatch(
               replaceNewTabWithSurface({
                 workspaceKey: effectiveWorkspaceKey,
                 paneId,
                 tab,
               }),
-            )
-          }
-          onOpenOrFocusTab={(tab: Partial<WorkbenchTabState> & { kind: WorkbenchSurfaceKind; splitDirection?: SplitDirection }) =>
+            );
+          }}
+          onOpenOrFocusTab={(tab: Partial<WorkbenchTabState> & { kind: WorkbenchSurfaceKind; splitDirection?: SplitDirection }) => {
+            if (!isAllowedTab(tab)) return;
             dispatch(
               openOrFocusWorkbenchTab({
                 workspaceKey: effectiveWorkspaceKey,
@@ -496,12 +525,16 @@ export function ConversationWorkbench({
                 tab,
                 splitDirection: tab.splitDirection,
               }),
-            )
-          }
+            );
+          }}
           onOpenInRightSplit={(tab: Partial<WorkbenchTabState> & { kind: WorkbenchSurfaceKind }) =>
             handleOpenInRightSplit(paneId, tab)
           }
-          onUpdateTabParams={(tabId, patch) =>
+          onUpdateTabParams={(tabId, patch) => {
+            if (patch.agentInstanceId) {
+              const existing = value.tabs.find((t) => t.id === tabId);
+              if (existing && !isAllowedTab({ ...existing, ...patch })) return;
+            }
             dispatch(
               updateWorkbenchTabParams({
                 workspaceKey: effectiveWorkspaceKey,
@@ -509,8 +542,19 @@ export function ConversationWorkbench({
                 tabId,
                 patch,
               }),
-            )
-          }
+            );
+          }}
+          onReplaceTab={(tabId, tab) => {
+            if (!isAllowedTab(tab)) return;
+            dispatch(
+              replaceWorkbenchTab({
+                workspaceKey: effectiveWorkspaceKey,
+                paneId,
+                tabId,
+                tab,
+              }),
+            );
+          }}
           onSplitPane={(direction) =>
             dispatch(
               splitWorkbenchPane({
@@ -552,6 +596,7 @@ export function ConversationWorkbench({
       focusMessageId,
       handleOpenInRightSplit,
       handleTabDragStart,
+      isAllowedTab,
       isMobile,
       members,
       onOpenQuickOpen,

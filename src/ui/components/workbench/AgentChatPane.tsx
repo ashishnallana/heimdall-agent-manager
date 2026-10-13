@@ -3110,12 +3110,18 @@ export function AgentChatPane({
                     title: 'VCS / Diff',
                   })
                 }
-                onOpenAgentChat={(targetInstId, agentTitle) =>
+                onOpenAgentChat={(targetInstId, agentTitle) => {
+                  // Clicking a chain agent opens its chat in this pane.
+                  if (onSwitchAgent) {
+                    setOverviewPopupOpen(false);
+                    onSwitchAgent(targetInstId, agentTitle || targetInstId);
+                    return;
+                  }
                   openInRightSplitForAgent('agentChat', {
                     agentInstanceId: targetInstId,
                     title: agentTitle || targetInstId,
-                  })
-                }
+                  });
+                }}
                 onOpenAgentPty={(targetInstId, agentTitle) =>
                   openInRightSplitForAgent('agentPty', {
                     agentInstanceId: targetInstId,

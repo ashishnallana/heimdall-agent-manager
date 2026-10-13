@@ -6,7 +6,6 @@ import { VaultText } from '../vault/VaultText';
 import { useAuthUser } from '../auth/AuthUserContext';
 import { isVaultArmored, decryptVaultText } from '../../utils/vaultContent';
 import {
-  Avatar,
   Badge,
   Button,
   Icon,
@@ -678,7 +677,7 @@ export default function ChainOverviewPanel({
           members.length === 0 ? (
             <p className="text-xs text-muted py-1">No agents assigned to this chain.</p>
           ) : (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+            <div className="flex flex-col gap-0.5">
               {members.map((member) => {
                 const instId = member.agentInstanceId || member.agent_instance_id;
                 const agentId = member.agentId || member.agent_id || '';
@@ -697,51 +696,50 @@ export default function ChainOverviewPanel({
                   instId === chain?.coordinator_instance_id;
 
                 const isSelected = Boolean(agentInstanceId && instId === agentInstanceId);
-                const cardClasses = isSelected
-                  ? 'border-accent/50 bg-gradient-to-br from-accent/10 to-accent/5 ring-1 ring-accent/20'
-                  : 'border-subtle bg-surface-secondary/30';
                 const isCapturing = Boolean(capturedTerminalIds[instId]);
 
                 return (
                   <div
                     key={instId}
+                    role="button"
+                    tabIndex={0}
                     data-debug-id={`chain-overview-agent-row-${instId}`}
+                    aria-current={isSelected ? 'true' : undefined}
+                    title={`Open ${name} chat`}
                     onClick={() => handleNavigateToAgent(instId, name)}
-                    className={`flex flex-col justify-between gap-2 rounded-lg border p-2.5 transition-colors hover:bg-neutral-soft/50 cursor-pointer ${cardClasses}`}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        handleNavigateToAgent(instId, name);
+                      }
+                    }}
+                    className={`group flex h-8 min-w-0 cursor-pointer items-center gap-2 rounded-md px-2 text-xs transition-colors hover:bg-neutral-soft/60 ${
+                      isSelected ? 'bg-accent/10' : ''
+                    }`}
                   >
-                    <div className="flex items-center gap-2.5 min-w-0">
-                      <div className="relative shrink-0">
-                        <Avatar name={name} size="sm" />
-                        <div className="absolute -bottom-0.5 -right-0.5">
-                          <StatusDot tone={statusTone(rawStatus)} label={rawStatus} size="sm" />
-                        </div>
-                      </div>
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-1.5 flex-wrap">
-                          <span className="font-semibold text-xs text-primary truncate max-w-[140px] sm:max-w-[180px]">
-                            {name}
-                          </span>
-                          <Badge tone={roleTone(role)}>
-                            {role}
-                          </Badge>
-                          <StatusPill tone={statusTone(rawStatus)}>
-                            {rawStatus}
-                          </StatusPill>
-                        </div>
-                        <div className="text-[11px] text-muted truncate max-w-[240px] mt-0.5">
-                          {currentTask ? (
-                            <span className="flex items-center gap-1 text-accent">
-                              <Icon name="tasks" size={10} />
-                              <VaultText value={currentTask.title} as="span" className="truncate" />
-                            </span>
-                          ) : (
-                            <span className="text-faint">Idle / No active task</span>
-                          )}
-                        </div>
-                      </div>
-                    </div>
+                    <StatusDot tone={statusTone(rawStatus)} label={rawStatus} size="sm" />
+                    <span
+                      className={`shrink-0 truncate max-w-[45%] ${
+                        isSelected ? 'font-semibold text-accent' : 'font-medium text-primary'
+                      }`}
+                    >
+                      {name}
+                    </span>
+                    <span className="shrink-0 text-[10px] uppercase tracking-wide text-faint">
+                      {isCoordinator ? 'coordinator' : role}
+                    </span>
+                    <span className="min-w-0 flex-1 truncate text-[11px] text-muted">
+                      {currentTask ? (
+                        <VaultText value={currentTask.title} as="span" className="truncate" />
+                      ) : (
+                        <span className="text-faint">{rawStatus}</span>
+                      )}
+                    </span>
 
-                    <div className="shrink-0 flex items-center gap-1 justify-end" onClick={(e) => e.stopPropagation()}>
+                    <div
+                      className="flex shrink-0 items-center gap-0.5 opacity-60 group-hover:opacity-100"
+                      onClick={(e) => e.stopPropagation()}
+                    >
                       <button
                         type="button"
                         data-debug-id={`chain-overview-toggle-capture-${instId}`}
@@ -749,13 +747,13 @@ export default function ChainOverviewPanel({
                         title={isCapturing ? 'Stop capturing terminal' : 'Capture terminal output'}
                         aria-label={isCapturing ? 'Stop capturing terminal' : 'Capture terminal output'}
                         aria-pressed={isCapturing}
-                        className={`grid h-7 w-7 place-items-center rounded-md border border-subtle transition-colors ${
+                        className={`grid h-6 w-6 place-items-center rounded transition-colors ${
                           isCapturing
-                            ? 'bg-accent/20 text-accent font-semibold hover:bg-accent/30'
+                            ? 'bg-accent/20 text-accent'
                             : 'text-muted hover:bg-neutral-soft hover:text-primary'
                         }`}
                       >
-                        <Icon name="terminal" size={13} />
+                        <Icon name="terminal" size={12} />
                       </button>
                       {isStopped ? (
                         <button
@@ -765,13 +763,9 @@ export default function ChainOverviewPanel({
                           onClick={(e) => handleStartAgent(instId, e)}
                           title="Start Agent"
                           aria-label="Start Agent"
-                          className="grid h-7 w-7 place-items-center rounded-md bg-accent text-accent-fg hover:opacity-90 disabled:opacity-50 transition-opacity shadow-xs"
+                          className="grid h-6 w-6 place-items-center rounded text-accent hover:bg-neutral-soft disabled:opacity-50"
                         >
-                          {isStarting ? (
-                            <Spinner size="sm" />
-                          ) : (
-                            <Icon name="play" size={14} />
-                          )}
+                          {isStarting ? <Spinner size="sm" /> : <Icon name="play" size={12} />}
                         </button>
                       ) : isRunning ? (
                         <>
@@ -782,13 +776,9 @@ export default function ChainOverviewPanel({
                             onClick={(e) => handleStopAgent(instId, agentId, e)}
                             title="Stop Agent"
                             aria-label="Stop Agent"
-                            className="grid h-7 w-7 place-items-center rounded-md border border-subtle bg-surface-raised hover:bg-neutral-soft text-muted hover:text-danger transition-colors disabled:opacity-50"
+                            className="grid h-6 w-6 place-items-center rounded text-muted hover:bg-neutral-soft hover:text-danger disabled:opacity-50"
                           >
-                            {isStopping ? (
-                              <Spinner size="sm" />
-                            ) : (
-                              <Icon name="stop" size={12} />
-                            )}
+                            {isStopping ? <Spinner size="sm" /> : <Icon name="stop" size={11} />}
                           </button>
                           <button
                             type="button"
@@ -797,13 +787,9 @@ export default function ChainOverviewPanel({
                             onClick={(e) => handleRestartAgent(instId, agentId, e)}
                             title="Restart Agent"
                             aria-label="Restart Agent"
-                            className="grid h-7 w-7 place-items-center rounded-md border border-subtle bg-surface-raised hover:bg-neutral-soft text-muted hover:text-primary transition-colors disabled:opacity-50"
+                            className="grid h-6 w-6 place-items-center rounded text-muted hover:bg-neutral-soft hover:text-primary disabled:opacity-50"
                           >
-                            {isRestarting ? (
-                              <Spinner size="sm" />
-                            ) : (
-                              <Icon name="refresh" size={13} />
-                            )}
+                            {isRestarting ? <Spinner size="sm" /> : <Icon name="refresh" size={12} />}
                           </button>
                         </>
                       ) : null}

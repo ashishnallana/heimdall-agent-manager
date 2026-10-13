@@ -263,10 +263,13 @@ const workbenchSlice = createSlice({
                   p.value.tabs.length === 1 &&
                   p.value.tabs[0]?.kind === 'agentChat'
                 ) {
-                  p.value.tabs[0].agentInstanceId = defaultAgentInstanceId;
-                  if (defaultTitle) {
-                    p.value.tabs[0].title = defaultTitle;
-                  }
+                  const replaced = createWorkbenchTabState({
+                    kind: 'agentChat',
+                    agentInstanceId: defaultAgentInstanceId,
+                    title: defaultTitle || p.value.tabs[0].title,
+                  });
+                  p.value.tabs[0] = replaced;
+                  p.value.activeTabId = replaced.id;
                   break;
                 }
               }
@@ -865,6 +868,40 @@ const workbenchSlice = createSlice({
       ws.pendingDropTarget = null;
     },
 
+    replaceWorkbenchTab(
+      state,
+      action: PayloadAction<{
+        workspaceKey: string;
+        paneId: string;
+        tabId: string;
+        tab: WorkbenchTabSpec;
+      }>,
+    ) {
+      const { workspaceKey, paneId, tabId, tab: tabSpec } = action.payload;
+      const ws = state.workspaces[workspaceKey];
+      if (!ws) return;
+      const pane = ws.tree.panes[paneId];
+      if (!pane || pane.kind !== 'content') return;
+      const idx = pane.value.tabs.findIndex((t) => t.id === tabId);
+      if (idx < 0) return;
+      const nextTab = createWorkbenchTabState(tabSpec);
+      if (nextTab.id === tabId) {
+        pane.value.tabs[idx] = { ...pane.value.tabs[idx], ...nextTab };
+        pane.value.activeTabId = nextTab.id;
+        ws.tree.focusedPaneId = paneId;
+        return;
+      }
+      const existingIdx = pane.value.tabs.findIndex((t) => t.id === nextTab.id);
+      if (existingIdx >= 0) {
+        // Target tab already open in this pane: drop the old one and focus the existing.
+        pane.value.tabs.splice(idx, 1);
+      } else {
+        pane.value.tabs[idx] = nextTab;
+      }
+      pane.value.activeTabId = nextTab.id;
+      ws.tree.focusedPaneId = paneId;
+    },
+
     updateWorkbenchTabParams(
       state,
       action: PayloadAction<{
@@ -1165,6 +1202,7 @@ export const {
   moveWorkbenchTabToPane,
   splitWorkbenchPaneWithTab,
   updateWorkbenchTabParams,
+  replaceWorkbenchTab,
   openPreviewInWorkbench,
   setWorkbenchPendingDropTarget,
   hydrateWorkspaceWorkbench,

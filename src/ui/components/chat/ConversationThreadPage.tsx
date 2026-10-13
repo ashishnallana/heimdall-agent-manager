@@ -140,11 +140,16 @@ export function ConversationThreadPage({
   const members = useMemo(() => {
     const rawMembers = (chainData as any)?.members || (chainData?.chain as any)?.members || [];
     if (!Array.isArray(rawMembers)) return [];
-    return rawMembers.map((m: any) => ({
-      agentId: String(m?.agent_instance_id || m?.agentId || m?.agent_id || ''),
-      displayName: String(m?.display_name || m?.displayName || ''),
-      role: String(m?.role || ''),
-    }));
+    return rawMembers
+      .map((m: any) => ({
+        // task_chain_members is keyed by (chain_id, agent_instance_id), so the
+        // agent instance id is the stable participant identity within a chain.
+        agentInstanceId: String(m?.agentInstanceId || m?.agent_instance_id || ''),
+        agentId: String(m?.agentId || m?.agent_id || ''),
+        displayName: String(m?.displayName || m?.display_name || ''),
+        role: String(m?.role || ''),
+      }))
+      .filter((m: any) => m.agentInstanceId);
   }, [chainData]);
 
   const routeParams = useMemo(() => {
