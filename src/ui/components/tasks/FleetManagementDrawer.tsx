@@ -701,7 +701,7 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
 
   // Portaled to <body> on the shared `z-modal` layer (same as Modal / SettingsModal):
   // rendered inline from ChainHeader / TaskChainOverview it sat inside the shell, where
-  // the fixed mobile sidebar rail painted over its left edge and the BottomDock over its
+  // the fixed mobile sidebar rail painted over its left edge and the bottom chrome over its
   // footer. As a body-level overlay mounted after the shell it covers both.
   return createPortal(
     <div

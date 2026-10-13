@@ -82,7 +82,7 @@ import {
   type ShellSessionStatus,
 } from '../../api/endpoints/shells';
 import { useDispatch, useSelector } from 'react-redux';
-import { openTab } from '../../store/previewTabsSlice';
+import { openPreviewInWorkbench } from '../../store/workbenchSlice';
 import type { ShellState } from '../../store/shellSlice';
 import { SetShellPortDialog } from './SetShellPortDialog';
 import { bridgeLabel, catalogNote, projectLabel, useActionCatalog } from '../actions/actionCatalog';
@@ -402,7 +402,13 @@ export default function ShellListPage({ selectedId = '' }: { selectedId?: string
         return;
       }
       if (verb === 'preview') {
-        dispatch(openTab(session));
+        dispatch(
+          openPreviewInWorkbench({
+            sessionId: session.session_id,
+            label: session.label || session.cmd || session.session_id,
+            port: session.server_port,
+          }),
+        );
         return;
       }
       if (verb === 'copy-url') {

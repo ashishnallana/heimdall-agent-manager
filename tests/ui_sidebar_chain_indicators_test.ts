@@ -2,6 +2,7 @@
 //
 // RUN: node --test tests/ui_sidebar_chain_indicators_test.ts
 
+import './helpers/vaultEndpointHarness.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -74,8 +75,8 @@ test('filterSidebarChains correctly filters active, completed, and archived chai
   assert.deepEqual(activeIds, ['c1'], 'active filter should only include active chains');
 });
 
-// 3. REQ-CHAIN-SIDEBAR-PERSIST-5: Chain-level Right Sidebar Tab & Open Persistence
-test('REQ-CHAIN-SIDEBAR-PERSIST-5: clientPersistence persists and retrieves tab and open state by chainId', async () => {
+// 3. REQ-CHAIN-SIDEBAR-PERSIST-5: Chain-level Workbench Workspace Key & State Persistence
+test('REQ-CHAIN-SIDEBAR-PERSIST-5: clientPersistence resolves and persists workbench state by chainId and instanceId', async () => {
   const mockStorage: Record<string, string> = {};
   (globalThis as any).window = {
     localStorage: {
@@ -86,41 +87,24 @@ test('REQ-CHAIN-SIDEBAR-PERSIST-5: clientPersistence persists and retrieves tab 
   };
 
   const {
-    readRightSidebarTab,
-    writeRightSidebarTab,
-    readRightSidebarOpen,
-    writeRightSidebarOpen,
+    resolveWorkbenchWorkspaceKey,
+    readWorkbenchWorkspaceState,
+    writeWorkbenchWorkspaceState,
   } = await import('../src/ui/utils/clientPersistence.ts');
 
-  // Test 1: Writing with chainId writes to heimdall:sidebar:tab:chain:<chainId>
-  writeRightSidebarTab('files', { chainId: 'chain_test_1', instanceId: 'inst_1' });
-  assert.equal(mockStorage['heimdall:sidebar:tab:chain:chain_test_1'], 'files');
-  assert.equal(mockStorage['heimdall:sidebar:tab:inst_1'], 'files');
+  assert.equal(resolveWorkbenchWorkspaceKey({ chainId: 'chain_test_1', agentInstanceId: 'inst_1' }), 'chain:chain_test_1');
+  assert.equal(resolveWorkbenchWorkspaceKey({ agentInstanceId: 'inst_solo' }), 'agent:inst_solo');
 
-  // Test 2: Reading with chainId retrieves chain-level tab
-  assert.equal(readRightSidebarTab({ chainId: 'chain_test_1' }), 'files');
-  assert.equal(readRightSidebarTab({ chainId: 'chain_test_1', instanceId: 'inst_2' }), 'files');
-
-  // Test 3: Tab falls back to instanceId when chain key is absent
-  mockStorage['heimdall:sidebar:tab:inst_solo'] = 'vcs';
-  assert.equal(readRightSidebarTab({ chainId: 'chain_nonexistent', instanceId: 'inst_solo' }), 'vcs');
-
-  // Test 4: Tab falls back to global key when neither chain nor instance key is present
-  mockStorage['heimdall.rightSidebar.tab'] = 'tasks';
-  assert.equal(readRightSidebarTab({ chainId: 'chain_none', instanceId: 'inst_none' }), 'tasks');
-
-  // Test 5: Open state persists to heimdall:sidebar:open:chain:<chainId>
-  writeRightSidebarOpen(true, { chainId: 'chain_test_1', instanceId: 'inst_1' });
-  assert.equal(mockStorage['heimdall:sidebar:open:chain:chain_test_1'], 'true');
-  assert.equal(readRightSidebarOpen({ chainId: 'chain_test_1' }), true);
-
-  writeRightSidebarOpen(false, { chainId: 'chain_test_1' });
-  assert.equal(mockStorage['heimdall:sidebar:open:chain:chain_test_1'], 'false');
-  assert.equal(readRightSidebarOpen({ chainId: 'chain_test_1' }), false);
-
-  // Test 6: Open state falls back to instanceId when chain key is absent
-  mockStorage['heimdall:sidebar:open:inst_solo'] = 'true';
-  assert.equal(readRightSidebarOpen({ chainId: 'chain_other', instanceId: 'inst_solo' }), true);
+  const tree = {
+    rootPaneId: 'pane-1',
+    focusedPaneId: 'pane-1',
+    maximizedPaneId: null,
+    panes: {
+      'pane-1': { kind: 'content', value: { tabs: [], activeTabId: 'newTab__empty' } },
+    },
+  };
+  writeWorkbenchWorkspaceState('chain:chain_test_1', tree);
+  assert.deepEqual(readWorkbenchWorkspaceState('chain:chain_test_1'), tree);
 });
 
 

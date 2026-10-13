@@ -14,7 +14,6 @@ import {
 import { useListProjectsQuery, type Project } from '../../api/endpoints/projects';
 import { useArchivedProjectIds } from '../projects/projectModel';
 import { useIsMobile } from '../shell/responsive';
-import { writeRightSidebarOpen } from '../../utils/clientPersistence';
 import { TaskChainOverview } from './TaskChainOverview';
 import { useSelector } from 'react-redux';
 import { selectIsVaultUnlocked, getActiveVaultKey } from '../../store/vaultSlice';
@@ -166,7 +165,6 @@ function ChainRow({
             onClick={(e) => {
               e.stopPropagation();
               if (isMobile) {
-                writeRightSidebarOpen(false);
                 window.dispatchEvent(new CustomEvent('heimdall:close-sidebar'));
               }
             }}

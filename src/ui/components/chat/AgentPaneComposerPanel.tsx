@@ -16,8 +16,6 @@ import { useAgentStream } from './useAgentStream';
 import { usePaneVaultLock } from '../shells/usePaneVaultLock';
 import VaultLockedOverlay from '../shells/VaultLockedOverlay';
 import { useTheme } from '../../store/themeSlice';
-import Icon from '../Icon';
-import { readPinnedMonitorAgents, addPinnedMonitorAgent, removePinnedMonitorAgent } from '../../utils/clientPersistence';
 
 /**
  * Compute fitted font size for terminal container on narrow viewports (<500px).
@@ -53,7 +51,7 @@ export interface AgentPaneComposerPanelProps {
   onStreamClosed?: (info?: any) => void;
   className?: string;
   hideHeader?: boolean;
-  onPin?: (agentInstanceId: string) => void;
+  fillPane?: boolean;
 }
 
 export function AgentPaneComposerPanel({
@@ -72,29 +70,9 @@ export function AgentPaneComposerPanel({
   onStreamClosed,
   className = '',
   hideHeader = false,
-  onPin,
+  fillPane,
 }: AgentPaneComposerPanelProps) {
   const { theme } = useTheme();
-  // Whether this agent is pinned to the /agent-monitor grid (per-browser localStorage).
-  const [isPinned, setIsPinned] = useState<boolean>(false);
-  useEffect(() => {
-    setIsPinned(agentInstanceId ? readPinnedMonitorAgents().includes(agentInstanceId) : false);
-  }, [agentInstanceId]);
-  const handleTogglePin = useCallback(() => {
-    if (!agentInstanceId) return;
-    if (isPinned) {
-      removePinnedMonitorAgent(agentInstanceId);
-      setIsPinned(false);
-    } else {
-      addPinnedMonitorAgent(agentInstanceId);
-      setIsPinned(true);
-      // On first pin, surface the monitor grid so the user sees where it went.
-      if (typeof window !== 'undefined') {
-        window.open(window.location.origin + '/#/agent-monitor', 'agent-monitor');
-      }
-    }
-    onPin?.(agentInstanceId);
-  }, [agentInstanceId, isPinned, onPin]);
   const [terminalDimensions, setTerminalDimensions] = useState<{ cols: number; rows: number }>({
     cols: 80,
     rows: 24,
@@ -618,30 +596,17 @@ export function AgentPaneComposerPanel({
     <div
       data-debug-id="agent-pane-composer-panel"
       aria-hidden={!isExpanded}
-      className={`transition-all duration-300 ease-in-out overflow-hidden rounded-xl bg-surface ${
+      className={`transition-all duration-300 ease-in-out overflow-hidden bg-surface ${
+        fillPane ? 'rounded-none' : 'rounded-xl'
+      } ${
         isExpanded
-          ? 'max-h-[500px] opacity-100 transform-none pointer-events-auto'
+          ? fillPane
+            ? 'flex-1 min-h-0 h-full flex flex-col opacity-100 transform-none pointer-events-auto'
+            : 'max-h-[500px] opacity-100 transform-none pointer-events-auto'
           : 'max-h-0 opacity-0 -translate-y-1 pointer-events-none !mb-0 !p-0'
       } ${className}`}
     >
-      <div className="relative w-full">
-        {/* Floating top-right pin overlay button (REQ-STREAM-UI-POLISH-1) */}
-        {agentInstanceId ? (
-          <button
-            type="button"
-            data-debug-id="agent-pane-pin-btn"
-            title={isPinned ? 'Unpin from monitor' : 'Pin to Agent Monitor'}
-            aria-label={isPinned ? 'Unpin from monitor' : 'Pin to Agent Monitor'}
-            aria-pressed={isPinned}
-            onClick={handleTogglePin}
-            className={`absolute top-2 right-2 z-10 rounded-md p-1 shadow-sm backdrop-blur transition-colors bg-surface-raised/80 hover:bg-surface-raised ${
-              isPinned ? 'text-accent hover:text-accent' : 'text-muted hover:text-primary'
-            }`}
-          >
-            <Icon name="grid" size={14} />
-          </button>
-        ) : null}
-
+      <div className={fillPane ? 'relative w-full flex-1 min-h-0 flex flex-col' : 'relative w-full'}>
         {/* Interactive xterm terminal container (REQ-PANE-MOBILE-1, REQ-PANE-MOBILE-2) */}
         <div
           ref={terminalContainerRef}
@@ -651,7 +616,11 @@ export function AgentPaneComposerPanel({
           role="region"
           aria-label="Interactive Terminal"
           style={{ backgroundColor: theme.terminal.background }}
-          className="chat-scrollbar relative w-full overflow-x-auto p-2 font-mono text-xs cursor-text touch-manipulation focus:outline-none min-h-[140px] h-[140px] max-h-[200px] sm:min-h-[360px] sm:h-[360px] sm:max-h-[420px]"
+          className={`chat-scrollbar relative w-full overflow-x-auto p-2 font-mono text-xs cursor-text touch-manipulation focus:outline-none ${
+            fillPane
+              ? 'flex-1 min-h-0 h-full'
+              : 'min-h-[140px] h-[140px] max-h-[200px] sm:min-h-[360px] sm:h-[360px] sm:max-h-[420px]'
+          }`}
         >
           {isStarting && !hasReceivedOutputRef.current && streamBufferRef.current.length === 0 && !output && (
             <div

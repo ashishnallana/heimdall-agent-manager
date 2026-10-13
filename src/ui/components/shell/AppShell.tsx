@@ -29,7 +29,7 @@ import {
   removeAppOwnedClientStorage,
   writeLastSeenUserId,
 } from '../../utils/clientPersistence';
-import BottomDock from './BottomDock';
+import { WindowTilingHost } from '../windowTiling/WindowTilingHost';
 import BridgeEnrollmentApprovalPage from '../enrollment/BridgeEnrollmentApprovalPage';
 import ProviderEnrollmentSetupPage from '../providers/ProviderEnrollmentSetupPage';
 import BridgesPanel from '../settings/BridgesPanel';
@@ -41,7 +41,6 @@ import ProjectListPage from '../projects/ProjectListPage';
 import ProjectViewPage from '../projects/ProjectViewPage';
 import ProjectFormPage from '../projects/ProjectFormPage';
 import ProjectLaunchModal from '../projects/ProjectLaunchModal';
-import PreviewSidebar from '../shells/PreviewSidebar';
 import CardsPanel from '../cards/CardsPanel';
 import HomePage from '../home/HomePage';
 import ErrorBoundary from './ErrorBoundary';
@@ -88,7 +87,6 @@ import LspPanel from '../settings/LspPanel';
 import { useFetchExperimentsQuery } from '../../api/endpoints/settings';
 import { useFetchConversationQuery } from '../../api/endpoints/chats';
 import LibraryPage from '../LibraryPage';
-import AgentMonitorPage from '../monitor/AgentMonitorPage';
 import ArtifactViewer from '../ArtifactViewer';
 import { clearUserClientState } from '../../store/chatSlice';
 import { priorUserClientStateCleared } from '../../store/store';
@@ -1112,7 +1110,7 @@ function RouteOutlet({
   const lspFlagPending = isLspRoute && experimentsQuery.data === undefined && !experimentsQuery.isError;
   const isMappedRoute = useMemo(() => {
     return [
-      '/home', '/cards', '/conversations', '/conversations/new', '/actions', '/projects', '/chains', '/chains/new', '/agents', '/agents/new', '/library', '/memory', '/shells', '/settings', '/agent-monitor', '/issues',
+      '/home', '/cards', '/conversations', '/conversations/new', '/actions', '/projects', '/chains', '/chains/new', '/agents', '/agents/new', '/library', '/memory', '/shells', '/settings', '/issues',
     ].some((known) => path === known || path.startsWith(`${known}/`)) ||
       path.startsWith('/c/') ||
       path.startsWith('/settings/bridges') ||
@@ -1134,16 +1132,40 @@ function RouteOutlet({
   const isKnownRoute = isMappedRoute && !(isLspRoute && !lspEnabled);
 
   if (isConversationThreadRoute) {
-    const threadKey = activeChainId ? `chain-${activeChainId}` : agentInstanceId;
     return (
       <main data-debug-id="shell-main-route-outlet" className="min-w-0 min-h-0 flex-1 overflow-hidden bg-canvas">
-        {/* REQ-SWITCH-AGENT-PERSIST-SIDEBAR-9: key by activeChainId (falling back to agentInstanceId)
-            so switching agents within the same chain does not unmount ConversationThreadPage.
-            Retaining the mounted component allows the right sidebar (tasks, files, chain overview,
-            collapsed states, queries) to stay alive without blinking or reloading, while the message
-            pane swaps to the new conversation. */}
-        <ErrorBoundary resetKey={threadKey} label="Conversation">
-          <ConversationThreadPage key={threadKey} agentInstanceId={agentInstanceId} focusMessageId={focusMessageId} />
+        <ErrorBoundary resetKey="window-tiling-host" label="Conversation">
+          <WindowTilingHost
+            agentInstanceId={agentInstanceId}
+            routeAgentInstanceId={agentInstanceId}
+            activeAgentInstanceId={agentInstanceId}
+            activeChainId={activeChainId}
+            focusMessageId={focusMessageId}
+            routeFocusMessageId={focusMessageId}
+            activeFocusMessageId={focusMessageId}
+            onActiveConversationChange={({
+              agentInstanceId: nextInstanceId,
+              focusMessageId: nextFocusMessageId,
+            }) => {
+              if (!nextInstanceId || nextInstanceId === agentInstanceId) return;
+              const nextSearch = nextFocusMessageId
+                ? `?msg=${encodeURIComponent(nextFocusMessageId)}`
+                : '';
+              window.location.hash = buildRouteHash(
+                `/conversations/${encodeURIComponent(nextInstanceId)}`,
+                nextSearch,
+              );
+            }}
+            renderConversationPane={(_paneId, paneValue) => (
+              <ConversationThreadPage
+                key={paneValue.chainId ? `chain-${paneValue.chainId}` : paneValue.agentInstanceId}
+                agentInstanceId={paneValue.agentInstanceId}
+                chainId={paneValue.chainId || undefined}
+                projectId={paneValue.projectId || undefined}
+                focusMessageId={paneValue.focusMessageId}
+              />
+            )}
+          />
         </ErrorBoundary>
       </main>
     );
@@ -1360,11 +1382,6 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
   const isUnlockModalOpen = useSelector(selectIsUnlockModalOpen);
   const [isOnboardingModalOpen, setIsOnboardingModalOpen] = useState(false);
 
-  // Persistent Bottom Dock for Shells (REQ-BAR-1)
-  const handleToggleBottomDock = useCallback(() => {
-    window.dispatchEvent(new CustomEvent('heimdall:toggle-bottom-dock'));
-  }, []);
-
   // Auto-pop onboarding modal on first visit if vault is unconfigured or locked and not
   // dismissed. Suppressed entirely when SubtleCrypto is unavailable (REQ-VAULT-UNSUP-2).
   useEffect(() => {
@@ -1540,21 +1557,16 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
 
   // UI-12: Cmd/Ctrl-K opens the command palette (desktop). Also the sidebar
   // Search button and the mobile bottom-tab center button open the same surface.
-  // Ctrl+` toggles the persistent bottom dock (REQ-DOCK-1).
   useEffect(() => {
     function handler(event: KeyboardEvent) {
       if ((event.metaKey || event.ctrlKey) && (event.key === 'k' || event.key === 'K')) {
         event.preventDefault();
         setPaletteOpen((open) => !open);
       }
-      if ((event.ctrlKey || event.metaKey) && event.key === '`') {
-        event.preventDefault();
-        handleToggleBottomDock();
-      }
     }
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [handleToggleBottomDock]);
+  }, []);
 
   // Palette navigation: convert a logical route into a hash location.
   const handlePaletteNavigate = (route: string) => {
@@ -1644,23 +1656,9 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
   const sidebarError = String((conversationsQuery.error as any)?.error || (agentsLiveQuery.error as any)?.error || '');
   const sidebarLoading = conversationsQuery.isLoading || agentsLiveQuery.isLoading;
 
-  // /agent-monitor is a bare full-screen page: it owns the whole viewport and renders
-  // WITHOUT the shell sidebar/chrome (like a standalone dashboard).
-  if (path === '/agent-monitor') {
-    return (
-      /* REQ-VIEWPORT-SWEEP-1: was `h-screen` (= `height: 100vh`). This box sits INSIDE the
-         `app-viewport-height` shell, so with the keyboard up it was 812px tall inside a 409px
-         parent — it overflowed its own container, and REQ-MODAL-2's grid-row fix lives inside
-         it. `w-screen` stays: a keyboard does not change width. */
-      <main data-debug-id="shell-main-agent-monitor" className="app-viewport-height w-screen overflow-hidden">
-        <AgentMonitorPage />
-      </main>
-    );
-  }
-
   // Device approval and initial provider selection are focused setup ceremonies,
   // not application workspaces.
-  // Keep navigation, the bottom dock, previews, command palette, and vault onboarding
+  // Keep navigation, command palette, and vault onboarding
   // out of this route so the operator sees only the machine asking for access and the
   // decision in front of them.
   if (path === '/device/add') {
@@ -1839,13 +1837,7 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
 
       <div className="flex min-w-0 flex-1 flex-col h-full min-h-0 overflow-hidden">
         <RouteOutlet path={path} focusMessageId={focusMessageId} conversations={conversations} liveProjects={liveProjects} />
-        <BottomDock />
       </div>
-
-      {/* T11-UI-5: shell previews live in their own right-hand column, outside the
-          route outlet, so open previews survive navigating between routes. It
-          renders nothing at all until a preview tab is opened. */}
-      <PreviewSidebar />
 
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} onNavigate={handlePaletteNavigate} onAction={handlePaletteAction} currentPath={path} conversationGroups={conversationTree.map((group) => ({ projectId: group.project.projectId, projectName: group.project.name, conversations: group.conversations.map((c) => ({ conversationId: c.conversationId, agentInstanceId: c.agentInstanceId, title: displayConversationTitle(c), agentName: c.agentName, isCoordinator: c.isCoordinator, runtimeStatus: c.runtimeStatus, activityStatus: c.activityStatus, unreadCount: c.unreadCount })) }))} chainGroups={chainGroupsQuery.data?.groups ?? []} />
       <ProjectLaunchModal

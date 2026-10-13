@@ -592,7 +592,7 @@ describe('Model 3: Pairwise Combinatorial & Cross-Feature Integration Testing', 
     termInactive.dispose();
   });
 
-  test('T3-COMB-03: BottomDock collapse to 0x0 and expand back to 80x24 preserves scrollback', async () => {
+  test('T3-COMB-03: ShellWorkbenchPane and AgentPaneComposerPanel collapse to 0x0 and expand back to 80x24 preserves scrollback', async () => {
     const term = new Terminal({ cols: 80, rows: 24 });
     const serializeAddon = new SerializeAddon();
     term.loadAddon(serializeAddon);

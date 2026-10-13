@@ -51,7 +51,7 @@ import {
 import { ShellLogViewer } from './ShellLogViewer';
 import { ShellTerminalPane } from './ShellTerminalPane';
 import { SetShellPortDialog } from './SetShellPortDialog';
-import { openTab } from '../../store/previewTabsSlice';
+import { openPreviewInWorkbench } from '../../store/workbenchSlice';
 import { useDispatch } from 'react-redux';
 import { buildRouteHash } from '../../utils/appLocation';
 // Reused rather than duplicated: `useActionCatalog` resolves instance / agent /
@@ -183,9 +183,13 @@ export function useShellDetail(sessionId: string, onAfterVerb?: (verb: ShellVerb
         return;
       }
       if (verb === 'preview') {
-        // `openTab` takes the whole session — the slice reads its port, label and
-        // status to build the tab, so handing it a two-field shape would not compile.
-        dispatch(openTab(session));
+        dispatch(
+          openPreviewInWorkbench({
+            sessionId: session.session_id,
+            label: session.label || session.cmd || session.session_id,
+            port: session.server_port,
+          }),
+        );
         return;
       }
       if (verb === 'copy-url') {

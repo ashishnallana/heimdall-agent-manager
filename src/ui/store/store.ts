@@ -17,10 +17,11 @@ import notificationsReducer from './notificationsSlice';
 import agentActivityReducer from './agentActivitySlice';
 import cardsReducer from './cardsSlice';
 import themeReducer from './themeSlice';
-import previewTabsReducer from './previewTabsSlice';
 import vaultReducer from './vaultSlice';
 import searchTitleReducer from './searchTitleSlice';
 import shellReducer from './shellSlice';
+import windowLayoutReducer from './windowLayoutSlice';
+import workbenchReducer from './workbenchSlice';
 
 export const priorUserClientStateCleared = createAction('heimdall/priorUserClientStateCleared');
 
@@ -41,8 +42,8 @@ const appReducer = combineReducers({
   // REQ-SHELL-6 §6: a push-only tick for the shell consumers that are not RTK
   // Query caches, so no shell view needs a poller. See shellSlice.ts.
   shells: shellReducer,
-  // T11-UI-5: open Preview Sidebar tabs (server shell sessions being previewed).
-  previewTabs: previewTabsReducer,
+  windowLayout: windowLayoutReducer,
+  workbench: workbenchReducer,
   // Ephemeral, non-cache agent activity (push-only bubbles). Reset with the rest
   // of client state on user switch via the priorUserClientStateCleared handling
   // in rootReducer below.

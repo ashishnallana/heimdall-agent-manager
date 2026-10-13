@@ -185,8 +185,8 @@ function filterLibraryArtifacts(
   });
 }
 
-// 5. AgentMonitorPage filtered logic (src/ui/components/monitor/AgentMonitorPage.tsx:93-100)
-function filterAgentMonitorInstances(
+// 5. NewConversationWindowPane / WorkbenchAgentPicker filtered logic (src/ui/components/windowTiling/NewConversationWindowPane.tsx)
+function filterWorkbenchAgentInstances(
   instances: Array<{ agent_instance_id: string; display_name?: string }>,
   search: string,
 ) {
@@ -544,10 +544,10 @@ test('Area 4: LibraryPage - armored artifact name, description, and originRef ne
 });
 
 // =============================================================================
-// Area 5: AgentMonitorPage Filtered Logic
+// Area 5: NewConversationWindowPane / WorkbenchAgentPicker Filtered Logic
 // =============================================================================
 
-test('Area 5: AgentMonitorPage - armored display_name never matches search queries', async () => {
+test('Area 5: NewConversationWindowPane - armored display_name never matches search queries', async () => {
   const secretAgentName = 'TopSecret Intelligence Gatherer #007';
   const armoredAgentName = await encryptVaultText(secretAgentName, TEST_KEY_HEX);
   const cipherTokenAgent = armoredAgentName.slice(11, 27);
@@ -568,26 +568,26 @@ test('Area 5: AgentMonitorPage - armored display_name never matches search queri
   ];
 
   // 1. Searching for 'vault' must return 0 matches
-  assert.equal(filterAgentMonitorInstances(instances, 'vault').length, 0, "Query 'vault' must return 0 matches");
-  assert.equal(filterAgentMonitorInstances(instances, 'Vault').length, 0, "Query 'Vault' must return 0 matches");
+  assert.equal(filterWorkbenchAgentInstances(instances, 'vault').length, 0, "Query 'vault' must return 0 matches");
+  assert.equal(filterWorkbenchAgentInstances(instances, 'Vault').length, 0, "Query 'Vault' must return 0 matches");
 
   // 2. Searching for 'vault:v1' or 'vault:v1:' must return 0 matches
-  assert.equal(filterAgentMonitorInstances(instances, 'vault:v1').length, 0, "Query 'vault:v1' must return 0 matches");
-  assert.equal(filterAgentMonitorInstances(instances, 'vault:v1:').length, 0, "Query 'vault:v1:' must return 0 matches");
+  assert.equal(filterWorkbenchAgentInstances(instances, 'vault:v1').length, 0, "Query 'vault:v1' must return 0 matches");
+  assert.equal(filterWorkbenchAgentInstances(instances, 'vault:v1:').length, 0, "Query 'vault:v1:' must return 0 matches");
 
   // 3. Searching for raw ciphertext tokens must return 0 matches
-  assert.equal(filterAgentMonitorInstances(instances, cipherTokenAgent).length, 0, 'Ciphertext token must return 0 matches');
+  assert.equal(filterWorkbenchAgentInstances(instances, cipherTokenAgent).length, 0, 'Ciphertext token must return 0 matches');
 
   // 4. Searching for plaintext before decryption returns 0 matches
-  assert.equal(filterAgentMonitorInstances(instances, 'Intelligence Gatherer').length, 0);
+  assert.equal(filterWorkbenchAgentInstances(instances, 'Intelligence Gatherer').length, 0);
 
   // 5. Searching by agent_instance_id still matches
-  const matchId = filterAgentMonitorInstances(instances, 'inst_secret_01');
+  const matchId = filterWorkbenchAgentInstances(instances, 'inst_secret_01');
   assert.equal(matchId.length, 1);
   assert.equal(matchId[0].agent_instance_id, 'inst_secret_01');
 
   // 6. Searching unarmored display_name matches
-  const matchPublic = filterAgentMonitorInstances(instances, 'frontend-coder');
+  const matchPublic = filterWorkbenchAgentInstances(instances, 'frontend-coder');
   assert.equal(matchPublic.length, 1);
   assert.equal(matchPublic[0].agent_instance_id, 'inst_public_03');
 });
@@ -796,9 +796,9 @@ test('Cross-cutting: Encrypted items across all 7 areas are completely immune to
       const artifacts = [{ artifact_id: 'art1', name: armored, description: armored, origin_ref: armored }];
       assert.equal(filterLibraryArtifacts(artifacts, q).length, 0, `LibraryPage must yield 0 for "${q}"`);
 
-      // 5. AgentMonitorPage
+      // 5. NewConversationWindowPane / WorkbenchAgentPicker
       const instances = [{ agent_instance_id: 'inst1', display_name: armored }];
-      assert.equal(filterAgentMonitorInstances(instances, q).length, 0, `AgentMonitorPage must yield 0 for "${q}"`);
+      assert.equal(filterWorkbenchAgentInstances(instances, q).length, 0, `NewConversationWindowPane must yield 0 for "${q}"`);
 
       // 6. Combobox
       const options = [{ value: 'v1', title: armored, subtitle: armored, tag: armored, keywords: armored }];

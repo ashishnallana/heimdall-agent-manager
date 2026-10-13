@@ -2,7 +2,7 @@ import React from 'react';
 import { useDispatch } from 'react-redux';
 import { useListShellsQuery } from '../../api/endpoints/shells';
 import type { ShellSession } from '../../api/endpoints/shells';
-import { openTab } from '../../store/previewTabsSlice';
+import { openPreviewInWorkbench } from '../../store/workbenchSlice';
 import { activeServersOf, statusPresentation, supportsLivePreview } from './shellModel';
 import { ShellLogViewer } from './ShellLogViewer';
 
@@ -101,7 +101,15 @@ export function ChainActiveServersPanel({ chainId }: { chainId: string }) {
                   onToggleLog={() =>
                     setOpenLogSessionId((current) => (current === session.session_id ? '' : session.session_id))
                   }
-                  onOpenPreview={() => dispatch(openTab(session))}
+                  onOpenPreview={() =>
+                    dispatch(
+                      openPreviewInWorkbench({
+                        sessionId: session.session_id,
+                        label: session.label || session.cmd || session.session_id,
+                        port: session.server_port,
+                      }),
+                    )
+                  }
                 />
               </li>
             ))}

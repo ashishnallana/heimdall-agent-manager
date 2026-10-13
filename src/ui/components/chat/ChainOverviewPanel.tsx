@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { useSelector } from 'react-redux';
+import { useDispatch, useSelector } from 'react-redux';
 import { selectActiveVaultKey } from '../../store/vaultSlice';
+import { openOrFocusWorkbenchTab } from '../../store/workbenchSlice';
 import { VaultText } from '../vault/VaultText';
 import { useAuthUser } from '../auth/AuthUserContext';
 import { isVaultArmored, decryptVaultText } from '../../utils/vaultContent';
@@ -44,11 +45,6 @@ import { buildRouteHash } from '../../utils/appLocation';
 import {
   readChainOverviewCollapsedState,
   writeChainOverviewCollapsedState,
-  writeRightSidebarOpen,
-  writeRightSidebarTab,
-  readPinnedMonitorAgents,
-  addPinnedMonitorAgent,
-  removePinnedMonitorAgent,
 } from '../../utils/clientPersistence';
 
 function canUseAmbientApiAuth(): boolean {
@@ -71,6 +67,8 @@ export interface ChainOverviewPanelProps {
   onSelectTask?: (taskId: string) => void;
   onOpenFileDiff?: (filePath: string) => void;
   onOpenVcsFiles?: () => void;
+  onOpenAgentChat?: (agentInstanceId: string, title?: string) => void;
+  onOpenAgentPty?: (agentInstanceId: string, title?: string) => void;
   isMobile?: boolean;
 }
 
@@ -334,8 +332,11 @@ export default function ChainOverviewPanel({
   onSelectTask,
   onOpenFileDiff,
   onOpenVcsFiles,
+  onOpenAgentChat,
+  onOpenAgentPty,
   isMobile = false,
 }: ChainOverviewPanelProps) {
+  const dispatch = useDispatch();
   const authUser = useAuthUser();
   const username = String(authUser?.user_id || '').trim();
   const session = useSelector((state: any) => state.chat?.session || {});
@@ -400,33 +401,29 @@ export default function ChainOverviewPanel({
   const [openTerminalIds, setOpenTerminalIds] = useState<Record<string, boolean>>({});
   const [capturedTerminalIds, setCapturedTerminalIds] = useState<Record<string, boolean>>({});
   const [maximizedTerminalInstanceId, setMaximizedTerminalInstanceId] = useState<string | null>(null);
-  const [pinnedAgentIds, setPinnedAgentIds] = useState<string[]>(() => readPinnedMonitorAgents());
 
   const agentIdentitiesQuery = useListAgentIdentitiesQuery();
   const agentIdentities = agentIdentitiesQuery.data?.agents || [];
 
-  React.useEffect(() => {
-    setPinnedAgentIds(readPinnedMonitorAgents());
-  }, []);
-
-  const handleTogglePinAgent = useCallback(
-    (instId: string, e?: React.MouseEvent) => {
+  const handleOpenAgentPtyTab = useCallback(
+    (instId: string, name?: string, e?: React.MouseEvent) => {
       e?.stopPropagation();
       if (!instId) return;
-      const isPinned = pinnedAgentIds.includes(instId);
-      if (isPinned) {
-        removePinnedMonitorAgent(instId);
-        setPinnedAgentIds((prev) => prev.filter((id) => id !== instId));
+      if (onOpenAgentPty) {
+        onOpenAgentPty(instId, name);
       } else {
-        addPinnedMonitorAgent(instId);
-        setPinnedAgentIds((prev) => (prev.includes(instId) ? prev : [...prev, instId]));
-        // On first pin, surface the monitor grid so the user sees where it went.
-        if (typeof window !== 'undefined') {
-          window.open(window.location.origin + '/#/agent-monitor', 'agent-monitor');
-        }
+        dispatch(
+          openOrFocusWorkbenchTab({
+            tab: {
+              kind: 'agentPty',
+              agentInstanceId: instId,
+              title: name ? `${name} PTY` : `${instId} PTY`,
+            },
+          }),
+        );
       }
     },
-    [pinnedAgentIds]
+    [dispatch, onOpenAgentPty]
   );
 
   const chain = chainData?.chain;
@@ -589,19 +586,29 @@ export default function ChainOverviewPanel({
     [restartInstanceMutation, refetchChain]
   );
 
-  // Navigate to conversation thread
+  // Navigate to conversation thread or open Agent Chat workbench tab
   const handleNavigateToAgent = useCallback(
-    (agentInstanceId: string) => {
-      if (!agentInstanceId) return;
+    (targetInstanceId: string, displayName?: string) => {
+      if (!targetInstanceId) return;
+      if (onOpenAgentChat) {
+        onOpenAgentChat(targetInstanceId, displayName);
+        return;
+      }
       if (!isMobile) {
-        writeRightSidebarOpen(true, agentInstanceId);
-        writeRightSidebarTab('chain', agentInstanceId);
-        window.location.hash = buildRouteHash(`/conversations/${encodeURIComponent(agentInstanceId)}`, '?panel=chain');
+        dispatch(
+          openOrFocusWorkbenchTab({
+            tab: {
+              kind: 'agentChat',
+              agentInstanceId: targetInstanceId,
+              title: displayName || targetInstanceId,
+            },
+          }),
+        );
       } else {
-        window.location.hash = buildRouteHash(`/conversations/${encodeURIComponent(agentInstanceId)}`, '');
+        window.location.hash = buildRouteHash(`/conversations/${encodeURIComponent(targetInstanceId)}`, '');
       }
     },
-    [isMobile]
+    [dispatch, isMobile, onOpenAgentChat]
   );
 
   return (
@@ -699,7 +706,7 @@ export default function ChainOverviewPanel({
                   <div
                     key={instId}
                     data-debug-id={`chain-overview-agent-row-${instId}`}
-                    onClick={() => handleNavigateToAgent(instId)}
+                    onClick={() => handleNavigateToAgent(instId, name)}
                     className={`flex flex-col justify-between gap-2 rounded-lg border p-2.5 transition-colors hover:bg-neutral-soft/50 cursor-pointer ${cardClasses}`}
                   >
                     <div className="flex items-center gap-2.5 min-w-0">
@@ -1239,7 +1246,6 @@ export default function ChainOverviewPanel({
                 const rawStatus = String(member.runtimeStatus || member.runtime_status || 'stopped').toLowerCase();
                 const isStopped = rawStatus === 'stopped' || rawStatus === 'failed';
                 const isOpen = Boolean(openTerminalIds[instId]);
-                const isPinned = pinnedAgentIds.includes(instId);
 
                 return (
                   <div
@@ -1267,19 +1273,16 @@ export default function ChainOverviewPanel({
                         <span className="text-[11px] text-muted">
                           {rawStatus}
                         </span>
-                        {/* Pin to Agent Monitor */}
+                        {/* Open in Workbench PTY Tab */}
                         <button
                           type="button"
-                          title={isPinned ? 'Unpin from monitor' : 'Pin to Agent Monitor'}
-                          aria-label={isPinned ? 'Unpin from monitor' : 'Pin to Agent Monitor'}
-                          aria-pressed={isPinned}
-                          data-debug-id={`chain-overview-terminal-pin-${instId}`}
-                          onClick={(e) => handleTogglePinAgent(instId, e)}
-                          className={`grid h-6 w-6 place-items-center rounded hover:bg-neutral-soft ${
-                            isPinned ? 'text-accent' : 'text-muted hover:text-primary'
-                          }`}
+                          title="Open PTY in Workbench"
+                          aria-label="Open PTY in Workbench"
+                          data-debug-id={`chain-overview-terminal-open-pty-${instId}`}
+                          onClick={(e) => handleOpenAgentPtyTab(instId, name, e)}
+                          className="grid h-6 w-6 place-items-center rounded text-muted hover:bg-neutral-soft hover:text-primary"
                         >
-                          <Icon name="grid" size={12} />
+                          <Icon name="terminal" size={12} />
                         </button>
                         {/* Maximize / Pop out button */}
                         <button
@@ -1372,29 +1375,6 @@ export default function ChainOverviewPanel({
               </span>
             </div>
             <div className="flex items-center gap-2">
-              <button
-                type="button"
-                data-debug-id={`chain-overview-maximized-terminal-pin-${maximizedTerminalInstanceId}`}
-                title={
-                  maximizedTerminalInstanceId && pinnedAgentIds.includes(maximizedTerminalInstanceId)
-                    ? 'Unpin from monitor'
-                    : 'Pin to Agent Monitor'
-                }
-                aria-label={
-                  maximizedTerminalInstanceId && pinnedAgentIds.includes(maximizedTerminalInstanceId)
-                    ? 'Unpin from monitor'
-                    : 'Pin to Agent Monitor'
-                }
-                aria-pressed={Boolean(maximizedTerminalInstanceId && pinnedAgentIds.includes(maximizedTerminalInstanceId))}
-                onClick={(e) => handleTogglePinAgent(maximizedTerminalInstanceId, e)}
-                className={`grid h-8 w-8 place-items-center rounded-lg hover:bg-neutral-soft ${
-                  maximizedTerminalInstanceId && pinnedAgentIds.includes(maximizedTerminalInstanceId)
-                    ? 'text-accent'
-                    : 'text-muted hover:text-primary'
-                }`}
-              >
-                <Icon name="grid" size={14} />
-              </button>
               <button
                 type="button"
                 data-debug-id="chain-overview-maximized-terminal-close"

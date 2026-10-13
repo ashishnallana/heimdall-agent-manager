@@ -7,7 +7,6 @@ import Markdown from '../Markdown';
 import { ArtifactAttachmentPreview } from '../ArtifactAttachmentPreview';
 import { useFetchChainTaskCommentsQuery } from '../../api/endpoints/tasks';
 import { useIsMobile } from '../shell/responsive';
-import { writeRightSidebarOpen } from '../../utils/clientPersistence';
 
 // artifactIdsFromText mirrors the helper in TaskChainOverview; kept local so this
 // component is self-contained.
@@ -55,7 +54,6 @@ const CommentAuthor: React.FC<{ instanceId: string; displayName: string; userId:
         title={`Open ${label} (${instanceId})`}
         onClick={() => {
           if (isMobile) {
-            writeRightSidebarOpen(false);
             window.dispatchEvent(new CustomEvent('heimdall:close-sidebar'));
           }
         }}

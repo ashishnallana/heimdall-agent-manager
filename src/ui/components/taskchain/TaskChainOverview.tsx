@@ -63,7 +63,6 @@ import {
 import { effectiveChainBridgeId, taskBridgeDisplay, taskBridgeOptions } from '../../utils/taskBridgePin';
 import { useIsMobile } from '../shell/responsive';
 import ChainActiveServersPanel from '../shells/ChainActiveServersPanel';
-import { writeRightSidebarOpen } from '../../utils/clientPersistence';
 import { useAuthUser } from '../auth/AuthUserContext';
 
 interface TaskChainOverviewProps {
@@ -2981,7 +2980,6 @@ export function InstanceIdLink({ instanceId, displayName }: { instanceId: string
       title={title}
       onClick={() => {
         if (isMobile) {
-          writeRightSidebarOpen(false);
           window.dispatchEvent(new CustomEvent('heimdall:close-sidebar'));
         }
       }}
