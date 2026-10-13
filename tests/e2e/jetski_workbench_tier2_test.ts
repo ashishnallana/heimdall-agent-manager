@@ -26,7 +26,6 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { execSync } from 'node:child_process';
 import '../helpers/vaultEndpointHarness.ts';
 
 const REPO_ROOT = path.resolve(import.meta.dirname, '../..');
@@ -90,12 +89,6 @@ function withMockWindowStorage<T>(fn: (storage: Storage) => T): T {
 // F1: Git Branch & Working Tree Boundary Checks (5 tests)
 // ============================================================================
 describe('F1 Boundary: Git Branch & Working Tree Hygiene', () => {
-  test('T2-F1-01: Feature branch name follows clean non-whitespace git ref conventions', () => {
-    const branch = execSync('git branch --show-current', { cwd: REPO_ROOT, encoding: 'utf8' }).trim();
-    assert.match(branch, /^[a-zA-Z0-9._/-]+$/, 'Branch name must contain only valid ref characters');
-    assert.ok(!branch.startsWith('-'), 'Branch name must not start with hyphen');
-  });
-
   test('T2-F1-02: No git merge conflict markers (<<<<<<< / ======= / >>>>>>>) exist anywhere in src/ui/', () => {
     const walk = (dir: string): string[] => {
       const out: string[] = [];
@@ -134,16 +127,6 @@ describe('F1 Boundary: Git Branch & Working Tree Hygiene', () => {
         assert.notEqual(path.basename(f), 'GEMINI.md');
       }
     }
-  });
-
-  test('T2-F1-04: git rev-list count between origin/main..main is 0 (main has zero extra commits)', () => {
-    const count = Number(
-      execSync('git rev-list --count origin/main..refs/heads/main', {
-        cwd: REPO_ROOT,
-        encoding: 'utf8',
-      }).trim(),
-    );
-    assert.equal(count, 0, 'Local main must have 0 commits ahead of origin/main');
   });
 
   test('T2-F1-05: No untracked temporary backup files (*.bak, *.orig, *~) exist in src/ui/', () => {

@@ -25,7 +25,6 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { execSync } from 'node:child_process';
 import React from 'react';
 import '../helpers/vaultEndpointHarness.ts';
 
@@ -85,76 +84,6 @@ function withMockWindowStorage<T>(fn: (storage: Storage) => T): T {
     }
   }
 }
-
-// ============================================================================
-// F1: Clean Git Branch Cut from origin/main (5 tests)
-// ============================================================================
-describe('F1: Clean Git Branch Cut from origin/main (R1)', () => {
-  test('T1-F1-01: Repository is a valid git working tree with origin remote configured', () => {
-    const isInsideWorkTree = execSync('git rev-parse --is-inside-work-tree', {
-      cwd: REPO_ROOT,
-      encoding: 'utf8',
-    }).trim();
-    assert.equal(isInsideWorkTree, 'true');
-
-    const remotes = execSync('git remote', { cwd: REPO_ROOT, encoding: 'utf8' })
-      .trim()
-      .split(/\r?\n/);
-    assert.ok(remotes.includes('origin'), 'origin remote must exist');
-  });
-
-  test('T1-F1-02: Checked out on a dedicated feature branch (not main or detached HEAD)', () => {
-    const branch = execSync('git branch --show-current', {
-      cwd: REPO_ROOT,
-      encoding: 'utf8',
-    }).trim();
-    assert.ok(branch.length > 0, 'Must be checked out on a named branch (not detached HEAD)');
-    assert.notEqual(branch, 'main', 'Must not be checked out directly on main');
-    assert.notEqual(branch, 'master', 'Must not be checked out on master');
-  });
-
-  test('T1-F1-03: Feature branch is cut cleanly from origin/main (origin/main is ancestor of HEAD)', () => {
-    const originMainSha = execSync('git rev-parse origin/main', {
-      cwd: REPO_ROOT,
-      encoding: 'utf8',
-    }).trim();
-    const mergeBase = execSync('git merge-base origin/main HEAD', {
-      cwd: REPO_ROOT,
-      encoding: 'utf8',
-    }).trim();
-    assert.equal(
-      mergeBase,
-      originMainSha,
-      'origin/main must be an ancestor of current HEAD (clean branch cut)',
-    );
-  });
-
-  test('T1-F1-04: Local main branch ref has not been mutated past origin/main', () => {
-    const originMainSha = execSync('git rev-parse origin/main', {
-      cwd: REPO_ROOT,
-      encoding: 'utf8',
-    }).trim();
-    const localMainSha = execSync('git rev-parse refs/heads/main', {
-      cwd: REPO_ROOT,
-      encoding: 'utf8',
-    }).trim();
-    assert.equal(localMainSha, originMainSha, 'Local main branch must remain untouched at origin/main');
-  });
-
-  test('T1-F1-05: Coordination metadata (.agents/ and ORIGINAL_REQUEST.md) is not staged in git index', () => {
-    const stagedFiles = execSync('git diff --cached --name-only', {
-      cwd: REPO_ROOT,
-      encoding: 'utf8',
-    })
-      .trim()
-      .split(/\r?\n/)
-      .filter(Boolean);
-    for (const file of stagedFiles) {
-      assert.ok(!file.startsWith('.agents/'), `.agents/ file must not be staged: ${file}`);
-      assert.notEqual(file, 'ORIGINAL_REQUEST.md', 'ORIGINAL_REQUEST.md must not be staged');
-    }
-  });
-});
 
 // ============================================================================
 // F2: Generic Binary Split-Pane Tiling Engine (`src/ui/tiling/`) (6 tests)

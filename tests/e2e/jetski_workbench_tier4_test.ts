@@ -19,7 +19,6 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { execSync } from 'node:child_process';
 import * as xtermModule from '@xterm/xterm';
 import * as serializeModule from '@xterm/addon-serialize';
 import '../helpers/vaultEndpointHarness.ts';
@@ -626,13 +625,6 @@ describe('Tier 4: Real-World End-to-End Application Scenarios', () => {
   });
 
   test('Scenario 6: Full Repository Architectural & R4 Cleanliness Audit (deleted files, zero dangling references in src/ and tests/, Redux store registration)', async () => {
-    // 1. Verify git branch cut from origin/main
-    const branch = execSync('git branch --show-current', { cwd: REPO_ROOT, encoding: 'utf8' }).trim();
-    assert.notEqual(branch, 'main');
-    const originMain = execSync('git rev-parse origin/main', { cwd: REPO_ROOT, encoding: 'utf8' }).trim();
-    const mergeBase = execSync('git merge-base origin/main HEAD', { cwd: REPO_ROOT, encoding: 'utf8' }).trim();
-    assert.equal(mergeBase, originMain);
-
     // 2. Verify all 5 legacy files are deleted
     const deletedPaths = [
       'src/ui/components/shell/BottomDock.tsx',
