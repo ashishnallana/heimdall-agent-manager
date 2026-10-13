@@ -19,6 +19,7 @@ import {
 } from './terminalWriteAccounting';
 import { activateVisibleTerminal } from './terminalPaneActivation';
 import { deliverTerminalOutput } from './terminalOutputDelivery';
+import { createTerminalResizeDispatcher } from './terminalResizeDispatch';
 
 const xtermObj = xtermModule as Record<string, any>;
 const Terminal = (xtermObj.Terminal || xtermObj['default']?.Terminal || xtermObj['default']) as typeof TerminalType;
@@ -369,6 +370,16 @@ export function ShellTerminalPane({
     handleResizeRef.current = handleResize;
   }, [handleResize]);
 
+  // Fit xterm on every local layout change, but notify the PTY only after the geometry settles.
+  // Mobile visual-viewport and dock animations otherwise send one resize per frame; a full-screen
+  // program redraws for every one and can starve terminal-query parsing behind that output burst.
+  const resizeDispatcherRef = useRef<ReturnType<typeof createTerminalResizeDispatcher> | null>(null);
+  if (!resizeDispatcherRef.current) {
+    resizeDispatcherRef.current = createTerminalResizeDispatcher((rows, cols) => {
+      handleResizeRef.current(rows, cols);
+    });
+  }
+
   // --------------------------------------------------------------------------
   // Terminal Lifecycle & Addon Management
   // --------------------------------------------------------------------------
@@ -425,7 +436,7 @@ export function ShellTerminalPane({
     });
 
     const resizeDisposable = term.onResize(({ cols, rows }) => {
-      handleResizeRef.current(rows, cols);
+      resizeDispatcherRef.current?.schedule(rows, cols);
     });
 
     // Close the small mount-order gap without waiting for layout. This MUST happen after
@@ -564,6 +575,7 @@ export function ShellTerminalPane({
         clearTimeout(keystrokeDebounceTimerRef.current);
       }
       clearTimeout(timer);
+      resizeDispatcherRef.current?.cancel();
       resizeObserver.disconnect();
       dataDisposable.dispose();
       resizeDisposable.dispose();
@@ -695,7 +707,7 @@ export function ShellTerminalPane({
   return (
     <div
       data-debug-id={`shell-terminal-pane-${session.session_id}`}
-      className="relative flex flex-col flex-1 h-full min-h-0 w-full overflow-hidden bg-canvas"
+      className="relative flex min-w-0 max-w-full flex-col flex-1 h-full min-h-0 w-full overflow-hidden bg-canvas"
     >
       {showUnreachableBanner && (
         <div
@@ -773,7 +785,7 @@ export function ShellTerminalPane({
         role="region"
         aria-label="Shell Terminal"
         style={{ backgroundColor: theme.terminal.background }}
-        className="chat-scrollbar relative flex-1 min-h-0 w-full overflow-x-auto p-2 font-mono text-xs cursor-text touch-manipulation focus:outline-none"
+        className="chat-scrollbar relative min-w-0 max-w-full flex-1 min-h-0 w-full overflow-x-auto p-2 font-mono text-xs cursor-text touch-manipulation focus:outline-none"
       />
     </div>
   );

@@ -550,7 +550,7 @@ export default function BottomDock({
 
       {/* Dock Body - ShellTerminalPane occupies 100% of parent container (REQ-BAR-5) */}
       {!isMinimized && (
-        <div className="flex flex-col flex-1 min-h-0 w-full overflow-hidden bg-canvas">
+        <div className="flex min-w-0 max-w-full flex-col flex-1 min-h-0 w-full overflow-hidden bg-canvas">
           {/* REQ-STREAM-IMPL-3: duplicate state indicator when viewed in main view */}
           {activeSession && isViewedInMainView && (
             <div
@@ -600,7 +600,7 @@ export default function BottomDock({
             return (
               <div
                 key={session.session_id}
-                className="h-full w-full flex-col flex-1 min-h-0"
+                className="h-full min-w-0 max-w-full w-full flex-col flex-1 min-h-0 overflow-hidden"
                 style={{ display: isHidden ? 'none' : 'flex' }}
                 aria-hidden={isHidden}
               >

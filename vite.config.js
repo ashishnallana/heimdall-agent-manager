@@ -19,12 +19,23 @@ export default defineConfig({
   plugins: [react()],
   base: './',
   resolve: {
-    alias: {
-      // `@ui/*` -> the shared component library (src/ui/components/ui/*).
-      // Mirrors the tsconfig.renderer.json path alias so imports resolve at
-      // typecheck, dev, and build.
-      '@ui': fileURLToPath(new URL('./src/ui/components/ui', import.meta.url)),
-    },
+    alias: [
+      {
+        // xterm 6.0.0's published ESM keeps a function-local const-enum initializer that
+        // esbuild 0.21 can tree-shake into an undeclared variable. Safari then throws from
+        // requestMode on Neovim's first DECRQM query and xterm's async write queue dies forever.
+        // The package's equivalent precompiled UMD artifact has the enum folded to literals.
+        find: /^@xterm\/xterm$/,
+        replacement: fileURLToPath(new URL('./node_modules/@xterm/xterm/lib/xterm.js', import.meta.url)),
+      },
+      {
+        // `@ui/*` -> the shared component library (src/ui/components/ui/*).
+        // Mirrors the tsconfig.renderer.json path alias so imports resolve at
+        // typecheck, dev, and build.
+        find: '@ui',
+        replacement: fileURLToPath(new URL('./src/ui/components/ui', import.meta.url)),
+      },
+    ],
   },
   server: {
     // Route the trusted-proxy auth surface through ham-dev-proxy in dev.

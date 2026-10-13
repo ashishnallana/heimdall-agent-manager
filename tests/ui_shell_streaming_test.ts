@@ -5,6 +5,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
 
 import * as xtermModule from '@xterm/xterm';
 
@@ -21,9 +23,80 @@ import {
 } from '../src/ui/components/shells/terminalWriteAccounting.ts';
 import { activateVisibleTerminal } from '../src/ui/components/shells/terminalPaneActivation.ts';
 import { deliverTerminalOutput } from '../src/ui/components/shells/terminalOutputDelivery.ts';
+import { createTerminalResizeDispatcher } from '../src/ui/components/shells/terminalResizeDispatch.ts';
 import { shellResizeFrame } from '../src/ui/components/shells/shellStreamFrames.ts';
 
 const Terminal = (xtermModule as any).Terminal || (xtermModule as any).default?.Terminal || (xtermModule as any).default;
+
+test('terminal flex ancestors contain xterm intrinsic width instead of feeding it back into fit', () => {
+  const pane = fs.readFileSync(
+    path.join(process.cwd(), 'src/ui/components/shells/ShellTerminalPane.tsx'),
+    'utf8'
+  );
+  const dock = fs.readFileSync(
+    path.join(process.cwd(), 'src/ui/components/shell/BottomDock.tsx'),
+    'utf8'
+  );
+
+  assert.match(
+    pane,
+    /chat-scrollbar relative min-w-0 max-w-full[^"\n]*overflow-x-auto/,
+    'the xterm scroll host must be allowed to shrink without growing its measurement box'
+  );
+  assert.match(
+    dock,
+    /h-full min-w-0 max-w-full w-full[^"\n]*overflow-hidden/,
+    'the keep-alive flex wrapper must contain xterm intrinsic width'
+  );
+});
+
+test('renderer build uses xterm precompiled artifact without the Safari DECRQM minification crash', () => {
+  const viteConfig = fs.readFileSync(path.join(process.cwd(), 'vite.config.js'), 'utf8');
+  assert.match(
+    viteConfig,
+    /find: \/\^@xterm\\\/xterm\$\//,
+    'the alias must match only the xterm JavaScript entry and leave its CSS subpath intact'
+  );
+  assert.match(
+    viteConfig,
+    /node_modules\/@xterm\/xterm\/lib\/xterm\.js/,
+    'the renderer must use xterm 6.0.0 precompiled UMD, whose requestMode enum is already folded'
+  );
+});
+
+test('terminal resize bursts send only the final stable geometry to the PTY', () => {
+  const callbacks = new Map<number, () => void>();
+  const sent: Array<[number, number]> = [];
+  let nextTimer = 1;
+  const dispatcher = createTerminalResizeDispatcher(
+    (rows, cols) => sent.push([rows, cols]),
+    100,
+    {
+      setTimeout: (callback) => {
+        const id = nextTimer++;
+        callbacks.set(id, callback);
+        return id as ReturnType<typeof setTimeout>;
+      },
+      clearTimeout: (timer) => {
+        callbacks.delete(timer as unknown as number);
+      },
+    }
+  );
+
+  dispatcher.schedule(28, 45);
+  dispatcher.schedule(27, 45);
+  dispatcher.schedule(13, 45);
+  dispatcher.schedule(28, 45);
+
+  assert.deepEqual(sent, [], 'animation intermediates must not resize the PTY');
+  assert.equal(callbacks.size, 1, 'only the trailing dispatch remains scheduled');
+  callbacks.values().next().value?.();
+  assert.deepEqual(sent, [[28, 45]], 'the PTY receives the final stable geometry once');
+
+  dispatcher.schedule(20, 80);
+  dispatcher.cancel();
+  assert.equal(callbacks.size, 0, 'unmount cancellation prevents a stale resize');
+});
 
 function writeToTerminal(term: any, data: string | Uint8Array): Promise<void> {
   return new Promise((resolve) => term.write(data, () => resolve()));
