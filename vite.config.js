@@ -19,12 +19,20 @@ export default defineConfig({
   plugins: [react()],
   base: './',
   resolve: {
-    alias: {
-      // `@ui/*` -> the shared component library (src/ui/components/ui/*).
-      // Mirrors the tsconfig.renderer.json path alias so imports resolve at
-      // typecheck, dev, and build.
-      '@ui': fileURLToPath(new URL('./src/ui/components/ui', import.meta.url)),
-    },
+    alias: [
+      {
+        // Avoid an esbuild 0.21 miscompile of xterm 6.0.0's ESM requestMode enum.
+        find: /^@xterm\/xterm$/,
+        replacement: fileURLToPath(new URL('./node_modules/@xterm/xterm/lib/xterm.js', import.meta.url)),
+      },
+      {
+        // `@ui/*` -> the shared component library (src/ui/components/ui/*).
+        // Mirrors the tsconfig.renderer.json path alias so imports resolve at
+        // typecheck, dev, and build.
+        find: '@ui',
+        replacement: fileURLToPath(new URL('./src/ui/components/ui', import.meta.url)),
+      },
+    ],
   },
   server: {
     // Route the trusted-proxy auth surface through ham-dev-proxy in dev.

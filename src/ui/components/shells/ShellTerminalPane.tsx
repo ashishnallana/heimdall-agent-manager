@@ -13,6 +13,7 @@ import {
   resolveStreamRenderMode,
   resolveStreamingMode,
 } from './streamingMode';
+import { createTerminalResizeDispatcher } from './terminalResizeDispatch';
 
 const xtermObj = xtermModule as Record<string, any>;
 const Terminal = (xtermObj.Terminal || xtermObj['default']?.Terminal || xtermObj['default']) as typeof TerminalType;
@@ -378,6 +379,15 @@ export function ShellTerminalPane({
     handleResizeRef.current = handleResize;
   }, [handleResize]);
 
+  // Fit locally on every layout change, but send only the final geometry after dock and viewport
+  // animations settle so full-screen programs do not redraw for every animation frame.
+  const resizeDispatcherRef = useRef<ReturnType<typeof createTerminalResizeDispatcher> | null>(null);
+  if (!resizeDispatcherRef.current) {
+    resizeDispatcherRef.current = createTerminalResizeDispatcher((rows, cols) => {
+      handleResizeRef.current(rows, cols);
+    });
+  }
+
   // --------------------------------------------------------------------------
   // Terminal Lifecycle & Addon Management
   // --------------------------------------------------------------------------
@@ -436,7 +446,7 @@ export function ShellTerminalPane({
     });
 
     const resizeDisposable = term.onResize(({ cols, rows }) => {
-      handleResizeRef.current(rows, cols);
+      resizeDispatcherRef.current?.schedule(rows, cols);
     });
 
     // Track manual scroll-up so a repaint does not yank the viewport back down.
@@ -569,6 +579,7 @@ export function ShellTerminalPane({
         clearTimeout(keystrokeDebounceTimerRef.current);
       }
       clearTimeout(timer);
+      resizeDispatcherRef.current?.cancel();
       resizeObserver.disconnect();
       dataDisposable.dispose();
       resizeDisposable.dispose();

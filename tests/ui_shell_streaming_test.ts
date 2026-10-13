@@ -5,6 +5,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
 
 import * as xtermModule from '@xterm/xterm';
 
@@ -15,9 +17,47 @@ import {
   resolveStreamRenderMode,
   resolveStreamingMode,
 } from '../src/ui/components/shells/streamingMode.ts';
+import { createTerminalResizeDispatcher } from '../src/ui/components/shells/terminalResizeDispatch.ts';
 import { shellResizeFrame } from '../src/ui/components/shells/shellStreamFrames.ts';
 
 const Terminal = (xtermModule as any).Terminal || (xtermModule as any).default?.Terminal || (xtermModule as any).default;
+
+test('renderer build uses xterm precompiled artifact for Safari-safe mode queries', () => {
+  const viteConfig = fs.readFileSync(path.join(process.cwd(), 'vite.config.js'), 'utf8');
+  assert.match(viteConfig, /find: \/\^@xterm\\\/xterm\$\//);
+  assert.match(viteConfig, /node_modules\/@xterm\/xterm\/lib\/xterm\.js/);
+});
+
+test('terminal resize bursts send only the final geometry to the PTY', () => {
+  const callbacks = new Map<number, () => void>();
+  const sent: Array<[number, number]> = [];
+  let nextTimer = 1;
+  const dispatcher = createTerminalResizeDispatcher(
+    (rows, cols) => sent.push([rows, cols]),
+    100,
+    {
+      setTimeout: (callback) => {
+        const id = nextTimer++;
+        callbacks.set(id, callback);
+        return id as ReturnType<typeof setTimeout>;
+      },
+      clearTimeout: (timer) => callbacks.delete(timer as unknown as number),
+    }
+  );
+
+  dispatcher.schedule(28, 45);
+  dispatcher.schedule(13, 45);
+  dispatcher.schedule(28, 45);
+
+  assert.deepEqual(sent, []);
+  assert.equal(callbacks.size, 1);
+  callbacks.values().next().value?.();
+  assert.deepEqual(sent, [[28, 45]]);
+
+  dispatcher.schedule(20, 80);
+  dispatcher.cancel();
+  assert.equal(callbacks.size, 0);
+});
 
 function writeToTerminal(term: any, data: string | Uint8Array): Promise<void> {
   return new Promise((resolve) => term.write(data, () => resolve()));
