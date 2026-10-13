@@ -39,7 +39,6 @@ import {
 } from '../tasks/FleetManagementDrawer';
 import ArtifactViewer from '../ArtifactViewer';
 import Markdown from '../Markdown';
-import AgentPaneComposerPanel from './AgentPaneComposerPanel';
 import { buildRouteHash } from '../../utils/appLocation';
 import {
   readChainOverviewCollapsedState,
@@ -397,9 +396,6 @@ export default function ChainOverviewPanel({
   const [restartingInstanceId, setRestartingInstanceId] = useState<string | null>(null);
   const [activeArtifactId, setActiveArtifactId] = useState<string>('');
   const [expandedAttentionTaskId, setExpandedAttentionTaskId] = useState<string | null>(null);
-  const [openTerminalIds, setOpenTerminalIds] = useState<Record<string, boolean>>({});
-  const [capturedTerminalIds, setCapturedTerminalIds] = useState<Record<string, boolean>>({});
-  const [maximizedTerminalInstanceId, setMaximizedTerminalInstanceId] = useState<string | null>(null);
 
   const agentIdentitiesQuery = useListAgentIdentitiesQuery();
   const agentIdentities = agentIdentitiesQuery.data?.agents || [];
@@ -427,12 +423,6 @@ export default function ChainOverviewPanel({
 
   const chain = chainData?.chain;
   const members: any[] = useMemo(() => chain?.members || [], [chain?.members]);
-  const capturedMembers = useMemo(() => {
-    return members.filter((member) => {
-      const instId = member.agentInstanceId || member.agent_instance_id;
-      return Boolean(capturedTerminalIds[instId]);
-    });
-  }, [members, capturedTerminalIds]);
   const tasks: any[] = useMemo(() => chain?.tasks || [], [chain?.tasks]);
   const artifacts: any[] = useMemo(() => artifactsData?.artifacts || [], [artifactsData?.artifacts]);
   const vcsFiles: VcsChangedFile[] = useMemo(() => vcsFilesQuery.data?.files || [], [vcsFilesQuery.data?.files]);
@@ -507,32 +497,6 @@ export default function ChainOverviewPanel({
     },
     [memberNameMap, agentIdentities, username]
   );
-
-  // Toggle terminal accordion
-  const toggleTerminal = useCallback((instId: string) => {
-    setOpenTerminalIds((prev) => ({
-      ...prev,
-      [instId]: !prev[instId],
-    }));
-  }, []);
-
-  // Toggle terminal capture
-  const toggleCaptureTerminal = useCallback((instId: string, e?: React.MouseEvent) => {
-    e?.stopPropagation();
-    setCapturedTerminalIds((prev) => {
-      const willCapture = !prev[instId];
-      if (willCapture) {
-        setOpenTerminalIds((openPrev) => ({
-          ...openPrev,
-          [instId]: true,
-        }));
-      }
-      return {
-        ...prev,
-        [instId]: willCapture,
-      };
-    });
-  }, []);
 
   // Handle start agent instance
   const handleStartAgent = useCallback(
@@ -682,7 +646,6 @@ export default function ChainOverviewPanel({
                 const instId = member.agentInstanceId || member.agent_instance_id;
                 const agentId = member.agentId || member.agent_id || '';
                 const name = member.displayName || member.display_name || instId;
-                const role = member.role || 'worker';
                 const rawStatus = String(member.runtimeStatus || member.runtime_status || 'stopped').toLowerCase();
                 const isStopped = rawStatus === 'stopped' || rawStatus === 'failed';
                 const isRunning = rawStatus === 'running' || rawStatus === 'idle' || rawStatus === 'ready';
@@ -690,13 +653,7 @@ export default function ChainOverviewPanel({
                 const isStopping = stoppingInstanceId === instId;
                 const isRestarting = restartingInstanceId === instId;
                 const currentTask = memberCurrentTaskMap.get(instId);
-                const isCoordinator =
-                  String(role).toLowerCase() === 'coordinator' ||
-                  instId === chain?.coordinatorInstanceId ||
-                  instId === chain?.coordinator_instance_id;
-
                 const isSelected = Boolean(agentInstanceId && instId === agentInstanceId);
-                const isCapturing = Boolean(capturedTerminalIds[instId]);
 
                 return (
                   <div
@@ -742,16 +699,11 @@ export default function ChainOverviewPanel({
                     >
                       <button
                         type="button"
-                        data-debug-id={`chain-overview-toggle-capture-${instId}`}
-                        onClick={(e) => toggleCaptureTerminal(instId, e)}
-                        title={isCapturing ? 'Stop capturing terminal' : 'Capture terminal output'}
-                        aria-label={isCapturing ? 'Stop capturing terminal' : 'Capture terminal output'}
-                        aria-pressed={isCapturing}
-                        className={`grid h-6 w-6 place-items-center rounded transition-colors ${
-                          isCapturing
-                            ? 'bg-accent/20 text-accent'
-                            : 'text-muted hover:bg-neutral-soft hover:text-primary'
-                        }`}
+                        data-debug-id={`chain-overview-open-pty-${instId}`}
+                        onClick={(e) => handleOpenAgentPtyTab(instId, name, e)}
+                        title="Open live terminal"
+                        aria-label="Open live terminal"
+                        className="grid h-6 w-6 place-items-center rounded text-muted transition-colors hover:bg-neutral-soft hover:text-primary"
                       >
                         <Icon name="terminal" size={12} />
                       </button>
@@ -1196,145 +1148,6 @@ export default function ChainOverviewPanel({
       </section>
       ) : null}
 
-      {/* SECTION 6: Fleet Terminals */}
-      <section data-debug-id="chain-overview-section-fleet-terminals" className="space-y-2.5">
-        <button
-          type="button"
-          data-debug-id="chain-overview-section-toggle-terminals"
-          onClick={() => toggleSection('terminals')}
-          aria-expanded={!isCollapsed('terminals')}
-          className="flex w-full items-center justify-between text-left group cursor-pointer"
-        >
-          <div className="flex items-center gap-1.5">
-            <Icon
-              name={isCollapsed('terminals') ? 'chevron-right' : 'chevron-down'}
-              size={14}
-              className="text-muted group-hover:text-primary transition-colors"
-            />
-            <Icon name="terminal" size={14} className="text-muted" />
-            <h3 className="text-xs font-semibold uppercase tracking-wider text-muted group-hover:text-primary transition-colors">
-              Fleet Terminals ({capturedMembers.length})
-            </h3>
-          </div>
-        </button>
-
-        {!isCollapsed('terminals') && (
-          capturedMembers.length === 0 ? (
-            <p className="text-xs text-muted py-1">
-              No active terminal captures. Click the terminal icon on an agent card in Chain Agents to capture and monitor its output.
-            </p>
-          ) : (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-start">
-              {capturedMembers.map((member) => {
-                const instId = member.agentInstanceId || member.agent_instance_id;
-                const name = member.displayName || member.display_name || instId;
-                const role = member.role || 'worker';
-                const rawStatus = String(member.runtimeStatus || member.runtime_status || 'stopped').toLowerCase();
-                const isStopped = rawStatus === 'stopped' || rawStatus === 'failed';
-                const isOpen = Boolean(openTerminalIds[instId]);
-
-                return (
-                  <div
-                    key={instId}
-                    data-debug-id={`chain-overview-terminal-accordion-${instId}`}
-                    className="rounded-lg border border-subtle bg-surface-secondary/20 overflow-hidden"
-                  >
-                    {/* Accordion Header */}
-                    <div
-                      onClick={() => toggleTerminal(instId)}
-                      className="flex items-center justify-between p-2.5 transition-colors hover:bg-neutral-soft/40 cursor-pointer"
-                    >
-                      <div className="flex items-center gap-2 min-w-0">
-                        <Icon name={isOpen ? 'chevron-down' : 'chevron-right'} size={14} className="text-muted shrink-0" />
-                        <StatusDot tone={statusTone(rawStatus)} label={rawStatus} size="sm" />
-                        <span className="text-xs font-semibold text-primary truncate max-w-[160px]">
-                          {name}
-                        </span>
-                        <Badge tone={roleTone(role)}>
-                          {role}
-                        </Badge>
-                      </div>
-
-                      <div className="flex items-center gap-2 shrink-0">
-                        <span className="text-[11px] text-muted">
-                          {rawStatus}
-                        </span>
-                        {/* Open in Workbench PTY Tab */}
-                        <button
-                          type="button"
-                          title="Open PTY in Workbench"
-                          aria-label="Open PTY in Workbench"
-                          data-debug-id={`chain-overview-terminal-open-pty-${instId}`}
-                          onClick={(e) => handleOpenAgentPtyTab(instId, name, e)}
-                          className="grid h-6 w-6 place-items-center rounded text-muted hover:bg-neutral-soft hover:text-primary"
-                        >
-                          <Icon name="terminal" size={12} />
-                        </button>
-                        {/* Maximize / Pop out button */}
-                        <button
-                          type="button"
-                          title="Maximize terminal"
-                          aria-label="Maximize terminal"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setMaximizedTerminalInstanceId(instId);
-                          }}
-                          className="grid h-6 w-6 place-items-center rounded text-muted hover:bg-neutral-soft hover:text-primary"
-                        >
-                          <Icon name="maximize" size={12} />
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* STRICT Lazy Rendering: only mounted when accordion is OPEN */}
-                    {isOpen && (
-                      <div className="border-t border-subtle bg-canvas p-2">
-                        {isStopped ? (
-                          <div
-                            data-debug-id={`chain-overview-stopped-terminal-${instId}`}
-                            className="flex flex-col items-center justify-center h-44 rounded border border-subtle bg-surface-secondary/40 p-4 text-center space-y-2.5"
-                          >
-                            <div className="flex items-center gap-2 text-muted">
-                              <Icon name="terminal" size={18} />
-                              <span className="font-mono text-xs font-medium">Agent instance is stopped</span>
-                            </div>
-                            <p className="text-[11px] text-muted max-w-xs">
-                              Start this agent to launch its container and subscribe to its interactive terminal pane feed.
-                            </p>
-                            <button
-                              type="button"
-                              disabled={startingInstanceId === instId}
-                              onClick={(e) => handleStartAgent(instId, e)}
-                              title="Start Agent"
-                              aria-label="Start Agent"
-                              className="grid h-8 w-8 place-items-center rounded-lg bg-accent text-accent-fg hover:opacity-90 disabled:opacity-50 transition-opacity shadow-xs"
-                            >
-                              {startingInstanceId === instId ? (
-                                <Spinner size="sm" />
-                              ) : (
-                                <Icon name="play" size={14} />
-                              )}
-                            </button>
-                          </div>
-                        ) : (
-                          <AgentPaneComposerPanel
-                            agentInstanceId={instId}
-                            isExpanded={true}
-                            isActiveTab={true}
-                            runtimeStatus={rawStatus}
-                            hideHeader={true}
-                          />
-                        )}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          )
-        )}
-      </section>
-
       {/* ArtifactViewer Modal Overlay */}
       {activeArtifactId && (
         <ArtifactViewer
@@ -1343,45 +1156,6 @@ export default function ChainOverviewPanel({
           clientToken={viewerSession.clientToken || 'v1'}
           onClose={() => setActiveArtifactId('')}
         />
-      )}
-
-      {/* Maximized Terminal Modal Overlay */}
-      {maximizedTerminalInstanceId && (
-        <div
-          data-debug-id="chain-overview-maximized-terminal-modal"
-          className="fixed inset-x-0 top-0 app-viewport-height z-50 flex flex-col bg-canvas/95 backdrop-blur-md p-4 sm:p-6"
-        >
-          <div className="flex items-center justify-between border-b border-subtle pb-3">
-            <div className="flex items-center gap-2">
-              <Icon name="terminal" size={18} className="text-accent" />
-              <span className="font-semibold text-sm text-primary">
-                Fleet Terminal —{' '}
-                {members.find((m) => (m.agentInstanceId || m.agent_instance_id) === maximizedTerminalInstanceId)?.displayName ||
-                  maximizedTerminalInstanceId}
-              </span>
-            </div>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                data-debug-id="chain-overview-maximized-terminal-close"
-                aria-label="Restore terminal"
-                onClick={() => setMaximizedTerminalInstanceId(null)}
-                className="grid h-8 w-8 place-items-center rounded-lg text-muted hover:bg-neutral-soft hover:text-primary"
-              >
-                <Icon name="minimize" size={16} />
-              </button>
-            </div>
-          </div>
-          <div className="flex-1 min-h-0 pt-3">
-            <AgentPaneComposerPanel
-              agentInstanceId={maximizedTerminalInstanceId}
-              isExpanded={true}
-              isActiveTab={true}
-              className="h-full !max-h-full"
-              hideHeader={true}
-            />
-          </div>
-        </div>
       )}
     </div>
   );
