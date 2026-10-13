@@ -12,6 +12,7 @@
 package device_auth_grant_store_test
 
 import "core:fmt"
+import "core:testing"
 import "core:os"
 import "core:strings"
 import device_auth "odin_test:hub/service/device_auth"
@@ -50,6 +51,12 @@ is_base32 :: proc(s: string) -> bool {
 		if !ok do return false
 	}
 	return true
+}
+
+@(test)
+test_device_auth_grant_store_test :: proc(t: ^testing.T) {
+	_ = t
+	main()
 }
 
 main :: proc() {

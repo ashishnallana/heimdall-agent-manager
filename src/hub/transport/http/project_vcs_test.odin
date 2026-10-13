@@ -12,21 +12,21 @@ import "core:strings"
 import "core:testing"
 
 @(test)
-vcs_command_timeout_ms_network_commands :: proc(t: ^testing.T) {
+test_vcs_command_timeout_ms_network_commands :: proc(t: ^testing.T) {
 	for command_type in ([]string{"vcs_upload", "vcs_push", "vcs_sync", "vcs_pull"}) {
 		testing.expectf(t, vcs_command_timeout_ms(command_type) == 120_000, "%s has 120-second timeout", command_type)
 	}
 }
 
 @(test)
-vcs_command_timeout_ms_default_commands :: proc(t: ^testing.T) {
+test_vcs_command_timeout_ms_default_commands :: proc(t: ^testing.T) {
 	for command_type in ([]string{"vcs_status", "vcs_commit", "vcs_workspaces"}) {
 		testing.expectf(t, vcs_command_timeout_ms(command_type) == 10_000, "%s retains 10-second timeout", command_type)
 	}
 }
 
 @(test)
-project_vcs_command_json_commit_diff_contract :: proc(t: ^testing.T) {
+test_project_vcs_command_json_commit_diff_contract :: proc(t: ^testing.T) {
 	cmd := Project_Vcs_Command{
 		command_type = "vcs_commit_diff",
 		base_ref = "HEAD~1", send_base_ref = true,
@@ -51,7 +51,7 @@ project_vcs_command_json_commit_diff_contract :: proc(t: ^testing.T) {
 // relayed body must then carry "list_files":true and NOT carry cursor/limit (the file
 // list is not paginated).
 @(test)
-project_vcs_command_json_commit_diff_list_files :: proc(t: ^testing.T) {
+test_project_vcs_command_json_commit_diff_list_files :: proc(t: ^testing.T) {
 	cmd := Project_Vcs_Command{
 		command_type = "vcs_commit_diff",
 		base_ref = "abc123", send_base_ref = true,
@@ -71,7 +71,7 @@ project_vcs_command_json_commit_diff_list_files :: proc(t: ^testing.T) {
 // Default hunk mode (list_files=false, even with send_list_files=true) must NOT emit
 // the list_files field, and still forwards cursor/limit — no regression.
 @(test)
-project_vcs_command_json_commit_diff_no_list_files :: proc(t: ^testing.T) {
+test_project_vcs_command_json_commit_diff_no_list_files :: proc(t: ^testing.T) {
 	cmd := Project_Vcs_Command{
 		command_type = "vcs_commit_diff",
 		base_ref = "HEAD~1", send_base_ref = true,
@@ -89,7 +89,7 @@ project_vcs_command_json_commit_diff_no_list_files :: proc(t: ^testing.T) {
 // vcs_commit (TASK-E): project_handle_vcs_commit relays message with send_message=true.
 // The body must carry "message":"<escaped>" and the command type vcs_commit.
 @(test)
-project_vcs_command_json_commit_message :: proc(t: ^testing.T) {
+test_project_vcs_command_json_commit_message :: proc(t: ^testing.T) {
 	cmd := Project_Vcs_Command{
 		command_type = "vcs_commit",
 		message = "fix: repair the "+`"parser"`, send_message = true,
@@ -103,14 +103,14 @@ project_vcs_command_json_commit_message :: proc(t: ^testing.T) {
 
 // An empty message (or send_message=false) must NOT emit the message field.
 @(test)
-project_vcs_command_json_commit_omits_empty_message :: proc(t: ^testing.T) {
+test_project_vcs_command_json_commit_omits_empty_message :: proc(t: ^testing.T) {
 	cmd := Project_Vcs_Command{command_type = "vcs_commit", message = "", send_message = true}
 	out := project_vcs_command_json(cmd, "cmd_commit_2", "/repo")
 	testing.expect(t, !strings.contains(out, "\"message\""), "empty message omitted")
 }
 
 @(test)
-project_vcs_command_json_omits_unset_refs :: proc(t: ^testing.T) {
+test_project_vcs_command_json_omits_unset_refs :: proc(t: ^testing.T) {
 	// vcs_log-style command: no refs, no path.
 	cmd := Project_Vcs_Command{
 		command_type = "vcs_log",
@@ -127,7 +127,7 @@ project_vcs_command_json_omits_unset_refs :: proc(t: ^testing.T) {
 }
 
 @(test)
-vcs_workspaces_has_path_matches :: proc(t: ^testing.T) {
+test_vcs_workspaces_has_path_matches :: proc(t: ^testing.T) {
 	reply := "{\"type\":\"vcs_workspaces_result\",\"command_id\":\"c\",\"ok\":true,\"provider\":\"git\",\"workspaces\":[{\"path\":\"/home/u/repo\",\"label\":\"main\",\"is_current\":true,\"is_locked\":false},{\"path\":\"/home/u/wt/feature\",\"label\":\"feature\",\"is_current\":false,\"is_locked\":false}],\"error\":{\"code\":\"\",\"message\":\"\"}}"
 	testing.expect(t, vcs_workspaces_has_path(reply, "/home/u/repo"), "current workspace matches")
 	testing.expect(t, vcs_workspaces_has_path(reply, "/home/u/wt/feature"), "secondary workspace matches")
@@ -136,7 +136,7 @@ vcs_workspaces_has_path_matches :: proc(t: ^testing.T) {
 }
 
 @(test)
-vcs_workspaces_has_path_empty_or_missing :: proc(t: ^testing.T) {
+test_vcs_workspaces_has_path_empty_or_missing :: proc(t: ^testing.T) {
 	empty := "{\"type\":\"vcs_workspaces_result\",\"ok\":false,\"provider\":\"\",\"workspaces\":[],\"error\":{\"code\":\"no_vcs\",\"message\":\"x\"}}"
 	testing.expect(t, !vcs_workspaces_has_path(empty, "/home/u/repo"), "empty list matches nothing")
 	missing := "{\"type\":\"vcs_workspaces_result\",\"ok\":false}"
@@ -156,7 +156,7 @@ vcs_workspaces_has_path_empty_or_missing :: proc(t: ^testing.T) {
 // HT-LOG (wire contract): project_handle_vcs_log builds vcs_log with limit (default 50)
 // always emitted and cursor omitted when empty.
 @(test)
-project_vcs_command_json_log_defaults :: proc(t: ^testing.T) {
+test_project_vcs_command_json_log_defaults :: proc(t: ^testing.T) {
 	q := "" // no cursor, no limit -> handler defaults limit to 50
 	cmd := Project_Vcs_Command{
 		command_type = "vcs_log",
@@ -172,7 +172,7 @@ project_vcs_command_json_log_defaults :: proc(t: ^testing.T) {
 
 // HT-LOG-3 (pagination wire): a follow-up page carries the caller's limit and cursor.
 @(test)
-project_vcs_command_json_log_pagination :: proc(t: ^testing.T) {
+test_project_vcs_command_json_log_pagination :: proc(t: ^testing.T) {
 	q := "limit=2&cursor=abc123"
 	cmd := Project_Vcs_Command{
 		command_type = "vcs_log",
@@ -189,7 +189,7 @@ project_vcs_command_json_log_pagination :: proc(t: ^testing.T) {
 // head_ref -> worktree semantic is the bridge's, so head_ref="WORKDIR" and an absent
 // file (path:"") are emitted as-is rather than omitted.
 @(test)
-project_vcs_command_json_commit_diff_workdir_verbatim :: proc(t: ^testing.T) {
+test_project_vcs_command_json_commit_diff_workdir_verbatim :: proc(t: ^testing.T) {
 	q := "base_ref=HEAD~1&head_ref=WORKDIR" // no file
 	cmd := Project_Vcs_Command{
 		command_type = "vcs_commit_diff",
@@ -210,7 +210,7 @@ project_vcs_command_json_commit_diff_workdir_verbatim :: proc(t: ^testing.T) {
 
 // HT-WS (wire contract): project_handle_vcs_workspaces sends only type + root.
 @(test)
-project_vcs_command_json_workspaces_minimal :: proc(t: ^testing.T) {
+test_project_vcs_command_json_workspaces_minimal :: proc(t: ^testing.T) {
 	cmd := Project_Vcs_Command{command_type = "vcs_workspaces"}
 	out := project_vcs_command_json(cmd, "cmd_ws_1", "/home/u/repo")
 	testing.expect(t, strings.contains(out, "\"type\":\"vcs_workspaces\""), "type present")
@@ -225,7 +225,7 @@ project_vcs_command_json_workspaces_minimal :: proc(t: ^testing.T) {
 // {"file":"<rel>"} onto the command's path field. json_string(body,"file") is the exact
 // extraction the handler uses.
 @(test)
-project_vcs_command_json_write_endpoints_map_file_to_path :: proc(t: ^testing.T) {
+test_project_vcs_command_json_write_endpoints_map_file_to_path :: proc(t: ^testing.T) {
 	body := "{\"file\":\"src/main.odin\"}"
 	for cmd_type in ([]string{"vcs_stage", "vcs_unstage", "vcs_revert"}) {
 		cmd := Project_Vcs_Command{
@@ -243,7 +243,7 @@ project_vcs_command_json_write_endpoints_map_file_to_path :: proc(t: ^testing.T)
 // HT-STAGE-2 / HT-UNSTAGE-2 (wire contract): an empty/missing file body yields an empty
 // path forwarded to the bridge (which returns ok:false); the hub does not reject here.
 @(test)
-project_vcs_command_json_write_empty_file :: proc(t: ^testing.T) {
+test_project_vcs_command_json_write_empty_file :: proc(t: ^testing.T) {
 	cmd := Project_Vcs_Command{
 		command_type = "vcs_stage",
 		path = json_string("{}", "file"), send_path = true,
@@ -260,7 +260,7 @@ project_vcs_command_json_write_empty_file :: proc(t: ^testing.T) {
 
 // HT-WT-3: absent worktree_path keeps the project root unchanged.
 @(test)
-worktree_path_empty_uses_project_root :: proc(t: ^testing.T) {
+test_worktree_path_empty_uses_project_root :: proc(t: ^testing.T) {
 	bh: Bridge_Handlers
 	req := Request{query = ""}
 	root, ok, err := project_vcs_effective_root(&bh, req, "brg_x", "/home/u/repo")
@@ -271,7 +271,7 @@ worktree_path_empty_uses_project_root :: proc(t: ^testing.T) {
 
 // HT-WT-3 (whitespace): a blank worktree_path is trimmed to empty and uses the root.
 @(test)
-worktree_path_blank_uses_project_root :: proc(t: ^testing.T) {
+test_worktree_path_blank_uses_project_root :: proc(t: ^testing.T) {
 	bh: Bridge_Handlers
 	req := Request{query = "worktree_path=%20%20"}
 	root, ok, err := project_vcs_effective_root(&bh, req, "brg_x", "/home/u/repo")
@@ -283,7 +283,7 @@ worktree_path_blank_uses_project_root :: proc(t: ^testing.T) {
 // Path-traversal guard: a non-absolute worktree_path is rejected with 400 before any
 // bridge lookup (it can never match an absolute workspace path anyway).
 @(test)
-worktree_path_non_absolute_rejected :: proc(t: ^testing.T) {
+test_worktree_path_non_absolute_rejected :: proc(t: ^testing.T) {
 	bh: Bridge_Handlers
 	req := Request{query = "worktree_path=..%2Fescape"}
 	root, ok, err := project_vcs_effective_root(&bh, req, "brg_x", "/home/u/repo")
@@ -299,7 +299,7 @@ worktree_path_non_absolute_rejected :: proc(t: ^testing.T) {
 // with the shared 400. This is the decision project_vcs_effective_root makes on the
 // bridge's vcs_workspaces reply once an absolute worktree_path passes the prefix guard.
 @(test)
-worktree_path_whitelist_accept_and_reject :: proc(t: ^testing.T) {
+test_worktree_path_whitelist_accept_and_reject :: proc(t: ^testing.T) {
 	reply := "{\"type\":\"vcs_workspaces_result\",\"ok\":true,\"provider\":\"git\",\"workspaces\":[{\"path\":\"/home/u/repo\",\"label\":\"main\",\"is_current\":true},{\"path\":\"/home/u/wt/feature\",\"label\":\"feature\",\"is_current\":false}],\"error\":{\"code\":\"\",\"message\":\"\"}}"
 	// HT-WT-1: a path the bridge advertises is accepted.
 	testing.expect(t, vcs_workspaces_has_path(reply, "/home/u/wt/feature"), "HT-WT-1: listed worktree accepted")

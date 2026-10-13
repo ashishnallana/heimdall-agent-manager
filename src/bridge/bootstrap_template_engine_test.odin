@@ -164,7 +164,7 @@ bt_memory_decouple_manifest_and_file_set :: proc(t: ^testing.T) {
 	_ = os.set_env("HEIMDALL_HAM_CTL_BIN", "/bin/sh")
 
 	cache: Bootstrap_Cache
-	tmp := "/tmp/ham-test-mem-decouple"
+	tmp := fmt.tprintf("/tmp/ham-test-mem-decouple-%d", os.get_pid())
 	_ = os.remove_all(tmp)
 	defer _ = os.remove_all(tmp)
 	bootstrap_cache_init(&cache, tmp, 1024 * 1024)
@@ -177,7 +177,7 @@ bt_memory_decouple_manifest_and_file_set :: proc(t: ^testing.T) {
 		role = "worker",
 	}
 
-	files, res := bridge_bootstrap_build_file_set(manifest, d, "unix:/tmp/test.sock", "tok", "jetski", &cache)
+	files, res := bridge_bootstrap_build_file_set(manifest, d, "unix:/tmp/test.sock", "tok", "codex", &cache)
 	defer bridge_bootstrap_free_file_set(files)
 
 	testing.expect(t, res.ok, "build file set should succeed")
@@ -226,8 +226,8 @@ bt_memory_decouple_materialize_run_dir :: proc(t: ^testing.T) {
 	_ = os.set_env("HEIMDALL_HAM_CTL_BIN", "/bin/sh")
 
 	cache: Bootstrap_Cache
-	cache_dir := "/tmp/ham-test-mat-cache"
-	run_dir := "/tmp/ham-test-mat-rundir"
+	cache_dir := fmt.tprintf("/tmp/ham-test-mat-cache-%d", os.get_pid())
+	run_dir := fmt.tprintf("/tmp/ham-test-mat-rundir-%d", os.get_pid())
 	_ = os.remove_all(cache_dir)
 	_ = os.remove_all(run_dir)
 	defer {
@@ -244,7 +244,7 @@ bt_memory_decouple_materialize_run_dir :: proc(t: ^testing.T) {
 		role = "worker",
 	}
 
-	res := bridge_bootstrap_materialize_run_dir(manifest, d, run_dir, "unix:/tmp/test.sock", "tok", "jetski", &cache)
+	res := bridge_bootstrap_materialize_run_dir(manifest, d, run_dir, "unix:/tmp/test.sock", "tok", "codex", &cache)
 	testing.expect(t, res.ok, "materialize_run_dir should succeed")
 
 	// Verify both AGENTS.md and MEMORY.md exist on disk in run_dir
@@ -361,7 +361,7 @@ bt_file_set_decrypts_vault_tokens :: proc(t: ^testing.T) {
 	defer os.unset_env("HEIMDALL_VAULT_KEY")
 
 	cache: Bootstrap_Cache
-	tmp := "/tmp/ham-test-bootstrap-decrypt"
+	tmp := fmt.tprintf("/tmp/ham-test-bootstrap-decrypt-%d", os.get_pid())
 	_ = os.remove_all(tmp)
 	defer _ = os.remove_all(tmp)
 	bootstrap_cache_init(&cache, tmp, 1024 * 1024)
@@ -370,7 +370,27 @@ bt_file_set_decrypts_vault_tokens :: proc(t: ^testing.T) {
 	bootstrap_cache_put(&cache, skill_hash, skill_body)
 
 	d := Bridge_Bootstrap_Descriptor{instance_id = "inst_1", agent_name = "Agent 1", role = "worker"}
-	files, res := bridge_bootstrap_build_file_set(manifest, d, "unix:/tmp/test.sock", "tok", "claude", &cache)
+	test_providers := []Bridge_Catalog_Provider{{
+		provider  = "codex",
+		state     = "active",
+		skill_dir = ".agents/skills",
+	}}
+	test_snap := Bridge_Provider_Catalog_Snapshot{
+		providers = test_providers,
+	}
+	sync.rw_mutex_lock(&bridge_provider_catalog_mutex)
+	prev_loaded := bridge_provider_catalog_loaded
+	prev_snap := bridge_provider_catalog_snapshot
+	bridge_provider_catalog_loaded = true
+	bridge_provider_catalog_snapshot = &test_snap
+	sync.rw_mutex_unlock(&bridge_provider_catalog_mutex)
+	defer {
+		sync.rw_mutex_lock(&bridge_provider_catalog_mutex)
+		bridge_provider_catalog_loaded = prev_loaded
+		bridge_provider_catalog_snapshot = prev_snap
+		sync.rw_mutex_unlock(&bridge_provider_catalog_mutex)
+	}
+	files, res := bridge_bootstrap_build_file_set(manifest, d, "unix:/tmp/test.sock", "tok", "codex", &cache)
 	defer bridge_bootstrap_free_file_set(files)
 	testing.expect(t, res.ok, "build file set should succeed")
 

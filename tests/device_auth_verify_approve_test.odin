@@ -14,6 +14,7 @@
 package device_auth_verify_approve_test
 
 import "core:fmt"
+import "core:testing"
 import "core:os"
 import device_auth "odin_test:hub/service/device_auth"
 import domain "odin_test:hub/domain"
@@ -91,6 +92,12 @@ new_service :: proc() -> (^device_auth.Grant_Store, device_auth.Device_Auth_Serv
 	device_auth.with_token_minter(&svc, fake_minter)
 	device_auth.with_bridge_token_minter(&svc, fake_bridge_minter)
 	return store, svc
+}
+
+@(test)
+test_device_auth_verify_approve_test :: proc(t: ^testing.T) {
+	_ = t
+	main()
 }
 
 main :: proc() {

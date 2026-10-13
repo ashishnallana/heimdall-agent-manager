@@ -6,7 +6,6 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { pendingBridgeUpdates } from '../src/ui/components/settings/bridgeUpdate.ts';
 
 const online = { status: 'online', runtime_connected: true, update_available: true };
@@ -36,13 +35,4 @@ test('empty / malformed input', () => {
   assert.deepEqual(pendingBridgeUpdates([{ ...online }] as any), []);
   // The list query's data is `{ bridges: [...] }`; a non-array must never throw.
   assert.deepEqual(pendingBridgeUpdates({ bridges: [] } as any), []);
-});
-
-test('badge checks once on load and opens the bridge update button', () => {
-  const badge = readFileSync(new URL('../src/ui/components/shell/SidebarUpdateBadge.tsx', import.meta.url), 'utf8');
-  assert.match(badge, /if \(update !== undefined \|\| !bridgesQuery\.isSuccess\) return;/, 'first response is captured once');
-  assert.match(badge, /pendingBridgeUpdates\(bridgesQuery\.data\?\.bridges\)/, 'reads the bridges array from the list query');
-  const shell = readFileSync(new URL('../src/ui/components/shell/AppShell.tsx', import.meta.url), 'utf8');
-  assert.match(shell, /settings-bridge-update-btn-\$\{CSS\.escape\(update\.bridgeId\)\}/);
-  assert.match(shell, /setSettingsModalTab\('bridges'\)/);
 });

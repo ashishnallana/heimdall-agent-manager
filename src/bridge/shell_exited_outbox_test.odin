@@ -25,7 +25,7 @@ import "core:testing"
 
 @(private = "file")
 outbox_test_dir :: proc(name: string) -> string {
-	return strings.concatenate({"/tmp/ham-shell4-outbox-", name})
+	return fmt.aprintf("/tmp/ham-shell4-outbox-%s-%d", name, os.get_pid())
 }
 
 // A clean slate per test. These tests are about what survives on DISK, so a stale

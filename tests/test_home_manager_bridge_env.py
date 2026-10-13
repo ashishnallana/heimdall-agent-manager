@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def eval_bridge(extra_module: str = "{}") -> dict:
     expr = f'''
 let
-  flake = builtins.getFlake (toString {ROOT});
+  flake = builtins.getFlake "git+file://{ROOT}";
   system = builtins.currentSystem;
   pkgs = import flake.inputs.nixpkgs {{ inherit system; }};
   lib = pkgs.lib // {{ hm = {{ dag = {{ entryAfter = deps: value: value; }}; }}; }};

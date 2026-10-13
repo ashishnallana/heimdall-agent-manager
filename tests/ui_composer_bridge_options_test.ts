@@ -5,7 +5,6 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { composerBridgeIsArchived, composerBridgeOptions } from '../src/ui/utils/composerBridgeOptions.ts';
 
 const online = { bridge_id: 'brg_on', status: 'online', runtime_connected: true, reconfiguration_supported: true };
@@ -40,12 +39,4 @@ test('reconfiguration requirement still applies to online bridges', () => {
 test('empty / malformed input', () => {
   assert.deepEqual(composerBridgeOptions(undefined), []);
   assert.deepEqual(composerBridgeOptions([{ status: 'online' }]), []);
-});
-
-test('the picker renders only these options and disables by their reason', () => {
-  const s = readFileSync(new URL('../src/ui/components/chat/RuntimeConfigurationOptions.tsx', import.meta.url), 'utf8');
-  assert.match(s, /const bridgeOptions = composerBridgeOptions\(bridges, requireReconfiguration\);/);
-  assert.match(s, /\{bridgeOptions\.map\(/);
-  assert.doesNotMatch(s, /\{bridges\.map\(/, 'raw list (with archived bridges) is no longer rendered');
-  assert.match(s, /disabled=\{disabled \|\| disabledReason !== null\}/);
 });

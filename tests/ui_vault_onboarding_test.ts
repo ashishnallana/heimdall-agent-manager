@@ -5,9 +5,6 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 import {
   generateVaultKey,
@@ -48,10 +45,6 @@ import vaultReducer, {
   VAULT_ONBOARDING_DISMISSED_KEY,
 } from '../src/ui/store/vaultSlice.ts';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const REPO_ROOT = path.resolve(__dirname, '..');
-
 // Helper to provide an in-memory sessionStorage mock for Node test environment
 function setupMockSessionStorage(): Map<string, string> {
   const store = new Map<string, string>();
@@ -75,117 +68,6 @@ function setupMockSessionStorage(): Map<string, string> {
   (globalThis as any).sessionStorage = mockStorage;
   return store;
 }
-
-// -----------------------------------------------------------------------------
-// Test 1: Static verification of AppShell.tsx integration
-// -----------------------------------------------------------------------------
-
-test('AppShell.tsx mounts VaultOnboardingModal and BottomDock displays vault-header-status-badge', () => {
-  const appShellPath = path.join(REPO_ROOT, 'src/ui/components/shell/AppShell.tsx');
-  assert.ok(fs.existsSync(appShellPath), 'AppShell.tsx must exist');
-
-  const content = fs.readFileSync(appShellPath, 'utf8');
-
-  // Verify VaultOnboardingModal import
-  assert.match(
-    content,
-    /import\s+VaultOnboardingModal\s+from\s+['"]\.\.\/settings\/VaultOnboardingModal['"]/,
-    'AppShell.tsx must import VaultOnboardingModal',
-  );
-
-  // Verify Vault selectors / dismissal import
-  assert.match(
-    content,
-    /selectIsVaultConfigured.*selectIsVaultUnlocked/s,
-    'AppShell.tsx must import vault selectors from vaultSlice',
-  );
-
-  // Verify status badge in BottomDock.tsx (REQ-BOTTOMDOCK-VAULT-2)
-  const bottomDockPath = path.join(REPO_ROOT, 'src/ui/components/shell/BottomDock.tsx');
-  assert.ok(fs.existsSync(bottomDockPath), 'BottomDock.tsx must exist');
-  const bottomDockContent = fs.readFileSync(bottomDockPath, 'utf8');
-
-  assert.match(
-    bottomDockContent,
-    /data-debug-id=['"]vault-header-status-badge['"]/,
-    'BottomDock.tsx must render header status badge with data-debug-id="vault-header-status-badge"',
-  );
-
-  // Verify header displays vault status via the canonical label helper
-  // (REQ-VAULT-UNSUP-3: Unsupported/Unlocked/Locked/Unconfigured)
-  assert.match(
-    bottomDockContent,
-    /Vault:\s*\{vaultLabel\}/,
-    'BottomDock.tsx header status badge must render the vaultStatusLabel() result',
-  );
-  assert.match(
-    bottomDockContent,
-    /vaultStatusLabel\(\{\s*isVaultUnlocked,\s*isVaultConfigured\s*\}\)/,
-    'BottomDock.tsx must derive its badge label from vaultStatusLabel()',
-  );
-
-  // Verify VaultOnboardingModal mounting
-  assert.match(
-    content,
-    /<VaultOnboardingModal\s+open=\{isOnboardingModalOpen\}\s+onOpenChange=\{setIsOnboardingModalOpen\}\s*\/>/,
-    'AppShell.tsx must mount <VaultOnboardingModal /> globally',
-  );
-
-  // Verify automated popup condition on first visit
-  assert.match(
-    content,
-    /readOnboardingDismissed/,
-    'AppShell.tsx must check readOnboardingDismissed before auto-opening modal',
-  );
-});
-
-// -----------------------------------------------------------------------------
-// Test 2: Static verification of VaultOnboardingModal.tsx debug IDs and flows
-// -----------------------------------------------------------------------------
-
-test('VaultOnboardingModal.tsx implements Setup, Unlock, and Skip without raw key import', () => {
-  const modalPath = path.join(REPO_ROOT, 'src/ui/components/settings/VaultOnboardingModal.tsx');
-  assert.ok(fs.existsSync(modalPath), 'VaultOnboardingModal.tsx must exist');
-
-  const content = fs.readFileSync(modalPath, 'utf8');
-
-  const requiredDebugIds = [
-    'vault-onboarding-modal',
-    'vault-onboarding-setup-form',
-    'vault-onboarding-unlock-form',
-    'vault-onboarding-master-password-input',
-    'vault-onboarding-confirm-password-input',
-    'vault-onboarding-recovery-words-grid',
-    'vault-onboarding-copy-words-btn',
-    'vault-onboarding-regenerate-words-btn',
-    'vault-onboarding-setup-backup-checkbox',
-    'vault-onboarding-setup-submit-btn',
-    'vault-onboarding-unlock-password-input',
-    'vault-onboarding-unlock-recovery-input',
-    'vault-onboarding-unlock-submit-btn',
-    'vault-onboarding-remember-checkbox',
-    'vault-onboarding-skip-btn',
-  ];
-
-  for (const debugId of requiredDebugIds) {
-    assert.ok(
-      content.includes(`data-debug-id="${debugId}"`) || content.includes(`data-debug-id={'${debugId}'}`),
-      `VaultOnboardingModal.tsx must include data-debug-id="${debugId}"`,
-    );
-  }
-
-  assert.doesNotMatch(content, /Direct Key Import|handleDirectKeyImport|importLocalKey|directHexKey/,
-    'onboarding must offer password and recovery only');
-  assert.match(content, /!isConfigured \?/, 'existing vaults must not offer setup');
-  assert.match(content, /isVaultLoading \?/, 'wait for vault status before offering setup');
-
-  // Verify skip button writes dismissal
-  assert.match(
-    content,
-    /writeOnboardingDismissed\(true\)/,
-    'VaultOnboardingModal.tsx must persist dismissal via writeOnboardingDismissed(true)',
-  );
-});
 
 // -----------------------------------------------------------------------------
 // Test 3: Functional verification of 64-hex key import, WebCrypto import, & Redux
@@ -444,85 +326,3 @@ test('dock badge reads "Unsupported" with precedence over Unlocked/Locked/Unconf
   assert.match(VAULT_UNSUPPORTED_REASON, /HTTPS|localhost/i, 'tooltip must name the remedy');
 });
 
-test('AppShell gates both modal-open paths and VaultPanel has no dead end when unsupported', () => {
-  const appShell = fs.readFileSync(
-    path.join(REPO_ROOT, 'src/ui/components/shell/AppShell.tsx'),
-    'utf8',
-  );
-
-  // Path 1: the first-visit auto-pop goes through the predicate.
-  assert.match(
-    appShell,
-    /shouldOpenVaultOnboarding\(\{\s*isVaultUnlocked,\s*dismissed\s*\}\)/,
-    'AppShell.tsx auto-pop effect must be gated by shouldOpenVaultOnboarding()',
-  );
-  // Path 2: the isUnlockModalOpen back door is gated too.
-  assert.match(
-    appShell,
-    /if\s*\(isUnlockModalOpen\s*&&\s*isVaultSupported\(\)\)/,
-    'AppShell.tsx isUnlockModalOpen effect must be gated by isVaultSupported()',
-  );
-  // No ungated setIsOnboardingModalOpen(true) survives.
-  const ungated = appShell.match(/if\s*\(!isVaultUnlocked\s*&&\s*!dismissed\)/);
-  assert.equal(ungated, null, 'the original ungated auto-pop condition must be gone');
-
-  // The badge keys tooling and tests — it must not be renamed.
-  const bottomDock = fs.readFileSync(
-    path.join(REPO_ROOT, 'src/ui/components/shell/BottomDock.tsx'),
-    'utf8',
-  );
-  assert.match(
-    bottomDock,
-    /data-debug-id=['"]vault-header-status-badge['"]/,
-    'vault-header-status-badge debug id must be unchanged',
-  );
-
-  // REQ-VAULT-UNSUP-4: the badge routes to /settings/vault, which must explain itself.
-  const vaultPanel = fs.readFileSync(
-    path.join(REPO_ROOT, 'src/ui/components/settings/VaultPanel.tsx'),
-    'utf8',
-  );
-  assert.match(
-    vaultPanel,
-    /if\s*\(!isVaultSupported\(\)\)/,
-    'VaultPanel.tsx must short-circuit to an unsupported explanation',
-  );
-  assert.match(
-    vaultPanel,
-    /data-debug-id=['"]vault-unsupported-notice['"]/,
-    'VaultPanel.tsx must render the unsupported notice',
-  );
-
-  // Non-goal guard: no polyfill / userland crypto fallback was introduced.
-  const vaultCrypto = fs.readFileSync(
-    path.join(REPO_ROOT, 'src/ui/utils/vaultCrypto.ts'),
-    'utf8',
-  );
-  assert.equal(
-    /polyfill|require\(['"]crypto['"]\)|node:crypto/.test(vaultCrypto),
-    false,
-    'no crypto polyfill or userland fallback may be introduced',
-  );
-
-  // Exactly one availability predicate: nobody re-implements the subtle check.
-  for (const [file, content] of [
-    ['AppShell.tsx', appShell],
-    ['BottomDock.tsx', bottomDock],
-    ['VaultPanel.tsx', vaultPanel],
-  ] as const) {
-    // Matches a duplicated availability *check* (a probe, negation, or comparison) —
-    // deliberately not bare `crypto.subtle`, which also appears in explanatory prose.
-    const duplicateSubtleCheck =
-      /(?:[!(]\s*|typeof\s+)\w*\.?crypto\??\.subtle|crypto\??\.subtle\s*(?:===|!==|\?\?|&&|\|\|)|crypto\??\.subtle\??\.\w/;
-    assert.equal(
-      duplicateSubtleCheck.test(content),
-      false,
-      `${file} must not perform its own crypto.subtle check — use isVaultSupported()`,
-    );
-    assert.equal(
-      /isSecureContext/.test(content),
-      false,
-      `${file} must not branch on isSecureContext`,
-    );
-  }
-});

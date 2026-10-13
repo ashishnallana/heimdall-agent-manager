@@ -7,10 +7,13 @@ import "core:net"
 import "core:os"
 import "core:strconv"
 import "core:strings"
+import "core:sync"
 import "core:sys/posix"
 import "core:testing"
 import "core:thread"
 import "core:time"
+
+manager_test_env_mutex: sync.Mutex
 
 @(test)
 test_manager_option_helpers :: proc(t: ^testing.T) {
@@ -91,6 +94,8 @@ test_manager_line_number_parse :: proc(t: ^testing.T) {
 
 @(test)
 test_manager_config_and_token_paths :: proc(t: ^testing.T) {
+	sync.mutex_lock(&manager_test_env_mutex)
+	defer sync.mutex_unlock(&manager_test_env_mutex)
 	tmp := manager_test_tmp_dir("paths-home")
 	defer manager_test_cleanup(tmp)
 	previous := os.get_env("HEIMDALL_HOME", context.allocator)
@@ -116,6 +121,8 @@ test_manager_config_and_token_paths :: proc(t: ^testing.T) {
 
 @(test)
 test_manager_bin_on_path :: proc(t: ^testing.T) {
+	sync.mutex_lock(&manager_test_env_mutex)
+	defer sync.mutex_unlock(&manager_test_env_mutex)
 	tmp := manager_test_tmp_dir("path-bin")
 	defer manager_test_cleanup(tmp)
 	fake := fmt.tprintf("%s/fake-heimdall-bin", tmp)
@@ -125,7 +132,7 @@ test_manager_bin_on_path :: proc(t: ^testing.T) {
 	defer {
 		if previous != "" do os.set_env("PATH", previous)
 	}
-	os.set_env("PATH", tmp)
+	os.set_env("PATH", fmt.tprintf("%s:%s", tmp, previous))
 	path, found := manager_bin_on_path("fake-heimdall-bin")
 	testing.expect(t, found, "fake bin is found on the overridden PATH")
 	testing.expect(t, path == fake, fmt.tprintf("resolved path is the fake bin: %s", path))
@@ -140,11 +147,11 @@ test_manager_bin_on_path :: proc(t: ^testing.T) {
 manager_test_unique_counter: int
 
 manager_test_unique :: proc() -> int {
-	manager_test_unique_counter += 1
+	val := sync.atomic_add(&manager_test_unique_counter, 1) + 1
 	when ODIN_OS == .Linux || ODIN_OS == .Darwin {
-		return int(posix.getpid()) * 1000 + manager_test_unique_counter
+		return int(posix.getpid()) * 1000 + val
 	}
-	return manager_test_unique_counter
+	return val
 }
 
 manager_test_tmp_dir :: proc(suffix: string) -> string {

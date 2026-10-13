@@ -3,6 +3,7 @@ package hub_memory_actions_test
 import "core:fmt"
 import "core:os"
 import "core:strings"
+import "core:testing"
 import "core:thread"
 import bridge "odin_test:bridge"
 import contracts "odin_test:contracts"
@@ -109,6 +110,12 @@ enroll_bridge :: proc(graph: ^app.App_Graph, headers: []contracts.HTTP_Header) -
 	return extract_json_string(issued.body, "bridge_id"), extract_json_string(issued.body, "access_token")
 }
 
+@(test)
+test_hub_memory_actions :: proc(t: ^testing.T) {
+	_ = t
+	main()
+}
+
 main :: proc() {
 	db_path := "/tmp/heimdall-hub-memory-actions-test.db"
 	_ = os.remove(db_path)
@@ -125,6 +132,7 @@ main :: proc() {
 		trusted_proxy_cidrs = cidrs[:],
 		auto_provision_users = true,
 		logout_url = "/_dev/logout",
+		paddle_environment = "sandbox",
 	})
 	check(ok, message)
 
@@ -145,8 +153,6 @@ main :: proc() {
 		owner_user_id = owner,
 		name = "Memory Test Agent",
 		slug = "mem-agent",
-		default_provider = "claude",
-		default_model = "normal",
 		state = .Active,
 		created_at = now,
 		updated_at = now,
@@ -282,8 +288,6 @@ main :: proc() {
 		owner_user_id = owner,
 		name = "Memory Test Agent 2",
 		slug = "mem-agent-2",
-		default_provider = "claude",
-		default_model = "normal",
 		state = .Active,
 		created_at = now,
 		updated_at = now,

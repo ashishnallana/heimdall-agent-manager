@@ -648,3 +648,37 @@ test_security_self_hosted_unconfigured_executes_unencrypted_without_errors :: pr
 		testing.expect(t, strings.contains(first_frame, `"data_b64":"`), "must emit plaintext data_b64 frame")
 	}
 }
+
+// Package-visible so other suites (vault_configured_marker_test.odin) can drive
+// the real hub `bridge_unseal` frame instead of duplicating the sealing code.
+test_create_unseal_envelope :: proc(
+	bridge_id: string,
+	bridge_pub_hex: string,
+	vault_key_hex: string,
+	timestamp: i64,
+	nonce: string,
+	tamper_aad: bool = false,
+) -> string {
+	return create_sec_test_envelope(bridge_id, bridge_pub_hex, vault_key_hex, timestamp, nonce, tamper_aad)
+}
+
+@(test)
+test_unseal_protocol_sliding_nonce_cache :: proc(t: ^testing.T) {
+	cache: Unseal_Nonce_Cache
+	unseal_nonce_cache_clear(&cache)
+
+	now: i64 = 1_000_000
+
+	// Insert nonce 1
+	testing.expect(t, unseal_nonce_cache_check_and_insert(&cache, "nonce_1", now), "first insert of nonce_1 must succeed")
+	// Replay nonce 1
+	testing.expect(t, !unseal_nonce_cache_check_and_insert(&cache, "nonce_1", now + 1000), "replay of nonce_1 must fail")
+
+	// Insert nonce 2
+	testing.expect(t, unseal_nonce_cache_check_and_insert(&cache, "nonce_2", now + 2000), "insert of nonce_2 must succeed")
+
+	// Nonce 1 after TTL (> 60s) can be re-inserted because old entry expired
+	testing.expect(t, unseal_nonce_cache_check_and_insert(&cache, "nonce_1", now + UNSEAL_NONCE_TTL_MS + 1000), "nonce_1 after TTL expiry should succeed")
+
+	unseal_nonce_cache_clear(&cache)
+}

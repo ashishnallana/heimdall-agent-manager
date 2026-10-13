@@ -4,6 +4,7 @@ import "core:fmt"
 import "core:net"
 import "core:strings"
 import "core:sync"
+import "core:sys/posix"
 import "core:testing"
 import "core:thread"
 import "core:time"
@@ -91,8 +92,6 @@ test_bridge_http_5xx_then_200_sequence :: proc(t: ^testing.T) {
 		}
 	})
 
-	time.sleep(20 * time.Millisecond)
-
 	hub_url := fmt.tprintf("http://127.0.0.1:%d", port)
 	headers := [?]http.Header{
 		{name = "Authorization", value = "Bearer test_token"},
@@ -104,6 +103,7 @@ test_bridge_http_5xx_then_200_sequence :: proc(t: ^testing.T) {
 	testing.expect(t, resp.status == 200, "status must be 200 after retry")
 	testing.expect(t, strings.contains(resp.body, "restarted"), "body must contain restarted")
 
+	_ = posix.shutdown(posix.FD(listener), .RDWR)
 	net.close(listener)
 	thread.join(server_thread)
 	thread.destroy(server_thread)

@@ -5,6 +5,7 @@ package hub_mem6_policy_test
 // These need only the agent repo (display-name resolution) + a capture sink.
 
 import "core:fmt"
+import "core:testing"
 import "core:os"
 import "core:strings"
 import contracts "odin_test:contracts"
@@ -30,6 +31,12 @@ capture_send :: proc(ctx: rawptr, command: project.Runtime_Command) -> (bool, do
 	captured.bodies[captured.count] = strings.clone(command.body_json); captured.count += 1; return true, {}
 }
 check :: proc(ok: bool, msg: string) { if ok do return; fmt.eprintln("FAIL:", msg); os.exit(1) }
+
+@(test)
+test_hub_mem6_policy_test :: proc(t: ^testing.T) {
+	_ = t
+	main()
+}
 
 main :: proc() {
 	a: Agents

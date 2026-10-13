@@ -10,8 +10,15 @@ package hub_startup_blocked_projection_test
 
 import "core:fmt"
 import "core:os"
+import "core:testing"
 import agent "odin_test:hub/service/agent"
 import domain "odin_test:hub/domain"
+
+@(test)
+test_hub_startup_blocked_projection :: proc(t: ^testing.T) {
+	_ = t
+	main()
+}
 
 main :: proc() {
 	// (1) blocked -> startup_blocked, active-but-not-ready, no terminal side effects.

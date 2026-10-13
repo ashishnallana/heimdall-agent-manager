@@ -147,7 +147,7 @@ read_upgrade_then_frame :: proc(sock: net.TCP_Socket, timeout: time.Duration) ->
 // --- a bridge frame reaches the browser socket -------------------------------
 
 @(test)
-lsp_bridge_frame_arrives_at_the_browser_socket :: proc(t: ^testing.T) {
+test_lsp_bridge_frame_arrives_at_the_browser_socket :: proc(t: ^testing.T) {
 	pair, ok := make_loopback_pair(t)
 	if !ok do return
 	defer close_pair(&pair)
@@ -183,7 +183,7 @@ lsp_bridge_frame_arrives_at_the_browser_socket :: proc(t: ^testing.T) {
 }
 
 @(test)
-lsp_large_frame_arrives_whole :: proc(t: ^testing.T) {
+test_lsp_large_frame_arrives_whole :: proc(t: ^testing.T) {
 	// A completion list or semantic-token response over 64KB. Every pre-existing
 	// writer in this codebase refuses these, so this test is the reason the LSP
 	// socket has its own 64-bit-length writer.
@@ -236,7 +236,7 @@ park_in_recv :: proc(data: rawptr) {
 }
 
 @(test)
-lsp_bridge_disconnect_wakes_the_parked_relay :: proc(t: ^testing.T) {
+test_lsp_bridge_disconnect_wakes_the_parked_relay :: proc(t: ^testing.T) {
 	pair, ok := make_loopback_pair(t)
 	if !ok do return
 	defer close_pair(&pair)
@@ -257,7 +257,7 @@ lsp_bridge_disconnect_wakes_the_parked_relay :: proc(t: ^testing.T) {
 	defer lsp_ws_reader_destroy(&d.reader)
 	th := thread.create_and_start_with_data(rawptr(d), park_in_recv)
 	defer thread.destroy(th)
-	time.sleep(150 * time.Millisecond) // let it actually park
+	time.sleep(20 * time.Millisecond) // let it actually park
 
 	testing.expect(t, !d.returned, "the relay should still be parked before the disconnect")
 
@@ -282,7 +282,7 @@ lsp_bridge_disconnect_wakes_the_parked_relay :: proc(t: ^testing.T) {
 }
 
 @(test)
-lsp_disconnect_only_touches_sessions_on_that_bridge :: proc(t: ^testing.T) {
+test_lsp_disconnect_only_touches_sessions_on_that_bridge :: proc(t: ^testing.T) {
 	pair_a, ok_a := make_loopback_pair(t)
 	if !ok_a do return
 	defer close_pair(&pair_a)
@@ -313,7 +313,7 @@ lsp_disconnect_only_touches_sessions_on_that_bridge :: proc(t: ^testing.T) {
 }
 
 @(test)
-lsp_disconnect_tells_the_browser_why :: proc(t: ^testing.T) {
+test_lsp_disconnect_tells_the_browser_why :: proc(t: ^testing.T) {
 	// The browser must learn the session died rather than just seeing silence.
 	pair, ok := make_loopback_pair(t)
 	if !ok do return
@@ -367,7 +367,7 @@ run_stream_handler :: proc(data: rawptr) {
 }
 
 @(test)
-lsp_stream_handler_runs_and_unwinds_cleanly :: proc(t: ^testing.T) {
+test_lsp_stream_handler_runs_and_unwinds_cleanly :: proc(t: ^testing.T) {
 	pair, ok := make_loopback_pair(t)
 	if !ok do return
 	defer net.close(pair.listener)
@@ -389,7 +389,7 @@ lsp_stream_handler_runs_and_unwinds_cleanly :: proc(t: ^testing.T) {
 		delete(reg.by_wire)
 		delete(reg.by_owner)
 	}
-	ids := platform.real_id_generator()
+	ids := http_test_id_generator()
 	h := Lsp_Session_Stream_Handlers{
 		ws_tickets = &tickets,
 		sessions   = &reg,

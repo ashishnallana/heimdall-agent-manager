@@ -1,8 +1,0 @@
-{
-  "agent_instance_id": "pi@task18-e2e",
-  "connected": true,
-  "connection_state": "connected",
-  "live": true,
-  "startup_status": "starting",
-  "tmux_pane_present": true
-}

@@ -1,6 +1,7 @@
 package main
 
 import "base:runtime"
+import "core:c"
 import base64 "core:encoding/base64"
 import "core:fmt"
 import "core:net"
@@ -9,6 +10,7 @@ import "core:strings"
 import "core:sync"
 import "core:sys/posix"
 import "core:testing"
+import "core:thread"
 import ws "odin_test:lib/ws"
 
 // REQ-SHELL-ENC-1: Secure command execution and spawn authorization on Bridge.
@@ -83,6 +85,8 @@ test_shell_enc_spec_parser_invalid_json :: proc(t: ^testing.T) {
 test_shell_start_rejects_missing_enc_spec_when_vault_active :: proc(t: ^testing.T) {
 	sync.mutex_lock(&bridge_test_config_mutex)
 	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
 
 	prev_key, had_key := os.lookup_env("HEIMDALL_VAULT_KEY", context.allocator)
 	defer {
@@ -112,6 +116,8 @@ test_shell_start_rejects_missing_enc_spec_when_vault_active :: proc(t: ^testing.
 test_shell_start_rejects_unarmored_enc_spec_when_vault_active :: proc(t: ^testing.T) {
 	sync.mutex_lock(&bridge_test_config_mutex)
 	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
 
 	prev_key, had_key := os.lookup_env("HEIMDALL_VAULT_KEY", context.allocator)
 	defer {
@@ -141,6 +147,8 @@ test_shell_start_rejects_unarmored_enc_spec_when_vault_active :: proc(t: ^testin
 test_shell_start_rejects_tampered_enc_spec :: proc(t: ^testing.T) {
 	sync.mutex_lock(&bridge_test_config_mutex)
 	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
 
 	prev_key, had_key := os.lookup_env("HEIMDALL_VAULT_KEY", context.allocator)
 	defer {
@@ -179,6 +187,8 @@ test_shell_start_rejects_tampered_enc_spec :: proc(t: ^testing.T) {
 test_shell_start_rejects_mismatched_vault_key :: proc(t: ^testing.T) {
 	sync.mutex_lock(&bridge_test_config_mutex)
 	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
 
 	// Encrypt with ALT key
 	ts_str := fmt.tprintf("%d", bridge_now_unix_ms())
@@ -216,6 +226,8 @@ test_shell_start_rejects_mismatched_vault_key :: proc(t: ^testing.T) {
 test_shell_start_rejects_expired_timestamp :: proc(t: ^testing.T) {
 	sync.mutex_lock(&bridge_test_config_mutex)
 	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
 
 	prev_key, had_key := os.lookup_env("HEIMDALL_VAULT_KEY", context.allocator)
 	defer {
@@ -253,6 +265,8 @@ test_shell_start_rejects_expired_timestamp :: proc(t: ^testing.T) {
 test_shell_start_rejects_future_skewed_timestamp :: proc(t: ^testing.T) {
 	sync.mutex_lock(&bridge_test_config_mutex)
 	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
 
 	prev_key, had_key := os.lookup_env("HEIMDALL_VAULT_KEY", context.allocator)
 	defer {
@@ -290,6 +304,8 @@ test_shell_start_rejects_future_skewed_timestamp :: proc(t: ^testing.T) {
 test_shell_start_accepts_and_decrypts_valid_enc_spec :: proc(t: ^testing.T) {
 	sync.mutex_lock(&bridge_test_config_mutex)
 	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
 
 	prev_key, had_key := os.lookup_env("HEIMDALL_VAULT_KEY", context.allocator)
 	defer {
@@ -341,6 +357,8 @@ test_shell_start_accepts_and_decrypts_valid_enc_spec :: proc(t: ^testing.T) {
 test_shell_start_fallback_when_vault_key_unconfigured :: proc(t: ^testing.T) {
 	sync.mutex_lock(&bridge_test_config_mutex)
 	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
 
 	// Explicit invalid env ensures bridge_read_vault_key() returns false (does not fall through to file)
 	prev_key, had_key := os.lookup_env("HEIMDALL_VAULT_KEY", context.allocator)
@@ -376,15 +394,12 @@ test_shell_start_fallback_when_vault_key_unconfigured :: proc(t: ^testing.T) {
 // AES-256-GCM encrypted PTY output streaming, input decryption, and catch-up snapshots.
 // ---------------------------------------------------------------------------
 
-@(private = "file")
-test_shell_stream_mutex: sync.Mutex
-
 @(test)
 test_pty_stream_emit_frame_encrypted_when_vault_active :: proc(t: ^testing.T) {
-	sync.mutex_lock(&test_shell_stream_mutex)
-	defer sync.mutex_unlock(&test_shell_stream_mutex)
 	sync.mutex_lock(&bridge_test_config_mutex)
 	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
 
 	bridge_pty_stream_reset()
 	defer bridge_pty_stream_reset()
@@ -439,10 +454,10 @@ test_pty_stream_emit_frame_encrypted_when_vault_active :: proc(t: ^testing.T) {
 
 @(test)
 test_pty_stream_emit_frame_plaintext_when_vault_unconfigured :: proc(t: ^testing.T) {
-	sync.mutex_lock(&test_shell_stream_mutex)
-	defer sync.mutex_unlock(&test_shell_stream_mutex)
 	sync.mutex_lock(&bridge_test_config_mutex)
 	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
 
 	bridge_pty_stream_reset()
 	defer bridge_pty_stream_reset()
@@ -493,10 +508,10 @@ test_pty_stream_emit_frame_plaintext_when_vault_unconfigured :: proc(t: ^testing
 
 @(test)
 test_pty_stream_monotonic_nonce_counter_no_reuse :: proc(t: ^testing.T) {
-	sync.mutex_lock(&test_shell_stream_mutex)
-	defer sync.mutex_unlock(&test_shell_stream_mutex)
 	sync.mutex_lock(&bridge_test_config_mutex)
 	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
 
 	bridge_pty_stream_reset()
 	defer bridge_pty_stream_reset()
@@ -582,10 +597,10 @@ test_pty_stream_monotonic_nonce_counter_no_reuse :: proc(t: ^testing.T) {
 
 @(test)
 test_pty_stream_screen_payload_encryption :: proc(t: ^testing.T) {
-	sync.mutex_lock(&test_shell_stream_mutex)
-	defer sync.mutex_unlock(&test_shell_stream_mutex)
 	sync.mutex_lock(&bridge_test_config_mutex)
 	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
 
 	bridge_pty_stream_reset()
 	defer bridge_pty_stream_reset()
@@ -633,10 +648,18 @@ test_pty_stream_screen_payload_encryption :: proc(t: ^testing.T) {
 	}
 }
 
+@(private = "file")
+Shell_Pty_Input_Mock_Ctx :: struct {
+	listener_fd: posix.FD,
+	received:    [dynamic]byte,
+}
+
 @(test)
 test_shell_pty_input_decrypts_valid_enc_b64 :: proc(t: ^testing.T) {
 	sync.mutex_lock(&bridge_test_config_mutex)
 	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
 
 	prev_key, had_key := os.lookup_env("HEIMDALL_VAULT_KEY", context.allocator)
 	defer {
@@ -648,6 +671,67 @@ test_shell_pty_input_decrypts_valid_enc_b64 :: proc(t: ^testing.T) {
 		}
 	}
 	_ = os.set_env("HEIMDALL_VAULT_KEY", TEST_ENC_VAULT_KEY)
+
+	sock_path := fmt.tprintf("/tmp/test-shell-pty-input-%d.sock", os.get_pid())
+	cpath := strings.clone_to_cstring(sock_path, context.temp_allocator)
+	_ = posix.unlink(cpath)
+	defer _ = posix.unlink(cpath)
+
+	lfd := posix.socket(.UNIX, .STREAM)
+	testing.expect(t, lfd >= 0, "unix socket created")
+	if lfd < 0 do return
+	defer _ = posix.close(lfd)
+
+	addr: posix.sockaddr_un
+	when ODIN_OS == .Darwin || ODIN_OS == .FreeBSD || ODIN_OS == .NetBSD || ODIN_OS == .OpenBSD {
+		addr.sun_len = c.uchar(size_of(addr))
+	}
+	addr.sun_family = .UNIX
+	for i in 0 ..< len(sock_path) do addr.sun_path[i] = c.char(sock_path[i])
+	testing.expect(t, posix.bind(lfd, (^posix.sockaddr)(&addr), posix.socklen_t(size_of(addr))) == .OK, "bind succeeded")
+	testing.expect(t, posix.listen(lfd, 4) == .OK, "listen succeeded")
+
+	sync.mutex_lock(&pty_host_daemon_lock)
+	prev_sock := pty_host_daemon_socket
+	prev_started := pty_host_daemon_started
+	pty_host_daemon_socket = sock_path
+	pty_host_daemon_started = true
+	sync.mutex_unlock(&pty_host_daemon_lock)
+	defer {
+		sync.mutex_lock(&pty_host_daemon_lock)
+		pty_host_daemon_socket = prev_sock
+		pty_host_daemon_started = prev_started
+		sync.mutex_unlock(&pty_host_daemon_lock)
+	}
+
+	mock_ctx := Shell_Pty_Input_Mock_Ctx{
+		listener_fd = lfd,
+		received    = make([dynamic]byte, runtime.heap_allocator()),
+	}
+	defer delete(mock_ctx.received)
+
+	srv := thread.create_and_start_with_data(&mock_ctx, proc(raw: rawptr) {
+		ctx := (^Shell_Pty_Input_Mock_Ctx)(raw)
+		// Connection 1: Ping -> Pong
+		c1 := posix.accept(ctx.listener_fd, nil, nil)
+		if c1 >= 0 {
+			if frame, ok := pty_host_read_frame(c1); ok {
+				delete(frame)
+				pong := [5]byte{0, 0, 0, 1, PTY_HOST_T_PONG}
+				_ = pty_host_send_all(c1, pong[:])
+			}
+			_ = posix.close(c1)
+		}
+		// Connection 2: Input frame
+		c2 := posix.accept(ctx.listener_fd, nil, nil)
+		if c2 >= 0 {
+			if frame, ok := pty_host_read_frame(c2); ok {
+				for b in frame do append(&ctx.received, b)
+				delete(frame)
+			}
+			_ = posix.close(c2)
+		}
+	})
 
 	input_keystrokes := "uname -a\n"
 	enc_b64, enc_ok := bridge_pty_stream_encrypt_chunk(
@@ -662,15 +746,22 @@ test_shell_pty_input_decrypts_valid_enc_b64 :: proc(t: ^testing.T) {
 	cmd := fmt.tprintf(`{{"type":"shell_pty_input","command_id":"cmd_input_valid","shell_id":"sh_nonexistent_valid","data_b64":"%s","is_encrypted":true}}`, enc_b64)
 	bridge_hub_handle_shell_pty_input(nil, cmd)
 
+	_ = posix.shutdown(lfd, .RDWR)
+	thread.join(srv)
+	thread.destroy(srv)
+
 	res, res_ok := bridge_runtime_cached_command("cmd_input_valid")
 	testing.expect(t, res_ok, "command result cached")
 	testing.expect(t, strings.contains(res, "succeeded"), "valid encrypted input is decrypted and dispatched to pty")
+	testing.expect(t, strings.has_suffix(string(mock_ctx.received[:]), input_keystrokes), "pty received decrypted keystrokes")
 }
 
 @(test)
 test_shell_pty_input_decrypts_valid_armored_data_b64 :: proc(t: ^testing.T) {
 	sync.mutex_lock(&bridge_test_config_mutex)
 	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
 
 	prev_key, had_key := os.lookup_env("HEIMDALL_VAULT_KEY", context.allocator)
 	defer {
@@ -706,6 +797,8 @@ test_shell_pty_input_decrypts_valid_armored_data_b64 :: proc(t: ^testing.T) {
 test_shell_pty_input_drops_tampered_enc_b64 :: proc(t: ^testing.T) {
 	sync.mutex_lock(&bridge_test_config_mutex)
 	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
 
 	prev_key, had_key := os.lookup_env("HEIMDALL_VAULT_KEY", context.allocator)
 	defer {
@@ -748,6 +841,8 @@ test_shell_pty_input_drops_tampered_enc_b64 :: proc(t: ^testing.T) {
 test_shell_pty_input_drops_mismatched_key_enc_b64 :: proc(t: ^testing.T) {
 	sync.mutex_lock(&bridge_test_config_mutex)
 	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
 
 	prev_key, had_key := os.lookup_env("HEIMDALL_VAULT_KEY", context.allocator)
 	defer {
@@ -782,6 +877,8 @@ test_shell_pty_input_drops_mismatched_key_enc_b64 :: proc(t: ^testing.T) {
 test_shell_pty_input_drops_plaintext_when_vault_active :: proc(t: ^testing.T) {
 	sync.mutex_lock(&bridge_test_config_mutex)
 	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
 
 	prev_key, had_key := os.lookup_env("HEIMDALL_VAULT_KEY", context.allocator)
 	defer {

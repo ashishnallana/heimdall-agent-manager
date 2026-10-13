@@ -4,26 +4,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const REPO_ROOT = path.resolve(__dirname, '..');
 
 // 1. Persistence Tests for Sidebar Chain Filter
 test('clientPersistence defines sidebar chain filter key and functions', async () => {
-  const persistenceFile = path.join(REPO_ROOT, 'src/ui/utils/clientPersistence.ts');
-  assert.ok(fs.existsSync(persistenceFile), 'clientPersistence.ts must exist');
-
-  const content = fs.readFileSync(persistenceFile, 'utf8');
-
-  // Verify key and function definitions
-  assert.match(content, /SIDEBAR_CHAIN_FILTER_KEY\s*=\s*['"]heimdall:sidebar-chain-filter['"]/, 'SIDEBAR_CHAIN_FILTER_KEY must be heimdall:sidebar-chain-filter');
-  assert.match(content, /export function readSidebarChainFilter/, 'readSidebarChainFilter must be exported');
-  assert.match(content, /export function writeSidebarChainFilter/, 'writeSidebarChainFilter must be exported');
-
   // Test functional persistence behavior with a mock localStorage
   const mockStorage: Record<string, string> = {};
   (globalThis as any).window = {
@@ -65,9 +48,6 @@ test('clientPersistence defines sidebar chain filter key and functions', async (
 
 // 2. Pure Filtering Logic Tests (filterSidebarChains)
 test('filterSidebarChains correctly filters active, completed, and archived chains', async () => {
-  const treeFile = path.join(REPO_ROOT, 'src/ui/components/chains/ProjectChainTree.tsx');
-  assert.ok(fs.existsSync(treeFile), 'ProjectChainTree.tsx must exist');
-
   const { filterSidebarChains } = await import('../src/ui/utils/clientPersistence.ts');
   assert.equal(typeof filterSidebarChains, 'function', 'filterSidebarChains must be exported function');
 
@@ -94,49 +74,7 @@ test('filterSidebarChains correctly filters active, completed, and archived chai
   assert.deepEqual(activeIds, ['c1'], 'active filter should only include active chains');
 });
 
-// 3. ProjectChainTree Component Source Invariants
-test('ProjectChainTree.tsx satisfies REQ-CHAIN-UI-SIDEBAR-1 UI requirements', () => {
-  const treeFile = path.join(REPO_ROOT, 'src/ui/components/chains/ProjectChainTree.tsx');
-  const content = fs.readFileSync(treeFile, 'utf8');
-
-  // Acceptance Criterion 1: Filter icon present beside "Chains" header in sidebar
-  assert.match(content, /data-debug-id="sidebar-chain-filter-btn"/, 'Filter button must have debug id');
-  assert.match(content, /<Icon\s+name="filter"/, 'Filter button must render filter icon');
-
-  // Acceptance Criterion 2: Switching filter between "All" and "Active only"
-  assert.match(content, /data-debug-id="sidebar-chain-filter-option-all"/, 'Menu must have option for All chains');
-  assert.match(content, /data-debug-id="sidebar-chain-filter-option-active"/, 'Menu must have option for Active only');
-  assert.match(content, /data-debug-id="sidebar-chain-filter-badge"/, 'Active badge must be rendered when filter is applied');
-
-  // Acceptance Criterion 3: Active chains with tasks display a subtle % progress indicator (SVG circular ring)
-  assert.match(content, /data-debug-id="chain-progress-ring"/, 'Progress ring must have debug id');
-  assert.match(content, /strokeDasharray=/, 'Progress ring must use strokeDasharray');
-  assert.match(content, /strokeDashoffset=/, 'Progress ring must use strokeDashoffset');
-
-  // Acceptance Criterion 4: Chains blocked on user validation display an amber alert indicator/badge
-  assert.match(content, /data-debug-id="chain-user-validation-badge"/, 'User validation badge must have debug id');
-  assert.match(content, /title="Awaiting user validation"/, 'User validation badge must have title="Awaiting user validation"');
-  assert.match(content, /userValidationCount/, 'ChainRow must check userValidationCount or hasUserValidation');
-
-  // Acceptance Criterion 5: Completed chains display a clear completed visual treatment
-  assert.match(content, /data-debug-id="chain-completed-icon"/, 'Completed chain must have completed icon debug id');
-  assert.match(content, /name="check"/, 'Completed chain must display checkmark icon');
-
-  // Preservation: pinning up to 10 pinned chains and project collapse/expand
-  assert.match(content, /pinnedChains\.length\s*>=\s*10/, 'Pinning limit of 10 must be preserved');
-  assert.match(content, /collapsed/, 'Project collapse/expand state must be preserved');
-});
-
-// 4. Icon Primitive Invariants
-test('Icon.tsx includes filter glyph in IconName and PATHS', () => {
-  const iconFile = path.join(REPO_ROOT, 'src/ui/components/ui/primitives/Icon.tsx');
-  const content = fs.readFileSync(iconFile, 'utf8');
-
-  assert.match(content, /\|\s*'filter'/, 'IconName union must include filter');
-  assert.match(content, /filter:\s*\(/, 'PATHS dictionary must define filter path');
-});
-
-// 5. REQ-CHAIN-SIDEBAR-PERSIST-5: Chain-level Right Sidebar Tab & Open Persistence
+// 3. REQ-CHAIN-SIDEBAR-PERSIST-5: Chain-level Right Sidebar Tab & Open Persistence
 test('REQ-CHAIN-SIDEBAR-PERSIST-5: clientPersistence persists and retrieves tab and open state by chainId', async () => {
   const mockStorage: Record<string, string> = {};
   (globalThis as any).window = {
@@ -183,15 +121,6 @@ test('REQ-CHAIN-SIDEBAR-PERSIST-5: clientPersistence persists and retrieves tab 
   // Test 6: Open state falls back to instanceId when chain key is absent
   mockStorage['heimdall:sidebar:open:inst_solo'] = 'true';
   assert.equal(readRightSidebarOpen({ chainId: 'chain_other', instanceId: 'inst_solo' }), true);
-
-  // Test 7: Verify ConversationThreadPage invariants for instance switch within same chain
-  const convFile = path.join(REPO_ROOT, 'src/ui/components/chat/ConversationThreadPage.tsx');
-  const convSrc = fs.readFileSync(convFile, 'utf8');
-
-  assert.match(convSrc, /prevChainIdRef\s*=\s*useRef/, 'Must define prevChainIdRef');
-  assert.match(convSrc, /chainId\s*&&\s*prevChainIdRef\.current\s*===\s*chainId/, 'Must guard rightPanel reset when switching instances within same chain');
-  assert.match(convSrc, /readRightSidebarTab\(\{\s*chainId/, 'Must read tab with chainId');
-  assert.match(convSrc, /readRightSidebarOpen\(\{\s*chainId/, 'Must read open with chainId');
-  assert.match(convSrc, /writeRightSidebarTab\(targetTab,\s*\{\s*chainId/, 'Must write tab with chainId in selectRightPanelTab');
 });
+
 

@@ -10,6 +10,7 @@
 package hub_search_scope_validation_test
 
 import "core:fmt"
+import "core:testing"
 import "core:os"
 import "core:strings"
 import domain "odin_test:hub/domain"
@@ -39,6 +40,12 @@ ALIAS_CASES :: [?][2]string{
 	{"artifact", "artifact"}, {"artifacts", "artifact"},
 	{"memory", "memory"}, {"memories", "memory"},
 	{"skill", "skill"}, {"skills", "skill"},
+}
+
+@(test)
+test_hub_search_scope_validation_test :: proc(t: ^testing.T) {
+	_ = t
+	main()
 }
 
 main :: proc() {

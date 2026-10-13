@@ -21,6 +21,7 @@ package hub_ct_title_lifecycle_test
 import "core:fmt"
 import "core:os"
 import "core:strings"
+import "core:testing"
 import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
@@ -177,6 +178,12 @@ wire_repos :: proc() {
 	idg = platform.ID_Generator{ctx = nil, generate = fid}
 }
 
+@(test)
+test_hub_ct_title_lifecycle :: proc(t: ^testing.T) {
+	_ = t
+	main()
+}
+
 main :: proc() {
 	f.counters = make(map[string]int)
 	f.now = "2026-07-22T10:00:00Z"
@@ -189,8 +196,23 @@ main :: proc() {
 	test_agent_to_agent_triggers_nudge()
 	test_set_title_marks_source()
 	test_normalize_title_source()
+	test_conversation_title_from_input()
 
 	fmt.println("PASS: hub CT title lifecycle (counter, default title, activity-gating, guardrails, set-title source)")
+}
+
+// --- PS-7: conversation title is never derived from initial message body -----
+test_conversation_title_from_input :: proc() {
+	default_title := "Reviewer #7"
+	check(content_service.conversation_title_from_input("", default_title) == default_title,
+		"no explicit title -> falls back to the per-run default, NEVER the initial message body")
+	title_no_explicit := content_service.conversation_title_from_input("", default_title)
+	check(!strings.contains(title_no_explicit, "investigate"),
+		"initial body text must not leak into the title")
+	check(content_service.conversation_title_from_input("  My   Chat  ", default_title) == "My Chat",
+		"explicit title is honored (whitespace-normalized)")
+	check(content_service.conversation_title_from_input("", "") == "",
+		"empty explicit + empty fallback yields empty (caller supplies default)")
 }
 
 // --- REQ-1/REQ-2: per-agent global counter + "<name> #n" default title ------

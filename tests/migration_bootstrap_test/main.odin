@@ -30,11 +30,18 @@ import "core:c"
 import "core:fmt"
 import "core:os"
 import "core:strings"
+import "core:testing"
 import sqlite "odin_test:hub/repository/sqlite"
 
 DEFAULT_MIGRATIONS_DIR :: "src/hub/repository/sqlite/migrations"
 
 failures := 0
+
+@(test)
+test_migration_bootstrap :: proc(t: ^testing.T) {
+	main()
+	testing.expect_value(t, failures, 0)
+}
 
 fail :: proc(msg: string) {
 	fmt.eprintfln("FAIL: %s", msg)
@@ -124,8 +131,9 @@ assert_bug14_anchors :: proc(conn: ^sqlite.Conn, label: string) {
 }
 
 main :: proc() {
+	failures = 0
 	migrations_dir := DEFAULT_MIGRATIONS_DIR
-	if len(os.args) > 1 do migrations_dir = os.args[1]
+	if len(os.args) > 1 && os.exists(os.args[1]) do migrations_dir = os.args[1]
 
 	tmp := "/tmp/ham-migration-bootstrap-test"
 	os.make_directory(tmp)

@@ -1,25 +1,13 @@
+// Behavioral tests for shell session HTTP endpoints, list JSON serialization, preview URL derivation, and bridge offline handling.
 package http
 
-// REQ-SHELL-10 work item 3 / AC3 + AC6: the BRIDGE-OFFLINE SESSION STATE.
-//
-// The requirement: a session whose owning bridge is gone must not be presented as
-// plainly `running` (which asserts something we cannot see) nor as `failed`/`killed`
-// (which assert something we do not know). It needs a third reading — "the bridge that
-// owns this is gone; its true status is unknown until it returns" — which REQ-SHELL-6
-// §8 renders.
-//
-// WHY THE TESTS LIVE HERE rather than in the service package. The state is DERIVED at
-// serialization time from the live bridge registry, not stored on the row and not
-// written on disconnect. That is the design decision of this work item (see
-// shell_session_status_unknown for the full reasoning), and it puts the whole of the
-// behaviour in this package — so this is where it can be asserted end to end, against
-// the real registry rather than a fake of it.
-
+import bridge_runtime_service "odin_test:hub/service/bridge_runtime"
+import domain "odin_test:hub/domain"
+import project_service "odin_test:hub/service/project"
 import "core:strings"
 import "core:testing"
-import domain "odin_test:hub/domain"
-import bridge_runtime_service "odin_test:hub/service/bridge_runtime"
-import project_service "odin_test:hub/service/project"
+
+// --- Consolidated from shell_session_bridge_offline_test.odin ---
 
 @(private = "file")
 _offline_session :: proc(status: string) -> domain.Shell_Session {
@@ -131,4 +119,75 @@ test_superseded_teardown_does_not_flip_a_fresh_reconnect :: proc(t: ^testing.T) 
 		"a superseded connection's teardown must not evict the live reconnect")
 	testing.expect(t, strings.contains(body, "\"status_unknown\":false"),
 		"and so must not present a healthy bridge's sessions as status-unknown")
+}
+
+// --- Consolidated from shell_session_list_json_test.odin ---
+
+@(test)
+test_shell_session_list_json_has_more :: proc(t: ^testing.T) {
+	sessions := []domain.Shell_Session{
+		{session_id = "sh_a", bridge_id = "brg_1", status = "running"},
+		{session_id = "sh_b", bridge_id = "brg_2", status = "exited"},
+	}
+
+	// A full page: cursor present, has_more true.
+	more := _shell_session_list_json(sessions, "sh_b")
+	defer delete(more)
+	testing.expect(t, strings.contains(more, "\"next_cursor\":\"sh_b\""), "cursor echoed")
+	testing.expect(t, strings.contains(more, "\"has_more\":true"), "has_more true when a cursor was returned")
+	testing.expect(t, !strings.contains(more, "\"has_more\":false"), "not both spellings")
+
+	// The last page: no cursor, has_more false.
+	last := _shell_session_list_json(sessions, "")
+	defer delete(last)
+	testing.expect(t, strings.contains(last, "\"next_cursor\":\"\""), "empty cursor still emitted")
+	testing.expect(t, strings.contains(last, "\"has_more\":false"), "has_more false with no cursor")
+
+	// The keys existing consumers already read are untouched and still in order.
+	testing.expect(t, strings.contains(last, "\"ok\":true,\"sessions\":["), "envelope prefix unchanged")
+	testing.expect(t, strings.contains(last, "\"session_id\":\"sh_a\""), "first session present")
+	testing.expect(t, strings.contains(last, "\"session_id\":\"sh_b\""), "second session present")
+	testing.expect(t, strings.contains(last, "\"bridge_id\":\"brg_2\""), "sessions from more than one bridge serialize")
+
+	// An empty page is still a well-formed envelope, not a bare array.
+	none := _shell_session_list_json([]domain.Shell_Session{}, "")
+	defer delete(none)
+	testing.expect_value(t, none, "{\"ok\":true,\"sessions\":[],\"next_cursor\":\"\",\"has_more\":false}")
+}
+
+// --- Consolidated from shell_session_preview_url_test.odin ---
+
+@(private = "file")
+preview_url_test_session :: proc(port: int = 5173) -> domain.Shell_Session {
+	return domain.Shell_Session{session_id = "ss_1", server_port = port}
+}
+
+@(test)
+test_shell_session_preview_url_variants :: proc(t: ^testing.T) {
+	cases := []struct {
+		preview_origin: string,
+		ui_origin:      string,
+		port:           int,
+		expected:       string,
+	}{
+		{"https://preview.example", "https://hub.example", 5173, "https://preview.example/p/ss_1/"},
+		{"https://preview.example/", "https://hub.example", 5173, "https://preview.example/p/ss_1/"},
+		{"", "https://hub.example", 5173, "https://hub.example/api/v1/preview/ss_1/"},
+		{"", "", 5173, "/api/v1/preview/ss_1/"},
+		{"https://preview.example", "https://hub.example", 0, ""},
+	}
+	for tc in cases {
+		actual := shell_session_preview_url(preview_url_test_session(tc.port), tc.preview_origin, tc.ui_origin)
+		testing.expect_value(t, actual, tc.expected)
+		delete(actual)
+	}
+}
+
+@(test)
+test_shell_session_json_contains_preview_url :: proc(t: ^testing.T) {
+	b := strings.builder_make()
+	write_shell_session_json(&b, preview_url_test_session(), nil, "https://preview.example", "https://hub.example")
+	actual := strings.to_string(b)
+	defer delete(actual)
+	testing.expect(t, strings.contains(actual, `"preview_url":"https://preview.example/p/ss_1/"`))
 }

@@ -26,7 +26,7 @@ registry_durable_save :: proc(ctx: rawptr, instance: domain.Agent_Instance) -> (
 registry_durable_now :: proc(ctx: rawptr) -> string { return "2026-10-10T00:00:00Z" }
 
 @(test)
-runtime_expired_tombstone_cannot_override_durable_terminal_sequence :: proc(t: ^testing.T) {
+test_runtime_expired_tombstone_cannot_override_durable_terminal_sequence :: proc(t: ^testing.T) {
 	registry := new(project.Bridge_Runtime_Registry)
 	defer { bridge_runtime.runtime_command_cache_destroy(registry); free(registry) }
 	registry.limits.terminal_retention = time.Second

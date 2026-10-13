@@ -75,8 +75,8 @@ SUB_WIRE_TRUSTED_CIDRS := [1]string{"127.0.0.1/32"}
 
 sub_wire_setup :: proc(t: ^testing.T, tag: string) -> ^sub_wire_fixture {
 	f := new(sub_wire_fixture)
-	f.db_path = fmt.tprintf("/tmp/test_taskchain_sub_wire_%s_%d.db", tag, os.get_pid())
-	os.remove(f.db_path)
+	f.db_path = ":memory:"
+	
 
 	conn, open_ok, open_err := sqlite.open(f.db_path)
 	testing.expect(t, open_ok, "sqlite open ok")
@@ -93,7 +93,7 @@ sub_wire_setup :: proc(t: ^testing.T, tag: string) -> ^sub_wire_fixture {
 	f.us_repo = sqlite.new_user_repository(&f.us_impl, &f.conn)
 
 	f.clock = platform.real_clock()
-	f.ids = platform.real_id_generator()
+	f.ids = http_test_id_generator()
 
 	f.ag_svc = agent_service.new_agent_service(&f.ag_repo, &f.br_repo, &f.clock, &f.ids)
 	f.tc_svc = taskchain_service.new_taskchain_service(&f.tc_repo, &f.ag_repo, &f.clock, &f.ids)
@@ -195,7 +195,7 @@ sub_wire_setup :: proc(t: ^testing.T, tag: string) -> ^sub_wire_fixture {
 sub_wire_teardown :: proc(f: ^sub_wire_fixture) {
 	if f == nil do return
 	sqlite.close(&f.conn)
-	os.remove(f.db_path)
+	
 	delete(f.bridge_id)
 	delete(f.bridge_token)
 	free(f)

@@ -40,7 +40,7 @@ masked_text_frame :: proc(text: string) -> [dynamic]byte {
 // pre-existing bridge_ws_take_frame_flags_nontext_fatal test pins that a close is still
 // fatal (the connection still ends); this pins that it is now fatal for the RIGHT reason.
 @(test)
-bridge_ws_close_frame_reads_as_clean_close :: proc(t: ^testing.T) {
+test_bridge_ws_close_frame_reads_as_clean_close :: proc(t: ^testing.T) {
 	reader := Bridge_WS_Reader{}
 	defer bridge_ws_reader_destroy(&reader)
 	append(&reader.pending, 0x88, 0x80, 0x00, 0x00, 0x00, 0x00) // masked, empty close
@@ -54,7 +54,7 @@ bridge_ws_close_frame_reads_as_clean_close :: proc(t: ^testing.T) {
 // distinguishable from the clean close above — these two shared a single `fatal=true`
 // return before this change.
 @(test)
-bridge_ws_64bit_length_reads_as_fatal_desync :: proc(t: ^testing.T) {
+test_bridge_ws_64bit_length_reads_as_fatal_desync :: proc(t: ^testing.T) {
 	reader := Bridge_WS_Reader{}
 	defer bridge_ws_reader_destroy(&reader)
 	// masked text frame claiming an invalid 64-bit length (high bit set, forbidden by RFC 6455 §5.2)
@@ -68,7 +68,7 @@ bridge_ws_64bit_length_reads_as_fatal_desync :: proc(t: ^testing.T) {
 // A partial frame is NOT a teardown — it means "need more bytes". If this regressed into
 // a fatal reason, every coalesced/split frame would kill the bridge connection.
 @(test)
-bridge_ws_partial_frame_is_not_a_teardown :: proc(t: ^testing.T) {
+test_bridge_ws_partial_frame_is_not_a_teardown :: proc(t: ^testing.T) {
 	reader := Bridge_WS_Reader{}
 	defer bridge_ws_reader_destroy(&reader)
 	append(&reader.pending, 0x81, 0x85, 0x00, 0x00, 0x00, 0x00, 'h') // claims 5, has 1
@@ -81,7 +81,7 @@ bridge_ws_partial_frame_is_not_a_teardown :: proc(t: ^testing.T) {
 // A successful read must clear any reason left over from a previous fatal classification
 // on the same reader, so a later teardown cannot inherit a stale cause.
 @(test)
-bridge_ws_successful_read_clears_stale_reason :: proc(t: ^testing.T) {
+test_bridge_ws_successful_read_clears_stale_reason :: proc(t: ^testing.T) {
 	reader := Bridge_WS_Reader{}
 	defer bridge_ws_reader_destroy(&reader)
 	reader.fatal_reason = .Fatal_Frame
@@ -97,7 +97,7 @@ bridge_ws_successful_read_clears_stale_reason :: proc(t: ^testing.T) {
 // Every reason must render as a distinct, non-empty, allocation-free token — a log line
 // whose reasons collide would defeat the task.
 @(test)
-bridge_ws_reason_strings_are_distinct :: proc(t: ^testing.T) {
+test_bridge_ws_reason_strings_are_distinct :: proc(t: ^testing.T) {
 	reasons := []Bridge_WS_Disconnect_Reason{
 		.None, .Clean_Close, .Read_Deadline, .Fatal_Frame,
 		.Recv_Error, .Connection_Replaced, .Frame_Rejected, .Write_Failed,
@@ -119,7 +119,7 @@ bridge_ws_reason_strings_are_distinct :: proc(t: ^testing.T) {
 // the suppressed COUNT survives to the next window — a storm is bounded but never
 // silent.
 @(test)
-bridge_ws_log_limiter_bounds_a_reconnect_storm :: proc(t: ^testing.T) {
+test_bridge_ws_log_limiter_bounds_a_reconnect_storm :: proc(t: ^testing.T) {
 	// Private to this test: nothing else can clear or age it mid-loop.
 	lim := Bridge_WS_Log_Limiter{}
 	now := i64(1_000_000_000_000)
@@ -144,7 +144,7 @@ bridge_ws_log_limiter_bounds_a_reconnect_storm :: proc(t: ^testing.T) {
 // One flapping bridge must not consume another bridge's budget — per-bridge windows,
 // not one global one.
 @(test)
-bridge_ws_log_limiter_budgets_are_per_bridge :: proc(t: ^testing.T) {
+test_bridge_ws_log_limiter_budgets_are_per_bridge :: proc(t: ^testing.T) {
 	lim := Bridge_WS_Log_Limiter{}
 	now := i64(2_000_000_000_000)
 	for i in 0 ..< 50 {
@@ -159,7 +159,7 @@ bridge_ws_log_limiter_budgets_are_per_bridge :: proc(t: ^testing.T) {
 // More concurrent bridges than there are slots must degrade by EVICTION, never by
 // refusing to log or by running off the end of the table.
 @(test)
-bridge_ws_log_limiter_survives_more_bridges_than_slots :: proc(t: ^testing.T) {
+test_bridge_ws_log_limiter_survives_more_bridges_than_slots :: proc(t: ^testing.T) {
 	lim := Bridge_WS_Log_Limiter{}
 	now := i64(3_000_000_000_000)
 	ids := make([dynamic]string)

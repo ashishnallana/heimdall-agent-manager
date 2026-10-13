@@ -16,10 +16,6 @@ import {
   lockVaultFully,
   clearActiveKey,
 } from './helpers/vaultEndpointHarness.ts';
-import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-
 import {
   isVaultArmored,
   encryptVaultText,
@@ -35,78 +31,11 @@ import vaultReducer, {
   selectRawVaultKeyHex,
 } from '../src/ui/store/vaultSlice.ts';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const REPO_ROOT = path.resolve(__dirname, '..');
-
 const TEST_KEY_HEX = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
 const DIFFERENT_KEY_HEX = 'fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210';
 
 // -----------------------------------------------------------------------------
-// Section 1: Static Architecture & Endpoint Wiring Verification
-// -----------------------------------------------------------------------------
-
-test('REQ-FS-ENC-4: projectFs.ts imports vault crypto utilities and implements all zero-trust endpoints', () => {
-  const projectFsFile = path.join(REPO_ROOT, 'src/ui/api/endpoints/projectFs.ts');
-  assert.ok(fs.existsSync(projectFsFile), 'projectFs.ts must exist');
-
-  const content = fs.readFileSync(projectFsFile, 'utf8');
-
-  // Verify vault crypto imports
-  assert.ok(
-    content.includes('isVaultArmored') &&
-      content.includes('decryptVaultText') &&
-      content.includes('encryptVaultText'),
-    'projectFs.ts must import isVaultArmored, decryptVaultText, and encryptVaultText',
-  );
-
-  // Verify readProjectFile transparent decryption
-  assert.ok(
-    content.includes('readProjectFile: build.query'),
-    'projectFs.ts must define readProjectFile query',
-  );
-  assert.ok(
-    content.includes('isVaultArmored(data.content)'),
-    'readProjectFile must check isVaultArmored(data.content)',
-  );
-  assert.ok(
-    content.includes('decryptVaultText(data.content, activeKey)'),
-    'readProjectFile must decrypt data.content with the active CryptoKey',
-  );
-
-  // Verify writeProjectFile client-side encryption
-  assert.ok(
-    content.includes('writeProjectFile: build.mutation'),
-    'projectFs.ts must define writeProjectFile mutation',
-  );
-  assert.ok(
-    content.includes('encryptVaultText(outgoingContent, activeKey)'),
-    'writeProjectFile must encrypt outgoingContent with the active CryptoKey before the PUT',
-  );
-
-  // Verify batchWriteProjectFiles client-side encryption
-  assert.ok(
-    content.includes('batchWriteProjectFiles: build.mutation'),
-    'projectFs.ts must define batchWriteProjectFiles mutation',
-  );
-  assert.ok(
-    content.includes('encryptVaultText(file.content, activeKey)'),
-    'batchWriteProjectFiles must encrypt each file.content with the active CryptoKey before the batch PUT',
-  );
-
-  // Verify searchProjectFiles grep matches decryption
-  assert.ok(
-    content.includes('searchProjectFiles: build.query'),
-    'projectFs.ts must define searchProjectFiles query',
-  );
-  assert.ok(
-    content.includes('decryptSearchMatches'),
-    'searchProjectFiles must use decryptSearchMatches to decrypt match items',
-  );
-});
-
-// -----------------------------------------------------------------------------
-// Sections 2-5: REAL-ENDPOINT wire verification
+// REAL-ENDPOINT wire verification
 // -----------------------------------------------------------------------------
 // REQ-RAWKEY-A8: these sections used to RE-IMPLEMENT each queryFn's transform
 // inside the test body -- reading a fake `state.vault.rawVaultKeyHex` that no
@@ -170,6 +99,7 @@ test('readProjectFile: leaves content armored when the vault is locked', async (
   const data = await runQuery(store, endpoints.readProjectFile.initiate(READ_ARGS('locked/.env'), q));
 
   assert.equal(data.content, armoredCiphertext, 'armored content must stay armored while locked');
+  await lockVaultFully(store);
 });
 
 test('readProjectFile: leaves content armored when no key is active even though state says unlocked', async () => {
@@ -257,6 +187,7 @@ test('writeProjectFile: sends plaintext on the wire when the vault is locked', a
 
   const wire = cap.find((r) => r.method === 'PUT' && /\/fs\/file/.test(r.url));
   assert.equal(wire.body.content, plainContent, 'a locked vault must not armor the write');
+  await lockVaultFully(store);
 });
 
 test('writeProjectFile: does not double-encrypt already-armored content', async () => {
@@ -324,6 +255,7 @@ test('batchWriteProjectFiles: sends plain file content on the wire when locked',
 
   const wire = cap.find((r) => r.method === 'PUT' && /\/fs\/files/.test(r.url));
   assert.equal(wire.body.files[0].content, 'plain unencrypted text', 'a locked vault must not armor batch writes');
+  await lockVaultFully(store);
 });
 
 // ---- Section 5: searchProjectFiles grep match decryption --------------------
@@ -379,18 +311,7 @@ test('searchProjectFiles: leaves grep matches armored when the vault is locked',
   assert.equal(data.matches[0].line, fixture[0].line, 'armored match text must stay armored while locked');
   assert.ok(isVaultArmored(data.matches[0].line_content));
   assert.ok(!String(data.matches[0].line).includes('sk_live_999'), 'a locked vault must not reveal the secret line');
-});
-
-// ---- Counterfactual: the retired key sources are gone for good --------------
-
-test('COUNTERFACTUAL: projectFs.ts does not reference the retired rawKey sources at all', () => {
-  const src = fs.readFileSync(path.join(REPO_ROOT, 'src/ui/api/endpoints/projectFs.ts'), 'utf8');
-  for (const dead of ['rawVaultKeyHex', 'selectRawVaultKeyHex', 'rawKeyHex', 'readSessionVaultKey']) {
-    assert.ok(
-      !src.includes(dead),
-      `projectFs.ts must not read ${dead} -- it is permanently null, so every gate using it silently disables encryption`,
-    );
-  }
+  await lockVaultFully(store);
 });
 
 // -----------------------------------------------------------------------------

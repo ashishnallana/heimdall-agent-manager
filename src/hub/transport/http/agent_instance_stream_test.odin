@@ -337,7 +337,7 @@ test_agent_instance_stream_validation_and_permissions :: proc(t: ^testing.T) {
 	}
 
 	clock := platform.real_clock()
-	ids := platform.real_id_generator()
+	ids := http_test_id_generator()
 	ag_svc := agent_service.new_agent_service(&agent_repo, nil, &clock, &ids)
 
 	h := Agent_Handlers{
@@ -425,7 +425,7 @@ test_agent_instance_stream_handshake_and_ready_frame :: proc(t: ^testing.T) {
 	}
 
 	clock := platform.real_clock()
-	ids := platform.real_id_generator()
+	ids := http_test_id_generator()
 	ag_svc := agent_service.new_agent_service_with_runtime(&agent_repo, nil, nil, nil, nil, mock_sink, nil, &clock, &ids)
 
 	shell_svc := shell_session_svc.new_shell_session_service(repo = nil, bridge_command_sink = mock_sink, event_bus = nil, ids = &ids, clock = &clock)
@@ -454,7 +454,7 @@ test_agent_instance_stream_handshake_and_ready_frame :: proc(t: ^testing.T) {
 
 	th := thread.create_and_start_with_data(rawptr(&runner), run_agent_stream_handler_thread)
 	defer {
-		net.close(pair.client)
+		net.close(pair.client); pair.client = net.TCP_Socket(0)
 		thread.join(th)
 		thread.destroy(th)
 	}

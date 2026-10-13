@@ -13,6 +13,7 @@
 package hub_search_owner_isolation_test
 
 import "core:fmt"
+import "core:testing"
 import "core:os"
 import "core:strings"
 import domain "odin_test:hub/domain"
@@ -43,6 +44,12 @@ Q :: struct {
 	not_in_chain_ids:        string,
 	not_in_project_ids:      string,
 	not_in_conversation_ids: string,
+}
+
+@(test)
+test_hub_search_owner_isolation_test :: proc(t: ^testing.T) {
+	_ = t
+	main()
 }
 
 main :: proc() {

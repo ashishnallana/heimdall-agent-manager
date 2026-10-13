@@ -8,10 +8,8 @@ import iface "odin_test:hub/repository/iface"
 
 @(test)
 test_lsp_server_config_repo_sqlite_lifecycle :: proc(t: ^testing.T) {
-	db_path := fmt.tprintf("/tmp/test_lsp_server_configs_%d.db", os.get_pid())
-	os.remove(db_path)
+	db_path := fmt.tprintf("/tmp/test_lsp_server_config_repo_%d.db", os.get_pid())
 	defer os.remove(db_path)
-
 	conn, open_ok, _ := open(db_path)
 	testing.expect(t, open_ok, "db open ok")
 	defer close(&conn)

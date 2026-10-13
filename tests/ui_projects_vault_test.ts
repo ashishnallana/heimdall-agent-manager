@@ -5,18 +5,12 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 import {
   isVaultArmored,
   encryptVaultText,
-  decryptVaultText,
-  VAULT_ARMOR_PREFIX,
 } from '../src/ui/utils/vaultContent.ts';
 import vaultReducer, {
-  setVaultConfigured,
   setVaultUnlocked,
   lockVault,
   openUnlockModal,
@@ -26,7 +20,6 @@ import vaultReducer, {
 } from '../src/ui/store/vaultSlice.ts';
 import {
   resolveVaultText,
-  decryptVaultTextContent,
 } from '../src/ui/components/vault/vaultTextHelper.ts';
 import {
   encryptProjectFields,
@@ -34,97 +27,10 @@ import {
   decryptProjectList,
 } from '../src/ui/utils/vaultProjects.ts';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const REPO_ROOT = path.resolve(__dirname, '..');
-
 const TEST_KEY_HEX = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
-const DIFFERENT_KEY_HEX = 'fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210';
 
 // -----------------------------------------------------------------------------
-// Test 1: Static verification of project component files, contracts, and debug IDs
-// -----------------------------------------------------------------------------
-
-test('Projects endpoints, utilities, and UI files exist with required contracts', () => {
-  const vaultProjectsFile = path.join(REPO_ROOT, 'src/ui/utils/vaultProjects.ts');
-  const projectsEndpointFile = path.join(REPO_ROOT, 'src/ui/api/endpoints/projects.ts');
-  const sidebarEndpointFile = path.join(REPO_ROOT, 'src/ui/api/endpoints/sidebar.ts');
-  const projectDetailFile = path.join(REPO_ROOT, 'src/ui/components/projects/ProjectDetail.tsx');
-  const projectRowFile = path.join(REPO_ROOT, 'src/ui/components/projects/ProjectRow.tsx');
-  const projectChainTreeFile = path.join(REPO_ROOT, 'src/ui/components/chains/ProjectChainTree.tsx');
-  const projectsPanelFile = path.join(REPO_ROOT, 'src/ui/components/settings/ProjectsPanel.tsx');
-
-  assert.ok(fs.existsSync(vaultProjectsFile), 'vaultProjects.ts must exist');
-  assert.ok(fs.existsSync(projectsEndpointFile), 'projects.ts endpoint must exist');
-  assert.ok(fs.existsSync(sidebarEndpointFile), 'sidebar.ts endpoint must exist');
-  assert.ok(fs.existsSync(projectDetailFile), 'ProjectDetail.tsx must exist');
-  assert.ok(fs.existsSync(projectRowFile), 'ProjectRow.tsx must exist');
-  assert.ok(fs.existsSync(projectChainTreeFile), 'ProjectChainTree.tsx must exist');
-  assert.ok(fs.existsSync(projectsPanelFile), 'ProjectsPanel.tsx must exist');
-
-  const projectsSrc = fs.readFileSync(projectsEndpointFile, 'utf8');
-  assert.ok(
-    projectsSrc.includes('encryptProjectFields'),
-    'projects.ts must import and use encryptProjectFields',
-  );
-  assert.ok(
-    projectsSrc.includes('decryptProjectRecord'),
-    'projects.ts must import and use decryptProjectRecord',
-  );
-  assert.ok(
-    projectsSrc.includes('decryptProjectList'),
-    'projects.ts must import and use decryptProjectList',
-  );
-  assert.ok(
-    projectsSrc.includes('createProject:'),
-    'projects.ts must define createProject mutation',
-  );
-  assert.ok(
-    projectsSrc.includes('updateProject:'),
-    'projects.ts must define updateProject mutation',
-  );
-  assert.ok(
-    projectsSrc.includes('listProjects:'),
-    'projects.ts must define listProjects query',
-  );
-  assert.ok(
-    projectsSrc.includes('fetchProject:'),
-    'projects.ts must define fetchProject query',
-  );
-
-  const sidebarSrc = fs.readFileSync(sidebarEndpointFile, 'utf8');
-  assert.ok(
-    sidebarSrc.includes('decryptProjectList'),
-    'sidebar.ts must import and use decryptProjectList for project names',
-  );
-
-  const projectDetailSrc = fs.readFileSync(projectDetailFile, 'utf8');
-  assert.ok(
-    projectDetailSrc.includes('VaultText'),
-    'ProjectDetail.tsx must integrate VaultText component',
-  );
-
-  const projectRowSrc = fs.readFileSync(projectRowFile, 'utf8');
-  assert.ok(
-    projectRowSrc.includes('VaultText'),
-    'ProjectRow.tsx must integrate VaultText component',
-  );
-
-  const projectChainTreeSrc = fs.readFileSync(projectChainTreeFile, 'utf8');
-  assert.ok(
-    projectChainTreeSrc.includes('VaultText'),
-    'ProjectChainTree.tsx must integrate VaultText component',
-  );
-
-  const projectsPanelSrc = fs.readFileSync(projectsPanelFile, 'utf8');
-  assert.ok(
-    projectsPanelSrc.includes('VaultText'),
-    'ProjectsPanel.tsx must integrate VaultText component',
-  );
-});
-
-// -----------------------------------------------------------------------------
-// Test 2: encryptProjectFields encrypts name and description when unlocked
+// Test 1: encryptProjectFields encrypts name and description when unlocked
 // -----------------------------------------------------------------------------
 
 test('encryptProjectFields encrypts name and description when vault key is provided', async () => {

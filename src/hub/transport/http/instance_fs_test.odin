@@ -12,7 +12,7 @@ import "core:strings"
 import "core:testing"
 
 @(test)
-instance_fs_list_command_json_contract :: proc(t: ^testing.T) {
+test_instance_fs_list_command_json_contract :: proc(t: ^testing.T) {
 	cmd := Instance_Fs_Command{
 		command_type = "agent_run_dir_list",
 		path = "skills",
@@ -31,7 +31,7 @@ instance_fs_list_command_json_contract :: proc(t: ^testing.T) {
 }
 
 @(test)
-instance_fs_read_command_json_contract :: proc(t: ^testing.T) {
+test_instance_fs_read_command_json_contract :: proc(t: ^testing.T) {
 	cmd := Instance_Fs_Command{
 		command_type = "agent_run_dir_read",
 		path = "AGENTS.md",
@@ -50,7 +50,7 @@ instance_fs_read_command_json_contract :: proc(t: ^testing.T) {
 }
 
 @(test)
-instance_fs_list_command_json_omits_unset_optionals :: proc(t: ^testing.T) {
+test_instance_fs_list_command_json_omits_unset_optionals :: proc(t: ^testing.T) {
 	// Zero-value list command (no hidden/cursor/limit): only the always-on fields.
 	cmd := Instance_Fs_Command{command_type = "agent_run_dir_list"}
 	out := instance_fs_command_json(cmd, "cmd_ifs_3", "inst_789")

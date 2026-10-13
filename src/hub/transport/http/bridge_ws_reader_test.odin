@@ -22,7 +22,7 @@ make_masked_text_frame :: proc(text: string, mask: [4]byte) -> [dynamic]byte {
 }
 
 @(test)
-bridge_ws_take_frame_decodes_single :: proc(t: ^testing.T) {
+test_bridge_ws_take_frame_decodes_single :: proc(t: ^testing.T) {
 	reader := Bridge_WS_Reader{}
 	defer bridge_ws_reader_destroy(&reader)
 	frame := make_masked_text_frame("{\"type\":\"bridge_heartbeat\"}", {0x11, 0x22, 0x33, 0x44})
@@ -39,7 +39,7 @@ bridge_ws_take_frame_decodes_single :: proc(t: ^testing.T) {
 }
 
 @(test)
-bridge_ws_take_frame_keeps_coalesced_second_frame :: proc(t: ^testing.T) {
+test_bridge_ws_take_frame_keeps_coalesced_second_frame :: proc(t: ^testing.T) {
 	// THE >16KB REGRESSION: a heartbeat/state frame coalesced in the same recv as an
 	// fs_read_file_result. The old per-call reader returned the first and DROPPED the
 	// second, so the fs result never reached the cache and the request timed out.
@@ -66,7 +66,7 @@ bridge_ws_take_frame_keeps_coalesced_second_frame :: proc(t: ^testing.T) {
 }
 
 @(test)
-bridge_ws_take_frame_waits_for_partial :: proc(t: ^testing.T) {
+test_bridge_ws_take_frame_waits_for_partial :: proc(t: ^testing.T) {
 	// A frame split across two recvs: the header + part of the payload arrive first
 	// (incomplete -> ok=false, not fatal, bytes retained), the rest arrives next.
 	reader := Bridge_WS_Reader{}
@@ -90,7 +90,7 @@ bridge_ws_take_frame_waits_for_partial :: proc(t: ^testing.T) {
 }
 
 @(test)
-bridge_ws_take_frame_flags_nontext_fatal :: proc(t: ^testing.T) {
+test_bridge_ws_take_frame_flags_nontext_fatal :: proc(t: ^testing.T) {
 	// A close frame (opcode 0x8) is fatal (as the previous reader treated any
 	// non-text frame), so the loop tears the connection down rather than spinning.
 	reader := Bridge_WS_Reader{}

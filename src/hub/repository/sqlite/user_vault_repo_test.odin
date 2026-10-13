@@ -8,10 +8,7 @@ import iface "odin_test:hub/repository/iface"
 
 @(test)
 test_user_vault_repo_sqlite_lifecycle :: proc(t: ^testing.T) {
-	db_path := fmt.tprintf("/tmp/test_user_vaults_%d.db", os.get_pid())
-	_ = os.remove(db_path)
-	defer _ = os.remove(db_path)
-
+	db_path := ":memory:"
 	conn, open_ok, _ := open(db_path)
 	testing.expect(t, open_ok, "db open ok")
 	defer close(&conn)

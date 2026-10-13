@@ -180,8 +180,8 @@ wire_persisted_pin :: proc(t: ^testing.T, f: ^wire_fixture, task_id: string) -> 
 
 wire_setup :: proc(t: ^testing.T, tag: string) -> ^wire_fixture {
 	f := new(wire_fixture)
-	f.db_path = fmt.tprintf("/tmp/test_task_bridge_wire_%s_%d.db", tag, os.get_pid())
-	os.remove(f.db_path)
+	f.db_path = ":memory:"
+	
 
 	conn, open_ok, open_err := sqlite.open(f.db_path)
 	testing.expect(t, open_ok, "sqlite open ok")
@@ -198,7 +198,7 @@ wire_setup :: proc(t: ^testing.T, tag: string) -> ^wire_fixture {
 	f.us_repo = sqlite.new_user_repository(&f.us_impl, &f.conn)
 
 	f.clock = platform.real_clock()
-	f.ids = platform.real_id_generator()
+	f.ids = http_test_id_generator()
 
 	f.ag_svc = agent_service.new_agent_service(&f.ag_repo, &f.br_repo, &f.clock, &f.ids)
 	f.tc_svc = taskchain_service.new_taskchain_service(&f.tc_repo, &f.ag_repo, &f.clock, &f.ids)
@@ -288,7 +288,7 @@ wire_setup :: proc(t: ^testing.T, tag: string) -> ^wire_fixture {
 
 wire_teardown :: proc(f: ^wire_fixture) {
 	sqlite.close(&f.conn)
-	os.remove(f.db_path)
+	
 	delete(f.bridge_token)
 	delete(f.bridge_pin)
 	delete(f.bridge_alt)

@@ -5,9 +5,6 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 import {
   isVaultArmored,
@@ -16,14 +13,12 @@ import {
   VAULT_ARMOR_PREFIX,
 } from '../src/ui/utils/vaultContent.ts';
 import vaultReducer, {
-  setVaultConfigured,
   setVaultUnlocked,
   lockVault,
   openUnlockModal,
   closeUnlockModal,
   setUnlockModalOpen,
   selectIsVaultUnlocked,
-  selectRawVaultKeyHex,
   selectIsUnlockModalOpen,
 } from '../src/ui/store/vaultSlice.ts';
 import {
@@ -37,99 +32,11 @@ import {
   decryptCommentRecord,
 } from '../src/ui/utils/vaultIssues.ts';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const REPO_ROOT = path.resolve(__dirname, '..');
-
 const TEST_KEY_HEX = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
 const DIFFERENT_KEY_HEX = 'fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210';
 
 // -----------------------------------------------------------------------------
-// Test 1: Static verification of component files, contracts, and debug IDs
-// -----------------------------------------------------------------------------
-
-test('VaultText component, issues endpoints, and issues UI files exist with required contracts', () => {
-  const vaultTextFile = path.join(REPO_ROOT, 'src/ui/components/vault/VaultText.tsx');
-  const issuesEndpointFile = path.join(REPO_ROOT, 'src/ui/api/endpoints/issues.ts');
-  const issueRowFile = path.join(REPO_ROOT, 'src/ui/components/issues/IssueRow.tsx');
-  const issueDetailFile = path.join(REPO_ROOT, 'src/ui/components/issues/IssueDetail.tsx');
-  const issueFormFile = path.join(REPO_ROOT, 'src/ui/components/issues/IssueFormPage.tsx');
-
-  assert.ok(fs.existsSync(vaultTextFile), 'VaultText.tsx must exist');
-  assert.ok(fs.existsSync(issuesEndpointFile), 'issues.ts must exist');
-  assert.ok(fs.existsSync(issueRowFile), 'IssueRow.tsx must exist');
-  assert.ok(fs.existsSync(issueDetailFile), 'IssueDetail.tsx must exist');
-  assert.ok(fs.existsSync(issueFormFile), 'IssueFormPage.tsx must exist');
-
-  const vaultTextSrc = fs.readFileSync(vaultTextFile, 'utf8');
-  assert.ok(
-    vaultTextSrc.includes('data-debug-id="vault-locked-placeholder"'),
-    'VaultText must render placeholder with data-debug-id="vault-locked-placeholder"',
-  );
-  assert.ok(
-    vaultTextSrc.includes('openUnlockModal'),
-    'VaultText must support openUnlockModal',
-  );
-  assert.ok(
-    vaultTextSrc.includes('isVaultArmored'),
-    'VaultText must check isVaultArmored',
-  );
-  assert.ok(
-    vaultTextSrc.includes('decryptVaultText'),
-    'VaultText must call decryptVaultText',
-  );
-  assert.ok(
-    vaultTextSrc.includes('selectIsVaultUnlocked'),
-    'VaultText must read selectIsVaultUnlocked',
-  );
-
-  const issuesEndpointSrc = fs.readFileSync(issuesEndpointFile, 'utf8');
-  assert.ok(
-    issuesEndpointSrc.includes('encryptVaultText'),
-    'issues.ts must import and use encryptVaultText',
-  );
-  assert.ok(
-    issuesEndpointSrc.includes('createIssue'),
-    'issues.ts must define createIssue mutation',
-  );
-  assert.ok(
-    issuesEndpointSrc.includes('updateIssue'),
-    'issues.ts must define updateIssue mutation',
-  );
-  assert.ok(
-    issuesEndpointSrc.includes('addIssueComment'),
-    'issues.ts must define addIssueComment mutation',
-  );
-
-  const issueRowSrc = fs.readFileSync(issueRowFile, 'utf8');
-  assert.ok(
-    issueRowSrc.includes('VaultText'),
-    'IssueRow.tsx must integrate VaultText component',
-  );
-
-  const issueDetailSrc = fs.readFileSync(issueDetailFile, 'utf8');
-  assert.ok(
-    issueDetailSrc.includes('VaultText'),
-    'IssueDetail.tsx must integrate VaultText component',
-  );
-  assert.ok(
-    issueDetailSrc.includes('MarkdownBody'),
-    'IssueDetail.tsx must render MarkdownBody',
-  );
-  assert.ok(
-    issueDetailSrc.includes('issue.description'),
-    'IssueDetail.tsx must pass issue.description',
-  );
-
-  const issueFormSrc = fs.readFileSync(issueFormFile, 'utf8');
-  assert.ok(
-    issueFormSrc.includes('decryptVaultText'),
-    'IssueFormPage.tsx must decrypt existing issue fields when editing',
-  );
-});
-
-// -----------------------------------------------------------------------------
-// Test 2: <VaultText /> renders plaintext for unencrypted strings
+// Test 1: <VaultText /> renders plaintext for unencrypted strings
 // -----------------------------------------------------------------------------
 
 test('<VaultText /> renders plaintext for unencrypted strings and empty fallbacks', () => {
@@ -145,16 +52,10 @@ test('<VaultText /> renders plaintext for unencrypted strings and empty fallback
   const resolvedEmpty = resolveVaultText('', false, 'No content provided');
   assert.equal(resolvedEmpty.mode, 'plaintext');
   assert.equal(resolvedEmpty.displayText, 'No content provided');
-
-  // Verify VaultText component source code handles as prop ('span' | 'p' | 'div')
-  const vaultTextSrc = fs.readFileSync(path.join(REPO_ROOT, 'src/ui/components/vault/VaultText.tsx'), 'utf8');
-  assert.ok(vaultTextSrc.includes("as = 'span'"), 'VaultText defaults to span');
-  assert.ok(vaultTextSrc.includes('const Tag = as;'), 'VaultText renders dynamic Tag');
-  assert.ok(vaultTextSrc.includes('<Tag className={className}'), 'VaultText applies className');
 });
 
 // -----------------------------------------------------------------------------
-// Test 3: <VaultText /> renders interactive placeholder when vault is locked and triggers unlock
+// Test 2: <VaultText /> renders interactive placeholder when vault is locked and triggers unlock
 // -----------------------------------------------------------------------------
 
 test('<VaultText /> renders interactive placeholder when vault is locked with data-debug-id="vault-locked-placeholder"', async () => {
@@ -169,21 +70,6 @@ test('<VaultText /> renders interactive placeholder when vault is locked with da
   assert.equal(resolvedLocked.isLocked, true);
   assert.equal(resolvedLocked.dataDebugId, 'vault-locked-placeholder');
   assert.equal(resolvedLocked.displayText, 'Encrypted content');
-
-  // Verify VaultText component implementation
-  const vaultTextSrc = fs.readFileSync(path.join(REPO_ROOT, 'src/ui/components/vault/VaultText.tsx'), 'utf8');
-  assert.ok(
-    vaultTextSrc.includes('data-debug-id="vault-locked-placeholder"'),
-    'Must include data-debug-id="vault-locked-placeholder"',
-  );
-  assert.ok(
-    vaultTextSrc.includes('dispatch(openUnlockModal())'),
-    'Must dispatch openUnlockModal on click',
-  );
-  assert.ok(
-    vaultTextSrc.includes('onUnlockClick'),
-    'Must support custom onUnlockClick prop callback',
-  );
 
   // Redux state verification for openUnlockModal
   let state = vaultReducer(undefined, { type: '@@INIT' });

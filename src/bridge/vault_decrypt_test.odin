@@ -349,3 +349,66 @@ test_bridge_vault_embedded_locked_marker_and_bare_prefix :: proc(t: ^testing.T) 
 		testing.expect_value(t, got, text)
 	}
 }
+
+@(private = "file")
+frame_carries_legal_vault_status :: proc(frame: string) -> bool {
+	return strings.contains(frame, "\"vault_status\":\"unlocked\"") ||
+	       strings.contains(frame, "\"vault_status\":\"locked\"") ||
+	       strings.contains(frame, "\"vault_status\":\"disabled\"")
+}
+
+@(test)
+heartbeat_frame_carries_vault_status :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
+
+	frame := bridge_hub_heartbeat_json()
+	defer delete(frame)
+
+	testing.expect(t, strings.contains(frame, "\"type\":\"bridge_heartbeat\""), "frame is still a bridge_heartbeat")
+	testing.expect(t, strings.contains(frame, "\"vault_status\":\""), "heartbeat carries a vault_status field")
+	testing.expect(t, frame_carries_legal_vault_status(frame), "heartbeat vault_status is one of unlocked|locked|disabled")
+
+	testing.expect(t, strings.contains(frame, "\"protocol_version\":1"), "protocol_version intact")
+	testing.expect(t, strings.contains(frame, "\"capabilities\":"), "capabilities intact — the hub's heartbeat arm keys off this")
+	testing.expect(t, strings.contains(frame, "\"features\":"), "features intact")
+	testing.expect(t, strings.contains(frame, "\"active_instance_ids\":["), "active_instance_ids intact")
+	testing.expect(t, strings.contains(frame, "\"instances\":["), "instances intact")
+}
+
+@(test)
+vault_status_report_frame_is_its_own_type :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
+
+	frame := bridge_vault_status_report_json()
+	defer delete(frame)
+
+	testing.expect(t, strings.contains(frame, "\"type\":\"bridge_vault_status\""), "report has its own frame type")
+	testing.expect(t, strings.contains(frame, "\"protocol_version\":1"), "report carries protocol_version")
+	testing.expect(t, frame_carries_legal_vault_status(frame), "report vault_status is one of unlocked|locked|disabled")
+
+	testing.expect(t, !strings.contains(frame, "\"type\":\"bridge_heartbeat\""), "report is not a synthetic heartbeat")
+	testing.expect(t, !strings.contains(frame, "\"active_instance_ids\""), "report carries no instance digest")
+	testing.expect(t, !strings.contains(frame, "\"instances\""), "report carries no instance list")
+}
+
+@(test)
+vault_status_report_agrees_with_bridge_vault_status :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
+
+	expected := bridge_vault_status_string()
+	frame := bridge_vault_status_report_json()
+	defer delete(frame)
+
+	needle := strings.concatenate({"\"vault_status\":\"", expected, "\""})
+	defer delete(needle)
+	testing.expect(t, strings.contains(frame, needle), "the frame reports exactly what bridge_vault_status_string() returns")
+}

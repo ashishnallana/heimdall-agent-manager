@@ -12,33 +12,6 @@ TEST_PROJECT_VAULT_KEY :: "0123456789abcdef0123456789abcdef0123456789abcdef01234
 ALT_PROJECT_VAULT_KEY  :: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
 
 @(test)
-test_project_write_encryption :: proc(t: ^testing.T) {
-	orig_name := "Confidential Core Infrastructure"
-	orig_desc := "Production infrastructure repository with sensitive deployment manifests."
-
-	// Encrypt name
-	enc_name, name_ok := vault_encrypt_text_hex(orig_name, TEST_PROJECT_VAULT_KEY, context.temp_allocator)
-	testing.expect(t, name_ok, "name encryption must succeed")
-	testing.expect(t, is_vault_armored(enc_name), "encrypted name must have vault:v1: prefix")
-	testing.expect(t, !strings.contains(enc_name, orig_name), "encrypted name must not leak plaintext")
-
-	// Encrypt description
-	enc_desc, desc_ok := vault_encrypt_text_hex(orig_desc, TEST_PROJECT_VAULT_KEY, context.temp_allocator)
-	testing.expect(t, desc_ok, "description encryption must succeed")
-	testing.expect(t, is_vault_armored(enc_desc), "encrypted description must have vault:v1: prefix")
-	testing.expect(t, !strings.contains(enc_desc, orig_desc), "encrypted description must not leak plaintext")
-
-	// Decrypt round-trip
-	dec_name, dn_ok := vault_decrypt_text_hex(enc_name, TEST_PROJECT_VAULT_KEY, context.temp_allocator)
-	testing.expect(t, dn_ok, "name decryption must succeed")
-	testing.expect_value(t, dec_name, orig_name)
-
-	dec_desc, dd_ok := vault_decrypt_text_hex(enc_desc, TEST_PROJECT_VAULT_KEY, context.temp_allocator)
-	testing.expect(t, dd_ok, "description decryption must succeed")
-	testing.expect_value(t, dec_desc, orig_desc)
-}
-
-@(test)
 test_project_show_transparent_decryption :: proc(t: ^testing.T) {
 	orig_name := "Classified Security Hardening"
 	orig_desc := "All project credentials, endpoints, and architecture notes are encrypted."

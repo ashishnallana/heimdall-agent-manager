@@ -50,9 +50,9 @@ make_stream_pair :: proc(t: ^testing.T) -> (Stream_Sock_Pair, bool) {
 
 @(private = "file")
 close_stream_pair :: proc(p: ^Stream_Sock_Pair) {
-	net.close(p.hub)
-	net.close(p.client)
-	net.close(p.listener)
+	if int(p.hub) > 0 { net.close(p.hub); p.hub = net.TCP_Socket(0) }
+	if int(p.client) > 0 { net.close(p.client); p.client = net.TCP_Socket(0) }
+	if int(p.listener) > 0 { net.close(p.listener); p.listener = net.TCP_Socket(0) }
 }
 
 // Read raw response string until timeout
@@ -411,7 +411,7 @@ test_shell_stream_ticket_and_experiment_gating :: proc(t: ^testing.T) {
 		testing.expect_value(t, shell_session_svc.shell_session_viewer_count(&shell_svc, "sh_test"), 1)
 
 		// Close client to let handler unwind
-		net.close(pair.client)
+		net.close(pair.client); pair.client = net.TCP_Socket(0)
 		deadline := time.now()
 		for !runner.finished && time.duration_seconds(time.since(deadline)) < 5.0 {
 			time.sleep(20 * time.Millisecond)
@@ -444,7 +444,7 @@ test_shell_stream_viewer_transitions_attach_detach :: proc(t: ^testing.T) {
 		send_runtime_command = mock_send_runtime_command,
 	}
 
-	ids := platform.real_id_generator()
+	ids := http_test_id_generator()
 	svc := shell_session_svc.new_shell_session_service(
 		bridge_command_sink = sink,
 		ids                 = &ids,
@@ -892,7 +892,7 @@ test_shell_stream_input_and_resize_forwarding :: proc(t: ^testing.T) {
 	testing.expect(t, has_resize, "must have dispatched shell_pty_resize")
 	sync.mutex_unlock(&sink_state.mu)
 
-	net.close(pair.client)
+	net.close(pair.client); pair.client = net.TCP_Socket(0)
 	deadline := time.now()
 	for !runner.finished && time.duration_seconds(time.since(deadline)) < 5.0 {
 		time.sleep(20 * time.Millisecond)
@@ -921,7 +921,7 @@ test_shell_stream_attach_deduplication :: proc(t: ^testing.T) {
 		send_runtime_command = mock_send_runtime_command,
 	}
 
-	ids := platform.real_id_generator()
+	ids := http_test_id_generator()
 	svc := shell_session_svc.new_shell_session_service(
 		bridge_command_sink = sink,
 		ids                 = &ids,
@@ -992,7 +992,7 @@ test_shell_stream_broadcast_prunes_dead_socket :: proc(t: ^testing.T) {
 		send_runtime_command = mock_send_runtime_command,
 	}
 
-	ids := platform.real_id_generator()
+	ids := http_test_id_generator()
 	svc := shell_session_svc.new_shell_session_service(
 		bridge_command_sink = sink,
 		ids                 = &ids,

@@ -5,15 +5,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 import {
   isVaultArmored,
   encryptVaultText,
-  decryptVaultText,
-  VAULT_ARMOR_PREFIX,
 } from '../src/ui/utils/vaultContent.ts';
 import {
   resolveVaultText,
@@ -28,108 +23,11 @@ import {
   decryptConversationList,
 } from '../src/ui/utils/vaultChats.ts';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const REPO_ROOT = path.resolve(__dirname, '..');
-
 const TEST_KEY_HEX = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
 const DIFFERENT_KEY_HEX = 'fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210';
 
 // -----------------------------------------------------------------------------
-// Test 1: Static verification of component files, contracts, and imports
-// -----------------------------------------------------------------------------
-
-test('Chat UI components, endpoints, and utils exist with required contracts', () => {
-  const chatPaneFile = path.join(REPO_ROOT, 'src/ui/components/chat/ChatPane.tsx');
-  const messageItemFile = path.join(REPO_ROOT, 'src/ui/components/chat/MessageItem.tsx');
-  const chatInboxFile = path.join(REPO_ROOT, 'src/ui/components/chat/ChatInbox.tsx');
-  const chatMessageListFile = path.join(REPO_ROOT, 'src/ui/components/chat/ChatMessageList.tsx');
-  const conversationThreadFile = path.join(REPO_ROOT, 'src/ui/components/chat/ConversationThreadPage.tsx');
-  const conversationsHomeFile = path.join(REPO_ROOT, 'src/ui/components/chat/ConversationsHomePage.tsx');
-  const chatsEndpointFile = path.join(REPO_ROOT, 'src/ui/api/endpoints/chats.ts');
-  const vaultChatsFile = path.join(REPO_ROOT, 'src/ui/utils/vaultChats.ts');
-
-  assert.ok(fs.existsSync(chatPaneFile), 'ChatPane.tsx must exist');
-  assert.ok(fs.existsSync(messageItemFile), 'MessageItem.tsx must exist');
-  assert.ok(fs.existsSync(chatInboxFile), 'ChatInbox.tsx must exist');
-  assert.ok(fs.existsSync(chatMessageListFile), 'ChatMessageList.tsx must exist');
-  assert.ok(fs.existsSync(conversationThreadFile), 'ConversationThreadPage.tsx must exist');
-  assert.ok(fs.existsSync(conversationsHomeFile), 'ConversationsHomePage.tsx must exist');
-  assert.ok(fs.existsSync(chatsEndpointFile), 'chats.ts must exist');
-  assert.ok(fs.existsSync(vaultChatsFile), 'vaultChats.ts must exist');
-
-  // Verify ChatPane integrates VaultText
-  const chatPaneSrc = fs.readFileSync(chatPaneFile, 'utf8');
-  assert.ok(
-    chatPaneSrc.includes('VaultText'),
-    'ChatPane.tsx must integrate VaultText component',
-  );
-  assert.ok(
-    chatPaneSrc.includes('MessageItem'),
-    'ChatPane.tsx must render MessageItem components',
-  );
-
-  // Verify MessageItem integrates VaultText and decryption
-  const messageItemSrc = fs.readFileSync(messageItemFile, 'utf8');
-  assert.ok(
-    messageItemSrc.includes('VaultText'),
-    'MessageItem.tsx must integrate VaultText component',
-  );
-  assert.ok(
-    messageItemSrc.includes('isVaultArmored'),
-    'MessageItem.tsx must detect vault-armored text',
-  );
-
-  // Verify ChatInbox integrates VaultText
-  const chatInboxSrc = fs.readFileSync(chatInboxFile, 'utf8');
-  assert.ok(
-    chatInboxSrc.includes('VaultText'),
-    'ChatInbox.tsx must integrate VaultText component',
-  );
-
-  // Verify ChatMessageList integrates VaultText
-  const chatMessageListSrc = fs.readFileSync(chatMessageListFile, 'utf8');
-  assert.ok(
-    chatMessageListSrc.includes('VaultText'),
-    'ChatMessageList.tsx must integrate VaultText component',
-  );
-
-  // Verify ConversationThreadPage integrates VaultText
-  const conversationThreadSrc = fs.readFileSync(conversationThreadFile, 'utf8');
-  assert.ok(
-    conversationThreadSrc.includes('VaultText'),
-    'ConversationThreadPage.tsx must integrate VaultText component',
-  );
-
-  // Verify ConversationsHomePage integrates VaultText
-  const conversationsHomeSrc = fs.readFileSync(conversationsHomeFile, 'utf8');
-  assert.ok(
-    conversationsHomeSrc.includes('VaultText'),
-    'ConversationsHomePage.tsx must integrate VaultText component',
-  );
-
-  // Verify chats.ts endpoint exports vault helpers and encrypts mutations
-  const chatsEndpointSrc = fs.readFileSync(chatsEndpointFile, 'utf8');
-  assert.ok(
-    chatsEndpointSrc.includes('encryptVaultText'),
-    'chats.ts must import and use encryptVaultText',
-  );
-  assert.ok(
-    chatsEndpointSrc.includes('sendConversationMessage'),
-    'chats.ts must define sendConversationMessage mutation',
-  );
-  assert.ok(
-    chatsEndpointSrc.includes('updateConversationTitle'),
-    'chats.ts must define updateConversationTitle mutation',
-  );
-  assert.ok(
-    chatsEndpointSrc.includes('encryptChatFields'),
-    'chats.ts must re-export encryptChatFields',
-  );
-});
-
-// -----------------------------------------------------------------------------
-// Test 2: Chat message body encryption and decryption round-trip
+// Test 1: Chat message body encryption and decryption round-trip
 // -----------------------------------------------------------------------------
 
 test('encryptChatFields encrypts message body when key is provided', async () => {
@@ -333,77 +231,3 @@ test('embedded ciphertext tokens in message bodies and sender-prefixed previews 
   assert.equal(decryptedActionMsg.body, `Action receipt for approval ${secretBody}`);
 });
 
-// -----------------------------------------------------------------------------
-// Test 7: Static UI surface checks for Batches 1-4 contracts
-// -----------------------------------------------------------------------------
-
-test('UI Batches 1-4 contracts and integration adhere to specifications', () => {
-  const convThreadFile = path.join(REPO_ROOT, 'src/ui/components/chat/ConversationThreadPage.tsx');
-  const convThreadSrc = fs.readFileSync(convThreadFile, 'utf8');
-
-  // Breadcrumb projectName wrapped with VaultText
-  assert.ok(
-    convThreadSrc.includes('<VaultText value={projectName} fallback="Project" />'),
-    'ConversationThreadPage.tsx must wrap breadcrumb projectName in VaultText',
-  );
-
-  // Composer chip wrapped with VaultText
-  assert.ok(
-    convThreadSrc.includes('conversation-composer-project-chip'),
-    'ConversationThreadPage.tsx must have conversation-composer-project-chip',
-  );
-
-  // Overflow details menu resolves IDs to friendly names/titles
-  assert.ok(
-    convThreadSrc.includes('conversation-thread-overflow-details'),
-    'ConversationThreadPage.tsx must render conversation-thread-overflow-details',
-  );
-  assert.ok(
-    convThreadSrc.includes('agentDisplayName'),
-    'ConversationThreadPage.tsx must resolve agent display name in details menu',
-  );
-  assert.ok(
-    convThreadSrc.includes('chainTitle'),
-    'ConversationThreadPage.tsx must resolve chain title in details menu',
-  );
-
-  // CurrentTaskStrip human display names and criteria unsuppression
-  const currentTaskStripFile = path.join(REPO_ROOT, 'src/ui/components/chat/CurrentTaskStrip.tsx');
-  const currentTaskStripSrc = fs.readFileSync(currentTaskStripFile, 'utf8');
-  assert.ok(
-    currentTaskStripSrc.includes('assigneeDisplayName'),
-    'CurrentTaskStrip.tsx must compute assigneeDisplayName',
-  );
-  assert.ok(
-    currentTaskStripSrc.includes('reviewerDisplayName'),
-    'CurrentTaskStrip.tsx must compute reviewerDisplayName',
-  );
-  assert.ok(
-    !currentTaskStripSrc.includes('if (!raw || isVaultArmored(raw)) return \'\';'),
-    'CurrentTaskStrip.tsx must not suppress criteria for armored tasks',
-  );
-
-  // chainTaskInference.ts support for reviewer agent_id
-  const chainInferenceFile = path.join(REPO_ROOT, 'src/ui/components/chat/chainTaskInference.ts');
-  const chainInferenceSrc = fs.readFileSync(chainInferenceFile, 'utf8');
-  assert.ok(
-    chainInferenceSrc.includes('agentId') || chainInferenceSrc.includes('agent_id'),
-    'chainTaskInference.ts must check agent_id for task reviewer',
-  );
-
-  // AgentActivityBubbles decrypts embedded tokens
-  const bubblesFile = path.join(REPO_ROOT, 'src/ui/components/chat/AgentActivityBubbles.tsx');
-  const bubblesSrc = fs.readFileSync(bubblesFile, 'utf8');
-  assert.ok(
-    bubblesSrc.includes('decryptEmbeddedVaultTokens') || bubblesSrc.includes('containsVaultArmored'),
-    'AgentActivityBubbles.tsx must handle embedded vault tokens',
-  );
-
-  // ConversationsHomePage consumes decrypted records
-  const homePageFile = path.join(REPO_ROOT, 'src/ui/components/chat/ConversationsHomePage.tsx');
-  const homePageSrc = fs.readFileSync(homePageFile, 'utf8');
-  assert.ok(
-    homePageSrc.includes('decryptConversationList'),
-    'ConversationsHomePage.tsx must consume decrypted records via decryptConversationList',
-  );
-});

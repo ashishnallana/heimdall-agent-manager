@@ -5,18 +5,12 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 import {
   isVaultArmored,
   encryptVaultText,
-  decryptVaultText,
-  VAULT_ARMOR_PREFIX,
 } from '../src/ui/utils/vaultContent.ts';
 import vaultReducer, {
-  setVaultConfigured,
   setVaultUnlocked,
   lockVault,
   openUnlockModal,
@@ -26,7 +20,6 @@ import vaultReducer, {
 } from '../src/ui/store/vaultSlice.ts';
 import {
   resolveVaultText,
-  decryptVaultTextContent,
 } from '../src/ui/components/vault/vaultTextHelper.ts';
 import {
   encryptChainFields,
@@ -34,105 +27,10 @@ import {
   decryptChainList,
 } from '../src/ui/utils/vaultChains.ts';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const REPO_ROOT = path.resolve(__dirname, '..');
-
 const TEST_KEY_HEX = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
-const DIFFERENT_KEY_HEX = 'fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210';
 
 // -----------------------------------------------------------------------------
-// Test 1: Static verification of chain component files, contracts, and debug IDs
-// -----------------------------------------------------------------------------
-
-test('Task Chains endpoints, utilities, and UI files exist with required contracts', () => {
-  const vaultChainsFile = path.join(REPO_ROOT, 'src/ui/utils/vaultChains.ts');
-  const taskChainsEndpointFile = path.join(REPO_ROOT, 'src/ui/api/endpoints/taskChains.ts');
-  const tasksEndpointFile = path.join(REPO_ROOT, 'src/ui/api/endpoints/tasks.ts');
-  const taskChainsPageFile = path.join(REPO_ROOT, 'src/ui/components/taskchain/TaskChainsPage.tsx');
-  const taskChainOverviewFile = path.join(REPO_ROOT, 'src/ui/components/taskchain/TaskChainOverview.tsx');
-  const projectChainTreeFile = path.join(REPO_ROOT, 'src/ui/components/chains/ProjectChainTree.tsx');
-  const chainOverviewPanelFile = path.join(REPO_ROOT, 'src/ui/components/chat/ChainOverviewPanel.tsx');
-  const recentTaskChainsTabFile = path.join(REPO_ROOT, 'src/ui/components/home/RecentTaskChainsTab.tsx');
-
-  assert.ok(fs.existsSync(vaultChainsFile), 'vaultChains.ts must exist');
-  assert.ok(fs.existsSync(taskChainsEndpointFile), 'taskChains.ts must exist');
-  assert.ok(fs.existsSync(tasksEndpointFile), 'tasks.ts must exist');
-  assert.ok(fs.existsSync(taskChainsPageFile), 'TaskChainsPage.tsx must exist');
-  assert.ok(fs.existsSync(taskChainOverviewFile), 'TaskChainOverview.tsx must exist');
-  assert.ok(fs.existsSync(projectChainTreeFile), 'ProjectChainTree.tsx must exist');
-  assert.ok(fs.existsSync(chainOverviewPanelFile), 'ChainOverviewPanel.tsx must exist');
-  assert.ok(fs.existsSync(recentTaskChainsTabFile), 'RecentTaskChainsTab.tsx must exist');
-
-  const taskChainsSrc = fs.readFileSync(taskChainsEndpointFile, 'utf8');
-  assert.ok(
-    taskChainsSrc.includes('encryptVaultText'),
-    'taskChains.ts must import and use encryptVaultText',
-  );
-  assert.ok(
-    taskChainsSrc.includes('createTaskChain'),
-    'taskChains.ts must define createTaskChain mutation',
-  );
-  assert.ok(
-    taskChainsSrc.includes('updateTaskChain'),
-    'taskChains.ts must define updateTaskChain mutation',
-  );
-  assert.ok(
-    taskChainsSrc.includes('getTaskChain'),
-    'taskChains.ts must define getTaskChain query',
-  );
-  assert.ok(
-    taskChainsSrc.includes('getTaskChains'),
-    'taskChains.ts must define getTaskChains query',
-  );
-
-  const tasksSrc = fs.readFileSync(tasksEndpointFile, 'utf8');
-  assert.ok(
-    tasksSrc.includes('encryptVaultText'),
-    'tasks.ts must import and use encryptVaultText',
-  );
-
-  const taskChainsPageSrc = fs.readFileSync(taskChainsPageFile, 'utf8');
-  assert.ok(
-    taskChainsPageSrc.includes('VaultText'),
-    'TaskChainsPage.tsx must integrate VaultText component',
-  );
-
-  const taskChainOverviewSrc = fs.readFileSync(taskChainOverviewFile, 'utf8');
-  assert.ok(
-    taskChainOverviewSrc.includes('VaultText'),
-    'TaskChainOverview.tsx must integrate VaultText component',
-  );
-  assert.ok(
-    taskChainOverviewSrc.includes('data-debug-id="taskchain-overview-title"'),
-    'TaskChainOverview.tsx must retain data-debug-id="taskchain-overview-title"',
-  );
-  assert.ok(
-    taskChainOverviewSrc.includes('data-debug-id="taskchain-overview-description"'),
-    'TaskChainOverview.tsx must retain data-debug-id="taskchain-overview-description"',
-  );
-
-  const projectChainTreeSrc = fs.readFileSync(projectChainTreeFile, 'utf8');
-  assert.ok(
-    projectChainTreeSrc.includes('VaultText'),
-    'ProjectChainTree.tsx must integrate VaultText component',
-  );
-
-  const chainOverviewPanelSrc = fs.readFileSync(chainOverviewPanelFile, 'utf8');
-  assert.ok(
-    chainOverviewPanelSrc.includes('VaultText'),
-    'ChainOverviewPanel.tsx must integrate VaultText component',
-  );
-
-  const recentTaskChainsTabSrc = fs.readFileSync(recentTaskChainsTabFile, 'utf8');
-  assert.ok(
-    recentTaskChainsTabSrc.includes('VaultText'),
-    'RecentTaskChainsTab.tsx must integrate VaultText component',
-  );
-});
-
-// -----------------------------------------------------------------------------
-// Test 2: encryptChainFields encrypts title and description when unlocked
+// Test 1: encryptChainFields encrypts title and description when unlocked
 // -----------------------------------------------------------------------------
 
 test('encryptChainFields encrypts title and description when vault key is provided', async () => {

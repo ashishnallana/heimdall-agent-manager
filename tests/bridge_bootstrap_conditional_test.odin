@@ -11,7 +11,14 @@ import "core:encoding/hex"
 import "core:fmt"
 import "core:os"
 import "core:strings"
+import "core:testing"
 import bridge "odin_test:bridge"
+
+@(test)
+test_bridge_bootstrap_conditional :: proc(t: ^testing.T) {
+	_ = t
+	main()
+}
 
 bridge_sha256 :: proc(body: string) -> string {
 	buf: [32]byte
@@ -84,6 +91,26 @@ main :: proc() {
 
 	// (6) BRG-3 wrapper file-set store + list/file RPC JSON. Seed the disk cache
 	// with the fragment/skill bodies the manifest references, then build the set.
+	prev_ctl, had_ctl := os.lookup_env("HEIMDALL_HAM_CTL_BIN", context.allocator)
+	defer {
+		if had_ctl {
+			_ = os.set_env("HEIMDALL_HAM_CTL_BIN", prev_ctl)
+		} else {
+			os.unset_env("HEIMDALL_HAM_CTL_BIN")
+		}
+		delete(prev_ctl)
+	}
+	_ = os.set_env("HEIMDALL_HAM_CTL_BIN", "/bin/sh")
+	catalog_providers := [?]bridge.Bridge_Catalog_Provider{{
+		provider = "claude",
+		state = "active",
+		skill_dir = ".claude/skills",
+		bootstrap_file = "CLAUDE.md",
+	}}
+	catalog_snap := bridge.Bridge_Provider_Catalog_Snapshot{
+		providers = catalog_providers[:],
+	}
+	bridge.bridge_provider_catalog_publish(&catalog_snap)
 	id_body := "\n\n## Agent Identity & Instructions\nBe excellent."
 	sk_body := "# skill one\nbody"
 	id_hash := bridge_sha256(id_body)

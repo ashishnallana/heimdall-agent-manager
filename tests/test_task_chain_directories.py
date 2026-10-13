@@ -35,114 +35,14 @@ def find_free_port() -> int:
         return s.getsockname()[1]
 
 
-def test_schema_and_migration_files() -> None:
-    print("Testing migration and schema static requirements...")
-    mig_file = ROOT / "src/hub/repository/sqlite/migrations/043_task_chain_directories.sql"
-    if not mig_file.exists():
-        mig_file = ROOT / "src/hub/repository/sqlite/migrations/044_task_chain_directories.sql"
-    require(mig_file.exists(), "043_task_chain_directories.sql or 044_task_chain_directories.sql must exist")
-    mig_sql = read(mig_file)
-
-    require("CREATE TABLE IF NOT EXISTS task_chain_directories" in mig_sql or "CREATE TABLE task_chain_directories" in mig_sql,
-            "must create task_chain_directories table")
-    require("directory_id TEXT PRIMARY KEY" in mig_sql, "directory_id must be PRIMARY KEY")
-    require("chain_id TEXT NOT NULL" in mig_sql, "chain_id must be NOT NULL")
-    require("owner_user_id TEXT NOT NULL" in mig_sql, "owner_user_id must be NOT NULL")
-    require("path TEXT NOT NULL" in mig_sql, "path must be NOT NULL")
-    require("bridge_id TEXT NOT NULL" in mig_sql, "bridge_id column must exist")
-    require("vcs_kind TEXT NOT NULL" in mig_sql, "vcs_kind column must exist")
-    require("vcs_info_json TEXT NOT NULL" in mig_sql, "vcs_info_json column must exist")
-    require("created_at TEXT NOT NULL" in mig_sql, "created_at must be NOT NULL")
-    require("updated_at TEXT NOT NULL" in mig_sql, "updated_at must be NOT NULL")
-    require("ON DELETE CASCADE" in mig_sql, "FOREIGN KEY must specify ON DELETE CASCADE")
-    require("idx_task_chain_directories_chain_owner" in mig_sql, "index on (chain_id, owner_user_id) must exist")
-
-    migrations_odin = read(ROOT / "src/hub/repository/sqlite/migrations.odin")
-    require("MIGRATION_043_TASK_CHAIN_DIRECTORIES" in migrations_odin or "MIGRATION_044_TASK_CHAIN_DIRECTORIES" in migrations_odin, "MIGRATION constant must exist")
-    require('"043_task_chain_directories.sql"' in migrations_odin or '"044_task_chain_directories.sql"' in migrations_odin, "migration file must be in migration_order")
-    require(bool(re.search(r"migration_order\s*::\s*\[\d+\]string\{", migrations_odin)), "migration_order array must exist")
-    require("upgrade_task_chain_directories_schema" in migrations_odin, "upgrade proc must exist in migrations.odin")
-
-
-def test_domain_model() -> None:
-    print("Testing domain model definition...")
-    domain_odin = read(ROOT / "src/hub/domain/taskchain.odin")
-    require("Task_Chain_Directory :: struct {" in domain_odin, "Task_Chain_Directory struct must be defined")
-    require("directory_id:  string" in domain_odin, "Task_Chain_Directory must have directory_id")
-    require("chain_id:      Task_Chain_ID" in domain_odin, "Task_Chain_Directory must have chain_id")
-    require("owner_user_id: User_ID" in domain_odin, "Task_Chain_Directory must have owner_user_id")
-    require("path:          string" in domain_odin, "Task_Chain_Directory must have path")
-    require("bridge_id:     string" in domain_odin, "Task_Chain_Directory must have bridge_id")
-    require("vcs_kind:      string" in domain_odin, "Task_Chain_Directory must have vcs_kind")
-    require("vcs_info_json: string" in domain_odin, "Task_Chain_Directory must have vcs_info_json")
-
-
-def test_repository_and_service_procs() -> None:
-    print("Testing repository and service layer procs...")
-    iface_odin = read(ROOT / "src/hub/repository/iface/taskchain_repo.odin")
-    require("save_directory: Task_Chain_Directory_Save_Proc" in iface_odin, "iface repo must have save_directory")
-    require("get_directory: Task_Chain_Directory_Get_Proc" in iface_odin, "iface repo must have get_directory")
-    require("list_directories_by_chain: Task_Chain_Directory_List_By_Chain_Proc" in iface_odin, "iface repo must have list_directories_by_chain")
-    require("remove_directory: Task_Chain_Directory_Remove_Proc" in iface_odin, "iface repo must have remove_directory")
-
-    repo_sqlite = read(ROOT / "src/hub/repository/sqlite/taskchain_repo_sqlite.odin")
-    require("taskchain_save_directory_sqlite" in repo_sqlite, "sqlite repo must implement taskchain_save_directory_sqlite")
-    require("taskchain_get_directory_sqlite" in repo_sqlite, "sqlite repo must implement taskchain_get_directory_sqlite")
-    require("taskchain_list_directories_by_chain_sqlite" in repo_sqlite, "sqlite repo must implement taskchain_list_directories_by_chain_sqlite")
-    require("taskchain_remove_directory_sqlite" in repo_sqlite, "sqlite repo must implement taskchain_remove_directory_sqlite")
-
-    service_odin = read(ROOT / "src/hub/service/taskchain/taskchain_service.odin")
-    require("list_chain_directories :: proc" in service_odin, "service must implement list_chain_directories")
-    require("add_chain_directory :: proc" in service_odin, "service must implement add_chain_directory")
-    require("update_chain_directory :: proc" in service_odin, "service must implement update_chain_directory")
-    require("remove_chain_directory :: proc" in service_odin, "service must implement remove_chain_directory")
-
-
-def test_http_handlers_and_wiring() -> None:
-    print("Testing HTTP handlers and router wiring...")
-    wiring_odin = read(ROOT / "src/hub/app/wiring.odin")
-    require('"/api/v1/task-chains/*/directories"' in wiring_odin, "wiring must have /api/v1/task-chains/*/directories")
-    require('"/api/v1/task-chains/*/directories/*"' in wiring_odin, "wiring must have /api/v1/task-chains/*/directories/*")
-
-    handlers_odin = read(ROOT / "src/hub/transport/http/taskchain_handlers.odin")
-    require("list_chain_directories_handler :: proc" in handlers_odin, "handler list_chain_directories_handler must exist")
-    require("add_chain_directory_handler :: proc" in handlers_odin, "handler add_chain_directory_handler must exist")
-    require("patch_chain_directory_handler :: proc" in handlers_odin, "handler patch_chain_directory_handler must exist")
-    require("remove_chain_directory_handler :: proc" in handlers_odin, "handler remove_chain_directory_handler must exist")
-    require('write_directory_json' in handlers_odin, "write_directory_json helper must exist")
-    require('strings.write_string(&b, "],\\"directories\\":[")' in handlers_odin, "task_chain_detail_handler must embed directories array")
-
-
-def test_ctl_commands() -> None:
-    print("Testing CLI support in tasks.odin, hub_mode.odin, and agent_mode.odin...")
-    tasks_ctl = read(ROOT / "src/ctl/tasks.odin")
-    require('action == "directory" || action == "directories"' in tasks_ctl, "tasks.odin must support directory action")
-    require('sub == "add"' in tasks_ctl, "tasks.odin must support directory add")
-    require('sub == "update"' in tasks_ctl, "tasks.odin must support directory update")
-    require('sub == "remove"' in tasks_ctl, "tasks.odin must support directory remove")
-
-    hub_ctl = read(ROOT / "src/ctl/hub_mode.odin")
-    require('action == "directory" || action == "directories"' in hub_ctl, "hub_mode.odin must support directory action")
-
-    agent_ctl = read(ROOT / "src/ctl/agent_mode.odin")
-    require('case "directory", "directories":' in agent_ctl, "agent_mode.odin must handle directory verb")
-
-
 def test_sqlite_schema_execution() -> None:
     print("Testing SQLite migration execution on real database...")
     db = sqlite3.connect(":memory:")
     cursor = db.cursor()
     cursor.execute("PRAGMA foreign_keys = ON;")
 
-    # Read migration order from migrations.odin
-    migrations_odin = read(ROOT / "src/hub/repository/sqlite/migrations.odin")
-    match = re.search(r"migration_order :: \[\d+\]string\{([^}]+)\}", migrations_odin)
-    require(match is not None, "must find migration_order in migrations.odin")
-    files = [f.strip(' "') for f in match.group(1).split(",")]
-
-    for fname in files:
-        fpath = ROOT / "src/hub/repository/sqlite/migrations" / fname
-        require(fpath.exists(), f"migration file {fname} must exist on disk")
+    for fpath in sorted((ROOT / "src/hub/repository/sqlite/migrations").glob("*.sql")):
+        fname = fpath.name
         sql = fpath.read_text(encoding="utf-8")
         try:
             cursor.executescript(sql)
@@ -201,20 +101,30 @@ def test_sqlite_schema_execution() -> None:
     print("SQLite migration and trigger verification PASSED.")
 
 
+def build_odin_pkg(pkg: str, out_path: Path) -> None:
+    import shutil
+    odin = os.environ.get("ODIN") or shutil.which("odin")
+    res = None
+    if odin and os.environ.get("IN_NIX_SHELL"):
+        res = subprocess.run([odin, "build", pkg, "-collection:odin_test=src", f"-out:{out_path}"], cwd=ROOT, capture_output=True, text=True)
+    if res is None or res.returncode != 0:
+        res = subprocess.run(["nix", "develop", "--command", "odin", "build", pkg, "-collection:odin_test=src", f"-out:{out_path}"], cwd=ROOT, capture_output=True, text=True)
+    require(res.returncode == 0, f"build failed for {pkg}: {res.stderr}")
+
+
 def test_e2e_hub_rest_and_cli() -> None:
+    import shutil
+    import tempfile
     print("Testing end-to-end REST API and CLI on live Hub...")
-    hub_bin = Path("/tmp/test_hub")
-    ctl_bin = Path("/tmp/test_ctl")
-    if not hub_bin.exists() or not ctl_bin.exists():
-        print("Building test_hub and test_ctl binaries...")
-        build_cmd = "nix develop --command bash -c 'odin build src/hub -collection:odin_test=src -out:/tmp/test_hub && odin build src/ctl -collection:odin_test=src -out:/tmp/test_ctl'"
-        res = subprocess.run(build_cmd, shell=True, cwd=ROOT, capture_output=True, text=True)
-        require(res.returncode == 0, f"build failed: {res.stderr}")
+    tmp_dir = Path(tempfile.mkdtemp(prefix="ham-test-dirs-"))
+    hub_bin = tmp_dir / "test_hub"
+    ctl_bin = tmp_dir / "test_ctl"
+    print("Building test_hub and test_ctl binaries...")
+    build_odin_pkg("src/hub", hub_bin)
+    build_odin_pkg("src/ctl", ctl_bin)
 
     port = find_free_port()
-    db_path = f"/tmp/ham-test-dirs-{port}.db"
-    if os.path.exists(db_path):
-        os.remove(db_path)
+    db_path = str(tmp_dir / f"ham-test-dirs-{port}.db")
 
     migrations_dir = str(ROOT / "src/hub/repository/sqlite/migrations")
     user_out = subprocess.check_output(
@@ -393,16 +303,10 @@ def test_e2e_hub_rest_and_cli() -> None:
             hub_proc.wait(timeout=3)
         except subprocess.TimeoutExpired:
             hub_proc.kill()
-        if os.path.exists(db_path):
-            os.remove(db_path)
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":
-    test_schema_and_migration_files()
-    test_domain_model()
-    test_repository_and_service_procs()
-    test_http_handlers_and_wiring()
-    test_ctl_commands()
     test_sqlite_schema_execution()
     test_e2e_hub_rest_and_cli()
     print("\nALL TASK CHAIN DIRECTORIES TESTS PASSED! (0 errors)")

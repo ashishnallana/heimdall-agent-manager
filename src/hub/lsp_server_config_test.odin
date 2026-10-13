@@ -1,7 +1,13 @@
 package main
 
+import "core:fmt"
+import "core:os"
+import "core:strings"
 import "core:testing"
+import contracts "odin_test:contracts"
+import app "odin_test:hub/app"
 import domain "odin_test:hub/domain"
+import api_http "odin_test:hub/transport/http"
 
 // make_cfg is a test helper that builds a minimal Lsp_Server_Config.
 // It does NOT allocate heap strings — the literals live in the test binary's
@@ -302,4 +308,163 @@ test_lsp_resolve_full_precedence_chain :: proc(t: ^testing.T) {
 	testing.expect(t, f4, "found")
 	testing.expect_value(t, got4.dir_prefix, "")
 	testing.expect_value(t, got4.dir_pattern, "")
+}
+
+// --- HTTP handler roundtrip and dir_prefix "/" rejection tests ---
+
+@(test)
+test_lsp_server_config_slash_dir_prefix_rejected :: proc(t: ^testing.T) {
+	db_path := fmt.tprintf("/tmp/heimdall-hub-test-lsp-handler-%d.db", os.get_pid())
+	_ = os.remove(db_path)
+	defer _ = os.remove(db_path)
+
+	cidrs := [?]string{"127.0.0.1/32"}
+	graph: app.App_Graph
+	ok, msg := app.build_graph(&graph, app.Hub_Config{
+		database_path        = db_path,
+		migrations_dir       = "src/hub/repository/sqlite/migrations",
+		username_header      = "X-authentik-username",
+		display_name_header  = "X-authentik-name",
+		email_header         = "X-authentik-email",
+		trusted_proxy_cidrs  = cidrs[:],
+		auto_provision_users = true,
+		logout_url           = "/_dev/logout",
+		paddle_environment   = "sandbox",
+	})
+	testing.expect(t, ok, msg)
+	defer app.shutdown_graph(&graph)
+
+	alice := [?]contracts.HTTP_Header{{name = "X-authentik-username", value = "alice"}}
+
+	bridge_id, _, enroll_ok := device_enroll_test_bridge(&graph, alice[:], "Alice Bridge")
+	testing.expect(t, enroll_ok, "device-flow bridge provisioning failed")
+	testing.expect(t, bridge_id != "", "bridge_id must be non-empty after enrollment")
+
+	lsp_path := fmt.tprintf("/api/v1/bridges/%s/lsp-servers", bridge_id)
+
+	// Step 1: Create a language default (dir_prefix="")
+	default_created := api_http.router_dispatch(&graph.router, api_http.Request{
+		method      = "POST",
+		path        = lsp_path,
+		body        = `{"language":"go","cmd":"gopls","dir_prefix":""}`,
+		request_id  = "req_lsph_3",
+		remote_addr = "127.0.0.1",
+		headers     = alice[:],
+	})
+	testing.expect(t, default_created.status == 200, "creating language default must succeed")
+
+	default_config_id := ""
+	if idx := strings.index(default_created.body, "\"config_id\":\""); idx >= 0 {
+		rest := default_created.body[idx + len("\"config_id\":\""):]
+		if end := strings.index_byte(rest, '"'); end >= 0 do default_config_id = rest[:end]
+	}
+	testing.expect(t, default_config_id != "", "default config_id must be non-empty")
+
+	// Step 2: POST dir_prefix="/" must be rejected with 400
+	slash_rejected := api_http.router_dispatch(&graph.router, api_http.Request{
+		method      = "POST",
+		path        = lsp_path,
+		body        = `{"language":"go","cmd":"gopls-root","dir_prefix":"/"}`,
+		request_id  = "req_lsph_4",
+		remote_addr = "127.0.0.1",
+		headers     = alice[:],
+	})
+	testing.expect(t, slash_rejected.status == 400, `POST dir_prefix="/" must return 400`)
+
+	// Step 3: POST dir_prefix="///" must also be rejected with 400
+	multi_slash_rejected := api_http.router_dispatch(&graph.router, api_http.Request{
+		method      = "POST",
+		path        = lsp_path,
+		body        = `{"language":"go","cmd":"gopls-root","dir_prefix":"///"}`,
+		request_id  = "req_lsph_5",
+		remote_addr = "127.0.0.1",
+		headers     = alice[:],
+	})
+	testing.expect(t, multi_slash_rejected.status == 400, `POST dir_prefix="///" must return 400`)
+
+	// Step 4: The default row must survive both rejections unchanged
+	list_resp := api_http.router_dispatch(&graph.router, api_http.Request{
+		method      = "GET",
+		path        = lsp_path,
+		request_id  = "req_lsph_6",
+		remote_addr = "127.0.0.1",
+		headers     = alice[:],
+	})
+	testing.expect(t, list_resp.status == 200, "list must succeed")
+	testing.expect(t, strings.contains(list_resp.body, default_config_id), "default config_id must be unchanged after rejected POSTs")
+	testing.expect(t, strings.contains(list_resp.body, "\"cmd\":\"gopls\""), "default row cmd must be unchanged")
+	testing.expect(t, strings.count(list_resp.body, "\"config_id\"") == 1, "exactly one config must exist after rejections")
+}
+
+@(test)
+test_lsp_server_config_dir_pattern_and_multilang_rest_roundtrip :: proc(t: ^testing.T) {
+	db_path := fmt.tprintf("/tmp/heimdall-hub-test-lsp-pattern-%d.db", os.get_pid())
+	_ = os.remove(db_path)
+	defer _ = os.remove(db_path)
+
+	cidrs := [?]string{"127.0.0.1/32"}
+	graph: app.App_Graph
+	ok, msg := app.build_graph(&graph, app.Hub_Config{
+		database_path        = db_path,
+		migrations_dir       = "src/hub/repository/sqlite/migrations",
+		username_header      = "X-authentik-username",
+		display_name_header  = "X-authentik-name",
+		email_header         = "X-authentik-email",
+		trusted_proxy_cidrs  = cidrs[:],
+		auto_provision_users = true,
+		logout_url           = "/_dev/logout",
+		paddle_environment   = "sandbox",
+	})
+	testing.expect(t, ok, msg)
+	defer app.shutdown_graph(&graph)
+
+	alice := [?]contracts.HTTP_Header{{name = "X-authentik-username", value = "alice"}}
+
+	bridge_id, _, enroll_ok := device_enroll_test_bridge(&graph, alice[:], "Alice Bridge")
+	testing.expect(t, enroll_ok, "device-flow bridge provisioning failed")
+	testing.expect(t, bridge_id != "", "bridge_id must be non-empty")
+
+	lsp_path := fmt.tprintf("/api/v1/bridges/%s/lsp-servers", bridge_id)
+
+	create_resp := api_http.router_dispatch(&graph.router, api_http.Request{
+		method      = "POST",
+		path        = lsp_path,
+		body        = `{"language":"go, cpp, proto","cmd":"ciderlsp","file_extensions":".go, .cc, .proto","dir_pattern":"/google/src/cloud/*/*/google3/**"}`,
+		request_id  = "req_lspp_3",
+		remote_addr = "127.0.0.1",
+		headers     = alice[:],
+	})
+	testing.expect(t, create_resp.status == 200, "create config with pattern must succeed")
+	testing.expect(t, strings.contains(create_resp.body, `"dir_pattern":"/google/src/cloud/*/*/google3/**"`), "response must contain dir_pattern")
+
+	resolve_resp := api_http.router_dispatch(&graph.router, api_http.Request{
+		method      = "GET",
+		path        = fmt.tprintf("/api/v1/bridges/%s/lsp-servers/resolve", bridge_id),
+		query       = "language=proto&path=/google/src/cloud/tanmay/ws/google3/service.proto",
+		request_id  = "req_lspp_4",
+		remote_addr = "127.0.0.1",
+		headers     = alice[:],
+	})
+	testing.expect(t, resolve_resp.status == 200, "resolve must succeed for matching proto and pattern")
+	testing.expect(t, strings.contains(resolve_resp.body, `"cmd":"ciderlsp"`), "resolved server cmd matches")
+
+	resolve_ext_resp := api_http.router_dispatch(&graph.router, api_http.Request{
+		method      = "GET",
+		path        = fmt.tprintf("/api/v1/bridges/%s/lsp-servers/resolve", bridge_id),
+		query       = "language=unknown&path=/google/src/cloud/tanmay/ws/google3/main.cc",
+		request_id  = "req_lspp_5",
+		remote_addr = "127.0.0.1",
+		headers     = alice[:],
+	})
+	testing.expect(t, resolve_ext_resp.status == 200, "resolve must succeed via file extension .cc")
+
+	resolve_outside_resp := api_http.router_dispatch(&graph.router, api_http.Request{
+		method      = "GET",
+		path        = fmt.tprintf("/api/v1/bridges/%s/lsp-servers/resolve", bridge_id),
+		query       = "language=proto&path=/other/path/service.proto",
+		request_id  = "req_lspp_6",
+		remote_addr = "127.0.0.1",
+		headers     = alice[:],
+	})
+	testing.expect(t, resolve_outside_resp.status == 404, "resolve outside pattern without default must return 404")
 }

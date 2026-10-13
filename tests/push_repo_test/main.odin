@@ -2,8 +2,15 @@ package push_repo_test
 
 import "core:fmt"
 import "core:os"
+import "core:testing"
 import domain "odin_test:hub/domain"
 import sqlite "odin_test:hub/repository/sqlite"
+
+@(test)
+test_push_repo :: proc(t: ^testing.T) {
+	_ = t
+	main()
+}
 
 check :: proc(ok: bool, msg: string) {
 	if ok do return

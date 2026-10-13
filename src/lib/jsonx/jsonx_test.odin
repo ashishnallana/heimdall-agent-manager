@@ -122,11 +122,11 @@ test_jsonx_raw_object_and_array :: proc(t: ^testing.T) {
 
 @(test)
 test_jsonx_complex_array_with_nested_objects :: proc(t: ^testing.T) {
-	complex_json := `{"default_provider":"jetski","providers":[{"name":"jetski","enabled":true,"command":["/bin/cli"],"models":{"flag":"--model","smart":"argon-sum"},"activity_detection":{"enabled":true,"sample_line_count":20}},{"name":"codex","command":["/usr/bin/codex"]}]}`
+	complex_json := `{"default_provider":"claude","providers":[{"name":"claude","enabled":true,"command":["/bin/cli"],"models":{"flag":"--model","smart":"argon-sum"},"activity_detection":{"enabled":true,"sample_line_count":20}},{"name":"codex","command":["/usr/bin/codex"]}]}`
 	raw_arr, ok_arr := extract_raw_array(complex_json, "providers")
 	defer if ok_arr do delete(raw_arr)
 	testing.expect(t, ok_arr, "extract_raw_array on complex providers should succeed")
-	testing.expect(t, strings.contains(raw_arr, `"name":"jetski"`), "should contain jetski")
+	testing.expect(t, strings.contains(raw_arr, `"name":"claude"`), "should contain claude")
 	testing.expect(t, strings.contains(raw_arr, `"name":"codex"`), "should contain codex")
 }
 

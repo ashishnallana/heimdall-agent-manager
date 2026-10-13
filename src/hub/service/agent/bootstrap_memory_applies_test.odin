@@ -145,7 +145,7 @@ test_bootstrap_build_memory_markdown_option_a_empty :: proc(t: ^testing.T) {
 @(test)
 test_bootstrap_render_agent_manifest_includes_memory_md :: proc(t: ^testing.T) {
 	agent := domain.Agent{agent_id = "agt_1", name = "Worker", owner_user_id = "user_1"}
-	manifest, version := render_agent_manifest(nil, "user_1", agent, false, "jetski", "proj_1", "brg_1")
+	manifest, version := render_agent_manifest(nil, "user_1", agent, false, "claude", "proj_1", "brg_1")
 	defer delete(manifest)
 	defer delete(version)
 

@@ -18,10 +18,7 @@ import "core:testing"
 // With fix: clone_to_cstring appends a NUL, SQLite sees the exact table name, succeeds.
 @(test)
 test_scalar_count_uses_exact_query :: proc(t: ^testing.T) {
-	db_path := fmt.tprintf("/tmp/test_fts_repair_%d.db", os.get_pid())
-	os.remove(db_path)
-	defer os.remove(db_path)
-
+	db_path := ":memory:"
 	conn, ok, _ := open(db_path)
 	testing.expect(t, ok, "db open ok")
 	defer close(&conn)
@@ -52,10 +49,7 @@ test_scalar_count_uses_exact_query :: proc(t: ^testing.T) {
 // functional correctness test is the correct bar for this site.
 @(test)
 test_fts_rebuild_one_runtime_name :: proc(t: ^testing.T) {
-	db_path := fmt.tprintf("/tmp/test_fts_rebuild_%d.db", os.get_pid())
-	os.remove(db_path)
-	defer os.remove(db_path)
-
+	db_path := ":memory:"
 	conn, ok, _ := open(db_path)
 	testing.expect(t, ok, "db open ok")
 	defer close(&conn)

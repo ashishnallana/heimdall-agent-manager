@@ -80,8 +80,8 @@ REVOCATION_TEST_CIDRS := [1]string{"127.0.0.1/32"}
 setup_revocation_fixture :: proc(t: ^testing.T, tag: string) -> ^Revocation_Fixture {
 	f := new(Revocation_Fixture)
 	seq := sync.atomic_add(&revocation_test_counter, 1)
-	f.db_path = fmt.tprintf("/tmp/test_bridge_revocation_%s_%d_%d_%d.db", tag, os.get_pid(), time.now()._nsec, seq)
-	os.remove(f.db_path)
+	f.db_path = ":memory:"
+	
 
 	conn, open_ok, _ := sqlite.open(f.db_path)
 	testing.expect(t, open_ok, "sqlite open ok")
@@ -93,7 +93,7 @@ setup_revocation_fixture :: proc(t: ^testing.T, tag: string) -> ^Revocation_Fixt
 	f.br_repo = sqlite.new_bridge_repository(&f.br_repo_sqlite, &f.conn)
 	f.us_repo = sqlite.new_user_repository(&f.us_repo_sqlite, &f.conn)
 	f.clock = platform.real_clock()
-	f.ids = platform.real_id_generator()
+	f.ids = http_test_id_generator()
 	f.br_svc = bridge_service.new_bridge_service(&f.br_repo, &f.clock, &f.ids)
 	bridge_service.with_connection_closer(&f.br_svc, bridge_runtime_service.new_bridge_connection_closer(&f.registry))
 	f.us_svc = user_service.new_user_service_basic(&f.us_repo, &f.clock, &f.ids)
@@ -119,7 +119,7 @@ setup_revocation_fixture :: proc(t: ^testing.T, tag: string) -> ^Revocation_Fixt
 teardown_revocation_fixture :: proc(f: ^Revocation_Fixture) {
 	if f == nil do return
 	sqlite.close(&f.conn)
-	os.remove(f.db_path)
+	
 	if len(f.owner_user_id) > 0 do delete(f.owner_user_id)
 	free(f)
 }
@@ -211,7 +211,7 @@ test_revoke_bridge_terminates_live_websocket :: proc(t: ^testing.T) {
 	// Let the reader actually reach its blocking read before revoking. Without this
 	// the test could pass by racing — revoking before anything was parked — which
 	// would prove nothing about an IN-FLIGHT connection.
-	time.sleep(150 * time.Millisecond)
+	time.sleep(20 * time.Millisecond)
 	testing.expect(t, !sync.atomic_load(&job.returned), "the reader is parked in a blocking read before revocation")
 
 	owner_auth := contracts.Auth_Context{kind = .User_Token, user_id = f.owner_user_id}
@@ -284,7 +284,7 @@ test_revoke_one_bridge_leaves_the_others_connected :: proc(t: ^testing.T) {
 	defer thread.destroy(a_reader)
 	b_reader := thread.create_and_start_with_data(rawptr(&b_job), parked_reader)
 	defer thread.destroy(b_reader)
-	time.sleep(150 * time.Millisecond)
+	time.sleep(20 * time.Millisecond)
 
 	owner_auth := contracts.Auth_Context{kind = .User_Token, user_id = f.owner_user_id}
 	_, revoke_ok, revoke_err := bridge_service.revoke_bridge(&f.br_svc, owner_auth, a_id)

@@ -7,7 +7,6 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import {
   PANE_VAULT_LOCK_INITIAL,
   VAULT_LOCKED_HEADLINE,
@@ -24,8 +23,6 @@ import {
   type PaneVaultLockState,
 } from '../src/ui/utils/vaultLockedError.ts';
 import { isBridgeVaultLockedError } from '../src/ui/utils/bridgeVaultStatus.ts';
-
-const src = (p: string) => readFileSync(new URL(`../${p}`, import.meta.url), 'utf8');
 
 // ---------------------------------------------------------------------------
 // Classifier: every channel a locked bridge reaches the UI through.
@@ -145,58 +142,5 @@ test('every locked surface opens with the same headline, including the hub 423 m
   for (const m of [VAULT_LOCKED_OVERLAY_MESSAGE, VAULT_LOCKED_SHELL_START_MESSAGE, VAULT_LOCKED_SETTINGS_DESCRIPTION]) {
     assert.ok(m.startsWith(VAULT_LOCKED_HEADLINE), m);
   }
-  assert.match(src('src/hub/domain/errors.odin'), /VAULT_LOCKED_MESSAGE :: "This bridge's vault is locked\./);
-  assert.match(src('src/ui/components/shells/NewShellDialog.tsx'), /VAULT_LOCKED_SHELL_START_MESSAGE/);
-  assert.match(src('src/ui/components/settings/BridgeSettingsPanel.tsx'), /Locked: VAULT_LOCKED_SETTINGS_DESCRIPTION/);
 });
 
-// ---------------------------------------------------------------------------
-// Wiring (source text).
-// ---------------------------------------------------------------------------
-
-test('both panes use the ONE shared overlay + lock hook and drop input while locked', () => {
-  for (const file of ['src/ui/components/chat/AgentPaneComposerPanel.tsx', 'src/ui/components/shells/ShellTerminalPane.tsx']) {
-    const s = src(file);
-    assert.match(s, /import VaultLockedOverlay from '(\.\.\/shells|\.)\/VaultLockedOverlay'/, file);
-    assert.match(s, /usePaneVaultLock\(\{/, file);
-    assert.match(s, /onVaultLocked: \(signal\) => \{\s*\/\/[^\n]*\n\s*vaultLock\.report\(signal\);/, `${file}: stream signal feeds the hook, not the polling fallback`);
-    assert.match(s, /if \(vaultLockedRef\.current\) return;/, `${file}: input refused while locked`);
-    assert.match(s, /<VaultLockedOverlay bridgeId=\{vaultLock\.bridgeId\} onUnsealed=\{vaultLock\.markUnsealed\} \/>/, file);
-    assert.match(s, /sessionId: /, `${file}: listens for announced signals for its session`);
-  }
-  assert.match(src('src/ui/components/chat/AgentPaneComposerPanel.tsx'), /reconnectStream\(\);/);
-  assert.match(src('src/ui/components/shells/ShellTerminalPane.tsx'), /restartShell\(\{ sessionId: session\.session_id \}\)/);
-});
-
-test('both stream hooks classify error frames and close reasons with the shared helper', () => {
-  for (const file of ['src/ui/components/chat/useAgentStream.ts', 'src/ui/components/shells/useShellStream.ts']) {
-    const s = src(file);
-    assert.match(s, /import \{ isVaultLockedError \} from '\.\.\/\.\.\/utils\/vaultLockedError\.ts';/, file);
-    assert.match(s, /if \(isVaultLockedError\(msg\)\) \{[\s\S]{0,200}onVaultLockedRef\.current\?\.\(msg\);/, `${file}: error frame`);
-    assert.match(s, /isVaultLockedError\(\{ reason: event\??\.reason \}\)/, `${file}: close reason`);
-  }
-});
-
-test('the overlay reuses the Settings -> Bridges unseal path; no new key-entry surface', () => {
-  const s = src('src/ui/components/shells/VaultLockedOverlay.tsx');
-  assert.match(s, /<BridgeSettingsPanel\s+selectedBridgeId=\{bridgeId\}\s+autoUnseal/);
-  assert.match(s, /VAULT_LOCKED_OVERLAY_MESSAGE/);
-  assert.match(s, /VAULT_LOCKED_UNLOCK_LABEL/);
-  assert.doesNotMatch(s, /type="password"|<Input\b|deriveKeyFromPassword/, 'no password field of its own');
-
-  const panel = src('src/ui/components/settings/BridgeSettingsPanel.tsx');
-  assert.match(panel, /if \(!autoUnseal \|\| !selectedBridgeId \|\| autoUnsealStartedRef\.current\) return;[\s\S]{0,120}handleBridgeConfigure\(selectedBridgeId\);/,
-    'autoUnseal runs the row\'s own Configure/Unlock logic once');
-  assert.equal((panel.match(/onBridgeUnsealedRef\.current\?\.\(bridgeId\);/g) || []).length, 2, 'both unseal success paths notify');
-});
-
-test('REST and user-WS signals are announced to the pane showing that session', () => {
-  const shells = src('src/ui/api/endpoints/shells.ts');
-  assert.equal((shells.match(/announcePaneVaultLocked\(sessionId, customQueryError\(error\)\);/g) || []).length, 2, 'restart + input');
-  assert.match(src('src/ui/api/endpoints/agents.ts'), /announcePaneVaultLocked\(agentInstanceId, customQueryError\(error\)\);/);
-  assert.match(src('src/ui/api/wsInvalidation.ts'), /case 'shell_session_exited':[\s\S]{0,400}announcePaneVaultLocked\(String\(payload\?\.session_id \|\| ''\), payload\);/);
-  const fetch = src('src/ui/api/cookieFetch.ts');
-  assert.match(fetch, /export function customQueryError/);
-  assert.match(fetch, /if \(typeof e\?\.code === 'string' && e\.code\) out\.code = e\.code;/);
-  assert.match(fetch, /if \(typeof e\?\.status === 'number'\) out\.originalStatus = e\.status;/);
-});

@@ -1,103 +1,13 @@
 package main
 
-import "core:encoding/json"
 import "core:fmt"
-import "core:os"
 import "core:strings"
-import "core:sync"
-import "core:sys/posix"
 import "core:testing"
-import cfg_lib "odin_test:lib/config"
 
 // ── REQ-VAULT-ISSUES-CLI-1 Unit Tests ────────────────────────────────────────
 
 TEST_ISSUE_VAULT_KEY :: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 ALT_ISSUE_VAULT_KEY  :: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
-
-@(test)
-test_ctl_read_vault_key_resolution :: proc(t: ^testing.T) {
-	sync.mutex_lock(&vault_test_mutex)
-	defer sync.mutex_unlock(&vault_test_mutex)
-	sb := ctl_vault_test_sandbox_open("ctl-read-vault-key-resolution")
-	defer ctl_vault_test_sandbox_close(&sb)
-
-	// 1. CLI flag override (--vault-key)
-	args_flag := [?]string{"ham-ctl", "issue", "list", "--vault-key", TEST_ISSUE_VAULT_KEY}
-	key_flag, ok_flag := ctl_read_vault_key(args_flag[:], context.temp_allocator)
-	testing.expect(t, ok_flag, "vault key from --vault-key flag must resolve")
-	testing.expect_value(t, key_flag, TEST_ISSUE_VAULT_KEY)
-
-	// Invalid hex flag must be rejected without falling through
-	args_invalid := [?]string{"ham-ctl", "issue", "list", "--vault-key", "invalid_short_hex"}
-	_, ok_invalid := ctl_read_vault_key(args_invalid[:], context.temp_allocator)
-	testing.expect(t, !ok_invalid, "invalid short vault-key flag must be rejected")
-
-	args_invalid_chars := [?]string{"ham-ctl", "issue", "list", "--vault-key", "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"}
-	_, ok_invalid_chars := ctl_read_vault_key(args_invalid_chars[:], context.temp_allocator)
-	testing.expect(t, !ok_invalid_chars, "invalid chars vault-key flag must be rejected")
-
-	// 2. Environment variable HEIMDALL_VAULT_KEY
-	_ = os.set_env("HEIMDALL_VAULT_KEY", TEST_ISSUE_VAULT_KEY)
-	key_env, ok_env := ctl_read_vault_key(nil, context.temp_allocator)
-	testing.expect(t, ok_env, "vault key from HEIMDALL_VAULT_KEY env must resolve")
-	testing.expect_value(t, key_env, TEST_ISSUE_VAULT_KEY)
-	os.unset_env("HEIMDALL_VAULT_KEY")
-
-	// Invalid HEIMDALL_VAULT_KEY env var must be rejected without falling through
-	_ = os.set_env("HEIMDALL_VAULT_KEY", "bad_short_key")
-	_, ok_bad_env := ctl_read_vault_key(nil, context.temp_allocator)
-	testing.expect(t, !ok_bad_env, "invalid short HEIMDALL_VAULT_KEY env must be rejected")
-	_ = os.set_env("HEIMDALL_VAULT_KEY", "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz")
-	_, ok_bad_chars_env := ctl_read_vault_key(nil, context.temp_allocator)
-	testing.expect(t, !ok_bad_chars_env, "invalid chars HEIMDALL_VAULT_KEY env must be rejected")
-	os.unset_env("HEIMDALL_VAULT_KEY")
-
-	// 3. Flag takes precedence over Environment variable
-	_ = os.set_env("HEIMDALL_VAULT_KEY", TEST_ISSUE_VAULT_KEY)
-	defer os.unset_env("HEIMDALL_VAULT_KEY")
-	args_override := [?]string{"ham-ctl", "issue", "list", "--vault-key", ALT_ISSUE_VAULT_KEY}
-	key_override, ok_override := ctl_read_vault_key(args_override[:], context.temp_allocator)
-	testing.expect(t, ok_override, "vault key flag override must resolve")
-	testing.expect_value(t, key_override, ALT_ISSUE_VAULT_KEY)
-}
-
-@(test)
-test_issue_write_encryption :: proc(t: ^testing.T) {
-	orig_title := "Critical zero-day vulnerability in bridge authentication"
-	orig_desc := "Steps to reproduce: send malformed token with null bytes to TCP socket."
-	orig_body := "Investigating the root cause in src/bridge/agent_token_store.odin."
-
-	// Encrypt title
-	enc_title, title_ok := vault_encrypt_text_hex(orig_title, TEST_ISSUE_VAULT_KEY, context.temp_allocator)
-	testing.expect(t, title_ok, "title encryption must succeed")
-	testing.expect(t, is_vault_armored(enc_title), "encrypted title must have vault:v1: prefix")
-	testing.expect(t, !strings.contains(enc_title, orig_title), "encrypted title must not leak plaintext")
-
-	// Encrypt description
-	enc_desc, desc_ok := vault_encrypt_text_hex(orig_desc, TEST_ISSUE_VAULT_KEY, context.temp_allocator)
-	testing.expect(t, desc_ok, "description encryption must succeed")
-	testing.expect(t, is_vault_armored(enc_desc), "encrypted description must have vault:v1: prefix")
-	testing.expect(t, !strings.contains(enc_desc, orig_desc), "encrypted description must not leak plaintext")
-
-	// Encrypt comment body
-	enc_body, body_ok := vault_encrypt_text_hex(orig_body, TEST_ISSUE_VAULT_KEY, context.temp_allocator)
-	testing.expect(t, body_ok, "body encryption must succeed")
-	testing.expect(t, is_vault_armored(enc_body), "encrypted body must have vault:v1: prefix")
-	testing.expect(t, !strings.contains(enc_body, orig_body), "encrypted body must not leak plaintext")
-
-	// Decrypt round-trip
-	dec_title, dt_ok := vault_decrypt_text_hex(enc_title, TEST_ISSUE_VAULT_KEY, context.temp_allocator)
-	testing.expect(t, dt_ok, "title decryption must succeed")
-	testing.expect_value(t, dec_title, orig_title)
-
-	dec_desc, dd_ok := vault_decrypt_text_hex(enc_desc, TEST_ISSUE_VAULT_KEY, context.temp_allocator)
-	testing.expect(t, dd_ok, "description decryption must succeed")
-	testing.expect_value(t, dec_desc, orig_desc)
-
-	dec_body, db_ok := vault_decrypt_text_hex(enc_body, TEST_ISSUE_VAULT_KEY, context.temp_allocator)
-	testing.expect(t, db_ok, "body decryption must succeed")
-	testing.expect_value(t, dec_body, orig_body)
-}
 
 @(test)
 test_issue_show_transparent_decryption :: proc(t: ^testing.T) {

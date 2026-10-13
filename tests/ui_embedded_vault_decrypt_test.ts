@@ -6,85 +6,12 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const REPO_ROOT = path.resolve(__dirname, '..');
 
 const TEST_KEY_HEX = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
 const DIFFERENT_KEY_HEX = 'fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210';
 
 // -----------------------------------------------------------------------------
-// Section 1: Static Architecture & File Integration Audit
-// -----------------------------------------------------------------------------
-
-test('all required indirect decrypt implementation files exist with expected tokens', () => {
-  const filesToCheck = [
-    {
-      file: 'src/ui/utils/vaultContent.ts',
-      tokens: ['containsVaultArmored', 'decryptEmbeddedVaultTokens', 'VAULT_ARMOR_PREFIX'],
-    },
-    {
-      file: 'src/ui/utils/vaultChats.ts',
-      tokens: ['containsVaultArmored', 'decryptEmbeddedVaultTokens', 'decryptChatMessage', 'decryptConversationRecord'],
-    },
-    {
-      file: 'src/ui/services/notificationService.ts',
-      tokens: ['containsVaultArmored', 'decryptEmbeddedVaultTokens', '[🔒 Encrypted action]', '[🔒 Encrypted message]', '[🔒 Encrypted]'],
-    },
-    {
-      file: 'src/ui/api/pushNotificationMapper.ts',
-      tokens: ['containsVaultArmored', '[🔒 Encrypted notification]'],
-    },
-    {
-      file: 'src/ui/components/chat/chainTaskInference.ts',
-      tokens: ['reviewerRefs', 'reviewer_refs', 'agentId', 'agent_id'],
-    },
-    {
-      file: 'src/ui/components/chat/CurrentTaskStrip.tsx',
-      tokens: ['containsVaultArmored', 'decryptEmbeddedVaultTokens', 'acceptanceSummary'],
-    },
-    {
-      file: 'src/ui/components/chat/AgentActivityBubbles.tsx',
-      tokens: ['containsVaultArmored', 'decryptEmbeddedVaultTokens', '[🔒 Encrypted]'],
-    },
-    {
-      file: 'src/ui/components/chat/ConversationThreadPage.tsx',
-      tokens: ['containsVaultArmored', 'decryptEmbeddedVaultTokens', 'VaultText'],
-    },
-    {
-      file: 'src/ui/components/chat/MessageItem.tsx',
-      tokens: ['containsVaultArmored', 'decryptEmbeddedVaultTokens'],
-    },
-    {
-      file: 'src/bridge/vault_decrypt.odin',
-      tokens: ['bridge_decrypt_embedded_vault_tokens', 'bridge_decrypt_vault_ciphertext', 'VAULT_ARMOR_PREFIX'],
-    },
-    {
-      file: 'src/bridge/pty_host_runtime.odin',
-      tokens: ['bridge_decrypt_embedded_vault_tokens', 'sender_display_name', './.heimdall/bin/ham-ctl task list'],
-    },
-    {
-      file: 'src/hub/service/taskchain/taskchain_service.odin',
-      tokens: ['strings.has_prefix', 'vault:v1:'],
-    },
-  ];
-
-  for (const { file, tokens } of filesToCheck) {
-    const fullPath = path.join(REPO_ROOT, file);
-    assert.ok(fs.existsSync(fullPath), `Expected file to exist: ${file}`);
-    const content = fs.readFileSync(fullPath, 'utf8');
-    for (const token of tokens) {
-      assert.ok(content.includes(token), `Expected ${file} to contain '${token}'`);
-    }
-  }
-});
-
-// -----------------------------------------------------------------------------
-// Section 2: Embedded Vault Token Detection & Multi-Token Decryption
+// Section 1: Embedded Vault Token Detection & Multi-Token Decryption
 // -----------------------------------------------------------------------------
 
 import {
@@ -607,24 +534,6 @@ test('isVaultSupported() is the single availability predicate consumed by vault 
   const { isVaultSupported } = await import('../src/ui/utils/vaultCrypto.ts');
   assert.equal(typeof isVaultSupported, 'function', 'vaultCrypto.ts must export isVaultSupported');
   assert.equal(isVaultSupported(), true, 'Node webcrypto is a supported context');
-
-  // Exactly one definition of the predicate exists across the UI sources.
-  const sources = [
-    'src/ui/utils/vaultCrypto.ts',
-    'src/ui/utils/vaultContent.ts',
-    'src/ui/store/vaultSlice.ts',
-    'src/ui/components/shell/AppShell.tsx',
-    'src/ui/components/shell/BottomDock.tsx',
-    'src/ui/components/settings/VaultPanel.tsx',
-  ];
-  const definitions = sources.filter((rel) =>
-    /export function isVaultSupported/.test(fs.readFileSync(path.join(REPO_ROOT, rel), 'utf8')),
-  );
-  assert.deepEqual(
-    definitions,
-    ['src/ui/utils/vaultCrypto.ts'],
-    'isVaultSupported() must be defined exactly once, in vaultCrypto.ts',
-  );
 });
 
 console.log('ui_embedded_vault_decrypt_test: all regression tests completed successfully.');

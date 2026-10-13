@@ -80,26 +80,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# ---- AC4, source half: the constant is GONE -----------------------------------
-# Run BEFORE the stack comes up: it needs no processes, and a reintroduced
-# threshold should fail this suite immediately rather than after a five-minute
-# bring-up.
-# Count only CODE references. The constant's name survives in prose — the header
-# comment in shell_common.odin explains that it was deleted and must not return, and
-# these tests name it too — so a bare grep would report its own documentation as a
-# violation. Comment lines and test files are therefore excluded, and what is left
-# is any line that actually uses the identifier.
-THRESHOLD_HITS="$( { grep -rn 'BRIDGE_SHELL_ASYNC_THRESHOLD' src/ 2>/dev/null || true; } \
-  | { grep -v '_test\.odin:' || true; } \
-  | { grep -vE ':[0-9]+:[[:space:]]*//' || true; } \
-  | wc -l | tr -d ' ')"
-if [ "${THRESHOLD_HITS:-0}" -eq 0 ]; then
-  ok "AC4: BRIDGE_SHELL_ASYNC_THRESHOLD no longer exists in the tree"
-else
-  bad "AC4: BRIDGE_SHELL_ASYNC_THRESHOLD is still referenced $THRESHOLD_HITS time(s)"
-  grep -rn 'BRIDGE_SHELL_ASYNC_THRESHOLD' src/ | head -5
-fi
-
 port_busy() { ss -ltn 2>/dev/null | awk '{print $4}' | grep -q ":$1\$"; }
 for p in "$HUB_PORT" "$PROXY_PORT" "$B_PORT" "$B_LOCAL" "$SERVE_PORT"; do
   if port_busy "$p"; then

@@ -26,13 +26,21 @@ package hub_bootstrap_golden_test
 import "core:fmt"
 import "core:os"
 import "core:strings"
+import "core:testing"
 import agent_service "odin_test:hub/service/agent"
 
 GOLDEN_DIR :: "tests/hub_bootstrap_golden_test/golden"
 
 failures := 0
 
+@(test)
+test_hub_bootstrap_golden :: proc(t: ^testing.T) {
+	main()
+	testing.expect_value(t, failures, 0)
+}
+
 main :: proc() {
+	failures = 0
 	// --- Header goldens -----------------------------------------------------
 	// render_header_inline is the ONLY surviving per-fragment renderer (the bridge
 	// injects the AGENTS.md header locally from the instance manifest). The

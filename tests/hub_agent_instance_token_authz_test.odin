@@ -11,6 +11,7 @@ package hub_agent_instance_token_authz_test
 //     launch/stop/restart), identical to the user-token boundary.
 
 import "core:fmt"
+import "core:testing"
 import "core:os"
 import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
@@ -48,6 +49,12 @@ fr_now: string = "2026-09-01T10:00:00Z"
 fr_clock_now :: proc(ctx: rawptr) -> string { _ = ctx; return fr_now }
 
 check :: proc(ok: bool, message: string) { if ok do return; fmt.eprintln("FAIL:", message); os.exit(1) }
+
+@(test)
+test_hub_agent_instance_token_authz_test :: proc(t: ^testing.T) {
+	_ = t
+	main()
+}
 
 main :: proc() {
 	repo := new(Fake_Repo)

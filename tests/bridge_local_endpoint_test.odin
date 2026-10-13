@@ -1,6 +1,7 @@
 package bridge_local_endpoint_test
 
 import "core:fmt"
+import "core:testing"
 import "core:net"
 import "core:os"
 import "core:strings"
@@ -40,6 +41,12 @@ itoa_local :: proc(n: int) -> string {
 	return strings.clone(string(buf[i:]))
 }
 
+@(test)
+test_bridge_local_endpoint_test :: proc(t: ^testing.T) {
+	_ = t
+	main()
+}
+
 main :: proc() {
 	bridge.bridge_runtime_init()
 	bridge.bridge_agent_token_store_init()
@@ -49,7 +56,12 @@ main :: proc() {
 	time.sleep(20 * time.Millisecond)
 	bridge.bridge_config.daemon_url = fmt.tprintf("http://127.0.0.1:%d", fake_port)
 	bridge.bridge_config.bridge_token = "hbr_test"
+	_ = os.remove_all("/tmp/heimdall-bridge-local-endpoint-test")
+	defer _ = os.remove_all("/tmp/heimdall-bridge-local-endpoint-test")
 	unix_cfg := bridge.bridge_local_endpoint_config_default("/tmp/heimdall-bridge-local-endpoint-test", 0)
+	sock_cstr := strings.clone_to_cstring(unix_cfg.unix_socket_path)
+	defer delete(sock_cstr)
+	unix_cfg.unix_socket_path = string(sock_cstr)
 	check(bridge.bridge_local_endpoint_env_value(unix_cfg, true) == "unix:/tmp/heimdall-bridge-local-endpoint-test/bridge.sock", "unix endpoint env must use run_dir bridge.sock")
 	check(bridge.bridge_local_endpoint_start_unix(unix_cfg), "unix socket endpoint must start with owner-only mode")
 	issued := bridge.bridge_agent_token_issue("inst_local", "hit_bridge_held", .Agent)

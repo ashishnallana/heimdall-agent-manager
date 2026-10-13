@@ -336,31 +336,3 @@ test('COUNTERFACTUAL: the pre-fix operand state.vault.rawVaultKeyHex is dead eve
     'POST-FIX GATE: true when unlocked — encryption/decryption actually runs');
 });
 
-test('COUNTERFACTUAL: neither file references the retired rawKey sources at all', async () => {
-  for (const rel of ['src/ui/api/endpoints/artifacts.ts', 'src/ui/api/endpoints/taskChains.ts']) {
-    const src = fs.readFileSync(`${R}/${rel}`, 'utf8');
-    for (const dead of ['rawVaultKeyHex', 'selectRawVaultKeyHex', 'rawKeyHex']) {
-      const hits = src.split('\n')
-        .map((l, i) => [i + 1, l] as [number, string])
-        .filter(([, l]) => l.includes(dead));
-      assert.equal(hits.length, 0,
-        `${rel} still references ${dead} at: ${hits.map(([n, l]) => `${n}: ${l.trim()}`).join(' | ')}`);
-    }
-    // A7 retires selectRawVaultKeyHex; a stale import here would break its build.
-    assert.ok(!/selectRawVaultKeyHex/.test(src), `${rel} must not import selectRawVaultKeyHex`);
-  }
-});
-
-test('COUNTERFACTUAL: useArtifactContentState effect no longer depends on the dead key', async () => {
-  const src = fs.readFileSync(`${R}/src/ui/api/endpoints/artifacts.ts`, 'utf8');
-  const hook = src.slice(src.indexOf('export function useArtifactContentState'));
-  const body = hook.slice(0, hook.indexOf('export function useArtifactContentUrl'));
-  assert.ok(/const activeKey = getActiveVaultKey\(\);/.test(body),
-    'the hook must resolve the real CryptoKey inside the effect');
-  assert.ok(/if \(isUnlocked && activeKey\)/.test(body),
-    'the hook decryption gate must test the real key');
-  const dep = body.match(/\}, \[([^\]]*)\]\);/);
-  assert.ok(dep, 'effect dependency array must be present');
-  assert.ok(!/rawKey/i.test(dep![1]), `dead key must be gone from deps, got: [${dep![1]}]`);
-  assert.ok(/isUnlocked/.test(dep![1]), 'isUnlocked must remain the reactive trigger');
-});

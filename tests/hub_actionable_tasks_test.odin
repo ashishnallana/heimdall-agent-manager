@@ -1,6 +1,7 @@
 package hub_actionable_tasks_test
 
 import "core:fmt"
+import "core:testing"
 import "core:os"
 import "core:strings"
 import domain "odin_test:hub/domain"
@@ -46,6 +47,12 @@ d_list_by_chain :: proc(ctx: rawptr, chain_id: domain.Task_Chain_ID, owner: doma
 }
 
 assignee_ref :: proc(id: string) -> string { return strings.concatenate({`{"type":"agent_instance","agent_instance_id":"`, id, `"}`}) }
+
+@(test)
+test_hub_actionable_tasks_test :: proc(t: ^testing.T) {
+	_ = t
+	main()
+}
 
 main :: proc() {
 	r: Fake_Repo

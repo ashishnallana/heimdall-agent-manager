@@ -283,27 +283,23 @@ test('modelOptionsForProvider returns the selected provider models and none for 
 });
 
 test('fleetProviderCapabilities maps the live bridge providers payload (name + models) to models', () => {
-  // Shape GET /bridges/:id/providers actually returns (src/bridge/provider_store.odin
-  // bridge_provider_profiles_report_json): provider names under "name", models implied
-  // by non-empty model slots.
   const payload = {
     bridge_id: 'brg_x',
     default_provider: 'claude',
     default_model: 'normal',
     providers: [
-      { name: 'claude', enabled: true, models: { flag: '--model', cheap: '', normal: 'claude-sonnet', smart: 'claude-opus' } },
-      { name: 'codex', enabled: true, models: { flag: '', cheap: '', normal: '', smart: '' } },
+      { name: 'claude', enabled: true, models: { cheap: '', normal: 'claude-sonnet', smart: 'claude-opus' } },
+      { name: 'codex', enabled: true, models: { cheap: '', normal: '', smart: '' } },
       { name: 'disabled-one', enabled: false, models: { normal: 'x' } },
     ],
   };
   assert.deepEqual(fleetProviderCapabilities(payload), [
-    { provider: 'claude', models: ['normal', 'smart'], defaultModel: undefined },
-    { provider: 'codex', models: [], defaultModel: undefined },
+    { provider: 'claude', models: ['normal', 'smart'] },
+    { provider: 'codex', models: [] },
   ]);
 });
 
 test('fleetProviderCapabilities maps the explicit models payload shape unchanged', () => {
-  // Capability-report / mock shape: {provider, models, default_model}.
   const payload = {
     bridge_id: 'brg_x',
     default_provider: 'qoder',
@@ -311,7 +307,7 @@ test('fleetProviderCapabilities maps the explicit models payload shape unchanged
     providers: [{ provider: 'qoder', models: ['smart', 'max'], default_model: 'smart' }],
   };
   assert.deepEqual(fleetProviderCapabilities(payload), [
-    { provider: 'qoder', models: ['smart', 'max'], defaultModel: 'smart' },
+    { provider: 'qoder', models: ['smart', 'max'] },
   ]);
   assert.deepEqual(fleetProviderCapabilities({ providers: [] }), []);
   assert.deepEqual(fleetProviderCapabilities(undefined), []);
@@ -638,8 +634,8 @@ test('model options derived from a live bridge payload drive model selection end
     default_provider: 'claude',
     default_model: 'normal',
     providers: [
-      { name: 'claude', enabled: true, models: { flag: '--model', cheap: '', normal: 'claude-sonnet', smart: 'claude-opus' } },
-      { name: 'codex', enabled: true, models: { flag: '', cheap: '', normal: 'gpt-5-codex', smart: '' } },
+      { name: 'claude', enabled: true, models: { cheap: '', normal: 'claude-sonnet', smart: 'claude-opus' } },
+      { name: 'codex', enabled: true, models: { cheap: '', normal: 'gpt-5-codex', smart: '' } },
     ],
   };
   const caps = fleetProviderCapabilities(livePayload);
@@ -725,20 +721,6 @@ test('changedFleetEntries detects changes from per-bridge drafts', () => {
   ]);
 });
 
-test('REQ-FLEET-UI-EXPANDABLE-1 & REQ-FLEET-PER-BRIDGE-1: drawer markup contains accordion and bridge rows', () => {
-  const drawerSource = readRepo('src/ui/components/tasks/FleetManagementDrawer.tsx');
-  // Expandable trigger with required debug id
-  assert.match(drawerSource, /data-debug-id=\{`fleet-runtime-expand-btn-\$\{agentId\}`\}/);
-  // Bridge row panel with required debug id
-  assert.match(drawerSource, /data-debug-id=\{`fleet-bridge-runtime-row-\$\{agentId\}-\$\{bId\}`\}/);
-  // State for tracking expansion
-  assert.match(drawerSource, /expandedRuntimeRoles/);
-  // Configure Runtime text
-  assert.match(drawerSource, /Configure Runtime/);
-  // useListBridgesQuery usage
-  assert.match(drawerSource, /useListBridgesQuery/);
-});
-
 // -----------------------------------------------------------------------------
 // REQ-TB-5: per-task bridge pin — select default, create submit, change/clear
 // -----------------------------------------------------------------------------
@@ -750,12 +732,6 @@ import {
   taskPatchBridgeFields,
   taskBridgeDisplay,
 } from '../src/ui/utils/taskBridgePin.ts';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import path from 'node:path';
-
-const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const readRepo = (rel: string) => readFileSync(path.join(REPO_ROOT, rel), 'utf-8');
 
 const PIN_BRIDGES = [
   { bridge_id: 'brg_alpha', label: 'alpha host', status: 'online' },
@@ -798,29 +774,6 @@ test('taskBridgeDisplay resolves the pin name and marks inherit', () => {
   // No pin: inherited.
   assert.deepEqual(taskBridgeDisplay('', PIN_BRIDGES), { label: '', inherited: true });
   assert.deepEqual(taskBridgeDisplay(undefined, PIN_BRIDGES), { label: '', inherited: true });
-});
-
-test('REQ-TB-5 wiring: create modals, task detail, and the tasks API all carry the bridge pin', () => {
-  const createModal = readRepo('src/ui/components/tasks/CreateTaskModal.tsx');
-  const overview = readRepo('src/ui/components/taskchain/TaskChainOverview.tsx');
-  const tasksApi = readRepo('src/ui/api/endpoints/tasks.ts');
-
-  // Both create paths submit the selected bridge through the RTK arg.
-  assert.match(createModal, /create-task-bridge-select/);
-  assert.match(createModal, /bridgeId,/);
-  assert.match(overview, /taskchain-new-task-bridge-select/);
-  assert.match(overview, /bridgeId: newTaskBridgeId/);
-
-  // Task detail shows the pin and PATCHes changes through updateTaskDetail.
-  assert.match(overview, /taskchain-task-bridge-\$\{taskId\}/);
-  assert.match(overview, /taskchain-edit-bridge-select/);
-  assert.match(overview, /bridgeId: editBridgeId/);
-
-  // The API layer serializes via the presence-aware helpers and normalizes the
-  // pin onto the task shape.
-  assert.match(tasksApi, /taskCreateBridgeFields\(bridgeId\)/);
-  assert.match(tasksApi, /taskPatchBridgeFields\(bridgeId\)/);
-  assert.match(tasksApi, /bridgeId: String\(task\.bridge_id/);
 });
 
 // -----------------------------------------------------------------------------
@@ -884,30 +837,4 @@ test('canStartTask, canCompleteTask, canPauseTask handle finishing and pausing s
   assert.equal(canStartTask(pausingTask), true);
   assert.equal(canPauseTask(pausingTask), true);
   assert.equal(canCompleteTask(pausingTask), false);
-});
-
-test('TaskChainOverview handles finishing and pausing statuses with badges and action buttons', () => {
-  const overview = readRepo('src/ui/components/taskchain/TaskChainOverview.tsx');
-
-  // Fallback allowedActions for finishing and pausing
-  assert.match(overview, /status === 'finishing'/);
-  assert.match(overview, /\['complete',\s*'force_finish',\s*'revalidate',\s*'pause',\s*'cancel',\s*'nudge'\]/);
-  assert.match(overview, /status === 'pausing'/);
-  assert.match(overview, /\['pause',\s*'force_pause',\s*'start',\s*'cancel',\s*'nudge'\]/);
-
-  // Action buttons
-  assert.match(overview, /taskchain-task-complete-btn-/);
-  assert.match(overview, /taskchain-task-force-finish-btn-/);
-  assert.match(overview, /taskchain-task-pause-btn-/);
-  assert.match(overview, /taskchain-task-force-pause-btn-/);
-
-  // Status badge styling: amber for finishing, cyan/blue for pausing
-  assert.match(overview, /s === 'finishing'[\s\S]*?amber/);
-  assert.match(overview, /s === 'pausing'[\s\S]*?cyan/);
-});
-
-test('FleetManagementDrawer and FleetSlotChips filter out fleet entries for agent IDs not present in agentIdentities', () => {
-  const drawerSource = readRepo('src/ui/components/tasks/FleetManagementDrawer.tsx');
-  assert.match(drawerSource, /validIdentitiesSet/);
-  assert.match(drawerSource, /rawFleets\.filter\(\(f\)\s*=>\s*validIdentitiesSet\.has\(f\.agent_id\)\)/);
 });

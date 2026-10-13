@@ -1,9 +1,0 @@
-[heimdall] startup config:
-  daemon_url=http://127.0.0.1:49422
-  daemon_url_source=env
-  pid=1341
-  platform=darwin
-  electron=33.4.11
-  packaged=false
-  dev=false
-[heimdall] debug_server_port=64550

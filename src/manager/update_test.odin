@@ -13,6 +13,7 @@ import "core:fmt"
 import "core:net"
 import "core:os"
 import "core:strings"
+import "core:sync"
 import "core:testing"
 import "core:thread"
 import "core:time"
@@ -504,6 +505,8 @@ test_manager_update_runit_service :: proc(t: ^testing.T) {
 @(test)
 test_manager_update_build_plan_refuses_linux_build_on_termux :: proc(t: ^testing.T) {
 	when contracts.RELEASE_TARGET == "" && ODIN_OS == .Linux {
+		sync.mutex_lock(&manager_test_env_mutex)
+		defer sync.mutex_unlock(&manager_test_env_mutex)
 		prev, had_prev := os.lookup_env("TERMUX_VERSION", context.allocator)
 		defer if had_prev do delete(prev)
 		testing.expect(t, os.set_env("TERMUX_VERSION", "0.118.0") == nil, "set TERMUX_VERSION")

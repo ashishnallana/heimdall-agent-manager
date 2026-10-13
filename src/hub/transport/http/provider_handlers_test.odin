@@ -39,5 +39,5 @@ test_provider_catalog_serializer_emits_recipe_and_literal_models :: proc(t: ^tes
 	testing.expect(t, strings.contains(body, "\"binary\":\"codex\""), "recipe binary is present")
 	testing.expect(t, strings.contains(body, "\"model_flag\":\"-m\""), "model flag is present")
 	testing.expect(t, strings.contains(body, "\"model_id\":\"gpt-5\""), "literal model id is present")
-	testing.expect(t, !strings.contains(body, "model"), "catalog contract contains no model models")
+	testing.expect(t, !strings.contains(body, "tier"), "catalog contract contains no tier fields")
 }

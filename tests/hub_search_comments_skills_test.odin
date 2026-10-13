@@ -12,6 +12,7 @@
 package hub_search_comments_skills_test
 
 import "core:fmt"
+import "core:testing"
 import "core:os"
 import "core:strings"
 import domain "odin_test:hub/domain"
@@ -29,6 +30,12 @@ TS :: "2026-01-01T00:00:00Z"
 SKILLS := []sqlite.Skill_Doc{
 	{"deploy-runbook", "This runbook explains how to deploy the service to production safely."},
 	{"incident-response", "Steps for handling an incident: escalate, mitigate, then communicate."},
+}
+
+@(test)
+test_hub_search_comments_skills_test :: proc(t: ^testing.T) {
+	_ = t
+	main()
 }
 
 main :: proc() {

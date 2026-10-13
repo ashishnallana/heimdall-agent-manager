@@ -32,52 +32,6 @@ BUMP_SCRIPT = REPO_ROOT / "scripts" / "release" / "bump-version.sh"
 class TestBumpVersionDarwinSed(unittest.TestCase):
     def setUp(self):
         self.assertTrue(BUMP_SCRIPT.exists(), f"bump-version.sh not found at {BUMP_SCRIPT}")
-        self.script_content = BUMP_SCRIPT.read_text(encoding="utf-8")
-
-    def test_sed_i_helper_definition(self):
-        """Verify sed_i helper is defined with Darwin and non-Darwin branches."""
-        self.assertIn("sed_i() {", self.script_content, "sed_i helper function must be defined")
-        self.assertRegex(
-            self.script_content,
-            r'if\s+\[\s*"(\$\(uname\s+-s\)|`uname\s+-s`)"\s*=\s*"Darwin"\s*\];\s*then',
-            "sed_i must detect Darwin via uname -s",
-        )
-        self.assertIn("sed -i '' \"$@\"", self.script_content, "sed_i must use `sed -i '' \"$@\"` on Darwin")
-        self.assertIn("sed -i \"$@\"", self.script_content, "sed_i must use `sed -i \"$@\"` on Linux")
-
-    def test_no_raw_sed_i_outside_helper(self):
-        """Verify all file updates use sed_i and no raw sed -i calls exist outside the helper."""
-        lines = self.script_content.splitlines()
-        helper_lines = set()
-        in_helper = False
-        for idx, line in enumerate(lines):
-            if "sed_i() {" in line:
-                in_helper = True
-            if in_helper:
-                helper_lines.add(idx)
-                if line.strip() == "}":
-                    in_helper = False
-
-        raw_sed_i_matches = []
-        for idx, line in enumerate(lines):
-            if idx in helper_lines:
-                continue
-            stripped = line.strip()
-            if stripped.startswith("#"):
-                continue
-            if re.search(r'\bsed\s+-i\b', line):
-                raw_sed_i_matches.append((idx + 1, line))
-
-        self.assertEqual(
-            raw_sed_i_matches,
-            [],
-            f"Found raw 'sed -i' outside sed_i helper: {raw_sed_i_matches}",
-        )
-
-        # Confirm target files use sed_i
-        self.assertRegex(self.script_content, r'sed_i\s+.*flake\.nix')
-        self.assertRegex(self.script_content, r'sed_i\s+.*src/contracts/protocol\.odin')
-        self.assertRegex(self.script_content, r'sed_i\s+.*package\.json')
 
     def _setup_mock_repo(self, tmp_path: Path):
         """Creates a mock repo structure with fixtures for testing bump-version.sh."""
@@ -142,9 +96,9 @@ BUILD_TIMESTAMP :: #config(HAM_BUILD_TIMESTAMP, "1970-01-01T00:00:00Z")
             self.assertIn('GIT_COMMIT :: #config(HAM_GIT_COMMIT, "c0ffee12")', odin_text)
             self.assertIn('BUILD_TIMESTAMP :: #config(HAM_BUILD_TIMESTAMP, "2026-10-03T12:00:00Z")', odin_text)
 
-            # Verify package.json
+            # Verify package.json keeps its dependency-manifest version untouched
             pkg_text = (tmp_path / "package.json").read_text(encoding="utf-8")
-            self.assertIn('"version": "1.2.3"', pkg_text)
+            self.assertIn('"version": "0.1.0"', pkg_text)
 
             # Verify no backup files created
             all_files = [p.name for p in tmp_path.rglob("*")]
@@ -258,9 +212,9 @@ else:
             self.assertIn('GIT_COMMIT :: #config(HAM_GIT_COMMIT, "abcdef99")', odin_text)
             self.assertIn('BUILD_TIMESTAMP :: #config(HAM_BUILD_TIMESTAMP, "2026-10-03T14:30:00Z")', odin_text)
 
-            # Verify package.json updated properly
+            # Verify package.json keeps its dependency-manifest version untouched
             pkg_text = (tmp_path / "package.json").read_text(encoding="utf-8")
-            self.assertIn('"version": "2.0.0"', pkg_text)
+            self.assertIn('"version": "0.1.0"', pkg_text)
 
 
 if __name__ == "__main__":

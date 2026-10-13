@@ -61,6 +61,7 @@ test_title_mutation_live_events_and_flat_listing :: proc(t: ^testing.T) {
 		trusted_proxy_cidrs  = cidrs[:],
 		auto_provision_users = true,
 		logout_url           = "/_dev/logout",
+		paddle_environment   = "sandbox",
 	})
 	testing.expect(t, ok, msg)
 	defer app.shutdown_graph(&graph)
@@ -104,18 +105,22 @@ test_title_mutation_live_events_and_flat_listing :: proc(t: ^testing.T) {
 		_, _, _ = iface.bridge_save_bridge(graph.bridges.repo, b)
 	}
 	project_service.bridge_runtime_registry_mark_live(graph.agents.bridge_runtime_registry, bridge_id, false, "")
+	_, _ = iface.bridge_provider_status_upsert(graph.agents.providers, domain.Bridge_Provider_Status{bridge_id = bridge_id, provider = "claude", state = "present", checked_at = "2026-10-01T00:00:00Z"})
+	_, _ = iface.bridge_provider_setting_upsert(graph.agents.providers, domain.Bridge_Provider_Setting{bridge_id = bridge_id, provider = "claude", enabled = true, updated_at = "2026-10-01T00:00:00Z"})
 
 	mock_sink := proc(ctx: rawptr, command: project_service.Runtime_Command) -> (bool, domain.Domain_Error) {
 		return true, domain.Domain_Error{}
 	}
-	graph.agents.bridge_command_sink.ctx = nil
-	graph.agents.bridge_command_sink.send_runtime_command = mock_sink
+	graph.agents.bridge_command_sink = project_service.Bridge_Command_Sink{
+		ctx = nil,
+		send_runtime_command = mock_sink,
+	}
 
 	// 2. Create Agent
 	agent_res := api_http.router_dispatch(&graph.router, api_http.Request{
 		method      = "POST",
 		path        = "/api/v1/agents",
-		body        = `{"name":"Coder","slug":"custom-coder","default_provider":"claude","default_model":"normal"}`,
+		body        = `{"name":"Coder","slug":"custom-coder","default_provider":"claude","default_model":"claude-sonnet-5-5"}`,
 		request_id  = "req_tm_3",
 		remote_addr = "127.0.0.1",
 		headers     = alice[:],
@@ -135,7 +140,7 @@ test_title_mutation_live_events_and_flat_listing :: proc(t: ^testing.T) {
 	api_http.router_dispatch(&graph.router, api_http.Request{
 		method      = "PATCH",
 		path        = support_path,
-		body        = `{"enabled":true,"provider":"claude","model":"normal"}`,
+		body        = `{"enabled":true,"provider":"claude","model":"claude-sonnet-5-5"}`,
 		request_id  = "req_tm_4",
 		remote_addr = "127.0.0.1",
 		headers     = alice[:],
@@ -177,7 +182,7 @@ test_title_mutation_live_events_and_flat_listing :: proc(t: ^testing.T) {
 	}
 	defer delete(chain2_id)
 
-	inst_body := strings.concatenate({`{"agent_id":"`, agent_id, `","bridge_id":"`, bridge_id, `","chain_id":"`, chain1_id, `"}`})
+	inst_body := strings.concatenate({`{"agent_id":"`, agent_id, `","bridge_id":"`, bridge_id, `","chain_id":"`, chain1_id, `","provider":"claude","model":"claude-sonnet-5-5"}`})
 	defer delete(inst_body)
 	inst_res := api_http.router_dispatch(&graph.router, api_http.Request{
 		method      = "POST",

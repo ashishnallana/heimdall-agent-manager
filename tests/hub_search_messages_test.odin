@@ -8,6 +8,7 @@
 package hub_search_messages_test
 
 import "core:fmt"
+import "core:testing"
 import "core:os"
 import "core:strings"
 import domain "odin_test:hub/domain"
@@ -59,6 +60,12 @@ search :: proc(repo: ^iface.Search_Repository, owner, q, types: string) -> iface
 find :: proc(hits: []iface.Search_Hit, id: string) -> (iface.Search_Hit, bool) {
 	for hit in hits do if hit.id == id do return hit, true
 	return {}, false
+}
+
+@(test)
+test_hub_search_messages_test :: proc(t: ^testing.T) {
+	_ = t
+	main()
 }
 
 main :: proc() {

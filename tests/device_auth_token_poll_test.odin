@@ -12,6 +12,7 @@
 package device_auth_token_poll_test
 
 import "core:fmt"
+import "core:testing"
 import "core:os"
 import "core:strings"
 import contracts "odin_test:contracts"
@@ -86,6 +87,12 @@ header_value :: proc(headers: []contracts.HTTP_Header, name: string) -> string {
 		if strings.to_lower(h.name) == strings.to_lower(name) do return h.value
 	}
 	return ""
+}
+
+@(test)
+test_device_auth_token_poll_test :: proc(t: ^testing.T) {
+	_ = t
+	main()
 }
 
 main :: proc() {

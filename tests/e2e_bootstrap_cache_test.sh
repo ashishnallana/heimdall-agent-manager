@@ -14,7 +14,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; cd "$ROOT"
 
-PORT="${E2E_HUB_PORT:-8091}"
+PORT="${E2E_HUB_PORT:-$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')}"
 H="127.0.0.1:$PORT"
 DB="$(mktemp -t e2e-hub-XXXX.db)"
 CACHE="$(mktemp -d -t e2e-bridge-cache-XXXX)"
@@ -27,13 +27,13 @@ cleanup() { [ -n "${HUB_PID:-}" ] && kill "$HUB_PID" 2>/dev/null || true; rm -rf
 trap cleanup EXIT
 
 echo "[e2e] building ham-hub + ham-bridge via nix"
-nix build "$ROOT#ham-hub" -o result-hub >/dev/null
-nix build "$ROOT#ham-bridge" -o result-bridge >/dev/null
+nix build "$ROOT#ham-hub" --out-link "$CACHE/result-hub" >/dev/null
+nix build "$ROOT#ham-bridge" --out-link "$CACHE/result-bridge" >/dev/null
 echo "[e2e] building bootstrap harness"
 "$ODIN_BIN" build tests/e2e_bridge_bootstrap_cache_harness.odin -file -collection:odin_test=src -out:"$HARNESS"
 
 echo "[e2e] starting local hub on $H"
-./result-hub/bin/ham-hub --listen "$H" --db "$DB" \
+"$CACHE/result-hub/bin/ham-hub" --listen "$H" --db "$DB" \
   --migrations-dir src/hub/repository/sqlite/migrations \
   --trusted-proxy-cidr 127.0.0.1/32 >"$LOG" 2>&1 &
 HUB_PID=$!

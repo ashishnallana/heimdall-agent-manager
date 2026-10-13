@@ -12,6 +12,8 @@ import "core:fmt"
 import "core:net"
 import "core:os"
 import "core:strings"
+import "core:sync"
+import "core:sys/posix"
 import "core:testing"
 import cfg_lib "odin_test:lib/config"
 
@@ -47,6 +49,7 @@ test_manager_tcp_probe :: proc(t: ^testing.T) {
 	testing.expect(t, lok, "loopback listener bound")
 	if !lok do return
 	testing.expect(t, manager_tcp_probe(port), fmt.tprintf("open port %d probes true", port))
+	_ = posix.shutdown(posix.FD(listener), .RDWR)
 	net.close(listener)
 	testing.expect(t, !manager_tcp_probe(port), fmt.tprintf("closed port %d probes false", port))
 }
@@ -96,7 +99,10 @@ test_manager_probe_bridge_loopback_against_mock :: proc(t: ^testing.T) {
 
 	// Nothing listening on the port.
 	closed_listener, closed_port, clok := manager_test_loopback_listener()
-	if clok do net.close(closed_listener)
+	if clok {
+		_ = posix.shutdown(posix.FD(closed_listener), .RDWR)
+		net.close(closed_listener)
+	}
 	probe3, _ := manager_probe_bridge_loopback(closed_port, "")
 	testing.expect(t, probe3 == .Not_Listening, fmt.tprintf("closed port %d classifies as not listening", closed_port))
 }
@@ -437,6 +443,8 @@ ExecStart=/opt/heimdall/ham-bridge --port 49323
 
 @(test)
 test_manager_unit_config_path :: proc(t: ^testing.T) {
+	sync.mutex_lock(&manager_test_env_mutex)
+	defer sync.mutex_unlock(&manager_test_env_mutex)
 	tmp := manager_test_tmp_dir("unit-config-path")
 	defer manager_test_cleanup(tmp)
 	previous := os.get_env("HEIMDALL_HOME", context.allocator)

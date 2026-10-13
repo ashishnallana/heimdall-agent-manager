@@ -10,6 +10,7 @@
 package hub_agent_search_isolation_test
 
 import "core:fmt"
+import "core:testing"
 import "core:os"
 import "core:strings"
 import contracts "odin_test:contracts"
@@ -25,6 +26,12 @@ check :: proc(ok: bool, msg: string) {
 }
 
 TS :: "2026-01-01T00:00:00Z"
+
+@(test)
+test_hub_agent_search_isolation_test :: proc(t: ^testing.T) {
+	_ = t
+	main()
+}
 
 main :: proc() {
 	db_path := "/tmp/hub_agent_search_isolation.db"

@@ -1,11 +1,22 @@
-package main
+package vcs_backend_test
 
 import "core:fmt"
 import "core:os"
 import "core:strings"
+import "core:testing"
 import vcs "odin_test:lib/vcs"
 
+@(test)
+test_vcs_backend :: proc(t: ^testing.T) {
+	_ = t
+	run_vcs_backend_tests()
+}
+
 main :: proc() {
+	run_vcs_backend_tests()
+}
+
+run_vcs_backend_tests :: proc() {
 	root := "/tmp/ham-vcs-backend-test"
 	origin := "/tmp/ham-vcs-backend-origin.git"
 	worktrees := "/tmp/ham-vcs-backend-worktrees"
@@ -45,7 +56,7 @@ main :: proc() {
 	_ = os.write_entire_file(fmt.tprintf("%s/README.md", root), "main change\n")
 	_, _, _, _ = os.process_exec(os.Process_Desc{command = []string{"git", "-C", root, "add", "README.md"}}, context.allocator)
 	_, _, _, _ = os.process_exec(os.Process_Desc{command = []string{"git", "-C", root, "commit", "-m", "main change"}}, context.allocator)
-	_, _, _, _ = os.process_exec(os.Process_Desc{command = []string{"git", "-C", root, "push", "origin", "main"}}, context.allocator)
+	_, _, _, _ = os.process_exec(os.Process_Desc{command = []string{"git", fmt.tprintf("--git-dir=%s", origin), "fetch", "--update-head-ok", root, "+main:main"}}, context.allocator)
 	status: vcs.Vcs_Status
 	status, ok, msg = backend.workspace_status(handle)
 	if !ok {
@@ -181,6 +192,11 @@ main :: proc() {
 		os.exit(1)
 	}
 	fmt.println("jj ok", jj_detected.repo_root, jj_handle.path, jj_handle.branch_or_change, jj_status.summary_line)
+
+	if os.get_env("HEIMDALL_RUN_LIVE_CITC_TEST", context.allocator) != "1" {
+		fmt.println("fig skip: HEIMDALL_RUN_LIVE_CITC_TEST!=1")
+		return
+	}
 
 	hg_state, _, _, hg_err := os.process_exec(os.Process_Desc{command = []string{"hg", "help", "citc"}}, context.allocator)
 	if hg_err != nil || !hg_state.success {

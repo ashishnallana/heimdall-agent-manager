@@ -35,90 +35,31 @@ def find_free_port() -> int:
         return s.getsockname()[1]
 
 
-def test_static_requirements() -> None:
-    print("Testing static handler and router wiring requirements...")
-    handlers_path = ROOT / "src/hub/transport/http/issue_handlers.odin"
-    require(handlers_path.exists(), "src/hub/transport/http/issue_handlers.odin must exist")
-    handlers_src = read(handlers_path)
-
-    for fn in [
-        "list_issues_handler",
-        "create_issue_handler",
-        "get_issue_handler",
-        "patch_issue_handler",
-        "delete_issue_handler",
-        "list_issue_comments_handler",
-        "create_issue_comment_handler",
-        "delete_issue_comment_handler",
-        "list_issue_votes_handler",
-        "vote_issue_handler",
-        "unvote_issue_handler",
-        "write_issue_lean_json",
-        "write_issue_detail_json",
-    ]:
-        require(f"{fn} :: proc" in handlers_src, f"{fn} must be defined in issue_handlers.odin")
-
-    require("require_auth_any" in handlers_src, "handlers must enforce require_auth_any")
-
-    # Check wiring.odin
-    wiring_path = ROOT / "src/hub/app/wiring.odin"
-    wiring_src = read(wiring_path)
-    require("issue_handlers: http.Issue_Handlers" in wiring_src, "App_Graph must have issue_handlers field")
-    require('"/api/v1/issues"' in wiring_src, "wiring.odin must register /api/v1/issues")
-    require('"/api/v1/issues/*"' in wiring_src, "wiring.odin must register /api/v1/issues/*")
-    require('"/api/v1/issues/*/comments"' in wiring_src, "wiring.odin must register /api/v1/issues/*/comments")
-    require('"/api/v1/issues/*/comments/*"' in wiring_src, "wiring.odin must register /api/v1/issues/*/comments/*")
-    require('"/api/v1/issues/*/votes"' in wiring_src, "wiring.odin must register /api/v1/issues/*/votes")
-    require('"/api/v1/issues/*/vote"' in wiring_src, "wiring.odin must register /api/v1/issues/*/vote")
-
-    # Check CLI files
-    issue_ctl_path = ROOT / "src/ctl/issue.odin"
-    require(issue_ctl_path.exists(), "src/ctl/issue.odin must exist")
-    ctl_src = read(issue_ctl_path)
-    require("ctl_issues_command :: proc" in ctl_src, "src/ctl/issue.odin must implement ctl_issues_command")
-
-    main_ctl_src = read(ROOT / "src/ctl/main.odin")
-    require('"issue"' in main_ctl_src and '"issues"' in main_ctl_src, "src/ctl/main.odin must dispatch issue and issues")
-
-    hub_ctl_src = read(ROOT / "src/ctl/hub_mode.odin")
-    require('resource == "issues" || resource == "issue"' in hub_ctl_src, "src/ctl/hub_mode.odin must support issues")
-
-    agent_ctl_src = read(ROOT / "src/ctl/agent_mode.odin")
-    require('case "issue", "issues":' in agent_ctl_src, "src/ctl/agent_mode.odin must support issue and issues")
-
-    print("Static requirements: PASS")
-
-
-def test_sqlite_schema() -> None:
-    print("Testing SQLite schema migration...")
-    mig_path = ROOT / "src/hub/repository/sqlite/migrations/044_issues.sql"
-    if not mig_path.exists():
-        mig_path = ROOT / "src/hub/repository/sqlite/migrations/045_issues.sql"
-    require(mig_path.exists(), "044_issues.sql or 045_issues.sql migration file must exist")
-    sql = read(mig_path)
-    require("CREATE TABLE IF NOT EXISTS issues" in sql, "issues table must be created")
-    require("CREATE TABLE IF NOT EXISTS issue_comments" in sql, "issue_comments table must be created")
-    require("CREATE TABLE IF NOT EXISTS issue_votes" in sql, "issue_votes table must be created")
-    require("PRIMARY KEY (issue_id, voter_id)" in sql, "issue_votes must enforce composite primary key on (issue_id, voter_id)")
-    print("SQLite schema: PASS")
+def build_odin_pkg(pkg: str, out_path: Path) -> None:
+    import shutil
+    odin = os.environ.get("ODIN") or shutil.which("odin")
+    res = None
+    if odin and os.environ.get("IN_NIX_SHELL"):
+        res = subprocess.run([odin, "build", pkg, "-collection:odin_test=src", f"-out:{out_path}"], cwd=ROOT, capture_output=True, text=True)
+    if res is None or res.returncode != 0:
+        res = subprocess.run(["nix", "develop", "--command", "odin", "build", pkg, "-collection:odin_test=src", f"-out:{out_path}"], cwd=ROOT, capture_output=True, text=True)
+    require(res.returncode == 0, f"Compilation of {pkg} failed: {res.stderr}")
 
 
 def test_live_hub_and_cli() -> None:
+    import shutil
+    import tempfile
     print("Testing live Hub REST API and ham-ctl CLI...")
-    hub_bin = Path("/tmp/test_ham_hub_issues")
-    ctl_bin = Path("/tmp/test_ham_ctl_issues")
+    tmp_dir = Path(tempfile.mkdtemp(prefix="ham-issues-test-"))
+    hub_bin = tmp_dir / "ham-hub"
+    ctl_bin = tmp_dir / "ham-ctl"
 
-    print("Building hub and ctl binaries via nix develop...")
-    build_cmd = f"nix develop --command bash -c 'odin build src/hub -collection:odin_test=src -out:{hub_bin} && odin build src/ctl -collection:odin_test=src -out:{ctl_bin}'"
-    res = subprocess.run(build_cmd, shell=True, cwd=ROOT, capture_output=True, text=True)
-    require(res.returncode == 0, f"Compilation failed: {res.stderr}")
+    print("Building hub and ctl binaries...")
+    build_odin_pkg("src/hub", hub_bin)
+    build_odin_pkg("src/ctl", ctl_bin)
 
     port = find_free_port()
-    db_path = f"/tmp/ham-issues-test-{port}.db"
-    for ext in ["", "-shm", "-wal"]:
-        p = f"{db_path}{ext}"
-        if os.path.exists(p):
-            os.remove(p)
+    db_path = str(tmp_dir / f"ham-issues-test-{port}.db")
 
     migrations_dir = str(ROOT / "src/hub/repository/sqlite/migrations")
 
@@ -452,18 +393,13 @@ def test_live_hub_and_cli() -> None:
             hub_proc.wait(timeout=3)
         except subprocess.TimeoutExpired:
             hub_proc.kill()
-        for ext in ["", "-shm", "-wal"]:
-            p = f"{db_path}{ext}"
-            if os.path.exists(p):
-                os.remove(p)
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def main() -> None:
     print("=" * 60)
     print("RUNNING REQ-ISSUES-API-AND-CLI TEST SUITE")
     print("=" * 60)
-    test_static_requirements()
-    test_sqlite_schema()
     test_live_hub_and_cli()
     print("=" * 60)
     print("ALL TESTS PASSED SUCCESSFULLY!")

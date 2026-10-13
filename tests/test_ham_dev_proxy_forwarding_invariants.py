@@ -133,130 +133,146 @@ def api(base: str, method: str, path: str, body: dict | None = None) -> int:
         return e.code
 
 
+def ensure_proxy_bin(temp_dir: Path) -> Path:
+    import shutil
+    env_bin = os.environ.get("HAM_DEV_PROXY_BIN")
+    if env_bin and Path(env_bin).exists():
+        return Path(env_bin)
+    out_bin = temp_dir / "ham-dev-proxy"
+    odin = os.environ.get("ODIN") or shutil.which("odin")
+    if odin:
+        subprocess.run([odin, "build", "src/dev_proxy", "-collection:odin_test=src", f"-out:{out_bin}"], cwd=ROOT, check=True)
+    else:
+        subprocess.run(["nix", "develop", "--command", "odin", "build", "src/dev_proxy", "-collection:odin_test=src", f"-out:{out_bin}"], cwd=ROOT, check=True)
+    return out_bin
+
+
 def main() -> None:
+    import shutil
     import tempfile
 
-    proxy_bin = Path(os.environ.get("HAM_DEV_PROXY_BIN", "/tmp/ham-dev-proxy"))
-    if not proxy_bin.exists():
-        raise SystemExit(f"missing HAM_DEV_PROXY_BIN: {proxy_bin}")
-
-    hub = RecordingHub()
-    hub_port = free_port()
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", hub_port), hub.handler_factory())
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-
-    proxy_port = free_port()
     testhome = Path(tempfile.mkdtemp())
-    proc = start_proxy(str(proxy_bin), f"127.0.0.1:{proxy_port}", hub_port, str(testhome))
     try:
-        wait_for_proxy(proc, proxy_port)
-        base = f"http://127.0.0.1:{proxy_port}"
+        proxy_bin = ensure_proxy_bin(testhome)
 
-        # --- DP-6: Bearer Authorization passthrough (unchanged) ---------------
-        for prefix in ("hut_", "hbr_", "hbe_"):
-            token = f"{prefix}abcdef0123456789"
-            h = proxied_headers(base, "/api/v1/me", {"Authorization": f"Bearer {token}"})
-            assert h.get("authorization") == f"Bearer {token}", (
-                f"bearer {prefix}* must be forwarded unchanged; got {h.get('authorization')}")
-        print("PASS: DP-6 bearer Authorization (hut_/hbr_/hbe_) forwarded unchanged")
+        hub = RecordingHub()
+        hub_port = free_port()
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", hub_port), hub.handler_factory())
+        threading.Thread(target=server.serve_forever, daemon=True).start()
 
-        # --- DP-6 / HBR-6: spoofed trusted headers stripped; real user injected
-        h = proxied_headers(base, "/api/v1/me", {
-            "X-Dev-User": "reviewer",                       # selects reviewer, then stripped
-            "X-authentik-username": "evil",                 # spoof — must be stripped
-            "X-authentik-name": "Evil Imposter",            # spoof — must be stripped
-            "X-authentik-email": "evil@attacker.example",   # spoof — must be stripped
-            "Authorization": "Bearer hut_keep",
-        })
-        assert h.get("x-authentik-username") == REVIEWER["username"], f"real username injected; got {h}"
-        assert h.get("x-authentik-name") == REVIEWER["display_name"], f"real display name injected; got {h}"
-        assert h.get("x-authentik-email") == REVIEWER["email"], f"real email injected; got {h}"
-        assert "x-dev-user" not in h, f"X-Dev-User must be stripped; saw {h.get('x-dev-user')}"
-        assert h.get("authorization") == "Bearer hut_keep", "non-spoofable headers still forwarded"
-        assert "evil" not in json.dumps(h), f"spoofed values leaked into forwarded headers: {h}"
-        print("PASS: DP-6/HBR-6 spoofed X-authentik-* + X-Dev-User stripped; real reviewer injected")
-
-        # --- DP-6: selection precedence (cookie > default; header > cookie) ---
-        # No selector -> default_user (tanmay).
-        h = proxied_headers(base, "/api/v1/me")
-        assert h.get("x-authentik-username") == TANMAY["username"], f"default should be tanmay; got {h}"
-        # Cookie selects tanmay explicitly.
-        h = proxied_headers(base, "/api/v1/me", cookie="ham_dev_user=tanmay")
-        assert h.get("x-authentik-username") == "tanmay"
-        # Header beats cookie.
-        h = proxied_headers(base, "/api/v1/me", {"X-Dev-User": "reviewer"}, cookie="ham_dev_user=tanmay")
-        assert h.get("x-authentik-username") == "reviewer", "X-Dev-User header must win over cookie"
-        print("PASS: DP-6 selection precedence (header > cookie > default)")
-
-        # --- DP-6: management paths NEVER forwarded to the Hub ---------------
-        hub.reset()
-        # Each of these must be answered LOCALLY (own status), not forwarded.
-        mgmt_calls = [
-            ("GET", "/_dev/", None),                       # UI HTML
-            ("GET", "/_dev/api/users", None),              # roster JSON
-            ("POST", "/_dev/api/users", {"username": "erin", "display_name": "Erin", "email": "erin@e.example"}),
-            ("GET", "/_dev/login?user=erin", None),        # cookie login
-            ("GET", "/_dev/logout", None),                 # cookie clear
-        ]
-        statuses = []
-        for method, path, body in mgmt_calls:
-            statuses.append(api(base, method, path, body))
-        forwarded = hub.paths()
-        assert forwarded == [], (
-            f"management paths must NEVER be forwarded; Hub saw: {forwarded}")
-        assert all(s < 400 for s in statuses), f"management calls should succeed locally; got {statuses}"
-        print(f"PASS: DP-6 management paths answered locally, never forwarded (statuses={statuses})")
-
-        # --- DP-6: unknown dev user is rejected (400), not forwarded --------
-        hub.reset()
-        code = api(base, "GET", "/api/v1/me", None) if False else None
+        proxy_port = free_port()
+        proc = start_proxy(str(proxy_bin), f"127.0.0.1:{proxy_port}", hub_port, str(testhome))
         try:
-            urllib.request.urlopen(
-                urllib.request.Request(f"{base}/api/v1/me", headers={"X-Dev-User": "ghost"}), timeout=5)
-            raise AssertionError("unknown dev user should be rejected")
-        except urllib.error.HTTPError as e:
-            assert e.code == 400, f"unknown user should be 400; got {e.code}"
-        assert hub.paths() == [], "rejected request must not reach the Hub"
-        print("PASS: DP-6 unknown dev user -> 400, not forwarded")
+            wait_for_proxy(proc, proxy_port)
+            base = f"http://127.0.0.1:{proxy_port}"
+
+            # --- DP-6: Bearer Authorization passthrough (unchanged) ---------------
+            for prefix in ("hut_", "hbr_", "hbe_"):
+                token = f"{prefix}abcdef0123456789"
+                h = proxied_headers(base, "/api/v1/me", {"Authorization": f"Bearer {token}"})
+                assert h.get("authorization") == f"Bearer {token}", (
+                    f"bearer {prefix}* must be forwarded unchanged; got {h.get('authorization')}")
+            print("PASS: DP-6 bearer Authorization (hut_/hbr_/hbe_) forwarded unchanged")
+
+            # --- DP-6 / HBR-6: spoofed trusted headers stripped; real user injected
+            h = proxied_headers(base, "/api/v1/me", {
+                "X-Dev-User": "reviewer",                       # selects reviewer, then stripped
+                "X-authentik-username": "evil",                 # spoof — must be stripped
+                "X-authentik-name": "Evil Imposter",            # spoof — must be stripped
+                "X-authentik-email": "evil@attacker.example",   # spoof — must be stripped
+                "Authorization": "Bearer hut_keep",
+            })
+            assert h.get("x-authentik-username") == REVIEWER["username"], f"real username injected; got {h}"
+            assert h.get("x-authentik-name") == REVIEWER["display_name"], f"real display name injected; got {h}"
+            assert h.get("x-authentik-email") == REVIEWER["email"], f"real email injected; got {h}"
+            assert "x-dev-user" not in h, f"X-Dev-User must be stripped; saw {h.get('x-dev-user')}"
+            assert h.get("authorization") == "Bearer hut_keep", "non-spoofable headers still forwarded"
+            assert "evil" not in json.dumps(h), f"spoofed values leaked into forwarded headers: {h}"
+            print("PASS: DP-6/HBR-6 spoofed X-authentik-* + X-Dev-User stripped; real reviewer injected")
+
+            # --- DP-6: selection precedence (cookie > default; header > cookie) ---
+            # No selector -> default_user (tanmay).
+            h = proxied_headers(base, "/api/v1/me")
+            assert h.get("x-authentik-username") == TANMAY["username"], f"default should be tanmay; got {h}"
+            # Cookie selects tanmay explicitly.
+            h = proxied_headers(base, "/api/v1/me", cookie="ham_dev_user=tanmay")
+            assert h.get("x-authentik-username") == "tanmay"
+            # Header beats cookie.
+            h = proxied_headers(base, "/api/v1/me", {"X-Dev-User": "reviewer"}, cookie="ham_dev_user=tanmay")
+            assert h.get("x-authentik-username") == "reviewer", "X-Dev-User header must win over cookie"
+            print("PASS: DP-6 selection precedence (header > cookie > default)")
+
+            # --- DP-6: management paths NEVER forwarded to the Hub ---------------
+            hub.reset()
+            # Each of these must be answered LOCALLY (own status), not forwarded.
+            mgmt_calls = [
+                ("GET", "/_dev/", None),                       # UI HTML
+                ("GET", "/_dev/api/users", None),              # roster JSON
+                ("POST", "/_dev/api/users", {"username": "erin", "display_name": "Erin", "email": "erin@e.example"}),
+                ("GET", "/_dev/login?user=erin", None),        # cookie login
+                ("GET", "/_dev/logout", None),                 # cookie clear
+            ]
+            statuses = []
+            for method, path, body in mgmt_calls:
+                statuses.append(api(base, method, path, body))
+            forwarded = hub.paths()
+            assert forwarded == [], (
+                f"management paths must NEVER be forwarded; Hub saw: {forwarded}")
+            assert all(s < 400 for s in statuses), f"management calls should succeed locally; got {statuses}"
+            print(f"PASS: DP-6 management paths answered locally, never forwarded (statuses={statuses})")
+
+            # --- DP-6: unknown dev user is rejected (400), not forwarded --------
+            hub.reset()
+            code = api(base, "GET", "/api/v1/me", None) if False else None
+            try:
+                urllib.request.urlopen(
+                    urllib.request.Request(f"{base}/api/v1/me", headers={"X-Dev-User": "ghost"}), timeout=5)
+                raise AssertionError("unknown dev user should be rejected")
+            except urllib.error.HTTPError as e:
+                assert e.code == 400, f"unknown user should be 400; got {e.code}"
+            assert hub.paths() == [], "rejected request must not reach the Hub"
+            print("PASS: DP-6 unknown dev user -> 400, not forwarded")
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            server.shutdown()
+            server.server_close()
+
+        # --- DP-7: non-loopback bind disables management; forwarding still works -
+        nl_hub = RecordingHub()
+        nl_hub_port = free_port()
+        nl_server = http.server.ThreadingHTTPServer(("127.0.0.1", nl_hub_port), nl_hub.handler_factory())
+        threading.Thread(target=nl_server.serve_forever, daemon=True).start()
+        nl_port = free_port()
+        nl_proc = start_proxy(str(proxy_bin), f"0.0.0.0:{nl_port}", nl_hub_port, str(testhome))
+        try:
+            wait_for_proxy(nl_proc, nl_port)
+            nbase = f"http://127.0.0.1:{nl_port}"
+            # Every management surface returns 404 on non-loopback.
+            for path in ("/_dev/", "/_dev/api/users", "/_dev/login?user=tanmay", "/_dev/logout"):
+                code = api(nbase, "GET", path)
+                assert code == 404, f"non-loopback {path} should be 404; got {code}"
+            code = api(nbase, "POST", "/_dev/api/users", {"username": "evil"})
+            assert code == 404, f"non-loopback POST management should be 404; got {code}"
+            # Normal proxied forwarding is unaffected by the loopback gate.
+            h = proxied_headers(nbase, "/api/v1/me")
+            assert h.get("x-authentik-username") == "tanmay", "forwarding must still work on non-loopback"
+            print("PASS: DP-7 non-loopback disables all /_dev/* (404); forwarding still works")
+        finally:
+            nl_proc.terminate()
+            try:
+                nl_proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                nl_proc.kill()
+            nl_server.shutdown()
+            nl_server.server_close()
+
+        print("ALL PASS")
     finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-        server.shutdown()
-        server.server_close()
-
-    # --- DP-7: non-loopback bind disables management; forwarding still works -
-    nl_hub = RecordingHub()
-    nl_hub_port = free_port()
-    nl_server = http.server.ThreadingHTTPServer(("127.0.0.1", nl_hub_port), nl_hub.handler_factory())
-    threading.Thread(target=nl_server.serve_forever, daemon=True).start()
-    nl_port = free_port()
-    nl_proc = start_proxy(str(proxy_bin), f"0.0.0.0:{nl_port}", nl_hub_port, str(testhome))
-    try:
-        wait_for_proxy(nl_proc, nl_port)
-        nbase = f"http://127.0.0.1:{nl_port}"
-        # Every management surface returns 404 on non-loopback.
-        for path in ("/_dev/", "/_dev/api/users", "/_dev/login?user=tanmay", "/_dev/logout"):
-            code = api(nbase, "GET", path)
-            assert code == 404, f"non-loopback {path} should be 404; got {code}"
-        code = api(nbase, "POST", "/_dev/api/users", {"username": "evil"})
-        assert code == 404, f"non-loopback POST management should be 404; got {code}"
-        # Normal proxied forwarding is unaffected by the loopback gate.
-        h = proxied_headers(nbase, "/api/v1/me")
-        assert h.get("x-authentik-username") == "tanmay", "forwarding must still work on non-loopback"
-        print("PASS: DP-7 non-loopback disables all /_dev/* (404); forwarding still works")
-    finally:
-        nl_proc.terminate()
-        try:
-            nl_proc.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            nl_proc.kill()
-        nl_server.shutdown()
-        nl_server.server_close()
-
-    print("ALL PASS")
+        shutil.rmtree(testhome, ignore_errors=True)
 
 
 if __name__ == "__main__":

@@ -1,9 +1,7 @@
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-// The push mapper is pure (no DOM). Import it directly. It turns the raw Web
-// Push wire payload the Hub sends into the concrete plan the service worker
-// renders, and is TOTAL: a missing/garbage payload still yields a visible
-// Heimdall fallback (iOS revokes push permission on a silent push).
+test('planForPushPayload maps Web Push payloads and provides total visible fallbacks', async () => {
 const { planForPushPayload } = await import('../src/ui/api/pushNotificationMapper.ts');
 
 // --- Full payload round-trips faithfully ----------------------------------
@@ -133,5 +131,4 @@ for (const bad of ['a raw string', 42, true, ['not', 'an', 'object']] as unknown
   assert.equal(clipped.length, 140, 'over-limit body clipped to exactly 140 chars');
   assert.ok(clipped.endsWith('…'), 'over-limit body ends with ellipsis');
 }
-
-console.log('ui_push_notification_mapper_test: ok');
+});

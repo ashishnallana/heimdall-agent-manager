@@ -342,6 +342,9 @@ test_dynamic_fleet_jit_provisioning :: proc(t: ^testing.T) {
 	co_impl := sqlite.Content_Repo_SQLite{conn = &conn}
 	co_repo := sqlite.new_content_repository(&co_impl, &conn)
 
+	provider_impl := sqlite.Provider_Repo_SQLite{conn = &conn}
+	providers := sqlite.new_provider_repository(&provider_impl, &conn)
+
 	clock := platform.real_clock()
 	ids := platform.real_id_generator()
 
@@ -354,7 +357,7 @@ test_dynamic_fleet_jit_provisioning :: proc(t: ^testing.T) {
 		owner_user_id     = owner,
 		machine_hostname  = "localhost",
 		status            = .Online,
-		capabilities_json = `{"capabilities":[{"provider":"jetski","models":["cheap","normal","smart"],"default_model":"normal"}],"provider":"jetski","default_model":"normal"}`,
+		capabilities_json = `{"capabilities":[{"provider":"claude","models":["claude-fable-5-1","claude-opus-5-5","claude-sonnet-5-5"],"default_model":"claude-opus-5-5"}],"provider":"claude","default_model":"claude-opus-5-5"}`,
 		created_at        = "2026-09-23T10:00:00Z",
 		updated_at        = "2026-09-23T10:00:00Z",
 	}
@@ -362,6 +365,10 @@ test_dynamic_fleet_jit_provisioning :: proc(t: ^testing.T) {
 	override_bridge := bridge
 	override_bridge.bridge_id = "brg_jit_task_override"
 	_, _, _ = iface.bridge_save_bridge(&br_repo, override_bridge)
+	_, _ = iface.bridge_provider_status_upsert(&providers, domain.Bridge_Provider_Status{bridge_id = "brg_jit", provider = "claude", state = "present"})
+	_, _ = iface.bridge_provider_setting_upsert(&providers, domain.Bridge_Provider_Setting{bridge_id = "brg_jit", provider = "claude", enabled = true})
+	_, _ = iface.bridge_provider_status_upsert(&providers, domain.Bridge_Provider_Status{bridge_id = override_bridge.bridge_id, provider = "claude", state = "present"})
+	_, _ = iface.bridge_provider_setting_upsert(&providers, domain.Bridge_Provider_Setting{bridge_id = override_bridge.bridge_id, provider = "claude", enabled = true})
 
 	// REQ-TB-3 regression fixture: a project with distinct per-bridge paths so a
 	// task-level bridge pin keeps the inherited project context (from the
@@ -440,6 +447,7 @@ test_dynamic_fleet_jit_provisioning :: proc(t: ^testing.T) {
 
 	svc := new_taskchain_service_with_runtime(&tc_repo, &ag_repo, sink, &clock, &ids)
 	ag_service := agent_service.new_agent_service_with_runtime(&ag_repo, &br_repo, &pr_repo, &co_repo, &tc_repo, sink, &registry, &clock, &ids)
+	ag_service.providers = &providers
 	svc.agent_service = &ag_service
 
 	// Create chain
@@ -471,7 +479,7 @@ test_dynamic_fleet_jit_provisioning :: proc(t: ^testing.T) {
 	_, _, _ = iface.agent_save_instance(&ag_repo, coord_inst)
 
 	// Set fleet capacity = 2 for agt_jit_worker with a per-role provider/model
-	// (model "cheap" differs from the agent default "normal" so the assertions
+	// (model "claude-fable-5-1" differs from the catalog default "claude-opus-5-5" so the assertions
 	// below prove the fleet selection wins).
 	fleet := domain.Task_Chain_Fleet{
 		task_chain_id    = chain_id,
@@ -479,8 +487,8 @@ test_dynamic_fleet_jit_provisioning :: proc(t: ^testing.T) {
 		capacity         = 2,
 		min_warm         = 0,
 		idle_ttl_seconds = 300,
-		provider         = "jetski",
-		model             = "cheap",
+		provider         = "claude",
+		model             = "claude-fable-5-1",
 		created_at       = "2026-09-23T10:00:00Z",
 		updated_at       = "2026-09-23T10:00:00Z",
 	}
@@ -528,15 +536,15 @@ test_dynamic_fleet_jit_provisioning :: proc(t: ^testing.T) {
 
 	// REQ-FLEET-PT-2: the fleet row's provider/model must reach the JIT-provisioned
 	// instance (worker call site).
-	testing.expect_value(t, spawned_inst.provider, "jetski")
-	testing.expect_value(t, spawned_inst.model, "cheap")
+	testing.expect_value(t, spawned_inst.provider, "claude")
+	testing.expect_value(t, spawned_inst.model, "claude-fable-5-1")
 
 	// Check instance is enrolled as chain member
 	is_member := is_instance_member_or_coordinator(&svc, chain, spawned_id)
 	testing.expect(t, is_member, "spawned instance must be enrolled as chain member")
 
 	// Fleet provider/model cleared back to "" -> inherit. The next JIT instance must
-	// fall back to the standard resolution order (agent default jetski/normal).
+	// fall back to the standard resolution order (catalog default claude/claude-opus-5-5).
 	cleared := fleet
 	cleared.provider = ""
 	cleared.model = ""
@@ -570,16 +578,16 @@ test_dynamic_fleet_jit_provisioning :: proc(t: ^testing.T) {
 	inherited_inst, inherited_ok, _ := iface.agent_get_instance(&ag_repo, spawned2_id)
 	testing.expect(t, inherited_ok, "second spawned instance must exist in repository")
 	testing.expect_value(t, inherited_inst.bridge_id, "brg_jit")
-	testing.expect_value(t, inherited_inst.provider, "jetski")
-	testing.expect_value(t, inherited_inst.model, "normal")
+	testing.expect_value(t, inherited_inst.provider, "claude")
+	testing.expect_value(t, inherited_inst.model, "claude-opus-5-5")
 	// REQ-TB-3: with no task pin the same inherited project context resolves its
 	// path on the fallback bridge (coordinator bridge), not the override bridge.
 	testing.expect_value(t, string(inherited_inst.project_id), "prj_jit")
 	testing.expect_value(t, inherited_inst.project_path, "/srv/jit/primary")
 
 	// Reviewer call site: a fleet row for the reviewer agent must reach the
-	// reviewer JIT provision in the REVIEWER DISPATCH PASS (model "smart" differs
-	// from the reviewer agent's default "normal").
+	// reviewer JIT provision in the REVIEWER DISPATCH PASS (model "claude-sonnet-5-5" differs
+	// from the catalog default "claude-opus-5-5").
 	reviewer_agent := domain.Agent{
 		agent_id         = "agt_jit_reviewer",
 		owner_user_id    = owner,
@@ -607,8 +615,8 @@ test_dynamic_fleet_jit_provisioning :: proc(t: ^testing.T) {
 		capacity         = 1,
 		min_warm         = 0,
 		idle_ttl_seconds = 300,
-		provider         = "jetski",
-		model             = "smart",
+		provider         = "claude",
+		model             = "claude-sonnet-5-5",
 		created_at       = "2026-09-23T10:00:00Z",
 		updated_at       = "2026-09-23T10:00:00Z",
 	}
@@ -645,8 +653,8 @@ test_dynamic_fleet_jit_provisioning :: proc(t: ^testing.T) {
 		testing.expect(t, rev_ok, "reviewer JIT instance must exist in repository")
 		testing.expect_value(t, rev_inst.agent_id, "agt_jit_reviewer")
 		testing.expect_value(t, rev_inst.bridge_id, override_bridge.bridge_id)
-		testing.expect_value(t, rev_inst.provider, "jetski")
-		testing.expect_value(t, rev_inst.model, "smart")
+		testing.expect_value(t, rev_inst.provider, "claude")
+		testing.expect_value(t, rev_inst.model, "claude-sonnet-5-5")
 		testing.expect_value(t, rev_inst.current_task_id, "task_jit_review")
 		testing.expect_value(t, rev_inst.current_task_role, domain.Current_Task_Role.Review)
 		// REQ-TB-3: reviewer JIT spawn keeps the inherited project context and
@@ -667,6 +675,8 @@ test_dynamic_fleet_jit_provisioning :: proc(t: ^testing.T) {
 	offline_bridge.bridge_id = "brg_jit_offline"
 	offline_bridge.status = .Offline
 	_, _, _ = iface.bridge_save_bridge(&br_repo, offline_bridge)
+	_, _ = iface.bridge_provider_status_upsert(&providers, domain.Bridge_Provider_Status{bridge_id = offline_bridge.bridge_id, provider = "claude", state = "present"})
+	_, _ = iface.bridge_provider_setting_upsert(&providers, domain.Bridge_Provider_Setting{bridge_id = offline_bridge.bridge_id, provider = "claude", enabled = true})
 	offline_agent := domain.Agent{
 		agent_id         = "agt_jit_offline",
 		owner_user_id    = owner,
@@ -1015,6 +1025,9 @@ test_dynamic_fleet_schedule_bridge_pinning_and_live_count_scope :: proc(t: ^test
 	co_impl := sqlite.Content_Repo_SQLite{conn = &conn}
 	co_repo := sqlite.new_content_repository(&co_impl, &conn)
 
+	provider_impl := sqlite.Provider_Repo_SQLite{conn = &conn}
+	providers := sqlite.new_provider_repository(&provider_impl, &conn)
+
 	clock := platform.real_clock()
 	ids := platform.real_id_generator()
 
@@ -1027,7 +1040,7 @@ test_dynamic_fleet_schedule_bridge_pinning_and_live_count_scope :: proc(t: ^test
 		owner_user_id     = owner,
 		machine_hostname  = "dawnstar-host",
 		status            = .Online,
-		capabilities_json = `{"capabilities":[{"provider":"jetski","models":["cheap","normal","smart"],"default_model":"normal"}],"provider":"jetski","default_model":"normal"}`,
+		capabilities_json = `{"capabilities":[{"provider":"claude","models":["claude-fable-5-1","claude-opus-5-5","claude-sonnet-5-5"],"default_model":"claude-sonnet-5-5"}],"provider":"claude","default_model":"claude-sonnet-5-5"}`,
 		created_at        = "2026-09-23T10:00:00Z",
 		updated_at        = "2026-09-23T10:00:00Z",
 	}
@@ -1038,11 +1051,15 @@ test_dynamic_fleet_schedule_bridge_pinning_and_live_count_scope :: proc(t: ^test
 		owner_user_id     = owner,
 		machine_hostname  = "riverwood-host",
 		status            = .Online,
-		capabilities_json = `{"capabilities":[{"provider":"jetski","models":["cheap","normal","smart"],"default_model":"normal"}],"provider":"jetski","default_model":"normal"}`,
+		capabilities_json = `{"capabilities":[{"provider":"claude","models":["claude-fable-5-1","claude-opus-5-5","claude-sonnet-5-5"],"default_model":"claude-sonnet-5-5"}],"provider":"claude","default_model":"claude-sonnet-5-5"}`,
 		created_at        = "2026-09-23T10:00:00Z",
 		updated_at        = "2026-09-23T10:00:00Z",
 	}
 	_, _, _ = iface.bridge_save_bridge(&br_repo, brg_riverwood)
+	_, _ = iface.bridge_provider_status_upsert(&providers, domain.Bridge_Provider_Status{bridge_id = "brg_dawnstar", provider = "claude", state = "present"})
+	_, _ = iface.bridge_provider_setting_upsert(&providers, domain.Bridge_Provider_Setting{bridge_id = "brg_dawnstar", provider = "claude", enabled = true})
+	_, _ = iface.bridge_provider_status_upsert(&providers, domain.Bridge_Provider_Status{bridge_id = "brg_riverwood", provider = "claude", state = "present"})
+	_, _ = iface.bridge_provider_setting_upsert(&providers, domain.Bridge_Provider_Setting{bridge_id = "brg_riverwood", provider = "claude", enabled = true})
 
 	// Set up Project
 	pin_project := domain.Project{
@@ -1120,6 +1137,7 @@ test_dynamic_fleet_schedule_bridge_pinning_and_live_count_scope :: proc(t: ^test
 
 	svc := new_taskchain_service_with_runtime(&tc_repo, &ag_repo, sink, &clock, &ids)
 	ag_service := agent_service.new_agent_service_with_runtime(&ag_repo, &br_repo, &pr_repo, &co_repo, &tc_repo, sink, &registry, &clock, &ids)
+	ag_service.providers = &providers
 	svc.agent_service = &ag_service
 
 	// Create chain with coordinator on brg_dawnstar
@@ -1183,8 +1201,8 @@ test_dynamic_fleet_schedule_bridge_pinning_and_live_count_scope :: proc(t: ^test
 		capacity         = 1,
 		min_warm         = 0,
 		idle_ttl_seconds = 300,
-		provider         = "jetski",
-		model             = "normal",
+		provider         = "claude",
+		model             = "claude-sonnet-5-5",
 		created_at       = "2026-09-23T10:00:00Z",
 		updated_at       = "2026-09-23T10:00:00Z",
 	}
@@ -1518,6 +1536,9 @@ test_fsm_unified_atomic_start_and_jit_instance_binding :: proc(t: ^testing.T) {
 	co_impl := sqlite.Content_Repo_SQLite{conn = &conn}
 	co_repo := sqlite.new_content_repository(&co_impl, &conn)
 
+	provider_impl := sqlite.Provider_Repo_SQLite{conn = &conn}
+	providers := sqlite.new_provider_repository(&provider_impl, &conn)
+
 	clock := platform.real_clock()
 	ids := platform.real_id_generator()
 
@@ -1530,11 +1551,13 @@ test_fsm_unified_atomic_start_and_jit_instance_binding :: proc(t: ^testing.T) {
 		owner_user_id     = owner,
 		machine_hostname  = "localhost",
 		status            = .Online,
-		capabilities_json = `{"capabilities":[{"provider":"jetski","models":["cheap","normal","smart"],"default_model":"normal"}],"provider":"jetski","default_model":"normal"}`,
+		capabilities_json = `{"capabilities":[{"provider":"claude","models":["claude-fable-5-1","claude-opus-5-5","claude-sonnet-5-5"],"default_model":"claude-sonnet-5-5"}],"provider":"claude","default_model":"claude-sonnet-5-5"}`,
 		created_at        = "2026-10-01T10:00:00Z",
 		updated_at        = "2026-10-01T10:00:00Z",
 	}
 	_, _, _ = iface.bridge_save_bridge(&br_repo, bridge)
+	_, _ = iface.bridge_provider_status_upsert(&providers, domain.Bridge_Provider_Status{bridge_id = "brg_atomic", provider = "claude", state = "present"})
+	_, _ = iface.bridge_provider_setting_upsert(&providers, domain.Bridge_Provider_Setting{bridge_id = "brg_atomic", provider = "claude", enabled = true})
 
 	project := domain.Project{
 		project_id    = domain.Project_ID("prj_atomic"),
@@ -1596,6 +1619,7 @@ test_fsm_unified_atomic_start_and_jit_instance_binding :: proc(t: ^testing.T) {
 
 	svc := new_taskchain_service_with_runtime(&tc_repo, &ag_repo, sink, &clock, &ids)
 	ag_service := agent_service.new_agent_service_with_runtime(&ag_repo, &br_repo, &pr_repo, &co_repo, &tc_repo, sink, &registry, &clock, &ids)
+	ag_service.providers = &providers
 	svc.agent_service = &ag_service
 
 	// Create chain
@@ -1633,8 +1657,8 @@ test_fsm_unified_atomic_start_and_jit_instance_binding :: proc(t: ^testing.T) {
 		capacity         = 2,
 		min_warm         = 1,
 		idle_ttl_seconds = 300,
-		provider         = "jetski",
-		model             = "normal",
+		provider         = "claude",
+		model             = "claude-sonnet-5-5",
 		created_at       = "2026-10-01T10:00:00Z",
 		updated_at       = "2026-10-01T10:00:00Z",
 	}
@@ -1877,6 +1901,9 @@ test_fsm_watchdog_auto_recovery_crashed_worker_respawn :: proc(t: ^testing.T) {
 	co_impl := sqlite.Content_Repo_SQLite{conn = &conn}
 	co_repo := sqlite.new_content_repository(&co_impl, &conn)
 
+	provider_impl := sqlite.Provider_Repo_SQLite{conn = &conn}
+	providers := sqlite.new_provider_repository(&provider_impl, &conn)
+
 	clock := platform.real_clock()
 	ids := platform.real_id_generator()
 
@@ -1888,11 +1915,13 @@ test_fsm_watchdog_auto_recovery_crashed_worker_respawn :: proc(t: ^testing.T) {
 		owner_user_id     = owner,
 		machine_hostname  = "localhost",
 		status            = .Online,
-		capabilities_json = `{"capabilities":[{"provider":"jetski","models":["cheap","normal","smart"],"default_model":"normal"}],"provider":"jetski","default_model":"normal"}`,
+		capabilities_json = `{"capabilities":[{"provider":"claude","models":["claude-fable-5-1","claude-opus-5-5","claude-sonnet-5-5"],"default_model":"claude-sonnet-5-5"}],"provider":"claude","default_model":"claude-sonnet-5-5"}`,
 		created_at        = "2026-10-01T10:00:00Z",
 		updated_at        = "2026-10-01T10:00:00Z",
 	}
 	_, _, _ = iface.bridge_save_bridge(&br_repo, bridge)
+	_, _ = iface.bridge_provider_status_upsert(&providers, domain.Bridge_Provider_Status{bridge_id = "brg_recovery", provider = "claude", state = "present"})
+	_, _ = iface.bridge_provider_setting_upsert(&providers, domain.Bridge_Provider_Setting{bridge_id = "brg_recovery", provider = "claude", enabled = true})
 
 	project := domain.Project{
 		project_id    = domain.Project_ID("prj_recovery"),
@@ -1953,6 +1982,7 @@ test_fsm_watchdog_auto_recovery_crashed_worker_respawn :: proc(t: ^testing.T) {
 
 	svc := new_taskchain_service_with_runtime(&tc_repo, &ag_repo, sink, &clock, &ids)
 	ag_service := agent_service.new_agent_service_with_runtime(&ag_repo, &br_repo, &pr_repo, &co_repo, &tc_repo, sink, &registry, &clock, &ids)
+	ag_service.providers = &providers
 	svc.agent_service = &ag_service
 
 	chain := domain.Task_Chain{
@@ -1989,8 +2019,8 @@ test_fsm_watchdog_auto_recovery_crashed_worker_respawn :: proc(t: ^testing.T) {
 		capacity         = 2,
 		min_warm         = 1,
 		idle_ttl_seconds = 300,
-		provider         = "jetski",
-		model             = "normal",
+		provider         = "claude",
+		model             = "claude-sonnet-5-5",
 		created_at       = "2026-10-01T10:00:00Z",
 		updated_at       = "2026-10-01T10:00:00Z",
 	}
@@ -3176,6 +3206,9 @@ test_fsm_reviewer_auto_binding_and_jit_on_in_validation :: proc(t: ^testing.T) {
 	co_impl := sqlite.Content_Repo_SQLite{conn = &conn}
 	co_repo := sqlite.new_content_repository(&co_impl, &conn)
 
+	provider_impl := sqlite.Provider_Repo_SQLite{conn = &conn}
+	providers := sqlite.new_provider_repository(&provider_impl, &conn)
+
 	clock := platform.real_clock()
 	ids := platform.real_id_generator()
 
@@ -3189,11 +3222,13 @@ test_fsm_reviewer_auto_binding_and_jit_on_in_validation :: proc(t: ^testing.T) {
 		owner_user_id     = owner,
 		machine_hostname  = "localhost",
 		status            = .Online,
-		capabilities_json = `{"capabilities":[{"provider":"jetski","models":["cheap","normal","smart"],"default_model":"normal"}],"provider":"jetski","default_model":"normal"}`,
+		capabilities_json = `{"capabilities":[{"provider":"claude","models":["claude-fable-5-1","claude-opus-5-5","claude-sonnet-5-5"],"default_model":"claude-opus-5-5"}],"provider":"claude","default_model":"claude-opus-5-5"}`,
 		created_at        = "2026-10-01T10:00:00Z",
 		updated_at        = "2026-10-01T10:00:00Z",
 	}
 	_, _, _ = iface.bridge_save_bridge(&br_repo, bridge)
+	_, _ = iface.bridge_provider_status_upsert(&providers, domain.Bridge_Provider_Status{bridge_id = "brg_fsm_rev", provider = "claude", state = "present"})
+	_, _ = iface.bridge_provider_setting_upsert(&providers, domain.Bridge_Provider_Setting{bridge_id = "brg_fsm_rev", provider = "claude", enabled = true})
 
 	project := domain.Project{
 		project_id    = domain.Project_ID("prj_rev"),
@@ -3273,6 +3308,7 @@ test_fsm_reviewer_auto_binding_and_jit_on_in_validation :: proc(t: ^testing.T) {
 
 	svc := new_taskchain_service_with_runtime(&tc_repo, &ag_repo, sink, &clock, &ids)
 	ag_service := agent_service.new_agent_service_with_runtime(&ag_repo, &br_repo, &pr_repo, &co_repo, &tc_repo, sink, &registry, &clock, &ids)
+	ag_service.providers = &providers
 	svc.agent_service = &ag_service
 
 	// Create chain
@@ -3304,15 +3340,15 @@ test_fsm_reviewer_auto_binding_and_jit_on_in_validation :: proc(t: ^testing.T) {
 	}
 	_, _, _ = iface.agent_save_instance(&ag_repo, coord_inst)
 
-	// Reviewer fleet capacity = 2, provider = "jetski", model = "smart"
+	// Reviewer fleet capacity = 2, provider = "claude", model = "claude-sonnet-5-5"
 	rev_fleet := domain.Task_Chain_Fleet{
 		task_chain_id    = chain_id,
 		agent_id         = "agt_fsm_reviewer",
 		capacity         = 2,
 		min_warm         = 1,
 		idle_ttl_seconds = 300,
-		provider         = "jetski",
-		model             = "smart",
+		provider         = "claude",
+		model             = "claude-sonnet-5-5",
 		created_at       = "2026-10-01T10:00:00Z",
 		updated_at       = "2026-10-01T10:00:00Z",
 	}
@@ -3474,7 +3510,7 @@ test_fsm_reviewer_auto_binding_and_jit_on_in_validation :: proc(t: ^testing.T) {
 		jit_rev_inst, j_ok, _ := iface.agent_get_instance(&ag_repo, jit_rev_id)
 		testing.expect(t, j_ok, "provisioned JIT reviewer instance must exist in agent repository")
 		testing.expect_value(t, jit_rev_inst.agent_id, "agt_fsm_reviewer")
-		testing.expect_value(t, jit_rev_inst.model, "smart")
+		testing.expect_value(t, jit_rev_inst.model, "claude-sonnet-5-5")
 		testing.expect_value(t, jit_rev_inst.current_task_id, "task_fsm_rev_2")
 		testing.expect_value(t, jit_rev_inst.current_task_role, domain.Current_Task_Role.Review)
 	}

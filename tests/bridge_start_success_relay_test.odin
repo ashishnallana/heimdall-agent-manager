@@ -14,6 +14,7 @@ package bridge_start_success_relay_test
 //      double-deliver.
 
 import "core:fmt"
+import "core:testing"
 import "core:net"
 import "core:os"
 import "core:strings"
@@ -148,6 +149,12 @@ test_start_success_relay_ok_passthrough :: proc() {
 	check(strings.contains(resp, "hub"), "start_success must pass through the hub 200 payload")
 
 	fmt.println("PASS: start_success passes through healthy hub relay")
+}
+
+@(test)
+test_bridge_start_success_relay_test :: proc(t: ^testing.T) {
+	_ = t
+	main()
 }
 
 main :: proc() {

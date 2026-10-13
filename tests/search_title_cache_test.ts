@@ -22,6 +22,7 @@ if (typeof (globalThis as any).window === 'undefined') {
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { configureStore } from '@reduxjs/toolkit';
+import './helpers/vaultEndpointHarness.ts';
 
 import searchTitleReducer, {
   upsertChainTitle,
@@ -61,7 +62,7 @@ import {
   setActiveVaultKey,
 } from '../src/ui/utils/vaultCrypto.ts';
 
-import { handleUserWsEvent } from '../src/ui/api/wsInvalidation.ts';
+const { handleUserWsEvent } = await import('../src/ui/api/wsInvalidation.ts');
 
 const TEST_KEY_HEX = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
 const ALT_KEY_HEX = 'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789';

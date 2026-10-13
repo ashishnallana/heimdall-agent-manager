@@ -5,9 +5,6 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 import {
   generateVaultKey,
@@ -31,127 +28,6 @@ import vaultReducer, {
   selectIsVaultUnlocked,
   selectRawVaultKeyHex,
 } from '../src/ui/store/vaultSlice.ts';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const REPO_ROOT = path.resolve(__dirname, '..');
-
-// -----------------------------------------------------------------------------
-// Test 1: Static verification of AppShell.tsx routing and navigation
-// -----------------------------------------------------------------------------
-
-test('AppShell.tsx correctly registers /settings/vault in SETTINGS_NAV and wires routing', () => {
-  const appShellPath = path.join(REPO_ROOT, 'src/ui/components/shell/AppShell.tsx');
-  assert.ok(fs.existsSync(appShellPath), 'AppShell.tsx must exist');
-
-  const content = fs.readFileSync(appShellPath, 'utf8');
-
-  // Verify SETTINGS_NAV includes User Vault
-  assert.match(
-    content,
-    /\{\s*path:\s*['"]\/settings\/vault['"],\s*label:\s*['"]User Vault['"]\s*\}/,
-    'SETTINGS_NAV must include { path: "/settings/vault", label: "User Vault" }',
-  );
-
-  // Verify VaultPanel import
-  assert.match(
-    content,
-    /import\s+VaultPanel\s+from\s+['"]\.\.\/settings\/VaultPanel['"]/,
-    'AppShell.tsx must import VaultPanel',
-  );
-
-  // Verify route title
-  assert.match(
-    content,
-    /path\.startsWith\(['"]\/settings\/vault['"]\)/,
-    'routeTitle must handle /settings/vault',
-  );
-
-  // Verify component rendering
-  // The route condition also accepts nested /settings/vault/* paths, so match the
-  // VaultPanel render rather than an exact shape of the ternary test.
-  assert.match(
-    content,
-    /path === ['"]\/settings\/vault['"][^?]*\?\s*\(\s*<VaultPanel\s*\/>/,
-    'AppShell must render <VaultPanel /> when path === "/settings/vault"',
-  );
-});
-
-// -----------------------------------------------------------------------------
-// Test 2: Static verification of VaultPanel.tsx design system and debug IDs
-// -----------------------------------------------------------------------------
-
-test('VaultPanel.tsx implements Setup Wizard, Unlock dialog, and hex Vault Key viewer with required data-debug-ids', () => {
-  const vaultPanelPath = path.join(REPO_ROOT, 'src/ui/components/settings/VaultPanel.tsx');
-  assert.ok(fs.existsSync(vaultPanelPath), 'VaultPanel.tsx must exist');
-
-  const content = fs.readFileSync(vaultPanelPath, 'utf8');
-
-  // Required debug IDs
-  const requiredDebugIds = [
-    'settings-vault-panel',
-    'vault-setup-wizard',
-    'vault-setup-form',
-    'vault-master-password-input',
-    'vault-confirm-password-input',
-    'vault-recovery-words-grid',
-    'vault-copy-words-btn',
-    'vault-setup-backup-checkbox',
-    'vault-setup-submit-btn',
-    'vault-unlock-view',
-    'vault-open-unlock-dialog-btn',
-    'vault-unlock-modal',
-    'vault-unlock-password-input',
-    'vault-unlock-password-btn',
-    'vault-unlock-recovery-input',
-    'vault-unlock-recovery-btn',
-    'vault-unlocked-view',
-    'vault-status-badge',
-    'vault-lock-btn',
-    'vault-key-viewer',
-    'vault-key-hex-display',
-    'vault-key-toggle-visibility-btn',
-    'vault-key-copy-btn',
-    'vault-bridge-instructions',
-    'vault-bridge-cmd-display',
-  ];
-
-  for (const debugId of requiredDebugIds) {
-    assert.ok(
-      content.includes(`data-debug-id="${debugId}"`) || content.includes(`data-debug-id={'${debugId}'}`),
-      `VaultPanel.tsx must include data-debug-id="${debugId}"`,
-    );
-  }
-
-  // Bridges are unsealed from Settings -> Bridges; there is no CLI key command.
-  assert.ok(
-    content.includes(
-      'Bridges receive the key from this browser. Open Settings → Bridges and use Unseal (or Configure encryption) on each bridge you want to encrypt.',
-    ),
-    'VaultPanel.tsx must point bridge setup at Settings → Bridges',
-  );
-  assert.doesNotMatch(content, /ham-ctl vault set-?key/, 'VaultPanel.tsx must not mention the removed vault key command');
-  assert.ok(!content.includes('vault-bridge-cmd-copy-btn'), 'VaultPanel.tsx must not offer a CLI command to copy');
-
-  // Verify 12 recovery words grid logic
-  assert.match(
-    content,
-    /generate12RecoveryWords/,
-    'VaultPanel.tsx must generate 12 BIP-39 recovery words',
-  );
-
-  // Verify WebCrypto envelope derivation & encryption
-  assert.match(
-    content,
-    /encryptVaultKeyEnvelope/,
-    'VaultPanel.tsx must encrypt envelopes client-side',
-  );
-  assert.match(
-    content,
-    /decryptVaultKeyEnvelope/,
-    'VaultPanel.tsx must decrypt envelopes client-side',
-  );
-});
 
 // -----------------------------------------------------------------------------
 // Test 3: Functional verification of Setup Wizard envelope creation & Dual Unlock

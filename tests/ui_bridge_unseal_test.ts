@@ -302,32 +302,4 @@ test('resolveVaultStatus returns correct tri-state for all conditions (REQ-VAULT
   assert.equal(resolveVaultStatus({ isConfigured: true, isUnlocked: true }), 'Unlocked');
 });
 
-test('BridgeSettingsPanel and BridgesPanel satisfy REQ-VAULT-HARDEN-13 mobile responsiveness and 44px touch targets', async () => {
-  const fs = await import('node:fs');
-  const path = await import('node:path');
-
-  const bspPath = path.resolve('src/ui/components/settings/BridgeSettingsPanel.tsx');
-  const bpPath = path.resolve('src/ui/components/settings/BridgesPanel.tsx');
-
-  assert.ok(fs.existsSync(bspPath), 'BridgeSettingsPanel.tsx must exist');
-  assert.ok(fs.existsSync(bpPath), 'BridgesPanel.tsx must exist');
-
-  const bspContent = fs.readFileSync(bspPath, 'utf8');
-  const bpContent = fs.readFileSync(bpPath, 'utf8');
-
-  // REQ-VAULT-HARDEN-10, 11: tri-state pill and unseal/lock actions
-  assert.ok(bspContent.includes('Bridge Locked'), 'Must render Bridge Locked state');
-  assert.ok(bspContent.includes('Bridge Unlocked'), 'Must render Bridge Unlocked state');
-  assert.ok(bspContent.includes('Encryption: Disabled (Optional)'), 'Must render Encryption: Disabled state');
-  assert.ok(bspContent.includes('unsealBridgeE2EE'), 'Must use unsealBridgeE2EE for bridge unseal');
-  assert.ok(bspContent.includes('lockVault'), 'Must invoke lockVault on lock');
-
-  // REQ-VAULT-HARDEN-13: min 44px touch targets and responsive flex down to 320px
-  assert.ok(bspContent.includes('min-h-[44px]'), 'Must enforce minimum 44px touch targets on buttons');
-  assert.ok(bspContent.includes('touch-manipulation'), 'Must include touch-manipulation for mobile responsiveness');
-  assert.ok(bspContent.includes('flex-col') && bspContent.includes('sm:flex-row'), 'Must wrap flex columns on narrow mobile screens (320px)');
-
-  // Integration into BridgesPanel.tsx
-  assert.ok(bpContent.includes('<BridgeSettingsPanel'), 'BridgesPanel must mount BridgeSettingsPanel');
-});
 

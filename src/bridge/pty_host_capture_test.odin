@@ -181,3 +181,62 @@ pty_host_get_pane_missing_agent_instance_id :: proc(t: ^testing.T) {
 	testing.expect_value(t, cursor_col, 0)
 	testing.expect_value(t, err_msg, "missing agent_instance_id")
 }
+
+@(test)
+pty_host_stream_screen_payload_trim_variations :: proc(t: ^testing.T) {
+	all_empty := []string{"", "", "", ""}
+	got1 := bridge_pty_stream_screen_payload(all_empty, -1, -1)
+	defer delete(got1)
+	testing.expect_value(t, got1, "")
+
+	whitespace_only := []string{"   ", "\t\t", " \t \t", ""}
+	got2 := bridge_pty_stream_screen_payload(whitespace_only, -1, -1)
+	defer delete(got2)
+	testing.expect_value(t, got2, "")
+
+	lines := make([dynamic]string, context.temp_allocator)
+	append(&lines, "admin@box:~#   ")
+	for _ in 0 ..< 100 {
+		append(&lines, "")
+	}
+	got3 := bridge_pty_stream_screen_payload(lines[:], -1, -1)
+	defer delete(got3)
+	testing.expect_value(t, got3, "admin@box:~#   ")
+	testing.expect(t, strings.has_suffix(got3, "   "), "trailing spaces preserved")
+
+	lines4 := []string{"First", "", "Second", "   ", "Third", "", ""}
+	got4 := bridge_pty_stream_screen_payload(lines4, -1, -1)
+	defer delete(got4)
+	testing.expect_value(t, got4, "First\r\n\r\nSecond\r\n   \r\nThird")
+
+	lines5 := []string{"already\r", "carriage\r"}
+	got5 := bridge_pty_stream_screen_payload(lines5, -1, -1)
+	defer delete(got5)
+	testing.expect(t, !strings.contains(got5, "\r\r"), "no doubled CR")
+}
+
+@(test)
+pty_host_get_pane_result_json_coordinate_extremes :: proc(t: ^testing.T) {
+	json1 := bridge_get_agent_pane_result_json("cmd_large", true, false, "h1", "out", 1, false, 65535, 65535)
+	defer delete(json1)
+	testing.expect(t, strings.contains(json1, "\"cursor_row\":65535"), "large cursor_row formatted")
+	testing.expect(t, strings.contains(json1, "\"cursor_col\":65535"), "large cursor_col formatted")
+
+	json2 := bridge_get_agent_pane_result_json("cmd_origin", true, false, "h2", "out", 1, false, 0, 0)
+	defer delete(json2)
+	testing.expect(t, strings.contains(json2, "\"cursor_row\":0"), "cursor_row 0")
+	testing.expect(t, strings.contains(json2, "\"cursor_col\":0"), "cursor_col 0")
+
+	json3 := bridge_get_agent_pane_result_json("cmd_unchanged", true, true, "h3", "", 0, false, 5, 10)
+	defer delete(json3)
+	testing.expect(t, strings.contains(json3, "\"unchanged\":true"), "unchanged true")
+	testing.expect(t, !strings.contains(json3, "cursor_row"), "cursor_row omitted when unchanged")
+	testing.expect(t, !strings.contains(json3, "cursor_col"), "cursor_col omitted when unchanged")
+	testing.expect(t, !strings.contains(json3, "output"), "output omitted when unchanged")
+
+	json4 := bridge_get_agent_pane_result_json("cmd_fail", false, false, "", "", 0, false, 5, 10, "error detail")
+	defer delete(json4)
+	testing.expect(t, strings.contains(json4, "\"ok\":false"), "ok false")
+	testing.expect(t, !strings.contains(json4, "cursor_row"), "cursor_row omitted on failure")
+	testing.expect(t, !strings.contains(json4, "cursor_col"), "cursor_col omitted on failure")
+}

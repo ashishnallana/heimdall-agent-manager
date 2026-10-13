@@ -2,6 +2,7 @@ package ws
 
 import base64 "core:encoding/base64"
 import "core:fmt"
+import "core:mem"
 import "core:net"
 import "core:strings"
 import "core:testing"
@@ -186,4 +187,162 @@ test_chunk_frames_and_reassembly_round_trip :: proc(t: ^testing.T) {
 	testing.expect_value(t, outcome, Chunk_Outcome.Completed)
 	defer delete(full)
 	testing.expect_value(t, full, large_data)
+}
+
+@(test)
+test_send_text_accepts_64bit_length_and_rejects_over_max_payload :: proc(t: ^testing.T) {
+	client, server := make_test_pair(t)
+	defer {
+		net.close(client)
+		net.close(server)
+	}
+
+	conn := Connection{
+		socket    = client,
+		secure    = false,
+		connected = true,
+	}
+
+	payload_70k := make([]byte, 70_000)
+	defer delete(payload_70k)
+	for i in 0 ..< len(payload_70k) {
+		payload_70k[i] = 'a'
+	}
+
+	sent := send_text(&conn, string(payload_70k))
+	testing.expect(t, sent, "ws.send_text must accept a 70,000-byte payload using 64-bit extended length")
+
+	oversized := strings.repeat("x", WS_MAX_SERVER_PAYLOAD + 1)
+	defer delete(oversized)
+	sent_oversized := send_text(&conn, oversized)
+	testing.expect(t, !sent_oversized, "ws.send_text must reject a payload exceeding WS_MAX_SERVER_PAYLOAD")
+}
+
+@(test)
+test_poll_text_decodes_64bit_length_frame :: proc(t: ^testing.T) {
+	client, server := make_test_pair(t)
+	defer {
+		net.close(client)
+		net.close(server)
+	}
+
+	conn := Connection{
+		socket        = client,
+		secure        = false,
+		connected     = true,
+		pending_texts = make([dynamic]string),
+		pending_bytes = make([dynamic]byte),
+	}
+	defer {
+		for s in conn.pending_texts do delete(s)
+		delete(conn.pending_texts)
+		delete(conn.pending_bytes)
+		delete(conn.fragmented)
+	}
+
+	payload_70k := make([]byte, 70_000)
+	defer delete(payload_70k)
+	for i in 0 ..< len(payload_70k) {
+		payload_70k[i] = 'b'
+	}
+
+	append(&conn.pending_bytes, 0x81, 127, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x11, 0x70)
+	append(&conn.pending_bytes, ..payload_70k[:69_999])
+
+	last_byte := [1]byte{payload_70k[69_999]}
+	_, send_err := net.send_tcp(server, last_byte[:])
+	testing.expect_value(t, send_err, nil)
+
+	text, poll_ok := poll_text(&conn)
+	defer delete(text)
+	testing.expect(t, poll_ok, "ws.poll_text must decode a 70,000-byte 64-bit length frame intact")
+	testing.expect_value(t, len(text), 70_000)
+	testing.expect_value(t, text, string(payload_70k))
+	testing.expect(t, conn.connected, "ws.poll_text must keep conn.connected = true on valid 64-bit frame")
+}
+
+@(test)
+test_poll_text_reassembles_fragmented_frames :: proc(t: ^testing.T) {
+	client, server := make_test_pair(t)
+	defer {
+		net.close(client)
+		net.close(server)
+	}
+	_ = net.set_blocking(client, false)
+
+	conn := Connection{
+		socket        = client,
+		secure        = false,
+		connected     = true,
+		pending_texts = make([dynamic]string),
+		pending_bytes = make([dynamic]byte, 0, 64),
+	}
+	defer {
+		for s in conn.pending_texts do delete(s)
+		delete(conn.pending_texts)
+		delete(conn.pending_bytes)
+		delete(conn.fragmented)
+	}
+
+	frag1_payload := `{"part":1`
+	frag2_payload := `,"part2":2}`
+
+	append(&conn.pending_bytes, 0x01, byte(len(frag1_payload)))
+	append(&conn.pending_bytes, ..transmute([]byte)frag1_payload)
+
+	append(&conn.pending_bytes, 0x80, byte(len(frag2_payload)))
+	append(&conn.pending_bytes, ..transmute([]byte)frag2_payload[:len(frag2_payload) - 1])
+
+	last_byte := [1]byte{frag2_payload[len(frag2_payload) - 1]}
+	_, send_err := net.send_tcp(server, last_byte[:])
+	testing.expect_value(t, send_err, nil)
+
+	text1, ok1 := poll_text(&conn)
+	defer delete(text1)
+
+	testing.expect(t, ok1, "poll_text must successfully reassemble fragmented frames")
+	testing.expect_value(t, text1, `{"part":1,"part2":2}`)
+	testing.expect_value(t, len(conn.pending_texts), 0)
+	testing.expect_value(t, len(conn.pending_bytes), 0)
+}
+
+@(test)
+test_poll_text_shifts_pending_bytes_without_leak :: proc(t: ^testing.T) {
+	client, server := make_test_pair(t)
+	defer {
+		net.close(client)
+		net.close(server)
+	}
+
+	payload := `{"type":"ack","ok":true}`
+	frame := make([]byte, 2 + len(payload))
+	defer delete(frame)
+	frame[0] = 0x81
+	frame[1] = byte(len(payload))
+	copy(frame[2:], transmute([]byte)payload)
+
+	_, send_err := net.send_tcp(server, frame)
+	testing.expect_value(t, send_err, nil)
+
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+
+	{
+		context.allocator = mem.tracking_allocator(&track)
+		conn := Connection{
+			socket    = client,
+			secure    = false,
+			connected = true,
+		}
+
+		text, poll_ok := poll_text(&conn)
+		testing.expect(t, poll_ok, "ws.poll_text must decode a valid unmasked text frame")
+		testing.expect_value(t, text, payload)
+
+		delete(text)
+		close(&conn)
+	}
+
+	testing.expect_value(t, len(track.allocation_map), 0)
 }

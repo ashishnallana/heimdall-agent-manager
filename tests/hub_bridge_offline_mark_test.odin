@@ -12,6 +12,7 @@ package hub_bridge_offline_mark_test
 // Uses a tiny in-memory Bridge_Repository + a fixed clock.
 
 import "core:fmt"
+import "core:testing"
 import "core:os"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
@@ -53,6 +54,12 @@ fb_now: string = "2026-09-01T10:00:00Z"
 fb_clock_now :: proc(ctx: rawptr) -> string { _ = ctx; return fb_now }
 
 check :: proc(ok: bool, message: string) { if ok do return; fmt.eprintln("FAIL:", message); os.exit(1) }
+
+@(test)
+test_hub_bridge_offline_mark_test :: proc(t: ^testing.T) {
+	_ = t
+	main()
+}
 
 main :: proc() {
 	repo := new(Fake_Bridge_Repo)

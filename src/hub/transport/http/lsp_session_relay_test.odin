@@ -17,7 +17,7 @@ import iface "odin_test:hub/repository/iface"
 // --- registry: ownership is structural --------------------------------------
 
 @(test)
-lsp_registry_namespaces_session_ids_by_owner :: proc(t: ^testing.T) {
+test_lsp_registry_namespaces_session_ids_by_owner :: proc(t: ^testing.T) {
 	reg := Lsp_Session_Registry{}
 	defer {
 		delete(reg.by_wire)
@@ -48,7 +48,7 @@ lsp_registry_namespaces_session_ids_by_owner :: proc(t: ^testing.T) {
 }
 
 @(test)
-lsp_registry_second_socket_for_same_pair_is_refused :: proc(t: ^testing.T) {
+test_lsp_registry_second_socket_for_same_pair_is_refused :: proc(t: ^testing.T) {
 	reg := Lsp_Session_Registry{}
 	defer {
 		delete(reg.by_wire)
@@ -75,7 +75,7 @@ lsp_registry_second_socket_for_same_pair_is_refused :: proc(t: ^testing.T) {
 }
 
 @(test)
-lsp_registry_release_is_idempotent :: proc(t: ^testing.T) {
+test_lsp_registry_release_is_idempotent :: proc(t: ^testing.T) {
 	reg := Lsp_Session_Registry{}
 	defer {
 		delete(reg.by_wire)
@@ -92,7 +92,7 @@ lsp_registry_release_is_idempotent :: proc(t: ^testing.T) {
 }
 
 @(test)
-lsp_registry_mark_started_replaces_bridge_id :: proc(t: ^testing.T) {
+test_lsp_registry_mark_started_replaces_bridge_id :: proc(t: ^testing.T) {
 	reg := Lsp_Session_Registry{}
 	defer {
 		delete(reg.by_wire)
@@ -115,7 +115,7 @@ lsp_registry_mark_started_replaces_bridge_id :: proc(t: ^testing.T) {
 }
 
 @(test)
-lsp_owner_key_cannot_collide_across_pairs :: proc(t: ^testing.T) {
+test_lsp_owner_key_cannot_collide_across_pairs :: proc(t: ^testing.T) {
 	// Without a separator, ("ab","c") and ("a","bc") would both key as "abc".
 	k1 := lsp_owner_key("ab", "c")
 	defer delete(k1)
@@ -127,7 +127,7 @@ lsp_owner_key_cannot_collide_across_pairs :: proc(t: ^testing.T) {
 // --- outbound framing: the 64-bit length path -------------------------------
 
 @(test)
-lsp_ws_frame_header_encodes_each_length_class :: proc(t: ^testing.T) {
+test_lsp_ws_frame_header_encodes_each_length_class :: proc(t: ^testing.T) {
 	buf: [10]byte
 
 	// Small: length inline, 2-byte header.
@@ -210,7 +210,7 @@ lsp_make_masked_fragment :: proc(text: string, mask: [4]byte, opcode: byte, fin:
 }
 
 @(test)
-lsp_ws_take_frame_reassembles_a_fragmented_message :: proc(t: ^testing.T) {
+test_lsp_ws_take_frame_reassembles_a_fragmented_message :: proc(t: ^testing.T) {
 	// REQ-LSP-RLY-3. THE EXACT SHAPE MEASURED FROM ELECTRON 43.6.0: a first frame
 	// with opcode 0x1 and FIN CLEAR, then a 0x0 continuation carrying FIN.
 	//
@@ -247,7 +247,7 @@ lsp_ws_take_frame_reassembles_a_fragmented_message :: proc(t: ^testing.T) {
 }
 
 @(test)
-lsp_ws_take_frame_reassembles_many_fragments_across_recvs :: proc(t: ^testing.T) {
+test_lsp_ws_take_frame_reassembles_many_fragments_across_recvs :: proc(t: ^testing.T) {
 	// Electron produced 132 frames for a 16MB message, and they do NOT arrive in
 	// one recv. Each fragment is appended separately here so the "need more bytes"
 	// path runs between every one — the partial must survive across calls.
@@ -276,7 +276,7 @@ lsp_ws_take_frame_reassembles_many_fragments_across_recvs :: proc(t: ^testing.T)
 }
 
 @(test)
-lsp_ws_take_frame_reads_fragments_coalesced_in_one_recv :: proc(t: ^testing.T) {
+test_lsp_ws_take_frame_reads_fragments_coalesced_in_one_recv :: proc(t: ^testing.T) {
 	// The opposite arrival pattern: every fragment already sitting in pending.
 	// One take must walk them all and return the single joined message.
 	reader := Lsp_WS_Reader{}
@@ -299,7 +299,7 @@ lsp_ws_take_frame_reads_fragments_coalesced_in_one_recv :: proc(t: ^testing.T) {
 }
 
 @(test)
-lsp_ws_take_frame_still_reads_an_unfragmented_message :: proc(t: ^testing.T) {
+test_lsp_ws_take_frame_still_reads_an_unfragmented_message :: proc(t: ^testing.T) {
 	// The fast path must be untouched: a lone FIN+text frame is still one message,
 	// and the reader must not think a fragmented message is open afterwards.
 	reader := Lsp_WS_Reader{}
@@ -318,7 +318,7 @@ lsp_ws_take_frame_still_reads_an_unfragmented_message :: proc(t: ^testing.T) {
 }
 
 @(test)
-lsp_ws_take_frame_rejects_a_continuation_with_nothing_to_continue :: proc(t: ^testing.T) {
+test_lsp_ws_take_frame_rejects_a_continuation_with_nothing_to_continue :: proc(t: ^testing.T) {
 	// A 0x0 frame outside a fragmented message is a protocol violation. It must be
 	// fatal — NOT silently started as if it were a new message.
 	reader := Lsp_WS_Reader{}
@@ -333,7 +333,7 @@ lsp_ws_take_frame_rejects_a_continuation_with_nothing_to_continue :: proc(t: ^te
 }
 
 @(test)
-lsp_ws_take_frame_rejects_a_new_text_frame_mid_message :: proc(t: ^testing.T) {
+test_lsp_ws_take_frame_rejects_a_new_text_frame_mid_message :: proc(t: ^testing.T) {
 	// Interleaving a fresh text frame into an open fragmented message is illegal.
 	// Accepting it would silently discard the half-built message.
 	reader := Lsp_WS_Reader{}
@@ -354,7 +354,7 @@ lsp_ws_take_frame_rejects_a_new_text_frame_mid_message :: proc(t: ^testing.T) {
 }
 
 @(test)
-lsp_ws_take_frame_caps_the_reassembled_size :: proc(t: ^testing.T) {
+test_lsp_ws_take_frame_caps_the_reassembled_size :: proc(t: ^testing.T) {
 	// The DoS bound. A client that sends continuations and never sets FIN must not
 	// be able to grow reader.message without limit: trading a silent session death
 	// for memory exhaustion would be a worse bug than the one being fixed.
@@ -393,7 +393,7 @@ lsp_ws_take_frame_caps_the_reassembled_size :: proc(t: ^testing.T) {
 }
 
 @(test)
-lsp_ws_take_frame_reads_a_64bit_length_frame :: proc(t: ^testing.T) {
+test_lsp_ws_take_frame_reads_a_64bit_length_frame :: proc(t: ^testing.T) {
 	// A textDocument/didOpen carrying a large file is exactly this frame. The
 	// SHARED reader (bridge_ws_take_frame) treats a 127 length as FATAL, which is
 	// why this socket has its own reader.
@@ -418,7 +418,7 @@ lsp_ws_take_frame_reads_a_64bit_length_frame :: proc(t: ^testing.T) {
 }
 
 @(test)
-lsp_ws_take_frame_waits_for_a_split_header :: proc(t: ^testing.T) {
+test_lsp_ws_take_frame_waits_for_a_split_header :: proc(t: ^testing.T) {
 	// One recv can end mid-header; that is "need more bytes", never a fatal error.
 	reader := Lsp_WS_Reader{}
 	defer lsp_ws_reader_destroy(&reader)
@@ -446,7 +446,7 @@ lsp_ws_take_frame_waits_for_a_split_header :: proc(t: ^testing.T) {
 }
 
 @(test)
-lsp_ws_take_frame_splits_coalesced_frames :: proc(t: ^testing.T) {
+test_lsp_ws_take_frame_splits_coalesced_frames :: proc(t: ^testing.T) {
 	// One recv can carry several messages; each take must return exactly one and
 	// leave the rest intact.
 	reader := Lsp_WS_Reader{}
@@ -471,7 +471,7 @@ lsp_ws_take_frame_splits_coalesced_frames :: proc(t: ^testing.T) {
 }
 
 @(test)
-lsp_ws_take_frame_treats_close_as_fatal :: proc(t: ^testing.T) {
+test_lsp_ws_take_frame_treats_close_as_fatal :: proc(t: ^testing.T) {
 	// The browser closing its tab must end the relay loop (which is what tears the
 	// session down and stops the language server), not look like a short read.
 	reader := Lsp_WS_Reader{}
@@ -485,7 +485,7 @@ lsp_ws_take_frame_treats_close_as_fatal :: proc(t: ^testing.T) {
 // --- bridge -> browser translation -------------------------------------------
 
 @(test)
-lsp_bridge_frame_translates_wire_id_to_client_id :: proc(t: ^testing.T) {
+test_lsp_bridge_frame_translates_wire_id_to_client_id :: proc(t: ^testing.T) {
 	// The bridge frame carries the Hub's opaque wire id; the browser only knows
 	// the id it chose, so the field must be rewritten, not passed through.
 	bridge_frame := "{\"type\":\"lsp_data\",\"session_id\":\"lsp_wire_abc\",\"message\":\"{\\\"id\\\":1}\"}"
@@ -502,7 +502,7 @@ lsp_bridge_frame_translates_wire_id_to_client_id :: proc(t: ^testing.T) {
 }
 
 @(test)
-lsp_bridge_frame_carries_each_type_payload :: proc(t: ^testing.T) {
+test_lsp_bridge_frame_carries_each_type_payload :: proc(t: ^testing.T) {
 	err_in := "{\"type\":\"lsp_error\",\"session_id\":\"w1\",\"reason\":\"server exited\",\"exit_code\":3}"
 	err_out := lsp_bridge_frame_for_client("lsp_error", err_in, "s1")
 	defer delete(err_out)
@@ -530,7 +530,7 @@ lsp_bridge_frame_carries_each_type_payload :: proc(t: ^testing.T) {
 }
 
 @(test)
-lsp_forward_drops_frames_for_unknown_sessions :: proc(t: ^testing.T) {
+test_lsp_forward_drops_frames_for_unknown_sessions :: proc(t: ^testing.T) {
 	// A server can still be talking when its socket has already gone. That frame
 	// has nowhere to go and must be dropped, not delivered to some other session.
 	reg := Lsp_Session_Registry{}
@@ -576,7 +576,7 @@ fake_experiment_repo :: proc(f: ^Fake_Experiments) -> iface.Experiment_Repositor
 }
 
 @(test)
-lsp_experiment_gate_defaults_closed :: proc(t: ^testing.T) {
+test_lsp_experiment_gate_defaults_closed :: proc(t: ^testing.T) {
 	// Flag absent entirely => off. A new user must not get the feature by default.
 	absent := Fake_Experiments{present = false}
 	repo_absent := fake_experiment_repo(&absent)
@@ -626,7 +626,7 @@ fake_config_repo :: proc(f: ^Fake_Configs) -> iface.Lsp_Server_Config_Repository
 }
 
 @(test)
-lsp_resolve_server_picks_the_longest_matching_prefix :: proc(t: ^testing.T) {
+test_lsp_resolve_server_picks_the_longest_matching_prefix :: proc(t: ^testing.T) {
 	f := Fake_Configs{rows = make([dynamic]domain.Lsp_Server_Config)}
 	defer {
 		for r in f.rows do domain.lsp_server_config_destroy(r)
@@ -669,7 +669,7 @@ lsp_resolve_server_picks_the_longest_matching_prefix :: proc(t: ^testing.T) {
 }
 
 @(test)
-lsp_working_dir_prefers_config_prefix_then_file_dir :: proc(t: ^testing.T) {
+test_lsp_working_dir_prefers_config_prefix_then_file_dir :: proc(t: ^testing.T) {
 	scoped := domain.Lsp_Server_Config{dir_prefix = "/work/exp"}
 	d1 := lsp_working_dir(scoped, "/work/exp/pkg/main.go")
 	defer delete(d1)
@@ -703,7 +703,7 @@ lsp_working_dir_prefers_config_prefix_then_file_dir :: proc(t: ^testing.T) {
 }
 
 @(test)
-lsp_registry_mark_stopped_clears_started :: proc(t: ^testing.T) {
+test_lsp_registry_mark_stopped_clears_started :: proc(t: ^testing.T) {
 	// After an explicit client "stop" the entry must no longer look like a live
 	// session on that bridge, or a later bridge disconnect would tear down a
 	// session the user had already stopped.

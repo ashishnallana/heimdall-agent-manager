@@ -8,10 +8,8 @@ import iface "odin_test:hub/repository/iface"
 
 @(test)
 test_experiment_repo_sqlite_lifecycle :: proc(t: ^testing.T) {
-	db_path := fmt.tprintf("/tmp/test_experiments_%d.db", os.get_pid())
-	os.remove(db_path)
+	db_path := fmt.tprintf("/tmp/test_experiment_repo_%d.db", os.get_pid())
 	defer os.remove(db_path)
-
 	conn, open_ok, _ := open(db_path)
 	testing.expect(t, open_ok, "db open ok")
 	defer close(&conn)
@@ -128,10 +126,7 @@ test_experiment_repo_sqlite_lifecycle :: proc(t: ^testing.T) {
 
 @(test)
 test_experiment_repo_streaming_terminal_pane :: proc(t: ^testing.T) {
-	db_path := fmt.tprintf("/tmp/test_exp_streaming_%d.db", os.get_pid())
-	os.remove(db_path)
-	defer os.remove(db_path)
-
+	db_path := ":memory:"
 	conn, open_ok, _ := open(db_path)
 	testing.expect(t, open_ok, "db open ok")
 	defer close(&conn)

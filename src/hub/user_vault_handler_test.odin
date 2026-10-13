@@ -27,6 +27,7 @@ test_user_vault_http_handlers_lifecycle :: proc(t: ^testing.T) {
 		trusted_proxy_cidrs  = cidrs[:],
 		auto_provision_users = true,
 		logout_url           = "/_dev/logout",
+		paddle_environment   = "sandbox",
 	})
 	testing.expect(t, ok, msg)
 	defer app.shutdown_graph(&graph)
@@ -106,6 +107,7 @@ test_user_vault_service_direct :: proc(t: ^testing.T) {
 		migrations_dir       = "src/hub/repository/sqlite/migrations",
 		trusted_proxy_cidrs  = cidrs[:],
 		auto_provision_users = true,
+		paddle_environment   = "sandbox",
 	})
 	testing.expect(t, ok, msg)
 	defer app.shutdown_graph(&graph)

@@ -26,11 +26,15 @@ def require(cond, msg):
         sys.exit(1)
 
 
-def build_binary():
-    subprocess.run(
-        ["nix", "build", ".#ham-ctl", "-o", str(BIN.parent.parent)],
-        cwd=ROOT, check=True, capture_output=True,
-    )
+def build_binary(out_path: Path):
+    import shutil
+    odin = os.environ.get("ODIN") or shutil.which("odin")
+    res = None
+    if odin and os.environ.get("IN_NIX_SHELL"):
+        res = subprocess.run([odin, "build", "src/ctl", "-collection:odin_test=src", f"-out:{out_path}"], cwd=ROOT, capture_output=True, text=True)
+    if res is None or res.returncode != 0:
+        res = subprocess.run(["nix", "develop", "--command", "odin", "build", "src/ctl", "-collection:odin_test=src", f"-out:{out_path}"], cwd=ROOT, capture_output=True, text=True)
+    require(res.returncode == 0, f"ham-ctl build failed: {res.stderr}")
 
 
 class MockEndpoint:
@@ -76,8 +80,14 @@ def run_agent(args, env_extra=None):
 
 
 def main():
-    if not BIN.exists():
-        build_binary()
+    global BIN
+    import shutil
+    import tempfile
+    tmp_dir = None
+    if not os.environ.get("HAM_CTL_BIN") or not BIN.exists():
+        tmp_dir = Path(tempfile.mkdtemp(prefix="ham-ctl-rte2e7-"))
+        BIN = tmp_dir / "ham-ctl"
+        build_binary(BIN)
     require(BIN.exists(), "ham-ctl binary must build")
 
     # --- missing endpoint/token -> usage -----------------------------------

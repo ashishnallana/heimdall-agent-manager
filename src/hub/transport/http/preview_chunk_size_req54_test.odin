@@ -196,7 +196,7 @@ req54_build_preview_data_frame :: proc(stream_id: string) -> (frame: string, b64
 // measurement the shipped 48 KiB was chosen without: 48 KiB of raw bytes cannot be
 // carried in one 16-bit WS frame, and it misses by ONE BYTE on the base64 alone.
 @(test)
-req54_a_full_preview_chunk_overflows_a_single_ws_frame :: proc(t: ^testing.T) {
+test_req54_a_full_preview_chunk_overflows_a_single_ws_frame :: proc(t: ^testing.T) {
 	frame, b64_len := req54_build_preview_data_frame("stream-abc")
 	defer delete(frame)
 
@@ -239,7 +239,7 @@ req54_a_full_preview_chunk_overflows_a_single_ws_frame :: proc(t: ^testing.T) {
 // write_ws_command to a single write_ws_text_frame and it returns .Send_Failed here
 // instead of .Ok, because the frame is over the cap.
 @(test)
-req54_write_ws_command_carries_a_full_preview_chunk :: proc(t: ^testing.T) {
+test_req54_write_ws_command_carries_a_full_preview_chunk :: proc(t: ^testing.T) {
 	frame, _ := req54_build_preview_data_frame("stream-abc")
 	defer delete(frame)
 
@@ -330,7 +330,7 @@ req54_write_ws_command_carries_a_full_preview_chunk :: proc(t: ^testing.T) {
 // this task, and this test is what would object if someone enlarged that buffer past
 // the point where the same overflow returns.
 @(test)
-req54_the_4096_byte_pump_frame_fits_one_ws_frame :: proc(t: ^testing.T) {
+test_req54_the_4096_byte_pump_frame_fits_one_ws_frame :: proc(t: ^testing.T) {
 	PUMP_BUF_BYTES :: 4096 // mirrors the `buf: [4096]byte` at shell_session_handlers.odin:741
 	raw := make([]byte, PUMP_BUF_BYTES)
 	defer delete(raw)
@@ -377,7 +377,7 @@ req54_the_4096_byte_pump_frame_fits_one_ws_frame :: proc(t: ^testing.T) {
 // tunnel frames are carried without either call site being touched, and why this test
 // deliberately mixes tunnel_data frames with plain text.
 @(test)
-req54_no_input_size_can_put_an_over_cap_frame_on_the_wire :: proc(t: ^testing.T) {
+test_req54_no_input_size_can_put_an_over_cap_frame_on_the_wire :: proc(t: ^testing.T) {
 	payload := contracts.BRIDGE_WS_HUB_TO_BRIDGE_CHUNK_PAYLOAD_BYTES
 
 	// Sizes chosen at the boundaries where an off-by-one would hide: either side of the

@@ -1,8 +1,15 @@
 package bridge_task_scheduler_test
 
 import "core:fmt"
+import "core:testing"
 import "core:os"
 import bridge "odin_test:bridge"
+
+@(test)
+test_bridge_task_scheduler_test :: proc(t: ^testing.T) {
+	_ = t
+	main()
+}
 
 main :: proc() {
 	test_threshold_mapping()

@@ -13,6 +13,7 @@ package hub_ct_notification_gating_test
 //     for its current task, with the matching action label (R6/R8).
 
 import "core:fmt"
+import "core:testing"
 import "core:os"
 import "core:strings"
 import contracts "odin_test:contracts"
@@ -102,6 +103,12 @@ cmd_targets :: proc(needle: string) -> int {
 	n := 0
 	for i in 0..<g.cmd_n { if strings.contains(g.cmds[i], needle) do n += 1 }
 	return n
+}
+
+@(test)
+test_hub_ct_notification_gating_test :: proc(t: ^testing.T) {
+	_ = t
+	main()
 }
 
 main :: proc() {

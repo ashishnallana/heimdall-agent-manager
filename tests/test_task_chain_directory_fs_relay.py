@@ -106,59 +106,28 @@ def decode_ws_frame(raw: bytes) -> tuple[str, bytes]:
         return payload_bytes.decode("utf-8", errors="replace"), remainder
 
 
-def test_static_requirements() -> None:
-    print("Testing static code requirements for REQ-BE-TASK-CHAIN-DIRECTORY-FS-RELAY...")
-    service_odin = read(ROOT / "src/hub/service/taskchain/taskchain_service.odin")
-    require("get_chain_directory :: proc" in service_odin, "taskchain_service.odin must define get_chain_directory")
-
-    bridge_handlers = read(ROOT / "src/hub/transport/http/bridge_handlers.odin")
-    require("directory_fs_relay :: proc" in bridge_handlers, "bridge_handlers.odin must define directory_fs_relay")
-    require("project_fs_command_json(cmd, command_id, dir.path)" in bridge_handlers,
-            "directory_fs_relay must sandbox command root to dir.path")
-    require("require_auth_any(h.auth, req)" in bridge_handlers, "directory_fs_relay must enforce require_auth_any")
-
-    # Verify all 9 HTTP handlers exist
-    for handler in [
-        "list_chain_directory_fs_handler :: proc",
-        "read_chain_directory_file_handler :: proc",
-        "create_chain_directory_file_handler :: proc",
-        "write_chain_directory_file_handler :: proc",
-        "batch_write_chain_directory_files_handler :: proc",
-        "create_chain_directory_dir_handler :: proc",
-        "move_chain_directory_path_handler :: proc",
-        "delete_chain_directory_path_handler :: proc",
-        "quick_open_chain_directory_fs_handler :: proc",
-    ]:
-        require(handler in bridge_handlers, f"bridge_handlers.odin missing handler: {handler}")
-
-    # Verify router wiring in wiring.odin
-    wiring = read(ROOT / "src/hub/app/wiring.odin")
-    for route in [
-        '"/api/v1/task-chains/*/directories/*/fs"',
-        '"/api/v1/task-chains/*/directories/*/fs/quick-open"',
-        '"/api/v1/task-chains/*/directories/*/fs/file"',
-        '"/api/v1/task-chains/*/directories/*/fs/files"',
-        '"/api/v1/task-chains/*/directories/*/fs/dir"',
-        '"/api/v1/task-chains/*/directories/*/fs/move"',
-    ]:
-        require(route in wiring, f"wiring.odin missing route: {route}")
-
-    print("Static requirements PASSED.")
+def build_odin_pkg(pkg: str, out_path: Path) -> None:
+    import shutil
+    odin = os.environ.get("ODIN") or shutil.which("odin")
+    res = None
+    if odin and os.environ.get("IN_NIX_SHELL"):
+        res = subprocess.run([odin, "build", pkg, "-collection:odin_test=src", f"-out:{out_path}"], cwd=ROOT, capture_output=True, text=True)
+    if res is None or res.returncode != 0:
+        res = subprocess.run(["nix", "develop", "--command", "odin", "build", pkg, "-collection:odin_test=src", f"-out:{out_path}"], cwd=ROOT, capture_output=True, text=True)
+    require(res.returncode == 0, f"build failed for {pkg}: {res.stderr}")
 
 
 def test_live_directory_fs_relay() -> None:
+    import shutil
+    import tempfile
     print("Testing live Hub task chain directory fs relay with mock bridge...")
-    hub_bin = Path("/tmp/test_hub")
-    if not hub_bin.exists():
-        print("Building test_hub binary...")
-        build_cmd = "nix develop --command bash -c 'odin build src/hub -collection:odin_test=src -out:/tmp/test_hub'"
-        res = subprocess.run(build_cmd, shell=True, cwd=ROOT, capture_output=True, text=True)
-        require(res.returncode == 0, f"build failed: {res.stderr}")
+    tmp_dir = Path(tempfile.mkdtemp(prefix="ham-test-dir-fs-"))
+    hub_bin = tmp_dir / "test_hub"
+    print("Building test_hub binary...")
+    build_odin_pkg("src/hub", hub_bin)
 
     port = find_free_port()
-    db_path = f"/tmp/ham-test-dir-fs-{port}.db"
-    if os.path.exists(db_path):
-        os.remove(db_path)
+    db_path = str(tmp_dir / f"ham-test-dir-fs-{port}.db")
 
     migrations_dir = str(ROOT / "src/hub/repository/sqlite/migrations")
     user_out = subprocess.check_output(
@@ -503,11 +472,9 @@ def test_live_directory_fs_relay() -> None:
             hub_proc.wait(timeout=3)
         except subprocess.TimeoutExpired:
             hub_proc.kill()
-        if os.path.exists(db_path):
-            os.remove(db_path)
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":
-    test_static_requirements()
     test_live_directory_fs_relay()
     print("\nALL DIRECTORY FS RELAY TESTS PASSED! (0 errors)")

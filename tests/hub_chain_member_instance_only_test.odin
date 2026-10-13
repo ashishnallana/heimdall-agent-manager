@@ -12,6 +12,7 @@ package hub_chain_member_instance_only_test
 // 5. set_chain_coordinator removes any legacy "agt_" records during coordinator update.
 
 import "core:fmt"
+import "core:testing"
 import "core:os"
 import "core:strings"
 import contracts "odin_test:contracts"
@@ -86,6 +87,12 @@ agent_inst_get :: proc(ctx: rawptr, id: string) -> (domain.Agent_Instance, bool,
 
 check :: proc(ok: bool, msg: string) {
 	if !ok { fmt.eprintln("FAIL:", msg); os.exit(1) }
+}
+
+@(test)
+test_hub_chain_member_instance_only_test :: proc(t: ^testing.T) {
+	_ = t
+	main()
 }
 
 main :: proc() {

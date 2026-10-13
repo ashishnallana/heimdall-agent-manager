@@ -15,6 +15,7 @@ package device_auth_security_matrix_test
 import "core:fmt"
 import "core:os"
 import "core:strings"
+import "core:testing"
 import contracts "odin_test:contracts"
 import app "odin_test:hub/app"
 import domain "odin_test:hub/domain"
@@ -64,7 +65,15 @@ new_service :: proc(rate_limit := 2, interval := 5) -> (^device_auth.Grant_Store
 	return store, svc
 }
 
+@(test)
+test_device_auth_security_matrix :: proc(t: ^testing.T) {
+	main()
+	testing.expect_value(t, FAILURES, 0)
+}
+
 main :: proc() {
+	FAILURES = 0
+	FAKE_NOW = 8_000_000
 	fmt.println("=== device_auth security matrix ===")
 	defer {
 		if FAILURES == 0 {
@@ -113,6 +122,7 @@ test_bridge_enrollment_end_to_end :: proc() {
 	config := app.default_config()
 	config.database_path = db_path
 	config.migrations_dir = "src/hub/repository/sqlite/migrations"
+	config.paddle_environment = "sandbox"
 	graph: app.App_Graph
 	graph_ok, graph_msg := app.build_graph(&graph, config)
 	assert_true(graph_ok, graph_msg)
@@ -273,7 +283,7 @@ test_bridge_enrollment_end_to_end :: proc() {
 	// credential try to act for it.
 	agent_row := domain.Agent{
 		agent_id = "agt_crossbridge", owner_user_id = "approving-human", name = "Cross Bridge",
-		slug = "cross-bridge", default_provider = "claude", default_model = "normal", state = .Active,
+		slug = "cross-bridge", state = .Active,
 		created_at = "2026-10-07T00:00:00Z", updated_at = "2026-10-07T00:00:00Z",
 	}
 	_, _, _ = iface.agent_save(graph.agents.agents, agent_row)
@@ -463,6 +473,7 @@ test_http_owner_spoof_and_audit_queryability :: proc() {
 	config := app.default_config()
 	config.database_path = db_path
 	config.migrations_dir = "src/hub/repository/sqlite/migrations"
+	config.paddle_environment = "sandbox"
 	graph: app.App_Graph
 	graph_ok, graph_msg := app.build_graph(&graph, config)
 	assert_true(graph_ok, graph_msg)

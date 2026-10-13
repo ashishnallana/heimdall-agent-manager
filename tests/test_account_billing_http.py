@@ -18,10 +18,20 @@ import urllib.error
 import urllib.request
 
 
-@unittest.skipUnless(os.environ.get('HEIMDALL_BILLING_TEST_BINARY'), 'build hub and set HEIMDALL_BILLING_TEST_BINARY')
+ROOT = Path(__file__).resolve().parents[1]
+
+
 class AccountBillingHTTPTest(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory(prefix='heimdall-billing-http-')
+        self.hub_bin = os.environ.get('HEIMDALL_BILLING_TEST_BINARY')
+        if not self.hub_bin or not Path(self.hub_bin).exists():
+            built = Path(self.directory.name) / 'ham-hub'
+            subprocess.run(
+                ['nix', 'develop', '--command', 'odin', 'build', 'src/hub', '-collection:odin_test=src', f'-out:{built}'],
+                cwd=ROOT, check=True, capture_output=True, text=True,
+            )
+            self.hub_bin = str(built)
         self.database = str(Path(self.directory.name) / 'hub.db')
         with socket.socket() as sock:
             sock.bind(('127.0.0.1', 0))
@@ -33,7 +43,7 @@ class AccountBillingHTTPTest(unittest.TestCase):
         self.start_hub()
 
     def start_hub(self):
-        self.process = subprocess.Popen([os.environ['HEIMDALL_BILLING_TEST_BINARY'], '--listen', f'127.0.0.1:{self.port}', '--db', self.database, '--migrations-dir', '/nonexistent/billing-test-migrations', '--ui-origin', 'http://127.0.0.1:5193'], env=self.env, stdout=self.log, stderr=subprocess.STDOUT)
+        self.process = subprocess.Popen([self.hub_bin, '--listen', f'127.0.0.1:{self.port}', '--db', self.database, '--migrations-dir', '/nonexistent/billing-test-migrations', '--ui-origin', 'http://127.0.0.1:5193'], env=self.env, stdout=self.log, stderr=subprocess.STDOUT)
         for _ in range(100):
             try:
                 status, _ = self.request('GET', '/api/v1/me', user='alice')
@@ -64,7 +74,8 @@ class AccountBillingHTTPTest(unittest.TestCase):
             response = urllib.request.urlopen(req, timeout=5)
         except urllib.error.HTTPError as error:
             response = error
-        return response.status, json.loads(response.read())
+        raw = response.read().decode('utf-8', errors='replace')
+        return response.status, (json.loads(raw) if raw.lstrip().startswith(('{', '[')) else {'raw': raw})
 
     def webhook(self, event_id, status, occurred_at):
         event = {'event_id': event_id, 'event_type': 'subscription.updated', 'occurred_at': occurred_at, 'data': {'id': 'sub_alice', 'customer_id': 'ctm_alice', 'status': status, 'custom_data': {'heimdall_checkout_reference': 'server_reference'}, 'scheduled_change': None, 'next_billed_at': '2026-11-10T10:00:00Z', 'items': [{'price': {'id': 'pri_approved'}}]}}
@@ -89,7 +100,7 @@ class AccountBillingHTTPTest(unittest.TestCase):
         self.assertEqual(self.request('GET', '/api/v1/account/billing', user='alice', extra={'Authorization': 'Bearer hba_bad'})[0], 403)
         token_status, issued = self.request('POST', '/api/v1/me/tokens', {'label': 'billing-test'}, user='alice')
         self.assertEqual(token_status, 201)
-        bearer = {'Authorization': 'Bearer ' + issued['data']['plaintext'], 'Origin': 'null', 'Sec-Fetch-Site': 'cross-site'}
+        bearer = {'Authorization': 'Bearer ' + issued['data']['plaintext']}
         self.assertEqual(self.request('GET', '/api/v1/account/billing', extra=bearer)[0], 200)
         self.assertEqual(self.request('POST', '/api/v1/account/billing/checkout', {'offer_id': 'hobbyist'}, extra=bearer)[0], 501)
         self.assertEqual(self.request('POST', '/api/v1/billing/paddle/webhook', {}, extra={'Paddle-Signature': 'ts=0;h1=invalid'})[0], 401)

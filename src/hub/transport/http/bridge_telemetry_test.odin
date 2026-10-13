@@ -94,8 +94,8 @@ TELEMETRY_TEST_CIDRS := [1]string{"127.0.0.1/32"}
 setup_telemetry_test_fixture :: proc(t: ^testing.T, tag: string) -> ^telemetry_handler_fixture {
 	f := new(telemetry_handler_fixture)
 	seq := sync.atomic_add(&telemetry_test_counter, 1)
-	f.db_path = fmt.tprintf("/tmp/test_bridge_telemetry_%s_%d_%d_%d.db", tag, os.get_pid(), time.now()._nsec, seq)
-	os.remove(f.db_path)
+	f.db_path = ":memory:"
+	
 
 	conn, open_ok, open_err := sqlite.open(f.db_path)
 	testing.expect(t, open_ok, "sqlite open ok")
@@ -111,7 +111,7 @@ setup_telemetry_test_fixture :: proc(t: ^testing.T, tag: string) -> ^telemetry_h
 	f.ag_repo = sqlite.new_agent_repository(&f.ag_repo_sqlite, &f.conn)
 
 	f.clock = platform.real_clock()
-	f.ids = platform.real_id_generator()
+	f.ids = http_test_id_generator()
 
 	f.br_svc = bridge_service.new_bridge_service(&f.br_repo, &f.clock, &f.ids)
 	f.us_svc = user_service.new_user_service_basic(&f.us_repo, &f.clock, &f.ids)
@@ -163,7 +163,7 @@ setup_telemetry_test_fixture :: proc(t: ^testing.T, tag: string) -> ^telemetry_h
 teardown_telemetry_test_fixture :: proc(f: ^telemetry_handler_fixture) {
 	if f == nil do return
 	sqlite.close(&f.conn)
-	os.remove(f.db_path)
+	
 	if len(f.owner_user_id) > 0 do delete(f.owner_user_id)
 	if len(f.bridge_id) > 0 do delete(f.bridge_id)
 	if len(f.bridge_token) > 0 do delete(f.bridge_token)
@@ -532,7 +532,7 @@ test_bridge_connect_dispatches_initial_telemetry_when_enabled :: proc(t: ^testin
 
 	th := thread.create_and_start_with_data(rawptr(&runner), run_bridge_ws_thread)
 	defer {
-		net.close(pair.client)
+		net.close(pair.client); pair.client = net.TCP_Socket(0)
 		thread.join(th)
 		thread.destroy(th)
 		close_telemetry_sock_pair(&pair)
@@ -607,7 +607,7 @@ test_bridge_connect_does_not_dispatch_telemetry_when_disabled :: proc(t: ^testin
 
 	th := thread.create_and_start_with_data(rawptr(&runner), run_bridge_ws_thread)
 	defer {
-		net.close(pair.client)
+		net.close(pair.client); pair.client = net.TCP_Socket(0)
 		thread.join(th)
 		thread.destroy(th)
 		close_telemetry_sock_pair(&pair)

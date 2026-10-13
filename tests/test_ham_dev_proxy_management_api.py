@@ -107,106 +107,121 @@ def _maybe_json(raw: str) -> dict | None:
         return None
 
 
+def ensure_proxy_bin(temp_dir: Path) -> Path:
+    import shutil
+    env_bin = os.environ.get("HAM_DEV_PROXY_BIN")
+    if env_bin and Path(env_bin).exists():
+        return Path(env_bin)
+    out_bin = temp_dir / "ham-dev-proxy"
+    odin = os.environ.get("ODIN") or shutil.which("odin")
+    if odin:
+        subprocess.run([odin, "build", "src/dev_proxy", "-collection:odin_test=src", f"-out:{out_bin}"], cwd=ROOT, check=True)
+    else:
+        subprocess.run(["nix", "develop", "--command", "odin", "build", "src/dev_proxy", "-collection:odin_test=src", f"-out:{out_bin}"], cwd=ROOT, check=True)
+    return out_bin
+
+
 def main() -> None:
+    import shutil
     import tempfile
 
-    proxy_bin = Path(os.environ.get("HAM_DEV_PROXY_BIN", "/tmp/ham-dev-proxy"))
-    if not proxy_bin.exists():
-        raise SystemExit(f"missing HAM_DEV_PROXY_BIN: {proxy_bin}")
-
     testhome = Path(tempfile.mkdtemp())
-    hub_port = free_port()
-    proxy_port = free_port()
-    hub = http.server.ThreadingHTTPServer(("127.0.0.1", hub_port), HubHandler)
-    threading.Thread(target=hub.serve_forever, daemon=True).start()
-
-    proc = start_proxy(str(proxy_bin), f"127.0.0.1:{proxy_port}", hub_port, str(testhome))
     try:
-        wait_for_proxy(proc, proxy_port)
-        base = f"http://127.0.0.1:{proxy_port}"
+        proxy_bin = ensure_proxy_bin(testhome)
+        hub_port = free_port()
+        proxy_port = free_port()
+        hub = http.server.ThreadingHTTPServer(("127.0.0.1", hub_port), HubHandler)
+        threading.Thread(target=hub.serve_forever, daemon=True).start()
 
-        # AC1 (DP-2): create -> 201; new user appears in GET and is selectable.
-        status, created, _ = api(base, "POST", "/_dev/api/users", {"username": "carol", "display_name": "Carol", "email": "carol@example.com"})
-        assert status == 201, f"create should be 201, got {status}: {created}"
-        assert created == {"username": "carol", "display_name": "Carol", "email": "carol@example.com"}, f"created body mismatch: {created}"
-
-        status, listing, _ = api(base, "GET", "/_dev/api/users")
-        assert status == 200
-        usernames = [u["username"] for u in listing["users"]]
-        assert "carol" in usernames and "tanmay" in usernames and "reviewer" in usernames, f"roster missing users: {usernames}"
-
-        # AC1 (DP-2): duplicate username -> 409; empty username -> 409.
-        status, _, _ = api(base, "POST", "/_dev/api/users", {"username": "carol"})
-        assert status == 409, f"duplicate should be 409, got {status}"
-        status, _, _ = api(base, "POST", "/_dev/api/users", {"display_name": "no username"})
-        assert status == 409, f"empty username should be 409, got {status}"
-
-        # AC2 (DP-3): set active -> 200 + ham_dev_user cookie.
-        status, _, cookie = api(base, "POST", "/_dev/api/active", {"username": "carol"})
-        assert status == 200, f"set active should be 200, got {status}"
-        assert "ham_dev_user=carol" in cookie, f"set-active should set ham_dev_user cookie; got {cookie!r}"
-
-        # AC2 (DP-3): persisted active reflected in GET, and a proxied /api/v1
-        # request (no cookie) is forwarded with that user's X-authentik-username.
-        status, listing, _ = api(base, "GET", "/_dev/api/users")
-        assert listing["active"] == "carol", f"active should be carol, got {listing['active']}"
-        fwd = json.loads(urllib.request.urlopen(f"{base}/api/v1/me", timeout=5).read())
-        h = {k.lower(): v for k, v in fwd["headers"].items()}
-        assert h.get("x-authentik-username") == "carol", f"proxied request should inject carol; got {h}"
-        assert h.get("x-authentik-email") == "carol@example.com", f"proxied email mismatch: {h}"
-
-        # AC3 (DP-7): delete the active user -> 204 AND active is cleared.
-        status, _, _ = api(base, "DELETE", "/_dev/api/users/carol")
-        assert status == 204, f"delete should be 204, got {status}"
-        status, listing, _ = api(base, "GET", "/_dev/api/users")
-        assert listing["active"] is None, f"active should be cleared after deleting active user; got {listing['active']}"
-        assert "carol" not in [u["username"] for u in listing["users"]], "carol should be gone from roster"
-
-        # DP-6 invariant: management paths are never forwarded to the Hub
-        # (the echo Hub only handles GET; a POST to /_dev/api/users must not
-        # appear as a forwarded GET to the Hub). Verified implicitly above
-        # since the proxy answered all /_dev/api/* locally without error.
-
-        # Management mutation persisted across the in-memory snapshot: a fresh
-        # create on a different user is reflected in a subsequent GET.
-        status, _, _ = api(base, "POST", "/_dev/api/users", {"username": "dave", "display_name": "Dave", "email": "dave@example.com"})
-        assert status == 201
-        status, listing, _ = api(base, "GET", "/_dev/api/users")
-        assert "dave" in [u["username"] for u in listing["users"]], "dave should be visible after create (shared config)"
-
-        print("PASS: management API create/list/select/delete + forwarded identity + persisted active")
-    finally:
-        proc.terminate()
+        proc = start_proxy(str(proxy_bin), f"127.0.0.1:{proxy_port}", hub_port, str(testhome))
         try:
-            proc.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-        hub.shutdown()
-        hub.server_close()
+            wait_for_proxy(proc, proxy_port)
+            base = f"http://127.0.0.1:{proxy_port}"
 
-    # AC4 (DP-7): non-loopback bind -> every /_dev/api/* returns 404.
-    nl_port = free_port()
-    nl_hub_port = free_port()
-    nl_hub = http.server.ThreadingHTTPServer(("127.0.0.1", nl_hub_port), HubHandler)
-    threading.Thread(target=nl_hub.serve_forever, daemon=True).start()
-    nl_proc = start_proxy(str(proxy_bin), f"0.0.0.0:{nl_port}", nl_hub_port, str(testhome))
-    try:
-        wait_for_proxy(nl_proc, nl_port)
-        status, _, _ = api(f"http://127.0.0.1:{nl_port}", "GET", "/_dev/api/users")
-        assert status == 404, f"non-loopback GET management should be 404, got {status}"
-        status, _, _ = api(f"http://127.0.0.1:{nl_port}", "POST", "/_dev/api/users", {"username": "evil"})
-        assert status == 404, f"non-loopback POST management should be 404, got {status}"
-        print("PASS: non-loopback bind disables management routes (404) (DP-7)")
-    finally:
-        nl_proc.terminate()
+            # AC1 (DP-2): create -> 201; new user appears in GET and is selectable.
+            status, created, _ = api(base, "POST", "/_dev/api/users", {"username": "carol", "display_name": "Carol", "email": "carol@example.com"})
+            assert status == 201, f"create should be 201, got {status}: {created}"
+            assert created == {"username": "carol", "display_name": "Carol", "email": "carol@example.com"}, f"created body mismatch: {created}"
+
+            status, listing, _ = api(base, "GET", "/_dev/api/users")
+            assert status == 200
+            usernames = [u["username"] for u in listing["users"]]
+            assert "carol" in usernames and "tanmay" in usernames and "reviewer" in usernames, f"roster missing users: {usernames}"
+
+            # AC1 (DP-2): duplicate username -> 409; empty username -> 409.
+            status, _, _ = api(base, "POST", "/_dev/api/users", {"username": "carol"})
+            assert status == 409, f"duplicate should be 409, got {status}"
+            status, _, _ = api(base, "POST", "/_dev/api/users", {"display_name": "no username"})
+            assert status == 409, f"empty username should be 409, got {status}"
+
+            # AC2 (DP-3): set active -> 200 + ham_dev_user cookie.
+            status, _, cookie = api(base, "POST", "/_dev/api/active", {"username": "carol"})
+            assert status == 200, f"set active should be 200, got {status}"
+            assert "ham_dev_user=carol" in cookie, f"set-active should set ham_dev_user cookie; got {cookie!r}"
+
+            # AC2 (DP-3): persisted active reflected in GET, and a proxied /api/v1
+            # request (no cookie) is forwarded with that user's X-authentik-username.
+            status, listing, _ = api(base, "GET", "/_dev/api/users")
+            assert listing["active"] == "carol", f"active should be carol, got {listing['active']}"
+            fwd = json.loads(urllib.request.urlopen(f"{base}/api/v1/me", timeout=5).read())
+            h = {k.lower(): v for k, v in fwd["headers"].items()}
+            assert h.get("x-authentik-username") == "carol", f"proxied request should inject carol; got {h}"
+            assert h.get("x-authentik-email") == "carol@example.com", f"proxied email mismatch: {h}"
+
+            # AC3 (DP-7): delete the active user -> 204 AND active is cleared.
+            status, _, _ = api(base, "DELETE", "/_dev/api/users/carol")
+            assert status == 204, f"delete should be 204, got {status}"
+            status, listing, _ = api(base, "GET", "/_dev/api/users")
+            assert listing["active"] is None, f"active should be cleared after deleting active user; got {listing['active']}"
+            assert "carol" not in [u["username"] for u in listing["users"]], "carol should be gone from roster"
+
+            # DP-6 invariant: management paths are never forwarded to the Hub
+            # (the echo Hub only handles GET; a POST to /_dev/api/users must not
+            # appear as a forwarded GET to the Hub). Verified implicitly above
+            # since the proxy answered all /_dev/api/* locally without error.
+
+            # Management mutation persisted across the in-memory snapshot: a fresh
+            # create on a different user is reflected in a subsequent GET.
+            status, _, _ = api(base, "POST", "/_dev/api/users", {"username": "dave", "display_name": "Dave", "email": "dave@example.com"})
+            assert status == 201
+            status, listing, _ = api(base, "GET", "/_dev/api/users")
+            assert "dave" in [u["username"] for u in listing["users"]], "dave should be visible after create (shared config)"
+
+            print("PASS: management API create/list/select/delete + forwarded identity + persisted active")
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            hub.shutdown()
+            hub.server_close()
+
+        # AC4 (DP-7): non-loopback bind -> every /_dev/api/* returns 404.
+        nl_port = free_port()
+        nl_hub_port = free_port()
+        nl_hub = http.server.ThreadingHTTPServer(("127.0.0.1", nl_hub_port), HubHandler)
+        threading.Thread(target=nl_hub.serve_forever, daemon=True).start()
+        nl_proc = start_proxy(str(proxy_bin), f"0.0.0.0:{nl_port}", nl_hub_port, str(testhome))
         try:
-            nl_proc.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            nl_proc.kill()
-        nl_hub.shutdown()
-        nl_hub.server_close()
+            wait_for_proxy(nl_proc, nl_port)
+            status, _, _ = api(f"http://127.0.0.1:{nl_port}", "GET", "/_dev/api/users")
+            assert status == 404, f"non-loopback GET management should be 404, got {status}"
+            status, _, _ = api(f"http://127.0.0.1:{nl_port}", "POST", "/_dev/api/users", {"username": "evil"})
+            assert status == 404, f"non-loopback POST management should be 404, got {status}"
+            print("PASS: non-loopback bind disables management routes (404) (DP-7)")
+        finally:
+            nl_proc.terminate()
+            try:
+                nl_proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                nl_proc.kill()
+            nl_hub.shutdown()
+            nl_hub.server_close()
 
-    print("ALL PASS")
+        print("ALL PASS")
+    finally:
+        shutil.rmtree(testhome, ignore_errors=True)
 
 
 if __name__ == "__main__":

@@ -142,36 +142,51 @@ def run_once(proxy_bin: str, proxy_port: int, hub_port: int, testhome: Path) -> 
     hub.server_close()
 
 
+def ensure_proxy_bin(temp_dir: Path) -> Path:
+    import shutil
+    env_bin = os.environ.get("HAM_DEV_PROXY_BIN")
+    if env_bin and Path(env_bin).exists():
+        return Path(env_bin)
+    out_bin = temp_dir / "ham-dev-proxy"
+    odin = os.environ.get("ODIN") or shutil.which("odin")
+    if odin:
+        subprocess.run([odin, "build", "src/dev_proxy", "-collection:odin_test=src", f"-out:{out_bin}"], cwd=ROOT, check=True)
+    else:
+        subprocess.run(["nix", "develop", "--command", "odin", "build", "src/dev_proxy", "-collection:odin_test=src", f"-out:{out_bin}"], cwd=ROOT, check=True)
+    return out_bin
+
+
 def main() -> None:
+    import shutil
     import tempfile
 
-    proxy_bin = Path(os.environ.get("HAM_DEV_PROXY_BIN", "/tmp/ham-dev-proxy"))
-    if not proxy_bin.exists():
-        raise SystemExit(f"missing HAM_DEV_PROXY_BIN: {proxy_bin}")
-
     testhome = Path(tempfile.mkdtemp())
-    # Pre-seed the store at $HEIMDALL_HOME/dev-proxy/users.json (HEIMDALL_HOME is the data-dir root).
-    store_dir = testhome / "dev-proxy"
-    store_dir.mkdir(parents=True)
-    (store_dir / "users.json").write_text(json.dumps({
-        "active": "reviewer",
-        "users": [
-            {"username": "alice", "display_name": "Alice Dev", "email": "alice@example.com"},
-            {"username": "reviewer", "display_name": "Reviewer Override", "email": "rev@persisted.example"},
-        ],
-    }))
+    try:
+        proxy_bin = ensure_proxy_bin(testhome)
+        # Pre-seed the store at $HEIMDALL_HOME/dev-proxy/users.json (HEIMDALL_HOME is the data-dir root).
+        store_dir = testhome / "dev-proxy"
+        store_dir.mkdir(parents=True)
+        (store_dir / "users.json").write_text(json.dumps({
+            "active": "reviewer",
+            "users": [
+                {"username": "alice", "display_name": "Alice Dev", "email": "alice@example.com"},
+                {"username": "reviewer", "display_name": "Reviewer Override", "email": "rev@persisted.example"},
+            ],
+        }))
 
-    proxy_port = free_port()
+        proxy_port = free_port()
 
-    # Run 1: persisted roster + active honored, cookie wins, DP-6 invariants.
-    run_once(str(proxy_bin), proxy_port, free_port(), testhome)
-    print("PASS: persisted roster + active honored, cookie wins, DP-6 invariants (run 1)")
+        # Run 1: persisted roster + active honored, cookie wins, DP-6 invariants.
+        run_once(str(proxy_bin), proxy_port, free_port(), testhome)
+        print("PASS: persisted roster + active honored, cookie wins, DP-6 invariants (run 1)")
 
-    # Run 2 (restart simulation): same HEIMDALL_HOME, fresh process + fresh hub port -> same persisted active.
-    run_once(str(proxy_bin), proxy_port, free_port(), testhome)
-    print("PASS: persisted active survives restart (run 2)")
+        # Run 2 (restart simulation): same HEIMDALL_HOME, fresh process + fresh hub port -> same persisted active.
+        run_once(str(proxy_bin), proxy_port, free_port(), testhome)
+        print("PASS: persisted active survives restart (run 2)")
 
-    print("ALL PASS")
+        print("ALL PASS")
+    finally:
+        shutil.rmtree(testhome, ignore_errors=True)
 
 
 if __name__ == "__main__":

@@ -1,8 +1,7 @@
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-// Simulated DOM/browser environment for the side-effectful service. We control
-// visibility/focus, window.Notification, and localStorage to drive the gates.
-
+test('notificationService gates, open-thread suppression, click routing, and permission requests', async () => {
 type Created = { title: string; options: any };
 const created: Created[] = [];
 
@@ -236,5 +235,4 @@ FakeNotification.requestImpl = async () => 'denied';
 assert.equal(await requestNotificationPermission(), 'denied');
 FakeNotification.requestImpl = async () => { throw new Error('boom'); };
 assert.equal(await requestNotificationPermission(), 'denied', 'thrown requestPermission => denied, no crash');
-
-console.log('ui_notification_service_test: ok');
+});

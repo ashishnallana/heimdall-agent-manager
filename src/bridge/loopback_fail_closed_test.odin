@@ -26,6 +26,7 @@ package main
 // `test_blank_configured_token_authorizes_nothing` fail, which is the whole point.
 
 import "core:strings"
+import "core:sync"
 import "core:testing"
 import contracts "odin_test:contracts"
 
@@ -45,6 +46,8 @@ loopback_request :: proc(auth: string) -> string {
 // absent header, not an empty bearer, and not an arbitrary guess.
 @(test)
 test_blank_configured_token_authorizes_nothing :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
 	saved := bridge_config.bridge_token
 	defer bridge_config.bridge_token = saved
 
@@ -67,6 +70,8 @@ test_blank_configured_token_authorizes_nothing :: proc(t: ^testing.T) {
 // The positive case, so the test above cannot pass by rejecting everything.
 @(test)
 test_configured_token_authorizes_only_the_matching_bearer :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
 	saved := bridge_config.bridge_token
 	defer bridge_config.bridge_token = saved
 
@@ -89,6 +94,8 @@ test_configured_token_authorizes_only_the_matching_bearer :: proc(t: ^testing.T)
 // the token is.
 @(test)
 test_surrounding_whitespace_in_the_configured_token_does_not_break_authorization :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
 	saved := bridge_config.bridge_token
 	defer bridge_config.bridge_token = saved
 

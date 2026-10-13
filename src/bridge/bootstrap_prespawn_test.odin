@@ -164,6 +164,8 @@ bridge_bootstrap_shim_omits_vault_key :: proc(t: ^testing.T) {
 	// lock at all, racing every other env-mutating test (iss_18db48473fc5cb6d, 2026-10-04).
 	sync.mutex_lock(&bridge_test_config_mutex)
 	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
 	// Point the resolver at a real executable so rendering can succeed; the shim
 	// only embeds this path, it never runs it.
 	prev, had := os.lookup_env("HEIMDALL_HAM_CTL_BIN", context.allocator)
@@ -219,6 +221,8 @@ bridge_bootstrap_written_wrapper_omits_vault_key :: proc(t: ^testing.T) {
 	// lock at all, racing every other env-mutating test (iss_18db48473fc5cb6d, 2026-10-04).
 	sync.mutex_lock(&bridge_test_config_mutex)
 	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
 	prev, had := os.lookup_env("HEIMDALL_HAM_CTL_BIN", context.allocator)
 	defer {
 		if had {
@@ -268,4 +272,50 @@ bridge_bootstrap_written_wrapper_omits_vault_key :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(script, "HEIMDALL_BRIDGE_ENDPOINT="), "wrapper keeps the endpoint")
 	testing.expect(t, strings.contains(script, "HEIMDALL_AGENT_TOKEN="), "wrapper keeps the agent token")
 	testing.expect(t, strings.contains(script, "HEIMDALL_AGENT_INSTANCE_ID="), "wrapper keeps the instance id")
+}
+
+// ---- REQ-37: wake_agent / scheduler launch descriptor round-trip ----
+
+@(test)
+wake_launch_command_json_roundtrips_full_descriptor :: proc(t: ^testing.T) {
+	cmd := bridge_wake_launch_command_json(
+		"cmd_1", "inst_abc", "task_9", "reviewer", "pi", "smart",
+		"agt_42", "coder", "chain_7", "Heimdall — Coordinator Session",
+		"inst_coord", "proj_3", "/home/x/project",
+	)
+	defer delete(cmd)
+
+	testing.expect(t, strings.contains(cmd, "\"type\":\"launch_agent\""))
+	d := bridge_bootstrap_descriptor_from_launch(cmd)
+	testing.expect_value(t, d.instance_id, "inst_abc")
+	testing.expect_value(t, d.agent_id, "agt_42")
+	testing.expect_value(t, d.agent_name, "coder")
+	testing.expect_value(t, d.role, "reviewer")
+	testing.expect_value(t, d.chain_id, "chain_7")
+	testing.expect_value(t, d.chain_title, "Heimdall — Coordinator Session")
+	testing.expect_value(t, d.coordinator_id, "inst_coord")
+	testing.expect_value(t, d.project_id, "proj_3")
+	testing.expect_value(t, d.project_path, "/home/x/project")
+}
+
+@(test)
+wake_launch_command_json_escapes_free_text :: proc(t: ^testing.T) {
+	cmd := bridge_wake_launch_command_json(
+		"cmd_2", "inst_q", "", "worker", "", "",
+		"agt_1", "coder", "chain_1", "Say \"hi\" now",
+		"", "proj_1", "",
+	)
+	defer delete(cmd)
+	d := bridge_bootstrap_descriptor_from_launch(cmd)
+	testing.expect_value(t, d.agent_id, "agt_1")
+	testing.expect_value(t, d.chain_title, "Say \"hi\" now")
+}
+
+@(test)
+bare_launch_payload_leaves_agent_id_empty :: proc(t: ^testing.T) {
+	bare := "{\"type\":\"launch_agent\",\"command_id\":\"c\",\"payload\":{\"agent_instance_id\":\"inst_bare\"}}"
+	d := bridge_bootstrap_descriptor_from_launch(bare)
+	testing.expect_value(t, d.instance_id, "inst_bare")
+	testing.expect_value(t, d.agent_id, "")
+	testing.expect_value(t, d.role, "worker")
 }

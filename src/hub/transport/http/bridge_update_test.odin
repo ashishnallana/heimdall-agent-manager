@@ -191,8 +191,8 @@ UPDATE_TEST_CIDRS := [1]string{"127.0.0.1/32"}
 setup_update_test_fixture :: proc(t: ^testing.T, tag: string) -> ^update_handler_wire_fixture {
 	f := new(update_handler_wire_fixture)
 	seq := sync.atomic_add(&update_test_counter, 1)
-	f.db_path = fmt.tprintf("/tmp/test_bridge_update_wire_%s_%d_%d_%d.db", tag, os.get_pid(), time.now()._nsec, seq)
-	os.remove(f.db_path)
+	f.db_path = ":memory:"
+	
 
 	conn, open_ok, open_err := sqlite.open(f.db_path)
 	testing.expect(t, open_ok, "sqlite open ok")
@@ -208,7 +208,7 @@ setup_update_test_fixture :: proc(t: ^testing.T, tag: string) -> ^update_handler
 	f.ag_repo = sqlite.new_agent_repository(&f.ag_impl, &f.conn)
 
 	f.clock = platform.real_clock()
-	f.ids = platform.real_id_generator()
+	f.ids = http_test_id_generator()
 
 	f.sink_rec = Update_Sink_Recorder{}
 	sink := project_service.Bridge_Command_Sink{
@@ -265,7 +265,7 @@ setup_update_test_fixture :: proc(t: ^testing.T, tag: string) -> ^update_handler
 teardown_update_test_fixture :: proc(f: ^update_handler_wire_fixture) {
 	if f == nil do return
 	sqlite.close(&f.conn)
-	os.remove(f.db_path)
+	
 	delete(f.owner_user_id)
 	delete(f.bridge_id)
 	if f.sink_rec.sent {

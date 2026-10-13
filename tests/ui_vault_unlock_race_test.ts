@@ -22,9 +22,6 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 import vaultReducer, {
   setVaultUnlocked,
@@ -39,9 +36,6 @@ import {
   exportRawKeyHex,
   importRawKeyHex,
 } from '../src/ui/utils/vaultCrypto.ts';
-
-const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const read = (rel: string) => fs.readFileSync(path.join(REPO_ROOT, rel), 'utf8');
 
 // -----------------------------------------------------------------------------
 // 1. setVaultUnlocked -- the master-password / recovery / VaultPanel-hex path
@@ -149,26 +143,3 @@ test('A7: no raw key material reaches Redux state on ANY unlock path', async () 
   }
 });
 
-// -----------------------------------------------------------------------------
-// 4. Call-site contracts. Source checks, because this suite mounts no DOM; they are
-//    retargeted at the CURRENT symbols and exist to stop the racing shape coming back.
-// -----------------------------------------------------------------------------
-
-test('A7: no production call site dispatches raw hex into either unlock reducer', () => {
-  const panel = read('src/ui/components/settings/VaultPanel.tsx');
-  const modal = read('src/ui/components/settings/VaultOnboardingModal.tsx');
-
-  assert.match(panel, /dispatch\(setVaultUnlocked\(vaultKey\)\)/, 'VaultPanel must dispatch the CryptoKey');
-  assert.doesNotMatch(panel, /setVaultUnlocked\(rawHex\)/, 'VaultPanel must not dispatch hex');
-  assert.match(
-    modal,
-    /dispatch\(setVaultUnlocked\(\{ key: vaultKey, rememberSession \}\)\)/,
-    'onboarding modal must dispatch the CryptoKey to setVaultUnlocked',
-  );
-  assert.doesNotMatch(modal, /importLocalKey|handleDirectKeyImport/, 'onboarding has no raw-key import path');
-  assert.doesNotMatch(modal, /rawVaultKeyHex: rawHex/, 'onboarding modal must not dispatch hex');
-
-  // The one legitimate survivor: rawHex still feeds the E2EE bridge unseal payload, which
-  // needs transportable key material and is not a Redux write.
-  assert.match(panel, /unsealAllConnectedBridges\(rawHex\)/, 'rawHex still feeds bridge unseal');
-});

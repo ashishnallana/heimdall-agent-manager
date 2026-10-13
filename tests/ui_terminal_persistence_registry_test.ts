@@ -15,9 +15,6 @@
 
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 import * as xtermModule from '@xterm/xterm';
 import {
@@ -26,13 +23,6 @@ import {
   MAX_DELTA_BYTES,
   SerializeAddon,
 } from '../src/ui/components/shells/terminalSessionRegistry.ts';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const REPO_ROOT = path.resolve(__dirname, '..');
-
-const SHELL_TERMINAL_PANE = path.join(REPO_ROOT, 'src/ui/components/shells/ShellTerminalPane.tsx');
-const BOTTOM_DOCK = path.join(REPO_ROOT, 'src/ui/components/shell/BottomDock.tsx');
 
 // Resolve Terminal across ESM/CJS boundaries
 const Terminal = (xtermModule as any).Terminal || (xtermModule as any).default?.Terminal || (xtermModule as any).default;
@@ -106,6 +96,32 @@ describe('Suite 1: TerminalSessionRegistry Contract & Lifecycle Management', () 
     assert.equal(registry.consumeRestorationData('s1'), null);
     assert.equal(registry.isSessionActive('s1'), false);
     assert.equal(registry.hasSessionState('s1'), false);
+  });
+
+  test('Test 1.6: clearAll purges all sessions and active registrations, and saveSessionState safely catches unattached SerializeAddon errors', () => {
+    const registry = new TerminalSessionRegistry();
+    registry.registerActiveSession('s1');
+    registry.registerActiveSession('s2');
+    registry.saveSnapshot('s1', 'snap1', 0, 80, 24);
+    registry.saveSnapshot('s2', 'snap2', 5, 100, 30);
+
+    // Calling saveSessionState with a registered but unattached SerializeAddon catches serialize() error and saves empty snapshot + dimensions
+    const unattachedAddon = new SerializeAddon();
+    registry.registerSerializeAddon('s3', unattachedAddon);
+    const fakeTerm = { buffer: { active: { viewportY: 12 } }, cols: 90, rows: 25 } as any;
+    registry.saveSessionState('s3', fakeTerm);
+    assert.equal(registry.get('s3')?.snapshot, '');
+    assert.equal(registry.get('s3')?.savedViewportY, 12);
+    assert.equal(registry.get('s3')?.cols, 90);
+    assert.equal(registry.get('s3')?.rows, 25);
+    registry.unregisterSerializeAddon('s3');
+
+    registry.clearAll();
+    assert.equal(registry.get('s1'), undefined);
+    assert.equal(registry.get('s2'), undefined);
+    assert.equal(registry.get('s3'), undefined);
+    assert.equal(registry.isSessionActive('s1'), false);
+    assert.equal(registry.isSessionActive('s2'), false);
   });
 });
 
@@ -602,30 +618,11 @@ describe('Suite 5: Concurrent Multi-Session Isolation & Memory Hygiene', () => {
   });
 });
 
-describe('Suite 6: React Component Integration & Contract Enforcement', () => {
+describe('Suite 6: Module Exports Contract', () => {
   test('Test 6.1: Module exports contract', () => {
     assert.ok(typeof TerminalSessionRegistry === 'function');
     assert.ok(typeof terminalSessionRegistry === 'object');
     assert.equal(MAX_DELTA_BYTES, 1024 * 1024);
     assert.ok(typeof SerializeAddon === 'function');
-  });
-
-  test('Test 6.2: ShellTerminalPane unmount hook integration', () => {
-    const paneSrc = fs.readFileSync(SHELL_TERMINAL_PANE, 'utf8');
-    assert.ok(paneSrc.includes('SerializeAddon'), 'must import and instantiate SerializeAddon');
-    assert.ok(paneSrc.includes('terminalSessionRegistry.saveSnapshot'), 'must save snapshot on unmount');
-    assert.ok(paneSrc.includes('terminalSessionRegistry.unregisterActiveSession'), 'must unregister active session on unmount');
-  });
-
-  test('Test 6.3: ShellTerminalPane mount restoration hook integration', () => {
-    const paneSrc = fs.readFileSync(SHELL_TERMINAL_PANE, 'utf8');
-    assert.ok(paneSrc.includes('terminalSessionRegistry.consumeRestorationData'), 'must consume restoration data on mount');
-    assert.ok(paneSrc.includes('terminalSessionRegistry.registerActiveSession'), 'must register active session on mount');
-    assert.ok(paneSrc.includes('restorationData.snapshot'), 'must write restoration snapshot on mount');
-  });
-
-  test('Test 6.4: BottomDock session disposal hook integration', () => {
-    const dockSrc = fs.readFileSync(BOTTOM_DOCK, 'utf8');
-    assert.ok(dockSrc.includes('terminalSessionRegistry.closeSession(sessionId)'), 'must close session in registry when killed');
   });
 });

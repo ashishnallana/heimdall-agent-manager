@@ -147,9 +147,11 @@ test_send_text_frees_its_frame_when_the_write_fails :: proc(t: ^testing.T) {
 	context.allocator = mem.tracking_allocator(&track)
 
 	pair := leak_make_pair(t)
-	// Closed up front: nothing in this test opens another descriptor afterwards, so the
-	// number cannot have been recycled under us by the time send_text uses it.
-	leak_close_pair(&pair)
+	defer leak_close_pair(&pair)
+	// Shut down both directions while keeping the descriptor open until defer: closing the
+	// descriptor up front allows the kernel to recycle the numeric FD into another parallel
+	// test thread's socket pair mid-run.
+	_ = net.shutdown(pair.hub, .Both)
 
 	big := strings.repeat("y", 1000)
 	defer delete(big)
@@ -159,8 +161,9 @@ test_send_text_frees_its_frame_when_the_write_fails :: proc(t: ^testing.T) {
 	baseline_allocs := len(track.allocation_map)
 	{
 		for _ in 0 ..< FRAME_REPEATS {
+			conn.connected = true
 			testing.expect(t, !send_text(&conn, big),
-				"a write on a closed socket must report failure — if this passes, the test is no longer exercising the failure exit")
+				"a write on a shut-down socket must report failure — if this passes, the test is no longer exercising the failure exit")
 		}
 	}
 	leak_expect_heap_restored(t, &track, baseline_allocs, "send_text failure path")

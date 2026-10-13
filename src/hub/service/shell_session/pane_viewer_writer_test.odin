@@ -34,7 +34,7 @@ pane_test_read :: proc(t: ^testing.T, reader: ^ws.Connection) -> string {
 }
 
 @(test)
-pane_slow_viewer_does_not_block_healthy_viewer :: proc(t: ^testing.T) {
+test_pane_slow_viewer_does_not_block_healthy_viewer :: proc(t: ^testing.T) {
 	slow := pane_test_pair(t)
 	healthy := pane_test_pair(t)
 	defer net.close(slow.hub)
@@ -79,7 +79,7 @@ pane_slow_viewer_does_not_block_healthy_viewer :: proc(t: ^testing.T) {
 }
 
 @(test)
-pane_snapshot_chunks_and_output_remain_ordered :: proc(t: ^testing.T) {
+test_pane_snapshot_chunks_and_output_remain_ordered :: proc(t: ^testing.T) {
 	pair := pane_test_pair(t)
 	defer net.close(pair.hub)
 	reader := ws.Connection{socket = pair.peer, connected = true}
@@ -108,7 +108,7 @@ pane_snapshot_chunks_and_output_remain_ordered :: proc(t: ^testing.T) {
 }
 
 @(test)
-pane_writer_churn_reclaims_workers_and_keys :: proc(t: ^testing.T) {
+test_pane_writer_churn_reclaims_workers_and_keys :: proc(t: ^testing.T) {
 	svc := new_shell_session_service()
 	defer shell_session_service_free(&svc)
 	for i in 0..<100 {
@@ -139,7 +139,7 @@ pane_test_wait_writer :: proc(t: ^testing.T, svc: ^Shell_Session_Service, socket
 }
 
 @(test)
-pane_multiple_bridges_sustain_output_without_queue_growth :: proc(t: ^testing.T) {
+test_pane_multiple_bridges_sustain_output_without_queue_growth :: proc(t: ^testing.T) {
 	pairs: [10]Pane_Test_Pair
 	readers: [10]ws.Connection
 	ids := []string{"pane0", "pane1", "pane2", "pane3", "pane4", "pane5", "pane6", "pane7", "pane8", "pane9"}
@@ -171,7 +171,7 @@ pane_multiple_bridges_sustain_output_without_queue_growth :: proc(t: ^testing.T)
 }
 
 @(test)
-pane_resync_is_scoped_to_its_bridge :: proc(t: ^testing.T) {
+test_pane_resync_is_scoped_to_its_bridge :: proc(t: ^testing.T) {
 	pair := pane_test_pair(t)
 	defer net.close(pair.hub)
 	reader := ws.Connection{socket = pair.peer, connected = true}
@@ -191,7 +191,7 @@ pane_resync_is_scoped_to_its_bridge :: proc(t: ^testing.T) {
 }
 
 @(test)
-pane_pong_uses_the_registered_writer_and_preserves_payload :: proc(t: ^testing.T) {
+test_pane_pong_uses_the_registered_writer_and_preserves_payload :: proc(t: ^testing.T) {
 	pair := pane_test_pair(t)
 	defer net.close(pair.hub)
 	defer net.close(pair.peer)

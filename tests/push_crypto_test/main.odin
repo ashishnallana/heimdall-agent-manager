@@ -12,7 +12,14 @@ package push_crypto_test
 import "core:crypto/ecdh"
 import "core:fmt"
 import "core:os"
+import "core:testing"
 import push "odin_test:hub/service/push"
+
+@(test)
+test_push_crypto_rfc8291 :: proc(t: ^testing.T) {
+	_ = t
+	main()
+}
 
 check :: proc(ok: bool, msg: string) {
 	if ok do return

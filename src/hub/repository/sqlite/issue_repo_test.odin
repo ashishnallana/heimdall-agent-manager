@@ -8,17 +8,13 @@ import iface "odin_test:hub/repository/iface"
 
 @(test)
 test_issue_sqlite_lifecycle :: proc(t: ^testing.T) {
-	db_path := fmt.tprintf("/tmp/test_issues_repo_%d.db", os.get_pid())
-	os.remove(db_path)
-	defer os.remove(db_path)
-
+	db_path := ":memory:"
 	conn, open_ok, open_err := open(db_path)
 	testing.expect(t, open_ok, "db open ok")
 	testing.expect_value(t, open_err.code, domain.Error_Code.None)
 	defer close(&conn)
 
 	mig_ok, mig_err := run_migrations(&conn)
-	if !mig_ok do fmt.println("MIG ERR:", mig_err.message)
 	testing.expect(t, mig_ok, "migrations ok")
 	testing.expect_value(t, mig_err.code, domain.Error_Code.None)
 

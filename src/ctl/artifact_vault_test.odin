@@ -1,6 +1,5 @@
 package main
 
-import "core:encoding/base64"
 import "core:encoding/json"
 import "core:fmt"
 import "core:os"
@@ -88,30 +87,6 @@ test_artifact_create_without_vault_key_leaves_plaintext :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(out, `"description":"Public documentation for open-source library"`), "description must remain plaintext")
 	testing.expect(t, strings.contains(out, `"content":"# Public Library\nOpen documentation."`), "content must remain plaintext")
 	testing.expect(t, !strings.contains(out, "vault:v1:"), "must not contain vault armor")
-}
-
-@(test)
-test_artifact_create_base64_content_encryption :: proc(t: ^testing.T) {
-	raw_text := "DATABASE_SECRET_TOKEN=xyz_token_123"
-	b64 := base64.encode(transmute([]byte)raw_text, allocator = context.temp_allocator)
-
-	args := []string{
-		"--name", "config.env",
-		"--vault-key", TEST_ARTIFACT_VAULT_KEY,
-	}
-	// Inject content_base64 manually via helper args test
-	params := fmt.tprintf(`{"name":"config.env","content_base64":"%s"}`, b64)
-	testing.expect(t, len(params) > 0, "params valid")
-
-	enc_text, enc_ok := vault_encrypt_text_hex(raw_text, TEST_ARTIFACT_VAULT_KEY, context.temp_allocator)
-	testing.expect(t, enc_ok, "encryption should succeed")
-	enc_b64 := base64.encode(transmute([]byte)enc_text, allocator = context.temp_allocator)
-
-	raw_bytes, b_err := base64.decode(enc_b64, allocator = context.temp_allocator)
-	testing.expect(t, b_err == nil, "base64 decode succeeds")
-	dec_text, dec_ok := vault_decrypt_text_hex(string(raw_bytes), TEST_ARTIFACT_VAULT_KEY, context.temp_allocator)
-	testing.expect(t, dec_ok, "decryption should succeed")
-	testing.expect_value(t, dec_text, raw_text)
 }
 
 @(test)

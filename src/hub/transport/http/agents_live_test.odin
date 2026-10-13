@@ -83,7 +83,7 @@ find_chain :: proc(p: Agents_Live_Project, chain_id: string) -> (Agents_Live_Cha
 }
 
 @(test)
-agents_live_tree_all_projects_alphabetical :: proc(t: ^testing.T) {
+test_agents_live_tree_all_projects_alphabetical :: proc(t: ^testing.T) {
 	projects, chains, members_by_chain, instances_by_id := live_test_fixture()
 	defer live_test_fixture_free(projects, chains, members_by_chain, instances_by_id)
 	tree := build_agents_live_tree(projects, chains, members_by_chain, instances_by_id)
@@ -101,7 +101,7 @@ agents_live_tree_all_projects_alphabetical :: proc(t: ^testing.T) {
 }
 
 @(test)
-agents_live_cross_project_chain_under_both :: proc(t: ^testing.T) {
+test_agents_live_cross_project_chain_under_both :: proc(t: ^testing.T) {
 	projects, chains, members_by_chain, instances_by_id := live_test_fixture()
 	defer live_test_fixture_free(projects, chains, members_by_chain, instances_by_id)
 	tree := build_agents_live_tree(projects, chains, members_by_chain, instances_by_id)
@@ -148,7 +148,7 @@ agents_live_cross_project_chain_under_both :: proc(t: ^testing.T) {
 }
 
 @(test)
-agents_live_p1_live_p2_dead_only :: proc(t: ^testing.T) {
+test_agents_live_p1_live_p2_dead_only :: proc(t: ^testing.T) {
 	projects, chains, members_by_chain, instances_by_id := live_test_fixture()
 	defer live_test_fixture_free(projects, chains, members_by_chain, instances_by_id)
 	tree := build_agents_live_tree(projects, chains, members_by_chain, instances_by_id)
@@ -179,7 +179,7 @@ agents_live_p1_live_p2_dead_only :: proc(t: ^testing.T) {
 }
 
 @(test)
-agents_live_chain_omitted_when_no_running_agent :: proc(t: ^testing.T) {
+test_agents_live_chain_omitted_when_no_running_agent :: proc(t: ^testing.T) {
 	projects, chains, members_by_chain, instances_by_id := live_test_fixture()
 	defer live_test_fixture_free(projects, chains, members_by_chain, instances_by_id)
 	tree := build_agents_live_tree(projects, chains, members_by_chain, instances_by_id)
@@ -192,7 +192,7 @@ agents_live_chain_omitted_when_no_running_agent :: proc(t: ^testing.T) {
 }
 
 @(test)
-agents_live_json_contract :: proc(t: ^testing.T) {
+test_agents_live_json_contract :: proc(t: ^testing.T) {
 	projects, chains, members_by_chain, instances_by_id := live_test_fixture()
 	defer live_test_fixture_free(projects, chains, members_by_chain, instances_by_id)
 	tree := build_agents_live_tree(projects, chains, members_by_chain, instances_by_id)
@@ -258,7 +258,7 @@ order_fixture :: proc() -> (projects: []domain.Project, chains: []domain.Task_Ch
 }
 
 @(test)
-agents_live_group_order_by_min_member_created_at :: proc(t: ^testing.T) {
+test_agents_live_group_order_by_min_member_created_at :: proc(t: ^testing.T) {
 	projects, chains, members_by_chain, instances_by_id := order_fixture()
 	defer live_test_fixture_free(projects, chains, members_by_chain, instances_by_id)
 	tree := build_agents_live_tree(projects, chains, members_by_chain, instances_by_id)
@@ -275,7 +275,7 @@ agents_live_group_order_by_min_member_created_at :: proc(t: ^testing.T) {
 }
 
 @(test)
-agents_live_agents_within_group_oldest_first :: proc(t: ^testing.T) {
+test_agents_live_agents_within_group_oldest_first :: proc(t: ^testing.T) {
 	projects, chains, members_by_chain, instances_by_id := order_fixture()
 	defer live_test_fixture_free(projects, chains, members_by_chain, instances_by_id)
 	tree := build_agents_live_tree(projects, chains, members_by_chain, instances_by_id)
@@ -295,7 +295,7 @@ agents_live_agents_within_group_oldest_first :: proc(t: ^testing.T) {
 }
 
 @(test)
-agents_live_archived_project_omitted_and_not_in_unassigned :: proc(t: ^testing.T) {
+test_agents_live_archived_project_omitted_and_not_in_unassigned :: proc(t: ^testing.T) {
 	projects, chains, members_by_chain, instances_by_id := live_test_fixture()
 	defer live_test_fixture_free(projects, chains, members_by_chain, instances_by_id)
 

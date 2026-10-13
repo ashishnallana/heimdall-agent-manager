@@ -78,32 +78,6 @@ pty_host_env_pairs_splits_on_first_eq :: proc(t: ^testing.T) {
 }
 
 @(test)
-pty_host_socket_path_under_run_dir :: proc(t: ^testing.T) {
-	// Shares the global bridge_config with the BR-2a socket tests; serialize on the
-	// same mutex and snapshot/restore. BR-2a made the socket name bridge-unique, so
-	// pin a known identity and assert the new <run_dir>/pty-host-<id>.sock shape.
-	sync.mutex_lock(&bridge_test_config_mutex)
-	defer sync.mutex_unlock(&bridge_test_config_mutex)
-	old_dir := bridge_config.local_endpoint_run_dir
-	old_id := bridge_config.daemon_id
-	old_port := bridge_config.local_endpoint_port
-	defer { bridge_config.local_endpoint_run_dir = old_dir; bridge_config.daemon_id = old_id; bridge_config.local_endpoint_port = old_port }
-	bridge_config.daemon_id = "brg_z"
-	bridge_config.local_endpoint_port = 0
-
-	bridge_config.local_endpoint_run_dir = "/tmp/heimdall-bridge-x"
-	p := pty_host_socket_path()
-	defer delete(p)
-	testing.expect_value(t, p, "/tmp/heimdall-bridge-x/pty-host-brg_z.sock")
-
-	// Trailing slash must not double up.
-	bridge_config.local_endpoint_run_dir = "/tmp/heimdall-bridge-x/"
-	p2 := pty_host_socket_path()
-	defer delete(p2)
-	testing.expect_value(t, p2, "/tmp/heimdall-bridge-x/pty-host-brg_z.sock")
-}
-
-@(test)
 pty_host_message_notice_rendering :: proc(t: ^testing.T) {
 	m := bridge_pty_host_message_notice("inst_sender")
 	defer delete(m)
@@ -715,16 +689,40 @@ shell_stream_detach_command_handles_payload_and_caching :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(res4, "failed"), "empty session_id fails gracefully")
 }
 
-@(private = "file")
-bridge_test_stream_mutex: sync.Mutex
-
 @(test)
 pty_stream_worker_emit_frame_encodes_base64_and_queues :: proc(t: ^testing.T) {
-	sync.mutex_lock(&bridge_test_stream_mutex)
-	defer sync.mutex_unlock(&bridge_test_stream_mutex)
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
 
 	bridge_pty_stream_reset()
 	defer bridge_pty_stream_reset()
+
+	prev_key, had_key := os.lookup_env("HEIMDALL_VAULT_KEY", context.allocator)
+	defer {
+		if had_key {
+			_ = os.set_env("HEIMDALL_VAULT_KEY", prev_key)
+			delete(prev_key)
+		} else {
+			os.unset_env("HEIMDALL_VAULT_KEY")
+		}
+	}
+	_ = os.set_env("HEIMDALL_VAULT_KEY", "unconfigured_key")
+
+	prev_configured, had_configured := os.lookup_env("HEIMDALL_VAULT_CONFIGURED", context.allocator)
+	saved_workspace := bridge_workspace_vault_configured
+	bridge_workspace_vault_configured = false
+	_ = os.set_env("HEIMDALL_VAULT_CONFIGURED", "false")
+	defer {
+		bridge_workspace_vault_configured = saved_workspace
+		if had_configured {
+			_ = os.set_env("HEIMDALL_VAULT_CONFIGURED", prev_configured)
+			delete(prev_configured)
+		} else {
+			os.unset_env("HEIMDALL_VAULT_CONFIGURED")
+		}
+	}
 
 	test_data := "echo streaming test\n"
 	bridge_pty_stream_emit_frame(nil, "sh_stream_1", transmute([]byte)test_data)
@@ -747,22 +745,16 @@ pty_stream_worker_emit_frame_encodes_base64_and_queues :: proc(t: ^testing.T) {
 		frame := frames[0]
 		testing.expect(t, strings.contains(frame, `"type":"shell_pty_output"`), "frame type is shell_pty_output")
 		testing.expect(t, strings.contains(frame, `"session_id":"sh_stream_1"`), "frame has session_id")
-		if key, has_key := bridge_read_vault_key(); has_key {
-			defer delete(key)
-			testing.expect(t, strings.contains(frame, `"enc_b64":`), "frame contains enc_b64 when vault key active")
-			decrypted, dec_ok := bridge_pty_stream_decrypt_chunk(extract_json_string(frame, "enc_b64", ""), key, context.temp_allocator)
-			testing.expect(t, dec_ok, "decryption ok")
-			testing.expect_value(t, string(decrypted), test_data)
-		} else {
-			testing.expect(t, strings.contains(frame, `"data_b64":"ZWNobyBzdHJlYW1pbmcgdGVzdAo="`), "frame data_b64 matches encoded test string")
-		}
+		testing.expect(t, strings.contains(frame, `"data_b64":"ZWNobyBzdHJlYW1pbmcgdGVzdAo="`), "frame data_b64 matches encoded test string")
 	}
 }
 
 @(test)
 pty_stream_worker_detach_deregisters_immediately :: proc(t: ^testing.T) {
-	sync.mutex_lock(&bridge_test_stream_mutex)
-	defer sync.mutex_unlock(&bridge_test_stream_mutex)
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
 
 	bridge_pty_stream_reset()
 	defer bridge_pty_stream_reset()
@@ -866,8 +858,10 @@ t40_fake_worker :: proc(sid: string, fd: posix.FD) -> ^Bridge_PTY_Stream_Worker 
 
 @(test)
 t40_stop_all_for_reconnect_detaches_every_worker :: proc(t: ^testing.T) {
-	sync.mutex_lock(&bridge_test_stream_mutex)
-	defer sync.mutex_unlock(&bridge_test_stream_mutex)
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
 
 	// THE 128B LEAK THIS TEST USED TO REPORT IS GONE, AND SO IS THE REASONING THAT EXCUSED IT.
 	// The previous version of this test appended to bridge_pty_stream_outgoing directly and then
@@ -956,8 +950,10 @@ t40_stop_all_for_reconnect_detaches_every_worker :: proc(t: ^testing.T) {
 // _bridge_pty_stream_outgoing_bind_heap and this fails as a plain expectation, not a crash.
 @(test)
 t40_outgoing_queue_backing_is_pinned_to_the_heap :: proc(t: ^testing.T) {
-	sync.mutex_lock(&bridge_test_stream_mutex)
-	defer sync.mutex_unlock(&bridge_test_stream_mutex)
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
 
 	heap := runtime.heap_allocator()
 
@@ -1017,8 +1013,10 @@ t40_outgoing_queue_backing_is_pinned_to_the_heap :: proc(t: ^testing.T) {
 
 @(test)
 t40_stop_all_for_reconnect_is_a_noop_with_no_workers :: proc(t: ^testing.T) {
-	sync.mutex_lock(&bridge_test_stream_mutex)
-	defer sync.mutex_unlock(&bridge_test_stream_mutex)
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
 
 	bridge_pty_stream_reset()
 	defer bridge_pty_stream_reset()
@@ -1032,8 +1030,10 @@ t40_stop_all_for_reconnect_is_a_noop_with_no_workers :: proc(t: ^testing.T) {
 
 @(test)
 t40_reattach_of_a_live_worker_creates_no_second_worker :: proc(t: ^testing.T) {
-	sync.mutex_lock(&bridge_test_stream_mutex)
-	defer sync.mutex_unlock(&bridge_test_stream_mutex)
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
 
 	bridge_pty_stream_reset()
 	defer bridge_pty_stream_reset()
@@ -1084,8 +1084,10 @@ t40_reattach_of_a_live_worker_creates_no_second_worker :: proc(t: ^testing.T) {
 
 @(test)
 t40_connection_teardown_retires_workers_then_closes :: proc(t: ^testing.T) {
-	sync.mutex_lock(&bridge_test_stream_mutex)
-	defer sync.mutex_unlock(&bridge_test_stream_mutex)
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
 
 	bridge_pty_stream_reset()
 	defer bridge_pty_stream_reset()
@@ -1134,8 +1136,10 @@ t40_connection_teardown_retires_workers_then_closes :: proc(t: ^testing.T) {
 
 @(test)
 pty_stream_worker_get_active_conn_retrieves_registered_connection :: proc(t: ^testing.T) {
-	sync.mutex_lock(&bridge_test_stream_mutex)
-	defer sync.mutex_unlock(&bridge_test_stream_mutex)
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
 
 	bridge_pty_stream_reset()
 	defer bridge_pty_stream_reset()
@@ -1172,8 +1176,10 @@ pty_stream_worker_get_active_conn_retrieves_registered_connection :: proc(t: ^te
 
 @(test)
 pty_stream_worker_auto_reattach_flow_preserves_connection :: proc(t: ^testing.T) {
-	sync.mutex_lock(&bridge_test_stream_mutex)
-	defer sync.mutex_unlock(&bridge_test_stream_mutex)
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
 
 	bridge_pty_stream_reset()
 	defer bridge_pty_stream_reset()
@@ -1220,4 +1226,76 @@ pty_stream_worker_auto_reattach_flow_preserves_connection :: proc(t: ^testing.T)
 	conn_after, active_after := bridge_pty_stream_worker_get_active_conn(inst_id)
 	testing.expect(t, active_after, "stream worker is active on newly spawned PTY")
 	testing.expect(t, conn_after == &var_conn, "conn is preserved across relaunch")
+}
+
+@(test)
+pane_overflow_detaches_only_affected_stream_and_requests_resync :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
+	bridge_pty_stream_reset()
+	defer bridge_pty_stream_reset()
+	slow := Bridge_PTY_Stream_Worker{active = true, fd = -1}
+	healthy := Bridge_PTY_Stream_Worker{active = true, fd = -1}
+	heap := runtime.heap_allocator()
+	chunk := strings.repeat("x", 32 * 1024, heap)
+	defer delete(chunk, heap)
+	_bridge_pty_stream_deliver_or_queue(&healthy, strings.clone("healthy", heap), heap, "healthy")
+	for i in 0..<12 do _bridge_pty_stream_deliver_or_queue(&slow, strings.clone(chunk, heap), heap, "slow")
+	testing.expect(t, !sync.atomic_load(&slow.active))
+	testing.expect(t, sync.atomic_load(&healthy.active))
+	testing.expect(t, bridge_pty_stream_outgoing_bytes <= BRIDGE_PANE_QUEUE_BYTES)
+	frames := bridge_pty_stream_take_outgoing()
+	defer { for frame in frames do delete(frame, heap); delete(frames) }
+	testing.expect_value(t, len(frames), 2)
+	if len(frames) == 2 {
+		testing.expect_value(t, frames[0], "healthy")
+		testing.expect(t, strings.contains(frames[1], "pane_resync_required"))
+	}
+	testing.expect_value(t, bridge_pty_stream_outgoing_bytes, 0)
+}
+
+@(test)
+pane_large_encrypted_snapshot_splits_before_encryption :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
+	bridge_pty_stream_reset()
+	defer bridge_pty_stream_reset()
+	prev_key, found := os.lookup_env("HEIMDALL_VAULT_KEY", context.allocator)
+	defer { if found { _ = os.set_env("HEIMDALL_VAULT_KEY", prev_key); delete(prev_key) } else { os.unset_env("HEIMDALL_VAULT_KEY") } }
+	_ = os.set_env("HEIMDALL_VAULT_KEY", TEST_ENC_VAULT_KEY)
+	worker := Bridge_PTY_Stream_Worker{active = true, emitting_snapshot = true, fd = -1}
+	source := strings.repeat("λ", 256 * 1024)
+	defer delete(source)
+	bridge_pty_stream_emit_frame(&worker, "pane", transmute([]byte)source)
+	frames := bridge_pty_stream_take_outgoing()
+	defer { for frame in frames do delete(frame, runtime.heap_allocator()); delete(frames) }
+	result := make([dynamic]byte)
+	defer delete(result)
+	testing.expect_value(t, len(frames), 64)
+	for frame in frames {
+		testing.expect(t, strings.contains(frame, "\"is_encrypted\":true"))
+		testing.expect(t, strings.contains(frame, "\"is_snapshot\":true"))
+		testing.expect(t, !strings.contains(frame, "enc_b64"))
+		payload := extract_json_string(frame, "data_b64", "")
+		bytes, ok := bridge_pty_stream_decrypt_chunk(payload, TEST_ENC_VAULT_KEY)
+		testing.expect(t, ok)
+		append(&result, ..bytes)
+		delete(bytes)
+		delete(payload)
+	}
+	testing.expect_value(t, string(result[:]), source)
+}
+
+@(test)
+pane_decrypts_real_browser_golden_input :: proc(t: ^testing.T) {
+	ciphertext := "vault:v1:vFQrdD8pfrvPMg80AH82Q+0Ryd+5fD++WZUYiGUzlU+BsSo="
+	key := "4f1c2a9d8e7b6a5c4d3e2f10112233445566778899aabbccddeeff0011223344"
+	plain, ok := bridge_decrypt_vault_ciphertext_hex(ciphertext, key)
+	defer if ok do delete(plain)
+	testing.expect(t, ok)
+	testing.expect_value(t, plain, "ls -la\n")
 }

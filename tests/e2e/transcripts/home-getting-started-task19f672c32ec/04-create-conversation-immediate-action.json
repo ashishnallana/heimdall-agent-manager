@@ -1,9 +1,0 @@
-{
-  "conversation_thread_page": true,
-  "message_debug_ids": [],
-  "thread_elements": [
-    "conversation-thread-page",
-    "conversation-thread-status-chip",
-    "conversation-thread-transcript"
-  ]
-}

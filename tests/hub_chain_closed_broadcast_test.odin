@@ -5,6 +5,7 @@ package hub_chain_closed_broadcast_test
 // long-running loops/tasks halt. The actor (closer) is not self-woken.
 
 import "core:fmt"
+import "core:testing"
 import "core:os"
 import "core:strings"
 import contracts "odin_test:contracts"
@@ -65,6 +66,12 @@ capture_send :: proc(ctx: rawptr, command: project.Runtime_Command) -> (bool, do
 	return true, {}
 }
 check :: proc(ok: bool, msg: string) { if ok do return; fmt.eprintln("FAIL:", msg); os.exit(1) }
+
+@(test)
+test_hub_chain_closed_broadcast_test :: proc(t: ^testing.T) {
+	_ = t
+	main()
+}
 
 main :: proc() {
 	r: Repo

@@ -138,11 +138,12 @@ test_vault_set_configured_writes_private_timestamp_marker :: proc(t: ^testing.T)
 	testing.expect(t, ts_ok, fmt.tprintf("marker must hold only an ISO-8601 timestamp, got %q", content))
 
 	// A second unseal keeps the first-configured timestamp rather than rewriting it.
-	time.sleep(1100 * time.Millisecond)
+	sentinel_ts := "2020-01-01T00:00:00Z\n"
+	_ = os.write_entire_file(path, transmute([]byte)sentinel_ts)
 	testing.expect(t, bridge_vault_set_configured(vault_marker_test_bridge_id(), true), "repeat set_configured(true) must succeed")
 	again, _ := os.read_entire_file(path, context.allocator)
 	defer delete(again)
-	testing.expect_value(t, strings.trim_space(string(again)), content)
+	testing.expect_value(t, strings.trim_space(string(again)), "2020-01-01T00:00:00Z")
 }
 
 @(test)
@@ -266,4 +267,76 @@ test_vault_hub_unseal_frame_persists_marker :: proc(t: ^testing.T) {
 	keystore_lock_and_purge(vault_marker_test_bridge_id())
 	vault_marker_test_simulate_restart()
 	testing.expect_value(t, bridge_vault_status(), Vault_Status.Locked)
+}
+
+@(test)
+test_on_connect_heartbeat_reports_persisted_vault_after_restart :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
+
+	prev_env, had_env := os.lookup_env("HEIMDALL_VAULT_KEY", context.allocator)
+	defer {
+		if had_env {
+			_ = os.set_env("HEIMDALL_VAULT_KEY", prev_env)
+			delete(prev_env)
+		} else {
+			_ = os.unset_env("HEIMDALL_VAULT_KEY")
+		}
+	}
+	os.unset_env("HEIMDALL_VAULT_KEY")
+
+	id_a, _ := keystore_test_bridge_ids()
+	prev_daemon_id := keystore_test_set_daemon_id(id_a)
+	defer bridge_config.daemon_id = prev_daemon_id
+
+	keystore_set_mock_syscall_error(0)
+	keystore_lock_and_purge(id_a)
+	defer keystore_lock_and_purge(id_a)
+
+	ok, err := keystore_store_vault_key(id_a, KEYSTORE_SEC_TEST_KEY_1)
+	testing.expect(t, ok, "store must succeed")
+	testing.expect_value(t, err, 0)
+
+	keystore_wipe_in_memory_vault_key()
+	persisted, persisted_ok := keystore_read_keyring_vault_key(id_a)
+	testing.expect(t, persisted_ok, "the OS store must still hold the key after the memory wipe")
+	defer if persisted_ok do delete(persisted)
+	testing.expect_value(t, persisted, KEYSTORE_SEC_TEST_KEY_1)
+
+	hb := bridge_hub_heartbeat_json()
+	defer delete(hb)
+	testing.expect(t, strings.contains(hb, "\"vault_status\":\"unlocked\""), "on-connect heartbeat must report the key read back from the OS store")
+
+	keystore_lock_and_purge(id_a)
+	hb_after := bridge_hub_heartbeat_json()
+	defer delete(hb_after)
+	testing.expect(t, !strings.contains(hb_after, "\"vault_status\":\"unlocked\""), "after purge the on-connect heartbeat must not report unlocked")
+}
+
+@(test)
+test_enroll_only_runtime_never_reports_unlocked :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
+
+	prev_env, had_env := os.lookup_env("HEIMDALL_VAULT_KEY", context.allocator)
+	defer {
+		if had_env {
+			_ = os.set_env("HEIMDALL_VAULT_KEY", prev_env)
+			delete(prev_env)
+		} else {
+			_ = os.unset_env("HEIMDALL_VAULT_KEY")
+		}
+	}
+	os.unset_env("HEIMDALL_VAULT_KEY")
+
+	keystore_wipe_in_memory_vault_key()
+	defer keystore_wipe_in_memory_vault_key()
+	testing.expect(t, keystore_store_in_memory_vault_key(KEYSTORE_SEC_TEST_KEY_1), "in-memory store must succeed")
+
+	testing.expect_value(t, bridge_vault_status_reported(true), Vault_Status.Locked)
+	testing.expect_value(t, bridge_vault_status_reported(false), Vault_Status.Unlocked)
 }

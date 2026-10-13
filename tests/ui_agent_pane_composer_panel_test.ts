@@ -1,156 +1,143 @@
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import React from 'react';
-import { AgentPaneComposerPanel, computeFittedFontSize } from '../src/ui/components/chat/AgentPaneComposerPanel';
-import { computeAgentPanePollingInterval } from '../src/ui/hooks/useAgentPaneSubscription';
-
-console.log('Testing AgentPaneComposerPanel module and export contracts...');
-
-assert.equal(typeof AgentPaneComposerPanel, 'function', 'AgentPaneComposerPanel must be a React function component');
-
-// Test that props shape is well-formed
-const element = React.createElement(AgentPaneComposerPanel, {
-  agentInstanceId: 'inst_test_123',
-  isExpanded: true,
-  isActiveTab: true,
-  runtimeStatus: 'running',
-  onClose: () => {},
-  onToggleExpand: () => {},
-  className: 'custom-class',
-});
-
-assert.ok(element, 'React.createElement with AgentPaneComposerPanel must succeed');
-assert.equal(element.props.agentInstanceId, 'inst_test_123');
-assert.equal(element.props.isExpanded, true);
-assert.equal(element.props.isActiveTab, true);
-assert.equal(element.props.runtimeStatus, 'running');
-
-// Verify polling interval rules for expanded vs collapsed state in composer
-assert.equal(
-  computeAgentPanePollingInterval({
-    agentInstanceId: 'inst_test_123',
-    isExpanded: true,
-    isActiveTab: true,
-    runtimeStatus: 'running',
-    isDocumentHidden: false,
-  }),
-  500,
-  'Composer panel expanded polling interval must be 500ms continuous'
-);
-
-assert.equal(
-  computeAgentPanePollingInterval({
-    agentInstanceId: 'inst_test_123',
-    isExpanded: false,
-    isActiveTab: true,
-    runtimeStatus: 'running',
-    isDocumentHidden: false,
-  }),
-  300000,
-  'Composer panel collapsed polling interval must be 5m (300000ms)'
-);
-
-assert.equal(
-  computeAgentPanePollingInterval({
-    agentInstanceId: 'inst_test_123',
-    isExpanded: true,
-    isActiveTab: false,
-    runtimeStatus: 'running',
-  }),
-  0,
-  'Inactive tab must pause polling (0ms)'
-);
-
-assert.equal(
-  computeAgentPanePollingInterval({
-    agentInstanceId: 'inst_test_123',
-    isExpanded: true,
-    isActiveTab: true,
-    runtimeStatus: 'stopped',
-  }),
-  0,
-  'Stopped agent runtime must pause polling (0ms)'
-);
-
-// REQ-INT-3: Interactive Terminal Integration & ANSI Color Support
-// REQ-WINSIZE-3: Terminal render window dimensions and viewport resize synchronization
-import { agentsApi, useSendAgentPaneInputMutation, useSendAgentPaneResizeMutation } from '../src/ui/api/endpoints/agents';
 import * as xtermModule from '@xterm/xterm';
 import * as fitAddonModule from '@xterm/addon-fit';
+import './helpers/vaultEndpointHarness.ts';
 
-console.log('Testing REQ-INT-3: sendAgentPaneInput API endpoint & hook...');
-assert.equal(typeof useSendAgentPaneInputMutation, 'function', 'useSendAgentPaneInputMutation hook must be exported');
-assert.ok(agentsApi.endpoints.sendAgentPaneInput, 'sendAgentPaneInput endpoint must exist on agentsApi');
+test('AgentPaneComposerPanel module, polling intervals, and xterm terminal contracts', async () => {
+  const { AgentPaneComposerPanel, computeFittedFontSize } = await import('../src/ui/components/chat/AgentPaneComposerPanel.tsx');
+  const { computeAgentPanePollingInterval } = await import('../src/ui/hooks/useAgentPaneSubscription.ts');
+  const { agentsApi, useSendAgentPaneInputMutation, useSendAgentPaneResizeMutation } = await import('../src/ui/api/endpoints/agents.ts');
 
-console.log('Testing REQ-WINSIZE-3: sendAgentPaneResize API endpoint & hook...');
-assert.equal(typeof useSendAgentPaneResizeMutation, 'function', 'useSendAgentPaneResizeMutation hook must be exported');
-assert.ok(agentsApi.endpoints.sendAgentPaneResize, 'sendAgentPaneResize endpoint must exist on agentsApi');
-assert.equal(typeof agentsApi.endpoints.sendAgentPaneResize.initiate, 'function', 'sendAgentPaneResize must have initiate function');
+  assert.equal(typeof AgentPaneComposerPanel, 'function', 'AgentPaneComposerPanel must be a React function component');
 
-console.log('Testing REQ-INT-3 & REQ-WINSIZE-3: @xterm/xterm Terminal & ANSI color rendering...');
-const TerminalClass = (xtermModule.Terminal || (xtermModule as any).default?.Terminal || (xtermModule as any).default);
-const FitAddonClass = (fitAddonModule.FitAddon || (fitAddonModule as any).default?.FitAddon || (fitAddonModule as any).default);
+  const element = React.createElement(AgentPaneComposerPanel, {
+    agentInstanceId: 'inst_test_123',
+    isExpanded: true,
+    isActiveTab: true,
+    runtimeStatus: 'running',
+    onClose: () => {},
+    onToggleExpand: () => {},
+    className: 'custom-class',
+  });
 
-assert.equal(typeof TerminalClass, 'function', 'Terminal must be available from @xterm/xterm');
-assert.equal(typeof FitAddonClass, 'function', 'FitAddon must be available from @xterm/addon-fit');
+  assert.ok(element, 'React.createElement with AgentPaneComposerPanel must succeed');
+  assert.equal(element.props.agentInstanceId, 'inst_test_123');
+  assert.equal(element.props.isExpanded, true);
+  assert.equal(element.props.isActiveTab, true);
+  assert.equal(element.props.runtimeStatus, 'running');
 
-const testTerminal = new TerminalClass({
-  convertEol: true,
-  cursorBlink: false,
-  cursorInactiveStyle: 'none',
+  assert.equal(
+    computeAgentPanePollingInterval({
+      agentInstanceId: 'inst_test_123',
+      isExpanded: true,
+      isActiveTab: true,
+      runtimeStatus: 'running',
+      isDocumentHidden: false,
+    }),
+    500,
+    'Composer panel expanded polling interval must be 500ms continuous'
+  );
+
+  assert.equal(
+    computeAgentPanePollingInterval({
+      agentInstanceId: 'inst_test_123',
+      isExpanded: false,
+      isActiveTab: true,
+      runtimeStatus: 'running',
+      isDocumentHidden: false,
+    }),
+    300000,
+    'Composer panel collapsed polling interval must be 5m (300000ms)'
+  );
+
+  assert.equal(
+    computeAgentPanePollingInterval({
+      agentInstanceId: 'inst_test_123',
+      isExpanded: true,
+      isActiveTab: false,
+      runtimeStatus: 'running',
+    }),
+    0,
+    'Inactive tab must pause polling (0ms)'
+  );
+
+  assert.equal(
+    computeAgentPanePollingInterval({
+      agentInstanceId: 'inst_test_123',
+      isExpanded: true,
+      isActiveTab: true,
+      runtimeStatus: 'stopped',
+    }),
+    0,
+    'Stopped agent runtime must pause polling (0ms)'
+  );
+
+  assert.equal(typeof useSendAgentPaneInputMutation, 'function', 'useSendAgentPaneInputMutation hook must be exported');
+  assert.ok(agentsApi.endpoints.sendAgentPaneInput, 'sendAgentPaneInput endpoint must exist on agentsApi');
+
+  assert.equal(typeof useSendAgentPaneResizeMutation, 'function', 'useSendAgentPaneResizeMutation hook must be exported');
+  assert.ok(agentsApi.endpoints.sendAgentPaneResize, 'sendAgentPaneResize endpoint must exist on agentsApi');
+  assert.equal(typeof agentsApi.endpoints.sendAgentPaneResize.initiate, 'function', 'sendAgentPaneResize must have initiate function');
+
+  const TerminalClass = (xtermModule.Terminal || (xtermModule as any).default?.Terminal || (xtermModule as any).default);
+  const FitAddonClass = (fitAddonModule.FitAddon || (fitAddonModule as any).default?.FitAddon || (fitAddonModule as any).default);
+
+  assert.equal(typeof TerminalClass, 'function', 'Terminal must be available from @xterm/xterm');
+  assert.equal(typeof FitAddonClass, 'function', 'FitAddon must be available from @xterm/addon-fit');
+
+  const testTerminal = new TerminalClass({
+    convertEol: true,
+    cursorBlink: false,
+    cursorInactiveStyle: 'none',
+  });
+  const testFit = new FitAddonClass();
+  testTerminal.loadAddon(testFit);
+
+  assert.equal(testTerminal.options.cursorBlink, false, 'Terminal cursorBlink must be disabled');
+  assert.equal(testTerminal.options.cursorInactiveStyle, 'none', 'Terminal cursorInactiveStyle must be none');
+
+  const ansiColorString = '\x1b[31mRed\x1b[0m \x1b[32mGreen\x1b[0m \x1b[1;34mBold Blue\x1b[0m \x1b[38;2;255;100;50mRGB\x1b[0m\n';
+  testTerminal.write(ansiColorString);
+
+  let capturedInput = '';
+  const disposable = testTerminal.onData((data: string) => {
+    capturedInput = data;
+  });
+
+  testTerminal.input('ls -la\r');
+  assert.equal(capturedInput, 'ls -la\r', 'Terminal onData must capture input keystrokes');
+  disposable.dispose();
+
+  let capturedResize: { cols: number; rows: number } | null = null;
+  const resizeDisposable = testTerminal.onResize((e: { cols: number; rows: number }) => {
+    capturedResize = { cols: e.cols, rows: e.rows };
+  });
+
+  testTerminal.resize(110, 25);
+  assert.deepEqual(capturedResize, { cols: 110, rows: 25 }, 'Terminal onResize must fire with new cols and rows');
+  assert.equal(testTerminal.cols, 110, 'Terminal cols must update to 110');
+  assert.equal(testTerminal.rows, 25, 'Terminal rows must update to 25');
+  resizeDisposable.dispose();
+
+  assert.equal(typeof testTerminal.scrollToBottom, 'function', 'Terminal must support scrollToBottom');
+  testTerminal.scrollToBottom();
+  testTerminal.dispose();
+
+  assert.equal(typeof computeFittedFontSize, 'function', 'computeFittedFontSize must be exported');
+  assert.equal(computeFittedFontSize(600), 12, 'Desktop width (600px) must retain default 12px font');
+  assert.equal(computeFittedFontSize(500), 12, '500px boundary must retain default 12px font');
+
+  const font360 = computeFittedFontSize(360);
+  const font390 = computeFittedFontSize(390);
+  const font480 = computeFittedFontSize(480);
+
+  assert.ok(font360 >= 6 && font360 <= 12, '360px font size must be within 6-12');
+  assert.ok(font390 >= 6 && font390 <= 12, '390px font size must be within 6-12');
+  assert.ok(font480 >= 6 && font480 <= 12, '480px font size must be within 6-12');
+
+  assert.ok(80 * (font360 * 0.6) <= 360 - 16, '80 columns must fit within 360px container');
+  assert.ok(80 * (font390 * 0.6) <= 390 - 16, '80 columns must fit within 390px container');
+  assert.ok(80 * (font480 * 0.6) <= 480 - 16, '80 columns must fit within 480px container');
 });
-const testFit = new FitAddonClass();
-testTerminal.loadAddon(testFit);
-
-assert.equal(testTerminal.options.cursorBlink, false, 'Terminal cursorBlink must be disabled');
-assert.equal(testTerminal.options.cursorInactiveStyle, 'none', 'Terminal cursorInactiveStyle must be none');
-
-// Verify ANSI color test strings writing
-const ansiColorString = '\x1b[31mRed\x1b[0m \x1b[32mGreen\x1b[0m \x1b[1;34mBold Blue\x1b[0m \x1b[38;2;255;100;50mRGB\x1b[0m\n';
-testTerminal.write(ansiColorString);
-
-// Verify keystroke dispatch hook
-let capturedInput = '';
-const disposable = testTerminal.onData((data: string) => {
-  capturedInput = data;
-});
-
-testTerminal.input('ls -la\r');
-assert.equal(capturedInput, 'ls -la\r', 'Terminal onData must capture input keystrokes');
-disposable.dispose();
-
-// Verify terminal onResize listener and dimension updates (REQ-WINSIZE-3)
-let capturedResize: { cols: number; rows: number } | null = null;
-const resizeDisposable = testTerminal.onResize((e: { cols: number; rows: number }) => {
-  capturedResize = { cols: e.cols, rows: e.rows };
-});
-
-testTerminal.resize(110, 25);
-assert.deepEqual(capturedResize, { cols: 110, rows: 25 }, 'Terminal onResize must fire with new cols and rows');
-assert.equal(testTerminal.cols, 110, 'Terminal cols must update to 110');
-assert.equal(testTerminal.rows, 25, 'Terminal rows must update to 25');
-resizeDisposable.dispose();
-
-// Verify auto-scroll to bottom
-assert.equal(typeof testTerminal.scrollToBottom, 'function', 'Terminal must support scrollToBottom');
-testTerminal.scrollToBottom();
-
-// REQ-PANE-MOBILE-1 & REQ-PANE-MOBILE-2: Compact mobile height & 80-column auto-fit scaling
-console.log('Testing REQ-PANE-MOBILE-2: computeFittedFontSize and 80-column mobile auto-fit...');
-assert.equal(typeof computeFittedFontSize, 'function', 'computeFittedFontSize must be exported');
-assert.equal(computeFittedFontSize(600), 12, 'Desktop width (600px) must retain default 12px font');
-assert.equal(computeFittedFontSize(500), 12, '500px boundary must retain default 12px font');
-
-const font360 = computeFittedFontSize(360);
-const font390 = computeFittedFontSize(390);
-const font480 = computeFittedFontSize(480);
-
-assert.ok(font360 >= 6 && font360 <= 12, '360px font size must be within 6-12');
-assert.ok(font390 >= 6 && font390 <= 12, '390px font size must be within 6-12');
-assert.ok(font480 >= 6 && font480 <= 12, '480px font size must be within 6-12');
-
-// Monospace aspect ratio ~0.6; available width = containerWidth - 16px (p-2 padding)
-assert.ok(80 * (font360 * 0.6) <= 360 - 16, '80 columns must fit within 360px container');
-assert.ok(80 * (font390 * 0.6) <= 390 - 16, '80 columns must fit within 390px container');
-assert.ok(80 * (font480 * 0.6) <= 480 - 16, '80 columns must fit within 480px container');
-
-console.log('ALL COMPOSER PANEL & INTERACTIVE TERMINAL TESTS PASSED (REQ-PANE-4, REQ-PANE-5, REQ-INT-3, REQ-WINSIZE-3, REQ-PANE-MOBILE-1, REQ-PANE-MOBILE-2)');

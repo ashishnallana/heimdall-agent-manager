@@ -12,6 +12,7 @@
 package hub_fts_repair_test
 
 import "core:fmt"
+import "core:testing"
 import "core:os"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
@@ -33,6 +34,12 @@ tasks_index_drifted :: proc(conn: ^sqlite.Conn) -> bool {
 	drift, known := sqlite.fts_index_has_drift(conn, sqlite.Fts_Index{base = "tasks", fts = "tasks_fts"})
 	check(known, "drift must be determinable for tasks_fts (docsize shadow present)")
 	return drift
+}
+
+@(test)
+test_hub_fts_repair_test :: proc(t: ^testing.T) {
+	_ = t
+	main()
 }
 
 main :: proc() {

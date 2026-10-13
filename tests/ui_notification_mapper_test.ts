@@ -1,7 +1,8 @@
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-// The mapper is pure (no DOM). Import it directly.
-const { notificationForWsEvent } = await import('../src/ui/api/notificationMapper.ts');
+test('notificationForWsEvent maps curated notify events and excludes receipts/invalidations', async () => {
+  const { notificationForWsEvent } = await import('../src/ui/api/notificationMapper.ts');
 
 // --- Curated NOTIFY cases -------------------------------------------------
 
@@ -191,5 +192,4 @@ for (const type of [
 assert.equal(notificationForWsEvent({ type: 'totally_unknown' }), null);
 assert.equal(notificationForWsEvent({}), null);
 assert.equal(notificationForWsEvent(null as any), null);
-
-console.log('ui_notification_mapper_test: ok');
+});

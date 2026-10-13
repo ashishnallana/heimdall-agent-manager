@@ -3,8 +3,15 @@ package hub_actions_repo_test
 import "core:fmt"
 import "core:os"
 import "core:strings"
+import "core:testing"
 import domain "odin_test:hub/domain"
 import sqlite "odin_test:hub/repository/sqlite"
+
+@(test)
+test_hub_actions_repo :: proc(t: ^testing.T) {
+	_ = t
+	main()
+}
 
 check :: proc(ok: bool, msg: string) {
 	if ok do return
@@ -175,6 +182,7 @@ main :: proc() {
 	check(sqlite.exec(&conn_mig, sqlite.MIGRATION_023_ACTIONS), "mig 023")
 	check(sqlite.exec(&conn_mig, sqlite.MIGRATION_036_ACTION_TARGETS), "mig 036")
 	check(sqlite.exec(&conn_mig, sqlite.MIGRATION_038_ACTION_INSTANCE_STRATEGY), "mig 038")
+	check(sqlite.upgrade_actions_schema(&conn_mig), "upgrade_actions_schema on migrated db")
 
 	repo_mig_impl: sqlite.Action_Repo_SQLite
 	repo_mig := sqlite.new_action_repository(&repo_mig_impl, &conn_mig)

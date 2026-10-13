@@ -16,7 +16,14 @@ package taskchain_grouping_test
 import "core:fmt"
 import "core:os"
 import "core:strings"
+import "core:testing"
 import http "odin_test:hub/transport/http"
+
+@(test)
+test_taskchain_grouping :: proc(t: ^testing.T) {
+	_ = t
+	main()
+}
 
 mk :: proc(chain_id, updated_at, project_id, project_name: string) -> http.Chain_List_Item {
 	return http.Chain_List_Item{

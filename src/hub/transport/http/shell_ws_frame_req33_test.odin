@@ -108,7 +108,7 @@ split_text_frames :: proc(raw: []byte) -> (payloads: [dynamic]string, ok: bool) 
 // length as fatal), but the refusal must now be reported rather than silent, and it
 // must leave the socket clean — NOT half a frame.
 @(test)
-req33_control_writer_refuses_oversize_and_writes_nothing :: proc(t: ^testing.T) {
+test_req33_control_writer_refuses_oversize_and_writes_nothing :: proc(t: ^testing.T) {
 	pair := make_pair(t)
 	defer close_pair(&pair)
 	big := strings.repeat("y", ws.WS_16BIT_MAX_PAYLOAD + 1)
@@ -128,7 +128,7 @@ req33_control_writer_refuses_oversize_and_writes_nothing :: proc(t: ^testing.T) 
 // The browser writer gets the 64-bit arm, and reports the typed result so its callers
 // can tell "could not encode" from "peer is gone".
 @(test)
-req33_browser_writer_sends_over_65535 :: proc(t: ^testing.T) {
+test_req33_browser_writer_sends_over_65535 :: proc(t: ^testing.T) {
 	pair := make_pair(t)
 	defer close_pair(&pair)
 	big := strings.repeat("z", 80_000)
@@ -163,7 +163,7 @@ wide_pane_reply :: proc(rows, cols: int) -> string {
 // dropped on a `false` nobody inspected, and paint NOTHING — a blank pane on switch.
 // It must now arrive, in ordered chunks, byte-identical to the one-shot repaint.
 @(test)
-req33_wide_snapshot_paints_in_ordered_chunks :: proc(t: ^testing.T) {
+test_req33_wide_snapshot_paints_in_ordered_chunks :: proc(t: ^testing.T) {
 	pair := make_pair(t)
 	defer close_pair(&pair)
 
@@ -213,7 +213,7 @@ req33_wide_snapshot_paints_in_ordered_chunks :: proc(t: ^testing.T) {
 
 // A pane that fits is still one frame: chunking must not change the common case.
 @(test)
-req33_small_snapshot_is_still_one_frame :: proc(t: ^testing.T) {
+test_req33_small_snapshot_is_still_one_frame :: proc(t: ^testing.T) {
 	pair := make_pair(t)
 	defer close_pair(&pair)
 	testing.expect(t, _shell_stream_write_screen_frame(nil, "", pair.hub, "{\"output\":\"hello\\nworld\"}"))
@@ -229,7 +229,7 @@ req33_small_snapshot_is_still_one_frame :: proc(t: ^testing.T) {
 // multi-byte rune, and it must always advance — a boundary search that returns `start`
 // would spin forever on a row longer than the budget.
 @(test)
-req33_chunk_end_prefers_a_row_boundary_and_always_advances :: proc(t: ^testing.T) {
+test_req33_chunk_end_prefers_a_row_boundary_and_always_advances :: proc(t: ^testing.T) {
 	rows := strings.repeat("abcdefghi\n", SHELL_SCREEN_CHUNK_DECODED_BYTES / 10 + 16)
 	defer delete(rows)
 	end := _shell_screen_chunk_end(rows, 0)
@@ -275,7 +275,7 @@ hammer_output :: proc(raw: rawptr) {
 }
 
 @(test)
-req33_output_cannot_interleave_with_a_chunked_snapshot :: proc(t: ^testing.T) {
+test_req33_output_cannot_interleave_with_a_chunked_snapshot :: proc(t: ^testing.T) {
 	pair := make_pair(t)
 	defer close_pair(&pair)
 

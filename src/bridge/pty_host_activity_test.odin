@@ -126,3 +126,32 @@ bridge_activity_screen_to_text_joins_lines :: proc(t: ^testing.T) {
 	defer delete(txt)
 	testing.expect_value(t, txt, "line1\n\nline3")
 }
+
+// ---- bridge_runtime_normalize_activity_status (REQ-4) ----
+
+@(test)
+activity_normalize_waiting_user_is_idle :: proc(t: ^testing.T) {
+	testing.expect(t, bridge_runtime_normalize_activity_status("waiting_user") == "idle",
+		"waiting_user must project to idle, not active (blocked-on-user agent is not working)")
+	testing.expect(t, bridge_runtime_normalize_activity_status("waiting") == "idle",
+		"waiting must project to idle")
+	testing.expect(t, bridge_runtime_normalize_activity_status("waiting_approval") == "idle",
+		"waiting_approval must project to idle")
+	testing.expect(t, bridge_runtime_normalize_activity_status("  Waiting_User  ") == "idle",
+		"normalization must be case- and whitespace-insensitive")
+}
+
+@(test)
+activity_normalize_active_signals_unchanged :: proc(t: ^testing.T) {
+	testing.expect(t, bridge_runtime_normalize_activity_status("active") == "active", "active stays active")
+	testing.expect(t, bridge_runtime_normalize_activity_status("working") == "active", "working maps to active")
+	testing.expect(t, bridge_runtime_normalize_activity_status("busy") == "active", "busy maps to active")
+}
+
+@(test)
+activity_normalize_idle_and_unknown :: proc(t: ^testing.T) {
+	testing.expect(t, bridge_runtime_normalize_activity_status("idle") == "idle", "idle stays idle")
+	testing.expect(t, bridge_runtime_normalize_activity_status("inactive") == "idle", "inactive maps to idle")
+	testing.expect(t, bridge_runtime_normalize_activity_status("unknown") == "unknown", "unknown stays unknown")
+	testing.expect(t, bridge_runtime_normalize_activity_status("") == "unknown", "empty maps to unknown")
+}

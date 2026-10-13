@@ -1,5 +1,6 @@
 package tmux
 
+import "core:fmt"
 import "core:os"
 import "core:strings"
 import "core:testing"
@@ -18,11 +19,14 @@ import "core:time"
 send_named_keys_presses_discrete_keys_not_literal :: proc(t: ^testing.T) {
 	if !tmux_binary_available() do return
 
-	out_named := "/tmp/ham-named-keys-named.txt"
-	out_literal := "/tmp/ham-named-keys-literal.txt"
+	pid := os.get_pid()
+	out_named := fmt.tprintf("/tmp/ham-named-keys-named-%d.txt", pid)
+	out_literal := fmt.tprintf("/tmp/ham-named-keys-literal-%d.txt", pid)
+	defer os.remove(out_named)
+	defer os.remove(out_literal)
 
-	named, named_ok := run_cat_pane_capture("ham-test-nk-named", out_named, "b i r d", true)
-	literal, literal_ok := run_cat_pane_capture("ham-test-nk-literal", out_literal, "b i r d", false)
+	named, named_ok := run_cat_pane_capture(fmt.tprintf("ham-test-nk-named-%d", pid), out_named, "b i r d", true)
+	literal, literal_ok := run_cat_pane_capture(fmt.tprintf("ham-test-nk-literal-%d", pid), out_literal, "b i r d", false)
 
 	testing.expect(t, named_ok, "named cat pane produced output")
 	testing.expect(t, literal_ok, "literal cat pane produced output")
@@ -42,25 +46,38 @@ run_cat_pane_capture :: proc(session, out_file, spec: string, use_named: bool) -
 	state, _, _, err := os.process_exec(os.Process_Desc{command = []string{"tmux", "new-session", "-d", "-s", session, "-n", "w", cmd}}, context.allocator)
 	if err != nil || !state.success do return "", false
 	defer { _, _, _, _ = os.process_exec(os.Process_Desc{command = []string{"tmux", "kill-session", "-t", session}}, context.allocator) }
-	time.sleep(400 * time.Millisecond)
 
-	pane := pane_of(session, "w")
+	pane := ""
+	for _ in 0 ..< 50 {
+		pane = pane_of(session, "w")
+		if pane != "" do break
+		time.sleep(10 * time.Millisecond)
+	}
 	if pane == "" do return "", false
+
+	// Wait briefly until `cat` has opened out_file before sending keys.
+	for _ in 0 ..< 50 {
+		if _, serr := os.stat(out_file, context.temp_allocator); serr == nil do break
+		time.sleep(10 * time.Millisecond)
+	}
 
 	sent := use_named ? send_named_keys(pane, spec, false) : send_text(pane, spec, false)
 	if !sent do return "", false
 
 	// Flush the current line then close cat's stdin (Ctrl-D) so the file is fully
 	// written before we read it.
-	time.sleep(200 * time.Millisecond)
 	_, _, _, _ = os.process_exec(os.Process_Desc{command = []string{"tmux", "send-keys", "-t", pane, "Enter"}}, context.allocator)
-	time.sleep(150 * time.Millisecond)
 	_, _, _, _ = os.process_exec(os.Process_Desc{command = []string{"tmux", "send-keys", "-t", pane, "C-d"}}, context.allocator)
-	time.sleep(300 * time.Millisecond)
 
-	bytes, read_err := os.read_entire_file(out_file, context.allocator)
-	if read_err != nil do return "", false
-	return strings.trim_space(string(bytes)), true
+	for _ in 0 ..< 100 {
+		bytes, read_err := os.read_entire_file(out_file, context.allocator)
+		if read_err == nil && len(bytes) > 0 {
+			return strings.trim_space(string(bytes)), true
+		}
+		if read_err == nil do delete(bytes)
+		time.sleep(10 * time.Millisecond)
+	}
+	return "", false
 }
 
 @(private = "file")

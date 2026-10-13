@@ -4,6 +4,7 @@
 package hub_search_fts_all_test
 
 import "core:fmt"
+import "core:testing"
 import "core:os"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
@@ -16,6 +17,12 @@ check :: proc(ok: bool, msg: string) {
 }
 
 TS :: "2026-01-01T00:00:00Z"
+
+@(test)
+test_hub_search_fts_all_test :: proc(t: ^testing.T) {
+	_ = t
+	main()
+}
 
 main :: proc() {
 	db_path := "/tmp/hub_search_fts_all.db"

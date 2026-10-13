@@ -253,3 +253,188 @@ test_shell_session_spec_zero_tracking_allocator_leaks :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(track.allocation_map), 0)
 	testing.expect_value(t, len(track.bad_free_array), 0)
 }
+
+// ---- REQ-PAGER-1/2/3: non-interactive pager overrides for kind=run ----------
+
+@(test)
+test_shell_run_env_key_values :: proc(t: ^testing.T) {
+	env := bridge_shell_run_env()
+	defer {
+		for kv in env {
+			delete(kv[0])
+			delete(kv[1])
+		}
+		delete(env)
+	}
+
+	testing.expect_value(t, len(env), 3)
+	if len(env) == 3 {
+		testing.expect_value(t, env[0][0], "PAGER")
+		testing.expect_value(t, env[0][1], "cat")
+		testing.expect_value(t, env[1][0], "GIT_PAGER")
+		testing.expect_value(t, env[1][1], "cat")
+		testing.expect_value(t, env[2][0], "SYSTEMD_PAGER")
+		testing.expect_value(t, env[2][1], "cat")
+	}
+}
+
+@(test)
+test_shell_run_env_cleanly_freed_by_spawn_request_delete :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	baseline_allocs := len(track.allocation_map)
+	baseline_bytes := track.current_memory_allocated
+
+	{
+		req := Pty_Host_Spawn_Request{
+			env = bridge_shell_run_env(),
+		}
+		bridge_pty_host_spawn_request_delete(req)
+	}
+
+	testing.expectf(t, len(track.allocation_map) == baseline_allocs,
+		"leak: %d live allocations, expected %d", len(track.allocation_map), baseline_allocs)
+	testing.expectf(t, track.current_memory_allocated == baseline_bytes,
+		"leak: %d live bytes, expected %d", track.current_memory_allocated, baseline_bytes)
+	testing.expect(t, len(track.bad_free_array) == 0, "no bad frees")
+}
+
+@(test)
+test_shell_env_kind_branching :: proc(t: ^testing.T) {
+	run_env := Bridge_Shell_Session_Kind.Run == .Run ? bridge_shell_run_env() : nil
+	testing.expect(t, run_env != nil, "Run env must not be nil")
+	testing.expect_value(t, len(run_env), 3)
+
+	req_run := Pty_Host_Spawn_Request{
+		env = run_env,
+	}
+	bridge_pty_host_spawn_request_delete(req_run)
+
+	shell_env := Bridge_Shell_Session_Kind.Shell == .Run ? bridge_shell_run_env() : nil
+	testing.expect(t, shell_env == nil, "Shell env must remain nil")
+	req_shell := Pty_Host_Spawn_Request{
+		env = shell_env,
+	}
+	bridge_pty_host_spawn_request_delete(req_shell)
+
+	server_env := Bridge_Shell_Session_Kind.Server == .Run ? bridge_shell_run_env() : nil
+	testing.expect(t, server_env == nil, "Server env must remain nil")
+	req_server := Pty_Host_Spawn_Request{
+		env = server_env,
+	}
+	bridge_pty_host_spawn_request_delete(req_server)
+}
+
+// ---- REQ-SHELL-16: shell error result JSON & log formatting -----------------
+
+@(test)
+test_req16_shell_start_error_body_is_unchanged :: proc(t: ^testing.T) {
+	got := bridge_shell_error_result_json("shell_start_result", "sh_1", "cmd_1", "daemon unavailable", "")
+	defer delete(got)
+	testing.expect_value(
+		t,
+		got,
+		`{"type":"shell_start_result","session_id":"sh_1","command_id":"cmd_1","ok":false,"error":"daemon unavailable"}`,
+	)
+}
+
+@(test)
+test_req16_shell_logs_error_body_keeps_its_padding_fields :: proc(t: ^testing.T) {
+	got := bridge_shell_error_result_json(
+		"shell_logs_result", "sh_2", "cmd_2", "session not found",
+		`"lines":[],"truncated":false,"total_lines":0,`,
+	)
+	defer delete(got)
+	testing.expect_value(
+		t,
+		got,
+		`{"type":"shell_logs_result","session_id":"sh_2","command_id":"cmd_2","ok":false,"lines":[],"truncated":false,"total_lines":0,"error":"session not found"}`,
+	)
+}
+
+@(test)
+test_req16_shell_capture_error_body_keeps_its_padding_fields :: proc(t: ^testing.T) {
+	got := bridge_shell_error_result_json(
+		"shell_capture_result", "sh_3", "cmd_3", "capture failed",
+		`"content":"","rows":0,"cols":0,`,
+	)
+	defer delete(got)
+	testing.expect_value(
+		t,
+		got,
+		`{"type":"shell_capture_result","session_id":"sh_3","command_id":"cmd_3","ok":false,"content":"","rows":0,"cols":0,"error":"capture failed"}`,
+	)
+}
+
+@(test)
+test_req16_error_reason_is_json_escaped :: proc(t: ^testing.T) {
+	got := bridge_shell_error_result_json(
+		"shell_start_result", "sh_4", "cmd_4", `spawn failed: "/bin/sh" \ exited`, "",
+	)
+	defer delete(got)
+	testing.expect(
+		t,
+		strings.contains(got, `\"/bin/sh\"`),
+		"an embedded quote in the reason must be escaped, not emitted raw",
+	)
+	testing.expect(
+		t,
+		!strings.contains(got, `: "/bin/sh"`),
+		"the raw unescaped form must not appear",
+	)
+}
+
+@(test)
+test_req16_error_log_line_names_the_reason_and_both_ids :: proc(t: ^testing.T) {
+	got := bridge_shell_error_log_line("shell_start_result", "sh_5", "cmd_5", "daemon unavailable")
+	defer delete(got)
+	testing.expect_value(
+		t,
+		got,
+		"bridge shell: rejected shell_start_result session_id=sh_5 command_id=cmd_5 reason=daemon unavailable",
+	)
+}
+
+@(test)
+test_req16_handler_rejects_a_missing_session_id :: proc(t: ^testing.T) {
+	bridge_hub_handle_shell_start(nil, `{"type":"shell_start","command_id":"cmd_ac1a","kind":"run","cmd":"echo hi"}`)
+	testing.expect(t, true, "handler returned without a connection or a daemon")
+}
+
+@(test)
+test_req16_handler_rejects_a_missing_cmd :: proc(t: ^testing.T) {
+	bridge_hub_handle_shell_start(nil, `{"type":"shell_start","session_id":"sh_ac1b","command_id":"cmd_ac1b","kind":"run"}`)
+	testing.expect(t, true, "handler returned without a connection or a daemon")
+}
+
+// ---- REQ-SHELL-1 §8: authoritative started_at clock -------------------------
+
+@(test)
+test_bridge_shell_started_at_prefers_the_hub_clock :: proc(t: ^testing.T) {
+	hub   := "2026-09-28T08:00:00Z"
+	local := "2026-09-28T08:00:00Z"
+	testing.expect_value(t, bridge_shell_authoritative_started_at(hub, local), hub)
+}
+
+@(test)
+test_bridge_shell_skewed_local_clock_does_not_change_started_at :: proc(t: ^testing.T) {
+	hub := "2026-09-28T08:00:00Z"
+	skews := []string{
+		"2026-09-28T02:13:44Z",
+		"2026-09-28T19:47:02Z",
+		"2026-09-27T08:00:00Z",
+		"2026-09-29T08:00:00Z",
+	}
+	for skewed in skews {
+		testing.expect_value(t, bridge_shell_authoritative_started_at(hub, skewed), hub)
+	}
+}
+
+@(test)
+test_bridge_shell_started_at_falls_back_only_when_hub_sent_none :: proc(t: ^testing.T) {
+	local := "2026-09-28T08:00:00Z"
+	testing.expect_value(t, bridge_shell_authoritative_started_at("", local), local)
+}

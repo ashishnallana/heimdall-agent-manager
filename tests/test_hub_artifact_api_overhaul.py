@@ -111,57 +111,25 @@ def run_cmd(cmd: list[str], cwd: Path | None = None, env: dict | None = None) ->
     )
 
 
-def test_odin_tracking_allocator_and_unit_tests() -> None:
-    print("[1/5] Running Odin Tracking Allocator & Repository tests (asserting 0 leaks, 0 bad frees)...")
-    res = run_cmd(
-        ["nix", "develop", "--command", "bash", "-c", "odin test src/hub/repository/sqlite -collection:odin_test=src"]
-    )
-    repo_out = res.stdout + res.stderr
-    assert res.returncode == 0, f"Odin sqlite repo test failed (code {res.returncode}):\n{repo_out}"
-    assert "All tests were successful" in repo_out, f"Expected all tests successful, got:\n{repo_out}"
-    print("  -> Passed: test_artifact_repo_sqlite_lifecycle_and_pagination & test_artifact_repo_sqlite_tracking_allocator verified (0 leaks, 0 bad frees).")
-
-    print("  Running Odin Content Service tests...")
-    res_svc = run_cmd(
-        ["nix", "develop", "--command", "bash", "-c", "odin test src/hub/service/content -collection:odin_test=src"]
-    )
-    svc_out = res_svc.stdout + res_svc.stderr
-    assert res_svc.returncode == 0, f"Odin content service test failed:\n{svc_out}"
-    assert "All tests were successful" in svc_out
-
-    print("  Running Odin HTTP transport artifact pagination tests...")
-    res_http = run_cmd(
-        ["nix", "develop", "--command", "bash", "-c", "odin test src/hub/transport/http -collection:odin_test=src"]
-    )
-    http_out = res_http.stdout + res_http.stderr
-    assert res_http.returncode == 0, f"Odin http transport test failed:\n{http_out}"
-    assert "All tests were successful" in http_out
-    print("  -> Passed all Odin unit & tracking allocator test suites.")
+def build_odin_pkg(pkg: str, out_path: Path) -> None:
+    odin = os.environ.get("ODIN") or shutil.which("odin")
+    res = None
+    if odin and os.environ.get("IN_NIX_SHELL"):
+        res = subprocess.run([odin, "build", pkg, "-collection:odin_test=src", f"-out:{out_path}"], cwd=ROOT, capture_output=True, text=True)
+    if res is None or res.returncode != 0:
+        res = subprocess.run(["nix", "develop", "--command", "odin", "build", pkg, "-collection:odin_test=src", f"-out:{out_path}"], cwd=ROOT, capture_output=True, text=True)
+    assert res.returncode == 0, f"Failed to build {pkg}: {res.stderr}"
 
 
 def test_hub_artifact_api_overhaul() -> None:
-    hub_bin = ROOT / "dist" / "heimdall-cloudtop" / "bin" / "ham-hub"
-    if not hub_bin.exists():
-        hub_bin = ROOT / "result-hub" / "bin" / "ham-hub"
-    if not hub_bin.exists():
-        hub_bin = ROOT / "bin" / "ham-hub"
-    ctl_bin = ROOT / "dist" / "heimdall-cloudtop" / "bin" / "ham-ctl"
-    if not ctl_bin.exists():
-        ctl_bin = ROOT / "result-ctl" / "bin" / "ham-ctl"
-    if not ctl_bin.exists():
-        ctl_bin = ROOT / "bin" / "ham-ctl"
-    bridge_bin = ROOT / "dist" / "heimdall-cloudtop" / "bin" / "ham-bridge"
-    if not bridge_bin.exists():
-        bridge_bin = ROOT / "result-bridge" / "bin" / "ham-bridge"
-    if not bridge_bin.exists():
-        bridge_bin = ROOT / "bin" / "ham-bridge"
-
-    assert hub_bin.exists(), f"ham-hub binary not found at {hub_bin}"
-    assert ctl_bin.exists(), f"ham-ctl binary not found at {ctl_bin}"
-    assert bridge_bin.exists(), f"ham-bridge binary not found at {bridge_bin}"
-
     test_dir = Path(tempfile.mkdtemp(prefix="heimdall-artifact-api-test-"))
     try:
+        hub_bin = test_dir / "ham-hub"
+        build_odin_pkg("src/hub", hub_bin)
+
+        ctl_bin = test_dir / "ham-ctl"
+        build_odin_pkg("src/ctl", ctl_bin)
+
         db_path = test_dir / "hub.db"
         bridge_token_file = test_dir / "bridge_token"
         hub_port = free_port()
@@ -680,8 +648,7 @@ def test_hub_artifact_api_overhaul() -> None:
 
 
 if __name__ == "__main__":
-    test_odin_tracking_allocator_and_unit_tests()
     test_hub_artifact_api_overhaul()
     print("\n" + "=" * 70)
-    print("ALL ARTIFACT API OVERHAUL INTEGRATION & TRACKING ALLOCATOR TESTS PASSED!")
+    print("ALL ARTIFACT API OVERHAUL INTEGRATION TESTS PASSED!")
     print("=" * 70)

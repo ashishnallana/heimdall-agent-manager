@@ -104,95 +104,110 @@ def check_html_shape(html: str) -> None:
     print("PASS: HTML shape (single doc, inline CSS/JS, no external deps, API hooks, loopback note, XSS-safe)")
 
 
+def ensure_proxy_bin(temp_dir: Path) -> Path:
+    import shutil
+    env_bin = os.environ.get("HAM_DEV_PROXY_BIN")
+    if env_bin and Path(env_bin).exists():
+        return Path(env_bin)
+    out_bin = temp_dir / "ham-dev-proxy"
+    odin = os.environ.get("ODIN") or shutil.which("odin")
+    if odin:
+        subprocess.run([odin, "build", "src/dev_proxy", "-collection:odin_test=src", f"-out:{out_bin}"], cwd=ROOT, check=True)
+    else:
+        subprocess.run(["nix", "develop", "--command", "odin", "build", "src/dev_proxy", "-collection:odin_test=src", f"-out:{out_bin}"], cwd=ROOT, check=True)
+    return out_bin
+
+
 def main() -> None:
+    import shutil
     import tempfile
 
-    proxy_bin = Path(os.environ.get("HAM_DEV_PROXY_BIN", "/tmp/ham-dev-proxy"))
-    if not proxy_bin.exists():
-        raise SystemExit(f"missing HAM_DEV_PROXY_BIN: {proxy_bin}")
-
     testhome = Path(tempfile.mkdtemp())
-    hub_port = free_port()
-    proxy_port = free_port()
-    hub = http.server.ThreadingHTTPServer(("127.0.0.1", hub_port), HubHandler)
-    threading.Thread(target=hub.serve_forever, daemon=True).start()
-
-    proc = start_proxy(str(proxy_bin), f"127.0.0.1:{proxy_port}", hub_port, str(testhome))
     try:
-        wait_for_proxy(proc, proxy_port)
-        base = f"http://127.0.0.1:{proxy_port}"
+        proxy_bin = ensure_proxy_bin(testhome)
+        hub_port = free_port()
+        proxy_port = free_port()
+        hub = http.server.ThreadingHTTPServer(("127.0.0.1", hub_port), HubHandler)
+        threading.Thread(target=hub.serve_forever, daemon=True).start()
 
-        # AC1 (DP-4): GET /_dev/ returns the self-contained HTML doc.
-        with urllib.request.urlopen(f"{base}/_dev/", timeout=5) as resp:
-            assert resp.status == 200, f"/_dev/ should be 200, got {resp.status}"
-            ctype = resp.headers.get("Content-Type", "")
-            assert ctype.startswith("text/html"), f"content-type should be text/html, got {ctype}"
-            html = resp.read().decode()
-        check_html_shape(html)
+        proc = start_proxy(str(proxy_bin), f"127.0.0.1:{proxy_port}", hub_port, str(testhome))
+        try:
+            wait_for_proxy(proc, proxy_port)
+            base = f"http://127.0.0.1:{proxy_port}"
 
-        # /_dev/ui alias serves the same doc.
-        with urllib.request.urlopen(f"{base}/_dev/ui", timeout=5) as resp:
-            assert resp.status == 200
+            # AC1 (DP-4): GET /_dev/ returns the self-contained HTML doc.
+            with urllib.request.urlopen(f"{base}/_dev/", timeout=5) as resp:
+                assert resp.status == 200, f"/_dev/ should be 200, got {resp.status}"
+                ctype = resp.headers.get("Content-Type", "")
+                assert ctype.startswith("text/html"), f"content-type should be text/html, got {ctype}"
+                html = resp.read().decode()
+            check_html_shape(html)
 
-        # AC3 (DP-4): the create-form target adds a user the list returns.
-        data = json.dumps({"username": "erin", "display_name": "Erin", "email": "erin@example.com"}).encode()
-        req = urllib.request.Request(f"{base}/_dev/api/users", data=data, method="POST",
-                                     headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            assert resp.status == 201, f"create should be 201, got {resp.status}"
-        with urllib.request.urlopen(f"{base}/_dev/api/users", timeout=5) as resp:
-            roster = json.loads(resp.read())
-        assert "erin" in [u["username"] for u in roster["users"]], "erin should appear after create"
+            # /_dev/ui alias serves the same doc.
+            with urllib.request.urlopen(f"{base}/_dev/ui", timeout=5) as resp:
+                assert resp.status == 200
 
-        # AC2 (DP-3): [Use] target sets active; proxied /api/v1 reflects erin.
-        data = json.dumps({"username": "erin"}).encode()
-        req = urllib.request.Request(f"{base}/_dev/api/active", data=data, method="POST",
-                                     headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            assert resp.status == 200
-            assert "ham_dev_user=erin" in resp.headers.get("Set-Cookie", ""), "active should set ham_dev_user cookie"
-        with urllib.request.urlopen(f"{base}/api/v1/me", timeout=5) as resp:
-            fwd = json.loads(resp.read())
-        h = {k.lower(): v for k, v in fwd["headers"].items()}
-        assert h.get("x-authentik-username") == "erin", f"proxied request should be erin; got {h}"
-        assert h.get("x-authentik-email") == "erin@example.com", f"proxied email mismatch: {h}"
+            # AC3 (DP-4): the create-form target adds a user the list returns.
+            data = json.dumps({"username": "erin", "display_name": "Erin", "email": "erin@example.com"}).encode()
+            req = urllib.request.Request(f"{base}/_dev/api/users", data=data, method="POST",
+                                         headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                assert resp.status == 201, f"create should be 201, got {resp.status}"
+            with urllib.request.urlopen(f"{base}/_dev/api/users", timeout=5) as resp:
+                roster = json.loads(resp.read())
+            assert "erin" in [u["username"] for u in roster["users"]], "erin should appear after create"
 
-        # AC3 (DP-4): [Delete] target removes the user.
-        req = urllib.request.Request(f"{base}/_dev/api/users/erin", method="DELETE")
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            assert resp.status in (200, 204), f"delete should be 204, got {resp.status}"
-        with urllib.request.urlopen(f"{base}/_dev/api/users", timeout=5) as resp:
-            roster = json.loads(resp.read())
-        assert "erin" not in [u["username"] for u in roster["users"]], "erin should be gone after delete"
-        print("PASS: UI-backed API flow create/select(proxied identity)/delete (DP-3/DP-4)")
+            # AC2 (DP-3): [Use] target sets active; proxied /api/v1 reflects erin.
+            data = json.dumps({"username": "erin"}).encode()
+            req = urllib.request.Request(f"{base}/_dev/api/active", data=data, method="POST",
+                                         headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                assert resp.status == 200
+                assert "ham_dev_user=erin" in resp.headers.get("Set-Cookie", ""), "active should set ham_dev_user cookie"
+            with urllib.request.urlopen(f"{base}/api/v1/me", timeout=5) as resp:
+                fwd = json.loads(resp.read())
+            h = {k.lower(): v for k, v in fwd["headers"].items()}
+            assert h.get("x-authentik-username") == "erin", f"proxied request should be erin; got {h}"
+            assert h.get("x-authentik-email") == "erin@example.com", f"proxied email mismatch: {h}"
+
+            # AC3 (DP-4): [Delete] target removes the user.
+            req = urllib.request.Request(f"{base}/_dev/api/users/erin", method="DELETE")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                assert resp.status in (200, 204), f"delete should be 204, got {resp.status}"
+            with urllib.request.urlopen(f"{base}/_dev/api/users", timeout=5) as resp:
+                roster = json.loads(resp.read())
+            assert "erin" not in [u["username"] for u in roster["users"]], "erin should be gone after delete"
+            print("PASS: UI-backed API flow create/select(proxied identity)/delete (DP-3/DP-4)")
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            hub.shutdown()
+            hub.server_close()
+
+        # AC4 (DP-7): non-loopback bind does not serve the UI.
+        nl_port = free_port()
+        nl_proc = start_proxy(str(proxy_bin), f"0.0.0.0:{nl_port}", free_port(), str(testhome))
+        try:
+            wait_for_proxy(nl_proc, nl_port)
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{nl_port}/_dev/", timeout=5)
+                raise AssertionError("non-loopback /_dev/ should 404, got 200")
+            except urllib.error.HTTPError as e:
+                assert e.code == 404, f"non-loopback /_dev/ should be 404, got {e.code}"
+            print("PASS: non-loopback bind does not serve the UI (DP-7)")
+        finally:
+            nl_proc.terminate()
+            try:
+                nl_proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                nl_proc.kill()
+
+        print("ALL PASS")
     finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-        hub.shutdown()
-        hub.server_close()
-
-    # AC4 (DP-7): non-loopback bind does not serve the UI.
-    nl_port = free_port()
-    nl_proc = start_proxy(str(proxy_bin), f"0.0.0.0:{nl_port}", free_port(), str(testhome))
-    try:
-        wait_for_proxy(nl_proc, nl_port)
-        try:
-            urllib.request.urlopen(f"http://127.0.0.1:{nl_port}/_dev/", timeout=5)
-            raise AssertionError("non-loopback /_dev/ should 404, got 200")
-        except urllib.error.HTTPError as e:
-            assert e.code == 404, f"non-loopback /_dev/ should be 404, got {e.code}"
-        print("PASS: non-loopback bind does not serve the UI (DP-7)")
-    finally:
-        nl_proc.terminate()
-        try:
-            nl_proc.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            nl_proc.kill()
-
-    print("ALL PASS")
+        shutil.rmtree(testhome, ignore_errors=True)
 
 
 import urllib.error

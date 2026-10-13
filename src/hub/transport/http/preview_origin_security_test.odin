@@ -178,7 +178,7 @@ test_preview_origin_foreign_and_missing_sessions_are_identical_404_without_tunne
 	shell_repo := iface.Shell_Session_Repository{ctx = rawptr(&repo_state), get = preview_owner_repo_get}
 	user_repo := iface.User_Repository{get_by_id = preview_owner_user_get}
 	clock := platform.real_clock()
-	ids := platform.real_id_generator()
+	ids := http_test_id_generator()
 	users := user_service.new_user_service_basic(&user_repo, &clock, &ids)
 	cidrs := []string{"127.0.0.1/32"}
 	auth := auth_service.new_auth_service(auth_service.Trusted_Proxy_Config{

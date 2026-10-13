@@ -11,6 +11,7 @@ package main
 import "core:fmt"
 import "core:os"
 import "core:strings"
+import "core:sync"
 import "core:testing"
 
 MANAGER_TEST_SELFTEST_UNIT :: "heimdall-manager-selftest"
@@ -66,6 +67,8 @@ test_manager_logs_argv :: proc(t: ^testing.T) {
 
 @(test)
 test_manager_launchd_plist_path :: proc(t: ^testing.T) {
+	sync.mutex_lock(&manager_test_env_mutex)
+	defer sync.mutex_unlock(&manager_test_env_mutex)
 	previous := os.get_env("HOME", context.allocator)
 	defer {
 		if previous != "" do os.set_env("HOME", previous)

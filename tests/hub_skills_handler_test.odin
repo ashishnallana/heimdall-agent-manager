@@ -5,6 +5,7 @@
 package hub_skills_handler_test
 
 import "core:fmt"
+import "core:testing"
 import "core:os"
 import agent "odin_test:hub/service/agent"
 import http "odin_test:hub/transport/http"
@@ -13,6 +14,12 @@ check :: proc(ok: bool, msg: string) {
 	if ok do return
 	fmt.eprintln("FAIL:", msg)
 	os.exit(1)
+}
+
+@(test)
+test_hub_skills_handler_test :: proc(t: ^testing.T) {
+	_ = t
+	main()
 }
 
 main :: proc() {

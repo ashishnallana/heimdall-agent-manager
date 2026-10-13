@@ -11,6 +11,7 @@ package main
 // every operation. This mirrors exactly how the hub's project-scoped relay calls
 // these procs (project root passed per-command), and keeps tests independent.
 
+import "core:fmt"
 import "core:mem"
 import "core:os"
 import "core:strings"
@@ -1157,6 +1158,8 @@ fs_wire_error_responses_round_trip :: proc(t: ^testing.T) {
 fs_vault_read_file_encryption_lifecycle :: proc(t: ^testing.T) {
 	sync.mutex_lock(&bridge_test_config_mutex)
 	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
 
 	prev_key, had_key := os.lookup_env("HEIMDALL_VAULT_KEY", context.allocator)
 	defer {
@@ -1199,6 +1202,8 @@ fs_vault_read_file_encryption_lifecycle :: proc(t: ^testing.T) {
 fs_vault_write_file_decryption_and_rejection :: proc(t: ^testing.T) {
 	sync.mutex_lock(&bridge_test_config_mutex)
 	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
 
 	prev_key, had_key := os.lookup_env("HEIMDALL_VAULT_KEY", context.allocator)
 	defer {
@@ -1269,6 +1274,8 @@ fs_vault_write_file_decryption_and_rejection :: proc(t: ^testing.T) {
 fs_vault_batch_write_enforces_decryption_per_item :: proc(t: ^testing.T) {
 	sync.mutex_lock(&bridge_test_config_mutex)
 	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
 
 	prev_key, had_key := os.lookup_env("HEIMDALL_VAULT_KEY", context.allocator)
 	defer {
@@ -1320,6 +1327,8 @@ fs_vault_batch_write_enforces_decryption_per_item :: proc(t: ^testing.T) {
 fs_vault_grep_encrypts_matched_lines :: proc(t: ^testing.T) {
 	sync.mutex_lock(&bridge_test_config_mutex)
 	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
 
 	prev_key, had_key := os.lookup_env("HEIMDALL_VAULT_KEY", context.allocator)
 	defer {
@@ -1362,248 +1371,6 @@ fs_vault_grep_encrypts_matched_lines :: proc(t: ^testing.T) {
 	testing.expect_value(t, grep_plain.matches[0].line, "def sensitive_function():")
 }
 
-// --- Bridge FS Vault Encryption & Security Tests (REQ-FS-ENC-5) ---
-
-@(test)
-test_bridge_fs_read_file_vault_encrypted :: proc(t: ^testing.T) {
-	sync.mutex_lock(&bridge_test_config_mutex)
-	defer sync.mutex_unlock(&bridge_test_config_mutex)
-
-	prev_key, had_key := os.lookup_env("HEIMDALL_VAULT_KEY", context.allocator)
-	defer {
-		if had_key {
-			_ = os.set_env("HEIMDALL_VAULT_KEY", prev_key)
-			delete(prev_key)
-		} else {
-			os.unset_env("HEIMDALL_VAULT_KEY")
-		}
-	}
-
-	test_key := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-	_ = os.set_env("HEIMDALL_VAULT_KEY", test_key)
-
-	root := fs_test_make_root(t, "vault_read_encrypted")
-	defer fs_test_cleanup(root)
-
-	original_content := "Top secret configuration credentials\nAPI_KEY=999888777\n"
-	fs_test_seed_file(t, root, "secret_config.env", original_content)
-
-	res := bridge_fs_read_file("secret_config.env", root)
-	defer delete(res.content)
-
-	testing.expect(t, res.ok && res.viewable, "reading encrypted file must succeed and be viewable")
-	testing.expect(t, strings.has_prefix(res.content, VAULT_ARMOR_PREFIX), "result.content must start with VAULT_ARMOR_PREFIX")
-
-	decrypted, dec_ok := bridge_decrypt_vault_ciphertext_hex(res.content, test_key)
-	testing.expect(t, dec_ok, "decrypting armored content with bridge vault key must succeed")
-	defer delete(decrypted)
-	testing.expect_value(t, decrypted, original_content)
-}
-
-@(test)
-test_bridge_fs_write_file_vault_armored_success :: proc(t: ^testing.T) {
-	sync.mutex_lock(&bridge_test_config_mutex)
-	defer sync.mutex_unlock(&bridge_test_config_mutex)
-
-	prev_key, had_key := os.lookup_env("HEIMDALL_VAULT_KEY", context.allocator)
-	defer {
-		if had_key {
-			_ = os.set_env("HEIMDALL_VAULT_KEY", prev_key)
-			delete(prev_key)
-		} else {
-			os.unset_env("HEIMDALL_VAULT_KEY")
-		}
-	}
-
-	test_key := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-	_ = os.set_env("HEIMDALL_VAULT_KEY", test_key)
-
-	root := fs_test_make_root(t, "vault_write_success")
-	defer fs_test_cleanup(root)
-
-	plaintext := "Plaintext payload written via bridge vault armor"
-	armored, enc_ok := bridge_encrypt_vault_ciphertext_hex(plaintext, test_key)
-	testing.expect(t, enc_ok, "encryption with vault key must succeed")
-	defer delete(armored)
-
-	res := bridge_fs_write_file("secure_file.txt", armored, root)
-	testing.expect(t, res.ok, "writing armored content must succeed")
-	testing.expect_value(t, res.bytes_written, len(plaintext))
-
-	disk_content, rerr := os.read_entire_file_from_path(res.path, context.allocator)
-	testing.expect(t, rerr == nil, "file on disk must be readable")
-	defer delete(disk_content, context.allocator)
-	testing.expect_value(t, string(disk_content), plaintext)
-}
-
-@(test)
-test_bridge_fs_write_file_vault_tampered_rejected :: proc(t: ^testing.T) {
-	sync.mutex_lock(&bridge_test_config_mutex)
-	defer sync.mutex_unlock(&bridge_test_config_mutex)
-
-	prev_key, had_key := os.lookup_env("HEIMDALL_VAULT_KEY", context.allocator)
-	defer {
-		if had_key {
-			_ = os.set_env("HEIMDALL_VAULT_KEY", prev_key)
-			delete(prev_key)
-		} else {
-			os.unset_env("HEIMDALL_VAULT_KEY")
-		}
-	}
-
-	test_key := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-	_ = os.set_env("HEIMDALL_VAULT_KEY", test_key)
-
-	root := fs_test_make_root(t, "vault_write_tampered")
-	defer fs_test_cleanup(root)
-
-	plaintext := "High security token data"
-	armored, enc_ok := bridge_encrypt_vault_ciphertext_hex(plaintext, test_key)
-	testing.expect(t, enc_ok, "encryption must succeed")
-	defer delete(armored)
-
-	tampered := strings.concatenate({VAULT_ARMOR_PREFIX, "Z9", armored[len(VAULT_ARMOR_PREFIX)+2:]})
-	defer delete(tampered)
-
-	res := bridge_fs_write_file("tampered_file.txt", tampered, root)
-	testing.expect(t, !res.ok, "tampered armored content write must fail")
-	testing.expect_value(t, res.error_code, "invalid_vault_key")
-
-	file_path, _ := filepath.join([]string{root, "tampered_file.txt"}, context.allocator)
-	defer delete(file_path, context.allocator)
-	testing.expect(t, !os.exists(file_path), "tampered file must NOT be created on disk")
-}
-
-@(test)
-test_bridge_fs_write_file_vault_mismatched_key_rejected :: proc(t: ^testing.T) {
-	sync.mutex_lock(&bridge_test_config_mutex)
-	defer sync.mutex_unlock(&bridge_test_config_mutex)
-
-	prev_key, had_key := os.lookup_env("HEIMDALL_VAULT_KEY", context.allocator)
-	defer {
-		if had_key {
-			_ = os.set_env("HEIMDALL_VAULT_KEY", prev_key)
-			delete(prev_key)
-		} else {
-			os.unset_env("HEIMDALL_VAULT_KEY")
-		}
-	}
-
-	test_key := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-	wrong_key := "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
-	_ = os.set_env("HEIMDALL_VAULT_KEY", test_key)
-
-	root := fs_test_make_root(t, "vault_write_mismatched")
-	defer fs_test_cleanup(root)
-
-	armored_mismatched, enc_ok := bridge_encrypt_vault_ciphertext_hex("Foreign confidential data", wrong_key)
-	testing.expect(t, enc_ok, "encryption with other key must succeed")
-	defer delete(armored_mismatched)
-
-	res := bridge_fs_write_file("mismatched_file.txt", armored_mismatched, root)
-	testing.expect(t, !res.ok, "write with mismatched key must fail")
-	testing.expect_value(t, res.error_code, "invalid_vault_key")
-
-	file_path, _ := filepath.join([]string{root, "mismatched_file.txt"}, context.allocator)
-	defer delete(file_path, context.allocator)
-	testing.expect(t, !os.exists(file_path), "mismatched key file must NOT be created on disk")
-}
-
-@(test)
-test_bridge_fs_batch_write_vault_armored :: proc(t: ^testing.T) {
-	sync.mutex_lock(&bridge_test_config_mutex)
-	defer sync.mutex_unlock(&bridge_test_config_mutex)
-
-	prev_key, had_key := os.lookup_env("HEIMDALL_VAULT_KEY", context.allocator)
-	defer {
-		if had_key {
-			_ = os.set_env("HEIMDALL_VAULT_KEY", prev_key)
-			delete(prev_key)
-		} else {
-			os.unset_env("HEIMDALL_VAULT_KEY")
-		}
-	}
-
-	test_key := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-	_ = os.set_env("HEIMDALL_VAULT_KEY", test_key)
-
-	root := fs_test_make_root(t, "vault_batch_write")
-	defer fs_test_cleanup(root)
-
-	plaintext_valid := "Batch write valid armored content"
-	armored_valid, enc_ok := bridge_encrypt_vault_ciphertext_hex(plaintext_valid, test_key)
-	testing.expect(t, enc_ok, "encryption of valid batch file ok")
-	defer delete(armored_valid)
-
-	armored_tampered := strings.concatenate({VAULT_ARMOR_PREFIX, "corrupted_vault_ciphertext_data=="})
-	defer delete(armored_tampered)
-
-	items := make([dynamic]Bridge_Fs_Write_Item)
-	defer delete(items)
-	append(&items, Bridge_Fs_Write_Item{path = "valid.txt", content = armored_valid})
-	append(&items, Bridge_Fs_Write_Item{path = "tampered.txt", content = armored_tampered})
-
-	batch_res := bridge_fs_batch_write(items, root)
-	defer bridge_fs_batch_write_result_delete(&batch_res)
-
-	testing.expect(t, !batch_res.ok, "batch write with tampered item should have ok == false")
-	testing.expect_value(t, batch_res.error_code, "batch_write_partial")
-	testing.expect_value(t, len(batch_res.saved), 1)
-	if !testing.expect_value(t, len(batch_res.errors), 1) do return
-	testing.expect_value(t, batch_res.errors[0].path, "tampered.txt")
-	testing.expect_value(t, batch_res.errors[0].error_code, "invalid_vault_key")
-
-	valid_path, _ := filepath.join([]string{root, "valid.txt"}, context.allocator)
-	defer delete(valid_path, context.allocator)
-	testing.expect(t, os.exists(valid_path), "valid file must exist on disk")
-
-	content_on_disk, rerr := os.read_entire_file_from_path(valid_path, context.allocator)
-	testing.expect(t, rerr == nil, "valid file on disk must be readable")
-	defer delete(content_on_disk, context.allocator)
-	testing.expect_value(t, string(content_on_disk), plaintext_valid)
-
-	tampered_path, _ := filepath.join([]string{root, "tampered.txt"}, context.allocator)
-	defer delete(tampered_path, context.allocator)
-	testing.expect(t, !os.exists(tampered_path), "tampered file must NOT exist on disk")
-}
-
-@(test)
-test_bridge_fs_grep_vault_encrypted :: proc(t: ^testing.T) {
-	sync.mutex_lock(&bridge_test_config_mutex)
-	defer sync.mutex_unlock(&bridge_test_config_mutex)
-
-	prev_key, had_key := os.lookup_env("HEIMDALL_VAULT_KEY", context.allocator)
-	defer {
-		if had_key {
-			_ = os.set_env("HEIMDALL_VAULT_KEY", prev_key)
-			delete(prev_key)
-		} else {
-			os.unset_env("HEIMDALL_VAULT_KEY")
-		}
-	}
-
-	test_key := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-	_ = os.set_env("HEIMDALL_VAULT_KEY", test_key)
-
-	root := fs_test_make_root(t, "vault_grep_encrypted")
-	defer fs_test_cleanup(root)
-
-	target_line := "export VAULT_DATABASE_PASSWORD=\"very_secret_pwd_991\""
-	fs_test_seed_file(t, root, "app/settings.sh", "# Header\nexport VAULT_DATABASE_PASSWORD=\"very_secret_pwd_991\"\n# Footer\n")
-
-	grep_res := bridge_fs_grep("VAULT_DATABASE_PASSWORD", false, 10, root)
-	defer bridge_fs_grep_result_delete(&grep_res)
-
-	testing.expect(t, grep_res.ok, "grep should succeed")
-	if !testing.expect_value(t, len(grep_res.matches), 1) do return
-	testing.expect(t, strings.has_prefix(grep_res.matches[0].line, VAULT_ARMOR_PREFIX), "grep match line must have VAULT_ARMOR_PREFIX")
-
-	decrypted_line, dec_ok := bridge_decrypt_vault_ciphertext_hex(grep_res.matches[0].line, test_key)
-	testing.expect(t, dec_ok, "decryption of grep match line must succeed")
-	defer delete(decrypted_line)
-	testing.expect_value(t, decrypted_line, target_line)
-}
-
 @(test)
 bridge_fs_traversals_fail_before_work_when_command_deadline_expired :: proc(t: ^testing.T) {
 	root := fs_test_make_root(t, "expired_traversal")
@@ -1627,4 +1394,19 @@ bridge_fs_traversals_fail_before_work_when_command_deadline_expired :: proc(t: ^
 	path, _ := filepath.join([]string{root, "keep.txt"}, context.allocator)
 	defer delete(path, context.allocator)
 	testing.expect(t, os.exists(path), "expired mutation must not begin")
+}
+
+// Creates only the missing tail; existing ancestors are never mkdir()ed.
+@(test)
+test_bridge_make_directory_all_creates_missing_tail_only :: proc(t: ^testing.T) {
+	base := fmt.tprintf("%s/ham-mkdir-%d", os.temp_dir(context.temp_allocator), time.to_unix_nanoseconds(time.now()))
+	testing.expect_value(t, os.make_directory(base), nil)
+	defer os.remove_all(base)
+	deep := strings.concatenate({base, "/a/b/c/"}, context.temp_allocator)
+	testing.expect_value(t, bridge_make_directory_all(deep), nil)
+	testing.expect(t, os.exists(strings.concatenate({base, "/a/b/c"}, context.temp_allocator)), "created")
+	testing.expect_value(t, bridge_make_directory_all(deep), nil) // idempotent
+	testing.expect_value(t, bridge_make_directory_all(base), nil)  // exists already
+	testing.expect_value(t, bridge_make_directory_all(strings.concatenate({base, "/x"}, context.temp_allocator)), nil)
+	testing.expect(t, os.exists(strings.concatenate({base, "/x"}, context.temp_allocator)), "single missing component")
 }

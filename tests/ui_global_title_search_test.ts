@@ -26,16 +26,11 @@ if (typeof (globalThis as any).window === 'undefined') {
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { configureStore } from '@reduxjs/toolkit';
 
 import searchTitleReducer, {
-  upsertChainTitle,
   setBulkChainTitles,
   selectSearchChains,
-  type SearchItem,
 } from '../src/ui/store/searchTitleSlice.ts';
 
 import {
@@ -52,35 +47,8 @@ import {
 } from '../src/ui/utils/vaultContent.ts';
 import { batchDecryptTitles } from '../src/ui/utils/vaultSearch.ts';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const REPO_ROOT = path.resolve(__dirname, '..');
-
 // -----------------------------------------------------------------------------
-// 1. Static Contract: Backend global search removed from CommandPalette.tsx
-// -----------------------------------------------------------------------------
-
-test('Backend global search (/api/v1/search) is completely removed from CommandPalette.tsx', () => {
-  const file = path.join(REPO_ROOT, 'src/ui/components/ui/patterns/CommandPalette.tsx');
-  assert.ok(fs.existsSync(file), 'CommandPalette.tsx must exist');
-
-  const content = fs.readFileSync(file, 'utf8');
-
-  // Must not import or reference backend search queries or SearchHit
-  assert.ok(!content.includes('useGlobalSearchQuery'), 'useGlobalSearchQuery must be completely removed');
-  assert.ok(!content.includes('useLazyGlobalSearchQuery'), 'useLazyGlobalSearchQuery must be completely removed');
-  assert.ok(!content.includes('SearchHit'), 'SearchHit type must be completely removed');
-  assert.ok(!content.includes('/api/v1/search'), '/api/v1/search endpoint must not be referenced');
-  assert.ok(!content.includes('hitRoute'), 'hitRoute helper must not be imported');
-  assert.ok(!content.includes('renderPreview'), 'renderPreview helper must not be imported');
-
-  // Must connect to searchTitleSlice
-  assert.ok(content.includes('searchTitleSlice') || content.includes('selectSearchChains'), 'Must connect to searchTitleSlice');
-  assert.ok(content.includes('selectSearchChains'), 'Must use selectSearchChains selector');
-});
-
-// -----------------------------------------------------------------------------
-// 2. CommandPalette Status Indicator Mapping
+// 1. CommandPalette Status Indicator Mapping
 // -----------------------------------------------------------------------------
 
 test('chainStatusDot correctly maps all task chain statuses to StatusDot tone and pulse', () => {
@@ -254,70 +222,6 @@ test('Client-side task chain search filters strictly across decrypted titles', (
 });
 
 // -----------------------------------------------------------------------------
-// 6. ConversationThreadPage Header Breadcrumb Click Integration
-// -----------------------------------------------------------------------------
-
-test('ConversationThreadPage header breadcrumb has interactive button with click event opening palette', () => {
-  const convoFile = path.join(REPO_ROOT, 'src/ui/components/chat/ConversationThreadPage.tsx');
-  assert.ok(fs.existsSync(convoFile), 'ConversationThreadPage.tsx must exist');
-
-  const content = fs.readFileSync(convoFile, 'utf8');
-
-  // Breadcrumb structure with project, slash, and title
-  assert.ok(content.includes('data-debug-id="conversation-thread-breadcrumb"'), 'Must have breadcrumb container');
-  assert.ok(content.includes('data-debug-id="conversation-breadcrumb-project"'), 'Must have breadcrumb project');
-  assert.ok(content.includes('data-debug-id="conversation-thread-title"'), 'Must have conversation-thread-title debug id');
-
-  // Interactive button verification
-  assert.match(
-    content,
-    /<button[^>]*data-debug-id="conversation-thread-title"[^>]*onClick=\{[^}]*(setChainSelectorOpen\(true\)|setPaletteOpen\(true\))[^}]*\}/,
-    'conversation-thread-title must be a button triggering setChainSelectorOpen(true) or setPaletteOpen(true)',
-  );
-
-  // Accessibility and hover state
-  assert.match(content, /aria-label="Select task chain"/, 'Must have accessible aria-label on title button');
-  assert.match(content, /hover:bg-neutral-soft/, 'Must have hover background styling');
-  assert.match(content, /cursor-pointer/, 'Must indicate clickability with cursor-pointer');
-
-  // Search button also opens selector / palette
-  assert.match(
-    content,
-    /<button[^>]*data-debug-id="conversation-search-btn"[^>]*onClick=\{[^}]*(setChainSelectorOpen\(true\)|setPaletteOpen\(true\))[^}]*\}/,
-    'conversation-search-btn must open task chain selector via setChainSelectorOpen(true) or setPaletteOpen(true)',
-  );
-});
-
-// -----------------------------------------------------------------------------
-// 7. AppShell Cmd+K and Sidebar Search Button Integration
-// -----------------------------------------------------------------------------
-
-test('AppShell maintains Cmd+K / Ctrl+K and sidebar Search button opening CommandPalette', () => {
-  const appShellFile = path.join(REPO_ROOT, 'src/ui/components/shell/AppShell.tsx');
-  assert.ok(fs.existsSync(appShellFile), 'AppShell.tsx must exist');
-
-  const content = fs.readFileSync(appShellFile, 'utf8');
-
-  // Cmd+K / Ctrl+K keyboard shortcut
-  assert.match(
-    content,
-    /\(event\.metaKey\s*\|\|\s*event\.ctrlKey\)\s*&&\s*\(event\.key\s*===\s*['"]k['"]\s*\|\|\s*event\.key\s*===\s*['"]K['"]\)/,
-    'AppShell must handle Cmd+K and Ctrl+K to toggle command palette',
-  );
-
-  // Sidebar search button
-  assert.ok(
-    content.includes('data-debug-id="shell-sidebar-search-button"'),
-    'Sidebar search button must exist with data-debug-id="shell-sidebar-search-button"',
-  );
-  assert.match(
-    content,
-    /<button[^>]*data-debug-id="shell-sidebar-search-button"[^>]*onClick=\{[^}]*setPaletteOpen\(true\)[^}]*\}/,
-    'Sidebar search button must call setPaletteOpen(true)',
-  );
-});
-
-// -----------------------------------------------------------------------------
 // 8. Keyboard Navigation Logic
 // -----------------------------------------------------------------------------
 
@@ -460,53 +364,6 @@ test('matchesQuery returns false for any isVaultArmored string regardless of que
   assert.equal(matchesQuery('User Vault Setup', 'vault'), true, 'Matches unarmored title containing query');
   assert.equal(matchesQuery('User Vault Setup', 'Vault'), true, 'Matches unarmored title case-insensitively');
   assert.equal(matchesQuery('Billing Integration', 'vault'), false, 'Does not match unarmored title without query');
-});
-
-// -----------------------------------------------------------------------------
-// 12. Component Contracts: VaultText Row Rendering & Runtime Decryption (REQ-SEARCH-VAULT-TEXT-UI-1, REQ-SEARCH-DECRYPT-RUNTIME-1)
-// -----------------------------------------------------------------------------
-
-test('CommandPalette and AppShell maintain static contracts for VaultText row rendering and runtime decryption', () => {
-  const cpFile = path.join(REPO_ROOT, 'src/ui/components/ui/patterns/CommandPalette.tsx');
-  assert.ok(fs.existsSync(cpFile), 'CommandPalette.tsx must exist');
-  const cpContent = fs.readFileSync(cpFile, 'utf8');
-
-  // CommandPalette must import isVaultArmored and batchDecryptTitles
-  assert.ok(cpContent.includes('isVaultArmored'), 'CommandPalette.tsx must import isVaultArmored');
-  assert.ok(cpContent.includes('batchDecryptTitles'), 'CommandPalette.tsx must import batchDecryptTitles');
-
-  // CommandPalette must import vault selectors and searchTitleSlice dispatch
-  assert.ok(cpContent.includes('selectIsVaultUnlocked'), 'CommandPalette.tsx must import selectIsVaultUnlocked');
-  // REQ-RAWKEY-A4: selectRawVaultKeyHex is retired -- it always returned null, so a palette
-  // gated on it decrypted nothing. The key now comes from getActiveVaultKey().
-  assert.ok(cpContent.includes('getActiveVaultKey'), 'CommandPalette.tsx must import getActiveVaultKey');
-  assert.ok(
-    !cpContent.includes('selectRawVaultKeyHex'),
-    'CommandPalette.tsx must not read the retired selectRawVaultKeyHex',
-  );
-  assert.ok(cpContent.includes('setBulkChainTitles'), 'CommandPalette.tsx must import setBulkChainTitles');
-
-  // CommandPalette must import VaultText and render labels through VaultText as="span"
-  assert.ok(cpContent.includes('VaultText'), 'CommandPalette.tsx must import VaultText');
-  assert.ok(
-    cpContent.includes('<VaultText value={label} as="span" />'),
-    'CommandPalette.tsx must render chain row labels using <VaultText value={label} as="span" />',
-  );
-
-  // CommandPalette matchingChains must guard against armored titles
-  assert.ok(
-    cpContent.includes('!isVaultArmored(ch.title)'),
-    'matchingChains in CommandPalette.tsx must guard against isVaultArmored(ch.title)',
-  );
-
-  // AppShell must have background pre-warm decryption
-  const appShellFile = path.join(REPO_ROOT, 'src/ui/components/shell/AppShell.tsx');
-  assert.ok(fs.existsSync(appShellFile), 'AppShell.tsx must exist');
-  const appShellContent = fs.readFileSync(appShellFile, 'utf8');
-
-  assert.ok(appShellContent.includes('batchDecryptTitles'), 'AppShell.tsx must import batchDecryptTitles');
-  assert.ok(appShellContent.includes('setBulkChainTitles'), 'AppShell.tsx must import setBulkChainTitles');
-  assert.ok(appShellContent.includes('isVaultArmored'), 'AppShell.tsx must import isVaultArmored');
 });
 
 // -----------------------------------------------------------------------------

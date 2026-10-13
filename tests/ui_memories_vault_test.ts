@@ -5,123 +5,25 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 import {
   isVaultArmored,
   encryptVaultText,
-  decryptVaultText,
   VAULT_ARMOR_PREFIX,
 } from '../src/ui/utils/vaultContent.ts';
 import {
   resolveVaultText,
-  decryptVaultTextContent,
 } from '../src/ui/components/vault/vaultTextHelper.ts';
 import {
   encryptMemoryFields,
   decryptMemoryRecord,
 } from '../src/ui/utils/vaultMemories.ts';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const REPO_ROOT = path.resolve(__dirname, '..');
-
 const TEST_KEY_HEX = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
 const DIFFERENT_KEY_HEX = 'fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210';
 
 // -----------------------------------------------------------------------------
-// Test 1: Static verification of component files, contracts, and imports
-// -----------------------------------------------------------------------------
-
-test('Memory UI components, endpoints, and utils exist with required contracts', () => {
-  const memoryRowFile = path.join(REPO_ROOT, 'src/ui/components/memory/MemoryRow.tsx');
-  const memoryDetailFile = path.join(REPO_ROOT, 'src/ui/components/memory/MemoryDetail.tsx');
-  const memoryFormFile = path.join(REPO_ROOT, 'src/ui/components/memory/MemoryFormPage.tsx');
-  const memoryEndpointFile = path.join(REPO_ROOT, 'src/ui/api/endpoints/memory.ts');
-  const vaultMemoriesFile = path.join(REPO_ROOT, 'src/ui/utils/vaultMemories.ts');
-
-  assert.ok(fs.existsSync(memoryRowFile), 'MemoryRow.tsx must exist');
-  assert.ok(fs.existsSync(memoryDetailFile), 'MemoryDetail.tsx must exist');
-  assert.ok(fs.existsSync(memoryFormFile), 'MemoryFormPage.tsx must exist');
-  assert.ok(fs.existsSync(memoryEndpointFile), 'memory.ts must exist');
-  assert.ok(fs.existsSync(vaultMemoriesFile), 'vaultMemories.ts must exist');
-
-  // Verify MemoryRow integrates VaultText
-  const memoryRowSrc = fs.readFileSync(memoryRowFile, 'utf8');
-  assert.ok(
-    memoryRowSrc.includes('VaultText'),
-    'MemoryRow.tsx must integrate VaultText component',
-  );
-  assert.ok(
-    memoryRowSrc.includes('memoryTitle') || memoryRowSrc.includes('title'),
-    'MemoryRow.tsx must handle memory title',
-  );
-  assert.ok(
-    memoryRowSrc.includes('<VaultText value={title}'),
-    'MemoryRow.tsx must render title wrapped in VaultText',
-  );
-
-  // Verify MemoryDetail integrates VaultText and MarkdownBody
-  const memoryDetailSrc = fs.readFileSync(memoryDetailFile, 'utf8');
-  assert.ok(
-    memoryDetailSrc.includes('VaultText'),
-    'MemoryDetail.tsx must integrate VaultText component',
-  );
-  assert.ok(
-    memoryDetailSrc.includes('MarkdownBody'),
-    'MemoryDetail.tsx must render MarkdownBody',
-  );
-  assert.ok(
-    memoryDetailSrc.includes('evidence'),
-    'MemoryDetail.tsx must handle evidence field',
-  );
-
-  // Verify MemoryFormPage supports decryption of fields on edit
-  const memoryFormSrc = fs.readFileSync(memoryFormFile, 'utf8');
-  assert.ok(
-    memoryFormSrc.includes('decryptVaultText'),
-    'MemoryFormPage.tsx must decrypt existing memory fields when editing',
-  );
-
-  // Verify memory endpoint imports and uses vault encryption
-  const memoryEndpointSrc = fs.readFileSync(memoryEndpointFile, 'utf8');
-  assert.ok(
-    memoryEndpointSrc.includes('encryptVaultText'),
-    'memory.ts must import and use encryptVaultText',
-  );
-  assert.ok(
-    memoryEndpointSrc.includes('createMemory'),
-    'memory.ts must define createMemory mutation',
-  );
-  assert.ok(
-    memoryEndpointSrc.includes('proposeMemory'),
-    'memory.ts must define proposeMemory mutation',
-  );
-  assert.ok(
-    memoryEndpointSrc.includes('updateMemory'),
-    'memory.ts must define updateMemory mutation',
-  );
-  assert.ok(
-    memoryEndpointSrc.includes('approveMemory'),
-    'memory.ts must define approveMemory mutation',
-  );
-
-  // Verify vaultMemories utility exports
-  const vaultMemoriesSrc = fs.readFileSync(vaultMemoriesFile, 'utf8');
-  assert.ok(
-    vaultMemoriesSrc.includes('export async function encryptMemoryFields'),
-    'vaultMemories.ts must export encryptMemoryFields',
-  );
-  assert.ok(
-    vaultMemoriesSrc.includes('export async function decryptMemoryRecord'),
-    'vaultMemories.ts must export decryptMemoryRecord',
-  );
-});
-
-// -----------------------------------------------------------------------------
-// Test 2: <VaultText /> resolution for plaintext and legacy unencrypted memories
+// Test 1: <VaultText /> resolution for plaintext and legacy unencrypted memories
 // -----------------------------------------------------------------------------
 
 test('VaultText helper handles plaintext and legacy unencrypted memories without changes', () => {

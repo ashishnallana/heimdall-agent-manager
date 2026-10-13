@@ -1,6 +1,7 @@
 package hub_cards_repo_test
 
 import "core:fmt"
+import "core:testing"
 import "core:math"
 import "core:os"
 import domain "odin_test:hub/domain"
@@ -10,6 +11,12 @@ check :: proc(ok: bool, msg: string) {
 	if ok do return
 	fmt.eprintln("FAIL:", msg)
 	os.exit(1)
+}
+
+@(test)
+test_hub_cards_repo_test :: proc(t: ^testing.T) {
+	_ = t
+	main()
 }
 
 main :: proc() {

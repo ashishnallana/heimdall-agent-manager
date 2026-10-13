@@ -23,6 +23,7 @@ package hub_readonly_cross_chain_test
 //      inst_a can create_task on its own chain X.
 
 import "core:fmt"
+import "core:testing"
 import "core:os"
 import "core:strings"
 import contracts "odin_test:contracts"
@@ -126,6 +127,12 @@ add_member :: proc(r: ^Repo, chain_id, instance_id, owner, role: string) {
 }
 
 check :: proc(ok: bool, message: string) { if ok do return; fmt.eprintln("FAIL:", message); os.exit(1) }
+
+@(test)
+test_hub_readonly_cross_chain_test :: proc(t: ^testing.T) {
+	_ = t
+	main()
+}
 
 main :: proc() {
 	data: Repo

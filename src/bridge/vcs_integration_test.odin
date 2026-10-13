@@ -328,17 +328,3 @@ vcs_git_worktrees_list :: proc(t: ^testing.T) {
 		testing.expect(t, wt_current, "added worktree is_current when queried from itself")
 	}
 }
-
-// vcs_test_pid_paths proves the fixture paths are run-scoped by CALLING the real
-// helpers and printing what they RETURN, then removing them. It deliberately does not
-// hand-roll the path format: a diagnostic that builds its own copy of the string keeps
-// printing a reassuring pid-suffixed path even after a helper is reverted to a shared
-// one, i.e. it lies exactly when you need it. Pure diagnostic — no assertions.
-@(test)
-vcs_test_pid_paths :: proc(t: ^testing.T) {
-	marker := vcs_test_make_marker_repo("pidprobe", ".git")
-	defer vcs_test_rm(marker)
-	git_dir, _ := vcs_test_git_repo("pidprobe")
-	defer vcs_test_rm(git_dir)
-	fmt.printf("VCS-TEST-PID-PATHS pid=%d marker=%s git=%s\n", os.get_pid(), marker, git_dir)
-}

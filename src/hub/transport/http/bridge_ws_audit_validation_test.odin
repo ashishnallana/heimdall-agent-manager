@@ -101,7 +101,7 @@ make_audit_chunk_frame :: proc(chunk_id: string, index, count, total: int, raw: 
 // to ws.write_server_text(client, text, false)) returns false for a 70,000-byte JSON
 // payload while a 65,535-byte payload succeeds.
 @(test)
-audit_claim_write_ws_text_frame_rejects_over_65535 :: proc(t: ^testing.T) {
+test_audit_claim_write_ws_text_frame_rejects_over_65535 :: proc(t: ^testing.T) {
 	pair, ok := make_audit_sock_pair(t)
 	if !ok do return
 	defer close_audit_sock_pair(&pair)
@@ -126,7 +126,7 @@ audit_claim_write_ws_text_frame_rejects_over_65535 :: proc(t: ^testing.T) {
 // prove bridge_ws_take_frame decodes it intact (ok=true, fatal=false).
 // Also verify that an invalid/oversized 64-bit length (> 32 MiB or MSB set) returns ok=false, fatal=true.
 @(test)
-audit_claim_bridge_ws_take_frame_rejects_64bit_length_as_fatal :: proc(t: ^testing.T) {
+test_audit_claim_bridge_ws_take_frame_rejects_64bit_length_as_fatal :: proc(t: ^testing.T) {
 	reader := Bridge_WS_Reader{}
 	defer bridge_ws_reader_destroy(&reader)
 
@@ -162,7 +162,7 @@ audit_claim_bridge_ws_take_frame_rejects_64bit_length_as_fatal :: proc(t: ^testi
 // Bridge_WS_Reader; prove bridge_ws_take_frame reassembles the complete JSON message
 // with ok=true, fatal=false, and that interleaved Ping does not cause fatal=true.
 @(test)
-audit_claim_bridge_ws_take_frame_corrupts_fragmented_message :: proc(t: ^testing.T) {
+test_audit_claim_bridge_ws_take_frame_corrupts_fragmented_message :: proc(t: ^testing.T) {
 	reader := Bridge_WS_Reader{}
 	defer bridge_ws_reader_destroy(&reader)
 
@@ -200,7 +200,7 @@ audit_claim_bridge_ws_take_frame_corrupts_fragmented_message :: proc(t: ^testing
 //    (16 MiB + 1) with .Too_Large -> .Validation_Failed, while a closed socket returns
 //    .Send_Failed -> .Bridge_Offline ("bridge websocket command send failed").
 @(test)
-audit_claim_hub_to_bridge_large_json_command_dropped :: proc(t: ^testing.T) {
+test_audit_claim_hub_to_bridge_large_json_command_dropped :: proc(t: ^testing.T) {
 	pair, ok := make_audit_sock_pair(t)
 	if !ok do return
 	defer net.close(pair.listener)
@@ -268,7 +268,7 @@ audit_claim_hub_to_bridge_large_json_command_dropped :: proc(t: ^testing.T) {
 // len(reassemblies) >= BRIDGE_WS_MAX_REASSEMBLIES (64) (clean up reassemblies at end of test
 // so 0 leaks occur).
 @(test)
-audit_claim_abandoned_chunk_streams_persist_below_admission_cap :: proc(t: ^testing.T) {
+test_audit_claim_abandoned_chunk_streams_persist_below_admission_cap :: proc(t: ^testing.T) {
 	reassemblies := make([dynamic]Bridge_Chunk_Reassembly)
 	defer bridge_chunk_reassemblies_free(&reassemblies)
 
@@ -320,7 +320,7 @@ audit_claim_abandoned_chunk_streams_persist_below_admission_cap :: proc(t: ^test
 //    send_validate_project_path_command at bridge_runtime.odin:135-139 to leak the
 //    ws.poll_text string on the heap to avoid a use-after-free).
 @(test)
-audit_claim_bridge_runtime_write_ws_text_frame_leaks_frame_buffer :: proc(t: ^testing.T) {
+test_audit_claim_bridge_runtime_write_ws_text_frame_leaks_frame_buffer :: proc(t: ^testing.T) {
 	pair, ok := make_audit_sock_pair(t)
 	if !ok do return
 	defer close_audit_sock_pair(&pair)

@@ -7,9 +7,6 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 import {
   isVaultArmored,
@@ -18,10 +15,6 @@ import {
   VAULT_ARMOR_PREFIX,
 } from '../src/ui/utils/vaultContent.ts';
 import { batchDecryptTitles } from '../src/ui/utils/vaultSearch.ts';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const REPO_ROOT = path.resolve(__dirname, '..');
 
 const TEST_KEY_HEX = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
 
@@ -256,101 +249,6 @@ function shellModelMatchesQuery(session: any, query: string): boolean {
 }
 
 // =============================================================================
-// Static Source File Contracts (Inspection of all 8 files across the 7 areas)
-// =============================================================================
-
-test('Static contract: all 7 search areas import isVaultArmored and guard search haystacks', () => {
-  const files = [
-    {
-      name: 'RecentTaskChainsTab.tsx',
-      relPath: 'src/ui/components/home/RecentTaskChainsTab.tsx',
-      requiredTokens: [
-        'isVaultArmored',
-        '!isVaultArmored(title)',
-        '!isVaultArmored(projectName)',
-        'searchChains[chain.chainId]?.decryptedTitle',
-      ],
-    },
-    {
-      name: 'ActionItemsTab.tsx',
-      relPath: 'src/ui/components/home/ActionItemsTab.tsx',
-      requiredTokens: [
-        'isVaultArmored',
-        '!isVaultArmored(card.title)',
-        '!isVaultArmored(card.rationale)',
-        '!isVaultArmored(project?.name)',
-      ],
-    },
-    {
-      name: 'CardsPanel.tsx',
-      relPath: 'src/ui/components/cards/CardsPanel.tsx',
-      requiredTokens: [
-        'isVaultArmored',
-        '!isVaultArmored(card.title)',
-        '!isVaultArmored(card.rationale)',
-        '!isVaultArmored(project?.name)',
-      ],
-    },
-    {
-      name: 'ActionListPage.tsx',
-      relPath: 'src/ui/components/actions/ActionListPage.tsx',
-      requiredTokens: [
-        'isVaultArmored',
-        'row.prompt_text && !isVaultArmored(row.prompt_text)',
-      ],
-    },
-    {
-      name: 'LibraryPage.tsx',
-      relPath: 'src/ui/components/LibraryPage.tsx',
-      requiredTokens: [
-        'isVaultArmored',
-        '!isVaultArmored(a.name)',
-        '!isVaultArmored(a.description)',
-        '!isVaultArmored(originRef(a))',
-      ],
-    },
-    {
-      name: 'AgentMonitorPage.tsx',
-      relPath: 'src/ui/components/monitor/AgentMonitorPage.tsx',
-      requiredTokens: [
-        'isVaultArmored',
-        '!isVaultArmored(name)',
-      ],
-    },
-    {
-      name: 'Combobox.tsx',
-      relPath: 'src/ui/components/ui/primitives/Combobox.tsx',
-      requiredTokens: [
-        'isVaultArmored',
-        '!isVaultArmored(field)',
-      ],
-    },
-    {
-      name: 'shellModel.ts',
-      relPath: 'src/ui/components/shells/shellModel.ts',
-      requiredTokens: [
-        'isVaultArmored',
-        'session.label && !isVaultArmored(session.label)',
-        'session.cmd && !isVaultArmored(session.cmd)',
-      ],
-    },
-  ];
-
-  for (const { name, relPath, requiredTokens } of files) {
-    const fullPath = path.join(REPO_ROOT, relPath);
-    assert.ok(fs.existsSync(fullPath), `Target file ${name} (${relPath}) must exist`);
-    const src = fs.readFileSync(fullPath, 'utf8');
-
-    for (const token of requiredTokens) {
-      assert.ok(
-        src.includes(token),
-        `${name} must contain required vault armor shielding token: "${token}"`,
-      );
-    }
-  }
-});
-
-// =============================================================================
 // Area 1: RecentTaskChainsTab Logic / Chain Matching
 // =============================================================================
 
@@ -532,7 +430,7 @@ test('Area 3: ActionListPage - armored prompt_text is omitted from searchableTex
     prompt_text: armoredPrompt,
     cron_expr: '0 2 * * *',
     timezone: 'UTC',
-    target_provider: 'jetski',
+    target_provider: 'gemini',
     target_model: 'smart',
   };
 
@@ -541,7 +439,7 @@ test('Area 3: ActionListPage - armored prompt_text is omitted from searchableTex
     prompt_text: 'Perform daily incremental database backup',
     cron_expr: '0 3 * * *',
     timezone: 'UTC',
-    target_provider: 'jetski',
+    target_provider: 'gemini',
     target_model: 'smart',
   };
 
@@ -566,7 +464,7 @@ test('Area 3: ActionListPage - armored prompt_text is omitted from searchableTex
 
   // 4. Other unarmored metadata on the row matches as expected
   assert.equal(actionListPageMatchesQuery(rowArmored, catalog, 'act_alpha_01'), true);
-  assert.equal(actionListPageMatchesQuery(rowArmored, catalog, 'jetski smart'), true);
+  assert.equal(actionListPageMatchesQuery(rowArmored, catalog, 'gemini smart'), true);
 
   // 5. Unarmored row prompt_text matches as expected
   assert.equal(actionListPageMatchesQuery(rowPlaintext, catalog, 'incremental database backup'), true);

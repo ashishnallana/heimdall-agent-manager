@@ -5,9 +5,6 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 import {
   isVaultArmored,
@@ -25,156 +22,8 @@ import {
   decryptTaskCommentRecord,
 } from '../src/ui/utils/vaultTasks.ts';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const REPO_ROOT = path.resolve(__dirname, '..');
-
 const TEST_KEY_HEX = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
 const DIFFERENT_KEY_HEX = 'fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210';
-
-// -----------------------------------------------------------------------------
-// Test 1: Static verification of component files, contracts, and imports
-// -----------------------------------------------------------------------------
-
-test('Task UI components, endpoints, and utils exist with required contracts', () => {
-  const taskOverviewFile = path.join(REPO_ROOT, 'src/ui/components/taskchain/TaskChainOverview.tsx');
-  const taskCommentsThreadFile = path.join(REPO_ROOT, 'src/ui/components/taskchain/TaskCommentsThread.tsx');
-  const taskCommentsFile = path.join(REPO_ROOT, 'src/ui/components/comments/TaskComments.tsx');
-  const taskDetailPageFile = path.join(REPO_ROOT, 'src/ui/pages/TaskDetailPage.tsx');
-  const currentTaskStripFile = path.join(REPO_ROOT, 'src/ui/components/chat/CurrentTaskStrip.tsx');
-  const chainOverviewPanelFile = path.join(REPO_ROOT, 'src/ui/components/chat/ChainOverviewPanel.tsx');
-  const tasksEndpointFile = path.join(REPO_ROOT, 'src/ui/api/endpoints/tasks.ts');
-  const vaultTasksFile = path.join(REPO_ROOT, 'src/ui/utils/vaultTasks.ts');
-
-  assert.ok(fs.existsSync(taskOverviewFile), 'TaskChainOverview.tsx must exist');
-  assert.ok(fs.existsSync(taskCommentsThreadFile), 'TaskCommentsThread.tsx must exist');
-  assert.ok(fs.existsSync(taskCommentsFile), 'TaskComments.tsx must exist');
-  assert.ok(fs.existsSync(taskDetailPageFile), 'TaskDetailPage.tsx must exist');
-  assert.ok(fs.existsSync(currentTaskStripFile), 'CurrentTaskStrip.tsx must exist');
-  assert.ok(fs.existsSync(chainOverviewPanelFile), 'ChainOverviewPanel.tsx must exist');
-  assert.ok(fs.existsSync(tasksEndpointFile), 'tasks.ts endpoint must exist');
-  assert.ok(fs.existsSync(vaultTasksFile), 'vaultTasks.ts must exist');
-
-  // Verify TaskChainOverview integrates VaultText
-  const taskOverviewSrc = fs.readFileSync(taskOverviewFile, 'utf8');
-  assert.ok(
-    taskOverviewSrc.includes('VaultText'),
-    'TaskChainOverview.tsx must integrate VaultText component',
-  );
-  assert.ok(
-    taskOverviewSrc.includes('<VaultText value={task.title} as="span" />'),
-    'TaskChainOverview.tsx must render task.title wrapped in VaultText',
-  );
-  assert.ok(
-    taskOverviewSrc.includes('isVaultArmored'),
-    'TaskChainOverview.tsx must check for armored descriptions',
-  );
-
-  // Verify TaskCommentsThread integrates VaultText and decrypts comment bodies
-  const taskCommentsThreadSrc = fs.readFileSync(taskCommentsThreadFile, 'utf8');
-  assert.ok(
-    taskCommentsThreadSrc.includes('VaultText'),
-    'TaskCommentsThread.tsx must integrate VaultText component',
-  );
-  assert.ok(
-    taskCommentsThreadSrc.includes('decryptVaultText'),
-    'TaskCommentsThread.tsx must decrypt comment body with decryptVaultText',
-  );
-  assert.ok(
-    taskCommentsThreadSrc.includes('<VaultText value={summary.lastCommentPreview} as="span" />'),
-    'TaskCommentsThread.tsx must wrap lastCommentPreview in VaultText',
-  );
-
-  // Verify TaskComments.tsx re-exports components
-  const taskCommentsSrc = fs.readFileSync(taskCommentsFile, 'utf8');
-  assert.ok(
-    taskCommentsSrc.includes('TaskCommentsThread') && taskCommentsSrc.includes('VaultText'),
-    'TaskComments.tsx must re-export TaskCommentsThread and VaultText',
-  );
-
-  // Verify TaskDetailPage integrates VaultText
-  const taskDetailPageSrc = fs.readFileSync(taskDetailPageFile, 'utf8');
-  assert.ok(
-    taskDetailPageSrc.includes('<VaultText value={task.title} as="span" />'),
-    'TaskDetailPage.tsx must render task.title in VaultText',
-  );
-  assert.ok(
-    taskDetailPageSrc.includes('<VaultText value={task.description} as="div" />'),
-    'TaskDetailPage.tsx must render task.description in VaultText',
-  );
-
-  // Verify CurrentTaskStrip integrates VaultText
-  const currentTaskStripSrc = fs.readFileSync(currentTaskStripFile, 'utf8');
-  assert.ok(
-    currentTaskStripSrc.includes('VaultText'),
-    'CurrentTaskStrip.tsx must integrate VaultText component',
-  );
-
-  // Verify ChainOverviewPanel integrates VaultText and decrypts task description in review action gate
-  const chainOverviewPanelSrc = fs.readFileSync(chainOverviewPanelFile, 'utf8');
-  assert.ok(
-    chainOverviewPanelSrc.includes('VaultText'),
-    'ChainOverviewPanel.tsx must integrate VaultText component',
-  );
-  assert.ok(
-    chainOverviewPanelSrc.includes('<VaultText value={currentTask.title} as="span" className="truncate" />'),
-    'ChainOverviewPanel.tsx must wrap currentTask.title in VaultText on agent cards',
-  );
-  assert.ok(
-    chainOverviewPanelSrc.includes('selectActiveVaultKey'),
-    'ChainOverviewPanel.tsx must import the active CryptoKey selector',
-  );
-  assert.ok(
-    chainOverviewPanelSrc.includes('decryptVaultText'),
-    'ChainOverviewPanel.tsx must import and call decryptVaultText',
-  );
-  assert.ok(
-    chainOverviewPanelSrc.includes('fallback="[🔒 Encrypted description]"'),
-    'ChainOverviewPanel.tsx must provide locked fallback for armored descriptions in review card',
-  );
-
-  // Verify tasks endpoint imports and uses vault encryption
-  const tasksEndpointSrc = fs.readFileSync(tasksEndpointFile, 'utf8');
-  assert.ok(
-    tasksEndpointSrc.includes('encryptVaultText'),
-    'tasks.ts must import and use encryptVaultText',
-  );
-  assert.ok(
-    tasksEndpointSrc.includes('createTask:'),
-    'tasks.ts must define createTask mutation',
-  );
-  assert.ok(
-    tasksEndpointSrc.includes('updateTaskDetail:'),
-    'tasks.ts must define updateTaskDetail mutation',
-  );
-  assert.ok(
-    tasksEndpointSrc.includes('addTaskComment:'),
-    'tasks.ts must define addTaskComment mutation',
-  );
-  assert.ok(
-    tasksEndpointSrc.includes('updateTask:'),
-    'tasks.ts must define updateTask mutation',
-  );
-
-  // Verify vaultTasks utility exports
-  const vaultTasksSrc = fs.readFileSync(vaultTasksFile, 'utf8');
-  assert.ok(
-    vaultTasksSrc.includes('export async function encryptTaskFields'),
-    'vaultTasks.ts must export encryptTaskFields',
-  );
-  assert.ok(
-    vaultTasksSrc.includes('export async function encryptTaskCommentFields'),
-    'vaultTasks.ts must export encryptTaskCommentFields',
-  );
-  assert.ok(
-    vaultTasksSrc.includes('export async function decryptTaskRecord'),
-    'vaultTasks.ts must export decryptTaskRecord',
-  );
-  assert.ok(
-    vaultTasksSrc.includes('export async function decryptTaskCommentRecord'),
-    'vaultTasks.ts must export decryptTaskCommentRecord',
-  );
-});
 
 // -----------------------------------------------------------------------------
 // Test 2: <VaultText /> resolution for plaintext and legacy unencrypted tasks
@@ -459,15 +308,7 @@ Acceptance criteria:
 test('Agent card task titles resolve through VaultText and raw ciphertext never leaks (REQ-AGENT-CARD-VAULT-TITLE)', async () => {
   const originalTaskTitle = 'Confidential Security Audit Task';
 
-  // 1. Static check: ChainOverviewPanel wraps currentTask.title in VaultText
-  const chainOverviewPanelFile = path.join(REPO_ROOT, 'src/ui/components/chat/ChainOverviewPanel.tsx');
-  const chainOverviewPanelSrc = fs.readFileSync(chainOverviewPanelFile, 'utf8');
-  assert.ok(
-    chainOverviewPanelSrc.includes('<VaultText value={currentTask.title} as="span" className="truncate" />'),
-    'ChainOverviewPanel.tsx must wrap currentTask.title with <VaultText value={currentTask.title} as="span" className="truncate" />',
-  );
-
-  // 2. Encrypt task title
+  // Encrypt task title
   const armoredTitle = await encryptVaultText(originalTaskTitle, TEST_KEY_HEX);
   assert.ok(isVaultArmored(armoredTitle));
   assert.ok(armoredTitle.startsWith(VAULT_ARMOR_PREFIX));

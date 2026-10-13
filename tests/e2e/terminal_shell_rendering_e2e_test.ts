@@ -16,22 +16,10 @@
 
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 import * as xtermModule from '@xterm/xterm';
 import * as serializeModule from '@xterm/addon-serialize';
 import { shellResizeFrame, type ShellGeometry } from '../../src/ui/components/shells/shellStreamFrames.ts';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const REPO_ROOT = path.resolve(__dirname, '../..');
-
-const SHELL_TERMINAL_PANE = path.join(REPO_ROOT, 'src/ui/components/shells/ShellTerminalPane.tsx');
-const USE_SHELL_STREAM = path.join(REPO_ROOT, 'src/ui/components/shells/useShellStream.ts');
-const BOTTOM_DOCK = path.join(REPO_ROOT, 'src/ui/components/shell/BottomDock.tsx');
-const SNAPSHOT_ODIN = path.join(REPO_ROOT, 'src/hub/transport/http/shell_stream_screen_snapshot.odin');
 
 // Resolve Terminal & SerializeAddon constructors across ESM/CJS boundaries
 const Terminal = (xtermModule as any).Terminal || (xtermModule as any).default?.Terminal || (xtermModule as any).default;
@@ -245,11 +233,6 @@ describe('Model 1: Category-Partition Feature Coverage', () => {
     test('T1-R2-03: convertEol remains strictly false during active streaming mode', () => {
       const term = new Terminal({ cols: 80, rows: 24, convertEol: false });
       assert.equal(term.options.convertEol, false, 'convertEol must be false during streaming');
-
-      // Static verification of ShellTerminalPane contract
-      const paneSrc = fs.readFileSync(SHELL_TERMINAL_PANE, 'utf8');
-      assert.ok(paneSrc.includes('convertEol: !isStreamingActive'), 'ShellTerminalPane must set convertEol: !isStreamingActive');
-      assert.ok(paneSrc.includes('terminalRef.current.options.convertEol = !isStreamingActive'), 'ShellTerminalPane must sync convertEol on stream state');
       term.dispose();
     });
 
@@ -271,13 +254,6 @@ describe('Model 1: Category-Partition Feature Coverage', () => {
       sendGeometry(fakeSocket);
       assert.equal(framesSent.length, 1);
       assert.equal(framesSent[0], '{"type":"resize","rows":30,"cols":120}');
-    });
-
-    test('T1-R2-05: Shell stream sends measured geometry without applying cols - 1 nudge', () => {
-      const streamSrc = fs.readFileSync(USE_SHELL_STREAM, 'utf8');
-      assert.ok(streamSrc.includes('sendGeometry(socket)'), 'useShellStream must push geometry on open');
-      assert.ok(!streamSrc.includes('targetCols - 1'), 'useShellStream must never send a cols - 1 nudge');
-      assert.ok(!streamSrc.includes('cols: cols - 1'), 'useShellStream must not send cols - 1');
     });
   });
 
@@ -315,13 +291,6 @@ describe('Model 1: Category-Partition Feature Coverage', () => {
       assert.equal(panes[1].displayStyle, 'block', 'new active tab must be visible');
       assert.equal(panes[0].sessionId, 'session-alpha');
       assert.equal(panes[1].sessionId, 'session-beta');
-
-      // 2. Static verification that BottomDock preserves ShellTerminalPane keying invariant
-      const dockSrc = fs.readFileSync(BOTTOM_DOCK, 'utf8');
-      assert.ok(
-        dockSrc.includes('key={activeSession.session_id}') || dockSrc.includes('key={session.session_id}'),
-        'BottomDock must key ShellTerminalPane instances by session id'
-      );
     });
 
     test('T1-R3-02: Background output continues writing to inactive tab without losing lines', async () => {

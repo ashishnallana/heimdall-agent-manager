@@ -28,6 +28,7 @@ test_bridge_shell_input_and_resize_routes :: proc(t: ^testing.T) {
 		trusted_proxy_cidrs = cidrs[:],
 		auto_provision_users = true,
 		logout_url = "/_dev/logout",
+		paddle_environment = "sandbox",
 	})
 	testing.expect(t, ok, msg)
 	defer app.shutdown_graph(&graph)
@@ -49,6 +50,8 @@ test_bridge_shell_input_and_resize_routes :: proc(t: ^testing.T) {
 		_, _, _ = iface.bridge_save_bridge(graph.bridges.repo, b)
 	}
 	project_service.bridge_runtime_registry_mark_live(graph.agents.bridge_runtime_registry, bridge_id, false, "")
+	_, _ = iface.bridge_provider_status_upsert(graph.agents.providers, domain.Bridge_Provider_Status{bridge_id = bridge_id, provider = "claude", state = "present", checked_at = "2026-10-01T00:00:00Z"})
+	_, _ = iface.bridge_provider_setting_upsert(graph.agents.providers, domain.Bridge_Provider_Setting{bridge_id = bridge_id, provider = "claude", enabled = true, updated_at = "2026-10-01T00:00:00Z"})
 
 	call_count := 0
 	last_command: project_service.Runtime_Command
@@ -73,10 +76,14 @@ test_bridge_shell_input_and_resize_routes :: proc(t: ^testing.T) {
 		count = &call_count,
 		cmd   = &last_command,
 	}
-	graph.agents.bridge_command_sink.ctx = rawptr(&mock_data)
-	graph.agents.bridge_command_sink.send_runtime_command = mock_sink
-	graph.bridges.bridge_command_sink.ctx = rawptr(&mock_data)
-	graph.bridges.bridge_command_sink.send_runtime_command = mock_sink
+	graph.agents.bridge_command_sink = project_service.Bridge_Command_Sink{
+		ctx = rawptr(&mock_data),
+		send_runtime_command = mock_sink,
+	}
+	graph.bridges.bridge_command_sink = project_service.Bridge_Command_Sink{
+		ctx = rawptr(&mock_data),
+		send_runtime_command = mock_sink,
+	}
 
 	shell_id := "sh_custom_test_1"
 	input_path := fmt.tprintf("/api/v1/bridges/%s/shells/%s/input", bridge_id, shell_id)
@@ -144,7 +151,8 @@ test_bridge_shell_input_and_resize_routes :: proc(t: ^testing.T) {
 	testing.expect_value(t, last_command.bridge_id, bridge_id)
 	testing.expect(t, strings.contains(last_command.body_json, "\"type\":\"shell_pty_input\""), "type must be shell_pty_input")
 	testing.expect(t, strings.contains(last_command.body_json, fmt.tprintf("\"shell_id\":\"%s\"", shell_id)), "must contain shell_id")
-	testing.expect(t, strings.contains(last_command.body_json, "\"data\":\"ls -la\\n\""), "must contain data")
+	testing.expect(t, strings.contains(last_command.body_json, "\"data_b64\":\"bHMgLWxhCg==\""), "must contain base64-encoded data")
+	testing.expect(t, strings.contains(last_command.body_json, "\"is_encrypted\":false"), "must mark unencrypted input")
 
 	// 6. Input with control characters (Ctrl+C)
 	call_count = 0
@@ -158,7 +166,7 @@ test_bridge_shell_input_and_resize_routes :: proc(t: ^testing.T) {
 	})
 	testing.expect_value(t, ctrl_c_input.status, 200)
 	testing.expect_value(t, call_count, 1)
-	testing.expect(t, strings.contains(last_command.body_json, "\\u0003"), "must preserve escaped control characters")
+	testing.expect(t, strings.contains(last_command.body_json, "\"data_b64\":\"Aw==\""), "must preserve base64-encoded control characters")
 
 	// 6b. Input with enc_b64
 	call_count = 0
@@ -172,7 +180,8 @@ test_bridge_shell_input_and_resize_routes :: proc(t: ^testing.T) {
 	})
 	testing.expect_value(t, enc_input.status, 200)
 	testing.expect_value(t, call_count, 1)
-	testing.expect(t, strings.contains(last_command.body_json, "\"enc_b64\":\"dmF1bHQ6djE6dGVzdA==\""), "must forward enc_b64")
+	testing.expect(t, strings.contains(last_command.body_json, "\"data_b64\":\"dmF1bHQ6djE6dGVzdA==\""), "must forward encrypted payload as data_b64")
+	testing.expect(t, strings.contains(last_command.body_json, "\"is_encrypted\":true"), "must set is_encrypted true")
 
 	// --- RESIZE ENDPOINT TESTS ---
 	// 7. Unauthenticated -> 401
@@ -279,7 +288,7 @@ test_bridge_shell_input_and_resize_routes :: proc(t: ^testing.T) {
 	agent_res := api_http.router_dispatch(&graph.router, api_http.Request{
 		method = "POST",
 		path = "/api/v1/agents",
-		body = `{"name":"Coder Agent","slug":"coder","default_provider":"claude","default_model":"normal"}`,
+		body = `{"name":"Coder Agent","slug":"coder","default_provider":"claude","default_model":"claude-sonnet-5-5"}`,
 		request_id = "req_agent",
 		remote_addr = "127.0.0.1",
 		headers = alice[:],
@@ -300,7 +309,7 @@ test_bridge_shell_input_and_resize_routes :: proc(t: ^testing.T) {
 	support_res := api_http.router_dispatch(&graph.router, api_http.Request{
 		method = "PATCH",
 		path = support_path,
-		body = `{"enabled":true,"provider":"claude","model":"normal"}`,
+		body = `{"enabled":true,"provider":"claude","model":"claude-sonnet-5-5"}`,
 		request_id = "req_supp",
 		remote_addr = "127.0.0.1",
 		headers = alice[:],
@@ -308,7 +317,7 @@ test_bridge_shell_input_and_resize_routes :: proc(t: ^testing.T) {
 	testing.expect_value(t, support_res.status, 200)
 
 	// Create an agent instance
-	inst_body := strings.concatenate({"{\"agent_id\":\"", agent_id, "\",\"bridge_id\":\"", bridge_id, "\"}"})
+	inst_body := strings.concatenate({"{\"agent_id\":\"", agent_id, "\",\"bridge_id\":\"", bridge_id, "\",\"provider\":\"claude\",\"model\":\"claude-sonnet-5-5\"}"})
 	defer delete(inst_body)
 	inst_res := api_http.router_dispatch(&graph.router, api_http.Request{
 		method = "POST",
@@ -344,7 +353,7 @@ test_bridge_shell_input_and_resize_routes :: proc(t: ^testing.T) {
 	testing.expect_value(t, call_count, 1)
 	testing.expect_value(t, last_command.bridge_id, bridge_id)
 	testing.expect(t, strings.contains(last_command.body_json, fmt.tprintf("\"shell_id\":\"%s\"", inst_id)), "agent instance input must forward shell_id = agent_instance_id")
-	testing.expect(t, strings.contains(last_command.body_json, "\"data\":\"git status\\n\""), "agent instance input must pass data")
+	testing.expect(t, strings.contains(last_command.body_json, "\"data_b64\":\"Z2l0IHN0YXR1cwo=\""), "agent instance input must pass base64 data")
 
 	// Verify POST /api/v1/agent-instances/{id}/resize forwards with shell_id = agent_instance_id
 	call_count = 0
@@ -368,4 +377,75 @@ test_bridge_shell_input_and_resize_routes :: proc(t: ^testing.T) {
 	if last_command.bridge_id != "" do delete(last_command.bridge_id)
 	if last_command.command_id != "" do delete(last_command.command_id)
 	if last_command.body_json != "" do delete(last_command.body_json)
+}
+
+@(private = "file")
+T10_Route_Sink :: struct {
+	reply: string,
+	waits: int,
+}
+
+// T10 (REQ-T10-2): a REST keystroke into a pane on a LOCKED bridge answers HTTP 423
+// {error:{code:"vault_locked", details:{bridge_id}}} instead of a silent 200; any other
+// bridge outcome keeps the pre-T10 200.
+@(test)
+test_bridge_shell_input_on_locked_bridge_returns_423 :: proc(t: ^testing.T) {
+	db_path := fmt.tprintf("/tmp/heimdall-hub-test-t10-vault-locked-%d.db", os.get_pid())
+	_ = os.remove(db_path)
+	defer _ = os.remove(db_path)
+
+	cidrs := [?]string{"127.0.0.1/32"}
+	graph: app.App_Graph
+	ok, msg := app.build_graph(&graph, app.Hub_Config{
+		database_path = db_path,
+		migrations_dir = "src/hub/repository/sqlite/migrations",
+		username_header = "X-authentik-username",
+		display_name_header = "X-authentik-name",
+		email_header = "X-authentik-email",
+		trusted_proxy_cidrs = cidrs[:],
+		auto_provision_users = true,
+		logout_url = "/_dev/logout",
+		paddle_environment = "sandbox",
+	})
+	testing.expect(t, ok, msg)
+	defer app.shutdown_graph(&graph)
+
+	alice := [?]contracts.HTTP_Header{{name = "X-authentik-username", value = "alice"}}
+	bridge_id, _, enroll_ok := device_enroll_test_bridge(&graph, alice[:], "Alice Bridge")
+	testing.expect(t, enroll_ok, "device-flow bridge provisioning failed")
+	if !enroll_ok do return
+	if b, b_ok, _ := iface.bridge_get_bridge(graph.bridges.repo, bridge_id); b_ok {
+		b.status = .Online
+		_, _, _ = iface.bridge_save_bridge(graph.bridges.repo, b)
+	}
+
+	state := T10_Route_Sink{reply = `{"type":"command_result","protocol_version":1,"command_id":"x","payload":{"status":"failed","error_code":"vault_locked"}}`}
+	graph.bridges.bridge_command_sink = project_service.Bridge_Command_Sink{
+		ctx = rawptr(&state),
+		send_runtime_command = proc(ctx: rawptr, command: project_service.Runtime_Command) -> (bool, domain.Domain_Error) {
+			return true, {}
+		},
+		send_runtime_command_wait = proc(ctx: rawptr, command: project_service.Runtime_Command, timeout_ms: int) -> (string, bool, domain.Domain_Error) {
+			s := (^T10_Route_Sink)(ctx)
+			s.waits += 1
+			return strings.clone(s.reply), true, {}
+		},
+	}
+
+	path := fmt.tprintf("/api/v1/bridges/%s/shells/sh_t10/input", bridge_id)
+	locked := api_http.router_dispatch(&graph.router, api_http.Request{
+		method = "POST", path = path, body = `{"enc_b64":"vault:v1:AAAA"}`,
+		request_id = "req_t10_locked", remote_addr = "127.0.0.1", headers = alice[:],
+	})
+	testing.expect_value(t, locked.status, 423)
+	testing.expect(t, strings.contains(locked.body, `"code":"vault_locked"`), locked.body)
+	testing.expect(t, strings.contains(locked.body, fmt.tprintf(`"bridge_id":"%s"`, bridge_id)), locked.body)
+	testing.expect_value(t, state.waits, 1)
+
+	state.reply = `{"type":"command_result","protocol_version":1,"command_id":"x","payload":{"status":"succeeded"}}`
+	delivered := api_http.router_dispatch(&graph.router, api_http.Request{
+		method = "POST", path = path, body = `{"enc_b64":"vault:v1:AAAA"}`,
+		request_id = "req_t10_ok", remote_addr = "127.0.0.1", headers = alice[:],
+	})
+	testing.expect_value(t, delivered.status, 200)
 }

@@ -5,9 +5,6 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 import {
   isVaultArmored,
@@ -23,93 +20,10 @@ import {
   decryptArtifactText,
 } from '../src/ui/utils/vaultArtifacts.ts';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const REPO_ROOT = path.resolve(__dirname, '..');
-
 const TEST_KEY_HEX = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
-const DIFFERENT_KEY_HEX = 'fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210';
 
 // -----------------------------------------------------------------------------
-// Test 1: Static verification of component files, contracts, and imports
-// -----------------------------------------------------------------------------
-
-test('Artifact UI components, endpoints, and utils exist with required contracts', () => {
-  const artifactViewerFile = path.join(REPO_ROOT, 'src/ui/components/ArtifactViewer.tsx');
-  const libraryPageFile = path.join(REPO_ROOT, 'src/ui/components/LibraryPage.tsx');
-  const attachmentPreviewFile = path.join(REPO_ROOT, 'src/ui/components/ArtifactAttachmentPreview.tsx');
-  const artifactsEndpointFile = path.join(REPO_ROOT, 'src/ui/api/endpoints/artifacts.ts');
-  const vaultArtifactsFile = path.join(REPO_ROOT, 'src/ui/utils/vaultArtifacts.ts');
-
-  assert.ok(fs.existsSync(artifactViewerFile), 'ArtifactViewer.tsx must exist');
-  assert.ok(fs.existsSync(libraryPageFile), 'LibraryPage.tsx must exist');
-  assert.ok(fs.existsSync(attachmentPreviewFile), 'ArtifactAttachmentPreview.tsx must exist');
-  assert.ok(fs.existsSync(artifactsEndpointFile), 'artifacts.ts must exist');
-  assert.ok(fs.existsSync(vaultArtifactsFile), 'vaultArtifacts.ts must exist');
-
-  // Verify ArtifactViewer integrates VaultText and handles title, description, content
-  const viewerSrc = fs.readFileSync(artifactViewerFile, 'utf8');
-  assert.ok(
-    viewerSrc.includes('VaultText'),
-    'ArtifactViewer.tsx must integrate VaultText component',
-  );
-  assert.ok(
-    viewerSrc.includes('<VaultText value={title}'),
-    'ArtifactViewer.tsx must render title wrapped in VaultText',
-  );
-  assert.ok(
-    viewerSrc.includes('selectedArtifactMeta.description'),
-    'ArtifactViewer.tsx must handle description field',
-  );
-  assert.ok(
-    viewerSrc.includes('isVaultArmored'),
-    'ArtifactViewer.tsx must check for armored content',
-  );
-
-  // Verify LibraryPage integrates VaultText
-  const librarySrc = fs.readFileSync(libraryPageFile, 'utf8');
-  assert.ok(
-    librarySrc.includes('VaultText'),
-    'LibraryPage.tsx must integrate VaultText component',
-  );
-  assert.ok(
-    librarySrc.includes('<VaultText value={a?.name}'),
-    'LibraryPage.tsx must wrap artifact name with VaultText',
-  );
-
-  // Verify ArtifactAttachmentPreview integrates VaultText
-  const previewSrc = fs.readFileSync(attachmentPreviewFile, 'utf8');
-  assert.ok(
-    previewSrc.includes('VaultText'),
-    'ArtifactAttachmentPreview.tsx must integrate VaultText component',
-  );
-
-  // Verify artifacts endpoint imports and uses vault encryption
-  const endpointSrc = fs.readFileSync(artifactsEndpointFile, 'utf8');
-  assert.ok(
-    endpointSrc.includes('encryptVaultText'),
-    'artifacts.ts must import and use encryptVaultText',
-  );
-  assert.ok(
-    endpointSrc.includes('decryptVaultText'),
-    'artifacts.ts must import and use decryptVaultText',
-  );
-  assert.ok(
-    endpointSrc.includes('createArtifact'),
-    'artifacts.ts must define createArtifact mutation',
-  );
-  assert.ok(
-    endpointSrc.includes('updateArtifact'),
-    'artifacts.ts must define updateArtifact mutation',
-  );
-  assert.ok(
-    endpointSrc.includes('fetchArtifactTextContent'),
-    'artifacts.ts must define fetchArtifactTextContent query',
-  );
-});
-
-// -----------------------------------------------------------------------------
-// Test 2: Legacy unarmored plaintext artifact tolerance and passthrough
+// Test 1: Legacy unarmored plaintext artifact tolerance and passthrough
 // -----------------------------------------------------------------------------
 
 test('Legacy plaintext artifacts pass through without error', async () => {

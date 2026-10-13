@@ -23,6 +23,7 @@ package hub_h9_coordinator_single_source_test
 import "core:fmt"
 import "core:os"
 import "core:strings"
+import "core:testing"
 import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
@@ -104,6 +105,12 @@ inst_get :: proc(ctx: rawptr, id: string) -> (domain.Agent_Instance, bool, domai
 add_instance :: proc(r: ^Repo, id: string, owner: string, chain_id: string) {
 	r.instances[r.instance_count] = domain.Agent_Instance{agent_instance_id = id, owner_user_id = domain.User_ID(owner), agent_id = "agt_a", chain_id = chain_id}
 	r.instance_count += 1
+}
+
+@(test)
+test_hub_h9_coordinator_single_source :: proc(t: ^testing.T) {
+	_ = t
+	main()
 }
 
 main :: proc() {
@@ -210,6 +217,14 @@ main :: proc() {
 	rev_role := ""
 	for m in rev_members { if m.agent_instance_id == rev do rev_role = m.role }
 	check(rev_role == "reviewer", fmt.tprintf("T6: an existing reviewer member must keep its role, got %q", rev_role))
+
+	// --- T7 (H5): Cross-owner get_chain isolation and outsider coordinator target rejection ---
+	_, cross_ok, cross_err := taskchain_service.get_chain(&service, bob_auth, chain.chain_id)
+	check(!cross_ok && cross_err.code == .Not_Found, "T7: cross-owner instance token must not resolve another owner's chain")
+	outsider := "inst_alice_outsider"
+	add_instance(&data, outsider, "alice", "")
+	_, bad_ok, bad_err := taskchain_service.update_chain(&service, auth2, chain.chain_id, taskchain_service.Update_Chain_Input{coordinator_agent_instance_id = outsider, has_coordinator = true})
+	check(!bad_ok && bad_err.code == .Conflict, "T7: coordinator target must belong to the same chain")
 
 	fmt.println("PASS: hub H9 coordinator single source of truth")
 }

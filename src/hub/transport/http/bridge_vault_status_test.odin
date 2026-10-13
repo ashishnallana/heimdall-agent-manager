@@ -1,30 +1,26 @@
+// Behavioral tests for bridge JSON serialization (vault status, public key, version/update state) and heartbeat updates.
 package http
 
+import agent_service "odin_test:hub/service/agent"
+import auth_service "odin_test:hub/service/auth"
+import bridge_service "odin_test:hub/service/bridge"
+import contracts "odin_test:contracts"
+import domain "odin_test:hub/domain"
+import events "odin_test:hub/service/events"
 import "core:fmt"
+import iface "odin_test:hub/repository/iface"
 import "core:os"
+import platform "odin_test:hub/platform"
+import project_service "odin_test:hub/service/project"
+import sqlite "odin_test:hub/repository/sqlite"
 import "core:strings"
 import "core:sync"
 import "core:testing"
 import "core:time"
-import contracts "odin_test:contracts"
-import domain "odin_test:hub/domain"
-import platform "odin_test:hub/platform"
-import iface "odin_test:hub/repository/iface"
-import sqlite "odin_test:hub/repository/sqlite"
-import agent_service "odin_test:hub/service/agent"
-import auth_service "odin_test:hub/service/auth"
-import bridge_service "odin_test:hub/service/bridge"
-import events "odin_test:hub/service/events"
-import project_service "odin_test:hub/service/project"
 import user_service "odin_test:hub/service/user"
 
-// REQ-BVS-2: write_bridge_json emits vault_status VERBATIM — the key is always
-// present, and a bridge that has never reported serializes as "".
-//
-// The "" case is the one worth a test of its own. The tempting shape here is the
-// `x if x != "" else <default>` that telemetry_enabled and update_status both use two
-// lines above in the same proc, and copying it would have made every pre-existing
-// bridge in the fleet claim its vault was unlocked.
+// --- Consolidated from bridge_vault_status_test.odin ---
+
 @(test)
 test_write_bridge_json_vault_status_unreported_is_empty :: proc(t: ^testing.T) {
 	bridge := domain.Bridge{
@@ -101,8 +97,8 @@ VAULT_STATUS_TEST_CIDRS := [1]string{"127.0.0.1/32"}
 setup_vault_status_fixture :: proc(t: ^testing.T, tag: string) -> ^vault_status_fixture {
 	f := new(vault_status_fixture)
 	seq := sync.atomic_add(&vault_status_test_counter, 1)
-	f.db_path = fmt.tprintf("/tmp/test_bridge_vault_status_%s_%d_%d_%d.db", tag, os.get_pid(), time.now()._nsec, seq)
-	os.remove(f.db_path)
+	f.db_path = ":memory:"
+	
 
 	conn, open_ok, open_err := sqlite.open(f.db_path)
 	testing.expect(t, open_ok, "sqlite open ok")
@@ -118,7 +114,7 @@ setup_vault_status_fixture :: proc(t: ^testing.T, tag: string) -> ^vault_status_
 	f.ag_repo = sqlite.new_agent_repository(&f.ag_repo_sqlite, &f.conn)
 
 	f.clock = platform.real_clock()
-	f.ids = platform.real_id_generator()
+	f.ids = http_test_id_generator()
 
 	f.br_svc = bridge_service.new_bridge_service(&f.br_repo, &f.clock, &f.ids)
 	f.us_svc = user_service.new_user_service_basic(&f.us_repo, &f.clock, &f.ids)
@@ -170,7 +166,7 @@ setup_vault_status_fixture :: proc(t: ^testing.T, tag: string) -> ^vault_status_
 teardown_vault_status_fixture :: proc(f: ^vault_status_fixture) {
 	if f == nil do return
 	sqlite.close(&f.conn)
-	os.remove(f.db_path)
+	
 	if len(f.owner_user_id) > 0 do delete(f.owner_user_id)
 	if len(f.bridge_id) > 0 do delete(f.bridge_id)
 	free(f)
@@ -300,4 +296,142 @@ test_apply_vault_status_report_ignores_frames_without_the_field :: proc(t: ^test
 	defer { b := stored; domain.bridge_destroy(&b) }
 	testing.expect_value(t, stored.vault_status, "unlocked")
 	testing.expect(t, f.bus.event_seq == seq_after_report, "a frame without the field publishes nothing")
+}
+
+// --- Consolidated from bridge_unseal_test.odin ---
+
+@(test)
+test_write_bridge_json_public_key_fields :: proc(t: ^testing.T) {
+	registry: project_service.Bridge_Runtime_Registry
+	defer project_service.bridge_runtime_registry_destroy(&registry)
+	project_service.bridge_runtime_registry_mark_live(&registry, "brg_pk_test", false, "")
+	project_service.bridge_runtime_registry_set_public_key(&registry, "brg_pk_test", "04aabbccddeeff")
+
+	bridge := domain.Bridge{
+		bridge_id = "brg_pk_test",
+		label = "Worker Public Key",
+		machine_hostname = "worker-pk",
+		machine_os = "linux",
+		machine_arch = "amd64",
+		hub_url = "http://127.0.0.1:8080",
+		status = .Online,
+		capabilities_json = "{}",
+		version = "0.2.0",
+		commit_sha = "796bfb57",
+		build_timestamp = "2026-10-01T12:00:00Z",
+		update_status = "idle",
+		update_error = "",
+		last_seen_at = "2026-10-01T12:01:00Z",
+		updated_at = "2026-10-01T12:01:00Z",
+	}
+
+	agents := agent_service.Agent_Service{
+		bridge_runtime_registry = &registry,
+	}
+
+	b := strings.builder_make()
+	defer strings.builder_destroy(&b)
+
+	write_bridge_json(&b, bridge, &agents, nil)
+	out := strings.to_string(b)
+
+	testing.expect(t, strings.contains(out, "\"public_key\":\"04aabbccddeeff\""), "public_key serialized from registry")
+	testing.expect(t, strings.contains(out, "\"bridge_public_key\":\"04aabbccddeeff\""), "bridge_public_key serialized from registry")
+}
+
+// Fallback to capabilities_json if registry is empty
+@(test)
+test_write_bridge_json_public_key_from_capabilities :: proc(t: ^testing.T) {
+	bridge := domain.Bridge{
+		bridge_id = "brg_cap_test",
+		label = "Worker Cap",
+		machine_hostname = "worker-cap",
+		machine_os = "linux",
+		machine_arch = "amd64",
+		hub_url = "http://127.0.0.1:8080",
+		status = .Online,
+		capabilities_json = `{"public_key":"04112233445566"}`,
+		version = "0.2.0",
+		commit_sha = "796bfb57",
+		build_timestamp = "2026-10-01T12:00:00Z",
+		update_status = "idle",
+		update_error = "",
+		last_seen_at = "2026-10-01T12:01:00Z",
+		updated_at = "2026-10-01T12:01:00Z",
+	}
+
+	b := strings.builder_make()
+	defer strings.builder_destroy(&b)
+
+	write_bridge_json(&b, bridge, nil, nil)
+	out := strings.to_string(b)
+
+	testing.expect(t, strings.contains(out, "\"public_key\":\"04112233445566\""), "public_key serialized from capabilities_json")
+	testing.expect(t, strings.contains(out, "\"bridge_public_key\":\"04112233445566\""), "bridge_public_key serialized from capabilities_json")
+}
+
+// --- Consolidated from bridge_version_json_test.odin ---
+
+@(test)
+test_write_bridge_json_version_fields :: proc(t: ^testing.T) {
+	bridge := domain.Bridge{
+		bridge_id = "brg_version_test",
+		label = "Worker Alpha",
+		machine_hostname = "worker-01",
+		machine_os = "linux",
+		machine_arch = "amd64",
+		hub_url = "http://127.0.0.1:8080",
+		status = .Online,
+		capabilities_json = "{}",
+		version = "0.2.0",
+		commit_sha = "796bfb57",
+		build_timestamp = "2026-10-01T12:00:00Z",
+		update_status = "idle",
+		update_message = "",
+		update_progress = 0,
+		update_error = "",
+		last_seen_at = "2026-10-01T12:01:00Z",
+		updated_at = "2026-10-01T12:01:00Z",
+	}
+
+	b := strings.builder_make()
+	defer strings.builder_destroy(&b)
+
+	write_bridge_json(&b, bridge, nil)
+	out := strings.to_string(b)
+
+	testing.expect(t, strings.contains(out, "\"bridge_id\":\"brg_version_test\""), "bridge_id serialized")
+	testing.expect(t, strings.contains(out, "\"version\":\"0.2.0\""), "version serialized")
+	testing.expect(t, strings.contains(out, "\"commit_sha\":\"796bfb57\""), "commit_sha serialized")
+	testing.expect(t, strings.contains(out, "\"build_timestamp\":\"2026-10-01T12:00:00Z\""), "build_timestamp serialized")
+	testing.expect(t, strings.contains(out, "\"update_status\":\"idle\""), "update_status serialized")
+	testing.expect(t, strings.contains(out, "\"update_progress\":0"), "update_progress serialized")
+	testing.expect(t, strings.contains(out, "\"update_error\":\"\""), "update_error serialized")
+	testing.expect(t, strings.contains(out, "\"target\":\"linux-amd64\""), "target serialized")
+	testing.expect(t, strings.contains(out, "\"update_available\":"), "update_available serialized")
+	testing.expect(t, strings.contains(out, "\"latest_version\":"), "latest_version serialized")
+
+	// Test with active update error
+	bridge.update_status = "failed"
+	bridge.update_error = "verification failed: binary crashed"
+	b2 := strings.builder_make()
+	defer strings.builder_destroy(&b2)
+
+	write_bridge_json(&b2, bridge, nil)
+	out2 := strings.to_string(b2)
+	testing.expect(t, strings.contains(out2, "\"update_status\":\"failed\""), "update_status failed serialized")
+	testing.expect(t, strings.contains(out2, "\"update_error\":\"verification failed: binary crashed\""), "update_error text serialized")
+}
+
+
+_http_test_id_seq: int = 0
+
+http_test_id_generate :: proc(ctx: rawptr, prefix: string) -> string {
+	_ = ctx
+	seq := sync.atomic_add(&_http_test_id_seq, 1)
+	return fmt.tprintf("%s%x_%x", prefix, time.to_unix_nanoseconds(time.now()), seq)
+}
+
+http_test_id_generator :: proc() -> platform.ID_Generator {
+	return platform.ID_Generator{ctx = nil, generate = http_test_id_generate}
 }

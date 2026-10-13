@@ -25,6 +25,8 @@ package main
 //     the retired RPC did: setsid + sh -c, output teed to the session's .out file,
 //     pty_host=false, spec written after the pid is known.
 
+import "base:runtime"
+import "core:fmt"
 import "core:os"
 import "core:strings"
 import "core:sync"
@@ -34,7 +36,7 @@ import "core:time"
 
 @(private = "file")
 test_data_dir :: proc(name: string) -> string {
-	return strings.concatenate({"/tmp/ham-shell2-", name})
+	return fmt.aprintf("/tmp/ham-shell2-%s-%d", name, os.get_pid())
 }
 
 // test_spawn_direct_child_run spawns a DIRECT-CHILD run and registers it exactly as
@@ -137,11 +139,14 @@ Convert_Ctx :: struct {
 	session_id: string,
 }
 
-// Flips the run to background a moment after the waiter has parked.
+// Flips the run to background as soon as the waiter has parked.
 @(private = "file")
 convert_worker :: proc(data: rawptr) {
 	ctx := (^Convert_Ctx)(data)
-	time.sleep(150 * time.Millisecond)
+	for _ in 0 ..< 500 {
+		if bridge_shell_wait_count(ctx.session_id) > 0 do break
+		time.sleep(1 * time.Millisecond)
+	}
 	_ = bridge_shell_set_background(ctx.session_id)
 }
 
@@ -398,7 +403,14 @@ bridge_shell2_reconcile_after_restart_leaves_no_untracked_orphan :: proc(t: ^tes
 	bridge_shell_session_map_reset(&bridge_shell_session_map)
 	testing.expect_value(t, bridge_shell_wait_count(session_id), 0)
 
-	bridge_shell_session_reconcile(&bridge_shell_session_map, nil, dir)
+	{
+		// Reconcile spawns a detached 5s orphan-kill thread (thread.run_with_data)
+		// that frees its context and Thread struct after 5s; allocate on the process
+		// heap rather than the per-test tracking allocator so the background thread
+		// does not free against a destroyed test arena.
+		context.allocator = runtime.default_allocator()
+		bridge_shell_session_reconcile(&bridge_shell_session_map, nil, dir)
+	}
 
 	// Tracked either way — the one outcome that must not happen is "reconcile has
 	// never heard of it", which is the untracked orphan.

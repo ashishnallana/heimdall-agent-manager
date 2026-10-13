@@ -15,16 +15,56 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { registerHooks } from 'node:module';
-import { fileURLToPath } from 'node:url';
+import { createRequire, registerHooks } from 'node:module';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
-// Endpoint modules use extensionless relative imports (`from '../cookieFetch'`) that
-// only vite resolves at build time. Retry those against the real file extensions so
-// plain `node --test` can load them.
+const _req = createRequire(REPO_ROOT + '/package.json');
+let _transformSync: ((code: string, opts: Record<string, unknown>) => { code: string }) | null = null;
+function getTransformSync() {
+  if (!_transformSync) {
+    _transformSync = (_req('esbuild') as { transformSync: (code: string, opts: Record<string, unknown>) => { code: string } }).transformSync;
+  }
+  return _transformSync;
+}
+
+// Endpoint modules use extensionless relative imports (`from '../cookieFetch'`) and `@ui` aliases
+// that only vite resolves at build time. Retry those against the real file extensions and
+// transpile `.ts`/`.tsx` under `src/` via esbuild so plain `node --test` can load them.
 registerHooks({
+  load(url, context, nextLoad) {
+    if (url.startsWith('file:') && url.endsWith('.css')) {
+      return { format: 'module', source: 'export default {};', shortCircuit: true };
+    }
+    if (url.startsWith('file:') && (url.endsWith('.tsx') || (url.endsWith('.ts') && url.includes('/src/')))) {
+      const source = fs.readFileSync(fileURLToPath(url), 'utf8');
+      const result = getTransformSync()(source, {
+        loader: url.endsWith('.tsx') ? 'tsx' : 'ts',
+        format: 'esm',
+        target: 'esnext',
+        jsx: 'automatic',
+      });
+      return { format: 'module', source: result.code, shortCircuit: true };
+    }
+    return nextLoad(url, context);
+  },
   resolve(specifier, context, nextResolve) {
+    if (specifier === '@ui' || specifier.startsWith('@ui/')) {
+      const rel = specifier === '@ui' ? '' : specifier.slice(4);
+      const targetBase = path.join(REPO_ROOT, 'src', 'ui', 'components', 'ui', rel);
+      for (const cand of [
+        targetBase,
+        targetBase + '.ts',
+        targetBase + '.tsx',
+        path.join(targetBase, 'index.ts'),
+        path.join(targetBase, 'index.tsx'),
+      ]) {
+        if (fs.existsSync(cand) && fs.statSync(cand).isFile()) {
+          return { url: pathToFileURL(cand).href, shortCircuit: true };
+        }
+      }
+    }
     try {
       return nextResolve(specifier, context);
     } catch (err) {
@@ -140,8 +180,10 @@ export async function unlockVault(store: any, keyHex: string): Promise<CryptoKey
 export async function lockVaultFully(store: any): Promise<void> {
   const { setActiveVaultKey } = await import(`${REPO_ROOT}/src/ui/utils/vaultCrypto.ts`);
   const { lockVault } = await import(`${REPO_ROOT}/src/ui/store/vaultSlice.ts`);
+  const { heimdallApi } = await import(`${REPO_ROOT}/src/ui/api/heimdallApi.ts`);
   store.dispatch(lockVault());
-  setActiveVaultKey(null, null);
+  store.dispatch(heimdallApi.util.resetApiState());
+  setActiveVaultKey(null);
 }
 
 /** Encryption disabled: no vault configured and no key anywhere. */

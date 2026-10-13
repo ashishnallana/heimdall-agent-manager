@@ -11,7 +11,7 @@ import "core:strings"
 import "core:testing"
 
 @(test)
-agent_action_event_json_shape :: proc(t: ^testing.T) {
+test_agent_action_event_json_shape :: proc(t: ^testing.T) {
 	out := agent_action_event_json("inst_abc", "task_comment", "commented: looks good")
 	defer delete(out)
 	testing.expect(t, strings.contains(out, "\"type\":\"agent_action\""), "type present")
@@ -24,7 +24,7 @@ agent_action_event_json_shape :: proc(t: ^testing.T) {
 }
 
 @(test)
-agent_action_event_json_clips_long_summary :: proc(t: ^testing.T) {
+test_agent_action_event_json_clips_long_summary :: proc(t: ^testing.T) {
 	// A summary longer than AGENT_ACTION_SUMMARY_MAX runes must be truncated with an
 	// ellipsis so a long comment preview can't bloat the frame.
 	long := strings.repeat("x", 200)
@@ -39,7 +39,7 @@ agent_action_event_json_clips_long_summary :: proc(t: ^testing.T) {
 }
 
 @(test)
-agent_action_event_json_escapes_and_is_id_free :: proc(t: ^testing.T) {
+test_agent_action_event_json_escapes_and_is_id_free :: proc(t: ^testing.T) {
 	// Quotes/backslashes in a composed summary must be JSON-escaped so the frame
 	// stays well-formed. (Callers are responsible for passing id-free text; this
 	// asserts the framing does not re-introduce structural breakage.)
