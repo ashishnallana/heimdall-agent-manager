@@ -75,6 +75,7 @@ export default function BottomDock({
   const [height, setHeight] = useState<number>(() => readBottomDockHeight(dockMaxHeight()));
   const [isMinimized, setIsMinimized] = useState<boolean>(() => !readBottomDockOpen());
   const [isResizing, setIsResizing] = useState<boolean>(false);
+  const [layoutRevision, setLayoutRevision] = useState(0);
 
   // Vault status (REQ-BOTTOMDOCK-VAULT-2)
   const isVaultConfigured = useSelector(selectIsVaultConfigured);
@@ -381,6 +382,11 @@ export default function BottomDock({
   return (
     <div
       data-debug-id="bottom-dock-container"
+      onTransitionEnd={(event) => {
+        if (event.target === event.currentTarget && event.propertyName === 'height') {
+          setLayoutRevision((current) => current + 1);
+        }
+      }}
       style={{
         height: effectiveHeight,
         maxHeight: maxDockHeight,
@@ -603,6 +609,7 @@ export default function BottomDock({
                   key={session.session_id}
                   session={session}
                   isActive={isActive}
+                  layoutRevision={layoutRevision}
                   isBridgeUnreachable={Boolean(session.bridge_id && !isBridgeReachable(session.bridge_id))}
                   onClose={() => handleKillSession(session.session_id)}
                 />

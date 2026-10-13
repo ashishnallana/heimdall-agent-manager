@@ -20,6 +20,7 @@ import {
   dispatchTerminalData,
 } from '../src/ui/components/shells/terminalWriteAccounting.ts';
 import { activateVisibleTerminal } from '../src/ui/components/shells/terminalPaneActivation.ts';
+import { deliverTerminalOutput } from '../src/ui/components/shells/terminalOutputDelivery.ts';
 import { shellResizeFrame } from '../src/ui/components/shells/shellStreamFrames.ts';
 
 const Terminal = (xtermModule as any).Terminal || (xtermModule as any).default?.Terminal || (xtermModule as any).default;
@@ -89,6 +90,44 @@ test('a keep-alive terminal waits for visible geometry before sizing and drainin
     ['resize', 'mark-sized', 'send-resize', 'flush', 'focus'],
     'buffered bytes must not drain before xterm and the PTY have valid geometry'
   );
+});
+
+test('an unsized mounted terminal processes protocol queries instead of buffering them', async () => {
+  const term = new Terminal({ cols: 80, rows: 24 });
+  const replies: string[] = [];
+  const buffered: Uint8Array[] = [];
+  term.onData((data: string) => replies.push(data));
+
+  await new Promise<void>((resolve) => {
+    const outcome = deliverTerminalOutput(
+      term,
+      'session-unsized',
+      new TextEncoder().encode('\x1b[5n'),
+      {
+        write: (target, bytes) => target.write(bytes, resolve),
+        buffer: (_sessionId, bytes) => buffered.push(bytes),
+      }
+    );
+    assert.equal(outcome, 'written');
+  });
+
+  assert.deepEqual(replies, ['\x1b[0n'], 'xterm must answer DSR before the pane has fitted');
+  assert.deepEqual(buffered, [], 'layout state must never divert mounted-terminal bytes');
+  term.dispose();
+});
+
+test('terminal output buffers only while no terminal instance is mounted', () => {
+  const buffered: Array<{ sessionId: string; bytes: Uint8Array }> = [];
+  const bytes = new TextEncoder().encode('early output');
+  const outcome = deliverTerminalOutput(null, 'session-before-mount', bytes, {
+    write: () => assert.fail('no terminal exists yet'),
+    buffer: (sessionId, chunk) => buffered.push({ sessionId, bytes: chunk }),
+  });
+
+  assert.equal(outcome, 'buffered');
+  assert.equal(buffered.length, 1);
+  assert.equal(buffered[0].sessionId, 'session-before-mount');
+  assert.equal(new TextDecoder().decode(buffered[0].bytes), 'early output');
 });
 
 test('xterm protocol replies are always forwarded unless the vault is locked', async () => {

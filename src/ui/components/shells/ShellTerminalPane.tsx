@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { Terminal as TerminalType } from '@xterm/xterm';
 import type { FitAddon as FitAddonType } from '@xterm/addon-fit';
 import type { SerializeAddon as SerializeAddonType } from '@xterm/addon-serialize';
@@ -18,6 +18,7 @@ import {
   dispatchTerminalData,
 } from './terminalWriteAccounting';
 import { activateVisibleTerminal } from './terminalPaneActivation';
+import { deliverTerminalOutput } from './terminalOutputDelivery';
 
 const xtermObj = xtermModule as Record<string, any>;
 const Terminal = (xtermObj.Terminal || xtermObj['default']?.Terminal || xtermObj['default']) as typeof TerminalType;
@@ -43,6 +44,7 @@ import type { ShellSession } from '../../api/endpoints/shells';
 interface ShellTerminalPaneProps {
   session: ShellSession;
   isActive: boolean;
+  layoutRevision?: number;
   isBridgeUnreachable?: boolean;
   onClose?: () => void;
 }
@@ -69,6 +71,7 @@ interface ShellTerminalPaneProps {
 export function ShellTerminalPane({
   session,
   isActive,
+  layoutRevision = 0,
   isBridgeUnreachable: propIsBridgeUnreachable,
 }: ShellTerminalPaneProps) {
   const { theme } = useTheme();
@@ -158,19 +161,13 @@ export function ShellTerminalPane({
     onOutput: (bytes) => {
       const term = terminalRef.current;
       const sessionId = sessionIdRef.current;
-      if (!term || !isSizedRef.current) {
-        // REQ-FIX-1 — withheld output goes into the registry's CAPPED delta buffer
-        // (MAX_DELTA_BYTES, FIFO prune), never a plain array on this component. A pane in a
-        // backgrounded dock tab reports clientWidth === 0 forever, so isSizedRef can stay false
-        // for the whole life of the tab; an unbounded local queue grew without limit for exactly
-        // as long, and was thrown away on unmount. The registry is also the only queue here —
-        // the mount effect drains the same buffer, so replay order cannot interleave.
-        if (sessionId) {
-          terminalSessionRegistry.bufferSessionDelta(sessionId, bytes);
-        }
-        return;
-      }
-      writeStreamBytes(term, bytes);
+      // xterm is part of the PTY protocol, not just a renderer. It must parse terminal queries
+      // even while its dock is 0px tall so onData can return DSR/device/color responses. Only a
+      // genuinely unmounted terminal buffers; layout readiness controls fit/resize separately.
+      deliverTerminalOutput(term, sessionId, bytes, {
+        write: writeStreamBytes,
+        buffer: (targetId, chunk) => terminalSessionRegistry.bufferSessionDelta(targetId, chunk),
+      });
     },
     onVaultLocked: (signal) => {
       // A locked vault is not a stream failure: no fallback to polling.
@@ -411,6 +408,10 @@ export function ShellTerminalPane({
     terminalRef.current = term;
     fitAddonRef.current = fitAddon;
 
+    // Close the small mount-order gap without waiting for layout. Bytes that arrived after
+    // consumeRestorationData but before terminalRef was installed may contain terminal queries.
+    flushPendingOutput();
+
     const replayToXterm = (data: string | Uint8Array, onDone?: () => void) => {
       const finishWrite = beginTerminalWrite(pendingWritesRef);
       term.write(data, () => {
@@ -610,56 +611,29 @@ export function ShellTerminalPane({
     };
   }, []);
 
-  // A keep-alive pane may mount while its wrapper is `display: none`. Mobile WebKit does not
-  // reliably deliver ResizeObserver's hidden-to-visible notification, so activation is an
-  // explicit sizing event. Retry across the dock transition until the wrapper has real geometry;
-  // only then may buffered stream bytes be drained into xterm.
-  useEffect(() => {
+  // A keep-alive pane may mount while its wrapper is `display: none`, or while the dock is at the
+  // zero-height start of its expansion transition. BottomDock publishes transition completion as
+  // layoutRevision; ResizeObserver remains the continuous fallback for every other size change.
+  // This effect is deliberately event-driven: no timing loop and no arbitrary retry budget.
+  useLayoutEffect(() => {
     if (!isActive) return;
-
-    let cancelled = false;
-    let animationFrame = 0;
-    let attempts = 0;
-    const maxAttempts = 30;
-
-    const activate = () => {
-      if (cancelled) return;
-      attempts += 1;
-
-      const container = terminalContainerRef.current;
-      const fitAddon = fitAddonRef.current;
-      const term = terminalRef.current;
-      try {
-        if (
-          container &&
-          fitAddon &&
-          term &&
-          activateVisibleTerminal(container, fitAddon, term, {
-            markSized: () => {
-              if (!isSizedRef.current) {
-                isSizedRef.current = true;
-                setIsSized(true);
-              }
-            },
-            sendResize: (rows, cols) => handleResizeRef.current(rows, cols),
-            flushPendingOutput,
-          })
-        ) {
-          return;
-        }
-      } catch { /* retry while the dock is settling */ }
-
-      if (attempts < maxAttempts) {
-        animationFrame = window.requestAnimationFrame(activate);
-      }
-    };
-
-    activate();
-    return () => {
-      cancelled = true;
-      if (animationFrame) window.cancelAnimationFrame(animationFrame);
-    };
-  }, [isActive, flushPendingOutput]);
+    const container = terminalContainerRef.current;
+    const fitAddon = fitAddonRef.current;
+    const term = terminalRef.current;
+    if (!container || !fitAddon || !term) return;
+    try {
+      activateVisibleTerminal(container, fitAddon, term, {
+        markSized: () => {
+          if (!isSizedRef.current) {
+            isSizedRef.current = true;
+            setIsSized(true);
+          }
+        },
+        sendResize: (rows, cols) => handleResizeRef.current(rows, cols),
+        flushPendingOutput,
+      });
+    } catch { /* ResizeObserver or the next layout event will retry */ }
+  }, [isActive, layoutRevision, flushPendingOutput]);
 
   // --------------------------------------------------------------------------
   // LEGACY POLLING PATH: Snapshot Diff & Repaint

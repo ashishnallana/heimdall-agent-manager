@@ -20,6 +20,7 @@ import assert from 'node:assert/strict';
 import * as xtermModule from '@xterm/xterm';
 import * as serializeModule from '@xterm/addon-serialize';
 import { shellResizeFrame, type ShellGeometry } from '../../src/ui/components/shells/shellStreamFrames.ts';
+import { deliverTerminalOutput } from '../../src/ui/components/shells/terminalOutputDelivery.ts';
 
 // Resolve Terminal & SerializeAddon constructors across ESM/CJS boundaries
 const Terminal = (xtermModule as any).Terminal || (xtermModule as any).default?.Terminal || (xtermModule as any).default;
@@ -183,44 +184,34 @@ describe('Model 1: Category-Partition Feature Coverage', () => {
   // Feature Group R2: TUI Application First-Frame Rendering & Sizing Gates
   describe('Group R2: TUI Application First-Frame Rendering & Sizing Gates', () => {
 
-    test('T1-R2-01: Initialization gate withholds live stream writes while container is unmeasured', async () => {
-      const writeQueue: Uint8Array[] = [];
-      let isSized = false;
+    test('T1-R2-01: Mounted xterm parses TUI protocol bytes before container measurement', async () => {
+      const term = new Terminal({ cols: 80, rows: 24 });
+      const replies: string[] = [];
+      term.onData((data: string) => replies.push(data));
 
-      const handleStreamChunk = (chunk: Uint8Array) => {
-        if (!isSized) {
-          writeQueue.push(chunk);
-          return;
-        }
-      };
+      await new Promise<void>((resolve) => {
+        deliverTerminalOutput(term, 'tui-first-frame', new TextEncoder().encode('\x1b[5n'), {
+          write: (target, bytes) => target.write(bytes, resolve),
+          buffer: () => assert.fail('a mounted terminal must not buffer on layout state'),
+        });
+      });
 
-      // Receive chunks before container reports positive dimensions
-      const chunk1 = new TextEncoder().encode('welcome chunk\r\n');
-      handleStreamChunk(chunk1);
-
-      assert.equal(isSized, false);
-      assert.equal(writeQueue.length, 1, 'chunk must be queued while container is unmeasured');
+      assert.deepEqual(replies, ['\x1b[0n'], 'the TUI must receive its protocol reply before fit');
+      term.dispose();
     });
 
-    test('T1-R2-02: Initialization gate flushes buffered writes upon container measurement', async () => {
+    test('T1-R2-02: Only pre-mount bytes buffer and they flush when xterm mounts', async () => {
       const term = new Terminal({ cols: 80, rows: 24 });
       const writeQueue: Uint8Array[] = [];
-      let isSized = false;
-
-      const handleStreamChunk = (chunk: Uint8Array) => {
-        if (!isSized) {
-          writeQueue.push(chunk);
-          return;
-        }
-        term.write(chunk);
-      };
 
       const chunk = new TextEncoder().encode('initial splash banner');
-      handleStreamChunk(chunk);
+      deliverTerminalOutput(null, 'pre-mount', chunk, {
+        write: () => assert.fail('no terminal is mounted'),
+        buffer: (_sessionId, bytes) => writeQueue.push(bytes),
+      });
       assert.equal(term.buffer.active.cursorX, 0, 'term should not have written yet');
 
-      // Container measurement event occurs (clientWidth > 0 && clientHeight > 0)
-      isSized = true;
+      // Mounting xterm, not measuring its container, closes the only valid delivery gap.
       while (writeQueue.length > 0) {
         const buffered = writeQueue.shift()!;
         await writeToTerminal(term, buffered);
