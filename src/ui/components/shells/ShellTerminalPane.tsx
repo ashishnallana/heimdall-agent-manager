@@ -17,6 +17,7 @@ import {
   beginTerminalWrite,
   dispatchTerminalData,
 } from './terminalWriteAccounting';
+import { activateVisibleTerminal } from './terminalPaneActivation';
 
 const xtermObj = xtermModule as Record<string, any>;
 const Terminal = (xtermObj.Terminal || xtermObj['default']?.Terminal || xtermObj['default']) as typeof TerminalType;
@@ -41,6 +42,7 @@ import type { ShellSession } from '../../api/endpoints/shells';
 
 interface ShellTerminalPaneProps {
   session: ShellSession;
+  isActive: boolean;
   isBridgeUnreachable?: boolean;
   onClose?: () => void;
 }
@@ -56,11 +58,9 @@ interface ShellTerminalPaneProps {
  * mutable refs (terminalRef, fitAddonRef, sessionIdRef, lastWrittenOutputRef, userScrolledUpRef)
  * that must all agree with the new session, and a remount cannot forget one of them.
  *
- * A remount also re-runs the initial fit, which is the only thing that pushes geometry to a
- * freshly-selected session: geometry is sent from just two places, `term.onResize` (which fires
- * only when xterm's own dimensions CHANGE — switching sessions does not resize the pane) and
- * `dispatchResize` (mount-effect only). Without the remount, a switched-to PTY is never told its
- * size at all.
+ * A remount also resets every session-owned ref and runs the initial fit. BottomDock deliberately
+ * keeps one keyed instance per session instead; its explicit `isActive` prop triggers a fit when a
+ * pane mounted under `display: none` becomes visible, even if ResizeObserver misses that change.
  *
  * tests/ui_shell_streaming_test.ts asserts every call site passes the key, because a fourth call
  * site that forgets it reintroduces the bleed silently.
@@ -68,6 +68,7 @@ interface ShellTerminalPaneProps {
 
 export function ShellTerminalPane({
   session,
+  isActive,
   isBridgeUnreachable: propIsBridgeUnreachable,
 }: ShellTerminalPaneProps) {
   const { theme } = useTheme();
@@ -608,6 +609,57 @@ export function ShellTerminalPane({
       setIsSized(false);
     };
   }, []);
+
+  // A keep-alive pane may mount while its wrapper is `display: none`. Mobile WebKit does not
+  // reliably deliver ResizeObserver's hidden-to-visible notification, so activation is an
+  // explicit sizing event. Retry across the dock transition until the wrapper has real geometry;
+  // only then may buffered stream bytes be drained into xterm.
+  useEffect(() => {
+    if (!isActive) return;
+
+    let cancelled = false;
+    let animationFrame = 0;
+    let attempts = 0;
+    const maxAttempts = 30;
+
+    const activate = () => {
+      if (cancelled) return;
+      attempts += 1;
+
+      const container = terminalContainerRef.current;
+      const fitAddon = fitAddonRef.current;
+      const term = terminalRef.current;
+      try {
+        if (
+          container &&
+          fitAddon &&
+          term &&
+          activateVisibleTerminal(container, fitAddon, term, {
+            markSized: () => {
+              if (!isSizedRef.current) {
+                isSizedRef.current = true;
+                setIsSized(true);
+              }
+            },
+            sendResize: (rows, cols) => handleResizeRef.current(rows, cols),
+            flushPendingOutput,
+          })
+        ) {
+          return;
+        }
+      } catch { /* retry while the dock is settling */ }
+
+      if (attempts < maxAttempts) {
+        animationFrame = window.requestAnimationFrame(activate);
+      }
+    };
+
+    activate();
+    return () => {
+      cancelled = true;
+      if (animationFrame) window.cancelAnimationFrame(animationFrame);
+    };
+  }, [isActive, flushPendingOutput]);
 
   // --------------------------------------------------------------------------
   // LEGACY POLLING PATH: Snapshot Diff & Repaint

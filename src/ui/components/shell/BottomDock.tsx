@@ -602,6 +602,7 @@ export default function BottomDock({
                   // REQ-SHELL-18: key={activeSession.session_id}
                   key={session.session_id}
                   session={session}
+                  isActive={isActive}
                   isBridgeUnreachable={Boolean(session.bridge_id && !isBridgeReachable(session.bridge_id))}
                   onClose={() => handleKillSession(session.session_id)}
                 />

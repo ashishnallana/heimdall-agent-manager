@@ -735,7 +735,7 @@ export function ShellDetailBody({
                 In the desktop two-pane layout ShellListPage renders <ShellDetailPane
                 sessionId={selectedId}> unkeyed, so selecting a different row swaps `record`
                 through this component instead of remounting it. */}
-            <ShellTerminalPane key={record.session_id} session={record} />
+            <ShellTerminalPane key={record.session_id} session={record} isActive />
           </div>
         ) : (
           /* showSessionVerbs={false}: this page's header already carries Restart and

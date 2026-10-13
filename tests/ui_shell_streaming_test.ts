@@ -19,6 +19,7 @@ import {
   beginTerminalWrite,
   dispatchTerminalData,
 } from '../src/ui/components/shells/terminalWriteAccounting.ts';
+import { activateVisibleTerminal } from '../src/ui/components/shells/terminalPaneActivation.ts';
 import { shellResizeFrame } from '../src/ui/components/shells/shellStreamFrames.ts';
 
 const Terminal = (xtermModule as any).Terminal || (xtermModule as any).default?.Terminal || (xtermModule as any).default;
@@ -26,6 +27,69 @@ const Terminal = (xtermModule as any).Terminal || (xtermModule as any).default?.
 function writeToTerminal(term: any, data: string | Uint8Array): Promise<void> {
   return new Promise((resolve) => term.write(data, () => resolve()));
 }
+
+test('a keep-alive terminal waits for visible geometry before sizing and draining output', () => {
+  const container = { clientWidth: 0, clientHeight: 0 };
+  const resized: Array<[number, number]> = [];
+  const sent: Array<[number, number]> = [];
+  const activationOrder: string[] = [];
+  let fitCalls = 0;
+  let markSizedCalls = 0;
+  let flushCalls = 0;
+  let focusCalls = 0;
+  const terminal = {
+    cols: 12,
+    rows: 0,
+    resize: (cols: number, rows: number) => {
+      resized.push([cols, rows]);
+      activationOrder.push('resize');
+    },
+    focus: () => {
+      focusCalls += 1;
+      activationOrder.push('focus');
+    },
+  };
+  const fitAddon = {
+    fit: () => {
+      fitCalls += 1;
+      terminal.cols = 38;
+      terminal.rows = 12;
+    },
+  };
+  const callbacks = {
+    markSized: () => {
+      markSizedCalls += 1;
+      activationOrder.push('mark-sized');
+    },
+    sendResize: (rows: number, cols: number) => {
+      sent.push([rows, cols]);
+      activationOrder.push('send-resize');
+    },
+    flushPendingOutput: () => {
+      flushCalls += 1;
+      activationOrder.push('flush');
+    },
+  };
+
+  assert.equal(activateVisibleTerminal(container, fitAddon, terminal, callbacks), false);
+  assert.equal(fitCalls, 0, 'a display:none pane must not fit against zero geometry');
+  assert.equal(flushCalls, 0, 'stream output must remain buffered while the pane is hidden');
+
+  container.clientWidth = 390;
+  container.clientHeight = 420;
+  assert.equal(activateVisibleTerminal(container, fitAddon, terminal, callbacks), true);
+  assert.equal(fitCalls, 1);
+  assert.deepEqual(resized, [[40, 12]], 'activation preserves the terminal geometry floors');
+  assert.deepEqual(sent, [[12, 40]], 'the fitted geometry must reach the PTY');
+  assert.equal(markSizedCalls, 1);
+  assert.equal(flushCalls, 1, 'buffered first-mount output drains as soon as sizing succeeds');
+  assert.equal(focusCalls, 1);
+  assert.deepEqual(
+    activationOrder,
+    ['resize', 'mark-sized', 'send-resize', 'flush', 'focus'],
+    'buffered bytes must not drain before xterm and the PTY have valid geometry'
+  );
+});
 
 test('xterm protocol replies are always forwarded unless the vault is locked', async () => {
   const term = new Terminal({ cols: 80, rows: 24 });
