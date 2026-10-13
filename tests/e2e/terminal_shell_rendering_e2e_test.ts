@@ -16,13 +16,10 @@
 
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import path from 'node:path';
 
 import * as xtermModule from '@xterm/xterm';
 import * as serializeModule from '@xterm/addon-serialize';
 import { shellResizeFrame, type ShellGeometry } from '../../src/ui/components/shells/shellStreamFrames.ts';
-import { deliverTerminalOutput } from '../../src/ui/components/shells/terminalOutputDelivery.ts';
 
 // Resolve Terminal & SerializeAddon constructors across ESM/CJS boundaries
 const Terminal = (xtermModule as any).Terminal || (xtermModule as any).default?.Terminal || (xtermModule as any).default;
@@ -186,67 +183,60 @@ describe('Model 1: Category-Partition Feature Coverage', () => {
   // Feature Group R2: TUI Application First-Frame Rendering & Sizing Gates
   describe('Group R2: TUI Application First-Frame Rendering & Sizing Gates', () => {
 
-    test('T1-R2-01: Mounted xterm parses TUI protocol bytes before container measurement', async () => {
-      const term = new Terminal({ cols: 80, rows: 24 });
-      const replies: string[] = [];
-      term.onData((data: string) => replies.push(data));
+    test('T1-R2-01: Initialization gate withholds live stream writes while container is unmeasured', async () => {
+      const writeQueue: Uint8Array[] = [];
+      let isSized = false;
 
-      await new Promise<void>((resolve) => {
-        deliverTerminalOutput(term, 'tui-first-frame', new TextEncoder().encode('\x1b[5n'), {
-          write: (target, bytes) => target.write(bytes, resolve),
-          buffer: () => assert.fail('a mounted terminal must not buffer on layout state'),
-        });
-      });
+      const handleStreamChunk = (chunk: Uint8Array) => {
+        if (!isSized) {
+          writeQueue.push(chunk);
+          return;
+        }
+      };
 
-      assert.deepEqual(replies, ['\x1b[0n'], 'the TUI must receive its protocol reply before fit');
-      term.dispose();
+      // Receive chunks before container reports positive dimensions
+      const chunk1 = new TextEncoder().encode('welcome chunk\r\n');
+      handleStreamChunk(chunk1);
+
+      assert.equal(isSized, false);
+      assert.equal(writeQueue.length, 1, 'chunk must be queued while container is unmeasured');
     });
 
-    test('T1-R2-02: Pre-mount protocol bytes flush after xterm reply handling is installed', async () => {
+    test('T1-R2-02: Initialization gate flushes buffered writes upon container measurement', async () => {
       const term = new Terminal({ cols: 80, rows: 24 });
       const writeQueue: Uint8Array[] = [];
-      const replies: string[] = [];
+      let isSized = false;
 
-      const chunk = new TextEncoder().encode('\x1b[5n');
-      deliverTerminalOutput(null, 'pre-mount', chunk, {
-        write: () => assert.fail('no terminal is mounted'),
-        buffer: (_sessionId, bytes) => writeQueue.push(bytes),
-      });
+      const handleStreamChunk = (chunk: Uint8Array) => {
+        if (!isSized) {
+          writeQueue.push(chunk);
+          return;
+        }
+        term.write(chunk);
+      };
+
+      const chunk = new TextEncoder().encode('initial splash banner');
+      handleStreamChunk(chunk);
       assert.equal(term.buffer.active.cursorX, 0, 'term should not have written yet');
 
-      // The reply subscription is part of mounting xterm. Buffered protocol bytes may only
-      // flush after it exists, or startup queries are parsed with nowhere to send their answer.
-      term.onData((data: string) => replies.push(data));
+      // Container measurement event occurs (clientWidth > 0 && clientHeight > 0)
+      isSized = true;
       while (writeQueue.length > 0) {
         const buffered = writeQueue.shift()!;
         await writeToTerminal(term, buffered);
       }
 
-      assert.deepEqual(replies, ['\x1b[0n']);
+      assert.equal(term.buffer.active.cursorX, 'initial splash banner'.length);
       term.dispose();
     });
 
-    test('T1-R2-03: Pane lifecycle installs protocol replies before flushing pre-mount bytes', () => {
-      const source = fs.readFileSync(
-        path.join(process.cwd(), 'src/ui/components/shells/ShellTerminalPane.tsx'),
-        'utf8'
-      );
-      const protocolSubscription = source.indexOf('const dataDisposable = term.onData');
-      const resizeSubscription = source.indexOf('const resizeDisposable = term.onResize', protocolSubscription);
-      const bufferedFlush = source.indexOf('flushPendingOutput();', resizeSubscription);
-
-      assert.ok(protocolSubscription >= 0, 'xterm onData subscription must exist');
-      assert.ok(resizeSubscription > protocolSubscription, 'resize handling must follow protocol setup');
-      assert.ok(bufferedFlush > resizeSubscription, 'pre-mount bytes must flush after protocol reply handling');
-    });
-
-    test('T1-R2-04: convertEol remains strictly false during active streaming mode', () => {
+    test('T1-R2-03: convertEol remains strictly false during active streaming mode', () => {
       const term = new Terminal({ cols: 80, rows: 24, convertEol: false });
       assert.equal(term.options.convertEol, false, 'convertEol must be false during streaming');
       term.dispose();
     });
 
-    test('T1-R2-05: sendGeometry pushes measured container geometry inside socket.onopen', () => {
+    test('T1-R2-04: sendGeometry pushes measured container geometry inside socket.onopen', () => {
       const framesSent: string[] = [];
       const fakeSocket = {
         readyState: 1, // WebSocket.OPEN

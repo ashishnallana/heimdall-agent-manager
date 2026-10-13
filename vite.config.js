@@ -21,10 +21,7 @@ export default defineConfig({
   resolve: {
     alias: [
       {
-        // xterm 6.0.0's published ESM keeps a function-local const-enum initializer that
-        // esbuild 0.21 can tree-shake into an undeclared variable. Safari then throws from
-        // requestMode on Neovim's first DECRQM query and xterm's async write queue dies forever.
-        // The package's equivalent precompiled UMD artifact has the enum folded to literals.
+        // Avoid an esbuild 0.21 miscompile of xterm 6.0.0's ESM requestMode enum.
         find: /^@xterm\/xterm$/,
         replacement: fileURLToPath(new URL('./node_modules/@xterm/xterm/lib/xterm.js', import.meta.url)),
       },

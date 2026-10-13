@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Terminal as TerminalType } from '@xterm/xterm';
 import type { FitAddon as FitAddonType } from '@xterm/addon-fit';
 import type { SerializeAddon as SerializeAddonType } from '@xterm/addon-serialize';
@@ -13,12 +13,6 @@ import {
   resolveStreamRenderMode,
   resolveStreamingMode,
 } from './streamingMode';
-import {
-  beginTerminalWrite,
-  dispatchTerminalData,
-} from './terminalWriteAccounting';
-import { activateVisibleTerminal } from './terminalPaneActivation';
-import { deliverTerminalOutput } from './terminalOutputDelivery';
 import { createTerminalResizeDispatcher } from './terminalResizeDispatch';
 
 const xtermObj = xtermModule as Record<string, any>;
@@ -44,8 +38,6 @@ import type { ShellSession } from '../../api/endpoints/shells';
 
 interface ShellTerminalPaneProps {
   session: ShellSession;
-  isActive: boolean;
-  layoutRevision?: number;
   isBridgeUnreachable?: boolean;
   onClose?: () => void;
 }
@@ -61,9 +53,11 @@ interface ShellTerminalPaneProps {
  * mutable refs (terminalRef, fitAddonRef, sessionIdRef, lastWrittenOutputRef, userScrolledUpRef)
  * that must all agree with the new session, and a remount cannot forget one of them.
  *
- * A remount also resets every session-owned ref and runs the initial fit. BottomDock deliberately
- * keeps one keyed instance per session instead; its explicit `isActive` prop triggers a fit when a
- * pane mounted under `display: none` becomes visible, even if ResizeObserver misses that change.
+ * A remount also re-runs the initial fit, which is the only thing that pushes geometry to a
+ * freshly-selected session: geometry is sent from just two places, `term.onResize` (which fires
+ * only when xterm's own dimensions CHANGE — switching sessions does not resize the pane) and
+ * `dispatchResize` (mount-effect only). Without the remount, a switched-to PTY is never told its
+ * size at all.
  *
  * tests/ui_shell_streaming_test.ts asserts every call site passes the key, because a fourth call
  * site that forgets it reintroduces the bleed silently.
@@ -71,8 +65,6 @@ interface ShellTerminalPaneProps {
 
 export function ShellTerminalPane({
   session,
-  isActive,
-  layoutRevision = 0,
   isBridgeUnreachable: propIsBridgeUnreachable,
 }: ShellTerminalPaneProps) {
   const { theme } = useTheme();
@@ -82,6 +74,7 @@ export function ShellTerminalPane({
   const serializeAddonRef = useRef<SerializeAddonType | null>(null);
   const isExplicitlyClosedRef = useRef(false);
   const isSizedRef = useRef(false);
+  const pendingReplaysRef = useRef(0);
   const pendingWritesRef = useRef(0);
   const [isSized, setIsSized] = useState(false);
 
@@ -162,13 +155,19 @@ export function ShellTerminalPane({
     onOutput: (bytes) => {
       const term = terminalRef.current;
       const sessionId = sessionIdRef.current;
-      // xterm is part of the PTY protocol, not just a renderer. It must parse terminal queries
-      // even while its dock is 0px tall so onData can return DSR/device/color responses. Only a
-      // genuinely unmounted terminal buffers; layout readiness controls fit/resize separately.
-      deliverTerminalOutput(term, sessionId, bytes, {
-        write: writeStreamBytes,
-        buffer: (targetId, chunk) => terminalSessionRegistry.bufferSessionDelta(targetId, chunk),
-      });
+      if (!term || !isSizedRef.current) {
+        // REQ-FIX-1 — withheld output goes into the registry's CAPPED delta buffer
+        // (MAX_DELTA_BYTES, FIFO prune), never a plain array on this component. A pane in a
+        // backgrounded dock tab reports clientWidth === 0 forever, so isSizedRef can stay false
+        // for the whole life of the tab; an unbounded local queue grew without limit for exactly
+        // as long, and was thrown away on unmount. The registry is also the only queue here —
+        // the mount effect drains the same buffer, so replay order cannot interleave.
+        if (sessionId) {
+          terminalSessionRegistry.bufferSessionDelta(sessionId, bytes);
+        }
+        return;
+      }
+      writeStreamBytes(term, bytes);
     },
     onVaultLocked: (signal) => {
       // A locked vault is not a stream failure: no fallback to polling.
@@ -209,12 +208,22 @@ export function ShellTerminalPane({
     if (term.options.convertEol) {
       term.options.convertEol = false;
     }
-    // Live output is not replay, even when it enters the alternate buffer. Full-screen
-    // applications issue terminal queries in the same chunk and xterm emits their replies
-    // synchronously from `write`; suppressing those replies makes Neovim time out with E1568.
-    const finishWrite = beginTerminalWrite(pendingWritesRef);
+    // Check if this chunk is a screen repaint (\x1b[2J\x1b[H or \x1b[?1049h) so synthetic
+    // terminal query replies from xterm.js are suppressed during replay.
+    const isRepaintPrefix =
+      bytes.length >= 6 &&
+      bytes[0] === 0x1b &&
+      bytes[1] === 0x5b &&
+      ((bytes[2] === 0x32 && bytes[3] === 0x4a) || (bytes[2] === 0x3f && bytes[3] === 0x31));
+    if (isRepaintPrefix) {
+      pendingReplaysRef.current += 1;
+    }
+    pendingWritesRef.current += 1;
     term.write(bytes, () => {
-      finishWrite();
+      if (isRepaintPrefix) {
+        pendingReplaysRef.current = Math.max(0, pendingReplaysRef.current - 1);
+      }
+      pendingWritesRef.current = Math.max(0, pendingWritesRef.current - 1);
       const buffer = term.buffer.active;
       if (!userScrolledUpRef.current && buffer.type !== 'alternate' && buffer.baseY > 0) {
         term.scrollToBottom();
@@ -370,9 +379,8 @@ export function ShellTerminalPane({
     handleResizeRef.current = handleResize;
   }, [handleResize]);
 
-  // Fit xterm on every local layout change, but notify the PTY only after the geometry settles.
-  // Mobile visual-viewport and dock animations otherwise send one resize per frame; a full-screen
-  // program redraws for every one and can starve terminal-query parsing behind that output burst.
+  // Fit locally on every layout change, but send only the final geometry after dock and viewport
+  // animations settle so full-screen programs do not redraw for every animation frame.
   const resizeDispatcherRef = useRef<ReturnType<typeof createTerminalResizeDispatcher> | null>(null);
   if (!resizeDispatcherRef.current) {
     resizeDispatcherRef.current = createTerminalResizeDispatcher((rows, cols) => {
@@ -420,30 +428,26 @@ export function ShellTerminalPane({
     fitAddonRef.current = fitAddon;
 
     const replayToXterm = (data: string | Uint8Array, onDone?: () => void) => {
-      const finishWrite = beginTerminalWrite(pendingWritesRef);
+      pendingReplaysRef.current += 1;
+      pendingWritesRef.current += 1;
       term.write(data, () => {
-        finishWrite();
+        pendingReplaysRef.current = Math.max(0, pendingReplaysRef.current - 1);
+        pendingWritesRef.current = Math.max(0, pendingWritesRef.current - 1);
         onDone?.();
       });
     };
 
     const dataDisposable = term.onData((data) => {
-      // Terminal-generated replies (OSC color reports, DSR, device attributes) use the same
-      // channel as keystrokes and must reach the PTY. Only a locked vault suppresses input.
-      dispatchTerminalData(data, vaultLockedRef.current, (payload) => {
-        handleInputRef.current(payload);
-      });
+      // Suppress synthetic terminal query responses triggered during snapshot/delta replay.
+      if (pendingReplaysRef.current > 0) return;
+      // T10: input is refused while the bridge vault is locked — the overlay says so.
+      if (vaultLockedRef.current) return;
+      handleInputRef.current(data);
     });
 
     const resizeDisposable = term.onResize(({ cols, rows }) => {
       resizeDispatcherRef.current?.schedule(rows, cols);
     });
-
-    // Close the small mount-order gap without waiting for layout. This MUST happen after
-    // onData is subscribed: buffered startup bytes can contain Neovim's terminal queries, and
-    // parsing them before the reply channel exists silently drops the answers. A later remount
-    // appeared to fix the blank pane only because its protocol handler won that race.
-    flushPendingOutput();
 
     // Track manual scroll-up so a repaint does not yank the viewport back down.
     term.onScroll(() => {
@@ -625,30 +629,6 @@ export function ShellTerminalPane({
     };
   }, []);
 
-  // A keep-alive pane may mount while its wrapper is `display: none`, or while the dock is at the
-  // zero-height start of its expansion transition. BottomDock publishes transition completion as
-  // layoutRevision; ResizeObserver remains the continuous fallback for every other size change.
-  // This effect is deliberately event-driven: no timing loop and no arbitrary retry budget.
-  useLayoutEffect(() => {
-    if (!isActive) return;
-    const container = terminalContainerRef.current;
-    const fitAddon = fitAddonRef.current;
-    const term = terminalRef.current;
-    if (!container || !fitAddon || !term) return;
-    try {
-      activateVisibleTerminal(container, fitAddon, term, {
-        markSized: () => {
-          if (!isSizedRef.current) {
-            isSizedRef.current = true;
-            setIsSized(true);
-          }
-        },
-        sendResize: (rows, cols) => handleResizeRef.current(rows, cols),
-        flushPendingOutput,
-      });
-    } catch { /* ResizeObserver or the next layout event will retry */ }
-  }, [isActive, layoutRevision, flushPendingOutput]);
-
   // --------------------------------------------------------------------------
   // LEGACY POLLING PATH: Snapshot Diff & Repaint
   // When streaming is active, incoming bytes bypass term.reset() and are written directly.
@@ -707,7 +687,7 @@ export function ShellTerminalPane({
   return (
     <div
       data-debug-id={`shell-terminal-pane-${session.session_id}`}
-      className="relative flex min-w-0 max-w-full flex-col flex-1 h-full min-h-0 w-full overflow-hidden bg-canvas"
+      className="relative flex flex-col flex-1 h-full min-h-0 w-full overflow-hidden bg-canvas"
     >
       {showUnreachableBanner && (
         <div
@@ -785,7 +765,7 @@ export function ShellTerminalPane({
         role="region"
         aria-label="Shell Terminal"
         style={{ backgroundColor: theme.terminal.background }}
-        className="chat-scrollbar relative min-w-0 max-w-full flex-1 min-h-0 w-full overflow-x-auto p-2 font-mono text-xs cursor-text touch-manipulation focus:outline-none"
+        className="chat-scrollbar relative flex-1 min-h-0 w-full overflow-x-auto p-2 font-mono text-xs cursor-text touch-manipulation focus:outline-none"
       />
     </div>
   );

@@ -75,7 +75,6 @@ export default function BottomDock({
   const [height, setHeight] = useState<number>(() => readBottomDockHeight(dockMaxHeight()));
   const [isMinimized, setIsMinimized] = useState<boolean>(() => !readBottomDockOpen());
   const [isResizing, setIsResizing] = useState<boolean>(false);
-  const [layoutRevision, setLayoutRevision] = useState(0);
 
   // Vault status (REQ-BOTTOMDOCK-VAULT-2)
   const isVaultConfigured = useSelector(selectIsVaultConfigured);
@@ -382,11 +381,6 @@ export default function BottomDock({
   return (
     <div
       data-debug-id="bottom-dock-container"
-      onTransitionEnd={(event) => {
-        if (event.target === event.currentTarget && event.propertyName === 'height') {
-          setLayoutRevision((current) => current + 1);
-        }
-      }}
       style={{
         height: effectiveHeight,
         maxHeight: maxDockHeight,
@@ -550,7 +544,7 @@ export default function BottomDock({
 
       {/* Dock Body - ShellTerminalPane occupies 100% of parent container (REQ-BAR-5) */}
       {!isMinimized && (
-        <div className="flex min-w-0 max-w-full flex-col flex-1 min-h-0 w-full overflow-hidden bg-canvas">
+        <div className="flex flex-col flex-1 min-h-0 w-full overflow-hidden bg-canvas">
           {/* REQ-STREAM-IMPL-3: duplicate state indicator when viewed in main view */}
           {activeSession && isViewedInMainView && (
             <div
@@ -600,7 +594,7 @@ export default function BottomDock({
             return (
               <div
                 key={session.session_id}
-                className="h-full min-w-0 max-w-full w-full flex-col flex-1 min-h-0 overflow-hidden"
+                className="h-full w-full flex-col flex-1 min-h-0"
                 style={{ display: isHidden ? 'none' : 'flex' }}
                 aria-hidden={isHidden}
               >
@@ -608,8 +602,6 @@ export default function BottomDock({
                   // REQ-SHELL-18: key={activeSession.session_id}
                   key={session.session_id}
                   session={session}
-                  isActive={isActive}
-                  layoutRevision={layoutRevision}
                   isBridgeUnreachable={Boolean(session.bridge_id && !isBridgeReachable(session.bridge_id))}
                   onClose={() => handleKillSession(session.session_id)}
                 />

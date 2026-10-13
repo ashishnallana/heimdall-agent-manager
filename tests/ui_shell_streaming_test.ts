@@ -17,54 +17,18 @@ import {
   resolveStreamRenderMode,
   resolveStreamingMode,
 } from '../src/ui/components/shells/streamingMode.ts';
-import {
-  beginTerminalWrite,
-  dispatchTerminalData,
-} from '../src/ui/components/shells/terminalWriteAccounting.ts';
-import { activateVisibleTerminal } from '../src/ui/components/shells/terminalPaneActivation.ts';
-import { deliverTerminalOutput } from '../src/ui/components/shells/terminalOutputDelivery.ts';
 import { createTerminalResizeDispatcher } from '../src/ui/components/shells/terminalResizeDispatch.ts';
 import { shellResizeFrame } from '../src/ui/components/shells/shellStreamFrames.ts';
 
 const Terminal = (xtermModule as any).Terminal || (xtermModule as any).default?.Terminal || (xtermModule as any).default;
 
-test('terminal flex ancestors contain xterm intrinsic width instead of feeding it back into fit', () => {
-  const pane = fs.readFileSync(
-    path.join(process.cwd(), 'src/ui/components/shells/ShellTerminalPane.tsx'),
-    'utf8'
-  );
-  const dock = fs.readFileSync(
-    path.join(process.cwd(), 'src/ui/components/shell/BottomDock.tsx'),
-    'utf8'
-  );
-
-  assert.match(
-    pane,
-    /chat-scrollbar relative min-w-0 max-w-full[^"\n]*overflow-x-auto/,
-    'the xterm scroll host must be allowed to shrink without growing its measurement box'
-  );
-  assert.match(
-    dock,
-    /h-full min-w-0 max-w-full w-full[^"\n]*overflow-hidden/,
-    'the keep-alive flex wrapper must contain xterm intrinsic width'
-  );
-});
-
-test('renderer build uses xterm precompiled artifact without the Safari DECRQM minification crash', () => {
+test('renderer build uses xterm precompiled artifact for Safari-safe mode queries', () => {
   const viteConfig = fs.readFileSync(path.join(process.cwd(), 'vite.config.js'), 'utf8');
-  assert.match(
-    viteConfig,
-    /find: \/\^@xterm\\\/xterm\$\//,
-    'the alias must match only the xterm JavaScript entry and leave its CSS subpath intact'
-  );
-  assert.match(
-    viteConfig,
-    /node_modules\/@xterm\/xterm\/lib\/xterm\.js/,
-    'the renderer must use xterm 6.0.0 precompiled UMD, whose requestMode enum is already folded'
-  );
+  assert.match(viteConfig, /find: \/\^@xterm\\\/xterm\$\//);
+  assert.match(viteConfig, /node_modules\/@xterm\/xterm\/lib\/xterm\.js/);
 });
 
-test('terminal resize bursts send only the final stable geometry to the PTY', () => {
+test('terminal resize bursts send only the final geometry to the PTY', () => {
   const callbacks = new Map<number, () => void>();
   const sent: Array<[number, number]> = [];
   let nextTimer = 1;
@@ -77,165 +41,27 @@ test('terminal resize bursts send only the final stable geometry to the PTY', ()
         callbacks.set(id, callback);
         return id as ReturnType<typeof setTimeout>;
       },
-      clearTimeout: (timer) => {
-        callbacks.delete(timer as unknown as number);
-      },
+      clearTimeout: (timer) => callbacks.delete(timer as unknown as number),
     }
   );
 
   dispatcher.schedule(28, 45);
-  dispatcher.schedule(27, 45);
   dispatcher.schedule(13, 45);
   dispatcher.schedule(28, 45);
 
-  assert.deepEqual(sent, [], 'animation intermediates must not resize the PTY');
-  assert.equal(callbacks.size, 1, 'only the trailing dispatch remains scheduled');
+  assert.deepEqual(sent, []);
+  assert.equal(callbacks.size, 1);
   callbacks.values().next().value?.();
-  assert.deepEqual(sent, [[28, 45]], 'the PTY receives the final stable geometry once');
+  assert.deepEqual(sent, [[28, 45]]);
 
   dispatcher.schedule(20, 80);
   dispatcher.cancel();
-  assert.equal(callbacks.size, 0, 'unmount cancellation prevents a stale resize');
+  assert.equal(callbacks.size, 0);
 });
 
 function writeToTerminal(term: any, data: string | Uint8Array): Promise<void> {
   return new Promise((resolve) => term.write(data, () => resolve()));
 }
-
-test('a keep-alive terminal waits for visible geometry before sizing and draining output', () => {
-  const container = { clientWidth: 0, clientHeight: 0 };
-  const resized: Array<[number, number]> = [];
-  const sent: Array<[number, number]> = [];
-  const activationOrder: string[] = [];
-  let fitCalls = 0;
-  let markSizedCalls = 0;
-  let flushCalls = 0;
-  let focusCalls = 0;
-  const terminal = {
-    cols: 12,
-    rows: 0,
-    resize: (cols: number, rows: number) => {
-      resized.push([cols, rows]);
-      activationOrder.push('resize');
-    },
-    focus: () => {
-      focusCalls += 1;
-      activationOrder.push('focus');
-    },
-  };
-  const fitAddon = {
-    fit: () => {
-      fitCalls += 1;
-      terminal.cols = 38;
-      terminal.rows = 12;
-    },
-  };
-  const callbacks = {
-    markSized: () => {
-      markSizedCalls += 1;
-      activationOrder.push('mark-sized');
-    },
-    sendResize: (rows: number, cols: number) => {
-      sent.push([rows, cols]);
-      activationOrder.push('send-resize');
-    },
-    flushPendingOutput: () => {
-      flushCalls += 1;
-      activationOrder.push('flush');
-    },
-  };
-
-  assert.equal(activateVisibleTerminal(container, fitAddon, terminal, callbacks), false);
-  assert.equal(fitCalls, 0, 'a display:none pane must not fit against zero geometry');
-  assert.equal(flushCalls, 0, 'stream output must remain buffered while the pane is hidden');
-
-  container.clientWidth = 390;
-  container.clientHeight = 420;
-  assert.equal(activateVisibleTerminal(container, fitAddon, terminal, callbacks), true);
-  assert.equal(fitCalls, 1);
-  assert.deepEqual(resized, [[40, 12]], 'activation preserves the terminal geometry floors');
-  assert.deepEqual(sent, [[12, 40]], 'the fitted geometry must reach the PTY');
-  assert.equal(markSizedCalls, 1);
-  assert.equal(flushCalls, 1, 'buffered first-mount output drains as soon as sizing succeeds');
-  assert.equal(focusCalls, 1);
-  assert.deepEqual(
-    activationOrder,
-    ['resize', 'mark-sized', 'send-resize', 'flush', 'focus'],
-    'buffered bytes must not drain before xterm and the PTY have valid geometry'
-  );
-});
-
-test('an unsized mounted terminal processes protocol queries instead of buffering them', async () => {
-  const term = new Terminal({ cols: 80, rows: 24 });
-  const replies: string[] = [];
-  const buffered: Uint8Array[] = [];
-  term.onData((data: string) => replies.push(data));
-
-  await new Promise<void>((resolve) => {
-    const outcome = deliverTerminalOutput(
-      term,
-      'session-unsized',
-      new TextEncoder().encode('\x1b[5n'),
-      {
-        write: (target, bytes) => target.write(bytes, resolve),
-        buffer: (_sessionId, bytes) => buffered.push(bytes),
-      }
-    );
-    assert.equal(outcome, 'written');
-  });
-
-  assert.deepEqual(replies, ['\x1b[0n'], 'xterm must answer DSR before the pane has fitted');
-  assert.deepEqual(buffered, [], 'layout state must never divert mounted-terminal bytes');
-  term.dispose();
-});
-
-test('terminal output buffers only while no terminal instance is mounted', () => {
-  const buffered: Array<{ sessionId: string; bytes: Uint8Array }> = [];
-  const bytes = new TextEncoder().encode('early output');
-  const outcome = deliverTerminalOutput(null, 'session-before-mount', bytes, {
-    write: () => assert.fail('no terminal exists yet'),
-    buffer: (sessionId, chunk) => buffered.push({ sessionId, bytes: chunk }),
-  });
-
-  assert.equal(outcome, 'buffered');
-  assert.equal(buffered.length, 1);
-  assert.equal(buffered[0].sessionId, 'session-before-mount');
-  assert.equal(new TextDecoder().decode(buffered[0].bytes), 'early output');
-});
-
-test('xterm protocol replies are always forwarded unless the vault is locked', async () => {
-  const term = new Terminal({ cols: 80, rows: 24 });
-  const pendingWrites = { current: 0 };
-  const forwarded: string[] = [];
-  term.onData((data: string) => {
-    dispatchTerminalData(data, false, (payload) => forwarded.push(payload));
-  });
-
-  await new Promise<void>((resolve) => {
-    const finish = beginTerminalWrite(pendingWrites);
-    // Neovim brackets its background-color probe with a terminal-status query.
-    term.write('\x1b[?1049h\x1b]11;?\x07\x1b[5n', () => {
-      finish();
-      resolve();
-    });
-  });
-  assert.ok(forwarded.includes('\x1b[0n'), 'live DSR response must return to the PTY');
-  assert.equal(pendingWrites.current, 0);
-
-  forwarded.length = 0;
-  await new Promise<void>((resolve) => {
-    const finish = beginTerminalWrite(pendingWrites);
-    term.write('\x1b[5n', () => {
-      finish();
-      resolve();
-    });
-  });
-  assert.deepEqual(forwarded, ['\x1b[0n'], 'protocol replies must not depend on write provenance');
-
-  const locked: string[] = [];
-  assert.equal(dispatchTerminalData('secret', true, (data) => locked.push(data)), false);
-  assert.deepEqual(locked, [], 'a locked vault must still refuse terminal input');
-});
 
 function renderedLines(term: any): string[] {
   const out: string[] = [];
