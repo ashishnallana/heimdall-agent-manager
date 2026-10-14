@@ -454,7 +454,12 @@ export const agentsApi = heimdallApi.injectEndpoints({
           return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
         }
       },
-      invalidatesTags: (_result, _error, { agentId }) => [{ type: 'Agents' as const, id: 'LIST' }, { type: 'Agents' as const, id: agentId }, { type: 'AgentInstances' as const, id: agentId }],
+      invalidatesTags: (_result, _error, { agentId, instanceId }) => [
+        { type: 'Agents' as const, id: 'LIST' },
+        { type: 'Agents' as const, id: agentId },
+        { type: 'AgentInstances' as const, id: agentId },
+        { type: 'AgentInstances' as const, id: instanceId },
+      ],
     }),
     // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
     restartAgentInstance: build.mutation<any, { agentId?: string; instanceId: string }>({
@@ -466,7 +471,11 @@ export const agentsApi = heimdallApi.injectEndpoints({
           return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
         }
       },
-      invalidatesTags: (_result, _error, { agentId }) => [{ type: 'Agents' as const, id: 'LIST' }, ...(agentId ? [{ type: 'Agents' as const, id: agentId }, { type: 'AgentInstances' as const, id: agentId }] : [])],
+      invalidatesTags: (_result, _error, { agentId, instanceId }) => [
+        { type: 'Agents' as const, id: 'LIST' },
+        ...(agentId ? [{ type: 'Agents' as const, id: agentId }, { type: 'AgentInstances' as const, id: agentId }] : []),
+        { type: 'AgentInstances' as const, id: instanceId },
+      ],
     }),
     // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
     startAgentInstance: build.mutation<any, { agentId?: string; instanceId: string }>({
@@ -492,6 +501,26 @@ export const agentsApi = heimdallApi.injectEndpoints({
         } catch (error: any) { return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any }; }
       },
       providesTags: (_data, _error, { instanceId }) => [{ type: 'AgentInstances' as const, id: instanceId }],
+      // When an operation settles, the instance runtime, the conversation header and its
+      // messages all change server-side. Invalidate their tags here rather than having
+      // views refetch: invalidation only touches started subscriptions, so it is safe
+      // while a view's dependent queries are still skipped.
+      async onQueryStarted(arg, { dispatch, getCacheEntry, queryFulfilled }) {
+        const previous = getCacheEntry().data?.operations?.[0];
+        let next: InstanceReconfiguration | undefined;
+        try {
+          next = (await queryFulfilled).data.operations[0];
+        } catch {
+          return;
+        }
+        if (!next || !reconfigurationSettled(previous, next)) return;
+        dispatch(heimdallApi.util.invalidateTags([
+          { type: 'AgentInstances' as const, id: arg.instanceId },
+          ...(next.conversation_id
+            ? [{ type: 'Chat' as const, id: next.conversation_id }, { type: 'ConversationSummaries' as const, id: next.conversation_id }]
+            : []),
+        ]));
+      },
     }),
     retryInstanceConfiguration: build.mutation<InstanceReconfiguration, { instanceId: string; idempotency_key: string; expected_operation_revision: number }>({
       queryFn: async ({ instanceId, ...body }) => {
@@ -860,6 +889,23 @@ export type ApplyInstanceConfigurationInput = {
   instanceId: string; bridge_id: string; project_id: string; provider: string; model: string;
   idempotency_key: string; expected_revision: number;
 };
+/** Whether an operation reached a phase that changes the instance and conversation. */
+export function isSettledReconfiguration(operation: InstanceReconfiguration): boolean {
+  return operation.phase === 'ready' || (operation.phase === 'failed' && operation.failure_code === 'recovery_stopped');
+}
+
+/**
+ * True only when `next` settled since `previous` was observed. The first observation
+ * (no `previous`) is history, not a transition: an instance reconfigured last week
+ * reports a `ready` operation on every fetch.
+ */
+export function reconfigurationSettled(
+  previous: InstanceReconfiguration | undefined,
+  next: InstanceReconfiguration,
+): boolean {
+  if (!previous || !isSettledReconfiguration(next)) return false;
+  return previous.operation_id !== next.operation_id || !isSettledReconfiguration(previous);
+}
 function normalizeInstanceReconfiguration(raw: any): InstanceReconfiguration {
   const phases = ['prepared', 'stopping', 'source_stopped', 'launching', 'ready', 'failed', 'recovery_required'];
   const phase = typeof raw?.phase === 'number' ? phases[raw.phase] : String(raw?.phase || '').toLowerCase();

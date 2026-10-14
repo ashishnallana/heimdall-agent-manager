@@ -34,6 +34,7 @@ import {
   useRetryInstanceConfigurationMutation,
   useListInstanceReconfigurationsQuery,
   type InstanceReconfiguration,
+  reconfigurationSettled,
   useRestartAgentInstanceMutation,
   useStopAgentInstanceMutation,
 } from '../../api/endpoints/agents';
@@ -92,6 +93,15 @@ import type { ChatDeliveryStatus, ChatMessage, ChatTimestamp } from '../chat/typ
 import type { SplitDirection } from '../../tiling/types';
 
 export const COMPOSER_DRAFT_KEY = 'heimdall:composer:draft';
+
+/**
+ * For user-initiated refreshes only; data freshness otherwise comes from tag
+ * invalidation. RTK Query throws (error #38) when refetching a query that has not
+ * started, e.g. one still skipped while its arguments load.
+ */
+export function refetchIfStarted(query: { isUninitialized: boolean; refetch: () => unknown }) {
+  if (!query.isUninitialized) void query.refetch();
+}
 
 export interface AgentChatPaneProps {
   agentInstanceId: string;
@@ -764,7 +774,7 @@ export function AgentChatPane({
     skipPollingIfUnfocused: true,
   });
   useEffect(() => {
-    if (runtimeMenuOpen) void bridgesQuery.refetch();
+    if (runtimeMenuOpen) refetchIfStarted(bridgesQuery);
   }, [runtimeMenuOpen]);
   const bridges = bridgesQuery.data?.bridges || [];
   const instanceBridge = useMemo(
@@ -1133,7 +1143,9 @@ export function AgentChatPane({
     setProvider(instanceProvider);
     setModel(instanceModel);
   }, [instanceProvider, instanceModel]);
+  const observedOperationRef = useRef<InstanceReconfiguration | undefined>(undefined);
   useEffect(() => {
+    observedOperationRef.current = undefined;
     settingsEditedRef.current = false;
     setStagedBridgeId(null);
     setAcceptedOperation(null);
@@ -1153,25 +1165,21 @@ export function AgentChatPane({
     setProvider(operation.destination.provider);
     setModel(operation.destination.model);
   }, [operation?.operation_id, operation?.phase]);
+  // React to an operation settling WHILE this pane watches it, never to a settled
+  // operation it merely loads (an instance reconfigured long ago reports `ready` on
+  // every open). Refreshing the instance, conversation and messages is the API
+  // layer's job (listInstanceReconfigurations invalidates their tags).
   useEffect(() => {
-    if (!operation || operation.phase !== 'ready') return;
+    const previous = observedOperationRef.current;
+    observedOperationRef.current = operation;
+    if (!operation || !reconfigurationSettled(previous, operation)) return;
+    setAcceptedOperation(null);
+    setReconfigStatus('');
+    if (operation.phase !== 'ready') return;
     settingsEditedRef.current = false;
     setStagedBridgeId(null);
     setProvider(operation.destination.provider);
     setModel(operation.destination.model);
-    setAcceptedOperation(null);
-    setReconfigStatus('');
-    void instanceQuery.refetch();
-    void convQuery.refetch();
-    void messagesQuery.refetch();
-  }, [operation?.operation_id, operation?.phase]);
-  useEffect(() => {
-    if (operation?.failure_code !== 'recovery_stopped' || operation.phase !== 'failed')
-      return;
-    setAcceptedOperation(null);
-    setReconfigStatus('');
-    void instanceQuery.refetch();
-    void messagesQuery.refetch();
   }, [operation?.operation_id, operation?.phase, operation?.failure_code]);
   useEffect(() => {
     setOlderMessages([]);
@@ -1297,7 +1305,6 @@ export function AgentChatPane({
     try {
       await updateConversationTitle({ conversationId, title: next }).unwrap();
       setRenaming(false);
-      void convQuery.refetch();
     } catch (err: any) {
       setTitleError(errMsg(err, 'Rename failed'));
     }
@@ -1443,7 +1450,6 @@ export function AgentChatPane({
             : { ...message, sending: false };
         }),
       );
-      void messagesQuery.refetch();
     } catch (err: any) {
       const message = errMsg(err, 'Send failed');
       setLocalMessages((current) =>
@@ -1482,7 +1488,6 @@ export function AgentChatPane({
             : { ...message, sending: false };
         }),
       );
-      void messagesQuery.refetch();
     } catch (err: any) {
       const message = errMsg(err, 'Send failed');
       setLocalMessages((current) =>
@@ -1519,7 +1524,6 @@ export function AgentChatPane({
             : message,
         ),
       );
-      void messagesQuery.refetch();
     } catch (err: any) {
       const message = errMsg(err, 'Pane capture request failed');
       setLocalMessages((current) =>
@@ -1539,7 +1543,7 @@ export function AgentChatPane({
 
   function refreshFromHeader() {
     setHeaderActionsOpen(false);
-    void messagesQuery.refetch();
+    refetchIfStarted(messagesQuery);
   }
 
   function renderConversationMessageBody(message: ChatMessage) {
@@ -1768,7 +1772,6 @@ export function AgentChatPane({
       if (needsStart) await restartInstance({ agentId, instanceId: agentInstanceId }).unwrap();
       else await stopInstance({ agentId, instanceId: agentInstanceId }).unwrap();
       setReconfigStatus(needsStart ? 'Start requested.' : 'Stop requested.');
-      void instanceQuery.refetch();
     } catch (err: any) {
       setReconfigStatus(errMsg(err, needsStart ? 'Start failed' : 'Stop failed'));
     }
@@ -1787,10 +1790,8 @@ export function AgentChatPane({
         }).unwrap();
         setAcceptedOperation(retried);
         setReconfigStatus('');
-        void operationQuery.refetch();
       } catch (error: any) {
         setReconfigStatus(errMsg(error, 'Recovery retry failed'));
-        void operationQuery.refetch();
       }
       return;
     }
@@ -1818,12 +1819,8 @@ export function AgentChatPane({
       }).unwrap();
       setAcceptedOperation(applied);
       setReconfigStatus('');
-      void operationQuery.refetch();
-      void instanceQuery.refetch();
-      void messagesQuery.refetch();
     } catch (err: any) {
       setReconfigStatus(errMsg(err, 'Configuration change failed'));
-      void operationQuery.refetch();
     }
   }
 
@@ -1847,8 +1844,6 @@ export function AgentChatPane({
       setReconfigStatus(
         'Force stop requested. Waiting for confirmed termination…',
       );
-      void instanceQuery.refetch();
-      void operationQuery.refetch();
     } catch (err: any) {
       setReconfigStatus(errMsg(err, 'Force stop failed'));
     }
@@ -2616,7 +2611,7 @@ export function AgentChatPane({
                 aria-expanded={chainAgentSwitcherOpen}
                 onClick={() => {
                   setChainAgentSwitcherOpen(true);
-                  void chainDetailQuery.refetch();
+                  refetchIfStarted(chainDetailQuery);
                 }}
                 className="flex min-w-0 items-center gap-1.5 rounded-md px-1.5 py-0.5 text-primary hover:bg-neutral-soft"
               >

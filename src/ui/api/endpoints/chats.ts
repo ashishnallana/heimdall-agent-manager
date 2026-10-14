@@ -275,7 +275,14 @@ export const chatEndpoints = heimdallApi.injectEndpoints({
           return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
         }
       },
-      providesTags: (_r, _e, { conversationId }) => [{ type: 'ConversationSummaries' as const, id: conversationId }],
+      // A lookup by instance passes conversationId '' and only learns the real id from
+      // the result. Tag the resolved id too, or invalidations keyed on it (rename,
+      // reconfiguration settling) never reach this entry.
+      providesTags: (result, _e, { conversationId }) => {
+        const resolvedId = String(result?.conversation?.conversation_id || result?.conversation?.conversationId || '');
+        return [...new Set([conversationId, resolvedId].filter(Boolean))]
+          .map((id) => ({ type: 'ConversationSummaries' as const, id }));
+      },
       // Cache conversation metadata across switches so the header/runtime chip
       // render instantly on remount; refetchOnMountOrArgChange still refreshes it.
       keepUnusedDataFor: 300,
