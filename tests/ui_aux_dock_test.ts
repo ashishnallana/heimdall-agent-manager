@@ -195,7 +195,7 @@ test('clean aux tabs: surfaces no longer render their own header chrome', () => 
   assert.match(read('src/ui/components/aux/AuxTabContent.tsx'), /hideTitleBar=\{true\}/);
 });
 
-test('workspace: route fills the focused pane, URL tracks focus, dedupe, mobile pager + full-screen aux sheet', async () => {
+test('workspace: URL <-> layout sync (pane set in the URL, replace pushes, no loops), split groups, mobile sheet', async () => {
   await withDom(async (dom) => {
     const { createRoot } = await import('react-dom/client');
     const { act } = await import('react');
@@ -203,57 +203,82 @@ test('workspace: route fills the focused pane, URL tracks focus, dedupe, mobile 
     const { heimdallApi } = await import('../src/ui/api/heimdallApi.ts');
     const layout = await import('../src/ui/store/workspaceLayoutSlice.ts');
     const { setAuxPaneOpen } = await import('../src/ui/store/auxPanesSlice.ts');
+    const { readGroupIndex } = await import('../src/ui/store/splitGroups.ts');
     const { Workspace } = await import('../src/ui/components/mainWorkspace/Workspace.tsx');
 
     const store = await makeStore();
     const doc = dom.window.document;
     const root = createRoot(doc.getElementById('root')!);
-    const settle = () => new Promise((r) => setTimeout(r, 30));
-    const render = (route: string, isMobile = false) =>
-      root.render(
-        React.createElement(Provider, { store }, React.createElement(Workspace, { routeAgentInstanceId: route, isMobile })),
-      );
-    try {
+    const settle = () => new Promise((r) => setTimeout(r, 40));
+    const go = async (hash: string) => {
       await act(async () => {
-        render('agent-a');
+        dom.window.location.hash = hash;
+        dom.window.dispatchEvent(new dom.window.Event('hashchange'));
         await settle();
       });
+    };
+    let replaces = 0;
+    const origReplace = dom.window.history.replaceState.bind(dom.window.history);
+    dom.window.history.replaceState = (...args: any[]) => {
+      replaces += 1;
+      return origReplace(...(args as [any, string, string]));
+    };
+    const render = (isMobile = false) =>
+      root.render(React.createElement(Provider, { store }, React.createElement(Workspace, { isMobile })));
+    try {
+      await act(async () => {
+        render();
+        await settle();
+      });
+      // Legacy single-id URL = the 1-pane case.
       assert.deepEqual(layout.selectMainAgentIds(store.getState()), ['agent-a']);
+      assert.equal(replaces, 0, 'a URL-driven layout is never echoed back');
 
+      // In-app split -> URL replaced with the pane set + focused.
       await act(async () => {
         store.dispatch(layout.splitMainPane({ targetPaneId: 'pane-1', direction: 'right', agentInstanceId: 'agent-b' }));
         await settle();
       });
-      assert.match(dom.window.location.hash, /\/conversations\/agent-b/, 'URL tracks the focused pane agent');
+      assert.equal(dom.window.location.hash, '#/conversations/agent-a+agent-b?focused=agent-b');
+      const afterSplit = replaces;
+      await act(async () => {
+        await settle();
+      });
+      assert.equal(replaces, afterSplit, 'no ping-pong after the replace');
+      assert.deepEqual(readGroupIndex(), [['agent-a', 'agent-b']], 'the split is saved as a group');
 
-      // The shell feeds the new hash back as the route (no-op: already focused).
+      // Focus change -> only ?focused= changes.
       await act(async () => {
-        render('agent-b');
+        store.dispatch(layout.setFocusedMainPane('pane-1'));
         await settle();
       });
-      assert.equal(layout.selectFocusedMainAgentId(store.getState()), 'agent-b');
-      // Navigating to an open agent focuses it instead of duplicating it.
-      await act(async () => {
-        render('agent-a');
-        await settle();
-      });
+      assert.equal(dom.window.location.hash, '#/conversations/agent-a+agent-b?focused=agent-a');
+
+      // Opening an agent outside the group -> its single view; the group stays saved.
+      await go('#/conversations/agent-c');
+      assert.deepEqual(layout.selectMainAgentIds(store.getState()), ['agent-c']);
+      assert.deepEqual(readGroupIndex(), [['agent-a', 'agent-b']]);
+
+      // Opening an agent that is in a saved group -> the whole group, focused on it.
+      await go('#/conversations/agent-b');
+      assert.match(dom.window.location.hash, /^#\/conversations\/agent-a\+agent-b\?focused=agent-b$/);
       assert.deepEqual(layout.selectMainAgentIds(store.getState()), ['agent-a', 'agent-b']);
-      assert.equal(layout.selectFocusedMainAgentId(store.getState()), 'agent-a');
+      assert.equal(layout.selectFocusedMainAgentId(store.getState()), 'agent-b');
 
-      // Mobile: Main panes page sideways; the aux opens as a full-screen sheet.
+      // Mobile: Main panes page sideways; the aux opens as a full-screen sheet
+      // showing the FOCUSED agent's strip.
       await act(async () => {
-        store.dispatch(setAuxPaneOpen({ treeId: { kind: 'agent', agentInstanceId: 'agent-a' }, open: true, hasChain: false }));
-        render('agent-a', true);
+        store.dispatch(setAuxPaneOpen({ treeId: { kind: 'agent', agentInstanceId: 'agent-b' }, open: true, hasChain: false }));
+        render(true);
         await settle();
       });
       assert.ok(doc.querySelector('[data-debug-id="workspace-mobile-pager"]'));
       assert.equal(doc.querySelectorAll('[data-debug-id^="workspace-mobile-page-"]').length, 2);
       const dock = doc.querySelector('[data-debug-id="aux-dock"]');
       assert.ok(dock, 'aux dock rendered');
-      assert.equal(dock!.getAttribute('data-aux-tree'), 'agent:agent-a', 'split view shows the focused agent strip');
+      assert.equal(dock!.getAttribute('data-aux-tree'), 'agent:agent-b', 'split view shows the focused agent strip');
       assert.equal(dock!.getAttribute('data-aux-mobile-sheet'), 'true');
-      // Persisted globally, not keyed by chain.
-      assert.ok(dom.window.localStorage.getItem('heimdall:workspace-layout:v1'));
+      assert.equal(dom.window.localStorage.getItem('heimdall:workspace-layout:v1'), null, 'no global layout key');
     } finally {
       await act(async () => root.unmount());
       store.dispatch(heimdallApi.util.resetApiState());

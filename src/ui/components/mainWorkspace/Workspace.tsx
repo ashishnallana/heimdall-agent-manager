@@ -1,18 +1,18 @@
-import React, { useCallback, useEffect, useMemo, useRef } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { TilingContainer, getOverlayPosition, type RenderPaneProps } from '../../tiling';
 import {
   NEW_PANE_AGENT_ID,
   assignMainPaneAgent,
   closeMainPane,
-  hydrateWorkspaceLayout,
   isRealAgentId,
-  navigateMainToAgent,
   resizeMainSplit,
   selectFocusedMainAgentId,
   selectMainAgentIds,
+  selectMainLeafIds,
   selectMainTree,
   setFocusedMainPane,
+  setLayoutFromUrl,
   splitMainPane,
   type MainPaneValue,
 } from '../../store/workspaceLayoutSlice';
@@ -34,15 +34,26 @@ import {
 } from '../../store/workspaceChromeSlice';
 import { resolveLegacyPanelToAuxContent, type AuxContent } from '../../store/auxTabId';
 import { isAuxContentAllowed } from '../../store/auxTabGuards';
-import { buildRouteHash, getRouteSearch } from '../../utils/appLocation';
+import { buildRouteHash, getRoutePathname, getRouteSearch } from '../../utils/appLocation';
+import {
+  buildConversationHash,
+  conversationUrlKey,
+  navigateToHash,
+  parseConversationIdsFromRoute,
+  replaceHash,
+} from '../../utils/conversationUrl';
+import {
+  findGroupForAgent,
+  loadSavedLayout,
+  persistSplitLayout,
+  readGroupIndex,
+} from '../../store/splitGroups';
 import {
   readAuxPanesState,
   readWorkspaceChromeState,
-  readWorkspaceLayoutState,
   removeLegacyWorkbenchStorage,
   writeAuxPanesState,
   writeWorkspaceChromeState,
-  writeWorkspaceLayoutState,
 } from '../../utils/clientPersistence';
 import { AuxDock } from '../aux/AuxDock';
 import { useAgentAuxContext } from '../aux/useAgentAuxContext';
@@ -52,34 +63,57 @@ import { MobileMainPager } from './MobileMainPager';
 import { NewChatPanePicker } from './NewChatPanePicker';
 
 export interface WorkspaceProps {
-  /** Agent from the route (`/conversations/:agentInstanceId`). */
-  routeAgentInstanceId: string;
   focusMessageId?: string;
   isMobile?: boolean;
 }
 
-function navigateHashToAgent(agentInstanceId: string) {
-  if (typeof window === 'undefined') return;
-  window.location.hash = buildRouteHash(`/conversations/${encodeURIComponent(agentInstanceId)}`, '');
+function readRoute(): { pathname: string; search: string } {
+  return { pathname: getRoutePathname(), search: getRouteSearch() };
+}
+
+/** Subscribes to the hash route (pathname + search, incl. `?focused=`). */
+function useRouteLocation() {
+  const [loc, setLoc] = useState(readRoute);
+  useEffect(() => {
+    const update = () =>
+      setLoc((prev) => {
+        const next = readRoute();
+        return prev.pathname === next.pathname && prev.search === next.search ? prev : next;
+      });
+    window.addEventListener('hashchange', update);
+    window.addEventListener('popstate', update);
+    update();
+    return () => {
+      window.removeEventListener('hashchange', update);
+      window.removeEventListener('popstate', update);
+    };
+  }, []);
+  return loc;
 }
 
 /**
- * The ONE global Workspace for `/conversations/:agentInstanceId` (Jetski
+ * The Workspace for `#/conversations/<id1>+<id2>?focused=<id>` (Jetski
  * `MainContent`): a Main split tree of agent chats plus ONE aux dock on the
  * right, toggled from the chat header's [≡].
  *
- * - The URL tracks the focused pane's agent; navigating to an agent not in Main
- *   replaces the focused pane's agent, an open one is focused (dedupe).
- * - The aux dock shows the FOCUSED pane's agent strip (Jetski useTreeId with
- *   `?focused=`); moving focus within a split carries the open/closed state to
- *   the newly focused strip (Jetski RouteToReduxSync).
- * - Layout and strips persist globally (never keyed by task chain).
+ * - URL -> layout (RouteToReduxSync): the URL's pane set drives the tree via
+ *   `setLayoutFromUrl`; a single-id URL for an agent in a saved split group
+ *   opens the whole group focused on it.
+ * - Layout -> URL (ReduxToUrlSyncer): in-app edits replace the URL, only when
+ *   the URL was stable since the last run (no ping-pong).
+ * - The aux dock shows the FOCUSED pane's agent strip; moving focus within a
+ *   split carries the open/closed state to the newly focused strip.
+ * - Split geometry/groups persist per id set; nothing is keyed by task chain.
  */
-export function Workspace({ routeAgentInstanceId, focusMessageId, isMobile = false }: WorkspaceProps) {
+export function Workspace({ focusMessageId, isMobile = false }: WorkspaceProps) {
   const dispatch = useDispatch();
   const tree = useSelector(selectMainTree);
   const focusedAgentId = useSelector(selectFocusedMainAgentId);
   const mainAgentIds = useSelector(selectMainAgentIds);
+  const leafIds = useSelector(selectMainLeafIds);
+  const loc = useRouteLocation();
+  const route = useMemo(() => parseConversationIdsFromRoute(loc.pathname, loc.search), [loc]);
+  const routeAgentInstanceId = route.focused || '';
   const auxTreeId = useSelector(selectCurrentAuxTreeId);
   const auxPane = useSelector((state: any) => selectAuxPane(state, auxTreeId));
   const auxPanesState = useSelector(selectAuxPanesState);
@@ -93,13 +127,11 @@ export function Workspace({ routeAgentInstanceId, focusMessageId, isMobile = fal
   const hasChain = ctx.isResolved ? Boolean(ctx.chainId) : true;
   const auxOpen = Boolean(auxTreeId && auxPane?.isPaneOpen);
 
-  // 1. Hydrate the global workspace once (before the route sync below runs).
+  // 1. Hydrate aux strips + chrome once; drop superseded storage keys.
   const hydratedRef = useRef(false);
   useEffect(() => {
     if (hydratedRef.current) return;
     hydratedRef.current = true;
-    const layout = readWorkspaceLayoutState();
-    if (layout) dispatch(hydrateWorkspaceLayout(layout));
     const aux = readAuxPanesState();
     if (aux) dispatch(hydrateAuxPanes(aux));
     const chrome = readWorkspaceChromeState();
@@ -107,39 +139,77 @@ export function Workspace({ routeAgentInstanceId, focusMessageId, isMobile = fal
     removeLegacyWorkbenchStorage();
   }, [dispatch]);
 
-  // 2. Route -> Main: focus the agent if open, else put it in the focused pane.
+  // 2. URL -> layout (Jetski RouteToReduxSync).
+  const lastSyncKeyRef = useRef<string | null>(null);
+  const focusedAgentRef = useRef(focusedAgentId);
+  focusedAgentRef.current = focusedAgentId;
   useEffect(() => {
-    const id = (routeAgentInstanceId || '').trim();
-    if (!id || id === NEW_PANE_AGENT_ID) return;
-    dispatch(navigateMainToAgent(id));
-  }, [dispatch, routeAgentInstanceId]);
+    const { ids, focused } = route;
+    if (ids.length === 0 || !focused) return;
+    const key = conversationUrlKey(ids, focused);
+    if (lastSyncKeyRef.current === key) return;
+    lastSyncKeyRef.current = key;
 
-  // 3. Main -> URL: the URL tracks the focused pane's agent.
-  const prevFocusedRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (prevFocusedRef.current === focusedAgentId) return;
-    const first = prevFocusedRef.current === null;
-    prevFocusedRef.current = focusedAgentId;
-    if (first) return;
-    if (isRealAgentId(focusedAgentId) && focusedAgentId !== routeAgentInstanceId) {
-      navigateHashToAgent(focusedAgentId);
+    // "Open an agent from anywhere": a single-id URL for an agent that belongs
+    // to a saved split group opens the whole group focused on it.
+    if (ids.length === 1 && isRealAgentId(ids[0])) {
+      const group = findGroupForAgent(readGroupIndex(), ids[0]);
+      if (group && group.length > 1) {
+        replaceHash(buildConversationHash(group, { focusedId: ids[0] }));
+        return;
+      }
     }
-  }, [focusedAgentId, routeAgentInstanceId]);
 
-  // 3b. Focus moved to another agent inside a split: carry the dock's open state.
-  const prevTreeRef = useRef<typeof auxTreeId>(null);
-  useEffect(() => {
-    const prev = prevTreeRef.current;
-    prevTreeRef.current = auxTreeId;
-    if (!prev || !auxTreeId || prev.agentInstanceId === auxTreeId.agentInstanceId) return;
-    if (tree && mainAgentIds.length >= 2 && mainAgentIds.includes(prev.agentInstanceId)) {
-      dispatch(carryAuxPaneOpenOnFocus({ from: prev, to: auxTreeId }));
+    const prevFocused = focusedAgentRef.current;
+    dispatch(
+      setLayoutFromUrl({ ids, focusedId: focused, savedLayout: ids.length > 1 ? loadSavedLayout(ids) : null }),
+    );
+    // Focus moved within a split: carry the dock open state (Jetski parity).
+    if (
+      ids.length > 1 &&
+      isRealAgentId(prevFocused) &&
+      isRealAgentId(focused) &&
+      prevFocused !== focused &&
+      ids.includes(prevFocused)
+    ) {
+      dispatch(
+        carryAuxPaneOpenOnFocus({
+          from: { kind: 'agent', agentInstanceId: prevFocused },
+          to: { kind: 'agent', agentInstanceId: focused },
+        }),
+      );
     }
-  }, [auxTreeId, dispatch, mainAgentIds, tree]);
+  }, [dispatch, route]);
 
-  // 4. Persist (global, not keyed by chain).
+  // 3. Layout -> URL (Jetski ReduxToUrlSyncer).
+  const urlKey = conversationUrlKey(route.ids, route.focused);
+  const prevUrlKeyRef = useRef<string | null>(null);
   useEffect(() => {
-    if (hydratedRef.current) writeWorkspaceLayoutState(tree);
+    if (route.ids.length === 0) return; // not a conversation route
+    // Only push for in-app edits (URL stable since last run); if the URL just
+    // changed, step 2 reconciles the layout and echoing stale state would loop.
+    if (prevUrlKeyRef.current !== urlKey) {
+      prevUrlKeyRef.current = urlKey;
+      return;
+    }
+    if (leafIds.length === 0) return;
+    if (!leafIds.some(isRealAgentId)) {
+      navigateToHash(buildRouteHash('/home', ''));
+      return;
+    }
+    const targetFocused = focusedAgentId || leafIds[0];
+    const idsMatch =
+      leafIds.length === route.ids.length && leafIds.every((id, i) => id === route.ids[i]);
+    if (!idsMatch || targetFocused !== route.focused) {
+      replaceHash(buildConversationHash(leafIds, { focusedId: targetFocused }));
+    }
+  }, [focusedAgentId, leafIds, route, urlKey]);
+
+  // 4. Persist split geometry + groups per id set (Jetski layout persistence).
+  const prevActiveKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (lastSyncKeyRef.current === null) return; // layout not yet derived from the URL
+    prevActiveKeyRef.current = persistSplitLayout(tree, prevActiveKeyRef.current);
   }, [tree]);
   useEffect(() => {
     if (hydratedRef.current) writeAuxPanesState(auxPanesState);

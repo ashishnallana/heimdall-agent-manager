@@ -1109,10 +1109,9 @@ function RouteOutlet({
     return (
       <main data-debug-id="shell-main-route-outlet" className="min-w-0 min-h-0 flex-1 overflow-hidden bg-canvas">
         <ErrorBoundary resetKey="workspace" label="Conversation">
-          {/* ONE global Workspace: Main split tree of agent chats + ONE aux dock.
-              The route only says which agent the focused pane shows. */}
+          {/* Workspace: Main split tree of agent chats + ONE aux dock. The URL
+              (`/conversations/<id1>+<id2>?focused=<id>`) carries the pane set. */}
           <Workspace
-            routeAgentInstanceId={agentInstanceId}
             focusMessageId={focusMessageId}
             isMobile={isMobile}
           />

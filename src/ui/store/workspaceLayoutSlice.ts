@@ -17,8 +17,12 @@ import {
 /**
  * Main workspace layout (Jetski `multiConvoLayout` equivalent).
  *
- * ONE global split tree of agent chats for `/conversations/:agentInstanceId`.
- * Leaves hold ONLY an agent instance id, or `'_new'` for the new-chat picker.
+ * The split tree of agent chats for `/conversations/<id1>+<id2>?focused=<id>`.
+ * The URL is the source of truth for the OPEN PANE SET (see
+ * utils/conversationUrl.ts): `setLayoutFromUrl` reconciles the tree from it and
+ * in-app edits are written back to the URL. Leaves hold ONLY an agent instance
+ * id, or `'_new'` for the new-chat picker. Split geometry is remembered per id
+ * set as a split group (store/splitGroups.ts), never globally or per chain.
  *
  * Node shape: we reuse Heimdall's binary `tiling/*` tree (`PaneTreeState`) rather
  * than Jetski's N-ary `{children, weights}` node. Every N-ary layout Jetski can
@@ -178,24 +182,72 @@ const workspaceLayoutSlice = createSlice({
     },
 
     /**
-     * Route sync / "Full View": focuses the agent's pane if it is open,
-     * otherwise replaces the focused pane's agent.
+     * URL -> layout (Jetski `setLayoutFromUrl`):
+     * - same id set: only the focused pane changes (order is reconciled back
+     *   into the URL by the Redux->URL sync);
+     * - same count with exactly one id swapped: that pane's agent is replaced
+     *   in place (geometry preserved);
+     * - one id: a single pane;
+     * - N ids: the saved geometry for that exact set, else a default nested
+     *   horizontal split.
      */
-    navigateMainToAgent(state, action: PayloadAction<string>) {
-      const agentInstanceId = normalizeAgentId(action.payload);
-      if (!isRealAgentId(agentInstanceId)) return;
-      const existing = findPaneByAgent(state.tree, agentInstanceId);
-      if (existing) {
-        state.tree.focusedPaneId = existing;
+    setLayoutFromUrl(
+      state,
+      action: PayloadAction<{
+        ids: string[];
+        focusedId?: string;
+        savedLayout?: PaneTreeState<MainPaneValue> | null;
+      }>,
+    ) {
+      const ids = (action.payload.ids || []).map(normalizeAgentId);
+      if (ids.length === 0) return;
+      const { focusedId } = action.payload;
+      const tree = state.tree;
+      const paneIds = getContentPaneIds(tree);
+      const currentIds = paneIds.map((id) => {
+        const pane = tree.panes[id];
+        return pane?.kind === 'content' ? pane.value.agentInstanceId : NEW_PANE_AGENT_ID;
+      });
+      const focusPaneFor = (agentId: string | undefined) => {
+        if (!agentId) return;
+        const focusedPane = tree.panes[tree.focusedPaneId];
+        if (focusedPane?.kind === 'content' && focusedPane.value.agentInstanceId === agentId) return;
+        const idx = currentIds.indexOf(agentId);
+        if (idx >= 0) tree.focusedPaneId = paneIds[idx];
+      };
+      const sameSet =
+        currentIds.length === ids.length && [...currentIds].sort().join('+') === [...ids].sort().join('+');
+      if (sameSet) {
+        focusPaneFor(focusedId);
         return;
       }
-      const target = resolveTargetPaneId(state.tree);
-      if (!target) {
-        state.tree = createInitialMainTree(agentInstanceId);
+      const nextSet = new Set(ids);
+      const curSet = new Set(currentIds);
+      const removed = currentIds.filter((id) => !nextSet.has(id));
+      const added = ids.filter((id) => !curSet.has(id));
+      if (currentIds.length === ids.length && removed.length === 1 && added.length === 1) {
+        const idx = currentIds.indexOf(removed[0]);
+        setPaneAgent(tree, paneIds[idx], added[0]);
+        if (!focusedId || focusedId === added[0]) tree.focusedPaneId = paneIds[idx];
+        else {
+          currentIds[idx] = added[0];
+          focusPaneFor(focusedId);
+        }
         return;
       }
-      setPaneAgent(state.tree, target, agentInstanceId);
-      state.tree.focusedPaneId = target;
+      if (ids.length === 1) {
+        state.tree = createInitialMainTree(ids[0]);
+        return;
+      }
+      const saved = action.payload.savedLayout ? sanitizeMainTree(action.payload.savedLayout) : null;
+      state.tree = saved ?? buildDefaultSplitTree(ids);
+      const leafIds = getContentPaneIds(state.tree);
+      const focusIdx = leafIds.findIndex((pid) => {
+        const pane = state.tree.panes[pid];
+        return pane?.kind === 'content' && pane.value.agentInstanceId === focusedId;
+      });
+      if (focusIdx >= 0) state.tree.focusedPaneId = leafIds[focusIdx];
+      state.tree.maximizedPaneId = null;
     },
 
     moveMainPane(
@@ -226,16 +278,37 @@ const workspaceLayoutSlice = createSlice({
       toggleMaximizePaneInTree(state.tree, action.payload);
     },
 
-    hydrateWorkspaceLayout(state, action: PayloadAction<unknown>) {
-      const tree = sanitizeMainTree(action.payload);
-      if (tree) state.tree = tree;
-    },
-
     resetWorkspaceLayout(state) {
       state.tree = createInitialMainTree();
     },
   },
 });
+
+/**
+ * Default geometry for N panes: nested binary horizontal splits with equal
+ * widths (pane-1 | (pane-2 | (pane-3 ...))).
+ */
+export function buildDefaultSplitTree(ids: string[]): PaneTreeState<MainPaneValue> {
+  const panes: PaneTreeState<MainPaneValue>['panes'] = {};
+  const build = (start: number): string => {
+    const paneId = `pane-${start + 1}`;
+    panes[paneId] = { kind: 'content', value: { agentInstanceId: ids[start] } };
+    const remaining = ids.length - start;
+    if (remaining === 1) return paneId;
+    const splitId = `split-${start + 1}`;
+    const right = build(start + 1);
+    panes[splitId] = {
+      kind: 'split',
+      axis: 'horizontal',
+      leftChildId: paneId,
+      rightChildId: right,
+      ratio: 100 / remaining,
+    };
+    return splitId;
+  };
+  const rootPaneId = build(0);
+  return { rootPaneId, panes, focusedPaneId: 'pane-1', maximizedPaneId: null };
+}
 
 /**
  * Validates a persisted tree: drops malformed nodes, prunes unreachable ones,
@@ -320,13 +393,12 @@ export const {
   splitMainPane,
   closeMainPane,
   assignMainPaneAgent,
-  navigateMainToAgent,
+  setLayoutFromUrl,
   moveMainPane,
   swapMainPanes,
   resizeMainSplit,
   equalizeMainPanes,
   toggleMaximizeMainPane,
-  hydrateWorkspaceLayout,
   resetWorkspaceLayout,
 } = workspaceLayoutSlice.actions;
 
@@ -351,6 +423,14 @@ export const selectFocusedMainAgentId = (state: any): string => {
 
 export const selectMainPaneIds = createSelector([selectMainTree], (tree) =>
   getContentPaneIds(tree),
+);
+
+/** Leaf agent ids in tree order INCLUDING `_new` pickers (the URL pane set). */
+export const selectMainLeafIds = createSelector([selectMainTree], (tree): string[] =>
+  getContentPaneIds(tree).map((paneId) => {
+    const pane = tree.panes[paneId];
+    return pane?.kind === 'content' ? pane.value.agentInstanceId : NEW_PANE_AGENT_ID;
+  }),
 );
 
 /** Agents currently open in Main (in tree order, no pickers). */

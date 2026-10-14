@@ -71,13 +71,15 @@ export function writeChainOverviewCollapsedState(state: Record<string, boolean>,
 
 // --- Sidebar Chain Filter (REQ-CHAIN-UI-SIDEBAR-1) --------------------------
 // --- Workspace (Main + Aux) Persistence --------------------------------------
-// One GLOBAL workspace, not keyed by task chain: the Main split tree, the aux
-// tab strips (per agent + the shared split-view strip) and the aux width.
-export const WORKSPACE_LAYOUT_STORAGE_KEY = 'heimdall:workspace-layout:v1';
+// Never keyed by task chain. The open Main pane set lives in the URL and split
+// geometry per id set in store/splitGroups.ts; here: the per-agent aux tab
+// strips and the aux width.
 export const AUX_PANES_STORAGE_KEY = 'heimdall:aux-panes:v1';
 export const WORKSPACE_CHROME_STORAGE_KEY = 'heimdall:workspace-chrome:v1';
 
-/** Superseded chain-keyed workbench / window-tiling keys (removed on hydrate). */
+/** Superseded keys (removed on hydrate): chain-keyed workbench, window tiling,
+ *  and the short-lived single global workspace layout. */
+export const LEGACY_WORKSPACE_LAYOUT_STORAGE_KEY = 'heimdall:workspace-layout:v1';
 export const LEGACY_WINDOW_LAYOUT_STORAGE_KEY = 'heimdall:window-layout:v1';
 export const LEGACY_WORKBENCH_LAYOUT_STORAGE_PREFIX = 'heimdall:workbench-layout:v1:';
 
@@ -106,15 +108,6 @@ function writeJsonObject(key: string, value: unknown): void {
   }
 }
 
-/** Raw persisted Main tree; validated by `sanitizeMainTree` on hydrate. */
-export function readWorkspaceLayoutState<T = any>(): T | null {
-  return readJsonObject<T>(WORKSPACE_LAYOUT_STORAGE_KEY);
-}
-
-export function writeWorkspaceLayoutState(tree: unknown): void {
-  writeJsonObject(WORKSPACE_LAYOUT_STORAGE_KEY, tree);
-}
-
 /** Raw persisted aux strips; validated by `sanitizeAuxPanesState` on hydrate. */
 export function readAuxPanesState<T = any>(): T | null {
   return readJsonObject<T>(AUX_PANES_STORAGE_KEY);
@@ -139,6 +132,7 @@ export function removeLegacyWorkbenchStorage(): void {
     for (const key of storageKeys(storage)) {
       if (
         key === LEGACY_WINDOW_LAYOUT_STORAGE_KEY ||
+        key === LEGACY_WORKSPACE_LAYOUT_STORAGE_KEY ||
         key.startsWith(LEGACY_WORKBENCH_LAYOUT_STORAGE_PREFIX)
       ) {
         storage.removeItem(key);

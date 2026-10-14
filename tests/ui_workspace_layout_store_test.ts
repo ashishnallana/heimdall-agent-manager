@@ -10,9 +10,9 @@ import workspaceLayoutReducer, {
   closeMainPane,
   createInitialMainTree,
   findPaneByAgent,
-  hydrateWorkspaceLayout,
   moveMainPane,
-  navigateMainToAgent,
+  setLayoutFromUrl,
+  buildDefaultSplitTree,
   resizeMainSplit,
   sanitizeMainTree,
   selectFocusedMainAgentId,
@@ -55,36 +55,49 @@ test('workspace layout starts as ONE new-chat picker leaf', () => {
   assert.deepEqual(selectMainAgentIds(store.getState()), []);
 });
 
-test('navigateMainToAgent replaces the focused pane agent, or focuses an open agent (dedupe)', () => {
+test('setLayoutFromUrl: same set -> focus only; one-id swap -> in place; 1 id -> single; N ids -> saved or default', () => {
   const store = makeStore();
-  store.dispatch(navigateMainToAgent('agent-a'));
-  assert.equal(agentOf(store, 'pane-1'), 'agent-a');
+  store.dispatch(setLayoutFromUrl({ ids: ['a'] }));
+  assert.equal(agentOf(store, 'pane-1'), 'a');
 
-  store.dispatch(splitMainPane({ targetPaneId: 'pane-1', direction: 'right' }));
-  const [, right] = getContentPaneIds(tree(store));
-  assert.equal(agentOf(store, right), NEW_PANE_AGENT_ID, 'split without agent creates a picker');
-  assert.equal(tree(store).focusedPaneId, right, 'the new pane is focused');
+  // N ids without saved geometry: nested horizontal default.
+  store.dispatch(setLayoutFromUrl({ ids: ['a', 'b', 'c'], focusedId: 'b' }));
+  assert.deepEqual(selectMainAgentIds(store.getState()), ['a', 'b', 'c']);
+  assert.equal(selectFocusedMainAgentId(store.getState()), 'b');
+  const root = tree(store).panes[tree(store).rootPaneId];
+  assert.equal(root.kind === 'split' && root.axis, 'horizontal');
+  assert.ok(root.kind === 'split' && Math.abs(root.ratio - 100 / 3) < 0.01);
 
-  // Navigating to an agent NOT in Main replaces the focused pane's agent.
-  store.dispatch(navigateMainToAgent('agent-b'));
-  assert.equal(agentOf(store, right), 'agent-b');
-  assert.equal(agentOf(store, 'pane-1'), 'agent-a');
+  // Same set (any order) -> only focus changes, geometry untouched.
+  const before = JSON.stringify(tree(store).panes);
+  store.dispatch(setLayoutFromUrl({ ids: ['c', 'a', 'b'], focusedId: 'c' }));
+  assert.equal(JSON.stringify(tree(store).panes), before);
+  assert.equal(selectFocusedMainAgentId(store.getState()), 'c');
 
-  // Navigating to an agent already open focuses its pane, nothing is duplicated.
-  store.dispatch(navigateMainToAgent('agent-a'));
-  assert.equal(tree(store).focusedPaneId, 'pane-1');
-  assert.deepEqual(selectMainAgentIds(store.getState()), ['agent-a', 'agent-b']);
-  assert.equal(selectFocusedMainAgentId(store.getState()), 'agent-a');
+  // Exactly one id swapped -> replaced in place, pane ids/geometry preserved.
+  const bPane = findPaneByAgent(tree(store), 'b')!;
+  store.dispatch(setLayoutFromUrl({ ids: ['a', 'x', 'c'], focusedId: 'x' }));
+  assert.equal(agentOf(store, bPane), 'x');
+  assert.equal(tree(store).focusedPaneId, bPane);
 
-  // Ignores the picker sentinel / empty ids.
-  store.dispatch(navigateMainToAgent(NEW_PANE_AGENT_ID));
-  store.dispatch(navigateMainToAgent(''));
-  assert.deepEqual(selectMainAgentIds(store.getState()), ['agent-a', 'agent-b']);
+  // Saved geometry for the exact set is restored.
+  const saved = buildDefaultSplitTree(['p', 'q']);
+  (saved.panes['split-1'] as any).axis = 'vertical';
+  store.dispatch(setLayoutFromUrl({ ids: ['q', 'p'], focusedId: 'q', savedLayout: saved }));
+  const restored = tree(store).panes[tree(store).rootPaneId];
+  assert.equal(restored.kind === 'split' && restored.axis, 'vertical');
+  assert.equal(selectFocusedMainAgentId(store.getState()), 'q');
+
+  // Multiple '_new' placeholders are distinct panes.
+  store.dispatch(setLayoutFromUrl({ ids: ['a', NEW_PANE_AGENT_ID, NEW_PANE_AGENT_ID] }));
+  assert.equal(getContentPaneIds(tree(store)).length, 3);
+  store.dispatch(setLayoutFromUrl({ ids: [] }));
+  assert.equal(getContentPaneIds(tree(store)).length, 3, 'empty id list is ignored');
 });
 
 test('split in all 4 directions, focus, resize, maximize and move preserve pane ids', () => {
   const store = makeStore();
-  store.dispatch(navigateMainToAgent('a'));
+  store.dispatch(setLayoutFromUrl({ ids: ['a'] }));
   for (const direction of ['right', 'bottom', 'left', 'top'] as const) {
     store.dispatch(splitMainPane({ targetPaneId: 'pane-1', direction }));
   }
@@ -114,7 +127,7 @@ test('split in all 4 directions, focus, resize, maximize and move preserve pane 
 
 test('splitting WITH an agent that is already open focuses it instead of duplicating', () => {
   const store = makeStore();
-  store.dispatch(navigateMainToAgent('a'));
+  store.dispatch(setLayoutFromUrl({ ids: ['a'] }));
   store.dispatch(splitMainPane({ targetPaneId: 'pane-1', direction: 'right', agentInstanceId: 'b' }));
   const before = getContentPaneIds(tree(store));
   store.dispatch(setFocusedMainPane('pane-1'));
@@ -125,7 +138,7 @@ test('splitting WITH an agent that is already open focuses it instead of duplica
 
 test('assignMainPaneAgent fills a picker; picking an already-open agent focuses it and drops the picker', () => {
   const store = makeStore();
-  store.dispatch(navigateMainToAgent('a'));
+  store.dispatch(setLayoutFromUrl({ ids: ['a'] }));
   store.dispatch(splitMainPane({ targetPaneId: 'pane-1', direction: 'right' }));
   const picker = getContentPaneIds(tree(store)).find((id) => id !== 'pane-1')!;
 
@@ -150,7 +163,7 @@ test('assignMainPaneAgent fills a picker; picking an already-open agent focuses 
 
 test('closeMainPane removes a pane in a split and resets the sole pane to the picker', () => {
   const store = makeStore();
-  store.dispatch(navigateMainToAgent('a'));
+  store.dispatch(setLayoutFromUrl({ ids: ['a'] }));
   store.dispatch(splitMainPane({ targetPaneId: 'pane-1', direction: 'right', agentInstanceId: 'b' }));
   const bPane = findPaneByAgent(tree(store), 'b')!;
   store.dispatch(closeMainPane(bPane));
@@ -161,10 +174,10 @@ test('closeMainPane removes a pane in a split and resets the sole pane to the pi
   assert.equal(agentOf(store, 'pane-1'), NEW_PANE_AGENT_ID);
 });
 
-test('hydrate sanitizes persisted trees and enforces the dedupe invariant', () => {
+test('sanitizeMainTree validates saved geometry and enforces the dedupe invariant', () => {
   const store = makeStore();
   store.dispatch(
-    hydrateWorkspaceLayout({
+    setLayoutFromUrl({ ids: ['dup', '_new'], savedLayout: {
       rootPaneId: 'split-1',
       focusedPaneId: 'ghost',
       maximizedPaneId: 'pane-2',
@@ -174,7 +187,7 @@ test('hydrate sanitizes persisted trees and enforces the dedupe invariant', () =
         'pane-2': { kind: 'content', value: { agentInstanceId: 'dup' } },
         orphan: { kind: 'content', value: { agentInstanceId: 'zzz' } },
       },
-    }),
+    } as any }),
   );
   const t = tree(store);
   assert.equal(t.focusedPaneId, 'pane-1');
@@ -193,9 +206,6 @@ test('hydrate sanitizes persisted trees and enforces the dedupe invariant', () =
     }),
     null,
   );
-  // Invalid payloads leave the state untouched.
-  store.dispatch(hydrateWorkspaceLayout({ bogus: true }));
-  assert.equal(tree(store).rootPaneId, 'split-1');
   assert.deepEqual(createInitialMainTree('q').panes['pane-1'], { kind: 'content', value: { agentInstanceId: 'q' } });
 });
 

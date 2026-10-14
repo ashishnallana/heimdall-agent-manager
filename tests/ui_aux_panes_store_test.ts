@@ -40,7 +40,7 @@ import auxPanesReducer, {
 } from '../src/ui/store/auxPanesSlice.ts';
 import { isAuxContentAllowed, chainParticipantIdsFromMembers } from '../src/ui/store/auxTabGuards.ts';
 import workspaceLayoutReducer, {
-  navigateMainToAgent,
+  setLayoutFromUrl,
   setFocusedMainPane,
   splitMainPane,
   closeMainPane,
@@ -91,11 +91,11 @@ test('tree selection rule: the aux always shows the FOCUSED Main pane agent stri
   const store = makeStore();
   assert.equal(selectCurrentAuxTreeId(store.getState()), null, 'a lone picker has no aux');
 
-  store.dispatch(navigateMainToAgent('agent-a'));
+  store.dispatch(setLayoutFromUrl({ ids: ['agent-a'] }));
   assert.deepEqual(selectCurrentAuxTreeId(store.getState()), A);
 
   // Switching the agent in a pane switches the aux tree.
-  store.dispatch(navigateMainToAgent('agent-b'));
+  store.dispatch(setLayoutFromUrl({ ids: ['agent-b'] }));
   assert.deepEqual(selectCurrentAuxTreeId(store.getState()), B);
 
   // Split view: the aux follows focus (Jetski /c/A+B?focused=A).
@@ -274,7 +274,7 @@ test('openPreviewInAux targets the current tree and is a no-op without one', () 
   const store = makeStore();
   store.dispatch(openPreviewInAux({ sessionId: 's', port: 3000 }) as any);
   assert.deepEqual(store.getState().auxPanes.agentPanes, {});
-  store.dispatch(navigateMainToAgent('agent-a'));
+  store.dispatch(setLayoutFromUrl({ ids: ['agent-a'] }));
   store.dispatch(openPreviewInAux({ sessionId: 's', port: 3000, label: 'web' }) as any);
   const pane = selectAuxPane(store.getState(), A)!;
   assert.equal(pane.activeTabId, 'preview__s:3000');

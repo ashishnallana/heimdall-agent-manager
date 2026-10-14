@@ -24,7 +24,7 @@ import {
   visibleAuxTabs,
   type AuxTreeId,
 } from '../../store/auxPanesSlice';
-import { navigateMainToAgent } from '../../store/workspaceLayoutSlice';
+import { buildConversationHash, navigateToHash } from '../../utils/conversationUrl';
 import {
   AUX_DEFAULT_WIDTH,
   clampAuxWidth,
@@ -131,11 +131,11 @@ export function AuxDock({ treeId, ctx, isMobile = false }: AuxDockProps) {
 
   const fullView = useCallback(
     (agentInstanceId: string) => {
-      // Jetski "Full View": focus the agent's Main pane if open, else open it in
-      // the focused Main pane. A navigation, never nesting.
-      dispatch(navigateMainToAgent(agentInstanceId));
+      // Jetski "Full View": a navigation to the agent (its saved split group
+      // focused on it if it has one, else its single view), never nesting.
+      navigateToHash(buildConversationHash([agentInstanceId]));
     },
-    [dispatch],
+    [],
   );
 
   // ---- Desktop resize (left edge drag) ----
