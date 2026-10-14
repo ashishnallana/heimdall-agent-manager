@@ -452,6 +452,8 @@ bridge_hub_runtime_worker :: proc() {
 						delete(ready_bridge_id)
 					}
 					hub_catalog_etag = extract_json_string(text, "catalog_etag", "")
+					// Absent on older hubs -> keep the default (on).
+					bridge_heartbeat_stats_set_enabled(extract_json_bool(text, "heartbeat_stats", true))
 					ready = true
 					delete(msg_type)
 					delete(text)
@@ -724,6 +726,9 @@ bridge_hub_handle_command :: proc(conn: ^ws.Connection, text: string) {
 		enabled_str := extract_json_string(text, "enabled", "")
 		defer delete(enabled_str)
 		enabled := enabled_str == "true" || bridge_local_extract_json_bool(text, "enabled", false)
+		// telemetry_enabled governs BOTH the local Telegraf exporter and the
+		// resource stats piggybacked on the heartbeat (plan 4.3).
+		bridge_heartbeat_stats_set_enabled(enabled)
 		if enabled {
 			if !bridge_telemetry_status() {
 				_ = bridge_telemetry_start()
@@ -2899,6 +2904,10 @@ bridge_hub_send_vault_status :: proc(conn: ^ws.Connection) {
 
 bridge_hub_heartbeat_json :: proc() -> string {
 	caps := "[]"
+	// Resource stats are collected BEFORE bridge_runtime_mutex is taken: they
+	// fork `ps` and read /proc, none of which belongs inside that lock.
+	stats := bridge_heartbeat_stats_json()
+	defer delete(stats)
 	features := bridge_runtime_features_json()
 	dispatch_metrics := bridge_command_dispatch_metrics_json()
 	defer delete(dispatch_metrics)
@@ -2927,6 +2936,10 @@ bridge_hub_heartbeat_json :: proc() -> string {
 	strings.write_string(&b, dispatch_metrics)
 	strings.write_string(&b, ",\"dependency_breakers\":")
 	strings.write_string(&b, breaker_metrics)
+	if stats != "" {
+		strings.write_string(&b, ",\"stats\":")
+		strings.write_string(&b, stats)
+	}
 	strings.write_string(&b, ",\"active_instance_ids\":[")
 	first_active := true
 	for inst in bridge_runtime_instances {
