@@ -292,3 +292,32 @@ test_blog_drain_respects_opt_out_and_sends_frame :: proc(t: ^testing.T) {
 	testing.expect_value(t, blog_pending_count(&blog_ring), before)
 	posix.close(dead_fds[1])
 }
+
+// set_telemetry carries two switches: `enabled` (Telegraf) and
+// `heartbeat_stats` (stats + bridge_log shipping). "inherit" at PATCH time is
+// enabled=false,heartbeat_stats=true and must leave shipping ON; "disabled" is
+// false/false; "enabled" is true/true. An old hub sends only `enabled`, which
+// then drives both (legacy).
+@(test)
+test_blog_set_telemetry_two_flags_govern_shipping :: proc(t: ^testing.T) {
+	prev := bridge_heartbeat_stats_enabled()
+	defer bridge_heartbeat_stats_set_enabled(prev)
+
+	bridge_hub_handle_command(nil, `{"type":"set_telemetry","command_id":"","enabled":false,"heartbeat_stats":true}`)
+	testing.expect(t, bridge_heartbeat_stats_enabled(), "inherit: stats/log shipping stay ON while Telegraf is off")
+	testing.expect(t, !bridge_telemetry_status(), "inherit: Telegraf off")
+
+	bridge_hub_handle_command(nil, `{"type":"set_telemetry","command_id":"","enabled":false,"heartbeat_stats":false}`)
+	testing.expect(t, !bridge_heartbeat_stats_enabled(), "disabled: shipping OFF")
+
+	bridge_hub_handle_command(nil, `{"type":"set_telemetry","command_id":"","enabled":true,"heartbeat_stats":true}`)
+	testing.expect(t, bridge_heartbeat_stats_enabled(), "enabled: shipping ON")
+	_ = bridge_telemetry_stop()
+
+	// Legacy single-flag hub.
+	bridge_hub_handle_command(nil, `{"type":"set_telemetry","command_id":"","enabled":false}`)
+	testing.expect(t, !bridge_heartbeat_stats_enabled(), "legacy enabled=false turns shipping off")
+	bridge_hub_handle_command(nil, `{"type":"set_telemetry","command_id":"","enabled":true}`)
+	testing.expect(t, bridge_heartbeat_stats_enabled(), "legacy enabled=true turns shipping on")
+	_ = bridge_telemetry_stop()
+}

@@ -748,9 +748,14 @@ bridge_hub_handle_command :: proc(conn: ^ws.Connection, text: string) {
 		enabled_str := extract_json_string(text, "enabled", "")
 		defer delete(enabled_str)
 		enabled := enabled_str == "true" || bridge_local_extract_json_bool(text, "enabled", false)
-		// telemetry_enabled governs BOTH the local Telegraf exporter and the
-		// resource stats piggybacked on the heartbeat (plan 4.3).
-		bridge_heartbeat_stats_set_enabled(enabled)
+		// Two switches ride this command. `enabled` is the local Telegraf
+		// exporter (true only for telemetry_enabled=enabled). `heartbeat_stats`
+		// governs the heartbeat resource stats AND bridge_log shipping and is
+		// true unless the owner chose "disabled" — the same rule as
+		// bridge_ready.heartbeat_stats, so "inherit" means stats ON / Telegraf
+		// OFF at PATCH time exactly as it does at hello time. An old hub sends
+		// only `enabled`; then it is the switch for both (legacy semantics).
+		bridge_heartbeat_stats_set_enabled(extract_json_bool(text, "heartbeat_stats", enabled))
 		if enabled {
 			if !bridge_telemetry_status() {
 				_ = bridge_telemetry_start()
