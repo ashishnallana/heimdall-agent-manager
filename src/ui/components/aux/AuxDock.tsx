@@ -40,6 +40,7 @@ import { AuxTabContent } from './AuxTabContent';
 import { AuxTabStrip } from './AuxTabStrip';
 import { AuxTabActionsProvider, useAuxTabActionsHost } from './auxTabActions';
 import type { AgentAuxContext } from './useAgentAuxContext';
+import { useMobileSwipe } from '../mobileSwipe';
 
 function AgentStatusDotWithApi({ agentInstanceId }: { agentInstanceId: string }) {
   const { data } = useGetAgentsLiveQuery(undefined, { pollingInterval: 30000, skipPollingIfUnfocused: true });
@@ -171,6 +172,28 @@ export function AuxDock({ treeId, ctx, isMobile = false, shown = true, reserveRi
     [dispatch, treeId],
   );
 
+  const activeTabIndex = activeTab ? tabs.findIndex((tab) => tab.id === activeTab.id) : -1;
+  const swipeToNextTab = useCallback(() => {
+    if (activeTabIndex >= 0 && activeTabIndex < tabs.length - 1) {
+      dispatch(setActiveAuxTab({ treeId, tabId: tabs[activeTabIndex + 1].id }));
+      return;
+    }
+    closeDock();
+  }, [activeTabIndex, closeDock, dispatch, tabs, treeId]);
+  const swipeToPreviousTab = useCallback(() => {
+    if (activeTabIndex > 0) {
+      dispatch(setActiveAuxTab({ treeId, tabId: tabs[activeTabIndex - 1].id }));
+    } else if (activeTabIndex < 0 && tabs.length > 0) {
+      dispatch(setActiveAuxTab({ treeId, tabId: tabs[tabs.length - 1].id }));
+    }
+  }, [activeTabIndex, dispatch, tabs, treeId]);
+  const swipeHandlers = useMobileSwipe({
+    enabled: isMobile,
+    onSwipeLeft: swipeToNextTab,
+    onSwipeRight: swipeToPreviousTab,
+  });
+  const isTerminalAuxTab = activeTabIndex < 0 || activeTabIndex === tabs.length - 1;
+
   const menuContent = (
     <>
       {actions.map((a) => (
@@ -273,6 +296,7 @@ export function AuxDock({ treeId, ctx, isMobile = false, shown = true, reserveRi
       />
       <div
         data-debug-id="aux-dock-body"
+        {...swipeHandlers}
         className="relative flex min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden"
       >
         <AuxTabActionsProvider setActions={setActions}>
@@ -316,6 +340,32 @@ export function AuxDock({ treeId, ctx, isMobile = false, shown = true, reserveRi
             </div>
           )}
         </AuxTabActionsProvider>
+        {isMobile ? (
+          <div
+            data-debug-id="aux-mobile-swipe-indicators"
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-x-0 z-30 flex items-center justify-center gap-1.5 px-3"
+            style={{ bottom: 'max(0.25rem, env(safe-area-inset-bottom))' }}
+          >
+            {isTerminalAuxTab ? (
+              <span
+                data-debug-id="aux-mobile-close-indicator"
+                className="absolute left-3 inline-flex h-6 items-center gap-0.5 rounded-full border border-subtle bg-surface-overlay/90 px-1.5 text-muted shadow-sm backdrop-blur"
+              >
+                <Icon name="chevron-left" size={11} />
+                <Icon name="close" size={12} />
+              </span>
+            ) : null}
+            {tabs.length > 0 ? tabs.map((tab, index) => (
+              <span
+                key={tab.id}
+                className={`h-1.5 rounded-full transition-all ${
+                  index === activeTabIndex ? 'w-4 bg-accent' : 'w-1.5 bg-current text-muted opacity-40'
+                }`}
+              />
+            )) : <span className="h-1.5 w-4 rounded-full bg-accent" />}
+          </div>
+        ) : null}
       </div>
       </div>
     </aside>

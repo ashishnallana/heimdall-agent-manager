@@ -25,7 +25,9 @@ import {
   selectAuxPane,
   selectAuxPanesState,
   selectCurrentAuxTreeId,
+  setAuxPaneOpen,
   toggleAuxPane,
+  visibleAuxTabs,
 } from '../../store/auxPanesSlice';
 import {
   hydrateWorkspaceChrome,
@@ -132,6 +134,7 @@ export function Workspace({ focusMessageId, isMobile = false, leading, trailing 
   const ctx = useAgentAuxContext(ctxAgentId);
   const hasChain = ctx.isResolved ? Boolean(ctx.chainId) : true;
   const auxOpen = Boolean(auxTreeId && auxPane?.isPaneOpen);
+  const hasAvailableAux = Boolean(auxTreeId && ctx.isResolved && visibleAuxTabs(auxPane).length > 0);
 
   // 1. Hydrate aux strips + chrome once; drop superseded storage keys.
   const hydratedRef = useRef(false);
@@ -308,6 +311,15 @@ export function Workspace({ focusMessageId, isMobile = false, leading, trailing 
   }, [auxOpen]);
   const dockOccupiesTopRight = auxMounted && !isMobile;
 
+  const openMobileAux = useCallback(() => {
+    if (!auxTreeId || !hasAvailableAux) return;
+    dispatch(setAuxPaneOpen({ treeId: auxTreeId, open: true, hasChain }));
+  }, [auxTreeId, dispatch, hasAvailableAux, hasChain]);
+
+  const openMobileSidebar = useCallback(() => {
+    window.dispatchEvent(new Event('heimdall:open-sidebar'));
+  }, []);
+
   const auxToggle = (
     <button
       type="button"
@@ -478,7 +490,13 @@ export function Workspace({ focusMessageId, isMobile = false, leading, trailing 
           className={`relative min-h-0 min-w-0 flex-1 flex-col ${hideMain ? 'hidden' : 'flex'}`}
         >
           {!layoutReady ? null : isMobile ? (
-            <MobileMainPager tree={tree} renderPane={renderPane} onFocusPane={focusPane} />
+            <MobileMainPager
+              tree={tree}
+              renderPane={renderPane}
+              onFocusPane={focusPane}
+              onSwipeLeftBoundary={openMobileSidebar}
+              onSwipeRightBoundary={hasAvailableAux ? openMobileAux : undefined}
+            />
           ) : (
             <TilingContainer<MainPaneValue>
               treeState={tree}
