@@ -40,6 +40,8 @@ test('hidden sidebar renders no rail; the top-left toggle + app name reopens it'
   assert.match(reopen, /\{sidebarToggleButton\}\s*\{brandLink\}/);
   // On the conversation workspace the same control sits in the workspace top bar.
   assert.match(source, /workspaceLeading=\{isEffectiveCollapsed \? <>\{sidebarToggleButton\}\{brandLink\}<\/> : null\}/);
+  // ...and the update-available badge beside the top-right pane's ⋮.
+  assert.match(source, /workspaceTrailing=\{isEffectiveCollapsed \? <SidebarUpdateBadge onOpen=\{openBridgeUpdate\} \/> : null\}/);
   // The toggle flips the persisted desktop preference / the mobile drawer.
   assert.match(source, /onClick=\{\(\) => \(isMobile \? setDrawerOpen\(!drawerOpen\) : toggleCollapsed\(\)\)\}/);
   assert.match(source, /aria-label=\{isEffectiveCollapsed \? 'Show sidebar' : 'Hide sidebar'\}/);

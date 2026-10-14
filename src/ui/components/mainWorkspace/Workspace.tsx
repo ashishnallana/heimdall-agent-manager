@@ -66,8 +66,10 @@ import HomePage from '../home/HomePage';
 export interface WorkspaceProps {
   focusMessageId?: string;
   isMobile?: boolean;
-  /** Left side of the workspace top bar (the hidden-sidebar toggle + app name). */
+  /** Hidden sidebar: toggle + app name, inline at the left of the top-left pane's header. */
   leading?: React.ReactNode;
+  /** Hidden sidebar: update-available badge, beside the top-right pane's ⋮. */
+  trailing?: React.ReactNode;
 }
 
 function readRoute(): { pathname: string; search: string } {
@@ -108,7 +110,7 @@ function useRouteLocation() {
  *   split carries the open/closed state to the newly focused strip.
  * - Split geometry/groups persist per id set; nothing is keyed by task chain.
  */
-export function Workspace({ focusMessageId, isMobile = false, leading }: WorkspaceProps) {
+export function Workspace({ focusMessageId, isMobile = false, leading, trailing }: WorkspaceProps) {
   const dispatch = useDispatch();
   const tree = useSelector(selectMainTree);
   const focusedAgentId = useSelector(selectFocusedMainAgentId);
@@ -273,6 +275,27 @@ export function Workspace({ focusMessageId, isMobile = false, leading }: Workspa
     if (auxTreeId) dispatch(toggleAuxPane({ treeId: auxTreeId, hasChain }));
   }, [auxTreeId, dispatch, hasChain]);
 
+  // The ONE side-panel toggle (Jetski): inline at the right end of the
+  // top-right Main pane's header, i.e. the top-right corner of Main, right next
+  // to the aux dock. No extra bar, nothing overlaps.
+  const auxToggle = (
+    <button
+      type="button"
+      data-debug-id="workspace-aux-toggle"
+      data-testid="toggle-aux-pane"
+      aria-label={auxOpen ? 'Hide side panel' : 'Show side panel'}
+      title={auxTreeId ? (auxOpen ? 'Hide side panel' : 'Show side panel') : 'Open a conversation to use the side panel'}
+      aria-pressed={auxOpen}
+      disabled={!auxTreeId}
+      onClick={toggleAux}
+      className={`grid h-8 w-8 shrink-0 place-items-center rounded-lg transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+        auxOpen ? 'bg-accent/15 text-accent' : 'text-muted hover:bg-neutral-soft hover:text-primary'
+      }`}
+    >
+      <Icon name="panel-right" size={18} />
+    </button>
+  );
+
   // 7. Keyboard: Cmd/Ctrl+P (files palette), Cmd/Ctrl+Shift+F (search), Cmd/Ctrl+\ (split right).
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -305,7 +328,7 @@ export function Workspace({ focusMessageId, isMobile = false, leading }: Workspa
   const closePane = useCallback((paneId: string) => dispatch(closeMainPane(paneId)), [dispatch]);
 
   const renderPane = useCallback(
-    ({ paneId, value, isFocused, isSinglePane }: RenderPaneProps<MainPaneValue>) => {
+    ({ paneId, value, isFocused, isSinglePane, isTopLeftMost, isTopRightMost }: RenderPaneProps<MainPaneValue>) => {
       const agentId = value.agentInstanceId;
       const isPicker = !isRealAgentId(agentId);
       return (
@@ -317,6 +340,8 @@ export function Workspace({ focusMessageId, isMobile = false, leading }: Workspa
           isMobile={isMobile}
           onFocus={focusPane}
           onClose={closePane}
+          headerLeading={isTopLeftMost ? leading : null}
+          headerTrailing={isTopRightMost ? <>{trailing}{auxToggle}</> : null}
         >
           {isPicker ? (
             // Jetski: a '_new' pane renders the new-conversation (home) view.
@@ -346,15 +371,19 @@ export function Workspace({ focusMessageId, isMobile = false, leading }: Workspa
               }
               onClosePane={() => closePane(paneId)}
               isFocusedPane={isFocused}
+              headerLeading={isTopLeftMost ? leading : null}
+              headerTrailing={isTopRightMost ? trailing : null}
+              headerEnd={isTopRightMost ? auxToggle : null}
             />
           )}
         </MainPaneFrame>
       );
     },
     [
-      auxOpen,
-      auxTreeId,
+      auxToggle,
       closePane,
+      leading,
+      trailing,
       ctx.projectVcsEnabled,
       dispatch,
       focusMessageId,
@@ -398,31 +427,6 @@ export function Workspace({ focusMessageId, isMobile = false, leading }: Workspa
       data-aux-open={auxOpen ? 'true' : 'false'}
       className="relative flex h-full w-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-canvas"
     >
-      {/* Workspace top bar (Jetski title bar): the ONE right-sidebar (aux)
-          toggle lives here, top-right, in flow above Main and the aux dock so
-          it never overlaps a chat header or the aux tab strip. */}
-      <div
-        data-debug-id="workspace-top-bar"
-        className="flex h-10 shrink-0 items-center gap-1 border-b border-subtle bg-canvas px-2"
-      >
-        {leading}
-        <div className="min-w-0 flex-1" />
-        <button
-          type="button"
-          data-debug-id="workspace-aux-toggle"
-          data-testid="toggle-aux-pane"
-          aria-label={auxOpen ? 'Hide side panel' : 'Show side panel'}
-          title={auxTreeId ? (auxOpen ? 'Hide side panel' : 'Show side panel') : 'Open a conversation to use the side panel'}
-          aria-pressed={auxOpen}
-          disabled={!auxTreeId}
-          onClick={toggleAux}
-          className={`grid h-8 w-8 shrink-0 place-items-center rounded-lg transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
-            auxOpen ? 'bg-accent/15 text-accent' : 'text-muted hover:bg-neutral-soft hover:text-primary'
-          }`}
-        >
-          <Icon name="panel-right" size={18} />
-        </button>
-      </div>
       <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
         <div
           data-debug-id="workspace-main"

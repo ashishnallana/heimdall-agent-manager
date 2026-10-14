@@ -117,6 +117,12 @@ export interface AgentChatPaneProps {
   onClosePane?: () => void;
   /** Main: this pane is the focused one (shows its close ✕ in split view). */
   isFocusedPane?: boolean;
+  /** Inline before the breadcrumb (hidden-sidebar toggle + app name, top-left pane). */
+  headerLeading?: React.ReactNode;
+  /** Inline just before the ⋮ menu (update-available badge, top-right pane). */
+  headerTrailing?: React.ReactNode;
+  /** Inline at the far right (the side-panel toggle, top-right pane). */
+  headerEnd?: React.ReactNode;
 }
 
 export function stripArtifactLinks(text: string): string {
@@ -603,6 +609,9 @@ export function AgentChatPane({
   onReplaceWithNew,
   onClosePane,
   isFocusedPane = false,
+  headerLeading,
+  headerTrailing,
+  headerEnd,
 }: AgentChatPaneProps) {
   const isMobileHook = useIsMobile();
   const isMobile = explicitIsMobile ?? isMobileHook;
@@ -2440,13 +2449,14 @@ export function AgentChatPane({
         data-debug-id={`workbench-agent-chat-pane-${agentInstanceId}`}
         className="flex h-full min-h-0 w-full flex-col overflow-hidden bg-canvas text-left"
       >
-        {!isAuxSubagent && (onReplaceWithNew || (isMultiPane && onClosePane)) ? (
+        {!isAuxSubagent && (onReplaceWithNew || (isMultiPane && onClosePane) || headerLeading || headerEnd) ? (
           // Minimal header so a pane whose conversation is missing can still be
           // replaced or closed.
           <header
             data-debug-id="conversation-thread-header-minimal"
             className="flex shrink-0 items-center justify-end gap-1 px-3 py-2"
           >
+            {headerLeading ? <div className="mr-auto flex items-center gap-1">{headerLeading}</div> : null}
             {onReplaceWithNew ? (
               <button
                 type="button"
@@ -2470,6 +2480,8 @@ export function AgentChatPane({
                 <Icon name="close" size={16} />
               </button>
             ) : null}
+            {headerTrailing}
+            {headerEnd}
           </header>
         ) : null}
         <div className="mx-auto mt-6 w-full max-w-4xl rounded-[2rem] border border-subtle bg-surface p-6">
@@ -2508,6 +2520,11 @@ export function AgentChatPane({
         />
 
         <div className="flex min-w-0 flex-1 items-center justify-start gap-1.5">
+          {headerLeading ? (
+            <div data-debug-id="conversation-header-leading" className="flex shrink-0 items-center gap-1">
+              {headerLeading}
+            </div>
+          ) : null}
           {renaming ? (
             <div className="flex min-w-0 flex-1 items-center gap-2">
               <input
@@ -2651,6 +2668,7 @@ export function AgentChatPane({
             </span>
           ) : null}
 
+          {headerTrailing}
           <Menu
             align="end"
             label="Conversation options"
@@ -2806,6 +2824,7 @@ export function AgentChatPane({
               <Icon name="close" size={16} />
             </button>
           ) : null}
+          {headerEnd}
         </div>
       </header>
       ) : null}

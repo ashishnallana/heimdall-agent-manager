@@ -16,6 +16,10 @@ export interface MainPaneFrameProps {
   isMobile?: boolean;
   onFocus: (paneId: string) => void;
   onClose: (paneId: string) => void;
+  /** Picker header: hidden-sidebar control (top-left pane). */
+  headerLeading?: React.ReactNode;
+  /** Picker header: update badge + side-panel toggle (top-right pane). */
+  headerTrailing?: React.ReactNode;
   children: React.ReactNode;
 }
 
@@ -33,6 +37,8 @@ export function MainPaneFrame({
   isMobile = false,
   onFocus,
   onClose,
+  headerLeading,
+  headerTrailing,
   children,
 }: MainPaneFrameProps) {
   const dispatch = useDispatch();
@@ -122,10 +128,12 @@ export function MainPaneFrame({
           onDragStart={handleDragStart}
           className="flex h-9 shrink-0 select-none items-center justify-between gap-2 border-b border-subtle bg-surface px-3 text-xs text-muted"
         >
-          <span className="flex items-center gap-1.5 font-medium">
+          <span className="flex min-w-0 items-center gap-1.5 font-medium">
+            {headerLeading}
             <Icon name="plus" size={13} className="text-accent" />
             New conversation
           </span>
+          <span className="flex shrink-0 items-center gap-1">
           {!isSinglePane ? (
             <button
               type="button"
@@ -138,6 +146,8 @@ export function MainPaneFrame({
               <Icon name="close" size={12} />
             </button>
           ) : null}
+          {headerTrailing}
+          </span>
         </header>
       ) : null}
       <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">{children}</div>

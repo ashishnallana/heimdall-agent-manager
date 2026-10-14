@@ -76,6 +76,9 @@ export function MobileMainPager<T>({
                 isFocused: paneId === focusedPaneId,
                 isMaximized: false,
                 isSinglePane,
+                // Every page is full width: it is both the top-left and top-right pane.
+                isTopLeftMost: true,
+                isTopRightMost: true,
               })}
             </div>
           );

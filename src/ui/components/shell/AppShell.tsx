@@ -1056,13 +1056,16 @@ function RouteOutlet({
   conversations = [],
   liveProjects = [],
   workspaceLeading,
+  workspaceTrailing,
 }: {
   path: string;
   focusMessageId?: string;
   conversations?: ConversationSummary[];
   liveProjects?: LiveProject[];
-  /** Hidden-sidebar toggle + app name, placed in the workspace's top bar. */
+  /** Hidden sidebar: toggle + app name, inline at the top-left chat header. */
   workspaceLeading?: React.ReactNode;
+  /** Hidden sidebar: update-available badge, inline beside the top-right ⋮. */
+  workspaceTrailing?: React.ReactNode;
 }) {
   const viewport = useViewport();
   const isMobile = viewport === 'mobile';
@@ -1116,6 +1119,7 @@ function RouteOutlet({
               (`/conversations/<id1>+<id2>?focused=<id>`) carries the pane set. */}
           <Workspace
             leading={workspaceLeading}
+            trailing={workspaceTrailing}
             focusMessageId={focusMessageId}
             isMobile={isMobile}
           />
@@ -1767,8 +1771,8 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
       ) : null}
 
       <div className="flex min-w-0 flex-1 flex-col h-full min-h-0 overflow-hidden">
-        {/* The conversation workspace has its own top bar: the hidden-sidebar
-            control goes into it (left) next to the aux toggle (right). */}
+        {/* On the conversation workspace there is no extra bar: the hidden-sidebar
+            control sits inline in the top-left chat header (Jetski). */}
         {isEffectiveCollapsed && !isWorkspaceRoute ? (
           <div
             data-debug-id="shell-sidebar-reopen-bar"
@@ -1784,6 +1788,7 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
           conversations={conversations}
           liveProjects={liveProjects}
           workspaceLeading={isEffectiveCollapsed ? <>{sidebarToggleButton}{brandLink}</> : null}
+          workspaceTrailing={isEffectiveCollapsed ? <SidebarUpdateBadge onOpen={openBridgeUpdate} /> : null}
         />
       </div>
 
