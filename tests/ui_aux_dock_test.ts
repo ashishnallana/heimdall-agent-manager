@@ -8,9 +8,30 @@ import React from 'react';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const auxDockSource = fs.readFileSync(path.join(REPO_ROOT, 'src/ui/components/aux/AuxDock.tsx'), 'utf8');
+const launcherSource = fs.readFileSync(path.join(REPO_ROOT, 'src/ui/components/aux/AuxNewTabLauncher.tsx'), 'utf8');
+const tabContentSource = fs.readFileSync(path.join(REPO_ROOT, 'src/ui/components/aux/AuxTabContent.tsx'), 'utf8');
+const artifactViewerSource = fs.readFileSync(path.join(REPO_ROOT, 'src/ui/components/ArtifactViewer.tsx'), 'utf8');
 
 test('mobile aux sheet stays above fixed shell chrome while it transitions', () => {
   assert.match(auxDockSource, /fixed inset-0 z-\[70\].*translate-x-full/s);
+});
+
+test('new tab launcher searches safe titles and requires explicit bridge choice when needed', () => {
+  assert.match(launcherSource, /placeholder="Search artifacts, shells, and agents"/);
+  assert.match(launcherSource, /ResultGroup title="Artifacts"/);
+  assert.match(launcherSource, /ResultGroup title="Live shells and servers"/);
+  assert.match(launcherSource, /Agents in this task chain/);
+  assert.match(launcherSource, /aliveBridges\.length === 1/);
+  assert.match(launcherSource, /aliveBridges\.length > 1/);
+  assert.match(launcherSource, /No alive bridge is available/);
+  assert.match(launcherSource, /isVaultArmored\(raw\)/);
+  assert.match(launcherSource, /decryptVaultText\(raw, key\)/);
+});
+
+test('artifact tabs use embedded viewer content without a nested fullscreen shell', () => {
+  assert.match(tabContentSource, /case 'artifact':[\s\S]*<ArtifactViewer[\s\S]*embedded=\{true\}/);
+  assert.match(artifactViewerSource, /data-debug-id=\{embedded \? 'artifact-viewer-embedded-shell'/);
+  assert.match(artifactViewerSource, /embedded\s*\? 'flex h-full min-h-0 w-full flex-col bg-canvas'/);
 });
 
 async function withDom<T>(fn: (dom: any) => Promise<T>): Promise<T> {

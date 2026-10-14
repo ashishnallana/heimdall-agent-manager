@@ -16,6 +16,7 @@
  *   agentPty {agentId}       -> 'pty__<agentInstanceId>'
  *   preview {session, port}  -> 'preview__<sessionId>:<port>' (or 'preview__<sessionId>' when the port is unknown)
  *   subagentChat {agentId}   -> 'subagent_convo__<agentInstanceId>'
+ *   artifact {artifactId}    -> 'artifact__<artifactId>'
  *
  * `__` separates the type tag from the payload; payloads are embedded
  * verbatim, so decoding is by prefix only. Transient parameters (a file path to
@@ -33,6 +34,7 @@ export const AUX_TAB_KINDS = [
   'agentPty',
   'preview',
   'subagentChat',
+  'artifact',
 ] as const;
 
 export type AuxTabKind = (typeof AUX_TAB_KINDS)[number];
@@ -53,7 +55,8 @@ export type AuxContent =
   | { type: 'shell'; sessionId: string; bridgeId?: string; cwd?: string }
   | { type: 'agentPty'; agentInstanceId: string }
   | { type: 'preview'; sessionId: string; port?: number; path?: string }
-  | { type: 'subagentChat'; agentInstanceId: string };
+  | { type: 'subagentChat'; agentInstanceId: string }
+  | { type: 'artifact'; artifactId: string };
 
 export interface AuxTab {
   /** Content-derived id, see {@link auxTabId}. */
@@ -93,6 +96,7 @@ const TAB_ID_PREFIXES = {
   agentPty: 'pty__',
   preview: 'preview__',
   subagentChat: 'subagent_convo__',
+  artifact: 'artifact__',
 } as const;
 
 const FIXED_TAB_IDS: Record<string, AuxContent> = {
@@ -130,6 +134,8 @@ export function auxTabId(content: AuxContent): string {
     }
     case 'subagentChat':
       return `${TAB_ID_PREFIXES.subagentChat}${clean(content.agentInstanceId)}`;
+    case 'artifact':
+      return `${TAB_ID_PREFIXES.artifact}${clean(content.artifactId)}`;
   }
 }
 
@@ -169,6 +175,10 @@ export function decodeAuxTabId(id: string | null | undefined): AuxContent | null
     }
     return { type: 'preview', sessionId: payload };
   }
+  if (id.startsWith(TAB_ID_PREFIXES.artifact)) {
+    const artifactId = id.slice(TAB_ID_PREFIXES.artifact.length);
+    return artifactId ? { type: 'artifact', artifactId } : null;
+  }
   return null;
 }
 
@@ -188,6 +198,8 @@ export function isAuxContent(value: unknown): value is AuxContent {
     case 'agentPty':
     case 'subagentChat':
       return clean(v.agentInstanceId).length > 0;
+    case 'artifact':
+      return clean(v.artifactId).length > 0;
     default:
       return false;
   }
@@ -220,6 +232,8 @@ export function normalizeAuxContent(content: AuxContent): AuxContent {
     case 'agentPty':
     case 'subagentChat':
       return { ...content, agentInstanceId: clean(content.agentInstanceId) };
+    case 'artifact':
+      return { ...content, artifactId: clean(content.artifactId) };
     default:
       return { ...content };
   }
@@ -290,6 +304,13 @@ export const AUX_TAB_REGISTRY: Record<AuxTabKind, AuxTabDescriptor> = {
     description: 'Chat with another participant of the task chain.',
     multiInstance: true,
   },
+  artifact: {
+    kind: 'artifact',
+    label: 'Artifact',
+    shortLabel: 'Artifact',
+    description: 'Inspect an artifact and its versioned content.',
+    multiInstance: true,
+  },
 };
 
 /** Default human title for a tab (the strip renders this). */
@@ -308,6 +329,8 @@ export function auxTabTitle(tab: Pick<AuxTab, 'content' | 'title'>): string {
       return c.port ? `Preview :${c.port}` : `Preview (${c.sessionId.slice(0, 8)})`;
     case 'subagentChat':
       return c.agentInstanceId.slice(0, 12) || 'Sub-agent';
+    case 'artifact':
+      return c.artifactId.slice(0, 12) || 'Artifact';
     default:
       return AUX_TAB_REGISTRY[c.type].label;
   }

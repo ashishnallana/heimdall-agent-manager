@@ -15,7 +15,8 @@ type ArtifactViewerProps = {
   artifactId: string;
   daemonUrl: string;
   clientToken: string;
-  onClose: () => void;
+  onClose?: () => void;
+  embedded?: boolean;
 };
 
 type ArtifactMeta = {
@@ -264,7 +265,7 @@ function ArtifactCodePreview({ artifactId, versionNo, kind, daemonUrl, clientTok
   );
 }
 
-export default function ArtifactViewer({ artifactId, daemonUrl, clientToken, onClose }: ArtifactViewerProps) {
+export default function ArtifactViewer({ artifactId, daemonUrl, clientToken, onClose, embedded = false }: ArtifactViewerProps) {
   const artifactRequestAuth = useMemo(() => ({ daemonUrl, clientToken }), [daemonUrl, clientToken]);
   const metaQuery = useFetchArtifactMetaQuery({ artifactId, ...artifactRequestAuth }, { skip: !artifactId || !clientToken });
   const versionsQuery = useFetchArtifactVersionsQuery({ artifactId, ...artifactRequestAuth }, { skip: !artifactId || !clientToken });
@@ -358,12 +359,30 @@ export default function ArtifactViewer({ artifactId, daemonUrl, clientToken, onC
     document.body.removeChild(anchor);
   }
 
+  if (embedded && nestedArtifactId) {
+    return (
+      <ArtifactViewer
+        artifactId={nestedArtifactId}
+        daemonUrl={daemonUrl}
+        clientToken={clientToken}
+        embedded={true}
+        onClose={() => setNestedArtifactId('')}
+      />
+    );
+  }
+
   return (
     // REQ-MODAL-2: `app-viewport-height`, not `inset-0` — see the OVERLAYS note in
     // `src/ui/styles.css`. `items-center` centres the panel in this box, so the panel's
     // `max-h` cap below only reaches the user if this box is the visible region.
-    <div className="fixed inset-x-0 top-0 app-viewport-height z-[80] flex items-center justify-center bg-surface-overlay/80 p-2 sm:p-4 backdrop-blur-sm" onClick={onClose}>
-      <div data-debug-id="artifact-viewer" className="flex max-h-[calc(var(--app-viewport-height)*0.96)] sm:max-h-[calc(var(--app-viewport-height)*0.92)] w-full max-w-6xl flex-col overflow-hidden rounded-[22px] border border-subtle bg-surface shadow-panel focus-within:border-accent/40" onClick={(event) => event.stopPropagation()}>
+    <div
+      data-debug-id={embedded ? 'artifact-viewer-embedded-shell' : 'artifact-viewer-modal-shell'}
+      className={embedded
+        ? 'flex h-full min-h-0 w-full flex-col bg-canvas'
+        : 'fixed inset-x-0 top-0 app-viewport-height z-[80] flex items-center justify-center bg-surface-overlay/80 p-2 sm:p-4 backdrop-blur-sm'}
+      onClick={embedded ? undefined : onClose}
+    >
+      <div data-debug-id="artifact-viewer" className={embedded ? 'flex h-full min-h-0 w-full flex-col overflow-hidden bg-surface' : 'flex max-h-[calc(var(--app-viewport-height)*0.96)] sm:max-h-[calc(var(--app-viewport-height)*0.92)] w-full max-w-6xl flex-col overflow-hidden rounded-[22px] border border-subtle bg-surface shadow-panel focus-within:border-accent/40'} onClick={(event) => event.stopPropagation()}>
         <div data-debug-id="artifact-viewer-breadcrumb" className="flex items-center gap-2 border-b border-subtle bg-surface-raised/80 px-4 py-2 sm:px-5 sm:py-2.5 text-[12px] text-faint">
           <span className="text-muted">Artifact</span>
           <span className="text-faint">/</span>
@@ -395,15 +414,17 @@ export default function ArtifactViewer({ artifactId, daemonUrl, clientToken, onC
               >
                 {contentState.loading ? 'Downloading…' : 'Download'}
               </Button>
-              <Button
-                data-debug-id="artifact-viewer-close-btn"
-                variant="secondary"
-                size="sm"
-                onClick={onClose}
-                leading={<Icon name="close" size="sm" />}
-              >
-                Close
-              </Button>
+              {onClose ? (
+                <Button
+                  data-debug-id="artifact-viewer-close-btn"
+                  variant="secondary"
+                  size="sm"
+                  onClick={onClose}
+                  leading={<Icon name="close" size="sm" />}
+                >
+                  {embedded ? 'Back' : 'Close'}
+                </Button>
+              ) : null}
             </div>
           </div>
 
@@ -487,7 +508,7 @@ export default function ArtifactViewer({ artifactId, daemonUrl, clientToken, onC
           </div>
         </div>
       </div>
-      {nestedArtifactId ? <ArtifactViewer artifactId={nestedArtifactId} daemonUrl={daemonUrl} clientToken={clientToken} onClose={() => setNestedArtifactId('')} /> : null}
+      {!embedded && nestedArtifactId ? <ArtifactViewer artifactId={nestedArtifactId} daemonUrl={daemonUrl} clientToken={clientToken} onClose={() => setNestedArtifactId('')} /> : null}
     </div>
   );
 }

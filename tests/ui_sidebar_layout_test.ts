@@ -35,7 +35,7 @@ test('hidden sidebar renders no rail; the toggle + app name are a FIXED top-left
   // One fixed cluster with the toggle + brand, outside the sidebar (so it does not move).
   const cluster = source.slice(source.indexOf('data-debug-id="shell-top-left-cluster"') - 40, source.indexOf('data-debug-id="shell-top-left-cluster"') + 400);
   assert.match(cluster, /absolute left-0 top-0/);
-  assert.match(cluster, /\{sidebarToggleButton\}\s*\{brandLink\}/);
+  assert.match(cluster, /\{sidebarToggleButton\}\s*\{vaultStatusButton\}\s*\{brandLink\}/);
   assert.equal(source.split('{sidebarToggleButton}').length - 1, 1, 'toggle rendered exactly once');
   // The sidebar animates its width (desktop) / slides (mobile) and its header reserves the cluster.
   assert.match(source, /isEffectiveCollapsed \? 'invisible w-0' : 'visible w-80 border-r border-subtle'/);
@@ -53,4 +53,14 @@ test('hidden sidebar renders no rail; the toggle + app name are a FIXED top-left
 test('mobile aux hides the fixed Heimdall and sidebar controls', () => {
   assert.match(source, /const hideTopLeftCluster = isMobile && isWorkspaceRoute && isCurrentAuxPaneOpen/);
   assert.match(source, /\{!hideTopLeftCluster \? \(\s*<div\s+data-debug-id="shell-top-left-cluster"/);
+});
+
+test('vault status toggle sits immediately left of Heimdall and cannot fake unlock', () => {
+  assert.match(source, /data-debug-id="shell-vault-status-toggle"/);
+  assert.match(source, /Icon name=\{isVaultUnlocked \? 'lock-open' : 'lock'\}/);
+  assert.match(source, /isVaultUnlocked\s*\? 'bg-success-soft text-success/);
+  assert.match(source, /: 'bg-danger-soft text-danger/);
+  assert.match(source, /if \(!vaultSupported \|\| isVaultLocking\) return/);
+  assert.match(source, /dispatch\(setUnlockModalOpen\(true\)\)/);
+  assert.match(source, /lockAllConnectedBridges\(\)[\s\S]*dispatch\(lockVault\(\)\)/);
 });

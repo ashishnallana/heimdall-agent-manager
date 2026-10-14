@@ -14,6 +14,7 @@ import { PreviewWorkbenchPane } from '../workbench/PreviewWorkbenchPane';
 import { ShellWorkbenchPane } from '../workbench/ShellWorkbenchPane';
 import type { AgentAuxContext } from './useAgentAuxContext';
 import { OpenAgentChatContext } from './openAgentChatContext';
+import ArtifactViewer from '../ArtifactViewer';
 
 const ProjectFilesPanel = React.lazy(() => import('../chat/ProjectFilesPanel'));
 const ProjectVcsPanel = React.lazy(() => import('../chat/ProjectVcsPanel'));
@@ -164,14 +165,15 @@ function renderAuxTabBody({
       );
     case 'shell': {
       const bound = isProvisionalShellSessionId(c.sessionId) ? undefined : c.sessionId;
+      const selectedBridgeId = c.bridgeId || ctx.bridgeId;
       return (
         <ShellWorkbenchPane
           sessionId={bound}
-          bridgeId={c.bridgeId || ctx.bridgeId}
+          bridgeId={selectedBridgeId}
           projectId={ctx.projectId}
           chainId={ctx.chainId}
           agentInstanceId={ctx.agentInstanceId}
-          defaultCwd={c.cwd || ctx.shellDefaultCwd}
+          defaultCwd={c.cwd || (selectedBridgeId === ctx.bridgeId ? ctx.shellDefaultCwd : undefined)}
           cwdReady={ctx.shellCwdReady}
           autoCreate={!bound}
           isActiveTab={true}
@@ -219,6 +221,15 @@ function renderAuxTabBody({
         />
       );
     }
+    case 'artifact':
+      return (
+        <ArtifactViewer
+          artifactId={c.artifactId}
+          daemonUrl=""
+          clientToken="v1"
+          embedded={true}
+        />
+      );
     default:
       return null;
   }

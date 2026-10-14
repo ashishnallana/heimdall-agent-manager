@@ -70,6 +70,7 @@ export type IconName =
   | 'panel-left'
   | 'terminal'
   | 'lock'
+  | 'lock-open'
   | 'spark'
   | 'sparkle'
   | 'command'
@@ -261,6 +262,12 @@ const PATHS: Record<IconName, ReactElement> = {
     <g fill="none" stroke="currentColor" strokeWidth={1.9}>
       <rect x={5} y={10.5} width={14} height={9} rx={2} />
       <path d="M8 10.5V8a4 4 0 0 1 8 0v2.5" strokeLinecap="round" />
+    </g>
+  ),
+  'lock-open': (
+    <g fill="none" stroke="currentColor" strokeWidth={1.9}>
+      <rect x={5} y={10.5} width={14} height={9} rx={2} />
+      <path d="M16 10.5V8a4 4 0 0 0-7.5-2" strokeLinecap="round" />
     </g>
   ),
   spark: <path d="M12 3l2 6 6 2-6 2-2 6-2-6-6-2 6-2z" fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinejoin="round" />,

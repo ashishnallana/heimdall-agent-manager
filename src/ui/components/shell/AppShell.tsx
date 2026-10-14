@@ -21,7 +21,7 @@ import { useGetAccountBillingQuery } from '../../api/endpoints/accountBilling';
 import SidebarUpdateBadge from './SidebarUpdateBadge';
 import { TOP_CHROME_HEIGHT, TOP_LEFT_CLUSTER_WIDTH } from './shellChrome';
 import type { PendingBridgeUpdate } from '../settings/bridgeUpdate';
-import { unsealAllConnectedBridges } from '../../api/endpoints/bridges';
+import { lockAllConnectedBridges, unsealAllConnectedBridges } from '../../api/endpoints/bridges';
 import { buildRouteHash, getRoutePathname, getRouteSearch } from '../../utils/appLocation';
 import {
   readLastSeenUserId,
@@ -73,6 +73,7 @@ import {
   readOnboardingDismissed,
   shouldOpenVaultOnboarding,
   getActiveVaultKey,
+  lockVault,
 } from '../../store/vaultSlice';
 import { isVaultSupported } from '../../utils/vaultCrypto';
 import {
@@ -1344,6 +1345,7 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
   }, [isVaultUnlocked]);
   const isUnlockModalOpen = useSelector(selectIsUnlockModalOpen);
   const [isOnboardingModalOpen, setIsOnboardingModalOpen] = useState(false);
+  const [isVaultLocking, setIsVaultLocking] = useState(false);
 
   // Auto-pop onboarding modal on first visit if vault is unconfigured or locked and not
   // dismissed. Suppressed entirely when SubtleCrypto is unavailable (REQ-VAULT-UNSUP-2).
@@ -1633,6 +1635,37 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
       <Icon name="panel-left" size={16} />
     </button>
   );
+  const vaultSupported = isVaultSupported();
+  const vaultStatusButton = (
+    <button
+      data-debug-id="shell-vault-status-toggle"
+      type="button"
+      disabled={!vaultSupported || isVaultLocking}
+      onClick={() => {
+        if (!vaultSupported || isVaultLocking) return;
+        if (!isVaultUnlocked) {
+          dispatch(setUnlockModalOpen(true));
+          return;
+        }
+        setIsVaultLocking(true);
+        void lockAllConnectedBridges()
+          .finally(() => {
+            dispatch(lockVault());
+            setIsVaultLocking(false);
+          });
+      }}
+      aria-label={isVaultUnlocked ? 'Lock vault' : 'Unlock vault'}
+      aria-pressed={isVaultUnlocked}
+      title={!vaultSupported ? 'Vault unavailable in this browser context' : isVaultUnlocked ? 'Vault unlocked — click to lock' : 'Vault locked — click to unlock'}
+      className={`grid h-8 w-8 shrink-0 place-items-center rounded-lg transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+        isVaultUnlocked
+          ? 'bg-success-soft text-success hover:bg-success/20'
+          : 'bg-danger-soft text-danger hover:bg-danger/20'
+      }`}
+    >
+      <Icon name={isVaultUnlocked ? 'lock-open' : 'lock'} size={16} />
+    </button>
+  );
   const brandLink = (
     <a href={shellHash('/home')} data-debug-id="shell-brand" className="min-w-0 rounded-lg px-1.5 py-1 hover:bg-neutral-soft">
       <span className="block truncate text-sm font-black tracking-tight text-primary">Heimdall</span>
@@ -1716,6 +1749,7 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
           style={{ width: TOP_LEFT_CLUSTER_WIDTH, height: TOP_CHROME_HEIGHT }}
         >
           {sidebarToggleButton}
+          {vaultStatusButton}
           {brandLink}
         </div>
       ) : null}

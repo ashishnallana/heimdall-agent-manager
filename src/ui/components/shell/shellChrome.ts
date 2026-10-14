@@ -7,7 +7,7 @@
  */
 
 /** Width of the fixed top-left cluster (toggle + "Heimdall"), px. */
-export const TOP_LEFT_CLUSTER_WIDTH = 132;
+export const TOP_LEFT_CLUSTER_WIDTH = 168;
 
 /** Height of the top chrome row (matches the chat header / aux tab strip), px. */
 export const TOP_CHROME_HEIGHT = 48;

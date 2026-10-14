@@ -68,6 +68,7 @@ test('tab codec: content-derived ids round-trip and ignore transient params', ()
     [{ type: 'preview', sessionId: 'srv', port: 5173 }, 'preview__srv:5173'],
     [{ type: 'preview', sessionId: 'srv' }, 'preview__srv'],
     [{ type: 'subagentChat', agentInstanceId: 'child' }, 'subagent_convo__child'],
+    [{ type: 'artifact', artifactId: 'art-1' }, 'artifact__art-1'],
   ];
   for (const [content, id] of cases) {
     assert.equal(auxTabId(content), id);
@@ -79,6 +80,8 @@ test('tab codec: content-derived ids round-trip and ignore transient params', ()
   assert.equal(decodeAuxTabId('agentChat__x'), null, 'chats are never aux tabs');
   assert.equal(decodeAuxTabId('pty__'), null);
   assert.equal(isAuxContent({ type: 'agentPty' }), false);
+  assert.equal(isAuxContent({ type: 'artifact', artifactId: '' }), false);
+  assert.equal(isAuxContent({ type: 'artifact', artifactId: 'art-1' }), true);
   assert.equal(isAuxContent({ type: 'files' }), true);
   assert.equal(createAuxTab({ type: 'preview', sessionId: ' s ', port: 80, path: '//a' }).content.type, 'preview');
   assert.equal(auxTabTitle({ content: { type: 'preview', sessionId: 's', port: 80 } }), 'Preview :80');
