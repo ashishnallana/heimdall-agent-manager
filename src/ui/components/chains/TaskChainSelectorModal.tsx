@@ -45,6 +45,11 @@ export interface TaskChainSelectorModalProps {
   currentChainId?: string;
   projectId?: string;
   onNavigate?: (route: string) => void;
+  /**
+   * When provided, picking a chain calls this INSTEAD of navigating (e.g. a
+   * Main pane swaps its own agent to the chain's coordinator in place).
+   */
+  onSelectChain?: (chain: { chainId: string; coordinatorAgentInstanceId?: string }) => void;
   chainGroups?: ChainProjectGroup[];
 }
 
@@ -54,6 +59,7 @@ export function TaskChainSelectorModal({
   currentChainId,
   projectId,
   onNavigate,
+  onSelectChain,
   chainGroups: chainGroupsProp,
 }: TaskChainSelectorModalProps) {
   const [query, setQuery] = useState('');
@@ -246,6 +252,11 @@ export function TaskChainSelectorModal({
   };
 
   const handleSelect = (chain: ChainSelectorItem) => {
+    if (onSelectChain) {
+      onSelectChain({ chainId: chain.chainId, coordinatorAgentInstanceId: chain.coordinatorAgentInstanceId });
+      onClose();
+      return;
+    }
     const route = taskChainRoute(chain);
     if (onNavigate) {
       onNavigate(route);

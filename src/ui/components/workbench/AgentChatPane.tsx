@@ -3003,6 +3003,25 @@ export function AgentChatPane({
         onClose={() => setChainSelectorOpen(false)}
         currentChainId={chainId}
         projectId={projectId}
+        // Per-pane: picking a chain swaps THIS pane to its coordinator in place
+        // (deduped by the workspace). A chain without a coordinator keeps the
+        // default navigation to /chains/<id>.
+        onSelectChain={
+          onSwitchAgent
+            ? (chain) => {
+                if (chain.coordinatorAgentInstanceId) {
+                  if (chain.coordinatorAgentInstanceId !== agentInstanceId) {
+                    onSwitchAgent(chain.coordinatorAgentInstanceId);
+                  }
+                } else if (typeof window !== 'undefined') {
+                  window.location.hash = buildRouteHash(
+                    `/chains/${encodeURIComponent(chain.chainId)}`,
+                    '',
+                  );
+                }
+              }
+            : undefined
+        }
       />
 
       <CommandPalette
