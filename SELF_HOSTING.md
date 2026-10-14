@@ -447,6 +447,68 @@ Grafana.com dashboard **1860** for host graphs and the provisioned
 **Heimdall / Hub Health** for the hub. Details and non-Nix snippets:
 [`tools/telemetry/hub/README.md`](tools/telemetry/hub/README.md).
 
+### 1.9 Bridge error events (why a bridge is failing)
+
+Bridges relay **structured warn/error events** to the hub over their existing
+WebSocket: a `code` from a fixed enum (`hub_connect_failed`, `hub_ws_closed`,
+`provider_missing`, `agent_exited_early`, `pty_host_unreachable`,
+`update_apply_failed`, …) plus a few typed fields (`stage`, `reason`,
+`provider`, `exit_code`, `hub_status`, …) whose values are integers or enum
+names. **No free text ever leaves the bridge** — no paths, argv, hostnames,
+output — so there is nothing to scrub; the hub renders the human sentence from
+`code` + fields. The bridge keeps a 256-entry ring, dedups identical events into
+a `count`, and flushes ≤ 10 entries / ≤ 4 KiB per frame after each
+`bridge_ready` (so the reason for the *previous* disconnect arrives on
+reconnect). Shipping follows the same switch as the heartbeat stats
+(`telemetry_enabled = disabled` turns it off on both ends; the local stderr line
+is always printed).
+
+On the hub, every event is:
+
+- **counted**: `heimdall_bridge_errors_total{code,level}` (fleet-wide),
+  `heimdall_bridge_errors_by_bridge_total{bridge_id}`, plus
+  `heimdall_bridge_log_entries_total`, `..._log_dropped_total` (bridge ring
+  drops), `..._log_queue_dropped_total` (hub queue overflow),
+  `heimdall_bridge_frames_rejected_total{reason="log_*"}`;
+- **stored** in SQLite (`bridge_log_events`, ≤ 500 rows per bridge, 7 days,
+  written by one background thread in batches — never from a socket reader);
+- **readable by the owner** in *Settings → Bridges → Recent errors*, or
+  `GET /api/v1/bridges/{bridge_id}/events?limit=100&before_id=<id>` →
+  `{events:[{id,ts_ms,received_at,level,code,fields,count,message}],has_more,next_before_id}`;
+  `DELETE …/events` purges. Revoking a bridge deletes its events.
+
+Per-connection abuse bounds: 300-event burst then 20 per 10 s, 4 KiB frames,
+unknown codes → `other`, unknown field keys → entry rejected.
+
+**Optional log backend.** Start the hub with
+
+```bash
+ham-hub ... --log-push-url http://127.0.0.1:9428     # or HEIMDALL_LOG_PUSH_URL
+```
+
+and the same writer thread also POSTs each committed batch to
+`<url>/insert/loki/api/v1/push` (VictoriaLogs; Loki accepts the identical
+body). Stream labels are only `{job="heimdall-bridge", level}`; `bridge_id`,
+`code`, hub `version` and the fields are structured metadata — never `owner`.
+2 s timeout, 4xx dropped, 5xx retried once, failures in
+`heimdall_log_push_failures_total`; the SQLite ring and the owner API never
+depend on the backend. On the NixOS hub host:
+
+```nix
+services.heimdall-telemetry.logs.enable = true;   # VictoriaLogs 127.0.0.1:9428, 15 d,
+                                                  # journald upload (ham-hub, nginx, …),
+                                                  # Grafana VictoriaLogs datasource + plugin
+# and add `--log-push-url http://127.0.0.1:9428` to the heimdall-hub ExecStart
+```
+
+That provisions the **Heimdall / Bridge Events** dashboard (errors by code,
+per-bridge rate, codes first seen in 24 h, event stream) and a *Bridge errors*
+row on **Fleet**; `alerts.yml` gains `HeimdallBridgeDangerousErrors`,
+`HeimdallBridgeUnknownErrorCodes`, `HeimdallBridgeUpdateFailures`,
+`HeimdallLogPushFailures`, `HeimdallBridgeLogQueueDrops`. The hub's own
+journal arrives via `systemd-journal-upload` (whole-host journal — filter with
+`_SYSTEMD_UNIT:"heimdall-hub.service"` in LogsQL).
+
 ---
 
 ## Part 2 — Bridge (one per agent-running device)

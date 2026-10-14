@@ -1,0 +1,435 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": false,
+  "graphTooltip": 1,
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 78,
+      "panels": [],
+      "title": "Fleet",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "heimdall-prometheus"
+      },
+      "description": "Count-weighted events in the last hour by code (heimdall_bridge_errors_total).",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 0,
+        "y": 1
+      },
+      "id": 79,
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "sum by (code) (increase(heimdall_bridge_errors_total{code=~\"$code\",level=~\"$level\"}[1h]))",
+          "instant": true,
+          "legendFormat": "{{code}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Errors/h by code",
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "heimdall-prometheus"
+      },
+      "description": "",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 12,
+        "y": 1
+      },
+      "id": 80,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "sum by (code) (rate(heimdall_bridge_errors_total{code=~\"$code\",level=~\"$level\"}[15m]))",
+          "legendFormat": "{{code}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Errors/s by code",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "heimdall-prometheus"
+      },
+      "description": "One series per bridge (no code). owner is joined from heimdall_bridge_info here only.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 0,
+        "y": 11
+      },
+      "id": 81,
+      "options": {
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "Value"
+          }
+        ]
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "topk(20, sum by (bridge_id) (increase(heimdall_bridge_errors_by_bridge_total{bridge_id=~\"$bridge_id\"}[1h])) * on(bridge_id) group_left(owner) heimdall_bridge_info)",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ],
+      "title": "Per-bridge rate (events/h, top 20)",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "heimdall-prometheus"
+      },
+      "description": "A code with no series 24 h ago: a new failure mode or a new bridge build. code=\"other\" means bridges newer than the hub.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 12,
+        "y": 11
+      },
+      "id": 82,
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "count by (code) (heimdall_bridge_errors_total unless heimdall_bridge_errors_total offset 24h)",
+          "instant": true,
+          "legendFormat": "{{code}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Codes first seen in the last 24 h",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "heimdall-prometheus"
+      },
+      "description": "",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 21
+      },
+      "id": 83,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "sum by (reason) (rate(heimdall_bridge_frames_rejected_total{reason=~\"log_.*\"}[5m]))",
+          "legendFormat": "rejected {{reason}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "rate(heimdall_bridge_log_dropped_total[5m])",
+          "legendFormat": "dropped on bridges",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "rate(heimdall_bridge_log_queue_dropped_total[5m])",
+          "legendFormat": "dropped in hub queue",
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "rate(heimdall_log_push_failures_total[5m])",
+          "legendFormat": "push failures",
+          "refId": "D"
+        }
+      ],
+      "title": "Ingest health",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "heimdall-prometheus"
+      },
+      "description": "",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 21
+      },
+      "id": 84,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "rate(heimdall_bridge_log_entries_total[5m])",
+          "legendFormat": "entries (count-weighted)",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "rate(heimdall_bridge_log_rows_written_total[5m])",
+          "legendFormat": "rows written",
+          "refId": "B"
+        }
+      ],
+      "title": "Entries accepted vs rows written",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 29
+      },
+      "id": 85,
+      "panels": [],
+      "title": "Events (VictoriaLogs)",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "victoriametrics-logs-datasource",
+        "uid": "heimdall-victorialogs"
+      },
+      "description": "LogsQL over the optional VictoriaLogs backend. Lines are rendered by the hub; bridge_id, code, version and the typed fields are structured metadata.",
+      "gridPos": {
+        "h": 16,
+        "w": 24,
+        "x": 0,
+        "y": 30
+      },
+      "id": 86,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "victoriametrics-logs-datasource",
+            "uid": "heimdall-victorialogs"
+          },
+          "expr": "{job=\"heimdall-bridge\"} bridge_id:~\"$bridge_id\" code:~\"$code\" level:~\"$level\"",
+          "queryType": "instant",
+          "refId": "A"
+        }
+      ],
+      "title": "Event stream",
+      "type": "logs"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": [
+    "heimdall"
+  ],
+  "templating": {
+    "list": [
+      {
+        "allValue": ".*",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "heimdall-prometheus"
+        },
+        "includeAll": true,
+        "multi": true,
+        "name": "bridge_id",
+        "query": "label_values(heimdall_bridge_info, bridge_id)",
+        "refresh": 2,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "allValue": ".*",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "includeAll": true,
+        "multi": true,
+        "name": "level",
+        "options": [
+          {
+            "selected": true,
+            "text": "All",
+            "value": "$__all"
+          },
+          {
+            "selected": false,
+            "text": "warn",
+            "value": "warn"
+          },
+          {
+            "selected": false,
+            "text": "error",
+            "value": "error"
+          }
+        ],
+        "query": "warn,error",
+        "type": "custom"
+      },
+      {
+        "allValue": ".*",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "heimdall-prometheus"
+        },
+        "includeAll": true,
+        "multi": true,
+        "name": "code",
+        "query": "label_values(heimdall_bridge_errors_total, code)",
+        "refresh": 2,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "title": "Heimdall / Bridge Events",
+  "uid": "heimdall-bridge-events",
+  "version": 1
+}

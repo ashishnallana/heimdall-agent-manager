@@ -18,6 +18,13 @@
 #
 # and start the hub with `--metrics-addr 127.0.0.1:9464` (see SELF_HOSTING.md).
 #
+# Optional log backend (bridge_logs plan v2, section 5): set `logs.enable = true`
+# to add VictoriaLogs on 127.0.0.1:9428 (15 d retention), upload this host's
+# journal (ham-hub, nginx, …) into it via systemd-journal-upload, provision the
+# Grafana VictoriaLogs datasource + plugin, and start the hub with
+# `--log-push-url http://127.0.0.1:9428` so relayed bridge error events land
+# there too (Bridge Events dashboard). Everything stays on loopback.
+#
 # Authentik side (not expressible here): create group `heimdall-admins`, an
 # OAuth2/OpenID provider + application for `https://<grafanaDomain>/login/generic_oauth`
 # with the default `profile` scope (it already emits `groups`), and bind a
@@ -86,9 +93,46 @@ in
 
     retentionTime = mkOption { type = types.str; default = "15d"; };
     retentionSize = mkOption { type = types.str; default = "8GB"; };
+
+    logs = {
+      enable = mkEnableOption "VictoriaLogs for hub journald + relayed bridge error events";
+      listenAddress = mkOption {
+        type = types.str;
+        default = "127.0.0.1:9428";
+        description = "VictoriaLogs HTTP listener; also the value for ham-hub --log-push-url (http://<this>). Keep it on loopback: it is unauthenticated.";
+      };
+      retentionPeriod = mkOption {
+        type = types.str;
+        default = "15d";
+        description = "VictoriaLogs -retentionPeriod.";
+      };
+      uploadJournal = mkOption {
+        type = types.bool;
+        default = true;
+        description = "Upload this host's systemd journal (heimdall-hub, nginx, …) to VictoriaLogs via systemd-journal-upload. journal-upload has no per-unit filter; filter at query time with _SYSTEMD_UNIT.";
+      };
+    };
   };
 
   config = lib.mkIf cfg.enable {
+    # --- VictoriaLogs (optional) ------------------------------------------
+    # One binary, no schema/compactor config; accepts the Loki push API the hub
+    # speaks (/insert/loki/api/v1/push) and journald natively (/insert/journald).
+    services.victorialogs = lib.mkIf cfg.logs.enable {
+      enable = true;
+      listenAddress = cfg.logs.listenAddress;
+      extraOptions = [ "-retentionPeriod=${cfg.logs.retentionPeriod}" ];
+    };
+
+    # journald -> VictoriaLogs. systemd-journal-upload ships the WHOLE journal of
+    # this host (there is no unit filter in journal-upload.conf); the hub's and
+    # nginx's lines are selected in Grafana with _SYSTEMD_UNIT:"heimdall-hub.service"
+    # / "nginx.service". Loopback HTTP, so no TLS material is needed.
+    services.journald.upload = lib.mkIf (cfg.logs.enable && cfg.logs.uploadJournal) {
+      enable = true;
+      settings.Upload.URL = "http://${cfg.logs.listenAddress}/insert/journald";
+    };
+
     # --- Prometheus -------------------------------------------------------
     services.prometheus = {
       enable = true;
@@ -189,9 +233,16 @@ in
           use_pkce = true;
         };
       };
+      # The VictoriaLogs datasource plugin (Grafana has no built-in one).
+      declarativePlugins = lib.mkIf cfg.logs.enable [ pkgs.grafanaPlugins.victoriametrics-logs-datasource ];
       provision = {
         enable = true;
-        datasources.path = "${cfg.telemetryDir}/grafana/provisioning/datasources/prometheus.yml";
+        # Without the log backend provision Prometheus only; with it, the whole
+        # directory (prometheus.yml + victorialogs.yml).
+        datasources.path =
+          if cfg.logs.enable
+          then "${cfg.telemetryDir}/grafana/provisioning/datasources"
+          else "${cfg.telemetryDir}/grafana/provisioning/datasources/prometheus.yml";
         dashboards.settings = {
           apiVersion = 1;
           providers = [{

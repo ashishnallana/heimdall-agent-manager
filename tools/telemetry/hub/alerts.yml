@@ -167,3 +167,60 @@ groups:
         annotations:
           summary: "Hub host has < 10% memory available"
           description: "Check ham-hub RSS (one thread per connection) before blaming Prometheus."
+
+  # Bridge error events relayed over the bridge WebSocket (bridge_logs plan v2
+  # section 5). Codes are the shared enum (src/contracts/bridge_log.odin);
+  # "other" means a bridge newer than the hub. Thresholds per the plan review:
+  # update failures and "other" are fleet totals, not per bridge, so one
+  # laptop with a full disk cannot page by itself.
+  - name: heimdall-bridge-events
+    rules:
+      - alert: HeimdallBridgeDangerousErrors
+        expr: |
+          sum(increase(heimdall_bridge_errors_total{code=~"pty_host_spawn_failed|pty_host_unreachable|agent_launch_failed|keystore_unavailable"}[15m])) > 3
+        for: 5m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Bridges are failing to launch agents / reach the PTY host / use the keystore"
+          description: "More than 3 dangerous bridge error events (pty_host_spawn_failed, pty_host_unreachable, agent_launch_failed, keystore_unavailable) fleet-wide in 15 minutes. Open the Bridge Events dashboard; the per-bridge split is in heimdall_bridge_errors_by_bridge_total."
+
+      - alert: HeimdallBridgeUnknownErrorCodes
+        # ~0.4/s fleet rate makes a per-second ratio meaningless; 20/h of a
+        # code this hub cannot name is deploy skew (bridges ahead of the hub).
+        expr: sum(increase(heimdall_bridge_errors_total{code="other"}[1h])) > 20
+        for: 15m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Bridges report error codes this hub does not know"
+          description: "{{ $value | humanize }} events/h mapped to code=\"other\" — bridges are probably newer than the hub. Deploy the hub."
+
+      - alert: HeimdallBridgeUpdateFailures
+        expr: sum(increase(heimdall_bridge_errors_total{code=~"update_.*"}[1h])) > 5
+        for: 10m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Bridge self-updates are failing"
+          description: "More than 5 update_download_failed / update_apply_failed / update_rollback events fleet-wide in the last hour."
+
+      - alert: HeimdallLogPushFailures
+        expr: increase(heimdall_log_push_failures_total[10m]) > 0
+        for: 10m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Pushing bridge events to the log backend is failing"
+          description: "ham-hub could not POST to --log-push-url for 10 minutes (VictoriaLogs down, or rejecting the batch with 4xx). SQLite and the owner API are unaffected."
+
+      - alert: HeimdallBridgeLogQueueDrops
+        # The hub-side writer queue overflowing is an operator problem (writer
+        # stalled on SQLite); a bridge's own `dropped` counter is not.
+        expr: increase(heimdall_bridge_log_queue_dropped_total[10m]) > 0
+        for: 5m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Hub dropped accepted bridge events (writer queue full)"
+          description: "heimdall_bridge_log_queue_dropped_total is increasing: the single bridge_log writer thread is not keeping up (check heimdall_sqlite_busy and the hub's disk)."

@@ -13,7 +13,7 @@
         "x": 0,
         "y": 0
       },
-      "id": 55,
+      "id": 59,
       "panels": [],
       "title": "WebSockets",
       "type": "row"
@@ -36,7 +36,7 @@
         "x": 0,
         "y": 1
       },
-      "id": 56,
+      "id": 60,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -78,7 +78,7 @@
         "x": 12,
         "y": 1
       },
-      "id": 57,
+      "id": 61,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -120,7 +120,7 @@
         "x": 0,
         "y": 9
       },
-      "id": 58,
+      "id": 62,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -162,7 +162,7 @@
         "x": 12,
         "y": 9
       },
-      "id": 59,
+      "id": 63,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -204,7 +204,7 @@
         "x": 0,
         "y": 17
       },
-      "id": 60,
+      "id": 64,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -246,7 +246,7 @@
         "x": 12,
         "y": 17
       },
-      "id": 61,
+      "id": 65,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -278,7 +278,7 @@
         "x": 0,
         "y": 25
       },
-      "id": 62,
+      "id": 66,
       "panels": [],
       "title": "Shells",
       "type": "row"
@@ -301,7 +301,7 @@
         "x": 0,
         "y": 26
       },
-      "id": 63,
+      "id": 67,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -343,7 +343,7 @@
         "x": 12,
         "y": 26
       },
-      "id": 64,
+      "id": 68,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -394,7 +394,7 @@
         "x": 0,
         "y": 34
       },
-      "id": 65,
+      "id": 69,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -454,7 +454,7 @@
         "x": 12,
         "y": 34
       },
-      "id": 66,
+      "id": 70,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -496,7 +496,7 @@
         "x": 0,
         "y": 42
       },
-      "id": 67,
+      "id": 71,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -547,7 +547,7 @@
         "x": 12,
         "y": 42
       },
-      "id": 68,
+      "id": 72,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -579,7 +579,7 @@
         "x": 0,
         "y": 50
       },
-      "id": 69,
+      "id": 73,
       "panels": [],
       "title": "Preview & LSP",
       "type": "row"
@@ -602,7 +602,7 @@
         "x": 0,
         "y": 51
       },
-      "id": 70,
+      "id": 74,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -644,7 +644,7 @@
         "x": 12,
         "y": 51
       },
-      "id": 71,
+      "id": 75,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -686,7 +686,7 @@
         "x": 0,
         "y": 59
       },
-      "id": 72,
+      "id": 76,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -737,7 +737,7 @@
         "x": 12,
         "y": 59
       },
-      "id": 73,
+      "id": 77,
       "options": {
         "legend": {
           "displayMode": "list",

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the Heimdall Grafana dashboards (hub-health, fleet, streams).
+"""Generate the Heimdall Grafana dashboards (hub-health, fleet, streams, bridge-events).
 
 Hand-maintaining Grafana JSON is error-prone; this script is the source of
 truth for the Hub Health dashboard. Re-run it and commit the JSON when panels
@@ -9,6 +9,9 @@ import json
 import os
 
 DS = {"type": "prometheus", "uid": "heimdall-prometheus"}
+# Optional VictoriaLogs datasource (bridge_logs plan v2 section 5); panels that
+# use it show "datasource not found" until services.heimdall-telemetry.logs is on.
+LOGS_DS = {"type": "victoriametrics-logs-datasource", "uid": "heimdall-victorialogs"}
 JOB = 'job="heimdall-hub"'
 
 _id = [0]
@@ -30,9 +33,12 @@ def target(expr, legend="", instant=False):
 target.n = 0
 
 
-def panel(title, exprs, x, y, w=12, h=8, unit="short", kind="timeseries", desc="", extra_fc=None, options=None):
+def panel(title, exprs, x, y, w=12, h=8, unit="short", kind="timeseries", desc="", extra_fc=None, options=None, ds=None):
     target.n = 0
     targets = [target(*e) if isinstance(e, tuple) else target(e) for e in exprs]
+    if ds is not None:
+        for t in targets:
+            t["datasource"] = ds
     fc = {"defaults": {"unit": unit}, "overrides": []}
     if extra_fc:
         fc["defaults"].update(extra_fc)
@@ -41,7 +47,7 @@ def panel(title, exprs, x, y, w=12, h=8, unit="short", kind="timeseries", desc="
         "type": kind,
         "title": title,
         "description": desc,
-        "datasource": DS,
+        "datasource": ds or DS,
         "gridPos": {"x": x, "y": y, "w": w, "h": h},
         "fieldConfig": fc,
         "targets": targets,
@@ -50,6 +56,22 @@ def panel(title, exprs, x, y, w=12, h=8, unit="short", kind="timeseries", desc="
     if kind == "timeseries":
         p["options"] = {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
     return p
+
+
+def logs_panel(title, query, x, y, w=24, h=12, desc=""):
+    """A VictoriaLogs logs panel (LogsQL). Stream labels are {job, level}; bridge_id/code are
+    structured-metadata fields, so they are filtered with `field:~"regex"`, never selected
+    as a stream."""
+    return {
+        "id": nid(),
+        "type": "logs",
+        "title": title,
+        "description": desc,
+        "datasource": LOGS_DS,
+        "gridPos": {"x": x, "y": y, "w": w, "h": h},
+        "options": {"showTime": True, "wrapLogMessage": True, "sortOrder": "Descending", "enableLogDetails": True, "dedupStrategy": "none"},
+        "targets": [{"datasource": LOGS_DS, "refId": "A", "expr": query, "queryType": "instant"}],
+    }
 
 
 def row(title, y):
@@ -193,6 +215,14 @@ fleet_panels = [
         ('heimdall_bridge_host_load1{' + BRIDGE_SEL + '}', "load1 {{bridge_id}}"),
         ('heimdall_bridge_disk_free_bytes{' + BRIDGE_SEL + '} / 1e9', "disk free GB {{bridge_id}}"),
     ], 12, 77, unit="short", desc="Disk is a panel, never a page: it is the customer's machine."),
+
+    # bridge_logs plan v2 section 5: errors/h per bridge (one series per bridge,
+    # no code) and the raw events of the selected bridge(s) from VictoriaLogs.
+    row("Bridge errors (relayed events)", 85),
+    panel("Errors/h per bridge (top 10)", [('topk(10, sum by (bridge_id) (increase(heimdall_bridge_errors_by_bridge_total{' + BRIDGE_SEL + '}[1h]))' + OWNER_JOIN + ')', "{{bridge_id}} {{owner}}")], 0, 86, unit="short",
+          desc="Count-weighted warn+error events per bridge per hour (heimdall_bridge_errors_by_bridge_total). Codes are on the Bridge Events dashboard."),
+    panel("Errors/s by code (fleet)", [('sum by (code) (rate(heimdall_bridge_errors_total[15m]))', "{{code}}")], 12, 86, unit="ops"),
+    logs_panel("Recent events for the selected bridge(s)", '{job="heimdall-bridge"} bridge_id:~"$bridge"', 0, 94, w=24, h=12),
 ]
 
 fleet = dict(dashboard)
@@ -242,3 +272,49 @@ streams_panels = [
 streams = dict(dashboard)
 streams.update({"uid": "heimdall-streams", "title": "Heimdall / Streams & Shells", "panels": streams_panels, "templating": {"list": []}})
 write("streams.json", streams)
+
+# ---------------------------------------------------------------------------
+# Bridge Events (bridge_logs plan v2 section 5): what the relayed warn/error
+# events say, fleet-wide and per bridge. Counters come from Prometheus; the
+# event lines come from VictoriaLogs (optional; see README).
+EV_SEL = 'code=~"$code",level=~"$level"'
+LOGS_SEL = '{job="heimdall-bridge"} bridge_id:~"$bridge_id" code:~"$code" level:~"$level"'
+events_panels = [
+    row("Fleet", 0),
+    panel("Errors/h by code", [('sum by (code) (increase(heimdall_bridge_errors_total{' + EV_SEL + '}[1h]))', "{{code}}", True)], 0, 1, w=12, h=10, kind="bargauge",
+          options={"orientation": "horizontal", "displayMode": "gradient", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": False}},
+          desc="Count-weighted events in the last hour by code (heimdall_bridge_errors_total)."),
+    panel("Errors/s by code", [('sum by (code) (rate(heimdall_bridge_errors_total{' + EV_SEL + '}[15m]))', "{{code}}")], 12, 1, w=12, h=10, unit="ops"),
+    panel("Per-bridge rate (events/h, top 20)", [('topk(20, sum by (bridge_id) (increase(heimdall_bridge_errors_by_bridge_total{bridge_id=~"$bridge_id"}[1h]))' + ' * on(bridge_id) group_left(owner) heimdall_bridge_info' + ')', "", True)], 0, 11, w=12, h=10, kind="table",
+          options={"sortBy": [{"displayName": "Value", "desc": True}]},
+          desc="One series per bridge (no code). owner is joined from heimdall_bridge_info here only."),
+    panel("Codes first seen in the last 24 h", [('count by (code) (heimdall_bridge_errors_total unless heimdall_bridge_errors_total offset 24h)', "{{code}}", True)], 12, 11, w=12, h=10, kind="table",
+          desc="A code with no series 24 h ago: a new failure mode or a new bridge build. code=\"other\" means bridges newer than the hub."),
+    panel("Ingest health", [
+        ('sum by (reason) (rate(heimdall_bridge_frames_rejected_total{reason=~"log_.*"}[5m]))', "rejected {{reason}}"),
+        ('rate(heimdall_bridge_log_dropped_total[5m])', "dropped on bridges"),
+        ('rate(heimdall_bridge_log_queue_dropped_total[5m])', "dropped in hub queue"),
+        ('rate(heimdall_log_push_failures_total[5m])', "push failures"),
+    ], 0, 21, w=12, h=8, unit="ops"),
+    panel("Entries accepted vs rows written", [
+        ('rate(heimdall_bridge_log_entries_total[5m])', "entries (count-weighted)"),
+        ('rate(heimdall_bridge_log_rows_written_total[5m])', "rows written"),
+    ], 12, 21, w=12, h=8, unit="ops"),
+    row("Events (VictoriaLogs)", 29),
+    logs_panel("Event stream", LOGS_SEL, 0, 30, w=24, h=16,
+               desc="LogsQL over the optional VictoriaLogs backend. Lines are rendered by the hub; bridge_id, code, version and the typed fields are structured metadata."),
+]
+events = dict(dashboard)
+events.update({
+    "uid": "heimdall-bridge-events",
+    "title": "Heimdall / Bridge Events",
+    "panels": events_panels,
+    "time": {"from": "now-24h", "to": "now"},
+    "templating": {"list": [
+        {"name": "bridge_id", "type": "query", "datasource": DS, "query": "label_values(heimdall_bridge_info, bridge_id)", "refresh": 2, "includeAll": True, "multi": True, "allValue": ".*", "current": {"text": "All", "value": "$__all"}, "sort": 1},
+        {"name": "level", "type": "custom", "query": "warn,error", "includeAll": True, "multi": True, "allValue": ".*", "current": {"text": "All", "value": "$__all"},
+         "options": [{"text": "All", "value": "$__all", "selected": True}, {"text": "warn", "value": "warn", "selected": False}, {"text": "error", "value": "error", "selected": False}]},
+        {"name": "code", "type": "query", "datasource": DS, "query": "label_values(heimdall_bridge_errors_total, code)", "refresh": 2, "includeAll": True, "multi": True, "allValue": ".*", "current": {"text": "All", "value": "$__all"}, "sort": 1},
+    ]},
+})
+write("bridge-events.json", events)

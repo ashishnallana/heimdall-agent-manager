@@ -1128,6 +1128,137 @@
       ],
       "title": "Host load1 / disk free",
       "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 85
+      },
+      "id": 55,
+      "panels": [],
+      "title": "Bridge errors (relayed events)",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "heimdall-prometheus"
+      },
+      "description": "Count-weighted warn+error events per bridge per hour (heimdall_bridge_errors_by_bridge_total). Codes are on the Bridge Events dashboard.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 86
+      },
+      "id": 56,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "topk(10, sum by (bridge_id) (increase(heimdall_bridge_errors_by_bridge_total{bridge_id=~\"$bridge\"}[1h])) * on(bridge_id) group_left(owner) heimdall_bridge_info{owner=~\"$owner\"})",
+          "legendFormat": "{{bridge_id}} {{owner}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Errors/h per bridge (top 10)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "heimdall-prometheus"
+      },
+      "description": "",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 86
+      },
+      "id": 57,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "sum by (code) (rate(heimdall_bridge_errors_total[15m]))",
+          "legendFormat": "{{code}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Errors/s by code (fleet)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "victoriametrics-logs-datasource",
+        "uid": "heimdall-victorialogs"
+      },
+      "description": "",
+      "gridPos": {
+        "h": 12,
+        "w": 24,
+        "x": 0,
+        "y": 94
+      },
+      "id": 58,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "victoriametrics-logs-datasource",
+            "uid": "heimdall-victorialogs"
+          },
+          "expr": "{job=\"heimdall-bridge\"} bridge_id:~\"$bridge\"",
+          "queryType": "instant",
+          "refId": "A"
+        }
+      ],
+      "title": "Recent events for the selected bridge(s)",
+      "type": "logs"
     }
   ],
   "refresh": "30s",
