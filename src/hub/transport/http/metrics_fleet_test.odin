@@ -191,7 +191,7 @@ test_fleet_metrics_bridge_ws_lifecycle :: proc(t: ^testing.T) {
 	connects_ok_before := fleet_connects(f.bridge_id, "ok")
 	disconnects_before := metrics.counter_value(metrics.with(m.bridge_ws_disconnects, "clean_close"))
 	session_count_before := metrics.histogram_count(m.bridge_session_duration)
-	ws_open_before := metrics.gauge_value(metrics.with(m.ws_connections, project_service.WS_KIND_BRIDGE))
+	ws_connects_total_before := metrics.counter_value(metrics.with(m.ws_connections_total, project_service.WS_KIND_BRIDGE, "ok"))
 	rx_heartbeats_before := metrics.counter_value(metrics.with(m.bridge_ws_frames, "rx", "heartbeat"))
 	tx_control_before := metrics.counter_value(metrics.with(m.bridge_ws_frames, "tx", "control"))
 	rx_bytes := metrics.with(m.bridge_ws_bytes, f.bridge_id, "rx")
@@ -229,7 +229,9 @@ test_fleet_metrics_bridge_ws_lifecycle :: proc(t: ^testing.T) {
 	info := metrics.with(m.bridge_info, f.bridge_id, f.owner_user_id, "9.9.9", "linux", "amd64")
 	testing.expect_value(t, metrics.gauge_value(info), i64(1))
 	testing.expect(t, !metrics.series_is_dead(info), "bridge_info live while connected")
-	testing.expect(t, metrics.gauge_value(metrics.with(m.ws_connections, project_service.WS_KIND_BRIDGE)) - ws_open_before >= 1, "open gauge incremented")
+	// The open gauge is fleet-wide and siblings close bridge sockets concurrently,
+	// so assert the monotonic counter instead of the gauge delta.
+	testing.expect(t, metrics.counter_value(metrics.with(m.ws_connections_total, project_service.WS_KIND_BRIDGE, "ok")) > ws_connects_total_before, "ws_connections_total{bridge,ok} incremented")
 	testing.expect(t, metrics.counter_value(tx_bytes) > tx_bytes_before, "tx bytes counted (bridge_ready)")
 	testing.expect(t, metrics.counter_value(metrics.with(m.bridge_ws_frames, "tx", "control")) > tx_control_before, "bridge_ready counted as tx control frame")
 
