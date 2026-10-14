@@ -30,6 +30,7 @@ import "core:fmt"
 import "core:os"
 import "core:strings"
 import "core:sync"
+import "core:sys/posix"
 import "core:testing"
 import "core:thread"
 import "core:time"
@@ -106,6 +107,13 @@ test_spawn_direct_child_run :: proc(name, cmd, data_dir: string) -> (session_id:
 	// process, and there is no such owner any more. Every caller kills it in a defer
 	// with bridge_shell_test_kill_pid, and each of these commands would exit on its
 	// own well inside the suite's lifetime regardless.
+	//
+	// Do not hand the pid back until `setsid` has actually run in the child: the
+	// callers group-kill it, and a group kill issued in the window between fork
+	// and setsid targets a group that is not the child's own. On Darwin (no
+	// setsid in the command) this returns false immediately, which is fine —
+	// bridge_shell_test_kill_pid then kills only the pid.
+	when ODIN_OS != .Darwin do _ = bridge_shell_test_wait_for_own_session(process.pid)
 	return strings.clone(sid), process.pid, true
 }
 
@@ -574,4 +582,37 @@ bridge_shell2_only_runs_are_capped :: proc(t: ^testing.T) {
 
 	// And the cap constant a run IS measured against is the required 30 minutes.
 	testing.expect(t, BRIDGE_SHELL_HARD_TIMEOUT == 30 * time.Minute, "runs are capped at 30 minutes")
+}
+
+// bridge_shell_test_kill_pid must never group-kill a group that is ALSO the test
+// runner's. A child spawned WITHOUT setsid shares our process group: the helper
+// has to kill only that pid (and the runner survives to assert it); a child
+// spawned WITH setsid is its own group, and the helper may kill that group.
+@(test)
+bridge_shell_test_kill_pid_never_signals_own_process_group :: proc(t: ^testing.T) {
+	// (a) same group as the runner: only the pid dies.
+	shared, serr := os.process_start(os.Process_Desc{command = []string{"sleep", "30"}})
+	testing.expect(t, serr == nil, "spawn shared-group child")
+	if serr != nil do return
+	testing.expect_value(t, posix.getpgid(posix.pid_t(shared.pid)), posix.getpgid(0))
+	testing.expect(t, !bridge_shell_test_wait_for_own_session(shared.pid, 50 * time.Millisecond), "a non-setsid child never becomes its own session")
+	bridge_shell_test_kill_pid(shared.pid)
+	st, werr := os.process_wait(shared, 2 * time.Second)
+	testing.expect(t, werr == nil && st.exited, "shared-group child was killed by pid")
+	// If the helper had signalled our group we would not be here.
+
+	// (b) own session: wait for setsid, then the group kill reaches the child.
+	when ODIN_OS != .Darwin {
+		own, oerr := os.process_start(os.Process_Desc{command = []string{"setsid", "sleep", "30"}})
+		testing.expect(t, oerr == nil, "spawn setsid child")
+		if oerr != nil do return
+		testing.expect(t, bridge_shell_test_wait_for_own_session(own.pid), "setsid child becomes its own session before we signal it")
+		testing.expect_value(t, int(posix.getpgid(posix.pid_t(own.pid))), own.pid)
+		bridge_shell_test_kill_pid(own.pid)
+		st2, werr2 := os.process_wait(own, 2 * time.Second)
+		testing.expect(t, werr2 == nil && st2.exited, "own-session child was killed")
+	}
+	// (c) nonsense pids are ignored.
+	bridge_shell_test_kill_pid(0)
+	bridge_shell_test_kill_pid(-1)
 }
