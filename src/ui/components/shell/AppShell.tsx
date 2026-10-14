@@ -1055,11 +1055,14 @@ function RouteOutlet({
   focusMessageId,
   conversations = [],
   liveProjects = [],
+  workspaceLeading,
 }: {
   path: string;
   focusMessageId?: string;
   conversations?: ConversationSummary[];
   liveProjects?: LiveProject[];
+  /** Hidden-sidebar toggle + app name, placed in the workspace's top bar. */
+  workspaceLeading?: React.ReactNode;
 }) {
   const viewport = useViewport();
   const isMobile = viewport === 'mobile';
@@ -1112,6 +1115,7 @@ function RouteOutlet({
           {/* Workspace: Main split tree of agent chats + ONE aux dock. The URL
               (`/conversations/<id1>+<id2>?focused=<id>`) carries the pane set. */}
           <Workspace
+            leading={workspaceLeading}
             focusMessageId={focusMessageId}
             isMobile={isMobile}
           />
@@ -1601,6 +1605,8 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
   const primary = NAV_ROUTES.filter((item) => item.group === 'primary');
   const conversationTree = useMemo(() => buildProjectConversationTree(conversations, liveProjects), [conversations, liveProjects]);
   const isEffectiveCollapsed = isMobile ? !drawerOpen : collapsed;
+  const isWorkspaceRoute =
+    (path.startsWith('/conversations/') && path !== '/conversations/new') || path.startsWith('/c/');
   // One toggle + app name control: in the sidebar header when shown, at the
   // top-left of the main area when hidden.
   const sidebarToggleButton = (
@@ -1761,7 +1767,9 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
       ) : null}
 
       <div className="flex min-w-0 flex-1 flex-col h-full min-h-0 overflow-hidden">
-        {isEffectiveCollapsed ? (
+        {/* The conversation workspace has its own top bar: the hidden-sidebar
+            control goes into it (left) next to the aux toggle (right). */}
+        {isEffectiveCollapsed && !isWorkspaceRoute ? (
           <div
             data-debug-id="shell-sidebar-reopen-bar"
             className="flex h-10 shrink-0 items-center gap-1 border-b border-subtle bg-canvas px-2"
@@ -1770,7 +1778,13 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
             {brandLink}
           </div>
         ) : null}
-        <RouteOutlet path={path} focusMessageId={focusMessageId} conversations={conversations} liveProjects={liveProjects} />
+        <RouteOutlet
+          path={path}
+          focusMessageId={focusMessageId}
+          conversations={conversations}
+          liveProjects={liveProjects}
+          workspaceLeading={isEffectiveCollapsed ? <>{sidebarToggleButton}{brandLink}</> : null}
+        />
       </div>
 
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} onNavigate={handlePaletteNavigate} onAction={handlePaletteAction} currentPath={path} conversationGroups={conversationTree.map((group) => ({ projectId: group.project.projectId, projectName: group.project.name, conversations: group.conversations.map((c) => ({ conversationId: c.conversationId, agentInstanceId: c.agentInstanceId, title: displayConversationTitle(c), agentName: c.agentName, isCoordinator: c.isCoordinator, runtimeStatus: c.runtimeStatus, activityStatus: c.activityStatus, unreadCount: c.unreadCount })) }))} chainGroups={chainGroupsQuery.data?.groups ?? []} />

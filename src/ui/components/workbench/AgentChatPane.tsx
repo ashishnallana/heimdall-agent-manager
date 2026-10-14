@@ -115,9 +115,6 @@ export interface AgentChatPaneProps {
   onSplitPane?: (direction: SplitDirection) => void;
   onReplaceWithNew?: () => void;
   onClosePane?: () => void;
-  /** Aux dock toggle ([≡], top-right). Hidden when not provided. */
-  isAuxOpen?: boolean;
-  onToggleAux?: () => void;
 }
 
 export function stripArtifactLinks(text: string): string {
@@ -603,8 +600,6 @@ export function AgentChatPane({
   onSplitPane,
   onReplaceWithNew,
   onClosePane,
-  isAuxOpen = false,
-  onToggleAux,
 }: AgentChatPaneProps) {
   const isMobileHook = useIsMobile();
   const isMobile = explicitIsMobile ?? isMobileHook;
@@ -2640,7 +2635,7 @@ export function AgentChatPane({
           ) : null}
         </div>
 
-        {/* Right Cluster: Vault pill + Vertical 3-dots menu (⋮) + Overview Popup Toggle ([≡]) */}
+        {/* Right Cluster: Vault pill + Vertical 3-dots menu (⋮). The ONE side-panel toggle lives in the workspace top bar. */}
         <div className="flex shrink-0 items-center gap-1">
           {hasLockedVaultMessages ? (
             <span
@@ -2795,33 +2790,6 @@ export function AgentChatPane({
               ) : null}
             </div>
           </Menu>
-
-          {onToggleAux ? (
-            <button
-              type="button"
-              data-debug-id="conversation-right-panel-toggle-btn"
-              data-testid="toggle-aux-pane"
-              aria-label="Toggle side panel"
-              title="Toggle side panel"
-              aria-pressed={isAuxOpen}
-              onClick={onToggleAux}
-              className={`relative grid h-8 w-8 shrink-0 place-items-center rounded-lg transition-colors ${
-                isAuxOpen
-                  ? 'bg-accent/15 text-accent'
-                  : 'text-muted hover:bg-neutral-soft hover:text-primary'
-              }`}
-            >
-              <Icon name="panel-right" size={18} />
-              {chainId && chainProgress.total > 0 ? (
-                <span
-                  data-debug-id="conversation-right-panel-toggle-progress"
-                  className="absolute -right-1 -top-1 rounded-full bg-accent px-1 text-[9px] font-bold leading-4 text-accent-fg"
-                >
-                  {chainProgress.done}/{chainProgress.total}
-                </span>
-              ) : null}
-            </button>
-          ) : null}
         </div>
       </header>
       ) : null}

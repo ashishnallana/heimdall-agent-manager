@@ -36,8 +36,10 @@ test('hidden sidebar renders no rail; the top-left toggle + app name reopens it'
   assert.match(source, /\{!isEffectiveCollapsed \? \(\s*<aside\s+data-debug-id="shell-left-sidebar-expanded"/);
   // When hidden, the same toggle + brand render at the top-left of the main area.
   const reopen = source.slice(source.indexOf('shell-sidebar-reopen-bar') - 200, source.indexOf('shell-sidebar-reopen-bar') + 400);
-  assert.match(reopen, /\{isEffectiveCollapsed \? \(/);
+  assert.match(reopen, /\{isEffectiveCollapsed && !isWorkspaceRoute \? \(/);
   assert.match(reopen, /\{sidebarToggleButton\}\s*\{brandLink\}/);
+  // On the conversation workspace the same control sits in the workspace top bar.
+  assert.match(source, /workspaceLeading=\{isEffectiveCollapsed \? <>\{sidebarToggleButton\}\{brandLink\}<\/> : null\}/);
   // The toggle flips the persisted desktop preference / the mobile drawer.
   assert.match(source, /onClick=\{\(\) => \(isMobile \? setDrawerOpen\(!drawerOpen\) : toggleCollapsed\(\)\)\}/);
   assert.match(source, /aria-label=\{isEffectiveCollapsed \? 'Show sidebar' : 'Hide sidebar'\}/);

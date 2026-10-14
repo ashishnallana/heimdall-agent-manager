@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
+import { Icon } from '@ui';
 import { TilingContainer, getOverlayPosition, type RenderPaneProps } from '../../tiling';
 import {
   NEW_PANE_AGENT_ID,
@@ -65,6 +66,8 @@ import HomePage from '../home/HomePage';
 export interface WorkspaceProps {
   focusMessageId?: string;
   isMobile?: boolean;
+  /** Left side of the workspace top bar (the hidden-sidebar toggle + app name). */
+  leading?: React.ReactNode;
 }
 
 function readRoute(): { pathname: string; search: string } {
@@ -105,7 +108,7 @@ function useRouteLocation() {
  *   split carries the open/closed state to the newly focused strip.
  * - Split geometry/groups persist per id set; nothing is keyed by task chain.
  */
-export function Workspace({ focusMessageId, isMobile = false }: WorkspaceProps) {
+export function Workspace({ focusMessageId, isMobile = false, leading }: WorkspaceProps) {
   const dispatch = useDispatch();
   const tree = useSelector(selectMainTree);
   const focusedAgentId = useSelector(selectFocusedMainAgentId);
@@ -342,8 +345,6 @@ export function Workspace({ focusMessageId, isMobile = false }: WorkspaceProps) 
                 dispatch(assignMainPaneAgent({ paneId, agentInstanceId: NEW_PANE_AGENT_ID }))
               }
               onClosePane={() => closePane(paneId)}
-              isAuxOpen={auxOpen}
-              onToggleAux={auxTreeId ? toggleAux : undefined}
             />
           )}
         </MainPaneFrame>
@@ -394,28 +395,55 @@ export function Workspace({ focusMessageId, isMobile = false }: WorkspaceProps) 
     <div
       data-debug-id="workspace"
       data-aux-open={auxOpen ? 'true' : 'false'}
-      className="relative flex h-full w-full min-h-0 min-w-0 flex-1 overflow-hidden bg-canvas"
+      className="relative flex h-full w-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-canvas"
     >
+      {/* Workspace top bar (Jetski title bar): the ONE right-sidebar (aux)
+          toggle lives here, top-right, in flow above Main and the aux dock so
+          it never overlaps a chat header or the aux tab strip. */}
       <div
-        data-debug-id="workspace-main"
-        className={`relative min-h-0 min-w-0 flex-1 flex-col ${hideMain ? 'hidden' : 'flex'}`}
+        data-debug-id="workspace-top-bar"
+        className="flex h-10 shrink-0 items-center gap-1 border-b border-subtle bg-canvas px-2"
       >
-        {!layoutReady ? null : isMobile ? (
-          <MobileMainPager tree={tree} renderPane={renderPane} onFocusPane={focusPane} />
-        ) : (
-          <TilingContainer<MainPaneValue>
-            treeState={tree}
-            paneAttributeName="data-main-pane-id"
-            paneDividers={true}
-            renderPane={renderPane}
-            onResizePane={(splitPaneId, ratio) => dispatch(resizeMainSplit({ splitPaneId, ratio }))}
-            onFocusPane={focusPane}
-            className="h-full w-full flex-1 min-h-0"
-          />
-        )}
-        {dropOverlay}
+        {leading}
+        <div className="min-w-0 flex-1" />
+        <button
+          type="button"
+          data-debug-id="workspace-aux-toggle"
+          data-testid="toggle-aux-pane"
+          aria-label={auxOpen ? 'Hide side panel' : 'Show side panel'}
+          title={auxTreeId ? (auxOpen ? 'Hide side panel' : 'Show side panel') : 'Open a conversation to use the side panel'}
+          aria-pressed={auxOpen}
+          disabled={!auxTreeId}
+          onClick={toggleAux}
+          className={`grid h-8 w-8 shrink-0 place-items-center rounded-lg transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+            auxOpen ? 'bg-accent/15 text-accent' : 'text-muted hover:bg-neutral-soft hover:text-primary'
+          }`}
+        >
+          <Icon name="panel-right" size={18} />
+        </button>
       </div>
-      {auxOpen && auxTreeId ? <AuxDock treeId={auxTreeId} ctx={ctx} isMobile={isMobile} /> : null}
+      <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
+        <div
+          data-debug-id="workspace-main"
+          className={`relative min-h-0 min-w-0 flex-1 flex-col ${hideMain ? 'hidden' : 'flex'}`}
+        >
+          {!layoutReady ? null : isMobile ? (
+            <MobileMainPager tree={tree} renderPane={renderPane} onFocusPane={focusPane} />
+          ) : (
+            <TilingContainer<MainPaneValue>
+              treeState={tree}
+              paneAttributeName="data-main-pane-id"
+              paneDividers={true}
+              renderPane={renderPane}
+              onResizePane={(splitPaneId, ratio) => dispatch(resizeMainSplit({ splitPaneId, ratio }))}
+              onFocusPane={focusPane}
+              className="h-full w-full flex-1 min-h-0"
+            />
+          )}
+          {dropOverlay}
+        </div>
+        {auxOpen && auxTreeId ? <AuxDock treeId={auxTreeId} ctx={ctx} isMobile={isMobile} /> : null}
+      </div>
     </div>
   );
 }

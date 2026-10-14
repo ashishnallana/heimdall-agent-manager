@@ -57,6 +57,12 @@ async function withDom<T>(hash: string, fn: (dom: any) => Promise<T>): Promise<T
   (globalThis as any).localStorage = dom.window.localStorage;
   Object.defineProperty(globalThis, 'navigator', { value: dom.window.navigator, configurable: true });
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+  class RO { observe() {} unobserve() {} disconnect() {} }
+  const prevEnv = [(globalThis as any).ResizeObserver, (globalThis as any).requestAnimationFrame, (globalThis as any).cancelAnimationFrame];
+  (globalThis as any).ResizeObserver = RO;
+  (globalThis as any).requestAnimationFrame = (cb: any) => setTimeout(() => cb(Date.now()), 0) as any;
+  (globalThis as any).cancelAnimationFrame = (id: any) => clearTimeout(id);
+  (dom.window as any).matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {} });
   (globalThis as any).fetch = async (input: any) => {
     const url = String(input?.url ?? input);
     const byInstance = url.match(/\/chats\/by-instance\/([^/?]+)/);
@@ -77,6 +83,7 @@ async function withDom<T>(hash: string, fn: (dom: any) => Promise<T>): Promise<T
     (globalThis as any).localStorage = prev.localStorage;
     Object.defineProperty(globalThis, 'navigator', { value: prev.navigator, configurable: true });
     (globalThis as any).fetch = prev.fetch;
+    [(globalThis as any).ResizeObserver, (globalThis as any).requestAnimationFrame, (globalThis as any).cancelAnimationFrame] = prevEnv;
   }
 }
 
@@ -231,4 +238,57 @@ test('header switchers are wired to the pane (no route navigation for coordinato
   assert.match(chat, /onSelectChain=\{\s*onSwitchAgent/);
   const modal = fs.readFileSync(path.join(REPO_ROOT, 'src/ui/components/chains/TaskChainSelectorModal.tsx'), 'utf8');
   assert.match(modal, /if \(onSelectChain\) \{\s*onSelectChain\(/);
+});
+
+test('exactly ONE side-panel toggle, top-right in the workspace top bar, never inside a pane or the aux dock', async () => {
+  await withDom('#/conversations/a+b?focused=a', async (dom) => {
+    const { createRoot } = await import('react-dom/client');
+    const { act } = await import('react');
+    const { Provider } = await import('react-redux');
+    const { heimdallApi } = await import('../src/ui/api/heimdallApi.ts');
+    const layout = await import('../src/ui/store/workspaceLayoutSlice.ts');
+    const { Workspace } = await import('../src/ui/components/mainWorkspace/Workspace.tsx');
+    const store = await makeStore();
+    const doc = dom.window.document;
+    const root = createRoot(doc.getElementById('root')!);
+    try {
+      await act(async () => {
+        root.render(React.createElement(Provider, { store }, React.createElement(Workspace, { leading: React.createElement('span', { 'data-debug-id': 'lead' }) })));
+        await new Promise((r) => setTimeout(r, 40));
+      });
+      await waitFor(() => doc.querySelectorAll('[data-debug-id="conversation-chain-agent-switcher-btn"]').length === 2, act);
+      // Two chat headers, but no per-pane toggles.
+      assert.equal(doc.querySelectorAll('[data-debug-id="conversation-right-panel-toggle-btn"]').length, 0);
+      const toggles = doc.querySelectorAll('[data-debug-id="workspace-aux-toggle"]');
+      assert.equal(toggles.length, 1);
+      const bar = doc.querySelector('[data-debug-id="workspace-top-bar"]')!;
+      assert.ok(bar.contains(toggles[0]));
+      assert.ok(bar.querySelector('[data-debug-id="lead"]'), 'hidden-sidebar control shares the bar (left)');
+      assert.equal(bar.lastElementChild, toggles[0], 'the toggle is the right-most control');
+
+      await act(async () => {
+        (toggles[0] as any).click();
+        await new Promise((r) => setTimeout(r, 40));
+      });
+      const dock = doc.querySelector('[data-debug-id="aux-dock"]')!;
+      assert.ok(dock, 'toggle opens the side panel');
+      assert.equal(dock.getAttribute('data-aux-tree'), 'agent:a', 'for the focused pane');
+      // In-flow layout: the bar is a sibling above the Main/aux row, so nothing overlaps it.
+      assert.equal(bar.contains(dock), false);
+      assert.equal(dock.parentElement, doc.querySelector('[data-debug-id="workspace-main"]')!.parentElement);
+      assert.equal(bar.parentElement, dock.parentElement!.parentElement);
+      assert.equal(doc.querySelectorAll('[data-debug-id="workspace-aux-toggle"]').length, 1, 'still one toggle with the dock open');
+      assert.equal(doc.querySelector('[data-debug-id^="aux-close-dock-btn-"]'), null, 'no second close control on desktop');
+
+      // A focused new-chat pane has no side panel: the toggle is disabled.
+      await act(async () => {
+        store.dispatch(layout.splitMainPane({ targetPaneId: layout.findPaneByAgent(store.getState().workspaceLayout.tree, 'a')!, direction: 'right' }));
+        await new Promise((r) => setTimeout(r, 40));
+      });
+      assert.equal((doc.querySelector('[data-debug-id="workspace-aux-toggle"]') as any).disabled, true);
+    } finally {
+      await act(async () => root.unmount());
+      store.dispatch(heimdallApi.util.resetApiState());
+    }
+  });
 });

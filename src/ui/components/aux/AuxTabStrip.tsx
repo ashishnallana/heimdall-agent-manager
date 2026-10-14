@@ -206,6 +206,9 @@ export function AuxTabStrip({
             <Icon name={isMaximized ? 'minimize' : 'maximize'} size={12} />
           </button>
         ) : null}
+        {/* Desktop: the workspace top bar's toggle closes the dock. The mobile
+            full-screen sheet covers that bar, so it keeps its own close. */}
+        {isMobile ? (
         <button
           type="button"
           onClick={onCloseDock}
@@ -216,6 +219,7 @@ export function AuxTabStrip({
         >
           <Icon name="close" size={12} />
         </button>
+        ) : null}
       </div>
     </div>
   );
