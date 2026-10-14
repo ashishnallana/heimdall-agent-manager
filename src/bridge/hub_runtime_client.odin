@@ -714,6 +714,10 @@ bridge_hub_handle_command :: proc(conn: ^ws.Connection, text: string) {
 		bridge_hub_handle_update_command(conn, text)
 		return
 	}
+	if type == "task_chain_search" {
+		bridge_task_chain_search_handle_command(conn, text)
+		return
+	}
 	if type == "set_telemetry" {
 		command_id := extract_json_string(text, "command_id", "")
 		defer delete(command_id)
@@ -1189,6 +1193,7 @@ bridge_hub_handle_command :: proc(conn: ^ws.Connection, text: string) {
 		// Only a SUCCESSFUL unseal moved the vault; a failed one left it where it was,
 		// and reporting there would be a no-op the hub would have to filter out.
 		if ok do bridge_hub_send_vault_status(conn)
+		if ok do bridge_task_chain_search_refresh_async()
 		return
 	}
 	if type == "bridge_lock" {
@@ -2903,6 +2908,7 @@ bridge_hub_heartbeat_json :: proc() -> string {
 	// bridge_vault_status() touches the kernel keyring and the filesystem, and no
 	// blocking I/O belongs inside a lock the per-instance reporters also contend on.
 	vault_status := bridge_hub_vault_status_for_report()
+	search_ready, search_stale, search_revision := bridge_task_chain_search_status()
 	now := bridge_runtime_now_ms()
 	sync.mutex_lock(&bridge_runtime_mutex)
 	defer sync.mutex_unlock(&bridge_runtime_mutex)
@@ -2910,7 +2916,10 @@ bridge_hub_heartbeat_json :: proc() -> string {
 	b := strings.builder_make()
 	strings.write_string(&b, "{\"type\":\"bridge_heartbeat\",\"protocol_version\":1,\"vault_status\":\"")
 	bridge_runtime_write_json_string(&b, vault_status)
-	strings.write_string(&b, "\",\"capabilities\":")
+	strings.write_string(&b, `","task_chain_search_ready":`); strings.write_string(&b, "true" if search_ready else "false")
+	strings.write_string(&b, `,"task_chain_search_stale":`); strings.write_string(&b, "true" if search_stale else "false")
+	strings.write_string(&b, `,"task_chain_search_revision":`); strings.write_string(&b, fmt.tprintf("%d", search_revision))
+	strings.write_string(&b, ",\"capabilities\":")
 	strings.write_string(&b, caps)
 	strings.write_string(&b, ",\"features\":")
 	strings.write_string(&b, features)

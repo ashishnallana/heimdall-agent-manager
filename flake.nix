@@ -109,13 +109,14 @@
         version = appVersion;
         src = ./.;
         nativeBuildInputs = [ odin ];
+        buildInputs = pkgs.lib.optionals (name == "ham-bridge") [ pkgs.sqlite ];
         dontConfigure = true;
         dontInstall = true;
         buildPhase = ''
           runHook preBuild
           mkdir -p $out/bin
           odin build ${srcDir} -collection:odin_test=src -define:HAM_APP_VERSION=${appVersion} -out:$out/bin/${name} \
-            ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''-extra-linker-flags:"-static -no-pie -L${pkgs.glibc.static}/lib"''}
+            ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''-extra-linker-flags:"-static -no-pie -L${pkgs.glibc.static}/lib ${pkgs.lib.optionalString (name == "ham-bridge") "-L${pkgs.sqlite.out}/lib"}"''}
           runHook postBuild
         '';
       };
@@ -142,13 +143,15 @@
       # seccomp filter (REQ-T13-1).
       mkTermuxOdinPackage = pkgs: odin: name: srcDir:
         let
-          muslCc = pkgs.pkgsCross.aarch64-multiplatform-musl.stdenv.cc;
+          muslPkgs = pkgs.pkgsCross.aarch64-multiplatform-musl;
+          muslCc = muslPkgs.stdenv.cc;
         in
         pkgs.stdenv.mkDerivation {
           pname = "release-termux-${name}";
           version = appVersion;
           src = ./.;
           nativeBuildInputs = [ odin ];
+          buildInputs = pkgs.lib.optionals (name == "ham-bridge") [ muslPkgs.sqlite ];
           dontConfigure = true;
           dontInstall = true;
           buildPhase = ''
@@ -156,7 +159,7 @@
             mkdir -p $out/bin
             ODIN_CLANG_PATH=${muslCc}/bin/${muslCc.targetPrefix}cc \
               odin build ${srcDir} -target:linux_arm64 -collection:odin_test=src -define:HAM_APP_VERSION=${appVersion} -define:HAM_RELEASE_TARGET=termux-arm64 \
-              -out:$out/bin/${name} -extra-linker-flags:"-static -no-pie"
+              -out:$out/bin/${name} -extra-linker-flags:"-static -no-pie ${pkgs.lib.optionalString (name == "ham-bridge") "-L${muslPkgs.sqlite.out}/lib"}"
             runHook postBuild
           '';
         };
@@ -307,7 +310,7 @@
           # openssl stays for the s_client fallback (and socat's own OpenSSL engine).
           # curl handles release downloads; all three are runtimeInputs so the
           # wrapped bridge has deterministic tools on PATH.
-          ham-bridge = mkOdinPackageWithRuntime pkgs odin "ham-bridge" "src/bridge" [ pkgs.curl pkgs.openssl pkgs.socat ];
+          ham-bridge = mkOdinPackageWithRuntime pkgs odin "ham-bridge" "src/bridge" [ pkgs.sqlite pkgs.curl pkgs.openssl pkgs.socat ];
           ham-dev-proxy = mkOdinPackage pkgs odin "ham-dev-proxy" "src/dev_proxy";
           ham-ctl = mkOdinCtlPackage pkgs odin;
           ham-test-agent = mkOdinPackage pkgs odin "ham-test-agent" "src/test_agent";

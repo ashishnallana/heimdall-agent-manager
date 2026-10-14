@@ -1,6 +1,8 @@
 package sqlite
 
 import "core:c"
+import "core:fmt"
+import "core:strconv"
 import "core:strings"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
@@ -18,6 +20,8 @@ new_taskchain_repository :: proc(impl: ^Taskchain_Repo_SQLite, conn: ^Conn) -> i
 		count_pinned_chains = taskchain_count_pinned_chains_sqlite,
 		list_pinned_chains = taskchain_list_pinned_chains_sqlite,
 		save_chain = taskchain_save_chain_sqlite,
+			search_latest_revision = taskchain_search_latest_revision_sqlite,
+			search_list_changes = taskchain_search_list_changes_sqlite,
 		save_task = task_save_sqlite,
 		get_task = task_get_sqlite,
 		list_tasks_by_chain = task_list_by_chain_sqlite,
@@ -50,6 +54,44 @@ new_taskchain_repository :: proc(impl: ^Taskchain_Repo_SQLite, conn: ^Conn) -> i
 		list_subscriptions_by_task = taskchain_list_subscriptions_by_task_sqlite,
 		list_subscriptions_by_instance = taskchain_list_subscriptions_by_instance_sqlite,
 	}
+}
+
+taskchain_search_latest_revision_sqlite :: proc(ctx: rawptr, owner_user_id: domain.User_ID) -> (i64, domain.Domain_Error) {
+	impl := (^Taskchain_Repo_SQLite)(ctx)
+	stmt: sqlite3_stmt
+	query := "SELECT CAST(COALESCE(MAX(revision), 0) AS TEXT) FROM task_chain_search_changes WHERE owner_user_id = ?;"
+	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return 0, domain.domain_error(.Internal_Error, "failed to prepare task-chain search revision")
+	defer sqlite3_finalize(stmt)
+	bind_text(stmt, 1, string(owner_user_id))
+	if sqlite3_step(stmt) != SQLITE_ROW do return 0, domain.domain_error(.Internal_Error, "failed to read task-chain search revision")
+	value, ok := strconv.parse_int(column_text_unowned(stmt, 0))
+	if !ok do return 0, domain.domain_error(.Internal_Error, "invalid task-chain search revision")
+	return i64(value), domain.Domain_Error{}
+}
+
+taskchain_search_list_changes_sqlite :: proc(ctx: rawptr, owner_user_id: domain.User_ID, after_revision: i64, limit: int) -> ([]domain.Task_Chain_Search_Change, domain.Domain_Error) {
+	impl := (^Taskchain_Repo_SQLite)(ctx)
+	bounded_limit := limit
+	if bounded_limit <= 0 do bounded_limit = 100
+	if bounded_limit > 500 do bounded_limit = 500
+	stmt: sqlite3_stmt
+	query := "SELECT CAST(revision AS TEXT), chain_id, operation FROM task_chain_search_changes WHERE owner_user_id = ? AND revision > ? ORDER BY revision ASC LIMIT ?;"
+	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return nil, domain.domain_error(.Internal_Error, "failed to prepare task-chain search changes")
+	defer sqlite3_finalize(stmt)
+	bind_text(stmt, 1, string(owner_user_id))
+	bind_text(stmt, 2, fmt.tprintf("%d", after_revision))
+	sqlite3_bind_int(stmt, 3, c.int(bounded_limit))
+	out := make([dynamic]domain.Task_Chain_Search_Change)
+	for sqlite3_step(stmt) == SQLITE_ROW {
+		revision, parsed := strconv.parse_int(column_text_unowned(stmt, 0))
+		if !parsed do continue
+		append(&out, domain.Task_Chain_Search_Change{
+			revision = i64(revision),
+			chain_id = domain.Task_Chain_ID(column_text(stmt, 1)),
+			operation = column_text(stmt, 2),
+		})
+	}
+	return out[:], domain.Domain_Error{}
 }
 
 taskchain_get_chain_sqlite :: proc(ctx: rawptr, chain_id: domain.Task_Chain_ID) -> (domain.Task_Chain, bool, domain.Domain_Error) {

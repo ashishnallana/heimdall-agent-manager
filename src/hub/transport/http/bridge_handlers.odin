@@ -311,6 +311,52 @@ bridge_unseal_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	return respond_success(reply, req.request_id, auth_ctx_server_time(req))
 }
 
+// Hub-blind, single-target task-chain search relay. The Hub authorizes only the
+// target Bridge and forwards the armored envelope without possessing its key.
+task_chain_search_command_json :: proc(command_id, bridge_id, owner_user_id, request_id: string, expires_at_ms: i64, envelope: string) -> string {
+	b := strings.builder_make()
+	strings.write_string(&b, `{"type":"task_chain_search","command_id":"`); write_handler_json_string(&b, command_id)
+	strings.write_string(&b, `","bridge_id":"`); write_handler_json_string(&b, bridge_id)
+	strings.write_string(&b, `","owner_user_id":"`); write_handler_json_string(&b, owner_user_id)
+	strings.write_string(&b, `","request_id":"`); write_handler_json_string(&b, request_id)
+	strings.write_string(&b, `","expires_at_ms":`); strings.write_int(&b, int(expires_at_ms))
+	strings.write_string(&b, `,"envelope":"`); write_handler_json_string(&b, envelope)
+	strings.write_string(&b, `"}`)
+	return strings.to_string(b)
+}
+
+task_chain_search_relay_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Bridge_Handlers)(ctx)
+	auth_ctx, auth_ok, auth_resp := require_auth(h.auth, req)
+	if !auth_ok do return auth_resp
+	if len(req.body) > 36_000 do return respond_error(domain.domain_error(.Validation_Failed, "search envelope exceeds size limit"), req.request_id)
+	bridge_id := json_string(req.body, "bridge_id"); defer delete(bridge_id)
+	request_id := json_string(req.body, "request_id"); defer delete(request_id)
+	envelope := json_string(req.body, "envelope"); defer delete(envelope)
+	expires_at_ms := i64(json_int(req.body, "expires_at_ms", 0))
+	if bridge_id == "" || request_id == "" || len(request_id) > 128 || !strings.has_prefix(envelope, "search:v1:") || len(envelope) > 32_768 {
+		return respond_error(domain.domain_error(.Validation_Failed, "invalid search envelope"), req.request_id)
+	}
+	now_ms := time.to_unix_nanoseconds(time.now()) / 1_000_000
+	if expires_at_ms < now_ms || expires_at_ms > now_ms + 5_000 {
+		return respond_error(domain.domain_error(.Validation_Failed, "search envelope expired"), req.request_id)
+	}
+	bridge, bridge_ok, bridge_err := bridge_service.get_bridge(h.bridges, auth_ctx, bridge_id)
+	if !bridge_ok do return respond_error(bridge_err, req.request_id)
+	if bridge.status != .Online || !project_service.bridge_runtime_registry_has_live(h.bridge_runtime_registry, bridge.bridge_id) {
+		return respond_error(domain.domain_error(.Bridge_Offline, "target bridge is offline"), req.request_id)
+	}
+	command_id := fmt.tprintf("cmd_search_%d", time.to_unix_nanoseconds(time.now())); defer delete(command_id)
+	cmd_body := task_chain_search_command_json(command_id, bridge_id, auth_ctx.user_id, request_id, expires_at_ms, envelope); defer delete(cmd_body)
+	reply, reply_ok, reply_err := bridge_runtime_service.send_runtime_command_wait(
+		h.bridge_runtime_registry,
+		project_service.Runtime_Command{bridge_id = bridge.bridge_id, command_id = command_id, body_json = cmd_body},
+		5000,
+	)
+	if !reply_ok do return respond_error(reply_err, req.request_id)
+	return respond_success(reply, req.request_id, auth_ctx_server_time(req))
+}
+
 bridge_public_key_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Bridge_Handlers)(ctx)
 	auth_ctx, auth_ok, auth_resp := require_auth(h.auth, req)
@@ -1521,6 +1567,11 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
 		}
 		delete(payload)
 	case "bridge_heartbeat":
+		project_service.bridge_runtime_registry_set_task_chain_search_status(
+			h.bridge_runtime_registry, bridge_id, connection_generation,
+			json_bool_value(text, "task_chain_search_ready"), json_bool_value(text, "task_chain_search_stale"),
+			i64(json_int(text, "task_chain_search_revision", 0)),
+		)
 		if strings.contains(text, "\"capabilities\"") { _, _, _ = bridge_service.update_runtime_capabilities(h.bridges, bridge_id, text) }
 		// REQ-BVS-1. Runs AFTER update_runtime_capabilities, which rewrites the row:
 		// this one re-reads it, so it sees the fresh value and its own write is not
@@ -1641,7 +1692,7 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
 		}
 		delete(stage)
 		delete(message)
-	case "command_result", "project_path_validation_result", "provider_discovery_report", "fs_list_dir_result", "fs_stat_result", "fs_make_dir_result", "fs_read_file_result", "fs_create_file_result", "fs_write_file_result", "fs_batch_write_result", "fs_move_result", "fs_delete_result", "vcs_capabilities_result", "vcs_status_result", "vcs_files_result", "vcs_diff_result", "vcs_log_result", "vcs_commit_diff_result", "vcs_workspaces_result", "vcs_stage_result", "vcs_unstage_result", "vcs_revert_result", "vcs_save_file_result", "vcs_commit_result", "fs_find_files_result", "fs_grep_result", "shell_start_result", "shell_restart_result", "shell_list_result", "shell_logs_result", "shell_capture_result", "shell_set_port_result", "bridge_unseal_result", "bridge_lock_result":
+	case "command_result", "project_path_validation_result", "provider_discovery_report", "fs_list_dir_result", "fs_stat_result", "fs_make_dir_result", "fs_read_file_result", "fs_create_file_result", "fs_write_file_result", "fs_batch_write_result", "fs_move_result", "fs_delete_result", "vcs_capabilities_result", "vcs_status_result", "vcs_files_result", "vcs_diff_result", "vcs_log_result", "vcs_commit_diff_result", "vcs_workspaces_result", "vcs_stage_result", "vcs_unstage_result", "vcs_revert_result", "vcs_save_file_result", "vcs_commit_result", "fs_find_files_result", "fs_grep_result", "shell_start_result", "shell_restart_result", "shell_list_result", "shell_logs_result", "shell_capture_result", "shell_set_port_result", "bridge_unseal_result", "bridge_lock_result", "task_chain_search_result":
 		command_id := json_string(text, "command_id")
 		_ = bridge_runtime_service.runtime_command_result_for_connection(h.bridge_runtime_registry, bridge_id, connection_generation, command_id, text)
 		if type == "command_result" && h.agents != nil do agent_service.apply_reconfiguration_command_result(h.agents, bridge_id, command_id, text)
@@ -2176,6 +2227,13 @@ write_bridge_json :: proc(b: ^strings.Builder, br: domain.Bridge, agents: ^agent
 	// never reported yields "", and the key is always present, so the UI can tell
 	// "not reported" apart from a real state instead of being told "unlocked".
 	strings.write_string(b, "\",\"vault_status\":\""); write_handler_json_string(b, br.vault_status)
+	search_ready, search_stale, search_revision := false, false, i64(0)
+	if agents != nil && agents.bridge_runtime_registry != nil {
+		search_ready, search_stale, search_revision = project_service.bridge_runtime_registry_task_chain_search_status(agents.bridge_runtime_registry, br.bridge_id)
+	}
+	strings.write_string(b, `","task_chain_search_ready":`); strings.write_string(b, "true" if search_ready else "false")
+	strings.write_string(b, `,"task_chain_search_stale":`); strings.write_string(b, "true" if search_stale else "false")
+	strings.write_string(b, `,"task_chain_search_revision":`); strings.write_string(b, fmt.tprintf("%d", search_revision))
 	pub_key := ""
 	owned_key := ""
 	defer delete(owned_key)

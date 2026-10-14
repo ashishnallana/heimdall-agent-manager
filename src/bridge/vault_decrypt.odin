@@ -325,6 +325,7 @@ bridge_replace_embedded_vault_tokens :: proc(text: string, raw_key: []u8, locked
 // The vault_configured marker stays, so a locked bridge keeps reporting "locked"
 // rather than "disabled" across restarts (REQ-T3-2).
 bridge_vault_lock :: proc() {
+	bridge_task_chain_search_lock()
 	keystore_lock_and_purge(bridge_config.daemon_id)
 }
 
@@ -343,5 +344,6 @@ bridge_vault_reset :: proc() -> bool {
 
 // Explicitly wipe unsealed vault key material on bridge shutdown
 bridge_vault_shutdown :: proc() {
+	bridge_task_chain_search_lock()
 	keystore_lock_and_purge(bridge_config.daemon_id)
 }

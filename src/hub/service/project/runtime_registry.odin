@@ -50,6 +50,9 @@ Bridge_Runtime_Connection :: struct {
 	path_validation_adapter_registered: bool,
 	path_validation_url: string,
 	public_key: string,
+	task_chain_search_ready: bool,
+	task_chain_search_stale: bool,
+	task_chain_search_revision: i64,
 	references: int, // registry.metadata_mutex
 	retired: bool, // atomic
 	writer_mutex: sync.Mutex,
@@ -324,6 +327,24 @@ bridge_runtime_registry_public_key :: proc(r: ^Bridge_Runtime_Registry, id: stri
 	sync.lock(&c.writer_mutex)
 	defer sync.unlock(&c.writer_mutex)
 	return strings.clone(c.public_key)
+}
+
+bridge_runtime_registry_set_task_chain_search_status :: proc(r: ^Bridge_Runtime_Registry, id: string, generation: int, ready, stale: bool, revision: i64) {
+	c := bridge_runtime_connection_acquire(r, id, generation)
+	if c == nil do return
+	defer bridge_runtime_connection_release(r, c)
+	sync.lock(&c.writer_mutex); defer sync.unlock(&c.writer_mutex)
+	c.task_chain_search_ready = ready
+	c.task_chain_search_stale = stale
+	c.task_chain_search_revision = revision
+}
+
+bridge_runtime_registry_task_chain_search_status :: proc(r: ^Bridge_Runtime_Registry, id: string) -> (ready, stale: bool, revision: i64) {
+	c := bridge_runtime_connection_acquire(r, id)
+	if c == nil do return false, false, 0
+	defer bridge_runtime_connection_release(r, c)
+	sync.lock(&c.writer_mutex); defer sync.unlock(&c.writer_mutex)
+	return c.task_chain_search_ready, c.task_chain_search_stale, c.task_chain_search_revision
 }
 bridge_runtime_registry_has_path_validation_adapter :: proc(r: ^Bridge_Runtime_Registry, id: string) -> bool {
 	c := bridge_runtime_connection_acquire(r, id)

@@ -30,6 +30,24 @@ Taskchain_Handlers :: struct {
 	event_bus: ^events.User_Event_Bus,
 }
 
+Task_Chain_Search_Document_Wire :: struct {
+	revision: i64,
+	operation: string,
+	chain_id: string,
+	project_id: string,
+	status: string,
+	updated_at: string,
+	title: string,
+	description: string,
+}
+
+Task_Chain_Search_Feed_Wire :: struct {
+	snapshot_revision: i64,
+	next_revision: i64,
+	has_more: bool,
+	documents: []Task_Chain_Search_Document_Wire,
+}
+
 // UI-BE-7: publish a lightweight resource_changed event to the owning user's
 // live WebSocket clients so the browser can invalidate the smallest relevant
 // RTK Query cache and update task/chain views without a manual refresh. These
@@ -795,6 +813,105 @@ list_task_chains_handler :: proc(ctx: rawptr, req: Request) -> Response {
 		wires[i] = make_chain_project_group_wire(g)
 	}
 	data, _ := json.marshal(wires, JSON_MARSHAL_OPT, allocator = context.temp_allocator)
+	return respond_success(string(data), req.request_id, auth_ctx_server_time(req))
+}
+
+// Bridge-only ciphertext document feed. The Hub returns the canonical encrypted
+// title/description bytes and revision metadata; only the unsealed Bridge turns
+// them into the ephemeral plaintext FTS index.
+task_chain_search_documents_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Taskchain_Handlers)(ctx)
+	auth_ctx, ok, auth_resp := require_auth_or_bridge_token(h.auth, req)
+	if !ok do return auth_resp
+	if auth_ctx.kind != .Bridge_Token {
+		return respond_error(domain.domain_error(.Forbidden, "bridge authentication is required"), req.request_id)
+	}
+
+	after_revision := i64(query_int(req.query, "after_revision", 0))
+	if after_revision < 0 do return respond_error(domain.domain_error(.Validation_Failed, "after_revision must be non-negative"), req.request_id)
+	limit := query_int(req.query, "limit", 100)
+	if limit <= 0 do limit = 100
+	if limit > 500 do limit = 500
+
+	snapshot_revision, revision_err := taskchain_service.search_feed_revision(h.taskchains, auth_ctx)
+	if revision_err.code != .None do return respond_error(revision_err, req.request_id)
+
+	documents := make([dynamic]Task_Chain_Search_Document_Wire)
+	defer delete(documents)
+	if after_revision == 0 {
+		chains, chains_err := taskchain_service.list_chains(h.taskchains, auth_ctx)
+		if chains_err.code != .None do return respond_error(chains_err, req.request_id)
+		defer delete(chains)
+		items := enrich_chain_list_items(h, auth_ctx, chains, false, true)
+		defer delete(items)
+		project_by_chain := make(map[string]string)
+		defer delete(project_by_chain)
+		for item in items do project_by_chain[item.chain_id] = item.project_id
+		for chain in chains {
+			append(&documents, Task_Chain_Search_Document_Wire{
+				revision = snapshot_revision,
+				operation = "upsert",
+				chain_id = string(chain.chain_id),
+				project_id = project_by_chain[string(chain.chain_id)] or_else "",
+				status = chain_status_http(chain.status),
+				updated_at = chain.updated_at,
+				title = chain.title,
+				description = chain.description,
+			})
+		}
+		wire := Task_Chain_Search_Feed_Wire{snapshot_revision = snapshot_revision, next_revision = snapshot_revision, has_more = false, documents = documents[:]}
+		data, _ := json.marshal(wire, JSON_MARSHAL_OPT, allocator = context.temp_allocator)
+		return respond_success(string(data), req.request_id, auth_ctx_server_time(req))
+	}
+
+	changes, changes_err := taskchain_service.search_feed_changes(h.taskchains, auth_ctx, after_revision, limit)
+	if changes_err.code != .None do return respond_error(changes_err, req.request_id)
+	defer delete(changes)
+	upsert_chains := make([dynamic]domain.Task_Chain)
+	defer delete(upsert_chains)
+	chain_by_id := make(map[string]domain.Task_Chain)
+	defer delete(chain_by_id)
+	for change in changes {
+		if change.operation != "upsert" do continue
+		chain, found, _ := taskchain_service.get_chain(h.taskchains, auth_ctx, change.chain_id)
+		if found {
+			append(&upsert_chains, chain)
+			chain_by_id[string(change.chain_id)] = chain
+		}
+	}
+	items := enrich_chain_list_items(h, auth_ctx, upsert_chains[:], false, true)
+	defer delete(items)
+	project_by_chain := make(map[string]string)
+	defer delete(project_by_chain)
+	for item in items do project_by_chain[item.chain_id] = item.project_id
+
+	next_revision := after_revision
+	for change in changes {
+		if change.revision > next_revision do next_revision = change.revision
+		chain, found := chain_by_id[string(change.chain_id)]
+		operation := change.operation
+		if operation == "upsert" && !found do operation = "delete"
+		doc := Task_Chain_Search_Document_Wire{
+			revision = change.revision,
+			operation = operation,
+			chain_id = string(change.chain_id),
+		}
+		if operation == "upsert" {
+			doc.project_id = project_by_chain[string(change.chain_id)] or_else ""
+			doc.status = chain_status_http(chain.status)
+			doc.updated_at = chain.updated_at
+			doc.title = chain.title
+			doc.description = chain.description
+		}
+		append(&documents, doc)
+	}
+	wire := Task_Chain_Search_Feed_Wire{
+		snapshot_revision = snapshot_revision,
+		next_revision = next_revision,
+		has_more = len(changes) == limit && next_revision < snapshot_revision,
+		documents = documents[:],
+	}
+	data, _ := json.marshal(wire, JSON_MARSHAL_OPT, allocator = context.temp_allocator)
 	return respond_success(string(data), req.request_id, auth_ctx_server_time(req))
 }
 

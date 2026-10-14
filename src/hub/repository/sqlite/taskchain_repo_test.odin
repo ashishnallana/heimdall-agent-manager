@@ -8,6 +8,79 @@ import iface "odin_test:hub/repository/iface"
 import "core:os"
 import "core:testing"
 
+task_chain_search_changes_destroy_test :: proc(changes: []domain.Task_Chain_Search_Change) {
+	for change in changes {
+		delete(string(change.chain_id))
+		delete(change.operation)
+	}
+	delete(changes)
+}
+
+@(test)
+test_task_chain_search_change_feed_is_monotonic_and_owner_scoped :: proc(t: ^testing.T) {
+	conn, open_ok, open_err := open(":memory:")
+	testing.expect(t, open_ok, "db open ok")
+	testing.expect_value(t, open_err.code, domain.Error_Code.None)
+	defer close(&conn)
+	mig_ok, mig_err := run_migrations(&conn)
+	testing.expect(t, mig_ok, "migrations ok")
+	testing.expect_value(t, mig_err.code, domain.Error_Code.None)
+
+	impl := Taskchain_Repo_SQLite{conn = &conn}
+	repo := new_taskchain_repository(&impl, &conn)
+	owner_a := domain.User_ID("user_search_a")
+	owner_b := domain.User_ID("user_search_b")
+	chain_a := domain.Task_Chain{
+		chain_id = "chain_search_a", owner_user_id = owner_a,
+		title = "vault:v1:cipher-a", description = "vault:v1:description-a",
+		publish_state = .Published, status = .Active, kind = "team_work",
+		created_at = "2026-10-14T00:00:00Z", updated_at = "2026-10-14T00:00:00Z",
+	}
+	chain_b := domain.Task_Chain{
+		chain_id = "chain_search_b", owner_user_id = owner_b,
+		title = "vault:v1:cipher-b", publish_state = .Published, status = .Active,
+		kind = "team_work", created_at = "2026-10-14T00:00:00Z", updated_at = "2026-10-14T00:00:00Z",
+	}
+	_, saved_a, _ := iface.taskchain_save_chain(&repo, chain_a)
+	_, saved_b, _ := iface.taskchain_save_chain(&repo, chain_b)
+	testing.expect(t, saved_a && saved_b, "fixture chains should save")
+
+	first_revision, first_err := iface.taskchain_search_latest_revision(&repo, owner_a)
+	testing.expect_value(t, first_err.code, domain.Error_Code.None)
+	testing.expect(t, first_revision > 0, "owner snapshot should have a watermark")
+	initial, initial_err := iface.taskchain_search_list_changes(&repo, owner_a, 0, 100)
+	testing.expect_value(t, initial_err.code, domain.Error_Code.None)
+	defer task_chain_search_changes_destroy_test(initial)
+	testing.expect_value(t, len(initial), 1)
+	if len(initial) == 1 {
+		testing.expect_value(t, initial[0].chain_id, domain.Task_Chain_ID("chain_search_a"))
+		testing.expect_value(t, initial[0].operation, "upsert")
+	}
+
+	chain_a.title = "vault:v1:cipher-a2"
+	chain_a.updated_at = "2026-10-14T00:01:00Z"
+	_, updated, _ := iface.taskchain_save_chain(&repo, chain_a)
+	testing.expect(t, updated, "chain update should save")
+	delta, delta_err := iface.taskchain_search_list_changes(&repo, owner_a, first_revision, 100)
+	testing.expect_value(t, delta_err.code, domain.Error_Code.None)
+	defer task_chain_search_changes_destroy_test(delta)
+	testing.expect_value(t, len(delta), 1)
+	if len(delta) == 1 do testing.expect_value(t, delta[0].operation, "upsert")
+
+	before_delete, _ := iface.taskchain_search_latest_revision(&repo, owner_a)
+	testing.expect(t, exec(&conn, "DELETE FROM task_chains WHERE chain_id = 'chain_search_a';"), "chain delete should succeed")
+	tombstones, tombstone_err := iface.taskchain_search_list_changes(&repo, owner_a, before_delete, 100)
+	testing.expect_value(t, tombstone_err.code, domain.Error_Code.None)
+	defer task_chain_search_changes_destroy_test(tombstones)
+	testing.expect_value(t, len(tombstones), 1)
+	if len(tombstones) == 1 do testing.expect_value(t, tombstones[0].operation, "delete")
+
+	owner_b_changes, owner_b_err := iface.taskchain_search_list_changes(&repo, owner_b, 0, 100)
+	testing.expect_value(t, owner_b_err.code, domain.Error_Code.None)
+	defer task_chain_search_changes_destroy_test(owner_b_changes)
+	testing.expect_value(t, len(owner_b_changes), 1)
+}
+
 // --- Consolidated from taskchain_bridge_repo_test.odin ---
 
 @(test)

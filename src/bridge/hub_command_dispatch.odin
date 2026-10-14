@@ -228,6 +228,8 @@ bridge_command_spec :: proc(command_type: string) -> (Bridge_Command_Spec, bool)
 		return Bridge_Command_Spec{class = .Lifecycle, priority = .Interactive, key_kind = .Agent, queued = true, requires_id = true, timeout_ms = 5000, cost_units = 1}, true
 	case "bridge_unseal", "set_telemetry":
 		return Bridge_Command_Spec{class = .Lifecycle, priority = .Interactive, key_kind = .Bridge, queued = true, requires_id = true, timeout_ms = 5000, cost_units = 2}, true
+	case "task_chain_search":
+		return Bridge_Command_Spec{class = .Interactive, priority = .Interactive, key_kind = .Bridge, queued = true, requires_id = true, timeout_ms = 5000, cost_units = 2, retry_safe = true}, true
 	case "lsp_start":
 		return Bridge_Command_Spec{class = .Lifecycle, priority = .Interactive, key_kind = .LSP, queued = true, requires_id = true, timeout_ms = 15_000, cost_units = 4}, true
 	case "notify_agent_message", "notify_task_nudge", "notify_shell_run", "notify_title_nudge", "task_status_changed_notify", "capture_agent_pane", "get_agent_pane":

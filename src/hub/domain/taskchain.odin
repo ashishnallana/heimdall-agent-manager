@@ -78,6 +78,14 @@ Task_Chain :: struct {
 	pinned_at:                     string,
 }
 
+// A revisioned invalidation entry for the encrypted Bridge search document feed.
+// Content is intentionally absent: the current task_chains row remains canonical.
+Task_Chain_Search_Change :: struct {
+	revision: i64,
+	chain_id: Task_Chain_ID,
+	operation: string,
+}
+
 TASK_CHAINS_MAX_PINNED :: 10
 
 

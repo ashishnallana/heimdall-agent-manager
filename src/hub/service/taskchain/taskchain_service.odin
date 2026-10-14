@@ -324,6 +324,18 @@ list_chains :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context) -
 	return chains, domain.Domain_Error{}
 }
 
+search_feed_revision :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context) -> (i64, domain.Domain_Error) {
+	owner, ok, err := ownership.owner_from_auth(auth)
+	if !ok do return 0, err
+	return iface.taskchain_search_latest_revision(service.repo, owner)
+}
+
+search_feed_changes :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, after_revision: i64, limit: int) -> ([]domain.Task_Chain_Search_Change, domain.Domain_Error) {
+	owner, ok, err := ownership.owner_from_auth(auth)
+	if !ok do return nil, err
+	return iface.taskchain_search_list_changes(service.repo, owner, after_revision, limit)
+}
+
 // list_chains_coordinated_by (H9 R4): the chains an agent instance coordinates,
 // from the single canonical source (members table, role='coordinator'). When the
 // caller is an Instance_Token and no explicit target is given, defaults to the

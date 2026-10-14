@@ -17,6 +17,8 @@ import { Icon, StatusDot } from '../ui/primitives';
 import { useDialogA11y } from '../ui/composites/useDialogA11y';
 import { taskChainRoute, chainStatusDot } from '../ui/patterns/commandPaletteLogic';
 import { buildRouteHash } from '../../utils/appLocation';
+import { searchTaskChainsEncrypted, taskChainSearchErrorMessage } from '../../utils/taskChainSearch';
+import { useAuthUser } from '../auth/AuthUserContext';
 import {
   INITIAL_VISIBLE_COUNT,
   type ChainSelectorItem,
@@ -57,6 +59,9 @@ export function TaskChainSelectorModal({
   const [query, setQuery] = useState('');
   const [activeIndex, setActiveIndex] = useState(0);
   const [visibleCount, setVisibleCount] = useState(INITIAL_VISIBLE_COUNT);
+  const [remoteChains, setRemoteChains] = useState<ChainSelectorItem[] | null>(null);
+  const [remoteSearchState, setRemoteSearchState] = useState<'idle' | 'searching' | 'stale' | 'error'>('idle');
+  const [remoteSearchError, setRemoteSearchError] = useState('');
 
   const inputRef = useRef<HTMLInputElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
@@ -65,6 +70,7 @@ export function TaskChainSelectorModal({
   useDialogA11y(open, onClose, panelRef);
 
   const dispatch = useDispatch();
+  const authUser = useAuthUser();
 
   const isVaultUnlocked = useSelector((state: any) => {
     try {
@@ -151,10 +157,52 @@ export function TaskChainSelectorModal({
     return prepareChainSelectorItems(resolvedGroups, searchChains, currentChainId);
   }, [resolvedGroups, searchChains, currentChainId]);
 
+  // Search content stays transient: results live only in this modal and selecting
+  // one navigates to the canonical chain. Nothing here mutates the pinned sidebar.
+  useEffect(() => {
+    const trimmed = query.trim();
+    if (!open || !isVaultUnlocked || trimmed.length < 2 || !authUser?.user_id) {
+      setRemoteChains(null);
+      setRemoteSearchState('idle');
+      return;
+    }
+    let canceled = false;
+    setRemoteChains(null);
+    setRemoteSearchError('');
+    const timer = setTimeout(() => {
+      setRemoteSearchState('searching');
+      searchTaskChainsEncrypted(trimmed, authUser.user_id!, { projectId, limit: 40 })
+        .then((response) => {
+          if (canceled) return;
+          const projectNames = new Map(resolvedGroups.map((group) => [group.projectId, group.projectName]));
+          setRemoteChains(response.hits.map((hit) => ({
+            chainId: hit.chain_id,
+            title: hit.title || 'Untitled chain',
+            rawTitle: hit.title || '',
+            status: hit.status || '',
+            projectId: hit.project_id || '',
+            projectName: projectNames.get(hit.project_id) || '',
+            updatedAt: hit.updated_at,
+            isCurrent: Boolean(currentChainId && hit.chain_id === currentChainId),
+          })));
+          setRemoteSearchState(response.stale ? 'stale' : 'idle');
+        })
+        .catch((error) => {
+          if (!canceled) {
+            setRemoteChains(null);
+            setRemoteSearchState('error');
+            setRemoteSearchError(taskChainSearchErrorMessage(error));
+          }
+        });
+    }, 150);
+    return () => { canceled = true; clearTimeout(timer); };
+  }, [query, open, isVaultUnlocked, authUser?.user_id, projectId, resolvedGroups, currentChainId]);
+
   // Real-time search filter
   const filteredChains = useMemo(() => {
+    if (query.trim().length >= 2 && remoteChains) return remoteChains;
     return filterTaskChains(allChains, query);
-  }, [allChains, query]);
+  }, [allChains, query, remoteChains]);
 
   // Reset and focus on open
   useEffect(() => {
@@ -305,6 +353,11 @@ export function TaskChainSelectorModal({
           className="max-h-[calc(var(--app-viewport-height)*0.6)] sm:max-h-[420px] overflow-y-auto p-2"
           onScroll={handleScroll}
         >
+          {qTrim.length >= 2 && remoteSearchState !== 'idle' ? (
+            <div data-debug-id="task-chain-search-state" className="px-3 py-1 text-xs text-faint">
+              {remoteSearchState === 'searching' ? 'Searching unlocked Bridges…' : remoteSearchState === 'stale' ? 'Results may be stale.' : remoteSearchError}
+            </div>
+          ) : null}
           {isLoading && allChains.length === 0 ? (
             <div data-debug-id="task-chain-selector-loading" className="px-3 py-8 text-center text-sm text-muted">
               Loading task chains…
