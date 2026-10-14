@@ -6,6 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import React from 'react';
 
+import { coordinatorFromChainDetail } from '../src/ui/utils/chainConversation.ts';
 import {
   HOME_RECENT_CHAIN_LIMIT,
   filterHomeChains,
@@ -85,6 +86,19 @@ const GROUPS = [
   },
 ];
 
+// chain-4's list row has no coordinator; the canonical one is its member with role 'coordinator'.
+const DETAILS: Record<string, any> = {
+  'chain-4': {
+    chain_id: 'chain-4',
+    title: 'Chain Four',
+    coordinator_agent_instance_id: '',
+    members: [
+      { chain_id: 'chain-4', agent_instance_id: 'worker-4', role: 'worker' },
+      { chain_id: 'chain-4', agent_instance_id: 'coord-4', role: 'coordinator' },
+    ],
+  },
+};
+
 async function withDom<T>(hash: string, fn: (dom: any) => Promise<T>): Promise<T> {
   const { JSDOM } = await import('jsdom');
   const dom = new JSDOM('<!DOCTYPE html><html><body><div id="root"></div></body></html>', { url: `http://localhost/${hash}` });
@@ -114,7 +128,12 @@ async function withDom<T>(hash: string, fn: (dom: any) => Promise<T>): Promise<T
   (globalThis as any).cancelAnimationFrame = (id: any) => clearTimeout(id);
   (globalThis as any).fetch = async (input: any) => {
     const url = String(input?.url ?? input);
-    const body = /\/task-chains(\?|$)/.test(url) ? { groups: GROUPS } : { data: [] };
+    const detail = url.match(/\/task-chains\/([^/?]+)$/);
+    const body = /\/task-chains(\?|$)/.test(url)
+      ? { groups: GROUPS }
+      : detail
+        ? { data: DETAILS[decodeURIComponent(detail[1])] || { chain_id: detail[1], members: [] } }
+        : { data: [] };
     return { ok: true, status: 200, headers: { get: () => 'application/json' }, text: async () => JSON.stringify(body), json: async () => body } as any;
   };
   try {
@@ -254,4 +273,42 @@ test('launching from a pane fills that pane instead of navigating', () => {
   assert.match(home, /<NewConversationPage embedded onLaunched=\{pane\.onOpenAgent\}/);
   const ws = fs.readFileSync(path.join(REPO_ROOT, 'src/ui/components/mainWorkspace/Workspace.tsx'), 'utf8');
   assert.match(ws, /onOpenAgent: \(agentInstanceId\) =>\s*dispatch\(assignMainPaneAgent\(\{ paneId, agentInstanceId \}\)\)/);
+});
+
+test('coordinatorFromChainDetail: column first, else the member with role coordinator', () => {
+  assert.equal(coordinatorFromChainDetail({ coordinatorAgentInstanceId: 'c1', members: [] }), 'c1');
+  assert.equal(
+    coordinatorFromChainDetail({ coordinatorAgentInstanceId: '', members: [{ agentInstanceId: 'w', role: 'worker' }, { agentInstanceId: 'k', role: 'Coordinator' }] }),
+    'k',
+  );
+  assert.equal(coordinatorFromChainDetail({ members: [{ agentInstanceId: 'w', role: 'worker' }] }), '');
+  assert.equal(coordinatorFromChainDetail(null), '');
+});
+
+test('a recent chain whose list row lacks the coordinator still opens its conversation (resolved from chain detail)', async () => {
+  await withDom('#/home', async (dom) => {
+    const { createRoot } = await import('react-dom/client');
+    const { act } = await import('react');
+    const { Provider } = await import('react-redux');
+    const { heimdallApi } = await import('../src/ui/api/heimdallApi.ts');
+    const { HomePage } = await import('../src/ui/components/home/HomePage.tsx');
+    const store = await makeStore();
+    const doc = dom.window.document;
+    const root = createRoot(doc.getElementById('root')!);
+    try {
+      await act(async () => {
+        root.render(React.createElement(Provider, { store }, React.createElement(HomePage, {})));
+        await new Promise((r) => setTimeout(r, 40));
+      });
+      await waitFor(() => Boolean(doc.querySelector('[data-debug-id="home-chain-row-chain-4"]')), act);
+      await act(async () => {
+        (doc.querySelector('[data-debug-id="home-chain-row-chain-4"]') as any).click();
+        await new Promise((r) => setTimeout(r, 60));
+      });
+      assert.equal(dom.window.location.hash, '#/conversations/coord-4', 'opens the coordinator conversation, not the chain page');
+    } finally {
+      await act(async () => root.unmount());
+      store.dispatch(heimdallApi.util.resetApiState());
+    }
+  });
 });

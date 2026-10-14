@@ -1,11 +1,12 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { useSelector } from 'react-redux';
+import { useDispatch, useSelector } from 'react-redux';
 import { Icon, StatusDot } from '@ui';
 import { useFetchTaskChainGroupsQuery } from '../../api/endpoints/tasks';
 import { selectSearchChains } from '../../store/searchTitleSlice';
 import { selectIsVaultUnlocked } from '../../store/vaultSlice';
 import { buildRouteHash } from '../../utils/appLocation';
 import { buildConversationHash, navigateToHash } from '../../utils/conversationUrl';
+import { resolveChainConversationAgent } from '../../utils/chainConversation';
 import { searchTaskChainsEncrypted, taskChainSearchErrorMessage } from '../../utils/taskChainSearch';
 import { useAuthUser } from '../auth/AuthUserContext';
 import { useArchivedProjectIds } from '../projects/projectModel';
@@ -53,6 +54,7 @@ export function HomeChainSearch({ onOpenAgent }: HomeChainSearchProps) {
   const decryptedTitles = useSelector(selectSearchChains) as Record<string, { decryptedTitle?: string }>;
   const isVaultUnlocked = useSelector(selectIsVaultUnlocked);
   const authUser = useAuthUser();
+  const dispatch = useDispatch();
   const [query, setQuery] = useState('');
   const [remote, setRemote] = useState<HomeChainItem[] | null>(null);
   const [remoteState, setRemoteState] = useState<'idle' | 'searching' | 'stale' | 'error'>('idle');
@@ -92,8 +94,11 @@ export function HomeChainSearch({ onOpenAgent }: HomeChainSearchProps) {
 
   const rows = remote ?? filterHomeChains(loaded, trimmed, decryptedTitles);
 
-  const open = (chain: HomeChainItem) => {
-    const coordinator = chain.coordinatorAgentInstanceId;
+  // A chain opens as its coordinator's conversation (resolved from the chain
+  // detail when the list row lacks it); only a chain without any coordinator
+  // falls back to the chain page.
+  const open = async (chain: HomeChainItem) => {
+    const coordinator = await resolveChainConversationAgent(dispatch, chain.chainId, chain.coordinatorAgentInstanceId);
     if (coordinator) {
       if (onOpenAgent) onOpenAgent(coordinator);
       else navigateToHash(buildConversationHash([coordinator]));
@@ -138,7 +143,7 @@ export function HomeChainSearch({ onOpenAgent }: HomeChainSearchProps) {
               <button
                 type="button"
                 data-debug-id={`home-chain-row-${chain.chainId}`}
-                onClick={() => open(chain)}
+                onClick={() => void open(chain)}
                 title={chain.coordinatorAgentInstanceId ? 'Open coordinator conversation' : 'Open task chain'}
                 className="flex w-full min-w-0 items-center gap-3 px-4 py-2.5 text-left hover:bg-neutral-soft"
               >

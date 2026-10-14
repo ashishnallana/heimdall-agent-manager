@@ -17,6 +17,7 @@ import { Icon, StatusDot } from '../ui/primitives';
 import { useDialogA11y } from '../ui/composites/useDialogA11y';
 import { taskChainRoute, chainStatusDot } from '../ui/patterns/commandPaletteLogic';
 import { buildRouteHash } from '../../utils/appLocation';
+import { resolveChainConversationAgent } from '../../utils/chainConversation';
 import { searchTaskChainsEncrypted, taskChainSearchErrorMessage } from '../../utils/taskChainSearch';
 import { useAuthUser } from '../auth/AuthUserContext';
 import {
@@ -260,19 +261,23 @@ export function TaskChainSelectorModal({
     }
   };
 
+  // Opening a chain opens its coordinator's conversation; the coordinator is
+  // resolved from the chain detail when the list row doesn't carry it.
   const handleSelect = (chain: ChainSelectorItem) => {
-    if (onSelectChain) {
-      onSelectChain({ chainId: chain.chainId, coordinatorAgentInstanceId: chain.coordinatorAgentInstanceId });
-      onClose();
-      return;
-    }
-    const route = taskChainRoute(chain);
-    if (onNavigate) {
-      onNavigate(route);
-    } else {
-      window.location.hash = buildRouteHash(route, '');
-    }
     onClose();
+    void resolveChainConversationAgent(dispatch, chain.chainId, chain.coordinatorAgentInstanceId).then((coordinator) => {
+      const resolved = { chainId: chain.chainId, coordinatorAgentInstanceId: coordinator || undefined };
+      if (onSelectChain) {
+        onSelectChain(resolved);
+        return;
+      }
+      const route = taskChainRoute(resolved);
+      if (onNavigate) {
+        onNavigate(route);
+      } else {
+        window.location.hash = buildRouteHash(route, '');
+      }
+    });
   };
 
   const handleKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
