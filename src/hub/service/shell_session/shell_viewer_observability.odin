@@ -1,6 +1,7 @@
 package shell_session
 
 import "core:sync"
+import "core:time"
 
 // REQ-SHELL-41 (P0 addendum): SHELL VIEWER OBSERVABILITY.
 //
@@ -67,10 +68,11 @@ SHELL_FIRST_FRAME_SLOTS :: 64
 SHELL_FIRST_FRAME_ID_MAX :: 64
 
 Shell_First_Frame_Slot :: struct {
-	id:     [SHELL_FIRST_FRAME_ID_MAX]byte,
-	id_len: int,
-	armed:  bool,
-	seq:    u64, // insertion order, so eviction can pick the stalest slot
+	id:       [SHELL_FIRST_FRAME_ID_MAX]byte,
+	id_len:   int,
+	armed:    bool,
+	seq:      u64, // insertion order, so eviction can pick the stalest slot
+	armed_at: time.Tick, // when the 0->1 attach happened; feeds first_frame_latency_seconds
 }
 
 Shell_First_Frame_Tracker :: struct {
@@ -100,6 +102,7 @@ shell_first_frame_arm :: proc(session_id: string) {
 			tr.next += 1
 			s.armed = true
 			s.seq = tr.next
+			s.armed_at = time.tick_now()
 			return
 		}
 		if s.id_len == 0 && free_idx < 0 do free_idx = i
@@ -112,13 +115,22 @@ shell_first_frame_arm :: proc(session_id: string) {
 	tr.next += 1
 	s.armed = true
 	s.seq = tr.next
+	s.armed_at = time.tick_now()
 }
 
 // shell_first_frame_take returns true EXACTLY ONCE per arming — the frame that gets
 // logged — and false for every frame after it. That once-only contract is what keeps
 // this off the per-frame path.
 shell_first_frame_take :: proc(session_id: string) -> bool {
-	if session_id == "" do return false
+	fired, _ := shell_first_frame_take_latency(session_id)
+	return fired
+}
+
+// shell_first_frame_take_latency is shell_first_frame_take plus the elapsed time
+// since the arming attach, so the one-shot also feeds
+// heimdall_shell_first_frame_latency_seconds. latency is 0 when fired is false.
+shell_first_frame_take_latency :: proc(session_id: string) -> (fired: bool, latency: time.Duration) {
+	if session_id == "" do return false, 0
 	tr := &shell_first_frame_tracker
 	sync.mutex_lock(&tr.mu)
 	defer sync.mutex_unlock(&tr.mu)
@@ -126,10 +138,10 @@ shell_first_frame_take :: proc(session_id: string) -> bool {
 	for i in 0 ..< SHELL_FIRST_FRAME_SLOTS {
 		s := &tr.slots[i]
 		if s.id_len == key_len && string(s.id[:s.id_len]) == session_id[:key_len] {
-			if !s.armed do return false
+			if !s.armed do return false, 0
 			s.armed = false
-			return true
+			return true, time.tick_since(s.armed_at)
 		}
 	}
-	return false
+	return false, 0
 }

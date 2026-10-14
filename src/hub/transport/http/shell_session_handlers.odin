@@ -63,6 +63,7 @@ shell_session_stream_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_
 	if ticket != "" {
 		c, ok := user_ws_ticket_store_consume(h.ws_tickets, ticket)
 		if !ok {
+			project_service.ws_track_rejected(project_service.WS_KIND_SHELL, "auth_failed")
 			write_stream_error(client, respond_error(domain.domain_error(.Unauthenticated, "websocket ticket is invalid or expired"), req.request_id))
 			return
 		}
@@ -70,23 +71,27 @@ shell_session_stream_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_
 	} else if h.auth != nil {
 		c, ok, resp := require_auth(h.auth, req)
 		if !ok {
+			project_service.ws_track_rejected(project_service.WS_KIND_SHELL, "auth_failed")
 			write_stream_error(client, resp)
 			return
 		}
 		auth_ctx = c
 	} else {
+		project_service.ws_track_rejected(project_service.WS_KIND_SHELL, "auth_failed")
 		write_stream_error(client, respond_error(domain.domain_error(.Unauthenticated, "websocket ticket required for shell stream"), req.request_id))
 		return
 	}
 
 	// Experiment gate (REQ-STREAM-IMPL-2): with the flag off the route refuses.
 	if !shell_stream_experiment_enabled(h.experiments, auth_ctx.user_id) {
+		project_service.ws_track_rejected(project_service.WS_KIND_SHELL, "auth_failed")
 		write_stream_error(client, respond_error(domain.domain_error(.Forbidden, "the streaming_terminal_pane experiment is not enabled for this user"), req.request_id))
 		return
 	}
 
 	session_id := path_part(req.path, 4)
 	if session_id == "" || strings.contains(session_id, "/") {
+		project_service.ws_track_rejected(project_service.WS_KIND_SHELL, "not_found")
 		write_stream_error(client, respond_error(domain.domain_error(.Not_Found, "session not found"), req.request_id))
 		return
 	}
@@ -100,25 +105,40 @@ shell_session_stream_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_
 	// Surfacing repo_err verbatim gives that case its own 409 (respond.odin:46) and
 	// leaves the genuine miss below as the only thing reported as Not_Found.
 	if repo_err.code != .None {
+		project_service.ws_track_rejected(project_service.WS_KIND_SHELL, "conflict" if repo_err.code == .Conflict else "other")
 		write_stream_error(client, respond_error(repo_err, req.request_id))
 		return
 	}
 	if !found {
+		project_service.ws_track_rejected(project_service.WS_KIND_SHELL, "not_found")
 		write_stream_error(client, respond_error(domain.domain_error(.Not_Found, "session not found"), req.request_id))
 		return
 	}
 	defer domain.shell_session_destroy(session)
 	if session.owner_user_id != auth_ctx.user_id {
+		project_service.ws_track_rejected(project_service.WS_KIND_SHELL, "auth_failed")
 		write_stream_error(client, respond_error(domain.domain_error(.Forbidden, "not the session owner"), req.request_id))
 		return
 	}
 
 	key := header_value(req.headers, "Sec-WebSocket-Key")
 	if key == "" {
+		project_service.ws_track_rejected(project_service.WS_KIND_SHELL, "bad_request")
 		write_stream_error(client, respond_error(domain.domain_error(.Validation_Failed, "missing websocket key"), req.request_id))
 		return
 	}
-	if !write_user_ws_upgrade_response(client, user_ws_accept_key(key)) do return
+	if !write_user_ws_upgrade_response(client, user_ws_accept_key(key)) {
+		project_service.ws_track_rejected(project_service.WS_KIND_SHELL, "other")
+		return
+	}
+
+	// Telemetry (plan 3.4): the connection exists from here until the handler
+	// returns. tx bytes are counted by the pane viewer writer (it owns every write to
+	// this socket); rx bytes and the close reason are counted here.
+	ws_opened := project_service.ws_track_open(project_service.WS_KIND_SHELL)
+	ws_close_reason := "error"
+	defer project_service.ws_track_close(project_service.WS_KIND_SHELL, ws_opened, ws_close_reason)
+	ws_rx := ws_bytes_series(project_service.WS_KIND_SHELL, "rx", session.bridge_id)
 
 	// REQ-SHELL-29: a viewer joining a session that already had viewers triggers no bridge
 	// attach, so the pty-host's catchup screen never fires for it. Remember that here and
@@ -127,7 +147,7 @@ shell_session_stream_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_
 	// EVERY attaching viewer. It is still read from the attach (rather than inferred later)
 	// because it remains the one race-free answer to "did this socket trigger a bridge
 	// attach", which is what the first-frame diagnostic below is interpreted against.
-	late_join := shell_session_svc.shell_session_attach(h.shell_sessions, session_id, client, session.bridge_id)
+	late_join := shell_session_svc.shell_session_attach(h.shell_sessions, session_id, client, session.bridge_id, project_service.WS_KIND_SHELL)
 	// REQ-SHELL-41: the ORDINARY detach — this viewer's own stream handler is returning.
 	defer shell_session_svc.shell_session_detach(h.shell_sessions, session_id, client, session.bridge_id, .Stream_Closed)
 	screen_sent := false
@@ -159,8 +179,14 @@ shell_session_stream_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_
 
 	sink_override := h.bridge_command_sink
 	for {
-		text, ok := read_ws_text_blocking(&reader, 120 * time.Second)
-		if !ok do return
+		// Same read as read_ws_text_blocking; the reason is kept only for the
+		// ws_disconnects_total label (REQ-SHELL-41 made it available for exactly this).
+		text, ok, why := bridge_ws_read_frame(&reader, 120 * time.Second)
+		if !ok {
+			ws_close_reason = bridge_ws_reason_string(why)
+			return
+		}
+		ws_note_rx(ws_rx, len(text))
 
 		frame_type := json_string(text, "type")
 
@@ -175,8 +201,10 @@ shell_session_stream_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_
 			switch frame.kind {
 			case .Armored:
 				// The Hub has no vault key; the bridge decrypts or rejects-and-logs.
+				shell_session_svc.shell_metrics_note_input(len(frame.armored))
 				bridge_service.send_shell_input(h.bridges, auth_ctx, session.bridge_id, session_id, "", frame.armored, sink_override)
 			case .Plain:
+				shell_session_svc.shell_metrics_note_input(len(frame.plain))
 				bridge_service.send_shell_input(h.bridges, auth_ctx, session.bridge_id, session_id, frame.plain, "", sink_override)
 			case .Undecodable:
 				// REQ-PANE-INPUT-3: a dropped keystroke is never silent. This site used to
@@ -245,6 +273,7 @@ shell_session_input_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	defer delete(enc_b64)
 
 	sink_override: project_service.Bridge_Command_Sink = {}
+	shell_session_svc.shell_metrics_note_input(len(data) + len(enc_b64))
 	sent, err := bridge_service.send_shell_input(h.bridges, auth_ctx, session.bridge_id, session_id, data, enc_b64, sink_override, wait_for_result = true)
 	if !sent do return respond_error(err, req.request_id)
 	return respond_success("{\"ok\":true}", req.request_id, auth_ctx_server_time(req))
@@ -443,6 +472,14 @@ shell_session_preview_proxy_handler :: proc(ctx: rawptr, req: Request, client: n
 	stream := shell_session_svc.shell_session_tunnel_register(h.shell_sessions, stream_id)
 	defer shell_session_svc.shell_session_tunnel_unregister(h.shell_sessions, stream_id)
 
+	// Telemetry (plan 3.6). The tunnel gauge brackets the registered stream; the
+	// request counter fires once, on the first complete response head (or the
+	// synthesized 502), and falls back to "other" if the tunnel ends without one.
+	preview_tunnel := preview_tunnel_open(session.bridge_id)
+	defer preview_tunnel_close(preview_tunnel)
+	preview_request_counted := false
+	defer if !preview_request_counted do preview_note_request(0)
+
 	// Compute forwarded path using the active public namespace.
 	session_prefix := strings.concatenate({"/p/" if is_preview_origin else "/api/v1/preview/", session_id})
 	defer delete(session_prefix)
@@ -515,6 +552,7 @@ shell_session_preview_proxy_handler :: proc(ctx: rawptr, req: Request, client: n
 			project_service.Runtime_Command{bridge_id = session.bridge_id, body_json = data_json},
 		)
 		delete(data_json)
+		preview_note_bytes_to_bridge(len(chunk))
 		seq += 1
 		off = end
 		if is_last do break
@@ -614,17 +652,22 @@ shell_session_preview_proxy_handler :: proc(ctx: rawptr, req: Request, client: n
 			if write_ok && !head_overflow {
 				if response_head_done {
 					write_ok = _preview_write_all(client, chunk)
+					if write_ok do preview_note_bytes_to_browser(len(chunk))
 				} else {
-					filtered, complete, overflow := _preview_response_head_feed(
+					filtered, complete, overflow, status_code := _preview_response_head_feed_status(
 						&response_head_pending, chunk, session_prefix, session.server_port, forward_context.add_referrer_policy,
 					)
 					if overflow {
 						head_overflow = true
+						if !preview_request_counted { preview_request_counted = true; preview_note_request(502) }
 						write_ok = _preview_write_all(client, transmute([]byte)filtered)
+						if write_ok do preview_note_bytes_to_browser(len(filtered))
 						delete(filtered, runtime.heap_allocator())
 					} else if complete {
 						response_head_done = true
+						if !preview_request_counted { preview_request_counted = true; preview_note_request(status_code) }
 						write_ok = _preview_write_all(client, transmute([]byte)filtered)
+						if write_ok do preview_note_bytes_to_browser(len(filtered))
 						delete(filtered, runtime.heap_allocator())
 					}
 				}
@@ -662,9 +705,11 @@ shell_session_preview_proxy_handler :: proc(ctx: rawptr, req: Request, client: n
 			if !response_head_done {
 				eof_response := _preview_response_head_eof(response_head_pending[:])
 				if eof_response != "" {
+					if !preview_request_counted { preview_request_counted = true; preview_note_request(502) }
 					write_ok := _preview_write_all(client, transmute([]byte)eof_response)
 					delete(eof_response, runtime.heap_allocator())
 					if !write_ok do return
+					preview_note_bytes_to_browser(len(eof_response))
 				}
 				clear(&response_head_pending)
 			}
@@ -843,37 +888,47 @@ _preview_response_head_eof :: proc(pending: []byte) -> string {
 }
 
 _preview_response_head_feed :: proc(pending: ^[dynamic]byte, chunk: []byte, prefix: string, server_port: int, add_referrer_policy := false) -> (string, bool, bool) {
+	out, complete, overflow, _ := _preview_response_head_feed_status(pending, chunk, prefix, server_port, add_referrer_policy)
+	return out, complete, overflow
+}
+
+// _preview_response_head_feed_status is _preview_response_head_feed plus the FINAL
+// (non-interim) status code it validated, for heimdall_preview_requests_total. The
+// code is 0 unless `complete` is true.
+_preview_response_head_feed_status :: proc(pending: ^[dynamic]byte, chunk: []byte, prefix: string, server_port: int, add_referrer_policy := false) -> (string, bool, bool, int) {
 	append(pending, ..chunk)
 	all := string(pending[:])
 	cursor := 0
 	final_head_end := -1
+	final_status := 0
 	interim_count := 0
 	for {
 		end := _preview_response_head_end(all[cursor:])
 		if end < 0 do break
 		head_end := cursor + end
 		if head_end > PREVIEW_RESPONSE_HEAD_MAX {
-			return strings.clone(PREVIEW_BAD_GATEWAY_RESPONSE, runtime.heap_allocator()), false, true
+			return strings.clone(PREVIEW_BAD_GATEWAY_RESPONSE, runtime.heap_allocator()), false, true, 0
 		}
 		status_code, valid := _preview_response_head_status_code(all[cursor:head_end])
 		if !valid {
-			return strings.clone(PREVIEW_BAD_GATEWAY_RESPONSE, runtime.heap_allocator()), false, true
+			return strings.clone(PREVIEW_BAD_GATEWAY_RESPONSE, runtime.heap_allocator()), false, true, 0
 		}
 		if status_code < 100 || status_code >= 200 || status_code == 101 {
 			final_head_end = head_end
+			final_status = status_code
 			break
 		}
 		interim_count += 1
 		if interim_count > 5 {
-			return strings.clone(PREVIEW_BAD_GATEWAY_RESPONSE, runtime.heap_allocator()), false, true
+			return strings.clone(PREVIEW_BAD_GATEWAY_RESPONSE, runtime.heap_allocator()), false, true, 0
 		}
 		cursor = head_end
 	}
 	if final_head_end < 0 {
 		if len(pending) > PREVIEW_RESPONSE_HEAD_MAX {
-			return strings.clone(PREVIEW_BAD_GATEWAY_RESPONSE, runtime.heap_allocator()), false, true
+			return strings.clone(PREVIEW_BAD_GATEWAY_RESPONSE, runtime.heap_allocator()), false, true, 0
 		}
-		return "", false, false
+		return "", false, false, 0
 	}
 	b := strings.builder_make(runtime.heap_allocator())
 	cursor = 0
@@ -888,7 +943,7 @@ _preview_response_head_feed :: proc(pending: ^[dynamic]byte, chunk: []byte, pref
 	strings.write_string(&b, all[final_head_end:])
 	result := strings.to_string(b)
 	clear(pending)
-	return result, true, false
+	return result, true, false, final_status
 }
 
 _preview_tunnel_open_json :: proc(stream_id, session_id, client_ip: string) -> string {
@@ -1147,6 +1202,7 @@ _preview_client_to_bridge_pump :: proc(data_ptr: rawptr) {
 			project_service.Runtime_Command{bridge_id = d.bridge_id, body_json = frame_json},
 		)
 		delete(frame_json)
+		preview_note_bytes_to_bridge(n)
 		seq += 1
 	}
 

@@ -34,6 +34,7 @@ import bridge_service "odin_test:hub/service/bridge"
 import project_service "odin_test:hub/service/project"
 import shell_session_svc "odin_test:hub/service/shell_session"
 import iface "odin_test:hub/repository/iface"
+import metrics "odin_test:lib/metrics"
 
 // Hub_Proxy_Stream ties an originating bridge's proxy_id to the hub-side tunnel stream
 // driving the target leg. Two id spaces meet here and must not be confused:
@@ -164,6 +165,9 @@ bridge_proxy_handle_open :: proc(h: ^Bridge_Handlers, origin_bridge_id, text: st
 	// Register the tunnel stream BEFORE tunnel_open, so a fast bridge cannot deliver
 	// response bytes into an unregistered stream. Same ordering as the preview path.
 	stream := shell_session_svc.shell_session_tunnel_register(h.shell_sessions, stream_id)
+	// heimdall_preview_active_tunnels{bridge_id} counts this proxy tunnel against its
+	// TARGET bridge, exactly like a browser preview; bridge_proxy_finish releases it.
+	_ = preview_tunnel_open(session.bridge_id)
 
 	key := hub_proxy_key(origin_bridge_id, proxy_id, heap)
 	rec := new(Hub_Proxy_Stream, heap)
@@ -348,6 +352,8 @@ bridge_proxy_relay_worker :: proc(data: rawptr) {
 // other finds it gone. Same independent-key discipline the tunnel path uses on the
 // bridge side.
 bridge_proxy_finish :: proc(d: ^Hub_Proxy_Relay_Data, reason: string) {
+	// Runs exactly once per relay worker, so the gauge pairs with the inc in handle_open.
+	preview_tunnel_close(metrics.with(streams_metrics.preview_active_tunnels, d.target_bridge_id))
 	rec, removed := bridge_proxy_take(d.key)
 	if removed {
 		close_json := _preview_tunnel_close_json(d.stream_id, reason)

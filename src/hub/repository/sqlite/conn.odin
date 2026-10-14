@@ -25,9 +25,17 @@ foreign sqlite3_lib {
 	sqlite3_close :: proc(db: sqlite3) -> c.int ---
 	sqlite3_prepare_v2 :: proc(db: sqlite3, zSql: cstring, nByte: c.int, ppStmt: [^]sqlite3_stmt, pzTail: [^]cstring) -> c.int ---
 	sqlite3_finalize :: proc(pStmt: sqlite3_stmt) -> c.int ---
-	sqlite3_step :: proc(pStmt: sqlite3_stmt) -> c.int ---
+	// step/exec are the two choke points every query in this package passes
+	// through, so they are bound under *_raw names and wrapped below with the
+	// timing + busy accounting (sqlite_metrics.odin). Callers keep using the
+	// plain names, which resolve to the wrappers.
+	@(link_name="sqlite3_step")
+	sqlite3_step_raw :: proc(pStmt: sqlite3_stmt) -> c.int ---
 	sqlite3_reset :: proc(pStmt: sqlite3_stmt) -> c.int ---
-	sqlite3_exec :: proc(db: sqlite3, sql: cstring, callback: rawptr, arg: rawptr, errmsg: [^]cstring) -> c.int ---
+	@(link_name="sqlite3_exec")
+	sqlite3_exec_raw :: proc(db: sqlite3, sql: cstring, callback: rawptr, arg: rawptr, errmsg: [^]cstring) -> c.int ---
+	sqlite3_sql :: proc(pStmt: sqlite3_stmt) -> cstring ---
+	sqlite3_column_int64 :: proc(pStmt: sqlite3_stmt, iCol: c.int) -> i64 ---
 	sqlite3_errmsg :: proc(db: sqlite3) -> cstring ---
 	sqlite3_bind_text :: proc(pStmt: sqlite3_stmt, index: c.int, value: cstring, n: c.int, destructor: rawptr) -> c.int ---
 	sqlite3_bind_double :: proc(pStmt: sqlite3_stmt, index: c.int, value: c.double) -> c.int ---
@@ -62,6 +70,7 @@ open :: proc(path: string) -> (Conn, bool, domain.Domain_Error) {
 		close(&conn)
 		return Conn{}, false, domain.domain_error(.Internal_Error, "failed to enable foreign_keys")
 	}
+	sqlite_metrics_track_path(path)
 	return conn, true, domain.Domain_Error{}
 }
 
@@ -69,7 +78,10 @@ close :: proc(conn: ^Conn) {
 	if conn == nil do return
 	if conn.db != nil do sqlite3_close(conn.db)
 	conn.db = nil
-	if conn.path != "" { delete(conn.path); conn.path = "" }
+	if conn.path != "" {
+		sqlite_metrics_untrack_path(conn.path)
+		delete(conn.path); conn.path = ""
+	}
 }
 
 exec :: proc(conn: ^Conn, query: string) -> bool {

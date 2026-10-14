@@ -5,6 +5,8 @@ import "core:net"
 import "core:strings"
 import "core:time"
 import contracts "odin_test:contracts"
+import project_service "odin_test:hub/service/project"
+import metrics "odin_test:lib/metrics"
 import ws "odin_test:lib/ws"
 
 User_Event_Bus :: struct {
@@ -85,6 +87,7 @@ publish_raw_to_user :: proc(bus: ^User_Event_Bus, owner_user_id, event_json: str
 			case .Desynchronised: bus.desynchronised_removals += 1
 			case .Ok, .Peer_Gone: // nothing to count
 			}
+			user_ws_note_write(result, len(event_json))
 			// Reported unconditionally: whether the slot goes is a SEPARATE question from
 			// whether the outcome is worth a line, and _log_publish_write owns the latter.
 			_log_publish_write(result, len(event_json))
@@ -253,4 +256,23 @@ write_ws_text_frame :: proc(socket: net.TCP_Socket, text: string) -> bool {
 
 write_json_string :: proc(b: ^strings.Builder, value: string) {
 	contracts.write_json_string(b, value)
+}
+
+// user_ws_note_write feeds heimdall_ws_bytes_total{user,tx,""} and
+// heimdall_ws_write_errors_total{user,reason} (plan 3.4). Nil-safe when the
+// metric families were never initialised.
+user_ws_note_write :: proc(result: ws.Text_Write_Result, payload_len: int) {
+	m := &project_service.fleet_metrics
+	if result == .Ok {
+		metrics.counter_add(metrics.with(m.ws_bytes, project_service.WS_KIND_USER, "tx", ""), u64(payload_len))
+		return
+	}
+	reason := "other"
+	switch result {
+	case .Too_Large:      reason = "too_large"
+	case .Peer_Gone:      reason = "peer_gone"
+	case .Desynchronised: reason = "desync"
+	case .Ok:
+	}
+	metrics.counter_inc(metrics.with(m.ws_write_errors, project_service.WS_KIND_USER, reason))
 }

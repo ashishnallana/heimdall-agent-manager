@@ -120,6 +120,10 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 	graph.config = config
 	graph.clock = platform.real_clock()
 	graph.ids = platform.real_id_generator()
+	// In-process metrics registry + HTTP/process families. Always on (cheap
+	// atomics); only the /metrics listener is gated by config.metrics_addr.
+	init_metrics()
+	project_service.fleet_metrics_set_registry(&graph.bridge_runtime_registry)
 
 	db, db_ok, db_err := sqlite.open(config.database_path)
 	if !db_ok do return false, db_err.message
@@ -129,6 +133,9 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 
 	migrations_ok, migration_err := sqlite.run_migrations(&graph.db, config.migrations_dir)
 	if !migrations_ok do return false, migration_err.message
+	// DB-backed metric collectors (users/bridges/subscriptions, 60 s cache) use
+	// their own read-only connection; tables must exist first.
+	_ = db_collectors_attach(config.database_path)
 
 	// Reconcile drifted search (fts5) indexes on boot: a prior bad manual rebuild can
 	// leave rows unindexed, which makes the external-content sync triggers' 'delete'
@@ -251,6 +258,7 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 		// conversation. graph.content is constructed above, so the order holds.
 		content             = &graph.content,
 	)
+	shell_session_svc.shell_metrics_set_service(&graph.shell_session_service)
 	// REQ-SHELL-9 trigger A: a closed chain reaps its servers. Assigned HERE, after the
 	// shell-session service is constructed, rather than next to the other two taskchain
 	// dependencies at their construction above — graph.taskchains is built before this
@@ -355,9 +363,11 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 }
 
 shutdown_graph :: proc(graph: ^App_Graph) {
+	db_collectors_detach()
 	bridge_runtime_service.runtime_command_cache_destroy(&graph.bridge_runtime_registry)
 	http.router_free(&graph.router)
 	http.user_ws_ticket_store_free(&graph.user_handlers.ws_tickets)
+	shell_session_svc.shell_metrics_detach_service(&graph.shell_session_service)
 	shell_session_svc.shell_session_service_free(&graph.shell_session_service)
 	device_auth_service.grant_store_free(&graph.device_auth_store)
 	delete(graph.action_bridge_versions)

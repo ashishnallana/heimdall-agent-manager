@@ -63,6 +63,11 @@ Hub_Config :: struct {
 	// absolute `href` in Web Push payloads that the service worker opens on click
 	// (WP-SEND). The Hub serves only /api/v1; the SW/manifest are same-origin here.
 	public_app_origin: string,
+	// Loopback "host:port" for the private Prometheus /metrics listener
+	// (plan 4.2). Empty (the default) disables the listener; in-process
+	// counters are still maintained. Must never be the public bind address:
+	// /metrics exposes owner ids via heimdall_bridge_info.
+	metrics_addr: string,
 }
 
 // vapid_is_configured reports whether a usable VAPID keypair is present. Push
@@ -99,7 +104,21 @@ default_config :: proc() -> Hub_Config {
 		title_nudge_cooldown_seconds = 3600,
 		vapid_subject = "mailto:12tanmayvijay@gmail.com",
 		public_app_origin = "https://heimdall.mundus.in",
+		metrics_addr = "",
 	}
+}
+
+// parse_metrics_addr validates a `host:port` for the metrics listener. Only
+// IPv4 literals are accepted (no DNS: this is an operator-supplied loopback
+// address). Returns ok=false with a message for anything else.
+parse_metrics_addr :: proc(value: string) -> (address: net.IP4_Address, port: int, ok: bool, message: string) {
+	colon := strings.last_index_byte(value, ':')
+	if colon <= 0 || colon == len(value) - 1 do return {}, 0, false, "--metrics-addr must be host:port (e.g. 127.0.0.1:9464)"
+	parsed_port, port_ok := strconv.parse_int(value[colon+1:])
+	if !port_ok || parsed_port < 1 || parsed_port > 65535 do return {}, 0, false, "--metrics-addr port must be between 1 and 65535"
+	addr, addr_ok := net.parse_ip4_address(value[:colon])
+	if !addr_ok do return {}, 0, false, "--metrics-addr host must be an IPv4 address literal"
+	return addr, int(parsed_port), true, ""
 }
 
 // normalize_preview_origin validates the public preview origin and returns a

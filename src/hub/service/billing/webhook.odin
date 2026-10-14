@@ -36,9 +36,19 @@ verify_signature :: proc(secret, signature, body: string, now_seconds: i64) -> b
 }
 
 receive_webhook :: proc(service: ^Service, signature, body: string) -> domain.Domain_Error {
+	event_type, result, err := receive_webhook_classified(service, signature, body)
+	billing_metrics_record_webhook(event_type, result)
+	return err
+}
+
+// receive_webhook_classified is receive_webhook plus the two facts the metric
+// needs: the Paddle event type (raw; enum-mapped by the metrics layer) and the
+// outcome class. Split so every return path reports exactly one outcome.
+@(private)
+receive_webhook_classified :: proc(service: ^Service, signature, body: string) -> (event_type: string, result: string, err: domain.Domain_Error) {
 	now := platform.clock_now(service.clock)
 	parsed_now, _ := platform.parse_rfc3339_utc(now)
-	if !verify_signature(service.config.webhook_secret, signature, body, time.to_unix_seconds(parsed_now)) do return domain.domain_error(.Unauthenticated, "invalid Paddle webhook signature")
+	if !verify_signature(service.config.webhook_secret, signature, body, time.to_unix_seconds(parsed_now)) do return "", "invalid_signature", domain.domain_error(.Unauthenticated, "invalid Paddle webhook signature")
 	payload: struct {
 		event_id: string,
 		event_type: string,
@@ -53,20 +63,22 @@ receive_webhook :: proc(service: ^Service, signature, body: string) -> domain.Do
 			items: []struct {price: struct {id: string}},
 		},
 	}
-	if json.unmarshal_string(body, &payload, .JSON, context.temp_allocator) != nil do return domain.domain_error(.Validation_Failed, "invalid Paddle event JSON")
-	if !strings.has_prefix(payload.event_id, "evt_") do return domain.domain_error(.Validation_Failed, "Paddle event ID is required")
-	if !strings.has_prefix(payload.event_type, "subscription.") do return {} // Non-subscription notifications do not grant access.
+	if json.unmarshal_string(body, &payload, .JSON, context.temp_allocator) != nil do return "", "error", domain.domain_error(.Validation_Failed, "invalid Paddle event JSON")
+	event_type = payload.event_type
+	if !strings.has_prefix(payload.event_id, "evt_") do return event_type, "error", domain.domain_error(.Validation_Failed, "Paddle event ID is required")
+	if !strings.has_prefix(payload.event_type, "subscription.") do return event_type, "ignored", {} // Non-subscription notifications do not grant access.
 	occurred, valid_time := parse_paddle_time(payload.occurred_at)
-	if !valid_time || !strings.has_prefix(payload.data.id, "sub_") || !strings.has_prefix(payload.data.customer_id, "ctm_") || len(payload.data.items) != 1 do return domain.domain_error(.Validation_Failed, "invalid subscription event")
+	if !valid_time || !strings.has_prefix(payload.data.id, "sub_") || !strings.has_prefix(payload.data.customer_id, "ctm_") || len(payload.data.items) != 1 do return event_type, "error", domain.domain_error(.Validation_Failed, "invalid subscription event")
 	switch payload.data.status {
 	case "active", "trialing", "past_due", "paused", "canceled":
-	case: return domain.domain_error(.Validation_Failed, "unsupported subscription status")
+	case: return event_type, "error", domain.domain_error(.Validation_Failed, "unsupported subscription status")
 	}
 	cancels_at := ""
 	if payload.data.scheduled_change.action == "cancel" do cancels_at = payload.data.scheduled_change.effective_at
 	grace_until := ""
 	if payload.data.status == "past_due" && service.config.past_due_grace_seconds > 0 do grace_until = platform.format_rfc3339_utc(time.time_add(occurred, time.Duration(service.config.past_due_grace_seconds)*time.Second))
-	return service.repo.apply_event(service.repo.ctx, domain.Billing_Event{event_id = payload.event_id, event_type = payload.event_type, occurred_ns = time.to_unix_nanoseconds(occurred), checkout_reference = payload.data.custom_data.heimdall_checkout_reference, subscription_id = payload.data.id, customer_id = payload.data.customer_id, price_id = payload.data.items[0].price.id, status = payload.data.status, renews_at = payload.data.next_billed_at, cancels_at = cancels_at, grace_until = grace_until}, now)
+	err = service.repo.apply_event(service.repo.ctx, domain.Billing_Event{event_id = payload.event_id, event_type = payload.event_type, occurred_ns = time.to_unix_nanoseconds(occurred), checkout_reference = payload.data.custom_data.heimdall_checkout_reference, subscription_id = payload.data.id, customer_id = payload.data.customer_id, price_id = payload.data.items[0].price.id, status = payload.data.status, renews_at = payload.data.next_billed_at, cancels_at = cancels_at, grace_until = grace_until}, now)
+	return event_type, "ok" if err.code == .None else "error", err
 }
 
 // core:time in the pinned Odin release only parses two fractional digits.

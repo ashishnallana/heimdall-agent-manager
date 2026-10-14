@@ -1,0 +1,14 @@
+# Grafana dashboard provider. Points at the JSON files next to this directory.
+# The NixOS module rewrites `path` to the Nix store copy; on other distros set
+# it to wherever you copied tools/telemetry/hub/grafana/dashboards/.
+apiVersion: 1
+providers:
+  - name: heimdall
+    folder: Heimdall
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 60
+    options:
+      path: /etc/grafana/dashboards/heimdall
+      foldersFromFilesStructure: false

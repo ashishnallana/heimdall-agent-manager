@@ -1,0 +1,14 @@
+# Grafana datasource provisioning. Installed by the NixOS module via
+# services.grafana.provision.datasources.path, or copy to
+# /etc/grafana/provisioning/datasources/ on other distros.
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    uid: heimdall-prometheus
+    type: prometheus
+    access: proxy
+    url: http://127.0.0.1:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 15s

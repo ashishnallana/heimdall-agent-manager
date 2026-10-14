@@ -12,7 +12,10 @@ require_auth :: proc(auth: ^auth_service.Auth_Service, req: Request) -> (contrac
 		body = req.body,
 		headers = req.headers,
 	})
-	if !ok do return contracts.Auth_Context{}, false, respond_error(err, req.request_id)
+	if !ok {
+		auth_metrics_record_failure(auth, req)
+		return contracts.Auth_Context{}, false, respond_error(err, req.request_id)
+	}
 	return ctx, true, Response{}
 }
 
@@ -23,7 +26,10 @@ require_trusted_proxy_auth :: proc(auth: ^auth_service.Auth_Service, req: Reques
 		body = req.body,
 		headers = req.headers,
 	})
-	if !ok do return contracts.Auth_Context{}, false, respond_error(err, req.request_id)
+	if !ok {
+		auth_metrics_record_failure(auth, req, proxy_only = true)
+		return contracts.Auth_Context{}, false, respond_error(err, req.request_id)
+	}
 	return ctx, true, Response{}
 }
 
@@ -56,6 +62,18 @@ csrf_decide :: proc(method: string, headers: []contracts.HTTP_Header, ui_origin:
 	}
 	if cookie == "" do return true, ""
 	return false, "requests with cookies require same-origin browser metadata"
+}
+
+// csrf_rejected_body is the 403 body for a request csrf_decide refused. It is built
+// with a strings.Builder, not fmt.tprintf: in an fmt format string a literal `{`
+// opens a directive, so the old tprintf emitted `%!(MISSING CLOSE BRACE)` instead of
+// JSON and clients could not parse the error.
+csrf_rejected_body :: proc(reason: string, allocator := context.temp_allocator) -> string {
+	b := strings.builder_make(allocator)
+	strings.write_string(&b, "{\"error\":{\"code\":\"csrf_rejected\",\"message\":\"")
+	write_handler_json_string(&b, reason)
+	strings.write_string(&b, "\"}}")
+	return strings.to_string(b)
 }
 
 reject_query_or_body_token :: proc(req: Request) -> (bool, Response) {
@@ -92,6 +110,7 @@ require_auth_any :: proc(auth: ^auth_service.Auth_Service, req: Request) -> (con
 		if bare_bridge_bearer_without_instance(auth, req) {
 			auth_service.log_bridge_auth_denied("bare_token_shared_endpoint", req.method, req.path, "", "", "", req.request_id)
 		}
+		auth_metrics_record_failure(auth, req)
 		return contracts.Auth_Context{}, false, respond_error(err, req.request_id)
 	}
 	return ctx, true, Response{}
@@ -120,6 +139,9 @@ require_auth_or_bridge_token :: proc(auth: ^auth_service.Auth_Service, req: Requ
 		body = req.body,
 		headers = req.headers,
 	})
-	if !ok do return contracts.Auth_Context{}, false, respond_error(err, req.request_id)
+	if !ok {
+		auth_metrics_record_failure(auth, req)
+		return contracts.Auth_Context{}, false, respond_error(err, req.request_id)
+	}
 	return ctx, true, Response{}
 }

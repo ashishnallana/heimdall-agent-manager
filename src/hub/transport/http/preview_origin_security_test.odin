@@ -1,6 +1,7 @@
 package http
 
 import "base:runtime"
+import "core:encoding/json"
 import "core:net"
 import "core:strings"
 import "core:testing"
@@ -251,4 +252,16 @@ test_csrf_decision_table :: proc(t: ^testing.T) {
 	testing.expect(t, allow)
 	allow, _ = csrf_decide("GET", nil, ui, true)
 	testing.expect(t, allow)
+}
+
+@(test)
+test_csrf_rejected_body_is_json :: proc(t: ^testing.T) {
+	_, reason := csrf_decide("POST", csrf_headers({name="Cookie", value="sid=x"}, {name="Origin", value="https://evil.example"}), "https://hub.example", false)
+	body := csrf_rejected_body(reason)
+	testing.expect_value(t, body, `{"error":{"code":"csrf_rejected","message":"Origin does not match the UI origin"}}`)
+	_, err := json.parse_string(body, allocator = context.temp_allocator)
+	testing.expect_value(t, err, json.Error.None)
+	escaped := csrf_rejected_body(`quote " and \\ backslash`)
+	_, err = json.parse_string(escaped, allocator = context.temp_allocator)
+	testing.expect_value(t, err, json.Error.None)
 }

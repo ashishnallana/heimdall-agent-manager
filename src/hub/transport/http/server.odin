@@ -6,7 +6,9 @@ import "core:net"
 import "core:strconv"
 import "core:strings"
 import "core:thread"
+import "core:time"
 import contracts "odin_test:contracts"
+import metrics "odin_test:lib/metrics"
 
 // Allow 50 MiB artifact payloads plus multipart/base64 framing overhead.
 MAX_HTTP_REQUEST_BYTES :: 80 * 1024 * 1024
@@ -40,7 +42,13 @@ serve :: proc(router: ^Router, config: Server_Config) -> bool {
 	state := Server_State{router = router, config = config}
 	for {
 		client, source, accept_err := net.accept_tcp(listener)
-		if accept_err != nil do continue
+		if accept_err != nil {
+			// Count it, then yield briefly: on EMFILE accept() fails immediately
+			// and this loop would otherwise spin a core until an fd frees up.
+			metrics.counter_inc(http_metrics.accept_errors)
+			time.sleep(10 * time.Millisecond)
+			continue
+		}
 		thread.run_with_poly_data3(client, source, &state, handle_client_thread)
 	}
 }
@@ -97,8 +105,7 @@ handle_client :: proc(client: net.TCP_Socket, source: net.Endpoint, router: ^Rou
 	}
 	is_upgrade := ascii_equal_fold(header_value(headers, "Upgrade"), "websocket")
 	if allowed, reason := csrf_decide(method, headers, config.ui_origin, is_upgrade); !allowed {
-		body := fmt.tprintf("{\"error\":{\"code\":\"csrf_rejected\",\"message\":\"%s\"}}", reason)
-		write_http_response(client, Response{status = 403, content_type = "application/json", body = body})
+		write_http_response(client, Response{status = 403, content_type = "application/json", body = csrf_rejected_body(reason)})
 		return
 	}
 	if method == "OPTIONS" {
@@ -125,7 +132,14 @@ handle_client :: proc(client: net.TCP_Socket, source: net.Endpoint, router: ^Rou
 	context.allocator = heap
 	if router_dispatch_raw_upgrade(router, req_obj, client) do return
 	context.allocator = req_allocator
-	resp := router_dispatch(router, req_obj)
+	// HTTP metrics cover ONLY this plain-dispatch path: the timer starts after the
+	// request was fully read and the upgrade/raw paths above have been ruled out,
+	// so long-lived WebSocket connections never land in the latency histogram.
+	metrics.gauge_inc(http_metrics.in_flight)
+	defer metrics.gauge_dec(http_metrics.in_flight)
+	started := time.tick_now()
+	resp, route := router_dispatch_matched(router, req_obj)
+	http_metrics_observe(route, method, resp.status, time.tick_since(started))
 	write_http_response(client, resp)
 }
 

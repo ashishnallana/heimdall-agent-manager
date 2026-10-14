@@ -227,12 +227,14 @@ apply_push_prune :: proc(service: ^Push_Service, owner_user_id: domain.User_ID, 
 // push is disabled (no VAPID keypair) it is a no-op returning 0.
 send_to_user :: proc(service: ^Push_Service, owner_user_id: domain.User_ID, payload_json: string) -> int {
 	if !push_send_enabled(service) {
+		push_metrics_record("skipped")
 		return 0
 	}
 
 	subs, err := iface.push_subscription_list_by_owner(service.subscriptions, owner_user_id)
 	if err.code != .None {
 		fmt.eprintfln("ham-push DEBUG send_to_user: list subs FAILED owner=%s err=%v", string(owner_user_id), err.code)
+		push_metrics_record("skipped")
 		return 0
 	}
 	defer delete(subs)
@@ -242,9 +244,11 @@ send_to_user :: proc(service: ^Push_Service, owner_user_id: domain.User_ID, payl
 	}
 
 	// Decode the VAPID private scalar + public key once for the whole batch.
+	// A failure here is a delivery failure for every subscription in the batch.
 	priv_bytes, priv_ok := base64url_decode(service.vapid.private_key)
 	if !priv_ok {
 		fmt.eprintln("ham-push DEBUG send_to_user: VAPID private-key base64url decode FAILED")
+		for _ in subs do push_metrics_record("failed")
 		return 0
 	}
 	defer delete(priv_bytes)
@@ -252,6 +256,7 @@ send_to_user :: proc(service: ^Push_Service, owner_user_id: domain.User_ID, payl
 	defer ecdsa.private_key_clear(&vapid_priv)
 	if !ecdsa.private_key_set_bytes(&vapid_priv, .SECP256R1, priv_bytes) {
 		fmt.eprintln("ham-push DEBUG send_to_user: ecdsa private_key_set_bytes FAILED")
+		for _ in subs do push_metrics_record("failed")
 		return 0
 	}
 
@@ -283,6 +288,7 @@ send_to_user :: proc(service: ^Push_Service, owner_user_id: domain.User_ID, payl
 	for sub, i in subs {
 		class, status := send_to_subscription(service, &vapid_priv, sub, payload_json, now_unix)
 		outcomes[i] = Push_Send_Outcome{sub_id = sub.id, endpoint = sub.endpoint, status = status, class = class}
+		push_metrics_record(push_metrics_result(class))
 		if class == .Success {
 			successes += 1
 		}

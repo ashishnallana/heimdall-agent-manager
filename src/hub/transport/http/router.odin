@@ -110,8 +110,20 @@ router_dispatch_raw_upgrade :: proc(router: ^Router, req: Request, client: net.T
 }
 
 router_dispatch :: proc(router: ^Router, req: Request) -> Response {
+	resp, _ := router_dispatch_matched(router, req)
+	return resp
+}
+
+// ROUTE_UNMATCHED is the `route` label used for every request that did not
+// match a registered pattern (incl. non-/api/v1 paths). The raw request path is
+// NEVER used as a label: it is attacker-controlled and unbounded.
+ROUTE_UNMATCHED :: "unmatched"
+
+// router_dispatch_matched is router_dispatch plus the matched route PATTERN
+// (e.g. "/api/v1/bridges/*/heartbeat"), for the HTTP metrics `route` label.
+router_dispatch_matched :: proc(router: ^Router, req: Request) -> (Response, string) {
 	if router == nil {
-		return respond_error(domain.domain_error(.Internal_Error, "router is not configured"), req.request_id)
+		return respond_error(domain.domain_error(.Internal_Error, "router is not configured"), req.request_id), ROUTE_UNMATCHED
 	}
 	// Non-/api/v1 paths are CLOSED, with no exceptions. There was previously an
 	// allowlist escape hatch here (PUBLIC_PAGE_PATHS, admitting /policy and /toc
@@ -126,12 +138,12 @@ router_dispatch :: proc(router: ^Router, req: Request) -> Response {
 	// convenience. The two upgrade dispatchers above keep their own
 	// unconditional /api/v1 gate regardless.
 	if !strings.has_prefix(req.path, contracts.API_V1_BASE_PATH) {
-		return respond_error(domain.domain_error(.Not_Found, "route not found"), req.request_id)
+		return respond_error(domain.domain_error(.Not_Found, "route not found"), req.request_id), ROUTE_UNMATCHED
 	}
 	for route in router.routes {
 		if (route.method == req.method || route.method == "ANY") && route.handler != nil && route_matches(route.path, req.path) {
-			return route.handler(route.ctx, req)
+			return route.handler(route.ctx, req), route.path
 		}
 	}
-	return respond_error(domain.domain_error(.Not_Found, "route not found"), req.request_id)
+	return respond_error(domain.domain_error(.Not_Found, "route not found"), req.request_id), ROUTE_UNMATCHED
 }

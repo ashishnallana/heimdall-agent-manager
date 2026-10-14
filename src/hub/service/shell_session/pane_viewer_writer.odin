@@ -7,6 +7,8 @@ import "core:strings"
 import "core:sync"
 import "core:thread"
 import "core:time"
+import metrics "odin_test:lib/metrics"
+import project_service "odin_test:hub/service/project"
 import ws "odin_test:lib/ws"
 
 // Queues own their strings. Only this worker writes the registered socket;
@@ -34,9 +36,15 @@ Pane_Viewer_Writer :: struct {
 	bytes: int,
 	stopped: bool,
 	worker: ^thread.Thread,
+	// Telemetry (plan 3.4/3.5). ws_kind is the heimdall_ws_* `kind` label this viewer
+	// socket belongs to (shell or agent_stream); tx_bytes is the cached
+	// heimdall_ws_bytes_total{kind,"tx",bridge_id} series so the write loop only does
+	// an atomic add. Both are set once at start and read-only afterwards.
+	ws_kind: string,
+	tx_bytes: ^metrics.Series,
 }
 
-pane_viewer_start_locked :: proc(svc: ^Shell_Session_Service, socket: net.TCP_Socket, bridge_id, session_id: string) -> bool {
+pane_viewer_start_locked :: proc(svc: ^Shell_Session_Service, socket: net.TCP_Socket, bridge_id, session_id: string, ws_kind: string = project_service.WS_KIND_SHELL) -> bool {
 	if svc.viewer_writers == nil do svc.viewer_writers = make(map[net.TCP_Socket]^Pane_Viewer_Writer, runtime.heap_allocator())
 	if _, exists := svc.viewer_writers[socket]; exists do return true
 	w := new(Pane_Viewer_Writer, runtime.heap_allocator())
@@ -44,6 +52,8 @@ pane_viewer_start_locked :: proc(svc: ^Shell_Session_Service, socket: net.TCP_So
 	w.svc = svc
 	w.bridge_id = strings.clone(bridge_id, runtime.heap_allocator())
 	w.session_id = strings.clone(session_id, runtime.heap_allocator())
+	w.ws_kind = ws_kind
+	w.tx_bytes = metrics.with(project_service.fleet_metrics.ws_bytes, ws_kind, "tx", bridge_id)
 	if svc.pane_bridge_bytes == nil do svc.pane_bridge_bytes = make(map[string]int, runtime.heap_allocator())
 	w.queue = make([dynamic]Pane_Viewer_Frame, runtime.heap_allocator())
 	_ = net.set_option(socket, .Send_Timeout, 5 * time.Second)
@@ -68,8 +78,17 @@ pane_viewer_writer_run :: proc(raw: rawptr) {
 		// Count the in-flight frame until its write completes.
 		sync.mutex_unlock(&w.mu)
 		result := ws.write_server_opcode(w.socket, item.opcode, text, true)
-		if result == .Ok && !item.control && shell_first_frame_take(w.session_id) {
-			fmt.println("shell first frame after attach", "session=", w.session_id, "bytes=", len(text), "viewer=", int(w.socket))
+		if result == .Ok {
+			metrics.counter_add(w.tx_bytes, u64(len(text)))
+			shell_metrics_note_fanout(len(text))
+		} else {
+			metrics.counter_inc(metrics.with(project_service.fleet_metrics.ws_write_errors, w.ws_kind, ws_write_reason_string(result)))
+		}
+		if result == .Ok && !item.control {
+			if fired, latency := shell_first_frame_take_latency(w.session_id); fired {
+				shell_metrics_note_first_frame(latency)
+				fmt.println("shell first frame after attach", "session=", w.session_id, "bytes=", len(text), "viewer=", int(w.socket))
+			}
 		}
 		sync.mutex_lock(&w.svc.mu)
 		sync.mutex_lock(&w.mu)
@@ -114,6 +133,7 @@ pane_viewer_enqueue :: proc(svc: ^Shell_Session_Service, socket: net.TCP_Socket,
 		// Wake the owner reader; it detaches and joins before closing the fd.
 		_ = net.shutdown(w.socket, .Both)
 		fmt.eprintfln("ham-hub WARN pane viewer disconnected reason=slow_consumer viewer=%d queued_bytes=%d", int(socket), w.bytes)
+		metrics.counter_inc(metrics.with(project_service.fleet_metrics.ws_write_errors, w.ws_kind, "slow_consumer"))
 		return .Peer_Gone
 	}
 	append(&w.queue, Pane_Viewer_Frame{strings.clone(text, runtime.heap_allocator()), incremental, control, opcode})

@@ -152,7 +152,11 @@ shell_session_service_free :: proc(svc: ^Shell_Session_Service) {
 // The value is still returned and still means exactly what it says — it is a truthful fact
 // about the attach, useful for diagnostics, and its test still holds. It is simply no
 // longer a gate.
-shell_session_attach :: proc(svc: ^Shell_Session_Service, session_id: string, socket: net.TCP_Socket, bridge_id: string = "") -> (late_join: bool) {
+//
+// ws_kind is the heimdall_ws_* `kind` label for this viewer socket (telemetry only):
+// project_service.WS_KIND_SHELL for the shells pane, WS_KIND_AGENT_STREAM for the
+// agent pane. Pass one of those constants — the value is retained uncloned.
+shell_session_attach :: proc(svc: ^Shell_Session_Service, session_id: string, socket: net.TCP_Socket, bridge_id: string = "", ws_kind: string = project_service.WS_KIND_SHELL) -> (late_join: bool) {
 	if svc == nil || session_id == "" do return false
 	heap := runtime.heap_allocator()
 	sync.mutex_lock(&svc.mu)
@@ -179,7 +183,7 @@ shell_session_attach :: proc(svc: ^Shell_Session_Service, session_id: string, so
 		}
 	}
 	if !already_present {
-		if !pane_viewer_start_locked(svc, socket, bridge_id, session_id) { pane_sequence_collect_locked(svc, session_id); sync.mutex_unlock(&svc.mu); return false }
+		if !pane_viewer_start_locked(svc, socket, bridge_id, session_id, ws_kind) { pane_sequence_collect_locked(svc, session_id); sync.mutex_unlock(&svc.mu); return false }
 		append(&svc.viewers[session_id], socket)
 	}
 
@@ -287,6 +291,7 @@ shell_session_detach :: proc(
 	// the bridge to stop streaming — the difference between one browser tab closing and
 	// the session's output actually being shut off.
 	if removed {
+		shell_metrics_note_detach(reason)
 		fmt.println(
 			"shell viewer detach", "session=", session_id,
 			"viewer=", int(socket),
@@ -364,6 +369,10 @@ shell_session_write_viewer_frame :: proc(
 shell_session_broadcast_output :: proc(svc: ^Shell_Session_Service, session_id, data_b64: string, is_encrypted: bool = false, is_snapshot: bool = false, source_bridge_id: string = "") {
 	if svc == nil || session_id == "" do return
 	if source_bridge_id != "" && !shell_session_bridge_owns_stream(svc, session_id, source_bridge_id) do return
+	// heimdall_shell_output_bytes_total{bridge_id}: counted on arrival, before the
+	// viewer check, so output for an unviewed session is still visible. The bridge id
+	// is the caller's when it has one, else the session's recorded bridge.
+	shell_metrics_note_output_for_session(svc, session_id, source_bridge_id, len(data_b64))
 	sockets := _copy_viewers(svc, session_id)
 	defer delete(sockets)
 	if len(sockets) == 0 do return

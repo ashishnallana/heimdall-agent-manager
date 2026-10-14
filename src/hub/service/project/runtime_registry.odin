@@ -6,6 +6,7 @@ import "core:strings"
 import "core:sync"
 import "core:time"
 import domain "odin_test:hub/domain"
+import metrics "odin_test:lib/metrics"
 import ws "odin_test:lib/ws"
 
 Runtime_Registry_Limits :: struct {
@@ -60,6 +61,12 @@ Bridge_Runtime_Connection :: struct {
 	retire_mutex: sync.Mutex,
 	state_mutex: sync.Mutex,
 	instances: map[string]Runtime_Instance_State,
+	// Per-connection cached metric series (hot-path atomics only; the series
+	// memory is owned by the metrics registry and never freed).
+	tx_bytes: ^metrics.Series,
+	rx_bytes: ^metrics.Series,
+	// Last accepted heartbeat `stats` object (tick ns); enforces the 5 s cap.
+	last_stats_tick_ns: i64,
 	terminal_count: int,
 	next_sweep_ns: i64,
 }
@@ -130,7 +137,10 @@ runtime_active_change :: proc(r: ^Bridge_Runtime_Registry, owner: string, delta:
 	defer sync.unlock(&r.quota_mutex)
 	count := r.active_by_owner[owner]
 	limits := runtime_registry_limits(r)
-	if delta > 0 && (r.active_instances >= limits.active_instances || count >= limits.active_instances_per_owner) do return false
+	if delta > 0 && (r.active_instances >= limits.active_instances || count >= limits.active_instances_per_owner) {
+		metrics.counter_inc(metrics.with(fleet_metrics.limit_rejections, "max_active_instances" if r.active_instances >= limits.active_instances else "active_instances_per_owner"))
+		return false
+	}
 	if r.active_by_owner == nil do r.active_by_owner = make(map[string]int, runtime.default_allocator())
 	if delta > 0 && count == 0 {
 		r.active_by_owner[strings.clone(owner, runtime.default_allocator())] = delta
@@ -245,12 +255,19 @@ bridge_runtime_registry_accept_live :: proc(r: ^Bridge_Runtime_Registry, bridge_
 	for _, c in r.connections { if c.owner_id == owner do owner_count += 1 }
 	if (!exists && (r.live_bridge_count >= limits.live_bridges || owner_count >= limits.live_bridges_per_owner)) || (exists && old.owner_id != owner) {
 		sync.unlock(&r.metadata_mutex)
+		switch {
+		case exists:                                       metrics.counter_inc(metrics.with(fleet_metrics.limit_rejections, "owner_mismatch"))
+		case r.live_bridge_count >= limits.live_bridges:   metrics.counter_inc(metrics.with(fleet_metrics.limit_rejections, "max_live_bridges"))
+		case:                                              metrics.counter_inc(metrics.with(fleet_metrics.limit_rejections, "live_bridges_per_owner"))
+		}
 		return false, 0, false
 	}
 	heap := runtime.default_allocator()
 	c := new(Bridge_Runtime_Connection, heap)
 	r.next_generation += 1 // process-wide epoch; never resets when an ID is removed
 	c^ = Bridge_Runtime_Connection{bridge_id = strings.clone(bridge_id, heap), owner_id = strings.clone(owner, heap), generation = r.next_generation, references = 1, path_validation_adapter_registered = adapter, path_validation_url = strings.clone(url, heap), instances = make(map[string]Runtime_Instance_State, heap)}
+	c.tx_bytes = metrics.with(fleet_metrics.bridge_ws_bytes, bridge_id, "tx")
+	c.rx_bytes = metrics.with(fleet_metrics.bridge_ws_bytes, bridge_id, "rx")
 	if r.connections == nil do r.connections = make(map[string]^Bridge_Runtime_Connection, heap)
 	if exists {
 		// Remove the old owned map key before publishing the new generation.
@@ -443,6 +460,13 @@ bridge_runtime_instance_apply :: proc(r: ^Bridge_Runtime_Registry, bridge_id: st
 	active := runtime_state_active(status)
 	if active && (!exists || !old.active) && !runtime_active_change(r, owner, 1) do return false, false, domain.domain_error(.Bridge_Busy, "active instance quota exhausted")
 	if exists && old.active && !active do _ = runtime_active_change(r, old.owner_id, -1)
+	// Lifecycle counters (plan 3.3), keyed by the status enum only: an instance
+	// entering an active state from nothing/terminal is a start; an active one
+	// entering a terminal state is an exit. Reservations are not starts.
+	if !reserve {
+		if active && (!exists || !old.active) do metrics.counter_inc(metrics.with(fleet_metrics.agent_instance_starts, runtime_status_enum(status)))
+		if !active && exists && old.active do metrics.counter_inc(metrics.with(fleet_metrics.agent_instance_exits, runtime_status_enum(status)))
+	}
 	if !active && (!exists || old.active) do c.terminal_count += 1
 	if active && exists && !old.active do c.terminal_count -= 1
 	heap := runtime.default_allocator()
@@ -503,6 +527,7 @@ bridge_runtime_registry_sweep :: proc(r: ^Bridge_Runtime_Registry, now_ns: i64 =
 
 bridge_runtime_registry_destroy :: proc(r: ^Bridge_Runtime_Registry) {
 	if r == nil do return
+	fleet_metrics_detach_registry(r)
 	for len(r.connections) > 0 {
 		for key, c in r.connections { bridge_runtime_registry_mark_offline(r, key, c.generation); break }
 	}
