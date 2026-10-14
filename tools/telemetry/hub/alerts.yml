@@ -1,0 +1,169 @@
+# Heimdall hub alert rules (hub telemetry plan, section 7).
+# Validate: promtool check rules tools/telemetry/hub/alerts.yml
+#
+# Job names assumed (see prometheus-scrape.yml): heimdall-hub, node, blackbox.
+# Rules on heimdall_sqlite_*, heimdall_reaper_*, heimdall_bridge_* and
+# heimdall_shell_* are inert until the M2 instrumentation ships; they load fine
+# before that (no series -> no alert).
+groups:
+  - name: heimdall-hub-availability
+    rules:
+      - alert: HeimdallHubDown
+        expr: up{job="heimdall-hub"} == 0
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: "ham-hub /metrics is not scrapeable"
+          description: "Prometheus could not scrape the hub metrics listener for 2 minutes. Check `systemctl status heimdall-hub` and that --metrics-addr is set."
+
+      - alert: HeimdallHubProbeFailed
+        expr: probe_success{job="blackbox"} == 0
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: "Public HTTPS probe of the hub is failing"
+          description: "blackbox_exporter could not complete an HTTPS GET of the hub through nginx for 2 minutes (instance {{ $labels.instance }})."
+
+      - alert: HeimdallCertExpiringSoon
+        expr: (probe_ssl_earliest_cert_expiry{job="blackbox"} - time()) < 14 * 86400
+        for: 1h
+        labels:
+          severity: warn
+        annotations:
+          summary: "TLS certificate expires in < 14 days"
+          description: "Certificate for {{ $labels.instance }} expires in {{ $value | humanizeDuration }}."
+
+  - name: heimdall-hub-http
+    rules:
+      - alert: HeimdallHttp5xxRate
+        # Absolute rate AND ratio: at low RPS a ratio alone pages on a single error.
+        expr: |
+          sum(rate(heimdall_http_requests_total{status_class="5xx"}[5m])) > 0.05
+          and
+          (
+            sum(rate(heimdall_http_requests_total{status_class="5xx"}[5m]))
+            /
+            sum(rate(heimdall_http_requests_total[5m]))
+          ) > 0.05
+        for: 10m
+        labels:
+          severity: page
+        annotations:
+          summary: "Hub is returning 5xx"
+          description: "More than 5% of requests (and more than 0.05/s) are 5xx for 10 minutes."
+
+      - alert: HeimdallHttpLatencyP95
+        # Only routes with real traffic (> 0.1 req/s); the histogram excludes WebSocket upgrades.
+        expr: |
+          histogram_quantile(0.95, sum by (route, le) (rate(heimdall_http_request_duration_seconds_bucket[5m]))) > 2
+          and on (route)
+          sum by (route) (rate(heimdall_http_request_duration_seconds_count[5m])) > 0.1
+        for: 10m
+        labels:
+          severity: warn
+        annotations:
+          summary: "p95 latency > 2s on {{ $labels.route }}"
+          description: "Router dispatch p95 for {{ $labels.route }} is {{ $value | humanizeDuration }} over 5m windows for 10 minutes."
+
+      - alert: HeimdallHttpAcceptErrors
+        expr: increase(heimdall_http_accept_errors_total[10m]) > 0
+        for: 0m
+        labels:
+          severity: warn
+        annotations:
+          summary: "accept() is failing on the public listener"
+          description: "Usually EMFILE: the hub is out of file descriptors (one thread + fd per connection). See HeimdallHubCapacity."
+
+  - name: heimdall-hub-process
+    rules:
+      - alert: HeimdallHubCapacity
+        expr: |
+          process_threads{job="heimdall-hub"} > 2000
+          and
+          (process_open_fds{job="heimdall-hub"} / process_max_fds{job="heimdall-hub"}) > 0.8
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "Hub is near its thread/fd ceiling"
+          description: "{{ $value }} threads and > 80% of max fds in use. Raise LimitNOFILE or investigate leaked WebSocket readers."
+
+      - alert: HeimdallHubMemoryLeak
+        # Projected RSS 24h out, based on the last 6h trend. 4 GiB = adjust to host.
+        expr: predict_linear(process_resident_memory_bytes{job="heimdall-hub"}[6h], 86400) > 4 * 1024 * 1024 * 1024
+        for: 30m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Hub RSS projected to exceed 4 GiB within 24h"
+          description: "Current RSS {{ with query \"process_resident_memory_bytes{job='heimdall-hub'}\" }}{{ . | first | value | humanize1024 }}B{{ end }}; 6h trend projects > 4 GiB."
+
+      - alert: HeimdallSqliteBusy
+        expr: rate(heimdall_sqlite_busy_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warn
+        annotations:
+          summary: "SQLite is hitting busy_timeout"
+          description: "Writer contention on the hub database for 5 minutes."
+
+      - alert: HeimdallReaperStuck
+        expr: (time() - heimdall_reaper_last_success_timestamp_seconds) > 180
+        for: 0m
+        labels:
+          severity: page
+        annotations:
+          summary: "Stale-instance reaper has not completed in 3 minutes"
+          description: "Agents on dead bridges will not flip to 'unreachable'. Check the hub log for reaper errors."
+
+  - name: heimdall-fleet
+    rules:
+      - alert: HeimdallBridgeHeartbeatStale
+        # Series exists only while the bridge is connected, so this is 'online but silent'.
+        expr: (time() - heimdall_bridge_last_heartbeat_timestamp_seconds) > 180
+        for: 0m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Bridge {{ $labels.bridge_id }} is connected but silent"
+          description: "No heartbeat for {{ $value | humanizeDuration }} although the WebSocket is still registered."
+
+      - alert: HeimdallBridgeReconnectStorm
+        expr: sum by (bridge_id) (increase(heimdall_bridge_ws_connects_total[10m])) > 5
+        for: 0m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Bridge {{ $labels.bridge_id }} reconnected > 5 times in 10m"
+          description: "Flapping bridge: check its network, the hub read deadline, and 'replaced' results."
+
+      - alert: HeimdallShellViewerDetaches
+        expr: sum(increase(heimdall_shell_viewer_detaches_total{reason!="stream_closed"}[15m])) > 5
+        for: 0m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Shell viewers are being detached abnormally"
+          description: "> 5 non-client-initiated shell viewer detaches in 15 minutes."
+
+  - name: heimdall-host
+    rules:
+      - alert: HeimdallHostDiskLow
+        expr: (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay",mountpoint="/"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay",mountpoint="/"}) < 0.10
+        for: 15m
+        labels:
+          severity: page
+        annotations:
+          summary: "Hub host root filesystem < 10% free"
+          description: "Prometheus retention (8 GB cap) and the SQLite WAL both live here."
+
+      - alert: HeimdallHostMemoryPressure
+        expr: (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) < 0.10
+        for: 15m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Hub host has < 10% memory available"
+          description: "Check ham-hub RSS (one thread per connection) before blaming Prometheus."

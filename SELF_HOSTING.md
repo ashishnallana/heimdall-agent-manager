@@ -379,6 +379,57 @@ machine has no browser of its own.
 The `--hub` flag in the systemd/launchd service should match (e.g.
 `http://100.x.x.x` for a Tailscale IP).
 
+### 1.8 Hub telemetry (Prometheus + Grafana, optional)
+
+The hub keeps Prometheus metrics in-process at all times (cheap atomics) and
+serves them on a **separate, private listener** when asked to:
+
+```bash
+ham-hub ... --metrics-addr 127.0.0.1:9464        # or HEIMDALL_METRICS_ADDR=127.0.0.1:9464
+curl -s http://127.0.0.1:9464/metrics | head
+```
+
+- Off by default (`--metrics-addr` empty). The flag takes an IPv4 `host:port`
+  only; keep it on loopback — `/metrics` will carry owner ids once fleet
+  metrics land, and it is never routed on the public port.
+- The listener answers only `GET /metrics` and `GET /healthz`, one request at
+  a time, with 5 s socket timeouts. Content type is
+  `text/plain; version=0.0.4; charset=utf-8`.
+- What you get today: `heimdall_http_requests_total{route,method,status_class}`
+  (route = matched **pattern**, never the raw path; `unmatched` otherwise),
+  `heimdall_http_request_duration_seconds` (router dispatch only — WebSocket
+  upgrades and the preview relay are excluded), `heimdall_http_in_flight`,
+  `heimdall_http_accept_errors_total`, the standard `process_*` family from
+  `/proc/self`, `heimdall_hub_build_info{version,commit}`, and the lib's own
+  `heimdall_metrics_series` / `heimdall_metrics_scrape_duration_seconds`.
+
+**Full stack on the NixOS hub host** (Prometheus 15 d / 8 GB, node_exporter,
+blackbox probe of your public URL, Grafana behind Authentik OIDC for the
+`heimdall-admins` group only):
+
+```nix
+imports = [ "${inputs.heimdall}/tools/telemetry/hub/nixos-telemetry.nix" ];
+services.heimdall-telemetry = {
+  enable = true;
+  telemetryDir = "${inputs.heimdall}/tools/telemetry/hub";
+  publicUrl = "https://hub.example.com";
+  grafanaDomain = "grafana.example.com";
+  authentikUrl = "https://auth.example.com";
+  oauthClientSecretFile = "/run/secrets/grafana-oauth";   # from your secrets manager
+};
+# and add `--metrics-addr 127.0.0.1:9464` to systemd.services.heimdall-hub ExecStart
+```
+
+Authentik needs a group `heimdall-admins`, an OAuth2/OIDC provider +
+application with redirect URI `https://grafana.example.com/login/generic_oauth`,
+and a group-membership policy bound to that application. Grafana additionally
+enforces `role_attribute_strict`, so a user outside the group is refused even
+if Authentik lets them through. Alert rules live in
+`tools/telemetry/hub/alerts.yml` (`promtool check rules` clean); import
+Grafana.com dashboard **1860** for host graphs and the provisioned
+**Heimdall / Hub Health** for the hub. Details and non-Nix snippets:
+[`tools/telemetry/hub/README.md`](tools/telemetry/hub/README.md).
+
 ---
 
 ## Part 2 — Bridge (one per agent-running device)
