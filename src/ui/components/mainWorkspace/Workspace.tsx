@@ -62,13 +62,14 @@ import { AgentChatPane } from '../workbench/AgentChatPane';
 import { MainPaneFrame } from './MainPaneFrame';
 import { MobileMainPager } from './MobileMainPager';
 import HomePage from '../home/HomePage';
+import { PANE_ANIMATION_MS, TOP_CHROME_HEIGHT } from '../shell/shellChrome';
 
 export interface WorkspaceProps {
   focusMessageId?: string;
   isMobile?: boolean;
-  /** Hidden sidebar: toggle + app name, inline at the left of the top-left pane's header. */
+  /** Hidden sidebar: spacer reserving the fixed top-left cluster in the top-left pane's header. */
   leading?: React.ReactNode;
-  /** Hidden sidebar: update-available badge, beside the top-right pane's ⋮. */
+  /** Hidden sidebar: update-available badge, in the fixed top-right cluster. */
   trailing?: React.ReactNode;
 }
 
@@ -275,9 +276,38 @@ export function Workspace({ focusMessageId, isMobile = false, leading, trailing 
     if (auxTreeId) dispatch(toggleAuxPane({ treeId: auxTreeId, hasChain }));
   }, [auxTreeId, dispatch, hasChain]);
 
-  // The ONE side-panel toggle (Jetski): inline at the right end of the
-  // top-right Main pane's header, i.e. the top-right corner of Main, right next
-  // to the aux dock. No extra bar, nothing overlaps.
+  // Fixed top-right cluster (Jetski web): update badge + the ONE side-panel
+  // toggle stay in the window's top-right whether or not the aux dock is open.
+  // Whatever sits under it (the top-right pane header, or the aux tab strip
+  // when the dock is open) reserves its measured width.
+  const topRightRef = useRef<HTMLDivElement | null>(null);
+  const [topRightWidth, setTopRightWidth] = useState(48);
+  useEffect(() => {
+    const el = topRightRef.current;
+    if (!el) return;
+    const measure = () => setTopRightWidth(Math.ceil(el.getBoundingClientRect().width) || el.offsetWidth || 48);
+    measure();
+    if (typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  // Aux dock open / close animation: stay mounted while sliding closed.
+  const [auxMounted, setAuxMounted] = useState(auxOpen);
+  const [auxShown, setAuxShown] = useState(auxOpen);
+  useEffect(() => {
+    if (auxOpen) {
+      setAuxMounted(true);
+      const t = setTimeout(() => setAuxShown(true), 16);
+      return () => clearTimeout(t);
+    }
+    setAuxShown(false);
+    const t = setTimeout(() => setAuxMounted(false), PANE_ANIMATION_MS);
+    return () => clearTimeout(t);
+  }, [auxOpen]);
+  const dockOccupiesTopRight = auxMounted && !isMobile;
+
   const auxToggle = (
     <button
       type="button"
@@ -325,7 +355,21 @@ export function Workspace({ focusMessageId, isMobile = false, leading, trailing 
   }, [auxTreeId, dispatch, hasChain, tree.focusedPaneId]);
 
   const focusPane = useCallback((paneId: string) => dispatch(setFocusedMainPane(paneId)), [dispatch]);
-  const closePane = useCallback((paneId: string) => dispatch(closeMainPane(paneId)), [dispatch]);
+  // Main pane close animation: fade the pane out, then remove it.
+  const [closingPaneIds, setClosingPaneIds] = useState<string[]>([]);
+  const closePane = useCallback(
+    (paneId: string) => {
+      setClosingPaneIds((ids) => (ids.includes(paneId) ? ids : [...ids, paneId]));
+      setTimeout(() => {
+        dispatch(closeMainPane(paneId));
+        setClosingPaneIds((ids) => ids.filter((id) => id !== paneId));
+      }, PANE_ANIMATION_MS);
+    },
+    [dispatch],
+  );
+  const topRightSpacer = (
+    <div aria-hidden="true" data-debug-id="workspace-top-right-spacer" className="shrink-0" style={{ width: Math.max(0, topRightWidth - 12) }} />
+  );
 
   const renderPane = useCallback(
     ({ paneId, value, isFocused, isSinglePane, isTopLeftMost, isTopRightMost }: RenderPaneProps<MainPaneValue>) => {
@@ -340,8 +384,9 @@ export function Workspace({ focusMessageId, isMobile = false, leading, trailing 
           isMobile={isMobile}
           onFocus={focusPane}
           onClose={closePane}
+          isClosing={closingPaneIds.includes(paneId)}
           headerLeading={isTopLeftMost ? leading : null}
-          headerTrailing={isTopRightMost ? <>{trailing}{auxToggle}</> : null}
+          headerTrailing={isTopRightMost && !dockOccupiesTopRight ? topRightSpacer : null}
         >
           {isPicker ? (
             // Jetski: a '_new' pane renders the new-conversation (home) view.
@@ -372,18 +417,18 @@ export function Workspace({ focusMessageId, isMobile = false, leading, trailing 
               onClosePane={() => closePane(paneId)}
               isFocusedPane={isFocused}
               headerLeading={isTopLeftMost ? leading : null}
-              headerTrailing={isTopRightMost ? trailing : null}
-              headerEnd={isTopRightMost ? auxToggle : null}
+              headerEnd={isTopRightMost && !dockOccupiesTopRight ? topRightSpacer : null}
             />
           )}
         </MainPaneFrame>
       );
     },
     [
-      auxToggle,
       closePane,
+      closingPaneIds,
+      dockOccupiesTopRight,
       leading,
-      trailing,
+      topRightSpacer,
       ctx.projectVcsEnabled,
       dispatch,
       focusMessageId,
@@ -447,7 +492,18 @@ export function Workspace({ focusMessageId, isMobile = false, leading, trailing 
           )}
           {dropOverlay}
         </div>
-        {auxOpen && auxTreeId ? <AuxDock treeId={auxTreeId} ctx={ctx} isMobile={isMobile} /> : null}
+        {auxMounted && auxTreeId ? (
+          <AuxDock treeId={auxTreeId} ctx={ctx} isMobile={isMobile} shown={auxShown} reserveRight={topRightWidth} />
+        ) : null}
+      </div>
+      <div
+        ref={topRightRef}
+        data-debug-id="workspace-top-right-cluster"
+        className="absolute right-0 top-0 z-30 flex items-center gap-1 pl-1 pr-2"
+        style={{ height: TOP_CHROME_HEIGHT }}
+      >
+        {trailing}
+        {auxToggle}
       </div>
     </div>
   );

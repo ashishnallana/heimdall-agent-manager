@@ -2454,7 +2454,7 @@ export function AgentChatPane({
           // replaced or closed.
           <header
             data-debug-id="conversation-thread-header-minimal"
-            className="flex shrink-0 items-center justify-end gap-1 px-3 py-2"
+            className="flex min-h-12 shrink-0 items-center justify-end gap-1 px-3 py-2"
           >
             {headerLeading ? <div className="mr-auto flex items-center gap-1">{headerLeading}</div> : null}
             {onReplaceWithNew ? (
@@ -2511,7 +2511,7 @@ export function AgentChatPane({
       {!isAuxSubagent ? (
       <header
         data-debug-id="conversation-thread-header"
-        className="sticky top-0 z-20 flex shrink-0 items-center gap-2 px-3 py-2 sm:gap-3 sm:px-4 bg-canvas/90 backdrop-blur-md overflow-visible"
+        className="sticky top-0 z-20 flex min-h-12 shrink-0 items-center gap-2 px-3 py-2 sm:gap-3 sm:px-4 bg-canvas/90 backdrop-blur-md overflow-visible"
       >
         <div
           data-debug-id="conversation-topbar-blur-fade"

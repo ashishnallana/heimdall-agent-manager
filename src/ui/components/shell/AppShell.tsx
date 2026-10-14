@@ -19,6 +19,7 @@ import { useFetchTaskChainGroupsQuery } from '../../api/endpoints/tasks';
 import { useListBridgesQuery } from '../../api/endpoints/bridgeSupport';
 import { useGetAccountBillingQuery } from '../../api/endpoints/accountBilling';
 import SidebarUpdateBadge from './SidebarUpdateBadge';
+import { TOP_CHROME_HEIGHT, TOP_LEFT_CLUSTER_WIDTH } from './shellChrome';
 import type { PendingBridgeUpdate } from '../settings/bridgeUpdate';
 import { unsealAllConnectedBridges } from '../../api/endpoints/bridges';
 import { buildRouteHash, getRoutePathname, getRouteSearch } from '../../utils/appLocation';
@@ -1062,7 +1063,7 @@ function RouteOutlet({
   focusMessageId?: string;
   conversations?: ConversationSummary[];
   liveProjects?: LiveProject[];
-  /** Hidden sidebar: toggle + app name, inline at the top-left chat header. */
+  /** Hidden sidebar: spacer reserving the fixed top-left cluster in the top-left chat header. */
   workspaceLeading?: React.ReactNode;
   /** Hidden sidebar: update-available badge, inline beside the top-right ⋮. */
   workspaceTrailing?: React.ReactNode;
@@ -1611,8 +1612,8 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
   const isEffectiveCollapsed = isMobile ? !drawerOpen : collapsed;
   const isWorkspaceRoute =
     (path.startsWith('/conversations/') && path !== '/conversations/new') || path.startsWith('/c/');
-  // One toggle + app name control: in the sidebar header when shown, at the
-  // top-left of the main area when hidden.
+  // One toggle + app name control, FIXED at the window's top-left (it does not
+  // move when the sidebar opens or closes).
   const sidebarToggleButton = (
     <button
       data-debug-id="shell-sidebar-collapse-toggle"
@@ -1699,22 +1700,35 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
           aria-hidden="true"
         />
       ) : null}
-      {/* Jetski-style: a hidden sidebar takes ZERO width (no icon rail). The same
-          toggle + app name control then sits at the top-left of the main area. */}
-      {!isEffectiveCollapsed ? (
+      {/* Jetski web: the sidebar toggle + app name are a FIXED top-left cluster
+          that never moves; the sidebar slides open underneath it (its header
+          reserves the cluster's space) and a hidden sidebar takes ZERO width. */}
+      <div
+        data-debug-id="shell-top-left-cluster"
+        className="absolute left-0 top-0 z-[60] flex items-center gap-1 px-2"
+        style={{ width: TOP_LEFT_CLUSTER_WIDTH, height: TOP_CHROME_HEIGHT }}
+      >
+        {sidebarToggleButton}
+        {brandLink}
+      </div>
       <aside
-        data-debug-id="shell-left-sidebar-expanded"
-        className={`flex w-80 max-w-[calc(100vw-1rem)] shrink-0 flex-col border-r border-subtle bg-surface ${
-          isMobile ? 'fixed top-0 left-0 z-50 app-viewport-height md:static md:z-auto md:h-auto md:max-h-none' : 'md:static'
+        data-debug-id={isEffectiveCollapsed ? 'shell-left-sidebar-hidden' : 'shell-left-sidebar-expanded'}
+        aria-hidden={isEffectiveCollapsed}
+        className={`flex shrink-0 flex-col overflow-hidden bg-surface motion-reduce:transition-none ${
+          isMobile
+            ? `fixed top-0 left-0 z-50 app-viewport-height w-80 max-w-[calc(100vw-1rem)] border-r border-subtle transition-[transform,visibility] duration-200 ease-out ${
+                isEffectiveCollapsed ? 'invisible -translate-x-full' : 'visible translate-x-0'
+              }`
+            : `transition-[width,visibility] duration-200 ease-out ${
+                isEffectiveCollapsed ? 'invisible w-0' : 'visible w-80 border-r border-subtle'
+              }`
         }`}
         aria-label="Primary navigation"
       >
-        <div className="flex items-center gap-1 p-3">
-          {sidebarToggleButton}
-          <div className="flex min-w-0 flex-1 items-center gap-2">
-            {brandLink}
-            <SidebarUpdateBadge onOpen={openBridgeUpdate} />
-          </div>
+        <div className="flex w-80 max-w-[calc(100vw-1rem)] min-h-0 flex-1 flex-col">
+        <div className="flex items-center gap-2 pr-3" style={{ height: TOP_CHROME_HEIGHT }}>
+          <div aria-hidden="true" className="shrink-0" style={{ width: TOP_LEFT_CLUSTER_WIDTH }} />
+          <SidebarUpdateBadge onOpen={openBridgeUpdate} />
         </div>
 
         <div className="flex-1 overflow-y-auto p-3">
@@ -1767,27 +1781,27 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
             </button>
           ) : null}
         </div>
+        </div>
       </aside>
-      ) : null}
 
       <div className="flex min-w-0 flex-1 flex-col h-full min-h-0 overflow-hidden">
-        {/* On the conversation workspace there is no extra bar: the hidden-sidebar
-            control sits inline in the top-left chat header (Jetski). */}
+        {/* The fixed top-left cluster floats over the content. On the conversation
+            workspace the top-left chat header reserves its space; other pages get a
+            slim spacer row so the cluster never overlaps them (Jetski). */}
         {isEffectiveCollapsed && !isWorkspaceRoute ? (
           <div
             data-debug-id="shell-sidebar-reopen-bar"
-            className="flex h-10 shrink-0 items-center gap-1 border-b border-subtle bg-canvas px-2"
-          >
-            {sidebarToggleButton}
-            {brandLink}
-          </div>
+            aria-hidden="true"
+            className="shrink-0 border-b border-subtle bg-canvas"
+            style={{ height: TOP_CHROME_HEIGHT }}
+          />
         ) : null}
         <RouteOutlet
           path={path}
           focusMessageId={focusMessageId}
           conversations={conversations}
           liveProjects={liveProjects}
-          workspaceLeading={isEffectiveCollapsed ? <>{sidebarToggleButton}{brandLink}</> : null}
+          workspaceLeading={isEffectiveCollapsed ? <div aria-hidden="true" data-debug-id="shell-top-left-cluster-spacer" className="shrink-0" style={{ width: TOP_LEFT_CLUSTER_WIDTH - 12 }} /> : null}
           workspaceTrailing={isEffectiveCollapsed ? <SidebarUpdateBadge onOpen={openBridgeUpdate} /> : null}
         />
       </div>

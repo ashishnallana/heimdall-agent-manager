@@ -37,6 +37,8 @@ export interface AuxTabStripProps {
   /** Optional status dot per tab (e.g. a PTY/sub-agent runtime state). */
   renderTabStatus?: (tab: AuxTab) => React.ReactNode;
   isMobile?: boolean;
+  /** Right padding reserving the fixed top-right window cluster (px). */
+  reserveRight?: number;
 }
 
 /**
@@ -58,6 +60,7 @@ export function AuxTabStrip({
   onCloseDock,
   renderTabStatus,
   isMobile = false,
+  reserveRight = 0,
 }: AuxTabStripProps) {
   const [menuOpen, setMenuOpen] = React.useState(false);
   const showNewTabPill = activeTabId === NEW_TAB_ID || tabs.length === 0;
@@ -65,7 +68,8 @@ export function AuxTabStrip({
   return (
     <div
       data-debug-id={`aux-tab-strip-${treeKey}`}
-      className="flex h-10 shrink-0 select-none items-center justify-between border-b border-subtle bg-surface-raised/60 px-1.5"
+      className="flex h-12 shrink-0 select-none items-center justify-between border-b border-subtle bg-surface-raised/60 px-1.5"
+      style={reserveRight ? { paddingRight: reserveRight } : undefined}
     >
       <div
         role="tablist"

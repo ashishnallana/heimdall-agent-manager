@@ -16,6 +16,8 @@ export interface MainPaneFrameProps {
   isMobile?: boolean;
   onFocus: (paneId: string) => void;
   onClose: (paneId: string) => void;
+  /** Plays the close animation (the pane is removed right after). */
+  isClosing?: boolean;
   /** Picker header: hidden-sidebar control (top-left pane). */
   headerLeading?: React.ReactNode;
   /** Picker header: update badge + side-panel toggle (top-right pane). */
@@ -39,6 +41,7 @@ export function MainPaneFrame({
   onClose,
   headerLeading,
   headerTrailing,
+  isClosing = false,
   children,
 }: MainPaneFrameProps) {
   const dispatch = useDispatch();
@@ -104,7 +107,10 @@ export function MainPaneFrame({
       onMouseDownCapture={() => {
         if (!isFocused) onFocus(paneId);
       }}
+      data-main-pane-closing={isClosing ? 'true' : undefined}
       className={`relative flex h-full w-full min-h-0 min-w-0 flex-col overflow-hidden bg-canvas ${
+        isClosing ? 'heimdall-pane-exit' : 'heimdall-pane-enter'
+      } ${
         !isSinglePane && !isMobile
           ? isFocused
             ? 'ring-1 ring-inset ring-accent/50'
@@ -126,7 +132,7 @@ export function MainPaneFrame({
         <header
           draggable={!isSinglePane && !isMobile}
           onDragStart={handleDragStart}
-          className="flex h-9 shrink-0 select-none items-center justify-between gap-2 border-b border-subtle bg-surface px-3 text-xs text-muted"
+          className="flex h-12 shrink-0 select-none items-center justify-between gap-2 border-b border-subtle bg-surface px-3 text-xs text-muted"
         >
           <span className="flex min-w-0 items-center gap-1.5 font-medium">
             {headerLeading}

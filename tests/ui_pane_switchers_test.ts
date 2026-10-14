@@ -240,7 +240,7 @@ test('header switchers are wired to the pane (no route navigation for coordinato
   assert.match(modal, /if \(onSelectChain\) \{\s*onSelectChain\(/);
 });
 
-test('one side-panel toggle inline in the top-right pane header; hidden-sidebar brand top-left; update badge beside ⋮; no extra bar', async () => {
+test('fixed top-right cluster: one side-panel toggle (+ update badge) stays top-right with the dock open; content reserves its space', async () => {
   await withDom('#/conversations/a+b?focused=a', async (dom) => {
     const { createRoot } = await import('react-dom/client');
     const { act } = await import('react');
@@ -255,7 +255,7 @@ test('one side-panel toggle inline in the top-right pane header; hidden-sidebar 
     try {
       await act(async () => {
         root.render(
-          React.createElement(Provider, { store }, React.createElement(Workspace, { leading: el('brand'), trailing: el('update-badge') })),
+          React.createElement(Provider, { store }, React.createElement(Workspace, { leading: el('left-spacer'), trailing: el('update-badge') })),
         );
         await new Promise((r) => setTimeout(r, 40));
       });
@@ -263,31 +263,48 @@ test('one side-panel toggle inline in the top-right pane header; hidden-sidebar 
       const tree = store.getState().workspaceLayout.tree;
       const aFrame = doc.querySelector(`[data-debug-id="main-pane-frame-${layout.findPaneByAgent(tree, 'a')}"]`)!; // left
       const bFrame = doc.querySelector(`[data-debug-id="main-pane-frame-${layout.findPaneByAgent(tree, 'b')}"]`)!; // right
-      assert.equal(doc.querySelector('[data-debug-id="workspace-top-bar"]'), null, 'no header just for the name');
-      assert.equal(doc.querySelectorAll('[data-debug-id="conversation-right-panel-toggle-btn"]').length, 0);
+      assert.equal(doc.querySelector('[data-debug-id="workspace-top-bar"]'), null, 'no extra header bar');
+      const cluster = doc.querySelector('[data-debug-id="workspace-top-right-cluster"]')!;
       const toggles = doc.querySelectorAll('[data-debug-id="workspace-aux-toggle"]');
       assert.equal(toggles.length, 1, 'exactly one side-panel toggle');
-      // Top-left pane: brand inline before its breadcrumb. Top-right pane: badge then ⋮ ... toggle last.
-      assert.ok(aFrame.querySelector('[data-debug-id="conversation-header-leading"] [data-debug-id="brand"]'));
-      assert.equal(bFrame.querySelector('[data-debug-id="brand"]'), null);
-      const bHeader = bFrame.querySelector('[data-debug-id="conversation-thread-header"]')!;
-      assert.ok(bHeader.contains(toggles[0]), 'toggle is in the top-right pane header');
-      const badge = bHeader.querySelector('[data-debug-id="update-badge"]')!;
-      const menuBtn = bHeader.querySelector('[data-debug-id="conversation-thread-overflow-menu-btn"]')!;
-      assert.ok(badge && badge.compareDocumentPosition(menuBtn) & dom.window.Node.DOCUMENT_POSITION_FOLLOWING, 'badge sits just before ⋮');
-      assert.equal(toggles[0].parentElement!.lastElementChild, toggles[0], 'toggle is the right-most control');
-      assert.equal(aFrame.querySelector('[data-debug-id="update-badge"]'), null);
+      assert.ok(cluster.contains(toggles[0]));
+      assert.equal(cluster.lastElementChild, toggles[0], 'toggle is right-most');
+      assert.ok(cluster.querySelector('[data-debug-id="update-badge"]'), 'update badge sits in the top-right cluster, left of the toggle');
+      assert.equal(doc.querySelectorAll('[data-debug-id="conversation-right-panel-toggle-btn"]').length, 0);
+      // The top-left pane reserves the fixed top-left cluster; the top-right pane reserves the top-right cluster.
+      assert.ok(aFrame.querySelector('[data-debug-id="conversation-header-leading"] [data-debug-id="left-spacer"]'));
+      assert.ok(bFrame.querySelector('[data-debug-id="conversation-thread-header"] [data-debug-id="workspace-top-right-spacer"]'));
+      assert.equal(aFrame.querySelector('[data-debug-id="workspace-top-right-spacer"]'), null);
 
       await act(async () => {
         (toggles[0] as any).click();
-        await new Promise((r) => setTimeout(r, 40));
+        await new Promise((r) => setTimeout(r, 60));
       });
+      await waitFor(() => doc.querySelector('[data-debug-id="aux-dock"]')?.getAttribute('data-aux-shown') === 'true', act);
       const dock = doc.querySelector('[data-debug-id="aux-dock"]')!;
       assert.ok(dock, 'toggle opens the side panel');
       assert.equal(dock.getAttribute('data-aux-tree'), 'agent:a', 'for the focused pane');
-      assert.equal(dock.contains(doc.querySelector('[data-debug-id="workspace-aux-toggle"]')), false, 'toggle stays in Main, beside the dock');
+      assert.equal(dock.getAttribute('data-aux-shown'), 'true', 'slid open');
+      // Still ONE toggle, still in the fixed top-right cluster (not in Main, not in the dock).
       assert.equal(doc.querySelectorAll('[data-debug-id="workspace-aux-toggle"]').length, 1);
+      assert.ok(cluster.contains(doc.querySelector('[data-debug-id="workspace-aux-toggle"]')));
+      assert.equal(dock.contains(cluster), false);
+      // Now the aux tab strip reserves the cluster; the top-right Main pane no longer does.
+      const strip = dock.querySelector('[data-debug-id^="aux-tab-strip-"]') as any;
+      assert.ok(parseFloat(strip.style.paddingRight) > 0, 'aux strip reserves the top-right cluster');
+      assert.equal(bFrame.querySelector('[data-debug-id="workspace-top-right-spacer"]'), null);
       assert.equal(doc.querySelector('[data-debug-id^="aux-close-dock-btn-"]'), null, 'no second close control on desktop');
+
+      // Close animates: the dock slides shut, then unmounts.
+      await act(async () => {
+        (doc.querySelector('[data-debug-id="workspace-aux-toggle"]') as any).click();
+        await new Promise((r) => setTimeout(r, 20));
+      });
+      assert.equal(doc.querySelector('[data-debug-id="aux-dock"]')!.getAttribute('data-aux-shown'), 'false', 'sliding closed');
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 250));
+      });
+      assert.equal(doc.querySelector('[data-debug-id="aux-dock"]'), null, 'unmounted after the animation');
 
       // A focused new-chat pane has no side panel: the toggle is disabled.
       await act(async () => {
@@ -295,8 +312,10 @@ test('one side-panel toggle inline in the top-right pane header; hidden-sidebar 
         await new Promise((r) => setTimeout(r, 40));
       });
       const t = doc.querySelectorAll('[data-debug-id="workspace-aux-toggle"]');
-      assert.equal(t.length, 1, 'moves to the new top-right pane');
+      assert.equal(t.length, 1);
       assert.equal((t[0] as any).disabled, true);
+      // New panes animate in.
+      assert.ok(doc.querySelector(`[data-debug-id="main-pane-frame-${store.getState().workspaceLayout.tree.focusedPaneId}"]`)!.className.includes('heimdall-pane-enter'));
     } finally {
       await act(async () => root.unmount());
       store.dispatch(heimdallApi.util.resetApiState());
@@ -327,7 +346,11 @@ test('split view: only the FOCUSED pane shows a close ✕; it closes that pane a
       assert.ok(doc.querySelector(`[data-debug-id="main-pane-frame-${bPane}"]`)!.contains(closes[0]));
       await act(async () => {
         (closes[0] as any).click();
-        await new Promise((r) => setTimeout(r, 40));
+        await new Promise((r) => setTimeout(r, 20));
+      });
+      assert.equal(doc.querySelector(`[data-debug-id="main-pane-frame-${bPane}"]`)!.getAttribute('data-main-pane-closing'), 'true', 'pane animates out first');
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 250));
       });
       assert.deepEqual(layout.selectMainAgentIds(store.getState()), ['a']);
       assert.equal(dom.window.location.hash, '#/conversations/a');

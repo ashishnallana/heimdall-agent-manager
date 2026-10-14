@@ -27,23 +27,25 @@ test('sidebar shows no task chain list (no chain tree, no pinned chains)', () =>
   assert.equal(fs.existsSync(path.join(REPO_ROOT, 'src/ui/components/chains/ProjectChainTree.tsx')), false);
 });
 
-test('hidden sidebar renders no rail; the top-left toggle + app name reopens it', () => {
+test('hidden sidebar renders no rail; the toggle + app name are a FIXED top-left cluster that never moves', () => {
   // No icon rail widths or mobile spacer.
   assert.doesNotMatch(source, /'w-12' : 'w-16'/);
   assert.doesNotMatch(source, /w-12 shrink-0 md:hidden/);
   assert.doesNotMatch(source, /shell-left-sidebar-collapsed/);
-  // The aside only exists while shown.
-  assert.match(source, /\{!isEffectiveCollapsed \? \(\s*<aside\s+data-debug-id="shell-left-sidebar-expanded"/);
-  // When hidden, the same toggle + brand render at the top-left of the main area.
-  const reopen = source.slice(source.indexOf('shell-sidebar-reopen-bar') - 200, source.indexOf('shell-sidebar-reopen-bar') + 400);
-  assert.match(reopen, /\{isEffectiveCollapsed && !isWorkspaceRoute \? \(/);
-  assert.match(reopen, /\{sidebarToggleButton\}\s*\{brandLink\}/);
-  // On the conversation workspace the same control sits in the workspace top bar.
-  assert.match(source, /workspaceLeading=\{isEffectiveCollapsed \? <>\{sidebarToggleButton\}\{brandLink\}<\/> : null\}/);
-  // ...and the update-available badge beside the top-right pane's ⋮.
+  // One fixed cluster with the toggle + brand, outside the sidebar (so it does not move).
+  const cluster = source.slice(source.indexOf('data-debug-id="shell-top-left-cluster"') - 40, source.indexOf('data-debug-id="shell-top-left-cluster"') + 400);
+  assert.match(cluster, /absolute left-0 top-0/);
+  assert.match(cluster, /\{sidebarToggleButton\}\s*\{brandLink\}/);
+  assert.equal(source.split('{sidebarToggleButton}').length - 1, 1, 'toggle rendered exactly once');
+  // The sidebar animates its width (desktop) / slides (mobile) and its header reserves the cluster.
+  assert.match(source, /isEffectiveCollapsed \? 'invisible w-0' : 'visible w-80 border-r border-subtle'/);
+  assert.match(source, /isEffectiveCollapsed \? 'invisible -translate-x-full' : 'visible translate-x-0'/);
+  assert.match(source, /style=\{\{ width: TOP_LEFT_CLUSTER_WIDTH \}\} \/>\s*<SidebarUpdateBadge/);
+  // Hidden: the workspace's top-left header / other pages reserve the cluster's space.
+  assert.match(source, /workspaceLeading=\{isEffectiveCollapsed \? <div aria-hidden="true" data-debug-id="shell-top-left-cluster-spacer"/);
   assert.match(source, /workspaceTrailing=\{isEffectiveCollapsed \? <SidebarUpdateBadge onOpen=\{openBridgeUpdate\} \/> : null\}/);
+  assert.match(source, /\{isEffectiveCollapsed && !isWorkspaceRoute \? \(\s*<div\s+data-debug-id="shell-sidebar-reopen-bar"/);
   // The toggle flips the persisted desktop preference / the mobile drawer.
   assert.match(source, /onClick=\{\(\) => \(isMobile \? setDrawerOpen\(!drawerOpen\) : toggleCollapsed\(\)\)\}/);
-  assert.match(source, /aria-label=\{isEffectiveCollapsed \? 'Show sidebar' : 'Hide sidebar'\}/);
   assert.match(source, /localStorage\.setItem\('heimdall:shell:sidebar-collapsed'/);
 });

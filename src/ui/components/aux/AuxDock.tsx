@@ -90,6 +90,10 @@ function usePublishComments(ctx: AgentAuxContext) {
 
 export interface AuxDockProps {
   treeId: AuxTreeId;
+  /** false while sliding open / closed (the dock animates its width / transform). */
+  shown?: boolean;
+  /** Width of the fixed top-right window cluster the tab strip must not run under. */
+  reserveRight?: number;
   /** Context agent: the focused Main pane's agent (owner of the shown strip). */
   ctx: AgentAuxContext;
   isMobile?: boolean;
@@ -102,7 +106,7 @@ export interface AuxDockProps {
  * a ⋮ menu with the active tab's actions. Resizable (width persisted) and
  * maximizable on desktop; a full-screen sheet on mobile.
  */
-export function AuxDock({ treeId, ctx, isMobile = false }: AuxDockProps) {
+export function AuxDock({ treeId, ctx, isMobile = false, shown = true, reserveRight = 0 }: AuxDockProps) {
   const dispatch = useDispatch();
   const pane = useSelector((state: any) => selectAuxPane(state, treeId));
   const storedWidth = useSelector(selectAuxWidth);
@@ -213,11 +217,16 @@ export function AuxDock({ treeId, ctx, isMobile = false }: AuxDockProps) {
   );
 
   const width = dragWidth ?? storedWidth ?? AUX_DEFAULT_WIDTH;
+  const animating = dragWidth === null;
   const containerClass = isMobile
-    ? 'fixed inset-0 z-40 flex flex-col bg-canvas'
+    ? `fixed inset-0 z-40 flex flex-col bg-canvas transition-transform duration-200 ease-out motion-reduce:transition-none ${
+        shown ? 'translate-y-0' : 'translate-y-full'
+      }`
     : isMaximized
       ? 'relative flex min-w-0 flex-1 flex-col bg-canvas'
-      : 'relative flex shrink-0 flex-col border-l border-subtle bg-canvas';
+      : `relative flex shrink-0 flex-col overflow-hidden bg-canvas ${shown ? 'border-l border-subtle' : ''} ${
+          animating ? 'transition-[width] duration-200 ease-out motion-reduce:transition-none' : ''
+        }`;
 
   return (
     <aside
@@ -225,10 +234,16 @@ export function AuxDock({ treeId, ctx, isMobile = false }: AuxDockProps) {
       data-debug-id="aux-dock"
       data-aux-tree={treeKey}
       data-aux-mobile-sheet={isMobile ? 'true' : 'false'}
+      data-aux-shown={shown ? 'true' : 'false'}
       aria-label="Side panel"
       className={containerClass}
-      style={!isMobile && !isMaximized ? { width, maxWidth: '75%' } : undefined}
+      style={!isMobile && !isMaximized ? { width: shown ? width : 0, maxWidth: '75%' } : undefined}
     >
+      {/* Fixed-width inner column so the content doesn't reflow while sliding. */}
+      <div
+        className="flex h-full min-h-0 flex-col"
+        style={!isMobile && !isMaximized ? { width, minWidth: width } : { width: '100%' }}
+      >
       {!isMobile && !isMaximized ? (
         <div
           data-debug-id="aux-resize-handle"
@@ -237,7 +252,7 @@ export function AuxDock({ treeId, ctx, isMobile = false }: AuxDockProps) {
           aria-label="Resize side panel"
           onPointerDown={handleResizeStart}
           onDoubleClick={() => dispatch(setAuxWidth(null))}
-          className="absolute inset-y-0 -left-1 z-20 w-2 cursor-col-resize hover:bg-accent/30"
+          className="absolute inset-y-0 left-0 z-20 w-1.5 cursor-col-resize hover:bg-accent/30"
         />
       ) : null}
       <AuxTabStrip
@@ -246,6 +261,7 @@ export function AuxDock({ treeId, ctx, isMobile = false }: AuxDockProps) {
         activeTabId={activeTabId}
         isMobile={isMobile}
         isMaximized={isMaximized}
+        reserveRight={isMobile ? 0 : reserveRight}
         onSelectTab={(tabId) => dispatch(setActiveAuxTab({ treeId, tabId }))}
         onCloseTab={(tabId) => dispatch(closeAuxTab({ treeId, tabId }))}
         onOpenNewTab={() => dispatch(openAuxNewTab({ treeId, hasChain }))}
@@ -300,6 +316,7 @@ export function AuxDock({ treeId, ctx, isMobile = false }: AuxDockProps) {
             </div>
           )}
         </AuxTabActionsProvider>
+      </div>
       </div>
     </aside>
   );
