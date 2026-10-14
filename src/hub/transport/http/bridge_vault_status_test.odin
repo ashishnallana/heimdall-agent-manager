@@ -337,6 +337,8 @@ test_write_bridge_json_public_key_fields :: proc(t: ^testing.T) {
 
 	testing.expect(t, strings.contains(out, "\"public_key\":\"04aabbccddeeff\""), "public_key serialized from registry")
 	testing.expect(t, strings.contains(out, "\"bridge_public_key\":\"04aabbccddeeff\""), "bridge_public_key serialized from registry")
+	testing.expect(t, strings.contains(out, "\"task_chain_search_revision\":0,\"public_key\""), "numeric search revision is followed by a valid JSON field boundary")
+	testing.expect(t, !strings.contains(out, "\"task_chain_search_revision\":0\",\"public_key\""), "numeric search revision must not gain a stray closing quote")
 }
 
 // Fallback to capabilities_json if registry is empty

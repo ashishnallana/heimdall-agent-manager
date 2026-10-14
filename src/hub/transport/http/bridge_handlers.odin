@@ -2244,7 +2244,7 @@ write_bridge_json :: proc(b: ^strings.Builder, br: domain.Bridge, agents: ^agent
 	if pub_key == "" && br.capabilities_json != "" {
 		pub_key = json_string(br.capabilities_json, "public_key", context.temp_allocator)
 	}
-	strings.write_string(b, "\",\"public_key\":\""); write_handler_json_string(b, pub_key)
+	strings.write_string(b, ",\"public_key\":\""); write_handler_json_string(b, pub_key)
 	strings.write_string(b, "\",\"bridge_public_key\":\""); write_handler_json_string(b, pub_key)
 	strings.write_string(b, "\"}")
 }
