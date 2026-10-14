@@ -2440,9 +2440,41 @@ export function AgentChatPane({
     return (
       <div
         data-debug-id={`workbench-agent-chat-pane-${agentInstanceId}`}
-        className="flex h-full min-h-0 w-full flex-col overflow-hidden bg-canvas p-6 text-left"
+        className="flex h-full min-h-0 w-full flex-col overflow-hidden bg-canvas text-left"
       >
-        <div className="mx-auto w-full max-w-4xl rounded-[2rem] border border-subtle bg-surface p-6">
+        {!isAuxSubagent && (onReplaceWithNew || (isMultiPane && onClosePane)) ? (
+          // Minimal header so a pane whose conversation is missing can still be
+          // replaced or closed.
+          <header
+            data-debug-id="conversation-thread-header-minimal"
+            className="flex shrink-0 items-center justify-end gap-1 px-3 py-2"
+          >
+            {onReplaceWithNew ? (
+              <button
+                type="button"
+                data-debug-id="conversation-replace-with-new-action"
+                onClick={onReplaceWithNew}
+                className="inline-flex h-8 items-center gap-1.5 rounded-lg px-2 text-xs text-muted hover:bg-neutral-soft hover:text-primary"
+              >
+                <Icon name="plus" size={14} />
+                <span>Replace with New</span>
+              </button>
+            ) : null}
+            {isMultiPane && onClosePane ? (
+              <button
+                type="button"
+                data-debug-id="conversation-remove-from-split-action"
+                aria-label="Close pane"
+                title="Close pane"
+                onClick={onClosePane}
+                className="grid h-8 w-8 place-items-center rounded-lg text-muted hover:bg-neutral-soft hover:text-primary"
+              >
+                <Icon name="close" size={16} />
+              </button>
+            ) : null}
+          </header>
+        ) : null}
+        <div className="mx-auto mt-6 w-full max-w-4xl rounded-[2rem] border border-subtle bg-surface p-6">
           <h2 className="text-xl font-semibold text-primary">Conversation not found</h2>
           <p className="mt-2 text-sm text-muted">
             No conversation for instance{' '}
