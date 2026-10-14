@@ -1,5 +1,4 @@
 import TaskChainsPage from '../taskchain/TaskChainsPage';
-import ProjectChainTree, { CollapsedPinnedChains } from '../chains/ProjectChainTree';
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import NewConversationPage from '../chat/NewConversationPage';
@@ -159,14 +158,14 @@ const DEFAULT_CONVERSATIONS_PROJECT: ProjectSummary = {
   isDefaultConversations: true,
 };
 const NAV_ROUTES: ShellRoute[] = [
-  { path: '/home', label: 'Home', icon: 'home', description: 'Start conversations and explore recent activity', group: 'primary' },
-  { path: '/conversations', label: 'Conversations', icon: 'chat', description: 'Chat sessions grouped by project and agent', group: 'primary' },
+  // '+ New conversation' opens the start-conversation page. Conversations and
+  // Task Chains are no longer sidebar destinations (their routes still work).
+  { path: '/home', label: 'New conversation', icon: 'plus', description: 'Start a new conversation', group: 'primary' },
   { path: '/actions', label: 'Actions', icon: 'clock', description: 'Scheduled and on-demand prompts sent to your agents', group: 'primary' },
   { path: '/projects', label: 'Projects', icon: 'grid', description: 'Projects, their agents, memory and bridge paths', group: 'primary' },
   { path: '/agents', label: 'Agents', icon: 'bot', description: 'Agent identities and sessions', group: 'primary' },
   { path: '/memory', label: 'Memory', icon: 'spark', description: 'Durable facts, habits & skills for your agents', group: 'primary' },
   { path: '/shells', label: 'Shells', icon: 'terminal', description: 'Every shell session your bridges are running', group: 'primary' },
-  { path: '/chains', label: 'Task Chains', icon: 'tasks', description: 'Multi-agent task chains grouped by project', group: 'primary' },
   { path: '/issues', label: 'Issues', icon: 'alert', description: 'Reported issues across projects, agents, and bridges', group: 'primary' },
 ];
 
@@ -1602,8 +1601,27 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
 
   const primary = NAV_ROUTES.filter((item) => item.group === 'primary');
   const conversationTree = useMemo(() => buildProjectConversationTree(conversations, liveProjects), [conversations, liveProjects]);
-  const totalUnread = conversationTree.reduce((sum, project) => sum + project.unreadCount, 0);
   const isEffectiveCollapsed = isMobile ? !drawerOpen : collapsed;
+  // One toggle + app name control: in the sidebar header when shown, at the
+  // top-left of the main area when hidden.
+  const sidebarToggleButton = (
+    <button
+      data-debug-id="shell-sidebar-collapse-toggle"
+      type="button"
+      onClick={() => (isMobile ? setDrawerOpen(!drawerOpen) : toggleCollapsed())}
+      aria-label={isEffectiveCollapsed ? 'Show sidebar' : 'Hide sidebar'}
+      title={isEffectiveCollapsed ? 'Show sidebar' : 'Hide sidebar'}
+      aria-expanded={!isEffectiveCollapsed}
+      className="grid h-8 w-8 shrink-0 place-items-center rounded-lg text-muted hover:bg-neutral-soft hover:text-primary"
+    >
+      <Icon name="panel-left" size={16} />
+    </button>
+  );
+  const brandLink = (
+    <a href={shellHash('/home')} data-debug-id="shell-brand" className="min-w-0 rounded-lg px-1.5 py-1 hover:bg-neutral-soft">
+      <span className="block truncate text-sm font-black tracking-tight text-primary">Heimdall</span>
+    </a>
+  );
   const sidebarError = String((conversationsQuery.error as any)?.error || (agentsLiveQuery.error as any)?.error || '');
   const sidebarLoading = conversationsQuery.isLoading || agentsLiveQuery.isLoading;
 
@@ -1663,9 +1681,6 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
       data-debug-id="app-shell"
       className="fixed inset-x-0 top-0 app-viewport-height flex w-full max-w-full overflow-hidden bg-canvas text-primary"
     >
-      {/* On mobile, reserve space for the slim left sidebar so main content doesn't shift when drawer expands */}
-      {isMobile ? <div className="w-12 shrink-0 md:hidden pointer-events-none" aria-hidden="true" /> : null}
-
       {/* UI-13: mobile drawer scrim. Closes the expanded sidebar on tap. */}
       {isMobile && drawerOpen ? (
         <div
@@ -1675,42 +1690,27 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
           aria-hidden="true"
         />
       ) : null}
+      {/* Jetski-style: a hidden sidebar takes ZERO width (no icon rail). The same
+          toggle + app name control then sits at the top-left of the main area. */}
+      {!isEffectiveCollapsed ? (
       <aside
-        data-debug-id={isEffectiveCollapsed ? 'shell-left-sidebar-collapsed' : 'shell-left-sidebar-expanded'}
-        className={`flex shrink-0 flex-col border-r border-subtle bg-surface transition-[width] duration-200 ${
-          isEffectiveCollapsed ? (isMobile ? 'w-12' : 'w-16') : 'w-80 max-w-[calc(100vw-1rem)]'
-        } ${isMobile ? 'fixed top-0 left-0 z-50 app-viewport-height md:static md:z-auto md:h-auto md:max-h-none' : 'md:static'} translate-x-0`}
+        data-debug-id="shell-left-sidebar-expanded"
+        className={`flex w-80 max-w-[calc(100vw-1rem)] shrink-0 flex-col border-r border-subtle bg-surface ${
+          isMobile ? 'fixed top-0 left-0 z-50 app-viewport-height md:static md:z-auto md:h-auto md:max-h-none' : 'md:static'
+        }`}
         aria-label="Primary navigation"
       >
-        <div className={`flex items-center gap-3 ${isMobile && isEffectiveCollapsed ? 'p-1.5' : 'p-3'} ${isEffectiveCollapsed ? 'justify-center' : 'justify-between'}`}>
-          {!isEffectiveCollapsed && (
-            <div className="flex min-w-0 items-center gap-2">
-              <a href={shellHash('/home')} data-debug-id="shell-brand" className="min-w-0 rounded-xl px-2 py-1 hover:bg-neutral-soft">
-                <span className="block truncate text-sm font-black tracking-tight text-primary">Heimdall</span>
-              </a>
-              <SidebarUpdateBadge onOpen={openBridgeUpdate} />
-            </div>
-          )}
-          <button
-            data-debug-id="shell-sidebar-collapse-toggle"
-            type="button"
-            onClick={() => (isMobile ? setDrawerOpen(!drawerOpen) : toggleCollapsed())}
-            aria-label={isEffectiveCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-            title={isEffectiveCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-            className={`grid shrink-0 place-items-center rounded-2xl text-sm text-muted hover:bg-neutral-soft hover:text-primary ${
-              isMobile && isEffectiveCollapsed
-                ? 'h-9 w-9 min-h-9 min-w-9'
-                : 'h-10 w-10 min-h-11 min-w-11'
-            }`}
-          >
-            <Icon name={isEffectiveCollapsed ? (isMobile ? 'menu' : 'chevron-right') : (isMobile ? 'close' : 'chevron-left')} size={16} />
-          </button>
+        <div className="flex items-center gap-1 p-3">
+          {sidebarToggleButton}
+          <div className="flex min-w-0 flex-1 items-center gap-2">
+            {brandLink}
+            <SidebarUpdateBadge onOpen={openBridgeUpdate} />
+          </div>
         </div>
 
-        <div className={`flex-1 overflow-y-auto ${isMobile && isEffectiveCollapsed ? 'p-1.5' : 'p-3'}`}>
+        <div className="flex-1 overflow-y-auto p-3">
           {/* Primary action: open the command palette (search + jump + new chat).
-              Replaces the old direct "New chat" link — the palette is the canonical
-              entry point (also Cmd/Ctrl-K on desktop). */}
+              The palette is the canonical entry point (also Cmd/Ctrl-K on desktop). */}
           <button
             data-debug-id="shell-sidebar-search-button"
             type="button"
@@ -1721,15 +1721,11 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
             title="Search (⌘K)"
             aria-label="Search"
             aria-keyshortcuts="Meta+K Control+K"
-            className={`mb-2 flex min-h-11 w-full items-center gap-2 rounded-2xl border border-subtle bg-surface-raised ${isMobile && isEffectiveCollapsed ? 'px-1.5' : 'px-3'} py-2 text-sm text-muted hover:bg-neutral-soft hover:text-primary ${isEffectiveCollapsed ? 'justify-center' : ''}`}
+            className="mb-2 flex min-h-11 w-full items-center gap-2 rounded-2xl border border-subtle bg-surface-raised px-3 py-2 text-sm text-muted hover:bg-neutral-soft hover:text-primary"
           >
             <Icon name="search" size={18} />
-            {!isEffectiveCollapsed && (
-              <>
-                <span className="flex-1 text-left">Search</span>
-                <kbd className="rounded border border-subtle bg-surface px-1.5 py-0.5 text-[10px] font-medium text-faint">⌘K</kbd>
-              </>
-            )}
+            <span className="flex-1 text-left">Search</span>
+            <kbd className="rounded border border-subtle bg-surface px-1.5 py-0.5 text-[10px] font-medium text-faint">⌘K</kbd>
           </button>
           <nav data-debug-id="shell-primary-nav" className="mt-2 space-y-0.5" aria-label="Primary destinations">
             {primary.map((item) => (
@@ -1737,47 +1733,25 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
                 key={item.path}
                 item={item}
                 active={isRouteActive(path, item.path)}
-                collapsed={isEffectiveCollapsed}
-                badge={item.path === '/conversations' ? totalUnread : 0}
+                collapsed={false}
                 onClick={isMobile ? () => setDrawerOpen(false) : undefined}
               />
             ))}
           </nav>
-          {isEffectiveCollapsed && (
-            <CollapsedPinnedChains
-              currentPath={path}
-              onNavigate={(navPath) => {
-                if (isMobile) setDrawerOpen(false);
-                handlePaletteNavigate(navPath);
-              }}
-            />
-          )}
-          {!isEffectiveCollapsed && (
-            <ProjectChainTree
-              projects={liveProjects.map((p) => ({ projectId: p.projectId, projectName: p.name }))}
-              currentPath={path}
-              onNavigate={(navPath) => {
-                if (isMobile) setDrawerOpen(false);
-                handlePaletteNavigate(navPath);
-              }}
-            />
-          )}
         </div>
 
-        <div className={`border-t border-subtle ${isMobile && isEffectiveCollapsed ? 'p-1.5' : 'p-3'}`}>
-          <div data-debug-id="shell-global-ownership-points" className={`flex items-center gap-2 rounded-xl px-2 py-1.5 ${isEffectiveCollapsed ? 'justify-center' : ''}`}>
-            {isEffectiveCollapsed ? (
-              <button type="button" data-debug-id="shell-open-account-collapsed" aria-label="Open account settings" title="Account & settings" onClick={openAccountSettings} className="rounded-full focus-visible:outline-none focus-visible:shadow-focus hover:opacity-80">{userAvatar}</button>
-            ) : userAvatar}
-            {!isEffectiveCollapsed && (
+        <div className={`border-t border-subtle p-3`}>
+          <div data-debug-id="shell-global-ownership-points" className={`flex items-center gap-2 rounded-xl px-2 py-1.5`}>
+            {userAvatar}
+            {(
               <button type="button" data-debug-id="shell-open-account" aria-label="Open account settings" onClick={openAccountSettings} className="min-w-0 flex-1 rounded-lg text-left focus-visible:outline-none focus-visible:shadow-focus hover:bg-neutral-soft">
                 <div data-debug-id="shell-current-user-owner" className="truncate text-[12px] font-semibold text-primary">{displayName}</div>
                 <div className="truncate text-[10.5px] text-muted">{user.email || user.user_id || ''}</div>
               </button>
             )}
-            {logoutUrl && !isEffectiveCollapsed && <a data-debug-id="auth-logout-link" href={logoutUrl} title="Sign out" className="shrink-0 rounded-lg p-1.5 text-muted hover:bg-neutral-soft hover:text-primary"><Icon name="close" size={14} /></a>}
+            {logoutUrl && <a data-debug-id="auth-logout-link" href={logoutUrl} title="Sign out" className="shrink-0 rounded-lg p-1.5 text-muted hover:bg-neutral-soft hover:text-primary"><Icon name="close" size={14} /></a>}
           </div>
-          {!isEffectiveCollapsed && planLabel ? (
+          {planLabel ? (
             <button type="button" data-debug-id="shell-subscription-tier" aria-label={`Subscription: ${planLabel}. Open account settings`} onClick={openAccountSettings} className="mt-1 flex w-full items-center gap-2 rounded-lg px-2 py-1 text-left text-[11px] text-muted hover:bg-neutral-soft hover:text-primary focus-visible:outline-none focus-visible:shadow-focus">
               <Icon name="sparkle" size={12} className="shrink-0 text-accent" />
               <span className="truncate">Plan · <span className="font-semibold text-primary">{planLabel}</span></span>
@@ -1785,8 +1759,18 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
           ) : null}
         </div>
       </aside>
+      ) : null}
 
       <div className="flex min-w-0 flex-1 flex-col h-full min-h-0 overflow-hidden">
+        {isEffectiveCollapsed ? (
+          <div
+            data-debug-id="shell-sidebar-reopen-bar"
+            className="flex h-10 shrink-0 items-center gap-1 border-b border-subtle bg-canvas px-2"
+          >
+            {sidebarToggleButton}
+            {brandLink}
+          </div>
+        ) : null}
         <RouteOutlet path={path} focusMessageId={focusMessageId} conversations={conversations} liveProjects={liveProjects} />
       </div>
 

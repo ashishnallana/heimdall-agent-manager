@@ -70,53 +70,6 @@ export function writeChainOverviewCollapsedState(state: Record<string, boolean>,
 }
 
 // --- Sidebar Chain Filter (REQ-CHAIN-UI-SIDEBAR-1) --------------------------
-export const SIDEBAR_CHAIN_FILTER_KEY = 'heimdall:sidebar-chain-filter';
-export type SidebarChainFilter = 'all' | 'active';
-
-export function isSidebarChainFilter(val: unknown): val is SidebarChainFilter {
-  return val === 'all' || val === 'active';
-}
-
-export function readSidebarChainFilter(): SidebarChainFilter {
-  if (typeof window === 'undefined') return 'all';
-  try {
-    const raw = window.localStorage.getItem(SIDEBAR_CHAIN_FILTER_KEY);
-    if (raw === 'active' || raw === 'active-only') return 'active';
-    return 'all';
-  } catch {
-    return 'all';
-  }
-}
-
-export function writeSidebarChainFilter(filter: SidebarChainFilter): void {
-  if (typeof window === 'undefined') return;
-  try {
-    window.localStorage.setItem(SIDEBAR_CHAIN_FILTER_KEY, filter);
-  } catch {
-    /* ignore */
-  }
-}
-
-export type ChainStatusLike = {
-  chainId?: string;
-  status?: string;
-  archived?: boolean;
-  projectId?: string;
-};
-
-export function filterSidebarChains<T extends ChainStatusLike>(
-  chains: T[],
-  filter: SidebarChainFilter,
-  archivedProjectIds?: Set<string>,
-): T[] {
-  return chains.filter((c) => {
-    if (c.status === 'archived' || Boolean(c.archived)) return false;
-    if (c.projectId && archivedProjectIds && archivedProjectIds.has(c.projectId)) return false;
-    if (filter === 'active' && c.status !== 'active') return false;
-    return true;
-  });
-}
-
 // --- Workspace (Main + Aux) Persistence --------------------------------------
 // One GLOBAL workspace, not keyed by task chain: the Main split tree, the aux
 // tab strips (per agent + the shared split-view strip) and the aux width.
