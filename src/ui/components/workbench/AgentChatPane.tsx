@@ -2579,13 +2579,17 @@ export function AgentChatPane({
               data-debug-id="conversation-thread-breadcrumb"
               className="flex min-w-0 items-center gap-1.5 text-sm font-medium"
             >
-              <span
-                data-debug-id="conversation-breadcrumb-project"
-                className="truncate text-muted"
-              >
-                <VaultText value={projectName} fallback="Project" />
-              </span>
-              <span className="shrink-0 text-faint">/</span>
+              {!isMobile ? (
+                <>
+                  <span
+                    data-debug-id="conversation-breadcrumb-project"
+                    className="truncate text-muted"
+                  >
+                    <VaultText value={projectName} fallback="Project" />
+                  </span>
+                  <span className="shrink-0 text-faint">/</span>
+                </>
+              ) : null}
               <button
                 type="button"
                 data-debug-id="conversation-thread-title"

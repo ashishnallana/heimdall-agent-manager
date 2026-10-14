@@ -41,6 +41,7 @@ import { AuxTabStrip } from './AuxTabStrip';
 import { AuxTabActionsProvider, useAuxTabActionsHost } from './auxTabActions';
 import type { AgentAuxContext } from './useAgentAuxContext';
 import { useMobileSwipe } from '../mobileSwipe';
+import { MobileSwipeDots } from '../MobileSwipeDots';
 
 function AgentStatusDotWithApi({ agentInstanceId }: { agentInstanceId: string }) {
   const { data } = useGetAgentsLiveQuery(undefined, { pollingInterval: 30000, skipPollingIfUnfocused: true });
@@ -98,6 +99,10 @@ export interface AuxDockProps {
   /** Context agent: the focused Main pane's agent (owner of the shown strip). */
   ctx: AgentAuxContext;
   isMobile?: boolean;
+  /** Number of Main pages to the left in the mobile swipe continuum. */
+  mobileLeadingPageCount?: number;
+  /** Total Main + aux + New Tab pages in that continuum. */
+  mobileTotalPageCount?: number;
 }
 
 /**
@@ -107,7 +112,15 @@ export interface AuxDockProps {
  * a ⋮ menu with the active tab's actions. Resizable (width persisted) and
  * maximizable on desktop; a full-screen sheet on mobile.
  */
-export function AuxDock({ treeId, ctx, isMobile = false, shown = true, reserveRight = 0 }: AuxDockProps) {
+export function AuxDock({
+  treeId,
+  ctx,
+  isMobile = false,
+  shown = true,
+  reserveRight = 0,
+  mobileLeadingPageCount = 0,
+  mobileTotalPageCount = 0,
+}: AuxDockProps) {
   const dispatch = useDispatch();
   const pane = useSelector((state: any) => selectAuxPane(state, treeId));
   const storedWidth = useSelector(selectAuxWidth);
@@ -385,6 +398,13 @@ export function AuxDock({ treeId, ctx, isMobile = false, shown = true, reserveRi
           )}
         </AuxTabActionsProvider>
       </div>
+      {isMobile ? (
+        <MobileSwipeDots
+          total={mobileTotalPageCount}
+          activeIndex={mobileLeadingPageCount + activePageIndex}
+          debugId="aux-mobile-swipe-indicators"
+        />
+      ) : null}
       </div>
     </aside>
   );

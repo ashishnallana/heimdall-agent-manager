@@ -9,6 +9,9 @@
 /** Width of the fixed top-left cluster (toggle + "Heimdall"), px. */
 export const TOP_LEFT_CLUSTER_WIDTH = 168;
 
+/** Mobile omits the wordmark: sidebar + vault buttons, gaps and horizontal padding. */
+export const MOBILE_TOP_LEFT_CLUSTER_WIDTH = 84;
+
 /** Height of the top chrome row (matches the chat header / aux tab strip), px. */
 export const TOP_CHROME_HEIGHT = 48;
 

@@ -134,7 +134,13 @@ export function Workspace({ focusMessageId, isMobile = false, leading, trailing 
   const ctx = useAgentAuxContext(ctxAgentId);
   const hasChain = ctx.isResolved ? Boolean(ctx.chainId) : true;
   const auxOpen = Boolean(auxTreeId && auxPane?.isPaneOpen);
-  const hasAvailableAux = Boolean(auxTreeId && ctx.isResolved && visibleAuxTabs(auxPane).length > 0);
+  const auxTabs = visibleAuxTabs(auxPane);
+  // The New Tab launcher is always the final aux page once the focused agent's
+  // context resolves, even before a materialized tab exists.
+  const hasAvailableAux = Boolean(auxTreeId && ctx.isResolved);
+  const mainPageCount = leafIds.length;
+  const mobileMainContinuumPageCount = mainPageCount + (hasAvailableAux ? auxTabs.length + 1 : 0);
+  const mobileAuxContinuumPageCount = mainPageCount + auxTabs.length + 1;
 
   // 1. Hydrate aux strips + chrome once; drop superseded storage keys.
   const hydratedRef = useRef(false);
@@ -496,6 +502,7 @@ export function Workspace({ focusMessageId, isMobile = false, leading, trailing 
               onFocusPane={focusPane}
               onSwipeLeftBoundary={hasAvailableAux ? openMobileAux : undefined}
               onSwipeRightBoundary={openMobileSidebar}
+              totalPageCount={mobileMainContinuumPageCount}
             />
           ) : (
             <TilingContainer<MainPaneValue>
@@ -511,7 +518,15 @@ export function Workspace({ focusMessageId, isMobile = false, leading, trailing 
           {dropOverlay}
         </div>
         {auxMounted && auxTreeId ? (
-          <AuxDock treeId={auxTreeId} ctx={ctx} isMobile={isMobile} shown={auxShown} reserveRight={topRightWidth} />
+          <AuxDock
+            treeId={auxTreeId}
+            ctx={ctx}
+            isMobile={isMobile}
+            shown={auxShown}
+            reserveRight={topRightWidth}
+            mobileLeadingPageCount={mainPageCount}
+            mobileTotalPageCount={mobileAuxContinuumPageCount}
+          />
         ) : null}
       </div>
       <div

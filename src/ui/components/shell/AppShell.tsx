@@ -19,7 +19,7 @@ import { useFetchTaskChainGroupsQuery } from '../../api/endpoints/tasks';
 import { useListBridgesQuery } from '../../api/endpoints/bridgeSupport';
 import { useGetAccountBillingQuery } from '../../api/endpoints/accountBilling';
 import SidebarUpdateBadge from './SidebarUpdateBadge';
-import { TOP_CHROME_HEIGHT, TOP_LEFT_CLUSTER_WIDTH } from './shellChrome';
+import { MOBILE_TOP_LEFT_CLUSTER_WIDTH, TOP_CHROME_HEIGHT, TOP_LEFT_CLUSTER_WIDTH } from './shellChrome';
 import type { PendingBridgeUpdate } from '../settings/bridgeUpdate';
 import { lockAllConnectedBridges, unsealAllConnectedBridges } from '../../api/endpoints/bridges';
 import { buildRouteHash, getRoutePathname, getRouteSearch } from '../../utils/appLocation';
@@ -1620,8 +1620,9 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
   const isWorkspaceRoute =
     (path.startsWith('/conversations/') && path !== '/conversations/new') || path.startsWith('/c/');
   const hideTopLeftCluster = isMobile && isWorkspaceRoute && isCurrentAuxPaneOpen;
-  // One toggle + app name control, FIXED at the window's top-left (it does not
-  // move when the sidebar opens or closes).
+  const topLeftClusterWidth = isMobile ? MOBILE_TOP_LEFT_CLUSTER_WIDTH : TOP_LEFT_CLUSTER_WIDTH;
+  // Fixed window controls: sidebar + vault everywhere, plus the wordmark on
+  // desktop. They do not move when the sidebar opens or closes.
   const sidebarToggleButton = (
     <button
       data-debug-id="shell-sidebar-collapse-toggle"
@@ -1746,11 +1747,11 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
         <div
           data-debug-id="shell-top-left-cluster"
           className="absolute left-0 top-0 z-[60] flex items-center gap-1 px-2"
-          style={{ width: TOP_LEFT_CLUSTER_WIDTH, height: TOP_CHROME_HEIGHT }}
+          style={{ width: topLeftClusterWidth, height: TOP_CHROME_HEIGHT }}
         >
           {sidebarToggleButton}
           {vaultStatusButton}
-          {brandLink}
+          {!isMobile ? brandLink : null}
         </div>
       ) : null}
       <aside
@@ -1769,7 +1770,7 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
       >
         <div className="flex w-80 max-w-[calc(100vw-1rem)] min-h-0 flex-1 flex-col">
         <div className="flex items-center gap-2 pr-3" style={{ height: TOP_CHROME_HEIGHT }}>
-          <div aria-hidden="true" className="shrink-0" style={{ width: TOP_LEFT_CLUSTER_WIDTH }} />
+          <div aria-hidden="true" className="shrink-0" style={{ width: topLeftClusterWidth }} />
           <SidebarUpdateBadge onOpen={openBridgeUpdate} />
         </div>
 
@@ -1843,7 +1844,7 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
           focusMessageId={focusMessageId}
           conversations={conversations}
           liveProjects={liveProjects}
-          workspaceLeading={isEffectiveCollapsed ? <div aria-hidden="true" data-debug-id="shell-top-left-cluster-spacer" className="shrink-0" style={{ width: TOP_LEFT_CLUSTER_WIDTH - 12 }} /> : null}
+          workspaceLeading={isEffectiveCollapsed ? <div aria-hidden="true" data-debug-id="shell-top-left-cluster-spacer" className="shrink-0" style={{ width: topLeftClusterWidth - 12 }} /> : null}
           workspaceTrailing={isEffectiveCollapsed ? <SidebarUpdateBadge onOpen={openBridgeUpdate} /> : null}
         />
       </div>

@@ -78,6 +78,25 @@ async function withDom<T>(fn: (dom: any) => Promise<T>): Promise<T> {
   }
 }
 
+test('mobile swipe dots hide for one page and expose one active page accessibly', async () => {
+  await withDom(async (dom) => {
+    const { createRoot } = await import('react-dom/client');
+    const { MobileSwipeDots } = await import('../src/ui/components/MobileSwipeDots.tsx');
+    const root = createRoot(dom.window.document.getElementById('root')!);
+    try {
+      await React.act(async () => root.render(React.createElement(MobileSwipeDots, { total: 1, activeIndex: 0, debugId: 'test-dots' })));
+      assert.equal(dom.window.document.querySelector('[data-debug-id="test-dots"]'), null);
+      await React.act(async () => root.render(React.createElement(MobileSwipeDots, { total: 4, activeIndex: 2, debugId: 'test-dots' })));
+      const dots = dom.window.document.querySelector('[data-debug-id="test-dots"]');
+      assert.equal(dots?.getAttribute('aria-label'), 'Swipe page 3 of 4');
+      assert.equal(dots?.querySelectorAll('span').length, 4);
+      assert.equal(dots?.querySelectorAll('[data-active="true"]').length, 1);
+    } finally {
+      await React.act(async () => root.unmount());
+    }
+  });
+});
+
 async function makeStore() {
   const { configureStore } = await import('@reduxjs/toolkit');
   const { heimdallApi } = await import('../src/ui/api/heimdallApi.ts');
@@ -306,8 +325,14 @@ test('workspace: URL <-> layout sync (pane set in the URL, replace pushes, no lo
       assert.equal(dock!.getAttribute('data-aux-mobile-sheet'), 'true');
       assert.match(dock!.className, /translate-x-0/, 'mobile aux enters from the right edge');
       assert.doesNotMatch(dock!.className, /translate-y-/, 'mobile aux is not a bottom sheet');
-      assert.equal(doc.querySelector('[data-debug-id="workspace-mobile-swipe-indicators"]'), null);
-      assert.equal(doc.querySelector('[data-debug-id="aux-mobile-swipe-indicators"]'), null);
+      const mainDots = doc.querySelector('[data-debug-id="workspace-mobile-swipe-indicators"]');
+      const auxDots = doc.querySelector('[data-debug-id="aux-mobile-swipe-indicators"]');
+      assert.equal(mainDots?.getAttribute('aria-label'), 'Swipe page 2 of 4');
+      assert.equal(auxDots?.getAttribute('aria-label'), 'Swipe page 3 of 4');
+      assert.equal(mainDots?.querySelectorAll('[data-active="true"]').length, 1);
+      assert.equal(auxDots?.querySelectorAll('[data-active="true"]').length, 1);
+      assert.match(mainDots?.className || '', /h-4/, 'indicator reserves layout space instead of floating over content');
+      assert.match(auxDots?.className || '', /h-4/, 'aux indicator reserves layout space instead of floating over content');
       assert.equal(dom.window.localStorage.getItem('heimdall:workspace-layout:v1'), null, 'no global layout key');
     } finally {
       await act(async () => root.unmount());

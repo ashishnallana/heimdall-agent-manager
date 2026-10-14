@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef } from 'react';
 import type { PaneTreeState, RenderPaneProps } from '../../tiling/types';
 import { getContentPaneIds } from '../../tiling/paneTreeState';
 import { useMobileSwipe } from '../mobileSwipe';
+import { MobileSwipeDots } from '../MobileSwipeDots';
 
 /**
  * Mobile Main layout: every Main pane (in tree order) becomes a full-width page
@@ -15,6 +16,7 @@ export function MobileMainPager<T>({
   onFocusPane,
   onSwipeLeftBoundary,
   onSwipeRightBoundary,
+  totalPageCount,
 }: {
   tree: PaneTreeState<T>;
   renderPane: (props: RenderPaneProps<T>) => React.ReactNode;
@@ -23,6 +25,8 @@ export function MobileMainPager<T>({
   onSwipeLeftBoundary?: () => void;
   /** Physical right swipe before the first Main page. */
   onSwipeRightBoundary?: () => void;
+  /** Main pages plus the reachable aux-tab/New Tab pages to their right. */
+  totalPageCount: number;
 }) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const paneIds = getContentPaneIds(tree);
@@ -106,6 +110,11 @@ export function MobileMainPager<T>({
           );
         })}
       </div>
+      <MobileSwipeDots
+        total={totalPageCount}
+        activeIndex={focusedIndex}
+        debugId="workspace-mobile-swipe-indicators"
+      />
     </div>
   );
 }
