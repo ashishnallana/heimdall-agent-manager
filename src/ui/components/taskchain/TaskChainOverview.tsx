@@ -81,6 +81,11 @@ interface TaskChainOverviewProps {
    * standalone rendering cannot drift from the embedded one.
    */
   embedded?: boolean;
+  /**
+   * Aux tab mode (embedded only): drop the title / id / back bar, which the aux
+   * tab strip already provides, keeping only the in-content chain controls.
+   */
+  hideTitleBar?: boolean;
 }
 
 // Label formatters for instance / member <Select> options (EL-025). Names are
@@ -182,6 +187,7 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
   onClose,
   isMobile,
   embedded,
+  hideTitleBar,
 }) => {
   const authUser = useAuthUser();
   const username = String(authUser?.user_id || '').trim();
@@ -2901,6 +2907,14 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
         data-debug-id="taskchain-overview"
         className="flex h-full min-h-0 w-full max-w-full min-w-0 flex-col overflow-hidden bg-canvas text-primary"
       >
+        {hideTitleBar ? (
+          <div
+            data-debug-id="taskchain-overview-aux-controls"
+            className="flex shrink-0 justify-end px-4 pt-3 sm:px-6"
+          >
+            {actionsNode}
+          </div>
+        ) : (
         <ResourceDetailHeader
           dataDebugId="taskchain-overview-detail-header"
           title={titleNode}
@@ -2912,6 +2926,7 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
           headingLevel="h2"
           className="shrink-0 px-4 pt-4 sm:px-6"
         />
+        )}
         <div
           data-debug-id="taskchain-overview-embedded-scroll"
           className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden pb-28 sm:pb-12"

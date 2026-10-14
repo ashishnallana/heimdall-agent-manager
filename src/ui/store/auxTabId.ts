@@ -9,7 +9,10 @@
  *   files                    -> 'files'                    (fixed)
  *   vcs                      -> 'vcs'                      (fixed)
  *   tasks                    -> 'tasks'                    (fixed)
- *   shell {sessionId}        -> 'shell__<sessionId>'       ('shell__new' = provisional, rekeyed once bound)
+ *   shell {sessionId}        -> 'shell__<sessionId>'       (one interactive shell per tab; a fresh tab
+ *                                                           uses a unique provisional 'new-<nonce>' id, rekeyed
+ *                                                           to the real session once started, so several new
+ *                                                           shell tabs can coexist)
  *   agentPty {agentId}       -> 'pty__<agentInstanceId>'
  *   preview {session, port}  -> 'preview__<sessionId>:<port>' (or 'preview__<sessionId>' when the port is unknown)
  *   subagentChat {agentId}   -> 'subagent_convo__<agentInstanceId>'
@@ -68,6 +71,22 @@ export const TASKS_TAB_ID = 'tasks';
 
 /** Provisional shell session sentinel: the tab is rekeyed once a session is bound. */
 export const NEW_SHELL_SESSION_ID = 'new';
+
+/** True for an unbound (not yet started) shell tab session id. */
+export function isProvisionalShellSessionId(sessionId: string | null | undefined): boolean {
+  const id = typeof sessionId === 'string' ? sessionId.trim() : '';
+  return !id || id === NEW_SHELL_SESSION_ID || id.startsWith(`${NEW_SHELL_SESSION_ID}-`);
+}
+
+/**
+ * Content for a NEW interactive shell tab. Each call yields a distinct
+ * provisional id, so every "New shell" opens its own tab instead of focusing
+ * an existing one.
+ */
+export function newShellTabContent(extra: { bridgeId?: string; cwd?: string } = {}): AuxContent {
+  const nonce = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+  return { type: 'shell', sessionId: `${NEW_SHELL_SESSION_ID}-${nonce}`, ...extra };
+}
 
 const TAB_ID_PREFIXES = {
   shell: 'shell__',
@@ -280,9 +299,9 @@ export function auxTabTitle(tab: Pick<AuxTab, 'content' | 'title'>): string {
   const c = tab.content;
   switch (c.type) {
     case 'shell':
-      return c.sessionId && c.sessionId !== NEW_SHELL_SESSION_ID
-        ? `Shell (${c.sessionId.slice(0, 8)})`
-        : 'Shell';
+      return isProvisionalShellSessionId(c.sessionId)
+        ? 'Shell'
+        : `Shell (${c.sessionId.slice(0, 8)})`;
     case 'agentPty':
       return 'Terminal';
     case 'preview':

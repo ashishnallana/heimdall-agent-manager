@@ -68,9 +68,9 @@ test('interactive request trims and forwards a configured cwd', () => {
   );
 });
 
-test('workbench launch uses a fresh-session sentinel and a guarded retryable auto-start', () => {
+test('aux launch opens a fresh provisional shell tab and a guarded retryable auto-start', () => {
   const launcher = fs.readFileSync(
-    path.join(REPO_ROOT, 'src/ui/components/workbench/WorkbenchNewTabLauncher.tsx'),
+    path.join(REPO_ROOT, 'src/ui/components/aux/AuxNewTabLauncher.tsx'),
     'utf8',
   );
   const pane = fs.readFileSync(
@@ -82,7 +82,8 @@ test('workbench launch uses a fresh-session sentinel and a guarded retryable aut
     'utf8',
   );
 
-  assert.match(launcher, /kind: 'shell',[\s\S]*sessionId: 'new'/);
+  assert.match(launcher, /onSelect\(newShellTabContent\(\)\)/);
+  assert.doesNotMatch(pane, /workbench-shell-session-select/, 'a shell tab never switches sessions');
   assert.match(pane, /autoCreateAttemptedRef\.current/);
   assert.match(pane, /buildInteractiveShellRequest/);
   assert.match(pane, /workbench-shell-auto-retry-btn/);
@@ -95,9 +96,7 @@ test('successful auto-start creates once and reports the real session for tab re
   const { Provider } = await import('react-redux');
   const { createRoot } = await import('react-dom/client');
   const { act } = await import('react');
-  const { WorkbenchPaneView } = await import(
-    '../src/ui/components/workbench/WorkbenchPaneView.tsx'
-  );
+  const { AuxTabContent } = await import('../src/ui/components/aux/AuxTabContent.tsx');
   const { heimdallApi } = await import('../src/ui/api/heimdallApi.ts');
 
   const dom = new JSDOM('<!DOCTYPE html><html><body><div id="root"></div></body></html>', {
@@ -139,65 +138,38 @@ test('successful auto-start creates once and reports the real session for tab re
     } as any;
   };
 
-  const replacements: Array<{ tabId: string; tab: Record<string, unknown> }> = [];
+  const rekeys: Array<{ tabId: string; content: Record<string, unknown> }> = [];
   const store = await makeVaultStore();
   const root = createRoot(dom.window.document.getElementById('root')!);
+  const ctx = {
+    agentInstanceId: 'agent-a', conversationId: '', title: 'A', chainId: 'chain-a', projectId: 'project-a',
+    projectName: '', bridgeId: 'bridge-a', defaultCwd: '', shellDefaultCwd: undefined, shellCwdReady: true,
+    projectVcsEnabled: false, directories: [], members: [], participantIds: null, isResolved: true,
+  };
   try {
     await act(async () => {
       root.render(
         React.createElement(
           Provider,
           { store },
-          React.createElement(WorkbenchPaneView, {
-            paneId: 'pane-1',
-            pane: {
-              tabs: [{
-                id: 'shell__new',
-                kind: 'shell',
-                title: 'Shell',
-                sessionId: 'new',
-                closable: true,
-              }],
-              activeTabId: 'shell__new',
+          React.createElement(AuxTabContent, {
+            tab: { id: 'shell__new-x1', content: { type: 'shell', sessionId: 'new-x1' } },
+            ctx,
+            onOpenTab: () => {},
+            onUpdateTab: () => {},
+            onRekeyTab: (tabId: string, content: Record<string, unknown>) => {
+              rekeys.push({ tabId, content });
             },
-            workspaceKey: 'chain:chain-a',
-            primaryAgentInstanceId: 'agent-a',
-            bridgeId: 'bridge-a',
-            projectId: 'project-a',
-            chainId: 'chain-a',
-            isFocused: true,
-            isMaximized: false,
-            isSinglePane: true,
-            onFocusPane: () => {},
-            onSelectTab: () => {},
-            onCloseTab: () => {},
-            onOpenNewTab: () => {},
-            onReplaceNewTab: () => {},
-            onOpenOrFocusTab: () => {},
-            onUpdateTabParams: () => {},
-            onReplaceTab: (tabId: string, tab: Record<string, unknown>) => {
-              replacements.push({ tabId, tab });
-            },
-            onSplitPane: () => {},
-            onToggleMaximize: () => {},
-            onClosePane: () => {},
-          }),
+          } as any),
         ),
       );
       await new Promise((resolve) => setTimeout(resolve, 50));
     });
 
     assert.equal(postCount, 1, 'auto-start must issue exactly one shell creation request');
-    assert.deepEqual(replacements, [{
-      tabId: 'shell__new',
-      tab: {
-        kind: 'shell',
-        sessionId: 'sh-created',
-        title: 'Shell',
-        bridgeId: 'bridge-a',
-        currentPath: undefined,
-        closable: true,
-      },
+    assert.deepEqual(rekeys, [{
+      tabId: 'shell__new-x1',
+      content: { type: 'shell', sessionId: 'sh-created' },
     }]);
   } finally {
     await act(async () => root.unmount());

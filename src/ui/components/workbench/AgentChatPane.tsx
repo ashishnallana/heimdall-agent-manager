@@ -7,7 +7,7 @@ import React, {
   useRef,
   useState,
 } from 'react';
-import { useDispatch, useSelector } from 'react-redux';
+import { useSelector } from 'react-redux';
 import {
   CommandPalette,
   Icon as UiIcon,
@@ -47,20 +47,7 @@ import {
 } from '../../api/endpoints/bridgeSupport';
 import { useFetchChainTasksQuery, useFetchTaskChainDetailQuery } from '../../api/endpoints/tasks';
 import { selectActiveVaultKey } from '../../store/vaultSlice';
-import { getContentPaneIds } from '../../tiling/paneTreeState';
-import {
-  closeWorkbenchPane,
-  openNewTabView,
-  openOrFocusWorkbenchTab,
-  selectWorkspaceWorkbenchTree,
-  splitWorkbenchPane,
-  updateWorkbenchTabParams,
-} from '../../store/workbenchSlice';
-import {
-  buildWorkbenchTabId,
-  type WorkbenchSurfaceKind,
-  type WorkbenchTabState,
-} from '../../store/workbenchTabId';
+import type { AuxContent } from '../../store/auxTabId';
 import { buildRouteHash } from '../../utils/appLocation';
 import { readComposerDraft, writeComposerDraft } from '../../utils/clientPersistence';
 import { conversationConfigurationIssues } from '../../utils/conversationConfigurationValidity';
@@ -95,7 +82,6 @@ import {
 } from '../shells/ShellRunIndicator';
 import AgentActivityBubbles from '../chat/AgentActivityBubbles';
 import AtMentionPopup, { type MentionEntity } from '../chat/AtMentionPopup';
-import ChainOverviewPanel from '../chat/ChainOverviewPanel';
 import ChatMessageList from '../chat/ChatMessageList';
 import InstanceReconfigurationProgress from '../chat/InstanceReconfigurationProgress';
 import { MessageComposerInput, MessageComposerActions } from '../chat/MessageComposer';
@@ -109,20 +95,29 @@ export const COMPOSER_DRAFT_KEY = 'heimdall:composer:draft';
 
 export interface AgentChatPaneProps {
   agentInstanceId: string;
-  workspaceKey?: string;
   paneId?: string;
-  tabId?: string;
   focusMessageId?: string;
   isActiveTab?: boolean;
   isMobile?: boolean;
+  /** Main: true when this chat is the only Main pane. */
   isSinglePane?: boolean;
   projectVcsEnabled?: boolean;
-  onOpenSurface?: (kind: WorkbenchSurfaceKind, params?: Partial<WorkbenchTabState>) => void;
-  onOpenPty?: (agentInstanceId: string, title?: string) => void;
+  /**
+   * 'main' (default): a Main workspace leaf with the full header
+   * (`<Project> / <Task chain> / <agent>`, ⋮, [≡]).
+   * 'auxSubagent': an aux sub-agent chat tab, transcript + composer ONLY.
+   */
+  variant?: 'main' | 'auxSubagent';
+  /** Opens (or focuses) a tab in the current aux strip. */
+  onOpenAuxTab?: (content: AuxContent, title?: string) => void;
+  /** Agent switcher: swap the agent shown in this Main pane (deduped by the host). */
   onSwitchAgent?: (agentInstanceId: string, title?: string) => void;
   onSplitPane?: (direction: SplitDirection) => void;
   onReplaceWithNew?: () => void;
   onClosePane?: () => void;
+  /** Aux dock toggle ([≡], top-right). Hidden when not provided. */
+  isAuxOpen?: boolean;
+  onToggleAux?: () => void;
 }
 
 export function stripArtifactLinks(text: string): string {
@@ -598,41 +593,22 @@ function normalizeConversationMessages(rows: Message[], agentLabel: string): Cha
 
 export function AgentChatPane({
   agentInstanceId: routeInstanceId,
-  workspaceKey,
-  paneId,
-  tabId,
   focusMessageId,
   isActiveTab = true,
   isMobile: explicitIsMobile,
   isSinglePane = true,
-  projectVcsEnabled = true,
-  onOpenSurface,
-  onOpenPty,
+  variant = 'main',
+  onOpenAuxTab,
   onSwitchAgent,
   onSplitPane,
   onReplaceWithNew,
   onClosePane,
+  isAuxOpen = false,
+  onToggleAux,
 }: AgentChatPaneProps) {
-  const dispatch = useDispatch();
   const isMobileHook = useIsMobile();
   const isMobile = explicitIsMobile ?? isMobileHook;
-  const [overviewPopupOpen, setOverviewPopupOpen] = useState(false);
-
-  useEffect(() => {
-    setOverviewPopupOpen(false);
-  }, [routeInstanceId]);
-
-  useEffect(() => {
-    if (!overviewPopupOpen || typeof window === 'undefined') return;
-    const handleEsc = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !e.defaultPrevented) {
-        e.preventDefault();
-        setOverviewPopupOpen(false);
-      }
-    };
-    window.addEventListener('keydown', handleEsc);
-    return () => window.removeEventListener('keydown', handleEsc);
-  }, [overviewPopupOpen]);
+  const isAuxSubagent = variant === 'auxSubagent';
 
   const convQuery = useFetchConversationQuery(
     { conversationId: '', agentInstanceId: routeInstanceId },
@@ -666,15 +642,7 @@ export function AgentChatPane({
     conversation?.runtime_status || conversation?.runtimeStatus || '',
   );
   const chainId = String(conversation?.chain_id || conversation?.chainId || '');
-  const effectiveWorkspaceKey = workspaceKey || chainId || routeInstanceId;
-  const workspaceTree = useSelector((state: any) =>
-    selectWorkspaceWorkbenchTree(state, effectiveWorkspaceKey),
-  );
-  const contentPaneIds = useMemo(
-    () => (workspaceTree ? getContentPaneIds(workspaceTree) : []),
-    [workspaceTree],
-  );
-  const isMultiPane = contentPaneIds.length > 1 || !isSinglePane;
+  const isMultiPane = !isSinglePane;
   const title = conversationDisplayTitle(
     conversation,
     agentId,
@@ -837,81 +805,18 @@ export function AgentChatPane({
     [routeInstanceId],
   );
 
-  const openInRightSplitForAgent = useCallback(
-    (kind: WorkbenchSurfaceKind, params?: Partial<WorkbenchTabState>) => {
-      setOverviewPopupOpen(false);
-      const tabSpec: Partial<WorkbenchTabState> & { kind: WorkbenchSurfaceKind } = {
-        kind,
-        ...params,
-      };
-
-      if (onOpenSurface) {
-        onOpenSurface(kind, params);
-        return;
-      }
-
-      const targetTabId = buildWorkbenchTabId(tabSpec);
-      if (workspaceTree) {
-        // 1. If a tab with that canonical tabId already exists in any pane, focus that pane & tab
-        for (const candidatePaneId of contentPaneIds) {
-          const candidatePane = workspaceTree.panes[candidatePaneId];
-          if (
-            candidatePane &&
-            candidatePane.kind === 'content' &&
-            candidatePane.value.tabs.some((t) => t.id === targetTabId)
-          ) {
-            dispatch(
-              openOrFocusWorkbenchTab({
-                workspaceKey: effectiveWorkspaceKey,
-                paneId: candidatePaneId,
-                tab: tabSpec,
-              }),
-            );
-            return;
-          }
-        }
-
-        // 2. Otherwise, if another content pane (id !== paneId) already exists, open/focus there
-        const secondaryPaneId = contentPaneIds.find((id) => id !== paneId);
-        if (secondaryPaneId) {
-          dispatch(
-            openOrFocusWorkbenchTab({
-              workspaceKey: effectiveWorkspaceKey,
-              paneId: secondaryPaneId,
-              tab: tabSpec,
-            }),
-          );
-          return;
-        }
-      }
-
-      // 3. Otherwise (chat pane is the only pane in the workspace), split right to create the right split pane
-      dispatch(
-        openOrFocusWorkbenchTab({
-          workspaceKey: effectiveWorkspaceKey,
-          paneId,
-          tab: tabSpec,
-          splitDirection: 'right',
-        }),
-      );
+  // Context surfaces (files, terminal, ...) open as tabs in the aux dock.
+  const openAux = useCallback(
+    (content: AuxContent, auxTitle?: string) => {
+      onOpenAuxTab?.(content, auxTitle);
     },
-    [contentPaneIds, dispatch, effectiveWorkspaceKey, onOpenSurface, paneId, workspaceTree],
+    [onOpenAuxTab],
   );
-
-  const handleOpenSurface = openInRightSplitForAgent;
 
   const handleOpenPtyTab = useCallback(() => {
     const label = agentDisplayName || editableTitle || agentInstanceId;
-    setOverviewPopupOpen(false);
-    if (onOpenPty) {
-      onOpenPty(agentInstanceId, `${label} PTY`);
-      return;
-    }
-    openInRightSplitForAgent('agentPty', {
-      agentInstanceId,
-      title: `${label} PTY`,
-    });
-  }, [agentDisplayName, editableTitle, agentInstanceId, onOpenPty, openInRightSplitForAgent]);
+    openAux({ type: 'agentPty', agentInstanceId }, `${label} terminal`);
+  }, [agentDisplayName, editableTitle, agentInstanceId, openAux]);
 
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
@@ -2286,17 +2191,13 @@ export function AgentChatPane({
                     {bridgeLabel || 'no bridge'}
                   </span>
                 </button>
-                {projectId ? (
+                {projectId && !isAuxSubagent ? (
                   <>
                     <span className="shrink-0 opacity-40">·</span>
                     <button
                       type="button"
                       data-debug-id="conversation-composer-project-chip"
-                      onClick={() =>
-                        handleOpenSurface('files', {
-                          title: projectName || 'Files',
-                        })
-                      }
+                      onClick={() => openAux({ type: 'files' })}
                       title={`Open project files — ${projectName}`}
                       className="inline-flex min-w-0 max-w-[50%] shrink items-center gap-1.5 rounded-md px-1 py-0.5 hover:bg-neutral-soft hover:text-primary"
                     >
@@ -2564,7 +2465,8 @@ export function AgentChatPane({
       data-debug-id={`workbench-agent-chat-pane-${agentInstanceId}`}
       className="relative flex h-full w-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-canvas text-left"
     >
-      {/* Scoped top bar in Chat Pane */}
+      {/* Scoped top bar in Chat Pane (absent in an aux sub-agent tab: transcript + composer only) */}
+      {!isAuxSubagent ? (
       <header
         data-debug-id="conversation-thread-header"
         className="sticky top-0 z-20 flex shrink-0 items-center gap-2 px-3 py-2 sm:gap-3 sm:px-4 bg-canvas/90 backdrop-blur-md overflow-visible"
@@ -2762,151 +2664,71 @@ export function AgentChatPane({
               <span>Agent settings</span>
             </Menu.Item>
             <Menu.Separator />
-            <Menu.Label>{isMobile ? 'Panes' : 'Split'}</Menu.Label>
-            {isMobile ? (
-              <Menu.Item
-                data-debug-id="conversation-new-pane-action"
-                onClick={() => {
-                  setHeaderActionsOpen(false);
-                  if (onSplitPane) {
-                    onSplitPane('right');
-                  } else {
-                    dispatch(
-                      splitWorkbenchPane({
-                        workspaceKey: effectiveWorkspaceKey,
-                        targetPaneId: paneId,
-                        direction: 'right',
-                      }),
-                    );
-                  }
-                }}
-              >
-                <Icon name="plus" size={15} />
-                <span>New Pane</span>
-              </Menu.Item>
-            ) : (
+            {onSplitPane || onReplaceWithNew || (isMultiPane && onClosePane) ? (
               <>
-              <Menu.Item
-                data-debug-id="conversation-split-right-action"
-                onClick={() => {
-                  setHeaderActionsOpen(false);
-                  if (onSplitPane) {
-                    onSplitPane('right');
-                  } else {
-                    dispatch(
-                      splitWorkbenchPane({
-                        workspaceKey: effectiveWorkspaceKey,
-                        targetPaneId: paneId,
-                        direction: 'right',
-                      }),
-                    );
-                  }
-                }}
-              >
-                <Icon name="panel-right" size={15} />
-                <span>Split Right</span>
-              </Menu.Item>
-              <Menu.Item
-                data-debug-id="conversation-split-down-action"
-                onClick={() => {
-                  setHeaderActionsOpen(false);
-                  if (onSplitPane) {
-                    onSplitPane('bottom');
-                  } else {
-                    dispatch(
-                      splitWorkbenchPane({
-                        workspaceKey: effectiveWorkspaceKey,
-                        targetPaneId: paneId,
-                        direction: 'bottom',
-                      }),
-                    );
-                  }
-                }}
-              >
-                <Icon name="chevron-down" size={15} />
-                <span>Split Down</span>
-              </Menu.Item>
-              <Menu.Item
-                data-debug-id="conversation-split-left-action"
-                onClick={() => {
-                  setHeaderActionsOpen(false);
-                  if (onSplitPane) {
-                    onSplitPane('left');
-                  } else {
-                    dispatch(
-                      splitWorkbenchPane({
-                        workspaceKey: effectiveWorkspaceKey,
-                        targetPaneId: paneId,
-                        direction: 'left',
-                      }),
-                    );
-                  }
-                }}
-              >
-                <Icon name="panel-left" size={15} />
-                <span>Split Left</span>
-              </Menu.Item>
-              <Menu.Item
-                data-debug-id="conversation-split-up-action"
-                onClick={() => {
-                  setHeaderActionsOpen(false);
-                  if (onSplitPane) {
-                    onSplitPane('top');
-                  } else {
-                    dispatch(
-                      splitWorkbenchPane({
-                        workspaceKey: effectiveWorkspaceKey,
-                        targetPaneId: paneId,
-                        direction: 'top',
-                      }),
-                    );
-                  }
-                }}
-              >
-                <Icon name="chevron-up" size={15} />
-                <span>Split Up</span>
-              </Menu.Item>
+                <Menu.Label>{isMobile ? 'Panes' : 'Split'}</Menu.Label>
+                {onSplitPane ? (
+                  isMobile ? (
+                    <Menu.Item
+                      data-debug-id="conversation-new-pane-action"
+                      onClick={() => {
+                        setHeaderActionsOpen(false);
+                        onSplitPane('right');
+                      }}
+                    >
+                      <Icon name="plus" size={15} />
+                      <span>New Pane</span>
+                    </Menu.Item>
+                  ) : (
+                    <>
+                      {(
+                        [
+                          ['right', 'Split Right', 'panel-right'],
+                          ['bottom', 'Split Down', 'chevron-down'],
+                          ['left', 'Split Left', 'panel-left'],
+                          ['top', 'Split Up', 'chevron-up'],
+                        ] as const
+                      ).map(([direction, label, icon]) => (
+                        <Menu.Item
+                          key={direction}
+                          data-debug-id={`conversation-split-${direction === 'bottom' ? 'down' : direction === 'top' ? 'up' : direction}-action`}
+                          onClick={() => {
+                            setHeaderActionsOpen(false);
+                            onSplitPane(direction);
+                          }}
+                        >
+                          <Icon name={icon} size={15} />
+                          <span>{label}</span>
+                        </Menu.Item>
+                      ))}
+                    </>
+                  )
+                ) : null}
+                {onReplaceWithNew ? (
+                  <Menu.Item
+                    data-debug-id="conversation-replace-with-new-action"
+                    onClick={() => {
+                      setHeaderActionsOpen(false);
+                      onReplaceWithNew();
+                    }}
+                  >
+                    <Icon name="plus" size={15} />
+                    <span>Replace with New</span>
+                  </Menu.Item>
+                ) : null}
+                {isMultiPane && onClosePane ? (
+                  <Menu.Item
+                    data-debug-id="conversation-remove-from-split-action"
+                    onClick={() => {
+                      setHeaderActionsOpen(false);
+                      onClosePane();
+                    }}
+                  >
+                    <Icon name="close" size={15} />
+                    <span>{isMobile ? 'Close Pane' : 'Remove from Split'}</span>
+                  </Menu.Item>
+                ) : null}
               </>
-            )}
-            <Menu.Item
-              data-debug-id="conversation-replace-with-new-action"
-              onClick={() => {
-                setHeaderActionsOpen(false);
-                if (onReplaceWithNew) {
-                  onReplaceWithNew();
-                } else {
-                  dispatch(
-                    openNewTabView({
-                      workspaceKey: effectiveWorkspaceKey,
-                      paneId,
-                    }),
-                  );
-                }
-              }}
-            >
-              <Icon name="plus" size={15} />
-              <span>Replace with New</span>
-            </Menu.Item>
-            {isMultiPane && (paneId || onClosePane) ? (
-              <Menu.Item
-                data-debug-id="conversation-remove-from-split-action"
-                onClick={() => {
-                  setHeaderActionsOpen(false);
-                  if (onClosePane) {
-                    onClosePane();
-                  } else if (paneId) {
-                    dispatch(
-                      closeWorkbenchPane({
-                        workspaceKey: effectiveWorkspaceKey,
-                        paneId,
-                      }),
-                    );
-                  }
-                }}
-              >
-                <Icon name="close" size={15} />
-                <span>{isMobile ? 'Close Pane' : 'Remove from Split'}</span>
-              </Menu.Item>
             ) : null}
             <Menu.Separator />
             <div
@@ -2942,17 +2764,17 @@ export function AgentChatPane({
             </div>
           </Menu>
 
-          {(chainId || projectId || agentInstanceId) ? (
+          {onToggleAux ? (
             <button
               type="button"
               data-debug-id="conversation-right-panel-toggle-btn"
-              data-testid="toggle-overview-panel"
-              aria-label="Toggle Chain Overview"
-              title="Toggle Chain Overview"
-              aria-pressed={overviewPopupOpen}
-              onClick={() => setOverviewPopupOpen((prev) => !prev)}
+              data-testid="toggle-aux-pane"
+              aria-label="Toggle side panel"
+              title="Toggle side panel"
+              aria-pressed={isAuxOpen}
+              onClick={onToggleAux}
               className={`relative grid h-8 w-8 shrink-0 place-items-center rounded-lg transition-colors ${
-                overviewPopupOpen
+                isAuxOpen
                   ? 'bg-accent/15 text-accent'
                   : 'text-muted hover:bg-neutral-soft hover:text-primary'
               }`}
@@ -2970,194 +2792,6 @@ export function AgentChatPane({
           ) : null}
         </div>
       </header>
-
-      {/* Jetski-style Floating Chain Overview Popup anchored at top-right of the chat pane */}
-      {overviewPopupOpen ? (
-        <>
-          <div
-            data-debug-id="workbench-chain-overview-popup-backdrop"
-            aria-hidden="true"
-            onClick={() => setOverviewPopupOpen(false)}
-            className="absolute inset-0 z-30"
-          />
-          <div
-            data-debug-id="workbench-chain-overview-popup"
-            role="dialog"
-            aria-label="Chain Overview"
-            className="absolute top-12 right-3 z-40 flex w-[380px] max-w-[calc(100%-1.5rem)] max-h-[calc(100%-3.5rem)] flex-col overflow-hidden rounded-2xl border border-subtle bg-surface shadow-xl"
-          >
-            {/* Top Quick-Action Rows (open in right split for this agent & close popup) */}
-            <div
-              data-debug-id="workbench-chain-overview-quick-actions"
-              className="flex shrink-0 flex-col gap-0.5 border-b border-subtle p-1.5 bg-surface-raised/40"
-            >
-              <div className="flex items-center justify-between px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wider text-muted">
-                <span>Overview & Surfaces</span>
-                <button
-                  type="button"
-                  data-debug-id="workbench-chain-overview-popup-close-btn"
-                  aria-label="Close overview popup"
-                  onClick={() => setOverviewPopupOpen(false)}
-                  className="grid h-6 w-6 place-items-center rounded-md text-muted hover:bg-neutral-soft hover:text-primary"
-                >
-                  <Icon name="close" size={13} />
-                </button>
-              </div>
-              <button
-                type="button"
-                data-debug-id="overview-popup-row-files"
-                onClick={() =>
-                  openInRightSplitForAgent('files', {
-                    title: projectName || 'Files',
-                    agentInstanceId,
-                  })
-                }
-                className="flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-left text-xs font-medium text-primary hover:bg-neutral-soft transition-colors"
-              >
-                <span className="flex items-center gap-2">
-                  <Icon name="folder" size={14} className="text-muted" />
-                  <span>Files</span>
-                </span>
-                <Icon name="chevron-right" size={13} className="text-faint" />
-              </button>
-              <button
-                type="button"
-                data-debug-id="overview-popup-row-vcs"
-                onClick={() =>
-                  openInRightSplitForAgent('vcs', {
-                    title: 'VCS / Diff',
-                  })
-                }
-                className="flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-left text-xs font-medium text-primary hover:bg-neutral-soft transition-colors"
-              >
-                <span className="flex items-center gap-2">
-                  <Icon name="git-branch" size={14} className="text-muted" />
-                  <span>VCS / Review</span>
-                </span>
-                <Icon name="chevron-right" size={13} className="text-faint" />
-              </button>
-              <button
-                type="button"
-                data-debug-id="overview-popup-row-tasks"
-                onClick={() =>
-                  openInRightSplitForAgent('tasks', {
-                    title: 'Tasks',
-                  })
-                }
-                className="flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-left text-xs font-medium text-primary hover:bg-neutral-soft transition-colors"
-              >
-                <span className="flex items-center gap-2">
-                  <Icon name="tasks" size={14} className="text-muted" />
-                  <span>Tasks</span>
-                </span>
-                <span className="flex items-center gap-1.5">
-                  {chainId && chainProgress.total > 0 ? (
-                    <span className="rounded-full bg-accent/15 px-1.5 py-0.5 text-[10px] font-semibold text-accent">
-                      {chainProgress.done}/{chainProgress.total}
-                    </span>
-                  ) : null}
-                  <Icon name="chevron-right" size={13} className="text-faint" />
-                </span>
-              </button>
-              <button
-                type="button"
-                data-debug-id="overview-popup-row-shell"
-                onClick={() =>
-                  openInRightSplitForAgent('shell', {
-                    title: 'Interactive Shell',
-                    agentInstanceId,
-                    bridgeId: instanceBridgeId || undefined,
-                  })
-                }
-                className="flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-left text-xs font-medium text-primary hover:bg-neutral-soft transition-colors"
-              >
-                <span className="flex items-center gap-2">
-                  <Icon name="terminal" size={14} className="text-muted" />
-                  <span>Terminal / Shell</span>
-                </span>
-                <Icon name="chevron-right" size={13} className="text-faint" />
-              </button>
-              <button
-                type="button"
-                data-debug-id="overview-popup-row-agent-pty"
-                onClick={() => handleOpenPtyTab()}
-                className="flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-left text-xs font-medium text-primary hover:bg-neutral-soft transition-colors"
-              >
-                <span className="flex items-center gap-2">
-                  <Icon name="bot" size={14} className="text-muted" />
-                  <span>Agent PTY</span>
-                </span>
-                <Icon name="chevron-right" size={13} className="text-faint" />
-              </button>
-              <button
-                type="button"
-                data-debug-id="overview-popup-row-preview"
-                onClick={() =>
-                  openInRightSplitForAgent('preview', {
-                    sessionId: 'default',
-                    title: 'Web Preview',
-                  })
-                }
-                className="flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-left text-xs font-medium text-primary hover:bg-neutral-soft transition-colors"
-              >
-                <span className="flex items-center gap-2">
-                  <Icon name="eye" size={14} className="text-muted" />
-                  <span>Web Preview</span>
-                </span>
-                <Icon name="chevron-right" size={13} className="text-faint" />
-              </button>
-            </div>
-
-            {/* Chain Overview Content */}
-            <div className="flex-1 min-h-0 overflow-y-auto">
-              <ChainOverviewPanel
-                chainId={chainId || ''}
-                projectId={projectId || ''}
-                bridgeId={instanceBridgeId || ''}
-                agentInstanceId={agentInstanceId}
-                projectVcsEnabled={Boolean(projectVcsEnabled)}
-                onClose={() => setOverviewPopupOpen(false)}
-                onSelectTask={(taskId) =>
-                  openInRightSplitForAgent('tasks', {
-                    title: 'Tasks',
-                    focusTaskId: taskId || undefined,
-                  })
-                }
-                onOpenFileDiff={(filePath) =>
-                  openInRightSplitForAgent('vcs', {
-                    title: 'VCS / Diff',
-                    openFilePath: filePath,
-                    initialFilePath: filePath,
-                  })
-                }
-                onOpenVcsFiles={() =>
-                  openInRightSplitForAgent('vcs', {
-                    title: 'VCS / Diff',
-                  })
-                }
-                onOpenAgentChat={(targetInstId, agentTitle) => {
-                  // Clicking a chain agent opens its chat in this pane.
-                  if (onSwitchAgent) {
-                    setOverviewPopupOpen(false);
-                    onSwitchAgent(targetInstId, agentTitle || targetInstId);
-                    return;
-                  }
-                  openInRightSplitForAgent('agentChat', {
-                    agentInstanceId: targetInstId,
-                    title: agentTitle || targetInstId,
-                  });
-                }}
-                onOpenAgentPty={(targetInstId, agentTitle) =>
-                  openInRightSplitForAgent('agentPty', {
-                    agentInstanceId: targetInstId,
-                    title: agentTitle ? `${agentTitle} PTY` : `${targetInstId} PTY`,
-                  })
-                }
-                isMobile={isMobile}
-              />
-            </div>
-          </div>
-        </>
       ) : null}
 
       {/* Transcript + Composer Dock */}
@@ -3287,23 +2921,12 @@ export function AgentChatPane({
                 aria-pressed={member.agentInstanceId === agentInstanceId}
                 onClick={() => {
                   setChainAgentSwitcherOpen(false);
+                  if (member.agentInstanceId === agentInstanceId) return;
                   if (onSwitchAgent) {
+                    // The workspace swaps the agent in THIS pane (deduped: an agent
+                    // already open elsewhere is focused instead) and syncs the URL.
                     onSwitchAgent(member.agentInstanceId, member.title);
-                  }
-                  if (tabId && effectiveWorkspaceKey && paneId) {
-                    dispatch(
-                      updateWorkbenchTabParams({
-                        workspaceKey: effectiveWorkspaceKey,
-                        paneId,
-                        tabId,
-                        patch: {
-                          agentInstanceId: member.agentInstanceId,
-                          title: member.title,
-                        },
-                      }),
-                    );
-                  }
-                  if (!isMultiPane && typeof window !== 'undefined') {
+                  } else if (typeof window !== 'undefined') {
                     window.location.hash = buildRouteHash(
                       `/conversations/${encodeURIComponent(member.agentInstanceId)}`,
                       '',

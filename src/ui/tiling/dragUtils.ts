@@ -70,8 +70,10 @@ export function resolvePaneTarget(
   if (!pane) return null;
   const paneId =
     pane.getAttribute('data-pane-id') ||
+    pane.getAttribute('data-main-pane-id') ||
     pane.getAttribute('data-window-pane-id') ||
     pane.dataset?.paneId ||
+    pane.dataset?.mainPaneId ||
     pane.dataset?.windowPaneId;
   if (!paneId) return null;
   const rect = pane.getBoundingClientRect();

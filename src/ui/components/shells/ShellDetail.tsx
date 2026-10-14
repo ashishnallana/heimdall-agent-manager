@@ -51,7 +51,7 @@ import {
 import { ShellLogViewer } from './ShellLogViewer';
 import { ShellTerminalPane } from './ShellTerminalPane';
 import { SetShellPortDialog } from './SetShellPortDialog';
-import { openPreviewInWorkbench } from '../../store/workbenchSlice';
+import { openPreviewInAux } from '../../store/auxPanesSlice';
 import { useDispatch } from 'react-redux';
 import { buildRouteHash } from '../../utils/appLocation';
 // Reused rather than duplicated: `useActionCatalog` resolves instance / agent /
@@ -184,11 +184,11 @@ export function useShellDetail(sessionId: string, onAfterVerb?: (verb: ShellVerb
       }
       if (verb === 'preview') {
         dispatch(
-          openPreviewInWorkbench({
+          openPreviewInAux({
             sessionId: session.session_id,
             label: session.label || session.cmd || session.session_id,
             port: session.server_port,
-          }),
+          }) as any,
         );
         return;
       }

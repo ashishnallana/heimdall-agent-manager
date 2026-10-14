@@ -82,7 +82,7 @@ import {
   type ShellSessionStatus,
 } from '../../api/endpoints/shells';
 import { useDispatch, useSelector } from 'react-redux';
-import { openPreviewInWorkbench } from '../../store/workbenchSlice';
+import { openPreviewInAux } from '../../store/auxPanesSlice';
 import type { ShellState } from '../../store/shellSlice';
 import { SetShellPortDialog } from './SetShellPortDialog';
 import { bridgeLabel, catalogNote, projectLabel, useActionCatalog } from '../actions/actionCatalog';
@@ -403,11 +403,11 @@ export default function ShellListPage({ selectedId = '' }: { selectedId?: string
       }
       if (verb === 'preview') {
         dispatch(
-          openPreviewInWorkbench({
+          openPreviewInAux({
             sessionId: session.session_id,
             label: session.label || session.cmd || session.session_id,
             port: session.server_port,
-          }),
+          }) as any,
         );
         return;
       }

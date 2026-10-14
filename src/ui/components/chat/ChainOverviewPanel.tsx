@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { useDispatch, useSelector } from 'react-redux';
+import { useSelector } from 'react-redux';
 import { selectActiveVaultKey } from '../../store/vaultSlice';
-import { openOrFocusWorkbenchTab } from '../../store/workbenchSlice';
 import { VaultText } from '../vault/VaultText';
 import { useAuthUser } from '../auth/AuthUserContext';
 import { isVaultArmored, decryptVaultText } from '../../utils/vaultContent';
@@ -9,7 +8,6 @@ import {
   Badge,
   Button,
   Icon,
-  IconButton,
   Spinner,
   StatusDot,
   StatusPill,
@@ -61,7 +59,6 @@ export interface ChainOverviewPanelProps {
   bridgeId?: string;
   agentInstanceId?: string;
   projectVcsEnabled: boolean;
-  onClose?: () => void;
   onSelectTask?: (taskId: string) => void;
   onOpenFileDiff?: (filePath: string) => void;
   onOpenVcsFiles?: () => void;
@@ -326,7 +323,6 @@ export default function ChainOverviewPanel({
   bridgeId = '',
   agentInstanceId,
   projectVcsEnabled,
-  onClose,
   onSelectTask,
   onOpenFileDiff,
   onOpenVcsFiles,
@@ -334,7 +330,6 @@ export default function ChainOverviewPanel({
   onOpenAgentPty,
   isMobile = false,
 }: ChainOverviewPanelProps) {
-  const dispatch = useDispatch();
   const authUser = useAuthUser();
   const username = String(authUser?.user_id || '').trim();
   const session = useSelector((state: any) => state.chat?.session || {});
@@ -404,21 +399,9 @@ export default function ChainOverviewPanel({
     (instId: string, name?: string, e?: React.MouseEvent) => {
       e?.stopPropagation();
       if (!instId) return;
-      if (onOpenAgentPty) {
-        onOpenAgentPty(instId, name);
-      } else {
-        dispatch(
-          openOrFocusWorkbenchTab({
-            tab: {
-              kind: 'agentPty',
-              agentInstanceId: instId,
-              title: name ? `${name} PTY` : `${instId} PTY`,
-            },
-          }),
-        );
-      }
+      onOpenAgentPty?.(instId, name);
     },
-    [dispatch, onOpenAgentPty]
+    [onOpenAgentPty]
   );
 
   const chain = chainData?.chain;
@@ -549,7 +532,7 @@ export default function ChainOverviewPanel({
     [restartInstanceMutation, refetchChain]
   );
 
-  // Navigate to conversation thread or open Agent Chat workbench tab
+  // Open the agent's chat (the aux host opens a sub-agent tab) or navigate to it.
   const handleNavigateToAgent = useCallback(
     (targetInstanceId: string, displayName?: string) => {
       if (!targetInstanceId) return;
@@ -557,21 +540,9 @@ export default function ChainOverviewPanel({
         onOpenAgentChat(targetInstanceId, displayName);
         return;
       }
-      if (!isMobile) {
-        dispatch(
-          openOrFocusWorkbenchTab({
-            tab: {
-              kind: 'agentChat',
-              agentInstanceId: targetInstanceId,
-              title: displayName || targetInstanceId,
-            },
-          }),
-        );
-      } else {
-        window.location.hash = buildRouteHash(`/conversations/${encodeURIComponent(targetInstanceId)}`, '');
-      }
+      window.location.hash = buildRouteHash(`/conversations/${encodeURIComponent(targetInstanceId)}`, '');
     },
-    [dispatch, isMobile, onOpenAgentChat]
+    [onOpenAgentChat]
   );
 
   return (
@@ -584,36 +555,6 @@ export default function ChainOverviewPanel({
           <Spinner size="sm" /> Loading chain overview…
         </div>
       )}
-
-      {/* Chain Header Toolbar */}
-      <div
-        data-debug-id="chain-overview-header-toolbar"
-        className="rounded-xl border border-subtle bg-surface-secondary/40 p-3"
-      >
-        <div className="flex items-center justify-between gap-2">
-          <div className="min-w-0 flex-1">
-            <h2 className="text-xs font-bold text-primary truncate">
-              <VaultText value={chain?.title} fallback="Task Chain Overview" />
-            </h2>
-            <div className="flex items-center gap-2 mt-0.5">
-              <span className="font-mono text-[10px] text-muted">{chainId}</span>
-              {chain?.status && (
-                <StatusPill tone={statusTone(chain.status)}>
-                  {chain.status}
-                </StatusPill>
-              )}
-            </div>
-          </div>
-          {onClose && (
-            <IconButton
-              icon="close"
-              label="Close panel"
-              size="sm"
-              onClick={onClose}
-            />
-          )}
-        </div>
-      </div>
 
       {/* SECTION 1: Chain Agents */}
       <section data-debug-id="chain-overview-section-agents" className="space-y-2.5">

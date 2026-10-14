@@ -281,3 +281,24 @@ test('sub-agent chat tabs are limited to participants of the owning agent chain'
   assert.equal(isAuxContentAllowed({ type: 'agentPty', agentInstanceId: 'owner' }, { ownerAgentId: 'owner' }), true);
   assert.equal(isAuxContentAllowed({ type: 'files' }, {}), true);
 });
+
+test('multiple interactive shell tabs coexist: each "New shell" opens its own tab, rekeyed to its own session', async () => {
+  const { newShellTabContent, isProvisionalShellSessionId } = await import('../src/ui/store/auxTabId.ts');
+  const store = makeStore();
+  const first = newShellTabContent();
+  const second = newShellTabContent();
+  assert.notEqual(auxTabId(first), auxTabId(second), 'provisional shell tabs never dedupe into one');
+  assert.ok(first.type === 'shell' && isProvisionalShellSessionId(first.sessionId));
+  assert.equal(isProvisionalShellSessionId('sess-1'), false);
+  store.dispatch(openAuxTab({ treeId: A, content: first, hasChain: false }));
+  store.dispatch(openAuxTab({ treeId: A, content: second }));
+  store.dispatch(openAuxTab({ treeId: A, content: newShellTabContent() }));
+  let shells = selectAuxPane(store.getState(), A)!.tabs.filter((t) => t.content.type === 'shell');
+  assert.equal(shells.length, 3);
+  // Each tab binds to its own interactive session; none switches sessions in place.
+  store.dispatch(rekeyAuxTab({ treeId: A, tabId: auxTabId(first), content: { type: 'shell', sessionId: 's-1' } }));
+  store.dispatch(rekeyAuxTab({ treeId: A, tabId: auxTabId(second), content: { type: 'shell', sessionId: 's-2' } }));
+  shells = selectAuxPane(store.getState(), A)!.tabs.filter((t) => t.content.type === 'shell');
+  assert.deepEqual(shells.map((t) => t.id).slice(0, 2), ['shell__s-1', 'shell__s-2']);
+  assert.equal(auxTabTitle(shells[2]), 'Shell');
+});

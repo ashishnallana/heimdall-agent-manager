@@ -4,7 +4,6 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'rea
 import { useDispatch, useSelector } from 'react-redux';
 import NewConversationPage from '../chat/NewConversationPage';
 import ConversationsHomePage from '../chat/ConversationsHomePage';
-import ConversationThreadPage from '../chat/ConversationThreadPage';
 import Icon, { type IconName } from '../Icon';
 import { Badge, Breadcrumbs as UiBreadcrumbs, CommandPalette, PageShell, StatusDot } from '@ui';
 import { useViewport } from './responsive';
@@ -29,7 +28,7 @@ import {
   removeAppOwnedClientStorage,
   writeLastSeenUserId,
 } from '../../utils/clientPersistence';
-import { WindowTilingHost } from '../windowTiling/WindowTilingHost';
+import { Workspace } from '../mainWorkspace/Workspace';
 import BridgeEnrollmentApprovalPage from '../enrollment/BridgeEnrollmentApprovalPage';
 import ProviderEnrollmentSetupPage from '../providers/ProviderEnrollmentSetupPage';
 import BridgesPanel from '../settings/BridgesPanel';
@@ -85,8 +84,6 @@ import { VaultText } from '../vault/VaultText';
 import { batchDecryptTitles, type RawSearchItemInput } from '../../utils/vaultSearch';
 import LspPanel from '../settings/LspPanel';
 import { useFetchExperimentsQuery } from '../../api/endpoints/settings';
-import { useFetchConversationQuery } from '../../api/endpoints/chats';
-import { resolveActiveChainId } from '../windowTiling/activeChainId';
 import LibraryPage from '../LibraryPage';
 import ArtifactViewer from '../ArtifactViewer';
 import { clearUserClientState } from '../../store/chatSlice';
@@ -1076,17 +1073,6 @@ function RouteOutlet({
     ? decodeSegment(path.startsWith('/c/') ? path.slice('/c/'.length) : path.slice('/conversations/'.length))
     : '';
 
-  const convQuery = useFetchConversationQuery(
-    { conversationId: '', agentInstanceId },
-    { skip: !isConversationThreadRoute || !agentInstanceId }
-  );
-
-  // currentData, not data: data keeps the previous instance's conversation while
-  // this one loads, which would pin the new pane to the previous chain's workbench.
-  const activeChainId = useMemo(
-    () => resolveActiveChainId(agentInstanceId, convQuery.currentData?.conversation, liveProjects),
-    [agentInstanceId, convQuery.currentData?.conversation, liveProjects],
-  );
   // REQ-LSP-CFG-2: the LSP route is gated on the 'lsp' experiment flag HERE, not only in
   // SettingsSubNav — hiding the nav entry does nothing for a direct visit or a bookmark.
   // Nav and route read the same flag so they can never disagree.
@@ -1123,37 +1109,13 @@ function RouteOutlet({
   if (isConversationThreadRoute) {
     return (
       <main data-debug-id="shell-main-route-outlet" className="min-w-0 min-h-0 flex-1 overflow-hidden bg-canvas">
-        <ErrorBoundary resetKey="window-tiling-host" label="Conversation">
-          <WindowTilingHost
-            agentInstanceId={agentInstanceId}
+        <ErrorBoundary resetKey="workspace" label="Conversation">
+          {/* ONE global Workspace: Main split tree of agent chats + ONE aux dock.
+              The route only says which agent the focused pane shows. */}
+          <Workspace
             routeAgentInstanceId={agentInstanceId}
-            activeAgentInstanceId={agentInstanceId}
-            activeChainId={activeChainId}
             focusMessageId={focusMessageId}
-            routeFocusMessageId={focusMessageId}
-            activeFocusMessageId={focusMessageId}
-            onActiveConversationChange={({
-              agentInstanceId: nextInstanceId,
-              focusMessageId: nextFocusMessageId,
-            }) => {
-              if (!nextInstanceId || nextInstanceId === agentInstanceId) return;
-              const nextSearch = nextFocusMessageId
-                ? `?msg=${encodeURIComponent(nextFocusMessageId)}`
-                : '';
-              window.location.hash = buildRouteHash(
-                `/conversations/${encodeURIComponent(nextInstanceId)}`,
-                nextSearch,
-              );
-            }}
-            renderConversationPane={(_paneId, paneValue) => (
-              <ConversationThreadPage
-                key={paneValue.chainId ? `chain-${paneValue.chainId}:${paneValue.agentInstanceId}` : paneValue.agentInstanceId}
-                agentInstanceId={paneValue.agentInstanceId}
-                chainId={paneValue.chainId || undefined}
-                projectId={paneValue.projectId || undefined}
-                focusMessageId={paneValue.focusMessageId}
-              />
-            )}
+            isMobile={isMobile}
           />
         </ErrorBoundary>
       </main>

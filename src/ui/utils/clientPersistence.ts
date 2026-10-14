@@ -1,5 +1,3 @@
-import { calculatePaneLayouts } from '../tiling/calculatePaneLayout';
-
 export const APP_STORAGE_PREFIXES = ['odin.', 'heimdall.', 'heimdall:'] as const;
 export const LAST_SEEN_USER_ID_KEY = 'heimdall.lastSeenUserId';
 
@@ -119,112 +117,80 @@ export function filterSidebarChains<T extends ChainStatusLike>(
   });
 }
 
-// --- Level 1 Window Layout Persistence (R2) ---------------------------------
-export const WINDOW_LAYOUT_STORAGE_KEY = 'heimdall:window-layout:v1';
+// --- Workspace (Main + Aux) Persistence --------------------------------------
+// One GLOBAL workspace, not keyed by task chain: the Main split tree, the aux
+// tab strips (per agent + the shared split-view strip) and the aux width.
+export const WORKSPACE_LAYOUT_STORAGE_KEY = 'heimdall:workspace-layout:v1';
+export const AUX_PANES_STORAGE_KEY = 'heimdall:aux-panes:v1';
+export const WORKSPACE_CHROME_STORAGE_KEY = 'heimdall:workspace-chrome:v1';
 
-export function readWindowLayoutState<T = any>(): T | null {
+/** Superseded chain-keyed workbench / window-tiling keys (removed on hydrate). */
+export const LEGACY_WINDOW_LAYOUT_STORAGE_KEY = 'heimdall:window-layout:v1';
+export const LEGACY_WORKBENCH_LAYOUT_STORAGE_PREFIX = 'heimdall:workbench-layout:v1:';
+
+function readJsonObject<T>(key: string): T | null {
   if (typeof window === 'undefined') return null;
   try {
-    const raw = window.localStorage.getItem(WINDOW_LAYOUT_STORAGE_KEY);
+    const raw = window.localStorage.getItem(key);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
-    if (
-      parsed &&
-      typeof parsed === 'object' &&
-      !Array.isArray(parsed) &&
-      typeof parsed.rootPaneId === 'string' &&
-      parsed.panes &&
-      typeof parsed.panes === 'object' &&
-      !Array.isArray(parsed.panes) &&
-      Boolean(parsed.panes[parsed.rootPaneId]) &&
-      calculatePaneLayouts(parsed).contentLayouts.length > 0
-    ) {
-      return parsed as T;
-    }
-    return null;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as T) : null;
   } catch {
     return null;
   }
 }
 
-export function writeWindowLayoutState(tree: unknown): void {
+function writeJsonObject(key: string, value: unknown): void {
   if (typeof window === 'undefined') return;
   try {
-    if (!tree) {
-      window.localStorage.removeItem(WINDOW_LAYOUT_STORAGE_KEY);
+    if (value === null || value === undefined) {
+      window.localStorage.removeItem(key);
       return;
     }
-    window.localStorage.setItem(WINDOW_LAYOUT_STORAGE_KEY, JSON.stringify(tree));
+    window.localStorage.setItem(key, JSON.stringify(value));
   } catch {
     /* ignore */
   }
 }
 
-// --- Level 2 Per-Conversation Workbench Persistence (R3) --------------------
-export const WORKBENCH_LAYOUT_STORAGE_PREFIX = 'heimdall:workbench-layout:v1:';
-
-export function resolveWorkbenchWorkspaceKey(params: {
-  chainId?: string | null;
-  agentInstanceId?: string | null;
-  workspaceKey?: string | null;
-}): string {
-  if (params.workspaceKey && params.workspaceKey.trim().length > 0) {
-    return params.workspaceKey.trim();
-  }
-  if (params.chainId && params.chainId.trim().length > 0) {
-    return `chain:${params.chainId.trim()}`;
-  }
-  if (params.agentInstanceId && params.agentInstanceId.trim().length > 0) {
-    return `agent:${params.agentInstanceId.trim()}`;
-  }
-  return 'default';
+/** Raw persisted Main tree; validated by `sanitizeMainTree` on hydrate. */
+export function readWorkspaceLayoutState<T = any>(): T | null {
+  return readJsonObject<T>(WORKSPACE_LAYOUT_STORAGE_KEY);
 }
 
-export function getWorkbenchWorkspaceStorageKey(workspaceKey: string): string {
-  return `${WORKBENCH_LAYOUT_STORAGE_PREFIX}${workspaceKey || 'default'}`;
+export function writeWorkspaceLayoutState(tree: unknown): void {
+  writeJsonObject(WORKSPACE_LAYOUT_STORAGE_KEY, tree);
 }
 
-export function readWorkbenchWorkspaceState<T = any>(
-  workspaceKey: string,
-): T | null {
-  if (typeof window === 'undefined' || !workspaceKey) return null;
+/** Raw persisted aux strips; validated by `sanitizeAuxPanesState` on hydrate. */
+export function readAuxPanesState<T = any>(): T | null {
+  return readJsonObject<T>(AUX_PANES_STORAGE_KEY);
+}
+
+export function writeAuxPanesState(state: unknown): void {
+  writeJsonObject(AUX_PANES_STORAGE_KEY, state);
+}
+
+export function readWorkspaceChromeState<T = any>(): T | null {
+  return readJsonObject<T>(WORKSPACE_CHROME_STORAGE_KEY);
+}
+
+export function writeWorkspaceChromeState(state: { auxWidth: number | null }): void {
+  writeJsonObject(WORKSPACE_CHROME_STORAGE_KEY, { auxWidth: state.auxWidth });
+}
+
+export function removeLegacyWorkbenchStorage(): void {
+  if (typeof window === 'undefined') return;
   try {
-    const raw = window.localStorage.getItem(
-      getWorkbenchWorkspaceStorageKey(workspaceKey),
-    );
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    if (
-      parsed &&
-      typeof parsed === 'object' &&
-      !Array.isArray(parsed) &&
-      typeof parsed.rootPaneId === 'string' &&
-      parsed.panes &&
-      typeof parsed.panes === 'object' &&
-      !Array.isArray(parsed.panes) &&
-      Boolean(parsed.panes[parsed.rootPaneId]) &&
-      calculatePaneLayouts(parsed).contentLayouts.length > 0
-    ) {
-      return parsed as T;
+    const storage = window.localStorage;
+    for (const key of storageKeys(storage)) {
+      if (
+        key === LEGACY_WINDOW_LAYOUT_STORAGE_KEY ||
+        key.startsWith(LEGACY_WORKBENCH_LAYOUT_STORAGE_PREFIX)
+      ) {
+        storage.removeItem(key);
+      }
     }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-export function writeWorkbenchWorkspaceState(
-  workspaceKey: string,
-  tree: unknown,
-): void {
-  if (typeof window === 'undefined' || !workspaceKey) return;
-  try {
-    const storageKey = getWorkbenchWorkspaceStorageKey(workspaceKey);
-    if (!tree) {
-      window.localStorage.removeItem(storageKey);
-      return;
-    }
-    window.localStorage.setItem(storageKey, JSON.stringify(tree));
   } catch {
     /* ignore */
   }

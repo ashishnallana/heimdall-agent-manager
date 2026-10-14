@@ -2,7 +2,7 @@ import React from 'react';
 import { useDispatch } from 'react-redux';
 import { useListShellsQuery } from '../../api/endpoints/shells';
 import type { ShellSession } from '../../api/endpoints/shells';
-import { openPreviewInWorkbench } from '../../store/workbenchSlice';
+import { openPreviewInAux } from '../../store/auxPanesSlice';
 import { activeServersOf, statusPresentation, supportsLivePreview } from './shellModel';
 import { ShellLogViewer } from './ShellLogViewer';
 
@@ -102,11 +102,11 @@ export function ChainActiveServersPanel({ chainId }: { chainId: string }) {
                   }
                   onOpenPreview={() =>
                     dispatch(
-                      openPreviewInWorkbench({
+                      openPreviewInAux({
                         sessionId: session.session_id,
                         label: session.label || session.cmd || session.session_id,
                         port: session.server_port,
-                      }),
+                      }) as any,
                     )
                   }
                 />

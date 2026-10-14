@@ -1,7 +1,6 @@
 import React, { useMemo, useState } from 'react';
-import { useDispatch, useSelector } from 'react-redux';
+import { useSelector } from 'react-redux';
 import { Badge, Button, Icon, Input, Modal } from '@ui';
-import { assignWindowPaneConversation } from '../../store/windowLayoutSlice';
 import {
   useListSidebarConversationsQuery,
   type SidebarConversation,
@@ -230,7 +229,6 @@ function NewConversationWindowPaneBody({
   chainGroups = [],
   isLoading = false,
 }: NewConversationWindowPaneBodyProps) {
-  const dispatch = useDispatch();
   const [search, setSearch] = useState('');
   const [categoryFilter, setCategoryFilter] = useState<
     'all' | 'Conversation' | 'Task Chain' | 'Live Agent'
@@ -330,17 +328,9 @@ function NewConversationWindowPaneBody({
     });
   }, [candidates, categoryFilter, search]);
 
+  // The workspace puts the agent into this pane (deduped: an agent already
+  // open in another pane is focused instead).
   const handleSelectConversation = (selection: SelectedWindowConversation) => {
-    dispatch(
-      assignWindowPaneConversation({
-        paneId,
-        agentInstanceId: selection.agentInstanceId,
-        chainId: selection.chainId ?? null,
-        projectId: selection.projectId ?? null,
-        focusMessageId: selection.focusMessageId,
-        title: selection.title,
-      }),
-    );
     onSelect?.(selection);
   };
 
@@ -357,7 +347,7 @@ function NewConversationWindowPaneBody({
             <div className="min-w-0">
               <h3 className="flex items-center gap-1.5 text-sm font-semibold text-primary">
                 <Icon name="spark" size={15} className="text-accent" />
-                <span>Open Conversation in Split Window</span>
+                <span>Open a chat in this pane</span>
               </h3>
               <p className="mt-0.5 text-xs text-muted">
                 Select an existing conversation, task chain, or live agent below, or launch a new session.
@@ -497,3 +487,6 @@ function NewConversationWindowPaneBody({
 }
 
 export default NewConversationWindowPane;
+
+/** Main-pane new-chat picker ('_new' leaf). */
+export { NewConversationWindowPane as NewChatPanePicker };

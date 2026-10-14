@@ -20,8 +20,9 @@ import themeReducer from './themeSlice';
 import vaultReducer from './vaultSlice';
 import searchTitleReducer from './searchTitleSlice';
 import shellReducer from './shellSlice';
-import windowLayoutReducer from './windowLayoutSlice';
-import workbenchReducer from './workbenchSlice';
+import workspaceLayoutReducer from './workspaceLayoutSlice';
+import auxPanesReducer from './auxPanesSlice';
+import workspaceChromeReducer from './workspaceChromeSlice';
 
 export const priorUserClientStateCleared = createAction('heimdall/priorUserClientStateCleared');
 
@@ -42,8 +43,10 @@ const appReducer = combineReducers({
   // REQ-SHELL-6 §6: a push-only tick for the shell consumers that are not RTK
   // Query caches, so no shell view needs a poller. See shellSlice.ts.
   shells: shellReducer,
-  windowLayout: windowLayoutReducer,
-  workbench: workbenchReducer,
+  // Global Workspace: Main split tree of agent chats + ONE aux dock (Jetski parity).
+  workspaceLayout: workspaceLayoutReducer,
+  auxPanes: auxPanesReducer,
+  workspaceChrome: workspaceChromeReducer,
   // Ephemeral, non-cache agent activity (push-only bubbles). Reset with the rest
   // of client state on user switch via the priorUserClientStateCleared handling
   // in rootReducer below.
