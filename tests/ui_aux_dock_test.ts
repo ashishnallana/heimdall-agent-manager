@@ -242,7 +242,7 @@ test('workspace: route fills the focused pane, URL tracks focus, dedupe, mobile 
 
       // Mobile: Main panes page sideways; the aux opens as a full-screen sheet.
       await act(async () => {
-        store.dispatch(setAuxPaneOpen({ treeId: { kind: 'multi' }, open: true, hasChain: false }));
+        store.dispatch(setAuxPaneOpen({ treeId: { kind: 'agent', agentInstanceId: 'agent-a' }, open: true, hasChain: false }));
         render('agent-a', true);
         await settle();
       });
@@ -250,7 +250,7 @@ test('workspace: route fills the focused pane, URL tracks focus, dedupe, mobile 
       assert.equal(doc.querySelectorAll('[data-debug-id^="workspace-mobile-page-"]').length, 2);
       const dock = doc.querySelector('[data-debug-id="aux-dock"]');
       assert.ok(dock, 'aux dock rendered');
-      assert.equal(dock!.getAttribute('data-aux-tree'), 'multi', 'split view shows the shared strip');
+      assert.equal(dock!.getAttribute('data-aux-tree'), 'agent:agent-a', 'split view shows the focused agent strip');
       assert.equal(dock!.getAttribute('data-aux-mobile-sheet'), 'true');
       // Persisted globally, not keyed by chain.
       assert.ok(dom.window.localStorage.getItem('heimdall:workspace-layout:v1'));

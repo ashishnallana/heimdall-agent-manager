@@ -16,8 +16,8 @@ export interface AuxChainMember {
 }
 
 /**
- * Everything an aux tab needs about the agent that owns it (single view) or
- * the focused agent (split view): chain, project, bridge, shell cwd, chain
+ * Everything an aux tab needs about the agent that owns the shown strip (the
+ * focused Main pane's agent): chain, project, bridge, shell cwd, chain
  * participants. The chain is CONTEXT only; it never keys the layout.
  */
 export interface AgentAuxContext {

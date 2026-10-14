@@ -16,6 +16,7 @@ import {
   type AuxContent,
 } from '../src/ui/store/auxTabId.ts';
 import auxPanesReducer, {
+  carryAuxPaneOpenOnFocus,
   closeAuxTab,
   createDefaultAuxPane,
   ensureAuxPane,
@@ -54,7 +55,6 @@ function makeStore() {
 
 const A: AuxTreeId = { kind: 'agent', agentInstanceId: 'agent-a' };
 const B: AuxTreeId = { kind: 'agent', agentInstanceId: 'agent-b' };
-const MULTI: AuxTreeId = { kind: 'multi' };
 
 test('tab codec: content-derived ids round-trip and ignore transient params', () => {
   const cases: Array<[AuxContent, string]> = [
@@ -87,32 +87,56 @@ test('tab codec: content-derived ids round-trip and ignore transient params', ()
   assert.equal(resolveLegacyPanelToAuxContent('chat'), null);
 });
 
-test('tree selection rule: 1 Main pane -> that agent, 2+ panes -> shared multi, focus does not change it', () => {
+test('tree selection rule: the aux always shows the FOCUSED Main pane agent strip (single or split)', () => {
   const store = makeStore();
   assert.equal(selectCurrentAuxTreeId(store.getState()), null, 'a lone picker has no aux');
 
   store.dispatch(navigateMainToAgent('agent-a'));
   assert.deepEqual(selectCurrentAuxTreeId(store.getState()), A);
 
-  // Switching the agent in single view switches the aux tree.
+  // Switching the agent in a pane switches the aux tree.
   store.dispatch(navigateMainToAgent('agent-b'));
   assert.deepEqual(selectCurrentAuxTreeId(store.getState()), B);
 
+  // Split view: the aux follows focus (Jetski /c/A+B?focused=A).
   store.dispatch(splitMainPane({ targetPaneId: 'pane-1', direction: 'right', agentInstanceId: 'agent-a' }));
-  assert.deepEqual(selectCurrentAuxTreeId(store.getState()), MULTI);
+  assert.deepEqual(selectCurrentAuxTreeId(store.getState()), A, 'the new focused pane drives the aux');
   const t = store.getState().workspaceLayout.tree;
   store.dispatch(setFocusedMainPane(findPaneByAgent(t, 'agent-b')!));
-  assert.deepEqual(selectCurrentAuxTreeId(store.getState()), MULTI, 'focus never changes the split-view strip');
-  store.dispatch(setFocusedMainPane(findPaneByAgent(t, 'agent-a')!));
-  assert.deepEqual(selectCurrentAuxTreeId(store.getState()), MULTI);
-
-  // Back to one pane -> that agent's own strip.
-  store.dispatch(closeMainPane(findPaneByAgent(store.getState().workspaceLayout.tree, 'agent-a')!));
   assert.deepEqual(selectCurrentAuxTreeId(store.getState()), B);
+  store.dispatch(setFocusedMainPane(findPaneByAgent(t, 'agent-a')!));
+  assert.deepEqual(selectCurrentAuxTreeId(store.getState()), A);
+
+  // A focused picker pane has no aux.
+  store.dispatch(splitMainPane({ targetPaneId: findPaneByAgent(t, 'agent-a')!, direction: 'bottom' }));
+  assert.equal(selectCurrentAuxTreeId(store.getState()), null);
+
+  store.dispatch(closeMainPane(store.getState().workspaceLayout.tree.focusedPaneId));
+  assert.ok(selectCurrentAuxTreeId(store.getState()));
   assert.deepEqual(
     resolveAuxTreeId({ rootPaneId: 'p', focusedPaneId: 'p', panes: { p: { kind: 'content', value: { agentInstanceId: 'x' } } } }),
     { kind: 'agent', agentInstanceId: 'x' },
   );
+});
+
+test('focus change within a split carries the dock open state to the newly focused strip (Jetski RouteToReduxSync)', () => {
+  const store = makeStore();
+  store.dispatch(setAuxPaneOpen({ treeId: A, open: true, hasChain: true }));
+  // Target strip does not exist yet: created open, seeded once its chain is known.
+  store.dispatch(carryAuxPaneOpenOnFocus({ from: A, to: B }));
+  let b = selectAuxPane(store.getState(), B)!;
+  assert.equal(b.isPaneOpen, true);
+  assert.equal(b.activeTabId, undefined);
+  store.dispatch(ensureAuxPane({ treeId: B, hasChain: false }));
+  b = selectAuxPane(store.getState(), B)!;
+  assert.equal(b.activeTabId, FILES_TAB_ID, 'deferred seeding uses the real chain membership');
+  // Closing on B then focusing A closes A too.
+  store.dispatch(setAuxPaneOpen({ treeId: B, open: false }));
+  store.dispatch(carryAuxPaneOpenOnFocus({ from: B, to: A }));
+  assert.equal(selectAuxPane(store.getState(), A)!.isPaneOpen, false);
+  // Same agent is a no-op.
+  store.dispatch(carryAuxPaneOpenOnFocus({ from: A, to: A }));
+  assert.equal(selectAuxPane(store.getState(), A)!.isPaneOpen, false);
 });
 
 test('seeding mirrors Jetski createDefaultPaneState: no tabs, fixed overview active (Files without a chain)', () => {
@@ -122,16 +146,12 @@ test('seeding mirrors Jetski createDefaultPaneState: no tabs, fixed overview act
   const store = makeStore();
   store.dispatch(ensureAuxPane({ treeId: A, hasChain: true }));
   store.dispatch(ensureAuxPane({ treeId: B, hasChain: false }));
-  store.dispatch(ensureAuxPane({ treeId: MULTI, hasChain: true }));
   const a = selectAuxPane(store.getState(), A)!;
   assert.deepEqual(a.tabs, []);
   assert.equal(resolveActiveAuxTab(a)!.content.type, 'chainOverview');
   assert.deepEqual(visibleAuxTabs(a).map((t) => t.id), ['overview'], 'derived overview tab is shown');
   assert.equal(resolveActiveAuxTab(selectAuxPane(store.getState(), B))!.content.type, 'files');
-  // The shared strip is seeded the same way, never copied from an agent strip.
   store.dispatch(openAuxTab({ treeId: A, content: { type: 'vcs' } }));
-  store.dispatch(ensureAuxPane({ treeId: MULTI }));
-  assert.deepEqual(selectAuxPane(store.getState(), MULTI)!.tabs, []);
   // ensure is idempotent
   store.dispatch(ensureAuxPane({ treeId: A, hasChain: false }));
   assert.equal(selectAuxPane(store.getState(), A)!.tabs.length, 2);
@@ -215,10 +235,10 @@ test('isPaneOpen is per tree and previous agent strips are retained', () => {
   assert.equal(selectAuxPane(store.getState(), B), undefined);
   store.dispatch(ensureAuxPane({ treeId: B, hasChain: true }));
   assert.ok(!selectAuxPane(store.getState(), B)!.isPaneOpen, 'B starts closed');
-  store.dispatch(setAuxPaneOpen({ treeId: MULTI, open: true }));
+  store.dispatch(setAuxPaneOpen({ treeId: B, open: true }));
   store.dispatch(toggleAuxPane({ treeId: A }));
   assert.equal(selectAuxPane(store.getState(), A)!.isPaneOpen, false);
-  assert.equal(selectAuxPane(store.getState(), MULTI)!.isPaneOpen, true);
+  assert.equal(selectAuxPane(store.getState(), B)!.isPaneOpen, true);
   assert.deepEqual(selectAuxPane(store.getState(), A)!.tabs.map((t) => t.id), ['overview', 'vcs'], 'A strip retained');
 });
 
@@ -238,15 +258,16 @@ test('hydrate sanitizes persisted aux strips (drops bad tabs, duplicates, smuggl
       _new: { tabs: [] },
     },
     multiPane: { tabs: [], activeTabId: 'overview' },
-  });
+    b: 1,
+  } as any);
   assert.deepEqual(clean.agentPanes.a.tabs.map((t) => t.id), ['shell__s1'], 'ids are re-derived from content');
   assert.equal(clean.agentPanes.a.activeTabId, 'shell__s1');
   assert.equal(clean.agentPanes.a.isPaneOpen, true);
   assert.equal(clean.agentPanes._new, undefined);
-  assert.equal(clean.multiPane!.activeTabId, 'overview', 'fixed derived ids stay valid');
+  assert.equal((clean as any).multiPane, undefined, 'the old shared split strip is dropped');
   const store = makeStore();
   store.dispatch(hydrateAuxPanes({ agentPanes: [] }));
-  assert.deepEqual(store.getState().auxPanes, { agentPanes: {}, multiPane: undefined });
+  assert.deepEqual(store.getState().auxPanes, { agentPanes: {} });
 });
 
 test('openPreviewInAux targets the current tree and is a no-op without one', () => {

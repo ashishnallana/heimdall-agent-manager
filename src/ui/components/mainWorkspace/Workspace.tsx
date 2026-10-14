@@ -17,6 +17,7 @@ import {
   type MainPaneValue,
 } from '../../store/workspaceLayoutSlice';
 import {
+  carryAuxPaneOpenOnFocus,
   ensureAuxPane,
   hydrateAuxPanes,
   openAuxTab,
@@ -69,8 +70,9 @@ function navigateHashToAgent(agentInstanceId: string) {
  *
  * - The URL tracks the focused pane's agent; navigating to an agent not in Main
  *   replaces the focused pane's agent, an open one is focused (dedupe).
- * - Which aux strip is shown follows Jetski's useTreeId rule: one Main pane ->
- *   that agent's strip; two or more -> one shared strip that ignores focus.
+ * - The aux dock shows the FOCUSED pane's agent strip (Jetski useTreeId with
+ *   `?focused=`); moving focus within a split carries the open/closed state to
+ *   the newly focused strip (Jetski RouteToReduxSync).
  * - Layout and strips persist globally (never keyed by task chain).
  */
 export function Workspace({ routeAgentInstanceId, focusMessageId, isMobile = false }: WorkspaceProps) {
@@ -85,13 +87,8 @@ export function Workspace({ routeAgentInstanceId, focusMessageId, isMobile = fal
   const isAuxMaximized = useSelector(selectIsAuxMaximized);
   const pendingDrop = useSelector(selectPendingSplitDrop);
 
-  // Aux context agent: the strip owner in single view; the focused agent in split view.
-  const ctxAgentId =
-    auxTreeId?.kind === 'agent'
-      ? auxTreeId.agentInstanceId
-      : isRealAgentId(focusedAgentId)
-        ? focusedAgentId
-        : mainAgentIds[0] || '';
+  // Aux context agent = the focused Main pane's agent (single or split view).
+  const ctxAgentId = auxTreeId?.agentInstanceId || '';
   const ctx = useAgentAuxContext(ctxAgentId);
   const hasChain = ctx.isResolved ? Boolean(ctx.chainId) : true;
   const auxOpen = Boolean(auxTreeId && auxPane?.isPaneOpen);
@@ -129,6 +126,17 @@ export function Workspace({ routeAgentInstanceId, focusMessageId, isMobile = fal
     }
   }, [focusedAgentId, routeAgentInstanceId]);
 
+  // 3b. Focus moved to another agent inside a split: carry the dock's open state.
+  const prevTreeRef = useRef<typeof auxTreeId>(null);
+  useEffect(() => {
+    const prev = prevTreeRef.current;
+    prevTreeRef.current = auxTreeId;
+    if (!prev || !auxTreeId || prev.agentInstanceId === auxTreeId.agentInstanceId) return;
+    if (tree && mainAgentIds.length >= 2 && mainAgentIds.includes(prev.agentInstanceId)) {
+      dispatch(carryAuxPaneOpenOnFocus({ from: prev, to: auxTreeId }));
+    }
+  }, [auxTreeId, dispatch, mainAgentIds, tree]);
+
   // 4. Persist (global, not keyed by chain).
   useEffect(() => {
     if (hydratedRef.current) writeWorkspaceLayoutState(tree);
@@ -143,7 +151,8 @@ export function Workspace({ routeAgentInstanceId, focusMessageId, isMobile = fal
   // 5. Seed the current strip (Jetski createDefaultPaneState) once the
   //    context agent's chain membership is known.
   useEffect(() => {
-    if (!auxTreeId || auxPane || !ctx.isResolved) return;
+    if (!auxTreeId || !ctx.isResolved) return;
+    if (auxPane && !(auxPane.activeTabId === undefined && auxPane.tabs.length === 0)) return;
     dispatch(ensureAuxPane({ treeId: auxTreeId, hasChain: Boolean(ctx.chainId) }));
   }, [auxPane, auxTreeId, ctx.chainId, ctx.isResolved, dispatch]);
 

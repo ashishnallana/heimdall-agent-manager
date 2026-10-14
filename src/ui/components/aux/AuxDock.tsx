@@ -90,13 +90,14 @@ function usePublishComments(ctx: AgentAuxContext) {
 
 export interface AuxDockProps {
   treeId: AuxTreeId;
-  /** Context agent: the strip owner (single view) or the focused agent (split view). */
+  /** Context agent: the focused Main pane's agent (owner of the shown strip). */
   ctx: AgentAuxContext;
   isMobile?: boolean;
 }
 
 /**
- * The ONE aux dock on the right of the workspace: a single tab strip (no splits),
+ * The ONE aux dock on the right of the workspace, showing the focused agent's
+ * strip: a single tab strip (no splits),
  * the active tab's content (only the active tab is mounted), a `+` launcher and
  * a ⋮ menu with the active tab's actions. Resizable (width persisted) and
  * maximizable on desktop; a full-screen sheet on mobile.

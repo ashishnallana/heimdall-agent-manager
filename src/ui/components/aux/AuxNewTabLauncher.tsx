@@ -19,7 +19,7 @@ export interface AuxLauncherMember {
 
 export interface AuxNewTabLauncherProps {
   treeKey: string;
-  /** The agent that owns the strip (split view: the focused agent). */
+  /** The agent that owns the strip (the focused Main pane's agent). */
   ownerAgentId: string;
   chainId?: string;
   projectId?: string;

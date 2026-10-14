@@ -22,12 +22,13 @@ import {
 /**
  * Aux dock content (Jetski `auxPaneV2` equivalent).
  *
- * ONE tab strip per tree, no splits inside the aux. A tree is "which screen's
- * aux": a single agent (`agentPanes[agentInstanceId]`) or the one shared strip
- * for split view (`multiPane`). See {@link resolveAuxTreeId} for the rule.
+ * ONE tab strip per agent (`agentPanes[agentInstanceId]`), no splits inside the
+ * aux. The dock always shows the FOCUSED Main pane's agent strip, in single and
+ * split view alike (Jetski `/c/A+B?focused=A` -> conversationPanes[focused]).
+ * See {@link resolveAuxTreeId}.
  */
 
-export type AuxTreeId = { kind: 'agent'; agentInstanceId: string } | { kind: 'multi' };
+export type AuxTreeId = { kind: 'agent'; agentInstanceId: string };
 
 export interface AuxTabbedPane {
   tabs: AuxTab[];
@@ -39,39 +40,38 @@ export interface AuxTabbedPane {
 
 export interface AuxPanesState {
   agentPanes: Record<string, AuxTabbedPane>;
-  multiPane?: AuxTabbedPane;
 }
 
 const initialState: AuxPanesState = {
   agentPanes: {},
-  multiPane: undefined,
 };
 
 /**
- * Jetski `useTreeId` mapped onto Heimdall (there is no `/multiConversation`
- * route): exactly one Main pane -> that agent's strip; two or more Main panes
- * -> the ONE shared `multi` strip, which does NOT change with focus. A single
+ * Jetski `useTreeId`: in split view `useCascadeIdParam()` is the FOCUSED
+ * conversation, so the aux tree is always the focused Main pane's agent
+ * (`{kind:'cascadeId', cascadeId: focused}`), single or split. A focused
  * new-chat picker has no aux.
  */
 export function resolveAuxTreeId(tree: PaneTreeState<MainPaneValue>): AuxTreeId | null {
-  const ids = getContentPaneIds(tree);
-  if (ids.length >= 2) return { kind: 'multi' };
-  const only = ids[0] ? tree.panes[ids[0]] : undefined;
-  if (only?.kind !== 'content') return null;
-  const agentInstanceId = only.value.agentInstanceId;
+  let pane = tree.panes[tree.focusedPaneId];
+  if (pane?.kind !== 'content') {
+    const first = getContentPaneIds(tree)[0];
+    pane = first ? tree.panes[first] : undefined;
+  }
+  if (pane?.kind !== 'content') return null;
+  const agentInstanceId = pane.value.agentInstanceId;
   if (!agentInstanceId || agentInstanceId === NEW_PANE_AGENT_ID) return null;
   return { kind: 'agent', agentInstanceId };
 }
 
 export function auxTreeKey(treeId: AuxTreeId | null | undefined): string {
-  if (!treeId) return '';
-  return treeId.kind === 'multi' ? 'multi' : `agent:${treeId.agentInstanceId}`;
+  return treeId ? `agent:${treeId.agentInstanceId}` : '';
 }
 
 /**
  * Jetski `createDefaultPaneState()`: no stored tabs, the fixed overview tab
  * active. In Heimdall the overview is the Chain Overview, or Files for an agent
- * that has no chain. The shared split strip starts the same way (no copying).
+ * that has no chain.
  */
 export function createDefaultAuxPane(hasChain: boolean): AuxTabbedPane {
   return { tabs: [], activeTabId: hasChain ? OVERVIEW_TAB_ID : FILES_TAB_ID };
@@ -82,12 +82,11 @@ export function getAuxPane(
   treeId: AuxTreeId | null | undefined,
 ): AuxTabbedPane | undefined {
   if (!treeId) return undefined;
-  return treeId.kind === 'multi' ? state.multiPane : state.agentPanes[treeId.agentInstanceId];
+  return state.agentPanes[treeId.agentInstanceId];
 }
 
 function setAuxPane(state: AuxPanesState, treeId: AuxTreeId, pane: AuxTabbedPane): void {
-  if (treeId.kind === 'multi') state.multiPane = pane;
-  else state.agentPanes[treeId.agentInstanceId] = pane;
+  state.agentPanes[treeId.agentInstanceId] = pane;
 }
 
 function ensurePane(
@@ -96,7 +95,14 @@ function ensurePane(
   hasChain: boolean | undefined,
 ): AuxTabbedPane {
   const existing = getAuxPane(state, treeId);
-  if (existing) return existing;
+  if (existing) {
+    // A strip created before its agent's chain membership was known (focus
+    // carry-over) is seeded on first ensure.
+    if (existing.activeTabId === undefined && existing.tabs.length === 0 && hasChain !== undefined) {
+      existing.activeTabId = createDefaultAuxPane(hasChain).activeTabId;
+    }
+    return existing;
+  }
   setAuxPane(state, treeId, createDefaultAuxPane(hasChain !== false));
   return getAuxPane(state, treeId)!;
 }
@@ -321,6 +327,28 @@ const auxPanesSlice = createSlice({
       pane.isPaneOpen = !pane.isPaneOpen;
     },
 
+    /**
+     * Jetski RouteToReduxSync: when focus moves between panes of a split, the
+     * newly focused agent's strip takes over the previously focused strip's
+     * open/closed state (so the dock doesn't flicker shut or pop open).
+     */
+    carryAuxPaneOpenOnFocus(
+      state,
+      action: PayloadAction<{ from: AuxTreeId; to: AuxTreeId }>,
+    ) {
+      const { from, to } = action.payload;
+      if (from.agentInstanceId === to.agentInstanceId) return;
+      const wasOpen = Boolean(getAuxPane(state, from)?.isPaneOpen);
+      const target = getAuxPane(state, to);
+      if (Boolean(target?.isPaneOpen) === wasOpen) return;
+      if (target) {
+        target.isPaneOpen = wasOpen;
+      } else {
+        // Seeding waits for the agent's chain membership (see ensureAuxPane).
+        setAuxPane(state, to, { tabs: [], isPaneOpen: wasOpen });
+      }
+    },
+
     hydrateAuxPanes(_state, action: PayloadAction<unknown>) {
       return sanitizeAuxPanesState(action.payload);
     },
@@ -353,7 +381,7 @@ function sanitizePane(raw: any): AuxTabbedPane | null {
 }
 
 export function sanitizeAuxPanesState(raw: unknown): AuxPanesState {
-  const out: AuxPanesState = { agentPanes: {}, multiPane: undefined };
+  const out: AuxPanesState = { agentPanes: {} };
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
   const r = raw as any;
   if (r.agentPanes && typeof r.agentPanes === 'object' && !Array.isArray(r.agentPanes)) {
@@ -363,8 +391,6 @@ export function sanitizeAuxPanesState(raw: unknown): AuxPanesState {
       if (clean) out.agentPanes[agentId] = clean;
     }
   }
-  const multi = sanitizePane(r.multiPane);
-  if (multi) out.multiPane = multi;
   return out;
 }
 
@@ -379,6 +405,7 @@ export const {
   rekeyAuxTab,
   setAuxPaneOpen,
   toggleAuxPane,
+  carryAuxPaneOpenOnFocus,
   hydrateAuxPanes,
   resetAuxPanes,
 } = auxPanesSlice.actions;

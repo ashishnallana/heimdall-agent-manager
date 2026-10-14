@@ -3,8 +3,7 @@ import type { AuxContent } from './auxTabId';
 /**
  * Chain-participant guard for aux tabs that target another agent.
  *
- * - `subagentChat`: only participants of the OWNING agent's task chain (in
- *   split view the owner is the focused agent), never the owner itself (it is
+ * - `subagentChat`: only participants of the OWNING (focused) agent's task chain, never the owner itself (it is
  *   already in Main), and only once the participant list is known.
  * - `agentPty`: inside a chain, only participants (not blocked while members
  *   load, matching the pre-existing workbench guard); outside a chain, only
