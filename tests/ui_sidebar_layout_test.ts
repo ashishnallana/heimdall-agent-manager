@@ -49,3 +49,8 @@ test('hidden sidebar renders no rail; the toggle + app name are a FIXED top-left
   assert.match(source, /onClick=\{\(\) => \(isMobile \? setDrawerOpen\(!drawerOpen\) : toggleCollapsed\(\)\)\}/);
   assert.match(source, /localStorage\.setItem\('heimdall:shell:sidebar-collapsed'/);
 });
+
+test('mobile aux hides the fixed Heimdall and sidebar controls', () => {
+  assert.match(source, /const hideTopLeftCluster = isMobile && isWorkspaceRoute && isCurrentAuxPaneOpen/);
+  assert.match(source, /\{!hideTopLeftCluster \? \(\s*<div\s+data-debug-id="shell-top-left-cluster"/);
+});

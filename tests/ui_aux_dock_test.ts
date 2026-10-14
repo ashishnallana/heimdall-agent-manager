@@ -7,6 +7,11 @@ import { fileURLToPath } from 'node:url';
 import React from 'react';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const auxDockSource = fs.readFileSync(path.join(REPO_ROOT, 'src/ui/components/aux/AuxDock.tsx'), 'utf8');
+
+test('mobile aux sheet stays above fixed shell chrome while it transitions', () => {
+  assert.match(auxDockSource, /fixed inset-0 z-\[70\].*translate-x-full/s);
+});
 
 async function withDom<T>(fn: (dom: any) => Promise<T>): Promise<T> {
   const { JSDOM } = await import('jsdom');

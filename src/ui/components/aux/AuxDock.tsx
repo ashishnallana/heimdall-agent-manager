@@ -274,7 +274,7 @@ export function AuxDock({ treeId, ctx, isMobile = false, shown = true, reserveRi
   const width = dragWidth ?? storedWidth ?? AUX_DEFAULT_WIDTH;
   const animating = dragWidth === null;
   const containerClass = isMobile
-    ? `fixed inset-0 z-40 flex flex-col bg-canvas transition-transform duration-200 ease-out motion-reduce:transition-none ${
+    ? `fixed inset-0 z-[70] flex flex-col bg-canvas transition-transform duration-200 ease-out motion-reduce:transition-none ${
         shown ? 'translate-x-0' : 'translate-x-full'
       }`
     : isMaximized

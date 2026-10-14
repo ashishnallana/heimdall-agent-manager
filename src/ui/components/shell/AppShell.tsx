@@ -88,6 +88,7 @@ import LibraryPage from '../LibraryPage';
 import ArtifactViewer from '../ArtifactViewer';
 import { clearUserClientState } from '../../store/chatSlice';
 import { priorUserClientStateCleared } from '../../store/store';
+import { selectAuxPane, selectCurrentAuxTreeId } from '../../store/auxPanesSlice';
 
 type ShellRoute = {
   path: string;
@@ -1328,6 +1329,10 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
   const displayName = user.display_name || user.name || user.user_id || 'Current user';
 
   const dispatch = useDispatch();
+  const isCurrentAuxPaneOpen = useSelector((state: any) => {
+    const treeId = selectCurrentAuxTreeId(state);
+    return Boolean(selectAuxPane(state, treeId)?.isPaneOpen);
+  });
 
   // Vault state & onboarding modal
   const isVaultUnlocked = useSelector(selectIsVaultUnlocked);
@@ -1612,6 +1617,7 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
   const isEffectiveCollapsed = isMobile ? !drawerOpen : collapsed;
   const isWorkspaceRoute =
     (path.startsWith('/conversations/') && path !== '/conversations/new') || path.startsWith('/c/');
+  const hideTopLeftCluster = isMobile && isWorkspaceRoute && isCurrentAuxPaneOpen;
   // One toggle + app name control, FIXED at the window's top-left (it does not
   // move when the sidebar opens or closes).
   const sidebarToggleButton = (
@@ -1703,14 +1709,16 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
       {/* Jetski web: the sidebar toggle + app name are a FIXED top-left cluster
           that never moves; the sidebar slides open underneath it (its header
           reserves the cluster's space) and a hidden sidebar takes ZERO width. */}
-      <div
-        data-debug-id="shell-top-left-cluster"
-        className="absolute left-0 top-0 z-[60] flex items-center gap-1 px-2"
-        style={{ width: TOP_LEFT_CLUSTER_WIDTH, height: TOP_CHROME_HEIGHT }}
-      >
-        {sidebarToggleButton}
-        {brandLink}
-      </div>
+      {!hideTopLeftCluster ? (
+        <div
+          data-debug-id="shell-top-left-cluster"
+          className="absolute left-0 top-0 z-[60] flex items-center gap-1 px-2"
+          style={{ width: TOP_LEFT_CLUSTER_WIDTH, height: TOP_CHROME_HEIGHT }}
+        >
+          {sidebarToggleButton}
+          {brandLink}
+        </div>
+      ) : null}
       <aside
         data-debug-id={isEffectiveCollapsed ? 'shell-left-sidebar-hidden' : 'shell-left-sidebar-expanded'}
         aria-hidden={isEffectiveCollapsed}
