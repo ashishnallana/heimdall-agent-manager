@@ -27,6 +27,7 @@ import {
   updateAvailabilityLabel,
 } from './bridgeUpdate';
 import BridgeSettingsPanel from './BridgeSettingsPanel';
+import BridgeRecentErrorsCard from './BridgeRecentErrorsCard';
 
 // UI-11: Settings → Bridges. The user's machines (arch doc §6A).
 // List shows status dot, label, hostname/OS/arch, capabilities, instance count.
@@ -347,6 +348,7 @@ export default function BridgesPanel() {
                         </>
                       )}
                     </div>
+                    <BridgeRecentErrorsCard bridgeId={id} />
                   </div>
                 </div>
               );

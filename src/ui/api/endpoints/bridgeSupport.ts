@@ -58,6 +58,44 @@ export interface Bridge {
   vault_status?: string;
 }
 
+/** One row of GET /api/v1/bridges/{id}/events. `fields` values are enum names or ints. */
+export interface BridgeEvent {
+  id: number;
+  ts_ms: number;
+  received_at: number;
+  level: 'warn' | 'error' | string;
+  code: string;
+  fields: Record<string, string | number>;
+  count: number;
+  message: string;
+}
+
+export interface BridgeEventsPage {
+  bridge_id: string;
+  events: BridgeEvent[];
+  has_more: boolean;
+  next_before_id: number;
+}
+
+export function normalizeBridgeEventsPage(raw: any): BridgeEventsPage {
+  const events = Array.isArray(raw?.events) ? raw.events : [];
+  return {
+    bridge_id: String(raw?.bridge_id || ''),
+    events: events.map((e: any) => ({
+      id: Number(e?.id || 0),
+      ts_ms: Number(e?.ts_ms || 0),
+      received_at: Number(e?.received_at || 0),
+      level: String(e?.level || 'warn'),
+      code: String(e?.code || 'other'),
+      fields: e?.fields && typeof e.fields === 'object' ? e.fields : {},
+      count: Math.max(1, Number(e?.count || 1)),
+      message: String(e?.message || e?.code || ''),
+    })),
+    has_more: Boolean(raw?.has_more),
+    next_before_id: Number(raw?.next_before_id || 0),
+  };
+}
+
 export type BridgeCapability = {
   provider: string;
   models: string[];
@@ -197,6 +235,34 @@ export const bridgeSupportApi = heimdallApi.injectEndpoints({
       },
       invalidatesTags: (_result, _error, { bridgeId }) => [{ type: 'Bridges' as const, id: 'LIST' }, { type: 'Bridges' as const, id: bridgeId }],
     }),
+    // Bridge error events (bridge_logs plan v2 §4.4): the hub's per-bridge ring of
+    // structured warn/error events, with `message` rendered server-side. Owner
+    // scoped; a purge invalidates the same cache key.
+    listBridgeEvents: build.query<BridgeEventsPage, { bridgeId: string; limit?: number; beforeId?: number }>({
+      queryFn: async ({ bridgeId, limit, beforeId }) => {
+        try {
+          const params = new URLSearchParams();
+          params.set('limit', String(limit ?? 50));
+          if (beforeId) params.set('before_id', String(beforeId));
+          const data = await cookieJsonFetch(`/bridges/${encodeURIComponent(bridgeId)}/events?${params.toString()}`);
+          return { data: normalizeBridgeEventsPage(data) };
+        } catch (error: any) {
+          return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
+        }
+      },
+      providesTags: (_result, _error, { bridgeId }) => [{ type: 'Bridges' as const, id: `events:${bridgeId}` }],
+    }),
+    purgeBridgeEvents: build.mutation<any, { bridgeId: string }>({
+      queryFn: async ({ bridgeId }) => {
+        try {
+          const data = await cookieMutation(`/bridges/${encodeURIComponent(bridgeId)}/events`, 'DELETE');
+          return { data };
+        } catch (error: any) {
+          return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
+        }
+      },
+      invalidatesTags: (_result, _error, { bridgeId }) => [{ type: 'Bridges' as const, id: `events:${bridgeId}` }],
+    }),
     revokeBridge: build.mutation<any, { bridgeId: string }>({
       queryFn: async ({ bridgeId }) => {
         try {
@@ -272,6 +338,8 @@ export const {
   useRenameBridgeMutation,
   useUpdateBridgeTelemetryMutation,
   useRevokeBridgeMutation,
+  useListBridgeEventsQuery,
+  usePurgeBridgeEventsMutation,
   useUpdateBridgeMutation,
   useListBridgeProvidersQuery,
   usePutProjectBridgePathMutation,
