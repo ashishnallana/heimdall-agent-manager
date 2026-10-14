@@ -13,6 +13,7 @@ import auth_service "odin_test:hub/service/auth"
 import device_auth "odin_test:hub/service/device_auth"
 import domain "odin_test:hub/domain"
 import events "odin_test:hub/service/events"
+import project_service "odin_test:hub/service/project"
 import user_service "odin_test:hub/service/user"
 
 User_WS_Ticket :: struct {
@@ -138,18 +139,31 @@ user_ws_upgrade_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_Socke
 	} else {
 		auth_ctx, auth_ok, auth_err = auth_service.resolve_auth(handlers.auth, auth_service.Auth_Request{remote_addr = req.remote_addr, query = req.query, body = req.body, headers = req.headers})
 	}
-	if !auth_ok { write_http_response(client, respond_error(auth_err, req.request_id)); return }
+	if !auth_ok { project_service.ws_track_rejected(project_service.WS_KIND_USER, "auth_failed"); write_http_response(client, respond_error(auth_err, req.request_id)); return }
 	key := header_value(req.headers, "Sec-WebSocket-Key")
-	if key == "" { write_http_response(client, respond_error(domain.domain_error(.Validation_Failed, "missing websocket key"), req.request_id)); return }
-	if !write_user_ws_upgrade_response(client, user_ws_accept_key(key)) do return
+	if key == "" { project_service.ws_track_rejected(project_service.WS_KIND_USER, "bad_request"); write_http_response(client, respond_error(domain.domain_error(.Validation_Failed, "missing websocket key"), req.request_id)); return }
+	if !write_user_ws_upgrade_response(client, user_ws_accept_key(key)) { project_service.ws_track_rejected(project_service.WS_KIND_USER, "other"); return }
+	// Telemetry (plan 3.4). Event fan-out bytes (tx) are counted by the event bus;
+	// rx bytes and the close reason here. The user WS carries no bridge_id.
+	ws_opened := project_service.ws_track_open(project_service.WS_KIND_USER)
+	ws_close_reason := "error"
+	defer project_service.ws_track_close(project_service.WS_KIND_USER, ws_opened, ws_close_reason)
+	ws_rx := ws_bytes_series(project_service.WS_KIND_USER, "rx", "")
+	ws_tx := ws_bytes_series(project_service.WS_KIND_USER, "tx", "")
 	idx := events.user_ws_add(handlers.event_bus, auth_ctx.user_id, client)
 	defer events.user_ws_remove(handlers.event_bus, idx)
-	_ = events.write_ws_text_frame(client, "{\"type\":\"user_ws_ready\",\"protocol_version\":1}")
+	ready := "{\"type\":\"user_ws_ready\",\"protocol_version\":1}"
+	ws_note_write_ok(project_service.WS_KIND_USER, ws_tx, events.write_ws_text_frame(client, ready), len(ready))
 	for {
 		// The browser client sends lightweight heartbeat frames every ~25s. Keep the
 		// server idle timeout comfortably above that so normal sockets do not churn,
 		// while still eventually collecting half-open dead connections.
-		if _, frame_ok := read_user_ws_text_blocking(client, 120 * time.Second); !frame_ok do return
+		frame, frame_ok, why := read_user_ws_text_blocking_reason(client, 120 * time.Second)
+		if !frame_ok {
+			ws_close_reason = why
+			return
+		}
+		ws_note_rx(ws_rx, len(frame))
 	}
 }
 
@@ -282,12 +296,25 @@ user_ws_accept_key :: proc(key: string) -> string {
 }
 
 read_user_ws_text_blocking :: proc(client: net.TCP_Socket, timeout: time.Duration) -> (string, bool) {
+	text, ok, _ := read_user_ws_text_blocking_reason(client, timeout)
+	return text, ok
+}
+
+// read_user_ws_text_blocking_reason is read_user_ws_text_blocking plus WHY the read
+// ended, in heimdall_ws_disconnects_total vocabulary. The returned string aliases a
+// stack buffer and is only valid until the next call (as before).
+read_user_ws_text_blocking_reason :: proc(client: net.TCP_Socket, timeout: time.Duration) -> (string, bool, string) {
 	_ = net.set_option(client, .Receive_Timeout, timeout)
 	buf: [1024]byte
 	n, err := net.recv_tcp(client, buf[:])
-	if err != nil || n < 2 do return "", false
-	if (buf[0] & 0x0f) == 0x8 do return "", false
-	return string(buf[:n]), true
+	if err != nil {
+		if err == net.TCP_Recv_Error.Would_Block || err == net.TCP_Recv_Error.Timeout do return "", false, "read_deadline"
+		return "", false, "recv_error"
+	}
+	if n <= 0 do return "", false, "clean_close"
+	if n < 2 do return "", false, "fatal_frame"
+	if (buf[0] & 0x0f) == 0x8 do return "", false, "clean_close"
+	return string(buf[:n]), true, ""
 }
 
 write_handler_json_string :: proc(builder: ^strings.Builder, value: string) {

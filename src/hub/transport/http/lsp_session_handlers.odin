@@ -39,6 +39,7 @@ import platform "odin_test:hub/platform"
 import iface "odin_test:hub/repository/iface"
 import bridge_service "odin_test:hub/service/bridge"
 import project_service "odin_test:hub/service/project"
+import metrics "odin_test:lib/metrics"
 import ws "odin_test:lib/ws"
 
 
@@ -284,7 +285,7 @@ lsp_registry_wake_bridge_sessions :: proc(reg: ^Lsp_Session_Registry, bridge_id:
 		// closing when the relay unwinds.
 		_ = net.set_option(entry.socket, .Send_Timeout, LSP_TEARDOWN_SEND_TIMEOUT)
 		frame := lsp_error_frame(entry.session_id, "bridge disconnected")
-		_ = lsp_write_ws_text_frame(entry.socket, frame)
+		ws_note_write_ok(project_service.WS_KIND_LSP, ws_bytes_series(project_service.WS_KIND_LSP, "tx", ""), lsp_write_ws_text_frame(entry.socket, frame), len(frame))
 		delete(frame)
 		// Wake the parked reader; it owns the close.
 		_ = net.shutdown(entry.socket, .Receive)
@@ -304,6 +305,7 @@ lsp_registry_deliver :: proc(reg: ^Lsp_Session_Registry, wire_id, text: string) 
 	entry, found := reg.by_wire[wire_id]
 	if !found || entry == nil do return false
 	res := ws.write_server_text(entry.socket, text, true)
+	ws_note_write(project_service.WS_KIND_LSP, ws_bytes_series(project_service.WS_KIND_LSP, "tx", ""), res, len(text))
 	if res == .Ok do return true
 
 	// The write did not complete: either the peer is wedged (sent == 0, the send
@@ -634,29 +636,34 @@ lsp_session_stream_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_So
 
 	ticket := query_value(req.query, "ticket")
 	if ticket == "" {
+		project_service.ws_track_rejected(project_service.WS_KIND_LSP, "auth_failed")
 		write_http_response(client, respond_error(domain.domain_error(.Unauthenticated, "websocket ticket required for lsp stream"), req.request_id))
 		return
 	}
 	auth_ctx, auth_ok := user_ws_ticket_store_consume(h.ws_tickets, ticket)
 	if !auth_ok {
+		project_service.ws_track_rejected(project_service.WS_KIND_LSP, "auth_failed")
 		write_http_response(client, respond_error(domain.domain_error(.Unauthenticated, "websocket ticket is invalid or expired"), req.request_id))
 		return
 	}
 
 	// Experiment gate (REQ-EXP-1): with the flag off the route refuses outright.
 	if !lsp_experiment_enabled(h.experiments, auth_ctx.user_id) {
+		project_service.ws_track_rejected(project_service.WS_KIND_LSP, "auth_failed")
 		write_http_response(client, respond_error(domain.domain_error(.Forbidden, "the lsp experiment is not enabled for this user"), req.request_id))
 		return
 	}
 
 	session_id := path_part(req.path, 4)
 	if session_id == "" || strings.contains(session_id, "/") {
+		project_service.ws_track_rejected(project_service.WS_KIND_LSP, "bad_request")
 		write_http_response(client, respond_error(domain.domain_error(.Validation_Failed, "session id is required"), req.request_id))
 		return
 	}
 
 	key := header_value(req.headers, "Sec-WebSocket-Key")
 	if key == "" {
+		project_service.ws_track_rejected(project_service.WS_KIND_LSP, "bad_request")
 		write_http_response(client, respond_error(domain.domain_error(.Validation_Failed, "missing websocket key"), req.request_id))
 		return
 	}
@@ -677,6 +684,7 @@ lsp_session_stream_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_So
 	generated := ""
 	if h.ids != nil do generated = platform.generate_id(h.ids, "lsp_")
 	if generated == "" {
+		project_service.ws_track_rejected(project_service.WS_KIND_LSP, "other")
 		write_http_response(client, respond_error(domain.domain_error(.Internal_Error, "could not allocate an lsp session id"), req.request_id))
 		return
 	}
@@ -685,16 +693,31 @@ lsp_session_stream_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_So
 
 	entry, claimed := lsp_registry_claim(h.sessions, auth_ctx.user_id, session_id, wire_id, client)
 	if !claimed {
+		project_service.ws_track_rejected(project_service.WS_KIND_LSP, "conflict")
 		write_http_response(client, respond_error(domain.domain_error(.Conflict, "an lsp session with this id is already open"), req.request_id))
 		return
 	}
 	// From here the entry owns its strings; release frees them and unregisters.
 	defer lsp_registry_release(h.sessions, wire_id)
 
-	if !write_user_ws_upgrade_response(client, user_ws_accept_key(key)) do return
+	if !write_user_ws_upgrade_response(client, user_ws_accept_key(key)) {
+		project_service.ws_track_rejected(project_service.WS_KIND_LSP, "other")
+		return
+	}
+
+	// Telemetry (plan 3.4/3.6). LSP streams carry no bridge_id on ws_bytes (the
+	// bridge is chosen per "start" frame, after the connection exists). Bridge->browser
+	// frames are counted in lsp_registry_deliver; handler-originated frames here.
+	ws_opened := project_service.ws_track_open(project_service.WS_KIND_LSP)
+	ws_close_reason := "error"
+	defer project_service.ws_track_close(project_service.WS_KIND_LSP, ws_opened, ws_close_reason)
+	ws_rx := ws_bytes_series(project_service.WS_KIND_LSP, "rx", "")
+	ws_tx := ws_bytes_series(project_service.WS_KIND_LSP, "tx", "")
+	lsp_gauge: ^metrics.Series // heimdall_lsp_sessions{language} while started
+	defer if lsp_gauge != nil do lsp_session_stopped(lsp_gauge)
 
 	ready := lsp_simple_frame("ready", session_id)
-	_ = lsp_write_ws_text_frame(client, ready)
+	ws_note_write_ok(project_service.WS_KIND_LSP, ws_tx, lsp_write_ws_text_frame(client, ready), len(ready))
 	delete(ready)
 
 	reader := lsp_ws_reader_make(client)
@@ -719,8 +742,12 @@ lsp_session_stream_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_So
 
 	for {
 		text, ok := lsp_read_ws_text_blocking(&reader, LSP_IDLE_TIMEOUT)
-		if !ok do return
+		if !ok {
+			ws_close_reason = lsp_ws_close_reason(h.sessions, wire_id, reader.disconnect_reason)
+			return
+		}
 		defer delete(text)
+		ws_note_rx(ws_rx, len(text))
 
 		frame_type := json_string(text, "type")
 		defer delete(frame_type)
@@ -729,7 +756,7 @@ lsp_session_stream_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_So
 		case "start":
 			if started_bridge_id != "" {
 				frame := lsp_error_frame(session_id, "session is already started")
-				_ = lsp_write_ws_text_frame(client, frame)
+				ws_note_write_ok(project_service.WS_KIND_LSP, ws_tx, lsp_write_ws_text_frame(client, frame), len(frame))
 				delete(frame)
 				continue
 			}
@@ -745,7 +772,7 @@ lsp_session_stream_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_So
 			}
 			if strings.trim_space(bridge_id) == "" || strings.trim_space(language) == "" {
 				frame := lsp_error_frame(session_id, "start requires bridge_id and language")
-				_ = lsp_write_ws_text_frame(client, frame)
+				ws_note_write_ok(project_service.WS_KIND_LSP, ws_tx, lsp_write_ws_text_frame(client, frame), len(frame))
 				delete(frame)
 				continue
 			}
@@ -753,7 +780,7 @@ lsp_session_stream_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_So
 			cfg, resolved := lsp_resolve_server(h.lsp_configs, auth_ctx.user_id, bridge_id, language, file_path)
 			if !resolved {
 				frame := lsp_error_frame(session_id, "no lsp server is configured for this language and path")
-				_ = lsp_write_ws_text_frame(client, frame)
+				ws_note_write_ok(project_service.WS_KIND_LSP, ws_tx, lsp_write_ws_text_frame(client, frame), len(frame))
 				delete(frame)
 				continue
 			}
@@ -770,18 +797,19 @@ lsp_session_stream_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_So
 			)
 			if !sent {
 				frame := lsp_error_frame(session_id, send_err.message)
-				_ = lsp_write_ws_text_frame(client, frame)
+				ws_note_write_ok(project_service.WS_KIND_LSP, ws_tx, lsp_write_ws_text_frame(client, frame), len(frame))
 				delete(frame)
 				continue
 			}
 			started_bridge_id = strings.clone(bridge_id)
 			lsp_registry_mark_started(h.sessions, wire_id, bridge_id)
+			lsp_gauge = lsp_session_started(language)
 			_ = entry
 
 		case "send":
 			if started_bridge_id == "" {
 				frame := lsp_error_frame(session_id, "session is not started")
-				_ = lsp_write_ws_text_frame(client, frame)
+				ws_note_write_ok(project_service.WS_KIND_LSP, ws_tx, lsp_write_ws_text_frame(client, frame), len(frame))
 				delete(frame)
 				continue
 			}
@@ -796,13 +824,29 @@ lsp_session_stream_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_So
 			delete(started_bridge_id)
 			started_bridge_id = ""
 			lsp_registry_mark_stopped(h.sessions, wire_id)
+			if lsp_gauge != nil { lsp_session_stopped(lsp_gauge); lsp_gauge = nil }
 
 		case "ping":
 			frame := lsp_simple_frame("pong", session_id)
-			_ = lsp_write_ws_text_frame(client, frame)
+			ws_note_write_ok(project_service.WS_KIND_LSP, ws_tx, lsp_write_ws_text_frame(client, frame), len(frame))
 			delete(frame)
 		}
 	}
+}
+
+// lsp_ws_close_reason picks the heimdall_ws_disconnects_total reason for an LSP
+// relay that is unwinding: a session the hub itself marked dead (bridge gone, or a
+// failed write — both wake the reader with shutdown(.Receive), which the reader sees
+// as a clean close) reports WHY it was marked, otherwise the reader's own reason.
+lsp_ws_close_reason :: proc(reg: ^Lsp_Session_Registry, wire_id: string, read_reason: ws.Frame_Disconnect_Reason) -> string {
+	if reg != nil {
+		sync.mutex_lock(&reg.mu)
+		defer sync.mutex_unlock(&reg.mu)
+		if entry, found := reg.by_wire[wire_id]; found && entry != nil && entry.closing {
+			return "bridge_offline" if entry.bridge_gone else "write_failed"
+		}
+	}
+	return ws_disconnect_reason_string(read_reason)
 }
 
 // auth_ctx is carried by value into the teardown defer above; this reference keeps

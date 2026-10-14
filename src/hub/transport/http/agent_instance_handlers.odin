@@ -9,6 +9,7 @@ import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 import agent_service "odin_test:hub/service/agent"
+import project_service "odin_test:hub/service/project"
 import shell_session_svc "odin_test:hub/service/shell_session"
 
 // POST /api/v1/agent-instances/{id}/input
@@ -87,11 +88,13 @@ agent_instance_stream_handler :: proc(ctx: rawptr, req: Request, client: net.TCP
 	ticket := query_value(req.query, "ticket")
 	if ticket != "" {
 		if h.ws_tickets == nil {
+			project_service.ws_track_rejected(project_service.WS_KIND_AGENT_STREAM, "auth_failed")
 			write_stream_error(client, respond_error(domain.domain_error(.Unauthenticated, "ticket store not configured"), req.request_id))
 			return
 		}
 		c, ok := user_ws_ticket_store_consume(h.ws_tickets, ticket)
 		if !ok {
+			project_service.ws_track_rejected(project_service.WS_KIND_AGENT_STREAM, "auth_failed")
 			write_stream_error(client, respond_error(domain.domain_error(.Unauthenticated, "websocket ticket is invalid or expired"), req.request_id))
 			return
 		}
@@ -99,61 +102,81 @@ agent_instance_stream_handler :: proc(ctx: rawptr, req: Request, client: net.TCP
 	} else if h.auth != nil {
 		c, ok, resp := require_auth(h.auth, req)
 		if !ok {
+			project_service.ws_track_rejected(project_service.WS_KIND_AGENT_STREAM, "auth_failed")
 			write_stream_error(client, resp)
 			return
 		}
 		auth_ctx = c
 	} else {
+		project_service.ws_track_rejected(project_service.WS_KIND_AGENT_STREAM, "auth_failed")
 		write_stream_error(client, respond_error(domain.domain_error(.Unauthenticated, "authentication required for agent instance stream"), req.request_id))
 		return
 	}
 
 	// Experiment gate (REQ-STREAM-IMPL-4): with the flag off the route refuses.
 	if !shell_stream_experiment_enabled(h.experiments, auth_ctx.user_id) {
+		project_service.ws_track_rejected(project_service.WS_KIND_AGENT_STREAM, "auth_failed")
 		write_stream_error(client, respond_error(domain.domain_error(.Forbidden, "the streaming_terminal_pane experiment is not enabled for this user"), req.request_id))
 		return
 	}
 
 	instance_id := path_part(req.path, 4)
 	if instance_id == "" || strings.contains(instance_id, "/") {
+		project_service.ws_track_rejected(project_service.WS_KIND_AGENT_STREAM, "not_found")
 		write_stream_error(client, respond_error(domain.domain_error(.Not_Found, "agent instance not found"), req.request_id))
 		return
 	}
 
 	if h.agents == nil || h.agents.agents == nil {
+		project_service.ws_track_rejected(project_service.WS_KIND_AGENT_STREAM, "other")
 		write_stream_error(client, respond_error(domain.domain_error(.Internal_Error, "agent service is not configured"), req.request_id))
 		return
 	}
 
 	inst, got, err := iface.agent_get_instance(h.agents.agents, instance_id)
 	if !got || err.code != .None {
+		project_service.ws_track_rejected(project_service.WS_KIND_AGENT_STREAM, "not_found")
 		write_stream_error(client, respond_error(domain.domain_error(.Not_Found, "agent instance not found"), req.request_id))
 		return
 	}
 
 	if string(inst.owner_user_id) != auth_ctx.user_id {
+		project_service.ws_track_rejected(project_service.WS_KIND_AGENT_STREAM, "auth_failed")
 		write_stream_error(client, respond_error(domain.domain_error(.Forbidden, "not the instance owner"), req.request_id))
 		return
 	}
 
 	if strings.trim_space(inst.bridge_id) == "" {
+		project_service.ws_track_rejected(project_service.WS_KIND_AGENT_STREAM, "bridge_offline")
 		write_stream_error(client, respond_error(domain.domain_error(.Bridge_Offline, "agent instance has no bridge"), req.request_id))
 		return
 	}
 
 	key := header_value(req.headers, "Sec-WebSocket-Key")
 	if key == "" {
+		project_service.ws_track_rejected(project_service.WS_KIND_AGENT_STREAM, "bad_request")
 		write_stream_error(client, respond_error(domain.domain_error(.Validation_Failed, "missing websocket key"), req.request_id))
 		return
 	}
-	if !write_user_ws_upgrade_response(client, user_ws_accept_key(key)) do return
+	if !write_user_ws_upgrade_response(client, user_ws_accept_key(key)) {
+		project_service.ws_track_rejected(project_service.WS_KIND_AGENT_STREAM, "other")
+		return
+	}
+
+	// Telemetry (plan 3.4): open from here to handler return. tx bytes are counted by
+	// the pane viewer writer, which owns every write to this socket; rx bytes and the
+	// close reason are counted here.
+	ws_opened := project_service.ws_track_open(project_service.WS_KIND_AGENT_STREAM)
+	ws_close_reason := "error"
+	defer project_service.ws_track_close(project_service.WS_KIND_AGENT_STREAM, ws_opened, ws_close_reason)
+	ws_rx := ws_bytes_series(project_service.WS_KIND_AGENT_STREAM, "rx", inst.bridge_id)
 
 	// REQ-SHELL-29: same late-join hole as the shells pane — both consume the identical
 	// `screen` frame and both funnel through shell_session_attach. See the shells handler.
 	late_join := false
 	screen_sent := false
 	if h.shell_sessions != nil {
-		late_join = shell_session_svc.shell_session_attach(h.shell_sessions, instance_id, client, inst.bridge_id)
+		late_join = shell_session_svc.shell_session_attach(h.shell_sessions, instance_id, client, inst.bridge_id, project_service.WS_KIND_AGENT_STREAM)
 	}
 	defer {
 		if h.shell_sessions != nil {
@@ -201,8 +224,13 @@ agent_instance_stream_handler :: proc(ctx: rawptr, req: Request, client: net.TCP
 	defer bridge_ws_reader_destroy(&reader)
 
 	for {
-		text, ok := read_ws_text_blocking(&reader, 120 * time.Second)
-		if !ok do return
+		// Same read as read_ws_text_blocking; the reason feeds ws_disconnects_total only.
+		text, ok, why := bridge_ws_read_frame(&reader, 120 * time.Second)
+		if !ok {
+			ws_close_reason = bridge_ws_reason_string(why)
+			return
+		}
+		ws_note_rx(ws_rx, len(text))
 
 		frame_type := json_string(text, "type")
 
