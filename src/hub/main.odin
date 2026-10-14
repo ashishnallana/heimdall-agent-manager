@@ -222,6 +222,11 @@ parse_args :: proc(config: ^app.Hub_Config) {
 	if v := os.get_env_alloc("HEIMDALL_METRICS_ADDR", context.allocator); v != "" {
 		config.metrics_addr = v
 	}
+	// log_push_url resolves default (off) -> env -> flag. Loopback by convention
+	// (VictoriaLogs on 127.0.0.1:9428 in tools/telemetry/hub).
+	if v := os.get_env_alloc("HEIMDALL_LOG_PUSH_URL", context.allocator); v != "" {
+		config.log_push_url = v
+	}
 	for i := 1; i < len(os.args); i += 1 {
 		arg := os.args[i]
 		if arg == "--listen" && i + 1 < len(os.args) {
@@ -266,6 +271,8 @@ parse_args :: proc(config: ^app.Hub_Config) {
 			config.public_app_origin = strings.clone(os.args[i + 1]); i += 1
 		} else if arg == "--metrics-addr" && i + 1 < len(os.args) {
 			config.metrics_addr = strings.clone(os.args[i + 1]); i += 1
+		} else if arg == "--log-push-url" && i + 1 < len(os.args) {
+			config.log_push_url = strings.clone(os.args[i + 1]); i += 1
 		} else if arg == "--reaper-interval-seconds" && i + 1 < len(os.args) {
 			if parsed, ok := strconv.parse_int(os.args[i + 1]); ok do config.reaper_interval_seconds = int(parsed)
 			i += 1

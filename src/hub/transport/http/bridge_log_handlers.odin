@@ -324,7 +324,7 @@ bridge_events_purge_handler :: proc(ctx: rawptr, req: Request) -> Response {
 }
 
 write_bridge_log_event_json :: proc(b: ^strings.Builder, e: domain.Bridge_Log_Event) {
-	message := bridge_log_render_message(e.code, e.fields_json, context.temp_allocator)
+	message := bridge_log_service.render_message(e.code, e.fields_json, context.temp_allocator)
 	strings.write_string(b, "{\"id\":")
 	strings.write_i64(b, e.id)
 	strings.write_string(b, ",\"ts_ms\":")

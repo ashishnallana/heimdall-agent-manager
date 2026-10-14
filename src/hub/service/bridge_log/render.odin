@@ -1,4 +1,4 @@
-package http
+package bridge_log
 
 import "core:strconv"
 import "core:strings"
@@ -6,13 +6,13 @@ import contracts "odin_test:contracts"
 
 // Server-side rendering of bridge error events (bridge_logs plan v2 §4.4).
 // The bridge ships only `code` + typed fields; THIS table is the single source
-// of human text, so copy improves without a bridge upgrade and nothing
-// free-form ever crosses the wire. Every Bridge_Log_Code has an entry
-// (bridge_log_render_test checks that), and "other" covers a code from a
-// bridge newer than this hub.
+// of human text — the owner API and the optional log-backend push both use
+// it — so copy improves without a bridge upgrade and nothing free-form ever
+// crosses the wire. Every Bridge_Log_Code has an entry (the http render test
+// checks that), and "other" covers a code from a bridge newer than this hub.
 
 // bridge_log_render_title gives the headline for a code.
-bridge_log_render_title :: proc(code: string) -> string {
+render_title :: proc(code: string) -> string {
 	c, known := contracts.bridge_log_code_from_name(code)
 	if !known do return "Bridge reported an event this hub does not recognise (bridge newer than hub)"
 	switch c {
@@ -58,13 +58,13 @@ bridge_log_render_title :: proc(code: string) -> string {
 // bridge_log_render_message renders "<title> (key: value, …)" from the stored,
 // already-normalised fields object. Field values are enum names or integers, so
 // the output is safe to show as-is; a couple of keys get units/labels.
-bridge_log_render_message :: proc(code, fields_json: string, allocator := context.allocator) -> string {
+render_message :: proc(code, fields_json: string, allocator := context.allocator) -> string {
 	b := strings.builder_make(allocator)
-	strings.write_string(&b, bridge_log_render_title(code))
+	strings.write_string(&b, render_title(code))
 	first := true
 	keys := contracts.BRIDGE_LOG_KEY_NAMES
 	for key_name, key in keys {
-		raw, found := bridge_log_field_raw(fields_json, key_name)
+		raw, found := field_raw(fields_json, key_name)
 		if !found do continue
 		strings.write_string(&b, " (" if first else ", ")
 		first = false
@@ -101,7 +101,7 @@ bridge_log_render_message :: proc(code, fields_json: string, allocator := contex
 
 // bridge_log_field_raw returns the unparsed scalar after `"key":` in a flat
 // object (the stored fields_json is flat by construction).
-bridge_log_field_raw :: proc(obj, key: string) -> (string, bool) {
+field_raw :: proc(obj, key: string) -> (string, bool) {
 	needle_buf: [48]byte
 	if len(key) + 3 > len(needle_buf) do return "", false
 	n := copy(needle_buf[:], "\"")

@@ -6,6 +6,7 @@ import "core:testing"
 import "core:time"
 import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
+import bridge_log_service "odin_test:hub/service/bridge_log"
 import project_service "odin_test:hub/service/project"
 import metrics "odin_test:lib/metrics"
 
@@ -223,22 +224,22 @@ test_bridge_log_set_telemetry_payload_two_flags :: proc(t: ^testing.T) {
 
 @(test)
 test_bridge_log_render_covers_every_code :: proc(t: ^testing.T) {
-	generic := bridge_log_render_title("definitely_unknown")
+	generic := bridge_log_service.render_title("definitely_unknown")
 	for code in contracts.Bridge_Log_Code {
 		name := contracts.bridge_log_code_name(code)
-		title := bridge_log_render_title(name)
+		title := bridge_log_service.render_title(name)
 		testing.expectf(t, title != "" && title != generic && title != "Bridge event", "code %s has its own rendering", name)
 	}
-	msg := bridge_log_render_message("agent_exited_early", `{"provider":"codex","exit_code":1,"duration_ms":2500}`)
+	msg := bridge_log_service.render_message("agent_exited_early", `{"provider":"codex","exit_code":1,"duration_ms":2500}`)
 	defer delete(msg)
 	testing.expect_value(t, msg, "Agent exited right after launch (provider: codex, exit code 1, after 2 s)")
-	msg2 := bridge_log_render_message("hub_connect_failed", `{"stage":"ws_upgrade","hub_status":401}`)
+	msg2 := bridge_log_service.render_message("hub_connect_failed", `{"stage":"ws_upgrade","hub_status":401}`)
 	defer delete(msg2)
 	testing.expect_value(t, msg2, "Could not connect to the hub (stage: ws_upgrade, HTTP 401)")
-	msg3 := bridge_log_render_message("other", "{}")
+	msg3 := bridge_log_service.render_message("other", "{}")
 	defer delete(msg3)
 	testing.expect_value(t, msg3, generic)
-	msg4 := bridge_log_render_message("hub_ws_closed", `{"reason":"replaced","duration_ms":250}`)
+	msg4 := bridge_log_service.render_message("hub_ws_closed", `{"reason":"replaced","duration_ms":250}`)
 	defer delete(msg4)
 	testing.expect_value(t, msg4, "Connection to the hub closed; reconnecting (reason: replaced, after 250 ms)")
 

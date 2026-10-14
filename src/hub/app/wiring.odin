@@ -1,6 +1,7 @@
 package app
 
 import "core:fmt"
+import "core:strings"
 import "core:sync"
 import "core:time"
 import iface "odin_test:hub/repository/iface"
@@ -62,6 +63,7 @@ App_Graph :: struct {
 	// bridge_log relay: queue + the one writer thread (started in build_graph,
 	// joined in shutdown_graph).
 	bridge_logs: bridge_log_service.Service,
+	bridge_log_push: bridge_log_service.Push_Client,
 	sqlite_uow_factory: sqlite.SQLite_Unit_Of_Work_Factory,
 	repos: iface.Repositories,
 	uow_factory: iface.Unit_Of_Work_Factory,
@@ -188,6 +190,10 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 	graph.lsp_server_config_repo = sqlite.new_lsp_server_config_repository(&graph.sqlite_lsp_server_configs, &graph.db)
 	graph.bridge_log_repo = sqlite.new_bridge_log_repository(&graph.sqlite_bridge_logs, &graph.db)
 	graph.bridge_logs = bridge_log_service.new_service(&graph.bridge_log_repo)
+	if strings.trim_space(config.log_push_url) != "" {
+		graph.bridge_log_push = bridge_log_service.new_push_client(config.log_push_url)
+		bridge_log_service.install_push(&graph.bridge_logs, &graph.bridge_log_push)
+	}
 	graph.provider_repo = sqlite.new_provider_repository(&graph.sqlite_providers, &graph.db)
 	graph.repos.user_vaults = sqlite.new_user_vault_repository(&graph.sqlite_user_vaults, &graph.db)
 	graph.uow_factory = sqlite.new_unit_of_work_factory(&graph.sqlite_uow_factory, &graph.db, &graph.repos)
