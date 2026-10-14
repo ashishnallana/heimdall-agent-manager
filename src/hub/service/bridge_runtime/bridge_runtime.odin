@@ -12,6 +12,7 @@ import bridge_service "odin_test:hub/service/bridge"
 import project_service "odin_test:hub/service/project"
 import ws "odin_test:lib/ws"
 import jsonx "odin_test:lib/jsonx"
+import metrics "odin_test:lib/metrics"
 import "odin_test:contracts"
 
 // new_bridge_connection_closer builds the REQ-IMPL-3 / audit-F6 teardown seam: the
@@ -56,7 +57,21 @@ send_runtime_command :: proc(ctx: rawptr, command: project_service.Runtime_Comma
 	wrote := write_ws_command(socket, command.body_json)
 	if wrote == .Send_Failed do _ = net.shutdown(net.Any_Socket(socket), .Both)
 	if wrote != .Ok do return false, command_write_error(wrote)
+	bridge_command_track_sent(connection, command.body_json)
 	return true, domain.Domain_Error{}
+}
+
+// bridge_command_track_sent records one hub->bridge frame on the connection's
+// cached byte series and the fleet-wide frames counter. The `type` key sits at
+// the front of every command body, so the extraction is cheap; the result is
+// mapped onto a fixed enum before it becomes a label.
+bridge_command_track_sent :: proc(connection: ^project_service.Bridge_Runtime_Connection, body_json: string) -> string {
+	metrics.counter_add(connection.tx_bytes, u64(len(body_json)))
+	frame_type := jsonx.extract_string(body_json, "type")
+	defer delete(frame_type)
+	kind := project_service.bridge_frame_kind(frame_type)
+	metrics.counter_inc(metrics.with(project_service.fleet_metrics.bridge_ws_frames, "tx", kind))
+	return kind
 }
 
 send_runtime_command_wait :: proc(ctx: rawptr, command: project_service.Runtime_Command, timeout_ms: int) -> (string, bool, domain.Domain_Error) {
@@ -81,6 +96,20 @@ send_runtime_command_wait :: proc(ctx: rawptr, command: project_service.Runtime_
 	if wrote == .Send_Failed do _ = net.shutdown(net.Any_Socket(socket), .Both)
 	sync.unlock(writer_mu)
 	if wrote != .Ok do return "", false, command_write_error(wrote)
+	command_kind := bridge_command_track_sent(connection, command.body_json)
+	started := time.tick_now()
+	result_text, result_ok, result_err := send_runtime_command_wait_result(registry, connection, command, generation, timeout_ms)
+	metrics.observe_duration(metrics.with(project_service.fleet_metrics.bridge_command_duration, command_kind), time.tick_since(started))
+	if !result_ok {
+		code_name := fmt.tprint(result_err.code)
+		metrics.counter_inc(metrics.with(project_service.fleet_metrics.bridge_command_errors, command_kind, project_service.bridge_command_error_code(code_name)))
+	}
+	return result_text, result_ok, result_err
+}
+
+// send_runtime_command_wait_result is the wait half of send_runtime_command_wait,
+// split out so the round trip can be timed and classified in one place.
+send_runtime_command_wait_result :: proc(registry: ^project_service.Bridge_Runtime_Registry, connection: ^project_service.Bridge_Runtime_Connection, command: project_service.Runtime_Command, generation: int, timeout_ms: int) -> (string, bool, domain.Domain_Error) {
 	// The generated command id may come from a per-thread temporary ring. Keep an
 	// owned copy stable while the condition wait releases this thread.
 	wait_id := strings.clone(command.command_id)

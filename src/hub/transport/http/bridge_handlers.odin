@@ -27,6 +27,7 @@ import taskchain_service "odin_test:hub/service/taskchain"
 import ws "odin_test:lib/ws"
 import shell_session_svc "odin_test:hub/service/shell_session"
 import jsonx "odin_test:lib/jsonx"
+import metrics "odin_test:lib/metrics"
 
 Bridge_Handlers :: struct {
 	auth: ^auth_service.Auth_Service,
@@ -1253,13 +1254,18 @@ bridge_ws_upgrade_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_Soc
 	validation_url := json_string(hello_text, "validation_ws_url"); defer delete(validation_url)
 	body_bridge_id := json_string(hello_text, "bridge_id"); defer delete(body_bridge_id)
 	bridge_auth, auth_ok, auth_err := bridge_service.verify_bridge_token(h.bridges, token)
-	if !auth_ok { _ = write_ws_text_frame(client, bridge_ws_error_payload(auth_err.message)); return }
+	// Unauthenticated attempts carry no trustworthy bridge_id: they share one series.
+	if !auth_ok { bridge_metrics_connect_result(BRIDGE_ID_UNKNOWN, "auth_failed"); _ = write_ws_text_frame(client, bridge_ws_error_payload(auth_err.message)); return }
 	admitted_bridge, found, lookup_err := iface.bridge_get_bridge(h.bridges.repo, bridge_auth.bridge_id)
-	if !found { _ = write_ws_text_frame(client, bridge_ws_error_payload(lookup_err.message)); return }
+	if !found { bridge_metrics_connect_result(BRIDGE_ID_UNKNOWN, "auth_failed"); _ = write_ws_text_frame(client, bridge_ws_error_payload(lookup_err.message)); return }
 	defer domain.bridge_destroy(&admitted_bridge)
 	if body_bridge_id != "" && body_bridge_id != admitted_bridge.bridge_id { _ = write_ws_text_frame(client, bridge_ws_error_payload("bridge_id does not match bearer token")); return }
 	hello, hello_ok, hello_err := bridge_runtime_service.runtime_accept_hello(h.bridge_runtime_registry, admitted_bridge.bridge_id, json_int(hello_text, "protocol_version", 1), validation_url, string(admitted_bridge.owner_user_id), bridge_connection_replaced_payload())
-	if !hello_ok { _ = write_ws_text_frame(client, bridge_ws_error_payload(hello_err.message)); return }
+	if !hello_ok {
+		bridge_metrics_connect_result(admitted_bridge.bridge_id, "limit" if hello_err.code == .Bridge_Busy else "hello_rejected")
+		_ = write_ws_text_frame(client, bridge_ws_error_payload(hello_err.message))
+		return
+	}
 	connection := project_service.bridge_runtime_connection_acquire(h.bridge_runtime_registry, admitted_bridge.bridge_id, hello.generation)
 	if connection == nil do return
 	reader.control_context = rawptr(connection)
@@ -1273,8 +1279,14 @@ bridge_ws_upgrade_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_Soc
 	if sync.atomic_load(&connection.retired) { sync.unlock(&connection.state_mutex); return }
 	bridge, connect_ok, err := bridge_service.bridge_runtime_connect(h.bridges, token, hostname, platform_os, platform_arch, hello_text, version_str, commit_sha_str, build_timestamp_str)
 	sync.unlock(&connection.state_mutex)
-	if !connect_ok { _ = write_ws_text_frame(client, bridge_ws_error_payload(err.message)); return }
+	if !connect_ok {
+		bridge_metrics_connect_result(admitted_bridge.bridge_id, "revoked" if err.code == .Bridge_Revoked else "connect_failed")
+		_ = write_ws_text_frame(client, bridge_ws_error_payload(err.message))
+		return
+	}
 	defer domain.bridge_destroy(&bridge)
+	// Inbound bytes for this connection land on the registry-owned series.
+	reader.bytes_series = connection.rx_bytes
 	project_service.bridge_runtime_registry_set_command_socket(h.bridge_runtime_registry, bridge.bridge_id, client, hello.generation)
 	hello_pub_key := json_string(hello_text, "public_key")
 	if hello_pub_key != "" {
@@ -1349,6 +1361,7 @@ bridge_ws_upgrade_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_Soc
 	// existing connection for that bridge" fact AC2 asks for.
 	connected_at_ns := time.now()._nsec
 	bridge_ws_log_connect(bridge.bridge_id, req.remote_addr, hello.generation, hello.replaced_existing)
+	bridge_metrics_connected(bridge, hello.replaced_existing)
 	bridge_ws_runtime_loop(h, bridge.bridge_id, hello.generation, &reader, connected_at_ns)
 }
 
@@ -1404,6 +1417,10 @@ bridge_ws_disconnect :: proc(
 	if connected_at_ns > 0 do duration_ms = (time.now()._nsec - connected_at_ns) / 1_000_000
 	bridge_ws_log_disconnect(bridge_id, reason, connection_generation, duration_ms, still_current)
 	project_service.bridge_runtime_registry_mark_offline(h.bridge_runtime_registry, bridge_id, connection_generation)
+	// Per-bridge gauges (bridge_info with its owner/version labels, heartbeat
+	// timestamp, M3 resource gauges) are tombstoned only once NO generation is
+	// live: a replaced connection's teardown must not erase its successor's info.
+	bridge_metrics_disconnected(reason, connected_at_ns, project_service.bridge_runtime_registry_generation(h.bridge_runtime_registry, bridge_id) == 0, bridge_id)
 	if !still_current do return
 	// A replacement already published its newer generation; do not publish old
 	// status summaries after its connection has started.
@@ -1495,6 +1512,7 @@ bridge_ws_runtime_loop :: proc(
 		text, ok, read_reason := bridge_ws_read_frame(reader, 120 * time.Second)
 		if !ok {
 			reason = read_reason
+			if reason == .Fatal_Frame do metrics.counter_inc(metrics.with(project_service.fleet_metrics.bridge_frames_rejected, "fatal_frame"))
 			return
 		}
 		if !bridge_ws_process_frame(h, bridge_id, connection_generation, client, &reassemblies, text, (^project_service.Bridge_Runtime_Connection)(reader.control_context)) {
@@ -1503,6 +1521,7 @@ bridge_ws_runtime_loop :: proc(
 			// or because dispatch rejected it. Distinguish the two: a replacement is
 			// routine during a bridge restart, a rejection is not.
 			reason = .Connection_Replaced if project_service.bridge_runtime_registry_generation(h.bridge_runtime_registry, bridge_id) != connection_generation else .Frame_Rejected
+			if reason == .Frame_Rejected do metrics.counter_inc(metrics.with(project_service.fleet_metrics.bridge_frames_rejected, "rejected"))
 			return
 		}
 	}
@@ -1558,6 +1577,7 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
 	}
 	defer delete(text)
 	defer delete(type)
+	metrics.counter_inc(metrics.with(project_service.fleet_metrics.bridge_ws_frames, "rx", project_service.bridge_frame_kind(type)))
 
 	switch type {
 	case "provider_catalog_request":
@@ -1567,6 +1587,7 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
 		}
 		delete(payload)
 	case "bridge_heartbeat":
+		metrics.gauge_set(metrics.with(project_service.fleet_metrics.bridge_last_heartbeat, bridge_id), time.now()._nsec / 1_000_000_000)
 		project_service.bridge_runtime_registry_set_task_chain_search_status(
 			h.bridge_runtime_registry, bridge_id, connection_generation,
 			json_bool_value(text, "task_chain_search_ready"), json_bool_value(text, "task_chain_search_stale"),
@@ -1601,6 +1622,7 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
 			// is no "which signal fired?" branch whose wrong answer destroys work.
 			gone := agent_service.reconcile_bridge_heartbeat(h.agents, bridge_id, active)
 			defer domain.agent_instances_destroy(gone)
+			metrics.counter_add(project_service.fleet_metrics.agent_instances_reconciled_gone, u64(len(gone)))
 			for inst in gone {
 				shell_session_svc.shell_session_background_runs_for_agent(h.shell_sessions, string(inst.owner_user_id), inst.agent_instance_id)
 				reconciled += 1
@@ -1681,6 +1703,7 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
 		message := json_string(text, "message")
 		progress := json_int(text, "progress_percent", 0)
 		persisted, _ := bridge_service.record_bridge_update_progress(h.bridges, bridge_id, stage, message, progress)
+		if stage == "succeeded" || stage == "failed" do metrics.counter_inc(metrics.with(project_service.fleet_metrics.bridge_updates, stage if persisted else "invalid"))
 		if persisted {
 			bridge, found, _ := iface.bridge_get_bridge(h.bridges.repo, bridge_id)
 			if found {
@@ -2120,6 +2143,9 @@ revoke_bridge_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	bridge_id := strings.trim_suffix(suffix_after(req.path, "/api/v1/bridges/"), "/revoke")
 	bridge, revoke_ok, err := bridge_service.revoke_bridge(h.bridges, auth_ctx, bridge_id)
 	if !revoke_ok do return respond_error(err, req.request_id)
+	// The live connection (if any) is being shut down and will tombstone on its
+	// own teardown; do it here too so an offline revoked bridge leaves no info.
+	project_service.fleet_metrics_tombstone_bridge(bridge.bridge_id)
 	b := strings.builder_make()
 	write_bridge_json(&b, bridge, h.agents, h.bridges.catalog)
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req))
@@ -2470,6 +2496,8 @@ ws_accept_key :: proc(key: string) -> string {
 // the bridge side's ws.Connection.pending_bytes — means every frame is delivered.
 Bridge_WS_Reader :: struct {
 	socket:            net.TCP_Socket,
+	// Cached rx byte counter for this connection (nil until the bridge is known).
+	bytes_series:      ^metrics.Series,
 	pending:           [dynamic]byte,
 	fatal_reason:      Bridge_WS_Disconnect_Reason,
 	fragmented:        [dynamic]byte,
@@ -2649,6 +2677,7 @@ bridge_ws_read_frame :: proc(
 			return "", false, .Recv_Error
 		}
 		if n <= 0 do return "", false, .Clean_Close
+		metrics.counter_add(reader.bytes_series, u64(n))
 		append(&reader.pending, ..buf[:n])
 		reader.fatal_reason = .None
 		if text, ok, fatal := bridge_ws_take_frame(reader); fatal {
@@ -2711,6 +2740,7 @@ write_ws_text_frame_locked :: proc(h: ^Bridge_Handlers, bridge_id: string, clien
 	if sync.atomic_load(&connection.retired) || connection.socket != client do return false
 	result := ws.write_server_text(client, text, false)
 	if result == .Peer_Gone || result == .Desynchronised do _ = net.shutdown(net.Any_Socket(client), .Both)
+	if result == .Ok do bridge_runtime_service.bridge_command_track_sent(connection, text)
 	return result == .Ok
 }
 
