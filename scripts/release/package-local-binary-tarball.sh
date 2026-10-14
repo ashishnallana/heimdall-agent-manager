@@ -133,6 +133,8 @@ rewrite_darwin_macho() {
         case "$base" in
           libiconv*.dylib)
             install_name_tool -change "$path" /usr/lib/libiconv.2.dylib "$bin" ;;
+          libsqlite3*.dylib)
+            install_name_tool -change "$path" /usr/lib/libsqlite3.dylib "$bin" ;;
           *)
             echo "error: $bin links nix-store dylib with no system mapping: $path" >&2
             exit 1 ;;

@@ -145,13 +145,16 @@
         let
           muslPkgs = pkgs.pkgsCross.aarch64-multiplatform-musl;
           muslCc = muslPkgs.stdenv.cc;
+          # sqlite's own test suite (make devtest) fails under the aarch64-musl
+          # cross build; we only need the static library, so skip its checks.
+          muslSqlite = muslPkgs.sqlite.overrideAttrs (_: { doCheck = false; });
         in
         pkgs.stdenv.mkDerivation {
           pname = "release-termux-${name}";
           version = appVersion;
           src = ./.;
           nativeBuildInputs = [ odin ];
-          buildInputs = pkgs.lib.optionals (name == "ham-bridge") [ muslPkgs.sqlite ];
+          buildInputs = pkgs.lib.optionals (name == "ham-bridge") [ muslSqlite ];
           dontConfigure = true;
           dontInstall = true;
           buildPhase = ''
@@ -159,7 +162,7 @@
             mkdir -p $out/bin
             ODIN_CLANG_PATH=${muslCc}/bin/${muslCc.targetPrefix}cc \
               odin build ${srcDir} -target:linux_arm64 -collection:odin_test=src -define:HAM_APP_VERSION=${appVersion} -define:HAM_RELEASE_TARGET=termux-arm64 \
-              -out:$out/bin/${name} -extra-linker-flags:"-static -no-pie ${pkgs.lib.optionalString (name == "ham-bridge") "-L${muslPkgs.sqlite.out}/lib"}"
+              -out:$out/bin/${name} -extra-linker-flags:"-static -no-pie ${pkgs.lib.optionalString (name == "ham-bridge") "-L${muslSqlite.out}/lib"}"
             runHook postBuild
           '';
         };
