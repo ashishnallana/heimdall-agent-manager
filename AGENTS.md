@@ -555,6 +555,22 @@ When adding any new interactive element to the UI:
 - Wrapper attempts re-registration and WS reconnect after repeated heartbeat failures, allowing it to survive daemon restarts.
 - When creating a new tmux session, wrapper creates the agent window directly and avoids an extra default shell window.
 
+## Running Odin Tests
+
+- Always pass `-collection:odin_test=src` and a unique `-out:` so parallel runs do not
+  clobber each other's binaries, e.g.
+  `odin test src/hub/transport/http -collection:odin_test=src -out:$HOME/.cache/heimdall-tests/http-$$`.
+- **Put the test binary under `$HOME` (e.g. `$HOME/.cache/heimdall-tests/`), not `/tmp`.**
+  On managed cloudtops an endpoint agent (CrowdStrike Falcon; `audit INTEGRITY_RULE`
+  entries in the journal) SIGKILLs the *first* execution of a never-seen binary under
+  `/tmp` a few seconds in. The symptom is the whole suite dying with exit 137 right after
+  a fresh build, while re-running the identical binary passes — it is not a test bug, and
+  no in-tree process sends the signal (verified with `strace -f -e signal=all`). The same
+  fresh binary built into `$HOME` passes on its first run.
+- Bridge tests spawn real children (`setsid sh -c …`, `git`, `ps`); kill them with
+  `bridge_shell_test_kill_pid`, which only group-kills a child that is provably its own
+  session leader and never the runner's group.
+
 ## Task Chain Best Practices
 
 When coordinating a task chain, the designated Coordinator Agent must adhere to the following workflow upon task completion:
