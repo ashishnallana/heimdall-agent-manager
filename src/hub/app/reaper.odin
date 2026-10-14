@@ -7,6 +7,7 @@ import agent_service "odin_test:hub/service/agent"
 import events "odin_test:hub/service/events"
 import http "odin_test:hub/transport/http"
 import bridge_service "odin_test:hub/service/bridge"
+import bridge_log_service "odin_test:hub/service/bridge_log"
 import project_service "odin_test:hub/service/project"
 import provider_service "odin_test:hub/service/provider"
 import iface "odin_test:hub/repository/iface"
@@ -141,6 +142,11 @@ reaper_sweep_once :: proc(graph: ^App_Graph) {
 	// exists to remove. Like retention, a failure is swallowed rather than allowed to
 	// abort the stale-instance reap below, which is the safety net this loop is for.
 	reaper_sweep_gone_bridges(graph)
+
+	// bridge_log relay (plan §4.3): the 7-day time prune of bridge_log_events
+	// rides this sweep but runs only every 15 min (by the received_at index);
+	// the per-bridge 500-row cap lives in the writer thread, not here.
+	_, _ = bridge_log_service.maybe_prune(&graph.bridge_logs, time.now()._nsec / 1_000_000)
 
 	// REQ-SHELL-9 trigger B: servers older than a day. Rides THIS sweep for the reason
 	// the task requires and the two passes above already demonstrate — the loop exists,

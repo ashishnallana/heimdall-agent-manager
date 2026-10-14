@@ -354,6 +354,7 @@ keystore_android_store_vault_key :: proc(bridge_id: string, key_hex: string) -> 
 			gen_ok = derived
 		}
 		if !gen_ok {
+			blog_error(.keystore_unavailable, blog_sym(.reason, .android_keystore))
 			fmt.eprintfln(
 				"ERROR: Android Keystore unavailable, so the vault key was NOT persisted (%s). Install the Termux:API app and `pkg install termux-api`, then unseal from Settings → Bridges → Unseal.",
 				why,
@@ -477,12 +478,14 @@ keystore_android_unwrap_file :: proc(bridge_id: string, allocator: mem.Allocator
 	kek: [32]u8
 	defer mem.zero_explicit(&kek, size_of(kek))
 	if derived, why := keystore_android_derive_kek(bridge_id, kek[:]); !derived {
+		blog_warn(.vault_unseal_failed, blog_sym(.reason, .android_keystore))
 		fmt.eprintfln("WARN: could not unwrap the sealed vault key via the Android Keystore (%s); the bridge stays locked. Unseal from Settings → Bridges → Unseal.", why)
 		return "", false
 	}
 	plain: [KEYSTORE_ANDROID_KEY_HEX_LEN]u8
 	defer mem.zero_explicit(&plain, size_of(plain))
 	if !keystore_android_open_sealed(bridge_id, data, kek[:], plain[:]) {
+		blog_warn(.vault_unseal_failed, blog_sym(.reason, .android_keystore), blog_sym(.stage, .verify))
 		fmt.eprintln("WARN: the sealed vault key does not open with this device's Keystore key; the bridge stays locked. Unseal from Settings → Bridges → Unseal.")
 		return "", false
 	}

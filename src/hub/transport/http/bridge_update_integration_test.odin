@@ -333,50 +333,74 @@ test_bridge_update_integration_failure_triggers_supervisor_rollback :: proc(t: ^
 	testing.expect_value(t, upd_resp.status, 202)
 	testing.expect(t, f.sink_rec.sent, "bridge_update command sent to sink")
 
-	// 3. Setup Isolated File System for Supervisor Execution
-	tmp_dir := fmt.tprintf("/tmp/ham-integ-rollback-%d-%d", os.get_pid(), time.now()._nsec)
+	// 3. Setup Isolated File System for Supervisor Execution.
+	//
+	// Every path below is an OWNED string, not a tprintf: this test runs a child
+	// process for several seconds and other threads of the runner may free_all
+	// the shared temp arena meanwhile, which would leave the supervisor argv and
+	// the paths we read back afterwards pointing at reused memory.
+	tmp_dir := fmt.aprintf("/tmp/ham-integ-rollback-%d-%d", os.get_pid(), time.now()._nsec)
+	defer delete(tmp_dir)
 	_ = os.make_directory_all(tmp_dir)
 	defer _ = os.remove_all(tmp_dir)
 
-	data_dir := fmt.tprintf("%s/data", tmp_dir)
-	stage_dir := fmt.tprintf("%s/stage", tmp_dir)
-	data_bin := fmt.tprintf("%s/bin", data_dir)
-	stage_bin := fmt.tprintf("%s/bin", stage_dir)
+	data_dir := fmt.aprintf("%s/data", tmp_dir)
+	defer delete(data_dir)
+	stage_dir := fmt.aprintf("%s/stage", tmp_dir)
+	defer delete(stage_dir)
+	data_bin := fmt.aprintf("%s/bin", data_dir)
+	defer delete(data_bin)
+	stage_bin := fmt.aprintf("%s/bin", stage_dir)
+	defer delete(stage_bin)
 	_ = os.make_directory_all(data_bin)
 	_ = os.make_directory_all(stage_bin)
 
 	// Populate original installed binary (v0.1.0)
-	orig_bin_path := fmt.tprintf("%s/ham-bridge", data_bin)
+	orig_bin_path := fmt.aprintf("%s/ham-bridge", data_bin)
+	defer delete(orig_bin_path)
 	orig_bin_content := "#!/bin/sh\necho 'ham-bridge 0.1.0 (original)'\nexit 0\n"
 	_ = os.write_entire_file(orig_bin_path, transmute([]byte)orig_bin_content)
 	_ = os.chmod(orig_bin_path, os.Permissions{.Read_User, .Write_User, .Execute_User, .Read_Group, .Execute_Group, .Read_Other, .Execute_Other})
 
 	// Populate corrupt/crashing staged binary (v0.2.0)
-	staged_bin_path := fmt.tprintf("%s/ham-bridge", stage_bin)
+	staged_bin_path := fmt.aprintf("%s/ham-bridge", stage_bin)
+	defer delete(staged_bin_path)
 	staged_bin_content := "#!/bin/sh\necho 'corrupt-binary-crash' >&2\nexit 1\n"
 	_ = os.write_entire_file(staged_bin_path, transmute([]byte)staged_bin_content)
 	_ = os.chmod(staged_bin_path, os.Permissions{.Read_User, .Write_User, .Execute_User, .Read_Group, .Execute_Group, .Read_Other, .Execute_Other})
 
 	// Test hooks are executable paths, not shell command strings. Create one in
 	// the isolated fixture rather than assuming FHS paths such as /bin/true.
-	hook_path := fmt.tprintf("%s/succeed-hook", tmp_dir)
+	hook_path := fmt.aprintf("%s/succeed-hook", tmp_dir)
+	defer delete(hook_path)
 	hook_content := "#!/usr/bin/env bash\nexit 0\n"
 	_ = os.write_entire_file(hook_path, transmute([]byte)hook_content)
 	_ = os.chmod(hook_path, os.Permissions{.Read_User, .Write_User, .Execute_User, .Read_Group, .Execute_Group, .Read_Other, .Execute_Other})
 
-	// Locate supervisor script
-	supervisor_script := "scripts/apply-bridge-update.sh"
+	// Locate the supervisor script relative to THIS SOURCE FILE, so the test does
+	// not depend on the runner's cwd (it used to fall back to a hard-coded path
+	// on one developer's machine).
+	supervisor_script := fmt.aprintf("%s/../../../../scripts/apply-bridge-update.sh", #directory)
+	defer delete(supervisor_script)
 	if !os.exists(supervisor_script) {
-		supervisor_script = "/usr/local/google/home/tanmayvijay/heimdall-cloudtop/scripts/apply-bridge-update.sh"
+		delete(supervisor_script)
+		supervisor_script = strings.clone("scripts/apply-bridge-update.sh")
 	}
 	testing.expect(t, os.exists(supervisor_script), "supervisor script exists on disk")
 
-	// 4. Execute supervisor with a port failure simulation (no process on 58999, 2s health timeout)
+	// 4. Execute the supervisor against a port that is GUARANTEED closed.
+	//
+	// This used to probe 58999, which sits inside Linux's ephemeral range
+	// (32768-60999): under full parallel load the other tests in this package
+	// open hundreds of loopback listeners on port 0, and one of them landing on
+	// 58999 turns the "health check must fail" step into a success and the
+	// rollback never happens. Port 1 (tcpmux) is privileged — no test can bind
+	// it — so the probe is refused deterministically.
 	sup_args := []string{
 		supervisor_script,
 		"--data-dir", data_dir,
 		"--stage-dir", stage_dir,
-		"--bridge-port", "58999",
+		"--bridge-port", "1",
 		"--health-timeout", "2",
 		"--stop-hook", hook_path,
 		"--restart-hook", hook_path,
@@ -397,7 +421,8 @@ test_bridge_update_integration_failure_triggers_supervisor_rollback :: proc(t: ^
 	testing.expect(t, strings.contains(string(restored_data), "ham-bridge 0.1.0 (original)"), "binary restored to original v0.1.0")
 
 	// Verify rollback log
-	rollback_log_path := fmt.tprintf("%s/logs/update_rollback.log", data_dir)
+	rollback_log_path := fmt.aprintf("%s/logs/update_rollback.log", data_dir)
+	defer delete(rollback_log_path)
 	testing.expect(t, os.exists(rollback_log_path), "update_rollback.log was created")
 	log_data, log_err := os.read_entire_file(rollback_log_path, context.allocator)
 	testing.expect(t, log_err == nil, "read rollback log")

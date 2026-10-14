@@ -68,6 +68,11 @@ Hub_Config :: struct {
 	// counters are still maintained. Must never be the public bind address:
 	// /metrics exposes owner ids via heimdall_bridge_info.
 	metrics_addr: string,
+	// Optional log backend for relayed bridge error events (bridge_logs plan v2
+	// §4.2): base URL of a VictoriaLogs/Loki instance; the writer thread POSTs
+	// `<url>/insert/loki/api/v1/push`. Empty (the default) disables the push;
+	// the SQLite ring and the owner API work regardless.
+	log_push_url: string,
 }
 
 // vapid_is_configured reports whether a usable VAPID keypair is present. Push
@@ -105,6 +110,7 @@ default_config :: proc() -> Hub_Config {
 		vapid_subject = "mailto:12tanmayvijay@gmail.com",
 		public_app_origin = "https://heimdall.mundus.in",
 		metrics_addr = "",
+		log_push_url = "",
 	}
 }
 

@@ -67,6 +67,19 @@ Bridge_Runtime_Connection :: struct {
 	rx_bytes: ^metrics.Series,
 	// Last accepted heartbeat `stats` object (tick ns); enforces the 5 s cap.
 	last_stats_tick_ns: i64,
+	// bridge_log relay (plan §4.1).
+	//   telemetry_enabled: cached owner switch (atomic; written at hello and by
+	//                      PATCH); false only for "disabled" -> bridge_log
+	//                      frames are dropped on the hub.
+	//   log_tokens / log_tokens_tick_ns: per-connection token bucket, touched
+	//                      only by this connection's reader thread
+	//                      (burst BRIDGE_LOG_BUCKET_BURST, refill
+	//                      BRIDGE_LOG_BUCKET_REFILL per BRIDGE_LOG_BUCKET_PERIOD).
+	//                      log_tokens_tick_ns == 0 means "not yet initialised"
+	//                      (a fresh connection starts with a full bucket).
+	telemetry_enabled: bool,
+	log_tokens: int,
+	log_tokens_tick_ns: i64,
 	terminal_count: int,
 	next_sweep_ns: i64,
 }
@@ -265,7 +278,7 @@ bridge_runtime_registry_accept_live :: proc(r: ^Bridge_Runtime_Registry, bridge_
 	heap := runtime.default_allocator()
 	c := new(Bridge_Runtime_Connection, heap)
 	r.next_generation += 1 // process-wide epoch; never resets when an ID is removed
-	c^ = Bridge_Runtime_Connection{bridge_id = strings.clone(bridge_id, heap), owner_id = strings.clone(owner, heap), generation = r.next_generation, references = 1, path_validation_adapter_registered = adapter, path_validation_url = strings.clone(url, heap), instances = make(map[string]Runtime_Instance_State, heap)}
+	c^ = Bridge_Runtime_Connection{bridge_id = strings.clone(bridge_id, heap), owner_id = strings.clone(owner, heap), generation = r.next_generation, references = 1, path_validation_adapter_registered = adapter, path_validation_url = strings.clone(url, heap), instances = make(map[string]Runtime_Instance_State, heap), telemetry_enabled = true}
 	c.tx_bytes = metrics.with(fleet_metrics.bridge_ws_bytes, bridge_id, "tx")
 	c.rx_bytes = metrics.with(fleet_metrics.bridge_ws_bytes, bridge_id, "rx")
 	if r.connections == nil do r.connections = make(map[string]^Bridge_Runtime_Connection, heap)
@@ -354,6 +367,16 @@ bridge_runtime_registry_set_task_chain_search_status :: proc(r: ^Bridge_Runtime_
 	c.task_chain_search_ready = ready
 	c.task_chain_search_stale = stale
 	c.task_chain_search_revision = revision
+}
+
+// bridge_runtime_registry_set_telemetry_enabled caches the owner's telemetry
+// switch on the live connection (hello and PATCH); the bridge_log ingest reads
+// it to enforce opt-out on the hub side.
+bridge_runtime_registry_set_telemetry_enabled :: proc(r: ^Bridge_Runtime_Registry, id: string, enabled: bool) {
+	c := bridge_runtime_connection_acquire(r, id)
+	if c == nil do return
+	defer bridge_runtime_connection_release(r, c)
+	sync.atomic_store(&c.telemetry_enabled, enabled)
 }
 
 bridge_runtime_registry_task_chain_search_status :: proc(r: ^Bridge_Runtime_Registry, id: string) -> (ready, stale: bool, revision: i64) {

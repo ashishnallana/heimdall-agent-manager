@@ -162,14 +162,40 @@ bridge_shell_data_dir :: proc() -> string {
 	return strings.clone(expanded)
 }
 
-// bridge_shell_test_kill_pid terminates a process group a test spawned, so a
-// `sleep` left behind by a reconcile test does not outlive the suite. Kills the
-// GROUP (a spawned child is made a session leader, so the group reaches its own
-// children too), matching how a real kill tears a session down.
+// bridge_shell_test_kill_pid terminates a process a test spawned, so a `sleep`
+// left behind by a reconcile test does not outlive the suite. It kills the
+// child's PROCESS GROUP only when that group is provably the child's own — the
+// child called setsid, so getpgid(pid) == pid — and never a group that is also
+// ours. kill(-pid) on anything else is either a no-op (ESRCH) or, if `pid` ever
+// names the test runner's own group (a pid reused after the child was reaped,
+// or a spawn that never reached setsid on a platform without it), a SIGKILL of
+// the whole `odin test` process tree. That is the 137 the full src/bridge suite
+// used to die with; the group kill now cannot reach anything but the child.
 bridge_shell_test_kill_pid :: proc(pid: int) {
 	if pid <= 0 do return
-	_ = posix.kill(posix.pid_t(-i32(pid)), .SIGKILL)
+	own_pgid := posix.getpgid(0)
+	child_pgid := posix.getpgid(posix.pid_t(pid))
+	if child_pgid > 0 && int(child_pgid) == pid && child_pgid != own_pgid {
+		_ = posix.kill(posix.pid_t(-i32(pid)), .SIGKILL)
+	}
 	_ = posix.kill(posix.pid_t(pid), .SIGKILL)
+}
+
+// bridge_shell_test_wait_for_own_session blocks (up to `deadline`) until the
+// spawned child has become its own session/process-group leader, i.e. `setsid`
+// has run. Returns false if the child died first or never got there (Darwin
+// spawns without setsid). Tests that will later group-kill the child wait on
+// this so the kill can never precede the setsid.
+bridge_shell_test_wait_for_own_session :: proc(pid: int, deadline := 2 * time.Second) -> bool {
+	if pid <= 0 do return false
+	start := time.tick_now()
+	for time.tick_since(start) < deadline {
+		pgid := posix.getpgid(posix.pid_t(pid))
+		if pgid <= 0 do return false // gone (or not ours to query)
+		if int(pgid) == pid do return true
+		time.sleep(2 * time.Millisecond)
+	}
+	return false
 }
 
 // bridge_shell_test_session_str clones a string from THE SESSION MAP'S allocator, for

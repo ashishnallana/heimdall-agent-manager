@@ -421,10 +421,12 @@ bridge_enroll_poll_once :: proc(
 	}
 	if resp.status == 401 {
 		fmt.eprintln("enroll FAILED: the Hub rejected this bridge's PKCE proof (401). The device code cannot be redeemed by this process.")
+		blog_error(.enroll_failed, blog_sym(.stage, .token), blog_int(.hub_status, 401))
 		return .Fatal, Bridge_Enroll_Credential{}, 0
 	}
 	if resp.status != 200 {
 		fmt.eprintfln("enroll: unexpected HTTP %d from the token endpoint — %s", resp.status, resp.body)
+		blog_error(.enroll_failed, blog_sym(.stage, .token), blog_int(.hub_status, i64(resp.status)))
 		return .Fatal, Bridge_Enroll_Credential{}, 0
 	}
 	switch extract_json_string(resp.body, "status", "", context.temp_allocator) {
@@ -532,16 +534,19 @@ bridge_write_secret_file :: proc(path, value: string) -> bool {
 	content := strings.concatenate({strings.trim_space(value), "\n"}, context.temp_allocator)
 	if err := os.write_entire_file(tmp, transmute([]byte)content, os.Permissions{.Read_User, .Write_User}); err != nil {
 		fmt.eprintln("failed to write credential file", tmp)
+		blog_error(.token_persist_failed, blog_sym(.stage, .write))
 		return false
 	}
 	if chmod_err := os.chmod(tmp, os.Permissions{.Read_User, .Write_User}); chmod_err != nil {
 		_ = os.remove(tmp)
 		fmt.eprintln("failed to restrict credential file mode", tmp)
+		blog_error(.token_persist_failed, blog_sym(.stage, .chmod))
 		return false
 	}
 	if rename_err := os.rename(tmp, target); rename_err != nil {
 		_ = os.remove(tmp)
 		fmt.eprintln("failed to install credential file", target)
+		blog_error(.token_persist_failed, blog_sym(.stage, .rename))
 		return false
 	}
 	return true
@@ -575,6 +580,7 @@ bridge_enroll_persist :: proc(cred: Bridge_Enroll_Credential, access_path, confi
 		// Empty token argument on purpose — see the header above.
 		if !bridge_write_enrolled_config(config_path, hub_url, "", cred.bridge_id) {
 			fmt.eprintln("warning: credentials were saved, but config.toml could not be updated; pass --hub/--bridge-token-file when starting ham-bridge")
+			blog_warn(.config_write_failed, blog_sym(.stage, .config))
 		}
 	}
 	return true
@@ -736,6 +742,7 @@ bridge_credential_refresh_worker :: proc() {
 			bridge_config.bridge_token = ""
 			sync.mutex_unlock(&g_bridge_credential_mu)
 			fmt.eprintln("bridge credential REVOKED by the hub (invalid_grant): both tokens were wiped. RE-ENROLLMENT REQUIRED — run: ham-bridge enroll --hub <url>")
+			blog_error(.hub_rejected, blog_sym(.stage, .token), blog_sym(.reason, .revoked))
 			return
 		case .Retry:
 			delay = backoff
@@ -956,10 +963,12 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 		"POST", api_base, BRIDGE_ENROLL_AUTHORIZE_PATH, body, nil, http.DEFAULT_TIMEOUT_MS)
 	if !sent {
 		fmt.eprintfln("bridge enroll FAILED: could not reach %s — check the URL and that the proxy is up (transport error, no HTTP response)", api_base)
+		blog_error(.enroll_failed, blog_sym(.stage, .authorize), blog_sym(.reason, .transport))
 		return false
 	}
 	if resp.status != 200 {
 		fmt.eprintfln("bridge enroll FAILED: hub returned HTTP %d — %s", resp.status, resp.body)
+		blog_error(.enroll_failed, blog_sym(.stage, .authorize), blog_int(.hub_status, i64(resp.status)))
 		if resp.status == 404 do fmt.eprintln("  hint: --hub must point at the Hub API origin.")
 		return false
 	}
@@ -1073,10 +1082,12 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 			return true
 		case .Denied:
 			fmt.eprintln("bridge enroll FAILED: the request was denied in the browser. Nothing was written.")
+			blog_error(.enroll_failed, blog_sym(.stage, .poll), blog_sym(.reason, .denied))
 			return false
 		case .Expired:
 			now_ms := time.to_unix_nanoseconds(time.now()) / 1_000_000
 			fmt.eprintln("bridge enroll FAILED: the enrollment request expired before it was approved. Run the command again.")
+			blog_error(.enroll_failed, blog_sym(.stage, .poll), blog_sym(.reason, .expired))
 			fmt.eprintfln("  this process started waiting at %s and was told the request would expire at %s",
 				action_scheduler_format_rfc3339_utc(authorized_at_ms), action_scheduler_format_rfc3339_utc(deadline_ms))
 			fmt.eprintfln("  the Hub reported Expired at %s -- %ds after this process started waiting, against a %ds budget (waited=%ds)",
@@ -1094,6 +1105,7 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 	}
 	timeout_now_ms := time.to_unix_nanoseconds(time.now()) / 1_000_000
 	fmt.eprintln("bridge enroll FAILED: timed out waiting for approval. Nothing was written.")
+	blog_error(.enroll_failed, blog_sym(.stage, .poll), blog_sym(.reason, .timeout))
 	fmt.eprintfln("  this process started waiting at %s with a %ds budget (deadline %s) and gave up at %s (waited=%ds)",
 		action_scheduler_format_rfc3339_utc(authorized_at_ms), expires_in, action_scheduler_format_rfc3339_utc(deadline_ms),
 		action_scheduler_format_rfc3339_utc(timeout_now_ms), waited)

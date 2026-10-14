@@ -164,6 +164,7 @@ bridge_pty_host_ensure_daemon :: proc() -> (string, bool) {
 	// Ensure the socket's parent dir exists, then spawn the daemon detached.
 	if !bridge_unix_socket_prepare_parent(socket) {
 		fmt.eprintln("bridge pty-host: cannot prepare socket directory", socket)
+		blog_error(.pty_host_spawn_failed, blog_sym(.stage, .socket_dir))
 		return "", false
 	}
 	bin := bridge_pty_host_bin()
@@ -173,6 +174,7 @@ bridge_pty_host_ensure_daemon :: proc() -> (string, bool) {
 	proc_handle, err := os.process_start(os.Process_Desc{command = cmd})
 	if err != nil {
 		fmt.eprintln("bridge pty-host: failed to start daemon:", bin, err)
+		blog_error(.pty_host_spawn_failed, blog_sym(.stage, .exec))
 		bridge_dependency_breaker_record(breaker_key, false)
 		return "", false
 	}
@@ -190,6 +192,7 @@ bridge_pty_host_ensure_daemon :: proc() -> (string, bool) {
 		time.sleep(50 * time.Millisecond)
 	}
 	fmt.eprintln("bridge pty-host: daemon did not become ready on", socket)
+	blog_error(.pty_host_unreachable, blog_sym(.stage, .ready))
 	bridge_dependency_breaker_record(breaker_key, false)
 	return "", false
 }
@@ -720,6 +723,16 @@ bridge_pty_host_apply_child_exited :: proc(instance: string, code: i32) {
 	if strings.trim_space(instance) == "" do return
 	fmt.println("bridge pty-host: child exited", instance, "code", code)
 	bridge_runtime_set_pty_process_alive(instance, false)
+	// bridge_log relay: an agent that dies within BLOG_EARLY_EXIT_WINDOW of its
+	// launch (the launch record still has the tick) is almost always a provider
+	// CLI problem — not logged in, bad model flag, missing binary — and is the
+	// #1 "agent won't start" support question.
+	if launch, has_launch := bridge_runtime_get_launch(instance); has_launch && launch.launched_at_ns != 0 {
+		age := time.tick_now()._nsec - launch.launched_at_ns
+		if age >= 0 && age < i64(BLOG_EARLY_EXIT_WINDOW) {
+			blog_warn(.agent_exited_early, blog_sym(.provider, launch.provider_sym), blog_int(.exit_code, i64(code)), blog_int(.duration_ms, age / 1_000_000))
+		}
+	}
 	bridge_runtime_remove_launch(instance)
 	bridge_runtime_set_status(instance, "stopped", "idle")
 
@@ -772,6 +785,11 @@ bridge_pty_host_apply_startup_ready :: proc(instance: string) {
 bridge_pty_host_apply_startup_blocked :: proc(instance, reason_code, safe_diagnostic: string) {
 	if strings.trim_space(instance) == "" do return
 	fmt.println("bridge pty-host: startup blocked", instance, "reason=", reason_code, "detail=", safe_diagnostic)
+	if blog_startup_reason_is_login(reason_code) {
+		provider_sym := Blog_Sym.other
+		if launch, has_launch := bridge_runtime_get_launch(instance); has_launch do provider_sym = launch.provider_sym
+		blog_warn(.provider_not_logged_in, blog_sym(.provider, provider_sym))
+	}
 	bridge_runtime_set_status(instance, "blocked", "idle")
 }
 

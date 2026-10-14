@@ -225,6 +225,11 @@ Bridge_Runtime_Launch :: struct {
 	// field, or a non-wake launch). Used only for the coordinator stop-exemption
 	// (defense in depth); unknown is treated as non-coordinator.
 	role: string,
+	// bridge_log relay: provider symbol and launch tick so a ChildExited within
+	// BLOG_EARLY_EXIT_WINDOW becomes an agent_exited_early{provider,exit_code,
+	// duration_ms} event. Plain values, nothing to free.
+	provider_sym:   Blog_Sym,
+	launched_at_ns: i64,
 }
 
 Bridge_Pane_Capture_Pending :: struct {
@@ -406,13 +411,18 @@ bridge_hub_runtime_worker :: proc() {
 	// Only log each distinct failure the FIRST time (and periodically) so a down
 	// proxy/tunnel doesn't spam the log every 500ms, but the operator still sees
 	// exactly which step is failing.
+	// The structured twin of each line is a blog_warn (bridge_log relay): it is
+	// rate-limited by the same rule, dedup'd into `count` in the ring, and ships
+	// to the hub after the NEXT successful bridge_ready — which is exactly when
+	// "why did this bridge keep failing to connect" becomes answerable remotely.
 	last_failure := ""
 	defer delete(last_failure)
 	attempts := 0
-	log_failure :: proc(last: ^string, count: ^int, msg: string) {
+	log_failure :: proc(last: ^string, count: ^int, msg: string, code: Blog_Code, fields: ..Blog_Field) {
 		count^ += 1
 		if msg != last^ || count^ % 20 == 1 {
 			fmt.printfln("bridge hub runtime: %s (attempt %d)", msg, count^)
+			blog_emit(.Warn, code, fields)
 			delete(last^)
 			last^ = strings.clone(msg)
 		}
@@ -425,13 +435,19 @@ bridge_hub_runtime_worker :: proc() {
 		}
 		conn, ok := ws.connect_with_bearer(ws_url, bridge_config.bridge_token)
 		if !ok {
-			log_failure(&last_failure, &attempts, fmt.tprintf("cannot connect WS %s — %s", ws_url, ws.last_connect_error()))
+			connect_err := ws.last_connect_error()
+			code, stage, why := blog_connect_failure(connect_err)
+			if status := blog_http_status_from_reason(connect_err); status != 0 {
+				log_failure(&last_failure, &attempts, fmt.tprintf("cannot connect WS %s — %s", ws_url, connect_err), code, blog_sym(.stage, stage), blog_int(.hub_status, status))
+			} else {
+				log_failure(&last_failure, &attempts, fmt.tprintf("cannot connect WS %s — %s", ws_url, connect_err), code, blog_sym(.stage, stage), blog_sym(.reason, why))
+			}
 			time.sleep(500 * time.Millisecond)
 			continue
 		}
 		hello := bridge_hub_hello_json()
 		if !ws.send_text(&conn, hello) {
-			log_failure(&last_failure, &attempts, "WS connected but sending hello failed (connection dropped immediately)")
+			log_failure(&last_failure, &attempts, "WS connected but sending hello failed (connection dropped immediately)", .hub_connect_failed, blog_sym(.stage, .hello), blog_sym(.reason, .write_error))
 			bridge_hub_connection_teardown(&conn)
 			time.sleep(500 * time.Millisecond)
 			continue
@@ -506,18 +522,20 @@ bridge_hub_runtime_worker :: proc() {
 				// Never exit here: under systemd Restart=always that would just
 				// restart the process and keep the flapping.
 				fmt.printfln("bridge hub runtime: connection closed after replacement, reconnecting in %ds…", backoff_s)
+				blog_warn(.hub_ws_closed, blog_sym(.reason, .replaced), blog_int(.duration_ms, i64(backoff_s) * 1000))
 				bridge_hub_connection_teardown(&conn)
 				time.sleep(time.Duration(backoff_s) * time.Second)
 				continue
 			}
 			fmt.println("bridge hub runtime: connection closed, reconnecting…")
+			blog_warn(.hub_ws_closed, blog_sym(.reason, .eof))
 		} else if got_error {
 			delete(hub_catalog_etag)
-			log_failure(&last_failure, &attempts, hub_error)
+			log_failure(&last_failure, &attempts, hub_error, .hub_rejected, blog_sym(.reason, blog_hub_error_reason(hub_error)))
 			delete(hub_error)
 		} else {
 			delete(hub_catalog_etag)
-			log_failure(&last_failure, &attempts, "no bridge_ready within 5s after hello — hub didn't accept the session (slow link over the tunnel, or hub-side rejection)")
+			log_failure(&last_failure, &attempts, "no bridge_ready within 5s after hello — hub didn't accept the session (slow link over the tunnel, or hub-side rejection)", .hub_ready_timeout, blog_sym(.stage, .ready))
 		}
 		bridge_hub_connection_teardown(&conn)
 		time.sleep(500 * time.Millisecond)
@@ -615,6 +633,9 @@ bridge_hub_runtime_loop :: proc(conn: ^ws.Connection) {
 		bridge_pty_stream_drain_outgoing(conn)
 		bridge_tunnel_data_drain_outgoing(conn)
 		bridge_lsp_drain_outgoing(conn)
+		// bridge_log relay: at most one frame per iteration, only after
+		// bridge_ready (this loop), gated by the telemetry switch inside.
+		bridge_log_drain_outgoing(conn)
 		// Flush any status transitions applied on background threads (e.g. a
 		// pty-host ChildExited) so "stopped"/"unreachable" reaches the hub now,
 		// not on the next heartbeat.
@@ -710,6 +731,7 @@ bridge_hub_handle_command :: proc(conn: ^ws.Connection, text: string) {
 		reason := extract_json_string(text, "reason", "unknown")
 		defer delete(reason)
 		fmt.printfln("bridge hub runtime: connection replaced by a newer connection for this bridge id (reason=%s); another bridge process may be running with the same identity — backing off %ds", reason, backoff_s)
+		blog_warn(.hub_connection_replaced, blog_sym(.reason, blog_replaced_reason(reason)), blog_int(.duration_ms, i64(backoff_s) * 1000))
 		return
 	}
 	if type == "bridge_update" {
@@ -726,9 +748,14 @@ bridge_hub_handle_command :: proc(conn: ^ws.Connection, text: string) {
 		enabled_str := extract_json_string(text, "enabled", "")
 		defer delete(enabled_str)
 		enabled := enabled_str == "true" || bridge_local_extract_json_bool(text, "enabled", false)
-		// telemetry_enabled governs BOTH the local Telegraf exporter and the
-		// resource stats piggybacked on the heartbeat (plan 4.3).
-		bridge_heartbeat_stats_set_enabled(enabled)
+		// Two switches ride this command. `enabled` is the local Telegraf
+		// exporter (true only for telemetry_enabled=enabled). `heartbeat_stats`
+		// governs the heartbeat resource stats AND bridge_log shipping and is
+		// true unless the owner chose "disabled" — the same rule as
+		// bridge_ready.heartbeat_stats, so "inherit" means stats ON / Telegraf
+		// OFF at PATCH time exactly as it does at hello time. An old hub sends
+		// only `enabled`; then it is the switch for both (legacy semantics).
+		bridge_heartbeat_stats_set_enabled(extract_json_bool(text, "heartbeat_stats", enabled))
 		if enabled {
 			if !bridge_telemetry_status() {
 				_ = bridge_telemetry_start()
@@ -1174,6 +1201,7 @@ bridge_hub_handle_command :: proc(conn: ^ws.Connection, text: string) {
 		ok, err_msg := bridge_unseal_decrypt_and_verify(text, bridge_config.daemon_id, now_ms)
 		if ok && !bridge_vault_set_configured(bridge_config.daemon_id, true) {
 			// The unseal itself succeeded; only a restart would forget it was configured.
+			blog_warn(.config_write_failed, blog_sym(.stage, .vault))
 			fmt.eprintln("WARN: could not persist this bridge's vault_configured marker under ~/.config/heimdall/bridges/<bridge_id>/; after a restart it will report the vault as disabled instead of locked.")
 		}
 
@@ -1470,6 +1498,7 @@ bridge_runtime_apply_update :: proc(
 	stage_dir := fmt.tprintf("%s/updates/stage", data_dir)
 	_ = os.remove_all(stage_dir)
 	if bridge_make_directory_all(stage_dir) != nil {
+		blog_error(.update_apply_failed, blog_sym(.stage, .staging))
 		return false, fmt.tprintf("cannot create staging directory %s", stage_dir)
 	}
 
@@ -1493,12 +1522,14 @@ bridge_runtime_apply_update :: proc(
 		}
 		if !bridge_update_copy_file(local_src, tarball_path) {
 			_ = os.remove_all(stage_dir)
+			blog_error(.update_download_failed, blog_sym(.stage, .download), blog_sym(.reason, .transport))
 			return false, fmt.tprintf("failed to copy local bundle from %s", local_src)
 		}
 	} else {
 		dl_ok, dl_error := bridge_update_download_with_curl(resolved_url, tarball_path)
 		if !dl_ok {
 			_ = os.remove_all(stage_dir)
+			blog_error(.update_download_failed, blog_sym(.stage, .download))
 			return false, dl_error
 		}
 	}
@@ -1509,6 +1540,7 @@ bridge_runtime_apply_update :: proc(
 	tarball_bytes, rerr := os.read_entire_file(tarball_path, context.allocator)
 	if rerr != nil {
 		_ = os.remove_all(stage_dir)
+		blog_error(.update_download_failed, blog_sym(.stage, .verify))
 		return false, "failed to read downloaded tarball"
 	}
 	defer delete(tarball_bytes)
@@ -1527,6 +1559,7 @@ bridge_runtime_apply_update :: proc(
 		}
 		if !strings.equal_fold(expected_sha256, actual_sha256) {
 			_ = os.remove_all(stage_dir)
+			blog_error(.update_apply_failed, blog_sym(.stage, .verify))
 			return false, fmt.tprintf("SHA-256 mismatch for bundle (expected %s, got %s)", expected_sha256, actual_sha256)
 		}
 	}
@@ -1539,6 +1572,7 @@ bridge_runtime_apply_update :: proc(
 	defer { delete(tar_out); delete(tar_err) }
 	if !tar_ok {
 		_ = os.remove_all(stage_dir)
+		blog_error(.update_apply_failed, blog_sym(.stage, .extract))
 		return false, "tarball extraction failed"
 	}
 
@@ -1564,6 +1598,7 @@ bridge_runtime_apply_update :: proc(
 		}
 		if !found {
 			_ = os.remove_all(stage_dir)
+			blog_error(.update_apply_failed, blog_sym(.stage, .preflight), blog_sym(.reason, .missing_binary))
 			return false, "ham-bridge executable not found in staged bundle"
 		}
 	}
@@ -1574,6 +1609,7 @@ bridge_runtime_apply_update :: proc(
 	defer { delete(pf_out); delete(pf_err) }
 	if !pf_ok {
 		_ = os.remove_all(stage_dir)
+		blog_error(.update_apply_failed, blog_sym(.stage, .preflight), blog_sym(.reason, .not_executable))
 		return false, fmt.tprintf("preflight execution check failed (%s --version)", bridge_binary)
 	}
 
@@ -1600,6 +1636,7 @@ bridge_runtime_apply_update :: proc(
 	}
 	if !supervisor_found {
 		_ = os.remove_all(stage_dir)
+		blog_error(.update_apply_failed, blog_sym(.stage, .supervisor), blog_sym(.reason, .missing_binary))
 		return false, "supervisor script apply-bridge-update.sh not found"
 	}
 	_ = os.chmod(supervisor_target, os.Permissions{.Read_User, .Write_User, .Execute_User, .Read_Group, .Execute_Group, .Read_Other, .Execute_Other})
@@ -1615,6 +1652,7 @@ bridge_runtime_apply_update :: proc(
 	stop_pty_out, stop_pty_err, stop_pty_ok, _ := bridge_process_run_capture(stop_pty_argv, 15 * time.Second)
 	defer { delete(stop_pty_out); delete(stop_pty_err) }
 	if !stop_pty_ok {
+		blog_error(.update_apply_failed, blog_sym(.stage, .drain))
 		return false, "failed to stop bridge-owned PTY host; update aborted before restart"
 	}
 	_ = bridge_update_send_progress(conn, command_id, "pty_host_stopped", 88, "Bridge-owned PTY host and agent processes stopped.")
@@ -1637,6 +1675,7 @@ bridge_runtime_apply_update :: proc(
 		pty_host_socket = pty_socket,
 	) {
 		_ = os.remove_all(stage_dir)
+		blog_error(.update_apply_failed, blog_sym(.stage, .supervisor))
 		return false, "failed to spawn detached supervisor script"
 	}
 
@@ -1675,6 +1714,7 @@ bridge_hub_handle_agent_pty_input :: proc(conn: ^ws.Connection, text: string) {
 	switch vault_status {
 	case .Locked:
 		fmt.println("bridge agent_pty_input rejected: vault_locked for instance", instance_id)
+		blog_warn(.vault_locked, blog_sym(.command_kind, .agent_pty_input))
 		bridge_pty_input_reply_vault_locked(conn, command_id, instance_id)
 		return
 	case .Unlocked:
@@ -2062,6 +2102,7 @@ bridge_hub_handle_wake_agent :: proc(conn: ^ws.Connection, text: string) {
 					fmt.println("bridge wake_agent: re-bootstrapped and restarted instance", instance_id)
 				} else {
 					fmt.eprintln("bridge wake_agent: restart via re-bootstrap failed", instance_id, detail)
+					blog_error(.agent_launch_failed, blog_sym(.command_kind, .wake_agent), blog_sym(.stage, .materialize))
 				}
 			} else {
 				// No launch record: fresh full bootstrap via the standard launch path.
@@ -2078,6 +2119,7 @@ bridge_hub_handle_wake_agent :: proc(conn: ^ws.Connection, text: string) {
 					fmt.println("bridge wake_agent: launched instance", instance_id)
 				} else {
 					fmt.eprintln("bridge wake_agent: launch failed", instance_id, detail)
+					blog_error(.agent_launch_failed, blog_sym(.command_kind, .wake_agent), blog_sym(.stage, .spawn))
 				}
 			}
 		}
@@ -2205,6 +2247,7 @@ bridge_runtime_launch_agent :: proc(command_id, command_json: string, deadline_n
 		bridge_runtime_set_status(instance_id, "failed", "idle")
 		detail := fmt.tprintf("bootstrap failed at stage=%s http_status=%d: %s", boot_res.stage, boot_res.http_status, boot_res.detail)
 		fmt.println("bridge launch_agent bootstrap failed", "instance=", instance_id, "stage=", boot_res.stage, "http_status=", boot_res.http_status, "detail=", boot_res.detail)
+		blog_error(.agent_bootstrap_invalid, blog_sym(.stage, blog_bootstrap_stage(boot_res.stage)), blog_int(.hub_status, i64(boot_res.http_status)), blog_provider(provider))
 		return false, detail
 	}
 	return bridge_runtime_launch_agent_pty_host(command_id, instance_id, run_dir, endpoint, provider, model, agent_issue.plaintext_token, descriptor.display_name, 0)
@@ -2256,6 +2299,7 @@ bridge_runtime_launch_agent_pty_host :: proc(command_id, instance_id, run_dir, e
 	req, req_ok := bridge_pty_host_build_spawn(instance_id, run_dir, provider, model, agent_token, env, display_name, timeout_seconds)
 	if !req_ok {
 		bridge_runtime_set_status(instance_id, "failed", "idle")
+		blog_error(.provider_missing, blog_provider(provider))
 		return false, "provider has no runnable command"
 	}
 	defer bridge_pty_host_spawn_request_delete(req)
@@ -2275,16 +2319,18 @@ bridge_runtime_launch_agent_pty_host :: proc(command_id, instance_id, run_dir, e
 	if bridge_pty_host_is_registered(socket, instance_id) {
 		if !bridge_pty_host_close(socket, instance_id) {
 			bridge_runtime_set_status(instance_id, "failed", "idle")
+			blog_error(.agent_launch_failed, blog_provider(provider), blog_sym(.stage, .spawn), blog_sym(.reason, .replaced))
 			return false, "failed to close existing instance before respawn"
 		}
 	}
 	pid, ok = bridge_pty_host_spawn(socket, req)
 	if !ok {
 		bridge_runtime_set_status(instance_id, "failed", "idle")
+		blog_error(.agent_launch_failed, blog_provider(provider), blog_sym(.stage, .spawn))
 		return false, "ham-pty-host spawn failed"
 	}
 	bridge_runtime_set_pty_process_alive(instance_id, true)
-	bridge_runtime_record_launch(Bridge_Runtime_Launch{agent_instance_id = strings.clone(instance_id), command_id = strings.clone(command_id), run_dir = strings.clone(run_dir), pane_id = fmt.tprintf("pty-host:%d", pid), agent_token = strings.clone(agent_token)})
+	bridge_runtime_record_launch(Bridge_Runtime_Launch{agent_instance_id = strings.clone(instance_id), command_id = strings.clone(command_id), run_dir = strings.clone(run_dir), pane_id = fmt.tprintf("pty-host:%d", pid), agent_token = strings.clone(agent_token), provider_sym = contracts.bridge_log_provider_sym(provider), launched_at_ns = time.tick_now()._nsec})
 	// BR-3: ensure the event-subscription worker is running so this instance's
 	// ChildExited/StartupReady/StartupBlocked/ScreenChanged events flow to the hub
 	// status/activity surface without polling.
@@ -4351,6 +4397,7 @@ bridge_shell_kill_worker :: proc(data: rawptr) {
 		}
 	} else {
 		fmt.println("bridge shell_kill: pty-host daemon unreachable; kill not executed", ctx.shell_id)
+		blog_warn(.pty_host_unreachable, blog_sym(.stage, .exec))
 	}
 	delete(ctx.session_id)
 	delete(ctx.shell_id)
@@ -4603,6 +4650,7 @@ bridge_hub_handle_shell_restart :: proc(conn: ^ws.Connection, text: string) {
 	// names the reason in error_code so the hub answers a typed 423, not a 500.
 	if bridge_vault_status() == .Locked {
 		fmt.println("bridge shell_restart rejected: vault_locked for session", session_id)
+		blog_warn(.vault_locked, blog_sym(.command_kind, .shell_restart))
 		send_result(conn, session_id, command_id, false, 0, "vault_locked")
 		return
 	}

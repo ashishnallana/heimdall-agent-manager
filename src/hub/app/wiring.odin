@@ -1,6 +1,7 @@
 package app
 
 import "core:fmt"
+import "core:strings"
 import "core:sync"
 import "core:time"
 import iface "odin_test:hub/repository/iface"
@@ -8,6 +9,7 @@ import sqlite "odin_test:hub/repository/sqlite"
 import auth_service "odin_test:hub/service/auth"
 import agent_service "odin_test:hub/service/agent"
 import bridge_service "odin_test:hub/service/bridge"
+import bridge_log_service "odin_test:hub/service/bridge_log"
 import bridge_runtime_service "odin_test:hub/service/bridge_runtime"
 import shell_session_svc "odin_test:hub/service/shell_session"
 import content_service "odin_test:hub/service/content"
@@ -56,6 +58,12 @@ App_Graph :: struct {
 	sqlite_lsp_server_configs: sqlite.Lsp_Server_Config_Repo_SQLite,
 	sqlite_providers: sqlite.Provider_Repo_SQLite,
 	sqlite_user_vaults: sqlite.User_Vault_Repo_SQLite,
+	sqlite_bridge_logs: sqlite.Bridge_Log_Repo_SQLite,
+	bridge_log_repo: iface.Bridge_Log_Repository,
+	// bridge_log relay: queue + the one writer thread (started in build_graph,
+	// joined in shutdown_graph).
+	bridge_logs: bridge_log_service.Service,
+	bridge_log_push: bridge_log_service.Push_Client,
 	sqlite_uow_factory: sqlite.SQLite_Unit_Of_Work_Factory,
 	repos: iface.Repositories,
 	uow_factory: iface.Unit_Of_Work_Factory,
@@ -180,6 +188,12 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 	graph.shell_session_repo = sqlite.new_shell_session_repository(&graph.sqlite_shell_sessions, &graph.db)
 	graph.experiment_repo = sqlite.new_experiment_repository(&graph.sqlite_experiments, &graph.db)
 	graph.lsp_server_config_repo = sqlite.new_lsp_server_config_repository(&graph.sqlite_lsp_server_configs, &graph.db)
+	graph.bridge_log_repo = sqlite.new_bridge_log_repository(&graph.sqlite_bridge_logs, &graph.db)
+	graph.bridge_logs = bridge_log_service.new_service(&graph.bridge_log_repo)
+	if strings.trim_space(config.log_push_url) != "" {
+		graph.bridge_log_push = bridge_log_service.new_push_client(config.log_push_url)
+		bridge_log_service.install_push(&graph.bridge_logs, &graph.bridge_log_push)
+	}
 	graph.provider_repo = sqlite.new_provider_repository(&graph.sqlite_providers, &graph.db)
 	graph.repos.user_vaults = sqlite.new_user_vault_repository(&graph.sqlite_user_vaults, &graph.db)
 	graph.uow_factory = sqlite.new_unit_of_work_factory(&graph.sqlite_uow_factory, &graph.db, &graph.repos)
@@ -296,7 +310,8 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 		// state the serializer reports.
 		bridge_runtime_registry = &graph.bridge_runtime_registry,
 	}
-	graph.bridge_handlers = http.Bridge_Handlers{auth = &graph.auth, bridges = &graph.bridges, agents = &graph.agents, content = &graph.content, taskchains = &graph.taskchains, projects = &graph.projects, event_bus = &graph.event_bus, bridge_runtime_registry = &graph.bridge_runtime_registry, shell_sessions = &graph.shell_session_service, lsp_sessions = &graph.lsp_session_registry, providers = &graph.providers}
+	graph.bridge_handlers = http.Bridge_Handlers{auth = &graph.auth, bridges = &graph.bridges, agents = &graph.agents, content = &graph.content, taskchains = &graph.taskchains, projects = &graph.projects, event_bus = &graph.event_bus, bridge_runtime_registry = &graph.bridge_runtime_registry, shell_sessions = &graph.shell_session_service, lsp_sessions = &graph.lsp_session_registry, providers = &graph.providers, bridge_logs = &graph.bridge_logs}
+	bridge_log_service.start(&graph.bridge_logs)
 	graph.agent_handlers = http.Agent_Handlers{
  launch_preferences = &graph.users,
 		auth           = &graph.auth,
@@ -364,6 +379,8 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 
 shutdown_graph :: proc(graph: ^App_Graph) {
 	db_collectors_detach()
+	// Join the bridge_log writer (final drain) while the DB is still open.
+	bridge_log_service.service_free(&graph.bridge_logs)
 	bridge_runtime_service.runtime_command_cache_destroy(&graph.bridge_runtime_registry)
 	http.router_free(&graph.router)
 	http.user_ws_ticket_store_free(&graph.user_handlers.ws_tickets)
@@ -637,6 +654,8 @@ register_routes :: proc(graph: ^App_Graph) {
 	http.router_add(&graph.router, "POST", "/api/v1/bridges/*/unseal", rawptr(&graph.bridge_handlers), http.bridge_unseal_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/bridges/*/lock", rawptr(&graph.bridge_handlers), http.bridge_lock_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/bridges/*/public-key", rawptr(&graph.bridge_handlers), http.bridge_public_key_handler)
+	http.router_add(&graph.router, "GET", "/api/v1/bridges/*/events", rawptr(&graph.bridge_handlers), http.bridge_events_list_handler)
+	http.router_add(&graph.router, "DELETE", "/api/v1/bridges/*/events", rawptr(&graph.bridge_handlers), http.bridge_events_purge_handler)
 	// Actions API
 	http.router_add(&graph.router, "GET", "/api/v1/actions", rawptr(&graph.action_handlers), http.list_actions_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/actions", rawptr(&graph.action_handlers), http.create_action_handler)

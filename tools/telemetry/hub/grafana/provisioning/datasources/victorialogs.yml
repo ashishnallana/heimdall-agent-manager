@@ -1,0 +1,13 @@
+# Grafana datasource for the optional VictoriaLogs backend (bridge_logs plan v2
+# section 5). Requires the `victoriametrics-logs-datasource` plugin; the NixOS
+# module installs it via services.grafana.declarativePlugins. Only provisioned
+# when services.heimdall-telemetry.logs.enable = true.
+apiVersion: 1
+datasources:
+  - name: VictoriaLogs
+    uid: heimdall-victorialogs
+    type: victoriametrics-logs-datasource
+    access: proxy
+    url: http://127.0.0.1:9428
+    isDefault: false
+    editable: false

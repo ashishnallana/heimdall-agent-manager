@@ -150,11 +150,13 @@ bridge_shell_exited_outbox_write :: proc(data_dir, session_id, event_json: strin
 
 	if os.write_entire_file(tmp, payload) != nil {
 		fmt.eprintln("bridge shell_exited outbox: could not write", tmp, "— this exit will not survive a restart")
+		blog_warn(.outbox_persist_failed, blog_sym(.stage, .write))
 		delete(path)
 		return ""
 	}
 	if os.rename(tmp, path) != nil {
 		fmt.eprintln("bridge shell_exited outbox: could not rename", tmp, "->", path)
+		blog_warn(.outbox_persist_failed, blog_sym(.stage, .rename))
 		_ = os.remove(tmp)
 		delete(path)
 		return ""

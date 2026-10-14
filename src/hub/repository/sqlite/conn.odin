@@ -40,6 +40,7 @@ foreign sqlite3_lib {
 	sqlite3_bind_text :: proc(pStmt: sqlite3_stmt, index: c.int, value: cstring, n: c.int, destructor: rawptr) -> c.int ---
 	sqlite3_bind_double :: proc(pStmt: sqlite3_stmt, index: c.int, value: c.double) -> c.int ---
 	sqlite3_bind_int :: proc(pStmt: sqlite3_stmt, index: c.int, value: c.int) -> c.int ---
+	sqlite3_bind_int64 :: proc(pStmt: sqlite3_stmt, index: c.int, value: i64) -> c.int ---
 	sqlite3_bind_null :: proc(pStmt: sqlite3_stmt, index: c.int) -> c.int ---
 	sqlite3_column_text :: proc(pStmt: sqlite3_stmt, iCol: c.int) -> cstring ---
 	sqlite3_column_double :: proc(pStmt: sqlite3_stmt, iCol: c.int) -> c.double ---

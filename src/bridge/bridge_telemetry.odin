@@ -118,6 +118,7 @@ bridge_telemetry_start :: proc() -> bool {
 	write_err := os.write_entire_file(conf_file, transmute([]byte)hydrated)
 	if write_err != nil {
 		fmt.eprintln("bridge telemetry: failed to write config file:", conf_file, write_err)
+		blog_error(.telemetry_collector_failed, blog_sym(.stage, .config))
 		return false
 	}
 
@@ -140,6 +141,7 @@ bridge_telemetry_start :: proc() -> bool {
 	})
 	if start_err != nil {
 		fmt.eprintln("bridge telemetry: failed to spawn telegraf:", start_err)
+		blog_error(.telemetry_collector_failed, blog_sym(.stage, .spawn))
 		return false
 	}
 

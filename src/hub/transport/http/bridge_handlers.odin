@@ -19,6 +19,7 @@ import agent_service "odin_test:hub/service/agent"
 import events "odin_test:hub/service/events"
 import platform "odin_test:hub/platform"
 import bridge_service "odin_test:hub/service/bridge"
+import bridge_log_service "odin_test:hub/service/bridge_log"
 import bridge_runtime_service "odin_test:hub/service/bridge_runtime"
 import content_service "odin_test:hub/service/content"
 import project_service "odin_test:hub/service/project"
@@ -45,6 +46,10 @@ Bridge_Handlers :: struct {
 	// browser socket that owns each session.
 	lsp_sessions: ^Lsp_Session_Registry,
 	providers: ^provider_service.Provider_Service,
+	// bridge_log relay: validated entries go to this writer; the owner API
+	// reads through it. nil in tests that do not wire it (entries are then
+	// validated and counted but not stored).
+	bridge_logs: ^bridge_log_service.Service,
 }
 
 list_bridges_handler :: proc(ctx: rawptr, req: Request) -> Response {
@@ -107,10 +112,12 @@ rename_bridge_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	bridge, patch_ok, err := bridge_service.patch_bridge(h.bridges, auth_ctx, bridge_id, label, has_label, telemetry_enabled, has_telemetry)
 	if !patch_ok do return respond_error(err, req.request_id)
 	if has_telemetry && h.bridge_runtime_registry != nil {
+		// Hub-side opt-out for bridge_log frames follows the row, live or not.
+		project_service.bridge_runtime_registry_set_telemetry_enabled(h.bridge_runtime_registry, bridge.bridge_id, bridge.telemetry_enabled != "disabled")
 		if project_service.bridge_runtime_registry_has_live(h.bridge_runtime_registry, bridge.bridge_id) {
 			enabled := bridge.telemetry_enabled == "enabled"
 			cmd_id := fmt.tprintf("cmd_tel_%d", time.to_unix_nanoseconds(time.now()))
-			cmd_payload := bridge_set_telemetry_payload(cmd_id, enabled)
+			cmd_payload := bridge_set_telemetry_payload(cmd_id, enabled, bridge.telemetry_enabled != "disabled")
 			defer delete(cmd_payload)
 			_, _ = bridge_runtime_service.send_runtime_command(h.bridge_runtime_registry, project_service.Runtime_Command{
 				bridge_id = bridge.bridge_id,
@@ -1312,6 +1319,9 @@ bridge_ws_upgrade_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_Soc
 		)
 	}
 	defer delete(catalog_etag)
+	// Cache the owner's switch on the connection BEFORE bridge_ready goes out: a
+	// bridge may flush its bridge_log ring in the very next frame.
+	project_service.bridge_runtime_registry_set_telemetry_enabled(h.bridge_runtime_registry, bridge.bridge_id, bridge.telemetry_enabled != "disabled")
 	_ = write_ws_text_frame_locked(h, bridge.bridge_id, client, bridge_ready_payload(bridge.bridge_id, hello.generation, hello.replaced_existing, catalog_etag, bridge.telemetry_enabled != "disabled"))
 	if bridge.telemetry_enabled == "enabled" {
 		cmd_id := fmt.tprintf("cmd_tel_%d", time.to_unix_nanoseconds(time.now()))
@@ -1699,6 +1709,9 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
 		delete(instance_id)
 		delete(runtime_status)
 		delete(activity_status)
+	case "bridge_log":
+		// bridge_logs plan v2 §4.1: validate + count + hand off; never SQLite here.
+		_ = bridge_apply_log_frame(h.bridge_logs, bridge_id, text, connection)
 	case "bridge_update_progress":
 		stage := json_string(text, "stage")
 		message := json_string(text, "message")
@@ -2147,6 +2160,8 @@ revoke_bridge_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	// The live connection (if any) is being shut down and will tombstone on its
 	// own teardown; do it here too so an offline revoked bridge leaves no info.
 	project_service.fleet_metrics_tombstone_bridge(bridge.bridge_id)
+	// A revoked bridge's error ring goes with it (plan §4.3).
+	if h.bridge_logs != nil do _, _ = bridge_log_service.purge_bridge(h.bridge_logs, bridge.bridge_id)
 	b := strings.builder_make()
 	write_bridge_json(&b, bridge, h.agents, h.bridges.catalog)
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req))
@@ -2357,12 +2372,22 @@ bridge_provider_catalog_version_payload :: proc(catalog_etag: string) -> string 
 	return strings.to_string(b)
 }
 
-bridge_set_telemetry_payload :: proc(command_id: string, enabled: bool) -> string {
+// bridge_set_telemetry_payload carries TWO explicit switches so "inherit" means
+// the same thing at PATCH time as at hello time:
+//   enabled         — the local Telegraf exporter; true only for "enabled".
+//   heartbeat_stats — heartbeat resource stats AND bridge_log shipping; true
+//                     unless the owner chose "disabled" (same rule as
+//                     bridge_ready.heartbeat_stats).
+// Old bridges read only `enabled`; new bridges prefer `heartbeat_stats` and
+// fall back to `enabled` when the key is absent (old hubs).
+bridge_set_telemetry_payload :: proc(command_id: string, enabled: bool, heartbeat_stats := true) -> string {
 	b := strings.builder_make()
 	strings.write_string(&b, "{\"type\":\"set_telemetry\",\"command_id\":\"")
 	write_handler_json_string(&b, command_id)
 	strings.write_string(&b, "\",\"enabled\":")
 	strings.write_string(&b, "true" if enabled else "false")
+	strings.write_string(&b, ",\"heartbeat_stats\":")
+	strings.write_string(&b, "true" if heartbeat_stats else "false")
 	strings.write_string(&b, "}")
 	return strings.to_string(b)
 }
