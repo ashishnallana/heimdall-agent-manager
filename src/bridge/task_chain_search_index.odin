@@ -122,6 +122,7 @@ task_chain_search_exec :: proc(index: ^Task_Chain_Search_Index, sql: string) -> 
 	if rc == TASK_CHAIN_SEARCH_SQLITE_OK do return true
 	if err_msg != nil {
 		fmt.eprintln("task-chain search sqlite error:", string(err_msg))
+		blog_warn(.search_index_error, blog_sym(.stage, .sqlite))
 		sqlite3_free(rawptr(err_msg))
 	}
 	return false

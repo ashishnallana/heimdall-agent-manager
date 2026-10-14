@@ -183,6 +183,7 @@ keystore_store_vault_key :: proc(bridge_id: string, key_hex: string) -> (ok: boo
 
 	_, err := sys_add_key(key_type, key_desc, raw_data(payload), c.size_t(len(payload)), KEY_SPEC_USER_KEYRING)
 	if err != 0 {
+		blog_warn(.keystore_unavailable, blog_sym(.reason, .linux_keyring), blog_int(.errno, i64(err)))
 		if err == KEYSTORE_ERR_EPERM || err == KEYSTORE_ERR_EACCES || err == KEYSTORE_ERR_ENOSYS {
 			fmt.eprintfln(
 				"WARN: Linux kernel keyring restricted (errno %d). Falling back gracefully to process-isolated JIT memory (REQ-VAULT-HARDEN-9).",
