@@ -47,6 +47,17 @@ Fleet_Metrics :: struct {
 	bridge_disk_free:         ^metrics.Family, // {bridge_id}
 	instance_resident:        ^metrics.Family, // {bridge_id, provider}
 	instance_cpu:             ^metrics.Family, // {bridge_id, provider} counter, value pushed
+
+	// Bridge error-event relay (bridge_logs plan v2 §4.1/§4.2). `code` and
+	// `level` come from the shared enum (unknown code -> "other"); the
+	// per-bridge family carries bridge_id ONLY.
+	bridge_errors:            ^metrics.Family, // {code, level}
+	bridge_errors_by_bridge:  ^metrics.Family, // {bridge_id}
+	bridge_log_entries:       ^metrics.Series, // accepted entries (sum of count)
+	bridge_log_dropped:       ^metrics.Series, // bridge-reported ring drops
+	bridge_log_queue_dropped: ^metrics.Series, // hub writer queue overflow
+	bridge_log_rows_written:  ^metrics.Series, // rows the writer inserted
+	log_push_failures:        ^metrics.Series, // optional backend push failures
 }
 
 fleet_metrics: Fleet_Metrics
@@ -104,6 +115,13 @@ fleet_metrics_init :: proc(reg: ^metrics.Registry) {
 	m.bridge_disk_free = metrics.new_gauge(reg, "heimdall_bridge_disk_free_bytes", "Free bytes on the bridge's scratch filesystem. Removed on disconnect.", {"bridge_id"})
 	m.instance_resident = metrics.new_gauge(reg, "heimdall_instance_resident_bytes", "Resident memory of agent instance process trees per provider (summed on the bridge). Removed on disconnect.", {"bridge_id", "provider"})
 	m.instance_cpu = metrics.new_counter(reg, "heimdall_instance_cpu_seconds_total", "Cumulative CPU seconds of agent instance process trees per provider (pushed value). Removed on disconnect.", {"bridge_id", "provider"}, 2)
+	m.bridge_errors = metrics.new_counter(reg, "heimdall_bridge_errors_total", "Bridge warn/error events relayed over the bridge WebSocket, by code and level (fleet-wide; count-weighted).", {"code", "level"})
+	m.bridge_errors_by_bridge = metrics.new_counter(reg, "heimdall_bridge_errors_by_bridge_total", "Bridge warn/error events per bridge (count-weighted). One series per bridge, no code.", {"bridge_id"})
+	m.bridge_log_entries = metrics.with(metrics.new_counter(reg, "heimdall_bridge_log_entries_total", "bridge_log entries the hub accepted (count-weighted)."))
+	m.bridge_log_dropped = metrics.with(metrics.new_counter(reg, "heimdall_bridge_log_dropped_total", "Entries bridges reported dropping from their own ring before shipping."))
+	m.bridge_log_queue_dropped = metrics.with(metrics.new_counter(reg, "heimdall_bridge_log_queue_dropped_total", "Accepted entries the hub dropped because the writer queue was full."))
+	m.bridge_log_rows_written = metrics.with(metrics.new_counter(reg, "heimdall_bridge_log_rows_written_total", "bridge_log_events rows inserted by the writer thread."))
+	m.log_push_failures = metrics.with(metrics.new_counter(reg, "heimdall_log_push_failures_total", "Failed pushes of bridge events to the optional log backend (--log-push-url)."))
 	// Pre-create the per-kind gauges so a zero is exposed from the first scrape.
 	for kind in ([]string{"bridge", "user", "agent_stream", "shell", "lsp"}) do metrics.with(m.ws_connections, kind)
 	if !collector_registered {
@@ -162,6 +180,7 @@ bridge_frame_kind :: proc(frame_type: string) -> string {
 	case strings.has_prefix(frame_type, "project_path_validation"): return "path_validation"
 	case strings.has_prefix(frame_type, "instance_") || strings.has_prefix(frame_type, "agent_"): return "instance"
 	case frame_type == "set_telemetry":                    return "telemetry"
+	case frame_type == "bridge_log":                       return "log"
 	case frame_type == "chunk":                            return "chunk"
 	case frame_type == "ping" || frame_type == "pong" || frame_type == "bridge_ready" || frame_type == "connection_replaced": return "control"
 	}
