@@ -150,8 +150,8 @@ registry_add_collector :: proc(reg: ^Registry, ctx: rawptr, collect: Collector_P
 // Family creation. Re-registering an existing name returns the existing family
 // (so tests and repeated graph builds are idempotent); the kind must match.
 
-new_counter :: proc(reg: ^Registry, name, help: string, label_names: []string = {}) -> ^Family {
-	return new_family(reg, name, help, .Counter, label_names, nil, 0)
+new_counter :: proc(reg: ^Registry, name, help: string, label_names: []string = {}, decimals := 0) -> ^Family {
+	return new_family(reg, name, help, .Counter, label_names, nil, decimals)
 }
 
 new_gauge :: proc(reg: ^Registry, name, help: string, label_names: []string = {}, decimals := 0) -> ^Family {
@@ -332,6 +332,14 @@ counter_add :: proc(s: ^Series, n: u64) {
 counter_inc :: proc(s: ^Series) {
 	if s == nil do return
 	sync.atomic_add(&s.value, 1)
+}
+
+// counter_set overwrites a counter with a cumulative value pushed by a remote
+// process (e.g. a bridge's own cpu seconds). The remote restarting makes the
+// value drop, which rate()/increase() treat as a counter reset.
+counter_set :: proc(s: ^Series, v: u64) {
+	if s == nil do return
+	sync.atomic_store(&s.value, v)
 }
 
 counter_value :: proc(s: ^Series) -> u64 {

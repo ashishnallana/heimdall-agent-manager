@@ -237,8 +237,13 @@ test_fleet_metrics_bridge_ws_lifecycle :: proc(t: ^testing.T) {
 	hb := metrics.with(m.bridge_last_heartbeat, f.bridge_id)
 	hb_before := metrics.gauge_value(hb)
 	time.sleep(1100 * time.Millisecond) // the gauge has 1 s resolution
-	fleet_send_frame(t, pair.client, 0x1, `{"type":"bridge_heartbeat","active_instance_ids":[]}`)
+	fleet_send_frame(t, pair.client, 0x1, `{"type":"bridge_heartbeat","active_instance_ids":[],"stats":{"rss":4096,"pty_host_rss":1,"cpu_s":0.5,"instances":[{"provider":"claude","rss":77,"cpu_s":0.1}]}}`)
 	testing.expect(t, fleet_read_until(pair.client, `"type":"bridge_heartbeat_ack"`), "heartbeat ack received")
+	// M3: resource gauges from the stats object, per bridge.
+	rss_series := metrics.with(m.bridge_process_resident, f.bridge_id, "bridge")
+	inst_series := metrics.with(m.instance_resident, f.bridge_id, "claude")
+	testing.expect_value(t, metrics.gauge_value(rss_series), i64(4096))
+	testing.expect_value(t, metrics.gauge_value(inst_series), i64(77))
 	testing.expect(t, metrics.gauge_value(hb) > hb_before, "last_heartbeat advanced")
 	testing.expect(t, metrics.counter_value(rx_bytes) > rx_bytes_before, "rx bytes counted (heartbeat)")
 	testing.expect(t, metrics.gauge_value(hb) > 1_600_000_000, "last_heartbeat is unix seconds")
@@ -259,6 +264,7 @@ test_fleet_metrics_bridge_ws_lifecycle :: proc(t: ^testing.T) {
 	testing.expect(t, metrics.histogram_count(m.bridge_session_duration) - session_count_before >= 1, "session duration observed")
 	testing.expect(t, metrics.series_is_dead(info), "bridge_info tombstoned on disconnect")
 	testing.expect(t, metrics.series_is_dead(hb), "last_heartbeat tombstoned on disconnect")
+	testing.expect(t, metrics.series_is_dead(rss_series) && metrics.series_is_dead(inst_series), "resource gauges tombstoned on disconnect")
 	testing.expect(t, metrics.gauge_value(metrics.with(m.ws_connections, project_service.WS_KIND_BRIDGE)) >= 0, "open gauge never negative")
 	// Scrape output must not mention the owner anymore.
 	b := strings.builder_make()

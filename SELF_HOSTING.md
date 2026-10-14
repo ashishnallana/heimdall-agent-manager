@@ -402,6 +402,23 @@ curl -s http://127.0.0.1:9464/metrics | head
   `heimdall_http_accept_errors_total`, the standard `process_*` family from
   `/proc/self`, `heimdall_hub_build_info{version,commit}`, and the lib's own
   `heimdall_metrics_series` / `heimdall_metrics_scrape_duration_seconds`.
+- Fleet metrics (`heimdall_bridge_*`, `heimdall_ws_*`, `heimdall_shell_*`,
+  `heimdall_preview_*`, `heimdall_lsp_sessions`, SQLite/reaper/auth/billing
+  counters) carry `bridge_id` at most; the owner appears only on
+  `heimdall_bridge_info`, which disappears when the bridge disconnects. Join:
+  `heimdall_shell_sessions * on(bridge_id) group_left(owner) heimdall_bridge_info`.
+- **Bridge host resources** (`heimdall_bridge_process_resident_bytes`,
+  `..._cpu_seconds_total`, `heimdall_bridge_host_memory_bytes`,
+  `heimdall_bridge_host_load1`, `heimdall_bridge_disk_free_bytes`,
+  `heimdall_instance_resident_bytes{provider}`, `heimdall_instance_cpu_seconds_total{provider}`)
+  ride on the bridge's existing 45 s heartbeat as a `stats` object — one `ps -A`
+  per heartbeat on the bridge host, no inbound connection. The hub size-caps,
+  clamps and rate-limits (5 s) what it accepts and maps providers onto its
+  catalog (`claude|codex|copilot|antigravity|gemini|other`).
+  **`telemetry_enabled` now governs both** the local Telegraf exporter and
+  these heartbeat stats: `disabled` turns them off (the hub says so in
+  `bridge_ready` and on `set_telemetry`), `inherit`/`enabled` keep them on.
+  Bridges older than this release simply send no `stats`.
 
 **Full stack on the NixOS hub host** (Prometheus 15 d / 8 GB, node_exporter,
 blackbox probe of your public URL, Grafana behind Authentik OIDC for the

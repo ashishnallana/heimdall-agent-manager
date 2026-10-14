@@ -1312,7 +1312,7 @@ bridge_ws_upgrade_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_Soc
 		)
 	}
 	defer delete(catalog_etag)
-	_ = write_ws_text_frame_locked(h, bridge.bridge_id, client, bridge_ready_payload(bridge.bridge_id, hello.generation, hello.replaced_existing, catalog_etag))
+	_ = write_ws_text_frame_locked(h, bridge.bridge_id, client, bridge_ready_payload(bridge.bridge_id, hello.generation, hello.replaced_existing, catalog_etag, bridge.telemetry_enabled != "disabled"))
 	if bridge.telemetry_enabled == "enabled" {
 		cmd_id := fmt.tprintf("cmd_tel_%d", time.to_unix_nanoseconds(time.now()))
 		payload := bridge_set_telemetry_payload(cmd_id, true)
@@ -1588,6 +1588,7 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
 		delete(payload)
 	case "bridge_heartbeat":
 		metrics.gauge_set(metrics.with(project_service.fleet_metrics.bridge_last_heartbeat, bridge_id), time.now()._nsec / 1_000_000_000)
+		_ = bridge_apply_heartbeat_stats(bridge_id, text, connection)
 		project_service.bridge_runtime_registry_set_task_chain_search_status(
 			h.bridge_runtime_registry, bridge_id, connection_generation,
 			json_bool_value(text, "task_chain_search_ready"), json_bool_value(text, "task_chain_search_stale"),
@@ -2311,7 +2312,9 @@ json_key_present :: proc(body, key: string) -> bool {
 	return jsonx.has_key(body, key)
 }
 
-bridge_ready_payload :: proc(bridge_id: string, generation: int, replaced: bool, catalog_etag: string = "") -> string {
+// heartbeat_stats tells the bridge whether to attach resource stats to its
+// heartbeats (plan 4.3): false only when the owner set telemetry_enabled=disabled.
+bridge_ready_payload :: proc(bridge_id: string, generation: int, replaced: bool, catalog_etag: string = "", heartbeat_stats := true) -> string {
 	b := strings.builder_make()
 	strings.write_string(&b, "{\"type\":\"bridge_ready\",\"protocol_version\":1,\"payload\":{\"bridge_id\":\"")
 	write_handler_json_string(&b, bridge_id)
@@ -2322,6 +2325,8 @@ bridge_ready_payload :: proc(bridge_id: string, generation: int, replaced: bool,
 	strings.write_string(&b, ",\"catalog_etag\":\"")
 	write_handler_json_string(&b, catalog_etag)
 	strings.write_string(&b, "\"")
+	strings.write_string(&b, ",\"heartbeat_stats\":")
+	strings.write_string(&b, "true" if heartbeat_stats else "false")
 	strings.write_string(&b, "}}")
 	return strings.to_string(b)
 }

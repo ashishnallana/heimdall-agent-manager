@@ -65,6 +65,8 @@ Bridge_Runtime_Connection :: struct {
 	// memory is owned by the metrics registry and never freed).
 	tx_bytes: ^metrics.Series,
 	rx_bytes: ^metrics.Series,
+	// Last accepted heartbeat `stats` object (tick ns); enforces the 5 s cap.
+	last_stats_tick_ns: i64,
 	terminal_count: int,
 	next_sweep_ns: i64,
 }
@@ -458,6 +460,13 @@ bridge_runtime_instance_apply :: proc(r: ^Bridge_Runtime_Registry, bridge_id: st
 	active := runtime_state_active(status)
 	if active && (!exists || !old.active) && !runtime_active_change(r, owner, 1) do return false, false, domain.domain_error(.Bridge_Busy, "active instance quota exhausted")
 	if exists && old.active && !active do _ = runtime_active_change(r, old.owner_id, -1)
+	// Lifecycle counters (plan 3.3), keyed by the status enum only: an instance
+	// entering an active state from nothing/terminal is a start; an active one
+	// entering a terminal state is an exit. Reservations are not starts.
+	if !reserve {
+		if active && (!exists || !old.active) do metrics.counter_inc(metrics.with(fleet_metrics.agent_instance_starts, runtime_status_enum(status)))
+		if !active && exists && old.active do metrics.counter_inc(metrics.with(fleet_metrics.agent_instance_exits, runtime_status_enum(status)))
+	}
 	if !active && (!exists || old.active) do c.terminal_count += 1
 	if active && exists && !old.active do c.terminal_count -= 1
 	heap := runtime.default_allocator()

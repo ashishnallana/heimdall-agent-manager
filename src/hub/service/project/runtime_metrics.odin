@@ -29,6 +29,8 @@ Fleet_Metrics :: struct {
 	bridge_updates:           ^metrics.Family, // {result}
 	limit_rejections:         ^metrics.Family, // {limit}
 	agent_instances_reconciled_gone: ^metrics.Series,
+	agent_instance_starts:    ^metrics.Family, // {status}
+	agent_instance_exits:     ^metrics.Family, // {status}
 
 	ws_connections:           ^metrics.Family, // {kind}
 	ws_connections_total:     ^metrics.Family, // {kind, result}
@@ -36,6 +38,15 @@ Fleet_Metrics :: struct {
 	ws_connection_duration:   ^metrics.Family, // {kind}
 	ws_bytes:                 ^metrics.Family, // {kind, direction, bridge_id}
 	ws_write_errors:          ^metrics.Family, // {kind, reason}
+
+	// Bridge host resources pushed in the heartbeat `stats` object (plan 3.2).
+	bridge_process_resident:  ^metrics.Family, // {bridge_id, process}
+	bridge_process_cpu:       ^metrics.Family, // {bridge_id, process} counter, value pushed
+	bridge_host_memory:       ^metrics.Family, // {bridge_id, kind}
+	bridge_host_load1:        ^metrics.Family, // {bridge_id}
+	bridge_disk_free:         ^metrics.Family, // {bridge_id}
+	instance_resident:        ^metrics.Family, // {bridge_id, provider}
+	instance_cpu:             ^metrics.Family, // {bridge_id, provider} counter, value pushed
 }
 
 fleet_metrics: Fleet_Metrics
@@ -78,12 +89,21 @@ fleet_metrics_init :: proc(reg: ^metrics.Registry) {
 	m.limit_rejections = metrics.new_counter(reg, "heimdall_limit_rejections_total", "Admissions refused by a configured runtime limit.", {"limit"})
 	m.agent_instances_reconciled_gone = metrics.with(metrics.new_counter(reg, "heimdall_agent_instances_reconciled_gone_total", "Agent instances the hub marked gone because the bridge no longer reported them."))
 
+	m.agent_instance_starts = metrics.new_counter(reg, "heimdall_agent_instance_starts_total", "Agent instances entering an active runtime state (from new or terminal), by the status they entered.", {"status"})
+	m.agent_instance_exits = metrics.new_counter(reg, "heimdall_agent_instance_exits_total", "Active agent instances entering a terminal runtime state, by that status.", {"status"})
 	m.ws_connections = metrics.new_gauge(reg, "heimdall_ws_connections", "Open WebSocket connections by kind.", {"kind"})
 	m.ws_connections_total = metrics.new_counter(reg, "heimdall_ws_connections_total", "WebSocket upgrade attempts by kind and outcome.", {"kind", "result"})
 	m.ws_disconnects_total = metrics.new_counter(reg, "heimdall_ws_disconnects_total", "WebSocket teardowns by kind and reason.", {"kind", "reason"})
 	m.ws_connection_duration = metrics.new_histogram_seconds(reg, "heimdall_ws_connection_duration_seconds", "Lifetime of browser/bridge WebSocket connections.", {"kind"}, SESSION_DURATION_BUCKETS[:])
 	m.ws_bytes = metrics.new_counter(reg, "heimdall_ws_bytes_total", "WebSocket payload bytes by kind and direction (bridge_id only for agent_stream/shell).", {"kind", "direction", "bridge_id"})
 	m.ws_write_errors = metrics.new_counter(reg, "heimdall_ws_write_errors_total", "Failed WebSocket writes by kind and reason.", {"kind", "reason"})
+	m.bridge_process_resident = metrics.new_gauge(reg, "heimdall_bridge_process_resident_bytes", "Resident memory of bridge-side processes as reported in the heartbeat. Removed on disconnect.", {"bridge_id", "process"})
+	m.bridge_process_cpu = metrics.new_counter(reg, "heimdall_bridge_process_cpu_seconds_total", "Cumulative CPU seconds of bridge-side processes (pushed value; resets when the bridge restarts). Removed on disconnect.", {"bridge_id", "process"}, 2)
+	m.bridge_host_memory = metrics.new_gauge(reg, "heimdall_bridge_host_memory_bytes", "Bridge host memory as reported in the heartbeat. Removed on disconnect.", {"bridge_id", "kind"})
+	m.bridge_host_load1 = metrics.new_gauge(reg, "heimdall_bridge_host_load1", "Bridge host 1-minute load average. Removed on disconnect.", {"bridge_id"}, 2)
+	m.bridge_disk_free = metrics.new_gauge(reg, "heimdall_bridge_disk_free_bytes", "Free bytes on the bridge's scratch filesystem. Removed on disconnect.", {"bridge_id"})
+	m.instance_resident = metrics.new_gauge(reg, "heimdall_instance_resident_bytes", "Resident memory of agent instance process trees per provider (summed on the bridge). Removed on disconnect.", {"bridge_id", "provider"})
+	m.instance_cpu = metrics.new_counter(reg, "heimdall_instance_cpu_seconds_total", "Cumulative CPU seconds of agent instance process trees per provider (pushed value). Removed on disconnect.", {"bridge_id", "provider"}, 2)
 	// Pre-create the per-kind gauges so a zero is exposed from the first scrape.
 	for kind in ([]string{"bridge", "user", "agent_stream", "shell", "lsp"}) do metrics.with(m.ws_connections, kind)
 	if !collector_registered {
@@ -99,6 +119,13 @@ fleet_metrics_tombstone_bridge :: proc(bridge_id: string) {
 	m := &fleet_metrics
 	metrics.remove_where(m.bridge_info, 0, bridge_id)
 	metrics.remove_where(m.bridge_last_heartbeat, 0, bridge_id)
+	metrics.remove_where(m.bridge_process_resident, 0, bridge_id)
+	metrics.remove_where(m.bridge_process_cpu, 0, bridge_id)
+	metrics.remove_where(m.bridge_host_memory, 0, bridge_id)
+	metrics.remove_where(m.bridge_host_load1, 0, bridge_id)
+	metrics.remove_where(m.bridge_disk_free, 0, bridge_id)
+	metrics.remove_where(m.instance_resident, 0, bridge_id)
+	metrics.remove_where(m.instance_cpu, 0, bridge_id)
 	for hook in bridge_tombstone_hooks do hook(bridge_id)
 }
 
@@ -137,6 +164,16 @@ bridge_frame_kind :: proc(frame_type: string) -> string {
 	case frame_type == "set_telemetry":                    return "telemetry"
 	case frame_type == "chunk":                            return "chunk"
 	case frame_type == "ping" || frame_type == "pong" || frame_type == "bridge_ready" || frame_type == "connection_replaced": return "control"
+	}
+	return "other"
+}
+
+// provider_enum maps a bridge-reported provider/program name onto the hub's
+// provider catalog ids; anything else is "other".
+provider_enum :: proc(provider: string) -> string {
+	switch provider {
+	case "claude", "codex", "copilot", "antigravity", "gemini":
+		return provider
 	}
 	return "other"
 }
