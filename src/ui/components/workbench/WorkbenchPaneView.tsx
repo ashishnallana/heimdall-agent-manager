@@ -255,7 +255,16 @@ export function WorkbenchPaneView({
                   autoCreate={!tab.sessionId || tab.sessionId === 'new'}
                   isActiveTab={isActive}
                   onSelectSession={(nextSessionId) =>
-                    onUpdateTabParams(tab.id, { sessionId: nextSessionId })
+                    onReplaceTab
+                      ? onReplaceTab(tab.id, {
+                          kind: 'shell',
+                          sessionId: nextSessionId,
+                          title: tab.title,
+                          bridgeId: tab.bridgeId || bridgeId,
+                          currentPath: tab.currentPath,
+                          closable: tab.closable,
+                        })
+                      : onUpdateTabParams(tab.id, { sessionId: nextSessionId })
                   }
                 />
               ) : tab.kind === 'preview' ? (

@@ -87,6 +87,7 @@ import workbenchReducer, {
   moveWorkbenchTabToPane,
   splitWorkbenchPaneWithTab,
   updateWorkbenchTabParams,
+  replaceWorkbenchTab,
   openPreviewInWorkbench,
   setWorkbenchPendingDropTarget,
   hydrateWorkspaceWorkbench,
@@ -800,6 +801,65 @@ test('M1 Level 2 Tab Codec & Store: workbenchTabId and workbenchSlice full lifec
       ?.currentPath,
     'settings',
   );
+});
+
+test('shell session binding rekeys the provisional tab so another new shell can coexist', () => {
+  const workspaceKey = 'chain:shell-rekey';
+  let state = workbenchReducer(
+    undefined,
+    ensureWorkspaceInitialized({
+      workspaceKey,
+      defaultAgentInstanceId: 'coord-1',
+      defaultTitle: 'Coordinator',
+    }),
+  );
+
+  state = workbenchReducer(
+    state,
+    openOrFocusWorkbenchTab({
+      workspaceKey,
+      paneId: 'pane-1',
+      tab: { kind: 'shell', sessionId: 'new', title: 'Shell' },
+    }),
+  );
+  assert.equal(selectFocusedWorkbenchPane(state, workspaceKey)?.activeTabId, 'shell__new');
+
+  state = workbenchReducer(
+    state,
+    replaceWorkbenchTab({
+      workspaceKey,
+      paneId: 'pane-1',
+      tabId: 'shell__new',
+      tab: { kind: 'shell', sessionId: 'srv-running', title: 'Shell' },
+    }),
+  );
+  assert.equal(
+    selectFocusedWorkbenchPane(state, workspaceKey)?.activeTabId,
+    'shell__srv-running',
+  );
+  assert.equal(
+    selectAllWorkspaceTabs(state, workspaceKey).some((tab) => tab.id === 'shell__new'),
+    false,
+  );
+
+  state = workbenchReducer(
+    state,
+    openNewTabView({ workspaceKey, paneId: 'pane-1' }),
+  );
+  state = workbenchReducer(
+    state,
+    replaceNewTabWithSurface({
+      workspaceKey,
+      paneId: 'pane-1',
+      tab: { kind: 'shell', sessionId: 'new', title: 'Shell' },
+    }),
+  );
+
+  const shellTabIds = selectAllWorkspaceTabs(state, workspaceKey)
+    .filter((tab) => tab.kind === 'shell')
+    .map((tab) => tab.id);
+  assert.deepEqual(shellTabIds, ['shell__srv-running', 'shell__new']);
+  assert.equal(selectFocusedWorkbenchPane(state, workspaceKey)?.activeTabId, 'shell__new');
 });
 
 test('M1 Persistence Helpers: windowLayout, workbenchWorkspace, and per-instance composer drafts', () => {

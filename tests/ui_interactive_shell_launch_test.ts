@@ -90,6 +90,127 @@ test('workbench launch uses a fresh-session sentinel and a guarded retryable aut
   assert.match(dialog, /cwdEditedRef\.current = true/);
 });
 
+test('successful auto-start creates once and reports the real session for tab rekeying', async () => {
+  const { JSDOM } = await import('jsdom');
+  const { Provider } = await import('react-redux');
+  const { createRoot } = await import('react-dom/client');
+  const { act } = await import('react');
+  const { WorkbenchPaneView } = await import(
+    '../src/ui/components/workbench/WorkbenchPaneView.tsx'
+  );
+  const { heimdallApi } = await import('../src/ui/api/heimdallApi.ts');
+
+  const dom = new JSDOM('<!DOCTYPE html><html><body><div id="root"></div></body></html>', {
+    url: 'http://localhost/',
+  });
+  const previousWindow = (globalThis as any).window;
+  const previousDocument = (globalThis as any).document;
+  const previousHTMLElement = (globalThis as any).HTMLElement;
+  const previousNavigator = (globalThis as any).navigator;
+  const previousFetch = (globalThis as any).fetch;
+  (globalThis as any).window = dom.window;
+  (globalThis as any).document = dom.window.document;
+  (globalThis as any).HTMLElement = dom.window.HTMLElement;
+  Object.defineProperty(globalThis, 'navigator', { value: dom.window.navigator, configurable: true });
+  (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+
+  let postCount = 0;
+  (globalThis as any).fetch = async (input: any, init: any = {}) => {
+    const url = String(input?.url ?? input);
+    const method = String(init?.method || input?.method || 'GET').toUpperCase();
+    if (method === 'POST' && url.includes('/bridges/bridge-a/shells')) {
+      postCount += 1;
+      const body = { data: { session: { session_id: 'sh-created', kind: 'shell' } } };
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: () => 'application/json' },
+        text: async () => JSON.stringify(body),
+        json: async () => body,
+      } as any;
+    }
+    const body = { data: { sessions: [] } };
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => 'application/json' },
+      text: async () => JSON.stringify(body),
+      json: async () => body,
+    } as any;
+  };
+
+  const replacements: Array<{ tabId: string; tab: Record<string, unknown> }> = [];
+  const store = await makeVaultStore();
+  const root = createRoot(dom.window.document.getElementById('root')!);
+  try {
+    await act(async () => {
+      root.render(
+        React.createElement(
+          Provider,
+          { store },
+          React.createElement(WorkbenchPaneView, {
+            paneId: 'pane-1',
+            pane: {
+              tabs: [{
+                id: 'shell__new',
+                kind: 'shell',
+                title: 'Shell',
+                sessionId: 'new',
+                closable: true,
+              }],
+              activeTabId: 'shell__new',
+            },
+            workspaceKey: 'chain:chain-a',
+            primaryAgentInstanceId: 'agent-a',
+            bridgeId: 'bridge-a',
+            projectId: 'project-a',
+            chainId: 'chain-a',
+            isFocused: true,
+            isMaximized: false,
+            isSinglePane: true,
+            onFocusPane: () => {},
+            onSelectTab: () => {},
+            onCloseTab: () => {},
+            onOpenNewTab: () => {},
+            onReplaceNewTab: () => {},
+            onOpenOrFocusTab: () => {},
+            onUpdateTabParams: () => {},
+            onReplaceTab: (tabId: string, tab: Record<string, unknown>) => {
+              replacements.push({ tabId, tab });
+            },
+            onSplitPane: () => {},
+            onToggleMaximize: () => {},
+            onClosePane: () => {},
+          }),
+        ),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+
+    assert.equal(postCount, 1, 'auto-start must issue exactly one shell creation request');
+    assert.deepEqual(replacements, [{
+      tabId: 'shell__new',
+      tab: {
+        kind: 'shell',
+        sessionId: 'sh-created',
+        title: 'Shell',
+        bridgeId: 'bridge-a',
+        currentPath: undefined,
+        closable: true,
+      },
+    }]);
+  } finally {
+    await act(async () => root.unmount());
+    store.dispatch(heimdallApi.util.resetApiState());
+    dom.window.close();
+    (globalThis as any).window = previousWindow;
+    (globalThis as any).document = previousDocument;
+    (globalThis as any).HTMLElement = previousHTMLElement;
+    Object.defineProperty(globalThis, 'navigator', { value: previousNavigator, configurable: true });
+    (globalThis as any).fetch = previousFetch;
+  }
+});
+
 test('auto-start attempts once and exposes an explicit retry after failure', async () => {
   const { JSDOM } = await import('jsdom');
   const { Provider } = await import('react-redux');
