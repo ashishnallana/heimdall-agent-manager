@@ -36,6 +36,12 @@ mkdir -p "$RUN_DIR/bridge"
 # Defaults are unchanged.
 HUB_ADDR="${HAM_DEV_HUB_ADDR:-127.0.0.1:8081}"
 PROXY_ADDR="${HAM_DEV_PROXY_ADDR:-127.0.0.1:8080}"
+# The hub's CSRF check compares a cookie-carrying request's Origin to this. Override
+# it when the browser reaches the stack through another origin, e.g. the Heimdall
+# preview (https://heimdall-preview.<domain>): the preview relay does not forward
+# Sec-Fetch-Site, so every PATCH/POST from the preview 403s with csrf_rejected
+# ("Origin does not match the UI origin") unless this names the preview origin.
+UI_ORIGIN="${HAM_DEV_UI_ORIGIN:-http://$PROXY_ADDR}"
 BRIDGE_PORT="${HAM_DEV_BRIDGE_PORT:-49327}"
 BRIDGE_LOCAL_ENDPOINT_PORT="${HAM_DEV_BRIDGE_LOCAL_ENDPOINT_PORT:-49328}"
 HUB_DB="${HAM_DEV_HUB_DB:-$ROOT/hub.db}"
@@ -279,7 +285,7 @@ start() {
     --listen "$HUB_ADDR" --db "$HUB_DB" \
     --migrations-dir "$MIGRATIONS" \
     --trusted-proxy-cidr 127.0.0.1/32 \
-    --ui-origin "http://$PROXY_ADDR" \
+    --ui-origin "$UI_ORIGIN" \
     >"$RUN_DIR/hub.log" 2>&1 &
   echo $! > "$(_pidfile hub)"
   disown $!
