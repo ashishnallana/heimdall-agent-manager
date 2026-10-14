@@ -70,10 +70,16 @@ test('mobile aux hides the fixed Heimdall and sidebar controls', () => {
 
 test('vault status toggle sits immediately left of Heimdall and cannot fake unlock', () => {
   assert.match(source, /data-debug-id="shell-vault-status-toggle"/);
-  assert.match(source, /Icon name=\{isVaultUnlocked \? 'lock-open' : 'lock'\}/);
-  assert.match(source, /isVaultUnlocked\s*\? 'bg-success-soft text-success/);
+  assert.match(source, /Icon name=\{isVaultUnlocked && !hasOnlineLockedBridge \? 'lock-open' : 'lock'\}/);
+  assert.match(source, /hasOnlineLockedBridge[\s\S]*'bg-warning-soft text-warning/);
+  assert.match(source, /isVaultUnlocked[\s\S]*'bg-success-soft text-success/);
   assert.match(source, /: 'bg-danger-soft text-danger/);
-  assert.match(source, /if \(!vaultSupported \|\| isVaultLocking\) return/);
+  assert.match(source, /if \(!vaultSupported \|\| isVaultLocking \|\| isVaultReconciling\) return/);
   assert.match(source, /dispatch\(setUnlockModalOpen\(true\)\)/);
+  assert.match(source, /if \(hasOnlineLockedBridge\)[\s\S]*reconcileOnlineLockedBridges\(\)/);
+  assert.match(source, /if \(bridgeReconciliationRef\.current\) return bridgeReconciliationRef\.current/);
+  assert.match(source, /bridgeReconciliationRef\.current = run/);
+  assert.match(source, /await refetchBridges\(\)/);
+  assert.match(source, /bridgeReconciliationRef\.current = null/);
   assert.match(source, /lockAllConnectedBridges\(\)[\s\S]*dispatch\(lockVault\(\)\)/);
 });

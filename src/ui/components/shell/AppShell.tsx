@@ -16,12 +16,16 @@ import { useListAgentIdentitiesQuery } from '../../api/endpoints/agents';
 import { useListSidebarConversationsQuery, type SidebarConversation } from '../../api/endpoints/sidebar';
 import { useGetAgentsLiveQuery, type LiveProject } from '../../api/endpoints/agentsLive';
 import { useFetchTaskChainGroupsQuery } from '../../api/endpoints/tasks';
-import { useListBridgesQuery } from '../../api/endpoints/bridgeSupport';
+import { useListBridgesQuery, type Bridge } from '../../api/endpoints/bridgeSupport';
 import { useGetAccountBillingQuery } from '../../api/endpoints/accountBilling';
 import SidebarUpdateBadge from './SidebarUpdateBadge';
 import { MOBILE_TOP_LEFT_CLUSTER_WIDTH, TOP_CHROME_HEIGHT, TOP_LEFT_CLUSTER_WIDTH } from './shellChrome';
 import type { PendingBridgeUpdate } from '../settings/bridgeUpdate';
-import { lockAllConnectedBridges, unsealAllConnectedBridges } from '../../api/endpoints/bridges';
+import {
+  lockAllConnectedBridges,
+  reconcileLockedBridges,
+  type BridgeVaultReconciliationResult,
+} from '../../api/endpoints/bridges';
 import { buildRouteHash, getRoutePathname, getRouteSearch } from '../../utils/appLocation';
 import {
   readLastSeenUserId,
@@ -73,6 +77,8 @@ import {
   readOnboardingDismissed,
   shouldOpenVaultOnboarding,
   getActiveVaultKey,
+  getActiveBridgeVaultKeyMaterial,
+  setActiveBridgeVaultKeyMaterial,
   lockVault,
 } from '../../store/vaultSlice';
 import { isVaultSupported } from '../../utils/vaultCrypto';
@@ -90,6 +96,7 @@ import ArtifactViewer from '../ArtifactViewer';
 import { clearUserClientState } from '../../store/chatSlice';
 import { priorUserClientStateCleared } from '../../store/store';
 import { selectAuxPane, selectCurrentAuxTreeId } from '../../store/auxPanesSlice';
+import { selectOnlineLockedBridgeIds } from '../../utils/bridgeVaultStatus';
 
 type ShellRoute = {
   path: string;
@@ -1346,6 +1353,54 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
   const isUnlockModalOpen = useSelector(selectIsUnlockModalOpen);
   const [isOnboardingModalOpen, setIsOnboardingModalOpen] = useState(false);
   const [isVaultLocking, setIsVaultLocking] = useState(false);
+  const [isVaultReconciling, setIsVaultReconciling] = useState(false);
+  const [isBridgeReauthenticationOpen, setIsBridgeReauthenticationOpen] = useState(false);
+  const {
+    data: bridgesData,
+    fulfilledTimeStamp: bridgesFulfilledTimeStamp,
+    refetch: refetchBridges,
+  } = useListBridgesQuery(undefined);
+  const bridges = useMemo<Bridge[]>(() => bridgesData?.bridges || [], [bridgesData]);
+  const onlineLockedBridgeIds = useMemo(
+    () => selectOnlineLockedBridgeIds(bridges),
+    [bridges],
+  );
+  const onlineLockedBridgeSignature = onlineLockedBridgeIds.join('\u0000');
+  const hasOnlineLockedBridge = isVaultUnlocked && onlineLockedBridgeIds.length > 0;
+  const bridgeReconciliationRef = useRef<Promise<BridgeVaultReconciliationResult> | null>(null);
+  const lastAutomaticReconciliationRef = useRef<number | undefined>(undefined);
+
+  const reconcileOnlineLockedBridges = useCallback((providedKey?: string) => {
+    if (bridgeReconciliationRef.current) return bridgeReconciliationRef.current;
+
+    const targetBridgeIds = selectOnlineLockedBridgeIds(bridges);
+    const key = providedKey || getActiveBridgeVaultKeyMaterial();
+    if (targetBridgeIds.length > 0 && !key) {
+      setIsBridgeReauthenticationOpen(true);
+      return Promise.resolve({
+        targetBridgeIds,
+        attemptedBridgeIds: [],
+        succeededBridgeIds: [],
+        failedBridgeIds: [],
+        needsReauthentication: true,
+      });
+    }
+
+    setIsVaultReconciling(true);
+    const run = reconcileLockedBridges(bridges, key)
+      .then(async (result) => {
+        if (result.attemptedBridgeIds.length > 0) {
+          await refetchBridges();
+        }
+        return result;
+      })
+      .finally(() => {
+        bridgeReconciliationRef.current = null;
+        setIsVaultReconciling(false);
+      });
+    bridgeReconciliationRef.current = run;
+    return run;
+  }, [bridges, refetchBridges]);
 
   // Auto-pop onboarding modal on first visit if vault is unconfigured or locked and not
   // dismissed. Suppressed entirely when SubtleCrypto is unavailable (REQ-VAULT-UNSUP-2).
@@ -1372,10 +1427,24 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
     }
   }, [isOnboardingModalOpen, isUnlockModalOpen, dispatch]);
 
-  // Invalidate cached RTK Query tags when vault unlocks (REQ-VAULT-TAGS-INVALIDATE)
+  // Reconcile every and only online bridges that explicitly report Locked. A raw key
+  // derived in this browser session can run silently; a cold-restored non-extractable
+  // key opens the existing secure credential ceremony instead.
+  useEffect(() => {
+    if (!isVaultUnlocked || !onlineLockedBridgeSignature || !bridgesFulfilledTimeStamp) return;
+    if (lastAutomaticReconciliationRef.current === bridgesFulfilledTimeStamp) return;
+    lastAutomaticReconciliationRef.current = bridgesFulfilledTimeStamp;
+    void reconcileOnlineLockedBridges();
+  }, [
+    isVaultUnlocked,
+    onlineLockedBridgeSignature,
+    bridgesFulfilledTimeStamp,
+    reconcileOnlineLockedBridges,
+  ]);
+
+  // Invalidate decrypted content when vault unlocks (REQ-VAULT-TAGS-INVALIDATE).
   useEffect(() => {
     if (isVaultUnlocked) {
-      void unsealAllConnectedBridges();
       dispatch(
         heimdallApi.util.invalidateTags([
           'Projects',
@@ -1641,11 +1710,15 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
     <button
       data-debug-id="shell-vault-status-toggle"
       type="button"
-      disabled={!vaultSupported || isVaultLocking}
+      disabled={!vaultSupported || isVaultLocking || isVaultReconciling}
       onClick={() => {
-        if (!vaultSupported || isVaultLocking) return;
+        if (!vaultSupported || isVaultLocking || isVaultReconciling) return;
         if (!isVaultUnlocked) {
           dispatch(setUnlockModalOpen(true));
+          return;
+        }
+        if (hasOnlineLockedBridge) {
+          void reconcileOnlineLockedBridges();
           return;
         }
         setIsVaultLocking(true);
@@ -1655,16 +1728,24 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
             setIsVaultLocking(false);
           });
       }}
-      aria-label={isVaultUnlocked ? 'Lock vault' : 'Unlock vault'}
-      aria-pressed={isVaultUnlocked}
-      title={!vaultSupported ? 'Vault unavailable in this browser context' : isVaultUnlocked ? 'Vault unlocked — click to lock' : 'Vault locked — click to unlock'}
+      aria-label={hasOnlineLockedBridge ? 'Unlock locked bridges' : isVaultUnlocked ? 'Lock vault' : 'Unlock vault'}
+      aria-pressed={isVaultUnlocked && !hasOnlineLockedBridge}
+      title={!vaultSupported
+        ? 'Vault unavailable in this browser context'
+        : hasOnlineLockedBridge
+          ? `${onlineLockedBridgeIds.length} connected bridge${onlineLockedBridgeIds.length === 1 ? '' : 's'} locked — click to unlock`
+          : isVaultUnlocked
+            ? 'Vault unlocked — click to lock'
+            : 'Vault locked — click to unlock'}
       className={`grid h-8 w-8 shrink-0 place-items-center rounded-lg transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
-        isVaultUnlocked
+        hasOnlineLockedBridge
+          ? 'bg-warning-soft text-warning hover:bg-warning/20'
+          : isVaultUnlocked
           ? 'bg-success-soft text-success hover:bg-success/20'
           : 'bg-danger-soft text-danger hover:bg-danger/20'
       }`}
     >
-      <Icon name={isVaultUnlocked ? 'lock-open' : 'lock'} size={16} />
+      <Icon name={isVaultUnlocked && !hasOnlineLockedBridge ? 'lock-open' : 'lock'} size={16} />
     </button>
   );
   const brandLink = (
@@ -1860,8 +1941,13 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
         }}
       />
       <VaultOnboardingModal
-        open={isOnboardingModalOpen}
-        onOpenChange={setIsOnboardingModalOpen}
+        open={isOnboardingModalOpen || isBridgeReauthenticationOpen}
+        mode={isBridgeReauthenticationOpen ? 'bridge-reauthentication' : 'vault-unlock'}
+        onOpenChange={isBridgeReauthenticationOpen ? setIsBridgeReauthenticationOpen : setIsOnboardingModalOpen}
+        onBridgeReauthenticate={async (rawVaultKeyHex) => {
+          setActiveBridgeVaultKeyMaterial(rawVaultKeyHex);
+          await reconcileOnlineLockedBridges(rawVaultKeyHex);
+        }}
       />
       <SettingsModal
         open={settingsModalOpen}

@@ -3,6 +3,10 @@
 import { cookieJsonFetch, cookieMutation } from '../cookieFetch';
 import { heimdallApi } from '../heimdallApi';
 import type { BridgeUnsealPayload, BridgeUnsealResult } from '../../utils/vaultBridgeUnseal';
+import {
+  selectOnlineLockedBridgeIds,
+  type BridgeVaultStatusRecord,
+} from '../../utils/bridgeVaultStatus';
 
 /**
  * Dispatches an E2EE wrapped unseal payload to Hub for the specified Bridge.
@@ -63,45 +67,67 @@ export async function lockBridge(bridgeId: string): Promise<{ ok: boolean }> {
 }
 
 /**
- * Unseals all online bridges using the provided or active vault key.
+ * Unseals online bridges that explicitly report a locked vault.
  *
- * REQ-UNSEAL-1: pass the key material as HEX where you have it. The `getActiveVaultKey()`
- * fallback only works when the active key happens to be extractable; a hardened or
- * IndexedDB-restored handle cannot be wrapped for a bridge, and `prepareUnsealPayload`
- * then throws `VaultKeyNotExportableError` per bridge. That is reported here as a count
- * of 0 rather than as an error, so this bulk helper is NOT a way to find out why an
- * unseal did not happen — a surface that must tell the operator (and prompt them) should
- * call `unsealBridgeE2EE` per bridge and handle the error, as BridgeSettingsPanel does.
+ * REQ-AUX-10: pass raw HEX when it was derived during this browser session. The
+ * hardened/IndexedDB-restored CryptoKey is deliberately non-extractable, so this flow
+ * never treats that handle as transferable material; callers use
+ * `needsReauthentication` to open the secure password/recovery ceremony.
  */
+export interface BridgeVaultReconciliationResult {
+  targetBridgeIds: string[];
+  attemptedBridgeIds: string[];
+  succeededBridgeIds: string[];
+  failedBridgeIds: string[];
+  needsReauthentication: boolean;
+}
+
+/**
+ * Reconcile a known bridge-list snapshot. Keeping targeting separate from `/bridges`
+ * fetching lets AppShell use the same authoritative list it renders and makes partial
+ * failures observable instead of collapsing them into a misleading success count.
+ */
+export async function reconcileLockedBridges(
+  bridges: readonly BridgeVaultStatusRecord[],
+  vaultKey?: CryptoKey | string | null,
+): Promise<BridgeVaultReconciliationResult> {
+  const { getActiveBridgeVaultKeyMaterial } = await import('../../store/vaultSlice');
+  const targetBridgeIds = selectOnlineLockedBridgeIds(bridges);
+  const key = vaultKey || getActiveBridgeVaultKeyMaterial();
+  const result: BridgeVaultReconciliationResult = {
+    targetBridgeIds,
+    attemptedBridgeIds: [],
+    succeededBridgeIds: [],
+    failedBridgeIds: [],
+    needsReauthentication: targetBridgeIds.length > 0 && !key,
+  };
+  if (!key || targetBridgeIds.length === 0) return result;
+
+  result.attemptedBridgeIds = [...targetBridgeIds];
+  const outcomes = await Promise.all(targetBridgeIds.map(async (bridgeId) => {
+    try {
+      const pubKey = await fetchBridgePublicKey(bridgeId);
+      if (!pubKey) throw new Error(`Bridge ${bridgeId} advertised no public key`);
+      await unsealBridgeE2EE(bridgeId, pubKey, key);
+      return true;
+    } catch (err) {
+      console.warn(`[reconcileLockedBridges] failed unsealing bridge ${bridgeId}:`, err);
+      return false;
+    }
+  }));
+  outcomes.forEach((succeeded, index) => {
+    (succeeded ? result.succeededBridgeIds : result.failedBridgeIds).push(targetBridgeIds[index]);
+  });
+  return result;
+}
+
 export async function unsealAllConnectedBridges(vaultKey?: CryptoKey | string | null): Promise<number> {
-  const { getActiveVaultKey, getActiveBridgeVaultKeyMaterial } = await import('../../store/vaultSlice');
-  const key = vaultKey || getActiveBridgeVaultKeyMaterial() || getActiveVaultKey();
-  if (!key) return 0;
 
   try {
     const data = await cookieJsonFetch('/bridges');
     const rawBridges: any[] = data?.bridges || (Array.isArray(data) ? data : []);
-    const onlineBridges = rawBridges.filter((b) => {
-      const id = String(b?.bridge_id || b?.bridgeId || b?.id || '');
-      if (!id) return false;
-      const status = String(b?.status || b?.runtime_status || '').toLowerCase();
-      return status !== 'revoked';
-    });
-
-    let successCount = 0;
-    for (const bridge of onlineBridges) {
-      const bridgeId = String(bridge?.bridge_id || bridge?.bridgeId || bridge?.id || '');
-      try {
-        const pubKey = await fetchBridgePublicKey(bridgeId);
-        if (pubKey) {
-          await unsealBridgeE2EE(bridgeId, pubKey, key);
-          successCount++;
-        }
-      } catch (err) {
-        console.warn(`[unsealAllConnectedBridges] failed unsealing bridge ${bridgeId}:`, err);
-      }
-    }
-    return successCount;
+    const result = await reconcileLockedBridges(rawBridges, vaultKey);
+    return result.succeededBridgeIds.length;
   } catch (err) {
     console.warn('[unsealAllConnectedBridges] failed to list bridges:', err);
     return 0;

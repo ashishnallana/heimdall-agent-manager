@@ -44,6 +44,15 @@ export interface BridgeVaultStatusInput {
   vaultStatus?: ReportedVaultStatus | null;
 }
 
+export interface BridgeVaultStatusRecord extends BridgeVaultStatusInput {
+  bridge_id?: string | null;
+  bridgeId?: string | null;
+  id?: string | null;
+  status?: string | null;
+  runtime_status?: string | null;
+  vault_status?: ReportedVaultStatus | null;
+}
+
 /**
  * Derives the badge state for ONE bridge. See the two rules in the module header.
  */
@@ -63,6 +72,32 @@ export function resolveBridgeVaultStatus(input: BridgeVaultStatusInput): BridgeV
       // Rule 2: "" and anything unrecognised degrade to Unknown, never to Unlocked.
       return 'Unknown';
   }
+}
+
+/** Stable bridge id extraction shared by status consumers and bulk actions. */
+export function bridgeVaultId(bridge: BridgeVaultStatusRecord): string {
+  return String(bridge?.bridge_id || bridge?.bridgeId || bridge?.id || '').trim();
+}
+
+/**
+ * The exact reconciliation target set: bridges that are online now and explicitly
+ * report a locked vault. Offline cached state, revoked/unconfigured/unknown bridges,
+ * and already-unlocked bridges are deliberately excluded.
+ */
+export function selectOnlineLockedBridgeIds(
+  bridges: readonly BridgeVaultStatusRecord[] | null | undefined,
+): string[] {
+  const ids = new Set<string>();
+  for (const bridge of bridges || []) {
+    const id = bridgeVaultId(bridge);
+    if (!id) continue;
+    const status = resolveBridgeVaultStatus({
+      bridgeStatus: bridge?.status || bridge?.runtime_status,
+      vaultStatus: bridge?.vault_status,
+    });
+    if (status === 'Locked') ids.add(id);
+  }
+  return [...ids];
 }
 
 /**

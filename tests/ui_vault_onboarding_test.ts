@@ -5,6 +5,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 import {
   generateVaultKey,
@@ -324,5 +326,17 @@ test('dock badge reads "Unsupported" with precedence over Unlocked/Locked/Unconf
   // Tooltip names both cause and remedy.
   assert.match(VAULT_UNSUPPORTED_REASON, /secure context/i, 'tooltip must name the cause');
   assert.match(VAULT_UNSUPPORTED_REASON, /HTTPS|localhost/i, 'tooltip must name the remedy');
+});
+
+test('REQ-AUX-10: bridge reauthentication keeps an unlocked browser open and forwards only submit-scoped raw material', () => {
+  const source = fs.readFileSync(
+    fileURLToPath(new URL('../src/ui/components/settings/VaultOnboardingModal.tsx', import.meta.url)),
+    'utf8',
+  );
+  assert.match(source, /mode\?: 'vault-unlock' \| 'bridge-reauthentication'/);
+  assert.match(source, /if \(!isBridgeReauthentication && isUnlocked && isOpen\)/);
+  assert.match(source, /const rawVaultKeyHex = await decryptVaultKeyEnvelopeHex\([\s\S]*if \(isBridgeReauthentication\) \{[\s\S]*await onBridgeReauthenticate\?\.\(rawVaultKeyHex\)/);
+  assert.match(source, /isBridgeReauthentication[\s\S]*'Unlock connected bridges'/);
+  assert.match(source, /!isBridgeReauthentication \? \([\s\S]*vault-onboarding-remember-checkbox/);
 });
 

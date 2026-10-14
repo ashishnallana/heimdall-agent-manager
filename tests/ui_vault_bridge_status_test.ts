@@ -50,6 +50,7 @@ import {
   canConfigureBridgeVault,
   BRIDGE_VAULT_STATUS_TONE,
   BRIDGE_VAULT_STATUSES,
+  selectOnlineLockedBridgeIds,
   type BridgeVaultStatus,
 } from '../src/ui/utils/bridgeVaultStatus.ts';
 
@@ -124,6 +125,20 @@ test('REQ-BVS-3: an unreported vault_status is Unknown and is NEVER Unlocked', (
 test('REQ-BVS-3: vault_status matching is case- and whitespace-insensitive', () => {
   assert.equal(resolveBridgeVaultStatus({ bridgeStatus: 'ONLINE', vaultStatus: 'UNLOCKED' }), 'Unlocked');
   assert.equal(resolveBridgeVaultStatus({ bridgeStatus: ' online ', vaultStatus: ' Locked ' }), 'Locked');
+});
+
+test('REQ-AUX-10: reconciliation selects every and only online reported-locked bridge', () => {
+  assert.deepEqual(selectOnlineLockedBridgeIds([
+    { bridge_id: 'brg_locked_a', status: 'online', vault_status: 'locked' },
+    { bridgeId: 'brg_locked_b', runtime_status: ' ONLINE ', vault_status: ' LOCKED ' },
+    { id: 'brg_unlocked', status: 'online', vault_status: 'unlocked' },
+    { id: 'brg_unknown', status: 'online', vault_status: '' },
+    { id: 'brg_disabled', status: 'online', vault_status: 'disabled' },
+    { id: 'brg_offline_cached_locked', status: 'offline', vault_status: 'locked' },
+    { id: 'brg_revoked_cached_locked', status: 'revoked', vault_status: 'locked' },
+    { id: 'brg_locked_a', status: 'online', vault_status: 'locked' },
+    { status: 'online', vault_status: 'locked' },
+  ]), ['brg_locked_a', 'brg_locked_b']);
 });
 
 // --------------------------------------------------------------------------------
