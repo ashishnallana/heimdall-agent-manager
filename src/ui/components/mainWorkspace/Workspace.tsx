@@ -60,7 +60,7 @@ import { useAgentAuxContext } from '../aux/useAgentAuxContext';
 import { AgentChatPane } from '../workbench/AgentChatPane';
 import { MainPaneFrame } from './MainPaneFrame';
 import { MobileMainPager } from './MobileMainPager';
-import { NewChatPanePicker } from './NewChatPanePicker';
+import HomePage from '../home/HomePage';
 
 export interface WorkspaceProps {
   focusMessageId?: string;
@@ -141,6 +141,9 @@ export function Workspace({ focusMessageId, isMobile = false }: WorkspaceProps) 
 
   // 2. URL -> layout (Jetski RouteToReduxSync).
   const lastSyncKeyRef = useRef<string | null>(null);
+  // Main renders only once the layout has been derived from the URL, so the
+  // initial placeholder tree never flashes a new-conversation pane.
+  const [layoutReady, setLayoutReady] = useState(false);
   const focusedAgentRef = useRef(focusedAgentId);
   focusedAgentRef.current = focusedAgentId;
   useEffect(() => {
@@ -164,6 +167,7 @@ export function Workspace({ focusMessageId, isMobile = false }: WorkspaceProps) 
     dispatch(
       setLayoutFromUrl({ ids, focusedId: focused, savedLayout: ids.length > 1 ? loadSavedLayout(ids) : null }),
     );
+    setLayoutReady(true);
     // Focus moved within a split: carry the dock open state (Jetski parity).
     if (
       ids.length > 1 &&
@@ -312,12 +316,13 @@ export function Workspace({ focusMessageId, isMobile = false }: WorkspaceProps) 
           onClose={closePane}
         >
           {isPicker ? (
-            <NewChatPanePicker
-              paneId={paneId}
-              openConversationIds={mainAgentIds}
-              onSelect={(selection) =>
-                dispatch(assignMainPaneAgent({ paneId, agentInstanceId: selection.agentInstanceId }))
-              }
+            // Jetski: a '_new' pane renders the new-conversation (home) view.
+            // Launching or picking a task chain fills THIS pane.
+            <HomePage
+              pane={{
+                onOpenAgent: (agentInstanceId) =>
+                  dispatch(assignMainPaneAgent({ paneId, agentInstanceId })),
+              }}
             />
           ) : (
             <AgentChatPane
@@ -395,7 +400,7 @@ export function Workspace({ focusMessageId, isMobile = false }: WorkspaceProps) 
         data-debug-id="workspace-main"
         className={`relative min-h-0 min-w-0 flex-1 flex-col ${hideMain ? 'hidden' : 'flex'}`}
       >
-        {isMobile ? (
+        {!layoutReady ? null : isMobile ? (
           <MobileMainPager tree={tree} renderPane={renderPane} onFocusPane={focusPane} />
         ) : (
           <TilingContainer<MainPaneValue>

@@ -181,6 +181,14 @@ export function TaskChainSelectorModal({
         .then((response) => {
           if (canceled) return;
           const projectNames = new Map(resolvedGroups.map((group) => [group.projectId, group.projectName]));
+          // Bridge hits carry no coordinator: fill it from the loaded chain list
+          // so picking a hit opens (or swaps in) the coordinator's conversation.
+          const coordinators = new Map<string, string>();
+          for (const group of resolvedGroups) {
+            for (const ch of group.chains || []) {
+              if (ch.coordinatorAgentInstanceId) coordinators.set(ch.chainId, ch.coordinatorAgentInstanceId);
+            }
+          }
           setRemoteChains(response.hits.map((hit) => ({
             chainId: hit.chain_id,
             title: hit.title || 'Untitled chain',
@@ -189,6 +197,7 @@ export function TaskChainSelectorModal({
             projectId: hit.project_id || '',
             projectName: projectNames.get(hit.project_id) || '',
             updatedAt: hit.updated_at,
+            coordinatorAgentInstanceId: coordinators.get(hit.chain_id) || undefined,
             isCurrent: Boolean(currentChainId && hit.chain_id === currentChainId),
           })));
           setRemoteSearchState(response.stale ? 'stale' : 'idle');

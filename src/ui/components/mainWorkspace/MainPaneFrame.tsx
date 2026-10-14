@@ -123,8 +123,8 @@ export function MainPaneFrame({
           className="flex h-9 shrink-0 select-none items-center justify-between gap-2 border-b border-subtle bg-surface px-3 text-xs text-muted"
         >
           <span className="flex items-center gap-1.5 font-medium">
-            <Icon name="spark" size={13} className="text-accent" />
-            New chat
+            <Icon name="plus" size={13} className="text-accent" />
+            New conversation
           </span>
           {!isSinglePane ? (
             <button

@@ -31,7 +31,11 @@ const GREETINGS = [
   { text: 'こんにちは', lang: 'ja' }, { text: '안녕하세요', lang: 'ko' },
   { text: 'Olá', lang: 'pt' }, { text: 'Hallo', lang: 'de' },
 ];
-export default function NewConversationPage({ footer }: { embedded?: boolean; footer?: ReactNode }) {
+/**
+ * `onLaunched`: called with the new agent instance id instead of navigating to
+ * it (a Main new-chat pane puts the new conversation into THAT pane).
+ */
+export default function NewConversationPage({ footer, onLaunched }: { embedded?: boolean; footer?: ReactNode; onLaunched?: (agentInstanceId: string) => void }) {
   const user = useAuthUser();
   const userName = String(user?.display_name || user?.name || '').trim();
   const [greeting] = useState(() => GREETINGS[Math.floor(Math.random() * GREETINGS.length)]);
@@ -187,7 +191,8 @@ export default function NewConversationPage({ footer }: { embedded?: boolean; fo
       const id = result.instance?.agent_instance_id || result.conversation?.agent_instance_id;
       if (!id) throw new Error('Launch did not return an agent instance ID.');
       await launchAnimation.current?.finished.catch(() => undefined);
-      window.location.hash = buildRouteHash(`/conversations/${encodeURIComponent(id)}`, '');
+      if (onLaunched) onLaunched(id);
+      else window.location.hash = buildRouteHash(`/conversations/${encodeURIComponent(id)}`, '');
     } catch (e) { launchAnimation.current?.cancel(); launchAnimation.current = null; setTransitioning(false); setError(message(e)); submitRef.current = false; }
   }
   async function changeFavorite(id: string, favorite: boolean) {
