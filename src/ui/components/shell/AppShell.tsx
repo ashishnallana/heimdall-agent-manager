@@ -86,6 +86,7 @@ import { batchDecryptTitles, type RawSearchItemInput } from '../../utils/vaultSe
 import LspPanel from '../settings/LspPanel';
 import { useFetchExperimentsQuery } from '../../api/endpoints/settings';
 import { useFetchConversationQuery } from '../../api/endpoints/chats';
+import { resolveActiveChainId } from '../windowTiling/activeChainId';
 import LibraryPage from '../LibraryPage';
 import ArtifactViewer from '../ArtifactViewer';
 import { clearUserClientState } from '../../store/chatSlice';
@@ -1053,18 +1054,6 @@ function DefaultsSettingsPanel() {
   );
 }
 
-function findChainIdForInstance(instanceId: string, liveProjects?: LiveProject[]): string | undefined {
-  if (!instanceId || !liveProjects) return undefined;
-  for (const project of liveProjects) {
-    for (const chain of project.chains || []) {
-      if (chain.coordinatorAgentInstanceId === instanceId) return chain.chainId;
-      if (chain.liveAgents?.some((a) => a.agentInstanceId === instanceId)) return chain.chainId;
-      if (chain.members?.some((m) => m.agentInstanceId === instanceId)) return chain.chainId;
-    }
-  }
-  return undefined;
-}
-
 function RouteOutlet({
   path,
   focusMessageId,
@@ -1092,12 +1081,12 @@ function RouteOutlet({
     { skip: !isConversationThreadRoute || !agentInstanceId }
   );
 
-  const activeChainId = useMemo(() => {
-    if (!agentInstanceId) return undefined;
-    const fromConv = convQuery.data?.conversation?.chain_id || convQuery.data?.conversation?.chainId;
-    if (fromConv) return fromConv;
-    return findChainIdForInstance(agentInstanceId, liveProjects);
-  }, [agentInstanceId, convQuery.data?.conversation, liveProjects]);
+  // currentData, not data: data keeps the previous instance's conversation while
+  // this one loads, which would pin the new pane to the previous chain's workbench.
+  const activeChainId = useMemo(
+    () => resolveActiveChainId(agentInstanceId, convQuery.currentData?.conversation, liveProjects),
+    [agentInstanceId, convQuery.currentData?.conversation, liveProjects],
+  );
   // REQ-LSP-CFG-2: the LSP route is gated on the 'lsp' experiment flag HERE, not only in
   // SettingsSubNav — hiding the nav entry does nothing for a direct visit or a bookmark.
   // Nav and route read the same flag so they can never disagree.
@@ -1158,7 +1147,7 @@ function RouteOutlet({
             }}
             renderConversationPane={(_paneId, paneValue) => (
               <ConversationThreadPage
-                key={paneValue.chainId ? `chain-${paneValue.chainId}` : paneValue.agentInstanceId}
+                key={paneValue.chainId ? `chain-${paneValue.chainId}:${paneValue.agentInstanceId}` : paneValue.agentInstanceId}
                 agentInstanceId={paneValue.agentInstanceId}
                 chainId={paneValue.chainId || undefined}
                 projectId={paneValue.projectId || undefined}

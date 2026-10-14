@@ -1283,3 +1283,39 @@ test('M2 Regression Suite: WorkbenchPaneView renders NEW_TAB_ID launcher and New
   );
 });
 
+
+test('REQ-NAV-1: resolveActiveChainId ignores a conversation that belongs to a different instance', async () => {
+  const { resolveActiveChainId } = await import('../src/ui/components/windowTiling/activeChainId.ts');
+  const prevConversation = { agent_instance_id: 'inst-A', chain_id: 'chain-X' };
+  // Stale previous-instance conversation must not leak its chain into B.
+  assert.equal(resolveActiveChainId('inst-B', prevConversation, []), undefined);
+  // Own conversation wins.
+  assert.equal(resolveActiveChainId('inst-B', { agent_instance_id: 'inst-B', chain_id: 'chain-Y' }, []), 'chain-Y');
+  // Not loaded yet: fall back to live projects.
+  const liveProjects: any = [{ chains: [{ chainId: 'chain-Y', coordinatorAgentInstanceId: 'inst-B' }] }];
+  assert.equal(resolveActiveChainId('inst-B', undefined, liveProjects), 'chain-Y');
+  assert.equal(resolveActiveChainId('inst-B', prevConversation, liveProjects), 'chain-Y');
+  assert.equal(resolveActiveChainId('', prevConversation, liveProjects), undefined);
+});
+
+test('REQ-NAV-1: navigating to a new chain coordinator with an unresolved chain does not keep the previous chain', () => {
+  let state = windowLayoutReducer(undefined, { type: '@@init' });
+  state = windowLayoutReducer(
+    state,
+    syncRouteConversationToWindowLayout({ agentInstanceId: 'inst-A', chainId: 'chain-X' }),
+  );
+  // New chain: its chain id is not resolvable yet, so the route passes undefined.
+  state = windowLayoutReducer(
+    state,
+    syncRouteConversationToWindowLayout({ agentInstanceId: 'inst-B', chainId: undefined }),
+  );
+  const pane = selectFocusedWindowPane(state);
+  assert.equal(pane?.agentInstanceId, 'inst-B');
+  assert.equal(pane?.chainId, null, 'pane for B must not inherit chain-X from A');
+  // Once the chain resolves it is applied to B's pane.
+  state = windowLayoutReducer(
+    state,
+    syncRouteConversationToWindowLayout({ agentInstanceId: 'inst-B', chainId: 'chain-Y' }),
+  );
+  assert.equal(selectFocusedWindowPane(state)?.chainId, 'chain-Y');
+});
