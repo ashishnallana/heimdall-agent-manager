@@ -40,6 +40,8 @@ export interface AuxTabStripProps {
   isMobile?: boolean;
   /** Right padding reserving the fixed top-right window cluster (px). */
   reserveRight?: number;
+  /** Left padding reserving the fixed top-left window cluster (px). */
+  reserveLeft?: number;
 }
 
 /**
@@ -61,6 +63,7 @@ export function AuxTabStrip({
   onCloseDock,
   renderTabStatus,
   isMobile = false,
+  reserveLeft = 0,
   reserveRight = 0,
 }: AuxTabStripProps) {
   const [menuOpen, setMenuOpen] = React.useState(false);
@@ -70,7 +73,10 @@ export function AuxTabStrip({
     <div
       data-debug-id={`aux-tab-strip-${treeKey}`}
       className="flex h-12 shrink-0 select-none items-center justify-between border-b border-subtle bg-surface-raised/60 px-1.5"
-      style={reserveRight ? { paddingRight: reserveRight } : undefined}
+      style={reserveLeft || reserveRight ? {
+        ...(reserveLeft ? { paddingLeft: reserveLeft } : {}),
+        ...(reserveRight ? { paddingRight: reserveRight } : {}),
+      } : undefined}
     >
       <div
         role="tablist"

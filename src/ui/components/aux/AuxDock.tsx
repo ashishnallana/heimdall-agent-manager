@@ -96,6 +96,8 @@ export interface AuxDockProps {
   shown?: boolean;
   /** Width of the fixed top-right window cluster the tab strip must not run under. */
   reserveRight?: number;
+  /** Width of the fixed top-left window cluster a maximized tab strip must not run under. */
+  reserveLeft?: number;
   /** Context agent: the focused Main pane's agent (owner of the shown strip). */
   ctx: AgentAuxContext;
   isMobile?: boolean;
@@ -117,6 +119,7 @@ export function AuxDock({
   ctx,
   isMobile = false,
   shown = true,
+  reserveLeft = 0,
   reserveRight = 0,
   mobileLeadingPageCount = 0,
   mobileTotalPageCount = 0,
@@ -329,6 +332,7 @@ export function AuxDock({
         activeTabId={activeTabId}
         isMobile={isMobile}
         isMaximized={isMaximized}
+        reserveLeft={!isMobile && isMaximized ? reserveLeft : 0}
         reserveRight={isMobile ? 0 : reserveRight}
         onSelectTab={selectTab}
         onCloseTab={closeTab}

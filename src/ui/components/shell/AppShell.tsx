@@ -19,7 +19,12 @@ import { useFetchTaskChainGroupsQuery } from '../../api/endpoints/tasks';
 import { useListBridgesQuery, type Bridge } from '../../api/endpoints/bridgeSupport';
 import { useGetAccountBillingQuery } from '../../api/endpoints/accountBilling';
 import SidebarUpdateBadge from './SidebarUpdateBadge';
-import { MOBILE_TOP_LEFT_CLUSTER_WIDTH, TOP_CHROME_HEIGHT, TOP_LEFT_CLUSTER_WIDTH } from './shellChrome';
+import {
+  COMPACT_TOP_LEFT_CLUSTER_WIDTH,
+  TOP_CHROME_HEIGHT,
+  TOP_LEFT_CLUSTER_WIDTH,
+  isAgentConversationRoute,
+} from './shellChrome';
 import type { PendingBridgeUpdate } from '../settings/bridgeUpdate';
 import {
   lockAllConnectedBridges,
@@ -1066,6 +1071,7 @@ function RouteOutlet({
   conversations = [],
   liveProjects = [],
   workspaceLeading,
+  workspaceLeadingWidth,
   workspaceTrailing,
 }: {
   path: string;
@@ -1074,6 +1080,7 @@ function RouteOutlet({
   liveProjects?: LiveProject[];
   /** Hidden sidebar: spacer reserving the fixed top-left cluster in the top-left chat header. */
   workspaceLeading?: React.ReactNode;
+  workspaceLeadingWidth?: number;
   /** Hidden sidebar: update-available badge, inline beside the top-right ⋮. */
   workspaceTrailing?: React.ReactNode;
 }) {
@@ -1081,9 +1088,7 @@ function RouteOutlet({
   const isMobile = viewport === 'mobile';
   const description = routeDescription(path);
   const crumbs = routeBreadcrumbs(path, conversations);
-  const isConversationThreadRoute =
-    (path.startsWith('/conversations/') && path !== '/conversations/new') ||
-    path.startsWith('/c/');
+  const isConversationThreadRoute = isAgentConversationRoute(path);
   const agentInstanceId = isConversationThreadRoute
     ? decodeSegment(path.startsWith('/c/') ? path.slice('/c/'.length) : path.slice('/conversations/'.length))
     : '';
@@ -1129,6 +1134,7 @@ function RouteOutlet({
               (`/conversations/<id1>+<id2>?focused=<id>`) carries the pane set. */}
           <Workspace
             leading={workspaceLeading}
+            leadingWidth={workspaceLeadingWidth}
             trailing={workspaceTrailing}
             focusMessageId={focusMessageId}
             isMobile={isMobile}
@@ -1686,12 +1692,12 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
   const primary = NAV_ROUTES.filter((item) => item.group === 'primary');
   const conversationTree = useMemo(() => buildProjectConversationTree(conversations, liveProjects), [conversations, liveProjects]);
   const isEffectiveCollapsed = isMobile ? !drawerOpen : collapsed;
-  const isWorkspaceRoute =
-    (path.startsWith('/conversations/') && path !== '/conversations/new') || path.startsWith('/c/');
+  const isWorkspaceRoute = isAgentConversationRoute(path);
   const hideTopLeftCluster = isMobile && isWorkspaceRoute && isCurrentAuxPaneOpen;
-  const topLeftClusterWidth = isMobile ? MOBILE_TOP_LEFT_CLUSTER_WIDTH : TOP_LEFT_CLUSTER_WIDTH;
+  const showBrand = !isWorkspaceRoute;
+  const topLeftClusterWidth = showBrand ? TOP_LEFT_CLUSTER_WIDTH : COMPACT_TOP_LEFT_CLUSTER_WIDTH;
   // Fixed window controls: sidebar + vault everywhere, plus the wordmark on
-  // desktop. They do not move when the sidebar opens or closes.
+  // every route except an agent conversation. They do not move with the sidebar.
   const sidebarToggleButton = (
     <button
       data-debug-id="shell-sidebar-collapse-toggle"
@@ -1832,7 +1838,7 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
         >
           {sidebarToggleButton}
           {vaultStatusButton}
-          {!isMobile ? brandLink : null}
+          {showBrand ? brandLink : null}
         </div>
       ) : null}
       <aside
@@ -1926,6 +1932,7 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
           conversations={conversations}
           liveProjects={liveProjects}
           workspaceLeading={isEffectiveCollapsed ? <div aria-hidden="true" data-debug-id="shell-top-left-cluster-spacer" className="shrink-0" style={{ width: topLeftClusterWidth - 12 }} /> : null}
+          workspaceLeadingWidth={isEffectiveCollapsed ? topLeftClusterWidth : 0}
           workspaceTrailing={isEffectiveCollapsed ? <SidebarUpdateBadge onOpen={openBridgeUpdate} /> : null}
         />
       </div>

@@ -255,7 +255,11 @@ test('fixed top-right cluster: one side-panel toggle (+ update badge) stays top-
     try {
       await act(async () => {
         root.render(
-          React.createElement(Provider, { store }, React.createElement(Workspace, { leading: el('left-spacer'), trailing: el('update-badge') })),
+          React.createElement(Provider, { store }, React.createElement(Workspace, {
+            leading: el('left-spacer'),
+            leadingWidth: 84,
+            trailing: el('update-badge'),
+          })),
         );
         await new Promise((r) => setTimeout(r, 40));
       });
@@ -292,8 +296,23 @@ test('fixed top-right cluster: one side-panel toggle (+ update badge) stays top-
       // Now the aux tab strip reserves the cluster; the top-right Main pane no longer does.
       const strip = dock.querySelector('[data-debug-id^="aux-tab-strip-"]') as any;
       assert.ok(parseFloat(strip.style.paddingRight) > 0, 'aux strip reserves the top-right cluster');
+      assert.equal(strip.style.paddingLeft, '', 'restored aux does not reserve the shell cluster');
       assert.equal(bFrame.querySelector('[data-debug-id="workspace-top-right-spacer"]'), null);
       assert.equal(doc.querySelector('[data-debug-id^="aux-close-dock-btn-"]'), null, 'no second close control on desktop');
+
+      await act(async () => {
+        (doc.querySelector('[data-debug-id^="aux-maximize-btn-"]') as any).click();
+        await new Promise((r) => setTimeout(r, 20));
+      });
+      assert.equal(parseFloat(strip.style.paddingLeft), 84, 'maximized aux reserves the fixed top-left cluster');
+      assert.ok(doc.querySelector('[data-debug-id="workspace-main"]')!.className.includes('hidden'));
+      assert.ok(parseFloat(strip.style.paddingRight) > 0, 'maximized aux still reserves the top-right cluster');
+
+      await act(async () => {
+        (doc.querySelector('[data-debug-id^="aux-maximize-btn-"]') as any).click();
+        await new Promise((r) => setTimeout(r, 20));
+      });
+      assert.equal(strip.style.paddingLeft, '', 'restoring aux removes the top-left reservation');
 
       // Close animates: the dock slides shut, then unmounts.
       await act(async () => {

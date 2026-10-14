@@ -7,6 +7,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  COMPACT_TOP_LEFT_CLUSTER_WIDTH,
+  TOP_LEFT_CLUSTER_WIDTH,
+  isAgentConversationRoute,
+} from '../src/ui/components/shell/shellChrome.ts';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const source = fs.readFileSync(path.join(REPO_ROOT, 'src/ui/components/shell/AppShell.tsx'), 'utf8');
@@ -28,7 +33,7 @@ test('sidebar shows no task chain list (no chain tree, no pinned chains)', () =>
   assert.equal(fs.existsSync(path.join(REPO_ROOT, 'src/ui/components/chains/ProjectChainTree.tsx')), false);
 });
 
-test('hidden sidebar renders no rail; the fixed top-left cluster compacts on mobile', () => {
+test('hidden sidebar renders no rail; the fixed top-left cluster compacts on agent conversations', () => {
   // No icon rail widths or mobile spacer.
   assert.doesNotMatch(source, /'w-12' : 'w-16'/);
   assert.doesNotMatch(source, /w-12 shrink-0 md:hidden/);
@@ -36,20 +41,32 @@ test('hidden sidebar renders no rail; the fixed top-left cluster compacts on mob
   // One fixed cluster with the toggle + brand, outside the sidebar (so it does not move).
   const cluster = source.slice(source.indexOf('data-debug-id="shell-top-left-cluster"') - 40, source.indexOf('data-debug-id="shell-top-left-cluster"') + 400);
   assert.match(cluster, /absolute left-0 top-0/);
-  assert.match(cluster, /\{sidebarToggleButton\}\s*\{vaultStatusButton\}\s*\{!isMobile \? brandLink : null\}/);
+  assert.match(cluster, /\{sidebarToggleButton\}\s*\{vaultStatusButton\}\s*\{showBrand \? brandLink : null\}/);
   assert.equal(source.split('{sidebarToggleButton}').length - 1, 1, 'toggle rendered exactly once');
-  assert.match(source, /const topLeftClusterWidth = isMobile \? MOBILE_TOP_LEFT_CLUSTER_WIDTH : TOP_LEFT_CLUSTER_WIDTH/);
+  assert.match(source, /const showBrand = !isWorkspaceRoute/);
+  assert.match(source, /const topLeftClusterWidth = showBrand \? TOP_LEFT_CLUSTER_WIDTH : COMPACT_TOP_LEFT_CLUSTER_WIDTH/);
   // The sidebar animates its width (desktop) / slides (mobile) and its header reserves the cluster.
   assert.match(source, /isEffectiveCollapsed \? 'invisible w-0' : 'visible w-80 border-r border-subtle'/);
   assert.match(source, /isEffectiveCollapsed \? 'invisible -translate-x-full' : 'visible translate-x-0'/);
   assert.match(source, /style=\{\{ width: topLeftClusterWidth \}\} \/>\s*<SidebarUpdateBadge/);
   // Hidden: the workspace's top-left header / other pages reserve the cluster's space.
   assert.match(source, /workspaceLeading=\{isEffectiveCollapsed \? <div aria-hidden="true" data-debug-id="shell-top-left-cluster-spacer"/);
+  assert.match(source, /workspaceLeadingWidth=\{isEffectiveCollapsed \? topLeftClusterWidth : 0\}/);
   assert.match(source, /workspaceTrailing=\{isEffectiveCollapsed \? <SidebarUpdateBadge onOpen=\{openBridgeUpdate\} \/> : null\}/);
   assert.match(source, /\{isEffectiveCollapsed && !isWorkspaceRoute \? \(\s*<div\s+data-debug-id="shell-sidebar-reopen-bar"/);
   // The toggle flips the persisted desktop preference / the mobile drawer.
   assert.match(source, /onClick=\{\(\) => \(isMobile \? setDrawerOpen\(!drawerOpen\) : toggleCollapsed\(\)\)\}/);
   assert.match(source, /localStorage\.setItem\('heimdall:shell:sidebar-collapsed'/);
+});
+
+test('Heimdall wordmark is visible on Home and hidden only on agent conversations', () => {
+  assert.equal(isAgentConversationRoute('/home'), false);
+  assert.equal(isAgentConversationRoute('/cards'), false);
+  assert.equal(isAgentConversationRoute('/conversations'), false);
+  assert.equal(isAgentConversationRoute('/conversations/new'), false);
+  assert.equal(isAgentConversationRoute('/conversations/inst_123'), true);
+  assert.equal(isAgentConversationRoute('/c/inst_123'), true);
+  assert.ok(TOP_LEFT_CLUSTER_WIDTH > COMPACT_TOP_LEFT_CLUSTER_WIDTH);
 });
 
 test('mobile conversation header omits the project breadcrumb segment and first separator', () => {

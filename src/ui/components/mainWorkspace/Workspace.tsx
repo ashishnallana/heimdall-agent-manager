@@ -71,6 +71,8 @@ export interface WorkspaceProps {
   isMobile?: boolean;
   /** Hidden sidebar: spacer reserving the fixed top-left cluster in the top-left pane's header. */
   leading?: React.ReactNode;
+  /** Width occupied by the fixed top-left shell cluster when the sidebar is hidden. */
+  leadingWidth?: number;
   /** Hidden sidebar: update-available badge, in the fixed top-right cluster. */
   trailing?: React.ReactNode;
 }
@@ -113,7 +115,7 @@ function useRouteLocation() {
  *   split carries the open/closed state to the newly focused strip.
  * - Split geometry/groups persist per id set; nothing is keyed by task chain.
  */
-export function Workspace({ focusMessageId, isMobile = false, leading, trailing }: WorkspaceProps) {
+export function Workspace({ focusMessageId, isMobile = false, leading, leadingWidth = 0, trailing }: WorkspaceProps) {
   const dispatch = useDispatch();
   const tree = useSelector(selectMainTree);
   const focusedAgentId = useSelector(selectFocusedMainAgentId);
@@ -523,6 +525,7 @@ export function Workspace({ focusMessageId, isMobile = false, leading, trailing 
             ctx={ctx}
             isMobile={isMobile}
             shown={auxShown}
+            reserveLeft={leadingWidth}
             reserveRight={topRightWidth}
             mobileLeadingPageCount={mainPageCount}
             mobileTotalPageCount={mobileAuxContinuumPageCount}
