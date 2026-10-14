@@ -12,7 +12,10 @@ require_auth :: proc(auth: ^auth_service.Auth_Service, req: Request) -> (contrac
 		body = req.body,
 		headers = req.headers,
 	})
-	if !ok do return contracts.Auth_Context{}, false, respond_error(err, req.request_id)
+	if !ok {
+		auth_metrics_record_failure(auth, req)
+		return contracts.Auth_Context{}, false, respond_error(err, req.request_id)
+	}
 	return ctx, true, Response{}
 }
 
@@ -23,7 +26,10 @@ require_trusted_proxy_auth :: proc(auth: ^auth_service.Auth_Service, req: Reques
 		body = req.body,
 		headers = req.headers,
 	})
-	if !ok do return contracts.Auth_Context{}, false, respond_error(err, req.request_id)
+	if !ok {
+		auth_metrics_record_failure(auth, req, proxy_only = true)
+		return contracts.Auth_Context{}, false, respond_error(err, req.request_id)
+	}
 	return ctx, true, Response{}
 }
 
@@ -92,6 +98,7 @@ require_auth_any :: proc(auth: ^auth_service.Auth_Service, req: Request) -> (con
 		if bare_bridge_bearer_without_instance(auth, req) {
 			auth_service.log_bridge_auth_denied("bare_token_shared_endpoint", req.method, req.path, "", "", "", req.request_id)
 		}
+		auth_metrics_record_failure(auth, req)
 		return contracts.Auth_Context{}, false, respond_error(err, req.request_id)
 	}
 	return ctx, true, Response{}
@@ -120,6 +127,9 @@ require_auth_or_bridge_token :: proc(auth: ^auth_service.Auth_Service, req: Requ
 		body = req.body,
 		headers = req.headers,
 	})
-	if !ok do return contracts.Auth_Context{}, false, respond_error(err, req.request_id)
+	if !ok {
+		auth_metrics_record_failure(auth, req)
+		return contracts.Auth_Context{}, false, respond_error(err, req.request_id)
+	}
 	return ctx, true, Response{}
 }

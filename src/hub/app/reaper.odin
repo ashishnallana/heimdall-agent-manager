@@ -114,6 +114,11 @@ reaper_loop :: proc(graph: ^App_Graph) {
 // launch reaper_loop as a thread entry point.
 reaper_sweep_once :: proc(graph: ^App_Graph) {
 	if graph == nil do return
+	// Outcome for heimdall_reaper_runs_total: the passes below swallow their
+	// own failures by design, so the only error signal that surfaces is the
+	// retention sweep's domain error. Recorded on every exit path.
+	sweep_ok := true
+	defer reaper_metrics_record(sweep_ok)
 	_ = project_service.bridge_runtime_registry_sweep(&graph.bridge_runtime_registry)
 
 	// REQ-SHELL-8 item 6: terminal shell_sessions rows past their retention window.
@@ -126,7 +131,9 @@ reaper_sweep_once :: proc(graph: ^App_Graph) {
 	// tidy-up, the next tick retries it unchanged, and letting it abort the sweep
 	// would take the stale-instance reap down with it — the safety net this loop
 	// actually exists for.
-	_, _ = shell_session_svc.shell_session_sweep_terminal_rows(&graph.shell_session_service)
+	if _, retention_err := shell_session_svc.shell_session_sweep_terminal_rows(&graph.shell_session_service); retention_err.code != .None {
+		sweep_ok = false
+	}
 
 	// REQ-SHELL-14: sessions on a bridge that is never coming back. Rides THIS sweep
 	// for the same reason the retention pass above does — the loop already runs, and a

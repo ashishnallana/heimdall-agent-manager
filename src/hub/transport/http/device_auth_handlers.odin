@@ -55,6 +55,7 @@ device_authorize_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	}
 	xff := header_value(req.headers, "X-Forwarded-For")
 	result, ok, err := device_auth.authorize(handlers.service, input, req.remote_addr, xff)
+	device_auth_record("authorize", device_auth_error_result(err) if !ok else "ok")
 	if !ok do return respond_error(err, req.request_id)
 	data := strings.builder_make()
 	strings.write_string(&data, "{\"device_code\":\"")
@@ -133,6 +134,7 @@ device_verify_handler :: proc(ctx: rawptr, req: Request) -> Response {
 		req.remote_addr, header_value(req.headers, "X-Forwarded-For"),
 		handlers.service.trusted_cidrs)
 	info, vok, err := device_auth.verify_with_ip(handlers.service, json_string(req.body, "user_code"), request_ip)
+	device_auth_record("verify", device_auth_error_result(err) if !vok else "ok")
 	if !vok do return respond_error(err, req.request_id)
 	data := strings.builder_make()
 	strings.write_string(&data, "{\"device_label\":\"")
@@ -228,6 +230,8 @@ device_approve_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	pre_info, pre_ok, _ := device_auth.verify(handlers.service, input.user_code)
 	aok, err := device_auth.approve(
 		handlers.service, input, auth_ctx.user_id, approver_ip, approver_ua, auth_ctx.name)
+	// A recorded rejection is a successful call whose outcome is "denied".
+	device_auth_record("approve", device_auth_error_result(err) if !aok else ("ok" if input.approve else "denied"))
 	if !aok do return respond_error(err, req.request_id)
 	// Enrolling a machine is the most consequential approval an owner can give,
 	// and it happens in one tab that may then be closed. Tell their other
@@ -281,6 +285,7 @@ device_token_handler :: proc(ctx: rawptr, req: Request) -> Response {
 		req.remote_addr, header_value(req.headers, "X-Forwarded-For"),
 		handlers.service.trusted_cidrs)
 	result, err := device_auth.poll(handlers.service, device_code, request_ip, code_verifier)
+	device_auth_record("poll", device_auth_poll_result(result.status, err))
 	if err.code == .Rate_Limited {
 		// slow_down: 429. The body carries status=slow_down so the device backs off.
 		retry_after := handlers.service.store.config.interval
