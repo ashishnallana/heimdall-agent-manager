@@ -2,6 +2,7 @@ package main
 
 import "core:os"
 import "core:strings"
+import "core:sync"
 import "core:testing"
 
 @(test)
@@ -64,6 +65,11 @@ test_bridge_telemetry_agent_api :: proc(t: ^testing.T) {
 
 @(test)
 test_bridge_telemetry_command_toggle :: proc(t: ^testing.T) {
+	// set_telemetry flips process-global switches (Telegraf supervisor and the
+	// heartbeat-stats/bridge_log switch); serialize with the other tests that
+	// read or toggle them.
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
 	// Calling set_telemetry with false stops supervisor and reports stopped
 	bridge_hub_handle_command(nil, `{"type":"set_telemetry","command_id":"cmd_tel_off","enabled":false}`)
 	testing.expect(t, !bridge_telemetry_status(), "telemetry status is false after stop command")
@@ -71,6 +77,8 @@ test_bridge_telemetry_command_toggle :: proc(t: ^testing.T) {
 
 @(test)
 test_bridge_telemetry_lifecycle :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
 	os.set_env("TELEMETRY_PORT", "29871")
 	bridge_config.daemon_id = "test-daemon-lifecycle"
 

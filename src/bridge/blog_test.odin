@@ -4,6 +4,7 @@ import "core:encoding/json"
 import "core:fmt"
 import "core:net"
 import "core:strings"
+import "core:sync"
 import "core:sys/posix"
 import "core:testing"
 import "core:time"
@@ -248,6 +249,8 @@ blog_fake_ws :: proc() -> (conn: ws.Connection, read_fd: posix.FD, ok: bool) {
 // dead socket (the batch goes back to the ring for the next ready connection).
 @(test)
 test_blog_drain_respects_opt_out_and_sends_frame :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
 	prev_enabled := bridge_heartbeat_stats_enabled()
 	defer bridge_heartbeat_stats_set_enabled(prev_enabled)
 	blog_reset(&blog_ring)
@@ -300,6 +303,8 @@ test_blog_drain_respects_opt_out_and_sends_frame :: proc(t: ^testing.T) {
 // then drives both (legacy).
 @(test)
 test_blog_set_telemetry_two_flags_govern_shipping :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
 	prev := bridge_heartbeat_stats_enabled()
 	defer bridge_heartbeat_stats_set_enabled(prev)
 

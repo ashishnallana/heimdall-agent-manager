@@ -1,6 +1,7 @@
 package main
 
 import "core:strings"
+import "core:sync"
 import "core:sys/posix"
 import "core:testing"
 
@@ -96,6 +97,9 @@ test_heartbeat_stats_collect_live :: proc(t: ^testing.T) {
 
 @(test)
 test_heartbeat_stats_toggle_omits_object :: proc(t: ^testing.T) {
+	// The switch is process-global and read by the bridge_log/telemetry tests.
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
 	defer bridge_heartbeat_stats_set_enabled(true)
 	bridge_heartbeat_stats_set_enabled(false)
 	testing.expect_value(t, bridge_heartbeat_stats_json(), "")
