@@ -8,6 +8,11 @@ import "core:time"
 import contracts "odin_test:contracts"
 import metrics "odin_test:lib/metrics"
 import http "odin_test:hub/transport/http"
+import project_service "odin_test:hub/service/project"
+import push_service "odin_test:hub/service/push"
+import shell_session_svc "odin_test:hub/service/shell_session"
+import billing_service "odin_test:hub/service/billing"
+import sqlite "odin_test:hub/repository/sqlite"
 
 // Private Prometheus listener (plan 4.2). Deliberately NOT the public server:
 //   - its own TCP listener on an operator-chosen loopback address;
@@ -31,6 +36,15 @@ Metrics_Listener :: struct {
 init_metrics :: proc() -> ^metrics.Registry {
 	reg := metrics.init_global()
 	http.http_metrics_init(reg)
+	http.auth_metrics_init(reg)
+	project_service.fleet_metrics_init(reg)
+	shell_session_svc.shell_metrics_init(reg)
+	http.streams_metrics_init(reg)
+	sqlite.sqlite_metrics_init(reg)
+	reaper_metrics_init(reg)
+	db_collectors_init(reg)
+	push_service.push_metrics_init(reg)
+	billing_service.billing_metrics_init(reg)
 	metrics.register_process_collector(reg)
 	build_info := metrics.new_gauge(reg, "heimdall_hub_build_info", "Hub build information (value is always 1).", {"version", "commit"})
 	metrics.gauge_set(metrics.with(build_info, contracts.APP_VERSION, contracts.GIT_COMMIT), 1)
