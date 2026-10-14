@@ -120,6 +120,9 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 	graph.config = config
 	graph.clock = platform.real_clock()
 	graph.ids = platform.real_id_generator()
+	// In-process metrics registry + HTTP/process families. Always on (cheap
+	// atomics); only the /metrics listener is gated by config.metrics_addr.
+	init_metrics()
 
 	db, db_ok, db_err := sqlite.open(config.database_path)
 	if !db_ok do return false, db_err.message

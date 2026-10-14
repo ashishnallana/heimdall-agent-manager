@@ -2,6 +2,7 @@ package app
 
 import "core:fmt"
 import "core:thread"
+import metrics "odin_test:lib/metrics"
 import http "odin_test:hub/transport/http"
 
 run :: proc(config: Hub_Config) -> (bool, string) {
@@ -18,6 +19,8 @@ run :: proc(config: Hub_Config) -> (bool, string) {
 	// A heap COPY would be unsafe: the graph's services store pointers back into
 	// this graph's own fields, so a copy would alias the original anyway.
 	thread.run_with_data(rawptr(&graph), reaper_thread_entry)
+	// Private Prometheus endpoint, off unless --metrics-addr is set.
+	start_metrics_listener(metrics.global(), config.metrics_addr)
 	if config.ui_origin == "" do fmt.eprintln("ham-hub WARNING: --ui-origin is empty; CSRF protection is disabled")
 	served := http.serve(&graph.router, http.Server_Config{
 		bind_host = config.bind_host,

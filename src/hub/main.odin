@@ -35,6 +35,12 @@ main :: proc() {
 		os.exit(2)
 	}
 	config.preview_origin = normalized_preview_origin
+	if config.metrics_addr != "" {
+		if _, _, metrics_ok, metrics_error := app.parse_metrics_addr(config.metrics_addr); !metrics_ok {
+			fmt.eprintln(metrics_error)
+			os.exit(2)
+		}
+	}
 	ok, message := app.run(config)
 	if !ok {
 		fmt.eprintln(message)
@@ -211,6 +217,11 @@ parse_args :: proc(config: ^app.Hub_Config) {
 	if v := os.get_env_alloc("HEIMDALL_PUBLIC_APP_ORIGIN", context.allocator); v != "" {
 		config.public_app_origin = v
 	}
+	// metrics_addr resolves default (off) -> env -> flag. Loopback only by
+	// convention; see Hub_Config.metrics_addr.
+	if v := os.get_env_alloc("HEIMDALL_METRICS_ADDR", context.allocator); v != "" {
+		config.metrics_addr = v
+	}
 	for i := 1; i < len(os.args); i += 1 {
 		arg := os.args[i]
 		if arg == "--listen" && i + 1 < len(os.args) {
@@ -253,6 +264,8 @@ parse_args :: proc(config: ^app.Hub_Config) {
 			i += 1
 		} else if arg == "--public-app-origin" && i + 1 < len(os.args) {
 			config.public_app_origin = strings.clone(os.args[i + 1]); i += 1
+		} else if arg == "--metrics-addr" && i + 1 < len(os.args) {
+			config.metrics_addr = strings.clone(os.args[i + 1]); i += 1
 		} else if arg == "--reaper-interval-seconds" && i + 1 < len(os.args) {
 			if parsed, ok := strconv.parse_int(os.args[i + 1]); ok do config.reaper_interval_seconds = int(parsed)
 			i += 1
