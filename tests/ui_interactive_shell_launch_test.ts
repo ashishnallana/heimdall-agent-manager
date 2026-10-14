@@ -82,7 +82,10 @@ test('aux launch opens a fresh provisional shell tab and a guarded retryable aut
     'utf8',
   );
 
-  assert.match(launcher, /onSelect\(newShellTabContent\(\)\)/);
+  assert.match(
+    launcher,
+    /onSelect\(newShellTabContent\(\{ bridgeId: selectedBridgeId \}\)/,
+  );
   assert.doesNotMatch(pane, /workbench-shell-session-select/, 'a shell tab never switches sessions');
   assert.match(pane, /autoCreateAttemptedRef\.current/);
   assert.match(pane, /buildInteractiveShellRequest/);
