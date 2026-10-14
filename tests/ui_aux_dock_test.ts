@@ -278,6 +278,10 @@ test('workspace: URL <-> layout sync (pane set in the URL, replace pushes, no lo
       assert.ok(dock, 'aux dock rendered');
       assert.equal(dock!.getAttribute('data-aux-tree'), 'agent:agent-b', 'split view shows the focused agent strip');
       assert.equal(dock!.getAttribute('data-aux-mobile-sheet'), 'true');
+      assert.match(dock!.className, /translate-x-0/, 'mobile aux enters from the right edge');
+      assert.doesNotMatch(dock!.className, /translate-y-/, 'mobile aux is not a bottom sheet');
+      assert.equal(doc.querySelector('[data-debug-id="workspace-mobile-swipe-indicators"]'), null);
+      assert.equal(doc.querySelector('[data-debug-id="aux-mobile-swipe-indicators"]'), null);
       assert.equal(dom.window.localStorage.getItem('heimdall:workspace-layout:v1'), null, 'no global layout key');
     } finally {
       await act(async () => root.unmount());

@@ -494,8 +494,8 @@ export function Workspace({ focusMessageId, isMobile = false, leading, trailing 
               tree={tree}
               renderPane={renderPane}
               onFocusPane={focusPane}
-              onSwipeLeftBoundary={openMobileSidebar}
-              onSwipeRightBoundary={hasAvailableAux ? openMobileAux : undefined}
+              onSwipeLeftBoundary={hasAvailableAux ? openMobileAux : undefined}
+              onSwipeRightBoundary={openMobileSidebar}
             />
           ) : (
             <TilingContainer<MainPaneValue>

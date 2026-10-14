@@ -883,3 +883,26 @@ body {
     animation: none;
   }
 }
+
+/* Mobile aux pages share the same physical ordering as the Main pager:
+   forward content arrives from the right, backward content from the left. */
+@keyframes heimdall-aux-page-in-forward {
+  from { opacity: 0.72; transform: translateX(10%); }
+  to { opacity: 1; transform: translateX(0); }
+}
+@keyframes heimdall-aux-page-in-backward {
+  from { opacity: 0.72; transform: translateX(-10%); }
+  to { opacity: 1; transform: translateX(0); }
+}
+.heimdall-aux-page-in-forward {
+  animation: heimdall-aux-page-in-forward 180ms ease-out;
+}
+.heimdall-aux-page-in-backward {
+  animation: heimdall-aux-page-in-backward 180ms ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .heimdall-aux-page-in-forward,
+  .heimdall-aux-page-in-backward {
+    animation: none;
+  }
+}

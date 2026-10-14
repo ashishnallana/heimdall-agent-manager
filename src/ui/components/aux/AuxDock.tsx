@@ -120,6 +120,7 @@ export function AuxDock({ treeId, ctx, isMobile = false, shown = true, reserveRi
   const activeTab = resolveActiveAuxTab(pane);
   const activeTabId = activeTab?.id ?? NEW_TAB_ID;
   const hasChain = Boolean(ctx.chainId);
+  const [tabMotion, setTabMotion] = useState<'forward' | 'backward' | null>(null);
 
   const openTab = useCallback(
     (content: AuxContent, title?: string) => {
@@ -129,6 +130,10 @@ export function AuxDock({ treeId, ctx, isMobile = false, shown = true, reserveRi
         participantIds: ctx.participantIds,
       });
       if (!allowed) return;
+      // Materialising the active New Tab is a rekey, not movement to another
+      // page. Clear any entry direction so the chosen content does not slide a
+      // second time after the launcher has already arrived.
+      setTabMotion(null);
       dispatch(openAuxTab({ treeId, content, title, hasChain }));
     },
     [ctx.agentInstanceId, ctx.chainId, ctx.participantIds, dispatch, hasChain, treeId],
@@ -173,27 +178,54 @@ export function AuxDock({ treeId, ctx, isMobile = false, shown = true, reserveRi
   );
 
   const activeTabIndex = activeTab ? tabs.findIndex((tab) => tab.id === activeTab.id) : -1;
+  // The New Tab launcher is the final page in the aux continuum. It is not in
+  // `visibleAuxTabs`, so its conceptual index follows the last materialised tab.
+  const activePageIndex = activeTabIndex >= 0 ? activeTabIndex : tabs.length;
+  const selectTab = useCallback(
+    (tabId: string) => {
+      const nextIndex = tabs.findIndex((tab) => tab.id === tabId);
+      if (nextIndex < 0 || nextIndex === activePageIndex) return;
+      setTabMotion(nextIndex > activePageIndex ? 'forward' : 'backward');
+      dispatch(setActiveAuxTab({ treeId, tabId }));
+    },
+    [activePageIndex, dispatch, tabs, treeId],
+  );
+  const openNewTab = useCallback(() => {
+    if (activeTabId !== NEW_TAB_ID) setTabMotion('forward');
+    dispatch(openAuxNewTab({ treeId, hasChain }));
+  }, [activeTabId, dispatch, hasChain, treeId]);
+  const closeTab = useCallback((tabId: string) => {
+    setTabMotion(null);
+    dispatch(closeAuxTab({ treeId, tabId }));
+  }, [dispatch, treeId]);
   const swipeToNextTab = useCallback(() => {
-    if (activeTabIndex >= 0 && activeTabIndex < tabs.length - 1) {
+    if (activeTabIndex < 0) return;
+    if (activeTabIndex < tabs.length - 1) {
+      setTabMotion('forward');
       dispatch(setActiveAuxTab({ treeId, tabId: tabs[activeTabIndex + 1].id }));
       return;
     }
-    closeDock();
-  }, [activeTabIndex, closeDock, dispatch, tabs, treeId]);
+    // The launcher is the final page. Advancing from the final materialised
+    // tab reveals it; advancing again is intentionally a no-op.
+    setTabMotion('forward');
+    dispatch(openAuxNewTab({ treeId, hasChain }));
+  }, [activeTabIndex, dispatch, hasChain, tabs, treeId]);
   const swipeToPreviousTab = useCallback(() => {
     if (activeTabIndex > 0) {
+      setTabMotion('backward');
       dispatch(setActiveAuxTab({ treeId, tabId: tabs[activeTabIndex - 1].id }));
     } else if (activeTabIndex < 0 && tabs.length > 0) {
+      setTabMotion('backward');
       dispatch(setActiveAuxTab({ treeId, tabId: tabs[tabs.length - 1].id }));
+    } else {
+      closeDock();
     }
-  }, [activeTabIndex, dispatch, tabs, treeId]);
+  }, [activeTabIndex, closeDock, dispatch, tabs, treeId]);
   const swipeHandlers = useMobileSwipe({
     enabled: isMobile,
     onSwipeLeft: swipeToNextTab,
     onSwipeRight: swipeToPreviousTab,
   });
-  const isTerminalAuxTab = activeTabIndex < 0 || activeTabIndex === tabs.length - 1;
-
   const menuContent = (
     <>
       {actions.map((a) => (
@@ -222,7 +254,7 @@ export function AuxDock({ treeId, ctx, isMobile = false, shown = true, reserveRi
       {actions.length > 0 || activeTab?.content.type === 'subagentChat' ? <Menu.Separator /> : null}
       <Menu.Item
         data-debug-id="aux-menu-action-new-tab"
-        onClick={() => dispatch(openAuxNewTab({ treeId, hasChain }))}
+        onClick={openNewTab}
       >
         <Icon name="plus" size={15} />
         <span>New Tab</span>
@@ -243,7 +275,7 @@ export function AuxDock({ treeId, ctx, isMobile = false, shown = true, reserveRi
   const animating = dragWidth === null;
   const containerClass = isMobile
     ? `fixed inset-0 z-40 flex flex-col bg-canvas transition-transform duration-200 ease-out motion-reduce:transition-none ${
-        shown ? 'translate-y-0' : 'translate-y-full'
+        shown ? 'translate-x-0' : 'translate-x-full'
       }`
     : isMaximized
       ? 'relative flex min-w-0 flex-1 flex-col bg-canvas'
@@ -285,9 +317,9 @@ export function AuxDock({ treeId, ctx, isMobile = false, shown = true, reserveRi
         isMobile={isMobile}
         isMaximized={isMaximized}
         reserveRight={isMobile ? 0 : reserveRight}
-        onSelectTab={(tabId) => dispatch(setActiveAuxTab({ treeId, tabId }))}
-        onCloseTab={(tabId) => dispatch(closeAuxTab({ treeId, tabId }))}
-        onOpenNewTab={() => dispatch(openAuxNewTab({ treeId, hasChain }))}
+        onSelectTab={selectTab}
+        onCloseTab={closeTab}
+        onOpenNewTab={openNewTab}
         onMoveTab={(tabId, toIndex) => dispatch(moveAuxTab({ treeId, tabId, toIndex }))}
         onToggleMaximize={() => dispatch(toggleAuxMaximized())}
         onCloseDock={closeDock}
@@ -305,7 +337,13 @@ export function AuxDock({ treeId, ctx, isMobile = false, shown = true, reserveRi
             <div
               key={activeTab.id}
               data-debug-id={`aux-tab-panel-${activeTab.id}`}
-              className="flex h-full min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden"
+              className={`flex h-full min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden ${
+                isMobile && tabMotion === 'forward'
+                  ? 'heimdall-aux-page-in-forward'
+                  : isMobile && tabMotion === 'backward'
+                    ? 'heimdall-aux-page-in-backward'
+                    : ''
+              }`}
             >
               <AuxTabContent
                 tab={activeTab}
@@ -325,7 +363,13 @@ export function AuxDock({ treeId, ctx, isMobile = false, shown = true, reserveRi
             <div
               key={NEW_TAB_ID}
               data-debug-id={`aux-tab-panel-${NEW_TAB_ID}`}
-              className="flex h-full min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden"
+              className={`flex h-full min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden ${
+                isMobile && tabMotion === 'forward'
+                  ? 'heimdall-aux-page-in-forward'
+                  : isMobile && tabMotion === 'backward'
+                    ? 'heimdall-aux-page-in-backward'
+                    : ''
+              }`}
             >
               <AuxNewTabLauncher
                 treeKey={treeKey}
@@ -340,32 +384,6 @@ export function AuxDock({ treeId, ctx, isMobile = false, shown = true, reserveRi
             </div>
           )}
         </AuxTabActionsProvider>
-        {isMobile ? (
-          <div
-            data-debug-id="aux-mobile-swipe-indicators"
-            aria-hidden="true"
-            className="pointer-events-none absolute inset-x-0 z-30 flex items-center justify-center gap-1.5 px-3"
-            style={{ bottom: 'max(0.25rem, env(safe-area-inset-bottom))' }}
-          >
-            {isTerminalAuxTab ? (
-              <span
-                data-debug-id="aux-mobile-close-indicator"
-                className="absolute left-3 inline-flex h-6 items-center gap-0.5 rounded-full border border-subtle bg-surface-overlay/90 px-1.5 text-muted shadow-sm backdrop-blur"
-              >
-                <Icon name="chevron-left" size={11} />
-                <Icon name="close" size={12} />
-              </span>
-            ) : null}
-            {tabs.length > 0 ? tabs.map((tab, index) => (
-              <span
-                key={tab.id}
-                className={`h-1.5 rounded-full transition-all ${
-                  index === activeTabIndex ? 'w-4 bg-accent' : 'w-1.5 bg-current text-muted opacity-40'
-                }`}
-              />
-            )) : <span className="h-1.5 w-4 rounded-full bg-accent" />}
-          </div>
-        ) : null}
       </div>
       </div>
     </aside>

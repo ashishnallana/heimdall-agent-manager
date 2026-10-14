@@ -1,5 +1,4 @@
 import React, { useCallback, useEffect, useRef } from 'react';
-import { Icon } from '@ui';
 import type { PaneTreeState, RenderPaneProps } from '../../tiling/types';
 import { getContentPaneIds } from '../../tiling/paneTreeState';
 import { useMobileSwipe } from '../mobileSwipe';
@@ -74,11 +73,8 @@ export function MobileMainPager<T>({
     canSwipeLeft: canSwipeLeftBoundary,
     canSwipeRight: canSwipeRightBoundary,
   });
-  const isFirstPage = focusedIndex === 0;
-  const isLastPage = focusedIndex === paneIds.length - 1;
-
   return (
-    <div className="relative flex h-full min-h-0 w-full flex-1 flex-col">
+    <div className="flex h-full min-h-0 w-full flex-1 flex-col">
       <div
         ref={scrollRef}
         data-debug-id="workspace-mobile-pager"
@@ -109,39 +105,6 @@ export function MobileMainPager<T>({
             </div>
           );
         })}
-      </div>
-      <div
-        data-debug-id="workspace-mobile-swipe-indicators"
-        aria-hidden="true"
-        className="pointer-events-none absolute inset-x-0 z-30 flex items-center justify-center gap-1.5 px-3"
-        style={{ bottom: 'max(0.25rem, env(safe-area-inset-bottom))' }}
-      >
-        {isLastPage && onSwipeLeftBoundary ? (
-          <span
-            data-debug-id="workspace-mobile-open-nav-indicator"
-            className="absolute left-3 inline-flex h-6 items-center gap-0.5 rounded-full border border-subtle bg-surface-overlay/90 px-1.5 text-muted shadow-sm backdrop-blur"
-          >
-            <Icon name="chevron-left" size={11} />
-            <Icon name="panel-left" size={13} />
-          </span>
-        ) : null}
-        {!isSinglePane ? paneIds.map((paneId, i) => (
-          <span
-            key={paneId}
-            className={`h-1.5 rounded-full transition-all ${
-              i === focusedIndex ? 'w-4 bg-accent' : 'w-1.5 bg-current text-muted opacity-40'
-            }`}
-          />
-        )) : <span className="h-1.5 w-4 rounded-full bg-accent" />}
-        {isFirstPage && onSwipeRightBoundary ? (
-          <span
-            data-debug-id="workspace-mobile-open-aux-indicator"
-            className="absolute right-3 inline-flex h-6 items-center gap-0.5 rounded-full border border-subtle bg-surface-overlay/90 px-1.5 text-muted shadow-sm backdrop-blur"
-          >
-            <Icon name="panel-right" size={13} />
-            <Icon name="chevron-right" size={11} />
-          </span>
-        ) : null}
       </div>
     </div>
   );
