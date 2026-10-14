@@ -13,6 +13,7 @@ import { AgentPtyWorkbenchPane } from '../workbench/AgentPtyWorkbenchPane';
 import { PreviewWorkbenchPane } from '../workbench/PreviewWorkbenchPane';
 import { ShellWorkbenchPane } from '../workbench/ShellWorkbenchPane';
 import type { AgentAuxContext } from './useAgentAuxContext';
+import { OpenAgentChatContext } from './openAgentChatContext';
 
 const ProjectFilesPanel = React.lazy(() => import('../chat/ProjectFilesPanel'));
 const ProjectVcsPanel = React.lazy(() => import('../chat/ProjectVcsPanel'));
@@ -54,6 +55,31 @@ export function AuxTabContent({
   onPublishComments,
 }: AuxTabContentProps) {
   const c = tab.content;
+  // Sub-agent clicks inside aux surfaces open the agent's chat as an aux tab;
+  // the focused Main agent itself is already in Main (handled, no-op).
+  const openAgentChat = (agentInstanceId: string, title?: string) => {
+    if (!agentInstanceId) return false;
+    if (agentInstanceId !== ctx.agentInstanceId) onOpenTab({ type: 'subagentChat', agentInstanceId }, title);
+    return true;
+  };
+  return (
+    <OpenAgentChatContext.Provider value={openAgentChat}>
+      {renderAuxTabBody({ tab, ctx, isMobile, onOpenTab, onUpdateTab, onRekeyTab, onPublishComments, openAgentChat })}
+    </OpenAgentChatContext.Provider>
+  );
+}
+
+function renderAuxTabBody({
+  tab,
+  ctx,
+  isMobile = false,
+  onOpenTab,
+  onUpdateTab,
+  onRekeyTab,
+  onPublishComments,
+  openAgentChat,
+}: AuxTabContentProps & { openAgentChat: (agentInstanceId: string, title?: string) => boolean }) {
+  const c = tab.content;
   switch (c.type) {
     case 'chainOverview':
       if (!ctx.chainId) {
@@ -75,8 +101,7 @@ export function AuxTabContent({
           onOpenFileDiff={(filePath) => onOpenTab({ type: 'vcs', filePath })}
           onOpenVcsFiles={() => onOpenTab({ type: 'vcs' })}
           onOpenAgentChat={(agentInstanceId, title) => {
-            if (agentInstanceId === ctx.agentInstanceId) return; // already in Main
-            onOpenTab({ type: 'subagentChat', agentInstanceId }, title);
+            openAgentChat(agentInstanceId, title);
           }}
           onOpenAgentPty={(agentInstanceId, title) =>
             onOpenTab({ type: 'agentPty', agentInstanceId }, title ? `${title} terminal` : undefined)

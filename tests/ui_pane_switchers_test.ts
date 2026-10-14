@@ -292,3 +292,80 @@ test('exactly ONE side-panel toggle, top-right in the workspace top bar, never i
     }
   });
 });
+
+test('split view: only the FOCUSED pane shows a close ✕; it closes that pane and the URL follows', async () => {
+  await withDom('#/conversations/a+b?focused=b', async (dom) => {
+    const { createRoot } = await import('react-dom/client');
+    const { act } = await import('react');
+    const { Provider } = await import('react-redux');
+    const { heimdallApi } = await import('../src/ui/api/heimdallApi.ts');
+    const layout = await import('../src/ui/store/workspaceLayoutSlice.ts');
+    const { Workspace } = await import('../src/ui/components/mainWorkspace/Workspace.tsx');
+    const store = await makeStore();
+    const doc = dom.window.document;
+    const root = createRoot(doc.getElementById('root')!);
+    try {
+      await act(async () => {
+        root.render(React.createElement(Provider, { store }, React.createElement(Workspace, {})));
+        await new Promise((r) => setTimeout(r, 40));
+      });
+      await waitFor(() => doc.querySelectorAll('[data-debug-id="conversation-chain-agent-switcher-btn"]').length === 2, act);
+      const bPane = layout.findPaneByAgent(store.getState().workspaceLayout.tree, 'b')!;
+      const closes = doc.querySelectorAll('[data-debug-id="conversation-close-pane-btn"]');
+      assert.equal(closes.length, 1, 'one ✕, on the focused pane only');
+      assert.ok(doc.querySelector(`[data-debug-id="main-pane-frame-${bPane}"]`)!.contains(closes[0]));
+      await act(async () => {
+        (closes[0] as any).click();
+        await new Promise((r) => setTimeout(r, 40));
+      });
+      assert.deepEqual(layout.selectMainAgentIds(store.getState()), ['a']);
+      assert.equal(dom.window.location.hash, '#/conversations/a');
+      assert.equal(doc.querySelectorAll('[data-debug-id="conversation-close-pane-btn"]').length, 0, 'no ✕ in single view');
+    } finally {
+      await act(async () => root.unmount());
+      store.dispatch(heimdallApi.util.resetApiState());
+    }
+  });
+});
+
+test('inside the aux dock, agent links open the agent chat as an aux tab instead of navigating Main', async () => {
+  await withDom('#/conversations/a', async (dom) => {
+    const { createRoot } = await import('react-dom/client');
+    const { act } = await import('react');
+    const { Provider } = await import('react-redux');
+    const { heimdallApi } = await import('../src/ui/api/heimdallApi.ts');
+    const { InstanceIdLink } = await import('../src/ui/components/taskchain/TaskChainOverview.tsx');
+    const { OpenAgentChatContext } = await import('../src/ui/components/aux/openAgentChatContext.tsx');
+    const store = await makeStore();
+    const doc = dom.window.document;
+    const root = createRoot(doc.getElementById('root')!);
+    const opened: string[] = [];
+    try {
+      await act(async () => {
+        root.render(
+          React.createElement(
+            Provider,
+            { store },
+            React.createElement(
+              OpenAgentChatContext.Provider,
+              { value: (id: string) => { opened.push(id); return true; } },
+              React.createElement(InstanceIdLink, { instanceId: 'child-1', displayName: 'Child' }),
+            ),
+          ),
+        );
+      });
+      await act(async () => {
+        (doc.querySelector('[data-debug-id="taskchain-instance-link-child-1"]') as any).click();
+      });
+      assert.deepEqual(opened, ['child-1']);
+      assert.equal(dom.window.location.hash, '#/conversations/a', 'Main is not navigated');
+    } finally {
+      await act(async () => root.unmount());
+      store.dispatch(heimdallApi.util.resetApiState());
+    }
+  });
+  const content = fs.readFileSync(path.join(REPO_ROOT, 'src/ui/components/aux/AuxTabContent.tsx'), 'utf8');
+  assert.match(content, /onOpenTab\(\{ type: 'subagentChat', agentInstanceId \}, title\)/);
+  assert.match(content, /onOpenAgentChat=\{\(agentInstanceId, title\) => \{\s*openAgentChat\(agentInstanceId, title\);/);
+  assert.match(content, /<OpenAgentChatContext\.Provider value=\{openAgentChat\}>/);
+});

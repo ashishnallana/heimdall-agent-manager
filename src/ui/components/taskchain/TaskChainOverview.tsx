@@ -64,6 +64,7 @@ import { effectiveChainBridgeId, taskBridgeDisplay, taskBridgeOptions } from '..
 import { useIsMobile } from '../shell/responsive';
 import ChainActiveServersPanel from '../shells/ChainActiveServersPanel';
 import { useAuthUser } from '../auth/AuthUserContext';
+import { useOpenAgentChat } from '../aux/openAgentChatContext';
 
 interface TaskChainOverviewProps {
   chainId: string;
@@ -2968,6 +2969,9 @@ function shellHash(path: string): string { return `#${path.startsWith('/') ? pat
 // and must be rendered with plain text by callers.
 export function InstanceIdLink({ instanceId, displayName }: { instanceId: string; displayName?: string }) {
   const trimmed = String(instanceId || '').trim();
+  // Inside the aux dock, an agent link opens its chat as an aux tab instead of
+  // replacing the Main pane's conversation.
+  const openAgentChat = useOpenAgentChat();
   const known = Boolean(String(displayName || '').trim());
   const isMobile = useIsMobile();
   // Only fetch when we need a label; the href never depends on the fetch.
@@ -2993,7 +2997,11 @@ export function InstanceIdLink({ instanceId, displayName }: { instanceId: string
       data-debug-id={`taskchain-instance-link-${trimmed}`}
       href={href}
       title={title}
-      onClick={() => {
+      onClick={(event) => {
+        if (openAgentChat && openAgentChat(trimmed, agentName)) {
+          event.preventDefault();
+          return;
+        }
         if (isMobile) {
           window.dispatchEvent(new CustomEvent('heimdall:close-sidebar'));
         }

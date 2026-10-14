@@ -115,6 +115,8 @@ export interface AgentChatPaneProps {
   onSplitPane?: (direction: SplitDirection) => void;
   onReplaceWithNew?: () => void;
   onClosePane?: () => void;
+  /** Main: this pane is the focused one (shows its close ✕ in split view). */
+  isFocusedPane?: boolean;
 }
 
 export function stripArtifactLinks(text: string): string {
@@ -600,6 +602,7 @@ export function AgentChatPane({
   onSplitPane,
   onReplaceWithNew,
   onClosePane,
+  isFocusedPane = false,
 }: AgentChatPaneProps) {
   const isMobileHook = useIsMobile();
   const isMobile = explicitIsMobile ?? isMobileHook;
@@ -2790,6 +2793,19 @@ export function AgentChatPane({
               ) : null}
             </div>
           </Menu>
+          {/* Jetski: in split view the focused pane shows a close ✕. */}
+          {isMultiPane && isFocusedPane && onClosePane ? (
+            <button
+              type="button"
+              data-debug-id="conversation-close-pane-btn"
+              aria-label="Close pane"
+              title="Close pane"
+              onClick={onClosePane}
+              className="grid h-8 w-8 shrink-0 place-items-center rounded-lg text-muted hover:bg-neutral-soft hover:text-primary"
+            >
+              <Icon name="close" size={16} />
+            </button>
+          ) : null}
         </div>
       </header>
       ) : null}

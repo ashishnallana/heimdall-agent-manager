@@ -345,6 +345,7 @@ export function Workspace({ focusMessageId, isMobile = false, leading }: Workspa
                 dispatch(assignMainPaneAgent({ paneId, agentInstanceId: NEW_PANE_AGENT_ID }))
               }
               onClosePane={() => closePane(paneId)}
+              isFocusedPane={isFocused}
             />
           )}
         </MainPaneFrame>
