@@ -105,8 +105,7 @@ handle_client :: proc(client: net.TCP_Socket, source: net.Endpoint, router: ^Rou
 	}
 	is_upgrade := ascii_equal_fold(header_value(headers, "Upgrade"), "websocket")
 	if allowed, reason := csrf_decide(method, headers, config.ui_origin, is_upgrade); !allowed {
-		body := fmt.tprintf("{\"error\":{\"code\":\"csrf_rejected\",\"message\":\"%s\"}}", reason)
-		write_http_response(client, Response{status = 403, content_type = "application/json", body = body})
+		write_http_response(client, Response{status = 403, content_type = "application/json", body = csrf_rejected_body(reason)})
 		return
 	}
 	if method == "OPTIONS" {

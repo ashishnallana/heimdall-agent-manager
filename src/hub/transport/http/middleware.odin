@@ -64,6 +64,18 @@ csrf_decide :: proc(method: string, headers: []contracts.HTTP_Header, ui_origin:
 	return false, "requests with cookies require same-origin browser metadata"
 }
 
+// csrf_rejected_body is the 403 body for a request csrf_decide refused. It is built
+// with a strings.Builder, not fmt.tprintf: in an fmt format string a literal `{`
+// opens a directive, so the old tprintf emitted `%!(MISSING CLOSE BRACE)` instead of
+// JSON and clients could not parse the error.
+csrf_rejected_body :: proc(reason: string, allocator := context.temp_allocator) -> string {
+	b := strings.builder_make(allocator)
+	strings.write_string(&b, "{\"error\":{\"code\":\"csrf_rejected\",\"message\":\"")
+	write_handler_json_string(&b, reason)
+	strings.write_string(&b, "\"}}")
+	return strings.to_string(b)
+}
+
 reject_query_or_body_token :: proc(req: Request) -> (bool, Response) {
 	if auth_service.token_in_query_or_body(req.query, req.body) {
 		return true, respond_error(domain.domain_error(.Unauthenticated, "bearer tokens must use the Authorization header"), req.request_id)
