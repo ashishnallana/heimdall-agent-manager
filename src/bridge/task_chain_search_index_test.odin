@@ -1,7 +1,14 @@
 package main
 
 import "core:strings"
+import "core:sync"
 import "core:testing"
+
+// The bridge search index is process-global, and the test runner is
+// multi-threaded. Tests that rebuild or lock the global index hold this mutex so
+// they don't swap or wipe one another's index mid-assertion.
+@(private = "file")
+task_chain_search_global_test_mutex: sync.Mutex
 
 @(test)
 task_chain_search_index_upsert_query_filter_and_delete :: proc(t: ^testing.T) {
@@ -38,6 +45,8 @@ task_chain_search_index_upsert_query_filter_and_delete :: proc(t: ^testing.T) {
 
 @(test)
 task_chain_search_rebuild_is_atomic_and_lock_drops_plaintext :: proc(t: ^testing.T) {
+	sync.mutex_lock(&task_chain_search_global_test_mutex)
+	defer sync.mutex_unlock(&task_chain_search_global_test_mutex)
 	bridge_task_chain_search_lock()
 	defer bridge_task_chain_search_lock()
 	documents := [?]Task_Chain_Search_Document{{
@@ -107,6 +116,8 @@ task_chain_search_feed_decrypts_documents_and_preserves_tombstones :: proc(t: ^t
 
 @(test)
 task_chain_search_delta_preserves_delete_recreate_order :: proc(t: ^testing.T) {
+	sync.mutex_lock(&task_chain_search_global_test_mutex)
+	defer sync.mutex_unlock(&task_chain_search_global_test_mutex)
 	bridge_task_chain_search_lock()
 	defer bridge_task_chain_search_lock()
 	seed := [?]Task_Chain_Search_Document{{chain_id = "chain_recreated", project_id = "proj", status = "active", source_revision = 1, title = "Old title"}}
@@ -127,6 +138,8 @@ task_chain_search_delta_preserves_delete_recreate_order :: proc(t: ^testing.T) {
 
 @(test)
 task_chain_search_lock_generation_prevents_late_refresh_swap :: proc(t: ^testing.T) {
+	sync.mutex_lock(&task_chain_search_global_test_mutex)
+	defer sync.mutex_unlock(&task_chain_search_global_test_mutex)
 	bridge_task_chain_search_lock()
 	defer bridge_task_chain_search_lock()
 	generation := bridge_task_chain_search_generation()
