@@ -91,6 +91,17 @@ test('mobile swipe dots hide for one page and expose one active page accessibly'
       assert.equal(dots?.getAttribute('aria-label'), 'Swipe page 3 of 4');
       assert.equal(dots?.querySelectorAll('span').length, 4);
       assert.equal(dots?.querySelectorAll('[data-active="true"]').length, 1);
+      const activeDot = dots?.querySelector('[data-active="true"]');
+      assert.ok(activeDot?.classList.contains('bg-accent'));
+      assert.ok(activeDot?.classList.contains('h-1.5'));
+      assert.ok(activeDot?.classList.contains('w-3'));
+      const inactiveDots = Array.from(dots?.querySelectorAll('[data-active="false"]') || []);
+      assert.equal(inactiveDots.length, 3);
+      for (const dot of inactiveDots) {
+        assert.ok(dot.classList.contains('bg-muted'), 'inactive dot uses an emitted semantic background');
+        assert.ok(dot.classList.contains('h-1'));
+        assert.ok(dot.classList.contains('w-1'));
+      }
     } finally {
       await React.act(async () => root.unmount());
     }

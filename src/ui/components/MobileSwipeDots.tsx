@@ -23,7 +23,7 @@ export function MobileSwipeDots({ total, activeIndex, debugId }: MobileSwipeDots
             key={index}
             data-active={index === current ? 'true' : 'false'}
             className={`block shrink-0 rounded-full transition-[width,background-color] duration-150 ${
-              index === current ? 'h-1.5 w-3 bg-accent' : 'h-1 w-1 bg-muted/60'
+              index === current ? 'h-1.5 w-3 bg-accent' : 'h-1 w-1 bg-muted'
             }`}
           />
         ))}
