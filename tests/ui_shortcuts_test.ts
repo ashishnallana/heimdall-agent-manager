@@ -67,17 +67,19 @@ test('defers an exact action when the same sequence prefixes longer chords', () 
 });
 
 test('Enter commits only the current enabled exact action', () => {
-  const close = { id: 'close', title: 'Close', category: 'Workspace' as const, sequence: ['s', 'c'], run() {} };
-  const splitVertical = { id: 'split-v', title: 'Split right', category: 'Workspace' as const, sequence: ['s', 'c', 'v'], run() {} };
-  const splitHorizontal = { id: 'split-h', title: 'Split bottom', category: 'Workspace' as const, sequence: ['s', 'c', 'h'], run() {} };
-  const chordActions = [close, splitVertical, splitHorizontal];
+  const openLauncher = { id: 'open-launcher', title: 'Open launcher', category: 'Workspace' as const, sequence: ['s', 's'], run() {} };
+  const splitVertical = { id: 'split-v', title: 'Split right', category: 'Workspace' as const, sequence: ['s', 's', 'v'], run() {} };
+  const splitHorizontal = { id: 'split-h', title: 'Split bottom', category: 'Workspace' as const, sequence: ['s', 's', 'h'], run() {} };
+  const chordActions = [openLauncher, splitVertical, splitHorizontal];
 
-  assert.equal(getSequenceCommitAction(['s', 'c'], chordActions)?.id, 'close');
+  assert.equal(getSequenceCommitAction(['s', 's'], chordActions)?.id, 'open-launcher');
+  assert.deepEqual(matchSequence(['s', 's', 'v'], chordActions), { kind: 'exact', action: splitVertical });
+  assert.deepEqual(matchSequence(['s', 's', 'h'], chordActions), { kind: 'exact', action: splitHorizontal });
   assert.equal(getSequenceCommitAction(['s'], chordActions), undefined);
   assert.equal(getSequenceCommitAction([], chordActions), undefined);
   assert.equal(getSequenceCommitAction(['x'], chordActions), undefined);
   assert.equal(
-    getSequenceCommitAction(['s', 'c'], [{ ...close, isEnabled: () => false }, splitVertical]),
+    getSequenceCommitAction(['s', 's'], [{ ...openLauncher, isEnabled: () => false }, splitVertical]),
     undefined,
   );
 });

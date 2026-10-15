@@ -483,17 +483,27 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
       run: () => openFocusedChainSelector('bottom'),
     },
     {
-      id: 'workspace.split-right',
-      title: 'Split focused pane right',
+      id: 'workspace.open-launcher',
+      title: 'Open Agent / Shell launcher in focused pane',
       category: 'Workspace',
-      sequence: ['s', 'v'],
+      sequence: ['s', 's'],
+      run: () => dispatch(assignMainPaneAgent({
+        paneId: tree.focusedPaneId,
+        agentInstanceId: NEW_PANE_AGENT_ID,
+      })),
+    },
+    {
+      id: 'workspace.open-launcher-split-right',
+      title: 'Open Agent / Shell launcher in pane right',
+      category: 'Workspace',
+      sequence: ['s', 's', 'v'],
       run: () => dispatch(splitMainPane({ targetPaneId: tree.focusedPaneId, direction: 'right' })),
     },
     {
-      id: 'workspace.split-bottom',
-      title: 'Split focused pane down',
+      id: 'workspace.open-launcher-split-bottom',
+      title: 'Open Agent / Shell launcher in pane below',
       category: 'Workspace',
-      sequence: ['s', 'h'],
+      sequence: ['s', 's', 'h'],
       run: () => dispatch(splitMainPane({ targetPaneId: tree.focusedPaneId, direction: 'bottom' })),
     },
     {
@@ -521,7 +531,7 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
       id: 'workspace.focus-pane-left',
       title: 'Focus pane left',
       category: 'Workspace',
-      sequence: ['s', '←'],
+      sequence: ['s', 'h'],
       isEnabled: () => Boolean(getDirectionalPaneId(mainPaneLayouts, tree.focusedPaneId, 'left')),
       run: () => {
         const paneId = getDirectionalPaneId(mainPaneLayouts, tree.focusedPaneId, 'left');
@@ -532,7 +542,7 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
       id: 'workspace.focus-pane-right',
       title: 'Focus pane right',
       category: 'Workspace',
-      sequence: ['s', '→'],
+      sequence: ['s', 'l'],
       isEnabled: () => Boolean(getDirectionalPaneId(mainPaneLayouts, tree.focusedPaneId, 'right')),
       run: () => {
         const paneId = getDirectionalPaneId(mainPaneLayouts, tree.focusedPaneId, 'right');
@@ -543,7 +553,7 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
       id: 'workspace.focus-pane-up',
       title: 'Focus pane above',
       category: 'Workspace',
-      sequence: ['s', '↑'],
+      sequence: ['s', 'k'],
       isEnabled: () => Boolean(getDirectionalPaneId(mainPaneLayouts, tree.focusedPaneId, 'up')),
       run: () => {
         const paneId = getDirectionalPaneId(mainPaneLayouts, tree.focusedPaneId, 'up');
@@ -554,7 +564,7 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
       id: 'workspace.focus-pane-down',
       title: 'Focus pane below',
       category: 'Workspace',
-      sequence: ['s', '↓'],
+      sequence: ['s', 'j'],
       isEnabled: () => Boolean(getDirectionalPaneId(mainPaneLayouts, tree.focusedPaneId, 'down')),
       run: () => {
         const paneId = getDirectionalPaneId(mainPaneLayouts, tree.focusedPaneId, 'down');

@@ -161,6 +161,22 @@ test('assignMainPaneAgent fills a picker; picking an already-open agent focuses 
   assert.equal(findPaneByAgent(tree(store), 'a'), 'pane-1');
 });
 
+test('launcher chords can replace the focused pane or create a focused picker split', () => {
+  const store = makeStore();
+  store.dispatch(setLayoutFromUrl({ ids: ['a'] }));
+
+  store.dispatch(assignMainPaneAgent({ paneId: 'pane-1', agentInstanceId: NEW_PANE_AGENT_ID }));
+  assert.equal(agentOf(store, 'pane-1'), NEW_PANE_AGENT_ID);
+  assert.equal(tree(store).focusedPaneId, 'pane-1');
+
+  store.dispatch(assignMainPaneAgent({ paneId: 'pane-1', agentInstanceId: 'a' }));
+  store.dispatch(splitMainPane({ targetPaneId: 'pane-1', direction: 'right' }));
+  const picker = tree(store).focusedPaneId;
+  assert.notEqual(picker, 'pane-1');
+  assert.equal(agentOf(store, picker), NEW_PANE_AGENT_ID);
+  assert.equal(getContentPaneIds(tree(store)).length, 2);
+});
+
 test('closeMainPane removes a pane in a split and resets the sole pane to the picker', () => {
   const store = makeStore();
   store.dispatch(setLayoutFromUrl({ ids: ['a'] }));

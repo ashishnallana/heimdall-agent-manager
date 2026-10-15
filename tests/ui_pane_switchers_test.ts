@@ -570,13 +570,17 @@ test('workspace chords split, cycle, maximize, close, and remain shielded while 
     const store = await makeStore();
     const root = createRoot(dom.window.document.getElementById('root')!);
     const settle = (ms = 50) => new Promise((resolve) => setTimeout(resolve, ms));
-    const pressChord = async (first: string, second: string, target: EventTarget = dom.window) => {
+    const pressSequence = async (keys: readonly string[], target: EventTarget = dom.window) => {
       await act(async () => {
-        target.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: first, bubbles: true }));
-        target.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: second, bubbles: true }));
+        for (const key of keys) {
+          target.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key, bubbles: true }));
+        }
         await settle();
       });
     };
+    const pressChord = (first: string, second: string, target: EventTarget = dom.window) => (
+      pressSequence([first, second], target)
+    );
 
     try {
       await act(async () => {
@@ -588,22 +592,22 @@ test('workspace chords split, cycle, maximize, close, and remain shielded while 
         await settle();
       });
 
-      await pressChord('s', 'v');
-      assert.equal(layout.selectMainPaneIds(store.getState()).length, 2, 's v splits right');
+      await pressSequence(['s', 's', 'v']);
+      assert.equal(layout.selectMainPaneIds(store.getState()).length, 2, 's s v splits right into the launcher');
 
-      await pressChord('s', 'h');
-      assert.equal(layout.selectMainPaneIds(store.getState()).length, 3, 's h splits down');
+      await pressSequence(['s', 's', 'h']);
+      assert.equal(layout.selectMainPaneIds(store.getState()).length, 3, 's s h splits down into the launcher');
 
       const paneIds = layout.selectMainPaneIds(store.getState());
       const [leftPane, topRightPane, bottomRightPane] = paneIds;
-      await pressChord('s', 'ArrowUp');
-      assert.equal(layout.selectMainTree(store.getState()).focusedPaneId, topRightPane, 's ↑ focuses the pane above');
-      await pressChord('s', 'ArrowLeft');
-      assert.equal(layout.selectMainTree(store.getState()).focusedPaneId, leftPane, 's ← focuses the pane left');
-      await pressChord('s', 'ArrowRight');
-      assert.equal(layout.selectMainTree(store.getState()).focusedPaneId, topRightPane, 's → focuses the nearest pane right');
-      await pressChord('s', 'ArrowDown');
-      assert.equal(layout.selectMainTree(store.getState()).focusedPaneId, bottomRightPane, 's ↓ focuses the pane below');
+      await pressChord('s', 'k');
+      assert.equal(layout.selectMainTree(store.getState()).focusedPaneId, topRightPane, 's k focuses the pane above');
+      await pressChord('s', 'h');
+      assert.equal(layout.selectMainTree(store.getState()).focusedPaneId, leftPane, 's h focuses the pane left');
+      await pressChord('s', 'l');
+      assert.equal(layout.selectMainTree(store.getState()).focusedPaneId, topRightPane, 's l focuses the nearest pane right');
+      await pressChord('s', 'j');
+      assert.equal(layout.selectMainTree(store.getState()).focusedPaneId, bottomRightPane, 's j focuses the pane below');
 
       await waitFor(() => Boolean(dom.window.document.querySelector('[data-debug-id="new-convo-composer-input"]')), act);
       await pressChord('s', 'i');
@@ -634,7 +638,7 @@ test('workspace chords split, cycle, maximize, close, and remain shielded while 
       await pressChord('s', 'm');
       assert.equal(layout.selectMainTree(store.getState()).maximizedPaneId, null);
 
-      await pressChord('s', 'ArrowLeft');
+      await pressChord('s', 'h');
       assert.equal(layout.selectMainTree(store.getState()).focusedPaneId, leftPane);
 
       const workspace = dom.window.document.querySelector('[data-debug-id="workspace"]')!;
@@ -662,6 +666,12 @@ test('workspace chords split, cycle, maximize, close, and remain shielded while 
       await pressChord('s', 'x');
       await act(async () => settle(250));
       assert.equal(layout.selectMainPaneIds(store.getState()).length, 1, 's x leaves the sole pane intact');
+      await pressSequence(['s', 's', 'Enter']);
+      assert.equal(
+        layout.selectFocusedMainAgentId(store.getState()),
+        layout.NEW_PANE_AGENT_ID,
+        's s Enter replaces the focused pane with the Agent / Shell launcher',
+      );
 
     } finally {
       await act(async () => root.unmount());
