@@ -544,7 +544,9 @@ test_pty_stream_monotonic_nonce_counter_no_reuse :: proc(t: ^testing.T) {
 
 	testing.expect_value(t, worker.seq, u64(NUM_FRAMES))
 
-	frames := bridge_pty_stream_take_outgoing()
+	// coalesce=false: one wire frame per record, so each reserved nonce is observable.
+	// (The drain's merge keeps the FIRST record's nonce; see Bridge_PTY_Stream_Outgoing.)
+	frames := bridge_pty_stream_take_outgoing(coalesce = false)
 	defer {
 		for f in frames do delete(f, runtime.heap_allocator())
 		delete(frames)

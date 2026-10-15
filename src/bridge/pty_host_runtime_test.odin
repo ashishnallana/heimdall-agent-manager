@@ -4,6 +4,7 @@ import "base:runtime"
 import "core:c"
 import "core:fmt"
 import "core:os"
+import "core:slice"
 import "core:strings"
 import "core:sync"
 import "core:sys/posix"
@@ -1241,8 +1242,8 @@ pane_overflow_detaches_only_affected_stream_and_requests_resync :: proc(t: ^test
 	heap := runtime.heap_allocator()
 	chunk := strings.repeat("x", 32 * 1024, heap)
 	defer delete(chunk, heap)
-	_bridge_pty_stream_deliver_or_queue(&healthy, strings.clone("healthy", heap), heap, "healthy")
-	for i in 0..<12 do _bridge_pty_stream_deliver_or_queue(&slow, strings.clone(chunk, heap), heap, "slow")
+	_bridge_pty_stream_queue_output(&healthy, slice.clone(transmute([]byte)string("healthy"), heap), heap, "healthy", false, {}, 0)
+	for i in 0..<12 do _bridge_pty_stream_queue_output(&slow, slice.clone(transmute([]byte)chunk, heap), heap, "slow", false, {}, 0)
 	testing.expect(t, !sync.atomic_load(&slow.active))
 	testing.expect(t, sync.atomic_load(&healthy.active))
 	testing.expect(t, bridge_pty_stream_outgoing_bytes <= BRIDGE_PANE_QUEUE_BYTES)
@@ -1250,7 +1251,8 @@ pane_overflow_detaches_only_affected_stream_and_requests_resync :: proc(t: ^test
 	defer { for frame in frames do delete(frame, heap); delete(frames) }
 	testing.expect_value(t, len(frames), 2)
 	if len(frames) == 2 {
-		testing.expect_value(t, frames[0], "healthy")
+		testing.expect(t, strings.contains(frames[0], `"session_id":"healthy"`), "healthy stream survives")
+		testing.expect(t, strings.contains(frames[0], `"data_b64":"aGVhbHRoeQ=="`), "healthy payload intact")
 		testing.expect(t, strings.contains(frames[1], "pane_resync_required"))
 	}
 	testing.expect_value(t, bridge_pty_stream_outgoing_bytes, 0)
@@ -1275,7 +1277,9 @@ pane_large_encrypted_snapshot_splits_before_encryption :: proc(t: ^testing.T) {
 	defer { for frame in frames do delete(frame, runtime.heap_allocator()); delete(frames) }
 	result := make([dynamic]byte)
 	defer delete(result)
-	testing.expect_value(t, len(frames), 64)
+	// 256 Ki two-byte runes = 512 KiB of plaintext, cut at the 32 KiB snapshot cap BEFORE
+	// encryption (REQ-PTY-NET-1), so every frame decrypts on its own.
+	testing.expect_value(t, len(frames), 16)
 	for frame in frames {
 		testing.expect(t, strings.contains(frame, "\"is_encrypted\":true"))
 		testing.expect(t, strings.contains(frame, "\"is_snapshot\":true"))

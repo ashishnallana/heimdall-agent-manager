@@ -62,6 +62,7 @@ test_shell_metrics_output_fanout_detach_and_first_frame :: proc(t: ^testing.T) {
 	fm := &project_service.fleet_metrics
 
 	out_before := metrics.counter_value(metrics.with(m.output_bytes, bridge_id))
+	frames_before := metrics.counter_value(metrics.with(m.output_frames, bridge_id))
 	fanout_before := metrics.counter_value(m.fanout_bytes)
 	tx_before := metrics.counter_value(metrics.with(fm.ws_bytes, project_service.WS_KIND_SHELL, "tx", bridge_id))
 	detach_before := metrics.counter_value(metrics.with(m.viewer_detaches, "peer_gone"))
@@ -75,6 +76,8 @@ test_shell_metrics_output_fanout_detach_and_first_frame :: proc(t: ^testing.T) {
 
 	// Output bytes: exactly the payload, on exactly this bridge.
 	testing.expect_value(t, metrics.counter_value(metrics.with(m.output_bytes, bridge_id)) - out_before, u64(len(payload)))
+	// Output frames: one bridge->hub wire frame, on exactly this bridge (REQ-PTY-NET-1).
+	testing.expect_value(t, metrics.counter_value(metrics.with(m.output_frames, bridge_id)) - frames_before, u64(1))
 	// Fan-out and the per-connection tx series both moved by at least the frame size
 	// (the frame wraps the payload in JSON, so strictly more than the payload).
 	testing.expect(t, metrics.counter_value(m.fanout_bytes) - fanout_before > u64(len(payload)), "fanout bytes must count the written frame")

@@ -630,7 +630,10 @@ bridge_hub_runtime_loop :: proc(conn: ^ws.Connection) {
 		// inventory entry is not and yields to a later observed exit. See
 		// shell_inventory.odin.
 		bridge_shell_inventory_drain_outgoing(conn)
-		bridge_pty_stream_drain_outgoing(conn)
+		// REQ-PTY-NET-1: the pty drain is byte-budgeted per turn and says whether it
+		// left records behind; that counts as "busy" for the sleep below, so a pane
+		// streaming faster than one budget per 25 ms is not throttled by the idle cadence.
+		pty_more := bridge_pty_stream_drain_outgoing(conn)
 		bridge_tunnel_data_drain_outgoing(conn)
 		bridge_lsp_drain_outgoing(conn)
 		// bridge_log relay: at most one frame per iteration, only after
@@ -650,7 +653,7 @@ bridge_hub_runtime_loop :: proc(conn: ^ws.Connection) {
 		}
 		// Yield after a bounded burst. Idle connections retain the low-wake cadence;
 		// busy connections do not artificially process only 40 frames per second.
-		time.sleep(1 * time.Millisecond if inbound_count > 0 else 25 * time.Millisecond)
+		time.sleep(1 * time.Millisecond if inbound_count > 0 || pty_more else 25 * time.Millisecond)
 	}
 }
 
