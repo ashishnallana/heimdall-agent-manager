@@ -12,6 +12,9 @@ import { selectNotificationsState } from './store/notificationsSlice';
 import { initializeVaultPersistence } from './store/vaultSlice';
 import { installAppViewportHeightSync } from './utils/appViewportHeight';
 import { ShortcutProvider } from './services/shortcuts/ShortcutContext';
+import { ChordHud } from './components/shortcuts/ChordHud';
+import { ShortcutCheatsheetModal } from './components/shortcuts/ShortcutCheatsheetModal';
+import { GlobalShortcutPreviewActions } from './components/shortcuts/ShortcutPreviewActions';
 import './debugCapture';
 import './styles.css';
 
@@ -92,9 +95,12 @@ ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
     <Provider store={store}>
       <ShortcutProvider>
+        {import.meta.env?.DEV ? <GlobalShortcutPreviewActions /> : null}
         <ElectronDeviceAuthGate>
           <AppShell />
         </ElectronDeviceAuthGate>
+        <ChordHud />
+        <ShortcutCheatsheetModal />
       </ShortcutProvider>
       {/*
         REQ-UI-TOAST-1. THIS MOUNT IS LOAD-BEARING — DO NOT REMOVE IT AS "UNUSED".

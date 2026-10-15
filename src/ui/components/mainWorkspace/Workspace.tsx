@@ -68,6 +68,7 @@ import { MainPaneFrame } from './MainPaneFrame';
 import { MobileMainPager } from './MobileMainPager';
 import HomePage from '../home/HomePage';
 import { PANE_ANIMATION_MS, chromeIconButtonSizeClass, topChromeHeight } from '../shell/shellChrome';
+import { WorkspaceShortcutPreviewActions } from '../shortcuts/ShortcutPreviewActions';
 
 export interface WorkspaceProps {
   focusMessageId?: string;
@@ -507,6 +508,7 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
       data-aux-open={auxOpen ? 'true' : 'false'}
       className="relative flex h-full w-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-canvas"
     >
+      {import.meta.env?.DEV ? <WorkspaceShortcutPreviewActions /> : null}
       <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
         <div
           data-debug-id="workspace-main"

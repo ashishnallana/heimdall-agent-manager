@@ -7,6 +7,7 @@ import { JSDOM } from 'jsdom';
 import {
   SHORTCUT_SEQUENCE_TIMEOUT_MS,
   actionDescriptorKey,
+  getChordCompletions,
   matchSequence,
   normalizeShortcutKey,
   shouldIgnoreEvent,
@@ -97,4 +98,15 @@ test('descriptor keys ignore callback identity but include registration metadata
   const second = [{ ...actions[0], run() { throw new Error('fresh callback'); } }];
   assert.equal(actionDescriptorKey(first), actionDescriptorKey(second));
   assert.notEqual(actionDescriptorKey(first), actionDescriptorKey([{ ...second[0], title: 'Start' }]));
+});
+
+test('chord completions group actions by the next key after the active prefix', () => {
+  const matches = [
+    ...actions,
+    { id: 'history', title: 'History', category: 'Navigation' as const, sequence: ['g', 'h', 'i'], run() {} },
+  ];
+  assert.deepEqual(getChordCompletions(['g'], matches), [
+    { key: 'h', titles: ['Home', 'History'] },
+    { key: 'c', titles: ['Conversations'] },
+  ]);
 });

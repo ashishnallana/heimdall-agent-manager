@@ -21,6 +21,11 @@ export type SequenceMatch =
   | { kind: 'prefix'; actions: AppAction[] }
   | { kind: 'none' };
 
+export type ChordCompletion = {
+  key: string;
+  titles: string[];
+};
+
 export type ShortcutKeyboardEvent = Pick<
   KeyboardEvent,
   'altKey' | 'ctrlKey' | 'defaultPrevented' | 'isComposing' | 'key' | 'metaKey' | 'repeat' | 'target'
@@ -104,4 +109,19 @@ export function actionDescriptorKey(actions: readonly AppAction[]): string {
     sequence: action.sequence,
     hasEnabledGuard: Boolean(action.isEnabled),
   })));
+}
+
+export function getChordCompletions(
+  buffer: readonly string[],
+  matchingActions: readonly AppAction[],
+): ChordCompletion[] {
+  const byKey = new Map<string, string[]>();
+  for (const action of matchingActions) {
+    const key = action.sequence[buffer.length];
+    if (!key) continue;
+    const titles = byKey.get(key) ?? [];
+    titles.push(action.title);
+    byKey.set(key, titles);
+  }
+  return Array.from(byKey, ([key, titles]) => ({ key, titles }));
 }
