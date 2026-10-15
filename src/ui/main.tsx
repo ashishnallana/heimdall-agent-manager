@@ -11,6 +11,7 @@ import { resubscribeOnLoad } from './services/pushSubscriptionService';
 import { selectNotificationsState } from './store/notificationsSlice';
 import { initializeVaultPersistence } from './store/vaultSlice';
 import { installAppViewportHeightSync } from './utils/appViewportHeight';
+import { ShortcutProvider } from './services/shortcuts/ShortcutContext';
 import './debugCapture';
 import './styles.css';
 
@@ -90,9 +91,11 @@ if (!(globalThis as any)[VAULT_REHYDRATION_FLAG]) {
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
     <Provider store={store}>
-      <ElectronDeviceAuthGate>
-        <AppShell />
-      </ElectronDeviceAuthGate>
+      <ShortcutProvider>
+        <ElectronDeviceAuthGate>
+          <AppShell />
+        </ElectronDeviceAuthGate>
+      </ShortcutProvider>
       {/*
         REQ-UI-TOAST-1. THIS MOUNT IS LOAD-BEARING — DO NOT REMOVE IT AS "UNUSED".
         ToastViewport is the ONLY component that selects the store/toastSlice

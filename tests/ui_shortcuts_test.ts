@@ -1,0 +1,100 @@
+// REQ-SHORTCUT-MANAGER-1, REQ-SHORTCUT-SHIELD-3: pure shortcut logic coverage.
+// RUN: node --import ./tests/helpers/vaultEndpointHarness.ts --test tests/ui_shortcuts_test.ts
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { JSDOM } from 'jsdom';
+import {
+  SHORTCUT_SEQUENCE_TIMEOUT_MS,
+  actionDescriptorKey,
+  matchSequence,
+  normalizeShortcutKey,
+  shouldIgnoreEvent,
+  type AppAction,
+  type ShortcutKeyboardEvent,
+} from '../src/ui/services/shortcuts/shortcutLogic.ts';
+
+const actions: AppAction[] = [
+  { id: 'home', title: 'Home', category: 'Navigation', sequence: ['g', 'h'], run() {} },
+  { id: 'conversations', title: 'Conversations', category: 'Navigation', sequence: ['g', 'c'], run() {} },
+  { id: 'disabled', title: 'Disabled', category: 'General', sequence: ['x'], isEnabled: () => false, run() {} },
+];
+
+function keyboardEvent(target: EventTarget | null, overrides: Partial<ShortcutKeyboardEvent> = {}): ShortcutKeyboardEvent {
+  return {
+    altKey: false,
+    ctrlKey: false,
+    defaultPrevented: false,
+    isComposing: false,
+    key: 'g',
+    metaKey: false,
+    repeat: false,
+    target,
+    ...overrides,
+  };
+}
+
+test('matches exact, prefix, none, and disabled actions', () => {
+  const prefix = matchSequence(['g'], actions);
+  assert.equal(prefix.kind, 'prefix');
+  if (prefix.kind === 'prefix') assert.deepEqual(prefix.actions.map((action) => action.id), ['home', 'conversations']);
+
+  const exact = matchSequence(['g', 'h'], actions);
+  assert.equal(exact.kind, 'exact');
+  if (exact.kind === 'exact') assert.equal(exact.action.id, 'home');
+
+  assert.deepEqual(matchSequence(['g', 'x'], actions), { kind: 'none' });
+  assert.deepEqual(matchSequence(['x'], actions), { kind: 'none' });
+});
+
+test('normalizes only single-character keys plus Escape', () => {
+  assert.equal(normalizeShortcutKey('G'), 'g');
+  assert.equal(normalizeShortcutKey('?'), '?');
+  assert.equal(normalizeShortcutKey('Escape'), 'escape');
+  assert.equal(normalizeShortcutKey('ArrowDown'), null);
+  assert.equal(SHORTCUT_SEQUENCE_TIMEOUT_MS, 1_200);
+});
+
+test('ignores modified, composing, repeated, and prevented events', () => {
+  for (const override of [
+    { metaKey: true },
+    { ctrlKey: true },
+    { altKey: true },
+    { isComposing: true },
+    { repeat: true },
+    { defaultPrevented: true },
+  ]) {
+    assert.equal(shouldIgnoreEvent(keyboardEvent(null, override)), true);
+  }
+  assert.equal(shouldIgnoreEvent(keyboardEvent(null, { key: 'G' })), false);
+});
+
+test('ignores editable, Monaco, xterm, and blocking-dialog targets', () => {
+  const dom = new JSDOM(`<!doctype html><body>
+    <input id="input"><textarea id="textarea"></textarea><select id="select"></select>
+    <div id="editable" contenteditable="true"><span id="editable-child"></span></div>
+    <div class="monaco-editor"><span id="monaco-child"></span></div>
+    <div class="xterm"><span id="xterm-child"></span></div>
+    <button id="plain"></button>
+  </body>`);
+  const document = dom.window.document;
+  for (const id of ['input', 'textarea', 'select', 'editable-child', 'monaco-child', 'xterm-child']) {
+    assert.equal(shouldIgnoreEvent(keyboardEvent(document.getElementById(id))), true, id);
+  }
+  assert.equal(shouldIgnoreEvent(keyboardEvent(document.getElementById('plain'))), false);
+
+  const dialog = document.createElement('div');
+  dialog.setAttribute('role', 'dialog');
+  document.body.append(dialog);
+  assert.equal(shouldIgnoreEvent(keyboardEvent(document.getElementById('plain'))), true);
+
+  dialog.dataset.shortcutCheatsheet = 'true';
+  assert.equal(shouldIgnoreEvent(keyboardEvent(document.getElementById('plain'))), false);
+});
+
+test('descriptor keys ignore callback identity but include registration metadata', () => {
+  const first = [{ ...actions[0], run() {} }];
+  const second = [{ ...actions[0], run() { throw new Error('fresh callback'); } }];
+  assert.equal(actionDescriptorKey(first), actionDescriptorKey(second));
+  assert.notEqual(actionDescriptorKey(first), actionDescriptorKey([{ ...second[0], title: 'Start' }]));
+});
