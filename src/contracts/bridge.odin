@@ -16,7 +16,8 @@ Bridge_Stream_ID :: distinct string
 Bridge_Frame_ID :: distinct string
 
 BRIDGE_LOOPBACK_CONTRACT_VERSION :: 1
-BRIDGE_WS_FRAME_VERSION :: 1
+// 2: PTY output/input are binary frames (pty_wire.odin); shell_pty_output / data_b64 are gone.
+BRIDGE_WS_FRAME_VERSION :: 2
 
 // Loopback routes served by the bridge on :49323.
 ROUTE_BRIDGE_HEALTH :: "/bridge/health"

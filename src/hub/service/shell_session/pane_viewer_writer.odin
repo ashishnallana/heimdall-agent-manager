@@ -8,6 +8,7 @@ import "core:sync"
 import "core:thread"
 import "core:time"
 import metrics "odin_test:lib/metrics"
+import contracts "odin_test:contracts"
 import project_service "odin_test:hub/service/project"
 import ws "odin_test:lib/ws"
 
@@ -119,8 +120,11 @@ pane_viewer_enqueue :: proc(svc: ^Shell_Session_Service, socket: net.TCP_Socket,
 	sync.mutex_lock(&w.mu)
 	defer sync.mutex_unlock(&w.mu)
 	if w.stopped do return .Peer_Gone
-	incremental := strings.has_prefix(text, "{\"type\":\"output\"") && !strings.contains(text, "\"is_snapshot\":true")
-	control := opcode != 0x1 || !incremental && !strings.has_prefix(text, "{\"type\":\"screen\"") && !strings.contains(text, "\"is_snapshot\":true")
+	// Queue class (REQ-PTY-NET-2): a BINARY frame is pty data — incremental output under
+	// the tight bound, snapshot/screen under the larger one; every TEXT frame is a small
+	// JSON control frame (ready/status/stream_*/error); anything else (pong) is control.
+	incremental := opcode == 0x2 && contracts.pty_wire_viewer_frame_is_incremental_output(transmute([]byte)text)
+	control := opcode != 0x2
 	data_frames, control_frames := 0, 0
 	for item in w.queue { if item.control { control_frames += 1 } else { data_frames += 1 } }
 	bridge_limit := PANE_BRIDGE_QUEUE_BYTES + 64 * 1024 if control else PANE_BRIDGE_QUEUE_BYTES
@@ -148,8 +152,8 @@ pane_viewer_enqueue :: proc(svc: ^Shell_Session_Service, socket: net.TCP_Socket,
 }
 
 // Caller holds the session sequencing lock when enqueueing snapshot chunks.
-shell_session_enqueue_viewer_frame :: proc(svc: ^Shell_Session_Service, socket: net.TCP_Socket, text: string) -> ws.Text_Write_Result {
-	return pane_viewer_enqueue(svc, socket, text)
+shell_session_enqueue_viewer_frame :: proc(svc: ^Shell_Session_Service, socket: net.TCP_Socket, text: string, opcode: u8 = 0x1) -> ws.Text_Write_Result {
+	return pane_viewer_enqueue(svc, socket, text, opcode)
 }
 
 pane_viewer_stop :: proc(w: ^Pane_Viewer_Writer) {

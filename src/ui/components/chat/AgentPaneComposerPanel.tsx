@@ -118,7 +118,7 @@ export function AgentPaneComposerPanel({
   }, [onStreamClosed]);
 
   const hasReceivedOutputRef = useRef<boolean>(false);
-  const streamBufferRef = useRef<Uint8Array[]>([]);
+  const streamBufferRef = useRef<Array<Uint8Array | string>>([]);
 
   useEffect(() => {
     hasReceivedOutputRef.current = false;

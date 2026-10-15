@@ -4,6 +4,7 @@ import "base:runtime"
 import "core:strings"
 import "core:sync"
 import "core:time"
+import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
 import project_service "odin_test:hub/service/project"
 import jsonx "odin_test:lib/jsonx"
@@ -14,7 +15,12 @@ import jsonx "odin_test:lib/jsonx"
 // caller already holds it (socket-write sites lock separately and never nest a
 // cache call inside that section).
 
-PROTOCOL_VERSION :: 1
+// The bridge_hello handshake version. Bumped to 2 with REQ-PTY-NET-2: pty output and
+// input are binary pty_wire frames and shell_pty_output/data_b64 no longer exist, so a
+// version-1 bridge is refused at hello ("unsupported bridge protocol_version") rather
+// than silently streaming into a hub that drops every frame. Mirrors
+// contracts.BRIDGE_WS_FRAME_VERSION, which is what the bridge sends.
+PROTOCOL_VERSION :: contracts.BRIDGE_WS_FRAME_VERSION
 
 Hello_Result :: struct {
 	accepted: bool,

@@ -335,7 +335,7 @@ test_bridge_update_handler_online_dispatches_ws_command_and_returns_202 :: proc(
 	f.br_svc.catalog = &catalog
 
 	// Register bridge in live runtime registry
-	_, accept_ok, _ := bridge_runtime_service.runtime_accept_hello(&f.registry, f.bridge_id, 1, "")
+	_, accept_ok, _ := bridge_runtime_service.runtime_accept_hello(&f.registry, f.bridge_id, bridge_runtime_service.PROTOCOL_VERSION, "")
 	testing.expect(t, accept_ok, "accepted bridge in registry")
 
 	req := Request{
@@ -381,7 +381,7 @@ test_bridge_update_handler_missing_artifact_fails_before_dispatch :: proc(t: ^te
 	bridge.machine_arch = "amd64"
 	_, save_ok, _ := iface.bridge_save_bridge(&f.br_repo, bridge)
 	testing.expect(t, save_ok, "saved online bridge")
-	_, accept_ok, _ := bridge_runtime_service.runtime_accept_hello(&f.registry, f.bridge_id, 1, "")
+	_, accept_ok, _ := bridge_runtime_service.runtime_accept_hello(&f.registry, f.bridge_id, bridge_runtime_service.PROTOCOL_VERSION, "")
 	testing.expect(t, accept_ok, "accepted bridge in registry")
 
 	catalog := bridge_service.Bridge_Update_Catalog{
@@ -424,7 +424,7 @@ test_bridge_update_termux_target_without_artifact_not_available :: proc(t: ^test
 	bridge.version = "0.3.29"
 	_, save_ok, _ := iface.bridge_save_bridge(&f.br_repo, bridge)
 	testing.expect(t, save_ok, "saved online termux bridge")
-	_, accept_ok, _ := bridge_runtime_service.runtime_accept_hello(&f.registry, f.bridge_id, 1, "")
+	_, accept_ok, _ := bridge_runtime_service.runtime_accept_hello(&f.registry, f.bridge_id, bridge_runtime_service.PROTOCOL_VERSION, "")
 	testing.expect(t, accept_ok, "accepted bridge in registry")
 
 	catalog := bridge_service.Bridge_Update_Catalog{manifest_path = manifest_path}

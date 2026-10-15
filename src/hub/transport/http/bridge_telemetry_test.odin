@@ -543,7 +543,7 @@ test_bridge_connect_dispatches_initial_telemetry_when_enabled :: proc(t: ^testin
 	testing.expect(t, h101_ok, "received HTTP 101 Switching Protocols")
 
 	// 2. Send masked hello frame
-	hello_json := fmt.tprintf(`{{"hostname":"test-box","os":"linux","arch":"amd64","version":"1.0.0","bridge_id":"{0}","capabilities":{{}}}}`, f.bridge_id)
+	hello_json := fmt.tprintf(`{{"type":"bridge_hello","protocol_version":2,"hostname":"test-box","os":"linux","arch":"amd64","version":"1.0.0","bridge_id":"{0}","capabilities":{{}}}}`, f.bridge_id)
 	hello_frame := make_masked_ws_frame(hello_json)
 	defer delete(hello_frame)
 	_, send_err := net.send_tcp(pair.client, hello_frame[:])
@@ -618,7 +618,7 @@ test_bridge_connect_does_not_dispatch_telemetry_when_disabled :: proc(t: ^testin
 	testing.expect(t, h101_ok, "received HTTP 101 Switching Protocols")
 
 	// 2. Send masked hello frame
-	hello_json := fmt.tprintf(`{{"hostname":"test-box","os":"linux","arch":"amd64","version":"1.0.0","bridge_id":"{0}","capabilities":{{}}}}`, f.bridge_id)
+	hello_json := fmt.tprintf(`{{"type":"bridge_hello","protocol_version":2,"hostname":"test-box","os":"linux","arch":"amd64","version":"1.0.0","bridge_id":"{0}","capabilities":{{}}}}`, f.bridge_id)
 	hello_frame := make_masked_ws_frame(hello_json)
 	defer delete(hello_frame)
 	_, send_err := net.send_tcp(pair.client, hello_frame[:])

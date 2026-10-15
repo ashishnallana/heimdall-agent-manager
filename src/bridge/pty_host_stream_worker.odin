@@ -12,6 +12,7 @@ import "core:sync"
 import "core:sys/posix"
 import "core:thread"
 import "core:time"
+import contracts "odin_test:contracts"
 import ws "odin_test:lib/ws"
 
 // Bridge_PTY_Stream_Worker holds state for one dedicated streaming socket worker (REQ-STREAM-IMPL-1).
@@ -74,8 +75,26 @@ _bridge_pty_stream_outgoing_free :: proc(item: Bridge_PTY_Stream_Outgoing, heap:
 // at enqueue so the drain never has to cut a record; the drain merges UP TO the cap.
 // Incremental output is kept smaller than a snapshot because it is latency-sensitive and
 // the hub fans it out per viewer; a catch-up snapshot is one-shot bulk.
+//
+// REQ-PTY-NET-2: these are the SOCAT values. Binary frames never pass through the
+// kind:"chunk" re-splitter (it is text/base64-only), so a frame must fit the bridge->hub
+// per-message cap on its own: under the legacy s_client transport (cap 6000 B) both caps
+// drop to BRIDGE_PTY_STREAM_EMIT_SCLIENT_BYTES. See bridge_pty_stream_emit_caps.
 BRIDGE_PTY_STREAM_EMIT_INCREMENTAL_BYTES :: 16 * 1024
 BRIDGE_PTY_STREAM_EMIT_SNAPSHOT_BYTES    :: 32 * 1024
+BRIDGE_PTY_STREAM_EMIT_SCLIENT_BYTES     :: 4 * 1024
+#assert(BRIDGE_PTY_STREAM_EMIT_SNAPSHOT_BYTES + 64 + 28 + contracts.PTY_WIRE_SESSION_HEADER_BYTES < contracts.BRIDGE_WS_HUB_RUNTIME_CHUNK_PAYLOAD_BYTES_SOCAT)
+#assert(BRIDGE_PTY_STREAM_EMIT_SCLIENT_BYTES + 64 + 28 + contracts.PTY_WIRE_SESSION_HEADER_BYTES < contracts.BRIDGE_WS_HUB_RUNTIME_CHUNK_PAYLOAD_BYTES)
+
+// bridge_pty_stream_emit_caps picks the per-frame plaintext caps for the current
+// bridge->hub transport (the chunk cap is the proxy for it, see
+// bridge_hub_runtime_chunk_payload_bytes). The 64 B above is the session-id allowance.
+bridge_pty_stream_emit_caps :: proc() -> (incremental, snapshot: int) {
+	if bridge_hub_runtime_chunk_payload_bytes() >= contracts.BRIDGE_WS_HUB_RUNTIME_CHUNK_PAYLOAD_BYTES_SOCAT {
+		return BRIDGE_PTY_STREAM_EMIT_INCREMENTAL_BYTES, BRIDGE_PTY_STREAM_EMIT_SNAPSHOT_BYTES
+	}
+	return BRIDGE_PTY_STREAM_EMIT_SCLIENT_BYTES, BRIDGE_PTY_STREAM_EMIT_SCLIENT_BYTES
+}
 
 // BRIDGE_PTY_STREAM_DRAIN_BUDGET_BYTES bounds ONE drain turn of the hub loop in bytes
 // (it replaced a "4 frames per turn" cap, which throttled a busy pane to ~160 frames/s
@@ -547,19 +566,20 @@ bridge_pty_stream_reader_worker :: proc(data: rawptr) {
 	free(worker, heap)
 }
 
-// bridge_pty_stream_encrypt_chunk encrypts PTY output using AES-256-GCM with a 12-byte nonce
-// composed of a 4-byte session salt and 8-byte big-endian sequence counter (NIST SP 800-38D).
-// Emits enc_b64 containing base64-encoded nonce(12B) + auth_tag(16B) + ciphertext.
-bridge_pty_stream_encrypt_chunk :: proc(
+// bridge_pty_stream_encrypt_chunk_raw encrypts PTY output using AES-256-GCM with a 12-byte
+// nonce composed of a 4-byte session salt and 8-byte big-endian sequence counter (NIST SP
+// 800-38D). Returns nonce(12B) + auth_tag(16B) + ciphertext — the pty_wire encrypted
+// payload. Caller owns the result.
+bridge_pty_stream_encrypt_chunk_raw :: proc(
 	data: []byte,
 	salt: [4]byte,
 	seq: u64,
 	key_hex: string,
 	allocator := context.allocator,
-) -> (enc_b64: string, ok: bool) {
-	if !bridge_is_valid_hex_key(key_hex) do return "", false
+) -> (sealed: []byte, ok: bool) {
+	if !bridge_is_valid_hex_key(key_hex) do return nil, false
 	raw_key, hex_ok := hex.decode(transmute([]byte)key_hex, context.temp_allocator)
-	if !hex_ok || len(raw_key) != VAULT_KEY_BYTES do return "", false
+	if !hex_ok || len(raw_key) != VAULT_KEY_BYTES do return nil, false
 
 	nonce: [VAULT_NONCE_BYTES]byte
 	nonce[0] = salt[0]
@@ -575,45 +595,44 @@ bridge_pty_stream_encrypt_chunk :: proc(
 	nonce[10] = byte(seq >> 8)
 	nonce[11] = byte(seq)
 
-	ciphertext := make([]byte, len(data), context.temp_allocator)
+	payload := make([]byte, VAULT_HEADER_BYTES + len(data), allocator)
 	tag: [VAULT_TAG_BYTES]byte
 
 	gcm: aes.Context_GCM
 	aes.init_gcm(&gcm, raw_key)
 	defer aes.reset_gcm(&gcm)
 
-	aes.seal_gcm(&gcm, ciphertext, tag[:], nonce[:], nil, data)
-
-	payload_len := VAULT_HEADER_BYTES + len(ciphertext)
-	payload := make([]byte, payload_len, context.temp_allocator)
+	aes.seal_gcm(&gcm, payload[VAULT_HEADER_BYTES:], tag[:], nonce[:], nil, data)
 	copy(payload[0:VAULT_NONCE_BYTES], nonce[:])
 	copy(payload[VAULT_NONCE_BYTES:VAULT_HEADER_BYTES], tag[:])
-	copy(payload[VAULT_HEADER_BYTES:], ciphertext)
+	return payload, true
+}
 
-	b64, err := base64.encode(payload, allocator = allocator)
+// bridge_pty_stream_encrypt_chunk is the base64 form of bridge_pty_stream_encrypt_chunk_raw
+// (the `vault:v1:` armor body); kept for the command/reply paths that still travel as JSON.
+bridge_pty_stream_encrypt_chunk :: proc(
+	data: []byte,
+	salt: [4]byte,
+	seq: u64,
+	key_hex: string,
+	allocator := context.allocator,
+) -> (enc_b64: string, ok: bool) {
+	sealed, sealed_ok := bridge_pty_stream_encrypt_chunk_raw(data, salt, seq, key_hex, context.temp_allocator)
+	if !sealed_ok do return "", false
+	b64, err := base64.encode(sealed, allocator = allocator)
 	if err != nil do return "", false
 	return string(b64), true
 }
 
-// bridge_pty_stream_decrypt_chunk decrypts enc_b64 containing base64(nonce(12B) + auth_tag(16B) + ciphertext)
-// using AES-256-GCM and verifies authenticity against the provided vault key.
-bridge_pty_stream_decrypt_chunk :: proc(
-	enc_b64: string,
+// bridge_pty_stream_decrypt_chunk_raw opens nonce(12B) + auth_tag(16B) + ciphertext.
+bridge_pty_stream_decrypt_chunk_raw :: proc(
+	payload: []byte,
 	key_hex: string,
 	allocator := context.allocator,
 ) -> (plaintext: []byte, ok: bool) {
 	if !bridge_is_valid_hex_key(key_hex) do return nil, false
 	raw_key, hex_ok := hex.decode(transmute([]byte)key_hex, context.temp_allocator)
 	if !hex_ok || len(raw_key) != VAULT_KEY_BYTES do return nil, false
-
-	clean_b64 := strings.trim_space(enc_b64)
-	if strings.has_prefix(clean_b64, VAULT_ARMOR_PREFIX) {
-		clean_b64 = clean_b64[len(VAULT_ARMOR_PREFIX):]
-	}
-	if len(clean_b64) == 0 do return nil, false
-
-	payload, err := base64.decode(clean_b64, allocator = context.temp_allocator)
-	if err != nil do return nil, false
 	if len(payload) < VAULT_HEADER_BYTES do return nil, false
 
 	nonce := payload[0:VAULT_NONCE_BYTES]
@@ -630,6 +649,23 @@ bridge_pty_stream_decrypt_chunk :: proc(
 		return nil, false
 	}
 	return dst, true
+}
+
+// bridge_pty_stream_decrypt_chunk decrypts enc_b64 containing base64(nonce(12B) + auth_tag(16B) + ciphertext)
+// using AES-256-GCM and verifies authenticity against the provided vault key.
+bridge_pty_stream_decrypt_chunk :: proc(
+	enc_b64: string,
+	key_hex: string,
+	allocator := context.allocator,
+) -> (plaintext: []byte, ok: bool) {
+	clean_b64 := strings.trim_space(enc_b64)
+	if strings.has_prefix(clean_b64, VAULT_ARMOR_PREFIX) {
+		clean_b64 = clean_b64[len(VAULT_ARMOR_PREFIX):]
+	}
+	if len(clean_b64) == 0 do return nil, false
+	payload, err := base64.decode(clean_b64, allocator = context.temp_allocator)
+	if err != nil do return nil, false
+	return bridge_pty_stream_decrypt_chunk_raw(payload, key_hex, allocator)
 }
 
 BRIDGE_PANE_QUEUE_BYTES :: 8 * 1024 * 1024
@@ -726,7 +762,8 @@ _bridge_pty_stream_next_nonce :: proc(worker: ^Bridge_PTY_Stream_Worker) -> (sal
 bridge_pty_stream_emit_frame :: proc(worker: ^Bridge_PTY_Stream_Worker, session_id: string, data: []byte) {
 	if len(data) == 0 do return
 	snapshot := worker != nil && worker.emitting_snapshot
-	limit := BRIDGE_PTY_STREAM_EMIT_SNAPSHOT_BYTES if snapshot else BRIDGE_PTY_STREAM_EMIT_INCREMENTAL_BYTES
+	cap_incr, cap_snap := bridge_pty_stream_emit_caps()
+	limit := cap_snap if snapshot else cap_incr
 	if len(data) > limit {
 		for offset := 0; offset < len(data); offset += limit { bridge_pty_stream_emit_frame(worker, session_id, data[offset:min(offset+limit, len(data))]) }
 		return
@@ -811,7 +848,8 @@ _bridge_pty_stream_can_merge :: proc(head, next: Bridge_PTY_Stream_Outgoing, mer
 }
 
 // _bridge_pty_stream_pop_wire_frame removes the head of the queue and returns ONE wire
-// frame for it. For an output record it first folds in every immediately following
+// frame for it (`binary` says whether it is a pty_wire session frame or a JSON control
+// frame). For an output record it first folds in every immediately following
 // record that _bridge_pty_stream_can_merge allows (when `coalesce`), then encodes:
 // encryption happens HERE, once per merged frame. Returns ok=false when the queue is
 // empty. `session_id`/`payload_len` describe the frame for logging/accounting.
@@ -819,19 +857,20 @@ _bridge_pty_stream_can_merge :: proc(head, next: Bridge_PTY_Stream_Outgoing, mer
 // A record marked encrypted whose key is no longer readable (vault locked between
 // enqueue and drain) is replaced by a pane_resync_required for its session — plaintext
 // is never sent in its place.
-_bridge_pty_stream_pop_wire_frame :: proc(heap: runtime.Allocator, coalesce := true) -> (frame: string, session_id: string, payload_len: int, ok: bool) {
+_bridge_pty_stream_pop_wire_frame :: proc(heap: runtime.Allocator, coalesce := true) -> (frame: string, binary: bool, payload_len: int, ok: bool) {
 	sync.mutex_lock(&bridge_pty_stream_outgoing_mu)
 	_bridge_pty_stream_outgoing_bind_heap()
-	if len(bridge_pty_stream_outgoing) == 0 { sync.mutex_unlock(&bridge_pty_stream_outgoing_mu); return "", "", 0, false }
+	if len(bridge_pty_stream_outgoing) == 0 { sync.mutex_unlock(&bridge_pty_stream_outgoing_mu); return "", false, 0, false }
 	head := bridge_pty_stream_outgoing[0]
 	ordered_remove(&bridge_pty_stream_outgoing, 0)
 	bridge_pty_stream_outgoing_bytes -= _bridge_pty_stream_outgoing_len(head)
 	if head.data == nil {
 		sync.mutex_unlock(&bridge_pty_stream_outgoing_mu)
 		delete(head.session_id, heap)
-		return head.json, "", len(head.json), true
+		return head.json, false, len(head.json), true
 	}
-	limit := BRIDGE_PTY_STREAM_EMIT_SNAPSHOT_BYTES if head.snapshot else BRIDGE_PTY_STREAM_EMIT_INCREMENTAL_BYTES
+	cap_incr, cap_snap := bridge_pty_stream_emit_caps()
+	limit := cap_snap if head.snapshot else cap_incr
 	merged := head.data
 	buf: []byte // only allocated when a second record is folded in
 	if coalesce {
@@ -855,41 +894,31 @@ _bridge_pty_stream_pop_wire_frame :: proc(heap: runtime.Allocator, coalesce := t
 	defer delete(head.session_id, heap)
 
 	payload_len = len(merged)
-	session_id = head.session_id
-	frame, ok = bridge_pty_stream_encode_output_frame(head.session_id, merged, head.snapshot, head.encrypted, head.salt, head.seq, heap)
-	if !ok {
+	wire, enc_ok := bridge_pty_stream_encode_output_frame(head.session_id, merged, head.snapshot, head.encrypted, head.salt, head.seq, heap)
+	if !enc_ok {
 		fmt.eprintln("bridge WARN terminal encryption failed; refusing plaintext output")
-		frame = bridge_pty_stream_format_lifecycle_event("pane_resync_required", head.session_id, "", false, 0, heap)
+		return bridge_pty_stream_format_lifecycle_event("pane_resync_required", head.session_id, "", false, 0, heap), false, payload_len, true
 	}
-	return frame, "", payload_len, true
+	return string(wire), true, payload_len, true
 }
 
 // bridge_pty_stream_encode_output_frame turns one (merged) plaintext payload into the
-// shell_pty_output wire frame, encrypting it when `encrypted`. Caller owns the result.
-bridge_pty_stream_encode_output_frame :: proc(session_id: string, data: []byte, snapshot, encrypted: bool, salt: [4]byte, seq: u64, heap: runtime.Allocator) -> (frame: string, ok: bool) {
+// binary pty_wire session frame (REQ-PTY-NET-2), encrypting it when `encrypted`
+// (payload = nonce|tag|ciphertext). Caller owns the result.
+bridge_pty_stream_encode_output_frame :: proc(session_id: string, data: []byte, snapshot, encrypted: bool, salt: [4]byte, seq: u64, heap: runtime.Allocator) -> (frame: []byte, ok: bool) {
 	temp := runtime.default_temp_allocator_temp_begin()
 	defer runtime.default_temp_allocator_temp_end(temp)
-	payload_b64 := ""
+	payload := data
 	if encrypted {
 		status, key_hex := bridge_vault_status_and_key()
-		if status != .Unlocked do return "", false
+		if status != .Unlocked do return nil, false
 		defer delete(key_hex)
-		enc_b64, enc_ok := bridge_pty_stream_encrypt_chunk(data, salt, seq, key_hex, context.temp_allocator)
-		if !enc_ok do return "", false
-		payload_b64 = enc_b64
-	} else {
-		payload_b64 = string(base64.encode(data, allocator = context.temp_allocator))
+		sealed, enc_ok := bridge_pty_stream_encrypt_chunk_raw(data, salt, seq, key_hex, context.temp_allocator)
+		if !enc_ok do return nil, false
+		payload = sealed
 	}
-	b := strings.builder_make(heap)
-	strings.write_string(&b, "{\"type\":\"shell_pty_output\",\"session_id\":\"")
-	bridge_runtime_write_json_string(&b, session_id)
-	strings.write_string(&b, "\",\"data_b64\":\"")
-	bridge_runtime_write_json_string(&b, payload_b64)
-	strings.write_string(&b, "\",\"is_encrypted\":")
-	strings.write_string(&b, "true" if encrypted else "false")
-	if snapshot do strings.write_string(&b, ",\"is_snapshot\":true")
-	strings.write_string(&b, "}")
-	return strings.to_string(b), true
+	frame = contracts.pty_wire_encode_session_frame(contracts.PTY_WIRE_KIND_OUTPUT, contracts.pty_wire_flags(snapshot, encrypted), session_id, payload, heap)
+	return frame, frame != nil
 }
 
 // bridge_pty_stream_drain_outgoing flushes queued records to the hub connection, merging
@@ -900,10 +929,10 @@ bridge_pty_stream_drain_outgoing :: proc(conn: ^ws.Connection) -> (more: bool) {
 	heap := runtime.heap_allocator()
 	sent := 0
 	for sent < BRIDGE_PTY_STREAM_DRAIN_BUDGET_BYTES {
-		frame, _, payload_len, ok := _bridge_pty_stream_pop_wire_frame(heap)
+		frame, binary, payload_len, ok := _bridge_pty_stream_pop_wire_frame(heap)
 		if !ok do break
 		sent += max(payload_len, 1)
-		delivered := bridge_hub_send(conn, frame)
+		delivered := bridge_hub_send_binary(conn, transmute([]byte)frame) if binary else bridge_hub_send(conn, frame)
 		delete(frame, heap)
 		if !delivered do break
 	}

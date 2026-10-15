@@ -8,12 +8,34 @@ import platform "odin_test:hub/platform"
 import shell_session_svc "odin_test:hub/service/shell_session"
 import "core:strings"
 import "core:testing"
+import contracts "odin_test:contracts"
 
 // --- Consolidated from shell_stream_screen_snapshot_test.odin ---
 
+// REQ-PTY-NET-2: `screen` frames are binary pty_wire viewer frames now. These shims keep
+// the assertions below about the REPAINT BYTES unchanged: the base64 the tests inspect is
+// the debug rendering of the binary payload, not anything on the wire.
+@(private = "file")
+_screen_payload_b64 :: proc(pane_output: string, cursor_row: int = -1, cursor_col: int = -1) -> string {
+	text := _shell_screen_repaint_text(pane_output, cursor_row, cursor_col)
+	defer delete(text)
+	return base64.encode(transmute([]byte)text)
+}
+
+// _screen_frame_json builds the SCREEN frame for a payload given as base64 (as the old
+// JSON builder took it) and renders it back as debug JSON.
+@(private = "file")
+_screen_frame_json :: proc(data_b64: string, cursor_row: int = -1, cursor_col: int = -1) -> string {
+	payload, err := base64.decode(data_b64, allocator = context.temp_allocator)
+	if err != nil do payload = transmute([]byte)data_b64
+	frame := shell_stream_screen_frame(payload, cursor_row, cursor_col)
+	defer delete(frame)
+	return contracts.pty_wire_viewer_frame_debug_json(frame)
+}
+
 @(test)
 test_req29_screen_payload_is_an_absolute_repaint :: proc(t: ^testing.T) {
-	payload := shell_stream_screen_payload_b64("line one\nline two")
+	payload := _screen_payload_b64("line one\nline two")
 	defer delete(payload)
 
 	decoded, err := base64.decode(payload)
@@ -38,7 +60,7 @@ test_req29_screen_payload_is_an_absolute_repaint :: proc(t: ^testing.T) {
 
 @(test)
 test_req29_frame_uses_data_b64_not_the_data_b64_fallback :: proc(t: ^testing.T) {
-	frame := shell_stream_screen_frame_json("QUJD")
+	frame := _screen_frame_json("QUJD")
 	defer delete(frame)
 
 	testing.expect(t, strings.contains(frame, "\"type\":\"screen\""), "frame type must be screen")
@@ -143,7 +165,7 @@ test_req29_screen_frame_is_written_to_the_given_socket :: proc(t: ^testing.T) {
 	n, recv_err := net.recv_tcp(client, buf[:])
 	testing.expect(t, recv_err == nil && n > 0, "client must receive the screen frame")
 
-	got := string(buf[:n])
+	got := pty_test_first_server_frame_json(buf[:n])
 	testing.expect(t, strings.contains(got, "\"type\":\"screen\""), "received frame is a screen frame")
 
 	// Decode the payload actually delivered and prove the repaint prefix survived the wire.
@@ -185,7 +207,7 @@ test_req29_screen_frame_is_written_to_the_given_socket :: proc(t: ^testing.T) {
 // _req30_decoded_payload returns the decoded screen payload for pane text. Caller owns it.
 @(private = "file")
 _req30_decoded_payload :: proc(t: ^testing.T, pane_output: string) -> string {
-	payload := shell_stream_screen_payload_b64(pane_output)
+	payload := _screen_payload_b64(pane_output)
 	defer delete(payload)
 	decoded, err := base64.decode(payload)
 	if err != nil {
@@ -452,7 +474,7 @@ test_m1_interior_blank_rows_preserved_while_trailing_trimmed :: proc(t: ^testing
 @(test)
 test_m1_screen_payload_with_cursor_repositioning_ansi_cup :: proc(t: ^testing.T) {
 	// Scenario A: Single prompt at row 0, col 8 ("sh-5.2$ ") -> ANSI 1-indexed: row 1, col 9 (\x1b[1;9H)
-	payload_a := shell_stream_screen_payload_b64("sh-5.2$ \n\n\n", 0, 8)
+	payload_a := _screen_payload_b64("sh-5.2$ \n\n\n", 0, 8)
 	defer delete(payload_a)
 	decoded_a, err_a := base64.decode(payload_a)
 	testing.expect(t, err_a == nil, "valid base64")
@@ -468,7 +490,7 @@ test_m1_screen_payload_with_cursor_repositioning_ansi_cup :: proc(t: ^testing.T)
 	testing.expect(t, strings.has_suffix(got_a, "\x1b[1;9H"), "payload ends with ANSI CUP sequence")
 
 	// Scenario B: Multiline output with cursor at row 2, col 5 -> \x1b[3;6H
-	payload_b := shell_stream_screen_payload_b64("row0\nrow1\nrow2\n\n\n", 2, 5)
+	payload_b := _screen_payload_b64("row0\nrow1\nrow2\n\n\n", 2, 5)
 	defer delete(payload_b)
 	decoded_b, err_b := base64.decode(payload_b)
 	testing.expect(t, err_b == nil, "valid base64")
@@ -483,7 +505,7 @@ test_m1_screen_payload_with_cursor_repositioning_ansi_cup :: proc(t: ^testing.T)
 	testing.expect_value(t, got_b, expected_b)
 
 	// Scenario C: Omitted / negative cursor coordinates (-1) must NOT append CUP
-	payload_c := shell_stream_screen_payload_b64("prompt$ ", -1, -1)
+	payload_c := _screen_payload_b64("prompt$ ", -1, -1)
 	defer delete(payload_c)
 	decoded_c, _ := base64.decode(payload_c)
 	defer delete(decoded_c)
@@ -503,7 +525,7 @@ test_m1_screen_payload_with_cursor_repositioning_ansi_cup :: proc(t: ^testing.T)
 @(test)
 test_m1_frame_json_contains_cursor_coordinates :: proc(t: ^testing.T) {
 	// Case 1: Coordinates present (row=0, col=8)
-	frame1 := shell_stream_screen_frame_json("QUJD", 0, 8)
+	frame1 := _screen_frame_json("QUJD", 0, 8)
 	defer delete(frame1)
 
 	testing.expect(t, strings.contains(frame1, "\"type\":\"screen\""), "type is screen")
@@ -512,7 +534,7 @@ test_m1_frame_json_contains_cursor_coordinates :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(frame1, "\"cursor_col\":8"), "cursor_col is 8")
 
 	// Case 2: Negative/unspecified coordinates (-1, -1)
-	frame2 := shell_stream_screen_frame_json("QUJD", -1, -1)
+	frame2 := _screen_frame_json("QUJD", -1, -1)
 	defer delete(frame2)
 
 	testing.expect(t, strings.contains(frame2, "\"type\":\"screen\""), "type is screen")
@@ -521,9 +543,9 @@ test_m1_frame_json_contains_cursor_coordinates :: proc(t: ^testing.T) {
 	testing.expect(t, !strings.contains(frame2, "cursor_col"), "cursor_col omitted when negative")
 
 	// Case 3: Default argument invocation
-	frame3 := shell_stream_screen_frame_json("QUJD")
+	frame3 := _screen_frame_json("QUJD")
 	defer delete(frame3)
-	testing.expect_value(t, frame3, "{\"type\":\"screen\",\"data_b64\":\"QUJD\",\"is_encrypted\":false}")
+	testing.expect_value(t, frame3, "{\"type\":\"screen\",\"data_b64\":\"QUJD\",\"is_encrypted\":false,\"is_snapshot\":true}")
 }
 
 // TEST M1.6: End-to-end socket write propagates cursor coordinates and CUP from pane_reply.
@@ -551,7 +573,7 @@ test_m1_write_screen_frame_propagates_cursor_from_pane_reply :: proc(t: ^testing
 	n, recv_err := net.recv_tcp(client, buf[:])
 	testing.expect(t, recv_err == nil && n > 0, "client must receive frame")
 
-	got := string(buf[:n])
+	got := pty_test_first_server_frame_json(buf[:n])
 	testing.expect(t, strings.contains(got, "\"type\":\"screen\""), "type is screen")
 	testing.expect(t, strings.contains(got, "\"cursor_row\":0"), "cursor_row propagated")
 	testing.expect(t, strings.contains(got, "\"cursor_col\":8"), "cursor_col propagated")
@@ -757,19 +779,19 @@ test_adv_repaint_on_empty_and_whitespace_pane :: proc(t: ^testing.T) {
 @(test)
 test_adv_frame_json_extreme_coordinates :: proc(t: ^testing.T) {
 	// Origin (0, 0)
-	frame0 := shell_stream_screen_frame_json("ABC", 0, 0)
+	frame0 := _screen_frame_json("QUJD", 0, 0)
 	defer delete(frame0)
-	testing.expect_value(t, frame0, "{\"type\":\"screen\",\"data_b64\":\"ABC\",\"is_encrypted\":false,\"cursor_row\":0,\"cursor_col\":0}")
+	testing.expect_value(t, frame0, "{\"type\":\"screen\",\"data_b64\":\"QUJD\",\"is_encrypted\":false,\"is_snapshot\":true,\"cursor_row\":0,\"cursor_col\":0}")
 
 	// Large coordinates
-	frame_lg := shell_stream_screen_frame_json("ABC", 65535, 32768)
+	frame_lg := _screen_frame_json("QUJD", 65535, 32768)
 	defer delete(frame_lg)
-	testing.expect_value(t, frame_lg, "{\"type\":\"screen\",\"data_b64\":\"ABC\",\"is_encrypted\":false,\"cursor_row\":65535,\"cursor_col\":32768}")
+	testing.expect_value(t, frame_lg, "{\"type\":\"screen\",\"data_b64\":\"QUJD\",\"is_encrypted\":false,\"is_snapshot\":true,\"cursor_row\":65535,\"cursor_col\":32768}")
 
 	// Negative coordinates omitted
-	frame_neg := shell_stream_screen_frame_json("ABC", -10, -20)
+	frame_neg := _screen_frame_json("QUJD", -10, -20)
 	defer delete(frame_neg)
-	testing.expect_value(t, frame_neg, "{\"type\":\"screen\",\"data_b64\":\"ABC\",\"is_encrypted\":false}")
+	testing.expect_value(t, frame_neg, "{\"type\":\"screen\",\"data_b64\":\"QUJD\",\"is_encrypted\":false,\"is_snapshot\":true}")
 }
 
 // ---------------------------------------------------------------------------

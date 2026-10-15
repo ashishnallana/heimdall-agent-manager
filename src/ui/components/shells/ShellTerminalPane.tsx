@@ -204,17 +204,19 @@ export function ShellTerminalPane({
    * socket, so a frame arriving in the same tick as `connected` could otherwise be LF-translated.
    * PTY bytes must never be translated, whatever the render happens to be doing.
    */
-  const writeStreamBytes = useCallback((term: TerminalType, bytes: Uint8Array) => {
+  const writeStreamBytes = useCallback((term: TerminalType, bytes: Uint8Array | string) => {
     if (term.options.convertEol) {
       term.options.convertEol = false;
     }
     // Check if this chunk is a screen repaint (\x1b[2J\x1b[H or \x1b[?1049h) so synthetic
-    // terminal query replies from xterm.js are suppressed during replay.
-    const isRepaintPrefix =
-      bytes.length >= 6 &&
-      bytes[0] === 0x1b &&
-      bytes[1] === 0x5b &&
-      ((bytes[2] === 0x32 && bytes[3] === 0x4a) || (bytes[2] === 0x3f && bytes[3] === 0x31));
+    // terminal query replies from xterm.js are suppressed during replay. REQ-PTY-NET-2: the
+    // stream hook delivers decoded TEXT; the registry replay below may still hand back bytes.
+    const isRepaintPrefix = typeof bytes === 'string'
+      ? (bytes.startsWith('\x1b[2J') || bytes.startsWith('\x1b[?1'))
+      : (bytes.length >= 6 &&
+        bytes[0] === 0x1b &&
+        bytes[1] === 0x5b &&
+        ((bytes[2] === 0x32 && bytes[3] === 0x4a) || (bytes[2] === 0x3f && bytes[3] === 0x31)));
     if (isRepaintPrefix) {
       pendingReplaysRef.current += 1;
     }

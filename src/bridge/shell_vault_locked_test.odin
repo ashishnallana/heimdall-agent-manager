@@ -419,7 +419,8 @@ test_t10_locked_emit_frame_queues_typed_vault_locked_once :: proc(t: ^testing.T)
 	}
 	testing.expect_value(t, len(frames), 2)
 	if len(frames) == 2 {
-		testing.expect(t, strings.contains(frames[0], `"type":"shell_pty_output"`), "banner first, for scrollback")
+		_, banner, _, _, ok := pty_test_decode_output(frames[0])
+		testing.expect(t, ok && strings.contains(banner, "Vault locked"), "banner first, for scrollback, as a binary output frame")
 		testing.expect(t, strings.contains(frames[1], `"type":"shell_pty_vault_locked"`), fmt.tprintf("typed frame second, got %q", frames[1]))
 		testing.expect(t, strings.contains(frames[1], `"error_code":"vault_locked"`), "typed frame carries the code")
 	}

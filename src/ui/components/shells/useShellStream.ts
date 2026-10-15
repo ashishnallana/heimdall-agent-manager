@@ -1,4 +1,5 @@
-import { PaneDeliveryQueue, normalizeSnapshotBytes, repaintCapturedScreen, splitPaneInput } from './paneDeliveryQueue.ts';
+import { PaneDeliveryQueue, normalizeSnapshotText, repaintCapturedScreenText, splitPaneInput } from './paneDeliveryQueue.ts';
+import { PTY_WIRE_KIND_OUTPUT, PTY_WIRE_KIND_SCREEN, PTY_WIRE_VIEWER_HEADER_BYTES, PtyTextDecoder, decodePtyViewerFrame, decryptPtyPayload, type PtyViewerFrame } from './ptyWire.ts';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSelector } from 'react-redux';
 import { apiAbsoluteUrl } from '../../api/apiBase.ts';
@@ -13,9 +14,8 @@ const INITIAL_RECONNECT_DELAY_MS = 1000;
 const MAX_RECONNECT_DELAY_MS = 5000;
 const MAX_RECONNECT_ATTEMPTS = 3;
 
+// Control frames only (REQ-PTY-NET-2): pty output/screen bytes are binary frames, see ptyWire.ts.
 type ShellStreamMsg =
-  | { type: 'output'; data_b64: string; is_encrypted: boolean; is_snapshot?: boolean }
-  | { type: 'screen'; data_b64: string; is_encrypted: boolean; cursor_row?: number; cursor_col?: number }
   | { type: 'ready'; session_id?: string }
   | { type: 'stream_ready'; session_id?: string; [key: string]: any }
   | { type: 'stream_closed'; session_id?: string; exit_code?: number; [key: string]: any }
@@ -26,7 +26,12 @@ type ShellStreamMsg =
 export type UseShellStreamOptions = {
   sessionId: string | null;
   enabled?: boolean;
-  onOutput?: (data: Uint8Array) => void;
+  /**
+   * Decoded terminal text, ready for `term.write`. REQ-PTY-NET-2: frames are decoded through
+   * one streaming UTF-8 decoder per connection, so a character split across two wire frames
+   * arrives whole. Snapshot/screen frames are delivered as absolute repaints (erase+home).
+   */
+  onOutput?: (data: string) => void;
   onStatus?: (status: string) => void;
   onStreamReady?: (info?: { sessionId?: string; [key: string]: any }) => void;
   onStreamClosed?: (info?: { sessionId?: string; exitCode?: number; [key: string]: any }) => void;
@@ -261,7 +266,6 @@ export function useShellStream({
   const isVaultUnlockedRef = useRef(isVaultUnlocked);
   isVaultUnlockedRef.current = isVaultUnlocked;
   const vaultLockedNoticeShownRef = useRef(false);
-  const outputQueueRef = useRef<Promise<void>>(Promise.resolve());
   const paneQueueRef = useRef<PaneDeliveryQueue | null>(null);
   const inputQueueRef = useRef<Promise<void>>(Promise.resolve());
 
@@ -330,7 +334,6 @@ export function useShellStream({
     clearHeartbeat();
     clearReconnectTimer();
     clearStreamReadyFallbackTimer();
-    outputQueueRef.current = Promise.resolve();
     inputQueueRef.current = Promise.resolve();
     isStreamReadyRef.current = false;
     setIsStreamReady(false);
@@ -373,8 +376,7 @@ export function useShellStream({
           console.log('[useShellStream] socket.onopen connected successfully for session:', sessionId);
           reconnectAttemptsRef.current = 0;
           vaultLockedNoticeShownRef.current = false;
-          outputQueueRef.current = Promise.resolve();
-          inputQueueRef.current = Promise.resolve();
+                inputQueueRef.current = Promise.resolve();
           setConnected(true);
           startHeartbeat(socket);
           sendGeometry(socket);
@@ -401,107 +403,56 @@ export function useShellStream({
           try { socket.close(4008, 'pane delivery overloaded'); } catch { /* connection already closed */ }
         });
         paneQueueRef.current = paneQueue;
-        const handleMessage = async (event: MessageEvent) => {
+        // REQ-PTY-NET-2: pty bytes arrive as BINARY frames (ptyWire.ts); JSON text frames are
+        // control only. One streaming UTF-8 decoder per connection carries a multi-byte
+        // character split across two frames; it is reset when an absolute repaint begins.
+        socket.binaryType = 'arraybuffer';
+        const textDecoder = new PtyTextDecoder();
+        let previousWasSnapshot = false;
+
+        const showVaultLockedNoticeOnce = () => {
+          console.warn('[useShellStream] vault is locked; cannot decrypt encrypted pane frame');
+          if (vaultLockedNoticeShownRef.current) return;
+          vaultLockedNoticeShownRef.current = true;
+          onOutputRef.current?.(
+            '\r\n\x1b[33m[Vault locked: terminal stream is encrypted. Unlock vault to view session.]\x1b[0m\r\n'
+          );
+        };
+
+        const handleBinaryFrame = async (frame: PtyViewerFrame) => {
           if (activeConnectIdRef.current !== connectId) return;
-          let msg: ShellStreamMsg;
-          try {
-            msg = JSON.parse(event.data);
-          } catch {
-            console.warn('[useShellStream] failed to parse incoming JSON frame');
-            return;
+          if (frame.kind !== PTY_WIRE_KIND_OUTPUT && frame.kind !== PTY_WIRE_KIND_SCREEN) return;
+          let bytes = frame.payload;
+          if (frame.encrypted) {
+            const activeKey = getActiveVaultKey();
+            const isUnlocked = isVaultUnlockedRef.current || Boolean(activeKey);
+            if (!isUnlocked || !activeKey) { showVaultLockedNoticeOnce(); return; }
+            try {
+              bytes = await decryptPtyPayload(frame.payload, activeKey);
+            } catch (err) {
+              console.error('[useShellStream] decryption failed for pane frame:', err);
+              socket.close(4007, 'pane decryption failed');
+              return;
+            }
+            if (activeConnectIdRef.current !== connectId || socket.readyState !== WebSocket.OPEN) return;
           }
+          const isScreen = frame.kind === PTY_WIRE_KIND_SCREEN;
+          const startsRepaint = frame.snapshot && !previousWasSnapshot;
+          previousWasSnapshot = frame.snapshot;
+          if (startsRepaint) textDecoder.reset();
+          let text = textDecoder.decode(bytes);
+          if (isScreen && frame.encrypted) {
+            // The hub could not prefix/position an encrypted capture; do it here.
+            text = repaintCapturedScreenText(text, frame.cursorRow, frame.cursorCol);
+          } else if (!isScreen && frame.snapshot && startsRepaint) {
+            text = normalizeSnapshotText(text);
+          }
+          if (text.length > 0) onOutputRef.current?.(text);
+        };
 
-          if (msg.type === 'output') {
-            const isArmored = msg.is_encrypted === true;
-            const enc_b64 = isArmored ? msg.data_b64 : undefined;
-            const data_b64 = !isArmored ? msg.data_b64 : undefined;
-
-            // If unarmored plaintext base64 arrives, decode immediately via atob() with zero delay.
-            if (!isArmored && data_b64) {
-              try {
-                const raw = atob(data_b64);
-                const bytes = new Uint8Array(raw.length);
-                for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
-                onOutputRef.current?.(msg.is_snapshot ? normalizeSnapshotBytes(bytes) : bytes);
-              } catch (err) {
-                console.error('[useShellStream] base64 decode failed for plaintext output frame:', err);
-                socket.close(4007, 'invalid pane base64');
-              }
-              return;
-            }
-
-            await (outputQueueRef.current = outputQueueRef.current.then(async () => {
-              if (activeConnectIdRef.current !== connectId) return;
-              if (enc_b64) {
-                const activeKey = getActiveVaultKey();
-                const isUnlocked = isVaultUnlockedRef.current || Boolean(activeKey);
-                if (isUnlocked && activeKey) {
-                  try {
-                    const bytes = await decryptShellStreamPayload(enc_b64, activeKey);
-                    if (activeConnectIdRef.current !== connectId || socket.readyState !== WebSocket.OPEN) return;
-                    onOutputRef.current?.(msg.is_snapshot ? normalizeSnapshotBytes(bytes) : bytes);
-                  } catch (err) {
-                    console.error('[useShellStream] decryption failed for output frame:', err);
-                    socket.close(4007, 'pane decryption failed');
-                  }
-                } else {
-                  console.warn('[useShellStream] vault is locked; cannot decrypt encrypted output frame');
-                  if (!vaultLockedNoticeShownRef.current) {
-                    vaultLockedNoticeShownRef.current = true;
-                    const notice = new TextEncoder().encode(
-                      '\r\n\x1b[33m[Vault locked: terminal stream is encrypted. Unlock vault to view session.]\x1b[0m\r\n'
-                    );
-                    onOutputRef.current?.(notice);
-                  }
-                }
-              }
-            }).catch(() => { /* ignore queue errors */ }));
-          } else if (msg.type === 'screen') {
-            const isArmored = msg.is_encrypted === true;
-            const enc_b64 = isArmored ? msg.data_b64 : undefined;
-            const b64 = !isArmored ? msg.data_b64 : undefined;
-
-            // If unarmored plaintext base64 arrives, decode immediately via atob() with zero delay.
-            if (!isArmored && b64) {
-              try {
-                const raw = atob(b64);
-                const bytes = new Uint8Array(raw.length);
-                for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
-                onOutputRef.current?.(bytes);
-              } catch (err) {
-                console.error('[useShellStream] base64 decode failed for plaintext screen frame:', err);
-                socket.close(4007, 'invalid pane base64');
-              }
-              return;
-            }
-
-            await (outputQueueRef.current = outputQueueRef.current.then(async () => {
-              if (activeConnectIdRef.current !== connectId) return;
-              if (enc_b64) {
-                const activeKey = getActiveVaultKey();
-                const isUnlocked = isVaultUnlockedRef.current || Boolean(activeKey);
-                if (isUnlocked && activeKey) {
-                  try {
-                    const bytes = await decryptShellStreamPayload(enc_b64, activeKey);
-                    if (activeConnectIdRef.current !== connectId || socket.readyState !== WebSocket.OPEN) return;
-                    onOutputRef.current?.(repaintCapturedScreen(bytes, msg.cursor_row, msg.cursor_col));
-                  } catch (err) {
-                    console.error('[useShellStream] decryption failed for screen frame:', err);
-                    socket.close(4007, 'pane decryption failed');
-                  }
-                } else {
-                  console.warn('[useShellStream] vault is locked; cannot decrypt encrypted screen frame');
-                  if (!vaultLockedNoticeShownRef.current) {
-                    vaultLockedNoticeShownRef.current = true;
-                    const notice = new TextEncoder().encode(
-                      '\r\n\x1b[33m[Vault locked: terminal stream is encrypted. Unlock vault to view session.]\x1b[0m\r\n'
-                    );
-                    onOutputRef.current?.(notice);
-                  }
-                }
-              }
-            }).catch(() => { /* ignore queue errors */ }));
-          } else if (msg.type === 'stream_ready') {
+        const handleControlMessage = (msg: ShellStreamMsg) => {
+          if (activeConnectIdRef.current !== connectId) return;
+          if (msg.type === 'stream_ready') {
             console.log('[useShellStream] received stream_ready frame:', msg);
             clearStreamReadyFallbackTimer();
             isStreamReadyRef.current = true;
@@ -540,20 +491,23 @@ export function useShellStream({
 
         socket.onmessage = (event) => {
           if (activeConnectIdRef.current !== connectId) return;
-          let type: string;
-          try {
-            const frame = JSON.parse(event.data);
-            type = frame.type;
-            if ((type === 'output' || type === 'screen') && (typeof frame.data_b64 !== 'string' || typeof frame.is_encrypted !== 'boolean')) {
-              socket.close(4007, 'invalid pane payload');
-              return;
-            }
-          } catch { return; }
-          if (type === 'output' || type === 'screen' || type === 'status' || type === 'stream_closed') {
-            // JSON/Base64 pane frames are ASCII; count UTF-16 storage conservatively.
-            paneQueue.enqueue(event.data.length * 2, () => handleMessage(event));
+          if (event.data instanceof ArrayBuffer) {
+            const frame = decodePtyViewerFrame(event.data);
+            if (!frame) { socket.close(4007, 'invalid pane frame'); return; }
+            // Decoded text is UTF-16 in memory; the payload length bounds it at 2x.
+            paneQueue.enqueue(frame.payload.length * 2 + PTY_WIRE_VIEWER_HEADER_BYTES, () => handleBinaryFrame(frame));
+            return;
+          }
+          let msg: ShellStreamMsg;
+          try { msg = JSON.parse(event.data); } catch {
+            console.warn('[useShellStream] failed to parse incoming JSON frame');
+            return;
+          }
+          if (msg.type === 'status' || msg.type === 'stream_closed') {
+            // Ordered behind any pane bytes already queued.
+            paneQueue.enqueue(0, async () => handleControlMessage(msg));
           } else {
-            void handleMessage(event);
+            handleControlMessage(msg);
           }
         };
 

@@ -3445,7 +3445,11 @@ bridge_hub_hello_json :: proc() -> string {
 	caps := "[]"
 	features := bridge_runtime_features_json()
 	b := strings.builder_make()
-	strings.write_string(&b, "{\"type\":\"bridge_hello\",\"protocol_version\":1,\"version\":\"")
+	// protocol_version is the bridge-ws frame version (contracts.BRIDGE_WS_FRAME_VERSION);
+	// the hub refuses a mismatch at hello, which is how a wire-format change fails loudly.
+	strings.write_string(&b, "{\"type\":\"bridge_hello\",\"protocol_version\":")
+	strings.write_int(&b, contracts.BRIDGE_WS_FRAME_VERSION)
+	strings.write_string(&b, ",\"version\":\"")
 	bridge_runtime_write_json_string(&b, contracts.APP_VERSION)
 	strings.write_string(&b, "\",\"commit_sha\":\"")
 	bridge_runtime_write_json_string(&b, contracts.GIT_COMMIT)

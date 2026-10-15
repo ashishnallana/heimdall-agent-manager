@@ -743,10 +743,11 @@ pty_stream_worker_emit_frame_encodes_base64_and_queues :: proc(t: ^testing.T) {
 
 	testing.expect_value(t, len(frames), 1)
 	if len(frames) == 1 {
-		frame := frames[0]
-		testing.expect(t, strings.contains(frame, `"type":"shell_pty_output"`), "frame type is shell_pty_output")
-		testing.expect(t, strings.contains(frame, `"session_id":"sh_stream_1"`), "frame has session_id")
-		testing.expect(t, strings.contains(frame, `"data_b64":"ZWNobyBzdHJlYW1pbmcgdGVzdAo="`), "frame data_b64 matches encoded test string")
+		sid, payload, snapshot, encrypted, ok := pty_test_decode_output(frames[0])
+		testing.expect(t, ok, "frame is a binary pty_wire output frame")
+		testing.expect_value(t, sid, "sh_stream_1")
+		testing.expect_value(t, payload, test_data)
+		testing.expect(t, !snapshot && !encrypted, "plain incremental output")
 	}
 }
 
@@ -1251,8 +1252,9 @@ pane_overflow_detaches_only_affected_stream_and_requests_resync :: proc(t: ^test
 	defer { for frame in frames do delete(frame, heap); delete(frames) }
 	testing.expect_value(t, len(frames), 2)
 	if len(frames) == 2 {
-		testing.expect(t, strings.contains(frames[0], `"session_id":"healthy"`), "healthy stream survives")
-		testing.expect(t, strings.contains(frames[0], `"data_b64":"aGVhbHRoeQ=="`), "healthy payload intact")
+		sid, payload, _, _, _ := pty_test_decode_output(frames[0])
+		testing.expect_value(t, sid, "healthy")
+		testing.expect_value(t, payload, "healthy")
 		testing.expect(t, strings.contains(frames[1], "pane_resync_required"))
 	}
 	testing.expect_value(t, bridge_pty_stream_outgoing_bytes, 0)
@@ -1281,15 +1283,11 @@ pane_large_encrypted_snapshot_splits_before_encryption :: proc(t: ^testing.T) {
 	// encryption (REQ-PTY-NET-1), so every frame decrypts on its own.
 	testing.expect_value(t, len(frames), 16)
 	for frame in frames {
-		testing.expect(t, strings.contains(frame, "\"is_encrypted\":true"))
-		testing.expect(t, strings.contains(frame, "\"is_snapshot\":true"))
-		testing.expect(t, !strings.contains(frame, "enc_b64"))
-		payload := extract_json_string(frame, "data_b64", "")
-		bytes, ok := bridge_pty_stream_decrypt_chunk(payload, TEST_ENC_VAULT_KEY)
+		_, plain, snapshot, encrypted, ok := pty_test_decode_output(frame, TEST_ENC_VAULT_KEY)
+		testing.expect(t, encrypted)
+		testing.expect(t, snapshot)
 		testing.expect(t, ok)
-		append(&result, ..bytes)
-		delete(bytes)
-		delete(payload)
+		append(&result, ..transmute([]byte)plain)
 	}
 	testing.expect_value(t, string(result[:]), source)
 }

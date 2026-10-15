@@ -1,5 +1,6 @@
 package main
 
+import base64 "core:encoding/base64"
 import "core:fmt"
 import "base:runtime"
 import "core:net"
@@ -44,8 +45,13 @@ main :: proc() {
 			kind := jsonx.extract_string(command, "type")
 			switch kind {
 			case "output":
+				// The test still hands the fixture base64 (it is a JSON command line); the
+				// production fan-out takes the decoded bytes (REQ-PTY-NET-2).
 				data := jsonx.extract_string(command, "data_b64")
-				shell.shell_session_broadcast_output(&svc, "pane", data, jsonx.extract_bool(command, "is_encrypted"))
+				raw, derr := base64.decode(data)
+				if derr != nil do panic("output data_b64 must be valid base64")
+				shell.shell_session_broadcast_output(&svc, "pane", raw, jsonx.extract_bool(command, "is_encrypted"))
+				delete(raw)
 				delete(data)
 			case "capture":
 				if !http._shell_stream_write_screen_frame(&svc, "pane", client, command) do panic("capture failed")

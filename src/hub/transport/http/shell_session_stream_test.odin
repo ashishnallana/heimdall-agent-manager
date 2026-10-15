@@ -5,6 +5,7 @@ import "core:net"
 import "core:strings"
 import "core:sync"
 import "core:testing"
+import base64 "core:encoding/base64"
 import "core:thread"
 import "core:time"
 import contracts "odin_test:contracts"
@@ -90,7 +91,7 @@ read_server_stream_frame :: proc(sock: net.TCP_Socket, timeout: time.Duration) -
 		append(&acc, ..buf[:n])
 		b := acc[:]
 		if len(b) < 2 do continue
-		if b[0] != 0x81 do return "", false
+		if b[0] != 0x81 && b[0] != 0x82 do return "", false
 		payload_len := int(b[1] & 0x7f)
 		header_len := 2
 		switch payload_len {
@@ -107,7 +108,8 @@ read_server_stream_frame :: proc(sock: net.TCP_Socket, timeout: time.Duration) -
 		}
 		if (b[1] & 0x80) != 0 do return "", false
 		if len(b) < header_len + payload_len do continue
-		return strings.clone(string(b[header_len:header_len + payload_len])), true
+		// Binary pty_wire frames come back as their debug JSON (REQ-PTY-NET-2).
+		return pty_test_ws_payload_to_json(b[0] & 0x0f, string(b[header_len:header_len + payload_len])), true
 	}
 }
 
@@ -525,7 +527,7 @@ test_shell_stream_broadcast_output :: proc(t: ^testing.T) {
 
 	// Simulate output broadcast from Bridge (base64 encoded VT100 bytes)
 	test_b64 := "aGVsbG8gd29ybGQ=" // "hello world"
-	shell_session_svc.shell_session_broadcast_output(&svc, session_id, test_b64)
+	shell_session_svc.shell_session_broadcast_output(&svc, session_id, transmute([]byte)string("hello world"))
 
 	// Verify both client sockets received the unmasked output frame
 	frame1, r1 := read_server_stream_frame(pair1.client, 2 * time.Second)
@@ -568,7 +570,8 @@ test_shell_stream_broadcast_enc_output :: proc(t: ^testing.T) {
 
 	// Simulate encrypted output broadcast from Bridge
 	test_enc_b64 := "dmF1bHQ6djE6YWJjZGVmZ2hpams="
-	shell_session_svc.shell_session_broadcast_output(&svc, session_id, test_enc_b64, true)
+	enc_bytes, _ := base64.decode(test_enc_b64, allocator = context.temp_allocator)
+	shell_session_svc.shell_session_broadcast_output(&svc, session_id, enc_bytes, true)
 
 	// Verify both client sockets received the unmasked output frame containing enc_b64
 	frame1, r1 := read_server_stream_frame(pair1.client, 2 * time.Second)
@@ -613,9 +616,12 @@ test_bridge_shell_pty_output_enc_b64_forwarding :: proc(t: ^testing.T) {
 	reassemblies := make([dynamic]Bridge_Chunk_Reassembly)
 	defer bridge_chunk_reassemblies_free(&reassemblies)
 
-	bridge_msg := strings.clone("{\"type\":\"shell_pty_output\",\"session_id\":\"sh_bridge_enc_test\",\"data_b64\":\"dmF1bHQ6djE6dGVzdA==\",\"is_encrypted\":true}")
-	handled := bridge_ws_process_frame(&bh, "brg_test", 0, pair.hub, &reassemblies, bridge_msg)
-	testing.expect(t, handled, "bridge_ws_process_frame must handle shell_pty_output")
+	// REQ-PTY-NET-2: the bridge sends a BINARY pty_wire session frame; the hub forwards
+	// the payload bytes (here GCM ciphertext) untouched.
+	ct, _ := base64.decode("dmF1bHQ6djE6dGVzdA==", allocator = context.temp_allocator)
+	bridge_frame := contracts.pty_wire_encode_session_frame(contracts.PTY_WIRE_KIND_OUTPUT, contracts.pty_wire_flags(false, true), "sh_bridge_enc_test", ct)
+	handled := bridge_ws_process_binary_frame(&bh, "brg_test", 0, string(bridge_frame))
+	testing.expect(t, handled, "bridge_ws_process_binary_frame must handle a pty_wire output frame")
 
 	frame, r := read_server_stream_frame(pair.client, 2 * time.Second)
 	testing.expect(t, r, "client must receive output frame")
@@ -650,9 +656,9 @@ test_bridge_shell_pty_output_armored_data_b64_forwarding :: proc(t: ^testing.T) 
 	reassemblies := make([dynamic]Bridge_Chunk_Reassembly)
 	defer bridge_chunk_reassemblies_free(&reassemblies)
 
-	bridge_msg := strings.clone("{\"type\":\"shell_pty_output\",\"session_id\":\"sh_bridge_armored_test\",\"data_b64\":\"YWJjZGVmZ2hpams=\",\"is_encrypted\":false}")
-	handled := bridge_ws_process_frame(&bh, "brg_test", 0, pair.hub, &reassemblies, bridge_msg)
-	testing.expect(t, handled, "bridge_ws_process_frame must handle shell_pty_output")
+	bridge_frame := contracts.pty_wire_encode_session_frame(contracts.PTY_WIRE_KIND_OUTPUT, 0, "sh_bridge_armored_test", transmute([]byte)string("abcdefghijk"))
+	handled := bridge_ws_process_binary_frame(&bh, "brg_test", 0, string(bridge_frame))
+	testing.expect(t, handled, "bridge_ws_process_binary_frame must handle a pty_wire output frame")
 
 	frame, r := read_server_stream_frame(pair.client, 2 * time.Second)
 	testing.expect(t, r, "client must receive output frame")
@@ -1010,8 +1016,8 @@ test_shell_stream_broadcast_prunes_dead_socket :: proc(t: ^testing.T) {
 	_ = net.shutdown(pair1.hub, .Send)
 
 	// Broadcast output
-	test_b64 := "dGVzdF9kYXRh"
-	shell_session_svc.shell_session_broadcast_output(&svc, session_id, test_b64)
+	test_bytes := transmute([]byte)string("test_data")
+	shell_session_svc.shell_session_broadcast_output(&svc, session_id, test_bytes)
 
 	stream_test_wait_viewers(t, &svc, session_id, 1)
 	shell_session_svc.shell_session_detach(&svc, session_id, pair1.hub, bridge_id)
@@ -1022,7 +1028,7 @@ test_shell_stream_broadcast_prunes_dead_socket :: proc(t: ^testing.T) {
 	_ = net.shutdown(pair2.hub, .Send)
 
 	// Second broadcast should prune pair2, reducing count to 0 and triggering detach to bridge
-	shell_session_svc.shell_session_broadcast_output(&svc, session_id, test_b64)
+	shell_session_svc.shell_session_broadcast_output(&svc, session_id, test_bytes)
 	stream_test_wait_viewers(t, &svc, session_id, 0)
 	shell_session_svc.shell_session_detach(&svc, session_id, pair2.hub, bridge_id)
 	testing.expect_value(t, shell_session_svc.shell_session_viewer_count(&svc, session_id), 0)

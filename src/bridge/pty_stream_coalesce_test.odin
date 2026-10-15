@@ -9,11 +9,11 @@ package main
 // round-trips through the chunk decryptor.
 
 import "base:runtime"
-import base64 "core:encoding/base64"
 import "core:os"
 import "core:strings"
 import "core:sync"
 import "core:testing"
+import contracts "odin_test:contracts"
 
 @(private = "file")
 _p1_disable_vault :: proc() -> (restore: proc(prev_key, prev_cfg: string, had_key, had_cfg, saved_ws: bool), prev_key, prev_cfg: string, had_key, had_cfg, saved_ws: bool) {
@@ -31,12 +31,46 @@ _p1_disable_vault :: proc() -> (restore: proc(prev_key, prev_cfg: string, had_ke
 	return
 }
 
+// pty_test_decode_output decodes one bridge->hub pty_wire OUTPUT frame as the hub would
+// (REQ-PTY-NET-2), decrypting with `key_hex` when the frame says it is encrypted. The
+// payload is temp-allocated. Package-visible: every pty stream test reads frames through it.
+pty_test_decode_output :: proc(frame: string, key_hex := "") -> (session_id: string, payload: string, snapshot, encrypted, ok: bool) {
+	kind, flags, sid, body, dok := contracts.pty_wire_decode_session_frame(transmute([]byte)frame)
+	if !dok || kind != contracts.PTY_WIRE_KIND_OUTPUT do return "", "", false, false, false
+	snapshot = contracts.pty_wire_is_snapshot(flags)
+	encrypted = contracts.pty_wire_is_encrypted(flags)
+	if encrypted {
+		if key_hex == "" do return sid, "", snapshot, encrypted, true
+		plain, pok := bridge_pty_stream_decrypt_chunk_raw(body, key_hex, context.temp_allocator)
+		if !pok do return sid, "", snapshot, encrypted, false
+		return sid, string(plain), snapshot, encrypted, true
+	}
+	return sid, string(body), snapshot, encrypted, true
+}
+
+// pty_test_frame_is_output says whether a drained frame is a binary pty output frame
+// (as opposed to a JSON control frame).
+pty_test_frame_is_output :: proc(frame: string) -> bool {
+	_, _, _, _, ok := pty_test_decode_output(frame)
+	return ok
+}
+
 @(private = "file")
 _p1_payload :: proc(frame: string) -> string {
-	b64 := extract_json_string(frame, "data_b64", "", context.temp_allocator)
-	decoded, err := base64.decode(b64, allocator = context.temp_allocator)
-	if err != nil do return ""
-	return string(decoded)
+	_, payload, _, _, _ := pty_test_decode_output(frame)
+	return payload
+}
+
+@(private = "file")
+_p1_session :: proc(frame: string) -> string {
+	sid, _, _, _, _ := pty_test_decode_output(frame)
+	return sid
+}
+
+@(private = "file")
+_p1_snapshot :: proc(frame: string) -> bool {
+	_, _, snap, _, _ := pty_test_decode_output(frame)
+	return snap
 }
 
 @(test)
@@ -66,7 +100,7 @@ pty_drain_merges_adjacent_same_session_records_in_order :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(payload), 20 * 151)
 	// Order: the first byte of every 151-byte run counts up a..t.
 	for i in 0 ..< 20 do testing.expect_value(t, payload[i * 151], byte('a' + i))
-	testing.expect(t, !strings.contains(frames[0], "is_snapshot"), "incremental merge is not a snapshot")
+	testing.expect(t, !_p1_snapshot(frames[0]), "incremental merge is not a snapshot")
 	testing.expect_value(t, bridge_pty_stream_outgoing_bytes, 0)
 }
 
@@ -99,11 +133,11 @@ pty_drain_never_merges_across_session_snapshot_or_control_boundaries :: proc(t: 
 	testing.expect_value(t, len(frames), 6)
 	if len(frames) != 6 do return
 	testing.expect_value(t, _p1_payload(frames[0]), "a1a2")
-	testing.expect(t, strings.contains(frames[0], `"session_id":"A"`))
+	testing.expect_value(t, _p1_session(frames[0]), "A")
 	testing.expect_value(t, _p1_payload(frames[1]), "b1")
 	testing.expect_value(t, _p1_payload(frames[2]), "a3")
 	testing.expect_value(t, _p1_payload(frames[3]), "S1S2")
-	testing.expect(t, strings.contains(frames[3], `"is_snapshot":true`), "merged snapshot keeps the flag")
+	testing.expect(t, _p1_snapshot(frames[3]), "merged snapshot keeps the flag")
 	testing.expect(t, strings.contains(frames[4], `"type":"shell_pty_stream_ready"`), "control frame stays in place")
 	testing.expect_value(t, _p1_payload(frames[5]), "a4a5")
 }
@@ -163,12 +197,13 @@ pty_drain_encrypts_once_per_merged_frame_and_round_trips :: proc(t: ^testing.T) 
 	defer { for f in frames do delete(f, runtime.heap_allocator()); delete(frames) }
 	testing.expect_value(t, len(frames), 1)
 	if len(frames) != 1 do return
-	testing.expect(t, strings.contains(frames[0], `"is_encrypted":true`))
-	enc_b64 := extract_json_string(frames[0], "data_b64", "", context.temp_allocator)
-	plain, ok := bridge_pty_stream_decrypt_chunk(enc_b64, TEST_ENC_VAULT_KEY, context.temp_allocator)
+	_, plain, _, encrypted, ok := pty_test_decode_output(frames[0], TEST_ENC_VAULT_KEY)
+	testing.expect(t, encrypted, "frame is flagged encrypted")
 	testing.expect(t, ok, "merged ciphertext decrypts with one GCM header")
-	testing.expect_value(t, string(plain), "hello merged world\r\n")
+	testing.expect_value(t, plain, "hello merged world\r\n")
 	// The merged frame carries the FIRST record's nonce (seq 1); nothing is reused.
-	raw, _ := base64.decode(enc_b64, allocator = context.temp_allocator)
-	testing.expect_value(t, raw[11], byte(1))
+	_, _, _, body, _ := contracts.pty_wire_decode_session_frame(transmute([]byte)frames[0])
+	testing.expect_value(t, body[11], byte(1))
+	// And the wire frame carries NO base64 and NO JSON: header + 28 B GCM + plaintext length.
+	testing.expect_value(t, len(frames[0]), contracts.PTY_WIRE_SESSION_HEADER_BYTES + len("sh_enc") + VAULT_HEADER_BYTES + len(plain))
 }

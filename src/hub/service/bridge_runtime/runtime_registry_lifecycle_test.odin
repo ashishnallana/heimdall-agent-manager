@@ -13,7 +13,7 @@ import project "odin_test:hub/service/project"
 runtime_dynamic_instances_and_terminal_cleanup :: proc(t: ^testing.T) {
 	r := new(project.Bridge_Runtime_Registry)
 	defer { runtime_command_cache_destroy(r); free(r) }
-	hello, ok, _ := runtime_accept_hello(r, "bridge", 1, "", "customer")
+	hello, ok, _ := runtime_accept_hello(r, "bridge", PROTOCOL_VERSION, "", "customer")
 	testing.expect(t, ok)
 	for i in 0..<700 {
 		id := fmt.aprintf("agent-{}", i)
@@ -45,7 +45,7 @@ runtime_connection_churn_reclaims_writers_and_never_reuses_epoch :: proc(t: ^tes
 	previous := 0
 	for i in 0..<1500 {
 		id := fmt.aprintf("bridge-{}", i)
-		hello, ok, _ := runtime_accept_hello(r, id, 1, "", "customer")
+		hello, ok, _ := runtime_accept_hello(r, id, PROTOCOL_VERSION, "", "customer")
 		testing.expect(t, ok && hello.generation > previous)
 		previous = hello.generation
 		project.bridge_runtime_registry_mark_offline(r, id, hello.generation)
@@ -53,9 +53,9 @@ runtime_connection_churn_reclaims_writers_and_never_reuses_epoch :: proc(t: ^tes
 		testing.expect_value(t, r.connection_count, 0)
 		delete(id)
 	}
-	first, _, _ := runtime_accept_hello(r, "same", 1, "", "customer")
+	first, _, _ := runtime_accept_hello(r, "same", PROTOCOL_VERSION, "", "customer")
 	project.bridge_runtime_registry_mark_offline(r, "same", first.generation)
-	second, _, _ := runtime_accept_hello(r, "same", 1, "", "customer")
+	second, _, _ := runtime_accept_hello(r, "same", PROTOCOL_VERSION, "", "customer")
 	testing.expect(t, second.generation > first.generation)
 	project.bridge_runtime_registry_mark_offline(r, "same", first.generation)
 	testing.expect_value(t, project.bridge_runtime_registry_generation(r, "same"), second.generation)
@@ -65,10 +65,10 @@ runtime_connection_churn_reclaims_writers_and_never_reuses_epoch :: proc(t: ^tes
 runtime_retired_connection_survives_outstanding_lease :: proc(t: ^testing.T) {
 	r := new(project.Bridge_Runtime_Registry)
 	defer { runtime_command_cache_destroy(r); free(r) }
-	old, _, _ := runtime_accept_hello(r, "bridge", 1, "", "customer")
+	old, _, _ := runtime_accept_hello(r, "bridge", PROTOCOL_VERSION, "", "customer")
 	lease := project.bridge_runtime_connection_acquire(r, "bridge", old.generation)
 	_, _, _ = project.bridge_runtime_instance_apply(r, "bridge", old.generation, "agent", "customer", "running", "idle", 900)
-	fresh, ok, _ := runtime_accept_hello(r, "bridge", 1, "", "customer")
+	fresh, ok, _ := runtime_accept_hello(r, "bridge", PROTOCOL_VERSION, "", "customer")
 	testing.expect(t, ok && fresh.replaced_existing)
 	testing.expect(t, sync.atomic_load(&lease.retired))
 	testing.expect_value(t, lease.generation, old.generation)
@@ -87,8 +87,8 @@ runtime_retired_connection_survives_outstanding_lease :: proc(t: ^testing.T) {
 runtime_digest_isolated_to_reporting_bridge :: proc(t: ^testing.T) {
 	r := new(project.Bridge_Runtime_Registry)
 	defer { runtime_command_cache_destroy(r); free(r) }
-	a, _, _ := runtime_accept_hello(r, "a", 1, "", "customer")
-	b, _, _ := runtime_accept_hello(r, "b", 1, "", "customer")
+	a, _, _ := runtime_accept_hello(r, "a", PROTOCOL_VERSION, "", "customer")
+	b, _, _ := runtime_accept_hello(r, "b", PROTOCOL_VERSION, "", "customer")
 	_ = runtime_apply_state_report(r, "a", a.generation, "same-id", 7, "running", "idle", "customer")
 	_ = runtime_apply_state_report(r, "b", b.generation, "same-id", 9, "running", "busy", "customer")
 	testing.expect_value(t, runtime_reconcile_digest(r, "a", a.generation, nil), 1)
@@ -103,7 +103,7 @@ runtime_tombstone_rejects_stale_report_without_extending_retention :: proc(t: ^t
 	r := new(project.Bridge_Runtime_Registry)
 	defer { runtime_command_cache_destroy(r); free(r) }
 	r.limits.terminal_retention = time.Second
-	hello, _, _ := runtime_accept_hello(r, "bridge", 1, "", "customer")
+	hello, _, _ := runtime_accept_hello(r, "bridge", PROTOCOL_VERSION, "", "customer")
 	now := time.now()._nsec
 	_, _, _ = project.bridge_runtime_instance_apply(r, "bridge", hello.generation, "agent", "customer", "running", "idle", 5, now_ns = now)
 	_, _, _ = project.bridge_runtime_instance_apply(r, "bridge", hello.generation, "agent", "customer", "stopped", "idle", 6, now_ns = now)
@@ -118,9 +118,9 @@ runtime_active_quotas_are_per_owner_and_global_and_reusable :: proc(t: ^testing.
 	defer { runtime_command_cache_destroy(r); free(r) }
 	r.limits.active_instances = 2
 	r.limits.active_instances_per_owner = 1
-	a, _, _ := runtime_accept_hello(r, "a", 1, "", "alice")
-	b, _, _ := runtime_accept_hello(r, "b", 1, "", "bob")
-	c, _, _ := runtime_accept_hello(r, "c", 1, "", "carol")
+	a, _, _ := runtime_accept_hello(r, "a", PROTOCOL_VERSION, "", "alice")
+	b, _, _ := runtime_accept_hello(r, "b", PROTOCOL_VERSION, "", "bob")
+	c, _, _ := runtime_accept_hello(r, "c", PROTOCOL_VERSION, "", "carol")
 	_, ok, _ := project.bridge_runtime_instance_apply(r, "a", a.generation, "one", "alice", "running", "idle", 1)
 	testing.expect(t, ok)
 	err: domain.Domain_Error
@@ -142,7 +142,7 @@ runtime_active_quotas_are_per_owner_and_global_and_reusable :: proc(t: ^testing.
 runtime_reservations_cancel_expire_and_confirm_without_double_count :: proc(t: ^testing.T) {
 	r := new(project.Bridge_Runtime_Registry)
 	defer { runtime_command_cache_destroy(r); free(r) }
-	hello, _, _ := runtime_accept_hello(r, "bridge", 1, "", "customer")
+	hello, _, _ := runtime_accept_hello(r, "bridge", PROTOCOL_VERSION, "", "customer")
 	_, admitted, _ := project.bridge_runtime_instance_apply(r, "bridge", hello.generation, "cancel", "customer", "launching", "unknown", 0, reserve = true)
 	testing.expect(t, admitted)
 	project.bridge_runtime_instance_cancel_reservation(r, "bridge", hello.generation, "cancel")
@@ -161,7 +161,7 @@ runtime_reservations_cancel_expire_and_confirm_without_double_count :: proc(t: ^
 runtime_metadata_copy_survives_disconnect :: proc(t: ^testing.T) {
 	r := new(project.Bridge_Runtime_Registry)
 	defer { runtime_command_cache_destroy(r); free(r) }
-	hello, _, _ := runtime_accept_hello(r, "bridge", 1, "ws://example", "customer")
+	hello, _, _ := runtime_accept_hello(r, "bridge", PROTOCOL_VERSION, "ws://example", "customer")
 	project.bridge_runtime_registry_set_public_key(r, "bridge", "public-key", hello.generation)
 	key := project.bridge_runtime_registry_public_key(r, "bridge")
 	url := project.bridge_runtime_registry_path_validation_url(r, "bridge")
@@ -190,7 +190,7 @@ runtime_concurrent_bridges_cannot_overcommit_global_quota :: proc(t: ^testing.T)
 	threads: [4]^thread.Thread
 	for i in 0..<4 {
 		id := fmt.aprintf("bridge-{}", i)
-		hello, _, _ := runtime_accept_hello(r, id, 1, "", "customer")
+		hello, _, _ := runtime_accept_hello(r, id, PROTOCOL_VERSION, "", "customer")
 		jobs[i] = Quota_Job{registry = r, bridge_id = id, generation = hello.generation}
 		threads[i] = thread.create_and_start_with_data(rawptr(&jobs[i]), quota_entry)
 	}
@@ -205,13 +205,13 @@ runtime_live_registry_scales_beyond_old_array_and_admission_is_explicit :: proc(
 	r.limits.live_bridges_per_owner = 512
 	for i in 0..<400 {
 		id := fmt.aprintf("bridge-{}", i)
-		_, ok, _ := runtime_accept_hello(r, id, 1, "", "customer")
+		_, ok, _ := runtime_accept_hello(r, id, PROTOCOL_VERSION, "", "customer")
 		delete(id)
 		testing.expect(t, ok)
 	}
 	testing.expect_value(t, r.live_bridge_count, 400)
 	r.limits.live_bridges = 400
-	_, ok, err := runtime_accept_hello(r, "denied", 1, "", "another-customer")
+	_, ok, err := runtime_accept_hello(r, "denied", PROTOCOL_VERSION, "", "another-customer")
 	testing.expect(t, !ok && err.code == .Bridge_Busy)
 	testing.expect_value(t, r.connection_count, 400)
 	testing.expect(t, !project.bridge_runtime_registry_has_live(r, "denied"))
@@ -221,7 +221,7 @@ runtime_live_registry_scales_beyond_old_array_and_admission_is_explicit :: proc(
 runtime_disconnect_purges_observations_and_rejects_late_results :: proc(t: ^testing.T) {
 	r := new(project.Bridge_Runtime_Registry)
 	defer { runtime_command_cache_destroy(r); free(r) }
-	hello, _, _ := runtime_accept_hello(r, "bridge", 1, "", "customer")
+	hello, _, _ := runtime_accept_hello(r, "bridge", PROTOCOL_VERSION, "", "customer")
 	inserted := runtime_command_result_for_connection(r, "bridge", hello.generation, "command", `{"type":"command_result","status":"succeeded"}`)
 	testing.expect(t, inserted)
 	testing.expect_value(t, r.command_slots_used, 1)
@@ -242,7 +242,7 @@ retirement_entry :: proc(data: rawptr) {
 runtime_retirement_drains_writer_before_final_release :: proc(t: ^testing.T) {
 	r := new(project.Bridge_Runtime_Registry)
 	defer { runtime_command_cache_destroy(r); free(r) }
-	hello, _, _ := runtime_accept_hello(r, "bridge", 1, "", "customer")
+	hello, _, _ := runtime_accept_hello(r, "bridge", PROTOCOL_VERSION, "", "customer")
 	lease := project.bridge_runtime_connection_acquire(r, "bridge", hello.generation)
 	sync.lock(&lease.writer_mutex)
 	job := Retirement_Job{registry = r, generation = hello.generation}
@@ -270,7 +270,7 @@ registry_destroy_entry :: proc(data: rawptr) {
 runtime_registry_shutdown_waits_for_reader_lease :: proc(t: ^testing.T) {
 	r := new(project.Bridge_Runtime_Registry)
 	defer { runtime_command_cache_destroy(r); free(r) }
-	hello, _, _ := runtime_accept_hello(r, "bridge", 1, "", "customer")
+	hello, _, _ := runtime_accept_hello(r, "bridge", PROTOCOL_VERSION, "", "customer")
 	lease := project.bridge_runtime_connection_acquire(r, "bridge", hello.generation)
 	job := Registry_Destroy_Job{registry = r}
 	worker := thread.create_and_start_with_data(rawptr(&job), registry_destroy_entry)

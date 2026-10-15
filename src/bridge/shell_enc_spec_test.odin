@@ -10,6 +10,7 @@ import "core:strings"
 import "core:sync"
 import "core:sys/posix"
 import "core:testing"
+import contracts "odin_test:contracts"
 import "core:thread"
 import ws "odin_test:lib/ws"
 
@@ -434,21 +435,12 @@ test_pty_stream_emit_frame_encrypted_when_vault_active :: proc(t: ^testing.T) {
 
 	testing.expect_value(t, len(frames), 1)
 	if len(frames) == 1 {
-		frame := frames[0]
-		testing.expect(t, strings.contains(frame, `"type":"shell_pty_output"`), "frame type is shell_pty_output")
-		testing.expect(t, strings.contains(frame, `"session_id":"sh_stream_enc_1"`), "frame has session_id")
-		testing.expect(t, !strings.contains(frame, `"enc_b64":`), "ciphertext is not duplicated")
-		testing.expect(t, strings.contains(frame, `"is_encrypted":true`), "frame is explicitly encrypted")
-
-		enc_b64 := extract_json_string(frame, "data_b64", "")
-		testing.expect(t, enc_b64 != "", "enc_b64 must not be empty")
-
-		data_b64 := extract_json_string(frame, "data_b64", "")
-		testing.expect(t, !strings.has_prefix(data_b64, VAULT_ARMOR_PREFIX), "wire payload is bare base64")
-
-		decrypted, dec_ok := bridge_pty_stream_decrypt_chunk(data_b64, TEST_ENC_VAULT_KEY, context.temp_allocator)
-		testing.expect(t, dec_ok, "decryption of emitted frame from data_b64 must succeed")
-		testing.expect_value(t, string(decrypted), test_data)
+		sid, plain, _, encrypted, dec_ok := pty_test_decode_output(frames[0], TEST_ENC_VAULT_KEY)
+		testing.expect_value(t, sid, "sh_stream_enc_1")
+		testing.expect(t, encrypted, "frame is explicitly encrypted")
+		testing.expect(t, !strings.contains(frames[0], VAULT_ARMOR_PREFIX), "wire payload is raw nonce|tag|ciphertext, not armor")
+		testing.expect(t, dec_ok, "decryption of emitted frame must succeed")
+		testing.expect_value(t, plain, test_data)
 	}
 }
 
@@ -493,16 +485,11 @@ test_pty_stream_emit_frame_plaintext_when_vault_unconfigured :: proc(t: ^testing
 
 	testing.expect_value(t, len(frames), 1)
 	if len(frames) == 1 {
-		frame := frames[0]
-		testing.expect(t, strings.contains(frame, `"type":"shell_pty_output"`), "frame type is shell_pty_output")
-		testing.expect(t, strings.contains(frame, `"session_id":"sh_stream_plain_1"`), "frame has session_id")
-		testing.expect(t, strings.contains(frame, `"data_b64":`), "frame contains data_b64 field")
-		testing.expect(t, !strings.contains(frame, `"enc_b64":`), "frame does not contain enc_b64")
-
-		data_b64 := extract_json_string(frame, "data_b64", "")
-		decoded, err := base64.decode(data_b64, allocator = context.temp_allocator)
-		testing.expect(t, err == nil, "base64 decode of data_b64 must succeed")
-		testing.expect_value(t, string(decoded), test_data)
+		sid, plain, _, encrypted, ok := pty_test_decode_output(frames[0])
+		testing.expect(t, ok, "frame is a binary pty_wire output frame")
+		testing.expect_value(t, sid, "sh_stream_plain_1")
+		testing.expect(t, !encrypted, "frame is plaintext")
+		testing.expect_value(t, plain, test_data)
 	}
 }
 
@@ -556,9 +543,8 @@ test_pty_stream_monotonic_nonce_counter_no_reuse :: proc(t: ^testing.T) {
 	nonces: [NUM_FRAMES][VAULT_NONCE_BYTES]byte
 
 	for i in 0..<NUM_FRAMES {
-		enc_b64 := extract_json_string(frames[i], "data_b64", "")
-		payload, err := base64.decode(enc_b64, allocator = context.temp_allocator)
-		testing.expect(t, err == nil, "base64 decode of payload must succeed")
+		_, _, _, payload, pok := contracts.pty_wire_decode_session_frame(transmute([]byte)frames[i])
+		testing.expect(t, pok, "frame must decode as a pty_wire session frame")
 		testing.expect(t, len(payload) >= VAULT_HEADER_BYTES, "payload must contain header")
 
 		copy(nonces[i][:], payload[0:VAULT_NONCE_BYTES])
@@ -640,13 +626,10 @@ test_pty_stream_screen_payload_encryption :: proc(t: ^testing.T) {
 
 	testing.expect_value(t, len(frames), 1)
 	if len(frames) == 1 {
-		frame := frames[0]
-		enc_b64 := extract_json_string(frame, "data_b64", "")
-		testing.expect(t, enc_b64 != "", "screen snapshot must be emitted as enc_b64")
-
-		decrypted, dec_ok := bridge_pty_stream_decrypt_chunk(enc_b64, TEST_ENC_VAULT_KEY, context.temp_allocator)
+		_, plain, _, encrypted, dec_ok := pty_test_decode_output(frames[0], TEST_ENC_VAULT_KEY)
+		testing.expect(t, encrypted, "screen snapshot must be emitted encrypted")
 		testing.expect(t, dec_ok, "screen snapshot decryption must succeed")
-		testing.expect_value(t, string(decrypted), "row 1\r\nrow 2\r\nrow 3")
+		testing.expect_value(t, plain, "row 1\r\nrow 2\r\nrow 3")
 	}
 }
 

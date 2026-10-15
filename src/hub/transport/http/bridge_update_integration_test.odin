@@ -193,7 +193,7 @@ test_bridge_update_integration_wire_dispatch_and_version_bump :: proc(t: ^testin
 	testing.expect_value(t, connected_br.version, "0.1.0")
 
 	// Accept in registry to simulate live runtime socket
-	_, reg_ok, _ := bridge_runtime_service.runtime_accept_hello(&f.registry, f.bridge_id, 1, "")
+	_, reg_ok, _ := bridge_runtime_service.runtime_accept_hello(&f.registry, f.bridge_id, bridge_runtime_service.PROTOCOL_VERSION, "")
 	testing.expect(t, reg_ok, "registered bridge hello in registry")
 
 	// Configure central update catalog to serve target version 0.2.0
@@ -318,7 +318,7 @@ test_bridge_update_integration_failure_triggers_supervisor_rollback :: proc(t: ^
 	f.br_svc.catalog = &catalog
 
 	// 2. Hub dispatches update command
-	_, accept_ok, _ := bridge_runtime_service.runtime_accept_hello(&f.registry, f.bridge_id, 1, "")
+	_, accept_ok, _ := bridge_runtime_service.runtime_accept_hello(&f.registry, f.bridge_id, bridge_runtime_service.PROTOCOL_VERSION, "")
 	testing.expect(t, accept_ok, "registry accept ok")
 
 	upd_req := Request{
@@ -481,7 +481,7 @@ test_bridge_update_integration_active_tasks_drain_and_force_gating :: proc(t: ^t
 		"2026-09-01T00:00:00Z",
 	)
 	testing.expect(t, conn_ok, "bridge online")
-	_, acc_ok, _ := bridge_runtime_service.runtime_accept_hello(&f.registry, f.bridge_id, 1, "")
+	_, acc_ok, _ := bridge_runtime_service.runtime_accept_hello(&f.registry, f.bridge_id, bridge_runtime_service.PROTOCOL_VERSION, "")
 	testing.expect(t, acc_ok, "registry accept ok")
 
 	catalog := bridge_service.Bridge_Update_Catalog{

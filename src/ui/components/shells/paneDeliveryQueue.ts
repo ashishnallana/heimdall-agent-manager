@@ -60,23 +60,29 @@ const ALT_HIDDEN_PREFIX = '\x1b[?1049h\x1b[?25l';
 const ALT_PREFIX = '\x1b[?1049h';
 const REPAINT_PREFIX = '\x1b[2J\x1b[H';
 
-/** Format an opaque captured grid after the UI decrypts it. */
-export function repaintCapturedScreen(bytes: Uint8Array, row = -1, col = -1): Uint8Array {
-  const lines = new TextDecoder().decode(bytes).split(/\r?\n/);
+/**
+ * Format a captured grid (already decoded to text) as an absolute repaint. REQ-PTY-NET-2:
+ * the hooks decode frames through ONE streaming UTF-8 decoder per connection and hand text
+ * on, so these helpers work on strings; the *Bytes variants below remain for callers that
+ * still hold raw bytes (tests, the polled path).
+ */
+export function repaintCapturedScreenText(text: string, row = -1, col = -1): string {
+  const lines = text.split(/\r?\n/);
   while (lines.length && lines[lines.length - 1].trim() === '') lines.pop();
   const body = lines.join('\r\n');
   const cursor = row >= 0 && col >= 0 ? `\x1b[${row + 1};${col + 1}H` : '';
   if (body.startsWith(ALT_HIDDEN_PREFIX)) {
-    return new TextEncoder().encode(
-      `${ALT_HIDDEN_PREFIX}${REPAINT_PREFIX}${body.slice(ALT_HIDDEN_PREFIX.length)}${cursor}`
-    );
+    return `${ALT_HIDDEN_PREFIX}${REPAINT_PREFIX}${body.slice(ALT_HIDDEN_PREFIX.length)}${cursor}`;
   }
   if (body.startsWith(ALT_PREFIX)) {
-    return new TextEncoder().encode(
-      `${ALT_PREFIX}${REPAINT_PREFIX}${body.slice(ALT_PREFIX.length)}${cursor}`
-    );
+    return `${ALT_PREFIX}${REPAINT_PREFIX}${body.slice(ALT_PREFIX.length)}${cursor}`;
   }
-  return new TextEncoder().encode(`${REPAINT_PREFIX}${body}${cursor}`);
+  return `${REPAINT_PREFIX}${body}${cursor}`;
+}
+
+/** Format an opaque captured grid after the UI decrypts it. */
+export function repaintCapturedScreen(bytes: Uint8Array, row = -1, col = -1): Uint8Array {
+  return new TextEncoder().encode(repaintCapturedScreenText(new TextDecoder().decode(bytes), row, col));
 }
 
 /**
@@ -84,26 +90,27 @@ export function repaintCapturedScreen(bytes: Uint8Array, row = -1, col = -1): Ui
  * erase-screen + cursor-home prefix so they repaint in place instead of appending duplicate
  * lines at the current cursor position and polluting scrollback.
  */
-export function normalizeSnapshotBytes(bytes: Uint8Array): Uint8Array {
-  const decoded = new TextDecoder().decode(bytes);
+export function normalizeSnapshotText(decoded: string): string {
   if (
     decoded.startsWith(REPAINT_PREFIX) ||
     decoded.startsWith(`${ALT_PREFIX}${REPAINT_PREFIX}`) ||
     decoded.startsWith(`${ALT_HIDDEN_PREFIX}${REPAINT_PREFIX}`)
   ) {
-    return bytes;
+    return decoded;
   }
   if (decoded.startsWith(ALT_HIDDEN_PREFIX)) {
-    return new TextEncoder().encode(
-      `${ALT_HIDDEN_PREFIX}${REPAINT_PREFIX}${decoded.slice(ALT_HIDDEN_PREFIX.length)}`
-    );
+    return `${ALT_HIDDEN_PREFIX}${REPAINT_PREFIX}${decoded.slice(ALT_HIDDEN_PREFIX.length)}`;
   }
   if (decoded.startsWith(ALT_PREFIX)) {
-    return new TextEncoder().encode(
-      `${ALT_PREFIX}${REPAINT_PREFIX}${decoded.slice(ALT_PREFIX.length)}`
-    );
+    return `${ALT_PREFIX}${REPAINT_PREFIX}${decoded.slice(ALT_PREFIX.length)}`;
   }
-  return new TextEncoder().encode(`${REPAINT_PREFIX}${decoded}`);
+  return `${REPAINT_PREFIX}${decoded}`;
+}
+
+export function normalizeSnapshotBytes(bytes: Uint8Array): Uint8Array {
+  const decoded = new TextDecoder().decode(bytes);
+  const normalized = normalizeSnapshotText(decoded);
+  return normalized === decoded ? bytes : new TextEncoder().encode(normalized);
 }
 
 /** Keep pasted input inside the Hub's frame budget without splitting a surrogate pair. */
