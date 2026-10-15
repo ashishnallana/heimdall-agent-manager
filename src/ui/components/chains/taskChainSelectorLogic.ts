@@ -124,6 +124,20 @@ export function navigateIndex(
   return currentIndex > 0 ? currentIndex - 1 : total - 1;
 }
 
+type SelectionKeyEvent = Pick<KeyboardEvent, 'altKey' | 'ctrlKey' | 'key' | 'metaKey'>;
+
+/** Maps arrows and Vim-style Ctrl-N/Ctrl-P to list-selection movement. */
+export function selectionDirectionForEvent(event: SelectionKeyEvent): 'up' | 'down' | null {
+  if (event.metaKey || event.altKey) return null;
+  if (event.key === 'ArrowDown') return 'down';
+  if (event.key === 'ArrowUp') return 'up';
+  if (!event.ctrlKey) return null;
+  const key = event.key.toLowerCase();
+  if (key === 'n') return 'down';
+  if (key === 'p') return 'up';
+  return null;
+}
+
 export function groupChainsByProject(
   items: ChainSelectorItem[],
 ): Map<string, { items: ChainSelectorItem[]; indices: number[] }> {

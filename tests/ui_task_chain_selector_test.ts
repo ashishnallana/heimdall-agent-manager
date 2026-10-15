@@ -32,6 +32,7 @@ import {
   filterTaskChains,
   findInitialActiveIndex,
   navigateIndex,
+  selectionDirectionForEvent,
   groupChainsByProject,
   INITIAL_VISIBLE_COUNT,
   type ChainSelectorItem,
@@ -479,4 +480,16 @@ test('Keyboard navigation handles ArrowDown, ArrowUp with wrapping and Enter rou
     '/chains/chain_test_nocoord',
     'Selecting chain without coordinator navigates to chain overview',
   );
+});
+
+test('selection keys map arrows and Ctrl-N/Ctrl-P without Meta or Alt', () => {
+  const event = (key: string, ctrlKey = false, metaKey = false, altKey = false) => ({ key, ctrlKey, metaKey, altKey });
+  assert.equal(selectionDirectionForEvent(event('ArrowDown')), 'down');
+  assert.equal(selectionDirectionForEvent(event('ArrowUp')), 'up');
+  assert.equal(selectionDirectionForEvent(event('n', true)), 'down');
+  assert.equal(selectionDirectionForEvent(event('P', true)), 'up');
+  assert.equal(selectionDirectionForEvent(event('n')), null);
+  assert.equal(selectionDirectionForEvent(event('n', true, true)), null);
+  assert.equal(selectionDirectionForEvent(event('p', true, false, true)), null);
+  assert.equal(navigateIndex(0, 0, 'down'), 0, 'empty lists remain stable');
 });

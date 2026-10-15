@@ -27,6 +27,7 @@ import {
   filterTaskChains,
   findInitialActiveIndex,
   navigateIndex,
+  selectionDirectionForEvent,
   groupChainsByProject,
 } from './taskChainSelectorLogic';
 
@@ -37,6 +38,7 @@ export {
   filterTaskChains,
   findInitialActiveIndex,
   navigateIndex,
+  selectionDirectionForEvent,
   groupChainsByProject,
 };
 
@@ -220,6 +222,12 @@ export function TaskChainSelectorModal({
     return filterTaskChains(allChains, query);
   }, [allChains, query, remoteChains]);
 
+  useEffect(() => {
+    setActiveIndex((current) => (
+      filteredChains.length === 0 ? 0 : Math.min(current, filteredChains.length - 1)
+    ));
+  }, [filteredChains.length]);
+
   // Reset and focus on open
   useEffect(() => {
     if (!open) return;
@@ -288,22 +296,15 @@ export function TaskChainSelectorModal({
       return;
     }
 
-    if (event.key === 'ArrowDown') {
+    const direction = selectionDirectionForEvent(event);
+    if (direction) {
       event.preventDefault();
       setActiveIndex((prev) => {
-        const next = navigateIndex(prev, filteredChains.length, 'down');
-        if (next >= visibleCount) {
+        const next = navigateIndex(prev, filteredChains.length, direction);
+        if (direction === 'down' && next >= visibleCount) {
           setVisibleCount((c) => Math.min(c + 40, filteredChains.length));
         }
         return next;
-      });
-      return;
-    }
-
-    if (event.key === 'ArrowUp') {
-      event.preventDefault();
-      setActiveIndex((prev) => {
-        return navigateIndex(prev, filteredChains.length, 'up');
       });
       return;
     }

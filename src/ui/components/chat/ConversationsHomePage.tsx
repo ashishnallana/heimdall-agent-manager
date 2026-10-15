@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import type { KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { useSelector } from 'react-redux';
 import { useListConversationInboxQuery, useLazyListConversationInboxQuery, type SidebarConversation } from '../../api/endpoints/sidebar';
 import { buildRouteHash } from '../../utils/appLocation';
@@ -8,6 +9,7 @@ import { VaultText } from '../vault/VaultText';
 import { isVaultArmored } from '../../utils/vaultContent';
 import { selectActiveVaultKey } from '../../store/vaultSlice';
 import { decryptConversationList } from '../../utils/vaultChats';
+import { navigateIndex, selectionDirectionForEvent } from '../chains/taskChainSelectorLogic';
 const PAGE_SIZE = 40;
 
 function looksLikeInternalId(value: string): boolean {
@@ -70,7 +72,9 @@ export default function ConversationsHomePage({ onSelectConversation, compact = 
   const [hasMore, setHasMore] = useState(false);
   const [loadError, setLoadError] = useState('');
   const [query, setQuery] = useState('');
+  const [activeIndex, setActiveIndex] = useState(0);
   const searchRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLElement>(null);
 
   const activeKey = useSelector(selectActiveVaultKey);
   const [decryptedRows, setDecryptedRows] = useState<SidebarConversation[]>([]);
@@ -121,6 +125,40 @@ export default function ConversationsHomePage({ onSelectConversation, compact = 
     return () => cancelAnimationFrame(frame);
   }, [autoFocusSearch]);
 
+  useEffect(() => {
+    setActiveIndex((current) => (
+      filteredConversations.length === 0 ? 0 : Math.min(current, filteredConversations.length - 1)
+    ));
+  }, [filteredConversations.length]);
+
+  useEffect(() => {
+    const active = listRef.current?.querySelector<HTMLElement>(`[data-conversation-index="${activeIndex}"]`);
+    active?.scrollIntoView?.({ block: 'nearest' });
+  }, [activeIndex]);
+
+  function selectConversation(conversation: SidebarConversation) {
+    if (onSelectConversation) {
+      onSelectConversation(conversation.agentInstanceId);
+      return;
+    }
+    window.location.hash = buildRouteHash(`/conversations/${encodeURIComponent(conversation.agentInstanceId)}`, '');
+  }
+
+  function handleSearchKeyDown(event: ReactKeyboardEvent<HTMLInputElement>) {
+    const direction = selectionDirectionForEvent(event);
+    if (direction) {
+      event.preventDefault();
+      setActiveIndex((current) => navigateIndex(current, filteredConversations.length, direction));
+      return;
+    }
+    if (event.key === 'Enter') {
+      const selected = filteredConversations[activeIndex];
+      if (!selected) return;
+      event.preventDefault();
+      selectConversation(selected);
+    }
+  }
+
   async function loadMore() {
     if (!nextCursor || fetchPageResult.isFetching) return;
     setLoadError('');
@@ -150,7 +188,19 @@ export default function ConversationsHomePage({ onSelectConversation, compact = 
         </div>
         <div className="relative mt-3">
           <Icon name="search" size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-faint" />
-          <input ref={searchRef} data-debug-id="conversation-inbox-search-input" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search conversations…" className="min-h-10 w-full rounded-xl border border-subtle bg-surface px-3 pl-9 text-sm text-primary outline-none focus:border-accent" />
+          <input
+            ref={searchRef}
+            data-debug-id="conversation-inbox-search-input"
+            role="combobox"
+            aria-expanded="true"
+            aria-controls="conversation-inbox-listbox"
+            aria-activedescendant={filteredConversations.length ? `conversation-inbox-option-${activeIndex}` : undefined}
+            value={query}
+            onChange={(event) => { setQuery(event.target.value); setActiveIndex(0); }}
+            onKeyDown={handleSearchKeyDown}
+            placeholder="Search conversations…"
+            className="min-h-10 w-full rounded-xl border border-subtle bg-surface px-3 pl-9 text-sm text-primary outline-none focus:border-accent"
+          />
         </div>
       </header>
 
@@ -158,14 +208,14 @@ export default function ConversationsHomePage({ onSelectConversation, compact = 
         <div data-debug-id="conversation-inbox-error" className="mt-4 rounded-2xl border border-danger/30 bg-danger-soft p-4 text-sm text-danger">{String((firstPage.error as any)?.error || 'Failed to load conversations')}</div>
       ) : null}
 
-      <section data-debug-id="conversation-inbox-list" className="mt-3 w-full divide-y divide-subtle overflow-hidden rounded-3xl border border-subtle bg-surface">
+      <section ref={listRef} id="conversation-inbox-listbox" role="listbox" aria-label="Conversations" data-debug-id="conversation-inbox-list" className="mt-3 w-full divide-y divide-subtle overflow-hidden rounded-3xl border border-subtle bg-surface">
         {firstPage.isLoading && conversations.length === 0 ? (
           <div data-debug-id="conversation-inbox-loading" className="p-5 text-sm text-muted">Loading conversations…</div>
         ) : conversations.length === 0 ? (
           <div data-debug-id="conversation-inbox-empty" className="p-6 text-sm text-muted">No conversations yet. Start a new conversation to see it here.</div>
         ) : filteredConversations.length === 0 ? (
           <div data-debug-id="conversation-inbox-no-results" className="p-6 text-sm text-muted">No conversations match “{query.trim()}”.</div>
-        ) : filteredConversations.map((conversation) => {
+        ) : filteredConversations.map((conversation, index) => {
           const title = conversationTitle(conversation);
           const last = lastMessageLabel(conversation);
           const ts = timestampLabel(conversation);
@@ -190,11 +240,19 @@ export default function ConversationsHomePage({ onSelectConversation, compact = 
                 <span aria-hidden="true" className="text-lg text-faint group-hover:text-muted">›</span>
               </div>
             </>;
-          const className = 'group flex min-h-[76px] w-full touch-manipulation items-center gap-3 px-3 py-3 text-left transition hover:bg-neutral-soft active:bg-neutral-soft/80 sm:min-h-[84px] sm:px-4';
+          const active = index === activeIndex;
+          const className = `group flex min-h-[76px] w-full touch-manipulation items-center gap-3 px-3 py-3 text-left transition hover:bg-neutral-soft active:bg-neutral-soft/80 sm:min-h-[84px] sm:px-4 ${active ? 'bg-accent/10 ring-1 ring-inset ring-accent/30' : ''}`;
+          const optionProps = {
+            id: `conversation-inbox-option-${index}`,
+            role: 'option',
+            'aria-selected': active,
+            'data-conversation-index': index,
+            onMouseEnter: () => setActiveIndex(index),
+          } as const;
           return onSelectConversation ? (
-            <button key={conversation.conversationId} type="button" data-debug-id={`conversation-inbox-row-${conversation.conversationId}`} onClick={() => onSelectConversation(conversation.agentInstanceId)} className={className}>{content}</button>
+            <button {...optionProps} key={conversation.conversationId} type="button" data-debug-id={`conversation-inbox-row-${conversation.conversationId}`} onClick={() => selectConversation(conversation)} className={className}>{content}</button>
           ) : (
-            <a key={conversation.conversationId} data-debug-id={`conversation-inbox-row-${conversation.conversationId}`} href={buildRouteHash(`/conversations/${encodeURIComponent(conversation.agentInstanceId)}`, '')} className={className}>{content}</a>
+            <a {...optionProps} key={conversation.conversationId} data-debug-id={`conversation-inbox-row-${conversation.conversationId}`} href={buildRouteHash(`/conversations/${encodeURIComponent(conversation.agentInstanceId)}`, '')} className={className}>{content}</a>
           );
         })}
       </section>
