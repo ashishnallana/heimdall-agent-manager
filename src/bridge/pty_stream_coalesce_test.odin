@@ -232,3 +232,34 @@ pty_binary_frames_fit_every_transport_cap_without_the_chunker :: proc(t: ^testin
 	worst_c := contracts.pty_wire_session_frame_len(long_sid, snap_c + VAULT_HEADER_BYTES) + 8 /* ws header */
 	testing.expect(t, worst_c < 16 * 1024, "worst-case socat frame stays under the edge-proxy per-message ceiling")
 }
+
+// REQ-PTY-COLOR-1: the pty-host's colour preamble (OSC 10/11/12/4) leads the catch-up
+// payload — before the alt-screen prefix and the erase+home, after nothing — and
+// survives trailing-blank trimming and an all-blank screen.
+@(test)
+pty_screen_preamble_leads_catchup_and_survives_trimming :: proc(t: ^testing.T) {
+	pre := "\x1b]4;1;rgb:ff/00/00\x07\x1b]11;#1e1e2e\x07"
+	// Preamble sits in row 0 exactly as capture() emits it (before the alt prefix).
+	alt := bridge_pty_stream_screen_payload({strings.concatenate({pre, "\x1b[?1049h\x1b[?25l~"}, context.temp_allocator), "-- NORMAL --", "", ""}, 1, 0)
+	defer delete(alt)
+	testing.expect_value(t, alt, strings.concatenate({pre, "\x1b[?1049h\x1b[?25l\x1b[2J\x1b[H~\r\n-- NORMAL --\x1b[2;1H"}, context.temp_allocator))
+
+	plain := bridge_pty_stream_screen_payload({strings.concatenate({pre, "$ "}, context.temp_allocator), "", ""}, 0, 2)
+	defer delete(plain)
+	testing.expect_value(t, plain, strings.concatenate({pre, "$ \x1b[1;3H"}, context.temp_allocator))
+
+	// All-blank rows: the trim would reduce the rows to nothing; the preamble must remain.
+	blank := bridge_pty_stream_screen_payload({pre, "", ""}, -1, -1)
+	defer delete(blank)
+	testing.expect_value(t, blank, pre)
+
+	// No preamble: byte-identical to before (the common case).
+	none := bridge_pty_stream_screen_payload({"row 1", "row 2", ""}, -1, -1)
+	defer delete(none)
+	testing.expect_value(t, none, "row 1\r\nrow 2")
+
+	// The splitter leaves titles and ST-terminated non-colour OSCs with the rows.
+	p, rest := contracts.pty_screen_split_preamble("\x1b]11;#000000\x1b\\\x1b]0;title\x07text")
+	testing.expect_value(t, p, "\x1b]11;#000000\x1b\\")
+	testing.expect_value(t, rest, "\x1b]0;title\x07text")
+}

@@ -1,4 +1,4 @@
-import { PaneDeliveryQueue, PaneWriteBatcher, normalizeSnapshotText, repaintCapturedScreenText } from '../shells/paneDeliveryQueue.ts';
+import { PTY_COLOR_RESET, PaneDeliveryQueue, PaneWriteBatcher, normalizeSnapshotText, repaintCapturedScreenText } from '../shells/paneDeliveryQueue.ts';
 import { PTY_WIRE_FLAG_ENCRYPTED, PTY_WIRE_KIND_INPUT, PTY_WIRE_KIND_OUTPUT, PTY_WIRE_KIND_SCREEN, PTY_WIRE_VIEWER_HEADER_BYTES, PtyTextDecoder, decodePtyViewerFrame, decryptPtyPayload, encodePtyViewerFrame, encryptPtyPayload, type PtyViewerFrame } from '../shells/ptyWire.ts';
 import { createInputCoalescer, type InputCoalescer } from '../shells/ptyInputCoalescer.ts';
 import { createVisibilityGate } from '../shells/paneVisibilityGate.ts';
@@ -341,6 +341,9 @@ export function useAgentStream({
           } else if (!isScreen && frame.snapshot && startsRepaint) {
             text = normalizeSnapshotText(text);
           }
+          // REQ-PTY-COLOR-1: a repaint starts from the theme defaults; the capture's own
+          // preamble (if any) re-applies the bridge machine's colours right after.
+          if (startsRepaint) text = PTY_COLOR_RESET + text;
           if (text.length > 0) writeBatcher.push(text, startsRepaint);
         };
 

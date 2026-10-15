@@ -130,7 +130,12 @@ _shell_screen_trim_trailing_blank_rows :: proc(s: string, allocator := context.a
 //
 // The chunked writer cuts this text at row boundaries into SCREEN frames.
 _shell_screen_repaint_text :: proc(pane_output: string, cursor_row: int = -1, cursor_col: int = -1) -> string {
-	trimmed := _shell_screen_trim_trailing_blank_rows(pane_output)
+	// REQ-PTY-COLOR-1: the capture may lead with the pty-host's terminal-colour preamble
+	// (OSC 10/11/12/4). It goes FIRST in the repaint — before the alt-screen prefix and
+	// before the erase+home — and is split off here so neither the trim nor the alt-prefix
+	// detection below ever sees it.
+	preamble, rows := contracts.pty_screen_split_preamble(pane_output)
+	trimmed := _shell_screen_trim_trailing_blank_rows(rows)
 	defer delete(trimmed)
 	body := _shell_screen_lf_to_crlf(trimmed)
 	defer delete(body)
@@ -147,9 +152,9 @@ _shell_screen_repaint_text :: proc(pane_output: string, cursor_row: int = -1, cu
 
 	if cursor_row >= 0 && cursor_col >= 0 {
 		cup := fmt.tprintf("\x1b[%d;%dH", cursor_row + 1, cursor_col + 1)
-		return strings.concatenate({alt_prefix, SHELL_SCREEN_REPAINT_PREFIX, rest_body, cup})
+		return strings.concatenate({preamble, alt_prefix, SHELL_SCREEN_REPAINT_PREFIX, rest_body, cup})
 	}
-	return strings.concatenate({alt_prefix, SHELL_SCREEN_REPAINT_PREFIX, rest_body})
+	return strings.concatenate({preamble, alt_prefix, SHELL_SCREEN_REPAINT_PREFIX, rest_body})
 }
 
 // SHELL_SCREEN_CHUNK_DECODED_BYTES is how much repaint text one `screen` frame carries.

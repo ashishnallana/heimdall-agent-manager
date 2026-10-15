@@ -174,3 +174,24 @@ test_p4_viewer_one_falls_back_to_capture_when_no_catchup_arrives :: proc(t: ^tes
 	testing.expect_value(t, seq, 1)
 	testing.expect_value(t, frames, 1)
 }
+
+// REQ-PTY-COLOR-1: a capture that leads with the pty-host colour preamble produces SCREEN
+// frames whose first bytes are that preamble, then alt prefix (if any), then erase+home.
+@(test)
+test_screen_frames_carry_the_colour_preamble_first :: proc(t: ^testing.T) {
+	pre := "\x1b]11;rgb:1e/1e/2e\x07\x1b]10;#c0caf5\x07"
+	reply := strings.concatenate({"{\"output\":\"", "\\u001b]11;rgb:1e/1e/2e\\u0007\\u001b]10;#c0caf5\\u0007\\u001b[?1049h~\\n-- NORMAL --\\n\\n", "\",\"cursor_row\":1,\"cursor_col\":0}"}, context.temp_allocator)
+	frames, ok := _shell_stream_screen_frames(reply)
+	testing.expect(t, ok)
+	defer { for f in frames do delete(f); delete(frames) }
+	testing.expect_value(t, len(frames), 1)
+	if len(frames) != 1 do return
+	kind, flags, payload, _, _, dok := contracts.pty_wire_decode_viewer_frame(frames[0])
+	testing.expect(t, dok && kind == contracts.PTY_WIRE_KIND_SCREEN && contracts.pty_wire_is_snapshot(flags))
+	testing.expect_value(t, string(payload), strings.concatenate({pre, "\x1b[?1049h", SHELL_SCREEN_REPAINT_PREFIX, "~\r\n-- NORMAL --\x1b[2;1H"}, context.temp_allocator))
+
+	// Without a preamble the repaint is unchanged.
+	plain := _shell_screen_repaint_text("hello\n\n", 0, 5)
+	defer delete(plain)
+	testing.expect_value(t, plain, "\x1b[2J\x1b[Hhello\x1b[1;6H")
+}

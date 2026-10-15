@@ -98,6 +98,19 @@ session's last viewer leaves, on `stream_closed`, and at teardown; ≤ 1 MiB per
   3 compactions within 10 s, snapshot overflow or global overflow → `pane_resync_required`
   for that stream (old behaviour).
 
+## 4b. Terminal colours across repaints (REQ-PTY-COLOR-1)
+
+`tools/pty_host/src/vt.rs` tracks OSC 10/11/12 (default fg/bg/cursor) and OSC 4 (palette),
+their resets (110/111/112/104) and RIS; `capture()` emits them as a BEL-terminated OSC
+preamble in `Capture.preamble` AND at the head of `lines[0]` (wire shape unchanged), before
+the alt-screen prefix. The bridge catch-up payload and the hub SCREEN repaint both split it
+off (`contracts.pty_screen_split_preamble`) and re-emit it FIRST — ahead of the alt prefix
+and the erase+home — so trimming/sanitising never touches it (`shell_output_sanitize` only
+serves `shell log`). The browser writes `PTY_COLOR_RESET`
+(`OSC 110/111/112/104`) at the start of every repaint, then the capture; a capture with a
+preamble re-applies the bridge machine's colours, one without returns to the UI theme.
+Queries (`OSC 11;?`) are never answered by the emulator.
+
 ## 5. Metrics
 
 - `heimdall_shell_output_frames_total{bridge_id}` (new) and

@@ -124,14 +124,51 @@ export class PaneWriteBatcher {
 }
 
 /**
+ * REQ-PTY-COLOR-1: the pty-host leads a captured screen with the terminal-colour state as
+ * OSC sequences (4 palette, 10 fg, 11 bg, 12 cursor; BEL or ST terminated). Split it off so
+ * the repaint helpers below keep recognising the alt-screen / erase prefixes that follow,
+ * then put it back FIRST. Titles and other OSCs are not a preamble.
+ */
+export function splitPtyColorPreamble(text: string): { preamble: string; rest: string } {
+  let i = 0;
+  for (;;) {
+    if (!(text.charCodeAt(i) === 0x1b && text[i + 1] === ']')) break;
+    const body = text.slice(i + 2);
+    if (!/^(4|10|11|12);/.test(body)) break;
+    const bel = text.indexOf('\x07', i + 2);
+    const st = text.indexOf('\x1b\\', i + 2);
+    const nextEsc = text.indexOf('\x1b', i + 2);
+    let end = -1;
+    if (bel >= 0 && (nextEsc < 0 || bel < nextEsc)) end = bel + 1;
+    else if (st >= 0 && st === nextEsc) end = st + 2;
+    if (end < 0) break;
+    i = end;
+  }
+  return { preamble: text.slice(0, i), rest: text.slice(i) };
+}
+
+/**
+ * PTY_COLOR_RESET returns xterm's default fg/bg/cursor and palette to the UI theme. Written
+ * at the start of every repaint (reconnect, catch-up, hub capture) BEFORE the capture bytes,
+ * so colours set by a previous session cannot outlive it: a capture that carries a preamble
+ * re-applies its own colours right after; one without leaves the theme defaults.
+ */
+export const PTY_COLOR_RESET = '\x1b]110\x07\x1b]111\x07\x1b]112\x07\x1b]104\x07';
+
+/**
  * isPaneRepaintStart: does this write BEGIN an absolute repaint (erase-screen+home or an
- * alt-screen switch)? Used by the replay gates in both panes to suppress xterm's query
- * replies while the repaint is parsed. Accepts text or bytes.
+ * alt-screen switch), ignoring a leading colour reset/preamble? Used by the replay gates
+ * in both panes to suppress xterm's query replies while the repaint is parsed.
  */
 export function isPaneRepaintStart(data: string | Uint8Array): boolean {
-  if (typeof data === 'string') return data.startsWith('\x1b[2J') || data.startsWith('\x1b[?1');
-  return data.length >= 4 && data[0] === 0x1b && data[1] === 0x5b &&
-    ((data[2] === 0x32 && data[3] === 0x4a) || (data[2] === 0x3f && data[3] === 0x31));
+  if (typeof data !== 'string') {
+    return data.length >= 4 && data[0] === 0x1b && data[1] === 0x5b &&
+      ((data[2] === 0x32 && data[3] === 0x4a) || (data[2] === 0x3f && data[3] === 0x31));
+  }
+  let text = data;
+  if (text.startsWith(PTY_COLOR_RESET)) text = text.slice(PTY_COLOR_RESET.length);
+  text = splitPtyColorPreamble(text).rest;
+  return text.startsWith('\x1b[2J') || text.startsWith('\x1b[?1');
 }
 
 const ALT_HIDDEN_PREFIX = '\x1b[?1049h\x1b[?25l';
@@ -144,7 +181,12 @@ const REPAINT_PREFIX = '\x1b[2J\x1b[H';
  * on, so these helpers work on strings; the *Bytes variants below remain for callers that
  * still hold raw bytes (tests, the polled path).
  */
-export function repaintCapturedScreenText(text: string, row = -1, col = -1): string {
+export function repaintCapturedScreenText(input: string, row = -1, col = -1): string {
+  const { preamble, rest } = splitPtyColorPreamble(input);
+  return preamble + repaintCapturedRows(rest, row, col);
+}
+
+function repaintCapturedRows(text: string, row: number, col: number): string {
   const lines = text.split(/\r?\n/);
   while (lines.length && lines[lines.length - 1].trim() === '') lines.pop();
   const body = lines.join('\r\n');
@@ -168,7 +210,12 @@ export function repaintCapturedScreen(bytes: Uint8Array, row = -1, col = -1): Ui
  * erase-screen + cursor-home prefix so they repaint in place instead of appending duplicate
  * lines at the current cursor position and polluting scrollback.
  */
-export function normalizeSnapshotText(decoded: string): string {
+export function normalizeSnapshotText(input: string): string {
+  const { preamble, rest } = splitPtyColorPreamble(input);
+  return preamble + normalizeSnapshotRows(rest);
+}
+
+function normalizeSnapshotRows(decoded: string): string {
   if (
     decoded.startsWith(REPAINT_PREFIX) ||
     decoded.startsWith(`${ALT_PREFIX}${REPAINT_PREFIX}`) ||

@@ -436,7 +436,8 @@ _bridge_pty_stream_trim_trailing_blank_rows :: proc(s: string, allocator := cont
 }
 
 // bridge_pty_stream_screen_payload builds the byte payload of the bridge's catch-up screen
-// frame: the captured rows joined, with trailing blank rows trimmed, CRLF row separators, and
+// frame: the pty-host's colour preamble (if any) first, then the captured rows joined, with
+// trailing blank rows trimmed, CRLF row separators, and
 // an explicit ANSI cursor positioning sequence (\x1b[<row+1>;<col+1>H) when valid cursor
 // coordinates (>= 0) are supplied. Caller owns the result.
 //
@@ -467,9 +468,14 @@ _bridge_pty_stream_trim_trailing_blank_rows :: proc(s: string, allocator := cont
 bridge_pty_stream_screen_payload :: proc(lines: []string, cursor_row: int, cursor_col: int) -> string {
 	joined, _, _ := bridge_pty_host_screen_to_output(lines, 0)
 	defer delete(joined)
-	trimmed := _bridge_pty_stream_trim_trailing_blank_rows(joined)
+	// REQ-PTY-COLOR-1: the pty-host leads the capture with the terminal-colour preamble
+	// (OSC 10/11/12/4). Split it off FIRST so the alt-screen detection below still sees
+	// its prefix, and so a screen whose rows are all blank cannot trim it away.
+	preamble, rows := contracts.pty_screen_split_preamble(joined)
+	trimmed := _bridge_pty_stream_trim_trailing_blank_rows(rows)
 	defer delete(trimmed)
 	body := _bridge_pty_stream_lf_to_crlf(trimmed)
+	defer delete(body)
 
 	alt_prefix := ""
 	rest_body := body
@@ -481,20 +487,15 @@ bridge_pty_stream_screen_payload :: proc(lines: []string, cursor_row: int, curso
 		rest_body = body[len("\x1b[?1049h"):]
 	}
 
+	cup := ""
 	if cursor_row >= 0 && cursor_col >= 0 {
-		defer delete(body)
 		// tprintf lands in the temp allocator; concatenate copies it out, so the CUP is never freed here.
-		cup := fmt.tprintf("\x1b[%d;%dH", cursor_row + 1, cursor_col + 1)
-		if alt_prefix != "" {
-			return strings.concatenate({alt_prefix, rest_body, cup})
-		}
-		return strings.concatenate({body, cup})
+		cup = fmt.tprintf("\x1b[%d;%dH", cursor_row + 1, cursor_col + 1)
 	}
 	if alt_prefix != "" {
-		defer delete(body)
-		return strings.concatenate({alt_prefix, rest_body})
+		return strings.concatenate({preamble, alt_prefix, rest_body, cup})
 	}
-	return body
+	return strings.concatenate({preamble, body, cup})
 }
 
 // bridge_pty_stream_reader_worker runs on a dedicated background thread per active stream.

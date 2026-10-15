@@ -189,3 +189,31 @@ pty_wire_session_frame_debug_json :: proc(frame: []byte, allocator := context.al
 	strings.write_string(&b, "}")
 	return strings.to_string(b)
 }
+
+// pty_screen_split_preamble separates the terminal-colour preamble the pty-host puts in
+// front of a captured screen (tools/pty_host/src/vt.rs capture(): OSC 4/10/11/12
+// sequences, BEL- or ST-terminated) from the rows that follow. Both halves BORROW from
+// `text`. A repaint builder must keep the preamble FIRST — before any alt-screen prefix
+// and before the erase-screen+home it adds — and must never let it be trimmed as a
+// "blank row": that is exactly how the pane reverted to the UI theme after a repaint.
+pty_screen_split_preamble :: proc(text: string) -> (preamble, rest: string) {
+	i := 0
+	for i + 1 < len(text) && text[i] == 0x1b && text[i + 1] == ']' {
+		// Find the terminator: BEL (0x07) or ST (ESC \\).
+		j := i + 2
+		end := -1
+		for j < len(text) {
+			if text[j] == 0x07 { end = j + 1; break }
+			if text[j] == 0x1b && j + 1 < len(text) && text[j + 1] == '\\' { end = j + 2; break }
+			if text[j] == 0x1b do break // another escape started: not a terminated OSC
+			j += 1
+		}
+		if end < 0 do break
+		// Only the colour family is a preamble; anything else (a title) stays with the rows.
+		body := text[i + 2:end]
+		is_color := strings.has_prefix(body, "4;") || strings.has_prefix(body, "10;") || strings.has_prefix(body, "11;") || strings.has_prefix(body, "12;")
+		if !is_color do break
+		i = end
+	}
+	return text[:i], text[i:]
+}
