@@ -232,34 +232,23 @@ agent_instance_stream_handler :: proc(ctx: rawptr, req: Request, client: net.TCP
 		}
 		ws_note_rx(ws_rx, len(text))
 
+		// REQ-PTY-NET-3: same binary, ack-less input relay as the shells pane — the agent
+		// pane shares the pipeline and the bridge keys on shell_id == instance_id.
+		if reader.last_opcode == 0x2 {
+			kind, flags, payload, _, _, bin_ok := contracts.pty_wire_decode_viewer_frame(transmute([]byte)text)
+			if !bin_ok || kind != contracts.PTY_WIRE_KIND_INPUT {
+				fmt.eprintfln("ham-hub WARN agent pane input frame dropped instance_id=%s reason=not_a_pty_input_frame bytes=%d", instance_id, len(text))
+			} else if len(payload) > 0 {
+				shell_session_svc.shell_metrics_note_input(len(payload))
+				_, _ = agent_service.agent_service_send_pty_input_binary(h.agents, auth_ctx, instance_id, payload, contracts.pty_wire_is_encrypted(flags))
+			}
+			delete(text)
+			continue
+		}
+
 		frame_type := json_string(text, "type")
 
 		switch frame_type {
-		case "input":
-			// REQ-PANE-INPUT-1/5: decoded by the ONE shared decoder in
-			// shell_stream_input_frame.odin, which the shells pane consults too. This site
-			// used to carry its own copy of the contract that knew neither `vault:v1:` nor
-			// `enc_b64`, so with the vault UNLOCKED every keystroke was base64-decoded as if
-			// it were plaintext, failed, and vanished without a log — a total input outage.
-			frame := shell_stream_decode_input_frame(text)
-			defer shell_stream_input_destroy(&frame)
-			switch frame.kind {
-			case .Armored:
-				// REQ-PANE-INPUT-2/6: relay the ciphertext. The Hub holds no vault key; the
-				// bridge decrypts it or rejects-and-logs, so the pty is never fed ciphertext.
-				agent_service.agent_service_send_pty_input(h.agents, auth_ctx, instance_id, "", frame.armored)
-			case .Plain:
-				agent_service.agent_service_send_pty_input(h.agents, auth_ctx, instance_id, frame.plain, "")
-			case .Undecodable:
-				// REQ-PANE-INPUT-3: a dropped keystroke is never silent again.
-				fmt.eprintfln(
-					"ham-hub WARN agent pane input frame dropped instance_id=%s reason=%s",
-					instance_id,
-					frame.reason,
-				)
-			case .Empty:
-				// No payload on the frame — nothing to forward.
-			}
 		case "resize":
 			rows := json_int(text, "rows", 0)
 			cols := json_int(text, "cols", 0)

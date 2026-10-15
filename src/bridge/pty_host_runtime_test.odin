@@ -1279,9 +1279,9 @@ pane_large_encrypted_snapshot_splits_before_encryption :: proc(t: ^testing.T) {
 	defer { for frame in frames do delete(frame, runtime.heap_allocator()); delete(frames) }
 	result := make([dynamic]byte)
 	defer delete(result)
-	// 256 Ki two-byte runes = 512 KiB of plaintext, cut at the 32 KiB snapshot cap BEFORE
+	// 256 Ki two-byte runes = 512 KiB of plaintext, cut at the snapshot cap BEFORE
 	// encryption (REQ-PTY-NET-1), so every frame decrypts on its own.
-	testing.expect_value(t, len(frames), 16)
+	testing.expect_value(t, len(frames), (512 * 1024 + BRIDGE_PTY_STREAM_EMIT_SNAPSHOT_BYTES - 1) / BRIDGE_PTY_STREAM_EMIT_SNAPSHOT_BYTES)
 	for frame in frames {
 		_, plain, snapshot, encrypted, ok := pty_test_decode_output(frame, TEST_ENC_VAULT_KEY)
 		testing.expect(t, encrypted)

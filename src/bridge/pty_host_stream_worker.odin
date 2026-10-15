@@ -73,16 +73,25 @@ _bridge_pty_stream_outgoing_free :: proc(item: Bridge_PTY_Stream_Outgoing, heap:
 
 // Per-emitted-frame plaintext caps (REQ-PTY-NET-1). A record larger than its cap is split
 // at enqueue so the drain never has to cut a record; the drain merges UP TO the cap.
-// Incremental output is kept smaller than a snapshot because it is latency-sensitive and
-// the hub fans it out per viewer; a catch-up snapshot is one-shot bulk.
+// (Incremental and snapshot caps are separate knobs; today both sit at the edge-safe
+// value below, so a snapshot simply costs more frames.)
 //
 // REQ-PTY-NET-2: these are the SOCAT values. Binary frames never pass through the
 // kind:"chunk" re-splitter (it is text/base64-only), so a frame must fit the bridge->hub
 // per-message cap on its own: under the legacy s_client transport (cap 6000 B) both caps
 // drop to BRIDGE_PTY_STREAM_EMIT_SCLIENT_BYTES. See bridge_pty_stream_emit_caps.
-BRIDGE_PTY_STREAM_EMIT_INCREMENTAL_BYTES :: 16 * 1024
-BRIDGE_PTY_STREAM_EMIT_SNAPSHOT_BYTES    :: 32 * 1024
+//
+// WHY 12 KiB AND NOT MORE. The prod edge (nginx -> Caddy) still enforces a ~16 KiB
+// PER-MESSAGE WebSocket ceiling — contracts/bridge.odin, the note on
+// BRIDGE_WS_HUB_RUNTIME_CHUNK_PAYLOAD_BYTES says lifting it is a separate rollout — and the
+// pty path must not depend on that rollout. 12 KiB payload + 4 B pty_wire header + session
+// id + WS header stays under it with margin. When the edge ceiling is lifted, raise
+// BRIDGE_PTY_STREAM_EMIT_EDGE_SAFE_BYTES (the one constant) and both caps follow.
+BRIDGE_PTY_STREAM_EMIT_EDGE_SAFE_BYTES   :: 12 * 1024
+BRIDGE_PTY_STREAM_EMIT_INCREMENTAL_BYTES :: BRIDGE_PTY_STREAM_EMIT_EDGE_SAFE_BYTES
+BRIDGE_PTY_STREAM_EMIT_SNAPSHOT_BYTES    :: BRIDGE_PTY_STREAM_EMIT_EDGE_SAFE_BYTES
 BRIDGE_PTY_STREAM_EMIT_SCLIENT_BYTES     :: 4 * 1024
+#assert(BRIDGE_PTY_STREAM_EMIT_SNAPSHOT_BYTES + 256 + 28 + contracts.PTY_WIRE_SESSION_HEADER_BYTES + 8 < 16 * 1024)
 #assert(BRIDGE_PTY_STREAM_EMIT_SNAPSHOT_BYTES + 64 + 28 + contracts.PTY_WIRE_SESSION_HEADER_BYTES < contracts.BRIDGE_WS_HUB_RUNTIME_CHUNK_PAYLOAD_BYTES_SOCAT)
 #assert(BRIDGE_PTY_STREAM_EMIT_SCLIENT_BYTES + 64 + 28 + contracts.PTY_WIRE_SESSION_HEADER_BYTES < contracts.BRIDGE_WS_HUB_RUNTIME_CHUNK_PAYLOAD_BYTES)
 

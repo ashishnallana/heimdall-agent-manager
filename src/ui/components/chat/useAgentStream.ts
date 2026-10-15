@@ -1,24 +1,16 @@
-import { PaneDeliveryQueue, normalizeSnapshotText, repaintCapturedScreenText, splitPaneInput } from '../shells/paneDeliveryQueue.ts';
-import { PTY_WIRE_KIND_OUTPUT, PTY_WIRE_KIND_SCREEN, PTY_WIRE_VIEWER_HEADER_BYTES, PtyTextDecoder, decodePtyViewerFrame, decryptPtyPayload, type PtyViewerFrame } from '../shells/ptyWire.ts';
+import { PaneDeliveryQueue, normalizeSnapshotText, repaintCapturedScreenText } from '../shells/paneDeliveryQueue.ts';
+import { PTY_WIRE_FLAG_ENCRYPTED, PTY_WIRE_KIND_INPUT, PTY_WIRE_KIND_OUTPUT, PTY_WIRE_KIND_SCREEN, PTY_WIRE_VIEWER_HEADER_BYTES, PtyTextDecoder, decodePtyViewerFrame, decryptPtyPayload, encodePtyViewerFrame, encryptPtyPayload, type PtyViewerFrame } from '../shells/ptyWire.ts';
+import { createInputCoalescer, type InputCoalescer } from '../shells/ptyInputCoalescer.ts';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSelector } from 'react-redux';
 import { apiAbsoluteUrl } from '../../api/apiBase';
-import { encryptShellStreamPayload } from '../shells/useShellStream';
-import { bytesToBase64, getActiveVaultKey } from '../../utils/vaultContent';
+import { getActiveVaultKey } from '../../utils/vaultContent';
 import { isVaultLockedError } from '../../utils/vaultLockedError.ts';
 
 const HEARTBEAT_INTERVAL_MS = 30000;
 const INITIAL_RECONNECT_DELAY_MS = 1000;
 const MAX_RECONNECT_DELAY_MS = 5000;
 const MAX_RECONNECT_ATTEMPTS = 3;
-
-function toBase64(str: string): string {
-  try {
-    return btoa(str);
-  } catch {
-    return bytesToBase64(new TextEncoder().encode(str));
-  }
-}
 
 // Control frames only (REQ-PTY-NET-2): pty output/screen bytes are binary frames, see ptyWire.ts.
 type AgentStreamMsg =
@@ -224,6 +216,7 @@ export function useAgentStream({
     clearReconnectTimer();
     clearMicroNudgeTimer();
     clearStreamReadyFallbackTimer();
+    inputCoalescerRef.current?.reset();
     isStreamReadyRef.current = false;
     setIsStreamReady(false);
     pendingKeyEventsRef.current = [];
@@ -464,32 +457,37 @@ export function useAgentStream({
     };
   }, [agentInstanceId, enabled, connect]);
 
-  const dispatchInput: (data: string) => void = useCallback((data: string) => {
-    if (data.length > 8192) {
-      for (const part of splitPaneInput(data)) dispatchInput(part);
-      return;
-    }
+  // REQ-PTY-NET-3: binary, coalesced, ack-less input — identical to useShellStream.
+  const sendInputChunk = useCallback((data: string) => {
     const s = socketRef.current;
     if (!s || s.readyState !== WebSocket.OPEN) return;
-
     const keyToUse = getActiveVaultKey();
     const isUnlocked = isVaultUnlockedRef.current || Boolean(keyToUse);
-
+    const bytes = new TextEncoder().encode(data);
     if (isUnlocked && keyToUse) {
       inputQueueRef.current = inputQueueRef.current.then(async () => {
         if (s.readyState !== WebSocket.OPEN) return;
         try {
-          const enc_b64 = await encryptShellStreamPayload(data, keyToUse);
+          const sealed = await encryptPtyPayload(bytes, keyToUse);
           if (s.readyState === WebSocket.OPEN) {
-            s.send(JSON.stringify({ type: 'input', data_b64: enc_b64, is_encrypted: true }));
+            s.send(encodePtyViewerFrame(PTY_WIRE_KIND_INPUT, PTY_WIRE_FLAG_ENCRYPTED, sealed));
           }
         } catch {
           onErrorRef.current?.('Terminal input encryption failed');
         }
       }).catch(() => { /* ignore queue error */ });
     } else {
-      s.send(JSON.stringify({ type: 'input', data_b64: toBase64(data), is_encrypted: false }));
+      s.send(encodePtyViewerFrame(PTY_WIRE_KIND_INPUT, 0, bytes));
     }
+  }, []);
+
+  const inputCoalescerRef = useRef<InputCoalescer | null>(null);
+  if (inputCoalescerRef.current === null) {
+    inputCoalescerRef.current = createInputCoalescer((chunk) => sendInputChunk(chunk));
+  }
+
+  const dispatchInput: (data: string) => void = useCallback((data: string) => {
+    inputCoalescerRef.current?.push(data);
   }, []);
 
   useEffect(() => {

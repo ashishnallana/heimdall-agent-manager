@@ -163,3 +163,29 @@ pty_wire_viewer_frame_debug_json :: proc(frame: []byte, allocator := context.all
 	strings.write_string(&b, "}")
 	return strings.to_string(b)
 }
+
+// pty_wire_session_frame_debug_json renders a bridge-ws session frame in the shape of the
+// JSON command it replaced ({"type":"pty_input"|"pty_output","session_id":...,
+// "data_b64":...,"is_encrypted":...}). Logs and tests only.
+pty_wire_session_frame_debug_json :: proc(frame: []byte, allocator := context.allocator) -> string {
+	kind, flags, session_id, payload, ok := pty_wire_decode_session_frame(frame)
+	if !ok do return strings.clone("{\"type\":\"invalid_binary_frame\"}", allocator)
+	b := strings.builder_make(allocator)
+	strings.write_string(&b, "{\"type\":\"")
+	switch kind {
+	case PTY_WIRE_KIND_OUTPUT: strings.write_string(&b, "pty_output")
+	case PTY_WIRE_KIND_INPUT:  strings.write_string(&b, "pty_input")
+	case PTY_WIRE_KIND_SCREEN: strings.write_string(&b, "pty_screen")
+	case:                      strings.write_string(&b, "unknown")
+	}
+	strings.write_string(&b, "\",\"session_id\":\"")
+	write_json_string(&b, session_id)
+	strings.write_string(&b, "\",\"data_b64\":\"")
+	b64 := base64.encode(payload, allocator = context.temp_allocator)
+	strings.write_string(&b, string(b64))
+	strings.write_string(&b, "\",\"is_encrypted\":")
+	strings.write_string(&b, "true" if pty_wire_is_encrypted(flags) else "false")
+	if pty_wire_is_snapshot(flags) do strings.write_string(&b, ",\"is_snapshot\":true")
+	strings.write_string(&b, "}")
+	return strings.to_string(b)
+}

@@ -1,5 +1,6 @@
-import { PaneDeliveryQueue, normalizeSnapshotText, repaintCapturedScreenText, splitPaneInput } from './paneDeliveryQueue.ts';
-import { PTY_WIRE_KIND_OUTPUT, PTY_WIRE_KIND_SCREEN, PTY_WIRE_VIEWER_HEADER_BYTES, PtyTextDecoder, decodePtyViewerFrame, decryptPtyPayload, type PtyViewerFrame } from './ptyWire.ts';
+import { PaneDeliveryQueue, normalizeSnapshotText, repaintCapturedScreenText } from './paneDeliveryQueue.ts';
+import { PTY_WIRE_FLAG_ENCRYPTED, PTY_WIRE_KIND_INPUT, PTY_WIRE_KIND_OUTPUT, PTY_WIRE_KIND_SCREEN, PTY_WIRE_VIEWER_HEADER_BYTES, PtyTextDecoder, decodePtyViewerFrame, decryptPtyPayload, encodePtyViewerFrame, encryptPtyPayload, type PtyViewerFrame } from './ptyWire.ts';
+import { createInputCoalescer, type InputCoalescer } from './ptyInputCoalescer.ts';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSelector } from 'react-redux';
 import { apiAbsoluteUrl } from '../../api/apiBase.ts';
@@ -126,14 +127,6 @@ async function getCryptoKey(rawKeyHex: string): Promise<CryptoKey> {
   cachedRawKeyHex = rawKeyHex;
   cachedCryptoKey = key;
   return key;
-}
-
-function toBase64(str: string): string {
-  try {
-    return btoa(str);
-  } catch {
-    return bytesToBase64(new TextEncoder().encode(str));
-  }
 }
 
 /**
@@ -335,6 +328,7 @@ export function useShellStream({
     clearReconnectTimer();
     clearStreamReadyFallbackTimer();
     inputQueueRef.current = Promise.resolve();
+    inputCoalescerRef.current?.reset();
     isStreamReadyRef.current = false;
     setIsStreamReady(false);
     pendingKeyEventsRef.current = [];
@@ -591,34 +585,27 @@ export function useShellStream({
     };
   }, [sessionId, enabled, connect]);
 
-  const dispatchInput: (data: string) => void = useCallback((data: string) => {
-    if (data.length > 8192) {
-      for (const part of splitPaneInput(data)) dispatchInput(part);
-      return;
-    }
+  /**
+   * REQ-PTY-NET-3: one binary INPUT frame per coalesced chunk (ptyWire.ts), no JSON, no
+   * base64, and the hub relays it to the bridge ack-less. Encryption keeps its own ordered
+   * queue so frames leave in the order they were typed.
+   */
+  const sendInputChunk = useCallback((data: string) => {
     const s = socketRef.current;
     if (!s || s.readyState !== WebSocket.OPEN) {
       console.warn('[useShellStream] sendInput called but socket is not open, readyState:', s?.readyState);
       return;
     }
-
     const activeKey = getActiveVaultKey();
     const isUnlocked = isVaultUnlockedRef.current || Boolean(activeKey);
-
-    console.log('[useShellStream] sendInput sending keystroke(s):', {
-      chars: data.length,
-      isUnlocked,
-      hasKey: Boolean(activeKey),
-    });
-
+    const bytes = new TextEncoder().encode(data);
     if (isUnlocked && activeKey) {
       inputQueueRef.current = inputQueueRef.current.then(async () => {
         if (s.readyState !== WebSocket.OPEN) return;
         try {
-          const enc_b64 = await encryptShellStreamPayload(data, activeKey);
+          const sealed = await encryptPtyPayload(bytes, activeKey);
           if (s.readyState === WebSocket.OPEN) {
-            s.send(JSON.stringify({ type: 'input', data_b64: enc_b64, is_encrypted: true }));
-            console.log('[useShellStream] sendInput sent encrypted input frame');
+            s.send(encodePtyViewerFrame(PTY_WIRE_KIND_INPUT, PTY_WIRE_FLAG_ENCRYPTED, sealed));
           }
         } catch (err) {
           console.warn('[useShellStream] input encryption failed:', err);
@@ -626,9 +613,19 @@ export function useShellStream({
         }
       }).catch(() => { /* ignore queue error */ });
     } else {
-      s.send(JSON.stringify({ type: 'input', data_b64: toBase64(data), is_encrypted: false }));
-      console.log('[useShellStream] sendInput sent plaintext input frame');
+      s.send(encodePtyViewerFrame(PTY_WIRE_KIND_INPUT, 0, bytes));
     }
+  }, []);
+
+  // Coalesces onData calls landing in one macrotask (key repeat, paste) into one frame,
+  // split at the 8 KiB input budget. See ptyInputCoalescer.ts.
+  const inputCoalescerRef = useRef<InputCoalescer | null>(null);
+  if (inputCoalescerRef.current === null) {
+    inputCoalescerRef.current = createInputCoalescer((chunk) => sendInputChunk(chunk));
+  }
+
+  const dispatchInput: (data: string) => void = useCallback((data: string) => {
+    inputCoalescerRef.current?.push(data);
   }, []);
 
   useEffect(() => {

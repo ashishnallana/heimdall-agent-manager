@@ -153,8 +153,8 @@ pty_drain_respects_the_per_frame_byte_cap :: proc(t: ^testing.T) {
 	restore, pk, pc, hk, hc, sw := _p1_disable_vault()
 	defer restore(pk, pc, hk, hc, sw)
 
-	// 5 x 6 KiB = 30 KiB incremental: fits in 16 KiB frames as 12 + 12 + 6.
-	chunk := strings.repeat("y", 6 * 1024, context.temp_allocator)
+	// 5 x 5 KiB = 25 KiB incremental: fits in 12 KiB frames as 10 + 10 + 5.
+	chunk := strings.repeat("y", 5 * 1024, context.temp_allocator)
 	for _ in 0 ..< 5 do bridge_pty_stream_emit_frame(nil, "sh_cap", transmute([]byte)chunk)
 	frames := bridge_pty_stream_take_outgoing()
 	defer { for f in frames do delete(f, runtime.heap_allocator()); delete(frames) }
@@ -165,14 +165,16 @@ pty_drain_respects_the_per_frame_byte_cap :: proc(t: ^testing.T) {
 		testing.expect(t, n <= BRIDGE_PTY_STREAM_EMIT_INCREMENTAL_BYTES, "merged frame within the incremental cap")
 		total += n
 	}
-	testing.expect_value(t, total, 5 * 6 * 1024)
+	testing.expect_value(t, total, 5 * 5 * 1024)
 
 	// A single oversized emit is split at enqueue, never dropped.
-	big := strings.repeat("z", 40 * 1024, context.temp_allocator)
+	big := strings.repeat("z", 30 * 1024, context.temp_allocator)
 	bridge_pty_stream_emit_frame(nil, "sh_big", transmute([]byte)big)
 	frames2 := bridge_pty_stream_take_outgoing()
 	defer { for f in frames2 do delete(f, runtime.heap_allocator()); delete(frames2) }
-	testing.expect_value(t, len(frames2), 3) // 16 + 16 + 8
+	testing.expect_value(t, len(frames2), 3) // 12 + 12 + 6
+	// Every frame — payload, header and session id — stays under the 16 KiB edge ceiling.
+	for f in frames2 do testing.expect(t, len(f) < 16 * 1024, "wire frame under the edge-proxy per-message ceiling")
 }
 
 @(test)
