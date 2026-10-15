@@ -262,7 +262,7 @@ agent_instance_stream_handler :: proc(ctx: rawptr, req: Request, client: net.TCP
 				// they cannot drift apart again.
 				if shell_stream_should_send_screen_snapshot(late_join, screen_sent, rows, cols) {
 					screen_sent = true
-					_ = shell_stream_send_agent_screen_snapshot(h.agents, h.shell_sessions, auth_ctx, instance_id, client, rows, cols)
+					_ = shell_stream_send_agent_screen_snapshot(h.agents, h.shell_sessions, auth_ctx, instance_id, client, rows, cols, late_join)
 				}
 			}
 		case "heartbeat":

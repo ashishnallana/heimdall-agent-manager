@@ -42,6 +42,8 @@ Shell_Session_Service :: struct {
 	viewer_writers: map[net.TCP_Socket]^Pane_Viewer_Writer,
 	viewer_write_refs: map[string]int,
 	pane_bridge_bytes: map[string]int,
+	// REQ-PTY-NET-4: last repaint per session, see shell_snapshot_cache.odin. Under mu.
+	snapshot_cache: map[string]^Shell_Snapshot_Cache_Entry,
 	// CRUD layer (T5) — session_owners and session_bridges also protected by mu.
 	repo:                ^iface.Shell_Session_Repository,
 	bridge_command_sink: project_service.Bridge_Command_Sink,
@@ -121,6 +123,7 @@ shell_session_service_free :: proc(svc: ^Shell_Session_Service) {
 	delete(svc.session_bridges)
 	for bridge_id in svc.kill_replay_bridges do delete(bridge_id, heap)
 	delete(svc.kill_replay_bridges)
+	_snapshot_cache_free_all_locked(svc)
 	sync.mutex_lock(&svc.tunnel_mu)
 	defer sync.mutex_unlock(&svc.tunnel_mu)
 	for k, stream in svc.tunnel_streams {
@@ -388,6 +391,10 @@ shell_session_broadcast_output :: proc(svc: ^Shell_Session_Service, session_id: 
 	if len(sockets) == 0 do return
 	frame := contracts.pty_wire_encode_viewer_frame(contracts.PTY_WIRE_KIND_OUTPUT, contracts.pty_wire_flags(is_snapshot, is_encrypted), payload)
 	defer delete(frame)
+	// REQ-PTY-NET-4: remember the catch-up so a later joiner can be served from it and
+	// the viewers painted by it are never repainted by the hub capture. Noted BEFORE the
+	// fan-out so a first-resize that races the broadcast sees the entry.
+	shell_session_snapshot_cache_note_output(svc, session_id, frame, is_snapshot, sockets)
 	for sock in sockets {
 		// The write happens under the session write lock; the detach deliberately does
 		// NOT — it takes svc.mu, and nothing may hold the write lock while doing that.
@@ -438,6 +445,8 @@ shell_session_broadcast_stream_ready :: proc(svc: ^Shell_Session_Service, sessio
 // shell_session_broadcast_stream_closed relays stream_closed to all attached WebSocket viewers (REQ-STREAM-EVENT-3).
 shell_session_broadcast_stream_closed :: proc(svc: ^Shell_Session_Service, session_id: string, exit_code: int, exit_code_set: bool) {
 	if svc == nil || session_id == "" do return
+	// REQ-PTY-NET-4: a closed stream's last repaint is history, not a screen to serve.
+	shell_session_snapshot_cache_evict(svc, session_id)
 	sockets := _copy_viewers(svc, session_id)
 	defer delete(sockets)
 	if len(sockets) == 0 do return

@@ -221,7 +221,7 @@ shell_session_stream_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_
 				// session needs the snapshot too. See that proc for why serving it is safe.
 				if shell_stream_should_send_screen_snapshot(late_join, screen_sent, rows, cols) {
 					screen_sent = true
-					_ = shell_stream_send_shell_screen_snapshot(h.shell_sessions, auth_ctx, session_id, client, rows, cols)
+					_ = shell_stream_send_shell_screen_snapshot(h.shell_sessions, auth_ctx, session_id, client, rows, cols, late_join)
 				}
 			}
 		}

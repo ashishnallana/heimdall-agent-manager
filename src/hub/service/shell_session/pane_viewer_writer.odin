@@ -202,6 +202,9 @@ shell_session_viewer_write_release :: proc(svc: ^Shell_Session_Service, session_
 
 pane_sequence_collect_locked :: proc(svc: ^Shell_Session_Service, session_id: string) {
 	if len(svc.viewers[session_id]) != 0 || svc.viewer_write_refs[session_id] != 0 do return
+	// REQ-PTY-NET-4: no viewers left — the cached repaint goes with them (the next 0->1
+	// attach earns a fresh catch-up from the pty-host anyway).
+	_snapshot_cache_evict_locked(svc, session_id)
 	for key, mu in svc.viewer_write_mu {
 		if key == session_id {
 			delete_key(&svc.viewer_write_refs, key)
