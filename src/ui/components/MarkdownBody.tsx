@@ -400,7 +400,9 @@ export async function renderMermaidElement(
 export default function MarkdownBody({ source, className, compact, copyAll = true, 'data-debug-id': dataDebugId, onArtifactClick, onTextSelectionChange }: MarkdownBodyProps) {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const html = useMemo(() => renderMarkdown(source || '', copyAll), [source, copyAll]);
-  const spacing = compact ? 'space-y-1' : 'space-y-3';
+  // Compact (chat) spacing lives in `.markdown-compact` (styles.css): a `space-y-*`
+  // utility out-specifies the heading/paragraph margins and collapses every gap to 4px.
+  const spacing = compact ? 'markdown-compact' : 'space-y-3';
   const dispatch = useDispatch<any>();
   const session = useSelector((state: any) => state.chat?.session || {});
   const clientToken = session?.clientToken || '';

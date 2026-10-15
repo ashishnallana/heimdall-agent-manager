@@ -74,7 +74,7 @@ const TABS: { id: string; label: string; icon: IconName; route: string }[] = [
  * a shell measurement down. Cleared on unmount: when the tab bar is gone (desktop,
  * or a chrome-suppressed route) the variable is absent and consumers fall back to 0.
  */
-function useBottomChromeVar(ref: { current: HTMLElement | null }) {
+export function useBottomChromeVar(ref: { current: HTMLElement | null }) {
   useEffect(() => {
     const node = ref.current;
     if (!node || typeof window === 'undefined') return undefined;

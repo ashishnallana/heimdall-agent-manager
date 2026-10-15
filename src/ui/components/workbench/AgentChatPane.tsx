@@ -73,6 +73,7 @@ import { VaultText } from '../vault/VaultText';
 import { describeCron, formatInTimeZone, timeZoneLabel } from '../actions/scheduleUtils';
 import { TaskChainSelectorModal } from '../chains/TaskChainSelectorModal';
 import { useIsMobile } from '../shell/responsive';
+import { chromeIconButtonSizeClass } from '../shell/shellChrome';
 import {
   ClubbedRunGroup,
   PinnedShellRuns,
@@ -2108,7 +2109,7 @@ export function AgentChatPane({
                         type="button"
                         data-debug-id={`conversation-attachment-retry-${a.localId}`}
                         onClick={() => void uploadAttachment(a.file, a.localId)}
-                        className="rounded-full border border-subtle px-2 py-0.5 text-primary hover:bg-neutral-soft"
+                        className={`rounded-full border border-subtle text-primary hover:bg-neutral-soft ${isMobile ? 'min-h-11 px-4' : 'px-2 py-0.5'}`}
                       >
                         Retry
                       </button>
@@ -2121,7 +2122,7 @@ export function AgentChatPane({
                           prev.filter((item) => item.localId !== a.localId),
                         )
                       }
-                      className="rounded-full border border-subtle px-2 py-0.5 text-muted hover:bg-neutral-soft hover:text-primary"
+                      className={`rounded-full border border-subtle text-muted hover:bg-neutral-soft hover:text-primary ${isMobile ? 'min-h-11 px-4' : 'px-2 py-0.5'}`}
                     >
                       Remove
                     </button>
@@ -2373,7 +2374,7 @@ export function AgentChatPane({
                 </div>
               ) : isMobile && !pendingReconfig ? (
                 <div className="flex items-end gap-2">
-                  <div className="min-w-0 flex-1 py-1.5">{composerInput}</div>
+                  <div className="min-w-0 flex-1 py-2.5">{composerInput}</div>
                   <MessageComposerActions {...composerActions} inline />
                 </div>
               ) : (
@@ -2449,7 +2450,7 @@ export function AgentChatPane({
           // replaced or closed.
           <header
             data-debug-id="conversation-thread-header-minimal"
-            className="flex min-h-12 shrink-0 items-center justify-end gap-1 px-3 py-2"
+            className={`flex ${isMobile ? 'min-h-14' : 'min-h-12'} shrink-0 items-center justify-end gap-1 px-3 py-2`}
           >
             {headerLeading ? <div className="mr-auto flex items-center gap-1">{headerLeading}</div> : null}
             {onReplaceWithNew ? (
@@ -2470,7 +2471,7 @@ export function AgentChatPane({
                 aria-label="Close pane"
                 title="Close pane"
                 onClick={onClosePane}
-                className="grid h-8 w-8 place-items-center rounded-lg text-muted hover:bg-neutral-soft hover:text-primary"
+                className={`grid ${chromeIconButtonSizeClass(isMobile)} place-items-center text-muted hover:bg-neutral-soft hover:text-primary`}
               >
                 <Icon name="close" size={16} />
               </button>
@@ -2506,7 +2507,7 @@ export function AgentChatPane({
       {!isAuxSubagent ? (
       <header
         data-debug-id="conversation-thread-header"
-        className="sticky top-0 z-20 flex min-h-12 shrink-0 items-center gap-2 px-3 py-2 sm:gap-3 sm:px-4 bg-canvas/90 backdrop-blur-md overflow-visible"
+        className={`sticky top-0 z-20 flex ${isMobile ? 'min-h-14' : 'min-h-12'} shrink-0 items-center gap-2 px-3 py-2 sm:gap-3 sm:px-4 bg-canvas/90 backdrop-blur-md overflow-visible`}
       >
         <div
           data-debug-id="conversation-topbar-blur-fade"
@@ -2540,7 +2541,7 @@ export function AgentChatPane({
                     setTitleDraft(editableTitle);
                   }
                 }}
-                className="min-h-9 min-w-0 flex-1 rounded-xl border border-subtle bg-surface px-3 py-1.5 text-base font-semibold text-primary outline-none focus:border-accent sm:text-sm"
+                className={`${isMobile ? 'min-h-11' : 'min-h-9'} min-w-0 flex-1 rounded-xl border border-subtle bg-surface px-3 py-1.5 text-base font-semibold text-primary outline-none focus:border-accent sm:text-sm`}
                 autoFocus
               />
               <button
@@ -2550,7 +2551,7 @@ export function AgentChatPane({
                 title="Save"
                 onClick={() => void saveConversationTitle()}
                 disabled={updateTitleState.isLoading || !titleDraft.trim()}
-                className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-accent text-accent-fg hover:opacity-90 disabled:opacity-50"
+                className={`grid ${isMobile ? 'h-11 w-11 rounded-full' : 'h-9 w-9 rounded-xl'} shrink-0 place-items-center bg-accent text-accent-fg hover:opacity-90 disabled:opacity-50`}
               >
                 <Icon name="check" size={16} />
               </button>
@@ -2564,7 +2565,7 @@ export function AgentChatPane({
                   setTitleError('');
                   setTitleDraft(editableTitle);
                 }}
-                className="grid h-9 w-9 shrink-0 place-items-center rounded-xl border border-subtle bg-surface-raised text-muted hover:bg-neutral-soft hover:text-primary"
+                className={`grid ${isMobile ? 'h-11 w-11 rounded-full' : 'h-9 w-9 rounded-xl'} shrink-0 place-items-center border border-subtle bg-surface-raised text-muted hover:bg-neutral-soft hover:text-primary`}
               >
                 <Icon name="close" size={16} />
               </button>
@@ -2591,7 +2592,7 @@ export function AgentChatPane({
                 aria-label="Select task chain"
                 title="Click to search and select task chains"
                 onClick={() => setChainSelectorOpen(true)}
-                className="group flex min-w-0 items-center gap-1.5 rounded-md px-1.5 py-0.5 text-left text-sm font-medium text-primary hover:bg-neutral-soft hover:text-accent transition-colors cursor-pointer"
+                className={`group flex min-w-0 items-center gap-1.5 rounded-md px-1.5 py-0.5 text-left ${isMobile ? 'min-h-11 text-[15px]' : 'text-sm'} font-medium text-primary hover:bg-neutral-soft hover:text-accent transition-colors cursor-pointer`}
               >
                 <span className="truncate">
                   <VaultText value={chainTitle || title} as="span" />
@@ -2613,7 +2614,7 @@ export function AgentChatPane({
                   setChainAgentSwitcherOpen(true);
                   refetchIfStarted(chainDetailQuery);
                 }}
-                className="flex min-w-0 items-center gap-1.5 rounded-md px-1.5 py-0.5 text-primary hover:bg-neutral-soft"
+                className={`flex min-w-0 items-center gap-1.5 rounded-md px-1.5 py-0.5 text-primary hover:bg-neutral-soft ${isMobile ? 'min-h-11 text-[15px]' : ''}`}
               >
                 <StatusDot
                   size="sm"
@@ -2680,9 +2681,9 @@ export function AgentChatPane({
                 data-debug-id="conversation-thread-overflow-menu-btn"
                 aria-label="Conversation options"
                 title="More options"
-                className="grid h-8 w-8 shrink-0 place-items-center rounded-lg text-muted hover:bg-neutral-soft hover:text-primary"
+                className={`grid ${chromeIconButtonSizeClass(isMobile)} shrink-0 place-items-center text-muted hover:bg-neutral-soft hover:text-primary`}
               >
-                <Icon name="more-vertical" size={18} />
+                <Icon name="more-vertical" size={isMobile ? 22 : 18} />
               </button>
             }
           >
@@ -2818,7 +2819,7 @@ export function AgentChatPane({
               aria-label="Close pane"
               title="Close pane"
               onClick={onClosePane}
-              className="grid h-8 w-8 shrink-0 place-items-center rounded-lg text-muted hover:bg-neutral-soft hover:text-primary"
+              className={`grid ${chromeIconButtonSizeClass(isMobile)} shrink-0 place-items-center text-muted hover:bg-neutral-soft hover:text-primary`}
             >
               <Icon name="close" size={16} />
             </button>

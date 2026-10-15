@@ -17,12 +17,16 @@ import { useListSidebarConversationsQuery, type SidebarConversation } from '../.
 import { useGetAgentsLiveQuery, type LiveProject } from '../../api/endpoints/agentsLive';
 import { useFetchTaskChainGroupsQuery } from '../../api/endpoints/tasks';
 import { useListBridgesQuery, type Bridge } from '../../api/endpoints/bridgeSupport';
+import { useListShellsQuery } from '../../api/endpoints/shells';
+import { StatusBar } from './statusBar/StatusBar';
+import { STATUS_BAR_MODULES } from './statusBar/modules';
+import { countConnectedBridges, countRunningInstances, countShells } from './statusBar/statusBarModel';
 import { useGetAccountBillingQuery } from '../../api/endpoints/accountBilling';
 import SidebarUpdateBadge from './SidebarUpdateBadge';
 import {
-  COMPACT_TOP_LEFT_CLUSTER_WIDTH,
-  TOP_CHROME_HEIGHT,
-  TOP_LEFT_CLUSTER_WIDTH,
+  chromeIconButtonSizeClass,
+  topChromeHeight,
+  topLeftClusterWidth as computeTopLeftClusterWidth,
   isAgentConversationRoute,
 } from './shellChrome';
 import type { PendingBridgeUpdate } from '../settings/bridgeUpdate';
@@ -301,6 +305,9 @@ function routeDescription(path: string): string {
   if (path.startsWith('/settings')) return 'Settings surface for Bridges, Providers, Appearance, User tokens, Projects, and Defaults.';
   return 'Chat-first home with the routed main region ready for conversation surfaces.';
 }
+
+// Live shells fetched for the status bar's counts; a full page renders as "N+".
+const STATUS_BAR_SHELL_LIMIT = 200;
 
 const SETTINGS_NAV = [
   { path: '/settings/bridges', label: 'Bridges' },
@@ -1371,6 +1378,7 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
     () => selectOnlineLockedBridgeIds(bridges),
     [bridges],
   );
+  const connectedBridgeCount = useMemo(() => countConnectedBridges(bridges), [bridges]);
   const onlineLockedBridgeSignature = onlineLockedBridgeIds.join('\u0000');
   const hasOnlineLockedBridge = isVaultUnlocked && onlineLockedBridgeIds.length > 0;
   const bridgeReconciliationRef = useRef<Promise<BridgeVaultReconciliationResult> | null>(null);
@@ -1499,6 +1507,14 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
     [agentNamesById, conversationsQuery.data],
   );
   const liveProjects = useMemo(() => agentsLiveQuery.data || [], [agentsLiveQuery.data]);
+  // REQ-BAR-2: status bar counts. Instances reuse the agents-live poll above; live
+  // shells are kept fresh by the user-WS shell events that invalidate this list.
+  const liveShellsQuery = useListShellsQuery({ status: 'live', limit: STATUS_BAR_SHELL_LIMIT });
+  const runningInstanceCount = useMemo(() => countRunningInstances(liveProjects), [liveProjects]);
+  const shellCounts = useMemo(
+    () => countShells(liveShellsQuery.data?.sessions, liveShellsQuery.data?.has_more),
+    [liveShellsQuery.data],
+  );
   const chainGroupsQuery = useFetchTaskChainGroupsQuery();
   const searchChains = useSelector(selectSearchChains);
 
@@ -1695,7 +1711,9 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
   const isWorkspaceRoute = isAgentConversationRoute(path);
   const hideTopLeftCluster = isMobile && isWorkspaceRoute && isCurrentAuxPaneOpen;
   const showBrand = !isWorkspaceRoute;
-  const topLeftClusterWidth = showBrand ? TOP_LEFT_CLUSTER_WIDTH : COMPACT_TOP_LEFT_CLUSTER_WIDTH;
+  const topLeftClusterWidth = computeTopLeftClusterWidth(isMobile, showBrand);
+  const chromeHeight = topChromeHeight(isMobile);
+  const chromeIconButtonClass = chromeIconButtonSizeClass(isMobile);
   // Fixed window controls: sidebar + vault everywhere, plus the wordmark on
   // every route except an agent conversation. They do not move with the sidebar.
   const sidebarToggleButton = (
@@ -1706,13 +1724,14 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
       aria-label={isEffectiveCollapsed ? 'Show sidebar' : 'Hide sidebar'}
       title={isEffectiveCollapsed ? 'Show sidebar' : 'Hide sidebar'}
       aria-expanded={!isEffectiveCollapsed}
-      className="grid h-8 w-8 shrink-0 place-items-center rounded-lg text-muted hover:bg-neutral-soft hover:text-primary"
+      className={`grid ${chromeIconButtonClass} shrink-0 place-items-center text-muted hover:bg-neutral-soft hover:text-primary`}
     >
-      <Icon name="panel-left" size={16} />
+      <Icon name="panel-left" size={isMobile ? 20 : 16} />
     </button>
   );
   const vaultSupported = isVaultSupported();
-  const vaultStatusButton = (
+  // Rendered by the status bar's vault module, which supplies `compact` (mobile).
+  const renderVaultStatusButton = (compact: boolean) => (
     <button
       data-debug-id="shell-vault-status-toggle"
       type="button"
@@ -1743,7 +1762,7 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
           : isVaultUnlocked
             ? 'Vault unlocked — click to lock'
             : 'Vault locked — click to unlock'}
-      className={`grid h-8 w-8 shrink-0 place-items-center rounded-lg transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+      className={`inline-flex shrink-0 items-center gap-1 rounded-md px-1.5 font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${compact ? 'h-8 text-[13px]' : 'h-6 text-[11px]'} ${
         hasOnlineLockedBridge
           ? 'bg-warning-soft text-warning hover:bg-warning/20'
           : isVaultUnlocked
@@ -1751,7 +1770,8 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
           : 'bg-danger-soft text-danger hover:bg-danger/20'
       }`}
     >
-      <Icon name={isVaultUnlocked && !hasOnlineLockedBridge ? 'lock-open' : 'lock'} size={16} />
+      <Icon name={isVaultUnlocked && !hasOnlineLockedBridge ? 'lock-open' : 'lock'} size={compact ? 14 : 12} />
+      <span>{hasOnlineLockedBridge ? `${onlineLockedBridgeIds.length} locked` : isVaultUnlocked ? 'Unlocked' : 'Locked'}</span>
     </button>
   );
   const brandLink = (
@@ -1816,8 +1836,11 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
        the shell end where the keyboard begins. Keep `inset-x-0 top-0`, NOT `inset-0`. */
     <div
       data-debug-id="app-shell"
-      className="fixed inset-x-0 top-0 app-viewport-height flex w-full max-w-full overflow-hidden bg-canvas text-primary"
+      className="fixed inset-x-0 top-0 app-viewport-height flex w-full max-w-full flex-col overflow-hidden bg-canvas text-primary"
     >
+      {/* REQ-BAR-4: the shell is a column — the app row, then the in-flow status
+          bar. In-flow (not fixed) so it ends where the soft keyboard begins. */}
+      <div data-debug-id="app-shell-row" className="relative flex min-h-0 w-full flex-1 overflow-hidden">
       {/* UI-13: mobile drawer scrim. Closes the expanded sidebar on tap. */}
       {isMobile && drawerOpen ? (
         <div
@@ -1834,10 +1857,9 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
         <div
           data-debug-id="shell-top-left-cluster"
           className="absolute left-0 top-0 z-[60] flex items-center gap-1 px-2"
-          style={{ width: topLeftClusterWidth, height: TOP_CHROME_HEIGHT }}
+          style={{ width: topLeftClusterWidth, height: chromeHeight }}
         >
           {sidebarToggleButton}
-          {vaultStatusButton}
           {showBrand ? brandLink : null}
         </div>
       ) : null}
@@ -1856,7 +1878,7 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
         aria-label="Primary navigation"
       >
         <div className="flex w-80 max-w-[calc(100vw-1rem)] min-h-0 flex-1 flex-col">
-        <div className="flex items-center gap-2 pr-3" style={{ height: TOP_CHROME_HEIGHT }}>
+        <div className="flex items-center gap-2 pr-3" style={{ height: chromeHeight }}>
           <div aria-hidden="true" className="shrink-0" style={{ width: topLeftClusterWidth }} />
           <SidebarUpdateBadge onOpen={openBridgeUpdate} />
         </div>
@@ -1923,7 +1945,7 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
             data-debug-id="shell-sidebar-reopen-bar"
             aria-hidden="true"
             className="shrink-0 border-b border-subtle bg-canvas"
-            style={{ height: TOP_CHROME_HEIGHT }}
+            style={{ height: chromeHeight }}
           />
         ) : null}
         <RouteOutlet
@@ -1936,6 +1958,18 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
           workspaceTrailing={isEffectiveCollapsed ? <SidebarUpdateBadge onOpen={openBridgeUpdate} /> : null}
         />
       </div>
+      </div>
+
+      <StatusBar
+        modules={STATUS_BAR_MODULES}
+        compact={isMobile}
+        data={{
+          runningInstances: runningInstanceCount,
+          connectedBridges: connectedBridgeCount,
+          shells: shellCounts,
+          renderVaultToggle: renderVaultStatusButton,
+        }}
+      />
 
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} onNavigate={handlePaletteNavigate} onAction={handlePaletteAction} currentPath={path} conversationGroups={conversationTree.map((group) => ({ projectId: group.project.projectId, projectName: group.project.name, conversations: group.conversations.map((c) => ({ conversationId: c.conversationId, agentInstanceId: c.agentInstanceId, title: displayConversationTitle(c), agentName: c.agentName, isCoordinator: c.isCoordinator, runtimeStatus: c.runtimeStatus, activityStatus: c.activityStatus, unreadCount: c.unreadCount })) }))} chainGroups={chainGroupsQuery.data?.groups ?? []} />
       <ProjectLaunchModal

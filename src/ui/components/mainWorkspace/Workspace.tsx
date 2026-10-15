@@ -64,7 +64,7 @@ import { AgentChatPane } from '../workbench/AgentChatPane';
 import { MainPaneFrame } from './MainPaneFrame';
 import { MobileMainPager } from './MobileMainPager';
 import HomePage from '../home/HomePage';
-import { PANE_ANIMATION_MS, TOP_CHROME_HEIGHT } from '../shell/shellChrome';
+import { PANE_ANIMATION_MS, chromeIconButtonSizeClass, topChromeHeight } from '../shell/shellChrome';
 
 export interface WorkspaceProps {
   focusMessageId?: string;
@@ -338,11 +338,11 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
       aria-pressed={auxOpen}
       disabled={!auxTreeId}
       onClick={toggleAux}
-      className={`grid h-8 w-8 shrink-0 place-items-center rounded-lg transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+      className={`grid ${chromeIconButtonSizeClass(isMobile)} shrink-0 place-items-center transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
         auxOpen ? 'bg-accent/15 text-accent' : 'text-muted hover:bg-neutral-soft hover:text-primary'
       }`}
     >
-      <Icon name="panel-right" size={18} />
+      <Icon name="panel-right" size={isMobile ? 20 : 18} />
     </button>
   );
 
@@ -536,7 +536,7 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
         ref={topRightRef}
         data-debug-id="workspace-top-right-cluster"
         className="absolute right-0 top-0 z-30 flex items-center gap-1 pl-1 pr-2"
-        style={{ height: TOP_CHROME_HEIGHT }}
+        style={{ height: topChromeHeight(isMobile) }}
       >
         {trailing}
         {auxToggle}

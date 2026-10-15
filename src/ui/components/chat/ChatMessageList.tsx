@@ -16,16 +16,20 @@ import { selectActiveVaultKey } from '../../store/vaultSlice';
 import { extractMessageOptions } from './types';
 import type { ChatDeliveryStatus, ChatMessage, ChatTimestamp } from './types';
 import ChatActionCard from './ChatActionCard';
+import { useIsMobile } from '../shell/responsive';
+import { Icon, Spinner } from '@ui';
 
 const EMPTY_TIMESTAMP: ChatTimestamp = { label: '', iso: '' };
 const EMPTY_DELIVERY: ChatDeliveryStatus = { glyph: '', label: '', tone: '' };
 
-// CHAT-SCROLL: per the user's request, always scroll the list to the bottom when a
-// new INBOUND message arrives in the active conversation (not only when already
-// near the bottom). Flip this to false to restore the standard "don't yank while
-// reading history" near-bottom guard for inbound messages. The user's OWN send
-// always scrolls to the bottom regardless of this flag.
-const SCROLL_TO_BOTTOM_ON_INBOUND = true;
+// CHAT-SCROLL: an INBOUND message scrolls the list to the bottom only when the reader
+// is already at the bottom (stickyRef), so reading history is never yanked away.
+// The user's OWN send always scrolls to the bottom.
+const SCROLL_TO_BOTTOM_ON_INBOUND = false;
+
+// Infinite scroll: start fetching the previous page once the top sentinel is within
+// this distance of the viewport, so it usually lands before the reader reaches it.
+const LOAD_OLDER_ROOT_MARGIN = '400px 0px 0px 0px';
 
 // Deep-link scroll-to-match tuning. HIGHLIGHT_MS is how long the matched message
 // stays tinted; MAX_FOCUS_PAGE_LOADS caps how many "load older" pages we auto-fetch
@@ -165,9 +169,16 @@ export default function ChatMessageList({
   wrapperClassName?: string;
   scrollClassName?: string;
 }) {
+  const isMobile = useIsMobile();
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const stickyRef = useRef(true);
   const lastCountRef = useRef(0);
+  // First/last keys and scrollHeight as of the previous layout pass, to tell a
+  // prepended older page (keep the reader's position) from an appended message.
+  const firstKeyRef = useRef<string | null>(null);
+  const lastKeyRef = useRef<string | null>(null);
+  const prevScrollHeightRef = useRef(0);
+  const topSentinelRef = useRef<HTMLDivElement | null>(null);
   const lastConversationRef = useRef(conversationKey);
   const didInitialScrollRef = useRef(false);
   const [showJump, setShowJump] = useState(false);
@@ -191,6 +202,16 @@ export default function ChatMessageList({
   }, []);
 
   useLayoutEffect(() => {
+    const node = scrollRef.current;
+    const firstKey = messages[0]?.key ?? null;
+    const lastKey = messages[messages.length - 1]?.key ?? null;
+    const prevFirstKey = firstKeyRef.current;
+    const prevLastKey = lastKeyRef.current;
+    const prevScrollHeight = prevScrollHeightRef.current;
+    firstKeyRef.current = firstKey;
+    lastKeyRef.current = lastKey;
+    prevScrollHeightRef.current = node?.scrollHeight ?? 0;
+
     if (lastConversationRef.current !== conversationKey) {
       lastConversationRef.current = conversationKey;
       lastCountRef.current = 0;
@@ -215,6 +236,13 @@ export default function ChatMessageList({
     if (count !== lastCountRef.current) {
       const grew = count > lastCountRef.current;
       lastCountRef.current = count;
+      // An older page was prepended (same newest message, new oldest one): hold the
+      // reader where they were by shifting scrollTop by the height that was added
+      // above them. Never scroll to the bottom for this.
+      if (grew && node && lastKey === prevLastKey && firstKey !== prevFirstKey) {
+        node.scrollTop += node.scrollHeight - prevScrollHeight;
+        return;
+      }
       if (grew) {
         // Always scroll on the user's OWN send (even if scrolled up); for inbound
         // messages scroll per SCROLL_TO_BOTTOM_ON_INBOUND, else only when the user
@@ -225,7 +253,7 @@ export default function ChatMessageList({
         }
       }
     }
-  }, [conversationKey, messages.length, scrollToBottom]);
+  }, [conversationKey, messages, scrollToBottom]);
 
   // Reset the scroll-to-match bookkeeping whenever the target id changes, so a new
   // search result re-runs the hunt (and re-announces) rather than being suppressed by
@@ -283,10 +311,27 @@ export default function ChatMessageList({
     }
   }, [focusMessageId, messages, debugPrefix, hasMore, loadingOlder, onLoadOlder, reduceMotion]);
 
+  // Infinite scroll: fetch the previous page when the top sentinel nears the viewport.
+  // Waits for the initial bottom-scroll so opening a conversation doesn't page in
+  // history the reader never scrolled to.
+  useEffect(() => {
+    const root = scrollRef.current;
+    const sentinel = topSentinelRef.current;
+    if (!root || !sentinel || !hasMore || !onLoadOlder || loadingOlder) return;
+    if (typeof IntersectionObserver === 'undefined') return;
+    const observer = new IntersectionObserver((entries) => {
+      if (!didInitialScrollRef.current) return;
+      if (entries.some((entry) => entry.isIntersecting)) onLoadOlder();
+    }, { root, rootMargin: LOAD_OLDER_ROOT_MARGIN });
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [hasMore, loadingOlder, onLoadOlder, messages.length]);
+
   const onScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
     onScrollProp?.(event);
     const node = scrollRef.current;
     if (!node) return;
+    prevScrollHeightRef.current = node.scrollHeight;
     const distance = node.scrollHeight - node.scrollTop - node.clientHeight;
     const nearBottom = distance < 64;
     stickyRef.current = nearBottom;
@@ -298,13 +343,15 @@ export default function ChatMessageList({
       {/* Polite live region for scroll-to-match: announces the jump / paging / not-found
           to screen readers without stealing focus or blocking. */}
       <div data-debug-id={`${debugPrefix}-focus-status`} role="status" aria-live="polite" className="sr-only">{focusAnnouncement}</div>
-      <div ref={scrollRef} data-debug-id={`${debugPrefix}-scroll`} onScroll={onScroll} className={scrollClassName}>
+      <div ref={scrollRef} data-debug-id={`${debugPrefix}-scroll`} onScroll={onScroll} className={`${scrollClassName} [overflow-anchor:none]`}>
         <div data-debug-id={`${debugPrefix}-messages-container`} className="mx-auto w-full max-w-4xl space-y-3 sm:space-y-4">
           {hasMore ? (
-            <div className="flex justify-center">
-              <button data-debug-id={`${debugPrefix}-load-older-messages-btn`} type="button" onClick={onLoadOlder} disabled={loadingOlder || !onLoadOlder} className="rounded-full border border-subtle bg-surface px-3 py-1.5 text-xs text-muted hover:text-primary disabled:cursor-not-allowed disabled:opacity-50">
-                {loadingOlder ? 'Loading older messages…' : 'Load older messages'}
-              </button>
+            <div
+              ref={topSentinelRef}
+              data-debug-id={`${debugPrefix}-load-older-sentinel`}
+              className="flex min-h-8 justify-center"
+            >
+              {loadingOlder ? <Spinner size="sm" label="Loading older messages…" /> : null}
             </div>
           ) : null}
           {messages.length === 0 ? (
@@ -334,7 +381,7 @@ export default function ChatMessageList({
                           type="button"
                           data-debug-id={`${debugPrefix}-option-chip-${message.messageId}-${optIdx}`}
                           onClick={() => reply(option)}
-                          className="inline-flex items-center rounded-full border border-accent/40 bg-accent/10 px-3 py-1 text-xs font-medium text-accent hover:bg-accent/20 active:scale-95 transition-all cursor-pointer"
+                          className={`inline-flex items-center rounded-full border border-accent/40 bg-accent/10 ${isMobile ? 'min-h-11 px-4 text-sm' : 'px-3 py-1 text-xs'} font-medium text-accent hover:bg-accent/20 active:scale-95 transition-all cursor-pointer`}
                         >
                           {option}
                         </button>
@@ -369,7 +416,16 @@ export default function ChatMessageList({
         </div>
       </div>
       {showJump ? (
-        <button data-debug-id={`${debugPrefix}-jump-latest-btn`} onClick={() => scrollToBottom('smooth')} className="absolute bottom-3 right-3 rounded-full border border-subtle bg-surface-raised/90 px-3 py-1 text-caption text-primary shadow-lg hover:bg-surface-raised">Jump to latest ↓</button>
+        <button
+          type="button"
+          data-debug-id={`${debugPrefix}-jump-latest-btn`}
+          aria-label="Jump to latest"
+          title="Jump to latest"
+          onClick={() => scrollToBottom('smooth')}
+          className={`ui-liquid-glass absolute bottom-3 left-1/2 grid -translate-x-1/2 place-items-center rounded-full text-primary transition-transform active:scale-95 ${isMobile ? 'h-11 w-11' : 'h-9 w-9'}`}
+        >
+          <Icon name="arrow-down" size={isMobile ? 20 : 18} />
+        </button>
       ) : null}
     </div>
   );

@@ -9,8 +9,15 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   COMPACT_TOP_LEFT_CLUSTER_WIDTH,
+  MOBILE_COMPACT_TOP_LEFT_CLUSTER_WIDTH,
+  MOBILE_TOP_CHROME_HEIGHT,
+  MOBILE_TOP_LEFT_CLUSTER_WIDTH,
+  TOP_CHROME_HEIGHT,
   TOP_LEFT_CLUSTER_WIDTH,
+  chromeIconButtonSizeClass,
   isAgentConversationRoute,
+  topChromeHeight,
+  topLeftClusterWidth,
 } from '../src/ui/components/shell/shellChrome.ts';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -41,10 +48,11 @@ test('hidden sidebar renders no rail; the fixed top-left cluster compacts on age
   // One fixed cluster with the toggle + brand, outside the sidebar (so it does not move).
   const cluster = source.slice(source.indexOf('data-debug-id="shell-top-left-cluster"') - 40, source.indexOf('data-debug-id="shell-top-left-cluster"') + 400);
   assert.match(cluster, /absolute left-0 top-0/);
-  assert.match(cluster, /\{sidebarToggleButton\}\s*\{vaultStatusButton\}\s*\{showBrand \? brandLink : null\}/);
+  assert.match(cluster, /\{sidebarToggleButton\}\s*\{showBrand \? brandLink : null\}/);
+  assert.doesNotMatch(cluster, /vaultStatusButton/);
   assert.equal(source.split('{sidebarToggleButton}').length - 1, 1, 'toggle rendered exactly once');
   assert.match(source, /const showBrand = !isWorkspaceRoute/);
-  assert.match(source, /const topLeftClusterWidth = showBrand \? TOP_LEFT_CLUSTER_WIDTH : COMPACT_TOP_LEFT_CLUSTER_WIDTH/);
+  assert.match(source, /const topLeftClusterWidth = computeTopLeftClusterWidth\(isMobile, showBrand\)/);
   // The sidebar animates its width (desktop) / slides (mobile) and its header reserves the cluster.
   assert.match(source, /isEffectiveCollapsed \? 'invisible w-0' : 'visible w-80 border-r border-subtle'/);
   assert.match(source, /isEffectiveCollapsed \? 'invisible -translate-x-full' : 'visible translate-x-0'/);
@@ -69,6 +77,21 @@ test('Heimdall wordmark is visible on Home and hidden only on agent conversation
   assert.ok(TOP_LEFT_CLUSTER_WIDTH > COMPACT_TOP_LEFT_CLUSTER_WIDTH);
 });
 
+test('REQ-MOB-1: mobile window chrome uses 44px round buttons in a 56px row; desktop is unchanged', () => {
+  assert.equal(topChromeHeight(false), TOP_CHROME_HEIGHT);
+  assert.equal(topChromeHeight(true), MOBILE_TOP_CHROME_HEIGHT);
+  assert.equal(topLeftClusterWidth(false, true), TOP_LEFT_CLUSTER_WIDTH);
+  assert.equal(topLeftClusterWidth(false, false), COMPACT_TOP_LEFT_CLUSTER_WIDTH);
+  assert.equal(topLeftClusterWidth(true, true), MOBILE_TOP_LEFT_CLUSTER_WIDTH);
+  assert.equal(topLeftClusterWidth(true, false), MOBILE_COMPACT_TOP_LEFT_CLUSTER_WIDTH);
+  // One 44px button + 8px padding each side must fit the compact cluster.
+  assert.ok(MOBILE_COMPACT_TOP_LEFT_CLUSTER_WIDTH >= 44 + 16);
+  assert.ok(MOBILE_TOP_CHROME_HEIGHT >= 44);
+  assert.equal(chromeIconButtonSizeClass(false), 'h-8 w-8 rounded-lg');
+  assert.equal(chromeIconButtonSizeClass(true), 'h-11 w-11 rounded-full');
+  assert.equal(source.split('height: chromeHeight').length - 1, 3, 'cluster, sidebar header and reopen bar share the chrome height');
+});
+
 test('mobile conversation header omits the project breadcrumb segment and first separator', () => {
   const breadcrumb = chatSource.slice(
     chatSource.indexOf('data-debug-id="conversation-thread-breadcrumb"'),
@@ -85,7 +108,8 @@ test('mobile aux hides the fixed Heimdall and sidebar controls', () => {
   assert.match(source, /\{!hideTopLeftCluster \? \(\s*<div\s+data-debug-id="shell-top-left-cluster"/);
 });
 
-test('vault status toggle sits immediately left of Heimdall and cannot fake unlock', () => {
+test('REQ-BAR-3: vault status toggle lives in the bottom status bar and cannot fake unlock', () => {
+  assert.match(source, /renderVaultToggle: renderVaultStatusButton/);
   assert.match(source, /data-debug-id="shell-vault-status-toggle"/);
   assert.match(source, /Icon name=\{isVaultUnlocked && !hasOnlineLockedBridge \? 'lock-open' : 'lock'\}/);
   assert.match(source, /hasOnlineLockedBridge[\s\S]*'bg-warning-soft text-warning/);
