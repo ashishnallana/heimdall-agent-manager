@@ -4,7 +4,15 @@ import { useDispatch, useSelector } from 'react-redux';
 import NewConversationPage from '../chat/NewConversationPage';
 import ConversationsHomePage from '../chat/ConversationsHomePage';
 import Icon, { type IconName } from '../Icon';
-import { Badge, Breadcrumbs as UiBreadcrumbs, CommandPalette, PageShell, StatusDot } from '@ui';
+import {
+  Badge,
+  Breadcrumbs as UiBreadcrumbs,
+  CommandPalette,
+  DEFAULT_ACTIONS,
+  PageShell,
+  StatusDot,
+  mergePaletteActions,
+} from '@ui';
 import { useIsMobile, useViewport } from './responsive';
 import { AuthUserProvider, type AuthUserIdentity } from '../auth/AuthUserContext';
 import { isAgentWorking } from './agentWorking';
@@ -78,6 +86,8 @@ import VaultPanel from '../settings/VaultPanel';
 import VaultOnboardingModal from '../settings/VaultOnboardingModal';
 import SettingsModal from '../settings/SettingsModal';
 import { resolveSettingsTab } from '../../utils/settingsRouting';
+import { useShortcuts } from '../../services/shortcuts/ShortcutContext';
+import { useRegisterActions } from '../../services/shortcuts/useRegisterActions';
 import {
   selectIsVaultConfigured,
   selectIsVaultUnlocked,
@@ -1351,6 +1361,7 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
   const displayName = user.display_name || user.name || user.user_id || 'Current user';
 
   const dispatch = useDispatch();
+  const { actions: shortcutActions, runAction } = useShortcuts();
   const isCurrentAuxPaneOpen = useSelector((state: any) => {
     const treeId = selectCurrentAuxTreeId(state);
     return Boolean(selectAuxPane(state, treeId)?.isPaneOpen);
@@ -1636,6 +1647,38 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
     window.location.hash = buildRouteHash(route, '');
   };
 
+  useRegisterActions([
+    {
+      id: 'navigation.home',
+      title: 'Go to Home',
+      category: 'Navigation',
+      sequence: ['g', 'h'],
+      run: () => handlePaletteNavigate('/'),
+    },
+    {
+      id: 'navigation.conversations',
+      title: 'Go to Conversations',
+      category: 'Navigation',
+      sequence: ['g', 'c'],
+      run: () => handlePaletteNavigate('/conversations'),
+    },
+    {
+      id: 'navigation.settings',
+      title: 'Open Settings',
+      category: 'Navigation',
+      sequence: ['g', 's'],
+      run: () => {
+        setSettingsModalTab('');
+        setSettingsModalOpenState(true);
+      },
+    },
+  ]);
+
+  const paletteActions = useMemo(
+    () => mergePaletteActions(DEFAULT_ACTIONS, shortcutActions),
+    [shortcutActions],
+  );
+
   const handlePaletteAction = (actionId: string) => {
     switch (actionId) {
       case 'new-conversation':
@@ -1664,6 +1707,8 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
         if (actionId.startsWith('set-theme-')) {
           const themeId = actionId.slice('set-theme-'.length);
           dispatch(setTheme(themeId));
+        } else {
+          runAction(actionId);
         }
         break;
     }
@@ -1972,7 +2017,7 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
         }}
       />
 
-      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} onNavigate={handlePaletteNavigate} onAction={handlePaletteAction} currentPath={path} conversationGroups={conversationTree.map((group) => ({ projectId: group.project.projectId, projectName: group.project.name, conversations: group.conversations.map((c) => ({ conversationId: c.conversationId, agentInstanceId: c.agentInstanceId, title: displayConversationTitle(c), agentName: c.agentName, isCoordinator: c.isCoordinator, runtimeStatus: c.runtimeStatus, activityStatus: c.activityStatus, unreadCount: c.unreadCount })) }))} chainGroups={chainGroupsQuery.data?.groups ?? []} />
+      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} onNavigate={handlePaletteNavigate} onAction={handlePaletteAction} actions={paletteActions} currentPath={path} conversationGroups={conversationTree.map((group) => ({ projectId: group.project.projectId, projectName: group.project.name, conversations: group.conversations.map((c) => ({ conversationId: c.conversationId, agentInstanceId: c.agentInstanceId, title: displayConversationTitle(c), agentName: c.agentName, isCoordinator: c.isCoordinator, runtimeStatus: c.runtimeStatus, activityStatus: c.activityStatus, unreadCount: c.unreadCount })) }))} chainGroups={chainGroupsQuery.data?.groups ?? []} />
       <ProjectLaunchModal
         isOpen={Boolean(launchModalProject)}
         project={launchModalProject}

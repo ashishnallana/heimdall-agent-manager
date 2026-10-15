@@ -39,6 +39,13 @@ export type PaletteAction = {
   route?: string;
 };
 
+export type PaletteShortcutSource = {
+  id: string;
+  title: string;
+  sequence: readonly string[];
+  isEnabled?: () => boolean;
+};
+
 export type PaletteResult =
   | { kind: 'navigate'; label: string; hint?: string; icon?: IconName; route: string; group: string }
   | { kind: 'action'; label: string; hint?: string; badge?: string; icon?: IconName; actionId: string; route?: string; group: 'Actions' }
@@ -107,3 +114,22 @@ export const DEFAULT_ACTIONS: PaletteAction[] = [
     icon: 'spark' as IconName,
   })),
 ];
+
+/** Merge live shortcut actions into the palette without mutating its static defaults. */
+export function mergePaletteActions(
+  staticActions: readonly PaletteAction[],
+  shortcutActions: readonly PaletteShortcutSource[],
+): PaletteAction[] {
+  const merged = new Map(staticActions.map((action) => [action.id, action]));
+  for (const action of shortcutActions) {
+    if (action.isEnabled?.() === false) continue;
+    const sequence = action.sequence.join(' ');
+    merged.set(action.id, {
+      id: action.id,
+      label: action.title,
+      hint: sequence ? `Shortcut: ${sequence}` : undefined,
+      badge: sequence || undefined,
+    });
+  }
+  return Array.from(merged.values());
+}

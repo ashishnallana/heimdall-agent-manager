@@ -14,6 +14,7 @@ import {
   type AppAction,
   type ShortcutKeyboardEvent,
 } from '../src/ui/services/shortcuts/shortcutLogic.ts';
+import { mergePaletteActions } from '../src/ui/components/ui/patterns/commandPaletteLogic.ts';
 
 const actions: AppAction[] = [
   { id: 'home', title: 'Home', category: 'Navigation', sequence: ['g', 'h'], run() {} },
@@ -108,5 +109,21 @@ test('chord completions group actions by the next key after the active prefix', 
   assert.deepEqual(getChordCompletions(['g'], matches), [
     { key: 'h', titles: ['Home', 'History'] },
     { key: 'c', titles: ['Conversations'] },
+  ]);
+});
+
+test('palette merging keeps static actions and adapts only enabled live shortcuts', () => {
+  const merged = mergePaletteActions(
+    [{ id: 'static', label: 'Static action', route: '/static' }],
+    [
+      actions[0],
+      { ...actions[2], title: 'Hidden action' },
+      { ...actions[0], id: 'static', title: 'Live override', sequence: ['g', 'o'] },
+    ],
+  );
+
+  assert.deepEqual(merged, [
+    { id: 'static', label: 'Live override', hint: 'Shortcut: g o', badge: 'g o' },
+    { id: 'home', label: 'Home', hint: 'Shortcut: g h', badge: 'g h' },
   ]);
 });

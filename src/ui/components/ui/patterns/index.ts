@@ -14,7 +14,7 @@ export type { RuntimeChipProps, RuntimeState } from './RuntimeChip';
 
 export * from './ScopeField';
 
-export { CommandPalette } from './CommandPalette';
+export { CommandPalette, DEFAULT_ACTIONS, mergePaletteActions } from './CommandPalette';
 export type {
   CommandPaletteProps,
   PaletteAction,

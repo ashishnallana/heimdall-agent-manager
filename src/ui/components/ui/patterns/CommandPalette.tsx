@@ -51,6 +51,7 @@ import {
   optionId,
   DEFAULT_NAV,
   DEFAULT_ACTIONS,
+  mergePaletteActions,
   matchesQuery,
 } from './commandPaletteLogic';
 
@@ -67,6 +68,7 @@ export {
   optionId,
   DEFAULT_NAV,
   DEFAULT_ACTIONS,
+  mergePaletteActions,
   THEMES,
 };
 
