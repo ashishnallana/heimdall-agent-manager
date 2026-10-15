@@ -62,8 +62,25 @@ function normalizeAgentId(id: unknown): string {
   return s || NEW_PANE_AGENT_ID;
 }
 
+/** Any real pane occupant (agent conversation or shell), i.e. not the picker. */
 export function isRealAgentId(id: string | null | undefined): id is string {
   return Boolean(id && id !== NEW_PANE_AGENT_ID);
+}
+
+/**
+ * A Main pane can hold an interactive shell instead of an agent. Shell session ids
+ * are minted as `sh_…` by the hub, so the pane value's id alone tells the kinds
+ * apart (the URL model stays `#/conversations/<id>+<id>`).
+ */
+export const SHELL_PANE_ID_PREFIX = 'sh_';
+
+export function isShellPaneId(id: string | null | undefined): id is string {
+  return Boolean(id && id.startsWith(SHELL_PANE_ID_PREFIX));
+}
+
+/** A real agent conversation pane (not the picker, not a shell). */
+export function isAgentPaneId(id: string | null | undefined): id is string {
+  return isRealAgentId(id) && !isShellPaneId(id);
 }
 
 export function findPaneByAgent(

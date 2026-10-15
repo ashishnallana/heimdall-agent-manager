@@ -18,6 +18,8 @@ import { useAuthUser } from '../auth/AuthUserContext';
 import { VaultText } from '../vault/VaultText';
 import { MessageComposerInput, MessageComposerActions } from './MessageComposer';
 import RuntimeConfigurationOptions, { type RuntimeSelection } from './RuntimeConfigurationOptions';
+import ShellLaunchPanel from './ShellLaunchPanel';
+import { selectMainAgentIds } from '../../store/workspaceLayoutSlice';
 
 type Attachment = { localId: string; id?: string; file: File; name: string; status: 'uploading' | 'uploaded' | 'error'; error?: string };
 function message(e: any) { return String(e?.error || e?.message || apiErrorText(e)); }
@@ -35,11 +37,44 @@ const GREETINGS = [
  * `onLaunched`: called with the new agent instance id instead of navigating to
  * it (a Main new-chat pane puts the new conversation into THAT pane).
  */
+const PANE_MODE_STORAGE_KEY = 'heimdall:new-pane-mode';
+
+function PaneModeSwitch({ value, onChange, mobile }: { value: 'agent' | 'shell'; onChange: (v: 'agent' | 'shell') => void; mobile: boolean }) {
+  const option = (v: 'agent' | 'shell', icon: 'bot' | 'terminal', text: string) => (
+    <button
+      type="button"
+      role="tab"
+      data-debug-id={`new-convo-mode-${v}`}
+      aria-selected={value === v}
+      onClick={() => onChange(v)}
+      className={`inline-flex flex-1 items-center justify-center gap-2 rounded-xl font-semibold transition-colors ${mobile ? 'min-h-11 text-[15px]' : 'min-h-9 text-sm'} ${value === v ? 'bg-surface-raised text-primary shadow-sm' : 'text-muted hover:text-primary'}`}
+    >
+      <Icon name={icon} size={mobile ? 18 : 16} />{text}
+    </button>
+  );
+  return (
+    <div role="tablist" aria-label="Open in this pane" data-debug-id="new-convo-mode-switch" className={`mb-6 flex rounded-2xl border border-subtle bg-surface p-1 ${mobile ? 'w-full' : 'w-72'}`}>
+      {option('agent', 'bot', 'Agent')}
+      {option('shell', 'terminal', 'Shell')}
+    </div>
+  );
+}
+
 export default function NewConversationPage({ footer, onLaunched }: { embedded?: boolean; footer?: ReactNode; onLaunched?: (agentInstanceId: string) => void }) {
   const user = useAuthUser();
   const userName = String(user?.display_name || user?.name || '').trim();
   const [greeting] = useState(() => GREETINGS[Math.floor(Math.random() * GREETINGS.length)]);
   const mobile = useIsMobile();
+  // SH-1: the picker opens an agent conversation OR an interactive shell. The
+  // choice is a per-browser convenience, so it lives in localStorage.
+  const [paneMode, setPaneModeState] = useState<'agent' | 'shell'>(() => {
+    try { return localStorage.getItem(PANE_MODE_STORAGE_KEY) === 'shell' ? 'shell' : 'agent'; } catch { return 'agent'; }
+  });
+  const setPaneMode = (next: 'agent' | 'shell') => {
+    setPaneModeState(next);
+    try { localStorage.setItem(PANE_MODE_STORAGE_KEY, next); } catch { /* storage unavailable */ }
+  };
+  const openPaneIds = useSelector(selectMainAgentIds);
   const preferences = useGetConversationLaunchPreferencesQuery();
   const agentsQuery = useListAgentIdentitiesQuery({ limit: 200 });
   const projectsQuery = useListProjectsQuery();
@@ -222,7 +257,9 @@ export default function NewConversationPage({ footer, onLaunched }: { embedded?:
     <div className="mx-auto grid h-[calc(var(--app-viewport-height)-4rem)] min-h-min w-full max-w-4xl grid-cols-[minmax(0,1fr)] grid-rows-[minmax(min-content,1fr)_auto_minmax(min-content,1fr)] gap-8 py-6">
       <div data-debug-id="new-convo-introduction" className="flex items-center justify-center"><div className="w-full">
       <h1 data-debug-id="new-convo-greeting" className="mb-2 text-left text-2xl font-semibold text-primary"><span lang={greeting.lang}>{greeting.text}</span>{userName ? `, ${userName}` : ''}</h1>
-      <p data-debug-id="new-convo-subtitle" className="mb-6 text-left text-sm text-muted">Start a conversation</p>
+      <p data-debug-id="new-convo-subtitle" className="mb-5 text-left text-sm text-muted">{paneMode === 'shell' ? 'Open a terminal in this pane' : 'Start a conversation'}</p>
+      <PaneModeSwitch value={paneMode} onChange={setPaneMode} mobile={mobile} />
+      {paneMode === 'agent' ? (<>
       <div className="mb-2 flex items-center justify-between gap-3">
         <span data-debug-id="new-convo-favorite-count" className="text-xs text-muted">{favoriteIds.length} / 6 favorites</span>
         <button type="button" data-debug-id="new-convo-edit-favorites-btn" disabled={!hydrated || sending} onClick={() => { setManagementError(''); setFavoritesOpen(true); }} aria-label="Manage favorite agents" title="Manage favorite agents" className="grid h-10 w-10 place-items-center rounded-xl text-muted hover:bg-neutral-soft hover:text-primary disabled:opacity-40"><Icon name="pencil" size={19} /></button>
@@ -237,7 +274,24 @@ export default function NewConversationPage({ footer, onLaunched }: { embedded?:
           {selected ? <Icon name="check" size={14} className="absolute right-2 top-2 text-accent" /> : null}
         </button>;
       })}</div>
+      </>) : null}
       </div></div>
+      {paneMode === 'shell' ? (
+        <ShellLaunchPanel
+          projects={projects}
+          bridges={bridges}
+          projectId={projectId}
+          onProjectChange={chooseProject}
+          initialBridgeId={runtime.bridgeId}
+          openIds={openPaneIds}
+          isMobile={mobile}
+          disabled={!hydrated}
+          onOpenShell={(sessionId) => {
+            if (onLaunched) onLaunched(sessionId);
+            else window.location.hash = buildRouteHash(`/conversations/${encodeURIComponent(sessionId)}`, '');
+          }}
+        />
+      ) : (
       <div ref={composerRef} data-debug-id="new-convo-launch-dock" className={`relative w-full ${transitioning ? 'z-20' : ''}`}>
       <div className="flex flex-wrap items-center justify-between gap-2 rounded-t-2xl border border-b-0 border-subtle bg-surface px-4 py-2 sm:max-w-lg">
         <div className="min-w-0 flex-1"><Combobox debugId="new-convo-project-select" options={[...projects.filter((p: any) => p.state === 'active').map((p: any) => ({ value: p.project_id, title: label(p.name, 'Project') }))]} value={projectId} onChange={chooseProject} placeholder="Choose project" searchPlaceholder="Search projects…" disabled={sending || !hydrated} width="full" /></div>
@@ -253,6 +307,7 @@ export default function NewConversationPage({ footer, onLaunched }: { embedded?:
         {sending ? <p role="status" className="absolute -top-6 left-0 text-xs text-muted">Creating conversation and starting on {selectedBridge?.label || 'selected bridge'}…</p> : null}
       </form>
       </div>
+      )}
       <div data-debug-id="new-convo-footer" className={`flex items-center justify-center ${transitioning ? 'pointer-events-none opacity-0' : ''} transition-opacity duration-200`}>{footer}</div>
     </div>
     <Modal open={settingsOpen} onOpenChange={setSettingsOpen} title="Agent settings" size="lg" data-debug-id="new-convo-runtime-modal"><Modal.Body><RuntimeConfigurationOptions bridges={bridges} selection={runtime} onChange={chooseRuntime} disabled={sending} debugPrefix="new-convo" /><p className="mt-4 text-xs text-muted">The agent starts when you send your first message.</p></Modal.Body></Modal>

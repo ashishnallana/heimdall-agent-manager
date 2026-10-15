@@ -15,6 +15,7 @@ import {
 } from './auxTabId';
 import {
   NEW_PANE_AGENT_ID,
+  isShellPaneId,
   selectMainTree,
   type MainPaneValue,
 } from './workspaceLayoutSlice';
@@ -61,6 +62,8 @@ export function resolveAuxTreeId(tree: PaneTreeState<MainPaneValue>): AuxTreeId 
   if (pane?.kind !== 'content') return null;
   const agentInstanceId = pane.value.agentInstanceId;
   if (!agentInstanceId || agentInstanceId === NEW_PANE_AGENT_ID) return null;
+  // A focused shell pane has no agent context, so no aux dock.
+  if (isShellPaneId(agentInstanceId)) return null;
   return { kind: 'agent', agentInstanceId };
 }
 
@@ -386,7 +389,7 @@ export function sanitizeAuxPanesState(raw: unknown): AuxPanesState {
   const r = raw as any;
   if (r.agentPanes && typeof r.agentPanes === 'object' && !Array.isArray(r.agentPanes)) {
     for (const [agentId, pane] of Object.entries(r.agentPanes)) {
-      if (!agentId || agentId === NEW_PANE_AGENT_ID) continue;
+      if (!agentId || agentId === NEW_PANE_AGENT_ID || isShellPaneId(agentId)) continue;
       const clean = sanitizePane(pane);
       if (clean) out.agentPanes[agentId] = clean;
     }

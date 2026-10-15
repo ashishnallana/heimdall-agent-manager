@@ -6,7 +6,9 @@ import {
   NEW_PANE_AGENT_ID,
   assignMainPaneAgent,
   closeMainPane,
+  isAgentPaneId,
   isRealAgentId,
+  isShellPaneId,
   resizeMainSplit,
   selectFocusedMainAgentId,
   selectMainAgentIds,
@@ -61,6 +63,7 @@ import {
 import { AuxDock } from '../aux/AuxDock';
 import { useAgentAuxContext } from '../aux/useAgentAuxContext';
 import { AgentChatPane } from '../workbench/AgentChatPane';
+import { ShellMainPane } from './ShellMainPane';
 import { MainPaneFrame } from './MainPaneFrame';
 import { MobileMainPager } from './MobileMainPager';
 import HomePage from '../home/HomePage';
@@ -188,8 +191,8 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
     // Focus moved within a split: carry the dock open state (Jetski parity).
     if (
       ids.length > 1 &&
-      isRealAgentId(prevFocused) &&
-      isRealAgentId(focused) &&
+      isAgentPaneId(prevFocused) &&
+      isAgentPaneId(focused) &&
       prevFocused !== focused &&
       ids.includes(prevFocused)
     ) {
@@ -416,6 +419,18 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
                 onOpenAgent: (agentInstanceId) =>
                   dispatch(assignMainPaneAgent({ paneId, agentInstanceId })),
               }}
+            />
+          ) : isShellPaneId(agentId) ? (
+            // SH-1: a Main pane bound to an interactive shell.
+            <ShellMainPane
+              key={agentId}
+              sessionId={agentId}
+              isMobile={isMobile}
+              openIds={mainAgentIds.filter((id) => id !== agentId)}
+              onSwitch={(nextId) => dispatch(assignMainPaneAgent({ paneId, agentInstanceId: nextId }))}
+              onClose={() => closePane(paneId)}
+              headerLeading={isTopLeftMost ? leading : null}
+              headerEnd={isTopRightMost && !dockOccupiesTopRight ? topRightSpacer : null}
             />
           ) : (
             <AgentChatPane
