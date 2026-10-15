@@ -212,7 +212,9 @@ bridge_agent_route :: proc(method, params: string) -> Bridge_Agent_Route {
 		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/memory/content"}
 	case "agent.search":
 		// Global entity search (SEARCH-7): same owner scoping + hit shape as REST.
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/search"}
+		// Local because the bridge relays it to the hub, then merges its decrypted
+		// task-chain hits that the hub's ciphertext FTS cannot match (SRCH-2).
+		return Bridge_Agent_Route{kind = .Local, local_op = "search"}
 	case "agent.artifact.create":
 		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/artifacts/create"}
 	case "agent.artifact.list":
@@ -351,9 +353,10 @@ bridge_agent_rewrite_params :: proc(method, params: string) -> string {
 
 // ---- local op handlers (bridge-served, no hub) --------------------------
 
-// bridge_local_handle_agent_local_op fulfils .Local routes. Currently only
-// bridge.list, which merges Hub-registered bridges + this bridge's self row
-// (direct bridge<->bridge peers were removed in favor of the star topology).
+// bridge_local_handle_agent_local_op fulfils .Local routes: bridge.list (merges
+// Hub-registered bridges + this bridge's self row; direct bridge<->bridge peers
+// were removed in favor of the star topology), search (hub relay + local
+// decrypted task-chain hits), and the shell/vault/telemetry ops below.
 bridge_local_handle_agent_local_op :: proc(request_id, op, params: string, rec: Bridge_Local_Agent_Token_Record) -> string {
 	if op == "bridge.list" {
 		scope := strings.trim_space(bridge_local_extract_json_string(params, "scope", "all"))
@@ -398,6 +401,7 @@ bridge_local_handle_agent_local_op :: proc(request_id, op, params: string, rec: 
 		return bridge_local_response_data(request_id, strings.to_string(b))
 	}
 	if op == "shell.wait" do return bridge_shell_wait_rpc(request_id, params, rec)
+	if op == "search" do return bridge_agent_search_rpc(request_id, params, rec)
 	if op == "vault.status" {
 		status := bridge_vault_status()
 		status_str := bridge_vault_status_string(status)
