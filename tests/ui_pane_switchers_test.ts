@@ -216,9 +216,9 @@ test('per-pane chain switcher swaps THAT pane to the chain coordinator in place 
 
 test('task-chain chords replace the focused pane or open the selection right/below', async () => {
   const scenarios = [
-    { keys: ['s', 'c'], placement: 'replace', axis: null },
-    { keys: ['s', 'c', 'v'], placement: 'right', axis: 'horizontal' },
-    { keys: ['s', 'c', 'h'], placement: 'bottom', axis: 'vertical' },
+    { keys: ['s', 'o', 't'], placement: 'replace', axis: null },
+    { keys: ['s', 'o', 't', 'v'], placement: 'right', axis: 'horizontal' },
+    { keys: ['s', 'o', 't', 'h'], placement: 'bottom', axis: 'vertical' },
   ] as const;
 
   for (const scenario of scenarios) {
@@ -592,11 +592,11 @@ test('workspace chords split, cycle, maximize, close, and remain shielded while 
         await settle();
       });
 
-      await pressSequence(['s', 's', 'v']);
-      assert.equal(layout.selectMainPaneIds(store.getState()).length, 2, 's s v splits right into the launcher');
+      await pressSequence(['s', 'n', 'c', 'v']);
+      assert.equal(layout.selectMainPaneIds(store.getState()).length, 2, 's n c v splits right into the launcher');
 
-      await pressSequence(['s', 's', 'h']);
-      assert.equal(layout.selectMainPaneIds(store.getState()).length, 3, 's s h splits down into the launcher');
+      await pressSequence(['s', 'n', 'c', 'h']);
+      assert.equal(layout.selectMainPaneIds(store.getState()).length, 3, 's n c h splits down into the launcher');
 
       const paneIds = layout.selectMainPaneIds(store.getState());
       const [leftPane, topRightPane, bottomRightPane] = paneIds;
@@ -666,11 +666,11 @@ test('workspace chords split, cycle, maximize, close, and remain shielded while 
       await pressChord('s', 'x');
       await act(async () => settle(250));
       assert.equal(layout.selectMainPaneIds(store.getState()).length, 1, 's x leaves the sole pane intact');
-      await pressSequence(['s', 's', 'Enter']);
+      await pressSequence(['s', 'n', 'c', 'Enter']);
       assert.equal(
         layout.selectFocusedMainAgentId(store.getState()),
         layout.NEW_PANE_AGENT_ID,
-        's s Enter replaces the focused pane with the Agent / Shell launcher',
+        's n c Enter replaces the focused pane with the new-conversation launcher',
       );
 
     } finally {

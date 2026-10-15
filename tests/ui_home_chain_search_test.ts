@@ -275,7 +275,7 @@ test('launching from a pane fills that pane instead of navigating', () => {
   const page = fs.readFileSync(path.join(REPO_ROOT, 'src/ui/components/chat/NewConversationPage.tsx'), 'utf8');
   assert.match(page, /if \(onLaunched\) onLaunched\(id\);\s*else window\.location\.hash/);
   const home = fs.readFileSync(path.join(REPO_ROOT, 'src/ui/components/home/HomePage.tsx'), 'utf8');
-  assert.match(home, /<NewConversationPage embedded onLaunched=\{pane\.onOpenAgent\}/);
+  assert.match(home, /<NewConversationPage embedded launchIntent=\{pane\.launchIntent\} onLaunched=\{pane\.onOpenAgent\}/);
   const ws = fs.readFileSync(path.join(REPO_ROOT, 'src/ui/components/mainWorkspace/Workspace.tsx'), 'utf8');
   assert.match(ws, /onOpenAgent: \(agentInstanceId\) =>\s*dispatch\(assignMainPaneAgent\(\{ paneId, agentInstanceId \}\)\)/);
 });
