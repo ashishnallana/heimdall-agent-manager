@@ -39,7 +39,7 @@ import {
   selectIsAuxMaximized,
   selectPendingSplitDrop,
 } from '../../store/workspaceChromeSlice';
-import { resolveLegacyPanelToAuxContent, type AuxContent } from '../../store/auxTabId';
+import { auxTabId, resolveLegacyPanelToAuxContent, type AuxContent } from '../../store/auxTabId';
 import { isAuxContentAllowed } from '../../store/auxTabGuards';
 import { buildRouteHash, getRoutePathname, getRouteSearch } from '../../utils/appLocation';
 import {
@@ -322,6 +322,18 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
     if (auxTreeId) dispatch(toggleAuxPane({ treeId: auxTreeId, hasChain }));
   }, [auxTreeId, dispatch, hasChain]);
 
+  const toggleAuxContent = useCallback(
+    (content: AuxContent) => {
+      if (!auxTreeId) return;
+      if (auxOpen && auxPane?.activeTabId === auxTabId(content)) {
+        dispatch(setAuxPaneOpen({ treeId: auxTreeId, open: false, hasChain }));
+        return;
+      }
+      dispatch(openAuxTab({ treeId: auxTreeId, content, hasChain }));
+    },
+    [auxOpen, auxPane?.activeTabId, auxTreeId, dispatch, hasChain],
+  );
+
   // Fixed top-right cluster (Jetski web): update badge + the ONE side-panel
   // toggle stay in the window's top-right whether or not the aux dock is open.
   // Whatever sits under it (the top-right pane header, or the aux tab strip
@@ -563,6 +575,30 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
       sequence: ['s', 'a'],
       isEnabled: () => Boolean(auxTreeId),
       run: toggleAux,
+    },
+    {
+      id: 'workspace.toggle-aux-tasks',
+      title: 'Toggle Tasks in auxiliary pane',
+      category: 'Workspace',
+      sequence: ['s', 'a', 't'],
+      isEnabled: () => Boolean(auxTreeId && isAgentPaneId(focusedAgentId) && ctx.isResolved && ctx.chainId),
+      run: () => toggleAuxContent({ type: 'tasks' }),
+    },
+    {
+      id: 'workspace.toggle-aux-chat-overview',
+      title: 'Toggle Chat overview in auxiliary pane',
+      category: 'Workspace',
+      sequence: ['s', 'a', 'c'],
+      isEnabled: () => Boolean(auxTreeId && isAgentPaneId(focusedAgentId) && ctx.isResolved && ctx.chainId),
+      run: () => toggleAuxContent({ type: 'chainOverview' }),
+    },
+    {
+      id: 'workspace.toggle-aux-agent-pty',
+      title: 'Toggle Agent PTY in auxiliary pane',
+      category: 'Workspace',
+      sequence: ['s', 'a', 'a'],
+      isEnabled: () => Boolean(auxTreeId && isAgentPaneId(focusedAgentId)),
+      run: () => toggleAuxContent({ type: 'agentPty', agentInstanceId: focusedAgentId }),
     },
     {
       id: 'workspace.toggle-maximize',

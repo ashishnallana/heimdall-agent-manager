@@ -62,6 +62,8 @@ async function withDom<T>(hash: string, fn: (dom: any) => Promise<T>): Promise<T
   (globalThis as any).ResizeObserver = RO;
   (globalThis as any).requestAnimationFrame = (cb: any) => setTimeout(() => cb(Date.now()), 0) as any;
   (globalThis as any).cancelAnimationFrame = (id: any) => clearTimeout(id);
+  (dom.window as any).requestAnimationFrame = (globalThis as any).requestAnimationFrame;
+  (dom.window as any).cancelAnimationFrame = (globalThis as any).cancelAnimationFrame;
   (dom.window as any).matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {} });
   (globalThis as any).fetch = async (input: any) => {
     const url = String(input?.url ?? input);
@@ -69,6 +71,16 @@ async function withDom<T>(hash: string, fn: (dom: any) => Promise<T>): Promise<T
     if (byInstance) {
       const conv = CONVERSATIONS[decodeURIComponent(byInstance[1])];
       return conv ? json({ data: conv }) : json({ error: 'nope' }, false);
+    }
+    if (/\/agent-instances(\?|$)/.test(url)) return json({ data: [] });
+    if (/\/agents(\?|$)/.test(url)) return json({ data: [] });
+    if (/\/bridges(\?|$)/.test(url)) return json({ data: [] });
+    if (/\/task-chains\/[^/?]+\/fleets(\?|$)/.test(url)) return json({ data: [] });
+    const chainDetail = url.match(/\/task-chains\/([^/?]+)(?:\?|$)/);
+    if (chainDetail) {
+      const chainId = decodeURIComponent(chainDetail[1]);
+      const summary = GROUPS.flatMap((group) => group.chains).find((chain) => chain.chain_id === chainId);
+      return json({ data: { chain: { ...summary, chain_id: chainId, members: [], tasks: [] } } });
     }
     if (/\/task-chains(\?|$)/.test(url)) return json({ groups: GROUPS });
     if (/\/templates(\?|$)/.test(url)) return json({ data: [] });
@@ -84,7 +96,14 @@ async function withDom<T>(hash: string, fn: (dom: any) => Promise<T>): Promise<T
     (globalThis as any).localStorage = prev.localStorage;
     Object.defineProperty(globalThis, 'navigator', { value: prev.navigator, configurable: true });
     (globalThis as any).fetch = prev.fetch;
-    [(globalThis as any).ResizeObserver, (globalThis as any).requestAnimationFrame, (globalThis as any).cancelAnimationFrame] = prevEnv;
+    (globalThis as any).ResizeObserver = prevEnv[0];
+    // A few UI dependencies schedule cleanup one tick after React unmounts.
+    // Keep safe timer-backed fallbacks when Node did not provide RAF globals,
+    // so that late cleanup cannot call an already-restored undefined function.
+    (globalThis as any).requestAnimationFrame = prevEnv[1]
+      ?? ((cb: any) => setTimeout(() => cb(Date.now()), 0) as any);
+    (globalThis as any).cancelAnimationFrame = prevEnv[2]
+      ?? ((id: any) => clearTimeout(id));
   }
 }
 
@@ -259,6 +278,77 @@ test('task-chain chords replace the focused pane or open the selection right/bel
       }
     });
   }
+});
+
+test('auxiliary content chords toggle Tasks, Chat overview, and the focused agent PTY', async () => {
+  await withDom('#/conversations/a?focused=a', async (dom) => {
+    const { createRoot } = await import('react-dom/client');
+    const { act } = await import('react');
+    const { Provider } = await import('react-redux');
+    const { heimdallApi } = await import('../src/ui/api/heimdallApi.ts');
+    const { selectAuxPane } = await import('../src/ui/store/auxPanesSlice.ts');
+    const { Workspace } = await import('../src/ui/components/mainWorkspace/Workspace.tsx');
+    const { ChordHud } = await import('../src/ui/components/shortcuts/ChordHud.tsx');
+    const { ShortcutProvider } = await import('../src/ui/services/shortcuts/ShortcutContext.tsx');
+
+    const store = await makeStore();
+    const doc = dom.window.document;
+    const root = createRoot(doc.getElementById('root')!);
+    const treeId = { kind: 'agent' as const, agentInstanceId: 'a' };
+    const press = async (...keys: string[]) => {
+      await act(async () => {
+        for (const key of keys) {
+          dom.window.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key, bubbles: true }));
+        }
+        await new Promise((resolve) => setTimeout(resolve, 40));
+      });
+    };
+    try {
+      await act(async () => {
+        root.render(React.createElement(
+          Provider,
+          { store },
+          React.createElement(
+            ShortcutProvider,
+            {},
+            React.createElement(React.Fragment, {}, React.createElement(Workspace, {}), React.createElement(ChordHud)),
+          ),
+        ));
+        await new Promise((resolve) => setTimeout(resolve, 40));
+      });
+      await waitFor(
+        () => Boolean(doc.querySelector('[data-debug-id="conversation-thread-title"]')),
+        act,
+      );
+      await waitFor(
+        () => selectAuxPane(store.getState(), treeId)?.activeTabId === 'overview',
+        act,
+      );
+
+      await press('s', 'a');
+      const hud = doc.querySelector('[data-debug-id="shortcut-chord-hud"]');
+      assert.match(hud?.textContent || '', /Tasks/);
+      assert.match(hud?.textContent || '', /Chat overview/);
+      assert.match(hud?.textContent || '', /Agent PTY/);
+      await press('t');
+      assert.equal(selectAuxPane(store.getState(), treeId)?.activeTabId, 'tasks');
+      assert.equal(selectAuxPane(store.getState(), treeId)?.isPaneOpen, true);
+
+      await press('s', 'a', 't');
+      assert.equal(selectAuxPane(store.getState(), treeId)?.isPaneOpen, false, 'same active target closes the dock');
+
+      await press('s', 'a', 'c');
+      assert.equal(selectAuxPane(store.getState(), treeId)?.activeTabId, 'overview');
+      assert.equal(selectAuxPane(store.getState(), treeId)?.isPaneOpen, true);
+
+      // The HUD assertion above verifies that the focused-agent PTY action is
+      // registered and enabled. Avoid opening it here: xterm requires browser
+      // canvas APIs that jsdom intentionally does not implement.
+    } finally {
+      await act(async () => root.unmount());
+      store.dispatch(heimdallApi.util.resetApiState());
+    }
+  });
 });
 
 test('per-pane agent switcher swaps THAT pane in place (deduped) and the URL/groups follow', async () => {
@@ -550,6 +640,7 @@ test('workspace chords split, cycle, maximize, close, and remain shielded while 
       const workspace = dom.window.document.querySelector('[data-debug-id="workspace"]')!;
       const auxWasOpen = workspace.getAttribute('data-aux-open');
       await pressChord('s', 'a');
+      await act(async () => settle(1_250));
       assert.notEqual(workspace.getAttribute('data-aux-open'), auxWasOpen, 's a toggles the focused agent aux pane');
 
       const beforeCycle = layout.selectMainTree(store.getState());
