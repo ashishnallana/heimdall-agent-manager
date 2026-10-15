@@ -162,6 +162,13 @@ let pendingRequests = [];
 
 function startVite(sid) {
   const base = basePrefix || '/';
+  // Use the concrete browser prefix for HTTP API calls. A document-relative
+  // `./api/v1/...` works in Chromium, but WebKit can reject it with
+  // "The string did not match the expected pattern" after the Authentik
+  // redirect restores a hash route. The absolute path remains same-origin and
+  // still traverses this preview proxy, while avoiding browser-dependent URL
+  // resolution during the session bootstrap request.
+  const apiBase = base === '/' ? '' : base.replace(/\/$/, '');
   console.log(`[dev-preview] launching internal Vite on 127.0.0.1:${VITE_PORT} with base: ${base}`);
 
   const args = [
@@ -177,8 +184,8 @@ function startVite(sid) {
     stdio: ['inherit', 'pipe', 'pipe'],
     env: {
       ...process.env,
-      VITE_API_BASE: process.env.VITE_API_BASE ?? '.',
-      VITE_BASE_API: process.env.VITE_BASE_API ?? '.',
+      VITE_API_BASE: process.env.VITE_API_BASE ?? apiBase,
+      VITE_BASE_API: process.env.VITE_BASE_API ?? apiBase,
       // index.html interpolates these; nothing reads them in dev, but leaving
       // them undefined makes Vite warn on every HTML request (30+ lines of
       // "%VITE_HEIMDALL_LOGIN_URL% is not defined" noise per page load).
