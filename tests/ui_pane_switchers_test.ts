@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import React from 'react';
+import { blurInactiveMainPaneFocus } from '../src/ui/components/mainWorkspace/paneFocus.ts';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -123,6 +124,42 @@ async function withDom<T>(hash: string, fn: (dom: any) => Promise<T>): Promise<T
       ?? ((id: any) => clearTimeout(id));
   }
 }
+
+test('Main pane focus changes blur only controls owned by the old pane', async () => {
+  await withDom('#/conversations/a+b?focused=a', async (dom) => {
+    const doc = dom.window.document;
+    doc.body.insertAdjacentHTML('beforeend', `
+      <section data-main-pane-id="pane-a"><textarea id="old-pane-input"></textarea></section>
+      <section data-main-pane-id="pane-b"><input id="new-pane-input" /></section>
+      <input id="outside-workspace" />
+    `);
+    const oldPaneInput = doc.getElementById('old-pane-input') as HTMLTextAreaElement;
+    const newPaneInput = doc.getElementById('new-pane-input') as HTMLInputElement;
+    const outsideWorkspace = doc.getElementById('outside-workspace') as HTMLInputElement;
+
+    oldPaneInput.focus();
+    assert.equal(doc.activeElement, oldPaneInput);
+    assert.equal(blurInactiveMainPaneFocus('pane-b', doc), true);
+    assert.notEqual(doc.activeElement, oldPaneInput);
+
+    newPaneInput.focus();
+    assert.equal(blurInactiveMainPaneFocus('pane-b', doc), false);
+    assert.equal(doc.activeElement, newPaneInput);
+
+    outsideWorkspace.focus();
+    assert.equal(blurInactiveMainPaneFocus('pane-a', doc), false);
+    assert.equal(doc.activeElement, outsideWorkspace);
+  });
+
+  const workspace = fs.readFileSync(
+    path.join(REPO_ROOT, 'src/ui/components/mainWorkspace/Workspace.tsx'),
+    'utf8',
+  );
+  assert.match(
+    workspace,
+    /useEffect\(\(\) => \{\s*blurInactiveMainPaneFocus\(tree\.focusedPaneId\);\s*\}, \[tree\.focusedPaneId\]\);/,
+  );
+});
 
 async function makeStore() {
   const { configureStore } = await import('@reduxjs/toolkit');

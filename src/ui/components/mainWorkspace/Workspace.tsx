@@ -76,6 +76,7 @@ import { ShellMainPane } from './ShellMainPane';
 import { getContentPaneIds } from '../../tiling';
 import { MainPaneFrame } from './MainPaneFrame';
 import { MobileMainPager } from './MobileMainPager';
+import { blurInactiveMainPaneFocus } from './paneFocus';
 import HomePage from '../home/HomePage';
 import { PANE_ANIMATION_MS, chromeIconButtonSizeClass, topChromeHeight } from '../shell/shellChrome';
 import { useRegisterActions } from '../../services/shortcuts/useRegisterActions';
@@ -276,6 +277,13 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
       replaceHash(buildConversationHash(leafIds, { focusedId: targetFocused }));
     }
   }, [focusedAgentId, leafIds, route, urlKey]);
+
+  // A non-focusable pane surface does not move browser focus on its own. Keep
+  // controls in the previously focused pane from receiving later keystrokes,
+  // while preserving focus that already landed in the destination or a modal.
+  useEffect(() => {
+    blurInactiveMainPaneFocus(tree.focusedPaneId);
+  }, [tree.focusedPaneId]);
 
   // 4. Persist split geometry + groups per id set (Jetski layout persistence).
   const prevActiveKeyRef = useRef<string | null>(null);
