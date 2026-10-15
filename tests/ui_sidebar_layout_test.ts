@@ -115,9 +115,9 @@ test('REQ-BAR-3: vault status toggle lives in the bottom status bar and cannot f
   assert.match(source, /renderVaultToggle: renderVaultStatusButton/);
   assert.match(source, /data-debug-id="shell-vault-status-toggle"/);
   assert.match(source, /Icon name=\{isVaultUnlocked && !hasOnlineLockedBridge \? 'lock-open' : 'lock'\}/);
-  assert.match(source, /hasOnlineLockedBridge[\s\S]*'bg-warning-soft text-warning/);
-  assert.match(source, /isVaultUnlocked[\s\S]*'bg-success-soft text-success/);
-  assert.match(source, /: 'bg-danger-soft text-danger/);
+  // REQ-SB-2: plain colored text, no background pill.
+  assert.match(source, /hasOnlineLockedBridge \? 'text-warning' : isVaultUnlocked \? 'text-success' : 'text-danger'/);
+  assert.doesNotMatch(source, /bg-(warning|success|danger)-soft text-(warning|success|danger) hover:bg-/);
   assert.match(source, /if \(!vaultSupported \|\| isVaultLocking \|\| isVaultReconciling\) return/);
   assert.match(source, /dispatch\(setUnlockModalOpen\(true\)\)/);
   assert.match(source, /if \(hasOnlineLockedBridge\)[\s\S]*reconcileOnlineLockedBridges\(\)/);

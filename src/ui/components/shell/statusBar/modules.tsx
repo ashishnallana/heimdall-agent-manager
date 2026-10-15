@@ -18,11 +18,11 @@ export const shortcutModeModule: StatusBarModuleDef = {
         role="status"
         aria-label={`Shortcut mode: ${fullLabel}`}
         title={`${fullLabel} shortcut mode`}
-        className={`inline-flex items-center justify-center rounded-md px-2 font-bold tracking-wide ${compact ? 'h-8 min-w-8 text-[13px]' : 'h-6 min-w-10 text-[11px]'} ${
-          normal ? 'bg-info-soft text-info' : 'bg-accent text-accent-fg'
+        className={`inline-flex items-center px-1.5 font-bold tracking-wide ${compact ? 'text-[13px]' : 'text-[11px]'} ${
+          normal ? 'text-info' : 'text-accent'
         }`}
       >
-        {compact ? (normal ? 'N' : 'I') : normal ? 'NOR' : 'INS'}
+        {normal ? 'NOR' : 'INS'}
       </span>
     );
   },

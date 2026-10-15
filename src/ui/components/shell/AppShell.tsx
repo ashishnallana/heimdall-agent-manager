@@ -1863,12 +1863,8 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
           : isVaultUnlocked
             ? 'Vault unlocked — click to lock'
             : 'Vault locked — click to unlock'}
-      className={`inline-flex shrink-0 items-center gap-1 rounded-md px-1.5 font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${compact ? 'h-8 text-[13px]' : 'h-6 text-[11px]'} ${
-        hasOnlineLockedBridge
-          ? 'bg-warning-soft text-warning hover:bg-warning/20'
-          : isVaultUnlocked
-          ? 'bg-success-soft text-success hover:bg-success/20'
-          : 'bg-danger-soft text-danger hover:bg-danger/20'
+      className={`inline-flex shrink-0 items-center gap-1 px-1.5 font-bold transition-[filter] hover:brightness-125 disabled:cursor-not-allowed disabled:opacity-50 ${compact ? 'h-8 text-[13px]' : 'h-6 text-[11px]'} ${
+        hasOnlineLockedBridge ? 'text-warning' : isVaultUnlocked ? 'text-success' : 'text-danger'
       }`}
     >
       <Icon name={isVaultUnlocked && !hasOnlineLockedBridge ? 'lock-open' : 'lock'} size={compact ? 14 : 12} />

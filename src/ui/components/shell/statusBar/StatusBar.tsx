@@ -60,7 +60,7 @@ export function StatusCount({
       role="status"
       aria-label={`${value} ${label}`}
       title={`${value} ${label}`}
-      className={`inline-flex items-center gap-1 rounded-md px-1.5 tabular-nums ${compact ? 'text-[13px]' : 'text-[11px]'} ${
+      className={`inline-flex items-center gap-1 px-1.5 tabular-nums ${compact ? 'text-[13px]' : 'text-[11px]'} ${
         tone === 'active' ? 'text-primary' : 'text-muted'
       }`}
     >
@@ -105,7 +105,7 @@ export function StatusBar({ modules, compact, data }: { modules: readonly Status
       data-debug-id="shell-status-bar"
       data-compact={compact ? 'true' : 'false'}
       aria-label="Status bar"
-      className={`ui-safe-bottom grid shrink-0 grid-cols-[1fr_auto_1fr] items-center gap-2 border-t border-subtle bg-canvas px-2 text-muted ${compact ? 'min-h-9' : 'min-h-7'}`}
+      className={`ui-safe-bottom grid shrink-0 grid-cols-[1fr_auto_1fr] items-center gap-2 bg-canvas px-2 text-muted ${compact ? 'min-h-9' : 'min-h-7'}`}
     >
       <Slot slot="left" modules={modules} ctx={ctx} className="justify-start" />
       <Slot slot="center" modules={modules} ctx={ctx} className="justify-center" />

@@ -93,7 +93,7 @@ test('BAR-2: registry modules declare slot + order and render per compact contex
   assert.equal((renderSlot(STATUS_BAR_MODULES, 'right', { compact: true, data })[1].node as any).props.compact, true);
 });
 
-test('REQ-SHORTCUT-MODE-8: mode module has responsive labels, semantics, and distinct backgrounds', () => {
+test('REQ-SHORTCUT-MODE-8 / REQ-SB-1: mode module shows NOR/INS on every viewport as plain colored text', () => {
   const renderMode = (shortcutMode: 'normal' | 'insert', compact: boolean) => (
     renderSlot(STATUS_BAR_MODULES, 'left', { compact, data: { ...data, shortcutMode } })[0].node as any
   );
@@ -105,15 +105,18 @@ test('REQ-SHORTCUT-MODE-8: mode module has responsive labels, semantics, and dis
 
   assert.equal(normal.props.children, 'NOR');
   assert.equal(insert.props.children, 'INS');
-  assert.equal(compactNormal.props.children, 'N');
-  assert.equal(compactInsert.props.children, 'I');
+  assert.equal(compactNormal.props.children, 'NOR');
+  assert.equal(compactInsert.props.children, 'INS');
   assert.equal(normal.props.role, 'status');
   assert.equal(normal.props['aria-label'], 'Shortcut mode: Normal');
   assert.equal(insert.props['aria-label'], 'Shortcut mode: Insert');
   assert.equal(normal.props['data-mode'], 'normal');
   assert.equal(insert.props['data-mode'], 'insert');
-  assert.match(normal.props.className, /bg-info-soft/);
-  assert.match(insert.props.className, /bg-accent/);
+  assert.match(normal.props.className, /\btext-info\b/);
+  assert.match(insert.props.className, /\btext-accent\b/);
+  for (const node of [normal, insert, compactNormal, compactInsert]) {
+    assert.doesNotMatch(node.props.className, /\b(bg-|border|rounded)/);
+  }
   assert.notEqual(normal.props.className, insert.props.className);
 });
 
