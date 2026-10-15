@@ -195,6 +195,72 @@ test('per-pane chain switcher swaps THAT pane to the chain coordinator in place 
   });
 });
 
+test('task-chain chords replace the focused pane or open the selection right/below', async () => {
+  const scenarios = [
+    { keys: ['s', 'c'], placement: 'replace', axis: null },
+    { keys: ['s', 'c', 'v'], placement: 'right', axis: 'horizontal' },
+    { keys: ['s', 'c', 'h'], placement: 'bottom', axis: 'vertical' },
+  ] as const;
+
+  for (const scenario of scenarios) {
+    await withDom('#/conversations/a?focused=a', async (dom) => {
+      const { createRoot } = await import('react-dom/client');
+      const { act } = await import('react');
+      const { Provider } = await import('react-redux');
+      const { heimdallApi } = await import('../src/ui/api/heimdallApi.ts');
+      const layout = await import('../src/ui/store/workspaceLayoutSlice.ts');
+      const { Workspace } = await import('../src/ui/components/mainWorkspace/Workspace.tsx');
+      const { ShortcutProvider } = await import('../src/ui/services/shortcuts/ShortcutContext.tsx');
+
+      const store = await makeStore();
+      const doc = dom.window.document;
+      const root = createRoot(doc.getElementById('root')!);
+      const originalPane = () => layout.findPaneByAgent(store.getState().workspaceLayout.tree, 'a');
+      try {
+        await act(async () => {
+          root.render(React.createElement(
+            Provider,
+            { store },
+            React.createElement(ShortcutProvider, {}, React.createElement(Workspace, {})),
+          ));
+          await new Promise((resolve) => setTimeout(resolve, 40));
+        });
+        const paneId = originalPane()!;
+
+        await act(async () => {
+          for (const key of scenario.keys) {
+            dom.window.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key, bubbles: true }));
+          }
+          if (scenario.placement === 'replace') {
+            await new Promise((resolve) => setTimeout(resolve, 1_250));
+          }
+        });
+        await waitFor(
+          () => Boolean(doc.querySelector('[data-debug-id="chain-selector-item-chain-3"]')),
+          act,
+        );
+        await act(async () => {
+          (doc.querySelector('[data-debug-id="chain-selector-item-chain-3"]') as HTMLElement).click();
+          await new Promise((resolve) => setTimeout(resolve, 40));
+        });
+
+        const tree = layout.selectMainTree(store.getState());
+        if (scenario.placement === 'replace') {
+          assert.deepEqual(layout.selectMainAgentIds(store.getState()), ['coord-3']);
+          assert.equal(layout.findPaneByAgent(tree, 'coord-3'), paneId, 'replacement keeps the focused pane id');
+        } else {
+          assert.deepEqual(layout.selectMainAgentIds(store.getState()), ['a', 'coord-3']);
+          const rootPane = tree.panes[tree.rootPaneId];
+          assert.equal(rootPane.kind === 'split' && rootPane.axis, scenario.axis);
+        }
+      } finally {
+        await act(async () => root.unmount());
+        store.dispatch(heimdallApi.util.resetApiState());
+      }
+    });
+  }
+});
+
 test('per-pane agent switcher swaps THAT pane in place (deduped) and the URL/groups follow', async () => {
   await withDom('#/conversations/a+b?focused=b', async (dom) => {
     const { createRoot } = await import('react-dom/client');

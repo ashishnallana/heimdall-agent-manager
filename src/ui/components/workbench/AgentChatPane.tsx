@@ -123,6 +123,14 @@ export interface AgentChatPaneProps {
   onOpenAuxTab?: (content: AuxContent, title?: string) => void;
   /** Agent switcher: swap the agent shown in this Main pane (deduped by the host). */
   onSwitchAgent?: (agentInstanceId: string, title?: string) => void;
+  /** Opens a selected chain coordinator in a new pane beside this one. */
+  onOpenAgentInSplit?: (agentInstanceId: string, direction: 'right' | 'bottom') => void;
+  /** Requests that this pane open its task-chain picker for a shortcut placement. */
+  chainSelectorRequest?: {
+    id: number;
+    placement: 'replace' | 'right' | 'bottom';
+  };
+  onChainSelectorRequestHandled?: (requestId: number) => void;
   onSplitPane?: (direction: SplitDirection) => void;
   onReplaceWithNew?: () => void;
   onClosePane?: () => void;
@@ -616,6 +624,9 @@ export function AgentChatPane({
   variant = 'main',
   onOpenAuxTab,
   onSwitchAgent,
+  onOpenAgentInSplit,
+  chainSelectorRequest,
+  onChainSelectorRequestHandled,
   onSplitPane,
   onReplaceWithNew,
   onClosePane,
@@ -937,7 +948,15 @@ export function AgentChatPane({
   const [headerActionsOpen, setHeaderActionsOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [chainSelectorOpen, setChainSelectorOpen] = useState(false);
+  const [chainSelectorPlacement, setChainSelectorPlacement] = useState<'replace' | 'right' | 'bottom'>('replace');
   const [chainAgentSwitcherOpen, setChainAgentSwitcherOpen] = useState(false);
+
+  useEffect(() => {
+    if (!chainSelectorRequest) return;
+    setChainSelectorPlacement(chainSelectorRequest.placement);
+    setChainSelectorOpen(true);
+    onChainSelectorRequestHandled?.(chainSelectorRequest.id);
+  }, [chainSelectorRequest, onChainSelectorRequestHandled]);
 
   const chainAgentGroups = useMemo(() => {
     const chain = chainDetailQuery.data?.chain;
@@ -2594,7 +2613,10 @@ export function AgentChatPane({
                 data-pane-crumb
                 aria-label="Select task chain"
                 title="Click to search and select task chains"
-                onClick={() => setChainSelectorOpen(true)}
+                onClick={() => {
+                  setChainSelectorPlacement('replace');
+                  setChainSelectorOpen(true);
+                }}
                 className={`group flex min-w-0 items-center gap-1.5 rounded-md px-1.5 py-0.5 text-left ${isMobile ? 'min-h-11 text-[15px]' : 'text-sm'} font-medium text-primary hover:bg-neutral-soft hover:text-accent transition-colors cursor-pointer`}
               >
                 <span className="truncate">
@@ -3014,11 +3036,15 @@ export function AgentChatPane({
         // (deduped by the workspace). A chain without a coordinator keeps the
         // default navigation to /chains/<id>.
         onSelectChain={
-          onSwitchAgent
+          onSwitchAgent || onOpenAgentInSplit
             ? (chain) => {
                 if (chain.coordinatorAgentInstanceId) {
-                  if (chain.coordinatorAgentInstanceId !== agentInstanceId) {
-                    onSwitchAgent(chain.coordinatorAgentInstanceId);
+                  if (chainSelectorPlacement === 'replace') {
+                    if (chain.coordinatorAgentInstanceId !== agentInstanceId) {
+                      onSwitchAgent?.(chain.coordinatorAgentInstanceId);
+                    }
+                  } else {
+                    onOpenAgentInSplit?.(chain.coordinatorAgentInstanceId, chainSelectorPlacement);
                   }
                 } else if (typeof window !== 'undefined') {
                   window.location.hash = buildRouteHash(

@@ -160,6 +160,11 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
   const auxWidth = useSelector(selectAuxWidth);
   const isAuxMaximized = useSelector(selectIsAuxMaximized);
   const pendingDrop = useSelector(selectPendingSplitDrop);
+  const [chainSelectorRequest, setChainSelectorRequest] = useState<{
+    id: number;
+    paneId: string;
+    placement: 'replace' | 'right' | 'bottom';
+  } | null>(null);
 
   // Aux context agent = the focused Main pane's agent (single or split view).
   const ctxAgentId = auxTreeId?.agentInstanceId || '';
@@ -425,7 +430,46 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
     [dispatch],
   );
 
+  const openFocusedChainSelector = useCallback(
+    (placement: 'replace' | 'right' | 'bottom') => {
+      if (!isAgentPaneId(focusedAgentId)) return;
+      setChainSelectorRequest((request) => ({
+        id: (request?.id ?? 0) + 1,
+        paneId: tree.focusedPaneId,
+        placement,
+      }));
+    },
+    [focusedAgentId, tree.focusedPaneId],
+  );
+  const handleChainSelectorRequest = useCallback((requestId: number) => {
+    setChainSelectorRequest((request) => request?.id === requestId ? null : request);
+  }, []);
+
   useRegisterActions([
+    {
+      id: 'workspace.select-task-chain',
+      title: 'Select task chain in focused pane',
+      category: 'Workspace',
+      sequence: ['s', 'c'],
+      isEnabled: () => isAgentPaneId(focusedAgentId),
+      run: () => openFocusedChainSelector('replace'),
+    },
+    {
+      id: 'workspace.select-task-chain-split-right',
+      title: 'Open task chain in pane right',
+      category: 'Workspace',
+      sequence: ['s', 'c', 'v'],
+      isEnabled: () => isAgentPaneId(focusedAgentId),
+      run: () => openFocusedChainSelector('right'),
+    },
+    {
+      id: 'workspace.select-task-chain-split-bottom',
+      title: 'Open task chain in pane below',
+      category: 'Workspace',
+      sequence: ['s', 'c', 'h'],
+      isEnabled: () => isAgentPaneId(focusedAgentId),
+      run: () => openFocusedChainSelector('bottom'),
+    },
     {
       id: 'workspace.split-right',
       title: 'Split focused pane right',
@@ -586,6 +630,11 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
               onSwitchAgent={(nextAgentId) =>
                 dispatch(assignMainPaneAgent({ paneId, agentInstanceId: nextAgentId }))
               }
+              onOpenAgentInSplit={(nextAgentId, direction) =>
+                dispatch(splitMainPane({ targetPaneId: paneId, direction, agentInstanceId: nextAgentId }))
+              }
+              chainSelectorRequest={chainSelectorRequest?.paneId === paneId ? chainSelectorRequest : undefined}
+              onChainSelectorRequestHandled={handleChainSelectorRequest}
               onSplitPane={(direction) => dispatch(splitMainPane({ targetPaneId: paneId, direction }))}
               onReplaceWithNew={() =>
                 dispatch(assignMainPaneAgent({ paneId, agentInstanceId: NEW_PANE_AGENT_ID }))
@@ -604,6 +653,7 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
       showActiveBorder,
       closePane,
       closingPaneIds,
+      chainSelectorRequest,
       dockOccupiesTopRight,
       leading,
       topRightSpacer,
@@ -611,6 +661,7 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
       dispatch,
       focusMessageId,
       focusPane,
+      handleChainSelectorRequest,
       isMobile,
       mainAgentIds,
       openAuxFromPane,
