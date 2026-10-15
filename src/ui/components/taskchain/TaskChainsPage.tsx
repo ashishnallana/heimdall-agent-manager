@@ -150,7 +150,7 @@ function ChainRow({
         title="Open this task chain"
         className="min-w-0 flex-1 text-left"
       >
-        <span className="flex min-h-[32px] w-full min-w-0 flex-col justify-center gap-1.5 overflow-hidden">
+        <span className={`flex w-full min-w-0 flex-col justify-center gap-1.5 overflow-hidden ${isMobile ? 'min-h-11' : 'min-h-[32px]'}`}>
           {inner}
         </span>
       </button>
@@ -168,9 +168,9 @@ function ChainRow({
                 window.dispatchEvent(new CustomEvent('heimdall:close-sidebar'));
               }
             }}
-            className="inline-flex h-[32px] w-[32px] min-h-[32px] shrink-0 items-center justify-center rounded-lg border border-subtle bg-surface text-muted transition-colors hover:border-strong hover:bg-surface-raised hover:text-primary"
+            className={`inline-flex shrink-0 items-center justify-center border ${isMobile ? 'h-11 w-11 rounded-full' : 'h-[32px] w-[32px] min-h-[32px] rounded-lg'} border-subtle bg-surface text-muted transition-colors hover:border-strong hover:bg-surface-raised hover:text-primary`}
           >
-            <Icon name="chat" size={14} />
+            <Icon name="chat" size={isMobile ? 18 : 14} />
           </a>
         ) : null}
         {isArchived ? (
@@ -184,7 +184,7 @@ function ChainRow({
             }}
             title="Restore chain to active"
             aria-label="Restore chain to active"
-            className="min-h-[32px] rounded-lg border border-subtle bg-surface px-2.5 py-1 text-xs font-semibold text-primary transition-colors hover:border-strong hover:bg-surface-raised"
+            className={`rounded-lg border border-subtle bg-surface font-semibold text-primary transition-colors hover:border-strong hover:bg-surface-raised ${isMobile ? 'min-h-11 px-3.5 text-sm' : 'min-h-[32px] px-2.5 py-1 text-xs'}`}
           >
             Restore
           </button>
@@ -199,7 +199,7 @@ function ChainRow({
             }}
             title="Archive chain"
             aria-label="Archive chain"
-            className="min-h-[32px] rounded-lg border border-subtle bg-surface px-2.5 py-1 text-xs text-muted transition-colors hover:border-warning/40 hover:bg-warning-soft hover:text-warning"
+            className={`rounded-lg border border-subtle bg-surface text-muted transition-colors hover:border-warning/40 hover:bg-warning-soft hover:text-warning ${isMobile ? 'min-h-11 px-3.5 text-sm' : 'min-h-[32px] px-2.5 py-1 text-xs'}`}
           >
             Archive chain
           </button>
@@ -250,6 +250,7 @@ function ChainGroupCard({
   onArchiveChain?: (chainId: string) => void;
   onRestoreChain?: (chainId: string) => void;
 }) {
+  const isMobile = useIsMobile();
   const [extra, setExtra] = useState<ChainListItem[]>([]);
   const [cursor, setCursor] = useState<string>(initialNextCursor);
   const [hasMore, setHasMore] = useState<boolean>(initialHasMore);
@@ -328,9 +329,9 @@ function ChainGroupCard({
               }}
               title={`Launch agent for ${displayName}`}
               aria-label={`Launch agent for ${displayName}`}
-              className="flex h-6 w-6 items-center justify-center rounded-lg border border-subtle bg-neutral-soft text-muted transition-colors hover:border-strong hover:bg-surface-raised hover:text-primary"
+              className={`flex items-center justify-center border border-subtle bg-neutral-soft text-muted transition-colors hover:border-strong hover:bg-surface-raised hover:text-primary ${isMobile ? 'h-11 w-11 rounded-full' : 'h-6 w-6 rounded-lg'}`}
             >
-              <Icon name="plus" size={13} />
+              <Icon name="plus" size={isMobile ? 18 : 13} />
             </button>
           )}
           <span
@@ -364,7 +365,7 @@ function ChainGroupCard({
               data-debug-id={`task-chains-load-more-${projectId || 'unassigned'}`}
               onClick={() => void onLoadMore()}
               disabled={isFetching}
-              className="mt-1 w-full rounded-xl border border-subtle bg-surface-raised px-3 py-2 text-xs font-semibold text-muted transition-colors hover:bg-neutral-soft hover:text-primary disabled:opacity-50"
+              className={`mt-1 w-full rounded-xl border border-subtle bg-surface-raised px-3 font-semibold ${isMobile ? 'min-h-11 text-sm' : 'py-2 text-xs'} text-muted transition-colors hover:bg-neutral-soft hover:text-primary disabled:opacity-50`}
             >
               {isFetching ? 'Loading…' : 'Load more'}
             </button>
@@ -380,6 +381,7 @@ export const TaskChainsPage: React.FC<TaskChainsPageProps> = ({ chainId: initial
   // container can never disagree about where the 2-pane boundary is.
   const viewport = useViewport();
   const twoPane = viewport === 'desktop';
+  const isMobileViewport = isMobile ?? viewport === 'mobile';
 
   const [selectedChainId, setSelectedChainId] = useState<string>(initialChainId || '');
   const [filterProjectId, setFilterProjectId] = useState<string>('');
@@ -609,7 +611,7 @@ export const TaskChainsPage: React.FC<TaskChainsPageProps> = ({ chainId: initial
       >
         <label
           htmlFor="task-chains-has-tasks-filter"
-          className="inline-flex min-h-[32px] cursor-pointer items-center gap-2 rounded-xl border border-subtle bg-surface px-3 py-1.5 text-sm text-muted"
+          className={`inline-flex cursor-pointer items-center gap-2 rounded-xl border border-subtle bg-surface px-3 py-1.5 text-sm text-muted ${isMobileViewport ? 'min-h-11' : 'min-h-[32px]'}`}
         >
           <input
             id="task-chains-has-tasks-filter"
@@ -624,7 +626,7 @@ export const TaskChainsPage: React.FC<TaskChainsPageProps> = ({ chainId: initial
 
         <label
           htmlFor="task-chains-include-archived-filter"
-          className="inline-flex min-h-[32px] cursor-pointer items-center gap-2 rounded-xl border border-subtle bg-surface px-3 py-1.5 text-sm text-muted"
+          className={`inline-flex cursor-pointer items-center gap-2 rounded-xl border border-subtle bg-surface px-3 py-1.5 text-sm text-muted ${isMobileViewport ? 'min-h-11' : 'min-h-[32px]'}`}
         >
           <input
             id="task-chains-include-archived-filter"

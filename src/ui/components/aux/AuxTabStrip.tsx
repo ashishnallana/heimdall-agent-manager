@@ -72,7 +72,7 @@ export function AuxTabStrip({
   return (
     <div
       data-debug-id={`aux-tab-strip-${treeKey}`}
-      className="flex h-12 shrink-0 select-none items-center justify-between border-b border-subtle bg-surface-raised/60 px-1.5"
+      className={`flex ${isMobile ? 'h-14' : 'h-12'} shrink-0 select-none items-center justify-between border-b border-subtle bg-surface-raised/60 px-1.5`}
       style={reserveLeft || reserveRight ? {
         ...(reserveLeft ? { paddingLeft: reserveLeft } : {}),
         ...(reserveRight ? { paddingRight: reserveRight } : {}),
@@ -116,7 +116,7 @@ export function AuxTabStrip({
                   onCloseTab(tab.id);
                 }
               }}
-              className={`group relative flex h-7 max-w-[200px] shrink-0 cursor-pointer items-center gap-1.5 rounded-md border px-2 text-xs transition-colors ${
+              className={`group relative flex max-w-[200px] shrink-0 cursor-pointer items-center gap-1.5 rounded-md border px-2 transition-colors ${isMobile ? 'h-11 text-sm' : 'h-7 text-xs'} ${
                 isActive
                   ? 'border-accent/40 bg-surface font-semibold text-primary shadow-2xs'
                   : 'border-transparent bg-transparent text-muted hover:bg-neutral-soft/60 hover:text-primary'
@@ -124,7 +124,7 @@ export function AuxTabStrip({
             >
               <Icon
                 name={AUX_TAB_ICONS[tab.content.type] || 'file'}
-                size={12}
+                size={isMobile ? 14 : 12}
                 className={isActive ? 'shrink-0 text-accent' : 'shrink-0 text-muted'}
               />
               {renderTabStatus ? renderTabStatus(tab) : null}
@@ -139,9 +139,9 @@ export function AuxTabStrip({
                   e.stopPropagation();
                   onCloseTab(tab.id);
                 }}
-                className="ml-0.5 grid h-4 w-4 shrink-0 place-items-center rounded text-muted opacity-70 hover:bg-neutral-soft hover:text-primary group-hover:opacity-100"
+                className={`grid shrink-0 place-items-center rounded text-muted opacity-70 hover:bg-neutral-soft hover:text-primary group-hover:opacity-100 ${isMobile ? '-mr-2 h-11 w-10' : 'ml-0.5 h-4 w-4'}`}
               >
-                <Icon name="close" size={10} />
+                <Icon name="close" size={isMobile ? 14 : 10} />
               </button>
             </div>
           );
@@ -152,7 +152,7 @@ export function AuxTabStrip({
             role="tab"
             aria-selected={true}
             data-debug-id={`aux-tab-${NEW_TAB_ID}`}
-            className="flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-accent/40 bg-surface px-2 text-xs font-semibold text-primary"
+            className={`flex shrink-0 items-center gap-1.5 rounded-md border border-accent/40 bg-surface px-2 font-semibold text-primary ${isMobile ? 'h-11 text-sm' : 'h-7 text-xs'}`}
           >
             <Icon name="plus" size={12} className="shrink-0 text-accent" />
             <span>New Tab</span>
@@ -162,9 +162,9 @@ export function AuxTabStrip({
                 aria-label="Close New Tab"
                 data-debug-id={`aux-tab-close-${NEW_TAB_ID}`}
                 onClick={() => onCloseTab(NEW_TAB_ID)}
-                className="ml-0.5 grid h-4 w-4 shrink-0 place-items-center rounded text-muted hover:bg-neutral-soft hover:text-primary"
+                className={`grid shrink-0 place-items-center rounded text-muted hover:bg-neutral-soft hover:text-primary ${isMobile ? '-mr-2 h-11 w-10' : 'ml-0.5 h-4 w-4'}`}
               >
-                <Icon name="close" size={10} />
+                <Icon name="close" size={isMobile ? 14 : 10} />
               </button>
             ) : null}
           </div>
@@ -176,9 +176,9 @@ export function AuxTabStrip({
           title="New Tab (+)"
           aria-label="Open new tab"
           data-debug-id={`aux-new-tab-btn-${treeKey}`}
-          className="grid h-6 w-6 shrink-0 place-items-center rounded text-muted transition-colors hover:bg-neutral-soft hover:text-primary"
+          className={`grid ${isMobile ? 'h-11 w-11 rounded-full' : 'h-6 w-6 rounded'} shrink-0 place-items-center text-muted transition-colors hover:bg-neutral-soft hover:text-primary`}
         >
-          <Icon name="plus" size={13} />
+          <Icon name="plus" size={isMobile ? 18 : 13} />
         </button>
       </div>
 
@@ -195,9 +195,9 @@ export function AuxTabStrip({
               title="More options"
               aria-label="Tab options"
               data-debug-id={`aux-overflow-menu-btn-${treeKey}`}
-              className="grid h-6 w-6 place-items-center rounded text-muted hover:bg-neutral-soft hover:text-primary"
+              className={`grid ${isMobile ? 'h-11 w-11 rounded-full' : 'h-6 w-6 rounded'} place-items-center text-muted hover:bg-neutral-soft hover:text-primary`}
             >
-              <Icon name="more-vertical" size={14} />
+              <Icon name="more-vertical" size={isMobile ? 20 : 14} />
             </button>
           }
         >
@@ -226,9 +226,9 @@ export function AuxTabStrip({
           title="Close side panel"
           aria-label="Close side panel"
           data-debug-id={`aux-close-dock-btn-${treeKey}`}
-          className="grid h-6 w-6 place-items-center rounded text-muted hover:bg-neutral-soft hover:text-primary"
+          className={`grid ${isMobile ? 'h-11 w-11 rounded-full' : 'h-6 w-6 rounded'} place-items-center text-muted hover:bg-neutral-soft hover:text-primary`}
         >
-          <Icon name="close" size={12} />
+          <Icon name="close" size={isMobile ? 18 : 12} />
         </button>
         ) : null}
       </div>

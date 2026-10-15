@@ -5,7 +5,7 @@ import NewConversationPage from '../chat/NewConversationPage';
 import ConversationsHomePage from '../chat/ConversationsHomePage';
 import Icon, { type IconName } from '../Icon';
 import { Badge, Breadcrumbs as UiBreadcrumbs, CommandPalette, PageShell, StatusDot } from '@ui';
-import { useViewport } from './responsive';
+import { useIsMobile, useViewport } from './responsive';
 import { AuthUserProvider, type AuthUserIdentity } from '../auth/AuthUserContext';
 import { isAgentWorking } from './agentWorking';
 import { heimdallApi } from '../../api/heimdallApi';
@@ -768,6 +768,7 @@ function ProjectGroupItem({
   currentPath?: string;
   onLaunchProject?: (project: { projectId: string; name: string }) => void;
 }) {
+  const isMobile = useIsMobile();
   const projectId = projectGroup.project.projectId;
   const storageKey = `heimdall:project-collapsed:${projectId}`;
   const [collapsed, setCollapsed] = useState<boolean>(() => {
@@ -790,14 +791,14 @@ function ProjectGroupItem({
 
   return (
     <div data-debug-id={`sidebar-project-group-${projectId}`} className="px-0.5">
-      <div className="flex items-center justify-between gap-2 rounded-lg px-2 py-1.5 hover:bg-neutral-soft">
+      <div className={`flex items-center justify-between gap-2 rounded-lg px-2 hover:bg-neutral-soft ${isMobile ? 'min-h-11' : 'py-1.5'}`}>
         <button
           type="button"
           data-debug-id={`sidebar-project-toggle-btn-${projectId}`}
           onClick={toggleCollapsed}
           aria-expanded={!collapsed}
           aria-controls={`sidebar-project-body-${projectId}`}
-          className="flex min-w-0 flex-1 items-center gap-1.5 text-left text-[13px] font-semibold text-primary hover:text-primary"
+          className={`flex min-w-0 flex-1 items-center gap-1.5 self-stretch text-left font-semibold text-primary hover:text-primary ${isMobile ? 'text-[15px]' : 'text-[13px]'}`}
         >
           <span
             data-debug-id={`sidebar-project-chevron-${projectId}`}
@@ -839,9 +840,9 @@ function ProjectGroupItem({
               ? 'Launch agent for project'
               : `Launch agent for ${projectGroup.project.name || 'project'}`
           }
-          className="flex h-5 w-5 items-center justify-center rounded-md text-muted hover:bg-neutral-soft hover:text-primary transition-colors"
+          className={`flex items-center justify-center text-muted hover:bg-neutral-soft hover:text-primary transition-colors ${isMobile ? 'h-11 w-11 rounded-full' : 'h-5 w-5 rounded-md'}`}
         >
-          <Icon name="plus" size={13} />
+          <Icon name="plus" size={isMobile ? 18 : 13} />
         </button>
       </div>
       {!collapsed && (
@@ -862,7 +863,7 @@ function ProjectGroupItem({
                   <a
                     data-debug-id={`sidebar-session-row-${conversation.conversationId}`}
                     href={shellHash(`/conversations/${encodeURIComponent(conversation.agentInstanceId)}`)}
-                    className={`flex items-center gap-2 rounded-lg py-1.5 pl-6 pr-2 text-[12.5px] transition ${isSelected ? 'bg-neutral-soft text-primary font-semibold' : 'text-muted hover:bg-neutral-soft hover:text-primary'}`}
+                    className={`flex items-center gap-2 rounded-lg pl-6 pr-2 transition ${isMobile ? 'min-h-11 text-[15px]' : 'py-1.5 text-[12.5px]'} ${isSelected ? 'bg-neutral-soft text-primary font-semibold' : 'text-muted hover:bg-neutral-soft hover:text-primary'}`}
                   >
                     <BridgeLiveDot
                       bridgeId={conversation.bridgeId}
@@ -872,7 +873,7 @@ function ProjectGroupItem({
                       label={conversation.agentName}
                     />
                     <span data-debug-id={conversation.isCoordinator ? `sidebar-session-coordinator-name-${conversation.conversationId}` : undefined} className={`min-w-0 flex-1 truncate ${conversation.isCoordinator ? 'text-warning' : ''}`} title={conversation.isCoordinator ? 'Coordinator' : undefined}>{conversation.agentName}</span>
-                    {displayConversationMeta(conversation) ? <span className="shrink-0 text-[10px] text-faint">{displayConversationMeta(conversation)}</span> : null}
+                    {displayConversationMeta(conversation) ? <span className={`shrink-0 text-faint ${isMobile ? 'text-[12px]' : 'text-[10px]'}`}>{displayConversationMeta(conversation)}</span> : null}
                     <UnreadBadge count={conversation.unreadCount} debugId={`sidebar-session-unread-${conversation.conversationId}`} />
                   </a>
                   </Fragment>
@@ -1920,11 +1921,11 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
             {userAvatar}
             {(
               <button type="button" data-debug-id="shell-open-account" aria-label="Open account settings" onClick={openAccountSettings} className="min-w-0 flex-1 rounded-lg text-left focus-visible:outline-none focus-visible:shadow-focus hover:bg-neutral-soft">
-                <div data-debug-id="shell-current-user-owner" className="truncate text-[12px] font-semibold text-primary">{displayName}</div>
-                <div className="truncate text-[10.5px] text-muted">{user.email || user.user_id || ''}</div>
+                <div data-debug-id="shell-current-user-owner" className={`truncate font-semibold text-primary ${isMobile ? 'text-[14px]' : 'text-[12px]'}`}>{displayName}</div>
+                <div className={`truncate text-muted ${isMobile ? 'text-[12px]' : 'text-[10.5px]'}`}>{user.email || user.user_id || ''}</div>
               </button>
             )}
-            {logoutUrl && <a data-debug-id="auth-logout-link" href={logoutUrl} title="Sign out" className="shrink-0 rounded-lg p-1.5 text-muted hover:bg-neutral-soft hover:text-primary"><Icon name="close" size={14} /></a>}
+            {logoutUrl && <a data-debug-id="auth-logout-link" href={logoutUrl} title="Sign out" className={`grid shrink-0 place-items-center text-muted hover:bg-neutral-soft hover:text-primary ${isMobile ? 'h-11 w-11 rounded-full' : 'rounded-lg p-1.5'}`}><Icon name="close" size={isMobile ? 18 : 14} /></a>}
           </div>
           {planLabel ? (
             <button type="button" data-debug-id="shell-subscription-tier" aria-label={`Subscription: ${planLabel}. Open account settings`} onClick={openAccountSettings} className="mt-1 flex w-full items-center gap-2 rounded-lg px-2 py-1 text-left text-[11px] text-muted hover:bg-neutral-soft hover:text-primary focus-visible:outline-none focus-visible:shadow-focus">

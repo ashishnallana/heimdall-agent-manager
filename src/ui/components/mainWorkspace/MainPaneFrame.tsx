@@ -132,7 +132,7 @@ export function MainPaneFrame({
         <header
           draggable={!isSinglePane && !isMobile}
           onDragStart={handleDragStart}
-          className="flex h-12 shrink-0 select-none items-center justify-between gap-2 border-b border-subtle bg-surface px-3 text-xs text-muted"
+          className={`flex shrink-0 select-none items-center justify-between gap-2 border-b border-subtle bg-surface px-3 text-muted ${isMobile ? 'h-14 text-sm' : 'h-12 text-xs'}`}
         >
           <span className="flex min-w-0 items-center gap-1.5 font-medium">
             {headerLeading}
@@ -147,9 +147,9 @@ export function MainPaneFrame({
               aria-label="Close pane"
               title="Close pane"
               onClick={() => onClose(paneId)}
-              className="grid h-6 w-6 place-items-center rounded text-muted hover:bg-neutral-soft hover:text-primary"
+              className={`grid place-items-center text-muted hover:bg-neutral-soft hover:text-primary ${isMobile ? 'h-11 w-11 rounded-full' : 'h-6 w-6 rounded'}`}
             >
-              <Icon name="close" size={12} />
+              <Icon name="close" size={isMobile ? 18 : 12} />
             </button>
           ) : null}
           {headerTrailing}
