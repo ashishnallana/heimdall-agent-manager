@@ -8,11 +8,21 @@ import React from 'react';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-// Agents: a (chain-1), b (chain-2), coord-3 (coordinator of chain-3), chain-4 has no coordinator.
+// Agents: a/a2 (chain-1), b (chain-2), coord-3 (coordinator of chain-3), chain-4 has no coordinator.
 const CONVERSATIONS: Record<string, any> = {
   a: { conversation_id: 'conv-a', agent_instance_id: 'a', chain_id: 'chain-1', project_id: 'p1', title: 'Agent A' },
+  a2: { conversation_id: 'conv-a2', agent_instance_id: 'a2', chain_id: 'chain-1', project_id: 'p1', title: 'Agent A2' },
   b: { conversation_id: 'conv-b', agent_instance_id: 'b', chain_id: 'chain-2', project_id: 'p1', title: 'Agent B' },
   'coord-3': { conversation_id: 'conv-c3', agent_instance_id: 'coord-3', chain_id: 'chain-3', project_id: 'p1', title: 'Coord 3' },
+};
+const CHAIN_MEMBERS: Record<string, any[]> = {
+  'chain-1': [
+    { chain_id: 'chain-1', agent_instance_id: 'a', display_name: 'Agent A', role: 'coordinator' },
+    { chain_id: 'chain-1', agent_instance_id: 'a2', display_name: 'Agent A2', role: 'worker' },
+  ],
+  'chain-2': [
+    { chain_id: 'chain-2', agent_instance_id: 'b', display_name: 'Agent B', role: 'coordinator' },
+  ],
 };
 const GROUPS = [
   {
@@ -80,7 +90,14 @@ async function withDom<T>(hash: string, fn: (dom: any) => Promise<T>): Promise<T
     if (chainDetail) {
       const chainId = decodeURIComponent(chainDetail[1]);
       const summary = GROUPS.flatMap((group) => group.chains).find((chain) => chain.chain_id === chainId);
-      return json({ data: { chain: { ...summary, chain_id: chainId, members: [], tasks: [] } } });
+      return json({ data: {
+        ...(summary || {}),
+        chain_id: chainId,
+        title: summary?.title || (chainId === 'chain-1' ? 'Chain One' : chainId),
+        coordinator_agent_instance_id: summary?.coordinator_agent_instance_id || (chainId === 'chain-1' ? 'a' : ''),
+        members: CHAIN_MEMBERS[chainId] || [],
+        tasks: [],
+      } });
     }
     if (/\/task-chains(\?|$)/.test(url)) return json({ groups: GROUPS });
     if (/\/templates(\?|$)/.test(url)) return json({ data: [] });
@@ -404,6 +421,95 @@ test('per-pane agent switcher swaps THAT pane in place (deduped) and the URL/gro
       });
       assert.deepEqual(layout.selectMainAgentIds(store.getState()), ['a2', 'b']);
       assert.equal(dom.window.location.hash, '#/conversations/a2+b?focused=b');
+    } finally {
+      await act(async () => root.unmount());
+      store.dispatch(heimdallApi.util.resetApiState());
+    }
+  });
+});
+
+test('s o a opens only the focused pane same-chain agent switcher and reuses in-place switching', async () => {
+  await withDom('#/conversations/a+b?focused=b', async (dom) => {
+    const { createRoot } = await import('react-dom/client');
+    const { act } = await import('react');
+    const { Provider } = await import('react-redux');
+    const { heimdallApi } = await import('../src/ui/api/heimdallApi.ts');
+    const layout = await import('../src/ui/store/workspaceLayoutSlice.ts');
+    const { Workspace } = await import('../src/ui/components/mainWorkspace/Workspace.tsx');
+    const { ChordHud } = await import('../src/ui/components/shortcuts/ChordHud.tsx');
+    const { ShortcutProvider } = await import('../src/ui/services/shortcuts/ShortcutContext.tsx');
+
+    const store = await makeStore();
+    const doc = dom.window.document;
+    const root = createRoot(doc.getElementById('root')!);
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 40));
+    const press = async (...keys: string[]) => {
+      await act(async () => {
+        for (const key of keys) {
+          dom.window.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key, bubbles: true }));
+        }
+        await settle();
+      });
+    };
+
+    try {
+      await act(async () => {
+        root.render(React.createElement(
+          Provider,
+          { store },
+          React.createElement(
+            ShortcutProvider,
+            {},
+            React.createElement(React.Fragment, {}, React.createElement(Workspace, {}), React.createElement(ChordHud)),
+          ),
+        ));
+        await settle();
+      });
+      await waitFor(
+        () => doc.querySelectorAll('[data-debug-id="conversation-chain-agent-switcher-btn"]').length === 2,
+        act,
+      );
+      await waitFor(() => Object.values(
+        (store.getState() as any)[heimdallApi.reducerPath].queries,
+      ).filter((query: any) => (
+        query.endpointName === 'fetchTaskChainDetail' && query.status === 'fulfilled'
+      )).length === 2, act);
+      await act(async () => settle());
+
+      // Pane B starts focused, so its registration must win even though pane A
+      // registered the same sequence first.
+      await press('s', 'o');
+      assert.match(doc.querySelector('[data-debug-id="shortcut-chord-hud"]')?.textContent || '', /Agents in this task chain/);
+      await press('a');
+      await waitFor(() => Boolean(doc.querySelector('[data-debug-id="conversation-chain-agent-option-b"]')), act);
+      assert.equal(doc.querySelector('[data-debug-id="conversation-chain-agent-option-a"]'), null);
+      assert.equal(doc.querySelector('[data-debug-id="conversation-chain-agent-option-a2"]'), null);
+
+      // Selecting the current agent closes the modal without changing layout.
+      await act(async () => {
+        (doc.querySelector('[data-debug-id="conversation-chain-agent-option-b"]') as HTMLElement).click();
+        await settle();
+      });
+      assert.deepEqual(layout.selectMainAgentIds(store.getState()), ['a', 'b']);
+
+      // Focus pane A, reopen through the chord, and select its other chain member.
+      const aPane = layout.findPaneByAgent(store.getState().workspaceLayout.tree, 'a')!;
+      await act(async () => {
+        store.dispatch(layout.setFocusedMainPane(aPane));
+        await settle();
+      });
+      await press('s', 'o', 'a');
+      await waitFor(() => Boolean(doc.querySelector('[data-debug-id="conversation-chain-agent-option-a2"]')), act);
+      assert.ok(doc.querySelector('[data-debug-id="conversation-chain-agent-option-a"]'));
+      assert.equal(doc.querySelector('[data-debug-id="conversation-chain-agent-option-b"]'), null);
+      await act(async () => {
+        (doc.querySelector('[data-debug-id="conversation-chain-agent-option-a2"]') as HTMLElement).click();
+        await settle();
+      });
+      assert.deepEqual(layout.selectMainAgentIds(store.getState()), ['a2', 'b']);
+      assert.equal(layout.findPaneByAgent(store.getState().workspaceLayout.tree, 'a2'), aPane);
+      assert.equal(layout.selectFocusedMainAgentId(store.getState()), 'a2');
+      assert.equal(dom.window.location.hash, '#/conversations/a2+b?focused=a2');
     } finally {
       await act(async () => root.unmount());
       store.dispatch(heimdallApi.util.resetApiState());

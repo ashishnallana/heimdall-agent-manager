@@ -50,6 +50,7 @@ import { useFetchChainTasksQuery, useFetchTaskChainDetailQuery } from '../../api
 import { selectActiveVaultKey } from '../../store/vaultSlice';
 import type { AuxContent } from '../../store/auxTabId';
 import { buildRouteHash } from '../../utils/appLocation';
+import { useRegisterActions } from '../../services/shortcuts/useRegisterActions';
 import { readComposerDraft, writeComposerDraft } from '../../utils/clientPersistence';
 import { conversationConfigurationIssues } from '../../utils/conversationConfigurationValidity';
 import {
@@ -617,6 +618,7 @@ function normalizeConversationMessages(rows: Message[], agentLabel: string): Cha
 
 export function AgentChatPane({
   agentInstanceId: routeInstanceId,
+  paneId,
   focusMessageId,
   isActiveTab = true,
   isMobile: explicitIsMobile,
@@ -982,6 +984,27 @@ export function AgentChatPane({
       },
     ];
   }, [chainDetailQuery.data, chainId]);
+
+  const chainAgentOptions = chainAgentGroups[0]?.conversations || [];
+  const canOpenChainAgentSwitcher = (
+    variant === 'main'
+    && isFocusedPane
+    && Boolean(paneId)
+    && Boolean(chainId)
+    && chainAgentOptions.length > 0
+  );
+  useRegisterActions([{
+    id: `workspace.open-chain-agents.${variant}.${paneId || routeInstanceId}`,
+    title: 'Agents in this task chain',
+    category: 'Workspace',
+    sequence: ['s', 'o', 'a'],
+    isEnabled: () => canOpenChainAgentSwitcher,
+    run: () => {
+      if (!canOpenChainAgentSwitcher) return;
+      setChainAgentSwitcherOpen(true);
+      refetchIfStarted(chainDetailQuery);
+    },
+  }]);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
