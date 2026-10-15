@@ -251,7 +251,7 @@ test('task-chain chords replace the focused pane or open the selection right/bel
             dom.window.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key, bubbles: true }));
           }
           if (scenario.placement === 'replace') {
-            await new Promise((resolve) => setTimeout(resolve, 1_250));
+            dom.window.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
           }
         });
         await waitFor(
@@ -326,13 +326,26 @@ test('auxiliary content chords toggle Tasks, Chat overview, and the focused agen
       );
 
       await press('s', 'a');
-      const hud = doc.querySelector('[data-debug-id="shortcut-chord-hud"]');
+      let hud = doc.querySelector('[data-debug-id="shortcut-chord-hud"]');
       assert.match(hud?.textContent || '', /Tasks/);
       assert.match(hud?.textContent || '', /Chat overview/);
       assert.match(hud?.textContent || '', /Agent PTY/);
+      assert.match(hud?.textContent || '', /esc close/i);
+      assert.match(hud?.textContent || '', /enter run current/i);
+      assert.equal(hud?.classList.contains('hidden'), false, 'helper is rendered on mobile widths');
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 1_300));
+      });
+      hud = doc.querySelector('[data-debug-id="shortcut-chord-hud"]');
+      assert.ok(hud, 'helper remains visible beyond the former 1200ms timeout');
       await press('t');
       assert.equal(selectAuxPane(store.getState(), treeId)?.activeTabId, 'tasks');
       assert.equal(selectAuxPane(store.getState(), treeId)?.isPaneOpen, true);
+
+      await press('s', 'a');
+      assert.ok(doc.querySelector('[data-debug-id="shortcut-chord-hud"]'));
+      await press('Escape');
+      assert.equal(doc.querySelector('[data-debug-id="shortcut-chord-hud"]'), null, 'Escape dismisses the helper');
 
       await press('s', 'a', 't');
       assert.equal(selectAuxPane(store.getState(), treeId)?.isPaneOpen, false, 'same active target closes the dock');
@@ -643,8 +656,7 @@ test('workspace chords split, cycle, maximize, close, and remain shielded while 
 
       const workspace = dom.window.document.querySelector('[data-debug-id="workspace"]')!;
       const auxWasOpen = workspace.getAttribute('data-aux-open');
-      await pressChord('s', 'a');
-      await act(async () => settle(1_250));
+      await pressSequence(['s', 'a', 'Enter']);
       assert.notEqual(workspace.getAttribute('data-aux-open'), auxWasOpen, 's a toggles the focused agent aux pane');
 
       const beforeCycle = layout.selectMainTree(store.getState());

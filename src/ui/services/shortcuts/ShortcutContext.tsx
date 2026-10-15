@@ -9,7 +9,6 @@ import React, {
   type ReactNode,
 } from 'react';
 import {
-  SHORTCUT_SEQUENCE_TIMEOUT_MS,
   getSequenceCommitAction,
   isActionEnabled,
   isEditableShortcutTarget,
@@ -41,7 +40,6 @@ export function ShortcutProvider({ children }: { children: ReactNode }) {
   const actionsRef = useRef<readonly AppAction[]>([]);
   const bufferRef = useRef<readonly string[]>([]);
   const editableOverrideRef = useRef(false);
-  const timeoutRef = useRef<number | null>(null);
   const [registryVersion, setRegistryVersion] = useState(0);
   const [buffer, setBuffer] = useState<readonly string[]>([]);
   const [mode, setMode] = useState<ShortcutMode>('normal');
@@ -58,8 +56,6 @@ export function ShortcutProvider({ children }: { children: ReactNode }) {
   }, [syncMode]);
 
   const clearSequence = useCallback(() => {
-    if (timeoutRef.current !== null) window.clearTimeout(timeoutRef.current);
-    timeoutRef.current = null;
     bufferRef.current = [];
     setEditableOverride(false);
     setBuffer([]);
@@ -121,14 +117,6 @@ export function ShortcutProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
-    const scheduleClear = (fallbackAction?: AppAction) => {
-      if (timeoutRef.current !== null) window.clearTimeout(timeoutRef.current);
-      timeoutRef.current = window.setTimeout(() => {
-        clearSequence();
-        if (fallbackAction && isActionEnabled(fallbackAction)) fallbackAction.run();
-      }, SHORTCUT_SEQUENCE_TIMEOUT_MS);
-    };
-
     const applyMatch = (event: KeyboardEvent, keys: readonly string[]) => {
       const match = matchSequence(keys, actionsRef.current);
       if (match.kind === 'none') return match.kind;
@@ -142,7 +130,6 @@ export function ShortcutProvider({ children }: { children: ReactNode }) {
       } else {
         bufferRef.current = keys;
         setBuffer(keys);
-        scheduleClear(match.fallbackAction);
       }
       return match.kind;
     };
@@ -194,10 +181,7 @@ export function ShortcutProvider({ children }: { children: ReactNode }) {
     };
 
     window.addEventListener('keydown', onKeyDown, true);
-    return () => {
-      window.removeEventListener('keydown', onKeyDown, true);
-      if (timeoutRef.current !== null) window.clearTimeout(timeoutRef.current);
-    };
+    return () => window.removeEventListener('keydown', onKeyDown, true);
   }, [clearSequence, setEditableOverride]);
 
   const matchingActions = useMemo(() => {

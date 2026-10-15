@@ -3,8 +3,6 @@
  * Kept free of React so the behavior can be exercised by the native Node test runner.
  */
 
-export const SHORTCUT_SEQUENCE_TIMEOUT_MS = 1_200;
-
 export type ActionCategory = 'General' | 'Navigation' | 'Workspace';
 
 export type ShortcutMode = 'normal' | 'insert';

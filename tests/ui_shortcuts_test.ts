@@ -8,7 +8,6 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  SHORTCUT_SEQUENCE_TIMEOUT_MS,
   actionDescriptorKey,
   getChordCompletions,
   getDirectionalPaneId,
@@ -96,7 +95,6 @@ test('normalizes character, Escape, and arrow keys', () => {
   assert.equal(normalizeShortcutKey('ArrowRight'), '→');
   assert.equal(normalizeShortcutKey('ArrowUp'), '↑');
   assert.equal(normalizeShortcutKey('ArrowDown'), '↓');
-  assert.equal(SHORTCUT_SEQUENCE_TIMEOUT_MS, 1_200);
 });
 
 test('ignores modified, composing, repeated, and prevented events', () => {
