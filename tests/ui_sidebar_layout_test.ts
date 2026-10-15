@@ -56,12 +56,15 @@ test('hidden sidebar renders no rail; the fixed top-left cluster compacts on age
   // The sidebar animates its width (desktop) / slides (mobile) and its header reserves the cluster.
   assert.match(source, /isEffectiveCollapsed \? 'invisible w-0' : 'visible w-80 border-r border-subtle'/);
   assert.match(source, /isEffectiveCollapsed \? 'invisible -translate-x-full' : 'visible translate-x-0'/);
-  assert.match(source, /style=\{\{ width: topLeftClusterWidth \}\} \/>\s*<SidebarUpdateBadge/);
+  // The update badge is not in the sidebar header; it lives in the top bar / workspace top-right.
+  assert.doesNotMatch(source, /style=\{\{ width: topLeftClusterWidth \}\} \/>\s*<SidebarUpdateBadge/);
   // Hidden: the workspace's top-left header / other pages reserve the cluster's space.
   assert.match(source, /workspaceLeading=\{isEffectiveCollapsed \? <div aria-hidden="true" data-debug-id="shell-top-left-cluster-spacer"/);
   assert.match(source, /workspaceLeadingWidth=\{isEffectiveCollapsed \? topLeftClusterWidth : 0\}/);
-  assert.match(source, /workspaceTrailing=\{isEffectiveCollapsed \? <SidebarUpdateBadge onOpen=\{openBridgeUpdate\} \/> : null\}/);
-  assert.match(source, /\{isEffectiveCollapsed && !isWorkspaceRoute \? \(\s*<div\s+data-debug-id="shell-sidebar-reopen-bar"/);
+  assert.match(source, /workspaceTrailing=\{<SidebarUpdateBadge onOpen=\{openBridgeUpdate\} \/>\}/);
+  // Other pages keep their top bar (with the badge) whether or not the sidebar is open.
+  assert.match(source, /\{!isWorkspaceRoute \? \(\s*<div\s+data-debug-id="shell-top-bar"[\s\S]{0,300}<SidebarUpdateBadge onOpen=\{openBridgeUpdate\} \/>/);
+  assert.doesNotMatch(source, /shell-sidebar-reopen-bar/);
   // The toggle flips the persisted desktop preference / the mobile drawer.
   assert.match(source, /onClick=\{\(\) => \(isMobile \? setDrawerOpen\(!drawerOpen\) : toggleCollapsed\(\)\)\}/);
   assert.match(source, /localStorage\.setItem\('heimdall:shell:sidebar-collapsed'/);
@@ -89,7 +92,7 @@ test('REQ-MOB-1: mobile window chrome uses 44px round buttons in a 56px row; des
   assert.ok(MOBILE_TOP_CHROME_HEIGHT >= 44);
   assert.equal(chromeIconButtonSizeClass(false), 'h-8 w-8 rounded-lg');
   assert.equal(chromeIconButtonSizeClass(true), 'h-11 w-11 rounded-full');
-  assert.equal(source.split('height: chromeHeight').length - 1, 3, 'cluster, sidebar header and reopen bar share the chrome height');
+  assert.equal(source.split('height: chromeHeight').length - 1, 3, 'cluster, sidebar header and top bar share the chrome height');
 });
 
 test('mobile conversation header omits the project breadcrumb segment and first separator', () => {

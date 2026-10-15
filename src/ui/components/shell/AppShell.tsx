@@ -1114,7 +1114,7 @@ function RouteOutlet({
   /** Hidden sidebar: spacer reserving the fixed top-left cluster in the top-left chat header. */
   workspaceLeading?: React.ReactNode;
   workspaceLeadingWidth?: number;
-  /** Hidden sidebar: update-available badge, inline beside the top-right ⋮. */
+  /** Update-available badge, inline beside the top-right ⋮ (both sidebar states). */
   workspaceTrailing?: React.ReactNode;
 }) {
   const viewport = useViewport();
@@ -1979,10 +1979,8 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
         aria-label="Primary navigation"
       >
         <div className="flex w-80 max-w-[calc(100vw-1rem)] min-h-0 flex-1 flex-col">
-        <div className="flex items-center gap-2 pr-3" style={{ height: chromeHeight }}>
-          <div aria-hidden="true" className="shrink-0" style={{ width: topLeftClusterWidth }} />
-          <SidebarUpdateBadge onOpen={openBridgeUpdate} />
-        </div>
+        {/* Reserves the fixed top-left cluster's row; the update badge lives in the top bar. */}
+        <div aria-hidden="true" className="shrink-0" style={{ height: chromeHeight }} />
 
         <div className="flex-1 overflow-y-auto p-3">
           {/* Primary action: open the command palette (search + jump + new chat).
@@ -2040,14 +2038,16 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
       <div className="flex min-w-0 flex-1 flex-col h-full min-h-0 overflow-hidden">
         {/* The fixed top-left cluster floats over the content. On the conversation
             workspace the top-left chat header reserves its space; other pages get a
-            slim spacer row so the cluster never overlaps them (Jetski). */}
-        {isEffectiveCollapsed && !isWorkspaceRoute ? (
+            top bar in BOTH sidebar states (so the page never shifts when the sidebar
+            toggles), holding the update badge on its right. */}
+        {!isWorkspaceRoute ? (
           <div
-            data-debug-id="shell-sidebar-reopen-bar"
-            aria-hidden="true"
-            className="shrink-0 border-b border-subtle bg-canvas"
+            data-debug-id="shell-top-bar"
+            className="flex shrink-0 items-center justify-end gap-2 border-b border-subtle bg-canvas px-3"
             style={{ height: chromeHeight }}
-          />
+          >
+            <SidebarUpdateBadge onOpen={openBridgeUpdate} />
+          </div>
         ) : null}
         <RouteOutlet
           path={path}
@@ -2057,7 +2057,7 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
           liveProjects={liveProjects}
           workspaceLeading={isEffectiveCollapsed ? <div aria-hidden="true" data-debug-id="shell-top-left-cluster-spacer" className="shrink-0" style={{ width: topLeftClusterWidth - 12 }} /> : null}
           workspaceLeadingWidth={isEffectiveCollapsed ? topLeftClusterWidth : 0}
-          workspaceTrailing={isEffectiveCollapsed ? <SidebarUpdateBadge onOpen={openBridgeUpdate} /> : null}
+          workspaceTrailing={<SidebarUpdateBadge onOpen={openBridgeUpdate} />}
         />
       </div>
       </div>
