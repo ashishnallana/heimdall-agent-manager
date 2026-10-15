@@ -1292,6 +1292,14 @@ create_task_chain_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 201)
 }
 
+// chain_patch_title_source records who renamed a chain so the chain-scoped title
+// nudge stops (REQ-TN-A): "agent" for an instance token, "user" otherwise. A PATCH
+// without a title returns "" so update_chain leaves title_source untouched.
+chain_patch_title_source :: proc(title: string, kind: contracts.Auth_Kind) -> string {
+	if title == "" do return ""
+	return "agent" if kind == .Instance_Token else "user"
+}
+
 patch_task_chain_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Taskchain_Handlers)(ctx)
 	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
@@ -1299,8 +1307,10 @@ patch_task_chain_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	chain_id := path_part(req.path, 4)
 	has_pinned := strings.contains(req.body, "\"is_pinned\"") || strings.contains(req.body, "\"pinned\"")
 	is_pinned_val := json_bool(req.body, "is_pinned") if strings.contains(req.body, "\"is_pinned\"") else json_bool(req.body, "pinned")
+	title := json_string(req.body, "title")
 	chain, updated, err := taskchain_service.update_chain(h.taskchains, auth_ctx, domain.Task_Chain_ID(chain_id), taskchain_service.Update_Chain_Input{
-		title = json_string(req.body, "title"),
+		title = title,
+		title_source = chain_patch_title_source(title, auth_ctx.kind),
 		description = json_string(req.body, "description"),
 		status = json_string(req.body, "status"),
 		coordinator_agent_instance_id = json_string(req.body, "coordinator_agent_instance_id"),

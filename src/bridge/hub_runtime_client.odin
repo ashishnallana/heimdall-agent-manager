@@ -952,7 +952,7 @@ bridge_hub_handle_command :: proc(conn: ^ws.Connection, text: string) {
 		defer delete(command_id)
 		instance_id := extract_json_string(text, "agent_instance_id", "")
 		defer delete(instance_id)
-		message := extract_json_string(text, "message", "Please set a short, human-meaningful title for this conversation and its task chain.")
+		message := extract_json_string(text, "message", "Please set a short, human-meaningful title for this task chain: ham-ctl task-chain set-title \"<title>\"")
 		defer delete(message)
 		notice := strings.concatenate({"Nudge: ", message})
 		defer delete(notice)
