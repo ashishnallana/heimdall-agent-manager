@@ -27,12 +27,15 @@ on:
         default: false
         type: boolean
       prerelease:
-        # Default FALSE: /releases/latest excludes prereleases by design, which
-        # is what scripts/install.sh resolves against. Tick this for a genuine
-        # beta and expect the installer to fall back to /releases.
-        description: 'Mark the GitHub Release as a prerelease'
+        # Default TRUE: every release starts as a CANDIDATE. Hubs pin release
+        # tags (nix-homelab-config docs/heimdall-release-channels.md): the canary
+        # hub (mundus) takes a candidate first; "Promote release" then clears this
+        # flag and marks it Latest once the stable hub (brolabs) takes the same
+        # tag. /releases/latest and scripts/install.sh without --version only
+        # ever see promoted releases. Untick to publish straight to stable.
+        description: 'Publish as a candidate (prerelease) until promoted'
         required: true
-        default: false
+        default: true
         type: boolean
 
 permissions:
@@ -445,7 +448,10 @@ jobs:
           NOTES
           release_flags=()
           if [ "${{ inputs.draft || false }}" = "true" ]; then release_flags+=(--draft); fi
-          if [ "${{ inputs.prerelease || false }}" = "true" ]; then release_flags+=(--prerelease); fi
+          # Tag pushes have no inputs; they are candidates too (see the prerelease input).
+          if [ "${{ github.event_name == 'push' || inputs.prerelease }}" = "true" ]; then
+            release_flags+=(--prerelease)
+          fi
           if gh release view "$VERSION" >/dev/null 2>&1; then
             gh release upload "$VERSION" dist/heimdall-local-*-"$VERSION".tar.gz dist/SHA256SUMS --clobber
           else

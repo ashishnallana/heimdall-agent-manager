@@ -314,7 +314,9 @@ PY
   trap "$(printf 'rm -rf %q; rmdir %q' "$work_dir" "$lock_dir")" EXIT
   wait_for_hub
   if [ -z "$version" ]; then
-    # The repository also publishes prereleases, excluded by /releases/latest.
+    # Releases start as prereleases (candidates on the canary hub) and are promoted
+    # later; without --version, resolve only promoted releases. A hub's own
+    # /public/install.sh passes --version, so its bridges get the hub's release.
     download 'https://api.github.com/repos/tanmayv/heimdall-agent-manager/releases?per_page=30' "$work_dir/releases.json"
     # Newest release carrying the preferred target's bundle; only when no
     # listed release has one, the newest carrying the fallback target's.
@@ -326,10 +328,10 @@ for target in filter(None, sys.argv[2:]):
     for release in releases:
         tag = release.get('tag_name', '')
         assets = {a.get('name') for a in release.get('assets', [])}
-        if not release.get('draft') and {'SHA256SUMS', 'heimdall-local-'+target+'-'+tag+'.tar.gz'} <= assets:
+        if not release.get('draft') and not release.get('prerelease') and {'SHA256SUMS', 'heimdall-local-'+target+'-'+tag+'.tar.gz'} <= assets:
             print(tag)
             sys.exit()
-sys.exit('No published release bundle for this platform. Pass --version TAG.')
+sys.exit('No promoted release bundle for this platform. Pass --version TAG.')
 PY
 )"
   fi
