@@ -1361,7 +1361,7 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
   const displayName = user.display_name || user.name || user.user_id || 'Current user';
 
   const dispatch = useDispatch();
-  const { actions: shortcutActions, runAction } = useShortcuts();
+  const { actions: shortcutActions, runAction, mode: shortcutMode } = useShortcuts();
   const isCurrentAuxPaneOpen = useSelector((state: any) => {
     const treeId = selectCurrentAuxTreeId(state);
     return Boolean(selectAuxPane(state, treeId)?.isPaneOpen);
@@ -2013,6 +2013,7 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
           runningInstances: runningInstanceCount,
           connectedBridges: connectedBridgeCount,
           shells: shellCounts,
+          shortcutMode,
           renderVaultToggle: renderVaultStatusButton,
         }}
       />

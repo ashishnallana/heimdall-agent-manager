@@ -1,6 +1,7 @@
 import { useRef, type ReactNode } from 'react';
 import { Icon, type IconName } from '@ui';
 import { useBottomChromeVar } from '../responsive';
+import type { ShortcutMode } from '../../../services/shortcuts/shortcutLogic';
 import type { ShellCounts } from './statusBarModel';
 
 /**
@@ -20,6 +21,7 @@ export type StatusBarData = {
   runningInstances: number;
   connectedBridges: number;
   shells: ShellCounts;
+  shortcutMode: ShortcutMode;
   /** Shell-owned vault toggle (its handlers and modal state live in AppShell). */
   renderVaultToggle: (compact: boolean) => ReactNode;
 };

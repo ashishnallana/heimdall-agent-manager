@@ -71,25 +71,50 @@ const data = {
   runningInstances: 1,
   connectedBridges: 2,
   shells: { shells: 5, previews: 2, capped: false },
+  shortcutMode: 'normal' as const,
   renderVaultToggle: (compact: boolean) => `vault:${compact}`,
 };
 
 test('BAR-2: registry modules declare slot + order and render per compact context', () => {
   const ids = STATUS_BAR_MODULES.map((m) => m.id);
-  assert.deepEqual([...ids].sort(), ['bridges', 'instances', 'previews', 'shells', 'vault']);
+  assert.deepEqual([...ids].sort(), ['bridges', 'instances', 'previews', 'shells', 'shortcut-mode', 'vault']);
   assert.equal(new Set(ids).size, ids.length, 'module ids are unique');
   const left = renderSlot(STATUS_BAR_MODULES, 'left', { compact: false, data });
   const right = renderSlot(STATUS_BAR_MODULES, 'right', { compact: false, data });
-  assert.deepEqual(left.map((e) => e.id), ['vault', 'bridges']);
-  assert.deepEqual(right.map((e) => e.id), ['instances', 'shells', 'previews']);
+  assert.deepEqual(left.map((e) => e.id), ['shortcut-mode', 'bridges']);
+  assert.deepEqual(right.map((e) => e.id), ['instances', 'shells', 'previews', 'vault']);
   assert.deepEqual(renderSlot(STATUS_BAR_MODULES, 'center', { compact: false, data }), []);
   // Every module is told whether it is compact.
-  assert.equal(left[0].node, 'vault:false');
-  assert.equal(renderSlot(STATUS_BAR_MODULES, 'left', { compact: true, data })[0].node, 'vault:true');
+  assert.equal(right[3].node, 'vault:false');
+  assert.equal(renderSlot(STATUS_BAR_MODULES, 'right', { compact: true, data })[3].node, 'vault:true');
   const count = right[1].node as any;
   assert.equal(count.props.compact, false);
   assert.equal(count.props.value, '5');
   assert.equal((renderSlot(STATUS_BAR_MODULES, 'right', { compact: true, data })[1].node as any).props.compact, true);
+});
+
+test('REQ-SHORTCUT-MODE-8: mode module has responsive labels, semantics, and distinct backgrounds', () => {
+  const renderMode = (shortcutMode: 'normal' | 'insert', compact: boolean) => (
+    renderSlot(STATUS_BAR_MODULES, 'left', { compact, data: { ...data, shortcutMode } })[0].node as any
+  );
+
+  const normal = renderMode('normal', false);
+  const insert = renderMode('insert', false);
+  const compactNormal = renderMode('normal', true);
+  const compactInsert = renderMode('insert', true);
+
+  assert.equal(normal.props.children, 'NOR');
+  assert.equal(insert.props.children, 'INS');
+  assert.equal(compactNormal.props.children, 'N');
+  assert.equal(compactInsert.props.children, 'I');
+  assert.equal(normal.props.role, 'status');
+  assert.equal(normal.props['aria-label'], 'Shortcut mode: Normal');
+  assert.equal(insert.props['aria-label'], 'Shortcut mode: Insert');
+  assert.equal(normal.props['data-mode'], 'normal');
+  assert.equal(insert.props['data-mode'], 'insert');
+  assert.match(normal.props.className, /bg-info-soft/);
+  assert.match(insert.props.className, /bg-accent/);
+  assert.notEqual(normal.props.className, insert.props.className);
 });
 
 test('BAR-2: adding a module is one definition; order sorts, null hides', () => {
