@@ -101,6 +101,12 @@ test_bridge_log_entry_validation_enum_map_and_clamps :: proc(t: ^testing.T) {
 	testing.expect_value(t, e.received_at, NOW_MS)
 	testing.expect_value(t, e.fields_json, `{"stage":"other","exit_code":-7}`)
 	testing.expect_value(t, e.bridge_id, bid)
+	// The normalized unknown code is exposed with a valid class (API JSON).
+	{
+		b := strings.builder_make(context.temp_allocator)
+		write_bridge_log_event_json(&b, e)
+		testing.expect(t, strings.contains(strings.to_string(b), `"code":"other","class":"fatal"`), strings.to_string(b))
+	}
 
 	old, ok_old := bridge_log_validate_entry(bid, entry("warn", "provider_missing", `{"provider":"gemini"}`, 0, 12345), NOW_MS)
 	testing.expect(t, ok_old, "old ts accepted")
@@ -247,5 +253,5 @@ test_bridge_log_render_covers_every_code :: proc(t: ^testing.T) {
 	b := strings.builder_make()
 	defer strings.builder_destroy(&b)
 	write_bridge_log_event_json(&b, domain.Bridge_Log_Event{id = 7, bridge_id = "brg", ts_ms = 1, received_at = 2, level = "warn", code = "provider_missing", fields_json = `{"provider":"claude"}`, count = 3})
-	testing.expect_value(t, strings.to_string(b), `{"id":7,"ts_ms":1,"received_at":2,"level":"warn","code":"provider_missing","fields":{"provider":"claude"},"count":3,"message":"Provider CLI is not installed or has no runnable command (provider: claude)"}`)
+	testing.expect_value(t, strings.to_string(b), `{"id":7,"ts_ms":1,"received_at":2,"level":"warn","code":"provider_missing","class":"recoverable","fields":{"provider":"claude"},"count":3,"message":"Provider CLI is not installed or has no runnable command (provider: claude)"}`)
 }

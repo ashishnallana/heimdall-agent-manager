@@ -1972,6 +1972,11 @@ bootstrap_manifest_json_for_bridge :: proc(service: ^Agent_Service, owner: domai
 	strings.write_string(&b, "\",\"coordinator_agent_instance_id\":\""); write_service_json_string(&b, chain.coordinator_agent_instance_id)
 	strings.write_string(&b, "\",\"project_id\":\""); write_service_json_string(&b, string(inst.project_id))
 	strings.write_string(&b, "\",\"project_path\":\""); write_service_json_string(&b, inst.project_path)
+	// The scheduler wake builds its launch from this descriptor alone, so it must
+	// carry the instance's provider/model; without them every wake failed at spawn
+	// with provider_missing (REQ-ERR-6).
+	strings.write_string(&b, "\",\"provider\":\""); write_service_json_string(&b, inst.provider)
+	strings.write_string(&b, "\",\"model\":\""); write_service_json_string(&b, inst.model)
 	token := instance_assertion_token(inst); defer delete(token)
 	strings.write_string(&b, "\",\"instance_token\":\""); write_service_json_string(&b, token)
 	strings.write_string(&b, "\",\"hub_url\":\""); write_service_json_string(&b, bridge.hub_url)

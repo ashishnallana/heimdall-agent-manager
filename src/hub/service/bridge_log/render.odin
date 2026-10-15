@@ -120,3 +120,22 @@ field_raw :: proc(obj, key: string) -> (string, bool) {
 	for end < len(rest) && rest[end] != ',' && rest[end] != '}' && rest[end] != ' ' do end += 1
 	return rest[:end], true
 }
+
+// render_class derives the error class (retriable / recoverable / fatal) from the
+// code + fields with the same contracts.bridge_error_classify the bridge uses, so
+// the class never rides the wire and a hub upgrade alone can refine it. A code
+// this hub does not know (stored as "other") is classed from its fields by
+// contracts.bridge_error_classify_unknown, so the result is always a valid class.
+render_class :: proc(code: string, fields_json: string) -> string {
+	c, known := contracts.bridge_log_code_from_name(code)
+	reason := contracts.Bridge_Log_Sym.other
+	if raw, found := field_raw(fields_json, "reason"); found && len(raw) >= 2 && raw[0] == '"' {
+		if sym, sym_ok := contracts.bridge_log_sym_from_name(raw[1:len(raw) - 1]); sym_ok do reason = sym
+	}
+	hub_status := 0
+	if raw, found := field_raw(fields_json, "hub_status"); found {
+		if n, n_ok := strconv.parse_int(raw); n_ok do hub_status = n
+	}
+	if !known do return contracts.bridge_error_class_name(contracts.bridge_error_classify_unknown(reason, hub_status))
+	return contracts.bridge_error_class_name(contracts.bridge_error_classify(c, reason, hub_status))
+}

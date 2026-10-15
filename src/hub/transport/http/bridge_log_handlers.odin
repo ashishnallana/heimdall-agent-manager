@@ -335,6 +335,8 @@ write_bridge_log_event_json :: proc(b: ^strings.Builder, e: domain.Bridge_Log_Ev
 	write_handler_json_string(b, e.level)
 	strings.write_string(b, "\",\"code\":\"")
 	write_handler_json_string(b, e.code)
+	strings.write_string(b, "\",\"class\":\"")
+	write_handler_json_string(b, bridge_log_service.render_class(e.code, e.fields_json))
 	strings.write_string(b, "\",\"fields\":")
 	strings.write_string(b, e.fields_json if e.fields_json != "" else "{}")
 	strings.write_string(b, ",\"count\":")

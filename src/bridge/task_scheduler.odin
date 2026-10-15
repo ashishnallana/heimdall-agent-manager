@@ -1,6 +1,7 @@
 package main
 
 import "core:fmt"
+import "core:math/rand"
 import "core:strings"
 import "core:sync"
 import "core:thread"
@@ -26,6 +27,11 @@ BRIDGE_NUDGE_DEFAULT_WORKING_S :: 900
 BRIDGE_NUDGE_DEFAULT_COOLDOWN_S :: 300
 BRIDGE_NUDGE_DEFAULT_GRACE_S :: 30
 BRIDGE_WAKE_COALESCE_MS :: i64(30_000)
+// Retriable wake failures back off 1m, 2m, 4m ... capped at 30m (+-20% jitter).
+BRIDGE_WAKE_BACKOFF :: Bridge_Backoff_Policy{base_ms = 60_000, max_ms = 1_800_000, jitter_pct = 20}
+// A parked wake re-checks its LOCAL unpark probe (provider resolvable on PATH) at
+// most this often; the probe may scan PATH, so it is not run on every tick.
+BRIDGE_WAKE_PARK_PROBE_MS :: i64(300_000)
 
 Bridge_Nudge_Config :: struct {
 	// enabled gates only the auto-NUDGE path (re-pinging stale actionable tasks).
@@ -52,13 +58,31 @@ Bridge_Task_Observation :: struct {
 
 bridge_task_sched_mutex: sync.Mutex
 bridge_task_observations: [dynamic]Bridge_Task_Observation
-bridge_agent_wake: map[string]i64 // agent_instance_id -> last wake unix ms
+bridge_agent_wake: map[string]Bridge_Wake_State // agent_instance_id -> wake state
 bridge_nudge_config: Bridge_Nudge_Config
 
+bridge_task_sched_once: sync.Once
+
+// bridge_task_scheduler_init allocates the scheduler state exactly once. It is
+// idempotent and never replaces the mutex or the maps, because launch paths
+// (bridge_task_wake_note_launched) can run as soon as the hub worker starts,
+// before the scheduler thread does. main calls it before bridge_hub_runtime_start;
+// every entry point also calls it, so no call order can touch nil state.
 bridge_task_scheduler_init :: proc() {
-	bridge_task_sched_mutex = sync.Mutex{}
-	bridge_task_observations = make([dynamic]Bridge_Task_Observation)
-	bridge_agent_wake = make(map[string]i64)
+	sync.once_do(&bridge_task_sched_once, proc() {
+		bridge_task_observations = make([dynamic]Bridge_Task_Observation)
+		bridge_agent_wake = make(map[string]Bridge_Wake_State)
+	})
+}
+
+// bridge_task_scheduler_reset empties the scheduler state in place (tests).
+bridge_task_scheduler_reset :: proc() {
+	bridge_task_scheduler_init()
+	sync.mutex_lock(&bridge_task_sched_mutex)
+	defer sync.mutex_unlock(&bridge_task_sched_mutex)
+	clear(&bridge_task_observations)
+	for _, &st in bridge_agent_wake do bridge_wake_state_free(&st)
+	clear(&bridge_agent_wake)
 }
 
 // bridge_task_scheduler_default_config returns the built-in defaults
@@ -276,21 +300,165 @@ bridge_task_status_notify_wake_local :: proc(instance_id: string) -> bool {
 	return bridge_task_wake_if_needed(instance_id, bridge_runtime_now_ms())
 }
 
-// bridge_task_wake_if_needed wakes a local instance if it is not currently live,
-// coalescing wakes within BRIDGE_WAKE_COALESCE_MS. Returns true if a wake was
-// requested.
-bridge_task_wake_if_needed :: proc(instance_id: string, now: i64) -> bool {
-	inst, found := bridge_runtime_instance_snapshot(instance_id)
-	if found && bridge_runtime_status_active(inst.runtime_status) do return false
+// Per-instance wake state. The error class of the last failed wake decides what
+// happens next (see contracts.bridge_error_classify):
+//   retriable   -> exponential backoff (BRIDGE_WAKE_BACKOFF); never parks.
+//   recoverable -> PARKED: no timer retries. Unparks when the provider catalog
+//                  changes, or (for provider_missing / missing_binary) when the
+//                  provider becomes resolvable locally.
+//   fatal       -> PARKED until a launch of this instance succeeds by another path
+//                  (e.g. a hub launch_agent) or the bridge restarts.
+// Any successful launch resets the state (bridge_task_wake_note_launched).
+Bridge_Wake_State :: struct {
+	last_wake_ms:  i64, // last attempt; wakes within BRIDGE_WAKE_COALESCE_MS coalesce
+	failures:      int, // consecutive retriable failures
+	next_at_ms:    i64, // earliest next attempt after a retriable failure
+	parked:        bool,
+	err:           Bridge_Error, // last failure
+	probe_at_ms:   i64,    // parked: last local unpark probe
+	catalog_etag:  string, // parked: provider catalog etag at park time (owned)
+	provider:      string, // parked: for the local unpark probe (owned)
+	model:         string, // (owned)
+	generation:    u64,    // bumped by every successful launch; a wake result is
+	                       // applied only if the generation it started under is current
+}
 
+Bridge_Wake_Decision :: enum {
+	Wake,
+	Coalesced,
+	Backing_Off,
+	Parked,
+}
+
+Bridge_Wake_Transition :: enum {
+	None,
+	Recovered,
+	Backoff,
+	Parked,
+}
+
+bridge_wake_state_free :: proc(st: ^Bridge_Wake_State) {
+	delete(st.catalog_etag)
+	delete(st.provider)
+	delete(st.model)
+	st.catalog_etag, st.provider, st.model = "", "", ""
+}
+
+// bridge_wake_gate is the pure wake decision. `unpark` is the parked instance's
+// trigger check, evaluated by the caller only while parked.
+bridge_wake_gate :: proc(st: Bridge_Wake_State, has: bool, now_ms: i64, unpark := false) -> Bridge_Wake_Decision {
+	if !has do return .Wake
+	if st.parked do return .Wake if unpark else .Parked
+	if now_ms - st.last_wake_ms < BRIDGE_WAKE_COALESCE_MS do return .Coalesced
+	if st.next_at_ms > now_ms do return .Backing_Off
+	return .Wake
+}
+
+// bridge_wake_record applies one wake outcome to `st` and reports the transition
+// to log. It never touches the owned park strings; the caller sets them on .Parked.
+bridge_wake_record :: proc(st: ^Bridge_Wake_State, ok: bool, err: Bridge_Error, now_ms: i64, jitter_seed: u64 = 0) -> Bridge_Wake_Transition {
+	st.last_wake_ms = now_ms
+	if ok {
+		was_failing := st.parked || st.failures > 0
+		st.parked, st.failures, st.next_at_ms, st.err = false, 0, 0, {}
+		return .Recovered if was_failing else .None
+	}
+	st.err = err
+	switch err.class {
+	case .retriable:
+		st.parked = false
+		st.failures += 1
+		st.next_at_ms = bridge_backoff_next_at_ms(BRIDGE_WAKE_BACKOFF, st.failures, now_ms, err, jitter_seed)
+		return .Backoff
+	case .recoverable, .fatal:
+		was_parked := st.parked
+		st.parked, st.failures, st.next_at_ms, st.probe_at_ms = true, 0, 0, now_ms
+		return .None if was_parked else .Parked
+	}
+	return .None
+}
+
+// bridge_provider_runnable reports whether (provider, model) could be spawned on
+// this bridge right now: known to the catalog and the binary resolvable. Local
+// only; no hub call.
+bridge_provider_runnable :: proc(provider, model: string) -> bool {
+	if strings.trim_space(provider) == "" || strings.trim_space(model) == "" do return false
+	if !bridge_provider_catalog_has_model(provider, model) do return false
+	if _, ok := bridge_provider_catalog_profile(provider); !ok do return false
+	path, path_ok := bridge_provider_resolve_path(provider)
+	if !path_ok do return false
+	delete(path)
+	return true
+}
+
+// bridge_wake_unpark_trigger evaluates a parked instance's resume triggers and
+// returns a non-empty trigger name when it should be retried. Called under the
+// scheduler mutex; updates probe_at_ms.
+bridge_wake_unpark_trigger :: proc(st: ^Bridge_Wake_State, now_ms: i64) -> string {
+	if st.err.class == .fatal do return ""
+	etag := bridge_provider_catalog_current_etag()
+	defer delete(etag)
+	if etag != st.catalog_etag do return "provider_catalog_changed"
+	provider_problem := st.err.code == .provider_missing || st.err.reason == .missing_binary || st.err.reason == .not_executable
+	if !provider_problem || now_ms - st.probe_at_ms < BRIDGE_WAKE_PARK_PROBE_MS do return ""
+	st.probe_at_ms = now_ms
+	if bridge_provider_runnable(st.provider, st.model) do return "provider_runnable"
+	return ""
+}
+
+// bridge_task_wake_note_launched resets an instance's wake state after ANY
+// successful launch (scheduler, hub launch_agent, wake_agent), which is the
+// universal unpark trigger.
+//
+// The entry is created when absent, so a wake that registers AFTER this success
+// (it read a stale "not active" snapshot) still sees the bumped generation and a
+// fresh last_wake_ms, which coalesces it away.
+bridge_task_wake_note_launched :: proc(instance_id: string, now_ms: i64 = 0) {
+	bridge_task_scheduler_init()
 	sync.mutex_lock(&bridge_task_sched_mutex)
-	last, has := bridge_agent_wake[instance_id]
-	if has && now - last < BRIDGE_WAKE_COALESCE_MS {
+	defer sync.mutex_unlock(&bridge_task_sched_mutex)
+	if instance_id not_in bridge_agent_wake do bridge_agent_wake[strings.clone(instance_id)] = Bridge_Wake_State{}
+	st := &bridge_agent_wake[instance_id]
+	st.last_wake_ms = now_ms if now_ms > 0 else bridge_runtime_now_ms()
+	if st.parked || st.failures > 0 do fmt.println("bridge scheduler wake RECOVERED (launched)", instance_id)
+	bridge_wake_state_free(st)
+	st.parked, st.failures, st.next_at_ms, st.err = false, 0, 0, {}
+	// Invalidate any wake attempt still in flight: its (older) result must not
+	// re-park or back off an instance that has since launched.
+	st.generation += 1
+}
+
+// bridge_task_wake_if_needed wakes a local instance if it is not currently live,
+// subject to coalescing (BRIDGE_WAKE_COALESCE_MS), retriable-failure backoff and
+// parking (see Bridge_Wake_State). Returns true if a wake was requested and the
+// launch succeeded.
+bridge_task_wake_if_needed :: proc(instance_id: string, now: i64) -> bool {
+	bridge_task_scheduler_init()
+	sync.mutex_lock(&bridge_task_sched_mutex)
+	// Activity is checked UNDER the scheduler mutex (lock order: scheduler ->
+	// runtime). A launch marks the instance active before it calls
+	// bridge_task_wake_note_launched, so either this check sees it active, or the
+	// launch's generation bump happens after we register and invalidates us.
+	if inst, found := bridge_runtime_instance_snapshot(instance_id); found && bridge_runtime_status_active(inst.runtime_status) {
 		sync.mutex_unlock(&bridge_task_sched_mutex)
 		return false
 	}
-	bridge_agent_wake[instance_id] = now
+	st, has := bridge_agent_wake[instance_id]
+	trigger := ""
+	if has && st.parked {
+		trigger = bridge_wake_unpark_trigger(&bridge_agent_wake[instance_id], now)
+		st = bridge_agent_wake[instance_id]
+	}
+	if bridge_wake_gate(st, has, now, trigger != "") != .Wake {
+		sync.mutex_unlock(&bridge_task_sched_mutex)
+		return false
+	}
+	if !has do bridge_agent_wake[strings.clone(instance_id)] = Bridge_Wake_State{}
+	slot := &bridge_agent_wake[instance_id]
+	slot.last_wake_ms = now
+	generation := slot.generation
 	sync.mutex_unlock(&bridge_task_sched_mutex)
+	if trigger != "" do fmt.println("bridge scheduler wake UNPARKED", instance_id, "trigger=", trigger)
 
 	// Reuse the same launch path as a hub launch_agent command; a synthetic
 	// command_id keeps the launch idempotency/caching machinery happy.
@@ -302,26 +470,48 @@ bridge_task_wake_if_needed :: proc(instance_id: string, now: i64) -> bool {
 	// per-instance descriptor from the hub and build a FULLY-ENRICHED launch command
 	// (same payload keys as agent_service.launch_command_json_full) so the launch
 	// takes the full agent-keyed template bootstrap. If the descriptor cannot be
-	// fetched (or lacks agent_id), we ABORT the wake and retry next tick rather than
-	// materialize a degraded bootstrap -- a visible failure, never a silent one.
+	// fetched (or lacks agent_id), the wake fails with a classified error rather
+	// than materialize a degraded bootstrap -- a visible failure, never a silent one.
 	command_id := fmt.tprintf("sched_wake_%s_%d", instance_id, now)
-	command_json, enrich_ok := bridge_scheduler_fetch_enriched_launch_json(instance_id, command_id)
-	if !enrich_ok {
-		sync.mutex_lock(&bridge_task_sched_mutex)
-		delete_key(&bridge_agent_wake, instance_id)
-		sync.mutex_unlock(&bridge_task_sched_mutex)
-		fmt.println("bridge scheduler wake aborted: could not fetch enriched descriptor (agent_id) for instance", instance_id)
-		return false
-	}
+	command_json, enrich_err, enrich_ok := bridge_scheduler_fetch_enriched_launch_json(instance_id, command_id)
 	defer delete(command_json)
-	ok, detail := bridge_runtime_launch_agent(command_id, command_json)
-	if !ok {
-		sync.mutex_lock(&bridge_task_sched_mutex)
-		delete_key(&bridge_agent_wake, instance_id)
-		sync.mutex_unlock(&bridge_task_sched_mutex)
-		fmt.println("bridge scheduler wake failed", instance_id, detail)
+	ok, detail, err := false, "", enrich_err
+	if enrich_ok {
+		ok, detail, err = bridge_runtime_launch_agent(command_id, command_json)
+	} else {
+		detail = "could not fetch enriched descriptor (agent_id)"
 	}
+	bridge_task_wake_record_result(instance_id, generation, ok, detail, err, command_json, now)
 	return ok
+}
+
+// bridge_task_wake_record_result applies a wake outcome and logs only state
+// TRANSITIONS (first failure / each backoff step, parked, recovered), never one
+// line per tick.
+// A result whose `generation` is stale (a launch succeeded while this attempt was
+// in flight) is dropped.
+bridge_task_wake_record_result :: proc(instance_id: string, generation: u64, ok: bool, detail: string, err: Bridge_Error, command_json: string, now: i64) {
+	sync.mutex_lock(&bridge_task_sched_mutex)
+	defer sync.mutex_unlock(&bridge_task_sched_mutex)
+	st, has := &bridge_agent_wake[instance_id]
+	if !has || st.generation != generation do return
+	transition := bridge_wake_record(st, ok, err, now, rand.uint64())
+	if st.parked {
+		// Snapshot the trigger baselines on EVERY parked failure, including a failed
+		// unpark attempt: otherwise a changed catalog etag would re-trigger each tick.
+		bridge_wake_state_free(st)
+		st.catalog_etag = bridge_provider_catalog_current_etag()
+		st.provider, st.model = bridge_runtime_provider_model(command_json) // caller-owned
+	}
+	switch transition {
+	case .None:
+	case .Recovered:
+		fmt.println("bridge scheduler wake RECOVERED", instance_id)
+	case .Backoff:
+		fmt.printfln("bridge scheduler wake failed %s %s: %s; retry %d in %ds", instance_id, detail, bridge_error_string(err), st.failures, (st.next_at_ms - now) / 1000)
+	case .Parked:
+		fmt.printfln("bridge scheduler wake PARKED %s %s: %s; no timer retries until a resume trigger", instance_id, detail, bridge_error_string(err))
+	}
 }
 
 // bridge_scheduler_fetch_enriched_launch_json builds a fully-enriched launch_agent
@@ -331,27 +521,32 @@ bridge_task_wake_if_needed :: proc(instance_id: string, now: i64) -> bool {
 // returns the per-instance descriptor (agent_id, agent_name, role, chain_id,
 // chain_title, coordinator, project). Those are forwarded into the synthetic launch
 // payload so the launch takes the full agent-keyed template bootstrap instead of the
-// header-only fallback. Returns ("", false) when the hub is unreachable or the
-// descriptor lacks agent_id, so the caller aborts the wake (retry next tick) rather
-// than materialize a degraded, header-only CLAUDE.md. Transient extracted strings
+// header-only fallback. Returns ("", err, false) when the hub is unreachable
+// (retriable), rejects the fetch (classified by HTTP status) or the descriptor lacks
+// agent_id (recoverable), so the caller fails the wake with that class rather than
+// materialize a degraded, header-only CLAUDE.md. Transient extracted strings
 // follow the same no-free convention as bridge_hub_handle_wake_agent.
-bridge_scheduler_fetch_enriched_launch_json :: proc(instance_id, command_id: string) -> (string, bool) {
-	if strings.trim_space(bridge_config.daemon_url) == "" || strings.trim_space(bridge_config.bridge_token) == "" do return "", false
+bridge_scheduler_fetch_enriched_launch_json :: proc(instance_id, command_id: string) -> (string, Bridge_Error, bool) {
+	if strings.trim_space(bridge_config.daemon_url) == "" || strings.trim_space(bridge_config.bridge_token) == "" do return "", bridge_error(.hub_connect_failed, .config), false
 	path := strings.concatenate({"/api/v1/bridge/agent-instances/", instance_id, "/bootstrap?format=manifest"})
 	defer delete(path)
 	auth := strings.concatenate({"Bearer ", bridge_config.bridge_token})
 	defer delete(auth)
 	headers := [?]http.Header{{name = "Authorization", value = auth}}
 	resp, ok := bridge_http_request_retry("GET", bridge_config.daemon_url, path, "", headers[:], http.DEFAULT_TIMEOUT_MS)
-	if !ok || resp.status != 200 { delete(resp.body); return "", false }
+	if !ok || resp.status != 200 {
+		delete(resp.body)
+		if !ok || resp.status == 0 do return "", bridge_error(.hub_connect_failed, .transport), false
+		return "", bridge_error(.hub_rejected, .other, resp.status), false
+	}
 	defer delete(resp.body)
 	// data_obj/inst_obj are ALIASES into resp.body (not owned clones) -- do not free.
 	data_obj, data_ok := bridge_provider_json_extract_object(resp.body, "data")
-	if !data_ok do return "", false
+	if !data_ok do return "", bridge_error(.agent_bootstrap_invalid), false
 	inst_obj, inst_ok := bridge_provider_json_extract_object(data_obj, "instance")
-	if !inst_ok do return "", false
+	if !inst_ok do return "", bridge_error(.agent_bootstrap_invalid), false
 	agent_id := extract_json_string(inst_obj, "agent_id", "")
-	if strings.trim_space(agent_id) == "" do return "", false
+	if strings.trim_space(agent_id) == "" do return "", bridge_error(.agent_bootstrap_invalid), false
 	agent_name     := extract_json_string(inst_obj, "agent_name", "")
 	role           := extract_json_string(inst_obj, "role", "")
 	chain_id       := extract_json_string(inst_obj, "chain_id", "")
@@ -360,10 +555,15 @@ bridge_scheduler_fetch_enriched_launch_json :: proc(instance_id, command_id: str
 	coordinator_display_name := extract_json_string(inst_obj, "coordinator_display_name", "")
 	project_id               := extract_json_string(inst_obj, "project_id", "")
 	project_path             := extract_json_string(inst_obj, "project_path", "")
-	// task_id/provider/model are unknown to the scheduler wake (the agent resolves its
-	// current task after boot via reconcile; provider/model fall back to bridge/instance
-	// defaults in bridge_runtime_launch_agent). agent_id is the load-bearing field.
-	return bridge_wake_launch_command_json(command_id, instance_id, "", role, "", "", agent_id, agent_name, chain_id, chain_title, coordinator_id, project_id, project_path, coordinator_display_name), true
+	// REQ-ERR-6: provider/model come from the descriptor. The launch path has no
+	// fallback for them, so an older hub that omits them still yields
+	// provider_missing, which now parks the wake instead of looping. task_id stays
+	// unknown: the agent resolves its current task after boot via reconcile.
+	provider := extract_json_string(inst_obj, "provider", "")
+	defer delete(provider)
+	model    := extract_json_string(inst_obj, "model", "")
+	defer delete(model)
+	return bridge_wake_launch_command_json(command_id, instance_id, "", role, provider, model, agent_id, agent_name, chain_id, chain_title, coordinator_id, project_id, project_path, coordinator_display_name), {}, true
 }
 
 // bridge_task_deliver_nudge pushes a nudge to the local wrapper if live. If the

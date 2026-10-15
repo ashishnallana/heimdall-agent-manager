@@ -155,6 +155,9 @@ main :: proc() {
 		local_config := bridge_local_endpoint_config_default(bridge_config.local_endpoint_run_dir, bridge_config.local_endpoint_port)
 		fmt.println("bridge local endpoint", endpoint, "fallback", bridge_local_endpoint_env_value(local_config, false), "socket_mode", "0600")
 	}
+	// Scheduler state must exist before the hub worker can run a launch, which
+	// records itself via bridge_task_wake_note_launched.
+	bridge_task_scheduler_init()
 	bridge_hub_runtime_start()
 	// REQ-IMPL-4 / design §7.5: renew the access token at 80% of its lifetime with
 	// jitter, rather than waiting for a 401 — by which time in-flight work has

@@ -57,9 +57,9 @@ test_bridge_log_push_format_is_loki_with_two_label_streams :: proc(t: ^testing.T
 	testing.expect(t, !strings.contains(body, `"stream":{"job":"heimdall-bridge","level":"warn","`), "no extra labels")
 	testing.expect(t, !strings.contains(body, "owner"), "owner is never shipped")
 	// Values: [ns, line, metadata].
-	testing.expect(t, strings.contains(body, `["1700000000456000000","Connection to the hub closed; reconnecting (reason: eof, after 250 ms)",{"bridge_id":"brg_2","code":"hub_ws_closed","version":"1.2.3","count":"1","reason":"eof","duration_ms":"250"}]`), body)
-	testing.expect(t, strings.contains(body, `["1700000000123000000","Provider CLI is not installed or has no runnable command (provider: claude) (x2)",{"bridge_id":"brg_1","code":"provider_missing","version":"1.2.3","count":"2","provider":"claude"}]`), body)
-	testing.expect(t, strings.contains(body, `"code":"other"`), body)
+	testing.expect(t, strings.contains(body, `["1700000000456000000","Connection to the hub closed; reconnecting (reason: eof, after 250 ms)",{"bridge_id":"brg_2","code":"hub_ws_closed","class":"retriable","version":"1.2.3","count":"1","reason":"eof","duration_ms":"250"}]`), body)
+	testing.expect(t, strings.contains(body, `["1700000000123000000","Provider CLI is not installed or has no runnable command (provider: claude) (x2)",{"bridge_id":"brg_1","code":"provider_missing","class":"recoverable","version":"1.2.3","count":"2","provider":"claude"}]`), body)
+	testing.expect(t, strings.contains(body, `"code":"other","class":"fatal","version"`), body)
 	testing.expect(t, strings.has_suffix(body, "]}]}"), body)
 }
 
@@ -122,4 +122,22 @@ test_bridge_log_push_client_from_url_strips_trailing_slash :: proc(t: ^testing.T
 	testing.expect_value(t, c.base_url, "http://127.0.0.1:9428")
 	testing.expect_value(t, c.timeout_ms, PUSH_TIMEOUT_MS)
 	testing.expect(t, c.send != nil, "default sender installed")
+}
+
+@(test)
+test_bridge_log_render_class_uses_reason_and_hub_status :: proc(t: ^testing.T) {
+	testing.expect_value(t, render_class("provider_missing", `{"provider":"claude"}`), "recoverable")
+	testing.expect_value(t, render_class("hub_ws_closed", `{"reason":"eof"}`), "retriable")
+	testing.expect_value(t, render_class("hub_rejected", `{"hub_status":503}`), "retriable")
+	testing.expect_value(t, render_class("hub_rejected", `{"hub_status":401}`), "recoverable")
+	testing.expect_value(t, render_class("hub_rejected", `{"hub_status":400}`), "fatal")
+	testing.expect_value(t, render_class("enroll_failed", `{"stage":"poll","reason":"expired"}`), "recoverable")
+	testing.expect_value(t, render_class("update_apply_failed", `{"reason":"missing_binary"}`), "fatal")
+	testing.expect_value(t, render_class("internal", `{}`), "fatal")
+	// A code this hub does not know (normalized to "other") still gets a valid
+	// class: from its fields when they carry evidence, else fatal.
+	testing.expect_value(t, render_class("other", `{}`), "fatal")
+	testing.expect_value(t, render_class("from_a_newer_bridge", `{}`), "fatal")
+	testing.expect_value(t, render_class("other", `{"reason":"timeout"}`), "retriable")
+	testing.expect_value(t, render_class("other", `{"hub_status":401}`), "recoverable")
 }

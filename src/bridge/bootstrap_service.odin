@@ -18,6 +18,21 @@ Bridge_Bootstrap_Result :: struct {
 	detail:      string,
 }
 
+// bridge_bootstrap_result_error classifies a failed bootstrap: hub fetches carry
+// their HTTP status (0 = transport, retriable), a rejected descriptor is fatal,
+// and a local assemble/write failure is recoverable (it needs a fixed manifest
+// or disk, not another identical attempt).
+bridge_bootstrap_result_error :: proc(r: Bridge_Bootstrap_Result) -> Bridge_Error {
+	switch r.stage {
+	case "validate":
+		return bridge_error(.agent_bootstrap_invalid, .unsupported)
+	case "manifest_get", "blob_fetch":
+		if r.http_status == 0 do return bridge_error(.agent_bootstrap_invalid, .transport)
+		return bridge_error(.agent_bootstrap_invalid, .other, r.http_status)
+	}
+	return bridge_error(.agent_bootstrap_invalid)
+}
+
 // Retry/backoff for the individually-retriable hub calls (BRG-4/RETRY-1): the
 // conditional manifest GET and each per-hash blob GET retry alone with a short
 // exponential backoff so a transient failure of one small request never fails the

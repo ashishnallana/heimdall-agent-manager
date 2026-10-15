@@ -115,6 +115,8 @@ loki_push_json :: proc(events: []domain.Bridge_Log_Event, version: string, alloc
 			write_json_escaped(&b, e.bridge_id)
 			strings.write_string(&b, `","code":"`)
 			write_json_escaped(&b, e.code)
+			strings.write_string(&b, `","class":"`)
+			write_json_escaped(&b, render_class(e.code, e.fields_json))
 			strings.write_string(&b, `","version":"`)
 			write_json_escaped(&b, version)
 			strings.write_string(&b, `","count":"`)

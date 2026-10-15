@@ -26,7 +26,7 @@ main :: proc() {
 // records last_nudge on ATTEMPT. This test simulates the tick's decide->mark
 // sequence and asserts the cooldown holds regardless of delivery outcome.
 test_cooldown_on_attempt :: proc() {
-	bridge.bridge_task_scheduler_init()
+	bridge.bridge_task_scheduler_reset()
 	c := cfg()
 	now: i64 = 10_000_000
 	// Task became stale (first_seen 400s ago), never nudged.
@@ -91,7 +91,7 @@ test_should_nudge :: proc() {
 }
 
 test_observe_and_prune :: proc() {
-	bridge.bridge_task_scheduler_init()
+	bridge.bridge_task_scheduler_reset()
 	now: i64 = 5_000_000
 
 	// First observation sets first_seen = now.

@@ -91,6 +91,13 @@ BRIDGE_REFRESH_MIN_DELAY_SECONDS :: 30
 BRIDGE_REFRESH_BACKOFF_START_SECONDS :: 5
 BRIDGE_REFRESH_BACKOFF_MAX_SECONDS :: 300
 
+// bridge_refresh_backoff_seconds is the shared bridge backoff (retry_policy.odin)
+// on the refresh schedule: 5s, 10s, 20s, ... capped at 300s, no jitter.
+bridge_refresh_backoff_seconds :: proc(failures: int) -> int {
+	policy := Bridge_Backoff_Policy{base_ms = BRIDGE_REFRESH_BACKOFF_START_SECONDS * 1000, max_ms = BRIDGE_REFRESH_BACKOFF_MAX_SECONDS * 1000}
+	return int(bridge_backoff_delay_ms(policy, failures) / 1000)
+}
+
 // Bridge_Machine_Descriptor is what the approval screen renders (REQ-IMPL-5) and
 // what the Hub stores as the bridge's `machine_hostname` / `machine_os` /
 // `os_user` / version.
@@ -682,7 +689,7 @@ bridge_credential_refresh_start :: proc(credential_file: string) {
 // timestamp against the local wall clock, because REQ-IMPL-3 deliberately returns
 // durations so a box with bad time still renews correctly.
 bridge_credential_refresh_worker :: proc() {
-	backoff := BRIDGE_REFRESH_BACKOFF_START_SECONDS
+	failures := 0
 	// The first delay uses the access token's own remaining lifetime, which the
 	// bridge does not know across a restart — so it refreshes once promptly and
 	// then settles onto the 80% schedule from the Hub's reported durations. A
@@ -708,15 +715,15 @@ bridge_credential_refresh_worker :: proc() {
 			if strings.trim_space(cred.refresh_token) != "" {
 				if !bridge_write_secret_file(refresh_path, cred.refresh_token) {
 					fmt.println("bridge credential refresh: could not persist the rotated refresh token; retrying")
-					delay = backoff
-					backoff = min(backoff * 2, BRIDGE_REFRESH_BACKOFF_MAX_SECONDS)
+					failures += 1
+					delay = bridge_refresh_backoff_seconds(failures)
 					continue
 				}
 			}
 			if !bridge_write_secret_file(g_bridge_credential_file, cred.access_token) {
 				fmt.println("bridge credential refresh: could not persist the rotated access token; retrying")
-				delay = backoff
-				backoff = min(backoff * 2, BRIDGE_REFRESH_BACKOFF_MAX_SECONDS)
+				failures += 1
+				delay = bridge_refresh_backoff_seconds(failures)
 				continue
 			}
 			// The WS worker re-reads bridge_config.bridge_token on every reconnect, so
@@ -726,7 +733,7 @@ bridge_credential_refresh_worker :: proc() {
 			sync.mutex_lock(&g_bridge_credential_mu)
 			bridge_config.bridge_token = strings.clone(strings.trim_space(cred.access_token))
 			sync.mutex_unlock(&g_bridge_credential_mu)
-			backoff = BRIDGE_REFRESH_BACKOFF_START_SECONDS
+			failures = 0
 			jitter: [1]byte
 			if !bridge_enroll_entropy(jitter[:]) do jitter[0] = 128
 			delay = bridge_refresh_delay_seconds(cred.expires_in, jitter[0])
@@ -745,8 +752,8 @@ bridge_credential_refresh_worker :: proc() {
 			blog_error(.hub_rejected, blog_sym(.stage, .token), blog_sym(.reason, .revoked))
 			return
 		case .Retry:
-			delay = backoff
-			backoff = min(backoff * 2, BRIDGE_REFRESH_BACKOFF_MAX_SECONDS)
+			failures += 1
+			delay = bridge_refresh_backoff_seconds(failures)
 			fmt.printfln("bridge credential refresh failed (transport or transient); retrying in %ds", delay)
 		}
 	}

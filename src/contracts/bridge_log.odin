@@ -301,3 +301,128 @@ bridge_log_provider_sym :: proc(provider: string) -> Bridge_Log_Sym {
 	}
 	return .other
 }
+
+// ---- error classes -------------------------------------------------------
+//
+// Every code has ONE default class saying what the bridge may do about it:
+//   retriable   — transient; the identical request can succeed later. Retry with
+//                 exponential backoff, always (the cap keeps it cheap).
+//   recoverable — keeps failing until something EXTERNAL changes (an install, a
+//                 login, an unseal, a config push). Park; never retry on a timer;
+//                 resume on the matching trigger.
+//   fatal       — the request itself is invalid, or retrying cannot help. Fail
+//                 once, report, never retry.
+// The table is an exhaustive enumerated array, so a new code without a class is
+// a compile error. bridge_error_classify refines the default with the reason
+// symbol and the hub HTTP status, which carry more specific evidence. Both ends
+// import this, so the hub derives the same class from (code, fields) without the
+// class ever riding the wire.
+
+Bridge_Error_Class :: enum u8 {
+	retriable,
+	recoverable,
+	fatal,
+}
+
+BRIDGE_ERROR_CLASS_NAMES :: [Bridge_Error_Class]string{
+	.retriable   = "retriable",
+	.recoverable = "recoverable",
+	.fatal       = "fatal",
+}
+
+BRIDGE_LOG_CODE_DEFAULT_CLASS :: [Bridge_Log_Code]Bridge_Error_Class{
+	// hub link
+	.hub_connect_failed         = .retriable,
+	.tls_backend_missing        = .recoverable, // install a TLS backend
+	.hub_rejected               = .retriable,   // refined by hub_status
+	.hub_ready_timeout          = .retriable,
+	.hub_connection_replaced    = .retriable,
+	.hub_ws_closed              = .retriable,
+	.clock_skew                 = .recoverable, // sync the clock
+	// identity / vault
+	.enroll_failed              = .retriable,   // refined: expired/denied -> recoverable
+	.token_persist_failed       = .recoverable, // fix permissions / disk
+	.config_write_failed        = .recoverable, // fix permissions / disk
+	.vault_locked               = .recoverable, // unseal
+	.vault_unseal_failed        = .recoverable, // correct key
+	.keystore_unavailable       = .retriable,
+	.outbox_persist_failed      = .retriable,
+	// agents
+	.pty_host_spawn_failed      = .retriable,
+	.pty_host_unreachable       = .retriable,
+	.pty_host_exited            = .retriable,
+	.agent_launch_failed        = .retriable,   // refined by reason
+	.agent_exited_early         = .retriable,
+	.agent_bootstrap_invalid    = .recoverable, // hub pushes a fixed config
+	.provider_missing           = .recoverable, // install / configure provider
+	.provider_not_logged_in     = .recoverable, // log in
+	.provider_discovery_failed  = .retriable,
+	// shells / lsp / tunnel
+	.shell_start_failed         = .fatal,       // bad cwd / command for this request
+	.shell_exited_error         = .fatal,       // the user's command failed, not the bridge
+	.lsp_start_failed           = .recoverable, // install the language server
+	.lsp_crashed                = .retriable,
+	.tunnel_error               = .retriable,
+	.preview_proxy_error        = .retriable,
+	// update
+	.update_download_failed     = .retriable,
+	.update_apply_failed        = .fatal,       // never re-apply the same version automatically
+	.update_rollback            = .fatal,
+	// misc
+	.telemetry_collector_failed = .retriable,
+	.search_index_error         = .retriable,
+	.internal                   = .fatal,       // a bug: report, never loop on it
+}
+
+bridge_error_class_name :: proc(class: Bridge_Error_Class) -> string {
+	names := BRIDGE_ERROR_CLASS_NAMES
+	return names[class]
+}
+
+// bridge_error_http_class classifies a hub HTTP outcome. status 0 means the
+// request never got a response (transport failure).
+bridge_error_http_class :: proc(status: int) -> Bridge_Error_Class {
+	switch {
+	case status == 0, status == 429, status >= 500: return .retriable
+	// 409/423: the resource is in the wrong state (e.g. "not launchable") and
+	// becomes valid when that state changes, not by repeating the request.
+	case status == 401, status == 403, status == 409, status == 423: return .recoverable
+	case status >= 400:                               return .fatal
+	}
+	return .retriable
+}
+
+// bridge_error_classify_unknown classes an event whose code this side does not
+// know (a newer peer; the hub stores it as "other"). The fields still carry
+// evidence, so hub_status and the reason are applied as usual. With neither, the
+// result is fatal: an error that is not understood must never be retried
+// automatically.
+bridge_error_classify_unknown :: proc(reason: Bridge_Log_Sym = .other, hub_status := 0) -> Bridge_Error_Class {
+	if hub_status > 0 do return bridge_error_http_class(hub_status)
+	#partial switch reason {
+	case .timeout, .transport, .eof:
+		return .retriable
+	case .missing_binary, .not_executable, .login_required, .revoked, .expired, .denied:
+		return .recoverable
+	}
+	return .fatal
+}
+
+// bridge_error_classify returns the class of (code, reason, hub_status). Precedence:
+// a fatal default is final (a reason never softens a bug or a rolled-back update);
+// otherwise a hub HTTP status (> 0) is the most specific evidence, then the reason
+// symbol, then the code's default.
+bridge_error_classify :: proc(code: Bridge_Log_Code, reason: Bridge_Log_Sym = .other, hub_status := 0) -> Bridge_Error_Class {
+	defaults := BRIDGE_LOG_CODE_DEFAULT_CLASS
+	if defaults[code] == .fatal do return .fatal
+	if hub_status > 0 do return bridge_error_http_class(hub_status)
+	#partial switch reason {
+	case .timeout, .transport, .eof:
+		return .retriable
+	case .missing_binary, .not_executable, .login_required, .revoked, .expired, .denied:
+		return .recoverable
+	case .unsupported:
+		return .fatal
+	}
+	return defaults[code]
+}
