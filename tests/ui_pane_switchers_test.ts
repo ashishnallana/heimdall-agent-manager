@@ -71,6 +71,7 @@ async function withDom<T>(hash: string, fn: (dom: any) => Promise<T>): Promise<T
       return conv ? json({ data: conv }) : json({ error: 'nope' }, false);
     }
     if (/\/task-chains(\?|$)/.test(url)) return json({ groups: GROUPS });
+    if (/\/templates(\?|$)/.test(url)) return json({ data: [] });
     return json({ data: {} });
   };
   try {
@@ -129,6 +130,7 @@ test('per-pane chain switcher swaps THAT pane to the chain coordinator in place 
     const { selectCurrentAuxTreeId } = await import('../src/ui/store/auxPanesSlice.ts');
     const { readGroupIndex } = await import('../src/ui/store/splitGroups.ts');
     const { Workspace } = await import('../src/ui/components/mainWorkspace/Workspace.tsx');
+    const { ShortcutProvider } = await import('../src/ui/services/shortcuts/ShortcutContext.tsx');
 
     const store = await makeStore();
     const doc = dom.window.document;
@@ -150,7 +152,11 @@ test('per-pane chain switcher swaps THAT pane to the chain coordinator in place 
     };
     try {
       await act(async () => {
-        root.render(React.createElement(Provider, { store }, React.createElement(Workspace, {})));
+        root.render(React.createElement(
+          Provider,
+          { store },
+          React.createElement(ShortcutProvider, {}, React.createElement(Workspace, {})),
+        ));
         await new Promise((r) => setTimeout(r, 40));
       });
       assert.deepEqual(layout.selectMainAgentIds(store.getState()), ['a', 'b']);
@@ -198,13 +204,18 @@ test('per-pane agent switcher swaps THAT pane in place (deduped) and the URL/gro
     const layout = await import('../src/ui/store/workspaceLayoutSlice.ts');
     const { readGroupIndex } = await import('../src/ui/store/splitGroups.ts');
     const { Workspace } = await import('../src/ui/components/mainWorkspace/Workspace.tsx');
+    const { ShortcutProvider } = await import('../src/ui/services/shortcuts/ShortcutContext.tsx');
 
     const store = await makeStore();
     const root = createRoot(dom.window.document.getElementById('root')!);
     const settle = () => new Promise((r) => setTimeout(r, 40));
     try {
       await act(async () => {
-        root.render(React.createElement(Provider, { store }, React.createElement(Workspace, {})));
+        root.render(React.createElement(
+          Provider,
+          { store },
+          React.createElement(ShortcutProvider, {}, React.createElement(Workspace, {})),
+        ));
         await settle();
       });
       const aPane = layout.findPaneByAgent(store.getState().workspaceLayout.tree, 'a')!;
@@ -248,6 +259,7 @@ test('fixed top-right cluster: one side-panel toggle (+ update badge) stays top-
     const { heimdallApi } = await import('../src/ui/api/heimdallApi.ts');
     const layout = await import('../src/ui/store/workspaceLayoutSlice.ts');
     const { Workspace } = await import('../src/ui/components/mainWorkspace/Workspace.tsx');
+    const { ShortcutProvider } = await import('../src/ui/services/shortcuts/ShortcutContext.tsx');
     const store = await makeStore();
     const doc = dom.window.document;
     const root = createRoot(doc.getElementById('root')!);
@@ -255,11 +267,15 @@ test('fixed top-right cluster: one side-panel toggle (+ update badge) stays top-
     try {
       await act(async () => {
         root.render(
-          React.createElement(Provider, { store }, React.createElement(Workspace, {
-            leading: el('left-spacer'),
-            leadingWidth: 84,
-            trailing: el('update-badge'),
-          })),
+          React.createElement(
+            Provider,
+            { store },
+            React.createElement(ShortcutProvider, {}, React.createElement(Workspace, {
+              leading: el('left-spacer'),
+              leadingWidth: 84,
+              trailing: el('update-badge'),
+            })),
+          ),
         );
         await new Promise((r) => setTimeout(r, 40));
       });
@@ -350,12 +366,17 @@ test('split view: only the FOCUSED pane shows a close ✕; it closes that pane a
     const { heimdallApi } = await import('../src/ui/api/heimdallApi.ts');
     const layout = await import('../src/ui/store/workspaceLayoutSlice.ts');
     const { Workspace } = await import('../src/ui/components/mainWorkspace/Workspace.tsx');
+    const { ShortcutProvider } = await import('../src/ui/services/shortcuts/ShortcutContext.tsx');
     const store = await makeStore();
     const doc = dom.window.document;
     const root = createRoot(doc.getElementById('root')!);
     try {
       await act(async () => {
-        root.render(React.createElement(Provider, { store }, React.createElement(Workspace, {})));
+        root.render(React.createElement(
+          Provider,
+          { store },
+          React.createElement(ShortcutProvider, {}, React.createElement(Workspace, {})),
+        ));
         await new Promise((r) => setTimeout(r, 40));
       });
       await waitFor(() => doc.querySelectorAll('[data-debug-id="conversation-chain-agent-switcher-btn"]').length === 2, act);
@@ -374,6 +395,117 @@ test('split view: only the FOCUSED pane shows a close ✕; it closes that pane a
       assert.deepEqual(layout.selectMainAgentIds(store.getState()), ['a']);
       assert.equal(dom.window.location.hash, '#/conversations/a');
       assert.equal(doc.querySelectorAll('[data-debug-id="conversation-close-pane-btn"]').length, 0, 'no ✕ in single view');
+    } finally {
+      await act(async () => root.unmount());
+      store.dispatch(heimdallApi.util.resetApiState());
+    }
+  });
+});
+
+test('workspace chords split, cycle, maximize, close, and remain shielded while typing', async () => {
+  await withDom('#/conversations/a?focused=a', async (dom) => {
+    const { createRoot } = await import('react-dom/client');
+    const { act } = await import('react');
+    const { Provider } = await import('react-redux');
+    const { heimdallApi } = await import('../src/ui/api/heimdallApi.ts');
+    const layout = await import('../src/ui/store/workspaceLayoutSlice.ts');
+    const { Workspace } = await import('../src/ui/components/mainWorkspace/Workspace.tsx');
+    const { ShortcutProvider } = await import('../src/ui/services/shortcuts/ShortcutContext.tsx');
+    const store = await makeStore();
+    const root = createRoot(dom.window.document.getElementById('root')!);
+    const settle = (ms = 50) => new Promise((resolve) => setTimeout(resolve, ms));
+    const pressChord = async (first: string, second: string, target: EventTarget = dom.window) => {
+      await act(async () => {
+        target.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: first, bubbles: true }));
+        target.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: second, bubbles: true }));
+        await settle();
+      });
+    };
+
+    try {
+      await act(async () => {
+        root.render(React.createElement(
+          Provider,
+          { store },
+          React.createElement(ShortcutProvider, {}, React.createElement(Workspace, {})),
+        ));
+        await settle();
+      });
+
+      await pressChord('s', 'v');
+      assert.equal(layout.selectMainPaneIds(store.getState()).length, 2, 's v splits right');
+
+      await pressChord('s', 'h');
+      assert.equal(layout.selectMainPaneIds(store.getState()).length, 3, 's h splits down');
+
+      const paneIds = layout.selectMainPaneIds(store.getState());
+      const [leftPane, topRightPane, bottomRightPane] = paneIds;
+      await pressChord('s', 'ArrowUp');
+      assert.equal(layout.selectMainTree(store.getState()).focusedPaneId, topRightPane, 's ↑ focuses the pane above');
+      await pressChord('s', 'ArrowLeft');
+      assert.equal(layout.selectMainTree(store.getState()).focusedPaneId, leftPane, 's ← focuses the pane left');
+      await pressChord('s', 'ArrowRight');
+      assert.equal(layout.selectMainTree(store.getState()).focusedPaneId, topRightPane, 's → focuses the nearest pane right');
+      await pressChord('s', 'ArrowDown');
+      assert.equal(layout.selectMainTree(store.getState()).focusedPaneId, bottomRightPane, 's ↓ focuses the pane below');
+
+      await waitFor(() => Boolean(dom.window.document.querySelector('[data-debug-id="new-convo-composer-input"]')), act);
+      await pressChord('s', 'i');
+      assert.equal(
+        dom.window.document.activeElement?.getAttribute('data-debug-id'),
+        'new-convo-composer-input',
+        's i focuses the active pane input',
+      );
+      const composerInput = dom.window.document.activeElement as HTMLElement;
+      await pressChord('s', 'm', composerInput);
+      assert.equal(layout.selectMainTree(store.getState()).maximizedPaneId, null, 'typing shield blocks pane chords');
+      await act(async () => {
+        composerInput.dispatchEvent(new dom.window.KeyboardEvent('keydown', {
+          key: 'Alt',
+          altKey: true,
+          ctrlKey: true,
+          bubbles: true,
+        }));
+        await settle();
+      });
+      await pressChord('s', 'm', composerInput);
+      assert.equal(
+        layout.selectMainTree(store.getState()).maximizedPaneId,
+        bottomRightPane,
+        'Ctrl+Alt routes the next input chord through the manager',
+      );
+      await act(async () => (dom.window.document.activeElement as HTMLElement)?.blur());
+      await pressChord('s', 'm');
+      assert.equal(layout.selectMainTree(store.getState()).maximizedPaneId, null);
+
+      await pressChord('s', 'ArrowLeft');
+      assert.equal(layout.selectMainTree(store.getState()).focusedPaneId, leftPane);
+
+      const workspace = dom.window.document.querySelector('[data-debug-id="workspace"]')!;
+      const auxWasOpen = workspace.getAttribute('data-aux-open');
+      await pressChord('s', 'a');
+      assert.notEqual(workspace.getAttribute('data-aux-open'), auxWasOpen, 's a toggles the focused agent aux pane');
+
+      const beforeCycle = layout.selectMainTree(store.getState());
+      const expectedNext = paneIds[(paneIds.indexOf(beforeCycle.focusedPaneId) + 1) % paneIds.length];
+      await pressChord('s', 'w');
+      assert.equal(layout.selectMainTree(store.getState()).focusedPaneId, expectedNext, 's w focuses next pane');
+
+      await pressChord('s', 'm');
+      assert.equal(layout.selectMainTree(store.getState()).maximizedPaneId, expectedNext, 's m maximizes focus');
+      await pressChord('s', 'm');
+      assert.equal(layout.selectMainTree(store.getState()).maximizedPaneId, null, 's m restores layout');
+
+      await pressChord('s', 'x');
+      await act(async () => settle(250));
+      assert.equal(layout.selectMainPaneIds(store.getState()).length, 2, 's x closes focus in a split');
+      await pressChord('s', 'x');
+      await act(async () => settle(250));
+      assert.equal(layout.selectMainPaneIds(store.getState()).length, 1);
+      await pressChord('s', 'x');
+      await act(async () => settle(250));
+      assert.equal(layout.selectMainPaneIds(store.getState()).length, 1, 's x leaves the sole pane intact');
+
     } finally {
       await act(async () => root.unmount());
       store.dispatch(heimdallApi.util.resetApiState());

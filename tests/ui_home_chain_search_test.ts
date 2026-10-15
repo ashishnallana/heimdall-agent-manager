@@ -192,12 +192,17 @@ test('a new Main pane renders the home view; picking a recent task chain fills T
     const { heimdallApi } = await import('../src/ui/api/heimdallApi.ts');
     const layout = await import('../src/ui/store/workspaceLayoutSlice.ts');
     const { Workspace } = await import('../src/ui/components/mainWorkspace/Workspace.tsx');
+    const { ShortcutProvider } = await import('../src/ui/services/shortcuts/ShortcutContext.tsx');
     const store = await makeStore();
     const doc = dom.window.document;
     const root = createRoot(doc.getElementById('root')!);
     try {
       await act(async () => {
-        root.render(React.createElement(Provider, { store }, React.createElement(Workspace, {})));
+        root.render(React.createElement(
+          Provider,
+          { store },
+          React.createElement(ShortcutProvider, {}, React.createElement(Workspace, {})),
+        ));
         await new Promise((r) => setTimeout(r, 40));
       });
       const newPane = layout.findPaneByAgent(store.getState().workspaceLayout.tree, 'a') === 'pane-1' ? 'pane-2' : 'pane-1';

@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { Icon } from '@ui';
-import { TilingContainer, getOverlayPosition, type RenderPaneProps } from '../../tiling';
+import { TilingContainer, calculatePaneLayouts, getOverlayPosition, type RenderPaneProps } from '../../tiling';
 import {
   NEW_PANE_AGENT_ID,
   assignMainPaneAgent,
@@ -13,10 +13,12 @@ import {
   selectFocusedMainAgentId,
   selectMainAgentIds,
   selectMainLeafIds,
+  selectMainPaneIds,
   selectMainTree,
   setFocusedMainPane,
   setLayoutFromUrl,
   splitMainPane,
+  toggleMaximizeMainPane,
   type MainPaneValue,
 } from '../../store/workspaceLayoutSlice';
 import {
@@ -69,7 +71,8 @@ import { MainPaneFrame } from './MainPaneFrame';
 import { MobileMainPager } from './MobileMainPager';
 import HomePage from '../home/HomePage';
 import { PANE_ANIMATION_MS, chromeIconButtonSizeClass, topChromeHeight } from '../shell/shellChrome';
-import { WorkspaceShortcutPreviewActions } from '../shortcuts/ShortcutPreviewActions';
+import { useRegisterActions } from '../../services/shortcuts/useRegisterActions';
+import { getDirectionalPaneId, getNextPaneId } from '../../services/shortcuts/shortcutLogic';
 
 export interface WorkspaceProps {
   focusMessageId?: string;
@@ -84,6 +87,26 @@ export interface WorkspaceProps {
 
 function readRoute(): { pathname: string; search: string } {
   return { pathname: getRoutePathname(), search: getRouteSearch() };
+}
+
+function focusPaneInput(paneId: string): boolean {
+  if (typeof document === 'undefined') return false;
+  const frame = document.querySelector<HTMLElement>(`[data-debug-id="main-pane-frame-${paneId}"]`);
+  const selectors = [
+    '[data-debug-id="conversation-composer-input"]',
+    '[data-debug-id="new-convo-composer-input"]',
+    '.xterm-helper-textarea',
+    'textarea:not([disabled])',
+    'input:not([disabled]):not([type="hidden"]):not([type="file"])',
+    '[contenteditable="true"]',
+  ];
+  const target = selectors.reduce<HTMLElement | null>(
+    (found, selector) => found ?? frame?.querySelector<HTMLElement>(selector) ?? null,
+    null,
+  );
+  if (!target) return false;
+  target.focus({ preventScroll: true });
+  return true;
 }
 
 /** Subscribes to the hash route (pathname + search, incl. `?focused=`). */
@@ -126,6 +149,8 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
   const focusedAgentId = useSelector(selectFocusedMainAgentId);
   const mainAgentIds = useSelector(selectMainAgentIds);
   const leafIds = useSelector(selectMainLeafIds);
+  const mainPaneIds = useSelector(selectMainPaneIds);
+  const mainPaneLayouts = useMemo(() => calculatePaneLayouts(tree).contentLayouts, [tree]);
   const loc = useRouteLocation();
   const route = useMemo(() => parseConversationIdsFromRoute(loc.pathname, loc.search), [loc]);
   const routeAgentInstanceId = route.focused || '';
@@ -399,6 +424,111 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
     },
     [dispatch],
   );
+
+  useRegisterActions([
+    {
+      id: 'workspace.split-right',
+      title: 'Split focused pane right',
+      category: 'Workspace',
+      sequence: ['s', 'v'],
+      run: () => dispatch(splitMainPane({ targetPaneId: tree.focusedPaneId, direction: 'right' })),
+    },
+    {
+      id: 'workspace.split-bottom',
+      title: 'Split focused pane down',
+      category: 'Workspace',
+      sequence: ['s', 'h'],
+      run: () => dispatch(splitMainPane({ targetPaneId: tree.focusedPaneId, direction: 'bottom' })),
+    },
+    {
+      id: 'workspace.close-pane',
+      title: 'Close focused pane',
+      category: 'Workspace',
+      sequence: ['s', 'x'],
+      isEnabled: () => leafIds.length > 1,
+      run: () => {
+        if (leafIds.length > 1) closePane(tree.focusedPaneId);
+      },
+    },
+    {
+      id: 'workspace.focus-next-pane',
+      title: 'Focus next pane',
+      category: 'Workspace',
+      sequence: ['s', 'w'],
+      isEnabled: () => mainPaneIds.length > 1,
+      run: () => {
+        const nextPaneId = getNextPaneId(mainPaneIds, tree.focusedPaneId);
+        if (nextPaneId) dispatch(setFocusedMainPane(nextPaneId));
+      },
+    },
+    {
+      id: 'workspace.focus-pane-left',
+      title: 'Focus pane left',
+      category: 'Workspace',
+      sequence: ['s', '←'],
+      isEnabled: () => Boolean(getDirectionalPaneId(mainPaneLayouts, tree.focusedPaneId, 'left')),
+      run: () => {
+        const paneId = getDirectionalPaneId(mainPaneLayouts, tree.focusedPaneId, 'left');
+        if (paneId) dispatch(setFocusedMainPane(paneId));
+      },
+    },
+    {
+      id: 'workspace.focus-pane-right',
+      title: 'Focus pane right',
+      category: 'Workspace',
+      sequence: ['s', '→'],
+      isEnabled: () => Boolean(getDirectionalPaneId(mainPaneLayouts, tree.focusedPaneId, 'right')),
+      run: () => {
+        const paneId = getDirectionalPaneId(mainPaneLayouts, tree.focusedPaneId, 'right');
+        if (paneId) dispatch(setFocusedMainPane(paneId));
+      },
+    },
+    {
+      id: 'workspace.focus-pane-up',
+      title: 'Focus pane above',
+      category: 'Workspace',
+      sequence: ['s', '↑'],
+      isEnabled: () => Boolean(getDirectionalPaneId(mainPaneLayouts, tree.focusedPaneId, 'up')),
+      run: () => {
+        const paneId = getDirectionalPaneId(mainPaneLayouts, tree.focusedPaneId, 'up');
+        if (paneId) dispatch(setFocusedMainPane(paneId));
+      },
+    },
+    {
+      id: 'workspace.focus-pane-down',
+      title: 'Focus pane below',
+      category: 'Workspace',
+      sequence: ['s', '↓'],
+      isEnabled: () => Boolean(getDirectionalPaneId(mainPaneLayouts, tree.focusedPaneId, 'down')),
+      run: () => {
+        const paneId = getDirectionalPaneId(mainPaneLayouts, tree.focusedPaneId, 'down');
+        if (paneId) dispatch(setFocusedMainPane(paneId));
+      },
+    },
+    {
+      id: 'workspace.focus-input',
+      title: 'Focus active pane input',
+      category: 'Workspace',
+      sequence: ['s', 'i'],
+      run: () => focusPaneInput(tree.focusedPaneId),
+    },
+    {
+      id: 'workspace.toggle-aux-pane',
+      title: 'Toggle auxiliary pane',
+      category: 'Workspace',
+      sequence: ['s', 'a'],
+      isEnabled: () => Boolean(auxTreeId),
+      run: toggleAux,
+    },
+    {
+      id: 'workspace.toggle-maximize',
+      title: 'Toggle focused pane maximization',
+      category: 'Workspace',
+      sequence: ['s', 'm'],
+      run: () => dispatch(toggleMaximizeMainPane(tree.focusedPaneId)),
+    },
+  ]);
+
   const topRightSpacer = (
     <div aria-hidden="true" data-debug-id="workspace-top-right-spacer" className="shrink-0" style={{ width: Math.max(0, topRightWidth - 12) }} />
   );
@@ -520,7 +650,6 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
       data-aux-open={auxOpen ? 'true' : 'false'}
       className="relative flex h-full w-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-canvas"
     >
-      {import.meta.env?.DEV ? <WorkspaceShortcutPreviewActions /> : null}
       <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
         <div
           data-debug-id="workspace-main"

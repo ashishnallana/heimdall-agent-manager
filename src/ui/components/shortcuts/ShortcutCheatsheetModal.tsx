@@ -66,7 +66,7 @@ export function ShortcutCheatsheetModal() {
           </section>
         ))}
         <p className="border-t border-subtle pt-4 text-caption text-muted">
-          Shortcuts pause while you type in a composer, terminal, or code editor. Press Escape to leave that surface before using pane shortcuts.
+          Shortcuts pause while you type in a composer, terminal, or code editor. Press Ctrl+Alt together to route the next shortcut chord through the manager.
         </p>
       </Modal.Body>
     </Modal>

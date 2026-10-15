@@ -250,6 +250,7 @@ test('workspace: URL <-> layout sync (pane set in the URL, replace pushes, no lo
     const { setAuxPaneOpen } = await import('../src/ui/store/auxPanesSlice.ts');
     const { readGroupIndex } = await import('../src/ui/store/splitGroups.ts');
     const { Workspace } = await import('../src/ui/components/mainWorkspace/Workspace.tsx');
+    const { ShortcutProvider } = await import('../src/ui/services/shortcuts/ShortcutContext.tsx');
 
     const store = await makeStore();
     const doc = dom.window.document;
@@ -269,7 +270,11 @@ test('workspace: URL <-> layout sync (pane set in the URL, replace pushes, no lo
       return origReplace(...(args as [any, string, string]));
     };
     const render = (isMobile = false) =>
-      root.render(React.createElement(Provider, { store }, React.createElement(Workspace, { isMobile })));
+      root.render(React.createElement(
+        Provider,
+        { store },
+        React.createElement(ShortcutProvider, {}, React.createElement(Workspace, { isMobile })),
+      ));
     try {
       await act(async () => {
         render();

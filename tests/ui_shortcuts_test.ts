@@ -8,6 +8,9 @@ import {
   SHORTCUT_SEQUENCE_TIMEOUT_MS,
   actionDescriptorKey,
   getChordCompletions,
+  getDirectionalPaneId,
+  getNextPaneId,
+  isShortcutOverrideTrigger,
   matchSequence,
   normalizeShortcutKey,
   shouldIgnoreEvent,
@@ -49,11 +52,14 @@ test('matches exact, prefix, none, and disabled actions', () => {
   assert.deepEqual(matchSequence(['x'], actions), { kind: 'none' });
 });
 
-test('normalizes only single-character keys plus Escape', () => {
+test('normalizes character, Escape, and arrow keys', () => {
   assert.equal(normalizeShortcutKey('G'), 'g');
   assert.equal(normalizeShortcutKey('?'), '?');
   assert.equal(normalizeShortcutKey('Escape'), 'escape');
-  assert.equal(normalizeShortcutKey('ArrowDown'), null);
+  assert.equal(normalizeShortcutKey('ArrowLeft'), '←');
+  assert.equal(normalizeShortcutKey('ArrowRight'), '→');
+  assert.equal(normalizeShortcutKey('ArrowUp'), '↑');
+  assert.equal(normalizeShortcutKey('ArrowDown'), '↓');
   assert.equal(SHORTCUT_SEQUENCE_TIMEOUT_MS, 1_200);
 });
 
@@ -69,6 +75,13 @@ test('ignores modified, composing, repeated, and prevented events', () => {
     assert.equal(shouldIgnoreEvent(keyboardEvent(null, override)), true);
   }
   assert.equal(shouldIgnoreEvent(keyboardEvent(null, { key: 'G' })), false);
+});
+
+test('Ctrl+Alt together is the explicit one-shot editable shortcut override', () => {
+  assert.equal(isShortcutOverrideTrigger(keyboardEvent(null, { key: 'Alt', ctrlKey: true, altKey: true })), true);
+  assert.equal(isShortcutOverrideTrigger(keyboardEvent(null, { key: 'Control', ctrlKey: true, altKey: true })), true);
+  assert.equal(isShortcutOverrideTrigger(keyboardEvent(null, { key: 'AltGraph', ctrlKey: true, altKey: true })), false);
+  assert.equal(isShortcutOverrideTrigger(keyboardEvent(null, { key: 'Alt', ctrlKey: true, altKey: true, repeat: true })), false);
 });
 
 test('ignores editable, Monaco, xterm, and blocking-dialog targets', () => {
@@ -126,4 +139,26 @@ test('palette merging keeps static actions and adapts only enabled live shortcut
     { id: 'static', label: 'Live override', hint: 'Shortcut: g o', badge: 'g o' },
     { id: 'home', label: 'Home', hint: 'Shortcut: g h', badge: 'g h' },
   ]);
+});
+
+test('pane focus cycling advances and wraps in tree order', () => {
+  const paneIds = ['pane-1', 'pane-2', 'pane-3'];
+  assert.equal(getNextPaneId(paneIds, 'pane-1'), 'pane-2');
+  assert.equal(getNextPaneId(paneIds, 'pane-2'), 'pane-3');
+  assert.equal(getNextPaneId(paneIds, 'pane-3'), 'pane-1');
+  assert.equal(getNextPaneId(paneIds, 'missing'), 'pane-1');
+  assert.equal(getNextPaneId([], 'pane-1'), undefined);
+});
+
+test('directional pane focus chooses the nearest pane in the requested half-plane', () => {
+  const layouts = [
+    { paneId: 'left', left: 0, top: 0, width: 50, height: 100 },
+    { paneId: 'top-right', left: 50, top: 0, width: 50, height: 50 },
+    { paneId: 'bottom-right', left: 50, top: 50, width: 50, height: 50 },
+  ];
+  assert.equal(getDirectionalPaneId(layouts, 'bottom-right', 'up'), 'top-right');
+  assert.equal(getDirectionalPaneId(layouts, 'top-right', 'down'), 'bottom-right');
+  assert.equal(getDirectionalPaneId(layouts, 'top-right', 'left'), 'left');
+  assert.equal(getDirectionalPaneId(layouts, 'left', 'right'), 'top-right');
+  assert.equal(getDirectionalPaneId(layouts, 'left', 'left'), undefined);
 });

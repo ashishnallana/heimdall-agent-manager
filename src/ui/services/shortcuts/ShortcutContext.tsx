@@ -11,6 +11,8 @@ import React, {
 import {
   SHORTCUT_SEQUENCE_TIMEOUT_MS,
   isActionEnabled,
+  isEditableShortcutTarget,
+  isShortcutOverrideTrigger,
   matchSequence,
   normalizeShortcutKey,
   shouldIgnoreEvent,
@@ -34,6 +36,7 @@ export function ShortcutProvider({ children }: { children: ReactNode }) {
   const registrationsRef = useRef(new Map<symbol, readonly AppAction[]>());
   const actionsRef = useRef<readonly AppAction[]>([]);
   const bufferRef = useRef<readonly string[]>([]);
+  const editableOverrideRef = useRef(false);
   const timeoutRef = useRef<number | null>(null);
   const [registryVersion, setRegistryVersion] = useState(0);
   const [buffer, setBuffer] = useState<readonly string[]>([]);
@@ -43,6 +46,7 @@ export function ShortcutProvider({ children }: { children: ReactNode }) {
     if (timeoutRef.current !== null) window.clearTimeout(timeoutRef.current);
     timeoutRef.current = null;
     bufferRef.current = [];
+    editableOverrideRef.current = false;
     setBuffer([]);
   }, []);
 
@@ -90,7 +94,7 @@ export function ShortcutProvider({ children }: { children: ReactNode }) {
 
     const applyMatch = (event: KeyboardEvent, keys: readonly string[]) => {
       const match = matchSequence(keys, actionsRef.current);
-      if (match.kind === 'none') return false;
+      if (match.kind === 'none') return match.kind;
 
       event.preventDefault();
       event.stopPropagation();
@@ -103,26 +107,37 @@ export function ShortcutProvider({ children }: { children: ReactNode }) {
         setBuffer(keys);
         scheduleClear();
       }
-      return true;
+      return match.kind;
     };
 
     const onKeyDown = (event: KeyboardEvent) => {
+      if (isShortcutOverrideTrigger(event) && isEditableShortcutTarget(event.target)) {
+        clearSequence();
+        editableOverrideRef.current = true;
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation();
+        return;
+      }
+
       const key = normalizeShortcutKey(event.key);
       if (key === 'escape') {
         clearSequence();
         return;
       }
-      if (!key || shouldIgnoreEvent(event)) {
+      if (!key || shouldIgnoreEvent(event, editableOverrideRef.current)) {
         if (bufferRef.current.length > 0) clearSequence();
         return;
       }
 
       const candidate = [...bufferRef.current, key];
-      if (applyMatch(event, candidate)) return;
+      if (applyMatch(event, candidate) !== 'none') return;
 
       // A mismatch ends the old chord, but the same key may begin another one.
+      const preserveOverride = editableOverrideRef.current;
       clearSequence();
-      applyMatch(event, [key]);
+      const restarted = applyMatch(event, [key]);
+      if (preserveOverride && restarted === 'prefix') editableOverrideRef.current = true;
     };
 
     window.addEventListener('keydown', onKeyDown, true);
