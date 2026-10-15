@@ -1,4 +1,4 @@
-import { PaneDeliveryQueue, normalizeSnapshotText, repaintCapturedScreenText } from '../shells/paneDeliveryQueue.ts';
+import { PaneDeliveryQueue, PaneWriteBatcher, normalizeSnapshotText, repaintCapturedScreenText } from '../shells/paneDeliveryQueue.ts';
 import { PTY_WIRE_FLAG_ENCRYPTED, PTY_WIRE_KIND_INPUT, PTY_WIRE_KIND_OUTPUT, PTY_WIRE_KIND_SCREEN, PTY_WIRE_VIEWER_HEADER_BYTES, PtyTextDecoder, decodePtyViewerFrame, decryptPtyPayload, encodePtyViewerFrame, encryptPtyPayload, type PtyViewerFrame } from '../shells/ptyWire.ts';
 import { createInputCoalescer, type InputCoalescer } from '../shells/ptyInputCoalescer.ts';
 import { createVisibilityGate } from '../shells/paneVisibilityGate.ts';
@@ -315,6 +315,8 @@ export function useAgentStream({
         socket.binaryType = 'arraybuffer';
         const textDecoder = new PtyTextDecoder();
         let previousWasSnapshot = false;
+        // REQ-PTY-NET-7: one term.write per animation frame; a repaint always leads its own write.
+        const writeBatcher = new PaneWriteBatcher((text) => onOutputRef.current?.(text));
 
         const handleBinaryFrame = async (frame: PtyViewerFrame) => {
           if (activeConnectIdRef.current !== connectId) return;
@@ -339,7 +341,7 @@ export function useAgentStream({
           } else if (!isScreen && frame.snapshot && startsRepaint) {
             text = normalizeSnapshotText(text);
           }
-          if (text.length > 0) onOutputRef.current?.(text);
+          if (text.length > 0) writeBatcher.push(text, startsRepaint);
         };
 
         const handleControlMessage = (msg: AgentStreamMsg) => {
@@ -384,7 +386,7 @@ export function useAgentStream({
           let msg: AgentStreamMsg;
           try { msg = JSON.parse(event.data); } catch { return; }
           if (msg.type === 'status' || msg.type === 'stream_closed') {
-            paneQueue.enqueue(0, async () => handleControlMessage(msg));
+            paneQueue.enqueue(0, async () => { writeBatcher.flush(); handleControlMessage(msg); });
           } else {
             handleControlMessage(msg);
           }
@@ -392,6 +394,7 @@ export function useAgentStream({
 
         socket.onclose = (event: CloseEvent) => {
           paneQueue.cancel();
+          writeBatcher.reset();
           if (activeConnectIdRef.current !== connectId) return;
           if (isVaultLockedError({ reason: event?.reason })) {
             // T10: a locked vault is not a transport failure — no reconnect storm and

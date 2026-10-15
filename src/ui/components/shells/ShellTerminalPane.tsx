@@ -1,3 +1,4 @@
+import { isPaneRepaintStart } from './paneDeliveryQueue.ts';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Terminal as TerminalType } from '@xterm/xterm';
 import type { FitAddon as FitAddonType } from '@xterm/addon-fit';
@@ -211,12 +212,7 @@ export function ShellTerminalPane({
     // Check if this chunk is a screen repaint (\x1b[2J\x1b[H or \x1b[?1049h) so synthetic
     // terminal query replies from xterm.js are suppressed during replay. REQ-PTY-NET-2: the
     // stream hook delivers decoded TEXT; the registry replay below may still hand back bytes.
-    const isRepaintPrefix = typeof bytes === 'string'
-      ? (bytes.startsWith('\x1b[2J') || bytes.startsWith('\x1b[?1'))
-      : (bytes.length >= 6 &&
-        bytes[0] === 0x1b &&
-        bytes[1] === 0x5b &&
-        ((bytes[2] === 0x32 && bytes[3] === 0x4a) || (bytes[2] === 0x3f && bytes[3] === 0x31)));
+    const isRepaintPrefix = isPaneRepaintStart(bytes);
     if (isRepaintPrefix) {
       pendingReplaysRef.current += 1;
     }

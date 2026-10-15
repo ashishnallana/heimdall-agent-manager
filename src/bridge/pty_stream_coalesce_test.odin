@@ -14,6 +14,7 @@ import "core:strings"
 import "core:sync"
 import "core:testing"
 import contracts "odin_test:contracts"
+import ws "odin_test:lib/ws"
 
 @(private = "file")
 _p1_disable_vault :: proc() -> (restore: proc(prev_key, prev_cfg: string, had_key, had_cfg, saved_ws: bool), prev_key, prev_cfg: string, had_key, had_cfg, saved_ws: bool) {
@@ -208,4 +209,26 @@ pty_drain_encrypts_once_per_merged_frame_and_round_trips :: proc(t: ^testing.T) 
 	testing.expect_value(t, body[11], byte(1))
 	// And the wire frame carries NO base64 and NO JSON: header + 28 B GCM + plaintext length.
 	testing.expect_value(t, len(frames[0]), contracts.PTY_WIRE_SESSION_HEADER_BYTES + len("sh_enc") + VAULT_HEADER_BYTES + len(plain))
+}
+
+// REQ-PTY-NET-7: the s_client "double base64" is moot for pty output — a binary frame never
+// meets the text chunker. Under the legacy 6000 B cap the emit shrinks to 4 KiB so the
+// LARGEST possible frame (cap + 256 B session id + GCM header + pty_wire header) still fits
+// whole; under socat the 12 KiB emits fit the 45000 B cap AND the 16 KiB edge ceiling.
+@(test)
+pty_binary_frames_fit_every_transport_cap_without_the_chunker :: proc(t: ^testing.T) {
+	incr_s, snap_s := bridge_pty_stream_emit_caps_for(contracts.BRIDGE_WS_HUB_RUNTIME_CHUNK_PAYLOAD_BYTES)
+	testing.expect_value(t, incr_s, BRIDGE_PTY_STREAM_EMIT_SCLIENT_BYTES)
+	testing.expect_value(t, snap_s, BRIDGE_PTY_STREAM_EMIT_SCLIENT_BYTES)
+	long_sid := strings.repeat("s", 256, context.temp_allocator)
+	worst := contracts.pty_wire_session_frame_len(long_sid, snap_s + VAULT_HEADER_BYTES)
+	testing.expect(t, worst <= contracts.BRIDGE_WS_HUB_RUNTIME_CHUNK_PAYLOAD_BYTES, "worst-case s_client frame fits the 6000 B cap whole")
+	// And it is not chunkable material anyway: chunk_frames would only split TEXT above the cap.
+	testing.expect(t, ws.chunk_frames(strings.repeat("x", worst, context.temp_allocator), contracts.BRIDGE_WS_HUB_RUNTIME_CHUNK_PAYLOAD_BYTES) == nil, "a frame of that size never reaches the chunker")
+
+	incr_c, snap_c := bridge_pty_stream_emit_caps_for(contracts.BRIDGE_WS_HUB_RUNTIME_CHUNK_PAYLOAD_BYTES_SOCAT)
+	testing.expect_value(t, incr_c, BRIDGE_PTY_STREAM_EMIT_EDGE_SAFE_BYTES)
+	testing.expect_value(t, snap_c, BRIDGE_PTY_STREAM_EMIT_EDGE_SAFE_BYTES)
+	worst_c := contracts.pty_wire_session_frame_len(long_sid, snap_c + VAULT_HEADER_BYTES) + 8 /* ws header */
+	testing.expect(t, worst_c < 16 * 1024, "worst-case socat frame stays under the edge-proxy per-message ceiling")
 }

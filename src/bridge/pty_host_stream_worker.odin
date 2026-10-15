@@ -99,7 +99,13 @@ BRIDGE_PTY_STREAM_EMIT_SCLIENT_BYTES     :: 4 * 1024
 // bridge->hub transport (the chunk cap is the proxy for it, see
 // bridge_hub_runtime_chunk_payload_bytes). The 64 B above is the session-id allowance.
 bridge_pty_stream_emit_caps :: proc() -> (incremental, snapshot: int) {
-	if bridge_hub_runtime_chunk_payload_bytes() >= contracts.BRIDGE_WS_HUB_RUNTIME_CHUNK_PAYLOAD_BYTES_SOCAT {
+	return bridge_pty_stream_emit_caps_for(bridge_hub_runtime_chunk_payload_bytes())
+}
+
+// bridge_pty_stream_emit_caps_for is the pure core: caps for a given per-message chunk cap.
+// Split out so the s_client (6000 B) case is testable without mutating HAM_TLS_BACKEND.
+bridge_pty_stream_emit_caps_for :: proc(chunk_payload_cap: int) -> (incremental, snapshot: int) {
+	if chunk_payload_cap >= contracts.BRIDGE_WS_HUB_RUNTIME_CHUNK_PAYLOAD_BYTES_SOCAT {
 		return BRIDGE_PTY_STREAM_EMIT_INCREMENTAL_BYTES, BRIDGE_PTY_STREAM_EMIT_SNAPSHOT_BYTES
 	}
 	return BRIDGE_PTY_STREAM_EMIT_SCLIENT_BYTES, BRIDGE_PTY_STREAM_EMIT_SCLIENT_BYTES

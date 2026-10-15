@@ -1,3 +1,4 @@
+import { isPaneRepaintStart } from '../shells/paneDeliveryQueue.ts';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Terminal as TerminalType } from '@xterm/xterm';
 import type { FitAddon as FitAddonType } from '@xterm/addon-fit';
@@ -119,6 +120,12 @@ export function AgentPaneComposerPanel({
 
   const hasReceivedOutputRef = useRef<boolean>(false);
   const streamBufferRef = useRef<Array<Uint8Array | string>>([]);
+  // REQ-PTY-NET-7: replay gate. While an absolute repaint (snapshot/screen, recognised by
+  // its leading erase-screen or alt-screen escape) is being written, xterm's own answers to
+  // the queries inside it (DA, DSR, OSC 11 colour reports) must not be sent back to the pty
+  // as if the user typed them. ShellTerminalPane has had this gate (pendingReplaysRef) for a
+  // while; the agent pane shares the same pipeline and lacked it.
+  const pendingReplaysRef = useRef(0);
 
   useEffect(() => {
     hasReceivedOutputRef.current = false;
@@ -190,7 +197,10 @@ export function AgentPaneComposerPanel({
       if (term.options.convertEol) {
         term.options.convertEol = false;
       }
+      const isRepaint = isPaneRepaintStart(bytes);
+      if (isRepaint) pendingReplaysRef.current += 1;
       term.write(bytes, () => {
+        if (isRepaint) pendingReplaysRef.current = Math.max(0, pendingReplaysRef.current - 1);
         const buffer = term.buffer.active;
         if (!userScrolledUpRef.current && buffer.type !== 'alternate' && buffer.baseY > 0) {
           term.scrollToBottom();
@@ -431,6 +441,8 @@ export function AgentPaneComposerPanel({
 
     // Keystroke input hook: dispatch to unified handleInputRef
     const dataDisposable = term.onData((data) => {
+      // Suppress synthetic terminal query responses triggered during a repaint write.
+      if (pendingReplaysRef.current > 0) return;
       handleInputRef.current(data);
     });
 

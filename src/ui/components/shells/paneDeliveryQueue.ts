@@ -56,6 +56,84 @@ export class PaneDeliveryQueue {
   }
 }
 
+/**
+ * REQ-PTY-NET-7: one `term.write` per animation frame.
+ *
+ * xterm parses per write and the pane re-layouts per parse; a bursty TUI (7-8 redraws/s,
+ * spinner frames, coalesced bridge frames landing back-to-back) used to be one write per
+ * wire frame. The batcher concatenates everything that arrives within one animation frame
+ * and hands the consumer ONE string. Two rules keep it correct:
+ *   - a text that BEGINS an absolute repaint (snapshot/screen) always starts a new write:
+ *     the consumer's replay gate recognises a repaint by the write's leading bytes
+ *     (ShellTerminalPane writeStreamBytes), so it must never be buried mid-batch;
+ *   - PANE_WRITE_BATCH_MAX_CHARS bounds the batch so a hidden tab (where rAF does not
+ *     fire) cannot grow it without limit; above it the flush is forced.
+ * Scheduling is injectable; the default is requestAnimationFrame when present (browser),
+ * else setTimeout(0) (tests, Electron main).
+ */
+export const PANE_WRITE_BATCH_MAX_CHARS = 512 * 1024;
+
+export type PaneWriteSchedule = (flush: () => void) => void;
+
+const defaultWriteSchedule: PaneWriteSchedule = (flush) => {
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => flush());
+  else setTimeout(flush, 0);
+};
+
+export class PaneWriteBatcher {
+  private pending = '';
+  private scheduled = false;
+  private readonly write: (text: string) => void;
+  private readonly schedule: PaneWriteSchedule;
+  private readonly maxChars: number;
+
+  constructor(write: (text: string) => void, schedule: PaneWriteSchedule = defaultWriteSchedule, maxChars = PANE_WRITE_BATCH_MAX_CHARS) {
+    this.write = write;
+    this.schedule = schedule;
+    this.maxChars = maxChars;
+  }
+
+  /** Queue text; `startsRepaint` forces the pending batch out first so the repaint leads its own write. */
+  push(text: string, startsRepaint = false): void {
+    if (text.length === 0) return;
+    if (startsRepaint && this.pending.length > 0) this.flush();
+    this.pending += text;
+    if (this.pending.length >= this.maxChars) { this.flush(); return; }
+    if (!this.scheduled) {
+      this.scheduled = true;
+      this.schedule(() => this.flush());
+    }
+  }
+
+  /** Write everything pending now (also what the scheduled frame calls). */
+  flush(): void {
+    this.scheduled = false;
+    if (this.pending.length === 0) return;
+    const text = this.pending;
+    this.pending = '';
+    this.write(text);
+  }
+
+  /** Drop pending text without writing (the socket it came from is gone). */
+  reset(): void {
+    this.pending = '';
+    this.scheduled = false;
+  }
+
+  get pendingLength(): number { return this.pending.length; }
+}
+
+/**
+ * isPaneRepaintStart: does this write BEGIN an absolute repaint (erase-screen+home or an
+ * alt-screen switch)? Used by the replay gates in both panes to suppress xterm's query
+ * replies while the repaint is parsed. Accepts text or bytes.
+ */
+export function isPaneRepaintStart(data: string | Uint8Array): boolean {
+  if (typeof data === 'string') return data.startsWith('\x1b[2J') || data.startsWith('\x1b[?1');
+  return data.length >= 4 && data[0] === 0x1b && data[1] === 0x5b &&
+    ((data[2] === 0x32 && data[3] === 0x4a) || (data[2] === 0x3f && data[3] === 0x31));
+}
+
 const ALT_HIDDEN_PREFIX = '\x1b[?1049h\x1b[?25l';
 const ALT_PREFIX = '\x1b[?1049h';
 const REPAINT_PREFIX = '\x1b[2J\x1b[H';

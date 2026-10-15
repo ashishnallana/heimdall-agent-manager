@@ -1,4 +1,4 @@
-import { PaneDeliveryQueue, normalizeSnapshotText, repaintCapturedScreenText } from './paneDeliveryQueue.ts';
+import { PaneDeliveryQueue, PaneWriteBatcher, normalizeSnapshotText, repaintCapturedScreenText } from './paneDeliveryQueue.ts';
 import { PTY_WIRE_FLAG_ENCRYPTED, PTY_WIRE_KIND_INPUT, PTY_WIRE_KIND_OUTPUT, PTY_WIRE_KIND_SCREEN, PTY_WIRE_VIEWER_HEADER_BYTES, PtyTextDecoder, decodePtyViewerFrame, decryptPtyPayload, encodePtyViewerFrame, encryptPtyPayload, type PtyViewerFrame } from './ptyWire.ts';
 import { createInputCoalescer, type InputCoalescer } from './ptyInputCoalescer.ts';
 import { createVisibilityGate } from './paneVisibilityGate.ts';
@@ -405,6 +405,8 @@ export function useShellStream({
         socket.binaryType = 'arraybuffer';
         const textDecoder = new PtyTextDecoder();
         let previousWasSnapshot = false;
+        // REQ-PTY-NET-7: one term.write per animation frame; a repaint always leads its own write.
+        const writeBatcher = new PaneWriteBatcher((text) => onOutputRef.current?.(text));
 
         const showVaultLockedNoticeOnce = () => {
           console.warn('[useShellStream] vault is locked; cannot decrypt encrypted pane frame');
@@ -443,7 +445,7 @@ export function useShellStream({
           } else if (!isScreen && frame.snapshot && startsRepaint) {
             text = normalizeSnapshotText(text);
           }
-          if (text.length > 0) onOutputRef.current?.(text);
+          if (text.length > 0) writeBatcher.push(text, startsRepaint);
         };
 
         const handleControlMessage = (msg: ShellStreamMsg) => {
@@ -500,8 +502,8 @@ export function useShellStream({
             return;
           }
           if (msg.type === 'status' || msg.type === 'stream_closed') {
-            // Ordered behind any pane bytes already queued.
-            paneQueue.enqueue(0, async () => handleControlMessage(msg));
+            // Ordered behind any pane bytes already queued (and already written).
+            paneQueue.enqueue(0, async () => { writeBatcher.flush(); handleControlMessage(msg); });
           } else {
             handleControlMessage(msg);
           }
@@ -509,6 +511,7 @@ export function useShellStream({
 
         socket.onclose = (event: CloseEvent) => {
           paneQueue.cancel();
+          writeBatcher.reset();
           if (activeConnectIdRef.current !== connectId) {
             console.log('[useShellStream] socket.onclose ignored for stale connectId');
             return;
