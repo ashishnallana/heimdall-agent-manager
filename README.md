@@ -78,6 +78,66 @@ A typical run looks like this:
 Everything above is visible and steerable in real time from the dashboard, and every step
 leaves a durable record.
 
+## Keyboard shortcuts
+
+Heimdall's unmodified-key shortcuts use a Vim-style sequence grammar. Press `?` to open
+the live cheatsheet for the actions available in the current view.
+
+- `g` scopes an action to the whole app and opens the resulting resource in its own
+  Workspace.
+- `s` scopes an action to the current Workspace and focused pane.
+- `o` opens an existing resource; `n` creates a new one.
+- `c` means conversation, `t` means task-chain coordinator conversation, and `s` means
+  shell.
+- For Workspace resource actions, no suffix replaces the focused pane, `v` opens to the
+  right, and `h` opens below.
+
+### Global resource actions
+
+| Chord | Action |
+| --- | --- |
+| `g o c` | Choose and open an existing conversation |
+| `g o t` | Choose a task chain and open its coordinator conversation |
+| `g o s` | Choose and open a running shell across all projects |
+| `g n c` | Open a new-conversation launcher with the composer focused |
+| `g n s` | Open a new-shell launcher with **Start shell** focused |
+
+`g h` still goes Home and `g s` still opens Settings. `g n t` is reserved because
+creating a task chain is not the same operation as opening its coordinator.
+
+### Current Workspace resource actions
+
+| Base chord | Resource | Placement suffixes |
+| --- | --- | --- |
+| `s o c` | Existing conversation | none = replace, `v` = right, `h` = below |
+| `s o t` | Task-chain coordinator | none = replace, `v` = right, `h` = below |
+| `s o s` | Running shell | none = replace, `v` = right, `h` = below |
+| `s n c` | New-conversation launcher | none = replace, `v` = right, `h` = below |
+| `s n s` | New-shell launcher | none = replace, `v` = right, `h` = below |
+
+For example, `s o t v` chooses a task chain and opens its coordinator to the right.
+`s n t` is reserved. A base chord such as `s n c` is both an action and a prefix: press
+`Enter` to execute it immediately, add `v` or `h`, or pause for 1.2 seconds to execute
+the base action.
+
+### Pane focus, size, and exchange
+
+| Chord | Action |
+| --- | --- |
+| `s h/j/k/l` | Focus the nearest Main pane left/down/up/right |
+| `s r h/l` | Narrow/widen the focused Main pane by 5%; decrease/increase focused aux width |
+| `s r k/j` | Shorten/tall the focused Main pane by 5% |
+| `s r =` | Equalize Main panes; reset the focused aux pane to its default width |
+| `s e h/j/k/l` | Exchange the focused Main pane with its nearest directional neighbor |
+| `s w` | Focus the next Main pane |
+| `s x` | Close the focused Main pane |
+| `s m` | Toggle focused Main pane maximization |
+
+The auxiliary pane is a separate dock, so it can be resized but not exchanged with a
+Main pane. Shortcut sequences are shielded while typing in editable controls, Monaco,
+terminals, and dialogs. Hold `Ctrl+Alt` for the established one-shot override when an
+editable control has focus.
+
 ## Philosophy
 
 Heimdall is built around a simple idea: **agents should be cheap to start, focused on

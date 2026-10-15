@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { configureStore } from '@reduxjs/toolkit';
 
-import { getContentPaneIds } from '../src/ui/tiling/index.ts';
+import { calculatePaneLayouts, getContentPaneIds } from '../src/ui/tiling/index.ts';
 import workspaceLayoutReducer, {
   NEW_PANE_AGENT_ID,
   assignMainPaneAgent,
@@ -14,12 +14,14 @@ import workspaceLayoutReducer, {
   setLayoutFromUrl,
   buildDefaultSplitTree,
   resizeMainSplit,
+  resizeFocusedMainPane,
   sanitizeMainTree,
   selectFocusedMainAgentId,
   selectMainAgentIds,
   selectMainPaneIds,
   setFocusedMainPane,
   splitMainPane,
+  swapMainPanes,
   toggleMaximizeMainPane,
 } from '../src/ui/store/workspaceLayoutSlice.ts';
 import workspaceChromeReducer, {
@@ -125,6 +127,41 @@ test('split in all 4 directions, focus, resize, maximize and move preserve pane 
   assert.deepEqual(new Set(getContentPaneIds(tree(store))), new Set(ids));
 });
 
+test('focused-pane sizing changes the nearest matching split and panes can exchange positions', () => {
+  const store = makeStore();
+  store.dispatch(setLayoutFromUrl({ ids: ['a'] }));
+  store.dispatch(splitMainPane({ targetPaneId: 'pane-1', direction: 'right', agentInstanceId: 'b', newPaneId: 'pane-b' }));
+  const rootId = tree(store).rootPaneId;
+  const root = () => tree(store).panes[rootId];
+  assert.equal(root().kind === 'split' && root().ratio, 50);
+
+  store.dispatch(setFocusedMainPane('pane-1'));
+  store.dispatch(resizeFocusedMainPane('wider'));
+  assert.equal(root().kind === 'split' && root().ratio, 55);
+  store.dispatch(resizeFocusedMainPane('narrower'));
+  assert.equal(root().kind === 'split' && root().ratio, 50);
+
+  store.dispatch(splitMainPane({ targetPaneId: 'pane-1', direction: 'bottom', agentInstanceId: 'c', newPaneId: 'pane-c' }));
+  const verticalId = Object.entries(tree(store).panes).find(([, pane]) => pane.kind === 'split' && pane.axis === 'vertical')?.[0];
+  assert.ok(verticalId);
+  store.dispatch(setFocusedMainPane('pane-c'));
+  store.dispatch(resizeFocusedMainPane('taller'));
+  const vertical = tree(store).panes[verticalId!];
+  assert.equal(vertical.kind === 'split' && vertical.ratio, 45);
+  store.dispatch(resizeFocusedMainPane('shorter'));
+  const restoredVertical = tree(store).panes[verticalId!];
+  assert.equal(restoredVertical.kind === 'split' && restoredVertical.ratio, 50);
+
+  const beforeA = calculatePaneLayouts(tree(store)).contentLayouts.find((layout) => layout.paneId === 'pane-1');
+  const beforeB = calculatePaneLayouts(tree(store)).contentLayouts.find((layout) => layout.paneId === 'pane-b');
+  assert.ok(beforeA && beforeB);
+  store.dispatch(swapMainPanes({ paneIdA: 'pane-1', paneIdB: 'pane-b' }));
+  const afterA = calculatePaneLayouts(tree(store)).contentLayouts.find((layout) => layout.paneId === 'pane-1');
+  const afterB = calculatePaneLayouts(tree(store)).contentLayouts.find((layout) => layout.paneId === 'pane-b');
+  assert.equal(afterA?.left, beforeB?.left);
+  assert.equal(afterB?.left, beforeA?.left);
+});
+
 test('splitting WITH an agent that is already open focuses it instead of duplicating', () => {
   const store = makeStore();
   store.dispatch(setLayoutFromUrl({ ids: ['a'] }));
@@ -175,6 +212,47 @@ test('launcher chords can replace the focused pane or create a focused picker sp
   assert.notEqual(picker, 'pane-1');
   assert.equal(agentOf(store, picker), NEW_PANE_AGENT_ID);
   assert.equal(getContentPaneIds(tree(store)).length, 2);
+});
+
+test('shortcut launch intent is ephemeral to picker panes and clears on a real occupant', () => {
+  const store = makeStore();
+  store.dispatch(setLayoutFromUrl({ ids: ['a'] }));
+
+  store.dispatch(assignMainPaneAgent({
+    paneId: 'pane-1',
+    agentInstanceId: NEW_PANE_AGENT_ID,
+    launchIntent: 'shell',
+  }));
+  const replaced = tree(store).panes['pane-1'];
+  assert.deepEqual(replaced.kind === 'content' && replaced.value, {
+    agentInstanceId: NEW_PANE_AGENT_ID,
+    launchIntent: 'shell',
+  });
+
+  store.dispatch(splitMainPane({
+    targetPaneId: 'pane-1',
+    direction: 'right',
+    launchIntent: 'agent',
+  }));
+  const splitPicker = tree(store).panes[tree(store).focusedPaneId];
+  assert.deepEqual(splitPicker.kind === 'content' && splitPicker.value, {
+    agentInstanceId: NEW_PANE_AGENT_ID,
+    launchIntent: 'agent',
+  });
+
+  store.dispatch(assignMainPaneAgent({ paneId: tree(store).focusedPaneId, agentInstanceId: 'inst_real' }));
+  const real = tree(store).panes[tree(store).focusedPaneId];
+  assert.deepEqual(real.kind === 'content' && real.value, { agentInstanceId: 'inst_real' });
+
+  const sanitized = sanitizeMainTree({
+    rootPaneId: 'pane-1',
+    focusedPaneId: 'pane-1',
+    maximizedPaneId: null,
+    panes: {
+      'pane-1': { kind: 'content', value: { agentInstanceId: 'inst_real', launchIntent: 'shell' } },
+    },
+  });
+  assert.deepEqual(sanitized?.panes['pane-1'], { kind: 'content', value: { agentInstanceId: 'inst_real' } });
 });
 
 test('closeMainPane removes a pane in a split and resets the sole pane to the picker', () => {

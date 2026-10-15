@@ -4,6 +4,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   SHORTCUT_SEQUENCE_TIMEOUT_MS,
   actionDescriptorKey,
@@ -20,10 +23,11 @@ import {
   type ShortcutKeyboardEvent,
 } from '../src/ui/services/shortcuts/shortcutLogic.ts';
 import { mergePaletteActions } from '../src/ui/components/ui/patterns/commandPaletteLogic.ts';
+import { LOCAL_RESOURCE_CHORDS } from '../src/ui/services/shortcuts/resourceChordMatrix.ts';
 
 const actions: AppAction[] = [
   { id: 'home', title: 'Home', category: 'Navigation', sequence: ['g', 'h'], run() {} },
-  { id: 'conversations', title: 'Conversations', category: 'Navigation', sequence: ['g', 'c'], run() {} },
+  { id: 'conversations', title: 'Open conversation', category: 'Navigation', sequence: ['g', 'o', 'c'], run() {} },
   { id: 'disabled', title: 'Disabled', category: 'General', sequence: ['x'], isEnabled: () => false, run() {} },
 ];
 
@@ -167,8 +171,67 @@ test('chord completions group actions by the next key after the active prefix', 
   ];
   assert.deepEqual(getChordCompletions(['g'], matches), [
     { key: 'h', titles: ['Home', 'History'] },
-    { key: 'c', titles: ['Conversations'] },
+    { key: 'o', titles: ['Open conversation'] },
   ]);
+});
+
+test('AppShell registers the complete global open/new resource matrix', () => {
+  const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const source = fs.readFileSync(path.join(repoRoot, 'src/ui/components/shell/AppShell.tsx'), 'utf8');
+  for (const sequence of [
+    "['g', 'o', 'c']",
+    "['g', 'o', 't']",
+    "['g', 'o', 's']",
+    "['g', 'n', 'c']",
+    "['g', 'n', 's']",
+  ]) assert.equal(source.includes(`sequence: ${sequence}`), true, sequence);
+  assert.doesNotMatch(source, /sequence: \['g', 'c'\]/);
+  assert.match(source, /setRouteSearch\(routeSearchFromLocation\(\)\)/);
+  assert.match(source, /<NewConversationPage key=\{routeSearch \|\| 'default'\} launchIntent=/);
+  assert.match(source, /<ConversationSelectorModal/);
+  assert.match(source, /<TaskChainSelectorModal/);
+  assert.match(source, /<RunningShellSelectorModal/);
+});
+
+test('Workspace resource matrix has 15 unique actions and exact-prefix fallbacks', () => {
+  assert.equal(LOCAL_RESOURCE_CHORDS.length, 15);
+  assert.equal(new Set(LOCAL_RESOURCE_CHORDS.map((chord) => chord.sequence.join(' '))).size, 15);
+  assert.deepEqual(
+    LOCAL_RESOURCE_CHORDS.map((chord) => chord.sequence.join(' ')),
+    [
+      's o c', 's o c v', 's o c h',
+      's o t', 's o t v', 's o t h',
+      's o s', 's o s v', 's o s h',
+      's n c', 's n c v', 's n c h',
+      's n s', 's n s v', 's n s h',
+    ],
+  );
+  const actions: AppAction[] = LOCAL_RESOURCE_CHORDS.map((chord) => ({
+    id: chord.id,
+    title: chord.title,
+    category: 'Workspace',
+    sequence: chord.sequence,
+    run() {},
+  }));
+  for (const base of ['s o c', 's o t', 's o s', 's n c', 's n s']) {
+    const sequence = base.split(' ');
+    assert.equal(getSequenceCommitAction(sequence, actions)?.sequence.join(' '), base);
+    const match = matchSequence(sequence, actions);
+    assert.equal(match.kind, 'prefix');
+    if (match.kind === 'prefix') assert.equal(match.fallbackAction?.sequence.join(' '), base);
+  }
+});
+
+test('Workspace registers mnemonic resize/equalize/exchange chords including aux width handling', () => {
+  const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const source = fs.readFileSync(path.join(repoRoot, 'src/ui/components/mainWorkspace/Workspace.tsx'), 'utf8');
+  assert.match(source, /sequence: \['s', 'r', item\.key\]/);
+  assert.match(source, /sequence: \['s', 'r', '='\]/);
+  assert.match(source, /sequence: \['s', 'e', item\.key\]/);
+  assert.match(source, /dispatch\(setAuxWidth\(\(auxWidth \?\? AUX_DEFAULT_WIDTH\) - 40\)\)/);
+  assert.match(source, /dispatch\(setAuxWidth\(\(auxWidth \?\? AUX_DEFAULT_WIDTH\) \+ 40\)\)/);
+  assert.match(source, /dispatch\(setAuxWidth\(null\)\)/);
+  assert.match(source, /dispatch\(swapMainPanes\(/);
 });
 
 test('palette merging keeps static actions and adapts only enabled live shortcuts', () => {

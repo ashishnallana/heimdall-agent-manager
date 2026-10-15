@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { Combobox, Icon, Modal } from '@ui';
 import { useCreateShellMutation, useKillShellMutation, useListShellsQuery, type ShellSession } from '../../api/endpoints/shells';
@@ -22,6 +22,8 @@ export interface ShellLaunchPanelProps {
   openIds?: readonly string[];
   isMobile: boolean;
   disabled?: boolean;
+  /** Focuses Start once it becomes actionable for an explicit shortcut launch. */
+  autoFocusStart?: boolean;
   /** Opens a shell session in the pane (new or attached). */
   onOpenShell: (sessionId: string) => void;
 }
@@ -31,7 +33,7 @@ export interface ShellLaunchPanelProps {
  * (project, online bridge, cwd defaulting to the project's path on that bridge, with
  * a bridge directory browser) or attach to / kill a running one.
  */
-export function ShellLaunchPanel({ projects, bridges, projectId, onProjectChange, initialBridgeId, openIds = [], isMobile, disabled, onOpenShell }: ShellLaunchPanelProps) {
+export function ShellLaunchPanel({ projects, bridges, projectId, onProjectChange, initialBridgeId, openIds = [], isMobile, disabled, autoFocusStart = false, onOpenShell }: ShellLaunchPanelProps) {
   const dispatch = useDispatch();
   const vaultConfigured = useSelector(selectIsVaultConfigured);
   const vaultUnlocked = useSelector(selectIsVaultUnlocked);
@@ -63,6 +65,12 @@ export function ShellLaunchPanel({ projects, bridges, projectId, onProjectChange
 
   const [createShell, createState] = useCreateShellMutation();
   const blocked = vaultConfigured && !vaultUnlocked ? 'vault' : !bridge || !composerBridgeIsOnline(bridge) ? 'bridge' : '';
+  const startRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!autoFocusStart || disabled || blocked || createState.isLoading) return;
+    const frame = requestAnimationFrame(() => startRef.current?.focus());
+    return () => cancelAnimationFrame(frame);
+  }, [autoFocusStart, blocked, createState.isLoading, disabled]);
 
   const [query, setQuery] = useState('');
   const [allProjects, setAllProjects] = useState(false);
@@ -146,6 +154,7 @@ export function ShellLaunchPanel({ projects, bridges, projectId, onProjectChange
         {createState.error ? <p role="alert" className="mt-3 text-sm text-danger">{describeApiError(createState.error) || 'Could not start the shell.'}</p> : null}
         <div className="mt-4 flex justify-end">
           <button
+            ref={startRef}
             type="button"
             data-debug-id="new-convo-shell-start-btn"
             disabled={disabled || Boolean(blocked) || createState.isLoading}

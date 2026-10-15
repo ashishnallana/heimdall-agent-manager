@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useSelector } from 'react-redux';
 import { useListConversationInboxQuery, useLazyListConversationInboxQuery, type SidebarConversation } from '../../api/endpoints/sidebar';
 import { buildRouteHash } from '../../utils/appLocation';
@@ -55,13 +55,22 @@ function mergeConversations(current: SidebarConversation[], next: SidebarConvers
   });
 }
 
-export default function ConversationsHomePage() {
+export interface ConversationsHomePageProps {
+  /** Select in-place instead of navigating. Used by global and pane shortcut pickers. */
+  onSelectConversation?: (agentInstanceId: string) => void;
+  compact?: boolean;
+  autoFocusSearch?: boolean;
+}
+
+export default function ConversationsHomePage({ onSelectConversation, compact = false, autoFocusSearch = false }: ConversationsHomePageProps = {}) {
   const firstPage = useListConversationInboxQuery({ limit: PAGE_SIZE });
   const [fetchPage, fetchPageResult] = useLazyListConversationInboxQuery();
   const [rows, setRows] = useState<SidebarConversation[]>([]);
   const [nextCursor, setNextCursor] = useState('');
   const [hasMore, setHasMore] = useState(false);
   const [loadError, setLoadError] = useState('');
+  const [query, setQuery] = useState('');
+  const searchRef = useRef<HTMLInputElement>(null);
 
   const activeKey = useSelector(selectActiveVaultKey);
   const [decryptedRows, setDecryptedRows] = useState<SidebarConversation[]>([]);
@@ -95,7 +104,22 @@ export default function ConversationsHomePage() {
   }, [rows, activeKey]);
 
   const conversations = useMemo(() => mergeConversations([], decryptedRows), [decryptedRows]);
+  const filteredConversations = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    if (!needle) return conversations;
+    return conversations.filter((conversation) => {
+      const last = lastMessageLabel(conversation);
+      return [conversationTitle(conversation), conversation.agentName, last.prefix, last.preview]
+        .some((value) => String(value || '').toLowerCase().includes(needle));
+    });
+  }, [conversations, query]);
   const unreadTotal = conversations.reduce((sum, conversation) => sum + Number(conversation.unreadCount || 0), 0);
+
+  useEffect(() => {
+    if (!autoFocusSearch) return;
+    const frame = requestAnimationFrame(() => searchRef.current?.focus());
+    return () => cancelAnimationFrame(frame);
+  }, [autoFocusSearch]);
 
   async function loadMore() {
     if (!nextCursor || fetchPageResult.isFetching) return;
@@ -115,14 +139,18 @@ export default function ConversationsHomePage() {
       {/* On mobile the shell top bar already shows the "Conversations" title, so
           keep this header compact (a slim count row + New). Desktop shows the full
           eyebrow/title block. */}
-      <header data-debug-id="conversations-home-header" className="sticky top-0 z-10 -mx-3 border-b border-subtle bg-canvas/95 px-3 py-2 backdrop-blur sm:-mx-4 sm:px-4 sm:pb-3 sm:pt-2 lg:-mx-5 lg:px-5">
+      <header data-debug-id="conversations-home-header" className={compact ? 'sticky top-0 z-10 border-b border-subtle bg-canvas/95 pb-3 backdrop-blur' : 'sticky top-0 z-10 -mx-3 border-b border-subtle bg-canvas/95 px-3 py-2 backdrop-blur sm:-mx-4 sm:px-4 sm:pb-3 sm:pt-2 lg:-mx-5 lg:px-5'}>
         <div className="flex items-center justify-between gap-3">
           <div className="min-w-0">
             <Text as="p" role="overline" tone="accent" className="hidden sm:block">Conversations</Text>
             <h1 className="hidden text-2xl font-semibold tracking-tight text-primary sm:mt-1 sm:block">Inbox</h1>
             <p data-debug-id="conversations-home-subtitle" className="text-[13px] text-muted sm:mt-1 sm:text-sm">{conversations.length} loaded{unreadTotal ? ` · ${unreadTotal} unread` : ''}</p>
           </div>
-          <a data-debug-id="conversations-home-new-btn" href={buildRouteHash('/conversations/new', '')} className="inline-flex min-h-10 shrink-0 items-center gap-1.5 rounded-2xl bg-accent px-4 py-2 text-sm font-bold text-accent-fg shadow-panel hover:opacity-90"><Icon name="plus" size={15} /> New</a>
+          {!compact ? <a data-debug-id="conversations-home-new-btn" href={buildRouteHash('/conversations/new', '')} className="inline-flex min-h-10 shrink-0 items-center gap-1.5 rounded-2xl bg-accent px-4 py-2 text-sm font-bold text-accent-fg shadow-panel hover:opacity-90"><Icon name="plus" size={15} /> New</a> : null}
+        </div>
+        <div className="relative mt-3">
+          <Icon name="search" size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-faint" />
+          <input ref={searchRef} data-debug-id="conversation-inbox-search-input" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search conversations…" className="min-h-10 w-full rounded-xl border border-subtle bg-surface px-3 pl-9 text-sm text-primary outline-none focus:border-accent" />
         </div>
       </header>
 
@@ -135,17 +163,13 @@ export default function ConversationsHomePage() {
           <div data-debug-id="conversation-inbox-loading" className="p-5 text-sm text-muted">Loading conversations…</div>
         ) : conversations.length === 0 ? (
           <div data-debug-id="conversation-inbox-empty" className="p-6 text-sm text-muted">No conversations yet. Start a new conversation to see it here.</div>
-        ) : conversations.map((conversation) => {
+        ) : filteredConversations.length === 0 ? (
+          <div data-debug-id="conversation-inbox-no-results" className="p-6 text-sm text-muted">No conversations match “{query.trim()}”.</div>
+        ) : filteredConversations.map((conversation) => {
           const title = conversationTitle(conversation);
           const last = lastMessageLabel(conversation);
           const ts = timestampLabel(conversation);
-          return (
-            <a
-              key={conversation.conversationId}
-              data-debug-id={`conversation-inbox-row-${conversation.conversationId}`}
-              href={buildRouteHash(`/conversations/${encodeURIComponent(conversation.agentInstanceId)}`, '')}
-              className="group flex min-h-[76px] w-full touch-manipulation items-center gap-3 px-3 py-3 text-left transition hover:bg-neutral-soft active:bg-neutral-soft/80 sm:min-h-[84px] sm:px-4"
-            >
+          const content = <>
               <div className="grid h-12 w-12 shrink-0 place-items-center rounded-2xl bg-accent/10 text-base font-bold text-accent ring-1 ring-accent/20 sm:h-14 sm:w-14">
                 {isVaultArmored(title) ? '🔒' : (title.slice(0, 1).toUpperCase() || 'C')}
               </div>
@@ -165,7 +189,12 @@ export default function ConversationsHomePage() {
                 {ts ? <time data-debug-id={`conversation-inbox-timestamp-${conversation.conversationId}`} className="text-caption font-medium text-muted">{ts}</time> : null}
                 <span aria-hidden="true" className="text-lg text-faint group-hover:text-muted">›</span>
               </div>
-            </a>
+            </>;
+          const className = 'group flex min-h-[76px] w-full touch-manipulation items-center gap-3 px-3 py-3 text-left transition hover:bg-neutral-soft active:bg-neutral-soft/80 sm:min-h-[84px] sm:px-4';
+          return onSelectConversation ? (
+            <button key={conversation.conversationId} type="button" data-debug-id={`conversation-inbox-row-${conversation.conversationId}`} onClick={() => onSelectConversation(conversation.agentInstanceId)} className={className}>{content}</button>
+          ) : (
+            <a key={conversation.conversationId} data-debug-id={`conversation-inbox-row-${conversation.conversationId}`} href={buildRouteHash(`/conversations/${encodeURIComponent(conversation.agentInstanceId)}`, '')} className={className}>{content}</a>
           );
         })}
       </section>

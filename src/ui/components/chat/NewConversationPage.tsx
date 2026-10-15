@@ -19,7 +19,7 @@ import { VaultText } from '../vault/VaultText';
 import { MessageComposerInput, MessageComposerActions } from './MessageComposer';
 import RuntimeConfigurationOptions, { type RuntimeSelection } from './RuntimeConfigurationOptions';
 import ShellLaunchPanel from './ShellLaunchPanel';
-import { selectMainAgentIds } from '../../store/workspaceLayoutSlice';
+import { selectMainAgentIds, type LauncherIntent } from '../../store/workspaceLayoutSlice';
 
 type Attachment = { localId: string; id?: string; file: File; name: string; status: 'uploading' | 'uploaded' | 'error'; error?: string };
 function message(e: any) { return String(e?.error || e?.message || apiErrorText(e)); }
@@ -60,7 +60,15 @@ function PaneModeSwitch({ value, onChange, mobile }: { value: 'agent' | 'shell';
   );
 }
 
-export default function NewConversationPage({ footer, onLaunched }: { embedded?: boolean; footer?: ReactNode; onLaunched?: (agentInstanceId: string) => void }) {
+export interface NewConversationPageProps {
+  embedded?: boolean;
+  footer?: ReactNode;
+  onLaunched?: (agentInstanceId: string) => void;
+  /** Explicit shortcut intent. It selects the initial mode without rewriting the saved preference. */
+  launchIntent?: LauncherIntent;
+}
+
+export default function NewConversationPage({ footer, onLaunched, launchIntent }: NewConversationPageProps) {
   const user = useAuthUser();
   const userName = String(user?.display_name || user?.name || '').trim();
   const [greeting] = useState(() => GREETINGS[Math.floor(Math.random() * GREETINGS.length)]);
@@ -68,8 +76,12 @@ export default function NewConversationPage({ footer, onLaunched }: { embedded?:
   // SH-1: the picker opens an agent conversation OR an interactive shell. The
   // choice is a per-browser convenience, so it lives in localStorage.
   const [paneMode, setPaneModeState] = useState<'agent' | 'shell'>(() => {
+    if (launchIntent) return launchIntent;
     try { return localStorage.getItem(PANE_MODE_STORAGE_KEY) === 'shell' ? 'shell' : 'agent'; } catch { return 'agent'; }
   });
+  useEffect(() => {
+    if (launchIntent) setPaneModeState(launchIntent);
+  }, [launchIntent]);
   const setPaneMode = (next: 'agent' | 'shell') => {
     setPaneModeState(next);
     try { localStorage.setItem(PANE_MODE_STORAGE_KEY, next); } catch { /* storage unavailable */ }
@@ -198,6 +210,11 @@ export default function NewConversationPage({ footer, onLaunched }: { embedded?:
   const sending = launchState.isLoading || transitioning;
   const disabled = sending || issues.length > 0;
   const sendDisabled = disabled || pendingWrites > 0 || Boolean(preferenceError) || support.isLoading || uploading || failedUpload || (!draft.trim() && attachments.length === 0);
+  useEffect(() => {
+    if (launchIntent !== 'agent' || paneMode !== 'agent' || !hydrated || disabled) return;
+    const frame = requestAnimationFrame(() => inputRef.current?.focus());
+    return () => cancelAnimationFrame(frame);
+  }, [disabled, hydrated, launchIntent, paneMode]);
 
   async function upload(file: File, localId: string = crypto.randomUUID()) {
     const name = artifactUploadName(file, 'conversation-attachment');
@@ -286,6 +303,7 @@ export default function NewConversationPage({ footer, onLaunched }: { embedded?:
           openIds={openPaneIds}
           isMobile={mobile}
           disabled={!hydrated}
+          autoFocusStart={launchIntent === 'shell'}
           onOpenShell={(sessionId) => {
             if (onLaunched) onLaunched(sessionId);
             else window.location.hash = buildRouteHash(`/conversations/${encodeURIComponent(sessionId)}`, '');

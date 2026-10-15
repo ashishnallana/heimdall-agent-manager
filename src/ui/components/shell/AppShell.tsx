@@ -3,6 +3,8 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'rea
 import { useDispatch, useSelector } from 'react-redux';
 import NewConversationPage from '../chat/NewConversationPage';
 import ConversationsHomePage from '../chat/ConversationsHomePage';
+import ConversationSelectorModal from '../chat/ConversationSelectorModal';
+import RunningShellSelectorModal from '../chat/RunningShellSelectorModal';
 import Icon, { type IconName } from '../Icon';
 import {
   Badge,
@@ -116,6 +118,8 @@ import { clearUserClientState } from '../../store/chatSlice';
 import { priorUserClientStateCleared } from '../../store/store';
 import { selectAuxPane, selectCurrentAuxTreeId } from '../../store/auxPanesSlice';
 import { selectOnlineLockedBridgeIds } from '../../utils/bridgeVaultStatus';
+import TaskChainSelectorModal from '../chains/TaskChainSelectorModal';
+import type { LauncherIntent } from '../../store/workspaceLayoutSlice';
 
 type ShellRoute = {
   path: string;
@@ -220,6 +224,15 @@ function focusMessageFromLocation(): string {
   } catch {
     return '';
   }
+}
+
+function routeSearchFromLocation(): string {
+  return getRouteSearch();
+}
+
+function launcherIntentFromSearch(search: string): LauncherIntent | undefined {
+  const intent = new URLSearchParams(search.startsWith('?') ? search.slice(1) : search).get('intent');
+  return intent === 'agent' || intent === 'shell' ? intent : undefined;
 }
 
 function isRouteActive(currentPath: string, itemPath: string): boolean {
@@ -1085,6 +1098,7 @@ function DefaultsSettingsPanel() {
 
 function RouteOutlet({
   path,
+  routeSearch,
   focusMessageId,
   conversations = [],
   liveProjects = [],
@@ -1093,6 +1107,7 @@ function RouteOutlet({
   workspaceTrailing,
 }: {
   path: string;
+  routeSearch?: string;
   focusMessageId?: string;
   conversations?: ConversationSummary[];
   liveProjects?: LiveProject[];
@@ -1222,7 +1237,7 @@ function RouteOutlet({
           // short code and confirms the terminal fingerprint before approval.
           <BridgeEnrollmentApprovalPage />
         ) : path === '/conversations/new' ? (
-          <NewConversationPage />
+          <NewConversationPage key={routeSearch || 'default'} launchIntent={launcherIntentFromSearch(routeSearch || '')} />
         ) : path === '/settings' || path === '/settings/bridges' ? (
           <BridgesPanel />
         ) : path === '/settings/appearance' ? (
@@ -1318,7 +1333,9 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
     });
   };
   const [path, setPath] = useState(routeFromLocation);
+  const [routeSearch, setRouteSearch] = useState(routeSearchFromLocation);
   const [focusMessageId, setFocusMessageId] = useState(focusMessageFromLocation);
+  const [resourcePicker, setResourcePicker] = useState<'conversation' | 'task-chain' | 'shell' | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [launchModalProject, setLaunchModalProject] = useState<{ projectId: string; name: string } | null>(null);
@@ -1647,6 +1664,15 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
     window.location.hash = buildRouteHash(route, '');
   };
 
+  const openNewLauncher = (intent: LauncherIntent) => {
+    const search = new URLSearchParams({ intent, request: String(Date.now()) });
+    window.location.hash = buildRouteHash('/conversations/new', search.toString());
+  };
+
+  const openWorkspaceResource = (resourceId: string) => {
+    window.location.hash = buildRouteHash(`/conversations/${encodeURIComponent(resourceId)}`, '');
+  };
+
   useRegisterActions([
     {
       id: 'navigation.home',
@@ -1656,11 +1682,39 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
       run: () => handlePaletteNavigate('/'),
     },
     {
-      id: 'navigation.conversations',
-      title: 'Go to Conversations',
+      id: 'resource.open-conversation.global',
+      title: 'Open existing conversation',
       category: 'Navigation',
-      sequence: ['g', 'c'],
-      run: () => handlePaletteNavigate('/conversations'),
+      sequence: ['g', 'o', 'c'],
+      run: () => setResourcePicker('conversation'),
+    },
+    {
+      id: 'resource.open-task-chain.global',
+      title: 'Open task-chain coordinator',
+      category: 'Navigation',
+      sequence: ['g', 'o', 't'],
+      run: () => setResourcePicker('task-chain'),
+    },
+    {
+      id: 'resource.open-shell.global',
+      title: 'Open running shell',
+      category: 'Navigation',
+      sequence: ['g', 'o', 's'],
+      run: () => setResourcePicker('shell'),
+    },
+    {
+      id: 'resource.new-conversation.global',
+      title: 'New conversation',
+      category: 'Navigation',
+      sequence: ['g', 'n', 'c'],
+      run: () => openNewLauncher('agent'),
+    },
+    {
+      id: 'resource.new-shell.global',
+      title: 'New shell',
+      category: 'Navigation',
+      sequence: ['g', 'n', 's'],
+      run: () => openNewLauncher('shell'),
     },
     {
       id: 'navigation.settings',
@@ -1718,6 +1772,7 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
     const update = () => {
       const current = routeFromLocation();
       setPath(current);
+      setRouteSearch(routeSearchFromLocation());
       setFocusMessageId(focusMessageFromLocation());
       if (current.startsWith('/settings')) {
         const tab = resolveSettingsTab(current);
@@ -1996,6 +2051,7 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
         ) : null}
         <RouteOutlet
           path={path}
+          routeSearch={routeSearch}
           focusMessageId={focusMessageId}
           conversations={conversations}
           liveProjects={liveProjects}
@@ -2019,6 +2075,24 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
       />
 
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} onNavigate={handlePaletteNavigate} onAction={handlePaletteAction} actions={paletteActions} currentPath={path} conversationGroups={conversationTree.map((group) => ({ projectId: group.project.projectId, projectName: group.project.name, conversations: group.conversations.map((c) => ({ conversationId: c.conversationId, agentInstanceId: c.agentInstanceId, title: displayConversationTitle(c), agentName: c.agentName, isCoordinator: c.isCoordinator, runtimeStatus: c.runtimeStatus, activityStatus: c.activityStatus, unreadCount: c.unreadCount })) }))} chainGroups={chainGroupsQuery.data?.groups ?? []} />
+      <ConversationSelectorModal
+        open={resourcePicker === 'conversation'}
+        onClose={() => setResourcePicker(null)}
+        onSelectConversation={openWorkspaceResource}
+      />
+      <TaskChainSelectorModal
+        open={resourcePicker === 'task-chain'}
+        onClose={() => setResourcePicker(null)}
+        onSelectChain={(chain) => {
+          if (chain.coordinatorAgentInstanceId) openWorkspaceResource(chain.coordinatorAgentInstanceId);
+          setResourcePicker(null);
+        }}
+      />
+      <RunningShellSelectorModal
+        open={resourcePicker === 'shell'}
+        onClose={() => setResourcePicker(null)}
+        onSelectShell={openWorkspaceResource}
+      />
       <ProjectLaunchModal
         isOpen={Boolean(launchModalProject)}
         project={launchModalProject}

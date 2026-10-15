@@ -85,6 +85,20 @@ test('wiring: Workspace renders ShellMainPane for shell ids; picker has Agent|Sh
   assert.match(panel, /data-debug-id=\{`new-convo-shell-kill-\$\{s\.session_id\}`\}/);
 });
 
+test('resource chooser and explicit launcher-intent wiring is reusable', () => {
+  const conversations = read('src/ui/components/chat/ConversationSelectorModal.tsx');
+  assert.match(conversations, /onSelectConversation/);
+  assert.match(conversations, /autoFocusSearch/);
+  const shells = read('src/ui/components/chat/RunningShellSelectorModal.tsx');
+  assert.match(shells, /allProjects: true/);
+  assert.match(shells, /onSelectShell/);
+  const launcher = read('src/ui/components/chat/NewConversationPage.tsx');
+  assert.match(launcher, /launchIntent\?: LauncherIntent/);
+  assert.match(launcher, /autoFocusStart=\{launchIntent === 'shell'\}/);
+  const workspace = read('src/ui/components/mainWorkspace/Workspace.tsx');
+  assert.match(workspace, /launchIntent: value\.launchIntent/);
+});
+
 test('SH-2: every header segment follows the active-pane cue (theme tokens)', () => {
   const chat = read('src/ui/components/workbench/AgentChatPane.tsx');
   assert.match(chat, /data-debug-id="conversation-thread-header"\s+data-pane-active=\{isFocusedPane \? 'true' : 'false'\}/);

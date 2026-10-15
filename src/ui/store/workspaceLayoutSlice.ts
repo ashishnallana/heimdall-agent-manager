@@ -5,6 +5,7 @@ import {
   createPaneTreeState,
   equalizeTreeRatios,
   getContentPaneIds,
+  getPaneLocation,
   movePaneInTree,
   resizeSplitInTree,
   splitPaneInTree,
@@ -36,21 +37,33 @@ import {
 
 export const NEW_PANE_AGENT_ID = '_new';
 
+export type LauncherIntent = 'agent' | 'shell';
+
 export interface MainPaneValue {
   agentInstanceId: string; // NEW_PANE_AGENT_ID for the new-chat picker
+  /** One-shot presentation hint for a shortcut-created picker pane. */
+  launchIntent?: LauncherIntent;
 }
 
 export interface WorkspaceLayoutState {
   tree: PaneTreeState<MainPaneValue>;
 }
 
+export type FocusedPaneResize = 'narrower' | 'wider' | 'shorter' | 'taller';
+
 export const INITIAL_MAIN_PANE_ID = 'pane-1';
 
 export function createInitialMainTree(
   agentInstanceId: string = NEW_PANE_AGENT_ID,
   paneId = INITIAL_MAIN_PANE_ID,
+  launchIntent?: LauncherIntent,
 ): PaneTreeState<MainPaneValue> {
-  return createPaneTreeState<MainPaneValue>({ agentInstanceId }, paneId);
+  return createPaneTreeState<MainPaneValue>(
+    launchIntent && agentInstanceId === NEW_PANE_AGENT_ID
+      ? { agentInstanceId, launchIntent }
+      : { agentInstanceId },
+    paneId,
+  );
 }
 
 const initialState: WorkspaceLayoutState = {
@@ -106,13 +119,44 @@ function resolveTargetPaneId(
   return getContentPaneIds(tree)[0];
 }
 
+function nearestResizeSplit(
+  tree: PaneTreeState<MainPaneValue>,
+  paneId: string,
+  axis: 'horizontal' | 'vertical',
+): { splitPaneId: string; side: 'left' | 'right'; ratio: number } | undefined {
+  let childId = paneId;
+  while (childId !== tree.rootPaneId) {
+    const location = getPaneLocation(tree, childId);
+    if (!location) return undefined;
+    const parent = tree.panes[location.parentId];
+    if (parent?.kind === 'split' && parent.axis === axis) {
+      return { splitPaneId: location.parentId, side: location.side, ratio: parent.ratio };
+    }
+    childId = location.parentId;
+  }
+  return undefined;
+}
+
+export function canResizeFocusedMainPane(
+  tree: PaneTreeState<MainPaneValue>,
+  change: FocusedPaneResize,
+): boolean {
+  const horizontal = change === 'narrower' || change === 'wider';
+  return Boolean(nearestResizeSplit(tree, tree.focusedPaneId, horizontal ? 'horizontal' : 'vertical'));
+}
+
 function setPaneAgent(
   tree: PaneTreeState<MainPaneValue>,
   paneId: string,
   agentInstanceId: string,
+  launchIntent?: LauncherIntent,
 ): void {
   const pane = tree.panes[paneId];
-  if (pane?.kind === 'content') pane.value = { agentInstanceId };
+  if (pane?.kind === 'content') {
+    pane.value = launchIntent && agentInstanceId === NEW_PANE_AGENT_ID
+      ? { agentInstanceId, launchIntent }
+      : { agentInstanceId };
+  }
 }
 
 /**
@@ -150,6 +194,7 @@ const workspaceLayoutSlice = createSlice({
         targetPaneId?: string;
         direction: SplitInputDirection;
         agentInstanceId?: string;
+        launchIntent?: LauncherIntent;
         newPaneId?: string;
       }>,
     ) {
@@ -162,7 +207,11 @@ const workspaceLayoutSlice = createSlice({
       }
       const target = resolveTargetPaneId(state.tree, targetPaneId);
       if (!target) return;
-      splitPaneInTree(state.tree, target, direction, { agentInstanceId }, newPaneId);
+      const value: MainPaneValue =
+        action.payload.launchIntent && agentInstanceId === NEW_PANE_AGENT_ID
+          ? { agentInstanceId, launchIntent: action.payload.launchIntent }
+          : { agentInstanceId };
+      splitPaneInTree(state.tree, target, direction, value, newPaneId);
     },
 
     closeMainPane(state, action: PayloadAction<string>) {
@@ -177,7 +226,11 @@ const workspaceLayoutSlice = createSlice({
      */
     assignMainPaneAgent(
       state,
-      action: PayloadAction<{ paneId?: string; agentInstanceId: string }>,
+      action: PayloadAction<{
+        paneId?: string;
+        agentInstanceId: string;
+        launchIntent?: LauncherIntent;
+      }>,
     ) {
       const target = resolveTargetPaneId(state.tree, action.payload.paneId);
       if (!target) return;
@@ -194,7 +247,7 @@ const workspaceLayoutSlice = createSlice({
         state.tree.focusedPaneId = existing;
         return;
       }
-      setPaneAgent(state.tree, target, agentInstanceId);
+      setPaneAgent(state.tree, target, agentInstanceId, action.payload.launchIntent);
       state.tree.focusedPaneId = target;
     },
 
@@ -287,6 +340,21 @@ const workspaceLayoutSlice = createSlice({
       resizeSplitInTree(state.tree, action.payload.splitPaneId, action.payload.ratio);
     },
 
+    /** Resize the focused subtree by five percentage points in its nearest matching split. */
+    resizeFocusedMainPane(state, action: PayloadAction<FocusedPaneResize>) {
+      const change = action.payload;
+      const horizontal = change === 'narrower' || change === 'wider';
+      const target = nearestResizeSplit(
+        state.tree,
+        state.tree.focusedPaneId,
+        horizontal ? 'horizontal' : 'vertical',
+      );
+      if (!target) return;
+      const growing = change === 'wider' || change === 'taller';
+      const ratioDelta = (growing ? 5 : -5) * (target.side === 'left' ? 1 : -1);
+      resizeSplitInTree(state.tree, target.splitPaneId, target.ratio + ratioDelta);
+    },
+
     equalizeMainPanes(state) {
       equalizeTreeRatios(state.tree);
     },
@@ -372,7 +440,15 @@ export function sanitizeMainTree(raw: unknown): PaneTreeState<MainPaneValue> | n
         if (seenAgents.has(agentInstanceId)) agentInstanceId = NEW_PANE_AGENT_ID;
         else seenAgents.add(agentInstanceId);
       }
-      panes[id] = { kind: 'content', value: { agentInstanceId } };
+      const launchIntent =
+        agentInstanceId === NEW_PANE_AGENT_ID &&
+        (node.value?.launchIntent === 'agent' || node.value?.launchIntent === 'shell')
+          ? node.value.launchIntent
+          : undefined;
+      panes[id] = {
+        kind: 'content',
+        value: launchIntent ? { agentInstanceId, launchIntent } : { agentInstanceId },
+      };
     }
   };
   visit(tree.rootPaneId, 0);
@@ -414,6 +490,7 @@ export const {
   moveMainPane,
   swapMainPanes,
   resizeMainSplit,
+  resizeFocusedMainPane,
   equalizeMainPanes,
   toggleMaximizeMainPane,
   resetWorkspaceLayout,

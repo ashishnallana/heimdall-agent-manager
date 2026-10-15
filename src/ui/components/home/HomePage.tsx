@@ -7,6 +7,7 @@ import { ActionItemsTab } from './ActionItemsTab';
 import { useListIssuesQuery } from '../../api/endpoints/issues';
 import { useListCardsQuery } from '../../api/endpoints/cards';
 import { getRoutePathname, getRouteSearch, buildRouteHash } from '../../utils/appLocation';
+import type { LauncherIntent } from '../../store/workspaceLayoutSlice';
 
 type HomeSection = 'issues' | 'actions';
 function routeSelection(): HomeSection | null {
@@ -29,6 +30,7 @@ export interface HomePageProps {
    */
   pane?: {
     onOpenAgent: (agentInstanceId: string) => void;
+    launchIntent?: LauncherIntent;
   };
 }
 
@@ -93,7 +95,7 @@ export function HomePage({ pane }: HomePageProps = {}) {
 
   if (pane) {
     return <div ref={rootRef} data-debug-id="home-page-pane" className="h-full w-full min-h-0 overflow-y-auto pb-8">
-      <NewConversationPage embedded onLaunched={pane.onOpenAgent} footer={<div className="w-full min-w-0">{chainSearch}</div>} />
+      <NewConversationPage embedded launchIntent={pane.launchIntent} onLaunched={pane.onOpenAgent} footer={<div className="w-full min-w-0">{chainSearch}</div>} />
     </div>;
   }
 

@@ -5,11 +5,14 @@ import { TilingContainer, calculatePaneLayouts, getOverlayPosition, type RenderP
 import {
   NEW_PANE_AGENT_ID,
   assignMainPaneAgent,
+  canResizeFocusedMainPane,
   closeMainPane,
+  equalizeMainPanes,
   isAgentPaneId,
   isRealAgentId,
   isShellPaneId,
   resizeMainSplit,
+  resizeFocusedMainPane,
   selectFocusedMainAgentId,
   selectMainAgentIds,
   selectMainLeafIds,
@@ -18,7 +21,9 @@ import {
   setFocusedMainPane,
   setLayoutFromUrl,
   splitMainPane,
+  swapMainPanes,
   toggleMaximizeMainPane,
+  type LauncherIntent,
   type MainPaneValue,
 } from '../../store/workspaceLayoutSlice';
 import {
@@ -34,10 +39,12 @@ import {
   visibleAuxTabs,
 } from '../../store/auxPanesSlice';
 import {
+  AUX_DEFAULT_WIDTH,
   hydrateWorkspaceChrome,
   selectAuxWidth,
   selectIsAuxMaximized,
   selectPendingSplitDrop,
+  setAuxWidth,
 } from '../../store/workspaceChromeSlice';
 import { auxTabId, resolveLegacyPanelToAuxContent, type AuxContent } from '../../store/auxTabId';
 import { isAuxContentAllowed } from '../../store/auxTabGuards';
@@ -73,6 +80,15 @@ import HomePage from '../home/HomePage';
 import { PANE_ANIMATION_MS, chromeIconButtonSizeClass, topChromeHeight } from '../shell/shellChrome';
 import { useRegisterActions } from '../../services/shortcuts/useRegisterActions';
 import { getDirectionalPaneId, getNextPaneId } from '../../services/shortcuts/shortcutLogic';
+import type { AppAction } from '../../services/shortcuts/shortcutLogic';
+import ConversationSelectorModal from '../chat/ConversationSelectorModal';
+import RunningShellSelectorModal from '../chat/RunningShellSelectorModal';
+import TaskChainSelectorModal from '../chains/TaskChainSelectorModal';
+import {
+  LOCAL_RESOURCE_CHORDS,
+  type OpenResourceKind,
+  type ResourcePlacement,
+} from '../../services/shortcuts/resourceChordMatrix';
 
 export interface WorkspaceProps {
   focusMessageId?: string;
@@ -160,10 +176,10 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
   const auxWidth = useSelector(selectAuxWidth);
   const isAuxMaximized = useSelector(selectIsAuxMaximized);
   const pendingDrop = useSelector(selectPendingSplitDrop);
-  const [chainSelectorRequest, setChainSelectorRequest] = useState<{
-    id: number;
+  const [resourcePickerRequest, setResourcePickerRequest] = useState<{
+    resource: OpenResourceKind;
     paneId: string;
-    placement: 'replace' | 'right' | 'bottom';
+    placement: ResourcePlacement;
   } | null>(null);
 
   // Aux context agent = the focused Main pane's agent (single or split view).
@@ -442,69 +458,111 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
     [dispatch],
   );
 
-  const openFocusedChainSelector = useCallback(
-    (placement: 'replace' | 'right' | 'bottom') => {
-      if (!isAgentPaneId(focusedAgentId)) return;
-      setChainSelectorRequest((request) => ({
-        id: (request?.id ?? 0) + 1,
+  const openResourcePicker = useCallback(
+    (resource: OpenResourceKind, placement: ResourcePlacement) => {
+      setResourcePickerRequest({
+        resource,
         paneId: tree.focusedPaneId,
         placement,
-      }));
+      });
     },
-    [focusedAgentId, tree.focusedPaneId],
+    [tree.focusedPaneId],
   );
-  const handleChainSelectorRequest = useCallback((requestId: number) => {
-    setChainSelectorRequest((request) => request?.id === requestId ? null : request);
-  }, []);
 
-  useRegisterActions([
-    {
-      id: 'workspace.select-task-chain',
-      title: 'Select task chain in focused pane',
-      category: 'Workspace',
-      sequence: ['s', 'c'],
-      isEnabled: () => isAgentPaneId(focusedAgentId),
-      run: () => openFocusedChainSelector('replace'),
-    },
-    {
-      id: 'workspace.select-task-chain-split-right',
-      title: 'Open task chain in pane right',
-      category: 'Workspace',
-      sequence: ['s', 'c', 'v'],
-      isEnabled: () => isAgentPaneId(focusedAgentId),
-      run: () => openFocusedChainSelector('right'),
-    },
-    {
-      id: 'workspace.select-task-chain-split-bottom',
-      title: 'Open task chain in pane below',
-      category: 'Workspace',
-      sequence: ['s', 'c', 'h'],
-      isEnabled: () => isAgentPaneId(focusedAgentId),
-      run: () => openFocusedChainSelector('bottom'),
-    },
-    {
-      id: 'workspace.open-launcher',
-      title: 'Open Agent / Shell launcher in focused pane',
-      category: 'Workspace',
-      sequence: ['s', 's'],
-      run: () => dispatch(assignMainPaneAgent({
+  const placeResource = useCallback((resourceId: string) => {
+    const request = resourcePickerRequest;
+    if (!request) return;
+    if (request.placement === 'replace') {
+      dispatch(assignMainPaneAgent({ paneId: request.paneId, agentInstanceId: resourceId }));
+    } else {
+      dispatch(splitMainPane({
+        targetPaneId: request.paneId,
+        direction: request.placement,
+        agentInstanceId: resourceId,
+      }));
+    }
+    setResourcePickerRequest(null);
+  }, [dispatch, resourcePickerRequest]);
+
+  const openNewLauncher = useCallback((launchIntent: LauncherIntent, placement: ResourcePlacement) => {
+    if (placement === 'replace') {
+      dispatch(assignMainPaneAgent({
         paneId: tree.focusedPaneId,
         agentInstanceId: NEW_PANE_AGENT_ID,
-      })),
+        launchIntent,
+      }));
+    } else {
+      dispatch(splitMainPane({
+        targetPaneId: tree.focusedPaneId,
+        direction: placement,
+        launchIntent,
+      }));
+    }
+  }, [dispatch, tree.focusedPaneId]);
+
+  const resourceActions: AppAction[] = LOCAL_RESOURCE_CHORDS.map((chord) => ({
+    id: chord.id,
+    title: chord.title,
+    category: 'Workspace',
+    sequence: chord.sequence,
+    run: () => {
+      if (chord.resource) openResourcePicker(chord.resource, chord.placement);
+      else if (chord.launchIntent) openNewLauncher(chord.launchIntent, chord.placement);
     },
-    {
-      id: 'workspace.open-launcher-split-right',
-      title: 'Open Agent / Shell launcher in pane right',
-      category: 'Workspace',
-      sequence: ['s', 's', 'v'],
-      run: () => dispatch(splitMainPane({ targetPaneId: tree.focusedPaneId, direction: 'right' })),
+  }));
+  const paneResizeActions: AppAction[] = ([
+    { key: 'h', change: 'narrower' as const, title: 'Narrow focused pane' },
+    { key: 'j', change: 'taller' as const, title: 'Make focused pane taller' },
+    { key: 'k', change: 'shorter' as const, title: 'Make focused pane shorter' },
+    { key: 'l', change: 'wider' as const, title: 'Widen focused pane' },
+  ]).map((item) => ({
+    id: `workspace.resize-${item.change}`,
+    title: item.title,
+    category: 'Workspace',
+    sequence: ['s', 'r', item.key],
+    isEnabled: () => auxFocused
+      ? (item.change === 'narrower' || item.change === 'wider') && auxShown
+      : canResizeFocusedMainPane(tree, item.change),
+    run: () => {
+      if (auxFocused) {
+        if (item.change === 'narrower') dispatch(setAuxWidth((auxWidth ?? AUX_DEFAULT_WIDTH) - 40));
+        if (item.change === 'wider') dispatch(setAuxWidth((auxWidth ?? AUX_DEFAULT_WIDTH) + 40));
+        return;
+      }
+      dispatch(resizeFocusedMainPane(item.change));
     },
+  }));
+  const paneExchangeActions: AppAction[] = ([
+    { key: 'h', direction: 'left' as const, title: 'Exchange pane left' },
+    { key: 'j', direction: 'down' as const, title: 'Exchange pane down' },
+    { key: 'k', direction: 'up' as const, title: 'Exchange pane up' },
+    { key: 'l', direction: 'right' as const, title: 'Exchange pane right' },
+  ]).map((item) => ({
+    id: `workspace.exchange-${item.direction}`,
+    title: item.title,
+    category: 'Workspace',
+    sequence: ['s', 'e', item.key],
+    isEnabled: () => !auxFocused && Boolean(getDirectionalPaneId(mainPaneLayouts, tree.focusedPaneId, item.direction)),
+    run: () => {
+      const target = getDirectionalPaneId(mainPaneLayouts, tree.focusedPaneId, item.direction);
+      if (target) dispatch(swapMainPanes({ paneIdA: tree.focusedPaneId, paneIdB: target }));
+    },
+  }));
+
+  useRegisterActions([
+    ...resourceActions,
+    ...paneResizeActions,
+    ...paneExchangeActions,
     {
-      id: 'workspace.open-launcher-split-bottom',
-      title: 'Open Agent / Shell launcher in pane below',
+      id: 'workspace.resize-equalize',
+      title: auxFocused ? 'Reset auxiliary pane width' : 'Equalize Main pane sizes',
       category: 'Workspace',
-      sequence: ['s', 's', 'h'],
-      run: () => dispatch(splitMainPane({ targetPaneId: tree.focusedPaneId, direction: 'bottom' })),
+      sequence: ['s', 'r', '='],
+      isEnabled: () => auxFocused ? auxShown : mainPaneIds.length > 1,
+      run: () => {
+        if (auxFocused) dispatch(setAuxWidth(null));
+        else dispatch(equalizeMainPanes());
+      },
     },
     {
       id: 'workspace.close-pane',
@@ -646,6 +704,7 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
             // Launching or picking a task chain fills THIS pane.
             <HomePage
               pane={{
+                launchIntent: value.launchIntent,
                 onOpenAgent: (agentInstanceId) =>
                   dispatch(assignMainPaneAgent({ paneId, agentInstanceId })),
               }}
@@ -679,8 +738,6 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
               onOpenAgentInSplit={(nextAgentId, direction) =>
                 dispatch(splitMainPane({ targetPaneId: paneId, direction, agentInstanceId: nextAgentId }))
               }
-              chainSelectorRequest={chainSelectorRequest?.paneId === paneId ? chainSelectorRequest : undefined}
-              onChainSelectorRequestHandled={handleChainSelectorRequest}
               onSplitPane={(direction) => dispatch(splitMainPane({ targetPaneId: paneId, direction }))}
               onReplaceWithNew={() =>
                 dispatch(assignMainPaneAgent({ paneId, agentInstanceId: NEW_PANE_AGENT_ID }))
@@ -699,7 +756,6 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
       showActiveBorder,
       closePane,
       closingPaneIds,
-      chainSelectorRequest,
       dockOccupiesTopRight,
       leading,
       topRightSpacer,
@@ -707,7 +763,6 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
       dispatch,
       focusMessageId,
       focusPane,
-      handleChainSelectorRequest,
       isMobile,
       mainAgentIds,
       openAuxFromPane,
@@ -799,6 +854,24 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
         {trailing}
         {auxToggle}
       </div>
+      <ConversationSelectorModal
+        open={resourcePickerRequest?.resource === 'conversation'}
+        onClose={() => setResourcePickerRequest(null)}
+        onSelectConversation={placeResource}
+      />
+      <TaskChainSelectorModal
+        open={resourcePickerRequest?.resource === 'task-chain'}
+        onClose={() => setResourcePickerRequest(null)}
+        onSelectChain={(chain) => {
+          if (chain.coordinatorAgentInstanceId) placeResource(chain.coordinatorAgentInstanceId);
+          else setResourcePickerRequest(null);
+        }}
+      />
+      <RunningShellSelectorModal
+        open={resourcePickerRequest?.resource === 'shell'}
+        onClose={() => setResourcePickerRequest(null)}
+        onSelectShell={placeResource}
+      />
     </div>
   );
 }
