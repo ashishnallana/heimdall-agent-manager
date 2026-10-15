@@ -219,7 +219,7 @@ export default function NewConversationPage({ footer, onLaunched }: { embedded?:
   const actionProps = { debugPrefix: 'new-convo', mobile, provider: runtime.provider, model: runtime.model, onSettings: () => setSettingsOpen(true), onUpload: () => fileRef.current?.click(), uploadDisabled: disabled, sendDisabled };
   const input = <MessageComposerInput ref={inputRef} mobile={mobile} debugId="new-convo-composer-input" value={draft} disabled={sending} placeholder={mobile ? 'Message the agent…' : 'Message the agent… (Cmd/Ctrl+Enter to send)'} onChange={e => setDraft(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void submit(e); } }} onPaste={e => { const files = clipboardFilesFromEvent(e); if (files.length && !disabled) { e.preventDefault(); files.forEach(f => void upload(f)); } }} />;
   return <section data-debug-id="new-conversation-page" className="w-full px-3 sm:px-6">
-    <div className="mx-auto grid h-[calc(var(--app-viewport-height)-4rem)] min-h-min w-full max-w-4xl grid-rows-[minmax(min-content,1fr)_auto_minmax(min-content,1fr)] gap-8 py-6">
+    <div className="mx-auto grid h-[calc(var(--app-viewport-height)-4rem)] min-h-min w-full max-w-4xl grid-cols-[minmax(0,1fr)] grid-rows-[minmax(min-content,1fr)_auto_minmax(min-content,1fr)] gap-8 py-6">
       <div data-debug-id="new-convo-introduction" className="flex items-center justify-center"><div className="w-full">
       <h1 data-debug-id="new-convo-greeting" className="mb-2 text-left text-2xl font-semibold text-primary"><span lang={greeting.lang}>{greeting.text}</span>{userName ? `, ${userName}` : ''}</h1>
       <p data-debug-id="new-convo-subtitle" className="mb-6 text-left text-sm text-muted">Start a conversation</p>

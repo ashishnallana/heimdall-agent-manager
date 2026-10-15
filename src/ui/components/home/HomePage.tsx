@@ -93,12 +93,12 @@ export function HomePage({ pane }: HomePageProps = {}) {
 
   if (pane) {
     return <div ref={rootRef} data-debug-id="home-page-pane" className="h-full w-full min-h-0 overflow-y-auto pb-8">
-      <NewConversationPage embedded onLaunched={pane.onOpenAgent} footer={<div className="w-full">{chainSearch}</div>} />
+      <NewConversationPage embedded onLaunched={pane.onOpenAgent} footer={<div className="w-full min-w-0">{chainSearch}</div>} />
     </div>;
   }
 
   return <div ref={rootRef} data-debug-id="home-page" className="w-full pb-8">
-    <NewConversationPage embedded footer={<div className="relative w-full space-y-4">
+    <NewConversationPage embedded footer={<div className="relative w-full min-w-0 space-y-4">
       {chainSearch}
       <div ref={buttonsRef} data-debug-id="home-section-buttons" role="group" aria-label="Home activity" className="grid w-full scroll-mt-4 grid-cols-2 gap-2 sm:gap-3">
         {sections.map(section => <button key={section.id} type="button" data-debug-id={`home-tab-${section.id}`} aria-pressed={selected === section.id} aria-expanded={selected === section.id} aria-controls="home-activity-panel" onClick={() => toggle(section.id)} className={`relative flex min-h-28 min-w-0 flex-col items-start gap-2 rounded-2xl border px-3 py-4 text-left transition-colors sm:px-4 ${selected === section.id ? 'border-accent bg-accent/10' : 'border-subtle bg-surface hover:bg-neutral-soft'}`}>
