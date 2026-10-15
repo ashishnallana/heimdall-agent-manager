@@ -18,7 +18,7 @@ export type AppAction = {
 
 export type SequenceMatch =
   | { kind: 'exact'; action: AppAction }
-  | { kind: 'prefix'; actions: AppAction[] }
+  | { kind: 'prefix'; actions: AppAction[]; fallbackAction?: AppAction }
   | { kind: 'none' };
 
 export type ChordCompletion = {
@@ -123,13 +123,16 @@ export function matchSequence(
     action.sequence.length === buffer.length
     && action.sequence.every((key, index) => key === buffer[index])
   ));
-  if (exact) return { kind: 'exact', action: exact };
-
   const prefixes = enabled.filter((action) => (
     action.sequence.length > buffer.length
     && buffer.every((key, index) => action.sequence[index] === key)
   ));
-  return prefixes.length > 0 ? { kind: 'prefix', actions: prefixes } : { kind: 'none' };
+  if (prefixes.length > 0) {
+    return exact
+      ? { kind: 'prefix', actions: prefixes, fallbackAction: exact }
+      : { kind: 'prefix', actions: prefixes };
+  }
+  return exact ? { kind: 'exact', action: exact } : { kind: 'none' };
 }
 
 export function actionDescriptorKey(actions: readonly AppAction[]): string {

@@ -52,6 +52,18 @@ test('matches exact, prefix, none, and disabled actions', () => {
   assert.deepEqual(matchSequence(['x'], actions), { kind: 'none' });
 });
 
+test('defers an exact action when the same sequence prefixes longer chords', () => {
+  const replace = { id: 'replace', title: 'Replace', category: 'Workspace' as const, sequence: ['s', 'c'], run() {} };
+  const split = { id: 'split', title: 'Split', category: 'Workspace' as const, sequence: ['s', 'c', 'v'], run() {} };
+  const match = matchSequence(['s', 'c'], [replace, split]);
+  assert.equal(match.kind, 'prefix');
+  if (match.kind === 'prefix') {
+    assert.equal(match.fallbackAction?.id, 'replace');
+    assert.deepEqual(match.actions.map((action) => action.id), ['split']);
+  }
+  assert.deepEqual(matchSequence(['s', 'c', 'v'], [replace, split]), { kind: 'exact', action: split });
+});
+
 test('normalizes character, Escape, and arrow keys', () => {
   assert.equal(normalizeShortcutKey('G'), 'g');
   assert.equal(normalizeShortcutKey('?'), '?');

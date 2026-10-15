@@ -87,9 +87,12 @@ export function ShortcutProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
-    const scheduleClear = () => {
+    const scheduleClear = (fallbackAction?: AppAction) => {
       if (timeoutRef.current !== null) window.clearTimeout(timeoutRef.current);
-      timeoutRef.current = window.setTimeout(clearSequence, SHORTCUT_SEQUENCE_TIMEOUT_MS);
+      timeoutRef.current = window.setTimeout(() => {
+        clearSequence();
+        if (fallbackAction && isActionEnabled(fallbackAction)) fallbackAction.run();
+      }, SHORTCUT_SEQUENCE_TIMEOUT_MS);
     };
 
     const applyMatch = (event: KeyboardEvent, keys: readonly string[]) => {
@@ -105,7 +108,7 @@ export function ShortcutProvider({ children }: { children: ReactNode }) {
       } else {
         bufferRef.current = keys;
         setBuffer(keys);
-        scheduleClear();
+        scheduleClear(match.fallbackAction);
       }
       return match.kind;
     };
