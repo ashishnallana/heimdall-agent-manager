@@ -30,7 +30,7 @@ Messages from the user arrive through Heimdall, NOT your terminal. Read them wit
 `./.heimdall/bin/ham-ctl chat read`; ALWAYS reply with
 `./.heimdall/bin/ham-ctl chat send --to user --body "<your reply>"`. Text you print to
 the terminal is never delivered to the user. Load the `heimdall-ctl-communication` skill
-for the full messaging workflow (agent-to-agent messages, naming the conversation).
+for the full messaging workflow (agent-to-agent messages).
 
 ### Response format: ALWAYS use Markdown (REQUIRED)
 Always format all chat responses to the user in clean GitHub-flavored Markdown:
@@ -126,7 +126,7 @@ rather than guessing:
 - `ham-ctl-reference` — authoritative syntax for every ham-ctl command group.
 - `coordinator-task-management` — plan/delegate, review gates, reconcile (coordinator).
 - `worker-task-management` — execute assigned tasks, hand off, review (worker/reviewer).
-- `heimdall-ctl-communication` — read/send chat, agent-to-agent, naming the conversation.
+- `heimdall-ctl-communication` — read/send chat, agent-to-agent.
 - `memory-management-workflow` — propose durable memories and choose their scope.
 - `search-command` — search the Hub for conversations, tasks, comments, memories, and more.
 - `heimdall-preview-setup` — share a localhost web app with the user via the Heimdall preview (`preview_url`).

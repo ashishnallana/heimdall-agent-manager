@@ -504,8 +504,8 @@ ctl_v2_chat :: proc(endpoint, token: string, tokens, args: []string) {
 		params := ctl_agentmode_chat_send_params(to, body, args)
 		ctl_agent_call_task(endpoint, token, "agent.chat.send", params, args)
 	case "set-title":
-		// Rename the agent's OWN bound conversation (the chat thread shown in the
-		// UI top bar). Distinct from `task-chain set-title`, which renames the chain.
+		// DEPRECATED (REQ-TN-E): renames the agent's OWN bound conversation. Kept so
+		// existing callers do not break; agents name work with `task-chain set-title`.
 		title := option_value(args, "--title", pos(tokens, 1))
 		if title == "" { print_agent_help([]string{"chat"}); return }
 		params := ctl_agentmode_chat_set_title_params(title, args)
@@ -1985,13 +1985,13 @@ print_help_chat :: proc() {
 	fmt.println("      [--options <a,b> | --option <opt>] [--expected-answers <...>] [--choices <...>]")
 	fmt.println("      [--actions <a,b> | --action <act>]")
 	fmt.println("      --to is REQUIRED: `user` for the bound user, or an agent-instance-id.")
-	fmt.println("  set-title <title>                                              Rename THIS conversation.")
+	fmt.println("  set-title <title>                                              DEPRECATED: conversation titles are unused;")
+	fmt.println("                                                                 use `task-chain set-title` (coordinator only).")
 	fmt.println("")
 	fmt.println("EXAMPLES")
 	fmt.println("  ham-ctl chat read")
 	fmt.println("  ham-ctl chat send --to user --body 'Done — ready for review.'")
 	fmt.println("  ham-ctl chat send --to inst_reviewer --body 'Can you LGTM inst_task_1?'")
-	fmt.println("  ham-ctl chat set-title 'FS Demo: directory browser test'")
 }
 
 print_help_artifact :: proc() {

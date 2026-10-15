@@ -337,13 +337,13 @@ ham-ctl issue comment iss_18d7a123bc45de67 --body "Workaround: export CGO_CFLAGS
 ham-ctl issue update iss_18d7a123bc45de67 --status fixed
 ```
 
-## chat — inbox, sending, and this conversation's title
+## chat — inbox and sending
 - `chat read [--limit N] [--since T] [--include-read] [--transcript]` — read messages.
 - `chat send --to <user|agent-instance-id> --body <t>` (or `--stdin`) — send a message.
   `--to` is REQUIRED: `user` for the bound user, or an exact agent-instance-id for
   agent-to-agent.
-- `chat set-title <title>` — rename THIS conversation (the chat thread shown in the UI).
-  Distinct from `task-chain set-title`, which renames the chain board.
+- `chat set-title <title>` — DEPRECATED: conversation titles are no longer used. Do not
+  call it; name your work with `task-chain set-title` (coordinator only) instead.
 
 ## shell — run commands and long-lived sessions on the Bridge host
 THE THREE KINDS, enforced by the hub:

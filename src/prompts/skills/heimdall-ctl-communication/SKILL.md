@@ -1,6 +1,6 @@
 ---
 name: heimdall-ctl-communication
-description: How an agent communicates through Heimdall with ham-ctl — signal readiness at startup (start-success), read your inbox and message history (chat read), send to the user or another agent (chat send --to), name your conversation (chat set-title), and keep user-facing chat separate from technical task comments. Load when communicating through Heimdall: replying to the user, coordinating agent-to-agent, titling the conversation, or reacting to a new-message notification.
+description: How an agent communicates through Heimdall with ham-ctl — signal readiness at startup (start-success), read your inbox and message history (chat read), send to the user or another agent (chat send --to), and keep user-facing chat separate from technical task comments. Load when communicating through Heimdall: replying to the user, coordinating agent-to-agent, or reacting to a new-message notification.
 ---
 
 # Heimdall CLI communication
@@ -30,11 +30,7 @@ Messages from the user arrive through Heimdall, NOT your terminal. Text printed 
   `./.heimdall/bin/ham-ctl chat send --to <agent-instance-id> --body "<message>"`
   - Use exact instance IDs (e.g. `inst_...`), not display names or slugs.
 
-## 4. Setting conversation title
-- Name the current conversation as soon as the goal is established so the user can easily find it in the dashboard:
-  `./.heimdall/bin/ham-ctl chat set-title "<concise task summary>"`
-
-## 5. Separation of concerns: Chat vs Task Comments
+## 4. Separation of concerns: Chat vs Task Comments
 - **Task Comments** (`ham-ctl task comment <task-id> --body "..."`):
   - Use for technical progress tracking, step-by-step audit trails, test run outputs, code diff summaries, and review handoffs.
   - Permanent, auditable engineering logs attached directly to tasks in the chain.
