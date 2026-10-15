@@ -351,6 +351,31 @@ body {
   color: var(--color-text-muted);
 }
 
+/* SH-3: tmux-style active pane border. An overlay (not a border on the pane) so the
+   layout never shifts and pane content backgrounds can't paint over it. Sides +
+   bottom; the header already separates the top. */
+.ui-pane-active-border {
+  position: absolute;
+  inset: 0;
+  z-index: 35;
+  pointer-events: none;
+  border-style: solid;
+  border-color: var(--color-accent);
+  border-width: 0 1px 1px 1px;
+}
+
+/* SH-2: active-pane cue. Every breadcrumb segment of a Main pane header uses the
+   theme's primary text colour on the focused pane and its muted colour elsewhere
+   (tokens, so it follows light/dark). Attribute selectors out-rank the segments'
+   own text-* utilities. */
+[data-pane-active='true'] [data-pane-crumb]:not(:hover) {
+  color: var(--color-text-primary);
+}
+
+[data-pane-active='false'] [data-pane-crumb]:not(:hover) {
+  color: var(--color-text-muted);
+}
+
 /* Liquid glass: translucent raised surface that blurs and saturates what scrolls
    beneath it, with a hairline rim and a top highlight. Used by floating controls
    such as the chat's jump-to-latest button. */

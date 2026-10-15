@@ -18,6 +18,8 @@ export interface MainPaneFrameProps {
   onClose: (paneId: string) => void;
   /** Plays the close animation (the pane is removed right after). */
   isClosing?: boolean;
+  /** SH-3: draw the tmux-style active border (several panes visible and this one has focus). */
+  isActive?: boolean;
   /** Picker header: hidden-sidebar control (top-left pane). */
   headerLeading?: React.ReactNode;
   /** Picker header: update badge + side-panel toggle (top-right pane). */
@@ -42,6 +44,7 @@ export function MainPaneFrame({
   headerLeading,
   headerTrailing,
   isClosing = false,
+  isActive = false,
   children,
 }: MainPaneFrameProps) {
   const dispatch = useDispatch();
@@ -111,11 +114,7 @@ export function MainPaneFrame({
       className={`relative flex h-full w-full min-h-0 min-w-0 flex-col overflow-hidden bg-canvas ${
         isClosing ? 'heimdall-pane-exit' : 'heimdall-pane-enter'
       } ${
-        !isSinglePane && !isMobile
-          ? isFocused
-            ? 'ring-1 ring-inset ring-accent/50'
-            : 'ring-1 ring-inset ring-subtle/70'
-          : ''
+        !isSinglePane && !isMobile ? 'ring-1 ring-inset ring-subtle/70' : ''
       } ${isDragging ? 'opacity-60' : ''}`}
     >
       {!isSinglePane && !isMobile && !isPicker ? (
@@ -156,6 +155,7 @@ export function MainPaneFrame({
           </span>
         </header>
       ) : null}
+      {isActive ? <div aria-hidden="true" data-debug-id={`main-pane-active-border-${paneId}`} className="ui-pane-active-border" /> : null}
       <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">{children}</div>
     </section>
   );

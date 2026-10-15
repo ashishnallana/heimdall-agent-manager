@@ -64,6 +64,7 @@ import { AuxDock } from '../aux/AuxDock';
 import { useAgentAuxContext } from '../aux/useAgentAuxContext';
 import { AgentChatPane } from '../workbench/AgentChatPane';
 import { ShellMainPane } from './ShellMainPane';
+import { getContentPaneIds } from '../../tiling';
 import { MainPaneFrame } from './MainPaneFrame';
 import { MobileMainPager } from './MobileMainPager';
 import HomePage from '../home/HomePage';
@@ -311,6 +312,13 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
   // Aux dock open / close animation: stay mounted while sliding closed.
   const [auxMounted, setAuxMounted] = useState(auxOpen);
   const [auxShown, setAuxShown] = useState(auxOpen);
+  // SH-3: which region holds focus — a Main pane or the aux dock. Pointer-down in
+  // either claims it; the active one gets the tmux-style border while more than
+  // one pane is visible (desktop only: mobile shows one page at a time).
+  const [auxFocused, setAuxFocused] = useState(false);
+  useEffect(() => { if (!auxShown) setAuxFocused(false); }, [auxShown]);
+  const mainPaneCount = getContentPaneIds(tree).length;
+  const showActiveBorder = !isMobile && (mainPaneCount > 1 || auxShown);
   useEffect(() => {
     if (auxOpen) {
       setAuxMounted(true);
@@ -409,6 +417,7 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
           onFocus={focusPane}
           onClose={closePane}
           isClosing={closingPaneIds.includes(paneId)}
+          isActive={showActiveBorder && isFocused && !auxFocused}
           headerLeading={isTopLeftMost ? leading : null}
           headerTrailing={isTopRightMost && !dockOccupiesTopRight ? topRightSpacer : null}
         >
@@ -427,6 +436,7 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
               key={agentId}
               sessionId={agentId}
               isMobile={isMobile}
+              isFocused={isFocused}
               openIds={mainAgentIds.filter((id) => id !== agentId)}
               onSwitch={(nextId) => dispatch(assignMainPaneAgent({ paneId, agentInstanceId: nextId }))}
               onClose={() => closePane(paneId)}
@@ -460,6 +470,8 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
       );
     },
     [
+      auxFocused,
+      showActiveBorder,
       closePane,
       closingPaneIds,
       dockOccupiesTopRight,
@@ -512,6 +524,7 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
       <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
         <div
           data-debug-id="workspace-main"
+          onMouseDownCapture={() => setAuxFocused(false)}
           className={`relative min-h-0 min-w-0 flex-1 flex-col ${hideMain ? 'hidden' : 'flex'}`}
         >
           {!layoutReady ? null : isMobile ? (
@@ -542,6 +555,8 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
             ctx={ctx}
             isMobile={isMobile}
             shown={auxShown}
+            isActive={showActiveBorder && auxFocused}
+            onActivate={() => setAuxFocused(true)}
             reserveLeft={leadingWidth}
             reserveRight={topRightWidth}
             mobileLeadingPageCount={mainPageCount}

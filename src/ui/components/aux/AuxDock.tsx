@@ -101,6 +101,10 @@ export interface AuxDockProps {
   /** Context agent: the focused Main pane's agent (owner of the shown strip). */
   ctx: AgentAuxContext;
   isMobile?: boolean;
+  /** SH-3: the dock holds focus while several panes are visible (tmux-style border). */
+  isActive?: boolean;
+  /** Called on any pointer-down inside the dock, so the workspace can move focus here. */
+  onActivate?: () => void;
   /** Number of Main pages to the left in the mobile swipe continuum. */
   mobileLeadingPageCount?: number;
   /** Total Main + aux + New Tab pages in that continuum. */
@@ -123,6 +127,8 @@ export function AuxDock({
   reserveRight = 0,
   mobileLeadingPageCount = 0,
   mobileTotalPageCount = 0,
+  isActive = false,
+  onActivate,
 }: AuxDockProps) {
   const dispatch = useDispatch();
   const pane = useSelector((state: any) => selectAuxPane(state, treeId));
@@ -307,9 +313,12 @@ export function AuxDock({
       data-aux-mobile-sheet={isMobile ? 'true' : 'false'}
       data-aux-shown={shown ? 'true' : 'false'}
       aria-label="Side panel"
+      data-aux-active={isActive ? 'true' : 'false'}
+      onMouseDownCapture={onActivate}
       className={containerClass}
       style={!isMobile && !isMaximized ? { width: shown ? width : 0, maxWidth: '75%' } : undefined}
     >
+      {isActive && !isMobile ? <div aria-hidden="true" data-debug-id="aux-active-border" className="ui-pane-active-border" /> : null}
       {/* Fixed-width inner column so the content doesn't reflow while sliding. */}
       <div
         className="flex h-full min-h-0 flex-col"

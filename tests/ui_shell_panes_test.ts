@@ -84,3 +84,31 @@ test('wiring: Workspace renders ShellMainPane for shell ids; picker has Agent|Sh
   assert.match(panel, /resolveProjectBridgeShellCwd\(project, bridgeId\)/);
   assert.match(panel, /data-debug-id=\{`new-convo-shell-kill-\$\{s\.session_id\}`\}/);
 });
+
+test('SH-2: every header segment follows the active-pane cue (theme tokens)', () => {
+  const chat = read('src/ui/components/workbench/AgentChatPane.tsx');
+  assert.match(chat, /data-debug-id="conversation-thread-header"\s+data-pane-active=\{isFocusedPane \? 'true' : 'false'\}/);
+  for (const id of ['conversation-breadcrumb-project', 'conversation-thread-title', 'conversation-chain-agent-switcher-btn']) {
+    assert.match(chat, new RegExp(`data-debug-id="${id}"\\s+data-pane-crumb`));
+  }
+  const pane = read('src/ui/components/mainWorkspace/ShellMainPane.tsx');
+  assert.match(pane, /data-debug-id="shell-main-pane-header"\s+data-pane-active=\{isFocused \? 'true' : 'false'\}/);
+  assert.match(pane, /data-debug-id="shell-main-pane-bridge" data-pane-crumb/);
+  assert.match(pane, /data-debug-id="shell-main-pane-switcher-btn"\s+data-pane-crumb/);
+  assert.match(read('src/ui/components/mainWorkspace/Workspace.tsx'), /<ShellMainPane[\s\S]{0,200}isFocused=\{isFocused\}/);
+  const css = read('src/ui/styles.css');
+  assert.match(css, /\[data-pane-active='true'\] \[data-pane-crumb\]:not\(:hover\) \{\s*color: var\(--color-text-primary\);/);
+  assert.match(css, /\[data-pane-active='false'\] \[data-pane-crumb\]:not\(:hover\) \{\s*color: var\(--color-text-muted\);/);
+});
+
+test('SH-3: tmux-style active border on the focused pane or the focused aux dock', () => {
+  const ws = read('src/ui/components/mainWorkspace/Workspace.tsx');
+  assert.match(ws, /const showActiveBorder = !isMobile && \(mainPaneCount > 1 \|\| auxShown\)/);
+  assert.match(ws, /isActive=\{showActiveBorder && isFocused && !auxFocused\}/);
+  assert.match(ws, /isActive=\{showActiveBorder && auxFocused\}\s+onActivate=\{\(\) => setAuxFocused\(true\)\}/);
+  assert.match(ws, /data-debug-id="workspace-main"\s+onMouseDownCapture=\{\(\) => setAuxFocused\(false\)\}/);
+  assert.match(read('src/ui/components/mainWorkspace/MainPaneFrame.tsx'), /\{isActive \? <div aria-hidden="true" data-debug-id=\{`main-pane-active-border-\$\{paneId\}`\} className="ui-pane-active-border" \/> : null\}/);
+  assert.match(read('src/ui/components/aux/AuxDock.tsx'), /isActive && !isMobile \? <div aria-hidden="true" data-debug-id="aux-active-border" className="ui-pane-active-border" \/>/);
+  const css = read('src/ui/styles.css');
+  assert.match(css, /\.ui-pane-active-border \{[^}]*border-color: var\(--color-accent\);[^}]*border-width: 0 1px 1px 1px;/);
+});

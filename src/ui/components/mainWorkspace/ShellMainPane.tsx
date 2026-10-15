@@ -19,6 +19,8 @@ import { chromeIconButtonSizeClass } from '../shell/shellChrome';
 export interface ShellMainPaneProps {
   sessionId: string;
   isMobile: boolean;
+  /** The active (focused) Main pane: header segments use the primary text colour. */
+  isFocused?: boolean;
   /** Ids open in OTHER Main panes, for the switcher's "Open" badge. */
   openIds: readonly string[];
   /** Show another shell in this pane (dedup: an id open elsewhere focuses that pane). */
@@ -34,7 +36,7 @@ export interface ShellMainPaneProps {
  * `<Bridge> / <Shell name> ▾`; the shell segment opens a switcher. Closing the pane
  * detaches; killing is an explicit, confirmed menu action.
  */
-export function ShellMainPane({ sessionId, isMobile, openIds, onSwitch, onClose, headerLeading, headerEnd }: ShellMainPaneProps) {
+export function ShellMainPane({ sessionId, isMobile, isFocused = false, openIds, onSwitch, onClose, headerLeading, headerEnd }: ShellMainPaneProps) {
   const { data: session } = useGetShellSessionQuery({ sessionId }, { skip: !sessionId });
   const { data: bridgesData } = useListBridgesQuery(undefined);
   const bridge = (bridgesData?.bridges || []).find((b: any) => b.bridge_id === session?.bridge_id);
@@ -53,15 +55,17 @@ export function ShellMainPane({ sessionId, isMobile, openIds, onSwitch, onClose,
     <div data-debug-id={`shell-main-pane-${sessionId}`} className="relative flex h-full min-h-0 w-full flex-col overflow-hidden bg-canvas">
       <header
         data-debug-id="shell-main-pane-header"
+        data-pane-active={isFocused ? 'true' : 'false'}
         className={`relative z-20 flex shrink-0 items-center gap-2 border-b border-subtle bg-canvas/90 px-3 backdrop-blur-md ${isMobile ? 'min-h-14' : 'min-h-12'}`}
       >
         {headerLeading ? <div className="flex shrink-0 items-center gap-1">{headerLeading}</div> : null}
         <nav aria-label="Shell" className={`flex min-w-0 flex-1 items-center gap-1 ${isMobile ? 'text-[15px]' : 'text-sm'}`}>
-          <span data-debug-id="shell-main-pane-bridge" className="max-w-[40%] shrink-0 truncate text-muted">{bridgeName}</span>
+          <span data-debug-id="shell-main-pane-bridge" data-pane-crumb className="max-w-[40%] shrink-0 truncate text-muted">{bridgeName}</span>
           <span className="shrink-0 text-faint">/</span>
           <button
             type="button"
             data-debug-id="shell-main-pane-switcher-btn"
+            data-pane-crumb
             aria-haspopup="dialog"
             aria-expanded={switcherOpen}
             title="Switch shell"

@@ -2507,6 +2507,7 @@ export function AgentChatPane({
       {!isAuxSubagent ? (
       <header
         data-debug-id="conversation-thread-header"
+        data-pane-active={isFocusedPane ? 'true' : 'false'}
         className={`sticky top-0 z-20 flex ${isMobile ? 'min-h-14' : 'min-h-12'} shrink-0 items-center gap-2 px-3 py-2 sm:gap-3 sm:px-4 bg-canvas/90 backdrop-blur-md overflow-visible`}
       >
         <div
@@ -2579,6 +2580,7 @@ export function AgentChatPane({
                 <>
                   <span
                     data-debug-id="conversation-breadcrumb-project"
+                    data-pane-crumb
                     className="truncate text-muted"
                   >
                     <VaultText value={projectName} fallback="Project" />
@@ -2589,6 +2591,7 @@ export function AgentChatPane({
               <button
                 type="button"
                 data-debug-id="conversation-thread-title"
+                data-pane-crumb
                 aria-label="Select task chain"
                 title="Click to search and select task chains"
                 onClick={() => setChainSelectorOpen(true)}
@@ -2607,6 +2610,7 @@ export function AgentChatPane({
               <button
                 type="button"
                 data-debug-id="conversation-chain-agent-switcher-btn"
+                data-pane-crumb
                 aria-label="Switch agent in this task chain"
                 aria-haspopup="dialog"
                 aria-expanded={chainAgentSwitcherOpen}
