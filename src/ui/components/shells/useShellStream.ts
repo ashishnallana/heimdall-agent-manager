@@ -1,6 +1,7 @@
 import { PaneDeliveryQueue, normalizeSnapshotText, repaintCapturedScreenText } from './paneDeliveryQueue.ts';
 import { PTY_WIRE_FLAG_ENCRYPTED, PTY_WIRE_KIND_INPUT, PTY_WIRE_KIND_OUTPUT, PTY_WIRE_KIND_SCREEN, PTY_WIRE_VIEWER_HEADER_BYTES, PtyTextDecoder, decodePtyViewerFrame, decryptPtyPayload, encodePtyViewerFrame, encryptPtyPayload, type PtyViewerFrame } from './ptyWire.ts';
 import { createInputCoalescer, type InputCoalescer } from './ptyInputCoalescer.ts';
+import { createVisibilityGate } from './paneVisibilityGate.ts';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSelector } from 'react-redux';
 import { apiAbsoluteUrl } from '../../api/apiBase.ts';
@@ -222,6 +223,7 @@ export function useShellStream({
   const reconnectTimerRef = useRef<number | undefined>(undefined);
   const reconnectAttemptsRef = useRef(0);
   const stoppedRef = useRef(false);
+  const hiddenPausedRef = useRef(false);
   const activeConnectIdRef = useRef(0);
 
   const onOutputRef = useRef(onOutput);
@@ -345,7 +347,7 @@ export function useShellStream({
 
   const connect = useCallback(() => {
     console.log('[useShellStream] connect() called:', { sessionId, enabled, stopped: stoppedRef.current });
-    if (!sessionId || !enabled || stoppedRef.current) return;
+    if (!sessionId || !enabled || stoppedRef.current || hiddenPausedRef.current) return;
     closeSocket();
 
     const connectId = ++activeConnectIdRef.current;
@@ -582,6 +584,34 @@ export function useShellStream({
       console.log('[useShellStream] useEffect unmount/cleanup for session:', sessionId);
       stoppedRef.current = true;
       closeSocket();
+    };
+  }, [sessionId, enabled, connect]);
+
+  // REQ-PTY-NET-5: a pane hidden for > PANE_HIDDEN_PAUSE_MS closes its socket (which
+  // detaches the bridge stream when it was the last viewer) and reconnects the instant the
+  // document is visible again; the fresh attach repaints the whole screen. A connect()
+  // while hidden-paused is refused so a reconnect timer cannot resurrect the socket.
+  useEffect(() => {
+    if (!enabled || !sessionId || typeof document === 'undefined') return;
+    const gate = createVisibilityGate({
+      isHidden: () => document.hidden === true,
+      onPause: () => {
+        hiddenPausedRef.current = true;
+        closeSocket();
+      },
+      onResume: () => {
+        hiddenPausedRef.current = false;
+        reconnectAttemptsRef.current = 0;
+        if (!stoppedRef.current) connect();
+      },
+    });
+    const onVisibility = () => gate.notify();
+    document.addEventListener('visibilitychange', onVisibility);
+    gate.notify();
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      gate.dispose();
+      hiddenPausedRef.current = false;
     };
   }, [sessionId, enabled, connect]);
 

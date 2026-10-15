@@ -693,6 +693,121 @@ _bridge_pty_stream_queue_output :: proc(worker: ^Bridge_PTY_Stream_Worker, data:
 	_bridge_pty_stream_deliver_or_queue(worker, Bridge_PTY_Stream_Outgoing{data = data, encrypted = encrypted, salt = salt, seq = seq}, heap, session_id)
 }
 
+// Overflow handling (REQ-PTY-NET-5). When a session's INCREMENTAL output outruns the hub
+// link, the queue used to drop everything for that session, kill the worker and ask every
+// viewer to reconnect — which cost a double repaint and, on a slow link under `cat bigfile`,
+// repeated itself as a resync storm. Now the per-session queue is COMPACTED instead: the
+// oldest incremental records are dropped until the newest
+// BRIDGE_PTY_STREAM_COMPACT_KEEP_BYTES remain, a clear-screen+home record is placed in
+// front of the kept tail so the viewer sees "skipped ahead" rather than a torn join, and
+// the worker keeps streaming. The bytes are still in the pty-host tee file (see
+// bridge_pty_stream_stop_all_for_reconnect for why that makes a drop acceptable).
+//
+// Compaction is NOT applied to a snapshot overflow (a partial screen repaint is worse than
+// a fresh one) or to a GLOBAL queue overflow (this session's share is not the problem), and
+// it escalates to the old resync when it happens BRIDGE_PTY_STREAM_COMPACT_STORM_LIMIT
+// times within BRIDGE_PTY_STREAM_COMPACT_STORM_WINDOW — a link that slow needs the viewer
+// gone, not a smaller queue.
+BRIDGE_PTY_STREAM_COMPACT_KEEP_BYTES   :: 64 * 1024
+BRIDGE_PTY_STREAM_COMPACT_STORM_LIMIT  :: 3
+BRIDGE_PTY_STREAM_COMPACT_STORM_WINDOW :: 10 * time.Second
+BRIDGE_PTY_STREAM_COMPACT_MARKER       :: "\x1b[2J\x1b[H"
+
+@(private = "file")
+Bridge_PTY_Compaction_Record :: struct {
+	session_id: string, // heap
+	ticks:      [BRIDGE_PTY_STREAM_COMPACT_STORM_LIMIT]time.Tick,
+	count:      int,
+}
+
+@(private = "file")
+bridge_pty_stream_compactions: [dynamic]Bridge_PTY_Compaction_Record
+
+// _bridge_pty_stream_note_compaction_locked records one compaction for the session and
+// returns how many happened inside the storm window (including this one). Caller holds
+// bridge_pty_stream_outgoing_mu.
+_bridge_pty_stream_note_compaction_locked :: proc(session_id: string, now: time.Tick) -> int {
+	if bridge_pty_stream_compactions.allocator.procedure == nil do bridge_pty_stream_compactions.allocator = runtime.heap_allocator()
+	idx := -1
+	for r, i in bridge_pty_stream_compactions do if r.session_id == session_id { idx = i; break }
+	if idx < 0 {
+		append(&bridge_pty_stream_compactions, Bridge_PTY_Compaction_Record{session_id = strings.clone(session_id, runtime.heap_allocator())})
+		idx = len(bridge_pty_stream_compactions) - 1
+	}
+	r := &bridge_pty_stream_compactions[idx]
+	// Keep only ticks inside the window, then add this one.
+	kept := 0
+	for i in 0 ..< r.count {
+		if time.tick_diff(r.ticks[i], now) < BRIDGE_PTY_STREAM_COMPACT_STORM_WINDOW {
+			r.ticks[kept] = r.ticks[i]
+			kept += 1
+		}
+	}
+	if kept < len(r.ticks) {
+		r.ticks[kept] = now
+		kept += 1
+	}
+	r.count = kept
+	return kept
+}
+
+@(private = "file")
+_bridge_pty_stream_forget_compactions_locked :: proc(session_id: string) {
+	for r, i in bridge_pty_stream_compactions {
+		if r.session_id == session_id {
+			delete(r.session_id, runtime.heap_allocator())
+			unordered_remove(&bridge_pty_stream_compactions, i)
+			return
+		}
+	}
+}
+
+// _bridge_pty_stream_compact_session_locked drops the oldest incremental records of
+// `session_id` until at most keep_bytes of plaintext remain, and inserts the clear-screen
+// marker in front of what is kept. Returns the bytes released. Caller holds the lock.
+_bridge_pty_stream_compact_session_locked :: proc(session_id: string, keep_bytes: int, encrypted: bool, salt: [4]byte, seq: u64, heap: runtime.Allocator) -> (released: int) {
+	// Walk from the tail: everything past the budget (towards the head) goes.
+	kept := 0
+	cut := -1 // index of the oldest record that is kept
+	for i := len(bridge_pty_stream_outgoing) - 1; i >= 0; i -= 1 {
+		q := bridge_pty_stream_outgoing[i]
+		if q.session_id != session_id || q.data == nil || q.snapshot do continue
+		if kept + len(q.data) > keep_bytes do break
+		kept += len(q.data)
+		cut = i
+	}
+	i := 0
+	first_kept := -1
+	for i < len(bridge_pty_stream_outgoing) {
+		q := bridge_pty_stream_outgoing[i]
+		if q.session_id != session_id || q.data == nil || q.snapshot { i += 1; continue }
+		if cut >= 0 && i >= cut {
+			if first_kept < 0 do first_kept = i
+			i += 1
+			continue
+		}
+		released += len(q.data)
+		bridge_pty_stream_outgoing_bytes -= len(q.data)
+		_bridge_pty_stream_outgoing_free(q, heap)
+		ordered_remove(&bridge_pty_stream_outgoing, i)
+		if cut > i do cut -= 1
+	}
+	marker := Bridge_PTY_Stream_Outgoing{
+		data       = slice.clone(transmute([]byte)string(BRIDGE_PTY_STREAM_COMPACT_MARKER), heap),
+		session_id = strings.clone(session_id, heap),
+		encrypted  = encrypted,
+		salt       = salt,
+		seq        = seq,
+	}
+	if first_kept >= 0 {
+		inject_at(&bridge_pty_stream_outgoing, first_kept, marker)
+	} else {
+		append(&bridge_pty_stream_outgoing, marker)
+	}
+	bridge_pty_stream_outgoing_bytes += len(marker.data)
+	return released
+}
+
 // _bridge_pty_stream_deliver_or_queue appends `item` (whose json/data the queue takes over)
 // for `session_id`, enforcing the per-session and global bounds. `item.session_id` and
 // `item.snapshot` are filled in here.
@@ -707,7 +822,21 @@ _bridge_pty_stream_deliver_or_queue :: proc(worker: ^Bridge_PTY_Stream_Worker, i
 	stream_bytes := 0
 	for q in bridge_pty_stream_outgoing { if q.session_id == session_id && q.snapshot == snapshot do stream_bytes += _bridge_pty_stream_outgoing_len(q) }
 	stream_limit := 2 * 1024 * 1024 if snapshot else 256 * 1024
-	overflow := frame_len > stream_limit - stream_bytes || frame_len > BRIDGE_PANE_QUEUE_BYTES - bridge_pty_stream_outgoing_bytes || len(bridge_pty_stream_outgoing) >= BRIDGE_PANE_QUEUE_FRAMES
+	session_over := frame_len > stream_limit - stream_bytes
+	global_over := frame_len > BRIDGE_PANE_QUEUE_BYTES - bridge_pty_stream_outgoing_bytes || len(bridge_pty_stream_outgoing) >= BRIDGE_PANE_QUEUE_FRAMES
+	overflow := session_over || global_over
+	if session_over && !global_over && !snapshot && item.data != nil {
+		// REQ-PTY-NET-5: compact instead of dropping the session, unless it is storming.
+		now := time.tick_now()
+		if _bridge_pty_stream_note_compaction_locked(session_id, now) < BRIDGE_PTY_STREAM_COMPACT_STORM_LIMIT {
+			marker_salt, marker_seq := _bridge_pty_stream_next_nonce(worker)
+			released := _bridge_pty_stream_compact_session_locked(session_id, BRIDGE_PTY_STREAM_COMPACT_KEEP_BYTES, item.encrypted, marker_salt, marker_seq, heap)
+			fmt.eprintln("bridge WARN pane queue compacted; skipped ahead", "session=", session_id, "released_bytes=", released, "kept_bytes<=", BRIDGE_PTY_STREAM_COMPACT_KEEP_BYTES)
+			overflow = false
+		} else {
+			_bridge_pty_stream_forget_compactions_locked(session_id)
+		}
+	}
 	if !overflow {
 		item.session_id = strings.clone(session_id, heap)
 		item.snapshot = snapshot
@@ -1027,4 +1156,9 @@ bridge_pty_stream_reset :: proc() {
 	bridge_pty_stream_fallback_seq = 0
 	bridge_pty_stream_fallback_inited = false
 	sync.mutex_unlock(&bridge_pty_stream_fallback_mu)
+
+	sync.mutex_lock(&bridge_pty_stream_outgoing_mu)
+	for r in bridge_pty_stream_compactions do delete(r.session_id, heap)
+	clear(&bridge_pty_stream_compactions)
+	sync.mutex_unlock(&bridge_pty_stream_outgoing_mu)
 }
