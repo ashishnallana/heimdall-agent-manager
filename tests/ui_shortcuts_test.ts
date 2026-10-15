@@ -10,9 +10,11 @@ import {
   getChordCompletions,
   getDirectionalPaneId,
   getNextPaneId,
+  getSequenceCommitAction,
   isShortcutOverrideTrigger,
   matchSequence,
   normalizeShortcutKey,
+  resolveShortcutMode,
   shouldIgnoreEvent,
   type AppAction,
   type ShortcutKeyboardEvent,
@@ -64,6 +66,22 @@ test('defers an exact action when the same sequence prefixes longer chords', () 
   assert.deepEqual(matchSequence(['s', 'c', 'v'], [replace, split]), { kind: 'exact', action: split });
 });
 
+test('Enter commits only the current enabled exact action', () => {
+  const close = { id: 'close', title: 'Close', category: 'Workspace' as const, sequence: ['s', 'c'], run() {} };
+  const splitVertical = { id: 'split-v', title: 'Split right', category: 'Workspace' as const, sequence: ['s', 'c', 'v'], run() {} };
+  const splitHorizontal = { id: 'split-h', title: 'Split bottom', category: 'Workspace' as const, sequence: ['s', 'c', 'h'], run() {} };
+  const chordActions = [close, splitVertical, splitHorizontal];
+
+  assert.equal(getSequenceCommitAction(['s', 'c'], chordActions)?.id, 'close');
+  assert.equal(getSequenceCommitAction(['s'], chordActions), undefined);
+  assert.equal(getSequenceCommitAction([], chordActions), undefined);
+  assert.equal(getSequenceCommitAction(['x'], chordActions), undefined);
+  assert.equal(
+    getSequenceCommitAction(['s', 'c'], [{ ...close, isEnabled: () => false }, splitVertical]),
+    undefined,
+  );
+});
+
 test('normalizes character, Escape, and arrow keys', () => {
   assert.equal(normalizeShortcutKey('G'), 'g');
   assert.equal(normalizeShortcutKey('?'), '?');
@@ -94,6 +112,20 @@ test('Ctrl+Alt together is the explicit one-shot editable shortcut override', ()
   assert.equal(isShortcutOverrideTrigger(keyboardEvent(null, { key: 'Control', ctrlKey: true, altKey: true })), true);
   assert.equal(isShortcutOverrideTrigger(keyboardEvent(null, { key: 'AltGraph', ctrlKey: true, altKey: true })), false);
   assert.equal(isShortcutOverrideTrigger(keyboardEvent(null, { key: 'Alt', ctrlKey: true, altKey: true, repeat: true })), false);
+});
+
+test('shortcut mode follows editable focus unless the one-shot override is active', () => {
+  const dom = new JSDOM('<!doctype html><body><input id="input"><div class="xterm"><span id="terminal"></span></div><button id="plain"></button></body>');
+  const document = dom.window.document;
+  const input = document.getElementById('input');
+  const terminal = document.getElementById('terminal');
+  const plain = document.getElementById('plain');
+
+  assert.equal(resolveShortcutMode(input), 'insert');
+  assert.equal(resolveShortcutMode(terminal), 'insert');
+  assert.equal(resolveShortcutMode(input, true), 'normal');
+  assert.equal(resolveShortcutMode(plain), 'normal');
+  assert.equal(resolveShortcutMode(null), 'normal');
 });
 
 test('ignores editable, Monaco, xterm, and blocking-dialog targets', () => {

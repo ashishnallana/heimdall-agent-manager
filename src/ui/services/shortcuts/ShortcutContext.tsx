@@ -10,19 +10,23 @@ import React, {
 } from 'react';
 import {
   SHORTCUT_SEQUENCE_TIMEOUT_MS,
+  getSequenceCommitAction,
   isActionEnabled,
   isEditableShortcutTarget,
   isShortcutOverrideTrigger,
   matchSequence,
   normalizeShortcutKey,
+  resolveShortcutMode,
   shouldIgnoreEvent,
   type AppAction,
+  type ShortcutMode,
 } from './shortcutLogic';
 
 type ShortcutContextValue = {
   actions: readonly AppAction[];
   buffer: readonly string[];
   matchingActions: readonly AppAction[];
+  mode: ShortcutMode;
   cheatsheetOpen: boolean;
   setCheatsheetOpen: (open: boolean) => void;
   registerActions: (actions: readonly AppAction[]) => () => void;
@@ -40,15 +44,45 @@ export function ShortcutProvider({ children }: { children: ReactNode }) {
   const timeoutRef = useRef<number | null>(null);
   const [registryVersion, setRegistryVersion] = useState(0);
   const [buffer, setBuffer] = useState<readonly string[]>([]);
+  const [mode, setMode] = useState<ShortcutMode>('normal');
   const [cheatsheetOpen, setCheatsheetOpen] = useState(false);
+
+  const syncMode = useCallback((editableOverride = editableOverrideRef.current) => {
+    const activeTarget = typeof document === 'undefined' ? null : document.activeElement;
+    setMode(resolveShortcutMode(activeTarget, editableOverride));
+  }, []);
+
+  const setEditableOverride = useCallback((enabled: boolean) => {
+    editableOverrideRef.current = enabled;
+    syncMode(enabled);
+  }, [syncMode]);
 
   const clearSequence = useCallback(() => {
     if (timeoutRef.current !== null) window.clearTimeout(timeoutRef.current);
     timeoutRef.current = null;
     bufferRef.current = [];
-    editableOverrideRef.current = false;
+    setEditableOverride(false);
     setBuffer([]);
-  }, []);
+  }, [setEditableOverride]);
+
+  useEffect(() => {
+    const onFocusIn = (event: FocusEvent) => {
+      editableOverrideRef.current = false;
+      setMode(resolveShortcutMode(event.target, false));
+    };
+    const onFocusOut = (event: FocusEvent) => {
+      editableOverrideRef.current = false;
+      setMode(resolveShortcutMode(event.relatedTarget, false));
+    };
+
+    syncMode();
+    window.addEventListener('focusin', onFocusIn, true);
+    window.addEventListener('focusout', onFocusOut, true);
+    return () => {
+      window.removeEventListener('focusin', onFocusIn, true);
+      window.removeEventListener('focusout', onFocusOut, true);
+    };
+  }, [syncMode]);
 
   const registerActions = useCallback((registeredActions: readonly AppAction[]) => {
     const token = Symbol('shortcut-registration');
@@ -116,10 +150,26 @@ export function ShortcutProvider({ children }: { children: ReactNode }) {
     const onKeyDown = (event: KeyboardEvent) => {
       if (isShortcutOverrideTrigger(event) && isEditableShortcutTarget(event.target)) {
         clearSequence();
-        editableOverrideRef.current = true;
+        setEditableOverride(true);
         event.preventDefault();
         event.stopPropagation();
         event.stopImmediatePropagation();
+        return;
+      }
+
+      if (
+        event.key === 'Enter'
+        && bufferRef.current.length > 0
+        && !shouldIgnoreEvent(event, editableOverrideRef.current)
+      ) {
+        const action = getSequenceCommitAction(bufferRef.current, actionsRef.current);
+        clearSequence();
+        if (action && isActionEnabled(action)) {
+          event.preventDefault();
+          event.stopPropagation();
+          event.stopImmediatePropagation();
+          action.run();
+        }
         return;
       }
 
@@ -140,7 +190,7 @@ export function ShortcutProvider({ children }: { children: ReactNode }) {
       const preserveOverride = editableOverrideRef.current;
       clearSequence();
       const restarted = applyMatch(event, [key]);
-      if (preserveOverride && restarted === 'prefix') editableOverrideRef.current = true;
+      if (preserveOverride && restarted === 'prefix') setEditableOverride(true);
     };
 
     window.addEventListener('keydown', onKeyDown, true);
@@ -148,7 +198,7 @@ export function ShortcutProvider({ children }: { children: ReactNode }) {
       window.removeEventListener('keydown', onKeyDown, true);
       if (timeoutRef.current !== null) window.clearTimeout(timeoutRef.current);
     };
-  }, [clearSequence]);
+  }, [clearSequence, setEditableOverride]);
 
   const matchingActions = useMemo(() => {
     if (buffer.length === 0) return [];
@@ -163,12 +213,13 @@ export function ShortcutProvider({ children }: { children: ReactNode }) {
     actions,
     buffer,
     matchingActions,
+    mode,
     cheatsheetOpen,
     setCheatsheetOpen,
     registerActions,
     runAction,
     clearSequence,
-  }), [actions, buffer, matchingActions, cheatsheetOpen, registerActions, runAction, clearSequence]);
+  }), [actions, buffer, matchingActions, mode, cheatsheetOpen, registerActions, runAction, clearSequence]);
 
   return <ShortcutContext.Provider value={value}>{children}</ShortcutContext.Provider>;
 }

@@ -7,6 +7,8 @@ export const SHORTCUT_SEQUENCE_TIMEOUT_MS = 1_200;
 
 export type ActionCategory = 'General' | 'Navigation' | 'Workspace';
 
+export type ShortcutMode = 'normal' | 'insert';
+
 export type AppAction = {
   id: string;
   title: string;
@@ -71,6 +73,13 @@ export function isEditableShortcutTarget(target: EventTarget | null): boolean {
   return Boolean(closestElement(target)?.closest(EDITABLE_SELECTOR));
 }
 
+export function resolveShortcutMode(
+  target: EventTarget | null,
+  editableOverride = false,
+): ShortcutMode {
+  return !editableOverride && isEditableShortcutTarget(target) ? 'insert' : 'normal';
+}
+
 export function isShortcutOverrideTrigger(event: ShortcutKeyboardEvent): boolean {
   return (
     event.ctrlKey
@@ -133,6 +142,17 @@ export function matchSequence(
       : { kind: 'prefix', actions: prefixes };
   }
   return exact ? { kind: 'exact', action: exact } : { kind: 'none' };
+}
+
+/** Returns the enabled action Enter should commit for the current sequence. */
+export function getSequenceCommitAction(
+  buffer: readonly string[],
+  actions: readonly AppAction[],
+): AppAction | undefined {
+  if (buffer.length === 0) return undefined;
+  const match = matchSequence(buffer, actions);
+  if (match.kind === 'exact') return match.action;
+  return match.kind === 'prefix' ? match.fallbackAction : undefined;
 }
 
 export function actionDescriptorKey(actions: readonly AppAction[]): string {
