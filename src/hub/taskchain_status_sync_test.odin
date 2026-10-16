@@ -104,6 +104,8 @@ test_chain_status_sync_create_task_reactivates_completed_chain :: proc(t: ^testi
 		chain_id = chain_id,
 		title = "New Reactivating Task",
 		owner_user_id = owner,
+		// a task created on a LIVE chain is published at once → needs a full brief (M2)
+		brief_json = `{"goal":"reactivate","acceptance":["chain active again"],"verify":"true","review_roles":[]}`,
 	})
 	testing.expect(t, created, "create_task should succeed")
 

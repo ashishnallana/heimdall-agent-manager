@@ -1,0 +1,6 @@
+{
+  "summary": "Implemented the lease/submit verb and wired it in app/wiring.odin; typecheck and unit tests pass.",
+  "next_steps": "Add the bridge-side vcs enrichment for agent.lease.handoff and re-run the smoke test.",
+  "open_questions": ["Should verify_stale fall back to a re-run instead of a 409?"],
+  "truncated": false
+}

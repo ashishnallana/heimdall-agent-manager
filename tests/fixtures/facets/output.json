@@ -1,0 +1,7 @@
+{
+  "schema": "report/v1",
+  "format": "markdown",
+  "path": "docs/reports/task-v2-m2.md",
+  "sections": ["summary", "changes", "verification"],
+  "max_bytes": 65536
+}

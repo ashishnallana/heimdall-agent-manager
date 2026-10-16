@@ -1,0 +1,9 @@
+{
+  "summary": "Handoff with vendor extensions the hub must keep verbatim.",
+  "next_steps": "Nothing — this fixture exists for the round-trip test.",
+  "x_vendor": { "a": [1, 2, { "b": null }], "nested": { "deep": { "flag": true, "ratio": 0.25, "list": ["x", "", "z"] } } },
+  "x_empty_object": {},
+  "x_empty_array": [],
+  "x_unicode": "héllo — 日本語 \"quoted\" \\ backslash",
+  "x_big": 9007199254740991
+}

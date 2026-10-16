@@ -1,0 +1,13 @@
+{
+  "kind": "git",
+  "directory_id": "dir_01HZX9Q3V8",
+  "bridge_id": "brg_7f3a2c",
+  "branch": "feat/task-v2",
+  "base": "3f2a9c1d4b5e6f708192a3b4c5d6e7f8091a2b3c",
+  "head": "9b8c7d6e5f40312a1b2c3d4e5f60718293a4b5c6",
+  "dirty": false,
+  "files": [
+    { "path": "src/hub/service/taskv2/verbs_m2.odin", "status": "A", "add": 412, "del": 0 },
+    { "path": "src/hub/app/wiring.odin", "status": "M", "add": 18, "del": 3 }
+  ]
+}
