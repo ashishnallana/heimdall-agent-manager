@@ -2809,7 +2809,7 @@ write_ws_text_frame_locked :: proc(h: ^Bridge_Handlers, bridge_id: string, clien
 	connection := project_service.bridge_runtime_connection_acquire(h.bridge_runtime_registry, bridge_id)
 	if connection == nil do return false
 	defer project_service.bridge_runtime_connection_release(h.bridge_runtime_registry, connection)
-	sync.lock(&connection.writer_mutex)
+	project_service.bridge_runtime_connection_lock_writer(connection)
 	defer sync.unlock(&connection.writer_mutex)
 	if sync.atomic_load(&connection.retired) || connection.socket != client do return false
 	result := ws.write_server_text(client, text, false)
@@ -2835,7 +2835,7 @@ json_int :: proc(body, key: string, default_value: int) -> int {
 
 bridge_reader_write_pong :: proc(raw: rawptr, socket: net.TCP_Socket, payload: string) -> bool {
 	c := (^project_service.Bridge_Runtime_Connection)(raw)
-	sync.mutex_lock(&c.writer_mutex)
+	project_service.bridge_runtime_connection_lock_writer(c)
 	defer sync.mutex_unlock(&c.writer_mutex)
 	if sync.atomic_load(&c.retired) do return false
 	return ws.write_server_opcode(socket, 0xA, payload, false) == .Ok

@@ -6,6 +6,7 @@ import "core:fmt"
 import "core:strconv"
 import "core:strings"
 import "core:sync"
+import "core:thread"
 import "core:time"
 import "core:encoding/json"
 import domain "odin_test:hub/domain"
@@ -47,16 +48,10 @@ send_runtime_command :: proc(ctx: rawptr, command: project_service.Runtime_Comma
 	connection := project_service.bridge_runtime_connection_acquire(registry, command.bridge_id)
 	if connection == nil do return false, domain.domain_error(.Bridge_Offline, "bridge connection retired")
 	defer project_service.bridge_runtime_connection_release(registry, connection)
-	writer_mu := &connection.writer_mutex
-	sync.lock(writer_mu)
-	defer sync.unlock(writer_mu)
-	socket := connection.socket
-	socket_ok := socket != net.TCP_Socket(0) && !sync.atomic_load(&connection.retired)
-	if !socket_ok do return false, domain.domain_error(.Bridge_Offline, "bridge websocket command path is not connected")
 	// The writer lock is per durable Bridge id. A slow socket cannot stall command
 	// delivery or heartbeat acknowledgements for every other connected Bridge.
-	wrote := write_ws_command(socket, command.body_json)
-	if wrote == .Send_Failed do _ = net.shutdown(net.Any_Socket(socket), .Both)
+	wrote := write_ws_command_on_connection(connection, command.body_json)
+	if wrote == .Not_Connected do return false, domain.domain_error(.Bridge_Offline, "bridge websocket command path is not connected")
 	if wrote != .Ok do return false, command_write_error(wrote)
 	bridge_command_track_sent(connection, command.body_json)
 	return true, domain.Domain_Error{}
@@ -81,22 +76,13 @@ send_runtime_command_wait :: proc(ctx: rawptr, command: project_service.Runtime_
 	connection := project_service.bridge_runtime_connection_acquire(registry, command.bridge_id)
 	if connection == nil do return "", false, domain.domain_error(.Bridge_Offline, "bridge connection retired")
 	defer project_service.bridge_runtime_connection_release(registry, connection)
-	writer_mu := &connection.writer_mutex
-	sync.lock(writer_mu)
-	socket, generation := connection.socket, connection.generation
-	socket_ok := socket != net.TCP_Socket(0) && !sync.atomic_load(&connection.retired)
-	if !socket_ok {
-		sync.unlock(writer_mu)
-		return "", false, domain.domain_error(.Bridge_Offline, "bridge websocket command path is not connected")
-	}
-	// Serialize ONLY the frame write with the runtime loop's ack writes (so bytes
-	// can't interleave on the shared socket). The lock is released before the poll
+	generation := connection.generation
+	// The write takes the writer lock per frame and releases it before the poll
 	// below — holding it across the wait would stall the loop's heartbeat/state acks
 	// and could deadlock command delivery.
 	body := runtime_command_with_timeout(command.body_json, timeout_ms)
-	wrote := write_ws_command(socket, body)
-	if wrote == .Send_Failed do _ = net.shutdown(net.Any_Socket(socket), .Both)
-	sync.unlock(writer_mu)
+	wrote := write_ws_command_on_connection(connection, body)
+	if wrote == .Not_Connected do return "", false, domain.domain_error(.Bridge_Offline, "bridge websocket command path is not connected")
 	if wrote != .Ok do return "", false, command_write_error(wrote)
 	command_kind := bridge_command_track_sent(connection, body)
 	started := time.tick_now()
@@ -299,6 +285,8 @@ Command_Write_Result :: enum {
 	// The socket write failed or could not complete. The bridge really has stopped
 	// taking bytes, so .Bridge_Offline is the honest mapping for this one.
 	Send_Failed,
+	// The connection was retired or has no socket (write_ws_command_on_connection).
+	Not_Connected,
 }
 
 // write_ws_command writes one hub->bridge command, CHUNKING it when it does not fit in
@@ -307,7 +295,10 @@ Command_Write_Result :: enum {
 // chunking rather than a 64-bit length arm, and for the frame shape.
 //
 // >>> THE CALLER MUST HOLD THE REGISTRY COMMAND LOCK ACROSS THIS CALL. <<<
-// Both call sites do, and for a reason that got stricter when chunking landed. The lock
+// Production sends go through write_ws_command_on_connection, which keeps the
+// sequence-level guarantee below with chunk_sequence_mutex and takes the writer lock
+// per frame (REQ-ERR-PROTO-C); this proc remains for single-socket callers and tests.
+// The rule exists for a reason that got stricter when chunking landed. The lock
 // used to buy only BYTE-level serialisation: the runtime loop's ack writes must not
 // interleave bytes inside one frame. It now also buys SEQUENCE-level serialisation:
 // the bridge reassembles by chunk_id, so another command's CHUNKS must not appear
@@ -352,6 +343,62 @@ write_ws_command :: proc(socket: net.TCP_Socket, text: string) -> Command_Write_
 	return .Ok
 }
 
+// write_ws_command_on_connection is write_ws_command with the locking done for the
+// caller (REQ-ERR-PROTO-C). A command that fits one frame is written under
+// writer_mutex like any frame. A CHUNKED command holds chunk_sequence_mutex for the
+// whole sequence (sequences never interleave, see write_ws_command) but takes
+// writer_mutex only per frame, so acks, pongs, stop_agent and small commands go out
+// between its chunks instead of waiting behind up to ~2,700 frames of a large file
+// write. A failed write shuts the socket down, as before.
+// CHUNK_YIELD_MAX bounds how long a chunked command defers each chunk to waiting
+// single-frame writers (REQ-ERR-PROTO-C).
+CHUNK_YIELD_MAX :: 5 * time.Millisecond
+
+write_ws_command_on_connection :: proc(connection: ^project_service.Bridge_Runtime_Connection, text: string) -> Command_Write_Result {
+	payload := contracts.BRIDGE_WS_HUB_TO_BRIDGE_CHUNK_PAYLOAD_BYTES
+	if len(text) <= payload {
+		project_service.bridge_runtime_connection_lock_writer(connection)
+		defer sync.unlock(&connection.writer_mutex)
+		socket := connection.socket
+		if socket == net.TCP_Socket(0) || sync.atomic_load(&connection.retired) do return .Not_Connected
+		wrote := write_ws_command(socket, text)
+		if wrote == .Send_Failed do _ = net.shutdown(net.Any_Socket(socket), .Both)
+		return wrote
+	}
+	if !hub_command_is_chunkable(text, payload) do return .Too_Large
+	frames := hub_command_chunk_frames(text, payload)
+	if frames == nil do return .Send_Failed
+	defer {
+		for f in frames do delete(f)
+		delete(frames)
+	}
+	sync.lock(&connection.chunk_sequence_mutex)
+	defer sync.unlock(&connection.chunk_sequence_mutex)
+	sync.lock(&connection.writer_mutex)
+	socket := connection.socket
+	sync.unlock(&connection.writer_mutex)
+	if socket == net.TCP_Socket(0) || sync.atomic_load(&connection.retired) do return .Not_Connected
+	for f, i in frames {
+		// Let waiting single-frame writers (acks, pongs, small commands) go first, but
+		// only for CHUNK_YIELD_MAX: a steady stream of small frames must not starve the
+		// sequence. After that the chunk competes for the lock like any writer.
+		yield_started := time.tick_now()
+		for sync.atomic_load(&connection.writer_waiters) > 0 && time.tick_since(yield_started) < CHUNK_YIELD_MAX do thread.yield()
+		sync.lock(&connection.writer_mutex)
+		// Retired, or the socket was cleared, mid-sequence: the rest goes nowhere. The
+		// bridge's partial reassembly expires on its own (see write_ws_command).
+		if connection.socket != socket || sync.atomic_load(&connection.retired) {
+			sync.unlock(&connection.writer_mutex)
+			return .Not_Connected if i == 0 else .Send_Failed
+		}
+		ok := ws.write_server_text(socket, f, false) == .Ok
+		if !ok do _ = net.shutdown(net.Any_Socket(socket), .Both)
+		sync.unlock(&connection.writer_mutex)
+		if !ok do return .Send_Failed
+	}
+	return .Ok
+}
+
 // write_ws_text_frame writes ONE unmasked FIN+text frame, 16-bit length only,
 // delegating to the unified ws.write_server_text implementation.
 write_ws_text_frame :: proc(socket: net.TCP_Socket, text: string) -> bool {
@@ -373,6 +420,8 @@ command_write_error :: proc(result: Command_Write_Result) -> domain.Domain_Error
 		return domain.domain_error(.Validation_Failed, "bridge command payload exceeds the chunked-delivery limit for the hub->bridge channel; the bridge is NOT offline")
 	case .Send_Failed:
 		return domain.domain_error(.Bridge_Offline, "bridge websocket command send failed")
+	case .Not_Connected:
+		return domain.domain_error(.Bridge_Offline, "bridge websocket command path is not connected")
 	}
 	return domain.domain_error(.Internal_Error, "unknown bridge command write result")
 }

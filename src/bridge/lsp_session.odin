@@ -19,6 +19,7 @@ package main
 
 import "base:runtime"
 import "core:c"
+import "core:container/queue"
 import "core:fmt"
 import "core:os"
 import "core:path/filepath"
@@ -243,14 +244,28 @@ Bridge_Lsp_Outgoing :: struct {
 	json: string, // pre-built frame; caller transfers ownership
 }
 
+// REQ-ERR-PROTO-C: the outgoing queue is bounded by bytes. A language server's data
+// frames wait (bridge_lsp_enqueue_data) while this much is already queued, so a noisy
+// server or a slow/absent hub link throttles the server through its stdout pipe
+// instead of growing bridge memory without limit. Frames are never dropped while the
+// session lives: losing one would corrupt the JSON-RPC stream. This byte budget is
+// the session's credit window toward the hub.
+BRIDGE_LSP_OUTGOING_MAX_BYTES :: 4 * 1024 * 1024
+
 @(private = "file")
-bridge_lsp_outgoing_queue: [dynamic]Bridge_Lsp_Outgoing
+bridge_lsp_outgoing_queue: queue.Queue(Bridge_Lsp_Outgoing)
+
+@(private = "file")
+bridge_lsp_outgoing_bytes: int // bridge_lsp_outgoing_mu
 
 @(private = "file")
 bridge_lsp_outgoing_mu: sync.Mutex
 
+@(private = "file")
+bridge_lsp_outgoing_space: sync.Cond // signalled whenever queued bytes go down
+
 bridge_lsp_init :: proc() {
-	bridge_lsp_outgoing_queue = make([dynamic]Bridge_Lsp_Outgoing, lsp_heap())
+	queue.init(&bridge_lsp_outgoing_queue, allocator = lsp_heap())
 }
 
 @(private = "file")
@@ -263,11 +278,48 @@ bridge_lsp_init_once :: proc() {
 	sync.once_do(&_bridge_lsp_init_once, bridge_lsp_init)
 }
 
+// bridge_lsp_enqueue queues a frame unconditionally: lsp_error/control frames (one
+// per session end) and frames being put back. Language-server output goes through
+// bridge_lsp_enqueue_data, which respects the byte budget.
 bridge_lsp_enqueue :: proc(json: string) {
 	if json == "" do return
 	sync.mutex_lock(&bridge_lsp_outgoing_mu)
 	defer sync.mutex_unlock(&bridge_lsp_outgoing_mu)
-	append(&bridge_lsp_outgoing_queue, Bridge_Lsp_Outgoing{json = strings.clone(json, lsp_heap())})
+	bridge_lsp_outgoing_push_locked(json)
+}
+
+// bridge_lsp_enqueue_data queues one of session_id's data frames, first waiting while
+// the queue holds BRIDGE_LSP_OUTGOING_MAX_BYTES (a frame larger than the budget is
+// admitted once the queue is empty). It gives up and drops the frame only when the
+// session is no longer starting/running — e.g. bridge_lsp_stop_all killed it after
+// the hub link dropped — so a reader never waits on a drain that will not come.
+// Returns whether the frame was queued.
+bridge_lsp_enqueue_data :: proc(session_id, json: string) -> bool {
+	if json == "" do return true
+	sync.mutex_lock(&bridge_lsp_outgoing_mu)
+	defer sync.mutex_unlock(&bridge_lsp_outgoing_mu)
+	for bridge_lsp_outgoing_bytes > 0 && bridge_lsp_outgoing_bytes + len(json) > BRIDGE_LSP_OUTGOING_MAX_BYTES {
+		status, found := bridge_lsp_session_status(session_id)
+		if !found || (status != .Running && status != .Starting) do return false
+		_ = sync.cond_wait_with_timeout(&bridge_lsp_outgoing_space, &bridge_lsp_outgoing_mu, 100 * time.Millisecond)
+	}
+	bridge_lsp_outgoing_push_locked(json)
+	return true
+}
+
+@(private = "file")
+bridge_lsp_outgoing_push_locked :: proc(json: string) {
+	// Zero-value queue (bridge_lsp_init not run yet, e.g. a unit test): init lazily.
+	if bridge_lsp_outgoing_queue.data.allocator.procedure == nil do queue.init(&bridge_lsp_outgoing_queue, allocator = lsp_heap())
+	_, _ = queue.push_back(&bridge_lsp_outgoing_queue, Bridge_Lsp_Outgoing{json = strings.clone(json, lsp_heap())})
+	bridge_lsp_outgoing_bytes += len(json)
+}
+
+// bridge_lsp_outgoing_queued_bytes is the queue's current byte total.
+bridge_lsp_outgoing_queued_bytes :: proc() -> int {
+	sync.mutex_lock(&bridge_lsp_outgoing_mu)
+	defer sync.mutex_unlock(&bridge_lsp_outgoing_mu)
+	return bridge_lsp_outgoing_bytes
 }
 
 bridge_lsp_drain_outgoing :: proc(conn: ^ws.Connection) {
@@ -275,20 +327,23 @@ bridge_lsp_drain_outgoing :: proc(conn: ^ws.Connection) {
 		item: Bridge_Lsp_Outgoing
 		have := false
 		sync.mutex_lock(&bridge_lsp_outgoing_mu)
-		if len(bridge_lsp_outgoing_queue) > 0 {
-			item = bridge_lsp_outgoing_queue[0]
-			ordered_remove(&bridge_lsp_outgoing_queue, 0)
+		if queue.len(bridge_lsp_outgoing_queue) > 0 {
+			item = queue.pop_front(&bridge_lsp_outgoing_queue)
 			have = true
 		}
 		sync.mutex_unlock(&bridge_lsp_outgoing_mu)
 		if !have do return
 		if !bridge_hub_send(conn, item.json) {
 			sync.mutex_lock(&bridge_lsp_outgoing_mu)
-			inject_at(&bridge_lsp_outgoing_queue, 0, item)
+			_, _ = queue.push_front(&bridge_lsp_outgoing_queue, item)
 			sync.mutex_unlock(&bridge_lsp_outgoing_mu)
 			conn.connected = false
 			return
 		}
+		sync.mutex_lock(&bridge_lsp_outgoing_mu)
+		bridge_lsp_outgoing_bytes -= len(item.json)
+		sync.mutex_unlock(&bridge_lsp_outgoing_mu)
+		sync.cond_broadcast(&bridge_lsp_outgoing_space)
 		delete(item.json, lsp_heap())
 	}
 }
@@ -300,11 +355,12 @@ bridge_lsp_drain_outgoing :: proc(conn: ^ws.Connection) {
 bridge_lsp_take_outgoing :: proc() -> [dynamic]string {
 	out := make([dynamic]string, lsp_heap())
 	sync.mutex_lock(&bridge_lsp_outgoing_mu)
-	defer sync.mutex_unlock(&bridge_lsp_outgoing_mu)
-	for item in bridge_lsp_outgoing_queue {
-		append(&out, item.json) // ownership moves to caller
+	for queue.len(bridge_lsp_outgoing_queue) > 0 {
+		append(&out, queue.pop_front(&bridge_lsp_outgoing_queue).json) // ownership moves to caller
 	}
-	clear(&bridge_lsp_outgoing_queue)
+	bridge_lsp_outgoing_bytes = 0
+	sync.mutex_unlock(&bridge_lsp_outgoing_mu)
+	sync.cond_broadcast(&bridge_lsp_outgoing_space)
 	return out
 }
 
@@ -493,7 +549,7 @@ bridge_lsp_read_worker :: proc(data: rawptr) {
 
 				lsp_trace(ctx.session_id, "rx", string(msg))
 				frame := bridge_lsp_data_frame_json(ctx.session_id, string(msg))
-				bridge_lsp_enqueue(frame)
+				_ = bridge_lsp_enqueue_data(ctx.session_id, frame)
 				delete(frame, lsp_heap())
 
 				// Replace accumulator with the bytes after the consumed message.

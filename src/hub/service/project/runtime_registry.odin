@@ -57,6 +57,15 @@ Bridge_Runtime_Connection :: struct {
 	references: int, // registry.metadata_mutex
 	retired: bool, // atomic
 	writer_mutex: sync.Mutex,
+	// Held across a whole CHUNKED command (REQ-ERR-PROTO-C) so two chunk sequences
+	// never interleave, while writer_mutex is taken per frame so acks, pongs and small
+	// commands still go out between chunks. Order: chunk_sequence_mutex, then
+	// writer_mutex; never the reverse.
+	chunk_sequence_mutex: sync.Mutex,
+	// Single-frame writers waiting on writer_mutex (atomic). A chunked send yields to
+	// them before each chunk, because writer_mutex is not fair: without this, the chunk
+	// loop that just unlocked would usually win the lock straight back.
+	writer_waiters: int,
 	farewell_sent: bool, // writer_mutex; see bridge_runtime_connection_send_farewell
 	retire_mutex: sync.Mutex,
 	state_mutex: sync.Mutex,
@@ -327,6 +336,15 @@ bridge_runtime_registry_mark_offline :: proc(r: ^Bridge_Runtime_Registry, id: st
 	sync.unlock(&r.metadata_mutex)
 	bridge_runtime_connection_retire(r, c)
 }
+// bridge_runtime_connection_lock_writer takes writer_mutex for ONE frame and counts
+// the caller as waiting meanwhile, so an in-flight chunked command lets it in first
+// (REQ-ERR-PROTO-C). Pair with sync.unlock(&c.writer_mutex).
+bridge_runtime_connection_lock_writer :: proc(c: ^Bridge_Runtime_Connection) {
+	sync.atomic_add(&c.writer_waiters, 1)
+	sync.lock(&c.writer_mutex)
+	sync.atomic_sub(&c.writer_waiters, 1)
+}
+
 bridge_runtime_registry_set_command_socket :: proc(r: ^Bridge_Runtime_Registry, id: string, socket: net.TCP_Socket, generation: int = 0) {
 	c := bridge_runtime_connection_acquire(r, id, generation)
 	if c == nil do return

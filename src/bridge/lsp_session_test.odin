@@ -16,6 +16,7 @@ import "core:os"
 import "core:strings"
 import "core:sync"
 import "core:testing"
+import "core:thread"
 import "core:time"
 import "core:unicode/utf8"
 
@@ -565,4 +566,75 @@ test_lsp_find_root_dir_upward_traversal :: proc(t: ^testing.T) {
 		defer delete(res)
 		testing.expect_value(t, res, "")
 	}
+}
+
+@(private = "file")
+Lsp_Budget_Writer :: struct {
+	session_id: string,
+	frame:      string,
+	queued:     bool,
+	returned:   bool, // atomic
+}
+
+// REQ-ERR-PROTO-C: once BRIDGE_LSP_OUTGOING_MAX_BYTES are queued, a running session's
+// data frame waits (back-pressure on the server) instead of growing the queue; it is
+// queued as soon as the hub drains, and dropped only when the session has ended.
+@(test)
+test_lsp_outgoing_queue_is_bounded_and_backpressures :: proc(t: ^testing.T) {
+	sync.mutex_lock(&lsp_spawn_test_mu)
+	defer sync.mutex_unlock(&lsp_spawn_test_mu)
+	bridge_lsp_init_once()
+	// Start from an empty queue; put back anything another test left.
+	leftover := bridge_lsp_take_outgoing()
+	defer {
+		for f in leftover {
+			bridge_lsp_enqueue(f)
+			delete(f, lsp_heap())
+		}
+		delete(leftover)
+	}
+
+	session_id := "lsp_budget_test"
+	bridge_lsp_session_register(Bridge_Lsp_Session{
+		session_id = strings.clone(session_id, lsp_heap()), language = strings.clone("x", lsp_heap()),
+		cmd = strings.clone("x", lsp_heap()), cwd = strings.clone("/", lsp_heap()), owner_user_id = strings.clone("u", lsp_heap()),
+		status = .Running,
+	})
+	defer bridge_lsp_session_remove(session_id)
+
+	filler := strings.repeat("f", 512 * 1024, context.temp_allocator)
+	for bridge_lsp_outgoing_queued_bytes() + len(filler) <= BRIDGE_LSP_OUTGOING_MAX_BYTES {
+		testing.expect(t, bridge_lsp_enqueue_data(session_id, filler))
+	}
+	full := bridge_lsp_outgoing_queued_bytes()
+
+	w := Lsp_Budget_Writer{session_id = session_id, frame = filler}
+	th := thread.create_and_start_with_data(rawptr(&w), proc(data: rawptr) {
+		w := (^Lsp_Budget_Writer)(data)
+		w.queued = bridge_lsp_enqueue_data(w.session_id, w.frame)
+		sync.atomic_store(&w.returned, true)
+	})
+	time.sleep(300 * time.Millisecond)
+	testing.expect(t, !sync.atomic_load(&w.returned), "a data frame over the budget waits instead of queueing")
+	testing.expect_value(t, bridge_lsp_outgoing_queued_bytes(), full)
+
+	// The hub drains: the waiting frame goes in, and the queue never exceeded the cap.
+	drained := bridge_lsp_take_outgoing()
+	for f in drained do delete(f, lsp_heap())
+	delete(drained)
+	thread.join(th)
+	thread.destroy(th)
+	testing.expect(t, w.queued, "queued once there was room")
+	testing.expect(t, bridge_lsp_outgoing_queued_bytes() <= BRIDGE_LSP_OUTGOING_MAX_BYTES)
+
+	// A session that has ended does not wait: its frame is dropped.
+	for bridge_lsp_outgoing_queued_bytes() + len(filler) <= BRIDGE_LSP_OUTGOING_MAX_BYTES do bridge_lsp_enqueue(filler)
+	bridge_lsp_session_set_status(session_id, .Failed)
+	started := time.tick_now()
+	testing.expect(t, !bridge_lsp_enqueue_data(session_id, filler), "an ended session's frame is dropped, not waited on")
+	testing.expect(t, time.tick_since(started) < 50 * time.Millisecond)
+
+	rest := bridge_lsp_take_outgoing()
+	for f in rest do delete(f, lsp_heap())
+	delete(rest)
 }
