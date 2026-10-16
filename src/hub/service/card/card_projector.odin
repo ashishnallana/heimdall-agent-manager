@@ -4,6 +4,7 @@ import "base:runtime"
 import "core:encoding/json"
 import "core:fmt"
 import "core:strings"
+import "core:mem/virtual"
 import "core:sync"
 import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
@@ -92,18 +93,13 @@ attention_message_card_id :: proc(agent_instance_id: string) -> domain.Card_ID {
 // task_validation
 
 // task_awaits_user is the single "this task needs the user's review" rule,
-// shared with the accept-time guard: in validation, and either the user is an
-// explicit reviewer or there is no agent reviewer at all (an agent reviewer --
-// a durable agent_id or a bound instance -- votes instead of the user).
+// shared with the accept-time guard: in validation, and the owning user is an
+// explicit reviewer. It deliberately matches the vote authorization in
+// taskchain.record_task_vote (task_requires_user_approval), so every card it
+// projects can actually execute its advertised task.vote -- a task with no
+// reviewer at all is not "awaiting the user" because the user cannot vote on it.
 task_awaits_user :: proc(task: domain.Task) -> bool {
-	if task.status != .In_Validation do return false
-	if taskchain_service.task_requires_user_approval(task) do return true
-	refs, _, ok := taskchain_service.parse_actor_refs(task.reviewer_refs_json, context.temp_allocator)
-	if !ok do return true
-	for ref in refs {
-		if ref.agent_id != "" || ref.agent_instance_id != "" do return false
-	}
-	return true
+	return task.status == .In_Validation && taskchain_service.task_requires_user_approval(task)
 }
 
 project_task_card :: proc(s: ^Card_Service, owner: domain.User_ID, task_id: domain.Task_ID) -> (bool, domain.Domain_Error) {
@@ -112,7 +108,10 @@ project_task_card :: proc(s: ^Card_Service, owner: domain.User_ID, task_id: doma
 	sync.mutex_lock(&s.projector_mutex)
 	defer sync.mutex_unlock(&s.projector_mutex)
 
-	task, found, _ := iface.taskchain_get_task(s.taskchains.repo, task_id)
+	task, found, get_err := iface.taskchain_get_task(s.taskchains.repo, task_id)
+	// Only a definite "no such task" may retire a card; any other read failure
+	// leaves the card untouched (reconciliation retries it).
+	if !found && get_err.code != .Not_Found do return false, get_err
 	qualifies := found && task.owner_user_id == owner && task_awaits_user(task)
 	desired: domain.Card
 	if qualifies do desired = build_task_card(s, task)
@@ -298,7 +297,8 @@ write_message_options :: proc(b: ^strings.Builder, metadata_json: string) {
 apply_attention_projection :: proc(s: ^Card_Service, owner: domain.User_ID, cid: domain.Card_ID, desired: domain.Card, qualifies: bool) -> (bool, domain.Domain_Error) {
 	for _ in 0 ..< ATTENTION_CAS_ATTEMPTS {
 		now := platform.clock_now(s.clock)
-		existing, exists, _ := iface.card_get(s.cards, cid)
+		existing, exists, get_err := iface.card_get(s.cards, cid)
+		if !exists && get_err.code != .Not_Found do return false, get_err
 		if exists && existing.owner_user_id != owner {
 			return false, domain.domain_error(.Forbidden, "attention card belongs to another owner")
 		}
@@ -388,9 +388,14 @@ notify_card_changed :: proc(s: ^Card_Service, owner: domain.User_ID, kind: strin
 // reconciliation
 
 Attention_Reconcile_Stats :: struct {
-	owners:   int,
+	owners:    int,
 	projected: int,
-	failed:   int,
+	failed:    int, // failed projections AND failed source/card queries
+	// What failed last, for the reaper's log line. A string LITERAL plus the
+	// error code only: the sweep frees its allocations per owner, so an error
+	// message would dangle by the time the caller logs it.
+	last_failure:      string,
+	last_failure_code: domain.Error_Code,
 }
 
 // reconcile_attention re-projects, for every owner, each source that currently
@@ -399,65 +404,97 @@ Attention_Reconcile_Stats :: struct {
 reconcile_attention :: proc(s: ^Card_Service) -> Attention_Reconcile_Stats {
 	stats: Attention_Reconcile_Stats
 	if s == nil || s.attention_repo == nil do return stats
-	// This runs on the long-lived reaper thread, not a request arena: route the
-	// sweep's (many, short-lived) allocations to the temp allocator and release
-	// them after each owner, so a sweep leaks nothing.
-	context.allocator = context.temp_allocator
-	defer free_all(context.temp_allocator)
+	// The sweep makes many short-lived allocations on a long-lived thread. Give
+	// it a private growing arena (as both allocator and temp allocator), reset
+	// after each owner and destroyed at the end, so a sweep leaks nothing and
+	// never frees memory that belongs to its caller's temp allocator.
+	sweep_arena: virtual.Arena
+	if virtual.arena_init_growing(&sweep_arena) != nil {
+		stats.failed += 1
+		stats.last_failure = "sweep arena"
+		return stats
+	}
+	defer virtual.arena_destroy(&sweep_arena)
+	context.allocator = virtual.arena_allocator(&sweep_arena)
+	context.temp_allocator = context.allocator
+
 	owners_tmp, err := iface.attention_list_owners(s.attention_repo)
-	if err.code != .None do return stats
+	if err.code != .None {
+		stats.failed += 1
+		stats.last_failure = "list owners"
+		stats.last_failure_code = err.code
+		return stats
+	}
 	owners := make([]string, len(owners_tmp), runtime.heap_allocator())
 	for o, i in owners_tmp do owners[i] = strings.clone(string(o), runtime.heap_allocator())
 	defer {
 		for o in owners do delete(o, runtime.heap_allocator())
 		delete(owners, runtime.heap_allocator())
 	}
-	free_all(context.temp_allocator)
+	free_all(context.allocator)
 	for owner in owners {
 		stats.owners += 1
 		reconcile_attention_owner(s, domain.User_ID(owner), &stats)
-		free_all(context.temp_allocator)
+		free_all(context.allocator)
 	}
 	return stats
 }
 
 reconcile_attention_owner :: proc(s: ^Card_Service, owner: domain.User_ID, stats: ^Attention_Reconcile_Stats) {
-	record :: proc(stats: ^Attention_Reconcile_Stats, ok: bool) {
-		if ok do stats.projected += 1
-		else do stats.failed += 1
+	project_result :: proc(stats: ^Attention_Reconcile_Stats, ok: bool, err: domain.Domain_Error) {
+		if ok {
+			stats.projected += 1
+		} else {
+			stats.failed += 1
+			stats.last_failure = "projection"
+			stats.last_failure_code = err.code
+		}
+	}
+	query_failed :: proc(stats: ^Attention_Reconcile_Stats, what: string, err: domain.Domain_Error) {
+		stats.failed += 1
+		stats.last_failure = what // always a literal at the call sites below
+		stats.last_failure_code = err.code
 	}
 
 	task_ids, task_err := iface.attention_list_validation_task_ids(s.attention_repo, owner)
-	if task_err.code == .None {
+	if task_err.code != .None {
+		query_failed(stats, "list validation tasks", task_err)
+	} else {
 		for id in task_ids {
-			ok, _ := project_task_card(s, owner, id)
-			record(stats, ok)
+			ok, err := project_task_card(s, owner, id)
+			project_result(stats, ok, err)
 		}
 	}
 	live_tasks, live_task_err := iface.attention_list_live_cards(s.attention_repo, owner, domain.CARD_PROVIDER_TASK_VALIDATION)
-	if live_task_err.code == .None {
+	if live_task_err.code != .None {
+		query_failed(stats, "list live task cards", live_task_err)
+	} else {
 		for c in live_tasks {
 			id := string(c.card_id)
 			if !strings.has_prefix(id, ATTENTION_TASK_CARD_PREFIX) do continue
-			ok, _ := project_task_card(s, owner, domain.Task_ID(id[len(ATTENTION_TASK_CARD_PREFIX):]))
-			record(stats, ok)
+			ok, err := project_task_card(s, owner, domain.Task_ID(id[len(ATTENTION_TASK_CARD_PREFIX):]))
+			project_result(stats, ok, err)
 		}
 	}
 
 	instance_ids, inst_err := iface.attention_list_actionable_instance_ids(s.attention_repo, owner)
-	if inst_err.code == .None {
+	if inst_err.code != .None {
+		query_failed(stats, "list actionable instances", inst_err)
+	} else {
 		for id in instance_ids {
-			ok, _ := project_message_card(s, owner, id)
-			record(stats, ok)
+			ok, err := project_message_card(s, owner, id)
+			project_result(stats, ok, err)
 		}
 	}
 	live_msgs, live_msg_err := iface.attention_list_live_cards(s.attention_repo, owner, domain.CARD_PROVIDER_MESSAGE_OPTIONS)
-	if live_msg_err.code == .None {
+	if live_msg_err.code != .None {
+		query_failed(stats, "list live message cards", live_msg_err)
+	} else {
 		for c in live_msgs {
 			id := string(c.card_id)
 			if !strings.has_prefix(id, ATTENTION_MESSAGE_CARD_PREFIX) do continue
-			ok, _ := project_message_card(s, owner, id[len(ATTENTION_MESSAGE_CARD_PREFIX):])
-			record(stats, ok)
+			ok, err := project_message_card(s, owner, id[len(ATTENTION_MESSAGE_CARD_PREFIX):])
+			project_result(stats, ok, err)
 		}
 	}
 }

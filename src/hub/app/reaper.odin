@@ -131,7 +131,7 @@ attention_reconcile_maybe :: proc(graph: ^App_Graph, force: bool) {
 	if !force && attention_last_reconcile != {} && time.tick_diff(attention_last_reconcile, now) < time.Duration(ATTENTION_RECONCILE_INTERVAL_SECONDS) * time.Second do return
 	attention_last_reconcile = now
 	stats := card_service.reconcile_attention(&graph.cards)
-	if stats.failed > 0 do fmt.eprintfln("ham-hub WARN attention reconcile: owners=%d projected=%d failed=%d", stats.owners, stats.projected, stats.failed)
+	if stats.failed > 0 do fmt.eprintfln("ham-hub WARN attention reconcile: owners=%d projected=%d failed=%d last_failure=%s code=%v", stats.owners, stats.projected, stats.failed, stats.last_failure, stats.last_failure_code)
 }
 
 // reaper_sweep_once performs a single stale-instance sweep + event fan-out. Split

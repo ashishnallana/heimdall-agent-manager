@@ -102,4 +102,3 @@ write_attention_item_json :: proc(b: ^strings.Builder, item: card_service.Attent
 	write_handler_json_string(b, item.ctx.project_name)
 	strings.write_string(b, `"}}`)
 }
-

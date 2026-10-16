@@ -257,18 +257,34 @@ mark_read :: proc(s:^Content_Service, auth:contracts.Auth_Context,cid:string)->(
 // (caller owns it); it is empty when nothing needed marking.
 mark_read_with_receipts :: proc(s:^Content_Service, auth:contracts.Auth_Context,cid:string)->(domain.Chat_Conversation,[]string,bool,domain.Domain_Error){
 	c,ok,err:=get_conversation(s,auth,cid); if !ok do return {},nil,false,err
-	// Collect unread incoming messages (read_at empty, direction agent_to_user).
-	rows,list_err:=iface.content_list_user_visible_messages(s.content,c.conversation_id,c.owner_user_id,200,"")
+	// Collect EVERY unread incoming message (read_at empty, direction
+	// agent_to_user). A capped page would leave older unread rows behind -- and an
+	// older unread question would immediately resurface as an attention card.
 	marked_ids:=make([dynamic]string)
-	if list_err.code==.None {
-		for m in rows {
-			if m.read_at=="" && m.direction=="agent_to_user" do append(&marked_ids,m.message_id)
+	all_ids,all_supported,all_err:=iface.content_list_unread_incoming_ids(s.content,c.conversation_id,c.owner_user_id)
+	if all_supported {
+		if all_err.code!=.None { delete(marked_ids); return {},nil,false,all_err }
+		append(&marked_ids,..all_ids)
+	} else {
+		// Repositories without the unbounded lookup (test fakes): newest 200.
+		rows,list_err:=iface.content_list_user_visible_messages(s.content,c.conversation_id,c.owner_user_id,200,"")
+		if list_err.code==.None {
+			for m in rows {
+				if m.read_at=="" && m.direction=="agent_to_user" do append(&marked_ids,m.message_id)
+			}
 		}
 	}
 	if len(marked_ids)>0 {
 		owner,owner_ok,owner_err:=ownership.owner_from_auth(auth); if !owner_ok { delete(marked_ids); return {},nil,false,owner_err }
-		_,mark_err:=iface.content_mark_messages_read(s.content,owner,marked_ids[:],platform.clock_now(s.clock))
-		if mark_err.code!=.None { delete(marked_ids); return {},nil,false,mark_err }
+		// Batched: one statement binds one parameter per id, and a conversation
+		// can hold more unread rows than SQLite allows variables in a statement.
+		MARK_READ_BATCH :: 500
+		read_at:=platform.clock_now(s.clock)
+		for start:=0; start<len(marked_ids); start+=MARK_READ_BATCH {
+			end:=min(start+MARK_READ_BATCH,len(marked_ids))
+			_,mark_err:=iface.content_mark_messages_read(s.content,owner,marked_ids[start:end],read_at)
+			if mark_err.code!=.None { delete(marked_ids); return {},nil,false,mark_err }
+		}
 	}
 	c.unread_count=0; c.updated_at=platform.clock_now(s.clock)
 	saved,save_ok,save_err:=iface.content_save_conversation(s.content,c)

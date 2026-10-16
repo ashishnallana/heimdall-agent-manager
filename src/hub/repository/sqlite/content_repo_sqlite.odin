@@ -13,7 +13,7 @@ Content_Repo_SQLite :: struct { conn: ^Conn }
 
 new_content_repository :: proc(impl: ^Content_Repo_SQLite, conn: ^Conn) -> iface.Content_Repository {
 	impl.conn = conn
-	return iface.Content_Repository{ctx=rawptr(impl), save_memory=content_save_memory_sqlite, get_memory=content_get_memory_sqlite, list_memories=content_list_memories_sqlite, save_conversation=content_save_conversation_sqlite, get_conversation=content_get_conversation_sqlite, list_conversations=content_list_conversations_sqlite, save_message=content_save_message_sqlite, get_message=content_get_message_sqlite, update_message=content_update_message_sqlite, list_messages=content_list_messages_sqlite, list_user_visible_messages=content_list_user_visible_messages_sqlite, list_agent_inbox_messages=content_list_agent_inbox_messages_sqlite, mark_messages_read=content_mark_messages_read_sqlite, save_artifact=content_save_artifact_sqlite, get_artifact=content_get_artifact_sqlite, list_artifacts=content_list_artifacts_sqlite, delete_artifact=content_delete_artifact_sqlite, save_template=content_save_template_sqlite, get_template=content_get_template_sqlite, list_templates=content_list_templates_sqlite, delete_template=content_delete_template_sqlite}
+	return iface.Content_Repository{ctx=rawptr(impl), list_unread_incoming_ids=content_list_unread_incoming_ids_sqlite, save_memory=content_save_memory_sqlite, get_memory=content_get_memory_sqlite, list_memories=content_list_memories_sqlite, save_conversation=content_save_conversation_sqlite, get_conversation=content_get_conversation_sqlite, list_conversations=content_list_conversations_sqlite, save_message=content_save_message_sqlite, get_message=content_get_message_sqlite, update_message=content_update_message_sqlite, list_messages=content_list_messages_sqlite, list_user_visible_messages=content_list_user_visible_messages_sqlite, list_agent_inbox_messages=content_list_agent_inbox_messages_sqlite, mark_messages_read=content_mark_messages_read_sqlite, save_artifact=content_save_artifact_sqlite, get_artifact=content_get_artifact_sqlite, list_artifacts=content_list_artifacts_sqlite, delete_artifact=content_delete_artifact_sqlite, save_template=content_save_template_sqlite, get_template=content_get_template_sqlite, list_templates=content_list_templates_sqlite, delete_template=content_delete_template_sqlite}
 }
 
 content_save_memory_sqlite :: proc(ctx: rawptr, m: domain.Memory) -> (domain.Memory, bool, domain.Domain_Error) {
@@ -135,7 +135,8 @@ content_mark_messages_read_sqlite :: proc(ctx:rawptr, owner:domain.User_ID, mess
 	in_clause := strings.join(qs[:], ",", context.temp_allocator)
 	
 	q:=strings.concatenate({"UPDATE chat_messages SET read_at=? WHERE owner_user_id=? AND message_id IN (", in_clause, ");"}, context.temp_allocator)
-	if sqlite3_prepare_v2(impl.conn.db,cstring(raw_data(q)),-1,&stmt,nil)!=SQLITE_OK do return 0,domain.domain_error(.Internal_Error,"failed mark messages read")
+	// A concatenated string is not NUL-terminated; give sqlite a real cstring.
+	if sqlite3_prepare_v2(impl.conn.db,strings.clone_to_cstring(q, context.temp_allocator),-1,&stmt,nil)!=SQLITE_OK do return 0,domain.domain_error(.Internal_Error,"failed mark messages read")
 	defer sqlite3_finalize(stmt)
 	
 	bind_text(stmt, 1, updated_at)
@@ -374,3 +375,14 @@ bind_template :: proc(s:sqlite3_stmt,t:domain.Template){ bind_text(s,1,t.templat
 template_from_stmt :: proc(s:sqlite3_stmt)->domain.Template { return domain.Template{template_id=column_text(s,0),owner_user_id=domain.User_ID(column_text(s,1)),is_system=column_text(s,2)=="1",name=column_text(s,3),description=column_text(s,4),persona=column_text(s,5),instructions=column_text(s,6),created_at=column_text(s,7),updated_at=column_text(s,8)} }
 int_s :: proc(v:int)->string { return fmt.tprintf("%d",v) }
 int_v :: proc(v:string)->int { p,ok:=strconv.parse_int(v); if !ok do return 0; return int(p) }
+
+content_list_unread_incoming_ids_sqlite :: proc(ctx: rawptr, cid: string, owner: domain.User_ID) -> ([]string, domain.Domain_Error) {
+	impl := (^Content_Repo_SQLite)(ctx); stmt: sqlite3_stmt = nil
+	q := "SELECT message_id FROM chat_messages WHERE owner_user_id = ? AND conversation_id = ? AND direction = 'agent_to_user' AND read_at = '' ORDER BY created_at ASC, message_id ASC;"
+	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(q)), -1, &stmt, nil) != SQLITE_OK do return nil, domain.domain_error(.Internal_Error, "failed unread incoming list")
+	defer sqlite3_finalize(stmt)
+	bind_text(stmt, 1, string(owner)); bind_text(stmt, 2, cid)
+	out := make([dynamic]string)
+	for sqlite3_step(stmt) == SQLITE_ROW do append(&out, column_text(stmt, 0))
+	return out[:], {}
+}

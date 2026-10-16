@@ -23,7 +23,7 @@ ph_seed_attention :: proc(t: ^testing.T, h: ^Projector_Harness) {
 	ph_save_task(t, h, ph_task("task_10d", .In_Validation, ph_ago(10 * 24 * time.Hour)))
 	ph_conversation(t, h, "chat_q", "inst_q")
 	ph_message(t, h, "msg_q", "chat_q", "inst_q", "agent_to_user", ph_ago(3 * time.Hour), `{"options":["Yes","No"]}`)
-	other := ph_task("task_other", .In_Validation, ph_ago(1 * time.Hour))
+	other := ph_task("task_other", .In_Validation, ph_ago(1 * time.Hour), `[{"type":"user","user_id":"usr_other"}]`)
 	other.owner_user_id = "usr_other"
 	ph_save_task(t, h, other)
 }

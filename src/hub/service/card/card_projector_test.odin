@@ -81,7 +81,11 @@ ph_save_task :: proc(t: ^testing.T, h: ^Projector_Harness, task: domain.Task) {
 	testing.expectf(t, ok, "save task: %s", err.message)
 }
 
-ph_task :: proc(id: string, status: domain.Task_Status, updated_at: string, reviewers := "[]") -> domain.Task {
+// PH_USER_REVIEWER: the owner as explicit reviewer -- what --require-user-approval
+// produces, and the only shape that awaits (and can be voted on by) the user.
+PH_USER_REVIEWER :: `[{"type":"user","user_id":"usr_attention"}]`
+
+ph_task :: proc(id: string, status: domain.Task_Status, updated_at: string, reviewers := PH_USER_REVIEWER) -> domain.Task {
 	return domain.Task{task_id = domain.Task_ID(id), chain_id = PH_CHAIN, owner_user_id = PH_OWNER, title = "vault:v1:task-title", status = status, priority = .P1, publish_state = .Published, assignee_ref_json = "{}", reviewer_refs_json = reviewers, created_at = "2026-10-01T00:00:00Z", updated_at = updated_at}
 }
 
