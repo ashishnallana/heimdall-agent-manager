@@ -4,11 +4,38 @@ import "core:c"
 import "core:fmt"
 import "core:strconv"
 import "core:strings"
+import "core:sync"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 
 Bridge_Repo_SQLite :: struct {
 	conn: ^Conn,
+	// The enrollment commit's own connection (REQ-EA-2). nil only where there is no
+	// second connection to have (an in-memory database); see bridge_commit_enrollment_sqlite.
+	commit: ^Bridge_Enroll_Commit_Conn,
+}
+
+// Bridge_Enroll_Commit_Conn isolates the enrollment-commit transaction. `conn` is a
+// SHARED connection: a BEGIN on it would let any other request's statement, executed
+// on it before the COMMIT, join this transaction and be committed or rolled back with
+// it. A dedicated connection gets SQLite's own isolation instead — BEGIN IMMEDIATE
+// takes the database write lock, and other connections' writes wait on busy_timeout —
+// and the mutex serializes commits that share this connection, as billing does.
+Bridge_Enroll_Commit_Conn :: struct {
+	conn:  Conn,
+	mutex: sync.Mutex,
+}
+
+// open_bridge_enroll_commit_conn opens the dedicated connection on the hub database.
+open_bridge_enroll_commit_conn :: proc(c: ^Bridge_Enroll_Commit_Conn, path: string) -> (bool, domain.Domain_Error) {
+	conn, ok, err := open(path)
+	if !ok do return false, err
+	c.conn = conn
+	if !exec(&c.conn, "PRAGMA busy_timeout = 5000;") {
+		close(&c.conn)
+		return false, domain.domain_error(.Internal_Error, "failed to configure the enrollment commit connection")
+	}
+	return true, domain.Domain_Error{}
 }
 
 new_bridge_repository :: proc(impl: ^Bridge_Repo_SQLite, conn: ^Conn) -> iface.Bridge_Repository {

@@ -24,6 +24,7 @@
 
 package bridge
 
+import "core:fmt"
 import "core:strings"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
@@ -108,13 +109,20 @@ commit_pending_enrollment :: proc(service: ^Bridge_Service, input: Pending_Commi
 	}
 	delete(bridge.updated_at)
 	bridge.updated_at = strings.clone(now)
+	// The old device's socket is retired whatever happens to the row below: its
+	// credential died inside the commit transaction.
+	if attach do _ = close_bridge_connection(service, bridge.bridge_id)
 	saved, save_ok, save_err := iface.bridge_save_bridge(service.repo, bridge)
 	if !save_ok {
-		domain.bridge_destroy(&bridge)
-		return domain.Bridge{}, false, save_err
+		// COMMITTED regardless. The credential swap is durable; only the row's
+		// descriptive fields (machine facts, updated_at) are stale. Reporting a
+		// failure here would tell the bridge to discard a credential the hub has
+		// made live — the enrolled-without-credential state REQ-EA exists to
+		// prevent. So the verdict stays committed, and the error is logged.
+		fmt.eprintfln("hub: bridge %s enrollment committed, but its row's descriptive fields could not be saved: %s", bridge.bridge_id, save_err.message)
+		return bridge, true, domain.Domain_Error{}
 	}
-	if attach do _ = close_bridge_connection(service, saved.bridge_id)
-	return saved, true, domain.Domain_Error{}
+	return saved, true, domain.Domain_Error{} // save returns the same value it was given
 }
 
 // rollback_pending_enrollment undoes a pending enrollment (REQ-EA-3): the family is

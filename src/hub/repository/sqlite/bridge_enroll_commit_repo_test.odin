@@ -7,7 +7,11 @@ package sqlite
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 import "core:fmt"
+import "core:os"
+import "core:sync"
 import "core:testing"
+import "core:thread"
+import "core:time"
 
 ENROLL_SCOPE :: "bridge:enroll"
 RUNTIME_SCOPE :: "bridge:runtime"
@@ -194,4 +198,168 @@ test_enroll_commit_failure_in_the_swap_rolls_back_the_promote_attach :: proc(t: 
 	testing.expect_value(t, new_rt, 0)
 	testing.expect_value(t, old_rt, 2)
 	testing.expect_value(t, old_rev, 0)
+}
+
+// ===== Isolation and concurrency on the dedicated connection =====
+//
+// Production wiring: one shared request connection plus the enrollment commit's own
+// (Bridge_Enroll_Commit_Conn), on a FILE database — a second connection cannot open
+// an in-memory one.
+
+File_Fixture :: struct {
+	path:   string,
+	main:   Conn,
+	commit: Bridge_Enroll_Commit_Conn,
+	impl:   Bridge_Repo_SQLite,
+	repo:   iface.Bridge_Repository,
+}
+
+file_counter: int
+
+file_fixture_open :: proc(t: ^testing.T, f: ^File_Fixture, tag: string) -> bool {
+	n := sync.atomic_add(&file_counter, 1)
+	f.path = fmt.aprintf("/tmp/test_ea_commit_%s_%d_%d.db", tag, os.get_pid(), n)
+	_ = os.remove(f.path)
+	conn, ok, _ := open(f.path)
+	if !ok do return false
+	f.main = conn
+	testing.expect(t, exec(&f.main, "PRAGMA busy_timeout = 5000;"), "busy_timeout on the request connection, as wiring sets it")
+	mig_ok, _ := run_migrations(&f.main)
+	testing.expect(t, mig_ok, "migrations ok")
+	c_ok, _ := open_bridge_enroll_commit_conn(&f.commit, f.path)
+	testing.expect(t, c_ok, "commit connection opens")
+	f.impl = Bridge_Repo_SQLite{conn = &f.main, commit = &f.commit}
+	f.repo = new_bridge_repository(&f.impl, &f.main)
+	f.impl.commit = &f.commit
+	return mig_ok && c_ok
+}
+
+file_fixture_close :: proc(f: ^File_Fixture) {
+	close(&f.commit.conn)
+	close(&f.main)
+	_ = os.remove(f.path)
+	delete(f.path)
+}
+
+// as_commit_fixture lets the seed helpers above (which take a Commit_Fixture) seed
+// through the request connection.
+seed_on :: proc(t: ^testing.T, f: ^File_Fixture, bridge_id, family_id, scope, pending_until: string) {
+	cf := Commit_Fixture{repo = f.repo}
+	if pending_until != "-" do seed_bridge(t, &cf, bridge_id, pending_until)
+	seed_family(t, &cf, bridge_id, family_id, scope)
+}
+
+state_on :: proc(f: ^File_Fixture, family_id: string) -> (live_enroll, live_runtime, revoked: int) {
+	cf := Commit_Fixture{repo = f.repo}
+	return family_state(&cf, family_id)
+}
+
+// --- an unrelated write during an enrollment transaction is not part of it ---
+
+Unrelated_Writer :: struct {
+	repo: ^iface.Bridge_Repository,
+	ok:   bool,
+	err:  string,
+}
+
+g_unrelated: ^Unrelated_Writer
+g_unrelated_thread: ^thread.Thread
+
+unrelated_write :: proc(w: ^Unrelated_Writer) {
+	_, ok, err := iface.bridge_save_bridge(w.repo, domain.Bridge{
+		bridge_id = "brg_unrelated", owner_user_id = domain.User_ID("someone_else"), label = "u",
+		capabilities_json = "{}", status = .Offline, created_at = NOW, updated_at = NOW,
+	})
+	w.ok = ok
+	w.err = err.message
+}
+
+// Runs INSIDE the enrollment transaction, between promote and swap: start a request
+// on the shared connection, and give it time to reach SQLite.
+hook_start_unrelated_write :: proc(bridge_id: string) {
+	if bridge_id != "brg_iso" do return
+	g_unrelated_thread = thread.create_and_start_with_poly_data(g_unrelated, unrelated_write)
+	time.sleep(150 * time.Millisecond)
+}
+
+@(test)
+test_enroll_commit_is_isolated_from_a_concurrent_unrelated_write :: proc(t: ^testing.T) {
+	f: File_Fixture
+	if !file_fixture_open(t, &f, "iso") do return
+	defer file_fixture_close(&f)
+	seed_on(t, &f, "brg_iso", "fam_iso", ENROLL_SCOPE, "2026-10-16T15:05:00Z")
+	// Make the enrollment transaction fail AFTER its promote, so it rolls back.
+	testing.expect(t, exec(&f.main, "CREATE TRIGGER ea_inject BEFORE UPDATE OF enrollment_pending_until ON bridges BEGIN SELECT RAISE(ABORT, 'injected'); END;"), "trigger installed")
+
+	w := Unrelated_Writer{repo = &f.repo}
+	g_unrelated = &w
+	bridge_enroll_commit_test_hook = hook_start_unrelated_write
+	_, ok, _ := iface.bridge_commit_enrollment(&f.repo, "brg_iso", "fam_iso", ENROLL_SCOPE, RUNTIME_SCOPE, false, NOW)
+	bridge_enroll_commit_test_hook = nil
+	thread.join(g_unrelated_thread)
+	thread.destroy(g_unrelated_thread)
+
+	testing.expect(t, !ok, "the injected failure rolls the enrollment back")
+	e, r, _ := state_on(&f, "fam_iso")
+	testing.expect_value(t, e, 2)
+	testing.expect_value(t, r, 0)
+	// On a shared connection the unrelated write would have run inside the
+	// enrollment transaction and been rolled back with it.
+	testing.expectf(t, w.ok, "the unrelated write succeeded (%s)", w.err)
+	u, u_ok, _ := iface.bridge_get_bridge(&f.repo, "brg_unrelated")
+	defer domain.bridge_destroy(&u)
+	testing.expect(t, u_ok, "the unrelated write is durable, not rolled back with the enrollment")
+}
+
+// --- simultaneous commits do not corrupt each other ---
+
+Commit_Racer :: struct {
+	repo:      ^iface.Bridge_Repository,
+	bridge_id: string,
+	family_id: string,
+	outcome:   iface.Enrollment_Commit_Outcome,
+	ok:        bool,
+}
+
+commit_racer :: proc(r: ^Commit_Racer) {
+	r.outcome, r.ok, _ = iface.bridge_commit_enrollment(r.repo, r.bridge_id, r.family_id, ENROLL_SCOPE, RUNTIME_SCOPE, false, NOW)
+}
+
+@(test)
+test_enroll_commit_simultaneous_commits_serialize :: proc(t: ^testing.T) {
+	f: File_Fixture
+	if !file_fixture_open(t, &f, "race") do return
+	defer file_fixture_close(&f)
+	seed_on(t, &f, "brg_r1", "fam_r1", ENROLL_SCOPE, "2026-10-16T15:05:00Z")
+	seed_on(t, &f, "brg_r2", "fam_r2", ENROLL_SCOPE, "2026-10-16T15:05:00Z")
+
+	// Four racers: two on the SAME family (one must win, one must see it committed),
+	// and two on different bridges (both must commit).
+	racers := [4]Commit_Racer{
+		{repo = &f.repo, bridge_id = "brg_r1", family_id = "fam_r1"},
+		{repo = &f.repo, bridge_id = "brg_r1", family_id = "fam_r1"},
+		{repo = &f.repo, bridge_id = "brg_r2", family_id = "fam_r2"},
+		{repo = &f.repo, bridge_id = "brg_r2", family_id = "fam_r2"},
+	}
+	threads: [4]^thread.Thread
+	for i in 0..<4 do threads[i] = thread.create_and_start_with_poly_data(&racers[i], commit_racer)
+	for th in threads {
+		thread.join(th)
+		thread.destroy(th)
+	}
+	for pair in ([2][2]int{{0, 1}, {2, 3}}) {
+		a, b := racers[pair[0]], racers[pair[1]]
+		testing.expect(t, a.ok && b.ok, "every racer's transaction completed without a storage error")
+		won := int(a.outcome == .Committed) + int(b.outcome == .Committed)
+		dup := int(a.outcome == .Already_Committed) + int(b.outcome == .Already_Committed)
+		testing.expectf(t, won == 1 && dup == 1, "exactly one winner and one duplicate per family, got %v / %v", a.outcome, b.outcome)
+	}
+	for fam in ([2]string{"fam_r1", "fam_r2"}) {
+		e, r, rev := state_on(&f, fam)
+		testing.expect_value(t, e, 0)
+		testing.expect_value(t, r, 2)
+		testing.expect_value(t, rev, 0)
+	}
+	// The request connection is not stuck in a transaction afterwards.
+	testing.expect(t, exec(&f.main, "BEGIN; COMMIT;"), "the request connection has no transaction left open")
 }

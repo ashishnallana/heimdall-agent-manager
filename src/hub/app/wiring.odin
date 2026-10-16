@@ -44,6 +44,7 @@ App_Graph :: struct {
 	billing_handlers: http.Billing_Handlers,
 	sqlite_users: sqlite.User_Repo_SQLite,
 	sqlite_bridges: sqlite.Bridge_Repo_SQLite,
+	sqlite_bridge_commit: sqlite.Bridge_Enroll_Commit_Conn,
 	sqlite_agents: sqlite.Agent_Repo_SQLite,
 	sqlite_projects: sqlite.Project_Repo_SQLite,
 	sqlite_content: sqlite.Content_Repo_SQLite,
@@ -171,6 +172,12 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 
 	graph.repos.users = sqlite.new_user_repository(&graph.sqlite_users, &graph.db)
 	graph.repos.bridges = sqlite.new_bridge_repository(&graph.sqlite_bridges, &graph.db)
+	// REQ-EA-2: the enrollment commit runs on its own connection (see
+	// Bridge_Enroll_Commit_Conn). An in-memory database has no second connection.
+	if config.database_path != ":memory:" {
+		if ok, err := sqlite.open_bridge_enroll_commit_conn(&graph.sqlite_bridge_commit, config.database_path); !ok do return false, err.message
+		graph.sqlite_bridges.commit = &graph.sqlite_bridge_commit
+	}
 	graph.repos.agents = sqlite.new_agent_repository(&graph.sqlite_agents, &graph.db)
 	graph.repos.projects = sqlite.new_project_repository(&graph.sqlite_projects, &graph.db)
 	graph.repos.content = sqlite.new_content_repository(&graph.sqlite_content, &graph.db)
@@ -401,6 +408,7 @@ shutdown_graph :: proc(graph: ^App_Graph) {
 	device_auth_service.grant_store_free(&graph.device_auth_store)
 	delete(graph.action_bridge_versions)
 	sqlite.close(&graph.sqlite_billing.conn)
+	sqlite.close(&graph.sqlite_bridge_commit.conn)
 	sqlite.close(&graph.db)
 }
 

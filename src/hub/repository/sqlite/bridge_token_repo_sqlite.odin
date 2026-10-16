@@ -11,6 +11,7 @@
 package sqlite
 
 import "core:strconv"
+import "core:sync"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 
@@ -151,30 +152,51 @@ bridge_commit_enrollment_sqlite :: proc(ctx: rawptr, bridge_id, family_id, from_
 	if bridge_id == "" || family_id == "" || from_scope == "" || to_scope == "" || now == "" {
 		return .Not_Pending, false, domain.domain_error(.Validation_Failed, "bridge_id, family_id, scopes and now are required")
 	}
+	if impl.commit != nil {
+		sync.mutex_lock(&impl.commit.mutex)
+		defer sync.mutex_unlock(&impl.commit.mutex)
+		return bridge_commit_enrollment_on(&impl.commit.conn, bridge_id, family_id, from_scope, to_scope, attach, now)
+	}
+	// No dedicated connection: only an in-memory database, which a second connection
+	// cannot open. Single-connection use (tests) has nothing to interleave with.
+	return bridge_commit_enrollment_on(impl.conn, bridge_id, family_id, from_scope, to_scope, attach, now)
+}
+
+// bridge_enroll_commit_test_hook runs between the promote and the swap, inside the
+// transaction. Test-only: it lets a test act on ANOTHER connection mid-transaction.
+// It is handed the bridge_id so a test acts only on its own commit: tests run in
+// parallel, and this is a package global.
+bridge_enroll_commit_test_hook: proc(bridge_id: string)
+
+@(private = "file")
+bridge_commit_enrollment_on :: proc(conn: ^Conn, bridge_id, family_id, from_scope, to_scope: string, attach: bool, now: string) -> (iface.Enrollment_Commit_Outcome, bool, domain.Domain_Error) {
 	fail :: proc(msg: string) -> (iface.Enrollment_Commit_Outcome, bool, domain.Domain_Error) {
 		return .Not_Pending, false, domain.domain_error(.Internal_Error, msg)
 	}
-	if !exec(impl.conn, "BEGIN IMMEDIATE;") do return fail("failed to begin the enrollment commit")
+	if !exec(conn, "BEGIN IMMEDIATE;") do return fail("failed to begin the enrollment commit")
 	committed := false
-	defer if !committed do _ = exec(impl.conn, "ROLLBACK;")
+	defer if !committed do _ = exec(conn, "ROLLBACK;")
 
 	promoted := 0
 	{
 		stmt: sqlite3_stmt = nil
 		query := "UPDATE bridge_tokens SET scope = ? WHERE family_id = ? AND bridge_id = ? AND scope = ? AND revoked_at = '';"
-		if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return fail("failed to prepare the enrollment promote")
+		if sqlite3_prepare_v2(conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return fail("failed to prepare the enrollment promote")
 		defer sqlite3_finalize(stmt)
 		bind_text(stmt, 1, to_scope)
 		bind_text(stmt, 2, family_id)
 		bind_text(stmt, 3, bridge_id)
 		bind_text(stmt, 4, from_scope)
 		if sqlite3_step(stmt) != SQLITE_DONE do return fail("the enrollment family could not be promoted")
-		promoted = int(sqlite3_changes(impl.conn.db))
+		promoted = int(sqlite3_changes(conn.db))
+	}
+	when ODIN_TEST {
+		if bridge_enroll_commit_test_hook != nil do bridge_enroll_commit_test_hook(bridge_id)
 	}
 	if promoted == 0 {
 		stmt: sqlite3_stmt = nil
 		query := "SELECT COUNT(*) FROM bridge_tokens WHERE family_id = ? AND bridge_id = ? AND scope = ? AND revoked_at = '';"
-		if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return fail("failed to prepare the enrollment state read")
+		if sqlite3_prepare_v2(conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return fail("failed to prepare the enrollment state read")
 		defer sqlite3_finalize(stmt)
 		bind_text(stmt, 1, family_id)
 		bind_text(stmt, 2, bridge_id)
@@ -187,7 +209,7 @@ bridge_commit_enrollment_sqlite :: proc(ctx: rawptr, bridge_id, family_id, from_
 	{
 		stmt: sqlite3_stmt = nil
 		query := "UPDATE bridge_tokens SET revoked_at = ? WHERE bridge_id = ? AND family_id != ? AND revoked_at = '';" if attach else "UPDATE bridges SET enrollment_pending_until = '' WHERE bridge_id = ?;"
-		if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return fail("failed to prepare the enrollment swap")
+		if sqlite3_prepare_v2(conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return fail("failed to prepare the enrollment swap")
 		defer sqlite3_finalize(stmt)
 		if attach {
 			bind_text(stmt, 1, now)
@@ -198,7 +220,7 @@ bridge_commit_enrollment_sqlite :: proc(ctx: rawptr, bridge_id, family_id, from_
 		}
 		if sqlite3_step(stmt) != SQLITE_DONE do return fail("the enrollment swap failed; nothing was committed")
 	}
-	if !exec(impl.conn, "COMMIT;") do return fail("failed to commit the enrollment")
+	if !exec(conn, "COMMIT;") do return fail("failed to commit the enrollment")
 	committed = true
 	return .Committed, true, domain.Domain_Error{}
 }

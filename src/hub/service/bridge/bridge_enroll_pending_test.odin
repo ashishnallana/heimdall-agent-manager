@@ -1,0 +1,169 @@
+// REQ-EA-2/8: once the enrollment transaction commits, the verdict is COMMITTED —
+// even if the later, descriptive row save fails. These tests inject that failure
+// (a repository whose save_bridge refuses) and assert the hub neither reports a
+// rollback nor leaves an enrolled-without-credential state.
+package bridge
+
+import "core:fmt"
+import "core:os"
+import "core:strings"
+import "core:sync"
+import "core:testing"
+import "core:time"
+import domain "odin_test:hub/domain"
+import platform "odin_test:hub/platform"
+import iface "odin_test:hub/repository/iface"
+import sqlite "odin_test:hub/repository/sqlite"
+
+@(private = "file")
+pending_test_counter: int
+
+@(private = "file")
+Pending_Fixture :: struct {
+	db_path: string,
+	conn:    sqlite.Conn,
+	impl:    sqlite.Bridge_Repo_SQLite,
+	repo:    iface.Bridge_Repository,
+	broken:  iface.Bridge_Repository, // repo, except save_bridge always fails
+	clock:   platform.Clock,
+	ids:     platform.ID_Generator,
+	svc:     Bridge_Service,
+	closed:  [dynamic]string,
+}
+
+@(private = "file")
+pending_closer :: proc(ctx: rawptr, bridge_id: string) -> bool {
+	f := (^Pending_Fixture)(ctx)
+	append(&f.closed, strings.clone(bridge_id))
+	return true
+}
+
+@(private = "file")
+failing_save :: proc(ctx: rawptr, bridge: domain.Bridge) -> (domain.Bridge, bool, domain.Domain_Error) {
+	return domain.Bridge{}, false, domain.domain_error(.Internal_Error, "injected: row save failed")
+}
+
+@(private = "file")
+pending_fixture_open :: proc(t: ^testing.T, tag: string) -> ^Pending_Fixture {
+	f := new(Pending_Fixture)
+	seq := sync.atomic_add(&pending_test_counter, 1)
+	f.db_path = fmt.tprintf("/tmp/test_bridge_enroll_pending_%s_%d_%d_%d.db", tag, os.get_pid(), time.now()._nsec, seq)
+	os.remove(f.db_path)
+	conn, ok, _ := sqlite.open(f.db_path)
+	testing.expect(t, ok, "sqlite open ok")
+	f.conn = conn
+	mig_ok, _ := sqlite.run_migrations(&f.conn)
+	testing.expect(t, mig_ok, "migrations ok")
+	f.repo = sqlite.new_bridge_repository(&f.impl, &f.conn)
+	f.broken = f.repo
+	f.broken.save_bridge = failing_save
+	f.clock = platform.real_clock()
+	f.ids = platform.real_id_generator()
+	f.svc = new_bridge_service(&f.repo, &f.clock, &f.ids)
+	f.closed = make([dynamic]string)
+	with_connection_closer(&f.svc, Bridge_Connection_Closer{ctx = rawptr(f), close_bridge_connection = pending_closer})
+	return f
+}
+
+@(private = "file")
+pending_fixture_close :: proc(f: ^Pending_Fixture) {
+	sqlite.close(&f.conn)
+	os.remove(f.db_path)
+	for s in f.closed do delete(s)
+	delete(f.closed)
+	free(f)
+}
+
+@(private = "file")
+enroll_input :: proc(target, label: string, pending: bool) -> Device_Enroll_Input {
+	return Device_Enroll_Input{
+		owner_user_id = "ea-owner",
+		bridge_public_key = "04aabbccdd",
+		bridge_key_fingerprint = "aaaa bbbb cccc dddd",
+		os_user = "tanmay",
+		machine_hostname = "ea-host",
+		machine_os = "linux",
+		target_bridge_id = target,
+		new_bridge_label = label,
+		pending = pending,
+	}
+}
+
+@(private = "file")
+live_scope_count :: proc(f: ^Pending_Fixture, family_id, scope: string) -> int {
+	tokens, _ := iface.bridge_list_tokens_by_family(&f.repo, family_id)
+	defer free_bridge_tokens(tokens)
+	n := 0
+	for tok in tokens do if tok.revoked_at == "" && tok.scope == scope do n += 1
+	return n
+}
+
+@(test)
+test_commit_stays_committed_when_the_row_save_fails_new_bridge :: proc(t: ^testing.T) {
+	f := pending_fixture_open(t, "save_new")
+	defer pending_fixture_close(f)
+	enrolled, ok, err := enroll_bridge_from_device_grant(&f.svc, enroll_input("", "ea-new", true))
+	testing.expect(t, ok, err.message)
+	bridge_id := strings.clone(enrolled.bridge.bridge_id, context.temp_allocator)
+	family := strings.clone(enrolled.family_id, context.temp_allocator)
+
+	f.svc.repo = &f.broken // the descriptive save after the transaction will fail
+	committed, commit_ok, commit_err := commit_pending_enrollment(&f.svc, Pending_Commit_Input{bridge_id = bridge_id, family_id = family})
+	defer domain.bridge_destroy(&committed)
+	f.svc.repo = &f.repo
+	testing.expectf(t, commit_ok, "a committed transaction must be reported committed, got %v", commit_err.message)
+
+	testing.expect_value(t, live_scope_count(f, family, BRIDGE_TOKEN_SCOPE), 2)
+	testing.expect_value(t, live_scope_count(f, family, BRIDGE_ENROLL_TOKEN_SCOPE), 0)
+	row, row_ok, _ := iface.bridge_get_bridge(&f.repo, bridge_id)
+	defer domain.bridge_destroy(&row)
+	testing.expect(t, row_ok, "the row survives: it is enrolled, not rolled back")
+	testing.expect_value(t, row.enrollment_pending_until, "")
+	// And the sweep, which would delete a still-pending row, finds nothing.
+	rolled := sweep_expired_enrollments(&f.svc)
+	defer rolled_back_enrollments_destroy(rolled)
+	testing.expect_value(t, len(rolled), 0)
+}
+
+@(test)
+test_commit_stays_committed_when_the_row_save_fails_attach :: proc(t: ^testing.T) {
+	f := pending_fixture_open(t, "save_attach")
+	defer pending_fixture_close(f)
+	first, ok, err := enroll_bridge_from_device_grant(&f.svc, enroll_input("", "ea-old", false))
+	testing.expect(t, ok, err.message)
+	bridge_id := strings.clone(first.bridge.bridge_id, context.temp_allocator)
+	old_family := strings.clone(first.family_id, context.temp_allocator)
+	attach, attach_ok, attach_err := enroll_bridge_from_device_grant(&f.svc, enroll_input(bridge_id, "", true))
+	testing.expect(t, attach_ok, attach_err.message)
+	new_family := strings.clone(attach.family_id, context.temp_allocator)
+	testing.expect(t, new_family != old_family, "an attach mints a NEW family")
+
+	f.svc.repo = &f.broken
+	committed, commit_ok, commit_err := commit_pending_enrollment(&f.svc, Pending_Commit_Input{bridge_id = bridge_id, family_id = new_family})
+	defer domain.bridge_destroy(&committed)
+	f.svc.repo = &f.repo
+	testing.expectf(t, commit_ok, "a committed attach must be reported committed, got %v", commit_err.message)
+
+	testing.expect_value(t, live_scope_count(f, new_family, BRIDGE_TOKEN_SCOPE), 2)
+	testing.expect_value(t, live_scope_count(f, old_family, BRIDGE_TOKEN_SCOPE), 0)
+	// The old device's socket is retired even though the row save failed.
+	retired := false
+	for id in f.closed do if id == bridge_id do retired = true
+	testing.expect(t, retired, "the old device's connection is closed")
+}
+
+@(test)
+test_duplicate_commit_is_idempotent_at_the_service :: proc(t: ^testing.T) {
+	f := pending_fixture_open(t, "dup")
+	defer pending_fixture_close(f)
+	enrolled, ok, err := enroll_bridge_from_device_grant(&f.svc, enroll_input("", "ea-dup", true))
+	testing.expect(t, ok, err.message)
+	in_ := Pending_Commit_Input{bridge_id = enrolled.bridge.bridge_id, family_id = enrolled.family_id}
+	a, a_ok, _ := commit_pending_enrollment(&f.svc, in_)
+	defer domain.bridge_destroy(&a)
+	testing.expect(t, a_ok, "first commit")
+	b, b_ok, b_err := commit_pending_enrollment(&f.svc, in_)
+	defer domain.bridge_destroy(&b)
+	testing.expectf(t, b_ok, "a duplicate commit is a success, got %v", b_err.message)
+	testing.expect_value(t, live_scope_count(f, enrolled.family_id, BRIDGE_TOKEN_SCOPE), 2)
+}
