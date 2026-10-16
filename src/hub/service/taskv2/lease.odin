@@ -180,7 +180,9 @@ expire_lease_in_uow :: proc(svc: ^Service, u: ^Uow, lease: domain.Task_Lease, re
 		}
 		arm_idle_ttl(svc, inst.agent_instance_id, fleet_idle_ttl(svc, task.chain_id, task.owner_user_id, inst.agent_id), now)
 	}
-	_, _ = after_chain_change(svc, u, task.chain_id, task.owner_user_id, .Lease_Expired)
+	// NOTE: no match_chain here (review B3). Every caller runs
+	// after_chain_change exactly once at the end of its own UoW, after all of
+	// its writes, so the matcher never acts on an intermediate state.
 	return true
 }
 
@@ -248,12 +250,24 @@ on_dep_added_in_uow :: proc(svc: ^Service, u: ^Uow, task: domain.Task, actor: Ac
 on_instance_terminal :: proc(svc: ^Service, instance_id: string) {
 	if svc == nil || svc.repo == nil || instance_id == "" do return
 	if _, held, _ := iface.taskchain_get_lease_by_holder(svc.repo, instance_id); !held do return
+	// Bridge ABSENCE is not instance death (review B2): an instance marked
+	// `unreachable` because its bridge disconnected keeps its lease; the TTL
+	// expires it if the bridge stays away, and the hello-time heartbeat
+	// reconcile reports real deaths as not-active (→ this chokepoint again,
+	// with the bridge Online). stopped|failed always expire at once.
+	if inst, iok, _ := iface.agent_get_instance(svc.agents, instance_id); iok {
+		if inst.runtime_status == "unreachable" && !bridge_online(svc, inst.bridge_id) do return
+	}
 	u, ok, _ := begin_uow(svc)
 	if !ok do return
 	acted := false
+	chain_id := domain.Task_Chain_ID("")
+	owner := domain.User_ID("")
 	if lease, held, _ := iface.taskchain_get_lease_by_holder(svc.repo, instance_id); held {
 		acted = expire_lease_in_uow(svc, &u, lease, EXPIRE_INSTANCE_LOST, hub_actor())
+		chain_id, owner = lease.chain_id, lease.owner_user_id
 	}
+	if acted do acted, _ = after_chain_change(svc, &u, chain_id, owner, .Instance_Terminal)
 	_, _ = end_uow(svc, &u, acted)
 }
 
