@@ -5,6 +5,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 import {
   generateVaultKey,
@@ -140,4 +142,18 @@ test('End-to-End Vault lifecycle: Setup -> Master Password Unlock -> Recovery Ph
   assert.equal(selectIsVaultConfigured({ vault: state }), true);
   assert.equal(selectIsVaultUnlocked({ vault: state }), false);
   assert.equal(selectRawVaultKeyHex({ vault: state }), null);
+});
+
+test('VaultPanel setup wizard explains the vault password, before the password field and not on unlock', () => {
+  const source = fs.readFileSync(
+    fileURLToPath(new URL('../src/ui/components/settings/VaultPanel.tsx', import.meta.url)),
+    'utf8',
+  );
+  assert.equal(source.split('<VaultPasswordPurposeNote />').length - 1, 1, 'note rendered exactly once');
+  const noteAt = source.indexOf('<VaultPasswordPurposeNote />');
+  const setupAt = source.indexOf('data-debug-id="vault-setup-form"');
+  assert.ok(setupAt >= 0 && noteAt > setupAt, 'note is inside the setup form');
+  assert.ok(noteAt < source.indexOf('vault-master-password-input'), 'note precedes the master password field');
+  assert.ok(source.indexOf('data-debug-id="vault-unlock-password-form"') > noteAt, 'note is not in the password unlock form');
+  assert.ok(source.indexOf('data-debug-id="vault-unlock-recovery-form"') > noteAt, 'note is not in the recovery unlock form');
 });

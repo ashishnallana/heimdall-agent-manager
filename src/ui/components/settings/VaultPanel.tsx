@@ -45,6 +45,7 @@ import {
   DEFAULT_KDF_ITERATIONS,
   isVaultSupported,
 } from '../../utils/vaultCrypto';
+import { VaultPasswordPurposeNote } from './VaultPasswordPurposeNote';
 
 async function copyTextToClipboard(text: string): Promise<boolean> {
   try {
@@ -393,6 +394,7 @@ export default function VaultPanel() {
           {/* Master Password Section */}
           <div className="space-y-4">
             <Text as="div" role="overline" tone="muted">1. Master Password</Text>
+            <VaultPasswordPurposeNote />
             <div className="grid gap-4 sm:grid-cols-2">
               <label className="text-sm font-medium text-primary">
                 Master Password
