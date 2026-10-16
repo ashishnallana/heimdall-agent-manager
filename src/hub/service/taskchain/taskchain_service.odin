@@ -582,9 +582,6 @@ publish_chain :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context,
 			_, _, _ = iface.taskchain_save_task(service.repo, t_copy)
 		}
 	}
-	// Auto-promotion on publish: any task with satisfied deps and a free assignee
-	// auto-claims into In_Progress so a manual refresh shows the work as started.
-	_ = recompute_chain_promotions(service, saved_chain)
 	return saved_chain, true, domain.Domain_Error{}
 }
 
@@ -939,7 +936,7 @@ update_task :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, t
 	if !save_ok do return domain.Task{}, false, save_err
 
 	// Pointer healing (including clearing a reassigned-away instance's stale
-	// pointer) is now handled TOTALLY by reconcile_chain — no ad-hoc clear here.
+	// pointer) is handled by the lease engine — no ad-hoc clear here.
 	_ = prev_assignee
 
 	if input.has_depends_on {
@@ -1127,7 +1124,6 @@ change_task_status :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Con
 		// promoted assignees. Then the gated status-change notify (CT-6) wakes only
 		// the recipients whose current_task is THIS task, with the correct action
 		// label (R8). Ordering matters: gating reads the persisted pointer.
-		_ = recompute_chain_promotions(service, chain)
 		notify_task_status_change(service, auth, task_ret, chain)
 		// MEM-6 #6/#7: paused/cancelled/validated_good policy wakes (not covered by
 		// the CT-6 work/review gate above).
@@ -1135,8 +1131,8 @@ change_task_status :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Con
 		fanout_task_status_changed(service, auth, task_ret, chain)
 		// REPORT THE ROW, NOT OUR INTENTION.
 		//
-		// recompute_chain_promotions above is allowed to change this task's status
-		// again, in this same request, and it regularly does: reconcile enforces
+		// The scheduling engine is allowed to change this task's status
+		// again, in this same request, and it regularly does: it enforces
 		// "one In_Progress task per instance" and "zero while any task of yours is
 		// in_validation", and demotes back to Queued at promotion.odin:398-400.
 		// That is deliberate scheduling behaviour and is NOT a bug.
@@ -2382,7 +2378,6 @@ remove_task_dependency :: proc(service: ^Taskchain_Service, auth: contracts.Auth
 				}
 				delete(tasks); delete(deps)
 			}
-			_ = recompute_chain_promotions(service, chain)
 		}
 	}
 	return removed, remove_err
@@ -2489,15 +2484,6 @@ record_task_vote :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Conte
 		}
 	}
 
-	// Always reconcile after a vote so the reviewer is stopped once their focus
-	// clears (REQ-30 excludes already-voted tasks from the review pool). On a
-	// resolving vote, evaluate_task_quorum already called recompute above; calling
-	// it again is idempotent with snapshot-diff-act — the second diff sees no
-	// change and emits nothing.
-	if chain2, chain2_ok, _ := iface.taskchain_get_chain(service.repo, task.chain_id); chain2_ok {
-		_ = recompute_chain_promotions(service, chain2)
-	}
-
 	return saved_vote, true, domain.Domain_Error{}
 }
 
@@ -2563,7 +2549,6 @@ evaluate_task_quorum :: proc(service: ^Taskchain_Service, task: domain.Task) {
 			_, _, _ = sync_chain_status_from_tasks(service, saved.chain_id, saved.owner_user_id)
 			chain, chain_ok, _ := iface.taskchain_get_chain(service.repo, saved.chain_id)
 			if chain_ok {
-				_ = recompute_chain_promotions(service, chain)
 				fanout_task_status_changed(service, contracts.Auth_Context{kind = .None}, saved, chain)
 			}
 		}

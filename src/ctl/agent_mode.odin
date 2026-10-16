@@ -283,10 +283,6 @@ ctl_v2_task_chain :: proc(endpoint, token: string, tokens, args: []string) {
 		append(&fields, json_kv("status", "active"))
 		if cid != "" do append(&fields, json_kv("chain_id", cid))
 		ctl_agent_call(endpoint, token, "agent.task_chain.set_status", json_object_from_slice(fields[:]))
-	case "reconcile":
-		cid := option_value(args, "--chain", pos(tokens, 1))
-		if cid == "" { print_agent_help([]string{"task-chain"}); return }
-		ctl_agent_call(endpoint, token, "agent.task_chain.reconcile", json_object(json_kv("chain_id", cid)))
 	case "publish":
 		// Coordinator only (enforced hub-side). Flips the chain Draft -> Published and
 		// cascades Published to its tasks, which is what makes them promotable/nudgeable.
@@ -1894,9 +1890,6 @@ print_help_task_chain :: proc() {
 	fmt.println("  unsubscribe <chain-id> [--events <events>] Unsubscribe from task chain status events.")
 	fmt.println("  directory <add|update|remove|list>  Manage task chain relevant directories.")
 	fmt.println("  fleet <list|set>                    Manage chain fleet capacities and active workers.")
-	fmt.println("  reconcile <chain-id>                Self-heal: kick off / re-plan a chain — promote")
-	fmt.println("                                      actionable tasks, set current-tasks, nudge agents.")
-	fmt.println("                                      Coordinator/owner only. Run after staging tasks/deps.")
 	fmt.println("")
 	fmt.println("EXAMPLES")
 	fmt.println("  ham-ctl task-chain list --mine")

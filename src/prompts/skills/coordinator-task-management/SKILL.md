@@ -1,6 +1,6 @@
 ---
 name: coordinator-task-management
-description: How a task-chain COORDINATOR uses ham-ctl to plan, delegate to worker agents, enforce review gates, run reconcile, handle out-of-scope defects with issues reporting and voting, and complete the chain — including the full task lifecycle, status vocabulary, the fill-in task-creation template, the two review tiers, and the reconcile self-heal deep-dive. Load whenever you are the coordinator of a chain.
+description: How a task-chain COORDINATOR uses ham-ctl to plan, delegate to worker agents, enforce review gates, handle out-of-scope defects with issues reporting and voting, and complete the chain — including the full task lifecycle, status vocabulary, the fill-in task-creation template, and the two review tiers. Load whenever you are the coordinator of a chain.
 ---
 
 # Coordinator task management (delegate — do not do the work yourself)
@@ -23,7 +23,7 @@ All commands use the managed wrapper from your run directory: `./.heimdall/bin/h
 - Order work with dependencies: `./.heimdall/bin/ham-ctl task depend <task-id> --on <dependency-task-id>` (or `task update <id> --depends-on <id,id>` to replace the whole list).
 - Edit an existing task (title/description/priority/assignee/reviewers/deps): `./.heimdall/bin/ham-ctl task update <task-id> [...]`. When reassigning or updating reviewers, exclusively pass `agt_...` IDs.
 - Do NOT create one giant task you then implement yourself. Split the goal so each substantial piece has an assignee.
-- Staging note: creating tasks and wiring deps does NOT start anyone. Nothing promotes or nudges until you run `reconcile` (see §8).
+- Staging note: creating tasks and wiring deps on a DRAFT chain does NOT start anyone. Nothing promotes until the chain is published (see §8).
 
 ### Fleet-based task delegation & capacity management
 Coordinators must delegate tasks exclusively to durable agent templates (`agt_...`) rather than binding tasks to specific ephemeral instance IDs (`inst_...`) or manually provisioning instances. Fleet capacity quotas and JIT dispatch manage the worker and reviewer instance lifecycles automatically:
@@ -31,7 +31,7 @@ Coordinators must delegate tasks exclusively to durable agent templates (`agt_..
   `./.heimdall/bin/ham-ctl task-chain fleet set <chain-id> --agent <agent_id> --capacity <N> [--min-warm <M>] [--idle-ttl <seconds>]`
 - **Inspect fleet allocations**: Check configured capacity and live active instance counts:
   `./.heimdall/bin/ham-ctl task-chain fleet list <chain-id>`
-- **Assign to durable agent IDs**: When creating or updating tasks, exclusively specify `--assignee <agt_id>` and `--reviewer <agt_id>`. During `reconcile`, Heimdall dynamically routes actionable tasks to idle instances of that agent template, or provisions new instances just-in-time up to the configured fleet capacity limit.
+- **Assign to durable agent IDs**: When creating or updating tasks, exclusively specify `--assignee <agt_id>` and `--reviewer <agt_id>`. Heimdall dynamically routes actionable tasks to idle instances of that agent template, or provisions new instances just-in-time up to the configured fleet capacity limit.
 
 ## 4. Write a self-contained task (the task-creation template)
 Assume the assignee is a LOW-CAPABILITY agent that knows NOTHING beyond the task description and will NOT search the codebase to fill gaps. **Rule: if you had to search or already know something to make the task doable, put it in the task.** Every `--description` MUST fill in every field below (write "none" where a field truly does not apply — never leave a field out):
@@ -85,7 +85,7 @@ Links / artifacts: none.
 A task moves: **assigned/queued → in_progress → in_validation → completed** (with `validated_not_good` as the rework detour). The valid task statuses are exactly:
 `assigned`, `queued`, `in_progress`, `in_validation`, `validated_good`, `validated_not_good`, `paused`, `completed`, `cancelled`.
 
-- `queued` is a holding state the auto-promotion engine manages; `reconcile` promotes an actionable task to `in_progress` and demotes competing ones back to `queued`.
+- `queued` is a holding state the auto-promotion engine manages; the hub promotes an actionable task to `in_progress` and demotes competing ones back to `queued`.
 - The assignee submits with `--status in_validation`. There is **no `done` verb** and **no `approved` status.**
 - The only legal path into review is `in_progress → in_validation`; you cannot jump from `queued` straight to `in_validation`.
 
@@ -100,30 +100,12 @@ A task moves: **assigned/queued → in_progress → in_validation → completed*
 - **There is no explicit "approve" or "complete-task" command.** When a task is `in_validation` and its required reviewers reach an LGTM quorum with no `ngtm`, the Hub auto-finalizes it straight to `completed` — and `completed` (not `validated_good`) is the only outcome that unblocks dependents. A single `ngtm` moves the task to `validated_not_good`; the assignee reworks it and re-submits `in_validation`.
 - Complete the CHAIN yourself once every task is `completed` and you've written a verifiable final summary: `./.heimdall/bin/ham-ctl task-chain set-status --status completed [--chain <id>]` (coordinator only; chain statuses are `active`, `completed`, `cancelled`).
 
-## 8. Reconcile (self-heal) — you own this
-`reconcile` is the self-heal pass over your chain. It looks at every task's status, priority, and dependencies and, for each agent, computes the single task they should act on right now — then promotes actionable tasks to `in_progress`, demotes others to `queued`, sets each agent's current task, and nudges idle agents whose task is actionable. It never cancels or reassigns anything; it only fixes statuses and current-task pointers, and is safe to run any time (idempotent). Coordinator/owner only.
+## 8. Scheduling is automatic — there is no reconcile
+There is no `reconcile` command. The hub re-plans the chain itself on every event that can change who should act next: publishing the chain or a task, a dependency being added or removed, a priority change, a task being created on a live chain, an agent releasing or losing its lease, a review verdict, an agent process dying, a bridge reconnecting. Nothing is ever left for a manual kick: if a task looks stuck, that is a hub bug to report, not something to work around.
 
-Canonical form (the chain id is REQUIRED — positional, or `--chain <id>`; with neither it just prints help):
-
-```
-./.heimdall/bin/ham-ctl task-chain reconcile <chain-id>
-```
-
-Build the plan without anything triggering, then kick it off:
-1. Create all tasks with descriptions, set `--assignee`/`--reviewer`, and wire dependencies. During setup NOTHING promotes or nudges — no agent is told to start yet.
-2. When the plan is ready, run `task-chain reconcile <chain-id>` ONCE. This is the kickoff: it starts the entry tasks and points each agent at their work.
-
-Reconcile then runs AUTOMATICALLY on one event after kickoff:
-- **A task's status changes** (an assignee moves a task to `in_progress`/`in_validation`, or a reviewer's vote resolves it to `validated_good`/`validated_not_good`/`completed`). That shifts who should act next, so the chain re-heals on its own.
-
-Run `reconcile` MANUALLY after any of these (they do NOT auto-trigger):
-- You add or remove a task dependency (restructuring the DAG).
-- You change a task's priority (p0/p1/p2 reordering).
-- You add a new task to an already-running chain, or reassign a task to a different agent/reviewer.
-- An agent restarted/reconnected and needs its current task re-established.
-- Anything looks stuck (an idle agent with actionable work, or a task that should be `in_progress` but isn't) — reconcile is the "re-plan / fix it now" button.
-
-Rule of thumb: if you changed the PLAN (deps, priority, assignments, new tasks), run `reconcile`. If an agent changed a task's STATUS, it already reconciled.
+Build the plan, then publish it:
+1. Create all tasks with descriptions, set `--assignee`/`--reviewer`, and wire dependencies. A DRAFT chain never starts anyone.
+2. When the plan is ready, `task-chain publish <chain-id>`. Publishing is the kickoff: the hub starts the entry tasks and keeps the chain moving from there.
 
 ## 9. Communication
 - You are the primary point of contact for the user. See the `heimdall-ctl-communication` skill for messaging syntax, chat conventions, and separating technical logs (task comments) from user communication (`chat send --to user`).
@@ -143,4 +125,4 @@ When coordinators or agents encounter bugs, host toolchain defects, environment 
 - **File new issues**: If no matching issue exists, file a new issue with a clear description, reproduction steps, and appropriate scope:
   `./.heimdall/bin/ham-ctl issue create --title "<concise summary>" --description "<details, logs, reproduction>" [--scope <global|project|agent_id|bridge_id>] [--target-id <id>]`
 
-Golden rule: if a worker agent could do it, delegate it. Reserve your own hands-on effort for planning, coordination, synthesis, reconcile, and completion.
+Golden rule: if a worker agent could do it, delegate it. Reserve your own hands-on effort for planning, coordination, synthesis, and completion.

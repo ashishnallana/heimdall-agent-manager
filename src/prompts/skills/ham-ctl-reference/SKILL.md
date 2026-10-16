@@ -50,10 +50,6 @@ Groups: `bridge`, `agents`, `task-chain`, `task`, `issue`, `chat`, `memory`, `ar
 - `task-chain set-status --status <active|completed|cancelled> [--chain <id>]` — change
   the chain status (coordinator only). Chain statuses are exactly `active`, `completed`,
   `cancelled`. This is how a coordinator completes a chain.
-- `task-chain reconcile <chain-id>` — self-heal / kick off a chain: promote actionable
-  tasks, set each agent's current task, and nudge idle agents. **The chain id is REQUIRED**
-  (positional, or `--chain <id>`; with neither it just prints help). Coordinator/owner only,
-  idempotent. See the `coordinator-task-management` skill for when to run it.
 - `task-chain subscribe <chain-id> [--events <chain_status|task_status|all>]` — subscribe to task chain status events (default: `all`).
 - `task-chain unsubscribe <chain-id> [--events <types>]` — unsubscribe from task chain status events.
 

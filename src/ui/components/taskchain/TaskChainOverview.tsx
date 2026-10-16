@@ -37,7 +37,6 @@ import {
   useNudgeTaskMutation,
   useAddChainMemberMutation,
   useRemoveChainMemberMutation,
-  useReconcileTaskChainMutation,
   useUpdateTaskChainMutation,
 } from '../../api/endpoints/tasks';
 import { useDispatch, useSelector } from 'react-redux';
@@ -233,22 +232,7 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
   const [addMember] = useAddChainMemberMutation();
   const [removeMember] = useRemoveChainMemberMutation();
   const [createInstanceInChain, { isLoading: addingAgent }] = useCreateAgentInstanceInChainMutation();
-  const [reconcileChain, reconcileState] = useReconcileTaskChainMutation();
   const [updateTaskChain, { isLoading: isUpdatingChain }] = useUpdateTaskChainMutation();
-  const [reconcileMsg, setReconcileMsg] = useState('');
-
-  const handleReconcile = async () => {
-    if (reconcileState.isLoading || !chainId) return;
-    setReconcileMsg('');
-    try {
-      const res: any = await reconcileChain({ chainId }).unwrap();
-      const promoted = Number(res?.promoted ?? res?.data?.promoted ?? 0);
-      setReconcileMsg(`Reconciled — ${promoted} task${promoted === 1 ? '' : 's'} promoted. Reconcile is an automatic self-healing background guarantee.`);
-      refetch();
-    } catch (e: any) {
-      setReconcileMsg(String(e?.error || e?.message || 'Reconcile failed'));
-    }
-  };
   const dispatch = useDispatch();
 
   // Data sources for the Add-Agent popup's dependent selects.
@@ -1861,23 +1845,8 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
           >
             + New task
           </button>
-          <button
-            type="button"
-            data-debug-id="taskchain-overview-reconcile-btn"
-            disabled={reconcileState.isLoading || !chainId}
-            onClick={handleReconcile}
-            className="rounded border border-warning/40 bg-warning/10 px-2.5 py-1 text-xs font-semibold text-warning hover:bg-warning/20 disabled:opacity-50"
-            title="Manual reconcile (reconcile is an automatic self-healing background guarantee)"
-          >
-            {reconcileState.isLoading ? 'Reconciling…' : '↻ Reconcile chain'}
-          </button>
         </div>
       </div>
-      {reconcileMsg ? (
-        <div data-debug-id="taskchain-overview-reconcile-banner" className="mx-4 mb-2 rounded border border-warning/30 bg-warning/10 px-3 py-2 text-caption text-warning break-words sm:mx-6">
-          {reconcileMsg}
-        </div>
-      ) : null}
 
       {/* Tasks List */}
       <div className="flex-1 space-y-3 px-4 pb-6 sm:px-6">

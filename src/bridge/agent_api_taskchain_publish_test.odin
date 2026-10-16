@@ -35,7 +35,6 @@ bridge_task_chain_publish_requires_chain_id :: proc(t: ^testing.T) {
 bridge_task_chain_publish_method_allowed :: proc(t: ^testing.T) {
 	testing.expect(t, bridge_agent_method_allowed("agent.task_chain.publish"), "publish is in the agent method allowlist")
 	// Guard the neighbours: adding publish must not disturb the existing verbs.
-	testing.expect(t, bridge_agent_method_allowed("agent.task_chain.reconcile"), "reconcile still allowed")
 	testing.expect(t, bridge_agent_method_allowed("agent.task_chain.set_status"), "set_status still allowed")
 	testing.expect(t, bridge_agent_method_allowed("agent.task_chain.create"), "create is in the agent method allowlist")
 }

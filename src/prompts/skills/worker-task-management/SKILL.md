@@ -15,7 +15,7 @@ All commands use the managed wrapper: `./.heimdall/bin/ham-ctl`. For exact flags
 - Work WITH the coordinator: route blockers, questions, and scope changes to the coordinator rather than deciding unilaterally; proceed once you have what you need.
 
 ## 1. Find your work
-- `./.heimdall/bin/ham-ctl task list [--chain <id>]` — list tasks; focus on those assigned to you and currently actionable (your current task is set by `reconcile`).
+- `./.heimdall/bin/ham-ctl task list [--chain <id>]` — list tasks; focus on those assigned to you and currently actionable (your current task is assigned by the hub).
 - Read the task description and the chain description for the REQ-IDs and acceptance criteria your task must satisfy.
 - To catch up on discussion efficiently, `task list`/`task show` return a compact `comment_summary` (count, last_comment_at, author, preview), NOT full bodies. When the summary shows new activity, read only the recent bodies: `./.heimdall/bin/ham-ctl task comments <task-id> --last N` (newest N, max 100). Prefer a small N.
 

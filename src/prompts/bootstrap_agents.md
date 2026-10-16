@@ -166,7 +166,7 @@ These skills carry the procedures and exact command syntax — load the one you 
 rather than guessing:
 
 - `ham-ctl-reference` — authoritative syntax for every ham-ctl command group.
-- `coordinator-task-management` — plan/delegate, review gates, reconcile (coordinator).
+- `coordinator-task-management` — plan/delegate, review gates (coordinator).
 - `worker-task-management` — execute assigned tasks, hand off, review (worker/reviewer).
 - `heimdall-ctl-communication` — read/send chat, agent-to-agent.
 - `memory-management-workflow` — propose durable memories and choose their scope.

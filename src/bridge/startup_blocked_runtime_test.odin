@@ -19,7 +19,7 @@ startup_blocked_sets_active_but_not_ready :: proc(t: ^testing.T) {
 	testing.expect(t, snap.runtime_status == "blocked", "runtime_status must be blocked")
 	testing.expect(t, !snap.start_success_seen, "blocked must NOT be treated as start-success (not ready)")
 	testing.expect(t, snap.start_deadline_unix_ms == 0, "blocked must clear the start-success deadline so the reaper never fires")
-	// Blocked counts as active for heartbeat/reconcile purposes.
+	// Blocked counts as active for heartbeat and liveness-reconcile purposes.
 	testing.expect(t, bridge_runtime_status_active("blocked"), "blocked must be an active runtime status")
 }
 

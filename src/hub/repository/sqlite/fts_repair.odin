@@ -44,7 +44,7 @@ FTS_INDEX_TABLES := [?]Fts_Index{
 
 // repair_fts_indexes re-syncs the fts5 indexes to their base rows using the ONLY
 // supported external-content rebuild op — INSERT INTO <x>_fts(<x>_fts) VALUES
-// ('rebuild') — inside a single transaction. This is the recovery/reconcile path
+// ('rebuild') — inside a single transaction. This is the recovery (re-sync) path
 // for FTS index drift; it is idempotent and safe to run repeatedly, and a no-op
 // (ok) when FTS5 is not compiled in. When only_drifted is true it rebuilds just the
 // indexes whose posting count no longer matches their base table (cheap boot-time
