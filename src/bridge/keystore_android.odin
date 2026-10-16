@@ -339,7 +339,7 @@ keystore_android_store_vault_key :: proc(bridge_id: string, key_hex: string) -> 
 			present, known := keystore_android_alias_listed(alias)
 			if !known || present {
 				fmt.eprintfln(
-					"ERROR: the Android Keystore could not sign with %s (%s), and regenerating it would make the existing sealed vault key unopenable. The vault key was NOT persisted; check Termux:API and unseal again from Settings → Bridges → Unseal.",
+					"ERROR: the Android Keystore could not sign with %s (%s), and regenerating it would make the existing sealed vault key unopenable. The vault key was NOT persisted; check Termux:API and unseal again from Settings → User Vault → Unseal.",
 					alias,
 					sign_err,
 				)
@@ -356,7 +356,7 @@ keystore_android_store_vault_key :: proc(bridge_id: string, key_hex: string) -> 
 		if !gen_ok {
 			blog_error(.keystore_unavailable, blog_sym(.reason, .android_keystore))
 			fmt.eprintfln(
-				"ERROR: Android Keystore unavailable, so the vault key was NOT persisted (%s). Install the Termux:API app and `pkg install termux-api`, then unseal from Settings → Bridges → Unseal.",
+				"ERROR: Android Keystore unavailable, so the vault key was NOT persisted (%s). Install the Termux:API app and `pkg install termux-api`, then unseal from Settings → User Vault → Unseal.",
 				why,
 			)
 			return false, KEYSTORE_ERR_ANDROID_TOOL
@@ -471,7 +471,7 @@ keystore_android_unwrap_file :: proc(bridge_id: string, allocator: mem.Allocator
 	if read_err != nil do return "", false
 	defer delete(data)
 	if len(data) != KEYSTORE_ANDROID_SEALED_LEN || string(data[:len(KEYSTORE_ANDROID_SEALED_MAGIC)]) != KEYSTORE_ANDROID_SEALED_MAGIC || data[len(KEYSTORE_ANDROID_SEALED_MAGIC)] != KEYSTORE_ANDROID_SEALED_VER {
-		fmt.eprintfln("WARN: %s is not a version-%d sealed vault key; the bridge stays locked. Unseal from Settings → Bridges → Unseal.", path, KEYSTORE_ANDROID_SEALED_VER)
+		fmt.eprintfln("WARN: %s is not a version-%d sealed vault key; the bridge stays locked. Unseal from Settings → User Vault → Unseal.", path, KEYSTORE_ANDROID_SEALED_VER)
 		return "", false
 	}
 
@@ -479,14 +479,14 @@ keystore_android_unwrap_file :: proc(bridge_id: string, allocator: mem.Allocator
 	defer mem.zero_explicit(&kek, size_of(kek))
 	if derived, why := keystore_android_derive_kek(bridge_id, kek[:]); !derived {
 		blog_warn(.vault_unseal_failed, blog_sym(.reason, .android_keystore))
-		fmt.eprintfln("WARN: could not unwrap the sealed vault key via the Android Keystore (%s); the bridge stays locked. Unseal from Settings → Bridges → Unseal.", why)
+		fmt.eprintfln("WARN: could not unwrap the sealed vault key via the Android Keystore (%s); the bridge stays locked. Unseal from Settings → User Vault → Unseal.", why)
 		return "", false
 	}
 	plain: [KEYSTORE_ANDROID_KEY_HEX_LEN]u8
 	defer mem.zero_explicit(&plain, size_of(plain))
 	if !keystore_android_open_sealed(bridge_id, data, kek[:], plain[:]) {
 		blog_warn(.vault_unseal_failed, blog_sym(.reason, .android_keystore), blog_sym(.stage, .verify))
-		fmt.eprintln("WARN: the sealed vault key does not open with this device's Keystore key; the bridge stays locked. Unseal from Settings → Bridges → Unseal.")
+		fmt.eprintln("WARN: the sealed vault key does not open with this device's Keystore key; the bridge stays locked. Unseal from Settings → User Vault → Unseal.")
 		return "", false
 	}
 	candidate := string(plain[:])

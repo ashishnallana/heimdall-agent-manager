@@ -157,3 +157,18 @@ test('VaultPanel setup wizard explains the vault password, before the password f
   assert.ok(source.indexOf('data-debug-id="vault-unlock-password-form"') > noteAt, 'note is not in the password unlock form');
   assert.ok(source.indexOf('data-debug-id="vault-unlock-recovery-form"') > noteAt, 'note is not in the recovery unlock form');
 });
+
+test('bridge vault settings live in User Vault, not in Workspace Settings → Bridges', () => {
+  const read = (rel: string) =>
+    fs.readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
+  const vault = read('../src/ui/components/settings/VaultPanel.tsx');
+  const bridges = read('../src/ui/components/settings/BridgesPanel.tsx');
+  assert.match(vault, /import BridgeSettingsPanel from '\.\/BridgeSettingsPanel';/);
+  assert.equal(vault.split('<BridgeSettingsPanel').length - 1, 1, 'User Vault renders the bridge vault section once');
+  assert.ok(
+    vault.indexOf('<BridgeSettingsPanel') > vault.indexOf('data-debug-id="settings-vault-panel"'),
+    'inside the User Vault page body',
+  );
+  assert.ok(!bridges.includes('BridgeSettingsPanel'), 'Workspace Settings → Bridges no longer hosts it');
+  assert.ok(!vault.includes('Open Settings → Bridges'), 'the instructions point at this page, not the old one');
+});

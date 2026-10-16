@@ -46,6 +46,7 @@ import {
   isVaultSupported,
 } from '../../utils/vaultCrypto';
 import { VaultPasswordPurposeNote } from './VaultPasswordPurposeNote';
+import BridgeSettingsPanel from './BridgeSettingsPanel';
 
 async function copyTextToClipboard(text: string): Promise<boolean> {
   try {
@@ -82,10 +83,11 @@ const VAULT_KEY_PROTECTED_LABEL = 'Protected in WebCrypto (non-extractable)';
 
 /**
  * How bridges get the key. There is no CLI step: the browser delivers the key to each
- * bridge from Settings -> Bridges, and no key file exists on the bridge host.
+ * bridge from the Bridge Vault section of this panel, and no key file exists on the
+ * bridge host.
  */
 const VAULT_BRIDGE_INSTRUCTIONS =
-  'Bridges receive the key from this browser. Open Settings → Bridges and use Unseal (or Configure encryption) on each bridge you want to encrypt.';
+  'Bridges receive the key from this browser. Use Unseal (or Configure encryption) on each bridge you want to encrypt, in the Bridge Vault section below.';
 
 function extractVaultRecord(record: any) {
   if (!record) return null;
@@ -768,6 +770,9 @@ export default function VaultPanel() {
         {!isConfigured && renderSetupWizard()}
         {isConfigured && !isUnlocked && renderLockedView()}
         {isConfigured && isUnlocked && renderUnlockedView()}
+        {/* Per-bridge vault state (lock / unseal / configure). Lives with the user's
+            vault rather than in Workspace Settings: it is the same key, delivered. */}
+        <BridgeSettingsPanel />
       </div>
 
       {/* Unlock Modal Dialog */}

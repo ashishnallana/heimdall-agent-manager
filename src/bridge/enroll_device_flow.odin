@@ -925,7 +925,7 @@ bridge_enroll_wait_for_vault_delivery :: proc(args: []string, bridge_id: string)
 		time.sleep(100 * time.Millisecond)
 	}
 	fmt.eprintln("bridge enroll FAILED: enrolled, but the vault key was not delivered before the handoff deadline.")
-	fmt.eprintln("  Unlock the bridge later from Settings → Bridges, then start the registered service.")
+	fmt.eprintln("  Unlock the bridge later from Settings → User Vault, then start the registered service.")
 	return false
 }
 

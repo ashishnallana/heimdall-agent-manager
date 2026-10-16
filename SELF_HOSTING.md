@@ -810,7 +810,7 @@ Vault encryption is set up in the UI, not on the command line:
 
 1. Enable encryption once: **Settings → Bridges → Enable Encryption**, and choose
    the master password that protects the vault key in your browser.
-2. Unseal each bridge from **Settings → Bridges → Unseal**. The browser delivers the
+2. Unseal each bridge from **Settings → User Vault → Unseal**. The browser delivers the
    key to that bridge (enrollment does the same for a bridge approved while the vault
    is unlocked), and the bridge keeps it in its own per-bridge keyring/Keychain entry
    (see above), so a restart does not need another unseal.
@@ -1086,11 +1086,11 @@ device each get their own alias and their own file.
 is not persisted (enrollment aborts and purges it). Each unseal also signs twice and
 refuses if the two signatures differ, then reopens the file it wrote; enrollment
 re-checks the file itself before restarting the service. A restarted bridge then reports
-`locked`, and a WARN in its log points at **Settings → Bridges → Unseal**.
+`locked`, and a WARN in its log points at **Settings → User Vault → Unseal**.
 
 | Action | Effect on Android |
 |--------|-------------------|
-| Unseal (Settings → Bridges) | Writes `vault_key.sealed`; creates the Keystore key on first use, or when `termux-keystore list` shows it was removed. If signing fails while the key still exists, the unseal fails and the existing key and file are left untouched |
+| Unseal (Settings → User Vault) | Writes `vault_key.sealed`; creates the Keystore key on first use, or when `termux-keystore list` shows it was removed. If signing fails while the key still exists, the unseal fails and the existing key and file are left untouched |
 | Lock (`vault.lock`) | Deletes `vault_key.sealed` and wipes the key from memory; the Keystore key stays |
 | Reset (`vault.reset`) | As lock, and also `termux-keystore delete heimdall-bridge-<bridge_id>` |
 
@@ -1124,7 +1124,7 @@ Logs: `tail -f "$PREFIX/var/log/sv/ham-bridge/current"`. Status: `sv status ham-
 
 If the bridge reports `locked` after a restart (for example after Termux:API was
 reinstalled, which wipes its Keystore keys), unseal it again from
-**Settings → Bridges → Unseal**.
+**Settings → User Vault → Unseal**.
 
 ### Self-update
 

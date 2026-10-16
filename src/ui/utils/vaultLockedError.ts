@@ -41,7 +41,7 @@ export const VAULT_LOCKED_OVERLAY_MESSAGE = `${VAULT_LOCKED_HEADLINE} Input is d
 /** New-shell / restart refusal (T9's dialog copy). */
 export const VAULT_LOCKED_SHELL_START_MESSAGE = `${VAULT_LOCKED_HEADLINE} Unseal it from bridge settings to run commands.`;
 
-/** Settings -> Bridges row description for a Locked bridge. */
+/** Settings -> User Vault row description for a Locked bridge. */
 export const VAULT_LOCKED_SETTINGS_DESCRIPTION = `${VAULT_LOCKED_HEADLINE} Unseal it to resume encrypted file and terminal access.`;
 
 /** Label of the overlay's primary action. */

@@ -16,7 +16,7 @@ export interface VaultLockedOverlayProps {
  * remains visible through the scrim; the overlay itself takes the pointer so the
  * terminal cannot be focused or typed into (the panes also drop input while locked).
  *
- * "Unlock vault" opens Settings -> Bridges scoped to this bridge and starts that
+ * "Unlock vault" opens Settings -> User Vault scoped to this bridge and starts that
  * row's own unseal (`autoUnseal`): the active key, or the existing master-password
  * prompt scoped to this bridge. There is no new key-entry surface here.
  */

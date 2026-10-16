@@ -169,7 +169,7 @@ type DeliveryState =
  * Which process a vault key is wrapped for. `enrollment` is the CLI process whose
  * key the operator confirmed against the terminal; `restarted` is the registered
  * service it hands over to, whose ephemeral key is whatever it advertises now —
- * the same steady-state path Settings → Bridges uses.
+ * the same steady-state path Settings → User Vault uses.
  */
 type UnsealTarget = 'enrollment' | 'restarted';
 
@@ -1177,7 +1177,7 @@ export default function BridgeEnrollmentApprovalPage() {
                 {delivery.message}{' '}
                 {enrollmentPending
                   ? 'The bridge is not enrolled yet. Retry before the enrollment times out, or cancel it.'
-                  : 'The enrollment itself succeeded; the bridge is approved but still sealed. Retry now, or unlock it later from Settings → Bridges.'}
+                  : 'The enrollment itself succeeded; the bridge is approved but still sealed. Retry now, or unlock it later from Settings → User Vault.'}
               </p>
               {bridgeId && (
                 <div style={{ display: 'flex', gap: 8 }}>

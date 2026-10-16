@@ -51,7 +51,7 @@ export function usePaneVaultLock({ bridgeId: propBridgeId, sessionId, onResume }
   const [signalBridgeId, setSignalBridgeId] = useState<string | undefined>(undefined);
   const bridgeId = signalBridgeId || propBridgeId || '';
 
-  // The same cached list Settings -> Bridges reads; the hub invalidates it when a
+  // The same cached list Settings -> User Vault reads; the hub invalidates it when a
   // bridge reports a vault change, which is what clears the overlay after an unseal.
   const { data } = useListBridgesQuery(undefined, { skip: !bridgeId });
   const bridgeStatus: BridgeVaultStatus | undefined = useMemo(() => {

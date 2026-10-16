@@ -170,7 +170,7 @@ keystore_store_vault_key :: proc(bridge_id: string, key_hex: string) -> (ok: boo
 	if status != KEYCHAIN_ERR_SEC_SUCCESS {
 		blog_warn(.keystore_unavailable, blog_sym(.reason, .macos_keychain), blog_int(.errno, i64(status)))
 		fmt.eprintfln(
-			"WARN: macOS Keychain refused to store the vault key (OSStatus %d). Falling back to process-isolated JIT memory; the key will not survive a restart. After the bridge restarts, unseal it from Settings → Bridges → Unseal.",
+			"WARN: macOS Keychain refused to store the vault key (OSStatus %d). Falling back to process-isolated JIT memory; the key will not survive a restart. After the bridge restarts, unseal it from Settings → User Vault → Unseal.",
 			status,
 		)
 		return mem_ok, int(status)

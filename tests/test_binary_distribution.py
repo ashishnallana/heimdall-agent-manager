@@ -3383,7 +3383,7 @@ def test_self_hosting_documents_installer(ctx):
         'Part 2 still promises a one-time token ceremony that no longer exists')
     assert 'set-key' not in part2, (
         'Part 2 must not document the removed vault set-key command')
-    assert 'Settings → Bridges → Unseal' in part2, (
+    assert 'Settings → User Vault → Unseal' in part2, (
         'Part 2 must document unsealing each bridge from the UI')
     for target in ('linux-amd64', 'linux-arm64', 'darwin-amd64', 'darwin-arm64'):
         asset = f'heimdall-local-{target}.tar.gz'
