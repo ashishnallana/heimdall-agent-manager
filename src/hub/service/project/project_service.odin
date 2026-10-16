@@ -37,12 +37,16 @@ Runtime_Command :: struct {
 Bridge_Validate_Project_Path_Proc :: proc(ctx: rawptr, command: Validate_Project_Path_Command) -> (Project_Path_Validation_Result, bool, domain.Domain_Error)
 Bridge_Send_Runtime_Command_Proc :: proc(ctx: rawptr, command: Runtime_Command) -> (bool, domain.Domain_Error)
 Bridge_Send_Runtime_Command_Wait_Proc :: proc(ctx: rawptr, command: Runtime_Command, timeout_ms: int) -> (string, bool, domain.Domain_Error)
+// REQ-PTY-NET-3: one hub->bridge BINARY frame (a pty_wire session frame), fire-and-forget,
+// no command_id and therefore no command_result. Used for pty input.
+Bridge_Send_Runtime_Binary_Proc :: proc(ctx: rawptr, bridge_id: string, frame: []byte) -> (bool, domain.Domain_Error)
 
 Bridge_Command_Sink :: struct {
 	ctx: rawptr,
 	validate_project_path: Bridge_Validate_Project_Path_Proc,
 	send_runtime_command: Bridge_Send_Runtime_Command_Proc,
 	send_runtime_command_wait: Bridge_Send_Runtime_Command_Wait_Proc,
+	send_runtime_binary: Bridge_Send_Runtime_Binary_Proc,
 }
 
 Project_Service :: struct {
@@ -80,6 +84,11 @@ bridge_command_validate_project_path :: proc(sink: Bridge_Command_Sink, command:
 bridge_command_send_runtime :: proc(sink: Bridge_Command_Sink, command: Runtime_Command) -> (bool, domain.Domain_Error) {
 	if sink.send_runtime_command == nil do return false, domain.domain_error(.Bridge_Offline, "bridge command sink is not connected")
 	return sink.send_runtime_command(sink.ctx, command)
+}
+
+bridge_command_send_runtime_binary :: proc(sink: Bridge_Command_Sink, bridge_id: string, frame: []byte) -> (bool, domain.Domain_Error) {
+	if sink.send_runtime_binary == nil do return false, domain.domain_error(.Bridge_Offline, "bridge command sink is not connected")
+	return sink.send_runtime_binary(sink.ctx, bridge_id, frame)
 }
 
 bridge_command_send_runtime_wait :: proc(sink: Bridge_Command_Sink, command: Runtime_Command, timeout_ms: int) -> (string, bool, domain.Domain_Error) {

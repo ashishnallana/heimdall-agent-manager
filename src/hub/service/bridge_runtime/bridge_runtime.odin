@@ -39,7 +39,7 @@ close_bridge_connection :: proc(ctx: rawptr, bridge_id: string) -> bool {
 }
 
 new_bridge_command_sink :: proc(registry: ^project_service.Bridge_Runtime_Registry) -> project_service.Bridge_Command_Sink {
-	return project_service.Bridge_Command_Sink{ctx = rawptr(registry), validate_project_path = validate_project_path, send_runtime_command = send_runtime_command, send_runtime_command_wait = send_runtime_command_wait}
+	return project_service.Bridge_Command_Sink{ctx = rawptr(registry), validate_project_path = validate_project_path, send_runtime_command = send_runtime_command, send_runtime_command_wait = send_runtime_command_wait, send_runtime_binary = send_runtime_binary}
 }
 
 send_runtime_command :: proc(ctx: rawptr, command: project_service.Runtime_Command) -> (bool, domain.Domain_Error) {
@@ -54,6 +54,30 @@ send_runtime_command :: proc(ctx: rawptr, command: project_service.Runtime_Comma
 	if wrote == .Not_Connected do return false, domain.domain_error(.Bridge_Offline, "bridge websocket command path is not connected")
 	if wrote != .Ok do return false, command_write_error(wrote)
 	bridge_command_track_sent(connection, command.body_json)
+	return true, domain.Domain_Error{}
+}
+
+// send_runtime_binary writes one hub->bridge BINARY frame under the connection's writer
+// lock (REQ-PTY-NET-3). Never chunked — the chunker is a text envelope — and bounded by
+// the 16-bit arm our bridge reader accepts; a pty input frame is <= 8 KiB + header, far
+// below the hub->bridge per-message cap. Nothing is registered anywhere: there is no
+// command_id, so no result is expected and no waiter can hang on it.
+send_runtime_binary :: proc(ctx: rawptr, bridge_id: string, frame: []byte) -> (bool, domain.Domain_Error) {
+	registry := (^project_service.Bridge_Runtime_Registry)(ctx)
+	if len(frame) > contracts.BRIDGE_WS_HUB_TO_BRIDGE_CHUNK_PAYLOAD_BYTES + 4096 do return false, domain.domain_error(.Validation_Failed, "binary bridge frame exceeds the hub->bridge per-message cap")
+	if !project_service.bridge_runtime_registry_has_live(registry, bridge_id) do return false, domain.domain_error(.Bridge_Offline, "bridge is not connected")
+	connection := project_service.bridge_runtime_connection_acquire(registry, bridge_id)
+	if connection == nil do return false, domain.domain_error(.Bridge_Offline, "bridge connection retired")
+	defer project_service.bridge_runtime_connection_release(registry, connection)
+	sync.lock(&connection.writer_mutex)
+	defer sync.unlock(&connection.writer_mutex)
+	socket := connection.socket
+	if socket == net.TCP_Socket(0) || sync.atomic_load(&connection.retired) do return false, domain.domain_error(.Bridge_Offline, "bridge websocket command path is not connected")
+	result := ws.write_server_opcode(socket, 0x2, string(frame), false)
+	if result == .Peer_Gone || result == .Desynchronised do _ = net.shutdown(net.Any_Socket(socket), .Both)
+	if result != .Ok do return false, command_write_error(.Send_Failed if result != .Too_Large else .Too_Large)
+	metrics.counter_add(connection.tx_bytes, u64(len(frame)))
+	metrics.counter_inc(metrics.with(project_service.fleet_metrics.bridge_ws_frames, "tx", "shell_pty_input"))
 	return true, domain.Domain_Error{}
 }
 

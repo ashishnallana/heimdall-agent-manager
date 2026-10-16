@@ -30,6 +30,7 @@ import "core:fmt"
 import "core:net"
 import "core:strings"
 import "core:sync"
+import "core:time"
 import contracts "odin_test:contracts"
 import agent_service "odin_test:hub/service/agent"
 import shell_session_svc "odin_test:hub/service/shell_session"
@@ -127,11 +128,14 @@ _shell_screen_trim_trailing_blank_rows :: proc(s: string, allocator := context.a
 // explicit ANSI cursor positioning sequence (\x1b[<row+1>;<col+1>H) when valid cursor
 // coordinates (>= 0) are provided. Caller owns the result.
 //
-// Split out from shell_stream_screen_payload_b64 because the chunked writer needs the
-// repaint as bytes it can cut before encoding — base64 of the whole thing cannot be cut,
-// since each frame must decode on its own.
+// The chunked writer cuts this text at row boundaries into SCREEN frames.
 _shell_screen_repaint_text :: proc(pane_output: string, cursor_row: int = -1, cursor_col: int = -1) -> string {
-	trimmed := _shell_screen_trim_trailing_blank_rows(pane_output)
+	// REQ-PTY-COLOR-1: the capture may lead with the pty-host's terminal-colour preamble
+	// (OSC 10/11/12/4). It goes FIRST in the repaint — before the alt-screen prefix and
+	// before the erase+home — and is split off here so neither the trim nor the alt-prefix
+	// detection below ever sees it.
+	preamble, rows := contracts.pty_screen_split_preamble(pane_output)
+	trimmed := _shell_screen_trim_trailing_blank_rows(rows)
 	defer delete(trimmed)
 	body := _shell_screen_lf_to_crlf(trimmed)
 	defer delete(body)
@@ -148,24 +152,17 @@ _shell_screen_repaint_text :: proc(pane_output: string, cursor_row: int = -1, cu
 
 	if cursor_row >= 0 && cursor_col >= 0 {
 		cup := fmt.tprintf("\x1b[%d;%dH", cursor_row + 1, cursor_col + 1)
-		return strings.concatenate({alt_prefix, SHELL_SCREEN_REPAINT_PREFIX, rest_body, cup})
+		return strings.concatenate({preamble, alt_prefix, SHELL_SCREEN_REPAINT_PREFIX, rest_body, cup})
 	}
-	return strings.concatenate({alt_prefix, SHELL_SCREEN_REPAINT_PREFIX, rest_body})
+	return strings.concatenate({preamble, alt_prefix, SHELL_SCREEN_REPAINT_PREFIX, rest_body})
 }
 
-// shell_stream_screen_payload_b64 builds the base64 body of a single-frame `screen` payload.
-// Caller owns the result.
-shell_stream_screen_payload_b64 :: proc(pane_output: string, cursor_row: int = -1, cursor_col: int = -1) -> string {
-	joined := _shell_screen_repaint_text(pane_output, cursor_row, cursor_col)
-	defer delete(joined)
-	return base64.encode(transmute([]byte)joined)
-}
-
-// SHELL_SCREEN_CHUNK_DECODED_BYTES is how much DECODED repaint text one `screen` frame
-// carries. 32 KiB encodes to ~43.7 KB of base64 — base64's alphabet needs no JSON escaping,
-// so the frame lands well inside even the 16-bit WebSocket length (65535). That is
-// deliberate: a snapshot of any size now travels in frames that would survive a 16-bit-only
-// writer, so this path can never again depend on a length arm being present to paint.
+// SHELL_SCREEN_CHUNK_DECODED_BYTES is how much repaint text one `screen` frame carries.
+// 32 KiB + the 6-byte pty_wire header lands well inside even the 16-bit WebSocket length
+// (65535). That is deliberate: a snapshot of any size travels in frames that would survive
+// a 16-bit-only writer, so this path can never again depend on a length arm being present
+// to paint. (It was chosen when the payload was base64; binary left it unchanged so the
+// per-frame budget on the viewer writer did not move.)
 SHELL_SCREEN_CHUNK_DECODED_BYTES :: 32 * 1024
 
 // _shell_screen_chunk_end picks where the chunk starting at `start` ends, preferring a ROW
@@ -184,25 +181,14 @@ _shell_screen_chunk_end :: proc(s: string, start: int) -> int {
 	return hard
 }
 
-// shell_stream_screen_frame_json wraps a base64 payload in the frame both consumers parse.
-// When cursor_row and cursor_col are >= 0, they are included as JSON fields for client inspection.
+// shell_stream_screen_frame builds one binary SCREEN viewer frame (REQ-PTY-NET-2):
+// kind=SCREEN, flags=SNAPSHOT [|ENCRYPTED], an optional cursor block, then the payload.
+// For a plaintext repaint the payload already ends with the CUP escape, so the cursor
+// block is informational; for an ENCRYPTED capture (payload = nonce|tag|ciphertext the
+// hub cannot read) it is the ONLY way the browser learns where to put the cursor.
 // Caller owns the result.
-shell_stream_screen_frame_json :: proc(data_b64: string, cursor_row: int = -1, cursor_col: int = -1, is_encrypted: bool = false) -> string {
-	b := strings.builder_make()
-	strings.write_string(&b, "{\"type\":\"screen\",\"data_b64\":\"")
-	write_handler_json_string(&b, data_b64)
-	strings.write_string(&b, "\",\"is_encrypted\":")
-	strings.write_string(&b, "true" if is_encrypted else "false")
-	if cursor_row >= 0 {
-		strings.write_string(&b, ",\"cursor_row\":")
-		strings.write_int(&b, cursor_row)
-	}
-	if cursor_col >= 0 {
-		strings.write_string(&b, ",\"cursor_col\":")
-		strings.write_int(&b, cursor_col)
-	}
-	strings.write_string(&b, "}")
-	return strings.to_string(b)
+shell_stream_screen_frame :: proc(payload: []byte, cursor_row: int = -1, cursor_col: int = -1, is_encrypted: bool = false) -> []byte {
+	return contracts.pty_wire_encode_viewer_frame(contracts.PTY_WIRE_KIND_SCREEN, contracts.pty_wire_flags(true, is_encrypted), payload, cursor_row, cursor_col)
 }
 
 // _shell_stream_write_screen_frame turns a pane reply into one or more `screen` frames on
@@ -243,25 +229,12 @@ _shell_stream_write_screen_frame :: proc(
 	stream_id: string,
 	client: net.TCP_Socket,
 	pane_reply: string,
+	cols: int = -1,
+	rows: int = -1,
 ) -> bool {
-	output := json_string(pane_reply, "output")
-	defer delete(output)
-	if output == "" do return false
-	encrypted_capture := strings.has_prefix(output, "vault:v1:")
-	max_bytes := ((1024 * 1024 + 28 + 2) / 3) * 4 + len("vault:v1:") if encrypted_capture else 1024 * 1024
-	if len(output) > max_bytes do return false
-
-	cursor_row := json_int(pane_reply, "cursor_row", -1)
-	cursor_col := json_int(pane_reply, "cursor_col", -1)
-
-	if strings.has_prefix(output, "vault:v1:") {
-		frame := shell_stream_screen_frame_json(output[len("vault:v1:"):], cursor_row, cursor_col, true)
-		defer delete(frame)
-		return shell_session_svc.shell_session_write_viewer_frame(sessions, stream_id, client, frame) == .Ok
-	}
-
-	repaint := _shell_screen_repaint_text(output, cursor_row, cursor_col)
-	defer delete(repaint)
+	frames, ok := _shell_stream_screen_frames(pane_reply)
+	if !ok do return false
+	defer { for f in frames do delete(f); delete(frames) }
 
 	// Held across EVERY chunk, not per chunk: an `output` frame landing between two
 	// chunks would move the cursor and misposition all of them.
@@ -273,27 +246,118 @@ _shell_stream_write_screen_frame :: proc(
 	if write_mu != nil do sync.mutex_lock(write_mu)
 	defer if write_mu != nil { sync.mutex_unlock(write_mu); shell_session_svc.shell_session_viewer_write_release(sessions, stream_id) }
 
+	total := 0
+	for f in frames do total += len(f)
 	offset := 0
-	for offset < len(repaint) {
-		end := _shell_screen_chunk_end(repaint, offset)
-		payload := base64.encode(transmute([]byte)repaint[offset:end])
-		frame := shell_stream_screen_frame_json(payload, cursor_row, cursor_col)
-		result := shell_session_svc.shell_session_enqueue_viewer_frame(sessions, client, frame)
-		delete(payload)
-		delete(frame)
+	for frame in frames {
+		result := shell_session_svc.shell_session_enqueue_viewer_frame(sessions, client, string(frame), 0x2)
 		if result != .Ok {
 			fmt.eprintfln(
 				"ham-hub WARN shell screen snapshot frame not delivered result=%v offset=%d chunk_bytes=%d total_bytes=%d",
 				result,
 				offset,
-				end - offset,
-				len(repaint),
+				len(frame),
+				total,
 			)
 			return false
 		}
+		offset += len(frame)
+	}
+	// REQ-PTY-NET-4: the next joiner at this geometry (or within the freshness window)
+	// is served from these exact frames instead of another bridge round-trip.
+	shell_session_svc.shell_session_snapshot_cache_store_capture(sessions, stream_id, frames[:], cols, rows, client)
+	return true
+}
+
+// _shell_stream_screen_frames turns a pane reply into the ordered binary SCREEN frames
+// it is written as. ok=false when there is nothing to paint (empty output, over cap,
+// malformed armor). Caller owns the frames.
+_shell_stream_screen_frames :: proc(pane_reply: string) -> (frames: [dynamic][]byte, ok: bool) {
+	output := json_string(pane_reply, "output")
+	defer delete(output)
+	if output == "" do return nil, false
+	encrypted_capture := strings.has_prefix(output, "vault:v1:")
+	max_bytes := ((1024 * 1024 + 28 + 2) / 3) * 4 + len("vault:v1:") if encrypted_capture else 1024 * 1024
+	if len(output) > max_bytes do return nil, false
+
+	cursor_row := json_int(pane_reply, "cursor_row", -1)
+	cursor_col := json_int(pane_reply, "cursor_col", -1)
+	frames = make([dynamic][]byte)
+
+	if encrypted_capture {
+		// The bridge armors an encrypted capture as vault:v1:base64(nonce|tag|ct) on the
+		// command/reply channel; the viewer gets the raw bytes.
+		sealed, derr := base64.decode(output[len("vault:v1:"):], allocator = context.temp_allocator)
+		if derr != nil { delete(frames); return nil, false }
+		append(&frames, shell_stream_screen_frame(sealed, cursor_row, cursor_col, true))
+		return frames, true
+	}
+
+	repaint := _shell_screen_repaint_text(output, cursor_row, cursor_col)
+	defer delete(repaint)
+	offset := 0
+	for offset < len(repaint) {
+		end := _shell_screen_chunk_end(repaint, offset)
+		append(&frames, shell_stream_screen_frame(transmute([]byte)repaint[offset:end], cursor_row, cursor_col))
 		offset = end
 	}
-	return true
+	return frames, true
+}
+
+// SHELL_SNAPSHOT_CATCHUP_GRACE bounds how long the viewer that triggered the bridge attach
+// waits for the pty-host catch-up to land before falling back to a capture round-trip.
+// The catch-up normally beats the first resize by a few ms to a few hundred ms (bridge
+// attach -> pty-host Attach -> Screen -> bridge -> hub); the grace is the ceiling for a
+// slow bridge, after which REQ-SHELL-61's "every viewer sees a full screen" wins and one
+// capture is paid. Polled, because the handler thread is the only thing waiting and a
+// condvar per session would be more machinery than the two seconds justify.
+SHELL_SNAPSHOT_CATCHUP_GRACE :: 2 * time.Second
+SHELL_SNAPSHOT_CATCHUP_POLL  :: 20 * time.Millisecond
+
+// Shell_Screen_Capture is the pane-source callback shell_stream_serve_screen_snapshot
+// falls back to on a cache miss (shell_session_get_pane or agent get_instance_pane).
+Shell_Screen_Capture :: struct {
+	ctx:  rawptr,
+	call: proc(ctx: rawptr, cols, rows: int) -> (reply: string, ok: bool),
+}
+
+// shell_stream_serve_screen_snapshot is the one attach-repaint policy for both panes
+// (REQ-PTY-NET-4): serve from the cache when it can, wait briefly for the in-flight
+// catch-up when this viewer caused the bridge attach, capture only as a last resort.
+// Returns whether the viewer ended up with a full screen by any of the three routes.
+shell_stream_serve_screen_snapshot :: proc(
+	sessions: ^shell_session_svc.Shell_Session_Service,
+	session_id: string,
+	client: net.TCP_Socket,
+	rows, cols: int,
+	late_join: bool,
+	capture: Shell_Screen_Capture,
+	grace: time.Duration = SHELL_SNAPSHOT_CATCHUP_GRACE,
+) -> bool {
+	if session_id == "" || rows < 1 || cols < 1 do return false
+	switch shell_session_svc.shell_session_snapshot_cache_decide(sessions, session_id, client, cols, rows) {
+	case .Already_Painted: return true
+	case .Serve:           return shell_session_svc.shell_session_snapshot_cache_serve(sessions, session_id, client)
+	case .Miss:
+	}
+	if !late_join && grace > 0 {
+		// We triggered the 0->1 attach: the pty-host catch-up is on its way as a
+		// broadcast this socket will receive. Give it the grace window.
+		started := time.tick_now()
+		for time.tick_since(started) < grace {
+			time.sleep(SHELL_SNAPSHOT_CATCHUP_POLL)
+			switch shell_session_svc.shell_session_snapshot_cache_decide(sessions, session_id, client, cols, rows) {
+			case .Already_Painted: return true
+			case .Serve:           return shell_session_svc.shell_session_snapshot_cache_serve(sessions, session_id, client)
+			case .Miss:
+			}
+		}
+	}
+	if capture.call == nil do return false
+	reply, ok := capture.call(capture.ctx, cols, rows)
+	if !ok do return false
+	defer delete(reply)
+	return _shell_stream_write_screen_frame(sessions, session_id, client, reply, cols, rows)
 }
 
 // shell_stream_should_send_screen_snapshot decides whether an attaching viewer's resize
@@ -339,22 +403,52 @@ shell_stream_should_send_screen_snapshot :: proc(late_join: bool, screen_sent: b
 	return true
 }
 
+@(private = "file")
+Shell_Capture_Ctx :: struct {
+	svc:        ^shell_session_svc.Shell_Session_Service,
+	auth:       contracts.Auth_Context,
+	session_id: string,
+}
+
+@(private = "file")
+_shell_capture_call :: proc(raw: rawptr, cols, rows: int) -> (string, bool) {
+	c := (^Shell_Capture_Ctx)(raw)
+	reply, ok, err := shell_session_svc.shell_session_get_pane(c.svc, c.auth, c.session_id, "", cols, rows)
+	if !ok || err.code != .None do return "", false
+	return reply, true
+}
+
 // shell_stream_send_shell_screen_snapshot serves the shells terminal pane.
 // `cols`/`rows` come from the client's own resize frame so the capture is rendered at the
 // width the viewer actually has; capturing at a guessed 80 would deliver a correct picture
-// of the wrong layout.
+// of the wrong layout. `late_join` says whether this viewer triggered the bridge attach
+// (false) — see shell_stream_serve_screen_snapshot.
 shell_stream_send_shell_screen_snapshot :: proc(
 	svc: ^shell_session_svc.Shell_Session_Service,
 	auth: contracts.Auth_Context,
 	session_id: string,
 	client: net.TCP_Socket,
 	rows, cols: int,
+	late_join: bool = true,
 ) -> bool {
 	if svc == nil || session_id == "" || rows < 1 || cols < 1 do return false
-	reply, ok, err := shell_session_svc.shell_session_get_pane(svc, auth, session_id, "", cols, rows)
-	if !ok || err.code != .None do return false
-	defer delete(reply)
-	return _shell_stream_write_screen_frame(svc, session_id, client, reply)
+	ctx := Shell_Capture_Ctx{svc = svc, auth = auth, session_id = session_id}
+	return shell_stream_serve_screen_snapshot(svc, session_id, client, rows, cols, late_join, Shell_Screen_Capture{ctx = rawptr(&ctx), call = _shell_capture_call})
+}
+
+@(private = "file")
+Agent_Capture_Ctx :: struct {
+	svc:         ^agent_service.Agent_Service,
+	auth:        contracts.Auth_Context,
+	instance_id: string,
+}
+
+@(private = "file")
+_agent_capture_call :: proc(raw: rawptr, cols, rows: int) -> (string, bool) {
+	c := (^Agent_Capture_Ctx)(raw)
+	reply, ok, err := agent_service.get_instance_pane(c.svc, c.auth, c.instance_id, "", cols, rows)
+	if !ok || err.code != .None do return "", false
+	return reply, true
 }
 
 // shell_stream_send_agent_screen_snapshot serves the agent pane. Same frame, same
@@ -371,10 +465,9 @@ shell_stream_send_agent_screen_snapshot :: proc(
 	instance_id: string,
 	client: net.TCP_Socket,
 	rows, cols: int,
+	late_join: bool = true,
 ) -> bool {
 	if svc == nil || instance_id == "" || rows < 1 || cols < 1 do return false
-	reply, ok, err := agent_service.get_instance_pane(svc, auth, instance_id, "", cols, rows)
-	if !ok || err.code != .None do return false
-	defer delete(reply)
-	return _shell_stream_write_screen_frame(sessions, instance_id, client, reply)
+	ctx := Agent_Capture_Ctx{svc = svc, auth = auth, instance_id = instance_id}
+	return shell_stream_serve_screen_snapshot(sessions, instance_id, client, rows, cols, late_join, Shell_Screen_Capture{ctx = rawptr(&ctx), call = _agent_capture_call})
 }

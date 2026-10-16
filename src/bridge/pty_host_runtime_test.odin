@@ -4,6 +4,7 @@ import "base:runtime"
 import "core:c"
 import "core:fmt"
 import "core:os"
+import "core:slice"
 import "core:strings"
 import "core:sync"
 import "core:sys/posix"
@@ -742,10 +743,11 @@ pty_stream_worker_emit_frame_encodes_base64_and_queues :: proc(t: ^testing.T) {
 
 	testing.expect_value(t, len(frames), 1)
 	if len(frames) == 1 {
-		frame := frames[0]
-		testing.expect(t, strings.contains(frame, `"type":"shell_pty_output"`), "frame type is shell_pty_output")
-		testing.expect(t, strings.contains(frame, `"session_id":"sh_stream_1"`), "frame has session_id")
-		testing.expect(t, strings.contains(frame, `"data_b64":"ZWNobyBzdHJlYW1pbmcgdGVzdAo="`), "frame data_b64 matches encoded test string")
+		sid, payload, snapshot, encrypted, ok := pty_test_decode_output(frames[0])
+		testing.expect(t, ok, "frame is a binary pty_wire output frame")
+		testing.expect_value(t, sid, "sh_stream_1")
+		testing.expect_value(t, payload, test_data)
+		testing.expect(t, !snapshot && !encrypted, "plain incremental output")
 	}
 }
 
@@ -1228,8 +1230,10 @@ pty_stream_worker_auto_reattach_flow_preserves_connection :: proc(t: ^testing.T)
 	testing.expect(t, conn_after == &var_conn, "conn is preserved across relaunch")
 }
 
+// REQ-PTY-NET-5: a per-session incremental overflow COMPACTS the queue to its tail and
+// keeps streaming; only a storm of compactions falls back to the old drop + resync.
 @(test)
-pane_overflow_detaches_only_affected_stream_and_requests_resync :: proc(t: ^testing.T) {
+pane_overflow_compacts_slow_stream_to_its_tail_and_keeps_streaming :: proc(t: ^testing.T) {
 	sync.mutex_lock(&bridge_test_config_mutex)
 	defer sync.mutex_unlock(&bridge_test_config_mutex)
 	sync.mutex_lock(&keystore_test_mutex)
@@ -1241,19 +1245,80 @@ pane_overflow_detaches_only_affected_stream_and_requests_resync :: proc(t: ^test
 	heap := runtime.heap_allocator()
 	chunk := strings.repeat("x", 32 * 1024, heap)
 	defer delete(chunk, heap)
-	_bridge_pty_stream_deliver_or_queue(&healthy, strings.clone("healthy", heap), heap, "healthy")
-	for i in 0..<12 do _bridge_pty_stream_deliver_or_queue(&slow, strings.clone(chunk, heap), heap, "slow")
-	testing.expect(t, !sync.atomic_load(&slow.active))
+	_bridge_pty_stream_queue_output(&healthy, slice.clone(transmute([]byte)string("healthy"), heap), heap, "healthy", false, {}, 0)
+	// 8 x 32 KiB fill the 256 KiB session budget; the 9th compacts; 10..12 keep flowing.
+	for i in 0..<12 do _bridge_pty_stream_queue_output(&slow, slice.clone(transmute([]byte)chunk, heap), heap, "slow", false, {}, 0)
+	testing.expect(t, sync.atomic_load(&slow.active), "a compacted stream stays attached")
 	testing.expect(t, sync.atomic_load(&healthy.active))
 	testing.expect(t, bridge_pty_stream_outgoing_bytes <= BRIDGE_PANE_QUEUE_BYTES)
 	frames := bridge_pty_stream_take_outgoing()
 	defer { for frame in frames do delete(frame, heap); delete(frames) }
+	slow_payload := strings.builder_make()
+	defer strings.builder_destroy(&slow_payload)
+	resyncs := 0
+	for frame in frames {
+		if strings.contains(frame, "pane_resync_required") { resyncs += 1; continue }
+		sid, payload, _, _, ok := pty_test_decode_output(frame)
+		testing.expect(t, ok)
+		if sid == "slow" do strings.write_string(&slow_payload, payload)
+	}
+	testing.expect_value(t, resyncs, 0)
+	got := strings.to_string(slow_payload)
+	testing.expect(t, strings.has_prefix(got, BRIDGE_PTY_STREAM_COMPACT_MARKER), "the kept tail is led by a clear-screen+home so the viewer sees a skip, not a torn join")
+	// Tail kept = 2 x 32 KiB (<= 64 KiB), then frames 9..12.
+	testing.expect_value(t, len(got), len(BRIDGE_PTY_STREAM_COMPACT_MARKER) + 6 * 32 * 1024)
+	testing.expect_value(t, bridge_pty_stream_outgoing_bytes, 0)
+}
+
+@(test)
+pane_overflow_storm_falls_back_to_resync_for_that_stream_only :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
+	bridge_pty_stream_reset()
+	defer bridge_pty_stream_reset()
+	slow := Bridge_PTY_Stream_Worker{active = true, fd = -1}
+	healthy := Bridge_PTY_Stream_Worker{active = true, fd = -1}
+	heap := runtime.heap_allocator()
+	chunk := strings.repeat("x", 32 * 1024, heap)
+	defer delete(chunk, heap)
+	_bridge_pty_stream_queue_output(&healthy, slice.clone(transmute([]byte)string("healthy"), heap), heap, "healthy", false, {}, 0)
+	// Never drained: compaction #1 at frame 9, #2 at ~15, #3 at ~21 -> storm -> resync.
+	for i in 0..<30 do _bridge_pty_stream_queue_output(&slow, slice.clone(transmute([]byte)chunk, heap), heap, "slow", false, {}, 0)
+	testing.expect(t, !sync.atomic_load(&slow.active), "a storming stream is detached for a fresh screen")
+	testing.expect(t, sync.atomic_load(&healthy.active), "the healthy stream is untouched")
+	frames := bridge_pty_stream_take_outgoing()
+	defer { for frame in frames do delete(frame, heap); delete(frames) }
 	testing.expect_value(t, len(frames), 2)
 	if len(frames) == 2 {
-		testing.expect_value(t, frames[0], "healthy")
+		sid, payload, _, _, _ := pty_test_decode_output(frames[0])
+		testing.expect_value(t, sid, "healthy")
+		testing.expect_value(t, payload, "healthy")
 		testing.expect(t, strings.contains(frames[1], "pane_resync_required"))
 	}
 	testing.expect_value(t, bridge_pty_stream_outgoing_bytes, 0)
+}
+
+@(test)
+pane_overflow_snapshot_or_global_still_resyncs :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
+	bridge_pty_stream_reset()
+	defer bridge_pty_stream_reset()
+	heap := runtime.heap_allocator()
+	// Snapshot overflow: 2 MiB + 1 of snapshot records is never compacted.
+	snap := Bridge_PTY_Stream_Worker{active = true, fd = -1, emitting_snapshot = true}
+	big := strings.repeat("s", 512 * 1024, heap)
+	defer delete(big, heap)
+	for i in 0..<5 do _bridge_pty_stream_queue_output(&snap, slice.clone(transmute([]byte)big, heap), heap, "snap", false, {}, 0)
+	testing.expect(t, !sync.atomic_load(&snap.active), "a snapshot overflow still resyncs")
+	frames := bridge_pty_stream_take_outgoing()
+	defer { for frame in frames do delete(frame, heap); delete(frames) }
+	testing.expect_value(t, len(frames), 1)
+	if len(frames) == 1 do testing.expect(t, strings.contains(frames[0], "pane_resync_required"))
 }
 
 @(test)
@@ -1275,17 +1340,15 @@ pane_large_encrypted_snapshot_splits_before_encryption :: proc(t: ^testing.T) {
 	defer { for frame in frames do delete(frame, runtime.heap_allocator()); delete(frames) }
 	result := make([dynamic]byte)
 	defer delete(result)
-	testing.expect_value(t, len(frames), 64)
+	// 256 Ki two-byte runes = 512 KiB of plaintext, cut at the snapshot cap BEFORE
+	// encryption (REQ-PTY-NET-1), so every frame decrypts on its own.
+	testing.expect_value(t, len(frames), (512 * 1024 + BRIDGE_PTY_STREAM_EMIT_SNAPSHOT_BYTES - 1) / BRIDGE_PTY_STREAM_EMIT_SNAPSHOT_BYTES)
 	for frame in frames {
-		testing.expect(t, strings.contains(frame, "\"is_encrypted\":true"))
-		testing.expect(t, strings.contains(frame, "\"is_snapshot\":true"))
-		testing.expect(t, !strings.contains(frame, "enc_b64"))
-		payload := extract_json_string(frame, "data_b64", "")
-		bytes, ok := bridge_pty_stream_decrypt_chunk(payload, TEST_ENC_VAULT_KEY)
+		_, plain, snapshot, encrypted, ok := pty_test_decode_output(frame, TEST_ENC_VAULT_KEY)
+		testing.expect(t, encrypted)
+		testing.expect(t, snapshot)
 		testing.expect(t, ok)
-		append(&result, ..bytes)
-		delete(bytes)
-		delete(payload)
+		append(&result, ..transmute([]byte)plain)
 	}
 	testing.expect_value(t, string(result[:]), source)
 }

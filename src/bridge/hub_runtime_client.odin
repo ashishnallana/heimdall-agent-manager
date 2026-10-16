@@ -630,9 +630,16 @@ bridge_hub_runtime_loop :: proc(conn: ^ws.Connection) {
 		last_iteration = now_iteration
 		inbound_count := 0
 		for inbound_count < BRIDGE_HUB_INBOUND_BUDGET {
-			text, got := ws.poll_text(conn)
+			text, opcode, got := ws.poll_frame(conn)
 			if !got do break
 			inbound_count += 1
+			// REQ-PTY-NET-3: a BINARY frame from the hub is pty input (a pty_wire session
+			// frame). It never enters the command dispatcher: no command_id, no result.
+			if opcode == 0x2 {
+				bridge_hub_handle_binary_frame(conn, transmute([]byte)text)
+				delete(text)
+				continue
+			}
 			if hub_command_frame_is_chunk(text) {
 				// A chunk frame is NEVER dispatched as a command. Only a complete
 				// stream is.
@@ -665,7 +672,10 @@ bridge_hub_runtime_loop :: proc(conn: ^ws.Connection) {
 		// inventory entry is not and yields to a later observed exit. See
 		// shell_inventory.odin.
 		bridge_shell_inventory_drain_outgoing(conn)
-		bridge_pty_stream_drain_outgoing(conn)
+		// REQ-PTY-NET-1: the pty drain is byte-budgeted per turn and says whether it
+		// left records behind; that counts as "busy" for the sleep below, so a pane
+		// streaming faster than one budget per 25 ms is not throttled by the idle cadence.
+		pty_more := bridge_pty_stream_drain_outgoing(conn)
 		bridge_tunnel_data_drain_outgoing(conn)
 		bridge_lsp_drain_outgoing(conn)
 		// bridge_log relay: at most one frame per iteration, only after
@@ -685,7 +695,7 @@ bridge_hub_runtime_loop :: proc(conn: ^ws.Connection) {
 		}
 		// Yield after a bounded burst. Idle connections retain the low-wake cadence;
 		// busy connections do not artificially process only 40 frames per second.
-		time.sleep(1 * time.Millisecond if inbound_count > 0 else 25 * time.Millisecond)
+		time.sleep(1 * time.Millisecond if inbound_count > 0 || pty_more else 25 * time.Millisecond)
 	}
 }
 
@@ -1830,6 +1840,48 @@ bridge_hub_handle_agent_pty_resize :: proc(conn: ^ws.Connection, text: string) {
 		bridge_runtime_cache_command(command_id, result)
 		if conn != nil do _ = bridge_hub_send(conn, result)
 	}
+}
+
+// bridge_hub_handle_binary_frame routes one hub->bridge BINARY frame (REQ-PTY-NET-3).
+// kind=INPUT: the same tri-state vault gate as the JSON shell_pty_input below — Locked
+// drops the keystrokes and answers with the typed shell_pty_vault_locked stream frame,
+// Unlocked accepts only ciphertext, Disabled accepts only plaintext — then delivers to the
+// pty-host. No command_result is produced: the frame carries no command_id by design.
+bridge_hub_handle_binary_frame :: proc(conn: ^ws.Connection, frame: []byte) {
+	temp := runtime.default_temp_allocator_temp_begin()
+	defer runtime.default_temp_allocator_temp_end(temp)
+	kind, flags, shell_id, payload, ok := contracts.pty_wire_decode_session_frame(frame)
+	if !ok {
+		fmt.println("bridge binary frame rejected: not a pty_wire session frame, bytes", len(frame))
+		return
+	}
+	if kind != contracts.PTY_WIRE_KIND_INPUT {
+		fmt.println("bridge binary frame ignored: unexpected kind", kind, "for shell", shell_id)
+		return
+	}
+	encrypted := contracts.pty_wire_is_encrypted(flags)
+	vault_status, key_hex := bridge_vault_status_and_key()
+	defer if vault_status == .Unlocked do delete(key_hex)
+	data := ""
+	decoded_ok := false
+	reject_reason := "invalid payload or vault encryption mode"
+	switch vault_status {
+	case .Locked:
+		reject_reason = "vault_locked"
+	case .Unlocked:
+		if encrypted {
+			plain, pok := bridge_pty_stream_decrypt_chunk_raw(payload, key_hex, context.temp_allocator)
+			if pok { data = string(plain); decoded_ok = true }
+		}
+	case .Disabled:
+		if !encrypted { data = string(payload); decoded_ok = true }
+	}
+	if !decoded_ok {
+		fmt.println("bridge pty input rejected:", reject_reason, "for shell", shell_id)
+		if vault_status == .Locked do bridge_pty_input_reply_vault_locked(conn, "", shell_id)
+		return
+	}
+	if !bridge_pty_host_deliver_shell_input(shell_id, data) do fmt.println("bridge pty input delivery failed for shell", shell_id)
 }
 
 bridge_hub_handle_shell_pty_input :: proc(conn: ^ws.Connection, text: string) {
@@ -3573,7 +3625,11 @@ bridge_hub_hello_json :: proc() -> string {
 	caps := "[]"
 	features := bridge_runtime_features_json()
 	b := strings.builder_make()
-	strings.write_string(&b, "{\"type\":\"bridge_hello\",\"protocol_version\":1,\"version\":\"")
+	// protocol_version is the bridge-ws frame version (contracts.BRIDGE_WS_FRAME_VERSION);
+	// the hub refuses a mismatch at hello, which is how a wire-format change fails loudly.
+	strings.write_string(&b, "{\"type\":\"bridge_hello\",\"protocol_version\":")
+	strings.write_int(&b, contracts.BRIDGE_WS_FRAME_VERSION)
+	strings.write_string(&b, ",\"version\":\"")
 	bridge_runtime_write_json_string(&b, contracts.APP_VERSION)
 	strings.write_string(&b, "\",\"commit_sha\":\"")
 	bridge_runtime_write_json_string(&b, contracts.GIT_COMMIT)

@@ -289,7 +289,7 @@ def test_live_directory_fs_relay() -> None:
         # Send bridge_hello
         hello_msg = json.dumps({
             "type": "bridge_hello",
-            "protocol_version": 1,
+            "protocol_version": 2,
             "bridge_id": bridge_id,
             "hostname": "mock-bridge-host",
             "capabilities": [{"provider": "claude", "tiers": ["normal"], "default_tier": "normal"}],

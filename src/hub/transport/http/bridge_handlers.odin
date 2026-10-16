@@ -1537,6 +1537,14 @@ bridge_ws_runtime_loop :: proc(
 			if reason == .Fatal_Frame do metrics.counter_inc(metrics.with(project_service.fleet_metrics.bridge_frames_rejected, "fatal_frame"))
 			return
 		}
+		if reader.last_opcode == 0x2 {
+			if !bridge_ws_process_binary_frame(h, bridge_id, connection_generation, text) {
+				reason = .Frame_Rejected
+				metrics.counter_inc(metrics.with(project_service.fleet_metrics.bridge_frames_rejected, "rejected"))
+				return
+			}
+			continue
+		}
 		if !bridge_ws_process_frame(h, bridge_id, connection_generation, client, &reassemblies, text, (^project_service.Bridge_Runtime_Connection)(reader.control_context)) {
 			// process_frame refuses a frame either because a newer connection replaced
 			// this one (it says so on the wire via bridge_connection_replaced_payload)
@@ -1547,6 +1555,33 @@ bridge_ws_runtime_loop :: proc(
 			return
 		}
 	}
+}
+
+// bridge_ws_process_binary_frame routes one bridge->hub BINARY frame (REQ-PTY-NET-2).
+// Today that is exactly one thing: a pty_wire OUTPUT session frame, handed to the shell
+// fan-out WITHOUT re-encoding — the payload bytes (raw or GCM ciphertext) go to every
+// viewer as they arrived. The frame string is owned here and freed before return.
+// Returns false only for a frame that cannot be parsed at all: a desynchronised binary
+// stream is not something to keep reading from.
+bridge_ws_process_binary_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connection_generation: int, raw: string) -> bool {
+	defer delete(raw)
+	if project_service.bridge_runtime_registry_generation(h.bridge_runtime_registry, bridge_id) != connection_generation do return false
+	kind, flags, session_id, payload, ok := contracts.pty_wire_decode_session_frame(transmute([]byte)raw)
+	if !ok {
+		fmt.eprintfln("ham-hub WARN bridge ws binary frame REJECTED bridge=%s bytes=%d (not a pty_wire session frame)", bridge_id, len(raw))
+		return false
+	}
+	switch kind {
+	case contracts.PTY_WIRE_KIND_OUTPUT:
+		metrics.counter_inc(metrics.with(project_service.fleet_metrics.bridge_ws_frames, "rx", "shell_pty_output"))
+		if h.shell_sessions != nil && len(payload) > 0 {
+			shell_session_svc.shell_session_broadcast_output(h.shell_sessions, session_id, payload, contracts.pty_wire_is_encrypted(flags), contracts.pty_wire_is_snapshot(flags), bridge_id)
+		}
+	case:
+		// Unknown kinds are dropped, not fatal: a newer bridge may add one.
+		metrics.counter_inc(metrics.with(project_service.fleet_metrics.bridge_ws_frames, "rx", "other"))
+	}
+	return true
 }
 
 // connection is this reader's own registry connection (nil in unit tests that drive
@@ -1808,17 +1843,6 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
 		// closed while the server was still talking), which is expected and dropped.
 		if h.lsp_sessions != nil {
 			_ = lsp_forward_bridge_frame(h.lsp_sessions, type, text)
-		}
-	case "shell_pty_output":
-		if h.shell_sessions != nil {
-			session_id := json_string(text, "session_id")
-			defer delete(session_id)
-			data_b64 := json_string(text, "data_b64")
-			defer delete(data_b64)
-			is_encrypted, flag_ok := json_bool_literal(text, "is_encrypted")
-			if session_id != "" && data_b64 != "" && flag_ok {
-				shell_session_svc.shell_session_broadcast_output(h.shell_sessions, session_id, data_b64, is_encrypted, json_bool(text, "is_snapshot"), bridge_id)
-			}
 		}
 	case "shell_pty_vault_locked":
 		// T10 (REQ-T10-3): the bridge refused a pane's input or suspended its output
@@ -2577,6 +2601,9 @@ Bridge_WS_Reader :: struct {
 	fragmented:        [dynamic]byte,
 	fragmenting:       bool,
 	fragmented_opcode: u8,
+	// Opcode of the message most recently returned by bridge_ws_take_frame: 0x1 text,
+	// 0x2 binary (REQ-PTY-NET-2: binary = a pty_wire frame, never JSON).
+	last_opcode:       u8,
 	control_context: rawptr,
 	control_writer: proc(rawptr, net.TCP_Socket, string) -> bool,
 }
@@ -2599,8 +2626,8 @@ bridge_ws_reader_destroy :: proc(reader: ^Bridge_WS_Reader) {
 	}
 }
 
-// bridge_ws_take_frame extracts ONE complete text frame or reassembled fragmented
-// message from reader.pending, consuming its bytes and leaving any trailing bytes
+// bridge_ws_take_frame extracts ONE complete text or binary frame or reassembled
+// fragmented message from reader.pending (reader.last_opcode says which), consuming its bytes and leaving any trailing bytes
 // for the next call.
 //
 // Full RFC 6455 framing support (REQ-WS-FIX-2):
@@ -2657,13 +2684,14 @@ bridge_ws_take_frame :: proc(reader: ^Bridge_WS_Reader) -> (text: string, ok: bo
 
 		// Data and continuation frames
 		switch op {
-		case 0x1:
+		case 0x1, 0x2:
 			if reader.fragmenting {
 				delete(payload)
 				reader.fatal_reason = .Fatal_Frame
 				return "", false, true
 			}
 			if fin {
+				reader.last_opcode = op
 				return payload, true, false
 			}
 			reader.fragmenting = true
@@ -2687,6 +2715,7 @@ bridge_ws_take_frame :: proc(reader: ^Bridge_WS_Reader) -> (text: string, ok: bo
 			delete(payload)
 			if fin {
 				reader.fragmenting = false
+				reader.last_opcode = reader.fragmented_opcode
 				assembled := strings.clone(string(reader.fragmented[:]))
 				clear(&reader.fragmented)
 				return assembled, true, false

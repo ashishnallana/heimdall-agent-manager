@@ -42,6 +42,8 @@ Shell_Session_Service :: struct {
 	viewer_writers: map[net.TCP_Socket]^Pane_Viewer_Writer,
 	viewer_write_refs: map[string]int,
 	pane_bridge_bytes: map[string]int,
+	// REQ-PTY-NET-4: last repaint per session, see shell_snapshot_cache.odin. Under mu.
+	snapshot_cache: map[string]^Shell_Snapshot_Cache_Entry,
 	// CRUD layer (T5) — session_owners and session_bridges also protected by mu.
 	repo:                ^iface.Shell_Session_Repository,
 	bridge_command_sink: project_service.Bridge_Command_Sink,
@@ -121,6 +123,7 @@ shell_session_service_free :: proc(svc: ^Shell_Session_Service) {
 	delete(svc.session_bridges)
 	for bridge_id in svc.kill_replay_bridges do delete(bridge_id, heap)
 	delete(svc.kill_replay_bridges)
+	_snapshot_cache_free_all_locked(svc)
 	sync.mutex_lock(&svc.tunnel_mu)
 	defer sync.mutex_unlock(&svc.tunnel_mu)
 	for k, stream in svc.tunnel_streams {
@@ -351,37 +354,51 @@ shell_session_viewer_write_lock :: proc(svc: ^Shell_Session_Service, session_id:
 // shell_session_write_viewer_frame writes ONE frame to one viewer socket under that
 // session's write lock. Use it for any single frame; for a multi-frame sequence take
 // shell_session_viewer_write_lock yourself and hold it across the whole sequence.
+// `opcode` is 0x1 for a JSON control frame, 0x2 for a pty_wire viewer frame.
 shell_session_write_viewer_frame :: proc(
 	svc: ^Shell_Session_Service,
 	session_id: string,
 	socket: net.TCP_Socket,
 	text: string,
+	opcode: u8 = 0x1,
 ) -> ws.Text_Write_Result {
 	write_mu := shell_session_viewer_write_lock(svc, session_id)
-	if write_mu == nil do return _write_ws_text(socket, text)
+	if write_mu == nil do return _write_ws_frame(socket, opcode, text)
 	sync.mutex_lock(write_mu)
 	defer { sync.mutex_unlock(write_mu); shell_session_viewer_write_release(svc, session_id) }
-	return pane_viewer_enqueue(svc, socket, text)
+	return pane_viewer_enqueue(svc, socket, text, opcode)
 }
 
-// shell_session_broadcast_output fans PTY output (already base64-encoded by the bridge)
-// to all WS clients attached to session_id.
-shell_session_broadcast_output :: proc(svc: ^Shell_Session_Service, session_id, data_b64: string, is_encrypted: bool = false, is_snapshot: bool = false, source_bridge_id: string = "") {
+// shell_session_write_viewer_binary writes one pty_wire viewer frame (REQ-PTY-NET-2).
+shell_session_write_viewer_binary :: proc(svc: ^Shell_Session_Service, session_id: string, socket: net.TCP_Socket, frame: []byte) -> ws.Text_Write_Result {
+	return shell_session_write_viewer_frame(svc, session_id, socket, string(frame), 0x2)
+}
+
+// shell_session_broadcast_output fans PTY output to all WS clients attached to
+// session_id as ONE binary viewer frame per call (REQ-PTY-NET-2): `payload` is the raw
+// bytes, or nonce|tag|ciphertext when `is_encrypted` — exactly as the bridge sent it,
+// never re-encoded.
+shell_session_broadcast_output :: proc(svc: ^Shell_Session_Service, session_id: string, payload: []byte, is_encrypted: bool = false, is_snapshot: bool = false, source_bridge_id: string = "") {
 	if svc == nil || session_id == "" do return
 	if source_bridge_id != "" && !shell_session_bridge_owns_stream(svc, session_id, source_bridge_id) do return
 	// heimdall_shell_output_bytes_total{bridge_id}: counted on arrival, before the
 	// viewer check, so output for an unviewed session is still visible. The bridge id
-	// is the caller's when it has one, else the session's recorded bridge.
-	shell_metrics_note_output_for_session(svc, session_id, source_bridge_id, len(data_b64))
+	// is the caller's when it has one, else the session's recorded bridge. Payload
+	// bytes, not envelope bytes.
+	shell_metrics_note_output_for_session(svc, session_id, source_bridge_id, len(payload))
 	sockets := _copy_viewers(svc, session_id)
 	defer delete(sockets)
 	if len(sockets) == 0 do return
-	frame := _output_frame_json(data_b64, is_encrypted, is_snapshot)
+	frame := contracts.pty_wire_encode_viewer_frame(contracts.PTY_WIRE_KIND_OUTPUT, contracts.pty_wire_flags(is_snapshot, is_encrypted), payload)
 	defer delete(frame)
+	// REQ-PTY-NET-4: remember the catch-up so a later joiner can be served from it and
+	// the viewers painted by it are never repainted by the hub capture. Noted BEFORE the
+	// fan-out so a first-resize that races the broadcast sees the entry.
+	shell_session_snapshot_cache_note_output(svc, session_id, frame, is_snapshot, sockets)
 	for sock in sockets {
 		// The write happens under the session write lock; the detach deliberately does
 		// NOT — it takes svc.mu, and nothing may hold the write lock while doing that.
-		result := shell_session_write_viewer_frame(svc, session_id, sock, frame)
+		result := shell_session_write_viewer_binary(svc, session_id, sock, frame)
 		_log_viewer_write("output", session_id, result, len(frame))
 		if _viewer_write_ends_session(result) {
 			// The queue/worker has already woken the reader. It owns detach.
@@ -428,6 +445,8 @@ shell_session_broadcast_stream_ready :: proc(svc: ^Shell_Session_Service, sessio
 // shell_session_broadcast_stream_closed relays stream_closed to all attached WebSocket viewers (REQ-STREAM-EVENT-3).
 shell_session_broadcast_stream_closed :: proc(svc: ^Shell_Session_Service, session_id: string, exit_code: int, exit_code_set: bool) {
 	if svc == nil || session_id == "" do return
+	// REQ-PTY-NET-4: a closed stream's last repaint is history, not a screen to serve.
+	shell_session_snapshot_cache_evict(svc, session_id)
 	sockets := _copy_viewers(svc, session_id)
 	defer delete(sockets)
 	if len(sockets) == 0 do return
@@ -1991,17 +2010,6 @@ _copy_viewers :: proc(svc: ^Shell_Session_Service, session_id: string) -> []net.
 	return out
 }
 
-_output_frame_json :: proc(data_b64: string, is_encrypted: bool = false, is_snapshot: bool = false) -> string {
-	b := strings.builder_make()
-	strings.write_string(&b, "{\"type\":\"output\",\"data_b64\":\"")
-	contracts.write_json_string(&b, data_b64)
-	strings.write_string(&b, "\",\"is_encrypted\":")
-	strings.write_string(&b, "true" if is_encrypted else "false")
-	if is_snapshot do strings.write_string(&b, ",\"is_snapshot\":true")
-	strings.write_string(&b, "}")
-	return strings.to_string(b)
-}
-
 _status_frame_json :: proc(status: string, exit_code: int, exit_code_set: bool) -> string {
 	b := strings.builder_make()
 	strings.write_string(&b, "{\"type\":\"status\",\"status\":\"")
@@ -2041,8 +2049,8 @@ _stream_closed_frame_json :: proc(session_id: string, exit_code: int, exit_code_
 // It returns the typed result rather than a bool on purpose (REQ-SHELL-33): its callers
 // decide whether to DETACH the viewer, and a bool made "I could not encode this frame"
 // indistinguishable from "this socket is dead". See _viewer_write_ends_session.
-_write_ws_text :: proc(socket: net.TCP_Socket, text: string) -> ws.Text_Write_Result {
-	return ws.write_server_text(socket, text, true)
+_write_ws_frame :: proc(socket: net.TCP_Socket, opcode: u8, text: string) -> ws.Text_Write_Result {
+	return ws.write_server_opcode(socket, opcode, text, true)
 }
 
 // _viewer_write_ends_session answers the only question the broadcast loop actually asks:

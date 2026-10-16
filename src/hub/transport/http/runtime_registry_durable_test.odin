@@ -30,7 +30,7 @@ test_runtime_expired_tombstone_cannot_override_durable_terminal_sequence :: proc
 	registry := new(project.Bridge_Runtime_Registry)
 	defer { bridge_runtime.runtime_command_cache_destroy(registry); free(registry) }
 	registry.limits.terminal_retention = time.Second
-	hello, _, _ := bridge_runtime.runtime_accept_hello(registry, "bridge", 1, "", "customer")
+	hello, _, _ := bridge_runtime.runtime_accept_hello(registry, "bridge", bridge_runtime.PROTOCOL_VERSION, "", "customer")
 	_, _, _ = project.bridge_runtime_instance_apply(registry, "bridge", hello.generation, "agent", "customer", "stopped", "idle", 10)
 	_ = project.bridge_runtime_registry_sweep(registry, time.now()._nsec + i64(2 * time.Second))
 	fixture: Registry_Durable_Fixture
@@ -42,7 +42,7 @@ test_runtime_expired_tombstone_cannot_override_durable_terminal_sequence :: proc
 	testing.expect(t, !applied && err.code == .None)
 	testing.expect_value(t, fixture.saves, 0)
 	testing.expect_value(t, registry.active_instances, 0)
-	fresh, _, _ := bridge_runtime.runtime_accept_hello(registry, "bridge", 1, "", "customer")
+	fresh, _, _ := bridge_runtime.runtime_accept_hello(registry, "bridge", bridge_runtime.PROTOCOL_VERSION, "", "customer")
 	_, applied, err = bridge_apply_validated_status(&handlers, "bridge", hello.generation, "agent", 11, "running", "idle")
 	testing.expect(t, !applied && err.code == .Bridge_Offline)
 	testing.expect(t, fresh.generation != hello.generation)

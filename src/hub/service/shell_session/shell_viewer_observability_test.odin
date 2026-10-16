@@ -185,7 +185,7 @@ test_broadcast_output_too_large_frame_does_not_detach_live_viewer :: proc(t: ^te
 
 	payload := over_cap_payload()
 	defer delete(payload)
-	shell_session_broadcast_output(&svc, "sh_big", payload)
+	shell_session_broadcast_output(&svc, "sh_big", transmute([]byte)payload)
 
 	testing.expect_value(t, shell_session_viewer_count(&svc, "sh_big"), 1)
 }
@@ -217,7 +217,7 @@ test_broadcast_output_dead_viewer_is_detached :: proc(t: ^testing.T) {
 
 	_ = net.shutdown(pair.hub, .Send)
 
-	shell_session_broadcast_output(&svc, "sh_dead", "aGk=")
+	shell_session_broadcast_output(&svc, "sh_dead", transmute([]byte)string("hi"))
 	pane_test_wait_writer(t, &svc, pair.hub)
 	testing.expect_value(t, shell_session_viewer_count(&svc, "sh_dead"), 0)
 }
@@ -230,7 +230,7 @@ test_broadcast_output_healthy_viewer_stays_attached :: proc(t: ^testing.T) {
 	defer shell_session_service_free(&svc)
 
 	shell_session_attach(&svc, "sh_ok", pair.hub)
-	shell_session_broadcast_output(&svc, "sh_ok", "aGVsbG8=")
+	shell_session_broadcast_output(&svc, "sh_ok", transmute([]byte)string("hello"))
 	testing.expect_value(t, shell_session_viewer_count(&svc, "sh_ok"), 1)
 }
 
@@ -243,7 +243,7 @@ Blocked_Broadcast :: struct {
 @(private = "file")
 broadcast_worker :: proc(raw: rawptr) {
 	b := (^Blocked_Broadcast)(raw)
-	shell_session_broadcast_output(b.svc, "sh_lock", "QUJD")
+	shell_session_broadcast_output(b.svc, "sh_lock", transmute([]byte)string("ABC"))
 	sync.atomic_store(&b.done, true)
 }
 

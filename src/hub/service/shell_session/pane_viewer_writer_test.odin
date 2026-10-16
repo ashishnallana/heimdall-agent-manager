@@ -49,7 +49,7 @@ test_pane_slow_viewer_does_not_block_healthy_viewer :: proc(t: ^testing.T) {
 	defer delete(data)
 	for i in 0..<2048 {
 		start := time.tick_now()
-		shell_session_broadcast_output(&svc, "pane", data)
+		shell_session_broadcast_output(&svc, "pane", transmute([]byte)data)
 		testing.expect(t, time.tick_since(start) < 100 * time.Millisecond, "slow viewer blocked reader")
 		sync.mutex_lock(&svc.mu)
 		w := svc.viewer_writers[slow.hub]
@@ -62,7 +62,7 @@ test_pane_slow_viewer_does_not_block_healthy_viewer :: proc(t: ^testing.T) {
 	shell_session_attach(&svc, "pane", healthy.hub, "bridge")
 	for i in 0..<40 {
 		start := time.tick_now()
-		shell_session_broadcast_output(&svc, "pane", data)
+		shell_session_broadcast_output(&svc, "pane", transmute([]byte)data)
 		testing.expect(t, time.tick_since(start) < 100 * time.Millisecond, "reader blocked on fan-out")
 		text := pane_test_read(t, &reader)
 		testing.expect(t, strings.contains(text, data), "healthy viewer output changed")
@@ -94,8 +94,10 @@ test_pane_snapshot_chunks_and_output_remain_ordered :: proc(t: ^testing.T) {
 	}
 	sync.mutex_unlock(mu)
 	shell_session_viewer_write_release(&svc, "pane")
-	shell_session_broadcast_output(&svc, "pane", "Qw==")
-	for expected in ([]string{"QQ==", "Qg==", "Qw=="}) {
+	shell_session_broadcast_output(&svc, "pane", transmute([]byte)string("C"))
+	// The two screen frames are JSON control frames (text), the output is a binary
+	// pty_wire frame; ws.poll_text hands both back as strings in write order.
+	for expected in ([]string{"QQ==", "Qg==", "C"}) {
 		text := pane_test_read(t, &reader)
 		testing.expect(t, strings.contains(text, expected))
 		delete(text)
@@ -155,7 +157,7 @@ test_pane_multiple_bridges_sustain_output_without_queue_growth :: proc(t: ^testi
 	data := strings.repeat("A", 1024)
 	defer delete(data)
 	for round in 0..<500 {
-		for i in 0..<len(pairs) do shell_session_broadcast_output(&svc, ids[i], data, false, false, bridges[i])
+		for i in 0..<len(pairs) do shell_session_broadcast_output(&svc, ids[i], transmute([]byte)data, false, false, bridges[i])
 		for i in 0..<len(pairs) {
 			text := pane_test_read(t, &readers[i])
 			testing.expect(t, strings.contains(text, data))
@@ -181,11 +183,12 @@ test_pane_resync_is_scoped_to_its_bridge :: proc(t: ^testing.T) {
 	shell_session_attach(&svc, "pane", pair.hub, "bridgeA")
 	shell_session_resync_viewers(&svc, "pane", "bridgeB")
 	testing.expect_value(t, shell_session_viewer_count(&svc, "pane"), 1)
-	shell_session_broadcast_output(&svc, "pane", "QQ==", false, false, "bridgeB")
-	shell_session_broadcast_output(&svc, "pane", "Qg==", false, false, "bridgeA")
+	shell_session_broadcast_output(&svc, "pane", transmute([]byte)string("from-B"), false, false, "bridgeB")
+	shell_session_broadcast_output(&svc, "pane", transmute([]byte)string("from-A"), false, false, "bridgeA")
 	text := pane_test_read(t, &reader)
 	defer delete(text)
-	testing.expect(t, strings.contains(text, "Qg=="))
+	testing.expect(t, strings.contains(text, "from-A"))
+	testing.expect(t, !strings.contains(text, "from-B"))
 	shell_session_resync_viewers(&svc, "pane", "bridgeA")
 	testing.expect_value(t, shell_session_viewer_count(&svc, "pane"), 0)
 }

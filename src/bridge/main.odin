@@ -809,6 +809,22 @@ bridge_hub_send :: proc(conn: ^ws.Connection, text: string) -> bool {
 	return all_sent
 }
 
+// bridge_hub_send_binary writes one BINARY frame (a pty_wire session frame) to the
+// hub-runtime WS. Binary frames are NEVER chunked: the kind:"chunk" re-splitter is a
+// text/base64 envelope and would reintroduce exactly the overhead REQ-PTY-NET-2 removes.
+// The pty drain sizes its frames to fit (bridge_pty_stream_emit_caps); an over-cap frame
+// here is a programming error and is refused loudly rather than silently dropped by the
+// edge proxy.
+bridge_hub_send_binary :: proc(conn: ^ws.Connection, frame: []byte) -> bool {
+	if len(frame) > bridge_hub_runtime_chunk_payload_bytes() {
+		fmt.eprintfln("bridge WARN binary frame exceeds the hub-runtime per-message cap and was NOT sent bytes=%d cap=%d", len(frame), bridge_hub_runtime_chunk_payload_bytes())
+		return true // the connection is healthy; only this frame is lost
+	}
+	sync.mutex_lock(&_bridge_hub_send_mu)
+	defer sync.mutex_unlock(&_bridge_hub_send_mu)
+	return ws.send_binary(conn, frame)
+}
+
 bridge_ws_chunk_json :: proc(chunk_id: string, chunk_index, chunk_count, total_bytes: int, fragment: string) -> string {
 	return ws.chunk_json(chunk_id, chunk_index, chunk_count, total_bytes, fragment)
 }

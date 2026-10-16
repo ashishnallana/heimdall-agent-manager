@@ -1,6 +1,11 @@
 # Pane Streaming Network Optimization & Compression Latency Plan
 
-Status: planned; implementation has not started.
+Status: **superseded / retired.** The audit below describes the pre-change pipeline and
+is kept for the numbers. What was built, and the wire format now in force, is in
+[pty-streaming-binary-wire.md](pty-streaming-binary-wire.md): §3.1 (coalescing), §3.3
+(drain), §3.4 (repaint storm), §3.5 (binary frames) landed; §4 / Phase 2
+(compress-before-encrypt) was **dropped by decision** — nginx `permessage-deflate` in
+front of the hub is the zero-code alternative for the plaintext case.
 
 ## 1. Executive Summary
 

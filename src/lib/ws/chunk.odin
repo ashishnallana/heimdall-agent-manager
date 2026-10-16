@@ -1,5 +1,14 @@
 package ws
 
+// Application-level chunking for oversized TEXT frames on the bridge<->hub channel:
+// a JSON envelope carrying base64 fragments, reassembled by chunk_id.
+//
+// REQ-PTY-NET-2: BINARY frames (pty_wire output/input) are NEVER chunked here. The
+// envelope is text/base64 and would reintroduce the ~1.37x + JSON overhead the binary
+// format exists to remove (and under the legacy s_client cap it base64'd base64, 1.78x).
+// Instead the pty emitter sizes its frames to fit the per-message cap on their own
+// (bridge_pty_stream_emit_caps) and bridge_hub_send_binary refuses anything larger.
+
 import base64 "core:encoding/base64"
 import "core:strconv"
 import "core:strings"

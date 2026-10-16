@@ -15,6 +15,7 @@ import "core:net"
 import "core:strings"
 import "core:sync"
 import "core:testing"
+import ws "odin_test:lib/ws"
 import "core:thread"
 import "core:time"
 import contracts "odin_test:contracts"
@@ -347,9 +348,12 @@ test_metrics_shell_stream_connection_lifecycle_and_bytes :: proc(t: ^testing.T) 
 	tm_expect_ws_invariant(t, before, during, "while connected")
 	testing.expect(t, during.open >= 1, "ws_connections{shell} must be >= 1 while this stream is open")
 
-	// One input frame: rx bytes are exact (unique bridge id), input bytes >= the payload.
-	input_json := "{\"type\":\"input\",\"data_b64\":\"Y2xlYXIK\",\"is_encrypted\":false}"
-	_ = write_ws_text_frame(pair.client, input_json)
+	// One input frame (binary pty_wire INPUT, REQ-PTY-NET-3): rx bytes are exact (unique
+	// bridge id), input bytes >= the payload.
+	input_frame := contracts.pty_wire_encode_viewer_frame(contracts.PTY_WIRE_KIND_INPUT, 0, transmute([]byte)string("clear\n"))
+	defer delete(input_frame)
+	input_json := string(input_frame)
+	_ = ws.write_server_opcode(pair.client, 0x2, input_json, false)
 	Rx_Wait :: struct { s: ^metrics.Series, want: u64 }
 	rx_wait := Rx_Wait{s = rx_series, want = rx_before + u64(len(input_json))}
 	testing.expect(t, tm_wait_until(proc(ctx: rawptr) -> bool {

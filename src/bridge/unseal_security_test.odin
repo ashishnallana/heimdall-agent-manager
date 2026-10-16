@@ -642,10 +642,11 @@ test_security_self_hosted_unconfigured_executes_unencrypted_without_errors :: pr
 
 	testing.expect(t, len(frames) > 0, "stream frame must be emitted")
 	if len(frames) > 0 {
-		first_frame := frames[0]
-		testing.expect(t, !strings.contains(first_frame, "Vault locked"), "must not emit locked warning banner")
-		testing.expect(t, !strings.contains(first_frame, VAULT_ARMOR_PREFIX), "must not emit vault:v1: armored data")
-		testing.expect(t, strings.contains(first_frame, `"data_b64":"`), "must emit plaintext data_b64 frame")
+		_, payload, _, encrypted, ok := pty_test_decode_output(frames[0])
+		testing.expect(t, ok, "must emit a binary pty_wire output frame")
+		testing.expect(t, !strings.contains(payload, "Vault locked"), "must not emit locked warning banner")
+		testing.expect(t, !encrypted, "must emit plaintext, not vault ciphertext")
+		testing.expect_value(t, payload, string(stream_data))
 	}
 }
 

@@ -214,7 +214,7 @@ test_fleet_metrics_bridge_ws_lifecycle :: proc(t: ^testing.T) {
 	}
 
 	testing.expect(t, fleet_read_until(pair.client, "\r\n\r\n"), "101 received")
-	hello := fmt.tprintf(`{{"hostname":"fleet-box","os":"linux","arch":"amd64","version":"9.9.9","bridge_id":"{0}","capabilities":{{}}}}`, f.bridge_id)
+	hello := fmt.tprintf(`{{"type":"bridge_hello","protocol_version":2,"hostname":"fleet-box","os":"linux","arch":"amd64","version":"9.9.9","bridge_id":"{0}","capabilities":{{}}}}`, f.bridge_id)
 	fleet_send_frame(t, pair.client, 0x1, hello)
 	testing.expect(t, fleet_read_until(pair.client, `"type":"bridge_ready"`), "bridge_ready received")
 
@@ -299,7 +299,7 @@ test_fleet_metrics_auth_failure_is_one_shared_series :: proc(t: ^testing.T) {
 		net.close(pair.listener)
 	}
 	testing.expect(t, fleet_read_until(pair.client, "\r\n\r\n"), "101 received")
-	fleet_send_frame(t, pair.client, 0x1, `{"hostname":"x","os":"linux","arch":"amd64","version":"1"}`)
+	fleet_send_frame(t, pair.client, 0x1, `{"type":"bridge_hello","protocol_version":2,"hostname":"x","os":"linux","arch":"amd64","version":"1"}`)
 	testing.expect(t, fleet_read_until(pair.client, `"type":"bridge_error"`), "error frame received")
 	net.close(pair.client)
 	for i in 0 ..< 300 {

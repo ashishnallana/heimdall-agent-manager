@@ -19,9 +19,12 @@ Connection :: struct {
 	stdout_r: ^os.File,
 	connected: bool,
 	pending_texts: [dynamic]string,
+	// Opcode (0x1 text / 0x2 binary) of each pending_texts entry, same index.
+	pending_opcodes: [dynamic]u8,
 	pending_bytes: [dynamic]byte,
 	fragmented:    [dynamic]byte,
 	fragmenting:   bool,
+	fragmented_opcode: u8,
 
 	// REQ-SHELL-32: serialises WRITES on this connection. It lives here, with the
 	// socket it protects, rather than at a caller, because caller-side discipline is
@@ -213,6 +216,8 @@ close :: proc(conn: ^Connection) {
 	for s in conn.pending_texts do delete(s)
 	delete(conn.pending_texts)
 	conn.pending_texts = nil
+	delete(conn.pending_opcodes)
+	conn.pending_opcodes = nil
 	delete(conn.pending_bytes)
 	conn.pending_bytes = nil
 	delete(conn.fragmented)
@@ -236,12 +241,23 @@ close :: proc(conn: ^Connection) {
 	}
 }
 
+// poll_text returns the next complete TEXT or BINARY message as a string. Use poll_frame
+// when the opcode matters (the bridge's hub loop does: binary frames are PTY input).
 poll_text :: proc(conn: ^Connection) -> (text: string, ok: bool) {
-	if !conn.connected do return "", false
+	text, _, ok = poll_frame(conn)
+	return text, ok
+}
+
+// poll_frame returns the next complete data message and its opcode (0x1 text, 0x2 binary).
+// Binary payloads are returned as a string over the raw bytes — the caller transmutes.
+poll_frame :: proc(conn: ^Connection) -> (text: string, opcode: u8, ok: bool) {
+	if !conn.connected do return "", 0, false
 	if len(conn.pending_texts) > 0 {
 		text = conn.pending_texts[0]
+		opcode = conn.pending_opcodes[0] if len(conn.pending_opcodes) > 0 else 0x1
 		ordered_remove(&conn.pending_texts, 0)
-		return text, true
+		if len(conn.pending_opcodes) > 0 do ordered_remove(&conn.pending_opcodes, 0)
+		return text, opcode, true
 	}
 
 	buf: [131072]byte
@@ -249,32 +265,33 @@ poll_text :: proc(conn: ^Connection) -> (text: string, ok: bool) {
 	if conn.secure {
 		if ready, pipe_err := os.pipe_has_data(conn.stdout_r); pipe_err != nil {
 			conn.connected = false
-			return "", false
+			return "", 0, false
 		} else if !ready {
-			return "", false
+			return "", 0, false
 		}
 		read_n, read_err := os.read(conn.stdout_r, buf[:])
 		if read_err != nil || read_n <= 0 {
 			conn.connected = false
-			return "", false
+			return "", 0, false
 		}
 		n = read_n
 	} else {
 		read_n, err := net.recv_tcp(conn.socket, buf[:])
 		if err != nil {
-			if err == .Would_Block do return "", false
+			if err == .Would_Block do return "", 0, false
 			conn.connected = false
-			return "", false
+			return "", 0, false
 		}
 		if read_n == 0 {
 			conn.connected = false
-			return "", false
+			return "", 0, false
 		}
 		n = read_n
 	}
 	append(&conn.pending_bytes, ..buf[:n])
 
 	first_text := ""
+	first_opcode: u8 = 0x1
 	for {
 		opcode, fin, payload, has_frame, ok := take_one_frame_from_pending(
 			&conn.pending_bytes,
@@ -284,7 +301,7 @@ poll_text :: proc(conn: ^Connection) -> (text: string, ok: bool) {
 		if !ok {
 			if first_text != "" do delete(first_text)
 			conn.connected = false
-			return "", false
+			return "", 0, false
 		}
 		if !has_frame do break
 
@@ -294,12 +311,12 @@ poll_text :: proc(conn: ^Connection) -> (text: string, ok: bool) {
 				delete(payload)
 				if first_text != "" do delete(first_text)
 				conn.connected = false
-				return "", false
+				return "", 0, false
 			}
 			if opcode == 0x8 {
 				delete(payload)
 				conn.connected = false
-				return "", false
+				return "", 0, false
 			}
 			if opcode == 0x9 {
 				_ = send_frame(conn, 0xA, payload)
@@ -313,25 +330,28 @@ poll_text :: proc(conn: ^Connection) -> (text: string, ok: bool) {
 			delete(payload)
 			if first_text != "" do delete(first_text)
 			conn.connected = false
-			return "", false
+			return "", 0, false
 		}
 
 		switch opcode {
-		case 0x1:
+		case 0x1, 0x2:
 			if conn.fragmenting {
 				delete(payload)
 				if first_text != "" do delete(first_text)
 				conn.connected = false
-				return "", false
+				return "", 0, false
 			}
 			if fin {
 				if first_text == "" {
 					first_text = payload
+					first_opcode = opcode
 				} else {
 					append(&conn.pending_texts, payload)
+					append(&conn.pending_opcodes, opcode)
 				}
 			} else {
 				conn.fragmenting = true
+				conn.fragmented_opcode = opcode
 				clear(&conn.fragmented)
 				append(&conn.fragmented, ..transmute([]byte)payload)
 				delete(payload)
@@ -341,13 +361,13 @@ poll_text :: proc(conn: ^Connection) -> (text: string, ok: bool) {
 				delete(payload)
 				if first_text != "" do delete(first_text)
 				conn.connected = false
-				return "", false
+				return "", 0, false
 			}
 			if len(conn.fragmented) + len(payload) > WS_CONTINUATION_DEFAULT_MAX_BYTES {
 				delete(payload)
 				if first_text != "" do delete(first_text)
 				conn.connected = false
-				return "", false
+				return "", 0, false
 			}
 			append(&conn.fragmented, ..transmute([]byte)payload)
 			delete(payload)
@@ -357,20 +377,22 @@ poll_text :: proc(conn: ^Connection) -> (text: string, ok: bool) {
 				clear(&conn.fragmented)
 				if first_text == "" {
 					first_text = assembled
+					first_opcode = conn.fragmented_opcode
 				} else {
 					append(&conn.pending_texts, assembled)
+					append(&conn.pending_opcodes, conn.fragmented_opcode)
 				}
 			}
 		case:
 			delete(payload)
 			if first_text != "" do delete(first_text)
 			conn.connected = false
-			return "", false
+			return "", 0, false
 		}
 	}
 
-	if first_text == "" do return "", false
-	return first_text, true
+	if first_text == "" do return "", 0, false
+	return first_text, first_opcode, true
 }
 
 // All frames, including pong, share the connection writer and deadline.
@@ -380,6 +402,12 @@ send_text :: proc(conn: ^Connection, text: string) -> bool {
 
 send_text_with_deadline :: proc(conn: ^Connection, text: string, timeout: time.Duration) -> bool {
 	return send_frame(conn, 0x1, text, timeout)
+}
+
+// send_binary writes one BINARY (opcode 0x2) frame under the same writer lock and
+// deadline as text. REQ-PTY-NET-2: pty output/input frames.
+send_binary :: proc(conn: ^Connection, payload: []byte) -> bool {
+	return send_frame(conn, 0x2, string(payload))
 }
 
 @(private)

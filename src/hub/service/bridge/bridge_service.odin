@@ -408,13 +408,15 @@ write_service_json_string :: proc(b: ^strings.Builder, value: string) {
 	contracts.write_json_string(b, value)
 }
 
+// shell_pty_input_command_json is the JSON (acked, command_id-bearing) form of pty input,
+// used by the REST fallback which must wait for a typed refusal. The pane WebSocket uses
+// the binary ack-less form (send_shell_input_binary). REQ-PTY-NET-3 dropped the duplicated
+// `agent_instance_id`: the bridge keys on `shell_id` for both panes.
 shell_pty_input_command_json :: proc(command_id, shell_id, data: string, enc_b64: string = "") -> string {
 	b := strings.builder_make()
 	strings.write_string(&b, "{\"type\":\"shell_pty_input\",\"command_id\":\"")
 	write_service_json_string(&b, command_id)
 	strings.write_string(&b, "\",\"shell_id\":\"")
-	write_service_json_string(&b, shell_id)
-	strings.write_string(&b, "\",\"agent_instance_id\":\"")
 	write_service_json_string(&b, shell_id)
 	strings.write_string(&b, "\",\"data_b64\":\"")
 	payload := enc_b64
@@ -482,6 +484,33 @@ send_shell_input :: proc(service: ^Bridge_Service, auth: contracts.Auth_Context,
 	sent, send_err := project_service.bridge_command_send_runtime_checked(sink, command, wait_for_result)
 	if !sent do return false, send_err
 	return true, domain.Domain_Error{}
+}
+
+// send_shell_input_binary relays keystrokes from a pane WebSocket as ONE binary pty_wire
+// INPUT session frame (REQ-PTY-NET-3): no command_id, no command_result, no base64.
+// `payload` is plaintext or nonce|tag|ciphertext exactly as the browser sent it; the hub
+// never decrypts keystrokes. A locked vault is reported by the bridge's in-stream
+// shell_pty_vault_locked frame, as before.
+send_shell_input_binary :: proc(service: ^Bridge_Service, auth: contracts.Auth_Context, bridge_id, shell_id: string, payload: []byte, encrypted: bool, sink_override: project_service.Bridge_Command_Sink = {}) -> (bool, domain.Domain_Error) {
+	if strings.trim_space(shell_id) == "" {
+		return false, domain.domain_error(.Validation_Failed, "shell_id is required")
+	}
+	if len(payload) == 0 do return true, domain.Domain_Error{}
+	bridge, ok, err := get_bridge(service, auth, bridge_id)
+	if !ok do return false, err
+	if bridge.status == .Revoked {
+		return false, domain.domain_error(.Bridge_Revoked, "bridge is revoked")
+	}
+	if bridge.status != .Online {
+		return false, domain.domain_error(.Bridge_Offline, fmt.tprintf("Bridge %s is not connected", bridge.bridge_id))
+	}
+	sink := service.bridge_command_sink
+	if sink.send_runtime_binary == nil && sink_override.send_runtime_binary != nil {
+		sink = sink_override
+	}
+	frame := contracts.pty_wire_encode_session_frame(contracts.PTY_WIRE_KIND_INPUT, contracts.pty_wire_flags(false, encrypted), shell_id, payload, context.temp_allocator)
+	if frame == nil do return false, domain.domain_error(.Validation_Failed, "shell_id too long for a pty frame")
+	return project_service.bridge_command_send_runtime_binary(sink, bridge.bridge_id, frame)
 }
 
 send_shell_resize :: proc(service: ^Bridge_Service, auth: contracts.Auth_Context, bridge_id, shell_id: string, rows, cols: int, sink_override: project_service.Bridge_Command_Sink = {}) -> (bool, domain.Domain_Error) {

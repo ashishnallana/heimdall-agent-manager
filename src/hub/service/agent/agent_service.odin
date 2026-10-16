@@ -766,8 +766,6 @@ agent_pty_input_command_json :: proc(command_id, instance_id, data: string, enc_
 	write_service_json_string(&b, command_id)
 	strings.write_string(&b, "\",\"shell_id\":\"")
 	write_service_json_string(&b, instance_id)
-	strings.write_string(&b, "\",\"agent_instance_id\":\"")
-	write_service_json_string(&b, instance_id)
 	strings.write_string(&b, "\",\"data_b64\":\"")
 	payload := enc_b64
 	if payload == "" { payload = string(base64.encode(transmute([]byte)data, allocator = context.temp_allocator)) }
@@ -815,6 +813,21 @@ agent_service_send_pty_input :: proc(service: ^Agent_Service, auth: contracts.Au
 }
 
 send_pty_input :: agent_service_send_pty_input
+
+// agent_service_send_pty_input_binary is the pane-WebSocket form: one binary pty_wire
+// INPUT frame, no command_id, no ack (REQ-PTY-NET-3). Twin of
+// bridge_service.send_shell_input_binary; the bridge keys both on shell_id.
+agent_service_send_pty_input_binary :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, instance_id: string, payload: []byte, encrypted: bool) -> (bool, domain.Domain_Error) {
+	inst, ok, err := get_instance(service, auth, instance_id)
+	if !ok do return false, err
+	if strings.trim_space(inst.bridge_id) == "" {
+		return false, domain.domain_error(.Bridge_Offline, "agent instance has no bridge")
+	}
+	if len(payload) == 0 do return true, domain.Domain_Error{}
+	frame := contracts.pty_wire_encode_session_frame(contracts.PTY_WIRE_KIND_INPUT, contracts.pty_wire_flags(false, encrypted), instance_id, payload, context.temp_allocator)
+	if frame == nil do return false, domain.domain_error(.Validation_Failed, "instance id too long for a pty frame")
+	return project_service.bridge_command_send_runtime_binary(service.bridge_command_sink, inst.bridge_id, frame)
+}
 
 agent_pty_resize_command_json :: proc(command_id, instance_id: string, rows, cols: int) -> string {
 	b := strings.builder_make()
