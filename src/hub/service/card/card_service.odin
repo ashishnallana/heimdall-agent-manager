@@ -118,7 +118,7 @@ op_field_missing :: proc(field: string) -> string { return fmt.tprintf("missing 
 // unrecognized op name is rejected so unknown ops are caught at create, not accept.
 validate_op_required_args :: proc(op_name: string, op_obj: json.Object) -> (bool, string) {
 	switch op_name {
-	case "task.vote":
+	case "task.review":
 		if op_arg_string(op_obj, "task_id") == "" do return false, op_field_missing("task_id")
 	case "memory.approve", "memory.reject", "memory.update", "memory.delete", "memory.archive":
 		if op_arg_string(op_obj, "memory_id") == "" && op_arg_string(op_obj, "id") == "" do return false, op_field_missing("memory_id")
@@ -149,23 +149,6 @@ validate_op_required_args :: proc(op_name: string, op_obj: json.Object) -> (bool
 		return false, fmt.tprintf("unsupported card operation: %s", op_name)
 	}
 	return true, ""
-}
-
-task_status_str :: proc(st: domain.Task_Status) -> string {
-	switch st {
-	case .Assigned: return "assigned"
-	case .Queued: return "queued"
-	case .In_Progress: return "in_progress"
-	case .In_Validation: return "in_validation"
-	case .Finishing: return "finishing"
-	case .Pausing: return "pausing"
-	case .Validated_Good: return "validated_good"
-	case .Validated_Not_Good: return "validated_not_good"
-	case .Paused: return "paused"
-	case .Completed: return "completed"
-	case .Cancelled: return "cancelled"
-	}
-	return "assigned"
 }
 
 chain_status_str :: proc(st: domain.Task_Chain_Status) -> string {
@@ -365,15 +348,9 @@ sync_projected_cards :: proc(s: ^Card_Service, owner: domain.User_ID) {
 				defer delete(tasks)
 
 				for task in tasks {
-					if task.status != .In_Validation do continue
-
-					// Only surface tasks that AWAIT THE USER: skip any task that has an
-					// agent reviewer (that agent will vote on it). Empty / user-only
-					// reviewer_refs yields 0 instances => still projected.
-					task_reviewers := taskchain_service.extract_instances_from_ref_blob(task.reviewer_refs_json)
-					has_agent_reviewer := len(task_reviewers) > 0
-					delete(task_reviewers)
-					if has_agent_reviewer do continue
+					// Task System v2: a task awaits the USER when it is in_review and
+					// requires_user_approval; agent reviewers hold review leases instead.
+					if task.state != .In_Review || !task.requires_user_approval do continue
 
 					cid := domain.Card_ID(fmt.tprintf("crd_task_%s", string(task.task_id)))
 					existing, exists, _ := iface.card_get(s.cards, cid)
@@ -396,16 +373,16 @@ sync_projected_cards :: proc(s: ^Card_Service, owner: domain.User_ID) {
 					rationale := fmt.tprintf("Task %s in chain \"%s\" is in validation and awaiting review", string(task.task_id), c_title)
 
 					b_ops := strings.builder_make()
-					strings.write_string(&b_ops, `[{"op":"task.vote","label":"`)
-					contracts.write_json_string(&b_ops, fmt.tprintf("Cast LGTM on task: %s", t_title))
+					strings.write_string(&b_ops, `[{"op":"task.review","label":"`)
+					contracts.write_json_string(&b_ops, fmt.tprintf("Approve task: %s", t_title))
 					strings.write_string(&b_ops, `","args":{"task_id":"`)
 					contracts.write_json_string(&b_ops, string(task.task_id))
-					strings.write_string(&b_ops, `","result":"lgtm"}}]`)
+					strings.write_string(&b_ops, `","verdict":"approve"}}]`)
 
 					b_guard := strings.builder_make()
 					strings.write_string(&b_guard, `{"task_id":"`)
 					contracts.write_json_string(&b_guard, string(task.task_id))
-					strings.write_string(&b_guard, `","expected_status":"in_validation"}`)
+					strings.write_string(&b_guard, `","expected_status":"in_review"}`)
 
 					b_refs := strings.builder_make()
 					strings.write_string(&b_refs, `[{"type":"task","id":"`)
@@ -530,19 +507,15 @@ evaluate_guard :: proc(s: ^Card_Service, owner: domain.User_ID, card: domain.Car
 			return false, "referenced task does not exist"
 		}
 		if expected_status != "" {
-			actual_status := task_status_str(task.status)
+			actual_status := domain.task_state_string(task.state)
 			if actual_status != expected_status {
-				return false, fmt.tprintf("task status is %s, expected %s", actual_status, expected_status)
+				return false, fmt.tprintf("task state is %s, expected %s", actual_status, expected_status)
 			}
 		}
 		// Consistency with sync_projected_cards: a task card only belongs on the
-		// user's feed while the task awaits the user. Once an agent reviewer is
-		// assigned the card is stale (that agent will vote, not the user).
-		reviewers := taskchain_service.extract_instances_from_ref_blob(task.reviewer_refs_json)
-		has_agent_reviewer := len(reviewers) > 0
-		delete(reviewers)
-		if has_agent_reviewer {
-			return false, "task now has an agent reviewer"
+		// user's feed while the task awaits the USER's approval.
+		if !task.requires_user_approval {
+			return false, "task does not require user approval"
 		}
 	}
 
@@ -787,15 +760,9 @@ reject_card :: proc(s: ^Card_Service, auth: contracts.Auth_Context, id: domain.C
 
 	// For provider cards, execute negative action:
 	if card.provider == domain.CARD_PROVIDER_TASK_VALIDATION {
-		task_id := domain.Task_ID(strings.trim_prefix(string(card.card_id), "crd_task_"))
-		if s.taskchains != nil {
-			_, vote_ok, vote_err := taskchain_service.record_task_vote(s.taskchains, user_auth, taskchain_service.Vote_Input{
-				task_id = task_id,
-				vote    = "ngtm",
-				comment = "Rejected via Action Card",
-			})
-			if !vote_ok do return domain.Card{}, false, vote_err
-		}
+		// Task System v2: a user rejection is a `request_changes` review (M2). Until
+		// that verb lands the card itself is rejected without touching the task.
+		_ = user_auth
 	} else if card.provider == domain.CARD_PROVIDER_MEMORY_PROPOSAL {
 		mem_id := strings.trim_prefix(string(card.card_id), "crd_mem_")
 		if s.content != nil {
@@ -872,25 +839,12 @@ accept_card :: proc(s: ^Card_Service, auth: contracts.Auth_Context, id: domain.C
 		op_name := json_obj_string(op_obj, "op")
 
 		switch op_name {
-		case "task.vote":
-			tid := op_arg_string(op_obj, "task_id")
-			result := op_arg_string(op_obj, "result")
-			comment := op_arg_string(op_obj, "comment")
-			if result == "" do result = "lgtm"
-			if comment == "" do comment = "Accepted via Action Card"
-			if s.taskchains == nil {
-				if has_uow do iface.unit_of_work_rollback(&uow)
-				return domain.Card{}, false, domain.domain_error(.Internal_Error, "taskchain service is not configured")
-			}
-			_, v_ok, v_err := taskchain_service.record_task_vote(s.taskchains, user_auth, taskchain_service.Vote_Input{
-				task_id = domain.Task_ID(tid),
-				vote    = result,
-				comment = comment,
-			})
-			if !v_ok {
-				if has_uow do iface.unit_of_work_rollback(&uow)
-				return domain.Card{}, false, v_err
-			}
+		case "task.review":
+			// Task System v2: the user's approval is a review verdict (`review.post`,
+			// M2). Until that verb lands, accepting the card is refused rather than
+			// faking a state change.
+			if has_uow do iface.unit_of_work_rollback(&uow)
+			return domain.Card{}, false, domain.domain_error(.Not_Implemented, "task review from an action card arrives with Task System v2 M2 (review.post)")
 
 		case "memory.approve":
 			mid := op_arg_string(op_obj, "memory_id")

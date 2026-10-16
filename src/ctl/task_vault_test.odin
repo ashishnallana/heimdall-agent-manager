@@ -22,7 +22,7 @@ test_task_user_approval_flags_serialize :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(updated, `"requires_user_approval":false`), "update must serialize the negative flag")
 	testing.expect(t, !ctl_task_reviewer_flags_valid([]string{"--require-user-approval", "--no-require-user-approval"}, true), "conflicting flags must fail")
 	testing.expect(t, !ctl_task_reviewer_flags_valid([]string{"--reviewer", "user"}, true), "legacy user reviewer alias must fail")
-	testing.expect(t, ctl_task_reviewer_flags_valid([]string{"--reviewer", "reviewer@chain"}, true), "agent-instance reviewer IDs containing @ must remain valid")
+	testing.expect(t, ctl_task_reviewer_flags_valid([]string{"--reviewer", "reviewer@chain"}, true), "agent reviewer IDs containing @ must remain valid")
 }
 
 @(test)
@@ -35,7 +35,7 @@ test_task_create_encryption_with_vault_key :: proc(t: ^testing.T) {
 		"--description", orig_desc,
 		"--chain", "chain_vault_001",
 		"--priority", "p1",
-		"--assignee", "inst_worker_1",
+		"--assignee", "agt_worker_1",
 		"--reviewer", "agt_reviewer_1,agt_reviewer_2",
 		"--depends-on", "task_dep_alpha",
 		"--vault-key", TEST_TASK_VAULT_KEY,
@@ -46,8 +46,8 @@ test_task_create_encryption_with_vault_key :: proc(t: ^testing.T) {
 	// Check metadata and workflow fields are preserved in plaintext
 	testing.expect(t, strings.contains(out, `"chain_id":"chain_vault_001"`), "chain_id must be plaintext")
 	testing.expect(t, strings.contains(out, `"priority":"p1"`), "priority must be plaintext")
-	testing.expect(t, strings.contains(out, `"assignee_ref"`), "assignee_ref must be preserved")
-	testing.expect(t, strings.contains(out, `"reviewer_refs"`), "reviewer_refs must be preserved")
+	testing.expect(t, strings.contains(out, `"assignee":"agt_worker_1"`), "assignee must be preserved (v2 plain agent_id)")
+	testing.expect(t, strings.contains(out, `"reviewers":["agt_reviewer_1","agt_reviewer_2"]`), "reviewers must be preserved (v2 agent_id array)")
 	testing.expect(t, strings.contains(out, `"depends_on":["task_dep_alpha"]`), "depends_on must be preserved")
 
 	// Title must be encrypted
@@ -184,7 +184,7 @@ test_task_show_and_list_transparent_decryption :: proc(t: ^testing.T) {
 	enc_preview, _ := vault_encrypt_text_hex(orig_preview, TEST_TASK_VAULT_KEY, context.temp_allocator)
 
 	raw_json := fmt.tprintf(
-		`{{"v":1,"ok":true,"data":{{"data":{{"task_id":"task_test_show_1","title":"%s","description":"%s","priority":"p1","status":"in_progress","comment_summary":{{"count":3,"last_comment_preview":"%s"}}}}}}}}`,
+		`{{"v":1,"ok":true,"data":{{"data":{{"task_id":"task_test_show_1","title":"%s","description":"%s","priority":"p1","state":"in_progress","comment_summary":{{"count":3,"last_comment_preview":"%s"}}}}}}}}`,
 		enc_title, enc_desc, enc_preview,
 	)
 
@@ -221,7 +221,7 @@ test_task_unconfigured_fallback :: proc(t: ^testing.T) {
 	enc_title, _ := vault_encrypt_text_hex(orig_title, TEST_TASK_VAULT_KEY, context.temp_allocator)
 
 	raw_json := fmt.tprintf(
-		`{{"v":1,"ok":true,"data":{{"task_id":"task_unconfigured","title":"%s","status":"pending"}}}}`,
+		`{{"v":1,"ok":true,"data":{{"task_id":"task_unconfigured","title":"%s","state":"backlog"}}}}`,
 		enc_title,
 	)
 
@@ -230,7 +230,7 @@ test_task_unconfigured_fallback :: proc(t: ^testing.T) {
 	testing.expect(t, !strings.contains(decrypted, orig_title), "must not leak plaintext without key")
 	expected_fallback := fmt.tprintf(`[Encrypted: %s]`, enc_title)
 	testing.expect(t, strings.contains(decrypted, expected_fallback), "must contain [Encrypted: vault:v1:...] fallback")
-	testing.expect(t, strings.contains(decrypted, `"status":"pending"`), "unencrypted fields remain intact")
+	testing.expect(t, strings.contains(decrypted, `"state":"backlog"`), "unencrypted fields remain intact")
 }
 
 @(test)

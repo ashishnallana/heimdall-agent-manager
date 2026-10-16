@@ -285,20 +285,10 @@ ctl_v2_task_chain :: proc(endpoint, token: string, tokens, args: []string) {
 		ctl_agent_call(endpoint, token, "agent.task_chain.set_status", json_object_from_slice(fields[:]))
 	case "publish":
 		// Coordinator only (enforced hub-side). Flips the chain Draft -> Published and
-		// cascades Published to its tasks, which is what makes them promotable/nudgeable.
+		// cascades Published to its tasks, which is what makes them schedulable.
 		cid := option_value(args, "--chain", pos(tokens, 1))
 		if cid == "" { print_agent_help([]string{"task-chain"}); return }
 		ctl_agent_call(endpoint, token, "agent.task_chain.publish", json_object(json_kv("chain_id", cid)))
-	case "subscribe":
-		cid := option_value(args, "--chain", option_value(args, "--chain-id", pos(tokens, 1)))
-		events := option_value(args, "--events", option_value(args, "--event-type", "all"))
-		if cid == "" { print_agent_help([]string{"task-chain"}); return }
-		ctl_agent_call(endpoint, token, "agent.task_chain.subscribe", ctl_agentmode_chain_subscribe_params(cid, events))
-	case "unsubscribe":
-		cid := option_value(args, "--chain", option_value(args, "--chain-id", pos(tokens, 1)))
-		events := option_value(args, "--events", option_value(args, "--event-type", ""))
-		if cid == "" { print_agent_help([]string{"task-chain"}); return }
-		ctl_agent_call(endpoint, token, "agent.task_chain.unsubscribe", ctl_agentmode_chain_unsubscribe_params(cid, events))
 	case "pin":
 		cid := option_value(args, "--chain", pos(tokens, 1))
 		if cid == "" { print_agent_help([]string{"task-chain"}); return }
@@ -437,24 +427,6 @@ ctl_v2_task :: proc(endpoint, token: string, tokens, args: []string) {
 		if tid == "" || body == "" { print_agent_help([]string{"task"}); return }
 		params := ctl_agentmode_task_comment_params(tid, body, args)
 		ctl_agent_call(endpoint, token, "agent.task.comment", params)
-	case "status":
-		tid := pos(tokens, 1)
-		status := option_value(args, "--status", "")
-		if tid == "" || status == "" { print_agent_help([]string{"task"}); return }
-		ctl_agent_call(endpoint, token, "agent.task.status", json_object(json_kv("task_id", tid), json_kv("status", status)))
-	case "vote":
-		tid := pos(tokens, 1)
-		result := option_value(args, "--result", "")
-		if tid == "" || result == "" { print_agent_help([]string{"task"}); return }
-		ctl_agent_call(endpoint, token, "agent.task.vote", json_object(json_kv("task_id", tid), json_kv("result", result), json_kv("comment", option_value(args, "--comment", ""))))
-	case "nudge":
-		tid := pos(tokens, 1)
-		if tid == "" { print_agent_help([]string{"task"}); return }
-		ctl_agent_call(endpoint, token, "agent.task.nudge", json_object(json_kv("task_id", tid), json_kv("message", option_value(args, "--message", ""))))
-	case "set-current":
-		tid := pos(tokens, 1)
-		if tid == "" { print_agent_help([]string{"task"}); return }
-		ctl_agent_call(endpoint, token, "agent.task.set_current", json_object(json_kv("task_id", tid)))
 	case "depend":
 		tid := pos(tokens, 1)
 		on := option_value(args, "--on", "")
@@ -470,16 +442,6 @@ ctl_v2_task :: proc(endpoint, token: string, tokens, args: []string) {
 		if !ctl_task_reviewer_flags_valid(args, true) do return
 		params := ctl_agentmode_task_update_params(tid, args)
 		ctl_agent_call(endpoint, token, "agent.task.update", params)
-	case "subscribe":
-		tid := option_value(args, "--task", option_value(args, "--task-id", pos(tokens, 1)))
-		events := option_value(args, "--events", option_value(args, "--event-type", "all"))
-		if tid == "" { print_agent_help([]string{"task"}); return }
-		ctl_agent_call(endpoint, token, "agent.task.subscribe", ctl_agentmode_task_subscribe_params(tid, events))
-	case "unsubscribe":
-		tid := option_value(args, "--task", option_value(args, "--task-id", pos(tokens, 1)))
-		events := option_value(args, "--events", option_value(args, "--event-type", ""))
-		if tid == "" { print_agent_help([]string{"task"}); return }
-		ctl_agent_call(endpoint, token, "agent.task.unsubscribe", ctl_agentmode_task_unsubscribe_params(tid, events))
 	case:
 		print_agent_help([]string{"task"})
 	}
@@ -565,36 +527,27 @@ json_string_array_field :: proc(key: string, values: []string) -> string {
 	return strings.to_string(b)
 }
 
-// ctl_v2_actor_ref formats an actor reference for tasks: if the ID begins with
-// "agt_", it is formatted as a durable declarative agent_id ref {"type":"agent_id","agent_id":"..."}.
-// Otherwise, it is formatted as an agent_instance ref {"type":"agent_instance","agent_instance_id":"..."}.
-ctl_v2_actor_ref :: proc(id: string) -> string {
-	if strings.has_prefix(id, "agt_") {
-		return json_object(json_kv("type", "agent_id"), json_kv("agent_id", id))
-	}
-	return json_object(json_kv("type", "agent_instance"), json_kv("agent_instance_id", id))
+// ctl_v2_assignee_field builds the Task System v2 `"assignee":"<agent_id>"` field.
+// Instance pins were removed: only durable agent ids (agt_…) are accepted; an
+// inst_… value is rejected earlier by ctl_task_reviewer_flags_valid.
+ctl_v2_assignee_field :: proc(id: string) -> string {
+	return json_kv("assignee", strings.trim_space(id))
 }
 
-// ctl_v2_reviewer_refs builds a "reviewer_refs":[{type,...},...]
-// field from a comma-separated list of agent-instance or durable agent ids, so a task can carry
-// MULTIPLE reviewers (the hub reviewer_refs is an array). Empty/blank ids are
-// skipped; an all-blank csv still emits an empty array so callers can CLEAR the
-// reviewer list explicitly.
-ctl_v2_reviewer_refs :: proc(csv: string) -> string {
-	parts := strings.split(csv, ",")
-	defer delete(parts)
-	b := strings.builder_make()
-	strings.write_string(&b, "\"reviewer_refs\":[")
-	first := true
-	for p in parts {
-		id := strings.trim_space(p)
-		if id == "" do continue
-		if !first do strings.write_byte(&b, ',')
-		first = false
-		strings.write_string(&b, ctl_v2_actor_ref(id))
-	}
-	strings.write_byte(&b, ']')
-	return strings.to_string(b)
+// ctl_v2_reviewers_field builds the Task System v2 `"reviewers":[agent_id,…]`
+// field from every `--reviewer` occurrence (repeatable AND comma-separated), so a
+// task can carry MULTIPLE reviewers. Blank ids are skipped; `--reviewer ""` still
+// emits an empty array so callers can CLEAR the reviewer list explicitly.
+ctl_v2_reviewers_field :: proc(args: []string) -> string {
+	ids := collect_multi_values(args, "--reviewer", "--reviewer-agent-id")
+	defer delete(ids)
+	return json_string_array_field("reviewers", ids[:])
+}
+
+// ctl_task_actor_id_is_instance reports whether a --assignee/--reviewer value is a
+// live instance id (inst_…), which Task System v2 no longer accepts as a task actor.
+ctl_task_actor_id_is_instance :: proc(id: string) -> bool {
+	return strings.has_prefix(strings.trim_space(id), "inst_")
 }
 
 ctl_task_reviewer_flags_valid :: proc(args: []string, allow_disable: bool) -> bool {
@@ -606,14 +559,24 @@ ctl_task_reviewer_flags_valid :: proc(args: []string, allow_disable: bool) -> bo
 		fmt.println("--no-require-user-approval is only valid for task update")
 		return false
 	}
-	if has_flag(args, "--reviewer") {
-		parts := strings.split(option_value(args, "--reviewer", ""), ",")
-		defer delete(parts)
-		for raw in parts {
-			id := strings.trim_space(raw)
-			if id == "" do continue
+	if has_flag(args, "--assignee-agent-instance-id") || has_flag(args, "--reviewer-agent-instance-id") {
+		fmt.println("--assignee-agent-instance-id / --reviewer-agent-instance-id were removed in Task System v2: tasks target durable agent ids (agt_...), not instances; use --assignee / --reviewer <agt_id>")
+		return false
+	}
+	if a := option_value(args, "--assignee", option_value(args, "--assignee-agent-id", "")); ctl_task_actor_id_is_instance(a) {
+		fmt.printfln("--assignee must be a durable agent id (agt_...), got instance id %q: instance pins were removed in Task System v2", strings.trim_space(a))
+		return false
+	}
+	if has_flag(args, "--reviewer") || has_flag(args, "--reviewer-agent-id") {
+		ids := collect_multi_values(args, "--reviewer", "--reviewer-agent-id")
+		defer delete(ids)
+		for id in ids {
 			if id == "user" || id == "user_proxy" {
-				fmt.println("--reviewer accepts agent IDs or agent-instance IDs only; use --require-user-approval for user review")
+				fmt.println("--reviewer accepts durable agent IDs (agt_...) only; use --require-user-approval for user review")
+				return false
+			}
+			if ctl_task_actor_id_is_instance(id) {
+				fmt.printfln("--reviewer must be durable agent ids (agt_...), got instance id %q: instance pins were removed in Task System v2", id)
 				return false
 			}
 		}
@@ -1383,22 +1346,6 @@ ctl_agentmode_task_chain_create_params :: proc(args: []string, positional_title:
 	return json_object_from_slice(fields[:])
 }
 
-ctl_agentmode_chain_subscribe_params :: proc(cid, events: string) -> string {
-	return json_object(json_kv("chain_id", cid), json_kv("events", events))
-}
-
-ctl_agentmode_chain_unsubscribe_params :: proc(cid, events: string) -> string {
-	return json_object(json_kv("chain_id", cid), json_kv("events", events))
-}
-
-ctl_agentmode_task_subscribe_params :: proc(tid, events: string) -> string {
-	return json_object(json_kv("task_id", tid), json_kv("events", events))
-}
-
-ctl_agentmode_task_unsubscribe_params :: proc(tid, events: string) -> string {
-	return json_object(json_kv("task_id", tid), json_kv("events", events))
-}
-
 ctl_agentmode_task_create_params :: proc(args: []string) -> string {
 	title := option_value(args, "--title", "")
 	desc := option_value(args, "--description", "")
@@ -1420,8 +1367,8 @@ ctl_agentmode_task_create_params :: proc(args: []string) -> string {
 	if desc != "" do append(&fields, json_kv("description", desc))
 	if v := option_value(args, "--chain", ""); v != "" do append(&fields, json_kv("chain_id", v))
 	if v := option_value(args, "--priority", ""); v != "" do append(&fields, json_kv("priority", v))
-	if a := option_value(args, "--assignee", ""); a != "" do append(&fields, strings.concatenate({"\"assignee_ref\":", ctl_v2_actor_ref(a)}))
-	if r := option_value(args, "--reviewer", ""); r != "" do append(&fields, ctl_v2_reviewer_refs(r))
+	if a := option_value(args, "--assignee", ""); a != "" do append(&fields, ctl_v2_assignee_field(a))
+	if has_flag(args, "--reviewer") do append(&fields, ctl_v2_reviewers_field(args))
 	if has_flag(args, "--require-user-approval") do append(&fields, `"requires_user_approval":true`)
 	if deps := option_value(args, "--depends-on", ""); deps != "" do append(&fields, ctl_v2_json_string_array("depends_on", deps))
 	if b := option_value(args, "--bridge", ""); b != "" do append(&fields, json_kv("bridge_id", b))
@@ -1467,8 +1414,8 @@ ctl_agentmode_task_update_params :: proc(tid: string, args: []string) -> string 
 	if title != "" do append(&fields, json_kv("title", title))
 	if desc != "" do append(&fields, json_kv("description", desc))
 	if v := option_value(args, "--priority", ""); v != "" do append(&fields, json_kv("priority", v))
-	if a := option_value(args, "--assignee", ""); a != "" do append(&fields, strings.concatenate({"\"assignee_ref\":", ctl_v2_actor_ref(a)}))
-	if has_flag(args, "--reviewer") do append(&fields, ctl_v2_reviewer_refs(option_value(args, "--reviewer", "")))
+	if a := option_value(args, "--assignee", ""); a != "" do append(&fields, ctl_v2_assignee_field(a))
+	if has_flag(args, "--reviewer") do append(&fields, ctl_v2_reviewers_field(args))
 	if has_flag(args, "--require-user-approval") do append(&fields, `"requires_user_approval":true`)
 	if has_flag(args, "--no-require-user-approval") do append(&fields, `"requires_user_approval":false`)
 	if has_flag(args, "--depends-on") do append(&fields, ctl_v2_json_string_array("depends_on", option_value(args, "--depends-on", "")))
@@ -1820,7 +1767,6 @@ print_help_overview :: proc() {
 	fmt.println("  ham-ctl agents restart inst_123")
 	fmt.println("  ham-ctl task show inst_task_1")
 	fmt.println("  ham-ctl task comment inst_task_1 --body \"pushed fix, tests green\"")
-	fmt.println("  ham-ctl task status  inst_task_1 --status in_validation")
 	fmt.println("  ham-ctl chat read")
 	fmt.println("  ham-ctl chat send --to user --body \"Done — ready for review.\"")
 	fmt.println("  ham-ctl chat send --to inst_reviewer --body \"Can you LGTM inst_task_1?\"")
@@ -1885,9 +1831,7 @@ print_help_task_chain :: proc() {
 	fmt.println("  unarchive [<chain-id>]              Restore an archived task chain to active (coordinator only).")
 	fmt.println("  publish <chain-id>                  Publish a DRAFT chain (coordinator only). Cascades")
 	fmt.println("                                      published to its tasks — until then nothing in the")
-	fmt.println("                                      chain promotes or can be nudged.")
-	fmt.println("  subscribe <chain-id> [--events <events>]  Subscribe to task chain status events.")
-	fmt.println("  unsubscribe <chain-id> [--events <events>] Unsubscribe from task chain status events.")
+	fmt.println("                                      chain is scheduled.")
 	fmt.println("  directory <add|update|remove|list>  Manage task chain relevant directories.")
 	fmt.println("  fleet <list|set>                    Manage chain fleet capacities and active workers.")
 	fmt.println("")
@@ -1895,8 +1839,6 @@ print_help_task_chain :: proc() {
 	fmt.println("  ham-ctl task-chain list --mine")
 	fmt.println("  ham-ctl task-chain show chain_abc")
 	fmt.println("  ham-ctl task-chain create --title 'Build feature' --coordinator agt_coord")
-	fmt.println("  ham-ctl task-chain subscribe chain_abc --events all")
-	fmt.println("  ham-ctl task-chain unsubscribe chain_abc")
 	fmt.println("  ham-ctl task-chain set-title 'Auth hardening' --chain chain_abc")
 	fmt.println("  ham-ctl task-chain set-description 'Harden auth: rotate tokens, add tests.'")
 	fmt.println("  ham-ctl task-chain fleet list chain_abc")
@@ -1925,7 +1867,9 @@ print_help_task_chain_fleet :: proc() {
 print_help_task :: proc() {
 	fmt.println("ham-ctl task — tasks within a task chain")
 	fmt.println("")
-	fmt.println("Exactly one command per action; there is no `done`, `comments`, or `votes`.")
+	fmt.println("Exactly one command per action; there is no `done` or `votes`.")
+	fmt.println("Task System v2: `status`, `vote`, `nudge`, `set-current`, `subscribe` and `unsubscribe`")
+	fmt.println("were removed; the lease/review verbs that replace them arrive with the next milestone.")
 	fmt.println("Positional <task-id> identifies the task and is enough on its own — task ids are")
 	fmt.println("globally unique, so you never need --chain (the Hub derives the chain for you).")
 	fmt.println("")
@@ -1946,26 +1890,17 @@ print_help_task :: proc() {
 	fmt.println("      the pin. Only the fields you pass change.")
 	fmt.println("  comment <task-id> --body <t>            Add a comment (the only way to comment).")
 	fmt.println("      [--notify <id,id>]")
-	fmt.println("  status <task-id> --status <s>           Change status; use in_validation to submit for")
-	fmt.println("                                          review (there is no separate `done`).")
-	fmt.println("  vote <task-id> --result <lgtm|ngtm>     Cast a review vote (the only way to vote).")
-	fmt.println("      [--comment <t>]")
-	fmt.println("  nudge <task-id> [--message <t>]         Nudge the task's owner.")
-	fmt.println("  set-current <task-id>                   Mark this task as your current task.")
 	fmt.println("  depend <task-id> --on <task-id>         Add a single dependency (use `update --depends-on`")
 	fmt.println("                                          to replace the whole dependency list).")
-	fmt.println("  subscribe <task-id> [--events <events>] Subscribe to task status events.")
-	fmt.println("  unsubscribe <task-id> [--events <events>] Unsubscribe from task status events.")
+	fmt.println("")
+	fmt.println("  --assignee / --reviewer take durable agent ids (agt_...); --reviewer is repeatable or")
+	fmt.println("  comma-separated. Instance pins (inst_...) were removed in Task System v2 and are rejected.")
 	fmt.println("")
 	fmt.println("EXAMPLES")
-	fmt.println("  ham-ctl task show inst_task_1")
-	fmt.println("  ham-ctl task subscribe inst_task_1 --events all")
-	fmt.println("  ham-ctl task unsubscribe inst_task_1")
-	fmt.println("  ham-ctl task update inst_task_1 --assignee inst_worker --reviewer inst_a,inst_b")
-	fmt.println("  ham-ctl task update inst_task_1 --priority p0 --description 'urgent: fix regression'")
-	fmt.println("  ham-ctl task comment inst_task_1 --body 'pushed fix' --notify inst_rev")
-	fmt.println("  ham-ctl task status inst_task_1 --status in_validation")
-	fmt.println("  ham-ctl task vote inst_task_1 --result lgtm --comment 'clean'")
+	fmt.println("  ham-ctl task show task_1")
+	fmt.println("  ham-ctl task update task_1 --assignee agt_worker --reviewer agt_a --reviewer agt_b")
+	fmt.println("  ham-ctl task update task_1 --priority p0 --description 'urgent: fix regression'")
+	fmt.println("  ham-ctl task comment task_1 --body 'pushed fix' --notify inst_rev")
 }
 
 print_help_chat :: proc() {
@@ -2051,7 +1986,7 @@ print_help_cards :: proc() {
 	fmt.println("  (agent mode has no reject/snooze — those are hub/user mode only.)")
 	fmt.println("")
 	fmt.println("OPERATIONS  (a card's operation types; each carries a human `label` shown in the dashboard)")
-	fmt.println("  task.vote               Cast a review vote on a task (default lgtm).")
+	fmt.println("  task.review             Post a review verdict on a task (default lgtm).")
 	fmt.println("  memory.approve          Approve a pending memory proposal.")
 	fmt.println("  memory.reject           Reject a pending memory proposal.")
 	fmt.println("  memory.create           Create a new durable memory.")
@@ -2069,7 +2004,7 @@ print_help_cards :: proc() {
 	fmt.println("")
 	fmt.println("EXAMPLES")
 	fmt.println("  ham-ctl cards list")
-	fmt.println("  ham-ctl cards create --title \"Run tests\" --operations '[{\"op\":\"task.vote\",\"label\":\"Approve task\",\"args\":{\"task_id\":\"task_1\"}}]'")
+	fmt.println("  ham-ctl cards create --title \"Run tests\" --operations '[{\"op\":\"task.review\",\"label\":\"Approve task\",\"args\":{\"task_id\":\"task_1\"}}]'")
 	fmt.println("  ham-ctl cards show crd_123")
 	fmt.println("  ham-ctl cards accept crd_123")
 	fmt.println("  ham-ctl cards discard crd_123")

@@ -589,11 +589,11 @@ memory_project_list_matches :: proc(list: []domain.Project_ID, value: domain.Pro
 }
 
 write_bootstrap_task_context :: proc(b: ^strings.Builder, service: ^Agent_Service, inst: domain.Agent_Instance, chain: domain.Task_Chain, chain_ok: bool) {
-	reviewers := "[]"
-	if chain_ok do reviewers = json_or_empty_array(chain.default_reviewer_refs_json)
-	strings.write_string(b, "{\"effective_assignee_ref\":{\"type\":\"agent_instance\",\"agent_instance_id\":\""); write_service_json_string(b, inst.agent_instance_id)
-	strings.write_string(b, "\"},\"effective_reviewer_refs\":"); strings.write_string(b, reviewers)
-	strings.write_string(b, ",\"current_task\":")
+	// Task System v2: the current task is whatever lease the instance holds
+	// (the lease verbs keep agent_instances.current_task_id in sync); the
+	// runnable frontier is the chain's READY tasks (the matcher decides who gets
+	// them — the agent never picks).
+	strings.write_string(b, "{\"current_task\":")
 	current_written := false
 	if service.taskchains != nil && chain_ok {
 		tasks, err := iface.taskchain_list_tasks_by_chain(service.taskchains, chain.chain_id, chain.owner_user_id)
@@ -616,7 +616,7 @@ write_bootstrap_task_context :: proc(b: ^strings.Builder, service: ^Agent_Servic
 			strings.write_string(b, ",\"runnable_frontier\":[")
 			written := 0
 			for task in tasks {
-				if task.publish_state != .Published || task.started_at != "" || task.status != .Assigned || !strings.contains(task.assignee_ref_json, inst.agent_instance_id) do continue
+				if task.publish_state != .Published || task.state != .Ready do continue
 				if written > 0 do strings.write_string(b, ",")
 				write_bootstrap_task_json(b, task)
 				written += 1
@@ -636,7 +636,7 @@ write_bootstrap_task_context :: proc(b: ^strings.Builder, service: ^Agent_Servic
 write_bootstrap_current_task_json :: proc(b: ^strings.Builder, task: domain.Task, role: domain.Current_Task_Role) {
 	strings.write_string(b, "{\"task_id\":\""); write_service_json_string(b, string(task.task_id))
 	strings.write_string(b, "\",\"title\":\""); write_service_json_string(b, task.title)
-	strings.write_string(b, "\",\"status\":\""); write_service_json_string(b, task_status_string(task.status))
+	strings.write_string(b, "\",\"state\":\""); write_service_json_string(b, domain.task_state_string(task.state))
 	strings.write_string(b, "\",\"priority\":\""); write_service_json_string(b, domain.task_priority_string(task.priority))
 	strings.write_string(b, "\",\"role\":\""); write_service_json_string(b, domain.current_task_role_string(role))
 	strings.write_string(b, "\"}")
@@ -645,7 +645,7 @@ write_bootstrap_current_task_json :: proc(b: ^strings.Builder, task: domain.Task
 write_bootstrap_task_json :: proc(b: ^strings.Builder, task: domain.Task) {
 	strings.write_string(b, "{\"task_id\":\""); write_service_json_string(b, string(task.task_id))
 	strings.write_string(b, "\",\"title\":\""); write_service_json_string(b, task.title)
-	strings.write_string(b, "\",\"status\":\""); write_service_json_string(b, task_status_string(task.status))
+	strings.write_string(b, "\",\"state\":\""); write_service_json_string(b, domain.task_state_string(task.state))
 	strings.write_string(b, "\"}")
 }
 
@@ -1284,7 +1284,7 @@ resolve_instance_chain :: proc(service: ^Agent_Service, owner: domain.User_ID, c
 	}
 	now := platform.clock_now(service.clock)
 	title := strings.trim_space(default_title); if title == "" do title = "Private conversation"
-	chain := domain.Task_Chain{chain_id = domain.Task_Chain_ID(platform.generate_id(service.ids, "chain_")), owner_user_id = owner, title = title, publish_state = .Published, status = .Active, kind = "private_conversation", default_reviewer_refs_json = "[]", last_activity_at = now, title_source = "default", created_at = now, updated_at = now, published_at = now}
+	chain := domain.Task_Chain{chain_id = domain.Task_Chain_ID(platform.generate_id(service.ids, "chain_")), owner_user_id = owner, title = title, publish_state = .Published, status = .Active, kind = "private_conversation", last_activity_at = now, title_source = "default", created_at = now, updated_at = now, published_at = now}
 	created, saved, save_err := iface.taskchain_save_chain(service.taskchains, chain)
 	if !saved do return "", false, save_err
 	return string(created.chain_id), true, domain.Domain_Error{}
@@ -1431,7 +1431,6 @@ resolve_project_path_for_launch :: proc(service: ^Agent_Service, owner: domain.U
 
 publish_state_string :: proc(state: domain.Publish_State) -> string { if state == .Published do return "published"; return "draft" }
 chain_status_string :: proc(status: domain.Task_Chain_Status) -> string { if status == .Completed do return "completed"; if status == .Cancelled do return "cancelled"; if status == .Archived do return "archived"; return "active" }
-task_status_string :: proc(status: domain.Task_Status) -> string { switch status { case .Assigned: return "assigned"; case .Queued: return "queued"; case .In_Progress: return "in_progress"; case .In_Validation: return "in_validation"; case .Finishing: return "finishing"; case .Pausing: return "pausing"; case .Validated_Good: return "validated_good"; case .Validated_Not_Good: return "validated_not_good"; case .Paused: return "paused"; case .Completed: return "completed"; case .Cancelled: return "cancelled" }; return "assigned" }
 json_or_empty_array :: proc(value: string) -> string { if strings.trim_space(value) == "" do return "[]"; return value }
 
 apply_runtime_startup_projection :: proc(inst: ^domain.Agent_Instance, now: string) {

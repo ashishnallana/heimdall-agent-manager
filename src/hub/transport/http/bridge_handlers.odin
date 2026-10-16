@@ -2174,40 +2174,11 @@ bridge_blob_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	return resp
 }
 
-// bridge_actionable_tasks_handler returns the compact actionable-task set for the
-// calling bridge's hosted instances. The Bridge scheduler polls this once per
-// tick to drive auto-promotion and auto-nudge locally, keeping the Hub lean.
+// bridge_actionable_tasks_handler: `GET /api/v1/bridge/actionable-tasks` was the
+// bridge-side task scheduler's poll. Task System v2 pushes leases; the bridge
+// never polls for work. 410 so an older bridge stops retrying.
 bridge_actionable_tasks_handler :: proc(ctx: rawptr, req: Request) -> Response {
-	h := (^Bridge_Handlers)(ctx)
-	if rejected, resp := reject_query_or_body_token(req); rejected do return resp
-	token, token_ok := bearer_token(req)
-	if !token_ok do return respond_error(domain.domain_error(.Unauthenticated, "bridge bearer token is required"), req.request_id)
-	bridge_auth, bridge_ok, bridge_err := bridge_service.verify_bridge_token(h.bridges, token)
-	if !bridge_ok do return respond_error(bridge_err, req.request_id)
-	if h.taskchains == nil do return respond_error(domain.domain_error(.Internal_Error, "taskchain service is not configured"), req.request_id)
-	items, err := taskchain_service.actionable_tasks_for_bridge(h.taskchains, domain.User_ID(bridge_auth.user_id), bridge_auth.bridge_id)
-	if err.code != .None do return respond_error(err, req.request_id)
-	b := strings.builder_make()
-	strings.write_string(&b, "{\"tasks\":[")
-	for item, i in items {
-		if i > 0 do strings.write_byte(&b, ',')
-		write_actionable_task_json(&b, item)
-	}
-	strings.write_string(&b, "]}")
-	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req))
-}
-
-write_actionable_task_json :: proc(b: ^strings.Builder, t: taskchain_service.Actionable_Task) {
-	strings.write_string(b, "{\"task_id\":\""); write_handler_json_string(b, string(t.task_id))
-	strings.write_string(b, "\",\"chain_id\":\""); write_handler_json_string(b, string(t.chain_id))
-	strings.write_string(b, "\",\"status\":\""); write_handler_json_string(b, task_status_http(t.status))
-	strings.write_string(b, "\",\"title\":\""); write_handler_json_string(b, t.title)
-	strings.write_string(b, "\",\"target_instance_id\":\""); write_handler_json_string(b, t.target_instance_id)
-	strings.write_string(b, "\",\"target_role\":\""); write_handler_json_string(b, taskchain_service.target_string(t.target_role))
-	strings.write_string(b, "\",\"action\":\""); write_handler_json_string(b, t.action)
-	strings.write_string(b, "\",\"updated_at\":\""); write_handler_json_string(b, t.updated_at)
-	strings.write_string(b, "\",\"deps_satisfied\":"); strings.write_string(b, "true" if t.deps_satisfied else "false")
-	strings.write_string(b, "}")
+	return respond_gone(req, "bridge task polling was removed in Task System v2; the hub pushes leases via wake_agent")
 }
 
 revoke_bridge_handler :: proc(ctx: rawptr, req: Request) -> Response {

@@ -242,7 +242,7 @@ bridge_local_spoofable_params :: proc(params: string) -> bool {
 	// never from the request body. So these keys in the payload are spoof attempts.
 	//
 	// NOTE: "agent_instance_id" is intentionally NOT blocked. It is required inside
-	// task targeting refs (assignee_ref / reviewer_refs) to point at OTHER agents,
+	// task targeting fields (legacy assignee_ref / reviewer_refs objects) to point at OTHER agents,
 	// and the hub never treats a body-level agent_instance_id as the acting
 	// identity (that always comes from the token). The genuine spoofing vector is
 	// "sender_agent_instance_id"/"owner_user_id"/credentials, which stay blocked.

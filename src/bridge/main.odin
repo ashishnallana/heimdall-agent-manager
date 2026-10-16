@@ -37,13 +37,6 @@ Bridge_Config :: struct {
 	// or [bridge] local_proxy_enabled=false turns it off. This is an off switch, not an
 	// opt-in: a deployment that sets nothing gets the proxy.
 	local_proxy_enabled: bool,
-	nudge_enabled: bool,
-	nudge_interval_seconds: int,
-	nudge_ready_after_seconds: int,
-	nudge_review_after_seconds: int,
-	nudge_working_stale_after_seconds: int,
-	nudge_cooldown_seconds: int,
-	nudge_restart_grace_seconds: int,
 	fs_root: string,
 	fs_read_page_bytes: i64,
 	// BR-2: when true the bridge drives agents through ham-pty-host instead of
@@ -155,16 +148,14 @@ main :: proc() {
 		local_config := bridge_local_endpoint_config_default(bridge_config.local_endpoint_run_dir, bridge_config.local_endpoint_port)
 		fmt.println("bridge local endpoint", endpoint, "fallback", bridge_local_endpoint_env_value(local_config, false), "socket_mode", "0600")
 	}
-	// Scheduler state must exist before the hub worker can run a launch, which
+	// Wake state must exist before the hub worker can run a launch, which
 	// records itself via bridge_task_wake_note_launched.
-	bridge_task_scheduler_init()
+	bridge_agent_wake_init()
 	bridge_hub_runtime_start()
 	// REQ-IMPL-4 / design §7.5: renew the access token at 80% of its lifetime with
 	// jitter, rather than waiting for a 401 — by which time in-flight work has
 	// already failed. No-ops for a non-expiring legacy credential.
 	bridge_credential_refresh_start(bridge_config.credential_file)
-	bridge_task_scheduler_configure()
-	bridge_task_scheduler_start()
 	bridge_task_chain_search_start()
 	bridge_action_scheduler_start()
 	if bridge_config.chunk_bytes <= 0 do bridge_config.chunk_bytes = contracts.BRIDGE_WS_DEFAULT_CHUNK_BYTES
@@ -372,29 +363,8 @@ bridge_config_from_args :: proc(args: []string) -> Bridge_Config {
 		cfg.daemon_id = loaded.config.daemon.daemon_id
 		cfg.bridge_token = loaded.config.daemon.bridge_token
 		cfg.data_dir = loaded.config.daemon.data_dir
-		// Nudge/scheduler knobs are bridge-owned: prefer the [bridge] section.
-		// Fall back to the legacy [daemon].nudge_* keys (from the ham-daemon era)
-		// with a deprecation warning so existing configs keep working.
-		if loaded.config.bridge.nudge_configured {
-			cfg.nudge_enabled = loaded.config.bridge.nudge_enabled
-			cfg.nudge_interval_seconds = loaded.config.bridge.nudge_interval_seconds
-			cfg.nudge_ready_after_seconds = loaded.config.bridge.nudge_ready_after_seconds
-			cfg.nudge_review_after_seconds = loaded.config.bridge.nudge_review_after_seconds
-			cfg.nudge_working_stale_after_seconds = loaded.config.bridge.nudge_working_stale_after_seconds
-			cfg.nudge_cooldown_seconds = loaded.config.bridge.nudge_cooldown_seconds
-			cfg.nudge_restart_grace_seconds = loaded.config.bridge.nudge_restart_grace_seconds
-		} else {
-			if loaded.config.daemon.nudge_enabled || loaded.config.daemon.nudge_interval_seconds != 0 {
-				fmt.println("WARN deprecated config: [daemon].nudge_* is bridge-owned; move these keys to a [bridge] section")
-			}
-			cfg.nudge_enabled = loaded.config.daemon.nudge_enabled
-			cfg.nudge_interval_seconds = loaded.config.daemon.nudge_interval_seconds
-			cfg.nudge_ready_after_seconds = loaded.config.daemon.nudge_ready_after_seconds
-			cfg.nudge_review_after_seconds = loaded.config.daemon.nudge_review_after_seconds
-			cfg.nudge_working_stale_after_seconds = loaded.config.daemon.nudge_working_stale_after_seconds
-			cfg.nudge_cooldown_seconds = loaded.config.daemon.nudge_cooldown_seconds
-			cfg.nudge_restart_grace_seconds = loaded.config.daemon.nudge_restart_grace_seconds
-		}
+		// Task System v2: the bridge no longer polls the hub for actionable tasks,
+		// so the [bridge]/[daemon] nudge_* keys are parsed but ignored here.
 		cfg.fs_root = loaded.config.bridge.fs_root
 		if loaded.config.bridge.fs_read_page_bytes > 0 {
 			cfg.fs_read_page_bytes = i64(loaded.config.bridge.fs_read_page_bytes)

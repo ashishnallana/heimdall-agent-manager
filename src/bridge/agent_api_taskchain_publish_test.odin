@@ -48,38 +48,24 @@ bridge_task_chain_create_routes_raw_post :: proc(t: ^testing.T) {
 	testing.expect(t, r.send_body, "create takes a request body")
 }
 
+// Task System v2: the subscribe/unsubscribe, status, set_current, vote and nudge
+// agent verbs were removed. They must be neither routed nor allow-listed, so an
+// agent that still issues them gets a clean "unknown method" rather than a hub 410.
 @(test)
-bridge_task_chain_subscribe_routes_envelope :: proc(t: ^testing.T) {
-	r := bridge_agent_route("agent.task_chain.subscribe", `{"chain_id":"chain_abc","events":"all"}`)
-	testing.expect(t, r.kind == .Envelope, "subscribe routes .Envelope")
-	testing.expect_value(t, r.path, "/api/v1/agent-actions/chain/subscribe")
-}
-
-@(test)
-bridge_task_chain_unsubscribe_routes_envelope :: proc(t: ^testing.T) {
-	r := bridge_agent_route("agent.task_chain.unsubscribe", `{"chain_id":"chain_abc"}`)
-	testing.expect(t, r.kind == .Envelope, "unsubscribe routes .Envelope")
-	testing.expect_value(t, r.path, "/api/v1/agent-actions/chain/unsubscribe")
-}
-
-@(test)
-bridge_task_subscribe_routes_envelope :: proc(t: ^testing.T) {
-	r := bridge_agent_route("agent.task.subscribe", `{"task_id":"task_123","events":"all"}`)
-	testing.expect(t, r.kind == .Envelope, "task subscribe routes .Envelope")
-	testing.expect_value(t, r.path, "/api/v1/agent-actions/task/subscribe")
-}
-
-@(test)
-bridge_task_unsubscribe_routes_envelope :: proc(t: ^testing.T) {
-	r := bridge_agent_route("agent.task.unsubscribe", `{"task_id":"task_123"}`)
-	testing.expect(t, r.kind == .Envelope, "task unsubscribe routes .Envelope")
-	testing.expect_value(t, r.path, "/api/v1/agent-actions/task/unsubscribe")
-}
-
-@(test)
-bridge_subscription_methods_allowed :: proc(t: ^testing.T) {
-	testing.expect(t, bridge_agent_method_allowed("agent.task_chain.subscribe"), "chain subscribe allowed")
-	testing.expect(t, bridge_agent_method_allowed("agent.task_chain.unsubscribe"), "chain unsubscribe allowed")
-	testing.expect(t, bridge_agent_method_allowed("agent.task.subscribe"), "task subscribe allowed")
-	testing.expect(t, bridge_agent_method_allowed("agent.task.unsubscribe"), "task unsubscribe allowed")
+bridge_removed_task_verbs_not_routed :: proc(t: ^testing.T) {
+	removed := [?]string{
+		"agent.task.status", "agent.task.set_current", "agent.task.vote", "agent.task.nudge",
+		"agent.task.subscribe", "agent.task.unsubscribe",
+		"agent.task_chain.subscribe", "agent.task_chain.unsubscribe",
+	}
+	for m in removed {
+		r := bridge_agent_route(m, `{"task_id":"task_123","chain_id":"chain_abc"}`)
+		testing.expectf(t, r.kind == .Unknown, "%s must be unrouted", m)
+		testing.expectf(t, !bridge_agent_method_allowed(m), "%s must not be allow-listed", m)
+	}
+	// The surviving task verbs are untouched.
+	for m in ([?]string{"agent.task.list", "agent.task.show", "agent.task.comments", "agent.task.create", "agent.task.update", "agent.task.depend", "agent.task.comment", "agent.context.get"}) {
+		testing.expectf(t, bridge_agent_method_allowed(m), "%s still allowed", m)
+		testing.expectf(t, bridge_agent_route(m, "{}").kind == .Envelope, "%s still routed", m)
+	}
 }

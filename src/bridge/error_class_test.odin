@@ -148,18 +148,18 @@ test_bootstrap_result_error_classes :: proc(t: ^testing.T) {
 	testing.expect_value(t, bridge_bootstrap_result_error({stage = "assemble"}).class, contracts.Bridge_Error_Class.recoverable)
 }
 
-// The wake-race tests share the global scheduler state; serialize them.
+// The wake-race tests share the global wake state; serialize them.
 @(private = "file")
 wake_global_state_mu: sync.Mutex
 
-// NGTM regression: a launch that succeeds while a scheduler wake is in flight
+// NGTM regression: a launch that succeeds while a wake is in flight
 // invalidates that wake; the wake's later failure must not park or back off.
 @(test)
 test_wake_stale_failure_after_successful_launch_is_dropped :: proc(t: ^testing.T) {
 	sync.mutex_lock(&wake_global_state_mu)
 	defer sync.mutex_unlock(&wake_global_state_mu)
-	bridge_task_scheduler_reset()
-	defer bridge_task_scheduler_reset()
+	bridge_agent_wake_reset()
+	defer bridge_agent_wake_reset()
 	id := "inst_wake_race"
 	bridge_agent_wake[id] = Bridge_Wake_State{last_wake_ms = 1_000}
 	in_flight_generation := bridge_agent_wake[id].generation
@@ -184,8 +184,8 @@ test_wake_stale_failure_after_successful_launch_is_dropped :: proc(t: ^testing.T
 test_wake_success_before_registration_coalesces_and_invalidates :: proc(t: ^testing.T) {
 	sync.mutex_lock(&wake_global_state_mu)
 	defer sync.mutex_unlock(&wake_global_state_mu)
-	bridge_task_scheduler_reset()
-	defer bridge_task_scheduler_reset()
+	bridge_agent_wake_reset()
+	defer bridge_agent_wake_reset()
 	id := "inst_wake_race_noentry"
 	testing.expect(t, id not_in bridge_agent_wake, "no wake entry yet")
 
@@ -200,21 +200,21 @@ test_wake_success_before_registration_coalesces_and_invalidates :: proc(t: ^test
 	testing.expect_value(t, bridge_agent_wake[id].failures, 0)
 }
 
-// NGTM regression 3: a launch can record itself before the scheduler thread
-// starts. Init is once-only and idempotent: calling it again (as
-// bridge_task_scheduler_start does) must keep what the early launch recorded.
+// NGTM regression 3: a launch can record itself before any other wake entry
+// point runs init. Init is once-only and idempotent: calling it again (as every
+// wake entry point does) must keep what the early launch recorded.
 @(test)
-test_wake_note_before_scheduler_start_survives_init :: proc(t: ^testing.T) {
+test_wake_note_before_init_survives_init :: proc(t: ^testing.T) {
 	sync.mutex_lock(&wake_global_state_mu)
 	defer sync.mutex_unlock(&wake_global_state_mu)
-	bridge_task_scheduler_reset()
-	defer bridge_task_scheduler_reset()
+	bridge_agent_wake_reset()
+	defer bridge_agent_wake_reset()
 	id := "inst_wake_early_launch"
-	bridge_task_wake_note_launched(id, 7_000) // hub worker launch, scheduler not started yet
+	bridge_task_wake_note_launched(id, 7_000) // hub worker launch before any other init
 	generation := bridge_agent_wake[id].generation
-	bridge_task_scheduler_init() // what bridge_task_scheduler_start does
+	bridge_agent_wake_init() // what every wake entry point does
 	st, has := bridge_agent_wake[id]
-	testing.expect(t, has, "early launch record survives scheduler start")
+	testing.expect(t, has, "early launch record survives a repeated init")
 	testing.expect_value(t, st.generation, generation)
 	testing.expect_value(t, st.last_wake_ms, i64(7_000))
 }

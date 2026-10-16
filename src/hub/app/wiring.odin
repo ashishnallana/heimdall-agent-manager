@@ -21,6 +21,7 @@ import provider_service "odin_test:hub/service/provider"
 import push_service "odin_test:hub/service/push"
 import search_service "odin_test:hub/service/search"
 import taskchain_service "odin_test:hub/service/taskchain"
+import taskv2 "odin_test:hub/service/taskv2"
 import user_service "odin_test:hub/service/user"
 import billing_service "odin_test:hub/service/billing"
 import user_vault_service "odin_test:hub/service/user_vault"
@@ -75,6 +76,7 @@ App_Graph :: struct {
 	projects: project_service.Project_Service,
 	content: content_service.Content_Service,
 	taskchains: taskchain_service.Taskchain_Service,
+	task_engine: taskv2.Service,
 	search: search_service.Search_Service,
 	push: push_service.Push_Service,
 	auth: auth_service.Auth_Service,
@@ -114,6 +116,15 @@ App_Graph :: struct {
 	action_mutex: sync.Mutex,
 	action_bridge_versions: map[string]int,
 	router: http.Router,
+}
+
+// task_engine_on_tasks_changed is the engine → taskchain callback: a task of the
+// chain crossed into or out of a terminal state, so the chain's own status may
+// need to follow (auto-complete when every task is done; reopen on a reopen).
+task_engine_on_tasks_changed :: proc(ctx: rawptr, chain_id: domain.Task_Chain_ID, owner: domain.User_ID) {
+	graph := (^App_Graph)(ctx)
+	if graph == nil do return
+	_, _, _ = taskchain_service.sync_chain_status_from_tasks(&graph.taskchains, chain_id, owner)
 }
 
 build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
@@ -218,6 +229,17 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 	graph.taskchains = taskchain_service.new_taskchain_service_with_runtime(&graph.repos.taskchains, &graph.repos.agents, bridge_command_sink, &graph.clock, &graph.ids)
 	graph.taskchains.agent_service = &graph.agents
 	graph.taskchains.event_bus = &graph.event_bus
+	// Task System v2 engine: events + fold + leases + timers + matcher. Every
+	// chain/task mutation in the taskchain service funnels into it; it calls back
+	// (on_tasks_changed) so the chain auto-completes when its last task is done.
+	graph.task_engine = taskv2.new_service(&graph.repos.taskchains, &graph.repos.agents, &graph.repos.bridges, &graph.clock, &graph.ids)
+	graph.task_engine.uow_factory = &graph.uow_factory
+	graph.task_engine.agent_service = &graph.agents
+	graph.task_engine.bridge_command_sink = bridge_command_sink
+	graph.task_engine.event_bus = &graph.event_bus
+	graph.task_engine.on_tasks_changed = task_engine_on_tasks_changed
+	graph.task_engine.on_tasks_changed_ctx = rawptr(graph)
+	taskchain_service.set_engine(&graph.taskchains, &graph.task_engine)
 	graph.search = search_service.new_search_service(&graph.repos.search)
 	graph.push = push_service.new_push_service(&graph.repos.push_subscriptions, &graph.clock, &graph.ids, push_service.Vapid_Config{
 		public_key = config.vapid_public_key,
@@ -552,8 +574,6 @@ register_routes :: proc(graph: ^App_Graph) {
 	http.router_add(&graph.router, "GET", "/api/v1/task-chains/*/members", rawptr(&graph.taskchain_handlers), http.list_chain_members_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/task-chains/*/members", rawptr(&graph.taskchain_handlers), http.add_chain_member_handler)
 	http.router_add(&graph.router, "DELETE", "/api/v1/task-chains/*/members/*", rawptr(&graph.taskchain_handlers), http.remove_chain_member_handler)
-	http.router_add(&graph.router, "POST", "/api/v1/task-chains/*/subscriptions", rawptr(&graph.taskchain_handlers), http.task_chain_subscribe_handler)
-	http.router_add(&graph.router, "DELETE", "/api/v1/task-chains/*/subscriptions", rawptr(&graph.taskchain_handlers), http.task_chain_unsubscribe_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/task-chains/*/directories", rawptr(&graph.taskchain_handlers), http.list_chain_directories_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/task-chains/*/directories", rawptr(&graph.taskchain_handlers), http.add_chain_directory_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/task-chains/*/directories/*", rawptr(&graph.taskchain_handlers), http.get_chain_directory_handler)
@@ -578,14 +598,6 @@ register_routes :: proc(graph: ^App_Graph) {
 	http.router_add(&graph.router, "POST", "/api/v1/task-chains/*/tasks/*/cancel", rawptr(&graph.taskchain_handlers), http.cancel_task_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/task-chains/*/tasks/*/comments", rawptr(&graph.taskchain_handlers), http.list_task_comments_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/task-chains/*/tasks/*/comments", rawptr(&graph.taskchain_handlers), http.create_task_comment_handler)
-	http.router_add(&graph.router, "GET", "/api/v1/task-chains/*/tasks/*/votes", rawptr(&graph.taskchain_handlers), http.list_task_votes_handler)
-	http.router_add(&graph.router, "POST", "/api/v1/task-chains/*/tasks/*/vote", rawptr(&graph.taskchain_handlers), http.vote_task_handler)
-	http.router_add(&graph.router, "POST", "/api/v1/task-chains/*/tasks/*/nudge", rawptr(&graph.taskchain_handlers), http.nudge_task_handler)
-	http.router_add(&graph.router, "POST", "/api/v1/task-chains/*/tasks/*/current-task", rawptr(&graph.taskchain_handlers), http.set_task_current_task_handler)
-	http.router_add(&graph.router, "POST", "/api/v1/task-chains/*/tasks/*/subscriptions", rawptr(&graph.taskchain_handlers), http.task_subscribe_handler)
-	http.router_add(&graph.router, "DELETE", "/api/v1/task-chains/*/tasks/*/subscriptions", rawptr(&graph.taskchain_handlers), http.task_unsubscribe_handler)
-	http.router_add(&graph.router, "POST", "/api/v1/tasks/*/subscriptions", rawptr(&graph.taskchain_handlers), http.task_subscribe_handler)
-	http.router_add(&graph.router, "DELETE", "/api/v1/tasks/*/subscriptions", rawptr(&graph.taskchain_handlers), http.task_unsubscribe_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/chat/send-to-user", rawptr(&graph.agent_action_handlers), http.agent_action_chat_send_to_user_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/chat/send-to-agent", rawptr(&graph.agent_action_handlers), http.agent_action_chat_send_to_agent_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/chat/fetch", rawptr(&graph.agent_action_handlers), http.agent_action_chat_fetch_handler)

@@ -139,10 +139,8 @@ bridge_agent_route :: proc(method, params: string) -> Bridge_Agent_Route {
 			return Bridge_Agent_Route{kind = .Raw, http_method = "POST", path = strings.concatenate({"/api/v1/task-chains/", cid, "/pin"}), send_body = true}
 		}
 		return Bridge_Agent_Route{kind = .Bad_Request, message = "task-chain pin requires a chain id: pass <chain-id> (or --chain <id>)"}
-	case "agent.task_chain.subscribe":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/chain/subscribe"}
-	case "agent.task_chain.unsubscribe":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/chain/unsubscribe"}
+	// Task System v2: agent.task_chain.subscribe/unsubscribe were removed (the hub
+	// answers 410 Gone for their routes); they are deliberately NOT routed here.
 
 	// ---- task -------------------------------------------------------------
 	case "agent.task.list":
@@ -163,18 +161,9 @@ bridge_agent_route :: proc(method, params: string) -> Bridge_Agent_Route {
 		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/tasks/depend"}
 	case "agent.task.comment":
 		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/tasks/comment"}
-	case "agent.task.status":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/tasks/status"}
-	case "agent.task.set_current":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/tasks/set-current"}
-	case "agent.task.vote":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/tasks/vote"}
-	case "agent.task.nudge":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/tasks/nudge"}
-	case "agent.task.subscribe":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/task/subscribe"}
-	case "agent.task.unsubscribe":
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/task/unsubscribe"}
+	// Task System v2: agent.task.status / set_current / vote / nudge / subscribe /
+	// unsubscribe were removed (hub answers 410 Gone). The lease.* / review.* /
+	// task.fetch verbs that replace them arrive with a later milestone.
 
 	// ---- chat -------------------------------------------------------------
 	case "agent.chat.send":
@@ -278,11 +267,8 @@ bridge_agent_method_allowed :: proc(method: string) -> bool {
 	     "agent.task_chain.create", "agent.task_chain.list", "agent.task_chain.show", "agent.task_chain.set_title",
 	     "agent.task_chain.set_description", "agent.task_chain.set_status",
 	     "agent.task_chain.publish", "agent.task_chain.pin",
-	     "agent.task_chain.subscribe", "agent.task_chain.unsubscribe",
 	     "agent.task.list", "agent.task.show", "agent.task.comments", "agent.task.create",
-	     "agent.task.update", "agent.task.depend", "agent.task.comment", "agent.task.status",
-	     "agent.task.set_current", "agent.task.vote", "agent.task.nudge",
-	     "agent.task.subscribe", "agent.task.unsubscribe",
+	     "agent.task.update", "agent.task.depend", "agent.task.comment",
 	     // chat + self/misc
 	     "agent.chat.send", "agent.chat.read",
 	     "agent.context.get", "agent.conversation.set_title",

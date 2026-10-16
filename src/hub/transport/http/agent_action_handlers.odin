@@ -18,6 +18,7 @@ import events "odin_test:hub/service/events"
 import push_service "odin_test:hub/service/push"
 import provider_service "odin_test:hub/service/provider"
 import card_service "odin_test:hub/service/card"
+import jsonx "odin_test:lib/jsonx"
 
 Agent_Action_Handlers :: struct {
 	auth: ^auth_service.Auth_Service,
@@ -260,41 +261,14 @@ agent_action_chain_show_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 200)
 }
 
+// agent_action_chain_subscribe_handler: removed in Task System v2 (410 Gone until M2 replaces it).
 agent_action_chain_subscribe_handler :: proc(ctx: rawptr, req: Request) -> Response {
-	h := (^Agent_Action_Handlers)(ctx)
-	auth, inst, ok, resp := require_instance_action_auth(h, req)
-	if !ok do return resp
-	params := json_object_raw(req.body, "params")
-	chain_id := strings.trim_space(json_string(params, "chain_id"))
-	if chain_id == "" do chain_id = inst.chain_id
-	if chain_id == "" do return respond_error(domain.domain_error(.Validation_Failed, "chain_id is required"), req.request_id)
-	events_val := json_string(params, "events")
-	if events_val == "" do events_val = json_string(params, "event_type")
-	sub, saved, err := taskchain_service.subscribe_taskchain(h.taskchains, auth, domain.Task_Chain_ID(chain_id), events_val)
-	if !saved do return respond_error(err, req.request_id)
-	publish_agent_action(h, inst, "chain_subscribe", fmt.tprintf("subscribed to chain %s", chain_id))
-	publish_chain_event(h.event_bus, string(sub.owner_user_id), string(sub.chain_id), "updated")
-	b := strings.builder_make()
-	defer strings.builder_destroy(&b)
-	write_subscription_json(&b, sub)
-	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 200)
+	return respond_gone(req, "task-chain subscriptions were removed in Task System v2; attention events reach the coordinator directly")
 }
 
+// agent_action_chain_unsubscribe_handler: removed in Task System v2 (410 Gone until M2 replaces it).
 agent_action_chain_unsubscribe_handler :: proc(ctx: rawptr, req: Request) -> Response {
-	h := (^Agent_Action_Handlers)(ctx)
-	auth, inst, ok, resp := require_instance_action_auth(h, req)
-	if !ok do return resp
-	params := json_object_raw(req.body, "params")
-	chain_id := strings.trim_space(json_string(params, "chain_id"))
-	if chain_id == "" do chain_id = inst.chain_id
-	if chain_id == "" do return respond_error(domain.domain_error(.Validation_Failed, "chain_id is required"), req.request_id)
-	events_val := json_string(params, "events")
-	if events_val == "" do events_val = json_string(params, "event_type")
-	removed, err := taskchain_service.unsubscribe_taskchain(h.taskchains, auth, domain.Task_Chain_ID(chain_id), events_val)
-	if err.code != .None do return respond_error(err, req.request_id)
-	publish_agent_action(h, inst, "chain_unsubscribe", fmt.tprintf("unsubscribed from chain %s", chain_id))
-	publish_chain_event(h.event_bus, auth.user_id, chain_id, "updated")
-	return respond_success(fmt.tprintf("{{\"removed\":%s}}", "true" if removed else "false"), req.request_id, auth_ctx_server_time(req), 200)
+	return respond_gone(req, "task-chain subscriptions were removed in Task System v2")
 }
 
 agent_action_chat_fetch_handler :: proc(ctx: rawptr, req: Request) -> Response {
@@ -572,92 +546,19 @@ agent_action_task_comment_handler :: proc(ctx: rawptr, req: Request) -> Response
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 201)
 }
 
+// agent_action_task_status_handler: removed in Task System v2 (410 Gone until M2 replaces it).
 agent_action_task_status_handler :: proc(ctx: rawptr, req: Request) -> Response {
-	h := (^Agent_Action_Handlers)(ctx)
-	auth, inst, ok, resp := require_instance_action_auth(h, req)
-	if !ok do return resp
-	params := json_object_raw(req.body, "params")
-	status, status_ok := task_status_from_http(json_string(params, "status"))
-	if !status_ok do return respond_error(domain.domain_error(.Validation_Failed, "task status is invalid"), req.request_id)
-	task, changed, err := taskchain_service.change_task_status(h.taskchains, auth, domain.Task_ID(json_string(params, "task_id")), status)
-	if !changed do return respond_error(err, req.request_id)
-	publish_agent_action(h, inst, "task_status", fmt.tprintf("set status \u2192 %s", task_status_http(task.status)))
-	publish_task_event(h.event_bus, string(task.owner_user_id), string(task.task_id), string(task.chain_id), "status_changed")
-	publish_chain_event(h.event_bus, string(task.owner_user_id), string(task.chain_id), "updated")
-	// `task` is the RE-READ row (see change_task_status), so its status is what the
-	// database holds — which is not always what was asked for: the promotion engine may
-	// demote it again in the same request. Pass the requested value so a caller can see
-	// both rather than being told its request took effect when it did not.
-	//
-	// This is the transport ham-ctl uses (ctl/agent_mode.odin -> bridge/agent_api.odin ->
-	// /api/v1/agent-actions/tasks/status), i.e. the path this defect was reported on, so it
-	// needs the same observational field as the user-mode route in taskchain_handlers.odin.
-	b := strings.builder_make()
-	write_task_json(&b, task, task_status_http(status))
-	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 200)
+	return respond_gone(req, "task status is derived from events; use the lease verbs (lease next/heartbeat/submit/block/handoff) — `task status` was removed in Task System v2")
 }
 
-// agent_action_task_set_current_handler lets an agent set its OWN current task
-// (CT-9 self-service focus switch). The instance is taken from the authenticated
-// token, so an agent can only move its own pointer. The service validates that the
-// agent is the task's assignee/reviewer and that the task is actionable, persists
-// the pointer, notifies (R8 action label), and we emit a live event.
+// agent_action_task_set_current_handler: removed in Task System v2 (410 Gone until M2 replaces it).
 agent_action_task_set_current_handler :: proc(ctx: rawptr, req: Request) -> Response {
-	h := (^Agent_Action_Handlers)(ctx)
-	auth, inst, ok, resp := require_instance_action_auth(h, req)
-	if !ok do return resp
-	params := json_object_raw(req.body, "params")
-	task_id := domain.Task_ID(json_string(params, "task_id"))
-	if strings.trim_space(string(task_id)) == "" do return respond_error(domain.domain_error(.Validation_Failed, "task_id is required"), req.request_id)
-	saved, set_ok, err := taskchain_service.set_instance_current_task(h.taskchains, auth, inst.agent_instance_id, task_id)
-	if !set_ok do return respond_error(err, req.request_id)
-	publish_current_task_changed(h, string(saved.owner_user_id), saved.agent_instance_id, saved.current_task_id, domain.current_task_role_string(saved.current_task_role))
-	publish_agent_action(h, inst, "task_set_current", "switched to a task")
-	b := strings.builder_make()
-	strings.write_string(&b, `{"agent_instance_id":"`)
-	write_handler_json_string(&b, saved.agent_instance_id)
-	strings.write_string(&b, `","current_task_id":"`)
-	write_handler_json_string(&b, saved.current_task_id)
-	strings.write_string(&b, `","current_task_role":"`)
-	write_handler_json_string(&b, domain.current_task_role_string(saved.current_task_role))
-	strings.write_string(&b, `"}`)
-	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 200)
+	return respond_gone(req, "`task set-current` was removed in Task System v2: your current task is the lease you hold (`lease next`)")
 }
 
+// agent_action_task_nudge_handler: removed in Task System v2 (410 Gone until M2 replaces it).
 agent_action_task_nudge_handler :: proc(ctx: rawptr, req: Request) -> Response {
-	h := (^Agent_Action_Handlers)(ctx)
-	auth, inst, ok, resp := require_instance_action_auth(h, req)
-	if !ok do return resp
-	params := json_object_raw(req.body, "params")
-	message := json_string(params, "message")
-	if message == "" do message = json_string(params, "body")
-	nudge, sent, err := taskchain_service.manual_nudge(h.taskchains, auth, domain.Task_ID(json_string(params, "task_id")), message)
-	if !sent do return respond_error(err, req.request_id)
-	// Q3: role is available without a DB lookup; fall back to a plain phrase.
-	nudge_role := taskchain_service.target_string(nudge.target)
-	nudge_summary := nudge_role != "" ? fmt.tprintf("nudged %s", nudge_role) : "nudged a teammate"
-	publish_agent_action(h, inst, "task_nudge", nudge_summary)
-	b := strings.builder_make()
-	strings.write_string(&b, `{"task_id":"`)
-	write_handler_json_string(&b, string(nudge.task_id))
-	strings.write_string(&b, `","nudge_id":"`)
-	write_handler_json_string(&b, nudge.nudge_id)
-	strings.write_string(&b, `","delivery_state":"`)
-	write_handler_json_string(&b, nudge.delivery_state)
-	strings.write_string(&b, `","live_delivered":`)
-	strings.write_string(&b, fmt.tprintf("%d", nudge.live_delivered))
-	strings.write_string(&b, `,"durable_queued":`)
-	strings.write_string(&b, fmt.tprintf("%d", nudge.durable_queued))
-	strings.write_string(&b, `,"failed":`)
-	strings.write_string(&b, fmt.tprintf("%d", nudge.failed))
-	strings.write_string(&b, `,"target_role":"`)
-	write_handler_json_string(&b, taskchain_service.target_string(nudge.target))
-	strings.write_string(&b, `","created_at":"`)
-	write_handler_json_string(&b, nudge.created_at)
-	strings.write_string(&b, `","targets":`)
-	strings.write_string(&b, nudge.targets_json)
-	strings.write_string(&b, `}`)
-	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 202)
+	return respond_gone(req, "`task nudge` was removed in Task System v2; leases and timers replace nudges")
 }
 
 agent_action_task_create_handler :: proc(ctx: rawptr, req: Request) -> Response {
@@ -690,12 +591,17 @@ agent_action_task_create_handler :: proc(ctx: rawptr, req: Request) -> Response 
 	has_requires_user_approval := json_key_present(params, "requires_user_approval")
 	requires_user_approval, valid_requires_user_approval := json_bool_literal(params, "requires_user_approval")
 	if has_requires_user_approval && !valid_requires_user_approval do return respond_error(domain.domain_error(.Validation_Failed, "requires_user_approval must be a boolean"), req.request_id)
+	assignee, reviewers, review_roles, has_roles, actor_err := task_actor_fields_from_body(params)
+	if actor_err.code != .None do return respond_error(actor_err, req.request_id)
+	brief_json, _ := jsonx.extract_raw_object(params, "brief", top_level_only = true, allocator = context.temp_allocator)
 	task, created, err := taskchain_service.create_task(h.taskchains, auth, taskchain_service.Create_Task_Input{
 		chain_id = domain.Task_Chain_ID(chain_id),
 		title = json_string(params, "title"),
 		description = json_string(params, "description"),
-		assignee_ref_json = json_object_or_empty(params, "assignee_ref"),
-		reviewer_refs_json = json_array_optional(params, "reviewer_refs"),
+		brief_json = brief_json,
+		assignee_agent_id = assignee,
+		reviewer_agent_ids = reviewers,
+		review_roles = review_roles if has_roles else nil,
 		requires_user_approval = requires_user_approval,
 		has_requires_user_approval = has_requires_user_approval,
 		priority = priority,
@@ -746,11 +652,18 @@ agent_action_task_update_handler :: proc(ctx: rawptr, req: Request) -> Response 
 	has_requires_user_approval := json_key_present(params, "requires_user_approval")
 	requires_user_approval, valid_requires_user_approval := json_bool_literal(params, "requires_user_approval")
 	if has_requires_user_approval && !valid_requires_user_approval do return respond_error(domain.domain_error(.Validation_Failed, "requires_user_approval must be a boolean"), req.request_id)
+	assignee, reviewers, review_roles, has_roles, actor_err := task_actor_fields_from_body(params)
+	if actor_err.code != .None do return respond_error(actor_err, req.request_id)
+	brief_json, _ := jsonx.extract_raw_object(params, "brief", top_level_only = true, allocator = context.temp_allocator)
 	task, updated, err := taskchain_service.update_task(h.taskchains, auth, task_id, taskchain_service.Update_Task_Input{
 		title = json_string(params, "title"),
 		description = json_string(params, "description"),
-		assignee_ref_json = json_object_or_empty(params, "assignee_ref"),
-		reviewer_refs_json = json_array_optional(params, "reviewer_refs"),
+		brief_json = brief_json,
+		assignee_agent_id = assignee,
+		has_assignee = json_key_present(params, "assignee") || json_key_present(params, "assignee_ref"),
+		review_roles = review_roles,
+		has_review_roles = has_roles,
+		reviewer_agent_ids = reviewers,
 		requires_user_approval = requires_user_approval,
 		has_requires_user_approval = has_requires_user_approval,
 		priority = priority,
@@ -793,63 +706,19 @@ agent_action_task_depend_handler :: proc(ctx: rawptr, req: Request) -> Response 
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 201)
 }
 
+// agent_action_task_vote_handler: removed in Task System v2 (410 Gone until M2 replaces it).
 agent_action_task_vote_handler :: proc(ctx: rawptr, req: Request) -> Response {
-	h := (^Agent_Action_Handlers)(ctx)
-	auth, inst, ok, resp := require_instance_action_auth(h, req)
-	if !ok do return resp
-	params := json_object_raw(req.body, "params")
-	task_id := domain.Task_ID(json_string(params, "task_id"))
-	result := json_string(params, "result")
-	if result == "" do result = json_string(params, "vote")
-	comment := json_string(params, "comment")
-	vote, recorded, err := taskchain_service.record_task_vote(h.taskchains, auth, taskchain_service.Vote_Input{task_id = task_id, vote = result, comment = comment})
-	if !recorded do return respond_error(err, req.request_id)
-	vote_label := result == "lgtm" ? "LGTM" : (result == "ngtm" ? "NGTM" : result)
-	publish_agent_action(h, inst, "task_vote", fmt.tprintf("voted %s", vote_label))
-	publish_task_event(h.event_bus, string(vote.owner_user_id), string(vote.task_id), string(vote.chain_id), "voted")
-	publish_chain_event(h.event_bus, string(vote.owner_user_id), string(vote.chain_id), "updated")
-	if updated_task, task_ok, _ := taskchain_service.get_task(h.taskchains, auth, vote.task_id); task_ok {
-		if updated_task.status == .Completed || updated_task.status == .Validated_Not_Good {
-			publish_task_event(h.event_bus, string(vote.owner_user_id), string(vote.task_id), string(vote.chain_id), "status_changed")
-		}
-	}
-	b := strings.builder_make()
-	write_task_vote_json(&b, vote)
-	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 200)
+	return respond_gone(req, "`task vote` was removed in Task System v2; use `review post` (M2)")
 }
 
+// agent_action_task_subscribe_handler: removed in Task System v2 (410 Gone until M2 replaces it).
 agent_action_task_subscribe_handler :: proc(ctx: rawptr, req: Request) -> Response {
-	h := (^Agent_Action_Handlers)(ctx)
-	auth, inst, ok, resp := require_instance_action_auth(h, req)
-	if !ok do return resp
-	params := json_object_raw(req.body, "params")
-	task_id := strings.trim_space(json_string(params, "task_id"))
-	if task_id == "" do return respond_error(domain.domain_error(.Validation_Failed, "task_id is required"), req.request_id)
-	events_val := json_string(params, "events")
-	if events_val == "" do events_val = json_string(params, "event_type")
-	sub, saved, err := taskchain_service.subscribe_task(h.taskchains, auth, domain.Task_ID(task_id), events_val)
-	if !saved do return respond_error(err, req.request_id)
-	publish_agent_action(h, inst, "task_subscribe", fmt.tprintf("subscribed to task %s", task_id))
-	publish_task_event(h.event_bus, string(sub.owner_user_id), string(sub.task_id), string(sub.chain_id), "updated")
-	b := strings.builder_make()
-	defer strings.builder_destroy(&b)
-	write_subscription_json(&b, sub)
-	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 200)
+	return respond_gone(req, "task subscriptions were removed in Task System v2")
 }
 
+// agent_action_task_unsubscribe_handler: removed in Task System v2 (410 Gone until M2 replaces it).
 agent_action_task_unsubscribe_handler :: proc(ctx: rawptr, req: Request) -> Response {
-	h := (^Agent_Action_Handlers)(ctx)
-	auth, inst, ok, resp := require_instance_action_auth(h, req)
-	if !ok do return resp
-	params := json_object_raw(req.body, "params")
-	task_id := strings.trim_space(json_string(params, "task_id"))
-	if task_id == "" do return respond_error(domain.domain_error(.Validation_Failed, "task_id is required"), req.request_id)
-	events_val := json_string(params, "events")
-	if events_val == "" do events_val = json_string(params, "event_type")
-	removed, err := taskchain_service.unsubscribe_task(h.taskchains, auth, domain.Task_ID(task_id), events_val)
-	if err.code != .None do return respond_error(err, req.request_id)
-	publish_agent_action(h, inst, "task_unsubscribe", fmt.tprintf("unsubscribed from task %s", task_id))
-	return respond_success(fmt.tprintf("{{\"removed\":%s}}", "true" if removed else "false"), req.request_id, auth_ctx_server_time(req), 200)
+	return respond_gone(req, "task subscriptions were removed in Task System v2")
 }
 
 
@@ -1376,15 +1245,11 @@ require_instance_action_auth :: proc(h: ^Agent_Action_Handlers, req: Request) ->
 }
 
 // write_agent_current_task_json serializes the instance's SERVER-AUTHORITATIVE
-// current task (CT-8/CT-9): it resolves the persisted current_task_id to the task
-// and emits it with the persisted role (work|review), rather than inferring from
-// status. Falls back to null when the pointer is unset or the task is gone.
+// current task: the lease it holds (Task System v2). agent_instances.current_task_*
+// is kept in sync by the lease verbs, so the pointer IS the lease; a pointer with
+// no matching task resolves to null.
 write_agent_current_task_json :: proc(b: ^strings.Builder, h: ^Agent_Action_Handlers, auth: contracts.Auth_Context, inst: domain.Agent_Instance) {
 	if h.taskchains == nil || inst.chain_id == "" || inst.current_task_id == "" { strings.write_string(b, "null"); return }
-	// Serializer guard (read-only): emit null if the persisted pointer no longer
-	// resolves to an actionable role for this instance, so a stale pointer never
-	// surfaces a task the agent should not act on between reconciles.
-	if !taskchain_service.current_task_pointer_valid(h.taskchains, auth, inst) { strings.write_string(b, "null"); return }
 	tasks, err := taskchain_service.list_tasks(h.taskchains, auth, domain.Task_Chain_ID(inst.chain_id))
 	if err.code != .None { strings.write_string(b, "null"); return }
 	for task in tasks {
@@ -1405,9 +1270,10 @@ write_current_task_json :: proc(b: ^strings.Builder, task: domain.Task, role: do
 	strings.write_string(b, "{\"task_id\":\""); write_handler_json_string(b, string(task.task_id))
 	strings.write_string(b, "\",\"chain_id\":\""); write_handler_json_string(b, string(task.chain_id))
 	strings.write_string(b, "\",\"title\":\""); write_handler_json_string(b, task.title)
-	strings.write_string(b, "\",\"status\":\""); write_handler_json_string(b, task_status_http(task.status))
+	strings.write_string(b, "\",\"state\":\""); write_handler_json_string(b, domain.task_state_string(task.state))
 	strings.write_string(b, "\",\"priority\":\""); write_handler_json_string(b, domain.task_priority_string(task.priority))
-	strings.write_string(b, "\",\"role\":\""); write_handler_json_string(b, domain.current_task_role_string(role))
+	strings.write_string(b, "\",\"attempt_no\":"); strings.write_string(b, fmt.tprintf("%d", task.attempt_no))
+	strings.write_string(b, ",\"role\":\""); write_handler_json_string(b, domain.current_task_role_string(role))
 	strings.write_string(b, "\",\"comment_summary\":")
 	write_task_comment_summary_json(b, summary)
 	strings.write_string(b, "}")

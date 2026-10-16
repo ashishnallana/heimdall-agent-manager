@@ -12,6 +12,7 @@ import agent_service "odin_test:hub/service/agent"
 import content_service "odin_test:hub/service/content"
 import project_service "odin_test:hub/service/project"
 import taskchain_service "odin_test:hub/service/taskchain"
+import taskv2 "odin_test:hub/service/taskv2"
 import events "odin_test:hub/service/events"
 import "core:encoding/json"
 import jsonx "odin_test:lib/jsonx"
@@ -129,7 +130,8 @@ Task_Chain_Wire :: struct {
 	status:                        string     `json:"status"`,
 	kind:                          string     `json:"kind"`,
 	coordinator_agent_instance_id: string     `json:"coordinator_agent_instance_id"`,
-	default_reviewer_refs:         json.Value `json:"default_reviewer_refs"`,
+	workflow_def_ref:              string     `json:"workflow_def_ref"`,
+	defaults:                      json.Value `json:"defaults"`,
 	created_at:                    string     `json:"created_at"`,
 	updated_at:                    string     `json:"updated_at"`,
 	is_pinned:                     bool       `json:"is_pinned"`,
@@ -160,59 +162,28 @@ Chain_Project_Group_Wire :: struct {
 	next_cursor:  string                 `json:"next_cursor"`,
 }
 
-Task_Subscription_Wire :: struct {
-	subscription_id:              string `json:"subscription_id"`,
-	owner_user_id:                string `json:"owner_user_id"`,
-	subscriber_agent_instance_id: string `json:"subscriber_agent_instance_id"`,
-	chain_id:                     string `json:"chain_id"`,
-	task_id:                      string `json:"task_id"`,
-	event_type:                   string `json:"event_type"`,
-	created_at:                   string `json:"created_at"`,
-}
-
-Subscription_Removed_Wire :: struct {
-	removed: bool `json:"removed"`,
-}
-
+// Simple_Task_Wire / Task_Detail_Wire (Task System v2): `state` is the five-state
+// ticket projection; `brief`, `blocked_on` and `generated_by` are spliced raw
+// (stored verbatim, never re-marshalled by a typed round trip).
 Simple_Task_Wire :: struct {
-	task_id:             string        `json:"task_id"`,
-	chain_id:            string        `json:"chain_id"`,
-	title:               string        `json:"title"`,
-	description:         string        `json:"description"`,
-	publish_state:       string        `json:"publish_state"`,
-	status:              string        `json:"status"`,
-	priority:            string        `json:"priority"`,
-	bridge_id:           string        `json:"bridge_id"`,
-	assignee_ref:        json.Value    `json:"assignee_ref"`,
-	reviewer_refs:       json.Value    `json:"reviewer_refs"`,
+	task_id:                string     `json:"task_id"`,
+	chain_id:               string     `json:"chain_id"`,
+	title:                  string     `json:"title"`,
+	description:            string     `json:"description"`,
+	publish_state:          string     `json:"publish_state"`,
+	state:                  string     `json:"state"`,
+	kind:                   string     `json:"kind"`,
+	priority:               string     `json:"priority"`,
+	attempt_no:             int        `json:"attempt_no"`,
+	bridge_id:              string     `json:"bridge_id"`,
+	brief:                  json.Value `json:"brief"`,
+	blocked_on:             json.Value `json:"blocked_on"`,
 	requires_user_approval: bool       `json:"requires_user_approval"`,
-	unblocks_dependents: bool          `json:"unblocks_dependents"`,
-	updated_at:          string        `json:"updated_at"`,
-	requested_status:    Maybe(string) `json:"requested_status,omitempty"`,
-	allowed_transitions: []string      `json:"allowed_transitions"`,
-	next_states:         []string      `json:"next_states"`,
-	allowed_actions:     []string      `json:"allowed_actions"`,
-}
-
-reviewer_refs_wire_value :: proc(t: domain.Task) -> json.Value {
-	refs, _, ok := taskchain_service.parse_actor_refs(t.reviewer_refs_json, context.temp_allocator)
-	if !ok do return json_value_or_empty_array("[]")
-	for &ref in refs {
-		if ref.type == "user" && ref.user_id == string(t.owner_user_id) {
-			ref.username = ref.user_id
-		}
-	}
-	encoded, err := json.marshal(refs[:], allocator = context.temp_allocator)
-	if err != nil do return json_value_or_empty_array("[]")
-	return json_value_or_empty_array(string(encoded))
-}
-
-Task_Vote_Wire :: struct {
-	task_id:                    string `json:"task_id"`,
-	reviewer_agent_instance_id: string `json:"reviewer_agent_instance_id"`,
-	vote:                       string `json:"vote"`,
-	comment:                    string `json:"comment"`,
-	created_at:                 string `json:"created_at"`,
+	ready_since:            string     `json:"ready_since"`,
+	stage_key:              string     `json:"stage_key"`,
+	stage_index:            int        `json:"stage_index"`,
+	unblocks_dependents:    bool       `json:"unblocks_dependents"`,
+	updated_at:             string     `json:"updated_at"`,
 }
 
 Task_Comment_Summary_Wire :: struct {
@@ -223,33 +194,47 @@ Task_Comment_Summary_Wire :: struct {
 }
 
 Task_Detail_Wire :: struct {
-	task_id:             string                    `json:"task_id"`,
-	chain_id:            string                    `json:"chain_id"`,
-	title:               string                    `json:"title"`,
-	description:         Maybe(string)             `json:"description,omitempty"`,
-	publish_state:       string                    `json:"publish_state"`,
-	status:              string                    `json:"status"`,
-	priority:            string                    `json:"priority"`,
-	bridge_id:           string                    `json:"bridge_id"`,
-	assignee_ref:        json.Value                `json:"assignee_ref"`,
-	reviewer_refs:       json.Value                `json:"reviewer_refs"`,
-	requires_user_approval: bool                   `json:"requires_user_approval"`,
-	blocked:             bool                      `json:"blocked"`,
-	unblocks_dependents: bool                      `json:"unblocks_dependents"`,
-	depends_on:          []string                  `json:"depends_on"`,
-	comment_summary:     Task_Comment_Summary_Wire `json:"comment_summary"`,
-	votes:               []Task_Vote_Wire          `json:"votes"`,
-	created_at:          string                    `json:"created_at"`,
-	updated_at:          string                    `json:"updated_at"`,
-	allowed_transitions: []string                  `json:"allowed_transitions"`,
-	next_states:         []string                  `json:"next_states"`,
-	allowed_actions:     []string                  `json:"allowed_actions"`,
+	task_id:                string                    `json:"task_id"`,
+	chain_id:               string                    `json:"chain_id"`,
+	title:                  string                    `json:"title"`,
+	description:            Maybe(string)             `json:"description,omitempty"`,
+	publish_state:          string                    `json:"publish_state"`,
+	state:                  string                    `json:"state"`,
+	kind:                   string                    `json:"kind"`,
+	priority:               string                    `json:"priority"`,
+	attempt_no:             int                       `json:"attempt_no"`,
+	bridge_id:              string                    `json:"bridge_id"`,
+	brief:                  json.Value                `json:"brief"`,
+	blocked_on:             json.Value                `json:"blocked_on"`,
+	requires_user_approval: bool                      `json:"requires_user_approval"`,
+	ready_since:            string                    `json:"ready_since"`,
+	stage_key:              string                    `json:"stage_key"`,
+	stage_index:            int                       `json:"stage_index"`,
+	// blocked: a dependency is not yet done (badge, not a state).
+	blocked:                bool                      `json:"blocked"`,
+	unblocks_dependents:    bool                      `json:"unblocks_dependents"`,
+	depends_on:             []string                  `json:"depends_on"`,
+	comment_summary:        Task_Comment_Summary_Wire `json:"comment_summary"`,
+	// lease: the live work/review lease(s) on this task (M1), empty when none.
+	leases:                 []Task_Lease_Wire         `json:"leases"`,
+	created_at:             string                    `json:"created_at"`,
+	updated_at:             string                    `json:"updated_at"`,
+	started_at:             string                    `json:"started_at"`,
+	completed_at:           string                    `json:"completed_at"`,
 }
 
-Task_FSM_Wire :: struct {
-	allowed_transitions: []string `json:"allowed_transitions"`,
-	next_states:         []string `json:"next_states"`,
-	allowed_actions:     []string `json:"allowed_actions"`,
+Task_Lease_Wire :: struct {
+	lease_id:           string `json:"lease_id"`,
+	kind:               string `json:"kind"`,
+	review_role:        string `json:"review_role"`,
+	holder_instance_id: string `json:"holder_instance_id"`,
+	attempt_no:         int    `json:"attempt_no"`,
+	bridge_id:          string `json:"bridge_id"`,
+	granted_at:         string `json:"granted_at"`,
+	confirmed_at:       string `json:"confirmed_at"`,
+	expires_at:         string `json:"expires_at"`,
+	hard_deadline_at:   string `json:"hard_deadline_at"`,
+	delivery:           string `json:"delivery"`,
 }
 
 Task_Chain_Member_Wire :: struct {
@@ -288,6 +273,8 @@ Task_Chain_Fleet_Wire :: struct {
 	updated_at:             string                         `json:"updated_at"`,
 	provider:               string                         `json:"provider"`,
 	model:                   string                         `json:"model"`,
+	roles:                  json.Value                     `json:"roles"`,
+	bridge_id:              string                         `json:"bridge_id"`,
 	restarted_instance_ids: Maybe([]string)                `json:"restarted_instance_ids,omitempty"`,
 	restart_failures:       Maybe([]Fleet_Restart_Failure) `json:"restart_failures,omitempty"`,
 }
@@ -315,24 +302,6 @@ Task_Comment_Response_Wire :: struct {
 	notified:                 []string `json:"notified"`,
 }
 
-Task_Current_Task_Response_Wire :: struct {
-	agent_instance_id: string `json:"agent_instance_id"`,
-	current_task_id:   string `json:"current_task_id"`,
-	current_task_role: string `json:"current_task_role"`,
-}
-
-Task_Nudge_Response_Wire :: struct {
-	task_id:        string     `json:"task_id"`,
-	nudge_id:       string     `json:"nudge_id"`,
-	delivery_state: string     `json:"delivery_state"`,
-	live_delivered: int        `json:"live_delivered"`,
-	durable_queued: int        `json:"durable_queued"`,
-	failed:         int        `json:"failed"`,
-	target_role:    string     `json:"target_role"`,
-	created_at:     string     `json:"created_at"`,
-	targets:        json.Value `json:"targets"`,
-}
-
 Task_Summary_Wire :: struct {
 	task_id:  string `json:"task_id"`,
 	chain_id: string `json:"chain_id"`,
@@ -346,7 +315,8 @@ Task_Chain_Detail_Response_Wire :: struct {
 	status:                        string                      `json:"status"`,
 	kind:                          string                      `json:"kind"`,
 	coordinator_agent_instance_id: string                      `json:"coordinator_agent_instance_id"`,
-	default_reviewer_refs:         json.Value                  `json:"default_reviewer_refs"`,
+	workflow_def_ref:              string                      `json:"workflow_def_ref"`,
+	defaults:                      json.Value                  `json:"defaults"`,
 	created_at:                    string                      `json:"created_at"`,
 	updated_at:                    string                      `json:"updated_at"`,
 	is_pinned:                     bool                        `json:"is_pinned"`,
@@ -369,7 +339,8 @@ make_chain_wire :: proc(c: domain.Task_Chain) -> Task_Chain_Wire {
 		status                        = chain_status_http(c.status),
 		kind                          = c.kind,
 		coordinator_agent_instance_id = c.coordinator_agent_instance_id,
-		default_reviewer_refs         = json_value_or_empty_array(c.default_reviewer_refs_json),
+		workflow_def_ref              = c.workflow_def_ref,
+		defaults                      = json_value_or_empty_object(c.defaults_json),
 		created_at                    = c.created_at,
 		updated_at                    = c.updated_at,
 		is_pinned                     = c.is_pinned,
@@ -424,45 +395,48 @@ make_chain_project_page_wire :: proc(p: Chain_Project_Page) -> Chain_Project_Gro
 	}
 }
 
-task_fsm_wire_slices :: proc(status: domain.Task_Status, allocator := context.temp_allocator) -> (transitions: []string, actions: []string) {
-	trans := domain.task_allowed_transitions(status)
-	acts := domain.task_allowed_actions(status)
-	t_strings := make([]string, len(trans), allocator)
-	for st, i in trans {
-		t_strings[i] = task_status_http(st)
+make_simple_task_wire :: proc(t: domain.Task) -> Simple_Task_Wire {
+	return Simple_Task_Wire{
+		task_id                = string(t.task_id),
+		chain_id               = string(t.chain_id),
+		title                  = t.title,
+		description            = t.description,
+		publish_state          = publish_state_http(t.publish_state),
+		state                  = domain.task_state_string(t.state),
+		kind                   = domain.task_kind_string(t.kind),
+		priority               = domain.task_priority_string(t.priority),
+		attempt_no             = t.attempt_no,
+		bridge_id              = t.bridge_id,
+		brief                  = json_value_or_empty_object(t.brief_json),
+		blocked_on             = json_value_or_null(t.blocked_on_json),
+		requires_user_approval = t.requires_user_approval,
+		ready_since            = t.ready_since,
+		stage_key              = t.stage_key,
+		stage_index            = t.stage_index,
+		unblocks_dependents    = domain.task_state_unblocks_dependents(t.state),
+		updated_at             = t.updated_at,
 	}
-	a_strings := make([]string, len(acts), allocator)
-	for a, i in acts {
-		a_strings[i] = a
-	}
-	return t_strings, a_strings
 }
 
-make_simple_task_wire :: proc(t: domain.Task, requested_status := "") -> Simple_Task_Wire {
-	trans, acts := task_fsm_wire_slices(t.status, context.temp_allocator)
-	req_status_maybe: Maybe(string) = nil
-	if requested_status != "" && requested_status != task_status_http(t.status) {
-		req_status_maybe = requested_status
+// json_value_or_null splices a raw JSON object or emits null when empty.
+json_value_or_null :: proc(raw: string) -> json.Value {
+	if strings.trim_space(raw) == "" do return nil
+	return json_value_raw(raw)
+}
+
+make_task_lease_wires :: proc(h: ^Taskchain_Handlers, t: domain.Task) -> []Task_Lease_Wire {
+	out := make([dynamic]Task_Lease_Wire, context.temp_allocator)
+	if h == nil || h.taskchains == nil || h.taskchains.repo == nil do return out[:]
+	leases, err := iface.taskchain_list_leases_by_task(h.taskchains.repo, t.task_id)
+	if err.code != .None do return out[:]
+	for l in leases {
+		append(&out, Task_Lease_Wire{
+			lease_id = l.lease_id, kind = l.kind, review_role = l.review_role, holder_instance_id = l.holder_instance_id,
+			attempt_no = l.attempt_no, bridge_id = l.bridge_id, granted_at = l.granted_at, confirmed_at = l.confirmed_at,
+			expires_at = l.expires_at, hard_deadline_at = l.hard_deadline_at, delivery = l.delivery,
+		})
 	}
-	return Simple_Task_Wire{
-		task_id             = string(t.task_id),
-		chain_id            = string(t.chain_id),
-		title               = t.title,
-		description         = t.description,
-		publish_state       = publish_state_http(t.publish_state),
-		status              = task_status_http(t.status),
-		priority            = domain.task_priority_string(t.priority),
-		bridge_id           = t.bridge_id,
-		assignee_ref        = json_value_or_empty_object(t.assignee_ref_json),
-		reviewer_refs       = reviewer_refs_wire_value(t),
-		requires_user_approval = taskchain_service.task_requires_user_approval(t),
-		unblocks_dependents = domain.task_status_unblocks_dependents(t.status),
-		updated_at          = t.updated_at,
-		requested_status    = req_status_maybe,
-		allowed_transitions = trans,
-		next_states         = trans,
-		allowed_actions     = acts,
-	}
+	return out[:]
 }
 
 make_task_detail_wire :: proc(h: ^Taskchain_Handlers, auth_ctx: contracts.Auth_Context, t: domain.Task, deps: []domain.Task_Dependency, include_description := true) -> Task_Detail_Wire {
@@ -472,22 +446,13 @@ make_task_detail_wire :: proc(h: ^Taskchain_Handlers, auth_ctx: contracts.Auth_C
 		if d.task_id == t.task_id {
 			append(&dep_ids, string(d.depends_on_task_id))
 			if parent, p_ok, _ := taskchain_service.get_task_for_read(h.taskchains, auth_ctx, d.depends_on_task_id); p_ok {
-				if !domain.task_status_unblocks_dependents(parent.status) do is_blocked = true
+				if !domain.task_state_unblocks_dependents(parent.state) do is_blocked = true
 			}
 		}
 	}
 
 	comment_summary, _ := taskchain_service.task_comment_summary(h.taskchains, auth_ctx, t.task_id)
-	votes, _ := taskchain_service.list_task_votes(h.taskchains, auth_ctx, t.task_id)
-	defer delete(votes)
-
-	votes_wire := make([]Task_Vote_Wire, len(votes), context.temp_allocator)
-	for v, i in votes {
-		votes_wire[i] = make_task_vote_wire(v)
-	}
-
 	summary_wire := make_task_comment_summary_wire(comment_summary)
-	trans, acts := task_fsm_wire_slices(t.status, context.temp_allocator)
 
 	desc_maybe: Maybe(string) = nil
 	if include_description {
@@ -495,27 +460,31 @@ make_task_detail_wire :: proc(h: ^Taskchain_Handlers, auth_ctx: contracts.Auth_C
 	}
 
 	return Task_Detail_Wire{
-		task_id             = string(t.task_id),
-		chain_id            = string(t.chain_id),
-		title               = t.title,
-		description         = desc_maybe,
-		publish_state       = publish_state_http(t.publish_state),
-		status              = task_status_http(t.status),
-		priority            = domain.task_priority_string(t.priority),
-		bridge_id           = t.bridge_id,
-		assignee_ref        = json_value_or_empty_object(t.assignee_ref_json),
-		reviewer_refs       = reviewer_refs_wire_value(t),
-		requires_user_approval = taskchain_service.task_requires_user_approval(t),
-		blocked             = is_blocked,
-		unblocks_dependents = domain.task_status_unblocks_dependents(t.status),
-		depends_on          = dep_ids[:],
-		comment_summary     = summary_wire,
-		votes               = votes_wire,
-		created_at          = t.created_at,
-		updated_at          = t.updated_at,
-		allowed_transitions = trans,
-		next_states         = trans,
-		allowed_actions     = acts,
+		task_id                = string(t.task_id),
+		chain_id               = string(t.chain_id),
+		title                  = t.title,
+		description            = desc_maybe,
+		publish_state          = publish_state_http(t.publish_state),
+		state                  = domain.task_state_string(t.state),
+		kind                   = domain.task_kind_string(t.kind),
+		priority               = domain.task_priority_string(t.priority),
+		attempt_no             = t.attempt_no,
+		bridge_id              = t.bridge_id,
+		brief                  = json_value_or_empty_object(t.brief_json),
+		blocked_on             = json_value_or_null(t.blocked_on_json),
+		requires_user_approval = t.requires_user_approval,
+		ready_since            = t.ready_since,
+		stage_key              = t.stage_key,
+		stage_index            = t.stage_index,
+		blocked                = is_blocked,
+		unblocks_dependents    = domain.task_state_unblocks_dependents(t.state),
+		depends_on             = dep_ids[:],
+		comment_summary        = summary_wire,
+		leases                 = make_task_lease_wires(h, t),
+		created_at             = t.created_at,
+		updated_at             = t.updated_at,
+		started_at             = t.started_at,
+		completed_at           = t.completed_at,
 	}
 }
 
@@ -544,16 +513,6 @@ make_chain_member_wire :: proc(h: ^Taskchain_Handlers, auth: contracts.Auth_Cont
 		runtime_status    = runtime_status,
 		activity_status   = activity_status,
 		created_at        = m.created_at,
-	}
-}
-
-make_task_vote_wire :: proc(v: domain.Task_Vote) -> Task_Vote_Wire {
-	return Task_Vote_Wire{
-		task_id                    = string(v.task_id),
-		reviewer_agent_instance_id = v.reviewer_agent_instance_id,
-		vote                       = v.vote,
-		comment                    = v.comment,
-		created_at                 = v.created_at,
 	}
 }
 
@@ -635,20 +594,10 @@ make_chain_fleet_wire :: proc(
 		updated_at             = f.updated_at,
 		provider               = f.provider,
 		model                   = f.model,
+		roles                  = json_value_or_empty_array(f.roles_json if f.roles_json != "" else domain.FLEET_ROLES_DEFAULT_JSON),
+		bridge_id              = f.bridge_id,
 		restarted_instance_ids = restarted_ids_maybe,
 		restart_failures       = restart_failures_maybe,
-	}
-}
-
-make_subscription_wire :: proc(s: domain.Task_Subscription) -> Task_Subscription_Wire {
-	return Task_Subscription_Wire{
-		subscription_id              = s.subscription_id,
-		owner_user_id                = string(s.owner_user_id),
-		subscriber_agent_instance_id = s.subscriber_agent_instance_id,
-		chain_id                     = string(s.chain_id),
-		task_id                      = string(s.task_id),
-		event_type                   = s.event_type,
-		created_at                   = s.created_at,
 	}
 }
 
@@ -684,7 +633,8 @@ make_chain_detail_response_wire :: proc(
 		status                        = chain_status_http(chain.status),
 		kind                          = chain.kind,
 		coordinator_agent_instance_id = chain.coordinator_agent_instance_id,
-		default_reviewer_refs         = json_value_or_empty_array(chain.default_reviewer_refs_json),
+		workflow_def_ref              = chain.workflow_def_ref,
+		defaults                      = json_value_or_empty_object(chain.defaults_json),
 		created_at                    = chain.created_at,
 		updated_at                    = chain.updated_at,
 		is_pinned                     = chain.is_pinned,
@@ -693,17 +643,6 @@ make_chain_detail_response_wire :: proc(
 		tasks                         = tasks_wire,
 		directories                   = dirs_wire,
 	}
-}
-
-publish_instance_current_task_changed :: proc(h: ^Taskchain_Handlers, owner_user_id, agent_instance_id, current_task_id, current_task_role: string) {
-	if h == nil || h.event_bus == nil || owner_user_id == "" do return
-	wire := Task_Current_Task_Response_Wire{
-		agent_instance_id = agent_instance_id,
-		current_task_id   = current_task_id,
-		current_task_role = current_task_role,
-	}
-	data, _ := json.marshal(wire, JSON_MARSHAL_OPT, allocator = context.temp_allocator)
-	events.publish_resource_changed(h.event_bus, owner_user_id, "agent_instance", agent_instance_id, "current_task_changed", string(data))
 }
 
 taskchain_resource_summary_json :: proc(key, value: string) -> string {
@@ -1271,7 +1210,6 @@ create_task_chain_handler :: proc(ctx: rawptr, req: Request) -> Response {
 		owner_user_id = json_string(req.body, "owner_user_id"),
 		kind = json_string(req.body, "kind"),
 		coordinator_agent_id = coord_inst_id,
-		default_reviewer_refs_json = json_array_raw(req.body, "default_reviewer_refs"),
 	})
 	if !created do return respond_error(err, req.request_id)
 	if coord_agent_id := json_string(req.body, "coordinator_agent_id"); coord_agent_id != "" {
@@ -1388,65 +1326,6 @@ pin_task_chain_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req))
 }
 
-task_chain_subscribe_handler :: proc(ctx: rawptr, req: Request) -> Response {
-	h := (^Taskchain_Handlers)(ctx)
-	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
-	if !ok do return auth_resp
-	chain_id := domain.Task_Chain_ID(path_part(req.path, 4))
-	if chain_id == "" do return respond_error(domain.domain_error(.Validation_Failed, "chain_id is required"), req.request_id)
-	if auth_ctx.agent_instance_id == "" {
-		if inst_id := json_string(req.body, "agent_instance_id"); inst_id != "" {
-			auth_ctx.agent_instance_id = inst_id
-		} else if inst_id2 := json_string(req.body, "subscriber_agent_instance_id"); inst_id2 != "" {
-			auth_ctx.agent_instance_id = inst_id2
-		} else if inst_id3 := query_value(req.query, "agent_instance_id"); inst_id3 != "" {
-			auth_ctx.agent_instance_id = inst_id3
-		} else if inst_id4 := query_value(req.query, "subscriber_agent_instance_id"); inst_id4 != "" {
-			auth_ctx.agent_instance_id = inst_id4
-		}
-	}
-	events_val := json_string(req.body, "events")
-	if events_val == "" do events_val = json_string(req.body, "event_type")
-	if events_val == "" do events_val = query_value(req.query, "events")
-	if events_val == "" do events_val = query_value(req.query, "event_type")
-	sub, saved, err := taskchain_service.subscribe_taskchain(h.taskchains, auth_ctx, chain_id, events_val)
-	if !saved do return respond_error(err, req.request_id)
-	publish_chain_changed(h, string(sub.owner_user_id), string(sub.chain_id), "updated")
-	b := strings.builder_make()
-	defer strings.builder_destroy(&b)
-	write_subscription_json(&b, sub)
-	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 201)
-}
-
-task_chain_unsubscribe_handler :: proc(ctx: rawptr, req: Request) -> Response {
-	h := (^Taskchain_Handlers)(ctx)
-	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
-	if !ok do return auth_resp
-	chain_id := domain.Task_Chain_ID(path_part(req.path, 4))
-	if chain_id == "" do return respond_error(domain.domain_error(.Validation_Failed, "chain_id is required"), req.request_id)
-	if auth_ctx.agent_instance_id == "" {
-		if inst_id := json_string(req.body, "agent_instance_id"); inst_id != "" {
-			auth_ctx.agent_instance_id = inst_id
-		} else if inst_id2 := json_string(req.body, "subscriber_agent_instance_id"); inst_id2 != "" {
-			auth_ctx.agent_instance_id = inst_id2
-		} else if inst_id3 := query_value(req.query, "agent_instance_id"); inst_id3 != "" {
-			auth_ctx.agent_instance_id = inst_id3
-		} else if inst_id4 := query_value(req.query, "subscriber_agent_instance_id"); inst_id4 != "" {
-			auth_ctx.agent_instance_id = inst_id4
-		}
-	}
-	events_val := json_string(req.body, "events")
-	if events_val == "" do events_val = json_string(req.body, "event_type")
-	if events_val == "" do events_val = query_value(req.query, "events")
-	if events_val == "" do events_val = query_value(req.query, "event_type")
-	removed, err := taskchain_service.unsubscribe_taskchain(h.taskchains, auth_ctx, chain_id, events_val)
-	if err.code != .None do return respond_error(err, req.request_id)
-	publish_chain_changed(h, auth_ctx.user_id, string(chain_id), "updated")
-	unsub_wire := Subscription_Removed_Wire{removed = removed}
-	data, _ := json.marshal(unsub_wire, JSON_MARSHAL_OPT, allocator = context.temp_allocator)
-	return respond_success(string(data), req.request_id, auth_ctx_server_time(req), 200)
-}
-
 list_tasks_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Taskchain_Handlers)(ctx)
 	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
@@ -1526,7 +1405,15 @@ create_task_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	has_requires_user_approval := json_key_present(req.body, "requires_user_approval")
 	requires_user_approval, valid_requires_user_approval := json_bool_literal(req.body, "requires_user_approval")
 	if has_requires_user_approval && !valid_requires_user_approval do return respond_error(domain.domain_error(.Validation_Failed, "requires_user_approval must be a boolean"), req.request_id)
-	task, created, err := taskchain_service.create_task(h.taskchains, auth_ctx, taskchain_service.Create_Task_Input{chain_id = domain.Task_Chain_ID(chain_id), title = json_string(req.body, "title"), description = json_string(req.body, "description"), owner_user_id = json_string(req.body, "owner_user_id"), assignee_ref_json = json_object_or_empty(req.body, "assignee_ref"), reviewer_refs_json = json_array_optional(req.body, "reviewer_refs"), requires_user_approval = requires_user_approval, has_requires_user_approval = has_requires_user_approval, priority = priority, has_priority = has_priority, depends_on = deps, bridge_id = bridge_id})
+	assignee, reviewers, review_roles, has_roles, actor_err := task_actor_fields_from_body(req.body)
+	if actor_err.code != .None do return respond_error(actor_err, req.request_id)
+	brief_json, _ := jsonx.extract_raw_object(req.body, "brief", top_level_only = true, allocator = context.temp_allocator)
+	task, created, err := taskchain_service.create_task(h.taskchains, auth_ctx, taskchain_service.Create_Task_Input{
+		chain_id = domain.Task_Chain_ID(chain_id), title = json_string(req.body, "title"), description = json_string(req.body, "description"), owner_user_id = json_string(req.body, "owner_user_id"),
+		brief_json = brief_json, assignee_agent_id = assignee, reviewer_agent_ids = reviewers, review_roles = review_roles if has_roles else nil,
+		requires_user_approval = requires_user_approval, has_requires_user_approval = has_requires_user_approval, priority = priority, has_priority = has_priority, depends_on = deps, bridge_id = bridge_id,
+		kind = domain.task_kind_from_string(json_string(req.body, "kind")),
+	})
 	if !created do return respond_error(err, req.request_id)
 	publish_task_changed(h, string(task.owner_user_id), string(task.task_id), string(task.chain_id), "created")
 	publish_chain_changed(h, string(task.owner_user_id), string(task.chain_id), "updated")
@@ -1555,7 +1442,15 @@ patch_task_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	has_requires_user_approval := json_key_present(req.body, "requires_user_approval")
 	requires_user_approval, valid_requires_user_approval := json_bool_literal(req.body, "requires_user_approval")
 	if has_requires_user_approval && !valid_requires_user_approval do return respond_error(domain.domain_error(.Validation_Failed, "requires_user_approval must be a boolean"), req.request_id)
-	task, updated, err := taskchain_service.update_task(h.taskchains, auth_ctx, task_id, taskchain_service.Update_Task_Input{title = json_string(req.body, "title"), description = json_string(req.body, "description"), assignee_ref_json = json_object_or_empty(req.body, "assignee_ref"), reviewer_refs_json = json_array_optional(req.body, "reviewer_refs"), requires_user_approval = requires_user_approval, has_requires_user_approval = has_requires_user_approval, priority = priority, has_priority = has_priority, depends_on = deps, has_depends_on = has_deps, bridge_id = bridge_pin})
+	assignee, reviewers, review_roles, has_roles, actor_err := task_actor_fields_from_body(req.body)
+	if actor_err.code != .None do return respond_error(actor_err, req.request_id)
+	brief_json, _ := jsonx.extract_raw_object(req.body, "brief", top_level_only = true, allocator = context.temp_allocator)
+	task, updated, err := taskchain_service.update_task(h.taskchains, auth_ctx, task_id, taskchain_service.Update_Task_Input{
+		title = json_string(req.body, "title"), description = json_string(req.body, "description"), brief_json = brief_json,
+		assignee_agent_id = assignee, has_assignee = json_key_present(req.body, "assignee") || json_key_present(req.body, "assignee_ref"),
+		review_roles = review_roles, has_review_roles = has_roles, reviewer_agent_ids = reviewers,
+		requires_user_approval = requires_user_approval, has_requires_user_approval = has_requires_user_approval, priority = priority, has_priority = has_priority, depends_on = deps, has_depends_on = has_deps, bridge_id = bridge_pin,
+	})
 	if !updated do return respond_error(err, req.request_id)
 	publish_task_changed(h, string(task.owner_user_id), string(task.task_id), string(task.chain_id), "updated")
 	publish_chain_changed(h, string(task.owner_user_id), string(task.chain_id), "updated")
@@ -1579,25 +1474,12 @@ publish_task_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req))
 }
 
+// change_task_status_handler: `POST …/tasks/{id}/status` is GONE (Task System v2).
+// Agents never set a status; the five-state projection is a fold over task_events
+// and only the lease/review verbs move it. 410 until M2 lands the human verbs
+// (approve / request-changes / reopen / answer).
 change_task_status_handler :: proc(ctx: rawptr, req: Request) -> Response {
-	h := (^Taskchain_Handlers)(ctx)
-	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
-	if !ok do return auth_resp
-	chain_id := domain.Task_Chain_ID(path_part(req.path, 4))
-	task_id := domain.Task_ID(path_part(req.path, 6))
-	if matched, mismatch_resp := require_task_path_scope(h, auth_ctx, chain_id, task_id, req); !matched do return mismatch_resp
-	status, status_ok := task_status_from_http(json_string(req.body, "status"))
-	if !status_ok do return respond_error(domain.domain_error(.Validation_Failed, "invalid task status"), req.request_id)
-	task, changed, err := taskchain_service.change_task_status(h.taskchains, auth_ctx, task_id, status)
-	if !changed do return respond_error(err, req.request_id)
-	publish_task_changed(h, string(task.owner_user_id), string(task.task_id), string(task.chain_id), "status_changed")
-	publish_chain_changed(h, string(task.owner_user_id), string(task.chain_id), "updated")
-	// `task` is the RE-READ row (see change_task_status), so its status is what the
-	// database holds — which is not always what was asked for: the promotion engine may
-	// demote it again in the same request. Pass the requested value so a caller can see
-	// both rather than being told its request took effect when it did not.
-	b := strings.builder_make(); write_task_json(&b, task, task_status_http(status))
-	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req))
+	return respond_gone(req, "task status is derived from events; use the lease/review verbs (POST …/status was removed in Task System v2)")
 }
 
 cancel_task_handler :: proc(ctx: rawptr, req: Request) -> Response {
@@ -1607,63 +1489,12 @@ cancel_task_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	chain_id := domain.Task_Chain_ID(path_part(req.path, 4))
 	task_id := domain.Task_ID(path_part(req.path, 6))
 	if matched, mismatch_resp := require_task_path_scope(h, auth_ctx, chain_id, task_id, req); !matched do return mismatch_resp
-	task, changed, err := taskchain_service.change_task_status(h.taskchains, auth_ctx, task_id, .Cancelled)
+	task, changed, err := taskchain_service.cancel_task(h.taskchains, auth_ctx, task_id, json_string(req.body, "reason"))
 	if !changed do return respond_error(err, req.request_id)
-	publish_task_changed(h, string(task.owner_user_id), string(task.task_id), string(task.chain_id), "status_changed")
+	publish_task_changed(h, string(task.owner_user_id), string(task.task_id), string(task.chain_id), "updated")
 	publish_chain_changed(h, string(task.owner_user_id), string(task.chain_id), "updated")
 	b := strings.builder_make(); write_task_json(&b, task)
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req))
-}
-
-nudge_task_handler :: proc(ctx: rawptr, req: Request) -> Response {
-	h := (^Taskchain_Handlers)(ctx)
-	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
-	if !ok do return auth_resp
-	chain_id := domain.Task_Chain_ID(path_part(req.path, 4))
-	task_id := domain.Task_ID(path_part(req.path, 6))
-	if matched, mismatch_resp := require_task_path_scope(h, auth_ctx, chain_id, task_id, req); !matched do return mismatch_resp
-	nudge, nudged, err := taskchain_service.manual_nudge(h.taskchains, auth_ctx, task_id, json_string(req.body, "message"))
-	if !nudged do return respond_error(err, req.request_id)
-	
-		nudge_wire := Task_Nudge_Response_Wire{
-		task_id        = string(nudge.task_id),
-		nudge_id       = nudge.nudge_id,
-		delivery_state = nudge.delivery_state,
-		live_delivered = nudge.live_delivered,
-		durable_queued = nudge.durable_queued,
-		failed         = nudge.failed,
-		target_role    = taskchain_service.target_string(nudge.target),
-		created_at     = nudge.created_at,
-		targets        = json_value_raw(nudge.targets_json),
-	}
-	data, _ := json.marshal(nudge_wire, JSON_MARSHAL_OPT, allocator = context.temp_allocator)
-	return respond_success(string(data), req.request_id, auth_ctx_server_time(req))
-}
-
-// set_task_current_task_handler lets a coordinator/user pin an agent instance's
-// current task to this task (CT-9 manual override). Body: {"agent_instance_id"}.
-// The service validates assignee/reviewer eligibility + actionability, persists
-// the pointer, and notifies the target agent (work vs review label).
-set_task_current_task_handler :: proc(ctx: rawptr, req: Request) -> Response {
-	h := (^Taskchain_Handlers)(ctx)
-	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
-	if !ok do return auth_resp
-	chain_id := domain.Task_Chain_ID(path_part(req.path, 4))
-	task_id := domain.Task_ID(path_part(req.path, 6))
-	if matched, mismatch_resp := require_task_path_scope(h, auth_ctx, chain_id, task_id, req); !matched do return mismatch_resp
-	instance_id := json_string(req.body, "agent_instance_id")
-	if strings.trim_space(instance_id) == "" do return respond_error(domain.domain_error(.Validation_Failed, "agent_instance_id is required"), req.request_id)
-	inst, set_ok, err := taskchain_service.set_instance_current_task(h.taskchains, auth_ctx, instance_id, task_id)
-	if !set_ok do return respond_error(err, req.request_id)
-	publish_task_changed(h, string(inst.owner_user_id), string(task_id), string(chain_id), "current_task_set")
-	publish_instance_current_task_changed(h, string(inst.owner_user_id), inst.agent_instance_id, inst.current_task_id, domain.current_task_role_string(inst.current_task_role))
-		ct_wire := Task_Current_Task_Response_Wire{
-		agent_instance_id = inst.agent_instance_id,
-		current_task_id   = inst.current_task_id,
-		current_task_role = domain.current_task_role_string(inst.current_task_role),
-	}
-	data, _ := json.marshal(ct_wire, JSON_MARSHAL_OPT, allocator = context.temp_allocator)
-	return respond_success(string(data), req.request_id, auth_ctx_server_time(req))
 }
 
 list_task_comments_handler :: proc(ctx: rawptr, req: Request) -> Response {
@@ -1703,122 +1534,6 @@ create_task_comment_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	b := strings.builder_make()
 	write_task_comment_response_json(&b, comment, resolve_comment_author_display(h, auth_ctx, comment), notified)
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 201)
-}
-
-list_task_votes_handler :: proc(ctx: rawptr, req: Request) -> Response {
-	h := (^Taskchain_Handlers)(ctx)
-	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
-	if !ok do return auth_resp
-	chain_id := domain.Task_Chain_ID(path_part(req.path, 4))
-	task_id := domain.Task_ID(path_part(req.path, 6))
-	if matched, mismatch_resp := require_task_path_scope(h, auth_ctx, chain_id, task_id, req); !matched do return mismatch_resp
-	votes, err := taskchain_service.list_task_votes(h.taskchains, auth_ctx, task_id)
-	if err.code != .None do return respond_error(err, req.request_id)
-	b := strings.builder_make(); strings.write_byte(&b, '[')
-	for v, i in votes { if i > 0 do strings.write_byte(&b, ','); write_task_vote_json(&b, v) }
-	strings.write_byte(&b, ']')
-	return respond_list(strings.to_string(b), contracts.API_Page{limit = contracts.API_DEFAULT_PAGE_LIMIT, has_more = false}, req.request_id, auth_ctx_server_time(req))
-}
-
-vote_task_handler :: proc(ctx: rawptr, req: Request) -> Response {
-	h := (^Taskchain_Handlers)(ctx)
-	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
-	if !ok do return auth_resp
-	chain_id := domain.Task_Chain_ID(path_part(req.path, 4))
-	task_id := domain.Task_ID(path_part(req.path, 6))
-	if matched, mismatch_resp := require_task_path_scope(h, auth_ctx, chain_id, task_id, req); !matched do return mismatch_resp
-	vote, recorded, err := taskchain_service.record_task_vote(h.taskchains, auth_ctx, taskchain_service.Vote_Input{task_id = task_id, vote = json_string(req.body, "vote"), comment = json_string(req.body, "comment")})
-	if !recorded do return respond_error(err, req.request_id)
-	publish_task_changed(h, string(vote.owner_user_id), string(vote.task_id), string(vote.chain_id), "voted")
-	publish_chain_changed(h, string(vote.owner_user_id), string(vote.chain_id), "updated")
-	if updated_task, task_ok, _ := taskchain_service.get_task(h.taskchains, auth_ctx, vote.task_id); task_ok {
-		if updated_task.status == .Completed || updated_task.status == .Validated_Not_Good {
-			publish_task_changed(h, string(vote.owner_user_id), string(vote.task_id), string(vote.chain_id), "status_changed")
-		}
-	}
-	b := strings.builder_make(); write_task_vote_json(&b, vote)
-	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 200)
-}
-
-task_subscribe_handler :: proc(ctx: rawptr, req: Request) -> Response {
-	h := (^Taskchain_Handlers)(ctx)
-	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
-	if !ok do return auth_resp
-	task_id: domain.Task_ID
-	if path_part(req.path, 3) == "task-chains" && path_part(req.path, 5) == "tasks" {
-		chain_id := domain.Task_Chain_ID(path_part(req.path, 4))
-		task_id = domain.Task_ID(path_part(req.path, 6))
-		if matched, mismatch_resp := require_task_path_scope(h, auth_ctx, chain_id, task_id, req); !matched do return mismatch_resp
-	} else if path_part(req.path, 3) == "tasks" {
-		task_id = domain.Task_ID(path_part(req.path, 4))
-	} else {
-		task_id = domain.Task_ID(path_part(req.path, 6))
-	}
-	if task_id == "" do return respond_error(domain.domain_error(.Validation_Failed, "task_id is required"), req.request_id)
-	if auth_ctx.agent_instance_id == "" {
-		if inst_id := json_string(req.body, "agent_instance_id"); inst_id != "" {
-			auth_ctx.agent_instance_id = inst_id
-		} else if inst_id2 := json_string(req.body, "subscriber_agent_instance_id"); inst_id2 != "" {
-			auth_ctx.agent_instance_id = inst_id2
-		} else if inst_id3 := query_value(req.query, "agent_instance_id"); inst_id3 != "" {
-			auth_ctx.agent_instance_id = inst_id3
-		} else if inst_id4 := query_value(req.query, "subscriber_agent_instance_id"); inst_id4 != "" {
-			auth_ctx.agent_instance_id = inst_id4
-		}
-	}
-	events_val := json_string(req.body, "events")
-	if events_val == "" do events_val = json_string(req.body, "event_type")
-	if events_val == "" do events_val = query_value(req.query, "events")
-	if events_val == "" do events_val = query_value(req.query, "event_type")
-	sub, saved, err := taskchain_service.subscribe_task(h.taskchains, auth_ctx, task_id, events_val)
-	if !saved do return respond_error(err, req.request_id)
-	publish_task_changed(h, string(sub.owner_user_id), string(sub.task_id), string(sub.chain_id), "updated")
-	b := strings.builder_make()
-	defer strings.builder_destroy(&b)
-	write_subscription_json(&b, sub)
-	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 201)
-}
-
-task_unsubscribe_handler :: proc(ctx: rawptr, req: Request) -> Response {
-	h := (^Taskchain_Handlers)(ctx)
-	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
-	if !ok do return auth_resp
-	task_id: domain.Task_ID
-	chain_for_pub: domain.Task_Chain_ID = ""
-	if path_part(req.path, 3) == "task-chains" && path_part(req.path, 5) == "tasks" {
-		chain_id := domain.Task_Chain_ID(path_part(req.path, 4))
-		task_id = domain.Task_ID(path_part(req.path, 6))
-		chain_for_pub = chain_id
-		if matched, mismatch_resp := require_task_path_scope(h, auth_ctx, chain_id, task_id, req); !matched do return mismatch_resp
-	} else if path_part(req.path, 3) == "tasks" {
-		task_id = domain.Task_ID(path_part(req.path, 4))
-	} else {
-		task_id = domain.Task_ID(path_part(req.path, 6))
-	}
-	if task_id == "" do return respond_error(domain.domain_error(.Validation_Failed, "task_id is required"), req.request_id)
-	if auth_ctx.agent_instance_id == "" {
-		if inst_id := json_string(req.body, "agent_instance_id"); inst_id != "" {
-			auth_ctx.agent_instance_id = inst_id
-		} else if inst_id2 := json_string(req.body, "subscriber_agent_instance_id"); inst_id2 != "" {
-			auth_ctx.agent_instance_id = inst_id2
-		} else if inst_id3 := query_value(req.query, "agent_instance_id"); inst_id3 != "" {
-			auth_ctx.agent_instance_id = inst_id3
-		} else if inst_id4 := query_value(req.query, "subscriber_agent_instance_id"); inst_id4 != "" {
-			auth_ctx.agent_instance_id = inst_id4
-		}
-	}
-	events_val := json_string(req.body, "events")
-	if events_val == "" do events_val = json_string(req.body, "event_type")
-	if events_val == "" do events_val = query_value(req.query, "events")
-	if events_val == "" do events_val = query_value(req.query, "event_type")
-	removed, err := taskchain_service.unsubscribe_task(h.taskchains, auth_ctx, task_id, events_val)
-	if err.code != .None do return respond_error(err, req.request_id)
-	if chain_for_pub != "" {
-		publish_chain_changed(h, auth_ctx.user_id, string(chain_for_pub), "updated")
-	}
-	unsub_wire := Subscription_Removed_Wire{removed = removed}
-	data, _ := json.marshal(unsub_wire, JSON_MARSHAL_OPT, allocator = context.temp_allocator)
-	return respond_success(string(data), req.request_id, auth_ctx_server_time(req), 200)
 }
 
 list_chain_members_handler :: proc(ctx: rawptr, req: Request) -> Response {
@@ -2079,6 +1794,11 @@ upsert_chain_fleet_handler :: proc(ctx: rawptr, req: Request) -> Response {
 			}
 		}
 	}
+	roles := jsonx.extract_string_array(req.body, "roles", true, context.temp_allocator)
+	has_roles := jsonx.has_key(req.body, "roles", top_level_only = true)
+	fleet_bridge_id, has_fleet_bridge := task_bridge_id_from_body(req.body)
+	fleet_bridge_ptr: ^string
+	if has_fleet_bridge do fleet_bridge_ptr = &fleet_bridge_id
 	fleet, err := taskchain_service.upsert_fleet(h.taskchains, auth_ctx, taskchain_service.Upsert_Fleet_Input{
 		chain_id         = chain_id,
 		agent_id         = agent_id,
@@ -2088,6 +1808,9 @@ upsert_chain_fleet_handler :: proc(ctx: rawptr, req: Request) -> Response {
 		provider         = provider,
 		model             = model,
 		bridge_models_json = bridge_models,
+		roles            = roles[:],
+		has_roles        = has_roles,
+		bridge_id        = fleet_bridge_ptr,
 	})
 	if err.code != .None do return respond_error(err, req.request_id)
 	restarted_ids := make([dynamic]string)
@@ -2157,33 +1880,13 @@ write_chain_json :: proc(b: ^strings.Builder, c: domain.Task_Chain) {
 	strings.write_string(b, string(data))
 }
 
-write_subscription_json :: proc(b: ^strings.Builder, s: domain.Task_Subscription) {
-	wire := make_subscription_wire(s)
-	data, _ := json.marshal(wire, JSON_MARSHAL_OPT, allocator = context.temp_allocator)
-	strings.write_string(b, string(data))
-}
-
-write_task_fsm_fields_json :: proc(b: ^strings.Builder, status: domain.Task_Status) {
-	trans_strings, act_strings := task_fsm_wire_slices(status, context.temp_allocator)
-	fsm := Task_FSM_Wire{
-		allowed_transitions = trans_strings,
-		next_states         = trans_strings,
-		allowed_actions     = act_strings,
-	}
-	data, _ := json.marshal(fsm, JSON_MARSHAL_OPT, allocator = context.temp_allocator)
-	if len(data) >= 2 {
-		strings.write_byte(b, ',')
-		strings.write_string(b, string(data[1:len(data)-1]))
-	}
-}
-
 // requested_status is OBSERVATIONAL and optional: pass it only when the caller asked
 // for a status the row did not end up holding, and it is emitted alongside the actual
 // one so the response cannot imply a change that did not stick. It is a defaulted
 // parameter so no existing call site changes, and an additive JSON field so no existing
 // consumer breaks. It reports what happened; it never predicts what will happen.
-write_task_json :: proc(b: ^strings.Builder, t: domain.Task, requested_status := "") {
-	wire := make_simple_task_wire(t, requested_status)
+write_task_json :: proc(b: ^strings.Builder, t: domain.Task) {
+	wire := make_simple_task_wire(t)
 	data, _ := json.marshal(wire, JSON_MARSHAL_OPT, allocator = context.temp_allocator)
 	strings.write_string(b, string(data))
 }
@@ -2484,12 +2187,6 @@ agents_live_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req))
 }
 
-write_task_vote_json :: proc(b: ^strings.Builder, v: domain.Task_Vote) {
-	wire := make_task_vote_wire(v)
-	data, _ := json.marshal(wire, JSON_MARSHAL_OPT, allocator = context.temp_allocator)
-	strings.write_string(b, string(data))
-}
-
 // resolve_comment_author_display returns the display name for a comment's author
 // agent instance (MEM-7), mirroring write_member_json: prefer the instance's
 // display_name, else the durable agent's name. Empty for user-authored comments
@@ -2546,8 +2243,6 @@ path_part :: proc(path: string, index: int) -> string {
 
 publish_state_http :: proc(state: domain.Publish_State) -> string { if state == .Published do return "published"; return "draft" }
 chain_status_http :: proc(status: domain.Task_Chain_Status) -> string { if status == .Completed do return "completed"; if status == .Cancelled do return "cancelled"; if status == .Archived do return "archived"; return "active" }
-task_status_http :: proc(status: domain.Task_Status) -> string { switch status { case .Assigned: return "assigned"; case .Queued: return "queued"; case .In_Progress: return "in_progress"; case .In_Validation: return "in_validation"; case .Finishing: return "finishing"; case .Pausing: return "pausing"; case .Validated_Good: return "validated_good"; case .Validated_Not_Good: return "validated_not_good"; case .Paused: return "paused"; case .Completed: return "completed"; case .Cancelled: return "cancelled" }; return "assigned" }
-task_status_from_http :: proc(status: string) -> (domain.Task_Status, bool) { if status == "assigned" do return .Assigned, true; if status == "queued" do return .Queued, true; if status == "in_progress" do return .In_Progress, true; if status == "in_validation" do return .In_Validation, true; if status == "finishing" do return .Finishing, true; if status == "pausing" do return .Pausing, true; if status == "validated_good" do return .Validated_Good, true; if status == "validated_not_good" do return .Validated_Not_Good, true; if status == "paused" do return .Paused, true; if status == "completed" do return .Completed, true; if status == "cancelled" do return .Cancelled, true; return .Assigned, false }
 
 
 json_or_empty_array :: proc(value: string) -> string { if strings.trim_space(value) == "" do return "[]"; return value }
@@ -2567,49 +2262,65 @@ json_object_raw :: proc(body, key: string, allocator := context.allocator) -> st
 	if !ok do return ""
 	return res
 }
+// task_matches_query filters a task list by the query string. Task System v2
+// supports `state=<state>` (comma-separated), `kind=<task|gate>`, and
+// `assignee=<agent_id>` (brief.assignee). The legacy instance-ref filters are gone
+// with the refs: who holds a task is a lease, not an attribute.
 task_matches_query :: proc(task: domain.Task, query: string) -> bool {
-	assignee := query_value(query, "assignee_agent_instance_id")
-	if assignee != "" {
-		refs, _, ok := taskchain_service.parse_actor_refs(task.assignee_ref_json, context.temp_allocator)
-		if !ok do return false
+	if states := query_value(query, "state"); states != "" {
 		matched := false
-		for r in refs {
-			if r.agent_instance_id == assignee {
-				matched = true
-				break
-			}
+		for part in strings.split(states, ",", context.temp_allocator) {
+			if want, ok := domain.task_state_from_string(strings.trim_space(part)); ok && want == task.state do matched = true
 		}
 		if !matched do return false
 	}
+	if kind := query_value(query, "kind"); kind != "" {
+		if domain.task_kind_from_string(kind) != task.kind do return false
+	}
+	if assignee := query_value(query, "assignee"); assignee != "" {
+		if taskv2.brief_assignee(task.brief_json) != assignee do return false
+	}
+	return true
+}
 
-	reviewer := query_value(query, "reviewer_agent_instance_id")
-	reviewer_user := query_value(query, "reviewer_user_id")
-	if reviewer != "" || reviewer_user != "" {
-		refs, _, ok := taskchain_service.parse_actor_refs(task.reviewer_refs_json, context.temp_allocator)
-		if !ok do return false
-		if reviewer != "" {
-			matched := false
-			for r in refs {
-				if r.agent_instance_id == reviewer {
-					matched = true
-					break
-				}
+// task_actor_fields_from_body reads the v2 task actor fields:
+//   assignee:      agent_id string  (or legacy assignee_ref {type: agent_id, agent_id})
+//   reviewers:     [agent_id]       (or legacy reviewer_refs [{type: agent_id, agent_id}])
+//   review_roles:  [role]
+// Instance refs are rejected (instance pins no longer exist); user refs are
+// rejected in favour of requires_user_approval.
+task_actor_fields_from_body :: proc(body: string) -> (assignee: string, reviewers: []string, review_roles: []string, has_roles: bool, err: domain.Domain_Error) {
+	assignee = strings.trim_space(json_string(body, "assignee"))
+	if assignee == "" {
+		if ref, ok := jsonx.extract_raw_object(body, "assignee_ref", top_level_only = true, allocator = context.temp_allocator); ok {
+			if jsonx.extract_string(ref, "agent_instance_id", "", true, context.temp_allocator) != "" {
+				return "", nil, nil, false, domain.domain_error(.Validation_Failed, "assignee must be an agent template id (agent_id); instance pins were removed in Task System v2")
 			}
-			if !matched do return false
-		}
-		if reviewer_user != "" {
-			matched := false
-			for r in refs {
-				if r.user_id == reviewer_user {
-					matched = true
-					break
-				}
-			}
-			if !matched do return false
+			assignee = strings.trim_space(jsonx.extract_string(ref, "agent_id", "", true))
 		}
 	}
-
-	return true
+	revs := jsonx.extract_string_array(body, "reviewers", true)
+	if raw, ok := jsonx.extract_raw_array(body, "reviewer_refs", top_level_only = true, allocator = context.temp_allocator); ok {
+		parsed, perr := json.parse_string(raw, json.DEFAULT_SPECIFICATION, false, context.temp_allocator)
+		if perr == .None {
+			if arr, is_arr := parsed.(json.Array); is_arr {
+				for item in arr {
+					obj, is_obj := item.(json.Object)
+					if !is_obj do continue
+					if t, tok := obj["type"].(json.String); tok && string(t) == "user" {
+						return "", nil, nil, false, domain.domain_error(.Validation_Failed, "user reviewer refs are not accepted; use requires_user_approval")
+					}
+					if _, iok := obj["agent_instance_id"].(json.String); iok {
+						return "", nil, nil, false, domain.domain_error(.Validation_Failed, "reviewers must be agent template ids (agent_id); instance refs were removed in Task System v2")
+					}
+					if a, aok := obj["agent_id"].(json.String); aok && string(a) != "" do append(&revs, strings.clone(string(a)))
+				}
+			}
+		}
+	}
+	roles := jsonx.extract_string_array(body, "review_roles", true)
+	has_roles = jsonx.has_key(body, "review_roles", top_level_only = true)
+	return assignee, revs[:], roles[:], has_roles, domain.Domain_Error{}
 }
 
 // require_task_path_scope validates that the task exists, is owned by the caller,

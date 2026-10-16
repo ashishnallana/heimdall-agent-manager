@@ -77,28 +77,25 @@ Links / artifacts: none.
 ```
 
 ## 5. Drive the work without doing it
-- Nudge a stalled task's current owner: `./.heimdall/bin/ham-ctl task nudge <task-id> [--message "<text>"]`.
 - Read progress via `task list` + `task comments <task-id> --last N`. Answer worker questions; unblock dependencies; add missing reviewers.
-- Only touch a task's own status for coordination glue. Implementation status transitions are the assignee's responsibility.
+- To reach a stalled task's owner, comment on the task or `chat send` to them (`task nudge` was removed in Task System v2).
+- Never set a task's state yourself; the hub drives it (leases, reviews, dependencies).
 
-## 6. The task lifecycle and status vocabulary
-A task moves: **assigned/queued → in_progress → in_validation → completed** (with `validated_not_good` as the rework detour). The valid task statuses are exactly:
-`assigned`, `queued`, `in_progress`, `in_validation`, `validated_good`, `validated_not_good`, `paused`, `completed`, `cancelled`.
-
-- `queued` is a holding state the auto-promotion engine manages; the hub promotes an actionable task to `in_progress` and demotes competing ones back to `queued`.
-- The assignee submits with `--status in_validation`. There is **no `done` verb** and **no `approved` status.**
-- The only legal path into review is `in_progress → in_validation`; you cannot jump from `queued` straight to `in_validation`.
+## 6. The task lifecycle and state vocabulary
+A task carries a hub-driven `state`: `backlog`, `ready`, `in_progress`, `in_review`, `done`, `cancelled`.
+- `backlog`/`ready` are managed by the hub from dependencies and publish state; the hub leases a `ready` task to its assignee (`in_progress`), moves it to `in_review` on submit, and to `done` on the review quorum.
+- Task System v2 removed `task status`, `task vote`, `task nudge`, `task set-current` and `task subscribe`; the `lease.*` / `review.*` verbs that replace them arrive with the next milestone. There is **no `done` verb** and **no `approved` state.**
 
 ## 7. Review gates, review tiers, and completion (approval is IMPLICIT)
-- Assignees hand off with `./.heimdall/bin/ham-ctl task status <task-id> --status in_validation`.
-- Reviewers vote with `./.heimdall/bin/ham-ctl task vote <task-id> --result lgtm|ngtm [--comment "<feedback>"]` (`--result` must be exactly `lgtm` or `ngtm`; an assignee cannot vote on their own task).
+- Assignees hand off for review with a summary + evidence comment (the lease submit verb arrives with the next milestone).
+- Reviewers record `lgtm`/`ngtm` with feedback (an assignee cannot review their own task; the review verb arrives with the next milestone).
 - **State the required REVIEW TIER in every task** (the Dependencies & handoff field, §4). Pick with this rule:
   - QUICK — docs/comments/cosmetic/text-only changes with no runtime-behavior impact.
   - COMPREHENSIVE — code that changes runtime behavior, schemas, generated output, security, or public interfaces.
   - When in doubt → COMPREHENSIVE.
   The reviewer runs the matching checklist (the QUICK and COMPREHENSIVE checklists live in the `worker-task-management` skill, since reviewers operate through it). In BOTH tiers a reviewer verifies against ACTUAL behavior and an `lgtm` must cite evidence, never assertion.
-- **There is no explicit "approve" or "complete-task" command.** When a task is `in_validation` and its required reviewers reach an LGTM quorum with no `ngtm`, the Hub auto-finalizes it straight to `completed` — and `completed` (not `validated_good`) is the only outcome that unblocks dependents. A single `ngtm` moves the task to `validated_not_good`; the assignee reworks it and re-submits `in_validation`.
-- Complete the CHAIN yourself once every task is `completed` and you've written a verifiable final summary: `./.heimdall/bin/ham-ctl task-chain set-status --status completed [--chain <id>]` (coordinator only; chain statuses are `active`, `completed`, `cancelled`).
+- **There is no explicit "approve" or "complete-task" command.** When a task is `in_review` and its required reviewers reach an LGTM quorum with no `ngtm`, the Hub moves it to `done` — the only outcome that unblocks dependents. A single `ngtm` sends it back to the assignee for rework and re-submission.
+- Complete the CHAIN yourself once every task is `done` and you've written a verifiable final summary: `./.heimdall/bin/ham-ctl task-chain set-status --status completed [--chain <id>]` (coordinator only; chain statuses are `active`, `completed`, `cancelled`).
 
 ## 8. Scheduling is automatic — there is no reconcile
 There is no `reconcile` command. The hub re-plans the chain itself on every event that can change who should act next: publishing the chain or a task, a dependency being added or removed, a priority change, a task being created on a live chain, an agent releasing or losing its lease, a review verdict, an agent process dying, a bridge reconnecting. Nothing is ever left for a manual kick: if a task looks stuck, that is a hub bug to report, not something to work around.

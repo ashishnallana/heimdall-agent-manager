@@ -73,21 +73,21 @@ fx9_chain :: proc(fx: ^Fx9, chain_id: string, status := domain.Task_Chain_Status
 		title         = "REQ-SHELL-9 chain",
 		publish_state = .Published,
 		status        = status,
-		kind          = "team_work",
+		kind          = domain.CHAIN_KIND_TICKET,
 		created_at    = "2026-09-29T10:00:00Z",
 		updated_at    = "2026-09-29T10:00:00Z",
 	})
 }
 
 @(private = "file")
-fx9_task :: proc(fx: ^Fx9, chain_id, task_id: string, status: domain.Task_Status) {
+fx9_task :: proc(fx: ^Fx9, chain_id, task_id: string, state: domain.Task_State) {
 	_, _, _ = iface.taskchain_save_task(&fx.tc_repo, domain.Task{
 		task_id       = domain.Task_ID(task_id),
 		chain_id      = domain.Task_Chain_ID(chain_id),
 		owner_user_id = domain.User_ID(R9_OWNER),
 		title         = "REQ-SHELL-9 task",
 		publish_state = .Published,
-		status        = status,
+		state         = state,
 		created_at    = "2026-09-29T10:00:00Z",
 		updated_at    = "2026-09-29T10:00:00Z",
 	})
@@ -129,7 +129,7 @@ test_sync_chain_status_from_tasks_auto_complete_reaps_servers :: proc(t: ^testin
 	defer fx9_free(&fx)
 
 	fx9_chain(&fx, "chain_auto")
-	fx9_task(&fx, "chain_auto", "task_1", .Completed)
+	fx9_task(&fx, "chain_auto", "task_1", .Done)
 	fx9_session(&fx, "srv_auto", domain.Shell_Session_Kind_Server, "chain_auto", "")
 
 	chain, ok, _ := sync_chain_status_from_tasks(&fx.svc, "chain_auto", domain.User_ID(R9_OWNER))

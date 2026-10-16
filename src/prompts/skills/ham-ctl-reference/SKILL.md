@@ -50,8 +50,7 @@ Groups: `bridge`, `agents`, `task-chain`, `task`, `issue`, `chat`, `memory`, `ar
 - `task-chain set-status --status <active|completed|cancelled> [--chain <id>]` — change
   the chain status (coordinator only). Chain statuses are exactly `active`, `completed`,
   `cancelled`. This is how a coordinator completes a chain.
-- `task-chain subscribe <chain-id> [--events <chain_status|task_status|all>]` — subscribe to task chain status events (default: `all`).
-- `task-chain unsubscribe <chain-id> [--events <types>]` — unsubscribe from task chain status events.
+- `task-chain subscribe` / `task-chain unsubscribe` — **removed in Task System v2** (see note under `task`).
 
 ### Relevant directories (`task-chain directory`)
 Associate one or more working directories (local checkouts, CitC workspaces, repos) with a task chain so participating agents and the UI know which workspaces/directories are in scope. Directories are also embedded directly in `task-chain show [<chain-id>]` and `GET /api/v1/task-chains/:id` output under the `"directories"` array.
@@ -151,33 +150,6 @@ ham-ctl task-chain fleet set chain_18d711c5384a0119 --agent agt_worker --capacit
 ham-ctl task-chain fleet set chain_18d711c5384a0119 --agent agt_reviewer --capacity 2 --min-warm 1 --idle-ttl 600
 ```
 
-### Pub/Sub subscription mechanism
-Subscribe to real-time status change events across an entire task chain or for individual tasks instead of polling.
-
-- **Chain-level subscriptions**: `task-chain subscribe <chain-id> [--events <chain_status|task_status|all>]` registers the calling agent instance to receive status events for the entire chain (default: `all`).
-- **Task-level subscriptions**: `task subscribe <task-id> [--events <task_status|all>]` registers the calling agent instance to receive status events for a single task (default: `all`).
-- **Event types** (`--events`):
-  - `chain_status` — triggers when the task chain status changes (e.g. `active`, `completed`, `cancelled`, `archived`).
-  - `task_status` — triggers when a task status transitions (e.g. `in_progress`, `in_validation`, `completed`, `cancelled`).
-  - `all` — (default) triggers on both chain and task status changes.
-- **Asynchronous notice delivery**: When a status transition occurs, the Hub's subscription engine fans out notifications to all active subscriber instances. Each notification is delivered as an asynchronous `notify_task_nudge` runtime command routed to the subscriber instance via its connected Bridge, waking the agent reactively without polling.
-- **Unsubscribing**: `task-chain unsubscribe <chain-id> [--events <types>]` and `task unsubscribe <task-id>` remove matching active subscriptions for the caller.
-
-#### Command examples
-```bash
-# Subscribe to all events across an entire chain
-ham-ctl task-chain subscribe chain_18d711c5384a0119 --events all
-
-# Unsubscribe from chain events
-ham-ctl task-chain unsubscribe chain_18d711c5384a0119
-
-# Subscribe to a specific task's status changes
-ham-ctl task subscribe task_18d7a123bc45de67 --events task_status
-
-# Unsubscribe from a task
-ham-ctl task unsubscribe task_18d7a123bc45de67
-```
-
 ## task — tasks within a chain
 A positional `<task-id>` identifies the task and is enough on its own (task ids are
 globally unique — you rarely need `--chain`).
@@ -186,45 +158,25 @@ globally unique — you rarely need `--chain`).
   (count, last_comment_at, author, preview) — NOT full comment bodies.
 - `task show <task-id> [--chain <id>]` — a task + its `comment_summary` + votes (no bodies).
 - `task comments <task-id> [--last N]` — fetch comment BODIES; `--last N` = newest N (max 100).
-- `task create --title <t> [--description <d>] [--priority p0|p1|p2] [--assignee <instance-or-agent-id>] [--reviewer <id,id,...>] [--depends-on <id,id>] [--bridge <bridge-id>] [--chain <id>]` — create a task.
-  `--assignee` and `--reviewer` accept both live instance IDs (`inst_...`) and durable agent IDs (`agt_...`). Coordinators should exclusively specify durable agent IDs (`agt_...`) for `--assignee` and `--reviewer`, relying on automatic actor reference serialization (`{"type":"agent_id","agent_id":"<id>"}`) and fleet JIT dispatch.
+- `task create --title <t> [--description <d>] [--priority p0|p1|p2] [--assignee <agt_id>] [--reviewer <agt_id,agt_id,...>] [--depends-on <id,id>] [--bridge <bridge-id>] [--chain <id>]` — create a task.
+  `--assignee` and `--reviewer` take durable agent IDs (`agt_...`) only; instance pins (`inst_...`) were removed in Task System v2 and are rejected client-side.
   `--reviewer` and `--depends-on` accept comma-separated lists. `--bridge` pins the task to a specific bridge.
-- `task update <task-id> [--title <t>] [--description <d>] [--priority p0|p1|p2] [--assignee <instance-or-agent-id>] [--reviewer <id,id,...>] [--depends-on <id,id>] [--bridge <bridge-id>]` — edit an
+- `task update <task-id> [--title <t>] [--description <d>] [--priority p0|p1|p2] [--assignee <agt_id>] [--reviewer <agt_id,agt_id,...>] [--depends-on <id,id>] [--bridge <bridge-id>]` — edit an
   existing task (coordinator only). Only the fields you pass change; coordinators should exclusively specify durable agent IDs (`agt_...`) for `--assignee` and `--reviewer`; `--reviewer` and
   `--depends-on` REPLACE the whole list (pass `""` to clear); `--bridge ""` clears the bridge pin back to inherit.
 - `task comment <task-id> --body <t>` (or `--stdin`) `[--notify <id,id>]` — add a comment
   (the only way to comment).
-- `task status <task-id> --status <s>` — change status. Use `in_validation` to submit for
-  review. **There is no `done` verb.**
-- `task vote <task-id> --result <lgtm|ngtm> [--comment <t>]` — cast a review vote (the only
-  way to vote). `--result` must be exactly `lgtm` or `ngtm`.
-- `task nudge <task-id> [--message <t>]` — nudge the task's owner.
-- `task set-current <task-id>` — mark this as your current task.
 - `task depend <task-id> --on <task-id>` — add a single dependency (`update --depends-on`
   replaces the whole list).
-- `task subscribe <task-id> [--events <task_status|all>]` — subscribe to status change events for a specific task (default: `all`).
-- `task unsubscribe <task-id>` — unsubscribe from task status events.
 
-### Task statuses (the only valid `--status` values)
-`assigned`, `queued`, `in_progress`, `in_validation`, `finishing`, `pausing`, `validated_good`,
-`validated_not_good`, `paused`, `completed`, `cancelled`.
+> **Task System v2:** `task-chain subscribe/unsubscribe`, `task subscribe/unsubscribe`,
+> `task status`, `task vote`, `task nudge` and `task set-current` were removed. The hub now
+> pushes work to agents directly (no subscriptions, no polling); the `lease.*` / `review.*`
+> verbs that replace them arrive with the next milestone.
 
-**There is no `approved` status and no explicit approve/complete-task verb.** Approval is
-IMPLICIT: when a task is `in_validation` and its required reviewers reach an LGTM quorum
-with no `ngtm`, the Hub auto-finalizes the task straight to `completed` (or to `finishing`
-for assignee wrap-up; that is also the only outcome that unblocks dependents — `validated_good`
-does not). A single `ngtm` moves it to `validated_not_good` for rework. So the assignee's job
-is `--status in_validation`; the reviewer's job is `--result lgtm|ngtm`; completion happens on its own.
-
-### Instance lifecycle and pre-completion wrap-up checklist
-Executing `ham-ctl task status <task_id> --status paused` (for pausing) or `ham-ctl task status <task_id> --status completed` (for finishing) causes the dispatcher to recycle/restart or stop the instance.
-
-Before submitting either status command, workers must complete the mandatory pre-completion wrap-up checklist:
-1. Wrap up code changes and verify tests.
-2. Commit and push changes if needed.
-3. Post a handoff/wrap-up comment (`ham-ctl task comment <task_id> --body "..."`) capturing work summary, stash state, and context.
-4. Clean up task descriptions and scratch files.
-5. Run the status transition command.
+### Task states
+A task carries a `state`: `backlog`, `ready`, `in_progress`, `in_review`, `done`, `cancelled`.
+State is driven by the hub (leases, reviews, dependencies); agents do not set it directly.
 
 ## issue — track, discuss, and vote on issues and blockers
 Manage defects, toolchain quirks, environment problems, and out-of-scope bugs across

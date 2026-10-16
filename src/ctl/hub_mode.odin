@@ -240,13 +240,13 @@ ctl_hub_tasks :: proc(base, token, action: string, args: []string) {
 	}
 	if action == "create" {
 		title := option_value(args, "--title", "")
-		if chain_id == "" || title == "" { fmt.println("usage: ham-ctl hub tasks create --chain-id <id> --title <title> [--description <desc>] [--assignee <id>] [--reviewer <agent-ref>] [--require-user-approval] [--depends-on <id,id>]"); return }
+		if chain_id == "" || title == "" { fmt.println("usage: ham-ctl hub tasks create --chain-id <id> --title <title> [--description <desc>] [--assignee <agt_id>] [--reviewer <agt_id>]... [--require-user-approval] [--depends-on <id,id>]"); return }
 		if !ctl_task_reviewer_flags_valid(args, false) do return
 		fields := make([dynamic]string)
 		append(&fields, json_kv("title", title))
 		if desc := option_value(args, "--description", ""); desc != "" do append(&fields, json_kv("description", desc))
-		if assignee := option_value(args, "--assignee-agent-instance-id", option_value(args, "--assignee", "")); assignee != "" do append(&fields, strings.concatenate({"\"assignee_ref\":", json_object(json_kv("type", "agent_instance"), json_kv("agent_instance_id", assignee))}))
-		if reviewer := option_value(args, "--reviewer", ""); reviewer != "" do append(&fields, strings.concatenate({"\"reviewer_refs\":[", json_object(json_kv("type", "agent_instance"), json_kv("agent_instance_id", reviewer)), "]"}))
+		if assignee := option_value(args, "--assignee", option_value(args, "--assignee-agent-id", "")); assignee != "" do append(&fields, ctl_v2_assignee_field(assignee))
+		if has_flag(args, "--reviewer") || has_flag(args, "--reviewer-agent-id") do append(&fields, ctl_v2_reviewers_field(args))
 		if has_flag(args, "--require-user-approval") do append(&fields, `"requires_user_approval":true`)
 		if deps := option_value(args, "--depends-on", option_value(args, "--on", "")); deps != "" {
 			parts := strings.split(deps, ",")
@@ -265,14 +265,14 @@ ctl_hub_tasks :: proc(base, token, action: string, args: []string) {
 		ctl_hub_request(base, token, "POST", fmt.tprintf("/api/v1/task-chains/%s/tasks", safe_path_part(chain_id)), json_object_from_slice(fields[:])); return
 	}
 	task_id := option_value(args, "--task-id", option_value(args, "--task", ""))
-	if chain_id == "" || task_id == "" { fmt.println("usage: ham-ctl hub tasks <update|publish|status|done|cancel|depend|comments|votes|nudge> --chain-id <id> --task-id <id>"); return }
+	if chain_id == "" || task_id == "" { fmt.println("usage: ham-ctl hub tasks <update|publish|cancel|depend|comments> --chain-id <id> --task-id <id>"); return }
 	if action == "update" {
 		if !ctl_task_reviewer_flags_valid(args, true) do return
 		fields := make([dynamic]string)
 		if title := option_value(args, "--title", ""); title != "" do append(&fields, json_kv("title", title))
 		if desc := option_value(args, "--description", ""); desc != "" do append(&fields, json_kv("description", desc))
-		if aref := ctl_build_assignee_ref(args); aref != "" do append(&fields, strings.concatenate({"\"assignee_ref\":", aref}))
-		if rref := ctl_build_reviewer_refs(args); rref != "" do append(&fields, strings.concatenate({"\"reviewer_refs\":", rref}))
+		if assignee := option_value(args, "--assignee", option_value(args, "--assignee-agent-id", "")); assignee != "" do append(&fields, ctl_v2_assignee_field(assignee))
+		if has_flag(args, "--reviewer") || has_flag(args, "--reviewer-agent-id") do append(&fields, ctl_v2_reviewers_field(args))
 		if has_flag(args, "--require-user-approval") do append(&fields, `"requires_user_approval":true`)
 		if has_flag(args, "--no-require-user-approval") do append(&fields, `"requires_user_approval":false`)
 		if deps := option_value(args, "--depends-on", option_value(args, "--on", "")); deps != "" {
@@ -291,14 +291,12 @@ ctl_hub_tasks :: proc(base, token, action: string, args: []string) {
 		}
 		ctl_hub_request(base, token, "PATCH", fmt.tprintf("/api/v1/task-chains/%s/tasks/%s", safe_path_part(chain_id), safe_path_part(task_id)), json_object_from_slice(fields[:])); return
 	}
-	if action == "done" { ctl_hub_request(base, token, "POST", fmt.tprintf("/api/v1/task-chains/%s/tasks/%s/status", safe_path_part(chain_id), safe_path_part(task_id)), json_object(json_kv("status", "in_validation"))); return }
 	if action == "depend" {
 		on_id := option_value(args, "--on", option_value(args, "--depends-on", ""))
 		if on_id == "" { fmt.println("usage: ham-ctl hub tasks depend --chain-id <id> --task-id <id> --on <depends_on_task_id>"); return }
 		ctl_hub_request(base, token, "PATCH", fmt.tprintf("/api/v1/task-chains/%s/tasks/%s", safe_path_part(chain_id), safe_path_part(task_id)), json_object(strings.concatenate({"\"depends_on\":[\"", on_id, "\"]"}))); return
 	}
 	if action == "publish" { ctl_hub_request(base, token, "POST", fmt.tprintf("/api/v1/task-chains/%s/tasks/%s/publish", safe_path_part(chain_id), safe_path_part(task_id)), "{}"); return }
-	if action == "status" { status := option_value(args, "--status", ""); if status == "" { fmt.println("usage: ham-ctl hub tasks status --chain-id <id> --task-id <id> --status <status>"); return }; ctl_hub_request(base, token, "POST", fmt.tprintf("/api/v1/task-chains/%s/tasks/%s/status", safe_path_part(chain_id), safe_path_part(task_id)), json_object(json_kv("status", status))); return }
 	if action == "cancel" { ctl_hub_request(base, token, "POST", fmt.tprintf("/api/v1/task-chains/%s/tasks/%s/cancel", safe_path_part(chain_id), safe_path_part(task_id)), "{}"); return }
 	if action == "comments" {
 		sub := option_value(args, "--action", "")
@@ -326,19 +324,7 @@ ctl_hub_tasks :: proc(base, token, action: string, args: []string) {
 			ctl_hub_request(base, token, "POST", fmt.tprintf("/api/v1/task-chains/%s/tasks/%s/comments", safe_path_part(chain_id), safe_path_part(task_id)), json_object_from_slice(fields[:])); return
 		}
 	}
-	if action == "votes" {
-		sub := option_value(args, "--action", "")
-		if len(args) > 5 && (args[5] == "add" || args[5] == "list" || args[5] == "vote") do sub = args[5]
-		if sub == "" || sub == "list" { ctl_hub_request(base, token, "GET", fmt.tprintf("/api/v1/task-chains/%s/tasks/%s/votes", safe_path_part(chain_id), safe_path_part(task_id)), ""); return }
-		if sub == "add" || sub == "vote" {
-			vote := option_value(args, "--vote", option_value(args, "--result", ""))
-			comment := option_value(args, "--comment", "")
-			if vote == "" { fmt.println("usage: ham-ctl hub tasks votes --chain-id <id> --task-id <id> vote --vote <lgtm|ngtm> [--comment <text>]"); return }
-			ctl_hub_request(base, token, "POST", fmt.tprintf("/api/v1/task-chains/%s/tasks/%s/vote", safe_path_part(chain_id), safe_path_part(task_id)), json_object(json_kv("vote", vote), json_kv("comment", comment))); return
-		}
-	}
-	if action == "nudge" { message := option_value(args, "--message", option_value(args, "--body", "")); ctl_hub_request(base, token, "POST", fmt.tprintf("/api/v1/task-chains/%s/tasks/%s/nudge", safe_path_part(chain_id), safe_path_part(task_id)), json_object(json_kv("message", message))); return }
-	fmt.println("usage: ham-ctl hub tasks <list|create|update|publish|status|done|cancel|depend|comments|votes|nudge>")
+	fmt.println("usage: ham-ctl hub tasks <list|create|update|publish|cancel|depend|comments>")
 }
 
 ctl_hub_projects :: proc(base, token, action: string, args: []string) {
@@ -753,7 +739,7 @@ print_hub_help :: proc(cmd: []string) {
 	if resource == "agents" { fmt.println("ham-ctl hub agents <list|create>\nPurpose: manage durable Hub agent identities.\nExamples:\n  ham-ctl hub --hub-url http://127.0.0.1:49322 --user-token hut_... agents list\n  ham-ctl hub --hub-url http://127.0.0.1:49322 --user-token hut_... agents create --name reviewer --model normal"); return }
 	if resource == "launch" { fmt.println("ham-ctl hub launch --agent-id <id> [--bridge-id <id>] [--model <model>]\nPurpose: start a new agent instance through Hub/Bridge.\nExample:\n  ham-ctl hub --hub-url http://127.0.0.1:49322 --user-token hut_... launch --agent-id reviewer --model normal"); return }
 	if resource == "chats" { fmt.println("ham-ctl hub chats <list|create|send|messages>\nPurpose: read/write user chat conversations.\nExamples:\n  ham-ctl hub --hub-url http://127.0.0.1:49322 --user-token hut_... chats list\n  ham-ctl hub --hub-url http://127.0.0.1:49322 --user-token hut_... chats send --conversation-id chat_123 --body 'Hello'"); return }
-	if resource == "tasks" { fmt.println("ham-ctl hub tasks <list|create|update|publish|status|nudge> --chain-id <id>\nPurpose: manage Hub task records.\nUser approval:\n  create ... --require-user-approval\n  update ... --require-user-approval | --no-require-user-approval\n  --reviewer accepts agent IDs/instances only.\nExample:\n  ham-ctl hub --hub-url http://127.0.0.1:49322 --user-token hut_... tasks list --chain-id chain_123"); return }
+	if resource == "tasks" { fmt.println("ham-ctl hub tasks <list|create|update|publish|cancel|depend|comments> --chain-id <id>\nPurpose: manage Hub task records.\nUser approval:\n  create ... --require-user-approval\n  update ... --require-user-approval | --no-require-user-approval\n  --assignee/--reviewer take durable agent ids (agt_...) only.\nExample:\n  ham-ctl hub --hub-url http://127.0.0.1:49322 --user-token hut_... tasks list --chain-id chain_123"); return }
 	if resource == "task-chains" { fmt.println("ham-ctl hub task-chains <list|create|show|directory|publish|complete|pin|unpin>\nPurpose: manage Hub task chains.\nExample:\n  ham-ctl hub --hub-url http://127.0.0.1:49322 --user-token hut_... task-chains create --title 'Fix bug'"); return }
 	if resource == "projects" { fmt.println("ham-ctl hub projects <list|create|show|update>\nPurpose: manage Hub projects.\nExamples:\n  ham-ctl hub --hub-url http://127.0.0.1:49322 --user-token hut_... projects list\n  ham-ctl hub --hub-url http://127.0.0.1:49322 --user-token hut_... projects create --name demo --repo-url https://example/repo.git"); return }
 	if resource == "artifacts" { fmt.println("ham-ctl hub artifacts <list|create|show|content|update|delete>\nPurpose: manage Hub artifacts.\nExamples:\n  ham-ctl hub --hub-url http://127.0.0.1:49322 --user-token hut_... artifacts list\n  ham-ctl hub --hub-url http://127.0.0.1:49322 --user-token hut_... artifacts create --name notes --content 'hello'"); return }
@@ -774,7 +760,7 @@ print_hub_help :: proc(cmd: []string) {
 		fmt.println("  snooze  <card-id> --snooze-until <ts>   Hide a card until the given time.")
 		fmt.println("")
 		fmt.println("OPERATIONS  (a card's operation types; each carries a human `label` shown in the dashboard)")
-		fmt.println("  task.vote               Cast a review vote on a task (default lgtm).")
+		fmt.println("  task.review             Post a review verdict on a task (default lgtm).")
 		fmt.println("  memory.approve          Approve a pending memory proposal.")
 		fmt.println("  memory.reject           Reject a pending memory proposal.")
 		fmt.println("  memory.create           Create a new durable memory.")
@@ -818,32 +804,3 @@ print_hub_help :: proc(cmd: []string) {
 	fmt.println("  ham-ctl hub --hub-url http://127.0.0.1:49322 --user-token hut_... cards list")
 }
 
-// ctl_ref_json builds a single actor ref, choosing agent_id vs agent_instance based
-// on explicit flags or the id prefix. Values starting with "inst_" are treated as
-// concrete agent_instance ids; anything else (e.g. "default-agent", "reviewer") is a
-// durable agent_id that the hub resolves-or-launches into a concrete instance.
-ctl_ref_json :: proc(instance_value, agent_id_value, plain_value: string) -> string {
-	if agent_id_value != "" do return json_object(json_kv("type", "agent_id"), json_kv("agent_id", agent_id_value))
-	if instance_value != "" do return json_object(json_kv("type", "agent_instance"), json_kv("agent_instance_id", instance_value))
-	if plain_value != "" {
-		if strings.has_prefix(plain_value, "inst_") do return json_object(json_kv("type", "agent_instance"), json_kv("agent_instance_id", plain_value))
-		return json_object(json_kv("type", "agent_id"), json_kv("agent_id", plain_value))
-	}
-	return ""
-}
-
-ctl_build_assignee_ref :: proc(args: []string) -> string {
-	inst := option_value(args, "--assignee-agent-instance-id", "")
-	aid := option_value(args, "--assignee-agent-id", "")
-	plain := option_value(args, "--assignee", "")
-	return ctl_ref_json(inst, aid, plain)
-}
-
-ctl_build_reviewer_refs :: proc(args: []string) -> string {
-	inst := option_value(args, "--reviewer-agent-instance-id", "")
-	aid := option_value(args, "--reviewer-agent-id", "")
-	plain := option_value(args, "--reviewer", "")
-	ref := ctl_ref_json(inst, aid, plain)
-	if ref == "" do return ""
-	return strings.concatenate({"[", ref, "]"})
-}

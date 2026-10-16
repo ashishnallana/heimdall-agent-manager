@@ -1,10 +1,7 @@
 package taskchain
 
-import "base:runtime"
 import "core:fmt"
-import "core:mem/virtual"
 import "core:os"
-import "core:strings"
 import "core:testing"
 import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
@@ -12,46 +9,6 @@ import iface "odin_test:hub/repository/iface"
 import platform "odin_test:hub/platform"
 import sqlite "odin_test:hub/repository/sqlite"
 import agent_service "odin_test:hub/service/agent"
-
-@(private = "file")
-ptr_in_arena :: proc(arena: ^virtual.Arena, p: rawptr) -> bool {
-	addr := uintptr(p)
-	for block := arena.curr_block; block != nil; block = block.prev {
-		base := uintptr(rawptr(block.base))
-		if addr >= base && addr < base + uintptr(block.committed) do return true
-	}
-	return false
-}
-
-@(private = "file")
-first_key :: proc(m: map[string]i64) -> string {
-	for k in m do return k
-	return ""
-}
-
-// MEM-4 use-after-free regression guard: retained debounce keys must live on the
-// persistent heap rather than per-request virtual.Arena memory.
-@(test)
-test_nudge_debounce_key_not_in_request_arena :: proc(t: ^testing.T) {
-	svc: Taskchain_Service
-	arena: virtual.Arena
-	testing.expect(t, virtual.arena_init_growing(&arena, 64 * 1024) == nil)
-	defer virtual.arena_destroy(&arena)
-
-	prev := context.allocator
-	context.allocator = virtual.arena_allocator(&arena)
-	_ = should_debounce_nudge_dispatch(&svc, "inst_x", "task_y")
-	context.allocator = prev
-
-	key := first_key(svc.nudge_debounce_last_unix_ms)
-	testing.expect(t, key != "", "expected a stored debounce key")
-	testing.expect(t, !ptr_in_arena(&arena, rawptr(raw_data(key))),
-		"nudge_debounce key retained per-request arena memory (use-after-free)")
-
-	delete_key(&svc.nudge_debounce_last_unix_ms, key)
-	delete(key, runtime.heap_allocator())
-	delete(svc.nudge_debounce_last_unix_ms)
-}
 
 @(test)
 test_valid_chain_transitions_with_archived :: proc(t: ^testing.T) {
@@ -89,44 +46,52 @@ test_chain_status_from_string_archived :: proc(t: ^testing.T) {
 	testing.expect_value(t, chain_status_from_string("unknown"), domain.Task_Chain_Status.Active)
 }
 
+// Task System v2 §0: chain kind vocabulary is {ticket, workflow}. The pre-v2
+// default "team_work" is accepted as an alias for ticket at create time only;
+// "" means ticket; anything else is a validation failure.
 @(test)
-test_owner_user_approval_ref_is_derived_and_mutated_idempotently :: proc(t: ^testing.T) {
-	base := `[{"type":"agent_id","agent_id":"agt_review"}]`
-	with_user, ok := set_owner_user_approval(base, "alice", true, context.temp_allocator)
-	testing.expect(t, ok, "enabling user approval must succeed")
-	testing.expect(t, strings.contains(with_user, `"user_id":"alice"`), "owner user ref must be added")
-	testing.expect(t, strings.contains(with_user, `"agent_id":"agt_review"`), "agent reviewer must be preserved")
+test_team_work_alias_accepted :: proc(t: ^testing.T) {
+	db_path := fmt.tprintf("/tmp/test_chain_kind_alias_%d.db", os.get_pid())
+	os.remove(db_path)
+	defer os.remove(db_path)
 
-	twice, twice_ok := set_owner_user_approval(with_user, "alice", true, context.temp_allocator)
-	testing.expect(t, twice_ok, "repeated enable must succeed")
-	refs, _, parsed := parse_actor_refs(twice, context.temp_allocator)
-	testing.expect(t, parsed, "result must parse")
-	user_count := 0
-	for ref in refs do if ref.type == "user" && ref.user_id == "alice" do user_count += 1
-	testing.expect_value(t, user_count, 1)
+	conn, open_ok, _ := sqlite.open(db_path)
+	testing.expect(t, open_ok, "sqlite open ok")
+	defer sqlite.close(&conn)
+	mig_ok, _ := sqlite.run_migrations(&conn)
+	testing.expect(t, mig_ok, "migrations ok")
 
-	without_user, removed_ok := set_owner_user_approval(twice, "alice", false, context.temp_allocator)
-	testing.expect(t, removed_ok, "disabling user approval must succeed")
-	testing.expect(t, !strings.contains(without_user, `"user_id"`), "owner user ref must be removed")
-	testing.expect(t, strings.contains(without_user, `"agent_id":"agt_review"`), "agent reviewer must remain")
+	tc_impl := sqlite.Taskchain_Repo_SQLite{conn = &conn}
+	tc_repo := sqlite.new_taskchain_repository(&tc_impl, &conn)
+	ag_impl := sqlite.Agent_Repo_SQLite{conn = &conn}
+	ag_repo := sqlite.new_agent_repository(&ag_impl, &conn)
+	clock := platform.real_clock()
+	ids := platform.real_id_generator()
+	svc := new_taskchain_service(&tc_repo, &ag_repo, &clock, &ids)
+
+	auth := contracts.Auth_Context{kind = .User_Token, user_id = "user_kind_alias"}
+
+	Case :: struct { input, want: string }
+	cases := [?]Case{
+		{"team_work", domain.CHAIN_KIND_TICKET},
+		{"", domain.CHAIN_KIND_TICKET},
+		{"ticket", domain.CHAIN_KIND_TICKET},
+		{"workflow", domain.CHAIN_KIND_WORKFLOW},
+	}
+	for c in cases {
+		chain, ok, err := create_chain(&svc, auth, Create_Chain_Input{title = "kind alias", kind = c.input})
+		testing.expectf(t, ok, "create_chain(kind=%q) must succeed: %v", c.input, err.message)
+		testing.expectf(t, chain.kind == c.want, "kind %q: stored %q, want %q", c.input, chain.kind, c.want)
+		persisted, got, _ := iface.taskchain_get_chain(&tc_repo, chain.chain_id)
+		testing.expect(t, got, "chain must be persisted")
+		testing.expectf(t, persisted.kind == c.want, "kind %q: persisted %q, want %q", c.input, persisted.kind, c.want)
+	}
+
+	_, bad_ok, bad_err := create_chain(&svc, auth, Create_Chain_Input{title = "kind alias", kind = "swarm"})
+	testing.expect(t, !bad_ok, "unknown chain kind must be rejected")
+	testing.expect_value(t, bad_err.code, domain.Error_Code.Validation_Failed)
 }
 
-@(test)
-test_replacing_agent_reviewers_can_preserve_owner_gate :: proc(t: ^testing.T) {
-	replacement := `[{"type":"agent_id","agent_id":"agt_new"}]`
-	preserved, ok := set_owner_user_approval(replacement, "alice", true, context.temp_allocator)
-	testing.expect(t, ok, "preserving the user gate must succeed")
-	testing.expect(t, strings.contains(preserved, `"agent_id":"agt_new"`), "replacement agent reviewer must remain")
-	testing.expect(t, strings.contains(preserved, `"user_id":"alice"`), "owner gate must remain when the boolean is omitted")
-}
-
-@(test)
-test_task_requires_user_approval_requires_exact_owner_ref :: proc(t: ^testing.T) {
-	owner_task := domain.Task{owner_user_id = domain.User_ID("alice"), reviewer_refs_json = `[{"type":"user","user_id":"alice"}]`}
-	other_task := domain.Task{owner_user_id = domain.User_ID("alice"), reviewer_refs_json = `[{"type":"user","user_id":"bob"}]`}
-	testing.expect(t, task_requires_user_approval(owner_task), "exact owner ref must enable approval")
-	testing.expect(t, !task_requires_user_approval(other_task), "another user ref must not enable approval")
-}
 
 // REQ-TB-1: create/update carry tasks.bridge_id; a non-empty pin must reference
 // an existing bridge owned by the chain owner (unknown/foreign -> error, nothing

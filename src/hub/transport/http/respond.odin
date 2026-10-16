@@ -64,3 +64,10 @@ respond_error :: proc(err: domain.Domain_Error, request_id: string) -> Response 
 status_for_error :: proc(code: domain.Error_Code) -> int {
 	return contracts.error_code_http_status(code)
 }
+
+// respond_gone answers a route the Task System v2 cutover removed (status/vote/
+// nudge, subscribe, set-current, reconcile). 410, never 404: the path existed and
+// callers (older ctl binaries) should learn it is gone for good, not retry.
+respond_gone :: proc(req: Request, message: string) -> Response {
+	return respond_error(domain.domain_error(.Gone, message), req.request_id)
+}

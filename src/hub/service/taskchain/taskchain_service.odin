@@ -1,12 +1,9 @@
 package taskchain
 
-import "base:runtime"
 import "core:fmt"
 import "core:log"
 import "core:os"
 import "core:strings"
-import "core:sync"
-import "core:time"
 import "core:unicode/utf8"
 import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
@@ -17,30 +14,15 @@ import project "odin_test:hub/service/project"
 import agent "odin_test:hub/service/agent"
 import events "odin_test:hub/service/events"
 import shell_session "odin_test:hub/service/shell_session"
+import taskv2 "odin_test:hub/service/taskv2"
 import jsonx "odin_test:lib/jsonx"
 import json "core:encoding/json"
 
-Nudge_Target :: enum {
-	None,
-	Assignee,
-	Reviewer,
-	Coordinator,
-}
-
-Manual_Nudge :: struct {
-	task_id: domain.Task_ID,
-	owner_user_id: domain.User_ID,
-	target: Nudge_Target,
-	message: string,
-	created_at: string,
-	nudge_id: string,
-	delivery_state: string,
-	live_delivered: int,
-	durable_queued: int,
-	failed: int,
-	targets_json: string,
-}
-
+// Taskchain_Service owns chains, members, directories, fleets and the task ROWS
+// (create/update/publish/comments/dependencies). Everything about a task's
+// lifecycle after publish — state, leases, attempts, reviews, timers — is the
+// Task System v2 engine's (service/taskv2), which this service calls on every
+// mutation that can change who should act next. There is no manual reconcile.
 Taskchain_Service :: struct {
 	repo: ^iface.Taskchain_Repository,
 	agents: ^iface.Agent_Repository,
@@ -55,17 +37,18 @@ Taskchain_Service :: struct {
 	// reap, which keeps every existing test that builds a bare Taskchain_Service
 	// working unchanged.
 	shell_sessions: ^shell_session.Shell_Session_Service,
-	nudge_debounce_mutex: sync.Mutex,
-	nudge_debounce_last_unix_ms: map[string]i64,
+	// engine is the Task System v2 service. Optional for the same reason: a bare
+	// service (tests) records nothing and schedules nothing.
+	engine: ^taskv2.Service,
 }
 
 Create_Chain_Input :: struct {
 	title: string,
 	description: string,
 	owner_user_id: string,
+	// kind ∈ {ticket, workflow}; "" and the pre-v2 "team_work" mean ticket.
 	kind: string,
 	coordinator_agent_id: string,
-	default_reviewer_refs_json: string,
 }
 
 Update_Chain_Input :: struct {
@@ -89,46 +72,61 @@ Update_Chain_Input :: struct {
 	has_is_pinned: bool,
 }
 
+// Create_Task_Input (Task System v2). The brief carries goal/acceptance/verify/
+// inputs/review_roles/assignee/budget; the convenience fields below are merged
+// into it so ctl/UI callers that only know assignee + reviewers keep working.
 Create_Task_Input :: struct {
 	chain_id: domain.Task_Chain_ID,
 	title: string,
 	description: string,
 	owner_user_id: string,
-	assignee_ref_json: string,
-	reviewer_refs_json: string,
+	// brief_json: a JSON object; "" → built from title/description + the fields below.
+	brief_json: string,
+	// assignee_agent_id pins the worker TEMPLATE (brief.assignee). Instance pins are gone.
+	assignee_agent_id: string,
+	// review_roles: fleet roles whose rows must approve (brief.review_roles).
+	review_roles: []string,
+	// reviewer_agent_ids: templates to add to the chain fleet with the reviewer
+	// role (legacy `--reviewer agt_…` spelling); implies review_roles ⊇ ["reviewer"].
+	reviewer_agent_ids: []string,
 	requires_user_approval: bool,
 	has_requires_user_approval: bool,
 	// priority sets the task priority (P0/P1/P2) at create time. has_priority
 	// distinguishes an explicit choice from "field absent" so a create that omits
-	// priority keeps the documented P2 default. Mirrors Update_Task_Input below;
-	// its absence here is REQ-CLI-2: the CLIs sent priority and create dropped it.
+	// priority keeps the documented P2 default (REQ-CLI-2).
 	priority: domain.Task_Priority,
 	has_priority: bool,
 	depends_on: []domain.Task_ID,
-	// bridge_id pins the task to a specific bridge for instantiating its
-	// agent-id actors (REQ-TB-1). Empty = inherit (resolved at promotion time).
-	// A non-empty value must reference a bridge owned by the chain owner.
+	// bridge_id pins the task to a specific bridge (REQ-TB-1). Empty = inherit
+	// (resolved at grant time). A non-empty value must reference a bridge owned by
+	// the chain owner.
 	bridge_id: string,
+	// kind: task (default) or gate (workflow materialiser only).
+	kind: domain.Task_Kind,
 }
 
 Update_Task_Input :: struct {
 	title: string,
 	description: string,
-	assignee_ref_json: string,
-	reviewer_refs_json: string,
+	// brief_json replaces the whole brief when non-empty (409 while leased).
+	brief_json: string,
+	assignee_agent_id: string,
+	has_assignee: bool,
+	review_roles: []string,
+	has_review_roles: bool,
+	reviewer_agent_ids: []string,
 	requires_user_approval: bool,
 	has_requires_user_approval: bool,
 	// priority sets the task priority (P0/P1/P2). has_priority distinguishes an
 	// explicit change from "field absent" so a PATCH that omits priority leaves it
-	// untouched. A priority change re-orders the auto-promotion selection.
+	// untouched. A priority change re-orders the matcher's ready queue.
 	priority: domain.Task_Priority,
 	has_priority: bool,
 	depends_on: []domain.Task_ID,
 	has_depends_on: bool,
 	// bridge_id repins the task's bridge (REQ-TB-1). nil = field absent: leave the
 	// current pin untouched. A non-nil pointer is the new value — pointing at ""
-	// clears the pin back to inherit (resolved at promotion time). A non-empty
-	// value must reference a bridge owned by the chain owner.
+	// clears the pin back to inherit. A pin edit is a brief edit: 409 while leased.
 	bridge_id: ^string,
 }
 
@@ -141,12 +139,6 @@ Task_Comment_Input :: struct {
 Comment_Input :: struct {
 	task_id: domain.Task_ID,
 	body: string,
-}
-
-Vote_Input :: struct {
-	task_id: domain.Task_ID,
-	vote: string, // "lgtm" or "ngtm"
-	comment: string,
 }
 
 new_taskchain_service :: proc(repo: ^iface.Taskchain_Repository, agents: ^iface.Agent_Repository, clock: ^platform.Clock, ids: ^platform.ID_Generator) -> Taskchain_Service {
@@ -170,6 +162,16 @@ set_event_bus :: proc(service: ^Taskchain_Service, bus: ^events.User_Event_Bus) 
 set_shell_session_service :: proc(service: ^Taskchain_Service, shell_svc: ^shell_session.Shell_Session_Service) {
 	if service == nil do return
 	service.shell_sessions = shell_svc
+}
+
+set_engine :: proc(service: ^Taskchain_Service, engine: ^taskv2.Service) {
+	if service == nil do return
+	service.engine = engine
+}
+
+// engine_actor maps the caller to the event actor recorded by the engine.
+engine_actor :: proc(auth: contracts.Auth_Context) -> taskv2.Actor {
+	return taskv2.actor_from_auth(auth)
 }
 
 // reap_chain_servers_on_close kills every live SERVER of a chain that has just reached a
@@ -396,9 +398,11 @@ create_chain :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, 
 	owner, ok, err := ownership.owner_from_auth(auth)
 	if !ok do return domain.Task_Chain{}, false, err
 	if input.title == "" do return domain.Task_Chain{}, false, domain.domain_error(.Validation_Failed, "chain title is required")
+	// `team_work` (pre-v2 default) is accepted as an alias for `ticket` at this
+	// boundary only, so older ctl binaries and fixtures keep working.
+	kind, kind_ok := domain.normalize_chain_kind(input.kind)
+	if !kind_ok do return domain.Task_Chain{}, false, domain.domain_error(.Validation_Failed, "chain kind must be ticket or workflow")
 	now := platform.clock_now(service.clock)
-	kind := input.kind; if kind == "" do kind = "team_work"
-	default_reviewers := input.default_reviewer_refs_json; if default_reviewers == "" do default_reviewers = "[]"
 	coordinator_id := input.coordinator_agent_id
 	if auth.kind == .Instance_Token && coordinator_id == "" {
 		coordinator_id = auth.agent_instance_id
@@ -414,7 +418,7 @@ create_chain :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, 
 		// coordinator_agent_instance_id is a DERIVED MIRROR (H9): it is stamped from
 		// the canonical members table below, never set as an independent authority.
 		coordinator_agent_instance_id = "",
-		default_reviewer_refs_json = default_reviewers,
+		defaults_json = "{}",
 		created_at = now,
 		updated_at = now,
 	}
@@ -499,10 +503,10 @@ update_chain :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, 
 		// REQ-SHELL-9 trigger A. Before the broadcast rather than after, so the servers
 		// are already dying by the time members are told the chain closed.
 		reap_chain_servers_on_close(service, saved, closed_status)
+		// Task System v2: a closed chain reclaims every lease (stop[] the holders,
+		// coordinator exempt); a CANCELLED chain also cancels its open tasks.
+		engine_chain_closed(service, auth, saved, closed_status)
 		broadcast_chain_closed(service, auth, saved, closed_status)
-	}
-	if save_ok && input.status != "" {
-		fanout_chain_status_changed(service, auth, saved)
 	}
 	return saved, save_ok, save_err
 }
@@ -582,6 +586,11 @@ publish_chain :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context,
 			_, _, _ = iface.taskchain_save_task(service.repo, t_copy)
 		}
 	}
+	// Publishing IS the kickoff: the engine records `published` for every task,
+	// refolds the chain (entry tasks become ready) and runs the matcher.
+	if service.engine != nil {
+		if eng_err := taskv2.chain_published(service.engine, saved_chain, engine_actor(auth)); eng_err.code != .None do return domain.Task_Chain{}, false, eng_err
+	}
 	return saved_chain, true, domain.Domain_Error{}
 }
 
@@ -608,12 +617,23 @@ change_chain_status :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Co
 		// REQ-SHELL-9 trigger A — see reap_chain_servers_on_close for why all three
 		// close paths call it and why that is safe.
 		reap_chain_servers_on_close(service, saved, next)
+		engine_chain_closed(service, auth, saved, next)
 		broadcast_chain_closed(service, auth, saved, next)
 	}
-	if save_ok {
-		fanout_chain_status_changed(service, auth, saved)
+	if save_ok && next == .Active && service.engine != nil {
+		// Reopening a chain re-evaluates it (nothing restarts by itself; the
+		// matcher grants whatever is ready).
+		_ = taskv2.fleet_changed(service.engine, saved)
 	}
 	return saved, save_ok, save_err
+}
+
+// engine_chain_closed forwards a chain close to the engine: leases reclaimed,
+// holders stopped, open tasks cancelled on a cancel. Best-effort (the chain row
+// is already saved); the engine logs its own failures.
+engine_chain_closed :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, chain: domain.Task_Chain, next: domain.Task_Chain_Status) {
+	if service.engine == nil do return
+	_ = taskv2.chain_closed(service.engine, chain, engine_actor(auth), next == .Cancelled)
 }
 
 // broadcast_chain_closed wakes every live member of a just-closed chain with a
@@ -693,23 +713,6 @@ validate_task_bridge :: proc(service: ^Taskchain_Service, owner: domain.User_ID,
 	return domain.Domain_Error{}
 }
 
-// validate_task_assignee_bridge_match (REQ-TB-HUB-1):
-// Rejects task creation or update with Conflict if a concrete assignee instance
-// is specified and its bridge_id does not match the task's non-empty bridge_id.
-validate_task_assignee_bridge_match :: proc(service: ^Taskchain_Service, task_bridge_id: string, assignee_ref_json: string) -> (bool, domain.Domain_Error) {
-	if task_bridge_id == "" || service == nil || service.agents == nil do return true, domain.Domain_Error{}
-	instances := extract_instances_from_ref_blob(assignee_ref_json)
-	defer delete(instances)
-	for inst_id in instances {
-		if inst, ok, _ := iface.agent_get_instance(service.agents, inst_id); ok {
-			if inst.bridge_id != "" && inst.bridge_id != task_bridge_id {
-				return false, domain.domain_error(.Conflict, "assignee instance bridge does not match task bridge")
-			}
-		}
-	}
-	return true, domain.Domain_Error{}
-}
-
 // sync_chain_status_from_tasks (REQ-CHAIN-AUTO-STATUS-1):
 // Synchronizes the parent task chain's status based on the lifecycle of its tasks:
 // - Transitions a Completed chain to Active when a task is created or moved to non-terminal status.
@@ -734,10 +737,10 @@ sync_chain_status_from_tasks :: proc(service: ^Taskchain_Service, chain_id: doma
 	non_terminal := 0
 	completed := 0
 	for t in tasks {
-		if t.status != .Completed && t.status != .Cancelled {
+		if !domain.task_state_is_terminal(t.state) {
 			non_terminal += 1
 		}
-		if t.status == .Completed {
+		if t.state == .Done {
 			completed += 1
 		}
 	}
@@ -776,19 +779,109 @@ sync_chain_status_from_tasks :: proc(service: ^Taskchain_Service, chain_id: doma
 		// `chain.status` rather than a `next` parameter because this block also handles
 		// the reopen (.Active at :679), which the reap refuses.
 		reap_chain_servers_on_close(service, chain, chain.status)
-		fanout_chain_status_changed(service, contracts.Auth_Context{kind = .None}, chain)
+		if chain.status != .Active do engine_chain_closed(service, contracts.Auth_Context{kind = .None}, chain, chain.status)
 	}
 
 	return chain, true, domain.Domain_Error{}
 }
 
+// --- Tasks ---------------------------------------------------------------------
+
+// build_brief_json merges the convenience fields of a create/update into a
+// brief object. An explicit brief_json wins; otherwise goal defaults to the
+// description (or the title), acceptance/verify stay empty until M2's publish
+// validator requires them.
+build_brief_json :: proc(existing_brief, title, description, assignee_agent_id: string, has_assignee: bool, review_roles: []string, has_review_roles: bool) -> string {
+	goal := jsonx.extract_string(existing_brief, "goal", "", true)
+	if goal == "" do goal = strings.trim_space(description)
+	if goal == "" do goal = strings.trim_space(title)
+	assignee := jsonx.extract_string(existing_brief, "assignee", "", true)
+	if has_assignee do assignee = strings.trim_space(assignee_agent_id)
+	roles := jsonx.extract_string_array(existing_brief, "review_roles", true)
+	if has_review_roles {
+		clear(&roles)
+		for r in review_roles do if strings.trim_space(r) != "" do append(&roles, strings.trim_space(r))
+	}
+	acceptance, acc_ok := jsonx.extract_raw_array(existing_brief, "acceptance", true)
+	if !acc_ok do acceptance = "[]"
+	verify := jsonx.extract_string(existing_brief, "verify", "", true)
+	inputs, in_ok := jsonx.extract_raw_array(existing_brief, "inputs", true)
+	if !in_ok do inputs = "[]"
+	budget, b_ok := jsonx.extract_raw_object(existing_brief, "budget", true)
+
+	o := taskv2.json_begin()
+	taskv2.json_str(&o, "goal", goal)
+	taskv2.json_raw(&o, "acceptance", acceptance)
+	taskv2.json_str(&o, "verify", verify)
+	taskv2.json_raw(&o, "inputs", inputs)
+	rb := strings.builder_make()
+	strings.write_byte(&rb, '[')
+	for r, i in roles {
+		if i > 0 do strings.write_byte(&rb, ',')
+		strings.write_byte(&rb, '"')
+		contracts.write_json_string(&rb, r)
+		strings.write_byte(&rb, '"')
+	}
+	strings.write_byte(&rb, ']')
+	taskv2.json_raw(&o, "review_roles", strings.to_string(rb))
+	if assignee != "" do taskv2.json_str(&o, "assignee", assignee)
+	if b_ok do taskv2.json_raw(&o, "budget", budget)
+	if auto, aok := jsonx.extract_bool_literal(existing_brief, "auto_submit", true); aok do taskv2.json_bool(&o, "auto_submit", auto)
+	return taskv2.json_end(&o)
+}
+
+// ensure_fleet_role guarantees a fleet row for `agent_id` in the chain carrying
+// `role` (adding the role to an existing row when missing). Rows are the
+// placement policy the matcher grants from, so a template named on a task must
+// exist there (REQ-FLEET-DISPATCHER-1).
+ensure_fleet_role :: proc(service: ^Taskchain_Service, chain: domain.Task_Chain, agent_id, role: string) -> domain.Domain_Error {
+	id := strings.trim_space(agent_id)
+	if id == "" do return domain.Domain_Error{}
+	if service.agents != nil {
+		if _, ok, _ := iface.agent_get(service.agents, id); !ok do return domain.domain_error(.Not_Found, strings.concatenate({"agent template not found: ", id}))
+	}
+	now := platform.clock_now(service.clock)
+	fleets, err := iface.taskchain_list_fleets_by_chain(service.repo, chain.chain_id, chain.owner_user_id)
+	if err.code != .None do return err
+	for f in fleets {
+		if f.agent_id != id do continue
+		if fleet_has_role(f, role) do return domain.Domain_Error{}
+		updated := f
+		updated.roles_json = fleet_roles_with(f.roles_json, role)
+		updated.updated_at = now
+		_, uerr := iface.taskchain_upsert_fleet(service.repo, updated)
+		return uerr
+	}
+	roles := `["worker"]`
+	if role == domain.FLEET_ROLE_REVIEWER do roles = `["reviewer"]`
+	fleet := domain.Task_Chain_Fleet{task_chain_id = chain.chain_id, agent_id = id, capacity = 1, min_warm = 0, idle_ttl_seconds = 600, roles_json = roles, created_at = now, updated_at = now}
+	return iface.taskchain_ensure_fleet(service.repo, fleet)
+}
+
+fleet_has_role :: proc(f: domain.Task_Chain_Fleet, role: string) -> bool {
+	roles := jsonx.decode_string_array(f.roles_json if f.roles_json != "" else domain.FLEET_ROLES_DEFAULT_JSON, context.temp_allocator)
+	for r in roles do if r == role do return true
+	return false
+}
+
+fleet_roles_with :: proc(roles_json, role: string) -> string {
+	roles := jsonx.decode_string_array(roles_json if roles_json != "" else domain.FLEET_ROLES_DEFAULT_JSON, context.temp_allocator)
+	b := strings.builder_make()
+	strings.write_byte(&b, '[')
+	for r, i in roles {
+		if i > 0 do strings.write_byte(&b, ',')
+		strings.write_byte(&b, '"'); contracts.write_json_string(&b, r); strings.write_byte(&b, '"')
+	}
+	if len(roles) > 0 do strings.write_byte(&b, ',')
+	strings.write_byte(&b, '"'); contracts.write_json_string(&b, role); strings.write_byte(&b, '"')
+	strings.write_byte(&b, ']')
+	return strings.to_string(b)
+}
+
 create_task :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, input: Create_Task_Input) -> (domain.Task, bool, domain.Domain_Error) {
 	// WRITE. REQ-SEC-3 (close the create_task hole): fetch owner-scoped, then
-	// enforce membership EXPLICITLY here. create_task previously relied entirely on
-	// the shared get_chain gate; making the membership check local and independent
-	// keeps task creation restricted to chain members/coordinator regardless of how
-	// the read gate evolves. Cross-owner is rejected as Not_Found by get_chain_for_read
-	// (require_owner); a same-owner non-member is rejected as Forbidden below.
+	// enforce membership EXPLICITLY here. Cross-owner is rejected as Not_Found by
+	// get_chain_for_read (require_owner); a same-owner non-member is Forbidden.
 	chain, ok, err := get_chain_for_read(service, auth, input.chain_id)
 	if !ok do return domain.Task{}, false, err
 	if auth.kind == .Instance_Token && !is_instance_member_or_coordinator(service, chain, auth.agent_instance_id) {
@@ -799,29 +892,29 @@ create_task :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, i
 	if same_ok, same_err := ownership.require_same_owner(chain.owner_user_id, requested_owner); !same_ok do return domain.Task{}, false, same_err
 	if input.title == "" do return domain.Task{}, false, domain.domain_error(.Validation_Failed, "task title is required")
 	if br_err := validate_task_bridge(service, chain.owner_user_id, input.bridge_id); br_err.code != .None do return domain.Task{}, false, br_err
-	assignee_ref := input.assignee_ref_json
-	if assignee_ref == "" && chain.coordinator_agent_instance_id != "" do assignee_ref = agent_instance_ref_json(chain.coordinator_agent_instance_id)
-	if assignee_ref == "" do assignee_ref = user_ref_json(string(chain.owner_user_id))
-	reviewer_refs := input.reviewer_refs_json
-	if reviewer_refs != "" && actor_refs_contain_user(reviewer_refs) {
-		return domain.Task{}, false, domain.domain_error(.Validation_Failed, "user reviewer refs are not accepted; use requires_user_approval")
+
+	review_roles := make([dynamic]string, context.temp_allocator)
+	for r in input.review_roles do append(&review_roles, r)
+	if len(input.reviewer_agent_ids) > 0 {
+		has_reviewer := false
+		for r in review_roles do if r == domain.FLEET_ROLE_REVIEWER do has_reviewer = true
+		if !has_reviewer do append(&review_roles, domain.FLEET_ROLE_REVIEWER)
 	}
-	if reviewer_refs == "" do reviewer_refs = chain.default_reviewer_refs_json
-	if reviewer_refs == "" do reviewer_refs = "[]"
-	// Resolve any durable agent_id refs into concrete agent_instance refs (reuse or,
-	// in Phase 2, launch) before validation so callers can assign/review by agent_id.
-	if norm, norm_ok, norm_err := normalize_actor_refs(service, chain, assignee_ref); norm_ok { assignee_ref = norm } else { return domain.Task{}, false, norm_err }
-	if norm, norm_ok, norm_err := normalize_actor_refs(service, chain, reviewer_refs); norm_ok { reviewer_refs = norm } else { return domain.Task{}, false, norm_err }
-	if input.has_requires_user_approval {
-		if adjusted, adjusted_ok := set_owner_user_approval(reviewer_refs, string(chain.owner_user_id), input.requires_user_approval); adjusted_ok {
-			reviewer_refs = adjusted
-			defer delete(adjusted)
-		} else {
-			return domain.Task{}, false, domain.domain_error(.Validation_Failed, "invalid reviewer ref JSON")
-		}
+	brief := input.brief_json
+	if strings.trim_space(brief) == "" || strings.trim_space(brief) == "{}" {
+		brief = build_brief_json("{}", input.title, input.description, input.assignee_agent_id, input.assignee_agent_id != "", review_roles[:], true)
+	} else if input.assignee_agent_id != "" || len(review_roles) > 0 {
+		brief = build_brief_json(brief, input.title, input.description, input.assignee_agent_id, input.assignee_agent_id != "", review_roles[:], len(review_roles) > 0)
 	}
-	if refs_ok, refs_err := validate_actor_refs(service, chain, assignee_ref, reviewer_refs); !refs_ok do return domain.Task{}, false, refs_err
-	if bm_ok, bm_err := validate_task_assignee_bridge_match(service, input.bridge_id, assignee_ref); !bm_ok do return domain.Task{}, false, bm_err
+	// Fleet rows for every template the task names (worker for the assignee,
+	// reviewer for legacy reviewer refs).
+	if a := taskv2.brief_assignee(brief); a != "" {
+		if ferr := ensure_fleet_role(service, chain, a, domain.FLEET_ROLE_WORKER); ferr.code != .None do return domain.Task{}, false, ferr
+	}
+	for rid in input.reviewer_agent_ids {
+		if ferr := ensure_fleet_role(service, chain, rid, domain.FLEET_ROLE_REVIEWER); ferr.code != .None do return domain.Task{}, false, ferr
+	}
+
 	now := platform.clock_now(service.clock)
 	task := domain.Task{
 		task_id = domain.Task_ID(platform.generate_id(service.ids, "task_")),
@@ -830,46 +923,44 @@ create_task :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, i
 		title = input.title,
 		description = input.description,
 		publish_state = chain.publish_state,
-		status = .Assigned,
-		// Tasks default to the lowest priority (P2) unless the caller explicitly
-		// escalates via input.priority (REQ-CLI-2).
+		state = .Backlog,
+		kind = input.kind,
 		priority = input.has_priority ? input.priority : .P2,
-		assignee_ref_json = assignee_ref,
-		reviewer_refs_json = reviewer_refs,
+		brief_json = brief,
+		requires_user_approval = input.has_requires_user_approval && input.requires_user_approval,
 		bridge_id = input.bridge_id,
 		created_at = now,
 		updated_at = now,
 	}
+	if task.publish_state == .Published do task.published_at = now
 	saved_task, save_ok, save_err := iface.taskchain_save_task(service.repo, task)
 	if !save_ok do return domain.Task{}, false, save_err
 
 	for dep_id in input.depends_on {
-		if _, dep_ok, dep_err := add_task_dependency(service, auth, saved_task.task_id, dep_id); !dep_ok {
+		if _, dep_ok, dep_err := add_task_dependency_row(service, auth, saved_task.task_id, dep_id); !dep_ok {
 			return domain.Task{}, false, dep_err
 		}
 	}
-	if ensure_err := ensure_durable_actor_fleets(service, saved_task); ensure_err.code != .None do return domain.Task{}, false, ensure_err
 
 	if updated_chain, sync_ok, _ := sync_chain_status_from_tasks(service, chain.chain_id, chain.owner_user_id); sync_ok {
 		chain = updated_chain
 	}
 
-	// NO auto-reconcile on create (setup-phase rule): the coordinator stages the
-	// whole plan, then triggers `reconcile` explicitly. A newly-created task does
-	// not promote/nudge until the coordinator kicks off or re-plans.
-
-	// MEM-6 #1: on an ACTIVE, published chain a new task assignment notifies the
-	// assignee + coordinator (draft chains stay silent to avoid setup thrashing).
-	if chain.publish_state == .Published && chain.status == .Active && saved_task.publish_state == .Published {
-		actor := auth.agent_instance_id if auth.kind == .Instance_Token else ""
-		prio := task_priority_label(saved_task.priority)
-		assignee := primary_assignee_instance(saved_task.assignee_ref_json)
-		defer delete(assignee)
-		_ = send_task_wake(service, saved_task, assignee, "assigned", "Task Assigned", "assigned to you", prio, actor)
-		if chain.coordinator_agent_instance_id != assignee do _ = send_task_wake(service, saved_task, chain.coordinator_agent_instance_id, "assigned", "Task Assigned", "assigned", prio, actor)
+	// Engine: `created` (+ `published` on a live chain) → refold → match_chain.
+	if service.engine != nil {
+		if eng_err := taskv2.task_created(service.engine, saved_task, engine_actor(auth)); eng_err.code != .None do return domain.Task{}, false, eng_err
+		if fresh, fresh_ok, _ := iface.taskchain_get_task(service.repo, saved_task.task_id); fresh_ok do saved_task = fresh
 	}
-
 	return saved_task, true, domain.Domain_Error{}
+}
+
+// task_has_work_lease reports whether the engine holds a live work lease on the
+// task (brief/pin edits are rejected while it does).
+task_has_work_lease :: proc(service: ^Taskchain_Service, task_id: domain.Task_ID) -> bool {
+	leases, err := iface.taskchain_list_leases_by_task(service.repo, task_id)
+	if err.code != .None do return false
+	for l in leases do if l.kind == domain.LEASE_KIND_WORK do return true
+	return false
 }
 
 update_task :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, task_id: domain.Task_ID, input: Update_Task_Input) -> (domain.Task, bool, domain.Domain_Error) {
@@ -879,72 +970,73 @@ update_task :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, t
 	if !chain_ok do return domain.Task{}, false, chain_err
 
 	if auth.kind == .Instance_Token {
-		is_coord := is_chain_coordinator(service, chain, auth.agent_instance_id)
-		is_assignee := strings.contains(task.assignee_ref_json, auth.agent_instance_id)
-		if !is_coord && !is_assignee {
-			return domain.Task{}, false, domain.domain_error(.Forbidden, "only assignee or coordinator can update task")
+		// Members may edit; the coordinator may edit anything. (Holders are members.)
+		if !is_instance_member_or_coordinator(service, chain, auth.agent_instance_id) {
+			return domain.Task{}, false, domain.domain_error(.Forbidden, "only a member or coordinator can update task")
 		}
 	}
 
-	// Remember the prior assignee so a reassign-away can clear that instance's
-	// current_task pointer if it no longer holds the task (CT-7 consistency).
-	prev_assignee := primary_assignee_instance(task.assignee_ref_json)
-	defer delete(prev_assignee)
-	prev_priority := task.priority // MEM-6 #2: detect a P0 escalation.
-	prior_requires_user_approval := task_requires_user_approval(task)
+	changed := make([dynamic]string, context.temp_allocator)
+	brief_edit := input.brief_json != "" || input.has_assignee || input.has_review_roles || len(input.reviewer_agent_ids) > 0 || input.bridge_id != nil || input.title != "" || input.description != ""
+	if brief_edit && task_has_work_lease(service, task.task_id) {
+		// The holder is working off the brief in its pack; changing it under them
+		// is rejected. Priority and dependencies remain editable.
+		return domain.Task{}, false, domain.domain_error(.Conflict, "task is leased: cancel the lease or wait before editing its brief, assignee, reviewers, title or bridge pin")
+	}
 
-	if input.title != "" do task.title = input.title
-	if input.description != "" do task.description = input.description
-	if input.assignee_ref_json != "" do task.assignee_ref_json = input.assignee_ref_json
-	if input.reviewer_refs_json != "" {
-		if actor_refs_contain_user(input.reviewer_refs_json) {
-			return domain.Task{}, false, domain.domain_error(.Validation_Failed, "user reviewer refs are not accepted; use requires_user_approval")
+	if input.title != "" { task.title = input.title; append(&changed, "title") }
+	if input.description != "" { task.description = input.description; append(&changed, "description") }
+	if input.brief_json != "" {
+		task.brief_json = input.brief_json
+		append(&changed, "brief")
+	}
+	review_roles := make([dynamic]string, context.temp_allocator)
+	for r in input.review_roles do append(&review_roles, r)
+	has_roles := input.has_review_roles
+	if len(input.reviewer_agent_ids) > 0 {
+		has_roles = true
+		if !has_roles || len(review_roles) == 0 {
+			for r in taskv2.brief_review_roles(task.brief_json, context.temp_allocator) do append(&review_roles, r)
 		}
-		task.reviewer_refs_json = input.reviewer_refs_json
-		if !input.has_requires_user_approval && prior_requires_user_approval {
-			if adjusted, adjusted_ok := set_owner_user_approval(task.reviewer_refs_json, string(chain.owner_user_id), true); adjusted_ok {
-				task.reviewer_refs_json = adjusted
-				defer delete(adjusted)
-			} else {
-				return domain.Task{}, false, domain.domain_error(.Validation_Failed, "invalid reviewer ref JSON")
-			}
-		}
+		has_reviewer := false
+		for r in review_roles do if r == domain.FLEET_ROLE_REVIEWER do has_reviewer = true
+		if !has_reviewer do append(&review_roles, domain.FLEET_ROLE_REVIEWER)
+	}
+	if input.has_assignee || has_roles || input.title != "" || input.description != "" {
+		task.brief_json = build_brief_json(task.brief_json, task.title, task.description, input.assignee_agent_id, input.has_assignee, review_roles[:], has_roles)
+		if input.has_assignee do append(&changed, "assignee")
+		if has_roles do append(&changed, "review_roles")
 	}
 	if input.has_requires_user_approval {
-		if adjusted, adjusted_ok := set_owner_user_approval(task.reviewer_refs_json, string(chain.owner_user_id), input.requires_user_approval); adjusted_ok {
-			task.reviewer_refs_json = adjusted
-			defer delete(adjusted)
-		} else {
-			return domain.Task{}, false, domain.domain_error(.Validation_Failed, "invalid reviewer ref JSON")
-		}
+		task.requires_user_approval = input.requires_user_approval
+		append(&changed, "requires_user_approval")
 	}
-	if input.has_priority do task.priority = input.priority
+	if input.has_priority { task.priority = input.priority; append(&changed, "priority") }
 	// bridge_id is presence-checked via the pointer: nil leaves the pin untouched,
 	// a non-nil pointer (including "") repins — "" clears back to inherit.
 	if input.bridge_id != nil {
 		if br_err := validate_task_bridge(service, chain.owner_user_id, input.bridge_id^); br_err.code != .None do return domain.Task{}, false, br_err
 		task.bridge_id = input.bridge_id^
+		append(&changed, "bridge_id")
 	}
-
-	// Resolve durable agent_id refs into concrete agent_instance refs before validation.
-	if norm, norm_ok, norm_err := normalize_actor_refs(service, chain, task.assignee_ref_json); norm_ok { task.assignee_ref_json = norm } else { return domain.Task{}, false, norm_err }
-	if norm, norm_ok, norm_err := normalize_actor_refs(service, chain, task.reviewer_refs_json); norm_ok { task.reviewer_refs_json = norm } else { return domain.Task{}, false, norm_err }
-	if refs_ok, refs_err := validate_actor_refs(service, chain, task.assignee_ref_json, task.reviewer_refs_json); !refs_ok do return domain.Task{}, false, refs_err
-	if bm_ok, bm_err := validate_task_assignee_bridge_match(service, task.bridge_id, task.assignee_ref_json); !bm_ok do return domain.Task{}, false, bm_err
+	if a := taskv2.brief_assignee(task.brief_json); a != "" {
+		if ferr := ensure_fleet_role(service, chain, a, domain.FLEET_ROLE_WORKER); ferr.code != .None do return domain.Task{}, false, ferr
+	}
+	for rid in input.reviewer_agent_ids {
+		if ferr := ensure_fleet_role(service, chain, rid, domain.FLEET_ROLE_REVIEWER); ferr.code != .None do return domain.Task{}, false, ferr
+	}
 	task.updated_at = platform.clock_now(service.clock)
 	saved, save_ok, save_err := iface.taskchain_save_task(service.repo, task)
 	if !save_ok do return domain.Task{}, false, save_err
-
-	// Pointer healing (including clearing a reassigned-away instance's stale
-	// pointer) is handled by the lease engine — no ad-hoc clear here.
-	_ = prev_assignee
 
 	if input.has_depends_on {
 		// clear existing deps and add new ones
 		existing_deps, _ := iface.taskchain_list_dependencies_by_chain(service.repo, chain.chain_id, chain.owner_user_id)
 		for ed in existing_deps {
 			if ed.task_id == task.task_id {
-				iface.taskchain_remove_dependency(service.repo, task.task_id, ed.depends_on_task_id, chain.owner_user_id)
+				if _, rem_err := remove_task_dependency(service, auth, task.task_id, ed.depends_on_task_id); rem_err.code != .None {
+					return domain.Task{}, false, rem_err
+				}
 			}
 		}
 		for dep_id in input.depends_on {
@@ -952,30 +1044,13 @@ update_task :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, t
 				return domain.Task{}, false, dep_err
 			}
 		}
-	}
-	if ensure_err := ensure_durable_actor_fleets(service, saved); ensure_err.code != .None do return domain.Task{}, false, ensure_err
-
-	// NO auto-reconcile on update (assignee/reviewer/priority/dependency edits are
-	// setup-phase changes): the coordinator triggers `reconcile` when the new plan
-	// should take effect. (Task STATUS changes reconcile — that's a different proc,
-	// change_task_status.)
-
-	// MEM-6 #2: on an ACTIVE, published chain, a reassignment notifies the new
-	// assignee + coordinator, and a P0 escalation notifies the assignee. Text-only
-	// edits stay silent (UI-only). Draft chains stay silent.
-	if chain.publish_state == .Published && chain.status == .Active && saved.publish_state == .Published {
-		actor := auth.agent_instance_id if auth.kind == .Instance_Token else ""
-		new_assignee := primary_assignee_instance(saved.assignee_ref_json)
-		defer delete(new_assignee)
-		if new_assignee != "" && new_assignee != prev_assignee {
-			_ = send_task_wake(service, saved, new_assignee, "reassigned", "Task Reassigned", "reassigned to you", "", actor)
-			if chain.coordinator_agent_instance_id != new_assignee do _ = send_task_wake(service, saved, chain.coordinator_agent_instance_id, "reassigned", "Task Reassigned", "reassigned", "", actor)
-		}
-		if input.has_priority && saved.priority == .P0 && prev_priority != .P0 {
-			_ = send_task_wake(service, saved, new_assignee, "priority", "Priority P0", "escalated to P0", "", actor)
-		}
+		append(&changed, "depends_on")
 	}
 
+	if service.engine != nil && len(changed) > 0 {
+		if eng_err := taskv2.task_updated(service.engine, saved, engine_actor(auth), changed[:]); eng_err.code != .None do return domain.Task{}, false, eng_err
+		if fresh, fresh_ok, _ := iface.taskchain_get_task(service.repo, saved.task_id); fresh_ok do saved = fresh
+	}
 	return saved, true, domain.Domain_Error{}
 }
 
@@ -987,328 +1062,23 @@ publish_task :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, 
 	if chain.publish_state != .Published do return domain.Task{}, false, domain.domain_error(.Conflict, "cannot publish task before chain is published")
 	if task.publish_state != .Draft do return domain.Task{}, false, domain.domain_error(.Conflict, "task is already published")
 	if auth.kind == .Instance_Token {
-		is_coord := is_chain_coordinator(service, chain, auth.agent_instance_id)
-		is_assignee := strings.contains(task.assignee_ref_json, auth.agent_instance_id)
-		if !is_coord && !is_assignee {
-			return domain.Task{}, false, domain.domain_error(.Forbidden, "only assignee or coordinator can publish task")
+		if !is_instance_member_or_coordinator(service, chain, auth.agent_instance_id) {
+			return domain.Task{}, false, domain.domain_error(.Forbidden, "only a member or coordinator can publish task")
 		}
 	}
 	now := platform.clock_now(service.clock)
 	task.publish_state = .Published
-	task.status = .Assigned
 	task.published_at = now
 	task.updated_at = now
 	saved, save_ok, save_err := iface.taskchain_save_task(service.repo, task)
 	if !save_ok do return domain.Task{}, false, save_err
-	// NO auto-reconcile: publishing a task is a setup-phase change. The coordinator
-	// triggers `reconcile` when the plan should take effect.
+	// Publishing a task on a live chain is an engine event: it becomes ready as
+	// soon as its dependencies allow and the matcher runs.
+	if service.engine != nil {
+		if eng_err := taskv2.task_published(service.engine, saved, engine_actor(auth)); eng_err.code != .None do return domain.Task{}, false, eng_err
+		if fresh, fresh_ok, _ := iface.taskchain_get_task(service.repo, saved.task_id); fresh_ok do saved = fresh
+	}
 	return saved, true, domain.Domain_Error{}
-}
-
-change_task_status :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, task_id: domain.Task_ID, next: domain.Task_Status) -> (domain.Task, bool, domain.Domain_Error) {
-	task, ok, err := get_task(service, auth, task_id)
-	if !ok do return domain.Task{}, false, err
-	if task.publish_state != .Published do return domain.Task{}, false, domain.domain_error(.Conflict, "draft task has no execution status")
-
-	target_next := next
-	if next == .Paused {
-		if task.status == .In_Progress || task.status == .Finishing {
-			target_next = .Pausing
-		}
-	}
-
-	if !valid_task_transition(task.status, target_next) do return domain.Task{}, false, domain.domain_error(.Conflict, "invalid task status transition")
-
-	chain, chain_ok, chain_err := iface.taskchain_get_chain(service.repo, task.chain_id)
-	if !chain_ok do return domain.Task{}, false, chain_err
-	if auth.kind == .Instance_Token {
-		is_coord := is_chain_coordinator(service, chain, auth.agent_instance_id)
-		is_assignee := strings.contains(task.assignee_ref_json, auth.agent_instance_id)
-		if !is_coord && !is_assignee {
-			return domain.Task{}, false, domain.domain_error(.Forbidden, "only assignee or coordinator can change task status")
-		}
-	}
-
-	new_assignee_ref := ""
-	defer if new_assignee_ref != "" do delete(new_assignee_ref)
-
-	new_reviewer_refs := make([dynamic]string)
-	defer {
-		for r in new_reviewer_refs do delete(r)
-		delete(new_reviewer_refs)
-	}
-
-	// Dependency Gating: reject transition to In_Progress if any dependency is blocked
-	if target_next == .In_Progress {
-		deps, dep_err := iface.taskchain_list_dependencies_by_chain(service.repo, task.chain_id, task.owner_user_id)
-		if dep_err.code == .None {
-			defer delete(deps)
-			for dep in deps {
-				if dep.task_id == task.task_id {
-					parent_task, p_ok, _ := iface.taskchain_get_task(service.repo, dep.depends_on_task_id)
-					if p_ok {
-						if !domain.task_status_unblocks_dependents(parent_task.status) {
-							return domain.Task{}, false, domain.domain_error(.Conflict, "task is blocked by dependencies")
-						}
-					}
-				}
-			}
-		}
-
-		// REQ-FSM-UNIFIED-1: Atomic Start & JIT Agent Instance Binding
-		inst_id := primary_assignee_instance(task.assignee_ref_json)
-		defer if inst_id != "" do delete(inst_id)
-		target_agent_id := primary_assignee_agent_id(task.assignee_ref_json)
-		defer if target_agent_id != "" do delete(target_agent_id)
-
-		if inst_id == "" && target_agent_id != "" {
-			allocated_inst, alloc_ok := allocate_or_jit_worker_instance(service, chain, task, target_agent_id)
-			if alloc_ok {
-				defer delete(allocated_inst)
-				ensure_chain_member(service, chain, allocated_inst, target_agent_id)
-				new_assignee_ref = bind_agent_id_to_instance(task.assignee_ref_json, target_agent_id, allocated_inst)
-				task.assignee_ref_json = new_assignee_ref
-			}
-		}
-	}
-
-	// REQ-FSM-REV-1: Atomic Reviewer JIT Agent Instance Binding on In_Validation
-	if target_next == .In_Validation {
-		target_ref_json := task.reviewer_refs_json
-		if target_ref_json == "" || target_ref_json == "[]" {
-			target_ref_json = chain.default_reviewer_refs_json
-		}
-
-		rev_agent_ids := extract_agent_ids_from_ref_blob(target_ref_json)
-		defer {
-			for r in rev_agent_ids do delete(r)
-			delete(rev_agent_ids)
-		}
-
-		current_rev_json := target_ref_json
-		for rev_agent_id in rev_agent_ids {
-			allocated_inst, alloc_ok := allocate_or_jit_reviewer_instance(service, chain, task, rev_agent_id)
-			if alloc_ok {
-				defer delete(allocated_inst)
-				ensure_chain_member(service, chain, allocated_inst, rev_agent_id)
-				bound_ref := bind_agent_id_to_instance(current_rev_json, rev_agent_id, allocated_inst)
-				append(&new_reviewer_refs, bound_ref)
-				current_rev_json = bound_ref
-				task.reviewer_refs_json = bound_ref
-			}
-		}
-	}
-
-	now := platform.clock_now(service.clock)
-	if task.status != .In_Validation && target_next == .In_Validation {
-		_, _ = iface.taskchain_delete_votes_by_task(service.repo, task.task_id, task.owner_user_id)
-	}
-	task.status = target_next
-	task.updated_at = now
-	if target_next == .In_Progress && task.started_at == "" do task.started_at = now
-	if target_next == .Completed || target_next == .Cancelled {
-		task.completed_at = now
-	} else {
-		task.completed_at = ""
-	}
-	task_ret, saved_ok, save_err := iface.taskchain_save_task(service.repo, task)
-	if saved_ok {
-		if updated_chain, sync_ok, _ := sync_chain_status_from_tasks(service, task.chain_id, task.owner_user_id); sync_ok {
-			chain = updated_chain
-		}
-		// Auto-promotion + auto-advance (CT-4/CT-5) runs FIRST so every instance's
-		// persisted current_task pointer is up to date before we notify: a terminal
-		// transition unblocks dependents, entering/leaving In_Progress frees or
-		// claims the work slot, and entering In_Validation makes the task a review
-		// focus for its reviewers. recompute persists focus + wakes any newly
-		// promoted assignees. Then the gated status-change notify (CT-6) wakes only
-		// the recipients whose current_task is THIS task, with the correct action
-		// label (R8). Ordering matters: gating reads the persisted pointer.
-		notify_task_status_change(service, auth, task_ret, chain)
-		// MEM-6 #6/#7: paused/cancelled/validated_good policy wakes (not covered by
-		// the CT-6 work/review gate above).
-		notify_status_policy(service, auth, task_ret, chain)
-		fanout_task_status_changed(service, auth, task_ret, chain)
-		// REPORT THE ROW, NOT OUR INTENTION.
-		//
-		// The scheduling engine is allowed to change this task's status
-		// again, in this same request, and it regularly does: it enforces
-		// "one In_Progress task per instance" and "zero while any task of yours is
-		// in_validation", and demotes back to Queued at promotion.odin:398-400.
-		// That is deliberate scheduling behaviour and is NOT a bug.
-		//
-		// The bug was that we returned task_ret — the in-memory struct we saved
-		// BEFORE recompute ran — so the API answered ok:true carrying a status the
-		// database no longer held. Callers recorded a state the Hub had already
-		// discarded, with nothing in the response to hint at it.
-		//
-		// Re-reading makes the response observational: it states what the row holds
-		// once everything that runs after the save has finished. It deliberately does
-		// NOT predict or re-implement the engine's rules — a second copy of those
-		// rules would drift from the engine and lie in a new way.
-		//
-		// ON THE FALLBACK: if the re-read fails we keep task_ret, which is the
-		// pre-recompute struct — i.e. exactly the value this fix exists to stop
-		// returning. That is a knowing trade, not an oversight: the status change
-		// itself has already succeeded and been persisted, so failing the whole call
-		// because a follow-up read failed would report a write that did happen as a
-		// failure — a worse lie than the one being fixed here, and in the opposite
-		// direction. If this path ever needs to be tightened, return the read error
-		// rather than silently substituting a stale struct.
-		if persisted, got, _ := iface.taskchain_get_task(service.repo, task.task_id); got {
-			task_ret = persisted
-		}
-	}
-	return task_ret, saved_ok, save_err
-}
-
-notify_task_status_change :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, task: domain.Task, chain: domain.Task_Chain) {
-	if service.bridge_command_sink.send_runtime_command == nil do return
-	actor_agent_instance_id := auth.agent_instance_id if auth.kind == .Instance_Token else ""
-
-	// CT-6 gating: the bridge derives its wake targets from the assignee/reviewer
-	// id arrays by status. We gate those arrays here through the recipient's
-	// persisted current_task so only instances whose current task is THIS task are
-	// woken (fail-open when the pointer is unset/unknown). The explicit "action"
-	// field states work-vs-review per R8 for unambiguous messaging.
-	all_assignees := extract_instances_from_ref_blob(task.assignee_ref_json)
-	defer delete(all_assignees)
-	all_reviewers := extract_instances_from_ref_blob(task.reviewer_refs_json)
-	defer delete(all_reviewers)
-	all_def_reviewers := extract_instances_from_ref_blob(chain.default_reviewer_refs_json)
-	defer delete(all_def_reviewers)
-
-	assignees := make([dynamic]string)
-	defer delete(assignees)
-	for id in all_assignees { if allowed, _ := notification_allowed_for_recipient(service, id, task); allowed do append(&assignees, id) }
-	reviewers := make([dynamic]string)
-	defer delete(reviewers)
-	for id in all_reviewers { if allowed, _ := notification_allowed_for_recipient(service, id, task); allowed do append(&reviewers, id) }
-	def_reviewers := make([dynamic]string)
-	defer delete(def_reviewers)
-	for id in all_def_reviewers { if allowed, _ := notification_allowed_for_recipient(service, id, task); allowed do append(&def_reviewers, id) }
-
-	action := action_for_status(task.status)
-	// R8: never fire a wake with an empty action — those statuses (assigned/queued/
-	// paused/validated_good/terminal) do not wake anyone here, so a notify would
-	// carry no actionable meaning. The status change still persists + recomputes;
-	// this only suppresses a meaningless wake command.
-	if action == "" do return
-	message := status_notify_message(task, action)
-	defer delete(message)
-	// MEM-6: human-readable message for the bridge to deliver verbatim.
-	human_message := status_human_message(service, task, actor_agent_instance_id)
-	defer delete(human_message)
-
-	// Bridges to notify: the union of gated recipients' bridges plus the
-	// coordinator's (kept for cross-bridge fan-out parity). A bridge that ends up
-	// with no gated local target simply wakes no one — harmless.
-	instance_ids := make([dynamic]string)
-	defer delete(instance_ids)
-	if chain.coordinator_agent_instance_id != "" do append(&instance_ids, chain.coordinator_agent_instance_id)
-	for id in assignees do append(&instance_ids, id)
-	for id in reviewers do append(&instance_ids, id)
-	for id in def_reviewers do append(&instance_ids, id)
-
-	bridge_ids := make(map[string]bool)
-	defer delete(bridge_ids)
-	for id in instance_ids {
-		inst, inst_ok, _ := iface.agent_get_instance(service.agents, id)
-		if inst_ok && inst.bridge_id != "" do bridge_ids[inst.bridge_id] = true
-	}
-
-	for bridge_id in bridge_ids {
-		cmd_id := platform.generate_id(service.ids, "cmd_")
-		b := strings.builder_make()
-		strings.write_string(&b, `{"type":"task_status_changed_notify","command_id":"`)
-		contracts.write_json_string(&b, cmd_id)
-		strings.write_string(&b, `","task_id":"`)
-		contracts.write_json_string(&b, string(task.task_id))
-		strings.write_string(&b, `","chain_id":"`)
-		contracts.write_json_string(&b, string(task.chain_id))
-		strings.write_string(&b, `","new_status":"`)
-		contracts.write_json_string(&b, task_status_string(task.status))
-		strings.write_string(&b, `","action":"`)
-		contracts.write_json_string(&b, action)
-		strings.write_string(&b, `","message":"`)
-		contracts.write_json_string(&b, message)
-		strings.write_string(&b, `","human_message":"`)
-		contracts.write_json_string(&b, human_message)
-		strings.write_string(&b, `","assignee_instance_ids":[`)
-		for id, i in assignees { if i>0 do strings.write_string(&b, ","); strings.write_string(&b, `"`); contracts.write_json_string(&b, id); strings.write_string(&b, `"`) }
-		strings.write_string(&b, `],"reviewer_instance_ids":[`)
-		for id, i in reviewers { if i>0 do strings.write_string(&b, ","); strings.write_string(&b, `"`); contracts.write_json_string(&b, id); strings.write_string(&b, `"`) }
-		strings.write_string(&b, `],"default_reviewer_instance_ids":[`)
-		for id, i in def_reviewers { if i>0 do strings.write_string(&b, ","); strings.write_string(&b, `"`); contracts.write_json_string(&b, id); strings.write_string(&b, `"`) }
-		strings.write_string(&b, `],"mutation_id":"`)
-		contracts.write_json_string(&b, cmd_id)
-		strings.write_string(&b, `","actor_agent_instance_id":"`)
-		contracts.write_json_string(&b, actor_agent_instance_id)
-		strings.write_string(&b, `","updated_at":"`)
-		contracts.write_json_string(&b, task.updated_at)
-		strings.write_string(&b, `"}`)
-		
-		sent, err := project.bridge_command_send_runtime(service.bridge_command_sink, project.Runtime_Command{bridge_id=bridge_id, command_id=cmd_id, body_json=strings.to_string(b)})
-		strings.builder_destroy(&b)
-	}
-}
-
-
-
-// notify_status_policy emits human-readable wakes for status transitions the CT-6
-// work/review gate (notify_task_status_change) does NOT cover: paused/cancelled
-// (assignee + coordinator stop execution) and validated_good (coordinator sign-off).
-// MEM-6 spec §4 #6/#7. Fire-and-forget; the actor is never self-woken.
-notify_status_policy :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, task: domain.Task, chain: domain.Task_Chain) {
-	if service.bridge_command_sink.send_runtime_command == nil || service.agents == nil do return
-	actor := auth.agent_instance_id if auth.kind == .Instance_Token else ""
-	coord := chain.coordinator_agent_instance_id
-	#partial switch task.status {
-	case .Pausing:
-		tag := "Task Pausing"
-		assignee := primary_assignee_instance(task.assignee_ref_json)
-		defer delete(assignee)
-		instruction := fmt.tprintf("wrap up, post handoff comment, stash/commit changes, then run './.heimdall/bin/ham-ctl task status %s --status paused'", task.task_id)
-		_ = send_task_wake(service, task, assignee, "pausing", tag, "pausing", instruction, actor)
-		if coord != assignee do _ = send_task_wake(service, task, coord, "pausing", tag, "entered pausing state", "", actor)
-	case .Paused, .Cancelled:
-		tag := "Task Paused" if task.status == .Paused else "Task Cancelled"
-		verb := "paused" if task.status == .Paused else "cancelled"
-		assignee := primary_assignee_instance(task.assignee_ref_json)
-		defer delete(assignee)
-		_ = send_task_wake(service, task, assignee, "status", tag, verb, "", actor)
-		if coord != assignee do _ = send_task_wake(service, task, coord, "status", tag, verb, "", actor)
-	case .Validated_Good:
-		_ = send_task_wake(service, task, coord, "status", "Review Consensus", "marked ready for sign-off", "", actor)
-	case .Completed:
-		_ = send_task_wake(service, task, coord, "status", "Task Completed", "has completed", "", actor)
-	}
-}
-
-valid_task_transition :: proc(current, next: domain.Task_Status) -> bool {
-	if current == next do return true
-	switch current {
-	case .Assigned: return next == .Queued || next == .In_Progress || next == .Paused || next == .Cancelled
-	// Queued is a holding state managed by the auto-promotion engine: it may be
-	// promoted back to Assigned/In_Progress when the instance is free, or paused/
-	// cancelled.
-	case .Queued: return next == .Assigned || next == .In_Progress || next == .Paused || next == .Cancelled
-	case .In_Progress: return next == .Queued || next == .In_Validation || next == .Pausing || next == .Paused || next == .Cancelled || next == .Assigned
-	// In_Validation -> Finishing is legal: it is the quorum auto-finalize path
-	// (evaluate_task_quorum advances a fully-approved task to Finishing).
-	case .In_Validation: return next == .Validated_Good || next == .Validated_Not_Good || next == .Finishing || next == .Completed || next == .Paused || next == .Cancelled || next == .In_Progress || next == .Assigned
-	case .Finishing: return next == .Completed || next == .In_Validation || next == .In_Progress || next == .Pausing || next == .Paused || next == .Cancelled || next == .Assigned
-	case .Pausing: return next == .Paused || next == .In_Progress || next == .Cancelled || next == .Assigned
-	case .Validated_Not_Good: return next == .In_Progress || next == .Paused || next == .Cancelled || next == .Assigned
-	case .Validated_Good: return next == .Completed || next == .Paused || next == .Cancelled || next == .Assigned
-	case .Paused: return next == .In_Progress || next == .Assigned || next == .Cancelled
-	case .Cancelled: return next == .Assigned || next == .In_Progress
-	case .Completed: return next == .Assigned || next == .In_Progress || next == .In_Validation
-	}
-	for allowed in domain.task_allowed_transitions(current) {
-		if allowed == next do return true
-	}
-	return false
 }
 
 create_comment :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, input: Comment_Input) -> (domain.Task_Comment, bool, domain.Domain_Error) {
@@ -1333,105 +1103,12 @@ list_comments :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context,
 	return iface.taskchain_list_comments_by_task(service.repo, task.task_id, task.owner_user_id)
 }
 
-target_string :: proc(target: Nudge_Target) -> string {
-	switch target {
-	case .Assignee: return "assignee"
-	case .Reviewer: return "reviewer"
-	case .Coordinator: return "coordinator"
-	case .None: return "none"
-	}
-	return "none"
-}
-
-// nudge_target_action maps a Nudge_Target to the canonical R8 action label used
-// consistently across every task notification ("work" for assignee, "review" for
-// reviewer, "coordinate" for coordinator, "" for none). This keeps the wrapper's
-// parsing uniform: every task notify carries an "action" field.
-nudge_target_action :: proc(target: Nudge_Target) -> string {
-	switch target {
-	case .Assignee:    return "work"
-	case .Reviewer:    return "review"
-	case .Coordinator: return "coordinate"
-	case .None:        return ""
-	}
-	return ""
-}
-
-// current_task_role_action maps a persisted Current_Task_Role to the R8 action
-// label the notification must state: "work" (assignee) or "review" (reviewer).
-// Returns "" for None (the instance has no current task).
-current_task_role_action :: proc(role: domain.Current_Task_Role) -> string {
-	switch role {
-	case .Work:   return "work"
-	case .Review: return "review"
-	case .None:   return ""
-	}
-	return ""
-}
-
-// notification_gate_action is the STRICT CT-6 gate used for comment fan-out (R4):
-// it returns (action, true) ONLY when `task_id` is exactly `instance_id`'s
-// persisted current task, deriving the work-vs-review action from the persisted
-// role. Any other case — pointer unset, different task, no role, or no agent repo
-// — returns ("", false). Unlike notification_allowed_for_recipient (used for
-// status-change wakes, which fail open on an unknown pointer), comments are purely
-// informational and must never wake a participant who is not currently focused on
-// the task, so this variant fails CLOSED.
-notification_gate_action :: proc(service: ^Taskchain_Service, instance_id: string, task_id: domain.Task_ID) -> (string, bool) {
-	if service == nil || service.agents == nil do return "", false
-	if strings.trim_space(instance_id) == "" do return "", false
-	inst, ok, _ := iface.agent_get_instance(service.agents, instance_id)
-	if !ok do return "", false
-	if inst.current_task_id != string(task_id) do return "", false
-	action := current_task_role_action(inst.current_task_role)
-	if action == "" do return "", false
-	return action, true
-}
-
-// action_for_status is the R8 action label implied by a status-change wake: the
-// bridge wakes the ASSIGNEE (work) when a task enters In_Progress or bounces back
-// Validated_Not_Good (rework), and the REVIEWER (review) when it enters
-// In_Validation. Other statuses do not wake anyone here.
-action_for_status :: proc(status: domain.Task_Status) -> string {
-	#partial switch status {
-	case .In_Progress, .Validated_Not_Good: return "work"
-	case .In_Validation:                     return "review"
-	}
-	return ""
-}
-
 // task_display_name returns the task's human title, falling back to its id when
 // the title is empty, so notification messages are always readable.
 task_display_name :: proc(task: domain.Task) -> string {
 	t := strings.trim_space(task.title)
 	if t != "" do return t
 	return string(task.task_id)
-}
-
-// status_notify_message builds the natural-language wake message for a
-// status-change notify, derived from the R8 action + task title (R8: every notify
-// must say WORK / REVIEW unambiguously). Validated_Not_Good is phrased as a rework
-// request so the assignee knows changes were requested.
-status_notify_message :: proc(task: domain.Task, action: string) -> string {
-	name := task_display_name(task)
-	switch action {
-	case "review": return strings.concatenate({"Review requested: ", name})
-	case "work":
-		if task.status == .Validated_Not_Good do return strings.concatenate({"Rework requested (changes requested): ", name})
-		return strings.concatenate({"Work ready: ", name})
-	}
-	return strings.concatenate({"Task updated: ", name})
-}
-
-// comment_notify_message builds the natural-language wake message for a comment
-// notify, stating whether the recipient should now work or review (R8) + title.
-comment_notify_message :: proc(task: domain.Task, action: string) -> string {
-	name := task_display_name(task)
-	switch action {
-	case "review": return strings.concatenate({"New comment on \"", name, "\" — please REVIEW"})
-	case "work":   return strings.concatenate({"New comment on \"", name, "\" — please continue WORK"})
-	}
-	return strings.concatenate({"New comment on \"", name, "\""})
 }
 
 comment_preview_safe :: proc(body: string) -> string {
@@ -1464,6 +1141,7 @@ comment_preview_safe :: proc(body: string) -> string {
 // NOTICE_TITLE_MAX_RUNES caps a task/chain title rendered in a notice. User
 // directive (2026-09-09): 20, matching the excerpt cap (spec §2 said 60).
 NOTICE_TITLE_MAX_RUNES :: 20
+
 // NOTICE_EXCERPT_MAX_RUNES caps inline free-text excerpts (comment bodies, review
 // feedback, custom nudge messages). User directive (2026-09-09): 20, not the
 // spec's 140.
@@ -1511,459 +1189,6 @@ notice_task_title :: proc(task: domain.Task) -> string {
 	return truncate_runes(task_display_name(task), NOTICE_TITLE_MAX_RUNES)
 }
 
-// build_human_readable_task_notice renders the standardized notice (spec §2).
-// `excerpt` is optional; when non-blank it is appended as a 20-rune-max quoted
-// tail. Caller owns the returned string.
-build_human_readable_task_notice :: proc(service: ^Taskchain_Service, task: domain.Task, actor_instance_id, event_tag, action_verb, excerpt: string) -> string {
-	actor := resolve_actor_display(service, actor_instance_id)
-	defer delete(actor)
-	title := notice_task_title(task)
-	defer delete(title)
-	head := strings.concatenate({"[", event_tag, "] ", actor, " ", action_verb, " \"", title, "\" (", string(task.task_id), ")"})
-	if strings.trim_space(excerpt) == "" do return head
-	defer delete(head)
-	ex: string
-	if event_tag == "Task Pausing" || event_tag == "Task Approved" {
-		ex = strings.clone(strings.trim_space(excerpt))
-	} else {
-		ex = truncate_runes(excerpt, NOTICE_EXCERPT_MAX_RUNES)
-	}
-	defer delete(ex)
-	return strings.concatenate({head, ": \"", ex, "\""})
-}
-
-// status_human_message builds the human_message for a status-change wake from the
-// task's new status (spec §3). Returns "" for statuses that carry no wake.
-status_human_message :: proc(service: ^Taskchain_Service, task: domain.Task, actor_instance_id: string) -> string {
-	assignee := primary_assignee_instance(task.assignee_ref_json)
-	defer delete(assignee)
-	#partial switch task.status {
-	case .In_Progress:
-		return build_human_readable_task_notice(service, task, assignee, "Work Started", "started work on", "")
-	case .In_Validation:
-		return build_human_readable_task_notice(service, task, assignee, "Review Requested", "submitted for review", "")
-	case .Validated_Not_Good:
-		return build_human_readable_task_notice(service, task, actor_instance_id, "Changes Requested", "requested changes on", "")
-	}
-	return ""
-}
-
-should_debounce_nudge_dispatch :: proc(service: ^Taskchain_Service, instance_id, task_id: string) -> bool {
-	if service == nil || instance_id == "" || task_id == "" do return false
-	key := strings.concatenate({instance_id, ":", task_id})
-	defer delete(key)
-	now_ms := time.to_unix_nanoseconds(time.now()) / 1_000_000
-
-	sync.mutex_lock(&service.nudge_debounce_mutex)
-	defer sync.mutex_unlock(&service.nudge_debounce_mutex)
-
-	if service.nudge_debounce_last_unix_ms == nil {
-		service.nudge_debounce_last_unix_ms = make(map[string]i64, runtime.heap_allocator())
-	}
-
-	if last_ms, ok := service.nudge_debounce_last_unix_ms[key]; ok {
-		if now_ms - last_ms < 1500 {
-			return true
-		}
-	}
-
-	// The debounce map outlives this request. On the request path context.allocator
-	// is the per-request arena (MEM-4), so the key MUST be cloned onto the persistent
-	// heap or it dangles the moment the arena is freed after the response (a
-	// use-after-free on the next map probe/resize). Mirrors the fragment/device_auth
-	// caches.
-	service.nudge_debounce_last_unix_ms[strings.clone(key, runtime.heap_allocator())] = now_ms
-	return false
-}
-
-// notification_allowed_for_recipient implements CT-6 gating with a fail-open bias:
-// a recipient is SUPPRESSED only when we positively know its persisted current
-// task is a DIFFERENT task. When the instance's current_task is this task we allow
-// with the persisted role's action label; when the pointer is unset/unknown (or no
-// agent repo is wired) we allow with the status-implied action, so legitimate
-// cross-bridge/replay/promotion wakes are never dropped just because a pointer has
-// not been computed yet. The net effect is the intended noise reduction: an
-// instance actively focused on task B is never woken for an event on task A, while
-// still guaranteeing an agent is woken for its own current task.
-notification_allowed_for_recipient :: proc(service: ^Taskchain_Service, instance_id: string, task: domain.Task) -> (bool, string) {
-	status_action := action_for_status(task.status)
-	if service == nil || service.agents == nil do return true, status_action
-	if strings.trim_space(instance_id) == "" do return true, status_action
-	inst, ok, _ := iface.agent_get_instance(service.agents, instance_id)
-	if !ok do return true, status_action
-	if inst.current_task_id == "" do return true, status_action
-	if inst.current_task_id != string(task.task_id) do return false, ""
-	// Positively this recipient's current task: prefer the persisted role's label.
-	action := current_task_role_action(inst.current_task_role)
-	if action == "" do action = status_action
-	return true, action
-}
-
-task_status_string :: proc(status: domain.Task_Status) -> string {
-	switch status {
-	case .Assigned: return "assigned"
-	case .Queued: return "queued"
-	case .In_Progress: return "in_progress"
-	case .In_Validation: return "in_validation"
-	case .Finishing: return "finishing"
-	case .Pausing: return "pausing"
-	case .Validated_Good: return "validated_good"
-	case .Validated_Not_Good: return "validated_not_good"
-	case .Paused: return "paused"
-	case .Completed: return "completed"
-	case .Cancelled: return "cancelled"
-	}
-	return "assigned"
-}
-
-task_action :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, task_id: domain.Task_ID, action: string) -> (domain.Task, bool, domain.Domain_Error) {
-	task, ok, err := get_task(service, auth, task_id)
-	if !ok do return domain.Task{}, false, err
-	if action == "pause" {
-		target_status: domain.Task_Status = .Paused
-		if task.status == .In_Progress || task.status == .Finishing {
-			target_status = .Pausing
-		} else if task.status == .Pausing {
-			target_status = .Paused
-		}
-		return change_task_status(service, auth, task_id, target_status)
-	}
-	return domain.Task{}, false, domain.domain_error(.Validation_Failed, "unsupported task action")
-}
-
-parse_actor_refs :: proc(blob: string, allocator := context.temp_allocator) -> (refs: [dynamic]domain.Actor_Ref, is_array: bool, ok: bool) {
-	trimmed := strings.trim_space(blob)
-	if len(trimmed) == 0 {
-		return make([dynamic]domain.Actor_Ref, allocator), false, true
-	}
-	parsed, err := json.parse_string(trimmed, json.DEFAULT_SPECIFICATION, false, context.temp_allocator)
-	if err != .None {
-		return nil, false, false
-	}
-	refs = make([dynamic]domain.Actor_Ref, allocator)
-	#partial switch val in parsed {
-	case json.Object:
-		ref := actor_ref_from_json_object(val)
-		append(&refs, ref)
-		return refs, false, true
-	case json.Array:
-		for item in val {
-			if obj, is_obj := item.(json.Object); is_obj {
-				append(&refs, actor_ref_from_json_object(obj))
-			}
-		}
-		return refs, true, true
-	case:
-		return nil, false, false
-	}
-}
-
-actor_refs_contain_user :: proc(blob: string) -> bool {
-	refs, _, ok := parse_actor_refs(blob, context.temp_allocator)
-	if !ok do return false
-	for ref in refs do if ref.type == "user" || ref.user_id != "" do return true
-	return false
-}
-
-task_requires_user_approval :: proc(task: domain.Task) -> bool {
-	refs, _, ok := parse_actor_refs(task.reviewer_refs_json, context.temp_allocator)
-	if !ok do return false
-	owner := string(task.owner_user_id)
-	for ref in refs do if ref.type == "user" && ref.user_id == owner do return true
-	return false
-}
-
-set_owner_user_approval :: proc(blob, owner_user_id: string, required: bool, allocator := context.allocator) -> (string, bool) {
-	refs, _, ok := parse_actor_refs(blob, context.temp_allocator)
-	if !ok do return "", false
-	out := make([dynamic]domain.Actor_Ref, allocator)
-	defer delete(out)
-	owner_seen := false
-	for ref in refs {
-		if ref.type == "user" || ref.user_id != "" {
-			if ref.type == "user" && ref.user_id == owner_user_id {
-				if required && !owner_seen {
-					append(&out, ref)
-					owner_seen = true
-				}
-			} else {
-				append(&out, ref)
-			}
-			continue
-		}
-		append(&out, ref)
-	}
-	if required && !owner_seen do append(&out, domain.Actor_Ref{type = "user", user_id = owner_user_id})
-	return marshal_actor_refs(out[:], true, allocator)
-}
-
-actor_ref_from_json_object :: proc(obj: json.Object) -> domain.Actor_Ref {
-	ref: domain.Actor_Ref
-	if t, ok := obj["type"].(json.String); ok {
-		ref.type = string(t)
-	}
-	if a, ok := obj["agent_id"].(json.String); ok {
-		ref.agent_id = string(a)
-	}
-	if inst, ok := obj["agent_instance_id"].(json.String); ok {
-		ref.agent_instance_id = string(inst)
-	}
-	if u, ok := obj["user_id"].(json.String); ok {
-		ref.user_id = string(u)
-	}
-	return ref
-}
-
-marshal_actor_refs :: proc(refs: []domain.Actor_Ref, is_array: bool, allocator := context.allocator) -> (string, bool) {
-	if is_array {
-		bytes, err := json.marshal(refs, allocator = allocator)
-		if err != nil do return "", false
-		return string(bytes), true
-	} else if len(refs) > 0 {
-		bytes, err := json.marshal(refs[0], allocator = allocator)
-		if err != nil do return "", false
-		return string(bytes), true
-	}
-	return strings.clone("", allocator), true
-}
-
-extract_instances_from_ref_blob :: proc(blob: string) -> [dynamic]string {
-	instances := make([dynamic]string)
-	if blob == "" do return instances
-	refs, _, ok := parse_actor_refs(blob, context.temp_allocator)
-	if !ok do return instances
-	for ref in refs {
-		id := ref.agent_instance_id
-		if id != "" {
-			if idx := strings.index(blob, id); idx >= 0 {
-				append(&instances, blob[idx : idx + len(id)])
-			} else {
-				append(&instances, strings.clone(id, context.temp_allocator))
-			}
-		}
-	}
-	return instances
-}
-
-manual_nudge :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, task_id: domain.Task_ID, message: string) -> (Manual_Nudge, bool, domain.Domain_Error) {
-	task, ok, err := get_task(service, auth, task_id)
-	if !ok do return Manual_Nudge{}, false, err
-	if task.publish_state != .Published do return Manual_Nudge{}, false, domain.domain_error(.Conflict, "draft task cannot be nudged")
-	if task.status == .Completed || task.status == .Cancelled do return Manual_Nudge{}, false, domain.domain_error(.Conflict, "terminal task cannot be nudged")
-	
-	target := nudge_target_for_status(task.status)
-	nudge_id := platform.generate_id(service.ids, "ndg_")
-	now := platform.clock_now(service.clock)
-	nudge := Manual_Nudge{task_id = task.task_id, owner_user_id = task.owner_user_id, target = target, message = message, created_at = now, nudge_id = nudge_id}
-	
-	instance_ids := make([dynamic]string)
-	defer delete(instance_ids)
-	
-	if target == .Assignee {
-		extracted := extract_instances_from_ref_blob(task.assignee_ref_json)
-		for id in extracted {
-			found := false
-			for existing in instance_ids {
-				if existing == id {
-					found = true
-					break
-				}
-			}
-			if !found do append(&instance_ids, id)
-		}
-		delete(extracted)
-	} else if target == .Reviewer {
-		extracted := extract_instances_from_ref_blob(task.reviewer_refs_json)
-		for id in extracted {
-			found := false
-			for existing in instance_ids {
-				if existing == id {
-					found = true
-					break
-				}
-			}
-			if !found do append(&instance_ids, id)
-		}
-		delete(extracted)
-	} else if target == .Coordinator {
-		chain, chain_ok, _ := iface.taskchain_get_chain(service.repo, task.chain_id)
-		if chain_ok && chain.coordinator_agent_instance_id != "" {
-			append(&instance_ids, chain.coordinator_agent_instance_id)
-		}
-	}
-	
-	if target == .None || len(instance_ids) == 0 {
-		nudge.delivery_state = "no_targets"
-		nudge.targets_json = "[]"
-		return nudge, true, domain.Domain_Error{}
-	}
-	
-	// MEM-6: human-readable nudge line — custom message if provided, else a
-	// stable fallback. Actor is the nudger (empty => "@User").
-	nudger := auth.agent_instance_id if auth.kind == .Instance_Token else ""
-	nudge_excerpt := strings.trim_space(message)
-	if nudge_excerpt == "" do nudge_excerpt = "Awaiting progress update"
-	nudge_human_message := build_human_readable_task_notice(service, task, nudger, "Nudge", "nudged on", nudge_excerpt)
-	defer delete(nudge_human_message)
-
-	live_delivered := 0
-	durable_queued := 0
-	failed := 0
-	targets_b := strings.builder_make()
-	defer strings.builder_destroy(&targets_b)
-	strings.write_string(&targets_b, "[")
-	
-	for id, i in instance_ids {
-		if i > 0 do strings.write_string(&targets_b, ",")
-		strings.write_string(&targets_b, `{"agent_instance_id":"`)
-		contracts.write_json_string(&targets_b, id)
-		strings.write_string(&targets_b, `","role":"`)
-		contracts.write_json_string(&targets_b, target_string(target))
-		
-		inst, inst_ok, _ := iface.agent_get_instance(service.agents, id)
-		if !inst_ok || inst.bridge_id == "" {
-			failed += 1
-			strings.write_string(&targets_b, `","state":"failed"}`)
-			continue
-		}
-
-		if should_debounce_nudge_dispatch(service, id, string(task.task_id)) {
-			live_delivered += 1
-			strings.write_string(&targets_b, `","state":"delivered"}`)
-			continue
-		}
-		
-		strings.write_string(&targets_b, `","bridge_id":"`)
-		contracts.write_json_string(&targets_b, inst.bridge_id)
-		
-		cmd_id := platform.generate_id(service.ids, "cmd_")
-		b := strings.builder_make()
-		defer strings.builder_destroy(&b)
-		strings.write_string(&b, `{"type":"notify_task_nudge","command_id":"`)
-		contracts.write_json_string(&b, cmd_id)
-		strings.write_string(&b, `","agent_instance_id":"`)
-		contracts.write_json_string(&b, id)
-		strings.write_string(&b, `","task_id":"`)
-		contracts.write_json_string(&b, string(task.task_id))
-		strings.write_string(&b, `","chain_id":"`)
-		contracts.write_json_string(&b, string(task.chain_id))
-		strings.write_string(&b, `","nudge_id":"`)
-		contracts.write_json_string(&b, nudge_id)
-		strings.write_string(&b, `","target_role":"`)
-		contracts.write_json_string(&b, target_string(target))
-		strings.write_string(&b, `","action":"`)
-		contracts.write_json_string(&b, nudge_target_action(target))
-		strings.write_string(&b, `","task_status":"`)
-		contracts.write_json_string(&b, task_status_string(task.status))
-		strings.write_string(&b, `","body":"`)
-		contracts.write_json_string(&b, message)
-		strings.write_string(&b, `","human_message":"`)
-		contracts.write_json_string(&b, nudge_human_message)
-		strings.write_string(&b, `","created_at":"`)
-		contracts.write_json_string(&b, now)
-		strings.write_string(&b, `"}`)
-
-		sent := false
-		if service.bridge_command_sink.send_runtime_command_wait != nil {
-			result_json, sent, send_err := project.bridge_command_send_runtime_wait(service.bridge_command_sink, project.Runtime_Command{bridge_id=inst.bridge_id, command_id=cmd_id, body_json=strings.to_string(b)}, 1000)
-			if !sent && send_err.cause != "" {
-				// The bridge answered with a typed refusal (e.g. wake_failed): the
-				// notice is still durably stored, so it is queued, not lost.
-				durable_queued += 1
-				strings.write_string(&targets_b, `","state":"queued"}`)
-			} else if sent {
-				if strings.contains(result_json, `"status":"succeeded"`) {
-					live_delivered += 1
-					strings.write_string(&targets_b, `","state":"delivered"}`)
-				} else {
-					durable_queued += 1
-					strings.write_string(&targets_b, `","state":"queued"}`)
-				}
-			} else {
-				failed += 1
-				strings.write_string(&targets_b, `","state":"failed"}`)
-			}
-		} else {
-			if service.bridge_command_sink.send_runtime_command != nil {
-				sent, _ = project.bridge_command_send_runtime(service.bridge_command_sink, project.Runtime_Command{bridge_id=inst.bridge_id, command_id=cmd_id, body_json=strings.to_string(b)})
-			}
-			if sent {
-				durable_queued += 1
-				strings.write_string(&targets_b, `","state":"queued"}`)
-			} else {
-				failed += 1
-				strings.write_string(&targets_b, `","state":"failed"}`)
-			}
-		}
-	}
-	strings.write_string(&targets_b, "]")
-	
-	nudge.targets_json = strings.clone(strings.to_string(targets_b))
-	nudge.live_delivered = live_delivered
-	nudge.durable_queued = durable_queued
-	nudge.failed = failed
-	
-	if live_delivered > 0 {
-		nudge.delivery_state = "delivered"
-	} else if durable_queued > 0 {
-		nudge.delivery_state = "queued"
-	} else {
-		nudge.delivery_state = "failed"
-	}
-
-	return nudge, true, domain.Domain_Error{}
-}
-
-// send_task_wake emits one human-readable notify_task_nudge for a task-level event
-// to a single instance. `origin`/`tag`/`verb`/`excerpt` shape the [tag] @actor verb
-// "title" (id): "excerpt" message; `actor_instance` is the acting agent ("" =>
-// "@User"). Returns true when a command was actually sent (instance live + bridge).
-// MEM-6. Skips the actor itself and blank/unresolvable targets.
-send_task_wake :: proc(service: ^Taskchain_Service, task: domain.Task, target_instance_id, origin, tag, verb, excerpt, actor_instance: string) -> bool {
-	if service.bridge_command_sink.send_runtime_command == nil || service.agents == nil do return false
-	tid := strings.trim_space(target_instance_id)
-	if tid == "" || tid == strings.trim_space(actor_instance) do return false
-	inst, inst_ok, _ := iface.agent_get_instance(service.agents, tid)
-	if !inst_ok || inst.bridge_id == "" do return false
-	hm := build_human_readable_task_notice(service, task, actor_instance, tag, verb, excerpt)
-	defer delete(hm)
-	now := platform.clock_now(service.clock)
-	cmd_id := platform.generate_id(service.ids, "cmd_")
-	b := strings.builder_make()
-	defer strings.builder_destroy(&b)
-	strings.write_string(&b, `{"type":"notify_task_nudge","origin":"`)
-	contracts.write_json_string(&b, origin)
-	strings.write_string(&b, `","command_id":"`)
-	contracts.write_json_string(&b, cmd_id)
-	strings.write_string(&b, `","agent_instance_id":"`)
-	contracts.write_json_string(&b, tid)
-	strings.write_string(&b, `","task_id":"`)
-	contracts.write_json_string(&b, string(task.task_id))
-	strings.write_string(&b, `","chain_id":"`)
-	contracts.write_json_string(&b, string(task.chain_id))
-	strings.write_string(&b, `","target_instance_id":"`)
-	contracts.write_json_string(&b, tid)
-	strings.write_string(&b, `","target_role":"`)
-	contracts.write_json_string(&b, origin)
-	strings.write_string(&b, `","action":"`)
-	contracts.write_json_string(&b, origin)
-	strings.write_string(&b, `","task_status":"`)
-	contracts.write_json_string(&b, task_status_string(task.status))
-	strings.write_string(&b, `","message":"`)
-	contracts.write_json_string(&b, hm)
-	strings.write_string(&b, `","human_message":"`)
-	contracts.write_json_string(&b, hm)
-	strings.write_string(&b, `","created_at":"`)
-	contracts.write_json_string(&b, now)
-	strings.write_string(&b, `"`)
-	if origin == "pausing" || origin == "finishing" {
-		strings.write_string(&b, `,"interrupt":true`)
-	}
-	strings.write_string(&b, `}`)
-	sent, _ := project.bridge_command_send_runtime(service.bridge_command_sink, project.Runtime_Command{bridge_id = inst.bridge_id, command_id = cmd_id, body_json = strings.to_string(b)})
-	return sent
-}
-
 // send_chain_level_wake emits a chain-level notify_task_nudge (task_id empty) with
 // a prebuilt human_message to one instance. Used for coordinator-assigned and
 // member-removed notices (spec §4 #9/#11). MEM-6.
@@ -2002,157 +1227,21 @@ send_chain_level_wake :: proc(service: ^Taskchain_Service, chain: domain.Task_Ch
 	return sent
 }
 
-// task_priority_label renders a priority as its P0/P1/P2 label for notices.
-task_priority_label :: proc(p: domain.Task_Priority) -> string {
-	switch p {
-	case .P0: return "P0"
-	case .P1: return "P1"
-	case .P2: return "P2"
-	}
-	return "P2"
-}
-
-// send_comment_wake pushes one comment/progress wake (notify_task_nudge, origin
-// "comment") to a single instance. Returns true when a command was actually sent
-// (the instance is resolvable and has a live bridge). MEM-6.
-send_comment_wake :: proc(service: ^Taskchain_Service, task: domain.Task, target_instance_id, legacy_message, human_message, now: string) -> bool {
-	if service.agents == nil do return false
-	inst, inst_ok, _ := iface.agent_get_instance(service.agents, target_instance_id)
-	if !inst_ok || inst.bridge_id == "" do return false
-	cmd_id := platform.generate_id(service.ids, "cmd_")
-	b := strings.builder_make()
-	defer strings.builder_destroy(&b)
-	strings.write_string(&b, `{"type":"notify_task_nudge","origin":"comment","command_id":"`)
-	contracts.write_json_string(&b, cmd_id)
-	strings.write_string(&b, `","agent_instance_id":"`)
-	contracts.write_json_string(&b, target_instance_id)
-	strings.write_string(&b, `","task_id":"`)
-	contracts.write_json_string(&b, string(task.task_id))
-	strings.write_string(&b, `","chain_id":"`)
-	contracts.write_json_string(&b, string(task.chain_id))
-	strings.write_string(&b, `","target_instance_id":"`)
-	contracts.write_json_string(&b, target_instance_id)
-	strings.write_string(&b, `","target_role":"comment","action":"comment","task_status":"`)
-	contracts.write_json_string(&b, task_status_string(task.status))
-	strings.write_string(&b, `","message":"`)
-	contracts.write_json_string(&b, legacy_message)
-	strings.write_string(&b, `","human_message":"`)
-	contracts.write_json_string(&b, human_message)
-	strings.write_string(&b, `","created_at":"`)
-	contracts.write_json_string(&b, now)
-	strings.write_string(&b, `"}`)
-	sent, _ := project.bridge_command_send_runtime(service.bridge_command_sink, project.Runtime_Command{bridge_id = inst.bridge_id, command_id = cmd_id, body_json = strings.to_string(b)})
-	return sent
-}
-
+// comment_task records a comment. Task System v2: a comment is an audit event
+// with no protocol meaning — nobody is woken by it (the pack carries the refs
+// an agent may fetch). The returned `notified` list is always empty.
 comment_task :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, input: Task_Comment_Input) -> (domain.Task_Comment, []string, bool, domain.Domain_Error) {
 	if strings.trim_space(input.body) == "" do return domain.Task_Comment{}, nil, false, domain.domain_error(.Validation_Failed, "comment body is required")
 	task, ok, err := get_task(service, auth, input.task_id)
 	if !ok do return domain.Task_Comment{}, nil, false, err
 	if task.publish_state != .Published do return domain.Task_Comment{}, nil, false, domain.domain_error(.Conflict, "draft task cannot be commented on")
-	if auth.kind == .Instance_Token {
-		if auth.agent_instance_id == "" do return domain.Task_Comment{}, nil, false, domain.domain_error(.Forbidden, "instance token is required")
-		chain, chain_ok, _ := iface.taskchain_get_chain(service.repo, task.chain_id)
-		is_coord := chain_ok && is_chain_coordinator(service, chain, auth.agent_instance_id)
-		is_actor := strings.contains(task.assignee_ref_json, auth.agent_instance_id) || strings.contains(task.reviewer_refs_json, auth.agent_instance_id)
-		if !is_coord && !is_actor do return domain.Task_Comment{}, nil, false, domain.domain_error(.Forbidden, "instance token is not assigned to or coordinator of this task")
-	}
-	invalid_ids := make([dynamic]string)
-	defer delete(invalid_ids)
-	if len(input.notify) > 0 {
-		for target in input.notify {
-			t := strings.trim_space(target)
-			if t == "" do continue
-			if service.agents == nil {
-				append(&invalid_ids, t)
-				continue
-			}
-			inst, inst_ok, _ := iface.agent_get_instance(service.agents, t)
-			if !inst_ok || inst.agent_instance_id == "" {
-				append(&invalid_ids, t)
-			}
-		}
-	}
-	if len(invalid_ids) > 0 {
-		msg := fmt.tprintf("invalid target instance IDs: %s", strings.join(invalid_ids[:], ", "))
-		return domain.Task_Comment{}, nil, false, domain.domain_error(.Validation_Failed, msg)
-	}
-
+	if auth.kind == .Instance_Token && auth.agent_instance_id == "" do return domain.Task_Comment{}, nil, false, domain.domain_error(.Forbidden, "instance token is required")
 	now := platform.clock_now(service.clock)
 	comment := domain.Task_Comment{comment_id = platform.generate_id(service.ids, "cmt_"), task_id = task.task_id, chain_id = task.chain_id, owner_user_id = task.owner_user_id, author_agent_instance_id = auth.agent_instance_id, body = input.body, created_at = now, updated_at = now}
 	saved, ok2, err2 := iface.taskchain_save_comment(service.repo, comment)
 	if !ok2 do return saved, nil, ok2, err2
-
-	// MEM-6 comment fan-out. Recipients (de-duped, author excluded):
-	//   * explicit --notify ids                         -> [Comment]
-	//   * chain coordinator, always kept informed       -> [Progress Update] for an
-	//     agent comment, [Comment] for a user comment
-	//   * USER-authored comment (any task): every role-holder (assignee + reviewer(s)
-	//     + default reviewers) regardless of --notify   -> [Comment]
-	//     (user directive 2026-09-09)
-	notified := make([dynamic]string)
-	if service.bridge_command_sink.send_runtime_command != nil && service.agents != nil {
-		author := auth.agent_instance_id if auth.kind == .Instance_Token && auth.agent_instance_id != "" else (auth.user_id if auth.user_id != "" else "user")
-		author_name := author
-		if auth.kind == .Instance_Token && auth.agent_instance_id != "" {
-			if inst, ok, _ := iface.agent_get_instance(service.agents, auth.agent_instance_id); ok {
-				if dn := strings.trim_space(inst.display_name); dn != "" {
-					author_name = dn
-				}
-			}
-		}
-		preview := comment_preview_safe(input.body)
-		defer delete(preview)
-		legacy_message := fmt.tprintf("Comment from %s on task %s: %s", author_name, string(task.task_id), preview)
-		// Actor is the authoring instance ("" => "@User" for a user-authored comment).
-		author_instance := auth.agent_instance_id if auth.kind == .Instance_Token && auth.agent_instance_id != "" else ""
-		is_user_author := auth.kind != .Instance_Token
-		comment_msg := build_human_readable_task_notice(service, task, author_instance, "Comment", "commented on", input.body)
-		defer delete(comment_msg)
-		progress_msg := build_human_readable_task_notice(service, task, author_instance, "Progress Update", "posted an update on", input.body)
-		defer delete(progress_msg)
-
-		chain, chain_ok, _ := iface.taskchain_get_chain(service.repo, task.chain_id)
-
-		recips := make(map[string]string)
-		defer delete(recips)
-		order := make([dynamic]string)
-		defer delete(order)
-		// Keys are cloned (the source blobs/refs are freed below before we send), so
-		// `order`/`recips` own their ids; freed after the send loop.
-		add_recip := proc(recips: ^map[string]string, order: ^[dynamic]string, author_instance, id, msg: string) {
-			t := strings.trim_space(id)
-			if t == "" || t == author_instance do return
-			if _, exists := recips[t]; exists do return
-			key := strings.clone(t)
-			recips[key] = msg
-			append(order, key)
-		}
-
-		// Explicit --notify targets: [Comment].
-		for target in input.notify do add_recip(&recips, &order, author_instance, target, comment_msg)
-		// User-authored comment: wake every role-holder regardless of --notify.
-		if is_user_author {
-			a := primary_assignee_instance(task.assignee_ref_json)
-			add_recip(&recips, &order, author_instance, a, comment_msg)
-			delete(a)
-			revs := extract_instances_from_ref_blob(task.reviewer_refs_json)
-			for id in revs do add_recip(&recips, &order, author_instance, id, comment_msg)
-			delete(revs)
-			if chain_ok {
-				drevs := extract_instances_from_ref_blob(chain.default_reviewer_refs_json)
-				for id in drevs do add_recip(&recips, &order, author_instance, id, comment_msg)
-				delete(drevs)
-			}
-		}
-
-		for id in order {
-			if send_comment_wake(service, task, id, legacy_message, recips[id], now) do append(&notified, strings.clone(id))
-		}
-		for id in order do delete(id)
-	}
-
-	return saved, notified[:], true, domain.Domain_Error{}
+	if service.engine != nil do _ = taskv2.task_comment(service.engine, task, engine_actor(auth), saved.comment_id)
+	return saved, nil, true, domain.Domain_Error{}
 }
 
 list_task_comments :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, task_id: domain.Task_ID) -> ([]domain.Task_Comment, domain.Domain_Error) {
@@ -2271,41 +1360,14 @@ remove_chain_member :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Co
 		return false, domain.domain_error(.Conflict, "cannot remove sole coordinator from task chain")
 	}
 
-	// MEM-6 #11: capture the non-terminal tasks this member still holds (as assignee)
-	// BEFORE removal so we can alert the coordinator that a reassignment is needed.
-	held_tasks := make([dynamic]string)
-	defer delete(held_tasks)
-	if tasks, terr := iface.taskchain_list_tasks_by_chain(service.repo, chain.chain_id, chain.owner_user_id); terr.code == .None {
-		for t in tasks {
-			if task_is_terminal(t.status) do continue
-			a := primary_assignee_instance(t.assignee_ref_json)
-			if a == agent_instance_id do append(&held_tasks, string(t.task_id))
-			delete(a)
-		}
-		delete(tasks)
-	}
-
 	removed, remove_err := iface.taskchain_remove_member(service.repo, chain.chain_id, agent_instance_id, chain.owner_user_id)
 	// If a coordinator member was removed, resync the derived mirror column from
 	// the canonical members table (H9).
 	if removed && is_target_coordinator do _ = coordinator_sync_mirror(service, chain)
 
-	// MEM-6 #11: if the removed member still held tasks, alert the coordinator that a
-	// reassignment is required (skip when the coordinator is the one being removed).
-	if removed && len(held_tasks) > 0 {
-		coord := chain.coordinator_agent_instance_id
-		if coord != "" && coord != agent_instance_id {
-			removed_display := resolve_actor_display(service, agent_instance_id)
-			defer delete(removed_display)
-			ids_joined := strings.join(held_tasks[:], ", ")
-			defer delete(ids_joined)
-			ids_excerpt := truncate_runes(ids_joined, NOTICE_EXCERPT_MAX_RUNES)
-			defer delete(ids_excerpt)
-			human_message := strings.concatenate({"[Member Removed] ", removed_display, " was removed while holding tasks (", ids_excerpt, "). Reassignment required."})
-			defer delete(human_message)
-			_ = send_chain_level_wake(service, chain, coord, "member_removed", human_message)
-		}
-	}
+	// Task System v2: a removed member that still HOLDS a lease is treated like a
+	// lost instance — the engine expires the lease and re-plans the chain.
+	if removed && service.engine != nil do taskv2.on_instance_terminal(service.engine, agent_instance_id)
 	return removed, remove_err
 }
 
@@ -2326,7 +1388,11 @@ list_chain_members :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Con
 
 // --- Task Dependencies ---
 
-add_task_dependency :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, task_id, depends_on_task_id: domain.Task_ID) -> (domain.Task_Dependency, bool, domain.Domain_Error) {
+// --- Task Dependencies ---
+
+// add_task_dependency_row validates and writes the edge (no engine call). Used by
+// create_task, whose engine notification covers the whole new task.
+add_task_dependency_row :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, task_id, depends_on_task_id: domain.Task_ID) -> (domain.Task_Dependency, bool, domain.Domain_Error) {
 	task, ok, err := get_task(service, auth, task_id)
 	if !ok do return domain.Task_Dependency{}, false, err
 	dep_task, dep_ok, dep_err := get_task(service, auth, depends_on_task_id)
@@ -2348,11 +1414,20 @@ add_task_dependency :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Co
 		owner_user_id = task.owner_user_id,
 		created_at = now,
 	}
+	return iface.taskchain_save_dependency(service.repo, dep)
+}
 
-	saved_dep, dep_save_ok, dep_save_err := iface.taskchain_save_dependency(service.repo, dep)
+// add_task_dependency writes the edge and tells the engine: a dependency added to
+// a LEASED task expires its lease first (reason dep_added, non-counting), then
+// the chain is re-planned.
+add_task_dependency :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, task_id, depends_on_task_id: domain.Task_ID) -> (domain.Task_Dependency, bool, domain.Domain_Error) {
+	saved_dep, dep_save_ok, dep_save_err := add_task_dependency_row(service, auth, task_id, depends_on_task_id)
 	if !dep_save_ok do return domain.Task_Dependency{}, false, dep_save_err
-	// NO auto-reconcile on dependency change (explicit decision): the coordinator
-	// restructures dependencies freely, then triggers `reconcile` when ready.
+	if service.engine != nil {
+		if task, tok, _ := iface.taskchain_get_task(service.repo, task_id); tok {
+			if eng_err := taskv2.dep_added(service.engine, task, depends_on_task_id, engine_actor(auth)); eng_err.code != .None do return saved_dep, false, eng_err
+		}
+	}
 	return saved_dep, true, domain.Domain_Error{}
 }
 
@@ -2361,24 +1436,10 @@ remove_task_dependency :: proc(service: ^Taskchain_Service, auth: contracts.Auth
 	if !ok do return false, err
 	removed, remove_err := iface.taskchain_remove_dependency(service.repo, task.task_id, depends_on_task_id, task.owner_user_id)
 	if remove_err.code != .None do return removed, remove_err
-
-	// MEM-6 #3: removing a dependency can UNBLOCK the task. On an active/published
-	// chain, notify the coordinator [Task Unblocked] and auto-reconcile so the
-	// assignee is promoted/woken to the now-ready work (the promotion wake is the
-	// assignee's "ready" signal; a per-instance debounce coalesces any overlap).
-	if removed {
-		if chain, chain_ok, _ := iface.taskchain_get_chain(service.repo, task.chain_id); chain_ok && chain.publish_state == .Published && chain.status == .Active {
-			tasks, terr := iface.taskchain_list_tasks_by_chain(service.repo, chain.chain_id, chain.owner_user_id)
-			deps, derr := iface.taskchain_list_dependencies_by_chain(service.repo, chain.chain_id, chain.owner_user_id)
-			if terr.code == .None && derr.code == .None {
-				fresh, fresh_ok, _ := iface.taskchain_get_task(service.repo, task.task_id)
-				if fresh_ok && work_status_is_actionable(fresh.status) && deps_satisfied_for_task(tasks, deps, fresh.task_id) {
-					actor := auth.agent_instance_id if auth.kind == .Instance_Token else ""
-					_ = send_task_wake(service, fresh, chain.coordinator_agent_instance_id, "unblocked", "Task Unblocked", "is now unblocked —", "dependencies satisfied", actor)
-				}
-				delete(tasks); delete(deps)
-			}
-		}
+	// Removing a dependency can UNBLOCK the task: the engine refolds (→ ready)
+	// and the matcher grants it.
+	if removed && service.engine != nil {
+		if eng_err := taskv2.dep_removed(service.engine, task, depends_on_task_id, engine_actor(auth)); eng_err.code != .None do return removed, eng_err
 	}
 	return removed, remove_err
 }
@@ -2403,189 +1464,6 @@ has_dependency_cycle :: proc(service: ^Taskchain_Service, chain_id: domain.Task_
 }
 
 // --- Reviewer Voting & Quorum ---
-
-record_task_vote :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, input: Vote_Input) -> (domain.Task_Vote, bool, domain.Domain_Error) {
-	task, ok, err := get_task(service, auth, input.task_id)
-	if !ok do return domain.Task_Vote{}, false, err
-	if task.publish_state != .Published do return domain.Task_Vote{}, false, domain.domain_error(.Conflict, "draft task cannot receive votes")
-
-	voter_instance_id := ""
-	if auth.kind == .Instance_Token {
-		voter_instance_id = auth.agent_instance_id
-	}
-
-	// Assignee cannot vote on own task
-	if voter_instance_id != "" && strings.contains(task.assignee_ref_json, voter_instance_id) {
-		return domain.Task_Vote{}, false, domain.domain_error(.Forbidden, "assignee cannot vote on their own task")
-	}
-
-	if auth.kind == .Instance_Token {
-		chain, chain_ok, _ := iface.taskchain_get_chain(service.repo, task.chain_id)
-		is_reviewer := strings.contains(task.reviewer_refs_json, voter_instance_id)
-		if !is_reviewer && chain_ok {
-			is_reviewer = strings.contains(chain.default_reviewer_refs_json, voter_instance_id)
-		}
-		if !is_reviewer {
-			return domain.Task_Vote{}, false, domain.domain_error(.Forbidden, "voter is not a designated reviewer for this task")
-		}
-	}
-	if auth.kind == .User_Token && !task_requires_user_approval(task) {
-		return domain.Task_Vote{}, false, domain.domain_error(.Forbidden, "user is not a designated reviewer for this task")
-	}
-
-	now := platform.clock_now(service.clock)
-	v := input.vote
-	if v != "lgtm" && v != "ngtm" do return domain.Task_Vote{}, false, domain.domain_error(.Validation_Failed, "vote must be lgtm or ngtm")
-
-	vote := domain.Task_Vote{
-		task_id = task.task_id,
-		reviewer_agent_instance_id = voter_instance_id,
-		chain_id = task.chain_id,
-		owner_user_id = task.owner_user_id,
-		vote = v,
-		comment = input.comment,
-		created_at = now,
-		updated_at = now,
-	}
-
-	saved_vote, save_ok, save_err := iface.taskchain_save_vote(service.repo, vote)
-	if !save_ok do return domain.Task_Vote{}, false, save_err
-
-	// Evaluate Quorum and auto-promote task status
-	evaluate_task_quorum(service, task)
-
-	// MEM-6 #5: vote visibility. Coordinator is always informed; on an approving
-	// quorum the assignee is told; on a pending LGTM the remaining reviewers are too;
-	// an NGTM tells the coordinator changes were requested (the assignee is already
-	// re-focused by the quorum -> Validated_Not_Good reconcile).
-	if chain, chain_ok, _ := iface.taskchain_get_chain(service.repo, task.chain_id); chain_ok {
-		coord := chain.coordinator_agent_instance_id
-		updated, _, _ := iface.taskchain_get_task(service.repo, task.task_id)
-		if v == "lgtm" {
-			if updated.status == .Finishing {
-				assignee := primary_assignee_instance(updated.assignee_ref_json)
-				defer delete(assignee)
-				instruction := fmt.tprintf("wrap up, commit/push changes, then run './.heimdall/bin/ham-ctl task status %s --status completed'", updated.task_id)
-				_ = send_task_wake(service, updated, assignee, "finishing", "Task Approved", "is approved — please wrap up and complete", instruction, voter_instance_id)
-				_ = send_task_wake(service, updated, coord, "finishing", "Task Approved", "entered finishing state", input.comment, voter_instance_id)
-			} else if updated.status == .Completed {
-				assignee := primary_assignee_instance(updated.assignee_ref_json)
-				defer delete(assignee)
-				_ = send_task_wake(service, updated, assignee, "vote", "Task Approved", "voted LGTM on", input.comment, voter_instance_id)
-				_ = send_task_wake(service, updated, coord, "vote", "Task Approved", "voted LGTM on", input.comment, voter_instance_id)
-			} else {
-				_ = send_task_wake(service, updated, coord, "vote", "Review Progress", "voted LGTM on", input.comment, voter_instance_id)
-				reviewers := extract_instances_from_ref_blob(updated.reviewer_refs_json)
-				defer delete(reviewers)
-				for rid in reviewers do if rid != voter_instance_id do _ = send_task_wake(service, updated, rid, "vote", "Review Progress", "voted LGTM on", input.comment, voter_instance_id)
-			}
-		} else {
-			_ = send_task_wake(service, updated, coord, "vote", "Changes Requested", "requested changes on", input.comment, voter_instance_id)
-		}
-	}
-
-	return saved_vote, true, domain.Domain_Error{}
-}
-
-evaluate_task_quorum :: proc(service: ^Taskchain_Service, task: domain.Task) {
-	if task.status != .In_Validation do return
-
-	votes, err := iface.taskchain_list_votes_by_task(service.repo, task.task_id, task.owner_user_id)
-	if err.code != .None do return
-
-	has_ngtm := false
-	lgtm_count := 0
-	for v in votes {
-		if v.vote == "ngtm" do has_ngtm = true
-		if v.vote == "lgtm" do lgtm_count += 1
-	}
-
-	// Determine the quorum outcome. Any ngtm fails the task; otherwise a
-	// satisfied lgtm quorum means the task is fully approved.
-	updated_status := task.status
-	quorum_approved := false
-	if has_ngtm {
-		updated_status = .Validated_Not_Good
-	} else {
-		required_count := count_required_reviewers(task.reviewer_refs_json)
-		if required_count <= 1 && lgtm_count >= 1 {
-			quorum_approved = true
-		} else if required_count > 1 && lgtm_count >= required_count {
-			quorum_approved = true
-		}
-	}
-
-	// When all required reviewers approve (no ngtm), auto-finalize the task all
-	// the way to Completed rather than lingering in Validated_Good. This is the
-	// only path that unblocks dependents: task_status_unblocks_dependents treats
-	// just Completed/Cancelled as clearing — Validated_Good does NOT unblock. We
-	// go In_Validation -> Completed directly (a legal transition here since the
-	// quorum is satisfied) and set completed_at exactly once. Idempotency: the
-	// early return above (status != In_Validation) makes late/duplicate votes a
-	// no-op, so completion side-effects run once.
-	if quorum_approved {
-		updated_status = .Finishing
-	}
-
-	if updated_status != task.status {
-		now := platform.clock_now(service.clock)
-		t := task
-		t.status = updated_status
-		t.updated_at = now
-		if updated_status == .Completed do t.completed_at = now
-		saved, ok, _ := iface.taskchain_save_task(service.repo, t)
-		// CT-10: recompute whenever a review RESOLVES the task, not just on the
-		// Completed path. Both outcomes change an instance's current focus:
-		//   * Completed (LGTM quorum): frees the reviewer + unblocks dependents so
-		//     downstream tasks auto-claim.
-		//   * Validated_Not_Good (any NGTM): the reviewer is done reviewing and must
-		//     advance to its next focus, AND the not-good task re-enters the
-		//     assignee's promotable pool (work_status_is_actionable includes
-		//     Validated_Not_Good) so auto-promotion flows the rework back to the
-		//     assignee without a manual bump.
-		// Guarding on updated_status != task.status keeps this a single recompute
-		// per real resolution and a no-op for idempotent/duplicate votes.
-		if ok && updated_status != task.status {
-			_, _, _ = sync_chain_status_from_tasks(service, saved.chain_id, saved.owner_user_id)
-			chain, chain_ok, _ := iface.taskchain_get_chain(service.repo, saved.chain_id)
-			if chain_ok {
-				fanout_task_status_changed(service, contracts.Auth_Context{kind = .None}, saved, chain)
-			}
-		}
-	}
-}
-
-count_required_reviewers :: proc(reviewer_refs_json: string) -> int {
-	if reviewer_refs_json == "" || reviewer_refs_json == "[]" do return 0
-	refs, _, ok := parse_actor_refs(reviewer_refs_json, context.temp_allocator)
-	if !ok do return 0
-	count := 0
-	for ref in refs {
-		if ref.agent_instance_id != "" || ref.user_id != "" || (ref.type == "agent_id" && ref.agent_id != "") {
-			count += 1
-		}
-	}
-	return count
-}
-
-list_task_votes :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, task_id: domain.Task_ID) -> ([]domain.Task_Vote, domain.Domain_Error) {
-	// READ: owner-scoped (REQ-SEC-3).
-	task, ok, err := get_task_for_read(service, auth, task_id)
-	if !ok do return nil, err
-	return iface.taskchain_list_votes_by_task(service.repo, task.task_id, task.owner_user_id)
-}
-
-nudge_target_for_status :: proc(status: domain.Task_Status) -> Nudge_Target {
-	switch status {
-	// Queued tasks are held back deliberately, so they do not target a nudge.
-	case .Queued: return .None
-	case .Assigned, .In_Progress, .Validated_Not_Good, .Finishing, .Pausing, .Paused: return .Assignee
-	case .In_Validation: return .Reviewer
-	case .Validated_Good: return .Coordinator
-	case .Completed, .Cancelled: return .None
-	}
-	return .None
-}
 
 get_task :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, task_id: domain.Task_ID) -> (domain.Task, bool, domain.Domain_Error) {
 	task, ok, err := iface.taskchain_get_task(service.repo, task_id)
@@ -2650,25 +1528,6 @@ notify_coordinator_assigned :: proc(service: ^Taskchain_Service, auth: contracts
 	_ = send_chain_level_wake(service, chain, new_coordinator, "coordinator_assigned", human_message)
 }
 
-validate_actor_refs :: proc(service: ^Taskchain_Service, chain: domain.Task_Chain, assignee_ref_json, reviewer_refs_json: string) -> (bool, domain.Domain_Error) {
-	if ok, err := validate_ref_blob(service, chain, assignee_ref_json); !ok do return false, err
-	if ok, err := validate_ref_blob(service, chain, reviewer_refs_json); !ok do return false, err
-	return true, domain.Domain_Error{}
-}
-
-validate_ref_blob :: proc(service: ^Taskchain_Service, chain: domain.Task_Chain, blob: string) -> (bool, domain.Domain_Error) {
-	if blob == "" do return true, domain.Domain_Error{}
-	refs, _, ok := parse_actor_refs(blob, context.temp_allocator)
-	if !ok do return false, domain.domain_error(.Validation_Failed, "invalid actor ref JSON")
-	for ref in refs {
-		if ref.agent_instance_id != "" {
-			if same, same_err := agent_instance_same_chain(service, ref.agent_instance_id, chain); !same do return false, same_err
-		}
-		if ref.user_id != "" && ref.user_id != string(chain.owner_user_id) do return false, domain.domain_error(.Not_Found, "task actor ref not found")
-	}
-	return true, domain.Domain_Error{}
-}
-
 agent_instance_same_chain :: proc(service: ^Taskchain_Service, instance_id: string, chain: domain.Task_Chain) -> (bool, domain.Domain_Error) {
 	if service.agents == nil do return false, domain.domain_error(.Internal_Error, "agent repository is not configured")
 	inst, ok, err := iface.agent_get_instance(service.agents, instance_id)
@@ -2678,129 +1537,6 @@ agent_instance_same_chain :: proc(service: ^Taskchain_Service, instance_id: stri
 		return true, domain.Domain_Error{}
 	}
 	return false, domain.domain_error(.Conflict, "agent instance ref must belong to the same chain")
-}
-
-agent_instance_ref_json :: proc(instance_id: string) -> string { return strings.concatenate({`{"type":"agent_instance","agent_instance_id":"`, instance_id, `"}`}) }
-user_ref_json :: proc(user_id: string) -> string { return strings.concatenate({`{"type":"user","user_id":"`, user_id, `"}`}) }
-
-// normalize_actor_refs handles actor ref normalization.
-// With Fleet Management (REQ-FLEET-DISPATCHER-1), tasks store declarative
-// {"type":"agent_id","agent_id":"agt_..."} refs without requiring an instance upfront
-// or failing if none exists. The reconcile engine acts as the dynamic fleet scheduler.
-normalize_actor_refs :: proc(service: ^Taskchain_Service, chain: domain.Task_Chain, blob: string) -> (string, bool, domain.Domain_Error) {
-	if blob == "" do return blob, true, domain.Domain_Error{}
-	if !strings.contains(blob, "\"agent_id\"") do return blob, true, domain.Domain_Error{}
-	_, _, ok := parse_actor_refs(blob, context.temp_allocator)
-	if !ok do return blob, false, domain.domain_error(.Validation_Failed, "invalid actor ref JSON")
-	return blob, true, domain.Domain_Error{}
-}
-
-primary_assignee_agent_id :: proc(assignee_ref_json: string) -> string {
-	if assignee_ref_json == "" do return ""
-	refs, _, ok := parse_actor_refs(assignee_ref_json, context.temp_allocator)
-	if !ok do return ""
-	for ref in refs {
-		if ref.type == "agent_id" && ref.agent_id != "" {
-			return strings.clone(ref.agent_id)
-		}
-	}
-	return ""
-}
-
-collect_durable_actor_ids :: proc(ids: ^[dynamic]string, seen: ^map[string]bool, blob: string) {
-	if blob == "" do return
-	refs, _, ok := parse_actor_refs(blob, context.temp_allocator)
-	if !ok do return
-	for ref in refs {
-		if ref.type == "agent_id" && ref.agent_id != "" {
-			if !seen[ref.agent_id] {
-				seen[ref.agent_id] = true
-				append(ids, strings.clone(ref.agent_id))
-			}
-		}
-	}
-}
-
-durable_actor_ids :: proc(task: domain.Task) -> [dynamic]string {
-	ids := make([dynamic]string)
-	seen := make(map[string]bool)
-	defer delete(seen)
-	collect_durable_actor_ids(&ids, &seen, task.assignee_ref_json)
-	collect_durable_actor_ids(&ids, &seen, task.reviewer_refs_json)
-	return ids
-}
-
-ensure_durable_actor_fleets :: proc(service: ^Taskchain_Service, task: domain.Task) -> domain.Domain_Error {
-	ids := durable_actor_ids(task)
-	defer { for id in ids do delete(id); delete(ids) }
-	now := platform.clock_now(service.clock)
-	for agent_id in ids {
-		if service == nil || service.agents == nil do continue
-		if _, ok, _ := iface.agent_get(service.agents, agent_id); !ok do continue
-		fleet := domain.Task_Chain_Fleet{task_chain_id = task.chain_id, agent_id = agent_id, capacity = 1, min_warm = 0, idle_ttl_seconds = 600, created_at = now, updated_at = now}
-		if err := iface.taskchain_ensure_fleet(service.repo, fleet); err.code != .None do return err
-	}
-	return domain.Domain_Error{}
-}
-
-extract_agent_ids_from_ref_blob :: proc(blob: string) -> [dynamic]string {
-	agent_ids := make([dynamic]string)
-	if blob == "" do return agent_ids
-	refs, _, ok := parse_actor_refs(blob, context.temp_allocator)
-	if !ok do return agent_ids
-	for ref in refs {
-		if ref.agent_id != "" {
-			append(&agent_ids, strings.clone(ref.agent_id))
-		}
-	}
-	return agent_ids
-}
-
-bind_agent_id_to_instance :: proc(blob: string, target_agent_id: string, instance_id: string) -> string {
-	if blob == "" do return strings.clone(blob)
-	refs, is_array, ok := parse_actor_refs(blob, context.temp_allocator)
-	if !ok do return strings.clone(blob)
-	replaced := false
-	for &ref in refs {
-		if ref.type == "agent_id" && ref.agent_id == target_agent_id {
-			ref.type = "agent_instance"
-			ref.agent_instance_id = instance_id
-			ref.agent_id = ""
-			replaced = true
-			break
-		}
-	}
-	if !replaced do return strings.clone(blob)
-	out, marshal_ok := marshal_actor_refs(refs[:], is_array, context.allocator)
-	if !marshal_ok do return strings.clone(blob)
-	return out
-}
-
-// resolve_agent_id_instance finds a reusable instance of the durable agent_id for the
-// chain owner. Prefers in-chain instances, then any owner-owned instance.
-resolve_agent_id_instance :: proc(service: ^Taskchain_Service, chain: domain.Task_Chain, agent_id: string) -> (string, bool, domain.Domain_Error) {
-	if service.agents == nil do return "", false, domain.domain_error(.Internal_Error, "agent repository is not configured")
-	// 1) Prefer an instance already in this chain (coordinator or member).
-	if chain.coordinator_agent_instance_id != "" {
-		if inst, ok, _ := iface.agent_get_instance(service.agents, chain.coordinator_agent_instance_id); ok && inst.agent_id == agent_id {
-			return inst.agent_instance_id, true, domain.Domain_Error{}
-		}
-	}
-	if members, err := iface.taskchain_list_members_by_chain(service.repo, chain.chain_id, chain.owner_user_id); err.code == .None {
-		for m in members {
-			if m.agent_id == agent_id && m.agent_instance_id != "" do return m.agent_instance_id, true, domain.Domain_Error{}
-		}
-	}
-	// 2) Any active instance of this agent_id owned by the chain owner.
-	instances, list_err := iface.agent_list_instances_by_owner(service.agents, chain.owner_user_id, 1000, "")
-	if list_err.code == .None {
-		for inst in instances {
-			if inst.agent_id != agent_id do continue
-			if inst.runtime_status == "stopped" || inst.runtime_status == "failed" do continue
-			return inst.agent_instance_id, true, domain.Domain_Error{}
-		}
-	}
-	return "", false, domain.domain_error(.Not_Found, strings.concatenate({"no reusable instance found for agent_id '", agent_id, "'; launch one or add it to the chain"}))
 }
 
 // ensure_chain_member adds instance_id to the chain members with a worker role if not
@@ -2950,6 +1686,8 @@ remove_chain_directory :: proc(service: ^Taskchain_Service, auth: contracts.Auth
 
 // --- Fleet Management (REQ-FLEET-SCHEMA-1, REQ-FLEET-API-CLI-1) ---
 
+// --- Fleet Management (REQ-FLEET-SCHEMA-1, REQ-FLEET-API-CLI-1, Task System v2 §4a) ---
+
 Upsert_Fleet_Input :: struct {
 	bridge_models_json: string,
 	chain_id:         domain.Task_Chain_ID,
@@ -2959,6 +1697,11 @@ Upsert_Fleet_Input :: struct {
 	idle_ttl_seconds: int,
 	provider:         string,
 	model:             string,
+	// roles: fleet roles (worker|reviewer); nil keeps the existing roles (default ["worker"]).
+	roles:            []string,
+	has_roles:        bool,
+	// bridge_id: placement; nil leaves the row's bridge untouched, "" clears it.
+	bridge_id:        ^string,
 }
 
 list_fleets :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, chain_id: domain.Task_Chain_ID) -> ([]domain.Task_Chain_Fleet, domain.Domain_Error) {
@@ -2982,12 +1725,14 @@ upsert_fleet :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, 
 	idle_ttl := input.idle_ttl_seconds
 	if idle_ttl <= 0 do idle_ttl = 600
 
+	prior, prior_err := iface.taskchain_list_fleets_by_chain(service.repo, chain.chain_id, chain.owner_user_id)
+	if prior_err.code != .None do return {}, prior_err
+	defer delete(prior)
+	existing := domain.Task_Chain_Fleet{roles_json = domain.FLEET_ROLES_DEFAULT_JSON}
+	for row in prior { if row.agent_id == trimmed_agent { existing = row; break } }
 	bridge_models := input.bridge_models_json
 	if bridge_models == "" {
-		prior, prior_err := iface.taskchain_list_fleets_by_chain(service.repo, chain.chain_id, chain.owner_user_id)
-		if prior_err.code != .None do return {}, prior_err
-		defer if prior_err.code == .None do delete(prior)
-		for row in prior { if row.agent_id == trimmed_agent { bridge_models = row.bridge_models_json; break } }
+		bridge_models = existing.bridge_models_json
 	} else {
 		entries: map[string]domain.Fleet_Bridge_Model
 		if json.unmarshal((transmute([]u8) bridge_models), &entries, allocator = context.temp_allocator) != nil do return {}, domain.domain_error(.Validation_Failed, "invalid bridge_models")
@@ -3000,6 +1745,28 @@ upsert_fleet :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, 
 			if !valid do return {}, validation_err
 		}
 	}
+	roles_json := existing.roles_json
+	if input.has_roles {
+		b := strings.builder_make()
+		strings.write_byte(&b, '[')
+		n := 0
+		for r in input.roles {
+			role := strings.trim_space(r)
+			if role != domain.FLEET_ROLE_WORKER && role != domain.FLEET_ROLE_REVIEWER do return {}, domain.domain_error(.Validation_Failed, "fleet roles must be worker or reviewer")
+			if n > 0 do strings.write_byte(&b, ',')
+			strings.write_byte(&b, '"'); contracts.write_json_string(&b, role); strings.write_byte(&b, '"')
+			n += 1
+		}
+		strings.write_byte(&b, ']')
+		if n == 0 do return {}, domain.domain_error(.Validation_Failed, "fleet roles must not be empty")
+		roles_json = strings.to_string(b)
+	}
+	if roles_json == "" do roles_json = domain.FLEET_ROLES_DEFAULT_JSON
+	bridge_id := existing.bridge_id
+	if input.bridge_id != nil {
+		if br_err := validate_task_bridge(service, chain.owner_user_id, input.bridge_id^); br_err.code != .None do return {}, br_err
+		bridge_id = input.bridge_id^
+	}
 	now := platform.clock_now(service.clock)
 	fleet := domain.Task_Chain_Fleet{
 		bridge_models_json = bridge_models,
@@ -3010,11 +1777,18 @@ upsert_fleet :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, 
 		idle_ttl_seconds = idle_ttl,
 		provider         = input.provider,
 		model             = input.model,
-		created_at       = now,
+		roles_json       = roles_json,
+		bridge_id        = bridge_id,
+		created_at       = existing.created_at if existing.created_at != "" else now,
 		updated_at       = now,
 	}
 
-	return iface.taskchain_upsert_fleet(service.repo, fleet)
+	saved, save_err := iface.taskchain_upsert_fleet(service.repo, fleet)
+	if save_err.code != .None do return saved, save_err
+	// Editing a row never touches live leases; the next grant uses the new
+	// placement. The engine re-evaluates review gates and ready tasks.
+	if service.engine != nil do _ = taskv2.fleet_changed(service.engine, chain)
+	return saved, domain.Domain_Error{}
 }
 
 upsert_chain_fleet :: upsert_fleet
@@ -3028,8 +1802,51 @@ delete_fleet :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, 
 	deleted, del_err := iface.taskchain_delete_fleet(service.repo, chain.chain_id, trimmed_agent, chain.owner_user_id)
 	if del_err.code != .None do return false, del_err
 	if !deleted do return false, domain.domain_error(.Not_Found, "fleet not found")
+	if service.engine != nil do _ = taskv2.fleet_changed(service.engine, chain)
 	return true, domain.Domain_Error{}
 }
 
 delete_chain_fleet :: delete_fleet
+
 remove_chain_fleet :: delete_fleet
+
+// --- Fleet placement helpers (shared with the engine's JIT provisioning) ---
+
+fleet_model_on_bridge :: proc(fleet: domain.Task_Chain_Fleet, bridge_id: string) -> (string, string) {
+	if fleet.bridge_models_json != "" {
+		entries: map[string]domain.Fleet_Bridge_Model
+		if json.unmarshal((transmute([]u8) fleet.bridge_models_json), &entries, allocator = context.temp_allocator) == nil {
+			if selection, found := entries[bridge_id]; found { return selection.provider, selection.model }
+		}
+	}
+	return fleet.provider, fleet.model
+}
+
+// Catalog order is rank then id, matching the bridge provider-status UI.
+// Explicit selections are preserved: an unavailable selection must fail rather
+// than silently launch a different provider or model.
+resolve_fleet_launch_model :: proc(service: ^Taskchain_Service, bridge_id, provider, model: string) -> (string, string) {
+	if provider != "" && model != "" do return strings.clone(provider), strings.clone(model)
+	if service == nil || service.agent_service == nil do return strings.clone(provider), strings.clone(model)
+	return taskv2.resolve_launch_model(service.agent_service, bridge_id, provider, model)
+}
+
+// cancel_task is a human/coordinator verb: the engine records `cancelled`,
+// reclaims any lease (stop[] the holder) and re-plans the chain. Dependents are
+// not touched (a cancelled prerequisite unblocks them — the human decided).
+cancel_task :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, task_id: domain.Task_ID, reason: string) -> (domain.Task, bool, domain.Domain_Error) {
+	task, ok, err := get_task(service, auth, task_id)
+	if !ok do return domain.Task{}, false, err
+	if auth.kind == .Instance_Token {
+		chain, chain_ok, chain_err := iface.taskchain_get_chain(service.repo, task.chain_id)
+		if !chain_ok do return domain.Task{}, false, chain_err
+		if !is_chain_coordinator(service, chain, auth.agent_instance_id) {
+			return domain.Task{}, false, domain.domain_error(.Forbidden, "only the chain coordinator or the owner can cancel a task")
+		}
+	}
+	if domain.task_state_is_terminal(task.state) do return domain.Task{}, false, domain.domain_error(.Conflict, "task is already terminal")
+	if service.engine == nil do return domain.Task{}, false, domain.domain_error(.Internal_Error, "task engine is not configured")
+	if eng_err := taskv2.cancel_task(service.engine, task, engine_actor(auth), reason); eng_err.code != .None do return domain.Task{}, false, eng_err
+	if fresh, fresh_ok, _ := iface.taskchain_get_task(service.repo, task.task_id); fresh_ok do task = fresh
+	return task, true, domain.Domain_Error{}
+}

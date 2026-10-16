@@ -57,10 +57,8 @@ test_write_task_json_always_emits_bridge_id :: proc(t: ^testing.T) {
 			title              = "Wire Task",
 			description        = "d",
 			publish_state      = .Draft,
-			status             = .Assigned,
+			state              = .Ready,
 			priority           = .P2,
-			assignee_ref_json  = "",
-			reviewer_refs_json = "",
 			bridge_id          = c[0],
 		}
 		b := strings.builder_make()
@@ -235,7 +233,7 @@ wire_setup :: proc(t: ^testing.T, tag: string) -> ^wire_fixture {
 		title         = "TB-2 Wire Chain",
 		publish_state = .Draft,
 		status        = .Active,
-		kind          = "tb_wire",
+		kind          = domain.CHAIN_KIND_TICKET,
 		created_at    = "2026-09-25T10:00:00Z",
 		updated_at    = "2026-09-25T10:00:00Z",
 	})
@@ -420,92 +418,67 @@ test_agent_action_task_bridge_id_create_and_update :: proc(t: ^testing.T) {
 	testing.expect_value(t, wire_persisted_pin(t, f, created_id), f.bridge_pin)
 }
 
-// ------------------------------------ FSM transitions & actions (REQ-FSM-API-1)
+// ------------------------------------------ v2 state projection on the wire
 
+// Task System v2: the wire carries the five-state `state` projection (plus
+// cancelled) and the derived `unblocks_dependents` badge; there is no FSM
+// `allowed_transitions` / `next_states` / `allowed_actions` tail any more, and
+// the detail wire always carries a `leases` array.
 @(test)
-test_write_task_json_and_detail_emit_fsm_transitions_and_actions :: proc(t: ^testing.T) {
-	FSM_Wire_Case :: struct {
-		status:        domain.Task_Status,
-		expected_tail: string,
+test_write_task_json_and_detail_emit_v2_state :: proc(t: ^testing.T) {
+	State_Wire_Case :: struct {
+		state:     domain.Task_State,
+		wire:      string,
+		unblocks:  bool,
 	}
 
-	cases := []FSM_Wire_Case{
-		{
-			status        = .Assigned,
-			expected_tail = `"allowed_transitions":["queued","in_progress","paused","cancelled"],"next_states":["queued","in_progress","paused","cancelled"],"allowed_actions":["start","pause","cancel","nudge"]`,
-		},
-		{
-			status        = .Queued,
-			expected_tail = `"allowed_transitions":["assigned","in_progress","paused","cancelled"],"next_states":["assigned","in_progress","paused","cancelled"],"allowed_actions":["start","pause","cancel","nudge"]`,
-		},
-		{
-			status        = .In_Progress,
-			expected_tail = `"allowed_transitions":["queued","in_validation","pausing","paused","cancelled"],"next_states":["queued","in_validation","pausing","paused","cancelled"],"allowed_actions":["validate","pause","cancel","nudge"]`,
-		},
-		{
-			status        = .In_Validation,
-			expected_tail = `"allowed_transitions":["validated_good","validated_not_good","finishing","completed","paused","cancelled"],"next_states":["validated_good","validated_not_good","finishing","completed","paused","cancelled"],"allowed_actions":["lgtm","ngtm","pause","cancel","nudge"]`,
-		},
-		{
-			status        = .Finishing,
-			expected_tail = `"allowed_transitions":["completed","in_validation","in_progress","pausing","paused","cancelled"],"next_states":["completed","in_validation","in_progress","pausing","paused","cancelled"],"allowed_actions":["complete","revalidate","pause","cancel","nudge"]`,
-		},
-		{
-			status        = .Pausing,
-			expected_tail = `"allowed_transitions":["paused","in_progress","cancelled","assigned"],"next_states":["paused","in_progress","cancelled","assigned"],"allowed_actions":["pause","start","cancel","nudge"]`,
-		},
-		{
-			status        = .Validated_Not_Good,
-			expected_tail = `"allowed_transitions":["in_progress","paused","cancelled"],"next_states":["in_progress","paused","cancelled"],"allowed_actions":["start","pause","cancel","nudge"]`,
-		},
-		{
-			status        = .Validated_Good,
-			expected_tail = `"allowed_transitions":["completed","paused","cancelled"],"next_states":["completed","paused","cancelled"],"allowed_actions":["complete","pause","cancel"]`,
-		},
-		{
-			status        = .Paused,
-			expected_tail = `"allowed_transitions":["in_progress","assigned","cancelled"],"next_states":["in_progress","assigned","cancelled"],"allowed_actions":["unpause","cancel"]`,
-		},
-		{
-			status        = .Cancelled,
-			expected_tail = `"allowed_transitions":["assigned"],"next_states":["assigned"],"allowed_actions":["uncancel"]`,
-		},
-		{
-			status        = .Completed,
-			expected_tail = `"allowed_transitions":["assigned","in_progress","in_validation"],"next_states":["assigned","in_progress","in_validation"],"allowed_actions":["not_complete","revalidate"]`,
-		},
+	cases := []State_Wire_Case{
+		{state = .Backlog, wire = `"state":"backlog"`, unblocks = false},
+		{state = .Ready, wire = `"state":"ready"`, unblocks = false},
+		{state = .In_Progress, wire = `"state":"in_progress"`, unblocks = false},
+		{state = .In_Review, wire = `"state":"in_review"`, unblocks = false},
+		{state = .Done, wire = `"state":"done"`, unblocks = true},
+		{state = .Cancelled, wire = `"state":"cancelled"`, unblocks = true},
 	}
 
-	f := wire_setup(t, "fsm_wire")
+	f := wire_setup(t, "state_wire")
 	defer wire_teardown(f)
 	owner_auth := contracts.Auth_Context{kind = .User_Token, user_id = string(f.owner)}
 
 	for c in cases {
 		task := domain.Task{
-			task_id            = domain.Task_ID("task_fsm_wire"),
-			chain_id           = f.chain_id,
-			owner_user_id      = f.owner,
-			title              = "FSM Wire Task",
-			description        = "desc",
-			publish_state      = .Published,
-			status             = c.status,
-			priority           = .P2,
-			assignee_ref_json  = "",
-			reviewer_refs_json = "",
-			bridge_id          = "",
+			task_id       = domain.Task_ID("task_state_wire"),
+			chain_id      = f.chain_id,
+			owner_user_id = f.owner,
+			title         = "State Wire Task",
+			description   = "desc",
+			publish_state = .Published,
+			state         = c.state,
+			kind          = .Task,
+			priority      = .P2,
+			brief_json    = `{"goal":"g"}`,
+			bridge_id     = "",
 		}
+		unblocks_tail := `"unblocks_dependents":true` if c.unblocks else `"unblocks_dependents":false`
 
 		b1 := strings.builder_make()
 		defer strings.builder_destroy(&b1)
 		write_task_json(&b1, task)
 		out1 := strings.to_string(b1)
-		testing.expectf(t, strings.contains(out1, c.expected_tail), "write_task_json(%v) must emit %s (got %s)", c.status, c.expected_tail, out1)
+		testing.expectf(t, strings.contains(out1, c.wire), "write_task_json(%v) must emit %s (got %s)", c.state, c.wire, out1)
+		testing.expectf(t, strings.contains(out1, unblocks_tail), "write_task_json(%v) must emit %s (got %s)", c.state, unblocks_tail, out1)
+		testing.expectf(t, !strings.contains(out1, `"allowed_transitions"`), "write_task_json(%v) must not emit the FSM tail (got %s)", c.state, out1)
+		testing.expectf(t, !strings.contains(out1, `"status"`), "write_task_json(%v) must not emit status (got %s)", c.state, out1)
 
 		b2 := strings.builder_make()
 		defer strings.builder_destroy(&b2)
 		write_task_detail_json(&b2, &f.th, owner_auth, task, nil)
 		out2 := strings.to_string(b2)
-		testing.expectf(t, strings.contains(out2, c.expected_tail), "write_task_detail_json(%v) must emit %s (got %s)", c.status, c.expected_tail, out2)
+		testing.expectf(t, strings.contains(out2, c.wire), "write_task_detail_json(%v) must emit %s (got %s)", c.state, c.wire, out2)
+		testing.expectf(t, strings.contains(out2, unblocks_tail), "write_task_detail_json(%v) must emit %s (got %s)", c.state, unblocks_tail, out2)
+		testing.expectf(t, strings.contains(out2, `"leases":[]`), "write_task_detail_json(%v) must emit an empty leases array (got %s)", c.state, out2)
+		testing.expectf(t, strings.contains(out2, `"blocked":false`), "write_task_detail_json(%v) with no deps must not be blocked (got %s)", c.state, out2)
+		testing.expectf(t, !strings.contains(out2, `"allowed_transitions"`), "write_task_detail_json(%v) must not emit the FSM tail (got %s)", c.state, out2)
+		testing.expectf(t, !strings.contains(out2, `"votes"`), "write_task_detail_json(%v) must not emit votes (got %s)", c.state, out2)
 	}
 }
-

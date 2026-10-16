@@ -16,18 +16,22 @@ test_task_wire_escaped_characters_and_markdown :: proc(t: ^testing.T) {
 	special_desc := "Line 1\nLine 2\r\n\"Quoted\" \\back\\ \t tab \b \f \x01 \x1f print(\"code\")"
 
 	task := domain.Task{
-		task_id            = domain.Task_ID("task_escape_1"),
-		chain_id           = domain.Task_Chain_ID("chain_escape_1"),
-		owner_user_id      = domain.User_ID("usr_admin"),
-		title              = special_title,
-		description        = special_desc,
-		publish_state      = .Published,
-		status             = .Assigned,
-		priority           = .P1,
-		bridge_id          = "brg_123",
-		assignee_ref_json  = `{"type":"agent_instance","agent_instance_id":"inst_worker_1"}`,
-		reviewer_refs_json = `[{"type":"user","user_id":"usr_admin"}]`,
-		updated_at         = "2026-10-03T12:00:00Z",
+		task_id                = domain.Task_ID("task_escape_1"),
+		chain_id               = domain.Task_Chain_ID("chain_escape_1"),
+		owner_user_id          = domain.User_ID("usr_admin"),
+		title                  = special_title,
+		description            = special_desc,
+		publish_state          = .Published,
+		state                  = .Ready,
+		kind                   = .Task,
+		priority               = .P1,
+		attempt_no             = 2,
+		bridge_id              = "brg_123",
+		brief_json             = `{"goal":"g","acceptance":[],"verify":"","inputs":[],"review_roles":["reviewer"],"assignee":"agt_worker_1"}`,
+		blocked_on_json        = `{"kind":"human","reason":"decide"}`,
+		requires_user_approval = true,
+		ready_since            = "2026-10-03T11:59:00Z",
+		updated_at             = "2026-10-03T12:00:00Z",
 	}
 
 	b := strings.builder_make(context.temp_allocator)
@@ -51,46 +55,92 @@ test_task_wire_escaped_characters_and_markdown :: proc(t: ^testing.T) {
 		testing.expect(t, ok3, "bridge_id must be present as a string")
 		testing.expect_value(t, string(bridge_val), "brg_123")
 
+		state_val, ok_state := obj["state"].(json.String)
+		testing.expect(t, ok_state, "state must be present as a string")
+		testing.expect_value(t, string(state_val), "ready")
+		kind_val, ok_kind := obj["kind"].(json.String)
+		testing.expect(t, ok_kind, "kind must be present as a string")
+		testing.expect_value(t, string(kind_val), "task")
+		attempt_val, ok_attempt := obj["attempt_no"].(json.Float)
+		testing.expect(t, ok_attempt && int(attempt_val) == 2, "attempt_no must be emitted")
+		ready_since_val, ok_rs := obj["ready_since"].(json.String)
+		testing.expect(t, ok_rs, "ready_since must be present")
+		testing.expect_value(t, string(ready_since_val), "2026-10-03T11:59:00Z")
+
 		requires_approval, ok4 := obj["requires_user_approval"].(json.Boolean)
-		testing.expect(t, ok4 && bool(requires_approval), "wire task must derive requires_user_approval")
-		reviewers := obj["reviewer_refs"].(json.Array)
-		reviewer := reviewers[0].(json.Object)
-		username, username_ok := reviewer["username"].(json.String)
-		testing.expect(t, username_ok, "user reviewer wire entry must include username")
-		testing.expect_value(t, string(username), "usr_admin")
+		testing.expect(t, ok4 && bool(requires_approval), "wire task must carry requires_user_approval")
+
+		brief, brief_ok := obj["brief"].(json.Object)
+		testing.expect(t, brief_ok, "brief must be spliced as an object")
+		if brief_ok {
+			assignee, a_ok := brief["assignee"].(json.String)
+			testing.expect(t, a_ok, "brief.assignee must be a string")
+			testing.expect_value(t, string(assignee), "agt_worker_1")
+			roles, r_ok := brief["review_roles"].(json.Array)
+			testing.expect(t, r_ok && len(roles) == 1, "brief.review_roles must be an array of one role")
+		}
+		blocked_on, bo_ok := obj["blocked_on"].(json.Object)
+		testing.expect(t, bo_ok, "blocked_on must be spliced as an object when set")
+		if bo_ok do testing.expect_value(t, string(blocked_on["kind"].(json.String)), "human")
+
+		// Pre-v2 fields must be gone from the wire.
+		_, has_status := obj["status"]
+		testing.expect(t, !has_status, "v2 wire must not carry status")
+		_, has_assignee_ref := obj["assignee_ref"]
+		testing.expect(t, !has_assignee_ref, "v2 wire must not carry assignee_ref")
+		_, has_reviewer_refs := obj["reviewer_refs"]
+		testing.expect(t, !has_reviewer_refs, "v2 wire must not carry reviewer_refs")
+		_, has_transitions := obj["allowed_transitions"]
+		testing.expect(t, !has_transitions, "v2 wire must not carry allowed_transitions")
+		_, has_votes := obj["votes"]
+		testing.expect(t, !has_votes, "v2 wire must not carry votes")
 	case:
 		testing.fail_now(t, "expected json.Object payload")
 	}
 }
 
 @(test)
-test_task_matches_query_actor_ref_resilience_and_no_substring_false_positives :: proc(t: ^testing.T) {
-	// Keys reversed with extra spaces
+test_task_wire_blocked_on_null_when_unblocked :: proc(t: ^testing.T) {
+	task := domain.Task{task_id = "task_nb", chain_id = "chain_nb", state = .Backlog, kind = .Gate, brief_json = ""}
+	b := strings.builder_make(context.temp_allocator)
+	write_task_json(&b, task)
+	out := strings.to_string(b)
+	testing.expect(t, strings.contains(out, `"blocked_on":null`), "empty blocked_on_json must serialize as null")
+	testing.expect(t, strings.contains(out, `"brief":{}`), "empty brief_json must serialize as an empty object")
+	testing.expect(t, strings.contains(out, `"state":"backlog"`), "backlog state string")
+	testing.expect(t, strings.contains(out, `"kind":"gate"`), "gate kind string")
+	testing.expect(t, strings.contains(out, `"unblocks_dependents":false`), "backlog does not unblock dependents")
+}
+
+@(test)
+test_task_matches_query_state_kind_assignee :: proc(t: ^testing.T) {
 	task1 := domain.Task{
-		task_id            = domain.Task_ID("task_1"),
-		assignee_ref_json  = `  { "display_name": "worker #1",  "agent_instance_id": "inst_123", "type": "agent_instance" }  `,
-		reviewer_refs_json = ` [ { "user_id": "usr_reviewer_1", "type": "user" }, { "agent_instance_id": "inst_rev_2", "type": "agent_instance" } ] `,
+		task_id    = domain.Task_ID("task_1"),
+		state      = .In_Progress,
+		kind       = .Task,
+		brief_json = `  { "goal": "g",  "assignee": "agt_123", "review_roles": ["reviewer"] }  `,
 	}
 
-	// 1. Exact match works despite whitespace and key reordering
-	testing.expect(t, task_matches_query(task1, "assignee_agent_instance_id=inst_123"), "exact assignee must match")
-	testing.expect(t, task_matches_query(task1, "reviewer_agent_instance_id=inst_rev_2"), "exact reviewer agent must match")
-	testing.expect(t, task_matches_query(task1, "reviewer_user_id=usr_reviewer_1"), "exact reviewer user must match")
+	// 1. Exact matches work despite whitespace and key ordering in the brief
+	testing.expect(t, task_matches_query(task1, "assignee=agt_123"), "exact assignee must match")
+	testing.expect(t, task_matches_query(task1, "state=in_progress"), "exact state must match")
+	testing.expect(t, task_matches_query(task1, "state=ready,in_progress"), "comma-separated state list must match")
+	testing.expect(t, task_matches_query(task1, "kind=task"), "kind must match")
+	testing.expect(t, task_matches_query(task1, ""), "empty query matches everything")
 
 	// 2. Substring matching is strictly rejected (preventing false positives)
-	testing.expect(t, !task_matches_query(task1, "assignee_agent_instance_id=inst_12"), "prefix substring must NOT match")
-	testing.expect(t, !task_matches_query(task1, "assignee_agent_instance_id=23"), "suffix substring must NOT match")
-	testing.expect(t, !task_matches_query(task1, "reviewer_agent_instance_id=inst_rev"), "reviewer prefix substring must NOT match")
-	testing.expect(t, !task_matches_query(task1, "reviewer_user_id=usr_rev"), "reviewer user prefix substring must NOT match")
+	testing.expect(t, !task_matches_query(task1, "assignee=agt_12"), "prefix substring must NOT match")
+	testing.expect(t, !task_matches_query(task1, "assignee=23"), "suffix substring must NOT match")
 
-	// 3. Different ID does not match
-	testing.expect(t, !task_matches_query(task1, "assignee_agent_instance_id=inst_other"), "different assignee must not match")
-	testing.expect(t, !task_matches_query(task1, "reviewer_agent_instance_id=inst_other"), "different reviewer agent must not match")
-	testing.expect(t, !task_matches_query(task1, "reviewer_user_id=usr_other"), "different reviewer user must not match")
+	// 3. Different values do not match
+	testing.expect(t, !task_matches_query(task1, "assignee=agt_other"), "different assignee must not match")
+	testing.expect(t, !task_matches_query(task1, "state=ready"), "different state must not match")
+	testing.expect(t, !task_matches_query(task1, "state=bogus"), "unknown state must not match")
+	testing.expect(t, !task_matches_query(task1, "kind=gate"), "different kind must not match")
 
-	// 4. Combined queries require both to match
-	testing.expect(t, task_matches_query(task1, "reviewer_user_id=usr_reviewer_1&reviewer_agent_instance_id=inst_rev_2"), "both matching reviewer query params must match")
-	testing.expect(t, !task_matches_query(task1, "reviewer_user_id=usr_reviewer_1&reviewer_agent_instance_id=inst_other"), "mismatched reviewer agent in combined query must fail")
+	// 4. Combined queries require all to match
+	testing.expect(t, task_matches_query(task1, "state=in_progress&assignee=agt_123"), "both matching params must match")
+	testing.expect(t, !task_matches_query(task1, "state=in_progress&assignee=agt_other"), "mismatched assignee in combined query must fail")
 }
 
 @(test)
@@ -105,20 +155,20 @@ test_taskchain_typed_wire_tracking_allocator_clean :: proc(t: ^testing.T) {
 	for _ in 0..<10 {
 		b := strings.builder_make(context.temp_allocator)
 		task := domain.Task{
-			task_id            = domain.Task_ID("task_leak_check"),
-			chain_id           = domain.Task_Chain_ID("chain_leak_check"),
-			title              = "Leak check task",
-			description        = "Verifying zero heap leaks",
-			publish_state      = .Published,
-			status             = .Assigned,
-			priority           = .P0,
-			assignee_ref_json  = `{"type":"agent_instance","agent_instance_id":"inst_leak"}`,
-			reviewer_refs_json = `[]`,
-			updated_at         = "2026-10-03T12:00:00Z",
+			task_id       = domain.Task_ID("task_leak_check"),
+			chain_id      = domain.Task_Chain_ID("chain_leak_check"),
+			title         = "Leak check task",
+			description   = "Verifying zero heap leaks",
+			publish_state = .Published,
+			state         = .Ready,
+			kind          = .Task,
+			priority      = .P0,
+			brief_json    = `{"goal":"g","assignee":"agt_leak","review_roles":[]}`,
+			updated_at    = "2026-10-03T12:00:00Z",
 		}
 		write_task_json(&b, task)
 
-		matched := task_matches_query(task, "assignee_agent_instance_id=inst_leak")
+		matched := task_matches_query(task, "assignee=agt_leak&state=ready")
 		testing.expect(t, matched, "task should match")
 	}
 
@@ -128,33 +178,39 @@ test_taskchain_typed_wire_tracking_allocator_clean :: proc(t: ^testing.T) {
 	}
 }
 
+// Task System v2 create/patch bodies: `assignee` (agent_id), `reviewers`
+// ([agent_id]) and `review_roles`; the legacy `assignee_ref` / `reviewer_refs`
+// spellings map onto the same fields when they carry agent_id refs, and
+// instance / user refs are rejected.
 @(test)
-test_task_comment_and_vote_wire_serialization :: proc(t: ^testing.T) {
-	vote := domain.Task_Vote{
-		task_id                   = domain.Task_ID("task_v1"),
-		chain_id                  = domain.Task_Chain_ID("chain_v1"),
-		owner_user_id             = domain.User_ID("usr_v1"),
-		reviewer_agent_instance_id = "inst_rev_1",
-		vote                      = "lgtm",
-		comment                   = "Looks great! \"Special quotes\" and \nnewlines.",
-		created_at                = "2026-10-03T12:00:00Z",
-	}
+test_task_actor_fields_from_body_v2_and_legacy :: proc(t: ^testing.T) {
+	assignee, reviewers, roles, has_roles, err := task_actor_fields_from_body(`{"title":"t","assignee":"agt_w","reviewers":["agt_r1","agt_r2"],"review_roles":["reviewer","qa"]}`)
+	defer { delete(reviewers); delete(roles) }
+	testing.expect_value(t, err.code, domain.Error_Code.None)
+	testing.expect_value(t, assignee, "agt_w")
+	testing.expect_value(t, len(reviewers), 2)
+	if len(reviewers) == 2 { testing.expect_value(t, reviewers[0], "agt_r1"); testing.expect_value(t, reviewers[1], "agt_r2") }
+	testing.expect(t, has_roles, "review_roles present must be flagged")
+	testing.expect_value(t, len(roles), 2)
 
-	b := strings.builder_make(context.temp_allocator)
-	write_task_vote_json(&b, vote)
-	vote_payload := strings.to_string(b)
+	l_assignee, l_reviewers, l_roles, l_has_roles, l_err := task_actor_fields_from_body(`{"title":"t","assignee_ref":{"type":"agent_id","agent_id":"agt_legacy"},"reviewer_refs":[{"type":"agent_id","agent_id":"agt_rev"}]}`)
+	defer { delete(l_reviewers); delete(l_roles) }
+	testing.expect_value(t, l_err.code, domain.Error_Code.None)
+	testing.expect_value(t, l_assignee, "agt_legacy")
+	testing.expect_value(t, len(l_reviewers), 1)
+	if len(l_reviewers) == 1 do testing.expect_value(t, l_reviewers[0], "agt_rev")
+	testing.expect(t, !l_has_roles, "absent review_roles must not be flagged")
 
-	val, err := json.parse_string(vote_payload, json.DEFAULT_SPECIFICATION, false, context.temp_allocator)
-	testing.expect(t, err == .None, "vote json must parse cleanly")
-	#partial switch obj in val {
-	case json.Object:
-		testing.expect_value(t, string(obj["vote"].(json.String)), "lgtm")
-		testing.expect_value(t, string(obj["comment"].(json.String)), vote.comment)
-		testing.expect_value(t, string(obj["reviewer_agent_instance_id"].(json.String)), "inst_rev_1")
-	case:
-		testing.fail_now(t, "expected json.Object payload for vote")
-	}
+	_, _, _, _, inst_err := task_actor_fields_from_body(`{"title":"t","assignee_ref":{"type":"agent_instance","agent_instance_id":"inst_x"}}`)
+	testing.expect_value(t, inst_err.code, domain.Error_Code.Validation_Failed)
+	_, _, _, _, inst_rev_err := task_actor_fields_from_body(`{"title":"t","reviewer_refs":[{"type":"agent_instance","agent_instance_id":"inst_x"}]}`)
+	testing.expect_value(t, inst_rev_err.code, domain.Error_Code.Validation_Failed)
+	_, _, _, _, user_err := task_actor_fields_from_body(`{"title":"t","reviewer_refs":[{"type":"user","user_id":"alice"}]}`)
+	testing.expect_value(t, user_err.code, domain.Error_Code.Validation_Failed)
+}
 
+@(test)
+test_task_comment_wire_serialization :: proc(t: ^testing.T) {
 	comment := domain.Task_Comment{
 		comment_id               = "cmt_1",
 		task_id                  = domain.Task_ID("task_c1"),
@@ -435,9 +491,10 @@ test_write_chain_json_pinned :: proc(t: ^testing.T) {
 		description                   = "Description",
 		publish_state                 = .Published,
 		status                        = .Active,
-		kind                          = "team_work",
+		kind                          = domain.CHAIN_KIND_TICKET,
 		coordinator_agent_instance_id = "inst_coord",
-		default_reviewer_refs_json    = "[]",
+		workflow_def_ref              = "",
+		defaults_json                 = `{"auto_submit":false}`,
 		created_at                    = "2026-09-21T09:00:00Z",
 		updated_at                    = "2026-09-21T09:10:00Z",
 		is_pinned                     = true,
@@ -449,4 +506,8 @@ test_write_chain_json_pinned :: proc(t: ^testing.T) {
 	out := strings.to_string(b)
 	testing.expect(t, strings.contains(out, `"is_pinned":true`), "must serialize is_pinned true")
 	testing.expect(t, strings.contains(out, `"pinned_at":"2026-09-21T09:10:00Z"`), "must serialize pinned_at")
+	testing.expect(t, strings.contains(out, `"kind":"ticket"`), "must serialize kind")
+	testing.expect(t, strings.contains(out, `"workflow_def_ref":""`), "must serialize workflow_def_ref")
+	testing.expect(t, strings.contains(out, `"defaults":{"auto_submit":false}`), "must splice defaults as an object")
+	testing.expect(t, !strings.contains(out, `default_reviewer_refs`), "v2 chain wire must not carry default_reviewer_refs")
 }

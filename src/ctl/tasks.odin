@@ -7,20 +7,40 @@ import "core:strconv"
 import "core:strings"
 import http "odin_test:lib/http_client"
 
-Task_Actor_Ref_Wire :: struct {
-	type:              string `json:"type"`,
-	agent_id:          string `json:"agent_id"`,
-	agent_instance_id: string `json:"agent_instance_id"`,
+// Task_Brief_Wire is the Task System v2 brief object carried under `brief` on
+// every task read. Only the fields ham-ctl renders are typed; the hub stores the
+// brief verbatim, so unknown keys (inputs, budget, auto_submit, …) are ignored.
+Task_Brief_Wire :: struct {
+	goal:         string   `json:"goal"`,
+	acceptance:   []string `json:"acceptance"`,
+	verify:       string   `json:"verify"`,
+	review_roles: []string `json:"review_roles"`,
+	assignee:     string   `json:"assignee"`,
 }
 
+// Task_Blocked_On_Wire mirrors the hub's blocked_on object (zero value when the
+// task is not blocked; the hub sends null then).
+Task_Blocked_On_Wire :: struct {
+	kind:   string `json:"kind"`,
+	ref:    string `json:"ref"`,
+	reason: string `json:"reason"`,
+	since:  string `json:"since"`,
+}
+
+// Task_Created_Data_Wire is the subset of the Task System v2 task wire that the
+// `tasks create` summary reads back: `state` replaces the old `status`, and
+// `brief.assignee` / `brief.review_roles` replace assignee_ref / reviewer_refs.
 Task_Created_Data_Wire :: struct {
-	task_id:       string                `json:"task_id"`,
-	status:        string                `json:"status"`,
-	assignee_ref:  Task_Actor_Ref_Wire   `json:"assignee_ref"`,
-	reviewer_refs: []Task_Actor_Ref_Wire `json:"reviewer_refs"`,
-	depends_on:    []string              `json:"depends_on"`,
-	blocked:       bool                  `json:"blocked"`,
-	bridge_id:     string                `json:"bridge_id"`,
+	task_id:                string               `json:"task_id"`,
+	state:                  string               `json:"state"`,
+	kind:                   string               `json:"kind"`,
+	attempt_no:             int                  `json:"attempt_no"`,
+	brief:                  Task_Brief_Wire      `json:"brief"`,
+	blocked_on:             Task_Blocked_On_Wire `json:"blocked_on"`,
+	requires_user_approval: bool                 `json:"requires_user_approval"`,
+	depends_on:             []string             `json:"depends_on"`,
+	blocked:                bool                 `json:"blocked"`,
+	bridge_id:              string               `json:"bridge_id"`,
 }
 
 Task_Created_Envelope_Wire :: struct {
@@ -32,15 +52,13 @@ Task_Created_Envelope_Wire :: struct {
 
 format_task_created_summary :: proc(task: Task_Created_Data_Wire, allocator := context.temp_allocator) -> (assignee, reviewers, deps_str, blocked_str, bridge_str: string) {
 	assignee = "\x1b[31mNONE\x1b[0m"
-	if task.assignee_ref.agent_instance_id != "" {
-		assignee = task.assignee_ref.agent_instance_id
-	} else if task.assignee_ref.agent_id != "" {
-		assignee = task.assignee_ref.agent_id
+	if task.brief.assignee != "" {
+		assignee = task.brief.assignee
 	}
 
 	reviewers = "\x1b[31mNONE\x1b[0m"
-	if len(task.reviewer_refs) > 0 {
-		reviewers = "assigned"
+	if len(task.brief.review_roles) > 0 {
+		reviewers = strings.join(task.brief.review_roles, ",", allocator)
 	}
 
 	deps_str = "none"
@@ -51,6 +69,9 @@ format_task_created_summary :: proc(task: Task_Created_Data_Wire, allocator := c
 	}
 
 	blocked_str = "\x1b[31mtrue\x1b[0m" if task.blocked else "false"
+	if task.blocked && task.blocked_on.kind != "" {
+		blocked_str = strings.concatenate({blocked_str, " (", task.blocked_on.kind, ")"}, allocator)
+	}
 
 	bridge_str = "inherited"
 	if task.bridge_id != "" {
@@ -211,11 +232,9 @@ resolve_task_id :: proc(transport: Ctl_Transport, args: []string) -> string {
 
 print_task_chains_help :: proc(action: string) {
 	_ = action
-	fmt.println("usage: ham-ctl task-chains <list|coordinated|create|show|update|members|fleet|directory|add-agent|publish|complete|reopen|archive|unarchive|pin|unpin|subscribe|unsubscribe>")
+	fmt.println("usage: ham-ctl task-chains <list|coordinated|create|show|update|members|fleet|directory|add-agent|publish|complete|reopen|archive|unarchive|pin|unpin>")
 	fmt.println("  coordinated [--agent-id <instance_id>]  list chains an agent coordinates (default: your own instance)")
 	fmt.println("  fleet <list|set>                        manage chain fleet capacities")
-	fmt.println("  subscribe <chain-id> [--events <events>] subscribe to chain status events")
-	fmt.println("  unsubscribe <chain-id> [--events <events>] unsubscribe from chain status events")
 }
 
 ctl_task_chains_fleet_command :: proc(transport: Ctl_Transport, tokens: []string, args: []string) {
@@ -279,12 +298,11 @@ is_destructive_chain_verb :: proc(action: string) -> bool {
 
 print_tasks_help :: proc(action: string) {
 	_ = action
-	fmt.println("usage: ham-ctl tasks <list|create|update|status|done|depend|cancel|comment|comments|vote|votes|nudge|subscribe|unsubscribe>")
-	fmt.println("  create --chain <id> --title <title> [--reviewer <agent-id,...>] [--require-user-approval]")
-	fmt.println("  update <task-id> [--reviewer <agent-id,...>] [--require-user-approval | --no-require-user-approval]")
-	fmt.println("  --reviewer accepts agent IDs/instances only; user approval is controlled by the explicit flags")
-	fmt.println("  subscribe <task-id> [--chain <id>] [--events <events>]   subscribe to task status events")
-	fmt.println("  unsubscribe <task-id> [--chain <id>] [--events <events>] unsubscribe from task status events")
+	fmt.println("usage: ham-ctl tasks <list|show|create|update|depend|cancel|comment|comments>")
+	fmt.println("  create --chain <id> --title <title> [--assignee <agt_id>] [--reviewer <agt_id>]... [--require-user-approval]")
+	fmt.println("  update <task-id> [--assignee <agt_id>] [--reviewer <agt_id>]... [--require-user-approval | --no-require-user-approval]")
+	fmt.println("  --assignee/--reviewer take durable agent ids (agt_...) only; instance pins (inst_...) were removed in Task System v2")
+	fmt.println("  (status/done/vote/votes/nudge/subscribe/unsubscribe were removed in Task System v2; lease verbs arrive with the next milestone)")
 }
 
 ctl_task_chain_request_and_decrypt :: proc(transport: Ctl_Transport, method, path, body_json: string, args: []string = nil) {
@@ -300,26 +318,6 @@ ctl_task_chain_request_and_decrypt :: proc(transport: Ctl_Transport, method, pat
 	decrypted_json := ctl_decrypt_vault_json(resp_str, key_hex, key_ok)
 	defer delete(decrypted_json)
 	fmt.println(decrypted_json)
-}
-
-ctl_user_chain_subscribe_body :: proc(events, agent_instance_id: string) -> string {
-	if agent_instance_id != "" {
-		return json_object(json_kv("events", events), json_kv("agent_instance_id", agent_instance_id))
-	}
-	return json_object(json_kv("events", events))
-}
-
-ctl_user_chain_unsubscribe_body :: proc(events, agent_instance_id: string) -> string {
-	if events != "" && agent_instance_id != "" {
-		return json_object(json_kv("events", events), json_kv("agent_instance_id", agent_instance_id))
-	}
-	if events != "" {
-		return json_object(json_kv("events", events))
-	}
-	if agent_instance_id != "" {
-		return json_object(json_kv("agent_instance_id", agent_instance_id))
-	}
-	return "{}"
 }
 
 ctl_task_chains_command :: proc(cmd: []string, args: []string) {
@@ -405,26 +403,12 @@ ctl_task_chains_command :: proc(cmd: []string, args: []string) {
 		chain_id = cmd[idx + 1]
 	}
 	if chain_id == "" {
-		fmt.println("usage: ham-ctl task-chains <show|update|members|directory|add-agent|publish|complete|reopen|archive|unarchive|subscribe|unsubscribe> --chain <id>")
+		fmt.println("usage: ham-ctl task-chains <show|update|members|directory|add-agent|publish|complete|reopen|archive|unarchive> --chain <id>")
 		return
 	}
 
 	if action == "show" {
 		ctl_task_chain_request_and_decrypt(transport, "GET", fmt.tprintf("/api/v1/task-chains/%s", safe_path_part(chain_id)), "", args)
-		return
-	}
-
-	if action == "subscribe" {
-		events := option_value(args, "--events", option_value(args, "--event-type", "all"))
-		inst := option_value(args, "--agent-instance-id", option_value(args, "--agent", ""))
-		ctl_tasks_request(transport, "POST", fmt.tprintf("/api/v1/task-chains/%s/subscriptions", safe_path_part(chain_id)), ctl_user_chain_subscribe_body(events, inst))
-		return
-	}
-
-	if action == "unsubscribe" {
-		events := option_value(args, "--events", option_value(args, "--event-type", ""))
-		inst := option_value(args, "--agent-instance-id", option_value(args, "--agent", ""))
-		ctl_tasks_request(transport, "DELETE", fmt.tprintf("/api/v1/task-chains/%s/subscriptions", safe_path_part(chain_id)), ctl_user_chain_unsubscribe_body(events, inst))
 		return
 	}
 
@@ -603,7 +587,7 @@ ctl_task_chains_command :: proc(cmd: []string, args: []string) {
 		return
 	}
 
-	fmt.println("usage: ham-ctl task-chains <list|coordinated|create|show|update|members|directory|add-agent|publish|complete|reopen|archive|unarchive|pin|unpin|subscribe|unsubscribe>")
+	fmt.println("usage: ham-ctl task-chains <list|coordinated|create|show|update|members|directory|add-agent|publish|complete|reopen|archive|unarchive|pin|unpin>")
 }
 
 ctl_tasks_command :: proc(cmd: []string, args: []string) {
@@ -674,11 +658,11 @@ ctl_tasks_command :: proc(cmd: []string, args: []string) {
 			}
 			append(&fields, json_kv("priority", prio))
 		}
-		if assignee := option_value(args, "--assignee-agent-instance-id", option_value(args, "--assignee", "")); assignee != "" {
-			append(&fields, strings.concatenate({"\"assignee_ref\":", ctl_v2_actor_ref(assignee)}))
+		if assignee := option_value(args, "--assignee", option_value(args, "--assignee-agent-id", "")); assignee != "" {
+			append(&fields, ctl_v2_assignee_field(assignee))
 		}
-		// --reviewer accepts a comma-separated list for multiple reviewers.
-		if reviewer := option_value(args, "--reviewer", ""); reviewer != "" do append(&fields, ctl_v2_reviewer_refs(reviewer))
+		// --reviewer is repeatable and/or comma-separated for multiple reviewers.
+		if has_flag(args, "--reviewer") || has_flag(args, "--reviewer-agent-id") do append(&fields, ctl_v2_reviewers_field(args))
 		if has_flag(args, "--require-user-approval") do append(&fields, `"requires_user_approval":true`)
 		if deps := option_value(args, "--depends-on", option_value(args, "--on", "")); deps != "" {
 			parts := strings.split(deps, ",")
@@ -716,12 +700,13 @@ ctl_tasks_command :: proc(cmd: []string, args: []string) {
 		}
 
 		t_id := envelope.data.data.task_id
-		t_status := envelope.data.data.status
+		t_state := envelope.data.data.state
 		assignee, reviewers, deps_str, blocked_str, bridge_str := format_task_created_summary(envelope.data.data, context.temp_allocator)
 
 		fmt.printf("Task created successfully (ID: %s)\n", t_id)
-		fmt.printf("Status: %s | Assignee: %s | Reviewers: %s | Depends on: %s | Blocked: %s\n", t_status, assignee, reviewers, deps_str, blocked_str)
-		fmt.printf("Bridge: %s\n", bridge_str)
+		fmt.printf("State: %s | Assignee: %s | Review roles: %s | Depends on: %s | Blocked: %s\n", t_state, assignee, reviewers, deps_str, blocked_str)
+		if goal := strings.trim_space(envelope.data.data.brief.goal); goal != "" do fmt.printf("Goal: %s\n", goal)
+		fmt.printf("Bridge: %s | Requires user approval: %t\n", bridge_str, envelope.data.data.requires_user_approval)
 		return
 	}
 
@@ -730,38 +715,8 @@ ctl_tasks_command :: proc(cmd: []string, args: []string) {
 		task_id = cmd[idx + 1]
 	}
 
-	if action == "subscribe" {
-		if task_id == "" {
-			fmt.println("usage: ham-ctl tasks subscribe <task-id> [--chain <id>] [--events <events>]")
-			return
-		}
-		events := option_value(args, "--events", option_value(args, "--event-type", "all"))
-		inst := option_value(args, "--agent-instance-id", option_value(args, "--agent", ""))
-		path := fmt.tprintf("/api/v1/tasks/%s/subscriptions", safe_path_part(task_id))
-		if chain_id != "" {
-			path = fmt.tprintf("/api/v1/task-chains/%s/tasks/%s/subscriptions", safe_path_part(chain_id), safe_path_part(task_id))
-		}
-		ctl_tasks_request(transport, "POST", path, ctl_user_chain_subscribe_body(events, inst))
-		return
-	}
-
-	if action == "unsubscribe" {
-		if task_id == "" {
-			fmt.println("usage: ham-ctl tasks unsubscribe <task-id> [--chain <id>] [--events <events>]")
-			return
-		}
-		events := option_value(args, "--events", option_value(args, "--event-type", ""))
-		inst := option_value(args, "--agent-instance-id", option_value(args, "--agent", ""))
-		path := fmt.tprintf("/api/v1/tasks/%s/subscriptions", safe_path_part(task_id))
-		if chain_id != "" {
-			path = fmt.tprintf("/api/v1/task-chains/%s/tasks/%s/subscriptions", safe_path_part(chain_id), safe_path_part(task_id))
-		}
-		ctl_tasks_request(transport, "DELETE", path, ctl_user_chain_unsubscribe_body(events, inst))
-		return
-	}
-
 	if chain_id == "" || task_id == "" {
-		fmt.println("usage: ham-ctl tasks <update|status|done|depend|cancel|comment|comments|vote|votes|nudge|subscribe|unsubscribe> --chain <id> --task <id>")
+		fmt.println("usage: ham-ctl tasks <show|update|depend|cancel|comment|comments> --chain <id> --task <id>")
 		return
 	}
 
@@ -791,12 +746,12 @@ ctl_tasks_command :: proc(cmd: []string, args: []string) {
 		if title != "" do append(&fields, json_kv("title", title))
 		if desc != "" do append(&fields, json_kv("description", desc))
 		if prio := option_value(args, "--priority", ""); prio != "" do append(&fields, json_kv("priority", prio))
-		if assignee := option_value(args, "--assignee-agent-instance-id", option_value(args, "--assignee", "")); assignee != "" {
-			append(&fields, strings.concatenate({"\"assignee_ref\":", ctl_v2_actor_ref(assignee)}))
+		if assignee := option_value(args, "--assignee", option_value(args, "--assignee-agent-id", "")); assignee != "" {
+			append(&fields, ctl_v2_assignee_field(assignee))
 		}
-		// --reviewer is comma-separated for MULTIPLE reviewers; presence-checked so
-		// `--reviewer ""` clears the list.
-		if has_flag(args, "--reviewer") do append(&fields, ctl_v2_reviewer_refs(option_value(args, "--reviewer", "")))
+		// --reviewer is repeatable/comma-separated for MULTIPLE reviewers;
+		// presence-checked so `--reviewer ""` clears the list.
+		if has_flag(args, "--reviewer") || has_flag(args, "--reviewer-agent-id") do append(&fields, ctl_v2_reviewers_field(args))
 		if has_flag(args, "--require-user-approval") do append(&fields, `"requires_user_approval":true`)
 		if has_flag(args, "--no-require-user-approval") do append(&fields, `"requires_user_approval":false`)
 		// --bridge is presence-checked so `--bridge ""` clears the pin back to inherit.
@@ -806,21 +761,6 @@ ctl_tasks_command :: proc(cmd: []string, args: []string) {
 			append(&fields, ctl_v2_json_string_array("depends_on", deps))
 		}
 		ctl_tasks_request(transport, "PATCH", fmt.tprintf("/api/v1/task-chains/%s/tasks/%s", safe_path_part(chain_id), safe_path_part(task_id)), json_object_from_slice(fields[:]))
-		return
-	}
-
-	if action == "status" {
-		status := option_value(args, "--status", "")
-		if status == "" {
-			fmt.println("usage: ham-ctl tasks status --chain <id> --task <id> --status <status>")
-			return
-		}
-		ctl_tasks_request(transport, "POST", fmt.tprintf("/api/v1/task-chains/%s/tasks/%s/status", safe_path_part(chain_id), safe_path_part(task_id)), json_object(json_kv("status", status)))
-		return
-	}
-
-	if action == "done" {
-		ctl_tasks_request(transport, "POST", fmt.tprintf("/api/v1/task-chains/%s/tasks/%s/status", safe_path_part(chain_id), safe_path_part(task_id)), json_object(json_kv("status", "in_validation")))
 		return
 	}
 
@@ -923,41 +863,5 @@ ctl_tasks_command :: proc(cmd: []string, args: []string) {
 		}
 	}
 
-	if action == "vote" {
-		v := option_value(args, "--vote", option_value(args, "--result", ""))
-		comment := option_value(args, "--comment", "")
-		if v == "" {
-			fmt.println("usage: ham-ctl tasks vote --chain <id> --task <id> --result lgtm|ngtm [--comment <text>]")
-			return
-		}
-		ctl_tasks_request(transport, "POST", fmt.tprintf("/api/v1/task-chains/%s/tasks/%s/vote", safe_path_part(chain_id), safe_path_part(task_id)), json_object(json_kv("vote", v), json_kv("comment", comment)))
-		return
-	}
-
-	if action == "votes" {
-		sub := option_value(args, "--action", "")
-		if idx + 1 < len(cmd) && (cmd[idx + 1] == "add" || cmd[idx + 1] == "list" || cmd[idx + 1] == "vote") do sub = cmd[idx + 1]
-		if sub == "" || sub == "list" {
-			ctl_tasks_request(transport, "GET", fmt.tprintf("/api/v1/task-chains/%s/tasks/%s/votes", safe_path_part(chain_id), safe_path_part(task_id)), "")
-			return
-		}
-		if sub == "add" || sub == "vote" {
-			v := option_value(args, "--vote", option_value(args, "--result", ""))
-			comment := option_value(args, "--comment", "")
-			if v == "" {
-				fmt.println("usage: ham-ctl tasks votes --chain <id> --task <id> add --result lgtm|ngtm [--comment <text>]")
-				return
-			}
-			ctl_tasks_request(transport, "POST", fmt.tprintf("/api/v1/task-chains/%s/tasks/%s/vote", safe_path_part(chain_id), safe_path_part(task_id)), json_object(json_kv("vote", v), json_kv("comment", comment)))
-			return
-		}
-	}
-
-	if action == "nudge" {
-		msg := option_value(args, "--message", "")
-		ctl_tasks_request(transport, "POST", fmt.tprintf("/api/v1/task-chains/%s/tasks/%s/nudge", safe_path_part(chain_id), safe_path_part(task_id)), json_object(json_kv("message", msg)))
-		return
-	}
-
-	fmt.println("usage: ham-ctl tasks <list|create|update|status|done|depend|cancel|comment|comments|vote|votes|nudge|subscribe|unsubscribe>")
+	fmt.println("usage: ham-ctl tasks <list|show|create|update|depend|cancel|comment|comments>")
 }
