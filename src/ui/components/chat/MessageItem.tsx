@@ -8,7 +8,7 @@ import {
   decryptEmbeddedVaultTokens,
 } from '../../utils/vaultContent';
 import { selectActiveVaultKey } from '../../store/vaultSlice';
-import { extractMessageOptions } from './types';
+import { visibleMessageOptions } from './types';
 import Markdown from '../Markdown';
 import ChatActionCard from './ChatActionCard';
 
@@ -41,7 +41,7 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onReply, clas
   // whenever the vault reported unlocked without a key. Both now test the real key.
   const activeKey = useSelector(selectActiveVaultKey);
   const [decryptedBody, setDecryptedBody] = useState<string | null>(null);
-  const options = extractMessageOptions(message);
+  const options = visibleMessageOptions(message, Boolean(activeKey));
 
   useEffect(() => {
     let active = true;

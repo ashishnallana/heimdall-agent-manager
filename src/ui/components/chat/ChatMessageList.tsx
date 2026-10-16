@@ -13,7 +13,7 @@ import {
   maskVaultArmored,
 } from '../../utils/vaultContent';
 import { selectActiveVaultKey } from '../../store/vaultSlice';
-import { extractMessageOptions } from './types';
+import { visibleMessageOptions } from './types';
 import type { ChatDeliveryStatus, ChatMessage, ChatTimestamp } from './types';
 import ChatActionCard from './ChatActionCard';
 import { useIsMobile } from '../shell/responsive';
@@ -170,6 +170,7 @@ export default function ChatMessageList({
   scrollClassName?: string;
 }) {
   const isMobile = useIsMobile();
+  const activeKey = useSelector(selectActiveVaultKey);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const stickyRef = useRef(true);
   const lastCountRef = useRef(0);
@@ -364,7 +365,7 @@ export default function ChatMessageList({
             ));
             const isClubbedGroup = message.messageType === 'shell_run_group';
             const hideCardChrome = isDivider || isClubbedGroup;
-            const options = extractMessageOptions(message);
+            const options = visibleMessageOptions(message, Boolean(activeKey));
             return (
               <div key={message.key} data-debug-id={`${debugPrefix}-message-${message.messageId}`} className={`msg group flex min-w-0 max-w-full rounded-xl outline-none focus-visible:shadow-focus ${reduceMotion ? '' : 'transition-colors duration-500'} ${message.messageId === highlightId ? 'bg-warning-soft ring-1 ring-warning' : ''} ${message.isUser ? 'justify-end' : 'justify-start'}`}>
                 <div className={`flex min-w-0 max-w-full ${message.isUser ? 'max-w-[86%] items-end sm:max-w-[78%]' : 'w-full items-start'} flex-col text-sm`}>

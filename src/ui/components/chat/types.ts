@@ -1,4 +1,5 @@
 import type { KeyboardEvent, ReactNode, RefObject } from 'react';
+import { containsVaultArmored, isVaultArmored } from '../../utils/vaultContent.ts';
 
 export type ChatMessage = {
   key: string;
@@ -128,6 +129,22 @@ export function extractMessageOptions(message: { metadata?: any; metadata_json?:
     return meta.options.map((opt: any) => String(opt)).filter((opt: string) => opt.trim() !== '');
   }
   return [];
+}
+
+/**
+ * Quick-reply options to render for a message. While its body is still vault ciphertext
+ * (no active key), the options are hidden too: they are not part of the encrypted body,
+ * so showing them would print plaintext beside an "Encrypted content" placeholder.
+ * Armored options are likewise hidden until they can be read.
+ */
+export function visibleMessageOptions(
+  message: { body?: string; metadata?: any; metadata_json?: string },
+  hasVaultKey: boolean,
+): string[] {
+  if (hasVaultKey) return extractMessageOptions(message);
+  const body = message.body || '';
+  if (isVaultArmored(body) || containsVaultArmored(body)) return [];
+  return extractMessageOptions(message).filter((opt) => !containsVaultArmored(opt));
 }
 
 export function extractMessageActionIds(message: { metadata?: any; metadata_json?: string }): string[] {
