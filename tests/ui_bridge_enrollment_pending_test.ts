@@ -5,6 +5,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { bytesToHex } from '../src/ui/utils/vaultCrypto.ts';
 
 const TEST_VAULT_KEY_HEX = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
@@ -104,4 +106,19 @@ test('REQ-EA-2/7: delivery to an enrolling bridge names the target and the confi
   } finally {
     globalThis.fetch = realFetch;
   }
+});
+
+test('REQ-EA-6: a user with no vault creates it on the approval page, not via Settings', () => {
+  const source = fs.readFileSync(
+    fileURLToPath(new URL('../src/ui/components/enrollment/BridgeEnrollmentApprovalPage.tsx', import.meta.url)),
+    'utf8',
+  );
+  // The vault-required banner carries the setup button, and no longer sends the user away.
+  assert.match(source, /enrollment-vault-required[\s\S]*data-debug-id="enrollment-vault-setup-btn"[\s\S]*onClick=\{\(\) => setVaultSetupOpen\(true\)\}/);
+  assert.doesNotMatch(source, /Create one in Settings/);
+  // The button opens the shared create-and-unlock modal, controlled by the page.
+  assert.match(source, /import VaultOnboardingModal from '\.\.\/settings\/VaultOnboardingModal'/);
+  assert.match(source, /<VaultOnboardingModal\s+open=\{vaultSetupOpen\}\s+onOpenChange=\{setVaultSetupOpen\}/);
+  // Approve stays gated on the vault query, which the modal refetches after creation.
+  assert.match(source, /const vaultRequired = isBridge && !vaultQuery\.isLoading && !vaultEnvelope;/);
 });

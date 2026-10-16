@@ -68,6 +68,7 @@ import {
   unsealEnrollingBridgeE2EE,
 } from '../../api/endpoints/bridges';
 import { useGetUserVaultQuery } from '../../api/endpoints/userVault';
+import VaultOnboardingModal from '../settings/VaultOnboardingModal';
 import {
   getActiveVaultKey,
   getActiveBridgeVaultKeyMaterial,
@@ -271,6 +272,9 @@ export default function BridgeEnrollmentApprovalPage() {
   const [passwordError, setPasswordError] = useState('');
   const [passwordBusy, setPasswordBusy] = useState(false);
   const [rememberSession, setRememberSession] = useState(true);
+  // A user with no vault creates it right here rather than detouring to Settings
+  // and losing the device code's short TTL on the way back.
+  const [vaultSetupOpen, setVaultSetupOpen] = useState(false);
   // "Attach to an existing bridge" instead of minting a new one. Empty means
   // the default (unchanged) behaviour: create a new bridge.
   const [bridgeTargets, setBridgeTargets] = useState<BridgeSummary[]>([]);
@@ -1035,8 +1039,18 @@ export default function BridgeEnrollmentApprovalPage() {
             <Banner tone="warn" title="Set up your vault first">
               <span data-debug-id="enrollment-vault-required">
                 A bridge is enrolled only once your vault key is delivered to it, so you need a vault
-                before approving. Create one in Settings → Vault, then come back to this page.
+                before approving.
               </span>
+              <div style={{ marginTop: 10 }}>
+                <Button
+                  data-debug-id="enrollment-vault-setup-btn"
+                  variant="primary"
+                  size="sm"
+                  onClick={() => setVaultSetupOpen(true)}
+                >
+                  Set up vault
+                </Button>
+              </div>
             </Banner>
           )}
           {decision === 'none' ? (
@@ -1287,6 +1301,16 @@ export default function BridgeEnrollmentApprovalPage() {
         </>
       )}
       </section>
+      {/* Creating the vault also unlocks it, so the key is delivered on approval
+          with no second password prompt. The modal refetches the shared vault
+          query, which clears vaultRequired and enables Approve. */}
+      {vaultSetupOpen ? (
+        <VaultOnboardingModal
+          open={vaultSetupOpen}
+          onOpenChange={setVaultSetupOpen}
+          onDismiss={() => setVaultSetupOpen(false)}
+        />
+      ) : null}
     </div>
   );
 }
