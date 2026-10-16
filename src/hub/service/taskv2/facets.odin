@@ -54,21 +54,27 @@ get_facet :: proc(svc: ^Service, task: domain.Task, attempt_no: int, kind: strin
 	return {}, false
 }
 
+is_vault_armored :: proc(s: string) -> bool {
+	t := strings.trim_space(s)
+	return strings.has_prefix(t, "vault:v1:") || strings.has_prefix(t, "ENC:v1:")
+}
+
 // handoff_body_json builds the stored handoff facet from the agent's object:
 // `summary` (required, caller-validated) is kept; `next_steps` and `summary`
-// longer than the caps are cut and `truncated:true` is added at the top level.
+// longer than the caps are cut and `truncated:true` is added at the top level
+// (unless the value is vault-armored ciphertext, which must never be byte-sliced).
 // Every other field of the agent's object is kept verbatim.
 handoff_body_json :: proc(summary: string, handoff_json: string) -> string {
 	truncated := false
 	s := summary
-	if len(s) > HANDOFF_SUMMARY_MAX { s = s[:HANDOFF_SUMMARY_MAX]; truncated = true }
+	if len(s) > HANDOFF_SUMMARY_MAX && !is_vault_armored(s) { s = s[:HANDOFF_SUMMARY_MAX]; truncated = true }
 	o := json_begin()
 	json_str(&o, "summary", s)
 	seen_next := false
 	if strings.has_prefix(strings.trim_space(handoff_json), "{") {
 		if next, ok := jsonx.extract_string_found(handoff_json, "next_steps", true, context.temp_allocator); ok {
 			n := next
-			if len(n) > HANDOFF_NEXT_STEPS_MAX { n = n[:HANDOFF_NEXT_STEPS_MAX]; truncated = true }
+			if len(n) > HANDOFF_NEXT_STEPS_MAX && !is_vault_armored(n) { n = n[:HANDOFF_NEXT_STEPS_MAX]; truncated = true }
 			json_str(&o, "next_steps", n)
 			seen_next = true
 		}
@@ -96,7 +102,7 @@ findings_json_capped :: proc(findings_json: string) -> (string, bool) {
 		if n >= FINDINGS_MAX { truncated = true; break }
 		if n > 0 do strings.write_byte(&b, ',')
 		item := it
-		if len(item) > FINDING_TEXT_MAX + 2 {
+		if len(item) > FINDING_TEXT_MAX + 2 && !strings.contains(item, "vault:v1:") && !strings.contains(item, "ENC:v1:") {
 			// an oversized finding is replaced by its (object-preserving) stub
 			item = fmt.tprintf(`{{"text":"(finding truncated: %d bytes)","truncated":true}}`, len(it))
 			truncated = true

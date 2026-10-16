@@ -481,8 +481,10 @@ ctl_v2_verify :: proc(endpoint, token: string, tokens, args: []string) {
 	independent := has_flag(args, "--independent")
 	cwd := ctl_agent_cwd(context.allocator)
 
-	// 1. the lease (status current|granted) carries the task + brief.verify.
-	lease_resp, lok := ctl_agent_local_call(endpoint, token, "agent.lease.next", json_object(json_kv("cwd", cwd)))
+	// 1. the lease (status current) carries the task + brief.verify.
+	//    peek:true ensures `ham-ctl verify` inspects an existing lease without
+	//    implicitly claiming a new ready task.
+	lease_resp, lok := ctl_agent_local_call(endpoint, token, "agent.lease.next", json_object(json_kv("cwd", cwd), json_kv_raw("peek", "true")))
 	if !lok { fmt.println(`{"ok":false,"message":"local Bridge endpoint is not reachable"}`); os.exit(1) }
 	lease, parsed := ctl_verify_parse_lease(lease_resp)
 	if !parsed || (lease.status != "current" && lease.status != "granted") {
@@ -490,9 +492,13 @@ ctl_v2_verify :: proc(endpoint, token: string, tokens, args: []string) {
 		fmt.println(lease_resp)
 		os.exit(1)
 	}
-	verify_cmd := strings.trim_space(option_value(args, "--cmd", lease.verify_cmd))
+	if has_flag(args, "--cmd") {
+		fmt.println(`{"ok":false,"message":"verify: --cmd is not supported; verify always runs brief.verify from your current task"}`)
+		os.exit(1)
+	}
+	verify_cmd := strings.trim_space(lease.verify_cmd)
 	if verify_cmd == "" {
-		fmt.printfln(`{"ok":false,"message":"verify: task %s has no brief.verify command; pass --cmd '<command>' or fix the brief"}`, lease.task_id)
+		fmt.printfln(`{"ok":false,"message":"verify: task %s has no brief.verify command; update the brief first"}`, lease.task_id)
 		os.exit(1)
 	}
 	if verify_cmd == "none" {
@@ -604,7 +610,7 @@ print_help_review :: proc() {
 print_help_verify :: proc() {
 	fmt.println("ham-ctl verify — run your task's verify command as an attributable Run session")
 	fmt.println("")
-	fmt.println("  ham-ctl verify [--independent] [--cmd '<override>'] [--bridge <id>]")
+	fmt.println("  ham-ctl verify [--independent] [--bridge <id>]")
 	fmt.println("")
 	fmt.println("Reads brief.verify from your current lease, runs it in your cwd as a shell Run")
 	fmt.println("labelled `verify <task_id> #<attempt_no> @<head>`, heartbeats your lease while it")

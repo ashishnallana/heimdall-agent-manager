@@ -13,6 +13,9 @@ Lease_Next_Input :: struct {
 	// vcs_base: the bridge's .Local enrichment (git head at lease start). When
 	// present and no attempt_started exists for the current attempt, it is recorded.
 	vcs_base: string,
+	// peek: when true, returns the caller's existing lease (or status="none")
+	// without granting a new ready task inline (used by `ham-ctl verify`).
+	peek:     bool,
 }
 
 Lease_Next_Result :: struct {
@@ -25,7 +28,7 @@ Lease_Next_Result :: struct {
 
 // lease_next (plan §2.5): idempotent. An instance holding a lease gets it back
 // (and the call confirms a wake-delivered lease); a lease-free chain worker is
-// granted inline (never woken); the coordinator gets `none`.
+// granted inline (never woken) unless `input.peek` is set; the coordinator gets `none`.
 lease_next :: proc(svc: ^Service, auth: contracts.Auth_Context, input: Lease_Next_Input) -> (Lease_Next_Result, bool, domain.Domain_Error) {
 	inst, ok, err := instance_from_auth(svc, auth)
 	if !ok do return {}, false, err
@@ -47,7 +50,7 @@ lease_next :: proc(svc: ^Service, auth: contracts.Auth_Context, input: Lease_Nex
 		// re-woken with a fresh pack. No inline grant for an orphan.
 		_, _ = end_uow(svc, &u, false)
 		return {}, false, lease_lost_error()
-	} else if inst.chain_id != "" {
+	} else if !input.peek && inst.chain_id != "" {
 		if chain, cok, _ := iface.taskchain_get_chain(svc.repo, domain.Task_Chain_ID(inst.chain_id)); cok {
 			if lease, task, granted := grant_inline_for_instance(svc, &u, chain, inst, .Lease_Next); granted {
 				record_attempt_started(svc, task, lease, input.vcs_base)

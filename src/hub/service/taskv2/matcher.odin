@@ -160,7 +160,7 @@ grant_work :: proc(svc: ^Service, u: ^Uow, ctx: ^Match_Context, task: domain.Tas
 	evs, _ := iface.taskchain_list_events_by_task(svc.repo, task.task_id, task.owner_user_id)
 	view := fold_task(evs, fold_input_for_task(task, true))
 	prefer := ""
-	if view.last_release == .Changes_Requested || view.last_release == .Handoff || view.last_release == .Expired {
+	if view.last_release == .Changes_Requested || view.last_release == .Expired {
 		prefer = last_attempt_holder(svc, task)
 	}
 	for fleet in ctx.fleets {
@@ -250,9 +250,10 @@ review_lease_live_for :: proc(ctx: ^Match_Context, svc: ^Service, task_id: domai
 pick_instance :: proc(svc: ^Service, u: ^Uow, ctx: ^Match_Context, fleet: domain.Task_Chain_Fleet, placement: Placement, role: string, prefer: string) -> (domain.Agent_Instance, bool) {
 	live_count := 0
 	live_free := domain.Agent_Instance{}
+	stopping_free := domain.Agent_Instance{}
 	warm := domain.Agent_Instance{}
 	preferred := domain.Agent_Instance{}
-	have_live, have_warm, have_pref := false, false, false
+	have_live, have_stopping, have_warm, have_pref := false, false, false, false
 	for inst in ctx.instances {
 		if inst.agent_id != fleet.agent_id || inst.bridge_id != placement.bridge_id do continue
 		if is_coordinator(svc, ctx.chain, inst.agent_instance_id) do continue
@@ -260,9 +261,17 @@ pick_instance :: proc(svc: ^Service, u: ^Uow, ctx: ^Match_Context, fleet: domain
 		if disposition == .Dead do continue
 		if disposition == .Hold { live_count += 1; continue }
 		free := !ctx.held[inst.agent_instance_id]
+		stopping := u != nil && effect_has_stop(u, inst.bridge_id, string(ctx.chain.chain_id), inst.agent_instance_id)
 		if instance_is_live(inst) || instance_is_pending(inst) {
 			live_count += 1
-			if free && !have_live { live_free = inst; have_live = true }
+			if free {
+				if stopping {
+					if !have_stopping { stopping_free = inst; have_stopping = true }
+				} else if !have_live {
+					live_free = inst
+					have_live = true
+				}
+			}
 		} else if free && !have_warm {
 			warm = inst
 			have_warm = true
@@ -272,6 +281,7 @@ pick_instance :: proc(svc: ^Service, u: ^Uow, ctx: ^Match_Context, fleet: domain
 	if have_pref do return preferred, true
 	if have_live do return live_free, true
 	if have_warm do return warm, true
+	if have_stopping do return stopping_free, true
 	capacity := fleet.capacity
 	if capacity < 1 do capacity = 1
 	if live_count >= capacity do return {}, false

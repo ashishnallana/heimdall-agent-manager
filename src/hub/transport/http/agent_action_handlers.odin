@@ -57,14 +57,15 @@ make_lease_wire :: proc(l: domain.Task_Lease) -> Task_Lease_Wire {
 	}
 }
 
-// POST /api/v1/agent-actions/lease/next  params: {vcs_base?}
+// POST /api/v1/agent-actions/lease/next  params: {vcs_base?, peek?}
 agent_action_lease_next_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Agent_Action_Handlers)(ctx)
 	auth, _, ok, resp := require_instance_action_auth(h, req)
 	if !ok do return resp
 	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
 	params := json_object_raw(req.body, "params")
-	res, rok, err := taskv2.lease_next(h.task_engine, auth, taskv2.Lease_Next_Input{vcs_base = json_string(params, "vcs_base")})
+	peek, _ := jsonx.extract_bool_literal(params, "peek", true)
+	res, rok, err := taskv2.lease_next(h.task_engine, auth, taskv2.Lease_Next_Input{vcs_base = json_string(params, "vcs_base"), peek = peek})
 	if !rok do return respond_error(err, req.request_id)
 	wire := Lease_Next_Wire{status = res.status}
 	if res.status != "none" {

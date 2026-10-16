@@ -141,7 +141,7 @@ task_engine_on_start_success :: proc(ctx: rawptr, inst: domain.Agent_Instance) {
 
 task_engine_on_unobserved_shell_terminal :: proc(ctx: rawptr, session: domain.Shell_Session) {
 	svc := (^taskv2.Service)(ctx)
-	if svc == nil || !strings.has_prefix(session.label, taskv2.VERIFY_LABEL_PREFIX) do return
+	if svc == nil || session.kind != "run" || !strings.has_prefix(session.label, taskv2.VERIFY_LABEL_PREFIX) do return
 	duration := i64(0)
 	if s_ms, sok := platform.rfc3339_to_unix_ms(session.started_at); sok {
 		if e_ms, eok := platform.rfc3339_to_unix_ms(session.finished_at); eok && e_ms >= s_ms do duration = e_ms - s_ms
@@ -154,6 +154,7 @@ task_engine_on_unobserved_shell_terminal :: proc(ctx: rawptr, session: domain.Sh
 		exit_code     = -1,
 		exit_code_set = false,
 		duration_ms   = duration,
+		cmd           = session.cmd,
 	})
 }
 
@@ -614,6 +615,8 @@ register_routes :: proc(graph: ^App_Graph) {
 	http.router_add(&graph.router, "POST", "/api/v1/task-chains/*/tasks/*/reopen", rawptr(&graph.taskchain_handlers), http.reopen_task_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/task-chains/*/tasks/*/answer", rawptr(&graph.taskchain_handlers), http.answer_task_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/task-chains/*/tasks/*/fetch", rawptr(&graph.taskchain_handlers), http.fetch_task_ref_handler)
+	http.router_add(&graph.router, "GET", "/api/v1/task-chains/*/tasks/*/events", rawptr(&graph.taskchain_handlers), http.list_task_events_handler)
+	http.router_add(&graph.router, "GET", "/api/v1/task-chains/*/tasks/*/attempts/*/facets/*", rawptr(&graph.taskchain_handlers), http.get_task_facet_handler)
 	http.router_add(&graph.router, "PATCH", "/api/v1/task-chains/*", rawptr(&graph.taskchain_handlers), http.patch_task_chain_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/task-chains/*/members", rawptr(&graph.taskchain_handlers), http.list_chain_members_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/task-chains/*/members", rawptr(&graph.taskchain_handlers), http.add_chain_member_handler)

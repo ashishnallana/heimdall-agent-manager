@@ -883,15 +883,20 @@ BRIEF_ACCEPTANCE_ITEM :: 200
 // "verify" (empty unless verify:"none" with an output contract),
 // "review_role:<r>" (no fleet row in the chain carries the role). Gates are
 // exempt (decided, not worked).
+is_brief_armored :: proc(s: string) -> bool {
+	t := strings.trim_space(s)
+	return strings.has_prefix(t, "vault:v1:") || strings.has_prefix(t, "ENC:v1:")
+}
+
 brief_publish_problems :: proc(service: ^Taskchain_Service, chain: domain.Task_Chain, task: domain.Task) -> []string {
 	out := make([dynamic]string, context.temp_allocator)
 	if task.kind == .Gate do return out[:]
 	brief := task.brief_json
 	goal := strings.trim_space(jsonx.extract_string(brief, "goal", "", true, context.temp_allocator))
-	if goal == "" || len(goal) > BRIEF_GOAL_MAX do append(&out, "goal")
+	if goal == "" || (len(goal) > BRIEF_GOAL_MAX && !is_brief_armored(goal)) do append(&out, "goal")
 	acceptance := jsonx.extract_string_array(brief, "acceptance", true, context.temp_allocator)
 	acc_ok := len(acceptance) >= 1 && len(acceptance) <= BRIEF_ACCEPTANCE_MAX
-	for a in acceptance do if strings.trim_space(a) == "" || len(a) > BRIEF_ACCEPTANCE_ITEM do acc_ok = false
+	for a in acceptance do if strings.trim_space(a) == "" || (len(a) > BRIEF_ACCEPTANCE_ITEM && !is_brief_armored(a)) do acc_ok = false
 	if !acc_ok do append(&out, "acceptance")
 	verify := strings.trim_space(jsonx.extract_string(brief, "verify", "", true, context.temp_allocator))
 	_, has_output := jsonx.extract_raw_object(brief, "output", true, context.temp_allocator)

@@ -25,6 +25,36 @@ package main
 //      repo, included so a repo-initialised run dir still works).
 
 import "core:strings"
+import "core:sync"
+import jsonx "odin_test:lib/jsonx"
+
+// Per-instance cached vcs_base captured on `agent.lease.next` so a subsequent
+// `agent.lease.submit` / `handoff` in a clean committed tree still reports
+// `git diff --numstat <vcs_base>..HEAD` in `vcs.files`.
+bridge_taskv2_vcs_base_mutex: sync.Mutex
+bridge_taskv2_vcs_base_by_instance: map[string]string
+
+bridge_taskv2_cache_vcs_base :: proc(instance_id, base: string) {
+	id := strings.trim_space(instance_id)
+	if id == "" || strings.trim_space(base) == "" do return
+	sync.mutex_lock(&bridge_taskv2_vcs_base_mutex)
+	defer sync.mutex_unlock(&bridge_taskv2_vcs_base_mutex)
+	if old, has := bridge_taskv2_vcs_base_by_instance[id]; has {
+		delete(old)
+		bridge_taskv2_vcs_base_by_instance[id] = strings.clone(base)
+	} else {
+		bridge_taskv2_vcs_base_by_instance[strings.clone(id)] = strings.clone(base)
+	}
+}
+
+bridge_taskv2_lookup_vcs_base :: proc(instance_id: string, allocator := context.temp_allocator) -> string {
+	id := strings.trim_space(instance_id)
+	if id == "" do return ""
+	sync.mutex_lock(&bridge_taskv2_vcs_base_mutex)
+	defer sync.mutex_unlock(&bridge_taskv2_vcs_base_mutex)
+	if v, has := bridge_taskv2_vcs_base_by_instance[id]; has do return strings.clone(v, allocator)
+	return ""
+}
 
 // bridge_taskv2_git_head returns HEAD's sha for `dir`, or ("", false) when the
 // directory is not a usable git repository (no repo, unborn branch, git missing).
@@ -60,6 +90,10 @@ bridge_taskv2_git_files_json :: proc(dir, base: string) -> string {
 	first := true
 
 	files, _, _, ok := vcs_git_changed_files(dir, "", VCS_FILES_MAX_LIMIT)
+	defer if ok {
+		for f in files do if len(f.path) > 0 do delete(f.path)
+		if len(files) > 0 do delete(files)
+	}
 	if ok {
 		for f in files {
 			if !first do strings.write_byte(&b, ',')
@@ -68,10 +102,10 @@ bridge_taskv2_git_files_json :: proc(dir, base: string) -> string {
 		}
 	}
 
-	if base_sha := strings.trim_space(base); base_sha != "" {
+	if base_sha := strings.trim_space(base); base_sha != "" && !strings.has_prefix(base_sha, "-") {
 		revspec := strings.concatenate({base_sha, "..HEAD"})
 		defer delete(revspec)
-		out, run_ok := vcs_run([]string{"git", "-C", dir, "diff", "--numstat", revspec})
+		out, run_ok := vcs_run([]string{"git", "-C", dir, "diff", "--numstat", revspec, "--"})
 		defer if len(out) > 0 do delete(out)
 		if run_ok {
 			for line in strings.split_lines_iterator(&out) {
@@ -120,9 +154,8 @@ bridge_taskv2_vcs_object_json :: proc(head: string, dirty: bool, files_json: str
 // not second-guessed).
 bridge_taskv2_params_inject :: proc(params, key, raw_json: string) -> string {
 	body := strings.trim_space(params)
-	probe := strings.concatenate({"\"", key, "\":"})
-	defer delete(probe)
-	if strings.contains(body, probe) do return strings.clone(params)
+	if _, has_str := jsonx.extract_string_found(body, key, true, context.temp_allocator); has_str do return strings.clone(params)
+	if _, has_obj := jsonx.extract_raw_object(body, key, true, context.temp_allocator); has_obj do return strings.clone(params)
 	if body == "" || body == "{}" || body[0] != '{' {
 		return strings.concatenate({"{\"", key, "\":", raw_json, "}"})
 	}
@@ -160,6 +193,8 @@ bridge_taskv2_enrich_lease_params :: proc(method, params: string, rec: Bridge_Lo
 
 	switch method {
 	case "agent.lease.next":
+		peek, _ := jsonx.extract_bool_literal(params, "peek", true)
+		if !peek do bridge_taskv2_cache_vcs_base(rec.agent_instance_id, head)
 		quoted := bridge_local_json_escaped(head)
 		defer delete(quoted)
 		raw := strings.concatenate({"\"", quoted, "\""})
@@ -168,6 +203,7 @@ bridge_taskv2_enrich_lease_params :: proc(method, params: string, rec: Bridge_Lo
 	case "agent.lease.submit", "agent.lease.handoff":
 		dirty, _ := bridge_taskv2_git_dirty(repo)
 		base := bridge_local_extract_json_string(params, "vcs_base", "", context.temp_allocator)
+		if strings.trim_space(base) == "" do base = bridge_taskv2_lookup_vcs_base(rec.agent_instance_id, context.temp_allocator)
 		files := bridge_taskv2_git_files_json(repo, base)
 		defer delete(files)
 		obj := bridge_taskv2_vcs_object_json(head, dirty, files)

@@ -1549,6 +1549,57 @@ fetch_task_ref_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	return respond_success(raw, req.request_id, auth_ctx_server_time(req))
 }
 
+// GET /api/v1/task-chains/{cid}/tasks/{tid}/events
+list_task_events_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Taskchain_Handlers)(ctx)
+	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
+	if !ok do return auth_resp
+	if h.task_engine == nil || h.task_engine.repo == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
+	chain_id := domain.Task_Chain_ID(path_part(req.path, 4))
+	task_id := domain.Task_ID(path_part(req.path, 6))
+	if matched, mismatch_resp := require_task_path_scope(h, auth_ctx, chain_id, task_id, req); !matched do return mismatch_resp
+	task, tok, terr := taskchain_service.get_task_for_read(h.taskchains, auth_ctx, task_id)
+	if !tok do return respond_error(terr, req.request_id)
+	evs, err := iface.taskchain_list_events_by_task(h.task_engine.repo, task.task_id, task.owner_user_id)
+	if err.code != .None do return respond_error(err, req.request_id)
+	b := strings.builder_make()
+	strings.write_byte(&b, '[')
+	for e, i in evs {
+		if i > 0 do strings.write_byte(&b, ',')
+		o := taskv2.json_begin()
+		taskv2.json_int(&o, "event_id", e.event_id)
+		taskv2.json_str(&o, "task_id", string(e.task_id))
+		taskv2.json_str(&o, "chain_id", string(e.chain_id))
+		taskv2.json_str(&o, "kind", e.kind)
+		taskv2.json_str(&o, "actor_kind", e.actor_kind)
+		taskv2.json_str(&o, "actor_id", e.actor_id)
+		taskv2.json_int(&o, "ts_ms", e.ts_ms)
+		taskv2.json_raw(&o, "payload", e.payload_json)
+		strings.write_string(&b, taskv2.json_end(&o))
+	}
+	strings.write_byte(&b, ']')
+	return respond_list(strings.to_string(b), contracts.API_Page{limit = len(evs), has_more = false}, req.request_id, auth_ctx_server_time(req))
+}
+
+// GET /api/v1/task-chains/{cid}/tasks/{tid}/attempts/{n}/facets/{kind}
+get_task_facet_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Taskchain_Handlers)(ctx)
+	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
+	if !ok do return auth_resp
+	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
+	chain_id := domain.Task_Chain_ID(path_part(req.path, 4))
+	task_id := domain.Task_ID(path_part(req.path, 6))
+	if matched, mismatch_resp := require_task_path_scope(h, auth_ctx, chain_id, task_id, req); !matched do return mismatch_resp
+	task, tok, terr := taskchain_service.get_task_for_read(h.taskchains, auth_ctx, task_id)
+	if !tok do return respond_error(terr, req.request_id)
+	attempt_str := path_part(req.path, 8)
+	kind := path_part(req.path, 10)
+	ref := fmt.tprintf("facet:%s:%s:%s", task.task_id, attempt_str, kind)
+	raw, fok, err := taskv2.task_fetch(h.task_engine, task, ref)
+	if !fok do return respond_error(err, req.request_id)
+	return respond_success(raw, req.request_id, auth_ctx_server_time(req))
+}
+
 cancel_task_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Taskchain_Handlers)(ctx)
 	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)

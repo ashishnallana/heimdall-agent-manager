@@ -18,11 +18,11 @@ user_auth :: proc() -> contracts.Auth_Context {
 }
 
 // write_verify simulates the hub-written verify facet for a finished verify run.
-write_verify :: proc(fx: ^Fixture, task_id: string, attempt_no: int, head: string, exit_code: int, dirty := "false", status := "exited", head_end := "") {
+write_verify :: proc(fx: ^Fixture, task_id: string, attempt_no: int, head: string, exit_code: int, dirty := "false", status := "exited", head_end := "", cmd := "") {
 	on_verify_session_exited(&fx.svc, Verify_Exit{
 		session_id = fmt.tprintf("sh_%s_%d", task_id, attempt_no), label = fmt.tprintf("verify %s #%d @%s", task_id, attempt_no, head),
 		owner_user_id = "u1", status = status, exit_code = exit_code, exit_code_set = status != "failed", duration_ms = 1200,
-		head_at_end = head_end if head_end != "" else head, dirty = dirty, tail = "ok\n",
+		head_at_end = head_end if head_end != "" else head, dirty = dirty, tail = "ok\n", cmd = cmd,
 	})
 }
 
@@ -57,6 +57,14 @@ test_submit_requires_green_verify_at_head :: proc(t: ^testing.T) {
 	write_verify(fx, "task_1", lease.attempt_no, "abc", 0, dirty = "true")
 	_, dok, derr := lease_submit(&fx.svc, auth, Submit_Input{summary = "done", vcs_json = `{"head":"abc","dirty":false,"files":[]}`})
 	testing.expect(t, !dok && strings.contains(derr.details_json, "verify_dirty"), "verify_dirty")
+	// green verify, but working tree dirtied before submit → verify_dirty (M2-M1)
+	write_verify(fx, "task_1", lease.attempt_no, "abc", 0, dirty = "false")
+	_, sdok, sderr := lease_submit(&fx.svc, auth, Submit_Input{summary = "done", vcs_json = `{"head":"abc","dirty":true,"files":[]}`})
+	testing.expect(t, !sdok && strings.contains(sderr.details_json, "verify_dirty"), "submit dirty tree → verify_dirty")
+	// green verify with mismatched command → verify_required (M2-C3)
+	write_verify(fx, "task_1", lease.attempt_no, "abc", 0, dirty = "false", cmd = "true")
+	_, cmok, cmerr := lease_submit(&fx.svc, auth, Submit_Input{summary = "done", vcs_json = `{"head":"abc","dirty":false,"files":[]}`})
+	testing.expect(t, !cmok && strings.contains(cmerr.details_json, "verify_required"), "mismatched verify command rejected")
 	// verify:none without an output contract → refused
 	_, nok, nerr := lease_submit(&fx.svc, auth, Submit_Input{summary = "done", verify = "none"})
 	testing.expect(t, !nok && strings.contains(nerr.details_json, "verify_required"), "verify:none needs an output contract")
@@ -188,9 +196,18 @@ test_oscillation_guard_parks_after_three_rounds :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(parked.blocked_on_json, "oscillation"), "oscillation guard → blocked_on human")
 	_, held := lease_of(fx, "inst_w1")
 	testing.expect(t, !held, "no grant while parked")
-	// the human answers → ready again → granted
+	// the human answers → ready again → granted, and oscillation counter resets (M2-m2)
 	_, aok, _ := task_answer(&fx.svc, parked, Actor{kind = ACTOR_USER, id = "u1"}, "merged the two views")
 	testing.expect(t, aok, "answer")
+	testing.expect_value(t, get_task(fx, "task_1").state, domain.Task_State.In_Progress)
+	confirm_holder(fx, "inst_w1")
+	l4, _ := lease_of(fx, "inst_w1")
+	write_verify(fx, "task_1", l4.attempt_no, "h4", 0)
+	_, s4ok, _ := lease_submit(&fx.svc, inst_auth("inst_w1"), Submit_Input{summary = "try 4", vcs_json = `{"head":"h4","dirty":false}`})
+	testing.expect(t, s4ok, "submit 4")
+	_, r4ok, _ := review_post(&fx.svc, inst_auth("inst_r1"), Review_Input{verdict = "request_changes"})
+	testing.expect(t, r4ok, "review 4")
+	// 1 round after answer < 3, so NOT parked for oscillation
 	testing.expect_value(t, get_task(fx, "task_1").state, domain.Task_State.In_Progress)
 }
 
@@ -365,4 +382,50 @@ test_reopen_starts_new_noncounting_attempt :: proc(t: ^testing.T) {
 	for a in attempts do if a.counts_toward_budget do counting += 1
 	testing.expect(t, len(attempts) == 2 && counting == 1, "reopen attempt is non-counting")
 	assert_projection_matches_fold(t, fx, chain.chain_id, "u1", "reopen")
+}
+
+@(test)
+test_m2_review_fixes_verify_none_peek_and_vault_caps :: proc(t: ^testing.T) {
+	fx, log, ok := lease_fixture(t, "m2_rvfix")
+	defer lease_fixture_close(fx, log)
+	if !ok do return
+	chain := seed_live_chain(t, fx, "chain_rvf")
+	seed_fleet(fx, chain, "agt_w")
+	seed_instance(fx, chain, "inst_w1", "agt_w", "br_1", "idle")
+	// 1. M2-M7: lease_next(peek=true) does not inline-grant a ready task when holding no lease
+	t_draft := domain.Task{
+		task_id = "task_peek", chain_id = chain.chain_id, owner_user_id = "u1",
+		title = "t", kind = .Task, state = .Ready, publish_state = .Published, priority = .P1,
+		brief_json = `{"goal":"g","acceptance":["a"],"verify":"make test","output":{"schema":"v1"},"review_roles":[]}`,
+		ready_since = "2026-03-01T00:00:00Z", created_at = "2026-03-01T00:00:00Z", updated_at = "2026-03-01T00:00:00Z",
+	}
+	_, _, _ = iface.taskchain_save_task(&fx.repo, t_draft)
+	_, _, _ = append_event(&fx.repo, &fx.clock, t_draft, hub_actor(), EV_CREATED, `{"publish_state":"published"}`)
+	peek_res, pok, _ := lease_next(&fx.svc, inst_auth("inst_w1"), Lease_Next_Input{peek = true})
+	testing.expect(t, pok && peek_res.status == "none", "peek=true does not claim a ready task")
+	// Now normal lease_next claims it
+	claim_res, cok, _ := lease_next(&fx.svc, inst_auth("inst_w1"), Lease_Next_Input{vcs_base = "abc"})
+	testing.expect(t, cok && claim_res.status == "granted", "peek=false claims the ready task")
+
+	// 2. M2-C2: task has output contract AND brief.verify != "none" → verify="none" is REJECTED
+	_, vn_ok, vn_err := lease_submit(&fx.svc, inst_auth("inst_w1"), Submit_Input{
+		summary = "try bypass", output_json = `{"ok":true}`, verify = "none",
+	})
+	testing.expect(t, !vn_ok && strings.contains(vn_err.details_json, "verify_required"), "verify:none rejected when brief.verify != none even with output contract")
+
+	// 3. M2-C3: verify exit for wrong attempt_no is ignored
+	on_verify_session_exited(&fx.svc, Verify_Exit{
+		session_id = "sh_stale", label = "verify task_peek #99 @abc",
+		owner_user_id = "u1", status = "exited", exit_code = 0, exit_code_set = true,
+		head_at_end = "abc", dirty = "false",
+	})
+	_, has_v := get_facet(&fx.svc, get_task(fx, "task_peek"), 1, FACET_VERIFY)
+	testing.expect(t, !has_v, "stale attempt verify exit ignored")
+
+	// 4. M2-M5: oversized vault-armored strings are not truncated in handoff_body_json or findings_json_capped
+	big_cipher := strings.concatenate({"ENC:v1:", strings.repeat("A", HANDOFF_SUMMARY_MAX + 500, context.temp_allocator)}, context.temp_allocator)
+	hb := handoff_body_json(big_cipher, fmt.tprintf(`{{"next_steps":"%s"}}`, big_cipher))
+	testing.expect(t, !strings.contains(hb, `"truncated":true`) && strings.contains(hb, big_cipher), "ENC:v1: handoff never byte-sliced")
+	fc, ftrunc := findings_json_capped(fmt.tprintf(`[{{"text":"%s"}}]`, big_cipher))
+	testing.expect(t, !ftrunc && strings.contains(fc, big_cipher), "ENC:v1: finding never byte-sliced")
 }

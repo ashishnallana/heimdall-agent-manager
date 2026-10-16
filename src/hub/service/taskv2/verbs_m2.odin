@@ -107,12 +107,17 @@ write_submit_facets :: proc(svc: ^Service, u: ^Uow, task: domain.Task, attempt_n
 
 // verify_gate (plan §4d): outcome=submitted requires a `verify` facet on this
 // attempt with exit_code==0 ∧ head_at_start==head_at_end==submit.head ∧
-// dirty==false. `dirty` may be null when the chain has no VCS directory; the
-// facet must then postdate the attempt's last handoff/note. verify:"none" is
-// allowed only when the brief declares an output contract (flag stored).
+// dirty==false (and submit's own working tree not dirty). `dirty` may be null
+// when the chain has no VCS directory; the facet must then postdate the
+// attempt's last handoff/note. verify:"none" is allowed only when the brief
+// itself says `verify: "none"` AND declares an output contract.
 @(private = "file")
 verify_gate :: proc(svc: ^Service, task: domain.Task, attempt_no: int, input: Submit_Input) -> domain.Domain_Error {
-	if input.verify == "none" {
+	bverify := strings.trim_space(jsonx.extract_string(task.brief_json, "verify", "", true, context.temp_allocator))
+	if input.verify == "none" || bverify == "none" {
+		if bverify != "none" {
+			return domain.domain_error(.Conflict, "verify:none is allowed only when brief.verify is \"none\"", `{"code":"verify_required"}`)
+		}
 		if _, has_output := jsonx.extract_raw_object(task.brief_json, "output", true, context.temp_allocator); has_output do return domain.Domain_Error{}
 		return domain.domain_error(.Conflict, "verify:none is allowed only when the brief declares an output contract", `{"code":"verify_required"}`)
 	}
@@ -121,12 +126,22 @@ verify_gate :: proc(svc: ^Service, task: domain.Task, attempt_no: int, input: Su
 	if n, nok := jsonx.extract_int_found(f.body_json, "exit_code", true); !nok || n != 0 {
 		return domain.domain_error(.Conflict, "last verify run did not pass (exit_code != 0)", `{"code":"verify_failed"}`)
 	}
+	fcmd := strings.trim_space(jsonx.extract_string(f.body_json, "command", "", true, context.temp_allocator))
+	if fcmd != "" && bverify != "" && fcmd != bverify {
+		return domain.domain_error(.Conflict, "verify ran a command different from brief.verify: re-run `ham-ctl verify`", `{"code":"verify_required"}`)
+	}
 	head_start := jsonx.extract_string(f.body_json, "head_at_start", "", true, context.temp_allocator)
 	head_end := jsonx.extract_string(f.body_json, "head_at_end", "", true, context.temp_allocator)
 	submit_head := ""
-	if strings.has_prefix(strings.trim_space(input.vcs_json), "{") do submit_head = jsonx.extract_string(input.vcs_json, "head", "", true, context.temp_allocator)
-	if head_start != head_end || (submit_head != "" && head_end != submit_head) {
+	submit_has_vcs := strings.has_prefix(strings.trim_space(input.vcs_json), "{")
+	if submit_has_vcs do submit_head = jsonx.extract_string(input.vcs_json, "head", "", true, context.temp_allocator)
+	if head_start != head_end || (head_end != "" && submit_head != head_end) {
 		return domain.domain_error(.Conflict, "verify ran at a different head than the one being submitted: re-run `ham-ctl verify`", `{"code":"verify_stale"}`)
+	}
+	if submit_has_vcs {
+		if sdirty, sdok := jsonx.extract_bool_literal(input.vcs_json, "dirty", true); sdok && sdirty {
+			return domain.domain_error(.Conflict, "working tree is dirty at submit time: commit or clean, then re-run `ham-ctl verify`", `{"code":"verify_dirty"}`)
+		}
 	}
 	if dirty, dok := jsonx.extract_bool_literal(f.body_json, "dirty", true); dok {
 		if dirty do return domain.domain_error(.Conflict, "verify ran on a dirty tree: commit, then re-run `ham-ctl verify`", `{"code":"verify_dirty"}`)
@@ -375,6 +390,7 @@ Verify_Exit :: struct {
 	head_at_end:   string, // bridge enrichment on the exit frame, "" when unknown
 	dirty:         string, // "true" | "false" | "" (unknown / no VCS)
 	tail:          string, // last lines of the log (≤ 40), optional
+	cmd:           string, // session command when known (checked against brief.verify)
 }
 
 parse_verify_label :: proc(label: string) -> (task_id, head: string, attempt_no: int, ok: bool) {
@@ -397,14 +413,17 @@ on_verify_session_exited :: proc(svc: ^Service, exit: Verify_Exit) {
 	if svc == nil || svc.repo == nil do return
 	task_id, head_start, attempt_no, ok := parse_verify_label(exit.label)
 	if !ok do return
+	u, uok, _ := begin_uow(svc)
+	if !uok do return
 	task, tok, _ := iface.taskchain_get_task(svc.repo, domain.Task_ID(task_id))
-	if !tok || string(task.owner_user_id) != exit.owner_user_id do return
+	if !tok || string(task.owner_user_id) != exit.owner_user_id || attempt_no != task.attempt_no {
+		_, _ = end_uow(svc, &u, false)
+		return
+	}
 	code := exit.exit_code if exit.exit_code_set else -1
 	if exit.status == "killed" || exit.status == "failed" {
 		if !exit.exit_code_set || exit.status == "failed" do code = -1
 	}
-	u, uok, _ := begin_uow(svc)
-	if !uok do return
 	// Don't let an unobserved inventory reap overwrite an already-observed verify facet.
 	if !exit.exit_code_set {
 		if existing, has := get_facet(svc, task, attempt_no, FACET_VERIFY); has {
@@ -414,12 +433,15 @@ on_verify_session_exited :: proc(svc: ^Service, exit: Verify_Exit) {
 			}
 		}
 	}
+	cmd := strings.trim_space(exit.cmd)
+	if cmd == "" do cmd = strings.trim_space(jsonx.extract_string(task.brief_json, "verify", "", true, context.temp_allocator))
 	o := json_begin()
+	if cmd != "" do json_str(&o, "command", cmd)
 	json_int(&o, "exit_code", i64(code))
 	json_int(&o, "duration_ms", exit.duration_ms)
 	json_str(&o, "log_ref", exit.session_id)
 	json_str(&o, "head_at_start", head_start)
-	json_str(&o, "head_at_end", exit.head_at_end if exit.head_at_end != "" else head_start)
+	json_str(&o, "head_at_end", exit.head_at_end)
 	switch exit.dirty {
 	case "true": json_bool(&o, "dirty", true)
 	case "false": json_bool(&o, "dirty", false)

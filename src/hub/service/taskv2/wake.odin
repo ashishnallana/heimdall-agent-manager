@@ -80,6 +80,15 @@ effect_stop :: proc(u: ^Uow, bridge_id, chain_id, instance_id: string) {
 	u.effects.stops[key] = stops
 }
 
+effect_has_stop :: proc(u: ^Uow, bridge_id, chain_id, instance_id: string) -> bool {
+	if u == nil || bridge_id == "" || instance_id == "" do return false
+	key := effects_key(&u.effects, bridge_id, chain_id)
+	if stops, has := u.effects.stops[key]; has {
+		for s in stops do if s == instance_id do return true
+	}
+	return false
+}
+
 @(private = "file")
 remove_stop :: proc(u: ^Uow, key, instance_id: string) {
 	stops, has := u.effects.stops[key]

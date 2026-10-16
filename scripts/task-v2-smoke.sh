@@ -137,8 +137,11 @@ mkdir -p "$BIN" "$LOGS" "$WORK/run-b" "$WORK/bridge-data" "$WORK/fakebin" "$WORK
 : > "$LOGS/hub.log"; : > "$LOGS/bridge.log"; rm -f "$LOGS"/agent-*.log
 
 if [ -z "${SMOKE_SKIP_BUILD:-}" ]; then
+  SQLITE_LIB="$(dirname "$(find /nix/store -maxdepth 3 -name 'libsqlite3.so' 2>/dev/null | head -n1)")"
+  EXTRA_LINKER=""
+  [ -n "$SQLITE_LIB" ] && [ -d "$SQLITE_LIB" ] && EXTRA_LINKER="-extra-linker-flags:-L$SQLITE_LIB"
   for t in hub bridge ctl; do
-    if ( cd "$ROOT" && odin build "src/$t" -collection:odin_test=src -out:"$BIN/ham-$t.new" ) >"$LOGS/build-$t.log" 2>&1; then
+    if ( cd "$ROOT" && odin build "src/$t" -collection:odin_test=src ${EXTRA_LINKER:+"$EXTRA_LINKER"} -out:"$BIN/ham-$t.new" ) >"$LOGS/build-$t.log" 2>&1; then
       mv -f "$BIN/ham-$t.new" "$BIN/ham-$t"
     elif [ "$t" = ctl ] && [ -x "$BIN/ham-ctl" ]; then
       # ctl is being edited by another agent; the shim only needs start-success /

@@ -126,8 +126,13 @@ export const CreateTaskModal: React.FC<CreateTaskModalProps> = ({
       reviewRolesText,
       assignee: assigneeMode === 'agent' ? assigneeAgentId : '',
     });
-    if (briefBuild.errors.length > 0) {
-      setErrorMsg(briefBuild.errors[0]);
+    // Allow draft creation when brief fields are still being sketched; reject only
+    // when provided values exceed hub caps or violate verify:"none" rules.
+    const hardBriefError = briefBuild.errors.find(
+      (msg) => msg.includes('exceeds') || msg.includes('at most') || msg.includes('output contract'),
+    );
+    if (hardBriefError) {
+      setErrorMsg(hardBriefError);
       return;
     }
 

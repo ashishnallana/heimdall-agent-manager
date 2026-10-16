@@ -198,11 +198,13 @@ fold_task :: proc(events: []domain.Task_Event, input: Fold_Input) -> Task_View {
 			v.blocked_on_json = ""
 			v.budget_exhausted = false
 			v.oscillating = false
+			v.review_rounds = 0
 			v.last_release = .Reopened
 		case EV_ANSWERED:
 			v.blocked_on_json = ""
 			v.budget_exhausted = false
 			v.oscillating = false
+			v.review_rounds = 0
 		case:
 			// audit-only kinds
 		}
