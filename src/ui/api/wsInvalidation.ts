@@ -3,7 +3,6 @@ import { tasksApi } from './endpoints/tasks';
 import { normalizeChain, workspaceApi } from './endpoints/workspace';
 import { chatEndpoints } from './endpoints/chats';
 import { patchAgentCachesFromWs } from './endpoints/agents';
-import { patchChatApprovalCachesFromWs, patchMergeDecisionCachesFromWs } from './endpoints/attention';
 import { patchMemoryCachesFromWs } from './endpoints/memory';
 import { bridgeSupportApi } from './endpoints/bridgeSupport';
 import { upsertTaskInList, upsertTaskLogEvent } from './taskCache';
@@ -562,7 +561,6 @@ function handleMergeDecisionPending(dispatch: any, payload: any, ctx: WsCtx) {
     ]));
   }
   dispatch(attentionEventReceived());
-  patchMergeDecisionCachesFromWs(dispatch, payload);
 }
 
 // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
@@ -789,7 +787,12 @@ export function handleUserWsEvent(dispatch: any, payload: any, ctx: WsCtx = {}) 
       return;
     case 'chat_approval':
       dispatch(attentionEventReceived());
-      patchChatApprovalCachesFromWs(dispatch, payload);
+      return;
+    case 'attention_changed':
+      // Attention deck: an invalidation hint only ({kinds}, no counts). Refetch
+      // the bar summary for whatever range the user picked; the open deck's
+      // item query shares the tag, closed decks have no subscriber to refetch.
+      dispatch(heimdallApi.util.invalidateTags([{ type: 'Attention', id: 'ALL' }]));
       return;
     case 'memory_event':
       handleMemoryEvent(dispatch, payload);

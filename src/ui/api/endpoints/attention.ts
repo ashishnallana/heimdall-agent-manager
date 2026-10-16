@@ -1,146 +1,115 @@
-import * as daemonApi from '../daemonApi';
-import { ChatApproval, normalizeApproval, normalizeMergeDecision, sortApprovals } from '../attentionCatalog';
-import { heimdallApi, withSessionQuery } from '../heimdallApi';
+// Attention deck v1: the hub's card-backed attention API.
+//
+//   GET /api/v1/attention/summary?since=   counts only (the always-visible bar)
+//   GET /api/v1/attention?since=&kind=     counts + the cards the deck renders
+//
+// Both carry the 'Attention' tag. The hub's attention_changed WebSocket hint
+// invalidates it (wsInvalidation.ts), so the bar refetches for whatever range
+// the user picked, and the deck's item query refetches only while it is open
+// (RTK only refetches subscribed queries).
+import { cookieJsonFetch, customQueryError } from '../cookieFetch';
+import { heimdallApi } from '../heimdallApi';
 
-function auth(session: any) {
-  return { daemonUrl: session.daemonUrl, clientToken: session.clientToken };
+export type AttentionRange = '6h' | '24h' | '7d' | 'all';
+export type AttentionKind = 'message' | 'task';
+export const ATTENTION_RANGES: readonly AttentionRange[] = ['6h', '24h', '7d', 'all'];
+
+export type AttentionCounts = { total: number; older: number; message: number; task: number };
+
+export type AttentionExcerpt = { author_name: string; body: string; at: string };
+
+export type AttentionTaskDetails = {
+  priority: string;
+  status: string;
+  bridge_id: string;
+  assignee_name: string;
+  excerpt: AttentionExcerpt | null;
+};
+
+export type AttentionMessageDetails = {
+  excerpt: AttentionExcerpt;
+  options: string[];
+  other_unread: number;
+};
+
+export type AttentionTaskRefs = { chain_id: string; task_id: string };
+export type AttentionMessageRefs = { conversation_id: string; agent_instance_id: string; message_id: string };
+
+type AttentionItemBase = {
+  card_id: string;
+  provider: string;
+  reason: string;
+  urgency: 'error' | 'warn' | 'info';
+  status: string;
+  attention_since: string;
+  /** May be vault ciphertext; render through the vault helpers. */
+  title: string;
+  rationale: string;
+  primary_op: string | null;
+  operations: Array<{ op: string; label?: string }>;
+  context: { chain_title: string; agent_name: string; project_name: string };
+};
+
+export type AttentionTaskItem = AttentionItemBase & { kind: 'task'; details: AttentionTaskDetails; action_refs: AttentionTaskRefs };
+export type AttentionMessageItem = AttentionItemBase & { kind: 'message'; details: AttentionMessageDetails; action_refs: AttentionMessageRefs };
+export type AttentionItem = AttentionTaskItem | AttentionMessageItem;
+
+export type AttentionSummary = { since: AttentionRange; counts: AttentionCounts };
+export type AttentionResult = AttentionSummary & { items: AttentionItem[] };
+
+const EMPTY_COUNTS: AttentionCounts = { total: 0, older: 0, message: 0, task: 0 };
+
+export function normalizeAttentionCounts(raw: any): AttentionCounts {
+  const n = (v: any) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.floor(v) : 0);
+  if (!raw || typeof raw !== 'object') return { ...EMPTY_COUNTS };
+  return { total: n(raw.total), older: n(raw.older), message: n(raw.message), task: n(raw.task) };
 }
 
-function approvalTagId(approval: any, fallback = '') {
-  return String(approval?.approvalId || approval?.approval_id || approval?.id || fallback || '');
+/** Keeps only well-formed items of the kinds v1 renders. */
+export function normalizeAttentionItems(raw: any): AttentionItem[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((item: any) =>
+    item && typeof item.card_id === 'string' && (item.kind === 'task' || item.kind === 'message') &&
+    item.details && typeof item.details === 'object' && item.action_refs && typeof item.action_refs === 'object');
 }
 
-function mergeDecisionTagId(decision: any, fallback = '') {
-  return String(decision?.chainId || decision?.chain_id || fallback || '');
-}
-
-function openNonExpiredApprovals(records: any[]) {
-  const now = Date.now();
-  return sortApprovals((records || [])
-    .map(normalizeApproval)
-    .filter((approval: ChatApproval) => approval.state === 'open' && (!approval.expiresAtUnixMs || approval.expiresAtUnixMs > now)));
+function attentionQuery(path: string, range: AttentionRange, kind?: AttentionKind) {
+  const params = new URLSearchParams({ since: range });
+  if (kind) params.set('kind', kind);
+  return cookieJsonFetch(`${path}?${params.toString()}`);
 }
 
 export const attentionApi = heimdallApi.injectEndpoints({
   endpoints: (build) => ({
-    listChatApprovals: build.query<any, void>({
-      queryFn: withSessionQuery(async (_arg, { session }) => {
-        if (!session?.clientToken) return { approvals: [] };
-        const data = await daemonApi.listPendingChatApprovals(auth(session));
-        return { approvals: openNonExpiredApprovals(data.approvals || []) };
-      }),
-      providesTags: (result) => [
-        { type: 'ChatApprovals' as const, id: 'ALL' },
-        { type: 'Attention' as const, id: 'ALL' },
-        ...((result?.approvals || []).map((approval: any) => ({ type: 'ChatApprovals' as const, id: approvalTagId(approval) })).filter((tag: any) => Boolean(tag.id))),
-      ],
+    getAttentionSummary: build.query<AttentionSummary, { since: AttentionRange }>({
+      queryFn: async ({ since }) => {
+        try {
+          const data = await attentionQuery('/attention/summary', since);
+          return { data: { since: (data?.since || since) as AttentionRange, counts: normalizeAttentionCounts(data?.counts) } };
+        } catch (error) {
+          return { error: customQueryError(error) as any };
+        }
+      },
+      providesTags: [{ type: 'Attention' as const, id: 'ALL' }],
     }),
-    fetchAttention: build.query<any, void>({
-      queryFn: withSessionQuery(async (_arg, { session }) => {
-        if (!session?.clientToken) return { mergeDecisions: [], raw: null };
-        const data = await daemonApi.fetchAttention(auth(session));
-        return {
-          mergeDecisions: (data.merge_decisions || []).map(normalizeMergeDecision),
-          raw: data,
-        };
-      }),
-      providesTags: (result) => [
-        { type: 'Attention' as const, id: 'ALL' },
-        { type: 'MergeDecisions' as const, id: 'ALL' },
-        ...((result?.mergeDecisions || []).map((decision: any) => ({ type: 'MergeDecisions' as const, id: mergeDecisionTagId(decision) })).filter((tag: any) => Boolean(tag.id))),
-      ],
-    }),
-    answerChatApproval: build.mutation<any, { approvalId: string; reply: string }>({
-      queryFn: withSessionQuery(async (payload, { session }) => {
-        if (!session?.clientToken) throw new Error('Not authenticated');
-        return daemonApi.answerChatApproval({ ...auth(session), approvalId: payload.approvalId, reply: payload.reply });
-      }),
-      invalidatesTags: (_result, _error, payload) => [
-        { type: 'ChatApprovals' as const, id: 'ALL' },
-        { type: 'ChatApprovals' as const, id: payload.approvalId },
-        { type: 'Attention' as const, id: 'ALL' },
-      ],
-    }),
-    dismissChatApproval: build.mutation<any, { approvalId: string; reason?: string; notify?: boolean }>({
-      queryFn: withSessionQuery(async (payload, { session }) => {
-        if (!session?.clientToken) throw new Error('Not authenticated');
-        return daemonApi.dismissChatApproval({ ...auth(session), approvalId: payload.approvalId, reason: payload.reason, notify: payload.notify });
-      }),
-      invalidatesTags: (_result, _error, payload) => [
-        { type: 'ChatApprovals' as const, id: 'ALL' },
-        { type: 'ChatApprovals' as const, id: payload.approvalId },
-        { type: 'Attention' as const, id: 'ALL' },
-      ],
-    }),
-    executeMergeViaChain: build.mutation<any, { chainId: string; instructions: string; target?: string }>({
-      queryFn: withSessionQuery(async (payload, { session }) => {
-        if (!session?.clientToken) throw new Error('Not authenticated');
-        return daemonApi.executeWorkspaceMerge({
-          ...auth(session),
-          chainId: payload.chainId,
-          target: payload.target,
-          mode: 'chain',
-          instructions: payload.instructions,
-        });
-      }),
-      invalidatesTags: (_result, _error, payload) => [
-        { type: 'MergeDecisions' as const, id: 'ALL' },
-        { type: 'MergeDecisions' as const, id: payload.chainId },
-        { type: 'Attention' as const, id: 'ALL' },
-        { type: 'Workspace' as const, id: payload.chainId },
-      ],
+    getAttention: build.query<AttentionResult, { since: AttentionRange; kind?: AttentionKind }>({
+      queryFn: async ({ since, kind }) => {
+        try {
+          const data = await attentionQuery('/attention', since, kind);
+          return {
+            data: {
+              since: (data?.since || since) as AttentionRange,
+              counts: normalizeAttentionCounts(data?.counts),
+              items: normalizeAttentionItems(data?.items),
+            },
+          };
+        } catch (error) {
+          return { error: customQueryError(error) as any };
+        }
+      },
+      providesTags: [{ type: 'Attention' as const, id: 'ALL' }],
     }),
   }),
 });
 
-export function patchChatApprovalCachesFromWs(dispatch: any, payload: any) {
-  const raw = payload?.approval || null;
-  const approvalId = String(raw?.approval_id || raw?.approvalId || payload?.approval_id || payload?.approvalId || '');
-  if (raw && approvalId) {
-    const approval = normalizeApproval(raw);
-    dispatch(attentionApi.util.updateQueryData('listChatApprovals', undefined, (draft: any) => {
-      const rows = draft?.approvals || (draft.approvals = []);
-      const existingIndex = rows.findIndex((item: any) => item.approvalId === approvalId);
-      const isOpen = approval.state === 'open' && (!approval.expiresAtUnixMs || approval.expiresAtUnixMs > Date.now());
-      if (isOpen && String(payload?.event || '') === 'chat_approval_created') {
-        if (existingIndex >= 0) rows[existingIndex] = approval;
-        else rows.push(approval);
-        draft.approvals = sortApprovals(rows);
-      } else if (existingIndex >= 0) {
-        rows.splice(existingIndex, 1);
-      }
-    }));
-  }
-  dispatch(heimdallApi.util.invalidateTags([
-    { type: 'ChatApprovals', id: 'ALL' },
-    { type: 'Attention', id: 'ALL' },
-    ...(approvalId ? [{ type: 'ChatApprovals' as const, id: approvalId }] : []),
-  ]));
-}
-
-export function patchMergeDecisionCachesFromWs(dispatch: any, payload: any) {
-  const chainId = String(payload?.chain_id || payload?.chainId || '');
-  if (chainId) {
-    const decision = normalizeMergeDecision(payload);
-    dispatch(attentionApi.util.updateQueryData('fetchAttention', undefined, (draft: any) => {
-      if (!draft) return;
-      const rows = draft.mergeDecisions || (draft.mergeDecisions = []);
-      const index = rows.findIndex((item: any) => item.chainId === chainId);
-      if (index >= 0) rows[index] = { ...rows[index], ...decision };
-      else rows.unshift(decision);
-    }));
-  }
-  dispatch(heimdallApi.util.invalidateTags([
-    { type: 'MergeDecisions', id: 'ALL' },
-    { type: 'Attention', id: 'ALL' },
-    ...(chainId ? [{ type: 'MergeDecisions' as const, id: chainId }, { type: 'Workspace' as const, id: chainId }] : []),
-  ]));
-}
-
-export const {
-  useListChatApprovalsQuery,
-  useFetchAttentionQuery,
-  useAnswerChatApprovalMutation,
-  useDismissChatApprovalMutation,
-  useExecuteMergeViaChainMutation,
-} = attentionApi;
+export const { useGetAttentionSummaryQuery, useGetAttentionQuery } = attentionApi;
