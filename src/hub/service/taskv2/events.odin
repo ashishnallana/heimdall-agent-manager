@@ -30,6 +30,7 @@ EV_DEP_ADDED         :: "dep_added"          // {depends_on}
 EV_DEP_REMOVED       :: "dep_removed"        // {depends_on}
 EV_LEASE_CONFIRMED   :: "lease_confirmed"    // {lease_id}
 EV_LEASE_RESENT      :: "lease_resent"       // {lease_id}
+EV_LEASE_EXTENDED    :: "lease_extended"     // {lease_id, reason}  (clock-jump one-shot extension)
 EV_ATTEMPT_STARTED   :: "attempt_started"    // {attempt_no, vcs_base}
 EV_HEARTBEAT         :: "heartbeat"          // {lease_id, note}  (only when note is non-empty)
 EV_REVIEW_POSTED     :: "review_posted"      // {attempt_no, role, verdict, reviewer}

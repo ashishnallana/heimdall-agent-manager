@@ -40,6 +40,9 @@ Service :: struct {
 	// M1 state (timers / lease cache) lives behind this mutex; see timers.odin.
 	state_mutex:         sync.Mutex,
 	timers:              Timer_Service,
+	// wake_observer sees every wake_agent push after commit (tests).
+	wake_observer:       proc(ctx: rawptr, cmd: Wake_Command),
+	wake_observer_ctx:   rawptr,
 }
 
 new_service :: proc(repo: ^iface.Taskchain_Repository, agents: ^iface.Agent_Repository, bridges: ^iface.Bridge_Repository, clock: ^platform.Clock, ids: ^platform.ID_Generator) -> Service {
@@ -106,6 +109,15 @@ Effects :: struct {
 	publishes:   [dynamic]Publish_Effect,
 	// chains whose task set changed terminal-ness (→ on_tasks_changed).
 	changed_chains: [dynamic]Changed_Chain,
+	// JIT launch reservations taken in the bridge runtime registry during this
+	// UoW; cancelled on rollback (the instance row is rolled back with the tx).
+	reservations: [dynamic]Jit_Reservation,
+}
+
+Jit_Reservation :: struct {
+	bridge_id:   string,
+	generation:  int,
+	instance_id: string,
 }
 
 Publish_Effect :: struct {
@@ -135,6 +147,7 @@ begin_uow :: proc(svc: ^Service) -> (Uow, bool, domain.Domain_Error) {
 	u.effects.stops = make(map[string][dynamic]string)
 	u.effects.publishes = make([dynamic]Publish_Effect)
 	u.effects.changed_chains = make([dynamic]Changed_Chain)
+	u.effects.reservations = make([dynamic]Jit_Reservation)
 	if svc.uow_factory == nil do return u, true, domain.Domain_Error{}
 	tx, ok, err := iface.unit_of_work_begin(svc.uow_factory)
 	if !ok do return u, false, err
@@ -157,8 +170,17 @@ end_uow :: proc(svc: ^Service, u: ^Uow, ok: bool) -> (bool, domain.Domain_Error)
 		u.has_tx = false
 	}
 	if committed do flush_effects(svc, &u.effects)
+	else do cancel_reservations(svc, &u.effects)
 	destroy_effects(&u.effects)
 	return committed, err
+}
+
+@(private = "file")
+cancel_reservations :: proc(svc: ^Service, e: ^Effects) {
+	if svc.agent_service == nil do return
+	for r in e.reservations {
+		project.bridge_runtime_instance_cancel_reservation(svc.agent_service.bridge_runtime_registry, r.bridge_id, r.generation, r.instance_id)
+	}
 }
 
 @(private = "file")
@@ -169,6 +191,7 @@ destroy_effects :: proc(e: ^Effects) {
 	delete(e.stops)
 	delete(e.publishes)
 	delete(e.changed_chains)
+	delete(e.reservations)
 }
 
 @(private = "file")
@@ -234,6 +257,11 @@ refold_task :: proc(svc: ^Service, u: ^Uow, task: domain.Task, tasks: []domain.T
 	if projection_equal(task, next) do return task, view, true, domain.Domain_Error{}
 	saved, ok, err := iface.taskchain_save_task(svc.repo, next)
 	if !ok do return task, view, false, err
+	// Column-backed alerts: ready_unclaimed (ready_since) and blocked-on-human
+	// re-alert (blocked_on_json) are armed whenever the column they key on moves.
+	if saved.ready_since != task.ready_since || saved.blocked_on_json != task.blocked_on_json || saved.state != task.state {
+		arm_task_timers(svc, saved)
+	}
 	if u != nil {
 		effect_publish_task(u, saved, "updated")
 		if domain.task_state_is_terminal(task.state) != domain.task_state_is_terminal(saved.state) {
