@@ -57,7 +57,7 @@ import React, {
   type KeyboardEvent,
 } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
-import { Button, Input, Icon, Select } from '@ui';
+import { Button, Input, Icon, Modal, ModalBody, ModalFooter, Select } from '@ui';
 
 import { cookieJsonFetch, cookieMutation } from '../../api/cookieFetch';
 import { fetchBridgePublicKey, unsealBridgeE2EE } from '../../api/endpoints/bridges';
@@ -83,6 +83,7 @@ import {
   navigateEnrollmentProviderSetup,
   nextAvailableBridgeLabel,
   RESTART_CONFIRMATION_TIMEOUT_SECONDS,
+  WRONG_MASTER_PASSWORD_MESSAGE,
 } from './bridgeEnrollmentCompletion';
 import {
   bridgeApprovalBlocked,
@@ -246,6 +247,8 @@ export default function BridgeEnrollmentApprovalPage() {
   const [bridgeConnected, setBridgeConnected] = useState(false);
   const [delivery, setDelivery] = useState<DeliveryState>({ phase: 'idle' });
   const [masterPassword, setMasterPassword] = useState('');
+  const [passwordError, setPasswordError] = useState('');
+  const [passwordBusy, setPasswordBusy] = useState(false);
   const [rememberSession, setRememberSession] = useState(true);
   // "Attach to an existing bridge" instead of minting a new one. Empty means
   // the default (unchanged) behaviour: create a new bridge.
@@ -586,10 +589,26 @@ export default function BridgeEnrollmentApprovalPage() {
       await deliverVaultKey(bridgeId, active, 'restarted');
       return;
     }
+    setPasswordError('');
     setDelivery({ phase: 'need-password', target: 'restarted' });
   }, [bridgeId, isUnlocked, deliverVaultKey]);
 
   /** Obtains the vault key without ever degrading to a weaker payload. */
+  const deliverToEnrollment = useCallback(
+    async (targetBridgeId: string) => {
+      const active = getActiveBridgeVaultKeyMaterial() || getActiveVaultKey();
+      if (isUnlocked && active && canUnsealWithKey(active)) {
+        await deliverVaultKey(targetBridgeId, active);
+        return;
+      }
+      // A hardened or IndexedDB-restored handle cannot be wrapped, which is the
+      // expected case rather than a malfunction. Ask the operator.
+      setPasswordError('');
+      setDelivery({ phase: 'need-password', target: 'enrollment' });
+    },
+    [isUnlocked, deliverVaultKey],
+  );
+
   const startDelivery = useCallback(
     async (targetBridgeId: string) => {
       if (!(await waitForAuthenticatedBridge(targetBridgeId))) return;
@@ -598,25 +617,20 @@ export default function BridgeEnrollmentApprovalPage() {
         setDelivery({ phase: 'not-needed' });
         return;
       }
-      const active = getActiveBridgeVaultKeyMaterial() || getActiveVaultKey();
-      if (isUnlocked && active && canUnsealWithKey(active)) {
-        await deliverVaultKey(targetBridgeId, active);
-        return;
-      }
-      // A hardened or IndexedDB-restored handle cannot be wrapped, which is the
-      // expected case rather than a malfunction. Ask the operator.
-      setDelivery({ phase: 'need-password', target: 'enrollment' });
+      await deliverToEnrollment(targetBridgeId);
     },
-    [isUnlocked, deliverVaultKey, vaultEnvelope, vaultQuery.isLoading, waitForAuthenticatedBridge],
+    [deliverToEnrollment, vaultEnvelope, vaultQuery.isLoading, waitForAuthenticatedBridge],
   );
 
   const handlePasswordSubmit = useCallback(
     async (e: FormEvent) => {
       e.preventDefault();
-      if (!masterPassword || !vaultEnvelope || !bridgeId) return;
+      if (!masterPassword || !vaultEnvelope || !bridgeId || passwordBusy) return;
       const target: UnsealTarget =
         delivery.phase === 'need-password' ? delivery.target : 'enrollment';
-      setDelivery({ phase: 'delivering', target });
+      setPasswordBusy(true);
+      setPasswordError('');
+      let unsealHex: string;
       try {
         const derived = await deriveKeyFromPassword(
           masterPassword,
@@ -626,7 +640,7 @@ export default function BridgeEnrollmentApprovalPage() {
         // Two shapes from one envelope, as elsewhere: the hex is what the unseal
         // protocol has to transmit and dies with this closure; the handle
         // installed as the active key is imported NON-extractable.
-        const unsealHex = await decryptVaultKeyEnvelopeHex(
+        unsealHex = await decryptVaultKeyEnvelopeHex(
           derived,
           vaultEnvelope.encrypted_vault_key,
           vaultEnvelope.vault_key_nonce,
@@ -640,19 +654,35 @@ export default function BridgeEnrollmentApprovalPage() {
         );
         dispatch(setVaultUnlocked({ key: handle, rememberSession }));
         setActiveBridgeVaultKeyMaterial(unsealHex);
+      } catch {
+        // The envelope is AES-GCM: a failed decrypt means the password is wrong.
+        // Browsers word that OperationError differently (or not at all), so say
+        // it plainly and keep the prompt open for another try.
+        setPasswordError(WRONG_MASTER_PASSWORD_MESSAGE);
         setMasterPassword('');
-        await deliverVaultKey(bridgeId, unsealHex, target);
-      } catch (err: any) {
-        const message = String(err?.message || 'That password did not unlock the vault.');
-        if (target === 'restarted') {
-          setDelivery({ phase: 'restart-unconfirmed', reason: 'sealed', vaultStatus: '', error: message });
-        } else {
-          setDelivery({ phase: 'failed', message });
-        }
+        setPasswordBusy(false);
+        return;
       }
+      setMasterPassword('');
+      setPasswordBusy(false);
+      // Delivery reports its own failures (bridge refused, went offline).
+      await deliverVaultKey(bridgeId, unsealHex, target);
     },
-    [masterPassword, vaultEnvelope, bridgeId, rememberSession, dispatch, deliverVaultKey, delivery],
+    [masterPassword, vaultEnvelope, bridgeId, passwordBusy, rememberSession, dispatch, deliverVaultKey, delivery],
   );
+
+  /** Closing the prompt skips delivery; the enrolled bridge simply stays sealed. */
+  const dismissPasswordPrompt = useCallback(() => {
+    if (passwordBusy || delivery.phase !== 'need-password') return;
+    const target = delivery.target;
+    setMasterPassword('');
+    setPasswordError('');
+    if (target === 'restarted') {
+      setDelivery({ phase: 'restart-unconfirmed', reason: 'sealed', vaultStatus: '', error: '' });
+    } else {
+      setDelivery({ phase: 'failed', message: 'You closed the password prompt.' });
+    }
+  }, [passwordBusy, delivery]);
 
   // ── The decision ────────────────────────────────────────────────────────
 
@@ -1014,46 +1044,95 @@ export default function BridgeEnrollmentApprovalPage() {
           )}
           {delivery.phase === 'failed' && (
             <Banner tone="danger" title="The vault key was not delivered.">
-              {delivery.message} The enrollment itself succeeded; the bridge is approved but still sealed. You
-              can unlock it from Settings → Bridges.
+              <p style={{ margin: '0 0 8px' }}>
+                {delivery.message} The enrollment itself succeeded; the bridge is approved but still sealed.
+                Retry now, or unlock it later from Settings → Bridges.
+              </p>
+              {bridgeId && (
+                <Button
+                  data-debug-id="enrollment-retry-delivery-btn"
+                  variant="secondary"
+                  onClick={() => void deliverToEnrollment(bridgeId)}
+                >
+                  Retry
+                </Button>
+              )}
             </Banner>
           )}
-          {delivery.phase === 'need-password' && (
-            <form onSubmit={handlePasswordSubmit} style={{ marginTop: 12 }}>
-              <Banner tone="warn" title="Enter your master password to finish.">
-                This browser holds the vault key in a form that cannot be wrapped for a bridge, so the key has
-                to be derived again here. It is used for this delivery and not stored.
-              </Banner>
-              <Input
-                data-debug-id="enrollment-master-password-input"
-                type="password"
-                value={masterPassword}
-                autoComplete="current-password"
-                placeholder="Master password"
-                onChange={(value) => setMasterPassword(value)}
-              />
-              <label
-                data-debug-id="enrollment-remember-session-label"
-                style={{ display: 'block', fontSize: '0.8rem', margin: '8px 0' }}
-              >
-                <input
-                  data-debug-id="enrollment-remember-session-checkbox"
-                  type="checkbox"
-                  checked={rememberSession}
-                  onChange={(e) => setRememberSession(e.target.checked)}
-                />{' '}
-                Keep the vault unlocked for this session
-              </label>
-              <Button
-                data-debug-id="enrollment-deliver-vault-key-btn"
-                variant="primary"
-                type="submit"
-                disabled={!masterPassword}
-              >
-                Deliver vault key
-              </Button>
+          <Modal
+            open={delivery.phase === 'need-password'}
+            onOpenChange={(open) => { if (!open) dismissPasswordPrompt(); }}
+            title="Unlock vault for this bridge"
+            data-debug-id="enrollment-unlock-modal"
+          >
+            <form onSubmit={(e) => void handlePasswordSubmit(e)}>
+              <ModalBody className="space-y-4">
+                <div className="flex items-center gap-2">
+                  <Icon name="lock" size="md" className="text-accent" />
+                  <h3 className="text-base font-semibold text-primary">Unlock vault for this bridge</h3>
+                </div>
+                <p className="text-xs leading-relaxed text-muted">
+                  Enter your master password to deliver the vault key to the bridge. It is used for this delivery
+                  only and is not stored.
+                </p>
+                <Input
+                  data-debug-id="enrollment-master-password-input"
+                  type="password"
+                  value={masterPassword}
+                  autoComplete="current-password"
+                  placeholder="Master password"
+                  autoFocus
+                  required
+                  className="min-h-[44px] w-full"
+                  onChange={(value) => {
+                    setMasterPassword(value);
+                    if (passwordError) setPasswordError('');
+                  }}
+                />
+                <label
+                  data-debug-id="enrollment-remember-session-label"
+                  className="flex min-h-[44px] cursor-pointer items-center gap-2 text-xs text-muted"
+                >
+                  <input
+                    data-debug-id="enrollment-remember-session-checkbox"
+                    type="checkbox"
+                    checked={rememberSession}
+                    onChange={(e) => setRememberSession(e.target.checked)}
+                    className="min-h-[20px] min-w-[20px] rounded text-accent focus:ring-accent"
+                  />
+                  <span>Keep the vault unlocked for this session</span>
+                </label>
+                {passwordError ? (
+                  <div
+                    role="alert"
+                    data-debug-id="enrollment-unlock-modal-error"
+                    className="rounded-lg border border-danger/30 bg-danger-soft p-2.5 text-xs text-danger"
+                  >
+                    {passwordError}
+                  </div>
+                ) : null}
+              </ModalBody>
+              <ModalFooter>
+                <Button
+                  variant="secondary"
+                  data-debug-id="enrollment-unlock-modal-cancel"
+                  disabled={passwordBusy}
+                  onClick={dismissPasswordPrompt}
+                >
+                  Not now
+                </Button>
+                <Button
+                  data-debug-id="enrollment-deliver-vault-key-btn"
+                  variant="primary"
+                  type="submit"
+                  loading={passwordBusy}
+                  disabled={!masterPassword}
+                >
+                  Unlock &amp; deliver
+                </Button>
+              </ModalFooter>
             </form>
-          )}
+          </Modal>
 
         </>
       )}

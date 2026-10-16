@@ -9,6 +9,7 @@ import {
   nextAvailableBridgeLabel,
   RESTART_CONFIRMATION_TIMEOUT_SECONDS,
   RESTART_SEALED_CONFIRM_POLLS,
+  WRONG_MASTER_PASSWORD_MESSAGE,
 } from '../src/ui/components/enrollment/bridgeEnrollmentCompletion.ts';
 import {
   getActiveBridgeVaultKeyMaterial,
@@ -144,16 +145,22 @@ test('restart confirmation: the deadline yields timed-out, but a confirmation on
 });
 
 test('continue to provider selection stays available in every terminal state', () => {
-  for (const phase of ['delivered', 'confirming-restart', 'confirmed', 'restart-unconfirmed', 'not-needed']) {
+  // `failed` = approved and online but the key was not delivered (wrong prompt
+  // dismissed, bridge refused): the bridge is enrolled, just sealed.
+  for (const phase of ['delivered', 'confirming-restart', 'confirmed', 'restart-unconfirmed', 'not-needed', 'failed']) {
     assert.equal(enrollmentContinueAvailable(phase), true, phase);
   }
   // Re-unsealing the restarted service keeps it; the initial delivery does not offer it yet.
   assert.equal(enrollmentContinueAvailable('need-password', 'restarted'), true);
   assert.equal(enrollmentContinueAvailable('delivering', 'restarted'), true);
   assert.equal(enrollmentContinueAvailable('need-password', 'enrollment'), false);
-  for (const phase of ['idle', 'waiting-for-bridge', 'failed', 'timed-out']) {
+  for (const phase of ['idle', 'waiting-for-bridge', 'timed-out']) {
     assert.equal(enrollmentContinueAvailable(phase), false, phase);
   }
+});
+
+test('a wrong master password gets one plain, browser-independent message', () => {
+  assert.equal(WRONG_MASTER_PASSWORD_MESSAGE, 'Incorrect master password. Try again.');
 });
 
 test('REQ-T4-4: nothing but a restarted bridge reporting `unlocked` is ever confirmed', () => {

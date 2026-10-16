@@ -117,6 +117,9 @@ export function enrollmentRestartConfirmation(
  * offered whatever the vault outcome (REQ-T2-4). A sealed bridge is still an
  * enrolled bridge; the operator can unseal it later from Settings → Bridges.
  */
+/** Shown in the unlock prompt when the master password does not decrypt the vault. */
+export const WRONG_MASTER_PASSWORD_MESSAGE = 'Incorrect master password. Try again.';
+
 export function enrollmentContinueAvailable(phase: string, passwordTarget?: string): boolean {
   switch (phase) {
     case 'delivered':
@@ -124,6 +127,8 @@ export function enrollmentContinueAvailable(phase: string, passwordTarget?: stri
     case 'confirmed':
     case 'restart-unconfirmed':
     case 'not-needed':
+    // The vault key was not delivered, but the bridge is approved and online.
+    case 'failed':
       return true;
     case 'need-password':
     case 'delivering':
