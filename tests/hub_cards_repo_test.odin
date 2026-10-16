@@ -122,6 +122,56 @@ main :: proc() {
 	check(got2.source_refs_json == "[]", "got2 source_refs mismatch")
 	check(got2.operations_json == "[]", "got2 ops mismatch")
 	check(got2.guard_json == "{}", "got2 guard mismatch")
+	// Attention defaults (migration 087): kind derives from provider,
+	// attention_since from created_at, the JSON fields default to objects.
+	check(saved2.kind == domain.CARD_KIND_TASK, "card2 default kind mismatch")
+	check(got2.kind == domain.CARD_KIND_TASK, "got2 kind mismatch")
+	check(got2.attention_since == "2026-09-15T00:10:00Z", "got2 attention_since should default to created_at")
+	check(got2.details_json == "{}", "got2 details default mismatch")
+	check(got2.action_refs_json == "{}", "got2 action_refs default mismatch")
+	check(got2.source_marker == "", "got2 source_marker default mismatch")
+	check(got1.kind == domain.CARD_KIND_MEMORY, "memory_proposal card should be kind memory")
+
+	// Test 5b: attention fields round-trip through create and update, and
+	// source_refs_json is left untouched by them.
+	card3 := domain.Card{
+		card_id = domain.Card_ID("crd_msg_inst_1"),
+		owner_user_id = domain.User_ID("usr_test_1"),
+		title = "vault:v1:ciphertext-title",
+		provider = domain.CARD_PROVIDER_MESSAGE_OPTIONS,
+		source_refs_json = "[\"evidence_1\"]",
+		created_at = "2026-09-15T00:20:00Z",
+		updated_at = "2026-09-15T00:20:00Z",
+		attention_since = "2026-09-15T00:19:00Z",
+		source_marker = "msg_9",
+		details_json = "{\"options\":[\"Yes\",\"No\"],\"other_unread\":2}",
+		action_refs_json = "{\"conversation_id\":\"chat_1\",\"agent_instance_id\":\"inst_1\",\"message_id\":\"msg_9\"}",
+	}
+	_, ok_save3, err_save3 := repo.create(repo.ctx, card3)
+	check(ok_save3, fmt.tprintf("create card3: %s", err_save3.message))
+	got3, ok_get3, _ := repo.get(repo.ctx, domain.Card_ID("crd_msg_inst_1"))
+	check(ok_get3, "get card3 failed")
+	check(got3.kind == domain.CARD_KIND_MESSAGE, "card3 kind mismatch")
+	check(got3.attention_since == "2026-09-15T00:19:00Z", "card3 attention_since mismatch")
+	check(got3.source_marker == "msg_9", "card3 source_marker mismatch")
+	check(got3.details_json == card3.details_json, "card3 details_json mismatch")
+	check(got3.action_refs_json == card3.action_refs_json, "card3 action_refs_json mismatch")
+	check(got3.title == "vault:v1:ciphertext-title", "card3 ciphertext title must round-trip byte-for-byte")
+	got3.source_marker = "msg_10"
+	got3.attention_since = "2026-09-15T00:30:00Z"
+	got3.details_json = "{\"options\":[\"Ok\"],\"other_unread\":0}"
+	got3.status = domain.CARD_STATUS_RESOLVED
+	got3.updated_at = "2026-09-15T00:31:00Z"
+	_, ok_up3, err_up3 := repo.update(repo.ctx, got3)
+	check(ok_up3, fmt.tprintf("update card3: %s", err_up3.message))
+	got3b, _, _ := repo.get(repo.ctx, domain.Card_ID("crd_msg_inst_1"))
+	check(got3b.source_marker == "msg_10", "card3 marker update not persisted")
+	check(got3b.attention_since == "2026-09-15T00:30:00Z", "card3 attention_since update not persisted")
+	check(got3b.status == domain.CARD_STATUS_RESOLVED, "card3 resolved status not persisted")
+	check(got3b.details_json == "{\"options\":[\"Ok\"],\"other_unread\":0}", "card3 details update not persisted")
+	check(got3b.source_refs_json == "[\"evidence_1\"]", "source_refs_json must round-trip unchanged")
+	ok_del3, _ := repo.delete_card(repo.ctx, domain.Card_ID("crd_msg_inst_1"))
+	check(ok_del3, "delete card3 failed")
 
 	// Test 6: Update card status
 	ok_up_status, err_up_status := repo.update_status(repo.ctx, domain.Card_ID("crd_test_1"), domain.CARD_STATUS_ACCEPTED, "2026-09-15T01:00:00Z")
