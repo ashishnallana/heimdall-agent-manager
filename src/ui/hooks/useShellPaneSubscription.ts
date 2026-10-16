@@ -220,13 +220,14 @@ export function useShellPaneSubscription({
   // LEGACY TRANSPORT that paints the interactive terminal SCREEN, and the no-polling
   // decision is about how STATUS reaches the UI.
   //
-  // It cannot be deleted in this task because its replacement is gated server-side:
+  // It cannot be deleted yet because its replacement is still gated server-side:
   // ShellTerminalPane uses the WebSocket path (useShellStream) only when the
   // `streaming_terminal_pane` experiment is enabled, and the hub REFUSES the stream
-  // route with 403 for anyone else — shell_stream_experiment_enabled defaults to false
-  // (shell_session_handlers.odin:32-44, :80-83). Removing this timer would therefore
-  // leave every user without that flag with a `shell` session whose terminal never
-  // paints, which is a worse regression than the polling.
+  // route with 403 for anyone else. shell_stream_experiment_enabled defaults to ON
+  // when the user has no stored row, but an explicit opt-out is respected
+  // (shell_session_handlers.odin:34-52, :86-90). Removing this timer would therefore
+  // leave every user who turned the experiment off with a `shell` session whose
+  // terminal never paints, which is a worse regression than the polling.
   //
   // Retiring it is REQ-SHELL-19, deliberately sequenced: prove the WS path works with
   // the experiment OFF, then remove the hub gate, then delete this transport and the
