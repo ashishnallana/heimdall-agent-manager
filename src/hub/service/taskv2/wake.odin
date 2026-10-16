@@ -52,7 +52,7 @@ effect_wake_lease :: proc(svc: ^Service, u: ^Uow, lease: domain.Task_Lease, task
 		lease_id          = lease.lease_id,
 		pack_json         = build_pack_json(svc, chain, task, lease, inst),
 	}
-	key := wake_key(bridge_id, string(chain.chain_id))
+	key := effects_key(&u.effects, bridge_id, string(chain.chain_id))
 	entries := u.effects.runs[key]
 	// A later entry for the same instance in one UoW replaces the earlier one.
 	replaced := false
@@ -70,7 +70,7 @@ effect_wake_lease :: proc(svc: ^Service, u: ^Uow, lease: domain.Task_Lease, task
 // bridge checks again).
 effect_stop :: proc(u: ^Uow, bridge_id, chain_id, instance_id: string) {
 	if u == nil || bridge_id == "" || instance_id == "" do return
-	key := wake_key(bridge_id, chain_id)
+	key := effects_key(&u.effects, bridge_id, chain_id)
 	if entries, has := u.effects.runs[key]; has {
 		for e in entries do if e.agent_instance_id == instance_id do return // being restarted in this UoW
 	}
@@ -91,12 +91,6 @@ remove_stop :: proc(u: ^Uow, key, instance_id: string) {
 		}
 	}
 	u.effects.stops[key] = stops
-}
-
-// wake_key packs (bridge_id, chain_id) into one map key: "<bridge>\x00<chain>".
-@(private = "file")
-wake_key :: proc(bridge_id, chain_id: string) -> string {
-	return fmt.tprintf("%s\x00%s", bridge_id, chain_id)
 }
 
 @(private = "file")

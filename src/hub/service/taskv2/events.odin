@@ -111,7 +111,10 @@ Json_Object :: struct {
 	count: int,
 }
 
-json_begin :: proc(allocator := context.allocator) -> Json_Object {
+// Payloads are consumed within the call that builds them (appended to the
+// event row, spliced into a wake), so the builder is temp-allocated by default
+// (review S9); pass an allocator to keep one longer.
+json_begin :: proc(allocator := context.temp_allocator) -> Json_Object {
 	o := Json_Object{b = strings.builder_make(allocator)}
 	strings.write_byte(&o.b, '{')
 	return o

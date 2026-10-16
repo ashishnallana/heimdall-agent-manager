@@ -32,15 +32,30 @@ import lockorder "odin_test:lib/lockorder"
 // (card accept → change_chain_status → engine chain_closed) gets a SAVEPOINT
 // nested inside the outer transaction instead of a self-deadlock. The mutex is
 // taken at depth 0 and released when depth returns to 0; a nested commit is
-// RELEASE, a nested rollback is ROLLBACK TO + RELEASE. Effects the nested UoW
-// flushes still run inside the outer transaction — rare, and bounded by the
-// outer caller, but it is the one place this file's no-I/O rule bends.
+// RELEASE, a nested rollback is ROLLBACK TO + RELEASE. A nested UoW's
+// post-commit effects are registered with unit_of_work_after_commit and run by
+// the outermost COMMIT after the mutex is released, so the no-I/O rule holds
+// for nested units too (review S7).
 @(private = "file")
 tx_mutex: sync.Mutex
+// tx_owner_thread / tx_depth are read before the mutex is taken (to detect
+// same-thread nesting), so they are accessed atomically (review S7).
 @(private = "file")
 tx_owner_thread: int
 @(private = "file")
 tx_depth: int
+// tx_after_commit: hooks registered by nested units of work, run by the
+// outermost commit AFTER the mutex is released. Only the owner thread touches
+// it while the transaction is open. `depth` lets a nested rollback drop the
+// hooks its savepoint registered.
+@(private = "file")
+tx_after_commit: [dynamic]Pending_After_Commit
+
+@(private = "file")
+Pending_After_Commit :: struct {
+	depth: int,
+	hook:  iface.After_Commit_Hook,
+}
 
 SQLite_Unit_Of_Work_Factory :: struct {
 	conn: ^Conn,
@@ -67,16 +82,17 @@ sqlite_uow_begin :: proc(ctx: rawptr) -> (iface.Unit_Of_Work, bool, domain.Domai
 		return iface.Unit_Of_Work{}, false, domain.domain_error(.Internal_Error, "sqlite unit of work factory is not open")
 	}
 	me := sync.current_thread_id()
-	if tx_depth > 0 && tx_owner_thread == me {
+	if sync.atomic_load(&tx_depth) > 0 && sync.atomic_load(&tx_owner_thread) == me {
 		// Nested: this thread already owns the transaction.
-		sp := savepoint_name(tx_depth)
+		depth := sync.atomic_load(&tx_depth)
+		sp := savepoint_name(depth)
 		if !exec(factory.conn, sp.begin) do return iface.Unit_Of_Work{}, false, domain.domain_error(.Internal_Error, "failed to open nested savepoint")
 		uow_ctx := new(SQLite_Unit_Of_Work_Context)
 		uow_ctx.conn = factory.conn
 		uow_ctx.repos = factory.repos
-		uow_ctx.depth = tx_depth
-		tx_depth += 1
-		return iface.Unit_Of_Work{ctx = rawptr(uow_ctx), commit = sqlite_uow_commit, rollback = sqlite_uow_rollback, repos = factory.repos}, true, domain.Domain_Error{}
+		uow_ctx.depth = depth
+		sync.atomic_store(&tx_depth, depth + 1)
+		return iface.Unit_Of_Work{ctx = rawptr(uow_ctx), commit = sqlite_uow_commit, rollback = sqlite_uow_rollback, repos = factory.repos, nested = true, after_commit = sqlite_uow_after_commit}, true, domain.Domain_Error{}
 	}
 	lockorder.assert_tx_mutex_allowed()
 	sync.mutex_lock(&tx_mutex)
@@ -84,13 +100,35 @@ sqlite_uow_begin :: proc(ctx: rawptr) -> (iface.Unit_Of_Work, bool, domain.Domai
 		sync.mutex_unlock(&tx_mutex)
 		return iface.Unit_Of_Work{}, false, domain.domain_error(.Internal_Error, "failed to begin transaction")
 	}
-	tx_owner_thread = me
-	tx_depth = 1
+	sync.atomic_store(&tx_owner_thread, me)
+	sync.atomic_store(&tx_depth, 1)
 	uow_ctx := new(SQLite_Unit_Of_Work_Context)
 	uow_ctx.conn = factory.conn
 	uow_ctx.repos = factory.repos
 	uow_ctx.depth = 0
-	return iface.Unit_Of_Work{ctx = rawptr(uow_ctx), commit = sqlite_uow_commit, rollback = sqlite_uow_rollback, repos = factory.repos}, true, domain.Domain_Error{}
+	return iface.Unit_Of_Work{ctx = rawptr(uow_ctx), commit = sqlite_uow_commit, rollback = sqlite_uow_rollback, repos = factory.repos, after_commit = sqlite_uow_after_commit}, true, domain.Domain_Error{}
+}
+
+// sqlite_uow_after_commit queues a hook on the transaction this unit of work
+// belongs to; the outermost commit runs it after releasing the mutex.
+sqlite_uow_after_commit :: proc(ctx: rawptr, hook: iface.After_Commit_Hook) -> bool {
+	uow_ctx := (^SQLite_Unit_Of_Work_Context)(ctx)
+	if uow_ctx == nil || uow_ctx.closed do return false
+	if tx_after_commit == nil do tx_after_commit = make([dynamic]Pending_After_Commit)
+	append(&tx_after_commit, Pending_After_Commit{depth = uow_ctx.depth, hook = hook})
+	return true
+}
+
+// drop_after_commit_from removes hooks registered at `depth` or deeper (a
+// rolled-back savepoint takes its hooks with it).
+@(private = "file")
+drop_after_commit_from :: proc(depth: int) {
+	for i := 0; i < len(tx_after_commit); i += 1 {
+		if tx_after_commit[i].depth >= depth {
+			ordered_remove(&tx_after_commit, i)
+			i -= 1
+		}
+	}
 }
 
 Savepoint_SQL :: struct { begin, release, rollback: string }
@@ -112,8 +150,11 @@ sqlite_uow_commit :: proc(ctx: rawptr) -> (bool, domain.Domain_Error) {
 	if uow_ctx.depth > 0 {
 		sp := savepoint_name(uow_ctx.depth)
 		ok := exec(uow_ctx.conn, sp.release)
-		if !ok do exec(uow_ctx.conn, sp.rollback)
-		tx_depth -= 1
+		if !ok {
+			exec(uow_ctx.conn, sp.rollback)
+			drop_after_commit_from(uow_ctx.depth)
+		}
+		sync.atomic_store(&tx_depth, uow_ctx.depth)
 		free(uow_ctx)
 		if !ok do return false, domain.domain_error(.Internal_Error, "failed to release nested savepoint")
 		return true, domain.Domain_Error{}
@@ -125,9 +166,17 @@ sqlite_uow_commit :: proc(ctx: rawptr) -> (bool, domain.Domain_Error) {
 		exec(uow_ctx.conn, "ROLLBACK;")
 	}
 	free(uow_ctx)
-	tx_depth = 0
-	tx_owner_thread = 0
+	// Take the deferred hooks out before releasing the mutex (the next owner
+	// may register its own), run them after.
+	hooks := tx_after_commit
+	tx_after_commit = nil
+	sync.atomic_store(&tx_depth, 0)
+	sync.atomic_store(&tx_owner_thread, 0)
 	sync.mutex_unlock(&tx_mutex)
+	if ok {
+		for h in hooks do if h.hook.run != nil do h.hook.run(h.hook.ctx)
+	}
+	delete(hooks)
 	if !ok do return false, domain.domain_error(.Internal_Error, "failed to commit transaction")
 	return true, domain.Domain_Error{}
 }
@@ -138,14 +187,17 @@ sqlite_uow_rollback :: proc(ctx: rawptr) {
 	uow_ctx.closed = true
 	if uow_ctx.depth > 0 {
 		exec(uow_ctx.conn, savepoint_name(uow_ctx.depth).rollback)
-		tx_depth -= 1
+		drop_after_commit_from(uow_ctx.depth)
+		sync.atomic_store(&tx_depth, uow_ctx.depth)
 		free(uow_ctx)
 		return
 	}
 	exec(uow_ctx.conn, "ROLLBACK;")
 	free(uow_ctx)
-	tx_depth = 0
-	tx_owner_thread = 0
+	delete(tx_after_commit)
+	tx_after_commit = nil
+	sync.atomic_store(&tx_depth, 0)
+	sync.atomic_store(&tx_owner_thread, 0)
 	sync.mutex_unlock(&tx_mutex)
 }
 

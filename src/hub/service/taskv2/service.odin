@@ -40,6 +40,9 @@ Service :: struct {
 	// M1 state (timers / lease cache) lives behind this mutex; see timers.odin.
 	state_mutex:         sync.Mutex,
 	timers:              Timer_Service,
+	// recent_expiries: holder → expiry time (ms) for the lease.next refusal
+	// window; guarded by state_mutex, keys heap-owned (lease.odin).
+	recent_expiries:     map[string]i64,
 	// wake_observer sees every wake_agent push after commit (tests).
 	wake_observer:       proc(ctx: rawptr, cmd: Wake_Command),
 	wake_observer_ctx:   rawptr,
@@ -112,6 +115,19 @@ Effects :: struct {
 	// JIT launch reservations taken in the bridge runtime registry during this
 	// UoW; cancelled on rollback (the instance row is rolled back with the tx).
 	reservations: [dynamic]Jit_Reservation,
+	// keys owns the (bridge × chain) map keys of runs/stops (heap-cloned per
+	// UoW, freed in destroy_effects — never the request's temp allocator).
+	keys: [dynamic]string,
+}
+
+// effects_key returns the owned "<bridge>\x00<chain>" key for runs/stops,
+// cloning it once per UoW.
+effects_key :: proc(e: ^Effects, bridge_id, chain_id: string) -> string {
+	probe := fmt.tprintf("%s\x00%s", bridge_id, chain_id)
+	for k in e.keys do if k == probe do return k
+	owned := strings.clone(probe)
+	append(&e.keys, owned)
+	return owned
 }
 
 Jit_Reservation :: struct {
@@ -148,6 +164,7 @@ begin_uow :: proc(svc: ^Service) -> (Uow, bool, domain.Domain_Error) {
 	u.effects.publishes = make([dynamic]Publish_Effect)
 	u.effects.changed_chains = make([dynamic]Changed_Chain)
 	u.effects.reservations = make([dynamic]Jit_Reservation)
+	u.effects.keys = make([dynamic]string)
 	if svc.uow_factory == nil do return u, true, domain.Domain_Error{}
 	tx, ok, err := iface.unit_of_work_begin(svc.uow_factory)
 	if !ok do return u, false, err
@@ -157,11 +174,26 @@ begin_uow :: proc(svc: ^Service) -> (Uow, bool, domain.Domain_Error) {
 }
 
 // end_uow commits (ok) or rolls back (!ok) and, on commit, flushes the effects
-// — network I/O strictly after the lock is released.
+// — network I/O strictly after the lock is released. A NESTED unit of work
+// (SAVEPOINT inside a caller's transaction) hands its effects to the outer
+// transaction's after-commit hooks instead of flushing under the lock (S7).
 end_uow :: proc(svc: ^Service, u: ^Uow, ok: bool) -> (bool, domain.Domain_Error) {
 	committed := ok
 	err := domain.Domain_Error{}
+	nested := u.has_tx && u.tx.nested
 	if u.has_tx {
+		if ok && nested {
+			// Register BEFORE the savepoint release so a failed release drops it.
+			d := new(Deferred_Effects)
+			d.svc = svc
+			d.effects = u.effects
+			if iface.unit_of_work_after_commit(&u.tx, iface.After_Commit_Hook{ctx = rawptr(d), run = deferred_effects_run}) {
+				u.effects = Effects{} // ownership moved
+			} else {
+				free(d)
+				nested = false
+			}
+		}
 		if ok {
 			committed, err = iface.unit_of_work_commit(&u.tx)
 		} else {
@@ -169,10 +201,24 @@ end_uow :: proc(svc: ^Service, u: ^Uow, ok: bool) -> (bool, domain.Domain_Error)
 		}
 		u.has_tx = false
 	}
-	if committed do flush_effects(svc, &u.effects)
-	else do cancel_reservations(svc, &u.effects)
+	if committed && !nested do flush_effects(svc, &u.effects)
+	else if !committed do cancel_reservations(svc, &u.effects)
 	destroy_effects(&u.effects)
 	return committed, err
+}
+
+Deferred_Effects :: struct {
+	svc:     ^Service,
+	effects: Effects,
+}
+
+@(private = "file")
+deferred_effects_run :: proc(ctx: rawptr) {
+	d := (^Deferred_Effects)(ctx)
+	if d == nil do return
+	flush_effects(d.svc, &d.effects)
+	destroy_effects(&d.effects)
+	free(d)
 }
 
 @(private = "file")
@@ -192,6 +238,8 @@ destroy_effects :: proc(e: ^Effects) {
 	delete(e.publishes)
 	delete(e.changed_chains)
 	delete(e.reservations)
+	for k in e.keys do delete(k)
+	delete(e.keys)
 }
 
 @(private = "file")
