@@ -48,7 +48,7 @@ STATE="$REPO/.dev-preview-session"
 log() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 die() { printf '\033[31merror: %s\033[0m\n' "$*" >&2; exit 1; }
 
-json() { python3 -c 'import json,sys;d=json.load(sys.stdin);exec(sys.argv[1])' "$1"; }
+json() { python3 -c 'import json,sys,re; raw=sys.stdin.read(); m=re.search(r"(\{.*\})", raw, re.DOTALL); d=json.loads(m.group(1)) if m else {}; exec(sys.argv[1])' "$1"; }
 
 command -v python3 >/dev/null || die "python3 is required (used to read ham-ctl JSON)"
 command -v "$HAM_CTL" >/dev/null || die "ham-ctl not found at $HAM_CTL"
