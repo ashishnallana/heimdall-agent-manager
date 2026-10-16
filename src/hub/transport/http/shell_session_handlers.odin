@@ -46,7 +46,8 @@ shell_stream_experiment_enabled :: proc(repo: ^iface.Experiment_Repository, owne
 	for exp in exps {
 		if exp.key == domain.STREAMING_TERMINAL_PANE_EXPERIMENT_KEY do return exp.enabled
 	}
-	return false
+	// Never set: streaming panes are on by default (an explicit off is a stored row).
+	return domain.experiment_default_enabled(domain.STREAMING_TERMINAL_PANE_EXPERIMENT_KEY)
 }
 
 write_stream_error :: proc(client: net.TCP_Socket, resp: Response) {

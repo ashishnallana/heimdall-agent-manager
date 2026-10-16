@@ -5,7 +5,8 @@ import { PROJECT_VCS_EXPERIMENT_KEY } from '../chat/projectVcsExperiment';
 import { PageShell, Panel, Toggle } from '@ui';
 
 // REQ-EXP-2: Experimental flags panel. Absent key from the API means disabled —
-// we never treat absence as indeterminate or as an error.
+// we never treat absence as indeterminate or as an error. Default-on flags (today:
+// streaming_terminal_pane) are listed by the hub as enabled until the user turns them off.
 const KNOWN_FLAGS: Array<{ key: string; label: string; description: string }> = [
   {
     key: 'lsp',
@@ -15,7 +16,7 @@ const KNOWN_FLAGS: Array<{ key: string; label: string; description: string }> = 
   {
     key: 'streaming_terminal_pane',
     label: 'Streaming Terminal Pane',
-    description: 'Real-time WebSocket streaming for interactive shell and agent terminal panes. Reduces interaction latency from 500ms to sub-10ms with native VT100 scrollback.',
+    description: 'Real-time WebSocket streaming for interactive shell and agent terminal panes. Reduces interaction latency from 500ms to sub-10ms with native VT100 scrollback. On by default; turn off to fall back to polling.',
   },
   {
     key: PROJECT_VCS_EXPERIMENT_KEY,
