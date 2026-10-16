@@ -28,6 +28,7 @@ import {
 } from './bridgeUpdate';
 import BridgeSettingsPanel from './BridgeSettingsPanel';
 import BridgeRecentErrorsCard from './BridgeRecentErrorsCard';
+import PendingEnrollmentsCard from './PendingEnrollmentsCard';
 
 // UI-11: Settings → Bridges. The user's machines (arch doc §6A).
 // List shows status dot, label, hostname/OS/arch, capabilities, instance count.
@@ -164,6 +165,9 @@ export default function BridgesPanel() {
           </span>
         </div>
       </div>
+
+      {/* Approved bridges whose vault key has not been delivered yet (REQ-EA-6) */}
+      <PendingEnrollmentsCard refreshKey={bridgesQuery.fulfilledTimeStamp} />
 
       {/* Bridge list */}
       <div data-debug-id="settings-bridges-list" className="mt-4">

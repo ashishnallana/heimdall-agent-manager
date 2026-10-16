@@ -131,6 +131,9 @@ Bridge_Enroll_Credential :: struct {
 	expires_in:         int,
 	refresh_expires_in: int,
 	vault_delivery_expected: bool,
+	// REQ-EA-4: the hub holds this credential PENDING until the vault key is
+	// delivered; see enroll_atomic.odin. False from a hub that predates it.
+	enrollment_pending: bool,
 }
 
 // ===== Base64url: used for PKCE =====
@@ -461,6 +464,7 @@ bridge_enroll_credential_from_json :: proc(body: string, allocator := context.al
 		expires_in         = extract_json_int(body, "expires_in", 0),
 		refresh_expires_in = extract_json_int(body, "refresh_expires_in", 0),
 		vault_delivery_expected = extract_json_bool(body, "vault_delivery_expected", false),
+		enrollment_pending = extract_json_bool(body, "enrollment_pending", false),
 	}
 }
 
@@ -1061,6 +1065,14 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 				return false
 			}
 			config_path := cfg_lib.config_path_from_args(args)
+			if cred.enrollment_pending {
+				// REQ-EA-4: write nothing until the vault key is delivered and the hub
+				// commits; enroll_atomic.odin owns the whole sequence.
+				if !bridge_enroll_atomic_run(args, cred, token_file, config_path, api_base) do return false
+				if !bridge_enroll_restart_service() do return false
+				fmt.println("  registered bridge service restarted with the new credential")
+				return true
+			}
 			if !bridge_enroll_persist(cred, token_file, config_path, api_base) do return false
 			fmt.println("")
 			fmt.printfln("bridge enroll SUCCESS: enrolled as bridge_id=%s", cred.bridge_id)

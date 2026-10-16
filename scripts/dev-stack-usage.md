@@ -1067,6 +1067,27 @@ nix develop --command sqlite3 $HUB_DB "delete from user_vaults;"   # throwaway D
 
 ---
 
+## 10e. Atomic enrollment — a bridge is enrolled only once its vault key is delivered (REQ-EA, 2026-10-16)
+
+Approving a bridge grant no longer enrolls the bridge. The Hub mints it **pending**, and three facts follow:
+
+- **Approval writes nothing on the machine.** `ham-bridge enroll` sees `"enrollment_pending":true` in the token poll. It keeps its credential in memory and opens an **enroll-only** WebSocket. The registry key for that socket is `enroll:<bridge_id>`, and its token family has scope `bridge:enroll`, which authenticates only that socket.
+- **A pending bridge is invisible by default.** `GET /api/v1/bridges` omits it unless `?include_pending=1` is passed, which Settings → Bridges does. `GET /api/v1/bridges/<id>/enrollment` reports `enrollment_state`, `enroll_connected`, `enroll_public_key` and `enrollment_pending_until`.
+- **Commit happens on an observed ok:true.** `POST /api/v1/bridges/<id>/unseal` relays to the enroll-only socket.
+  - The bridge answers ok:true only after it has stored the key, read it back from the OS keystore, and written the token, refresh token and config.toml.
+  - The Hub then promotes the token family to `bridge:runtime`, clears the pending column, and sends the bridge `bridge_enrollment_result`.
+  - If the bridge receives `committed:false`, it restores every file it wrote and purges the key.
+
+**Rollback.** Pending enrollments roll back in two ways:
+- `POST /api/v1/bridges/<id>/enrollment/cancel`;
+- the reaper, at the 300 s deadline, and also once at Hub startup.
+
+Either way the Hub revokes the family and **hard-deletes** a new bridge's row. An attach leaves its target untouched. The enrolling process prints `enrollment rolled back` and exits 1. On the `heimdall-ct` page, any exit other than 0 or 3 therefore no longer triggers a service restart.
+
+**Verify it.** Run `tests/e2e_req_fix_2_vault_delivery.sh`. It drives the real binaries through three scenarios: success (preceded by a refused delivery), cancel, and an enroll process killed mid-wait. A failed delivery must leave the enrollment `pending`, so the operator can retry before the deadline.
+
+**Not covered:** a crash between the bridge's writes and the Hub's commit. The files then hold a credential that the sweep revokes, so the service fails to authenticate rather than running enrolled.
+
 ## 11. Checking logs
 
 ```bash

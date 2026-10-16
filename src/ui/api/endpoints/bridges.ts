@@ -55,6 +55,91 @@ export async function unsealBridgeE2EE(
 }
 
 /**
+ * REQ-EA-6: where an atomic enrollment stands. `GET /bridges/{id}/enrollment`.
+ * A bridge is enrolled only once its vault key reaches the enrolling process
+ * (`ham-bridge enroll`), which holds an enroll-only connection until then.
+ */
+export interface BridgeEnrollmentStatus {
+  bridge_id: string;
+  enrollment_state: 'pending' | 'enrolled';
+  /** RFC 3339 deadline after which the hub rolls the enrollment back ('' for an attach). */
+  enrollment_pending_until: string;
+  /** Whether the enrolling process is connected and can receive the key. */
+  enroll_connected: boolean;
+  /** The key the connected enrolling process holds ('' when not connected). */
+  enroll_public_key: string;
+  vault_status: string;
+}
+
+/**
+ * Reads an enrollment's state. Resolves `null` when the hub no longer knows the
+ * bridge: a new bridge's row is deleted when its enrollment is rolled back.
+ */
+export async function fetchBridgeEnrollmentStatus(bridgeId: string): Promise<BridgeEnrollmentStatus | null> {
+  try {
+    const res = await cookieJsonFetch(`/bridges/${encodeURIComponent(bridgeId)}/enrollment`);
+    const data = ((res as any)?.data ?? res) as BridgeEnrollmentStatus;
+    return data && typeof data === 'object' ? data : null;
+  } catch (err: any) {
+    if (err instanceof ApiError && err.status === 404) return null;
+    throw err;
+  }
+}
+
+/** A bridge that is approved but not enrolled yet (REQ-EA-1). */
+export interface PendingBridgeEnrollment {
+  bridge_id: string;
+  label: string;
+  machine_hostname: string;
+  enrollment_pending_until: string;
+}
+
+/**
+ * The owner's pending enrollments. GET /bridges omits them unless asked, so no
+ * picker offers a bridge that is not enrolled; only Settings asks.
+ */
+export async function fetchPendingBridgeEnrollments(): Promise<PendingBridgeEnrollment[]> {
+  const res = await cookieJsonFetch('/bridges?include_pending=1');
+  const body = (res as any)?.data ?? res;
+  const rows: any[] = Array.isArray(body) ? body : Array.isArray(body?.bridges) ? body.bridges : [];
+  return rows
+    .filter((row) => row?.enrollment_state === 'pending')
+    .map((row) => ({
+      bridge_id: String(row.bridge_id || ''),
+      label: String(row.label || ''),
+      machine_hostname: String(row.machine_hostname || ''),
+      enrollment_pending_until: String(row.enrollment_pending_until || ''),
+    }))
+    .filter((row) => row.bridge_id !== '');
+}
+
+/** Abandons a pending enrollment now instead of at its deadline. Idempotent. */
+export async function cancelBridgeEnrollment(bridgeId: string): Promise<void> {
+  await cookieMutation(`/bridges/${encodeURIComponent(bridgeId)}/enrollment/cancel`, 'POST', {});
+}
+
+/**
+ * Delivers the vault key to the ENROLLING process of a pending enrollment
+ * (REQ-EA-2). `expectedPublicKey` is the key the operator confirmed: the hub
+ * refuses with `enrollment_key_mismatch` when the connected process holds a
+ * different one, instead of relaying a seal it cannot open. A success means the
+ * hub observed the bridge persist the key and committed the enrollment.
+ */
+export async function unsealEnrollingBridgeE2EE(
+  bridgeId: string,
+  expectedPublicKey: string,
+  vaultKey: string | CryptoKey | Uint8Array,
+): Promise<BridgeUnsealResult> {
+  const { prepareUnsealPayload } = await import('../../utils/vaultBridgeUnseal');
+  const payload = await prepareUnsealPayload(bridgeId, expectedPublicKey, vaultKey);
+  return await unsealBridge(bridgeId, {
+    ...payload,
+    enrollment: true,
+    expected_public_key: expectedPublicKey.trim().toLowerCase(),
+  } as BridgeUnsealPayload);
+}
+
+/**
  * Locks (purges the vault key on) a single bridge.
  *
  * REQ-BVS-4: this used to swallow EVERY error and `return { ok: true }`, so a lock

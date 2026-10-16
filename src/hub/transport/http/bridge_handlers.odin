@@ -62,9 +62,12 @@ list_bridges_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	if !ok do return auth_resp
 	bridges, err := bridge_service.list_bridges(h.bridges, auth_ctx)
 	if err.code != .None do return respond_error(err, req.request_id)
-	// REQ-EA-1: list_bridges returns enrolled bridges only. This view also shows
-	// the owner's pending enrollments, marked enrollment_state:"pending", after them.
-	pending := bridge_service.list_pending_bridges(h.bridges, auth_ctx)
+	// REQ-EA-1: list_bridges returns enrolled bridges only. ?include_pending=1 (the
+	// Settings view) also returns the owner's pending enrollments, marked
+	// enrollment_state:"pending", after them. Opt-in, so a picker, an agent or an
+	// older client never offers a bridge that is not enrolled yet.
+	pending: []domain.Bridge
+	if query_bool(req.query, "include_pending", false) do pending = bridge_service.list_pending_bridges(h.bridges, auth_ctx)
 	defer { for &p in pending do domain.bridge_destroy(&p); delete(pending) }
 	b := strings.builder_make()
 	strings.write_byte(&b, '[')
@@ -368,9 +371,11 @@ bridge_unseal_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	)
 	if !reply_ok do return respond_error(reply_err, req.request_id)
 	if enroll_target && json_bool_value(reply, "ok") {
-		if commit_err, committed := bridge_enroll_commit(h, bridge); !committed {
-			return respond_error(commit_err, req.request_id)
-		}
+		commit_err, committed := bridge_enroll_commit(h, bridge)
+		// Tell the enrolling process the verdict: it has already persisted its key
+		// and credential, and undoes them on committed:false (REQ-EA-4).
+		bridge_enroll_send_result(h.bridge_runtime_registry, target_key, committed)
+		if !committed do return respond_error(commit_err, req.request_id)
 	}
 	return respond_success(reply, req.request_id, auth_ctx_server_time(req))
 }
@@ -497,6 +502,8 @@ bridge_enrollment_cancel_handler :: proc(ctx: rawptr, req: Request) -> Response 
 	if err.code != .None do return respond_error(err, req.request_id)
 	enroll_key := bridge_enroll_registry_key(bridge.bridge_id)
 	defer delete(enroll_key)
+	// Before the close: a process that already saved its key undoes it on this.
+	bridge_enroll_send_result(h.bridge_runtime_registry, enroll_key, false)
 	_ = bridge_service.close_bridge_connection(h.bridges, enroll_key)
 	publish_bridge_enrollment_changed(h, string(bridge.owner_user_id), bridge.bridge_id)
 	return respond_success(fmt.tprintf("{\"bridge_id\":\"%s\",\"rolled_back\":true,\"row_deleted\":%v}", bridge.bridge_id, removed), req.request_id, auth_ctx_server_time(req))

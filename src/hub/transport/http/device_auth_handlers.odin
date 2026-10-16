@@ -264,7 +264,10 @@ device_approve_handler :: proc(ctx: rawptr, req: Request) -> Response {
 			data := strings.builder_make()
 			strings.write_string(&data, "{\"hub_observed\":{\"bridge_id\":\"")
 			write_handler_json_string(&data, bridge_id)
-			strings.write_string(&data, "\"}}")
+			// REQ-EA-6: the bridge is not enrolled until its vault key is delivered.
+			// Every bridge grant is minted pending (wiring.odin), so this is constant;
+			// it is on the wire so the page need not infer it from the hub version.
+			strings.write_string(&data, "\",\"enrollment_pending\":true}}")
 			return respond_success(strings.to_string(data), req.request_id, "", 200)
 		}
 	}
@@ -332,6 +335,11 @@ device_token_handler :: proc(ctx: rawptr, req: Request) -> Response {
 		}
 		if result.bridge_id != "" {
 			strings.write_string(&data, ",\"vault_delivery_expected\":")
+			strings.write_string(&data, "true" if result.vault_delivery_expected else "false")
+			// REQ-EA: every vault-delivery grant is minted PENDING (wiring.odin's minter
+			// refuses an owner without a vault), so the two flags coincide. A bridge that
+			// sees this writes nothing until the key is delivered and the hub commits.
+			strings.write_string(&data, ",\"enrollment_pending\":")
 			strings.write_string(&data, "true" if result.vault_delivery_expected else "false")
 		}
 		strings.write_string(&data, "}")

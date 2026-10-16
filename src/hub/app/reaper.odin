@@ -237,6 +237,8 @@ reaper_sweep_pending_enrollments :: proc(graph: ^App_Graph) -> int {
 	defer bridge_service.rolled_back_enrollments_destroy(rolled)
 	for r in rolled {
 		key := http.bridge_enroll_registry_key(r.bridge_id)
+		// Before the close: a process that already saved its key undoes it on this.
+		http.bridge_enroll_send_result(&graph.bridge_runtime_registry, key, false)
 		_ = bridge_service.close_bridge_connection(&graph.bridges, key)
 		delete(key)
 		fmt.eprintfln("hub: bridge %s enrollment rolled back (vault key not delivered in time; row deleted: %v)", r.bridge_id, r.row_deleted)

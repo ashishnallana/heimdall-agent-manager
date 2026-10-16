@@ -1250,8 +1250,17 @@ bridge_hub_handle_command :: proc(conn: ^ws.Connection, text: string) {
 		command_id := extract_json_string(text, "command_id", "")
 		defer delete(command_id)
 		now_ms := time.to_unix_nanoseconds(time.now()) / 1_000_000
-		ok, err_msg := bridge_unseal_decrypt_and_verify(text, bridge_config.daemon_id, now_ms)
-		if ok && !bridge_vault_set_configured(bridge_config.daemon_id, true) {
+		ok: bool
+		err_msg: string
+		atomic_enroll := bridge_enroll_atomic_is_active()
+		if atomic_enroll {
+			// REQ-EA-4: ok:true commits the enrollment at the hub, so it is sent only
+			// after the key AND the credential are persisted (enroll_atomic.odin).
+			ok, err_msg = bridge_enroll_atomic_on_unseal(text, now_ms)
+		} else {
+			ok, err_msg = bridge_unseal_decrypt_and_verify(text, bridge_config.daemon_id, now_ms)
+		}
+		if ok && !atomic_enroll && !bridge_vault_set_configured(bridge_config.daemon_id, true) {
 			// The unseal itself succeeded; only a restart would forget it was configured.
 			blog_warn(.config_write_failed, blog_sym(.stage, .vault))
 			fmt.eprintln("WARN: could not persist this bridge's vault_configured marker under ~/.config/heimdall/bridges/<bridge_id>/; after a restart it will report the vault as disabled instead of locked.")
@@ -1277,6 +1286,11 @@ bridge_hub_handle_command :: proc(conn: ^ws.Connection, text: string) {
 		// and reporting there would be a no-op the hub would have to filter out.
 		if ok do bridge_hub_send_vault_status(conn)
 		if ok do bridge_task_chain_search_refresh_async()
+		return
+	}
+	if type == "bridge_enrollment_result" {
+		// REQ-EA-4: the hub's verdict on an atomic enrollment this process acked.
+		bridge_enroll_atomic_on_result(text)
 		return
 	}
 	if type == "bridge_lock" {

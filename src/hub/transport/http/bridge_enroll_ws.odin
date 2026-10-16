@@ -212,3 +212,15 @@ publish_bridge_enrollment_changed :: proc(h: ^Bridge_Handlers, owner_user_id, br
 	if h == nil || h.event_bus == nil || owner_user_id == "" do return
 	events.publish_resource_changed(h.event_bus, owner_user_id, "bridge", bridge_id, "bridge_enrollment_changed", "{}")
 }
+
+// bridge_enroll_send_result tells an enroll-only socket whether its enrollment
+// committed. Best-effort: a bridge that never hears keeps what it saved, and a
+// rolled-back credential then simply fails to authenticate.
+bridge_enroll_send_result :: proc(registry: ^project_service.Bridge_Runtime_Registry, enroll_key: string, committed: bool) {
+	if registry == nil do return
+	command_id := fmt.aprintf("cmd_enroll_result_%d", time.to_unix_nanoseconds(time.now()))
+	defer delete(command_id)
+	body := fmt.aprintf(`{"type":"bridge_enrollment_result","command_id":"%s","committed":%v}`, command_id, committed)
+	defer delete(body)
+	_, _ = bridge_runtime_service.send_runtime_command(rawptr(registry), project_service.Runtime_Command{bridge_id = enroll_key, command_id = command_id, body_json = body})
+}

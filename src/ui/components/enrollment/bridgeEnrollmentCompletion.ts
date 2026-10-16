@@ -111,25 +111,59 @@ export function enrollmentRestartConfirmation(
   return { outcome: expired ? 'timed-out' : 'waiting', sealedPolls: nextSealed, vaultStatus };
 }
 
-/**
- * Phases of the approval page's delivery state machine after which the
- * enrollment itself is finished, so "Continue to provider selection" must stay
- * offered whatever the vault outcome (REQ-T2-4). A sealed bridge is still an
- * enrolled bridge; the operator can unseal it later from Settings → Bridges.
- */
 /** Shown in the unlock prompt when the master password does not decrypt the vault. */
 export const WRONG_MASTER_PASSWORD_MESSAGE = 'Incorrect master password. Try again.';
 
-export function enrollmentContinueAvailable(phase: string, passwordTarget?: string): boolean {
+/**
+ * How long the page waits for the enrolling process to connect when the hub gave
+ * no deadline. Matches the hub's BRIDGE_ENROLL_PENDING_SECONDS.
+ */
+export const ENROLLMENT_PENDING_FALLBACK_SECONDS = 300;
+
+export type EnrollmentPendingOutcome = 'ready' | 'waiting' | 'rolled-back' | 'committed';
+
+/**
+ * Reads `GET /bridges/{id}/enrollment` for the approval page (REQ-EA-6).
+ * `null` (the row is gone) and a past deadline both mean the hub rolled the
+ * enrollment back; `enrolled` means it already committed (e.g. another tab).
+ */
+export function enrollmentPendingOutcome(
+  status: { enrollment_state?: string; enroll_connected?: boolean; enrollment_pending_until?: string } | null,
+  nowMs: number,
+): EnrollmentPendingOutcome {
+  if (!status) return 'rolled-back';
+  if (status.enrollment_state === 'enrolled') return 'committed';
+  const until = Date.parse(String(status.enrollment_pending_until || ''));
+  if (Number.isFinite(until) && nowMs >= until) return 'rolled-back';
+  return status.enroll_connected ? 'ready' : 'waiting';
+}
+
+/**
+ * Phases of the approval page's delivery state machine after which the
+ * enrollment itself is finished, so "Continue to provider selection" is offered
+ * (REQ-T2-4). Provider selection stays optional. Under atomic enrollment (REQ-EA)
+ * the enrollment finishes only when the key is delivered: `failed` then means
+ * "not enrolled yet, retry", and `rolled-back` means "not enrolled, start again".
+ */
+export function enrollmentContinueAvailable(
+  phase: string,
+  passwordTarget?: string,
+  enrollmentPending = false,
+): boolean {
   switch (phase) {
     case 'delivered':
     case 'confirming-restart':
     case 'confirmed':
     case 'restart-unconfirmed':
     case 'not-needed':
-    // The vault key was not delivered, but the bridge is approved and online.
-    case 'failed':
       return true;
+    // Legacy hub: the vault key was not delivered, but the bridge is approved and
+    // online. Under atomic enrollment (REQ-EA) an undelivered key means the bridge
+    // is NOT enrolled, so there is nothing to configure providers for yet.
+    case 'failed':
+      return !enrollmentPending;
+    case 'rolled-back':
+      return false;
     case 'need-password':
     case 'delivering':
       // Re-unsealing the restarted service: the enrollment already completed.
