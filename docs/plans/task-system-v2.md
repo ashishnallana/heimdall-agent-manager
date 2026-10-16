@@ -108,13 +108,13 @@ The agent never sees the chain kind or the workflow definition. Every launch wri
 |---|---|---|
 | `ham-ctl lease next` | current lease + pack, or inline grant via the matcher (never wakes the caller; `none` for coordinators; `409 lease_lost` for 5 min after your lease expired) | ✅ M1 |
 | `ham-ctl lease heartbeat [--note "…"]` | extend TTL (≤ hard cap); note lands in the timeline | ✅ M1 |
-| `ham-ctl verify [--independent]` | run `brief.verify`; hub records the facet pinned to head | 🔧 M2 |
-| `ham-ctl lease submit --summary "…" [--handoff-file f] [--output-file f]` | verify‑gated; releases + stops you; → In review / Done | 🔧 M2 |
-| `ham-ctl lease block --waiting-on human\|task:T‑x --reason "…"` | → Backlog with `blocked_on`; `gave_up` ≡ block on human | 🔧 M2 |
-| `ham-ctl lease handoff --summary "…"` | release; same attempt continues with a fresh agent | 🔧 M2 |
-| `ham-ctl review post --task T‑x --verdict approve\|request_changes [--findings-file f]` | reviewer verb (review lease) | 🔧 M2 |
-| `ham-ctl task fetch <#event \| output:T‑x \| facet:T‑x:n:kind \| dir:… \| path>` | pull history/inputs on demand | 🔧 M2 |
-| `ham-ctl task comment --task T‑x "…"` | event only, no protocol meaning, no wake | 🔧 M2 |
+| `ham-ctl verify [--independent]` | run `brief.verify` in ≤5‑min heartbeat slices; hub records the `verify` facet pinned to head | ✅ M2 |
+| `ham-ctl lease submit --summary "…" [--handoff-file f] [--output-file f]` | verify‑gated; releases + stops you; → In review / Done | ✅ M2 |
+| `ham-ctl lease block --waiting-on human\|task:T‑x --reason "…"` | → Backlog with `blocked_on`; `gave_up` ≡ block on human | ✅ M2 |
+| `ham-ctl lease handoff --summary "…" [--handoff-file f]` | release; same attempt continues with a fresh agent | ✅ M2 |
+| `ham-ctl review post [--task T‑x] --verdict approve\|request_changes [--findings-file f]` | reviewer verb (review lease) | ✅ M2 |
+| `ham-ctl task fetch <#event \| output:T‑x \| facet:T‑x:n:kind \| dir:… \| path>` | pull history/inputs on demand | ✅ M2 |
+| `ham-ctl task comment --task T‑x "…"` | event only, no protocol meaning, no wake | ✅ M2 |
 | `ham-ctl task list / show / task_chain show / context` | read‑only | ✅ kept |
 
 Coordinator (ticket chains): `task create --goal --acceptance* --verify --input* --review-role* --assignee --bridge [--auto-submit] [--brief-file] [--draft]`, `task update`, `task depend T‑a --on T‑b`, `task publish` / `task_chain publish` (atomic, per‑task missing‑field list), `task cancel`, `chain summary set` (M3), `chain propose --file` (M3). Workflow chains: `workflow templates | define --file | run <name> --input k=v | status | output <run> <stage> | retry <run> <stage> [--cascade] | cancel` (M3b). Human‑only (UI/HTTP): publish, cancel, reopen, answer blocker, approve / request changes.
@@ -178,7 +178,7 @@ Aux‑pane Tasks tab = status summaries first (state bar + counts, attention chi
 | **M0** | Delete reconcile (+ CI grep test `tests/no_reconcile_symbol_test.sh`), migration `087_task_v2.sql` (+ idempotent twin), `tx_mutex`, v2 domain/repos, event log + fold, hub/bridge/ctl cutover, tests ported | ✅ `1c330b05 … 0583579f` |
 | **M1** | `Timer_Service`, leases, matcher (placement, JIT within capacity, review leases excluding author template), wake with `lease_id` + pack skeleton, `lease next|heartbeat`, `on_instance_terminal`, bridge‑hello, boot healing | ✅ `8f3dd882 … 0d7aa121` |
 | **M1 review fixes** | B1 lock order (`src/lib/lockorder`), B2 bridge blip ≠ death, B3 expire never matches; S1–S10 (grant‑time budget, timer rollback, heartbeat throttle, idle_ttl/clock‑jump truths, scoped hello, nested‑UoW effects, owned keys) — taskv2 tests 45/45 | ✅ `3054b52a … fa38412a` |
-| **M2** | `submit/block/handoff`, `review post`, strict‑AND gate + user approval + oscillation guard, `task fetch/comment`, legacy create/update/publish/fleet verbs inside the UoW, facets write/read (verbatim) with `vcs` (bridge‑enriched) and `verify` (hub‑written from Run sessions), verify‑gated submit, brief validation + ctl flags, `CreateTaskModal` brief fields, shared facet fixtures (Odin + TS), `scripts/task-v2-smoke.sh` | 🔧 in progress |
+| **M2** | `submit/block/handoff`, `review post`, strict‑AND gate + user approval + oscillation guard, `task fetch/comment`, legacy create/update/publish/fleet verbs inside the UoW, facets write/read (verbatim) with `vcs` (bridge‑enriched) and `verify` (hub‑written from Run sessions + inventory reap), verify‑gated submit, brief validation + ctl flags, `CreateTaskModal` brief fields, shared facet fixtures (Odin + TS), `scripts/task-v2-smoke.sh` (34/34 green) | ✅ `55a5da75 … 040fe43c` |
 | **M3** | Full `TASK.md` context pack (bridge decrypts, caps after decryption), skills/AGENTS.md rewrite, mechanical chain summary (+ `chain summary set`), fleet placement editor, `runtime`/`artifacts`/`findings` facets, commit‑diff route + file‑at, independent re‑verify in an ephemeral worktree, **auto‑submit**, coordinator `chain propose` + attention lines, metrics. Ticket chains complete → mergeable | ☐ |
 | **M3b** | `workflow.v1` + snapshot, materialiser (`needs`/`parallel`/`for_each`, stage completeness, explicit edges, idempotent), gates, `workflow.*` verbs, `--cascade` + carry‑forward, built‑in JSON templates, `on_output: start_workflow` | ☐ |
 | **M4** | Ticket board, pipeline view, shared detail (Your review, Placement, Changes, Verify, Output), timeline; delete old hooks (`useSetTaskStatus`, `useVote`, `useNudge`, `task.status`/`assignee_ref` reads) | ☐ |
