@@ -69,7 +69,9 @@ send_runtime_binary :: proc(ctx: rawptr, bridge_id: string, frame: []byte) -> (b
 	connection := project_service.bridge_runtime_connection_acquire(registry, bridge_id)
 	if connection == nil do return false, domain.domain_error(.Bridge_Offline, "bridge connection retired")
 	defer project_service.bridge_runtime_connection_release(registry, connection)
-	sync.lock(&connection.writer_mutex)
+	// A keystroke is a single-frame writer: it goes out between the chunks of a large
+	// command instead of waiting behind the whole sequence (REQ-ERR-PROTO-C).
+	project_service.bridge_runtime_connection_lock_writer(connection)
 	defer sync.unlock(&connection.writer_mutex)
 	socket := connection.socket
 	if socket == net.TCP_Socket(0) || sync.atomic_load(&connection.retired) do return false, domain.domain_error(.Bridge_Offline, "bridge websocket command path is not connected")

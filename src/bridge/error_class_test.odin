@@ -306,6 +306,12 @@ test_err_proto_failed_instance_status_carries_last_error :: proc(t: ^testing.T) 
 // vault for vault_locked, a slow re-check for causes with no local signal.
 @(test)
 test_wake_unpark_triggers_for_recoverable_causes :: proc(t: ^testing.T) {
+	// HEIMDALL_VAULT_KEY is process-wide: hold the same locks as every other vault test
+	// (config, then keystore) so a concurrent vault-status test never sees it mid-change.
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
 	prev_key, had_key := os.lookup_env("HEIMDALL_VAULT_KEY", context.allocator)
 	defer {
 		if had_key {

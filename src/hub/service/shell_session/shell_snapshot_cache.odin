@@ -89,6 +89,19 @@ _snapshot_cache_evict_locked :: proc(svc: ^Shell_Session_Service, session_id: st
 	}
 }
 
+// _snapshot_cache_forget_viewer_locked drops `socket` from the session's painted set.
+// A socket is an OS fd, and the OS reuses a closed fd for the next connection, so a
+// detached viewer must not stay "painted": a new viewer that happens to get the same fd
+// would be told Already_Painted and left with a blank pane. Called on every detach and
+// on every attach. Caller holds svc.mu.
+_snapshot_cache_forget_viewer_locked :: proc(svc: ^Shell_Session_Service, session_id: string, socket: net.TCP_Socket) {
+	e, have := svc.snapshot_cache[session_id]
+	if !have do return
+	for i := len(e.painted) - 1; i >= 0; i -= 1 {
+		if e.painted[i] == socket do unordered_remove(&e.painted, i)
+	}
+}
+
 shell_session_snapshot_cache_evict :: proc(svc: ^Shell_Session_Service, session_id: string) {
 	if svc == nil || session_id == "" do return
 	sync.mutex_lock(&svc.mu)

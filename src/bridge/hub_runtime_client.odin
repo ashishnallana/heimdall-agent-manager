@@ -1878,10 +1878,19 @@ bridge_hub_handle_binary_frame :: proc(conn: ^ws.Connection, frame: []byte) {
 	}
 	if !decoded_ok {
 		fmt.println("bridge pty input rejected:", reject_reason, "for shell", shell_id)
-		if vault_status == .Locked do bridge_pty_input_reply_vault_locked(conn, "", shell_id)
+		if vault_status == .Locked {
+			blog_warn(.vault_locked, blog_sym(.command_kind, .agent_pty_input))
+			bridge_pty_input_reply_vault_locked(conn, "", shell_id)
+		}
 		return
 	}
-	if !bridge_pty_host_deliver_shell_input(shell_id, data) do fmt.println("bridge pty input delivery failed for shell", shell_id)
+	if !bridge_pty_host_deliver_shell_input(shell_id, data) {
+		// Ack-less (no command_result to carry a typed error), so report it the typed
+		// way the bridge reports any failure: a bridge_log event the hub relays and
+		// counts (REQ-ERR-PROTO-A), rate-limited and dedup'd by the blog ring.
+		fmt.println("bridge pty input delivery failed for shell", shell_id)
+		blog_warn(.pty_host_unreachable, blog_sym(.command_kind, .agent_pty_input))
+	}
 }
 
 bridge_hub_handle_shell_pty_input :: proc(conn: ^ws.Connection, text: string) {

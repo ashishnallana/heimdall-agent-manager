@@ -187,6 +187,8 @@ shell_session_attach :: proc(svc: ^Shell_Session_Service, session_id: string, so
 	}
 	if !already_present {
 		if !pane_viewer_start_locked(svc, socket, bridge_id, session_id, ws_kind) { pane_sequence_collect_locked(svc, session_id); sync.mutex_unlock(&svc.mu); return false }
+		// A new attach is never "already painted", even on a reused fd number.
+		_snapshot_cache_forget_viewer_locked(svc, session_id, socket)
 		append(&svc.viewers[session_id], socket)
 	}
 
@@ -279,6 +281,8 @@ shell_session_detach :: proc(
 	remaining := len(viewers^)
 	writer := svc.viewer_writers[socket]
 	if removed do delete_key(&svc.viewer_writers, socket)
+	// The fd may be reused for the next viewer; it must not stay "painted".
+	if removed do _snapshot_cache_forget_viewer_locked(svc, session_id, socket)
 	if remaining == 0 do pane_sequence_collect_locked(svc, session_id)
 	sync.mutex_unlock(&svc.mu)
 	if removed && writer != nil do pane_viewer_stop(writer)

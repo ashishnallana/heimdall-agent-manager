@@ -119,3 +119,46 @@ test_snapshot_cache_serve_writes_frames_once_and_detach_to_zero_evicts :: proc(t
 	shell_session_detach(&svc, "sh_serve", hub)
 	testing.expect(t, !shell_session_snapshot_cache_has(&svc, "sh_serve"), "detach-to-zero evicts the repaint")
 }
+
+// A detached viewer's fd can be handed to the next connection by the OS. If it stayed in
+// the painted set, the new viewer would be told Already_Painted and get a blank pane
+// (review finding on REQ-PTY-NET-4). A+B painted, A detaches while B stays, a new viewer
+// arrives on A's fd number: it must be served.
+@(test)
+test_snapshot_cache_detached_viewer_fd_is_not_left_painted :: proc(t: ^testing.T) {
+	listener, lerr := net.listen_tcp(net.Endpoint{address = net.IP4_Loopback, port = 0})
+	if lerr != nil do testing.fail_now(t, "listen")
+	defer net.close(listener)
+	bound, _ := net.bound_endpoint(listener)
+	pair :: proc(t: ^testing.T, listener: net.TCP_Socket, port: int) -> (peer, hub: net.TCP_Socket) {
+		p, derr := net.dial_tcp(net.Endpoint{address = net.IP4_Loopback, port = port})
+		if derr != nil do testing.fail_now(t, "dial")
+		h, _, aerr := net.accept_tcp(listener)
+		if aerr != nil do testing.fail_now(t, "accept")
+		return p, h
+	}
+	a_peer, a := pair(t, listener, bound.port)
+	b_peer, b := pair(t, listener, bound.port)
+	defer { net.close(a_peer); net.close(a); net.close(b_peer); net.close(b) }
+
+	svc := new_shell_session_service()
+	defer shell_session_service_free(&svc)
+	shell_session_attach(&svc, "sh_reuse", a, "bridge")
+	shell_session_attach(&svc, "sh_reuse", b, "bridge")
+	f := snap_frame("\x1b[2J\x1b[Ha screen both viewers were painted with\r\n")
+	defer delete(f)
+	shell_session_snapshot_cache_note_output(&svc, "sh_reuse", f, true, {a, b})
+	testing.expect_value(t, shell_session_snapshot_cache_decide(&svc, "sh_reuse", a, 80, 24), Shell_Snapshot_Decision.Already_Painted)
+
+	// A leaves; B stays, so the cache entry survives.
+	shell_session_detach(&svc, "sh_reuse", a)
+	testing.expect(t, shell_session_snapshot_cache_has(&svc, "sh_reuse"), "B still watching: entry kept")
+	testing.expect_value(t, shell_session_snapshot_cache_decide(&svc, "sh_reuse", b, 80, 24), Shell_Snapshot_Decision.Already_Painted)
+
+	// A new viewer on the same fd number is served, before and after it attaches.
+	testing.expect_value(t, shell_session_snapshot_cache_decide(&svc, "sh_reuse", a, 80, 24), Shell_Snapshot_Decision.Serve)
+	shell_session_attach(&svc, "sh_reuse", a, "bridge")
+	testing.expect_value(t, shell_session_snapshot_cache_decide(&svc, "sh_reuse", a, 80, 24), Shell_Snapshot_Decision.Serve)
+	shell_session_detach(&svc, "sh_reuse", a)
+	shell_session_detach(&svc, "sh_reuse", b)
+}
