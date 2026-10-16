@@ -403,6 +403,17 @@ on_verify_session_exited :: proc(svc: ^Service, exit: Verify_Exit) {
 	if exit.status == "killed" || exit.status == "failed" {
 		if !exit.exit_code_set || exit.status == "failed" do code = -1
 	}
+	u, uok, _ := begin_uow(svc)
+	if !uok do return
+	// Don't let an unobserved inventory reap overwrite an already-observed verify facet.
+	if !exit.exit_code_set {
+		if existing, has := get_facet(svc, task, attempt_no, FACET_VERIFY); has {
+			if prev_code := jsonx.extract_int(existing.body_json, "exit_code", -1, true); prev_code != -1 {
+				_, _ = end_uow(svc, &u, false)
+				return
+			}
+		}
+	}
 	o := json_begin()
 	json_int(&o, "exit_code", i64(code))
 	json_int(&o, "duration_ms", exit.duration_ms)
@@ -416,8 +427,6 @@ on_verify_session_exited :: proc(svc: ^Service, exit: Verify_Exit) {
 	}
 	json_str(&o, "status", exit.status)
 	json_str(&o, "summary", tail_lines(exit.tail, 40))
-	u, uok, _ := begin_uow(svc)
-	if !uok do return
 	saved, _ := save_facet_verbatim(svc, task, attempt_no, FACET_VERIFY, json_end(&o), FACET_WRITER_HUB)
 	if saved do effect_publish_task(&u, task, "verify")
 	_, _ = end_uow(svc, &u, saved)

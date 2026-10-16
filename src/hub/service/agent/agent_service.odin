@@ -120,6 +120,7 @@ Create_Instance_Input :: struct {
 	project_id: domain.Project_ID,
 	chain_id: string,
 	display_name: string,
+	member_role: string,
 }
 
 Stop_Instance_Input :: struct { reason: string, force: bool }
@@ -329,13 +330,18 @@ prepare_instance :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, 
 	conv, conv_ok, conv_err := ensure_instance_conversation(service, saved, default_title)
 	if !conv_ok do return domain.Agent_Instance{}, 0, false, conv_err
 	if saved.conversation_id == "" { saved.conversation_id = conv.conversation_id; saved, saved_ok, save_err = iface.agent_save_instance(service.agents, saved); if !saved_ok do return domain.Agent_Instance{}, 0, false, save_err }
-	if input.chain_id == "" { update_private_chain_coordinator(service, saved) }
 	if service.taskchains != nil && saved.chain_id != "" {
 		members, _ := iface.taskchain_list_members_by_chain(service.taskchains, domain.Task_Chain_ID(saved.chain_id), saved.owner_user_id)
-		role := "coordinator" if len(members) == 0 else "worker"
+		role := input.member_role
+		if role == "" {
+			role = "coordinator" if len(members) == 0 else "worker"
+		}
 		now_m := platform.clock_now(service.clock)
 		member := domain.Task_Chain_Member{chain_id = domain.Task_Chain_ID(saved.chain_id), agent_instance_id = saved.agent_instance_id, agent_id = saved.agent_id, owner_user_id = saved.owner_user_id, role = role, created_at = now_m}
 		iface.taskchain_save_member(service.taskchains, member)
+		if role == "coordinator" {
+			update_private_chain_coordinator(service, saved)
+		}
 	}
 	prepared = true
 	return saved, generation, true, domain.Domain_Error{}

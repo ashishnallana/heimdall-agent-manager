@@ -64,6 +64,12 @@ Shell_Session_Service :: struct {
 	// Tunnel stream registry (T8) — protected by tunnel_mu.
 	tunnel_streams: map[string]^Preview_Tunnel_Stream, // stream_id → live stream
 	tunnel_mu:      sync.Mutex,
+	// Task System v2 (§4d): optional hook notified when an unobserved terminal
+	// status is landed on a live row by inventory absence or gone-bridge reap
+	// (_reap_inventory_absent) so verify Run sessions still get a verify facet
+	// with exit_code = -1.
+	on_unobserved_terminal:     proc(ctx: rawptr, session: domain.Shell_Session),
+	on_unobserved_terminal_ctx: rawptr,
 }
 
 new_shell_session_service :: proc(

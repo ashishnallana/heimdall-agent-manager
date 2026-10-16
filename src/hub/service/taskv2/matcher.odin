@@ -294,6 +294,7 @@ jit_prepare :: proc(svc: ^Service, u: ^Uow, ctx: ^Match_Context, fleet: domain.T
 		agent_id = fleet.agent_id, bridge_id = placement.bridge_id,
 		provider = provider, model = model,
 		chain_id = string(ctx.chain.chain_id), project_id = project_id,
+		member_role = "worker",
 	}
 	inst, generation, ok, err := agent.prepare_instance(svc.agent_service, auth, input)
 	if !ok {
