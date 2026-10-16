@@ -283,7 +283,12 @@ mark_read_with_receipts :: proc(s:^Content_Service, auth:contracts.Auth_Context,
 		for start:=0; start<len(marked_ids); start+=MARK_READ_BATCH {
 			end:=min(start+MARK_READ_BATCH,len(marked_ids))
 			_,mark_err:=iface.content_mark_messages_read(s.content,owner,marked_ids[start:end],read_at)
-			if mark_err.code!=.None { delete(marked_ids); return {},nil,false,mark_err }
+			if mark_err.code!=.None {
+				// Earlier batches did commit: let the projector re-read so the
+				// card matches what is actually still unread, then report.
+				if start>0 do notify_conversation_attention(s,c)
+				delete(marked_ids); return {},nil,false,mark_err
+			}
 		}
 	}
 	c.unread_count=0; c.updated_at=platform.clock_now(s.clock)
