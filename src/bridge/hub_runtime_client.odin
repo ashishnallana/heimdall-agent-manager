@@ -223,6 +223,11 @@ Bridge_Runtime_Launch :: struct {
 	agent_instance_id: string,
 	command_id: string,
 	run_dir: string,
+	// project_path is the project/chain directory from the launch descriptor
+	// (what AGENTS.md tells the agent to work in). "" when the launch carried none.
+	// Task System v2 uses it as the fallback repository for lease vcs enrichment
+	// when ham-ctl's own cwd is not a git repository (agent_taskv2_vcs.odin).
+	project_path: string,
 	pane_id: string,
 	agent_token: string,
 	// role is the action role from the wake_agent run[] entry that (re)started this
@@ -2385,7 +2390,7 @@ bridge_runtime_launch_agent :: proc(command_id, command_json: string, deadline_n
 		blog_error(.agent_bootstrap_invalid, blog_sym(.stage, blog_bootstrap_stage(boot_res.stage)), blog_int(.hub_status, i64(boot_res.http_status)), blog_provider(provider))
 		return false, detail, bridge_bootstrap_result_error(boot_res)
 	}
-	return bridge_runtime_launch_agent_pty_host(command_id, instance_id, run_dir, endpoint, provider, model, agent_issue.plaintext_token, descriptor.display_name, 0)
+	return bridge_runtime_launch_agent_pty_host(command_id, instance_id, run_dir, endpoint, provider, model, agent_issue.plaintext_token, descriptor.display_name, 0, descriptor.project_path)
 }
 
 bridge_runtime_launch_provider_test :: proc(command_id, command_json: string) -> (ok: bool, detail: string, err: Bridge_Error) {
@@ -2419,7 +2424,7 @@ bridge_runtime_launch_provider_test :: proc(command_id, command_json: string) ->
 // ham-pty-host daemon, and (3) spawn (or restart, if the instance is already
 // registered) the agent under the daemon PTY. Retry/backoff on spawn preserves
 // AC-5 launch resilience.
-bridge_runtime_launch_agent_pty_host :: proc(command_id, instance_id, run_dir, endpoint, provider, model, agent_token, display_name: string, timeout_seconds: u64) -> (ok: bool, detail: string, err: Bridge_Error) {
+bridge_runtime_launch_agent_pty_host :: proc(command_id, instance_id, run_dir, endpoint, provider, model, agent_token, display_name: string, timeout_seconds: u64, project_path: string = "") -> (ok: bool, detail: string, err: Bridge_Error) {
 	// Bootstrap files were already clean-slated + written to run_dir by
 	// bridge_bootstrap_launch_materialize_run_dir in the caller (the bridge is the
 	// sole materializer in the pty-host runtime). Here we only build the agent env.
@@ -2465,7 +2470,7 @@ bridge_runtime_launch_agent_pty_host :: proc(command_id, instance_id, run_dir, e
 		return false, "ham-pty-host spawn failed", bridge_error(.agent_launch_failed, .spawn)
 	}
 	bridge_runtime_set_pty_process_alive(instance_id, true)
-	bridge_runtime_record_launch(Bridge_Runtime_Launch{agent_instance_id = strings.clone(instance_id), command_id = strings.clone(command_id), run_dir = strings.clone(run_dir), pane_id = fmt.tprintf("pty-host:%d", pid), agent_token = strings.clone(agent_token), provider_sym = contracts.bridge_log_provider_sym(provider), launched_at_ns = time.tick_now()._nsec})
+	bridge_runtime_record_launch(Bridge_Runtime_Launch{agent_instance_id = strings.clone(instance_id), command_id = strings.clone(command_id), run_dir = strings.clone(run_dir), project_path = strings.clone(strings.trim_space(project_path)), pane_id = fmt.tprintf("pty-host:%d", pid), agent_token = strings.clone(agent_token), provider_sym = contracts.bridge_log_provider_sym(provider), launched_at_ns = time.tick_now()._nsec})
 	// BR-3: ensure the event-subscription worker is running so this instance's
 	// ChildExited/StartupReady/StartupBlocked/ScreenChanged events flow to the hub
 	// status/activity surface without polling.
@@ -3736,8 +3741,14 @@ bridge_runtime_write_json_string :: proc(b: ^strings.Builder, value: string) {
 // A failed write is not fatal — the exit is still queued in memory and will be
 // delivered normally if the process lives long enough. bridge_shell_exited_outbox_write
 // reports the failure itself.
-bridge_shell_exited_enqueue :: proc(event_json: string) {
-	if strings.trim_space(event_json) == "" do return
+bridge_shell_exited_enqueue :: proc(raw_event_json: string) {
+	if strings.trim_space(raw_event_json) == "" do return
+	// Task System v2: a `ham-ctl verify` run's exit carries the repo head/dirty
+	// state and the log tail for the hub-written verify facet. Done here, at the
+	// one chokepoint every exit producer passes through, and BEFORE the outbox
+	// write so a replayed exit is as complete as a live one.
+	event_json := bridge_taskv2_maybe_enrich_verify_exit(raw_event_json)
+	defer delete(event_json)
 
 	outbox_path: string
 	// Persisted outside the lock: this is file I/O, and bridge_runtime_mutex is the

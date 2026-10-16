@@ -164,12 +164,23 @@ bridge_agent_route :: proc(method, params: string) -> Bridge_Agent_Route {
 	// Task System v2: agent.task.status / set_current / vote / nudge / subscribe /
 	// unsubscribe were removed (hub answers 410 Gone). Lease verbs (M1):
 	case "agent.lease.next":
-		// Plain relay in M1; M2 makes it .Local so the bridge enriches params
-		// with vcs_base (git head) before forwarding.
-		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/lease/next"}
+		// .Local (M2): the bridge adds params.vcs_base (git HEAD of the agent's
+		// repo) and relays to lease/next (agent_taskv2_vcs.odin).
+		return Bridge_Agent_Route{kind = .Local, local_op = "lease.next", path = "/api/v1/agent-actions/lease/next"}
 	case "agent.lease.heartbeat":
 		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/lease/heartbeat"}
-	// lease.submit / handoff / block, review.post and task.fetch arrive in M2.
+	case "agent.lease.submit":
+		// .Local (M2): adds params.vcs = {head, dirty, files} then relays.
+		return Bridge_Agent_Route{kind = .Local, local_op = "lease.submit", path = "/api/v1/agent-actions/lease/submit"}
+	case "agent.lease.handoff":
+		return Bridge_Agent_Route{kind = .Local, local_op = "lease.handoff", path = "/api/v1/agent-actions/lease/handoff"}
+	case "agent.lease.block":
+		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/lease/block"}
+	case "agent.review.post":
+		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/review/post"}
+	case "agent.task.fetch":
+		// {task_id, ref} with ref "#<event_id>" | "facet:<task>:<attempt>:<kind>".
+		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/task/fetch"}
 
 	// ---- chat -------------------------------------------------------------
 	case "agent.chat.send":
@@ -274,8 +285,9 @@ bridge_agent_method_allowed :: proc(method: string) -> bool {
 	     "agent.task_chain.set_description", "agent.task_chain.set_status",
 	     "agent.task_chain.publish", "agent.task_chain.pin",
 	     "agent.task.list", "agent.task.show", "agent.task.comments", "agent.task.create",
-	     "agent.task.update", "agent.task.depend", "agent.task.comment",
-	     "agent.lease.next", "agent.lease.heartbeat",
+	     "agent.task.update", "agent.task.depend", "agent.task.comment", "agent.task.fetch",
+	     "agent.lease.next", "agent.lease.heartbeat", "agent.lease.submit", "agent.lease.handoff",
+	     "agent.lease.block", "agent.review.post",
 	     // chat + self/misc
 	     "agent.chat.send", "agent.chat.read",
 	     "agent.context.get", "agent.conversation.set_title",
@@ -388,6 +400,11 @@ bridge_local_handle_agent_local_op :: proc(request_id, op, params: string, rec: 
 	}
 	if op == "shell.wait" do return bridge_shell_wait_rpc(request_id, params, rec)
 	if op == "search" do return bridge_agent_search_rpc(request_id, params, rec)
+	// Task System v2 lease verbs: enrich with git state, then relay to the hub
+	// path the route table names (agent_taskv2_vcs.odin).
+	if op == "lease.next" do return bridge_agent_lease_local_rpc(request_id, "agent.lease.next", "/api/v1/agent-actions/lease/next", params, rec)
+	if op == "lease.submit" do return bridge_agent_lease_local_rpc(request_id, "agent.lease.submit", "/api/v1/agent-actions/lease/submit", params, rec)
+	if op == "lease.handoff" do return bridge_agent_lease_local_rpc(request_id, "agent.lease.handoff", "/api/v1/agent-actions/lease/handoff", params, rec)
 	if op == "vault.status" {
 		status := bridge_vault_status()
 		status_str := bridge_vault_status_string(status)

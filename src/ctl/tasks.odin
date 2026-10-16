@@ -552,7 +552,10 @@ ctl_task_chains_command :: proc(cmd: []string, args: []string) {
 	}
 
 	if action == "publish" {
-		ctl_tasks_request(transport, "POST", fmt.tprintf("/api/v1/task-chains/%s/publish", safe_path_part(chain_id)), "{}")
+		// Task System v2: a 422 brief_incomplete is rendered per task and exits 1.
+		resp_str, ok := ctl_tasks_request_local(transport, "POST", fmt.tprintf("/api/v1/task-chains/%s/publish", safe_path_part(chain_id)), "{}")
+		if !ok { if resp_str != "" do fmt.println(resp_str); os.exit(1) }
+		ctl_publish_print_and_exit(resp_str)
 		return
 	}
 

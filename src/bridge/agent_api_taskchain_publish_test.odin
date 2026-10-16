@@ -8,6 +8,8 @@ package main
 // (POST /api/v1/task-chains/<id>/publish) and its coordinator permission check
 // already existed — these tests pin the bridge surface that reaches them.
 
+import "core:encoding/json"
+import "core:strings"
 import "core:testing"
 
 @(test)
@@ -70,14 +72,76 @@ bridge_removed_task_verbs_not_routed :: proc(t: ^testing.T) {
 	}
 }
 
-// Task System v2 (M1): the lease verbs are relayed to the hub's agent-actions.
+// Task System v2 (M1+M2): the lease / review / fetch verbs. next, submit and
+// handoff are .Local so the bridge can add git state before relaying; the route
+// still names the hub path it relays to. heartbeat, block, review.post and
+// task.fetch are plain envelopes.
 @(test)
 bridge_lease_verbs_routed :: proc(t: ^testing.T) {
 	next := bridge_agent_route("agent.lease.next", "{}")
-	testing.expect(t, next.kind == .Envelope && next.path == "/api/v1/agent-actions/lease/next", "lease.next relays")
+	testing.expect(t, next.kind == .Local && next.local_op == "lease.next", "lease.next is bridge-local (vcs_base enrichment)")
+	testing.expect_value(t, next.path, "/api/v1/agent-actions/lease/next")
 	hb := bridge_agent_route("agent.lease.heartbeat", `{"note":"x"}`)
 	testing.expect(t, hb.kind == .Envelope && hb.path == "/api/v1/agent-actions/lease/heartbeat", "lease.heartbeat relays")
-	testing.expect(t, bridge_agent_method_allowed("agent.lease.next") && bridge_agent_method_allowed("agent.lease.heartbeat"), "allow-listed")
-	// M2 verbs are not routed yet
-	testing.expect(t, bridge_agent_route("agent.lease.submit", "{}").kind == .Unknown, "submit arrives in M2")
+	submit := bridge_agent_route("agent.lease.submit", `{"summary":"done"}`)
+	testing.expect(t, submit.kind == .Local && submit.local_op == "lease.submit", "lease.submit is bridge-local (vcs enrichment)")
+	testing.expect_value(t, submit.path, "/api/v1/agent-actions/lease/submit")
+	handoff := bridge_agent_route("agent.lease.handoff", `{"summary":"wip"}`)
+	testing.expect(t, handoff.kind == .Local && handoff.local_op == "lease.handoff", "lease.handoff is bridge-local (vcs enrichment)")
+	testing.expect_value(t, handoff.path, "/api/v1/agent-actions/lease/handoff")
+	block := bridge_agent_route("agent.lease.block", `{"waiting_on":{"kind":"user","reason":"q"}}`)
+	testing.expect(t, block.kind == .Envelope && block.path == "/api/v1/agent-actions/lease/block", "lease.block relays")
+	review := bridge_agent_route("agent.review.post", `{"verdict":"approve"}`)
+	testing.expect(t, review.kind == .Envelope && review.path == "/api/v1/agent-actions/review/post", "review.post relays")
+	fetch := bridge_agent_route("agent.task.fetch", `{"task_id":"task_1","ref":"#evt_1"}`)
+	testing.expect(t, fetch.kind == .Envelope && fetch.path == "/api/v1/agent-actions/task/fetch", "task.fetch relays")
+	for m in ([?]string{"agent.lease.next", "agent.lease.heartbeat", "agent.lease.submit", "agent.lease.handoff", "agent.lease.block", "agent.review.post", "agent.task.fetch"}) {
+		testing.expectf(t, bridge_agent_method_allowed(m), "%s allow-listed", m)
+	}
+}
+
+// bridge_taskv2_params_inject is the pure splice behind the lease enrichment.
+@(test)
+bridge_lease_params_inject :: proc(t: ^testing.T) {
+	a := bridge_taskv2_params_inject("{}", "vcs_base", `"abc"`)
+	defer delete(a)
+	testing.expect_value(t, a, `{"vcs_base":"abc"}`)
+	b := bridge_taskv2_params_inject(`{"summary":"s"}`, "vcs", `{"head":"h","dirty":false,"files":[]}`)
+	defer delete(b)
+	testing.expect_value(t, b, `{"vcs":{"head":"h","dirty":false,"files":[]},"summary":"s"}`)
+	// an explicit caller value wins
+	c := bridge_taskv2_params_inject(`{"vcs_base":"mine"}`, "vcs_base", `"bridge"`)
+	defer delete(c)
+	testing.expect_value(t, c, `{"vcs_base":"mine"}`)
+	obj := bridge_taskv2_vcs_object_json("h1", true, `[{"path":"a","status":"modified","add":1,"del":2}]`)
+	defer delete(obj)
+	testing.expect_value(t, obj, `{"kind":"git","head":"h1","dirty":true,"files":[{"path":"a","status":"modified","add":1,"del":2}]}`)
+}
+
+// shell_exited frames for `ham-ctl verify` runs carry vcs + tail (contract §verify 6).
+@(test)
+bridge_verify_exit_frame_enriched :: proc(t: ^testing.T) {
+	frame := bridge_shell_exited_event_json("sh_v1", 3, true, "exited", 0)
+	defer delete(frame)
+	enriched := bridge_taskv2_verify_exit_enrich_json(frame, "deadbeef", true, false, "line39\nline40\n")
+	defer delete(enriched)
+	testing.expect(t, strings.has_suffix(enriched, `,"vcs":{"head":"deadbeef","dirty":false},"tail":"line39\nline40\n"}`), "vcs + tail appended")
+	testing.expect(t, strings.contains(enriched, `"session_id":"sh_v1"`) && strings.contains(enriched, `"exit_code":3`), "original fields kept")
+	parsed: Bridge_Shell_Exited_Event
+	testing.expect(t, json.unmarshal_string(enriched, &parsed, json.DEFAULT_SPECIFICATION, context.temp_allocator) == nil, "still valid JSON")
+	testing.expect_value(t, parsed.run_seq, 0)
+
+	// unknown dirty -> null; not-a-repo head is written empty, tail empty
+	unknown := bridge_taskv2_verify_exit_enrich_json(`{"type":"shell_exited"}`, "", false, false, "")
+	defer delete(unknown)
+	testing.expect_value(t, unknown, `{"type":"shell_exited","vcs":{"head":"","dirty":null},"tail":""}`)
+
+	// tail keeps the last 40 lines only
+	b := strings.builder_make()
+	defer strings.builder_destroy(&b)
+	for i in 1 ..= 45 { strings.write_string(&b, "l"); strings.write_int(&b, i); strings.write_byte(&b, '\n') }
+	tail := bridge_taskv2_tail_lines(strings.to_string(b), 40)
+	testing.expect(t, strings.has_prefix(tail, "l6\n") && strings.has_suffix(tail, "l45\n"), "last 40 lines")
+	short := bridge_taskv2_tail_lines("a\nb\n", 40)
+	testing.expect_value(t, short, "a\nb\n")
 }

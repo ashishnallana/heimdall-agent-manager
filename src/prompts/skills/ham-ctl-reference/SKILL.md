@@ -176,8 +176,25 @@ globally unique — you rarely need `--chain`).
 >   inline (status `granted`), with the task, deadlines and context pack; `none` when idle.
 > - `lease heartbeat [--note <text>]` — extend the lease TTL (every ham-ctl call already
 >   heartbeats implicitly). A `409 lease_lost` means your lease expired: stop.
->
-> `lease submit/handoff/block`, `review post` and `task fetch` arrive with the next milestone.
+> - `lease submit --summary <s> [--handoff-file <json>] [--output-file <json>] [--verify none]` —
+>   finish the attempt (task → `in_review`, or `done` with no review roles). Needs a passing
+>   `ham-ctl verify` at the current head unless the brief says `verify: none`
+>   (`409 verify_required|verify_failed|verify_stale|verify_dirty`). The bridge attaches your
+>   repo state (head, dirty, files) automatically.
+> - `lease handoff --summary <s> [--handoff-file <json>]` — stop without finishing; the task goes
+>   back to `ready` with your handoff (`next_steps`, …) for the next attempt.
+> - `lease block --waiting-on <kind> --reason <text> [--ref <id>] [--summary <s>]` — park the task
+>   on something external (e.g. `--waiting-on user`).
+> - `verify [--independent]` — run the brief's `verify` command as a Run session labelled for this
+>   attempt, heartbeating while it runs; prints the log tail and exits with the run's exit code.
+> - `review post --verdict approve|request_changes [--findings-file <json>] [--task <id>]` — your
+>   verdict when woken as a reviewer (findings: `[{path?, line?, severity?, text}]`).
+> - `task fetch <task-id> <ref>` — fetch one event (`#<event_id>`) or facet
+>   (`facet:<task_id>:<attempt_no>:<kind>`) referenced by your pack.
+> - `task create/update` take the BRIEF flags `--goal <g> --acceptance <a>… --verify <cmd>
+>   [--input <ref>]… [--review-role <r>]… [--auto-submit] [--brief-file <path.json>]`; `task publish
+>   <task-id>` / `task-chain publish <chain-id>` validate briefs and list missing fields per task
+>   on `422 brief_incomplete`.
 
 ### Task states
 A task carries a `state`: `backlog`, `ready`, `in_progress`, `in_review`, `done`, `cancelled`.

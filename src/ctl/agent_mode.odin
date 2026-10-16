@@ -44,6 +44,8 @@ ctl_agent_mode :: proc(cmd: []string, args: []string) {
 	case "task-chain", "task-chains", "chain", "chains": ctl_v2_task_chain(endpoint, token, rest, args); return
 	case "task", "tasks": ctl_v2_task(endpoint, token, rest, args); return
 	case "lease":         ctl_v2_lease(endpoint, token, rest, args); return
+	case "review":        ctl_v2_review(endpoint, token, rest, args); return
+	case "verify":        ctl_v2_verify(endpoint, token, rest, args); return
 	case "chat", "chats", "conversation", "conversations": ctl_v2_chat(endpoint, token, rest, args); return
 	case "memory":        ctl_v2_memory(endpoint, token, rest, args); return
 	case "artifact", "artifacts": ctl_v2_artifact(endpoint, token, rest, args); return
@@ -289,7 +291,11 @@ ctl_v2_task_chain :: proc(endpoint, token: string, tokens, args: []string) {
 		// cascades Published to its tasks, which is what makes them schedulable.
 		cid := option_value(args, "--chain", pos(tokens, 1))
 		if cid == "" { print_agent_help([]string{"task-chain"}); return }
-		ctl_agent_call(endpoint, token, "agent.task_chain.publish", json_object(json_kv("chain_id", cid)))
+		// Task System v2: publish validates every task's brief; a 422
+		// brief_incomplete is rendered per task (taskv2_cmds.odin) and exits 1.
+		response, ok := ctl_agent_local_call(endpoint, token, "agent.task_chain.publish", json_object(json_kv("chain_id", cid)))
+		if !ok { fmt.println(`{"ok":false,"message":"local Bridge endpoint is not reachable"}`); os.exit(1) }
+		ctl_publish_print_and_exit(response)
 	case "pin":
 		cid := option_value(args, "--chain", pos(tokens, 1))
 		if cid == "" { print_agent_help([]string{"task-chain"}); return }
@@ -435,14 +441,21 @@ ctl_v2_task :: proc(endpoint, token: string, tokens, args: []string) {
 		ctl_agent_call(endpoint, token, "agent.task.depend", json_object(json_kv("task_id", tid), json_kv("depends_on_task_id", on)))
 	case "update":
 		// Edit an already-created task: title/description/priority/assignee/
-		// reviewers/dependencies. Relayed as a PATCH to the task; only the fields
-		// you pass are changed. --reviewer and --depends-on are comma-separated and
-		// REPLACE the whole list (pass one value to set a single reviewer/dep).
+		// reviewers/dependencies/brief. Relayed as a PATCH to the task; only the
+		// fields you pass are changed (the hub merges brief fields too). --reviewer
+		// and --depends-on are comma-separated and REPLACE the whole list.
 		tid := pos(tokens, 1)
 		if tid == "" { print_agent_help([]string{"task"}); return }
 		if !ctl_task_reviewer_flags_valid(args, true) do return
 		params := ctl_agentmode_task_update_params(tid, args)
 		ctl_agent_call(endpoint, token, "agent.task.update", params)
+	case "publish":
+		// Coordinator only. 422 brief_incomplete is rendered per task (taskv2_cmds.odin).
+		tid := pos(tokens, 1)
+		if tid == "" { print_agent_help([]string{"task"}); return }
+		ctl_v2_task_publish(endpoint, token, tid, args)
+	case "fetch":
+		ctl_v2_task_fetch(endpoint, token, tokens, args)
 	case:
 		print_agent_help([]string{"task"})
 	}
@@ -704,6 +717,7 @@ ctl_agent_artifact_call_and_decrypt :: proc(endpoint, token, method, params_json
 	decrypted_json := ctl_decrypt_json_string(response, key_hex, key_ok)
 	defer delete(decrypted_json)
 	fmt.println(decrypted_json)
+	if strings.contains(response, `"ok":false`) do os.exit(1)
 }
 
 ctl_agentmode_artifact_create_params :: proc(args: []string) -> string {
@@ -1373,6 +1387,9 @@ ctl_agentmode_task_create_params :: proc(args: []string) -> string {
 	if has_flag(args, "--require-user-approval") do append(&fields, `"requires_user_approval":true`)
 	if deps := option_value(args, "--depends-on", ""); deps != "" do append(&fields, ctl_v2_json_string_array("depends_on", deps))
 	if b := option_value(args, "--bridge", ""); b != "" do append(&fields, json_kv("bridge_id", b))
+	// Task System v2 brief: --goal/--acceptance/--verify/--input/--review-role/
+	// --auto-submit over an optional --brief-file base (taskv2_cmds.odin).
+	if brief, ok := ctl_task_brief_field(args); ok do append(&fields, brief)
 	return json_object_from_slice(fields[:])
 }
 
@@ -1421,6 +1438,8 @@ ctl_agentmode_task_update_params :: proc(tid: string, args: []string) -> string 
 	if has_flag(args, "--no-require-user-approval") do append(&fields, `"requires_user_approval":false`)
 	if has_flag(args, "--depends-on") do append(&fields, ctl_v2_json_string_array("depends_on", option_value(args, "--depends-on", "")))
 	if has_flag(args, "--bridge") do append(&fields, json_kv("bridge_id", option_value(args, "--bridge", "")))
+	// brief fields are sent only when given; the hub merges them into the stored brief.
+	if brief, ok := ctl_task_brief_field(args); ok do append(&fields, brief)
 	return json_object_from_slice(fields[:])
 }
 
@@ -1490,6 +1509,7 @@ ctl_agent_call_task :: proc(endpoint, token, method, params_json: string, args: 
 	decrypted_json := ctl_decrypt_json_string(response, key_hex, key_ok)
 	defer delete(decrypted_json)
 	fmt.println(decrypted_json)
+	if strings.contains(response, `"ok":false`) do os.exit(1)
 }
 
 // JSONL v1 local endpoint client. Sends one request line, reads one response
@@ -1721,6 +1741,8 @@ print_agent_help :: proc(cmd: []string) {
 		return
 	case "task", "tasks": print_help_task(); return
 	case "lease": print_help_lease(); return
+	case "review": print_help_review(); return
+	case "verify": print_help_verify(); return
 	case "chat", "chats", "conversation", "conversations": print_help_chat(); return
 	case "artifact", "artifacts": print_help_artifact(); return
 	case "memory": print_help_memory(); return
@@ -1757,7 +1779,9 @@ print_help_overview :: proc() {
 	fmt.println("  issue       Issues, bugs, and blockers (list, show, create, update, comment, vote, unvote)")
 	fmt.println("  projects    Manage projects (list, show, create, update)")
 	fmt.println("  vault       Report the vault key source: env override and bridge status (status)")
-	fmt.println("  lease       Task System v2 leases: next (claim / re-read your task), heartbeat")
+	fmt.println("  lease       Task System v2 leases: next, heartbeat, submit, handoff, block")
+	fmt.println("  verify      Run your task's brief.verify as an attributable Run session (exit code = result)")
+	fmt.println("  review      Post a review verdict on the task you were woken to review (post)")
 	fmt.println("  context     One-shot snapshot of this instance (chain, task, unread)")
 	fmt.println("  start-success  Signal this instance is ready")
 	fmt.println("")
@@ -1768,6 +1792,9 @@ print_help_overview :: proc() {
 	fmt.println("  ham-ctl agents start   inst_123")
 	fmt.println("  ham-ctl agents stop    inst_123 --reason \"done for now\"")
 	fmt.println("  ham-ctl agents restart inst_123")
+	fmt.println("  ham-ctl lease next")
+	fmt.println("  ham-ctl verify && ham-ctl lease submit --summary \"done; tests green\"")
+	fmt.println("  ham-ctl review post --verdict approve")
 	fmt.println("  ham-ctl task show inst_task_1")
 	fmt.println("  ham-ctl task comment inst_task_1 --body \"pushed fix, tests green\"")
 	fmt.println("  ham-ctl chat read")
@@ -1872,25 +1899,34 @@ print_help_task :: proc() {
 	fmt.println("")
 	fmt.println("Exactly one command per action; there is no `done` or `votes`.")
 	fmt.println("Task System v2: `status`, `vote`, `nudge`, `set-current`, `subscribe` and `unsubscribe`")
-	fmt.println("were removed; the lease/review verbs that replace them arrive with the next milestone.")
+	fmt.println("were removed. Work flows through leases: `ham-ctl lease next|submit|handoff|block`,")
+	fmt.println("`ham-ctl verify`, and `ham-ctl review post` (see `ham-ctl lease --help`).")
 	fmt.println("Positional <task-id> identifies the task and is enough on its own — task ids are")
 	fmt.println("globally unique, so you never need --chain (the Hub derives the chain for you).")
 	fmt.println("")
 	fmt.println("VERBS")
 	fmt.println("  list                                    List your chain's tasks; each carries a comment_summary")
 	fmt.println("                                          (count, last_comment_at, author, preview) — not bodies.")
-	fmt.println("  show <task-id>                          Show a task + comment_summary + votes (no bodies).")
+	fmt.println("  show <task-id>                          Show a task + brief + comment_summary (no bodies).")
 	fmt.println("  comments <task-id> [--last N]           Fetch comment bodies; --last N = newest N (max 100).")
-	fmt.println("  create --title <t>                      Create a task.")
-	fmt.println("      [--description <d>] [--priority p0|p1|p2] [--assignee <instance-or-agent-id>]")
-	fmt.println("      [--reviewer <agent-id,...>] [--require-user-approval] [--depends-on <id,id>] [--bridge <bridge-id>] [--chain <id>]")
+	fmt.println("  fetch <task-id> <ref>                   Fetch one event (#<event_id>) or facet")
+	fmt.println("                                          (facet:<task_id>:<attempt_no>:<kind>) referenced by your pack.")
+	fmt.println("  create --title <t>                      Create a task (draft until published).")
+	fmt.println("      [--description <d>] [--priority p0|p1|p2] [--assignee <agent-id>] [--bridge <bridge-id>]")
+	fmt.println("      [--reviewer <agent-id,...>] [--require-user-approval] [--depends-on <id,id>] [--chain <id>]")
+	fmt.println("      BRIEF (what publish validates): --goal <g> --acceptance <a> (repeatable) --verify <cmd>")
+	fmt.println("      [--input <ref>]... [--review-role <role>]... [--auto-submit] [--brief-file <path.json>]")
+	fmt.println("      --brief-file is the base object {goal, acceptance:[…], verify, inputs, review_roles,")
+	fmt.println("      output, budget, auto_submit}; flags override its fields.")
 	fmt.println("  update <task-id>                        Edit an existing task (coordinator only).")
-	fmt.println("      [--title <t>] [--description <d>] [--priority p0|p1|p2] [--assignee <instance-or-agent-id>]")
+	fmt.println("      [--title <t>] [--description <d>] [--priority p0|p1|p2] [--assignee <agent-id>]")
 	fmt.println("      [--reviewer <agent-id,...>] [--require-user-approval | --no-require-user-approval]")
-	fmt.println("      [--depends-on <id,id>] [--bridge <bridge-id>]")
-	fmt.println("      --reviewer accepts agent IDs/instances only; user approval is controlled by the explicit flags.")
+	fmt.println("      [--depends-on <id,id>] [--bridge <bridge-id>] + the same BRIEF flags as create")
+	fmt.println("      (brief fields you pass are merged into the stored brief by the hub).")
 	fmt.println("      --reviewer/--depends-on REPLACE the whole list (pass \"\" to clear); --bridge \"\" clears")
 	fmt.println("      the pin. Only the fields you pass change.")
+	fmt.println("  publish <task-id> [--chain <id>]        Publish one draft task (coordinator only). A 422")
+	fmt.println("                                          brief_incomplete lists the missing fields per task.")
 	fmt.println("  comment <task-id> --body <t>            Add a comment (the only way to comment).")
 	fmt.println("      [--notify <id,id>]")
 	fmt.println("  depend <task-id> --on <task-id>         Add a single dependency (use `update --depends-on`")
@@ -1901,8 +1937,12 @@ print_help_task :: proc() {
 	fmt.println("")
 	fmt.println("EXAMPLES")
 	fmt.println("  ham-ctl task show task_1")
+	fmt.println("  ham-ctl task create --title 'Add retry' --goal 'Retry transient 5xx in the client' \\")
+	fmt.println("      --acceptance 'retries 3x with backoff' --acceptance 'unit test covers 503' \\")
+	fmt.println("      --verify 'make test' --review-role reviewer --assignee agt_worker")
 	fmt.println("  ham-ctl task update task_1 --assignee agt_worker --reviewer agt_a --reviewer agt_b")
-	fmt.println("  ham-ctl task update task_1 --priority p0 --description 'urgent: fix regression'")
+	fmt.println("  ham-ctl task publish task_1")
+	fmt.println("  ham-ctl task fetch task_1 facet:task_1:2:handoff")
 	fmt.println("  ham-ctl task comment task_1 --body 'pushed fix' --notify inst_rev")
 }
 
@@ -2013,22 +2053,31 @@ print_help_cards :: proc() {
 	fmt.println("  ham-ctl cards discard crd_123")
 }
 
-// ---- lease (Task System v2, M1) ------------------------------------------
+// ---- lease (Task System v2) ------------------------------------------------
 // The lease IS your task: `lease next` returns the lease you hold (with its
 // context pack) or claims the next task for you inline; `lease heartbeat`
-// extends the TTL (every ham-ctl call already heartbeats implicitly).
+// extends the TTL (every ham-ctl call already heartbeats implicitly). submit /
+// handoff / block end the attempt (taskv2_cmds.odin).
 ctl_v2_lease :: proc(endpoint, token: string, tokens, args: []string) {
 	action := pos(tokens, 0)
 	switch action {
 	case "next":
 		fields := make([dynamic]string)
 		if v := option_value(args, "--vcs-base", ""); v != "" do append(&fields, json_kv("vcs_base", v))
+		// cwd lets the bridge find the repo for its vcs_base enrichment.
+		append(&fields, ctl_agent_cwd_field())
 		ctl_agent_call_task(endpoint, token, "agent.lease.next", json_object_from_slice(fields[:]), args)
 	case "heartbeat":
 		fields := make([dynamic]string)
 		if v := option_value(args, "--lease", ""); v != "" do append(&fields, json_kv("lease_id", v))
 		if v := option_value(args, "--note", ""); v != "" do append(&fields, json_kv("note", v))
 		ctl_agent_call(endpoint, token, "agent.lease.heartbeat", json_object_from_slice(fields[:]))
+	case "submit":
+		ctl_v2_lease_submit(endpoint, token, args)
+	case "handoff":
+		ctl_v2_lease_handoff(endpoint, token, args)
+	case "block":
+		ctl_v2_lease_block(endpoint, token, args)
 	case:
 		print_help_lease()
 	}
@@ -2043,11 +2092,25 @@ print_help_lease :: proc() {
 	fmt.println("                             The response carries the task, the lease deadlines and the context pack.")
 	fmt.println("  heartbeat [--note <text>]  Extend the lease TTL (15 min, never past the hard cap). Any ham-ctl")
 	fmt.println("                             call already heartbeats implicitly; use --note to leave a progress note.")
+	fmt.println("  submit --summary <s> [--handoff-file <json>] [--output-file <json>] [--verify none]")
+	fmt.println("                             Finish the attempt: the task goes to review (or done when no review")
+	fmt.println("                             roles). Needs a passing `ham-ctl verify` at the current head unless")
+	fmt.println("                             the brief says verify: none (409 verify_required/failed/stale/dirty).")
+	fmt.println("                             The bridge attaches your repo state (head, dirty, files).")
+	fmt.println("  handoff --summary <s> [--handoff-file <json>]")
+	fmt.println("                             Stop without finishing; the task returns to ready with your handoff")
+	fmt.println("                             (next_steps, …) for whoever picks it up next.")
+	fmt.println("  block --waiting-on <kind> --reason <text> [--ref <id>] [--summary <s>]")
+	fmt.println("                             Park the task on something external (kind: user|task|…).")
 	fmt.println("")
-	fmt.println("A 409 lease_lost means your lease expired: stop; you will be re-woken with a fresh pack.")
-	fmt.println("submit / handoff / block / review post arrive with the next milestone.")
+	fmt.println("  Every verb takes [--lease <id>] (defaults to your current lease). handoff/output files")
+	fmt.println("  are JSON objects: handoff {summary?, next_steps?, …}; output = the brief's output contract.")
+	fmt.println("  A 409 lease_lost means your lease expired: stop; you will be re-woken with a fresh pack.")
 	fmt.println("")
 	fmt.println("EXAMPLES")
 	fmt.println("  ham-ctl lease next")
 	fmt.println("  ham-ctl lease heartbeat --note \"tests green, writing docs\"")
+	fmt.println("  ham-ctl verify && ham-ctl lease submit --summary \"implemented X; tests green\"")
+	fmt.println("  ham-ctl lease handoff --summary \"half done\" --handoff-file handoff.json")
+	fmt.println("  ham-ctl lease block --waiting-on user --reason \"need the staging credentials\"")
 }
