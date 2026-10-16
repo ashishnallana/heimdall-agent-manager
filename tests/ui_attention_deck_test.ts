@@ -1,0 +1,340 @@
+// Attention deck v1 (UI): view model, undo scheduler, snooze presets, prefs,
+// API normalisation, and the deck rendered under jsdom with a real store.
+//
+// RUN: node --import ./tests/helpers/vaultEndpointHarness.ts --test tests/ui_attention_deck_test.ts
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import React from 'react';
+import { makeVaultStore, unlockVault, lockVaultFully } from './helpers/vaultEndpointHarness.ts';
+
+const model = await import('../src/ui/components/attention/attentionModel.ts');
+const { createActionScheduler } = await import('../src/ui/services/attention/actionScheduler.ts');
+const { snoozePresets, toHubTimestamp } = await import('../src/ui/services/attention/snoozePresets.ts');
+const prefs = await import('../src/ui/services/attention/attentionPrefs.ts');
+const api = await import('../src/ui/api/endpoints/attention.ts');
+
+const NOW = Date.parse('2026-10-16T12:00:00Z');
+
+function taskItem(id: string, extra: any = {}): any {
+  return {
+    card_id: `crd_task_${id}`, kind: 'task', provider: 'task_validation', reason: 'awaiting_review', urgency: 'warn', status: 'pending',
+    attention_since: '2026-10-16T10:00:00Z', title: `Review ${id}`, rationale: 'Waiting on your review', primary_op: 'task.vote',
+    operations: [{ op: 'task.vote', label: 'Approve' }],
+    details: { priority: 'p1', status: 'in_validation', bridge_id: 'brg_x', assignee_name: 'soloist #3', excerpt: { author_name: 'soloist #3', body: 'All tests pass.', at: '2026-10-16T11:00:00Z' } },
+    action_refs: { chain_id: 'chain_secret_id', task_id: `task_secret_${id}` },
+    context: { chain_title: 'Attention work', agent_name: 'soloist #3', project_name: '' },
+    ...extra,
+  };
+}
+
+function messageItem(id: string, extra: any = {}): any {
+  return {
+    card_id: `crd_msg_inst_${id}`, kind: 'message', provider: 'message_options', reason: 'question', urgency: 'info', status: 'pending',
+    attention_since: '2026-10-16T11:30:00Z', title: 'Which approach?', rationale: 'Waiting on your reply', primary_op: null, operations: [],
+    details: { excerpt: { author_name: 'soloist #7', body: 'Which approach should I take?', at: '2026-10-16T11:30:00Z' }, options: ['Keep it', 'Skip it'], other_unread: 2 },
+    action_refs: { conversation_id: 'chat_secret_id', agent_instance_id: `inst_secret_${id}`, message_id: 'msg_secret_id' },
+    context: { chain_title: 'Attention work', agent_name: 'soloist #7', project_name: '' },
+    ...extra,
+  };
+}
+
+// ---------------------------------------------------------------- view model
+
+test('model: visible items, per-tab counts, default tab, stepping, swipe', () => {
+  const items = [taskItem('a'), taskItem('b'), messageItem('m')];
+  const hidden = new Set(['crd_task_a']);
+  assert.deepEqual(model.visibleItems(items, 'task', hidden).map((i: any) => i.card_id), ['crd_task_b']);
+  assert.deepEqual(model.tabCounts({ total: 3, older: 0, message: 1, task: 2 }, items, hidden), { message: 1, task: 1 });
+  assert.equal(model.defaultTab({ message: 0, task: 2 }), 'task');
+  assert.equal(model.defaultTab({ message: 1, task: 2 }), 'message');
+  assert.equal(model.defaultTab({ message: 0, task: 0 }), 'message');
+  assert.equal(model.stepIndex(2, 1, 3), 0, 'wraps forward');
+  assert.equal(model.stepIndex(0, -1, 3), 2, 'wraps back');
+  assert.equal(model.clampIndex(5, 2), 1);
+  assert.equal(model.swipeDelta(-120), 1);
+  assert.equal(model.swipeDelta(120), -1);
+  assert.equal(model.swipeDelta(40), 0, 'short drags snap back');
+});
+
+test('model: human age and reason lines never contain ids', () => {
+  assert.equal(model.formatAge('2026-10-16T11:59:40Z', NOW), 'just now');
+  assert.equal(model.formatAge('2026-10-16T11:45:00Z', NOW), '15 min');
+  assert.equal(model.formatAge('2026-10-16T09:00:00Z', NOW), '3h');
+  assert.equal(model.formatAge('2026-10-15T09:00:00Z', NOW), '1 day');
+  assert.equal(model.formatAge('2026-10-10T09:00:00Z', NOW), '6 days');
+  assert.equal(model.reasonLine(taskItem('a'), NOW), 'Waiting on your review · 2h');
+  assert.equal(model.reasonLine(messageItem('m'), NOW), 'Waiting on your reply · 30 min');
+});
+
+// ---------------------------------------------------------------- scheduler
+
+function fakeTimers() {
+  let now = 0;
+  let seq = 0;
+  const timers = new Map<number, { at: number; fn: () => void }>();
+  return {
+    timers: {
+      setTimeout: (fn: () => void, ms: number) => { seq += 1; timers.set(seq, { at: now + ms, fn }); return seq; },
+      clearTimeout: (h: unknown) => { timers.delete(h as number); },
+      now: () => now,
+    },
+    async advance(ms: number) {
+      now += ms;
+      for (const [id, t] of [...timers]) if (t.at <= now) { timers.delete(id); t.fn(); }
+      await new Promise((r) => setTimeout(r, 0));
+    },
+  };
+}
+
+test('scheduler: holds, hides, undoes, sends, restores on failure, flushes with keepalive', async () => {
+  const clock = fakeTimers();
+  const s = createActionScheduler({ delayMs: 4000, timers: clock.timers });
+  const calls: Array<{ card: string; keepalive: boolean }> = [];
+  const ok = (card: string) => async (keepalive: boolean) => { calls.push({ card, keepalive }); };
+
+  const undone = s.schedule({ cardId: 'c1', label: 'Approved', run: ok('c1') });
+  assert.ok(s.getSnapshot().hidden.has('c1'), 'hidden optimistically');
+  assert.equal(s.undo(undone), true);
+  assert.equal(s.getSnapshot().hidden.has('c1'), false, 'undo brings it back');
+  await clock.advance(5000);
+  assert.equal(calls.length, 0, 'an undone action is never sent');
+
+  s.schedule({ cardId: 'c2', label: 'Discarded', run: ok('c2') });
+  await clock.advance(3999);
+  assert.equal(calls.length, 0, 'held for the whole window');
+  await clock.advance(1);
+  assert.deepEqual(calls, [{ card: 'c2', keepalive: false }]);
+  assert.ok(s.getSnapshot().hidden.has('c2'), 'stays hidden after success until the server drops it');
+  s.prune(['other']);
+  assert.equal(s.getSnapshot().hidden.has('c2'), false, 'pruned once the server stops returning it');
+  assert.equal(s.undo(1234), false);
+
+  s.schedule({ cardId: 'c3', label: 'Snoozed', run: async () => { throw new Error('hub said no'); } });
+  await clock.advance(4000);
+  assert.equal(s.getSnapshot().hidden.has('c3'), false, 'failure restores the card');
+  assert.match(s.getSnapshot().error, /Snoozed failed: hub said no/);
+  s.acknowledgeError();
+  assert.equal(s.getSnapshot().error, '');
+
+  s.schedule({ cardId: 'c4', label: 'Approved', run: ok('c4') });
+  s.schedule({ cardId: 'c5', label: 'Approved', run: ok('c5') });
+  await s.flushAll(true);
+  assert.deepEqual(calls.slice(-2), [{ card: 'c4', keepalive: true }, { card: 'c5', keepalive: true }], 'page exit flushes with keepalive');
+  await clock.advance(10000);
+  assert.equal(calls.length, 3, 'flushed actions are not sent twice');
+
+  s.settle('c6');
+  assert.ok(s.getSnapshot().hidden.has('c6'));
+  s.unsettle('c6');
+  assert.equal(s.getSnapshot().hidden.has('c6'), false);
+});
+
+// ---------------------------------------------------------------- presets, prefs, api
+
+test('snooze presets: 1h, tonight (before 19:00 only), tomorrow 9:00, next Monday 9:00', () => {
+  const morning = new Date(2026, 9, 16, 10, 30); // Friday
+  const p = snoozePresets(morning);
+  assert.deepEqual(p.map((x: any) => x.id), ['hour', 'tonight', 'tomorrow', 'next-week']);
+  assert.equal(p[1].until.getHours(), 20);
+  assert.equal(p[2].until.getDate(), 17);
+  assert.equal(p[2].until.getHours(), 9);
+  assert.equal(p[3].until.getDay(), 1, 'next week = Monday');
+  assert.equal(p[3].until.getDate(), 19);
+  assert.deepEqual(snoozePresets(new Date(2026, 9, 16, 21, 0)).map((x: any) => x.id), ['hour', 'tomorrow', 'next-week']);
+  assert.equal(snoozePresets(new Date(2026, 9, 19, 8, 0))[3].until.getDate(), 26, 'on a Monday, next week is a week away');
+  assert.equal(toHubTimestamp(new Date('2026-10-16T12:00:00.123Z')), '2026-10-16T12:00:00Z');
+});
+
+test('prefs: range persists, falls back to 24h on junk or broken storage', () => {
+  const store = new Map<string, string>();
+  const storage = { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => { store.set(k, v); } };
+  assert.equal(prefs.readAttentionRange(storage), '24h');
+  prefs.writeAttentionRange('7d', storage);
+  assert.equal(store.get('heimdall:attention:range'), '7d');
+  assert.equal(prefs.readAttentionRange(storage), '7d');
+  store.set('heimdall:attention:range', 'forever');
+  assert.equal(prefs.readAttentionRange(storage), '24h');
+  assert.equal(prefs.readAttentionRange({ getItem: () => { throw new Error('denied'); } } as any), '24h');
+  assert.doesNotThrow(() => prefs.writeAttentionRange('6h', { setItem: () => { throw new Error('quota'); } } as any));
+});
+
+test('api: counts and items are normalised defensively', () => {
+  assert.deepEqual(api.normalizeAttentionCounts({ total: 3, older: -1, message: '2', task: 1.7 }), { total: 3, older: 0, message: 0, task: 1 });
+  assert.deepEqual(api.normalizeAttentionCounts(null), { total: 0, older: 0, message: 0, task: 0 });
+  const items = api.normalizeAttentionItems([taskItem('a'), { card_id: 'x', kind: 'shell', details: {}, action_refs: {} }, null, { kind: 'task' }]);
+  assert.deepEqual(items.map((i: any) => i.card_id), ['crd_task_a']);
+});
+
+// ---------------------------------------------------------------- deck under jsdom
+
+function jsonResponse(body: any) {
+  return { ok: true, status: 200, headers: { get: () => 'application/json' }, text: async () => JSON.stringify(body), json: async () => body } as any;
+}
+
+async function withDeck(items: any[], run: (h: { dom: any; store: any; scheduler: any; text: () => string; q: (sel: string) => any; act: any; closed: () => number; hits: string[] }) => Promise<void>, opts: { unlocked?: boolean } = {}) {
+  const { JSDOM } = await import('jsdom');
+  const { Provider } = await import('react-redux');
+  const { createRoot } = await import('react-dom/client');
+  const { act } = await import('react');
+  const { heimdallApi } = await import('../src/ui/api/heimdallApi.ts');
+  const dom = new JSDOM('<!DOCTYPE html><html><body><div id="root"></div></body></html>', { url: 'http://localhost/', pretendToBeVisual: true });
+  const saved: any = {};
+  for (const k of ['window', 'document', 'HTMLElement', 'Node', 'KeyboardEvent']) saved[k] = (globalThis as any)[k];
+  (globalThis as any).window = dom.window;
+  (globalThis as any).document = dom.window.document;
+  (globalThis as any).HTMLElement = dom.window.HTMLElement;
+  (globalThis as any).Node = dom.window.Node;
+  (globalThis as any).KeyboardEvent = dom.window.KeyboardEvent;
+  // RTK batches with rAF when a window exists. A timer-based shim (left in place
+  // for the rest of this file's process) keeps it independent of the jsdom window,
+  // which is closed per test.
+  (globalThis as any).requestAnimationFrame = (cb: (t: number) => void) => setTimeout(() => cb(Date.now()), 0);
+  (globalThis as any).cancelAnimationFrame = (h: any) => clearTimeout(h);
+  (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+  const hits: string[] = [];
+  const prevFetch = (globalThis as any).fetch;
+  (globalThis as any).fetch = async (input: any, init: any = {}) => {
+    const url = new URL(String(input?.url ?? input), 'http://localhost');
+    hits.push(`${String(init?.method || 'GET').toUpperCase()} ${url.pathname}${url.search}`);
+    if (url.pathname.endsWith('/attention')) {
+      const counts = { total: items.length, older: 1, message: items.filter((i) => i.kind === 'message').length, task: items.filter((i) => i.kind === 'task').length };
+      return jsonResponse({ data: { since: '24h', counts, items } });
+    }
+    return jsonResponse({ data: {} });
+  };
+  const store = await makeVaultStore();
+  if (opts.unlocked) await unlockVault(store, '00'.repeat(32));
+  const { AttentionDeck } = await import('../src/ui/components/attention/AttentionDeck.tsx');
+  const scheduler = createActionScheduler({ delayMs: 60_000 });
+  let closedCount = 0;
+  const root = createRoot(dom.window.document.getElementById('root')!);
+  try {
+    await act(async () => {
+      root.render(React.createElement(Provider, { store }, React.createElement(AttentionDeck, {
+        open: true, onClose: () => { closedCount += 1; }, range: '24h', onRangeChange: () => {}, scheduler, nowMs: NOW,
+      })));
+    });
+    await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
+    await run({
+      dom, store, scheduler, act, hits,
+      text: () => dom.window.document.body.textContent || '',
+      q: (sel: string) => dom.window.document.querySelector(sel),
+      closed: () => closedCount,
+    });
+  } finally {
+    await act(async () => root.unmount());
+    store.dispatch(heimdallApi.util.resetApiState());
+    if (opts.unlocked) await lockVaultFully(store);
+    // Let RTK's batched notifications drain before the window goes away.
+    await act(async () => { await new Promise((r) => setTimeout(r, 50)); });
+    dom.window.close();
+    for (const [k, v] of Object.entries(saved)) (globalThis as any)[k] = v;
+    (globalThis as any).fetch = prevFetch;
+  }
+}
+
+test('deck: message card shows the question, options and unread count -- never an id', async () => {
+  await withDeck([messageItem('m'), taskItem('a')], async ({ text, q, hits }) => {
+    assert.ok(hits.some((h) => h.startsWith('GET /api/v1/attention?since=24h')), 'fetches the selected range');
+    assert.ok(q('[data-debug-id="attention-card-message"]'), 'opens on the Messages tab');
+    assert.match(text(), /Which approach should I take\?/);
+    assert.match(text(), /Keep it/);
+    assert.match(text(), /\+2 more unread messages/);
+    assert.match(text(), /Waiting on your reply · 30 min/);
+    assert.match(text(), /Messages1/);
+    assert.match(text(), /Tasks1/);
+    assert.doesNotMatch(text(), /secret|crd_|chat_|inst_|task_|msg_|chain_/, 'no ids rendered');
+    assert.match(text(), /\+1 older/);
+  });
+});
+
+test('deck: task card, tab switch, keyboard approve is deferred and undoable', async () => {
+  await withDeck([taskItem('a'), taskItem('b')], async ({ text, q, scheduler, act, dom, hits, closed }) => {
+    assert.ok(q('[data-debug-id="attention-card-task"]'), 'no messages -> opens on Tasks');
+    assert.match(text(), /Review a/);
+    assert.match(text(), /High priority/);
+    assert.match(text(), /All tests pass\./);
+    assert.match(text(), /1 \/ 2/);
+    assert.doesNotMatch(text(), /secret|crd_|task_secret/, 'no ids rendered');
+
+    await act(async () => { dom.window.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true })); });
+    assert.match(text(), /Review b/, 'arrow keys move between cards');
+    assert.match(text(), /2 \/ 2/);
+
+    await act(async () => { dom.window.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'a', bubbles: true })); });
+    const snap = scheduler.getSnapshot();
+    assert.equal(snap.pending.length, 1, 'approve is held, not sent');
+    assert.equal(snap.pending[0].cardId, 'crd_task_b');
+    assert.equal(snap.pending[0].label, 'Approved');
+    assert.equal(hits.filter((h) => h.includes('/accept')).length, 0, 'nothing sent during the undo window');
+    assert.match(text(), /1 \/ 1/, 'the approved card is hidden at once');
+
+    // Snooze menu, then Escape closes the menu before the deck.
+    await act(async () => { (q('[data-debug-id="attention-action-snooze"]') as any).click(); });
+    assert.ok(q('[data-debug-id="attention-snooze-menu"]'));
+    await act(async () => { dom.window.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
+    assert.equal(q('[data-debug-id="attention-snooze-menu"]'), null);
+    assert.equal(closed(), 0);
+    await act(async () => { dom.window.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
+    assert.equal(closed(), 1);
+
+    // Flushing (page exit) actually sends the held approve.
+    await act(async () => { await scheduler.flushAll(true); });
+    assert.equal(hits.filter((h) => h === 'POST /api/v1/cards/crd_task_b/accept').length, 1);
+  });
+});
+
+test('deck: locked vault shows the lock placeholder instead of ciphertext', async () => {
+  const cipherTitle = 'vault:v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+  await withDeck([taskItem('c', { title: cipherTitle })], async ({ text, q }) => {
+    assert.doesNotMatch(text(), /vault:v1:/, 'ciphertext is never painted');
+    assert.ok(q('[data-debug-id="vault-locked-placeholder"]'), 'lock placeholder shown');
+  });
+});
+
+test('deck: unlocked vault decrypts the card title and excerpt', async () => {
+  const { encryptVaultText, importRawKeyHex } = await import('../src/ui/utils/vaultCrypto.ts');
+  const key = await importRawKeyHex('00'.repeat(32));
+  const title = await encryptVaultText('Secret review title', key);
+  const body = await encryptVaultText('Secret excerpt body', key);
+  const item = taskItem('d', { title, details: { ...taskItem('d').details, excerpt: { author_name: 'soloist #3', body, at: '2026-10-16T11:00:00Z' } } });
+  await withDeck([item], async ({ text, act }) => {
+    await act(async () => { await new Promise((r) => setTimeout(r, 80)); });
+    assert.match(text(), /Secret review title/);
+    assert.match(text(), /Secret excerpt body/);
+    assert.doesNotMatch(text(), /vault:v1:/);
+  }, { unlocked: true });
+});
+
+test('deck: a quick-reply option is sent at once, then the conversation is marked read', async () => {
+  await withDeck([messageItem('m')], async ({ q, act, hits, scheduler, text }) => {
+    await act(async () => { (q('[data-debug-id="attention-card-option-0"]') as any).click(); });
+    await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
+    const send = hits.findIndex((h) => h.startsWith('POST /api/v1/chats/chat_secret_id/messages'));
+    const read = hits.findIndex((h) => h === 'POST /api/v1/chats/chat_secret_id/read');
+    assert.ok(send >= 0, 'the option text is sent as a reply');
+    assert.ok(read > send, 'then the conversation is marked read');
+    assert.ok(scheduler.getSnapshot().hidden.has('crd_msg_inst_m'), 'the answered card leaves the deck');
+    assert.match(text(), /Reply sent to soloist #7/);
+  });
+});
+
+test('status bar: attention pill is hidden without data and reads as one number', async () => {
+  const { attentionModule } = await import('../src/ui/components/shell/statusBar/modules.tsx');
+  const base: any = { runningInstances: 0, connectedBridges: 0, shells: { shells: 0, previews: 0, capped: false }, shortcutMode: 'normal', renderVaultToggle: () => null };
+  assert.equal(attentionModule.render({ compact: false, data: base }), null);
+  let opened = 0;
+  const waiting: any = attentionModule.render({ compact: false, data: { ...base, attention: { total: 3, onOpen: () => { opened += 1; } } } });
+  assert.equal(waiting.props['data-state'], 'waiting');
+  assert.match(String(waiting.props.children[1].props.children), /^3 need you$/);
+  waiting.props.onClick();
+  assert.equal(opened, 1);
+  const clear: any = attentionModule.render({ compact: false, data: { ...base, attention: { total: 0, onOpen: () => {} } } });
+  assert.equal(clear.props['data-state'], 'clear');
+  assert.equal(clear.props.children[1].props.children, 'All clear');
+  const compact: any = attentionModule.render({ compact: true, data: { ...base, attention: { total: 12, onOpen: () => {} } } });
+  assert.equal(compact.props.children[1].props.children, '12');
+  const loading: any = attentionModule.render({ compact: false, data: { ...base, attention: { total: null, onOpen: () => {} } } });
+  assert.equal(loading.props['data-state'], 'loading');
+});

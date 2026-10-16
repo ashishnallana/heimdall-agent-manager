@@ -31,6 +31,9 @@ import { useListShellsQuery } from '../../api/endpoints/shells';
 import { StatusBar } from './statusBar/StatusBar';
 import { STATUS_BAR_MODULES } from './statusBar/modules';
 import { countConnectedBridges, countRunningInstances, countShells } from './statusBar/statusBarModel';
+import { AttentionDeck, AttentionUndoToast } from '../attention';
+import { useGetAttentionSummaryQuery, type AttentionRange } from '../../api/endpoints/attention';
+import { readAttentionRange, writeAttentionRange } from '../../services/attention/attentionPrefs';
 import { useGetAccountBillingQuery } from '../../api/endpoints/accountBilling';
 import SidebarUpdateBadge from './SidebarUpdateBadge';
 import {
@@ -1337,6 +1340,15 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
   const [focusMessageId, setFocusMessageId] = useState(focusMessageFromLocation);
   const [resourcePicker, setResourcePicker] = useState<'conversation' | 'task-chain' | 'shell' | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  // Attention deck: the bar pill counts what needs the user in the chosen range;
+  // the hub's attention_changed hint refetches it (poll is only a slow fallback).
+  const [attentionOpen, setAttentionOpen] = useState(false);
+  const [attentionRange, setAttentionRangeState] = useState<AttentionRange>(() => readAttentionRange());
+  const setAttentionRange = useCallback((range: AttentionRange) => {
+    setAttentionRangeState(range);
+    writeAttentionRange(range);
+  }, []);
+  const attentionSummary = useGetAttentionSummaryQuery({ since: attentionRange }, { pollingInterval: 5 * 60 * 1000 });
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [launchModalProject, setLaunchModalProject] = useState<{ projectId: string; name: string } | null>(null);
   const [settingsModalOpen, setSettingsModalOpenState] = useState<boolean>(() => routeFromLocation().startsWith('/settings'));
@@ -1674,6 +1686,13 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
   };
 
   useRegisterActions([
+    {
+      id: 'attention.open',
+      title: 'Open what needs you',
+      category: 'Navigation',
+      sequence: ['g', 'a'],
+      run: () => setAttentionOpen(true),
+    },
     {
       id: 'navigation.home',
       title: 'Go to Home',
@@ -2067,8 +2086,14 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
           shells: shellCounts,
           shortcutMode,
           renderVaultToggle: renderVaultStatusButton,
+          attention: {
+            total: attentionSummary.data ? attentionSummary.data.counts.total : null,
+            onOpen: () => setAttentionOpen(true),
+          },
         }}
       />
+      <AttentionDeck open={attentionOpen} onClose={() => setAttentionOpen(false)} range={attentionRange} onRangeChange={setAttentionRange} />
+      <AttentionUndoToast />
 
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} onNavigate={handlePaletteNavigate} onAction={handlePaletteAction} actions={paletteActions} currentPath={path} conversationGroups={conversationTree.map((group) => ({ projectId: group.project.projectId, projectName: group.project.name, conversations: group.conversations.map((c) => ({ conversationId: c.conversationId, agentInstanceId: c.agentInstanceId, title: displayConversationTitle(c), agentName: c.agentName, isCoordinator: c.isCoordinator, runtimeStatus: c.runtimeStatus, activityStatus: c.activityStatus, unreadCount: c.unreadCount })) }))} chainGroups={chainGroupsQuery.data?.groups ?? []} />
       <ConversationSelectorModal
