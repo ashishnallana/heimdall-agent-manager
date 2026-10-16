@@ -1165,19 +1165,43 @@ accept_card :: proc(s: ^Card_Service, auth: contracts.Auth_Context, id: domain.C
 
 mark_card_accepted :: proc(s: ^Card_Service, card: domain.Card) -> (domain.Card, bool, domain.Domain_Error) {
 	now := platform.clock_now(s.clock)
-	up_ok, up_err := iface.card_update_status(s.cards, card.card_id, domain.CARD_STATUS_ACCEPTED, now)
-	if !up_ok {
-		if up_err.code == .None do return domain.Card{}, false, domain.domain_error(.Not_Found, "card not found")
-		return domain.Card{}, false, up_err
+	if s.attention_repo == nil {
+		up_ok, up_err := iface.card_update_status(s.cards, card.card_id, domain.CARD_STATUS_ACCEPTED, now)
+		if !up_ok {
+			if up_err.code == .None do return domain.Card{}, false, domain.domain_error(.Not_Found, "card not found")
+			return domain.Card{}, false, up_err
+		}
+		saved, found, _ := iface.card_get(s.cards, card.card_id)
+		if !found {
+			saved = card
+			saved.status = domain.CARD_STATUS_ACCEPTED
+			saved.updated_at = now
+		}
+		notify_card_changed(s, saved.owner_user_id, saved.kind)
+		return saved, true, domain.Domain_Error{}
 	}
-	saved, found, _ := iface.card_get(s.cards, card.card_id)
-	if !found {
-		saved = card
-		saved.status = domain.CARD_STATUS_ACCEPTED
-		saved.updated_at = now
+	// With the projector wired, accept is a compare-and-set against the source
+	// marker the user acted on. If the source moved to a NEW state meanwhile
+	// (e.g. the task re-entered validation for another round), the projector's
+	// reactivated card stands: the user approved the old state, not the new one.
+	// Same marker (including the common case where the projector just retired
+	// the card because this accept's ops changed the source): accepted wins.
+	for _ in 0 ..< ATTENTION_CAS_ATTEMPTS {
+		fresh, found, _ := iface.card_get(s.cards, card.card_id)
+		if !found do return domain.Card{}, false, domain.domain_error(.Not_Found, "card not found")
+		if fresh.source_marker != card.source_marker do return fresh, true, domain.Domain_Error{}
+		next := fresh
+		next.status = domain.CARD_STATUS_ACCEPTED
+		next.snooze_until = ""
+		next.updated_at = now
+		changed, err := iface.attention_card_compare_and_set(s.attention_repo, next, fresh.status, fresh.source_marker)
+		if err.code != .None do return domain.Card{}, false, err
+		if changed {
+			notify_card_changed(s, next.owner_user_id, next.kind)
+			return next, true, domain.Domain_Error{}
+		}
 	}
-	notify_card_changed(s, saved.owner_user_id, saved.kind)
-	return saved, true, domain.Domain_Error{}
+	return domain.Card{}, false, domain.domain_error(.Conflict, "card kept changing during accept")
 }
 
 // notify_written passes a card write's result through, telling the attention

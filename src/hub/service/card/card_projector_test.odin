@@ -363,3 +363,25 @@ test_projector_owner_isolation :: proc(t: ^testing.T) {
 	c, _ := ph_card(t, &h, attention_task_card_id("task_o"))
 	testing.expect_value(t, c.status, domain.CARD_STATUS_PENDING)
 }
+
+// Third interleaving: the source moves to a NEW state (another review round)
+// between the accept's read and its write. The reactivated card must stand --
+// the user approved the old state, not the new one.
+@(test)
+test_projector_accept_does_not_swallow_new_round :: proc(t: ^testing.T) {
+	h: Projector_Harness
+	ph_open(t, &h, "att_accept_new_round")
+	defer ph_close(&h)
+	cid := attention_task_card_id("task_z")
+	ph_save_task(t, &h, ph_task("task_z", .In_Validation, "2026-10-01T02:00:00Z"))
+	read_by_accept, _ := ph_card(t, &h, cid)
+	// Meanwhile: the round ends and a new one starts.
+	ph_save_task(t, &h, ph_task("task_z", .Completed, "2026-10-01T02:01:00Z"))
+	ph_save_task(t, &h, ph_task("task_z", .In_Validation, "2026-10-01T03:00:00Z"))
+	got, ok, _ := mark_card_accepted(&h.svc, read_by_accept)
+	testing.expect(t, ok, "accept returns the current card")
+	testing.expect_value(t, got.status, domain.CARD_STATUS_PENDING)
+	now, _ := ph_card(t, &h, cid)
+	testing.expect_value(t, now.status, domain.CARD_STATUS_PENDING)
+	testing.expect_value(t, now.source_marker, "in_validation|2026-10-01T03:00:00Z")
+}
