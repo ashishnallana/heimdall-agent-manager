@@ -122,7 +122,7 @@ record_shell_run_marker :: proc(
 	// same contract shell_session_create already documents for its cmd_id.
 	//
 	// Every other field here is either a literal or owned by `c`.
-	saved, save_ok, _ := iface.content_save_message(s.content, m)
+	saved, save_ok, _ := save_message(s, m)
 	if !save_ok do return {}, false
 
 	// Conversation bookkeeping, matching request_pane_capture: move the preview and

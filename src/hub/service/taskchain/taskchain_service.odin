@@ -57,6 +57,9 @@ Taskchain_Service :: struct {
 	shell_sessions: ^shell_session.Shell_Session_Service,
 	nudge_debounce_mutex: sync.Mutex,
 	nudge_debounce_last_unix_ms: map[string]i64,
+	// attention reports task/comment writes to the card projector (attention
+	// deck). Optional: nil in bare test services; see attention_notify.odin.
+	attention: ^contracts.Attention_Notifier,
 }
 
 Create_Chain_Input :: struct {
@@ -579,7 +582,7 @@ publish_chain :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context,
 			t_copy.publish_state = .Published
 			if t_copy.published_at == "" do t_copy.published_at = now
 			t_copy.updated_at = now
-			_, _, _ = iface.taskchain_save_task(service.repo, t_copy)
+			_, _, _ = save_task(service, t_copy)
 		}
 	}
 	// Auto-promotion on publish: any task with satisfied deps and a free assignee
@@ -843,7 +846,7 @@ create_task :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, i
 		created_at = now,
 		updated_at = now,
 	}
-	saved_task, save_ok, save_err := iface.taskchain_save_task(service.repo, task)
+	saved_task, save_ok, save_err := save_task(service, task)
 	if !save_ok do return domain.Task{}, false, save_err
 
 	for dep_id in input.depends_on {
@@ -935,7 +938,7 @@ update_task :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, t
 	if refs_ok, refs_err := validate_actor_refs(service, chain, task.assignee_ref_json, task.reviewer_refs_json); !refs_ok do return domain.Task{}, false, refs_err
 	if bm_ok, bm_err := validate_task_assignee_bridge_match(service, task.bridge_id, task.assignee_ref_json); !bm_ok do return domain.Task{}, false, bm_err
 	task.updated_at = platform.clock_now(service.clock)
-	saved, save_ok, save_err := iface.taskchain_save_task(service.repo, task)
+	saved, save_ok, save_err := save_task(service, task)
 	if !save_ok do return domain.Task{}, false, save_err
 
 	// Pointer healing (including clearing a reassigned-away instance's stale
@@ -1001,7 +1004,7 @@ publish_task :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, 
 	task.status = .Assigned
 	task.published_at = now
 	task.updated_at = now
-	saved, save_ok, save_err := iface.taskchain_save_task(service.repo, task)
+	saved, save_ok, save_err := save_task(service, task)
 	if !save_ok do return domain.Task{}, false, save_err
 	// NO auto-reconcile: publishing a task is a setup-phase change. The coordinator
 	// triggers `reconcile` when the plan should take effect.
@@ -1114,7 +1117,7 @@ change_task_status :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Con
 	} else {
 		task.completed_at = ""
 	}
-	task_ret, saved_ok, save_err := iface.taskchain_save_task(service.repo, task)
+	task_ret, saved_ok, save_err := save_task(service, task)
 	if saved_ok {
 		if updated_chain, sync_ok, _ := sync_chain_status_from_tasks(service, task.chain_id, task.owner_user_id); sync_ok {
 			chain = updated_chain
@@ -1327,7 +1330,7 @@ create_comment :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context
 	}
 	now := platform.clock_now(service.clock)
 	comment := domain.Task_Comment{comment_id = platform.generate_id(service.ids, "cmt_"), task_id = task.task_id, chain_id = task.chain_id, owner_user_id = task.owner_user_id, author_agent_instance_id = auth.agent_instance_id, body = input.body, created_at = now, updated_at = now}
-	return iface.taskchain_save_comment(service.repo, comment)
+	return save_comment(service, comment)
 }
 
 list_comments :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, task_id: domain.Task_ID) -> ([]domain.Task_Comment, domain.Domain_Error) {
@@ -2084,7 +2087,7 @@ comment_task :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, 
 
 	now := platform.clock_now(service.clock)
 	comment := domain.Task_Comment{comment_id = platform.generate_id(service.ids, "cmt_"), task_id = task.task_id, chain_id = task.chain_id, owner_user_id = task.owner_user_id, author_agent_instance_id = auth.agent_instance_id, body = input.body, created_at = now, updated_at = now}
-	saved, ok2, err2 := iface.taskchain_save_comment(service.repo, comment)
+	saved, ok2, err2 := save_comment(service, comment)
 	if !ok2 do return saved, nil, ok2, err2
 
 	// MEM-6 comment fan-out. Recipients (de-duped, author excluded):
@@ -2547,7 +2550,7 @@ evaluate_task_quorum :: proc(service: ^Taskchain_Service, task: domain.Task) {
 		t.status = updated_status
 		t.updated_at = now
 		if updated_status == .Completed do t.completed_at = now
-		saved, ok, _ := iface.taskchain_save_task(service.repo, t)
+		saved, ok, _ := save_task(service, t)
 		// CT-10: recompute whenever a review RESOLVES the task, not just on the
 		// Completed path. Both outcomes change an instance's current focus:
 		//   * Completed (LGTM quorum): frees the reviewer + unblocks dependents so

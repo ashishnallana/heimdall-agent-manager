@@ -865,7 +865,7 @@ dynamic_fleet_schedule :: proc(service: ^Taskchain_Service, chain: domain.Task_C
 			nt := cand
 			nt.assignee_ref_json = bound_ref
 			nt.updated_at = now
-			_, _, _ = iface.taskchain_save_task(service.repo, nt)
+			_, _, _ = save_task(service, nt)
 
 			mark_busy(&busy_instances, &busy_keys, chosen_instance_id)
 			modified = true
@@ -896,7 +896,7 @@ dynamic_fleet_schedule :: proc(service: ^Taskchain_Service, chain: domain.Task_C
 				nt := cand
 				nt.assignee_ref_json = bound_ref
 				nt.updated_at = now
-				_, _, _ = iface.taskchain_save_task(service.repo, nt)
+				_, _, _ = save_task(service, nt)
 
 				mark_busy(&busy_instances, &busy_keys, new_instance_id)
 				live_count += 1
@@ -912,7 +912,7 @@ dynamic_fleet_schedule :: proc(service: ^Taskchain_Service, chain: domain.Task_C
 					nt := cand
 					nt.status = .Queued
 					nt.updated_at = now
-					_, _, _ = iface.taskchain_save_task(service.repo, nt)
+					_, _, _ = save_task(service, nt)
 					modified = true
 				}
 			}
@@ -921,7 +921,7 @@ dynamic_fleet_schedule :: proc(service: ^Taskchain_Service, chain: domain.Task_C
 				nt := cand
 				nt.status = .Queued
 				nt.updated_at = now
-				_, _, _ = iface.taskchain_save_task(service.repo, nt)
+				_, _, _ = save_task(service, nt)
 				modified = true
 			}
 		}
@@ -1003,7 +1003,7 @@ dynamic_fleet_schedule :: proc(service: ^Taskchain_Service, chain: domain.Task_C
 				nt := t
 				nt.reviewer_refs_json = bound_ref
 				nt.updated_at = now
-				_, _, _ = iface.taskchain_save_task(service.repo, nt)
+				_, _, _ = save_task(service, nt)
 
 				mark_busy(&busy_instances, &busy_keys, chosen_reviewer_id)
 				modified = true
@@ -1030,7 +1030,7 @@ dynamic_fleet_schedule :: proc(service: ^Taskchain_Service, chain: domain.Task_C
 					nt := t
 					nt.reviewer_refs_json = bound_ref
 					nt.updated_at = now
-					_, _, _ = iface.taskchain_save_task(service.repo, nt)
+					_, _, _ = save_task(service, nt)
 
 					mark_busy(&busy_instances, &busy_keys, new_instance_id)
 					live_count += 1
@@ -1333,7 +1333,7 @@ reconcile_chain :: proc(service: ^Taskchain_Service, chain: domain.Task_Chain) -
 			nt.status = .In_Progress
 			if nt.started_at == "" do nt.started_at = now
 			nt.updated_at = now
-			saved, ok, _ := iface.taskchain_save_task(service.repo, nt)
+			saved, ok, _ := save_task(service, nt)
 			if ok {
 				promoted += 1
 				append(&promoted_tasks, saved)
@@ -1342,7 +1342,7 @@ reconcile_chain :: proc(service: ^Taskchain_Service, chain: domain.Task_Chain) -
 			nt := t
 			nt.status = .Queued
 			nt.updated_at = now
-			_, _, _ = iface.taskchain_save_task(service.repo, nt)
+			_, _, _ = save_task(service, nt)
 		}
 	}
 
