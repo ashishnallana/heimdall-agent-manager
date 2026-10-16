@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Button, Icon, Spinner, StatusPill } from '@ui';
 import {
   type BridgeProviderStatus,
@@ -25,6 +25,7 @@ export function ProviderSetupSurface({ bridgeId, mode, onApply }: ProviderSetupS
   const [busy, setBusy] = useState('');
   const [notice, setNotice] = useState('');
   const [testTarget, setTestTarget] = useState<ProviderTestTarget | null>(null);
+  const autoScannedBridge = useRef('');
 
   useEffect(() => {
     let cancelled = false;
@@ -54,6 +55,16 @@ export function ProviderSetupSurface({ bridgeId, mode, onApply }: ProviderSetupS
       setBusy('');
     }
   }
+
+  // A freshly enrolled bridge has never reported its CLIs, so scan once on
+  // arrival instead of making the user click "Scan again" first.
+  useEffect(() => {
+    if (mode !== 'enrollment' || !payload || busy !== '') return;
+    const id = payload.bridge.bridge_id;
+    if (autoScannedBridge.current === id) return;
+    autoScannedBridge.current = id;
+    void rediscover();
+  }, [mode, payload, busy]);
 
   async function setProviderEnabled(provider: BridgeProviderStatus, enabled: boolean) {
     if (!payload) return;
