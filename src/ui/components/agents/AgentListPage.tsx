@@ -113,7 +113,7 @@ export default function AgentListPage({ selectedId = '' }: { selectedId?: string
   const [urlState, setUrlState] = React.useState<AgentListUrlState>(() =>
     parseAgentListUrl(getRouteSearch()),
   );
-  const tab: AgentTab = urlState.tab || 'live';
+  const tab: AgentTab = urlState.tab || 'active';
   const searching = Boolean(urlState.q);
 
   const applyUrlState = React.useCallback((next: AgentListUrlState) => {

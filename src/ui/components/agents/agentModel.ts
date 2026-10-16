@@ -39,8 +39,8 @@ export function stateTone(state: AgentState): Tone {
 export type AgentTab = 'live' | 'active' | 'archived';
 
 export const AGENT_TABS: { value: AgentTab; label: string }[] = [
-  { value: 'live', label: 'Live Instances' },
   { value: 'active', label: 'Active' },
+  { value: 'live', label: 'Live Instances' },
   { value: 'archived', label: 'Archived' },
 ];
 
