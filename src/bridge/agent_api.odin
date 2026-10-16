@@ -162,8 +162,14 @@ bridge_agent_route :: proc(method, params: string) -> Bridge_Agent_Route {
 	case "agent.task.comment":
 		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/tasks/comment"}
 	// Task System v2: agent.task.status / set_current / vote / nudge / subscribe /
-	// unsubscribe were removed (hub answers 410 Gone). The lease.* / review.* /
-	// task.fetch verbs that replace them arrive with a later milestone.
+	// unsubscribe were removed (hub answers 410 Gone). Lease verbs (M1):
+	case "agent.lease.next":
+		// Plain relay in M1; M2 makes it .Local so the bridge enriches params
+		// with vcs_base (git head) before forwarding.
+		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/lease/next"}
+	case "agent.lease.heartbeat":
+		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/lease/heartbeat"}
+	// lease.submit / handoff / block, review.post and task.fetch arrive in M2.
 
 	// ---- chat -------------------------------------------------------------
 	case "agent.chat.send":
@@ -269,6 +275,7 @@ bridge_agent_method_allowed :: proc(method: string) -> bool {
 	     "agent.task_chain.publish", "agent.task_chain.pin",
 	     "agent.task.list", "agent.task.show", "agent.task.comments", "agent.task.create",
 	     "agent.task.update", "agent.task.depend", "agent.task.comment",
+	     "agent.lease.next", "agent.lease.heartbeat",
 	     // chat + self/misc
 	     "agent.chat.send", "agent.chat.read",
 	     "agent.context.get", "agent.conversation.set_title",

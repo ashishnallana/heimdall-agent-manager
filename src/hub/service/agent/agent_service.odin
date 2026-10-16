@@ -28,6 +28,37 @@ Agent_Service :: struct {
 	bridge_command_sink: project_service.Bridge_Command_Sink,
 	clock: ^platform.Clock,
 	ids: ^platform.ID_Generator,
+	// lifecycle hooks (Task System v2): set by wiring so every instance death
+	// path funnels into ONE chokepoint (taskv2.on_instance_terminal) without the
+	// agent package importing the engine.
+	hooks: Lifecycle_Hooks,
+}
+
+Lifecycle_Hooks :: struct {
+	ctx:              rawptr,
+	on_terminal:      proc(ctx: rawptr, instance_id: string),
+	on_activity:      proc(ctx: rawptr, instance_id, activity_status: string),
+	on_start_success: proc(ctx: rawptr, inst: domain.Agent_Instance),
+}
+
+// notify_instance_terminal is the ONE place every death path (status report
+// stopped|failed|unreachable, heartbeat reconcile, bridge disconnect, reaper,
+// delete) calls; the engine expires the instance's lease and re-plans.
+notify_instance_terminal :: proc(service: ^Agent_Service, instance_id: string) {
+	if service == nil || service.hooks.on_terminal == nil || instance_id == "" do return
+	service.hooks.on_terminal(service.hooks.ctx, instance_id)
+}
+
+notify_instance_activity :: proc(service: ^Agent_Service, instance_id, activity_status: string) {
+	if service == nil || service.hooks.on_activity == nil || instance_id == "" || activity_status == "" do return
+	service.hooks.on_activity(service.hooks.ctx, instance_id, activity_status)
+}
+
+instance_runtime_is_terminal :: proc(runtime_status: string) -> bool {
+	switch runtime_status {
+	case "stopped", "failed", "unreachable": return true
+	}
+	return false
 }
 
 Create_Agent_Input :: struct {
@@ -213,32 +244,48 @@ reserve_runtime_launch :: proc(service: ^Agent_Service, inst: domain.Agent_Insta
 }
 
 create_instance :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, input: Create_Instance_Input) -> (domain.Agent_Instance, bool, domain.Domain_Error) {
+	saved, generation, ok, err := prepare_instance(service, auth, input)
+	if !ok do return domain.Agent_Instance{}, false, err
+	if sent, send_err := send_instance_launch(service, saved); !sent {
+		project_service.bridge_runtime_instance_cancel_reservation(service.bridge_runtime_registry, saved.bridge_id, generation, saved.agent_instance_id)
+		return domain.Agent_Instance{}, false, send_err
+	}
+	return saved, true, domain.Domain_Error{}
+}
+
+// prepare_instance is create_instance WITHOUT the network send: it validates,
+// reserves runtime capacity, writes the instance row, conversation and chain
+// membership, and returns the row plus the registry generation of the
+// reservation. The caller either sends the launch (send_instance_launch) or
+// delivers the instance through a wake_agent run[] entry after its own commit
+// (Task System v2 JIT grants), and must cancel the reservation if it gives up.
+prepare_instance :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, input: Create_Instance_Input) -> (inst: domain.Agent_Instance, generation: int, ok: bool, err: domain.Domain_Error) {
 	owner, owner_ok, owner_err := ownership.owner_from_auth(auth)
-	if !owner_ok do return domain.Agent_Instance{}, false, owner_err
+	if !owner_ok do return domain.Agent_Instance{}, 0, false, owner_err
 	agent, agent_ok, agent_err := get_agent(service, auth, input.agent_id)
-	if !agent_ok do return domain.Agent_Instance{}, false, agent_err
-	if agent.state != .Active do return {}, false, domain.domain_error(.Conflict, "archived agents cannot be launched")
+	if !agent_ok do return domain.Agent_Instance{}, 0, false, agent_err
+	if agent.state != .Active do return {}, 0, false, domain.domain_error(.Conflict, "archived agents cannot be launched")
 	bridge_id := strings.trim_space(input.bridge_id)
 	if bridge_id == "" && auth.bridge_id != "" {
 		bridge_id = auth.bridge_id
 	}
-	if bridge_id == "" do return domain.Agent_Instance{}, false, domain.domain_error(.Validation_Failed, "bridge_id is required; choose the bridge to run this agent on")
+	if bridge_id == "" do return domain.Agent_Instance{}, 0, false, domain.domain_error(.Validation_Failed, "bridge_id is required; choose the bridge to run this agent on")
 	bridge, bridge_ok, bridge_err := iface.bridge_get_bridge(service.bridges, bridge_id)
-	if !bridge_ok do return domain.Agent_Instance{}, false, bridge_err
-	if bridge.owner_user_id != owner || bridge.owner_user_id != agent.owner_user_id do return domain.Agent_Instance{}, false, domain.domain_error(.Not_Found, "bridge not found")
-	if bridge.status != .Online || !project_service.bridge_runtime_registry_has_live(service.bridge_runtime_registry, bridge.bridge_id) do return domain.Agent_Instance{}, false, domain.domain_error(.Bridge_Offline, "bridge is offline")
+	if !bridge_ok do return domain.Agent_Instance{}, 0, false, bridge_err
+	if bridge.owner_user_id != owner || bridge.owner_user_id != agent.owner_user_id do return domain.Agent_Instance{}, 0, false, domain.domain_error(.Not_Found, "bridge not found")
+	if bridge.status != .Online || !project_service.bridge_runtime_registry_has_live(service.bridge_runtime_registry, bridge.bridge_id) do return domain.Agent_Instance{}, 0, false, domain.domain_error(.Bridge_Offline, "bridge is offline")
 	resolved, resolved_ok, resolved_err := resolve_provider_model(service, auth, agent.agent_id, bridge.bridge_id, Run_Request{provider = input.provider, model = input.model})
-	if !resolved_ok do return domain.Agent_Instance{}, false, resolved_err
+	if !resolved_ok do return domain.Agent_Instance{}, 0, false, resolved_err
 	// Mint one per-agent global counter for this run and derive the default title
 	// "<agent-name> #<n>". The same default title is used for the (new) chain and
 	// the conversation so a run is identifiable before the agent/user renames it.
 	default_title := default_title_for_agent(service, owner, agent)
 	chain_id, chain_ok, chain_err := resolve_instance_chain(service, owner, input.chain_id, default_title)
-	if !chain_ok do return domain.Agent_Instance{}, false, chain_err
+	if !chain_ok do return domain.Agent_Instance{}, 0, false, chain_err
 	project_path := ""
 	if input.project_id != "" {
 		path, path_ok, path_err := resolve_project_path_for_launch(service, owner, input.project_id, bridge.bridge_id)
-		if !path_ok do return domain.Agent_Instance{}, false, path_err
+		if !path_ok do return domain.Agent_Instance{}, 0, false, path_err
 		project_path = path
 	}
 	now := platform.clock_now(service.clock)
@@ -247,15 +294,17 @@ create_instance :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, i
 	display_name := strings.trim_space(input.display_name)
 	if display_name == "" do display_name = default_title
 	instance := domain.Agent_Instance{agent_instance_id = instance_id, owner_user_id = owner, agent_id = agent.agent_id, bridge_id = bridge.bridge_id, display_name = display_name, provider = resolved.provider, model = resolved.model, project_id = input.project_id, project_path = project_path, chain_id = chain_id, conversation_id = conversation_id, runtime_status = "launching", startup_status = "starting", activity_status = "unknown", last_applied_seq = 0, run_count = 1, created_at = now, updated_at = now, started_at = now, last_seen_at = now}
-	generation, admitted, quota_err := reserve_runtime_launch(service, instance)
-	if !admitted do return {}, false, quota_err
-	launch_sent := false
-	defer if !launch_sent do project_service.bridge_runtime_instance_cancel_reservation(service.bridge_runtime_registry, instance.bridge_id, generation, instance.agent_instance_id)
+	admitted: bool
+	quota_err: domain.Domain_Error
+	generation, admitted, quota_err = reserve_runtime_launch(service, instance)
+	if !admitted do return {}, 0, false, quota_err
+	prepared := false
+	defer if !prepared do project_service.bridge_runtime_instance_cancel_reservation(service.bridge_runtime_registry, instance.bridge_id, generation, instance.agent_instance_id)
 	saved, saved_ok, save_err := iface.agent_save_instance(service.agents, instance)
-	if !saved_ok do return domain.Agent_Instance{}, false, save_err
+	if !saved_ok do return domain.Agent_Instance{}, 0, false, save_err
 	conv, conv_ok, conv_err := ensure_instance_conversation(service, saved, default_title)
-	if !conv_ok do return domain.Agent_Instance{}, false, conv_err
-	if saved.conversation_id == "" { saved.conversation_id = conv.conversation_id; saved, saved_ok, save_err = iface.agent_save_instance(service.agents, saved); if !saved_ok do return domain.Agent_Instance{}, false, save_err }
+	if !conv_ok do return domain.Agent_Instance{}, 0, false, conv_err
+	if saved.conversation_id == "" { saved.conversation_id = conv.conversation_id; saved, saved_ok, save_err = iface.agent_save_instance(service.agents, saved); if !saved_ok do return domain.Agent_Instance{}, 0, false, save_err }
 	if input.chain_id == "" { update_private_chain_coordinator(service, saved) }
 	if service.taskchains != nil && saved.chain_id != "" {
 		members, _ := iface.taskchain_list_members_by_chain(service.taskchains, domain.Task_Chain_ID(saved.chain_id), saved.owner_user_id)
@@ -264,11 +313,15 @@ create_instance :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, i
 		member := domain.Task_Chain_Member{chain_id = domain.Task_Chain_ID(saved.chain_id), agent_instance_id = saved.agent_instance_id, agent_id = saved.agent_id, owner_user_id = saved.owner_user_id, role = role, created_at = now_m}
 		iface.taskchain_save_member(service.taskchains, member)
 	}
+	prepared = true
+	return saved, generation, true, domain.Domain_Error{}
+}
+
+// send_instance_launch pushes the launch_agent command for a prepared instance.
+send_instance_launch :: proc(service: ^Agent_Service, saved: domain.Agent_Instance) -> (bool, domain.Domain_Error) {
 	command_id := strings.concatenate({platform.generate_id(service.ids, "cmd_launch_"), "_", saved.agent_instance_id})
-	command := project_service.Runtime_Command{bridge_id = bridge.bridge_id, command_id = command_id, body_json = launch_command_json_full(service, command_id, saved)}
-	if sent, send_err := project_service.bridge_command_send_runtime(service.bridge_command_sink, command); !sent do return domain.Agent_Instance{}, false, send_err
-	launch_sent = true
-	return saved, true, domain.Domain_Error{}
+	command := project_service.Runtime_Command{bridge_id = saved.bridge_id, command_id = command_id, body_json = launch_command_json_full(service, command_id, saved)}
+	return project_service.bridge_command_send_runtime(service.bridge_command_sink, command)
 }
 
 launch_agent :: create_instance
@@ -413,7 +466,9 @@ mark_instance_start_success :: proc(service: ^Agent_Service, auth: contracts.Aut
 	inst.last_seen_at = now
 	inst.stopped_at = ""
 	inst.updated_at = now
-	return iface.agent_save_instance(service.agents, inst)
+	saved, saved_ok, save_err := iface.agent_save_instance(service.agents, inst)
+	if saved_ok && service.hooks.on_start_success != nil do service.hooks.on_start_success(service.hooks.ctx, saved)
+	return saved, saved_ok, save_err
 }
 
 bootstrap_skill_file_content :: proc(m: domain.Memory, name: string) -> string {
@@ -969,7 +1024,9 @@ apply_bridge_status_report :: proc(service: ^Agent_Service, bridge_id, instance_
 				if len(inst.activity_status) > 0 do delete(inst.activity_status)
 				inst.activity_status = strings.clone(activity_status)
 			}
-			return iface.agent_save_instance(service.agents, inst)
+			saved, saved_ok, save_err := iface.agent_save_instance(service.agents, inst)
+			if saved_ok do notify_instance_activity(service, instance_id, activity_status)
+			return saved, saved_ok, save_err
 		} else {
 			domain.agent_instance_destroy(&inst)
 			return domain.Agent_Instance{}, false, domain.Domain_Error{}
@@ -1025,7 +1082,15 @@ apply_bridge_status_report :: proc(service: ^Agent_Service, bridge_id, instance_
 		inst.stopped_at = strings.clone(now)
 		clear_instance_current_task(&inst)
 	}
-	return iface.agent_save_instance(service.agents, inst)
+	saved, saved_ok, save_err := iface.agent_save_instance(service.agents, inst)
+	if saved_ok {
+		if instance_runtime_is_terminal(saved.runtime_status) {
+			notify_instance_terminal(service, instance_id)
+		} else {
+			notify_instance_activity(service, instance_id, activity_status)
+		}
+	}
+	return saved, saved_ok, save_err
 }
 
 // reconcile_bridge_heartbeat marks instances the bridge no longer reports active
@@ -1081,6 +1146,7 @@ reconcile_bridge_heartbeat :: proc(service: ^Agent_Service, bridge_id: string, a
 			if ok {
 				// Escapes to the caller, which owns it from here. NOT destroyed below.
 				append(&changed, saved)
+				notify_instance_terminal(service, saved.agent_instance_id)
 			} else {
 				domain.agent_instance_destroy(&inst)
 			}
@@ -1173,6 +1239,7 @@ mark_bridge_instances_unreachable :: proc(service: ^Agent_Service, bridge_id: st
 		saved, ok, _ := iface.agent_save_instance(service.agents, inst)
 		if ok {
 			append(&changed, saved)
+			notify_instance_terminal(service, saved.agent_instance_id)
 		} else {
 			domain.agent_instance_destroy(&inst)
 		}
@@ -1227,6 +1294,7 @@ reap_stale_instances :: proc(service: ^Agent_Service, stale_after_ms: i64) -> []
 		saved, ok, _ := iface.agent_save_instance(service.agents, inst)
 		if ok {
 			append(&changed, saved)
+			notify_instance_terminal(service, saved.agent_instance_id)
 		} else {
 			domain.agent_instance_destroy(&inst)
 		}
@@ -1568,6 +1636,10 @@ Wake_Agent_Run_Entry :: struct {
 	coordinator_id:    string,
 	project_id:        string,
 	project_path:      string,
+	// Task System v2: the lease this run entry delivers and its context pack
+	// (a JSON object, emitted verbatim). Empty for non-lease wakes.
+	lease_id:          string,
+	pack_json:         string,
 }
 
 // wake_agent_command_json builds the ephemeral-lifecycle push the reconcile pass
@@ -1623,6 +1695,12 @@ wake_agent_command_json :: proc(command_id, chain_id: string, run: []Wake_Agent_
 		}
 		if entry.project_path != "" {
 			strings.write_string(&b, ",\"project_path\":\""); write_service_json_string(&b, entry.project_path); strings.write_string(&b, "\"")
+		}
+		if entry.lease_id != "" {
+			strings.write_string(&b, ",\"lease_id\":\""); write_service_json_string(&b, entry.lease_id); strings.write_string(&b, "\"")
+		}
+		if strings.has_prefix(strings.trim_space(entry.pack_json), "{") {
+			strings.write_string(&b, ",\"pack\":"); strings.write_string(&b, strings.trim_space(entry.pack_json))
 		}
 		strings.write_string(&b, "}")   // close entry object
 	}

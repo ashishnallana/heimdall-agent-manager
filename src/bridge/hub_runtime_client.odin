@@ -2188,6 +2188,12 @@ bridge_hub_handle_wake_agent :: proc(conn: ^ws.Connection, text: string) {
 			coordinator_display_name := extract_json_string(entry, "coordinator_display_name", "")
 			project_id               := extract_json_string(entry, "project_id", "")
 			project_path             := extract_json_string(entry, "project_path", "")
+			// Task System v2: the lease this wake delivers and its context pack.
+			// Forwarded verbatim into the synthetic launch so the bootstrap (M3)
+			// can write <run_dir>/TASK.md; the agent's first act is `lease next`.
+			lease_id := extract_json_string(entry, "lease_id", "")
+			pack_json, _ := bridge_provider_json_extract_object(entry, "pack")
+			defer delete(pack_json)
 
 			if _, has := bridge_runtime_get_launch(instance_id); has {
 				// A launch record exists, but restart via the pty-host's remembered
@@ -2198,7 +2204,7 @@ bridge_hub_handle_wake_agent :: proc(conn: ^ws.Connection, text: string) {
 				// bridge_runtime_launch_agent_pty_host already closes any registered
 				// instance before re-spawning, so no separate is_registered check.
 				syn_command_id := fmt.tprintf("wake_restart_%s_%d", instance_id, bridge_runtime_now_ms())
-				command_json := bridge_wake_launch_command_json(syn_command_id, instance_id, task_id, role, provider, model, agent_id, agent_name, chain_id, chain_title, coordinator_id, project_id, project_path, coordinator_display_name)
+				command_json := bridge_wake_launch_command_json(syn_command_id, instance_id, task_id, role, provider, model, agent_id, agent_name, chain_id, chain_title, coordinator_id, project_id, project_path, coordinator_display_name, lease_id, pack_json)
 				defer delete(command_json)
 				ok, detail, launch_err := bridge_runtime_launch_agent(syn_command_id, command_json, bridge_command_worker_deadline_ns(conn))
 				if ok {
@@ -2216,7 +2222,7 @@ bridge_hub_handle_wake_agent :: proc(conn: ^ws.Connection, text: string) {
 				// resolve it — a top-level-only id aborts the launch at validate. This
 				// mirrors the scheduler sched_wake synthetic launch.
 				syn_command_id := fmt.tprintf("wake_launch_%s_%d", instance_id, bridge_runtime_now_ms())
-				command_json := bridge_wake_launch_command_json(syn_command_id, instance_id, task_id, role, provider, model, agent_id, agent_name, chain_id, chain_title, coordinator_id, project_id, project_path)
+				command_json := bridge_wake_launch_command_json(syn_command_id, instance_id, task_id, role, provider, model, agent_id, agent_name, chain_id, chain_title, coordinator_id, project_id, project_path, "", lease_id, pack_json)
 				defer delete(command_json)
 				ok, detail, launch_err := bridge_runtime_launch_agent(syn_command_id, command_json, bridge_command_worker_deadline_ns(conn))
 				if ok {
@@ -2264,7 +2270,7 @@ bridge_wake_report_failed_status :: proc(conn: ^ws.Connection, instance_id: stri
 // the agent-keyed template bootstrap path rather than the header-only fallback
 // (REQ-37). Free-text fields (agent_name, chain_title) are JSON-escaped. Fields are
 // emitted unconditionally (empty is harmless) so the descriptor is deterministic.
-bridge_wake_launch_command_json :: proc(command_id, instance_id, task_id, role, provider, model, agent_id, agent_name, chain_id, chain_title, coordinator_id, project_id, project_path: string, coordinator_display_name: string = "") -> string {
+bridge_wake_launch_command_json :: proc(command_id, instance_id, task_id, role, provider, model, agent_id, agent_name, chain_id, chain_title, coordinator_id, project_id, project_path: string, coordinator_display_name: string = "", lease_id: string = "", pack_json: string = "") -> string {
 	b := strings.builder_make()
 	write_field :: proc(b: ^strings.Builder, first: ^bool, key, val: string) {
 		if !first^ do strings.write_byte(b, ',')
@@ -2292,6 +2298,14 @@ bridge_wake_launch_command_json :: proc(command_id, instance_id, task_id, role, 
 	}
 	write_field(&b, &first, "project_id", project_id)
 	write_field(&b, &first, "project_path", project_path)
+	// Task System v2 lease delivery (empty on non-lease wakes).
+	if lease_id != "" {
+		write_field(&b, &first, "lease_id", lease_id)
+	}
+	if strings.has_prefix(strings.trim_space(pack_json), "{") {
+		strings.write_string(&b, ",\"pack\":")
+		strings.write_string(&b, strings.trim_space(pack_json))
+	}
 	strings.write_string(&b, "}}")
 	return strings.to_string(b)
 }

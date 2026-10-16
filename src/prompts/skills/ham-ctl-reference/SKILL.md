@@ -171,8 +171,13 @@ globally unique — you rarely need `--chain`).
 
 > **Task System v2:** `task-chain subscribe/unsubscribe`, `task subscribe/unsubscribe`,
 > `task status`, `task vote`, `task nudge` and `task set-current` were removed. The hub now
-> pushes work to agents directly (no subscriptions, no polling); the `lease.*` / `review.*`
-> verbs that replace them arrive with the next milestone.
+> pushes work to agents directly (no subscriptions, no polling). Available now:
+> - `lease next` — the lease you hold (status `current`) or the next task claimed for you
+>   inline (status `granted`), with the task, deadlines and context pack; `none` when idle.
+> - `lease heartbeat [--note <text>]` — extend the lease TTL (every ham-ctl call already
+>   heartbeats implicitly). A `409 lease_lost` means your lease expired: stop.
+>
+> `lease submit/handoff/block`, `review post` and `task fetch` arrive with the next milestone.
 
 ### Task states
 A task carries a `state`: `backlog`, `ready`, `in_progress`, `in_review`, `done`, `cancelled`.

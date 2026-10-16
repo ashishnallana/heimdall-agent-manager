@@ -43,6 +43,7 @@ ctl_agent_mode :: proc(cmd: []string, args: []string) {
 	case "agents":        ctl_v2_agents(endpoint, token, rest, args); return
 	case "task-chain", "task-chains", "chain", "chains": ctl_v2_task_chain(endpoint, token, rest, args); return
 	case "task", "tasks": ctl_v2_task(endpoint, token, rest, args); return
+	case "lease":         ctl_v2_lease(endpoint, token, rest, args); return
 	case "chat", "chats", "conversation", "conversations": ctl_v2_chat(endpoint, token, rest, args); return
 	case "memory":        ctl_v2_memory(endpoint, token, rest, args); return
 	case "artifact", "artifacts": ctl_v2_artifact(endpoint, token, rest, args); return
@@ -1719,6 +1720,7 @@ print_agent_help :: proc(cmd: []string) {
 		print_help_task_chain()
 		return
 	case "task", "tasks": print_help_task(); return
+	case "lease": print_help_lease(); return
 	case "chat", "chats", "conversation", "conversations": print_help_chat(); return
 	case "artifact", "artifacts": print_help_artifact(); return
 	case "memory": print_help_memory(); return
@@ -1755,6 +1757,7 @@ print_help_overview :: proc() {
 	fmt.println("  issue       Issues, bugs, and blockers (list, show, create, update, comment, vote, unvote)")
 	fmt.println("  projects    Manage projects (list, show, create, update)")
 	fmt.println("  vault       Report the vault key source: env override and bridge status (status)")
+	fmt.println("  lease       Task System v2 leases: next (claim / re-read your task), heartbeat")
 	fmt.println("  context     One-shot snapshot of this instance (chain, task, unread)")
 	fmt.println("  start-success  Signal this instance is ready")
 	fmt.println("")
@@ -2008,4 +2011,43 @@ print_help_cards :: proc() {
 	fmt.println("  ham-ctl cards show crd_123")
 	fmt.println("  ham-ctl cards accept crd_123")
 	fmt.println("  ham-ctl cards discard crd_123")
+}
+
+// ---- lease (Task System v2, M1) ------------------------------------------
+// The lease IS your task: `lease next` returns the lease you hold (with its
+// context pack) or claims the next task for you inline; `lease heartbeat`
+// extends the TTL (every ham-ctl call already heartbeats implicitly).
+ctl_v2_lease :: proc(endpoint, token: string, tokens, args: []string) {
+	action := pos(tokens, 0)
+	switch action {
+	case "next":
+		fields := make([dynamic]string)
+		if v := option_value(args, "--vcs-base", ""); v != "" do append(&fields, json_kv("vcs_base", v))
+		ctl_agent_call_task(endpoint, token, "agent.lease.next", json_object_from_slice(fields[:]), args)
+	case "heartbeat":
+		fields := make([dynamic]string)
+		if v := option_value(args, "--lease", ""); v != "" do append(&fields, json_kv("lease_id", v))
+		if v := option_value(args, "--note", ""); v != "" do append(&fields, json_kv("note", v))
+		ctl_agent_call(endpoint, token, "agent.lease.heartbeat", json_object_from_slice(fields[:]))
+	case:
+		print_help_lease()
+	}
+}
+
+print_help_lease :: proc() {
+	fmt.println("ham-ctl lease — your task lease (Task System v2)")
+	fmt.println("")
+	fmt.println("VERBS")
+	fmt.println("  next                       Return the lease you hold (status=current) or claim the next task")
+	fmt.println("                             for you (status=granted); status=none when nothing is available.")
+	fmt.println("                             The response carries the task, the lease deadlines and the context pack.")
+	fmt.println("  heartbeat [--note <text>]  Extend the lease TTL (15 min, never past the hard cap). Any ham-ctl")
+	fmt.println("                             call already heartbeats implicitly; use --note to leave a progress note.")
+	fmt.println("")
+	fmt.println("A 409 lease_lost means your lease expired: stop; you will be re-woken with a fresh pack.")
+	fmt.println("submit / handoff / block / review post arrive with the next milestone.")
+	fmt.println("")
+	fmt.println("EXAMPLES")
+	fmt.println("  ham-ctl lease next")
+	fmt.println("  ham-ctl lease heartbeat --note \"tests green, writing docs\"")
 }

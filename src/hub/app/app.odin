@@ -4,6 +4,7 @@ import "core:fmt"
 import "core:thread"
 import metrics "odin_test:lib/metrics"
 import http "odin_test:hub/transport/http"
+import taskv2 "odin_test:hub/service/taskv2"
 
 run :: proc(config: Hub_Config) -> (bool, string) {
 	graph: App_Graph
@@ -19,6 +20,11 @@ run :: proc(config: Hub_Config) -> (bool, string) {
 	// A heap COPY would be unsafe: the graph's services store pointers back into
 	// this graph's own fields, so a copy would alias the original anyway.
 	thread.run_with_data(rawptr(&graph), reaper_thread_entry)
+	// Task System v2: rebuild timers from the columns, heal lease-less
+	// in_progress rows, match every Active chain once, then run the thin timer
+	// thread (1 s probe of the in-memory heap; the columns stay the truth).
+	taskv2.boot(&graph.task_engine)
+	_ = taskv2.start_timer_thread(&graph.task_engine)
 	// Private Prometheus endpoint, off unless --metrics-addr is set.
 	start_metrics_listener(metrics.global(), config.metrics_addr)
 	if config.ui_origin == "" do fmt.eprintln("ham-hub WARNING: --ui-origin is empty; CSRF protection is disabled")

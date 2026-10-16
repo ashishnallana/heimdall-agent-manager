@@ -127,6 +127,18 @@ task_engine_on_tasks_changed :: proc(ctx: rawptr, chain_id: domain.Task_Chain_ID
 	_, _, _ = taskchain_service.sync_chain_status_from_tasks(&graph.taskchains, chain_id, owner)
 }
 
+task_engine_on_instance_terminal :: proc(ctx: rawptr, instance_id: string) {
+	taskv2.on_instance_terminal((^taskv2.Service)(ctx), instance_id)
+}
+
+task_engine_on_instance_activity :: proc(ctx: rawptr, instance_id, activity_status: string) {
+	taskv2.on_instance_activity((^taskv2.Service)(ctx), instance_id, activity_status)
+}
+
+task_engine_on_start_success :: proc(ctx: rawptr, inst: domain.Agent_Instance) {
+	taskv2.on_start_success((^taskv2.Service)(ctx), inst)
+}
+
 build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 	graph.bridge_runtime_registry.limits = project_service.Runtime_Registry_Limits{
 		live_bridges = config.runtime_max_live_bridges,
@@ -240,6 +252,14 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 	graph.task_engine.on_tasks_changed = task_engine_on_tasks_changed
 	graph.task_engine.on_tasks_changed_ctx = rawptr(graph)
 	taskchain_service.set_engine(&graph.taskchains, &graph.task_engine)
+	// Instance lifecycle → engine: ONE chokepoint for every death path
+	// (taskv2.on_instance_terminal), busy/idle activity, and start-success.
+	graph.agents.hooks = agent_service.Lifecycle_Hooks{
+		ctx              = rawptr(&graph.task_engine),
+		on_terminal      = task_engine_on_instance_terminal,
+		on_activity      = task_engine_on_instance_activity,
+		on_start_success = task_engine_on_start_success,
+	}
 	graph.search = search_service.new_search_service(&graph.repos.search)
 	graph.push = push_service.new_push_service(&graph.repos.push_subscriptions, &graph.clock, &graph.ids, push_service.Vapid_Config{
 		public_key = config.vapid_public_key,
@@ -332,7 +352,7 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 		// state the serializer reports.
 		bridge_runtime_registry = &graph.bridge_runtime_registry,
 	}
-	graph.bridge_handlers = http.Bridge_Handlers{auth = &graph.auth, bridges = &graph.bridges, agents = &graph.agents, content = &graph.content, taskchains = &graph.taskchains, projects = &graph.projects, event_bus = &graph.event_bus, bridge_runtime_registry = &graph.bridge_runtime_registry, shell_sessions = &graph.shell_session_service, lsp_sessions = &graph.lsp_session_registry, providers = &graph.providers, bridge_logs = &graph.bridge_logs}
+	graph.bridge_handlers = http.Bridge_Handlers{auth = &graph.auth, bridges = &graph.bridges, agents = &graph.agents, content = &graph.content, taskchains = &graph.taskchains, projects = &graph.projects, event_bus = &graph.event_bus, bridge_runtime_registry = &graph.bridge_runtime_registry, shell_sessions = &graph.shell_session_service, lsp_sessions = &graph.lsp_session_registry, providers = &graph.providers, bridge_logs = &graph.bridge_logs, task_engine = &graph.task_engine}
 	bridge_log_service.start(&graph.bridge_logs)
 	graph.agent_handlers = http.Agent_Handlers{
  launch_preferences = &graph.users,
@@ -350,7 +370,7 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 	graph.skills_handlers = http.Skills_Handlers{auth = &graph.auth}
 	graph.push_handlers = http.Push_Handlers{auth = &graph.auth, push = &graph.push, vapid_public_key = config.vapid_public_key}
 	graph.device_auth_handlers = http.Device_Auth_Handlers{service = &graph.device_auth, auth = &graph.auth, push = &graph.push, public_app_origin = config.public_app_origin, ui_origin = config.ui_origin}
-	graph.agent_action_handlers = http.Agent_Action_Handlers{auth = &graph.auth, agents = &graph.agents, bridges = &graph.bridges, content = &graph.content, taskchains = &graph.taskchains, search = &graph.search, event_bus = &graph.event_bus, push = &graph.push, public_app_origin = config.public_app_origin}
+	graph.agent_action_handlers = http.Agent_Action_Handlers{auth = &graph.auth, agents = &graph.agents, bridges = &graph.bridges, content = &graph.content, taskchains = &graph.taskchains, search = &graph.search, event_bus = &graph.event_bus, push = &graph.push, public_app_origin = config.public_app_origin, task_engine = &graph.task_engine}
 	graph.action_bridge_versions = make(map[string]int)
 	graph.action_handlers = http.Action_Handlers{
 		auth = &graph.auth,
@@ -618,6 +638,8 @@ register_routes :: proc(graph: ^App_Graph) {
 	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/tasks/update", rawptr(&graph.agent_action_handlers), http.agent_action_task_update_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/tasks/depend", rawptr(&graph.agent_action_handlers), http.agent_action_task_depend_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/tasks/comment", rawptr(&graph.agent_action_handlers), http.agent_action_task_comment_handler)
+	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/lease/next", rawptr(&graph.agent_action_handlers), http.agent_action_lease_next_handler)
+	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/lease/heartbeat", rawptr(&graph.agent_action_handlers), http.agent_action_lease_heartbeat_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/tasks/status", rawptr(&graph.agent_action_handlers), http.agent_action_task_status_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/tasks/set-current", rawptr(&graph.agent_action_handlers), http.agent_action_task_set_current_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/tasks/vote", rawptr(&graph.agent_action_handlers), http.agent_action_task_vote_handler)

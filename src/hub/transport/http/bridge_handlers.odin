@@ -25,6 +25,7 @@ import content_service "odin_test:hub/service/content"
 import project_service "odin_test:hub/service/project"
 import provider_service "odin_test:hub/service/provider"
 import taskchain_service "odin_test:hub/service/taskchain"
+import taskv2 "odin_test:hub/service/taskv2"
 import ws "odin_test:lib/ws"
 import shell_session_svc "odin_test:hub/service/shell_session"
 import jsonx "odin_test:lib/jsonx"
@@ -50,6 +51,10 @@ Bridge_Handlers :: struct {
 	// reads through it. nil in tests that do not wire it (entries are then
 	// validated and counted but not stored).
 	bridge_logs: ^bridge_log_service.Service,
+	// task_engine: Task System v2 — bridge hello re-sends unconfirmed grants,
+	// stops lease-less orphans and re-plans chains with held tasks; the bridge
+	// `busy` push is an implicit heartbeat. nil in tests that do not wire it.
+	task_engine: ^taskv2.Service,
 }
 
 list_bridges_handler :: proc(ctx: rawptr, req: Request) -> Response {
@@ -1354,6 +1359,12 @@ bridge_ws_upgrade_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_Soc
 			}
 		}
 	}
+	// Task System v2 (plan §2.4, bridge Online): re-send unconfirmed grants on
+	// this bridge, stop[] live non-coordinator instances that hold no lease, and
+	// match_chain for every chain with a held task. Runs AFTER the heartbeat
+	// reconcile above so instances the bridge no longer runs have already
+	// crossed on_instance_terminal.
+	taskv2.on_bridge_hello(h.task_engine, bridge.bridge_id, hello_active)
 	for s in hello_active do delete(s)
 	delete(hello_active)
 	// REQ-SHELL-3: deliver this bridge's OUTSTANDING KILL INTENTS. A kill accepted

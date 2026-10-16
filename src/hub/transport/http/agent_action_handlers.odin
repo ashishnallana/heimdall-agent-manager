@@ -18,6 +18,8 @@ import events "odin_test:hub/service/events"
 import push_service "odin_test:hub/service/push"
 import provider_service "odin_test:hub/service/provider"
 import card_service "odin_test:hub/service/card"
+import taskv2 "odin_test:hub/service/taskv2"
+import "core:encoding/json"
 import jsonx "odin_test:lib/jsonx"
 
 Agent_Action_Handlers :: struct {
@@ -34,6 +36,57 @@ Agent_Action_Handlers :: struct {
 	push: ^push_service.Push_Service,
 	public_app_origin: string,
 	providers: ^provider_service.Provider_Service,
+	// task_engine: Task System v2 lease verbs + implicit heartbeat on every
+	// instance-token call. nil in unit tests that do not exercise leases.
+	task_engine: ^taskv2.Service,
+}
+
+// Lease_Next_Wire is the `lease.next` response: status ∈ granted|current|none.
+Lease_Next_Wire :: struct {
+	status: string          `json:"status"`,
+	lease:  Maybe(Task_Lease_Wire) `json:"lease"`,
+	task:   Maybe(Simple_Task_Wire) `json:"task"`,
+	pack:   json.Value      `json:"pack"`,
+}
+
+make_lease_wire :: proc(l: domain.Task_Lease) -> Task_Lease_Wire {
+	return Task_Lease_Wire{
+		lease_id = l.lease_id, kind = l.kind, review_role = l.review_role, holder_instance_id = l.holder_instance_id,
+		attempt_no = l.attempt_no, bridge_id = l.bridge_id, granted_at = l.granted_at, confirmed_at = l.confirmed_at,
+		expires_at = l.expires_at, hard_deadline_at = l.hard_deadline_at, delivery = l.delivery,
+	}
+}
+
+// POST /api/v1/agent-actions/lease/next  params: {vcs_base?}
+agent_action_lease_next_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Agent_Action_Handlers)(ctx)
+	auth, _, ok, resp := require_instance_action_auth(h, req)
+	if !ok do return resp
+	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
+	params := json_object_raw(req.body, "params")
+	res, rok, err := taskv2.lease_next(h.task_engine, auth, taskv2.Lease_Next_Input{vcs_base = json_string(params, "vcs_base")})
+	if !rok do return respond_error(err, req.request_id)
+	wire := Lease_Next_Wire{status = res.status}
+	if res.status != "none" {
+		wire.lease = make_lease_wire(res.lease)
+		wire.task = make_simple_task_wire(res.task)
+		wire.pack = json_value_or_null(res.pack_json)
+	}
+	data, _ := json.marshal(wire, JSON_MARSHAL_OPT, allocator = context.temp_allocator)
+	return respond_success(string(data), req.request_id, auth_ctx_server_time(req), 200)
+}
+
+// POST /api/v1/agent-actions/lease/heartbeat  params: {lease_id?, note?}
+agent_action_lease_heartbeat_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Agent_Action_Handlers)(ctx)
+	auth, _, ok, resp := require_instance_action_auth(h, req)
+	if !ok do return resp
+	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
+	params := json_object_raw(req.body, "params")
+	lease, hok, err := taskv2.lease_heartbeat(h.task_engine, auth, taskv2.Lease_Heartbeat_Input{lease_id = json_string(params, "lease_id"), note = json_string(params, "note")})
+	if !hok do return respond_error(err, req.request_id)
+	data, _ := json.marshal(make_lease_wire(lease), JSON_MARSHAL_OPT, allocator = context.temp_allocator)
+	return respond_success(fmt.tprintf("{{\"lease\":%s}}", string(data)), req.request_id, auth_ctx_server_time(req), 200)
 }
 
 agent_action_chat_send_to_user_handler :: proc(ctx: rawptr, req: Request) -> Response {
@@ -1241,6 +1294,9 @@ require_instance_action_auth :: proc(h: ^Agent_Action_Handlers, req: Request) ->
 	if !ok do return contracts.Auth_Context{}, domain.Agent_Instance{}, false, respond_error(err, req.request_id)
 	inst, inst_ok, inst_err := agent_service.get_instance(h.agents, contracts.Auth_Context{kind = .Bridge_Token, bridge_id = auth.bridge_id, user_id = auth.user_id}, auth.agent_instance_id)
 	if !inst_ok do return contracts.Auth_Context{}, domain.Agent_Instance{}, false, respond_error(inst_err, req.request_id)
+	// Task System v2: every authenticated instance call is an implicit lease
+	// heartbeat (plan §2.3). Cheap when the instance holds nothing.
+	taskv2.touch_instance(h.task_engine, auth.agent_instance_id)
 	return auth, inst, true, Response{}
 }
 
