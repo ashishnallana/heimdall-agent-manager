@@ -52,6 +52,7 @@ App_Graph :: struct {
 	sqlite_scheduled_prompts: sqlite.Scheduled_Prompt_Repo_SQLite,
 	sqlite_push: sqlite.Push_Repo_SQLite,
 	sqlite_cards: sqlite.Card_Repo_SQLite,
+	sqlite_attention: sqlite.Attention_Repo_SQLite,
 	sqlite_issues: sqlite.Issue_Repo_SQLite,
 	sqlite_shell_sessions: sqlite.Shell_Session_Repo_SQLite,
 	sqlite_experiments: sqlite.Experiment_Repo_SQLite,
@@ -184,6 +185,7 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 	graph.repos.scheduled_prompts = graph.repos.actions
 	graph.repos.push_subscriptions = sqlite.new_push_repository(&graph.sqlite_push, &graph.db)
 	graph.repos.cards = sqlite.new_card_repository(&graph.sqlite_cards, &graph.db)
+	graph.repos.attention = sqlite.new_attention_repository(&graph.sqlite_attention, &graph.db)
 	graph.repos.issues = sqlite.new_issue_repository(&graph.sqlite_issues, &graph.db)
 	graph.shell_session_repo = sqlite.new_shell_session_repository(&graph.sqlite_shell_sessions, &graph.db)
 	graph.experiment_repo = sqlite.new_experiment_repository(&graph.sqlite_experiments, &graph.db)
@@ -357,6 +359,12 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 		&graph.ids,
 		&graph.issues,
 	)
+	// Attention deck: the card projector keeps task-validation and actionable
+	// message cards in step with their sources (write-through), so wire it into
+	// the services that own those sources.
+	card_service.init_attention(&graph.cards, &graph.repos.attention)
+	taskchain_service.set_attention_notifier(&graph.taskchains, &graph.cards.attention_notifier)
+	content_service.set_attention_notifier(&graph.content, &graph.cards.attention_notifier)
 	graph.experiment_handlers = http.Experiment_Rest_Handlers{auth = &graph.auth, repo = &graph.experiment_repo, clock = &graph.clock}
 	graph.lsp_server_config_handlers = http.Lsp_Server_Config_Rest_Handlers{auth = &graph.auth, repo = &graph.lsp_server_config_repo, clock = &graph.clock, ids = &graph.ids}
 	graph.providers = provider_service.new_provider_service(&graph.provider_repo)

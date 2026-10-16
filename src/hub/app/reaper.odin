@@ -1,5 +1,6 @@
 package app
 
+import "core:fmt"
 import "core:time"
 import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
@@ -7,6 +8,7 @@ import agent_service "odin_test:hub/service/agent"
 import events "odin_test:hub/service/events"
 import http "odin_test:hub/transport/http"
 import bridge_service "odin_test:hub/service/bridge"
+import card_service "odin_test:hub/service/card"
 import bridge_log_service "odin_test:hub/service/bridge_log"
 import project_service "odin_test:hub/service/project"
 import provider_service "odin_test:hub/service/provider"
@@ -104,10 +106,32 @@ reaper_loop :: proc(graph: ^App_Graph) {
 	if graph == nil do return
 	interval := graph.config.reaper_interval_seconds
 	if interval <= 0 do interval = DEFAULT_REAPER_INTERVAL_SECONDS
+	// Attention cards: reconcile once at startup, then on the sweep cadence below.
+	attention_reconcile_maybe(graph, true)
 	for {
 		time.sleep(time.Duration(interval) * time.Second)
 		reaper_sweep_once(graph)
+		attention_reconcile_maybe(graph, false)
 	}
+}
+
+// ATTENTION_RECONCILE_INTERVAL_SECONDS: how often the attention-card
+// reconciliation (card_service.reconcile_attention) re-checks every source.
+// Write-through keeps cards current; this only repairs a missed notification,
+// so it can be infrequent.
+ATTENTION_RECONCILE_INTERVAL_SECONDS :: 10 * 60
+
+attention_last_reconcile: time.Tick
+
+// attention_reconcile_maybe rides the reaper thread (no extra timer thread). It
+// runs when forced or when the interval has elapsed since the last run.
+attention_reconcile_maybe :: proc(graph: ^App_Graph, force: bool) {
+	if graph == nil do return
+	now := time.tick_now()
+	if !force && attention_last_reconcile != {} && time.tick_diff(attention_last_reconcile, now) < time.Duration(ATTENTION_RECONCILE_INTERVAL_SECONDS) * time.Second do return
+	attention_last_reconcile = now
+	stats := card_service.reconcile_attention(&graph.cards)
+	if stats.failed > 0 do fmt.eprintfln("ham-hub WARN attention reconcile: owners=%d projected=%d failed=%d", stats.owners, stats.projected, stats.failed)
 }
 
 // reaper_sweep_once performs a single stale-instance sweep + event fan-out. Split

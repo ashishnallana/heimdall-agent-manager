@@ -3,6 +3,7 @@ package card
 import "core:encoding/json"
 import "core:fmt"
 import "core:strings"
+import "core:sync"
 import "core:time"
 import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
@@ -236,6 +237,12 @@ Card_Service :: struct {
 	uow_factory: ^iface.Unit_Of_Work_Factory,
 	clock:       ^platform.Clock,
 	ids:         ^platform.ID_Generator,
+	// Attention deck (card_projector.odin). Set by init_attention; when nil the
+	// service keeps the legacy list-time task projection instead.
+	attention_repo:     ^iface.Attention_Repository,
+	attention_notifier: contracts.Attention_Notifier,
+	projector_mutex:    sync.Mutex,
+	card_changed:       Card_Changed_Hook,
 }
 
 new_card_service :: proc(
@@ -354,8 +361,10 @@ sync_projected_cards :: proc(s: ^Card_Service, owner: domain.User_ID) {
 		default_ttl = platform.expires_at_after_seconds(24 * 3600)
 	}
 
-	// 1. Task-in-validation deterministic provider
-	if s.taskchains != nil && s.taskchains.repo != nil {
+	// 1. Task-in-validation deterministic provider. Superseded by the
+	// write-through projector (card_projector.odin) whenever that is wired; this
+	// list-time path (one query per chain) remains only for bare test services.
+	if s.attention_repo == nil && s.taskchains != nil && s.taskchains.repo != nil {
 		chains, cerr := iface.taskchain_list_chains_by_owner(s.taskchains.repo, owner)
 		if cerr.code == .None {
 			defer delete(chains)
@@ -535,13 +544,10 @@ evaluate_guard :: proc(s: ^Card_Service, owner: domain.User_ID, card: domain.Car
 				return false, fmt.tprintf("task status is %s, expected %s", actual_status, expected_status)
 			}
 		}
-		// Consistency with sync_projected_cards: a task card only belongs on the
-		// user's feed while the task awaits the user. Once an agent reviewer is
-		// assigned the card is stale (that agent will vote, not the user).
-		reviewers := taskchain_service.extract_instances_from_ref_blob(task.reviewer_refs_json)
-		has_agent_reviewer := len(reviewers) > 0
-		delete(reviewers)
-		if has_agent_reviewer {
+		// Consistency with the projector: a task card only belongs on the user's
+		// feed while the task awaits the user (task_awaits_user). Once an agent
+		// reviewer is assigned the card is stale (that agent votes, not the user).
+		if task.status == .In_Validation && !task_awaits_user(task) {
 			return false, "task now has an agent reviewer"
 		}
 	}
@@ -660,8 +666,11 @@ list_cards :: proc(s: ^Card_Service, auth: contracts.Auth_Context, filter: Card_
 		if card.status == domain.CARD_STATUS_PENDING {
 			guard_ok, _ := evaluate_guard(s, owner, card)
 			if !guard_ok {
-				_, _ = iface.card_update_status(s.cards, card.card_id, domain.CARD_STATUS_DISCARDED, now)
-				card.status = domain.CARD_STATUS_DISCARDED
+				// A failed guard is the system retiring a stale card, not the
+				// user's decision: resolved, so a changed source can bring it back.
+				_, _ = iface.card_update_status(s.cards, card.card_id, domain.CARD_STATUS_RESOLVED, now)
+				card.status = domain.CARD_STATUS_RESOLVED
+				notify_card_changed(s, owner, card.kind)
 				continue
 			}
 		}
@@ -701,7 +710,8 @@ list_cards_by_project :: proc(s: ^Card_Service, auth: contracts.Auth_Context, pr
 		if card.status == domain.CARD_STATUS_PENDING {
 			guard_ok, _ := evaluate_guard(s, owner, card)
 			if !guard_ok {
-				_, _ = iface.card_update_status(s.cards, card.card_id, domain.CARD_STATUS_DISCARDED, now)
+				_, _ = iface.card_update_status(s.cards, card.card_id, domain.CARD_STATUS_RESOLVED, now)
+				notify_card_changed(s, owner, card.kind)
 				continue
 			}
 		}
@@ -814,6 +824,11 @@ accept_card :: proc(s: ^Card_Service, auth: contracts.Auth_Context, id: domain.C
 	if card.status != domain.CARD_STATUS_PENDING && card.status != domain.CARD_STATUS_SNOOZED {
 		return domain.Card{}, false, domain.domain_error(.Conflict, fmt.tprintf("card cannot be accepted in status '%s'", card.status))
 	}
+	// A message card is answered (reply / mark read), never accepted: accepting
+	// it would hide the question without the agent ever hearing back.
+	if card.provider == domain.CARD_PROVIDER_MESSAGE_OPTIONS {
+		return domain.Card{}, false, domain.domain_error(.Conflict, "message cards are answered by replying or marking the conversation read")
+	}
 
 	// Defense-in-depth: validate operations before doing any work (also guards rows
 	// created before create-time validation existed).
@@ -825,17 +840,14 @@ accept_card :: proc(s: ^Card_Service, auth: contracts.Auth_Context, id: domain.C
 	guard_ok, guard_reason := evaluate_guard(s, card.owner_user_id, card)
 	if !guard_ok {
 		now := platform.clock_now(s.clock)
-		_, _ = iface.card_update_status(s.cards, card.card_id, domain.CARD_STATUS_DISCARDED, now)
+		_, _ = iface.card_update_status(s.cards, card.card_id, domain.CARD_STATUS_RESOLVED, now)
+		notify_card_changed(s, card.owner_user_id, card.kind)
 		return domain.Card{}, false, domain.domain_error(.Conflict, fmt.tprintf("card precondition changed: %s", guard_reason))
 	}
 
 	trimmed_ops := strings.trim_space(card.operations_json)
 	if trimmed_ops == "" || trimmed_ops == "[]" {
-		now := platform.clock_now(s.clock)
-		card.status = domain.CARD_STATUS_ACCEPTED
-		card.updated_at = now
-		saved, save_ok, save_err := iface.card_update(s.cards, card)
-		return saved, save_ok, save_err
+		return mark_card_accepted(s, card)
 	}
 
 	ops_val, ops_err := json.parse_string(trimmed_ops)
@@ -1139,18 +1151,38 @@ accept_card :: proc(s: ^Card_Service, auth: contracts.Auth_Context, id: domain.C
 		if !commit_ok do return domain.Card{}, false, commit_err
 	}
 
+	// Status-only write, re-read after: executing the ops usually changed the
+	// card's source, and the projector may already have rewritten this row's
+	// attention fields; the accept must not clobber them with the copy read
+	// above. Writing accepted over a resolved row is intended -- this accept is
+	// what made the source stop qualifying.
+	return mark_card_accepted(s, card)
+}
+
+mark_card_accepted :: proc(s: ^Card_Service, card: domain.Card) -> (domain.Card, bool, domain.Domain_Error) {
 	now := platform.clock_now(s.clock)
-	card.status = domain.CARD_STATUS_ACCEPTED
-	card.updated_at = now
-	saved_card, save_ok, save_err := iface.card_update(s.cards, card)
-	if !save_ok do return domain.Card{}, false, save_err
-	return saved_card, true, domain.Domain_Error{}
+	up_ok, up_err := iface.card_update_status(s.cards, card.card_id, domain.CARD_STATUS_ACCEPTED, now)
+	if !up_ok {
+		if up_err.code == .None do return domain.Card{}, false, domain.domain_error(.Not_Found, "card not found")
+		return domain.Card{}, false, up_err
+	}
+	saved, found, _ := iface.card_get(s.cards, card.card_id)
+	if !found {
+		saved = card
+		saved.status = domain.CARD_STATUS_ACCEPTED
+		saved.updated_at = now
+	}
+	return saved, true, domain.Domain_Error{}
 }
 
 snooze_card :: proc(s: ^Card_Service, auth: contracts.Auth_Context, id: domain.Card_ID, snooze_until: string) -> (domain.Card, bool, domain.Domain_Error) {
 	card, ok, err := get_card(s, auth, id)
 	if !ok do return domain.Card{}, false, err
 
+	// Re-read immediately before the write so a concurrent projection's
+	// attention fields are not overwritten with the copy read above.
+	fresh, fresh_ok, _ := iface.card_get(s.cards, id)
+	if fresh_ok do card = fresh
 	now := platform.clock_now(s.clock)
 	card.status = domain.CARD_STATUS_SNOOZED
 	card.snooze_until = snooze_until
