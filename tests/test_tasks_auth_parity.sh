@@ -127,13 +127,6 @@ else
   fail "User: list task comments" "$COMMENTS_LIST_USER"
 fi
 
-NUDGE_USER=$("$CTL_BIN" tasks nudge --as user --chain "$CHAIN_USER_ID" --task "$TASK_USER_ID" --message "User nudge message" 2>&1)
-if has "$NUDGE_USER" '"ok":true' || has "$NUDGE_USER" '"task_id":'; then
-  pass "User: nudge task"
-else
-  fail "User: nudge task" "$NUDGE_USER"
-fi
-
 COMPLETE_CHAIN=$("$CTL_BIN" task-chains complete --as user --chain "$CHAIN_USER_ID" 2>&1)
 if has "$COMPLETE_CHAIN" '"status":"completed"'; then
   pass "User: complete task chain"

@@ -57,7 +57,7 @@ main :: proc() {
 
 	// A chain to satisfy the task's parentage, then a task via the repo CREATE path
 	// (INSERT => tasks_fts AI trigger indexes it, so there is no drift yet).
-	run(&conn, "INSERT INTO task_chains(chain_id,owner_user_id,title,kind,status,coordinator_agent_instance_id,created_at,updated_at) VALUES('ch1','u','Chain','team','active','','x','x');")
+	run(&conn, "INSERT INTO task_chains(chain_id,owner_user_id,title,kind,status,coordinator_agent_instance_id,created_at,updated_at) VALUES('ch1','u','Chain','ticket','active','','x','x');")
 	repo_impl: sqlite.Taskchain_Repo_SQLite
 	repo := sqlite.new_taskchain_repository(&repo_impl, &conn)
 	task := domain.Task{
@@ -67,10 +67,10 @@ main :: proc() {
 		title         = "Deploy prod",
 		description   = "ship it",
 		publish_state = .Published,
-		status        = .In_Progress,
+		state         = .In_Progress,
+		kind          = .Task,
 		priority      = .P2,
-		assignee_ref_json  = "{}",
-		reviewer_refs_json = "[]",
+		brief_json    = "{}",
 		created_at = TS, updated_at = TS,
 	}
 	_, created, cerr := iface.taskchain_save_task(&repo, task)
@@ -84,9 +84,9 @@ main :: proc() {
 	// (1) ASYMMETRY: a raw UPDATE of the drifted row fails (the AU trigger's 'delete'
 	// op hits missing postings => SQLITE_CORRUPT), while an INSERT of a NEW row still
 	// succeeds (the AI trigger never runs 'delete').
-	update_ok := sqlite.exec(&conn, "UPDATE tasks SET status='in_validation' WHERE task_id='t_fts';")
+	update_ok := sqlite.exec(&conn, "UPDATE tasks SET state='in_review' WHERE task_id='t_fts';")
 	check(!update_ok, "a drifted row's raw UPDATE must fail (SQLITE_CORRUPT), reproducing the jam")
-	insert_ok := sqlite.exec(&conn, "INSERT INTO tasks(task_id,chain_id,owner_user_id,title,description,publish_state,status,priority,assignee_ref_json,reviewer_refs_json,created_at,updated_at,published_at,started_at,completed_at) VALUES('t_fts2','ch1','u','Another','x','published','assigned','p2','{}','[]','t','t','','','');")
+	insert_ok := sqlite.exec(&conn, "INSERT INTO tasks(task_id,chain_id,owner_user_id,title,description,publish_state,state,kind,priority,brief_json,created_at,updated_at,published_at,started_at,completed_at) VALUES('t_fts2','ch1','u','Another','x','published','ready','task','p2','{}','t','t','','','');")
 	check(insert_ok, "INSERT of a new row must still succeed while a drifted row's UPDATE fails")
 
 	// (2) RECOVERY: repair_fts_indexes() re-syncs via the supported 'rebuild' op and
@@ -95,17 +95,17 @@ main :: proc() {
 	check(repair_ok, fmt.tprintf("repair_fts_indexes: %s", repair_err.message))
 	check(rebuilt >= 1, "repair must rebuild at least the drifted tasks_fts")
 	check(!tasks_index_drifted(&conn), "after repair the tasks index must be in sync")
-	check(sqlite.exec(&conn, "UPDATE tasks SET status='in_validation' WHERE task_id='t_fts';"), "after repair the row's UPDATE must succeed")
+	check(sqlite.exec(&conn, "UPDATE tasks SET state='in_review' WHERE task_id='t_fts';"), "after repair the row's UPDATE must succeed")
 
 	// (3) SELF-HEAL WRITE: re-drift, then update through the repo save path. It hits
 	// the corruption, re-syncs, retries once, and reports success — the update lands.
 	run(&conn, "DELETE FROM tasks_fts;")
 	check(tasks_index_drifted(&conn), "re-wipe must drift again")
-	task.status = .Completed
+	task.state = .Done
 	task.updated_at = "2026-01-02T00:00:00Z"
 	_, saved, serr := iface.taskchain_save_task(&repo, task)
 	check(saved, fmt.tprintf("save through drift must self-heal + succeed: %s", serr.message))
-	landed, _ := sqlite.scalar_count(&conn, "SELECT count(*) FROM tasks WHERE task_id='t_fts' AND status='completed';")
+	landed, _ := sqlite.scalar_count(&conn, "SELECT count(*) FROM tasks WHERE task_id='t_fts' AND state='done';")
 	check(landed == 1, "the self-healed save must actually update the row")
 	check(!tasks_index_drifted(&conn), "self-heal must leave the index in sync")
 

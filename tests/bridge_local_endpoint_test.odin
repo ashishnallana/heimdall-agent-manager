@@ -116,13 +116,13 @@ main :: proc() {
 	r_chat_bad := bridge.bridge_agent_route("agent.chat.send", "{\"body\":\"hi\"}")
 	check(r_chat_bad.kind == .Bad_Request && r_chat_bad.message != "", "chat.send without to must be Bad_Request with a message")
 	// task-chain: show defaults to the caller's chain via envelope (no context fallback);
-	// set-description is an envelope; reconcile without a chain is a Bad_Request.
+	// set-description is an envelope; the removed Task System v2 verbs are Unknown.
 	r_chain_show := bridge.bridge_agent_route("agent.task_chain.show", "{}")
 	check(r_chain_show.kind == .Envelope && r_chain_show.path == "/api/v1/agent-actions/chain/show", "task_chain.show (no id) -> chain/show envelope, not context")
 	r_chain_desc := bridge.bridge_agent_route("agent.task_chain.set_description", "{\"description\":\"x\"}")
 	check(r_chain_desc.kind == .Envelope && r_chain_desc.path == "/api/v1/agent-actions/chain/set-description", "task_chain.set_description -> chain/set-description envelope")
-	r_recon_bad := bridge.bridge_agent_route("agent.task_chain.reconcile", "{}")
-	check(r_recon_bad.kind == .Bad_Request && r_recon_bad.message != "", "reconcile without chain -> Bad_Request with message")
+	r_removed := bridge.bridge_agent_route("agent.task.status", "{\"task_id\":\"task_x\",\"status\":\"in_progress\"}")
+	check(r_removed.kind == .Unknown, "task.status was removed in Task System v2 -> Unknown route")
 	// task show/list/comments resolve by task_id alone (envelopes).
 	r_task_show := bridge.bridge_agent_route("agent.task.show", "{\"task_id\":\"task_x\"}")
 	check(r_task_show.kind == .Envelope && r_task_show.path == "/api/v1/agent-actions/tasks/show", "task.show -> tasks/show envelope (no chain needed)")

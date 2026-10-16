@@ -13,7 +13,7 @@ package hub_readonly_cross_chain_test
 // (coordinated by inst_b). inst_a is a member of X ONLY. Assertions:
 //   1. inst_a can READ Y (same owner, non-member): list_chains sees Y;
 //      get_chain_for_read(Y) ok; list_tasks(Y) ok; get_task_for_read(taskY) ok;
-//      list_task_votes / list_chain_members / list_chain_dependencies ok.
+//      list_chain_members / list_chain_dependencies ok.
 //   2. inst_a CANNOT WRITE to Y: create_task -> Forbidden (the closed hole);
 //      the membership-gated get_chain/get_task still Forbid; change_chain_status
 //      -> Forbidden.
@@ -108,9 +108,6 @@ chains_by_coordinator :: proc(ctx: rawptr, agent_instance_id: string, owner: dom
 dependencies_by_chain :: proc(ctx: rawptr, id: domain.Task_Chain_ID, owner: domain.User_ID) -> ([]domain.Task_Dependency, domain.Domain_Error) {
 	return nil, domain.Domain_Error{}
 }
-votes_by_task :: proc(ctx: rawptr, id: domain.Task_ID, owner: domain.User_ID) -> ([]domain.Task_Vote, domain.Domain_Error) {
-	return nil, domain.Domain_Error{}
-}
 inst_get :: proc(ctx: rawptr, id: string) -> (domain.Agent_Instance, bool, domain.Domain_Error) {
 	r := (^Repo)(ctx)
 	for i in 0..<r.instance_count { if r.instances[i].agent_instance_id == id do return r.instances[i], true, domain.Domain_Error{} }
@@ -143,7 +140,7 @@ main :: proc() {
 		get_chain = chain_get, save_chain = chain_save, list_chains_by_owner = chains_by_owner,
 		save_task = task_save, get_task = task_get, list_tasks_by_chain = tasks_by_chain,
 		save_member = member_save, list_members_by_chain = member_list, list_chains_by_coordinator = chains_by_coordinator,
-		list_dependencies_by_chain = dependencies_by_chain, list_votes_by_task = votes_by_task,
+		list_dependencies_by_chain = dependencies_by_chain,
 	}
 	agents := iface.Agent_Repository{ctx = rawptr(&data), get_instance = inst_get}
 	service := taskchain_service.new_taskchain_service(&repo, &agents, &clock, &ids)
@@ -157,7 +154,7 @@ main :: proc() {
 	add_member(&data, "chain_x", "inst_a", "alice", "coordinator")
 	add_member(&data, "chain_y", "inst_b", "alice", "coordinator")
 	// A task in Y (created by Y's coordinator context directly in the repo).
-	_, _, _ = task_save(rawptr(&data), domain.Task{task_id = "task_y1", chain_id = "chain_y", owner_user_id = "alice", title = "y task", publish_state = .Draft, status = .Assigned})
+	_, _, _ = task_save(rawptr(&data), domain.Task{task_id = "task_y1", chain_id = "chain_y", owner_user_id = "alice", title = "y task", publish_state = .Draft, state = .Backlog, kind = .Task, brief_json = "{}"})
 
 	// inst_a is a member of X only; it is a NON-member of Y (same owner alice).
 	auth_a := contracts.Auth_Context{kind = .Instance_Token, user_id = "alice", agent_instance_id = "inst_a"}
@@ -180,11 +177,11 @@ main :: proc() {
 
 	_, lm_err := taskchain_service.list_chain_members(&service, auth_a, "chain_y")
 	check(lm_err.code == .None, "1: list_chain_members(Y) must succeed for same-owner non-member")
-	_, lv_err := taskchain_service.list_task_votes(&service, auth_a, "task_y1")
-	check(lv_err.code == .None, "1: list_task_votes(Y task) must succeed for same-owner non-member")
+	_, ld_err := taskchain_service.list_chain_dependencies(&service, auth_a, "chain_y")
+	check(ld_err.code == .None, "1: list_chain_dependencies(Y) must succeed for same-owner non-member")
 
 	// ---- 2. WRITE to Y as non-member: denied ----
-	_, ct_ok, ct_err := taskchain_service.create_task(&service, auth_a, taskchain_service.Create_Task_Input{chain_id = "chain_y", title = "sneak", assignee_ref_json = taskchain_service.user_ref_json("alice")})
+	_, ct_ok, ct_err := taskchain_service.create_task(&service, auth_a, taskchain_service.Create_Task_Input{chain_id = "chain_y", title = "sneak"})
 	check(!ct_ok && ct_err.code == .Forbidden, "2: create_task on non-member chain Y must be Forbidden (closed hole)")
 
 	// The membership-gated authorizers still block a non-member (writers use these).
@@ -208,9 +205,9 @@ main :: proc() {
 
 	// ---- 4. Member/coordinator write paths still work ----
 	auth_b := contracts.Auth_Context{kind = .Instance_Token, user_id = "alice", agent_instance_id = "inst_b"}
-	_, cby_ok, cby_err := taskchain_service.create_task(&service, auth_b, taskchain_service.Create_Task_Input{chain_id = "chain_y", title = "by coordinator", assignee_ref_json = taskchain_service.user_ref_json("alice")})
+	_, cby_ok, cby_err := taskchain_service.create_task(&service, auth_b, taskchain_service.Create_Task_Input{chain_id = "chain_y", title = "by coordinator"})
 	check(cby_ok, fmt.tprintf("4: Y's coordinator must be able to create_task on Y: %s", cby_err.message))
-	_, cax_ok, cax_err := taskchain_service.create_task(&service, auth_a, taskchain_service.Create_Task_Input{chain_id = "chain_x", title = "own chain", assignee_ref_json = taskchain_service.user_ref_json("alice")})
+	_, cax_ok, cax_err := taskchain_service.create_task(&service, auth_a, taskchain_service.Create_Task_Input{chain_id = "chain_x", title = "own chain"})
 	check(cax_ok, fmt.tprintf("4: a member/coordinator must be able to create_task on its own chain X: %s", cax_err.message))
 
 	fmt.println("PASS: hub read-only cross-chain access (same-owner reads ok, writes gated, cross-owner Not_Found)")

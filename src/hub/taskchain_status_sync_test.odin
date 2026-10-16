@@ -36,43 +36,55 @@ create_sync_test_chain :: proc(graph: ^app.App_Graph, owner: string, chain_id: d
 	now := "2026-09-26T00:00:00Z"
 	completed_at := now if initial_status == .Completed else ""
 	chain := domain.Task_Chain{
-		chain_id                   = chain_id,
-		owner_user_id              = domain.User_ID(owner),
-		title                      = "sync test chain",
-		publish_state              = .Published,
-		status                     = initial_status,
-		default_reviewer_refs_json = "[]",
-		created_at                 = now,
-		updated_at                 = now,
-		published_at               = now,
-		completed_at               = completed_at,
+		chain_id      = chain_id,
+		owner_user_id = domain.User_ID(owner),
+		title         = "sync test chain",
+		publish_state = .Published,
+		status        = initial_status,
+		kind          = domain.CHAIN_KIND_TICKET,
+		defaults_json = "{}",
+		created_at    = now,
+		updated_at    = now,
+		published_at  = now,
+		completed_at  = completed_at,
 	}
 	saved, _, _ := iface.taskchain_save_chain(graph.taskchains.repo, chain)
 	return saved
 }
 
+// Task System v2: the task row's `state` is a cached fold projection; these
+// tests seed rows directly with the state they want and exercise the chain
+// auto-status rule (sync_chain_status_from_tasks) on top of them.
 @(private = "file")
-create_sync_test_task :: proc(graph: ^app.App_Graph, owner: string, chain_id: domain.Task_Chain_ID, task_id: domain.Task_ID, status: domain.Task_Status, reviewer_json: string = "[]") -> domain.Task {
+create_sync_test_task :: proc(graph: ^app.App_Graph, owner: string, chain_id: domain.Task_Chain_ID, task_id: domain.Task_ID, state: domain.Task_State) -> domain.Task {
 	now := "2026-09-26T00:00:00Z"
-	completed_at := now if status == .Completed || status == .Cancelled else ""
-	assignee := fmt.tprintf(`{{"type":"user_id","user_id":"%s"}}`, owner)
+	completed_at := now if domain.task_state_is_terminal(state) else ""
 	task := domain.Task{
-		task_id            = task_id,
-		chain_id           = chain_id,
-		owner_user_id      = domain.User_ID(owner),
-		title              = string(task_id),
-		publish_state      = .Published,
-		status             = status,
-		priority           = .P2,
-		assignee_ref_json  = assignee,
-		reviewer_refs_json = reviewer_json,
-		created_at         = now,
-		updated_at         = now,
-		published_at       = now,
-		completed_at       = completed_at,
+		task_id       = task_id,
+		chain_id      = chain_id,
+		owner_user_id = domain.User_ID(owner),
+		title         = string(task_id),
+		publish_state = .Published,
+		state         = state,
+		kind          = .Task,
+		priority      = .P2,
+		brief_json    = `{"goal":"sync test"}`,
+		created_at    = now,
+		updated_at    = now,
+		published_at  = now,
+		completed_at  = completed_at,
 	}
 	saved, _, _ := iface.taskchain_save_task(graph.taskchains.repo, task)
 	return saved
+}
+
+@(private = "file")
+set_sync_test_task_state :: proc(graph: ^app.App_Graph, task_id: domain.Task_ID, state: domain.Task_State) {
+	task, ok, _ := iface.taskchain_get_task(graph.taskchains.repo, task_id)
+	if !ok do return
+	task.state = state
+	task.completed_at = "2026-09-26T00:01:00Z" if domain.task_state_is_terminal(state) else ""
+	_, _, _ = iface.taskchain_save_task(graph.taskchains.repo, task)
 }
 
 // 1. Creating a task in a completed chain reactivates the chain to .Active
@@ -101,7 +113,7 @@ test_chain_status_sync_create_task_reactivates_completed_chain :: proc(t: ^testi
 	testing.expect_value(t, updated_chain.completed_at, "")
 }
 
-// 2. Completing the final remaining open task in an active chain automatically sets the chain to .Completed
+// 2. The final remaining open task reaching `done` sets the chain to .Completed
 @(test)
 test_chain_status_sync_complete_final_task_completes_chain :: proc(t: ^testing.T) {
 	graph: app.App_Graph
@@ -112,30 +124,26 @@ test_chain_status_sync_complete_final_task_completes_chain :: proc(t: ^testing.T
 	chain_id := domain.Task_Chain_ID("chain_sync_2")
 	_ = create_sync_test_chain(&graph, owner, chain_id, .Active)
 
-	t1 := create_sync_test_task(&graph, owner, chain_id, "task_sync_2_1", .In_Validation)
-	t2 := create_sync_test_task(&graph, owner, chain_id, "task_sync_2_2", .In_Validation)
+	t1 := create_sync_test_task(&graph, owner, chain_id, "task_sync_2_1", .In_Review)
+	t2 := create_sync_test_task(&graph, owner, chain_id, "task_sync_2_2", .In_Review)
 
-	auth := contracts.Auth_Context{kind = .User_Token, user_id = owner}
-
-	// Complete first task
-	_, ok1, _ := taskchain_service.change_task_status(&graph.taskchains, auth, t1.task_id, .Completed)
-	testing.expect(t, ok1, "completing t1 should succeed")
-
-	// Chain should still be Active (t2 is still In_Validation)
+	// First task done → chain still Active (t2 is still in_review)
+	set_sync_test_task_state(&graph, t1.task_id, .Done)
+	_, ok1, _ := taskchain_service.sync_chain_status_from_tasks(&graph.taskchains, chain_id, domain.User_ID(owner))
+	testing.expect(t, ok1, "sync after t1 done should succeed")
 	c1, _, _ := iface.taskchain_get_chain(graph.taskchains.repo, chain_id)
 	testing.expect_value(t, c1.status, domain.Task_Chain_Status.Active)
 
-	// Complete second (and final) task
-	_, ok2, _ := taskchain_service.change_task_status(&graph.taskchains, auth, t2.task_id, .Completed)
-	testing.expect(t, ok2, "completing t2 should succeed")
-
-	// Chain should now automatically transition to Completed
+	// Second (and final) task done → chain Completed
+	set_sync_test_task_state(&graph, t2.task_id, .Done)
+	_, ok2, _ := taskchain_service.sync_chain_status_from_tasks(&graph.taskchains, chain_id, domain.User_ID(owner))
+	testing.expect(t, ok2, "sync after t2 done should succeed")
 	c2, _, _ := iface.taskchain_get_chain(graph.taskchains.repo, chain_id)
 	testing.expect_value(t, c2.status, domain.Task_Chain_Status.Completed)
 	testing.expect(t, c2.completed_at != "", "completed_at must be populated on chain")
 }
 
-// 3. Cancelling all remaining open tasks in an active chain with >=1 completed task automatically sets the chain to .Completed
+// 3. Cancelling all remaining open tasks in an active chain with >=1 done task sets the chain to .Completed
 @(test)
 test_chain_status_sync_cancel_remaining_tasks_completes_chain :: proc(t: ^testing.T) {
 	graph: app.App_Graph
@@ -146,22 +154,44 @@ test_chain_status_sync_cancel_remaining_tasks_completes_chain :: proc(t: ^testin
 	chain_id := domain.Task_Chain_ID("chain_sync_3")
 	_ = create_sync_test_chain(&graph, owner, chain_id, .Active)
 
-	t1 := create_sync_test_task(&graph, owner, chain_id, "task_sync_3_1", .Completed)
-	t2 := create_sync_test_task(&graph, owner, chain_id, "task_sync_3_2", .Assigned)
+	_ = create_sync_test_task(&graph, owner, chain_id, "task_sync_3_1", .Done)
+	t2 := create_sync_test_task(&graph, owner, chain_id, "task_sync_3_2", .Ready)
 
-	auth := contracts.Auth_Context{kind = .User_Token, user_id = owner}
+	// Still open → still Active
+	_, _, _ = taskchain_service.sync_chain_status_from_tasks(&graph.taskchains, chain_id, domain.User_ID(owner))
+	c0, _, _ := iface.taskchain_get_chain(graph.taskchains.repo, chain_id)
+	testing.expect_value(t, c0.status, domain.Task_Chain_Status.Active)
 
 	// Cancel the remaining open task
-	_, ok, _ := taskchain_service.change_task_status(&graph.taskchains, auth, t2.task_id, .Cancelled)
-	testing.expect(t, ok, "cancelling t2 should succeed")
+	set_sync_test_task_state(&graph, t2.task_id, .Cancelled)
+	_, ok, _ := taskchain_service.sync_chain_status_from_tasks(&graph.taskchains, chain_id, domain.User_ID(owner))
+	testing.expect(t, ok, "sync after cancel should succeed")
 
-	// Chain should automatically transition to Completed because non_terminal == 0 and completed == 1
+	// non_terminal == 0 and completed == 1 → Completed
 	c, _, _ := iface.taskchain_get_chain(graph.taskchains.repo, chain_id)
 	testing.expect_value(t, c.status, domain.Task_Chain_Status.Completed)
 	testing.expect(t, c.completed_at != "", "completed_at must be populated on chain")
 }
 
-// 4. Un-cancelling a task in a completed chain automatically sets the chain back to .Active
+// 3b. All tasks cancelled and none done → chain stays Active (nothing was accomplished)
+@(test)
+test_chain_status_sync_all_cancelled_without_done_keeps_active :: proc(t: ^testing.T) {
+	graph: app.App_Graph
+	db_path := open_sync_test_graph(t, &graph, "all_cancelled")
+	defer { app.shutdown_graph(&graph); _ = os.remove(db_path) }
+
+	owner := "alice"
+	chain_id := domain.Task_Chain_ID("chain_sync_3b")
+	_ = create_sync_test_chain(&graph, owner, chain_id, .Active)
+	_ = create_sync_test_task(&graph, owner, chain_id, "task_sync_3b_1", .Cancelled)
+
+	_, ok, _ := taskchain_service.sync_chain_status_from_tasks(&graph.taskchains, chain_id, domain.User_ID(owner))
+	testing.expect(t, ok, "sync should succeed")
+	c, _, _ := iface.taskchain_get_chain(graph.taskchains.repo, chain_id)
+	testing.expect_value(t, c.status, domain.Task_Chain_Status.Active)
+}
+
+// 4. A non-terminal task on a completed chain sets the chain back to .Active
 @(test)
 test_chain_status_sync_uncancel_task_reactivates_completed_chain :: proc(t: ^testing.T) {
 	graph: app.App_Graph
@@ -172,80 +202,43 @@ test_chain_status_sync_uncancel_task_reactivates_completed_chain :: proc(t: ^tes
 	chain_id := domain.Task_Chain_ID("chain_sync_4")
 	_ = create_sync_test_chain(&graph, owner, chain_id, .Completed)
 
-	_ = create_sync_test_task(&graph, owner, chain_id, "task_sync_4_1", .Completed)
+	_ = create_sync_test_task(&graph, owner, chain_id, "task_sync_4_1", .Done)
 	t2 := create_sync_test_task(&graph, owner, chain_id, "task_sync_4_2", .Cancelled)
 
-	auth := contracts.Auth_Context{kind = .User_Token, user_id = owner}
+	// Both terminal → Completed chain stays Completed
+	_, _, _ = taskchain_service.sync_chain_status_from_tasks(&graph.taskchains, chain_id, domain.User_ID(owner))
+	c0, _, _ := iface.taskchain_get_chain(graph.taskchains.repo, chain_id)
+	testing.expect_value(t, c0.status, domain.Task_Chain_Status.Completed)
 
-	// Un-cancel task2: .Cancelled -> .Assigned
-	_, ok, _ := taskchain_service.change_task_status(&graph.taskchains, auth, t2.task_id, .Assigned)
-	testing.expect(t, ok, "un-cancelling t2 should succeed")
+	// Un-cancel task2: cancelled → ready
+	set_sync_test_task_state(&graph, t2.task_id, .Ready)
+	_, ok, _ := taskchain_service.sync_chain_status_from_tasks(&graph.taskchains, chain_id, domain.User_ID(owner))
+	testing.expect(t, ok, "sync after un-cancel should succeed")
 
-	// Chain should automatically reactivate to Active
 	c, _, _ := iface.taskchain_get_chain(graph.taskchains.repo, chain_id)
 	testing.expect_value(t, c.status, domain.Task_Chain_Status.Active)
 	testing.expect_value(t, c.completed_at, "")
 }
 
-// 5. Quorum resolution triggers chain status sync to .Completed
+// 5. Every non-terminal state (backlog/ready/in_progress/in_review) keeps a chain open
 @(test)
-test_chain_status_sync_quorum_approval_completes_chain :: proc(t: ^testing.T) {
+test_chain_status_sync_every_non_terminal_state_keeps_chain_active :: proc(t: ^testing.T) {
 	graph: app.App_Graph
-	db_path := open_sync_test_graph(t, &graph, "quorum_sync")
+	db_path := open_sync_test_graph(t, &graph, "non_terminal_states")
 	defer { app.shutdown_graph(&graph); _ = os.remove(db_path) }
 
 	owner := "alice"
-	chain_id := domain.Task_Chain_ID("chain_sync_5")
-	_ = create_sync_test_chain(&graph, owner, chain_id, .Active)
-
-	// Reviewer agent instance
-	reviewer_inst_id := "inst_reviewer_5"
-	inst := domain.Agent_Instance{
-		agent_instance_id = reviewer_inst_id,
-		agent_id          = "agt_reviewer_5",
-		owner_user_id     = domain.User_ID(owner),
-		runtime_status    = "running",
-		activity_status   = "idle",
-		created_at        = "2026-09-26T00:00:00Z",
-		updated_at        = "2026-09-26T00:00:00Z",
+	states := [?]domain.Task_State{.Backlog, .Ready, .In_Progress, .In_Review}
+	for state, i in states {
+		chain_id := domain.Task_Chain_ID(fmt.tprintf("chain_sync_5_%d", i))
+		_ = create_sync_test_chain(&graph, owner, chain_id, .Active)
+		_ = create_sync_test_task(&graph, owner, chain_id, domain.Task_ID(fmt.tprintf("task_sync_5_%d_done", i)), .Done)
+		_ = create_sync_test_task(&graph, owner, chain_id, domain.Task_ID(fmt.tprintf("task_sync_5_%d_open", i)), state)
+		_, ok, _ := taskchain_service.sync_chain_status_from_tasks(&graph.taskchains, chain_id, domain.User_ID(owner))
+		testing.expect(t, ok, "sync should succeed")
+		c, _, _ := iface.taskchain_get_chain(graph.taskchains.repo, chain_id)
+		testing.expectf(t, c.status == .Active, "state %v must keep the chain Active, got %v", state, c.status)
 	}
-	_, _, _ = iface.agent_save_instance(graph.taskchains.agents, inst)
-
-	// Add reviewer as chain member
-	member := domain.Task_Chain_Member{
-		chain_id          = chain_id,
-		agent_instance_id = reviewer_inst_id,
-		owner_user_id     = domain.User_ID(owner),
-		role              = "reviewer",
-		created_at        = "2026-09-26T00:00:00Z",
-	}
-	_, _, _ = iface.taskchain_save_member(graph.taskchains.repo, member)
-
-	reviewer_ref := fmt.tprintf(`[{{"type":"agent_instance","agent_instance_id":"%s"}}]`, reviewer_inst_id)
-	t1 := create_sync_test_task(&graph, owner, chain_id, "task_sync_5_1", .In_Validation, reviewer_ref)
-
-	// Cast LGTM review vote as reviewer instance
-	auth := contracts.Auth_Context{kind = .Instance_Token, agent_instance_id = reviewer_inst_id, user_id = owner}
-	_, recorded, _ := taskchain_service.record_task_vote(&graph.taskchains, auth, taskchain_service.Vote_Input{
-		task_id = t1.task_id,
-		vote = "lgtm",
-		comment = "verified LGTM",
-	})
-	testing.expect(t, recorded, "record_task_vote should succeed")
-
-	// Task enters Finishing state via quorum approval
-	task_db, _, _ := iface.taskchain_get_task(graph.taskchains.repo, t1.task_id)
-	testing.expect_value(t, task_db.status, domain.Task_Status.Finishing)
-
-	// Worker wraps up and marks task Completed
-	auth_owner := contracts.Auth_Context{kind = .User_Token, user_id = owner}
-	_, comp_ok, _ := taskchain_service.change_task_status(&graph.taskchains, auth_owner, t1.task_id, .Completed)
-	testing.expect(t, comp_ok, "change_task_status to completed should succeed")
-
-	// Chain should now automatically transition to Completed
-	c, _, _ := iface.taskchain_get_chain(graph.taskchains.repo, chain_id)
-	testing.expect_value(t, c.status, domain.Task_Chain_Status.Completed)
-	testing.expect(t, c.completed_at != "", "completed_at must be populated on chain")
 }
 
 // 6. WebSocket resource_changed for task_chain is published when chain status updates
@@ -258,135 +251,15 @@ test_chain_status_sync_publishes_websocket_resource_changed :: proc(t: ^testing.
 	owner := "alice"
 	chain_id := domain.Task_Chain_ID("chain_sync_6")
 	_ = create_sync_test_chain(&graph, owner, chain_id, .Active)
-	t1 := create_sync_test_task(&graph, owner, chain_id, "task_sync_6_1", .In_Validation)
+	t1 := create_sync_test_task(&graph, owner, chain_id, "task_sync_6_1", .In_Review)
 
 	seq_before := graph.event_bus.event_seq
 
-	auth := contracts.Auth_Context{kind = .User_Token, user_id = owner}
-	_, ok, _ := taskchain_service.change_task_status(&graph.taskchains, auth, t1.task_id, .Completed)
-	testing.expect(t, ok, "completing task should succeed")
+	set_sync_test_task_state(&graph, t1.task_id, .Done)
+	_, ok, _ := taskchain_service.sync_chain_status_from_tasks(&graph.taskchains, chain_id, domain.User_ID(owner))
+	testing.expect(t, ok, "sync should succeed")
 
 	testing.expect(t, graph.event_bus.event_seq > seq_before, "event bus seq must increment on chain status change")
-}
-
-// --- Task Status Persistence & Reconcile Demotion (REQ-HUB-STATUS-1) ---
-
-@(private = "file")
-status_fixture :: struct {
-	graph:       ^app.App_Graph,
-	owner:       string,
-	instance_id: string,
-	chain_id:    domain.Task_Chain_ID,
-	review_task: domain.Task_ID,
-	work_task:   domain.Task_ID,
-}
-
-@(private = "file")
-build_status_fixture :: proc(graph: ^app.App_Graph, owner: string, tag: string) -> status_fixture {
-	now := "2026-09-22T00:00:00Z"
-	instance_id := fmt.tprintf("inst_%s", tag)
-
-	inst := domain.Agent_Instance{
-		agent_instance_id = instance_id,
-		agent_id          = fmt.tprintf("agt_%s", tag),
-		owner_user_id     = domain.User_ID(owner),
-		runtime_status    = "running",
-		activity_status   = "idle",
-		created_at        = now,
-		updated_at        = now,
-	}
-	_, _, _ = iface.agent_save_instance(graph.taskchains.agents, inst)
-
-	chain_id := domain.Task_Chain_ID(fmt.tprintf("chain_%s", tag))
-	chain := domain.Task_Chain{
-		chain_id                   = chain_id,
-		owner_user_id              = domain.User_ID(owner),
-		title                      = "status fixture",
-		publish_state              = .Published,
-		status                     = .Active,
-		default_reviewer_refs_json = "[]",
-		created_at                 = now,
-		updated_at                 = now,
-		published_at               = now,
-	}
-	_, _, _ = iface.taskchain_save_chain(graph.taskchains.repo, chain)
-
-	assignee := fmt.tprintf(`{{"type":"agent_instance","agent_instance_id":"%s"}}`, instance_id)
-
-	review_id := domain.Task_ID(fmt.tprintf("task_%s_review", tag))
-	review := domain.Task{
-		task_id            = review_id,
-		chain_id           = chain_id,
-		owner_user_id      = domain.User_ID(owner),
-		title              = "awaiting review",
-		publish_state      = .Published,
-		status             = .In_Validation,
-		priority           = .P1,
-		assignee_ref_json  = assignee,
-		reviewer_refs_json = "[]",
-		created_at         = now,
-		updated_at         = now,
-		published_at       = now,
-	}
-	_, _, _ = iface.taskchain_save_task(graph.taskchains.repo, review)
-
-	work_id := domain.Task_ID(fmt.tprintf("task_%s_work", tag))
-	work := domain.Task{
-		task_id            = work_id,
-		chain_id           = chain_id,
-		owner_user_id      = domain.User_ID(owner),
-		title              = "next work",
-		publish_state      = .Published,
-		status             = .Assigned,
-		priority           = .P2,
-		assignee_ref_json  = assignee,
-		reviewer_refs_json = "[]",
-		created_at         = now,
-		updated_at         = now,
-		published_at       = now,
-	}
-	_, _, _ = iface.taskchain_save_task(graph.taskchains.repo, work)
-
-	return status_fixture{graph, owner, instance_id, chain_id, review_id, work_id}
-}
-
-@(test)
-test_change_task_status_reports_the_persisted_status :: proc(t: ^testing.T) {
-	graph: app.App_Graph
-	db_path := open_sync_test_graph(t, &graph, "reported")
-	defer { app.shutdown_graph(&graph); _ = os.remove(db_path) }
-
-	f := build_status_fixture(&graph, "alice", "reported")
-	auth := contracts.Auth_Context{kind = .User_Token, user_id = f.owner}
-
-	reported, changed, _ := taskchain_service.change_task_status(&graph.taskchains, auth, f.work_task, .In_Progress)
-	testing.expect(t, changed, "change_task_status should succeed")
-
-	persisted, got, _ := iface.taskchain_get_task(graph.taskchains.repo, f.work_task)
-	testing.expect(t, got, "task should still exist after the status change")
-
-	testing.expectf(t, reported.status == persisted.status,
-		"API REPORTED %v but the row PERSISTED %v - the response is describing a state the database does not hold",
-		reported.status, persisted.status)
-}
-
-@(test)
-test_reconcile_demotes_in_progress_while_instance_awaits_review_by_design :: proc(t: ^testing.T) {
-	graph: app.App_Graph
-	db_path := open_sync_test_graph(t, &graph, "demote")
-	defer { app.shutdown_graph(&graph); _ = os.remove(db_path) }
-
-	f := build_status_fixture(&graph, "alice", "demote")
-	auth := contracts.Auth_Context{kind = .User_Token, user_id = f.owner}
-
-	_, changed, _ := taskchain_service.change_task_status(&graph.taskchains, auth, f.work_task, .In_Progress)
-	testing.expect(t, changed, "change_task_status should succeed")
-
-	persisted, got, _ := iface.taskchain_get_task(graph.taskchains.repo, f.work_task)
-	testing.expect(t, got, "task should still exist")
-	testing.expectf(t, persisted.status == .Queued,
-		"expected the promotion engine to demote to Queued while the instance awaits review, got %v",
-		persisted.status)
 }
 
 // --- Archived Chain Transitions and Status Mappings ---

@@ -284,9 +284,11 @@ test_record_activity_wiring :: proc() {
 	cs.title_nudge_cooldown_seconds = 3600
 
 	// Conversation bound to inst_c on brg_c, chain chain_c, title still default.
-	f.chains[0] = domain.Task_Chain{chain_id = "chain_c", owner_user_id = "alice", title = "Coder #1", title_source = "default"}
+	// REQ-TN-B/D: the nudge goes to the chain COORDINATOR and only while it is
+	// live, so the fixture names inst_c as coordinator with a running process.
+	f.chains[0] = domain.Task_Chain{chain_id = "chain_c", owner_user_id = "alice", title = "Coder #1", title_source = "default", coordinator_agent_instance_id = "inst_c"}
 	f.chain_n = 1
-	f.insts[0] = domain.Agent_Instance{agent_instance_id = "inst_c", owner_user_id = "alice", chain_id = "chain_c", bridge_id = "brg_c"}
+	f.insts[0] = domain.Agent_Instance{agent_instance_id = "inst_c", owner_user_id = "alice", chain_id = "chain_c", bridge_id = "brg_c", runtime_status = "running"}
 	f.inst_n = 1
 	f.convos[0] = domain.Chat_Conversation{conversation_id = "chat_c", owner_user_id = "alice", agent_id = "agt_c", agent_instance_id = "inst_c", chain_id = "chain_c", title = "Coder #1", title_source = "default"}
 	f.convo_n = 1
@@ -306,10 +308,11 @@ test_record_activity_wiring :: proc() {
 	check(cmds_with("notify_title_nudge") == 1, "first activity (one message, no exchange) fires EXACTLY one title nudge")
 	check(cmds_with("inst_c") == 1 && cmds_with("chat_c") == 1 && cmds_with("chain_c") == 1, "nudge targets the owning instance + carries conversation/chain ids")
 
-	// last_title_nudge_at stamped on conversation AND chain.
+	// last_title_nudge_at stamped on the chain (chain-only nudges, REQ-TN-A);
+	// the conversation only tracks activity.
 	cc, _, _ := fc_get_convo(nil, "chat_c")
 	ch, _, _ := ft_get_chain(nil, "chain_c")
-	check(cc.last_title_nudge_at == "2026-07-22T10:01:00Z", "last_title_nudge_at stamped on conversation")
+	check(cc.last_activity_at == "2026-07-22T10:01:00Z", "last_activity_at stamped on conversation")
 	check(ch.last_title_nudge_at == "2026-07-22T10:01:00Z", "last_title_nudge_at stamped on chain")
 
 	// Immediate re-call: activity moves but cooldown NOT elapsed -> no second ping.
@@ -322,10 +325,11 @@ test_record_activity_wiring :: proc() {
 	content_service.record_activity_and_maybe_nudge(&cs, "chat_c", "2026-07-22T11:30:00Z")
 	check(cmds_with("notify_title_nudge") == 1, "re-nudge fires after cooldown + new activity")
 
-	// Agent sets a title (source=agent): all further nudges stop forever.
-	cc2, _, _ := fc_get_convo(nil, "chat_c")
-	cc2.title = "Fix login bug"; cc2.title_source = "agent"
-	fc_save_convo(nil, cc2)
+	// Agent sets the CHAIN title (source=agent): all further nudges stop forever.
+	// The gate reads the chain's title_source (chain-only nudges, REQ-TN-A).
+	ch2, _, _ := ft_get_chain(nil, "chain_c")
+	ch2.title = "Fix login bug"; ch2.title_source = "agent"
+	ft_save_chain(nil, ch2)
 	f.cmd_n = 0
 	content_service.record_activity_and_maybe_nudge(&cs, "chat_c", "2026-07-22T13:00:00Z")
 	check(cmds_with("notify_title_nudge") == 0, "a non-default (agent-set) title stops all further nudges")
@@ -339,9 +343,9 @@ test_nudge_without_user_message :: proc() {
 	cs := content_service.new_content_service_with_runtime(&content_repo, &ag_repo, nil, nil, &tc_repo, project_service.Bridge_Command_Sink{ctx = nil, send_runtime_command = fsink}, &clk, &idg)
 	cs.title_nudge_cooldown_seconds = 3600
 
-	f.chains[0] = domain.Task_Chain{chain_id = "chain_u", owner_user_id = "alice", title = "Coder #1", title_source = "default"}
+	f.chains[0] = domain.Task_Chain{chain_id = "chain_u", owner_user_id = "alice", title = "Coder #1", title_source = "default", coordinator_agent_instance_id = "inst_u"}
 	f.chain_n = 1
-	f.insts[0] = domain.Agent_Instance{agent_instance_id = "inst_u", owner_user_id = "alice", chain_id = "chain_u", bridge_id = "brg_u"}
+	f.insts[0] = domain.Agent_Instance{agent_instance_id = "inst_u", owner_user_id = "alice", chain_id = "chain_u", bridge_id = "brg_u", runtime_status = "running"}
 	f.inst_n = 1
 	f.convos[0] = domain.Chat_Conversation{conversation_id = "chat_u", owner_user_id = "alice", agent_id = "agt_u", agent_instance_id = "inst_u", chain_id = "chain_u", title = "Coder #1", title_source = "default"}
 	f.convo_n = 1
@@ -363,9 +367,9 @@ test_agent_to_agent_triggers_nudge :: proc() {
 	cs := content_service.new_content_service_with_runtime(&content_repo, &ag_repo, nil, nil, &tc_repo, project_service.Bridge_Command_Sink{ctx = nil, send_runtime_command = fsink}, &clk, &idg)
 	cs.title_nudge_cooldown_seconds = 3600
 
-	f.chains[0] = domain.Task_Chain{chain_id = "chain_a", owner_user_id = "alice", title = "Coder #1", title_source = "default"}
+	f.chains[0] = domain.Task_Chain{chain_id = "chain_a", owner_user_id = "alice", title = "Coder #1", title_source = "default", coordinator_agent_instance_id = "inst_a"}
 	f.chain_n = 1
-	f.insts[0] = domain.Agent_Instance{agent_instance_id = "inst_a", owner_user_id = "alice", chain_id = "chain_a", bridge_id = "brg_a"}
+	f.insts[0] = domain.Agent_Instance{agent_instance_id = "inst_a", owner_user_id = "alice", chain_id = "chain_a", bridge_id = "brg_a", runtime_status = "running"}
 	f.inst_n = 1
 	f.convos[0] = domain.Chat_Conversation{conversation_id = "chat_a", owner_user_id = "alice", agent_id = "agt_a", agent_instance_id = "inst_a", chain_id = "chain_a", title = "Coder #1", title_source = "default"}
 	f.convo_n = 1
