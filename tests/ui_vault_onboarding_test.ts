@@ -340,3 +340,20 @@ test('REQ-AUX-10: bridge reauthentication keeps an unlocked browser open and for
   assert.match(source, /!isBridgeReauthentication \? \([\s\S]*vault-onboarding-remember-checkbox/);
 });
 
+
+test('vault setup explains the vault password is separate from login and used for E2E encryption', () => {
+  const source = fs.readFileSync(
+    fileURLToPath(new URL('../src/ui/components/settings/VaultOnboardingModal.tsx', import.meta.url)),
+    'utf8',
+  );
+  const setupStart = source.indexOf('data-debug-id="vault-onboarding-setup-form"');
+  const unlockStart = source.indexOf('data-debug-id="vault-onboarding-unlock-form"');
+  const noteAt = source.indexOf('data-debug-id="vault-onboarding-password-purpose-note"');
+  assert.ok(setupStart >= 0 && unlockStart > setupStart, 'setup form precedes unlock form');
+  // Shown while CREATING the password only, ahead of the password field.
+  assert.ok(noteAt > setupStart && noteAt < unlockStart, 'note lives in the setup form');
+  assert.ok(noteAt < source.indexOf('vault-onboarding-master-password-input'), 'note precedes the password field');
+  const note = source.slice(noteAt, source.indexOf('</p>', noteAt));
+  assert.match(note, /different from your login password/);
+  assert.match(note, /end-to-end encryption of your messages and remote connections/);
+});
