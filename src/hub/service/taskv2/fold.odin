@@ -125,8 +125,8 @@ fold_task :: proc(events: []domain.Task_Event, input: Fold_Input) -> Task_View {
 			if v.done || v.cancelled do continue
 			v.has_work_lease = true
 			v.in_review = false
-			v.work_lease_id = jsonx.extract_string(ev.payload_json, "lease_id", "", true)
-			v.holder_instance_id = jsonx.extract_string(ev.payload_json, "instance_id", "", true)
+			v.work_lease_id = jsonx.extract_string(ev.payload_json, "lease_id", "", true, context.temp_allocator)
+			v.holder_instance_id = jsonx.extract_string(ev.payload_json, "instance_id", "", true, context.temp_allocator)
 			if v.last_release != .Handoff {
 				v.attempt_no += 1
 				if attempt_counts(v.last_release) do v.counting_attempts += 1
@@ -150,6 +150,9 @@ fold_task :: proc(events: []domain.Task_Event, input: Fold_Input) -> Task_View {
 			} else {
 				v.blocked_on_json = human_block("blocked", ev.ts_ms)
 			}
+			// Budget is spent by ATTEMPTS, whatever ended them (review S1): a
+			// fifth block parks the task for a human exactly like a fifth expiry.
+			apply_budget(&v, max_attempts, ev.ts_ms)
 		case EV_HANDOFF:
 			v.has_work_lease = false
 			v.last_release = .Handoff
@@ -166,10 +169,7 @@ fold_task :: proc(events: []domain.Task_Event, input: Fold_Input) -> Task_View {
 			case EXPIRE_DEP_ADDED: v.last_release = .Dep_Added
 			case:
 				v.last_release = .Expired
-				if v.counting_attempts >= max_attempts && !v.done && !v.cancelled {
-					v.budget_exhausted = true
-					v.blocked_on_json = human_block("budget_exhausted", ev.ts_ms)
-				}
+				apply_budget(&v, max_attempts, ev.ts_ms)
 			}
 		case EV_CHANGES_REQUESTED:
 			// Verdicts only mean something while the task awaits review.
@@ -181,6 +181,7 @@ fold_task :: proc(events: []domain.Task_Event, input: Fold_Input) -> Task_View {
 				v.oscillating = true
 				v.blocked_on_json = human_block("oscillation", ev.ts_ms)
 			}
+			apply_budget(&v, max_attempts, ev.ts_ms)
 		case EV_APPROVED:
 			if !v.in_review do continue
 			v.in_review = false
@@ -215,13 +216,36 @@ fold_task :: proc(events: []domain.Task_Event, input: Fold_Input) -> Task_View {
 // between author and reviewer and waits for a human.
 OSCILLATION_ROUNDS :: 3
 
+// apply_budget parks the task for a human once `max_attempts` counting
+// attempts have been spent, whatever ended the last one (expiry, block,
+// changes_requested). The next grant would be attempt max+1; grant_in_uow
+// refuses it independently (belt and braces).
+@(private = "file")
+apply_budget :: proc(v: ^Task_View, max_attempts: int, ts_ms: i64) {
+	if v.counting_attempts >= max_attempts && !v.done && !v.cancelled && !v.budget_exhausted {
+		v.budget_exhausted = true
+		v.blocked_on_json = human_block("budget_exhausted", ts_ms)
+	}
+}
+
+// budget_allows_grant: whether one more WORK grant is within the budget. A
+// grant after a non-counting release (replaced/dep_added/reopened) or a handoff
+// continuation never consumes budget.
+budget_allows_grant :: proc(v: Task_View, max_attempts_in: int) -> bool {
+	max_attempts := max_attempts_in
+	if max_attempts <= 0 do max_attempts = domain.TASK_MAX_ATTEMPTS
+	if v.last_release == .Handoff || !attempt_counts(v.last_release) do return true
+	return v.counting_attempts < max_attempts
+}
+
 // human_block builds the blocked_on badge the fold itself raises (budget,
 // oscillation). `since_ms` is the event timestamp so the 24 h re-alert can key
 // off it exactly like an agent-written `blocked.waiting_on.since_ms`.
+// Temp-allocated: callers persist it through save_task (review S9).
 @(private = "file")
 human_block :: proc(reason: string, since_ms: i64) -> string {
 	// NB: Odin's fmt treats `{`/`}` as argument syntax, hence `{{`/`}}`.
-	return fmt.aprintf(`{{"kind":"human","reason":"%s","since_ms":%d}}`, reason, since_ms)
+	return fmt.tprintf(`{{"kind":"human","reason":"%s","since_ms":%d}}`, reason, since_ms)
 }
 
 @(private = "file")
