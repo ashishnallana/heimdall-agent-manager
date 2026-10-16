@@ -7,6 +7,7 @@ package http
 
 import "core:strings"
 import "core:testing"
+import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
 import project_service "odin_test:hub/service/project"
 import shell_session_svc "odin_test:hub/service/shell_session"
@@ -26,15 +27,21 @@ test_t10_vault_locked_maps_to_423_with_bridge_id :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_t10_bridge_refusal_error_only_maps_known_codes :: proc(t: ^testing.T) {
-	typed, ok := domain.bridge_refusal_error("vault_locked", "brg_x")
-	testing.expect(t, ok, "vault_locked has a typed mapping")
+test_err_proto_bridge_reply_refusal_is_typed_for_every_code :: proc(t: ^testing.T) {
+	ok, typed := project_service.bridge_reply_refusal(`{"type":"command_result","ok":false,"error":{"code":"vault_locked","class":"recoverable","cause":"vault_locked","message":"m"}}`, "brg_x")
+	testing.expect(t, !ok, "vault_locked is a refusal")
 	testing.expect_value(t, typed.code, domain.Error_Code.Vault_Locked)
+	testing.expect(t, strings.contains(typed.details_json, "brg_x"), typed.details_json)
 
-	_, unknown_ok := domain.bridge_refusal_error("invalid_vault_key", "brg_x")
-	testing.expect(t, !unknown_ok, "codes without a typed mapping fall back to the caller's error")
-	_, empty_ok := domain.bridge_refusal_error("", "brg_x")
-	testing.expect(t, !empty_ok, "no code, no mapping")
+	// REQ-ERR-PROTO-A: every typed code is a refusal now, keeping the bridge's class and cause.
+	ok, typed = project_service.bridge_reply_refusal(`{"type":"command_result","ok":false,"error":{"code":"validation_failed","class":"fatal","cause":"invalid_vault_key","message":"m"}}`, "brg_x")
+	testing.expect(t, !ok)
+	testing.expect_value(t, typed.code, domain.Error_Code.Validation_Failed)
+	testing.expect_value(t, typed.cause, "invalid_vault_key")
+	testing.expect_value(t, domain.domain_error_class(typed), contracts.Bridge_Error_Class.fatal)
+
+	ok, _ = project_service.bridge_reply_refusal(`{"type":"command_result","ok":true,"payload":{"status":"succeeded"}}`, "brg_x")
+	testing.expect(t, ok, "no error object, no refusal")
 
 	// A hostile id cannot break the details JSON.
 	quoted := domain.vault_locked_error(`brg"\x`)
@@ -45,7 +52,7 @@ test_t10_bridge_refusal_error_only_maps_known_codes :: proc(t: ^testing.T) {
 @(test)
 test_t10_bridge_failure_types_vault_locked_and_keeps_500_otherwise :: proc(t: ^testing.T) {
 	locked := shell_session_svc._bridge_failure(
-		`{"type":"shell_start_result","ok":false,"error_code":"vault_locked","error":"unauthorized: vault locked"}`,
+		`{"type":"shell_start_result","ok":false,"error":{"code":"vault_locked","class":"recoverable","cause":"vault_locked","message":"unauthorized: vault locked"}}`,
 		"bridge failed to start shell session",
 		"brg_t10",
 	)
@@ -54,18 +61,19 @@ test_t10_bridge_failure_types_vault_locked_and_keeps_500_otherwise :: proc(t: ^t
 	testing.expect(t, strings.contains(locked.details_json, "brg_t10"), locked.details_json)
 
 	restart := shell_session_svc._bridge_failure(
-		`{"type":"shell_restart_result","session_id":"sh_1","command_id":"c","ok":false,"error_code":"vault_locked"}`,
+		`{"type":"shell_restart_result","session_id":"sh_1","command_id":"c","ok":false,"error":{"code":"vault_locked","class":"recoverable","cause":"vault_locked","message":""}}`,
 		"bridge failed to restart shell session",
 		"brg_t10",
 	)
 	testing.expect_value(t, restart.code, domain.Error_Code.Vault_Locked)
 
 	other := shell_session_svc._bridge_failure(
-		`{"type":"shell_start_result","ok":false,"error_code":"invalid_vault_key","error":"unauthorized: missing or invalid vault enc_spec"}`,
+		`{"type":"shell_start_result","ok":false,"error":{"code":"validation_failed","class":"fatal","cause":"invalid_vault_key","message":"unauthorized: missing or invalid vault enc_spec"}}`,
 		"bridge failed to start shell session",
 		"brg_t10",
 	)
-	testing.expect_value(t, other.code, domain.Error_Code.Internal_Error)
+	testing.expect_value(t, other.code, domain.Error_Code.Validation_Failed)
+	testing.expect_value(t, other.cause, "invalid_vault_key")
 	testing.expect(t, strings.contains(other.message, "missing or invalid vault enc_spec"), other.message)
 
 	bare := shell_session_svc._bridge_failure(`{"ok":false}`, "bridge failed to start shell session", "brg_t10")
@@ -101,18 +109,19 @@ t10_sink :: proc(state: ^T10_Sink_State) -> project_service.Bridge_Command_Sink 
 test_t10_checked_send_surfaces_vault_locked_from_command_result :: proc(t: ^testing.T) {
 	cmd := project_service.Runtime_Command{bridge_id = "brg_t10", command_id = "cmd_1", body_json = `{"type":"shell_pty_input"}`}
 
-	locked := T10_Sink_State{reply = `{"type":"command_result","protocol_version":1,"command_id":"cmd_1","payload":{"status":"failed","error_code":"vault_locked"}}`}
+	locked := T10_Sink_State{reply = `{"type":"command_result","protocol_version":1,"command_id":"cmd_1","ok":false,"error":{"code":"vault_locked","class":"recoverable","cause":"vault_locked","message":""},"payload":{"status":"failed"}}`}
 	ok, err := project_service.bridge_command_send_runtime_checked(t10_sink(&locked), cmd, true)
 	testing.expect(t, !ok, "a locked refusal is not a delivery")
 	testing.expect_value(t, err.code, domain.Error_Code.Vault_Locked)
 	testing.expect(t, strings.contains(err.details_json, "brg_t10"), err.details_json)
 	testing.expect_value(t, locked.wait_calls, 1)
 
-	// Any other outcome keeps the old fire-and-forget answer: delivered.
-	plain_fail := T10_Sink_State{reply = `{"type":"command_result","protocol_version":1,"command_id":"cmd_1","payload":{"status":"failed"}}`}
-	ok2, err2 := project_service.bridge_command_send_runtime_checked(t10_sink(&plain_fail), cmd, true)
-	testing.expect(t, ok2, "an untyped failure keeps the pre-T10 contract")
-	testing.expect_value(t, err2.code, domain.Error_Code.None)
+	// Any typed refusal surfaces with the bridge's own code (REQ-ERR-PROTO-A).
+	typed_fail := T10_Sink_State{reply = `{"type":"command_result","protocol_version":1,"command_id":"cmd_1","ok":false,"error":{"code":"unprocessable_entity","class":"fatal","cause":"delivery_failed","message":""},"payload":{"status":"failed"}}`}
+	ok2, err2 := project_service.bridge_command_send_runtime_checked(t10_sink(&typed_fail), cmd, true)
+	testing.expect(t, !ok2, "a typed failure is not a delivery")
+	testing.expect_value(t, err2.code, domain.Error_Code.Unprocessable_Entity)
+	testing.expect_value(t, err2.cause, "delivery_failed")
 
 	// The WebSocket pane path does not wait.
 	no_wait := T10_Sink_State{reply = locked.reply}

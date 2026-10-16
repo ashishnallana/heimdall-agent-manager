@@ -108,7 +108,7 @@ test_shell_start_rejects_missing_enc_spec_when_vault_active :: proc(t: ^testing.
 	bridge_hub_handle_shell_start(&conn, cmd)
 
 	reply := test_read_ws_text(read_fd)
-	testing.expect(t, strings.contains(reply, `"error_code":"invalid_vault_key"`), "must include invalid_vault_key code")
+	testing.expect(t, strings.contains(reply, `"cause":"invalid_vault_key"`), "must include invalid_vault_key code")
 	testing.expect(t, strings.contains(reply, "unauthorized: missing or invalid vault enc_spec"), "must specify missing enc_spec reason")
 }
 
@@ -139,7 +139,7 @@ test_shell_start_rejects_unarmored_enc_spec_when_vault_active :: proc(t: ^testin
 	bridge_hub_handle_shell_start(&conn, cmd)
 
 	reply := test_read_ws_text(read_fd)
-	testing.expect(t, strings.contains(reply, `"error_code":"invalid_vault_key"`), "must include invalid_vault_key code")
+	testing.expect(t, strings.contains(reply, `"cause":"invalid_vault_key"`), "must include invalid_vault_key code")
 	testing.expect(t, strings.contains(reply, "unauthorized: missing or invalid vault enc_spec"), "must specify unarmored enc_spec reason")
 }
 
@@ -179,7 +179,7 @@ test_shell_start_rejects_tampered_enc_spec :: proc(t: ^testing.T) {
 	bridge_hub_handle_shell_start(&conn, cmd)
 
 	reply := test_read_ws_text(read_fd)
-	testing.expect(t, strings.contains(reply, `"error_code":"invalid_vault_key"`), "must include invalid_vault_key code")
+	testing.expect(t, strings.contains(reply, `"cause":"invalid_vault_key"`), "must include invalid_vault_key code")
 	testing.expect(t, strings.contains(reply, "unauthorized: invalid vault encryption"), "must specify invalid vault encryption")
 }
 
@@ -218,7 +218,7 @@ test_shell_start_rejects_mismatched_vault_key :: proc(t: ^testing.T) {
 	bridge_hub_handle_shell_start(&conn, cmd)
 
 	reply := test_read_ws_text(read_fd)
-	testing.expect(t, strings.contains(reply, `"error_code":"invalid_vault_key"`), "must include invalid_vault_key code")
+	testing.expect(t, strings.contains(reply, `"cause":"invalid_vault_key"`), "must include invalid_vault_key code")
 	testing.expect(t, strings.contains(reply, "unauthorized: invalid vault encryption"), "must specify invalid vault encryption")
 }
 
@@ -257,7 +257,7 @@ test_shell_start_rejects_expired_timestamp :: proc(t: ^testing.T) {
 	bridge_hub_handle_shell_start(&conn, cmd)
 
 	reply := test_read_ws_text(read_fd)
-	testing.expect(t, strings.contains(reply, `"error_code":"invalid_vault_key"`), "must include invalid_vault_key code")
+	testing.expect(t, strings.contains(reply, `"cause":"invalid_vault_key"`), "must include invalid_vault_key code")
 	testing.expect(t, strings.contains(reply, "unauthorized: expired execution timestamp"), "must specify expired timestamp")
 }
 
@@ -296,7 +296,7 @@ test_shell_start_rejects_future_skewed_timestamp :: proc(t: ^testing.T) {
 	bridge_hub_handle_shell_start(&conn, cmd)
 
 	reply := test_read_ws_text(read_fd)
-	testing.expect(t, strings.contains(reply, `"error_code":"invalid_vault_key"`), "must include invalid_vault_key code")
+	testing.expect(t, strings.contains(reply, `"cause":"invalid_vault_key"`), "must include invalid_vault_key code")
 	testing.expect(t, strings.contains(reply, "unauthorized: expired execution timestamp"), "must specify expired timestamp")
 }
 

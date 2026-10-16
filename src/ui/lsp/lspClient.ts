@@ -8,7 +8,7 @@
 //                    {"type":"send","message":"<raw JSON-RPC text>"}
 //                    {"type":"stop"} / {"type":"ping"}
 //   hub -> browser : {"type":"ready"}                       (sent on upgrade)
-//                    {"type":"lsp_started","ok":bool,"error"?}
+//                    {"type":"lsp_started","ok":bool,"error"?:{code,class,cause,message}}
 //                    {"type":"lsp_data","message":"<raw JSON-RPC text>"}
 //                    {"type":"lsp_error","reason","exit_code"}
 //                    {"type":"lsp_stopped"} / {"type":"pong"}
@@ -234,7 +234,7 @@ export class LspClient {
         if (frame.ok) {
           void this.initialize();
         } else {
-          this.setStatus('error', String(frame.error || 'language server failed to start'));
+          this.setStatus('error', String(frame.error?.message || frame.error?.cause || 'language server failed to start'));
         }
         break;
       case 'lsp_data':

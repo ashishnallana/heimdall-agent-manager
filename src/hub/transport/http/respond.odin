@@ -31,32 +31,19 @@ respond_error :: proc(err: domain.Domain_Error, request_id: string) -> Response 
 		status = status_for_error(err.code),
 		content_type = "application/json",
 		body = contracts.api_error_json(
-			contracts.API_Error{code = domain.error_code_string(err.code), message = err.message, details_json = err.details_json},
+			contracts.API_Error{
+				code = domain.error_code_string(err.code),
+				message = err.message,
+				details_json = err.details_json,
+				class = contracts.bridge_error_class_name(domain.domain_error_class(err)),
+				cause = err.cause,
+			},
 			contracts.api_meta(request_id, ""),
 		),
 	}
 }
 
+// status_for_error is the code's HTTP status from the shared contract table.
 status_for_error :: proc(code: domain.Error_Code) -> int {
-	switch code {
-	case .Unauthenticated: return 401
-	case .Forbidden: return 403
-	case .Not_Found: return 404
-	case .Validation_Failed: return 400
-	case .Conflict: return 409
-	case .Gone: return 410
-	case .Unprocessable_Entity: return 422
-	case .Bridge_Offline: return 409
-	case .Bridge_Busy: return 503
-	case .Bridge_Timeout: return 504
-	case .Provider_Unavailable: return 503
-	case .Bridge_Revoked: return 403
-	case .Instance_Not_Running: return 409
-	case .Rate_Limited: return 429
-	case .Not_Implemented: return 501
-	case .Internal_Error: return 500
-	case .Vault_Locked: return 423 // RFC 4918 Locked: retryable once the bridge is unsealed
-	case .None: return 200
-	}
-	return 500
+	return contracts.error_code_http_status(code)
 }

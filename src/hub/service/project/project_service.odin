@@ -106,13 +106,13 @@ bridge_command_send_runtime_checked :: proc(sink: Bridge_Command_Sink, command: 
 	return bridge_reply_refusal(reply, command.bridge_id)
 }
 
-// bridge_reply_refusal maps a bridge reply's `error_code` to a typed domain error.
-// ok is true when the reply carries no code with a typed mapping.
+// bridge_reply_refusal maps a bridge reply's typed error (REQ-ERR-PROTO-A) to a
+// domain error; ok is true when the reply carries none.
 bridge_reply_refusal :: proc(reply, bridge_id: string) -> (ok: bool, err: domain.Domain_Error) {
-	code := jsonx.extract_string(reply, "error_code", allocator = context.temp_allocator)
-	if code == "" do return true, {}
-	if typed, mapped := domain.bridge_refusal_error(code, bridge_id); mapped do return false, typed
-	return true, {}
+	werr, found := contracts.wire_error_parse(reply, context.temp_allocator)
+	if !found do return true, {}
+	if werr.code == .Vault_Locked do return false, domain.vault_locked_error(bridge_id)
+	return false, domain.domain_error_from_wire(werr)
 }
 
 

@@ -1,5 +1,7 @@
 package main
 
+import "core:os"
+import "core:strings"
 import "core:sync"
 import "core:testing"
 import contracts "odin_test:contracts"
@@ -223,4 +225,155 @@ test_error_classify_unknown_code :: proc(t: ^testing.T) {
 	testing.expect_value(t, contracts.bridge_error_classify_unknown(.transport), contracts.Bridge_Error_Class.retriable)
 	testing.expect_value(t, contracts.bridge_error_classify_unknown(.login_required), contracts.Bridge_Error_Class.recoverable)
 	testing.expect_value(t, contracts.bridge_error_classify_unknown(.other, 503), contracts.Bridge_Error_Class.retriable)
+}
+
+// ---- REQ-ERR-PROTO-A: every reply failure is the typed wire error ---------------
+
+@(test)
+test_err_proto_cause_maps_to_contract_code :: proc(t: ^testing.T) {
+	testing.expect_value(t, bridge_cause_error_code("vault_locked"), contracts.Error_Code.Vault_Locked)
+	testing.expect_value(t, bridge_cause_error_code("path_not_found"), contracts.Error_Code.Not_Found)
+	testing.expect_value(t, bridge_cause_error_code("path_outside_root"), contracts.Error_Code.Forbidden)
+	testing.expect_value(t, bridge_cause_error_code("session_not_running"), contracts.Error_Code.Conflict)
+	testing.expect_value(t, bridge_cause_error_code("output_reclaimed"), contracts.Error_Code.Gone)
+	testing.expect_value(t, bridge_cause_error_code("bridge_busy"), contracts.Error_Code.Bridge_Busy)
+	testing.expect_value(t, bridge_cause_error_code("commit_failed"), contracts.Error_Code.Unprocessable_Entity)
+	testing.expect_value(t, bridge_cause_error_code("something_new"), contracts.Error_Code.Internal_Error)
+	testing.expect_value(t, bridge_cause_error_code(""), contracts.Error_Code.None)
+	empty := bridge_result_error("", "")
+	testing.expect_value(t, empty.code, "")
+	fs := bridge_result_error("path_not_found", "Path does not exist")
+	testing.expect_value(t, fs.code, "not_found")
+	testing.expect_value(t, fs.class, "fatal")
+	testing.expect_value(t, fs.cause, "path_not_found")
+}
+
+@(test)
+test_err_proto_command_failed_json_is_typed :: proc(t: ^testing.T) {
+	busy := bridge_command_dispatch_busy_json("cmd_busy", "agent", 2500)
+	defer delete(busy)
+	werr, found := contracts.wire_error_parse(busy, context.temp_allocator)
+	testing.expect(t, found, busy)
+	testing.expect_value(t, werr.code, contracts.Error_Code.Bridge_Busy)
+	testing.expect_value(t, werr.class, contracts.Bridge_Error_Class.retriable)
+	testing.expect_value(t, werr.retry_after_ms, i64(2500))
+	testing.expect_value(t, werr.scope, "agent")
+
+	deadline := bridge_command_dispatch_deadline_json("cmd_dl")
+	defer delete(deadline)
+	werr, _ = contracts.wire_error_parse(deadline, context.temp_allocator)
+	testing.expect_value(t, werr.code, contracts.Error_Code.Bridge_Timeout)
+	testing.expect_value(t, werr.class, contracts.Bridge_Error_Class.fatal)
+
+	// A launch failure keeps the classifier's class, not the code's table default.
+	launch := bridge_command_failed_json("cmd_launch", bridge_error_wire(bridge_error(.provider_not_logged_in), "claude: login required"), "failed")
+	defer delete(launch)
+	werr, _ = contracts.wire_error_parse(launch, context.temp_allocator)
+	testing.expect_value(t, werr.code, contracts.Error_Code.Provider_Unavailable)
+	testing.expect_value(t, werr.class, contracts.Bridge_Error_Class.recoverable)
+	testing.expect_value(t, werr.cause, "provider_not_logged_in")
+	testing.expect(t, strings.contains(launch, `"payload":{"status":"failed","result":{"runtime_status":"failed"}}`), launch)
+
+	ok := bridge_command_result_json("cmd_ok", "succeeded", "")
+	defer delete(ok)
+	_, found = contracts.wire_error_parse(ok, context.temp_allocator)
+	testing.expect(t, !found, "success carries no error")
+	testing.expect(t, strings.contains(ok, `"ok":true`), ok)
+}
+
+@(test)
+test_err_proto_failed_instance_status_carries_last_error :: proc(t: ^testing.T) {
+	id := "inst_err_proto_status"
+	bridge_runtime_set_status(id, "failed", "idle")
+	bridge_runtime_record_failure(id, bridge_error(.pty_host_unreachable))
+	failed := bridge_instance_status_json(id)
+	defer delete(failed)
+	werr, found := contracts.wire_error_parse(failed, context.temp_allocator)
+	testing.expect(t, found, failed)
+	testing.expect_value(t, werr.cause, "pty_host_unreachable")
+	testing.expect_value(t, werr.class, contracts.Bridge_Error_Class.retriable)
+
+	// Any other status clears it, and a failure is only recorded on a failed instance.
+	bridge_runtime_set_status(id, "starting", "active")
+	bridge_runtime_record_failure(id, bridge_error(.provider_missing))
+	starting := bridge_instance_status_json(id)
+	defer delete(starting)
+	_, found = contracts.wire_error_parse(starting, context.temp_allocator)
+	testing.expect(t, !found, starting)
+}
+
+// REQ-ERR-PROTO-A: a parked recoverable wake resumes on its trigger: unsealing the
+// vault for vault_locked, a slow re-check for causes with no local signal.
+@(test)
+test_wake_unpark_triggers_for_recoverable_causes :: proc(t: ^testing.T) {
+	prev_key, had_key := os.lookup_env("HEIMDALL_VAULT_KEY", context.allocator)
+	defer {
+		if had_key {
+			os.set_env("HEIMDALL_VAULT_KEY", prev_key)
+		} else {
+			os.unset_env("HEIMDALL_VAULT_KEY")
+		}
+		delete(prev_key)
+	}
+
+	locked: Bridge_Wake_State
+	locked.parked = true
+	locked.err = bridge_error(.vault_locked)
+	testing.expect_value(t, locked.err.class, contracts.Bridge_Error_Class.recoverable)
+	locked.catalog_etag = bridge_provider_catalog_current_etag()
+	defer delete(locked.catalog_etag)
+	os.set_env("HEIMDALL_VAULT_KEY", "not-a-valid-key") // set but invalid: locked, no fallthrough
+	testing.expect_value(t, bridge_wake_unpark_trigger(&locked, BRIDGE_WAKE_PARK_PROBE_MS), "")
+	os.set_env("HEIMDALL_VAULT_KEY", TEST_VAULT_KEY_HEX)
+	testing.expect_value(t, bridge_wake_unpark_trigger(&locked, BRIDGE_WAKE_PARK_PROBE_MS), "") // probed this tick already
+	testing.expect_value(t, bridge_wake_unpark_trigger(&locked, 2 * BRIDGE_WAKE_PARK_PROBE_MS), "vault_unsealed")
+
+	refused: Bridge_Wake_State
+	refused.parked = true
+	refused.err = bridge_bootstrap_result_error({stage = "manifest_get", http_status = 409})
+	testing.expect_value(t, refused.err.class, contracts.Bridge_Error_Class.recoverable)
+	refused.catalog_etag = bridge_provider_catalog_current_etag()
+	defer delete(refused.catalog_etag)
+	refused.last_wake_ms = 1_000
+	testing.expect_value(t, bridge_wake_unpark_trigger(&refused, 1_000 + BRIDGE_WAKE_BACKOFF.max_ms - 1), "")
+	testing.expect_value(t, bridge_wake_unpark_trigger(&refused, 1_000 + BRIDGE_WAKE_BACKOFF.max_ms), "periodic_recheck")
+}
+
+// REQ-ERR-PROTO-A: a stop that fails (here: the pty-host daemon is unreachable, as the
+// real stop reports it) never leaves the instance "stopping". With no pre-stop
+// snapshot (an empty registry after a bridge restart) it becomes "unreachable" for
+// the liveness reconciler to settle; with one, the prior status is put back. The
+// failed command_result names the status for the hub either way.
+@(test)
+test_err_proto_failed_stop_never_stays_stopping :: proc(t: ^testing.T) {
+	// The real stop's prelude (intent + "stopping"), then a transport failure.
+	failing_stop :: proc(instance_id: string, force: bool) -> bool {
+		bridge_runtime_mark_stop_intent(instance_id)
+		bridge_runtime_set_status(instance_id, "stopping", "idle")
+		return false
+	}
+
+	no_snapshot := "inst_err_proto_stop_cold"
+	ok, restored := bridge_runtime_stop_or_restore(no_snapshot, false, failing_stop)
+	defer delete(restored)
+	testing.expect(t, !ok)
+	testing.expect_value(t, restored, "unreachable")
+	status, _, found := bridge_runtime_status_snapshot(no_snapshot)
+	defer delete(status)
+	testing.expect(t, found)
+	testing.expect_value(t, status, "unreachable")
+	result := bridge_command_failed_json("cmd_stop_1_inst_err_proto_stop_cold", bridge_cause_wire_error("stop_failed", "the agent did not stop"), restored)
+	defer delete(result)
+	testing.expect(t, strings.contains(result, `"runtime_status":"unreachable"`), result)
+
+	warm := "inst_err_proto_stop_warm"
+	bridge_runtime_set_status(warm, "running", "busy")
+	ok2, restored2 := bridge_runtime_stop_or_restore(warm, false, failing_stop)
+	defer delete(restored2)
+	testing.expect(t, !ok2)
+	testing.expect_value(t, restored2, "running")
+	status2, activity2, _ := bridge_runtime_status_snapshot(warm)
+	defer { delete(status2); delete(activity2) }
+	testing.expect_value(t, status2, "running")
+	testing.expect_value(t, activity2, "busy")
 }

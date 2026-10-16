@@ -1576,6 +1576,10 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
 				fmt.eprintfln(
 					"ham-hub WARN bridge ws chunk frame DROPPED bridge=%s (malformed, over-cap, or admission refused)",
 					bridge_id)
+				// REQ-ERR-PROTO-A: tell the bridge why before the connection closes.
+				refusal := bridge_protocol_error_frame(contracts.BRIDGE_WS_FRAME_KIND_CHUNK, contracts.wire_error(.Validation_Failed, "chunk_rejected", "chunk frame malformed, over the size cap, or refused admission"))
+				_ = write_ws_text_frame_locked(h, bridge_id, client, refusal)
+				delete(refusal)
 				return false
 			}
 			if !complete do return true
@@ -1678,8 +1682,9 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
 		runtime_status := json_string(text, "runtime_status")
 		activity_status := json_string(text, "activity_status")
 		if h.agents != nil {
-			if inst, applied, _ := bridge_apply_validated_status(h, bridge_id, connection_generation, instance_id, state_seq, runtime_status, activity_status, json_string(text, "launch_epoch", context.temp_allocator)); applied {
-				summary := agent_instance_status_summary_json(inst.runtime_status, inst.startup_status, inst.activity_status)
+			error_json, _ := jsonx.extract_raw_object(text, "error", true, context.temp_allocator)
+			if inst, applied, _ := bridge_apply_validated_status(h, bridge_id, connection_generation, instance_id, state_seq, runtime_status, activity_status, json_string(text, "launch_epoch", context.temp_allocator), error_json); applied {
+				summary := agent_instance_status_summary_json(inst.runtime_status, inst.startup_status, inst.activity_status, inst.last_error_json)
 				events.publish_resource_changed(h.event_bus, string(inst.owner_user_id), "agent_instance", inst.agent_instance_id, "status_changed", summary)
 				delete(summary)
 				domain.agent_instance_destroy(&inst)
@@ -1729,25 +1734,23 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
 		}
 		delete(stage)
 		delete(message)
-	case "command_result", "project_path_validation_result", "provider_discovery_report", "fs_list_dir_result", "fs_stat_result", "fs_make_dir_result", "fs_read_file_result", "fs_create_file_result", "fs_write_file_result", "fs_batch_write_result", "fs_move_result", "fs_delete_result", "vcs_capabilities_result", "vcs_status_result", "vcs_files_result", "vcs_diff_result", "vcs_log_result", "vcs_commit_diff_result", "vcs_workspaces_result", "vcs_stage_result", "vcs_unstage_result", "vcs_revert_result", "vcs_save_file_result", "vcs_commit_result", "fs_find_files_result", "fs_grep_result", "shell_start_result", "shell_restart_result", "shell_list_result", "shell_logs_result", "shell_capture_result", "shell_set_port_result", "bridge_unseal_result", "bridge_lock_result", "task_chain_search_result":
+	case "command_result", "project_path_validation_result", "provider_discovery_report", "fs_list_dir_result", "fs_stat_result", "fs_make_dir_result", "fs_read_file_result", "fs_create_file_result", "fs_write_file_result", "fs_batch_write_result", "fs_move_result", "fs_delete_result", "vcs_capabilities_result", "vcs_status_result", "vcs_files_result", "vcs_diff_result", "vcs_log_result", "vcs_commit_diff_result", "vcs_workspaces_result", "vcs_stage_result", "vcs_unstage_result", "vcs_revert_result", "vcs_save_file_result", "vcs_commit_result", "vcs_upload_result", "vcs_sync_result", "fs_find_files_result", "fs_grep_result", "shell_start_result", "shell_restart_result", "shell_list_result", "shell_logs_result", "shell_capture_result", "shell_set_port_result", "bridge_unseal_result", "bridge_lock_result", "task_chain_search_result":
 		command_id := json_string(text, "command_id")
 		_ = bridge_runtime_service.runtime_command_result_for_connection(h.bridge_runtime_registry, bridge_id, connection_generation, command_id, text)
 		if type == "command_result" && h.agents != nil do agent_service.apply_reconfiguration_command_result(h.agents, bridge_id, command_id, text)
+		if type == "command_result" && h.agents != nil do _ = agent_service.apply_stop_command_result(h.agents, bridge_id, command_id, text)
 		if type == "command_result" && command_id == "" {
 			// An id-less failure cannot be matched to any pending command; log it so
 			// hub/bridge protocol drift (e.g. missing_command_id) is visible.
-			status := json_string(text, "status")
-			if status == "failed" {
-				error_code := json_string(text, "error_code")
-				fmt.eprintln("hub: bridge", bridge_id, "rejected command without id:", error_code)
-				delete(error_code)
+			if werr, found := contracts.wire_error_parse(text, context.temp_allocator); found {
+				fmt.eprintln("hub: bridge", bridge_id, "rejected command without id:", domain.error_code_string(werr.code), werr.cause)
 			}
-			delete(status)
 		}
 		delete(command_id)
 	case "pane_capture_result":
 		if json_int(text, "protocol_version", 0) != 1 do return true
 		if h.content != nil {
+			pane_err, _ := contracts.wire_error_parse(text, context.temp_allocator)
 			input := content_service.Pane_Capture_Result_Input{
 				command_id = json_string_unescaped(text, "command_id"),
 				pane_capture_request_id = json_string_unescaped(text, "pane_capture_request_id"),
@@ -1756,8 +1759,8 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
 				agent_instance_id = json_string_unescaped(text, "agent_instance_id"),
 				ok = json_bool_value(text, "ok"),
 				output = json_string_unescaped(text, "output"),
-				error_code = json_string_unescaped(text, "error_code"),
-				message = json_string_unescaped(text, "message"),
+				error_code = strings.clone(pane_err.cause),
+				message = strings.clone(pane_err.message),
 				width = json_int(text, "width", 80),
 				line_count = json_int(text, "line_count", 0),
 				truncated = json_bool_value(text, "truncated"),
@@ -1915,9 +1918,29 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
 		if h.shell_sessions != nil do bridge_proxy_handle_data(h, bridge_id, text)
 	case "proxy_close":
 		if h.shell_sessions != nil do bridge_proxy_handle_close(h, bridge_id, text)
+	case:
+		// REQ-ERR-PROTO-A: a frame type the hub does not know is refused out loud
+		// rather than dropped, so protocol drift shows on both sides. Fatal: the
+		// bridge must not resend it.
+		refusal := bridge_protocol_error_frame(type, contracts.wire_error(.Not_Implemented, "unknown_frame_type", "hub does not handle this frame type"))
+		_ = write_ws_text_frame_locked(h, bridge_id, client, refusal)
+		delete(refusal)
+		fmt.eprintln("hub: bridge", bridge_id, "sent unknown frame type:", type)
 	}
 
 	return true
+}
+
+// bridge_protocol_error_frame is the hub's refusal of a bridge frame it cannot
+// process: {"type":"protocol_error","frame_type":...,"ok":false,"error":{...}}.
+bridge_protocol_error_frame :: proc(frame_type: string, err: contracts.Wire_Error) -> string {
+	b := strings.builder_make()
+	strings.write_string(&b, "{\"type\":\"protocol_error\",\"frame_type\":\"")
+	contracts.write_json_string(&b, frame_type)
+	strings.write_string(&b, "\",\"ok\":false,\"error\":")
+	contracts.write_wire_error(&b, err)
+	strings.write_string(&b, "}")
+	return strings.to_string(b)
 }
 
 Bridge_Agent_Status_Report :: struct {
@@ -1938,7 +1961,7 @@ Bridge_Heartbeat_Message :: struct {
 // Serialize durable status writes with retirement. New connections do not finish
 // admission until the old state writer has drained; a delayed old frame cannot
 // save over the new generation's durable state.
-bridge_apply_validated_status :: proc(h: ^Bridge_Handlers, bridge_id: string, generation: int, id: string, seq: int, status, activity: string, launch_epoch: string = "") -> (domain.Agent_Instance, bool, domain.Domain_Error) {
+bridge_apply_validated_status :: proc(h: ^Bridge_Handlers, bridge_id: string, generation: int, id: string, seq: int, status, activity: string, launch_epoch: string = "", error_json: string = "") -> (domain.Agent_Instance, bool, domain.Domain_Error) {
 	c := project_service.bridge_runtime_connection_acquire(h.bridge_runtime_registry, bridge_id, generation)
 	if c == nil do return {}, false, domain.domain_error(.Bridge_Offline, "stale bridge generation")
 	defer project_service.bridge_runtime_connection_release(h.bridge_runtime_registry, c)
@@ -1947,7 +1970,7 @@ bridge_apply_validated_status :: proc(h: ^Bridge_Handlers, bridge_id: string, ge
 		sync.unlock(&c.state_mutex)
 		return {}, false, domain.domain_error(.Bridge_Offline, "retired bridge generation")
 	}
-	instance, applied, err := agent_service.apply_bridge_status_report(h.agents, bridge_id, id, seq, status, activity, owner_user_id = c.owner_id, launch_epoch = launch_epoch)
+	instance, applied, err := agent_service.apply_bridge_status_report(h.agents, bridge_id, id, seq, status, activity, owner_user_id = c.owner_id, launch_epoch = launch_epoch, error_json = error_json)
 	sync.unlock(&c.state_mutex)
 	if applied {
 		_, _, tracking_err := project_service.bridge_runtime_instance_apply(h.bridge_runtime_registry, bridge_id, generation, id, string(instance.owner_user_id), string(instance.runtime_status), string(instance.activity_status), seq, recover = true)
@@ -2415,12 +2438,14 @@ bridge_heartbeat_ack_payload :: proc(reconciled: int, superseded_instance_ids: [
 	return strings.to_string(b)
 }
 
-agent_instance_status_summary_json :: proc(runtime_status, startup_status, activity_status: string) -> string {
+agent_instance_status_summary_json :: proc(runtime_status, startup_status, activity_status: string, last_error_json := "") -> string {
 	b := strings.builder_make()
 	strings.write_string(&b, "{\"runtime_status\":\""); write_handler_json_string(&b, runtime_status)
 	strings.write_string(&b, "\",\"startup_status\":\""); write_handler_json_string(&b, startup_status)
 	strings.write_string(&b, "\",\"activity_status\":\""); write_handler_json_string(&b, activity_status)
-	strings.write_string(&b, "\"}")
+	strings.write_string(&b, "\"")
+	write_last_error_json(&b, last_error_json)
+	strings.write_string(&b, "}")
 	return strings.to_string(b)
 }
 

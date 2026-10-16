@@ -61,6 +61,9 @@ Agent_Instance :: struct {
 	startup_status: string,
 	activity_status: string,
 	status_message: string,
+	// last_error_json is the wire error object (contracts.Wire_Error) the bridge
+	// reported when the instance last went "failed"; "" otherwise (REQ-ERR-PROTO-A).
+	last_error_json: string,
 	last_applied_seq: int,
 	run_count: int,
 	configuration_revision: int,
@@ -117,6 +120,7 @@ agent_instance_destroy :: proc(inst: ^Agent_Instance) {
 	if len(inst.startup_status) > 0 do delete(inst.startup_status)
 	if len(inst.activity_status) > 0 do delete(inst.activity_status)
 	if len(inst.status_message) > 0 do delete(inst.status_message)
+	if len(inst.last_error_json) > 0 do delete(inst.last_error_json)
 	if len(inst.launch_epoch) > 0 do delete(inst.launch_epoch)
 	if len(inst.current_task_id) > 0 do delete(inst.current_task_id)
 	if len(inst.created_at) > 0 do delete(inst.created_at)

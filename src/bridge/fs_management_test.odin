@@ -911,7 +911,7 @@ fs_wire_results_round_trip_all_11_operations :: proc(t: ^testing.T) {
 	testing.expect_value(t, var_batch.saved[0].path, "s1.txt")
 	if !testing.expect_value(t, len(var_batch.errors), 1) do return
 	testing.expect_value(t, var_batch.errors[0].error_code, "permission_denied")
-	testing.expect_value(t, var_batch.error.code, "batch_write_partial")
+	testing.expect_value(t, var_batch.error.cause, "batch_write_partial")
 
 	// 6. move
 	r_move := Bridge_Fs_Move_Result{
@@ -1145,7 +1145,7 @@ fs_wire_error_responses_round_trip :: proc(t: ^testing.T) {
 	delete(json_err)
 	testing.expect(t, err == nil, "unmarshal error wire ok")
 	testing.expect_value(t, var_err.ok, false)
-	testing.expect_value(t, var_err.error.code, "path_outside_root")
+	testing.expect_value(t, var_err.error.cause, "path_outside_root")
 	testing.expect_value(t, var_err.error.message, "Path is outside sandbox root")
 
 	testing.expectf(t, len(track.allocation_map) == 0, "leak: %d live allocations", len(track.allocation_map))

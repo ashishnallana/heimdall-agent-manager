@@ -118,7 +118,7 @@ test_t9_locked_shell_start_refuses_plaintext_cmd :: proc(t: ^testing.T) {
 		`{{"type":"shell_start","session_id":"sh_t9_a","command_id":"cmd_t9_a","kind":"run","cmd":"touch %s","cwd":"%s"}}`,
 		canary, f.sb.dir,
 	))
-	testing.expect(t, strings.contains(reply, `"error_code":"vault_locked"`), fmt.tprintf("must refuse with vault_locked, got %q", reply))
+	testing.expect(t, strings.contains(reply, `"cause":"vault_locked"`), fmt.tprintf("must refuse with vault_locked, got %q", reply))
 	testing.expect(t, strings.contains(reply, "unauthorized: vault locked"), "must carry the locked reason")
 	testing.expect(t, !os.exists(canary), "the plaintext cmd must never run on a locked bridge")
 }
@@ -147,7 +147,7 @@ test_t9_locked_shell_start_refuses_enc_spec :: proc(t: ^testing.T) {
 		`{{"type":"shell_start","session_id":"sh_t9_b","command_id":"cmd_t9_b","kind":"run","cmd":"touch %s","cwd":"%s","enc_spec":"%s"}}`,
 		canary, f.sb.dir, armored,
 	))
-	testing.expect(t, strings.contains(reply, `"error_code":"vault_locked"`), fmt.tprintf("must refuse with vault_locked, got %q", reply))
+	testing.expect(t, strings.contains(reply, `"cause":"vault_locked"`), fmt.tprintf("must refuse with vault_locked, got %q", reply))
 	testing.expect(t, !os.exists(canary), "nothing executed")
 }
 
@@ -197,7 +197,7 @@ test_t9_unlocked_shell_start_still_requires_enc_spec :: proc(t: ^testing.T) {
 		`{{"type":"shell_start","session_id":"sh_t9_d","command_id":"cmd_t9_d","kind":"run","cmd":"touch %s","cwd":"%s"}}`,
 		canary, f.sb.dir,
 	))
-	testing.expect(t, strings.contains(reply, `"error_code":"invalid_vault_key"`), fmt.tprintf("must refuse with invalid_vault_key, got %q", reply))
+	testing.expect(t, strings.contains(reply, `"cause":"invalid_vault_key"`), fmt.tprintf("must refuse with invalid_vault_key, got %q", reply))
 	testing.expect(t, !os.exists(canary), "nothing executed")
 }
 
@@ -266,7 +266,7 @@ test_t9_locked_shell_restart_is_refused :: proc(t: ^testing.T) {
 	bridge_hub_handle_shell_restart(&conn, `{"type":"shell_restart","session_id":"sh_t9_restart","command_id":"cmd_t9_restart","run_seq":1}`)
 	reply := read_reply(read_fd)
 	testing.expect(t, strings.contains(reply, `"ok":false`), fmt.tprintf("restart must be refused when locked, got %q", reply))
-	testing.expect(t, strings.contains(reply, `"error_code":"vault_locked"`), fmt.tprintf("T10: restart refusal must name vault_locked, got %q", reply))
+	testing.expect(t, strings.contains(reply, `"cause":"vault_locked"`), fmt.tprintf("T10: restart refusal must name vault_locked, got %q", reply))
 	testing.expect(t, !os.exists(canary), "the stored cmd must not be re-executed")
 }
 
@@ -315,7 +315,7 @@ test_t10_locked_agent_pty_input_is_refused_with_vault_locked :: proc(t: ^testing
 	res, res_ok := bridge_runtime_cached_command("cmd_t10_agent_locked")
 	testing.expect(t, res_ok, "result recorded")
 	testing.expect(t, strings.contains(res, `"status":"failed"`), fmt.tprintf("locked agent input must fail, got %q", res))
-	testing.expect(t, strings.contains(res, `"error_code":"vault_locked"`), fmt.tprintf("locked agent input must carry vault_locked, got %q", res))
+	testing.expect(t, strings.contains(res, `"cause":"vault_locked"`), fmt.tprintf("locked agent input must carry vault_locked, got %q", res))
 
 	wire := read_all(read_fd)
 	testing.expect(t, strings.contains(wire, `"type":"shell_pty_vault_locked"`), fmt.tprintf("typed stream frame sent, got %q", wire))
@@ -360,7 +360,7 @@ test_t10_disabled_agent_pty_input_passes_gate :: proc(t: ^testing.T) {
 	bridge_hub_handle_agent_pty_input(nil, `{"type":"agent_pty_input","command_id":"cmd_t10_agent_disabled","agent_instance_id":"inst_t10_none","data":"ls\n"}`)
 	res, res_ok := bridge_runtime_cached_command("cmd_t10_agent_disabled")
 	testing.expect(t, res_ok, "result recorded")
-	testing.expect(t, !strings.contains(res, "error_code"), fmt.tprintf("Disabled must not be refused by the vault gate, got %q", res))
+	testing.expect(t, !strings.contains(res, "vault_locked") && !strings.contains(res, "invalid_vault_key"), fmt.tprintf("Disabled must not be refused by the vault gate, got %q", res))
 }
 
 // shell_pty_input (the wire type the current hub uses for BOTH agent and shell panes)
@@ -385,7 +385,7 @@ test_t10_locked_shell_pty_input_carries_vault_locked :: proc(t: ^testing.T) {
 	bridge_hub_handle_shell_pty_input(&conn, `{"type":"shell_pty_input","command_id":"cmd_t10_shell_locked","shell_id":"sh_t10","agent_instance_id":"sh_t10","data_b64":"ZWNobyBoaQo=","is_encrypted":false}`)
 	res, res_ok := bridge_runtime_cached_command("cmd_t10_shell_locked")
 	testing.expect(t, res_ok, "result recorded")
-	testing.expect(t, strings.contains(res, `"error_code":"vault_locked"`), fmt.tprintf("locked shell input must carry vault_locked, got %q", res))
+	testing.expect(t, strings.contains(res, `"cause":"vault_locked"`), fmt.tprintf("locked shell input must carry vault_locked, got %q", res))
 	wire := read_all(read_fd)
 	testing.expect(t, strings.contains(wire, `"type":"shell_pty_vault_locked"`), fmt.tprintf("typed stream frame sent, got %q", wire))
 	testing.expect(t, strings.contains(wire, `"session_id":"sh_t10"`), "frame names the pane")
@@ -421,6 +421,6 @@ test_t10_locked_emit_frame_queues_typed_vault_locked_once :: proc(t: ^testing.T)
 	if len(frames) == 2 {
 		testing.expect(t, strings.contains(frames[0], `"type":"shell_pty_output"`), "banner first, for scrollback")
 		testing.expect(t, strings.contains(frames[1], `"type":"shell_pty_vault_locked"`), fmt.tprintf("typed frame second, got %q", frames[1]))
-		testing.expect(t, strings.contains(frames[1], `"error_code":"vault_locked"`), "typed frame carries the code")
+		testing.expect(t, strings.contains(frames[1], `"cause":"vault_locked"`), "typed frame carries the code")
 	}
 }

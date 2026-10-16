@@ -923,7 +923,10 @@ relaunch_instance_locked :: proc(service: ^Agent_Service, auth: contracts.Auth_C
 	return iface.agent_save_instance(service.agents, next)
 }
 
-apply_bridge_status_report :: proc(service: ^Agent_Service, bridge_id, instance_id: string, state_seq: int, runtime_status, activity_status: string, owner_user_id: string = "", launch_epoch: string = "") -> (domain.Agent_Instance, bool, domain.Domain_Error) {
+// error_json is the report's wire error object (REQ-ERR-PROTO-A), recorded as the
+// instance's last_error (with a consecutive-failure attempt count) while it is
+// failed; a successful start or a stop clears it, a retry in flight keeps it.
+apply_bridge_status_report :: proc(service: ^Agent_Service, bridge_id, instance_id: string, state_seq: int, runtime_status, activity_status: string, owner_user_id: string = "", launch_epoch: string = "", error_json: string = "") -> (domain.Agent_Instance, bool, domain.Domain_Error) {
 	inst, ok, err := iface.agent_get_instance(service.agents, instance_id)
 	if !ok do return domain.Agent_Instance{}, false, err
 	if inst.bridge_id != bridge_id || (owner_user_id != "" && string(inst.owner_user_id) != owner_user_id) {
@@ -973,6 +976,19 @@ apply_bridge_status_report :: proc(service: ^Agent_Service, bridge_id, instance_
 	inst.last_seen_at = strings.clone(now)
 	if len(inst.updated_at) > 0 do delete(inst.updated_at)
 	inst.updated_at = strings.clone(now)
+	switch inst.runtime_status {
+	case "failed":
+		if error_json != "" {
+			recorded := instance_last_error_record(inst.last_error_json, error_json)
+			if len(inst.last_error_json) > 0 do delete(inst.last_error_json)
+			inst.last_error_json = recorded
+		}
+	case "launching", "starting":
+		// A retry in flight keeps the failure (and its attempt count) until it succeeds.
+	case:
+		if len(inst.last_error_json) > 0 do delete(inst.last_error_json)
+		inst.last_error_json = ""
+	}
 	switch inst.runtime_status {
 	case "running", "idle", "busy":
 		if len(inst.startup_status) > 0 do delete(inst.startup_status)

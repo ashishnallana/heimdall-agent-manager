@@ -1,58 +1,41 @@
 package domain
 
 import "core:strings"
+import contracts "odin_test:contracts"
 
-Error_Code :: enum {
-	None,
-	Unauthenticated,
-	Forbidden,
-	Not_Found,
-	Validation_Failed,
-	Conflict,
-	Bridge_Offline,
-	Bridge_Busy,
-	Bridge_Timeout,
-	Bridge_Revoked,
-	Provider_Unavailable,
-	Instance_Not_Running,
-	Rate_Limited,
-	Gone,
-	Unprocessable_Entity,
-	Not_Implemented,
-	Internal_Error,
-	// T10 (REQ-T10-2): the bridge refused because its vault is locked. Appended rather
-	// than inserted so no existing ordinal moves.
-	Vault_Locked,
-}
+// Error_Code is the shared bridge<->hub contract code (src/contracts/errors.odin);
+// its table fixes each code's wire name, class and HTTP status.
+Error_Code :: contracts.Error_Code
 
 Domain_Error :: struct {
 	code:    Error_Code,
 	message: string,
 	details_json: string,
+	// cause is the fine-grained reason relayed from the bridge (a Bridge_Log_Code or
+	// fs/vcs reason name); "" for hub-originated errors.
+	cause: string,
+	// class overrides the code's table class when the side that saw the failure
+	// classified it differently (a bridge-relayed error carries its own class).
+	class: Maybe(contracts.Bridge_Error_Class),
 }
 
-error_code_string :: proc(code: Error_Code) -> string {
-	switch code {
-	case .None: return ""
-	case .Unauthenticated: return "unauthenticated"
-	case .Forbidden: return "forbidden"
-	case .Not_Found: return "not_found"
-	case .Validation_Failed: return "validation_failed"
-	case .Conflict: return "conflict"
-	case .Bridge_Offline: return "bridge_offline"
-	case .Bridge_Busy: return "bridge_busy"
-	case .Bridge_Timeout: return "bridge_timeout"
-	case .Bridge_Revoked: return "bridge_revoked"
-	case .Provider_Unavailable: return "provider_unavailable"
-	case .Instance_Not_Running: return "instance_not_running"
-	case .Rate_Limited: return "rate_limited"
-	case .Gone: return "gone"
-	case .Unprocessable_Entity: return "unprocessable_entity"
-	case .Not_Implemented: return "not_implemented"
-	case .Internal_Error: return "internal_error"
-	case .Vault_Locked: return "vault_locked"
-	}
-	return "internal_error"
+error_code_string :: contracts.error_code_string
+
+// domain_error_class is the class a client should act on.
+domain_error_class :: proc(err: Domain_Error) -> contracts.Bridge_Error_Class {
+	if class, ok := err.class.?; ok do return class
+	return contracts.error_code_class(err.code)
+}
+
+// domain_error_from_wire turns a bridge-relayed wire error into a domain error that
+// keeps the bridge's code, class and cause. Message is cloned into the temp arena.
+domain_error_from_wire :: proc(w: contracts.Wire_Error) -> Domain_Error {
+	code := w.code
+	if code == .None do code = .Internal_Error
+	message := w.message
+	if message == "" do message = w.cause
+	if message == "" do message = error_code_string(code)
+	return Domain_Error{code = code, message = message, cause = w.cause, class = w.class}
 }
 
 domain_error :: proc(code: Error_Code, message: string, details_json := "") -> Domain_Error {
@@ -80,14 +63,4 @@ vault_locked_error :: proc(bridge_id: string) -> Domain_Error {
 	}
 	strings.write_string(&b, "\"}")
 	return domain_error(.Vault_Locked, VAULT_LOCKED_MESSAGE, strings.to_string(b))
-}
-
-// bridge_refusal_error maps a bridge's machine-readable refusal code to a typed domain
-// error. ok is false for codes with no typed mapping; callers then keep their generic
-// fallback (a genuinely unknown failure stays a 500).
-bridge_refusal_error :: proc(error_code, bridge_id: string) -> (err: Domain_Error, ok: bool) {
-	switch error_code {
-	case VAULT_LOCKED_ERROR_CODE: return vault_locked_error(bridge_id), true
-	}
-	return {}, false
 }

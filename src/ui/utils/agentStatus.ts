@@ -49,6 +49,21 @@ export function isAgentRunning(agent: any): boolean {
   return ['ready', 'live', 'connected', 'working', 'active'].includes(state) || ['ready', 'connected'].includes(startup);
 }
 
+// REQ-ERR-PROTO-A: a failed instance carries the bridge's typed error as
+// `last_error` ({code, class, cause, message}). The class says what happens next,
+// so the UI words the failure by class rather than showing a bare "failed".
+export function agentFailureSummary(lastError: any): { label: string; detail: string; tone: 'warning' | 'danger' } | null {
+  if (!lastError || typeof lastError !== 'object') return null;
+  const cause = String(lastError.cause || lastError.code || '').replace(/_/g, ' ');
+  const message = String(lastError.message || '');
+  const detail = message && message !== lastError.cause ? `${cause}: ${message}` : cause;
+  switch (lastError.class) {
+    case 'retriable': return { label: 'Retrying automatically', detail, tone: 'warning' };
+    case 'recoverable': return { label: 'Needs attention', detail, tone: 'warning' };
+    default: return { label: 'Failed', detail, tone: 'danger' };
+  }
+}
+
 // Keep the tone helper exported for potential reuse; it is intentionally not
 // used by the two functions' public contract but mirrors the original module.
 export { agentRuntimeDotTone };

@@ -1869,8 +1869,13 @@ manual_nudge :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, 
 
 		sent := false
 		if service.bridge_command_sink.send_runtime_command_wait != nil {
-			result_json, sent, _ := project.bridge_command_send_runtime_wait(service.bridge_command_sink, project.Runtime_Command{bridge_id=inst.bridge_id, command_id=cmd_id, body_json=strings.to_string(b)}, 1000)
-			if sent {
+			result_json, sent, send_err := project.bridge_command_send_runtime_wait(service.bridge_command_sink, project.Runtime_Command{bridge_id=inst.bridge_id, command_id=cmd_id, body_json=strings.to_string(b)}, 1000)
+			if !sent && send_err.cause != "" {
+				// The bridge answered with a typed refusal (e.g. wake_failed): the
+				// notice is still durably stored, so it is queued, not lost.
+				durable_queued += 1
+				strings.write_string(&targets_b, `","state":"queued"}`)
+			} else if sent {
 				if strings.contains(result_json, `"status":"succeeded"`) {
 					live_delivered += 1
 					strings.write_string(&targets_b, `","state":"delivered"}`)

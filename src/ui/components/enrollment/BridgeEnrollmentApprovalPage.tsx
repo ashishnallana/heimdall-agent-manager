@@ -555,10 +555,8 @@ export default function BridgeEnrollmentApprovalPage() {
             throw new Error('The bridge advertised no public key — it may have gone offline.');
           }
         }
-        const result = await unsealBridgeE2EE(targetBridgeId, publicKey, vaultKeyMaterial);
-        if (result && (result as any).ok === false) {
-          throw new Error(String((result as any).error || 'the bridge refused the unseal'));
-        }
+        // Throws the bridge's typed error when it refuses the unseal.
+        await unsealBridgeE2EE(targetBridgeId, publicKey, vaultKeyMaterial);
       } catch (err: any) {
         const message = String(err?.message || err);
         if (target === 'restarted') {

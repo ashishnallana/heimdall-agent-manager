@@ -136,7 +136,7 @@ vcs_api_stage_empty_file :: proc(t: ^testing.T) {
 	out := bridge_vcs_stage_json("s", fmt.tprintf(`{{"command_id":"s","root":"%s","path":""}}`, repo))
 	defer delete(out)
 	testing.expect(t, strings.contains(out, `"ok":false`), "empty file stage ok:false")
-	testing.expect(t, strings.contains(out, `"code":"missing_file"`), "empty file -> missing_file")
+	testing.expect(t, strings.contains(out, `"cause":"missing_file"`), "empty file -> missing_file")
 }
 
 @(test)
@@ -154,7 +154,7 @@ vcs_api_unstage_not_supported_jj :: proc(t: ^testing.T) {
 	defer delete(out)
 	testing.expect(t, strings.contains(out, `"ok":false`), "jj unstage ok:false")
 	testing.expect(t, strings.contains(out, `"provider":"jj"`), "provider resolves to jj")
-	testing.expect(t, strings.contains(out, `"code":"not_supported"`), "jj unstage -> not_supported")
+	testing.expect(t, strings.contains(out, `"cause":"not_supported"`), "jj unstage -> not_supported")
 }
 
 @(test)
@@ -171,7 +171,7 @@ vcs_api_revert_missing_file :: proc(t: ^testing.T) {
 	out := bridge_vcs_revert_json("r", fmt.tprintf(`{{"command_id":"r","root":"%s","path":""}}`, repo))
 	defer delete(out)
 	testing.expect(t, strings.contains(out, `"ok":false`), "missing file revert ok:false")
-	testing.expect(t, strings.contains(out, `"code":"missing_file"`), "missing file -> missing_file")
+	testing.expect(t, strings.contains(out, `"cause":"missing_file"`), "missing file -> missing_file")
 }
 
 @(test)
@@ -248,7 +248,7 @@ vcs_api_commit_diff_list_files_jj_not_supported :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(out, `"ok":false`), "jj list_files -> ok:false")
 	testing.expect(t, strings.contains(out, `"provider":"jj"`), "provider resolves to jj")
 	testing.expect(t, strings.contains(out, `"list_files":true`), "error still echoes list_files:true")
-	testing.expect(t, strings.contains(out, `"code":"not_supported"`), "jj list_files -> not_supported")
+	testing.expect(t, strings.contains(out, `"cause":"not_supported"`), "jj list_files -> not_supported")
 }
 
 // vcs_commit handler: empty root -> no_vcs (fail-safe, no crash).
@@ -270,7 +270,7 @@ vcs_api_commit_missing_message :: proc(t: ^testing.T) {
 	defer delete(out)
 	testing.expect(t, strings.contains(out, `"ok":false`), "empty message commit ok:false")
 	testing.expect(t, strings.contains(out, `"provider":"git"`), "provider resolves to git")
-	testing.expect(t, strings.contains(out, `"code":"missing_message"`), "empty message -> missing_message")
+	testing.expect(t, strings.contains(out, `"cause":"missing_message"`), "empty message -> missing_message")
 }
 
 // vcs_commit handler: jj provider has commit=nil -> not_supported (detection-only path).
@@ -282,7 +282,7 @@ vcs_api_commit_jj_not_supported :: proc(t: ^testing.T) {
 	defer delete(out)
 	testing.expect(t, strings.contains(out, `"ok":false`), "jj commit ok:false")
 	testing.expect(t, strings.contains(out, `"provider":"jj"`), "provider resolves to jj")
-	testing.expect(t, strings.contains(out, `"code":"not_supported"`), "jj commit -> not_supported")
+	testing.expect(t, strings.contains(out, `"cause":"not_supported"`), "jj commit -> not_supported")
 }
 
 @(test)
@@ -325,7 +325,7 @@ vcs_api_upload_jj_not_supported :: proc(t: ^testing.T) {
 	defer delete(out)
 	testing.expect(t, strings.contains(out, `"ok":false`), "jj upload ok:false")
 	testing.expect(t, strings.contains(out, `"provider":"jj"`), "provider resolves to jj")
-	testing.expect(t, strings.contains(out, `"code":"not_supported"`), "jj upload -> not_supported")
+	testing.expect(t, strings.contains(out, `"cause":"not_supported"`), "jj upload -> not_supported")
 }
 
 @(test)
@@ -336,7 +336,7 @@ vcs_api_sync_jj_not_supported :: proc(t: ^testing.T) {
 	defer delete(out)
 	testing.expect(t, strings.contains(out, `"ok":false`), "jj sync ok:false")
 	testing.expect(t, strings.contains(out, `"provider":"jj"`), "provider resolves to jj")
-	testing.expect(t, strings.contains(out, `"code":"not_supported"`), "jj sync -> not_supported")
+	testing.expect(t, strings.contains(out, `"cause":"not_supported"`), "jj sync -> not_supported")
 }
 
 // --- REQ-VCS-2: push/pull failure responses carry git stderr detail -------
@@ -387,7 +387,7 @@ vcs_api_upload_no_remote_captures_stderr :: proc(t: ^testing.T) {
 	out := bridge_vcs_upload_json("u", fmt.tprintf(`{{"command_id":"u","root":"%s"}}`, repo))
 	defer delete(out)
 	testing.expect(t, strings.contains(out, `"ok":false`), "no-remote upload ok:false")
-	testing.expect(t, strings.contains(out, `"code":"push_failed"`), "no-remote upload code push_failed")
+	testing.expect(t, strings.contains(out, `"cause":"push_failed"`), "no-remote upload code push_failed")
 	testing.expect(t, strings.contains(out, "No configured push destination"), "failure message embeds real git stderr")
 }
 
@@ -402,7 +402,7 @@ vcs_api_sync_no_remote_captures_stderr :: proc(t: ^testing.T) {
 	out := bridge_vcs_sync_json("s", fmt.tprintf(`{{"command_id":"s","root":"%s"}}`, repo))
 	defer delete(out)
 	testing.expect(t, strings.contains(out, `"ok":false`), "no-upstream sync ok:false")
-	testing.expect(t, strings.contains(out, `"code":"sync_failed"`), "no-upstream sync code sync_failed")
+	testing.expect(t, strings.contains(out, `"cause":"sync_failed"`), "no-upstream sync code sync_failed")
 	testing.expect(t, strings.contains(out, "no tracking information"), "failure message embeds real git stderr")
 }
 
@@ -692,7 +692,7 @@ vcs_api_save_missing_file :: proc(t: ^testing.T) {
 	out := bridge_vcs_save_json("s", fmt.tprintf(`{{"command_id":"s","root":"%s","path":"","content":"x"}}`, repo))
 	defer delete(out)
 	testing.expect(t, strings.contains(out, `"ok":false`), "missing file save ok:false")
-	testing.expect(t, strings.contains(out, `"code":"missing_file"`), "empty path -> missing_file")
+	testing.expect(t, strings.contains(out, `"cause":"missing_file"`), "empty path -> missing_file")
 }
 
 @(test)
@@ -738,7 +738,7 @@ vcs_api_save_rejects_path_traversal :: proc(t: ^testing.T) {
 	out := bridge_vcs_save_json("s", fmt.tprintf(`{{"command_id":"s","root":"%s","path":"../ham-vcs-save-escape-PWNED.txt","content":"pwn"}}`, repo))
 	defer delete(out)
 	testing.expect(t, strings.contains(out, `"ok":false`), "traversal save must be rejected")
-	testing.expect(t, strings.contains(out, `"code":"path_outside_root"`), "traversal -> path_outside_root")
+	testing.expect(t, strings.contains(out, `"cause":"path_outside_root"`), "traversal -> path_outside_root")
 	testing.expect(t, !os.exists(escaped), "escaped file must not exist on disk")
 }
 

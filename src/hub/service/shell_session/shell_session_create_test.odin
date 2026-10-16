@@ -1002,7 +1002,7 @@ r16_create :: proc(fx: ^R16_Fixture) -> (domain.Shell_Session, bool, domain.Doma
 @(test)
 test_req16_start_failure_surfaces_the_bridge_reason :: proc(t: ^testing.T) {
 	fx: R16_Fixture
-	r16_fixture_make(&fx, `{"type":"shell_start_result","ok":false,"error":"daemon unavailable"}`)
+	r16_fixture_make(&fx, `{"type":"shell_start_result","ok":false,"error":{"code":"bridge_busy","class":"retriable","cause":"pty_host_unreachable","message":"daemon unavailable"}}`)
 	defer r16_fixture_free(&fx)
 
 	_, ok, err := r16_create(&fx)
@@ -1044,7 +1044,7 @@ test_req16_start_failure_without_a_reason_falls_back_to_the_constant :: proc(t: 
 @(test)
 test_req16_start_failure_stamps_finished_at :: proc(t: ^testing.T) {
 	fx: R16_Fixture
-	r16_fixture_make(&fx, `{"type":"shell_start_result","ok":false,"error":"spawn failed"}`)
+	r16_fixture_make(&fx, `{"type":"shell_start_result","ok":false,"error":{"code":"unprocessable_entity","class":"fatal","cause":"shell_start_failed","message":"spawn failed"}}`)
 	defer r16_fixture_free(&fx)
 
 	_, ok, _ := r16_create(&fx)

@@ -592,11 +592,13 @@ bridge_project_path_validation_result_json :: proc(body: string, use_cache: bool
 	strings.write_string(&b, "{\"type\":\"project_path_validation_result\",\"command_id\":\""); json_write_string(&b, command_id)
 	strings.write_string(&b, "\",\"project_id\":\""); json_write_string(&b, project_id)
 	strings.write_string(&b, "\",\"path\":\""); json_write_string(&b, path)
-	strings.write_string(&b, "\",\"ok\":"); strings.write_string(&b, "true" if result.ok else "false")
-	strings.write_string(&b, ",\"validation_error\":\""); json_write_string(&b, result.message)
-	strings.write_string(&b, "\",\"error\":{\"code\":\""); json_write_string(&b, result.error_code)
-	strings.write_string(&b, "\",\"message\":\""); json_write_string(&b, result.message)
-	strings.write_string(&b, "\"}}")
+	strings.write_string(&b, "\",")
+	if result.ok {
+		strings.write_string(&b, "\"ok\":true}")
+	} else {
+		bridge_write_failure(&b, bridge_cause_wire_error(result.error_code if result.error_code != "" else "path_validation_failed", result.message))
+		strings.write_string(&b, "}")
+	}
 	result_json := strings.to_string(b)
 	if use_cache do bridge_validation_command_store(command_id, result_json)
 	return result_json
@@ -604,9 +606,9 @@ bridge_project_path_validation_result_json :: proc(body: string, use_cache: bool
 
 bridge_unsupported_route_json :: proc(method, route: string) -> string {
 	b := strings.builder_make()
-	strings.write_string(&b, `{"ok":false,"error_code":"`)
-	json_write_string(&b, contracts.BRIDGE_ERROR_UNSUPPORTED_ROUTE)
-	strings.write_string(&b, `","message":"unsupported bridge route","method":"`)
+	strings.write_string(&b, `{`)
+	bridge_write_failure(&b, bridge_cause_wire_error(contracts.BRIDGE_ERROR_UNSUPPORTED_ROUTE, "unsupported bridge route"))
+	strings.write_string(&b, `,"method":"`)
 	json_write_string(&b, method)
 	strings.write_string(&b, `","route":"`)
 	json_write_string(&b, route)

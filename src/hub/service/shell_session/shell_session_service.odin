@@ -1410,14 +1410,6 @@ shell_session_set_port :: proc(svc: ^Shell_Session_Service, auth: contracts.Auth
 		// non-allocated "" literal in that case. Guarded, and the generic fallback now
 		// carries the reason like the other four sites instead of dropping a refusal
 		// word this branch simply did not recognise.
-		reason := _json_str(reply, "error")
-		defer if reason != "" do delete(reason)
-		if reason == "session_not_running" {
-			return session, false, domain.domain_error(.Conflict, "session has already terminated")
-		}
-		if reason == "session_not_found" {
-			return session, false, domain.domain_error(.Not_Found, "session not found")
-		}
 		return session, false, _bridge_failure(reply, "bridge failed to set the shell session port", session.bridge_id)
 	}
 
@@ -1519,11 +1511,6 @@ shell_session_get_log :: proc(svc: ^Shell_Session_Service, auth: contracts.Auth_
 	//   output was reclaimed  -> .Gone. The bridge is fine; retention took the file.
 	//   ok, zero lines        -> success. The command genuinely printed nothing.
 	if !_json_bool(reply, "ok") {
-		code := _json_str(reply, "error_code")
-		defer delete(code)
-		if code == SHELL_OUTPUT_RECLAIMED_CODE {
-			return {}, false, domain.domain_error(.Gone, "output no longer available: reclaimed by the bridge retention window")
-		}
 		return {}, false, _bridge_failure(reply, "bridge failed to retrieve shell logs", session.bridge_id)
 	}
 
@@ -2474,14 +2461,18 @@ _json_str :: proc(body, key: string, allocator := context.allocator) -> string {
 // becomes the TYPED error for it — HTTP 423 with details.bridge_id — instead of the
 // generic 500, so the client can tell "locked" from a crash. Unknown codes and replies
 // with no code keep the 500 below.
+//
+// REQ-ERR-PROTO-A: the reply's typed error decides the outcome. Its code picks the
+// status (session_not_running -> 409, session_not_found -> 404, output_reclaimed ->
+// 410, ...), its class and cause ride along, and the message is display only. A
+// reply with no typed error is a contract violation and stays a 500.
 _bridge_failure :: proc(reply, fallback: string, bridge_id := "") -> domain.Domain_Error {
-	if code := _json_str(reply, "error_code", context.temp_allocator); code != "" {
-		if typed, ok := domain.bridge_refusal_error(code, bridge_id); ok do return typed
-	}
-	reason := _json_str(reply, "error")
-	if reason == "" do return domain.domain_error(.Internal_Error, fallback)
-	defer delete(reason)
-	return domain.domain_error(.Internal_Error, fmt.tprintf("%s: %s", fallback, reason))
+	werr, found := contracts.wire_error_parse(reply, context.temp_allocator)
+	if !found do return domain.domain_error(.Internal_Error, fallback)
+	if werr.code == .Vault_Locked do return domain.vault_locked_error(bridge_id)
+	err := domain.domain_error_from_wire(werr)
+	err.message = fmt.tprintf("%s: %s", fallback, err.message)
+	return err
 }
 
 _json_int :: proc(body, key: string, default_value: int) -> int {

@@ -5,6 +5,7 @@
 // stops each new cookie endpoint from reinventing its own apiUrl/fetch wrapper.
 
 import { withApiBase } from './apiBase';
+import type { WireErrorClass } from './wireError';
 
 /**
  * ApiError carries the hub's MACHINE-READABLE error code alongside the message.
@@ -28,11 +29,17 @@ import { withApiBase } from './apiBase';
 export class ApiError extends Error {
   readonly status?: number;
   readonly code?: string;
-  constructor(message: string, status?: number, code?: string) {
+  // REQ-ERR-PROTO-A: the error's class (retriable / recoverable / fatal) and its
+  // fine-grained cause, when the hub sent them.
+  readonly errorClass?: WireErrorClass;
+  readonly errorCause?: string;
+  constructor(message: string, status?: number, code?: string, errorClass?: WireErrorClass, errorCause?: string) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.code = code;
+    this.errorClass = errorClass;
+    this.errorCause = errorCause;
   }
 }
 
@@ -41,6 +48,8 @@ export class ApiError extends Error {
 async function errorFromResponse(res: Response): Promise<ApiError> {
   let msg = `Request failed (${res.status})`;
   let code: string | undefined;
+  let errorClass: WireErrorClass | undefined;
+  let cause: string | undefined;
   try {
     const text = await res.text();
     const errBody = JSON.parse(text);
@@ -48,8 +57,10 @@ async function errorFromResponse(res: Response): Promise<ApiError> {
     else if (errBody?.message) msg = errBody.message;
     if (typeof errBody?.error?.code === 'string') code = errBody.error.code;
     else if (typeof errBody?.code === 'string') code = errBody.code;
+    if (errBody?.error?.class) errorClass = errBody.error.class;
+    if (typeof errBody?.error?.cause === 'string') cause = errBody.error.cause;
   } catch (e) { /* non-JSON or unreadable body — the status line is all we have */ }
-  return new ApiError(msg, res.status, code);
+  return new ApiError(msg, res.status, code, errorClass, cause);
 }
 
 // `withApiBase` is the identity in every normal build; it only does something in a

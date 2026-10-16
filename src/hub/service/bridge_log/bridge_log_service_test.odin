@@ -1,6 +1,7 @@
 package bridge_log
 
 import "core:strings"
+import "core:sync"
 import "core:testing"
 import "core:time"
 import domain "odin_test:hub/domain"
@@ -208,7 +209,9 @@ test_bridge_log_writer_thread_drains_and_stops :: proc(t: ^testing.T) {
 	for _ in 0 ..< FLUSH_THRESHOLD + 1 do _ = enqueue(&svc, ev("brg_t"))
 	// Threshold wake-up: drained well before the 1 s tick.
 	deadline := time.tick_now()
-	for pending(&svc) > 0 && time.tick_since(deadline) < 3 * time.Second do time.sleep(5 * time.Millisecond)
+	// Wait for the WRITE, not just the dequeue: pending hits 0 as soon as the writer
+	// takes the batch, before its rows reach the repo.
+	for (pending(&svc) > 0 || sync.atomic_load(&f.rows) < FLUSH_THRESHOLD + 1) && time.tick_since(deadline) < 3 * time.Second do time.sleep(5 * time.Millisecond)
 	testing.expect_value(t, pending(&svc), 0)
 	testing.expect(t, f.rows >= FLUSH_THRESHOLD + 1, "rows written by the thread")
 	_ = enqueue(&svc, ev("brg_t"))

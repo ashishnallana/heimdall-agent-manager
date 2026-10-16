@@ -32,7 +32,8 @@ export function taskChainSearchErrorMessage(error: unknown): string {
     case 'vault_locked': return 'Unlock the vault to search task chains.';
     case 'search_not_ready': return 'Bridge search is still preparing.';
     case 'search_stale': return 'Bridge search results may be stale.';
-    case 'deadline_exceeded': return 'Bridge search timed out.';
+    case 'deadline_exceeded':
+    case 'bridge_timeout': return 'Bridge search timed out.';
     case 'invalid_envelope': return 'The encrypted search response was rejected.';
     case 'query_too_short': return 'Enter at least two characters.';
     case 'limit_exceeded': return 'The search result limit is invalid.';
@@ -155,7 +156,7 @@ async function relayOne(
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new ApiError(String(body?.error?.message || 'Search relay failed'), response.status, body?.error?.code);
   const result = body?.data ?? body;
-  if (!result?.ok) throw new ApiError(String(result?.error_code || 'Search failed'), 409, result?.error_code);
+  if (!result?.ok) throw new ApiError(String(result?.error?.message || result?.error?.cause || 'Search failed'), 409, result?.error?.cause);
   const opened = await openTaskChainSearch<TaskChainSearchResponse>(result.envelope, key, taskChainSearchAad(ownerId, bridgeId, requestId, 'response', expiresAtMs));
   if (opened.request_id !== requestId || opened.bridge_id !== bridgeId) throw new ApiError('Mismatched encrypted search response', 400, 'invalid_envelope');
   return opened;

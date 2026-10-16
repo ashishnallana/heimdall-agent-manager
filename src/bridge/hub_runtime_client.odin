@@ -207,6 +207,10 @@ Bridge_Runtime_Instance :: struct {
 	// stopped instance back to running/starting. A fresh launch clears it.
 	stopped_intent_unix_ms: i64,
 	pty_process_alive: bool,
+	// last_error is why the instance last went "failed" (REQ-ERR-PROTO-A); reported on
+	// agent_instance_status so the hub can act on its class. Cleared on any other status.
+	last_error:     Bridge_Error,
+	has_last_error: bool,
 }
 
 Bridge_Runtime_Command_Result :: struct {
@@ -725,6 +729,14 @@ bridge_hub_handle_command :: proc(conn: ^ws.Connection, text: string) {
 		// re-reports rather than acks, so this is deliberately a no-op.
 		return
 	}
+	if type == "protocol_error" {
+		// The hub refused a frame it could not process (REQ-ERR-PROTO-A). Never
+		// answered, so two peers cannot bounce refusals; logged for protocol drift.
+		werr, _ := contracts.wire_error_parse(text, context.temp_allocator)
+		frame_type := extract_json_string(text, "frame_type", "", context.temp_allocator)
+		fmt.println("bridge hub runtime: hub refused frame", frame_type, contracts.error_code_string(werr.code), werr.cause)
+		return
+	}
 	if type == "connection_replaced" {
 		backoff_s, first := bridge_hub_note_connection_replaced()
 		if !first do return
@@ -791,9 +803,7 @@ bridge_hub_handle_command :: proc(conn: ^ws.Connection, text: string) {
 		st_json := bridge_instance_status_json(instance_id)
 		defer delete(st_json)
 		_ = bridge_hub_send(conn, st_json)
-		final_status := "succeeded" if ok else "failed"
-		final_runtime := "starting" if ok else "failed"
-		final := bridge_command_result_json(command_id, final_status, final_runtime)
+		final := bridge_command_result_json(command_id, "succeeded", "starting") if ok else bridge_command_failed_json(command_id, bridge_error_wire(launch_err, detail), "failed")
 		defer delete(final)
 		if !ok do fmt.println("bridge launch_agent failed", detail, bridge_error_string(launch_err))
 		bridge_runtime_cache_command(command_id, final)
@@ -808,13 +818,13 @@ bridge_hub_handle_command :: proc(conn: ^ws.Connection, text: string) {
 		defer delete(accepted)
 		bridge_runtime_cache_command(command_id, accepted)
 		_ = bridge_hub_send(conn, accepted)
-		ok, detail, _ := bridge_runtime_launch_provider_test(command_id, text)
+		ok, detail, test_err := bridge_runtime_launch_provider_test(command_id, text)
 		instance_id := extract_json_string(text, "agent_instance_id", "")
 		defer delete(instance_id)
 		st_json := bridge_instance_status_json(instance_id)
 		defer delete(st_json)
 		_ = bridge_hub_send(conn, st_json)
-		final := bridge_command_result_json(command_id, "succeeded" if ok else "failed", "starting" if ok else detail)
+		final := bridge_command_result_json(command_id, "succeeded", "starting") if ok else bridge_command_failed_json(command_id, bridge_error_wire(test_err, detail), "failed")
 		defer delete(final)
 		bridge_runtime_cache_command(command_id, final)
 		_ = bridge_hub_send(conn, final)
@@ -831,11 +841,12 @@ bridge_hub_handle_command :: proc(conn: ^ws.Connection, text: string) {
 		_ = bridge_hub_send(conn, accepted)
 		instance_id := extract_json_string(text, "agent_instance_id", "")
 		defer delete(instance_id)
-		ok := bridge_runtime_stop_agent(instance_id, force = extract_json_bool(text, "force", false))
+		ok, restored := bridge_runtime_stop_or_restore(instance_id, extract_json_bool(text, "force", false))
+		defer delete(restored)
 		st_json := bridge_instance_status_json(instance_id)
 		defer delete(st_json)
 		_ = bridge_hub_send(conn, st_json)
-		final := bridge_command_result_json(command_id, "succeeded" if ok else "failed", "stopped" if ok else "failed")
+		final := bridge_command_result_json(command_id, "succeeded", "stopped") if ok else bridge_command_failed_json(command_id, bridge_cause_wire_error("stop_failed", "the agent did not stop"), restored)
 		defer delete(final)
 		bridge_runtime_cache_command(command_id, final)
 		_ = bridge_hub_send(conn, final)
@@ -1075,7 +1086,7 @@ bridge_hub_handle_command :: proc(conn: ^ws.Connection, text: string) {
 			if delivered > 0 || len(targets) == 0 {
 				res = bridge_command_result_json(command_id, "succeeded", "")
 			} else if failed > 0 {
-				res = bridge_command_result_json(command_id, "failed", "")
+				res = bridge_command_failed_json(command_id, bridge_cause_wire_error("wake_failed", "no target agent could be woken"))
 			} else {
 				res = bridge_command_result_json(command_id, "accepted", "")
 			}
@@ -1208,14 +1219,12 @@ bridge_hub_handle_command :: proc(conn: ^ws.Connection, text: string) {
 		b := strings.builder_make()
 		strings.write_string(&b, "{\"type\":\"bridge_unseal_result\",\"command_id\":\"")
 		bridge_runtime_write_json_string(&b, command_id)
-		strings.write_string(&b, "\",\"ok\":")
-		strings.write_string(&b, "true" if ok else "false")
 		if ok {
-			strings.write_string(&b, ",\"status\":\"unlocked\"}")
+			strings.write_string(&b, "\",\"ok\":true,\"status\":\"unlocked\"}")
 		} else {
-			strings.write_string(&b, ",\"status\":\"error\",\"error\":\"")
-			bridge_runtime_write_json_string(&b, err_msg)
-			strings.write_string(&b, "\"}")
+			strings.write_string(&b, "\",\"status\":\"error\",")
+			bridge_write_failure(&b, bridge_cause_wire_error("vault_unseal_failed", err_msg))
+			strings.write_string(&b, "}")
 		}
 		res := strings.to_string(b)
 		defer delete(res)
@@ -1268,7 +1277,12 @@ bridge_update_progress_json :: proc(command_id, bridge_id, stage: string, progre
 	strings.write_string(&b, fmt.tprintf("%d", progress_percent))
 	strings.write_string(&b, ",\"message\":\"")
 	bridge_runtime_write_json_string(&b, message)
-	strings.write_string(&b, "\"}")
+	strings.write_string(&b, "\"")
+	if stage == "failed" {
+		strings.write_string(&b, ",\"error\":")
+		contracts.write_wire_error(&b, bridge_error_wire(bridge_error(.update_apply_failed), message))
+	}
+	strings.write_string(&b, "}")
 	return strings.to_string(b)
 }
 
@@ -1426,7 +1440,7 @@ bridge_hub_handle_update_command :: proc(conn: ^ws.Connection, text: string) {
 		if conn != nil do _ = bridge_hub_send(conn, fail_progress)
 
 		if command_id != "" {
-			final := bridge_command_result_json(command_id, "failed", detail)
+			final := bridge_command_failed_json(command_id, bridge_error_wire(bridge_error(.update_apply_failed), detail))
 			defer delete(final)
 			bridge_runtime_cache_command(command_id, final)
 			if conn != nil do _ = bridge_hub_send(conn, final)
@@ -1720,7 +1734,7 @@ bridge_hub_handle_agent_pty_input :: proc(conn: ^ws.Connection, text: string) {
 	case .Unlocked:
 		fmt.println("bridge agent_pty_input rejected: plaintext input on an unlocked vault (use encrypted shell_pty_input) for instance", instance_id)
 		if command_id != "" {
-			result := bridge_command_result_error_json(command_id, "invalid_vault_key")
+			result := bridge_command_failed_json(command_id, bridge_cause_wire_error("invalid_vault_key", "plaintext input is refused on an unlocked vault"))
 			defer delete(result)
 			bridge_runtime_cache_command(command_id, result)
 			if conn != nil do _ = bridge_hub_send(conn, result)
@@ -1734,7 +1748,7 @@ bridge_hub_handle_agent_pty_input :: proc(conn: ^ws.Connection, text: string) {
 	if !ok do fmt.println("bridge agent_pty_input delivery failed for instance", instance_id)
 
 	if command_id != "" {
-		result := bridge_command_result_json(command_id, "succeeded" if ok else "failed", "")
+		result := bridge_command_result_json(command_id, "succeeded", "") if ok else bridge_command_failed_json(command_id, bridge_cause_wire_error("delivery_failed", "the pane did not accept the input"))
 		defer delete(result)
 		bridge_runtime_cache_command(command_id, result)
 		if conn != nil do _ = bridge_hub_send(conn, result)
@@ -1780,7 +1794,7 @@ bridge_hub_handle_agent_pty_resize :: proc(conn: ^ws.Connection, text: string) {
 	if !ok do fmt.println("bridge agent_pty_resize delivery failed for instance", instance_id)
 
 	if command_id != "" {
-		result := bridge_command_result_json(command_id, "succeeded" if ok else "failed", "")
+		result := bridge_command_result_json(command_id, "succeeded", "") if ok else bridge_command_failed_json(command_id, bridge_cause_wire_error("delivery_failed", "the pane did not accept the input"))
 		defer delete(result)
 		bridge_runtime_cache_command(command_id, result)
 		if conn != nil do _ = bridge_hub_send(conn, result)
@@ -1835,7 +1849,7 @@ bridge_hub_handle_shell_pty_input :: proc(conn: ^ws.Connection, text: string) {
 			return
 		}
 		if command_id != "" {
-			result := bridge_command_result_json(command_id, "failed", "")
+			result := bridge_command_failed_json(command_id, bridge_cause_wire_error("invalid_payload", reject_reason))
 			defer delete(result)
 			bridge_runtime_cache_command(command_id, result)
 			if conn != nil do _ = bridge_hub_send(conn, result)
@@ -1847,7 +1861,7 @@ bridge_hub_handle_shell_pty_input :: proc(conn: ^ws.Connection, text: string) {
 	if !ok do fmt.println("bridge shell_pty_input delivery failed for shell", shell_id)
 
 	if command_id != "" {
-		result := bridge_command_result_json(command_id, "succeeded" if ok else "failed", "")
+		result := bridge_command_result_json(command_id, "succeeded", "") if ok else bridge_command_failed_json(command_id, bridge_cause_wire_error("delivery_failed", "the pane did not accept the input"))
 		defer delete(result)
 		bridge_runtime_cache_command(command_id, result)
 		if conn != nil do _ = bridge_hub_send(conn, result)
@@ -1895,7 +1909,7 @@ bridge_hub_handle_shell_pty_resize :: proc(conn: ^ws.Connection, text: string) {
 	if !ok do fmt.println("bridge shell_pty_resize delivery failed for shell", shell_id)
 
 	if command_id != "" {
-		result := bridge_command_result_json(command_id, "succeeded" if ok else "failed", "")
+		result := bridge_command_result_json(command_id, "succeeded", "") if ok else bridge_command_failed_json(command_id, bridge_cause_wire_error("delivery_failed", "the pane did not accept the input"))
 		defer delete(result)
 		bridge_runtime_cache_command(command_id, result)
 		if conn != nil do _ = bridge_hub_send(conn, result)
@@ -1916,17 +1930,16 @@ bridge_hub_handle_shell_stream_attach :: proc(conn: ^ws.Connection, text: string
 	if session_id == "" do session_id = extract_json_string(text, "agent_instance_id", "")
 	if session_id == "" && has_payload do session_id = extract_json_string(payload, "agent_instance_id", "")
 
-	send_result :: proc(conn: ^ws.Connection, command_id: string, ok: bool, err_msg: string = "") {
+	send_result :: proc(conn: ^ws.Connection, command_id: string, ok: bool, cause: string = "", err_msg: string = "") {
 		if command_id == "" do return
-		status := "succeeded" if ok else "failed"
-		result := bridge_command_result_json(command_id, status, err_msg)
+		result := bridge_command_result_json(command_id, "succeeded", "") if ok else bridge_command_failed_json(command_id, bridge_cause_wire_error(cause if cause != "" else "stream_detach_failed", err_msg))
 		defer delete(result)
 		bridge_runtime_cache_command(command_id, result)
 		if conn != nil do _ = bridge_hub_send(conn, result)
 	}
 
 	if session_id == "" {
-		send_result(conn, command_id, false, "missing session_id")
+		send_result(conn, command_id, false, "missing_session_id", "missing session_id")
 		return
 	}
 
@@ -1940,7 +1953,7 @@ bridge_hub_handle_shell_stream_attach :: proc(conn: ^ws.Connection, text: string
 
 	ok := bridge_pty_stream_worker_start(session_id, shell_id, conn)
 	if !ok {
-		send_result(conn, command_id, false, "failed to start streaming worker")
+		send_result(conn, command_id, false, "stream_start_failed", "failed to start streaming worker")
 		return
 	}
 	send_result(conn, command_id, true)
@@ -1960,17 +1973,16 @@ bridge_hub_handle_shell_stream_detach :: proc(conn: ^ws.Connection, text: string
 	if session_id == "" do session_id = extract_json_string(text, "agent_instance_id", "")
 	if session_id == "" && has_payload do session_id = extract_json_string(payload, "agent_instance_id", "")
 
-	send_result :: proc(conn: ^ws.Connection, command_id: string, ok: bool, err_msg: string = "") {
+	send_result :: proc(conn: ^ws.Connection, command_id: string, ok: bool, cause: string = "", err_msg: string = "") {
 		if command_id == "" do return
-		status := "succeeded" if ok else "failed"
-		result := bridge_command_result_json(command_id, status, err_msg)
+		result := bridge_command_result_json(command_id, "succeeded", "") if ok else bridge_command_failed_json(command_id, bridge_cause_wire_error(cause if cause != "" else "stream_detach_failed", err_msg))
 		defer delete(result)
 		bridge_runtime_cache_command(command_id, result)
 		if conn != nil do _ = bridge_hub_send(conn, result)
 	}
 
 	if session_id == "" {
-		send_result(conn, command_id, false, "missing session_id")
+		send_result(conn, command_id, false, "missing_session_id", "missing session_id")
 		return
 	}
 
@@ -2010,7 +2022,7 @@ bridge_hub_handle_pane_capture_command :: proc(conn: ^ws.Connection, text: strin
 	command_id := extract_json_string(text, "command_id", "")
 	if cached, ok := bridge_runtime_cached_command(command_id); ok { _ = bridge_hub_send(conn, cached); return }
 	if extract_json_int(text, "protocol_version", 0) != 1 {
-		failed := bridge_command_result_payload_json(command_id, "failed", "{\"error_code\":\"unsupported_capture_agent_pane\"}")
+		failed := bridge_command_failed_json(command_id, bridge_cause_wire_error("unsupported_command", "capture_agent_pane protocol_version must be 1"))
 		bridge_runtime_cache_command(command_id, failed)
 		_ = bridge_hub_send(conn, failed)
 		return
@@ -2102,6 +2114,7 @@ bridge_hub_handle_wake_agent :: proc(conn: ^ws.Connection, text: string) {
 					fmt.println("bridge wake_agent: re-bootstrapped and restarted instance", instance_id)
 				} else {
 					fmt.eprintln("bridge wake_agent: restart via re-bootstrap failed", instance_id, detail, bridge_error_string(launch_err))
+					bridge_wake_report_failed_status(conn, instance_id)
 					blog_error(.agent_launch_failed, blog_sym(.command_kind, .wake_agent), blog_sym(.stage, .materialize))
 				}
 			} else {
@@ -2119,6 +2132,7 @@ bridge_hub_handle_wake_agent :: proc(conn: ^ws.Connection, text: string) {
 					fmt.println("bridge wake_agent: launched instance", instance_id)
 				} else {
 					fmt.eprintln("bridge wake_agent: launch failed", instance_id, detail, bridge_error_string(launch_err))
+					bridge_wake_report_failed_status(conn, instance_id)
 					blog_error(.agent_launch_failed, blog_sym(.command_kind, .wake_agent), blog_sym(.stage, .spawn))
 				}
 			}
@@ -2139,6 +2153,16 @@ bridge_hub_handle_wake_agent :: proc(conn: ^ws.Connection, text: string) {
 	}
 
 	if command_id != "" do _ = bridge_hub_send(conn, bridge_command_result_json(command_id, "succeeded", ""))
+}
+
+// bridge_wake_report_failed_status sends a woken instance's failed status, with its
+// typed error, right away (REQ-ERR-PROTO-A) so the hub can act on the class instead
+// of waiting for the next heartbeat.
+bridge_wake_report_failed_status :: proc(conn: ^ws.Connection, instance_id: string) {
+	if conn == nil do return
+	st_json := bridge_instance_status_json(instance_id)
+	defer delete(st_json)
+	_ = bridge_hub_send(conn, st_json)
 }
 
 // bridge_wake_launch_command_json builds the synthetic launch_agent command the
@@ -2186,6 +2210,7 @@ bridge_wake_launch_command_json :: proc(command_id, instance_id, task_id, role, 
 bridge_runtime_launch_agent :: proc(command_id, command_json: string, deadline_ns: i64 = 0) -> (ok: bool, detail: string, err: Bridge_Error) {
 	instance_id := extract_json_string(command_json, "agent_instance_id", "")
 	if strings.trim_space(instance_id) == "" do return false, "missing agent_instance_id", bridge_error(.agent_launch_failed, .unsupported)
+	defer if !ok do bridge_runtime_record_failure(instance_id, err)
 	launch_epoch := extract_json_string(command_json, "launch_epoch", "")
 	defer delete(launch_epoch)
 	instance_token := extract_json_string(command_json, "instance_token", "")
@@ -2263,6 +2288,7 @@ bridge_runtime_launch_provider_test :: proc(command_id, command_json: string) ->
 	provider, model := bridge_runtime_provider_model(command_json)
 	defer { delete(provider); delete(model) }
 	if strings.trim_space(instance_id) == "" || !bridge_provider_catalog_has_model(provider, model) do return false, "invalid provider test request", bridge_error(.agent_launch_failed, .unsupported)
+	defer if !ok do bridge_runtime_record_failure(instance_id, err)
 	bridge_runtime_clear_stop_intent(instance_id)
 	run_dir := bridge_runtime_default_run_dir(instance_id)
 	defer delete(run_dir)
@@ -2544,6 +2570,51 @@ bridge_runtime_now_ms :: proc() -> i64 {
 	return bridge_now_unix_ms()
 }
 
+// bridge_runtime_record_failure attaches err to a "failed" instance so the next
+// agent_instance_status carries it. A no-op unless the instance is failed.
+bridge_runtime_record_failure :: proc(instance_id: string, err: Bridge_Error) {
+	sync.mutex_lock(&bridge_runtime_mutex)
+	defer sync.mutex_unlock(&bridge_runtime_mutex)
+	for &inst in bridge_runtime_instances {
+		if inst.agent_instance_id != instance_id do continue
+		if inst.runtime_status == "failed" {
+			inst.last_error = err
+			inst.has_last_error = true
+		}
+		return
+	}
+}
+
+// bridge_runtime_stop_or_restore stops an instance; if the stop does not happen it
+// must not leave the instance "stopping" on either side (REQ-ERR-PROTO-A). It clears
+// the stop intent and puts back the pre-stop status, or "unreachable" when there was
+// none to put back (an empty registry after a bridge restart): the agent may still be
+// alive, and the liveness reconciler settles it from there. restored is that status
+// ("" on success; caller owns it); the failed command_result carries it for the hub.
+// stop is a seam for tests.
+bridge_runtime_stop_or_restore :: proc(instance_id: string, force: bool, stop := bridge_runtime_stop_agent) -> (ok: bool, restored: string) {
+	prior_runtime, prior_activity, had_prior := bridge_runtime_status_snapshot(instance_id)
+	defer { delete(prior_runtime); delete(prior_activity) }
+	if stop(instance_id, force) do return true, ""
+	runtime_status, activity := "unreachable", "idle"
+	if had_prior && prior_runtime != "" && prior_runtime != "stopping" {
+		runtime_status, activity = prior_runtime, prior_activity
+	}
+	bridge_runtime_clear_stop_intent(instance_id)
+	bridge_runtime_set_status(instance_id, runtime_status, activity)
+	return false, strings.clone(runtime_status)
+}
+
+// bridge_runtime_status_snapshot returns an instance's current statuses (owned clones).
+bridge_runtime_status_snapshot :: proc(instance_id: string) -> (runtime_status, activity_status: string, found: bool) {
+	sync.mutex_lock(&bridge_runtime_mutex)
+	defer sync.mutex_unlock(&bridge_runtime_mutex)
+	for inst in bridge_runtime_instances {
+		if inst.agent_instance_id == instance_id do return strings.clone(inst.runtime_status), strings.clone(inst.activity_status), true
+	}
+	return "", "", false
+}
+
 bridge_runtime_set_status :: proc(instance_id, runtime_status, activity_status: string) {
 	if strings.trim_space(instance_id) == "" do return
 	now := bridge_runtime_now_ms()
@@ -2679,6 +2750,7 @@ bridge_runtime_set_status_with_source_locked :: proc(instance_id, runtime_status
 			activity_changed := accept_activity && inst.activity_status != activity_status
 			if runtime_changed || activity_changed {
 				inst.state_seq = bridge_runtime_next_state_seq(inst.state_seq, now)
+				if runtime_status != "failed" do inst.has_last_error = false
 				inst.runtime_status = runtime_status
 				if accept_activity do inst.activity_status = activity_status
 			}
@@ -2877,8 +2949,18 @@ bridge_instance_status_json :: proc(instance_id: string) -> string {
 	bridge_runtime_write_json_string(&b, inst.activity_status)
 	strings.write_string(&b, "\",\"activity_source\":\"")
 	bridge_runtime_write_json_string(&b, inst.activity_source)
-	strings.write_string(&b, "\"}")
+	strings.write_string(&b, "\"")
+	bridge_runtime_write_instance_error(&b, inst)
+	strings.write_string(&b, "}")
 	return strings.to_string(b)
+}
+
+// bridge_runtime_write_instance_error appends `,"error":{...}` for a failed instance
+// whose cause is known (REQ-ERR-PROTO-A).
+bridge_runtime_write_instance_error :: proc(b: ^strings.Builder, inst: Bridge_Runtime_Instance) {
+	if inst.runtime_status != "failed" || !inst.has_last_error do return
+	strings.write_string(b, ",\"error\":")
+	contracts.write_wire_error(b, bridge_error_wire(inst.last_error))
 }
 
 // g_bridge_hub_enroll_only_runtime marks the `ham-bridge enroll` process, which
@@ -3018,7 +3100,9 @@ bridge_hub_heartbeat_json :: proc() -> string {
 		bridge_runtime_write_json_string(&b, inst.activity_status)
 		strings.write_string(&b, "\",\"activity_source\":\"")
 		bridge_runtime_write_json_string(&b, inst.activity_source)
-		strings.write_string(&b, "\"}")
+		strings.write_string(&b, "\"")
+		bridge_runtime_write_instance_error(&b, inst)
+		strings.write_string(&b, "}")
 	}
 	strings.write_string(&b, "]}")
 	return strings.to_string(b)
@@ -3044,6 +3128,8 @@ bridge_runtime_expire_stale_locked :: proc(now: i64) {
 		if inst.runtime_status == "starting" && !inst.start_success_seen && inst.start_deadline_unix_ms > 0 && now >= inst.start_deadline_unix_ms {
 			inst.state_seq = bridge_runtime_next_state_seq(inst.state_seq, now)
 			inst.runtime_status = "failed"
+			inst.last_error = bridge_error(.agent_launch_failed, .timeout)
+			inst.has_last_error = true
 			inst.activity_status = "idle"
 			inst.activity_source = "bridge"
 			inst.activity_updated_unix_ms = now
@@ -3168,7 +3254,9 @@ bridge_hub_handle_get_shell_output :: proc(conn: ^ws.Connection, text: string) {
 	bridge_runtime_write_json_string(&b, command_id)
 	strings.write_byte(&b, '"')
 	if command_id == "" || exec_id == "" {
-		strings.write_string(&b, ",\"ok\":false,\"error\":\"missing fields\"}")
+		strings.write_string(&b, ",")
+		bridge_write_failure(&b, bridge_cause_wire_error("missing_fields", "command_id and exec_id are required"))
+		strings.write_byte(&b, '}')
 		bridge_shell_output_enqueue_result(strings.to_string(b), command_id)
 		return
 	}
@@ -3181,11 +3269,9 @@ bridge_hub_handle_get_shell_output :: proc(conn: ^ws.Connection, text: string) {
 		// Explicit refusal rather than an empty log (REQ-SHELL-8 AC3). The hub maps
 		// this code to domain .Gone, which is distinct both from an offline bridge
 		// (no reply at all -> .Bridge_Offline) and from a successful empty log.
-		strings.write_string(&b, ",\"ok\":false,\"error_code\":\"")
-		strings.write_string(&b, BRIDGE_SHELL_OUTPUT_RECLAIMED_CODE)
-		strings.write_string(&b, "\",\"error\":\"")
-		bridge_runtime_write_json_string(&b, BRIDGE_SHELL_OUTPUT_RECLAIMED_MESSAGE)
-		strings.write_string(&b, "\"}")
+		strings.write_string(&b, ",")
+		bridge_write_failure(&b, bridge_cause_wire_error(BRIDGE_SHELL_OUTPUT_RECLAIMED_CODE, BRIDGE_SHELL_OUTPUT_RECLAIMED_MESSAGE))
+		strings.write_byte(&b, '}')
 		bridge_shell_output_enqueue_result(strings.to_string(b), command_id)
 		return
 	}
@@ -3268,9 +3354,9 @@ bridge_pane_capture_expire_pending :: proc() {
 
 bridge_pane_capture_push_json :: proc(pending: Bridge_Pane_Capture_Pending, settle_ms:int)->string{ b:=strings.builder_make(); strings.write_string(&b,"{\"push\":\"pane_capture_request\",\"payload\":{\"protocol_version\":1,\"command_id\":\""); bridge_runtime_write_json_string(&b,pending.command_id); strings.write_string(&b,"\",\"pane_capture_request_id\":\""); bridge_runtime_write_json_string(&b,pending.pane_capture_request_id); strings.write_string(&b,"\",\"message_id\":\""); bridge_runtime_write_json_string(&b,pending.message_id); strings.write_string(&b,"\",\"width\":"); strings.write_string(&b,fmt.tprintf("%d",pending.width)); strings.write_string(&b,",\"settle_ms\":"); strings.write_string(&b,fmt.tprintf("%d",settle_ms)); strings.write_string(&b,",\"line_limit\":"); strings.write_string(&b,fmt.tprintf("%d",pending.line_limit)); strings.write_string(&b,"}}\n"); return strings.to_string(b) }
 
-bridge_pane_capture_result_json :: proc(pending: Bridge_Pane_Capture_Pending, ok:bool, error_code,message,output:string,line_count:int,truncated:bool)->string{ b:=strings.builder_make(); strings.write_string(&b,"{\"type\":\"pane_capture_result\",\"protocol_version\":1,\"command_id\":\""); bridge_runtime_write_json_string(&b,pending.command_id); strings.write_string(&b,"\",\"pane_capture_request_id\":\""); bridge_runtime_write_json_string(&b,pending.pane_capture_request_id); strings.write_string(&b,"\",\"conversation_id\":\""); bridge_runtime_write_json_string(&b,pending.conversation_id); strings.write_string(&b,"\",\"message_id\":\""); bridge_runtime_write_json_string(&b,pending.message_id); strings.write_string(&b,"\",\"agent_instance_id\":\""); bridge_runtime_write_json_string(&b,pending.agent_instance_id); strings.write_string(&b,"\",\"ok\":"); strings.write_string(&b,"true" if ok else "false"); strings.write_string(&b,",\"width\":"); strings.write_string(&b,fmt.tprintf("%d",pending.width)); strings.write_string(&b,",\"line_count\":"); strings.write_string(&b,fmt.tprintf("%d",line_count)); strings.write_string(&b,",\"truncated\":"); strings.write_string(&b,"true" if truncated else "false"); if ok { strings.write_string(&b,",\"output\":\""); bridge_runtime_write_json_string(&b,output); strings.write_string(&b,"\"") } else { strings.write_string(&b,",\"error_code\":\""); bridge_runtime_write_json_string(&b,error_code); strings.write_string(&b,"\",\"message\":\""); bridge_runtime_write_json_string(&b,message); strings.write_string(&b,"\"") }; strings.write_string(&b,"}"); return strings.to_string(b) }
+bridge_pane_capture_result_json :: proc(pending: Bridge_Pane_Capture_Pending, ok:bool, error_code,message,output:string,line_count:int,truncated:bool)->string{ b:=strings.builder_make(); strings.write_string(&b,"{\"type\":\"pane_capture_result\",\"protocol_version\":1,\"command_id\":\""); bridge_runtime_write_json_string(&b,pending.command_id); strings.write_string(&b,"\",\"pane_capture_request_id\":\""); bridge_runtime_write_json_string(&b,pending.pane_capture_request_id); strings.write_string(&b,"\",\"conversation_id\":\""); bridge_runtime_write_json_string(&b,pending.conversation_id); strings.write_string(&b,"\",\"message_id\":\""); bridge_runtime_write_json_string(&b,pending.message_id); strings.write_string(&b,"\",\"agent_instance_id\":\""); bridge_runtime_write_json_string(&b,pending.agent_instance_id); strings.write_string(&b,"\""); if ok do strings.write_string(&b,",\"ok\":true"); strings.write_string(&b,",\"width\":"); strings.write_string(&b,fmt.tprintf("%d",pending.width)); strings.write_string(&b,",\"line_count\":"); strings.write_string(&b,fmt.tprintf("%d",line_count)); strings.write_string(&b,",\"truncated\":"); strings.write_string(&b,"true" if truncated else "false"); if ok { strings.write_string(&b,",\"output\":\""); bridge_runtime_write_json_string(&b,output); strings.write_string(&b,"\"") } else { strings.write_string(&b,","); bridge_write_failure(&b, bridge_cause_wire_error(error_code, message)) }; strings.write_string(&b,"}"); return strings.to_string(b) }
 
-bridge_get_agent_pane_result_json :: proc(command_id: string, ok: bool, unchanged: bool, hash_val: string, output: string, line_count: int, truncated: bool, cursor_row: int = 0, cursor_col: int = 0, err_msg: string = "") -> string {
+bridge_get_agent_pane_result_json :: proc(command_id: string, ok: bool, unchanged: bool, hash_val: string, output: string, line_count: int, truncated: bool, cursor_row: int = 0, cursor_col: int = 0, err_msg: string = "", err_cause: string = "") -> string {
 	b := strings.builder_make()
 	strings.write_string(&b, "{\"type\":\"command_result\",\"protocol_version\":1,\"command_id\":\"")
 	bridge_runtime_write_json_string(&b, command_id)
@@ -3294,24 +3380,21 @@ bridge_get_agent_pane_result_json :: proc(command_id: string, ok: bool, unchange
 			strings.write_string(&b, fmt.tprintf("%d", cursor_col))
 		}
 	} else {
-		strings.write_string(&b, ",\"ok\":false,\"unchanged\":false")
-		if err_msg != "" {
-			strings.write_string(&b, ",\"error\":\"")
-			bridge_runtime_write_json_string(&b, err_msg)
-			strings.write_string(&b, "\",\"message\":\"")
-			bridge_runtime_write_json_string(&b, err_msg)
-			strings.write_string(&b, "\"")
-		}
+		strings.write_string(&b, ",\"unchanged\":false,")
+		bridge_write_failure(&b, bridge_cause_wire_error(err_cause if err_cause != "" else "capture_failed", err_msg))
 	}
 	strings.write_string(&b, "}")
 	return strings.to_string(b)
 }
 
+// bridge_command_result_json is a non-failed command_result (accepted / succeeded);
+// failures go through bridge_command_failed_json so they always carry a typed error.
 bridge_command_result_json :: proc(command_id, status, runtime_status: string) -> string {
+	assert(status != "failed", "use bridge_command_failed_json for failures")
 	b := strings.builder_make()
 	strings.write_string(&b, "{\"type\":\"command_result\",\"protocol_version\":1,\"command_id\":\"")
 	bridge_runtime_write_json_string(&b, command_id)
-	strings.write_string(&b, "\",\"payload\":{\"status\":\"")
+	strings.write_string(&b, "\",\"ok\":true,\"payload\":{\"status\":\"")
 	bridge_runtime_write_json_string(&b, status)
 	strings.write_string(&b, "\"")
 	if runtime_status != "" {
@@ -3323,17 +3406,24 @@ bridge_command_result_json :: proc(command_id, status, runtime_status: string) -
 	return strings.to_string(b)
 }
 
-// bridge_command_result_error_json is a FAILED command_result that names why (T10,
-// REQ-T10-2): the hub maps a known error_code (e.g. `vault_locked`) to a typed API error
-// instead of the generic 500. The code sits in payload next to status, where the hub
-// already reads status from. Caller owns the result.
-bridge_command_result_error_json :: proc(command_id, error_code: string) -> string {
+// bridge_command_failed_json is a FAILED command_result (REQ-ERR-PROTO-A): top-level
+// "ok":false plus the typed wire error, so the hub acts on code/class and never on
+// text. payload.status stays "failed" for the hub's terminal-state check; a
+// runtime_status (launch/stop) rides in payload.result as on success. Caller owns
+// the result.
+bridge_command_failed_json :: proc(command_id: string, err: contracts.Wire_Error, runtime_status := "") -> string {
 	b := strings.builder_make()
 	strings.write_string(&b, "{\"type\":\"command_result\",\"protocol_version\":1,\"command_id\":\"")
 	bridge_runtime_write_json_string(&b, command_id)
-	strings.write_string(&b, "\",\"payload\":{\"status\":\"failed\",\"error_code\":\"")
-	bridge_runtime_write_json_string(&b, error_code)
-	strings.write_string(&b, "\"}}")
+	strings.write_string(&b, "\",")
+	bridge_write_failure(&b, err)
+	strings.write_string(&b, ",\"payload\":{\"status\":\"failed\"")
+	if runtime_status != "" {
+		strings.write_string(&b, ",\"result\":{\"runtime_status\":\"")
+		bridge_runtime_write_json_string(&b, runtime_status)
+		strings.write_string(&b, "\"}")
+	}
+	strings.write_string(&b, "}}")
 	return strings.to_string(b)
 }
 
@@ -3345,7 +3435,9 @@ bridge_pty_vault_locked_frame_json :: proc(session_id: string, allocator := cont
 	b := strings.builder_make(allocator)
 	strings.write_string(&b, "{\"type\":\"shell_pty_vault_locked\",\"session_id\":\"")
 	bridge_runtime_write_json_string(&b, session_id)
-	strings.write_string(&b, "\",\"error_code\":\"vault_locked\"}")
+	strings.write_string(&b, "\",\"error\":")
+	contracts.write_wire_error(&b, bridge_cause_wire_error("vault_locked", "this bridge's vault is locked"))
+	strings.write_string(&b, "}")
 	return strings.to_string(b)
 }
 
@@ -3354,7 +3446,7 @@ bridge_pty_vault_locked_frame_json :: proc(session_id: string, allocator := cont
 // retried command_id gets the same answer) and the pane gets the typed stream frame.
 bridge_pty_input_reply_vault_locked :: proc(conn: ^ws.Connection, command_id, session_id: string) {
 	if command_id != "" {
-		result := bridge_command_result_error_json(command_id, "vault_locked")
+		result := bridge_command_failed_json(command_id, bridge_cause_wire_error("vault_locked", "this bridge's vault is locked"))
 		defer delete(result)
 		bridge_runtime_cache_command(command_id, result)
 		if conn != nil do _ = bridge_hub_send(conn, result)
@@ -3370,7 +3462,7 @@ bridge_command_result_payload_json :: proc(command_id, status, result_json: stri
 	b := strings.builder_make()
 	strings.write_string(&b, "{\"type\":\"command_result\",\"protocol_version\":1,\"command_id\":\"")
 	bridge_runtime_write_json_string(&b, command_id)
-	strings.write_string(&b, "\",\"payload\":{\"status\":\"")
+	strings.write_string(&b, "\",\"ok\":true,\"payload\":{\"status\":\"")
 	bridge_runtime_write_json_string(&b, status)
 	strings.write_string(&b, "\",\"result\":")
 	if strings.trim_space(result_json) == "" { strings.write_string(&b, "{}") } else { strings.write_string(&b, result_json) }
@@ -3756,7 +3848,7 @@ Bridge_Shell_Set_Port_Result :: struct {
 	session_id: string `json:"session_id"`,
 	command_id: string `json:"command_id"`,
 	ok:         bool   `json:"ok"`,
-	error:      string `json:"error,omitempty"`,
+	error:      Bridge_Result_Error `json:"error"`,
 }
 
 Bridge_Shell_Restart_Command :: struct {
@@ -3772,8 +3864,8 @@ Bridge_Shell_Restart_Result :: struct {
 	command_id: string     `json:"command_id"`,
 	ok:         bool       `json:"ok"`,
 	pid:        Maybe(int) `json:"pid,omitempty"`,
-	// T10: machine-readable refusal reason (e.g. `vault_locked`); empty on success.
-	error_code: string     `json:"error_code,omitempty"`,
+	// Typed refusal (REQ-ERR-PROTO-A); nil on success.
+	error:      Bridge_Result_Error `json:"error"`,
 }
 
 Bridge_Shell_Logs_Command :: struct {
@@ -3846,12 +3938,12 @@ bridge_shell_exited_event_json :: proc(session_id: string, exit_code: int, exit_
 // Logged at plain stdout, the bridge's normal journal level (cf. pty_host_runtime.odin
 // child-exit logging), NOT behind a debug flag: a rejection that is only visible when
 // someone thought to turn logging on ahead of time is the exact failure being fixed.
-bridge_shell_send_error :: proc(conn: ^ws.Connection, result_type, session_id, command_id, msg, extra_json: string) {
+bridge_shell_send_error :: proc(conn: ^ws.Connection, result_type, session_id, command_id, cause, msg, extra_json: string) {
 	line := bridge_shell_error_log_line(result_type, session_id, command_id, msg)
 	fmt.println(line)
 	delete(line)
 
-	result := bridge_shell_error_result_json(result_type, session_id, command_id, msg, extra_json)
+	result := bridge_shell_error_result_json(result_type, session_id, command_id, cause, msg, extra_json)
 	defer delete(result)
 	if conn != nil do _ = bridge_hub_send(conn, result)
 }
@@ -3874,7 +3966,7 @@ bridge_shell_error_log_line :: proc(result_type, session_id, command_id, msg: st
 // collapsed three hand-written builders into one, and the three replies are a
 // CONTRACT the hub parses, so "still byte-identical per type" needs to be a test
 // rather than a careful reading. Caller owns the result.
-bridge_shell_error_result_json :: proc(result_type, session_id, command_id, msg, extra_json: string) -> string {
+bridge_shell_error_result_json :: proc(result_type, session_id, command_id, cause, msg, extra_json: string) -> string {
 	b := strings.builder_make()
 	strings.write_string(&b, "{\"type\":\"")
 	bridge_runtime_write_json_string(&b, result_type)
@@ -3882,11 +3974,10 @@ bridge_shell_error_result_json :: proc(result_type, session_id, command_id, msg,
 	bridge_runtime_write_json_string(&b, session_id)
 	strings.write_string(&b, "\",\"command_id\":\"")
 	bridge_runtime_write_json_string(&b, command_id)
-	strings.write_string(&b, "\",\"ok\":false,")
+	strings.write_string(&b, "\",")
 	strings.write_string(&b, extra_json)
-	strings.write_string(&b, "\"error\":\"")
-	bridge_runtime_write_json_string(&b, msg)
-	strings.write_string(&b, "\"}")
+	bridge_write_failure(&b, bridge_cause_wire_error(cause, msg))
+	strings.write_string(&b, "}")
 	return strings.to_string(b)
 }
 
@@ -3917,17 +4008,13 @@ bridge_hub_handle_shell_start :: proc(conn: ^ws.Connection, text: string) {
 	// reading `send_error(conn, session_id, command_id, "reason")` and cannot forget
 	// which result type they are answering. The JSON building — and the logging they
 	// were all missing — lives in exactly one place.
-	send_error :: proc(conn: ^ws.Connection, session_id, command_id, msg: string, error_code: string = "") {
-		extra := ""
-		if error_code != "" {
-			extra = fmt.tprintf("\"error_code\":\"%s\",", error_code)
-		}
-		bridge_shell_send_error(conn, "shell_start_result", session_id, command_id, msg, extra)
+	send_error :: proc(conn: ^ws.Connection, session_id, command_id, cause, msg: string) {
+		bridge_shell_send_error(conn, "shell_start_result", session_id, command_id, cause, msg, "")
 	}
 
 	cmd_wire: Bridge_Shell_Start_Command
 	if err := json.unmarshal(transmute([]byte)text, &cmd_wire, allocator = context.temp_allocator); err != nil {
-		send_error(conn, "", "", "invalid json")
+		send_error(conn, "", "", "invalid_payload", "invalid json")
 		return
 	}
 
@@ -3956,7 +4043,7 @@ bridge_hub_handle_shell_start :: proc(conn: ^ws.Connection, text: string) {
 	run_seq := cmd_wire.run_seq
 
 	if session_id == "" {
-		send_error(conn, session_id, command_id, "missing session_id")
+		send_error(conn, session_id, command_id, "missing_session_id", "missing session_id")
 		return
 	}
 
@@ -3978,26 +4065,26 @@ bridge_hub_handle_shell_start :: proc(conn: ^ws.Connection, text: string) {
 		// way to authenticate the request, and plaintext is never acceptable from a
 		// bridge that has been configured. `vault_locked` is the stable code the fs
 		// handlers already use (REQ-T9-2).
-		send_error(conn, session_id, command_id, "unauthorized: vault locked", "vault_locked")
+		send_error(conn, session_id, command_id, "vault_locked", "unauthorized: vault locked")
 		return
 	case .Disabled:
 		// Never configured: encryption is optional by design, so the plaintext
 		// cmd/cwd from the wire are used as-is.
 	case .Unlocked:
 		if cmd_wire.enc_spec == "" || !strings.has_prefix(cmd_wire.enc_spec, VAULT_ARMOR_PREFIX) {
-			send_error(conn, session_id, command_id, "unauthorized: missing or invalid vault enc_spec", "invalid_vault_key")
+			send_error(conn, session_id, command_id, "invalid_vault_key", "unauthorized: missing or invalid vault enc_spec")
 			return
 		}
 
 		plaintext, dec_ok := bridge_decrypt_vault_ciphertext_hex(cmd_wire.enc_spec, key_hex, context.temp_allocator)
 		if !dec_ok || len(plaintext) == 0 {
-			send_error(conn, session_id, command_id, "unauthorized: invalid vault encryption", "invalid_vault_key")
+			send_error(conn, session_id, command_id, "invalid_vault_key", "unauthorized: invalid vault encryption")
 			return
 		}
 
 		spec, parse_ok := bridge_shell_parse_enc_spec(plaintext, context.temp_allocator)
 		if !parse_ok {
-			send_error(conn, session_id, command_id, "unauthorized: invalid vault encryption", "invalid_vault_key")
+			send_error(conn, session_id, command_id, "invalid_vault_key", "unauthorized: invalid vault encryption")
 			return
 		}
 
@@ -4008,7 +4095,7 @@ bridge_hub_handle_shell_start :: proc(conn: ^ws.Connection, text: string) {
 		}
 		drift := now_ms - ts_ms
 		if ts_ms == 0 || drift < -60_000 || drift > 60_000 {
-			send_error(conn, session_id, command_id, "unauthorized: expired execution timestamp", "invalid_vault_key")
+			send_error(conn, session_id, command_id, "invalid_vault_key", "unauthorized: expired execution timestamp")
 			return
 		}
 
@@ -4028,7 +4115,7 @@ bridge_hub_handle_shell_start :: proc(conn: ^ws.Connection, text: string) {
 		cmd_defaulted = true
 	}
 	if cmd == "" {
-		send_error(conn, session_id, command_id, "missing cmd")
+		send_error(conn, session_id, command_id, "missing_cmd", "missing cmd")
 		return
 	}
 
@@ -4053,7 +4140,7 @@ bridge_hub_handle_shell_start :: proc(conn: ^ws.Connection, text: string) {
 	if cwd_verdict != .Ok {
 		msg := bridge_shell_cwd_reject_message(cwd_verdict, cwd_resolved)
 		defer delete(msg)
-		send_error(conn, session_id, command_id, msg)
+		send_error(conn, session_id, command_id, "invalid_cwd", msg)
 		return
 	}
 
@@ -4065,7 +4152,7 @@ bridge_hub_handle_shell_start :: proc(conn: ^ws.Connection, text: string) {
 
 	socket, daemon_ok := bridge_pty_host_ensure_daemon()
 	if !daemon_ok {
-		send_error(conn, session_id, command_id, "daemon unavailable")
+		send_error(conn, session_id, command_id, "pty_host_unreachable", "daemon unavailable")
 		return
 	}
 
@@ -4205,9 +4292,9 @@ bridge_hub_handle_shell_start :: proc(conn: ^ws.Connection, text: string) {
 		if cwd_resolved != "" {
 			msg := strings.concatenate({"spawn failed (cwd: ", cwd_resolved, ")"})
 			defer delete(msg)
-			send_error(conn, session_id, command_id, msg)
+			send_error(conn, session_id, command_id, "shell_start_failed", msg)
 		} else {
-			send_error(conn, session_id, command_id, "spawn failed")
+			send_error(conn, session_id, command_id, "shell_start_failed", "spawn failed")
 		}
 		return
 	}
@@ -4576,7 +4663,7 @@ bridge_hub_handle_shell_set_port :: proc(conn: ^ws.Connection, text: string) {
 			session_id = session_id,
 			command_id = command_id,
 			ok         = ok,
-			error      = reason,
+			error      = bridge_result_error("" if ok else reason, reason),
 		}
 		if data, err := json.marshal(res, allocator = context.temp_allocator); err == nil {
 			if conn != nil do _ = bridge_hub_send(conn, string(data))
@@ -4630,14 +4717,14 @@ bridge_hub_handle_shell_restart :: proc(conn: ^ws.Connection, text: string) {
 	// when a restart fails — the hub does not advance its row on a failure either.
 	new_run_seq := cmd.run_seq
 
-	send_result :: proc(conn: ^ws.Connection, session_id, command_id: string, ok: bool, pid: int, error_code := "") {
+	send_result :: proc(conn: ^ws.Connection, session_id, command_id: string, ok: bool, pid: int, cause := "shell_restart_failed") {
 		res := Bridge_Shell_Restart_Result{
 			type       = "shell_restart_result",
 			session_id = session_id,
 			command_id = command_id,
 			ok         = ok,
 			pid        = pid if ok else nil,
-			error_code = error_code,
+			error      = bridge_result_error("" if ok else cause, "shell restart failed"),
 		}
 		if data, err := json.marshal(res, allocator = context.temp_allocator); err == nil {
 			if conn != nil do _ = bridge_hub_send(conn, string(data))
@@ -4753,7 +4840,7 @@ bridge_hub_handle_shell_list :: proc(conn: ^ws.Connection, text: string) {
 	b := strings.builder_make()
 	strings.write_string(&b, "{\"type\":\"shell_list_result\",\"command_id\":\"")
 	bridge_runtime_write_json_string(&b, command_id)
-	strings.write_string(&b, "\",\"sessions\":[")
+	strings.write_string(&b, "\",\"ok\":true,\"sessions\":[")
 	for s, i in sessions {
 		if i > 0 do strings.write_byte(&b, ',')
 		bridge_shell_session_write_json(&b, s)
@@ -4819,12 +4906,12 @@ bridge_hub_handle_shell_logs :: proc(conn: ^ws.Connection, text: string) {
 	limit      := cmd.limit if cmd.limit > 0 else BRIDGE_SHELL_TAIL_KEEP
 	grep       := cmd.grep
 
-	send_error :: proc(conn: ^ws.Connection, session_id, command_id, msg: string) {
-		bridge_shell_send_error(conn, "shell_logs_result", session_id, command_id, msg, "\"lines\":[],\"truncated\":false,\"total_lines\":0,")
+	send_error :: proc(conn: ^ws.Connection, session_id, command_id, cause, msg: string) {
+		bridge_shell_send_error(conn, "shell_logs_result", session_id, command_id, cause, msg, "\"lines\":[],\"truncated\":false,\"total_lines\":0,")
 	}
 
 	if session_id == "" {
-		send_error(conn, session_id, command_id, "missing session_id")
+		send_error(conn, session_id, command_id, "missing_session_id", "missing session_id")
 		return
 	}
 
@@ -4849,16 +4936,14 @@ bridge_hub_handle_shell_logs :: proc(conn: ^ws.Connection, text: string) {
 		// Explicitly allocated and freed rather than temp-allocated: this runs on the
 		// long-lived hub WS handler, which never reclaims a temp arena, so anything
 		// left there would accumulate for the life of the bridge.
-		extra := strings.concatenate({"\"lines\":[],\"truncated\":false,\"total_lines\":0,\"error_code\":\"", BRIDGE_SHELL_OUTPUT_RECLAIMED_CODE, "\","})
-		defer delete(extra)
-		bridge_shell_send_error(conn, "shell_logs_result", session_id, command_id, BRIDGE_SHELL_OUTPUT_RECLAIMED_MESSAGE, extra)
+		bridge_shell_send_error(conn, "shell_logs_result", session_id, command_id, BRIDGE_SHELL_OUTPUT_RECLAIMED_CODE, BRIDGE_SHELL_OUTPUT_RECLAIMED_MESSAGE, "\"lines\":[],\"truncated\":false,\"total_lines\":0,")
 		return
 	case .Absent:
 		// No output file and no tombstone. A session the map still knows has simply
 		// not written its first byte yet and gets an honest empty log; one the map
 		// does not know either never existed here at all.
 		if !bridge_shell_session_exists(&bridge_shell_session_map, session_id) {
-			send_error(conn, session_id, command_id, "session not found")
+			send_error(conn, session_id, command_id, "session_not_found", "session not found")
 			return
 		}
 	case .Available:
@@ -4985,25 +5070,25 @@ bridge_hub_handle_shell_capture :: proc(conn: ^ws.Connection, text: string) {
 	session_id := extract_json_string(text, "session_id", "")
 	command_id := extract_json_string(text, "command_id", "")
 
-	send_error :: proc(conn: ^ws.Connection, session_id, command_id, msg: string) {
-		bridge_shell_send_error(conn, "shell_capture_result", session_id, command_id, msg, "\"content\":\"\",\"rows\":0,\"cols\":0,")
+	send_error :: proc(conn: ^ws.Connection, session_id, command_id, cause, msg: string) {
+		bridge_shell_send_error(conn, "shell_capture_result", session_id, command_id, cause, msg, "\"content\":\"\",\"rows\":0,\"cols\":0,")
 	}
 
 	if session_id == "" {
-		send_error(conn, session_id, command_id, "missing session_id")
+		send_error(conn, session_id, command_id, "missing_session_id", "missing session_id")
 		return
 	}
 
 	shell_id, ok := bridge_shell_session_shell_id(&bridge_shell_session_map, session_id)
 	if !ok {
-		send_error(conn, session_id, command_id, "session not found")
+		send_error(conn, session_id, command_id, "session_not_found", "session not found")
 		return
 	}
 	defer bridge_shell_session_str_delete(&bridge_shell_session_map, shell_id)
 
 	socket, daemon_ok := bridge_pty_host_ensure_daemon()
 	if !daemon_ok {
-		send_error(conn, session_id, command_id, "daemon unavailable")
+		send_error(conn, session_id, command_id, "pty_host_unreachable", "daemon unavailable")
 		return
 	}
 
@@ -5012,7 +5097,7 @@ bridge_hub_handle_shell_capture :: proc(conn: ^ws.Connection, text: string) {
 	reply, rok := pty_host_request(socket, frame)
 	if !rok || reply.kind != .Screen {
 		if rok do pty_host_reply_delete(reply)
-		send_error(conn, session_id, command_id, "capture failed")
+		send_error(conn, session_id, command_id, "capture_failed", "capture failed")
 		return
 	}
 	defer pty_host_reply_delete(reply)

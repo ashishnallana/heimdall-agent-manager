@@ -16,6 +16,7 @@
 // mutating a directory only refetches the affected listing.
 
 import { heimdallApi } from '../heimdallApi';
+import type { WireError } from '../wireError';
 import { cookieJsonFetch, cookieMutation } from '../cookieFetch';
 import { isVaultArmored, decryptVaultText, encryptVaultText, getActiveVaultKey } from '../../utils/vaultContent';
 
@@ -39,7 +40,7 @@ export type FsListResult = {
   next_cursor: string | null;
   has_more: boolean;
   truncated: boolean;
-  error: { code: string; message: string };
+  error?: WireError;
 };
 
 export type FsReadFileResult = {
@@ -57,14 +58,14 @@ export type FsReadFileResult = {
   offset?: number;
   bytes_returned?: number;
   eof?: boolean;
-  error: { code: string; message: string };
+  error?: WireError;
 };
 
 export type FsMutationResult = {
   ok: boolean;
   path: string;
   within_root: boolean;
-  error: { code: string; message: string };
+  error?: WireError;
 };
 
 export type FsWriteResult = {
@@ -73,9 +74,7 @@ export type FsWriteResult = {
   bytes_written?: number;
   modified_at?: string;
   within_root?: boolean;
-  error_code?: string;
-  message?: string;
-  error?: { code: string; message: string };
+  error?: WireError;
 };
 
 export type FsSavedItem = {
@@ -94,9 +93,7 @@ export type FsBatchWriteResult = {
   ok: boolean;
   saved: FsSavedItem[];
   errors: FsErrorItem[];
-  error_code?: string;
-  message?: string;
-  error?: { code: string; message: string };
+  error?: WireError;
 };
 
 export type FsQuickOpenResult = {
@@ -104,7 +101,7 @@ export type FsQuickOpenResult = {
   root: string;
   files: string[];
   truncated: boolean;
-  error?: { code: string; message: string };
+  error?: WireError;
 };
 
 import type {
@@ -125,7 +122,7 @@ export type {
   MultiScopeSearchResult,
 };
 
-// The shared error vocabulary from the contract, exported for callers that want
+// The bridge's fs causes (WireError.cause), exported for callers that want
 // to branch on specific failures (e.g. friendly "already exists" messaging).
 export const FS_ERROR_CODES = [
   'path_outside_root',

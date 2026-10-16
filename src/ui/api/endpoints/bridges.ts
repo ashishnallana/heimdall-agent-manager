@@ -1,6 +1,7 @@
 // REQ-VAULT-HARDEN-3: Bridges API endpoint for E2EE unseal and public key retrieval
 
-import { cookieJsonFetch, cookieMutation } from '../cookieFetch';
+import { ApiError, cookieJsonFetch, cookieMutation } from '../cookieFetch';
+import type { WireError } from '../wireError';
 import { heimdallApi } from '../heimdallApi';
 import type { BridgeUnsealPayload, BridgeUnsealResult } from '../../utils/vaultBridgeUnseal';
 import {
@@ -17,6 +18,18 @@ export async function unsealBridge(
   payload: BridgeUnsealPayload
 ): Promise<BridgeUnsealResult> {
   const res = await cookieMutation(`/bridges/${encodeURIComponent(bridgeId)}/unseal`, 'POST', payload);
+  // A 2xx relaying the bridge's `ok: false` is a refused unseal (REQ-ERR-PROTO-A):
+  // throw its typed error instead of letting callers report success.
+  if ((res as any)?.ok === false) {
+    const err = (res as any)?.error as WireError | undefined;
+    throw new ApiError(
+      String(err?.message || `Bridge ${bridgeId} refused the unseal`),
+      undefined,
+      err?.code,
+      err?.class || undefined,
+      err?.cause,
+    );
+  }
   return res as BridgeUnsealResult;
 }
 

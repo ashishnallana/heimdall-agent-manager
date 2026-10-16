@@ -332,47 +332,47 @@ test_shell_env_kind_branching :: proc(t: ^testing.T) {
 
 @(test)
 test_req16_shell_start_error_body_is_unchanged :: proc(t: ^testing.T) {
-	got := bridge_shell_error_result_json("shell_start_result", "sh_1", "cmd_1", "daemon unavailable", "")
+	got := bridge_shell_error_result_json("shell_start_result", "sh_1", "cmd_1", "pty_host_unreachable", "daemon unavailable", "")
 	defer delete(got)
 	testing.expect_value(
 		t,
 		got,
-		`{"type":"shell_start_result","session_id":"sh_1","command_id":"cmd_1","ok":false,"error":"daemon unavailable"}`,
+		`{"type":"shell_start_result","session_id":"sh_1","command_id":"cmd_1","ok":false,"error":{"code":"bridge_busy","class":"retriable","cause":"pty_host_unreachable","message":"daemon unavailable"}}`,
 	)
 }
 
 @(test)
 test_req16_shell_logs_error_body_keeps_its_padding_fields :: proc(t: ^testing.T) {
 	got := bridge_shell_error_result_json(
-		"shell_logs_result", "sh_2", "cmd_2", "session not found",
+		"shell_logs_result", "sh_2", "cmd_2", "session_not_found", "session not found",
 		`"lines":[],"truncated":false,"total_lines":0,`,
 	)
 	defer delete(got)
 	testing.expect_value(
 		t,
 		got,
-		`{"type":"shell_logs_result","session_id":"sh_2","command_id":"cmd_2","ok":false,"lines":[],"truncated":false,"total_lines":0,"error":"session not found"}`,
+		`{"type":"shell_logs_result","session_id":"sh_2","command_id":"cmd_2","lines":[],"truncated":false,"total_lines":0,"ok":false,"error":{"code":"not_found","class":"fatal","cause":"session_not_found","message":"session not found"}}`,
 	)
 }
 
 @(test)
 test_req16_shell_capture_error_body_keeps_its_padding_fields :: proc(t: ^testing.T) {
 	got := bridge_shell_error_result_json(
-		"shell_capture_result", "sh_3", "cmd_3", "capture failed",
+		"shell_capture_result", "sh_3", "cmd_3", "capture_failed", "capture failed",
 		`"content":"","rows":0,"cols":0,`,
 	)
 	defer delete(got)
 	testing.expect_value(
 		t,
 		got,
-		`{"type":"shell_capture_result","session_id":"sh_3","command_id":"cmd_3","ok":false,"content":"","rows":0,"cols":0,"error":"capture failed"}`,
+		`{"type":"shell_capture_result","session_id":"sh_3","command_id":"cmd_3","content":"","rows":0,"cols":0,"ok":false,"error":{"code":"unprocessable_entity","class":"fatal","cause":"capture_failed","message":"capture failed"}}`,
 	)
 }
 
 @(test)
 test_req16_error_reason_is_json_escaped :: proc(t: ^testing.T) {
 	got := bridge_shell_error_result_json(
-		"shell_start_result", "sh_4", "cmd_4", `spawn failed: "/bin/sh" \ exited`, "",
+		"shell_start_result", "sh_4", "cmd_4", "shell_start_failed", `spawn failed: "/bin/sh" \ exited`, "",
 	)
 	defer delete(got)
 	testing.expect(

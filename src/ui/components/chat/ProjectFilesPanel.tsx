@@ -1593,9 +1593,9 @@ export default function ProjectFilesPanel({
               content: '',
               isUnviewable: true,
               unviewableReason:
-                res.error?.code === 'file_too_large'
+                res.error?.cause === 'file_too_large'
                   ? `This file is too large to preview (${formatBytes(res.size || 0)}).`
-                  : res.error?.code === 'unsupported_type'
+                  : res.error?.cause === 'unsupported_type'
                     ? 'This file type cannot be previewed.'
                     : str(res.error?.message) || 'This file cannot be previewed.',
             };
@@ -1853,7 +1853,7 @@ export default function ProjectFilesPanel({
       } else {
         setSaveFeedback({
           type: 'error',
-          message: res.error_code || res.message || res.error?.message || 'Failed to save file',
+          message: res.error?.message || res.error?.cause || 'Failed to save file',
         });
       }
     } catch (err: any) {
@@ -1900,7 +1900,7 @@ export default function ProjectFilesPanel({
       } else {
         setSaveFeedback({
           type: 'error',
-          message: res.error_code || res.message || res.error?.message || 'Failed to save files',
+          message: res.error?.message || res.error?.cause || 'Failed to save files',
         });
       }
     } catch (err: any) {
@@ -2006,7 +2006,7 @@ export default function ProjectFilesPanel({
         if (!name) return;
         const targetPath = joinPath(cwd, name);
         const res = await createFile({ ...activeFsTarget, path: targetPath }).unwrap();
-        if (!res.ok) return setError(mutationError(res.error?.code, res.error?.message) || 'Could not create file');
+        if (!res.ok) return setError(mutationError(res.error?.cause, res.error?.message) || 'Could not create file');
         setPending(null);
         setNameDraft('');
         await load(cwd);
@@ -2015,7 +2015,7 @@ export default function ProjectFilesPanel({
       } else if (pending.kind === 'new-dir') {
         if (!name) return;
         const res = await createDir({ ...activeFsTarget, path: joinPath(cwd, name) }).unwrap();
-        if (!res.ok) return setError(mutationError(res.error?.code, res.error?.message) || 'Could not create folder');
+        if (!res.ok) return setError(mutationError(res.error?.cause, res.error?.message) || 'Could not create folder');
       } else if (pending.kind === 'rename') {
         if (!name || name === pending.entry.name) {
           setPending(null);
@@ -2024,7 +2024,7 @@ export default function ProjectFilesPanel({
         const from = joinPath(cwd, pending.entry.name);
         const to = joinPath(cwd, name);
         const res = await movePath({ ...activeFsTarget, from, to }).unwrap();
-        if (!res.ok) return setError(mutationError(res.error?.code, res.error?.message) || 'Could not rename');
+        if (!res.ok) return setError(mutationError(res.error?.cause, res.error?.message) || 'Could not rename');
       }
       setPending(null);
       setNameDraft('');
@@ -2046,7 +2046,7 @@ export default function ProjectFilesPanel({
     try {
       const res = await deletePath({ ...activeFsTarget, path: target, recursive: entry.is_dir }).unwrap();
       if (!res.ok) {
-        setError(mutationError(res.error?.code, res.error?.message) || 'Could not delete');
+        setError(mutationError(res.error?.cause, res.error?.message) || 'Could not delete');
         return;
       }
       await load(cwd);

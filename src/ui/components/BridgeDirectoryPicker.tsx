@@ -46,8 +46,8 @@ export default function BridgeDirectoryPicker({
         // Friendlier: if the requested path is outside the bridge's allowed root
         // (or just missing), fall back to opening the root instead of erroring —
         // so the picker always shows something useful. Only note it, don't block.
-        if (!opts?.fromFallback && (res.error?.code === 'path_outside_root' || res.error?.code === 'path_not_found')) {
-          const reason = res.error?.code === 'path_outside_root' ? 'outside the allowed root' : 'not found';
+        if (!opts?.fromFallback && (res.error?.cause === 'path_outside_root' || res.error?.cause === 'path_not_found')) {
+          const reason = res.error?.cause === 'path_outside_root' ? 'outside the allowed root' : 'not found';
           await load('', { fromFallback: true }); // '' => the bridge's root
           setError(`Opened the root — "${path}" is ${reason} on this device.`);
           return;

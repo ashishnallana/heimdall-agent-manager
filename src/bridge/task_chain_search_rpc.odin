@@ -100,8 +100,9 @@ task_chain_search_error_result :: proc(command_id, request_id, code: string) -> 
 	b := strings.builder_make()
 	strings.write_string(&b, `{"type":"task_chain_search_result","command_id":"`); bridge_runtime_write_json_string(&b, command_id)
 	strings.write_string(&b, `","request_id":"`); bridge_runtime_write_json_string(&b, request_id)
-	strings.write_string(&b, `","ok":false,"error_code":"`); bridge_runtime_write_json_string(&b, code)
-	strings.write_string(&b, `"}`)
+	strings.write_string(&b, `",`)
+	bridge_write_failure(&b, bridge_cause_wire_error(code, ""))
+	strings.write_string(&b, `}`)
 	return strings.to_string(b)
 }
 

@@ -206,7 +206,7 @@ bridge_command_dispatch_drop_stale_queue_locked :: proc(queue: ^[dynamic]Bridge_
 // deadline, cost, coalescing, and retry contract.
 bridge_command_spec :: proc(command_type: string) -> (Bridge_Command_Spec, bool) {
 	switch command_type {
-	case "bridge_heartbeat_ack", "provider_catalog_version", "agent_instance_status_ack", "connection_replaced":
+	case "bridge_heartbeat_ack", "provider_catalog_version", "agent_instance_status_ack", "connection_replaced", "protocol_error":
 		return Bridge_Command_Spec{priority = .Control, queued = false, timeout_ms = 1000, cost_units = 1}, true
 	case "provider_catalog":
 		return Bridge_Command_Spec{priority = .Control, key_kind = .Provider_Discovery, queued = false, timeout_ms = 5000, cost_units = 2}, true
@@ -383,34 +383,26 @@ bridge_command_dispatch_prune_claim_locked :: proc() -> bool {
 	return false
 }
 
+// bridge_command_dispatch_busy_json sheds a command the bridge has no room for:
+// retriable, with the floor the hub must wait and the saturated scope.
 bridge_command_dispatch_busy_json :: proc(command_id, scope: string, retry_after_ms: int = 1000) -> string {
-	b := strings.builder_make()
-	strings.write_string(&b, "{\"type\":\"command_result\",\"protocol_version\":1,\"command_id\":\"")
-	bridge_runtime_write_json_string(&b, command_id)
-	strings.write_string(&b, "\",\"payload\":{\"status\":\"failed\",\"error_code\":\"bridge_busy\",\"retryable\":true,\"retry_after_ms\":")
-	strings.write_string(&b, fmt.tprintf("%d", retry_after_ms))
-	strings.write_string(&b, ",\"overload_scope\":\"")
-	bridge_runtime_write_json_string(&b, scope)
-	strings.write_string(&b, "\"}}")
-	return strings.to_string(b)
+	return bridge_command_failed_json(command_id, bridge_cause_wire_error("bridge_busy", "bridge command queue is full", i64(retry_after_ms), scope))
 }
 
+// bridge_command_dispatch_deadline_json answers a command whose hub deadline passed
+// before it ran. The hub caller has already given up, so it is not retried.
 bridge_command_dispatch_deadline_json :: proc(command_id: string) -> string {
-	b := strings.builder_make()
-	strings.write_string(&b, "{\"type\":\"command_result\",\"protocol_version\":1,\"command_id\":\"")
-	bridge_runtime_write_json_string(&b, command_id)
-	strings.write_string(&b, "\",\"payload\":{\"status\":\"failed\",\"error_code\":\"deadline_exceeded\",\"retryable\":false}}")
-	return strings.to_string(b)
+	err := bridge_cause_wire_error("deadline_exceeded", "command deadline passed before it ran")
+	err.class = .fatal
+	return bridge_command_failed_json(command_id, err)
 }
 
-bridge_command_dispatch_protocol_error_json :: proc(command_id, error_code: string) -> string {
-	b := strings.builder_make()
-	strings.write_string(&b, "{\"type\":\"command_result\",\"protocol_version\":1,\"command_id\":\"")
-	bridge_runtime_write_json_string(&b, command_id)
-	strings.write_string(&b, "\",\"payload\":{\"status\":\"failed\",\"error_code\":\"")
-	bridge_runtime_write_json_string(&b, error_code)
-	strings.write_string(&b, "\",\"retryable\":false}}")
-	return strings.to_string(b)
+// bridge_command_dispatch_protocol_error_json refuses a frame the bridge cannot
+// process (unknown type, no id, too large, an oversized reply): fatal.
+bridge_command_dispatch_protocol_error_json :: proc(command_id, cause: string) -> string {
+	err := bridge_cause_wire_error(cause, "bridge refused the command frame")
+	err.class = .fatal
+	return bridge_command_failed_json(command_id, err)
 }
 
 // bridge_wake_synth_counter numbers the ids synthesized for id-less wake_agent

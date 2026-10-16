@@ -89,6 +89,15 @@ bridge_http_is_retriable :: proc(status: int, ok: bool) -> bool {
 	return contracts.bridge_error_http_class(status) == .retriable
 }
 
+// bridge_http_response_is_retriable prefers the class the hub put in its error
+// envelope (REQ-ERR-PROTO-A) and falls back to the status mapping above.
+bridge_http_response_is_retriable :: proc(resp: http.Response, ok: bool) -> bool {
+	if ok && resp.status >= 400 {
+		if werr, found := contracts.wire_error_parse(resp.body, context.temp_allocator); found do return werr.class == .retriable
+	}
+	return bridge_http_is_retriable(resp.status, ok)
+}
+
 // bridge_http_is_terminal reports whether an HTTP response is terminal (not retriable).
 bridge_http_is_terminal :: proc(status: int, ok: bool) -> bool {
 	return !bridge_http_is_retriable(status, ok)
@@ -122,7 +131,7 @@ bridge_http_request_retry :: proc(
 			attempt_timeout_ms = min(attempt_timeout_ms, remaining_ms)
 		}
 		resp, ok = http.request_with_headers_timeout(method, hub_url, path, body, headers, attempt_timeout_ms)
-		if bridge_http_is_terminal(resp.status, ok) {
+		if !bridge_http_response_is_retriable(resp, ok) {
 			// Log the terminal outcome when it followed at least one retry, so a
 			// retried-then-succeeded (or retried-then-failed-hard) sequence is
 			// visible in the log rather than trailing off at the last "retry" line.

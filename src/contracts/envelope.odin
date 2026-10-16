@@ -23,6 +23,8 @@ API_Error :: struct {
 	code:    string,
 	message: string,
 	details_json: string,
+	class:   string, // Bridge_Error_Class name; omitted when ""
+	cause:   string, // fine-grained reason; omitted when ""
 }
 
 API_Sort_Direction :: enum {
@@ -100,7 +102,18 @@ api_error_json :: proc(err: API_Error, meta: API_Meta) -> string {
 	write_json_string(&builder, err.code)
 	strings.write_string(&builder, "\",\"message\":\"")
 	write_json_string(&builder, err.message)
-	strings.write_string(&builder, "\",\"details\":")
+	strings.write_string(&builder, "\"")
+	if err.class != "" {
+		strings.write_string(&builder, ",\"class\":\"")
+		write_json_string(&builder, err.class)
+		strings.write_string(&builder, "\"")
+	}
+	if err.cause != "" {
+		strings.write_string(&builder, ",\"cause\":\"")
+		write_json_string(&builder, err.cause)
+		strings.write_string(&builder, "\"")
+	}
+	strings.write_string(&builder, ",\"details\":")
 	write_json_value_or_object(&builder, details)
 	strings.write_string(&builder, "},\"meta\":")
 	write_meta_json(&builder, meta, false)

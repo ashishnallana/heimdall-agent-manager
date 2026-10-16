@@ -75,10 +75,10 @@ bridge_dispatch_overload_result_has_retry_contract :: proc(t: ^testing.T) {
 	result := bridge_command_dispatch_busy_json("cmd_busy", "background", 1250)
 	defer delete(result)
 	testing.expect(t, strings.contains(result, `"status":"failed"`), "overload is terminal for this attempt")
-	testing.expect(t, strings.contains(result, `"error_code":"bridge_busy"`), "overload has a stable error code")
-	testing.expect(t, strings.contains(result, `"retryable":true`), "overload declares retry safety")
+	testing.expect(t, strings.contains(result, `"cause":"bridge_busy"`), "overload has a stable error code")
+	testing.expect(t, strings.contains(result, `"class":"retriable"`), "overload declares retry safety")
 	testing.expect(t, strings.contains(result, `"retry_after_ms":1250`), "overload supplies bounded retry guidance")
-	testing.expect(t, strings.contains(result, `"overload_scope":"background"`), "overload identifies only a bounded scope")
+	testing.expect(t, strings.contains(result, `"scope":"background"`), "overload identifies only a bounded scope")
 }
 
 @(test)
@@ -87,8 +87,8 @@ bridge_dispatch_protocol_errors_are_terminal_and_not_retryable :: proc(t: ^testi
 	defer delete(result)
 	testing.expect(t, strings.contains(result, `"command_id":"cmd_bad"`), "protocol error retains command correlation")
 	testing.expect(t, strings.contains(result, `"status":"failed"`), "protocol error is terminal")
-	testing.expect(t, strings.contains(result, `"error_code":"command_too_large"`), "protocol error has a stable reason")
-	testing.expect(t, strings.contains(result, `"retryable":false`), "malformed work must not be retried")
+	testing.expect(t, strings.contains(result, `"cause":"command_too_large"`), "protocol error has a stable reason")
+	testing.expect(t, strings.contains(result, `"class":"fatal"`), "malformed work must not be retried")
 }
 
 @(test)

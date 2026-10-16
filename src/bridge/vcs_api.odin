@@ -144,10 +144,7 @@ Bridge_Vcs_Workspaces_Command :: struct {
 
 // --- Wire Response Structs (outgoing over WS) -----------------------------
 
-Bridge_Vcs_Error_Wire :: struct {
-	code:    string `json:"code"`,
-	message: string `json:"message"`,
-}
+Bridge_Vcs_Error_Wire :: Bridge_Result_Error
 
 Bridge_Vcs_Capabilities_Result_Wire :: struct {
 	type:              string                `json:"type"`,
@@ -586,10 +583,7 @@ bridge_vcs_capabilities_json :: proc(command_id, text: string, allocator := cont
 			staging_model     = "",
 			commit_model      = "",
 			supported_actions = []string{},
-			error             = Bridge_Vcs_Error_Wire{
-				code    = "no_vcs",
-				message = "No supported version control system found at path",
-			},
+			error             = bridge_result_error("no_vcs", "No supported version control system found at path"),
 		}
 		data, err := json.marshal(wire, allocator = context.temp_allocator)
 		if err != nil do return ""
@@ -611,10 +605,7 @@ bridge_vcs_capabilities_json :: proc(command_id, text: string, allocator := cont
 		staging_model     = caps.staging_model,
 		commit_model      = caps.commit_model,
 		supported_actions = actions,
-		error             = Bridge_Vcs_Error_Wire{
-			code    = "",
-			message = "",
-		},
+		error             = bridge_result_error("", ""),
 	}
 	data, err := json.marshal(wire, allocator = context.temp_allocator)
 	if err != nil do return ""
@@ -640,10 +631,7 @@ bridge_vcs_status_json :: proc(command_id, text: string, allocator := context.al
 			ahead      = 0,
 			behind     = 0,
 			is_clean   = false,
-			error      = Bridge_Vcs_Error_Wire{
-				code    = "no_vcs",
-				message = "No supported version control system found at path",
-			},
+			error      = bridge_result_error("no_vcs", "No supported version control system found at path"),
 		}
 		data, err := json.marshal(wire, allocator = context.temp_allocator)
 		if err != nil do return ""
@@ -661,10 +649,7 @@ bridge_vcs_status_json :: proc(command_id, text: string, allocator := context.al
 			ahead      = 0,
 			behind     = 0,
 			is_clean   = false,
-			error      = Bridge_Vcs_Error_Wire{
-				code    = "status_failed",
-				message = "Could not read VCS status",
-			},
+			error      = bridge_result_error("status_failed", "Could not read VCS status"),
 		}
 		data, err := json.marshal(wire, allocator = context.temp_allocator)
 		if err != nil do return ""
@@ -680,10 +665,7 @@ bridge_vcs_status_json :: proc(command_id, text: string, allocator := context.al
 		ahead      = st.ahead,
 		behind     = st.behind,
 		is_clean   = st.is_clean,
-		error      = Bridge_Vcs_Error_Wire{
-			code    = "",
-			message = "",
-		},
+		error      = bridge_result_error("", ""),
 	}
 	data, err := json.marshal(wire, allocator = context.temp_allocator)
 	if err != nil do return ""
@@ -710,10 +692,7 @@ bridge_vcs_files_json :: proc(command_id, text: string, allocator := context.all
 			has_more    = false,
 			next_cursor = nil,
 			files       = []Bridge_Vcs_Changed_File_Wire{},
-			error       = Bridge_Vcs_Error_Wire{
-				code    = "no_vcs",
-				message = "No supported version control system found at path",
-			},
+			error       = bridge_result_error("no_vcs", "No supported version control system found at path"),
 		}
 		data, err := json.marshal(wire, allocator = context.temp_allocator)
 		if err != nil do return ""
@@ -731,10 +710,7 @@ bridge_vcs_files_json :: proc(command_id, text: string, allocator := context.all
 			has_more    = false,
 			next_cursor = nil,
 			files       = []Bridge_Vcs_Changed_File_Wire{},
-			error       = Bridge_Vcs_Error_Wire{
-				code    = "files_failed",
-				message = "Could not list changed files",
-			},
+			error       = bridge_result_error("files_failed", "Could not list changed files"),
 		}
 		data, err := json.marshal(wire, allocator = context.temp_allocator)
 		if err != nil do return ""
@@ -751,10 +727,7 @@ bridge_vcs_files_json :: proc(command_id, text: string, allocator := context.all
 		has_more    = has_more,
 		next_cursor = next_cursor_val,
 		files       = vcs_to_wire_files(files),
-		error       = Bridge_Vcs_Error_Wire{
-			code    = "",
-			message = "",
-		},
+		error       = bridge_result_error("", ""),
 	}
 	data, err := json.marshal(wire, allocator = context.temp_allocator)
 	if err != nil do return ""
@@ -783,10 +756,7 @@ bridge_vcs_diff_json :: proc(command_id, text: string, allocator := context.allo
 			has_more    = false,
 			next_cursor = nil,
 			hunks       = []Bridge_Vcs_Diff_Hunk_Wire{},
-			error       = Bridge_Vcs_Error_Wire{
-				code    = "no_vcs",
-				message = "No supported version control system found at path",
-			},
+			error       = bridge_result_error("no_vcs", "No supported version control system found at path"),
 		}
 		data, err := json.marshal(wire, allocator = context.temp_allocator)
 		if err != nil do return ""
@@ -804,10 +774,7 @@ bridge_vcs_diff_json :: proc(command_id, text: string, allocator := context.allo
 			has_more    = false,
 			next_cursor = nil,
 			hunks       = []Bridge_Vcs_Diff_Hunk_Wire{},
-			error       = Bridge_Vcs_Error_Wire{
-				code    = "missing_file",
-				message = "The 'file' parameter is required for vcs_diff",
-			},
+			error       = bridge_result_error("missing_file", "The 'file' parameter is required for vcs_diff"),
 		}
 		data, err := json.marshal(wire, allocator = context.temp_allocator)
 		if err != nil do return ""
@@ -826,10 +793,7 @@ bridge_vcs_diff_json :: proc(command_id, text: string, allocator := context.allo
 			has_more    = false,
 			next_cursor = nil,
 			hunks       = []Bridge_Vcs_Diff_Hunk_Wire{},
-			error       = Bridge_Vcs_Error_Wire{
-				code    = "diff_failed",
-				message = "Could not read file diff",
-			},
+			error       = bridge_result_error("diff_failed", "Could not read file diff"),
 		}
 		data, err := json.marshal(wire, allocator = context.temp_allocator)
 		if err != nil do return ""
@@ -847,10 +811,7 @@ bridge_vcs_diff_json :: proc(command_id, text: string, allocator := context.allo
 		has_more    = has_more,
 		next_cursor = next_cursor_val,
 		hunks       = vcs_to_wire_hunks(hunks),
-		error       = Bridge_Vcs_Error_Wire{
-			code    = "",
-			message = "",
-		},
+		error       = bridge_result_error("", ""),
 	}
 	data, err := json.marshal(wire, allocator = context.temp_allocator)
 	if err != nil do return ""
@@ -889,10 +850,7 @@ bridge_vcs_write_action_json :: proc(command_id, text, result_type, action: stri
 			command_id = cid,
 			ok         = false,
 			provider   = "",
-			error      = Bridge_Vcs_Error_Wire{
-				code    = "no_vcs",
-				message = "No supported version control system found at path",
-			},
+			error      = bridge_result_error("no_vcs", "No supported version control system found at path"),
 		}
 		data, err := json.marshal(wire, allocator = context.temp_allocator)
 		if err != nil do return ""
@@ -904,10 +862,7 @@ bridge_vcs_write_action_json :: proc(command_id, text, result_type, action: stri
 			command_id = cid,
 			ok         = false,
 			provider   = "",
-			error      = Bridge_Vcs_Error_Wire{
-				code    = "missing_file",
-				message = "The 'path' parameter is required",
-			},
+			error      = bridge_result_error("missing_file", "The 'path' parameter is required"),
 		}
 		data, err := json.marshal(wire, allocator = context.temp_allocator)
 		if err != nil do return ""
@@ -930,10 +885,7 @@ bridge_vcs_write_action_json :: proc(command_id, text, result_type, action: stri
 			command_id = cid,
 			ok         = false,
 			provider   = provider.name(),
-			error      = Bridge_Vcs_Error_Wire{
-				code    = "not_supported",
-				message = "Action not supported by this provider",
-			},
+			error      = bridge_result_error("not_supported", "Action not supported by this provider"),
 		}
 		data, err := json.marshal(wire, allocator = context.temp_allocator)
 		if err != nil do return ""
@@ -941,10 +893,10 @@ bridge_vcs_write_action_json :: proc(command_id, text, result_type, action: stri
 	}
 	err_wire: Bridge_Vcs_Error_Wire
 	if aok {
-		err_wire = Bridge_Vcs_Error_Wire{code = "", message = ""}
+		err_wire = bridge_result_error("", "")
 	} else {
 		code := msg if msg != "" else "action_failed"
-		err_wire = Bridge_Vcs_Error_Wire{code = code, message = vcs_action_error_message(code)}
+		err_wire = bridge_result_error(code, vcs_action_error_message(code))
 	}
 	wire := Bridge_Vcs_Mutation_Result_Wire{
 		type       = result_type,
@@ -975,10 +927,7 @@ bridge_vcs_save_json :: proc(command_id, text: string, allocator := context.allo
 			command_id = cid,
 			ok         = false,
 			provider   = "",
-			error      = Bridge_Vcs_Error_Wire{
-				code    = "no_vcs",
-				message = "No supported version control system found at path",
-			},
+			error      = bridge_result_error("no_vcs", "No supported version control system found at path"),
 		}
 		data, err := json.marshal(wire, allocator = context.temp_allocator)
 		if err != nil do return ""
@@ -990,10 +939,7 @@ bridge_vcs_save_json :: proc(command_id, text: string, allocator := context.allo
 			command_id = cid,
 			ok         = false,
 			provider   = "",
-			error      = Bridge_Vcs_Error_Wire{
-				code    = "missing_file",
-				message = "The 'path' parameter is required",
-			},
+			error      = bridge_result_error("missing_file", "The 'path' parameter is required"),
 		}
 		data, err := json.marshal(wire, allocator = context.temp_allocator)
 		if err != nil do return ""
@@ -1005,10 +951,7 @@ bridge_vcs_save_json :: proc(command_id, text: string, allocator := context.allo
 			command_id = cid,
 			ok         = false,
 			provider   = provider.name(),
-			error      = Bridge_Vcs_Error_Wire{
-				code    = "not_supported",
-				message = "Save is not supported by this provider",
-			},
+			error      = bridge_result_error("not_supported", "Save is not supported by this provider"),
 		}
 		data, err := json.marshal(wire, allocator = context.temp_allocator)
 		if err != nil do return ""
@@ -1017,10 +960,10 @@ bridge_vcs_save_json :: proc(command_id, text: string, allocator := context.allo
 	aok, msg := provider.save_file(path, file, cmd.content)
 	err_wire: Bridge_Vcs_Error_Wire
 	if aok {
-		err_wire = Bridge_Vcs_Error_Wire{code = "", message = ""}
+		err_wire = bridge_result_error("", "")
 	} else {
 		code := msg if msg != "" else "save_failed"
-		err_wire = Bridge_Vcs_Error_Wire{code = code, message = vcs_action_error_message(code)}
+		err_wire = bridge_result_error(code, vcs_action_error_message(code))
 	}
 	wire := Bridge_Vcs_Mutation_Result_Wire{
 		type       = "vcs_save_file_result",
@@ -1052,10 +995,7 @@ bridge_vcs_commit_json :: proc(command_id, text: string, allocator := context.al
 			command_id = cid,
 			ok         = false,
 			provider   = "",
-			error      = Bridge_Vcs_Error_Wire{
-				code    = "no_vcs",
-				message = "No supported version control system found at path",
-			},
+			error      = bridge_result_error("no_vcs", "No supported version control system found at path"),
 		}
 		data, err := json.marshal(wire, allocator = context.temp_allocator)
 		if err != nil do return ""
@@ -1067,10 +1007,7 @@ bridge_vcs_commit_json :: proc(command_id, text: string, allocator := context.al
 			command_id = cid,
 			ok         = false,
 			provider   = provider.name(),
-			error      = Bridge_Vcs_Error_Wire{
-				code    = "missing_message",
-				message = "The 'message' parameter is required",
-			},
+			error      = bridge_result_error("missing_message", "The 'message' parameter is required"),
 		}
 		data, err := json.marshal(wire, allocator = context.temp_allocator)
 		if err != nil do return ""
@@ -1082,10 +1019,7 @@ bridge_vcs_commit_json :: proc(command_id, text: string, allocator := context.al
 			command_id = cid,
 			ok         = false,
 			provider   = provider.name(),
-			error      = Bridge_Vcs_Error_Wire{
-				code    = "not_supported",
-				message = "Commit is not supported by this provider",
-			},
+			error      = bridge_result_error("not_supported", "Commit is not supported by this provider"),
 		}
 		data, err := json.marshal(wire, allocator = context.temp_allocator)
 		if err != nil do return ""
@@ -1094,12 +1028,9 @@ bridge_vcs_commit_json :: proc(command_id, text: string, allocator := context.al
 	aok := provider.commit(path, message, cmd.amend)
 	err_wire: Bridge_Vcs_Error_Wire
 	if aok {
-		err_wire = Bridge_Vcs_Error_Wire{code = "", message = ""}
+		err_wire = bridge_result_error("", "")
 	} else {
-		err_wire = Bridge_Vcs_Error_Wire{
-			code    = "commit_failed",
-			message = vcs_action_error_message("commit_failed"),
-		}
+		err_wire = bridge_result_error("commit_failed", vcs_action_error_message("commit_failed"))
 	}
 	wire := Bridge_Vcs_Mutation_Result_Wire{
 		type       = "vcs_commit_result",
@@ -1128,10 +1059,7 @@ bridge_vcs_upload_json :: proc(command_id, text: string, allocator := context.al
 			command_id = cid,
 			ok         = false,
 			provider   = "",
-			error      = Bridge_Vcs_Error_Wire{
-				code    = "no_vcs",
-				message = "No supported version control system found at path",
-			},
+			error      = bridge_result_error("no_vcs", "No supported version control system found at path"),
 		}
 		data, err := json.marshal(wire, allocator = context.temp_allocator)
 		if err != nil do return ""
@@ -1143,10 +1071,7 @@ bridge_vcs_upload_json :: proc(command_id, text: string, allocator := context.al
 			command_id = cid,
 			ok         = false,
 			provider   = provider.name(),
-			error      = Bridge_Vcs_Error_Wire{
-				code    = "not_supported",
-				message = "Upload is not supported by this provider",
-			},
+			error      = bridge_result_error("not_supported", "Upload is not supported by this provider"),
 		}
 		data, err := json.marshal(wire, allocator = context.temp_allocator)
 		if err != nil do return ""
@@ -1155,7 +1080,7 @@ bridge_vcs_upload_json :: proc(command_id, text: string, allocator := context.al
 	aok, code, detail := provider.upload(path)
 	err_wire: Bridge_Vcs_Error_Wire
 	if aok {
-		err_wire = Bridge_Vcs_Error_Wire{code = "", message = ""}
+		err_wire = bridge_result_error("", "")
 	} else {
 		err_code := code if code != "" else "upload_failed"
 		msg := vcs_action_error_message(err_code)
@@ -1163,7 +1088,7 @@ bridge_vcs_upload_json :: proc(command_id, text: string, allocator := context.al
 			msg = fmt.tprintf("%s — %s", msg, detail)
 			delete(detail)
 		}
-		err_wire = Bridge_Vcs_Error_Wire{code = err_code, message = msg}
+		err_wire = bridge_result_error(err_code, msg)
 	}
 	wire := Bridge_Vcs_Mutation_Result_Wire{
 		type       = "vcs_upload_result",
@@ -1192,10 +1117,7 @@ bridge_vcs_sync_json :: proc(command_id, text: string, allocator := context.allo
 			command_id = cid,
 			ok         = false,
 			provider   = "",
-			error      = Bridge_Vcs_Error_Wire{
-				code    = "no_vcs",
-				message = "No supported version control system found at path",
-			},
+			error      = bridge_result_error("no_vcs", "No supported version control system found at path"),
 		}
 		data, err := json.marshal(wire, allocator = context.temp_allocator)
 		if err != nil do return ""
@@ -1207,10 +1129,7 @@ bridge_vcs_sync_json :: proc(command_id, text: string, allocator := context.allo
 			command_id = cid,
 			ok         = false,
 			provider   = provider.name(),
-			error      = Bridge_Vcs_Error_Wire{
-				code    = "not_supported",
-				message = "Sync is not supported by this provider",
-			},
+			error      = bridge_result_error("not_supported", "Sync is not supported by this provider"),
 		}
 		data, err := json.marshal(wire, allocator = context.temp_allocator)
 		if err != nil do return ""
@@ -1219,7 +1138,7 @@ bridge_vcs_sync_json :: proc(command_id, text: string, allocator := context.allo
 	aok, code, detail := provider.sync(path)
 	err_wire: Bridge_Vcs_Error_Wire
 	if aok {
-		err_wire = Bridge_Vcs_Error_Wire{code = "", message = ""}
+		err_wire = bridge_result_error("", "")
 	} else {
 		err_code := code if code != "" else "sync_failed"
 		msg := vcs_action_error_message(err_code)
@@ -1227,7 +1146,7 @@ bridge_vcs_sync_json :: proc(command_id, text: string, allocator := context.allo
 			msg = fmt.tprintf("%s — %s", msg, detail)
 			delete(detail)
 		}
-		err_wire = Bridge_Vcs_Error_Wire{code = err_code, message = msg}
+		err_wire = bridge_result_error(err_code, msg)
 	}
 	wire := Bridge_Vcs_Mutation_Result_Wire{
 		type       = "vcs_sync_result",
@@ -1280,10 +1199,7 @@ bridge_vcs_log_json :: proc(command_id, text: string, allocator := context.alloc
 			has_more    = false,
 			next_cursor = nil,
 			entries     = []Bridge_Vcs_Log_Entry_Wire{},
-			error       = Bridge_Vcs_Error_Wire{
-				code    = "no_vcs",
-				message = "No supported version control system found at path",
-			},
+			error       = bridge_result_error("no_vcs", "No supported version control system found at path"),
 		}
 		data, err := json.marshal(wire, allocator = context.temp_allocator)
 		if err != nil do return ""
@@ -1298,10 +1214,7 @@ bridge_vcs_log_json :: proc(command_id, text: string, allocator := context.alloc
 			has_more    = false,
 			next_cursor = nil,
 			entries     = []Bridge_Vcs_Log_Entry_Wire{},
-			error       = Bridge_Vcs_Error_Wire{
-				code    = "not_supported",
-				message = "Log is not supported by this provider",
-			},
+			error       = bridge_result_error("not_supported", "Log is not supported by this provider"),
 		}
 		data, err := json.marshal(wire, allocator = context.temp_allocator)
 		if err != nil do return ""
@@ -1317,10 +1230,7 @@ bridge_vcs_log_json :: proc(command_id, text: string, allocator := context.alloc
 			has_more    = false,
 			next_cursor = nil,
 			entries     = []Bridge_Vcs_Log_Entry_Wire{},
-			error       = Bridge_Vcs_Error_Wire{
-				code    = "log_failed",
-				message = "Could not read commit log",
-			},
+			error       = bridge_result_error("log_failed", "Could not read commit log"),
 		}
 		data, err := json.marshal(wire, allocator = context.temp_allocator)
 		if err != nil do return ""
@@ -1335,10 +1245,7 @@ bridge_vcs_log_json :: proc(command_id, text: string, allocator := context.alloc
 		has_more    = has_more,
 		next_cursor = next_cursor_val,
 		entries     = vcs_to_wire_log_entries(entries),
-		error       = Bridge_Vcs_Error_Wire{
-			code    = "",
-			message = "",
-		},
+		error       = bridge_result_error("", ""),
 	}
 	data, err := json.marshal(wire, allocator = context.temp_allocator)
 	if err != nil do return ""
@@ -1375,10 +1282,7 @@ bridge_vcs_commit_diff_json :: proc(command_id, text: string, allocator := conte
 			has_more    = false,
 			next_cursor = nil,
 			hunks       = []Bridge_Vcs_Diff_Hunk_Wire{},
-			error       = Bridge_Vcs_Error_Wire{
-				code    = "no_vcs",
-				message = "No supported version control system found at path",
-			},
+			error       = bridge_result_error("no_vcs", "No supported version control system found at path"),
 		}
 		data, err := json.marshal(wire, allocator = context.temp_allocator)
 		if err != nil do return ""
@@ -1398,10 +1302,7 @@ bridge_vcs_commit_diff_json :: proc(command_id, text: string, allocator := conte
 			has_more    = false,
 			next_cursor = nil,
 			hunks       = []Bridge_Vcs_Diff_Hunk_Wire{},
-			error       = Bridge_Vcs_Error_Wire{
-				code    = "invalid_ref",
-				message = "The 'base_ref' parameter is required",
-			},
+			error       = bridge_result_error("invalid_ref", "The 'base_ref' parameter is required"),
 		}
 		data, err := json.marshal(wire, allocator = context.temp_allocator)
 		if err != nil do return ""
@@ -1422,10 +1323,7 @@ bridge_vcs_commit_diff_json :: proc(command_id, text: string, allocator := conte
 				base_ref   = base_ref,
 				head_ref   = head_ref,
 				files      = []Bridge_Vcs_Commit_File_Wire{},
-				error      = Bridge_Vcs_Error_Wire{
-					code    = "not_supported",
-					message = "Commit diff file list is not supported by this provider",
-				},
+				error      = bridge_result_error("not_supported", "Commit diff file list is not supported by this provider"),
 			}
 			data, err := json.marshal(wire, allocator = context.temp_allocator)
 			if err != nil do return ""
@@ -1442,10 +1340,7 @@ bridge_vcs_commit_diff_json :: proc(command_id, text: string, allocator := conte
 				base_ref   = base_ref,
 				head_ref   = head_ref,
 				files      = []Bridge_Vcs_Commit_File_Wire{},
-				error      = Bridge_Vcs_Error_Wire{
-					code    = "invalid_ref",
-					message = "Could not diff the requested revisions",
-				},
+				error      = bridge_result_error("invalid_ref", "Could not diff the requested revisions"),
 			}
 			data, err := json.marshal(wire, allocator = context.temp_allocator)
 			if err != nil do return ""
@@ -1460,10 +1355,7 @@ bridge_vcs_commit_diff_json :: proc(command_id, text: string, allocator := conte
 			base_ref   = base_ref,
 			head_ref   = head_ref,
 			files      = vcs_to_wire_commit_files(files),
-			error      = Bridge_Vcs_Error_Wire{
-				code    = "",
-				message = "",
-			},
+			error      = bridge_result_error("", ""),
 		}
 		data, err := json.marshal(wire, allocator = context.temp_allocator)
 		if err != nil do return ""
@@ -1483,10 +1375,7 @@ bridge_vcs_commit_diff_json :: proc(command_id, text: string, allocator := conte
 			has_more    = false,
 			next_cursor = nil,
 			hunks       = []Bridge_Vcs_Diff_Hunk_Wire{},
-			error       = Bridge_Vcs_Error_Wire{
-				code    = "not_supported",
-				message = "Commit diff is not supported by this provider",
-			},
+			error       = bridge_result_error("not_supported", "Commit diff is not supported by this provider"),
 		}
 		data, err := json.marshal(wire, allocator = context.temp_allocator)
 		if err != nil do return ""
@@ -1507,10 +1396,7 @@ bridge_vcs_commit_diff_json :: proc(command_id, text: string, allocator := conte
 			has_more    = false,
 			next_cursor = nil,
 			hunks       = []Bridge_Vcs_Diff_Hunk_Wire{},
-			error       = Bridge_Vcs_Error_Wire{
-				code    = "invalid_ref",
-				message = "Could not diff the requested revisions",
-			},
+			error       = bridge_result_error("invalid_ref", "Could not diff the requested revisions"),
 		}
 		data, err := json.marshal(wire, allocator = context.temp_allocator)
 		if err != nil do return ""
@@ -1530,10 +1416,7 @@ bridge_vcs_commit_diff_json :: proc(command_id, text: string, allocator := conte
 		has_more    = has_more,
 		next_cursor = next_cursor_val,
 		hunks       = vcs_to_wire_hunks(hunks),
-		error       = Bridge_Vcs_Error_Wire{
-			code    = "",
-			message = "",
-		},
+		error       = bridge_result_error("", ""),
 	}
 	data, err := json.marshal(wire, allocator = context.temp_allocator)
 	if err != nil do return ""
@@ -1555,10 +1438,7 @@ bridge_vcs_workspaces_json :: proc(command_id, text: string, allocator := contex
 			ok         = false,
 			provider   = "",
 			workspaces = []Bridge_Vcs_Workspace_Entry_Wire{},
-			error      = Bridge_Vcs_Error_Wire{
-				code    = "no_vcs",
-				message = "No supported version control system found at path",
-			},
+			error      = bridge_result_error("no_vcs", "No supported version control system found at path"),
 		}
 		data, err := json.marshal(wire, allocator = context.temp_allocator)
 		if err != nil do return ""
@@ -1571,10 +1451,7 @@ bridge_vcs_workspaces_json :: proc(command_id, text: string, allocator := contex
 			ok         = false,
 			provider   = provider.name(),
 			workspaces = []Bridge_Vcs_Workspace_Entry_Wire{},
-			error      = Bridge_Vcs_Error_Wire{
-				code    = "not_supported",
-				message = "Workspaces are not supported by this provider",
-			},
+			error      = bridge_result_error("not_supported", "Workspaces are not supported by this provider"),
 		}
 		data, err := json.marshal(wire, allocator = context.temp_allocator)
 		if err != nil do return ""
@@ -1588,10 +1465,7 @@ bridge_vcs_workspaces_json :: proc(command_id, text: string, allocator := contex
 			ok         = false,
 			provider   = provider.name(),
 			workspaces = []Bridge_Vcs_Workspace_Entry_Wire{},
-			error      = Bridge_Vcs_Error_Wire{
-				code    = "workspaces_failed",
-				message = "Could not list workspaces",
-			},
+			error      = bridge_result_error("workspaces_failed", "Could not list workspaces"),
 		}
 		data, err := json.marshal(wire, allocator = context.temp_allocator)
 		if err != nil do return ""
@@ -1603,10 +1477,7 @@ bridge_vcs_workspaces_json :: proc(command_id, text: string, allocator := contex
 		ok         = true,
 		provider   = provider.name(),
 		workspaces = vcs_to_wire_workspaces(workspaces),
-		error      = Bridge_Vcs_Error_Wire{
-			code    = "",
-			message = "",
-		},
+		error      = bridge_result_error("", ""),
 	}
 	data, err := json.marshal(wire, allocator = context.temp_allocator)
 	if err != nil do return ""

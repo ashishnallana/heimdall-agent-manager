@@ -303,9 +303,10 @@ bridge_task_status_notify_wake_local :: proc(instance_id: string) -> bool {
 // Per-instance wake state. The error class of the last failed wake decides what
 // happens next (see contracts.bridge_error_classify):
 //   retriable   -> exponential backoff (BRIDGE_WAKE_BACKOFF); never parks.
-//   recoverable -> PARKED: no timer retries. Unparks when the provider catalog
-//                  changes, or (for provider_missing / missing_binary) when the
-//                  provider becomes resolvable locally.
+//   recoverable -> PARKED: no backoff retries. Unparks when the provider catalog
+//                  changes; for provider_missing / missing_binary when the provider
+//                  becomes resolvable locally; for vault_locked when the vault is
+//                  unsealed; for any other cause on a slow re-check at the backoff cap.
 //   fatal       -> PARKED until a launch of this instance succeeds by another path
 //                  (e.g. a hub launch_agent) or the bridge restarts.
 // Any successful launch resets the state (bridge_task_wake_note_launched).
@@ -400,9 +401,17 @@ bridge_wake_unpark_trigger :: proc(st: ^Bridge_Wake_State, now_ms: i64) -> strin
 	defer delete(etag)
 	if etag != st.catalog_etag do return "provider_catalog_changed"
 	provider_problem := st.err.code == .provider_missing || st.err.reason == .missing_binary || st.err.reason == .not_executable
-	if !provider_problem || now_ms - st.probe_at_ms < BRIDGE_WAKE_PARK_PROBE_MS do return ""
-	st.probe_at_ms = now_ms
-	if bridge_provider_runnable(st.provider, st.model) do return "provider_runnable"
+	if provider_problem || st.err.code == .vault_locked {
+		if now_ms - st.probe_at_ms < BRIDGE_WAKE_PARK_PROBE_MS do return ""
+		st.probe_at_ms = now_ms
+		if provider_problem && bridge_provider_runnable(st.provider, st.model) do return "provider_runnable"
+		if st.err.code == .vault_locked && bridge_vault_status() == .Unlocked do return "vault_unsealed"
+		return ""
+	}
+	// Any other recoverable cause (a refused bootstrap token, hub-side config) has no
+	// local signal to watch: re-check it at the retriable backoff cap, so a fix made
+	// elsewhere is picked up without user action and without a retry storm.
+	if now_ms - st.last_wake_ms >= BRIDGE_WAKE_BACKOFF.max_ms do return "periodic_recheck"
 	return ""
 }
 

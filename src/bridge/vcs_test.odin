@@ -123,7 +123,7 @@ vcs_no_vcs_json_envelope :: proc(t: ^testing.T) {
 	caps := bridge_vcs_capabilities_json("c1", req)
 	defer delete(caps)
 	testing.expect(t, strings.contains(caps, "\"ok\":false"), "caps ok:false for no vcs")
-	testing.expect(t, strings.contains(caps, "\"code\":\"no_vcs\""), "caps no_vcs code")
+	testing.expect(t, strings.contains(caps, "\"cause\":\"no_vcs\""), "caps no_vcs code")
 	testing.expect(t, strings.contains(caps, "\"type\":\"vcs_capabilities_result\""), "caps result type")
 
 	files := bridge_vcs_files_json("c1", req)

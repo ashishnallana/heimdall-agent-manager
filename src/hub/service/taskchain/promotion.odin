@@ -3,6 +3,7 @@ package taskchain
 import "core:fmt"
 import json "core:encoding/json"
 import "core:strings"
+import "core:time"
 import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
@@ -328,14 +329,18 @@ resolve_fleet_launch_model :: proc(service: ^Taskchain_Service, bridge_id, provi
 
 instance_is_crashed_or_dead :: proc(service: ^Taskchain_Service, chain_instances: []domain.Agent_Instance, instance_id: string) -> bool {
 	if instance_id == "" do return true
+	// REQ-ERR-PROTO-A: only an untyped failure (a crash) is dead. A typed failure
+	// keeps its assignment whatever its class, so the hub does not churn replacement
+	// instances that would fail the same way.
+	now_ms := promotion_now_ms(service)
 	for inst in chain_instances {
 		if inst.agent_instance_id == instance_id {
-			return inst.runtime_status == "failed" || inst.runtime_status == "terminated"
+			return agent.failed_instance_disposition(inst, now_ms) == .Dead
 		}
 	}
 	if service != nil && service.agents != nil {
 		if inst, ok, _ := iface.agent_get_instance(service.agents, instance_id); ok {
-			return inst.runtime_status == "failed" || inst.runtime_status == "terminated"
+			return agent.failed_instance_disposition(inst, now_ms) == .Dead
 		}
 		return true // not found in repo -> dead/orphaned
 	}
@@ -453,11 +458,16 @@ allocate_or_jit_worker_instance :: proc(service: ^Taskchain_Service, chain: doma
 
 	for inst in chain_instances {
 		if inst.agent_id != target_agent_id do continue
-		if inst.runtime_status == "failed" || inst.runtime_status == "terminated" do continue
-
+		disposition := agent.failed_instance_disposition(inst, promotion_now_ms(service))
 		if task.bridge_id != "" && inst.bridge_id != task.bridge_id do continue
+		// REQ-ERR-PROTO-A: a dead (untyped) failure frees its slot; a held one
+		// (backing off, recoverable, fatal) keeps it, so it is not replaced.
+		if disposition == .Dead do continue
+		if disposition == .Hold { live_count += 1; continue }
 
-		if inst.runtime_status == "stopped" {
+		if inst.runtime_status == "stopped" || disposition == .Retry_Now {
+			// A due retriable failure still owns its slot: re-wake it, never replace it.
+			if disposition == .Retry_Now do live_count += 1
 			if warm_stopped_id == "" && !busy_instances[inst.agent_instance_id] {
 				warm_stopped_id = inst.agent_instance_id
 			}
@@ -602,11 +612,16 @@ allocate_or_jit_reviewer_instance :: proc(service: ^Taskchain_Service, chain: do
 	for inst in chain_instances {
 		if inst.agent_id != target_agent_id do continue
 		if assignee_id != "" && inst.agent_instance_id == assignee_id do continue
-		if inst.runtime_status == "failed" || inst.runtime_status == "terminated" do continue
-
+		disposition := agent.failed_instance_disposition(inst, promotion_now_ms(service))
 		if task.bridge_id != "" && inst.bridge_id != task.bridge_id do continue
+		// REQ-ERR-PROTO-A: a dead (untyped) failure frees its slot; a held one
+		// (backing off, recoverable, fatal) keeps it, so it is not replaced.
+		if disposition == .Dead do continue
+		if disposition == .Hold { live_count += 1; continue }
 
-		if inst.runtime_status == "stopped" {
+		if inst.runtime_status == "stopped" || disposition == .Retry_Now {
+			// A due retriable failure still owns its slot: re-wake it, never replace it.
+			if disposition == .Retry_Now do live_count += 1
 			if warm_stopped_reviewer_id == "" && !busy_instances[inst.agent_instance_id] && !strings.contains(task.reviewer_refs_json, inst.agent_instance_id) {
 				warm_stopped_reviewer_id = inst.agent_instance_id
 			}
@@ -809,13 +824,18 @@ dynamic_fleet_schedule :: proc(service: ^Taskchain_Service, chain: domain.Task_C
 
 		for inst in chain_instances {
 			if inst.agent_id != target_agent_id do continue
-			if inst.runtime_status == "failed" || inst.runtime_status == "terminated" do continue
-
+			disposition := agent.failed_instance_disposition(inst, promotion_now_ms(service))
 			// REQ-TB-HUB-1: when cand.bridge_id != "", filter candidate instances and
 			// scope live_count strictly to the pinned bridge.
 			if cand.bridge_id != "" && inst.bridge_id != cand.bridge_id do continue
+			// REQ-ERR-PROTO-A: a dead (untyped) failure frees its slot; a held one
+			// (backing off, recoverable, fatal) keeps it, so it is not replaced.
+			if disposition == .Dead do continue
+			if disposition == .Hold { live_count += 1; continue }
 
-			if inst.runtime_status == "stopped" {
+			if inst.runtime_status == "stopped" || disposition == .Retry_Now {
+				// A due retriable failure still owns its slot: re-wake it, never replace it.
+				if disposition == .Retry_Now do live_count += 1
 				if warm_stopped_id == "" && !busy_instances[inst.agent_instance_id] {
 					warm_stopped_id = inst.agent_instance_id
 				}
@@ -946,13 +966,18 @@ dynamic_fleet_schedule :: proc(service: ^Taskchain_Service, chain: domain.Task_C
 			for inst in chain_instances {
 				if inst.agent_id != rev_agent_id do continue
 				if inst.agent_instance_id == assignee_id do continue
-				if inst.runtime_status == "failed" || inst.runtime_status == "terminated" do continue
-
+				disposition := agent.failed_instance_disposition(inst, promotion_now_ms(service))
 				// REQ-TB-HUB-1: when t.bridge_id != "", filter candidate reviewer instances and
 				// scope live_count strictly to the pinned bridge.
 				if t.bridge_id != "" && inst.bridge_id != t.bridge_id do continue
+				// REQ-ERR-PROTO-A: a dead (untyped) failure frees its slot; a held one
+				// (backing off, recoverable, fatal) keeps it, so it is not replaced.
+				if disposition == .Dead do continue
+				if disposition == .Hold { live_count += 1; continue }
 
-				if inst.runtime_status == "stopped" {
+				if inst.runtime_status == "stopped" || disposition == .Retry_Now {
+					// A due retriable failure still owns its slot: re-wake it, never replace it.
+					if disposition == .Retry_Now do live_count += 1
 					if warm_stopped_reviewer_id == "" && !busy_instances[inst.agent_instance_id] && !strings.contains(current_rev_json, inst.agent_instance_id) {
 						warm_stopped_reviewer_id = inst.agent_instance_id
 					}
@@ -1558,6 +1583,12 @@ ensure_actionable_agent_started :: proc(
 	if instance_is_live(inst) || instance_in_runs(runs^, instance_id) {
 		return
 	}
+	// REQ-ERR-PROTO-A: re-wake a failed instance only when its error class allows it
+	// now (retriable and backed off); recoverable/fatal failures are not re-woken.
+	switch agent.failed_instance_disposition(inst, promotion_now_ms(service)) {
+	case .Hold, .Dead: return
+	case .Retry_Now, .Not_Failed:
+	}
 
 	role_str := "worker"
 	if task_role == .Review do role_str = "reviewer"
@@ -1597,6 +1628,14 @@ ensure_actionable_agent_started :: proc(
 // instance_is_live reports whether an instance currently has a running process
 // (mirrors the "live" set used by instance_is_idle). Only live instances are eligible
 // for a stop[] push; a stopped/launching instance is left alone.
+// promotion_now_ms is the service clock in unix ms (wall clock when unparseable).
+promotion_now_ms :: proc(service: ^Taskchain_Service) -> i64 {
+	if service != nil {
+		if ms, ok := platform.rfc3339_to_unix_ms(platform.clock_now(service.clock)); ok do return ms
+	}
+	return time.to_unix_nanoseconds(time.now()) / 1_000_000
+}
+
 instance_is_live :: proc(inst: domain.Agent_Instance) -> bool {
 	return inst.runtime_status == "running" || inst.runtime_status == "idle" || inst.runtime_status == "busy"
 }

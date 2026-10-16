@@ -518,10 +518,11 @@ test_lsp_bridge_frame_carries_each_type_payload :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(started_root, "\"ok\":true"))
 	testing.expect(t, strings.contains(started_root, "\"root_path\":\"/workspace/myproject\""))
 
-	started_bad := lsp_bridge_frame_for_client("lsp_started", "{\"type\":\"lsp_started\",\"session_id\":\"w1\",\"ok\":false,\"error\":\"process_start failed\"}", "s1")
+	started_bad := lsp_bridge_frame_for_client("lsp_started", "{\"type\":\"lsp_started\",\"session_id\":\"w1\",\"ok\":false,\"error\":{\"code\":\"internal_error\",\"class\":\"retriable\",\"cause\":\"lsp_start_failed\",\"message\":\"process_start failed\"}}", "s1")
 	defer delete(started_bad)
 	testing.expect(t, strings.contains(started_bad, "\"ok\":false"))
-	testing.expect(t, strings.contains(started_bad, "\"error\":\"process_start failed\""))
+	testing.expect(t, strings.contains(started_bad, "\"cause\":\"lsp_start_failed\""))
+	testing.expect(t, strings.contains(started_bad, "\"message\":\"process_start failed\""))
 
 	stopped := lsp_bridge_frame_for_client("lsp_stopped", "{\"type\":\"lsp_stopped\",\"session_id\":\"w1\"}", "s1")
 	defer delete(stopped)

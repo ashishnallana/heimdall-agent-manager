@@ -477,11 +477,10 @@ lsp_bridge_frame_for_client :: proc(frame_type, text, client_session_id: string)
 		strings.write_string(&b, ",\"ok\":")
 		strings.write_string(&b, "true" if ok_val else "false")
 		if !ok_val {
-			err_msg := json_string(text, "error")
-			defer delete(err_msg)
-			strings.write_string(&b, ",\"error\":\"")
-			write_handler_json_string(&b, err_msg)
-			strings.write_byte(&b, '"')
+			// REQ-ERR-PROTO-A: relay the bridge's typed error object unchanged.
+			werr, _ := contracts.wire_error_parse(text, context.temp_allocator)
+			strings.write_string(&b, ",\"error\":")
+			contracts.write_wire_error(&b, werr)
 		} else {
 			root_path := json_string(text, "root_path")
 			defer delete(root_path)

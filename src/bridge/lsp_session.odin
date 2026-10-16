@@ -28,6 +28,7 @@ import "core:sync"
 import "core:sys/posix"
 import "core:thread"
 import "core:time"
+import contracts "odin_test:contracts"
 import ws "odin_test:lib/ws"
 
 // ALLOCATOR RULE (learned the hard way — see the comment on lsp_heap).
@@ -416,6 +417,8 @@ bridge_lsp_error_frame_json :: proc(session_id, reason: string, exit_code: int) 
 	bridge_runtime_write_json_string(&b, reason)
 	strings.write_string(&b, "\",\"exit_code\":")
 	bridge_agent_write_int(&b, exit_code)
+	strings.write_string(&b, ",\"error\":")
+	contracts.write_wire_error(&b, bridge_error_wire(bridge_error(.lsp_crashed), reason))
 	strings.write_byte(&b, '}')
 	return strings.to_string(b)
 }
@@ -649,13 +652,13 @@ bridge_lsp_handle_start :: proc(conn: ^ws.Connection, text: string) {
 		bridge_runtime_write_json_string(&b, session_id)
 		strings.write_string(&b, "\",\"command_id\":\"")
 		bridge_runtime_write_json_string(&b, command_id)
-		strings.write_string(&b, "\",\"ok\":")
-		strings.write_string(&b, "true" if ok else "false")
+		strings.write_string(&b, "\",")
 		if !ok {
-			strings.write_string(&b, ",\"error\":\"")
-			bridge_runtime_write_json_string(&b, err_msg)
-			strings.write_byte(&b, '"')
-		} else if strings.trim_space(root_path) != "" {
+			bridge_write_failure(&b, bridge_error_wire(bridge_error(.lsp_start_failed), err_msg))
+		} else {
+			strings.write_string(&b, "\"ok\":true")
+		}
+		if ok && strings.trim_space(root_path) != "" {
 			strings.write_string(&b, ",\"root_path\":\"")
 			bridge_runtime_write_json_string(&b, root_path)
 			strings.write_byte(&b, '"')

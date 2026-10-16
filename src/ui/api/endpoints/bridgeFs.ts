@@ -6,6 +6,7 @@
 
 import { heimdallApi } from '../heimdallApi';
 import { cookieJsonFetch, cookieMutation } from '../cookieFetch';
+import type { WireError } from '../wireError';
 
 export type BridgeFsEntry = { name: string; is_dir: boolean; hidden: boolean; has_git: boolean };
 export type BridgeFsListResult = {
@@ -15,7 +16,7 @@ export type BridgeFsListResult = {
   parent: string;
   entries: BridgeFsEntry[];
   truncated: boolean;
-  error: { code: string; message: string };
+  error?: WireError;
 };
 export type BridgeFsStatResult = {
   ok: boolean;
@@ -24,14 +25,14 @@ export type BridgeFsStatResult = {
   is_dir: boolean;
   has_git: boolean;
   within_root: boolean;
-  error: { code: string; message: string };
+  error?: WireError;
 };
 export type BridgeFsMkdirResult = {
   ok: boolean;
   path: string;
   created: boolean;
   within_root: boolean;
-  error: { code: string; message: string };
+  error?: WireError;
 };
 
 export const bridgeFsApi = heimdallApi.injectEndpoints({

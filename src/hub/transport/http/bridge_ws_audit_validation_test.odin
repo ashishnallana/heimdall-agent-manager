@@ -352,16 +352,18 @@ test_audit_claim_bridge_runtime_write_ws_text_frame_leaks_frame_buffer :: proc(t
 		bridge_id  = "brg_1",
 		path       = "/tmp/ws",
 	}
-	parsed := bridge_runtime_service.parse_validation_result(cmd, raw_json)
+	// REQ-ERR-PROTO-A: the reply's failure is the typed wire error object.
+	wire_json := `{"type":"project_path_validation_result","command_id":"cmd_1","ok":false,"error":{"code":"validation_failed","class":"fatal","cause":"bad_path","message":"invalid path \"/tmp/ws\" here"}}`
+	parsed := bridge_runtime_service.parse_validation_result(cmd, wire_json)
 	defer delete(parsed.details_json)
 	defer delete(parsed.validation_error)
 
 	testing.expect(t, !parsed.ok)
 	testing.expect_value(t, parsed.validation_error, `invalid path "/tmp/ws" here`)
 
-	// Prove parsed.validation_error is an owned string allocated separately, not pointing inside raw_json.
-	raw_start := uintptr(raw_data(raw_json))
-	raw_end := raw_start + uintptr(len(raw_json))
+	// Prove parsed.validation_error is an owned string allocated separately, not pointing inside the reply.
+	raw_start := uintptr(raw_data(wire_json))
+	raw_end := raw_start + uintptr(len(wire_json))
 	err_ptr := uintptr(raw_data(parsed.validation_error))
 	testing.expect(t, err_ptr < raw_start || err_ptr >= raw_end, "parsed.validation_error is an owned string, not aliasing raw_json")
 }

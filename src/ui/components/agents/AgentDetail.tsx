@@ -54,6 +54,8 @@ import { useFetchTaskChainDetailQuery } from '../../api/endpoints/tasks';
 import { VaultText } from '../vault/VaultText';
 import PaginatedMemoriesSection from '../shared/PaginatedMemoriesSection';
 import { buildRouteHash } from '../../utils/appLocation';
+import { agentFailureSummary } from '../../utils/agentStatus';
+import { AgentFailureNotice } from './AgentFailureNotice';
 import {
   VERB_LABEL,
   absoluteTime,
@@ -611,7 +613,8 @@ export function LiveInstanceDetailPane({
     );
   }
 
-  const runtimeTone: Tone = (runtimeStatus.toLowerCase() === 'running' || runtimeStatus.toLowerCase() === 'ready')
+  const failure = runtimeStatus.toLowerCase() === 'failed' ? agentFailureSummary(inst?.last_error) : null;
+  const runtimeTone: Tone = failure ? failure.tone : (runtimeStatus.toLowerCase() === 'running' || runtimeStatus.toLowerCase() === 'ready')
     ? 'success'
     : (runtimeStatus.toLowerCase() === 'starting' || runtimeStatus.toLowerCase() === 'launching')
       ? 'warning'
@@ -702,6 +705,7 @@ export function LiveInstanceDetailPane({
               </StatusPill>
             ) : null}
           </div>
+          <AgentFailureNotice runtimeStatus={runtimeStatus} lastError={inst?.last_error} />
         </DetailRow>
 
         <DetailRow label="Provider & Model">

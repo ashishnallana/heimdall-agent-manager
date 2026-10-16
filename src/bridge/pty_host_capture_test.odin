@@ -61,7 +61,7 @@ pty_host_capture_result_json_shape_ok :: proc(t: ^testing.T) {
 	fail_json := bridge_pane_capture_result_json(pending, false, "host_unavailable", "The ham-pty-host daemon is not available.", "", 0, false)
 	defer delete(fail_json)
 	testing.expect(t, strings.contains(fail_json, "\"ok\":false"), "ok false")
-	testing.expect(t, strings.contains(fail_json, "\"error_code\":\"host_unavailable\""), "error code")
+	testing.expect(t, strings.contains(fail_json, "\"cause\":\"host_unavailable\""), "error code")
 	testing.expect(t, !strings.contains(fail_json, "\"output\":"), "no output on failure")
 }
 
@@ -164,7 +164,8 @@ pty_host_get_pane_result_json_failure_shape :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(json, "\"command_id\":\"cmd_test_3\""), "command_id present")
 	testing.expect(t, strings.contains(json, "\"ok\":false"), "ok false")
 	testing.expect(t, strings.contains(json, "\"unchanged\":false"), "unchanged false")
-	testing.expect(t, strings.contains(json, "\"error\":\"daemon connection failed\""), "error message present")
+	testing.expect(t, strings.contains(json, "\"message\":\"daemon connection failed\""), "error message present")
+	testing.expect(t, strings.contains(json, "\"cause\":\"capture_failed\""), "typed cause present")
 	testing.expect(t, !strings.contains(json, "\"output\""), "no output on failure")
 }
 

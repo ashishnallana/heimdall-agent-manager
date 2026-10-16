@@ -419,7 +419,7 @@ test_bridge_shell_input_on_locked_bridge_returns_423 :: proc(t: ^testing.T) {
 		_, _, _ = iface.bridge_save_bridge(graph.bridges.repo, b)
 	}
 
-	state := T10_Route_Sink{reply = `{"type":"command_result","protocol_version":1,"command_id":"x","payload":{"status":"failed","error_code":"vault_locked"}}`}
+	state := T10_Route_Sink{reply = `{"type":"command_result","protocol_version":1,"command_id":"x","ok":false,"error":{"code":"vault_locked","class":"recoverable","cause":"vault_locked","message":""},"payload":{"status":"failed"}}`}
 	graph.bridges.bridge_command_sink = project_service.Bridge_Command_Sink{
 		ctx = rawptr(&state),
 		send_runtime_command = proc(ctx: rawptr, command: project_service.Runtime_Command) -> (bool, domain.Domain_Error) {

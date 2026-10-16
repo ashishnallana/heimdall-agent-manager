@@ -377,8 +377,17 @@ agent_instance_summary_json :: proc(inst: domain.Agent_Instance) -> string {
 	strings.write_string(&b, "\",\"startup_status\":\""); write_handler_json_string(&b, inst.startup_status)
 	strings.write_string(&b, "\",\"activity_status\":\""); write_handler_json_string(&b, inst.activity_status)
 	strings.write_string(&b, "\",\"display_name\":\""); write_handler_json_string(&b, inst.display_name)
-	strings.write_string(&b, "\"}")
+	strings.write_string(&b, "\"")
+	write_last_error_json(&b, inst.last_error_json)
+	strings.write_string(&b, "}")
 	return strings.to_string(b)
+}
+
+// write_last_error_json appends `,"last_error":{...}` (the bridge's wire error for a
+// failed instance, REQ-ERR-PROTO-A) or `,"last_error":null`.
+write_last_error_json :: proc(b: ^strings.Builder, last_error_json: string) {
+	strings.write_string(b, ",\"last_error\":")
+	strings.write_string(b, last_error_json if last_error_json != "" else "null")
 }
 
 write_agent_instance_json :: proc(b: ^strings.Builder, inst: domain.Agent_Instance) {
@@ -406,7 +415,9 @@ write_agent_instance_json :: proc(b: ^strings.Builder, inst: domain.Agent_Instan
 	// dashboard can render the work-vs-review banner from persisted state.
 	strings.write_string(b, "\",\"current_task_id\":\""); write_handler_json_string(b, inst.current_task_id)
 	strings.write_string(b, "\",\"current_task_role\":\""); write_handler_json_string(b, domain.current_task_role_string(inst.current_task_role))
-	strings.write_string(b, "\"}")
+	strings.write_string(b, "\"")
+	write_last_error_json(b, inst.last_error_json)
+	strings.write_string(b, "}")
 }
 
 i32_to_string_http :: proc(v: int) -> string {

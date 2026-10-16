@@ -732,9 +732,9 @@ function FileView({
           <div className="p-4 text-center text-xs text-muted">Loading…</div>
         ) : !file.viewable ? (
           <div data-debug-id={`${debugPrefix}-file-unviewable`} className="grid h-full place-items-center p-6 text-center text-xs text-muted">
-            {file.error?.code === 'file_too_large'
+            {file.error?.cause === 'file_too_large'
               ? `This file is too large to preview (${formatBytes(file.size)}).`
-              : file.error?.code === 'unsupported_type'
+              : file.error?.cause === 'unsupported_type'
                 ? 'This file type cannot be previewed.'
                 : str(file.error?.message) || 'This file cannot be previewed.'}
           </div>

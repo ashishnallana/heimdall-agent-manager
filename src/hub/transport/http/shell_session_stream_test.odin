@@ -1046,3 +1046,36 @@ stream_test_wait_viewers :: proc(t: ^testing.T, svc: ^shell_session_svc.Shell_Se
 	}
 	testing.expect(t, false, "writer did not wake its reader")
 }
+
+// REQ-ERR-PROTO-A: a chunk the hub refuses (malformed, over-cap, admission) is answered with a typed
+// protocol_error on the bridge's own socket before the connection is closed.
+@(test)
+test_err_proto_rejected_chunk_frame_gets_protocol_error :: proc(t: ^testing.T) {
+	pair, ok := make_stream_pair(t)
+	testing.expect(t, ok)
+	if !ok do return
+	defer close_stream_pair(&pair)
+
+	registry := project_service.Bridge_Runtime_Registry{}
+	bridge_id := "brg_err_proto_chunk"
+	project_service.bridge_runtime_registry_mark_live(&registry, bridge_id, false, "")
+	project_service.bridge_runtime_registry_set_command_socket(&registry, bridge_id, pair.hub)
+	defer project_service.bridge_runtime_registry_destroy(&registry)
+	bh := Bridge_Handlers{bridge_runtime_registry = &registry}
+	reassemblies := make([dynamic]Bridge_Chunk_Reassembly)
+	defer bridge_chunk_reassemblies_free(&reassemblies)
+
+	generation := project_service.bridge_runtime_registry_generation(&registry, bridge_id)
+	handled := bridge_ws_process_frame(&bh, bridge_id, generation, pair.hub, &reassemblies, strings.clone(`{"version":1,"kind":"chunk"}`))
+	testing.expect(t, !handled, "a rejected chunk closes the connection")
+
+	frame, got := read_server_stream_frame(pair.client, 2 * time.Second)
+	testing.expect(t, got, "bridge must receive a protocol_error")
+	if !got do return
+	defer delete(frame)
+	testing.expect(t, strings.contains(frame, `"type":"protocol_error"`), frame)
+	werr, found := contracts.wire_error_parse(frame, context.temp_allocator)
+	testing.expect(t, found, frame)
+	testing.expect_value(t, werr.cause, "chunk_rejected")
+	testing.expect_value(t, werr.class, contracts.Bridge_Error_Class.fatal)
+}

@@ -119,21 +119,32 @@ send_runtime_command_wait_result :: proc(registry: ^project_service.Bridge_Runti
 		if sync.atomic_load(&connection.retired) do return "", false, domain.domain_error(.Bridge_Offline, "bridge connection ended before its command result")
 		return "", false, domain.domain_error(.Bridge_Timeout, "bridge websocket command timed out")
 	}
-	error_code := jsonx.extract_string(cached, "error_code")
-	defer delete(error_code)
-	switch error_code {
-	case "bridge_busy":
-		retry_after_ms := jsonx.extract_int(cached, "retry_after_ms", 1000)
-		scope := jsonx.extract_string(cached, "overload_scope")
-		defer delete(scope)
-		details := fmt.aprintf("{\"retry_after_ms\":%d,\"overload_scope\":\"%s\"}", retry_after_ms, scope)
-		delete(cached, runtime.default_allocator())
-		return "", false, domain.domain_error(.Bridge_Busy, "bridge is busy; retry later", details)
-	case "deadline_exceeded":
-		delete(cached, runtime.default_allocator())
-		return "", false, domain.domain_error(.Bridge_Timeout, "bridge command deadline exceeded")
+	// A failed command_result is a typed refusal (REQ-ERR-PROTO-A): surface it as the
+	// bridge's own code/class/cause. Data-carrying replies (fs/vcs/shell/search/pane
+	// results) go back to the caller, which relays or maps their typed error itself.
+	if bridge_reply_type_is(cached, "command_result") {
+		if werr, found := contracts.wire_error_parse(cached, context.temp_allocator); found {
+			delete(cached, runtime.default_allocator())
+			return "", false, bridge_wire_domain_error(werr)
+		}
 	}
 	return cached, true, domain.Domain_Error{}
+}
+
+// bridge_wire_domain_error turns a bridge's wire error into the domain error the API
+// answers with. Overload keeps its Retry-After floor and scope in details.
+bridge_wire_domain_error :: proc(werr: contracts.Wire_Error) -> domain.Domain_Error {
+	err := domain.domain_error_from_wire(werr)
+	if werr.retry_after_ms > 0 || werr.scope != "" {
+		err.details_json = fmt.tprintf("{\"retry_after_ms\":%d,\"overload_scope\":\"%s\"}", werr.retry_after_ms, werr.scope)
+	}
+	return err
+}
+
+// bridge_reply_type_is reports whether a reply frame's top-level type is want.
+bridge_reply_type_is :: proc(reply, want: string) -> bool {
+	got := jsonx.extract_string(reply, "type", "", true, context.temp_allocator)
+	return got == want
 }
 
 validate_project_path :: proc(ctx: rawptr, command: project_service.Validate_Project_Path_Command) -> (project_service.Project_Path_Validation_Result, bool, domain.Domain_Error) {
@@ -179,20 +190,20 @@ validation_result_json :: proc(result: project_service.Project_Path_Validation_R
 }
 
 parse_validation_result :: proc(command: project_service.Validate_Project_Path_Command, text: string) -> project_service.Project_Path_Validation_Result {
-	ok := json_bool(text, "ok")
-	message := json_string(text, "validation_error")
-	error_code := json_string(text, "code")
-	if !ok && message == "" {
-		delete(message)
-		message = json_string(text, "message")
-	}
-	if !ok && error_code == "" {
-		delete(error_code)
-		error_code = strings.clone("validation_failed")
-	}
-	defer delete(error_code)
-	defer delete(message)
-	return validation_result(command, ok, error_code, message)
+	if json_bool(text, "ok") do return validation_result(command, true, "", "")
+	// The fine-grained cause (path_not_found, git_root_not_found, ...) is what the
+	// path row records; the message is display text.
+	werr, _ := contracts.wire_error_parse(text, context.temp_allocator)
+	code := werr.cause if werr.cause != "" else "validation_failed"
+	return validation_result(command, false, code, werr.message)
+}
+
+// bridge_runtime_json_escaped_temp JSON-escapes a bridge-supplied string for embedding
+// in a hand-built object (the message may quote a path); temp-allocated.
+bridge_runtime_json_escaped_temp :: proc(value: string) -> string {
+	b := strings.builder_make(context.temp_allocator)
+	contracts.write_json_string(&b, value)
+	return strings.to_string(b)
 }
 
 validation_result :: proc(command: project_service.Validate_Project_Path_Command, ok: bool, error_code, message: string) -> project_service.Project_Path_Validation_Result {
@@ -202,7 +213,7 @@ validation_result :: proc(command: project_service.Validate_Project_Path_Command
 		details = strings.concatenate({"{\"transport\":\"bridge_ws\",\"command\":\"validate_project_path\",\"bridge_id\":\"", command.bridge_id, "\",\"vcs_kind\":\"", command.vcs_kind, "\",\"command_id\":\"", command.command_id, "\"}"})
 	} else {
 		validation_error = strings.clone(message)
-		details = strings.concatenate({"{\"transport\":\"bridge_ws\",\"command\":\"validate_project_path\",\"bridge_id\":\"", command.bridge_id, "\",\"command_id\":\"", command.command_id, "\",\"error\":{\"code\":\"", error_code, "\",\"message\":\"", message, "\"}}"})
+		details = strings.concatenate({"{\"transport\":\"bridge_ws\",\"command\":\"validate_project_path\",\"bridge_id\":\"", command.bridge_id, "\",\"command_id\":\"", command.command_id, "\",\"error\":{\"code\":\"", bridge_runtime_json_escaped_temp(error_code), "\",\"message\":\"", bridge_runtime_json_escaped_temp(message), "\"}}"})
 	}
 	return project_service.Project_Path_Validation_Result{type = "project_path_validation_result", command_id = command.command_id, project_id = command.project_id, path = command.path, ok = ok, validation_error = validation_error, details_json = details}
 }
