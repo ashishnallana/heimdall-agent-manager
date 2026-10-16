@@ -40,6 +40,40 @@ Taskchain_Service :: struct {
 	// engine is the Task System v2 service. Optional for the same reason: a bare
 	// service (tests) records nothing and schedules nothing.
 	engine: ^taskv2.Service,
+	// uow_factory (Task System v2, M2 / review C1): every mutating verb runs
+	// its row writes AND the engine (events, refold, matcher) in ONE unit of
+	// work under tx_mutex. The engine's own entry points nest as SAVEPOINTs
+	// and hand their effects to the outer commit. nil in bare tests (autocommit).
+	uow_factory: ^iface.Unit_Of_Work_Factory,
+}
+
+// verb_begin / verb_end wrap a mutating taskchain verb in one unit of work.
+// Without a factory (unit tests over fake repos) they are no-ops.
+Verb_Tx :: struct {
+	tx:  iface.Unit_Of_Work,
+	has: bool,
+}
+
+verb_begin :: proc(service: ^Taskchain_Service) -> Verb_Tx {
+	if service == nil || service.uow_factory == nil do return Verb_Tx{}
+	tx, ok, _ := iface.unit_of_work_begin(service.uow_factory)
+	if !ok do return Verb_Tx{}
+	return Verb_Tx{tx = tx, has = true}
+}
+
+verb_end :: proc(v: ^Verb_Tx, ok: bool) -> domain.Domain_Error {
+	if !v.has do return domain.Domain_Error{}
+	v.has = false
+	if ok {
+		if committed, err := iface.unit_of_work_commit(&v.tx); !committed do return err
+		return domain.Domain_Error{}
+	}
+	iface.unit_of_work_rollback(&v.tx)
+	return domain.Domain_Error{}
+}
+
+set_uow_factory :: proc(service: ^Taskchain_Service, factory: ^iface.Unit_Of_Work_Factory) {
+	service.uow_factory = factory
 }
 
 Create_Chain_Input :: struct {
@@ -561,13 +595,21 @@ set_own_chain_description :: proc(service: ^Taskchain_Service, auth: contracts.A
 	return update_chain(service, auth, domain.Task_Chain_ID(chain_id), Update_Chain_Input{description = next, has_description = true})
 }
 
-publish_chain :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, chain_id: domain.Task_Chain_ID) -> (domain.Task_Chain, bool, domain.Domain_Error) {
+publish_chain_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, chain_id: domain.Task_Chain_ID) -> (domain.Task_Chain, bool, domain.Domain_Error) {
 	chain, ok, err := get_chain(service, auth, chain_id)
 	if !ok do return domain.Task_Chain{}, false, err
 	if auth.kind == .Instance_Token && !is_chain_coordinator(service, chain, auth.agent_instance_id) {
 		return domain.Task_Chain{}, false, domain.domain_error(.Forbidden, "only chain coordinator can perform this action")
 	}
 	if chain.publish_state != .Draft do return domain.Task_Chain{}, false, domain.domain_error(.Conflict, "chain is already published")
+	// Atomic: every task's brief must be publishable, or nothing is published.
+	if drafts, derr := iface.taskchain_list_tasks_by_chain(service.repo, chain_id, chain.owner_user_id); derr.code == .None {
+		problems := make(map[string][]string, context.temp_allocator)
+		for t in drafts {
+			if missing := brief_publish_problems(service, chain, t); len(missing) > 0 do problems[string(t.task_id)] = missing
+		}
+		if len(problems) > 0 do return domain.Task_Chain{}, false, publish_problems_error(problems)
+	}
 	now := platform.clock_now(service.clock)
 	chain.publish_state = .Published
 	chain.status = .Active
@@ -594,7 +636,7 @@ publish_chain :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context,
 	return saved_chain, true, domain.Domain_Error{}
 }
 
-change_chain_status :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, chain_id: domain.Task_Chain_ID, next: domain.Task_Chain_Status) -> (domain.Task_Chain, bool, domain.Domain_Error) {
+change_chain_status_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, chain_id: domain.Task_Chain_ID, next: domain.Task_Chain_Status) -> (domain.Task_Chain, bool, domain.Domain_Error) {
 	chain, ok, err := get_chain(service, auth, chain_id)
 	if !ok do return domain.Task_Chain{}, false, err
 	if auth.kind == .Instance_Token && !is_chain_coordinator(service, chain, auth.agent_instance_id) {
@@ -826,8 +868,63 @@ build_brief_json :: proc(existing_brief, title, description, assignee_agent_id: 
 	taskv2.json_raw(&o, "review_roles", strings.to_string(rb))
 	if assignee != "" do taskv2.json_str(&o, "assignee", assignee)
 	if b_ok do taskv2.json_raw(&o, "budget", budget)
+	if output, ook := jsonx.extract_raw_object(existing_brief, "output", true); ook do taskv2.json_raw(&o, "output", output)
 	if auto, aok := jsonx.extract_bool_literal(existing_brief, "auto_submit", true); aok do taskv2.json_bool(&o, "auto_submit", auto)
 	return taskv2.json_end(&o)
+}
+
+// ---- brief validation at publish (plan §2.4 / M2) ----------------------------------
+BRIEF_GOAL_MAX        :: 2000
+BRIEF_ACCEPTANCE_MAX  :: 20
+BRIEF_ACCEPTANCE_ITEM :: 200
+
+// brief_publish_problems lists what a task's brief is missing for publish:
+// "goal" (empty or > 2k), "acceptance" (none, > 20, or an item > 200 chars),
+// "verify" (empty unless verify:"none" with an output contract),
+// "review_role:<r>" (no fleet row in the chain carries the role). Gates are
+// exempt (decided, not worked).
+brief_publish_problems :: proc(service: ^Taskchain_Service, chain: domain.Task_Chain, task: domain.Task) -> []string {
+	out := make([dynamic]string, context.temp_allocator)
+	if task.kind == .Gate do return out[:]
+	brief := task.brief_json
+	goal := strings.trim_space(jsonx.extract_string(brief, "goal", "", true, context.temp_allocator))
+	if goal == "" || len(goal) > BRIEF_GOAL_MAX do append(&out, "goal")
+	acceptance := jsonx.extract_string_array(brief, "acceptance", true, context.temp_allocator)
+	acc_ok := len(acceptance) >= 1 && len(acceptance) <= BRIEF_ACCEPTANCE_MAX
+	for a in acceptance do if strings.trim_space(a) == "" || len(a) > BRIEF_ACCEPTANCE_ITEM do acc_ok = false
+	if !acc_ok do append(&out, "acceptance")
+	verify := strings.trim_space(jsonx.extract_string(brief, "verify", "", true, context.temp_allocator))
+	_, has_output := jsonx.extract_raw_object(brief, "output", true, context.temp_allocator)
+	if verify == "" || (verify == "none" && !has_output) do append(&out, "verify")
+	roles := jsonx.extract_string_array(brief, "review_roles", true, context.temp_allocator)
+	if len(roles) > 0 {
+		fleets, ferr := iface.taskchain_list_fleets_by_chain(service.repo, chain.chain_id, chain.owner_user_id)
+		for r in roles {
+			covered := false
+			if ferr.code == .None do for f in fleets do if fleet_has_role(f, r) { covered = true; break }
+			if !covered do append(&out, fmt.tprintf("review_role:%s", r))
+		}
+	}
+	return out[:]
+}
+
+@(private = "file")
+publish_problems_error :: proc(problems: map[string][]string) -> domain.Domain_Error {
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_string(&b, `{"code":"brief_incomplete","tasks":[`)
+	first := true
+	for task_id, missing in problems {
+		if !first do strings.write_byte(&b, ',')
+		first = false
+		strings.write_string(&b, `{"task_id":"`); contracts.write_json_string(&b, task_id); strings.write_string(&b, `","missing":[`)
+		for m, i in missing {
+			if i > 0 do strings.write_byte(&b, ',')
+			strings.write_byte(&b, '"'); contracts.write_json_string(&b, m); strings.write_byte(&b, '"')
+		}
+		strings.write_string(&b, "]}")
+	}
+	strings.write_string(&b, "]}")
+	return domain.domain_error(.Validation_Failed, "brief incomplete: every published task needs goal (≤2k), ≥1 acceptance item (≤20×200), verify (or verify:none with an output contract) and a fleet row per review role", strings.to_string(b))
 }
 
 // ensure_fleet_role guarantees a fleet row for `agent_id` in the chain carrying
@@ -878,14 +975,16 @@ fleet_roles_with :: proc(roles_json, role: string) -> string {
 	return strings.to_string(b)
 }
 
-create_task :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, input: Create_Task_Input) -> (domain.Task, bool, domain.Domain_Error) {
+create_task_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, input: Create_Task_Input) -> (domain.Task, bool, domain.Domain_Error) {
 	// WRITE. REQ-SEC-3 (close the create_task hole): fetch owner-scoped, then
 	// enforce membership EXPLICITLY here. Cross-owner is rejected as Not_Found by
 	// get_chain_for_read (require_owner); a same-owner non-member is Forbidden.
 	chain, ok, err := get_chain_for_read(service, auth, input.chain_id)
 	if !ok do return domain.Task{}, false, err
-	if auth.kind == .Instance_Token && !is_instance_member_or_coordinator(service, chain, auth.agent_instance_id) {
-		return domain.Task{}, false, domain.domain_error(.Forbidden, "only a member or coordinator of the chain can create tasks")
+	// Task System v2: only the chain COORDINATOR (or the owner) shapes the
+	// ticket board; workers work their lease. (Ticket chains only — M3b.)
+	if auth.kind == .Instance_Token && !is_chain_coordinator(service, chain, auth.agent_instance_id) {
+		return domain.Task{}, false, domain.domain_error(.Forbidden, "only the chain coordinator or the owner can create tasks")
 	}
 	requested_owner := domain.User_ID(input.owner_user_id)
 	if requested_owner == "" do requested_owner = chain.owner_user_id
@@ -932,7 +1031,16 @@ create_task :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, i
 		created_at = now,
 		updated_at = now,
 	}
-	if task.publish_state == .Published do task.published_at = now
+	if task.publish_state == .Published {
+		// A task created on a LIVE chain is published at once, so its brief
+		// must be publishable now (the same rule publish applies to drafts).
+		if missing := brief_publish_problems(service, chain, task); len(missing) > 0 {
+			problems := make(map[string][]string, context.temp_allocator)
+			problems["(new task)"] = missing
+			return domain.Task{}, false, publish_problems_error(problems)
+		}
+		task.published_at = now
+	}
 	saved_task, save_ok, save_err := iface.taskchain_save_task(service.repo, task)
 	if !save_ok do return domain.Task{}, false, save_err
 
@@ -963,16 +1071,15 @@ task_has_work_lease :: proc(service: ^Taskchain_Service, task_id: domain.Task_ID
 	return false
 }
 
-update_task :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, task_id: domain.Task_ID, input: Update_Task_Input) -> (domain.Task, bool, domain.Domain_Error) {
+update_task_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, task_id: domain.Task_ID, input: Update_Task_Input) -> (domain.Task, bool, domain.Domain_Error) {
 	task, ok, err := get_task(service, auth, task_id)
 	if !ok do return domain.Task{}, false, err
 	chain, chain_ok, chain_err := iface.taskchain_get_chain(service.repo, task.chain_id)
 	if !chain_ok do return domain.Task{}, false, chain_err
 
 	if auth.kind == .Instance_Token {
-		// Members may edit; the coordinator may edit anything. (Holders are members.)
-		if !is_instance_member_or_coordinator(service, chain, auth.agent_instance_id) {
-			return domain.Task{}, false, domain.domain_error(.Forbidden, "only a member or coordinator can update task")
+		if !is_chain_coordinator(service, chain, auth.agent_instance_id) {
+			return domain.Task{}, false, domain.domain_error(.Forbidden, "only the chain coordinator or the owner can update a task")
 		}
 	}
 
@@ -1054,7 +1161,7 @@ update_task :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, t
 	return saved, true, domain.Domain_Error{}
 }
 
-publish_task :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, task_id: domain.Task_ID) -> (domain.Task, bool, domain.Domain_Error) {
+publish_task_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, task_id: domain.Task_ID) -> (domain.Task, bool, domain.Domain_Error) {
 	task, ok, err := get_task(service, auth, task_id)
 	if !ok do return domain.Task{}, false, err
 	chain, chain_ok, chain_err := iface.taskchain_get_chain(service.repo, task.chain_id)
@@ -1062,9 +1169,14 @@ publish_task :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, 
 	if chain.publish_state != .Published do return domain.Task{}, false, domain.domain_error(.Conflict, "cannot publish task before chain is published")
 	if task.publish_state != .Draft do return domain.Task{}, false, domain.domain_error(.Conflict, "task is already published")
 	if auth.kind == .Instance_Token {
-		if !is_instance_member_or_coordinator(service, chain, auth.agent_instance_id) {
-			return domain.Task{}, false, domain.domain_error(.Forbidden, "only a member or coordinator can publish task")
+		if !is_chain_coordinator(service, chain, auth.agent_instance_id) {
+			return domain.Task{}, false, domain.domain_error(.Forbidden, "only the chain coordinator or the owner can publish a task")
 		}
+	}
+	if missing := brief_publish_problems(service, chain, task); len(missing) > 0 {
+		problems := make(map[string][]string, context.temp_allocator)
+		problems[string(task.task_id)] = missing
+		return domain.Task{}, false, publish_problems_error(problems)
 	}
 	now := platform.clock_now(service.clock)
 	task.publish_state = .Published
@@ -1420,7 +1532,8 @@ add_task_dependency_row :: proc(service: ^Taskchain_Service, auth: contracts.Aut
 // add_task_dependency writes the edge and tells the engine: a dependency added to
 // a LEASED task expires its lease first (reason dep_added, non-counting), then
 // the chain is re-planned.
-add_task_dependency :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, task_id, depends_on_task_id: domain.Task_ID) -> (domain.Task_Dependency, bool, domain.Domain_Error) {
+add_task_dependency_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, task_id, depends_on_task_id: domain.Task_ID) -> (domain.Task_Dependency, bool, domain.Domain_Error) {
+	if ferr := require_coordinator_for_task(service, auth, task_id, "add a dependency"); ferr.code != .None do return domain.Task_Dependency{}, false, ferr
 	saved_dep, dep_save_ok, dep_save_err := add_task_dependency_row(service, auth, task_id, depends_on_task_id)
 	if !dep_save_ok do return domain.Task_Dependency{}, false, dep_save_err
 	if service.engine != nil {
@@ -1431,7 +1544,8 @@ add_task_dependency :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Co
 	return saved_dep, true, domain.Domain_Error{}
 }
 
-remove_task_dependency :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, task_id, depends_on_task_id: domain.Task_ID) -> (bool, domain.Domain_Error) {
+remove_task_dependency_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, task_id, depends_on_task_id: domain.Task_ID) -> (bool, domain.Domain_Error) {
+	if ferr := require_coordinator_for_task(service, auth, task_id, "remove a dependency"); ferr.code != .None do return false, ferr
 	task, ok, err := get_task(service, auth, task_id)
 	if !ok do return false, err
 	removed, remove_err := iface.taskchain_remove_dependency(service.repo, task.task_id, depends_on_task_id, task.owner_user_id)
@@ -1712,7 +1826,7 @@ list_fleets :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, c
 
 list_chain_fleets :: list_fleets
 
-upsert_fleet :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, input: Upsert_Fleet_Input) -> (domain.Task_Chain_Fleet, domain.Domain_Error) {
+upsert_fleet_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, input: Upsert_Fleet_Input) -> (domain.Task_Chain_Fleet, domain.Domain_Error) {
 	trimmed_agent := strings.trim_space(input.agent_id)
 	if trimmed_agent == "" do return domain.Task_Chain_Fleet{}, domain.domain_error(.Validation_Failed, "agent_id is required")
 	chain, ok, err := get_chain(service, auth, input.chain_id)
@@ -1793,7 +1907,7 @@ upsert_fleet :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, 
 
 upsert_chain_fleet :: upsert_fleet
 
-delete_fleet :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, chain_id: domain.Task_Chain_ID, agent_id: string) -> (bool, domain.Domain_Error) {
+delete_fleet_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, chain_id: domain.Task_Chain_ID, agent_id: string) -> (bool, domain.Domain_Error) {
 	trimmed_agent := strings.trim_space(agent_id)
 	if trimmed_agent == "" do return false, domain.domain_error(.Validation_Failed, "agent_id is required")
 	chain, ok, err := get_chain(service, auth, chain_id)
@@ -1834,7 +1948,7 @@ resolve_fleet_launch_model :: proc(service: ^Taskchain_Service, bridge_id, provi
 // cancel_task is a human/coordinator verb: the engine records `cancelled`,
 // reclaims any lease (stop[] the holder) and re-plans the chain. Dependents are
 // not touched (a cancelled prerequisite unblocks them — the human decided).
-cancel_task :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, task_id: domain.Task_ID, reason: string) -> (domain.Task, bool, domain.Domain_Error) {
+cancel_task_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, task_id: domain.Task_ID, reason: string) -> (domain.Task, bool, domain.Domain_Error) {
 	task, ok, err := get_task(service, auth, task_id)
 	if !ok do return domain.Task{}, false, err
 	if auth.kind == .Instance_Token {
@@ -1849,4 +1963,92 @@ cancel_task :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, t
 	if eng_err := taskv2.cancel_task(service.engine, task, engine_actor(auth), reason); eng_err.code != .None do return domain.Task{}, false, eng_err
 	if fresh, fresh_ok, _ := iface.taskchain_get_task(service.repo, task.task_id); fresh_ok do task = fresh
 	return task, true, domain.Domain_Error{}
+}
+
+// ---- one-UoW wrappers (review C1) --------------------------------------------------
+// Each mutating verb runs entirely inside one unit of work; the *_impl bodies
+// are unchanged and the engine calls inside them nest as SAVEPOINTs.
+
+publish_chain :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, chain_id: domain.Task_Chain_ID) -> (domain.Task_Chain, bool, domain.Domain_Error) {
+	v := verb_begin(service)
+	out, ok, err := publish_chain_impl(service, auth, chain_id)
+	if cerr := verb_end(&v, ok); cerr.code != .None do return domain.Task_Chain{}, false, cerr
+	return out, ok, err
+}
+
+change_chain_status :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, chain_id: domain.Task_Chain_ID, next: domain.Task_Chain_Status) -> (domain.Task_Chain, bool, domain.Domain_Error) {
+	v := verb_begin(service)
+	out, ok, err := change_chain_status_impl(service, auth, chain_id, next)
+	if cerr := verb_end(&v, ok); cerr.code != .None do return domain.Task_Chain{}, false, cerr
+	return out, ok, err
+}
+
+create_task :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, input: Create_Task_Input) -> (domain.Task, bool, domain.Domain_Error) {
+	v := verb_begin(service)
+	out, ok, err := create_task_impl(service, auth, input)
+	if cerr := verb_end(&v, ok); cerr.code != .None do return domain.Task{}, false, cerr
+	return out, ok, err
+}
+
+update_task :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, task_id: domain.Task_ID, input: Update_Task_Input) -> (domain.Task, bool, domain.Domain_Error) {
+	v := verb_begin(service)
+	out, ok, err := update_task_impl(service, auth, task_id, input)
+	if cerr := verb_end(&v, ok); cerr.code != .None do return domain.Task{}, false, cerr
+	return out, ok, err
+}
+
+publish_task :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, task_id: domain.Task_ID) -> (domain.Task, bool, domain.Domain_Error) {
+	v := verb_begin(service)
+	out, ok, err := publish_task_impl(service, auth, task_id)
+	if cerr := verb_end(&v, ok); cerr.code != .None do return domain.Task{}, false, cerr
+	return out, ok, err
+}
+
+add_task_dependency :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, task_id, depends_on_task_id: domain.Task_ID) -> (domain.Task_Dependency, bool, domain.Domain_Error) {
+	v := verb_begin(service)
+	out, ok, err := add_task_dependency_impl(service, auth, task_id, depends_on_task_id)
+	if cerr := verb_end(&v, ok); cerr.code != .None do return domain.Task_Dependency{}, false, cerr
+	return out, ok, err
+}
+
+remove_task_dependency :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, task_id, depends_on_task_id: domain.Task_ID) -> (bool, domain.Domain_Error) {
+	v := verb_begin(service)
+	ok, err := remove_task_dependency_impl(service, auth, task_id, depends_on_task_id)
+	if cerr := verb_end(&v, ok); cerr.code != .None do return false, cerr
+	return ok, err
+}
+
+upsert_fleet :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, input: Upsert_Fleet_Input) -> (domain.Task_Chain_Fleet, domain.Domain_Error) {
+	v := verb_begin(service)
+	out, err := upsert_fleet_impl(service, auth, input)
+	if cerr := verb_end(&v, err.code == .None); cerr.code != .None do return domain.Task_Chain_Fleet{}, cerr
+	return out, err
+}
+
+delete_fleet :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, chain_id: domain.Task_Chain_ID, agent_id: string) -> (bool, domain.Domain_Error) {
+	v := verb_begin(service)
+	ok, err := delete_fleet_impl(service, auth, chain_id, agent_id)
+	if cerr := verb_end(&v, ok); cerr.code != .None do return false, cerr
+	return ok, err
+}
+
+cancel_task :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, task_id: domain.Task_ID, reason: string) -> (domain.Task, bool, domain.Domain_Error) {
+	v := verb_begin(service)
+	out, ok, err := cancel_task_impl(service, auth, task_id, reason)
+	if cerr := verb_end(&v, ok); cerr.code != .None do return domain.Task{}, false, cerr
+	return out, ok, err
+}
+
+// require_coordinator_for_task: instance tokens may shape the board (create /
+// update / depend / publish / cancel) only as the chain coordinator.
+require_coordinator_for_task :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, task_id: domain.Task_ID, what: string) -> domain.Domain_Error {
+	if auth.kind != .Instance_Token do return domain.Domain_Error{}
+	task, ok, err := iface.taskchain_get_task(service.repo, task_id)
+	if !ok do return err
+	chain, cok, cerr := iface.taskchain_get_chain(service.repo, task.chain_id)
+	if !cok do return cerr
+	if !is_chain_coordinator(service, chain, auth.agent_instance_id) {
+		return domain.domain_error(.Forbidden, fmt.tprintf("only the chain coordinator or the owner can %s", what))
+	}
+	return domain.Domain_Error{}
 }

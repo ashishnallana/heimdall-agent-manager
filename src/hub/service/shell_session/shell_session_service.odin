@@ -2559,3 +2559,13 @@ _shell_exited_event_json :: proc(session_id, status: string, exit_code: int, exi
 	strings.write_string(&b, "}")
 	return strings.to_string(b)
 }
+
+// shell_session_get_row is the TRUSTED by-id lookup for hub-internal consumers
+// of a bridge event that was already applied (Task System v2 verify facets):
+// scoped by the reporting bridge like handle_exited's fallback, never by user.
+shell_session_get_row :: proc(svc: ^Shell_Session_Service, bridge_id, session_id: string) -> (domain.Shell_Session, bool) {
+	if svc == nil || svc.repo == nil || session_id == "" do return {}, false
+	session, found, err := iface.shell_session_get_by_id(svc.repo, bridge_id, session_id)
+	if !found || err.code != .None do return {}, false
+	return session, true
+}

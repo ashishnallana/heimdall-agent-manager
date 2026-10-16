@@ -29,6 +29,8 @@ Taskchain_Handlers :: struct {
 	content: ^content_service.Content_Service,
 	projects: ^project_service.Project_Service,
 	event_bus: ^events.User_Event_Bus,
+	// task_engine: human verbs (review / reopen / answer / fetch), M2.
+	task_engine: ^taskv2.Service,
 }
 
 Task_Chain_Search_Document_Wire :: struct {
@@ -1474,12 +1476,77 @@ publish_task_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req))
 }
 
-// change_task_status_handler: `POST …/tasks/{id}/status` is GONE (Task System v2).
-// Agents never set a status; the five-state projection is a fold over task_events
-// and only the lease/review verbs move it. 410 until M2 lands the human verbs
-// (approve / request-changes / reopen / answer).
-change_task_status_handler :: proc(ctx: rawptr, req: Request) -> Response {
-	return respond_gone(req, "task status is derived from events; use the lease/review verbs (POST …/status was removed in Task System v2)")
+// Human verbs (Task System v2, M2). Owner-scoped like every task route; the
+// five-state projection is a fold over task_events, so these append events
+// (review_posted → gate, reopened, answered) rather than setting a status.
+
+// POST …/tasks/{id}/review  {verdict: approve|request_changes, findings?: […]}
+user_review_task_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Taskchain_Handlers)(ctx)
+	auth_ctx, ok, auth_resp := require_auth(h.auth, req)
+	if !ok do return auth_resp
+	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
+	chain_id := domain.Task_Chain_ID(path_part(req.path, 4))
+	task_id := domain.Task_ID(path_part(req.path, 6))
+	if matched, mismatch_resp := require_task_path_scope(h, auth_ctx, chain_id, task_id, req); !matched do return mismatch_resp
+	res, rok, err := taskv2.user_review(h.task_engine, auth_ctx, task_id, taskv2.Review_Input{verdict = json_string(req.body, "verdict"), findings_json = verbatim_field(req.body, "findings")})
+	if !rok do return respond_error(err, req.request_id)
+	publish_task_changed(h, string(res.task.owner_user_id), string(res.task.task_id), string(res.task.chain_id), "updated")
+	b := strings.builder_make(); write_task_json(&b, res.task)
+	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req))
+}
+
+// POST …/tasks/{id}/reopen
+reopen_task_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Taskchain_Handlers)(ctx)
+	auth_ctx, ok, auth_resp := require_auth(h.auth, req)
+	if !ok do return auth_resp
+	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
+	chain_id := domain.Task_Chain_ID(path_part(req.path, 4))
+	task_id := domain.Task_ID(path_part(req.path, 6))
+	if matched, mismatch_resp := require_task_path_scope(h, auth_ctx, chain_id, task_id, req); !matched do return mismatch_resp
+	task, tok, terr := taskchain_service.get_task(h.taskchains, auth_ctx, task_id)
+	if !tok do return respond_error(terr, req.request_id)
+	fresh, rok, err := taskv2.task_reopen(h.task_engine, task, taskv2.actor_from_auth(auth_ctx))
+	if !rok do return respond_error(err, req.request_id)
+	publish_task_changed(h, string(fresh.owner_user_id), string(fresh.task_id), string(fresh.chain_id), "updated")
+	publish_chain_changed(h, string(fresh.owner_user_id), string(fresh.chain_id), "updated")
+	b := strings.builder_make(); write_task_json(&b, fresh)
+	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req))
+}
+
+// POST …/tasks/{id}/answer  {note?}
+answer_task_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Taskchain_Handlers)(ctx)
+	auth_ctx, ok, auth_resp := require_auth(h.auth, req)
+	if !ok do return auth_resp
+	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
+	chain_id := domain.Task_Chain_ID(path_part(req.path, 4))
+	task_id := domain.Task_ID(path_part(req.path, 6))
+	if matched, mismatch_resp := require_task_path_scope(h, auth_ctx, chain_id, task_id, req); !matched do return mismatch_resp
+	task, tok, terr := taskchain_service.get_task(h.taskchains, auth_ctx, task_id)
+	if !tok do return respond_error(terr, req.request_id)
+	fresh, aok, err := taskv2.task_answer(h.task_engine, task, taskv2.actor_from_auth(auth_ctx), json_string(req.body, "note"))
+	if !aok do return respond_error(err, req.request_id)
+	publish_task_changed(h, string(fresh.owner_user_id), string(fresh.task_id), string(fresh.chain_id), "updated")
+	b := strings.builder_make(); write_task_json(&b, fresh)
+	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req))
+}
+
+// GET …/tasks/{id}/fetch?ref=…  (human read of an event or facet)
+fetch_task_ref_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Taskchain_Handlers)(ctx)
+	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
+	if !ok do return auth_resp
+	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
+	chain_id := domain.Task_Chain_ID(path_part(req.path, 4))
+	task_id := domain.Task_ID(path_part(req.path, 6))
+	if matched, mismatch_resp := require_task_path_scope(h, auth_ctx, chain_id, task_id, req); !matched do return mismatch_resp
+	task, tok, terr := taskchain_service.get_task_for_read(h.taskchains, auth_ctx, task_id)
+	if !tok do return respond_error(terr, req.request_id)
+	raw, fok, err := taskv2.task_fetch(h.task_engine, task, query_value(req.query, "ref"))
+	if !fok do return respond_error(err, req.request_id)
+	return respond_success(raw, req.request_id, auth_ctx_server_time(req))
 }
 
 cancel_task_handler :: proc(ctx: rawptr, req: Request) -> Response {

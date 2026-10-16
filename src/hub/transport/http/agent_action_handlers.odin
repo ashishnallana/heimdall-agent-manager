@@ -89,6 +89,97 @@ agent_action_lease_heartbeat_handler :: proc(ctx: rawptr, req: Request) -> Respo
 	return respond_success(fmt.tprintf("{{\"lease\":%s}}", string(data)), req.request_id, auth_ctx_server_time(req), 200)
 }
 
+// ---- M2 lease verbs ------------------------------------------------------------------
+
+// POST /api/v1/agent-actions/lease/submit  params: {lease_id?, summary, handoff?, output?, vcs?, verify?}
+agent_action_lease_submit_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Agent_Action_Handlers)(ctx)
+	auth, inst, ok, resp := require_instance_action_auth(h, req)
+	if !ok do return resp
+	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
+	// Facet bodies are stored VERBATIM: slice them out of the raw request
+	// (never through a parse → marshal round trip).
+	params := verbatim_params(req.body)
+	res, sok, err := taskv2.lease_submit(h.task_engine, auth, taskv2.Submit_Input{
+		lease_id = json_string(params, "lease_id"), summary = json_string(params, "summary"),
+		handoff_json = verbatim_field(params, "handoff"), output_json = verbatim_field(params, "output"),
+		vcs_json = verbatim_field(params, "vcs"), verify = json_string(params, "verify"),
+	})
+	if !sok do return respond_error(err, req.request_id)
+	publish_agent_action(h, inst, "lease_submit", fmt.tprintf("submitted %s (%s)", res.task.task_id, res.outcome))
+	publish_task_event(h.event_bus, string(res.task.owner_user_id), string(res.task.task_id), string(res.task.chain_id), "updated")
+	data, _ := json.marshal(make_simple_task_wire(res.task), JSON_MARSHAL_OPT, allocator = context.temp_allocator)
+	return respond_success(fmt.tprintf("{{\"outcome\":\"%s\",\"task\":%s}}", res.outcome, string(data)), req.request_id, auth_ctx_server_time(req), 200)
+}
+
+// POST /api/v1/agent-actions/lease/handoff  params: {lease_id?, summary, handoff?, vcs?}
+agent_action_lease_handoff_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Agent_Action_Handlers)(ctx)
+	auth, inst, ok, resp := require_instance_action_auth(h, req)
+	if !ok do return resp
+	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
+	params := verbatim_params(req.body)
+	task, hok, err := taskv2.lease_handoff(h.task_engine, auth, taskv2.Handoff_Input{lease_id = json_string(params, "lease_id"), summary = json_string(params, "summary"), handoff_json = verbatim_field(params, "handoff"), vcs_json = verbatim_field(params, "vcs")})
+	if !hok do return respond_error(err, req.request_id)
+	publish_agent_action(h, inst, "lease_handoff", fmt.tprintf("handed off %s", task.task_id))
+	publish_task_event(h.event_bus, string(task.owner_user_id), string(task.task_id), string(task.chain_id), "updated")
+	data, _ := json.marshal(make_simple_task_wire(task), JSON_MARSHAL_OPT, allocator = context.temp_allocator)
+	return respond_success(fmt.tprintf("{{\"task\":%s}}", string(data)), req.request_id, auth_ctx_server_time(req), 200)
+}
+
+// POST /api/v1/agent-actions/lease/block  params: {lease_id?, waiting_on:{kind, ref?, reason}, summary?}
+agent_action_lease_block_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Agent_Action_Handlers)(ctx)
+	auth, inst, ok, resp := require_instance_action_auth(h, req)
+	if !ok do return resp
+	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
+	params := verbatim_params(req.body)
+	task, bok, err := taskv2.lease_block(h.task_engine, auth, taskv2.Block_Input{lease_id = json_string(params, "lease_id"), waiting_on_json = verbatim_field(params, "waiting_on"), summary = json_string(params, "summary")})
+	if !bok do return respond_error(err, req.request_id)
+	publish_agent_action(h, inst, "lease_block", fmt.tprintf("blocked %s", task.task_id))
+	publish_task_event(h.event_bus, string(task.owner_user_id), string(task.task_id), string(task.chain_id), "updated")
+	data, _ := json.marshal(make_simple_task_wire(task), JSON_MARSHAL_OPT, allocator = context.temp_allocator)
+	return respond_success(fmt.tprintf("{{\"task\":%s}}", string(data)), req.request_id, auth_ctx_server_time(req), 200)
+}
+
+// POST /api/v1/agent-actions/review/post  params: {task_id?, verdict, findings?:[…]}
+agent_action_review_post_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Agent_Action_Handlers)(ctx)
+	auth, inst, ok, resp := require_instance_action_auth(h, req)
+	if !ok do return resp
+	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
+	params := verbatim_params(req.body)
+	res, rok, err := taskv2.review_post(h.task_engine, auth, taskv2.Review_Input{task_id = json_string(params, "task_id"), verdict = json_string(params, "verdict"), findings_json = verbatim_field(params, "findings")})
+	if !rok do return respond_error(err, req.request_id)
+	publish_agent_action(h, inst, "review_post", fmt.tprintf("reviewed %s: %s", res.task.task_id, json_string(params, "verdict")))
+	publish_task_event(h.event_bus, string(res.task.owner_user_id), string(res.task.task_id), string(res.task.chain_id), "updated")
+	data, _ := json.marshal(make_simple_task_wire(res.task), JSON_MARSHAL_OPT, allocator = context.temp_allocator)
+	return respond_success(fmt.tprintf("{{\"gate\":\"%s\",\"task\":%s}}", gate_label(res.gate), string(data)), req.request_id, auth_ctx_server_time(req), 200)
+}
+
+gate_label :: proc(g: taskv2.Gate_Result) -> string {
+	switch g {
+	case .Approved: return "approved"
+	case .Changes_Requested: return "changes_requested"
+	case .Waiting: return "waiting"
+	}
+	return "waiting"
+}
+
+// POST /api/v1/agent-actions/task/fetch  params: {task_id, ref}
+agent_action_task_fetch_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Agent_Action_Handlers)(ctx)
+	auth, _, ok, resp := require_instance_action_auth(h, req)
+	if !ok do return resp
+	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
+	params := json_object_raw(req.body, "params")
+	task, tok, terr := taskchain_service.get_task_for_read(h.taskchains, auth, domain.Task_ID(json_string(params, "task_id")))
+	if !tok do return respond_error(terr, req.request_id)
+	raw, fok, err := taskv2.task_fetch(h.task_engine, task, json_string(params, "ref"))
+	if !fok do return respond_error(err, req.request_id)
+	return respond_success(raw, req.request_id, auth_ctx_server_time(req), 200)
+}
+
 agent_action_chat_send_to_user_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Agent_Action_Handlers)(ctx)
 	auth, inst, ok, resp := require_instance_action_auth(h, req)
@@ -312,16 +403,6 @@ agent_action_chain_show_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	b := strings.builder_make()
 	write_chain_json(&b, chain)
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 200)
-}
-
-// agent_action_chain_subscribe_handler: removed in Task System v2 (410 Gone until M2 replaces it).
-agent_action_chain_subscribe_handler :: proc(ctx: rawptr, req: Request) -> Response {
-	return respond_gone(req, "task-chain subscriptions were removed in Task System v2; attention events reach the coordinator directly")
-}
-
-// agent_action_chain_unsubscribe_handler: removed in Task System v2 (410 Gone until M2 replaces it).
-agent_action_chain_unsubscribe_handler :: proc(ctx: rawptr, req: Request) -> Response {
-	return respond_gone(req, "task-chain subscriptions were removed in Task System v2")
 }
 
 agent_action_chat_fetch_handler :: proc(ctx: rawptr, req: Request) -> Response {
@@ -599,21 +680,6 @@ agent_action_task_comment_handler :: proc(ctx: rawptr, req: Request) -> Response
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 201)
 }
 
-// agent_action_task_status_handler: removed in Task System v2 (410 Gone until M2 replaces it).
-agent_action_task_status_handler :: proc(ctx: rawptr, req: Request) -> Response {
-	return respond_gone(req, "task status is derived from events; use the lease verbs (lease next/heartbeat/submit/block/handoff) — `task status` was removed in Task System v2")
-}
-
-// agent_action_task_set_current_handler: removed in Task System v2 (410 Gone until M2 replaces it).
-agent_action_task_set_current_handler :: proc(ctx: rawptr, req: Request) -> Response {
-	return respond_gone(req, "`task set-current` was removed in Task System v2: your current task is the lease you hold (`lease next`)")
-}
-
-// agent_action_task_nudge_handler: removed in Task System v2 (410 Gone until M2 replaces it).
-agent_action_task_nudge_handler :: proc(ctx: rawptr, req: Request) -> Response {
-	return respond_gone(req, "`task nudge` was removed in Task System v2; leases and timers replace nudges")
-}
-
 agent_action_task_create_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Agent_Action_Handlers)(ctx)
 	auth, inst, ok, resp := require_instance_action_auth(h, req)
@@ -757,21 +823,6 @@ agent_action_task_depend_handler :: proc(ctx: rawptr, req: Request) -> Response 
 	b := strings.builder_make()
 	strings.write_string(&b, "{\"task_id\":\""); write_handler_json_string(&b, string(dep.task_id)); strings.write_string(&b, "\",\"depends_on_task_id\":\""); write_handler_json_string(&b, string(dep.depends_on_task_id)); strings.write_string(&b, "\"}")
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 201)
-}
-
-// agent_action_task_vote_handler: removed in Task System v2 (410 Gone until M2 replaces it).
-agent_action_task_vote_handler :: proc(ctx: rawptr, req: Request) -> Response {
-	return respond_gone(req, "`task vote` was removed in Task System v2; use `review post` (M2)")
-}
-
-// agent_action_task_subscribe_handler: removed in Task System v2 (410 Gone until M2 replaces it).
-agent_action_task_subscribe_handler :: proc(ctx: rawptr, req: Request) -> Response {
-	return respond_gone(req, "task subscriptions were removed in Task System v2")
-}
-
-// agent_action_task_unsubscribe_handler: removed in Task System v2 (410 Gone until M2 replaces it).
-agent_action_task_unsubscribe_handler :: proc(ctx: rawptr, req: Request) -> Response {
-	return respond_gone(req, "task subscriptions were removed in Task System v2")
 }
 
 
@@ -1333,4 +1384,16 @@ write_current_task_json :: proc(b: ^strings.Builder, task: domain.Task, role: do
 	strings.write_string(b, "\",\"comment_summary\":")
 	write_task_comment_summary_json(b, summary)
 	strings.write_string(b, "}")
+}
+
+// verbatim_params / verbatim_field slice JSON values out of the raw request
+// body without re-marshalling (facets are stored byte-for-byte, plan §4b).
+verbatim_params :: proc(body: string) -> string {
+	if p, ok := taskv2.raw_object_field(body, "params"); ok do return p
+	return ""
+}
+
+verbatim_field :: proc(obj, key: string) -> string {
+	if v, ok := taskv2.raw_value_field(obj, key); ok do return v
+	return ""
 }

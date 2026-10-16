@@ -1922,6 +1922,11 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
 				// terminal status the row does not have and that nothing later corrects.
 				if shell_session_svc.shell_session_handle_exited(h.shell_sessions, session_id, bridge_id, status, exit_code, exit_code_set, run_seq) {
 					shell_session_svc.shell_session_broadcast_status(h.shell_sessions, session_id, status, exit_code, exit_code_set)
+					// Task System v2 (§4d): a verify Run's exit is written by the HUB
+					// as the attempt's `verify` facet. The bridge enriches the frame
+					// with the tree's head/dirty after the run (vcs object) and the
+					// log tail; absent values are recorded as unknown.
+					bridge_record_verify_exit(h, bridge_id, session_id, status, exit_code, exit_code_set, text)
 				}
 			}
 			delete(session_id)
@@ -2195,13 +2200,6 @@ bridge_blob_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	headers[0] = contracts.HTTP_Header{name = "Cache-Control", value = "immutable, max-age=31536000"}
 	resp.headers = headers
 	return resp
-}
-
-// bridge_actionable_tasks_handler: `GET /api/v1/bridge/actionable-tasks` was the
-// bridge-side task scheduler's poll. Task System v2 pushes leases; the bridge
-// never polls for work. 410 so an older bridge stops retrying.
-bridge_actionable_tasks_handler :: proc(ctx: rawptr, req: Request) -> Response {
-	return respond_gone(req, "bridge task polling was removed in Task System v2; the hub pushes leases via wake_agent")
 }
 
 revoke_bridge_handler :: proc(ctx: rawptr, req: Request) -> Response {
@@ -2866,4 +2864,26 @@ bridge_reader_write_pong :: proc(raw: rawptr, socket: net.TCP_Socket, payload: s
 
 pane_reader_write_pong :: proc(raw: rawptr, socket: net.TCP_Socket, payload: string) -> bool {
 	return shell_session_svc.shell_session_enqueue_viewer_control((^shell_session_svc.Shell_Session_Service)(raw), socket, 0xA, payload)
+}
+
+
+// bridge_record_verify_exit forwards a terminal verify Run session to the task
+// engine (hub-written verify facet, plan §4d). Only sessions labelled by
+// `ham-ctl verify` ("verify <task> #<attempt> @<head>") are attributed.
+bridge_record_verify_exit :: proc(h: ^Bridge_Handlers, bridge_id, session_id, status: string, exit_code: int, exit_code_set: bool, frame: string) {
+	if h == nil || h.task_engine == nil || h.shell_sessions == nil do return
+	session, ok := shell_session_svc.shell_session_get_row(h.shell_sessions, bridge_id, session_id)
+	if !ok || !strings.has_prefix(session.label, taskv2.VERIFY_LABEL_PREFIX) do return
+	vcs := json_object_raw(frame, "vcs")
+	dirty := ""
+	if d, dok := jsonx.extract_bool_literal(vcs, "dirty", true); dok do dirty = "true" if d else "false"
+	duration := i64(0)
+	if s_ms, sok := platform.rfc3339_to_unix_ms(session.started_at); sok {
+		if e_ms, eok := platform.rfc3339_to_unix_ms(session.finished_at); eok && e_ms >= s_ms do duration = e_ms - s_ms
+	}
+	taskv2.on_verify_session_exited(h.task_engine, taskv2.Verify_Exit{
+		session_id = session_id, label = session.label, owner_user_id = session.owner_user_id,
+		status = status, exit_code = exit_code, exit_code_set = exit_code_set, duration_ms = duration,
+		head_at_end = json_string(vcs, "head"), dirty = dirty, tail = json_string(frame, "tail"),
+	})
 }
