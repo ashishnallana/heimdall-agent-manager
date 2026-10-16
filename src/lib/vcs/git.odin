@@ -135,6 +135,48 @@ git_repo_head_sha :: proc(repo: string) -> (string, bool, string) {
 	return strings.clone(strings.trim_space(out)), true, "git head sha ok"
 }
 
+git_worktree_add_detached :: proc(repo, path, rev: string) -> (bool, string) {
+	target_rev := strings.trim_space(rev)
+	if target_rev == "" do target_rev = "HEAD"
+	_ = os.make_directory_all(vcs_workspace_parent(path))
+	return vcs_run_ok([]string{"git", "-C", repo, "worktree", "add", "--detach", path, target_rev})
+}
+
+git_worktree_remove_force :: proc(repo, path: string) -> (bool, string) {
+	base_repo := strings.trim_space(repo)
+	if base_repo == "" do base_repo = path
+	ok, msg := vcs_run_ok([]string{"git", "-C", base_repo, "worktree", "remove", "--force", path})
+	_, _ = vcs_run_ok([]string{"git", "-C", base_repo, "worktree", "prune"})
+	return ok, msg
+}
+
+git_repo_is_clean :: proc(repo: string) -> bool {
+	out, ok, _ := vcs_run([]string{"git", "-C", repo, "status", "--porcelain=v1", "-uall"})
+	if !ok do return false
+	for line in strings.split(out, "\n") {
+		if strings.trim_space(line) == "" || len(line) < 3 do continue
+		status := strings.trim_space(line[:2])
+		path := strings.trim_space(line[3:])
+		if strings.contains(status, "?") && git_is_probable_artifact_blob_path(path) do continue
+		return false
+	}
+	return true
+}
+
+git_commit_subjects_since :: proc(repo, base_sha: string) -> (string, bool) {
+	base := strings.trim_space(base_sha)
+	if base == "" do return "", false
+	out, ok, _ := vcs_run([]string{"git", "-C", repo, "log", "--reverse", "--format=%s", fmt.tprintf("%s..HEAD", base)})
+	if !ok do return "", false
+	subjects := make([dynamic]string, context.temp_allocator)
+	for line in strings.split(out, "\n") {
+		s := strings.trim_space(line)
+		if s != "" do append(&subjects, s)
+	}
+	if len(subjects) == 0 do return "", false
+	return strings.clone(strings.join(subjects[:], "; ", context.temp_allocator)), true
+}
+
 git_repo_status :: proc(repo, diff_base_sha: string) -> (Vcs_Status, bool, string) {
 	out, ok, msg := vcs_run([]string{"git", "-C", repo, "status", "--porcelain=v1", "-uall"})
 	if !ok do return Vcs_Status{}, false, msg

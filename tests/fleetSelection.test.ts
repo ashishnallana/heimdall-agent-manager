@@ -11,6 +11,18 @@ import {
   changedFleetEntries,
   resolvedFleetProviderModel,
   seedPerBridgeProviderModelDrafts,
+  normalizeFleetRoles,
+  toggleFleetRole,
+  formatFleetRolesBadge,
+  seedFleetRolesDrafts,
+  seedFleetBridgeIdDrafts,
+  seedFleetMinWarmDrafts,
+  seedFleetIdleTtlDrafts,
+  getOriginalFleetRoles,
+  getOriginalFleetBridgeId,
+  getOriginalFleetMinWarm,
+  getOriginalFleetIdleTtl,
+  fleetRolesEqual,
   type FleetProviderModel,
   type ChangedFleetEntry,
 } from '../src/ui/components/tasks/fleetSelection.ts';
@@ -410,3 +422,153 @@ test('summarizeFleetRestartResults aggregates restarted instances and failure me
   assert.equal(summary.failures[0].instance_id, 'inst_fail_1');
   assert.equal(summary.failures[0].message, 'Instance busy');
 });
+
+// ---------------------------------------------------------------------------
+// Task System v2 M3: Fleet placement roles, bridge_id, provider, model, min_warm, idle_ttl_seconds
+// ---------------------------------------------------------------------------
+
+test('normalizeFleetRoles and toggleFleetRole enforce valid non-empty roles in canonical order', () => {
+  assert.deepEqual(normalizeFleetRoles(undefined), ['worker', 'reviewer']);
+  assert.deepEqual(normalizeFleetRoles([]), ['worker', 'reviewer']);
+  assert.deepEqual(normalizeFleetRoles(['reviewer']), ['reviewer']);
+  assert.deepEqual(normalizeFleetRoles(['reviewer', 'worker', 'invalid']), ['worker', 'reviewer']);
+
+  // Toggling adds a missing role and removes an existing role when >1 selected
+  assert.deepEqual(toggleFleetRole(['worker'], 'reviewer'), ['worker', 'reviewer']);
+  assert.deepEqual(toggleFleetRole(['worker', 'reviewer'], 'worker'), ['reviewer']);
+  // Cannot deselect the last remaining role
+  assert.deepEqual(toggleFleetRole(['worker'], 'worker'), ['worker']);
+  assert.deepEqual(toggleFleetRole(['reviewer'], 'reviewer'), ['reviewer']);
+
+  assert.equal(formatFleetRolesBadge(['worker']), 'worker');
+  assert.equal(formatFleetRolesBadge(['reviewer']), 'reviewer');
+  assert.equal(formatFleetRolesBadge(['reviewer', 'worker']), 'worker + reviewer');
+});
+
+test('seedFleetRolesDrafts, seedFleetBridgeIdDrafts, seedFleetMinWarmDrafts, and seedFleetIdleTtlDrafts seed from server rows', () => {
+  const fleets = [
+    {
+      agent_id: 'agt_worker',
+      capacity: 2,
+      roles: ['worker', 'reviewer'],
+      bridge_id: 'brg_alpha',
+      min_warm: 1,
+      idle_ttl_seconds: 900,
+    },
+    {
+      agent_id: 'agt_reviewer',
+      capacity: 1,
+    },
+  ];
+
+  assert.deepEqual(seedFleetRolesDrafts(fleets), {
+    agt_worker: ['worker', 'reviewer'],
+    agt_reviewer: ['worker', 'reviewer'],
+  });
+  assert.deepEqual(seedFleetBridgeIdDrafts(fleets), {
+    agt_worker: 'brg_alpha',
+    agt_reviewer: '',
+  });
+  assert.deepEqual(seedFleetMinWarmDrafts(fleets), {
+    agt_worker: 1,
+    agt_reviewer: 0,
+  });
+  assert.deepEqual(seedFleetIdleTtlDrafts(fleets), {
+    agt_worker: 900,
+    agt_reviewer: 600,
+  });
+
+  assert.deepEqual(getOriginalFleetRoles(fleets, 'agt_worker'), ['worker', 'reviewer']);
+  assert.equal(getOriginalFleetRoles(fleets, 'agt_unknown'), null);
+  assert.equal(getOriginalFleetBridgeId(fleets, 'agt_worker'), 'brg_alpha');
+  assert.equal(getOriginalFleetBridgeId(fleets, 'agt_unknown'), '');
+  assert.equal(getOriginalFleetMinWarm(fleets, 'agt_worker'), 1);
+  assert.equal(getOriginalFleetIdleTtl(fleets, 'agt_worker'), 900);
+  assert.equal(fleetRolesEqual(['worker', 'reviewer'], ['reviewer', 'worker']), true);
+  assert.equal(fleetRolesEqual(['worker'], ['reviewer']), false);
+});
+
+test('changedFleetEntries and fleetApplyRequests detect and serialize roles, bridgeId, top-level provider/model, minWarm, and idleTtlSeconds', () => {
+  const rawFleets = [
+    {
+      agent_id: 'agt_worker',
+      capacity: 2,
+      roles: ['worker'],
+      bridge_id: '',
+      provider: '',
+      model: '',
+      min_warm: 0,
+      idle_ttl_seconds: 600,
+    },
+    {
+      agent_id: 'agt_reviewer',
+      capacity: 1,
+      roles: ['reviewer'],
+      bridge_id: 'brg_alpha',
+      provider: 'claude',
+      model: 'sonnet',
+      min_warm: 0,
+      idle_ttl_seconds: 600,
+    },
+  ];
+
+  const drafts = seedPerBridgeProviderModelDrafts(rawFleets, [{ bridge_id: 'brg_alpha' }], 'brg_alpha');
+
+  // Unchanged placement -> 0 entries
+  assert.deepEqual(
+    changedFleetEntries(rawFleets, { agt_worker: 2, agt_reviewer: 1 }, drafts, rawFleets, 'brg_alpha', {
+      roles: { agt_worker: ['worker'], agt_reviewer: ['reviewer'] },
+      bridgeIds: { agt_worker: '', agt_reviewer: 'brg_alpha' },
+      topLevelProviderModels: {
+        agt_worker: { provider: '', model: '' },
+        agt_reviewer: { provider: 'claude', model: 'sonnet' },
+      },
+      minWarms: { agt_worker: 0, agt_reviewer: 0 },
+      idleTtls: { agt_worker: 600, agt_reviewer: 600 },
+    }),
+    []
+  );
+
+  // Edit roles, bridgeId, top-level provider/model, minWarm, and idleTtlSeconds on agt_worker
+  const changed = changedFleetEntries(
+    rawFleets,
+    { agt_worker: 2, agt_reviewer: 1 },
+    drafts,
+    rawFleets,
+    'brg_alpha',
+    {
+      roles: { agt_worker: ['worker', 'reviewer'], agt_reviewer: ['reviewer'] },
+      bridgeIds: { agt_worker: 'brg_beta', agt_reviewer: 'brg_alpha' },
+      topLevelProviderModels: {
+        agt_worker: { provider: 'claude', model: 'opus' },
+        agt_reviewer: { provider: 'claude', model: 'sonnet' },
+      },
+      minWarms: { agt_worker: 1, agt_reviewer: 0 },
+      idleTtls: { agt_worker: 1200, agt_reviewer: 600 },
+    }
+  );
+
+  assert.equal(changed.length, 1);
+  assert.equal(changed[0].agentId, 'agt_worker');
+  assert.deepEqual(changed[0].roles, ['worker', 'reviewer']);
+  assert.equal(changed[0].bridgeId, 'brg_beta');
+  assert.equal(changed[0].provider, 'claude');
+  assert.equal(changed[0].model, 'opus');
+  assert.equal(changed[0].minWarm, 1);
+  assert.equal(changed[0].idleTtlSeconds, 1200);
+
+  const applyPayloads = fleetApplyRequests(changed, []);
+  assert.equal(applyPayloads.length, 1);
+  assert.deepEqual(applyPayloads[0], {
+    agentId: 'agt_worker',
+    capacity: 2,
+    provider: 'claude',
+    model: 'opus',
+    bridgeModels: {},
+    roles: ['worker', 'reviewer'],
+    bridgeId: 'brg_beta',
+    minWarm: 1,
+    idleTtlSeconds: 1200,
+  });
+});
+

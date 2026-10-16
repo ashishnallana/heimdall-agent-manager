@@ -17,6 +17,7 @@ import { heimdallApi } from '../../api/heimdallApi';
 import {
   useGetTaskChainFleetsQuery,
   useUpdateTaskChainFleetMutation,
+  useDeleteTaskChainFleetMutation,
   type TaskChainFleet,
 } from '../../api/endpoints/taskChains';
 import { useFetchTaskChainDetailQuery } from '../../api/endpoints/tasks';
@@ -25,26 +26,40 @@ import {
   useListBridgesQuery,
   useListBridgeProvidersQuery,
 } from '../../api/endpoints/bridgeSupport';
-import { effectiveChainBridgeId, isRevokedBridge } from '../../utils/taskBridgePin';
+import { effectiveChainBridgeId, isRevokedBridge, taskBridgeOptions } from '../../utils/taskBridgePin';
 import {
+  FLEET_ROLES,
   activeTasksByRole,
   changedFleetEntries,
   detectLiveInstanceRuntimeMismatch,
   fleetApplyRequests,
   fleetProviderCapabilities,
+  fleetRolesEqual,
+  formatFleetRolesBadge,
   resolvedFleetProviderModel,
+  getOriginalFleetBridgeId,
   getOriginalFleetCapacity,
+  getOriginalFleetIdleTtl,
+  getOriginalFleetMinWarm,
+  getOriginalFleetRoles,
   getOriginalProviderModel,
   hasCustomRuntimeOverrides,
   liveInstancesByRole,
   nextModelOnProviderChange,
+  normalizeFleetRoles,
   providerModelModified,
   restartAffectedEntries,
+  seedFleetBridgeIdDrafts,
+  seedFleetIdleTtlDrafts,
+  seedFleetMinWarmDrafts,
+  seedFleetRolesDrafts,
   seedPerBridgeProviderModelDrafts,
   seedProviderModelDrafts,
   summarizeFleetRestartResults,
+  toggleFleetRole,
   modelOptionsForProvider,
   type ChangedFleetEntry,
+  type FleetPlacementDrafts,
   type FleetProviderCapability,
   type FleetProviderModel,
   type FleetRestartSummary,
@@ -147,6 +162,7 @@ export const FleetSlotChips: React.FC<FleetSlotChipsProps> = ({
         const capacity = fleet.capacity ?? 1;
         const activeCount = fleet.active_count ?? fleet.activeCount ?? 0;
         const isSaturated = activeCount >= capacity;
+        const rolesBadge = formatFleetRolesBadge(fleet.roles);
 
         return (
           <button
@@ -154,7 +170,7 @@ export const FleetSlotChips: React.FC<FleetSlotChipsProps> = ({
             type="button"
             data-debug-id={`fleet-slot-chip-${fleet.agent_id}`}
             onClick={onOpenDrawer}
-            title={`Fleet ${roleName}: ${activeCount}/${capacity} active slots. Click to manage capacity.`}
+            title={`Fleet ${roleName} (${rolesBadge}): ${activeCount}/${capacity} active slots. Click to manage capacity and placement.`}
             className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium border transition-colors cursor-pointer shadow-xs ${
               isSaturated
                 ? 'border-warning/40 bg-warning-soft/30 text-warning hover:bg-warning-soft/50'
@@ -162,6 +178,12 @@ export const FleetSlotChips: React.FC<FleetSlotChipsProps> = ({
             }`}
           >
             <span className="font-semibold">{roleName}:</span>
+            <span
+              data-debug-id={`fleet-slot-chip-roles-${fleet.agent_id}`}
+              className="rounded bg-neutral-soft px-1.5 py-0.5 text-[10px] font-mono text-muted"
+            >
+              {rolesBadge}
+            </span>
             <span className="font-mono text-[11px]">{activeCount}/{capacity} active</span>
             <span className="text-accent text-[11px] tracking-tighter select-none font-mono">
               {renderSlotDots(activeCount, capacity)}
@@ -357,6 +379,8 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
     return [];
   }, [activeBridges, bridgeId]);
 
+  const bridgeSelectOptions = useMemo(() => taskBridgeOptions(bridgesToRender), [bridgesToRender]);
+
   const providersQuery = useListBridgeProvidersQuery({ bridgeId }, { skip: !bridgeId });
   const bridgeCapabilities = useMemo(
     () => fleetProviderCapabilities(providersQuery.data),
@@ -365,11 +389,17 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
 
   const dispatch = useDispatch();
   const [updateFleet, { isLoading: isUpdating }] = useUpdateTaskChainFleetMutation();
+  const [deleteFleet, { isLoading: isDeleting }] = useDeleteTaskChainFleetMutation();
   const [selectedNewAgentId, setSelectedNewAgentId] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
   const [isApplying, setIsApplying] = useState(false);
   const [draftCapacities, setDraftCapacities] = useState<Record<string, number>>({});
+  const [draftRoles, setDraftRoles] = useState<Record<string, string[]>>({});
+  const [draftBridgeIds, setDraftBridgeIds] = useState<Record<string, string>>({});
+  const [draftTopLevelPT, setDraftTopLevelPT] = useState<Record<string, FleetProviderModel>>({});
+  const [draftMinWarms, setDraftMinWarms] = useState<Record<string, number>>({});
+  const [draftIdleTtls, setDraftIdleTtls] = useState<Record<string, number>>({});
   const [draftProviderModels, setDraftProviderModels] = useState<
     Record<string, Record<string, FleetProviderModel>>
   >({});
@@ -385,16 +415,20 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
   const backdropPressStartedRef = useRef(false);
 
   const seedDrafts = useCallback(() => {
+    const validFleets = rawFleets.filter((f) => validIdentitiesSet.has(f.agent_id));
     const init: Record<string, number> = {};
-    for (const f of rawFleets) {
-      if (validIdentitiesSet.has(f.agent_id)) {
-        init[f.agent_id] = f.capacity ?? 1;
-      }
+    for (const f of validFleets) {
+      init[f.agent_id] = f.capacity ?? 1;
     }
     setDraftCapacities(init);
+    setDraftRoles(seedFleetRolesDrafts(validFleets));
+    setDraftBridgeIds(seedFleetBridgeIdDrafts(validFleets));
+    setDraftTopLevelPT(seedProviderModelDrafts(validFleets));
+    setDraftMinWarms(seedFleetMinWarmDrafts(validFleets));
+    setDraftIdleTtls(seedFleetIdleTtlDrafts(validFleets));
     setDraftProviderModels(
       seedPerBridgeProviderModelDrafts(
-        rawFleets.filter((f) => validIdentitiesSet.has(f.agent_id)),
+        validFleets,
         bridgesToRender,
         bridgeId
       )
@@ -429,13 +463,19 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
           agent_id: aid,
           capacity: cap,
           active_count: 0,
+          roles: draftRoles[aid] ?? ['worker'],
+          bridge_id: draftBridgeIds[aid] ?? '',
+          provider: draftTopLevelPT[aid]?.provider ?? '',
+          model: draftTopLevelPT[aid]?.model ?? '',
+          min_warm: draftMinWarms[aid] ?? 0,
+          idle_ttl_seconds: draftIdleTtls[aid] ?? 600,
         });
         seen.add(aid);
       }
     }
 
     return list;
-  }, [rawFleets, chainId, draftCapacities, validIdentitiesSet]);
+  }, [rawFleets, chainId, draftCapacities, draftRoles, draftBridgeIds, draftTopLevelPT, draftMinWarms, draftIdleTtls, validIdentitiesSet]);
 
   const getOriginalCapacity = useCallback(
     (agentId: string) => getOriginalFleetCapacity(rawFleets, agentId),
@@ -445,6 +485,92 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
   const handleDraftCapacityChange = useCallback((agentId: string, newCapacity: number) => {
     const clamped = Math.max(1, Math.min(20, newCapacity));
     setDraftCapacities((prev) => ({
+      ...prev,
+      [agentId]: clamped,
+    }));
+    setDraftMinWarms((prev) => {
+      const current = prev[agentId];
+      if (current !== undefined && current > clamped) {
+        return { ...prev, [agentId]: clamped };
+      }
+      return prev;
+    });
+    setErrorMsg('');
+    setSuccessMsg('');
+    setRestartSummary(null);
+  }, []);
+
+  const handleDraftRoleToggle = useCallback((agentId: string, role: string, currentRoles?: string[]) => {
+    setDraftRoles((prev) => {
+      const existing = prev[agentId] ?? currentRoles ?? ['worker'];
+      return {
+        ...prev,
+        [agentId]: toggleFleetRole(existing, role),
+      };
+    });
+    setErrorMsg('');
+    setSuccessMsg('');
+    setRestartSummary(null);
+  }, []);
+
+  const handleDraftBridgeIdChange = useCallback((agentId: string, nextBridgeId: string) => {
+    setDraftBridgeIds((prev) => ({
+      ...prev,
+      [agentId]: nextBridgeId,
+    }));
+    setErrorMsg('');
+    setSuccessMsg('');
+    setRestartSummary(null);
+  }, []);
+
+  const handleDraftTopLevelProviderChange = useCallback(
+    (agentId: string, provider: string) => {
+      setDraftTopLevelPT((prev) => {
+        const currentModel = prev[agentId]?.model ?? '';
+        const nextModel = provider
+          ? nextModelOnProviderChange(currentModel, provider, bridgeCapabilities) ||
+            modelOptionsForProvider(bridgeCapabilities, provider)[0] ||
+            ''
+          : '';
+        return {
+          ...prev,
+          [agentId]: { provider, model: nextModel },
+        };
+      });
+      setErrorMsg('');
+      setSuccessMsg('');
+      setRestartSummary(null);
+    },
+    [bridgeCapabilities]
+  );
+
+  const handleDraftTopLevelModelChange = useCallback((agentId: string, model: string) => {
+    setDraftTopLevelPT((prev) => ({
+      ...prev,
+      [agentId]: {
+        provider: prev[agentId]?.provider ?? '',
+        model,
+      },
+    }));
+    setErrorMsg('');
+    setSuccessMsg('');
+    setRestartSummary(null);
+  }, []);
+
+  const handleDraftMinWarmChange = useCallback((agentId: string, minWarm: number, maxCap: number) => {
+    const clamped = Math.max(0, Math.min(maxCap, isNaN(minWarm) ? 0 : minWarm));
+    setDraftMinWarms((prev) => ({
+      ...prev,
+      [agentId]: clamped,
+    }));
+    setErrorMsg('');
+    setSuccessMsg('');
+    setRestartSummary(null);
+  }, []);
+
+  const handleDraftIdleTtlChange = useCallback((agentId: string, ttlSeconds: number) => {
+    const clamped = Math.max(30, isNaN(ttlSeconds) ? 600 : ttlSeconds);
+    setDraftIdleTtls((prev) => ({
       ...prev,
       [agentId]: clamped,
     }));
@@ -517,9 +643,30 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
   const handleAddFleet = useCallback(
     (agentId: string) => {
       if (!agentId) return;
+      const defaultRoles = agentId.toLowerCase().includes('review') ? ['reviewer'] : ['worker'];
       setDraftCapacities((prev) => ({
         ...prev,
         [agentId]: prev[agentId] ?? 1,
+      }));
+      setDraftRoles((prev) => ({
+        ...prev,
+        [agentId]: prev[agentId] ?? defaultRoles,
+      }));
+      setDraftBridgeIds((prev) => ({
+        ...prev,
+        [agentId]: prev[agentId] ?? '',
+      }));
+      setDraftTopLevelPT((prev) => ({
+        ...prev,
+        [agentId]: prev[agentId] ?? { provider: '', model: '' },
+      }));
+      setDraftMinWarms((prev) => ({
+        ...prev,
+        [agentId]: prev[agentId] ?? 0,
+      }));
+      setDraftIdleTtls((prev) => ({
+        ...prev,
+        [agentId]: prev[agentId] ?? 600,
       }));
       setDraftProviderModels((prev) => {
         const roleDrafts: Record<string, FleetProviderModel> = {};
@@ -543,9 +690,91 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
     [bridgesToRender, bridgeId]
   );
 
+  const handleRemoveFleet = useCallback(
+    async (agentId: string, isPersisted: boolean) => {
+      setErrorMsg('');
+      setSuccessMsg('');
+      if (!isPersisted) {
+        setDraftCapacities((prev) => {
+          const next = { ...prev };
+          delete next[agentId];
+          return next;
+        });
+        setDraftRoles((prev) => {
+          const next = { ...prev };
+          delete next[agentId];
+          return next;
+        });
+        setDraftBridgeIds((prev) => {
+          const next = { ...prev };
+          delete next[agentId];
+          return next;
+        });
+        setDraftTopLevelPT((prev) => {
+          const next = { ...prev };
+          delete next[agentId];
+          return next;
+        });
+        setDraftMinWarms((prev) => {
+          const next = { ...prev };
+          delete next[agentId];
+          return next;
+        });
+        setDraftIdleTtls((prev) => {
+          const next = { ...prev };
+          delete next[agentId];
+          return next;
+        });
+        setDraftProviderModels((prev) => {
+          const next = { ...prev };
+          delete next[agentId];
+          return next;
+        });
+        return;
+      }
+
+      try {
+        await deleteFleet({ chainId, agentId }).unwrap();
+        dispatch(
+          heimdallApi.util.invalidateTags([
+            { type: 'TaskChainFleets' as const, id: chainId },
+            { type: 'Chain' as const, id: chainId },
+          ])
+        );
+        await refetch();
+        await chainDetailQuery.refetch();
+        setSuccessMsg(`Removed fleet role ${formatFleetRoleName(agentId, agentIdentities)}`);
+      } catch (err: any) {
+        setErrorMsg(
+          String(err?.data?.error?.message || err?.error || err?.message || 'Failed to remove fleet role')
+        );
+      }
+    },
+    [chainId, deleteFleet, dispatch, refetch, chainDetailQuery, agentIdentities]
+  );
+
+  const placementDrafts = useMemo<FleetPlacementDrafts>(
+    () => ({
+      roles: draftRoles,
+      bridgeIds: draftBridgeIds,
+      topLevelProviderModels: draftTopLevelPT,
+      minWarms: draftMinWarms,
+      idleTtls: draftIdleTtls,
+    }),
+    [draftRoles, draftBridgeIds, draftTopLevelPT, draftMinWarms, draftIdleTtls]
+  );
+
   const changedFleets = useMemo(
-    () => changedFleetEntries(fleets, draftCapacities, draftProviderModels, rawFleets, bridgeId),
-    [fleets, draftCapacities, draftProviderModels, rawFleets, bridgeId]
+    () =>
+      changedFleetEntries(
+        fleets,
+        draftCapacities,
+        draftProviderModels,
+        rawFleets,
+        bridgeId,
+        placementDrafts
+      ),
+    [fleets, draftCapacities, draftProviderModels, rawFleets, bridgeId, placementDrafts]
   );
 
   const hasPendingChanges = changedFleets.length > 0;
@@ -574,6 +803,10 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
               capacity: cf.capacity,
               provider: cf.provider,
               model: cf.model,
+              roles: cf.roles,
+              bridgeId: cf.bridgeId,
+              minWarm: cf.minWarm,
+              idleTtlSeconds: cf.idleTtlSeconds,
               bridgeModels: cf.bridgeModels,
               restartLiveInstances: cf.restartLiveInstances,
             }).unwrap();
@@ -616,7 +849,7 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
       isApplying,
       changedFleets,
       draftProviderModels,
-        updateFleet,
+      updateFleet,
       chainId,
       dispatch,
       refetch,
@@ -635,7 +868,8 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
       rawFleets,
       draftProviderModels,
       liveCounts,
-      bridgeId
+      bridgeId,
+      draftTopLevelPT
     );
     const mismatches = detectLiveInstanceRuntimeMismatch(
       members,
@@ -667,6 +901,7 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
     changedFleets,
     rawFleets,
     draftProviderModels,
+    draftTopLevelPT,
     liveInstancesByRoleMap,
     members,
     activeTasksByRoleMap,
@@ -728,7 +963,7 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
             <Icon name="layers" size={18} className="text-accent" />
             <div>
               <h2 className="text-sm font-bold text-primary">Fleet Management</h2>
-              <p className="text-[11px] text-muted">Concurrency quotas & live slots</p>
+              <p className="text-[11px] text-muted">Placement, roles, concurrency &amp; live slots</p>
             </div>
           </div>
           <IconButton
@@ -750,7 +985,7 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
             footer out of the viewport. */}
         <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-4">
           <div className="text-xs text-muted">
-            Configure concurrency limits and provider/model overrides per agent role. The scheduler JIT-provisions warm instances up to capacity when tasks become actionable.
+            Configure fleet roles (worker / reviewer), placement bridge, provider/model defaults, and concurrency limits per agent template.
           </div>
 
           <div className="space-y-3">
@@ -759,21 +994,63 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
               const roleName = formatFleetRoleName(agentId, agentIdentities);
               const effectiveCapacity = draftCapacities[agentId] ?? fleet.capacity ?? 1;
               const origCapacity = getOriginalCapacity(agentId);
+              const isPersisted = origCapacity !== null;
               const activeCount = fleet.active_count ?? fleet.activeCount ?? 0;
               const isSaturated = activeCount >= effectiveCapacity;
 
+              const effectiveRoles = normalizeFleetRoles(draftRoles[agentId] ?? fleet.roles);
+              const origRoles = getOriginalFleetRoles(rawFleets, agentId);
+              const rolesModified = origRoles === null || !fleetRolesEqual(effectiveRoles, origRoles);
+
+              const effectiveBridgeId = draftBridgeIds[agentId] ?? fleet.bridge_id ?? fleet.bridgeId ?? '';
+              const origBridgeId = getOriginalFleetBridgeId(rawFleets, agentId);
+              const bridgeModified = origCapacity === null || effectiveBridgeId !== origBridgeId;
+
+              const effectiveTopPT = draftTopLevelPT[agentId] ?? {
+                provider: fleet.provider ?? '',
+                model: fleet.model ?? '',
+              };
+              const topModelOptions = modelOptionsForProvider(bridgeCapabilities, effectiveTopPT.provider);
+
+              const effectiveMinWarm = draftMinWarms[agentId] ?? fleet.min_warm ?? fleet.minWarm ?? 0;
+              const origMinWarm = getOriginalFleetMinWarm(rawFleets, agentId);
+              const minWarmModified = origCapacity === null || effectiveMinWarm !== origMinWarm;
+
+              const effectiveIdleTtl = draftIdleTtls[agentId] ?? fleet.idle_ttl_seconds ?? fleet.idleTtlSeconds ?? 600;
+              const origIdleTtl = getOriginalFleetIdleTtl(rawFleets, agentId);
+              const idleTtlModified = origCapacity === null || effectiveIdleTtl !== origIdleTtl;
+
               const roleDraftMap = draftProviderModels[agentId] || {};
               const capacityModified = origCapacity === null || effectiveCapacity !== origCapacity;
-              const runtimeModified = providerModelModified(rawFleets, agentId, draftProviderModels, bridgeId);
-              const isModified = capacityModified || runtimeModified;
+              const runtimeModified = providerModelModified(
+                rawFleets,
+                agentId,
+                draftProviderModels,
+                bridgeId,
+                draftTopLevelPT
+              );
+              const isModified =
+                capacityModified ||
+                runtimeModified ||
+                rolesModified ||
+                bridgeModified ||
+                minWarmModified ||
+                idleTtlModified;
+
               const pendingParts: string[] = [];
               if (capacityModified) pendingParts.push(`${origCapacity ?? 0} → ${effectiveCapacity}`);
+              if (rolesModified) pendingParts.push(`Roles: ${formatFleetRolesBadge(effectiveRoles)}`);
+              if (bridgeModified) pendingParts.push(`Bridge: ${effectiveBridgeId || 'inherit'}`);
               if (runtimeModified) pendingParts.push('Provider/model settings changed');
+              if (minWarmModified) pendingParts.push(`Min warm: ${effectiveMinWarm}`);
+              if (idleTtlModified) pendingParts.push(`Idle TTL: ${effectiveIdleTtl}s`);
 
               const liveInstances = liveInstancesByRoleMap[agentId] || [];
               const activeTasks = activeTasksByRoleMap[agentId] || [];
               const isRuntimeExpanded = Boolean(expandedRuntimeRoles[agentId]);
-              const hasCustomOverrides = hasCustomRuntimeOverrides(roleDraftMap);
+              const hasCustomOverrides =
+                hasCustomRuntimeOverrides(roleDraftMap) ||
+                Boolean(effectiveTopPT.provider || effectiveTopPT.model);
 
               return (
                 <div
@@ -814,9 +1091,120 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
                         </div>
                       </div>
                     </div>
-                    <Badge tone={isSaturated ? 'warning' : 'neutral'} className="shrink-0 whitespace-nowrap">
-                      {isSaturated ? 'Saturated' : 'Available'}
-                    </Badge>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <Badge tone={isSaturated ? 'warning' : 'neutral'} className="shrink-0 whitespace-nowrap">
+                        {isSaturated ? 'Saturated' : 'Available'}
+                      </Badge>
+                      <button
+                        type="button"
+                        data-debug-id={`fleet-delete-role-btn-${agentId}`}
+                        onClick={() => void handleRemoveFleet(agentId, isPersisted)}
+                        disabled={isUpdating || isApplying || isDeleting}
+                        title={isPersisted ? `Delete ${roleName} fleet row` : `Remove staged ${roleName}`}
+                        aria-label={`Remove ${roleName} from fleet`}
+                        className="rounded border border-subtle bg-surface px-1.5 py-1 text-[10px] font-semibold text-muted hover:text-danger hover:border-danger/40 transition-colors cursor-pointer disabled:opacity-40"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Placement Section: Roles (worker / reviewer), Bridge Pin, and Role Default Provider/Model */}
+                  <div
+                    data-debug-id={`fleet-placement-section-${agentId}`}
+                    className="rounded-lg border border-subtle bg-surface p-2.5 space-y-2.5"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-medium text-primary">Fleet Roles</span>
+                      <div className="flex items-center gap-1.5" role="group" aria-label={`Roles for ${roleName}`}>
+                        {FLEET_ROLES.map((roleKey) => {
+                          const selected = effectiveRoles.includes(roleKey);
+                          return (
+                            <button
+                              key={roleKey}
+                              type="button"
+                              data-debug-id={`fleet-role-toggle-${agentId}-${roleKey}`}
+                              aria-pressed={selected}
+                              disabled={isUpdating || isApplying}
+                              onClick={() => handleDraftRoleToggle(agentId, roleKey, effectiveRoles)}
+                              className={`rounded-full px-2.5 py-0.5 text-[11px] font-semibold border transition-colors cursor-pointer ${
+                                selected
+                                  ? 'border-accent bg-accent/15 text-accent'
+                                  : 'border-subtle bg-surface-raised text-muted hover:text-primary'
+                              }`}
+                            >
+                              {roleKey}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    <div className="space-y-1">
+                      <span className="block text-[10px] font-semibold uppercase tracking-wide text-muted">
+                        Placement Bridge
+                      </span>
+                      <Select
+                        data-debug-id={`fleet-bridge-select-${agentId}`}
+                        value={effectiveBridgeId}
+                        onChange={(val) => handleDraftBridgeIdChange(agentId, val)}
+                        disabled={isUpdating || isApplying}
+                        size="sm"
+                        width="full"
+                        aria-label={`Placement bridge for ${roleName}`}
+                        options={
+                          effectiveBridgeId && !bridgeSelectOptions.some((o) => o.value === effectiveBridgeId)
+                            ? [...bridgeSelectOptions, { value: effectiveBridgeId, label: effectiveBridgeId }]
+                            : bridgeSelectOptions
+                        }
+                      />
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2">
+                      <div className="space-y-1">
+                        <span className="block text-[10px] font-semibold uppercase tracking-wide text-muted">
+                          Default Provider
+                        </span>
+                        <Select
+                          data-debug-id={`fleet-default-provider-select-${agentId}`}
+                          value={effectiveTopPT.provider}
+                          onChange={(val) => handleDraftTopLevelProviderChange(agentId, val)}
+                          disabled={isUpdating || isApplying}
+                          size="sm"
+                          width="full"
+                          aria-label={`Default provider for ${roleName}`}
+                          options={[
+                            { value: '', label: 'Inherit (Auto)' },
+                            ...(effectiveTopPT.provider &&
+                            !bridgeCapabilities.some((cap) => cap.provider === effectiveTopPT.provider)
+                              ? [{ value: effectiveTopPT.provider, label: effectiveTopPT.provider }]
+                              : []),
+                            ...bridgeCapabilities.map((cap) => ({ value: cap.provider, label: cap.provider })),
+                          ]}
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <span className="block text-[10px] font-semibold uppercase tracking-wide text-muted">
+                          Default Model
+                        </span>
+                        <Select
+                          data-debug-id={`fleet-default-model-select-${agentId}`}
+                          value={effectiveTopPT.model}
+                          onChange={(val) => handleDraftTopLevelModelChange(agentId, val)}
+                          disabled={!effectiveTopPT.provider || isUpdating || isApplying}
+                          size="sm"
+                          width="full"
+                          aria-label={`Default model for ${roleName}`}
+                          options={[
+                            { value: '', label: 'Inherit (Auto)' },
+                            ...(effectiveTopPT.model && !topModelOptions.includes(effectiveTopPT.model)
+                              ? [{ value: effectiveTopPT.model, label: effectiveTopPT.model }]
+                              : []),
+                            ...topModelOptions.map((m) => ({ value: m, label: m })),
+                          ]}
+                        />
+                      </div>
+                    </div>
                   </div>
 
                   {/* Inline +/- and Slider controls */}
@@ -871,6 +1259,43 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
                       <span>5 slots</span>
                       <span>10 slots</span>
                     </div>
+
+                    <div className="grid grid-cols-2 gap-2 pt-1 border-t border-subtle/60">
+                      <label className="space-y-1 block">
+                        <span className="block text-[10px] font-semibold uppercase tracking-wide text-muted">
+                          Min Warm (0–{effectiveCapacity})
+                        </span>
+                        <input
+                          type="number"
+                          min={0}
+                          max={effectiveCapacity}
+                          value={effectiveMinWarm}
+                          data-debug-id={`fleet-min-warm-input-${agentId}`}
+                          disabled={isUpdating || isApplying}
+                          onChange={(e) =>
+                            handleDraftMinWarmChange(agentId, parseInt(e.target.value, 10), effectiveCapacity)
+                          }
+                          aria-label={`Min warm instances for ${roleName}`}
+                          className="w-full rounded border border-subtle bg-surface-raised px-2 py-1 text-xs font-mono text-primary"
+                        />
+                      </label>
+                      <label className="space-y-1 block">
+                        <span className="block text-[10px] font-semibold uppercase tracking-wide text-muted">
+                          Idle TTL (sec)
+                        </span>
+                        <input
+                          type="number"
+                          min={30}
+                          step={60}
+                          value={effectiveIdleTtl}
+                          data-debug-id={`fleet-idle-ttl-input-${agentId}`}
+                          disabled={isUpdating || isApplying}
+                          onChange={(e) => handleDraftIdleTtlChange(agentId, parseInt(e.target.value, 10))}
+                          aria-label={`Idle TTL seconds for ${roleName}`}
+                          className="w-full rounded border border-subtle bg-surface-raised px-2 py-1 text-xs font-mono text-primary"
+                        />
+                      </label>
+                    </div>
                   </div>
 
                   {/* Expandable "Configure Runtime" Section (REQ-FLEET-UI-EXPANDABLE-1, REQ-FLEET-PER-BRIDGE-1) */}
@@ -894,7 +1319,7 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
                           size={14}
                           className="text-muted shrink-0"
                         />
-                        <span className="text-xs font-medium text-primary">Configure Runtime</span>
+                        <span className="text-xs font-medium text-primary">Configure Per-Bridge Runtime</span>
                       </div>
                       <span
                         data-debug-id={`fleet-runtime-summary-pill-${agentId}`}

@@ -1,0 +1,17 @@
+{
+  "items": [
+    {
+      "kind": "file",
+      "title": "Coverage report",
+      "path": "reports/coverage.html",
+      "mime": "text/html",
+      "bytes": 18432,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "kind": "link",
+      "title": "Benchmark dashboard",
+      "uri": "https://ci.example.internal/runs/42"
+    }
+  ]
+}

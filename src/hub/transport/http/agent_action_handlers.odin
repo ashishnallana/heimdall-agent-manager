@@ -92,7 +92,7 @@ agent_action_lease_heartbeat_handler :: proc(ctx: rawptr, req: Request) -> Respo
 
 // ---- M2 lease verbs ------------------------------------------------------------------
 
-// POST /api/v1/agent-actions/lease/submit  params: {lease_id?, summary, handoff?, output?, vcs?, verify?}
+// POST /api/v1/agent-actions/lease/submit  params: {lease_id?, summary, handoff?, output?, vcs?, verify?, artifacts?, auto?}
 agent_action_lease_submit_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Agent_Action_Handlers)(ctx)
 	auth, inst, ok, resp := require_instance_action_auth(h, req)
@@ -105,6 +105,7 @@ agent_action_lease_submit_handler :: proc(ctx: rawptr, req: Request) -> Response
 		lease_id = json_string(params, "lease_id"), summary = json_string(params, "summary"),
 		handoff_json = verbatim_field(params, "handoff"), output_json = verbatim_field(params, "output"),
 		vcs_json = verbatim_field(params, "vcs"), verify = json_string(params, "verify"),
+		artifacts_json = verbatim_field(params, "artifacts"), auto = jsonx.extract_bool(params, "auto", false, true),
 	})
 	if !sok do return respond_error(err, req.request_id)
 	publish_agent_action(h, inst, "lease_submit", fmt.tprintf("submitted %s (%s)", res.task.task_id, res.outcome))
@@ -143,14 +144,14 @@ agent_action_lease_block_handler :: proc(ctx: rawptr, req: Request) -> Response 
 	return respond_success(fmt.tprintf("{{\"task\":%s}}", string(data)), req.request_id, auth_ctx_server_time(req), 200)
 }
 
-// POST /api/v1/agent-actions/review/post  params: {task_id?, verdict, findings?:[…]}
+// POST /api/v1/agent-actions/review/post  params: {task_id?, verdict, findings?:[…], on_behalf_of?}
 agent_action_review_post_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Agent_Action_Handlers)(ctx)
 	auth, inst, ok, resp := require_instance_action_auth(h, req)
 	if !ok do return resp
 	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
 	params := verbatim_params(req.body)
-	res, rok, err := taskv2.review_post(h.task_engine, auth, taskv2.Review_Input{task_id = json_string(params, "task_id"), verdict = json_string(params, "verdict"), findings_json = verbatim_field(params, "findings")})
+	res, rok, err := taskv2.review_post(h.task_engine, auth, taskv2.Review_Input{task_id = json_string(params, "task_id"), verdict = json_string(params, "verdict"), findings_json = verbatim_field(params, "findings"), on_behalf_of = json_string(params, "on_behalf_of")})
 	if !rok do return respond_error(err, req.request_id)
 	publish_agent_action(h, inst, "review_post", fmt.tprintf("reviewed %s: %s", res.task.task_id, json_string(params, "verdict")))
 	publish_task_event(h.event_bus, string(res.task.owner_user_id), string(res.task.task_id), string(res.task.chain_id), "updated")
@@ -404,6 +405,65 @@ agent_action_chain_show_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	b := strings.builder_make()
 	write_chain_json(&b, chain)
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 200)
+}
+
+// POST /api/v1/agent-actions/chain/summary  params: {chain_id?, summary}
+agent_action_chain_summary_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Agent_Action_Handlers)(ctx)
+	auth, inst, ok, resp := require_instance_action_auth(h, req)
+	if !ok do return resp
+	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
+	params := verbatim_params(req.body)
+	chain_id := strings.trim_space(json_string(params, "chain_id"))
+	if chain_id == "" do chain_id = inst.chain_id
+	if chain_id == "" do return respond_error(domain.domain_error(.Validation_Failed, "chain_id is required"), req.request_id)
+	body_str := json_string(params, "summary")
+	if body_str == "" do body_str = json_string(params, "body")
+	row, sok, err := taskv2.chain_summary_set(h.task_engine, auth, domain.Task_Chain_ID(chain_id), body_str)
+	if !sok do return respond_error(err, req.request_id)
+	publish_agent_action(h, inst, "chain_summary", "updated chain summary")
+	publish_chain_event(h.event_bus, string(inst.owner_user_id), string(row.chain_id), "updated")
+	o := taskv2.json_begin()
+	taskv2.json_str(&o, "chain_id", string(row.chain_id))
+	taskv2.json_str(&o, "summary", row.body)
+	taskv2.json_str(&o, "body", row.body)
+	taskv2.json_int(&o, "line_count", i64(row.line_count))
+	taskv2.json_int(&o, "version", i64(row.version))
+	taskv2.json_str(&o, "updated_at", row.updated_at)
+	return respond_success(taskv2.json_end(&o), req.request_id, auth_ctx_server_time(req), 200)
+}
+
+// POST /api/v1/agent-actions/chain/propose  params: {chain_id?, tasks?:[...], kind?, rationale?, alternative?, auto_approve?, summary?}
+agent_action_chain_propose_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Agent_Action_Handlers)(ctx)
+	auth, inst, ok, resp := require_instance_action_auth(h, req)
+	if !ok do return resp
+	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
+	params := verbatim_params(req.body)
+	chain_id := strings.trim_space(json_string(params, "chain_id"))
+	if chain_id == "" do chain_id = inst.chain_id
+	if chain_id == "" do return respond_error(domain.domain_error(.Validation_Failed, "chain_id is required"), req.request_id)
+	tasks_json := verbatim_field(params, "tasks")
+	kind := json_string(params, "kind")
+	rationale := json_string(params, "rationale")
+	if rationale == "" do rationale = json_string(params, "summary")
+	alternative := json_string(params, "alternative")
+	auto_approve := jsonx.extract_bool(params, "auto_approve", false, true)
+	updated_chain, pok, err := taskv2.chain_propose(h.task_engine, domain.Task_Chain_ID(chain_id), inst.owner_user_id, taskv2.actor_from_auth(auth), taskv2.Propose_Input{
+		chain_id     = chain_id,
+		tasks_json   = tasks_json,
+		kind         = kind,
+		rationale    = rationale,
+		alternative  = alternative,
+		auto_approve = auto_approve,
+	})
+	if !pok do return respond_error(err, req.request_id)
+	publish_agent_action(h, inst, "chain_propose", "proposed task chain plan")
+	publish_chain_event(h.event_bus, string(inst.owner_user_id), chain_id, "updated")
+	prop_json := taskv2.chain_proposal_json(updated_chain)
+	if prop_json == "" do prop_json = "{}"
+	pub_state := "published" if updated_chain.publish_state == .Published else "draft"
+	return respond_success(fmt.tprintf("{{\"chain_id\":\"%s\",\"publish_state\":\"%s\",\"proposal\":%s}}", updated_chain.chain_id, pub_state, prop_json), req.request_id, auth_ctx_server_time(req), 200)
 }
 
 agent_action_chat_fetch_handler :: proc(ctx: rawptr, req: Request) -> Response {

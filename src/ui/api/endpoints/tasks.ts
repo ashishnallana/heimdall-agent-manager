@@ -1438,5 +1438,7 @@ export {
   useGetTaskChainFleetsQuery,
   useLazyGetTaskChainFleetsQuery,
   useUpdateTaskChainFleetMutation,
+  useDeleteTaskChainFleetMutation,
+  normalizeFleet,
 } from './taskChains';
 export type { TaskChainFleet } from './taskChains';

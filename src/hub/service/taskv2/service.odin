@@ -10,13 +10,16 @@ import agent "odin_test:hub/service/agent"
 import events "odin_test:hub/service/events"
 import project "odin_test:hub/service/project"
 
+import lockorder "odin_test:lib/lockorder"
+
 // Service is the Task System v2 engine: events + fold (M0), leases, timers and
 // the matcher (M1). It sits BELOW the taskchain service (which calls into it on
 // every chain/task mutation) and above the agent service (JIT instances, bridge
 // lookups, wakes).
 //
 // Concurrency contract: every entry point that mutates state is exactly ONE
-// unit of work under sqlite.tx_mutex (begin_uow / end_uow). Nothing in a UoW
+// unit of work (with_uow: begin_uow / end_uow) under sqlite.tx_mutex, and
+// lockorder (src/lib/lockorder) enforces tx_mutex -> state_mutex. Nothing in a UoW
 // touches the network; bridge wakes and user-event publishes are queued on an
 // Effects list and flushed AFTER commit.
 Service :: struct {
@@ -46,9 +49,16 @@ Service :: struct {
 	// wake_observer sees every wake_agent push after commit (tests).
 	wake_observer:       proc(ctx: rawptr, cmd: Wake_Command),
 	wake_observer_ctx:   rawptr,
+	// notify_observer sees every 1-line coordinator attention notification after commit (tests).
+	notify_observer:     proc(ctx: rawptr, instance_id, trigger, line: string),
+	notify_observer_ctx: rawptr,
+	// vcs_show_file resolves a file at a commit on a chain directory via the bridge (M3 R2.2).
+	vcs_show_file:       proc(ctx: rawptr, chain_id: domain.Task_Chain_ID, owner: domain.User_ID, directory_id, rev, file_path: string) -> (string, bool, domain.Domain_Error),
+	vcs_show_file_ctx:   rawptr,
 }
 
 new_service :: proc(repo: ^iface.Taskchain_Repository, agents: ^iface.Agent_Repository, bridges: ^iface.Bridge_Repository, clock: ^platform.Clock, ids: ^platform.ID_Generator) -> Service {
+	init_task_metrics()
 	return Service{repo = repo, agents = agents, bridges = bridges, clock = clock, ids = ids}
 }
 
@@ -115,9 +125,20 @@ Effects :: struct {
 	// JIT launch reservations taken in the bridge runtime registry during this
 	// UoW; cancelled on rollback (the instance row is rolled back with the tx).
 	reservations: [dynamic]Jit_Reservation,
+	// 1-line coordinator attention notifications (M3 §3c), flushed after commit.
+	notifications: [dynamic]Coordinator_Notification,
 	// keys owns the (bridge × chain) map keys of runs/stops (heap-cloned per
 	// UoW, freed in destroy_effects — never the request's temp allocator).
 	keys: [dynamic]string,
+}
+
+Coordinator_Notification :: struct {
+	coordinator_instance_id: string,
+	bridge_id:               string,
+	chain_id:                string,
+	owner:                   string,
+	trigger:                 string,
+	line:                    string,
 }
 
 // effects_key returns the owned "<bridge>\x00<chain>" key for runs/stops,
@@ -164,8 +185,12 @@ begin_uow :: proc(svc: ^Service) -> (Uow, bool, domain.Domain_Error) {
 	u.effects.publishes = make([dynamic]Publish_Effect)
 	u.effects.changed_chains = make([dynamic]Changed_Chain)
 	u.effects.reservations = make([dynamic]Jit_Reservation)
+	u.effects.notifications = make([dynamic]Coordinator_Notification)
 	u.effects.keys = make([dynamic]string)
-	if svc.uow_factory == nil do return u, true, domain.Domain_Error{}
+	if svc.uow_factory == nil {
+		lockorder.assert_tx_mutex_allowed()
+		return u, true, domain.Domain_Error{}
+	}
 	tx, ok, err := iface.unit_of_work_begin(svc.uow_factory)
 	if !ok do return u, false, err
 	u.tx = tx
@@ -238,6 +263,15 @@ destroy_effects :: proc(e: ^Effects) {
 	delete(e.publishes)
 	delete(e.changed_chains)
 	delete(e.reservations)
+	for n in e.notifications {
+		delete(n.coordinator_instance_id)
+		delete(n.bridge_id)
+		delete(n.chain_id)
+		delete(n.owner)
+		delete(n.trigger)
+		delete(n.line)
+	}
+	delete(e.notifications)
 	for k in e.keys do delete(k)
 	delete(e.keys)
 }
@@ -245,6 +279,25 @@ destroy_effects :: proc(e: ^Effects) {
 @(private = "file")
 flush_effects :: proc(svc: ^Service, e: ^Effects) {
 	flush_wakes(svc, e)
+	for n in e.notifications {
+		if svc.notify_observer != nil {
+			svc.notify_observer(svc.notify_observer_ctx, n.coordinator_instance_id, n.trigger, n.line)
+		}
+		if n.bridge_id != "" && svc.bridge_command_sink.send_runtime_command != nil {
+			cmd_id := platform.generate_id(svc.ids, "cmd_notify_")
+			cmd_json := agent.agent_pty_input_command_json(cmd_id, n.coordinator_instance_id, strings.concatenate({n.line, "\r"}, context.temp_allocator))
+			defer delete(cmd_json)
+			_, _ = project.bridge_command_send_runtime(svc.bridge_command_sink, project.Runtime_Command{
+				bridge_id  = n.bridge_id,
+				command_id = cmd_id,
+				body_json  = cmd_json,
+			})
+		}
+		if svc.event_bus != nil {
+			summary := fmt.tprintf("{{\"coordinator_instance_id\":\"%s\",\"chain_id\":\"%s\",\"trigger\":\"%s\"}}", n.coordinator_instance_id, n.chain_id, n.trigger)
+			events.publish_resource_changed(svc.event_bus, n.owner, "coordinator_attention", n.coordinator_instance_id, n.trigger, summary)
+		}
+	}
 	for p in e.publishes {
 		if svc.event_bus == nil do continue
 		summary := fmt.tprintf("{{\"%s_id\":\"%s\",\"chain_id\":\"%s\"}}", p.resource, p.resource_id, p.chain_id)
@@ -253,6 +306,45 @@ flush_effects :: proc(svc: ^Service, e: ^Effects) {
 	for c in e.changed_chains {
 		if svc.on_tasks_changed != nil do svc.on_tasks_changed(svc.on_tasks_changed_ctx, c.chain_id, c.owner)
 	}
+}
+
+// effect_notify_coordinator queues a 1-line coordinator attention notification
+// (plan §3c: proposal_decided, blocked_on human, budget_exhausted, oscillation,
+// ready_unclaimed, chain_complete, review_requested_from_user, summary_overflow).
+effect_notify_coordinator :: proc(svc: ^Service, u: ^Uow, chain_id: domain.Task_Chain_ID, owner: domain.User_ID, trigger, line: string) {
+	if svc == nil || svc.repo == nil || u == nil || strings.trim_space(line) == "" do return
+	chain, cok, _ := iface.taskchain_get_chain(svc.repo, chain_id)
+	if !cok do return
+	coord_id := strings.trim_space(chain.coordinator_agent_instance_id)
+	if coord_id == "" {
+		if members, merr := iface.taskchain_list_members_by_chain(svc.repo, chain_id, owner); merr.code == .None {
+			for m in members do if m.role == "coordinator" && m.agent_instance_id != "" { coord_id = m.agent_instance_id; break }
+		}
+	}
+	if coord_id == "" do return
+	bridge_id := ""
+	if svc.agents != nil {
+		if inst, iok, _ := iface.agent_get_instance(svc.agents, coord_id); iok do bridge_id = inst.bridge_id
+	}
+	clean_line := first_line_trimmed(line)
+	for existing in u.effects.notifications {
+		if existing.coordinator_instance_id == coord_id && existing.trigger == trigger && existing.line == clean_line do return
+	}
+	append(&u.effects.notifications, Coordinator_Notification{
+		coordinator_instance_id = strings.clone(coord_id),
+		bridge_id               = strings.clone(bridge_id),
+		chain_id                = strings.clone(string(chain_id)),
+		owner                   = strings.clone(string(owner)),
+		trigger                 = strings.clone(trigger),
+		line                    = strings.clone(clean_line),
+	})
+}
+
+first_line_trimmed :: proc(s: string) -> string {
+	t := strings.trim_space(s)
+	if nl := strings.index_byte(t, '\n'); nl >= 0 do t = strings.trim_space(t[:nl])
+	if cr := strings.index_byte(t, '\r'); cr >= 0 do t = strings.trim_space(t[:cr])
+	return t
 }
 
 effect_publish_task :: proc(u: ^Uow, task: domain.Task, change: string) {
@@ -305,6 +397,9 @@ refold_task :: proc(svc: ^Service, u: ^Uow, task: domain.Task, tasks: []domain.T
 	if projection_equal(task, next) do return task, view, true, domain.Domain_Error{}
 	saved, ok, err := iface.taskchain_save_task(svc.repo, next)
 	if !ok do return task, view, false, err
+	if saved.state != task.state {
+		metric_task_transition(task.state, saved.state)
+	}
 	// Column-backed alerts: ready_unclaimed (ready_since) and blocked-on-human
 	// re-alert (blocked_on_json) are armed whenever the column they key on moves.
 	if saved.ready_since != task.ready_since || saved.blocked_on_json != task.blocked_on_json || saved.state != task.state {
@@ -315,8 +410,42 @@ refold_task :: proc(svc: ^Service, u: ^Uow, task: domain.Task, tasks: []domain.T
 		if domain.task_state_is_terminal(task.state) != domain.task_state_is_terminal(saved.state) {
 			effect_tasks_changed(u, saved.chain_id, saved.owner_user_id)
 		}
+		check_coordinator_attention_on_refold(svc, u, task, saved, view, all_tasks)
 	}
 	return saved, view, true, domain.Domain_Error{}
+}
+
+@(private = "file")
+check_coordinator_attention_on_refold :: proc(svc: ^Service, u: ^Uow, before, after: domain.Task, view: Task_View, all_tasks: []domain.Task) {
+	if u == nil do return
+	if after.blocked_on_json != before.blocked_on_json && after.blocked_on_json != "" {
+		if view.budget_exhausted || strings.contains(after.blocked_on_json, `"budget_exhausted"`) {
+			effect_notify_coordinator(svc, u, after.chain_id, after.owner_user_id, "budget_exhausted", fmt.tprintf("[taskv2] budget_exhausted: task %s (%s) exhausted attempt budget (#%d)", after.task_id, after.title, after.attempt_no))
+		} else if view.oscillating || strings.contains(after.blocked_on_json, `"oscillation"`) {
+			effect_notify_coordinator(svc, u, after.chain_id, after.owner_user_id, "oscillation", fmt.tprintf("[taskv2] oscillation: task %s (%s) parked after %d review rounds", after.task_id, after.title, view.review_rounds))
+		} else if strings.contains(after.blocked_on_json, `"human"`) {
+			effect_notify_coordinator(svc, u, after.chain_id, after.owner_user_id, "blocked_on human", fmt.tprintf("[taskv2] blocked_on human: task %s (%s) is waiting on human input", after.task_id, after.title))
+		}
+	}
+	if after.state == .In_Review && before.state != .In_Review {
+		// Notify coordinator when user approval is required and all agent review roles are already satisfied (or empty).
+		if after.requires_user_approval && brief_review_roles_count(after.brief_json) == 0 {
+			effect_notify_coordinator(svc, u, after.chain_id, after.owner_user_id, "review_requested_from_user", fmt.tprintf("[taskv2] review_requested_from_user: task %s (%s) is in_review and awaits user approval", after.task_id, after.title))
+		}
+	}
+	if domain.task_state_is_terminal(after.state) && !domain.task_state_is_terminal(before.state) && len(all_tasks) > 0 {
+		all_done := true
+		for t in all_tasks {
+			st := after.state if t.task_id == after.task_id else t.state
+			if !domain.task_state_is_terminal(st) {
+				all_done = false
+				break
+			}
+		}
+		if all_done {
+			effect_notify_coordinator(svc, u, after.chain_id, after.owner_user_id, "chain_complete", fmt.tprintf("[taskv2] chain_complete: chain %s has all %d tasks in terminal state", after.chain_id, len(all_tasks)))
+		}
+	}
 }
 
 @(private = "file")
@@ -475,7 +604,6 @@ task_comment :: proc(svc: ^Service, task: domain.Task, actor: Actor, comment_id:
 	return cerr
 }
 
-@(private = "file")
 event_exists :: proc(svc: ^Service, task: domain.Task, kind: string) -> bool {
 	evs, err := iface.taskchain_list_events_by_task(svc.repo, task.task_id, task.owner_user_id)
 	if err.code != .None do return false
@@ -484,10 +612,15 @@ event_exists :: proc(svc: ^Service, task: domain.Task, kind: string) -> bool {
 }
 
 // after_chain_change is the one place every chain mutation funnels through
-// inside its UoW: refold the chain's projections, then run the matcher.
+// inside its UoW: refold the chain's projections, rebuild the mechanical chain
+// summary on task transitions, then run the matcher.
 after_chain_change :: proc(svc: ^Service, u: ^Uow, chain_id: domain.Task_Chain_ID, owner: domain.User_ID, trigger: Trigger) -> (bool, domain.Domain_Error) {
 	chain, ok, err := iface.taskchain_get_chain(svc.repo, chain_id)
 	if !ok do return false, err
 	if _, rok, rerr := refold_chain(svc, u, chain); !rok do return false, rerr
+	#partial switch trigger {
+	case .Lease_Released, .Lease_Expired, .Review_Posted, .Task_Reopened, .Task_Cancelled, .Chain_Published, .Task_Published:
+		rebuild_chain_summary_in_uow(svc, u, chain)
+	}
 	return match_chain_in_uow(svc, u, chain, trigger)
 }

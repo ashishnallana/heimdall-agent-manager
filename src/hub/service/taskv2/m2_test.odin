@@ -429,3 +429,302 @@ test_m2_review_fixes_verify_none_peek_and_vault_caps :: proc(t: ^testing.T) {
 	fc, ftrunc := findings_json_capped(fmt.tprintf(`[{{"text":"%s"}}]`, big_cipher))
 	testing.expect(t, !ftrunc && strings.contains(fc, big_cipher), "ENC:v1: finding never byte-sliced")
 }
+
+@(test)
+test_m3_r1_r2_r3_end_to_end :: proc(t: ^testing.T) {
+	fx, log, ok := lease_fixture(t, "m3_e2e")
+	defer lease_fixture_close(fx, log)
+	if !ok do return
+
+	Notif_Capture :: struct {
+		triggers: [dynamic]string,
+		lines:    [dynamic]string,
+	}
+	nc := Notif_Capture{
+		triggers = make([dynamic]string, context.temp_allocator),
+		lines    = make([dynamic]string, context.temp_allocator),
+	}
+	fx.svc.notify_observer_ctx = &nc
+	fx.svc.notify_observer = proc(ctx: rawptr, coord_id, trigger, line: string) {
+		c := (^Notif_Capture)(ctx)
+		append(&c.triggers, strings.clone(trigger, context.temp_allocator))
+		append(&c.lines, strings.clone(line, context.temp_allocator))
+	}
+	fx.svc.vcs_show_file = proc(ctx: rawptr, chain_id: domain.Task_Chain_ID, owner: domain.User_ID, directory_id, rev, file_path: string) -> (string, bool, domain.Domain_Error) {
+		return fmt.tprintf("package main // %s@%s", file_path, rev), true, domain.Domain_Error{}
+	}
+
+	chain := seed_live_chain(t, fx, "chain_m3")
+	chain.publish_state = .Draft
+	chain.published_at = ""
+	chain.coordinator_agent_instance_id = "inst_coord"
+	_, _, _ = iface.taskchain_save_chain(&fx.repo, chain)
+	seed_instance(fx, chain, "inst_coord", "coordinator", "br_1", "idle")
+	_, _, _ = iface.taskchain_save_member(&fx.repo, domain.Task_Chain_Member{
+		chain_id = chain.chain_id, agent_instance_id = "inst_coord", agent_id = "coordinator", owner_user_id = "u1", role = "coordinator", created_at = "2026-03-01T00:00:00Z",
+	})
+	_, _, _ = iface.taskchain_save_directory(&fx.repo, domain.Task_Chain_Directory{
+		directory_id = "dir_1", chain_id = chain.chain_id, owner_user_id = "u1", bridge_id = "br_1", path = "/repo", vcs_kind = "git", created_at = "2026-03-01T00:00:00Z", updated_at = "2026-03-01T00:00:00Z",
+	})
+	seed_fleet(fx, chain, "agt_w")
+	seed_instance(fx, chain, "inst_w1", "agt_w", "br_1", "idle")
+
+	// R3: chain_propose + chain_proposal_decide(approve) transitions Draft -> Published
+	prop_chain, pok, perr := chain_propose(&fx.svc, chain.chain_id, "u1", Actor{kind = ACTOR_AGENT, id = "inst_coord"}, Propose_Input{
+		kind        = "ticket",
+		rationale   = "initial 2-task plan",
+		alternative = "single monolith task",
+		tasks_json  = `[{"id":"t_base","title":"Base task","brief":{"goal":"produce output","acceptance":["ok"],"verify":"make test","output":{"v":1},"review_roles":[]}},{"id":"t_indep","title":"Indep verify task","depends_on":["t_base"],"brief":{"goal":"verify indep","acceptance":["ok"],"verify":"make test","require_independent_verify":true,"requires_user_approval":true,"inputs":["output:t_base","src/main.odin@abc1234"],"review_roles":[]}}]`,
+	})
+	if !testing.expect(t, pok, fmt.tprintf("chain_propose: %s", perr.message)) do return
+	testing.expect(t, strings.contains(chain_proposal_json(prop_chain), `"status":"pending"`), "proposal stored")
+	testing.expect(t, strings.contains(chain_proposal_json(prop_chain), `"alternative":"single monolith task"`), "alternative stored")
+
+	dec_chain, mat_tasks, dok, derr := chain_proposal_decide(&fx.svc, chain.chain_id, "u1", Actor{kind = ACTOR_USER, id = "u1"}, "approve")
+	if !testing.expect(t, dok && len(mat_tasks) == 2, fmt.tprintf("proposal decide: %s", derr.message)) do return
+	testing.expect_value(t, dec_chain.publish_state, domain.Publish_State.Published)
+	testing.expect(t, dec_chain.published_at != "", "chain published_at set on proposal approve")
+	chain = dec_chain
+	t_base := mat_tasks[0]
+	t_indep := mat_tasks[1]
+	testing.expect_value(t, t_base.publish_state, domain.Publish_State.Published)
+	testing.expect_value(t, t_base.state, domain.Task_State.In_Progress) // auto-granted to inst_w1!
+	testing.expect_value(t, t_indep.state, domain.Task_State.Backlog)   // waiting on t_base
+
+	// R2: runtime facet written at grant
+	rt_f, has_rt := get_facet(&fx.svc, t_base, 1, FACET_RUNTIME)
+	testing.expect(t, has_rt && strings.contains(rt_f.body_json, `"bridge_id":"br_1"`), "runtime facet written at grant")
+
+	// Submit t_base with output + artifacts (using spec {kind, ref, label} schema for file, url, preview_port)
+	confirm_holder(fx, "inst_w1")
+	write_verify(fx, string(t_base.task_id), 1, "abc1234", 0)
+	sub1, sok1, serr1 := lease_submit(&fx.svc, inst_auth("inst_w1"), Submit_Input{
+		summary        = "base complete",
+		output_json    = `{"result":"forty-two"}`,
+		vcs_json       = `{"head":"abc1234","dirty":false,"files":[{"path":"src/main.odin","status":"M","add":10,"del":2}]}`,
+		artifacts_json = `{"items":[{"kind":"file","ref":"out/report.txt","label":"Report"},{"kind":"url","ref":"https://example.com/ci","label":"CI"},{"kind":"preview_port","ref":3000,"label":"Preview"}]}`,
+	})
+	if !testing.expect(t, sok1 && sub1.outcome == "done", fmt.tprintf("submit t_base: %s", serr1.message)) do return
+	art_f, has_art := get_facet(&fx.svc, t_base, 1, FACET_ARTIFACTS)
+	testing.expect(t, has_art && strings.contains(art_f.body_json, `"label":"Report"`) && strings.contains(art_f.body_json, `"preview_port"`), "artifacts facet stored with {kind, ref, label}")
+	rt_after, _ := get_facet(&fx.svc, t_base, 1, FACET_RUNTIME)
+	testing.expect(t, strings.contains(rt_after.body_json, `"ended_at":"2026-`), "runtime facet ended_at populated on close")
+
+	// R1: mechanical chain summary updated on transition (includes title, @vcs.head, and handoff.summary); t_indep now In_Progress with full pack
+	cs, cs_ok, _ := iface.taskchain_get_chain_summary(&fx.repo, chain.chain_id, "u1")
+	testing.expect(t, cs_ok && strings.contains(cs.body, "Base task") && strings.contains(cs.body, "@abc1234") && strings.contains(cs.body, "base complete"), "mechanical chain summary lists completed task with title, @vcs.head, and handoff summary")
+
+	// Set coordinator-curated summary BEFORE t_indep transitions, and verify subsequent mechanical rebuild preserves it!
+	_, sum_ok, sum_err := chain_summary_set(&fx.svc, inst_auth("inst_coord"), chain.chain_id, "Coordinator curated note: architecture v2")
+	testing.expect(t, sum_ok, fmt.tprintf("chain_summary_set: %s", sum_err.message))
+
+	l_indep, held_indep := lease_of(fx, "inst_w1")
+	testing.expect(t, held_indep && l_indep.task_id == t_indep.task_id, "t_indep granted after t_base done")
+	inst_w1, _, _ := iface.agent_get_instance(&fx.agents, "inst_w1")
+	pack := build_pack_json(&fx.svc, chain, get_task(fx, string(t_indep.task_id)), l_indep, inst_w1)
+	testing.expect(t, strings.contains(pack, `"where_you_are"`) && strings.contains(pack, `"forty-two"`) && strings.contains(pack, "package main // src/main.odin@abc1234"), "pack resolves output:<task> and path@rev inputs")
+
+	// R2: submit t_indep -> enters In_Review because require_independent_verify=true & requires_user_approval=true
+	confirm_holder(fx, "inst_w1")
+	write_verify(fx, string(t_indep.task_id), 1, "def5678", 0)
+	sub2, sok2, serr2 := lease_submit(&fx.svc, inst_auth("inst_w1"), Submit_Input{
+		summary  = "indep ready",
+		vcs_json = `{"head":"def5678","dirty":false}`,
+		auto     = true,
+	})
+	if !testing.expect(t, sok2 && sub2.outcome == "in_review", fmt.tprintf("submit t_indep: %s", serr2.message)) do return
+
+	// R3: coordinator proxy review on_behalf_of="user" approves user part, records actor_kind="coordinator", and gate waits for independent verify!
+	rev_res, rok, rerr := review_post(&fx.svc, inst_auth("inst_coord"), Review_Input{
+		task_id      = string(t_indep.task_id),
+		verdict      = "approve",
+		on_behalf_of = "user",
+	})
+	if !testing.expect(t, rok && rev_res.gate == .Waiting, fmt.tprintf("proxy review: %s", rerr.message)) do return
+	testing.expect_value(t, get_task(fx, string(t_indep.task_id)).state, domain.Task_State.In_Review)
+	indep_evs, _ := iface.taskchain_list_events_by_task(&fx.repo, t_indep.task_id, "u1")
+	found_coord_rev := false
+	for ev in indep_evs {
+		if ev.kind == EV_REVIEW_POSTED && ev.actor_kind == ACTOR_COORDINATOR && strings.contains(ev.payload_json, `"on_behalf_of":"user"`) {
+			found_coord_rev = true
+		}
+	}
+	testing.expect(t, found_coord_rev, "proxy review event records actor_kind == coordinator and on_behalf_of == user")
+
+	// R2: independent verify session exits 0 -> gate approves and task transitions to Done!
+	on_verify_session_exited(&fx.svc, Verify_Exit{
+		session_id    = "sh_indep_1",
+		label         = fmt.tprintf("verify %s #1 @def5678 independent", t_indep.task_id),
+		owner_user_id = "u1",
+		status        = "exited",
+		exit_code     = 0,
+		exit_code_set = true,
+		duration_ms   = 120,
+		head_at_end   = "def5678",
+		dirty         = "false",
+		cmd           = "make test",
+		independent   = true,
+	})
+	testing.expect_value(t, get_task(fx, string(t_indep.task_id)).state, domain.Task_State.Done)
+
+	// R1: verify coordinator-curated note survived rebuild_chain_summary_in_uow on t_indep completion AND mechanical completed task lines are present!
+	cs_after, cs_after_ok, _ := iface.taskchain_get_chain_summary(&fx.repo, chain.chain_id, "u1")
+	testing.expect(t, cs_after_ok && strings.contains(cs_after.body, "Coordinator curated note: architecture v2") && strings.contains(cs_after.body, "@def5678") && strings.contains(cs_after.body, "indep ready"), "coordinator summary preserved alongside mechanical updates")
+
+	too_many := strings.repeat("line\n", 65, context.temp_allocator)
+	_, bad_sum, bad_sum_err := chain_summary_set(&fx.svc, inst_auth("inst_coord"), chain.chain_id, too_many)
+	testing.expect(t, !bad_sum && bad_sum_err.code == .Validation_Failed, ">60 line summary rejected")
+
+	// R3: verify coordinator notifications fired (proposal_decided and chain_complete)
+	has_prop_notif, has_complete_notif := false, false
+	for trig in nc.triggers {
+		if trig == "proposal_decided" do has_prop_notif = true
+		if trig == "chain_complete" do has_complete_notif = true
+	}
+	testing.expect(t, has_prop_notif && has_complete_notif, "coordinator notified on proposal_decided and chain_complete")
+	assert_projection_matches_fold(t, fx, chain.chain_id, "u1", "m3_e2e")
+}
+
+@(test)
+test_chain_propose_validation_and_auto_approve :: proc(t: ^testing.T) {
+	fx, log, ok := lease_fixture(t, "m3_propose_val")
+	defer lease_fixture_close(fx, log)
+	if !ok do return
+
+	chain := seed_live_chain(t, fx, "chain_pv")
+	chain.publish_state = .Draft
+	chain.published_at = ""
+	chain.coordinator_agent_instance_id = "inst_coord"
+	chain.defaults_json = `{"auto_submit":true,"custom_flag":"keep_me"}`
+	_, _, _ = iface.taskchain_save_chain(&fx.repo, chain)
+	seed_instance(fx, chain, "inst_coord", "coordinator", "br_1", "idle")
+	seed_instance(fx, chain, "inst_worker", "agt_w", "br_1", "idle")
+	_, _, _ = iface.taskchain_save_member(&fx.repo, domain.Task_Chain_Member{
+		chain_id = chain.chain_id, agent_instance_id = "inst_coord", agent_id = "coordinator", owner_user_id = "u1", role = "coordinator", created_at = "2026-03-01T00:00:00Z",
+	})
+
+	valid_tasks := `[{"id":"tp_1","title":"Task 1","brief":{"goal":"build 1","acceptance":["a1"],"verify":"make test","review_roles":[]}}]`
+
+	// 1. Non-coordinator agent rejected with 403 Forbidden (not_coordinator)
+	_, pok1, perr1 := chain_propose(&fx.svc, chain.chain_id, "u1", Actor{kind = ACTOR_AGENT, id = "inst_worker"}, Propose_Input{
+		kind       = "ticket",
+		rationale  = "worker try",
+		tasks_json = valid_tasks,
+	})
+	testing.expect(t, !pok1 && perr1.code == .Forbidden && strings.contains(perr1.details_json, "not_coordinator"), "non-coordinator rejected with 403 not_coordinator")
+
+	// 2. Incomplete brief rejected with 400 Validation_Failed (brief_incomplete)
+	_, pok2, perr2 := chain_propose(&fx.svc, chain.chain_id, "u1", Actor{kind = ACTOR_AGENT, id = "inst_coord"}, Propose_Input{
+		kind       = "ticket",
+		rationale  = "bad brief",
+		tasks_json = `[{"id":"tp_bad","title":"Bad task","brief":{"goal":"","acceptance":[],"verify":""}}]`,
+	})
+	testing.expect(t, !pok2 && perr2.code == .Validation_Failed && strings.contains(perr2.details_json, "brief_incomplete"), "incomplete brief rejected with brief_incomplete")
+
+	// 3. Valid proposal preserves existing defaults_json keys
+	prop_chain, pok3, perr3 := chain_propose(&fx.svc, chain.chain_id, "u1", Actor{kind = ACTOR_AGENT, id = "inst_coord"}, Propose_Input{
+		kind       = "ticket",
+		rationale  = "good plan",
+		tasks_json = valid_tasks,
+	})
+	if !testing.expect(t, pok3, fmt.tprintf("valid propose: %s", perr3.message)) do return
+	testing.expect(t, strings.contains(prop_chain.defaults_json, `"custom_flag":"keep_me"`) && strings.contains(prop_chain.defaults_json, `"auto_submit":true`), "defaults_json keys preserved on propose")
+
+	// 4. Reject clears proposal while keeping custom_flag, leaving chain in Draft
+	rej_chain, _, rok, _ := chain_proposal_decide(&fx.svc, chain.chain_id, "u1", Actor{kind = ACTOR_USER, id = "u1"}, "reject", "try auto_approve")
+	testing.expect(t, rok && rej_chain.publish_state == .Draft && strings.contains(rej_chain.defaults_json, `"custom_flag":"keep_me"`) && chain_proposal_json(rej_chain) == "", "reject clears proposal and preserves defaults_json")
+
+	// 5. auto_approve = true immediately publishes chain and tasks in one UoW
+	auto_chain, pok4, perr4 := chain_propose(&fx.svc, chain.chain_id, "u1", Actor{kind = ACTOR_AGENT, id = "inst_coord"}, Propose_Input{
+		kind         = "ticket",
+		rationale    = "auto-approved plan",
+		auto_approve = true,
+		tasks_json   = valid_tasks,
+	})
+	if !testing.expect(t, pok4, fmt.tprintf("auto_approve propose: %s", perr4.message)) do return
+	testing.expect_value(t, auto_chain.publish_state, domain.Publish_State.Published)
+	testing.expect_value(t, get_task(fx, "tp_1").state, domain.Task_State.Ready)
+
+	// 6. Proposing again on already-published chain is rejected with 409 Conflict (already_published)
+	_, pok5, perr5 := chain_propose(&fx.svc, chain.chain_id, "u1", Actor{kind = ACTOR_AGENT, id = "inst_coord"}, Propose_Input{
+		kind       = "ticket",
+		rationale  = "late propose",
+		tasks_json = valid_tasks,
+	})
+	testing.expect(t, !pok5 && perr5.code == .Conflict && strings.contains(perr5.details_json, "already_published"), "already-published chain rejected with 409 already_published")
+}
+
+@(test)
+test_pack_full_sections_and_field_safe_cap :: proc(t: ^testing.T) {
+	fx, log, ok := lease_fixture(t, "m3_pack_full")
+	defer lease_fixture_close(fx, log)
+	if !ok do return
+	chain := seed_live_chain(t, fx, "chain_pf")
+	seed_fleet(fx, chain, "agt_w")
+	seed_fleet(fx, chain, "agt_r", `["reviewer"]`)
+	inst_w := seed_instance(fx, chain, "inst_w1", "agt_w", "br_1", "idle")
+	_ = seed_instance(fx, chain, "inst_r1", "agt_r", "br_1", "idle")
+
+	// 1. Complete an upstream task t_up so we have an event id and output:<task>
+	t_up := publish_task(t, fx, chain, "t_up", brief = `{"goal":"upstream","acceptance":["ok"],"verify":"make test","output":{"v":1},"review_roles":[]}`)
+	confirm_holder(fx, "inst_w1")
+	write_verify(fx, "t_up", 1, "111aaaa", 0)
+	_, sok_up, _ := lease_submit(&fx.svc, inst_auth("inst_w1"), Submit_Input{
+		summary     = "upstream finished",
+		output_json = `{"endpoint":"/api/v2"}`,
+		vcs_json    = `{"head":"111aaaa","dirty":false}`,
+	})
+	testing.expect(t, sok_up, "t_up done")
+	up_evs, _ := iface.taskchain_list_events_by_task(&fx.repo, t_up.task_id, "u1")
+	ev_ref := fmt.tprintf("#%d", up_evs[0].event_id)
+
+	// 2. Publish task_pf with inputs referencing #<event_id>, output:t_up, and facet:task_pf:1:handoff
+	brief_pf := fmt.tprintf(`{{"goal":"full pack goal","acceptance":["a1"],"verify":"make test","inputs":["%s","output:t_up","facet:task_pf:1:handoff"],"review_roles":["reviewer"]}}`, ev_ref)
+	task := publish_task(t, fx, chain, "task_pf", brief = brief_pf)
+	confirm_holder(fx, "inst_w1")
+	_, _, _ = lease_heartbeat(&fx.svc, inst_auth("inst_w1"), Lease_Heartbeat_Input{note = "halfway through attempt 1"})
+	write_verify(fx, "task_pf", 1, "222bbbb", 0)
+	_, sok_pf1, _ := lease_submit(&fx.svc, inst_auth("inst_w1"), Submit_Input{
+		summary      = "attempt 1 summary",
+		handoff_json = `{"summary":"attempt 1 summary","decisions":["use sqlite"],"dead_ends":["avoided polling"],"next_steps":"fix edge case"}`,
+		vcs_json     = `{"head":"222bbbb","base":"111aaaa","dirty":false,"files":[{"path":"src/a.odin","status":"M","add":5,"del":1}]}`,
+	})
+	testing.expect(t, sok_pf1, "attempt 1 submitted to review")
+
+	// 3. Reviewer requests changes with open findings -> triggers attempt 2 grant to inst_w1!
+	confirm_holder(fx, "inst_r1")
+	_, rok_pf1, _ := review_post(&fx.svc, inst_auth("inst_r1"), Review_Input{
+		verdict       = "request_changes",
+		findings_json = `[{"path":"src/a.odin","line":42,"severity":"blocking","text":"handle nil pointer"}]`,
+	})
+	testing.expect(t, rok_pf1, "reviewer requested changes")
+
+	lse2, held2 := lease_of(fx, "inst_w1")
+	if !testing.expect(t, held2 && lse2.attempt_no == 2, "attempt 2 lease granted") do return
+	pack := build_pack_json(&fx.svc, chain, get_task(fx, "task_pf"), lse2, inst_w)
+	testing.expect(t, strings.contains(pack, `"why":"changes_requested"`), "pack has why=changes_requested")
+	testing.expect(t, strings.contains(pack, `"attempt_no":2`), "pack has attempt_no=2")
+	testing.expect(t, strings.contains(pack, `"review_round":1`), "pack has review_round=1")
+	testing.expect(t, strings.contains(pack, `"previous_attempt":{"attempt_no":1`), "pack has non-null previous_attempt")
+	testing.expect(t, strings.contains(pack, `"avoided polling"`), "pack has previous_attempt dead_ends")
+	testing.expect(t, strings.contains(pack, `"use sqlite"`), "pack has previous_attempt decisions")
+	testing.expect(t, strings.contains(pack, `"halfway through attempt 1"`), "pack has previous_attempt heartbeat_note")
+	testing.expect(t, strings.contains(pack, `"handle nil pointer"`), "pack has open review findings")
+	testing.expect(t, strings.contains(pack, `"/api/v2"`), "pack resolves output:t_up input")
+	testing.expect(t, strings.contains(pack, `"where_you_are"`), "pack has where_you_are")
+	testing.expect(t, strings.contains(pack, `"protocol"`), "pack has protocol")
+
+	// 4. Test 32 KiB field-safe cap (cap_pack_json_field_safe): drops inputs -> verify -> handoff, preserving brief, dead_ends, findings
+	big_chunk := strings.repeat("X", 14000, context.temp_allocator)
+	huge_pack := fmt.tprintf(
+		`{{"lease_id":"lse_cap","task_id":"task_pf","attempt_no":2,"brief":{{"goal":"full pack goal"}},"inputs":[{{"ref":"output:t_up","resolved":true,"data":"%s"}}],"previous_attempt":{{"attempt_no":1,"outcome":"changes_requested","handoff":{{"summary":"%s","dead_ends":["keep_dead_end_1"]}},"verify":{{"exit_code":0,"summary":"%s"}}}},"findings":[{{"role":"reviewer","reviewer":"inst_r1","path":"src/a.odin","line":42,"severity":"blocking","text":"keep_finding_1"}}]}}`,
+		big_chunk, big_chunk, big_chunk,
+	)
+	capped := cap_pack_json_field_safe(huge_pack, "task_pf")
+	testing.expect(t, len(capped) <= PACK_MAX_BYTES, fmt.tprintf("capped pack <= 32 KiB (got %d)", len(capped)))
+	testing.expect(t, strings.contains(capped, "ham-ctl task fetch task_pf"), "dropped fields replaced with ham-ctl task fetch pointer")
+	testing.expect(t, strings.contains(capped, "full pack goal"), "brief preserved under cap")
+	testing.expect(t, strings.contains(capped, "keep_dead_end_1"), "dead_ends preserved under cap")
+	testing.expect(t, strings.contains(capped, "keep_finding_1"), "findings preserved under cap")
+}
+

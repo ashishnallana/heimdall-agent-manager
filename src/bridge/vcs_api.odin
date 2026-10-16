@@ -142,6 +142,15 @@ Bridge_Vcs_Workspaces_Command :: struct {
 	root:       string `json:"root"`,
 }
 
+Bridge_Vcs_Show_File_Command :: struct {
+	type:       string `json:"type"`,
+	command_id: string `json:"command_id"`,
+	root:       string `json:"root"`,
+	rev:        string `json:"rev"`,
+	path:       string `json:"path"`,
+	file:       string `json:"file"`,
+}
+
 // --- Wire Response Structs (outgoing over WS) -----------------------------
 
 Bridge_Vcs_Error_Wire :: Bridge_Result_Error
@@ -283,6 +292,7 @@ Bridge_Vcs_Commit_Diff_Result_Wire :: struct {
 	cursor:      string                      `json:"cursor"`,
 	limit:       int                         `json:"limit"`,
 	has_more:    bool                        `json:"has_more"`,
+	truncated:   bool                        `json:"truncated"`,
 	next_cursor: Maybe(string)               `json:"next_cursor"`,
 	hunks:       []Bridge_Vcs_Diff_Hunk_Wire `json:"hunks"`,
 	error:       Bridge_Vcs_Error_Wire       `json:"error"`,
@@ -302,6 +312,17 @@ Bridge_Vcs_Workspaces_Result_Wire :: struct {
 	provider:   string                            `json:"provider"`,
 	workspaces: []Bridge_Vcs_Workspace_Entry_Wire `json:"workspaces"`,
 	error:      Bridge_Vcs_Error_Wire             `json:"error"`,
+}
+
+Bridge_Vcs_Show_File_Result_Wire :: struct {
+	type:       string                `json:"type"`,
+	command_id: string                `json:"command_id"`,
+	ok:         bool                  `json:"ok"`,
+	provider:   string                `json:"provider"`,
+	rev:        string                `json:"rev"`,
+	path:       string                `json:"path"`,
+	content:    string                `json:"content"`,
+	error:      Bridge_Vcs_Error_Wire `json:"error"`,
 }
 
 // --- Wire Conversion Helpers ----------------------------------------------
@@ -536,6 +557,17 @@ bridge_vcs_handle_command :: proc(conn: ^ws.Connection, type, text: string) -> b
 		}
 		if cached, ok := bridge_runtime_cached_command(cmd.command_id); ok { _ = bridge_hub_send(conn, cached); return true }
 		out := bridge_vcs_workspaces_json(cmd.command_id, text)
+		defer delete(out)
+		bridge_runtime_cache_command(cmd.command_id, out)
+		_ = bridge_hub_send(conn, out)
+		return true
+	case "vcs_show_file":
+		cmd: Bridge_Vcs_Show_File_Command
+		if err := json.unmarshal_string(text, &cmd, json.DEFAULT_SPECIFICATION, context.temp_allocator); err != nil {
+			return false
+		}
+		if cached, ok := bridge_runtime_cached_command(cmd.command_id); ok { _ = bridge_hub_send(conn, cached); return true }
+		out := bridge_vcs_show_file_json(cmd.command_id, text)
 		defer delete(out)
 		bridge_runtime_cache_command(cmd.command_id, out)
 		_ = bridge_hub_send(conn, out)
@@ -1381,6 +1413,7 @@ bridge_vcs_commit_diff_json :: proc(command_id, text: string, allocator := conte
 		if err != nil do return ""
 		return strings.clone(string(data), allocator)
 	}
+	vcs_last_hunks_truncated = false
 	hunks, next_cursor, has_more, dok := provider.commit_diff(path, base_ref, head_ref, file, cmd.cursor, eff_limit)
 	if !dok {
 		wire := Bridge_Vcs_Commit_Diff_Result_Wire{
@@ -1394,6 +1427,7 @@ bridge_vcs_commit_diff_json :: proc(command_id, text: string, allocator := conte
 			cursor      = cmd.cursor,
 			limit       = eff_limit,
 			has_more    = false,
+			truncated   = false,
 			next_cursor = nil,
 			hunks       = []Bridge_Vcs_Diff_Hunk_Wire{},
 			error       = bridge_result_error("invalid_ref", "Could not diff the requested revisions"),
@@ -1403,6 +1437,7 @@ bridge_vcs_commit_diff_json :: proc(command_id, text: string, allocator := conte
 		return strings.clone(string(data), allocator)
 	}
 	next_cursor_val: Maybe(string) = next_cursor if next_cursor != "" else nil
+	is_truncated := vcs_last_hunks_truncated || (has_more && len(hunks) >= VCS_DIFF_MAX_LIMIT)
 	wire := Bridge_Vcs_Commit_Diff_Result_Wire{
 		type        = "vcs_commit_diff_result",
 		command_id  = cid,
@@ -1414,6 +1449,7 @@ bridge_vcs_commit_diff_json :: proc(command_id, text: string, allocator := conte
 		cursor      = cmd.cursor,
 		limit       = eff_limit,
 		has_more    = has_more,
+		truncated   = is_truncated,
 		next_cursor = next_cursor_val,
 		hunks       = vcs_to_wire_hunks(hunks),
 		error       = bridge_result_error("", ""),
@@ -1483,3 +1519,76 @@ bridge_vcs_workspaces_json :: proc(command_id, text: string, allocator := contex
 	if err != nil do return ""
 	return strings.clone(string(data), allocator)
 }
+
+// --- vcs_show_file -------------------------------------------------------
+
+bridge_vcs_show_file_json :: proc(command_id, text: string, allocator := context.allocator) -> string {
+	cmd: Bridge_Vcs_Show_File_Command
+	_ = json.unmarshal_string(text, &cmd, json.DEFAULT_SPECIFICATION, context.temp_allocator)
+	cid := command_id if command_id != "" else cmd.command_id
+	path := vcs_request_path(cmd.root)
+	rev := strings.trim_space(cmd.rev)
+	file := strings.trim_space(cmd.path) if strings.trim_space(cmd.path) != "" else strings.trim_space(cmd.file)
+	provider, ok := vcs_detect_provider(path)
+	if !ok {
+		wire := Bridge_Vcs_Show_File_Result_Wire{
+			type       = "vcs_show_file_result",
+			command_id = cid,
+			ok         = false,
+			provider   = "",
+			rev        = rev,
+			path       = file,
+			content    = "",
+			error      = bridge_result_error("no_vcs", "No supported version control system found at path"),
+		}
+		data, err := json.marshal(wire, allocator = context.temp_allocator)
+		if err != nil do return ""
+		return strings.clone(string(data), allocator)
+	}
+	if provider.show_file == nil {
+		wire := Bridge_Vcs_Show_File_Result_Wire{
+			type       = "vcs_show_file_result",
+			command_id = cid,
+			ok         = false,
+			provider   = provider.name(),
+			rev        = rev,
+			path       = file,
+			content    = "",
+			error      = bridge_result_error("not_supported", "show_file is not supported by this provider"),
+		}
+		data, err := json.marshal(wire, allocator = context.temp_allocator)
+		if err != nil do return ""
+		return strings.clone(string(data), allocator)
+	}
+	content, sok := provider.show_file(path, rev, file)
+	defer if len(content) > 0 do delete(content)
+	if !sok {
+		wire := Bridge_Vcs_Show_File_Result_Wire{
+			type       = "vcs_show_file_result",
+			command_id = cid,
+			ok         = false,
+			provider   = provider.name(),
+			rev        = rev,
+			path       = file,
+			content    = "",
+			error      = bridge_result_error("not_found", "Could not read file at revision"),
+		}
+		data, err := json.marshal(wire, allocator = context.temp_allocator)
+		if err != nil do return ""
+		return strings.clone(string(data), allocator)
+	}
+	wire := Bridge_Vcs_Show_File_Result_Wire{
+		type       = "vcs_show_file_result",
+		command_id = cid,
+		ok         = true,
+		provider   = provider.name(),
+		rev        = rev,
+		path       = file,
+		content    = content,
+		error      = bridge_result_error("", ""),
+	}
+	data, err := json.marshal(wire, allocator = context.temp_allocator)
+	if err != nil do return ""
+	return strings.clone(string(data), allocator)
+}
+

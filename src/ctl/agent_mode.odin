@@ -308,6 +308,27 @@ ctl_v2_task_chain :: proc(endpoint, token: string, tokens, args: []string) {
 		ctl_task_chains_command(tokens, args)
 	case "fleet", "fleets":
 		ctl_v2_task_chain_fleet(endpoint, token, tokens[1:], args)
+	case "summary", "set-summary":
+		ctl_v2_task_chain_summary(endpoint, token, tokens[1:], args)
+	case "propose":
+		ctl_v2_task_chain_propose(endpoint, token, tokens[1:], args)
+	case "decide", "proposal":
+		cid := option_value(args, "--chain", option_value(args, "--chain-id", pos(tokens, 1)))
+		decision := strings.trim_space(option_value(args, "--decision", ""))
+		if cid == "" || (decision != "approve" && decision != "reject") {
+			fmt.println(`{"ok":false,"message":"task-chain decide requires --chain <id> --decision approve|reject [--reason <text>]"}`)
+			os.exit(1)
+		}
+		fields := make([dynamic]string)
+		defer delete(fields)
+		append(&fields, json_kv("decision", decision))
+		if r := option_value(args, "--reason", ""); r != "" do append(&fields, json_kv("reason", r))
+		params := json_object(
+			json_kv("http_method", "POST"),
+			json_kv("path", fmt.tprintf("/api/v1/task-chains/%s/proposal/decide", safe_path_part(cid))),
+			json_kv("body", json_object_from_slice(fields[:])),
+		)
+		ctl_agent_call_task(endpoint, token, "agent.rest.request", params, args)
 	case:
 		print_agent_help([]string{"task-chain"})
 	}
@@ -351,29 +372,17 @@ ctl_v2_task_chain_fleet :: proc(endpoint, token: string, tokens, args: []string)
 			}
 		}
 		agent_id := option_value(args, "--agent", option_value(args, "--agent-id", ""))
-		capacity_str := option_value(args, "--capacity", "")
-		if chain_id == "" || agent_id == "" || capacity_str == "" {
-			fmt.println("usage: ham-ctl task-chain fleet set <chain-id> --agent <agent_id> --capacity <N>")
+		bm_file, _ := ctl_read_json_file_flag(args, "--bridge-models-file")
+		body, body_ok := ctl_v2_fleet_set_body(args, bm_file)
+		if chain_id == "" || agent_id == "" || !body_ok {
+			fmt.println("usage: ham-ctl task-chain fleet set <chain-id> --agent <agent_id> --capacity <N> [--roles <worker,reviewer>] [--bridge <id>] [--provider <p>] [--model <m>] [--bridge-models <json>]")
 			return
-		}
-		capacity := 1
-		if c, c_ok := strconv.parse_int(capacity_str); c_ok {
-			capacity = int(c)
-		}
-		fields := make([dynamic]string)
-		defer delete(fields)
-		append(&fields, json_kv_raw("capacity", fmt.tprintf("%d", capacity)))
-		if mw := option_value(args, "--min-warm", ""); mw != "" {
-			if v, v_ok := strconv.parse_int(mw); v_ok do append(&fields, json_kv_raw("min_warm", fmt.tprintf("%d", v)))
-		}
-		if ttl := option_value(args, "--idle-ttl", option_value(args, "--idle-ttl-seconds", "")); ttl != "" {
-			if v, v_ok := strconv.parse_int(ttl); v_ok do append(&fields, json_kv_raw("idle_ttl_seconds", fmt.tprintf("%d", v)))
 		}
 		path := fmt.tprintf("/api/v1/task-chains/%s/fleets/%s", safe_path_part(chain_id), safe_path_part(agent_id))
 		params := json_object(
 			json_kv("http_method", "PUT"),
 			json_kv("path", path),
-			json_kv("body", json_object_from_slice(fields[:])),
+			json_kv("body", body),
 		)
 		ctl_agent_call(endpoint, token, "agent.rest.request", params)
 		return
@@ -1856,6 +1865,12 @@ print_help_task_chain :: proc() {
 	fmt.println("  set-title <title> [--chain <id>]    Rename a chain (coordinator only).")
 	fmt.println("  set-description <text> [--chain <id>] | --stdin   Set the chain description")
 	fmt.println("                                      (coordinator only; pass \"\" to clear).")
+	fmt.println("  summary set <text> [--chain <id>] | --stdin       Set/override the chain summary (<=60 lines, coordinator only).")
+	fmt.println("  propose --file <proposal.json> [--auto-approve] [--chain <id>]")
+	fmt.println("                                      Propose a ticket or workflow (creates draft tasks in one UoW;")
+	fmt.println("                                      --auto-approve publishes immediately when the user said 'go ahead').")
+	fmt.println("  decide [<chain-id>] --decision approve|reject [--reason <text>]")
+	fmt.println("                                      Approve or reject a pending proposal on the chain.")
 	fmt.println("  set-status <active|completed|archived> [--chain <id>] Change chain status (coordinator only).")
 	fmt.println("  archive [<chain-id>]                Archive a task chain (coordinator only).")
 	fmt.println("  unarchive [<chain-id>]              Restore an archived task chain to active (coordinator only).")
@@ -1863,16 +1878,16 @@ print_help_task_chain :: proc() {
 	fmt.println("                                      published to its tasks — until then nothing in the")
 	fmt.println("                                      chain is scheduled.")
 	fmt.println("  directory <add|update|remove|list>  Manage task chain relevant directories.")
-	fmt.println("  fleet <list|set>                    Manage chain fleet capacities and active workers.")
+	fmt.println("  fleet <list|set>                    Manage chain fleet capacities, roles, and placement.")
 	fmt.println("")
 	fmt.println("EXAMPLES")
 	fmt.println("  ham-ctl task-chain list --mine")
 	fmt.println("  ham-ctl task-chain show chain_abc")
 	fmt.println("  ham-ctl task-chain create --title 'Build feature' --coordinator agt_coord")
-	fmt.println("  ham-ctl task-chain set-title 'Auth hardening' --chain chain_abc")
-	fmt.println("  ham-ctl task-chain set-description 'Harden auth: rotate tokens, add tests.'")
+	fmt.println("  ham-ctl task-chain summary set '# Chain summary' --chain chain_abc")
+	fmt.println("  ham-ctl task-chain propose --file proposal.json --auto-approve")
 	fmt.println("  ham-ctl task-chain fleet list chain_abc")
-	fmt.println("  ham-ctl task-chain fleet set chain_abc --agent agt_worker --capacity 4")
+	fmt.println("  ham-ctl task-chain fleet set chain_abc --agent agt_worker --capacity 4 --roles worker,reviewer --bridge brg_1 --provider claude --model sonnet")
 	fmt.println("  ham-ctl task-chain publish chain_abc")
 }
 
@@ -1880,18 +1895,23 @@ print_help_task_chain_fleet :: proc() {
 	fmt.println("ham-ctl task-chain fleet — fleet management for task chains")
 	fmt.println("")
 	fmt.println("VERBS")
-	fmt.println("  list <chain-id>                             List fleet capacities and active agent counts.")
-	fmt.println("  set <chain-id> --agent <id> --capacity <N>  Set or adjust fleet capacity for an agent.")
+	fmt.println("  list <chain-id>                             List fleet capacities, roles, placement, and active agent counts.")
+	fmt.println("  set <chain-id> --agent <id> --capacity <N>  Set or adjust fleet capacity, roles, and placement for an agent.")
 	fmt.println("")
 	fmt.println("FLAGS (set)")
-	fmt.println("  --agent <agent_id>      Durable agent ID (e.g. agt_worker).")
-	fmt.println("  --capacity <N>          Maximum concurrent instances for this agent on the chain.")
-	fmt.println("  --min-warm <N>          Minimum warm idle instances to maintain (optional).")
-	fmt.println("  --idle-ttl <seconds>    Idle TTL before scaling down warm instances (default: 600).")
+	fmt.println("  --agent <agent_id>        Durable agent ID (e.g. agt_worker).")
+	fmt.println("  --capacity <N>            Maximum concurrent instances for this agent on the chain.")
+	fmt.println("  --min-warm <N>            Minimum warm idle instances to maintain (optional).")
+	fmt.println("  --idle-ttl <seconds>      Idle TTL before scaling down warm instances (default: 600).")
+	fmt.println("  --roles <worker,reviewer> Roles this fleet row can serve (repeatable or comma-separated).")
+	fmt.println("  --bridge <bridge_id>      Pin fleet placement to a specific bridge (pass \"\" to inherit).")
+	fmt.println("  --provider <provider>     Provider override for this fleet row (pass \"\" to inherit).")
+	fmt.println("  --model <model>           Model override for this fleet row (pass \"\" to inherit).")
+	fmt.println("  --bridge-models <json>    Per-bridge provider/model map JSON object.")
 	fmt.println("")
 	fmt.println("EXAMPLES")
 	fmt.println("  ham-ctl task-chain fleet list chain_abc")
-	fmt.println("  ham-ctl task-chain fleet set chain_abc --agent agt_worker --capacity 4")
+	fmt.println("  ham-ctl task-chain fleet set chain_abc --agent agt_worker --capacity 4 --roles worker,reviewer --bridge brg_1 --provider claude --model sonnet")
 }
 
 print_help_task :: proc() {
@@ -1909,15 +1929,17 @@ print_help_task :: proc() {
 	fmt.println("                                          (count, last_comment_at, author, preview) — not bodies.")
 	fmt.println("  show <task-id>                          Show a task + brief + comment_summary (no bodies).")
 	fmt.println("  comments <task-id> [--last N]           Fetch comment bodies; --last N = newest N (max 100).")
-	fmt.println("  fetch <task-id> <ref>                   Fetch one event (#<event_id>) or facet")
-	fmt.println("                                          (facet:<task_id>:<attempt_no>:<kind>) referenced by your pack.")
+	fmt.println("  fetch <task-id> <ref>                   Fetch one event (#<event_id>), output (output:<task_id>),")
+	fmt.println("                                          facet (facet:<task_id>:<attempt_no>:<kind>), or file at commit")
+	fmt.println("                                          (dir:<dir_id>:<rev>:<path>, <path>@<rev>, or <path>).")
 	fmt.println("  create --title <t>                      Create a task (draft until published).")
 	fmt.println("      [--description <d>] [--priority p0|p1|p2] [--assignee <agent-id>] [--bridge <bridge-id>]")
 	fmt.println("      [--reviewer <agent-id,...>] [--require-user-approval] [--depends-on <id,id>] [--chain <id>]")
 	fmt.println("      BRIEF (what publish validates): --goal <g> --acceptance <a> (repeatable) --verify <cmd>")
-	fmt.println("      [--input <ref>]... [--review-role <role>]... [--auto-submit] [--brief-file <path.json>]")
+	fmt.println("      [--input <ref>]... [--review-role <role>]... [--auto-submit] [--require-independent-verify]")
+	fmt.println("      [--brief-file <path.json>]")
 	fmt.println("      --brief-file is the base object {goal, acceptance:[…], verify, inputs, review_roles,")
-	fmt.println("      output, budget, auto_submit}; flags override its fields.")
+	fmt.println("      output, budget, auto_submit, require_independent_verify}; flags override its fields.")
 	fmt.println("  update <task-id>                        Edit an existing task (coordinator only).")
 	fmt.println("      [--title <t>] [--description <d>] [--priority p0|p1|p2] [--assignee <agent-id>]")
 	fmt.println("      [--reviewer <agent-id,...>] [--require-user-approval | --no-require-user-approval]")
@@ -1943,6 +1965,7 @@ print_help_task :: proc() {
 	fmt.println("  ham-ctl task update task_1 --assignee agt_worker --reviewer agt_a --reviewer agt_b")
 	fmt.println("  ham-ctl task publish task_1")
 	fmt.println("  ham-ctl task fetch task_1 facet:task_1:2:handoff")
+	fmt.println("  ham-ctl task fetch task_1 src/main.odin@HEAD")
 	fmt.println("  ham-ctl task comment task_1 --body 'pushed fix' --notify inst_rev")
 }
 
@@ -2092,7 +2115,7 @@ print_help_lease :: proc() {
 	fmt.println("                             The response carries the task, the lease deadlines and the context pack.")
 	fmt.println("  heartbeat [--note <text>]  Extend the lease TTL (15 min, never past the hard cap). Any ham-ctl")
 	fmt.println("                             call already heartbeats implicitly; use --note to leave a progress note.")
-	fmt.println("  submit --summary <s> [--handoff-file <json>] [--output-file <json>] [--verify none]")
+	fmt.println("  submit --summary <s> [--handoff-file <json>] [--output-file <json>] [--artifacts-file <json>] [--verify none]")
 	fmt.println("                             Finish the attempt: the task goes to review (or done when no review")
 	fmt.println("                             roles). Needs a passing `ham-ctl verify` at the current head unless")
 	fmt.println("                             the brief says verify: none (409 verify_required/failed/stale/dirty).")
@@ -2103,14 +2126,15 @@ print_help_lease :: proc() {
 	fmt.println("  block --waiting-on <kind> --reason <text> [--ref <id>] [--summary <s>]")
 	fmt.println("                             Park the task on something external (kind: user|task|…).")
 	fmt.println("")
-	fmt.println("  Every verb takes [--lease <id>] (defaults to your current lease). handoff/output files")
-	fmt.println("  are JSON objects: handoff {summary?, next_steps?, …}; output = the brief's output contract.")
+	fmt.println("  Every verb takes [--lease <id>] (defaults to your current lease). handoff/output/artifacts files")
+	fmt.println("  are JSON objects/arrays: handoff {summary?, decisions?, dead_ends?, next_steps?}; output = the")
+	fmt.println("  brief's output contract; artifacts = {items:[{kind:file|url|preview_port, ref, label}]}.")
 	fmt.println("  A 409 lease_lost means your lease expired: stop; you will be re-woken with a fresh pack.")
 	fmt.println("")
 	fmt.println("EXAMPLES")
 	fmt.println("  ham-ctl lease next")
 	fmt.println("  ham-ctl lease heartbeat --note \"tests green, writing docs\"")
-	fmt.println("  ham-ctl verify && ham-ctl lease submit --summary \"implemented X; tests green\"")
+	fmt.println("  ham-ctl verify && ham-ctl lease submit --summary \"implemented X; tests green\" --artifacts-file artifacts.json")
 	fmt.println("  ham-ctl lease handoff --summary \"half done\" --handoff-file handoff.json")
 	fmt.println("  ham-ctl lease block --waiting-on user --reason \"need the staging credentials\"")
 }

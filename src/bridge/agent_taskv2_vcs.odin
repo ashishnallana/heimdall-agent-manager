@@ -24,6 +24,8 @@ package main
 //   3. the launch record's run_dir (the managed run directory; normally not a
 //      repo, included so a repo-initialised run dir still works).
 
+import "core:fmt"
+import "core:os"
 import "core:strings"
 import "core:sync"
 import jsonx "odin_test:lib/jsonx"
@@ -216,6 +218,7 @@ bridge_taskv2_enrich_lease_params :: proc(method, params: string, rec: Bridge_Lo
 // bridge_agent_lease_local_rpc fulfils the .Local lease routes: enrich, then
 // relay to the SAME hub agent-actions path a plain .Envelope route would use,
 // with identical error mapping (mirrors the .Envelope branch of the dispatcher).
+// On a non-peek `agent.lease.next` that returns a `pack`, materializes `<run_dir>/TASK.md`.
 bridge_agent_lease_local_rpc :: proc(request_id, method, hub_path, params: string, rec: Bridge_Local_Agent_Token_Record) -> string {
 	if strings.trim_space(rec.instance_token) == "" do return bridge_local_response_error(request_id, "unavailable", "Bridge-held instance token is unavailable")
 	eff := bridge_taskv2_enrich_lease_params(method, params, rec)
@@ -224,6 +227,25 @@ bridge_agent_lease_local_rpc :: proc(request_id, method, hub_path, params: strin
 	if !relay.ok do return bridge_local_response_error(request_id, "retryable_unavailable", "Hub relay failed")
 	if relay.status < 200 || relay.status >= 300 do return bridge_local_response_error(request_id, "hub_error", relay.body)
 	if strings.trim_space(relay.body) == "" do return bridge_local_response_data(request_id, "{}")
+	if method == "agent.lease.next" {
+		peek, _ := jsonx.extract_bool_literal(params, "peek", true)
+		if !peek {
+			data_obj, has_data := jsonx.extract_raw_object(relay.body, "data", true, context.temp_allocator)
+			target := data_obj if has_data else relay.body
+			if pack_obj, has_pack := jsonx.extract_raw_object(target, "pack", true, context.temp_allocator); has_pack && strings.has_prefix(strings.trim_space(pack_obj), "{") {
+				run_dir := ""
+				if launch, has_launch := bridge_runtime_get_launch(rec.agent_instance_id); has_launch && strings.trim_space(launch.run_dir) != "" {
+					run_dir = strings.clone(launch.run_dir, context.temp_allocator)
+				} else if strings.trim_space(rec.agent_instance_id) != "" {
+					run_dir = bridge_runtime_default_run_dir(rec.agent_instance_id)
+					defer delete(run_dir)
+				}
+				if strings.trim_space(run_dir) != "" {
+					_ = bridge_taskv2_materialize_task_md(run_dir, pack_obj)
+				}
+			}
+		}
+	}
 	return bridge_local_response_data(request_id, relay.body)
 }
 
@@ -294,3 +316,413 @@ bridge_taskv2_maybe_enrich_verify_exit :: proc(event_json: string) -> string {
 
 	return bridge_taskv2_verify_exit_enrich_json(event_json, head, dirty_known, dirty, tail)
 }
+
+// ---- M3: TASK.md Materialiser + Vault Decryption + 8k-Token Field-Safe Cap -
+
+BRIDGE_TASK_MD_MAX_BYTES :: 32_000 // ~8k tokens (@ 4 bytes/token)
+
+Bridge_Task_Md_Input :: struct {
+	ref:      string,
+	resolved: bool,
+	body:     string,
+	dropped:  bool,
+}
+
+bridge_taskv2_decrypt_field :: proc(s: string, allocator := context.temp_allocator) -> string {
+	if !bridge_has_vault_token(s) do return strings.clone(s, allocator)
+	return bridge_decrypt_embedded_vault_tokens(s, allocator = allocator, locked_marker = VAULT_LOCKED_MARKER)
+}
+
+// bridge_taskv2_render_task_md decrypts all vault:v1: / ENC:v1: tokens in pack_json,
+// applies the field-safe 8k-token (max_bytes) cap AFTER decryption (never inside a
+// field, dropping in order: 1. resolved input bodies -> 2. previous verify summary/tail
+// -> 3. previous handoff summary; preserving brief, dead_ends, and open findings intact),
+// and renders the Markdown document for <run_dir>/TASK.md.
+bridge_taskv2_render_task_md :: proc(pack_json: string, max_bytes: int = BRIDGE_TASK_MD_MAX_BYTES, allocator := context.allocator) -> string {
+	if !strings.has_prefix(strings.trim_space(pack_json), "{") {
+		return strings.clone("", allocator)
+	}
+	lease_obj, _ := jsonx.extract_raw_object(pack_json, "lease", true, context.temp_allocator)
+	task_obj, _ := jsonx.extract_raw_object(pack_json, "task", true, context.temp_allocator)
+	brief_obj, has_brief := jsonx.extract_raw_object(pack_json, "brief", true, context.temp_allocator)
+	if !has_brief && task_obj != "" {
+		brief_obj, _ = jsonx.extract_raw_object(task_obj, "brief", true, context.temp_allocator)
+	}
+	chain_obj, _ := jsonx.extract_raw_object(pack_json, "chain", true, context.temp_allocator)
+	placement_obj, has_place := jsonx.extract_raw_object(pack_json, "placement", true, context.temp_allocator)
+	if !has_place && lease_obj != "" {
+		placement_obj, _ = jsonx.extract_raw_object(lease_obj, "placement", true, context.temp_allocator)
+	}
+	where_obj, _ := jsonx.extract_raw_object(pack_json, "where_you_are", true, context.temp_allocator)
+	prev_obj, _ := jsonx.extract_raw_object(pack_json, "previous_attempt", true, context.temp_allocator)
+	proto_obj, _ := jsonx.extract_raw_object(pack_json, "protocol", true, context.temp_allocator)
+
+	lease_id := jsonx.extract_string(pack_json, "lease_id", jsonx.extract_string(lease_obj, "lease_id", "", true, context.temp_allocator), true, context.temp_allocator)
+	task_id := jsonx.extract_string(pack_json, "task_id", jsonx.extract_string(task_obj, "task_id", "", true, context.temp_allocator), true, context.temp_allocator)
+	lease_kind := jsonx.extract_string(lease_obj, "kind", "work", true, context.temp_allocator)
+	review_role := jsonx.extract_string(lease_obj, "review_role", "", true, context.temp_allocator)
+	role_label := review_role if (lease_kind == "review" && review_role != "") else ("reviewer" if lease_kind == "review" else "worker")
+	attempt_no := jsonx.extract_int(pack_json, "attempt_no", jsonx.extract_int(lease_obj, "attempt_no", 1, true), true)
+	max_attempts := jsonx.extract_int(pack_json, "max_attempts", jsonx.extract_int(lease_obj, "max_attempts", 3, true), true)
+	review_rounds := jsonx.extract_int(pack_json, "review_rounds", jsonx.extract_int(lease_obj, "review_rounds", 0, true), true)
+	expires_at := jsonx.extract_string(pack_json, "expires_at", jsonx.extract_string(lease_obj, "expires_at", "", true, context.temp_allocator), true, context.temp_allocator)
+	hard_deadline_at := jsonx.extract_string(pack_json, "hard_deadline_at", jsonx.extract_string(lease_obj, "hard_deadline_at", "", true, context.temp_allocator), true, context.temp_allocator)
+	why := jsonx.extract_string(pack_json, "why", "first_grant", true, context.temp_allocator)
+
+	bridge_id := jsonx.extract_string(placement_obj, "bridge_id", "", true, context.temp_allocator)
+	directory_id := jsonx.extract_string(placement_obj, "directory_id", "", true, context.temp_allocator)
+	provider := jsonx.extract_string(placement_obj, "provider", "", true, context.temp_allocator)
+	model := jsonx.extract_string(placement_obj, "model", "", true, context.temp_allocator)
+
+	raw_title := jsonx.extract_string(task_obj, "title", "", true, context.temp_allocator)
+	raw_desc := jsonx.extract_string(task_obj, "description", "", true, context.temp_allocator)
+	title := bridge_taskv2_decrypt_field(raw_title, context.temp_allocator)
+	description := bridge_taskv2_decrypt_field(raw_desc, context.temp_allocator)
+
+	goal := bridge_taskv2_decrypt_field(jsonx.extract_string(brief_obj, "goal", "", true, context.temp_allocator), context.temp_allocator)
+	if strings.trim_space(goal) == "" do goal = description
+	verify_cmd := bridge_taskv2_decrypt_field(jsonx.extract_string(brief_obj, "verify", "", true, context.temp_allocator), context.temp_allocator)
+	acc_raw := jsonx.extract_string_array(brief_obj, "acceptance", true, context.temp_allocator)
+	acceptance := make([dynamic]string, context.temp_allocator)
+	for a in acc_raw {
+		append(&acceptance, bridge_taskv2_decrypt_field(a, context.temp_allocator))
+	}
+
+	raw_chain_summary := jsonx.extract_string(chain_obj, "summary", jsonx.extract_string(pack_json, "chain_summary", "", true, context.temp_allocator), true, context.temp_allocator)
+	chain_summary := bridge_taskv2_decrypt_field(raw_chain_summary, context.temp_allocator)
+
+	// Resolved inputs
+	inputs := make([dynamic]Bridge_Task_Md_Input, context.temp_allocator)
+	if inputs_arr, has_inputs := bridge_provider_json_extract_array(pack_json, "inputs"); has_inputs {
+		objs := bridge_provider_json_top_level_objects(inputs_arr)
+		defer bridge_bootstrap_free_object_slice(objs)
+		for obj in objs {
+			ref := jsonx.extract_string(obj, "ref", "", true, context.temp_allocator)
+			resolved, _ := jsonx.extract_bool_literal(obj, "resolved", true)
+			data_raw := ""
+			if d_obj, has_d := jsonx.extract_raw_object(obj, "data", true, context.temp_allocator); has_d {
+				data_raw = d_obj
+			} else {
+				data_raw = jsonx.extract_string(obj, "data", "", true, context.temp_allocator)
+			}
+			append(&inputs, Bridge_Task_Md_Input{
+				ref      = ref,
+				resolved = resolved,
+				body     = bridge_taskv2_decrypt_field(data_raw, context.temp_allocator),
+			})
+		}
+	}
+
+	// Where You Are (vcs)
+	vcs_head := jsonx.extract_string(where_obj, "head", "", true, context.temp_allocator)
+	vcs_dirty, vcs_has_dirty := jsonx.extract_bool_literal(where_obj, "dirty", true)
+	vcs_files_arr, _ := bridge_provider_json_extract_array(where_obj, "files")
+	defer if vcs_files_arr != "" do delete(vcs_files_arr)
+
+	// Previous Attempt
+	has_prev := strings.has_prefix(strings.trim_space(prev_obj), "{")
+	prev_attempt_no := jsonx.extract_int(prev_obj, "attempt_no", attempt_no - 1, true)
+	prev_outcome := jsonx.extract_string(prev_obj, "outcome", "", true, context.temp_allocator)
+	prev_note := bridge_taskv2_decrypt_field(jsonx.extract_string(prev_obj, "last_heartbeat_note", jsonx.extract_string(prev_obj, "note", "", true, context.temp_allocator), true, context.temp_allocator), context.temp_allocator)
+
+	handoff_obj, _ := jsonx.extract_raw_object(prev_obj, "handoff", true, context.temp_allocator)
+	handoff_summary := bridge_taskv2_decrypt_field(jsonx.extract_string(handoff_obj, "summary", "", true, context.temp_allocator), context.temp_allocator)
+	handoff_decisions := jsonx.extract_string_array(handoff_obj, "decisions", true, context.temp_allocator)
+	handoff_dead_ends := jsonx.extract_string_array(handoff_obj, "dead_ends", true, context.temp_allocator)
+	handoff_next_steps := jsonx.extract_string_array(handoff_obj, "next_steps", true, context.temp_allocator)
+	if len(handoff_next_steps) == 0 {
+		if ns := jsonx.extract_string(handoff_obj, "next_steps", "", true, context.temp_allocator); strings.trim_space(ns) != "" {
+			append(&handoff_next_steps, ns)
+		}
+	}
+	if len(handoff_dead_ends) == 0 {
+		if de := jsonx.extract_string(handoff_obj, "dead_ends", "", true, context.temp_allocator); strings.trim_space(de) != "" {
+			append(&handoff_dead_ends, de)
+		}
+	}
+
+	verify_obj, _ := jsonx.extract_raw_object(prev_obj, "verify", true, context.temp_allocator)
+	verify_cmd_prev := bridge_taskv2_decrypt_field(jsonx.extract_string(verify_obj, "cmd", "", true, context.temp_allocator), context.temp_allocator)
+	verify_exit, has_verify_exit := jsonx.extract_int_found(verify_obj, "exit_code", true)
+	verify_head := jsonx.extract_string(verify_obj, "head", "", true, context.temp_allocator)
+	verify_tail := bridge_taskv2_decrypt_field(jsonx.extract_string(verify_obj, "tail", jsonx.extract_string(verify_obj, "summary", "", true, context.temp_allocator), true, context.temp_allocator), context.temp_allocator)
+
+	// Open Findings (never dropped)
+	findings_lines := make([dynamic]string, context.temp_allocator)
+	if findings_arr, has_f := bridge_provider_json_extract_array(pack_json, "findings"); has_f {
+		f_objs := bridge_provider_json_top_level_objects(findings_arr)
+		defer bridge_bootstrap_free_object_slice(f_objs)
+		for f_obj in f_objs {
+			f_path := bridge_taskv2_decrypt_field(jsonx.extract_string(f_obj, "path", "", true, context.temp_allocator), context.temp_allocator)
+			f_line := jsonx.extract_int(f_obj, "line", 0, true)
+			f_sev := jsonx.extract_string(f_obj, "severity", "major", true, context.temp_allocator)
+			f_txt := bridge_taskv2_decrypt_field(jsonx.extract_string(f_obj, "text", jsonx.extract_string(f_obj, "message", "", true, context.temp_allocator), true, context.temp_allocator), context.temp_allocator)
+			if f_path != "" && f_line > 0 {
+				append(&findings_lines, fmt.tprintf("- [%s] `%s:%d` — %s", f_sev, f_path, f_line, f_txt))
+			} else if f_path != "" {
+				append(&findings_lines, fmt.tprintf("- [%s] `%s` — %s", f_sev, f_path, f_txt))
+			} else if f_txt != "" {
+				append(&findings_lines, fmt.tprintf("- [%s] %s", f_sev, f_txt))
+			}
+		}
+	}
+
+	// Protocol Rules
+	rules := jsonx.extract_string_array(proto_obj, "rules", true, context.temp_allocator)
+
+	drop_verify_summary := false
+	drop_handoff_summary := false
+
+	build_doc :: proc(
+		task_id, title, role_label, lease_id, expires_at, hard_deadline_at, bridge_id, directory_id, provider, model, why: string,
+		attempt_no, max_attempts, review_rounds: int,
+		goal, verify_cmd: string, acceptance: []string,
+		chain_summary: string,
+		inputs: []Bridge_Task_Md_Input,
+		vcs_head: string, vcs_has_dirty, vcs_dirty: bool, vcs_files_arr: string,
+		has_prev: bool, prev_attempt_no: int, prev_outcome, prev_note: string,
+		handoff_summary: string, drop_handoff_summary: bool,
+		handoff_decisions, handoff_dead_ends, handoff_next_steps: []string,
+		verify_cmd_prev: string, has_verify_exit: bool, verify_exit: int, verify_head, verify_tail: string, drop_verify_summary: bool,
+		findings_lines: []string,
+		rules: []string,
+		alloc := context.temp_allocator,
+	) -> string {
+		b := strings.builder_make(alloc)
+		fmt.sbprintf(&b, "# Task %s: %s (%s, attempt #%d)\n\n", task_id, title, role_label, attempt_no)
+		fmt.sbprintf(&b, "- **Lease**: `%s` (attempt %d/%d, review_rounds: %d)\n", lease_id, attempt_no, max_attempts, review_rounds)
+		if expires_at != "" || hard_deadline_at != "" {
+			fmt.sbprintf(&b, "- **Deadlines**: expires `%s`, hard_deadline `%s`\n", expires_at, hard_deadline_at)
+		}
+		if bridge_id != "" || directory_id != "" || provider != "" || model != "" {
+			fmt.sbprintf(&b, "- **Placement**: bridge=`%s` directory=`%s` provider=`%s` model=`%s`\n", bridge_id, directory_id, provider, model)
+		}
+		strings.write_string(&b, "\n## Brief\n")
+		if goal != "" {
+			fmt.sbprintf(&b, "**Goal**: %s\n", goal)
+		}
+		if len(acceptance) > 0 {
+			strings.write_string(&b, "**Acceptance**:\n")
+			for a in acceptance {
+				fmt.sbprintf(&b, "- %s\n", a)
+			}
+		}
+		if verify_cmd != "" {
+			fmt.sbprintf(&b, "**Verify**: `%s`\n", verify_cmd)
+		}
+
+		strings.write_string(&b, "\n## Chain Summary\n")
+		if strings.trim_space(chain_summary) != "" {
+			strings.write_string(&b, chain_summary)
+			if !strings.has_suffix(chain_summary, "\n") do strings.write_byte(&b, '\n')
+		} else {
+			strings.write_string(&b, "_(none)_\n")
+		}
+
+		if len(inputs) > 0 {
+			strings.write_string(&b, "\n## Resolved Inputs\n")
+			for inp in inputs {
+				if inp.dropped {
+					fmt.sbprintf(&b, "- `%s`: omitted for size — fetch with `ham-ctl task fetch %s %s`\n", inp.ref, task_id, inp.ref)
+				} else if inp.resolved {
+					fmt.sbprintf(&b, "- `%s`: %s\n", inp.ref, inp.body)
+				} else {
+					fmt.sbprintf(&b, "- `%s`: _(unresolved — `ham-ctl task fetch %s %s`)_\n", inp.ref, task_id, inp.ref)
+				}
+			}
+		}
+
+		strings.write_string(&b, "\n## Where You Are\n")
+		if vcs_head != "" {
+			fmt.sbprintf(&b, "- **HEAD**: `%s` (dirty: `%v`)\n", vcs_head, vcs_dirty if vcs_has_dirty else false)
+			if strings.has_prefix(strings.trim_space(vcs_files_arr), "[") && strings.trim_space(vcs_files_arr) != "[]" {
+				fmt.sbprintf(&b, "- **Changed files**: `%s`\n", strings.trim_space(vcs_files_arr))
+			}
+		} else {
+			strings.write_string(&b, "- No prior VCS state recorded.\n")
+		}
+
+		if has_prev {
+			fmt.sbprintf(&b, "\n## Previous Attempt (#%d)\n", prev_attempt_no)
+			if prev_outcome != "" {
+				fmt.sbprintf(&b, "- **Outcome**: `%s`\n", prev_outcome)
+			}
+			if prev_note != "" {
+				fmt.sbprintf(&b, "- **Last Heartbeat Note**: %s\n", prev_note)
+			}
+			if drop_handoff_summary {
+				fmt.sbprintf(&b, "- **Handoff Summary**: omitted for size — fetch with `ham-ctl task fetch %s facet:%s:%d:handoff`\n", task_id, task_id, prev_attempt_no)
+			} else if handoff_summary != "" {
+				fmt.sbprintf(&b, "- **Handoff Summary**: %s\n", handoff_summary)
+			}
+			if len(handoff_decisions) > 0 {
+				strings.write_string(&b, "- **Decisions**:\n")
+				for d in handoff_decisions {
+					fmt.sbprintf(&b, "  - %s\n", bridge_taskv2_decrypt_field(d, context.temp_allocator))
+				}
+			}
+			if len(handoff_dead_ends) > 0 {
+				strings.write_string(&b, "- **Dead Ends (DO NOT REPEAT)**:\n")
+				for de in handoff_dead_ends {
+					fmt.sbprintf(&b, "  - %s\n", bridge_taskv2_decrypt_field(de, context.temp_allocator))
+				}
+			}
+			if len(handoff_next_steps) > 0 {
+				strings.write_string(&b, "- **Next Steps**:\n")
+				for ns in handoff_next_steps {
+					fmt.sbprintf(&b, "  - %s\n", bridge_taskv2_decrypt_field(ns, context.temp_allocator))
+				}
+			}
+			if has_verify_exit || verify_cmd_prev != "" || verify_tail != "" || drop_verify_summary {
+				fmt.sbprintf(&b, "- **Previous Verify**: cmd=`%s` exit_code=`%d` head=`%s`\n", verify_cmd_prev, verify_exit, verify_head)
+				if drop_verify_summary {
+					fmt.sbprintf(&b, "  - Output omitted for size — fetch with `ham-ctl task fetch %s facet:%s:%d:verify`\n", task_id, task_id, prev_attempt_no)
+				} else if verify_tail != "" {
+					fmt.sbprintf(&b, "  - Output tail:\n```\n%s\n```\n", verify_tail)
+				}
+			}
+		}
+
+		if len(findings_lines) > 0 {
+			strings.write_string(&b, "\n## Open Findings\n")
+			for fl in findings_lines {
+				strings.write_string(&b, fl)
+				strings.write_byte(&b, '\n')
+			}
+		}
+
+		fmt.sbprintf(&b, "\n## Why You Were Chosen\n`%s`\n", why)
+
+		strings.write_string(&b, "\n## Protocol Rules\n")
+		if len(rules) > 0 {
+			for r in rules {
+				strings.write_string(&b, r)
+				strings.write_byte(&b, '\n')
+			}
+		} else {
+			strings.write_string(&b, "1. Confirm lease with `ham-ctl lease next`.\n2. Run `ham-ctl verify` and `ham-ctl lease submit --summary \"...\"` when done.\n")
+		}
+		return strings.to_string(b)
+	}
+
+	rendered := build_doc(
+		task_id, title, role_label, lease_id, expires_at, hard_deadline_at, bridge_id, directory_id, provider, model, why,
+		attempt_no, max_attempts, review_rounds,
+		goal, verify_cmd, acceptance[:],
+		chain_summary,
+		inputs[:],
+		vcs_head, vcs_has_dirty, vcs_dirty, vcs_files_arr,
+		has_prev, prev_attempt_no, prev_outcome, prev_note,
+		handoff_summary, drop_handoff_summary,
+		handoff_decisions[:], handoff_dead_ends[:], handoff_next_steps[:],
+		verify_cmd_prev, has_verify_exit, verify_exit, verify_head, verify_tail, drop_verify_summary,
+		findings_lines[:],
+		rules[:],
+		context.temp_allocator,
+	)
+
+	// Step 1 of field-safe cap: drop resolved input bodies (from last to first)
+	if max_bytes > 0 && len(rendered) > max_bytes {
+		for i := len(inputs) - 1; i >= 0 && len(rendered) > max_bytes; i -= 1 {
+			if inputs[i].dropped do continue
+			inputs[i].dropped = true
+			rendered = build_doc(
+				task_id, title, role_label, lease_id, expires_at, hard_deadline_at, bridge_id, directory_id, provider, model, why,
+				attempt_no, max_attempts, review_rounds,
+				goal, verify_cmd, acceptance[:],
+				chain_summary,
+				inputs[:],
+				vcs_head, vcs_has_dirty, vcs_dirty, vcs_files_arr,
+				has_prev, prev_attempt_no, prev_outcome, prev_note,
+				handoff_summary, drop_handoff_summary,
+				handoff_decisions[:], handoff_dead_ends[:], handoff_next_steps[:],
+				verify_cmd_prev, has_verify_exit, verify_exit, verify_head, verify_tail, drop_verify_summary,
+				findings_lines[:],
+				rules[:],
+				context.temp_allocator,
+			)
+		}
+	}
+
+	// Step 2 of field-safe cap: drop previous verify summary/tail
+	if max_bytes > 0 && len(rendered) > max_bytes && verify_tail != "" {
+		drop_verify_summary = true
+		rendered = build_doc(
+			task_id, title, role_label, lease_id, expires_at, hard_deadline_at, bridge_id, directory_id, provider, model, why,
+			attempt_no, max_attempts, review_rounds,
+			goal, verify_cmd, acceptance[:],
+			chain_summary,
+			inputs[:],
+			vcs_head, vcs_has_dirty, vcs_dirty, vcs_files_arr,
+			has_prev, prev_attempt_no, prev_outcome, prev_note,
+			handoff_summary, drop_handoff_summary,
+			handoff_decisions[:], handoff_dead_ends[:], handoff_next_steps[:],
+			verify_cmd_prev, has_verify_exit, verify_exit, verify_head, verify_tail, drop_verify_summary,
+			findings_lines[:],
+			rules[:],
+			context.temp_allocator,
+		)
+	}
+
+	// Step 3 of field-safe cap: drop previous handoff summary (preserving dead_ends!)
+	if max_bytes > 0 && len(rendered) > max_bytes && handoff_summary != "" {
+		drop_handoff_summary = true
+		rendered = build_doc(
+			task_id, title, role_label, lease_id, expires_at, hard_deadline_at, bridge_id, directory_id, provider, model, why,
+			attempt_no, max_attempts, review_rounds,
+			goal, verify_cmd, acceptance[:],
+			chain_summary,
+			inputs[:],
+			vcs_head, vcs_has_dirty, vcs_dirty, vcs_files_arr,
+			has_prev, prev_attempt_no, prev_outcome, prev_note,
+			handoff_summary, drop_handoff_summary,
+			handoff_decisions[:], handoff_dead_ends[:], handoff_next_steps[:],
+			verify_cmd_prev, has_verify_exit, verify_exit, verify_head, verify_tail, drop_verify_summary,
+			findings_lines[:],
+			rules[:],
+			context.temp_allocator,
+		)
+	}
+
+	return strings.clone(rendered, allocator)
+}
+
+// bridge_taskv2_materialize_task_md renders and writes `<run_dir>/TASK.md`.
+bridge_taskv2_materialize_task_md :: proc(run_dir, pack_json: string, max_bytes: int = BRIDGE_TASK_MD_MAX_BYTES) -> bool {
+	clean := strings.trim_right(strings.trim_space(run_dir), "/")
+	if clean == "" || !strings.has_prefix(strings.trim_space(pack_json), "{") do return false
+	_ = bridge_make_directory_all(clean)
+	md := bridge_taskv2_render_task_md(pack_json, max_bytes)
+	defer delete(md)
+	if strings.trim_space(md) == "" do return false
+	path := strings.concatenate({clean, "/TASK.md"})
+	defer delete(path)
+	return os.write_entire_file(path, transmute([]byte)md) == nil
+}
+
+// bridge_taskv2_worktree_add_detached creates an ephemeral detached git worktree at `rev`
+// (`git -C <repo> worktree add --detach <wt_path> <rev>`) for independent re-verification.
+bridge_taskv2_worktree_add_detached :: proc(repo_dir, wt_path, rev: string) -> bool {
+	if strings.trim_space(repo_dir) == "" || strings.trim_space(wt_path) == "" || strings.trim_space(rev) == "" do return false
+	out, ok := vcs_run([]string{"git", "-C", repo_dir, "worktree", "add", "--detach", wt_path, rev})
+	defer if len(out) > 0 do delete(out)
+	return ok
+}
+
+// bridge_taskv2_worktree_remove_force removes an ephemeral detached git worktree
+// (`git -C <repo> worktree remove --force <wt_path>`).
+bridge_taskv2_worktree_remove_force :: proc(repo_dir, wt_path: string) -> bool {
+	if strings.trim_space(repo_dir) == "" || strings.trim_space(wt_path) == "" do return false
+	out, ok := vcs_run([]string{"git", "-C", repo_dir, "worktree", "remove", "--force", wt_path})
+	defer if len(out) > 0 do delete(out)
+	_ = os.remove_all(wt_path)
+	return ok
+}
+
+// bridge_taskv2_should_auto_submit checks whether a verify run qualifies for automatic
+// lease submission (`brief.auto_submit == true`, `exit_code == 0`, `!independent`, and `!dirty`).
+bridge_taskv2_should_auto_submit :: proc(exit_code: int, independent, dirty, auto_submit: bool) -> bool {
+	return auto_submit && exit_code == 0 && !independent && !dirty
+}
+
+

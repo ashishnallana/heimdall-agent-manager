@@ -245,7 +245,7 @@ bridge_command_spec :: proc(command_type: string) -> (Bridge_Command_Spec, bool)
 		return Bridge_Command_Spec{class = .General_IO, priority = .Background, key_kind = .None, queued = true, requires_id = true, timeout_ms = 15_000, cost_units = 4, retry_safe = true}, true
 	case "fs_make_dir", "fs_create_file", "fs_write_file", "fs_batch_write", "fs_move", "fs_delete":
 		return Bridge_Command_Spec{class = .General_IO, priority = .Interactive, key_kind = .Filesystem, queued = true, requires_id = true, timeout_ms = 20_000, cost_units = 8}, true
-	case "vcs_capabilities", "vcs_status", "vcs_files", "vcs_diff", "vcs_log", "vcs_commit_diff", "vcs_workspaces":
+	case "vcs_capabilities", "vcs_status", "vcs_files", "vcs_diff", "vcs_log", "vcs_commit_diff", "vcs_workspaces", "vcs_show_file":
 		return Bridge_Command_Spec{class = .General_IO, priority = .Background, key_kind = .VCS, queued = true, requires_id = true, timeout_ms = 20_000, cost_units = 8, retry_safe = true}, true
 	case "vcs_stage", "vcs_unstage", "vcs_revert", "vcs_save_file", "vcs_commit":
 		return Bridge_Command_Spec{class = .General_IO, priority = .Interactive, key_kind = .VCS, queued = true, requires_id = true, timeout_ms = 30_000, cost_units = 16}, true

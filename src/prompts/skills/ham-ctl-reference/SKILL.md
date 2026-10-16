@@ -19,7 +19,7 @@ Conventions used below:
 - Run `./.heimdall/bin/ham-ctl <group> --help` for the built-in reference of any group;
   `./.heimdall/bin/ham-ctl --help` lists all groups.
 
-Groups: `bridge`, `agents`, `task-chain`, `task`, `issue`, `chat`, `memory`, `artifact`,
+Groups: `bridge`, `agents`, `task-chain`, `task`, `lease`, `verify`, `review`, `issue`, `chat`, `memory`, `artifact`,
 `shell`, `context`, `start-success`.
 
 ---
@@ -47,10 +47,18 @@ Groups: `bridge`, `agents`, `task-chain`, `task`, `issue`, `chat`, `memory`, `ar
 - `task-chain set-title <title> [--chain <id>]` — rename a chain (coordinator only).
 - `task-chain set-description <text> [--chain <id>]` (or `--stdin`) — set the chain
   description (coordinator only; pass `""` to clear; `--chain` defaults to your chain).
+- `task-chain summary set <text> [--chain <id>]` (or `--stdin`) — set the curated chain summary
+  (`<= 60` lines; coordinator only; surfaced in every agent's `TASK.md` context pack).
+- `task-chain propose --file <proposal.json> [--auto-approve] [--chain <id>]` — create a chain
+  proposal (`kind: "ticket"|"workflow"`, `rationale`, `alternative`, `tasks` array) and its draft
+  tasks in a single transaction (coordinator only). With `--auto-approve`, validates briefs and
+  publishes immediately.
+- `task-chain decide [<chain-id>] --decision approve|reject [--reason <text>]` — approve or reject
+  a pending chain proposal (publishes all tasks atomically on `approve`).
+- `task-chain publish [<chain-id>]` — validate all task briefs and publish the chain (`422 brief_incomplete` lists missing fields per task).
 - `task-chain set-status --status <active|completed|cancelled> [--chain <id>]` — change
   the chain status (coordinator only). Chain statuses are exactly `active`, `completed`,
   `cancelled`. This is how a coordinator completes a chain.
-- `task-chain subscribe` / `task-chain unsubscribe` — **removed in Task System v2** (see note under `task`).
 
 ### Relevant directories (`task-chain directory`)
 Associate one or more working directories (local checkouts, CitC workspaces, repos) with a task chain so participating agents and the UI know which workspaces/directories are in scope. Directories are also embedded directly in `task-chain show [<chain-id>]` and `GET /api/v1/task-chains/:id` output under the `"directories"` array.
@@ -105,10 +113,10 @@ ham-ctl task-chain show chain_18d711c5384a0119
 ```
 
 ### Fleet management (`task-chain fleet`)
-Configure and inspect agent concurrency caps (fleets) for a task chain. Fleets allow tasks to be assigned to durable agent types (`agt_...`) instead of individual instances (`inst_...`). Heimdall dynamically routes or provisions worker instances to satisfy fleet capacity quotas.
+Configure and inspect agent concurrency caps and placement (fleets) for a task chain. Fleets allow tasks to be assigned to durable agent types (`agt_...`) instead of individual instances (`inst_...`). Heimdall dynamically routes or provisions worker and reviewer instances to satisfy fleet capacity and placement rules.
 
-- `task-chain fleet list [<chain-id>]` — list fleet capacities and live active worker counts for a chain (defaults to current chain if omitted).
-- `task-chain fleet set <chain-id> --agent <agent_id> --capacity <N> [--min-warm <M>] [--idle-ttl <seconds>]` — configure fleet capacity for an agent class on the chain.
+- `task-chain fleet list [<chain-id>]` — list fleet capacities, placement (`roles`, `bridge_id`, `provider`, `model`, `bridge_models`), and live active worker counts for a chain (defaults to current chain if omitted).
+- `task-chain fleet set <chain-id> --agent <agent_id> --capacity <N> [--min-warm <M>] [--idle-ttl <seconds>] [--roles worker,reviewer] [--bridge <bridge_id>] [--provider <p>] [--model <m>] [--bridge-models <json>] [--bridge-models-file <path>]` — configure fleet capacity and placement for an agent class on the chain.
 
 #### Fleet JSON shape
 `task-chain fleet list` returns a JSON array of fleet configurations:
@@ -121,6 +129,11 @@ Configure and inspect agent concurrency caps (fleets) for a task chain. Fleets a
     "active_count": 1,
     "min_warm": 0,
     "idle_ttl_seconds": 300,
+    "roles": ["worker", "reviewer"],
+    "bridge_id": "brg_main",
+    "provider": "claude",
+    "model": "claude-opus-4-6",
+    "bridge_models": {},
     "created_at": "2026-09-24T00:00:00Z",
     "updated_at": "2026-09-24T00:00:00Z"
   }
@@ -134,67 +147,43 @@ Fields:
 - `active_count`: Currently active (running or busy) worker instances assigned to tasks in this chain.
 - `min_warm`: Minimum warm standby instances to maintain.
 - `idle_ttl_seconds`: Time before idle instances are stopped or decommissioned.
+- `roles`: Allowed lease roles for this fleet row (`["worker"]`, `["reviewer"]`, or `["worker", "reviewer"]`).
+- `bridge_id`, `provider`, `model`, `bridge_models`: Optional placement and model overrides.
 
 #### Command examples
 ```bash
 # List fleets for the current chain
 ham-ctl task-chain fleet list
 
-# List fleets for a specific chain
-ham-ctl task-chain fleet list chain_18d711c5384a0119
-
-# Set worker fleet capacity to 4
-ham-ctl task-chain fleet set chain_18d711c5384a0119 --agent agt_worker --capacity 4
+# Set worker fleet capacity and placement
+ham-ctl task-chain fleet set chain_18d711c5384a0119 --agent agt_worker --capacity 4 --roles worker --bridge brg_main
 
 # Set reviewer fleet capacity with warm standby and idle timeout
-ham-ctl task-chain fleet set chain_18d711c5384a0119 --agent agt_reviewer --capacity 2 --min-warm 1 --idle-ttl 600
+ham-ctl task-chain fleet set chain_18d711c5384a0119 --agent agt_reviewer --capacity 2 --min-warm 1 --idle-ttl 600 --roles reviewer
 ```
 
-## task — tasks within a chain
+## task, lease, verify, review — Task System v2
 A positional `<task-id>` identifies the task and is enough on its own (task ids are
 globally unique — you rarely need `--chain`).
 
 - `task list [--chain <id>]` — your chain's tasks. Each carries a `comment_summary`
   (count, last_comment_at, author, preview) — NOT full comment bodies.
-- `task show <task-id> [--chain <id>]` — a task + its `comment_summary` + votes (no bodies).
+- `task show <task-id> [--chain <id>]` — a task + its `brief` + `comment_summary` + facets.
 - `task comments <task-id> [--last N]` — fetch comment BODIES; `--last N` = newest N (max 100).
-- `task create --title <t> [--description <d>] [--priority p0|p1|p2] [--assignee <agt_id>] [--reviewer <agt_id,agt_id,...>] [--depends-on <id,id>] [--bridge <bridge-id>] [--chain <id>]` — create a task.
-  `--assignee` and `--reviewer` take durable agent IDs (`agt_...`) only; instance pins (`inst_...`) were removed in Task System v2 and are rejected client-side.
-  `--reviewer` and `--depends-on` accept comma-separated lists. `--bridge` pins the task to a specific bridge.
-- `task update <task-id> [--title <t>] [--description <d>] [--priority p0|p1|p2] [--assignee <agt_id>] [--reviewer <agt_id,agt_id,...>] [--depends-on <id,id>] [--bridge <bridge-id>]` — edit an
-  existing task (coordinator only). Only the fields you pass change; coordinators should exclusively specify durable agent IDs (`agt_...`) for `--assignee` and `--reviewer`; `--reviewer` and
-  `--depends-on` REPLACE the whole list (pass `""` to clear); `--bridge ""` clears the bridge pin back to inherit.
-- `task comment <task-id> --body <t>` (or `--stdin`) `[--notify <id,id>]` — add a comment
-  (the only way to comment).
-- `task depend <task-id> --on <task-id>` — add a single dependency (`update --depends-on`
-  replaces the whole list).
-
-> **Task System v2:** `task-chain subscribe/unsubscribe`, `task subscribe/unsubscribe`,
-> `task status`, `task vote`, `task nudge` and `task set-current` were removed. The hub now
-> pushes work to agents directly (no subscriptions, no polling). Available now:
-> - `lease next` — the lease you hold (status `current`) or the next task claimed for you
->   inline (status `granted`), with the task, deadlines and context pack; `none` when idle.
-> - `lease heartbeat [--note <text>]` — extend the lease TTL (every ham-ctl call already
->   heartbeats implicitly). A `409 lease_lost` means your lease expired: stop.
-> - `lease submit --summary <s> [--handoff-file <json>] [--output-file <json>] [--verify none]` —
->   finish the attempt (task → `in_review`, or `done` with no review roles). Needs a passing
->   `ham-ctl verify` at the current head unless the brief says `verify: none`
->   (`409 verify_required|verify_failed|verify_stale|verify_dirty`). The bridge attaches your
->   repo state (head, dirty, files) automatically.
-> - `lease handoff --summary <s> [--handoff-file <json>]` — stop without finishing; the task goes
->   back to `ready` with your handoff (`next_steps`, …) for the next attempt.
-> - `lease block --waiting-on <kind> --reason <text> [--ref <id>] [--summary <s>]` — park the task
->   on something external (e.g. `--waiting-on user`).
-> - `verify [--independent]` — run the brief's `verify` command as a Run session labelled for this
->   attempt, heartbeating while it runs; prints the log tail and exits with the run's exit code.
-> - `review post --verdict approve|request_changes [--findings-file <json>] [--task <id>]` — your
->   verdict when woken as a reviewer (findings: `[{path?, line?, severity?, text}]`).
-> - `task fetch <task-id> <ref>` — fetch one event (`#<event_id>`) or facet
->   (`facet:<task_id>:<attempt_no>:<kind>`) referenced by your pack.
-> - `task create/update` take the BRIEF flags `--goal <g> --acceptance <a>… --verify <cmd>
->   [--input <ref>]… [--review-role <r>]… [--auto-submit] [--brief-file <path.json>]`; `task publish
->   <task-id>` / `task-chain publish <chain-id>` validate briefs and list missing fields per task
->   on `422 brief_incomplete`.
+- `task create --title <t> [--description <d>] [--priority p0|p1|p2] [--assignee <agt_id>] [--reviewer <agt_id,agt_id,...>] [--depends-on <id,id>] [--bridge <bridge-id>] [--chain <id>] [--goal <g>] [--acceptance <a>]... [--verify <cmd>] [--input <ref>]... [--review-role <r>]... [--auto-submit] [--require-independent-verify] [--brief-file <path.json>]` — create a task.
+  `--assignee` and `--reviewer` take durable agent IDs (`agt_...`) only.
+- `task update <task-id> [--title <t>] [--description <d>] [--priority p0|p1|p2] [--assignee <agt_id>] [--reviewer <agt_id,agt_id,...>] [--depends-on <id,id>] [--bridge <bridge-id>] [--goal <g>] [--acceptance <a>]... [--verify <cmd>] [--input <ref>]... [--review-role <r>]... [--auto-submit] [--require-independent-verify] [--brief-file <path.json>]` — edit an existing task.
+- `task publish <task-id>` — validate the task's brief and publish it (`422 brief_incomplete` lists any missing fields).
+- `task comment <task-id> --body <t>` (or `--stdin`) `[--notify <id,id>]` — add a comment.
+- `task depend <task-id> --on <task-id>` — add a single dependency (`update --depends-on` replaces the whole list).
+- `task fetch <task-id> <ref>` — fetch one event (`#<event_id>`), output (`output:<task_id>`), facet (`facet:<task_id>:<attempt_no>:<kind>`), or file-at-commit (`dir:<dir_id>:<rev>:<path>`, `<path>@<rev>`, or `<path>`) referenced by `TASK.md`.
+- `lease next` — inspect the lease you hold (status `current`) or claim the next ready task inline (status `granted`), updating `<run_dir>/TASK.md`; returns `none` when idle.
+- `lease heartbeat [--note <text>]` — extend the lease TTL and optionally record a progress note. On `409 lease_lost`, stop immediately without touching the working tree.
+- `lease submit --summary <s> [--handoff-file <json>] [--output-file <json>] [--artifacts-file <json>] [--artifacts <json>] [--verify none]` — finish the attempt (task → `in_review`, or `done` with no review gates). Requires a passing `ham-ctl verify` at the current `HEAD` unless `brief.verify` is `"none"`.
+- `lease handoff --summary <s> [--handoff-file <json>]` — release the lease back to `ready` with structured handoff (`done`, `remaining`, `next_steps`, `dead_ends`, `warnings`) for the next attempt.
+- `lease block --waiting-on <kind> --reason <text> [--ref <id>] [--summary <s>]` — park the task on an external blocker (`human`, `task`, `external`).
+- `verify [<task-id>] [--independent]` — run `brief.verify` as a Run session labelled for this attempt (`verify <task_id> #<attempt_no> @<head> [independent]`), heartbeating while it runs. With `--independent`, runs inside an ephemeral detached git worktree at `vcs.head` and records `"independent": true` on the `verify` facet. When `brief.auto_submit` is `true` and a normal `verify` exits `0` on a clean working tree, automatically submits the lease (`auto: true`).
+- `review post [<task-id>] --verdict approve|request_changes [--findings-file <json>] [--task <id>] [--on-behalf-of user]` — record a review verdict and optional structured findings (`[{severity, file, line, message}]`). Coordinators pass `--on-behalf-of user` to record a proxy user review when the user approves or requests changes in chat.
 
 ### Task states
 A task carries a `state`: `backlog`, `ready`, `in_progress`, `in_review`, `done`, `cancelled`.

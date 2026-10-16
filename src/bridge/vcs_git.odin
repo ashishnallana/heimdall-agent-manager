@@ -33,6 +33,7 @@ vcs_git_provider :: proc() -> VCS_Provider {
 		upload            = vcs_git_push,
 		sync              = vcs_git_sync,
 		list_workspaces   = vcs_git_list_workspaces,
+		show_file         = vcs_git_show_file,
 	}
 }
 
@@ -496,3 +497,16 @@ vcs_git_finalize_workspace :: proc(w: ^VCS_Workspace, want: string) {
 	if w.label == "" do w.label = "(detached)"
 	w.is_current = vcs_clean_path(w.path) == want
 }
+
+// vcs_git_show_file reads a file's contents at `rev` (`git -C <path> show <rev>:<file>`).
+// Rejects leading-dash revs and traversal paths before invoking git.
+vcs_git_show_file :: proc(path, rev, file: string) -> (string, bool) {
+	r := strings.trim_space(rev)
+	f := strings.trim_left(strings.trim_space(file), "/")
+	if r == "" || f == "" || strings.has_prefix(r, "-") || strings.has_prefix(f, "-") || strings.contains(f, "..") {
+		return "", false
+	}
+	spec := strings.concatenate({r, ":", f}, context.temp_allocator)
+	return vcs_run([]string{"git", "-C", path, "show", spec})
+}
+

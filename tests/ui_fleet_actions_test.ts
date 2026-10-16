@@ -838,3 +838,203 @@ test('canStartTask, canCompleteTask, canPauseTask handle finishing and pausing s
   assert.equal(canPauseTask(pausingTask), true);
   assert.equal(canCompleteTask(pausingTask), false);
 });
+
+// -----------------------------------------------------------------------------
+// Task System v2 M3: Fleet Placement Editor (roles, bridge_id, provider, model, delete)
+// -----------------------------------------------------------------------------
+
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import {
+  FLEET_ROLES,
+  normalizeFleetRoles,
+  toggleFleetRole,
+  formatFleetRolesBadge,
+  seedFleetRolesDrafts,
+  seedFleetBridgeIdDrafts,
+  seedFleetMinWarmDrafts,
+  seedFleetIdleTtlDrafts,
+} from '../src/ui/components/tasks/fleetSelection.ts';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const REPO_ROOT = path.resolve(__dirname, '..');
+
+test('M3 Fleet Placement: roles toggle and dirty detection for staged and persisted rows', () => {
+  assert.deepEqual(FLEET_ROLES, ['worker', 'reviewer']);
+
+  const rawFleets = [
+    {
+      agent_id: 'agt_worker',
+      capacity: 2,
+      roles: ['worker'],
+      bridge_id: 'brg_alpha',
+      provider: 'claude',
+      model: 'sonnet',
+      min_warm: 1,
+      idle_ttl_seconds: 600,
+    },
+  ];
+
+  // Seeding preserves server values
+  const rolesDraft = seedFleetRolesDrafts(rawFleets);
+  const bridgeIdsDraft = seedFleetBridgeIdDrafts(rawFleets);
+  const topPTDraft = seedProviderModelDrafts(rawFleets);
+  const minWarmsDraft = seedFleetMinWarmDrafts(rawFleets);
+  const idleTtlsDraft = seedFleetIdleTtlDrafts(rawFleets);
+
+  assert.deepEqual(rolesDraft.agt_worker, ['worker']);
+  assert.equal(bridgeIdsDraft.agt_worker, 'brg_alpha');
+  assert.deepEqual(topPTDraft.agt_worker, { provider: 'claude', model: 'sonnet' });
+  assert.equal(minWarmsDraft.agt_worker, 1);
+  assert.equal(idleTtlsDraft.agt_worker, 600);
+
+  // Toggling reviewer adds it alongside worker
+  rolesDraft.agt_worker = toggleFleetRole(rolesDraft.agt_worker, 'reviewer');
+  assert.deepEqual(rolesDraft.agt_worker, ['worker', 'reviewer']);
+
+  // Changing bridge_id to '' (clear pin to inherit) and top-level model to 'opus'
+  bridgeIdsDraft.agt_worker = '';
+  topPTDraft.agt_worker = { provider: 'claude', model: 'opus' };
+
+  const changed = changedFleetEntries(
+    rawFleets,
+    { agt_worker: 2 },
+    {},
+    rawFleets,
+    'brg_alpha',
+    {
+      roles: rolesDraft,
+      bridgeIds: bridgeIdsDraft,
+      topLevelProviderModels: topPTDraft,
+      minWarms: minWarmsDraft,
+      idleTtls: idleTtlsDraft,
+    }
+  );
+
+  assert.equal(changed.length, 1);
+  assert.deepEqual(changed[0], {
+    agentId: 'agt_worker',
+    capacity: 2,
+    provider: 'claude',
+    model: 'opus',
+    roles: ['worker', 'reviewer'],
+    bridgeId: '',
+    minWarm: 1,
+    idleTtlSeconds: 600,
+  });
+
+  // Apply payload preserves empty string bridgeId (so hub clears bridge pin) and roles array
+  const requests = fleetApplyRequests(changed, []);
+  assert.deepEqual(requests, [
+    {
+      agentId: 'agt_worker',
+      capacity: 2,
+      provider: 'claude',
+      model: 'opus',
+      roles: ['worker', 'reviewer'],
+      bridgeId: '',
+      minWarm: 1,
+      idleTtlSeconds: 600,
+    },
+  ]);
+});
+
+test('M3 Fleet Placement: top-level provider/model edit triggers restart confirmation when live instances exist', () => {
+  const rawFleets = [
+    {
+      agent_id: 'agt_worker',
+      capacity: 2,
+      roles: ['worker'],
+      bridge_id: 'brg_alpha',
+      provider: 'claude',
+      model: 'sonnet',
+    },
+  ];
+  const topLevelDraftPT = {
+    agt_worker: { provider: 'claude', model: 'opus' },
+  };
+  const changed = changedFleetEntries(
+    rawFleets,
+    { agt_worker: 2 },
+    {},
+    rawFleets,
+    'brg_alpha',
+    { topLevelProviderModels: topLevelDraftPT }
+  );
+  assert.equal(changed.length, 1);
+  assert.equal(
+    providerModelModified(rawFleets, 'agt_worker', {}, 'brg_alpha', topLevelDraftPT),
+    true
+  );
+
+  const affected = restartAffectedEntries(
+    changed,
+    rawFleets,
+    {},
+    { agt_worker: 1 },
+    'brg_alpha',
+    topLevelDraftPT
+  );
+  assert.equal(affected.length, 1);
+  assert.equal(affected[0].agentId, 'agt_worker');
+});
+
+test('M3 Fleet Placement UI & API contract: FleetManagementDrawer.tsx and taskChains.ts wire roles, bridge_id, provider, model, and delete', () => {
+  const drawerSrc = fs.readFileSync(
+    path.join(REPO_ROOT, 'src/ui/components/tasks/FleetManagementDrawer.tsx'),
+    'utf8'
+  );
+  const taskChainsSrc = fs.readFileSync(
+    path.join(REPO_ROOT, 'src/ui/api/endpoints/taskChains.ts'),
+    'utf8'
+  );
+  const tasksSrc = fs.readFileSync(
+    path.join(REPO_ROOT, 'src/ui/api/endpoints/tasks.ts'),
+    'utf8'
+  );
+
+  // Verify FleetSlotChips renders role badge
+  assert.ok(
+    drawerSrc.includes('fleet-slot-chip-roles-'),
+    'FleetSlotChips must render role badge per fleet chip'
+  );
+
+  // Verify FleetManagementDrawer renders controls for roles, placement bridge, default provider/model, min_warm, idle_ttl, and remove
+  assert.ok(
+    drawerSrc.includes('fleet-role-toggle-'),
+    'FleetManagementDrawer must render role toggle buttons (worker / reviewer)'
+  );
+  assert.ok(
+    drawerSrc.includes('fleet-bridge-select-'),
+    'FleetManagementDrawer must render placement bridge selector'
+  );
+  assert.ok(
+    drawerSrc.includes('fleet-default-provider-select-') &&
+      drawerSrc.includes('fleet-default-model-select-'),
+    'FleetManagementDrawer must render top-level provider and model selectors'
+  );
+  assert.ok(
+    drawerSrc.includes('fleet-min-warm-input-') &&
+      drawerSrc.includes('fleet-idle-ttl-input-'),
+    'FleetManagementDrawer must render min_warm and idle_ttl_seconds inputs'
+  );
+  assert.ok(
+    drawerSrc.includes('fleet-delete-role-btn-'),
+    'FleetManagementDrawer must render a Remove button per fleet role card'
+  );
+
+  // Verify taskChains.ts normalizes and sends roles and bridge_id, and exposes deleteTaskChainFleet
+  assert.ok(
+    taskChainsSrc.includes('body.roles = roles') &&
+      taskChainsSrc.includes('body.bridge_id = resolvedBridgeId'),
+    'updateTaskChainFleet must send roles and bridge_id in the PUT body'
+  );
+  assert.ok(
+    taskChainsSrc.includes('deleteTaskChainFleet') &&
+      tasksSrc.includes('useDeleteTaskChainFleetMutation'),
+    'deleteTaskChainFleet must be defined in taskChains.ts and re-exported in tasks.ts'
+  );
+});
+

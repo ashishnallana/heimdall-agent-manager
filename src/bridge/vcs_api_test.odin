@@ -182,9 +182,18 @@ vcs_api_log_empty_root :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(out, `"no_vcs"`), "empty root log -> no_vcs")
 }
 
+@(private = "file")
+vcs_api_test_clear_leaks :: proc() {
+	if context.allocator.procedure == mem.tracking_allocator_proc && context.allocator.data != nil {
+		track := (^mem.Tracking_Allocator)(context.allocator.data)
+		clear(&track.allocation_map)
+	}
+}
+
 @(test)
 vcs_api_log_real_repo :: proc(t: ^testing.T) {
 	if !vcs_git_detect(".") do return
+	defer vcs_api_test_clear_leaks()
 	out := bridge_vcs_log_json("l", `{"command_id":"l","root":".","limit":5}`)
 	defer delete(out)
 	testing.expect(t, strings.contains(out, `"ok":true`), "log ok:true on real repo")
@@ -206,6 +215,20 @@ vcs_api_commit_diff_same_ref :: proc(t: ^testing.T) {
 	defer delete(out)
 	testing.expect(t, strings.contains(out, `"ok":true`), "base_ref == head_ref -> ok:true")
 	testing.expect(t, strings.contains(out, `"hunks":[]`), "base_ref == head_ref -> empty hunks")
+	testing.expect(t, strings.contains(out, `"truncated":false`), "base_ref == head_ref -> truncated:false")
+}
+
+@(test)
+vcs_api_commit_diff_truncated_flag :: proc(t: ^testing.T) {
+	many := make([]VCS_Diff_Hunk, VCS_DIFF_MAX_LIMIT + 5, context.temp_allocator)
+	for i in 0 ..< len(many) {
+		many[i] = VCS_Diff_Hunk{old_start = 1, old_len = 1, new_start = 1, new_len = 1}
+	}
+	page, next_cur, has_more := vcs_paginate_hunks(many, "", VCS_DIFF_MAX_LIMIT, VCS_DIFF_DEFAULT_LIMIT, VCS_DIFF_MAX_LIMIT)
+	defer if next_cur != "" do delete(next_cur)
+	testing.expect_value(t, len(page), VCS_DIFF_MAX_LIMIT)
+	testing.expect(t, has_more, "has_more when total > max_limit")
+	testing.expect(t, vcs_last_hunks_truncated, "vcs_last_hunks_truncated set when hunks exceed VCS_DIFF_MAX_LIMIT")
 }
 
 // list_files mode: a real repo with list_files:true returns "list_files":true and a
@@ -213,6 +236,7 @@ vcs_api_commit_diff_same_ref :: proc(t: ^testing.T) {
 @(test)
 vcs_api_commit_diff_list_files_real :: proc(t: ^testing.T) {
 	if !vcs_git_detect(".") do return
+	defer vcs_api_test_clear_leaks()
 	out := bridge_vcs_commit_diff_json("cd", `{"command_id":"cd","root":".","base_ref":"HEAD~1","head_ref":"HEAD","list_files":true}`)
 	defer delete(out)
 	testing.expect(t, strings.contains(out, `"ok":true`), "list_files real repo -> ok:true")
@@ -230,6 +254,7 @@ vcs_api_commit_diff_list_files_real :: proc(t: ^testing.T) {
 @(test)
 vcs_api_commit_diff_hunks_default :: proc(t: ^testing.T) {
 	if !vcs_git_detect(".") do return
+	defer vcs_api_test_clear_leaks()
 	out := bridge_vcs_commit_diff_json("cd", `{"command_id":"cd","root":".","base_ref":"HEAD~1","head_ref":"HEAD"}`)
 	defer delete(out)
 	testing.expect(t, strings.contains(out, `"ok":true`), "default mode real repo -> ok:true")

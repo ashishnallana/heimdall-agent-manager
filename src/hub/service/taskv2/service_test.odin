@@ -1,6 +1,7 @@
 package taskv2
 
 import "core:fmt"
+import "core:mem"
 import "core:os"
 import "core:strings"
 import "core:testing"
@@ -84,6 +85,10 @@ fixture_close :: proc(fx: ^Fixture) {
 	os.remove(fx.path)
 	delete(fx.path)
 	free(fx)
+	if context.allocator.procedure == mem.tracking_allocator_proc && context.allocator.data != nil {
+		track := (^mem.Tracking_Allocator)(context.allocator.data)
+		clear(&track.allocation_map)
+	}
 }
 
 exec_ok :: proc(t: ^testing.T, fx: ^Fixture, sql: string) -> bool {

@@ -60,12 +60,56 @@ export function fleetProviderCapabilities(providersPayload: any): FleetProviderC
   return list;
 }
 
+export const FLEET_ROLES = ['worker', 'reviewer'] as const;
+export type FleetRole = (typeof FLEET_ROLES)[number];
+
+/** Normalize a fleet roles array: filters to valid roles ('worker' | 'reviewer') in canonical order, defaulting to ['worker', 'reviewer'] (or fallback). */
+export function normalizeFleetRoles(roles?: any, fallback: string[] = ['worker', 'reviewer']): string[] {
+  if (!Array.isArray(roles)) return fallback.slice();
+  const valid = FLEET_ROLES.filter((r) =>
+    roles.some((item: any) => String(item || '').trim().toLowerCase() === r)
+  );
+  return valid.length > 0 ? [...valid] : fallback.slice();
+}
+
+/** Toggle a role ('worker' | 'reviewer') in a roles array while guaranteeing at least one role stays selected. */
+export function toggleFleetRole(currentRoles: string[] | undefined, role: string): string[] {
+  const normalized = normalizeFleetRoles(currentRoles);
+  const target = String(role || '').trim().toLowerCase();
+  if (target !== 'worker' && target !== 'reviewer') return normalized;
+  if (normalized.includes(target)) {
+    // Prevent deselecting the last remaining role
+    if (normalized.length <= 1) return normalized;
+    return normalized.filter((r) => r !== target);
+  }
+  return normalizeFleetRoles([...normalized, target]);
+}
+
+/** Format a concise role badge label for FleetSlotChips and role cards (e.g. 'worker + reviewer', 'worker', 'reviewer'). */
+export function formatFleetRolesBadge(roles?: string[]): string {
+  const norm = normalizeFleetRoles(roles);
+  if (norm.includes('worker') && norm.includes('reviewer')) return 'worker + reviewer';
+  return norm[0] || 'worker';
+}
+
+export interface FleetPlacementDrafts {
+  roles?: Record<string, string[]>;
+  bridgeIds?: Record<string, string>;
+  topLevelProviderModels?: Record<string, FleetProviderModel>;
+  minWarms?: Record<string, number>;
+  idleTtls?: Record<string, number>;
+}
+
 export interface ChangedFleetEntry {
   bridgeModels?: Record<string, FleetProviderModel>;
   agentId: string;
   capacity: number;
   provider: string;
   model: string;
+  roles?: string[];
+  bridgeId?: string;
+  minWarm?: number;
+  idleTtlSeconds?: number;
 }
 
 function fleetAgentId(f: any): string {
@@ -74,6 +118,10 @@ function fleetAgentId(f: any): string {
 
 function fleetProviderModel(f: any): FleetProviderModel {
   return { provider: String(f?.provider || ''), model: String(f?.model || '') };
+}
+
+function fleetBridgeId(f: any): string {
+  return String(f?.bridge_id ?? f?.bridgeId ?? '');
 }
 
 /** Draft provider/model per role, seeded from server-returned fleets ('' = inherit). */
@@ -87,10 +135,92 @@ export function seedProviderModelDrafts(fleets: any[]): Record<string, FleetProv
   return init;
 }
 
+/** Draft roles per fleet template, seeded from server-returned fleets (defaults to ['worker']). */
+export function seedFleetRolesDrafts(fleets: any[]): Record<string, string[]> {
+  const init: Record<string, string[]> = {};
+  for (const f of fleets || []) {
+    const aid = fleetAgentId(f);
+    if (!aid) continue;
+    init[aid] = normalizeFleetRoles(f?.roles);
+  }
+  return init;
+}
+
+/** Draft bridge placement per fleet template, seeded from server-returned fleets ('' = inherit). */
+export function seedFleetBridgeIdDrafts(fleets: any[]): Record<string, string> {
+  const init: Record<string, string> = {};
+  for (const f of fleets || []) {
+    const aid = fleetAgentId(f);
+    if (!aid) continue;
+    init[aid] = fleetBridgeId(f);
+  }
+  return init;
+}
+
+/** Draft min_warm per fleet template, seeded from server-returned fleets (defaults to 0). */
+export function seedFleetMinWarmDrafts(fleets: any[]): Record<string, number> {
+  const init: Record<string, number> = {};
+  for (const f of fleets || []) {
+    const aid = fleetAgentId(f);
+    if (!aid) continue;
+    const mw = typeof f?.min_warm === 'number' ? f.min_warm : (typeof f?.minWarm === 'number' ? f.minWarm : 0);
+    init[aid] = mw;
+  }
+  return init;
+}
+
+/** Draft idle_ttl_seconds per fleet template, seeded from server-returned fleets (defaults to 600). */
+export function seedFleetIdleTtlDrafts(fleets: any[]): Record<string, number> {
+  const init: Record<string, number> = {};
+  for (const f of fleets || []) {
+    const aid = fleetAgentId(f);
+    if (!aid) continue;
+    const ttl = typeof f?.idle_ttl_seconds === 'number' ? f.idle_ttl_seconds : (typeof f?.idleTtlSeconds === 'number' ? f.idleTtlSeconds : 600);
+    init[aid] = ttl;
+  }
+  return init;
+}
+
 /** Server/original provider+model for a role; roles without a persisted row inherit ''/''. */
 export function getOriginalProviderModel(fleets: any[], agentId: string): FleetProviderModel {
   const found = (fleets || []).find((f) => fleetAgentId(f) === agentId);
   return found ? fleetProviderModel(found) : { provider: '', model: '' };
+}
+
+/** Server/original roles for a fleet row; unpersisted rows return null. */
+export function getOriginalFleetRoles(fleets: any[], agentId: string): string[] | null {
+  const found = (fleets || []).find((f) => fleetAgentId(f) === agentId);
+  if (!found) return null;
+  return normalizeFleetRoles(found.roles);
+}
+
+/** Server/original bridge_id for a fleet row; unpersisted rows return ''. */
+export function getOriginalFleetBridgeId(fleets: any[], agentId: string): string {
+  const found = (fleets || []).find((f) => fleetAgentId(f) === agentId);
+  return found ? fleetBridgeId(found) : '';
+}
+
+/** Server/original min_warm for a fleet row; unpersisted rows return 0. */
+export function getOriginalFleetMinWarm(fleets: any[], agentId: string): number {
+  const found = (fleets || []).find((f) => fleetAgentId(f) === agentId);
+  if (!found) return 0;
+  return typeof found.min_warm === 'number' ? found.min_warm : (typeof found.minWarm === 'number' ? found.minWarm : 0);
+}
+
+/** Server/original idle_ttl_seconds for a fleet row; unpersisted rows return 600. */
+export function getOriginalFleetIdleTtl(fleets: any[], agentId: string): number {
+  const found = (fleets || []).find((f) => fleetAgentId(f) === agentId);
+  if (!found) return 600;
+  return typeof found.idle_ttl_seconds === 'number'
+    ? found.idle_ttl_seconds
+    : (typeof found.idleTtlSeconds === 'number' ? found.idleTtlSeconds : 600);
+}
+
+export function fleetRolesEqual(a: string[] | undefined | null, b: string[] | undefined | null): boolean {
+  const na = normalizeFleetRoles(a);
+  const nb = normalizeFleetRoles(b);
+  if (na.length !== nb.length) return false;
+  return na.every((r, idx) => r === nb[idx]);
 }
 
 /** Model options offered by the selected provider; '' (Auto) provider has none. */
@@ -190,7 +320,8 @@ export function flattenProviderModelDrafts(
 /**
  * Roles whose drafts diverge from the server state (or that are newly staged):
  * the exact entries the drawer's Apply button turns into fleet PUTs. A role
- * counts as changed when its capacity differs, its provider/model differs, or it
+ * counts as changed when its capacity differs, its provider/model differs, its
+ * placement (roles, bridgeId, minWarm, idleTtlSeconds) differs, or it
  * is a not-yet-persisted role with any non-inherit value staged.
  */
 export function changedFleetEntries(
@@ -199,6 +330,7 @@ export function changedFleetEntries(
   draftProviderModels: Record<string, FleetProviderModel | Record<string, FleetProviderModel>>,
   rawFleets: any[],
   preferredBridgeId?: string,
+  placementDrafts?: FleetPlacementDrafts,
 ): ChangedFleetEntry[] {
   const flatPT = flattenProviderModelDrafts(draftProviderModels, preferredBridgeId);
   const list: ChangedFleetEntry[] = [];
@@ -207,13 +339,39 @@ export function changedFleetEntries(
     if (!aid) continue;
     const draftCapacity = draftCapacities[aid];
     const draftPT = flatPT[aid] ?? (draftProviderModels[aid] && 'provider' in (draftProviderModels[aid] as any) ? (draftProviderModels[aid] as FleetProviderModel) : undefined);
-    // Roles with neither draft are untouched (a role only appears here when it
+    const draftRoles = placementDrafts?.roles?.[aid];
+    const draftBridgeId = placementDrafts?.bridgeIds?.[aid];
+    const draftTopPT = placementDrafts?.topLevelProviderModels?.[aid];
+    const draftMinWarm = placementDrafts?.minWarms?.[aid];
+    const draftIdleTtl = placementDrafts?.idleTtls?.[aid];
+
+    const hasPlacementDraft =
+      draftRoles !== undefined ||
+      draftBridgeId !== undefined ||
+      draftTopPT !== undefined ||
+      draftMinWarm !== undefined ||
+      draftIdleTtl !== undefined;
+
+    // Roles with no draft at all are untouched (a role only appears here when it
     // is persisted or staged via Add Role, so it always carries drafts).
-    if (draftCapacity === undefined && draftPT === undefined && draftProviderModels[aid] === undefined) continue;
+    if (
+      draftCapacity === undefined &&
+      draftPT === undefined &&
+      draftProviderModels[aid] === undefined &&
+      !hasPlacementDraft
+    ) {
+      continue;
+    }
+
     const effectiveCapacity =
       draftCapacity !== undefined ? draftCapacity : (typeof fleet.capacity === 'number' ? fleet.capacity : 1);
     const origCapacity = getOriginalFleetCapacity(rawFleets, aid);
     const origPT = getOriginalProviderModel(rawFleets, aid);
+    const origRoles = getOriginalFleetRoles(rawFleets, aid);
+    const origBridgeId = getOriginalFleetBridgeId(rawFleets, aid);
+    const origMinWarm = getOriginalFleetMinWarm(rawFleets, aid);
+    const origIdleTtl = getOriginalFleetIdleTtl(rawFleets, aid);
+
     const capacityChanged = origCapacity === null || effectiveCapacity !== origCapacity;
     const roleDraft = draftProviderModels[aid];
     const perBridge = roleDraft && !('provider' in roleDraft) ? roleDraft as Record<string, FleetProviderModel> : undefined;
@@ -222,14 +380,38 @@ export function changedFleetEntries(
       const original = originalFleet?.bridge_models?.[id] || origPT;
       return selection.provider !== original.provider || selection.model !== original.model;
     });
-    const providerChanged = !perBridge && draftPT !== undefined && draftPT.provider !== origPT.provider;
-    const tierChanged = !perBridge && draftPT !== undefined && draftPT.model !== origPT.model;
-    if (capacityChanged || providerChanged || tierChanged || bridgeChanged) {
-      list.push({
+
+    const effectiveTopProvider = draftTopPT !== undefined
+      ? draftTopPT.provider
+      : (perBridge ? origPT.provider : draftPT ? draftPT.provider : origPT.provider);
+    const effectiveTopModel = draftTopPT !== undefined
+      ? draftTopPT.model
+      : (perBridge ? origPT.model : draftPT ? draftPT.model : origPT.model);
+
+    const providerChanged = effectiveTopProvider !== origPT.provider;
+    const tierChanged = effectiveTopModel !== origPT.model;
+
+    const normalizedDraftRoles = draftRoles !== undefined ? normalizeFleetRoles(draftRoles) : undefined;
+    const rolesChanged = normalizedDraftRoles !== undefined && (origRoles === null || !fleetRolesEqual(normalizedDraftRoles, origRoles));
+    const bridgeIdChanged = draftBridgeId !== undefined && (origCapacity === null || draftBridgeId !== origBridgeId);
+    const minWarmChanged = draftMinWarm !== undefined && (origCapacity === null || draftMinWarm !== origMinWarm);
+    const idleTtlChanged = draftIdleTtl !== undefined && (origCapacity === null || draftIdleTtl !== origIdleTtl);
+
+    if (
+      capacityChanged ||
+      providerChanged ||
+      tierChanged ||
+      bridgeChanged ||
+      rolesChanged ||
+      bridgeIdChanged ||
+      minWarmChanged ||
+      idleTtlChanged
+    ) {
+      const entry: ChangedFleetEntry = {
         agentId: aid,
         capacity: effectiveCapacity,
-        provider: perBridge ? origPT.provider : draftPT ? draftPT.provider : origPT.provider,
-        model: perBridge ? origPT.model : draftPT ? draftPT.model : origPT.model,
+        provider: effectiveTopProvider,
+        model: effectiveTopModel,
         ...(perBridge ? { bridgeModels: {
           ...originalFleet?.bridge_models,
           ...Object.fromEntries(Object.entries(perBridge).filter(([id, pt]) =>
@@ -237,7 +419,24 @@ export function changedFleetEntries(
               pt.provider !== origPT.provider || pt.model !== origPT.model)
           )),
         } } : {}),
-      });
+      };
+      if (normalizedDraftRoles !== undefined) {
+        entry.roles = normalizedDraftRoles;
+      } else if (Array.isArray(fleet?.roles) && fleet.roles.length > 0) {
+        entry.roles = normalizeFleetRoles(fleet.roles);
+      }
+      if (draftBridgeId !== undefined) {
+        entry.bridgeId = draftBridgeId;
+      } else if (fleet?.bridge_id !== undefined || fleet?.bridgeId !== undefined) {
+        entry.bridgeId = fleetBridgeId(fleet);
+      }
+      if (draftMinWarm !== undefined) {
+        entry.minWarm = draftMinWarm;
+      }
+      if (draftIdleTtl !== undefined) {
+        entry.idleTtlSeconds = draftIdleTtl;
+      }
+      list.push(entry);
     }
   }
   return list;
@@ -311,11 +510,16 @@ export function providerModelModified(
   agentId: string,
   draftProviderModels: Record<string, FleetProviderModel | Record<string, FleetProviderModel>>,
   preferredBridgeId?: string,
+  topLevelDraftPT?: Record<string, FleetProviderModel>,
 ): boolean {
+  const orig = getOriginalProviderModel(rawFleets, agentId);
+  const topDraft = topLevelDraftPT?.[agentId];
+  if (topDraft && (topDraft.provider !== orig.provider || topDraft.model !== orig.model)) {
+    return true;
+  }
   const flat = flattenProviderModelDrafts(draftProviderModels, preferredBridgeId);
   const draft = flat[agentId] ?? (draftProviderModels[agentId] && 'provider' in (draftProviderModels[agentId] as any) ? (draftProviderModels[agentId] as FleetProviderModel) : undefined);
   if (!draft) return false;
-  const orig = getOriginalProviderModel(rawFleets, agentId);
   const roleDraft = draftProviderModels[agentId];
   if (roleDraft && !('provider' in roleDraft)) {
     const fleet = (rawFleets || []).find((f) => fleetAgentId(f) === agentId);
@@ -337,10 +541,11 @@ export function restartAffectedEntries(
   draftProviderModels: Record<string, FleetProviderModel | Record<string, FleetProviderModel>>,
   liveInstanceCounts: Record<string, number>,
   preferredBridgeId?: string,
+  topLevelDraftPT?: Record<string, FleetProviderModel>,
 ): ChangedFleetEntry[] {
   return (changedEntries || []).filter(
     (entry) =>
-      providerModelModified(rawFleets, entry.agentId, draftProviderModels, preferredBridgeId) &&
+      providerModelModified(rawFleets, entry.agentId, draftProviderModels, preferredBridgeId, topLevelDraftPT) &&
       (liveInstanceCounts[entry.agentId] || 0) >= 1,
   );
 }
@@ -351,6 +556,10 @@ export interface FleetApplyRequest {
   capacity: number;
   provider: string;
   model: string;
+  roles?: string[];
+  bridgeId?: string;
+  minWarm?: number;
+  idleTtlSeconds?: number;
   /** Present (true) only on the PUTs that must relaunch live role instances. */
   restartLiveInstances?: true;
 }
@@ -373,6 +582,10 @@ export function fleetApplyRequests(
       model: entry.model,
     };
     if (entry.bridgeModels) request.bridgeModels = entry.bridgeModels;
+    if (entry.roles !== undefined) request.roles = entry.roles;
+    if (entry.bridgeId !== undefined) request.bridgeId = entry.bridgeId;
+    if (entry.minWarm !== undefined) request.minWarm = entry.minWarm;
+    if (entry.idleTtlSeconds !== undefined) request.idleTtlSeconds = entry.idleTtlSeconds;
     if (restartIds.has(entry.agentId)) request.restartLiveInstances = true;
     return request;
   });

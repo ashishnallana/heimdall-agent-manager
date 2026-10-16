@@ -327,6 +327,11 @@ wait_confirmed "$T1" work || fail "fake worker never confirmed its lease (start-
 wait_state "$T1" in_progress 20 || fail "task not in_progress after confirm"
 WSHIM="$(shim_of "$HOLDER")"
 pass "worker confirmed lease (task in_progress); shim=$WSHIM"
+WTASK_MD="$WORK/run-b/instances/$HOLDER/TASK.md"
+[ -f "$WTASK_MD" ] && pass "M3: bridge materialised $WTASK_MD ($(wc -c < "$WTASK_MD") bytes)" || fail "M3: $WTASK_MD was not materialised on wake/lease.next"
+RT_FACET="$(facet "$T1" "$ATTEMPT" runtime | jq -c '.data.body // empty')"
+printf '%s' "$RT_FACET" | jq -e '(.bridge_id | length > 0) and (.started_at | length > 0)' >/dev/null 2>&1 \
+  && pass "M3: runtime facet written on lease grant: $RT_FACET" || fail "M3: runtime facet missing on grant: $RT_FACET"
 
 # 3a lives here because it needs an unverified live lease
 if want 3; then
@@ -338,7 +343,7 @@ SID="$(run_verify "$WSHIM" "$T1" "$ATTEMPT" "true")" || fail "verify run"
 note "verify session: $SID"
 verify_ok() { facet "$1" "$2" verify | jq -e '.data.body.exit_code == 0' >/dev/null 2>&1; }
 wait_for 30 "verify facet exit_code 0" verify_ok "$T1" "$ATTEMPT" || { facet "$T1" "$ATTEMPT" verify >&2; echo; fail "verify facet not written with exit_code 0"; }
-F="$(facet "$T1" "$ATTEMPT" verify | jq -c '.data.body | {exit_code, head_at_start, head_at_end, dirty, status, log_ref}')"
+F="$(facet "$T1" "$ATTEMPT" verify | jq -c '.data.body | {exit_code, head_at_start, head_at_end, dirty, status, log_ref, independent}')"
 pass "verify facet written by hub: $F"
 printf '%s' "$F" | jq -e --arg h "$HEAD_SHA" '.head_at_start == $h' >/dev/null && pass "verify facet head_at_start == repo HEAD ${HEAD_SHA:0:8}" || note "head_at_start != repo HEAD (label head: $(printf '%s' "$F" | jqr .head_at_start))"
 [ "$(printf '%s' "$F" | jqr .dirty)" = "false" ] && pass "bridge enriched shell_exited with vcs.dirty=false" || note "vcs.dirty not enriched by bridge yet (dirty=$(printf '%s' "$F" | jqr .dirty)); hub falls back to handoff/note ordering"
@@ -346,6 +351,8 @@ printf '%s' "$F" | jq -e --arg h "$HEAD_SHA" '.head_at_start == $h' >/dev/null &
 R="$(submit_as "$WSHIM" "done: README added")" || fail "submit: $R"
 OUTCOME="$(printf '%s' "$R" | jq -r '.data.data.outcome // .data.outcome // .outcome // empty')"
 [ "$OUTCOME" = "in_review" ] && pass "submit → outcome in_review" || fail "submit outcome '$OUTCOME': $R"
+RT_END="$(facet "$T1" "$ATTEMPT" runtime | jq -r '.data.body.ended_at // empty')"
+[ -n "$RT_END" ] && pass "M3: runtime facet ended_at updated on lease release ($RT_END)" || fail "M3: runtime facet ended_at not populated on lease release"
 wait_state "$T1" in_review 10 || fail "state after submit"
 wait_lease "$T1" review 120 || fail "matcher did not grant a review lease"
 [ "$HOLDER" != "$(task_lease "$T1" work holder_instance_id)" ] || true
@@ -354,11 +361,35 @@ pass "review lease $LEASE_ID role=$(task_lease "$T1" review review_role) granted
 wait_confirmed "$T1" review || fail "fake reviewer never confirmed"
 RSHIM="$(shim_of "$RHOLDER")"
 pass "reviewer confirmed (shim=$RSHIM)"
+# M3: reviewer independent verify & auto_submit check
+if [ "$CTL_VERIFY" = 1 ]; then
+  ( cd "$REPO" && "$RSHIM" verify --independent "$T1" ) >"$LOGS/verify-ind-$T1-$ATTEMPT.log" 2>&1 \
+    && pass "M3: reviewer verify --independent succeeded" \
+    || { cat "$LOGS/verify-ind-$T1-$ATTEMPT.log" >&2; fail "M3: verify --independent returned non-zero"; }
+  ind_verify_ok() { facet "$1" "$2" verify | jq -e '.data.body.independent == true and .data.body.exit_code == 0' >/dev/null 2>&1; }
+  wait_for 30 "verify facet independent=true" ind_verify_ok "$T1" "$ATTEMPT" \
+    && pass "M3: verify facet recorded independent=true" \
+    || { facet "$T1" "$ATTEMPT" verify >&2; fail "M3: verify facet did not record independent=true"; }
+fi
 R="$(review_as "$RSHIM" approve)" || fail "review post: $R"
 GATE="$(printf '%s' "$R" | jq -r '.data.data.gate // .data.gate // .gate // empty')"
 [ "$GATE" = "approved" ] && pass "review post approve → gate approved" || fail "gate '$GATE': $R"
 wait_state "$T1" done 15 || fail "task not done after approval"
 pass "task $T1 is DONE"
+
+# M3: brief.auto_submit = true E2E check
+if [ "$CTL_VERIFY" = 1 ]; then
+  T_AUTO="$(api_ok POST "/api/v1/task-chains/$CHAIN/tasks" '{"title":"smoke-auto-submit","brief":{"goal":"smoke: auto_submit","acceptance":["verify exits 0 and auto-submits"],"verify":"true","auto_submit":true,"review_roles":[]}}' | jqr .data.task_id)" || fail "create auto_submit task"
+  wait_lease "$T_AUTO" work 120 || fail "no grant for $T_AUTO"
+  wait_confirmed "$T_AUTO" work || fail "worker never confirmed $T_AUTO"
+  WASHIM="$(shim_of "$HOLDER")"
+  ( cd "$REPO" && "$WASHIM" verify ) >"$LOGS/verify-auto-$T_AUTO.log" 2>&1 \
+    || { cat "$LOGS/verify-auto-$T_AUTO.log" >&2; fail "M3: verify on auto_submit task failed"; }
+  wait_state "$T_AUTO" done 20 || fail "M3: auto_submit did not transition $T_AUTO to done"
+  api GET "/api/v1/task-chains/$CHAIN/tasks/$T_AUTO/events" | jq -e '.data[]? | select(.kind=="submitted" and (.payload.auto == true))' >/dev/null 2>&1 \
+    && pass "M3: brief.auto_submit=true automatically submitted $T_AUTO to DONE with submitted.payload.auto=true" \
+    || { api GET "/api/v1/task-chains/$CHAIN/tasks/$T_AUTO/events" >&2; fail "M3: submitted event on $T_AUTO missing payload.auto=true"; }
+fi
 else
   # scenarios 3-6 need the published chain and a known worker
   publish_chain || true
@@ -368,6 +399,7 @@ fi
 if want 3 && want 2; then
 section "3. negatives"
 R="$(submit_as "$WSHIM" "ghost submit" || true)"
+[ "$(printf '%s' "$R" | err_code)" = "unauthenticated" ] && R="$(submit_as "$(shim_of "$COORD")" "ghost submit" || true)"
 [ "$(printf '%s' "$R" | err_code)" = "lease_lost" ] && pass "3b submit with no live lease (after done) → 409 lease_lost" || fail "3b expected lease_lost, got: $R"
 
 T2="$(make_task "smoke-cancel")"

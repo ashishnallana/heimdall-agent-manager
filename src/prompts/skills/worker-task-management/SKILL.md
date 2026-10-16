@@ -1,76 +1,135 @@
 ---
 name: worker-task-management
-description: How a WORKER (or reviewer) agent uses ham-ctl to execute assigned tasks, report progress, hand off for review, and vote — covering the full task lifecycle and status vocabulary, the in_progress→in_validation handoff, implicit LGTM-quorum completion, and the QUICK vs COMPREHENSIVE reviewer checklists with risk-based tier selection. Load whenever you are a non-coordinator (worker or reviewer) member of a chain and need to run, hand off, or review a task.
+description: How a WORKER or REVIEWER agent uses ham-ctl in Task System v2 to read TASK.md, manage leases (`lease next/heartbeat/submit/handoff/block`), run verification (`verify [--independent]`), fetch context refs (`task fetch`), and post structured reviews (`review post`). Load whenever you are a worker or reviewer on a chain.
 ---
 
-# Worker task management (execute your assigned tasks)
+# Worker & Reviewer task management (Task System v2)
 
-You are a worker on this chain. Do the tasks ASSIGNED to you and report progress. Do not coordinate the whole chain or take on unassigned work — route that to the coordinator.
+You are a worker or reviewer on this chain. Work exclusively on the task currently leased to you by the Hub. Do not coordinate the whole chain or take on unassigned work — route scope questions to the coordinator.
 
 All commands use the managed wrapper: `./.heimdall/bin/ham-ctl`. For exact flags of any command, load the `ham-ctl-reference` skill.
 
-## 0. Before you start (non-negotiable: don't assume, share your plan, escalate)
-- DO NOT ASSUME OR INVENT anything not stated in the task. If any required detail is missing, ambiguous, or contradictory (paths, acceptance criteria, commands, expected behavior), STOP and ask the coordinator BEFORE doing the work — never guess, never silently expand scope. Ask by posting a task comment stating exactly what is unclear; if urgent, message the coordinator (the "Coordinator:" id in your bootstrap header) with `./.heimdall/bin/ham-ctl chat send --to <coordinator-instance-id> --body "..."`.
-- SHARE YOUR PLAN first: before substantial work, post a brief numbered plan as a task comment (what you will change, which files, how you will verify) so the coordinator can course-correct early. As a reviewer, post your review tier and what you will check before you dig in.
-- Work WITH the coordinator: route blockers, questions, and scope changes to the coordinator rather than deciding unilaterally; proceed once you have what you need.
+## 1. Read `TASK.md` on wake and inspect your lease (`lease next`)
+When the Hub wakes you for a work or review lease, the Bridge materializes `<run_dir>/TASK.md` before your turn starts.
+1. **Read `TASK.md` first.** It contains:
+   - **Lease header**: `lease_id`, `kind` (`work` or `review`), `attempt_no` / `max_attempts`, `review_round`, `expires_at`, `hard_deadline_at`, and resolved `placement` (`bridge_id`, `directory_id`, `cwd`, `provider`, `model`).
+   - **Why (`why`)**: Why you were woken (`first_grant`, `expired`, `changes_requested`, `handoff`, or `reopened`).
+   - **Brief (`brief`)**: `goal`, `acceptance` checklist, `verify` command, `inputs`, `review_roles`, `auto_submit`, and `require_independent_verify`.
+   - **Resolved inputs (`inputs`)**: Inline payloads for `#<event_id>`, `output:<task_id>`, or `facet:<task_id>:<attempt_no>:<kind>`.
+   - **Where you are & Previous attempt (`where_you_are`, `previous_attempt`)**: Previous `vcs` state (`base`, `head`, `dirty`), `verify` result, `handoff` (`done`, `remaining`, `next_steps`, `dead_ends`, `warnings`), and last heartbeat note.
+   - **Open review findings (`findings`)**: Blocking and non-blocking findings from prior review rounds.
+   - **Chain summary (`chain.summary`)** and the **10-line protocol card**.
+2. You can also query or claim your lease explicitly at any time:
+   ```bash
+   ./.heimdall/bin/ham-ctl lease next
+   ```
+   This returns `status: "current"` (existing lease), `status: "granted"` (newly claimed ready task, updating `TASK.md`), or `status: "none"`.
 
-## 1. Find your work
-- `./.heimdall/bin/ham-ctl task list [--chain <id>]` — list tasks; focus on those assigned to you and currently actionable (your current task is assigned by the hub).
-- Read the task description and the chain description for the REQ-IDs and acceptance criteria your task must satisfy.
-- To catch up on discussion efficiently, `task list`/`task show` return a compact `comment_summary` (count, last_comment_at, author, preview), NOT full bodies. When the summary shows new activity, read only the recent bodies: `./.heimdall/bin/ham-ctl task comments <task-id> --last N` (newest N, max 100). Prefer a small N.
+## 2. Fetch truncated or referenced context (`task fetch`)
+When `TASK.md` exceeds the 8k-token (`32 KiB`) cap, large inputs or prior attempt summaries are replaced with a pointer (`ham-ctl task fetch <task_id> <ref>`). `brief`, `dead_ends`, and open `findings` are never dropped. Fetch any referenced item on demand:
+```bash
+# Fetch an event by ID
+./.heimdall/bin/ham-ctl task fetch <task-id> "#evt_123"
 
-## 2. Do the work with visible progress
-- Comment at every meaningful step, on blockers, and before handoff: `./.heimdall/bin/ham-ctl task comment <task-id> --body "<what you did, what changed, what is next>"`.
-- Do not do substantial work that has no task. If one is missing, ask the coordinator to create it (do not silently expand scope).
+# Fetch a predecessor task's output facet
+./.heimdall/bin/ham-ctl task fetch <task-id> "output:task_prev"
 
-## 3. Hand off for review
-- When done, post a summary comment of what to review and the evidence (tests run + output, build result, files/paths, ids).
-- Task System v2: `task status` (and the `in_progress`/`in_validation` transitions it drove) was removed. Tasks now carry a hub-driven `state` (`backlog`, `ready`, `in_progress`, `in_review`, `done`, `cancelled`); the `lease.*` verbs that submit/hand off/block a task arrive with the next milestone. Until then, hand off via your summary comment.
-- You never "mark it done" yourself: completion happens on the reviewer quorum, which also unblocks dependent tasks. If review requests changes, address the feedback, comment what you changed, and re-submit.
+# Fetch a specific attempt facet (vcs, verify, handoff, output, findings, runtime, artifacts)
+./.heimdall/bin/ham-ctl task fetch <task-id> "facet:<task-id>:1:handoff"
 
-### Pre-completion wrap-up checklist
-Before any handoff, workers must complete the mandatory wrap-up checklist:
-1. Wrap up code changes and verify tests.
-2. Commit and push changes if needed.
-3. Post a handoff/wrap-up comment (`ham-ctl task comment <task_id> --body "..."`) capturing work summary, stash state, and context.
-4. Clean up task descriptions and scratch files.
+# Fetch a file at a specific revision from a chain directory or task vcs.head
+./.heimdall/bin/ham-ctl task fetch <task-id> "dir:<directory-id>:<rev>:src/main.odin"
+./.heimdall/bin/ham-ctl task fetch <task-id> "src/main.odin@<rev>"
+./.heimdall/bin/ham-ctl task fetch <task-id> "src/main.odin"
+```
 
-## 4. Reviewing (when you are a reviewer)
-You cannot review a task assigned to you. Task System v2: `task vote` was removed; the `review.post` verb that replaces it arrives with the next milestone. Until then record your verdict (`lgtm`/`ngtm`) and feedback as a task comment. A satisfied LGTM quorum (no `ngtm`) auto-completes the task and unblocks its dependents, so review promptly — a stalled review blocks the chain.
+## 3. Execute work, heartbeat (`lease heartbeat`), and handle `409 lease_lost`
+- Every `ham-ctl` command implicitly heartbeats your active lease. During long analysis or edits without CLI calls, send an explicit heartbeat with a progress note:
+  ```bash
+  ./.heimdall/bin/ham-ctl lease heartbeat --note "Implemented fold transitions; running unit tests next"
+  ```
+- **CRITICAL (`409 lease_lost`)**: If any `ham-ctl` command returns `409 lease_lost`, your lease expired or was reclaimed. **Stop immediately** — do NOT modify files, do NOT commit, and do NOT run further build commands in the working tree.
 
-**In BOTH tiers: verify against ACTUAL behavior (run the command / read the source / build+test) — never from the assignee's summary alone. An `lgtm` MUST cite the evidence you checked; an `ngtm` MUST list concrete, actionable fix steps.**
+## 4. Verify your work (`ham-ctl verify` and `brief.auto_submit`)
+Never claim a task is complete without running `ham-ctl verify`:
+```bash
+./.heimdall/bin/ham-ctl verify
+```
+- `ham-ctl verify` runs `brief.verify` from your current task as a tracked Run session labelled `verify <task_id> #<attempt_no> @<head>`, heartbeating your lease automatically while it runs.
+- On exit, the Hub records the `verify` facet (`exit_code`, `cmd`, `head`, `summary`, `independent: false`) on your current attempt.
+- **Automatic submit (`brief.auto_submit`)**: If the task's `brief.auto_submit` is `true`, `ham-ctl verify` exits `0`, and your working tree is clean (`dirty == false`) at `head`, `ham-ctl verify` automatically submits your lease (`agent.lease.submit` with `auto: true` and a summary built from commit subjects since `vcs_base`) and prints the submit result.
 
-### Which tier? (selection guidance)
-The coordinator states the required tier in the task (Dependencies & handoff). If it's missing, choose by risk:
-- QUICK — docs / comments / cosmetic / text-only changes with no runtime-behavior impact.
-- COMPREHENSIVE — code that changes runtime behavior, schemas, generated output, security, or public interfaces.
-- When in doubt → COMPREHENSIVE.
+## 5. Submit, hand off, or block (`lease submit` / `lease handoff` / `lease block`)
 
-### QUICK review checklist (low-risk / cosmetic / doc-only) — time-boxed
-1. Read the task's acceptance-criteria checklist and the assignee's handoff comment.
-2. Read the actual diff/changed files.
-3. Confirm EACH acceptance-criteria item is met (tick them off one by one).
-4. Run the ONE key verification command the task names; confirm it succeeds.
-5. Confirm build/tests the task cites are green (from the assignee's cited output, and spot-run if quick).
-6. Confirm the handoff cited real evidence (not just "done").
-7. Verdict: `lgtm` with "verified: <what you checked>", or `ngtm` with the exact fixes.
+### Submit completed work (`lease submit`)
+Once `ham-ctl verify` passes at your current `HEAD` (and all changes are committed if working in a repo), submit the attempt:
+```bash
+./.heimdall/bin/ham-ctl lease submit \
+  --summary "Implemented commit-diff pagination and added unit tests" \
+  [--handoff-file handoff.json] \
+  [--output-file output.json] \
+  [--artifacts-file artifacts.json]
+```
+- `artifacts.json` records structured deliverables (`{"items":[{"kind":"file","path":"...","label":"..."},{"kind":"url","url":"..."},{"kind":"preview_port","port":5173}]}`).
+- If the Hub returns `409 verify_required`, `409 verify_failed`, `409 verify_stale`, or `409 verify_dirty`, fix the issue (commit uncommitted files, re-run `ham-ctl verify` at the new `HEAD`) and re-run `lease submit`.
 
-### COMPREHENSIVE review checklist (behavioral / higher-risk)
-1. Read the task's REQ-IDs, acceptance criteria, and handoff comment.
-2. Independently REBUILD from the checkout (don't trust the assignee's build): run the task's build command yourself.
-3. Run the full or closely-related test suite; confirm green yourself.
-4. Cross-check the change against the source of truth and CITE it (`file:line`) — re-derive every load-bearing claim.
-5. Adversarial checks: edge cases, regressions, and any contradictions or duplication the change introduces.
-6. If the change has generated/codegen artifacts, confirm they were regenerated and MATCH the source (re-run the generator; diff).
-7. Give evidence PER acceptance-criterion (map each criterion → the command output or file:line that proves it).
-8. Classify findings as blocking vs non-blocking.
-9. Verdict: `lgtm` only if every criterion is proven with cited evidence; otherwise `ngtm` listing concrete, actionable steps.
+### Hand off incomplete work (`lease handoff`)
+If you must stop before finishing (approaching deadline or context limit), hand off cleanly so the next attempt starts with your findings and `dead_ends`:
+```bash
+cat > handoff.json <<'EOF'
+{
+  "done": ["Added SQLite migration for chain summary"],
+  "remaining": ["Wire HTTP handler and unit tests"],
+  "next_steps": ["Add route in wiring.odin", "Run odin test src/hub/service/taskchain"],
+  "dead_ends": ["Do not acquire state_mutex before tx_mutex (violates lockorder)"],
+  "warnings": ["Keep summary <= 60 lines"]
+}
+EOF
 
-Route disagreements you can't resolve to the coordinator; don't take over the implementation.
+./.heimdall/bin/ham-ctl lease handoff \
+  --summary "Migration complete; handler wiring remaining" \
+  --handoff-file handoff.json
+```
 
-## 5. Communication
-- Route questions, blockers, and user-facing messages through the coordinator (`chat send --to <coordinator-agent-instance-id>`).
-- See the `heimdall-ctl-communication` skill for messaging syntax, chat conventions, and separating technical logs (task comments) from user communication (`chat send --to user`).
-- `task nudge` was removed in Task System v2; to request attention on a stalled task, comment on it or message the coordinator.
+### Block on an external dependency (`lease block`)
+If you cannot proceed without a human decision, another task, or an external system:
+```bash
+./.heimdall/bin/ham-ctl lease block \
+  --waiting-on human \
+  --reason "Need confirmation whether commit-diff limit should default to 100 or 200" \
+  --summary "Blocked on API pagination default"
+```
 
-Keep your task comments current at all times so the chain reflects real progress.
+## 6. Reviewing (`review post` and `verify --independent`)
+When woken with a `review` lease (`kind: "review"` in `TASK.md`):
+1. Read `TASK.md` — inspect the `brief` (`goal`, `acceptance`, `verify`, `require_independent_verify`), the submitted attempt's `vcs`, `verify`, `handoff`, and `artifacts` facets, and any prior `findings`.
+2. Inspect changed files at the submitted revision using `ham-ctl task fetch <task-id> "<path>@<head>"` or in the checkout.
+3. **Run independent verification (`ham-ctl verify --independent`)**:
+   - Whenever `brief.require_independent_verify` is `true` (or for any behavioral/code review), run:
+     ```bash
+     ./.heimdall/bin/ham-ctl verify --independent [<task-id>]
+     ```
+   - This checks out the submitted `vcs.head` into an ephemeral detached git worktree, runs `brief.verify` with label `verify <task_id> #<attempt_no> @<head> independent`, records `"independent": true` on the `verify` facet, and removes the worktree on exit without touching the main working tree.
+4. **Post your review verdict (`ham-ctl review post`)**:
+   - Approve when every acceptance criterion is verified:
+     ```bash
+     ./.heimdall/bin/ham-ctl review post <task-id> --verdict approve
+     ```
+   - Request changes with structured findings when criteria are unmet:
+     ```bash
+     cat > findings.json <<'EOF'
+     [
+       {
+         "severity": "blocker",
+         "file": "src/hub/service/taskv2/gate.odin",
+         "line": 142,
+         "message": "require_independent_verify must check independent == true on the verify facet."
+       }
+     ]
+     EOF
+
+     ./.heimdall/bin/ham-ctl review post <task-id> \
+       --verdict request_changes \
+       --findings-file findings.json
+     ```
+   - When all required review gates and `require_independent_verify` are satisfied with no `request_changes`, the Hub transitions the task to `done` and unblocks dependents automatically.

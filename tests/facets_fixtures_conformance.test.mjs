@@ -92,8 +92,32 @@ test('unknown_fields.json: a handoff whose unknown nested members survive a roun
   assert.notDeepEqual(knownOnly, parsed);
 });
 
+test('runtime.json: bridge_id, provider, model, started_at, ended_at strings', () => {
+  const { parsed } = loadFixture('runtime.json');
+  assert.ok(isString(parsed.bridge_id) && parsed.bridge_id.length > 0, 'bridge_id must be a non-empty string');
+  assert.ok(isString(parsed.provider), 'provider must be a string');
+  assert.ok(isString(parsed.model), 'model must be a string');
+  assert.ok(isString(parsed.started_at) && parsed.started_at.length > 0, 'started_at must be a non-empty string');
+  assert.ok(isString(parsed.ended_at), 'ended_at must be a string');
+});
+
+test('artifacts.json: items array of {kind,title,uri?,path?,mime?,bytes?,sha256?}', () => {
+  const { parsed } = loadFixture('artifacts.json');
+  assert.ok(Array.isArray(parsed.items), 'items must be an array');
+  assert.ok(parsed.items.length > 0, 'items should not be empty');
+  for (const [i, item] of parsed.items.entries()) {
+    assert.ok(item && typeof item === 'object', `items[${i}] must be an object`);
+    assert.ok(isString(item.kind) && item.kind.length > 0, `items[${i}].kind must be a string`);
+    assert.ok(isString(item.title) && item.title.length > 0, `items[${i}].title must be a string`);
+    assert.ok(isString(item.uri) || isString(item.path), `items[${i}] must have uri or path`);
+    if ('bytes' in item) assert.ok(isNumber(item.bytes), `items[${i}].bytes must be a number`);
+    if ('mime' in item) assert.ok(isString(item.mime), `items[${i}].mime must be a string`);
+    if ('sha256' in item) assert.ok(isString(item.sha256), `items[${i}].sha256 must be a string`);
+  }
+});
+
 test('every fixture file listed in the contract exists and parses', () => {
-  for (const name of ['handoff.json', 'vcs.json', 'verify.json', 'output.json', 'unknown_fields.json']) {
+  for (const name of ['handoff.json', 'vcs.json', 'verify.json', 'output.json', 'runtime.json', 'artifacts.json', 'unknown_fields.json']) {
     assert.doesNotThrow(() => loadFixture(name), `${name} must exist and parse`);
   }
 });

@@ -123,6 +123,13 @@ grant_in_uow :: proc(svc: ^Service, u: ^Uow, req: Grant_Request) -> (domain.Task
 				}
 			}
 		}
+		rt := json_begin()
+		json_str(&rt, "bridge_id", saved.bridge_id if saved.bridge_id != "" else inst.bridge_id)
+		json_str(&rt, "provider", saved.provider if saved.provider != "" else inst.provider)
+		json_str(&rt, "model", saved.model if saved.model != "" else inst.model)
+		json_str(&rt, "started_at", now)
+		json_str(&rt, "ended_at", "")
+		_, _ = save_facet_verbatim(svc, refolded, view.attempt_no, FACET_RUNTIME, json_end(&rt), FACET_WRITER_HUB)
 	}
 	set_instance_pointer(svc, inst.agent_instance_id, string(task.task_id), .Work if req.kind == domain.LEASE_KIND_WORK else .Review)
 	arm_lease_timers(svc, saved)
@@ -522,14 +529,31 @@ boot :: proc(svc: ^Service) {
 @(private = "file")
 close_attempt :: proc(svc: ^Service, lease: domain.Task_Lease, outcome: string) {
 	if lease.kind != domain.LEASE_KIND_WORK do return
+	now := platform.clock_now(svc.clock)
 	attempts, err := iface.taskchain_list_attempts_by_task(svc.repo, lease.task_id, lease.owner_user_id)
 	if err.code != .None do return
+	started_at := lease.granted_at
 	for a in attempts {
 		if a.attempt_no != lease.attempt_no do continue
 		closed := a
-		closed.ended_at = platform.clock_now(svc.clock)
+		if closed.started_at != "" do started_at = closed.started_at
+		closed.ended_at = now
 		closed.outcome = outcome
 		_, _, _ = iface.taskchain_save_attempt(svc.repo, closed)
+	}
+	if task, tok, _ := iface.taskchain_get_task(svc.repo, lease.task_id); tok {
+		provider, model := lease.provider, lease.model
+		if inst, iok, _ := iface.agent_get_instance(svc.agents, lease.holder_instance_id); iok {
+			if provider == "" do provider = inst.provider
+			if model == "" do model = inst.model
+		}
+		rt := json_begin()
+		json_str(&rt, "bridge_id", lease.bridge_id)
+		json_str(&rt, "provider", provider)
+		json_str(&rt, "model", model)
+		json_str(&rt, "started_at", started_at)
+		json_str(&rt, "ended_at", now)
+		_, _ = save_facet_verbatim(svc, task, lease.attempt_no, FACET_RUNTIME, json_end(&rt), FACET_WRITER_HUB)
 	}
 }
 

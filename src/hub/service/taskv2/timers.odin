@@ -386,6 +386,7 @@ fire_ready_unclaimed :: proc(svc: ^Service, u: ^Uow, t: Timer) -> Fire_Result {
 	json_str(&p, "since", task.ready_since)
 	if _, aok, _ := append_event(svc.repo, svc.clock, task, hub_actor(), EV_READY_UNCLAIMED, json_end(&p)); !aok do return .Failed
 	effect_publish_task(u, task, "ready_unclaimed")
+	effect_notify_coordinator(svc, u, task.chain_id, task.owner_user_id, "ready_unclaimed", fmt.tprintf("[taskv2] ready_unclaimed: task %s (%s) ready since %s", task.task_id, task.title, task.ready_since))
 	return .Acted
 }
 
@@ -398,6 +399,7 @@ fire_blocked_realert :: proc(svc: ^Service, u: ^Uow, t: Timer) -> Fire_Result {
 	json_raw(&p, "blocked_on", task.blocked_on_json)
 	if _, aok, _ := append_event(svc.repo, svc.clock, task, hub_actor(), EV_BLOCKED_REALERT, json_end(&p)); !aok do return .Failed
 	effect_publish_task(u, task, "blocked_realert")
+	effect_notify_coordinator(svc, u, task.chain_id, task.owner_user_id, "blocked_on human", fmt.tprintf("[taskv2] blocked_on human: task %s (%s) still waiting on human input", task.task_id, task.title))
 	timers_arm(svc, .Blocked_Realert, string(task.task_id), now_ms(svc.clock) + BLOCKED_REALERT_SECONDS * 1000, task.blocked_on_json)
 	return .Acted
 }

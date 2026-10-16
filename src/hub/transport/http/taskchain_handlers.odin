@@ -1,9 +1,11 @@
 package http
 
 import "core:fmt"
+import "core:os"
 import "core:slice"
 import "core:strconv"
 import "core:strings"
+import "core:time"
 import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
@@ -13,6 +15,7 @@ import content_service "odin_test:hub/service/content"
 import project_service "odin_test:hub/service/project"
 import taskchain_service "odin_test:hub/service/taskchain"
 import taskv2 "odin_test:hub/service/taskv2"
+import shell_session_svc "odin_test:hub/service/shell_session"
 import events "odin_test:hub/service/events"
 import "core:encoding/json"
 import jsonx "odin_test:lib/jsonx"
@@ -31,6 +34,7 @@ Taskchain_Handlers :: struct {
 	event_bus: ^events.User_Event_Bus,
 	// task_engine: human verbs (review / reopen / answer / fetch), M2.
 	task_engine: ^taskv2.Service,
+	shell_sessions: ^shell_session_svc.Shell_Session_Service,
 }
 
 Task_Chain_Search_Document_Wire :: struct {
@@ -313,6 +317,8 @@ Task_Chain_Detail_Response_Wire :: struct {
 	chain_id:                      string                      `json:"chain_id"`,
 	title:                         string                      `json:"title"`,
 	description:                   string                      `json:"description"`,
+	summary:                       string                      `json:"summary"`,
+	proposal:                      json.Value                  `json:"proposal,omitempty"`,
 	publish_state:                 string                      `json:"publish_state"`,
 	status:                        string                      `json:"status"`,
 	kind:                          string                      `json:"kind"`,
@@ -627,10 +633,23 @@ make_chain_detail_response_wire :: proc(
 		dirs_wire[i] = make_chain_directory_wire(d)
 	}
 
+	summary_text := ""
+	if h != nil && h.taskchains != nil && h.taskchains.repo != nil {
+		if srow, sok, _ := iface.taskchain_get_chain_summary(h.taskchains.repo, chain.chain_id, chain.owner_user_id); sok {
+			summary_text = srow.body
+		}
+	}
+	prop_val: json.Value = nil
+	if pjson := taskv2.chain_proposal_json(chain); strings.trim_space(pjson) != "" {
+		prop_val = json_value_raw(pjson)
+	}
+
 	return Task_Chain_Detail_Response_Wire{
 		chain_id                      = string(chain.chain_id),
 		title                         = chain.title,
 		description                   = chain.description,
+		summary                       = summary_text,
+		proposal                      = prop_val,
 		publish_state                 = publish_state_http(chain.publish_state),
 		status                        = chain_status_http(chain.status),
 		kind                          = chain.kind,
@@ -2464,4 +2483,192 @@ json_array_of_strings :: proc(body: string, key: string, allocator := context.al
 		res[i] = domain.Task_ID(s)
 	}
 	return res
+}
+
+// GET /api/v1/task-chains/{cid}/summary
+get_task_chain_summary_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Taskchain_Handlers)(ctx)
+	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
+	if !ok do return auth_resp
+	chain_id := domain.Task_Chain_ID(path_part(req.path, 4))
+	chain, got, err := taskchain_service.get_chain_for_read(h.taskchains, auth_ctx, chain_id)
+	if !got do return respond_error(err, req.request_id)
+	summary_text := ""
+	line_count := 0
+	version := 0
+	updated_at := chain.updated_at
+	if h.taskchains != nil && h.taskchains.repo != nil {
+		if row, sok, _ := iface.taskchain_get_chain_summary(h.taskchains.repo, chain.chain_id, chain.owner_user_id); sok {
+			summary_text = row.body
+			line_count = row.line_count
+			version = row.version
+			updated_at = row.updated_at
+		}
+	}
+	o := taskv2.json_begin()
+	taskv2.json_str(&o, "chain_id", string(chain.chain_id))
+	taskv2.json_str(&o, "summary", summary_text)
+	taskv2.json_str(&o, "body", summary_text)
+	taskv2.json_int(&o, "line_count", i64(line_count))
+	taskv2.json_int(&o, "version", i64(version))
+	taskv2.json_str(&o, "updated_at", updated_at)
+	return respond_success(taskv2.json_end(&o), req.request_id, auth_ctx_server_time(req))
+}
+
+// PUT /api/v1/task-chains/{cid}/summary  {summary}
+put_task_chain_summary_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Taskchain_Handlers)(ctx)
+	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
+	if !ok do return auth_resp
+	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
+	chain_id := domain.Task_Chain_ID(path_part(req.path, 4))
+	body_str := json_string(req.body, "summary")
+	if body_str == "" do body_str = json_string(req.body, "body")
+	row, sok, err := taskv2.chain_summary_set(h.task_engine, auth_ctx, chain_id, body_str)
+	if !sok do return respond_error(err, req.request_id)
+	publish_chain_changed(h, string(row.owner_user_id), string(row.chain_id), "updated")
+	o := taskv2.json_begin()
+	taskv2.json_str(&o, "chain_id", string(row.chain_id))
+	taskv2.json_str(&o, "summary", row.body)
+	taskv2.json_str(&o, "body", row.body)
+	taskv2.json_int(&o, "line_count", i64(row.line_count))
+	taskv2.json_int(&o, "version", i64(row.version))
+	taskv2.json_str(&o, "updated_at", row.updated_at)
+	return respond_success(taskv2.json_end(&o), req.request_id, auth_ctx_server_time(req))
+}
+
+// POST /api/v1/task-chains/{cid}/propose  {tasks?:[...], kind?, rationale?, alternative?, auto_approve?, summary?}
+propose_task_chain_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Taskchain_Handlers)(ctx)
+	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
+	if !ok do return auth_resp
+	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
+	chain_id := domain.Task_Chain_ID(path_part(req.path, 4))
+	chain, got, cerr := taskchain_service.get_chain_for_read(h.taskchains, auth_ctx, chain_id)
+	if !got do return respond_error(cerr, req.request_id)
+	tasks_json := verbatim_field(req.body, "tasks")
+	kind := json_string(req.body, "kind")
+	rationale := json_string(req.body, "rationale")
+	if rationale == "" do rationale = json_string(req.body, "summary")
+	alternative := json_string(req.body, "alternative")
+	auto_approve := jsonx.extract_bool(req.body, "auto_approve", false, true)
+	updated, pok, err := taskv2.chain_propose(h.task_engine, chain_id, chain.owner_user_id, taskv2.actor_from_auth(auth_ctx), taskv2.Propose_Input{
+		chain_id     = string(chain_id),
+		tasks_json   = tasks_json,
+		kind         = kind,
+		rationale    = rationale,
+		alternative  = alternative,
+		auto_approve = auto_approve,
+	})
+	if !pok do return respond_error(err, req.request_id)
+	publish_chain_changed(h, string(updated.owner_user_id), string(chain_id), "updated")
+	prop_json := taskv2.chain_proposal_json(updated)
+	if prop_json == "" do prop_json = "{}"
+	pub_state := "published" if updated.publish_state == .Published else "draft"
+	return respond_success(fmt.tprintf("{{\"chain_id\":\"%s\",\"publish_state\":\"%s\",\"proposal\":%s}}", updated.chain_id, pub_state, prop_json), req.request_id, auth_ctx_server_time(req))
+}
+
+// POST /api/v1/task-chains/{cid}/proposal/decide  {decision: approve|reject, note?}
+decide_task_chain_proposal_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Taskchain_Handlers)(ctx)
+	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
+	if !ok do return auth_resp
+	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
+	chain_id := domain.Task_Chain_ID(path_part(req.path, 4))
+	chain_pre, got, cerr := taskchain_service.get_chain_for_read(h.taskchains, auth_ctx, chain_id)
+	if !got do return respond_error(cerr, req.request_id)
+	chain, created_tasks, dok, err := taskv2.chain_proposal_decide(h.task_engine, chain_id, chain_pre.owner_user_id, taskv2.actor_from_auth(auth_ctx), json_string(req.body, "decision"), json_string(req.body, "note"))
+	if !dok do return respond_error(err, req.request_id)
+	publish_chain_changed(h, string(chain.owner_user_id), string(chain.chain_id), "updated")
+	b := strings.builder_make()
+	strings.write_string(&b, "{\"decision\":\"")
+	write_handler_json_string(&b, json_string(req.body, "decision"))
+	strings.write_string(&b, "\",\"publish_state\":\"")
+	write_handler_json_string(&b, "published" if chain.publish_state == .Published else "draft")
+	strings.write_string(&b, "\",\"tasks\":[")
+	for t, i in created_tasks {
+		if i > 0 do strings.write_byte(&b, ',')
+		write_task_json(&b, t)
+	}
+	strings.write_string(&b, "]}")
+	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req))
+}
+
+// POST /api/v1/task-chains/{cid}/tasks/{tid}/verify  {independent?: bool}
+verify_task_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Taskchain_Handlers)(ctx)
+	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
+	if !ok do return auth_resp
+	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
+	chain_id := domain.Task_Chain_ID(path_part(req.path, 4))
+	task_id := domain.Task_ID(path_part(req.path, 6))
+	if matched, mismatch_resp := require_task_path_scope(h, auth_ctx, chain_id, task_id, req); !matched do return mismatch_resp
+	task, tok, terr := taskchain_service.get_task_for_read(h.taskchains, auth_ctx, task_id)
+	if !tok do return respond_error(terr, req.request_id)
+	cmd := strings.trim_space(jsonx.extract_string(task.brief_json, "verify", "", true, context.temp_allocator))
+	if cmd == "" || cmd == "none" {
+		return respond_error(domain.domain_error(.Validation_Failed, "task brief.verify is empty or 'none'"), req.request_id)
+	}
+	attempt_no := task.attempt_no
+	if attempt_no <= 0 do attempt_no = 1
+	head_rev := ""
+	cwd := ""
+	bridge_id := task.bridge_id
+	if facets, ferr := iface.taskchain_list_facets_by_task(h.task_engine.repo, task.task_id, task.owner_user_id); ferr.code == .None {
+		best_v := -1
+		for f in facets {
+			if f.attempt_no == attempt_no && f.kind == taskv2.FACET_VCS && f.v > best_v {
+				best_v = f.v
+				head_rev = jsonx.extract_string(f.body_json, "head", "", true, context.temp_allocator)
+				dir_id := jsonx.extract_string(f.body_json, "directory_id", "", true, context.temp_allocator)
+				if dir_id != "" {
+					if dir, dok, _ := iface.taskchain_get_directory(h.task_engine.repo, dir_id, task.chain_id, task.owner_user_id); dok {
+						cwd = dir.path
+						if bridge_id == "" do bridge_id = dir.bridge_id
+					}
+				}
+			}
+		}
+	}
+	if cwd == "" {
+		if dirs, derr := iface.taskchain_list_directories_by_chain(h.task_engine.repo, task.chain_id, task.owner_user_id); derr.code == .None && len(dirs) > 0 {
+			cwd = dirs[0].path
+			if bridge_id == "" do bridge_id = dirs[0].bridge_id
+		}
+	}
+	if bridge_id == "" && h.task_engine.bridges != nil {
+		if bridges, berr := iface.bridge_list_by_owner(h.task_engine.bridges, task.owner_user_id); berr.code == .None && len(bridges) > 0 {
+			bridge_id = bridges[0].bridge_id
+		}
+	}
+	independent := jsonx.extract_bool(req.body, "independent", true, true)
+	label := fmt.tprintf("verify %s #%d @%s%s", task.task_id, attempt_no, head_rev if head_rev != "" else "HEAD", " independent" if independent else "")
+	shell_cmd := cmd
+	if independent && head_rev != "" && cwd != "" {
+		home := strings.trim_space(os.get_env("HOME", context.temp_allocator))
+		if home == "" do home = "."
+		wt_base := fmt.tprintf("%s/.cache/heimdall-tests/verify-wt", home)
+		wt_dir := fmt.tprintf("%s/ham-verify-%s-%d-%d", wt_base, task.task_id, attempt_no, time.now()._nsec)
+		shell_cmd = fmt.tprintf("mkdir -p %q && git -C %q worktree add --detach --force %q %q >/dev/null 2>&1 && (cd %q && (%s)); rc=$?; git -C %q worktree remove --force %q >/dev/null 2>&1 || rm -rf %q; exit $rc", wt_base, cwd, wt_dir, head_rev, wt_dir, cmd, cwd, wt_dir, wt_dir)
+	}
+	if h.shell_sessions == nil {
+		return respond_error(domain.domain_error(.Internal_Error, "shell session service is not configured"), req.request_id)
+	}
+	session, created, serr := shell_session_svc.shell_session_create(h.shell_sessions, auth_ctx, shell_session_svc.Shell_Session_Create_Input{
+		bridge_id  = bridge_id,
+		kind       = "run",
+		cmd        = shell_cmd,
+		cwd        = cwd,
+		label      = label,
+		chain_id   = string(task.chain_id),
+		background = true,
+	})
+	if !created do return respond_error(serr, req.request_id)
+	b := strings.builder_make()
+	strings.write_string(&b, "{\"ok\":true,\"label\":\"")
+	write_handler_json_string(&b, label)
+	strings.write_string(&b, "\",\"session\":")
+	write_shell_session_json(&b, session)
+	strings.write_string(&b, "}")
+	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req))
 }

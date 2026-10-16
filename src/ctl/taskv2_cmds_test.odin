@@ -145,7 +145,7 @@ test_verify_slices_heartbeat :: proc(t: ^testing.T) {
 
 @(test)
 test_command_tokens_skips_v2_flag_values :: proc(t: ^testing.T) {
-	tokens := command_tokens([]string{"ham-ctl", "review", "post", "--verdict", "approve", "--findings-file", "f.json"})
+	tokens := command_tokens([]string{"ham-ctl", "review", "post", "--verdict", "approve", "--findings-file", "f.json", "--on-behalf-of", "user"})
 	defer delete(tokens)
 	testing.expect_value(t, len(tokens), 2)
 	if len(tokens) == 2 {
@@ -153,3 +153,101 @@ test_command_tokens_skips_v2_flag_values :: proc(t: ^testing.T) {
 		testing.expect_value(t, tokens[1], "post")
 	}
 }
+
+@(test)
+test_m3_ctl_params_and_verify_helpers :: proc(t: ^testing.T) {
+	// 1. --require-independent-verify in brief
+	brief, ok := ctl_task_brief_json([]string{"ham-ctl", "task", "create", "--goal", "g", "--require-independent-verify"}, "")
+	defer delete(brief)
+	testing.expect(t, ok, "brief present")
+	testing.expect(t, strings.contains(brief, `"require_independent_verify":true`), "require_independent_verify flag")
+
+	// 2. lease submit --artifacts-file
+	sub_p, sub_ok := ctl_v2_lease_submit_params(
+		[]string{"ham-ctl", "lease", "submit", "--summary", "done"},
+		"",
+		"",
+		`{"schema_version":1,"files":[{"path":"a.txt","kind":"report"}],"metrics":{"p99_ms":12}}`,
+		"/tmp/work",
+	)
+	defer delete(sub_p)
+	testing.expect(t, sub_ok, "lease submit params ok")
+	testing.expect(t, strings.contains(sub_p, `"artifacts":{"schema_version":1,`), "artifacts included in lease submit params")
+
+	// 3. review post --on-behalf-of user
+	rev_p, rev_ok := ctl_v2_review_post_params(
+		[]string{"post", "t1"},
+		[]string{"ham-ctl", "review", "post", "t1", "--verdict", "approve", "--on-behalf-of", "user"},
+		"",
+	)
+	defer delete(rev_p)
+	testing.expect(t, rev_ok, "review post params ok")
+	testing.expect(t, strings.contains(rev_p, `"on_behalf_of":"user"`), "on_behalf_of included in review post params")
+
+	// 4. task-chain summary set (positional, --body, --file)
+	sum_p, sum_ok := ctl_v2_task_chain_summary_params(
+		[]string{"set", "All foundation tasks done."},
+		[]string{"ham-ctl", "task-chain", "summary", "set", "All foundation tasks done."},
+		"",
+	)
+	defer delete(sum_p)
+	testing.expect(t, sum_ok, "task-chain summary params ok")
+	testing.expect_value(t, sum_p, `{"summary":"All foundation tasks done."}`)
+
+	sum_body, sum_body_ok := ctl_v2_task_chain_summary_params(
+		[]string{"set"},
+		[]string{"ham-ctl", "task-chain", "summary", "set", "--body", "Curated via --body flag.", "--chain", "ch_1"},
+		"",
+	)
+	defer delete(sum_body)
+	testing.expect(t, sum_body_ok, "task-chain summary --body params ok")
+	testing.expect_value(t, sum_body, `{"chain_id":"ch_1","summary":"Curated via --body flag."}`)
+
+	sum_file, sum_file_ok := ctl_v2_task_chain_summary_params(
+		[]string{"set"},
+		[]string{"ham-ctl", "task-chain", "summary", "set", "--file", "/tmp/sum.md"},
+		"",
+		"Curated via --file flag.\n",
+	)
+	defer delete(sum_file)
+	testing.expect(t, sum_file_ok, "task-chain summary --file params ok")
+	testing.expect_value(t, sum_file, `{"summary":"Curated via --file flag."}`)
+
+	// 5. task-chain propose --file --auto-approve
+	prop_p, prop_ok := ctl_v2_task_chain_propose_params(
+		[]string{"ham-ctl", "task-chain", "propose", "--file", "p.json", "--auto-approve"},
+		`{"kind":"split","rationale":"Need child","tasks":[{"title":"New"}]}`,
+	)
+	defer delete(prop_p)
+	testing.expect(t, prop_ok, "task-chain propose params ok")
+	testing.expect(t, strings.contains(prop_p, `"tasks":[{"title":"New"}]`), "tasks carried from proposal file")
+	testing.expect(t, strings.contains(prop_p, `"auto_approve":true`), "auto_approve appended")
+
+	// 6. task-chain fleet set placement fields
+	fleet_b, fleet_ok := ctl_v2_fleet_set_body([]string{
+		"ham-ctl", "task-chain", "fleet", "set", "ch_1",
+		"--capacity", "4", "--min-warm", "1", "--idle-ttl", "300",
+		"--roles", "worker,reviewer",
+		"--bridge", "br_main", "--provider", "claude", "--model", "opus",
+		"--bridge-models", `{"br_main":{"provider":"claude","model":"opus"}}`,
+	})
+	defer delete(fleet_b)
+	testing.expect(t, fleet_ok, "fleet set body ok")
+	testing.expect(t, strings.contains(fleet_b, `"capacity":4`), "capacity")
+	testing.expect(t, strings.contains(fleet_b, `"roles":["worker","reviewer"]`), "roles")
+	testing.expect(t, strings.contains(fleet_b, `"bridge_id":"br_main"`), "bridge_id")
+	testing.expect(t, strings.contains(fleet_b, `"bridge_models":{"br_main":`), "bridge_models")
+
+	// 7. verify independent label & lease parse (auto_submit + vcs.head/base)
+	ind_lbl := ctl_verify_label("task_1", 2, "abc1234", true)
+	defer delete(ind_lbl)
+	testing.expect_value(t, ind_lbl, "verify task_1 #2 @abc1234 independent")
+
+	resp := `{"v":1,"id":"x","ok":true,"data":{"data":{"status":"current","lease":{"lease_id":"l1","task_id":"t1","attempt_no":1,"vcs":{"base":"b000","head":"h111"}},"task":{"task_id":"t1","brief":{"goal":"g","verify":"make test","auto_submit":true}},"pack":{}}}}`
+	lse, lok := ctl_verify_parse_lease(resp)
+	testing.expect(t, lok, "lease parsed")
+	testing.expect(t, lse.auto_submit, "auto_submit parsed")
+	testing.expect_value(t, lse.vcs_base, "b000")
+	testing.expect_value(t, lse.vcs_head, "h111")
+}
+

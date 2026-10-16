@@ -1,22 +1,24 @@
 package taskv2
 
+import "core:fmt"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
+import jsonx "odin_test:lib/jsonx"
 
-// Review gate (plan §2.5). Evaluated inside the UoW after every review post
-// and after a fleet change, for a task in `in_review`:
+// Review gate (plan §2.5). Evaluated inside the UoW after every review post,
+// independent verify exit, and fleet change, for a task in `in_review`:
 //
 //   needed = { (fleet row, role) : role ∈ brief.review_roles ∧ row has role
 //              ∧ row.agent_id ≠ the attempt's author template }
 //   gate   = every needed pair has an `approve` review on THIS attempt
 //            ∧ no `request_changes` on this attempt
+//            ∧ (independent verify passed on this attempt, if require_independent_verify)
 //            ∧ (user approved on this attempt, if requires_user_approval)
 //
 // Strict AND per fleet row: two reviewer templates both review. Any
 // request_changes → EV_CHANGES_REQUESTED (task → ready, other review leases
 // expired); the oscillation guard (fold) parks the task after 3 rounds. A new
 // attempt invalidates prior reviews because reviews are keyed by attempt_no.
-// (require_independent_verify is M3.)
 
 Gate_Result :: enum { Waiting, Approved, Changes_Requested }
 
@@ -40,6 +42,7 @@ evaluate_gate_in_uow :: proc(svc: ^Service, u: ^Uow, chain: domain.Task_Chain, t
 				if expire_lease_in_uow(svc, u, l, EXPIRE_CHANGES_REQUESTED, actor) == .Failed do return .Waiting, false, domain.domain_error(.Internal_Error, "failed to drop a review lease")
 			}
 		}
+		metric_gate_evaluated(.Changes_Requested)
 		return .Changes_Requested, true, domain.Domain_Error{}
 	}
 	// 2. every needed (fleet row, role) approved
@@ -57,13 +60,36 @@ evaluate_gate_in_uow :: proc(svc: ^Service, u: ^Uow, chain: domain.Task_Chain, t
 			for r in reviews {
 				if r.attempt_no == task.attempt_no && r.verdict == "approve" && r.reviewer_kind == "agent" && r.role == role && r.reviewer_agent_id == f.agent_id { approved = true; break }
 			}
-			if !approved do return .Waiting, true, domain.Domain_Error{}
+			if !approved {
+				metric_gate_evaluated(.Waiting)
+				return .Waiting, true, domain.Domain_Error{}
+			}
+		}
+	}
+	// 3. require_independent_verify: requires a passing independent verify facet on this attempt
+	if brief_require_independent_verify(task.brief_json) {
+		vf, vok := get_facet(svc, task, task.attempt_no, FACET_VERIFY)
+		ind_ok := false
+		if vok {
+			if code, cok := jsonx.extract_int_found(vf.body_json, "exit_code", true); cok && code == 0 {
+				if ind, iok := jsonx.extract_bool_literal(vf.body_json, "independent", true); iok && ind {
+					ind_ok = true
+				}
+			}
+		}
+		if !ind_ok {
+			metric_gate_evaluated(.Waiting)
+			return .Waiting, true, domain.Domain_Error{}
 		}
 	}
 	if task.requires_user_approval {
 		user_ok := false
 		for r in reviews do if r.attempt_no == task.attempt_no && r.verdict == "approve" && r.reviewer_kind == "user" { user_ok = true; break }
-		if !user_ok do return .Waiting, true, domain.Domain_Error{}
+		if !user_ok {
+			effect_notify_coordinator(svc, u, task.chain_id, task.owner_user_id, "review_requested_from_user", fmt.tprintf("[taskv2] review_requested_from_user: task %s (%s) passed review gate and awaits user approval", task.task_id, task.title))
+			metric_gate_evaluated(.Waiting)
+			return .Waiting, true, domain.Domain_Error{}
+		}
 	}
 	p := json_begin()
 	json_int(&p, "attempt_no", i64(task.attempt_no))
@@ -74,6 +100,7 @@ evaluate_gate_in_uow :: proc(svc: ^Service, u: ^Uow, chain: domain.Task_Chain, t
 			if expire_lease_in_uow(svc, u, l, EXPIRE_REPLACED, actor) == .Failed do return .Waiting, false, domain.domain_error(.Internal_Error, "failed to drop a review lease")
 		}
 	}
+	metric_gate_evaluated(.Approved)
 	return .Approved, true, domain.Domain_Error{}
 }
 

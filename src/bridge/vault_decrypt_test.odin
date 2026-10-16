@@ -412,3 +412,109 @@ vault_status_report_agrees_with_bridge_vault_status :: proc(t: ^testing.T) {
 	defer delete(needle)
 	testing.expect(t, strings.contains(frame, needle), "the frame reports exactly what bridge_vault_status_string() returns")
 }
+
+@(test)
+test_bridge_taskv2_render_task_md_vault_decryption_and_field_safe_cap :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
+
+	os.set_env("HEIMDALL_VAULT_KEY", TEST_VAULT_KEY_HEX)
+	defer os.unset_env("HEIMDALL_VAULT_KEY")
+
+	armored_title, _ := bridge_encrypt_vault_ciphertext_hex("Secret Feature Task", TEST_VAULT_KEY_HEX)
+	defer delete(armored_title)
+	// Also test ENC:v1: prefix
+	enc_goal_vault, _ := bridge_encrypt_vault_ciphertext_hex("Deliver decrypted goal", TEST_VAULT_KEY_HEX)
+	defer delete(enc_goal_vault)
+	enc_goal := strings.concatenate({"ENC:v1:", enc_goal_vault[len(VAULT_ARMOR_PREFIX):]})
+	defer delete(enc_goal)
+
+	pack := strings.concatenate({
+		`{"version":1,"lease_id":"lease_1","task_id":"task_1","attempt_no":2,"max_attempts":3,"review_rounds":1,`,
+		`"expires_at":"2026-10-16T18:00:00Z","hard_deadline_at":"2026-10-16T20:00:00Z","why":"changes_requested",`,
+		`"placement":{"bridge_id":"br_1","directory_id":"dir_1","provider":"claude","model":"sonnet"},`,
+		`"task":{"task_id":"task_1","title":"`, armored_title, `","description":"desc"},`,
+		`"brief":{"goal":"`, enc_goal, `","acceptance":["acc 1"],"verify":"npm test"},`,
+		`"chain":{"chain_id":"ch_1","title":"Chain","summary":"# Chain ch_1\n- [x] task_0: done"},`,
+		`"inputs":[{"ref":"#ev_1","resolved":true,"data":"LARGE_INPUT_BODY_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}],`,
+		`"where_you_are":{"head":"abc1234","dirty":false,"files":[]},`,
+		`"previous_attempt":{"attempt_no":1,"outcome":"changes_requested","last_heartbeat_note":"hb note",`,
+		`"handoff":{"summary":"PREV_HANDOFF_SUMMARY_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","dead_ends":["NEVER_DROP_DEAD_END_1"]},`,
+		`"verify":{"cmd":"npm test","exit_code":0,"head":"abc1234","tail":"PREV_VERIFY_TAIL_CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"}},`,
+		`"findings":[{"path":"src/a.odin","line":42,"severity":"blocker","text":"NEVER_DROP_FINDING_1"}],`,
+		`"protocol":{"rules":["1. Rule one"]}}`,
+	})
+	defer delete(pack)
+
+	// 1. Uncapped render decrypts both vault:v1: and ENC:v1: and includes all fields
+	full_md := bridge_taskv2_render_task_md(pack, 32_000)
+	defer delete(full_md)
+	testing.expect(t, strings.contains(full_md, "# Task task_1: Secret Feature Task (worker, attempt #2)"), "decrypted title in header")
+	testing.expect(t, strings.contains(full_md, "**Goal**: Deliver decrypted goal"), "decrypted ENC:v1: goal in brief")
+	testing.expect(t, strings.contains(full_md, "LARGE_INPUT_BODY_"), "uncapped includes resolved input body")
+	testing.expect(t, strings.contains(full_md, "PREV_VERIFY_TAIL_"), "uncapped includes verify tail")
+	testing.expect(t, strings.contains(full_md, "PREV_HANDOFF_SUMMARY_"), "uncapped includes handoff summary")
+	testing.expect(t, strings.contains(full_md, "NEVER_DROP_DEAD_END_1"), "dead_ends present")
+	testing.expect(t, strings.contains(full_md, "NEVER_DROP_FINDING_1"), "findings present")
+
+	// 2. Step-by-step field-safe cap verification:
+	// Step 1: budget drops resolved input body first, while preserving verify tail AND handoff summary
+	step1_budget := len(full_md) - 10
+	step1_md := bridge_taskv2_render_task_md(pack, step1_budget)
+	defer delete(step1_md)
+	testing.expect(t, !strings.contains(step1_md, "LARGE_INPUT_BODY_"), "step 1: resolved input body dropped first")
+	testing.expect(t, strings.contains(step1_md, "ham-ctl task fetch task_1 #ev_1"), "step 1: replaced with fetch pointer for input")
+	testing.expect(t, strings.contains(step1_md, "PREV_VERIFY_TAIL_"), "step 1: verify tail still preserved")
+	testing.expect(t, strings.contains(step1_md, "PREV_HANDOFF_SUMMARY_"), "step 1: handoff summary still preserved")
+
+	// Step 2: tighter budget drops inputs + verify tail, while preserving handoff summary
+	step2_budget := len(step1_md) - 10
+	step2_md := bridge_taskv2_render_task_md(pack, step2_budget)
+	defer delete(step2_md)
+	testing.expect(t, !strings.contains(step2_md, "LARGE_INPUT_BODY_"), "step 2: input body dropped")
+	testing.expect(t, !strings.contains(step2_md, "PREV_VERIFY_TAIL_"), "step 2: verify tail dropped second")
+	testing.expect(t, strings.contains(step2_md, "ham-ctl task fetch task_1 facet:task_1:1:verify"), "step 2: replaced with fetch pointer for verify")
+	testing.expect(t, strings.contains(step2_md, "PREV_HANDOFF_SUMMARY_"), "step 2: handoff summary still preserved")
+
+	// Step 3: tightest budget drops inputs + verify tail + handoff summary, while keeping brief, dead_ends, findings
+	capped_md := bridge_taskv2_render_task_md(pack, 600)
+	defer delete(capped_md)
+	testing.expect(t, !strings.contains(capped_md, "LARGE_INPUT_BODY_"), "step 3: resolved input body dropped")
+	testing.expect(t, strings.contains(capped_md, "ham-ctl task fetch task_1 #ev_1"), "step 3: replaced with fetch pointer for input")
+	testing.expect(t, !strings.contains(capped_md, "PREV_VERIFY_TAIL_"), "step 3: verify tail dropped")
+	testing.expect(t, strings.contains(capped_md, "ham-ctl task fetch task_1 facet:task_1:1:verify"), "step 3: replaced with fetch pointer for verify")
+	testing.expect(t, !strings.contains(capped_md, "PREV_HANDOFF_SUMMARY_"), "step 3: handoff summary dropped third")
+	testing.expect(t, strings.contains(capped_md, "ham-ctl task fetch task_1 facet:task_1:1:handoff"), "step 3: replaced with fetch pointer for handoff")
+	testing.expect(t, strings.contains(capped_md, "**Goal**: Deliver decrypted goal"), "brief goal preserved under cap")
+	testing.expect(t, strings.contains(capped_md, "NEVER_DROP_DEAD_END_1"), "dead_ends preserved under cap")
+	testing.expect(t, strings.contains(capped_md, "NEVER_DROP_FINDING_1"), "open findings preserved under cap")
+
+	// 3. Materialise <run_dir>/TASK.md on disk and verify file contents
+	home := os.get_env("HOME", context.temp_allocator)
+	run_dir := strings.concatenate({home, "/.cache/heimdall-tests/task-md-unit-test"}, context.temp_allocator)
+	_ = os.make_directory(run_dir)
+	task_md_path := strings.concatenate({run_dir, "/TASK.md"}, context.temp_allocator)
+	defer _ = os.remove(task_md_path)
+	defer _ = os.remove(run_dir)
+	wrote := bridge_taskv2_materialize_task_md(run_dir, pack)
+	testing.expect(t, wrote, "bridge_taskv2_materialize_task_md wrote <run_dir>/TASK.md")
+	disk_bytes, rerr := os.read_entire_file(task_md_path, context.temp_allocator)
+	testing.expect(t, rerr == nil && strings.contains(string(disk_bytes), "# Task task_1: Secret Feature Task (worker, attempt #2)"), "TASK.md on disk contains decrypted header")
+	testing.expect(t, rerr == nil && strings.contains(string(disk_bytes), "**Goal**: Deliver decrypted goal"), "TASK.md on disk contains decrypted ENC:v1: goal")
+}
+
+@(test)
+test_bridge_agent_route_m3_chain_summary_and_propose :: proc(t: ^testing.T) {
+	r1 := bridge_agent_route("agent.task_chain.set_summary", `{"body":"# Summary"}`)
+	testing.expect_value(t, r1.kind, Bridge_Agent_Route_Kind.Envelope)
+	testing.expect_value(t, r1.path, "/api/v1/agent-actions/chain/summary")
+	testing.expect(t, bridge_agent_method_allowed("agent.task_chain.set_summary"), "set_summary allowed")
+
+	r2 := bridge_agent_route("agent.task_chain.propose", `{"tasks":[]}`)
+	testing.expect_value(t, r2.kind, Bridge_Agent_Route_Kind.Envelope)
+	testing.expect_value(t, r2.path, "/api/v1/agent-actions/chain/propose")
+	testing.expect(t, bridge_agent_method_allowed("agent.task_chain.propose"), "propose allowed")
+}
+

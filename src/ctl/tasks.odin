@@ -260,26 +260,14 @@ ctl_task_chains_fleet_command :: proc(transport: Ctl_Transport, tokens: []string
 		if chain_id == "" do chain_id = option_value(args, "--chain", option_value(args, "--chain-id", ""))
 		if chain_id == "" do chain_id = resolve_chain_id(transport, args)
 		agent_id := option_value(args, "--agent", option_value(args, "--agent-id", ""))
-		capacity_str := option_value(args, "--capacity", "")
-		if chain_id == "" || agent_id == "" || capacity_str == "" {
-			fmt.println("usage: ham-ctl task-chains fleet set <chain-id> --agent <agent_id> --capacity <N>")
+		bm_file, _ := ctl_read_json_file_flag(args, "--bridge-models-file")
+		body, body_ok := ctl_v2_fleet_set_body(args, bm_file)
+		if chain_id == "" || agent_id == "" || !body_ok {
+			fmt.println("usage: ham-ctl task-chains fleet set <chain-id> --agent <agent_id> --capacity <N> [--roles <worker,reviewer>] [--bridge <id>] [--provider <p>] [--model <m>] [--bridge-models <json>]")
 			return
 		}
-		capacity := 1
-		if c, c_ok := strconv.parse_int(capacity_str); c_ok {
-			capacity = int(c)
-		}
-		fields := make([dynamic]string)
-		defer delete(fields)
-		append(&fields, json_kv_raw("capacity", fmt.tprintf("%d", capacity)))
-		if mw := option_value(args, "--min-warm", ""); mw != "" {
-			if v, v_ok := strconv.parse_int(mw); v_ok do append(&fields, json_kv_raw("min_warm", fmt.tprintf("%d", v)))
-		}
-		if ttl := option_value(args, "--idle-ttl", option_value(args, "--idle-ttl-seconds", "")); ttl != "" {
-			if v, v_ok := strconv.parse_int(ttl); v_ok do append(&fields, json_kv_raw("idle_ttl_seconds", fmt.tprintf("%d", v)))
-		}
 		path := fmt.tprintf("/api/v1/task-chains/%s/fleets/%s", safe_path_part(chain_id), safe_path_part(agent_id))
-		ctl_tasks_request(transport, "PUT", path, json_object_from_slice(fields[:]))
+		ctl_tasks_request(transport, "PUT", path, body)
 		return
 	}
 	chain_id := sub
@@ -298,11 +286,11 @@ is_destructive_chain_verb :: proc(action: string) -> bool {
 
 print_tasks_help :: proc(action: string) {
 	_ = action
-	fmt.println("usage: ham-ctl tasks <list|show|create|update|depend|cancel|comment|comments>")
+	fmt.println("usage: ham-ctl tasks <list|show|create|update|depend|cancel|comment|comments|fetch>")
 	fmt.println("  create --chain <id> --title <title> [--assignee <agt_id>] [--reviewer <agt_id>]... [--require-user-approval]")
 	fmt.println("  update <task-id> [--assignee <agt_id>] [--reviewer <agt_id>]... [--require-user-approval | --no-require-user-approval]")
 	fmt.println("  --assignee/--reviewer take durable agent ids (agt_...) only; instance pins (inst_...) were removed in Task System v2")
-	fmt.println("  (status/done/vote/votes/nudge/subscribe/unsubscribe were removed in Task System v2; lease verbs arrive with the next milestone)")
+	fmt.println("  (status/done/vote/votes/nudge/subscribe/unsubscribe were removed in Task System v2; use lease/verify/review)")
 }
 
 ctl_task_chain_request_and_decrypt :: proc(transport: Ctl_Transport, method, path, body_json: string, args: []string = nil) {
@@ -335,6 +323,65 @@ ctl_task_chains_command :: proc(cmd: []string, args: []string) {
 
 	if action == "fleet" || action == "fleets" {
 		ctl_task_chains_fleet_command(transport, cmd[idx + 1:], args)
+		return
+	}
+
+	if action == "summary" || action == "set-summary" {
+		stdin_text := ""
+		if has_flag(args, "--stdin") {
+			if data, err := os.read_entire_file("/dev/stdin", context.allocator); err == nil {
+				stdin_text = string(data)
+			}
+		}
+		params, p_ok := ctl_v2_task_chain_summary_params(cmd[idx + 1:], args, stdin_text)
+		cid := resolve_chain_id(transport, args)
+		if !p_ok || cid == "" {
+			fmt.println(`{"ok":false,"message":"task-chains summary requires set <text> (or --stdin) and --chain <id>"}`)
+			os.exit(1)
+		}
+		ctl_task_chain_request_and_decrypt(transport, "PUT", fmt.tprintf("/api/v1/task-chains/%s/summary", safe_path_part(cid)), params, args)
+		return
+	}
+
+	if action == "propose" {
+		file_text := ""
+		path := option_value(args, "--file", option_value(args, "--proposal-file", ""))
+		if path != "" {
+			data, err := os.read_entire_file(path, context.allocator)
+			if err != nil {
+				fmt.printfln(`{"ok":false,"message":"--file %s: cannot read"}`, path)
+				os.exit(1)
+			}
+			file_text = string(data)
+		} else if has_flag(args, "--stdin") {
+			if data, err := os.read_entire_file("/dev/stdin", context.allocator); err == nil {
+				file_text = string(data)
+			}
+		}
+		params, p_ok := ctl_v2_task_chain_propose_params(args, file_text)
+		if !p_ok {
+			fmt.println(`{"ok":false,"message":"task-chains propose requires --file <proposal.json> [--auto-approve] [--chain <id>]"}`)
+			os.exit(1)
+		}
+		ctl_task_chain_request_and_decrypt(transport, "POST", "/api/v1/agent-actions/chain/propose", params, args)
+		return
+	}
+
+	if action == "decide" || action == "proposal" {
+		cid := resolve_chain_id(transport, args)
+		if cid == "" && idx + 1 < len(cmd) && !strings.has_prefix(cmd[idx + 1], "--") {
+			cid = cmd[idx + 1]
+		}
+		decision := strings.trim_space(option_value(args, "--decision", ""))
+		if cid == "" || (decision != "approve" && decision != "reject") {
+			fmt.println(`{"ok":false,"message":"task-chains decide requires --chain <id> --decision approve|reject [--reason <text>]"}`)
+			os.exit(1)
+		}
+		fields := make([dynamic]string)
+		defer delete(fields)
+		append(&fields, json_kv("decision", decision))
+		if r := option_value(args, "--reason", ""); r != "" do append(&fields, json_kv("reason", r))
+		ctl_task_chain_request_and_decrypt(transport, "POST", fmt.tprintf("/api/v1/task-chains/%s/proposal/decide", safe_path_part(cid)), json_object_from_slice(fields[:]), args)
 		return
 	}
 
@@ -590,7 +637,7 @@ ctl_task_chains_command :: proc(cmd: []string, args: []string) {
 		return
 	}
 
-	fmt.println("usage: ham-ctl task-chains <list|coordinated|create|show|update|members|directory|add-agent|publish|complete|reopen|archive|unarchive|pin|unpin>")
+	fmt.println("usage: ham-ctl task-chains <list|coordinated|create|show|update|summary|propose|decide|members|directory|add-agent|publish|complete|reopen|archive|unarchive|pin|unpin>")
 }
 
 ctl_tasks_command :: proc(cmd: []string, args: []string) {
@@ -682,6 +729,7 @@ ctl_tasks_command :: proc(cmd: []string, args: []string) {
 			append(&fields, strings.to_string(buf))
 		}
 		if b := option_value(args, "--bridge", ""); b != "" do append(&fields, json_kv("bridge_id", b))
+		if brief, ok := ctl_task_brief_field(args); ok do append(&fields, brief)
 		resp_str, ok := ctl_tasks_request_local(transport, "POST", fmt.tprintf("/api/v1/task-chains/%s/tasks", safe_path_part(chain_id)), json_object_from_slice(fields[:]))
 		if !ok {
 			fmt.println(resp_str)
@@ -719,12 +767,25 @@ ctl_tasks_command :: proc(cmd: []string, args: []string) {
 	}
 
 	if chain_id == "" || task_id == "" {
-		fmt.println("usage: ham-ctl tasks <show|update|depend|cancel|comment|comments> --chain <id> --task <id>")
+		fmt.println("usage: ham-ctl tasks <show|update|depend|cancel|comment|comments|fetch> --chain <id> --task <id>")
 		return
 	}
 
 	if action == "show" {
 		ctl_tasks_request_and_decrypt(transport, "GET", fmt.tprintf("/api/v1/task-chains/%s/tasks/%s", safe_path_part(chain_id), safe_path_part(task_id)), "", args)
+		return
+	}
+
+	if action == "fetch" {
+		ref := option_value(args, "--ref", "")
+		if ref == "" && idx + 2 < len(cmd) && !strings.has_prefix(cmd[idx + 2], "--") {
+			ref = cmd[idx + 2]
+		}
+		if ref == "" {
+			fmt.println(`{"ok":false,"message":"tasks fetch requires --ref <ref> or positional <ref>"}`)
+			os.exit(1)
+		}
+		ctl_tasks_request_and_decrypt(transport, "GET", fmt.tprintf("/api/v1/task-chains/%s/tasks/%s/fetch?ref=%s", safe_path_part(chain_id), safe_path_part(task_id), safe_path_part(ref)), "", args)
 		return
 	}
 
@@ -763,6 +824,7 @@ ctl_tasks_command :: proc(cmd: []string, args: []string) {
 			deps := option_value(args, "--depends-on", option_value(args, "--on", ""))
 			append(&fields, ctl_v2_json_string_array("depends_on", deps))
 		}
+		if brief, ok := ctl_task_brief_field(args); ok do append(&fields, brief)
 		ctl_tasks_request(transport, "PATCH", fmt.tprintf("/api/v1/task-chains/%s/tasks/%s", safe_path_part(chain_id), safe_path_part(task_id)), json_object_from_slice(fields[:]))
 		return
 	}
@@ -866,5 +928,5 @@ ctl_tasks_command :: proc(cmd: []string, args: []string) {
 		}
 	}
 
-	fmt.println("usage: ham-ctl tasks <list|show|create|update|depend|cancel|comment|comments>")
+	fmt.println("usage: ham-ctl tasks <list|show|create|update|depend|cancel|comment|comments|fetch>")
 }

@@ -335,6 +335,7 @@ Bridge_Bootstrap_Descriptor :: struct {
 	project_path:             string,
 	conversation_id:          string,
 	provider:                 string,
+	pack_json:                string,
 }
 
 // bridge_bootstrap_descriptor_from_launch parses the enriched launch_agent
@@ -342,6 +343,7 @@ Bridge_Bootstrap_Descriptor :: struct {
 // "worker".
 bridge_bootstrap_descriptor_from_launch :: proc(command_json: string) -> Bridge_Bootstrap_Descriptor {
 	payload := bridge_provider_payload_object(command_json)
+	pack_obj, _ := bridge_provider_json_extract_object(payload, "pack")
 	d := Bridge_Bootstrap_Descriptor{
 		instance_id              = bridge_provider_json_extract_string(payload, "agent_instance_id", ""),
 		agent_id                 = bridge_provider_json_extract_string(payload, "agent_id", ""),
@@ -356,6 +358,7 @@ bridge_bootstrap_descriptor_from_launch :: proc(command_json: string) -> Bridge_
 		project_path             = bridge_provider_json_extract_string(payload, "project_path", ""),
 		conversation_id          = bridge_provider_json_extract_string(payload, "conversation_id", ""),
 		provider                 = bridge_provider_json_extract_string(payload, "name", ""),
+		pack_json                = pack_obj,
 	}
 	if strings.trim_space(d.role) == "" do d.role = "worker"
 	return d
@@ -907,6 +910,15 @@ bridge_bootstrap_build_file_set :: proc(manifest_json: string, d: Bridge_Bootstr
 	}
 	append(&files, Bridge_Bootstrap_File{file_id = strings.clone(".heimdall/bin/ham-ctl"), relative_path = strings.clone(".heimdall/bin/ham-ctl"), kind = "CTL_WRAPPER", content = ctl_shim, mode = 0o755})
 
+	if strings.has_prefix(strings.trim_space(d.pack_json), "{") {
+		task_md := bridge_taskv2_render_task_md(d.pack_json)
+		if strings.trim_space(task_md) != "" {
+			append(&files, Bridge_Bootstrap_File{file_id = strings.clone("TASK.md"), relative_path = strings.clone("TASK.md"), kind = "TASK_MD", content = task_md, mode = 0o644})
+		} else {
+			delete(task_md)
+		}
+	}
+
 	// heimdall-bootstrap-manifest.json listing the managed files.
 	mb := strings.builder_make()
 	strings.write_string(&mb, "{\"agent_instance_id\":\""); strings.write_string(&mb, d.instance_id)
@@ -926,7 +938,7 @@ bridge_bootstrap_build_file_set :: proc(manifest_json: string, d: Bridge_Bootstr
 // string, frees the original and returns the result. Tokens left undecryptable
 // because the vault is locked become VAULT_LOCKED_MARKER.
 bridge_bootstrap_decrypt_owned :: proc(text: string) -> string {
-	if !strings.contains(text, VAULT_ARMOR_PREFIX) do return text
+	if !bridge_has_vault_token(text) do return text
 	out := bridge_decrypt_embedded_vault_tokens(text, locked_marker = VAULT_LOCKED_MARKER)
 	delete(text)
 	return out

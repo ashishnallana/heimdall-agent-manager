@@ -375,6 +375,8 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 		bridge_runtime_registry = &graph.bridge_runtime_registry,
 	}
 	graph.bridge_handlers = http.Bridge_Handlers{auth = &graph.auth, bridges = &graph.bridges, agents = &graph.agents, content = &graph.content, taskchains = &graph.taskchains, projects = &graph.projects, event_bus = &graph.event_bus, bridge_runtime_registry = &graph.bridge_runtime_registry, shell_sessions = &graph.shell_session_service, lsp_sessions = &graph.lsp_session_registry, providers = &graph.providers, bridge_logs = &graph.bridge_logs, task_engine = &graph.task_engine}
+	graph.task_engine.vcs_show_file = http.bridge_vcs_show_file_callback
+	graph.task_engine.vcs_show_file_ctx = rawptr(&graph.bridge_handlers)
 	bridge_log_service.start(&graph.bridge_logs)
 	graph.agent_handlers = http.Agent_Handlers{
  launch_preferences = &graph.users,
@@ -387,7 +389,7 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 	}
 	graph.project_handlers = http.Project_Handlers{auth = &graph.auth, projects = &graph.projects}
 	graph.content_handlers = http.Content_Handlers{auth = &graph.auth, agents = &graph.agents, content = &graph.content, event_bus = &graph.event_bus}
-	graph.taskchain_handlers = http.Taskchain_Handlers{auth = &graph.auth, taskchains = &graph.taskchains, agents = &graph.agents, content = &graph.content, projects = &graph.projects, event_bus = &graph.event_bus, task_engine = &graph.task_engine}
+	graph.taskchain_handlers = http.Taskchain_Handlers{auth = &graph.auth, taskchains = &graph.taskchains, agents = &graph.agents, content = &graph.content, projects = &graph.projects, event_bus = &graph.event_bus, task_engine = &graph.task_engine, shell_sessions = &graph.shell_session_service}
 	graph.search_handlers = http.Search_Handlers{auth = &graph.auth, search = &graph.search}
 	graph.skills_handlers = http.Skills_Handlers{auth = &graph.auth}
 	graph.push_handlers = http.Push_Handlers{auth = &graph.auth, push = &graph.push, vapid_public_key = config.vapid_public_key}
@@ -605,6 +607,10 @@ register_routes :: proc(graph: ^App_Graph) {
 	http.router_add(&graph.router, "POST", "/api/v1/task-chains", rawptr(&graph.taskchain_handlers), http.create_task_chain_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/task-chains/search/relay", rawptr(&graph.bridge_handlers), http.task_chain_search_relay_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/task-chains/*", rawptr(&graph.taskchain_handlers), http.task_chain_detail_handler)
+	http.router_add(&graph.router, "GET", "/api/v1/task-chains/*/summary", rawptr(&graph.taskchain_handlers), http.get_task_chain_summary_handler)
+	http.router_add(&graph.router, "PUT", "/api/v1/task-chains/*/summary", rawptr(&graph.taskchain_handlers), http.put_task_chain_summary_handler)
+	http.router_add(&graph.router, "POST", "/api/v1/task-chains/*/propose", rawptr(&graph.taskchain_handlers), http.propose_task_chain_handler)
+	http.router_add(&graph.router, "POST", "/api/v1/task-chains/*/proposal/decide", rawptr(&graph.taskchain_handlers), http.decide_task_chain_proposal_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/task-chains/*/publish", rawptr(&graph.taskchain_handlers), http.publish_task_chain_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/task-chains/*/complete", rawptr(&graph.taskchain_handlers), http.complete_task_chain_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/task-chains/*/pin", rawptr(&graph.taskchain_handlers), http.pin_task_chain_handler)
@@ -614,6 +620,7 @@ register_routes :: proc(graph: ^App_Graph) {
 	http.router_add(&graph.router, "POST", "/api/v1/task-chains/*/tasks/*/review", rawptr(&graph.taskchain_handlers), http.user_review_task_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/task-chains/*/tasks/*/reopen", rawptr(&graph.taskchain_handlers), http.reopen_task_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/task-chains/*/tasks/*/answer", rawptr(&graph.taskchain_handlers), http.answer_task_handler)
+	http.router_add(&graph.router, "POST", "/api/v1/task-chains/*/tasks/*/verify", rawptr(&graph.taskchain_handlers), http.verify_task_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/task-chains/*/tasks/*/fetch", rawptr(&graph.taskchain_handlers), http.fetch_task_ref_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/task-chains/*/tasks/*/events", rawptr(&graph.taskchain_handlers), http.list_task_events_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/task-chains/*/tasks/*/attempts/*/facets/*", rawptr(&graph.taskchain_handlers), http.get_task_facet_handler)
@@ -640,6 +647,14 @@ register_routes :: proc(graph: ^App_Graph) {
 	http.router_add(&graph.router, "POST", "/api/v1/task-chains/*/directories/*/fs/dir", rawptr(&graph.bridge_handlers), http.create_chain_directory_dir_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/task-chains/*/directories/*/fs/move", rawptr(&graph.bridge_handlers), http.move_chain_directory_path_handler)
 	http.router_add(&graph.router, "DELETE", "/api/v1/task-chains/*/directories/*/fs", rawptr(&graph.bridge_handlers), http.delete_chain_directory_path_handler)
+	// Task chain directory VCS relay (resolves chain+directory -> bridge+path, relays vcs_* WS commands).
+	http.router_add(&graph.router, "GET", "/api/v1/task-chains/*/directories/*/vcs/capabilities", rawptr(&graph.bridge_handlers), http.chain_directory_handle_vcs_capabilities)
+	http.router_add(&graph.router, "GET", "/api/v1/task-chains/*/directories/*/vcs/status", rawptr(&graph.bridge_handlers), http.chain_directory_handle_vcs_status)
+	http.router_add(&graph.router, "GET", "/api/v1/task-chains/*/directories/*/vcs/files", rawptr(&graph.bridge_handlers), http.chain_directory_handle_vcs_files)
+	http.router_add(&graph.router, "GET", "/api/v1/task-chains/*/directories/*/vcs/diff", rawptr(&graph.bridge_handlers), http.chain_directory_handle_vcs_diff)
+	http.router_add(&graph.router, "GET", "/api/v1/task-chains/*/directories/*/vcs/log", rawptr(&graph.bridge_handlers), http.chain_directory_handle_vcs_log)
+	http.router_add(&graph.router, "GET", "/api/v1/task-chains/*/directories/*/vcs/commit-diff", rawptr(&graph.bridge_handlers), http.chain_directory_handle_vcs_commit_diff)
+	http.router_add(&graph.router, "GET", "/api/v1/task-chains/*/directories/*/vcs/workspaces", rawptr(&graph.bridge_handlers), http.chain_directory_handle_vcs_workspaces)
 	http.router_add(&graph.router, "GET", "/api/v1/task-chains/*/tasks/*", rawptr(&graph.taskchain_handlers), http.get_task_handler)
 	http.router_add(&graph.router, "PATCH", "/api/v1/task-chains/*/tasks/*", rawptr(&graph.taskchain_handlers), http.patch_task_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/task-chains/*/tasks/*/cancel", rawptr(&graph.taskchain_handlers), http.cancel_task_handler)
@@ -654,6 +669,9 @@ register_routes :: proc(graph: ^App_Graph) {
 	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/chain/set-description", rawptr(&graph.agent_action_handlers), http.agent_action_chain_set_description_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/chain/set-status", rawptr(&graph.agent_action_handlers), http.agent_action_chain_set_status_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/chain/show", rawptr(&graph.agent_action_handlers), http.agent_action_chain_show_handler)
+	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/chain/summary", rawptr(&graph.agent_action_handlers), http.agent_action_chain_summary_handler)
+	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/chain/summary/set", rawptr(&graph.agent_action_handlers), http.agent_action_chain_summary_handler)
+	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/chain/propose", rawptr(&graph.agent_action_handlers), http.agent_action_chain_propose_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/agents/live", rawptr(&graph.agent_action_handlers), http.agent_action_agents_live_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/context", rawptr(&graph.agent_action_handlers), http.agent_action_context_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/tasks/list", rawptr(&graph.agent_action_handlers), http.agent_action_task_list_handler)

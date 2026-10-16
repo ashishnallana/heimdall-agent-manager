@@ -54,10 +54,11 @@ EXPIRE_CANCELLED     :: "cancelled"
 EXPIRE_CHANGES_REQUESTED :: "changes_requested" // review leases dropped after a request_changes
 EXPIRE_HUB_RESTART   :: "hub_restart_no_lease"  // boot: in_progress row without a lease row
 
-ACTOR_HUB    :: "hub"
-ACTOR_AGENT  :: "agent"
-ACTOR_USER   :: "user"
-ACTOR_BRIDGE :: "bridge"
+ACTOR_HUB         :: "hub"
+ACTOR_AGENT       :: "agent"
+ACTOR_COORDINATOR :: "coordinator"
+ACTOR_USER        :: "user"
+ACTOR_BRIDGE      :: "bridge"
 
 // Actor identifies who caused an event. Hub timers use Actor{} (kind "hub").
 Actor :: struct {

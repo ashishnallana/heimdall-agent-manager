@@ -42,6 +42,9 @@ export interface TaskChainFleet {
   idleTtlSeconds?: number;
   provider?: string;
   model?: string;
+  roles?: string[];
+  bridge_id?: string;
+  bridgeId?: string;
   // PUT-only additive fields, present when the request carried a well-formed
   // restart_live_instances boolean; absent on fleet list rows.
   restarted_instance_ids?: string[];
@@ -50,33 +53,42 @@ export interface TaskChainFleet {
   updated_at?: string;
 }
 
-function normalizeFleet(f: any): TaskChainFleet {
+export function normalizeFleet(f: any): TaskChainFleet {
+  const rawRoles: string[] = Array.isArray(f?.roles)
+    ? f.roles.map((r: any) => String(r || '').trim().toLowerCase()).filter((r: string) => r === 'worker' || r === 'reviewer')
+    : [];
+  const roles: string[] = rawRoles.length > 0 ? Array.from(new Set(rawRoles)) : ['worker', 'reviewer'];
+  const bridgeId = String(f?.bridge_id ?? f?.bridgeId ?? '');
+
   return {
-    bridge_models: f.bridge_models || {},
-    task_chain_id: f.task_chain_id || f.taskChainId || '',
-    taskChainId: f.taskChainId || f.task_chain_id || '',
-    agent_id: f.agent_id || f.agentId || '',
-    agentId: f.agentId || f.agent_id || '',
-    capacity: typeof f.capacity === 'number' ? f.capacity : 1,
-    active_count: typeof f.active_count === 'number' ? f.active_count : (typeof f.activeCount === 'number' ? f.activeCount : 0),
-    activeCount: typeof f.activeCount === 'number' ? f.activeCount : (typeof f.active_count === 'number' ? f.active_count : 0),
-    min_warm: typeof f.min_warm === 'number' ? f.min_warm : (typeof f.minWarm === 'number' ? f.minWarm : 0),
-    minWarm: typeof f.minWarm === 'number' ? f.minWarm : (typeof f.min_warm === 'number' ? f.min_warm : 0),
-    idle_ttl_seconds: typeof f.idle_ttl_seconds === 'number' ? f.idle_ttl_seconds : (typeof f.idleTtlSeconds === 'number' ? f.idleTtlSeconds : 600),
-    idleTtlSeconds: typeof f.idleTtlSeconds === 'number' ? f.idleTtlSeconds : (typeof f.idle_ttl_seconds === 'number' ? f.idle_ttl_seconds : 600),
-    provider: f.provider || '',
-    model: f.model || '',
-    restarted_instance_ids: Array.isArray(f.restarted_instance_ids)
+    bridge_models: f?.bridge_models || f?.bridgeModels || {},
+    task_chain_id: f?.task_chain_id || f?.taskChainId || '',
+    taskChainId: f?.taskChainId || f?.task_chain_id || '',
+    agent_id: f?.agent_id || f?.agentId || '',
+    agentId: f?.agentId || f?.agent_id || '',
+    capacity: typeof f?.capacity === 'number' ? f.capacity : 1,
+    active_count: typeof f?.active_count === 'number' ? f.active_count : (typeof f?.activeCount === 'number' ? f.activeCount : 0),
+    activeCount: typeof f?.activeCount === 'number' ? f.activeCount : (typeof f?.active_count === 'number' ? f.active_count : 0),
+    min_warm: typeof f?.min_warm === 'number' ? f.min_warm : (typeof f?.minWarm === 'number' ? f.minWarm : 0),
+    minWarm: typeof f?.minWarm === 'number' ? f.minWarm : (typeof f?.min_warm === 'number' ? f.min_warm : 0),
+    idle_ttl_seconds: typeof f?.idle_ttl_seconds === 'number' ? f.idle_ttl_seconds : (typeof f?.idleTtlSeconds === 'number' ? f.idleTtlSeconds : 600),
+    idleTtlSeconds: typeof f?.idleTtlSeconds === 'number' ? f.idleTtlSeconds : (typeof f?.idle_ttl_seconds === 'number' ? f.idle_ttl_seconds : 600),
+    provider: f?.provider || '',
+    model: f?.model || '',
+    roles,
+    bridge_id: bridgeId,
+    bridgeId,
+    restarted_instance_ids: Array.isArray(f?.restarted_instance_ids)
       ? f.restarted_instance_ids.map((id: any) => String(id))
       : undefined,
-    restart_failures: Array.isArray(f.restart_failures)
+    restart_failures: Array.isArray(f?.restart_failures)
       ? f.restart_failures.map((entry: any) => ({
           instance_id: String(entry?.instance_id || ''),
           message: String(entry?.message || ''),
         }))
       : undefined,
-    created_at: f.created_at || '',
-    updated_at: f.updated_at || '',
+    created_at: f?.created_at || '',
+    updated_at: f?.updated_at || '',
   };
 }
 
@@ -101,19 +113,47 @@ export const taskChainsApi = heimdallApi.injectEndpoints({
       agentId: string;
       capacity: number;
       minWarm?: number;
+      min_warm?: number;
       idleTtlSeconds?: number;
+      idle_ttl_seconds?: number;
       provider?: string;
       model?: string;
+      roles?: string[];
+      bridgeId?: string;
+      bridge_id?: string;
       /** Ask the hub to relaunch this role's live instances with the new provider/model. */
       restartLiveInstances?: boolean;
       bridgeModels?: Record<string, { provider: string; model: string }>;
+      bridge_models?: Record<string, { provider: string; model: string }>;
     }>({
-      queryFn: async ({ chainId, agentId, capacity, minWarm, idleTtlSeconds, provider, model, restartLiveInstances, bridgeModels }) => {
+      queryFn: async ({
+        chainId,
+        agentId,
+        capacity,
+        minWarm,
+        min_warm,
+        idleTtlSeconds,
+        idle_ttl_seconds,
+        provider,
+        model,
+        roles,
+        bridgeId,
+        bridge_id,
+        restartLiveInstances,
+        bridgeModels,
+        bridge_models,
+      }) => {
         try {
           const body: any = { capacity, provider: provider ?? '', model: model ?? '' };
-          if (bridgeModels !== undefined) body.bridge_models = bridgeModels;
-          if (minWarm !== undefined) body.min_warm = minWarm;
-          if (idleTtlSeconds !== undefined) body.idle_ttl_seconds = idleTtlSeconds;
+          const resolvedBridgeModels = bridgeModels ?? bridge_models;
+          if (resolvedBridgeModels !== undefined) body.bridge_models = resolvedBridgeModels;
+          const resolvedMinWarm = minWarm ?? min_warm;
+          if (resolvedMinWarm !== undefined) body.min_warm = resolvedMinWarm;
+          const resolvedIdleTtl = idleTtlSeconds ?? idle_ttl_seconds;
+          if (resolvedIdleTtl !== undefined) body.idle_ttl_seconds = resolvedIdleTtl;
+          if (roles !== undefined) body.roles = roles;
+          const resolvedBridgeId = bridgeId !== undefined ? bridgeId : bridge_id;
+          if (resolvedBridgeId !== undefined) body.bridge_id = resolvedBridgeId;
           // Only a true flag reaches the wire: flag-less bodies stay byte-identical
           // to the pre-restart request shape.
           if (restartLiveInstances === true) body.restart_live_instances = true;
@@ -124,6 +164,25 @@ export const taskChainsApi = heimdallApi.injectEndpoints({
           );
           const data = normalizeFleet(raw?.data !== undefined ? raw.data : raw);
           return { data };
+        } catch (error: any) {
+          return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
+        }
+      },
+      invalidatesTags: (_result, _error, { chainId }) => [
+        { type: 'TaskChainFleets' as const, id: chainId },
+        { type: 'Chain' as const, id: chainId },
+      ],
+    }),
+
+    deleteTaskChainFleet: build.mutation<{ deleted: boolean; removed?: boolean }, { chainId: string; agentId: string }>({
+      queryFn: async ({ chainId, agentId }) => {
+        try {
+          const raw = await cookieMutation(
+            `/task-chains/${encodeURIComponent(chainId)}/fleets/${encodeURIComponent(agentId)}`,
+            'DELETE'
+          );
+          const data = raw?.data !== undefined ? raw.data : raw;
+          return { data: { deleted: Boolean(data?.deleted ?? true), removed: Boolean(data?.removed ?? true) } };
         } catch (error: any) {
           return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
         }
@@ -286,6 +345,7 @@ export const {
   useGetTaskChainFleetsQuery,
   useLazyGetTaskChainFleetsQuery,
   useUpdateTaskChainFleetMutation,
+  useDeleteTaskChainFleetMutation,
   useGetTaskChainQuery,
   useGetTaskChainsQuery,
   useListFlatTaskChainsQuery,

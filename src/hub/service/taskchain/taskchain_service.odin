@@ -857,6 +857,7 @@ build_brief_json :: proc(existing_brief, title, description, assignee_agent_id: 
 	taskv2.json_str(&o, "verify", verify)
 	taskv2.json_raw(&o, "inputs", inputs)
 	rb := strings.builder_make()
+	defer strings.builder_destroy(&rb)
 	strings.write_byte(&rb, '[')
 	for r, i in roles {
 		if i > 0 do strings.write_byte(&rb, ',')
@@ -870,6 +871,7 @@ build_brief_json :: proc(existing_brief, title, description, assignee_agent_id: 
 	if b_ok do taskv2.json_raw(&o, "budget", budget)
 	if output, ook := jsonx.extract_raw_object(existing_brief, "output", true); ook do taskv2.json_raw(&o, "output", output)
 	if auto, aok := jsonx.extract_bool_literal(existing_brief, "auto_submit", true); aok do taskv2.json_bool(&o, "auto_submit", auto)
+	if req_indep, riok := jsonx.extract_bool_literal(existing_brief, "require_independent_verify", true); riok do taskv2.json_bool(&o, "require_independent_verify", req_indep)
 	return taskv2.json_end(&o)
 }
 

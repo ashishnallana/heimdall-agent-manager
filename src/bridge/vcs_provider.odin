@@ -135,6 +135,8 @@ VCS_Provider :: struct {
 	sync:            proc(path: string) -> (ok: bool, code: string, detail: string),
 	// read-only. returns (workspaces, ok)
 	list_workspaces: proc(path: string) -> (workspaces: []VCS_Workspace, ok: bool),
+	// read-only. returns file contents at a commit/revision (`git show <rev>:<file>`).
+	show_file:       proc(path, rev, file: string) -> (content: string, ok: bool),
 }
 
 // --- registry ------------------------------------------------------------
@@ -258,12 +260,16 @@ vcs_paginate_files :: proc(all: []VCS_Changed_File, cursor: string, limit, defau
 	return all[start:end], next_cursor, has_more
 }
 
+@(thread_local)
+vcs_last_hunks_truncated: bool
+
 // vcs_paginate_hunks is the hunk-list analogue of vcs_paginate_files.
 vcs_paginate_hunks :: proc(all: []VCS_Diff_Hunk, cursor: string, limit, default_limit, max_limit: int) -> ([]VCS_Diff_Hunk, string, bool) {
 	page_limit := limit
 	if page_limit <= 0 do page_limit = default_limit
 	if page_limit > max_limit do page_limit = max_limit
 	total := len(all)
+	vcs_last_hunks_truncated = max_limit > 0 && total > max_limit
 	start := bridge_fs_decode_cursor(cursor)
 	if start < 0 do start = 0
 	if start > total do start = total
