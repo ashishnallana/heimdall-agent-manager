@@ -319,3 +319,24 @@ bare_launch_payload_leaves_agent_id_empty :: proc(t: ^testing.T) {
 	testing.expect_value(t, d.agent_id, "")
 	testing.expect_value(t, d.role, "worker")
 }
+
+// Task System v2 (M1): a wake run entry's lease_id + pack ride the synthetic
+// launch verbatim (the bootstrap consumes them in M3); the descriptor still
+// parses, and non-lease wakes omit both keys.
+@(test)
+wake_launch_command_json_forwards_lease_and_pack :: proc(t: ^testing.T) {
+	cmd := bridge_wake_launch_command_json(
+		"cmd_3", "inst_l", "task_l", "worker", "claude", "opus",
+		"agt_l", "coder", "chain_l", "Chain L",
+		"inst_coord", "proj_l", "/srv/l", "", "lease_77", `{"version":1,"why":"first_grant"}`,
+	)
+	defer delete(cmd)
+	testing.expect(t, strings.contains(cmd, `"lease_id":"lease_77"`), "lease_id forwarded")
+	testing.expect(t, strings.contains(cmd, `"pack":{"version":1,"why":"first_grant"}`), "pack forwarded verbatim")
+	d := bridge_bootstrap_descriptor_from_launch(cmd)
+	testing.expect_value(t, d.instance_id, "inst_l")
+	testing.expect_value(t, d.agent_id, "agt_l")
+	plain := bridge_wake_launch_command_json("cmd_4", "inst_p", "", "worker", "", "", "agt_p", "coder", "chain_p", "P", "", "", "")
+	defer delete(plain)
+	testing.expect(t, !strings.contains(plain, "lease_id") && !strings.contains(plain, "\"pack\""), "no lease keys without a lease")
+}

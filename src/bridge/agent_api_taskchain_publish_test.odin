@@ -69,3 +69,15 @@ bridge_removed_task_verbs_not_routed :: proc(t: ^testing.T) {
 		testing.expectf(t, bridge_agent_route(m, "{}").kind == .Envelope, "%s still routed", m)
 	}
 }
+
+// Task System v2 (M1): the lease verbs are relayed to the hub's agent-actions.
+@(test)
+bridge_lease_verbs_routed :: proc(t: ^testing.T) {
+	next := bridge_agent_route("agent.lease.next", "{}")
+	testing.expect(t, next.kind == .Envelope && next.path == "/api/v1/agent-actions/lease/next", "lease.next relays")
+	hb := bridge_agent_route("agent.lease.heartbeat", `{"note":"x"}`)
+	testing.expect(t, hb.kind == .Envelope && hb.path == "/api/v1/agent-actions/lease/heartbeat", "lease.heartbeat relays")
+	testing.expect(t, bridge_agent_method_allowed("agent.lease.next") && bridge_agent_method_allowed("agent.lease.heartbeat"), "allow-listed")
+	// M2 verbs are not routed yet
+	testing.expect(t, bridge_agent_route("agent.lease.submit", "{}").kind == .Unknown, "submit arrives in M2")
+}

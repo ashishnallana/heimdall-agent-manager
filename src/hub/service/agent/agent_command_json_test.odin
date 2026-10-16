@@ -126,3 +126,18 @@ test_wake_agent_command_json_carries_command_id :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(got, "\"chain_id\":\"chain_3\""))
 	testing.expect(t, strings.contains(got, "\"stop\":[\"inst_9\"]"))
 }
+
+// Task System v2 (M1): a lease-delivering run entry carries lease_id and the
+// context pack object verbatim; entries without a lease omit both keys.
+@(test)
+test_wake_agent_command_json_carries_lease_and_pack :: proc(t: ^testing.T) {
+	run := []Wake_Agent_Run_Entry{
+		{agent_instance_id = "inst_1", task_id = "task_1", role = "worker", agent_id = "agt_1", lease_id = "lease_9", pack_json = `{"version":1,"lease":{"lease_id":"lease_9"}}`},
+		{agent_instance_id = "inst_2", task_id = "task_2", role = "reviewer"},
+	}
+	got := wake_agent_command_json("cmd_l", "chain_l", run, nil)
+	defer delete(got)
+	testing.expect(t, strings.contains(got, "\"lease_id\":\"lease_9\",\"pack\":{\"version\":1,\"lease\":{\"lease_id\":\"lease_9\"}}}"), "lease_id + verbatim pack")
+	testing.expect(t, strings.count(got, "\"lease_id\"") == 2, "pack is spliced raw (its own lease_id key) and the second entry has none")
+	testing.expect(t, strings.count(got, "\"pack\"") == 1)
+}
