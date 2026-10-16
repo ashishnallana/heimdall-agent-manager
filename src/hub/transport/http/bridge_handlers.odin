@@ -498,12 +498,14 @@ bridge_enrollment_cancel_handler :: proc(ctx: rawptr, req: Request) -> Response 
 	if !bridge_ok do return respond_error(bridge_err, req.request_id)
 	family, _ := bridge_service.pending_enrollment_family(h.bridges, bridge.bridge_id)
 	defer delete(family)
-	removed, err := bridge_service.rollback_pending_enrollment(h.bridges, bridge.bridge_id, family)
-	if err.code != .None do return respond_error(err, req.request_id)
 	enroll_key := bridge_enroll_registry_key(bridge.bridge_id)
 	defer delete(enroll_key)
-	// Before the close: a process that already saved its key undoes it on this.
+	// FIRST, while the socket is certainly still up: revoking the family below
+	// tears it down. A process that already saved its key undoes it on this; one
+	// that misses it still sees its credential refused on reconnect.
 	bridge_enroll_send_result(h.bridge_runtime_registry, enroll_key, false)
+	removed, err := bridge_service.rollback_pending_enrollment(h.bridges, bridge.bridge_id, family)
+	if err.code != .None do return respond_error(err, req.request_id)
 	_ = bridge_service.close_bridge_connection(h.bridges, enroll_key)
 	publish_bridge_enrollment_changed(h, string(bridge.owner_user_id), bridge.bridge_id)
 	return respond_success(fmt.tprintf("{\"bridge_id\":\"%s\",\"rolled_back\":true,\"row_deleted\":%v}", bridge.bridge_id, removed), req.request_id, auth_ctx_server_time(req))

@@ -485,6 +485,12 @@ bridge_hub_runtime_worker :: proc() {
 				if msg_type == "bridge_error" {
 					got_error = true
 					hub_error = bridge_hub_error_log_message(text)
+					// REQ-EA-4: an atomic enrollment whose credential the hub now refuses
+					// was rolled back (cancel or deadline), whether or not the
+					// bridge_enrollment_result frame arrived first.
+					if bridge_enroll_atomic_is_active() && strings.contains(hub_error, "bridge token is invalid") {
+						bridge_enroll_atomic_on_result(`{"type":"bridge_enrollment_result","committed":false}`)
+					}
 					delete(msg_type)
 					delete(text)
 					break

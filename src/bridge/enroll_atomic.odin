@@ -208,6 +208,7 @@ bridge_enroll_atomic_on_result :: proc(text: string) {
 		return
 	}
 	if a.state == .Acked || a.state == .Committed do bridge_enroll_atomic_undo_locked()
+	if a.state != .Rolled_Back do fmt.println("bridge enroll: the hub reported this enrollment rolled back")
 	a.state = .Rolled_Back
 }
 
