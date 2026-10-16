@@ -13,7 +13,7 @@
         "x": 0,
         "y": 0
       },
-      "id": 78,
+      "id": 81,
       "panels": [],
       "title": "Fleet",
       "type": "row"
@@ -36,7 +36,7 @@
         "x": 0,
         "y": 1
       },
-      "id": 79,
+      "id": 82,
       "options": {
         "displayMode": "gradient",
         "orientation": "horizontal",
@@ -81,7 +81,7 @@
         "x": 12,
         "y": 1
       },
-      "id": 80,
+      "id": 83,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -123,7 +123,7 @@
         "x": 0,
         "y": 11
       },
-      "id": 81,
+      "id": 84,
       "options": {
         "sortBy": [
           {
@@ -165,7 +165,7 @@
         "x": 12,
         "y": 11
       },
-      "id": 82,
+      "id": 85,
       "options": {},
       "targets": [
         {
@@ -200,7 +200,7 @@
         "x": 0,
         "y": 21
       },
-      "id": 83,
+      "id": 86,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -269,7 +269,7 @@
         "x": 12,
         "y": 21
       },
-      "id": 84,
+      "id": 87,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -310,7 +310,7 @@
         "x": 0,
         "y": 29
       },
-      "id": 85,
+      "id": 88,
       "panels": [],
       "title": "Events (VictoriaLogs)",
       "type": "row"
@@ -327,7 +327,7 @@
         "x": 0,
         "y": 30
       },
-      "id": 86,
+      "id": 89,
       "options": {
         "dedupStrategy": "none",
         "enableLogDetails": true,

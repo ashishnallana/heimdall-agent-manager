@@ -179,6 +179,46 @@ bridge_apply_heartbeat_stats :: proc(bridge_id, text: string, connection: ^proje
 	return .Applied
 }
 
+// bridge_apply_heartbeat_reliability exports the bridge's cumulative dispatcher,
+// HTTP-retry and circuit-breaker counters from a bridge_heartbeat frame
+// (REQ-ERR-PROTO-B). Each object is optional (older bridges omit http_retries) and
+// applied only when all of its fields parse.
+bridge_apply_heartbeat_reliability :: proc(bridge_id, text: string) {
+	m := &project_service.fleet_metrics
+	if obj, found, balanced := stats_raw_container(text, "command_dispatch", '{', '}'); found && balanced && len(obj) <= STATS_MAX_BYTES {
+		accepted, a_ok := stats_number(obj, "accepted")
+		shed, s_ok := stats_number(obj, "rejected")
+		completed, c_ok := stats_number(obj, "completed")
+		expired, e_ok := stats_number(obj, "deadline_expired")
+		if a_ok && s_ok && c_ok && e_ok {
+			metrics.counter_set(metrics.with(m.bridge_dispatch, bridge_id, "accepted"), accepted)
+			metrics.counter_set(metrics.with(m.bridge_dispatch, bridge_id, "shed"), shed)
+			metrics.counter_set(metrics.with(m.bridge_dispatch, bridge_id, "completed"), completed)
+			metrics.counter_set(metrics.with(m.bridge_dispatch, bridge_id, "deadline_expired"), expired)
+		}
+	}
+	if obj, found, balanced := stats_raw_container(text, "http_retries", '{', '}'); found && balanced && len(obj) <= STATS_MAX_BYTES {
+		retry, r_ok := stats_number(obj, "retry")
+		recovered, rc_ok := stats_number(obj, "recovered")
+		gave_up, g_ok := stats_number(obj, "gave_up")
+		deferred, d_ok := stats_number(obj, "deferred")
+		if r_ok && rc_ok && g_ok && d_ok {
+			metrics.counter_set(metrics.with(m.bridge_http_retries, bridge_id, "retry"), retry)
+			metrics.counter_set(metrics.with(m.bridge_http_retries, bridge_id, "recovered"), recovered)
+			metrics.counter_set(metrics.with(m.bridge_http_retries, bridge_id, "gave_up"), gave_up)
+			metrics.counter_set(metrics.with(m.bridge_http_retries, bridge_id, "deferred"), deferred)
+		}
+	}
+	if obj, found, balanced := stats_raw_container(text, "dependency_breakers", '{', '}'); found && balanced && len(obj) <= STATS_MAX_BYTES {
+		open, o_ok := stats_number(obj, "open")
+		opened, op_ok := stats_number(obj, "opened")
+		if o_ok && op_ok {
+			metrics.gauge_set(metrics.with(m.bridge_breakers_open, bridge_id), i64(open))
+			metrics.counter_set(metrics.with(m.bridge_breaker_trips, bridge_id), opened)
+		}
+	}
+}
+
 @(private = "file")
 stats_reject :: proc(result: Heartbeat_Stats_Result) -> Heartbeat_Stats_Result {
 	reason := "other"

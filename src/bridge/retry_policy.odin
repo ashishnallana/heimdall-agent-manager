@@ -1,13 +1,18 @@
 package main
 
 import "core:fmt"
+import "core:math/rand"
 import "core:strings"
+import "core:sync"
 import "core:time"
 import contracts "odin_test:contracts"
 import http "odin_test:lib/http_client"
 
 BRIDGE_RETRY_MAX_ATTEMPTS :: 4
 BRIDGE_RETRY_BASE_BACKOFF_MS :: 150
+// A hub retry_after_ms longer than this ends the retry loop instead of parking the
+// calling thread; the caller's own scheduling picks the work up later.
+BRIDGE_RETRY_AFTER_MAX_MS :: 30_000
 
 // ---- typed errors + the shared backoff policy ---------------------------
 //
@@ -98,6 +103,54 @@ bridge_http_response_is_retriable :: proc(resp: http.Response, ok: bool) -> bool
 	return bridge_http_is_retriable(resp.status, ok)
 }
 
+// bridge_http_method_idempotent: repeating the request cannot apply it twice
+// (RFC 9110 §9.2.2).
+bridge_http_method_idempotent :: proc(method: string) -> bool {
+	switch method {
+	case "GET", "HEAD", "OPTIONS", "PUT", "DELETE": return true
+	}
+	return false
+}
+
+// bridge_http_attempt_retriable decides whether one attempt may be repeated
+// (REQ-ERR-PROTO-B). An idempotent request retries on any transient failure. A
+// POST/PATCH may already have been applied when it failed in transit or with a
+// 5xx (a launch that ran twice, an action executed twice, a comment posted twice),
+// so it is repeated only when the hub refused it before doing anything: 429, or
+// 503 with a typed busy/rate-limited error.
+bridge_http_attempt_retriable :: proc(method: string, resp: http.Response, ok: bool) -> bool {
+	if bridge_http_method_idempotent(method) do return bridge_http_response_is_retriable(resp, ok)
+	if !ok do return false
+	if resp.status == 429 do return true
+	if resp.status != 503 do return false
+	werr, found := contracts.wire_error_parse(resp.body, context.temp_allocator)
+	return found && (werr.code == .Bridge_Busy || werr.code == .Rate_Limited)
+}
+
+// bridge_http_retry_after_ms is the hub's back-off floor for a refused attempt.
+bridge_http_retry_after_ms :: proc(resp: http.Response, ok: bool) -> i64 {
+	if !ok || resp.status < 400 do return 0
+	werr, found := contracts.wire_error_parse(resp.body, context.temp_allocator)
+	return werr.retry_after_ms if found else 0
+}
+
+// Bridge_Http_Retry_Metrics counts how bridge_http_request_retry sequences end
+// (REQ-ERR-PROTO-B). Shipped cumulative in every heartbeat as `http_retries`; the hub
+// exports them as heimdall_bridge_http_retries_total{bridge_id,outcome}.
+Bridge_Http_Retry_Metrics :: struct {
+	retry:     u64, // an attempt was repeated
+	recovered: u64, // a retried request then succeeded
+	gave_up:   u64, // a retried request still failed (attempts or deadline ran out, or a final hard error)
+	deferred:  u64, // the hub's retry_after_ms exceeded BRIDGE_RETRY_AFTER_MAX_MS, so the caller retries later
+}
+
+bridge_http_retry_metrics: Bridge_Http_Retry_Metrics
+
+bridge_http_retry_metrics_json :: proc() -> string {
+	m := &bridge_http_retry_metrics
+	return fmt.aprintf("{{\"retry\":%d,\"recovered\":%d,\"gave_up\":%d,\"deferred\":%d}}", sync.atomic_load(&m.retry), sync.atomic_load(&m.recovered), sync.atomic_load(&m.gave_up), sync.atomic_load(&m.deferred))
+}
+
 // bridge_http_is_terminal reports whether an HTTP response is terminal (not retriable).
 bridge_http_is_terminal :: proc(status: int, ok: bool) -> bool {
 	return !bridge_http_is_retriable(status, ok)
@@ -109,8 +162,9 @@ bridge_http_backoff_sleep :: proc(attempt: int, base_ms: int = BRIDGE_RETRY_BASE
 	time.sleep(time.Duration(ms) * time.Millisecond)
 }
 
-// bridge_http_request_retry issues an HTTP request with bounded retry and exponential
-// backoff for retriable failures. Non-retriable (terminal) responses return immediately.
+// bridge_http_request_retry issues an HTTP request with bounded retry and jittered
+// exponential backoff (floored by the hub's retry_after_ms) for attempts that may be
+// repeated (bridge_http_attempt_retriable). Anything else returns immediately.
 bridge_http_request_retry :: proc(
 	method, hub_url, path, body: string,
 	headers: []http.Header,
@@ -125,39 +179,56 @@ bridge_http_request_retry :: proc(
 		attempt_timeout_ms := timeout_ms
 		if deadline_ns > 0 {
 			remaining_ns := deadline_ns - time.to_unix_nanoseconds(time.now())
-			if remaining_ns <= 0 do return resp, false
+			if remaining_ns <= 0 {
+				if attempt > 1 do sync.atomic_add(&bridge_http_retry_metrics.gave_up, 1)
+				return resp, false
+			}
 			remaining_ms := int(remaining_ns / i64(time.Millisecond))
 			if remaining_ms < 1 do remaining_ms = 1
 			attempt_timeout_ms = min(attempt_timeout_ms, remaining_ms)
 		}
 		resp, ok = http.request_with_headers_timeout(method, hub_url, path, body, headers, attempt_timeout_ms)
-		if !bridge_http_response_is_retriable(resp, ok) {
+		if !bridge_http_attempt_retriable(method, resp, ok) {
 			// Log the terminal outcome when it followed at least one retry, so a
 			// retried-then-succeeded (or retried-then-failed-hard) sequence is
 			// visible in the log rather than trailing off at the last "retry" line.
 			if attempt > 1 {
-				fmt.println("bridge http retry DONE", "method=", method, "path=", path, "attempts=", attempt, "final_status=", resp.status, "ok=", ok, "outcome=", ok && resp.status >= 200 && resp.status < 300 ? "succeeded_after_retry" : "failed_terminal")
+				succeeded := ok && resp.status >= 200 && resp.status < 300
+				sync.atomic_add(&bridge_http_retry_metrics.recovered if succeeded else &bridge_http_retry_metrics.gave_up, 1)
+				fmt.println("bridge http retry DONE", "method=", method, "path=", path, "attempts=", attempt, "final_status=", resp.status, "ok=", ok, "outcome=", succeeded ? "succeeded_after_retry" : "failed_terminal")
 			}
 			return resp, ok
 		}
 		if attempt < max_attempts {
 			fmt.println("bridge http retry", "method=", method, "path=", path, "attempt=", attempt, "status=", resp.status, "ok=", ok)
+			// Jittered so bridges refused together do not retry together, and never
+			// sooner than the hub asked (retry_after_ms).
+			retry_after_ms := bridge_http_retry_after_ms(resp, ok)
+			if retry_after_ms > BRIDGE_RETRY_AFTER_MAX_MS {
+				sync.atomic_add(&bridge_http_retry_metrics.deferred, 1)
+				fmt.println("bridge http retry DEFERRED", "method=", method, "path=", path, "retry_after_ms=", retry_after_ms)
+				return resp, ok
+			}
 			if resp.body != "" {
 				delete(resp.body)
 				resp.body = ""
 			}
-			backoff_ms := int(bridge_backoff_delay_ms(Bridge_Backoff_Policy{base_ms = i64(base_backoff_ms)}, attempt))
+			backoff_ms := int(max(bridge_backoff_delay_ms(Bridge_Backoff_Policy{base_ms = i64(base_backoff_ms), jitter_pct = 20}, attempt, rand.uint64()), retry_after_ms))
 			if deadline_ns > 0 {
 				remaining_ns := deadline_ns - time.to_unix_nanoseconds(time.now())
-				if remaining_ns <= 0 do return resp, false
 				remaining_ms := int(remaining_ns / i64(time.Millisecond))
-				if remaining_ms <= 0 do return resp, false
+				if remaining_ms <= 0 {
+					if attempt > 1 do sync.atomic_add(&bridge_http_retry_metrics.gave_up, 1)
+					return resp, false
+				}
 				backoff_ms = min(backoff_ms, remaining_ms)
 			}
+			sync.atomic_add(&bridge_http_retry_metrics.retry, 1)
 			time.sleep(time.Duration(backoff_ms) * time.Millisecond)
 		}
 	}
 	// All attempts were retriable and none terminal-succeeded: retries exhausted.
+	if max_attempts > 1 do sync.atomic_add(&bridge_http_retry_metrics.gave_up, 1)
 	fmt.println("bridge http retry EXHAUSTED", "method=", method, "path=", path, "attempts=", max_attempts, "final_status=", resp.status, "ok=", ok)
 	return resp, ok
 }

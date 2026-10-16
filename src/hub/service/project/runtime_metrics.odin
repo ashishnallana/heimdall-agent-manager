@@ -58,6 +58,15 @@ Fleet_Metrics :: struct {
 	bridge_log_queue_dropped: ^metrics.Series, // hub writer queue overflow
 	bridge_log_rows_written:  ^metrics.Series, // rows the writer inserted
 	log_push_failures:        ^metrics.Series, // optional backend push failures
+
+	// Reliability (REQ-ERR-PROTO-B). `errors` counts the hub's own API error answers;
+	// the bridge_* families are cumulative bridge counters pushed in each heartbeat
+	// (they reset when the bridge restarts) and are removed on disconnect.
+	errors:                   ^metrics.Family, // {code, class}
+	bridge_dispatch:          ^metrics.Family, // {bridge_id, outcome} counter, value pushed
+	bridge_http_retries:      ^metrics.Family, // {bridge_id, outcome} counter, value pushed
+	bridge_breakers_open:     ^metrics.Family, // {bridge_id}
+	bridge_breaker_trips:     ^metrics.Family, // {bridge_id} counter, value pushed
 }
 
 fleet_metrics: Fleet_Metrics
@@ -122,6 +131,11 @@ fleet_metrics_init :: proc(reg: ^metrics.Registry) {
 	m.bridge_log_queue_dropped = metrics.with(metrics.new_counter(reg, "heimdall_bridge_log_queue_dropped_total", "Accepted entries the hub dropped because the writer queue was full."))
 	m.bridge_log_rows_written = metrics.with(metrics.new_counter(reg, "heimdall_bridge_log_rows_written_total", "bridge_log_events rows inserted by the writer thread."))
 	m.log_push_failures = metrics.with(metrics.new_counter(reg, "heimdall_log_push_failures_total", "Failed pushes of bridge events to the optional log backend (--log-push-url)."))
+	m.errors = metrics.new_counter(reg, "heimdall_errors_total", "API error answers by error code and class (retriable/recoverable/fatal).", {"code", "class"})
+	m.bridge_dispatch = metrics.new_counter(reg, "heimdall_bridge_dispatch_total", "Hub commands the bridge dispatcher accepted, shed under load, completed, or dropped past their deadline (pushed value; resets when the bridge restarts). Removed on disconnect.", {"bridge_id", "outcome"})
+	m.bridge_http_retries = metrics.new_counter(reg, "heimdall_bridge_http_retries_total", "Bridge->hub HTTP retries and how retried requests ended (pushed value; resets when the bridge restarts). Removed on disconnect.", {"bridge_id", "outcome"})
+	m.bridge_breakers_open = metrics.new_gauge(reg, "heimdall_bridge_breakers_open", "Bridge dependency circuit breakers currently open. Removed on disconnect.", {"bridge_id"})
+	m.bridge_breaker_trips = metrics.new_counter(reg, "heimdall_bridge_breaker_trips_total", "Times a bridge dependency circuit breaker opened (pushed value; resets when the bridge restarts). Removed on disconnect.", {"bridge_id"})
 	// Pre-create the per-kind gauges so a zero is exposed from the first scrape.
 	for kind in ([]string{"bridge", "user", "agent_stream", "shell", "lsp"}) do metrics.with(m.ws_connections, kind)
 	if !collector_registered {
@@ -144,6 +158,10 @@ fleet_metrics_tombstone_bridge :: proc(bridge_id: string) {
 	metrics.remove_where(m.bridge_disk_free, 0, bridge_id)
 	metrics.remove_where(m.instance_resident, 0, bridge_id)
 	metrics.remove_where(m.instance_cpu, 0, bridge_id)
+	metrics.remove_where(m.bridge_dispatch, 0, bridge_id)
+	metrics.remove_where(m.bridge_http_retries, 0, bridge_id)
+	metrics.remove_where(m.bridge_breakers_open, 0, bridge_id)
+	metrics.remove_where(m.bridge_breaker_trips, 0, bridge_id)
 	for hook in bridge_tombstone_hooks do hook(bridge_id)
 }
 

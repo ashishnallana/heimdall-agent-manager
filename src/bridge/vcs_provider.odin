@@ -167,9 +167,19 @@ vcs_detect_provider :: proc(path: string) -> (VCS_Provider, bool) {
 // to git/jj; callers that need the failure detail (vcs_git_push/vcs_git_sync)
 // use this so git stderr is preserved for the error response. The returned
 // strings are owned by context.allocator; the caller must delete them.
-vcs_run_capture :: proc(args: []string) -> (out: string, err_out: string, ok: bool) {
+// Local git/jj calls are bounded at VCS_LOCAL_TIMEOUT. Calls that talk to a remote
+// (push, pull) get VCS_NETWORK_TIMEOUT, the same 120s the hub waits for them and the
+// dispatcher allows (REQ-ERR-PROTO-B).
+VCS_LOCAL_TIMEOUT :: 20 * time.Second
+VCS_NETWORK_TIMEOUT :: 120 * time.Second
+
+// vcs_process_runner is the subprocess runner behind vcs_run_capture; tests swap it
+// to observe the argv and budget an operation actually runs with.
+vcs_process_runner := bridge_process_run_capture
+
+vcs_run_capture :: proc(args: []string, timeout: time.Duration = VCS_LOCAL_TIMEOUT) -> (out: string, err_out: string, ok: bool) {
 	if len(args) == 0 do return "", "", false
-	out, err_out, ok, _ = bridge_process_run_capture(args, 20 * time.Second)
+	out, err_out, ok, _ = vcs_process_runner(args, timeout)
 	return
 }
 

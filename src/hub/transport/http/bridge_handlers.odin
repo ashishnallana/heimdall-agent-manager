@@ -227,7 +227,7 @@ bridge_fs_relay :: proc(h: ^Bridge_Handlers, req: Request, bridge_id, command_ty
 	if bridge.status != .Online || !project_service.bridge_runtime_registry_has_live(h.bridge_runtime_registry, bridge.bridge_id) do return "", false, domain.domain_error(.Bridge_Offline, fmt.tprintf("Bridge %s is not connected", bridge.bridge_id))
 	command_id := fmt.tprintf("cmd_fs_%d", time.to_unix_nanoseconds(time.now()))
 	cmd_body := bridge_fs_command_json(command_type, command_id, path)
-	reply, reply_ok, reply_err := bridge_runtime_service.send_runtime_command_wait(h.bridge_runtime_registry, project_service.Runtime_Command{bridge_id = bridge.bridge_id, command_id = command_id, body_json = cmd_body}, 10000)
+	reply, reply_ok, reply_err := bridge_runtime_service.send_runtime_command_wait(h.bridge_runtime_registry, project_service.Runtime_Command{bridge_id = bridge.bridge_id, command_id = command_id, body_json = cmd_body}, fs_command_timeout_ms(command_type))
 	if !reply_ok do return "", false, reply_err
 	// The bridge fs_* result IS the payload we return verbatim (already a flat JSON
 	// object with ok/path/entries/error). Strip nothing.
@@ -489,7 +489,7 @@ project_fs_relay :: proc(h: ^Bridge_Handlers, req: Request, cmd: Project_Fs_Comm
 	if bridge.status != .Online || !project_service.bridge_runtime_registry_has_live(h.bridge_runtime_registry, bridge.bridge_id) do return "", false, domain.domain_error(.Bridge_Offline, fmt.tprintf("Bridge %s is not connected", bridge.bridge_id))
 	command_id := fmt.tprintf("cmd_pfs_%d", time.to_unix_nanoseconds(time.now()))
 	cmd_body := project_fs_command_json(cmd, command_id, target.root_path)
-	reply, reply_ok, reply_err := bridge_runtime_service.send_runtime_command_wait(h.bridge_runtime_registry, project_service.Runtime_Command{bridge_id = bridge.bridge_id, command_id = command_id, body_json = cmd_body}, 10000)
+	reply, reply_ok, reply_err := bridge_runtime_service.send_runtime_command_wait(h.bridge_runtime_registry, project_service.Runtime_Command{bridge_id = bridge.bridge_id, command_id = command_id, body_json = cmd_body}, fs_command_timeout_ms(cmd.command_type))
 	if !reply_ok do return "", false, reply_err
 	return reply, true, domain.Domain_Error{}
 }
@@ -682,7 +682,7 @@ directory_fs_relay :: proc(h: ^Bridge_Handlers, req: Request, cmd: Project_Fs_Co
 
 	command_id := fmt.tprintf("cmd_cdfs_%d", time.to_unix_nanoseconds(time.now()))
 	cmd_body := project_fs_command_json(cmd, command_id, dir.path)
-	reply, reply_ok, reply_err := bridge_runtime_service.send_runtime_command_wait(h.bridge_runtime_registry, project_service.Runtime_Command{bridge_id = bridge.bridge_id, command_id = command_id, body_json = cmd_body}, 10000)
+	reply, reply_ok, reply_err := bridge_runtime_service.send_runtime_command_wait(h.bridge_runtime_registry, project_service.Runtime_Command{bridge_id = bridge.bridge_id, command_id = command_id, body_json = cmd_body}, fs_command_timeout_ms(cmd.command_type))
 	if !reply_ok do return "", false, reply_err
 	return reply, true, domain.Domain_Error{}
 }
@@ -860,6 +860,18 @@ project_vcs_relay :: proc(h: ^Bridge_Handlers, req: Request, cmd: Project_Vcs_Co
 	root_path, root_ok, root_err := project_vcs_effective_root(h, req, bridge.bridge_id, target.root_path)
 	if !root_ok do return "", false, root_err
 	return project_vcs_send(h, bridge.bridge_id, cmd, root_path)
+}
+
+// fs_command_timeout_ms is how long the hub waits for an fs_* command, and (sent as
+// timeout_ms) how long the bridge may spend on it (REQ-ERR-PROTO-B). Mutations get the
+// bridge's own 20s cap so a large recursive delete or batch write is not cut short;
+// reads stay at 10s.
+fs_command_timeout_ms :: proc(command_type: string) -> int {
+	switch command_type {
+	case "fs_make_dir", "fs_create_file", "fs_write_file", "fs_batch_write", "fs_move", "fs_delete":
+		return 20_000
+	}
+	return 10_000
 }
 
 vcs_command_timeout_ms :: proc(command_type: string) -> int {
@@ -1162,7 +1174,7 @@ instance_fs_relay :: proc(h: ^Bridge_Handlers, req: Request, cmd: Instance_Fs_Co
 	if bridge.status != .Online || !project_service.bridge_runtime_registry_has_live(h.bridge_runtime_registry, bridge.bridge_id) do return "", false, domain.domain_error(.Bridge_Offline, fmt.tprintf("Bridge %s is not connected", bridge.bridge_id))
 	command_id := fmt.tprintf("cmd_ifs_%d", time.to_unix_nanoseconds(time.now()))
 	cmd_body := instance_fs_command_json(cmd, command_id, inst.agent_instance_id)
-	reply, reply_ok, reply_err := bridge_runtime_service.send_runtime_command_wait(h.bridge_runtime_registry, project_service.Runtime_Command{bridge_id = bridge.bridge_id, command_id = command_id, body_json = cmd_body}, 10000)
+	reply, reply_ok, reply_err := bridge_runtime_service.send_runtime_command_wait(h.bridge_runtime_registry, project_service.Runtime_Command{bridge_id = bridge.bridge_id, command_id = command_id, body_json = cmd_body}, fs_command_timeout_ms(cmd.command_type))
 	if !reply_ok do return "", false, reply_err
 	return reply, true, domain.Domain_Error{}
 }
@@ -1516,7 +1528,7 @@ bridge_ws_runtime_loop :: proc(
 	defer bridge_chunk_reassemblies_free(&reassemblies)
 	for {
 		// 120s read deadline decoupled from the bridge's idle heartbeat cadence
-		// (BRIDGE_HUB_HEARTBEAT_INTERVAL = 45s): a single delayed/dropped heartbeat
+		// (BRIDGE_HEARTBEAT_INTERVAL_SECONDS = 45s): a single delayed/dropped heartbeat
 		// still leaves a full extra beat of margin before we treat the bridge as
 		// gone, so we never tear down a healthy connection at the cadence edge.
 		text, ok, read_reason := bridge_ws_read_frame(reader, 120 * time.Second)
@@ -1603,6 +1615,7 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
 	case "bridge_heartbeat":
 		metrics.gauge_set(metrics.with(project_service.fleet_metrics.bridge_last_heartbeat, bridge_id), time.now()._nsec / 1_000_000_000)
 		_ = bridge_apply_heartbeat_stats(bridge_id, text, connection)
+		bridge_apply_heartbeat_reliability(bridge_id, text)
 		project_service.bridge_runtime_registry_set_task_chain_search_status(
 			h.bridge_runtime_registry, bridge_id, connection_generation,
 			json_bool_value(text, "task_chain_search_ready"), json_bool_value(text, "task_chain_search_stale"),
@@ -2350,13 +2363,19 @@ json_key_present :: proc(body, key: string) -> bool {
 	return jsonx.has_key(body, key)
 }
 
+// BRIDGE_HEARTBEAT_INTERVAL_SECONDS is the heartbeat cadence bridge_ready asks for
+// and the bridge follows (REQ-ERR-PROTO-B). Heartbeats are a reconciliation backstop
+// (status changes are pushed as they happen), so 45s keeps idle traffic low while a
+// missed beat stays well inside the 120s read deadline.
+BRIDGE_HEARTBEAT_INTERVAL_SECONDS :: 45
+
 // heartbeat_stats tells the bridge whether to attach resource stats to its
 // heartbeats (plan 4.3): false only when the owner set telemetry_enabled=disabled.
 bridge_ready_payload :: proc(bridge_id: string, generation: int, replaced: bool, catalog_etag: string = "", heartbeat_stats := true) -> string {
 	b := strings.builder_make()
 	strings.write_string(&b, "{\"type\":\"bridge_ready\",\"protocol_version\":1,\"payload\":{\"bridge_id\":\"")
 	write_handler_json_string(&b, bridge_id)
-	strings.write_string(&b, "\",\"heartbeat_interval_seconds\":15,\"command_ack_timeout_seconds\":10,\"connection_generation\":")
+	strings.write_string(&b, fmt.tprintf("\",\"heartbeat_interval_seconds\":%d,\"command_ack_timeout_seconds\":10,\"connection_generation\":", BRIDGE_HEARTBEAT_INTERVAL_SECONDS))
 	strings.write_string(&b, fmt.tprintf("%d", generation))
 	strings.write_string(&b, ",\"replaced_existing\":")
 	strings.write_string(&b, "true" if replaced else "false")

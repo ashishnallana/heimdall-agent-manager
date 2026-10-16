@@ -223,6 +223,18 @@ fleet_panels = [
           desc="Count-weighted warn+error events per bridge per hour (heimdall_bridge_errors_by_bridge_total). Codes are on the Bridge Events dashboard."),
     panel("Errors/s by code (fleet)", [('sum by (code) (rate(heimdall_bridge_errors_total[15m]))', "{{code}}")], 12, 86, unit="ops"),
     logs_panel("Recent events for the selected bridge(s)", '{job="heimdall-bridge"} bridge_id:~"$bridge"', 0, 94, w=24, h=12),
+
+    # REQ-ERR-PROTO-B: error classes and overload signals end to end.
+    row("Errors, retries and overload", 106),
+    panel("API errors/s by class and code", [('sum by (class, code) (rate(heimdall_errors_total[5m]))', "{{class}} {{code}}")], 0, 107, unit="ops",
+          desc="Hub API error answers (heimdall_errors_total). retriable = the caller may retry; recoverable = needs a user/config fix; fatal = give up."),
+    panel("Bridge retries, shed load and open breakers", [
+        ('sum by (outcome) (rate(heimdall_bridge_http_retries_total{' + BRIDGE_SEL + '}[5m]))', "http {{outcome}}"),
+        ('sum by (outcome) (rate(heimdall_bridge_dispatch_total{outcome=~"shed|deadline_expired",' + BRIDGE_SEL + '}[5m]))', "dispatch {{outcome}}"),
+        ('sum(rate(heimdall_bridge_breaker_trips_total{' + BRIDGE_SEL + '}[5m]))', "breaker trips"),
+        ('sum(heimdall_bridge_breakers_open{' + BRIDGE_SEL + '})', "breakers open"),
+    ], 12, 107, unit="short",
+          desc="From bridge heartbeats. http retry/recovered/gave_up/deferred: bridge->hub HTTP retries; shed: commands refused busy; deadline_expired: dropped after the hub stopped waiting."),
 ]
 
 fleet = dict(dashboard)

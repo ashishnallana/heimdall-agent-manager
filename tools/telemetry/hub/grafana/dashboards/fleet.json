@@ -1259,6 +1259,130 @@
       ],
       "title": "Recent events for the selected bridge(s)",
       "type": "logs"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 106
+      },
+      "id": 59,
+      "panels": [],
+      "title": "Errors, retries and overload",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "heimdall-prometheus"
+      },
+      "description": "Hub API error answers (heimdall_errors_total). retriable = the caller may retry; recoverable = needs a user/config fix; fatal = give up.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 107
+      },
+      "id": 60,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "sum by (class, code) (rate(heimdall_errors_total[5m]))",
+          "legendFormat": "{{class}} {{code}}",
+          "refId": "A"
+        }
+      ],
+      "title": "API errors/s by class and code",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "heimdall-prometheus"
+      },
+      "description": "From bridge heartbeats. http retry/recovered/gave_up/deferred: bridge->hub HTTP retries; shed: commands refused busy; deadline_expired: dropped after the hub stopped waiting.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 107
+      },
+      "id": 61,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "sum by (outcome) (rate(heimdall_bridge_http_retries_total{bridge_id=~\"$bridge\"}[5m]))",
+          "legendFormat": "http {{outcome}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "sum by (outcome) (rate(heimdall_bridge_dispatch_total{outcome=~\"shed|deadline_expired\",bridge_id=~\"$bridge\"}[5m]))",
+          "legendFormat": "dispatch {{outcome}}",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "sum(rate(heimdall_bridge_breaker_trips_total{bridge_id=~\"$bridge\"}[5m]))",
+          "legendFormat": "breaker trips",
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "heimdall-prometheus"
+          },
+          "expr": "sum(heimdall_bridge_breakers_open{bridge_id=~\"$bridge\"})",
+          "legendFormat": "breakers open",
+          "refId": "D"
+        }
+      ],
+      "title": "Bridge retries, shed load and open breakers",
+      "type": "timeseries"
     }
   ],
   "refresh": "30s",

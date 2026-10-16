@@ -3,6 +3,7 @@ package bridge_runtime
 import "base:runtime"
 import "core:net"
 import "core:fmt"
+import "core:strconv"
 import "core:strings"
 import "core:sync"
 import "core:time"
@@ -92,11 +93,12 @@ send_runtime_command_wait :: proc(ctx: rawptr, command: project_service.Runtime_
 	// can't interleave on the shared socket). The lock is released before the poll
 	// below — holding it across the wait would stall the loop's heartbeat/state acks
 	// and could deadlock command delivery.
-	wrote := write_ws_command(socket, command.body_json)
+	body := runtime_command_with_timeout(command.body_json, timeout_ms)
+	wrote := write_ws_command(socket, body)
 	if wrote == .Send_Failed do _ = net.shutdown(net.Any_Socket(socket), .Both)
 	sync.unlock(writer_mu)
 	if wrote != .Ok do return "", false, command_write_error(wrote)
-	command_kind := bridge_command_track_sent(connection, command.body_json)
+	command_kind := bridge_command_track_sent(connection, body)
 	started := time.tick_now()
 	result_text, result_ok, result_err := send_runtime_command_wait_result(registry, connection, command, generation, timeout_ms)
 	metrics.observe_duration(metrics.with(project_service.fleet_metrics.bridge_command_duration, command_kind), time.tick_since(started))
@@ -105,6 +107,72 @@ send_runtime_command_wait :: proc(ctx: rawptr, command: project_service.Runtime_
 		metrics.counter_inc(metrics.with(project_service.fleet_metrics.bridge_command_errors, command_kind, project_service.bridge_command_error_code(code_name)))
 	}
 	return result_text, result_ok, result_err
+}
+
+// runtime_command_with_timeout tells the bridge how long the hub will wait for this
+// command (REQ-ERR-PROTO-B), so a command still queued on the bridge when the hub has
+// given up is dropped there instead of run for nobody. The bridge takes the smaller
+// of this and its own per-command cap. Only the TOP-LEVEL timeout_ms counts: one the
+// body already carries is lowered to the hub's wait (never raised), and a timeout_ms
+// nested in params or quoted in content is ignored. Temp-allocated when it changes
+// the body.
+runtime_command_with_timeout :: proc(body_json: string, timeout_ms: int) -> string {
+	body := strings.trim_right_space(body_json)
+	if timeout_ms <= 0 || len(body) < 2 || body[0] != '{' || body[len(body) - 1] != '}' do return body_json
+	value_start, value_end, found := json_top_level_value_span(body, "timeout_ms")
+	if !found {
+		if strings.trim_space(body[1:len(body) - 1]) == "" do return fmt.tprintf("{{\"timeout_ms\":%d}}", timeout_ms)
+		return fmt.tprintf("%s,\"timeout_ms\":%d}}", body[:len(body) - 1], timeout_ms)
+	}
+	existing, ok := strconv.parse_int(body[value_start:value_end])
+	if ok && existing > 0 && existing <= timeout_ms do return body_json
+	return fmt.tprintf("%s%d%s", body[:value_start], timeout_ms, body[value_end:])
+}
+
+// json_top_level_value_span finds `key` among the members of the object `body` (not
+// inside nested objects/arrays or string values) and returns the byte span of its
+// scalar value.
+@(private = "file")
+json_top_level_value_span :: proc(body, key: string) -> (start, end: int, found: bool) {
+	depth := 0
+	expect_key := false
+	i := 0
+	for i < len(body) {
+		c := body[i]
+		switch c {
+		case '{', '[':
+			depth += 1
+			expect_key = c == '{' && depth == 1
+			i += 1
+		case '}', ']':
+			depth -= 1
+			i += 1
+		case ',':
+			if depth == 1 do expect_key = true
+			i += 1
+		case '"':
+			j := i + 1
+			for j < len(body) && body[j] != '"' {
+				if body[j] == '\\' do j += 1
+				j += 1
+			}
+			if j >= len(body) do return 0, 0, false
+			if depth == 1 && expect_key {
+				expect_key = false
+				if body[i + 1:j] == key {
+					k := j + 1
+					for k < len(body) && (body[k] == ' ' || body[k] == '\t' || body[k] == '\n' || body[k] == '\r' || body[k] == ':') do k += 1
+					e := k
+					for e < len(body) && body[e] != ',' && body[e] != '}' && body[e] != ' ' && body[e] != '\n' && body[e] != '\r' && body[e] != '\t' do e += 1
+					return k, e, true
+				}
+			}
+			i = j + 1
+		case:
+			i += 1
+		}
+	}
+	return 0, 0, false
 }
 
 // send_runtime_command_wait_result is the wait half of send_runtime_command_wait,

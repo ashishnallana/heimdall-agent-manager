@@ -6,6 +6,7 @@ import base64 "core:encoding/base64"
 import "core:encoding/hex"
 import "core:encoding/json"
 import "core:fmt"
+import "core:math/rand"
 import "core:net"
 import "core:os"
 import "core:strconv"
@@ -413,7 +414,7 @@ bridge_hub_runtime_worker :: proc() {
 		return
 	}
 	// Only log each distinct failure the FIRST time (and periodically) so a down
-	// proxy/tunnel doesn't spam the log every 500ms, but the operator still sees
+	// proxy/tunnel doesn't spam the log on every reconnect, but the operator still sees
 	// exactly which step is failing.
 	// The structured twin of each line is a blog_warn (bridge_log relay): it is
 	// rate-limited by the same rule, dedup'd into `count` in the ring, and ships
@@ -422,6 +423,7 @@ bridge_hub_runtime_worker :: proc() {
 	last_failure := ""
 	defer delete(last_failure)
 	attempts := 0
+	reconnect_failures := 0 // consecutive attempts that did not reach bridge_ready
 	log_failure :: proc(last: ^string, count: ^int, msg: string, code: Blog_Code, fields: ..Blog_Field) {
 		count^ += 1
 		if msg != last^ || count^ % 20 == 1 {
@@ -446,14 +448,14 @@ bridge_hub_runtime_worker :: proc() {
 			} else {
 				log_failure(&last_failure, &attempts, fmt.tprintf("cannot connect WS %s — %s", ws_url, connect_err), code, blog_sym(.stage, stage), blog_sym(.reason, why))
 			}
-			time.sleep(500 * time.Millisecond)
+			bridge_hub_reconnect_sleep(&reconnect_failures)
 			continue
 		}
 		hello := bridge_hub_hello_json()
 		if !ws.send_text(&conn, hello) {
 			log_failure(&last_failure, &attempts, "WS connected but sending hello failed (connection dropped immediately)", .hub_connect_failed, blog_sym(.stage, .hello), blog_sym(.reason, .write_error))
 			bridge_hub_connection_teardown(&conn)
-			time.sleep(500 * time.Millisecond)
+			bridge_hub_reconnect_sleep(&reconnect_failures)
 			continue
 		}
 		ready_deadline := time.to_unix_nanoseconds(time.now()) + i64(5 * time.Second)
@@ -474,6 +476,7 @@ bridge_hub_runtime_worker :: proc() {
 					hub_catalog_etag = extract_json_string(text, "catalog_etag", "")
 					// Absent on older hubs -> keep the default (on).
 					bridge_heartbeat_stats_set_enabled(extract_json_bool(text, "heartbeat_stats", true))
+					bridge_hub_set_heartbeat_interval(extract_json_int(text, "heartbeat_interval_seconds", 0))
 					ready = true
 					delete(msg_type)
 					delete(text)
@@ -493,7 +496,7 @@ bridge_hub_runtime_worker :: proc() {
 		}
 		if ready {
 			fmt.println("bridge hub runtime ready")
-			delete(last_failure); last_failure = ""; attempts = 0
+			delete(last_failure); last_failure = ""; attempts = 0; reconnect_failures = 0
 			if bridge_provider_catalog_needs_sync(hub_catalog_etag) {
 				request := bridge_provider_catalog_request_json()
 				_ = ws.send_text(&conn, request)
@@ -542,8 +545,19 @@ bridge_hub_runtime_worker :: proc() {
 			log_failure(&last_failure, &attempts, "no bridge_ready within 5s after hello — hub didn't accept the session (slow link over the tunnel, or hub-side rejection)", .hub_ready_timeout, blog_sym(.stage, .ready))
 		}
 		bridge_hub_connection_teardown(&conn)
-		time.sleep(500 * time.Millisecond)
+		bridge_hub_reconnect_sleep(&reconnect_failures)
 	}
+}
+
+// REQ-ERR-PROTO-B: reconnects back off exponentially from 500ms to 30s with +-20%
+// jitter, so a hub restart is not met by every bridge redialling twice a second in
+// lockstep. The count resets once a connection reaches bridge_ready, so the first
+// redial after a healthy session ends still comes after ~500ms.
+BRIDGE_HUB_RECONNECT_BACKOFF :: Bridge_Backoff_Policy{base_ms = 500, max_ms = 30_000, jitter_pct = 20}
+
+bridge_hub_reconnect_sleep :: proc(failures: ^int) {
+	failures^ += 1
+	time.sleep(time.Duration(bridge_backoff_delay_ms(BRIDGE_HUB_RECONNECT_BACKOFF, failures^, rand.uint64())) * time.Millisecond)
 }
 
 // A bridge_error is a post-upgrade protocol error, not proof that bearer-token
@@ -567,7 +581,24 @@ bridge_hub_error_log_message :: proc(text: string) -> string {
 // spurious disconnect, and below the 90s stale-reap window so reconciliation stays
 // timely. schedules_version rides the heartbeat ack, so this also bounds
 // scheduled-prompt pickup latency (~45s), which is fine for cron/interval work.
+//
+// That is the default; the hub's bridge_ready heartbeat_interval_seconds overrides
+// it (REQ-ERR-PROTO-B), clamped so a bad value can neither flood the hub nor let the
+// connection go quiet past its read deadline.
 BRIDGE_HUB_HEARTBEAT_INTERVAL :: 45 * time.Second
+BRIDGE_HUB_HEARTBEAT_INTERVAL_MIN_S :: 5
+BRIDGE_HUB_HEARTBEAT_INTERVAL_MAX_S :: 60
+
+bridge_hub_heartbeat_interval_ns := i64(BRIDGE_HUB_HEARTBEAT_INTERVAL)
+
+// bridge_hub_set_heartbeat_interval applies bridge_ready's heartbeat_interval_seconds;
+// 0 (an older hub that does not send it) restores the default.
+bridge_hub_set_heartbeat_interval :: proc(seconds: int) {
+	interval := i64(BRIDGE_HUB_HEARTBEAT_INTERVAL)
+	if seconds > 0 do interval = i64(clamp(seconds, BRIDGE_HUB_HEARTBEAT_INTERVAL_MIN_S, BRIDGE_HUB_HEARTBEAT_INTERVAL_MAX_S)) * i64(time.Second)
+	sync.atomic_store(&bridge_hub_heartbeat_interval_ns, interval)
+}
+
 BRIDGE_HUB_INBOUND_BUDGET :: 32
 
 bridge_hub_runtime_loop :: proc(conn: ^ws.Connection) {
@@ -645,7 +676,7 @@ bridge_hub_runtime_loop :: proc(conn: ^ws.Connection) {
 		// not on the next heartbeat.
 		bridge_runtime_drain_status_pushes(conn)
 		now := time.to_unix_nanoseconds(time.now())
-		if now - last_heartbeat >= i64(BRIDGE_HUB_HEARTBEAT_INTERVAL) {
+		if now - last_heartbeat >= sync.atomic_load(&bridge_hub_heartbeat_interval_ns) {
 			hb := bridge_hub_heartbeat_json()
 			_ = ws.send_text(conn, hb)
 			delete(hb)
@@ -3045,6 +3076,8 @@ bridge_hub_heartbeat_json :: proc() -> string {
 	defer delete(dispatch_metrics)
 	breaker_metrics := bridge_dependency_breaker_metrics_json()
 	defer delete(breaker_metrics)
+	retry_metrics := bridge_http_retry_metrics_json()
+	defer delete(retry_metrics)
 	// REQ-BVS-1: read the vault tri-state BEFORE taking bridge_runtime_mutex.
 	// bridge_vault_status() touches the kernel keyring and the filesystem, and no
 	// blocking I/O belongs inside a lock the per-instance reporters also contend on.
@@ -3068,6 +3101,8 @@ bridge_hub_heartbeat_json :: proc() -> string {
 	strings.write_string(&b, dispatch_metrics)
 	strings.write_string(&b, ",\"dependency_breakers\":")
 	strings.write_string(&b, breaker_metrics)
+	strings.write_string(&b, ",\"http_retries\":")
+	strings.write_string(&b, retry_metrics)
 	if stats != "" {
 		strings.write_string(&b, ",\"stats\":")
 		strings.write_string(&b, stats)

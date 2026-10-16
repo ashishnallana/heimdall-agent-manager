@@ -417,7 +417,7 @@ vcs_git_commit :: proc(path, message: string, amend: bool = false) -> (ok: bool)
 // "push_failed" plus a stderr excerpt (vcs_error_detail) so the failure response
 // can show WHY the push failed instead of only the generic message.
 vcs_git_push :: proc(path: string) -> (ok: bool, code: string, detail: string) {
-	out, stderr, rok := vcs_run_capture([]string{"git", "-C", path, "push"})
+	out, stderr, rok := vcs_run_capture([]string{"git", "-C", path, "push"}, VCS_NETWORK_TIMEOUT)
 	if len(out) > 0 do delete(out)
 	if !rok {
 		d := vcs_error_detail(stderr)
@@ -431,7 +431,7 @@ vcs_git_push :: proc(path: string) -> (ok: bool, code: string, detail: string) {
 // vcs_git_sync pulls latest changes from upstream with rebase. Same (code,
 // detail) convention as vcs_git_push ("sync_failed").
 vcs_git_sync :: proc(path: string) -> (ok: bool, code: string, detail: string) {
-	out, stderr, rok := vcs_run_capture([]string{"git", "-C", path, "pull", "--rebase"})
+	out, stderr, rok := vcs_run_capture([]string{"git", "-C", path, "pull", "--rebase"}, VCS_NETWORK_TIMEOUT)
 	if len(out) > 0 do delete(out)
 	if !rok {
 		d := vcs_error_detail(stderr)

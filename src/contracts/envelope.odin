@@ -25,6 +25,7 @@ API_Error :: struct {
 	details_json: string,
 	class:   string, // Bridge_Error_Class name; omitted when ""
 	cause:   string, // fine-grained reason; omitted when ""
+	retry_after_ms: i64, // overload back-off floor; omitted when 0
 }
 
 API_Sort_Direction :: enum {
@@ -113,6 +114,7 @@ api_error_json :: proc(err: API_Error, meta: API_Meta) -> string {
 		write_json_string(&builder, err.cause)
 		strings.write_string(&builder, "\"")
 	}
+	if err.retry_after_ms > 0 do fmt.sbprintf(&builder, ",\"retry_after_ms\":%d", err.retry_after_ms)
 	strings.write_string(&builder, ",\"details\":")
 	write_json_value_or_object(&builder, details)
 	strings.write_string(&builder, "},\"meta\":")

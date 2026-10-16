@@ -6,6 +6,7 @@ import "core:strings"
 import "core:sync"
 import "core:thread"
 import "core:time"
+import jsonx "odin_test:lib/jsonx"
 import ws "odin_test:lib/ws"
 
 // Commands known to perform process, PTY-host, filesystem, or network waits are
@@ -246,8 +247,12 @@ bridge_command_spec :: proc(command_type: string) -> (Bridge_Command_Spec, bool)
 		return Bridge_Command_Spec{class = .General_IO, priority = .Interactive, key_kind = .Filesystem, queued = true, requires_id = true, timeout_ms = 20_000, cost_units = 8}, true
 	case "vcs_capabilities", "vcs_status", "vcs_files", "vcs_diff", "vcs_log", "vcs_commit_diff", "vcs_workspaces":
 		return Bridge_Command_Spec{class = .General_IO, priority = .Background, key_kind = .VCS, queued = true, requires_id = true, timeout_ms = 20_000, cost_units = 8, retry_safe = true}, true
-	case "vcs_stage", "vcs_unstage", "vcs_revert", "vcs_save_file", "vcs_commit", "vcs_upload", "vcs_push", "vcs_sync", "vcs_pull":
+	case "vcs_stage", "vcs_unstage", "vcs_revert", "vcs_save_file", "vcs_commit":
 		return Bridge_Command_Spec{class = .General_IO, priority = .Interactive, key_kind = .VCS, queued = true, requires_id = true, timeout_ms = 30_000, cost_units = 16}, true
+	case "vcs_upload", "vcs_push", "vcs_sync", "vcs_pull":
+		// Network round trips to the remote: the hub waits 120s for these
+		// (vcs_command_timeout_ms), so the bridge deadline matches it (REQ-ERR-PROTO-B).
+		return Bridge_Command_Spec{class = .General_IO, priority = .Interactive, key_kind = .VCS, queued = true, requires_id = true, timeout_ms = 120_000, cost_units = 16}, true
 	case "get_shell_output", "shell_pty_input", "shell_pty_resize", "shell_start", "shell_background", "shell_restart", "shell_set_port", "shell_list", "shell_logs", "shell_capture", "shell_get_pane":
 		return Bridge_Command_Spec{class = .Shell, priority = .Interactive, key_kind = .Shell, queued = true, requires_id = true, timeout_ms = 30_000, cost_units = 4}, true
 	}
@@ -429,6 +434,15 @@ bridge_command_dispatch_resolve_id :: proc(command_type, text: string) -> (id: s
 	return "", false
 }
 
+// bridge_command_budget_ms is how long a queued command may wait and run: the hub's
+// top-level timeout_ms (how long it will wait for the result, REQ-ERR-PROTO-B), capped
+// by the command's own spec. A timeout_ms inside the command's params is not its budget.
+bridge_command_budget_ms :: proc(text: string, spec: Bridge_Command_Spec) -> int {
+	timeout_ms := jsonx.extract_int(text, "timeout_ms", spec.timeout_ms, top_level_only = true)
+	if timeout_ms <= 0 || timeout_ms > spec.timeout_ms do timeout_ms = spec.timeout_ms
+	return timeout_ms
+}
+
 bridge_command_dispatch :: proc(conn: ^ws.Connection, text: string, generation: i64) -> bool {
 	command_type := extract_json_string(text, "type", "")
 	defer delete(command_type)
@@ -458,8 +472,7 @@ bridge_command_dispatch :: proc(conn: ^ws.Connection, text: string, generation: 
 	ordering_key := bridge_command_ordering_key(command_type, text)
 	defer delete(ordering_key)
 
-	timeout_ms := extract_json_int(text, "timeout_ms", spec.timeout_ms)
-	if timeout_ms <= 0 || timeout_ms > spec.timeout_ms do timeout_ms = spec.timeout_ms
+	timeout_ms := bridge_command_budget_ms(text, spec)
 	now_ns := time.to_unix_nanoseconds(time.now())
 	deadline := now_ns + i64(time.Duration(timeout_ms) * time.Millisecond)
 	owned_bytes := len(text) + len(command_id) + len(command_type)

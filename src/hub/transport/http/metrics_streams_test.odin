@@ -357,7 +357,13 @@ test_metrics_shell_stream_connection_lifecycle_and_bytes :: proc(t: ^testing.T) 
 		return metrics.counter_value(w.s) >= w.want
 	}, rawptr(&rx_wait), 3 * time.Second), "ws_bytes_total{shell,rx,bridge} must count the input frame payload")
 	testing.expect_value(t, metrics.counter_value(rx_series) - rx_before, u64(len(input_json)))
-	testing.expect(t, metrics.counter_value(shell_session_svc.shell_metrics.input_bytes) - input_before >= 6, "shell_input_bytes_total must count the decoded keystrokes")
+	// The handler counts rx bytes before it decodes the frame and counts input bytes,
+	// so wait for the input counter too rather than racing the handler thread.
+	input_wait := Rx_Wait{s = shell_session_svc.shell_metrics.input_bytes, want = input_before + 6}
+	testing.expect(t, tm_wait_until(proc(ctx: rawptr) -> bool {
+		w := (^Rx_Wait)(ctx)
+		return metrics.counter_value(w.s) >= w.want
+	}, rawptr(&input_wait), 3 * time.Second), "shell_input_bytes_total must count the decoded keystrokes")
 
 	// Disconnect: gauge returns to the invariant and a disconnect is recorded.
 	net.close(pair.client); pair.client = net.TCP_Socket(0)
@@ -597,7 +603,14 @@ test_metrics_lsp_sessions_gauge_and_connection_lifecycle :: proc(t: ^testing.T) 
 	ready, read_ok := tm_read_upgrade_and_frame(pair.client, 5 * time.Second)
 	testing.expect(t, read_ok, "upgrade + ready must arrive")
 	if read_ok {
-		testing.expect(t, metrics.counter_value(tx_series) - tx_before >= u64(len(ready)), "ws_bytes_total{lsp,tx} must count the ready frame")
+		// The handler counts tx bytes after its write returns, so the client can read the
+		// frame first: wait for the counter instead of racing the handler thread.
+		Tx_Wait :: struct { s: ^metrics.Series, want: u64 }
+		tx_wait := Tx_Wait{s = tx_series, want = tx_before + u64(len(ready))}
+		testing.expect(t, tm_wait_until(proc(ctx: rawptr) -> bool {
+			w := (^Tx_Wait)(ctx)
+			return metrics.counter_value(w.s) >= w.want
+		}, rawptr(&tx_wait), 3 * time.Second), "ws_bytes_total{lsp,tx} must count the ready frame")
 		delete(ready)
 	}
 	during := tm_ws_snapshot(project_service.WS_KIND_LSP)
