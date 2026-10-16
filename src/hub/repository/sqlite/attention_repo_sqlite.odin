@@ -1,5 +1,6 @@
 package sqlite
 
+import "core:strings"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 
@@ -20,6 +21,9 @@ new_attention_repository :: proc(impl: ^Attention_Repo_SQLite, conn: ^Conn) -> i
 		list_actionable_instance_ids = attention_list_actionable_instance_ids_sqlite,
 		list_live_cards              = attention_list_live_cards_sqlite,
 		list_owners                  = attention_list_owners_sqlite,
+		list_cards                   = attention_list_cards_sqlite,
+		count                        = attention_count_sqlite,
+		resolve_context              = attention_resolve_context_sqlite,
 	}
 }
 
@@ -187,4 +191,93 @@ attention_list_owners_sqlite :: proc(ctx: rawptr) -> ([]domain.User_ID, domain.D
 		if owner != "" do append(&out, domain.User_ID(owner))
 	}
 	return out[:], domain.Domain_Error{}
+}
+
+// ---- attention API reads ----
+
+// LIVE_CARD_WHERE: pending, or snoozed with a snooze that expired by now (the
+// last bound parameter). Only the kinds the deck serves are ever counted.
+@(private="file")
+LIVE_CARD_WHERE :: ` (status = 'pending' OR (status = 'snoozed' AND snooze_until != '' AND snooze_until <= ?))`
+
+attention_list_cards_sqlite :: proc(ctx: rawptr, owner_user_id: domain.User_ID, kind, cutoff, now: string, limit: int) -> ([]domain.Card, domain.Domain_Error) {
+	impl, ok := attention_repo_open(ctx)
+	if !ok do return nil, not_open()
+	stmt: sqlite3_stmt = nil
+	query := "SELECT " + CARD_COLUMNS + " FROM cards WHERE owner_user_id = ? AND kind = ? AND attention_since >= ? AND" + LIVE_CARD_WHERE + " ORDER BY attention_since ASC, card_id ASC LIMIT ?;"
+	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK {
+		return nil, domain.domain_error(.Internal_Error, "failed to prepare attention card list")
+	}
+	defer sqlite3_finalize(stmt)
+	bind_text(stmt, 1, string(owner_user_id))
+	bind_text(stmt, 2, kind)
+	bind_text(stmt, 3, cutoff)
+	bind_text(stmt, 4, now)
+	sqlite3_bind_int64(stmt, 5, i64(limit))
+	out := make([dynamic]domain.Card)
+	for sqlite3_step(stmt) == SQLITE_ROW do append(&out, card_from_stmt(stmt))
+	return out[:], domain.Domain_Error{}
+}
+
+attention_count_sqlite :: proc(ctx: rawptr, owner_user_id: domain.User_ID, cutoff, now: string) -> (iface.Attention_Counts, domain.Domain_Error) {
+	impl, ok := attention_repo_open(ctx)
+	if !ok do return {}, not_open()
+	stmt: sqlite3_stmt = nil
+	query := "SELECT kind, SUM(CASE WHEN attention_since >= ? THEN 1 ELSE 0 END), SUM(CASE WHEN attention_since < ? THEN 1 ELSE 0 END) FROM cards WHERE owner_user_id = ? AND kind IN ('message', 'task') AND" + LIVE_CARD_WHERE + " GROUP BY kind;"
+	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK {
+		return {}, domain.domain_error(.Internal_Error, "failed to prepare attention count")
+	}
+	defer sqlite3_finalize(stmt)
+	bind_text(stmt, 1, cutoff)
+	bind_text(stmt, 2, cutoff)
+	bind_text(stmt, 3, string(owner_user_id))
+	bind_text(stmt, 4, now)
+	counts: iface.Attention_Counts
+	for sqlite3_step(stmt) == SQLITE_ROW {
+		kind := column_text_unowned(stmt, 0)
+		in_range := int(sqlite3_column_int64(stmt, 1))
+		counts.older += int(sqlite3_column_int64(stmt, 2))
+		switch kind {
+		case domain.CARD_KIND_MESSAGE: counts.message = in_range
+		case domain.CARD_KIND_TASK:    counts.task = in_range
+		}
+	}
+	return counts, domain.Domain_Error{}
+}
+
+// attention_lookup_pairs runs "SELECT key, value FROM <from> WHERE owner_user_id
+// = ? AND key IN (...)" once and fills out. Empty ids is a no-op.
+@(private="file")
+attention_lookup_pairs :: proc(impl: ^Attention_Repo_SQLite, select_from: string, owner_user_id: domain.User_ID, ids: []string, out: ^map[string]string) -> domain.Domain_Error {
+	if len(ids) == 0 do return domain.Domain_Error{}
+	qs := make([dynamic]string, 0, len(ids), context.temp_allocator)
+	for _ in ids do append(&qs, "?")
+	query := strings.concatenate({select_from, " IN (", strings.join(qs[:], ",", context.temp_allocator), ");"}, context.temp_allocator)
+	stmt: sqlite3_stmt = nil
+	if sqlite3_prepare_v2(impl.conn.db, strings.clone_to_cstring(query, context.temp_allocator), -1, &stmt, nil) != SQLITE_OK {
+		return domain.domain_error(.Internal_Error, "failed to prepare attention context lookup")
+	}
+	defer sqlite3_finalize(stmt)
+	bind_text(stmt, 1, string(owner_user_id))
+	for id, i in ids do bind_text(stmt, 2 + i, id)
+	for sqlite3_step(stmt) == SQLITE_ROW do out[column_text(stmt, 0)] = column_text(stmt, 1)
+	return domain.Domain_Error{}
+}
+
+attention_resolve_context_sqlite :: proc(ctx: rawptr, owner_user_id: domain.User_ID, conversation_ids, chain_ids, instance_ids: []string) -> (iface.Attention_Context, domain.Domain_Error) {
+	impl, ok := attention_repo_open(ctx)
+	if !ok do return {}, not_open()
+	out := iface.Attention_Context{
+		conversation_chain = make(map[string]string),
+		chain_title        = make(map[string]string),
+		instance_name      = make(map[string]string),
+	}
+	if err := attention_lookup_pairs(impl, "SELECT conversation_id, chain_id FROM chat_conversations WHERE owner_user_id = ? AND conversation_id", owner_user_id, conversation_ids, &out.conversation_chain); err.code != .None do return out, err
+	// Chains named directly plus the chains behind the conversations.
+	all_chains := make([dynamic]string, 0, len(chain_ids) + len(out.conversation_chain), context.temp_allocator)
+	append(&all_chains, ..chain_ids)
+	for _, chain_id in out.conversation_chain do if chain_id != "" do append(&all_chains, chain_id)
+	if err := attention_lookup_pairs(impl, "SELECT chain_id, title FROM task_chains WHERE owner_user_id = ? AND chain_id", owner_user_id, all_chains[:], &out.chain_title); err.code != .None do return out, err
+	if err := attention_lookup_pairs(impl, "SELECT agent_instance_id, display_name FROM agent_instances WHERE owner_user_id = ? AND agent_instance_id", owner_user_id, instance_ids, &out.instance_name); err.code != .None do return out, err
+	return out, domain.Domain_Error{}
 }

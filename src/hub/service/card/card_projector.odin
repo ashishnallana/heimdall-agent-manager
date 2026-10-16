@@ -243,7 +243,9 @@ build_message_card :: proc(s: ^Card_Service, msg: domain.Chat_Message, other_unr
 	contracts.write_json_string(&details, msg.created_at)
 	strings.write_string(&details, `"},"options":`)
 	write_message_options(&details, msg.metadata_json)
-	strings.write_string(&details, fmt.tprintf(`,"other_unread":%d}`, other_unread))
+	strings.write_string(&details, `,"other_unread":`)
+	strings.write_int(&details, other_unread)
+	strings.write_byte(&details, '}')
 
 	return domain.Card{
 		owner_user_id    = msg.owner_user_id,

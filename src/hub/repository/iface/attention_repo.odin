@@ -34,6 +34,34 @@ Attention_List_Live_Cards_Proc :: proc(ctx: rawptr, owner_user_id: domain.User_I
 
 Attention_List_Owners_Proc :: proc(ctx: rawptr) -> ([]domain.User_ID, domain.Domain_Error)
 
+// ---- attention API reads ----
+
+// A card is LIVE for the deck when it is pending, or snoozed with a snooze that
+// has expired as of now. cutoff is the RFC3339 lower bound on attention_since
+// ('' = all time).
+
+// Attention_Counts: live cards per kind with attention_since >= cutoff, plus
+// older = live cards (any served kind) older than cutoff.
+Attention_Counts :: struct {
+	message: int,
+	task:    int,
+	older:   int,
+}
+
+// Attention_List_Cards_Proc lists one kind's live cards in range, oldest first
+// (attention_since ASC, card_id ASC), at most limit.
+Attention_List_Cards_Proc :: proc(ctx: rawptr, owner_user_id: domain.User_ID, kind, cutoff, now: string, limit: int) -> ([]domain.Card, domain.Domain_Error)
+Attention_Count_Proc :: proc(ctx: rawptr, owner_user_id: domain.User_ID, cutoff, now: string) -> (Attention_Counts, domain.Domain_Error)
+
+// Attention_Context resolves display context in batch (one query per map),
+// owner-scoped, so listing N items never costs N queries.
+Attention_Context :: struct {
+	conversation_chain: map[string]string, // conversation_id -> chain_id
+	chain_title:        map[string]string, // chain_id -> title (may be ciphertext)
+	instance_name:      map[string]string, // agent_instance_id -> display_name
+}
+Attention_Resolve_Context_Proc :: proc(ctx: rawptr, owner_user_id: domain.User_ID, conversation_ids, chain_ids, instance_ids: []string) -> (Attention_Context, domain.Domain_Error)
+
 Attention_Repository :: struct {
 	ctx:                           rawptr,
 	card_insert_if_absent:         Attention_Card_Insert_Proc,
@@ -43,6 +71,9 @@ Attention_Repository :: struct {
 	list_actionable_instance_ids:  Attention_List_Actionable_Instance_IDs_Proc,
 	list_live_cards:               Attention_List_Live_Cards_Proc,
 	list_owners:                   Attention_List_Owners_Proc,
+	list_cards:                    Attention_List_Cards_Proc,
+	count:                         Attention_Count_Proc,
+	resolve_context:               Attention_Resolve_Context_Proc,
 }
 
 attention_not_configured :: proc() -> domain.Domain_Error {
@@ -82,4 +113,19 @@ attention_list_live_cards :: proc(r: ^Attention_Repository, owner: domain.User_I
 attention_list_owners :: proc(r: ^Attention_Repository) -> ([]domain.User_ID, domain.Domain_Error) {
 	if r == nil || r.list_owners == nil do return nil, attention_not_configured()
 	return r.list_owners(r.ctx)
+}
+
+attention_list_cards :: proc(r: ^Attention_Repository, owner: domain.User_ID, kind, cutoff, now: string, limit: int) -> ([]domain.Card, domain.Domain_Error) {
+	if r == nil || r.list_cards == nil do return nil, attention_not_configured()
+	return r.list_cards(r.ctx, owner, kind, cutoff, now, limit)
+}
+
+attention_count :: proc(r: ^Attention_Repository, owner: domain.User_ID, cutoff, now: string) -> (Attention_Counts, domain.Domain_Error) {
+	if r == nil || r.count == nil do return {}, attention_not_configured()
+	return r.count(r.ctx, owner, cutoff, now)
+}
+
+attention_resolve_context :: proc(r: ^Attention_Repository, owner: domain.User_ID, conversation_ids, chain_ids, instance_ids: []string) -> (Attention_Context, domain.Domain_Error) {
+	if r == nil || r.resolve_context == nil do return {}, attention_not_configured()
+	return r.resolve_context(r.ctx, owner, conversation_ids, chain_ids, instance_ids)
 }

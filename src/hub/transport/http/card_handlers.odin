@@ -54,7 +54,16 @@ write_card_json :: proc(b: ^strings.Builder, c: domain.Card) {
 	write_handler_json_string(b, c.created_at)
 	strings.write_string(b, "\",\"updated_at\":\"")
 	write_handler_json_string(b, c.updated_at)
-	strings.write_string(b, "\"}")
+	// Attention fields (migration 087).
+	strings.write_string(b, "\",\"kind\":\"")
+	write_handler_json_string(b, c.kind)
+	strings.write_string(b, "\",\"attention_since\":\"")
+	write_handler_json_string(b, c.attention_since)
+	strings.write_string(b, "\",\"details\":")
+	strings.write_string(b, c.details_json if c.details_json != "" else "{}")
+	strings.write_string(b, ",\"action_refs\":")
+	strings.write_string(b, c.action_refs_json if c.action_refs_json != "" else "{}")
+	strings.write_string(b, "}")
 }
 
 json_f32 :: proc(body, key: string, fallback: f32) -> f32 {
