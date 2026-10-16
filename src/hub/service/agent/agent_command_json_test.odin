@@ -17,7 +17,8 @@ test_agent_pty_input_command_json_formats_payload :: proc(t: ^testing.T) {
 	testing.expect(t, err == nil)
 	testing.expect_value(t, string(decoded), original)
 	testing.expect(t, strings.contains(got, "\"is_encrypted\":false"))
-	testing.expect(t, strings.contains(got, "\"agent_instance_id\":\"inst_456\""))
+	testing.expect(t, strings.contains(got, "\"shell_id\":\"inst_456\""))
+	testing.expect(t, !strings.contains(got, "agent_instance_id"), "REQ-PTY-NET-3: no duplicated agent_instance_id")
 	testing.expect(t, !strings.contains(got, "enc_b64"))
 }
 

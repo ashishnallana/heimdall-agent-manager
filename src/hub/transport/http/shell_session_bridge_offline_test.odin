@@ -40,7 +40,7 @@ test_shell_session_bridge_offline_state_both_directions :: proc(t: ^testing.T) {
 	session := _offline_session(domain.Shell_Session_Status_Running)
 
 	// 1. CONNECTED: the row's status stands on its own.
-	_, _, _ = bridge_runtime_service.runtime_accept_hello(&registry, "brg_1", 1, "")
+	_, _, _ = bridge_runtime_service.runtime_accept_hello(&registry, "brg_1", bridge_runtime_service.PROTOCOL_VERSION, "")
 	online := _offline_json(&registry, session)
 	defer delete(online)
 	testing.expect(t, strings.contains(online, "\"bridge_online\":true"), "a connected bridge must report online")
@@ -57,7 +57,7 @@ test_shell_session_bridge_offline_state_both_directions :: proc(t: ^testing.T) {
 		"the stored status is still reported verbatim — this state qualifies it, it does not replace it")
 
 	// 3. RECONNECTED: back to trustworthy, with nothing to unwind.
-	_, _, _ = bridge_runtime_service.runtime_accept_hello(&registry, "brg_1", 1, "")
+	_, _, _ = bridge_runtime_service.runtime_accept_hello(&registry, "brg_1", bridge_runtime_service.PROTOCOL_VERSION, "")
 	back := _offline_json(&registry, session)
 	defer delete(back)
 	testing.expect(t, strings.contains(back, "\"bridge_online\":true"), "reconnect must clear the flag")
@@ -105,8 +105,8 @@ test_superseded_teardown_does_not_flip_a_fresh_reconnect :: proc(t: ^testing.T) 
 	registry: project_service.Bridge_Runtime_Registry
 	session := _offline_session(domain.Shell_Session_Status_Running)
 
-	first, _, _ := bridge_runtime_service.runtime_accept_hello(&registry, "brg_1", 1, "")
-	second, _, _ := bridge_runtime_service.runtime_accept_hello(&registry, "brg_1", 1, "")
+	first, _, _ := bridge_runtime_service.runtime_accept_hello(&registry, "brg_1", bridge_runtime_service.PROTOCOL_VERSION, "")
+	second, _, _ := bridge_runtime_service.runtime_accept_hello(&registry, "brg_1", bridge_runtime_service.PROTOCOL_VERSION, "")
 	testing.expect(t, second.generation != first.generation, "a reconnect must take a new generation")
 
 	// The OLD connection's teardown arrives late, naming its own (now superseded)

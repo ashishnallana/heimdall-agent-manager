@@ -82,7 +82,8 @@ split_text_frames :: proc(raw: []byte) -> (payloads: [dynamic]string, ok: bool) 
 	pos := 0
 	for pos < len(raw) {
 		if len(raw) - pos < 2 do return payloads, false
-		if raw[pos] != 0x81 do return payloads, false
+		if raw[pos] != 0x81 && raw[pos] != 0x82 do return payloads, false
+		opcode := raw[pos] & 0x0f
 		n := int(raw[pos + 1] & 0x7f)
 		header := 2
 		if n == 126 {
@@ -96,7 +97,9 @@ split_text_frames :: proc(raw: []byte) -> (payloads: [dynamic]string, ok: bool) 
 			header = 10
 		}
 		if len(raw) - pos - header < n do return payloads, false
-		append(&payloads, string(raw[pos + header:pos + header + n]))
+		// Binary pty_wire frames are rendered as their debug JSON so the assertions
+		// below can keep reading data_b64 / type (REQ-PTY-NET-2). Temp-allocated.
+		append(&payloads, pty_test_ws_payload_to_json(opcode, string(raw[pos + header:pos + header + n])) if opcode == 0x2 else string(raw[pos + header:pos + header + n]))
 		pos += header + n
 	}
 	return payloads, true
@@ -268,7 +271,7 @@ Hammer :: struct {
 hammer_output :: proc(raw: rawptr) {
 	h := (^Hammer)(raw)
 	for !sync.atomic_load(&h.stop) {
-		shell_session_svc.shell_session_broadcast_output(h.svc, "sh_race", "T1VU")
+		shell_session_svc.shell_session_broadcast_output(h.svc, "sh_race", transmute([]byte)string("OUT"))
 		h.written += 1
 		time.sleep(time.Millisecond)
 	}

@@ -100,7 +100,7 @@ test_bridge_hub_hello_version_fields :: proc(t: ^testing.T) {
 	defer delete(hello)
 
 	testing.expect(t, strings.contains(hello, "\"type\":\"bridge_hello\""), "type is bridge_hello")
-	testing.expect(t, strings.contains(hello, "\"protocol_version\":1"), "protocol_version is 1")
+	testing.expect(t, strings.contains(hello, fmt.tprintf("\"protocol_version\":%d", contracts.BRIDGE_WS_FRAME_VERSION)), "protocol_version is the bridge-ws frame version")
 	expected_version := fmt.tprintf("\"version\":\"%s\"", contracts.APP_VERSION)
 	testing.expect(t, strings.contains(hello, expected_version), "version serialized from contracts")
 	testing.expect(t, strings.contains(hello, "\"commit_sha\":\""), "commit_sha key present")

@@ -78,8 +78,8 @@ runtime_command_cache_is_partitioned_by_bridge :: proc(t: ^testing.T) {
 runtime_writer_mutexes_are_isolated_by_bridge :: proc(t: ^testing.T) {
 	registry := new(project_service.Bridge_Runtime_Registry)
 	defer { runtime_command_cache_destroy(registry); free(registry) }
-	_, _, _ = runtime_accept_hello(registry, "brg_a", 1, "")
-	_, _, _ = runtime_accept_hello(registry, "brg_b", 1, "")
+	_, _, _ = runtime_accept_hello(registry, "brg_a", PROTOCOL_VERSION, "")
+	_, _, _ = runtime_accept_hello(registry, "brg_b", PROTOCOL_VERSION, "")
 	a1 := project_service.bridge_runtime_connection_acquire(registry, "brg_a")
 	defer project_service.bridge_runtime_connection_release(registry, a1)
 	a2 := project_service.bridge_runtime_connection_acquire(registry, "brg_a")
@@ -102,8 +102,8 @@ runtime_stalled_bridge_writer_does_not_block_another_bridge_send :: proc(t: ^tes
 	b_peer, _ := net.dial_tcp(net.Endpoint{address = net.IP4_Loopback, port = bound.port})
 	b_hub, _, _ := net.accept_tcp(listener)
 	defer { net.close(a_peer); net.close(a_hub); net.close(b_peer); net.close(b_hub); net.close(listener) }
-	stalled_hello, _, _ := runtime_accept_hello(registry, "brg_stalled", 1, "")
-	healthy_hello, _, _ := runtime_accept_hello(registry, "brg_healthy", 1, "")
+	stalled_hello, _, _ := runtime_accept_hello(registry, "brg_stalled", PROTOCOL_VERSION, "")
+	healthy_hello, _, _ := runtime_accept_hello(registry, "brg_healthy", PROTOCOL_VERSION, "")
 	project_service.bridge_runtime_registry_set_command_socket(registry, "brg_stalled", a_hub, stalled_hello.generation)
 	project_service.bridge_runtime_registry_set_command_socket(registry, "brg_healthy", b_hub, healthy_hello.generation)
 

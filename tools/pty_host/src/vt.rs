@@ -64,6 +64,12 @@ pub struct Capture {
     pub cells: Vec<Cell>,
     pub cursor_row: usize,
     pub cursor_col: usize,
+    /// Terminal-level colour state (OSC 10/11/12 defaults, OSC 4 palette) as the
+    /// BEL-terminated OSC sequences that re-apply it. Empty when nothing is set. It is
+    /// ALSO prepended to `lines[0]` so the wire shape (one string per row) is unchanged;
+    /// consumers that need the rows alone split it off (see the bridge's
+    /// `pty_screen_split_preamble`). Alt-screen prefix comes AFTER it in `lines[0]`.
+    pub preamble: String,
 }
 
 impl Capture {
@@ -111,6 +117,14 @@ pub struct Screen {
     // Deferred wrap: after writing the last column we stay put until the next
     // printable char, matching real terminal "auto-wrap" behavior.
     wrap_pending: bool,
+    // Terminal-level colours set by OSC 10 (default fg), 11 (default bg), 12 (cursor)
+    // and OSC 4 (palette entries). xterm applies these live, so a repaint that does not
+    // replay them reverts the pane to the UI theme — which is the bug this tracks.
+    // Stored as the colour spec text (`rgb:RR/GG/BB` or `#RRGGBB`) exactly as received.
+    default_fg: Option<String>,
+    default_bg: Option<String>,
+    cursor_color: Option<String>,
+    palette: std::collections::BTreeMap<u16, String>,
 }
 
 impl Screen {
@@ -140,6 +154,115 @@ impl Screen {
             origin_mode: false,
             last_char: None,
             wrap_pending: false,
+            default_fg: None,
+            default_bg: None,
+            cursor_color: None,
+            palette: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// The OSC sequences that re-apply the terminal-level colours (BEL-terminated), or
+    /// an empty string when none is set. Order: palette entries, then fg, bg, cursor.
+    pub fn color_preamble(&self) -> String {
+        let mut out = String::new();
+        for (idx, spec) in &self.palette {
+            out.push_str(&format!("\x1b]4;{};{}\x07", idx, spec));
+        }
+        if let Some(fg) = &self.default_fg {
+            out.push_str(&format!("\x1b]10;{}\x07", fg));
+        }
+        if let Some(bg) = &self.default_bg {
+            out.push_str(&format!("\x1b]11;{}\x07", bg));
+        }
+        if let Some(cc) = &self.cursor_color {
+            out.push_str(&format!("\x1b]12;{}\x07", cc));
+        }
+        out
+    }
+
+    fn reset_terminal_colors(&mut self) {
+        self.default_fg = None;
+        self.default_bg = None;
+        self.cursor_color = None;
+        self.palette.clear();
+    }
+
+    /// A colour spec we are willing to store and replay: `rgb:R/G/B` (1-4 hex digits per
+    /// component) or `#RRGGBB`. Queries (`?`) and anything else are ignored — we never
+    /// answer a query from the emulator; the real terminal does.
+    fn parse_color_spec(raw: &[u8]) -> Option<String> {
+        let s = std::str::from_utf8(raw).ok()?.trim();
+        if s.is_empty() || s == "?" {
+            return None;
+        }
+        if let Some(rest) = s.strip_prefix("rgb:") {
+            let parts: Vec<&str> = rest.split('/').collect();
+            if parts.len() == 3
+                && parts.iter().all(|p| (1..=4).contains(&p.len()) && p.chars().all(|c| c.is_ascii_hexdigit()))
+            {
+                return Some(s.to_string());
+            }
+            return None;
+        }
+        if let Some(hex) = s.strip_prefix('#') {
+            if hex.len() == 6 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Some(s.to_string());
+            }
+        }
+        None
+    }
+
+    fn handle_osc(&mut self, params: &[&[u8]]) {
+        if params.is_empty() {
+            return;
+        }
+        let code: u32 = match std::str::from_utf8(params[0]).ok().and_then(|s| s.parse().ok()) {
+            Some(c) => c,
+            None => return,
+        };
+        match code {
+            10 | 11 | 12 => {
+                // xterm allows `OSC 10;fg;bg;cursor`: each further spec sets the NEXT
+                // dynamic colour.
+                for (i, raw) in params.iter().skip(1).enumerate() {
+                    let which = code + i as u32;
+                    if let Some(spec) = Self::parse_color_spec(raw) {
+                        match which {
+                            10 => self.default_fg = Some(spec),
+                            11 => self.default_bg = Some(spec),
+                            12 => self.cursor_color = Some(spec),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            4 => {
+                let mut it = params.iter().skip(1);
+                while let (Some(idx_raw), Some(spec_raw)) = (it.next(), it.next()) {
+                    let idx: u16 = match std::str::from_utf8(idx_raw).ok().and_then(|s| s.trim().parse().ok()) {
+                        Some(i) if i < 256 => i,
+                        _ => continue,
+                    };
+                    if let Some(spec) = Self::parse_color_spec(spec_raw) {
+                        self.palette.insert(idx, spec);
+                    }
+                }
+            }
+            104 => {
+                if params.len() == 1 {
+                    self.palette.clear();
+                } else {
+                    for raw in params.iter().skip(1) {
+                        if let Some(idx) = std::str::from_utf8(raw).ok().and_then(|s| s.trim().parse::<u16>().ok()) {
+                            self.palette.remove(&idx);
+                        }
+                    }
+                }
+            }
+            110 => self.default_fg = None,
+            111 => self.default_bg = None,
+            112 => self.cursor_color = None,
+            _ => {}
         }
     }
 
@@ -415,6 +538,12 @@ impl Screen {
             };
             lines[0].insert_str(0, prefix);
         }
+        // Colour preamble FIRST — before the alt-screen prefix — so a consumer that
+        // splits leading OSC sequences off finds the alt prefix where it always was.
+        let preamble = self.color_preamble();
+        if !preamble.is_empty() && !lines.is_empty() {
+            lines[0].insert_str(0, &preamble);
+        }
         Capture {
             rows: self.rows,
             cols: self.cols,
@@ -422,6 +551,7 @@ impl Screen {
             cells: self.grid.clone(),
             cursor_row: self.cursor_row,
             cursor_col: self.cursor_col,
+            preamble,
         }
     }
 
@@ -892,6 +1022,7 @@ impl Perform for Screen {
                 self.origin_mode = false;
                 self.last_char = None;
                 self.wrap_pending = false;
+                self.reset_terminal_colors();
             }
             b'D' => self.line_feed(),
             b'E' => {
@@ -912,11 +1043,15 @@ impl Perform for Screen {
         }
     }
 
-    // DCS / OSC are ignored for the spike (title-setting etc. don't affect grid).
+    // DCS is ignored (nothing there affects the grid).
     fn hook(&mut self, _params: &Params, _intermediates: &[u8], _ignore: bool, _action: char) {}
     fn put(&mut self, _byte: u8) {}
     fn unhook(&mut self) {}
-    fn osc_dispatch(&mut self, _params: &[&[u8]], _bell_terminated: bool) {}
+    // OSC: only the colour-state family is tracked (10/11/12/4 and their resets); vte
+    // hands us the same params for BEL- and ST-terminated forms. Titles etc. are ignored.
+    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+        self.handle_osc(params);
+    }
 }
 
 /// A VT engine: owns the `vte::Parser` + a `Screen`, feeding bytes in.
@@ -1203,5 +1338,59 @@ mod tests {
         feed(&mut e, "\x1b[>4;2m\x1b[2 qplain");
         let cap = e.capture();
         assert_eq!(cap.lines[0], "plain");
+    }
+
+    // ---- OSC colour state (terminal-level fg/bg/cursor/palette) -------------------
+
+    #[test]
+    fn osc_11_background_is_replayed_in_capture_preamble() {
+        let mut e = VtEngine::new(3, 20);
+        feed(&mut e, "hello");
+        assert_eq!(e.capture().preamble, "", "nothing set: capture is byte-identical to before");
+        assert_eq!(e.capture().lines[0], "hello");
+        feed(&mut e, "\x1b]11;rgb:1e/1e/2e\x07");
+        let cap = e.capture();
+        assert_eq!(cap.preamble, "\x1b]11;rgb:1e/1e/2e\x07");
+        assert_eq!(cap.lines[0], "\x1b]11;rgb:1e/1e/2e\x07hello", "preamble leads row 0");
+        // ST-terminated form and #RRGGBB spec, multi-colour OSC 10;fg;bg.
+        feed(&mut e, "\x1b]10;#c0caf5;#24283b\x1b\\");
+        let cap = e.capture();
+        assert_eq!(cap.preamble, "\x1b]10;#c0caf5\x07\x1b]11;#24283b\x07");
+        feed(&mut e, "\x1b]12;rgb:ff/00/00\x07");
+        assert!(e.capture().preamble.ends_with("\x1b]12;rgb:ff/00/00\x07"));
+    }
+
+    #[test]
+    fn osc_111_reset_removes_background_and_queries_are_ignored() {
+        let mut e = VtEngine::new(3, 20);
+        feed(&mut e, "\x1b]11;#000000\x07\x1b]111\x07");
+        assert_eq!(e.capture().preamble, "");
+        feed(&mut e, "\x1b]11;?\x07\x1b]10;?\x1b\\\x1b]4;1;?\x07");
+        assert_eq!(e.capture().preamble, "", "queries never become state");
+        feed(&mut e, "\x1b]11;not-a-colour\x07");
+        assert_eq!(e.capture().preamble, "", "unknown specs are not stored");
+    }
+
+    #[test]
+    fn osc_4_palette_then_104_resets_all_or_listed() {
+        let mut e = VtEngine::new(3, 20);
+        feed(&mut e, "\x1b]4;1;rgb:ff/00/00;2;#00ff00\x07");
+        assert_eq!(e.capture().preamble, "\x1b]4;1;rgb:ff/00/00\x07\x1b]4;2;#00ff00\x07");
+        feed(&mut e, "\x1b]104;1\x07");
+        assert_eq!(e.capture().preamble, "\x1b]4;2;#00ff00\x07");
+        feed(&mut e, "\x1b]104\x07");
+        assert_eq!(e.capture().preamble, "");
+    }
+
+    #[test]
+    fn ris_clears_colour_state_but_alt_screen_switch_does_not() {
+        let mut e = VtEngine::new(3, 20);
+        feed(&mut e, "\x1b]11;#101010\x07\x1b[?1049h\x1b[?25lvim");
+        let cap = e.capture();
+        assert_eq!(cap.lines[0], "\x1b]11;#101010\x07\x1b[?1049h\x1b[?25lvim", "preamble before the alt prefix");
+        feed(&mut e, "\x1b[?1049l");
+        assert_eq!(e.capture().preamble, "\x1b]11;#101010\x07", "leaving the alt screen keeps colours");
+        feed(&mut e, "\x1bc");
+        assert_eq!(e.capture().preamble, "", "RIS resets everything");
     }
 }

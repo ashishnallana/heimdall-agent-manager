@@ -5,9 +5,11 @@ import "core:net"
 import "core:strings"
 import "core:sync"
 import "core:testing"
+import base64 "core:encoding/base64"
 import "core:thread"
 import "core:time"
 import contracts "odin_test:contracts"
+import ws "odin_test:lib/ws"
 import domain "odin_test:hub/domain"
 import platform "odin_test:hub/platform"
 import iface "odin_test:hub/repository/iface"
@@ -90,7 +92,7 @@ read_server_stream_frame :: proc(sock: net.TCP_Socket, timeout: time.Duration) -
 		append(&acc, ..buf[:n])
 		b := acc[:]
 		if len(b) < 2 do continue
-		if b[0] != 0x81 do return "", false
+		if b[0] != 0x81 && b[0] != 0x82 do return "", false
 		payload_len := int(b[1] & 0x7f)
 		header_len := 2
 		switch payload_len {
@@ -107,7 +109,8 @@ read_server_stream_frame :: proc(sock: net.TCP_Socket, timeout: time.Duration) -
 		}
 		if (b[1] & 0x80) != 0 do return "", false
 		if len(b) < header_len + payload_len do continue
-		return strings.clone(string(b[header_len:header_len + payload_len])), true
+		// Binary pty_wire frames come back as their debug JSON (REQ-PTY-NET-2).
+		return pty_test_ws_payload_to_json(b[0] & 0x0f, string(b[header_len:header_len + payload_len])), true
 	}
 }
 
@@ -244,6 +247,23 @@ mock_send_runtime_command :: proc(ctx: rawptr, command: project_service.Runtime_
 		bridge_id  = strings.clone(command.bridge_id, alloc),
 		command_id = strings.clone(command.command_id, alloc),
 		body_json  = strings.clone(command.body_json, alloc),
+	})
+	return true, domain.Domain_Error{}
+}
+
+// REQ-PTY-NET-3: binary frames are recorded as Runtime_Commands with an EMPTY command_id
+// (there is none on the wire) and the frame's debug JSON as body, so the assertions
+// below can tell "sent, ack-less" from "sent as an acked command".
+@(private = "file")
+mock_send_runtime_binary :: proc(ctx: rawptr, bridge_id: string, frame: []byte) -> (bool, domain.Domain_Error) {
+	st := (^Mock_Command_Sink_State)(ctx)
+	sync.mutex_lock(&st.mu)
+	defer sync.mutex_unlock(&st.mu)
+	alloc := st.allocator.procedure != nil ? st.allocator : context.allocator
+	append(&st.commands, project_service.Runtime_Command{
+		bridge_id  = strings.clone(bridge_id, alloc),
+		command_id = strings.clone("", alloc),
+		body_json  = contracts.pty_wire_session_frame_debug_json(frame, alloc),
 	})
 	return true, domain.Domain_Error{}
 }
@@ -525,7 +545,7 @@ test_shell_stream_broadcast_output :: proc(t: ^testing.T) {
 
 	// Simulate output broadcast from Bridge (base64 encoded VT100 bytes)
 	test_b64 := "aGVsbG8gd29ybGQ=" // "hello world"
-	shell_session_svc.shell_session_broadcast_output(&svc, session_id, test_b64)
+	shell_session_svc.shell_session_broadcast_output(&svc, session_id, transmute([]byte)string("hello world"))
 
 	// Verify both client sockets received the unmasked output frame
 	frame1, r1 := read_server_stream_frame(pair1.client, 2 * time.Second)
@@ -568,7 +588,8 @@ test_shell_stream_broadcast_enc_output :: proc(t: ^testing.T) {
 
 	// Simulate encrypted output broadcast from Bridge
 	test_enc_b64 := "dmF1bHQ6djE6YWJjZGVmZ2hpams="
-	shell_session_svc.shell_session_broadcast_output(&svc, session_id, test_enc_b64, true)
+	enc_bytes, _ := base64.decode(test_enc_b64, allocator = context.temp_allocator)
+	shell_session_svc.shell_session_broadcast_output(&svc, session_id, enc_bytes, true)
 
 	// Verify both client sockets received the unmasked output frame containing enc_b64
 	frame1, r1 := read_server_stream_frame(pair1.client, 2 * time.Second)
@@ -613,9 +634,12 @@ test_bridge_shell_pty_output_enc_b64_forwarding :: proc(t: ^testing.T) {
 	reassemblies := make([dynamic]Bridge_Chunk_Reassembly)
 	defer bridge_chunk_reassemblies_free(&reassemblies)
 
-	bridge_msg := strings.clone("{\"type\":\"shell_pty_output\",\"session_id\":\"sh_bridge_enc_test\",\"data_b64\":\"dmF1bHQ6djE6dGVzdA==\",\"is_encrypted\":true}")
-	handled := bridge_ws_process_frame(&bh, "brg_test", 0, pair.hub, &reassemblies, bridge_msg)
-	testing.expect(t, handled, "bridge_ws_process_frame must handle shell_pty_output")
+	// REQ-PTY-NET-2: the bridge sends a BINARY pty_wire session frame; the hub forwards
+	// the payload bytes (here GCM ciphertext) untouched.
+	ct, _ := base64.decode("dmF1bHQ6djE6dGVzdA==", allocator = context.temp_allocator)
+	bridge_frame := contracts.pty_wire_encode_session_frame(contracts.PTY_WIRE_KIND_OUTPUT, contracts.pty_wire_flags(false, true), "sh_bridge_enc_test", ct)
+	handled := bridge_ws_process_binary_frame(&bh, "brg_test", 0, string(bridge_frame))
+	testing.expect(t, handled, "bridge_ws_process_binary_frame must handle a pty_wire output frame")
 
 	frame, r := read_server_stream_frame(pair.client, 2 * time.Second)
 	testing.expect(t, r, "client must receive output frame")
@@ -650,9 +674,9 @@ test_bridge_shell_pty_output_armored_data_b64_forwarding :: proc(t: ^testing.T) 
 	reassemblies := make([dynamic]Bridge_Chunk_Reassembly)
 	defer bridge_chunk_reassemblies_free(&reassemblies)
 
-	bridge_msg := strings.clone("{\"type\":\"shell_pty_output\",\"session_id\":\"sh_bridge_armored_test\",\"data_b64\":\"YWJjZGVmZ2hpams=\",\"is_encrypted\":false}")
-	handled := bridge_ws_process_frame(&bh, "brg_test", 0, pair.hub, &reassemblies, bridge_msg)
-	testing.expect(t, handled, "bridge_ws_process_frame must handle shell_pty_output")
+	bridge_frame := contracts.pty_wire_encode_session_frame(contracts.PTY_WIRE_KIND_OUTPUT, 0, "sh_bridge_armored_test", transmute([]byte)string("abcdefghijk"))
+	handled := bridge_ws_process_binary_frame(&bh, "brg_test", 0, string(bridge_frame))
+	testing.expect(t, handled, "bridge_ws_process_binary_frame must handle a pty_wire output frame")
 
 	frame, r := read_server_stream_frame(pair.client, 2 * time.Second)
 	testing.expect(t, r, "client must receive output frame")
@@ -780,6 +804,7 @@ test_shell_stream_input_and_resize_forwarding :: proc(t: ^testing.T) {
 	mock_sink := project_service.Bridge_Command_Sink{
 		ctx                  = rawptr(&sink_state),
 		send_runtime_command = mock_send_runtime_command,
+		send_runtime_binary  = mock_send_runtime_binary,
 	}
 
 	shell_svc := shell_session_svc.new_shell_session_service(repo = &repo_iface, bridge_command_sink = mock_sink)
@@ -837,13 +862,15 @@ test_shell_stream_input_and_resize_forwarding :: proc(t: ^testing.T) {
 	testing.expect(t, read_ok, "handshake must succeed")
 	if read_ok do delete(frame)
 
-	// Send an input frame from client: {"type":"input","data_b64":"Y2xlYXIK"} ("clear\n")
-	input_json := "{\"type\":\"input\",\"data_b64\":\"Y2xlYXIK\",\"is_encrypted\":false}"
-	_ = write_ws_text_frame(pair.client, input_json)
-
-	// Send an encrypted input frame: {"type":"input","enc_b64":"dmF1bHQ6djE6d3NfZW5j"}
-	enc_input_json := "{\"type\":\"input\",\"data_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==\",\"is_encrypted\":true}"
-	_ = write_ws_text_frame(pair.client, enc_input_json)
+	// REQ-PTY-NET-3: keystrokes are BINARY pty_wire INPUT viewer frames: plaintext, then
+	// an encrypted one (nonce|tag|ct the hub must relay without touching).
+	plain_input := contracts.pty_wire_encode_viewer_frame(contracts.PTY_WIRE_KIND_INPUT, 0, transmute([]byte)string("clear\n"))
+	defer delete(plain_input)
+	_ = ws.write_server_opcode(pair.client, 0x2, string(plain_input), false)
+	enc_payload := make([]byte, 28, context.temp_allocator) // 12 B nonce + 16 B tag, empty ct
+	enc_input := contracts.pty_wire_encode_viewer_frame(contracts.PTY_WIRE_KIND_INPUT, contracts.PTY_WIRE_FLAG_ENCRYPTED, enc_payload)
+	defer delete(enc_input)
+	_ = ws.write_server_opcode(pair.client, 0x2, string(enc_input), false)
 
 	// Send a resize frame from client: {"type":"resize","rows":35,"cols":110}
 	resize_json := "{\"type\":\"resize\",\"rows\":35,\"cols\":110}"
@@ -861,17 +888,19 @@ test_shell_stream_input_and_resize_forwarding :: proc(t: ^testing.T) {
 
 	sync.mutex_lock(&sink_state.mu)
 	// Commands received should include:
-	// 1. shell_stream_attach (from 0->1 viewer transition)
-	// 2. shell_pty_input (from input frame)
-	// 3. shell_pty_input (from enc_b64 input frame)
-	// 4. shell_pty_resize (from resize frame)
+	// 1. shell_stream_attach (from 0->1 viewer transition)             — acked command
+	// 2. pty_input (binary, plaintext)                                  — NO command_id
+	// 3. pty_input (binary, encrypted payload relayed byte-for-byte)    — NO command_id
+	// 4. shell_pty_resize (from resize frame)                           — acked command
 	testing.expect(t, len(sink_state.commands) >= 4, "expected at least 4 commands in sink")
 	has_input := false
 	has_enc_input := false
 	has_resize := false
 	for cmd in sink_state.commands {
-		if strings.contains(cmd.body_json, "\"type\":\"shell_pty_input\"") {
-			if strings.contains(cmd.body_json, "Y2xlYXIK") {
+		if strings.contains(cmd.body_json, "\"type\":\"pty_input\"") {
+			testing.expect_value(t, cmd.command_id, "") // ack-less: nothing to wait for
+			testing.expect(t, strings.contains(cmd.body_json, "\"session_id\":\"sh_input_test\""), "input frame names the session")
+			if strings.contains(cmd.body_json, "\"data_b64\":\"Y2xlYXIK\",\"is_encrypted\":false") {
 				has_input = true
 				testing.expect_value(t, cmd.bridge_id, "brg_input_target")
 			}
@@ -880,15 +909,17 @@ test_shell_stream_input_and_resize_forwarding :: proc(t: ^testing.T) {
 				testing.expect_value(t, cmd.bridge_id, "brg_input_target")
 			}
 		}
+		testing.expect(t, !strings.contains(cmd.body_json, "\"type\":\"shell_pty_input\""), "the pane socket never produces an acked shell_pty_input command")
 		if strings.contains(cmd.body_json, "\"type\":\"shell_pty_resize\"") {
 			has_resize = true
+			testing.expect(t, strings.contains(cmd.body_json, "\"command_id\":"), "resize stays an acked JSON command (the snapshot gate depends on it)")
 			testing.expect_value(t, cmd.bridge_id, "brg_input_target")
 			testing.expect(t, strings.contains(cmd.body_json, "\"rows\":35"), "rows must match")
 			testing.expect(t, strings.contains(cmd.body_json, "\"cols\":110"), "cols must match")
 		}
 	}
-	testing.expect(t, has_input, "must have dispatched shell_pty_input")
-	testing.expect(t, has_enc_input, "must have dispatched shell_pty_input with enc_b64")
+	testing.expect(t, has_input, "must have relayed the plaintext input frame")
+	testing.expect(t, has_enc_input, "must have relayed the encrypted input frame untouched")
 	testing.expect(t, has_resize, "must have dispatched shell_pty_resize")
 	sync.mutex_unlock(&sink_state.mu)
 
@@ -1010,8 +1041,8 @@ test_shell_stream_broadcast_prunes_dead_socket :: proc(t: ^testing.T) {
 	_ = net.shutdown(pair1.hub, .Send)
 
 	// Broadcast output
-	test_b64 := "dGVzdF9kYXRh"
-	shell_session_svc.shell_session_broadcast_output(&svc, session_id, test_b64)
+	test_bytes := transmute([]byte)string("test_data")
+	shell_session_svc.shell_session_broadcast_output(&svc, session_id, test_bytes)
 
 	stream_test_wait_viewers(t, &svc, session_id, 1)
 	shell_session_svc.shell_session_detach(&svc, session_id, pair1.hub, bridge_id)
@@ -1022,7 +1053,7 @@ test_shell_stream_broadcast_prunes_dead_socket :: proc(t: ^testing.T) {
 	_ = net.shutdown(pair2.hub, .Send)
 
 	// Second broadcast should prune pair2, reducing count to 0 and triggering detach to bridge
-	shell_session_svc.shell_session_broadcast_output(&svc, session_id, test_b64)
+	shell_session_svc.shell_session_broadcast_output(&svc, session_id, test_bytes)
 	stream_test_wait_viewers(t, &svc, session_id, 0)
 	shell_session_svc.shell_session_detach(&svc, session_id, pair2.hub, bridge_id)
 	testing.expect_value(t, shell_session_svc.shell_session_viewer_count(&svc, session_id), 0)

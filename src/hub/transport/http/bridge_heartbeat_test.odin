@@ -117,7 +117,7 @@ test_bridge_heartbeat_digest_substring_collision_safety :: proc(t: ^testing.T) {
 @(test)
 test_bridge_heartbeat_digest_applies_runtime_registry :: proc(t: ^testing.T) {
 	registry := project_service.Bridge_Runtime_Registry{}
-	_, _, _ = bridge_runtime_service.runtime_accept_hello(&registry, "brg_test", 1, "")
+	_, _, _ = bridge_runtime_service.runtime_accept_hello(&registry, "brg_test", bridge_runtime_service.PROTOCOL_VERSION, "")
 	defer bridge_runtime_service.runtime_command_cache_destroy(&registry)
 	h := Bridge_Handlers{
 		bridge_runtime_registry = &registry,

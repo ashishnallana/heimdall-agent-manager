@@ -188,35 +188,26 @@ shell_session_stream_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_
 		}
 		ws_note_rx(ws_rx, len(text))
 
+		// REQ-PTY-NET-3: keystrokes arrive as BINARY pty_wire INPUT frames and are relayed
+		// to the bridge as one binary frame, ack-less. The hub holds no vault key: an
+		// encrypted payload is forwarded as-is. A malformed binary frame is dropped with
+		// a log line (REQ-PANE-INPUT-3: a dropped keystroke is never silent); the JSON
+		// `input` text frame no longer exists on this socket.
+		if reader.last_opcode == 0x2 {
+			kind, flags, payload, _, _, bin_ok := contracts.pty_wire_decode_viewer_frame(transmute([]byte)text)
+			if !bin_ok || kind != contracts.PTY_WIRE_KIND_INPUT {
+				fmt.eprintfln("ham-hub WARN shell input frame dropped session_id=%s reason=not_a_pty_input_frame bytes=%d", session_id, len(text))
+			} else if len(payload) > 0 {
+				shell_session_svc.shell_metrics_note_input(len(payload))
+				_, _ = bridge_service.send_shell_input_binary(h.bridges, auth_ctx, session.bridge_id, session_id, payload, contracts.pty_wire_is_encrypted(flags), sink_override)
+			}
+			delete(text)
+			continue
+		}
+
 		frame_type := json_string(text, "type")
 
 		switch frame_type {
-		case "input":
-			// REQ-PANE-INPUT-1/5: the wire contract is decoded by the ONE shared decoder in
-			// shell_stream_input_frame.odin, which the agent pane consults too. It used to be
-			// spelled out here only, and the agent pane's divergent copy understood neither
-			// `vault:v1:` nor `enc_b64` — a total input outage while the vault was unlocked.
-			frame := shell_stream_decode_input_frame(text)
-			defer shell_stream_input_destroy(&frame)
-			switch frame.kind {
-			case .Armored:
-				// The Hub has no vault key; the bridge decrypts or rejects-and-logs.
-				shell_session_svc.shell_metrics_note_input(len(frame.armored))
-				bridge_service.send_shell_input(h.bridges, auth_ctx, session.bridge_id, session_id, "", frame.armored, sink_override)
-			case .Plain:
-				shell_session_svc.shell_metrics_note_input(len(frame.plain))
-				bridge_service.send_shell_input(h.bridges, auth_ctx, session.bridge_id, session_id, frame.plain, "", sink_override)
-			case .Undecodable:
-				// REQ-PANE-INPUT-3: a dropped keystroke is never silent. This site used to
-				// discard an undecodable data_b64 without a word.
-				fmt.eprintfln(
-					"ham-hub WARN shell input frame dropped session_id=%s reason=%s",
-					session_id,
-					frame.reason,
-				)
-			case .Empty:
-				// No payload on the frame — nothing to forward.
-			}
 		case "resize":
 			rows := json_int(text, "rows", 0)
 			cols := json_int(text, "cols", 0)
@@ -230,7 +221,7 @@ shell_session_stream_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_
 				// session needs the snapshot too. See that proc for why serving it is safe.
 				if shell_stream_should_send_screen_snapshot(late_join, screen_sent, rows, cols) {
 					screen_sent = true
-					_ = shell_stream_send_shell_screen_snapshot(h.shell_sessions, auth_ctx, session_id, client, rows, cols)
+					_ = shell_stream_send_shell_screen_snapshot(h.shell_sessions, auth_ctx, session_id, client, rows, cols, late_join)
 				}
 			}
 		}

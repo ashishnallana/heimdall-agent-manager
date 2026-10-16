@@ -21,7 +21,7 @@ test_instance_lifecycle_counters :: proc(t: ^testing.T) {
 
 	r := new(project.Bridge_Runtime_Registry)
 	defer { runtime_command_cache_destroy(r); free(r) }
-	hello, ok, _ := runtime_accept_hello(r, "bridge-lc", 1, "", "customer")
+	hello, ok, _ := runtime_accept_hello(r, "bridge-lc", PROTOCOL_VERSION, "", "customer")
 	testing.expect(t, ok)
 	g := hello.generation
 	// new -> running: start

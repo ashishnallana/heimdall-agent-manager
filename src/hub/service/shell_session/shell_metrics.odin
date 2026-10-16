@@ -5,6 +5,7 @@ package shell_session
 //   heimdall_shell_sessions{bridge_id,state}      collector, DB-backed, cached 60 s
 //   heimdall_shell_viewers{bridge_id}             collector, in-memory viewer registry
 //   heimdall_shell_output_bytes_total{bridge_id}  pty output arriving from the bridge
+//   heimdall_shell_output_frames_total{bridge_id} pty output frames arriving from the bridge
 //   heimdall_shell_fanout_bytes_total             bytes written to viewers (fleet)
 //   heimdall_shell_input_bytes_total              keystrokes forwarded to bridges (fleet)
 //   heimdall_shell_viewer_detaches_total{reason}  Shell_Viewer_Detach_Reason
@@ -28,6 +29,7 @@ import ws "odin_test:lib/ws"
 
 Shell_Metrics :: struct {
 	output_bytes:        ^metrics.Family, // {bridge_id}
+	output_frames:       ^metrics.Family, // {bridge_id}
 	fanout_bytes:        ^metrics.Series,
 	input_bytes:         ^metrics.Series,
 	viewer_detaches:     ^metrics.Family, // {reason}
@@ -88,6 +90,7 @@ shell_metrics_init :: proc(reg: ^metrics.Registry) {
 	if reg == nil do return
 	m := &shell_metrics
 	m.output_bytes = metrics.new_counter(reg, "heimdall_shell_output_bytes_total", "PTY output payload bytes (base64 as carried on the wire) received from each bridge.", {"bridge_id"})
+	m.output_frames = metrics.new_counter(reg, "heimdall_shell_output_frames_total", "PTY output frames received from each bridge (one per bridge->hub wire frame; the coalescing win is frames/bytes).", {"bridge_id"})
 	m.fanout_bytes = metrics.with(metrics.new_counter(reg, "heimdall_shell_fanout_bytes_total", "Frame bytes written to shell/agent pane viewers (fleet-wide)."))
 	m.input_bytes = metrics.with(metrics.new_counter(reg, "heimdall_shell_input_bytes_total", "Shell input payload bytes forwarded to bridges (fleet-wide)."))
 	m.viewer_detaches = metrics.new_counter(reg, "heimdall_shell_viewer_detaches_total", "Pane viewers removed from a session's fan-out, by reason.", {"reason"})
@@ -108,6 +111,7 @@ shell_metrics_init :: proc(reg: ^metrics.Registry) {
 shell_metrics_note_output :: proc(bridge_id: string, n: int) {
 	if bridge_id == "" || n <= 0 do return
 	metrics.counter_add(metrics.with(shell_metrics.output_bytes, bridge_id), u64(n))
+	metrics.counter_inc(metrics.with(shell_metrics.output_frames, bridge_id))
 }
 
 // shell_metrics_note_output_for_session resolves the bridge for a session when the

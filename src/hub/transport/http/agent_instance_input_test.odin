@@ -92,9 +92,10 @@ test_agent_pane_relays_real_browser_armored_frame :: proc(t: ^testing.T) {
 	defer delete(cmd)
 
 	testing.expect(t, strings.contains(cmd, "\"type\":\"shell_pty_input\""), "bridge command type")
-	// The bridge resolves the pty from shell_id, falling back to agent_instance_id
-	// (src/bridge/hub_runtime_client.odin:1334-1337); the agent pane supplies both.
-	testing.expect(t, strings.contains(cmd, "\"agent_instance_id\":\"inst_golden\""), "pty addressed by agent_instance_id")
+	// The bridge resolves the pty from shell_id (REQ-PTY-NET-3 dropped the duplicated
+	// agent_instance_id from the envelope; the bridge keys both panes on shell_id).
+	testing.expect(t, strings.contains(cmd, "\"shell_id\":\"inst_golden\""), "pty addressed by shell_id")
+	testing.expect(t, !strings.contains(cmd, "agent_instance_id"), "no duplicated agent_instance_id on the wire")
 	testing.expect(
 		t,
 		strings.contains(cmd, strings.concatenate({"\"data_b64\":\"", C1_GOLDEN_ENC_B64, "\""}, context.temp_allocator)),

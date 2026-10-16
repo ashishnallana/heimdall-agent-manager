@@ -4,8 +4,10 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { connect } from 'node:net';
 import * as xtermModule from '@xterm/xterm';
-import { PaneDeliveryQueue, repaintCapturedScreen } from '../src/ui/components/shells/paneDeliveryQueue.ts';
-import { encryptShellStreamPayload, decryptShellStreamPayload } from '../src/ui/components/shells/useShellStream.ts';
+import { PaneDeliveryQueue, normalizeSnapshotText, repaintCapturedScreenText } from '../src/ui/components/shells/paneDeliveryQueue.ts';
+import { encryptShellStreamPayload } from '../src/ui/components/shells/useShellStream.ts';
+import { PTY_WIRE_KIND_SCREEN, PtyTextDecoder, decodePtyViewerFrame, decryptPtyPayload } from '../src/ui/components/shells/ptyWire.ts';
+import { importRawKeyHex } from '../src/ui/utils/vaultCrypto.ts';
 
 // Run through scripts/test-pane-transport.sh, which builds the production fixture.
 const fixture = process.env.HEIMDALL_PANE_TEST_SERVER;
@@ -35,31 +37,43 @@ test('production Hub queue and capture frames render through UI crypto and xterm
   const completed = new Promise<void>((resolve, reject) => { finish = resolve; fail = reject; });
   const queue = new PaneDeliveryQueue(() => fail(new Error('UI delivery failed')));
   socket.on('error', fail);
+  // The receive path mirrors useShellStream: binary frames are pty bytes decoded through ONE
+  // streaming UTF-8 decoder; text frames are JSON control (REQ-PTY-NET-2).
+  const cryptoKey = await importRawKeyHex(key);
+  const textDecoder = new PtyTextDecoder();
+  let previousWasSnapshot = false;
   socket.on('data', chunk => {
     pending = Buffer.concat([pending, chunk]);
     while (pending.length >= 2) {
+      const opcode = pending[0] & 0x0f;
       let size = pending[1] & 0x7f;
       let header = 2;
       if (size === 126) { if (pending.length < 4) break; size = pending.readUInt16BE(2); header = 4; }
       else if (size === 127) { if (pending.length < 10) break; size = Number(pending.readBigUInt64BE(2)); header = 10; }
       if (pending.length < header + size) break;
-      const message = JSON.parse(pending.subarray(header, header + size).toString());
+      const body = pending.subarray(header, header + size);
       pending = pending.subarray(header + size);
-      if (message.type === 'ready') { void queue.whenIdle().then(finish); continue; }
+      if (opcode === 0x1) {
+        const message = JSON.parse(body.toString());
+        if (message.type === 'ready') { void queue.whenIdle().then(finish); continue; }
+        fail(new Error(`unexpected text frame ${body.toString()}`));
+        return;
+      }
       try {
-        assert.equal(typeof message.is_encrypted, 'boolean');
-        assert.equal(typeof message.data_b64, 'string');
-        assert.ok(!('enc_b64' in message));
-        assert.ok(!('screen_b64' in message));
+        assert.equal(opcode, 0x2, 'pty bytes travel as binary frames');
       } catch (error) { fail(error as Error); return; }
+      const frame = decodePtyViewerFrame(new Uint8Array(body.buffer, body.byteOffset, body.byteLength));
+      if (!frame) { fail(new Error('malformed pty frame')); return; }
       frames++;
       queue.enqueue(size * 2, async () => {
-        const bytes = message.is_encrypted
-          ? await decryptShellStreamPayload(message.data_b64, key)
-          : new Uint8Array(Buffer.from(message.data_b64, 'base64'));
-        const output = message.type === 'screen' && message.is_encrypted
-          ? repaintCapturedScreen(bytes, message.cursor_row, message.cursor_col) : bytes;
-        await new Promise<void>(resolve => term.write(output, resolve));
+        const bytes = frame.encrypted ? await decryptPtyPayload(frame.payload, cryptoKey) : frame.payload;
+        const startsRepaint = frame.snapshot && !previousWasSnapshot;
+        previousWasSnapshot = frame.snapshot;
+        if (startsRepaint) textDecoder.reset();
+        let text = textDecoder.decode(bytes);
+        if (frame.kind === PTY_WIRE_KIND_SCREEN && frame.encrypted) text = repaintCapturedScreenText(text, frame.cursorRow, frame.cursorCol);
+        else if (frame.kind !== PTY_WIRE_KIND_SCREEN && frame.snapshot && startsRepaint) text = normalizeSnapshotText(text);
+        await new Promise<void>(resolve => term.write(text, resolve));
       });
     }
   });

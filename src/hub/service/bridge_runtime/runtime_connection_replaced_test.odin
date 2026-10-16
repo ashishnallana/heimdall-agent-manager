@@ -54,7 +54,7 @@ runtime_replaced_connection_receives_exactly_one_notice_before_close :: proc(t: 
 	new_peer, new_hub := replaced_test_socket_pair(t, listener, bound.port)
 	defer { net.close(old_peer); net.close(old_hub); net.close(new_peer); net.close(new_hub) }
 
-	old_hello, old_ok, _ := runtime_accept_hello(registry, "brg_dup", 1, "", "", REPLACED_FAREWELL_TEST)
+	old_hello, old_ok, _ := runtime_accept_hello(registry, "brg_dup", PROTOCOL_VERSION, "", "", REPLACED_FAREWELL_TEST)
 	if !testing.expect(t, old_ok) do return
 	project_service.bridge_runtime_registry_set_command_socket(registry, "brg_dup", old_hub, old_hello.generation)
 	// The old reader still holds its lease, as bridge_ws_handle_connection does.
@@ -62,7 +62,7 @@ runtime_replaced_connection_receives_exactly_one_notice_before_close :: proc(t: 
 	if !testing.expect(t, old_conn != nil) do return
 	defer project_service.bridge_runtime_connection_release(registry, old_conn)
 
-	new_hello, new_ok, _ := runtime_accept_hello(registry, "brg_dup", 1, "", "", REPLACED_FAREWELL_TEST)
+	new_hello, new_ok, _ := runtime_accept_hello(registry, "brg_dup", PROTOCOL_VERSION, "", "", REPLACED_FAREWELL_TEST)
 	if !testing.expect(t, new_ok && new_hello.replaced_existing) do return
 	project_service.bridge_runtime_registry_set_command_socket(registry, "brg_dup", new_hub, new_hello.generation)
 
@@ -98,14 +98,14 @@ runtime_connection_farewell_is_once_only_and_absent_on_plain_disconnect :: proc(
 	b_peer, b_hub := replaced_test_socket_pair(t, listener, bound.port)
 	defer { net.close(a_peer); net.close(a_hub); net.close(b_peer); net.close(b_hub) }
 
-	a_hello, _, _ := runtime_accept_hello(registry, "brg_a", 1, "", "", REPLACED_FAREWELL_TEST)
+	a_hello, _, _ := runtime_accept_hello(registry, "brg_a", PROTOCOL_VERSION, "", "", REPLACED_FAREWELL_TEST)
 	project_service.bridge_runtime_registry_set_command_socket(registry, "brg_a", a_hub, a_hello.generation)
 	a := project_service.bridge_runtime_connection_acquire(registry, "brg_a", a_hello.generation)
 	if !testing.expect(t, a != nil) do return
 	testing.expect(t, project_service.bridge_runtime_connection_send_farewell(a, REPLACED_FAREWELL_TEST), "first notice is written")
 	testing.expect(t, !project_service.bridge_runtime_connection_send_farewell(a, REPLACED_FAREWELL_TEST), "second notice is suppressed")
 	// A later replacement must not repeat it either.
-	_, _, _ = runtime_accept_hello(registry, "brg_a", 1, "", "", REPLACED_FAREWELL_TEST)
+	_, _, _ = runtime_accept_hello(registry, "brg_a", PROTOCOL_VERSION, "", "", REPLACED_FAREWELL_TEST)
 	project_service.bridge_runtime_connection_release(registry, a)
 	frames := make([dynamic]string, context.temp_allocator)
 	_, framing_ok := replaced_test_read_text_frames(a_peer, &frames)
@@ -113,7 +113,7 @@ runtime_connection_farewell_is_once_only_and_absent_on_plain_disconnect :: proc(
 	testing.expect_value(t, len(frames), 1)
 	project_service.bridge_runtime_registry_mark_offline(registry, "brg_a", 0)
 
-	b_hello, _, _ := runtime_accept_hello(registry, "brg_b", 1, "", "", REPLACED_FAREWELL_TEST)
+	b_hello, _, _ := runtime_accept_hello(registry, "brg_b", PROTOCOL_VERSION, "", "", REPLACED_FAREWELL_TEST)
 	project_service.bridge_runtime_registry_set_command_socket(registry, "brg_b", b_hub, b_hello.generation)
 	project_service.bridge_runtime_registry_mark_offline(registry, "brg_b", b_hello.generation)
 	clear(&frames)
