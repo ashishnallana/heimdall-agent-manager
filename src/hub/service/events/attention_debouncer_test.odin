@@ -1,9 +1,11 @@
 package events
 
 import "base:runtime"
+import "core:mem"
 import "core:strings"
 import "core:sync"
 import "core:testing"
+import "core:thread"
 import "core:time"
 
 Attention_Recorder :: struct {
@@ -80,4 +82,43 @@ test_attention_debouncer_rearms_after_flush :: proc(t: ^testing.T) {
 	sync.mutex_lock(&rec.mutex)
 	defer sync.mutex_unlock(&rec.mutex)
 	testing.expect_value(t, len(rec.events), 2) // separate windows, separate hints
+}
+
+// Regression (crashed a live hub): a note made from a request thread whose
+// allocator is a per-request arena that is wiped before the flush fires. The
+// debouncer must not keep anything in that arena -- neither the owner key nor
+// the flush thread's own record.
+@(test)
+test_attention_debouncer_survives_reclaimed_request_arena :: proc(t: ^testing.T) {
+	rec: Attention_Recorder
+	defer {
+		for s in rec.owners do delete(s, runtime.heap_allocator())
+		for s in rec.events do delete(s, runtime.heap_allocator())
+		delete(rec.owners); delete(rec.events)
+	}
+	d: Attention_Debouncer
+	init_attention_debouncer(&d, nil, 100 * time.Millisecond)
+	defer delete(d.pending)
+	d.publish = attention_record
+	d.publish_ctx = &rec
+
+	request :: proc(d: ^Attention_Debouncer) {
+		buf := make([]byte, 64 * 1024, runtime.heap_allocator())
+		defer delete(buf, runtime.heap_allocator())
+		arena: mem.Arena
+		mem.arena_init(&arena, buf)
+		context.allocator = mem.arena_allocator(&arena)
+		attention_debouncer_note(d, strings.clone("dave"), "task")
+		// The request ends: its arena is scribbled over and released.
+		for i in 0 ..< len(buf) do buf[i] = 0xAA
+	}
+	worker := thread.create_and_start_with_poly_data(&d, request)
+	thread.join(worker)
+	thread.destroy(worker)
+
+	time.sleep(400 * time.Millisecond)
+	sync.mutex_lock(&rec.mutex)
+	defer sync.mutex_unlock(&rec.mutex)
+	testing.expect_value(t, len(rec.events), 1)
+	if len(rec.owners) == 1 do testing.expect_value(t, rec.owners[0], "dave")
 }

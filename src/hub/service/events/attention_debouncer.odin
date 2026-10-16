@@ -58,13 +58,20 @@ attention_debouncer_note :: proc(d: ^Attention_Debouncer, owner_user_id: string,
 		sync.mutex_unlock(&d.mutex)
 		return
 	}
-	// Request threads run on a per-request arena that is reclaimed when the
-	// request ends, so everything that outlives this call (the map key, the
-	// flush thread's work) lives on the heap with a fresh default context.
+	// Callers are usually request threads, whose context.allocator is a
+	// per-request arena reclaimed when the request ends -- but the flush thread
+	// outlives the request. So: the map key lives on the heap, and the thread is
+	// CREATED with the heap allocator too, because core:thread allocates the
+	// Thread record (and frees it on self-cleanup) with the creating context's
+	// allocator. No init_context either: runtime.default_context() evaluated
+	// here would hand the thread this thread's thread-local temp allocator,
+	// which dies with the request thread. With none, the flush thread builds its
+	// own default context. (Both mistakes crashed a live hub in smoke testing.)
 	owner := strings.clone(owner_user_id, runtime.heap_allocator())
 	d.pending[owner] = bit
 	sync.mutex_unlock(&d.mutex)
-	thread.run_with_poly_data2(d, owner, attention_debouncer_flush_after, init_context = runtime.default_context())
+	context.allocator = runtime.heap_allocator()
+	thread.run_with_poly_data2(d, owner, attention_debouncer_flush_after)
 }
 
 // attention_debouncer_flush_after runs on the owner's one-shot thread. owner is
