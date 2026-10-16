@@ -1299,10 +1299,10 @@ bridge_ws_upgrade_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_Soc
 	defer project_service.bridge_runtime_registry_mark_offline(h.bridge_runtime_registry, connection.bridge_id, hello.generation)
 	// Admission and quota checks precede the durable Online transition. State
 	// retirement also gates this write, so an older disconnect finishes first.
-	sync.lock(&connection.state_mutex)
-	if sync.atomic_load(&connection.retired) { sync.unlock(&connection.state_mutex); return }
+	project_service.connection_state_lock(connection)
+	if sync.atomic_load(&connection.retired) { project_service.connection_state_unlock(connection); return }
 	bridge, connect_ok, err := bridge_service.bridge_runtime_connect(h.bridges, token, hostname, platform_os, platform_arch, hello_text, version_str, commit_sha_str, build_timestamp_str)
-	sync.unlock(&connection.state_mutex)
+	project_service.connection_state_unlock(connection)
 	if !connect_ok {
 		bridge_metrics_connect_result(admitted_bridge.bridge_id, "revoked" if err.code == .Bridge_Revoked else "connect_failed")
 		_ = write_ws_text_frame(client, bridge_ws_error_payload(err.message))
@@ -1353,6 +1353,7 @@ bridge_ws_upgrade_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_Soc
 	if h.agents != nil {
 		gone := agent_service.reconcile_bridge_heartbeat(h.agents, bridge.bridge_id, hello_active)
 		defer domain.agent_instances_destroy(gone)
+		agent_service.notify_instances_terminal(h.agents, gone)
 		for inst in gone {
 			if h.shell_sessions != nil {
 				shell_session_svc.shell_session_background_runs_for_agent(h.shell_sessions, string(inst.owner_user_id), inst.agent_instance_id)
@@ -1409,8 +1410,8 @@ BRIDGE_INSTANCE_STALE_MS :: 90_000
 // fans out resource_changed so the UI updates immediately.
 bridge_disconnect_persist :: proc(h: ^Bridge_Handlers, connection: ^project_service.Bridge_Runtime_Connection) -> (domain.Bridge, bool, []domain.Agent_Instance, bool) {
 	if connection == nil do return {}, false, nil, false
-	sync.lock(&connection.state_mutex)
-	defer sync.unlock(&connection.state_mutex)
+	project_service.connection_state_lock(connection)
+	defer project_service.connection_state_unlock(connection)
 	if sync.atomic_load(&connection.retired) do return {}, false, nil, false
 	bridge: domain.Bridge
 	changed := false
@@ -1446,6 +1447,10 @@ bridge_ws_disconnect :: proc(
 	bridge, changed, cleared, still_current := bridge_disconnect_persist(h, connection)
 	defer domain.bridge_destroy(&bridge)
 	defer domain.agent_instances_destroy(cleared)
+	// Lifecycle facts after the state_mutex is released (review B1). The engine
+	// treats `unreachable` on an Offline bridge as bridge absence, not death: the
+	// lease runs out via its TTL (review B2).
+	agent_service.notify_instances_terminal(h.agents, cleared)
 	duration_ms := i64(-1)
 	if connected_at_ns > 0 do duration_ms = (time.now()._nsec - connected_at_ns) / 1_000_000
 	bridge_ws_log_disconnect(bridge_id, reason, connection_generation, duration_ms, still_current)
@@ -1696,6 +1701,7 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
 			// is no "which signal fired?" branch whose wrong answer destroys work.
 			gone := agent_service.reconcile_bridge_heartbeat(h.agents, bridge_id, active)
 			defer domain.agent_instances_destroy(gone)
+			agent_service.notify_instances_terminal(h.agents, gone)
 			metrics.counter_add(project_service.fleet_metrics.agent_instances_reconciled_gone, u64(len(gone)))
 			for inst in gone {
 				shell_session_svc.shell_session_background_runs_for_agent(h.shell_sessions, string(inst.owner_user_id), inst.agent_instance_id)
@@ -1707,6 +1713,7 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
 		// lost WS close). Request-driven, so no background thread is required.
 		if h.agents != nil {
 			reaped := agent_service.reap_stale_instances(h.agents, BRIDGE_INSTANCE_STALE_MS)
+			agent_service.notify_instances_terminal(h.agents, reaped)
 			for inst in reaped {
 				shell_session_svc.shell_session_background_runs_for_agent(h.shell_sessions, string(inst.owner_user_id), inst.agent_instance_id)
 				summary := agent_instance_status_summary_json(inst.runtime_status, inst.startup_status, inst.activity_status)
@@ -2013,13 +2020,18 @@ bridge_apply_validated_status :: proc(h: ^Bridge_Handlers, bridge_id: string, ge
 	c := project_service.bridge_runtime_connection_acquire(h.bridge_runtime_registry, bridge_id, generation)
 	if c == nil do return {}, false, domain.domain_error(.Bridge_Offline, "stale bridge generation")
 	defer project_service.bridge_runtime_connection_release(h.bridge_runtime_registry, c)
-	sync.lock(&c.state_mutex)
+	project_service.connection_state_lock(c)
 	if sync.atomic_load(&c.retired) {
-		sync.unlock(&c.state_mutex)
+		project_service.connection_state_unlock(c)
 		return {}, false, domain.domain_error(.Bridge_Offline, "retired bridge generation")
 	}
-	instance, applied, err := agent_service.apply_bridge_status_report(h.agents, bridge_id, id, seq, status, activity, owner_user_id = c.owner_id, launch_epoch = launch_epoch, error_json = error_json)
-	sync.unlock(&c.state_mutex)
+	// Lifecycle facts are collected under state_mutex and delivered after the
+	// unlock: the engine opens a unit of work (tx_mutex), and the allowed lock
+	// order is tx_mutex → state_mutex, never the reverse (review B1).
+	facts := make([dynamic]agent_service.Lifecycle_Fact, context.temp_allocator)
+	instance, applied, err := agent_service.apply_bridge_status_report(h.agents, bridge_id, id, seq, status, activity, owner_user_id = c.owner_id, launch_epoch = launch_epoch, error_json = error_json, facts = &facts)
+	project_service.connection_state_unlock(c)
+	agent_service.notify_facts(h.agents, facts[:])
 	if applied {
 		_, _, tracking_err := project_service.bridge_runtime_instance_apply(h.bridge_runtime_registry, bridge_id, generation, id, string(instance.owner_user_id), string(instance.runtime_status), string(instance.activity_status), seq, recover = true)
 		if tracking_err.code == .Bridge_Busy { fmt.eprintln("bridge runtime instance admission failed", bridge_id, id, tracking_err.message) }

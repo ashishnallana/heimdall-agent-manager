@@ -3,6 +3,7 @@ package sqlite
 import "core:sync"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
+import lockorder "odin_test:lib/lockorder"
 
 // tx_mutex serialises every unit of work in the process (Task System v2 §2.1).
 //
@@ -20,6 +21,12 @@ import iface "odin_test:hub/repository/iface"
 // INVARIANT FOR CALLERS: never hold a unit of work across network I/O. Bridge
 // wakes and user-event publishes happen AFTER commit; a verb that did otherwise
 // would stall every other write in the hub behind a socket.
+//
+// LOCK ORDER (review B1): tx_mutex → Bridge_Runtime_Connection.state_mutex is
+// the single allowed order (a unit of work may reserve runtime capacity via
+// bridge_runtime_instance_apply). Code holding a state_mutex must never begin a
+// unit of work; it returns facts (terminal/activity) and the caller acts after
+// the unlock. lockorder.assert_tx_mutex_allowed enforces it at begin.
 //
 // NESTING: a thread that already owns the unit of work and begins another one
 // (card accept → change_chain_status → engine chain_closed) gets a SAVEPOINT
@@ -71,6 +78,7 @@ sqlite_uow_begin :: proc(ctx: rawptr) -> (iface.Unit_Of_Work, bool, domain.Domai
 		tx_depth += 1
 		return iface.Unit_Of_Work{ctx = rawptr(uow_ctx), commit = sqlite_uow_commit, rollback = sqlite_uow_rollback, repos = factory.repos}, true, domain.Domain_Error{}
 	}
+	lockorder.assert_tx_mutex_allowed()
 	sync.mutex_lock(&tx_mutex)
 	if !exec(factory.conn, "BEGIN;") {
 		sync.mutex_unlock(&tx_mutex)

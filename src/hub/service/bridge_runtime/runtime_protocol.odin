@@ -175,8 +175,8 @@ runtime_command_result_for_connection :: proc(registry: ^project_service.Bridge_
 	c := project_service.bridge_runtime_connection_acquire(registry, bridge_id, generation)
 	if c == nil do return false
 	defer project_service.bridge_runtime_connection_release(registry, c)
-	sync.lock(&c.state_mutex)
-	defer sync.unlock(&c.state_mutex)
+	project_service.connection_state_lock(c)
+	defer project_service.connection_state_unlock(c)
 	if sync.atomic_load(&c.retired) do return false
 	_, _ = runtime_command_result_idempotent(registry, bridge_id, generation, command_id, result_json)
 	return true
@@ -235,8 +235,8 @@ runtime_reconcile_digest :: proc(registry: ^project_service.Bridge_Runtime_Regis
 	c := project_service.bridge_runtime_connection_acquire(registry, bridge_id, generation)
 	if c == nil do return 0
 	defer project_service.bridge_runtime_connection_release(registry, c)
-	sync.lock(&c.state_mutex)
-	defer sync.unlock(&c.state_mutex)
+	project_service.connection_state_lock(c)
+	defer project_service.connection_state_unlock(c)
 	if sync.atomic_load(&c.retired) do return 0
 	changed := 0
 	now := time.now()._nsec

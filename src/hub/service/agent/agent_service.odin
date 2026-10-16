@@ -49,6 +49,30 @@ notify_instance_terminal :: proc(service: ^Agent_Service, instance_id: string) {
 	service.hooks.on_terminal(service.hooks.ctx, instance_id)
 }
 
+// Lifecycle_Fact is what a status write learned about an instance; callers that
+// run under a Bridge_Runtime_Connection.state_mutex collect facts and deliver
+// them with notify_facts AFTER the unlock (lock order tx_mutex → state_mutex).
+Lifecycle_Fact :: struct {
+	instance_id: string,
+	terminal:    bool,
+	activity:    string,
+}
+
+notify_facts :: proc(service: ^Agent_Service, facts: []Lifecycle_Fact) {
+	for f in facts {
+		if f.terminal do notify_instance_terminal(service, f.instance_id)
+		else do notify_instance_activity(service, f.instance_id, f.activity)
+	}
+}
+
+// notify_instances_terminal delivers the terminal fact for every instance a
+// liveness sweep (reconcile_bridge_heartbeat, mark_bridge_instances_unreachable,
+// reap_stale_instances) returned. Those procs never call the hooks themselves
+// because two of their callers hold a connection state_mutex.
+notify_instances_terminal :: proc(service: ^Agent_Service, insts: []domain.Agent_Instance) {
+	for inst in insts do notify_instance_terminal(service, inst.agent_instance_id)
+}
+
 notify_instance_activity :: proc(service: ^Agent_Service, instance_id, activity_status: string) {
 	if service == nil || service.hooks.on_activity == nil || instance_id == "" || activity_status == "" do return
 	service.hooks.on_activity(service.hooks.ctx, instance_id, activity_status)
@@ -994,7 +1018,9 @@ relaunch_instance_locked :: proc(service: ^Agent_Service, auth: contracts.Auth_C
 // error_json is the report's wire error object (REQ-ERR-PROTO-A), recorded as the
 // instance's last_error (with a consecutive-failure attempt count) while it is
 // failed; a successful start or a stop clears it, a retry in flight keeps it.
-apply_bridge_status_report :: proc(service: ^Agent_Service, bridge_id, instance_id: string, state_seq: int, runtime_status, activity_status: string, owner_user_id: string = "", launch_epoch: string = "", error_json: string = "") -> (domain.Agent_Instance, bool, domain.Domain_Error) {
+// facts: when non-nil the lifecycle hook is NOT called; the fact is appended
+// for the caller to deliver after it releases its locks (review B1).
+apply_bridge_status_report :: proc(service: ^Agent_Service, bridge_id, instance_id: string, state_seq: int, runtime_status, activity_status: string, owner_user_id: string = "", launch_epoch: string = "", error_json: string = "", facts: ^[dynamic]Lifecycle_Fact = nil) -> (domain.Agent_Instance, bool, domain.Domain_Error) {
 	inst, ok, err := iface.agent_get_instance(service.agents, instance_id)
 	if !ok do return domain.Agent_Instance{}, false, err
 	if inst.bridge_id != bridge_id || (owner_user_id != "" && string(inst.owner_user_id) != owner_user_id) {
@@ -1025,7 +1051,7 @@ apply_bridge_status_report :: proc(service: ^Agent_Service, bridge_id, instance_
 				inst.activity_status = strings.clone(activity_status)
 			}
 			saved, saved_ok, save_err := iface.agent_save_instance(service.agents, inst)
-			if saved_ok do notify_instance_activity(service, instance_id, activity_status)
+			if saved_ok do emit_fact(service, facts, Lifecycle_Fact{instance_id = instance_id, activity = activity_status})
 			return saved, saved_ok, save_err
 		} else {
 			domain.agent_instance_destroy(&inst)
@@ -1084,13 +1110,24 @@ apply_bridge_status_report :: proc(service: ^Agent_Service, bridge_id, instance_
 	}
 	saved, saved_ok, save_err := iface.agent_save_instance(service.agents, inst)
 	if saved_ok {
-		if instance_runtime_is_terminal(saved.runtime_status) {
-			notify_instance_terminal(service, instance_id)
-		} else {
-			notify_instance_activity(service, instance_id, activity_status)
-		}
+		emit_fact(service, facts, Lifecycle_Fact{instance_id = instance_id, terminal = instance_runtime_is_terminal(saved.runtime_status), activity = activity_status})
 	}
 	return saved, saved_ok, save_err
+}
+
+@(private = "file")
+emit_fact :: proc(service: ^Agent_Service, facts: ^[dynamic]Lifecycle_Fact, f: Lifecycle_Fact) {
+	if facts != nil {
+		append(facts, Lifecycle_Fact{instance_id = strings.clone(f.instance_id), terminal = f.terminal, activity = strings.clone(f.activity)})
+		return
+	}
+	if f.terminal do notify_instance_terminal(service, f.instance_id)
+	else do notify_instance_activity(service, f.instance_id, f.activity)
+}
+
+lifecycle_facts_destroy :: proc(facts: ^[dynamic]Lifecycle_Fact) {
+	for f in facts { delete(f.instance_id); delete(f.activity) }
+	delete(facts^)
 }
 
 // reconcile_bridge_heartbeat marks instances the bridge no longer reports active
@@ -1146,7 +1183,6 @@ reconcile_bridge_heartbeat :: proc(service: ^Agent_Service, bridge_id: string, a
 			if ok {
 				// Escapes to the caller, which owns it from here. NOT destroyed below.
 				append(&changed, saved)
-				notify_instance_terminal(service, saved.agent_instance_id)
 			} else {
 				domain.agent_instance_destroy(&inst)
 			}
@@ -1239,7 +1275,6 @@ mark_bridge_instances_unreachable :: proc(service: ^Agent_Service, bridge_id: st
 		saved, ok, _ := iface.agent_save_instance(service.agents, inst)
 		if ok {
 			append(&changed, saved)
-			notify_instance_terminal(service, saved.agent_instance_id)
 		} else {
 			domain.agent_instance_destroy(&inst)
 		}
@@ -1294,7 +1329,6 @@ reap_stale_instances :: proc(service: ^Agent_Service, stale_after_ms: i64) -> []
 		saved, ok, _ := iface.agent_save_instance(service.agents, inst)
 		if ok {
 			append(&changed, saved)
-			notify_instance_terminal(service, saved.agent_instance_id)
 		} else {
 			domain.agent_instance_destroy(&inst)
 		}

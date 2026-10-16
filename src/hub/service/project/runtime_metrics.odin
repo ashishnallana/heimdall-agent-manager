@@ -299,7 +299,7 @@ runtime_registry_collect :: proc(ctx: rawptr, e: ^metrics.Exposition) {
 	for _, c in r.connections {
 		if sync.atomic_load(&c.retired) do continue
 		live += 1
-		sync.lock(&c.state_mutex)
+		connection_state_lock(c)
 		for _, st in c.instances {
 			if !st.active do continue
 			status := runtime_status_enum(st.runtime_status)
@@ -309,7 +309,7 @@ runtime_registry_collect :: proc(ctx: rawptr, e: ^metrics.Exposition) {
 			}
 			if !found do append(&counts, Instance_Count{bridge_id = strings.clone(c.bridge_id, a), status = strings.clone(status, a), count = 1})
 		}
-		sync.unlock(&c.state_mutex)
+		connection_state_unlock(c)
 	}
 	sync.unlock(&r.metadata_mutex)
 

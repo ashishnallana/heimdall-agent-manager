@@ -7,6 +7,7 @@ import "core:sync"
 import "core:time"
 import domain "odin_test:hub/domain"
 import metrics "odin_test:lib/metrics"
+import lockorder "odin_test:lib/lockorder"
 import ws "odin_test:lib/ws"
 
 Runtime_Registry_Limits :: struct {
@@ -68,6 +69,11 @@ Bridge_Runtime_Connection :: struct {
 	writer_waiters: int,
 	farewell_sent: bool, // writer_mutex; see bridge_runtime_connection_send_farewell
 	retire_mutex: sync.Mutex,
+	// state_mutex guards `instances`. Take it ONLY through
+	// connection_state_lock/unlock: the allowed lock order is
+	// sqlite.tx_mutex → state_mutex (a unit of work may reserve capacity), and
+	// NEVER the reverse — code under state_mutex must not begin a unit of work
+	// (see lib/lockorder; Task System v2 review B1).
 	state_mutex: sync.Mutex,
 	instances: map[string]Runtime_Instance_State,
 	// Per-connection cached metric series (hot-path atomics only; the series
@@ -206,7 +212,7 @@ bridge_runtime_connection_quiesce :: proc(r: ^Bridge_Runtime_Registry, c: ^Bridg
 bridge_runtime_connection_retire :: proc(r: ^Bridge_Runtime_Registry, c: ^Bridge_Runtime_Connection) {
 	sync.atomic_store(&c.retired, true)
 	bridge_runtime_connection_quiesce(r, c)
-	sync.lock(&c.state_mutex)
+	connection_state_lock(c)
 	for key, state in c.instances {
 		if state.active do _ = runtime_active_change(r, state.owner_id, -1)
 		heap := runtime.default_allocator()
@@ -218,7 +224,7 @@ bridge_runtime_connection_retire :: proc(r: ^Bridge_Runtime_Registry, c: ^Bridge
 	delete(c.instances)
 	c.instances = nil
 	c.terminal_count = 0
-	sync.unlock(&c.state_mutex)
+	connection_state_unlock(c)
 	sync.lock(&r.command_mutex)
 	i := 0
 	for i < r.command_slots_used {
@@ -481,8 +487,8 @@ bridge_runtime_instance_apply :: proc(r: ^Bridge_Runtime_Registry, bridge_id: st
 	if c == nil do return false, false, domain.domain_error(.Bridge_Offline, "bridge connection is no longer current")
 	defer bridge_runtime_connection_release(r, c)
 	if instance_id == "" || (c.owner_id != "" && c.owner_id != owner) do return false, false, domain.domain_error(.Forbidden, "instance owner does not match bridge owner")
-	sync.lock(&c.state_mutex)
-	defer sync.unlock(&c.state_mutex)
+	connection_state_lock(c)
+	defer connection_state_unlock(c)
 	if sync.atomic_load(&c.retired) do return false, false, domain.domain_error(.Bridge_Offline, "bridge connection retired")
 	now := now_ns if now_ns > 0 else time.now()._nsec
 	if now >= c.next_sweep_ns {
@@ -537,8 +543,8 @@ bridge_runtime_instance_get :: proc(r: ^Bridge_Runtime_Registry, bridge_id: stri
 	c := bridge_runtime_connection_acquire(r, bridge_id, generation)
 	if c == nil do return {}, false
 	defer bridge_runtime_connection_release(r, c)
-	sync.lock(&c.state_mutex)
-	defer sync.unlock(&c.state_mutex)
+	connection_state_lock(c)
+	defer connection_state_unlock(c)
 	if sync.atomic_load(&c.retired) do return {}, false
 	state, ok := c.instances[id]
 	if !ok do return {}, false
@@ -558,9 +564,9 @@ bridge_runtime_registry_sweep :: proc(r: ^Bridge_Runtime_Registry, now_ns: i64 =
 	sync.unlock(&r.metadata_mutex)
 	removed := 0
 	for c in connections {
-		sync.lock(&c.state_mutex)
+		connection_state_lock(c)
 		removed += runtime_instances_sweep_locked(r, c, now)
-		sync.unlock(&c.state_mutex)
+		connection_state_unlock(c)
 		bridge_runtime_connection_release(r, c)
 	}
 	return removed
@@ -587,8 +593,8 @@ bridge_runtime_instance_cancel_reservation :: proc(r: ^Bridge_Runtime_Registry, 
 	c := bridge_runtime_connection_acquire(r, bridge_id, generation)
 	if c == nil do return
 	defer bridge_runtime_connection_release(r, c)
-	sync.lock(&c.state_mutex)
-	defer sync.unlock(&c.state_mutex)
+	connection_state_lock(c)
+	defer connection_state_unlock(c)
 	for key, state in c.instances {
 		if key == id && state.reserved {
 			if state.active do _ = runtime_active_change(r, state.owner_id, -1)
@@ -604,8 +610,8 @@ bridge_runtime_instance_retire :: proc(r: ^Bridge_Runtime_Registry, bridge_id: s
 	c := bridge_runtime_connection_acquire(r, bridge_id, generation)
 	if c == nil do return
 	defer bridge_runtime_connection_release(r, c)
-	sync.lock(&c.state_mutex)
-	defer sync.unlock(&c.state_mutex)
+	connection_state_lock(c)
+	defer connection_state_unlock(c)
 	state, ok := c.instances[id]
 	if !ok || !state.active do return
 	_ = runtime_active_change(r, state.owner_id, -1)
@@ -632,4 +638,16 @@ runtime_terminal_prune_locked :: proc(r: ^Bridge_Runtime_Registry, c: ^Bridge_Ru
 		if terminals <= runtime_registry_limits(r).terminal_instances_per_bridge do return
 		runtime_instance_remove_locked(c, oldest_key)
 	}
+}
+
+// connection_state_lock / unlock: the only way to take a connection's
+// state_mutex (lock-order bookkeeping, see the field comment).
+connection_state_lock :: proc(c: ^Bridge_Runtime_Connection) {
+	sync.lock(&c.state_mutex)
+	lockorder.state_mutex_enter()
+}
+
+connection_state_unlock :: proc(c: ^Bridge_Runtime_Connection) {
+	lockorder.state_mutex_leave()
+	sync.unlock(&c.state_mutex)
 }

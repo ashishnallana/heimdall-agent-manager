@@ -175,6 +175,7 @@ reaper_sweep_once :: proc(graph: ^App_Graph) {
 	}
 
 	reaped := agent_service.reap_stale_instances(&graph.agents, REAPER_STALE_MS)
+	agent_service.notify_instances_terminal(&graph.agents, reaped)
 	defer domain.agent_instances_destroy(reaped)
 	for inst in reaped {
 		project_service.bridge_runtime_instance_retire(&graph.bridge_runtime_registry, inst.bridge_id, project_service.bridge_runtime_registry_generation(&graph.bridge_runtime_registry, inst.bridge_id), inst.agent_instance_id, string(inst.runtime_status))
