@@ -265,7 +265,16 @@ fire_lease_ttl :: proc(svc: ^Service, u: ^Uow, t: Timer, now_ms: i64) -> bool {
 			}
 		}
 	}
-	return expire_lease_in_uow(svc, u, lease, EXPIRE_TTL, hub_actor())
+	return expire_then_match(svc, u, lease, EXPIRE_TTL)
+}
+
+// expire_then_match: a timer-driven expiry followed by exactly one matcher run
+// for the lease's chain (review B3: the matcher never runs inside expire).
+@(private = "file")
+expire_then_match :: proc(svc: ^Service, u: ^Uow, lease: domain.Task_Lease, reason: string) -> bool {
+	if !expire_lease_in_uow(svc, u, lease, reason, hub_actor()) do return false
+	ok, _ := after_chain_change(svc, u, lease.chain_id, lease.owner_user_id, .Lease_Expired)
+	return ok
 }
 
 @(private = "file")
@@ -283,7 +292,7 @@ fire_lease_hard_cap :: proc(svc: ^Service, u: ^Uow, t: Timer) -> bool {
 	lease, ok, _ := iface.taskchain_get_lease(svc.repo, t.key)
 	if !ok do return false
 	if lease.hard_deadline_at != t.armed do return false
-	return expire_lease_in_uow(svc, u, lease, EXPIRE_HARD_CAP, hub_actor())
+	return expire_then_match(svc, u, lease, EXPIRE_HARD_CAP)
 }
 
 @(private = "file")
@@ -304,7 +313,7 @@ fire_grant_unconfirmed :: proc(svc: ^Service, u: ^Uow, t: Timer) -> bool {
 		timers_arm(svc, .Grant_Unconfirmed, lease.lease_id, now_ms(svc.clock) + GRANT_UNCONFIRMED_SECONDS * 1000, lease.granted_at)
 		return true
 	}
-	return expire_lease_in_uow(svc, u, lease, EXPIRE_UNCONFIRMED, hub_actor())
+	return expire_then_match(svc, u, lease, EXPIRE_UNCONFIRMED)
 }
 
 @(private = "file")
@@ -325,7 +334,7 @@ fire_idle_grace :: proc(svc: ^Service, u: ^Uow, t: Timer) -> bool {
 	inst, iok, _ := iface.agent_get_instance(svc.agents, t.key)
 	if !iok do return false
 	if inst.activity_status != "idle" do return false      // busy again
-	return expire_lease_in_uow(svc, u, lease, EXPIRE_IDLE, hub_actor())
+	return expire_then_match(svc, u, lease, EXPIRE_IDLE)
 }
 
 @(private = "file")

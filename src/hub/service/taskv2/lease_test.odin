@@ -13,6 +13,7 @@ import sqlite "odin_test:hub/repository/sqlite"
 import agent "odin_test:hub/service/agent"
 import project "odin_test:hub/service/project"
 import jsonx "odin_test:lib/jsonx"
+import lockorder "odin_test:lib/lockorder"
 
 // M1 tests: leases, timers, matcher, wake delivery. Everything runs against a
 // real sqlite file with the fake clock; timers are driven with fire_due(now).
@@ -523,25 +524,156 @@ test_bridge_hello_stops_orphan_without_lease :: proc(t: ^testing.T) {
 	seed_instance(fx, chain, "inst_w1", "agt_w", "br_1", "idle")
 	seed_instance(fx, chain, "inst_w2", "agt_w", "br_1", "running")
 	_ = publish_task(t, fx, chain, "task_1")
+	confirm_holder(fx, "inst_w1")
 	lease, held := lease_of(fx, "inst_w1")
 	if !testing.expect(t, held, "w1 leased") do return
-	// bridge away > TTL: the lease expires meanwhile
+	// Bridge disconnects: instances go `unreachable`, the bridge Offline. That is
+	// absence, not death — the lease stays (B2).
+	bridge_disconnect(fx, "br_1")
+	l_after, still := lease_of(fx, "inst_w1")
+	testing.expect(t, still && l_after.lease_id == lease.lease_id, "disconnect alone keeps the lease")
+	// Away > TTL: the TTL fires → expired(ttl); the task is HELD (bridge offline), nobody re-granted.
 	fixture_advance(fx, LEASE_TTL_SECONDS + 1)
-	_ = fire_due(&fx.svc, now_ms(&fx.clock))
-	_, still := lease_of(fx, "inst_w1")
-	// (w2 may have been granted the task on expiry; w1 itself is lease-free now)
-	testing.expect(t, !still || lease.lease_id != lease_of_id(fx, "inst_w1"), "w1's original lease expired")
 	wake_log_reset(log)
+	_ = fire_due(&fx.svc, now_ms(&fx.clock))
+	testing.expect(t, strings.contains(last_event_payload(fx, "task_1", EV_LEASE_EXPIRED), `"reason":"ttl"`), "ttl expiry while away")
+	testing.expect_value(t, get_task(fx, "task_1").state, domain.Task_State.Ready)
+	leases_mid, _ := iface.taskchain_list_leases_by_chain(&fx.repo, chain.chain_id)
+	testing.expect_value(t, len(leases_mid), 0)
+	testing.expect_value(t, len(log.cmds), 0) // nothing can be sent to an offline bridge
+	// Reconnect: both workers still report active (the orphan w1 kept running).
+	wake_log_reset(log)
+	bridge_reconnect(fx, "br_1", []string{"inst_coord", "inst_w1", "inst_w2"})
 	on_bridge_hello(&fx.svc, "br_1", []string{"inst_coord", "inst_w1", "inst_w2"})
-	// whichever of w1/w2 holds the lease now is re-sent (unconfirmed); the other is stopped
+	// exactly one holder, the other stopped; never the coordinator
 	holder := ""
 	if l, h := lease_of(fx, "inst_w1"); h && l.task_id == "task_1" do holder = "inst_w1"
 	if l, h := lease_of(fx, "inst_w2"); h && l.task_id == "task_1" do holder = "inst_w2"
-	testing.expect(t, holder != "", "task re-granted")
+	testing.expect(t, holder != "", "task re-granted on hello")
+	leases_end, _ := iface.taskchain_list_leases_by_chain(&fx.repo, chain.chain_id)
+	testing.expect_value(t, len(leases_end), 1)
 	other := "inst_w2" if holder == "inst_w1" else "inst_w1"
-	testing.expect(t, wake_log_has_run(log, holder), "unconfirmed grant re-sent on hello")
+	testing.expect(t, wake_log_has_run(log, holder), "new grant delivered on hello")
 	testing.expect(t, wake_log_has_stop(log, other), "lease-less live worker stopped on hello")
 	testing.expect(t, !wake_log_has_stop(log, "inst_coord"), "coordinator never stopped")
+}
+
+// bridge_disconnect mirrors bridge_ws_disconnect: bridge Offline, every active
+// instance `unreachable`, then the terminal chokepoint for each (after unlock).
+bridge_disconnect :: proc(fx: ^Fixture, bridge_id: string) {
+	set_bridge_status(fx, bridge_id, false)
+	insts, _ := iface.agent_list_instances_by_bridge(&fx.agents, bridge_id)
+	for inst in insts {
+		if inst.runtime_status != "running" && inst.runtime_status != "idle" && inst.runtime_status != "busy" do continue
+		row := inst
+		row.runtime_status = "unreachable"
+		row.updated_at = platform.clock_now(&fx.clock)
+		_, _, _ = iface.agent_save_instance(&fx.agents, row)
+		on_instance_terminal(&fx.svc, inst.agent_instance_id)
+	}
+}
+
+// bridge_reconnect mirrors the hello path before on_bridge_hello: bridge
+// Online, reported-active instances back to running.
+bridge_reconnect :: proc(fx: ^Fixture, bridge_id: string, active: []string) {
+	set_bridge_status(fx, bridge_id, true)
+	for id in active {
+		inst, ok, _ := iface.agent_get_instance(&fx.agents, id)
+		if !ok do continue
+		inst.runtime_status = "running"
+		inst.last_seen_at = platform.clock_now(&fx.clock)
+		_, _, _ = iface.agent_save_instance(&fx.agents, inst)
+	}
+}
+
+// B2: a WS blip under the TTL is invisible to the lease system.
+@(test)
+test_bridge_blip_under_ttl_keeps_lease :: proc(t: ^testing.T) {
+	fx, log, ok := lease_fixture(t, "c_blip")
+	defer lease_fixture_close(fx, log)
+	if !ok do return
+	chain := seed_live_chain(t, fx, "chain_blip")
+	seed_fleet(fx, chain, "agt_w")
+	seed_instance(fx, chain, "inst_w1", "agt_w", "br_1", "idle")
+	_ = publish_task(t, fx, chain, "task_1")
+	confirm_holder(fx, "inst_w1")
+	lease, held := lease_of(fx, "inst_w1")
+	if !testing.expect(t, held, "leased") do return
+	wake_log_reset(log)
+	bridge_disconnect(fx, "br_1")
+	fixture_advance(fx, 60)
+	_ = fire_due(&fx.svc, now_ms(&fx.clock))
+	bridge_reconnect(fx, "br_1", []string{"inst_coord", "inst_w1"})
+	on_bridge_hello(&fx.svc, "br_1", []string{"inst_coord", "inst_w1"})
+	same, still := lease_of(fx, "inst_w1")
+	testing.expect(t, still && same.lease_id == lease.lease_id, "same lease after the blip")
+	testing.expect_value(t, count_events(fx, "task_1", EV_LEASE_EXPIRED), 0)
+	testing.expect_value(t, get_task(fx, "task_1").attempt_no, 1)
+	testing.expect(t, !wake_log_has_stop(log, "inst_w1") && !wake_log_has_run(log, "inst_w1"), "holder neither stopped nor restarted")
+	// A REAL death reported while the bridge is Online still expires at once.
+	inst, _, _ := iface.agent_get_instance(&fx.agents, "inst_w1")
+	inst.runtime_status = "unreachable" // heartbeat reconcile shape (bridge Online, instance gone)
+	_, _, _ = iface.agent_save_instance(&fx.agents, inst)
+	on_instance_terminal(&fx.svc, "inst_w1")
+	testing.expect_value(t, count_events(fx, "task_1", EV_LEASE_EXPIRED), 1)
+	testing.expect(t, strings.contains(last_event_payload(fx, "task_1", EV_LEASE_EXPIRED), `"reason":"instance_lost"`), "instance_lost when the bridge is online")
+}
+
+// B3: cancelling a leased task reclaims the lease and never re-grants it.
+@(test)
+test_cancel_leased_task_leaves_no_lease_and_stops_holder :: proc(t: ^testing.T) {
+	fx, log, ok := lease_fixture(t, "c_cancel_leased")
+	defer lease_fixture_close(fx, log)
+	if !ok do return
+	chain := seed_live_chain(t, fx, "chain_cl")
+	seed_fleet(fx, chain, "agt_w")
+	seed_instance(fx, chain, "inst_w1", "agt_w", "br_1", "idle")
+	task := publish_task(t, fx, chain, "task_1")
+	confirm_holder(fx, "inst_w1")
+	_, held := lease_of(fx, "inst_w1")
+	if !testing.expect(t, held, "leased") do return
+	wake_log_reset(log)
+	testing.expect(t, cancel_task(&fx.svc, get_task(fx, "task_1"), Actor{kind = ACTOR_USER, id = "u1"}, "scope cut").code == .None, "cancel")
+	testing.expect_value(t, get_task(fx, "task_1").state, domain.Task_State.Cancelled)
+	leases, _ := iface.taskchain_list_leases_by_task(&fx.repo, task.task_id)
+	testing.expect_value(t, len(leases), 0)
+	testing.expect_value(t, count_events(fx, "task_1", EV_LEASE_EXPIRED), 1)
+	testing.expect(t, strings.contains(last_event_payload(fx, "task_1", EV_LEASE_EXPIRED), `"reason":"cancelled"`), "reason cancelled")
+	testing.expect_value(t, count_events(fx, "task_1", EV_LEASE_GRANTED), 1)
+	testing.expect(t, wake_log_has_stop(log, "inst_w1"), "holder stopped")
+	testing.expect(t, !wake_log_has_run(log, "inst_w1"), "holder NOT re-woken")
+	inst, _, _ := iface.agent_get_instance(&fx.agents, "inst_w1")
+	testing.expect(t, inst.current_task_id == "", "pointer cleared")
+	attempts, _ := iface.taskchain_list_attempts_by_task(&fx.repo, task.task_id, "u1")
+	testing.expect(t, len(attempts) == 1 && attempts[0].ended_at != "", "single attempt, closed")
+	assert_projection_matches_fold(t, fx, chain.chain_id, "u1", "cancel leased")
+}
+
+// B1: the single allowed lock order is tx_mutex → connection state_mutex. A
+// unit of work begun while a state_mutex is held is a violation.
+@(test)
+test_lock_order_uow_under_state_mutex_is_a_violation :: proc(t: ^testing.T) {
+	when ODIN_DEBUG {
+		// begin would panic by design; only the bookkeeping is checked here.
+		lockorder.state_mutex_enter()
+		testing.expect(t, lockorder.state_mutex_held(), "held")
+		lockorder.state_mutex_leave()
+		testing.expect(t, !lockorder.state_mutex_held(), "released")
+	} else {
+		fx, ok := fixture_open(t, "lockorder")
+		defer fixture_close(fx)
+		if !ok do return
+		before := lockorder.violations
+		lockorder.state_mutex_enter()
+		u, bok, _ := begin_uow(&fx.svc)
+		lockorder.state_mutex_leave()
+		if bok do _, _ = end_uow(&fx.svc, &u, false)
+		testing.expect_value(t, lockorder.violations, before + 1)
+		// the normal order is silent
+		u2, bok2, _ := begin_uow(&fx.svc)
+		if bok2 do _, _ = end_uow(&fx.svc, &u2, false)
+		testing.expect_value(t, lockorder.violations, before + 1)
+	}
 }
 
 // confirm_holder: the holder's start-success (confirms a wake-delivered lease).
