@@ -66,6 +66,10 @@
 #            credential file survives.
 #   killed   the enroll process dies mid-wait: nothing was written; cancel then
 #            removes the row (the reaper would do the same at the 300s deadline).
+#   legacy   COMPATIBILITY: a bridge built from LEGACY_REF (default v0.4.1, before
+#            REQ-EA) against this hub. It ignores enrollment_pending and persists at
+#            approval, but its ok:true must still commit the enrollment, and its
+#            restarted service must come up enrolled and unlocked.
 #
 # Usage: tests/e2e_req_fix_2_vault_delivery.sh
 
@@ -131,7 +135,7 @@ now_ms() { date +%s%3N; }
 # One full run against a given ham-bridge binary.
 # Returns 0 if the vault key was delivered, 1 if it was not.
 # ---------------------------------------------------------------------------
-run_delivery_attempt() { # run_delivery_attempt <label> <bridge_binary> <run_dir> [success|cancel|killed]
+run_delivery_attempt() { # run_delivery_attempt <label> <bridge_binary> <run_dir> [success|cancel|killed|legacy]
   local label="$1" bridge_bin="$2" run_dir="$3" mode="${4:-success}"
   local home_dir="$run_dir/home"
   mkdir -p "$home_dir/.config/heimdall" "$home_dir/.local/share/heimdall"
@@ -303,7 +307,9 @@ SYSTEMCTL
   # nothing on the machine.
   printf '%s' "$approve_resp" | grep -aq '"enrollment_pending":true' \
     || fail "[$label] approve did not report enrollment_pending: $approve_resp"
-  [ ! -e "$token_file" ] || fail "[$label] a credential was written at APPROVAL, before any key was delivered"
+  if [ "$mode" != legacy ]; then
+    [ ! -e "$token_file" ] || fail "[$label] a credential was written at APPROVAL, before any key was delivered"
+  fi
   if printf '%s' "$(api GET /api/v1/bridges || true)" | grep -aq "$bridge_id"; then
     fail "[$label] a pending bridge is listed in the default GET /bridges"
   fi
@@ -361,6 +367,8 @@ SYSTEMCTL
   fi
 
   # --- a FAILED delivery first: it must write nothing and allow a retry ------
+  # (Not for the legacy bridge: it wrote its credential at approval by design.)
+  if [ "$mode" != legacy ]; then
   say "[$label] delivering a seal addressed to the wrong bridge (must be refused)"
   local bad_payload bad_resp
   bad_payload="$(node "$SCRIPT_DIR/helpers/req_fix_2_seal.mjs" "brg_not_this_one" "$bpk" "$VAULT_KEY_HEX")" \
@@ -371,6 +379,7 @@ SYSTEMCTL
   status="$(api GET "/api/v1/bridges/$bridge_id/enrollment" || true)"
   printf '%s' "$status" | grep -aq '"enrollment_state":"pending"' \
     || fail "[$label] a failed delivery did not leave the enrollment pending for a retry: $status"
+  fi
 
   # --- seal the vault key to the operator-confirmed key and deliver it ------
   say "[$label] sealing a vault key to the verified bpk and POSTing the unseal"
@@ -458,6 +467,16 @@ FIX_BIN="$WORK_DIR/ham-bridge-fix"
 [ "$FIX_BIN" -nt "$REPO_ROOT/src/bridge/main.odin" ] \
   || fail "built binary is not newer than main.odin — refusing to trust a stale artifact"
 
+# The pre-REQ-EA bridge, for the compatibility scenario. Built from the tagged
+# source tree, against the same toolchain.
+LEGACY_REF="${LEGACY_REF:-v0.4.1}"
+LEGACY_BIN="$WORK_DIR/ham-bridge-legacy"
+mkdir -p "$WORK_DIR/legacy-src"
+git -C "$REPO_ROOT" archive "$LEGACY_REF" src tools | tar -x -C "$WORK_DIR/legacy-src" \
+  || fail "could not extract $LEGACY_REF for the compatibility bridge"
+( cd "$REPO_ROOT" && nix develop --command "$ODIN_BIN" build "$WORK_DIR/legacy-src/src/bridge" -collection:odin_test="$WORK_DIR/legacy-src/src" -out:"$LEGACY_BIN" ) \
+  || fail "the $LEGACY_REF bridge does not build"
+
 mkdir -p "$WORK_DIR/fix"
 if run_delivery_attempt "fix" "$FIX_BIN" "$WORK_DIR/fix" success; then
   say "PASS: local Hub enrollment delivered the vault and handed off to the registered bridge service"
@@ -476,5 +495,14 @@ for mode in cancel killed; do
   say "PASS: $mode rolls the enrollment back completely"
   stop_run
 done
+
+# ===========================================================================
+# 4. REQ-EA compatibility: an old bridge against this hub still enrolls.
+# ===========================================================================
+mkdir -p "$WORK_DIR/legacy"
+run_delivery_attempt "legacy" "$LEGACY_BIN" "$WORK_DIR/legacy" legacy \
+  || fail "[legacy] a $LEGACY_REF bridge could not enroll against this hub"
+say "PASS: a $LEGACY_REF bridge enrolls, commits and comes up unlocked against this hub"
+stop_run
 say "ALL ASSERTIONS PASSED"
 say "measured approve->online: $(cat "$WORK_DIR/fix/approve_to_online_ms" 2>/dev/null || echo '?')ms against the 45000ms page budget"

@@ -29,8 +29,7 @@ new_bridge_repository :: proc(impl: ^Bridge_Repo_SQLite, conn: ^Conn) -> iface.B
 		revoke_token_family = bridge_revoke_token_family_sqlite,
 		revoke_tokens_for_bridge = bridge_revoke_tokens_for_bridge_sqlite,
 		mark_token_rotated = bridge_mark_token_rotated_sqlite,
-		promote_token_family = bridge_promote_token_family_sqlite,
-		revoke_other_families = bridge_revoke_other_families_sqlite,
+		commit_enrollment = bridge_commit_enrollment_sqlite,
 		list_live_tokens_by_scope = bridge_list_live_tokens_by_scope_sqlite,
 	}
 }

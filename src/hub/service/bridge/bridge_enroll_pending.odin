@@ -44,13 +44,14 @@ Pending_Commit_Input :: struct {
 
 // commit_pending_enrollment makes a pending enrollment real (REQ-EA-2).
 //
-// ORDER IS THE SAFETY PROPERTY. The family is promoted FIRST, as a compare-and-set
-// on its scope: if the sweep revoked it a moment earlier, 0 rows change and the
-// commit refuses, so a rolled-back enrollment can never be resurrected by a late
-// unseal answer. Only after the credential is live does the row change. For an
-// attach the old device's families are revoked next, and its socket kicked last,
-// for the same reason revoke_bridge orders its steps: by then nothing can
-// authenticate as the old device whether or not the close lands.
+// THE COMMIT IS ONE TRANSACTION (iface.bridge_commit_enrollment): the family is
+// promoted as a compare-and-set on its scope, and in the same transaction an
+// attach revokes the old device's families, or a new bridge's pending deadline is
+// cleared. So a rolled-back enrollment is never resurrected by a late answer, and no
+// failure leaves two live credentials or a live credential on a row the sweep would
+// delete. A duplicate answer for an already-committed family is an idempotent
+// success. Only then is the row's descriptive state refreshed and, for an attach,
+// the old device's socket kicked: by then nothing can authenticate as it.
 commit_pending_enrollment :: proc(service: ^Bridge_Service, input: Pending_Commit_Input) -> (domain.Bridge, bool, domain.Domain_Error) {
 	if service == nil || service.repo == nil do return domain.Bridge{}, false, domain.domain_error(.Internal_Error, "bridge service is not configured")
 	if input.bridge_id == "" || input.family_id == "" do return domain.Bridge{}, false, domain.domain_error(.Validation_Failed, "bridge_id and family_id are required")
@@ -60,22 +61,27 @@ commit_pending_enrollment :: proc(service: ^Bridge_Service, input: Pending_Commi
 		domain.bridge_destroy(&bridge)
 		return domain.Bridge{}, false, domain.domain_error(.Bridge_Revoked, "bridge is revoked")
 	}
-	changed, promote_ok, promote_err := iface.bridge_promote_token_family(service.repo, input.family_id, BRIDGE_ENROLL_TOKEN_SCOPE, BRIDGE_TOKEN_SCOPE)
-	if !promote_ok {
-		domain.bridge_destroy(&bridge)
-		return domain.Bridge{}, false, promote_err
-	}
-	if changed == 0 {
-		domain.bridge_destroy(&bridge)
-		return domain.Bridge{}, false, domain.domain_error(.Conflict, "the enrollment is no longer pending; it was rolled back or already committed")
-	}
 	now := platform.clock_now(service.clock)
 	attach := !domain.bridge_is_pending(bridge)
+	outcome, commit_ok, commit_err := iface.bridge_commit_enrollment(service.repo, bridge.bridge_id, input.family_id, BRIDGE_ENROLL_TOKEN_SCOPE, BRIDGE_TOKEN_SCOPE, attach, now)
+	if !commit_ok {
+		domain.bridge_destroy(&bridge)
+		return domain.Bridge{}, false, commit_err
+	}
+	switch outcome {
+	case .Not_Pending:
+		domain.bridge_destroy(&bridge)
+		return domain.Bridge{}, false, domain.domain_error(.Conflict, "the enrollment is no longer pending; it was rolled back")
+	case .Already_Committed:
+		// A duplicate ok:true (a retried relay) for an enrollment that is already
+		// committed. Idempotent success: answering a failure here would tell the
+		// bridge to undo a committed enrollment.
+		return bridge, true, domain.Domain_Error{}
+	case .Committed:
+	}
+	// The credential swap above is the commit. What follows only refreshes the row's
+	// descriptive fields; it cannot un-commit, and its failure is reported, not undone.
 	if attach {
-		if _, revoke_ok, revoke_err := iface.bridge_revoke_other_families(service.repo, bridge.bridge_id, input.family_id, now); !revoke_ok {
-			domain.bridge_destroy(&bridge)
-			return domain.Bridge{}, false, revoke_err
-		}
 		if h := strings.trim_space(input.machine_hostname); h != "" {
 			delete(bridge.machine_hostname)
 			bridge.machine_hostname = strings.clone(h)

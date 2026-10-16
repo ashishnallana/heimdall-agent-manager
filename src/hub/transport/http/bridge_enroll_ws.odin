@@ -220,7 +220,13 @@ bridge_enroll_send_result :: proc(registry: ^project_service.Bridge_Runtime_Regi
 	if registry == nil do return
 	command_id := fmt.aprintf("cmd_enroll_result_%d", time.to_unix_nanoseconds(time.now()))
 	defer delete(command_id)
-	body := fmt.aprintf(`{"type":"bridge_enrollment_result","command_id":"%s","committed":%v}`, command_id, committed)
+	body := bridge_enroll_result_json(command_id, committed)
 	defer delete(body)
 	_, _ = bridge_runtime_service.send_runtime_command(rawptr(registry), project_service.Runtime_Command{bridge_id = enroll_key, command_id = command_id, body_json = body})
+}
+
+// bridge_enroll_result_json is the bridge_enrollment_result frame. The caller owns
+// the string. (`{{`/`}}` are fmt's escapes for literal braces.)
+bridge_enroll_result_json :: proc(command_id: string, committed: bool) -> string {
+	return fmt.aprintf(`{{"type":"bridge_enrollment_result","command_id":"%s","committed":%v}}`, command_id, committed)
 }

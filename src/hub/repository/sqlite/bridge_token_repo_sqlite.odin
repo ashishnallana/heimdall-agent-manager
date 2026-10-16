@@ -12,6 +12,7 @@ package sqlite
 
 import "core:strconv"
 import domain "odin_test:hub/domain"
+import iface "odin_test:hub/repository/iface"
 
 BRIDGE_TOKEN_COLUMNS :: "token_id, bridge_id, kind, token_hash, family_id, generation, scope, issued_at, expires_at, family_expires_at, rotated_at, revoked_at"
 
@@ -130,39 +131,76 @@ bridge_mark_token_rotated_sqlite :: proc(ctx: rawptr, token_id, rotated_at: stri
 	return sqlite3_changes(impl.conn.db) > 0, domain.Domain_Error{}
 }
 
-// bridge_promote_token_family_sqlite is the enrollment COMMIT for a credential
-// (REQ-EA-2): it moves every live row of a pending family from `from_scope` to
-// `to_scope`. The `scope = from_scope` guard makes it a compare-and-set, so a family
-// rolled back (revoked) or already promoted changes 0 rows and the caller can tell.
-bridge_promote_token_family_sqlite :: proc(ctx: rawptr, family_id, from_scope, to_scope: string) -> (int, bool, domain.Domain_Error) {
+// bridge_commit_enrollment_sqlite is the enrollment COMMIT (REQ-EA-2/8), in ONE
+// transaction:
+//
+//   1. promote the family from_scope -> to_scope. The `scope = from_scope` guard makes
+//      it a compare-and-set: a revoked or already-promoted family changes 0 rows.
+//   2. attach: revoke every OTHER live family of the bridge (the old device);
+//      new bridge: clear enrollment_pending_until, so the sweep never deletes a row
+//      whose credential is now live.
+//
+// Either both happen or neither does. A 0-row promote is told apart: a family that
+// is already live in to_scope is a duplicate result (Already_Committed, nothing
+// changes), anything else was rolled back (Not_Pending).
+//
+// BEGIN IMMEDIATE takes the write lock up front, as billing_repo_sqlite does, so a
+// concurrent sweep cannot revoke the family between the read and the write.
+bridge_commit_enrollment_sqlite :: proc(ctx: rawptr, bridge_id, family_id, from_scope, to_scope: string, attach: bool, now: string) -> (iface.Enrollment_Commit_Outcome, bool, domain.Domain_Error) {
 	impl := (^Bridge_Repo_SQLite)(ctx)
-	if family_id == "" || from_scope == "" || to_scope == "" do return 0, false, domain.domain_error(.Validation_Failed, "family_id and scopes are required")
-	stmt: sqlite3_stmt = nil
-	query := "UPDATE bridge_tokens SET scope = ? WHERE family_id = ? AND scope = ? AND revoked_at = '';"
-	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return 0, false, domain.domain_error(.Internal_Error, "failed to prepare bridge token family promote")
-	defer sqlite3_finalize(stmt)
-	bind_text(stmt, 1, to_scope)
-	bind_text(stmt, 2, family_id)
-	bind_text(stmt, 3, from_scope)
-	if sqlite3_step(stmt) != SQLITE_DONE do return 0, false, domain.domain_error(.Internal_Error, "bridge token family could not be promoted")
-	return int(sqlite3_changes(impl.conn.db)), true, domain.Domain_Error{}
-}
+	if bridge_id == "" || family_id == "" || from_scope == "" || to_scope == "" || now == "" {
+		return .Not_Pending, false, domain.domain_error(.Validation_Failed, "bridge_id, family_id, scopes and now are required")
+	}
+	fail :: proc(msg: string) -> (iface.Enrollment_Commit_Outcome, bool, domain.Domain_Error) {
+		return .Not_Pending, false, domain.domain_error(.Internal_Error, msg)
+	}
+	if !exec(impl.conn, "BEGIN IMMEDIATE;") do return fail("failed to begin the enrollment commit")
+	committed := false
+	defer if !committed do _ = exec(impl.conn, "ROLLBACK;")
 
-// bridge_revoke_other_families_sqlite revokes every live credential of a bridge
-// EXCEPT one family: the attach-to-existing commit (REQ-EA-8), where the newly
-// delivered family replaces the old device's credential under the same bridge_id.
-bridge_revoke_other_families_sqlite :: proc(ctx: rawptr, bridge_id, keep_family_id, revoked_at: string) -> (int, bool, domain.Domain_Error) {
-	impl := (^Bridge_Repo_SQLite)(ctx)
-	if bridge_id == "" || keep_family_id == "" || revoked_at == "" do return 0, false, domain.domain_error(.Validation_Failed, "bridge_id, keep_family_id and revoked_at are required")
-	stmt: sqlite3_stmt = nil
-	query := "UPDATE bridge_tokens SET revoked_at = ? WHERE bridge_id = ? AND family_id != ? AND revoked_at = '';"
-	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return 0, false, domain.domain_error(.Internal_Error, "failed to prepare bridge token revoke")
-	defer sqlite3_finalize(stmt)
-	bind_text(stmt, 1, revoked_at)
-	bind_text(stmt, 2, bridge_id)
-	bind_text(stmt, 3, keep_family_id)
-	if sqlite3_step(stmt) != SQLITE_DONE do return 0, false, domain.domain_error(.Internal_Error, "bridge tokens could not be revoked")
-	return int(sqlite3_changes(impl.conn.db)), true, domain.Domain_Error{}
+	promoted := 0
+	{
+		stmt: sqlite3_stmt = nil
+		query := "UPDATE bridge_tokens SET scope = ? WHERE family_id = ? AND bridge_id = ? AND scope = ? AND revoked_at = '';"
+		if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return fail("failed to prepare the enrollment promote")
+		defer sqlite3_finalize(stmt)
+		bind_text(stmt, 1, to_scope)
+		bind_text(stmt, 2, family_id)
+		bind_text(stmt, 3, bridge_id)
+		bind_text(stmt, 4, from_scope)
+		if sqlite3_step(stmt) != SQLITE_DONE do return fail("the enrollment family could not be promoted")
+		promoted = int(sqlite3_changes(impl.conn.db))
+	}
+	if promoted == 0 {
+		stmt: sqlite3_stmt = nil
+		query := "SELECT COUNT(*) FROM bridge_tokens WHERE family_id = ? AND bridge_id = ? AND scope = ? AND revoked_at = '';"
+		if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return fail("failed to prepare the enrollment state read")
+		defer sqlite3_finalize(stmt)
+		bind_text(stmt, 1, family_id)
+		bind_text(stmt, 2, bridge_id)
+		bind_text(stmt, 3, to_scope)
+		if sqlite3_step(stmt) != SQLITE_ROW do return fail("the enrollment state could not be read")
+		live := int(sqlite3_column_int64(stmt, 0))
+		// Nothing was written; the deferred ROLLBACK ends the read transaction.
+		return (.Already_Committed if live > 0 else .Not_Pending), true, domain.Domain_Error{}
+	}
+	{
+		stmt: sqlite3_stmt = nil
+		query := "UPDATE bridge_tokens SET revoked_at = ? WHERE bridge_id = ? AND family_id != ? AND revoked_at = '';" if attach else "UPDATE bridges SET enrollment_pending_until = '' WHERE bridge_id = ?;"
+		if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return fail("failed to prepare the enrollment swap")
+		defer sqlite3_finalize(stmt)
+		if attach {
+			bind_text(stmt, 1, now)
+			bind_text(stmt, 2, bridge_id)
+			bind_text(stmt, 3, family_id)
+		} else {
+			bind_text(stmt, 1, bridge_id)
+		}
+		if sqlite3_step(stmt) != SQLITE_DONE do return fail("the enrollment swap failed; nothing was committed")
+	}
+	if !exec(impl.conn, "COMMIT;") do return fail("failed to commit the enrollment")
+	committed = true
+	return .Committed, true, domain.Domain_Error{}
 }
 
 // bridge_list_live_tokens_by_scope_sqlite returns every unrevoked token of a scope:

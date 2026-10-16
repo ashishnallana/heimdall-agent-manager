@@ -106,14 +106,28 @@ test_enroll_atomic_ack_only_after_key_and_credential_persist :: proc(t: ^testing
 	ok, err_msg := bridge_enroll_atomic_on_unseal(payload, now_ms)
 	testing.expect(t, ok, fmt.tprintf("delivery must succeed: %s", err_msg))
 	testing.expect_value(t, bridge_enroll_atomic_state(), Bridge_Enroll_Atomic_State.Acked)
-	testing.expect(t, strings.contains(enroll_atomic_test_read(f.token_file), "hba_enrolltest.secret"), "access token persisted before the ack")
-	testing.expect(t, enroll_atomic_test_file_exists(bridge_enroll_refresh_file_for(f.token_file, context.temp_allocator)), "refresh token persisted before the ack")
+	// STAGED before the ack: the live files are untouched until the hub commits.
+	st := bridge_enroll_stage_for(f.token_file, f.config_path)
+	testing.expect(t, strings.contains(enroll_atomic_test_read(strings.concatenate({f.token_file, BRIDGE_ENROLL_STAGE_SUFFIX}, context.temp_allocator)), "hba_enrolltest.secret"), "access token staged before the ack")
+	testing.expect(t, enroll_atomic_test_file_exists(strings.concatenate({st.refresh_file, BRIDGE_ENROLL_STAGE_SUFFIX}, context.temp_allocator)), "refresh token staged before the ack")
+	testing.expect(t, enroll_atomic_test_file_exists(st.marker), "the staging marker is written before the ack")
+	testing.expect(t, !enroll_atomic_test_file_exists(f.token_file), "the live credential is not written before the commit")
+	testing.expect_value(t, enroll_atomic_test_read(f.config_path), ENROLL_ATOMIC_TEST_OLD_CONFIG)
 	testing.expect(t, bridge_enroll_vault_key_persisted(f.bridge_id), "vault key readable from the OS store before the ack")
 
 	bridge_enroll_atomic_on_result(`{"type":"bridge_enrollment_result","committed":true}`)
 	testing.expect_value(t, bridge_enroll_atomic_state(), Bridge_Enroll_Atomic_State.Committed)
-	testing.expect(t, enroll_atomic_test_file_exists(f.token_file), "a committed enrollment keeps its credential")
+	testing.expect(t, strings.contains(enroll_atomic_test_read(f.token_file), "hba_enrolltest.secret"), "the commit moves the credential into place")
+	testing.expect(t, enroll_atomic_test_file_exists(st.refresh_file), "the commit moves the refresh token into place")
+	testing.expect(t, enroll_atomic_test_read(f.config_path) != ENROLL_ATOMIC_TEST_OLD_CONFIG, "the commit moves the new config into place")
+	testing.expect(t, !enroll_atomic_test_file_exists(st.marker), "the marker is gone once promoted")
 	testing.expect(t, bridge_enroll_vault_key_persisted(f.bridge_id), "a committed enrollment keeps its key")
+
+	// A stale or duplicate committed:false after the commit must NOT undo it.
+	bridge_enroll_atomic_on_result(`{"type":"bridge_enrollment_result","committed":false}`)
+	testing.expect_value(t, bridge_enroll_atomic_state(), Bridge_Enroll_Atomic_State.Committed)
+	testing.expect(t, enroll_atomic_test_file_exists(f.token_file), "a stale rollback leaves the committed credential")
+	testing.expect(t, bridge_enroll_vault_key_persisted(f.bridge_id), "a stale rollback leaves the committed key")
 }
 
 @(test)
@@ -130,12 +144,15 @@ test_enroll_atomic_hub_rollback_restores_previous_files_and_purges_key :: proc(t
 	defer delete(payload)
 	ok, err_msg := bridge_enroll_atomic_on_unseal(payload, now_ms)
 	testing.expect(t, ok, fmt.tprintf("delivery must succeed: %s", err_msg))
-	testing.expect(t, enroll_atomic_test_read(f.config_path) != ENROLL_ATOMIC_TEST_OLD_CONFIG, "config.toml was rewritten for the new bridge")
+	testing.expect_value(t, enroll_atomic_test_read(f.config_path), ENROLL_ATOMIC_TEST_OLD_CONFIG)
 
 	bridge_enroll_atomic_on_result(`{"type":"bridge_enrollment_result","committed":false}`)
 	testing.expect_value(t, bridge_enroll_atomic_state(), Bridge_Enroll_Atomic_State.Rolled_Back)
 	testing.expect(t, !enroll_atomic_test_file_exists(f.token_file), "rollback removes a credential that did not exist before")
 	testing.expect(t, !enroll_atomic_test_file_exists(bridge_enroll_refresh_file_for(f.token_file, context.temp_allocator)), "rollback removes the refresh token")
+	st := bridge_enroll_stage_for(f.token_file, f.config_path)
+	testing.expect(t, !enroll_atomic_test_file_exists(st.marker), "rollback removes the marker")
+	testing.expect(t, !enroll_atomic_test_file_exists(strings.concatenate({f.token_file, BRIDGE_ENROLL_STAGE_SUFFIX}, context.temp_allocator)), "rollback removes the staging")
 	testing.expect_value(t, enroll_atomic_test_read(f.config_path), ENROLL_ATOMIC_TEST_OLD_CONFIG)
 	testing.expect(t, !bridge_enroll_vault_key_persisted(f.bridge_id), "rollback purges the delivered key")
 
@@ -175,4 +192,161 @@ test_enroll_atomic_failed_delivery_writes_nothing_and_allows_retry :: proc(t: ^t
 	// A relayed duplicate after the ack answers ok again and writes nothing new.
 	dup_ok, _ := bridge_enroll_atomic_on_unseal(good, good_ms)
 	testing.expect(t, dup_ok, "a duplicate after the ack is answered ok, idempotently")
+}
+
+// ===== Crash recovery (step 4) =====
+//
+// Each test stages an enrollment through the real ack path, then DISARMS the state
+// machine — which is what a crash leaves: files on disk, no process — and runs the
+// recovery a service start runs, against a scripted hub answer.
+
+@(private = "file")
+g_recovery_probe_outcome: Bridge_Refresh_Outcome
+@(private = "file")
+g_recovery_probe_calls: int
+
+@(private = "file")
+recovery_probe :: proc(api_base, refresh_token: string) -> (Bridge_Enroll_Credential, Bridge_Refresh_Outcome) {
+	g_recovery_probe_calls += 1
+	if g_recovery_probe_outcome == .Rotated {
+		return Bridge_Enroll_Credential{access_token = "hba_rotated.secret", refresh_token = "hbf_rotated.secret", expires_in = 3600}, .Rotated
+	}
+	return Bridge_Enroll_Credential{}, g_recovery_probe_outcome
+}
+
+@(private = "file")
+enroll_atomic_stage_then_crash :: proc(t: ^testing.T, f: ^Enroll_Atomic_Fixture, nonce: string) {
+	payload, now_ms := enroll_atomic_test_envelope(f.bridge_id, nonce)
+	defer delete(payload)
+	ok, err_msg := bridge_enroll_atomic_on_unseal(payload, now_ms)
+	testing.expect(t, ok, fmt.tprintf("delivery must succeed: %s", err_msg))
+	bridge_enroll_atomic_disarm() // the process is gone; only the disk remains
+}
+
+@(test)
+test_enroll_recovery_promotes_a_committed_enrollment_with_the_rotated_pair :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
+	f: Enroll_Atomic_Fixture
+	defer enroll_atomic_fixture_close(&f)
+	if !enroll_atomic_fixture_open(t, &f, "ea_rec_commit") do return
+	enroll_atomic_stage_then_crash(t, &f, "nonce_ea_rec_c")
+
+	g_recovery_probe_outcome = .Rotated
+	g_recovery_probe_calls = 0
+	got := bridge_enroll_atomic_recover_paths(f.token_file, f.config_path, recovery_probe)
+	testing.expect_value(t, got, Bridge_Enroll_Recovery.Promoted)
+	testing.expect_value(t, g_recovery_probe_calls, 1)
+	st := bridge_enroll_stage_for(f.token_file, f.config_path)
+	testing.expect(t, strings.contains(enroll_atomic_test_read(f.token_file), "hba_rotated.secret"), "the ROTATED access token is live (the staged one is spent)")
+	testing.expect(t, strings.contains(enroll_atomic_test_read(st.refresh_file), "hbf_rotated.secret"), "the ROTATED refresh token is live")
+	testing.expect(t, enroll_atomic_test_read(f.config_path) != ENROLL_ATOMIC_TEST_OLD_CONFIG, "the staged config is live")
+	testing.expect(t, !enroll_atomic_test_file_exists(st.marker), "the marker is gone")
+	testing.expect(t, bridge_enroll_vault_key_persisted(f.bridge_id), "the key stays")
+	testing.expect_value(t, bridge_enroll_atomic_recover_paths(f.token_file, f.config_path, recovery_probe), Bridge_Enroll_Recovery.None)
+}
+
+@(test)
+test_enroll_recovery_discards_a_rolled_back_enrollment_and_its_key :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
+	f: Enroll_Atomic_Fixture
+	defer enroll_atomic_fixture_close(&f)
+	if !enroll_atomic_fixture_open(t, &f, "ea_rec_rb") do return
+	enroll_atomic_stage_then_crash(t, &f, "nonce_ea_rec_r")
+
+	// invalid_grant: the hub refuses refresh for a pending OR revoked family.
+	g_recovery_probe_outcome = .Revoked
+	got := bridge_enroll_atomic_recover_paths(f.token_file, f.config_path, recovery_probe)
+	testing.expect_value(t, got, Bridge_Enroll_Recovery.Discarded)
+	st := bridge_enroll_stage_for(f.token_file, f.config_path)
+	testing.expect(t, !enroll_atomic_test_file_exists(f.token_file), "no live credential")
+	testing.expect(t, !enroll_atomic_test_file_exists(strings.concatenate({f.token_file, BRIDGE_ENROLL_STAGE_SUFFIX}, context.temp_allocator)), "no staged credential")
+	testing.expect(t, !enroll_atomic_test_file_exists(st.marker), "no marker")
+	testing.expect_value(t, enroll_atomic_test_read(f.config_path), ENROLL_ATOMIC_TEST_OLD_CONFIG)
+	testing.expect(t, !bridge_enroll_vault_key_persisted(f.bridge_id), "the delivered key is purged")
+}
+
+@(test)
+test_enroll_recovery_keeps_staging_when_the_hub_is_unreachable :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
+	f: Enroll_Atomic_Fixture
+	defer enroll_atomic_fixture_close(&f)
+	if !enroll_atomic_fixture_open(t, &f, "ea_rec_retry") do return
+	enroll_atomic_stage_then_crash(t, &f, "nonce_ea_rec_u")
+
+	g_recovery_probe_outcome = .Retry
+	testing.expect_value(t, bridge_enroll_atomic_recover_paths(f.token_file, f.config_path, recovery_probe), Bridge_Enroll_Recovery.Unresolved)
+	st := bridge_enroll_stage_for(f.token_file, f.config_path)
+	testing.expect(t, enroll_atomic_test_file_exists(st.marker), "the staging survives for the next start")
+	testing.expect(t, !enroll_atomic_test_file_exists(f.token_file), "nothing was promoted on a guess")
+	// The next start, with the hub back and the enrollment committed, finishes it.
+	g_recovery_probe_outcome = .Rotated
+	testing.expect_value(t, bridge_enroll_atomic_recover_paths(f.token_file, f.config_path, recovery_probe), Bridge_Enroll_Recovery.Promoted)
+}
+
+@(test)
+test_enroll_recovery_discards_incomplete_staging_without_asking_the_hub :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
+	f: Enroll_Atomic_Fixture
+	defer enroll_atomic_fixture_close(&f)
+	if !enroll_atomic_fixture_open(t, &f, "ea_rec_partial") do return
+	bridge_enroll_atomic_disarm()
+	// A crash mid-staging: a staged token, no marker (the marker is written LAST).
+	_ = bridge_write_secret_file(strings.concatenate({f.token_file, BRIDGE_ENROLL_STAGE_SUFFIX}, context.temp_allocator), "hba_partial.secret")
+	g_recovery_probe_calls = 0
+	testing.expect_value(t, bridge_enroll_atomic_recover_paths(f.token_file, f.config_path, recovery_probe), Bridge_Enroll_Recovery.Discarded)
+	testing.expect_value(t, g_recovery_probe_calls, 0)
+	testing.expect(t, !enroll_atomic_test_file_exists(strings.concatenate({f.token_file, BRIDGE_ENROLL_STAGE_SUFFIX}, context.temp_allocator)), "the partial staging is gone")
+	testing.expect(t, !enroll_atomic_test_file_exists(f.token_file), "nothing became live")
+}
+
+@(test)
+test_enroll_recovery_finishes_an_interrupted_promotion :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
+	f: Enroll_Atomic_Fixture
+	defer enroll_atomic_fixture_close(&f)
+	if !enroll_atomic_fixture_open(t, &f, "ea_rec_half") do return
+	enroll_atomic_stage_then_crash(t, &f, "nonce_ea_rec_h")
+	// A crash after the refresh half was renamed but before the access half: the
+	// hub committed (promotion only starts on committed:true).
+	st := bridge_enroll_stage_for(f.token_file, f.config_path)
+	_ = os.rename(strings.concatenate({st.refresh_file, BRIDGE_ENROLL_STAGE_SUFFIX}, context.temp_allocator), st.refresh_file)
+	g_recovery_probe_calls = 0
+	testing.expect_value(t, bridge_enroll_atomic_recover_paths(f.token_file, f.config_path, recovery_probe), Bridge_Enroll_Recovery.Promoted)
+	testing.expect_value(t, g_recovery_probe_calls, 0)
+	testing.expect(t, strings.contains(enroll_atomic_test_read(f.token_file), "hba_enrolltest.secret"), "the access half is moved into place")
+	testing.expect(t, !enroll_atomic_test_file_exists(st.marker), "the marker is gone")
+}
+
+@(test)
+test_enroll_stage_marker_is_valid_json :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
+	f: Enroll_Atomic_Fixture
+	defer enroll_atomic_fixture_close(&f)
+	if !enroll_atomic_fixture_open(t, &f, "ea_marker") do return
+	payload, now_ms := enroll_atomic_test_envelope(f.bridge_id, "nonce_ea_marker")
+	defer delete(payload)
+	ok, _ := bridge_enroll_atomic_on_unseal(payload, now_ms)
+	testing.expect(t, ok, "delivery succeeds")
+	marker := enroll_atomic_test_read(bridge_enroll_stage_for(f.token_file, f.config_path).marker)
+	testing.expectf(t, strings.has_prefix(marker, `{"bridge_id":"`), "marker is JSON, got %q", marker)
+	testing.expect_value(t, extract_json_string(marker, "bridge_id", "", context.temp_allocator), f.bridge_id)
+	testing.expect_value(t, extract_json_string(marker, "hub", "", context.temp_allocator), "https://hub.example.test")
 }

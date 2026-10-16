@@ -29,10 +29,17 @@ Bridge_List_Tokens_By_Family_Proc :: proc(ctx: rawptr, family_id: string) -> ([]
 Bridge_Revoke_Token_Family_Proc :: proc(ctx: rawptr, family_id, revoked_at: string) -> (int, bool, domain.Domain_Error)
 Bridge_Revoke_Tokens_For_Bridge_Proc :: proc(ctx: rawptr, bridge_id, revoked_at: string) -> (int, bool, domain.Domain_Error)
 Bridge_Mark_Token_Rotated_Proc :: proc(ctx: rawptr, token_id, rotated_at: string) -> (bool, domain.Domain_Error)
-// REQ-EA-2/3/8: the pending-enrollment credential lifecycle. promote is a
-// compare-and-set on scope; revoke_other_families keeps exactly one family alive.
-Bridge_Promote_Token_Family_Proc :: proc(ctx: rawptr, family_id, from_scope, to_scope: string) -> (int, bool, domain.Domain_Error)
-Bridge_Revoke_Other_Families_Proc :: proc(ctx: rawptr, bridge_id, keep_family_id, revoked_at: string) -> (int, bool, domain.Domain_Error)
+// REQ-EA-2/8: the enrollment COMMIT, as ONE transaction. Promote the family from
+// from_scope to to_scope (a compare-and-set on scope), then either revoke every other
+// family of the bridge (attach) or clear the row's pending deadline (new bridge). A
+// failure anywhere rolls all of it back, so no crash or error leaves two live
+// credentials, or a live credential on a row the sweep would delete.
+Enrollment_Commit_Outcome :: enum {
+	Committed,          // this call promoted the family
+	Already_Committed,  // the family was promoted earlier (a duplicate result); nothing changed
+	Not_Pending,        // the family is revoked or unknown: the enrollment was rolled back
+}
+Bridge_Commit_Enrollment_Proc :: proc(ctx: rawptr, bridge_id, family_id, from_scope, to_scope: string, attach: bool, now: string) -> (Enrollment_Commit_Outcome, bool, domain.Domain_Error)
 Bridge_List_Live_Tokens_By_Scope_Proc :: proc(ctx: rawptr, scope: string) -> ([]domain.Bridge_Token, domain.Domain_Error)
 
 Bridge_Repository :: struct {
@@ -48,8 +55,7 @@ Bridge_Repository :: struct {
 	revoke_token_family: Bridge_Revoke_Token_Family_Proc,
 	revoke_tokens_for_bridge: Bridge_Revoke_Tokens_For_Bridge_Proc,
 	mark_token_rotated: Bridge_Mark_Token_Rotated_Proc,
-	promote_token_family: Bridge_Promote_Token_Family_Proc,
-	revoke_other_families: Bridge_Revoke_Other_Families_Proc,
+	commit_enrollment: Bridge_Commit_Enrollment_Proc,
 	list_live_tokens_by_scope: Bridge_List_Live_Tokens_By_Scope_Proc,
 }
 
@@ -113,14 +119,9 @@ bridge_mark_token_rotated :: proc(repo: ^Bridge_Repository, token_id, rotated_at
 	return repo.mark_token_rotated(repo.ctx, token_id, rotated_at)
 }
 
-bridge_promote_token_family :: proc(repo: ^Bridge_Repository, family_id, from_scope, to_scope: string) -> (int, bool, domain.Domain_Error) {
-	if repo == nil || repo.promote_token_family == nil do return 0, false, domain.domain_error(.Internal_Error, "bridge repository is not configured")
-	return repo.promote_token_family(repo.ctx, family_id, from_scope, to_scope)
-}
-
-bridge_revoke_other_families :: proc(repo: ^Bridge_Repository, bridge_id, keep_family_id, revoked_at: string) -> (int, bool, domain.Domain_Error) {
-	if repo == nil || repo.revoke_other_families == nil do return 0, false, domain.domain_error(.Internal_Error, "bridge repository is not configured")
-	return repo.revoke_other_families(repo.ctx, bridge_id, keep_family_id, revoked_at)
+bridge_commit_enrollment :: proc(repo: ^Bridge_Repository, bridge_id, family_id, from_scope, to_scope: string, attach: bool, now: string) -> (Enrollment_Commit_Outcome, bool, domain.Domain_Error) {
+	if repo == nil || repo.commit_enrollment == nil do return .Not_Pending, false, domain.domain_error(.Internal_Error, "bridge repository is not configured")
+	return repo.commit_enrollment(repo.ctx, bridge_id, family_id, from_scope, to_scope, attach, now)
 }
 
 bridge_list_live_tokens_by_scope :: proc(repo: ^Bridge_Repository, scope: string) -> ([]domain.Bridge_Token, domain.Domain_Error) {

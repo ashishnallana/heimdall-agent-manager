@@ -508,7 +508,7 @@ bridge_enrollment_cancel_handler :: proc(ctx: rawptr, req: Request) -> Response 
 	if err.code != .None do return respond_error(err, req.request_id)
 	_ = bridge_service.close_bridge_connection(h.bridges, enroll_key)
 	publish_bridge_enrollment_changed(h, string(bridge.owner_user_id), bridge.bridge_id)
-	return respond_success(fmt.tprintf("{\"bridge_id\":\"%s\",\"rolled_back\":true,\"row_deleted\":%v}", bridge.bridge_id, removed), req.request_id, auth_ctx_server_time(req))
+	return respond_success(fmt.tprintf("{{\"bridge_id\":\"%s\",\"rolled_back\":true,\"row_deleted\":%v}}", bridge.bridge_id, removed), req.request_id, auth_ctx_server_time(req))
 }
 
 bridge_public_key_handler :: proc(ctx: rawptr, req: Request) -> Response {

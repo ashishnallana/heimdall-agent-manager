@@ -934,6 +934,8 @@ bridge_enroll_wait_for_vault_delivery :: proc(args: []string, bridge_id: string)
 // bridge_enroll_device_command runs the whole ceremony. Steps are numbered to the
 // design's §2.2 so the two can be read side by side.
 bridge_enroll_device_command :: proc(args: []string) -> bool {
+	// REQ-EA-4: resolve a previous enrollment a crash left staged before starting anew.
+	_ = bridge_enroll_atomic_recover(args)
 	// Step 0 — the single input.
 	hub_raw := option_value(args, "--hub", os.get_env("HAM_BRIDGE_HUB_URL", context.allocator))
 	api_base, origin_ok := bridge_enroll_hub_url(hub_raw)
