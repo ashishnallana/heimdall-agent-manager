@@ -129,3 +129,46 @@ test_attention_caps_items_but_not_counts :: proc(t: ^testing.T) {
 	testing.expect_value(t, r.counts.task, total)
 	testing.expect_value(t, len(r.items), ATTENTION_ITEMS_PER_KIND)
 }
+
+// Every card write path reaches the change hook that drives attention_changed.
+@(test)
+test_attention_every_card_write_notifies :: proc(t: ^testing.T) {
+	h: Projector_Harness
+	ph_open(t, &h, "att_api_events")
+	defer ph_close(&h)
+	count :: proc(h: ^Projector_Harness) -> int { return len(h.changed_kinds) }
+
+	before := count(&h)
+	created, ok, _ := create_card(&h.svc, ph_auth(), Card_Input{title = "Generic approval", provider = "agent", operations_json = "[]"})
+	testing.expect(t, ok, "create")
+	testing.expect(t, count(&h) > before, "create notifies")
+	testing.expect_value(t, h.changed_kinds[len(h.changed_kinds) - 1], domain.CARD_KIND_APPROVAL)
+
+	before = count(&h)
+	_, _, _ = update_card(&h.svc, ph_auth(), created.card_id, Card_Update_Input{title = "Renamed", has_title = true})
+	testing.expect(t, count(&h) > before, "update notifies")
+
+	before = count(&h)
+	_, _, _ = snooze_card(&h.svc, ph_auth(), created.card_id, "2099-01-01T00:00:00Z")
+	testing.expect(t, count(&h) > before, "snooze notifies")
+
+	before = count(&h)
+	_, _, _ = discard_card(&h.svc, ph_auth(), created.card_id)
+	testing.expect(t, count(&h) > before, "discard notifies")
+
+	before = count(&h)
+	_, _ = delete_card(&h.svc, ph_auth(), created.card_id)
+	testing.expect(t, count(&h) > before, "delete notifies")
+
+	second, _, _ := create_card(&h.svc, ph_auth(), Card_Input{title = "Accept me", provider = "agent", operations_json = "[]"})
+	before = count(&h)
+	_, acc_ok, _ := accept_card(&h.svc, ph_auth(), second.card_id)
+	testing.expect(t, acc_ok, "accept")
+	testing.expect(t, count(&h) > before, "accept notifies")
+
+	// Projection writes notify too (task kind).
+	before = count(&h)
+	ph_save_task(t, &h, ph_task("task_ev", .In_Validation, ph_ago(time.Minute)))
+	testing.expect(t, count(&h) > before, "projection notifies")
+	testing.expect_value(t, h.changed_kinds[len(h.changed_kinds) - 1], domain.CARD_KIND_TASK)
+}

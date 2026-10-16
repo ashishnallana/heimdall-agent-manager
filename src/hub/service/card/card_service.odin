@@ -348,7 +348,8 @@ create_card :: proc(s: ^Card_Service, auth: contracts.Auth_Context, input: Card_
 		updated_at       = now,
 	}
 
-	return iface.card_create(s.cards, card)
+	created, created_ok, created_err := iface.card_create(s.cards, card)
+	return notify_written(s, created, created_ok, created_err)
 }
 
 sync_projected_cards :: proc(s: ^Card_Service, owner: domain.User_ID) {
@@ -732,6 +733,7 @@ update_card_status :: proc(s: ^Card_Service, auth: contracts.Auth_Context, id: d
 
 	card.status = status
 	card.updated_at = now
+	notify_card_changed(s, card.owner_user_id, card.kind)
 	return card, true, domain.Domain_Error{}
 }
 
@@ -773,9 +775,11 @@ update_card :: proc(s: ^Card_Service, auth: contracts.Auth_Context, id: domain.C
 	if input.has_snooze_until do card.snooze_until = input.snooze_until
 	if input.has_ttl_at do card.ttl_at = input.ttl_at
 
+	if input.has_provider do card.kind = domain.card_kind_for_provider(card.provider)
 	now := platform.clock_now(s.clock)
 	card.updated_at = now
-	return iface.card_update(s.cards, card)
+	updated, updated_ok, updated_err := iface.card_update(s.cards, card)
+	return notify_written(s, updated, updated_ok, updated_err)
 }
 
 discard_card :: proc(s: ^Card_Service, auth: contracts.Auth_Context, id: domain.Card_ID) -> (domain.Card, bool, domain.Domain_Error) {
@@ -1172,7 +1176,17 @@ mark_card_accepted :: proc(s: ^Card_Service, card: domain.Card) -> (domain.Card,
 		saved.status = domain.CARD_STATUS_ACCEPTED
 		saved.updated_at = now
 	}
+	notify_card_changed(s, saved.owner_user_id, saved.kind)
 	return saved, true, domain.Domain_Error{}
+}
+
+// notify_written passes a card write's result through, telling the attention
+// event about it when it succeeded. Every card write path funnels into
+// notify_card_changed (here, the status/accept/delete paths, the projector and
+// guard retirement), which drives the live attention_changed event.
+notify_written :: proc(s: ^Card_Service, card: domain.Card, ok: bool, err: domain.Domain_Error) -> (domain.Card, bool, domain.Domain_Error) {
+	if ok do notify_card_changed(s, card.owner_user_id, card.kind)
+	return card, ok, err
 }
 
 snooze_card :: proc(s: ^Card_Service, auth: contracts.Auth_Context, id: domain.Card_ID, snooze_until: string) -> (domain.Card, bool, domain.Domain_Error) {
@@ -1187,13 +1201,15 @@ snooze_card :: proc(s: ^Card_Service, auth: contracts.Auth_Context, id: domain.C
 	card.status = domain.CARD_STATUS_SNOOZED
 	card.snooze_until = snooze_until
 	card.updated_at = now
-	return iface.card_update(s.cards, card)
+	updated, updated_ok, updated_err := iface.card_update(s.cards, card)
+	return notify_written(s, updated, updated_ok, updated_err)
 }
 
 delete_card :: proc(s: ^Card_Service, auth: contracts.Auth_Context, id: domain.Card_ID) -> (bool, domain.Domain_Error) {
 	card, ok, err := get_card(s, auth, id)
 	if !ok do return false, err
 
-	_ = card
-	return iface.card_delete(s.cards, id)
+	deleted, del_err := iface.card_delete(s.cards, id)
+	if deleted do notify_card_changed(s, card.owner_user_id, card.kind)
+	return deleted, del_err
 }

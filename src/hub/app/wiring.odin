@@ -35,6 +35,8 @@ App_Graph :: struct {
 	ids: platform.ID_Generator,
 	bridge_runtime_registry: project_service.Bridge_Runtime_Registry,
 	event_bus: events.User_Event_Bus,
+	// attention_events coalesces card writes into attention_changed hints.
+	attention_events: events.Attention_Debouncer,
 	db: sqlite.Conn,
 	sqlite_billing: sqlite.Billing_Repo_SQLite,
 	billing_repo: iface.Billing_Repository,
@@ -365,6 +367,8 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 	card_service.init_attention(&graph.cards, &graph.repos.attention)
 	taskchain_service.set_attention_notifier(&graph.taskchains, &graph.cards.attention_notifier)
 	content_service.set_attention_notifier(&graph.content, &graph.cards.attention_notifier)
+	events.init_attention_debouncer(&graph.attention_events, &graph.event_bus)
+	graph.cards.card_changed = card_service.Card_Changed_Hook{ctx = rawptr(&graph.attention_events), changed = attention_card_changed}
 	graph.experiment_handlers = http.Experiment_Rest_Handlers{auth = &graph.auth, repo = &graph.experiment_repo, clock = &graph.clock}
 	graph.lsp_server_config_handlers = http.Lsp_Server_Config_Rest_Handlers{auth = &graph.auth, repo = &graph.lsp_server_config_repo, clock = &graph.clock, ids = &graph.ids}
 	graph.providers = provider_service.new_provider_service(&graph.provider_repo)
@@ -785,4 +789,10 @@ device_bridge_minter :: proc(graph_ptr: rawptr, req: device_auth_service.Bridge_
 		refresh_expires_in = result.refresh_expires_in,
 		vault_delivery_expected = vault_found,
 	}, true
+}
+
+// attention_card_changed adapts the card service's change hook to the
+// debounced attention_changed event (one hint per owner per 500ms).
+attention_card_changed :: proc(ctx: rawptr, owner_user_id: string, kind: string) {
+	events.attention_debouncer_note((^events.Attention_Debouncer)(ctx), owner_user_id, kind)
 }

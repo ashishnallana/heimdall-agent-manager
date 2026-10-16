@@ -1,5 +1,6 @@
 package card
 
+import "base:runtime"
 import "core:encoding/json"
 import "core:fmt"
 import "core:strings"
@@ -398,11 +399,24 @@ Attention_Reconcile_Stats :: struct {
 reconcile_attention :: proc(s: ^Card_Service) -> Attention_Reconcile_Stats {
 	stats: Attention_Reconcile_Stats
 	if s == nil || s.attention_repo == nil do return stats
-	owners, err := iface.attention_list_owners(s.attention_repo)
+	// This runs on the long-lived reaper thread, not a request arena: route the
+	// sweep's (many, short-lived) allocations to the temp allocator and release
+	// them after each owner, so a sweep leaks nothing.
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	owners_tmp, err := iface.attention_list_owners(s.attention_repo)
 	if err.code != .None do return stats
+	owners := make([]string, len(owners_tmp), runtime.heap_allocator())
+	for o, i in owners_tmp do owners[i] = strings.clone(string(o), runtime.heap_allocator())
+	defer {
+		for o in owners do delete(o, runtime.heap_allocator())
+		delete(owners, runtime.heap_allocator())
+	}
+	free_all(context.temp_allocator)
 	for owner in owners {
 		stats.owners += 1
-		reconcile_attention_owner(s, owner, &stats)
+		reconcile_attention_owner(s, domain.User_ID(owner), &stats)
+		free_all(context.temp_allocator)
 	}
 	return stats
 }
