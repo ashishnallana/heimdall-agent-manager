@@ -77,7 +77,7 @@ const data = {
 
 test('BAR-2: registry modules declare slot + order and render per compact context', () => {
   const ids = STATUS_BAR_MODULES.map((m) => m.id);
-  assert.deepEqual([...ids].sort(), ['bridges', 'instances', 'previews', 'shells', 'shortcut-mode', 'vault']);
+  assert.deepEqual([...ids].sort(), ['attention', 'bridges', 'instances', 'previews', 'shells', 'shortcut-mode', 'vault']);
   assert.equal(new Set(ids).size, ids.length, 'module ids are unique');
   const left = renderSlot(STATUS_BAR_MODULES, 'left', { compact: false, data });
   const right = renderSlot(STATUS_BAR_MODULES, 'right', { compact: false, data });

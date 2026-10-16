@@ -24,6 +24,11 @@ export type StatusBarData = {
   shortcutMode: ShortcutMode;
   /** Shell-owned vault toggle (its handlers and modal state live in AppShell). */
   renderVaultToggle: (compact: boolean) => ReactNode;
+  /**
+   * Attention deck pill: how many things need the user in the selected range
+   * (null while unknown) and how to open the deck. Absent = module hidden.
+   */
+  attention?: { total: number | null; onOpen: () => void };
 };
 
 export type StatusBarContext = {
