@@ -135,7 +135,7 @@ grant_in_uow :: proc(svc: ^Service, u: ^Uow, req: Grant_Request) -> (domain.Task
 // the verbs on top): delete the lease, append `event_kind`, refold, close the
 // attempt row, clear the pointer, stop the holder (fresh context per attempt),
 // arm idle_ttl for the released instance. Callers then run match_chain.
-release_in_uow :: proc(svc: ^Service, u: ^Uow, lease: domain.Task_Lease, actor: Actor, event_kind: string, payload_json: string, outcome: string) -> (domain.Task, bool, domain.Domain_Error) {
+release_in_uow :: proc(svc: ^Service, u: ^Uow, lease: domain.Task_Lease, actor: Actor, event_kind: string, payload_json: string, outcome: string, stop_holder := true) -> (domain.Task, bool, domain.Domain_Error) {
 	task, tok, terr := iface.taskchain_get_task(svc.repo, lease.task_id)
 	if !tok do return {}, false, terr
 	if deleted, derr := iface.taskchain_delete_lease(svc.repo, lease.lease_id); !deleted {
@@ -149,9 +149,10 @@ release_in_uow :: proc(svc: ^Service, u: ^Uow, lease: domain.Task_Lease, actor: 
 	now := platform.clock_now(svc.clock)
 	mark_instance_idle(svc, lease.holder_instance_id, now)
 	if inst, iok, _ := iface.agent_get_instance(svc.agents, lease.holder_instance_id); iok {
-		// Stop the holder unless the release is an inline continuation (the
-		// caller is about to be granted its next lease in the same request).
-		if event_kind != EV_HANDOFF || lease.delivery != domain.LEASE_DELIVERY_INLINE {
+		// Fresh context per attempt: the holder is stopped (the next grant, even
+		// to the same instance, re-bootstraps it). stop_holder=false is for a
+		// caller that continues the same process inline.
+		if stop_holder {
 			effect_stop(u, inst.bridge_id, string(task.chain_id), inst.agent_instance_id)
 		}
 		arm_idle_ttl(svc, inst.agent_instance_id, fleet_idle_ttl(svc, task.chain_id, task.owner_user_id, inst.agent_id), now)

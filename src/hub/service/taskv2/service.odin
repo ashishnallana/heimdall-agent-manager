@@ -454,7 +454,10 @@ dep_removed :: proc(svc: ^Service, task: domain.Task, depends_on: domain.Task_ID
 fleet_changed :: proc(svc: ^Service, chain: domain.Task_Chain) -> domain.Domain_Error {
 	u, ok, err := begin_uow(svc)
 	if !ok do return err
-	rok, rerr := after_chain_change(svc, &u, chain.chain_id, chain.owner_user_id, .Fleet_Changed)
+	// A fleet row added/removed changes who must review: re-evaluate the gate
+	// of every in_review task before matching (plan §2.4).
+	rok, rerr := reevaluate_gates_in_uow(svc, &u, chain)
+	if rok do rok, rerr = after_chain_change(svc, &u, chain.chain_id, chain.owner_user_id, .Fleet_Changed)
 	_, cerr := end_uow(svc, &u, rok)
 	if !rok do return rerr
 	return cerr

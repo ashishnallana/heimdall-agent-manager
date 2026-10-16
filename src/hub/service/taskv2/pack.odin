@@ -27,6 +27,15 @@ PACK_VERSION :: 1
 build_pack_json :: proc(svc: ^Service, chain: domain.Task_Chain, task: domain.Task, lease: domain.Task_Lease, inst: domain.Agent_Instance) -> string {
 	evs, _ := iface.taskchain_list_events_by_task(svc.repo, task.task_id, task.owner_user_id)
 	view := fold_task(evs, fold_input_for_task(task, true))
+	// "why this attempt exists" is the release that PRECEDED the current grant:
+	// fold up to (excluding) the last lease_granted for this lease.
+	pre := view
+	for i := len(evs) - 1; i >= 0; i -= 1 {
+		if evs[i].kind == EV_LEASE_GRANTED && strings.contains(evs[i].payload_json, lease.lease_id) {
+			pre = fold_task(evs[:i], fold_input_for_task(task, true))
+			break
+		}
+	}
 
 	o := json_begin()
 	json_int(&o, "version", PACK_VERSION)
@@ -70,8 +79,8 @@ build_pack_json :: proc(svc: ^Service, chain: domain.Task_Chain, task: domain.Ta
 	json_str(&c, "summary", summary)
 	json_raw(&o, "chain", json_end(&c))
 
-	json_raw(&o, "previous_attempt", previous_attempt_json(svc, task, lease))
-	json_str(&o, "why", pack_why(view, lease))
+	json_raw(&o, "previous_attempt", previous_attempt_json(svc, task, lease, pre.last_release == .Handoff))
+	json_str(&o, "why", pack_why(pre, lease))
 
 	proto := json_begin()
 	json_int(&proto, "heartbeat_ttl_seconds", LEASE_TTL_SECONDS)
@@ -84,14 +93,15 @@ build_pack_json :: proc(svc: ^Service, chain: domain.Task_Chain, task: domain.Ta
 // previous_attempt_json: the last closed attempt's outcome plus its handoff and
 // vcs facets (verbatim), or "null" on a first grant.
 @(private = "file")
-previous_attempt_json :: proc(svc: ^Service, task: domain.Task, lease: domain.Task_Lease) -> string {
+previous_attempt_json :: proc(svc: ^Service, task: domain.Task, lease: domain.Task_Lease, handoff_continuation: bool) -> string {
 	attempts, err := iface.taskchain_list_attempts_by_task(svc.repo, task.task_id, task.owner_user_id)
 	if err.code != .None do return "null"
 	prev := domain.Task_Attempt{}
 	found := false
 	for a in attempts {
-		if a.attempt_no >= lease.attempt_no && lease.kind == domain.LEASE_KIND_WORK && a.ended_at == "" do continue
 		if a.attempt_no > lease.attempt_no do continue
+		// the current (open) attempt is "previous" only when it was handed off
+		if a.attempt_no == lease.attempt_no && lease.kind == domain.LEASE_KIND_WORK && !handoff_continuation do continue
 		if !found || a.attempt_no > prev.attempt_no { prev = a; found = true }
 	}
 	if !found do return "null"

@@ -198,14 +198,14 @@ grant_reviews :: proc(svc: ^Service, u: ^Uow, ctx: ^Match_Context, task: domain.
 		if inst, iok, _ := iface.agent_get_instance(svc.agents, holder); iok do author_agent = inst.agent_id
 	}
 	reviews, _ := iface.taskchain_list_reviews_by_task(svc.repo, task.task_id, task.owner_user_id)
+	// One review lease per needed (fleet row, role) pair — the gate is a strict
+	// AND over the same pairs (gate.odin).
 	for role in roles {
-		posted := false
-		for r in reviews do if r.attempt_no == task.attempt_no && r.role == role { posted = true; break }
-		if posted do continue
-		if task_has_live_lease(ctx, task.task_id, domain.LEASE_KIND_REVIEW, role) do continue
 		for fleet in ctx.fleets {
 			if !fleet_row_has_role(fleet, role) do continue
 			if author_agent != "" && fleet.agent_id == author_agent do continue // never review your own work
+			if !review_needed_from(reviews, task, fleet.agent_id, role) do continue
+			if review_lease_live_for(ctx, svc, task.task_id, fleet.agent_id, role) do continue
 			placement, pok := resolve_placement(ctx, task, fleet, false)
 			if !pok do continue
 			if !bridge_online(svc, placement.bridge_id) do continue
@@ -222,9 +222,20 @@ grant_reviews :: proc(svc: ^Service, u: ^Uow, ctx: ^Match_Context, task: domain.
 			}
 			append(&ctx.leases, lease)
 			ctx.held[inst.agent_instance_id] = true
-			break
 		}
 	}
+}
+
+// review_lease_live_for: an instance of `agent_id` already holds a review
+// lease for `role` on the task.
+@(private = "file")
+review_lease_live_for :: proc(ctx: ^Match_Context, svc: ^Service, task_id: domain.Task_ID, agent_id, role: string) -> bool {
+	for l in ctx.leases {
+		if l.task_id != task_id || l.kind != domain.LEASE_KIND_REVIEW || l.review_role != role do continue
+		for inst in ctx.instances do if inst.agent_instance_id == l.holder_instance_id && inst.agent_id == agent_id do return true
+		if inst, ok, _ := iface.agent_get_instance(svc.agents, l.holder_instance_id); ok && inst.agent_id == agent_id do return true
+	}
+	return false
 }
 
 // ---- instance selection --------------------------------------------------------------
@@ -326,9 +337,8 @@ grant_inline_for_instance :: proc(svc: ^Service, u: ^Uow, chain: domain.Task_Cha
 		reviews, _ := iface.taskchain_list_reviews_by_task(svc.repo, task.task_id, task.owner_user_id)
 		for role in roles {
 			if !fleet_row_has_role(fleet, role) do continue
-			posted := false
-			for r in reviews do if r.attempt_no == task.attempt_no && r.role == role { posted = true; break }
-			if posted || task_has_live_lease(&ctx, task.task_id, domain.LEASE_KIND_REVIEW, role) do continue
+			if !review_needed_from(reviews, task, fleet.agent_id, role) do continue
+			if review_lease_live_for(&ctx, svc, task.task_id, fleet.agent_id, role) do continue
 			placement, pok := resolve_placement(&ctx, task, fleet, false)
 			if !pok do placement = Placement{bridge_id = inst.bridge_id}
 			placement.bridge_id = inst.bridge_id // the caller is where it is

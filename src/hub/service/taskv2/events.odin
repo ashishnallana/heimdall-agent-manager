@@ -251,3 +251,70 @@ raw_object_field :: proc(payload, key: string) -> (string, bool) {
 	}
 	return "", false
 }
+
+// raw_value_field returns the VERBATIM text of the top-level value at `key`
+// (object OR array) — the general form of raw_object_field, used by the HTTP
+// layer so facet bodies and findings reach the engine byte-for-byte.
+raw_value_field :: proc(payload, key: string) -> (string, bool) {
+	if obj, ok := raw_object_field(payload, key); ok do return obj, true
+	n := len(payload)
+	i := 0
+	depth := 0
+	in_str := false
+	esc := false
+	for i < n {
+		c := payload[i]
+		if in_str {
+			if esc { esc = false } else if c == '\\' { esc = true } else if c == '"' { in_str = false }
+			i += 1
+			continue
+		}
+		switch c {
+		case '"':
+			if depth == 1 {
+				end := i + 1
+				for end < n && payload[end] != '"' {
+					if payload[end] == '\\' do end += 1
+					end += 1
+				}
+				if end >= n do return "", false
+				found := payload[i+1:end]
+				j := end + 1
+				for j < n && (payload[j] == ' ' || payload[j] == '\t' || payload[j] == '\n' || payload[j] == '\r') do j += 1
+				if j < n && payload[j] == ':' && found == key {
+					j += 1
+					for j < n && (payload[j] == ' ' || payload[j] == '\t' || payload[j] == '\n' || payload[j] == '\r') do j += 1
+					if j >= n || payload[j] != '[' do return "", false
+					k := j
+					d := 0
+					s := false
+					e := false
+					for k < n {
+						ch := payload[k]
+						if s {
+							if e { e = false } else if ch == '\\' { e = true } else if ch == '"' { s = false }
+						} else if ch == '"' {
+							s = true
+						} else if ch == '[' || ch == '{' {
+							d += 1
+						} else if ch == ']' || ch == '}' {
+							d -= 1
+							if d == 0 do return payload[j:k+1], true
+						}
+						k += 1
+					}
+					return "", false
+				}
+				i = end + 1
+				continue
+			}
+			in_str = true
+		case '{', '[':
+			depth += 1
+		case '}', ']':
+			depth -= 1
+		}
+		i += 1
+	}
+	return "", false
+}
