@@ -666,6 +666,9 @@ register_routes :: proc(graph: ^App_Graph) {
 	http.router_add(&graph.router, "POST", "/api/v1/bridges/*/unseal", rawptr(&graph.bridge_handlers), http.bridge_unseal_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/bridges/*/lock", rawptr(&graph.bridge_handlers), http.bridge_lock_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/bridges/*/public-key", rawptr(&graph.bridge_handlers), http.bridge_public_key_handler)
+	// REQ-EA: pending-enrollment status for the approval page, and operator cancel.
+	http.router_add(&graph.router, "GET", "/api/v1/bridges/*/enrollment", rawptr(&graph.bridge_handlers), http.bridge_enrollment_status_handler)
+	http.router_add(&graph.router, "POST", "/api/v1/bridges/*/enrollment/cancel", rawptr(&graph.bridge_handlers), http.bridge_enrollment_cancel_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/bridges/*/events", rawptr(&graph.bridge_handlers), http.bridge_events_list_handler)
 	http.router_add(&graph.router, "DELETE", "/api/v1/bridges/*/events", rawptr(&graph.bridge_handlers), http.bridge_events_purge_handler)
 	// Actions API
@@ -762,7 +765,19 @@ device_minter :: proc(graph_ptr: rawptr, user_id, client, device_label: string) 
 // Returns (plaintext_token, bridge_id, ok).
 device_bridge_minter :: proc(graph_ptr: rawptr, req: device_auth_service.Bridge_Mint_Request) -> (device_auth_service.Bridge_Mint_Result, bool) {
 	graph := (^App_Graph)(graph_ptr)
-	result, ok, _ := bridge_service.enroll_bridge_from_device_grant(&graph.bridges, bridge_service.Device_Enroll_Input{
+	// The Hub, not the bridge, knows whether approval should also deliver a vault
+	// key: a stored envelope means the browser has key material to relay after the
+	// bridge connects.
+	_, vault_found, _ := iface.user_vault_get(&graph.repos.user_vaults, domain.User_ID(req.owner_user_id))
+	// REQ-EA decision A: a bridge is enrolled only once its vault is unlocked, so an
+	// owner with no vault cannot enroll one yet. Refused HERE, server-side, so a
+	// client that skips the approval page's vault step gets the same answer.
+	if !vault_found {
+		return device_auth_service.Bridge_Mint_Result{
+			error = domain.domain_error(.Validation_Failed, "set up your vault before enrolling a bridge; a bridge is enrolled only once its vault is unlocked"),
+		}, false
+	}
+	result, ok, mint_err := bridge_service.enroll_bridge_from_device_grant(&graph.bridges, bridge_service.Device_Enroll_Input{
 		owner_user_id = req.owner_user_id, // bound from Auth_Context by approve()
 		bridge_public_key = req.bridge_public_key,
 		bridge_key_fingerprint = req.bridge_key_fingerprint,
@@ -772,13 +787,18 @@ device_bridge_minter :: proc(graph_ptr: rawptr, req: device_auth_service.Bridge_
 		bridge_version = req.app_version,
 		target_bridge_id = req.target_bridge_id,
 		new_bridge_label = req.new_bridge_label,
+		// REQ-EA-1: the enrollment stays pending until the vault key is delivered.
+		pending = true,
 	})
-	if !ok do return device_auth_service.Bridge_Mint_Result{}, false
-	// The Hub, not the bridge, knows whether approval should also deliver a vault
-	// key. A stored envelope means the browser has key material to relay after the
-	// bridge connects; absence means enrollment can restart the service at once.
-	_, vault_found, _ := iface.user_vault_get(&graph.repos.user_vaults, domain.User_ID(req.owner_user_id))
-	// REQ-IMPL-3: enroll_bridge_from_device_grant now returns an EXPIRING PAIR
+	if !ok {
+		// Pass ownership/target refusals through (e.g. an attach target that is not
+		// the approver's): they are the approver's to see, not an internal fault.
+		if mint_err.code == .Not_Found || mint_err.code == .Validation_Failed {
+			return device_auth_service.Bridge_Mint_Result{error = mint_err}, false
+		}
+		return device_auth_service.Bridge_Mint_Result{}, false
+	}
+	// REQ-IMPL-3: enroll_bridge_from_device_grant returns an EXPIRING PAIR
 	// (`hba_` + `hbf_`), so the approval hands both halves to the grant and the
 	// bridge receives them together on its single-use poll.
 	return device_auth_service.Bridge_Mint_Result{
@@ -787,7 +807,7 @@ device_bridge_minter :: proc(graph_ptr: rawptr, req: device_auth_service.Bridge_
 		bridge_id = result.bridge.bridge_id,
 		expires_in = result.expires_in,
 		refresh_expires_in = result.refresh_expires_in,
-		vault_delivery_expected = vault_found,
+		vault_delivery_expected = true,
 	}, true
 }
 

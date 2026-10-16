@@ -148,20 +148,34 @@ Bridge_Token_Pair :: struct {
 
 BRIDGE_TOKEN_SCOPE :: "bridge:runtime"
 
+// BRIDGE_ENROLL_TOKEN_SCOPE marks a PENDING enrollment's credential (REQ-EA-1): the
+// family a bridge receives on approval while its vault key has not been delivered.
+// It authenticates exactly one thing — the enroll-only WebSocket the vault key is
+// relayed over (verify_enroll_access_token) — and nothing else: verify_access_token
+// and refresh_bridge_token both fail closed on any scope other than
+// BRIDGE_TOKEN_SCOPE. The hub promotes the family to BRIDGE_TOKEN_SCOPE when it
+// observes the delivery succeed (REQ-EA-2), or revokes it on rollback (REQ-EA-3).
+BRIDGE_ENROLL_TOKEN_SCOPE :: "bridge:enroll"
+
+// BRIDGE_ENROLL_PENDING_SECONDS is how long an approved enrollment may wait for its
+// vault key before the hub rolls it back (REQ-EA-3). Matches the bridge's own wait
+// (BRIDGE_ENROLL_VAULT_WAIT_SECONDS) so neither side gives up while the other waits.
+BRIDGE_ENROLL_PENDING_SECONDS :: 300
+
 // issue_bridge_token_pair mints generation 0 of a new family for a freshly enrolled
 // bridge. Called from the device-grant enrollment path; this is the ONLY place a
 // family begins.
 //
 // Fails closed on entropy failure with `.Provider_Unavailable` (503) and a retry
 // hint, per settled 8 — never a weaker credential, never `.Internal_Error`.
-issue_bridge_token_pair :: proc(service: ^Bridge_Service, bridge_id: string) -> (Bridge_Token_Pair, bool, domain.Domain_Error) {
+issue_bridge_token_pair :: proc(service: ^Bridge_Service, bridge_id: string, scope := BRIDGE_TOKEN_SCOPE) -> (Bridge_Token_Pair, bool, domain.Domain_Error) {
 	if service == nil || service.repo == nil do return Bridge_Token_Pair{}, false, domain.domain_error(.Internal_Error, "bridge service is not configured")
 	if bridge_id == "" do return Bridge_Token_Pair{}, false, domain.domain_error(.Validation_Failed, "bridge_id is required")
 	now := platform.clock_now(service.clock)
 	family_expires_at, cap_ok := platform.expires_at_after_seconds_from(now, BRIDGE_TOKEN_FAMILY_MAX_SECONDS)
 	if !cap_ok do return Bridge_Token_Pair{}, false, domain.domain_error(.Internal_Error, "could not derive a credential lifetime from the hub clock")
 	family_id := platform.generate_id(service.ids, "bfam_")
-	return mint_generation(service, bridge_id, family_id, 0, family_expires_at, now)
+	return mint_generation(service, bridge_id, family_id, 0, family_expires_at, now, scope)
 }
 
 // mint_generation writes one generation of a family: an access row and a refresh
@@ -174,7 +188,7 @@ issue_bridge_token_pair :: proc(service: ^Bridge_Service, bridge_id: string) -> 
 // on the bridge's next refresh. The reverse order would leave a bridge that
 // authenticates for an hour and can never renew, i.e. a machine that silently dies
 // later instead of immediately.
-mint_generation :: proc(service: ^Bridge_Service, bridge_id, family_id: string, generation: int, family_expires_at, now: string) -> (Bridge_Token_Pair, bool, domain.Domain_Error) {
+mint_generation :: proc(service: ^Bridge_Service, bridge_id, family_id: string, generation: int, family_expires_at, now: string, scope := BRIDGE_TOKEN_SCOPE) -> (Bridge_Token_Pair, bool, domain.Domain_Error) {
 	access_expires_at, a_ok := platform.expires_at_after_seconds_from(now, BRIDGE_ACCESS_TOKEN_TTL_SECONDS)
 	refresh_expires_at, r_ok := platform.expires_at_after_seconds_from(now, BRIDGE_REFRESH_TOKEN_TTL_SECONDS)
 	if !a_ok || !r_ok do return Bridge_Token_Pair{}, false, domain.domain_error(.Internal_Error, "could not derive a credential lifetime from the hub clock")
@@ -195,7 +209,7 @@ mint_generation :: proc(service: ^Bridge_Service, bridge_id, family_id: string, 
 		token_hash = refresh_hash,
 		family_id = family_id,
 		generation = generation,
-		scope = BRIDGE_TOKEN_SCOPE,
+		scope = scope,
 		issued_at = now,
 		expires_at = refresh_expires_at,
 		family_expires_at = family_expires_at,
@@ -212,7 +226,7 @@ mint_generation :: proc(service: ^Bridge_Service, bridge_id, family_id: string, 
 		token_hash = access_hash,
 		family_id = family_id,
 		generation = generation,
-		scope = BRIDGE_TOKEN_SCOPE,
+		scope = scope,
 		issued_at = now,
 		expires_at = access_expires_at,
 		family_expires_at = family_expires_at,
@@ -273,15 +287,32 @@ token_is_expired :: proc(expires_at, now: string) -> bool {
 //     surfaces re-enrollment. Telling a revoked bridge to keep refreshing is how a
 //     revoked fleet becomes a self-inflicted DoS.
 verify_access_token :: proc(service: ^Bridge_Service, token: string) -> (contracts.Auth_Context, bool, domain.Domain_Error) {
+	auth, _, ok, err := verify_access_token_scoped(service, token, BRIDGE_TOKEN_SCOPE)
+	return auth, ok, err
+}
+
+// verify_enroll_access_token authenticates a PENDING enrollment's credential and
+// nothing else (REQ-EA-1). Only the bridge WS upgrade calls it, to admit the
+// enroll-only socket the vault key is relayed over. Returns the family id so the
+// commit and the rollback act on exactly the lineage that was approved.
+verify_enroll_access_token :: proc(service: ^Bridge_Service, token: string) -> (auth: contracts.Auth_Context, family_id: string, ok: bool, err: domain.Domain_Error) {
+	return verify_access_token_scoped(service, token, BRIDGE_ENROLL_TOKEN_SCOPE)
+}
+
+// verify_access_token_scoped is verify_access_token's body with the required scope as
+// a parameter. The scope check FAILS CLOSED: a row whose scope is not exactly the one
+// asked for does not authenticate, so a pending credential can never reach a path
+// that calls verify_access_token, and an unknown future scope reaches none.
+verify_access_token_scoped :: proc(service: ^Bridge_Service, token: string, scope: string) -> (contracts.Auth_Context, string, bool, domain.Domain_Error) {
 	invalid := domain.domain_error(.Unauthenticated, "bridge token is invalid")
 	token_id, presented_secret, split_ok := split_credential(ACCESS_TOKEN_PREFIX, token)
-	if !split_ok do return contracts.Auth_Context{}, false, invalid
+	if !split_ok do return contracts.Auth_Context{}, "", false, invalid
 	row, ok, _ := iface.bridge_get_token(service.repo, token_id)
 	if !ok {
 		// Not an early return: burn the same work a wrong secret would. See
 		// verify_credential_miss, and read its header before touching this.
 		_ = verify_credential_miss(presented_secret)
-		return contracts.Auth_Context{}, false, invalid
+		return contracts.Auth_Context{}, "", false, invalid
 	}
 	// Check the STORED kind, not just the prefix the caller sent. A refresh row
 	// reached through an `hba_` prefix must not authenticate anything: the two have
@@ -289,22 +320,25 @@ verify_access_token :: proc(service: ^Bridge_Service, token: string) -> (contrac
 	// prefix-only test would miss.
 	if row.kind != .Access {
 		_ = verify_credential_miss(presented_secret)
-		return contracts.Auth_Context{}, false, invalid
+		return contracts.Auth_Context{}, "", false, invalid
 	}
-	if !verify_credential(row.token_hash, presented_secret) do return contracts.Auth_Context{}, false, invalid
-	if row.revoked_at != "" do return contracts.Auth_Context{}, false, domain.domain_error(.Forbidden, "bridge credential is revoked")
+	if !verify_credential(row.token_hash, presented_secret) do return contracts.Auth_Context{}, "", false, invalid
+	// Checked after the secret, like kind: the scope is not secret, but a mismatch
+	// must look exactly like a wrong token rather than confirm the row exists.
+	if row.scope != scope do return contracts.Auth_Context{}, "", false, invalid
+	if row.revoked_at != "" do return contracts.Auth_Context{}, "", false, domain.domain_error(.Forbidden, "bridge credential is revoked")
 	now := platform.clock_now(service.clock)
-	if token_is_expired(row.expires_at, now) do return contracts.Auth_Context{}, false, domain.domain_error(.Unauthenticated, "bridge access token has expired")
+	if token_is_expired(row.expires_at, now) do return contracts.Auth_Context{}, "", false, domain.domain_error(.Unauthenticated, "bridge access token has expired")
 	if row.family_expires_at != "" && token_is_expired(row.family_expires_at, now) {
-		return contracts.Auth_Context{}, false, domain.domain_error(.Forbidden, "bridge credential has reached its maximum lifetime; re-enrollment is required")
+		return contracts.Auth_Context{}, "", false, domain.domain_error(.Forbidden, "bridge credential has reached its maximum lifetime; re-enrollment is required")
 	}
 	bridge, bridge_ok, _ := iface.bridge_get_bridge(service.repo, row.bridge_id)
-	if !bridge_ok do return contracts.Auth_Context{}, false, invalid
+	if !bridge_ok do return contracts.Auth_Context{}, "", false, invalid
 	// A revoked BRIDGE and a revoked TOKEN are two separate records and both are
 	// checked: revoke_bridge stamps both, but a token row written before that change
 	// (or by a future path that forgets) must not outlive its bridge.
-	if bridge.status == .Revoked do return contracts.Auth_Context{}, false, domain.domain_error(.Forbidden, "bridge is revoked")
-	return contracts.Auth_Context{kind = .Bridge_Token, user_id = string(bridge.owner_user_id), bridge_id = bridge.bridge_id}, true, domain.Domain_Error{}
+	if bridge.status == .Revoked do return contracts.Auth_Context{}, "", false, domain.domain_error(.Forbidden, "bridge is revoked")
+	return contracts.Auth_Context{kind = .Bridge_Token, user_id = string(bridge.owner_user_id), bridge_id = bridge.bridge_id}, row.family_id, true, domain.Domain_Error{}
 }
 
 // refresh_bridge_token rotates a refresh token (design §7.4).
@@ -336,6 +370,10 @@ refresh_bridge_token :: proc(service: ^Bridge_Service, presented: string) -> (Br
 		return Bridge_Token_Pair{}, false, invalid_grant
 	}
 	if !verify_credential(row.token_hash, presented_secret) do return Bridge_Token_Pair{}, false, invalid_grant
+	// A pending enrollment's credential is never renewed (REQ-EA-1): it lives for at
+	// most BRIDGE_ENROLL_PENDING_SECONDS, well inside its access token's hour, and
+	// rotate_from would otherwise be a way to keep a lineage alive past its rollback.
+	if row.scope != BRIDGE_TOKEN_SCOPE do return Bridge_Token_Pair{}, false, invalid_grant
 	// From here the caller has PROVEN possession of this exact refresh token, so the
 	// remaining branches may act on the family without being an oracle.
 	if row.revoked_at != "" do return Bridge_Token_Pair{}, false, invalid_grant

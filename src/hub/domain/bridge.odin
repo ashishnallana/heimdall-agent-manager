@@ -40,6 +40,19 @@ Bridge :: struct {
 	// on the machine that actually holds the key; a value that travelled over the wire
 	// from the party being authorized cannot be the basis for authorizing it.
 	vault_status: string,
+	// enrollment_pending_until is "" for an ENROLLED bridge and the RFC 3339 deadline
+	// for one that is still PENDING (REQ-EA-1): approved, but its vault key not yet
+	// delivered. Unlike vault_status this IS authoritative and gates use: it is set
+	// and cleared only by the hub itself — cleared when the hub relays an unseal and
+	// observes ok:true (REQ-EA-2), never from a bridge self-report — and a pending
+	// bridge that misses the deadline is rolled back (REQ-EA-3).
+	enrollment_pending_until: string,
+}
+
+// bridge_is_pending reports whether a bridge is still awaiting its vault key and
+// therefore does not yet count as enrolled (REQ-EA-1).
+bridge_is_pending :: proc(b: Bridge) -> bool {
+	return b.enrollment_pending_until != ""
 }
 
 // bridge_destroy frees every heap string on a Bridge read from a repository.
@@ -73,6 +86,7 @@ bridge_destroy :: proc(b: ^Bridge) {
 	if len(b.update_error) > 0 do delete(b.update_error)
 	if len(b.telemetry_enabled) > 0 do delete(b.telemetry_enabled)
 	if len(b.vault_status) > 0 do delete(b.vault_status)
+	if len(b.enrollment_pending_until) > 0 do delete(b.enrollment_pending_until)
 	b^ = Bridge{}
 }
 

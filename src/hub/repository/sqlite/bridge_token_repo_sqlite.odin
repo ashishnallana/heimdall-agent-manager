@@ -130,6 +130,55 @@ bridge_mark_token_rotated_sqlite :: proc(ctx: rawptr, token_id, rotated_at: stri
 	return sqlite3_changes(impl.conn.db) > 0, domain.Domain_Error{}
 }
 
+// bridge_promote_token_family_sqlite is the enrollment COMMIT for a credential
+// (REQ-EA-2): it moves every live row of a pending family from `from_scope` to
+// `to_scope`. The `scope = from_scope` guard makes it a compare-and-set, so a family
+// rolled back (revoked) or already promoted changes 0 rows and the caller can tell.
+bridge_promote_token_family_sqlite :: proc(ctx: rawptr, family_id, from_scope, to_scope: string) -> (int, bool, domain.Domain_Error) {
+	impl := (^Bridge_Repo_SQLite)(ctx)
+	if family_id == "" || from_scope == "" || to_scope == "" do return 0, false, domain.domain_error(.Validation_Failed, "family_id and scopes are required")
+	stmt: sqlite3_stmt = nil
+	query := "UPDATE bridge_tokens SET scope = ? WHERE family_id = ? AND scope = ? AND revoked_at = '';"
+	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return 0, false, domain.domain_error(.Internal_Error, "failed to prepare bridge token family promote")
+	defer sqlite3_finalize(stmt)
+	bind_text(stmt, 1, to_scope)
+	bind_text(stmt, 2, family_id)
+	bind_text(stmt, 3, from_scope)
+	if sqlite3_step(stmt) != SQLITE_DONE do return 0, false, domain.domain_error(.Internal_Error, "bridge token family could not be promoted")
+	return int(sqlite3_changes(impl.conn.db)), true, domain.Domain_Error{}
+}
+
+// bridge_revoke_other_families_sqlite revokes every live credential of a bridge
+// EXCEPT one family: the attach-to-existing commit (REQ-EA-8), where the newly
+// delivered family replaces the old device's credential under the same bridge_id.
+bridge_revoke_other_families_sqlite :: proc(ctx: rawptr, bridge_id, keep_family_id, revoked_at: string) -> (int, bool, domain.Domain_Error) {
+	impl := (^Bridge_Repo_SQLite)(ctx)
+	if bridge_id == "" || keep_family_id == "" || revoked_at == "" do return 0, false, domain.domain_error(.Validation_Failed, "bridge_id, keep_family_id and revoked_at are required")
+	stmt: sqlite3_stmt = nil
+	query := "UPDATE bridge_tokens SET revoked_at = ? WHERE bridge_id = ? AND family_id != ? AND revoked_at = '';"
+	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return 0, false, domain.domain_error(.Internal_Error, "failed to prepare bridge token revoke")
+	defer sqlite3_finalize(stmt)
+	bind_text(stmt, 1, revoked_at)
+	bind_text(stmt, 2, bridge_id)
+	bind_text(stmt, 3, keep_family_id)
+	if sqlite3_step(stmt) != SQLITE_DONE do return 0, false, domain.domain_error(.Internal_Error, "bridge tokens could not be revoked")
+	return int(sqlite3_changes(impl.conn.db)), true, domain.Domain_Error{}
+}
+
+// bridge_list_live_tokens_by_scope_sqlite returns every unrevoked token of a scope:
+// the pending-enrollment sweep (REQ-EA-3) reads BRIDGE_ENROLL_TOKEN_SCOPE through it.
+bridge_list_live_tokens_by_scope_sqlite :: proc(ctx: rawptr, scope: string) -> ([]domain.Bridge_Token, domain.Domain_Error) {
+	impl := (^Bridge_Repo_SQLite)(ctx)
+	stmt: sqlite3_stmt = nil
+	query := "SELECT " + BRIDGE_TOKEN_COLUMNS + " FROM bridge_tokens WHERE scope = ? AND revoked_at = '';"
+	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return nil, domain.domain_error(.Internal_Error, "failed to prepare bridge token scope list")
+	defer sqlite3_finalize(stmt)
+	bind_text(stmt, 1, scope)
+	out := make([dynamic]domain.Bridge_Token)
+	for sqlite3_step(stmt) == SQLITE_ROW do append(&out, bridge_token_from_stmt(stmt))
+	return out[:], domain.Domain_Error{}
+}
+
 bridge_token_from_stmt :: proc(stmt: sqlite3_stmt) -> domain.Bridge_Token {
 	// An unrecognised kind decodes as `.Access` with ok=false. The row is returned
 	// anyway — with its kind preserved as the SAFER of the two is not possible, so the

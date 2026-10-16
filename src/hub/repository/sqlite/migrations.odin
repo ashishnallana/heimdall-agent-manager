@@ -395,10 +395,13 @@ MIGRATION_085_AGENT_INSTANCE_LAST_ERROR :: #load("migrations/085_agent_instance_
 MIGRATION_086_CLAUDE_BYPASS_PERMISSIONS_DETECTION :: #load("migrations/086_claude_bypass_permissions_detection.sql", string)
 
 MIGRATION_087_ATTENTION_CARDS :: #load("migrations/087_attention_cards.sql", string)
+// MIGRATION_088_BRIDGE_ENROLLMENT_PENDING adds enrollment_pending_until
+// to bridges (REQ-EA-1): a bridge is pending until its vault key is delivered.
+MIGRATION_088_BRIDGE_ENROLLMENT_PENDING :: #load("migrations/088_bridge_enrollment_pending.sql", string)
 
 MIGRATION_075_CONVERSATION_LAUNCH_PREFERENCES :: #load("migrations/075_conversation_launch_preferences.sql", string)
 
-migration_order :: [91]string {
+migration_order :: [92]string {
 	"001_foundation.sql",
 	"002_owner_scoped_core.sql",
 	"003_device_tokens.sql",
@@ -490,6 +493,7 @@ migration_order :: [91]string {
 	"085_agent_instance_last_error.sql",
 	"086_claude_bypass_permissions_detection.sql",
 	"087_attention_cards.sql",
+	"088_bridge_enrollment_pending.sql",
 }
 
 run_migrations :: proc(
@@ -761,6 +765,11 @@ run_migrations :: proc(
 			mark_migration_applied(conn, name)
 			continue
 		}
+		if name == "088_bridge_enrollment_pending.sql" &&
+		   table_column_exists(conn, "bridges", "enrollment_pending_until") {
+			mark_migration_applied(conn, name)
+			continue
+		}
 		// 057 creates a TABLE plus two indexes, all with IF NOT EXISTS, so unlike the
 		// ADD COLUMN migrations above it is already idempotent and strictly does not
 		// need a guard. It gets one anyway, for the same reason 053-056 have one: a
@@ -916,6 +925,7 @@ migration_sql :: proc(name, migrations_dir: string) -> string {
 	if name == "085_agent_instance_last_error.sql" do return strings.clone(MIGRATION_085_AGENT_INSTANCE_LAST_ERROR)
 	if name == "086_claude_bypass_permissions_detection.sql" do return strings.clone(MIGRATION_086_CLAUDE_BYPASS_PERMISSIONS_DETECTION)
 	if name == "087_attention_cards.sql" do return strings.clone(MIGRATION_087_ATTENTION_CARDS)
+	if name == "088_bridge_enrollment_pending.sql" do return strings.clone(MIGRATION_088_BRIDGE_ENROLLMENT_PENDING)
 	if name == "081_antigravity_models.sql" do return strings.clone(MIGRATION_081_ANTIGRAVITY_MODELS)
 	if name == "080_copilot_launch_recipe.sql" do return strings.clone(MIGRATION_080_COPILOT_LAUNCH_RECIPE)
 	if name == "079_repair_provider_catalog_etag.sql" do return strings.clone(MIGRATION_079_REPAIR_PROVIDER_CATALOG_ETAG)
