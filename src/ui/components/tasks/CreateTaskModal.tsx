@@ -6,6 +6,7 @@ import { useListBridgesQuery } from '../../api/endpoints/bridgeSupport';
 import { taskBridgeOptions } from '../../utils/taskBridgePin';
 import { formatFleetRoleName } from './FleetManagementDrawer';
 import { useAuthUser } from '../auth/AuthUserContext';
+import { BRIEF_ACCEPTANCE_ITEM_MAX, BRIEF_ACCEPTANCE_MAX, BRIEF_GOAL_MAX, buildTaskBrief } from '../../utils/taskBrief';
 
 export interface CreateTaskModalProps {
   chainId: string;
@@ -37,6 +38,12 @@ export const CreateTaskModal: React.FC<CreateTaskModalProps> = ({
 
   const [title, setTitle] = useState('');
   const [desc, setDesc] = useState('');
+  // Task System v2 (M2): the brief. Validated client-side with the hub's publish
+  // rules (utils/taskBrief) so a human-created task is publishable as-is.
+  const [goal, setGoal] = useState('');
+  const [acceptanceText, setAcceptanceText] = useState('');
+  const [verify, setVerify] = useState('');
+  const [reviewRolesText, setReviewRolesText] = useState('');
   const [assigneeMode, setAssigneeMode] = useState<'agent' | 'unassigned' | 'user'>('agent');
   // REQ-TB-5: '' = Inherit (coordinator bridge) — the default create pins nothing.
   const [bridgeId, setBridgeId] = useState('');
@@ -112,6 +119,18 @@ export const CreateTaskModal: React.FC<CreateTaskModalProps> = ({
       assigneeRef = { type: 'user', user_id: uid };
     }
 
+    const briefBuild = buildTaskBrief({
+      goal,
+      acceptanceText,
+      verify,
+      reviewRolesText,
+      assignee: assigneeMode === 'agent' ? assigneeAgentId : '',
+    });
+    if (briefBuild.errors.length > 0) {
+      setErrorMsg(briefBuild.errors[0]);
+      return;
+    }
+
     try {
       const payload: any = {
         chainId,
@@ -120,6 +139,7 @@ export const CreateTaskModal: React.FC<CreateTaskModalProps> = ({
         // '' is dropped by the createTask serialization (absent = inherit).
         bridgeId,
         requiresUserApproval,
+        brief: briefBuild.brief,
       };
       if (assigneeRef !== undefined) {
         payload.assigneeRef = assigneeRef;
@@ -135,6 +155,10 @@ export const CreateTaskModal: React.FC<CreateTaskModalProps> = ({
       // Reset form
       setTitle('');
       setDesc('');
+      setGoal('');
+      setAcceptanceText('');
+      setVerify('');
+      setReviewRolesText('');
       setAssigneeMode('agent');
       setAssigneeAgentId('');
       setBridgeId('');
@@ -197,6 +221,79 @@ export const CreateTaskModal: React.FC<CreateTaskModalProps> = ({
               placeholder="Specify requirements, files, and acceptance criteria..."
               className="w-full rounded border border-subtle bg-surface-raised p-2 text-primary focus:outline-none focus:border-accent"
             />
+          </div>
+
+          {/* Brief (Task System v2) — what the hub validates at publish. */}
+          <div data-debug-id="create-task-brief" className="rounded-lg border border-subtle bg-surface-raised/40 p-3 space-y-2.5">
+            <div>
+              <label className="block font-semibold text-primary">Brief</label>
+              <p className="text-[11px] text-muted mt-0.5">
+                Required to publish: a goal, at least one acceptance criterion, and a verify command.
+              </p>
+            </div>
+
+            <div>
+              <label className="block font-semibold text-primary mb-1">
+                Goal <span className="text-danger">*</span>
+                <span className="ml-1 font-normal text-faint">({goal.trim().length}/{BRIEF_GOAL_MAX})</span>
+              </label>
+              <textarea
+                data-debug-id="create-task-goal-input"
+                value={goal}
+                onChange={(e) => setGoal(e.target.value)}
+                rows={3}
+                maxLength={BRIEF_GOAL_MAX}
+                placeholder="What outcome should the agent deliver?"
+                className="w-full rounded border border-subtle bg-surface p-2 text-primary focus:outline-none focus:border-accent"
+              />
+            </div>
+
+            <div>
+              <label className="block font-semibold text-primary mb-1">
+                Acceptance criteria <span className="text-danger">*</span>
+                <span className="ml-1 font-normal text-faint">(one per line, 1–{BRIEF_ACCEPTANCE_MAX} items, ≤{BRIEF_ACCEPTANCE_ITEM_MAX} chars each)</span>
+              </label>
+              <textarea
+                data-debug-id="create-task-acceptance-input"
+                value={acceptanceText}
+                onChange={(e) => setAcceptanceText(e.target.value)}
+                rows={3}
+                placeholder={'Endpoint returns 201 on success\nUnit tests cover the error path'}
+                className="w-full rounded border border-subtle bg-surface p-2 text-primary font-mono focus:outline-none focus:border-accent"
+              />
+            </div>
+
+            <div>
+              <label className="block font-semibold text-primary mb-1">
+                Verify command <span className="text-danger">*</span>
+              </label>
+              <input
+                type="text"
+                data-debug-id="create-task-verify-input"
+                value={verify}
+                onChange={(e) => setVerify(e.target.value)}
+                placeholder="e.g. npm test"
+                className="w-full rounded border border-subtle bg-surface p-2 text-primary font-mono focus:outline-none focus:border-accent"
+              />
+              <p className="text-[11px] text-muted mt-1">
+                Run by <code>ham-ctl verify</code> in the chain directory; the task cannot be submitted until it passes.
+              </p>
+            </div>
+
+            <div>
+              <label className="block font-semibold text-primary mb-1">Review roles (optional)</label>
+              <input
+                type="text"
+                data-debug-id="create-task-review-roles-input"
+                value={reviewRolesText}
+                onChange={(e) => setReviewRolesText(e.target.value)}
+                placeholder="e.g. reviewer, security"
+                className="w-full rounded border border-subtle bg-surface p-2 text-primary focus:outline-none focus:border-accent"
+              />
+              <p className="text-[11px] text-muted mt-1">
+                Comma-separated. Each role needs a fleet row in this chain, or publish is rejected.
+              </p>
+            </div>
           </div>
 
           {/* Bridge (REQ-TB-5) */}

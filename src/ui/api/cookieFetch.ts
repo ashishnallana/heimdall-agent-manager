@@ -33,13 +33,17 @@ export class ApiError extends Error {
   // fine-grained cause, when the hub sent them.
   readonly errorClass?: WireErrorClass;
   readonly errorCause?: string;
-  constructor(message: string, status?: number, code?: string, errorClass?: WireErrorClass, errorCause?: string) {
+  // Task System v2 (M2): the hub's structured `error.details` object when sent
+  // (e.g. 422 publish → {code:'brief_incomplete', tasks:[{task_id, missing}]}).
+  readonly details?: any;
+  constructor(message: string, status?: number, code?: string, errorClass?: WireErrorClass, errorCause?: string, details?: any) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.code = code;
     this.errorClass = errorClass;
     this.errorCause = errorCause;
+    this.details = details;
   }
 }
 
@@ -50,6 +54,7 @@ async function errorFromResponse(res: Response): Promise<ApiError> {
   let code: string | undefined;
   let errorClass: WireErrorClass | undefined;
   let cause: string | undefined;
+  let details: any;
   try {
     const text = await res.text();
     const errBody = JSON.parse(text);
@@ -59,8 +64,9 @@ async function errorFromResponse(res: Response): Promise<ApiError> {
     else if (typeof errBody?.code === 'string') code = errBody.code;
     if (errBody?.error?.class) errorClass = errBody.error.class;
     if (typeof errBody?.error?.cause === 'string') cause = errBody.error.cause;
+    if (errBody?.error?.details && typeof errBody.error.details === 'object') details = errBody.error.details;
   } catch (e) { /* non-JSON or unreadable body — the status line is all we have */ }
-  return new ApiError(msg, res.status, code, errorClass, cause);
+  return new ApiError(msg, res.status, code, errorClass, cause, details);
 }
 
 // `withApiBase` is the identity in every normal build; it only does something in a

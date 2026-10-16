@@ -6,6 +6,8 @@ import { isVaultArmored, encryptVaultText, decryptVaultText, getActiveVaultKey }
 import { decryptChainRecord, decryptChainList } from '../../utils/vaultChains';
 import { decryptTaskRecord, decryptTaskList, decryptTaskComments } from '../../utils/vaultTasks';
 import { taskCreateBridgeFields, taskPatchBridgeFields } from '../../utils/taskBridgePin';
+import { publishErrorMessage } from '../../utils/taskBrief';
+import type { TaskBriefWire, TaskLeaseWire } from '../taskWire';
 
 // The rewrite shell is cookie-authenticated (same session as /api/v1/me), not the
 // legacy per-client token session. Task-chain reads/writes below must use
@@ -116,7 +118,17 @@ function normalizeTask(task: any) {
     title: task.title || '',
     description: task.description || '',
     priority: task.priority || 'p2',
-    status: task.status || 'pending',
+    // Task System v2: `state` is the five-state projection; the legacy `status`
+    // reader falls back to it until the M4 board rework retires `status`.
+    status: task.status || task.state || 'pending',
+    state: String(task.state || ''),
+    kind: String(task.kind || ''),
+    attemptNo: Number(task.attempt_no || 0),
+    brief: task.brief && typeof task.brief === 'object' ? (task.brief as TaskBriefWire) : null,
+    blockedOn: task.blocked_on && typeof task.blocked_on === 'object' ? task.blocked_on : null,
+    readySince: String(task.ready_since || ''),
+    leases: Array.isArray(task.leases) ? (task.leases as TaskLeaseWire[]) : [],
+    publishState: String(task.publish_state || ''),
     // REQ-TB-5: the per-task bridge pin ('' = inherit the coordinator's bridge).
     bridgeId: String(task.bridge_id || task.bridgeId || ''),
     assigneeAgentInstanceId,
@@ -1122,8 +1134,8 @@ export const tasksApi = heimdallApi.injectEndpoints({
       },
     }),
     // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
-    createTask: build.mutation<any, { chainId: string; title: string; description?: string; status?: string; agentToken?: string; assigneeRef?: any; reviewerRefs?: any[]; requiresUserApproval?: boolean; dependsOn?: string[]; bridgeId?: string }>({
-      queryFn: async ({ chainId, title, description, assigneeRef, reviewerRefs, requiresUserApproval, dependsOn, bridgeId }, api) => {
+    createTask: build.mutation<any, { chainId: string; title: string; description?: string; status?: string; agentToken?: string; assigneeRef?: any; reviewerRefs?: any[]; requiresUserApproval?: boolean; dependsOn?: string[]; bridgeId?: string; brief?: TaskBriefWire }>({
+      queryFn: async ({ chainId, title, description, assigneeRef, reviewerRefs, requiresUserApproval, dependsOn, bridgeId, brief }, api) => {
         try {
           const state: any = api.getState();
           const isUnlocked = Boolean(state?.vault?.isUnlocked);
@@ -1148,6 +1160,9 @@ export const tasksApi = heimdallApi.injectEndpoints({
           if (reviewerRefs !== undefined) body.reviewer_refs = reviewerRefs;
           if (requiresUserApproval !== undefined) body.requires_user_approval = requiresUserApproval;
           if (dependsOn !== undefined) body.depends_on = dependsOn;
+          // Task System v2 (M2): the brief travels verbatim; the hub normalises it
+          // and validates it at publish (422 brief_incomplete).
+          if (brief !== undefined) body.brief = brief;
           const data = await cookieMutation(`/task-chains/${encodeURIComponent(chainId)}/tasks`, 'POST', body);
           return { data };
         } catch (error: any) {
@@ -1161,6 +1176,44 @@ export const tasksApi = heimdallApi.injectEndpoints({
         // actors — invalidate so the drawer picks the new row up immediately.
         { type: 'TaskChainFleets' as const, id: chainId },
       ] : [],
+    }),
+    // Task System v2 (M2): POST …/tasks/{t}/publish. A 422 `brief_incomplete`
+    // is reworded per task ("Task <title>: missing goal, acceptance") from
+    // error.details.tasks[]; `taskTitles` (task_id → title) is optional and the
+    // raw task_id is the fallback label. The structured details ride along as
+    // `error.data` for callers that want to highlight fields.
+    publishTask: build.mutation<any, { chainId: string; taskId: string; taskTitles?: Record<string, string> }>({
+      queryFn: async ({ chainId, taskId, taskTitles }) => {
+        try {
+          const data = await cookieMutation(`/task-chains/${encodeURIComponent(chainId)}/tasks/${encodeURIComponent(taskId)}/publish`, 'POST', {});
+          return { data };
+        } catch (error: any) {
+          return { error: { status: 'CUSTOM_ERROR', error: publishErrorMessage(error, taskTitles), data: error?.details } as any };
+        }
+      },
+      invalidatesTags: (_result, _error, { chainId, taskId }) => [
+        ...preciseTaskTags(taskId, chainId),
+        { type: 'ChainList' as const, id: 'ALL' },
+      ],
+    }),
+    // Task System v2 (M2): POST /task-chains/{c}/publish — publishes every draft
+    // task; the 422 lists each offending task, surfaced the same way as above.
+    publishTaskChain: build.mutation<any, { chainId: string; taskTitles?: Record<string, string> }>({
+      queryFn: async ({ chainId, taskTitles }) => {
+        try {
+          const data = await cookieMutation(`/task-chains/${encodeURIComponent(chainId)}/publish`, 'POST', {});
+          return { data };
+        } catch (error: any) {
+          return { error: { status: 'CUSTOM_ERROR', error: publishErrorMessage(error, taskTitles), data: error?.details } as any };
+        }
+      },
+      invalidatesTags: (_result, _error, { chainId }) => [
+        { type: 'Chain' as const, id: chainId },
+        { type: 'ChainTasks' as const, id: chainId },
+        { type: 'ChainList' as const, id: 'ALL' },
+        { type: 'Chain' as const, id: 'GROUPED_LIST' },
+        { type: 'Chain' as const, id: 'PINNED_LIST' },
+      ],
     }),
     // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
     deleteTask: build.mutation<any, { taskId: string; chainId: string; agentToken?: string }>({
@@ -1367,6 +1420,8 @@ export const {
   useAddChainDirectoryMutation,
 
   useCreateTaskMutation,
+  usePublishTaskMutation,
+  usePublishTaskChainMutation,
   useDeleteTaskMutation,
   useAddTaskCommentMutation,
   useResolveTaskCommentMutation,
