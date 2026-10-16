@@ -394,9 +394,16 @@ MIGRATION_085_AGENT_INSTANCE_LAST_ERROR :: #load("migrations/085_agent_instance_
 
 MIGRATION_086_CLAUDE_BYPASS_PERMISSIONS_DETECTION :: #load("migrations/086_claude_bypass_permissions_detection.sql", string)
 
+// MIGRATION_087_TASK_V2 is the Task System v2 cutover: the event-sourced engine
+// tables (task_events/attempts/facets/leases/reviews, chain_summaries,
+// workflow_definitions), the new task/chain/fleet columns, and the one-shot
+// legacy status → state / reviewer-ref → fleet-role data migration. The legacy
+// columns and tables are dropped afterwards by upgrade_task_v2_schema.
+MIGRATION_087_TASK_V2 :: #load("migrations/087_task_v2.sql", string)
+
 MIGRATION_075_CONVERSATION_LAUNCH_PREFERENCES :: #load("migrations/075_conversation_launch_preferences.sql", string)
 
-migration_order :: [90]string {
+migration_order :: [91]string {
 	"001_foundation.sql",
 	"002_owner_scoped_core.sql",
 	"003_device_tokens.sql",
@@ -487,11 +494,18 @@ migration_order :: [90]string {
 	"084_bridge_log_events.sql",
 	"085_agent_instance_last_error.sql",
 	"086_claude_bypass_permissions_detection.sql",
+	"087_task_v2.sql",
 }
 
+// stop_before is a TEST SEAM: when non-empty, the apply loop stops in front of
+// that migration and the post-loop upgrade_* twins are skipped, which is how a
+// migration test builds the exact pre-migration schema (e.g. the legacy task
+// columns) before seeding fixture rows and running the real thing. Production
+// callers never set it.
 run_migrations :: proc(
 	conn: ^Conn,
 	migrations_dir := "src/hub/repository/sqlite/migrations",
+	stop_before := "",
 ) -> (
 	bool,
 	domain.Domain_Error,
@@ -500,6 +514,7 @@ run_migrations :: proc(
 		return false, domain.domain_error(.Internal_Error, "database connection is not open")
 	}
 	for name in migration_order {
+		if stop_before != "" && name == stop_before do return true, domain.Domain_Error{}
 		if name == "016_memory_workflow_skill_memory.sql" {
 			if !upgrade_memory_target_scope_schema(conn) do return false, domain.domain_error(.Internal_Error, "memory target scope schema upgrade failed")
 		}
@@ -780,6 +795,15 @@ run_migrations :: proc(
 			mark_migration_applied(conn, name)
 			continue
 		}
+		// 087 runs inside its own BEGIN/COMMIT, so it is either fully applied or
+		// absent; the guard only has to recognise a database that reached the schema
+		// through a pre-ledger path. Keyed on the LAST object the file creates
+		// (idx_tasks_chain_state) so nothing short of a complete apply reads as done.
+		if name == "087_task_v2.sql" &&
+		   sqlite_object_exists(conn, "idx_tasks_chain_state") {
+			mark_migration_applied(conn, name)
+			continue
+		}
 		sql := migration_sql(name, migrations_dir)
 		if sql == "" {
 			return false, domain.domain_error(
@@ -825,6 +849,7 @@ run_migrations :: proc(
 	if !upgrade_bridge_version_and_updates_schema(conn) do return false, domain.domain_error(.Internal_Error, "bridge version and updates schema upgrade failed")
 	if !upgrade_bridge_update_progress_schema(conn) do return false, domain.domain_error(.Internal_Error, "bridge update progress schema upgrade failed")
 	if !upgrade_memory_action_expiry_schema(conn) do return false, domain.domain_error(.Internal_Error, "memory action expiry schema upgrade failed")
+	if !upgrade_task_v2_schema(conn) do return false, domain.domain_error(.Internal_Error, "task v2 schema upgrade failed")
 	return true, domain.Domain_Error{}
 }
 
@@ -912,6 +937,7 @@ migration_sql :: proc(name, migrations_dir: string) -> string {
 	if name == "084_bridge_log_events.sql" do return strings.clone(MIGRATION_084_BRIDGE_LOG_EVENTS)
 	if name == "085_agent_instance_last_error.sql" do return strings.clone(MIGRATION_085_AGENT_INSTANCE_LAST_ERROR)
 	if name == "086_claude_bypass_permissions_detection.sql" do return strings.clone(MIGRATION_086_CLAUDE_BYPASS_PERMISSIONS_DETECTION)
+	if name == "087_task_v2.sql" do return strings.clone(MIGRATION_087_TASK_V2)
 	if name == "081_antigravity_models.sql" do return strings.clone(MIGRATION_081_ANTIGRAVITY_MODELS)
 	if name == "080_copilot_launch_recipe.sql" do return strings.clone(MIGRATION_080_COPILOT_LAUNCH_RECIPE)
 	if name == "079_repair_provider_catalog_etag.sql" do return strings.clone(MIGRATION_079_REPAIR_PROVIDER_CATALOG_ETAG)
@@ -1344,6 +1370,54 @@ upgrade_task_chain_fleets_schema :: proc(conn: ^Conn) -> bool {
 upgrade_task_bridge_schema :: proc(conn: ^Conn) -> bool {
 	if !table_column_exists(conn, "tasks", "bridge_id") && !exec(conn, "ALTER TABLE tasks ADD COLUMN bridge_id TEXT NOT NULL DEFAULT '';") do return false
 	return true
+}
+
+// upgrade_task_v2_schema is 087's twin: it idempotently guarantees every v2
+// column exists (a database that reached 087 half-way), then DROPS the legacy
+// task-status/actor-ref columns and the votes/subscriptions tables whose data
+// 087 has already converted.
+//
+// THE DROPS ARE TOLERANT. SQLite's DROP COLUMN refuses when the column is
+// referenced by an index, trigger or view; on this schema none of them is, but a
+// refusal must leave the column in place and log rather than abort startup — the
+// engine never reads those columns, so a lingering one is dead weight, not a
+// correctness problem. DROP TABLE is unconditional (nothing references them).
+upgrade_task_v2_schema :: proc(conn: ^Conn) -> bool {
+	if !table_column_exists(conn, "tasks", "state") && !exec(conn, "ALTER TABLE tasks ADD COLUMN state TEXT NOT NULL DEFAULT 'backlog';") do return false
+	if !table_column_exists(conn, "tasks", "kind") && !exec(conn, "ALTER TABLE tasks ADD COLUMN kind TEXT NOT NULL DEFAULT 'task';") do return false
+	if !table_column_exists(conn, "tasks", "attempt_no") && !exec(conn, "ALTER TABLE tasks ADD COLUMN attempt_no INTEGER NOT NULL DEFAULT 0;") do return false
+	if !table_column_exists(conn, "tasks", "brief_json") && !exec(conn, "ALTER TABLE tasks ADD COLUMN brief_json TEXT NOT NULL DEFAULT '{}';") do return false
+	if !table_column_exists(conn, "tasks", "blocked_on_json") && !exec(conn, "ALTER TABLE tasks ADD COLUMN blocked_on_json TEXT NOT NULL DEFAULT '';") do return false
+	if !table_column_exists(conn, "tasks", "requires_user_approval") && !exec(conn, "ALTER TABLE tasks ADD COLUMN requires_user_approval INTEGER NOT NULL DEFAULT 0;") do return false
+	if !table_column_exists(conn, "tasks", "ready_since") && !exec(conn, "ALTER TABLE tasks ADD COLUMN ready_since TEXT NOT NULL DEFAULT '';") do return false
+	if !table_column_exists(conn, "tasks", "stage_key") && !exec(conn, "ALTER TABLE tasks ADD COLUMN stage_key TEXT NOT NULL DEFAULT '';") do return false
+	if !table_column_exists(conn, "tasks", "stage_index") && !exec(conn, "ALTER TABLE tasks ADD COLUMN stage_index INTEGER NOT NULL DEFAULT 0;") do return false
+	if !table_column_exists(conn, "tasks", "generated_by_json") && !exec(conn, "ALTER TABLE tasks ADD COLUMN generated_by_json TEXT NOT NULL DEFAULT '';") do return false
+	if !table_column_exists(conn, "task_chains", "workflow_def_ref") && !exec(conn, "ALTER TABLE task_chains ADD COLUMN workflow_def_ref TEXT NOT NULL DEFAULT '';") do return false
+	if !table_column_exists(conn, "task_chains", "workflow_snapshot_json") && !exec(conn, "ALTER TABLE task_chains ADD COLUMN workflow_snapshot_json TEXT NOT NULL DEFAULT '';") do return false
+	if !table_column_exists(conn, "task_chains", "defaults_json") && !exec(conn, "ALTER TABLE task_chains ADD COLUMN defaults_json TEXT NOT NULL DEFAULT '{}';") do return false
+	if !table_column_exists(conn, "task_chain_fleets", "roles_json") && !exec(conn, "ALTER TABLE task_chain_fleets ADD COLUMN roles_json TEXT NOT NULL DEFAULT '[\"worker\"]';") do return false
+	if !table_column_exists(conn, "task_chain_fleets", "bridge_id") && !exec(conn, "ALTER TABLE task_chain_fleets ADD COLUMN bridge_id TEXT NOT NULL DEFAULT '';") do return false
+	if !exec(conn, "CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_chain_stage ON tasks(chain_id, stage_key, stage_index) WHERE stage_key <> '';") do return false
+	if !exec(conn, "CREATE INDEX IF NOT EXISTS idx_tasks_chain_state ON tasks(chain_id, state);") do return false
+	// Legacy drops (tolerant; see the proc comment).
+	drop_legacy_column(conn, "tasks", "status")
+	drop_legacy_column(conn, "tasks", "assignee_ref_json")
+	drop_legacy_column(conn, "tasks", "reviewer_refs_json")
+	drop_legacy_column(conn, "task_chains", "default_reviewer_refs_json")
+	if !exec(conn, "DROP TABLE IF EXISTS task_votes;") do return false
+	if !exec(conn, "DROP TABLE IF EXISTS task_subscriptions;") do return false
+	return true
+}
+
+// drop_legacy_column drops a column if it still exists, logging (not failing)
+// when SQLite refuses. See upgrade_task_v2_schema for why that is acceptable.
+drop_legacy_column :: proc(conn: ^Conn, table, column: string) {
+	if !table_column_exists(conn, table, column) do return
+	stmt := fmt.tprintf("ALTER TABLE %s DROP COLUMN %s;", table, column)
+	if !exec(conn, stmt) {
+		fmt.eprintfln("[migrations] task v2: could not drop legacy column %s.%s (left in place; the engine never reads it)", table, column)
+	}
 }
 
 // upgrade_user_vaults_schema idempotently ensures the user_vaults

@@ -1,5 +1,5 @@
 #+private file
-// Behavioral tests for taskchain SQLite repository (bridge, fleet, pinned, rollup, subscription).
+// Behavioral tests for taskchain SQLite repository (bridge, fleet, pinned, rollup, v2 fields).
 package sqlite
 
 import domain "odin_test:hub/domain"
@@ -33,7 +33,7 @@ test_task_chain_search_change_feed_is_monotonic_and_owner_scoped :: proc(t: ^tes
 	chain_a := domain.Task_Chain{
 		chain_id = "chain_search_a", owner_user_id = owner_a,
 		title = "vault:v1:cipher-a", description = "vault:v1:description-a",
-		publish_state = .Published, status = .Active, kind = "team_work",
+		publish_state = .Published, status = .Active, kind = domain.CHAIN_KIND_TICKET,
 		created_at = "2026-10-14T00:00:00Z", updated_at = "2026-10-14T00:00:00Z",
 	}
 	chain_b := domain.Task_Chain{
@@ -125,10 +125,8 @@ test_task_bridge_id_sqlite_roundtrip :: proc(t: ^testing.T) {
 		owner_user_id      = owner,
 		title              = "Inherit Task",
 		publish_state      = .Draft,
-		status             = .Assigned,
+		state              = .Ready,
 		priority           = .P2,
-		assignee_ref_json  = `{}`,
-		reviewer_refs_json = `[]`,
 		bridge_id          = "",
 		created_at         = "2026-09-25T10:01:00Z",
 		updated_at         = "2026-09-25T10:01:00Z",
@@ -149,10 +147,8 @@ test_task_bridge_id_sqlite_roundtrip :: proc(t: ^testing.T) {
 		owner_user_id      = owner,
 		title              = "Pinned Task",
 		publish_state      = .Draft,
-		status             = .Assigned,
+		state              = .Ready,
 		priority           = .P1,
-		assignee_ref_json  = `{}`,
-		reviewer_refs_json = `[]`,
 		bridge_id          = "brg_pin",
 		created_at         = "2026-09-25T10:02:00Z",
 		updated_at         = "2026-09-25T10:02:00Z",
@@ -246,7 +242,6 @@ test_taskchain_fleet_sqlite_lifecycle :: proc(t: ^testing.T) {
 		status                        = .Active,
 		kind                          = "fleet_testing",
 		coordinator_agent_instance_id = "inst_c",
-		default_reviewer_refs_json    = "[]",
 		created_at                    = "2026-09-23T10:00:00Z",
 		updated_at                    = "2026-09-23T10:00:00Z",
 	}
@@ -465,8 +460,7 @@ test_taskchain_pinned_sqlite_lifecycle :: proc(t: ^testing.T) {
 			status                        = .Active,
 			kind                          = "team_work",
 			coordinator_agent_instance_id = "inst_c",
-			default_reviewer_refs_json    = "[]",
-			created_at                    = fmt.tprintf("2026-09-21T10:%02d:00Z", i),
+				created_at                    = fmt.tprintf("2026-09-21T10:%02d:00Z", i),
 			updated_at                    = fmt.tprintf("2026-09-21T10:%02d:00Z", i),
 			is_pinned                     = true,
 			pinned_at                     = fmt.tprintf("2026-09-21T10:%02d:00Z", i),
@@ -547,118 +541,46 @@ test_taskchain_rollup_counts :: proc(t: ^testing.T) {
 		title         = "Chain 1",
 		publish_state = .Published,
 		status        = .Active,
-		kind          = "team_work",
+		kind          = domain.CHAIN_KIND_TICKET,
 		created_at    = "2026-09-25T10:00:00Z",
 		updated_at    = "2026-09-25T10:00:00Z",
 	}
 	_, s1_ok, _ := iface.taskchain_save_chain(&repo, c1)
 	testing.expect(t, s1_ok, "save chain 1 ok")
 
-	// Tasks in chain 1:
-	// Task 1: completed
-	t1 := domain.Task{
-		task_id            = domain.Task_ID("task_r_1"),
-		chain_id           = chain1,
-		owner_user_id      = owner,
-		title              = "Task 1",
-		publish_state      = .Published,
-		status             = .Completed,
-		priority           = .P1,
-		reviewer_refs_json = `[{"type":"agent_id","agent_id":"agt_1"}]`,
-		created_at         = "2026-09-25T10:00:00Z",
-		updated_at         = "2026-09-25T10:00:00Z",
+	// Tasks in chain 1 (Task System v2): the rollup counts `state='done'` as
+	// completed and `state='in_review' AND requires_user_approval` as awaiting
+	// user validation. Nothing else contributes beyond total_count.
+	rollup_task :: proc(id: string, chain: domain.Task_Chain_ID, owner: domain.User_ID, state: domain.Task_State, requires_user_approval: bool) -> domain.Task {
+		return domain.Task{
+			task_id                = domain.Task_ID(id),
+			chain_id               = chain,
+			owner_user_id          = owner,
+			title                  = id,
+			publish_state          = .Published,
+			state                  = state,
+			kind                   = .Task,
+			priority               = .P1,
+			brief_json             = `{"goal":"rollup"}`,
+			requires_user_approval = requires_user_approval,
+			created_at             = "2026-09-25T10:00:00Z",
+			updated_at             = "2026-09-25T10:00:00Z",
+		}
 	}
-	iface.taskchain_save_task(&repo, t1)
-
-	// Task 2: validated_good
-	t2 := domain.Task{
-		task_id            = domain.Task_ID("task_r_2"),
-		chain_id           = chain1,
-		owner_user_id      = owner,
-		title              = "Task 2",
-		publish_state      = .Published,
-		status             = .Validated_Good,
-		priority           = .P1,
-		reviewer_refs_json = `[]`,
-		created_at         = "2026-09-25T10:00:00Z",
-		updated_at         = "2026-09-25T10:00:00Z",
-	}
-	iface.taskchain_save_task(&repo, t2)
-
-	// Task 3: in_validation with empty reviewer_refs_json "[]" (defaults to user validation)
-	t3 := domain.Task{
-		task_id            = domain.Task_ID("task_r_3"),
-		chain_id           = chain1,
-		owner_user_id      = owner,
-		title              = "Task 3",
-		publish_state      = .Published,
-		status             = .In_Validation,
-		priority           = .P1,
-		reviewer_refs_json = `[]`,
-		created_at         = "2026-09-25T10:00:00Z",
-		updated_at         = "2026-09-25T10:00:00Z",
-	}
-	iface.taskchain_save_task(&repo, t3)
-
-	// Task 4: in_validation with reviewer_refs_json containing user
-	t4 := domain.Task{
-		task_id            = domain.Task_ID("task_r_4"),
-		chain_id           = chain1,
-		owner_user_id      = owner,
-		title              = "Task 4",
-		publish_state      = .Published,
-		status             = .In_Validation,
-		priority           = .P1,
-		reviewer_refs_json = `[{"type":"user"}]`,
-		created_at         = "2026-09-25T10:00:00Z",
-		updated_at         = "2026-09-25T10:00:00Z",
-	}
-	iface.taskchain_save_task(&repo, t4)
-
-	// Task 5: in_validation with agent-only reviewer (should NOT count as user_validation)
-	t5 := domain.Task{
-		task_id            = domain.Task_ID("task_r_5"),
-		chain_id           = chain1,
-		owner_user_id      = owner,
-		title              = "Task 5",
-		publish_state      = .Published,
-		status             = .In_Validation,
-		priority           = .P1,
-		reviewer_refs_json = `[{"type":"agent_id","agent_id":"agt_reviewer"}]`,
-		created_at         = "2026-09-25T10:00:00Z",
-		updated_at         = "2026-09-25T10:00:00Z",
-	}
-	iface.taskchain_save_task(&repo, t5)
-
-	// Task 6: in_progress
-	t6 := domain.Task{
-		task_id            = domain.Task_ID("task_r_6"),
-		chain_id           = chain1,
-		owner_user_id      = owner,
-		title              = "Task 6",
-		publish_state      = .Published,
-		status             = .In_Progress,
-		priority           = .P1,
-		reviewer_refs_json = `[]`,
-		created_at         = "2026-09-25T10:00:00Z",
-		updated_at         = "2026-09-25T10:00:00Z",
-	}
-	iface.taskchain_save_task(&repo, t6)
-
+	// Task 1: done
+	iface.taskchain_save_task(&repo, rollup_task("task_r_1", chain1, owner, .Done, false))
+	// Task 2: done (also with the user-approval flag — still only "completed")
+	iface.taskchain_save_task(&repo, rollup_task("task_r_2", chain1, owner, .Done, true))
+	// Task 3: in_review awaiting the user → user_validation
+	iface.taskchain_save_task(&repo, rollup_task("task_r_3", chain1, owner, .In_Review, true))
+	// Task 4: in_review awaiting the user → user_validation
+	iface.taskchain_save_task(&repo, rollup_task("task_r_4", chain1, owner, .In_Review, true))
+	// Task 5: in_review by agents only (must NOT count as user_validation)
+	iface.taskchain_save_task(&repo, rollup_task("task_r_5", chain1, owner, .In_Review, false))
+	// Task 6: in_progress (requires approval later, but not in review yet)
+	iface.taskchain_save_task(&repo, rollup_task("task_r_6", chain1, owner, .In_Progress, true))
 	// Task 7: other owner task in chain 1 (must NOT be counted)
-	t7 := domain.Task{
-		task_id            = domain.Task_ID("task_r_7"),
-		chain_id           = chain1,
-		owner_user_id      = other_owner,
-		title              = "Task 7 Other",
-		publish_state      = .Published,
-		status             = .Completed,
-		priority           = .P1,
-		reviewer_refs_json = `[]`,
-		created_at         = "2026-09-25T10:00:00Z",
-		updated_at         = "2026-09-25T10:00:00Z",
-	}
-	iface.taskchain_save_task(&repo, t7)
+	iface.taskchain_save_task(&repo, rollup_task("task_r_7", chain1, other_owner, .Done, false))
 
 	// Run rollup query
 	rollups, r_err := iface.taskchain_task_counts_by_chain(&repo, owner)
@@ -668,219 +590,199 @@ test_taskchain_rollup_counts :: proc(t: ^testing.T) {
 	testing.expect(t, string(chain1) in rollups, "chain1 present in rollups")
 	r1 := rollups[string(chain1)]
 	testing.expect_value(t, r1.total_count, 6)
-	testing.expect_value(t, r1.completed_count, 2) // t1 (.Completed) + t2 (.Validated_Good)
-	testing.expect_value(t, r1.user_validation_count, 2) // t3 (empty []) + t4 ("type":"user")
+	testing.expect_value(t, r1.completed_count, 2) // t1 + t2 (state = done)
+	testing.expect_value(t, r1.user_validation_count, 2) // t3 + t4 (in_review AND requires_user_approval)
 
 	// chain2 has no tasks -> absent from rollup
 	testing.expect(t, !(string(chain2) in rollups), "chain2 absent from rollups")
 }
 
-// --- Consolidated from taskchain_subscription_repo_test.odin ---
-
-free_subscription :: proc(sub: ^domain.Task_Subscription) {
-	delete(sub.subscription_id)
-	delete(string(sub.owner_user_id))
-	delete(sub.subscriber_agent_instance_id)
-	delete(string(sub.chain_id))
-	delete(string(sub.task_id))
-	delete(sub.event_type)
-	delete(sub.created_at)
-}
-
-free_subscriptions :: proc(subs: []domain.Task_Subscription) {
-	for &sub in subs {
-		free_subscription(&sub)
-	}
-	delete(subs)
-}
+// --- Task System v2 column round-trips ---
 
 @(test)
-test_taskchain_subscription_sqlite_lifecycle :: proc(t: ^testing.T) {
-	db_path := ":memory:"
-	conn, open_ok, open_err := open(db_path)
+test_task_v2_fields_sqlite_roundtrip :: proc(t: ^testing.T) {
+	conn, open_ok, _ := open(":memory:")
 	testing.expect(t, open_ok, "db open ok")
-	testing.expect_value(t, open_err.code, domain.Error_Code.None)
 	defer close(&conn)
-
 	mig_ok, mig_err := run_migrations(&conn)
 	testing.expect(t, mig_ok, "migrations ok")
 	testing.expect_value(t, mig_err.code, domain.Error_Code.None)
 
-	// Verify table and indexes exist
-	testing.expect(t, sqlite_object_exists(&conn, "task_subscriptions"), "task_subscriptions table exists")
-	testing.expect(t, sqlite_object_exists(&conn, "idx_task_sub_chain"), "idx_task_sub_chain index exists")
-	testing.expect(t, sqlite_object_exists(&conn, "idx_task_sub_task"), "idx_task_sub_task index exists")
+	for col in ([?]string{"state", "kind", "attempt_no", "brief_json", "blocked_on_json", "requires_user_approval", "ready_since", "stage_key", "stage_index", "generated_by_json"}) {
+		testing.expectf(t, table_column_exists(&conn, "tasks", col), "tasks.%s column exists", col)
+	}
+	testing.expect(t, table_column_exists(&conn, "task_chain_fleets", "roles_json"), "task_chain_fleets.roles_json column exists")
+	testing.expect(t, table_column_exists(&conn, "task_chain_fleets", "bridge_id"), "task_chain_fleets.bridge_id column exists")
+	testing.expect(t, table_column_exists(&conn, "task_chains", "workflow_def_ref"), "task_chains.workflow_def_ref column exists")
+	testing.expect(t, table_column_exists(&conn, "task_chains", "defaults_json"), "task_chains.defaults_json column exists")
 
 	repo_impl := Taskchain_Repo_SQLite{conn = &conn}
 	repo := new_taskchain_repository(&repo_impl, &conn)
 
-	owner := domain.User_ID("user_sub_tester")
-	cid := domain.Task_Chain_ID("chain_sub_test")
-	tid1 := domain.Task_ID("task_sub_test_1")
-	tid2 := domain.Task_ID("task_sub_test_2")
-	inst1 := "inst_worker_1"
-	inst2 := "inst_worker_2"
+	owner := domain.User_ID("user_v2_fields")
+	cid := domain.Task_Chain_ID("chain_v2_fields")
 
-	// 1. Initial list queries return empty slices
-	subs0, err0 := iface.taskchain_list_subscriptions_by_chain(&repo, cid, owner)
-	testing.expect_value(t, err0.code, domain.Error_Code.None)
-	testing.expect_value(t, len(subs0), 0)
-	free_subscriptions(subs0)
-
-	subs_task0, err_task0 := iface.taskchain_list_subscriptions_by_task(&repo, tid1, owner)
-	testing.expect_value(t, err_task0.code, domain.Error_Code.None)
-	testing.expect_value(t, len(subs_task0), 0)
-	free_subscriptions(subs_task0)
-
-	subs_inst0, err_inst0 := iface.taskchain_list_subscriptions_by_instance(&repo, inst1, owner)
-	testing.expect_value(t, err_inst0.code, domain.Error_Code.None)
-	testing.expect_value(t, len(subs_inst0), 0)
-	free_subscriptions(subs_inst0)
-
-	// 2. Save chain-level subscription
-	sub1 := domain.Task_Subscription{
-		subscription_id              = "sub_1",
-		owner_user_id                = owner,
-		subscriber_agent_instance_id = inst1,
-		chain_id                     = cid,
-		task_id                      = "",
-		event_type                   = "chain_status_changed",
-		created_at                   = "2026-09-28T10:00:00Z",
+	chain := domain.Task_Chain{
+		chain_id               = cid,
+		owner_user_id          = owner,
+		title                  = "V2 Fields Chain",
+		publish_state          = .Published,
+		status                 = .Active,
+		kind                   = domain.CHAIN_KIND_WORKFLOW,
+		workflow_def_ref       = "wf_def_1@3",
+		workflow_snapshot_json = `{"def_id":"wf_def_1","version":3,"inputs":{"repo":"x"}}`,
+		defaults_json          = `{"auto_submit":true}`,
+		created_at             = "2026-10-01T10:00:00Z",
+		updated_at             = "2026-10-01T10:00:00Z",
+		published_at           = "2026-10-01T10:00:00Z",
 	}
-	saved1, ok1, s_err1 := iface.taskchain_save_subscription(&repo, sub1)
-	testing.expect(t, ok1, "save sub1 ok")
-	testing.expect_value(t, s_err1.code, domain.Error_Code.None)
-	testing.expect_value(t, saved1.subscription_id, "sub_1")
+	_, sc_ok, sc_err := iface.taskchain_save_chain(&repo, chain)
+	testing.expect(t, sc_ok, "save chain ok")
+	testing.expect_value(t, sc_err.code, domain.Error_Code.None)
+	got_chain, gc_ok, _ := iface.taskchain_get_chain(&repo, cid)
+	testing.expect(t, gc_ok, "get chain ok")
+	testing.expect_value(t, got_chain.kind, domain.CHAIN_KIND_WORKFLOW)
+	testing.expect_value(t, got_chain.workflow_def_ref, "wf_def_1@3")
+	testing.expect_value(t, got_chain.workflow_snapshot_json, `{"def_id":"wf_def_1","version":3,"inputs":{"repo":"x"}}`)
+	testing.expect_value(t, got_chain.defaults_json, `{"auto_submit":true}`)
 
-	// 3. Save task-level subscription for same instance
-	sub2 := domain.Task_Subscription{
-		subscription_id              = "sub_2",
-		owner_user_id                = owner,
-		subscriber_agent_instance_id = inst1,
-		chain_id                     = cid,
-		task_id                      = tid1,
-		event_type                   = "task_status_changed",
-		created_at                   = "2026-09-28T10:01:00Z",
+	// Every Task_State / Task_Kind value survives the string mapping.
+	for state in domain.Task_State {
+		back, ok := domain.task_state_from_string(domain.task_state_string(state))
+		testing.expectf(t, ok && back == state, "task state %v must round-trip through its string", state)
 	}
-	saved2, ok2, s_err2 := iface.taskchain_save_subscription(&repo, sub2)
-	testing.expect(t, ok2, "save sub2 ok")
-	testing.expect_value(t, s_err2.code, domain.Error_Code.None)
-	testing.expect_value(t, saved2.subscription_id, "sub_2")
 
-	// 4. Save task-level subscription for different instance (inst2) on task2
-	sub3 := domain.Task_Subscription{
-		subscription_id              = "sub_3",
-		owner_user_id                = owner,
-		subscriber_agent_instance_id = inst2,
-		chain_id                     = cid,
-		task_id                      = tid2,
-		event_type                   = "task_status_changed",
-		created_at                   = "2026-09-28T10:02:00Z",
+	task := domain.Task{
+		task_id                = "task_v2_fields",
+		chain_id               = cid,
+		owner_user_id          = owner,
+		title                  = "V2 Task",
+		description            = "desc",
+		publish_state          = .Published,
+		state                  = .In_Review,
+		kind                   = .Gate,
+		priority               = .P0,
+		attempt_no             = 3,
+		brief_json             = `{"goal":"ship it","acceptance":["a"],"verify":"make test","inputs":[],"review_roles":["reviewer"],"assignee":"agt_w","budget":{"max_attempts":2}}`,
+		blocked_on_json        = `{"kind":"human","reason":"needs decision","since":"2026-10-01T10:05:00Z"}`,
+		requires_user_approval = true,
+		ready_since            = "2026-10-01T10:02:00Z",
+		bridge_id              = "brg_v2",
+		stage_key              = "stage.review",
+		stage_index            = 4,
+		generated_by_json      = `{"kind":"workflow","stage":"review"}`,
+		created_at             = "2026-10-01T10:01:00Z",
+		updated_at             = "2026-10-01T10:01:00Z",
+		published_at           = "2026-10-01T10:01:00Z",
+		started_at             = "2026-10-01T10:03:00Z",
 	}
-	saved3, ok3, s_err3 := iface.taskchain_save_subscription(&repo, sub3)
-	testing.expect(t, ok3, "save sub3 ok")
-	testing.expect_value(t, s_err3.code, domain.Error_Code.None)
-	testing.expect_value(t, saved3.subscription_id, "sub_3")
+	_, st_ok, st_err := iface.taskchain_save_task(&repo, task)
+	testing.expect(t, st_ok, "save task ok")
+	testing.expect_value(t, st_err.code, domain.Error_Code.None)
 
-	// 5. Query list by chain: should return all 3 subscriptions for chain cid
-	chain_subs, c_err := iface.taskchain_list_subscriptions_by_chain(&repo, cid, owner)
-	testing.expect_value(t, c_err.code, domain.Error_Code.None)
-	testing.expect_value(t, len(chain_subs), 3)
-	if len(chain_subs) == 3 {
-		testing.expect_value(t, chain_subs[0].subscription_id, "sub_1")
-		testing.expect_value(t, chain_subs[1].subscription_id, "sub_2")
-		testing.expect_value(t, chain_subs[2].subscription_id, "sub_3")
+	check_task :: proc(t: ^testing.T, got: domain.Task, label: string) {
+		testing.expectf(t, got.state == .In_Review, "%s: state %v", label, got.state)
+		testing.expectf(t, got.kind == .Gate, "%s: kind %v", label, got.kind)
+		testing.expectf(t, got.priority == .P0, "%s: priority %v", label, got.priority)
+		testing.expectf(t, got.attempt_no == 3, "%s: attempt_no %d", label, got.attempt_no)
+		testing.expectf(t, got.brief_json == `{"goal":"ship it","acceptance":["a"],"verify":"make test","inputs":[],"review_roles":["reviewer"],"assignee":"agt_w","budget":{"max_attempts":2}}`, "%s: brief_json %s", label, got.brief_json)
+		testing.expectf(t, got.blocked_on_json == `{"kind":"human","reason":"needs decision","since":"2026-10-01T10:05:00Z"}`, "%s: blocked_on_json %s", label, got.blocked_on_json)
+		testing.expectf(t, got.requires_user_approval, "%s: requires_user_approval", label)
+		testing.expectf(t, got.ready_since == "2026-10-01T10:02:00Z", "%s: ready_since %s", label, got.ready_since)
+		testing.expectf(t, got.bridge_id == "brg_v2", "%s: bridge_id %s", label, got.bridge_id)
+		testing.expectf(t, got.stage_key == "stage.review", "%s: stage_key %s", label, got.stage_key)
+		testing.expectf(t, got.stage_index == 4, "%s: stage_index %d", label, got.stage_index)
+		testing.expectf(t, got.generated_by_json == `{"kind":"workflow","stage":"review"}`, "%s: generated_by_json %s", label, got.generated_by_json)
+		testing.expectf(t, got.started_at == "2026-10-01T10:03:00Z", "%s: started_at %s", label, got.started_at)
 	}
-	free_subscriptions(chain_subs)
+	got, g_ok, _ := iface.taskchain_get_task(&repo, "task_v2_fields")
+	testing.expect(t, g_ok, "get task ok")
+	check_task(t, got, "get")
+	listed, l_err := iface.taskchain_list_tasks_by_chain(&repo, cid, owner)
+	defer delete(listed)
+	testing.expect_value(t, l_err.code, domain.Error_Code.None)
+	testing.expect_value(t, len(listed), 1)
+	if len(listed) == 1 do check_task(t, listed[0], "list")
 
-	// 6. Query list by task
-	task1_subs, t_err1 := iface.taskchain_list_subscriptions_by_task(&repo, tid1, owner)
-	testing.expect_value(t, t_err1.code, domain.Error_Code.None)
-	testing.expect_value(t, len(task1_subs), 1)
-	if len(task1_subs) == 1 {
-		testing.expect_value(t, task1_subs[0].subscription_id, "sub_2")
-		testing.expect_value(t, task1_subs[0].subscriber_agent_instance_id, inst1)
-		testing.expect_value(t, string(task1_subs[0].task_id), string(tid1))
+	// UPSERT path: every v2 column is updated, not just inserted.
+	got.state = .Done
+	got.kind = .Task
+	got.attempt_no = 4
+	got.blocked_on_json = ""
+	got.requires_user_approval = false
+	got.ready_since = ""
+	got.stage_key = "stage.done"
+	got.stage_index = 5
+	got.completed_at = "2026-10-01T11:00:00Z"
+	_, u_ok, _ := iface.taskchain_save_task(&repo, got)
+	testing.expect(t, u_ok, "re-save task ok")
+	again, a_ok, _ := iface.taskchain_get_task(&repo, "task_v2_fields")
+	testing.expect(t, a_ok, "get task after upsert ok")
+	testing.expect_value(t, again.state, domain.Task_State.Done)
+	testing.expect_value(t, again.kind, domain.Task_Kind.Task)
+	testing.expect_value(t, again.attempt_no, 4)
+	testing.expect_value(t, again.blocked_on_json, "")
+	testing.expect(t, !again.requires_user_approval, "requires_user_approval cleared")
+	testing.expect_value(t, again.ready_since, "")
+	testing.expect_value(t, again.stage_key, "stage.done")
+	testing.expect_value(t, again.stage_index, 5)
+	testing.expect_value(t, again.completed_at, "2026-10-01T11:00:00Z")
+
+	// Fleet: roles_json + bridge_id round-trip through upsert, ensure and list.
+	_, f_err := iface.taskchain_upsert_fleet(&repo, domain.Task_Chain_Fleet{
+		task_chain_id    = cid,
+		agent_id         = "agt_reviewer",
+		capacity         = 2,
+		min_warm         = 0,
+		idle_ttl_seconds = 120,
+		roles_json       = `["worker","reviewer"]`,
+		bridge_id        = "brg_fleet",
+		created_at       = "2026-10-01T10:00:00Z",
+		updated_at       = "2026-10-01T10:00:00Z",
+	})
+	testing.expect_value(t, f_err.code, domain.Error_Code.None)
+	// ensure with an empty roles_json: the default ["worker"] is stored.
+	e_err := iface.taskchain_ensure_fleet(&repo, domain.Task_Chain_Fleet{
+		task_chain_id    = cid,
+		agent_id         = "agt_default",
+		capacity         = 1,
+		idle_ttl_seconds = 600,
+		created_at       = "2026-10-01T10:00:01Z",
+		updated_at       = "2026-10-01T10:00:01Z",
+	})
+	testing.expect_value(t, e_err.code, domain.Error_Code.None)
+	fleets, fl_err := iface.taskchain_list_fleets_by_chain(&repo, cid, owner)
+	defer delete(fleets)
+	testing.expect_value(t, fl_err.code, domain.Error_Code.None)
+	testing.expect_value(t, len(fleets), 2)
+	for f in fleets {
+		switch f.agent_id {
+		case "agt_reviewer":
+			testing.expect_value(t, f.roles_json, `["worker","reviewer"]`)
+			testing.expect_value(t, f.bridge_id, "brg_fleet")
+		case "agt_default":
+			testing.expect_value(t, f.roles_json, domain.FLEET_ROLES_DEFAULT_JSON)
+			testing.expect_value(t, f.bridge_id, "")
+		case:
+			testing.expectf(t, false, "unexpected fleet row %s", f.agent_id)
+		}
 	}
-	free_subscriptions(task1_subs)
-
-	task2_subs, t_err2 := iface.taskchain_list_subscriptions_by_task(&repo, tid2, owner)
-	testing.expect_value(t, t_err2.code, domain.Error_Code.None)
-	testing.expect_value(t, len(task2_subs), 1)
-	if len(task2_subs) == 1 {
-		testing.expect_value(t, task2_subs[0].subscription_id, "sub_3")
-		testing.expect_value(t, task2_subs[0].subscriber_agent_instance_id, inst2)
-		testing.expect_value(t, string(task2_subs[0].task_id), string(tid2))
+	// Upsert updates roles_json/bridge_id on the existing row.
+	_, f2_err := iface.taskchain_upsert_fleet(&repo, domain.Task_Chain_Fleet{
+		task_chain_id    = cid,
+		agent_id         = "agt_reviewer",
+		capacity         = 2,
+		idle_ttl_seconds = 120,
+		roles_json       = `["reviewer"]`,
+		bridge_id        = "",
+		created_at       = "2026-10-01T10:00:00Z",
+		updated_at       = "2026-10-01T10:10:00Z",
+	})
+	testing.expect_value(t, f2_err.code, domain.Error_Code.None)
+	fleets2, _ := iface.taskchain_list_fleets_by_chain(&repo, cid, owner)
+	defer delete(fleets2)
+	for f in fleets2 do if f.agent_id == "agt_reviewer" {
+		testing.expect_value(t, f.roles_json, `["reviewer"]`)
+		testing.expect_value(t, f.bridge_id, "")
 	}
-	free_subscriptions(task2_subs)
-
-	// 7. Query list by instance
-	inst1_subs, i_err1 := iface.taskchain_list_subscriptions_by_instance(&repo, inst1, owner)
-	testing.expect_value(t, i_err1.code, domain.Error_Code.None)
-	testing.expect_value(t, len(inst1_subs), 2)
-	if len(inst1_subs) == 2 {
-		testing.expect_value(t, inst1_subs[0].subscription_id, "sub_1")
-		testing.expect_value(t, inst1_subs[1].subscription_id, "sub_2")
-	}
-	free_subscriptions(inst1_subs)
-
-	inst2_subs, i_err2 := iface.taskchain_list_subscriptions_by_instance(&repo, inst2, owner)
-	testing.expect_value(t, i_err2.code, domain.Error_Code.None)
-	testing.expect_value(t, len(inst2_subs), 1)
-	if len(inst2_subs) == 1 {
-		testing.expect_value(t, inst2_subs[0].subscription_id, "sub_3")
-	}
-	free_subscriptions(inst2_subs)
-
-	// 8. Test owner isolation: other user query returns empty
-	other_owner := domain.User_ID("user_other")
-	other_subs, o_err := iface.taskchain_list_subscriptions_by_chain(&repo, cid, other_owner)
-	testing.expect_value(t, o_err.code, domain.Error_Code.None)
-	testing.expect_value(t, len(other_subs), 0)
-	free_subscriptions(other_subs)
-
-	// 9. Upsert on conflict: duplicate subscriber + chain + task + event_type updates subscription_id and created_at
-	sub1_dup := domain.Task_Subscription{
-		subscription_id              = "sub_1_updated",
-		owner_user_id                = owner,
-		subscriber_agent_instance_id = inst1,
-		chain_id                     = cid,
-		task_id                      = "",
-		event_type                   = "chain_status_changed",
-		created_at                   = "2026-09-28T10:05:00Z",
-	}
-	_, ok_dup, dup_err := iface.taskchain_save_subscription(&repo, sub1_dup)
-	testing.expect(t, ok_dup, "save sub1_dup ok")
-	testing.expect_value(t, dup_err.code, domain.Error_Code.None)
-
-	// Total count for chain cid should still be 3 (not 4)
-	chain_subs_after, c_err_after := iface.taskchain_list_subscriptions_by_chain(&repo, cid, owner)
-	testing.expect_value(t, c_err_after.code, domain.Error_Code.None)
-	testing.expect_value(t, len(chain_subs_after), 3)
-	free_subscriptions(chain_subs_after)
-
-	// 10. Remove subscription
-	rem_ok, rem_err := iface.taskchain_remove_subscription(&repo, "sub_2", owner)
-	testing.expect(t, rem_ok, "remove sub_2 ok")
-	testing.expect_value(t, rem_err.code, domain.Error_Code.None)
-
-	// Verify sub_2 removed from task1
-	task1_subs_rem, _ := iface.taskchain_list_subscriptions_by_task(&repo, tid1, owner)
-	testing.expect_value(t, len(task1_subs_rem), 0)
-	free_subscriptions(task1_subs_rem)
-
-	// Verify inst1 now only has 1 subscription
-	inst1_subs_rem, _ := iface.taskchain_list_subscriptions_by_instance(&repo, inst1, owner)
-	testing.expect_value(t, len(inst1_subs_rem), 1)
-	free_subscriptions(inst1_subs_rem)
-
-	// Removing non-existent returns false
-	rem_fake_ok, rem_fake_err := iface.taskchain_remove_subscription(&repo, "non_existent_sub", owner)
-	testing.expect(t, !rem_fake_ok, "remove non-existent returns false")
-	testing.expect_value(t, rem_fake_err.code, domain.Error_Code.None)
-
-	// Removing with wrong owner returns false
-	rem_wrong_ok, rem_wrong_err := iface.taskchain_remove_subscription(&repo, "sub_3", other_owner)
-	testing.expect(t, !rem_wrong_ok, "remove with wrong owner returns false")
-	testing.expect_value(t, rem_wrong_err.code, domain.Error_Code.None)
 }
