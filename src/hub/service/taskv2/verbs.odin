@@ -42,6 +42,11 @@ lease_next :: proc(svc: ^Service, auth: contracts.Auth_Context, input: Lease_Nex
 			record_attempt_started(svc, task, fresh, input.vcs_base)
 			res = Lease_Next_Result{status = "current", lease = fresh, task = task}
 		}
+	} else if recently_expired(svc, inst.agent_instance_id, now_ms(svc.clock)) {
+		// The caller's lease just expired: it is being stopped and will be
+		// re-woken with a fresh pack. No inline grant for an orphan.
+		_, _ = end_uow(svc, &u, false)
+		return {}, false, lease_lost_error()
 	} else if inst.chain_id != "" {
 		if chain, cok, _ := iface.taskchain_get_chain(svc.repo, domain.Task_Chain_ID(inst.chain_id)); cok {
 			if lease, task, granted := grant_inline_for_instance(svc, &u, chain, inst, .Lease_Next); granted {

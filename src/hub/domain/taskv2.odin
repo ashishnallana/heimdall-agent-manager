@@ -83,6 +83,9 @@ Task_Lease :: struct {
 	hard_deadline_at:   string,
 	last_beat_at:       string,
 	delivery:           string,
+	// extended_at: set once when the clock-jump rule granted the one-shot
+	// hub_resume extension (plan §2.4); "" otherwise.
+	extended_at:        string,
 }
 
 // Task_Review: one verdict per (attempt, role, reviewer). verdict ∈ {approve,

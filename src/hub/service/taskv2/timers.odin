@@ -1,6 +1,7 @@
 package taskv2
 
 import "base:runtime"
+import "core:fmt"
 import "core:strings"
 import "core:sync"
 import "core:thread"
@@ -173,10 +174,12 @@ arm_lease_timers :: proc(svc: ^Service, lease: domain.Task_Lease) {
 	}
 }
 
-arm_idle_ttl :: proc(svc: ^Service, instance_id: string, idle_ttl_seconds: int, now: string) {
+// arm_idle_ttl: `idle_since` (= the release time written to the instance row)
+// is the armed stamp; a later release moves it and the older timer is a no-op.
+arm_idle_ttl :: proc(svc: ^Service, instance_id: string, idle_ttl_seconds: int, idle_since: string) {
 	ttl := idle_ttl_seconds
 	if ttl <= 0 do ttl = IDLE_TTL_DEFAULT_SECONDS
-	timers_arm(svc, .Idle_TTL, instance_id, to_ms(now) + i64(ttl) * 1000, now)
+	timers_arm(svc, .Idle_TTL, instance_id, to_ms(idle_since) + i64(ttl) * 1000, idle_since)
 }
 
 arm_task_timers :: proc(svc: ^Service, task: domain.Task) {
@@ -203,18 +206,32 @@ rebuild_timers :: proc(svc: ^Service) {
 	if berr.code == .None {
 		for t in backlog do arm_task_timers(svc, t)
 	}
+	// Idle_TTL from agent_instances.idle_since (live, lease-free instances).
+	if insts, ierr := iface.agent_list_active_runtime_instances(svc.agents); ierr.code == .None {
+		for inst in insts {
+			if inst.idle_since == "" || inst.chain_id == "" do continue
+			if _, held, _ := iface.taskchain_get_lease_by_holder(svc.repo, inst.agent_instance_id); held do continue
+			arm_idle_ttl(svc, inst.agent_instance_id, fleet_idle_ttl(svc, domain.Task_Chain_ID(inst.chain_id), inst.owner_user_id, inst.agent_id), inst.idle_since)
+		}
+	}
 }
 
 // ---- firing -----------------------------------------------------------------------
 
+// Fire_Result: Noop (deadline moved / row gone / state changed), Acted, or
+// Failed — a partial write that must be rolled back, never committed (S2).
+Fire_Result :: enum { Noop, Acted, Failed }
+
 // fire_due pops every timer due at now_ms and fires it: ONE unit of work per
 // timer, each re-reading its column before acting. Returns the number fired.
-fire_due :: proc(svc: ^Service, now_ms: i64) -> int {
+// `jump_detected` is the timer thread's "now − last tick > TTL" signal (plan
+// §2.4 clock-jump rule); tests pass it explicitly.
+fire_due :: proc(svc: ^Service, now_ms: i64, jump_detected := false) -> int {
 	due := timers_pop_due(svc, now_ms)
 	defer delete(due)
 	fired := 0
 	for &t in due {
-		fire_timer(svc, t, now_ms)
+		fire_timer(svc, t, now_ms, jump_detected)
 		timer_destroy(&t)
 		fired += 1
 	}
@@ -222,46 +239,62 @@ fire_due :: proc(svc: ^Service, now_ms: i64) -> int {
 }
 
 @(private = "file")
-fire_timer :: proc(svc: ^Service, t: Timer, now_ms: i64) {
+fire_timer :: proc(svc: ^Service, t: Timer, now_ms: i64, jump_detected: bool) {
 	u, ok, _ := begin_uow(svc)
 	if !ok do return
-	acted := false
+	r := Fire_Result.Noop
 	switch t.kind {
-	case .Lease_TTL:        acted = fire_lease_ttl(svc, &u, t, now_ms)
-	case .Lease_Hard_Cap:   acted = fire_lease_hard_cap(svc, &u, t)
-	case .Grant_Unconfirmed: acted = fire_grant_unconfirmed(svc, &u, t)
-	case .Idle_Grace:       acted = fire_idle_grace(svc, &u, t)
-	case .Idle_TTL:         acted = fire_idle_ttl(svc, &u, t)
-	case .Ready_Unclaimed:  acted = fire_ready_unclaimed(svc, &u, t)
-	case .Blocked_Realert:  acted = fire_blocked_realert(svc, &u, t)
+	case .Lease_TTL:        r = fire_lease_ttl(svc, &u, t, now_ms, jump_detected)
+	case .Lease_Hard_Cap:   r = fire_lease_hard_cap(svc, &u, t)
+	case .Grant_Unconfirmed: r = fire_grant_unconfirmed(svc, &u, t)
+	case .Idle_Grace:       r = fire_idle_grace(svc, &u, t)
+	case .Idle_TTL:         r = fire_idle_ttl(svc, &u, t)
+	case .Ready_Unclaimed:  r = fire_ready_unclaimed(svc, &u, t)
+	case .Blocked_Realert:  r = fire_blocked_realert(svc, &u, t)
 	}
-	_, _ = end_uow(svc, &u, true)
-	_ = acted
+	if r == .Failed {
+		fmt.eprintfln("[taskv2] timer %v for %s failed; rolled back", t.kind, t.key)
+		// Re-arm so the condition is re-evaluated next tick instead of being lost.
+		timers_arm(svc, t.kind, t.key, now_ms + 1000, t.armed)
+	}
+	_, _ = end_uow(svc, &u, r != .Failed)
 }
 
 @(private = "file")
-fire_lease_ttl :: proc(svc: ^Service, u: ^Uow, t: Timer, now_ms: i64) -> bool {
+expire_result_to_fire :: proc(r: Expire_Result) -> Fire_Result {
+	switch r {
+	case .Expired: return .Acted
+	case .Gone: return .Noop
+	case .Failed: return .Failed
+	}
+	return .Noop
+}
+
+@(private = "file")
+fire_lease_ttl :: proc(svc: ^Service, u: ^Uow, t: Timer, now_ms: i64, jump_detected: bool) -> Fire_Result {
 	lease, ok, _ := iface.taskchain_get_lease(svc.repo, t.key)
-	if !ok do return false                                  // released meanwhile
-	if lease.expires_at != t.armed do return false         // heartbeat moved it; the newer timer owns it
-	// Clock-jump rule (plan §2.4): a holder that is demonstrably alive (busy and
-	// seen in the last 2 min) gets ONE extension instead of a mass-expiry restart.
-	if lease_extension_allowed(svc, lease) {
+	if !ok do return .Noop                                  // released meanwhile
+	if lease.expires_at != t.armed do return .Noop         // heartbeat moved it; the newer timer owns it
+	// Clock-jump rule (plan §2.4): ONLY when the timer thread detected a jump
+	// (hub suspended / clock stepped), a holder that is demonstrably alive
+	// (busy, seen in the last 2 min) gets ONE extension instead of a
+	// mass-expiry restart. Recorded on the lease row (extended_at), S5.
+	if jump_detected && lease.extended_at == "" {
 		if inst, iok, _ := iface.agent_get_instance(svc.agents, lease.holder_instance_id); iok {
 			if inst.activity_status == "busy" && now_ms - to_ms(inst.last_seen_at) <= CLOCK_JUMP_SEEN_WITHIN_SECONDS * 1000 {
 				now := platform.clock_now(svc.clock)
 				lease.expires_at = min_rfc3339(add_seconds(now, LEASE_TTL_SECONDS), lease.hard_deadline_at)
 				lease.last_beat_at = now
-				if _, sok, _ := iface.taskchain_save_lease(svc.repo, lease); sok {
-					if task, tok, _ := iface.taskchain_get_task(svc.repo, lease.task_id); tok {
-						p := json_begin()
-						json_str(&p, "lease_id", lease.lease_id)
-						json_str(&p, "reason", "hub_resume")
-						_, _, _ = append_event(svc.repo, svc.clock, task, hub_actor(), EV_LEASE_EXTENDED, json_end(&p))
-					}
-					timers_arm(svc, .Lease_TTL, lease.lease_id, to_ms(lease.expires_at), lease.expires_at)
-					return true
+				lease.extended_at = now
+				if _, sok, _ := iface.taskchain_save_lease(svc.repo, lease); !sok do return .Failed
+				if task, tok, _ := iface.taskchain_get_task(svc.repo, lease.task_id); tok {
+					p := json_begin()
+					json_str(&p, "lease_id", lease.lease_id)
+					json_str(&p, "reason", "hub_resume")
+					_, _, _ = append_event(svc.repo, svc.clock, task, hub_actor(), EV_LEASE_EXTENDED, json_end(&p))
 				}
+				timers_arm(svc, .Lease_TTL, lease.lease_id, to_ms(lease.expires_at), lease.expires_at)
+				return .Acted
 			}
 		}
 	}
@@ -271,47 +304,38 @@ fire_lease_ttl :: proc(svc: ^Service, u: ^Uow, t: Timer, now_ms: i64) -> bool {
 // expire_then_match: a timer-driven expiry followed by exactly one matcher run
 // for the lease's chain (review B3: the matcher never runs inside expire).
 @(private = "file")
-expire_then_match :: proc(svc: ^Service, u: ^Uow, lease: domain.Task_Lease, reason: string) -> bool {
-	if !expire_lease_in_uow(svc, u, lease, reason, hub_actor()) do return false
-	ok, _ := after_chain_change(svc, u, lease.chain_id, lease.owner_user_id, .Lease_Expired)
-	return ok
+expire_then_match :: proc(svc: ^Service, u: ^Uow, lease: domain.Task_Lease, reason: string) -> Fire_Result {
+	r := expire_result_to_fire(expire_lease_in_uow(svc, u, lease, reason, hub_actor()))
+	if r != .Acted do return r
+	if ok, _ := after_chain_change(svc, u, lease.chain_id, lease.owner_user_id, .Lease_Expired); !ok do return .Failed
+	return .Acted
 }
 
 @(private = "file")
-lease_extension_allowed :: proc(svc: ^Service, lease: domain.Task_Lease) -> bool {
-	evs, err := iface.taskchain_list_events_by_task(svc.repo, lease.task_id, lease.owner_user_id)
-	if err.code != .None do return false
-	for e in evs {
-		if e.kind == EV_LEASE_EXTENDED && strings.contains(e.payload_json, lease.lease_id) do return false
-	}
-	return true
-}
-
-@(private = "file")
-fire_lease_hard_cap :: proc(svc: ^Service, u: ^Uow, t: Timer) -> bool {
+fire_lease_hard_cap :: proc(svc: ^Service, u: ^Uow, t: Timer) -> Fire_Result {
 	lease, ok, _ := iface.taskchain_get_lease(svc.repo, t.key)
-	if !ok do return false
-	if lease.hard_deadline_at != t.armed do return false
+	if !ok do return .Noop
+	if lease.hard_deadline_at != t.armed do return .Noop
 	return expire_then_match(svc, u, lease, EXPIRE_HARD_CAP)
 }
 
 @(private = "file")
-fire_grant_unconfirmed :: proc(svc: ^Service, u: ^Uow, t: Timer) -> bool {
+fire_grant_unconfirmed :: proc(svc: ^Service, u: ^Uow, t: Timer) -> Fire_Result {
 	lease, ok, _ := iface.taskchain_get_lease(svc.repo, t.key)
-	if !ok do return false
-	if lease.confirmed_at != "" do return false
-	if lease.granted_at != t.armed do return false
+	if !ok do return .Noop
+	if lease.confirmed_at != "" do return .Noop
+	if lease.granted_at != t.armed do return .Noop
 	task, tok, _ := iface.taskchain_get_task(svc.repo, lease.task_id)
-	if !tok do return false
+	if !tok do return .Noop
 	if !lease_resent(svc, lease) {
 		// Re-send the wake ONCE (the bridge may have dropped the frame), then
 		// give it another window.
 		p := json_begin()
 		json_str(&p, "lease_id", lease.lease_id)
-		_, _, _ = append_event(svc.repo, svc.clock, task, hub_actor(), EV_LEASE_RESENT, json_end(&p))
+		if _, aok, _ := append_event(svc.repo, svc.clock, task, hub_actor(), EV_LEASE_RESENT, json_end(&p)); !aok do return .Failed
 		effect_wake_lease(svc, u, lease, task)
 		timers_arm(svc, .Grant_Unconfirmed, lease.lease_id, now_ms(svc.clock) + GRANT_UNCONFIRMED_SECONDS * 1000, lease.granted_at)
-		return true
+		return .Acted
 	}
 	return expire_then_match(svc, u, lease, EXPIRE_UNCONFIRMED)
 }
@@ -327,54 +351,55 @@ lease_resent :: proc(svc: ^Service, lease: domain.Task_Lease) -> bool {
 }
 
 @(private = "file")
-fire_idle_grace :: proc(svc: ^Service, u: ^Uow, t: Timer) -> bool {
+fire_idle_grace :: proc(svc: ^Service, u: ^Uow, t: Timer) -> Fire_Result {
 	lease, ok, _ := iface.taskchain_get_lease_by_holder(svc.repo, t.key)
-	if !ok do return false
-	if lease.last_beat_at != t.armed do return false       // a heartbeat happened; idle grace restarted elsewhere
+	if !ok do return .Noop
+	if lease.last_beat_at != t.armed do return .Noop       // a heartbeat happened; idle grace restarted elsewhere
 	inst, iok, _ := iface.agent_get_instance(svc.agents, t.key)
-	if !iok do return false
-	if inst.activity_status != "idle" do return false      // busy again
+	if !iok do return .Noop
+	if inst.activity_status != "idle" do return .Noop      // busy again
 	return expire_then_match(svc, u, lease, EXPIRE_IDLE)
 }
 
 @(private = "file")
-fire_idle_ttl :: proc(svc: ^Service, u: ^Uow, t: Timer) -> bool {
-	if _, held, _ := iface.taskchain_get_lease_by_holder(svc.repo, t.key); held do return false
+fire_idle_ttl :: proc(svc: ^Service, u: ^Uow, t: Timer) -> Fire_Result {
+	if _, held, _ := iface.taskchain_get_lease_by_holder(svc.repo, t.key); held do return .Noop
 	inst, iok, _ := iface.agent_get_instance(svc.agents, t.key)
-	if !iok do return false
-	if !instance_is_live(inst) do return false
+	if !iok do return .Noop
+	if inst.idle_since == "" || inst.idle_since != t.armed do return .Noop // re-leased and released again: the newer timer owns it (S4)
+	if !instance_is_live(inst) do return .Noop
 	if inst.chain_id != "" {
 		if chain, cok, _ := iface.taskchain_get_chain(svc.repo, domain.Task_Chain_ID(inst.chain_id)); cok {
-			if is_coordinator(svc, chain, inst.agent_instance_id) do return false
+			if is_coordinator(svc, chain, inst.agent_instance_id) do return .Noop
 		}
 	}
 	effect_stop(u, inst.bridge_id, inst.chain_id, inst.agent_instance_id)
-	return true
+	return .Acted
 }
 
 @(private = "file")
-fire_ready_unclaimed :: proc(svc: ^Service, u: ^Uow, t: Timer) -> bool {
+fire_ready_unclaimed :: proc(svc: ^Service, u: ^Uow, t: Timer) -> Fire_Result {
 	task, ok, _ := iface.taskchain_get_task(svc.repo, domain.Task_ID(t.key))
-	if !ok do return false
-	if task.state != .Ready || task.ready_since != t.armed do return false
+	if !ok do return .Noop
+	if task.state != .Ready || task.ready_since != t.armed do return .Noop
 	p := json_begin()
 	json_str(&p, "since", task.ready_since)
-	_, _, _ = append_event(svc.repo, svc.clock, task, hub_actor(), EV_READY_UNCLAIMED, json_end(&p))
+	if _, aok, _ := append_event(svc.repo, svc.clock, task, hub_actor(), EV_READY_UNCLAIMED, json_end(&p)); !aok do return .Failed
 	effect_publish_task(u, task, "ready_unclaimed")
-	return true
+	return .Acted
 }
 
 @(private = "file")
-fire_blocked_realert :: proc(svc: ^Service, u: ^Uow, t: Timer) -> bool {
+fire_blocked_realert :: proc(svc: ^Service, u: ^Uow, t: Timer) -> Fire_Result {
 	task, ok, _ := iface.taskchain_get_task(svc.repo, domain.Task_ID(t.key))
-	if !ok do return false
-	if task.blocked_on_json == "" || task.blocked_on_json != t.armed do return false
+	if !ok do return .Noop
+	if task.blocked_on_json == "" || task.blocked_on_json != t.armed do return .Noop
 	p := json_begin()
 	json_raw(&p, "blocked_on", task.blocked_on_json)
-	_, _, _ = append_event(svc.repo, svc.clock, task, hub_actor(), EV_BLOCKED_REALERT, json_end(&p))
+	if _, aok, _ := append_event(svc.repo, svc.clock, task, hub_actor(), EV_BLOCKED_REALERT, json_end(&p)); !aok do return .Failed
 	effect_publish_task(u, task, "blocked_realert")
 	timers_arm(svc, .Blocked_Realert, string(task.task_id), now_ms(svc.clock) + BLOCKED_REALERT_SECONDS * 1000, task.blocked_on_json)
-	return true
+	return .Acted
 }
 
 // ---- the thin thread -----------------------------------------------------------------
@@ -391,9 +416,20 @@ start_timer_thread :: proc(svc: ^Service) -> ^thread.Thread {
 @(private = "file")
 timer_thread_proc :: proc(t: ^thread.Thread) {
 	svc := (^Service)(t.data)
+	// Everything a tick allocates (repository rows, payloads, effects) is
+	// scratch: route the thread's allocator to its temp arena and free it per
+	// tick. Heap-lived state (timer keys, recent_expiries) names
+	// runtime.heap_allocator explicitly.
+	context.allocator = context.temp_allocator
+	last_tick := now_ms(svc.clock)
 	for !sync.atomic_load(&svc.timers.stop) {
 		time.sleep(time.Second)
-		_ = fire_due(svc, now_ms(svc.clock))
+		now := now_ms(svc.clock)
+		// Clock jump (plan §2.4): the hub slept/was suspended for longer than
+		// a TTL; TTL fires in this tick may grant the one-shot extension.
+		jump := now - last_tick > LEASE_TTL_SECONDS * 1000
+		last_tick = now
+		_ = fire_due(svc, now, jump)
 		// Per-tick scratch (wake keys, JSON) lives on the temp allocator.
 		free_all(context.temp_allocator)
 	}

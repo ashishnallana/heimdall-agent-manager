@@ -1400,6 +1400,11 @@ upgrade_task_v2_schema :: proc(conn: ^Conn) -> bool {
 	if !table_column_exists(conn, "task_chain_fleets", "bridge_id") && !exec(conn, "ALTER TABLE task_chain_fleets ADD COLUMN bridge_id TEXT NOT NULL DEFAULT '';") do return false
 	if !exec(conn, "CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_chain_stage ON tasks(chain_id, stage_key, stage_index) WHERE stage_key <> '';") do return false
 	if !exec(conn, "CREATE INDEX IF NOT EXISTS idx_tasks_chain_state ON tasks(chain_id, state);") do return false
+	// M1 review follow-ups (additive, idempotent): idle_since lets the Idle_TTL
+	// timer detect a moved deadline and be rebuilt on boot (S4); extended_at
+	// records the one-shot clock-jump extension on the lease row (S5).
+	if !table_column_exists(conn, "agent_instances", "idle_since") && !exec(conn, "ALTER TABLE agent_instances ADD COLUMN idle_since TEXT NOT NULL DEFAULT '';") do return false
+	if !table_column_exists(conn, "task_leases", "extended_at") && !exec(conn, "ALTER TABLE task_leases ADD COLUMN extended_at TEXT NOT NULL DEFAULT '';") do return false
 	// Legacy drops (tolerant; see the proc comment).
 	drop_legacy_column(conn, "tasks", "status")
 	drop_legacy_column(conn, "tasks", "assignee_ref_json")

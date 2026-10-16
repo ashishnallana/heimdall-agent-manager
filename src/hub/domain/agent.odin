@@ -78,6 +78,10 @@ Agent_Instance :: struct {
 	started_at: string,
 	stopped_at: string,
 	last_seen_at: string,
+	// idle_since (Task System v2): when the instance last released a lease
+	// (set by the engine, cleared on grant). "" = never idle under the lease
+	// system. Keys the Idle_TTL timer's moved-deadline check and boot rebuild.
+	idle_since: string,
 }
 
 current_task_role_string :: proc(role: Current_Task_Role) -> string {
@@ -128,6 +132,7 @@ agent_instance_destroy :: proc(inst: ^Agent_Instance) {
 	if len(inst.started_at) > 0 do delete(inst.started_at)
 	if len(inst.stopped_at) > 0 do delete(inst.stopped_at)
 	if len(inst.last_seen_at) > 0 do delete(inst.last_seen_at)
+	if len(inst.idle_since) > 0 do delete(inst.idle_since)
 	inst^ = {}
 }
 

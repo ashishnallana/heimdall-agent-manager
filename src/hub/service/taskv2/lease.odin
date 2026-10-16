@@ -1,7 +1,9 @@
 package taskv2
 
+import "base:runtime"
 import "core:fmt"
 import "core:strings"
+import "core:sync"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 import platform "odin_test:hub/platform"
@@ -77,6 +79,9 @@ grant_in_uow :: proc(svc: ^Service, u: ^Uow, req: Grant_Request) -> (domain.Task
 	evs, eerr := iface.taskchain_list_events_by_task(svc.repo, task.task_id, task.owner_user_id)
 	if eerr.code != .None do return {}, false, eerr
 	pre := fold_task(evs, fold_input_for_task(task, true))
+	if req.kind == domain.LEASE_KIND_WORK && !budget_allows_grant(pre, brief_max_attempts(task.brief_json)) {
+		return {}, false, domain.domain_error(.Conflict, "attempt budget exhausted; the task waits for a human")
+	}
 	attempt_no := pre.attempt_no
 	if req.kind == domain.LEASE_KIND_WORK && pre.last_release != .Handoff do attempt_no += 1
 	lease.attempt_no = attempt_no
@@ -141,8 +146,8 @@ release_in_uow :: proc(svc: ^Service, u: ^Uow, lease: domain.Task_Lease, actor: 
 	refolded, _, rok, rerr := record_event(svc, u, task, actor, event_kind, payload_json)
 	if !rok do return {}, false, rerr
 	close_attempt(svc, lease, outcome)
-	clear_instance_pointer(svc, lease.holder_instance_id)
 	now := platform.clock_now(svc.clock)
+	mark_instance_idle(svc, lease.holder_instance_id, now)
 	if inst, iok, _ := iface.agent_get_instance(svc.agents, lease.holder_instance_id); iok {
 		// Stop the holder unless the release is an inline continuation (the
 		// caller is about to be granted its next lease in the same request).
@@ -158,22 +163,35 @@ release_in_uow :: proc(svc: ^Service, u: ^Uow, lease: domain.Task_Lease, actor: 
 // idle, instance lost, grant unconfirmed, replaced, dep_added, chain closed.
 // Work expiries are what the budget counts (fold rule); review expiries just
 // free the reviewer. The holder is stopped unless it is already gone.
-expire_lease_in_uow :: proc(svc: ^Service, u: ^Uow, lease: domain.Task_Lease, reason: string, actor: Actor) -> bool {
-	task, tok, _ := iface.taskchain_get_task(svc.repo, lease.task_id)
-	if !tok do return false
-	if deleted, _ := iface.taskchain_delete_lease(svc.repo, lease.lease_id); !deleted do return false
-	metric_lease_released(lease.kind)
-	metric_lease_expired(reason)
+// Result: Gone = the lease row no longer exists (someone released it first —
+// the timer-vs-verb race, a no-op for the caller), Failed = a write failed and
+// the caller must ROLL BACK (review S2: never commit "lease gone, no event").
+Expire_Result :: enum { Expired, Gone, Failed }
+
+expire_lease_in_uow :: proc(svc: ^Service, u: ^Uow, lease: domain.Task_Lease, reason: string, actor: Actor) -> Expire_Result {
+	task, tok, terr := iface.taskchain_get_task(svc.repo, lease.task_id)
+	if !tok do return .Gone if terr.code == .Not_Found || terr.code == .None else .Failed
+	// Event FIRST, then the row: an interrupted sequence leaves an event whose
+	// fold says "no lease" and a row the next boot/TTL fire reclaims — never
+	// the reverse (a row-less in_progress task).
 	p := json_begin()
 	json_str(&p, "lease_id", lease.lease_id)
 	json_str(&p, "kind", lease.kind)
 	json_int(&p, "attempt_no", i64(lease.attempt_no))
 	json_str(&p, "reason", reason)
 	json_str(&p, "instance_id", lease.holder_instance_id)
-	if _, _, rok, _ := record_event(svc, u, task, actor, EV_LEASE_EXPIRED, json_end(&p)); !rok do return false
+	if _, still, _ := iface.taskchain_get_lease(svc.repo, lease.lease_id); !still do return .Gone
+	if _, _, rok, _ := record_event(svc, u, task, actor, EV_LEASE_EXPIRED, json_end(&p)); !rok do return .Failed
+	if deleted, derr := iface.taskchain_delete_lease(svc.repo, lease.lease_id); !deleted {
+		if derr.code != .None do return .Failed
+		return .Failed // vanished between the check and the delete: roll back, the other writer owns it
+	}
+	metric_lease_released(lease.kind)
+	metric_lease_expired(reason)
 	if lease.kind == domain.LEASE_KIND_WORK do close_attempt(svc, lease, fmt.tprintf("expired:%s", reason))
-	clear_instance_pointer(svc, lease.holder_instance_id)
 	now := platform.clock_now(svc.clock)
+	mark_instance_idle(svc, lease.holder_instance_id, now)
+	note_recent_expiry(svc, lease.holder_instance_id, to_ms(now))
 	if inst, iok, _ := iface.agent_get_instance(svc.agents, lease.holder_instance_id); iok {
 		if reason != EXPIRE_INSTANCE_LOST && instance_is_live(inst) {
 			effect_stop(u, inst.bridge_id, string(task.chain_id), inst.agent_instance_id)
@@ -183,7 +201,7 @@ expire_lease_in_uow :: proc(svc: ^Service, u: ^Uow, lease: domain.Task_Lease, re
 	// NOTE: no match_chain here (review B3). Every caller runs
 	// after_chain_change exactly once at the end of its own UoW, after all of
 	// its writes, so the matcher never acts on an intermediate state.
-	return true
+	return .Expired
 }
 
 // heartbeat_in_uow extends the TTL (never past the hard cap). An event is
@@ -236,7 +254,7 @@ on_dep_added_in_uow :: proc(svc: ^Service, u: ^Uow, task: domain.Task, actor: Ac
 	if err.code != .None do return false, err
 	for l in leases {
 		if l.kind != domain.LEASE_KIND_WORK do continue
-		if !expire_lease_in_uow(svc, u, l, EXPIRE_DEP_ADDED, actor) do return false, domain.domain_error(.Internal_Error, "failed to expire lease on dep_added")
+		if expire_lease_in_uow(svc, u, l, EXPIRE_DEP_ADDED, actor) == .Failed do return false, domain.domain_error(.Internal_Error, "failed to expire lease on dep_added")
 	}
 	return true, domain.Domain_Error{}
 }
@@ -264,7 +282,7 @@ on_instance_terminal :: proc(svc: ^Service, instance_id: string) {
 	chain_id := domain.Task_Chain_ID("")
 	owner := domain.User_ID("")
 	if lease, held, _ := iface.taskchain_get_lease_by_holder(svc.repo, instance_id); held {
-		acted = expire_lease_in_uow(svc, &u, lease, EXPIRE_INSTANCE_LOST, hub_actor())
+		acted = expire_lease_in_uow(svc, &u, lease, EXPIRE_INSTANCE_LOST, hub_actor()) == .Expired
 		chain_id, owner = lease.chain_id, lease.owner_user_id
 	}
 	if acted do acted, _ = after_chain_change(svc, &u, chain_id, owner, .Instance_Terminal)
@@ -294,10 +312,13 @@ touch_instance :: proc(svc: ^Service, instance_id: string) {
 	touch_lease(svc, lease)
 }
 
+// IMPLICIT_HEARTBEAT_MIN_SECONDS throttles implicit heartbeats (review S3): a
+// chatty agent would otherwise write a row and arm a heap timer per call.
+IMPLICIT_HEARTBEAT_MIN_SECONDS :: 30
+
 @(private = "file")
 touch_lease :: proc(svc: ^Service, lease: domain.Task_Lease) {
-	// Skip the write when the last beat is within the current second.
-	if lease.last_beat_at == platform.clock_now(svc.clock) do return
+	if now_ms(svc.clock) - to_ms(lease.last_beat_at) < IMPLICIT_HEARTBEAT_MIN_SECONDS * 1000 do return
 	u, ok, _ := begin_uow(svc)
 	if !ok do return
 	fresh, still, _ := iface.taskchain_get_lease(svc.repo, lease.lease_id)
@@ -340,25 +361,46 @@ on_bridge_hello :: proc(svc: ^Service, bridge_id: string, active_instance_ids: [
 			if task, tok, _ := iface.taskchain_get_task(svc.repo, l.task_id); tok do effect_wake_lease(svc, &u, l, task)
 		}
 	}
+	// Orphans: ONLY instances the lease system itself would have launched —
+	// on THIS bridge, members of an Active ticket/workflow chain, whose
+	// template has a fleet row (worker/reviewer) in that chain — and that hold
+	// no lease. Human-chat members, coordinators, private conversations and
+	// other bridges' instances are never touched (review S8).
 	for id in active_instance_ids {
 		if strings.trim_space(id) == "" do continue
 		if _, held, _ := iface.taskchain_get_lease_by_holder(svc.repo, id); held do continue
 		inst, iok, _ := iface.agent_get_instance(svc.agents, id)
-		if !iok || inst.chain_id == "" do continue
+		if !iok || inst.chain_id == "" || inst.bridge_id != bridge_id do continue
 		chain, cok, _ := iface.taskchain_get_chain(svc.repo, domain.Task_Chain_ID(inst.chain_id))
-		if !cok || is_coordinator(svc, chain, id) do continue
-		// Only chain WORKERS are stopped: an instance in a private conversation
-		// chain is its own coordinator and is skipped above.
-		if chain.kind == domain.CHAIN_KIND_PRIVATE_CONVERSATION do continue
+		if !cok || chain.status != .Active || chain.publish_state != .Published do continue
+		if chain.kind != domain.CHAIN_KIND_TICKET && chain.kind != domain.CHAIN_KIND_WORKFLOW do continue
+		if is_coordinator(svc, chain, id) do continue
+		if !instance_is_fleet_member(svc, chain, inst) do continue
 		effect_stop(&u, inst.bridge_id, inst.chain_id, id)
 	}
+	ok_all := true
 	chains, cerr := iface.taskchain_list_published_active_chains(svc.repo)
 	if cerr.code == .None {
 		for c in chains {
-			if chain_has_held_task(svc, c) do _, _ = match_chain_in_uow(svc, &u, c, .Bridge_Hello)
+			if chain_has_held_task(svc, c) {
+				if mok, _ := match_chain_in_uow(svc, &u, c, .Bridge_Hello); !mok do ok_all = false
+			}
 		}
 	}
-	_, _ = end_uow(svc, &u, true)
+	_, _ = end_uow(svc, &u, ok_all)
+}
+
+// instance_is_fleet_member: the instance's template has a fleet row in the
+// chain with a worker or reviewer role (the only kind of instance the matcher
+// ever grants to or launches).
+instance_is_fleet_member :: proc(svc: ^Service, chain: domain.Task_Chain, inst: domain.Agent_Instance) -> bool {
+	fleets, err := iface.taskchain_list_fleets_by_chain(svc.repo, chain.chain_id, chain.owner_user_id)
+	if err.code != .None do return false
+	for f in fleets {
+		if f.agent_id != inst.agent_id do continue
+		if fleet_row_has_role(f, domain.FLEET_ROLE_WORKER) || fleet_row_has_role(f, domain.FLEET_ROLE_REVIEWER) do return true
+	}
+	return false
 }
 
 @(private = "file")
@@ -380,7 +422,7 @@ chain_closed :: proc(svc: ^Service, chain: domain.Task_Chain, actor: Actor, canc
 	leases, lerr := iface.taskchain_list_leases_by_chain(svc.repo, chain.chain_id)
 	if lerr.code == .None {
 		for l in leases {
-			if !expire_lease_in_uow(svc, &u, l, EXPIRE_CHAIN_CLOSED, actor) {
+			if expire_lease_in_uow(svc, &u, l, EXPIRE_CHAIN_CLOSED, actor) == .Failed {
 				rok = false
 				rerr = domain.domain_error(.Internal_Error, "failed to reclaim lease on chain close")
 				break
@@ -419,7 +461,7 @@ cancel_task :: proc(svc: ^Service, task: domain.Task, actor: Actor, reason: stri
 	rerr := domain.Domain_Error{}
 	leases, lerr := iface.taskchain_list_leases_by_task(svc.repo, task.task_id)
 	if lerr.code == .None {
-		for l in leases do if !expire_lease_in_uow(svc, &u, l, EXPIRE_CANCELLED, actor) { rok = false }
+		for l in leases do if expire_lease_in_uow(svc, &u, l, EXPIRE_CANCELLED, actor) == .Failed { rok = false }
 	}
 	if rok {
 		payload := json_begin()
@@ -493,15 +535,53 @@ close_attempt :: proc(svc: ^Service, lease: domain.Task_Lease, outcome: string) 
 set_instance_pointer :: proc(svc: ^Service, instance_id, task_id: string, role: domain.Current_Task_Role) {
 	inst, ok, _ := iface.agent_get_instance(svc.agents, instance_id)
 	if !ok do return
-	if inst.current_task_id == task_id && inst.current_task_role == role do return
+	if inst.current_task_id == task_id && inst.current_task_role == role && inst.idle_since == "" do return
 	inst.current_task_id = task_id
 	inst.current_task_role = role
+	inst.idle_since = "" // holding a lease is not idle
 	inst.updated_at = platform.clock_now(svc.clock)
 	_, _, _ = iface.agent_save_instance(svc.agents, inst)
 }
 
+// mark_instance_idle clears the pointer and stamps idle_since = now (the
+// column the Idle_TTL timer keys on; review S4).
+mark_instance_idle :: proc(svc: ^Service, instance_id, now: string) {
+	inst, ok, _ := iface.agent_get_instance(svc.agents, instance_id)
+	if !ok do return
+	inst.current_task_id = ""
+	inst.current_task_role = .None
+	inst.idle_since = now
+	inst.updated_at = now
+	_, _, _ = iface.agent_save_instance(svc.agents, inst)
+}
+
 clear_instance_pointer :: proc(svc: ^Service, instance_id: string) {
-	set_instance_pointer(svc, instance_id, "", .None)
+	mark_instance_idle(svc, instance_id, platform.clock_now(svc.clock))
+}
+
+// ---- recently expired holders (lease.next refusal, review S10) ------------------
+// An instance whose lease just expired is being stopped and re-woken; a
+// `lease.next` from its old process must not hand it a fresh inline lease.
+// In-memory (heap-cloned keys under state_mutex); not durable across restarts
+// on purpose — after a restart every process is re-bootstrapped anyway.
+
+note_recent_expiry :: proc(svc: ^Service, instance_id: string, at_ms: i64) {
+	if instance_id == "" do return
+	sync.mutex_lock(&svc.state_mutex)
+	defer sync.mutex_unlock(&svc.state_mutex)
+	if svc.recent_expiries == nil do svc.recent_expiries = make(map[string]i64, runtime.heap_allocator())
+	if _, has := svc.recent_expiries[instance_id]; has {
+		svc.recent_expiries[instance_id] = at_ms
+		return
+	}
+	svc.recent_expiries[strings.clone(instance_id, runtime.heap_allocator())] = at_ms
+}
+
+recently_expired :: proc(svc: ^Service, instance_id: string, now_ms: i64) -> bool {
+	sync.mutex_lock(&svc.state_mutex)
+	defer sync.mutex_unlock(&svc.state_mutex)
+	at, has := svc.recent_expiries[instance_id]
+	return has && now_ms - at < IDLE_GRACE_SECONDS * 1000
 }
 
 instance_is_live :: proc(inst: domain.Agent_Instance) -> bool {
