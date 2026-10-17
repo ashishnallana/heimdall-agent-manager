@@ -16,6 +16,8 @@ import {
 import {
   useAddTaskCommentMutation,
   useGetTaskChainFleetsQuery,
+  useGetTaskChainQuery,
+  useSendAgentMessageMutation,
   useListAgentIdentitiesQuery,
   useMarkConversationReadMutation,
   useSendConversationMessageMutation,
@@ -35,7 +37,7 @@ import { DECK_TABS, clampIndex, defaultTab, hideKey, nextLiveTab, reviewerCandid
 const NO_ITEMS: AttentionItem[] = [];
 
 type Popover = null | 'snooze' | 'reviewer';
-type Composer = null | 'reply' | 'comment';
+type Composer = null | 'reply' | 'comment' | 'coordinator';
 
 /** The deck sheet slides up from the bottom on open and back down on close. */
 export const SHEET_MS = 220;
@@ -250,6 +252,16 @@ export function AttentionDeck({
   const [voteTask] = useVoteTaskMutation();
   const [sendMessage] = useSendConversationMessageMutation();
   const [markRead] = useMarkConversationReadMutation();
+  // Message coordinator: the chain (and so its coordinator) is fetched on demand
+  // when the composer opens.
+  const coordinatorChainId = open && composer === 'coordinator' && current?.kind === 'task' ? current.action_refs.chain_id : '';
+  const chainQuery = useGetTaskChainQuery({ chainId: coordinatorChainId }, { skip: !coordinatorChainId });
+  const coordinatorId = String(chainQuery.data?.coordinator_agent_instance_id || '');
+  const coordinatorName = String(
+    (chainQuery.data?.members || []).find((m: any) => m?.agent_instance_id === coordinatorId)?.display_name || 'the coordinator',
+  );
+  const [sendAgentMessage] = useSendAgentMessageMutation();
+
   // Reviewer menu: fetched on demand when it opens -- the chain's fleet, plus the
   // agent list for names (and the reviewer-template fallback).
   const reviewerChainId = open && popover === 'reviewer' && current?.kind === 'task' ? current.action_refs.chain_id : '';
@@ -281,6 +293,24 @@ export function AttentionDeck({
       scheduler.unsettle(hideKey(item));
       throw err;
     }
+  };
+
+  const sendOption = (item: AttentionMessageItem, i: number) => {
+    const opt = item.details.options[i];
+    if (opt === undefined) return;
+    void replyAndRead(item, opt).catch((err) => say(`Reply failed: ${err?.message || 'error'}`));
+  };
+
+  // Sent straight to the coordinator's conversation. The task is named by id so
+  // the agent knows which one (agents read ids; the deck never renders them).
+  const submitCoordinatorMessage = async (item: AttentionTaskItem, value: ComposerSubmit) => {
+    if (!coordinatorId) throw new Error('This chain has no coordinator');
+    const text = appendArtifactLinks(value.text, value.attachments.map((a) => a.link)).trim();
+    const body = `About task \`${item.action_refs.task_id}\`:\n\n${text}`;
+    await (sendAgentMessage({ agentInstanceId: coordinatorId, body, tempId: `attn_${Date.now()}`, artifactIds: value.attachments.map((a) => a.id) }) as any).unwrap();
+    say(`Message sent to ${coordinatorName}`);
+    setComposer(null);
+    go(1);
   };
 
   const submitReply = async (item: AttentionMessageItem, value: ComposerSubmit) => {
@@ -328,6 +358,7 @@ export function AttentionDeck({
   const dock: DockAction[] = !current ? [] : current.kind === 'task' ? [
     { key: 'a', label: 'Approve', icon: 'check', tone: 'success', debug: 'approve', run: () => schedule(current, 'Approved', (k) => acceptCard(current.card_id, k)) },
     { key: 'c', label: 'Comment', icon: 'chat', debug: 'comment', run: () => { setPopover(null); setComposer(composer === 'comment' ? null : 'comment'); } },
+    { key: 'm', label: 'Message coordinator', icon: 'arrow-up', debug: 'message-coordinator', run: () => { setPopover(null); setComposer(composer === 'coordinator' ? null : 'coordinator'); } },
     { key: 'r', label: 'Reviewer', icon: 'bot', debug: 'reviewer', run: () => { setComposer(null); setPopover(popover === 'reviewer' ? null : 'reviewer'); } },
     { key: 's', label: 'Snooze', icon: 'clock', debug: 'snooze', run: () => { setComposer(null); setPopover(popover === 'snooze' ? null : 'snooze'); } },
     // Cancels the task itself (the card resolves with it), so it says so.
@@ -356,6 +387,11 @@ export function AttentionDeck({
       if (isTyping(e.target) || e.metaKey || e.ctrlKey || e.altKey) return;
       if (e.key === 'ArrowRight') { go(1); e.preventDefault(); return; }
       if (e.key === 'ArrowLeft') { go(-1); e.preventDefault(); return; }
+      if (/^[1-9]$/.test(e.key) && current?.kind === 'message' && Number(e.key) <= current.details.options.length) {
+        e.preventDefault();
+        sendOption(current, Number(e.key) - 1);
+        return;
+      }
       const hit = dock.find((d) => d.key === e.key.toLowerCase());
       if (hit) { e.preventDefault(); hit.run(); }
     };
@@ -475,21 +511,6 @@ export function AttentionDeck({
               onAnimationEnd={() => setSlide(null)}
             >
               <AttentionCardBody item={current} now={now}>
-                {current.kind === 'message' && current.details.options.length > 0 ? (
-                  <div data-debug-id="attention-card-options" className="mt-3 flex flex-wrap gap-2" data-no-drag>
-                    {current.details.options.map((opt, i) => (
-                      <button
-                        key={`${i}:${opt}`}
-                        type="button"
-                        data-debug-id={`attention-card-option-${i}`}
-                        onClick={() => void replyAndRead(current, opt).catch((err) => say(`Reply failed: ${err?.message || 'error'}`))}
-                        className="rounded-full border border-warning-soft px-3 py-1 text-[12px] text-warning hover:bg-warning-soft"
-                      >
-                        {opt}
-                      </button>
-                    ))}
-                  </div>
-                ) : null}
                 {composer === 'reply' && current.kind === 'message' ? (
                   <AttentionComposer
                     debugId="attention-reply"
@@ -500,6 +521,29 @@ export function AttentionDeck({
                     onSubmit={(v) => submitReply(current, v)}
                     onCancel={() => setComposer(null)}
                   />
+                ) : null}
+                {composer === 'coordinator' && current.kind === 'task' ? (
+                  chainQuery.isFetching && !chainQuery.data ? (
+                    <p data-debug-id="attention-coordinator-loading" className="mt-2 flex items-center gap-2 text-[12px] text-muted">
+                      <Spinner size="sm" label="Finding the coordinator…" /> Finding the coordinator…
+                    </p>
+                  ) : chainQuery.isError ? (
+                    <p data-debug-id="attention-coordinator-error" className="mt-2 text-[12px] text-danger">
+                      Couldn't load the chain. <button type="button" className="underline" onClick={() => chainQuery.refetch()}>Retry</button>
+                    </p>
+                  ) : !coordinatorId ? (
+                    <p data-debug-id="attention-coordinator-none" className="mt-2 text-[12px] text-muted">This chain has no coordinator.</p>
+                  ) : (
+                    <AttentionComposer
+                      debugId="attention-coordinator"
+                      placeholder={`Message ${coordinatorName} about this task…`}
+                      originKind="chat"
+                      originRef={coordinatorId}
+                      submitLabel={`Send to ${coordinatorName}`}
+                      onSubmit={(v) => submitCoordinatorMessage(current, v)}
+                      onCancel={() => setComposer(null)}
+                    />
+                  )
                 ) : null}
                 {composer === 'comment' && current.kind === 'task' ? (
                   <AttentionComposer
@@ -583,6 +627,25 @@ export function AttentionDeck({
           ) : null}
         </div>
 
+        {/* Quick replies sit outside the scrolling card, just above the arrows, so a
+            long message never pushes them out of view. Number keys 1-9 send them. */}
+        {current && current.kind === 'message' && current.details.options.length > 0 && open ? (
+          <div data-debug-id="attention-card-options" data-no-drag className="flex flex-wrap justify-center gap-2 px-4 pt-3" role="group" aria-label="Quick replies">
+            {current.details.options.map((opt, i) => (
+              <button
+                key={`${i}:${opt}`}
+                type="button"
+                data-debug-id={`attention-card-option-${i}`}
+                aria-keyshortcuts={i < 9 ? String(i + 1) : undefined}
+                onClick={() => sendOption(current, i)}
+                className="inline-flex items-center gap-1.5 rounded-full border border-warning-soft py-1 pl-1.5 pr-3 text-[12px] text-warning hover:bg-warning-soft"
+              >
+                {i < 9 ? <kbd className="grid h-4 min-w-4 place-items-center rounded-full bg-warning-soft px-1 text-[10px] font-semibold not-italic">{i + 1}</kbd> : null}
+                <span>{opt}</span>
+              </button>
+            ))}
+          </div>
+        ) : null}
         <div className="flex items-center justify-center gap-3 py-2 text-[12px] text-faint tabular-nums" data-debug-id="attention-deck-counter">
           {list.length > 0 ? (
             <>

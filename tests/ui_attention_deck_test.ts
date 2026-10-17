@@ -594,6 +594,54 @@ test('deck: focus moves into the deck on open; Esc closes it once (menus first)'
   });
 });
 
+test('deck: quick replies sit outside the scrolling card, numbered; number keys send them', async () => {
+  const long = 'Line of a long message. '.repeat(200);
+  const item = messageItem('m', { details: { ...messageItem('m').details, excerpt: { author_name: 'soloist #7', body: long, at: '2026-10-16T11:30:00Z' } } });
+  await withDeck([item], async ({ q, act, dom, hits, scheduler }) => {
+    const options = q('[data-debug-id="attention-card-options"]');
+    assert.ok(options, 'quick replies rendered');
+    assert.equal(q('[data-debug-id="attention-deck-card"]').contains(options), false, 'not inside the scrolling card');
+    const counter = q('[data-debug-id="attention-deck-counter"]');
+    assert.equal(options.nextElementSibling, counter, 'just above the arrows');
+    assert.match(options.textContent, /1Keep it/);
+    assert.match(options.textContent, /2Skip it/);
+    await act(async () => { dom.window.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: '2', bubbles: true })); });
+    await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
+    const send = hits.find((h) => h.startsWith('POST /api/v1/chats/chat_secret_id/messages'));
+    assert.ok(send, 'pressing 2 sends the second option');
+    assert.ok(scheduler.getSnapshot().hidden.has('crd_msg_inst_m'));
+  });
+  await withDeck([messageItem('m')], async ({ act, dom, hits }) => {
+    await act(async () => { dom.window.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: '5', bubbles: true })); });
+    assert.equal(hits.filter((h) => h.startsWith('POST')).length, 0, 'a number with no option does nothing');
+  });
+});
+
+test('deck: Message coordinator loads the chain on demand, then sends to the coordinator and moves on', async () => {
+  const routes = {
+    '/task-chains/chain_secret_id': { chain_id: 'chain_secret_id', coordinator_agent_instance_id: 'inst_coord', members: [{ agent_instance_id: 'inst_coord', role: 'coordinator', display_name: 'soloist #19' }] },
+    '/user-rpc': { message_id: 'msg_new' },
+  };
+  await withDeck([taskItem('a'), taskItem('b')], async ({ q, act, text, hits, holdRoutes, releaseRoutes }) => {
+    assert.equal(hits.filter((h) => h.includes('/task-chains/chain_secret_id') && !h.includes('/tasks/')).length, 0, 'nothing fetched before it is used');
+    holdRoutes();
+    await act(async () => { q('[data-debug-id="attention-action-message-coordinator"]').click(); });
+    await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+    assert.ok(q('[data-debug-id="attention-coordinator-loading"]'), 'loader while the chain loads');
+    releaseRoutes();
+    await act(async () => { await new Promise((r) => setTimeout(r, 40)); });
+    assert.match(text(), /Send to soloist #19/);
+    assert.doesNotMatch(text(), /inst_coord|chain_secret/, 'no ids rendered');
+    const input = q('[data-debug-id="attention-coordinator-input"]');
+    await act(async () => { typeInto(input, 'Can you split this task?'); });
+    await act(async () => { q('[data-debug-id="attention-coordinator-submit"]').click(); });
+    await act(async () => { await new Promise((r) => setTimeout(r, 40)); });
+    assert.ok(hits.some((h) => h === 'POST /user-rpc' || h.endsWith('/user-rpc')), 'sent through the agent message path');
+    assert.match(text(), /Message sent to soloist #19/);
+    assert.match(text(), /Review b/, 'moves on to the next card');
+  }, { routes });
+});
+
 test('status bar: attention pill takes the left slot, rings for unseen items, reads as one number', async () => {
   const { attentionModule } = await import('../src/ui/components/shell/statusBar/modules.tsx');
   const { renderToStaticMarkup } = await import('react-dom/server');
