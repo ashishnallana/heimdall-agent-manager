@@ -50,7 +50,7 @@ function prefersReducedMotion(): boolean {
   }
 }
 
-const SLIDE_CSS = `
+const DECK_CSS = `
 @keyframes attention-in-right { from { transform: translateX(40%); opacity: 0 } to { transform: none; opacity: 1 } }
 @keyframes attention-in-left { from { transform: translateX(-40%); opacity: 0 } to { transform: none; opacity: 1 } }
 @keyframes attention-sheet-in { from { transform: translateY(calc(100% + var(--ui-bottom-chrome, 32px))) } to { transform: none } }
@@ -61,6 +61,25 @@ const SLIDE_CSS = `
 [data-attention-sheet='closing'] { animation: attention-sheet-out ${SHEET_MS}ms ease-in forwards }
 [data-attention-backdrop='open'] { animation: attention-fade-in ${SHEET_MS}ms ease-out }
 [data-attention-backdrop='closing'] { animation: attention-fade-out ${SHEET_MS}ms ease-in forwards; pointer-events: none }
+[data-attention-top] { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; grid-template-areas: 'title title actions' 'tabs range range'; align-items: center; column-gap: 0.5rem; row-gap: 0.75rem }
+[data-attention-top] [data-attention-title] { grid-area: title; align-self: start }
+[data-attention-top] [data-attention-actions] { grid-area: actions; align-self: start; justify-self: end }
+[data-attention-top] [data-attention-tabs] { grid-area: tabs; overflow-x: auto; scrollbar-width: none }
+[data-attention-top] [data-attention-tabs]::-webkit-scrollbar { display: none }
+[data-attention-top] [data-attention-range] { grid-area: range; justify-self: end }
+/* Compact: phones, foldables and short windows. One band: title, range and
+   close on the first row, the tabs (scrolling sideways if needed) on the second;
+   the subtitle goes and the rest of the chrome tightens so the card gets the room. */
+@media (max-width: 639px), (max-height: 760px) {
+  [data-attention-sheet] [data-attention-top] { grid-template-areas: 'title range actions' 'tabs tabs tabs'; row-gap: 0.5rem; padding-top: 0.625rem; padding-bottom: 0.5rem }
+  [data-attention-top] [data-attention-title], [data-attention-top] [data-attention-actions] { align-self: center }
+  [data-attention-top] [data-attention-title] h2 { font-size: 16px }
+  [data-attention-top] [data-attention-title] p { display: none }
+  [data-attention-sheet] [data-attention-card] { padding: 0.75rem }
+  [data-attention-sheet] [data-attention-options] { padding-top: 0.5rem }
+  [data-attention-sheet] [data-attention-counter] { padding-top: 0.25rem; padding-bottom: 0.25rem }
+  [data-attention-sheet] [data-attention-dock] { margin-bottom: 0.5rem; padding-top: 0.25rem; padding-bottom: 0.25rem }
+}
 @media (prefers-reduced-motion: reduce) { [data-attention-slide], [data-attention-sheet], [data-attention-backdrop] { animation: none !important } }
 `;
 
@@ -435,7 +454,7 @@ export function AttentionDeck({
 
   return createPortal(
     <div data-debug-id="attention-deck-backdrop" data-attention-backdrop={phase} className="fixed inset-0 z-modal flex items-end justify-center bg-backdrop" onMouseDown={(e) => { if (open && e.target === e.currentTarget) onClose(); }}>
-      <style>{SLIDE_CSS}</style>
+      <style>{DECK_CSS}</style>
       <section
         role="dialog"
         aria-modal="true"
@@ -446,12 +465,15 @@ export function AttentionDeck({
         tabIndex={-1}
         className="relative mb-[var(--ui-bottom-chrome,32px)] flex h-[min(680px,calc(100%-48px))] w-full max-w-[620px] flex-col overflow-hidden rounded-t-[var(--radius-lg)] border border-subtle bg-surface shadow-panel max-sm:mb-0 max-sm:h-full max-sm:rounded-none"
       >
-        <header className="flex items-start gap-3 px-4 pt-4">
-          <div className="min-w-0">
-            <h2 className="text-[18px] font-semibold text-primary">What needs you</h2>
+        {/* Header and filters share one grid so short / narrow screens (foldables,
+            phones in landscape) can reflow them into a single compact band; see
+            DECK_CSS. Desktop: title | close, then tabs | range. */}
+        <header data-attention-top className="px-4 pb-3 pt-4">
+          <div data-attention-title className="min-w-0">
+            <h2 className="truncate text-[18px] font-semibold text-primary">What needs you</h2>
             <p className="text-[12px] text-muted">Questions from agents and tasks waiting on your review, across all chains.</p>
           </div>
-          <div className="ml-auto flex items-center gap-2">
+          <div data-attention-actions className="flex items-center gap-2">
             {data && query.isError && !query.isFetching ? (
               <button type="button" data-debug-id="attention-deck-refresh-error" className="text-[11px] text-danger underline" onClick={() => query.refetch()}>
                 Couldn't refresh · Retry
@@ -459,14 +481,11 @@ export function AttentionDeck({
             ) : data && !fresh ? (
               <span data-debug-id="attention-deck-checking" aria-live="polite" className="text-[11px] text-faint">Checking…</span>
             ) : null}
-            <button type="button" data-debug-id="attention-deck-close" aria-label="Close" onClick={onClose} className="rounded-full border border-subtle p-1.5 text-muted hover:text-primary">
+            <button type="button" data-debug-id="attention-deck-close" aria-label="Close" onClick={onClose} className="grid h-8 w-8 shrink-0 place-items-center rounded-full border border-subtle text-muted hover:text-primary">
               <Icon name="close" size={14} />
             </button>
           </div>
-        </header>
-
-        <div className="flex flex-wrap items-center gap-2 px-4 py-3">
-          <div role="tablist" aria-label="Kinds" className="flex gap-1">
+          <div role="tablist" aria-label="Kinds" data-attention-tabs className="flex min-w-0 gap-1">
             {DECK_TABS.map((t) => (
               <button
                 key={t.id}
@@ -475,14 +494,14 @@ export function AttentionDeck({
                 aria-selected={tab === t.id}
                 data-debug-id={`attention-deck-tab-${t.id}`}
                 onClick={() => { tabChoice.current = 'user'; setTab(t.id); setIndex(0); resetCardUi(); }}
-                className={`rounded-full border px-3 py-1 text-[12px] ${tab === t.id ? 'border-strong bg-surface-raised text-primary' : 'border-subtle text-muted hover:text-primary'}`}
+                className={`shrink-0 whitespace-nowrap rounded-full border px-3 py-1 text-[12px] ${tab === t.id ? 'border-strong bg-surface-raised text-primary' : 'border-subtle text-muted hover:text-primary'}`}
               >
                 {t.label}
                 <span className={`ml-1.5 tabular-nums ${tab === t.id ? 'text-warning' : 'text-faint'}`}>{perTab[t.id]}</span>
               </button>
             ))}
           </div>
-          <div role="group" aria-label="Time range" data-debug-id="attention-deck-range" className="ml-auto flex rounded-[var(--radius-md)] border border-subtle p-0.5">
+          <div role="group" aria-label="Time range" data-debug-id="attention-deck-range" data-attention-range className="flex rounded-[var(--radius-md)] border border-subtle p-0.5">
             {ATTENTION_RANGES.map((r) => (
               <button
                 key={r}
@@ -490,13 +509,13 @@ export function AttentionDeck({
                 aria-pressed={range === r}
                 data-debug-id={`attention-deck-range-${r}`}
                 onClick={() => { onRangeChange(r); setIndex(0); }}
-                className={`rounded-[var(--radius-sm)] px-2 py-0.5 text-[11px] ${range === r ? 'bg-surface-raised text-primary' : 'text-muted hover:text-primary'}`}
+                className={`whitespace-nowrap rounded-[var(--radius-sm)] px-2 py-0.5 text-[11px] ${range === r ? 'bg-surface-raised text-primary' : 'text-muted hover:text-primary'}`}
               >
                 {ATTENTION_RANGE_LABELS[r]}
               </button>
             ))}
           </div>
-        </div>
+        </header>
 
         <div className="relative min-h-0 flex-1 px-4" onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerUp}>
           {!data && !query.isError ? (
@@ -510,6 +529,7 @@ export function AttentionDeck({
               key={current.card_id}
               data-attention-slide
               data-debug-id="attention-deck-card"
+              data-attention-card
               className="h-full cursor-grab touch-pan-y select-none rounded-[var(--radius-lg)] border border-subtle bg-surface-raised p-4 active:cursor-grabbing"
               style={{
                 transform: dragX ? `translateX(${dragX}px) rotate(${dragX / 40}deg)` : undefined,
@@ -638,7 +658,7 @@ export function AttentionDeck({
         {/* Quick replies sit outside the scrolling card, just above the arrows, so a
             long message never pushes them out of view. Number keys 1-9 send them. */}
         {current && current.kind === 'message' && current.details.options.length > 0 && open ? (
-          <div data-debug-id="attention-card-options" data-no-drag className="flex flex-wrap justify-center gap-2 px-4 pt-3" role="group" aria-label="Quick replies">
+          <div data-debug-id="attention-card-options" data-no-drag data-attention-options className="flex flex-wrap justify-center gap-2 px-4 pt-3" role="group" aria-label="Quick replies">
             {current.details.options.map((opt, i) => (
               <button
                 key={`${i}:${opt}`}
@@ -654,7 +674,7 @@ export function AttentionDeck({
             ))}
           </div>
         ) : null}
-        <div className="flex items-center justify-center gap-3 py-2 text-[12px] text-faint tabular-nums" data-debug-id="attention-deck-counter">
+        <div className="flex items-center justify-center gap-3 py-2 text-[12px] text-faint tabular-nums" data-debug-id="attention-deck-counter" data-attention-counter>
           {list.length > 0 ? (
             <>
               <button type="button" aria-label="Previous card" title="Previous card (←)" data-debug-id="attention-deck-prev" disabled={list.length < 2} onClick={() => go(-1)} className="grid h-8 w-8 place-items-center rounded-full border border-subtle text-muted hover:border-strong hover:text-primary disabled:opacity-40">
@@ -672,7 +692,7 @@ export function AttentionDeck({
         </div>
         {notice ? <p role="status" data-debug-id="attention-deck-notice" className="px-4 pb-1 text-center text-[12px] text-success">{notice}</p> : null}
 
-        <nav aria-label="Card actions" data-debug-id="attention-deck-dock" className="mx-4 mb-4 flex justify-around rounded-[var(--radius-lg)] border border-subtle bg-surface-raised px-1 py-1.5" style={{ visibility: current ? 'visible' : 'hidden' }}>
+        <nav aria-label="Card actions" data-debug-id="attention-deck-dock" data-attention-dock className="mx-4 mb-4 flex justify-around rounded-[var(--radius-lg)] border border-subtle bg-surface-raised px-1 py-1.5" style={{ visibility: current ? 'visible' : 'hidden' }}>
           {dock.map((d) => (
             <button
               key={d.debug}
