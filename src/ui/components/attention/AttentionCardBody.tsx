@@ -50,7 +50,7 @@ function TaskBody({ item, now }: { item: AttentionTaskItem; now: number }) {
             {d.excerpt.author_name || 'Latest comment'}
             {d.excerpt.at ? ` · ${formatAge(d.excerpt.at, now)} ago` : ''}
           </span>
-          <DecryptedMarkdown source={d.excerpt.body} compact data-debug-id="attention-card-excerpt-body" />
+          <DecryptedMarkdown source={d.excerpt.body} compact copyAll={false} data-debug-id="attention-card-excerpt-body" />
         </blockquote>
       ) : (
         <p className="mt-3 text-[12px] text-faint">No comments yet.</p>
@@ -68,7 +68,7 @@ function MessageBody({ item, now }: { item: AttentionMessageItem; now: number })
           {d.excerpt.author_name || item.context.agent_name || 'Agent'}
           {d.excerpt.at ? ` · ${formatAge(d.excerpt.at, now)} ago` : ''}
         </span>
-        <DecryptedMarkdown source={d.excerpt.body} compact data-debug-id="attention-card-message-body" />
+        <DecryptedMarkdown source={d.excerpt.body} compact copyAll={false} data-debug-id="attention-card-message-body" />
       </div>
       {d.other_unread > 0 ? (
         <p data-debug-id="attention-card-other-unread" className="mt-2 text-[12px] text-faint">

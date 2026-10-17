@@ -274,6 +274,7 @@ test('deck: message card shows the question, options and unread count -- never a
     assert.match(text(), /Tasks1/);
     assert.doesNotMatch(text(), /secret|crd_|chat_|inst_|task_|msg_|chain_/, 'no ids rendered');
     assert.match(text(), /\+1 older/);
+    assert.equal(q('[data-markdown-copy-all="true"]'), null, 'no copy button on the card (it added an empty line)');
   });
 });
 
