@@ -56,7 +56,7 @@ export const TaskCard: React.FC<TaskCardProps> = ({
     .filter((b) => b.label !== names.bridge(task.bridge_id || ''))
     .map((b) => (b.label.endsWith('m left') ? { ...b, label: b.label.split(' · ').pop() || b.label } : b));
   const people = getTaskPeople(task, chainFleets);
-  const actions = useTaskActions(chainId, task.task_id);
+  const actions = useTaskActions(chainId, task.task_id, task.title);
   const { primary, more } = getTaskActions(task);
 
   const workerLabel = people.assignee
@@ -198,7 +198,7 @@ export const TaskCard: React.FC<TaskCardProps> = ({
               </Button>
             ))}
             {actions.error && (
-              <Text role="caption" tone="danger" className="min-w-0 break-words">
+              <Text role="caption" tone="danger" className="min-w-0 whitespace-pre-line break-words">
                 {actions.error}
               </Text>
             )}

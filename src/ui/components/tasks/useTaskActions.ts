@@ -22,7 +22,7 @@ export function actionErrorMessage(err: any): string {
  * Every human action on one task, shared by the card row and its expanded
  * details so both show the same busy state and error.
  */
-export function useTaskActions(chainId: string, taskId: string) {
+export function useTaskActions(chainId: string, taskId: string, taskTitle = '') {
   const [userReview, review] = useUserReviewTaskMutation();
   const [answerBlocker, answer] = useAnswerTaskBlockerMutation();
   const [reopenTask, reopen] = useReopenTaskMutation();
@@ -56,7 +56,8 @@ export function useTaskActions(chainId: string, taskId: string) {
       update.isLoading ||
       comment.isLoading ||
       publish.isLoading,
-    publish: () => run(() => publishTask({ chainId, taskId }).unwrap()),
+    // Titles let a brief_incomplete error name the task instead of its id.
+    publish: () => run(() => publishTask({ chainId, taskId, taskTitles: taskTitle ? { [taskId]: taskTitle } : undefined }).unwrap()),
     approve: () => run(() => userReview({ chainId, taskId, verdict: 'approve' }).unwrap()),
     requestChanges: (findings: string) =>
       run(() =>
