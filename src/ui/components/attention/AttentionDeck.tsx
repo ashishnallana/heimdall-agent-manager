@@ -153,7 +153,9 @@ export function AttentionDeck({
 
   const replyAndRead = async (item: AttentionMessageItem, body: string, artifactIds: string[] = []) => {
     const conversationId = item.action_refs.conversation_id;
+    // The answered card leaves at once, so the next one slides in.
     scheduler.settle(item.card_id);
+    setSlide('right');
     try {
       await (sendMessage({ conversationId, body, artifactIds }) as any).unwrap();
       await (markRead({ conversationId }) as any).unwrap();
@@ -177,6 +179,7 @@ export function AttentionDeck({
     const { chain_id: chainId, task_id: taskId } = item.action_refs;
     if (verdict === 'ngtm') {
       scheduler.settle(item.card_id);
+      setSlide('right');
       try {
         await (voteTask({ chainId, taskId, result: 'ngtm', comment: body }) as any).unwrap();
       } catch (err) {
@@ -189,6 +192,9 @@ export function AttentionDeck({
       await (addComment({ chainId, taskId, body }) as any).unwrap();
       invalidate();
       say('Comment posted');
+      // A comment does not settle the review, so the card stays in the deck;
+      // move on to the next one anyway.
+      go(1);
     }
     setComposer(null);
   };

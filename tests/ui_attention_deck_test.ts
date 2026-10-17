@@ -320,6 +320,39 @@ test('deck: a quick-reply option is sent at once, then the conversation is marke
   });
 });
 
+// React's change-event plugin can't see jsdom input events here (its feature
+// detection ran against another window), so drive the textarea's onChange directly.
+function typeInto(el: any, value: string) {
+  const key = Object.keys(el).find((k) => k.startsWith('__reactProps$'))!;
+  el.value = value;
+  el[key].onChange({ target: el, currentTarget: el });
+}
+
+test('deck: replying or commenting moves on to the next card', async () => {
+  await withDeck([messageItem('m'), messageItem('n', { details: { ...messageItem('n').details, excerpt: { author_name: 'soloist #8', body: 'Second question?', at: '2026-10-16T11:40:00Z' } } })], async ({ q, act, text }) => {
+    assert.match(text(), /Which approach should I take\?/);
+    await act(async () => { (q('[data-debug-id="attention-action-reply"]') as any).click(); });
+    const input = q('[data-debug-id="attention-reply-input"]') as any;
+    assert.ok(input, 'reply composer opens');
+    await act(async () => { typeInto(input, 'Go with option A'); });
+    await act(async () => { (q('[data-debug-id="attention-reply-submit"]') as any).click(); });
+    await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
+    assert.match(text(), /Second question\?/, 'the next card is shown after the reply');
+    assert.equal(q('[data-debug-id="attention-reply"]'), null, 'composer closed');
+  });
+  await withDeck([taskItem('a'), taskItem('b')], async ({ q, act, text, hits }) => {
+    assert.match(text(), /Review a/);
+    await act(async () => { (q('[data-debug-id="attention-action-comment"]') as any).click(); });
+    const input = q('[data-debug-id="attention-comment-input"]') as any;
+    await act(async () => { typeInto(input, 'Looks fine'); });
+    await act(async () => { (q('[data-debug-id="attention-comment-submit"]') as any).click(); });
+    await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
+    assert.ok(hits.some((h) => h.startsWith("POST ") && h.includes("task_secret_a") && h.includes("comment")), 'comment posted');
+    assert.match(text(), /Review b/, 'the next card is shown after the comment');
+    assert.match(text(), /2 \/ 2/, 'the commented card stays in the deck');
+  });
+});
+
 test('status bar: attention pill is hidden without data and reads as one number', async () => {
   const { attentionModule } = await import('../src/ui/components/shell/statusBar/modules.tsx');
   const base: any = { runningInstances: 0, connectedBridges: 0, shells: { shells: 0, previews: 0, capped: false }, shortcutMode: 'normal', renderVaultToggle: () => null };
