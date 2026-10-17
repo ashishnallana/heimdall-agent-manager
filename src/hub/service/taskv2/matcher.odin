@@ -273,6 +273,10 @@ review_lease_live_for :: proc(ctx: ^Match_Context, svc: ^Service, task_id: domai
 // Coordinators are never candidates.
 @(private = "file")
 pick_instance :: proc(svc: ^Service, u: ^Uow, ctx: ^Match_Context, fleet: domain.Task_Chain_Fleet, placement: Placement, role: string, prefer: string) -> (domain.Agent_Instance, bool) {
+	// The coordinator's own fleet row (solo mode) is pull-only: its agent
+	// takes work through `lease next`, never by a wake grant, and a JIT copy of
+	// it is never spawned (REQ-SOLO-2).
+	if ctx.has_coordinator && fleet.agent_id == ctx.coordinator.agent_id do return {}, false
 	live_count := 0
 	live_free := domain.Agent_Instance{}
 	stopping_free := domain.Agent_Instance{}
@@ -361,19 +365,20 @@ jit_prepare :: proc(svc: ^Service, u: ^Uow, ctx: ^Match_Context, fleet: domain.T
 // is never woken. Returns the lease and its task when something was granted.
 grant_inline_for_instance :: proc(svc: ^Service, u: ^Uow, chain: domain.Task_Chain, inst: domain.Agent_Instance, trigger: Trigger) -> (domain.Task_Lease, domain.Task, bool) {
 	if chain.publish_state != .Published || chain.status != .Active do return {}, {}, false
-	if is_coordinator(svc, chain, inst.agent_instance_id) do return {}, {}, false
+	coordinator := is_coordinator(svc, chain, inst.agent_instance_id)
+	if coordinator && !chain_is_solo(svc, chain) do return {}, {}, false
 	metric_matcher_run(trigger)
 	ctx, ok, _ := load_match_context(svc, chain)
 	if !ok do return {}, {}, false
 	defer destroy_match_context(&ctx)
 	if ctx.held[inst.agent_instance_id] do return {}, {}, false
-	fleet := domain.Task_Chain_Fleet{}
-	has_fleet := false
-	for f in ctx.fleets do if f.agent_id == inst.agent_id { fleet = f; has_fleet = true; break }
+	fleet, has_fleet := puller_fleet_row(&ctx, inst, coordinator)
 	if !has_fleet do return {}, {}, false
 
-	// Review pass.
+	// Review pass. A solo coordinator never reviews: its work is reviewed by
+	// the user (REQ-SOLO-5).
 	for task in ctx.sorted {
+		if coordinator do break
 		if task.state != .In_Review || task.kind == .Gate do continue
 		author_agent := ""
 		if holder := last_attempt_holder(svc, task); holder != "" {
@@ -422,6 +427,49 @@ grant_inline_for_instance :: proc(svc: ^Service, u: ^Uow, chain: domain.Task_Cha
 		}
 	}
 	return {}, {}, false
+}
+
+// grant_inline_task_for_instance: the work pass of grant_inline_for_instance
+// restricted to ONE named task (lease switch). Returns why it cannot be granted.
+grant_inline_task_for_instance :: proc(svc: ^Service, u: ^Uow, chain: domain.Task_Chain, inst: domain.Agent_Instance, task_id: domain.Task_ID, trigger: Trigger) -> (domain.Task_Lease, domain.Task, bool, domain.Domain_Error) {
+	if chain.publish_state != .Published || chain.status != .Active do return {}, {}, false, domain.domain_error(.Conflict, "chain is not active")
+	if is_coordinator(svc, chain, inst.agent_instance_id) && !chain_is_solo(svc, chain) do return {}, {}, false, domain.domain_error(.Conflict, "the chain coordinator works tasks only in solo mode")
+	ctx, ok, err := load_match_context(svc, chain)
+	if !ok do return {}, {}, false, err
+	defer destroy_match_context(&ctx)
+	fleet, has_fleet := puller_fleet_row(&ctx, inst, is_coordinator(svc, chain, inst.agent_instance_id))
+	if !has_fleet || !fleet_row_has_role(fleet, domain.FLEET_ROLE_WORKER) do return {}, {}, false, domain.domain_error(.Conflict, "this agent is not a worker on the chain")
+	for task in ctx.sorted {
+		if task.task_id != task_id do continue
+		if task.state != .Ready || task.kind == .Gate do return {}, {}, false, domain.domain_error(.Conflict, "task is not ready")
+		if task_has_live_lease(&ctx, task.task_id, domain.LEASE_KIND_WORK) do return {}, {}, false, domain.domain_error(.Conflict, "task is already held")
+		if assignee := brief_assignee(task.brief_json); assignee != "" && assignee != inst.agent_id do return {}, {}, false, domain.domain_error(.Conflict, "task is assigned to another agent")
+		if task.bridge_id != "" && task.bridge_id != inst.bridge_id do return {}, {}, false, domain.domain_error(.Conflict, "task is pinned to another bridge")
+		placement, pok := resolve_placement(&ctx, task, fleet, true)
+		if !pok do placement = Placement{bridge_id = inst.bridge_id}
+		if placement.bridge_id != inst.bridge_id do return {}, {}, false, domain.domain_error(.Conflict, "task is placed on another bridge")
+		lease, gok, gerr := grant_in_uow(svc, u, Grant_Request{
+			chain = chain, task = task, instance = inst,
+			kind = domain.LEASE_KIND_WORK, delivery = domain.LEASE_DELIVERY_INLINE,
+			placement = placement, actor = Actor{kind = ACTOR_AGENT, id = inst.agent_instance_id}, trigger = trigger,
+		})
+		if !gok do return {}, {}, false, gerr
+		fresh, _, _ := iface.taskchain_get_task(svc.repo, task.task_id)
+		return lease, fresh, true, domain.Domain_Error{}
+	}
+	return {}, {}, false, domain.domain_error(.Not_Found, "task is not in this chain")
+}
+
+// puller_fleet_row: the fleet row an instance pulling work (`lease next`) works
+// under. A solo coordinator without a row of its own (the built-in Soloist)
+// works under an implicit worker row on its own bridge.
+@(private = "file")
+puller_fleet_row :: proc(ctx: ^Match_Context, inst: domain.Agent_Instance, coordinator: bool) -> (domain.Task_Chain_Fleet, bool) {
+	for f in ctx.fleets do if f.agent_id == inst.agent_id do return f, true
+	if coordinator {
+		return domain.Task_Chain_Fleet{task_chain_id = ctx.chain.chain_id, agent_id = inst.agent_id, roles_json = `["worker"]`, capacity = 1}, true
+	}
+	return {}, false
 }
 
 // ---- helpers -----------------------------------------------------------------------------

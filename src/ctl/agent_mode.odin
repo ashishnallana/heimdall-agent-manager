@@ -2143,6 +2143,8 @@ ctl_v2_lease :: proc(endpoint, token: string, tokens, args: []string) {
 		ctl_v2_lease_submit(endpoint, token, args)
 	case "handoff":
 		ctl_v2_lease_handoff(endpoint, token, args)
+	case "switch":
+		ctl_v2_lease_switch(endpoint, token, args)
 	case "block":
 		ctl_v2_lease_block(endpoint, token, args)
 	case:
@@ -2167,6 +2169,10 @@ print_help_lease :: proc() {
 	fmt.println("  handoff --summary <s> [--handoff-file <json>]")
 	fmt.println("                             Stop without finishing; the task returns to ready with your handoff")
 	fmt.println("                             (next_steps, …) for whoever picks it up next.")
+	fmt.println("  switch <task_id> --summary <s> [--handoff-file <json>]")
+	fmt.println("                             Solo mode: hand the current task off (summary kept, attempt not")
+	fmt.println("                             counted) and take <task_id> (must be ready) in one step; on 409")
+	fmt.println("                             nothing changed and you still hold the current task.")
 	fmt.println("  block --waiting-on <kind> --reason <text> [--ref <id>] [--summary <s>]")
 	fmt.println("                             Park the task on something external (kind: user|task|…).")
 	fmt.println("")

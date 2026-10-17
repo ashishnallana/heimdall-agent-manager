@@ -126,6 +126,17 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
   const fleets = Array.isArray(fleetsData) ? fleetsData : [];
   const bridges = bridgesData?.bridges || [];
   const { data: identitiesData } = useListAgentIdentitiesQuery();
+  // Solo mode (Task System v2): the coordinator also does the work — it is the
+  // built-in Soloist, or its own agent has a worker row in the fleet.
+  const coordinatorId = String(chain?.coordinator_agent_instance_id || chain?.coordinatorAgentInstanceId || '');
+  const { data: coordinatorData } = useFetchAgentInstanceQuery({ instanceId: coordinatorId }, { skip: !coordinatorId });
+  const coordinatorAgentId = String((coordinatorData as any)?.instance?.agent_id || (coordinatorData as any)?.instance?.agentId || '');
+  const isSolo = React.useMemo(() => {
+    if (!coordinatorAgentId) return false;
+    const agent: any = (identitiesData?.agents || []).find((a: any) => (a?.agent_id || a?.agentId) === coordinatorAgentId);
+    if (agent && (agent.slug === 'soloist' || agent.template_id === 'tmpl_soloist' || agent.templateId === 'tmpl_soloist')) return true;
+    return fleets.some((f: any) => (f?.agent_id || f?.agentId) === coordinatorAgentId && String(f?.roles_json || JSON.stringify(f?.roles || ['worker'])).includes('worker'));
+  }, [coordinatorAgentId, identitiesData, fleets]);
   // One names resolver per chain view (plan REQ-UI-4): cards, board, pipeline and
   // detail all show titles / agent names / bridge labels instead of raw ids.
   const names = React.useMemo(
@@ -196,6 +207,11 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
             </Text>
             <Badge tone={isWorkflow ? 'info' : 'neutral'}>{isWorkflow ? 'Workflow' : 'Tickets'}</Badge>
             {chainIsDraft && <Badge tone="neutral">Draft</Badge>}
+            {isSolo && (
+              <span title="Solo mode: the coordinator works the tasks itself (pulling them one at a time) and you review each one.">
+                <Badge tone="info">Solo</Badge>
+              </span>
+            )}
           </div>
           {onClose && <IconButton icon="close" label="Close task chain" variant="ghost" size="sm" onClick={onClose} />}
         </header>

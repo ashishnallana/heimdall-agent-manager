@@ -214,6 +214,60 @@ lease_handoff :: proc(svc: ^Service, auth: contracts.Auth_Context, input: Handof
 	return fresh, true, domain.Domain_Error{}
 }
 
+// ---- lease.switch (solo mode, REQ-SOLO-4) ----------------------------------------------
+
+Switch_Input :: struct {
+	lease_id:     string,
+	task_id:      string, // the ready task to take next
+	summary:      string, // handoff summary for the task being left (required)
+	handoff_json: string,
+}
+
+Switch_Result :: struct {
+	left:      domain.Task,
+	lease:     domain.Task_Lease,
+	task:      domain.Task,
+	pack_json: string,
+}
+
+// lease_switch hands the caller's current work lease off (non-counting, summary
+// kept for the next attempt) and grants the named ready task inline — in ONE
+// unit of work: if the new task cannot be granted, nothing happened (409).
+lease_switch :: proc(svc: ^Service, auth: contracts.Auth_Context, input: Switch_Input) -> (Switch_Result, bool, domain.Domain_Error) {
+	if strings.trim_space(input.summary) == "" do return {}, false, domain.domain_error(.Validation_Failed, "summary is required")
+	if strings.trim_space(input.task_id) == "" do return {}, false, domain.domain_error(.Validation_Failed, "task_id is required")
+	u, uok, uerr := begin_uow(svc)
+	if !uok do return {}, false, uerr
+	c, ok, err := work_lease_caller(svc, auth, input.lease_id)
+	if !ok { _, _ = end_uow(svc, &u, false); return {}, false, err }
+	if string(c.task.task_id) == strings.trim_space(input.task_id) { _, _ = end_uow(svc, &u, false); return {}, false, domain.domain_error(.Conflict, "already working on that task") }
+	chain, cok, cerr := iface.taskchain_get_chain(svc.repo, c.task.chain_id)
+	if !cok { _, _ = end_uow(svc, &u, false); return {}, false, cerr }
+	if fok, _ := save_facet_verbatim(svc, c.task, c.lease.attempt_no, FACET_HANDOFF, handoff_body_json(input.summary, input.handoff_json), FACET_WRITER_AGENT); !fok {
+		_, _ = end_uow(svc, &u, false)
+		return {}, false, domain.domain_error(.Internal_Error, "failed to store the handoff")
+	}
+	p := json_begin()
+	json_str(&p, "lease_id", c.lease.lease_id)
+	json_int(&p, "attempt_no", i64(c.lease.attempt_no))
+	json_str(&p, "switched_to", strings.trim_space(input.task_id))
+	// The same process continues inline with the next task: never stopped.
+	left, rok, rerr := release_in_uow(svc, &u, c.lease, Actor{kind = ACTOR_AGENT, id = c.inst.agent_instance_id}, EV_HANDOFF, json_end(&p), "handoff", stop_holder = false)
+	if !rok { _, _ = end_uow(svc, &u, false); return {}, false, rerr }
+	// Grant B BEFORE the matcher runs, so a mixed chain cannot wake-grant it to
+	// another worker first.
+	lease, task, granted, gerr := grant_inline_task_for_instance(svc, &u, chain, c.inst, domain.Task_ID(strings.trim_space(input.task_id)), .Lease_Next)
+	if !granted { _, _ = end_uow(svc, &u, false); return {}, false, gerr }
+	if aok, aerr := after_chain_change(svc, &u, chain.chain_id, chain.owner_user_id, .Lease_Released); !aok {
+		_, _ = end_uow(svc, &u, false)
+		return {}, false, aerr
+	}
+	pack := build_pack_json(svc, chain, task, lease, c.inst)
+	_, ecerr := end_uow(svc, &u, true)
+	if ecerr.code != .None do return {}, false, ecerr
+	return Switch_Result{left = left, lease = lease, task = task, pack_json = pack}, true, domain.Domain_Error{}
+}
+
 // ---- lease.block -----------------------------------------------------------------------
 
 Block_Input :: struct {
@@ -276,6 +330,7 @@ Review_Result :: struct {
 // without holding a review lease.
 review_post :: proc(svc: ^Service, auth: contracts.Auth_Context, input: Review_Input) -> (Review_Result, bool, domain.Domain_Error) {
 	if input.verdict != "approve" && input.verdict != "request_changes" do return {}, false, domain.domain_error(.Validation_Failed, "verdict must be approve or request_changes")
+	if verr := require_change_reason(input); verr.code != .None do return {}, false, verr
 	inst, ok, err := instance_from_auth(svc, auth)
 	if !ok do return {}, false, err
 	if strings.trim_space(input.on_behalf_of) != "" && strings.trim_space(input.on_behalf_of) != "user" {
@@ -310,6 +365,12 @@ review_post :: proc(svc: ^Service, auth: contracts.Auth_Context, input: Review_I
 		if inst.agent_id != "coordinator" && !is_coordinator(svc, chain, inst.agent_instance_id) {
 			_, _ = end_uow(svc, &u, false)
 			return {}, false, domain.domain_error(.Forbidden, "only the coordinator may review a gate or on_behalf_of user")
+		}
+		// Solo mode: the coordinator did the work, so it may not approve it — not
+		// as the user, not at a plan gate (REQ-SOLO-5). The user reviews.
+		if chain_is_solo(svc, chain) {
+			_, _ = end_uow(svc, &u, false)
+			return {}, false, domain.domain_error(.Forbidden, "in solo mode the user reviews the coordinator's work", `{"code":"solo_self_review"}`)
 		}
 		if task.state != .In_Review {
 			_, _ = end_uow(svc, &u, false)
@@ -407,6 +468,7 @@ review_post :: proc(svc: ^Service, auth: contracts.Auth_Context, input: Review_I
 user_review :: proc(svc: ^Service, auth: contracts.Auth_Context, task_id: domain.Task_ID, input: Review_Input) -> (Review_Result, bool, domain.Domain_Error) {
 	if input.verdict != "approve" && input.verdict != "request_changes" do return {}, false, domain.domain_error(.Validation_Failed, "verdict must be approve or request_changes")
 	if auth.kind != .User_Token && auth.kind != .Trusted_Proxy do return {}, false, domain.domain_error(.Forbidden, "user token is required")
+	if verr := require_change_reason(input); verr.code != .None do return {}, false, verr
 	u, uok, uerr := begin_uow(svc)
 	if !uok do return {}, false, uerr
 	task, tok, terr := iface.taskchain_get_task(svc.repo, task_id)
@@ -764,7 +826,7 @@ approve_and_publish_chain_in_uow :: proc(svc: ^Service, u: ^Uow, chain_in: domai
 			kind                   = .Task,
 			priority               = domain.task_priority_from_string(spec.priority),
 			brief_json             = spec.brief_json,
-			requires_user_approval = jsonx.extract_bool(spec.brief_json, "requires_user_approval", false, true),
+			requires_user_approval = brief_user_approval(svc, chain, spec.brief_json),
 			ready_since            = "",
 			created_at             = now,
 			updated_at             = now,
@@ -1130,4 +1192,15 @@ split_json_array_objects :: proc(raw_array: string, allocator := context.temp_al
 		if depth != 0 do return nil, false
 	}
 	return out[:], true
+}
+
+// require_change_reason (REQ-SOLO-8, every reviewer): a request_changes says
+// what to change — a summary or at least one finding. Findings first, then the
+// verdict.
+require_change_reason :: proc(input: Review_Input) -> domain.Domain_Error {
+	if input.verdict != "request_changes" do return {}
+	if strings.trim_space(input.summary) != "" do return {}
+	f := strings.trim_space(input.findings_json)
+	if f != "" && f != "[]" && f != "null" do return {}
+	return domain.domain_error(.Validation_Failed, "request_changes needs a summary or findings: post your findings first, then the verdict")
 }

@@ -81,6 +81,8 @@ Workflow_Stage_Spec :: struct {
 	approver:               string,
 	prompt:                 string,
 	requires_user_approval: bool,
+	// the spec SAID requires_user_approval (true or false); absent → the solo default.
+	has_requires_user_approval: bool,
 	raw_json:               string,
 }
 
@@ -198,8 +200,8 @@ parse_and_validate_workflow_spec :: proc(raw_spec: string, name_override := "", 
 		prompt := strings.trim_space(jsonx.extract_string(sobj, "prompt", "", true, allocator))
 		if prompt == "" && has_gate do prompt = strings.trim_space(jsonx.extract_string(gate_raw, "prompt", "", true, allocator))
 		if prompt == "" && has_brief do prompt = strings.trim_space(jsonx.extract_string(brief_raw, "goal", "", true, allocator))
-		req_user := jsonx.extract_bool(sobj, "requires_user_approval", false, true)
-		if !req_user && has_brief do req_user = jsonx.extract_bool(brief_raw, "requires_user_approval", false, true)
+		req_user, has_req_user := jsonx.extract_bool_literal(sobj, "requires_user_approval", true)
+		if !has_req_user && has_brief do req_user, has_req_user = jsonx.extract_bool_literal(brief_raw, "requires_user_approval", true)
 
 		if skind == .Gate && (for_each != "" || parallel_n > 1) {
 			return {}, false, domain.domain_error(.Validation_Failed, fmt.tprintf("gate stage %s cannot use for_each or parallel > 1", skey), `{"code":"workflow_invalid"}`)
@@ -236,6 +238,7 @@ parse_and_validate_workflow_spec :: proc(raw_spec: string, name_override := "", 
 			approver               = approver,
 			prompt                 = prompt,
 			requires_user_approval = req_user,
+			has_requires_user_approval = has_req_user,
 			raw_json               = sobj,
 		}
 		append(&stages, st)
@@ -925,7 +928,7 @@ materialize_single_stage_in_uow :: proc(
 			gen_by = json_end(&g)
 		}
 
-		req_user := st.requires_user_approval
+		req_user := solo_default_user_approval(svc, chain^, st.has_requires_user_approval, st.requires_user_approval)
 		if st.kind == .Gate && st.approver == "user" do req_user = true
 
 		tid := domain.Task_ID(platform.generate_id(svc.ids, "task_"))

@@ -113,6 +113,8 @@ build_pack_json :: proc(svc: ^Service, chain: domain.Task_Chain, task: domain.Ta
 		summary, _ = build_mechanical_chain_summary(svc, chain)
 	}
 	json_str(&c, "summary", summary)
+	// Solo mode: the coordinator works its own chain (REQ-SOLO-1).
+	if chain_is_solo(svc, chain) do json_bool(&c, "solo", true)
 	json_raw(&o, "chain", json_end(&c))
 	json_str(&o, "chain_summary", summary)
 	if task.stage_key != "" {
@@ -406,6 +408,7 @@ pack_why :: proc(view: Task_View, lease: domain.Task_Lease, prev_outcome: string
 	case .Handoff: return "handoff"
 	case .Reopened: return "reopened"
 	case .User_Stopped: return "user_stopped"
+	case .Released_Noncounting: return "released"
 	case .Blocked: return "answered"
 	}
 	return "first_grant"

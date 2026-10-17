@@ -45,6 +45,9 @@ Last_Release :: enum {
 	Dep_Added,
 	Reopened,
 	User_Stopped,
+	// a solo coordinator's lease expired (it is never stopped and re-pulls);
+	// non-counting like User_Stopped (REQ-SOLO-6).
+	Released_Noncounting,
 }
 
 Task_View :: struct {
@@ -171,6 +174,12 @@ fold_task :: proc(events: []domain.Task_Event, input: Fold_Input) -> Task_View {
 			case EXPIRE_DEP_ADDED: v.last_release = .Dep_Added
 			case EXPIRE_USER_STOPPED: v.last_release = .User_Stopped
 			case:
+				// The expiry records whether it counts: a solo coordinator's lapse
+				// (counting:false) is not a failed attempt (REQ-SOLO-6).
+				if c, cok := jsonx.extract_bool_literal(ev.payload_json, "counting", true); cok && !c {
+					v.last_release = .Released_Noncounting
+					continue
+				}
 				v.last_release = .Expired
 				apply_budget(&v, max_attempts, ev.ts_ms)
 			}
@@ -274,7 +283,7 @@ human_block :: proc(reason: string, since_ms: i64) -> string {
 @(private = "file")
 attempt_counts :: proc(prev: Last_Release) -> bool {
 	#partial switch prev {
-	case .Replaced, .Dep_Added, .Reopened, .User_Stopped: return false
+	case .Replaced, .Dep_Added, .Reopened, .User_Stopped, .Released_Noncounting: return false
 	}
 	return true
 }

@@ -219,7 +219,8 @@ bridge_taskv2_enrich_lease_params :: proc(method, params: string, rec: Bridge_Lo
 // bridge_agent_lease_local_rpc fulfils the .Local lease routes: enrich, then
 // relay to the SAME hub agent-actions path a plain .Envelope route would use,
 // with identical error mapping (mirrors the .Envelope branch of the dispatcher).
-// On a non-peek `agent.lease.next` that returns a `pack`, materializes `<run_dir>/TASK.md`.
+// On a non-peek `agent.lease.next` (or `agent.lease.switch`) that returns a
+// `pack`, materializes `<run_dir>/TASK.md`.
 bridge_agent_lease_local_rpc :: proc(request_id, method, hub_path, params: string, rec: Bridge_Local_Agent_Token_Record) -> string {
 	if strings.trim_space(rec.instance_token) == "" do return bridge_local_response_error(request_id, "unavailable", "Bridge-held instance token is unavailable")
 	// The hub is down (no runtime session): nothing is sent, so the caller can
@@ -232,7 +233,7 @@ bridge_agent_lease_local_rpc :: proc(request_id, method, hub_path, params: strin
 	if !relay.ok do return bridge_local_response_error(request_id, "retryable_unavailable", "Hub relay failed")
 	if relay.status < 200 || relay.status >= 300 do return bridge_local_response_error(request_id, "hub_error", relay.body)
 	if strings.trim_space(relay.body) == "" do return bridge_local_response_data(request_id, "{}")
-	if method == "agent.lease.next" {
+	if method == "agent.lease.next" || method == "agent.lease.switch" {
 		peek, _ := jsonx.extract_bool_literal(params, "peek", true)
 		if !peek {
 			data_obj, has_data := jsonx.extract_raw_object(relay.body, "data", true, context.temp_allocator)
@@ -424,6 +425,10 @@ bridge_taskv2_render_task_md :: proc(pack_json: string, max_bytes: int = BRIDGE_
 	// Ready-made notice sections for the document (build_doc cannot see locals).
 	if gate_feedback != "" do gate_feedback = strings.concatenate({"\n## Rejected At The Gate\n", gate_feedback}, context.temp_allocator)
 	if answer_section != "" do gate_feedback = strings.concatenate({answer_section, gate_feedback}, context.temp_allocator)
+	// Solo mode: say how this chain works, ahead of the other notices.
+	if solo, sok := jsonx.extract_bool_literal(chain_obj, "solo", true); sok && solo {
+		gate_feedback = strings.concatenate({"\n## Solo Mode\nYou are this chain's coordinator AND its worker; the user reviews every task. Pull work with `ham-ctl lease next`, submit with `ham-ctl lease submit`, switch with `ham-ctl lease switch <task> --summary …`. Never set task status by hand; never review your own work.\n", gate_feedback}, context.temp_allocator)
+	}
 
 	raw_title := jsonx.extract_string(task_obj, "title", "", true, context.temp_allocator)
 	raw_desc := jsonx.extract_string(task_obj, "description", "", true, context.temp_allocator)

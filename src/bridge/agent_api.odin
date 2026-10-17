@@ -178,6 +178,9 @@ bridge_agent_route :: proc(method, params: string) -> Bridge_Agent_Route {
 		return Bridge_Agent_Route{kind = .Local, local_op = "lease.submit", path = "/api/v1/agent-actions/lease/submit"}
 	case "agent.lease.handoff":
 		return Bridge_Agent_Route{kind = .Local, local_op = "lease.handoff", path = "/api/v1/agent-actions/lease/handoff"}
+	case "agent.lease.switch":
+		// .Local: like lease.next, the response carries a pack → TASK.md + worktree.
+		return Bridge_Agent_Route{kind = .Local, local_op = "lease.switch", path = "/api/v1/agent-actions/lease/switch"}
 	case "agent.lease.block":
 		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/lease/block"}
 	case "agent.review.post":
@@ -309,7 +312,7 @@ bridge_agent_method_allowed :: proc(method: string) -> bool {
 	     "agent.task.list", "agent.task.show", "agent.task.comments", "agent.task.create",
 	     "agent.task.update", "agent.task.depend", "agent.task.comment", "agent.task.fetch",
 	     "agent.lease.next", "agent.lease.heartbeat", "agent.lease.submit", "agent.lease.handoff",
-	     "agent.lease.block", "agent.review.post",
+	     "agent.lease.block", "agent.lease.switch", "agent.review.post",
 	     "agent.workflow.templates", "agent.workflow.list", "agent.workflow.define",
 	     "agent.workflow.run", "agent.workflow.status", "agent.workflow.output",
 	     "agent.workflow.retry", "agent.workflow.cancel",
@@ -430,6 +433,7 @@ bridge_local_handle_agent_local_op :: proc(request_id, op, params: string, rec: 
 	if op == "lease.next" do return bridge_agent_lease_local_rpc(request_id, "agent.lease.next", "/api/v1/agent-actions/lease/next", params, rec)
 	if op == "lease.submit" do return bridge_agent_lease_local_rpc(request_id, "agent.lease.submit", "/api/v1/agent-actions/lease/submit", params, rec)
 	if op == "lease.handoff" do return bridge_agent_lease_local_rpc(request_id, "agent.lease.handoff", "/api/v1/agent-actions/lease/handoff", params, rec)
+	if op == "lease.switch" do return bridge_agent_lease_local_rpc(request_id, "agent.lease.switch", "/api/v1/agent-actions/lease/switch", params, rec)
 	if op == "vault.status" {
 		status := bridge_vault_status()
 		status_str := bridge_vault_status_string(status)

@@ -129,6 +129,26 @@ agent_action_lease_handoff_handler :: proc(ctx: rawptr, req: Request) -> Respons
 	return respond_success(fmt.tprintf("{{\"task\":%s}}", string(data)), req.request_id, auth_ctx_server_time(req), 200)
 }
 
+// POST /api/v1/agent-actions/lease/switch  params: {lease_id?, task_id, summary, handoff?}
+// Solo mode (REQ-SOLO-4): hand the current task off and take `task_id` in one
+// step. The response has the lease-next shape (status "granted" + pack), so
+// the bridge materialises TASK.md for the new task.
+agent_action_lease_switch_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Agent_Action_Handlers)(ctx)
+	auth, inst, ok, resp := require_instance_action_auth(h, req)
+	if !ok do return resp
+	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
+	params := verbatim_params(req.body)
+	res, sok, err := taskv2.lease_switch(h.task_engine, auth, taskv2.Switch_Input{lease_id = json_string(params, "lease_id"), task_id = json_string(params, "task_id"), summary = json_string(params, "summary"), handoff_json = verbatim_field(params, "handoff")})
+	if !sok do return respond_error(err, req.request_id)
+	publish_agent_action(h, inst, "lease_switch", fmt.tprintf("switched from %s to %s", res.left.task_id, res.task.task_id))
+	publish_task_event(h.event_bus, string(res.left.owner_user_id), string(res.left.task_id), string(res.left.chain_id), "updated")
+	publish_task_event(h.event_bus, string(res.task.owner_user_id), string(res.task.task_id), string(res.task.chain_id), "updated")
+	wire := Lease_Next_Wire{status = "granted", lease = make_lease_wire(res.lease), task = make_simple_task_wire(res.task), pack = json_value_or_null(res.pack_json)}
+	data, _ := json.marshal(wire, JSON_MARSHAL_OPT, allocator = context.temp_allocator)
+	return respond_success(string(data), req.request_id, auth_ctx_server_time(req), 200)
+}
+
 // POST /api/v1/agent-actions/lease/block  params: {lease_id?, waiting_on:{kind, ref?, reason}, summary?}
 agent_action_lease_block_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Agent_Action_Handlers)(ctx)

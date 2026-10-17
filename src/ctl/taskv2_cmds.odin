@@ -407,6 +407,23 @@ ctl_v2_lease_handoff :: proc(endpoint, token: string, args: []string) {
 	ctl_agent_call_task(endpoint, token, "agent.lease.handoff", json_object_from_slice(fields[:]), args)
 }
 
+// ctl_v2_lease_switch (solo mode): hand the current task off and take another
+// ready task in one step. `ham-ctl lease switch <task_id> --summary <s>`.
+ctl_v2_lease_switch :: proc(endpoint, token: string, args: []string) {
+	task_id := strings.trim_space(option_value(args, "--task", ""))
+	if task_id == "" && len(args) > 0 && !strings.has_prefix(args[0], "--") do task_id = args[0]
+	summary := strings.trim_space(option_value(args, "--summary", ""))
+	if task_id == "" || summary == "" { fmt.println(`{"ok":false,"message":"lease switch requires <task_id> and --summary <text> (where you left the current task)"}`); os.exit(1) }
+	fields := make([dynamic]string)
+	defer delete(fields)
+	append(&fields, json_kv("task_id", task_id))
+	append(&fields, json_kv("summary", summary))
+	if v := option_value(args, "--lease", ""); v != "" do append(&fields, json_kv("lease_id", v))
+	if h, ok := ctl_read_json_file_flag(args, "--handoff-file"); ok do append(&fields, json_kv_raw("handoff", h))
+	append(&fields, json_kv("cwd", ctl_lease_work_dir(endpoint, token)))
+	ctl_agent_call_task(endpoint, token, "agent.lease.switch", json_object_from_slice(fields[:]), args)
+}
+
 ctl_v2_lease_block :: proc(endpoint, token: string, args: []string) {
 	kind := strings.trim_space(option_value(args, "--waiting-on", ""))
 	reason := strings.trim_space(option_value(args, "--reason", ""))

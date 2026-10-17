@@ -7,6 +7,7 @@ import "core:sync"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 import platform "odin_test:hub/platform"
+import jsonx "odin_test:lib/jsonx"
 
 // Leases (plan §2.5). A lease is the ONLY way to work: one instance ⇄ one lease ⇄
 // one task. Rows are deleted on release (history is in events/attempts); the two
@@ -47,7 +48,11 @@ grant_in_uow :: proc(svc: ^Service, u: ^Uow, req: Grant_Request) -> (domain.Task
 	if req.kind == domain.LEASE_KIND_WORK && task.state != .Ready do return {}, false, domain.domain_error(.Conflict, "task is not ready")
 	if req.kind == domain.LEASE_KIND_REVIEW && task.state != .In_Review do return {}, false, domain.domain_error(.Conflict, "task is not in review")
 	if !instance_in_chain(svc, req.chain, inst) do return {}, false, domain.domain_error(.Conflict, "instance is not a member of the task's chain")
-	if is_coordinator(svc, req.chain, inst.agent_instance_id) do return {}, false, domain.domain_error(.Conflict, "the chain coordinator is never granted a lease")
+	// The coordinator works only in a solo chain, and only by pulling
+	// (`lease next`, inline): the hub never wakes, restarts or stops it.
+	if is_coordinator(svc, req.chain, inst.agent_instance_id) && !(req.delivery == domain.LEASE_DELIVERY_INLINE && chain_is_solo(svc, req.chain)) {
+		return {}, false, domain.domain_error(.Conflict, "the chain coordinator is never granted a lease (outside solo mode)")
+	}
 	if _, held, _ := iface.taskchain_get_lease_by_holder(svc.repo, inst.agent_instance_id); held do return {}, false, domain.domain_error(.Conflict, "instance already holds a lease")
 	if !bridge_online(svc, req.placement.bridge_id) do return {}, false, domain.domain_error(.Bridge_Offline, "placement bridge is offline")
 	if req.kind == domain.LEASE_KIND_WORK && req.placement.directory_id != "" {
@@ -104,7 +109,7 @@ grant_in_uow :: proc(svc: ^Service, u: ^Uow, req: Grant_Request) -> (domain.Task
 	if req.kind == domain.LEASE_KIND_WORK {
 		counts := true
 		#partial switch pre.last_release {
-		case .Replaced, .Dep_Added, .Reopened: counts = false
+		case .Replaced, .Dep_Added, .Reopened, .User_Stopped, .Released_Noncounting: counts = false
 		}
 		if pre.last_release != .Handoff {
 			_, _, _ = iface.taskchain_save_attempt(svc.repo, domain.Task_Attempt{
@@ -156,6 +161,9 @@ release_in_uow :: proc(svc: ^Service, u: ^Uow, lease: domain.Task_Lease, actor: 
 	now := platform.clock_now(svc.clock)
 	mark_instance_idle(svc, lease.holder_instance_id, now)
 	if inst, iok, _ := iface.agent_get_instance(svc.agents, lease.holder_instance_id); iok {
+		// The lease system never stops (or idles out) a chain coordinator — a
+		// solo coordinator keeps its process and pulls its next task (REQ-SOLO-2a).
+		if holder_is_coordinator(svc, task.chain_id, lease.holder_instance_id) do return refolded, true, domain.Domain_Error{}
 		// Fresh context per attempt: the holder is stopped (the next grant, even
 		// to the same instance, re-bootstraps it). stop_holder=false is for a
 		// caller that continues the same process inline.
@@ -188,6 +196,11 @@ expire_lease_in_uow :: proc(svc: ^Service, u: ^Uow, lease: domain.Task_Lease, re
 	json_int(&p, "attempt_no", i64(lease.attempt_no))
 	json_str(&p, "reason", reason)
 	json_str(&p, "instance_id", lease.holder_instance_id)
+	// A solo coordinator's lapse is not a failed attempt: it is never stopped
+	// and simply pulls again (REQ-SOLO-6). Recorded in the event so the pure
+	// fold can tell (it never sees the holder).
+	coordinator := holder_is_coordinator(svc, task.chain_id, lease.holder_instance_id)
+	if coordinator && lease.kind == domain.LEASE_KIND_WORK do json_bool(&p, "counting", false)
 	if _, still, _ := iface.taskchain_get_lease(svc.repo, lease.lease_id); !still do return .Gone
 	if _, _, rok, _ := record_event(svc, u, task, actor, EV_LEASE_EXPIRED, json_end(&p)); !rok do return .Failed
 	if deleted, derr := iface.taskchain_delete_lease(svc.repo, lease.lease_id); !deleted {
@@ -199,6 +212,7 @@ expire_lease_in_uow :: proc(svc: ^Service, u: ^Uow, lease: domain.Task_Lease, re
 	if lease.kind == domain.LEASE_KIND_WORK do close_attempt(svc, lease, fmt.tprintf("expired:%s", reason))
 	now := platform.clock_now(svc.clock)
 	mark_instance_idle(svc, lease.holder_instance_id, now)
+	if coordinator do return .Expired // never stopped, may re-pull at once (no recent-expiry window)
 	note_recent_expiry(svc, lease.holder_instance_id, to_ms(now))
 	if inst, iok, _ := iface.agent_get_instance(svc.agents, lease.holder_instance_id); iok {
 		if reason != EXPIRE_INSTANCE_LOST && instance_is_live(inst) {
@@ -683,6 +697,60 @@ instance_is_live :: proc(inst: domain.Agent_Instance) -> bool {
 
 instance_is_pending :: proc(inst: domain.Agent_Instance) -> bool {
 	return inst.runtime_status == "launching" || inst.runtime_status == "starting" || inst.runtime_status == "blocked"
+}
+
+// holder_is_coordinator resolves the lease's OWN chain (never a caller's) and
+// asks whether the holder is its coordinator.
+holder_is_coordinator :: proc(svc: ^Service, chain_id: domain.Task_Chain_ID, instance_id: string) -> bool {
+	chain, ok, _ := iface.taskchain_get_chain(svc.repo, chain_id)
+	return ok && is_coordinator(svc, chain, instance_id)
+}
+
+// chain_is_solo: the chain's coordinator also works its tasks (REQ-SOLO-1) —
+// the coordinator is the built-in Soloist agent, or its own agent has a fleet
+// row with the worker role (opt-in for any coordinator). The coordinator is
+// then granted work by pull only (inline), never woken, restarted or stopped.
+chain_is_solo :: proc(svc: ^Service, chain: domain.Task_Chain) -> bool {
+	coord_agent := chain_coordinator_agent_id(svc, chain)
+	if coord_agent == "" do return false
+	if ag, aok, _ := iface.agent_get(svc.agents, coord_agent); aok && (ag.slug == SOLOIST_AGENT_SLUG || ag.template_id == domain.TEMPLATE_SOLOIST_ID) do return true
+	fleets, err := iface.taskchain_list_fleets_by_chain(svc.repo, chain.chain_id, chain.owner_user_id)
+	if err.code != .None do return false
+	for f in fleets do if f.agent_id == coord_agent && fleet_row_has_role(f, domain.FLEET_ROLE_WORKER) do return true
+	return false
+}
+
+// solo_default_user_approval (REQ-SOLO-1a): an explicit value wins (true or
+// false); when the brief/spec says nothing, a solo chain's tasks wait for the
+// user's review and other chains' do not.
+solo_default_user_approval :: proc(svc: ^Service, chain: domain.Task_Chain, present, value: bool) -> bool {
+	if present do return value
+	return chain_is_solo(svc, chain)
+}
+
+// brief_user_approval: solo_default_user_approval over a brief, telling an
+// absent key from an explicit false.
+brief_user_approval :: proc(svc: ^Service, chain: domain.Task_Chain, brief_json: string) -> bool {
+	v, present := jsonx.extract_bool_literal(brief_json, "requires_user_approval", true)
+	return solo_default_user_approval(svc, chain, present, v)
+}
+
+// SOLOIST_AGENT_SLUG mirrors user.SOLOIST_AGENT_SLUG (the built-in Soloist).
+SOLOIST_AGENT_SLUG :: "soloist"
+
+// chain_coordinator_agent_id: the durable agent behind the chain's coordinator
+// instance ("" when the chain has none).
+chain_coordinator_agent_id :: proc(svc: ^Service, chain: domain.Task_Chain) -> string {
+	coord := chain.coordinator_agent_instance_id
+	if coord == "" {
+		members, err := iface.taskchain_list_members_by_chain(svc.repo, chain.chain_id, chain.owner_user_id)
+		if err.code == .None {
+			for m in members do if m.role == "coordinator" { coord = m.agent_instance_id; break }
+		}
+	}
+	if coord == "" do return ""
+	inst, ok, _ := iface.agent_get_instance(svc.agents, coord)
+	return inst.agent_id if ok else ""
 }
 
 // is_coordinator: the chain's coordinator is the member with role "coordinator"

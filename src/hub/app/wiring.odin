@@ -736,6 +736,7 @@ register_routes :: proc(graph: ^App_Graph) {
 	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/lease/heartbeat", rawptr(&graph.agent_action_handlers), http.agent_action_lease_heartbeat_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/lease/submit", rawptr(&graph.agent_action_handlers), http.agent_action_lease_submit_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/lease/handoff", rawptr(&graph.agent_action_handlers), http.agent_action_lease_handoff_handler)
+	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/lease/switch", rawptr(&graph.agent_action_handlers), http.agent_action_lease_switch_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/lease/block", rawptr(&graph.agent_action_handlers), http.agent_action_lease_block_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/review/post", rawptr(&graph.agent_action_handlers), http.agent_action_review_post_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/task/fetch", rawptr(&graph.agent_action_handlers), http.agent_action_task_fetch_handler)
