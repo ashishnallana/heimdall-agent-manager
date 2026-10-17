@@ -32,6 +32,10 @@ Timer_Kind :: enum {
 	Idle_TTL,          // key = instance_id, armed = "" (release time)
 	Ready_Unclaimed,   // key = task_id,     armed = ready_since
 	Blocked_Realert,   // key = task_id,     armed = blocked_on_json
+	// Rematch is a safety net: a Ready / In-review task that still has no lease
+	// of the right kind re-runs the matcher for its chain, so a missed trigger
+	// (e.g. a hub restart or re-fold racing the bridge reconnect) self-heals.
+	Rematch,           // key = task_id,     armed = task state when armed
 }
 
 Timer :: struct {
@@ -58,6 +62,8 @@ IDLE_GRACE_SECONDS          :: 5 * 60
 IDLE_TTL_DEFAULT_SECONDS    :: 600
 READY_UNCLAIMED_SECONDS     :: 10 * 60
 BLOCKED_REALERT_SECONDS     :: 24 * 60 * 60
+// Rematch one-shots after a task becomes Ready / In review (bounded, no self re-arm).
+REMATCH_DELAYS_SECONDS      :: [3]i64{60, 180, 600}
 CLOCK_JUMP_SEEN_WITHIN_SECONDS :: 120
 
 // timers_arm schedules a fire at due_ms. Thread-safe; O(log n).
@@ -183,6 +189,12 @@ arm_idle_ttl :: proc(svc: ^Service, instance_id: string, idle_ttl_seconds: int, 
 }
 
 arm_task_timers :: proc(svc: ^Service, task: domain.Task) {
+	if task.state == .Ready || task.state == .In_Review {
+		state := domain.task_state_string(task.state)
+		now := now_ms(svc.clock)
+		delays := REMATCH_DELAYS_SECONDS
+		for d in delays do timers_arm(svc, .Rematch, string(task.task_id), now + d * 1000, state)
+	}
 	if task.state == .Ready && task.ready_since != "" {
 		timers_arm(svc, .Ready_Unclaimed, string(task.task_id), to_ms(task.ready_since) + READY_UNCLAIMED_SECONDS * 1000, task.ready_since)
 	}
@@ -205,6 +217,10 @@ rebuild_timers :: proc(svc: ^Service) {
 	backlog, berr := iface.taskchain_list_tasks_by_state(svc.repo, .Backlog)
 	if berr.code == .None {
 		for t in backlog do arm_task_timers(svc, t)
+	}
+	in_review, irerr := iface.taskchain_list_tasks_by_state(svc.repo, .In_Review)
+	if irerr.code == .None {
+		for t in in_review do arm_task_timers(svc, t)
 	}
 	// Idle_TTL from agent_instances.idle_since (live, lease-free instances).
 	if insts, ierr := iface.agent_list_active_runtime_instances(svc.agents); ierr.code == .None {
@@ -251,6 +267,7 @@ fire_timer :: proc(svc: ^Service, t: Timer, now_ms: i64, jump_detected: bool) {
 	case .Idle_TTL:         r = fire_idle_ttl(svc, &u, t)
 	case .Ready_Unclaimed:  r = fire_ready_unclaimed(svc, &u, t)
 	case .Blocked_Realert:  r = fire_blocked_realert(svc, &u, t)
+	case .Rematch:          r = fire_rematch(svc, &u, t)
 	}
 	if r == .Failed {
 		fmt.eprintfln("[taskv2] timer %v for %s failed; rolled back", t.kind, t.key)
@@ -387,6 +404,23 @@ fire_ready_unclaimed :: proc(svc: ^Service, u: ^Uow, t: Timer) -> Fire_Result {
 	if _, aok, _ := append_event(svc.repo, svc.clock, task, hub_actor(), EV_READY_UNCLAIMED, json_end(&p)); !aok do return .Failed
 	effect_publish_task(u, task, "ready_unclaimed")
 	effect_notify_coordinator(svc, u, task.chain_id, task.owner_user_id, "ready_unclaimed", fmt.tprintf("[taskv2] ready_unclaimed: task %s (%s) ready since %s", task.task_id, task.title, task.ready_since))
+	return .Acted
+}
+
+// fire_rematch: the task is still Ready / In review (same state as when armed)
+// and holds no lease of the kind that state needs → run the matcher for its
+// chain. Harmless when nothing can be granted (no free worker, etc.).
+@(private = "file")
+fire_rematch :: proc(svc: ^Service, u: ^Uow, t: Timer) -> Fire_Result {
+	task, ok, _ := iface.taskchain_get_task(svc.repo, domain.Task_ID(t.key))
+	if !ok || domain.task_state_string(task.state) != t.armed do return .Noop
+	want := domain.LEASE_KIND_WORK if task.state == .Ready else domain.LEASE_KIND_REVIEW
+	if leases, lerr := iface.taskchain_list_leases_by_task(svc.repo, task.task_id); lerr.code == .None {
+		for l in leases do if l.kind == want do return .Noop
+	}
+	chain, cok, _ := iface.taskchain_get_chain(svc.repo, task.chain_id)
+	if !cok || chain.status != .Active || chain.publish_state != .Published do return .Noop
+	if mok, _ := match_chain_in_uow(svc, u, chain, .Timer); !mok do return .Failed
 	return .Acted
 }
 

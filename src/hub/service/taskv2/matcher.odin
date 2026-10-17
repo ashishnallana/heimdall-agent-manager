@@ -287,6 +287,14 @@ pick_instance :: proc(svc: ^Service, u: ^Uow, ctx: ^Match_Context, fleet: domain
 		if disposition == .Hold { live_count += 1; continue }
 		free := !ctx.held[inst.agent_instance_id]
 		stopping := u != nil && effect_has_stop(u, inst.bridge_id, string(ctx.chain.chain_id), inst.agent_instance_id)
+		// An instance granted earlier in this pass is about to run even if it is a
+		// stopped warm instance (the wake starts it after commit), so it counts
+		// toward capacity. Without this, waking a warm instance and then JIT-ing
+		// another in the same pass exceeded the fleet row's capacity.
+		if !free && !(instance_is_live(inst) || instance_is_pending(inst)) {
+			live_count += 1
+			continue
+		}
 		if instance_is_live(inst) || instance_is_pending(inst) {
 			live_count += 1
 			if free {
