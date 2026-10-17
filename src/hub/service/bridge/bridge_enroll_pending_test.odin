@@ -44,6 +44,16 @@ failing_save :: proc(ctx: rawptr, bridge: domain.Bridge) -> (domain.Bridge, bool
 }
 
 @(private = "file")
+failing_list_family :: proc(ctx: rawptr, family_id: string) -> ([]domain.Bridge_Token, domain.Domain_Error) {
+	return nil, domain.domain_error(.Internal_Error, "injected: family read failed")
+}
+
+@(private = "file")
+failing_list_scope :: proc(ctx: rawptr, scope: string) -> ([]domain.Bridge_Token, domain.Domain_Error) {
+	return nil, domain.domain_error(.Internal_Error, "injected: scope read failed")
+}
+
+@(private = "file")
 pending_fixture_open :: proc(t: ^testing.T, tag: string) -> ^Pending_Fixture {
 	f := new(Pending_Fixture)
 	seq := sync.atomic_add(&pending_test_counter, 1)
@@ -239,4 +249,83 @@ test_rollback_before_a_commit_rolls_back_and_is_idempotent :: proc(t: ^testing.T
 	defer domain.bridge_destroy(&committed)
 	testing.expect(t, !commit_ok, "a rolled-back family cannot be committed")
 	testing.expect_value(t, live_scope_count(f, family, BRIDGE_TOKEN_SCOPE), 0)
+}
+
+// --- a failed read never produces a verdict (review 3) ---
+
+@(test)
+test_rollback_verdict_read_failure_is_an_error_not_rolled_back :: proc(t: ^testing.T) {
+	f := pending_fixture_open(t, "rb_read_fail")
+	defer pending_fixture_close(f)
+	enrolled, ok, err := enroll_bridge_from_device_grant(&f.svc, enroll_input("", "ea-new", true))
+	testing.expect(t, ok, err.message)
+	bridge_id := strings.clone(enrolled.bridge.bridge_id, context.temp_allocator)
+	family := strings.clone(enrolled.family_id, context.temp_allocator)
+	committed, commit_ok, commit_err := commit_pending_enrollment(&f.svc, Pending_Commit_Input{bridge_id = bridge_id, family_id = family})
+	defer domain.bridge_destroy(&committed)
+	testing.expect(t, commit_ok, commit_err.message)
+
+	// The commit won; now the "is it committed?" read fails.
+	broken := f.repo
+	broken.list_tokens_by_family = failing_list_family
+	f.svc.repo = &broken
+	rolled_back, removed, rb_err := rollback_pending_enrollment(&f.svc, bridge_id, family)
+	f.svc.repo = &f.repo
+	testing.expect(t, rb_err.code != .None, "a failed verdict read must surface as an error")
+	testing.expect(t, !rolled_back, "a committed family is never reported rolled back")
+	testing.expect(t, !removed, "nothing deleted")
+	testing.expect_value(t, live_scope_count(f, family, BRIDGE_TOKEN_SCOPE), 2)
+}
+
+@(test)
+test_cancel_family_lookup_failure_does_nothing_new_bridge :: proc(t: ^testing.T) {
+	f := pending_fixture_open(t, "cancel_lookup_new")
+	defer pending_fixture_close(f)
+	enrolled, ok, err := enroll_bridge_from_device_grant(&f.svc, enroll_input("", "ea-new", true))
+	testing.expect(t, ok, err.message)
+	bridge_id := strings.clone(enrolled.bridge.bridge_id, context.temp_allocator)
+	family := strings.clone(enrolled.family_id, context.temp_allocator)
+
+	broken := f.repo
+	broken.list_live_tokens_by_scope = failing_list_scope
+	f.svc.repo = &broken
+	rolled_back, removed, cancel_err := cancel_pending_enrollment(&f.svc, bridge_id)
+	f.svc.repo = &f.repo
+	testing.expect(t, cancel_err.code != .None, "a failed family lookup must surface as an error")
+	testing.expect(t, !rolled_back && !removed, "no verdict and no delete")
+	row, row_ok, _ := iface.bridge_get_bridge(&f.repo, bridge_id)
+	defer domain.bridge_destroy(&row)
+	testing.expect(t, row_ok, "the pending row is not deleted out from under its live enroll token")
+	testing.expect(t, row.enrollment_pending_until != "", "still pending")
+	testing.expect_value(t, live_scope_count(f, family, BRIDGE_ENROLL_TOKEN_SCOPE), 2)
+}
+
+@(test)
+test_cancel_family_lookup_failure_does_nothing_attach :: proc(t: ^testing.T) {
+	f := pending_fixture_open(t, "cancel_lookup_attach")
+	defer pending_fixture_close(f)
+	first, ok, err := enroll_bridge_from_device_grant(&f.svc, enroll_input("", "ea-old", false))
+	testing.expect(t, ok, err.message)
+	bridge_id := strings.clone(first.bridge.bridge_id, context.temp_allocator)
+	old_family := strings.clone(first.family_id, context.temp_allocator)
+	attach, attach_ok, attach_err := enroll_bridge_from_device_grant(&f.svc, enroll_input(bridge_id, "", true))
+	testing.expect(t, attach_ok, attach_err.message)
+	new_family := strings.clone(attach.family_id, context.temp_allocator)
+
+	broken := f.repo
+	broken.list_live_tokens_by_scope = failing_list_scope
+	f.svc.repo = &broken
+	rolled_back, _, cancel_err := cancel_pending_enrollment(&f.svc, bridge_id)
+	f.svc.repo = &f.repo
+	testing.expect(t, cancel_err.code != .None, "a failed family lookup must surface as an error")
+	testing.expect(t, !rolled_back, "no verdict: a still-pending attach is neither rolled back nor committed")
+	testing.expect_value(t, live_scope_count(f, new_family, BRIDGE_ENROLL_TOKEN_SCOPE), 2)
+	testing.expect_value(t, live_scope_count(f, old_family, BRIDGE_TOKEN_SCOPE), 2)
+
+	// And with the read healthy again, the same cancel does roll the attach back.
+	again, _, again_err := cancel_pending_enrollment(&f.svc, bridge_id)
+	testing.expect_value(t, again_err.code, domain.Error_Code.None)
+	testing.expect(t, again, "a healthy cancel rolls the attach back")
+	testing.expect_value(t, live_scope_count(f, new_family, BRIDGE_ENROLL_TOKEN_SCOPE), 0)
+	testing.expect_value(t, live_scope_count(f, old_family, BRIDGE_TOKEN_SCOPE), 2)
 }

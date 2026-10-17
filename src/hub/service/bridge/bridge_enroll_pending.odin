@@ -151,7 +151,14 @@ rollback_pending_enrollment :: proc(service: ^Bridge_Service, bridge_id, family_
 		// Nothing left to revoke: either an earlier rollback did it (still rolled
 		// back), or a commit promoted the family. Only the latter has live
 		// runtime-scope rows, and the promote is final, so this read cannot race.
-		if changed == 0 do committed = family_has_live_scope(service, family_id, BRIDGE_TOKEN_SCOPE)
+		// A failed read is NOT "not committed": guessing rolled back here would
+		// recreate the committed-without-credential race, so the caller gets the error
+		// and must send nothing.
+		if changed == 0 {
+			has_runtime, read_err := family_has_live_scope(service, family_id, BRIDGE_TOKEN_SCOPE)
+			if read_err.code != .None do return false, false, read_err
+			committed = has_runtime
+		}
 	}
 	if committed do return false, false, domain.Domain_Error{}
 	removed, del_err := iface.bridge_delete_pending(service.repo, bridge_id)
@@ -161,11 +168,23 @@ rollback_pending_enrollment :: proc(service: ^Bridge_Service, bridge_id, family_
 }
 
 @(private = "file")
-family_has_live_scope :: proc(service: ^Bridge_Service, family_id, scope: string) -> bool {
-	tokens, _ := iface.bridge_list_tokens_by_family(service.repo, family_id)
+family_has_live_scope :: proc(service: ^Bridge_Service, family_id, scope: string) -> (bool, domain.Domain_Error) {
+	tokens, err := iface.bridge_list_tokens_by_family(service.repo, family_id)
 	defer free_bridge_tokens(tokens)
-	for t in tokens do if t.scope == scope && t.revoked_at == "" do return true
-	return false
+	if err.code != .None do return false, err
+	for t in tokens do if t.scope == scope && t.revoked_at == "" do return true, domain.Domain_Error{}
+	return false, domain.Domain_Error{}
+}
+
+// cancel_pending_enrollment is the operator's cancel (REQ-EA-3): find the bridge's
+// live enroll-scoped family, then roll back. A failed family lookup returns the error
+// with NOTHING done — rolling back with no family would delete a new bridge's row
+// while its enroll token stays live, or call a still-pending attach committed.
+cancel_pending_enrollment :: proc(service: ^Bridge_Service, bridge_id: string) -> (rolled_back: bool, row_deleted: bool, err: domain.Domain_Error) {
+	family, _, lookup_err := pending_enrollment_family(service, bridge_id)
+	defer delete(family)
+	if lookup_err.code != .None do return false, false, lookup_err
+	return rollback_pending_enrollment(service, bridge_id, family)
 }
 
 // Rolled_Back_Enrollment names one enrollment the sweep undid, so the caller can
@@ -257,10 +276,12 @@ rolled_back_enrollments_destroy :: proc(items: []Rolled_Back_Enrollment) {
 // any: the lineage an unseal commit would promote. An attach target and its new
 // device share a bridge_id, so this is how the commit finds the NEW family without
 // trusting anything the browser sent.
-pending_enrollment_family :: proc(service: ^Bridge_Service, bridge_id: string) -> (string, bool) {
-	if service == nil || service.repo == nil || bridge_id == "" do return "", false
-	tokens, _ := iface.bridge_list_live_tokens_by_scope(service.repo, BRIDGE_ENROLL_TOKEN_SCOPE)
+pending_enrollment_family :: proc(service: ^Bridge_Service, bridge_id: string) -> (string, bool, domain.Domain_Error) {
+	if service == nil || service.repo == nil do return "", false, domain.domain_error(.Internal_Error, "bridge service is not configured")
+	if bridge_id == "" do return "", false, domain.Domain_Error{}
+	tokens, err := iface.bridge_list_live_tokens_by_scope(service.repo, BRIDGE_ENROLL_TOKEN_SCOPE)
 	defer free_bridge_tokens(tokens)
+	if err.code != .None do return "", false, err
 	newest := ""
 	newest_family := ""
 	for t in tokens {
@@ -270,6 +291,6 @@ pending_enrollment_family :: proc(service: ^Bridge_Service, bridge_id: string) -
 			newest_family = t.family_id
 		}
 	}
-	if newest_family == "" do return "", false
-	return strings.clone(newest_family), true
+	if newest_family == "" do return "", false, domain.Domain_Error{}
+	return strings.clone(newest_family), true, domain.Domain_Error{}
 }

@@ -471,8 +471,9 @@ bridge_enrollment_status_handler :: proc(ctx: rawptr, req: Request) -> Response 
 	live_key := ""
 	if connected do live_key = project_service.bridge_runtime_registry_public_key(h.bridge_runtime_registry, enroll_key)
 	defer delete(live_key)
-	family, has_family := bridge_service.pending_enrollment_family(h.bridges, bridge.bridge_id)
+	family, has_family, family_err := bridge_service.pending_enrollment_family(h.bridges, bridge.bridge_id)
 	defer delete(family)
+	if family_err.code != .None do return respond_error(family_err, req.request_id)
 	// An attach has no pending row; its pending-ness is a live enroll-scoped family.
 	pending := domain.bridge_is_pending(bridge) || has_family
 	b := strings.builder_make()
@@ -496,14 +497,13 @@ bridge_enrollment_cancel_handler :: proc(ctx: rawptr, req: Request) -> Response 
 	bridge_id := path_part(req.path, 4)
 	bridge, bridge_ok, bridge_err := bridge_service.get_bridge_for_enrollment(h.bridges, auth_ctx, bridge_id)
 	if !bridge_ok do return respond_error(bridge_err, req.request_id)
-	family, _ := bridge_service.pending_enrollment_family(h.bridges, bridge.bridge_id)
-	defer delete(family)
 	enroll_key := bridge_enroll_registry_key(bridge.bridge_id)
 	defer delete(enroll_key)
 	// The verdict comes from the rollback itself, never from the request: a commit
 	// that won the write lock first has made this bridge enrolled, and telling its
-	// process committed:false could make it discard the live credential.
-	rolled_back, removed, err := bridge_service.rollback_pending_enrollment(h.bridges, bridge.bridge_id, family)
+	// process committed:false could make it discard the live credential. Any read
+	// failure on the way is an error response with nothing sent or deleted.
+	rolled_back, removed, err := bridge_service.cancel_pending_enrollment(h.bridges, bridge.bridge_id)
 	if err.code != .None do return respond_error(err, req.request_id)
 	if rolled_back {
 		// Before the close: a process that already saved its key undoes it on this;
