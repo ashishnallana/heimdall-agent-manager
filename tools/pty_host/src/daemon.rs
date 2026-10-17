@@ -44,6 +44,25 @@ const TERM_GRACE: Duration = Duration::from_millis(750);
 /// death path; this is only the silent-failure/idle backstop.
 const HOST_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 
+/// REQ-PTY-1: how long a finished session's exit watcher waits for the PTY
+/// reader to drain the child's last output before closing the master fds.
+const PTY_DRAIN_GRACE: Duration = Duration::from_millis(500);
+
+/// REQ-PTY-1: finished sessions stay registered as tombstones (pid, exit code,
+/// final screen; no fds) so late `list`/`capture`/`signal` still answer. At most
+/// this many are kept, oldest-exited evicted first...
+const TOMBSTONE_MAX: usize = 512;
+/// ...and none is kept longer than this after its child exited.
+const TOMBSTONE_TTL: Duration = Duration::from_secs(60 * 60);
+
+/// REQ-PTY-3: pause before the next `accept` after fd exhaustion, so the accept
+/// loop neither spins nor dies while fds are being released.
+const ACCEPT_EMFILE_BACKOFF: Duration = Duration::from_millis(100);
+
+/// REQ-PTY-3: the daemon raises its RLIMIT_NOFILE soft limit to the hard limit,
+/// capped here.
+const NOFILE_TARGET: libc::rlim_t = 65536;
+
 /// CRT resolution constants for unattached agents (REQ-CRT-1).
 pub const CRT_COLS: u16 = 80;
 pub const CRT_ROWS: u16 = 25;
@@ -130,6 +149,49 @@ fn now_millis() -> u64 {
         .unwrap_or(0)
 }
 
+/// Result of [`Daemon::signal`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SignalOutcome {
+    /// `killpg` succeeded.
+    Delivered,
+    /// The child had already exited with this code; nothing was signalled.
+    AlreadyExited(i32),
+}
+
+/// Poll `pred` every 10ms until it holds or `timeout` elapses.
+fn wait_until(pred: impl Fn() -> bool, timeout: Duration) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if pred() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    pred()
+}
+
+/// REQ-PTY-1: bound the finished-session tombstones in `agents`: drop those
+/// that exited more than `ttl` ago, then the oldest-exited beyond `max`. Live
+/// agents are never touched. Dropping a tombstone frees no fds (the exit
+/// watcher already released them), only its spec and VT model.
+fn prune_tombstones(agents: &mut HashMap<String, Agent>, max: usize, ttl: Duration) {
+    let cutoff = now_millis().saturating_sub(ttl.as_millis() as u64);
+    let mut exited: Vec<(u64, String)> = agents
+        .iter()
+        .filter_map(|(id, a)| match a.exited_at.load(Ordering::SeqCst) {
+            0 => None,
+            at => Some((at, id.clone())),
+        })
+        .collect();
+    exited.sort();
+    let over = exited.len().saturating_sub(max);
+    for (i, (at, id)) in exited.into_iter().enumerate() {
+        if i < over || at < cutoff {
+            agents.remove(&id);
+        }
+    }
+}
+
 /// One registered agent: its PTY host + the spec we remember for restart.
 struct Agent {
     spec: SpawnRequest,
@@ -138,6 +200,9 @@ struct Agent {
     pid: i32,
     started_at: u64,
     last_activity: Arc<AtomicU64>,
+    /// Unix ms at which the exit watcher released this agent's PTY after its
+    /// child exited (making it a tombstone); 0 while it is live.
+    exited_at: Arc<AtomicU64>,
     /// Set on close/restart so this agent's background threads stop.
     stop: Arc<AtomicBool>,
     pump: Option<JoinHandle<()>>,
@@ -320,7 +385,9 @@ impl Daemon {
         let agent = self.build_agent(spec)?;
         let pid = agent.pid;
         let instance = agent.spec.instance.clone();
-        self.agents.lock().unwrap().insert(instance, agent);
+        let mut agents = self.agents.lock().unwrap();
+        agents.insert(instance, agent);
+        prune_tombstones(&mut agents, TOMBSTONE_MAX, TOMBSTONE_TTL);
         Ok(pid)
     }
 
@@ -357,6 +424,13 @@ impl Daemon {
         let host = Arc::new(Mutex::new(host));
 
         let instance = spec.instance.clone();
+        // REQ-PTY-3: a thread that cannot be created fails this spawn (child
+        // killed, threads already started told to stop) instead of panicking.
+        let abort = |what: &str, e: std::io::Error| {
+            stop.store(true, Ordering::SeqCst);
+            host.lock().unwrap().kill();
+            anyhow!("spawn agent {instance}: start {what} thread: {e}")
+        };
 
         // Pump thread: fan raw output out to subscribers of this instance and
         // stamp last-activity. Ends when the PTY closes (child exit) — the
@@ -366,9 +440,11 @@ impl Daemon {
             let last_activity = Arc::clone(&last_activity);
             let instance = instance.clone();
             let tee_path = spec.tee_path.clone();
-            std::thread::spawn(move || {
-                pump_output(output_rx, subs, instance, last_activity, tee_path);
-            })
+            std::thread::Builder::new()
+                .spawn(move || {
+                    pump_output(output_rx, subs, instance, last_activity, tee_path);
+                })
+                .map_err(|e| abort("pump", e))?
         };
 
         // Exit watcher: when the child dies, broadcast ChildExited to every event
@@ -377,15 +453,18 @@ impl Daemon {
         // even though it never Attaches, but one-shot control connections must NOT
         // see it interleaved with their reply (HOST-5). Watchers get it without any
         // per-instance Output flood.
+        let exited_at = Arc::new(AtomicU64::new(0));
         let exit_watch = {
+            let agents = Arc::clone(&self.agents);
             let watchers = Arc::clone(&self.watchers);
             let subs = Arc::clone(&self.subs);
+            let exited_at = Arc::clone(&exited_at);
             let alive = Arc::clone(&alive);
             let stop = Arc::clone(&stop);
             let host = Arc::clone(&host);
             let instance = instance.clone();
             let timeout = spec.timeout_seconds.map(Duration::from_secs);
-            std::thread::spawn(move || {
+            std::thread::Builder::new().spawn(move || {
                 let started = Instant::now();
                 let mut timeout_fired = false;
                 while alive.load(Ordering::SeqCst) {
@@ -407,6 +486,18 @@ impl Daemon {
                 if stop.load(Ordering::SeqCst) {
                     return;
                 }
+                // REQ-PTY-1: the child is gone, so close this session's PTY
+                // master fds now (once the reader has drained its last output)
+                // instead of holding them until a `close` that may never come.
+                // The host lock is not held across the drain wait.
+                let drain_deadline = Instant::now() + PTY_DRAIN_GRACE;
+                while !host.lock().unwrap().reader_done() && Instant::now() < drain_deadline {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                host.lock().unwrap().release_pty();
+                exited_at.store(now_millis(), Ordering::SeqCst);
+                prune_tombstones(&mut agents.lock().unwrap(), TOMBSTONE_MAX, TOMBSTONE_TTL);
+
                 let code = host.lock().unwrap().exit_code().unwrap_or(-1);
                 broadcast_all_sinks(
                     &watchers,
@@ -425,6 +516,7 @@ impl Daemon {
                     },
                 );
             })
+            .map_err(|e| abort("exit watcher", e))?
         };
 
         // HOST-2: per-agent startup detector + activity (ScreenChanged) signal.
@@ -443,9 +535,13 @@ impl Daemon {
             let stop = Arc::clone(&stop);
             let host = Arc::clone(&host);
             let instance = instance.clone();
-            Some(std::thread::spawn(move || {
-                run_detector(cfg, host, watchers, instance, alive, stop);
-            }))
+            Some(
+                std::thread::Builder::new()
+                    .spawn(move || {
+                        run_detector(cfg, host, watchers, instance, alive, stop);
+                    })
+                    .map_err(|e| abort("detector", e))?,
+            )
         };
 
         Ok(Agent {
@@ -455,6 +551,7 @@ impl Daemon {
             pid,
             started_at: now_secs(),
             last_activity,
+            exited_at,
             stop,
             pump: Some(pump),
             exit_watch: Some(exit_watch),
@@ -555,25 +652,36 @@ impl Daemon {
     }
 
     /// Send POSIX signal `signum` to the process group of `shell_id` via `killpg`.
-    /// Returns `Ok(())` on success; `Err` if the instance is unknown or the syscall
-    /// fails (e.g. ESRCH if the process group no longer exists).
-    pub fn signal(&self, shell_id: &str, signum: u8) -> Result<()> {
-        let pid = {
+    ///
+    /// Returns [`SignalOutcome::AlreadyExited`] when the child has already
+    /// exited (REQ-PTY-1); a reaped pid is never signalled, since its process
+    /// group id may since have been reused. `Err` if the instance is unknown or
+    /// `killpg` fails on a live child.
+    pub fn signal(&self, shell_id: &str, signum: u8) -> Result<SignalOutcome> {
+        let (pid, alive) = {
             let agents = self.agents.lock().unwrap();
             let a = agents
                 .get(shell_id)
                 .ok_or_else(|| anyhow!("signal: no such instance {shell_id}"))?;
-            a.pid
+            (a.pid, Arc::clone(&a.alive))
         };
+        let exited = || SignalOutcome::AlreadyExited(self.exit_code(shell_id).unwrap_or(-1));
+        if !alive.load(Ordering::SeqCst) {
+            return Ok(exited());
+        }
         let ret = unsafe { libc::killpg(pid as libc::pid_t, signum as libc::c_int) };
         if ret == 0 {
-            Ok(())
-        } else {
-            Err(anyhow!(
-                "killpg({pid}, {signum}) failed: {}",
-                std::io::Error::last_os_error()
-            ))
+            return Ok(SignalOutcome::Delivered);
         }
+        let err = std::io::Error::last_os_error();
+        // ESRCH while still flagged alive: the child exited but its wait
+        // thread has not recorded it yet. Give it a moment to catch up.
+        if err.raw_os_error() == Some(libc::ESRCH)
+            && wait_until(|| !alive.load(Ordering::SeqCst), Duration::from_millis(500))
+        {
+            return Ok(exited());
+        }
+        Err(anyhow!("killpg({pid}, {signum}) failed: {err}"))
     }
 
     /// Exit code of `instance` (or `shell_id`) if it exists and has exited.
@@ -942,6 +1050,9 @@ fn run_detector(
 /// A running daemon bound to a unix socket, speaking [`crate::dproto`].
 pub struct DaemonServer {
     socket_path: std::path::PathBuf,
+    /// REQ-PTY-2: exclusive flock on `<socket>.lock`, held for the server's
+    /// lifetime so no second daemon can take over this socket.
+    _lock: std::fs::File,
     daemon: Daemon,
     shutdown: Arc<AtomicBool>,
     accept: Option<JoinHandle<()>>,
@@ -951,10 +1062,13 @@ pub struct DaemonServer {
 impl DaemonServer {
     /// Bind `socket_path` and start accepting control/data clients. The daemon
     /// starts with no agents; clients drive it via `Spawn`.
+    ///
+    /// REQ-PTY-2: fails, leaving the socket alone, if another daemon owns it
+    /// (see [`claim_socket`]).
     pub fn start(socket_path: impl Into<std::path::PathBuf>) -> Result<Self> {
         let socket_path = socket_path.into();
         crate::socket_path::prepare(&socket_path)?;
-        let _ = std::fs::remove_file(&socket_path);
+        let lock = claim_socket(&socket_path)?;
         let listener = UnixListener::bind(&socket_path)
             .with_context(|| format!("bind {socket_path:?}"))?;
         let daemon = Daemon::new();
@@ -977,6 +1091,7 @@ impl DaemonServer {
 
         Ok(DaemonServer {
             socket_path,
+            _lock: lock,
             daemon,
             shutdown,
             accept: Some(accept),
@@ -1038,6 +1153,71 @@ impl Drop for DaemonServer {
 
 static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
 
+/// REQ-PTY-2: take ownership of `socket_path` for this process.
+///
+/// Takes an exclusive, non-blocking flock on `<socket>.lock` (returned; the
+/// lock lasts as long as the file stays open). If another process holds it, or
+/// something accepts connections on the socket (a daemon that predates the
+/// lock), this fails without touching the socket. Only a stale socket file
+/// (no lock holder, connect refused) is removed so the caller can bind.
+fn claim_socket(socket_path: &std::path::Path) -> Result<std::fs::File> {
+    use std::os::unix::io::AsRawFd;
+    let mut lock_path = socket_path.as_os_str().to_owned();
+    lock_path.push(".lock");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .with_context(|| format!("open daemon lock {lock_path:?}"))?;
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
+            return Err(anyhow!(
+                "another ham-pty-host daemon owns {socket_path:?} (lock {lock_path:?} is held)"
+            ));
+        }
+        return Err(anyhow!("flock {lock_path:?}: {err}"));
+    }
+    if UnixStream::connect(socket_path).is_ok() {
+        return Err(anyhow!(
+            "another process is accepting connections on {socket_path:?}; refusing to replace it"
+        ));
+    }
+    match std::fs::remove_file(socket_path) {
+        Ok(()) => eprintln!("[ham-pty-host] removed stale socket {}", socket_path.display()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(anyhow!("remove stale socket {socket_path:?}: {e}")),
+    }
+    Ok(lock)
+}
+
+/// REQ-PTY-3: raise this process's RLIMIT_NOFILE soft limit to its hard limit,
+/// capped at [`NOFILE_TARGET`]; never lowers it. Returns the resulting soft limit.
+pub fn raise_nofile_limit() -> std::io::Result<libc::rlim_t> {
+    let mut lim = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let target = lim.rlim_max.min(NOFILE_TARGET);
+    if target > lim.rlim_cur {
+        lim.rlim_cur = target;
+        if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &lim) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(lim.rlim_cur)
+}
+
+/// True for the accept/clone errors that mean "out of fds or kernel memory":
+/// the daemon backs off and keeps going rather than spinning.
+fn is_resource_exhaustion(e: &std::io::Error) -> bool {
+    matches!(
+        e.raw_os_error(),
+        Some(libc::EMFILE | libc::ENFILE | libc::ENOBUFS | libc::ENOMEM)
+    )
+}
+
 fn accept_loop(listener: UnixListener, daemon: Daemon, shutdown: Arc<AtomicBool>) {
     for stream in listener.incoming() {
         if shutdown.load(Ordering::SeqCst) {
@@ -1045,32 +1225,50 @@ fn accept_loop(listener: UnixListener, daemon: Daemon, shutdown: Arc<AtomicBool>
         }
         let stream = match stream {
             Ok(s) => s,
-            Err(_) => continue,
+            Err(e) => {
+                // REQ-PTY-3: a failed accept never ends the loop. On fd
+                // exhaustion, back off so the fds held by finishing clients
+                // and sessions can be released.
+                eprintln!("[ham-pty-host] accept failed: {e}");
+                if is_resource_exhaustion(&e) {
+                    std::thread::sleep(ACCEPT_EMFILE_BACKOFF);
+                }
+                continue;
+            }
         };
         let id = NEXT_CLIENT_ID.fetch_add(1, Ordering::SeqCst);
         handle_client(id, stream, daemon.clone(), Arc::clone(&shutdown));
     }
 }
 
+/// Serve one client on its own reader + writer threads. REQ-PTY-3: never
+/// panics; if the per-client fds or threads cannot be created, the client is
+/// dropped (logged) and the accept loop carries on.
 fn handle_client(id: u64, stream: UnixStream, daemon: Daemon, shutdown: Arc<AtomicBool>) {
-    let (tx, rx) = reply_channel(Some(stream.try_clone().expect("clone client shutdown handle")));
+    let drop_client = |what: &str, e: std::io::Error| {
+        eprintln!("[ham-pty-host] dropping client {id}: {what}: {e}");
+        if is_resource_exhaustion(&e) {
+            std::thread::sleep(ACCEPT_EMFILE_BACKOFF);
+        }
+    };
+    let shutdown_handle = match stream.try_clone() {
+        Ok(s) => s,
+        Err(e) => return drop_client("clone client shutdown handle", e),
+    };
+    let mut write_stream = match stream.try_clone() {
+        Ok(s) => s,
+        Err(e) => return drop_client("clone client write stream", e),
+    };
+    let (tx, rx) = reply_channel(Some(shutdown_handle));
     // HOST-5: register the sink but do NOT subscribe to events. Async events
     // only flow to clients that later Attach; a control-only client stays out
     // of the `subs` map entirely and thus never sees an event frame.
     daemon.register_sink(id, tx.clone());
-
-    let mut write_stream = match stream.try_clone() {
-        Ok(s) => s,
-        Err(_) => {
-            daemon.unsubscribe(id);
-            return;
-        }
-    };
     let mut read_stream = stream;
 
     let daemon_writer = daemon.clone();
     // Writer thread: drain this client's reply queue to the socket.
-    std::thread::spawn(move || {
+    let writer = std::thread::Builder::new().spawn(move || {
         let _ = write_stream.set_write_timeout(Some(Duration::from_secs(5)));
         while let Ok(frame) = rx.recv() {
             if std::io::Write::write_all(&mut write_stream, &frame.bytes).is_err() {
@@ -1080,20 +1278,30 @@ fn handle_client(id: u64, stream: UnixStream, daemon: Daemon, shutdown: Arc<Atom
             }
         }
     });
+    if let Err(e) = writer {
+        daemon.unsubscribe(id);
+        return drop_client("spawn writer thread", e);
+    }
 
     // Reader thread: decode control/data messages + act on them.
-    std::thread::spawn(move || {
+    let daemon_reader = daemon.clone();
+    let reader = std::thread::Builder::new().spawn(move || {
         loop {
             match dproto::read_ctl_msg(&mut read_stream) {
-                Ok(Some(msg)) => handle_ctl(&daemon, id, msg, &tx),
+                Ok(Some(msg)) => handle_ctl(&daemon_reader, id, msg, &tx),
                 Ok(None) | Err(_) => break,
             }
             if shutdown.load(Ordering::SeqCst) {
                 break;
             }
         }
-        daemon.unsubscribe(id);
+        daemon_reader.unsubscribe(id);
     });
+    if let Err(e) = reader {
+        // Dropping the sink ends the writer thread; the moved stream closes.
+        daemon.unsubscribe(id);
+        drop_client("spawn reader thread", e);
+    }
 }
 
 fn handle_ctl(daemon: &Daemon, id: u64, msg: CtlMsg, tx: &ReplySink) {
@@ -1107,7 +1315,7 @@ fn handle_ctl(daemon: &Daemon, id: u64, msg: CtlMsg, tx: &ReplySink) {
                 Err(e) => {
                     let _ = tx.send(CtlReply::Error {
                         instance,
-                        message: e.to_string(),
+                        message: format!("{e:#}"),
                     });
                 }
             }
@@ -1119,7 +1327,7 @@ fn handle_ctl(daemon: &Daemon, id: u64, msg: CtlMsg, tx: &ReplySink) {
             Err(e) => {
                 let _ = tx.send(CtlReply::Error {
                     instance,
-                    message: e.to_string(),
+                    message: format!("{e:#}"),
                 });
             }
         },
@@ -1130,7 +1338,7 @@ fn handle_ctl(daemon: &Daemon, id: u64, msg: CtlMsg, tx: &ReplySink) {
             Err(e) => {
                 let _ = tx.send(CtlReply::Error {
                     instance,
-                    message: e.to_string(),
+                    message: format!("{e:#}"),
                 });
             }
         },
@@ -1141,7 +1349,7 @@ fn handle_ctl(daemon: &Daemon, id: u64, msg: CtlMsg, tx: &ReplySink) {
             if let Err(e) = daemon.attach(id, &instance) {
                 let _ = tx.send(CtlReply::Error {
                     instance,
-                    message: e.to_string(),
+                    message: format!("{e:#}"),
                 });
             }
         }
@@ -1149,7 +1357,7 @@ fn handle_ctl(daemon: &Daemon, id: u64, msg: CtlMsg, tx: &ReplySink) {
             if let Err(e) = daemon.write_input(&instance, &data) {
                 let _ = tx.send(CtlReply::Error {
                     instance,
-                    message: e.to_string(),
+                    message: format!("{e:#}"),
                 });
             }
         }
@@ -1157,7 +1365,7 @@ fn handle_ctl(daemon: &Daemon, id: u64, msg: CtlMsg, tx: &ReplySink) {
             if let Err(e) = daemon.write_input(&instance, key.to_bytes()) {
                 let _ = tx.send(CtlReply::Error {
                     instance,
-                    message: e.to_string(),
+                    message: format!("{e:#}"),
                 });
             }
         }
@@ -1165,7 +1373,7 @@ fn handle_ctl(daemon: &Daemon, id: u64, msg: CtlMsg, tx: &ReplySink) {
             if let Err(e) = daemon.resize(&instance, rows, cols) {
                 let _ = tx.send(CtlReply::Error {
                     instance,
-                    message: e.to_string(),
+                    message: format!("{e:#}"),
                 });
             }
         }
@@ -1195,13 +1403,16 @@ fn handle_ctl(daemon: &Daemon, id: u64, msg: CtlMsg, tx: &ReplySink) {
         }
         CtlMsg::Signal(SignalRequest { shell_id, signal }) => {
             match daemon.signal(&shell_id, signal) {
-                Ok(()) => {
+                Ok(SignalOutcome::Delivered) => {
                     let _ = tx.send(CtlReply::Closed { instance: shell_id });
+                }
+                Ok(SignalOutcome::AlreadyExited(code)) => {
+                    let _ = tx.send(CtlReply::AlreadyExited { instance: shell_id, code });
                 }
                 Err(e) => {
                     let _ = tx.send(CtlReply::Error {
                         instance: shell_id,
-                        message: e.to_string(),
+                        message: format!("{e:#}"),
                     });
                 }
             }
@@ -1213,6 +1424,10 @@ fn handle_ctl(daemon: &Daemon, id: u64, msg: CtlMsg, tx: &ReplySink) {
 /// signalled. Convenience entrypoint used by `main`. Blocks forever (until
 /// Ctrl-C), serving clients.
 pub fn serve(socket_path: impl Into<std::path::PathBuf>) -> Result<()> {
+    match raise_nofile_limit() {
+        Ok(n) => eprintln!("[ham-pty-host] RLIMIT_NOFILE soft limit {n}"),
+        Err(e) => eprintln!("[ham-pty-host] could not raise RLIMIT_NOFILE: {e}"),
+    }
     let mut server = DaemonServer::start(socket_path)?;
     eprintln!(
         "[ham-pty-host] daemon listening on {}",
@@ -2894,5 +3109,263 @@ mod tests {
         }
 
         server.shutdown();
+    }
+
+    // ---- REQ-PTY-1/2/3: fd lifecycle, socket ownership, fd exhaustion ----
+
+    /// Env var naming the `child_*` scenario a re-executed test binary runs.
+    const CHILD_SCENARIO_ENV: &str = "HAM_PTY_HOST_TEST_CHILD";
+
+    /// Run the `#[ignore]`d test `name` in a fresh copy of this test binary.
+    /// Scenarios that count or exhaust the process's fds need a process of
+    /// their own: other tests running in parallel here open PTYs too.
+    fn run_child_scenario(name: &str) {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([&format!("daemon::tests::{name}"), "--exact", "--ignored", "--nocapture", "--test-threads=1"])
+            .env(CHILD_SCENARIO_ENV, name)
+            .output()
+            .unwrap();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            out.status.success() && text.contains("1 passed"),
+            "child scenario {name} failed:\n{text}"
+        );
+    }
+
+    /// True when this process is the re-executed child for scenario `name`.
+    fn is_child_scenario(name: &str) -> bool {
+        std::env::var(CHILD_SCENARIO_ENV).as_deref() == Ok(name)
+    }
+
+    fn true_spec(instance: &str, prog: &str) -> SpawnRequest {
+        SpawnRequest { argv: vec![prog.into()], ..sh_spec(instance, prog) }
+    }
+
+    /// This process's open fds that are PTY masters.
+    fn ptmx_fds() -> usize {
+        std::fs::read_dir("/proc/self/fd")
+            .unwrap()
+            .filter_map(|e| std::fs::read_link(e.ok()?.path()).ok())
+            .filter(|t| t.to_str().is_some_and(|t| t.ends_with("ptmx")))
+            .count()
+    }
+
+    fn ping(sock: &std::path::Path) -> bool {
+        let Ok(mut c) = UnixStream::connect(sock) else { return false };
+        if dproto::write_ctl_msg(&mut c, &CtlMsg::Ping).is_err() {
+            return false;
+        }
+        await_reply(&mut c, |r| matches!(r, CtlReply::Pong), Duration::from_secs(2)).is_some()
+    }
+
+    /// Open /dev/null until the fd table is full; the caller drops some to
+    /// leave an exact number free.
+    fn fill_fd_table() -> Vec<std::fs::File> {
+        let mut fill = Vec::new();
+        loop {
+            match std::fs::File::open("/dev/null") {
+                Ok(f) => fill.push(f),
+                Err(e) => {
+                    assert_eq!(e.raw_os_error(), Some(libc::EMFILE), "unexpected open error {e}");
+                    return fill;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn finished_runs_release_their_ptys() {
+        require_pty!();
+        run_child_scenario("child_finished_runs_release_their_ptys");
+    }
+
+    #[test]
+    #[ignore = "run in a fresh process by finished_runs_release_their_ptys"]
+    fn child_finished_runs_release_their_ptys() {
+        if !is_child_scenario("child_finished_runs_release_their_ptys") {
+            return;
+        }
+        let prog = resolve("true").expect("`true` on PATH");
+        let sock = tmp_socket("ptmx");
+        let mut server = DaemonServer::start(&sock).unwrap();
+        let d = server.daemon().clone();
+        let before = ptmx_fds();
+
+        for i in 0..50 {
+            d.spawn(true_spec(&format!("run{i}"), &prog)).unwrap();
+        }
+        assert!(
+            wait_for(|| d.list().iter().all(|a| !a.alive), Duration::from_secs(30)),
+            "runs did not finish"
+        );
+        let released = wait_for(|| ptmx_fds() <= before + 2, Duration::from_secs(10));
+        assert!(released, "ptmx fds before={before} after 50 finished runs={}", ptmx_fds());
+        // The finished runs are still listed (as tombstones), just without fds.
+        assert_eq!(d.list().len(), 50);
+        server.shutdown();
+    }
+
+    #[test]
+    fn second_daemon_cannot_take_over_a_live_socket() {
+        require_pty!();
+        let sh = shell().expect("a POSIX shell");
+        let sock = tmp_socket("owner");
+        let mut first = DaemonServer::start(&sock).unwrap();
+        first.daemon().spawn(sh_spec("owned", &sh)).unwrap();
+
+        let err = DaemonServer::start(&sock).err().expect("second daemon must not start");
+        assert!(format!("{err:#}").contains("another ham-pty-host daemon owns"), "{err:#}");
+
+        // The socket still reaches the FIRST daemon: it answers and lists its agent.
+        assert!(ping(&sock), "first daemon stopped answering ping");
+        let mut c = UnixStream::connect(&sock).unwrap();
+        dproto::write_ctl_msg(&mut c, &CtlMsg::List).unwrap();
+        let list = await_reply(&mut c, |r| matches!(r, CtlReply::AgentList(_)), Duration::from_secs(2));
+        match list {
+            Some(CtlReply::AgentList(l)) => assert!(find(&l, "owned").is_some(), "{l:?}"),
+            other => panic!("expected AgentList, got {other:?}"),
+        }
+        first.shutdown();
+    }
+
+    #[test]
+    fn daemon_start_refuses_a_lockless_live_listener_but_replaces_a_stale_socket() {
+        // A daemon from before the lock existed holds no flock: the connect
+        // probe must still protect its socket.
+        let sock = tmp_socket("legacy");
+        let legacy = UnixListener::bind(&sock).unwrap();
+        let err = DaemonServer::start(&sock).err().expect("must not replace a live listener");
+        assert!(format!("{err:#}").contains("accepting connections"), "{err:#}");
+        assert!(sock.exists());
+
+        // Once nothing listens, the leftover socket file is stale and replaced.
+        drop(legacy);
+        let mut server = DaemonServer::start(&sock).expect("stale socket is replaced");
+        assert!(ping(&sock));
+        server.shutdown();
+    }
+
+    #[test]
+    fn daemon_keeps_serving_after_fd_exhaustion() {
+        require_pty!();
+        run_child_scenario("child_daemon_keeps_serving_after_fd_exhaustion");
+    }
+
+    #[test]
+    #[ignore = "run in a fresh process by daemon_keeps_serving_after_fd_exhaustion"]
+    fn child_daemon_keeps_serving_after_fd_exhaustion() {
+        if !is_child_scenario("child_daemon_keeps_serving_after_fd_exhaustion") {
+            return;
+        }
+        let prog = resolve("true").expect("`true` on PATH");
+        let sock = tmp_socket("emfile");
+        let mut server = DaemonServer::start(&sock).unwrap();
+        // A small fd table keeps filling it fast.
+        let mut lim = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        assert_eq!(unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) }, 0);
+        lim.rlim_cur = lim.rlim_cur.min(256);
+        assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &lim) }, 0);
+        assert!(ping(&sock));
+
+        // A client connects while only `free` fds are left; it takes one, so
+        // the daemon's accept + two try_clones get `free - 1`. Every split
+        // (accept fails / a clone fails / all succeed) must leave it serving.
+        for free in 1..=4 {
+            let mut fill = fill_fd_table();
+            fill.truncate(fill.len() - free);
+            let client = UnixStream::connect(&sock);
+            std::thread::sleep(Duration::from_millis(300));
+            drop(client);
+            drop(fill);
+            assert!(
+                wait_for(|| ping(&sock), Duration::from_secs(3)),
+                "daemon stopped serving after a client arrived with {free} fd(s) free"
+            );
+        }
+
+        // A spawn that fails for lack of fds reports the OS error to the caller.
+        let mut c = UnixStream::connect(&sock).unwrap();
+        let fill = fill_fd_table();
+        dproto::write_ctl_msg(&mut c, &CtlMsg::Spawn(true_spec("starved", &prog))).unwrap();
+        let reply = await_reply(&mut c, |r| matches!(r, CtlReply::Error { .. }), Duration::from_secs(3));
+        drop(fill);
+        match reply {
+            Some(CtlReply::Error { message, .. }) => {
+                assert!(message.contains("Too many open files"), "spawn error lacks the OS error: {message}")
+            }
+            other => panic!("expected spawn Error, got {other:?}"),
+        }
+        assert!(ping(&sock));
+        server.shutdown();
+    }
+
+    #[test]
+    fn finished_session_is_a_tombstone_for_list_capture_and_signal() {
+        require_pty!();
+        let prog = resolve("true").expect("`true` on PATH");
+        let sock = tmp_socket("tomb");
+        let mut server = DaemonServer::start(&sock).unwrap();
+        let d = server.daemon().clone();
+        d.spawn(true_spec("done", &prog)).unwrap();
+        let tombstoned = || {
+            d.agents.lock().unwrap().get("done").is_some_and(|a| a.exited_at.load(Ordering::SeqCst) != 0)
+        };
+        assert!(wait_for(tombstoned, Duration::from_secs(5)), "run never became a tombstone");
+        assert!(d.agents.lock().unwrap()["done"].host.lock().unwrap().pty_released());
+
+        let info = find(&d.list(), "done").expect("tombstone is listed");
+        assert!(!info.alive);
+        assert_eq!(info.exit_code, Some(0));
+        assert!(d.capture("done").is_some(), "tombstone still answers capture");
+        assert!(d.write_input("done", b"x").is_err());
+        assert_eq!(d.signal("done", 15).unwrap(), SignalOutcome::AlreadyExited(0));
+
+        // Over the wire the refused signal is a distinct, parseable reply.
+        let mut c = UnixStream::connect(&sock).unwrap();
+        dproto::write_ctl_msg(&mut c, &CtlMsg::Signal(SignalRequest { shell_id: "done".into(), signal: 15 })).unwrap();
+        let reply = await_reply(&mut c, |r| r.shell_id() == Some("done"), Duration::from_secs(2));
+        assert_eq!(reply, Some(CtlReply::AlreadyExited { instance: "done".into(), code: 0 }));
+
+        // close still clears a tombstone.
+        d.close("done").unwrap();
+        assert!(find(&d.list(), "done").is_none());
+        server.shutdown();
+    }
+
+    #[test]
+    fn tombstones_are_bounded_by_count_and_age() {
+        require_pty!();
+        let prog = resolve("true").expect("`true` on PATH");
+        let sh = shell().expect("a POSIX shell");
+        let d = Daemon::new();
+        for id in ["t1", "t2", "t3"] {
+            d.spawn(true_spec(id, &prog)).unwrap();
+        }
+        d.spawn(sh_spec("live", &sh)).unwrap();
+        let all_tombstoned = || {
+            let agents = d.agents.lock().unwrap();
+            ["t1", "t2", "t3"].iter().all(|id| agents[*id].exited_at.load(Ordering::SeqCst) != 0)
+        };
+        assert!(wait_for(all_tombstoned, Duration::from_secs(5)));
+
+        let now = now_millis();
+        let mut agents = d.agents.lock().unwrap();
+        for (id, age_ms) in [("t1", 3), ("t2", 2), ("t3", 1)] {
+            agents[id].exited_at.store(now - age_ms, Ordering::SeqCst);
+        }
+        prune_tombstones(&mut agents, 1, TOMBSTONE_TTL);
+        let mut left: Vec<&String> = agents.keys().collect();
+        left.sort();
+        assert_eq!(left, ["live", "t3"], "count bound keeps the newest tombstone and every live agent");
+
+        agents["t3"].exited_at.store(now - 2 * 60 * 60 * 1000, Ordering::SeqCst);
+        prune_tombstones(&mut agents, TOMBSTONE_MAX, TOMBSTONE_TTL);
+        assert_eq!(agents.keys().collect::<Vec<_>>(), ["live"], "age bound expires old tombstones");
+        drop(agents);
+        d.shutdown();
     }
 }

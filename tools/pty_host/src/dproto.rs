@@ -26,6 +26,8 @@
 //! | 0x35 | Detach  | unsubscribe this client from an instance (child survives)  |
 //! | 0x36 | Ping    | liveness check                                             |
 //! | 0x37 | Shutdown| stop all agents and terminate the daemon process           |
+//! | 0x38 | WatchEvents | subscribe to host-level events (heartbeat + lifecycle) |
+//! | 0x39 | Signal  | POSIX signal to a shell's process group                    |
 //!
 //! ## daemon -> client ([`CtlReply`])
 //!
@@ -44,6 +46,7 @@
 //! | 0xAD | HostHeartbeat| periodic host liveness digest (roster + alive)      |
 //! | 0xAE | StreamReady | stream attached and ready to accept input/output     |
 //! | 0xAF | StreamClosed| stream closed (child exited or teardown)             |
+//! | 0xB0 | AlreadyExited| Signal target had already exited (instance + code)  |
 
 use std::io::{self, Read, Write};
 
@@ -354,6 +357,12 @@ pub enum CtlReply {
     StreamReady { instance: String },
     /// REQ-STREAM-EVENT-2: stream closed (child exited or teardown).
     StreamClosed { instance: String, code: Option<i32> },
+    /// REQ-PTY-1: reply to [`CtlMsg::Signal`] when the target's child has
+    /// already exited (its tombstone is still registered). Distinct from
+    /// `Error` so the caller can finalize the session with `code` instead of
+    /// treating the refused signal as a failure. The daemon never signals a
+    /// reaped pid, since its process group id may have been reused.
+    AlreadyExited { instance: String, code: i32 },
 }
 
 /// One agent's liveness entry inside a [`CtlReply::HostHeartbeat`].
@@ -396,6 +405,7 @@ const T_SHUTTING_DOWN: u8 = 0xAC;
 const T_HOST_HEARTBEAT: u8 = 0xAD;
 pub const T_STREAM_READY: u8 = 0xAE;
 pub const T_STREAM_CLOSED: u8 = 0xAF;
+pub const T_ALREADY_EXITED: u8 = 0xB0;
 
 // ---- primitive codecs ---------------------------------------------------
 
@@ -744,6 +754,7 @@ impl CtlReply {
             CtlReply::ScreenChanged { instance, .. } => Some(instance),
             CtlReply::StreamReady { instance } => Some(instance),
             CtlReply::StreamClosed { instance, .. } => Some(instance),
+            CtlReply::AlreadyExited { instance, .. } => Some(instance),
             _ => None,
         }
     }
@@ -855,6 +866,11 @@ impl CtlReply {
                     }
                     None => p.push(0),
                 }
+            }
+            CtlReply::AlreadyExited { instance, code } => {
+                p.push(T_ALREADY_EXITED);
+                put_str(&mut p, instance);
+                put_i32(&mut p, *code);
             }
         }
         frame(&p)
@@ -994,6 +1010,13 @@ impl CtlReply {
                     None
                 };
                 CtlReply::StreamClosed { instance, code }
+            }
+            T_ALREADY_EXITED => {
+                let instance = get_str(rest, &mut off)?;
+                CtlReply::AlreadyExited {
+                    instance,
+                    code: get_i32(rest, &mut off)?,
+                }
             }
             _ => return Err(bad("unknown reply tag")),
         })
@@ -1211,6 +1234,8 @@ mod tests {
         round_reply(CtlReply::StreamReady { instance: "sh_ready".into() });
         round_reply(CtlReply::StreamClosed { instance: "sh_closed".into(), code: Some(0) });
         round_reply(CtlReply::StreamClosed { instance: "sh_closed_nocode".into(), code: None });
+        round_reply(CtlReply::AlreadyExited { instance: "sh_done".into(), code: 0 });
+        round_reply(CtlReply::AlreadyExited { instance: "sh_killed".into(), code: -1 });
     }
 
     #[test]

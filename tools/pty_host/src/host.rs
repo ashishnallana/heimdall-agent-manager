@@ -78,8 +78,11 @@ impl SpawnConfig {
 /// Handle to a running PTY-hosted child + its live screen model.
 pub struct PtyHost {
     engine: Arc<Mutex<VtEngine>>,
-    writer: Arc<Mutex<Box<dyn Write + Send>>>,
-    master: Box<dyn portable_pty::MasterPty + Send>,
+    /// PTY master write half and the master itself. Each holds its own
+    /// `/dev/ptmx` fd; both become `None` once [`PtyHost::release_pty`] frees
+    /// them after the child exits (REQ-PTY-1).
+    writer: Mutex<Option<Box<dyn Write + Send>>>,
+    master: Option<Box<dyn portable_pty::MasterPty + Send>>,
     killer: Arc<Mutex<Box<dyn portable_pty::ChildKiller + Send + Sync>>>,
     child_alive: Arc<AtomicBool>,
     exit_code: Arc<AtomicI32>,
@@ -153,9 +156,11 @@ impl PtyHost {
         let (output_tx, output_rx) = mpsc::sync_channel::<Vec<u8>>(64);
 
         // Reader thread: pump PTY bytes into the VT engine + broadcast raw bytes.
+        // A thread that cannot be created kills the child and fails the spawn
+        // rather than panicking the caller (REQ-PTY-3).
         let reader_thread = {
             let engine = Arc::clone(&engine);
-            std::thread::spawn(move || {
+            std::thread::Builder::new().spawn(move || {
                 let mut buf = [0u8; 8192];
                 loop {
                     match reader.read(&mut buf) {
@@ -178,23 +183,37 @@ impl PtyHost {
                 }
             })
         };
+        let reader_thread = match reader_thread {
+            Ok(t) => t,
+            Err(e) => {
+                let _ = killer.clone_killer().kill();
+                return Err(e).context("failed to start PTY reader thread");
+            }
+        };
 
         // Wait thread: reap the child + record its exit status.
         let wait_thread = {
             let child_alive = Arc::clone(&child_alive);
             let exit_code = Arc::clone(&exit_code);
-            std::thread::spawn(move || {
+            std::thread::Builder::new().spawn(move || {
                 if let Ok(status) = child.wait() {
                     exit_code.store(status.exit_code() as i32, Ordering::SeqCst);
                 }
                 child_alive.store(false, Ordering::SeqCst);
             })
         };
+        let wait_thread = match wait_thread {
+            Ok(t) => t,
+            Err(e) => {
+                let _ = killer.clone_killer().kill();
+                return Err(e).context("failed to start child wait thread");
+            }
+        };
 
         Ok(PtyHost {
             engine,
-            writer: Arc::new(Mutex::new(writer)),
-            master: pair.master,
+            writer: Mutex::new(Some(writer)),
+            master: Some(pair.master),
             killer: Arc::new(Mutex::new(killer)),
             child_alive,
             exit_code,
@@ -208,7 +227,10 @@ impl PtyHost {
 
     /// Send raw bytes to the child's stdin (via the PTY).
     pub fn write_input(&self, bytes: &[u8]) -> Result<()> {
-        let mut w = self.writer.lock().unwrap();
+        let mut guard = self.writer.lock().unwrap();
+        let w = guard
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("write to PTY failed: session has exited"))?;
         w.write_all(bytes).context("write to PTY failed")?;
         w.flush().ok();
         Ok(())
@@ -224,26 +246,24 @@ impl PtyHost {
         Arc::clone(&self.engine)
     }
 
-    /// Shared writer handle.
-    pub fn writer(&self) -> Arc<Mutex<Box<dyn Write + Send>>> {
-        Arc::clone(&self.writer)
-    }
-
     /// Take the raw-output receiver (single consumer). Later tasks fan this out.
     pub fn take_output_rx(&mut self) -> Option<Receiver<Vec<u8>>> {
         self.output_rx.take()
     }
 
     /// Resize the PTY window + the VT model together (REQ PTYH-1 winsize).
+    /// After [`PtyHost::release_pty`] only the VT model is resized.
     pub fn resize(&mut self, rows: u16, cols: u16) -> Result<()> {
-        self.master
-            .resize(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .context("PTY resize failed")?;
+        if let Some(master) = &self.master {
+            master
+                .resize(PtySize {
+                    rows,
+                    cols,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .context("PTY resize failed")?;
+        }
         self.engine
             .lock()
             .unwrap()
@@ -295,6 +315,32 @@ impl PtyHost {
         } else {
             Some(self.exit_code.load(Ordering::SeqCst))
         }
+    }
+
+    /// REQ-PTY-1: close this host's PTY master fds once the child has exited.
+    ///
+    /// The reader thread holds its own fd (closed at EOF), so a straggler that
+    /// still has the slave open only keeps that one fd, never these two. Callers
+    /// wait for [`PtyHost::reader_done`] first so the child's last output is
+    /// already in the VT model. Afterwards `capture` keeps answering from the VT
+    /// model while `write_input` errors. No-op while the child is alive;
+    /// idempotent.
+    pub fn release_pty(&mut self) {
+        if self.is_alive() {
+            return;
+        }
+        self.writer.lock().unwrap().take();
+        self.master.take();
+    }
+
+    /// Whether the reader thread has hit EOF (all child output is consumed).
+    pub fn reader_done(&self) -> bool {
+        self.reader_thread.as_ref().map_or(true, |t| t.is_finished())
+    }
+
+    /// Whether [`PtyHost::release_pty`] has closed the master fds.
+    pub fn pty_released(&self) -> bool {
+        self.master.is_none()
     }
 
     pub fn alive_flag(&self) -> Arc<AtomicBool> {
