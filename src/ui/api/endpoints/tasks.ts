@@ -43,7 +43,7 @@ function unwrapData(res: any): any {
 }
 
 // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
-function normalizeTask(task: any) {
+export function normalizeTask(task: any) {
   // Derive assigneeAgentInstanceId
   const assigneeAgentInstanceId =
     task.assignee_agent_instance_id ||
@@ -133,6 +133,10 @@ function normalizeTask(task: any) {
 
   // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
   const result: any = {
+    // Task System v2: the board/detail components read the raw snake_case wire
+    // (TaskWire: task_id, attempt_no, comment_summary, …), so keep every wire field
+    // and layer the legacy camelCase projection on top.
+    ...task,
     // TODO(FIX): Replace loose fallback chain with canonical typed schema property
     id: task.task_id || task.id,
     // TODO(FIX): Replace loose fallback chain with canonical typed schema property
@@ -293,7 +297,7 @@ export function normalizeTaskChainDirectory(d: any): TaskChainDirectory {
 }
 
 // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
-function normalizeTaskChainDetail(data: any) {
+export function normalizeTaskChainDetail(data: any) {
   if (!data) return null;
 
   // Build memberNameMap from data.members mapping both agentInstanceId and agent_instance_id to displayName

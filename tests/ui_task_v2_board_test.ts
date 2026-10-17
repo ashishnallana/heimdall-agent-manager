@@ -359,3 +359,41 @@ test('Invariant: legacy v1 hooks and endpoints are removed and v2 hooks are pres
     'useRunWorkflowMutation must exist'
   );
 });
+
+test('chain detail normalizer keeps the v2 wire fields the board and detail views read', async () => {
+  // Regression: normalizeTask projected tasks to legacy camelCase only, so
+  // TaskCard rendered task-card-undefined and a click selected `undefined`
+  // (detail view never opened). Feed an API-shaped chain detail through it.
+  const { normalizeTaskChainDetail } = await import('../src/ui/api/endpoints/tasks.ts');
+  const wire = {
+    task_id: 'task_abc',
+    chain_id: 'chain_abc',
+    title: 'Add refresh_tokens table',
+    publish_state: 'published',
+    state: 'ready',
+    kind: 'task',
+    priority: 'p0',
+    attempt_no: 2,
+    bridge_id: 'brg_1',
+    ready_since: '2026-10-17T04:38:42Z',
+    blocked_on: null,
+    requires_user_approval: true,
+    brief: { goal: 'Create the table', acceptance: ['migration applies'], verify: 'true' },
+    leases: [],
+    comment_summary: { count: 1, last_comment_at: '', last_comment_author_agent_instance_id: '', last_comment_preview: 'hi' },
+  };
+  const chain = normalizeTaskChainDetail({ chain_id: 'chain_abc', title: 'c', tasks: [wire], members: [] });
+  const t = chain.tasks[0];
+  for (const key of Object.keys(wire) as (keyof typeof wire)[]) {
+    if (key === 'priority' || key === 'brief') continue;
+    assert.deepEqual(t[key], wire[key], `wire field ${key} must survive normalization`);
+  }
+  assert.equal(t.priority, 'p0');
+  assert.deepEqual(t.brief, wire.brief);
+  // Legacy camelCase readers keep working.
+  assert.equal(t.taskId, 'task_abc');
+  assert.equal(t.attemptNo, 2);
+  // Badges derived from the normalized task see the wire fields too.
+  const labels = getTaskBadges(t as TaskWire, []).map((b) => b.label).join(' ');
+  assert.ok(!labels.includes('undefined'), `badges must not render undefined: ${labels}`);
+});

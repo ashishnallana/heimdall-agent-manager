@@ -21,6 +21,8 @@ export const TaskCard: React.FC<TaskCardProps> = ({
   const badges = getTaskBadges(task, chainFleets);
   const isAwaitingUser = state === 'in_review' && task.requires_user_approval;
   const isGate = task.kind === 'gate';
+  // The wire sends lowercase p0|p1|p2; older fixtures use P0 / urgent / high.
+  const priority = String(task.priority || '').toLowerCase();
 
   const summary = task.comment_summary?.last_comment_preview ||
     (task.brief?.goal ? String(task.brief.goal) : '');
@@ -68,9 +70,9 @@ export const TaskCard: React.FC<TaskCardProps> = ({
         ) : (
           <span
             className={`shrink-0 rounded-md px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase ${
-              task.priority === 'P0' || task.priority === 'urgent'
+              priority === 'p0' || priority === 'urgent'
                 ? 'bg-danger-soft text-danger'
-                : task.priority === 'P1' || task.priority === 'high'
+                : priority === 'p1' || priority === 'high'
                   ? 'bg-warning-soft text-warning'
                   : 'bg-neutral-soft text-muted'
             }`}
