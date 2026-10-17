@@ -141,7 +141,7 @@ export function getTaskBadges(task: TaskWire, _chainFleets?: any[], nowMs: numbe
   } else if (merge && merge.state === 'failed') {
     badges.push({ kind: 'merge', label: 'Merge failed – retrying', tone: 'warn', title: merge.detail ? `Merge did not run: ${merge.detail}. Retried when the bridge reconnects.` : 'Merge did not run; retried when the bridge reconnects.' });
   } else if (merge && merge.state === 'merged' && merge.head) {
-    badges.push({ kind: 'merge', label: `Merged → ${merge.head.slice(0, 7)}`, tone: 'ok', title: `Merged${merge.detail ? ` (${merge.detail})` : ''} at ${merge.head}` });
+    badges.push({ kind: 'merge', label: `Merged at ${merge.head.slice(0, 7)}`, tone: 'ok', title: `Merged${merge.detail ? ` (${merge.detail})` : ''} at ${merge.head}` });
   }
 
   return badges;
@@ -248,6 +248,21 @@ export interface TaskPeople {
 
 function fleetRoles(f: any): string[] {
   return Array.isArray(f?.roles) ? f.roles.map(String) : [];
+}
+
+/** One changed file of an attempt's VCS facet. */
+export interface TaskChangedFile {
+  path: string;
+  add?: number;
+  del?: number;
+}
+
+/** The facet's `files`: plain paths or `{path, status, add, del}` objects. */
+export function taskChangedFiles(vcs: any): TaskChangedFile[] {
+  const files = Array.isArray(vcs?.files) ? vcs.files : [];
+  return files
+    .map((f: any): TaskChangedFile => (typeof f === 'string' ? { path: f } : { path: String(f?.path || ''), add: f?.add, del: f?.del }))
+    .filter((f: TaskChangedFile) => f.path);
 }
 
 export function getTaskPeople(task: TaskWire, chainFleets: any[] = []): TaskPeople {

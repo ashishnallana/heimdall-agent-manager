@@ -59,7 +59,7 @@ test_attention_ranges_counts_and_order :: proc(t: ^testing.T) {
 		testing.expect_value(t, r7.items[1].reason, ATTENTION_REASON_QUESTION)
 		testing.expect_value(t, r7.items[1].primary_op, "")
 		testing.expect_value(t, string(r7.items[2].card.card_id), "crd_task_task_2h")
-		testing.expect_value(t, r7.items[2].primary_op, "task.vote")
+		testing.expect_value(t, r7.items[2].primary_op, "task.answer")
 		testing.expect_value(t, r7.items[2].reason, ATTENTION_REASON_AWAITING_REVIEW)
 		// Context resolved in batch: the chain title (ciphertext, verbatim).
 		testing.expect_value(t, r7.items[2].ctx.chain_title, "vault:v1:chain-title")

@@ -492,9 +492,10 @@ test('deck: reviewer menu loads the fleet on demand with a loader, then hands th
     assert.equal(pending[0].label, 'Handed to codex-reviewer');
     await act(async () => { await scheduler.flushAll(true); });
     const patch = hits.indexOf('PATCH /api/v1/task-chains/chain_secret_id/tasks/task_secret_a');
-    const reconcile = hits.indexOf('POST /api/v1/task-chains/chain_secret_id/reconcile');
     assert.ok(patch >= 0, 'reviewer set on the task');
-    assert.ok(reconcile > patch, 'then the chain is reconciled so the reviewer actually starts');
+    // Task System v2 re-gates the task on the reviewer edit itself (stale review
+    // leases replaced, the new reviewer matched), so there is no separate reconcile.
+    assert.equal(hits.indexOf('POST /api/v1/task-chains/chain_secret_id/reconcile'), -1, 'no reconcile call');
   }, { routes });
 });
 

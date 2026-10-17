@@ -114,12 +114,15 @@ test_fleet_custom_review_roles_and_reviewers_keep_brief_roles :: proc(t: ^testin
 		testing.expect(t, berr.code == .Validation_Failed, fmt.tprintf("role %q refused", bad))
 	}
 
-	// reviewers[] on create keeps the brief's own review roles and adds reviewer
+	// reviewers[] on create keeps the brief's own review roles and names the
+	// reviewer agents in brief.reviewers (hybrid model: named reviewers are not
+	// folded into a "reviewer" role any more)
 	task, tok, terr := create_task(&svc, auth, Create_Task_Input{chain_id = chain.chain_id, title = "rotate",
 		brief_json = `{"goal":"g","acceptance":["a"],"verify":"true","review_roles":["security"]}`,
 		reviewer_agent_ids = []string{"agt_rev"}})
 	if !testing.expect(t, tok, fmt.tprintf("create: %s", terr.message)) do return
-	testing.expect(t, strings.contains(task.brief_json, `"review_roles":["security","reviewer"]`), fmt.tprintf("brief keeps security + adds reviewer: %s", task.brief_json))
+	testing.expect(t, strings.contains(task.brief_json, `"review_roles":["security"]`), fmt.tprintf("brief keeps its security role: %s", task.brief_json))
+	testing.expect(t, strings.contains(task.brief_json, `"reviewers":["agt_rev"]`), fmt.tprintf("brief names the reviewer agent: %s", task.brief_json))
 	// both roles are covered by fleet rows → publish passes
 	_, pok, perr := publish_chain(&svc, auth, chain.chain_id)
 	testing.expect(t, pok, fmt.tprintf("publish: %s %s", perr.message, perr.details_json))

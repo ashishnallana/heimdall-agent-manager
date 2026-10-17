@@ -8,7 +8,7 @@ import {
   useFetchTaskEventsQuery,
   useFetchTaskFacetQuery,
 } from '../../api/endpoints/tasks';
-import { getTaskPeople, normalizeTaskState } from './taskV2Types';
+import { getTaskPeople, normalizeTaskState, taskChangedFiles } from './taskV2Types';
 import { awaitingYourReview, blockedOnYou } from './taskActions';
 import type { TaskActionsApi } from './useTaskActions';
 import { EMPTY_TASK_NAMES, instanceAgentsFromEvents, withInstanceAgents, type TaskNames } from './taskNames';
@@ -136,10 +136,7 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
   const verify = verifyData?.facet;
   const output = outputData?.facet;
   const findings = findingsData?.facet;
-  // The bridge reports files as paths or as {path, status, add, del} objects.
-  const changedFiles: { path: string; add?: number; del?: number }[] = (Array.isArray(vcs?.files) ? vcs.files : [])
-    .map((f: any) => (typeof f === 'string' ? { path: f } : { path: String(f?.path || ''), add: f?.add, del: f?.del }))
-    .filter((f: { path: string }) => f.path);
+  const changedFiles = taskChangedFiles(vcs);
 
   const [diffFile, setDiffFile] = useState<string | null>(null);
   const { data: diffData } = useFetchCommitDiffQuery(

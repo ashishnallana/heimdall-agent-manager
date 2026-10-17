@@ -93,7 +93,7 @@ FTS_PROVIDERS := []Fts_Provider{
 		{
 			resource_type = "task", base = "tasks", fts = "tasks_fts",
 			id_expr = "c.task_id", label_expr = "c.title",
-			sublabel_expr = "'chain ' || c.chain_id || ' \u00b7 ' || c.status",
+			sublabel_expr = "'chain ' || c.chain_id || ' \u00b7 ' || c.state",
 			route_expr = "'/chains/' || c.chain_id || '/tasks/' || c.task_id", primary_expr = "c.title",
 			scope_task = "c.task_id", scope_chain = "c.chain_id", bm25_weights = "10.0, 1.0", secondary_field = "description",
 		},
@@ -207,7 +207,7 @@ run_fts_search :: proc(impl: ^Search_Repo_SQLite, d: Fts_Provider, query: iface.
 	defer delete(sql_c)
 
 	stmt: sqlite3_stmt = nil
-	if sqlite3_prepare_v2(impl.conn.db, sql_c, -1, &stmt, nil) != SQLITE_OK do return nil, false, domain.domain_error(.Internal_Error, "failed to prepare fts search query")
+	if sqlite3_prepare_v2(impl.conn.db, sql_c, -1, &stmt, nil) != SQLITE_OK do return nil, false, domain.domain_error(.Internal_Error, fmt.tprintf("failed to prepare fts search query (%s): %s", d.resource_type, string(sqlite3_errmsg(impl.conn.db))))
 	defer sqlite3_finalize(stmt)
 	for i in 1..=6 do bind_text(stmt, i, query.q)
 	bind_text(stmt, 7, string(query.owner_user_id))

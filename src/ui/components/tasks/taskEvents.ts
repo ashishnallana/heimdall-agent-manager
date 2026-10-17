@@ -34,6 +34,7 @@ export const EXPIRE_REASON_TEXT: Record<string, string> = {
   cancelled: 'the task was cancelled',
   changes_requested: 'changes were requested',
   hub_restart_no_lease: 'Heimdall restarted',
+  user_stopped: 'a person stopped the agent',
 };
 
 function s(v: unknown): string {
@@ -142,6 +143,8 @@ export function describeTaskEvent(ev: TaskEventWire, names: TaskNames): Describe
     case 'blocked_realert':
       return known('Still blocked and waiting on you');
     case 'answered':
+      // The hub answers a block on another task once that task is done (C3-2).
+      if (p.auto) return known(`Unblocked automatically: ${s(p.note) || 'the task it waited on is done'}`);
       return known(`${who} answered the blocker`);
     case 'handoff':
       return known(`${who} handed the work off${attempt(p)}`);
@@ -175,6 +178,14 @@ export function describeTaskEvent(ev: TaskEventWire, names: TaskNames): Describe
       return known('Work from a plan item that no longer exists was set aside');
     case 'carried_forward':
       return known('Carried forward from the previous run, already done');
+    case 'merged':
+      return known(`Merged into the directory${s(p.mode) ? ` (${s(p.mode).replace(/-/g, ' ')})` : ''}`);
+    case 'merge_conflict':
+      return known(`The branch did not merge${s(p.files) ? `: conflicts in ${s(p.files)}` : ''}; waiting on you`);
+    case 'merge_failed':
+      return known(`The merge did not run${s(p.detail) ? `: ${s(p.detail)}` : ''}; it is retried when the bridge reconnects`);
+    case 'gate_feedback':
+      return known(`The plan was rejected at the gate${s(p.summary) ? `: ${s(p.summary)}` : ''}; planning again`);
     default:
       return { text: humanizeKind(kind), known: false };
   }

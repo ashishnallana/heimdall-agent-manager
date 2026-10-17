@@ -430,6 +430,28 @@ test('getTaskPeople resolves the assignee pin, fleet workers, role reviewers and
   assert.deepEqual(getTaskPeople(makeTask(), []).workers, []);
 });
 
+test('getTaskPeople names the Soloist from its implicit fleet row', async () => {
+  const { getTaskPeople } = await import('../src/ui/components/tasks/taskV2Types.ts');
+  // GET /fleets lists the Soloist coordinator's implicit worker row (no stored row).
+  const people = getTaskPeople(makeTask(), [{ agent_id: 'agt_soloist', roles: ['worker'], implicit: true }]);
+  assert.deepEqual(people.workers, ['agt_soloist']);
+});
+
+test('taskChangedFiles accepts paths and {path, status, add, del} objects', async () => {
+  const { taskChangedFiles } = await import('../src/ui/components/tasks/taskV2Types.ts');
+  assert.deepEqual(taskChangedFiles({ files: ['a.ts'] }), [{ path: 'a.ts' }]);
+  // The object form crashed the details view (React #31) when rendered as a child.
+  assert.deepEqual(taskChangedFiles({ files: [{ path: 'calc/core.py', status: 'M', add: 3, del: 1 }] }), [{ path: 'calc/core.py', add: 3, del: 1 }]);
+  assert.deepEqual(taskChangedFiles({ files: [{ status: 'M' }, ''] }), []);
+  assert.deepEqual(taskChangedFiles(null), []);
+  assert.deepEqual(taskChangedFiles({ files: 'not-an-array' }), []);
+});
+
+test('task card names workers without an "any of" prefix', () => {
+  const src = fs.readFileSync(path.join(REPO_ROOT, 'src/ui/components/tasks/TaskCard.tsx'), 'utf8');
+  assert.ok(!src.includes('any of'), 'the card lists worker names directly');
+});
+
 test('resolveSelectedTaskId drops a selection that is not in the current chain', async () => {
   const { resolveSelectedTaskId } = await import('../src/ui/components/tasks/taskV2Types.ts');
   const tasks = [makeTask({ task_id: 'task_a' }), makeTask({ task_id: 'task_b' })];

@@ -94,6 +94,14 @@ Ph_Status :: enum { In_Progress, In_Validation, Completed }
 // (e.g. an agent reviewer, or "[]") makes the task not await the user.
 PH_USER_REVIEWER :: `[{"type":"user","user_id":"usr_attention"}]`
 
+// PH_BLOCK: the agent question every awaiting ph_task carries.
+PH_BLOCK :: `{"kind":"human","reason":"Which database should I use?"}`
+
+// ph_marker: the v2 source marker of an awaiting ph_task at `updated_at`.
+ph_marker :: proc(updated_at: string) -> string {
+	return fmt.tprintf("v2|backlog|blocked|%s|0|%s", PH_BLOCK, updated_at)
+}
+
 ph_task :: proc(id: string, status: Ph_Status, updated_at: string, reviewers := PH_USER_REVIEWER) -> domain.Task {
 	task := domain.Task{task_id = domain.Task_ID(id), chain_id = PH_CHAIN, owner_user_id = PH_OWNER, title = "vault:v1:task-title", priority = .P1, publish_state = .Published, kind = .Task, brief_json = "{}", created_at = "2026-10-01T00:00:00Z", updated_at = updated_at}
 	switch status {
@@ -101,9 +109,9 @@ ph_task :: proc(id: string, status: Ph_Status, updated_at: string, reviewers := 
 	case .Completed:   task.state = .Done
 	case .In_Validation:
 		task.state = .In_Progress
-		if reviewers == PH_USER_REVIEWER {
+		if strings.contains(reviewers, `"type":"user"`) {
 			task.state = .Backlog
-			task.blocked_on_json = `{"kind":"human","reason":"Which database should I use?"}`
+			task.blocked_on_json = PH_BLOCK
 		}
 	}
 	return task
@@ -134,13 +142,13 @@ test_projector_task_card_lifecycle :: proc(t: ^testing.T) {
 	testing.expect_value(t, c.kind, domain.CARD_KIND_TASK)
 	testing.expect_value(t, c.provider, domain.CARD_PROVIDER_TASK_VALIDATION)
 	testing.expect_value(t, c.attention_since, "2026-10-01T02:00:00Z")
-	testing.expect_value(t, c.source_marker, "in_validation|2026-10-01T02:00:00Z")
+	testing.expect_value(t, c.source_marker, ph_marker("2026-10-01T02:00:00Z"))
 	testing.expect_value(t, c.title, "vault:v1:task-title") // ciphertext verbatim
 	testing.expect_value(t, c.action_refs_json, `{"chain_id":"chain_att","task_id":"task_a"}`)
 	testing.expect_value(t, c.ttl_at, "")
 	testing.expect(t, strings.contains(c.details_json, `"priority":"p1"`), "details carry priority")
-	testing.expect(t, strings.contains(c.details_json, `"excerpt":null`), "no comment yet")
-	testing.expect(t, strings.contains(c.operations_json, `"op":"task.vote"`), "primary op is the vote")
+	testing.expect(t, strings.contains(c.details_json, `"body":"Which database should I use?"`), "excerpt is the agent's question")
+	testing.expect(t, strings.contains(c.operations_json, `"op":"task.answer"`), "primary op answers the block")
 
 	// Idempotent: re-projecting the same source writes nothing.
 	changes_before := len(h.changed_kinds)
@@ -151,11 +159,12 @@ test_projector_task_card_lifecycle :: proc(t: ^testing.T) {
 	testing.expect_value(t, c2.updated_at, updated_before)
 	testing.expect_value(t, len(h.changed_kinds), changes_before)
 
-	// A comment refreshes the excerpt without changing the marker.
+	// A comment re-projects the card without changing the marker.
 	_, cm_ok, _ := taskchain_service.save_comment(&h.taskchains, domain.Task_Comment{comment_id = "cmt_1", task_id = "task_a", chain_id = PH_CHAIN, owner_user_id = PH_OWNER, body = "vault:v1:comment", created_at = "2026-10-01T02:30:00Z", updated_at = "2026-10-01T02:30:00Z"})
 	testing.expect(t, cm_ok, "save comment")
 	c3, _ := ph_card(t, &h, cid)
-	testing.expect(t, strings.contains(c3.details_json, `"body":"vault:v1:comment"`), "excerpt is the latest comment, ciphertext verbatim")
+	// A blocked card quotes the block, not the latest comment (v2).
+	testing.expect(t, strings.contains(c3.details_json, `"body":"Which database should I use?"`), "excerpt stays the agent's question")
 	testing.expect_value(t, c3.source_marker, c.source_marker)
 
 	// Leaves validation: retired to resolved.
@@ -271,13 +280,13 @@ test_projector_compare_and_set_rejects_stale :: proc(t: ^testing.T) {
 	testing.expect_value(t, err.code, domain.Error_Code.None)
 	testing.expect(t, !changed, "CAS with stale expectations must not write")
 	now, _ := ph_card(t, &h, cid)
-	testing.expect_value(t, now.source_marker, "in_validation|2026-10-01T03:00:00Z")
+	testing.expect_value(t, now.source_marker, ph_marker("2026-10-01T03:00:00Z"))
 
 	// An out-of-order notification (old state) re-reads the source, so the
 	// card still reflects the current task.
 	_, _ = project_task_card(&h.svc, PH_OWNER, "task_c")
 	again, _ := ph_card(t, &h, cid)
-	testing.expect_value(t, again.source_marker, "in_validation|2026-10-01T03:00:00Z")
+	testing.expect_value(t, again.source_marker, ph_marker("2026-10-01T03:00:00Z"))
 }
 
 ph_conversation :: proc(t: ^testing.T, h: ^Projector_Harness, conv_id, instance_id: string) {
@@ -407,5 +416,5 @@ test_projector_accept_does_not_swallow_new_round :: proc(t: ^testing.T) {
 	testing.expect_value(t, got.status, domain.CARD_STATUS_PENDING)
 	now, _ := ph_card(t, &h, cid)
 	testing.expect_value(t, now.status, domain.CARD_STATUS_PENDING)
-	testing.expect_value(t, now.source_marker, "in_validation|2026-10-01T03:00:00Z")
+	testing.expect_value(t, now.source_marker, ph_marker("2026-10-01T03:00:00Z"))
 }

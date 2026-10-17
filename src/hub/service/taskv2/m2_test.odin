@@ -188,7 +188,12 @@ test_oscillation_guard_parks_after_three_rounds :: proc(t: ^testing.T) {
 		write_verify(fx, "task_1", l.attempt_no, fmt.tprintf("h%d", round), 0)
 		_, sok, serr := lease_submit(&fx.svc, inst_auth("inst_w1"), Submit_Input{summary = "try", vcs_json = fmt.tprintf(`{{"head":"h%d","dirty":false}}`, round)})
 		if !testing.expect(t, sok, fmt.tprintf("submit %d: %s", round, serr.message)) do return
-		_, rok, rerr := review_post(&fx.svc, inst_auth("inst_r1"), Review_Input{verdict = "request_changes"})
+		if round == 1 {
+			// REQ-SOLO-8: a verdict without words is refused — findings first.
+			_, nok, nerr := review_post(&fx.svc, inst_auth("inst_r1"), Review_Input{verdict = "request_changes"})
+			testing.expect(t, !nok && nerr.code == .Validation_Failed, "request_changes without a summary or findings is refused")
+		}
+		_, rok, rerr := review_post(&fx.svc, inst_auth("inst_r1"), Review_Input{verdict = "request_changes", summary = fmt.tprintf("round %d: still wrong", round)})
 		if !testing.expect(t, rok, fmt.tprintf("review %d: %s", round, rerr.message)) do return
 	}
 	parked := get_task(fx, "task_1")
@@ -205,7 +210,7 @@ test_oscillation_guard_parks_after_three_rounds :: proc(t: ^testing.T) {
 	write_verify(fx, "task_1", l4.attempt_no, "h4", 0)
 	_, s4ok, _ := lease_submit(&fx.svc, inst_auth("inst_w1"), Submit_Input{summary = "try 4", vcs_json = `{"head":"h4","dirty":false}`})
 	testing.expect(t, s4ok, "submit 4")
-	_, r4ok, _ := review_post(&fx.svc, inst_auth("inst_r1"), Review_Input{verdict = "request_changes"})
+	_, r4ok, _ := review_post(&fx.svc, inst_auth("inst_r1"), Review_Input{verdict = "request_changes", summary = "round 4"})
 	testing.expect(t, r4ok, "review 4")
 	// 1 round after answer < 3, so NOT parked for oscillation
 	testing.expect_value(t, get_task(fx, "task_1").state, domain.Task_State.In_Progress)

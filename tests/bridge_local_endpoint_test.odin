@@ -131,6 +131,12 @@ main :: proc() {
 	// Spoof-guard still blocks owner/token fields on a create body.
 	admin_spoof := bridge.bridge_local_endpoint_handle_jsonl_line(strings.concatenate({"{\"v\":1,\"id\":\"admin_spoof\",\"token\":\"", issued.plaintext_token, "\",\"method\":\"agent.agents.create\",\"params\":{\"name\":\"x\",\"owner_user_id\":\"usr_other\"}}"}))
 	check(strings.contains(admin_spoof, "\"ok\":false") && strings.contains(admin_spoof, "forbidden"), "admin verbs must not let callers spoof owner_user_id")
+	// F2: with no hub runtime session the bridge refuses to relay (nothing is sent);
+	// the mock hub below stands in for an established session.
+	down := bridge.bridge_local_endpoint_handle_jsonl_line(strings.concatenate({"{\"v\":1,\"id\":\"down\",\"token\":\"", issued.plaintext_token, "\",\"method\":\"agent.context.get\",\"params\":{}}"}))
+	check(strings.contains(down, "hub_unreachable"), "relay refused while the hub runtime is down")
+	bridge.bridge_hub_runtime_up = true
+	defer bridge.bridge_hub_runtime_up = false
 	ctx := bridge.bridge_local_endpoint_handle_jsonl_line(strings.concatenate({"{\"v\":1,\"id\":\"ctx\",\"token\":\"", issued.plaintext_token, "\",\"method\":\"agent.context.get\",\"params\":{}}"}))
 	check(strings.contains(ctx, "\"ok\":true") && strings.contains(ctx, "inst_local") && !strings.contains(ctx, "MISSING"), "context.get should resolve identity and return valid JSON")
 	spaced_ctx := bridge.bridge_local_endpoint_handle_jsonl_line(strings.concatenate({"{ \"v\" : 1, \"id\" : \"spaced\", \"token\" : \"", issued.plaintext_token, "\", \"method\" : \"agent.context.get\", \"params\" : { } }"}))

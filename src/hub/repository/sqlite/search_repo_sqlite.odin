@@ -358,7 +358,7 @@ run_type_search :: proc(impl: ^Search_Repo_SQLite, resource_type: string, query:
 	defer if needs_free { delete(sql_str); delete(sql_c) }
 
 	stmt: sqlite3_stmt = nil
-	if sqlite3_prepare_v2(impl.conn.db, sql_c, -1, &stmt, nil) != SQLITE_OK do return nil, false, domain.domain_error(.Internal_Error, "failed to prepare search query")
+	if sqlite3_prepare_v2(impl.conn.db, sql_c, -1, &stmt, nil) != SQLITE_OK do return nil, false, domain.domain_error(.Internal_Error, fmt.tprintf("failed to prepare search query (%s): %s", resource_type, string(sqlite3_errmsg(impl.conn.db))))
 	defer sqlite3_finalize(stmt)
 	for i in 1..=7 do bind_text(stmt, i, query.q)
 	bind_text(stmt, 8, string(query.owner_user_id))
@@ -688,9 +688,9 @@ ORDER BY score DESC, updated_at DESC, id ASC LIMIT ?;`
 
 SEARCH_SQL_TASKS :: `SELECT resource_type, id, label, sublabel, route, score FROM (
   SELECT 'task' AS resource_type, task_id AS id, title AS label,
-         'chain ' || chain_id || ' · ' || status AS sublabel,
+         'chain ' || chain_id || ' · ' || state AS sublabel,
          '/chains/' || chain_id || '/tasks/' || task_id AS route, updated_at, owner_user_id,
-         chain_id || ' ' || status || ' ' || assignee_ref_json || ' ' || reviewer_refs_json AS aux,
+         chain_id || ' ' || state || ' ' || kind AS aux,
          task_id AS scope_task_id, chain_id AS scope_chain_id, '' AS scope_project_id, '' AS scope_conversation_id,
          CASE
            WHEN lower(title) = lower(?) THEN 100
