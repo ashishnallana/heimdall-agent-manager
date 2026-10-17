@@ -1,5 +1,6 @@
 package taskv2
 
+import "core:encoding/json"
 import "core:fmt"
 import "core:slice"
 import "core:strconv"
@@ -993,7 +994,6 @@ try_carry_forward_stage_item :: proc(
 	now: string,
 ) -> (domain.Task, bool) {
 	prefix := fmt.tprintf("~carry~%s~", stage_key)
-	norm_new := normalize_json_compact(item_json, context.temp_allocator)
 	new_key := strings.trim_space(jsonx.extract_string(item_json, "key", "", true, context.temp_allocator))
 	if new_key == "" do new_key = strings.trim_space(jsonx.extract_string(item_json, "id", "", true, context.temp_allocator))
 
@@ -1003,7 +1003,7 @@ try_carry_forward_stage_item :: proc(
 		if !has_old do continue
 		old_key := strings.trim_space(jsonx.extract_string(t.generated_by_json, "item_key", "", true, context.temp_allocator))
 		if new_key != "" && old_key != "" && new_key != old_key do continue
-		if normalize_json_compact(old_item, context.temp_allocator) != norm_new do continue
+		if !json_strings_equal(old_item, item_json, context.temp_allocator) do continue
 
 		// Identical item found! Restore it to active stage_key and stage_index
 		restored := t
@@ -1032,28 +1032,56 @@ try_carry_forward_stage_item :: proc(
 }
 
 @(private = "file")
-normalize_json_compact :: proc(s: string, allocator := context.temp_allocator) -> string {
-	b := strings.builder_make(allocator)
-	in_str := false
-	esc := false
-	for i in 0..<len(s) {
-		ch := s[i]
-		if in_str {
-			strings.write_byte(&b, ch)
-			if esc {
-				esc = false
-			} else if ch == '\\' {
-				esc = true
-			} else if ch == '"' {
-				in_str = false
-			}
-		} else {
-			if ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' do continue
-			if ch == '"' do in_str = true
-			strings.write_byte(&b, ch)
+json_values_equal :: proc(v1, v2: json.Value) -> bool {
+	#partial switch a in v1 {
+	case json.Null:
+		_, is_null := v2.(json.Null)
+		return is_null
+	case json.Boolean:
+		b, is_b := v2.(json.Boolean)
+		return is_b && bool(a) == bool(b)
+	case json.Integer:
+		b, is_b := v2.(json.Integer)
+		if is_b do return i64(a) == i64(b)
+		f, is_f := v2.(json.Float)
+		return is_f && f64(a) == f64(f)
+	case json.Float:
+		b, is_b := v2.(json.Float)
+		if is_b do return f64(a) == f64(b)
+		i, is_i := v2.(json.Integer)
+		return is_i && f64(a) == f64(i)
+	case json.String:
+		b, is_b := v2.(json.String)
+		return is_b && string(a) == string(b)
+	case json.Array:
+		b, is_b := v2.(json.Array)
+		if !is_b || len(a) != len(b) do return false
+		for it, idx in a {
+			if !json_values_equal(it, b[idx]) do return false
 		}
+		return true
+	case json.Object:
+		b, is_b := v2.(json.Object)
+		if !is_b || len(a) != len(b) do return false
+		for k, v in a {
+			b_val, has_k := b[k]
+			if !has_k || !json_values_equal(v, b_val) do return false
+		}
+		return true
 	}
-	return strings.to_string(b)
+	return false
+}
+
+@(private = "file")
+json_strings_equal :: proc(s1, s2: string, allocator := context.temp_allocator) -> bool {
+	t1 := strings.trim_space(s1)
+	t2 := strings.trim_space(s2)
+	if t1 == t2 do return true
+	v1, err1 := json.parse(transmute([]u8)t1, allocator = allocator)
+	if err1 != .None do return false
+	v2, err2 := json.parse(transmute([]u8)t2, allocator = allocator)
+	if err2 != .None do return false
+	return json_values_equal(v1, v2)
 }
 
 @(private = "file")

@@ -15,7 +15,7 @@ import {
   canPauseTask,
   hasLiveNudgeTarget,
   getUnpauseStatus,
-} from '../src/ui/components/tasks/TaskCard.ts';
+} from '../src/ui/components/tasks/taskCardLegacy.ts';
 import {
   activeTasksByRole,
   changedFleetEntries,

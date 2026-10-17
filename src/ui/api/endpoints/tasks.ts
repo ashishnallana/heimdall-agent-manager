@@ -364,6 +364,7 @@ export type ChainListItem = {
   chainId: string;
   title: string;
   status: string;
+  kind?: string;
   updatedAt: string;
   coordinatorAgentInstanceId: string;
   projectId: string;
@@ -389,6 +390,7 @@ function normalizeChainListItem(c: any): ChainListItem {
     chainId: String(c?.chain_id ?? c?.chainId ?? ''),
     title: String(c?.title ?? ''),
     status: String(c?.status ?? ''),
+    kind: String(c?.kind || 'ticket'),
     updatedAt: String(c?.updated_at ?? c?.updatedAt ?? ''),
     coordinatorAgentInstanceId: String(c?.coordinator_agent_instance_id ?? c?.coordinatorAgentInstanceId ?? ''),
     projectId: String(c?.project_id ?? c?.projectId ?? ''),
@@ -1261,21 +1263,173 @@ export const tasksApi = heimdallApi.injectEndpoints({
       }),
       invalidatesTags: (_result, _error, { taskId, chainId }) => preciseTaskTags(taskId, chainId, true),
     }),
-    // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
-    setTaskStatus: build.mutation<any, { taskId: string; chainId: string; status: string; body?: string; agentToken?: string }>({
-      queryFn: async ({ taskId, chainId, status }) => {
+    // Task System v2 (M4): human action verbs replacing legacy set-status/vote/nudge.
+    userReviewTask: build.mutation<any, { chainId: string; taskId: string; verdict: 'approve' | 'request_changes'; findings?: any }>({
+      queryFn: async ({ chainId, taskId, verdict, findings }) => {
         try {
-          const data = await cookieMutation(`/task-chains/${encodeURIComponent(chainId)}/tasks/${encodeURIComponent(taskId)}/status`, 'POST', { status });
+          const body: any = { verdict };
+          if (findings !== undefined) body.findings = findings;
+          const data = await cookieMutation(`/task-chains/${encodeURIComponent(chainId)}/tasks/${encodeURIComponent(taskId)}/review`, 'POST', body);
           return { data };
         } catch (error: any) {
           return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
         }
       },
       invalidatesTags: (_result, _error, { taskId, chainId }) => [
-        ...preciseTaskTags(taskId, chainId),
+        ...preciseTaskTags(taskId, chainId, true),
+        { type: 'Chain' as const, id: chainId },
+      ],
+    }),
+    reopenTask: build.mutation<any, { chainId: string; taskId: string }>({
+      queryFn: async ({ chainId, taskId }) => {
+        try {
+          const data = await cookieMutation(`/task-chains/${encodeURIComponent(chainId)}/tasks/${encodeURIComponent(taskId)}/reopen`, 'POST', {});
+          return { data };
+        } catch (error: any) {
+          return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
+        }
+      },
+      invalidatesTags: (_result, _error, { taskId, chainId }) => [
+        ...preciseTaskTags(taskId, chainId, true),
+        { type: 'Chain' as const, id: chainId },
+      ],
+    }),
+    answerTaskBlocker: build.mutation<any, { chainId: string; taskId: string; note?: string }>({
+      queryFn: async ({ chainId, taskId, note = '' }) => {
+        try {
+          const data = await cookieMutation(`/task-chains/${encodeURIComponent(chainId)}/tasks/${encodeURIComponent(taskId)}/answer`, 'POST', { note });
+          return { data };
+        } catch (error: any) {
+          return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
+        }
+      },
+      invalidatesTags: (_result, _error, { taskId, chainId }) => [
+        ...preciseTaskTags(taskId, chainId, true),
+        { type: 'Chain' as const, id: chainId },
+      ],
+    }),
+    verifyTask: build.mutation<any, { chainId: string; taskId: string }>({
+      queryFn: async ({ chainId, taskId }) => {
+        try {
+          const data = await cookieMutation(`/task-chains/${encodeURIComponent(chainId)}/tasks/${encodeURIComponent(taskId)}/verify`, 'POST', {});
+          return { data };
+        } catch (error: any) {
+          return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
+        }
+      },
+      invalidatesTags: (_result, _error, { taskId, chainId }) => preciseTaskTags(taskId, chainId, true),
+    }),
+    fetchTaskEvents: build.query<{ events: any[] }, { chainId: string; taskId: string; beforeId?: number; limit?: number }>({
+      queryFn: async ({ chainId, taskId, beforeId, limit = 50 }) => {
+        try {
+          let url = `/task-chains/${encodeURIComponent(chainId)}/tasks/${encodeURIComponent(taskId)}/events?limit=${limit}`;
+          if (beforeId !== undefined) url += `&before_id=${beforeId}`;
+          const data = await cookieJsonFetch(url);
+          const rawEvents = Array.isArray(data) ? data : data?.data || data?.events || [];
+          return { data: { events: rawEvents } };
+        } catch (error: any) {
+          return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
+        }
+      },
+      providesTags: (_result, _error, { taskId }) => [{ type: 'TaskLog' as const, id: taskId }],
+    }),
+    fetchTaskFacet: build.query<{ facet: any }, { chainId: string; taskId: string; attemptNo: number; kind: string }>({
+      queryFn: async ({ chainId, taskId, attemptNo, kind }) => {
+        try {
+          const url = `/task-chains/${encodeURIComponent(chainId)}/tasks/${encodeURIComponent(taskId)}/attempts/${attemptNo}/facets/${encodeURIComponent(kind)}`;
+          const data = await cookieJsonFetch(url);
+          return { data: { facet: data } };
+        } catch (error: any) {
+          return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
+        }
+      },
+      providesTags: (_result, _error, { taskId }) => [{ type: 'Task' as const, id: taskId }],
+    }),
+    fetchCommitDiff: build.query<any, { chainId: string; directoryId: string; base?: string; head?: string; path?: string; listFiles?: boolean; cursor?: string; limit?: number }>({
+      queryFn: async ({ chainId, directoryId, base = '', head = '', path = '', listFiles = false, cursor = '', limit = 50 }) => {
+        try {
+          const params = new URLSearchParams();
+          if (base) params.set('base', base);
+          if (head) params.set('head', head);
+          if (path) params.set('path', path);
+          if (listFiles) params.set('list_files', 'true');
+          if (cursor) params.set('cursor', cursor);
+          if (limit) params.set('limit', String(limit));
+          const data = await cookieJsonFetch(`/task-chains/${encodeURIComponent(chainId)}/directories/${encodeURIComponent(directoryId)}/vcs/commit-diff?${params.toString()}`);
+          return { data };
+        } catch (error: any) {
+          return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
+        }
+      },
+    }),
+    fetchWorkflowTemplates: build.query<{ templates: any[] }, void>({
+      queryFn: async () => {
+        try {
+          const data = await cookieJsonFetch('/workflows/templates');
+          return { data: { templates: data?.templates || [] } };
+        } catch (error: any) {
+          return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
+        }
+      },
+    }),
+    fetchWorkflowStatus: build.query<any, { chainId: string }>({
+      queryFn: async ({ chainId }) => {
+        try {
+          const data = await cookieJsonFetch(`/task-chains/${encodeURIComponent(chainId)}/workflow/status`);
+          return { data };
+        } catch (error: any) {
+          return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
+        }
+      },
+      providesTags: (_result, _error, { chainId }) => [{ type: 'Chain' as const, id: chainId }],
+    }),
+    retryWorkflow: build.mutation<any, { chainId: string; stageKey?: string; cascade?: boolean; reason?: string }>({
+      queryFn: async ({ chainId, stageKey = '', cascade = false, reason = '' }) => {
+        try {
+          const data = await cookieMutation(
+            `/task-chains/${encodeURIComponent(chainId)}/workflow/retry`,
+            'POST',
+            { stage_key: stageKey, cascade, reason }
+          );
+          return { data };
+        } catch (error: any) {
+          return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
+        }
+      },
+      invalidatesTags: (_result, _error, { chainId }) => [
         { type: 'Chain' as const, id: chainId },
         { type: 'ChainList' as const, id: 'ALL' },
-        { type: 'Chain' as const, id: 'PINNED_LIST' },
+      ],
+    }),
+    cancelWorkflow: build.mutation<any, { chainId: string; reason?: string }>({
+      queryFn: async ({ chainId, reason = '' }) => {
+        try {
+          const data = await cookieMutation(
+            `/task-chains/${encodeURIComponent(chainId)}/workflow/cancel`,
+            'POST',
+            { reason }
+          );
+          return { data };
+        } catch (error: any) {
+          return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
+        }
+      },
+      invalidatesTags: (_result, _error, { chainId }) => [
+        { type: 'Chain' as const, id: chainId },
+        { type: 'ChainList' as const, id: 'ALL' },
+      ],
+    }),
+    runWorkflow: build.mutation<any, { template_id?: string; def_id?: string; name?: string; inputs?: Record<string, any>; project_id?: string }>({
+      queryFn: async (payload) => {
+        try {
+          const data = await cookieMutation('/workflows/run', 'POST', payload);
+          return { data };
+        } catch (error: any) {
+          return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
+        }
+      },
+      invalidatesTags: [
+        { type: 'ChainList' as const, id: 'ALL' },
         { type: 'Chain' as const, id: 'GROUPED_LIST' },
       ],
     }),
@@ -1350,37 +1504,6 @@ export const tasksApi = heimdallApi.injectEndpoints({
       }),
       invalidatesTags: (_result, _error, { taskId, chainId }) => preciseTaskTags(taskId, chainId),
     }),
-    // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
-    voteTask: build.mutation<any, { taskId: string; chainId: string; result?: 'lgtm' | 'ngtm'; approved?: boolean; comment?: string; agentToken?: string }>({
-      queryFn: async ({ taskId, chainId, result, approved, comment = '' }) => {
-        try {
-          const isApproved = approved ?? (result === 'lgtm');
-          const data = await cookieMutation(`/task-chains/${encodeURIComponent(chainId)}/tasks/${encodeURIComponent(taskId)}/vote`, 'POST', { vote: isApproved ? 'lgtm' : 'ngtm', comment });
-          return { data };
-        } catch (error: any) {
-          return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
-        }
-      },
-      invalidatesTags: (_result, _error, { taskId, chainId }) => [
-        ...preciseTaskTags(taskId, chainId),
-        { type: 'Chain' as const, id: chainId },
-        { type: 'ChainList' as const, id: 'ALL' },
-        { type: 'Chain' as const, id: 'PINNED_LIST' },
-        { type: 'Chain' as const, id: 'GROUPED_LIST' },
-      ],
-    }),
-    // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
-    nudgeTask: build.mutation<any, { taskId: string; chainId: string; body?: string; message?: string; interrupt?: boolean; agentToken?: string }>({
-      queryFn: async ({ taskId, chainId, body, message }) => {
-        try {
-          const data = await cookieMutation(`/task-chains/${encodeURIComponent(chainId)}/tasks/${encodeURIComponent(taskId)}/nudge`, 'POST', { message: body ?? message ?? '' });
-          return { data };
-        } catch (error: any) {
-          return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
-        }
-      },
-      invalidatesTags: (_result, _error, { taskId, chainId }) => preciseTaskTags(taskId, chainId),
-    }),
   }),
 });
 
@@ -1414,7 +1537,6 @@ export const {
   useUpdateTaskDetailMutation,
   useCancelTaskDetailMutation,
   useUpdateTaskPriorityMutation,
-  useSetInstanceCurrentTaskMutation,
   useAddChainMemberMutation,
   useRemoveChainMemberMutation,
   useAddChainDirectoryMutation,
@@ -1425,13 +1547,27 @@ export const {
   useDeleteTaskMutation,
   useAddTaskCommentMutation,
   useResolveTaskCommentMutation,
-  useSetTaskStatusMutation,
   useUpdateTaskMutation,
   useAssignTaskMutation,
   useAddTaskParticipantMutation,
   useRemoveTaskParticipantMutation,
-  useVoteTaskMutation,
-  useNudgeTaskMutation,
+
+  // Task System v2 (M4) verbs & queries
+  useUserReviewTaskMutation,
+  useReopenTaskMutation,
+  useAnswerTaskBlockerMutation,
+  useVerifyTaskMutation,
+  useFetchTaskEventsQuery,
+  useLazyFetchTaskEventsQuery,
+  useFetchTaskFacetQuery,
+  useLazyFetchTaskFacetQuery,
+  useFetchCommitDiffQuery,
+  useLazyFetchCommitDiffQuery,
+  useFetchWorkflowTemplatesQuery,
+  useFetchWorkflowStatusQuery,
+  useRetryWorkflowMutation,
+  useCancelWorkflowMutation,
+  useRunWorkflowMutation,
 } = tasksApi;
 
 export {

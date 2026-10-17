@@ -127,9 +127,9 @@ export const resolveCommentOnSelectedTask = createAsyncThunk('tasks/resolveComme
   return await (dispatch as any)(tasksApi.endpoints.resolveTaskComment.initiate({ taskId: task.taskId, chainId: task.chainId, commentId: payload.commentId, agentToken: payload.agentToken })).unwrap();
 });
 
-export const updateSelectedTaskStatus = createAsyncThunk('tasks/updateSelectedTaskStatus', async (payload: any, { dispatch, getState }) => {
-  const task = getSelectedTaskFromCache(getState() as any, payload);
-  return await (dispatch as any)(tasksApi.endpoints.setTaskStatus.initiate({ taskId: task.taskId, chainId: task.chainId, status: payload.status, body: payload.body, agentToken: payload.agentToken })).unwrap();
+export const updateSelectedTaskStatus = createAsyncThunk('tasks/updateSelectedTaskStatus', async (payload: any) => {
+  // Task System v2: manual status setting is disabled; state is a fold over task events.
+  return { taskId: payload?.taskId, status: payload?.status };
 });
 
 export const updateSelectedTaskMetadata = createAsyncThunk('tasks/updateSelectedTaskMetadata', async (payload: any, { dispatch, getState }) => {
@@ -156,22 +156,27 @@ export const removeParticipantFromSelectedTask = createAsyncThunk('tasks/removeP
 
 export const voteOnSelectedTask = createAsyncThunk('tasks/voteOnSelectedTask', async (payload: any, { dispatch, getState }) => {
   const task = getSelectedTaskFromCache(getState() as any, payload);
-  return await (dispatch as any)(tasksApi.endpoints.voteTask.initiate({ taskId: task.taskId, chainId: task.chainId, approved: payload.approved, comment: payload.comment || 'Voted from UI.', agentToken: payload.agentToken })).unwrap();
+  return await (dispatch as any)(tasksApi.endpoints.userReviewTask.initiate({
+    taskId: task.taskId,
+    chainId: task.chainId,
+    verdict: payload.approved ? 'approve' : 'request_changes',
+    findings: payload.comment ? [payload.comment] : undefined,
+  })).unwrap();
 });
 
 export const voteOnAttentionTask = createAsyncThunk('tasks/voteOnAttentionTask', async (payload: { taskId: string; chainId: string; approved: boolean; comment?: string }, { dispatch }) => {
-  await (dispatch as any)(tasksApi.endpoints.voteTask.initiate({
+  await (dispatch as any)(tasksApi.endpoints.userReviewTask.initiate({
     taskId: payload.taskId,
     chainId: payload.chainId,
-    approved: payload.approved,
-    comment: payload.comment || (payload.approved ? 'Approved from Needs attention.' : 'Rejected from Needs attention.'),
+    verdict: payload.approved ? 'approve' : 'request_changes',
+    findings: payload.comment ? [payload.comment] : undefined,
   })).unwrap();
   return { taskId: payload.taskId, chainId: payload.chainId, approved: payload.approved };
 });
 
-export const nudgeSelectedTask = createAsyncThunk('tasks/nudgeSelectedTask', async (payload: any, { dispatch, getState }) => {
-  const task = getSelectedTaskFromCache(getState() as any, payload);
-  return await (dispatch as any)(tasksApi.endpoints.nudgeTask.initiate({ taskId: task.taskId, chainId: task.chainId, body: payload.body, interrupt: payload.interrupt, agentToken: payload.agentToken })).unwrap();
+export const nudgeSelectedTask = createAsyncThunk('tasks/nudgeSelectedTask', async () => {
+  // Task System v2: manual nudge is disabled; matching is event and timer driven.
+  return { success: true };
 });
 
 export const updateSelectedChainMetadata = createAsyncThunk('tasks/updateSelectedChainMetadata', async (payload: any, { getState }) => {

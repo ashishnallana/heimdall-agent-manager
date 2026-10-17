@@ -17,7 +17,7 @@ import {
 import {
   useFetchChainTaskDetailQuery,
   useFetchTaskChainDetailQuery,
-  useVoteTaskMutation,
+  useUserReviewTaskMutation,
 } from '../../api/endpoints/tasks';
 import {
   useGetProjectVcsStatusQuery,
@@ -158,7 +158,7 @@ function AttentionTaskReviewCard({
     { chainId, taskId },
     { skip: !chainId || !taskId }
   );
-  const [voteTask, { isLoading: isVoting }] = useVoteTaskMutation();
+  const [userReviewTask, { isLoading: isVoting }] = useUserReviewTaskMutation();
   const [voteComment, setVoteComment] = useState('');
   const [voteError, setVoteError] = useState('');
 
@@ -209,15 +209,17 @@ function AttentionTaskReviewCard({
   const handleVote = async (result: 'lgtm' | 'ngtm') => {
     try {
       setVoteError('');
-      await voteTask({
+      const verdict = result === 'lgtm' ? 'approve' : 'request_changes';
+      const findings = voteComment.trim() ? [voteComment.trim()] : [];
+      await userReviewTask({
         chainId,
         taskId,
-        result,
-        comment: voteComment.trim() || undefined,
+        verdict,
+        findings,
       }).unwrap();
       onVoteSuccess?.();
     } catch (err: any) {
-      setVoteError(err?.message || 'Vote failed. Please try again.');
+      setVoteError(err?.message || 'Review action failed. Please try again.');
     }
   };
 

@@ -3,6 +3,7 @@ import { Badge, ResourceContainer, ResourceSearchFilter, useViewport } from '@ui
 import Icon from '../Icon';
 import { buildRouteHash } from '../../utils/appLocation';
 import ProjectLaunchModal from '../projects/ProjectLaunchModal';
+import CreateChainModal from './CreateChainModal';
 import {
   useFetchTaskChainGroupsQuery,
   useFetchTaskChainProjectPageQuery,
@@ -108,6 +109,11 @@ function ChainRow({
         >
           {chain.status || 'unknown'}
         </span>
+        {chain.kind === 'workflow' && (
+          <span className="shrink-0 rounded-md bg-accent-soft px-1.5 py-0.5 text-caption font-mono text-accent">
+            workflow
+          </span>
+        )}
         <span
           data-debug-id={`task-chains-row-task-count-${chain.chainId}`}
           className="shrink-0 rounded-md border border-subtle bg-surface-raised px-1.5 py-0.5 text-caption text-muted"
@@ -222,6 +228,7 @@ function ChainGroupCard({
   totalCount,
   onlyWithTasks,
   filterStatus,
+  filterKind = 'all',
   matchesSearch,
   activeChainId,
   onSelectChain,
@@ -239,6 +246,7 @@ function ChainGroupCard({
   totalCount: number;
   onlyWithTasks: boolean;
   filterStatus: 'active' | 'completed' | 'archived' | 'all';
+  filterKind?: 'all' | 'ticket' | 'workflow';
   // Applied here as well as in the page's `groups` memo, so rows pulled in by
   // "Load more" are filtered by the search box too.
   matchesSearch: (chain: ChainListItem) => boolean;
@@ -272,9 +280,11 @@ function ChainGroupCard({
       if (filterStatus === 'active') return c.status === 'active';
       if (filterStatus === 'completed') return c.status === 'completed';
       if (filterStatus === 'archived') return c.status === 'archived';
+      if (filterKind === 'ticket' && c.kind === 'workflow') return false;
+      if (filterKind === 'workflow' && c.kind !== 'workflow') return false;
       return true;
     });
-  }, [rawChains, filterStatus, matchesSearch]);
+  }, [rawChains, filterStatus, filterKind, matchesSearch]);
 
   const onLoadMore = async () => {
     try {
@@ -386,6 +396,8 @@ export const TaskChainsPage: React.FC<TaskChainsPageProps> = ({ chainId: initial
   const [selectedChainId, setSelectedChainId] = useState<string>(initialChainId || '');
   const [filterProjectId, setFilterProjectId] = useState<string>('');
   const [filterStatus, setFilterStatus] = useState<'active' | 'completed' | 'archived' | 'all'>('active');
+  const [filterKind, setFilterKind] = useState<'all' | 'ticket' | 'workflow'>('all');
+  const [showCreateChainModal, setShowCreateChainModal] = useState(false);
   const [searchQuery, setSearchQuery] = useState<string>('');
   // Roughly half of real chains carry no tasks yet and have nothing to show, so
   // the list hides them by default; the toggle brings them back.
@@ -528,6 +540,8 @@ export const TaskChainsPage: React.FC<TaskChainsPageProps> = ({ chainId: initial
           if (filterStatus === 'active') return c.status === 'active';
           if (filterStatus === 'completed') return c.status === 'completed';
           if (filterStatus === 'archived') return c.status === 'archived';
+          if (filterKind === 'ticket' && c.kind === 'workflow') return false;
+          if (filterKind === 'workflow' && c.kind !== 'workflow') return false;
           return true;
         });
         return {
@@ -537,7 +551,7 @@ export const TaskChainsPage: React.FC<TaskChainsPageProps> = ({ chainId: initial
         };
       })
       .filter((g) => Boolean(filterProjectId) || g.chains.length > 0);
-  }, [rawGroups, filterStatus, filterProjectId, matchesSearch]);
+  }, [rawGroups, filterStatus, filterKind, filterProjectId, matchesSearch]);
 
   const totalChains = useMemo(() => groups.reduce((sum, g) => sum + (g.chainTotal || g.chains.length), 0), [groups]);
   const isLoading = filterProjectId ? projectPageQuery.isLoading : groupsQuery.isLoading;
@@ -602,6 +616,17 @@ export const TaskChainsPage: React.FC<TaskChainsPageProps> = ({ chainId: initial
             ],
             ariaLabel: 'Filter by project',
             debugId: 'task-chains-project-filter',
+          },
+          {
+            value: filterKind,
+            onChange: (val) => setFilterKind(val as 'all' | 'ticket' | 'workflow'),
+            options: [
+              { value: 'all', label: 'All kinds' },
+              { value: 'ticket', label: 'Tickets' },
+              { value: 'workflow', label: 'Workflows' },
+            ],
+            ariaLabel: 'Filter by kind',
+            debugId: 'task-chains-kind-filter',
           },
         ]}
         showFooterCounter
@@ -687,6 +712,7 @@ export const TaskChainsPage: React.FC<TaskChainsPageProps> = ({ chainId: initial
                   totalCount={group.chainTotal || group.chains.length}
                   onlyWithTasks={onlyWithTasks}
                   filterStatus={filterStatus}
+                  filterKind={filterKind}
                   matchesSearch={matchesSearch}
                   activeChainId={selectedChainId}
                   onSelectChain={handleSelectChain}
@@ -707,12 +733,23 @@ export const TaskChainsPage: React.FC<TaskChainsPageProps> = ({ chainId: initial
   return (
     <ResourceContainer
       title={
-        <span className="inline-flex items-center gap-2.5">
-          Task Chains
-          <Badge data-debug-id="task-chains-total-count" tone="info">
-            {totalChains} {totalChains === 1 ? 'chain' : 'chains'}
-          </Badge>
-        </span>
+        <div className="flex items-center justify-between w-full pr-2">
+          <span className="inline-flex items-center gap-2.5">
+            Task Chains
+            <Badge data-debug-id="task-chains-total-count" tone="info">
+              {totalChains} {totalChains === 1 ? 'chain' : 'chains'}
+            </Badge>
+          </span>
+          <button
+            type="button"
+            data-debug-id="task-chains-new-chain-btn"
+            onClick={() => setShowCreateChainModal(true)}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-accent px-3 py-1 text-xs font-semibold text-accent-fg hover:opacity-90 transition-opacity"
+          >
+            <span>+</span>
+            <span>New Chain</span>
+          </button>
+        </div>
       }
       description="Multi-agent workflows grouped by project. Select a chain to follow its tasks, dependencies, and reviews."
       breadcrumbs={[{ label: 'Task Chains' }]}
@@ -741,6 +778,16 @@ export const TaskChainsPage: React.FC<TaskChainsPageProps> = ({ chainId: initial
         onLaunched={(instanceId) => {
           setLaunchModalProject(null);
           window.location.hash = buildRouteHash('/conversations/' + encodeURIComponent(instanceId), '');
+        }}
+      />
+      <CreateChainModal
+        isOpen={showCreateChainModal}
+        onClose={() => setShowCreateChainModal(false)}
+        projects={decryptedProjects}
+        defaultProjectId={filterProjectId}
+        onCreated={(newChainId) => {
+          setShowCreateChainModal(false);
+          handleSelectChain(newChainId);
         }}
       />
     </ResourceContainer>

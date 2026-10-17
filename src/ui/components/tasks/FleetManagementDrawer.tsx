@@ -116,7 +116,7 @@ export {
   getUnpauseStatus,
   canCompleteTask,
   canPauseTask,
-} from './TaskCard';
+} from './taskCardLegacy';
 
 export interface FleetSlotChipsProps {
   chainId: string;
