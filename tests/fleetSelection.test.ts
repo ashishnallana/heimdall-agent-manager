@@ -431,7 +431,10 @@ test('normalizeFleetRoles and toggleFleetRole enforce valid non-empty roles in c
   assert.deepEqual(normalizeFleetRoles(undefined), ['worker', 'reviewer']);
   assert.deepEqual(normalizeFleetRoles([]), ['worker', 'reviewer']);
   assert.deepEqual(normalizeFleetRoles(['reviewer']), ['reviewer']);
-  assert.deepEqual(normalizeFleetRoles(['reviewer', 'worker', 'invalid']), ['worker', 'reviewer']);
+  assert.deepEqual(normalizeFleetRoles(['reviewer', 'worker', 'Not Valid!']), ['worker', 'reviewer']);
+  // Custom review roles survive (after the canonical pair), de-duplicated and lowercased
+  assert.deepEqual(normalizeFleetRoles(['security', 'reviewer', 'Security']), ['reviewer', 'security']);
+  assert.deepEqual(normalizeFleetRoles(['1st', 'has space', '']), ['worker', 'reviewer']);
 
   // Toggling adds a missing role and removes an existing role when >1 selected
   assert.deepEqual(toggleFleetRole(['worker'], 'reviewer'), ['worker', 'reviewer']);
@@ -443,6 +446,11 @@ test('normalizeFleetRoles and toggleFleetRole enforce valid non-empty roles in c
   assert.equal(formatFleetRolesBadge(['worker']), 'worker');
   assert.equal(formatFleetRolesBadge(['reviewer']), 'reviewer');
   assert.equal(formatFleetRolesBadge(['reviewer', 'worker']), 'worker + reviewer');
+  assert.equal(formatFleetRolesBadge(['security', 'reviewer']), 'reviewer + security');
+  // Custom roles toggle like the built-ins
+  assert.deepEqual(toggleFleetRole(['reviewer'], 'security'), ['reviewer', 'security']);
+  assert.deepEqual(toggleFleetRole(['reviewer', 'security'], 'security'), ['reviewer']);
+  assert.deepEqual(toggleFleetRole(['reviewer'], 'Bad Role'), ['reviewer']);
 });
 
 test('seedFleetRolesDrafts, seedFleetBridgeIdDrafts, seedFleetMinWarmDrafts, and seedFleetIdleTtlDrafts seed from server rows', () => {

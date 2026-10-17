@@ -57,6 +57,7 @@ import {
   seedProviderModelDrafts,
   summarizeFleetRestartResults,
   toggleFleetRole,
+  isValidFleetRoleName,
   modelOptionsForProvider,
   type ChangedFleetEntry,
   type FleetPlacementDrafts,
@@ -391,6 +392,8 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
   const [updateFleet, { isLoading: isUpdating }] = useUpdateTaskChainFleetMutation();
   const [deleteFleet, { isLoading: isDeleting }] = useDeleteTaskChainFleetMutation();
   const [selectedNewAgentId, setSelectedNewAgentId] = useState('');
+  // Per-row text for adding a custom review role (e.g. "security").
+  const [customRoleDrafts, setCustomRoleDrafts] = useState<Record<string, string>>({});
   const [errorMsg, setErrorMsg] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
   const [isApplying, setIsApplying] = useState(false);
@@ -1117,7 +1120,7 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
                     <div className="flex items-center justify-between gap-2">
                       <span className="text-xs font-medium text-primary">Fleet Roles</span>
                       <div className="flex items-center gap-1.5" role="group" aria-label={`Roles for ${roleName}`}>
-                        {FLEET_ROLES.map((roleKey) => {
+                        {[...FLEET_ROLES, ...effectiveRoles.filter((r) => !(FLEET_ROLES as readonly string[]).includes(r))].map((roleKey) => {
                           const selected = effectiveRoles.includes(roleKey);
                           return (
                             <button
@@ -1137,6 +1140,28 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
                             </button>
                           );
                         })}
+                        <input
+                          type="text"
+                          data-debug-id={`fleet-role-custom-input-${agentId}`}
+                          aria-label={`Add review role for ${roleName}`}
+                          placeholder="+ role"
+                          title="Add a custom review role (e.g. security); tasks list it in review_roles"
+                          value={customRoleDrafts[agentId] ?? ''}
+                          disabled={isUpdating || isApplying}
+                          onChange={(e) => setCustomRoleDrafts((prev) => ({ ...prev, [agentId]: e.target.value }))}
+                          onKeyDown={(e) => {
+                            if (e.key !== 'Enter') return;
+                            e.preventDefault();
+                            const role = String(customRoleDrafts[agentId] ?? '').trim().toLowerCase();
+                            if (!isValidFleetRoleName(role)) {
+                              setErrorMsg('Role names are 1-32 chars of a-z, 0-9, _ or -, starting with a letter');
+                              return;
+                            }
+                            if (!effectiveRoles.includes(role)) handleDraftRoleToggle(agentId, role, effectiveRoles);
+                            setCustomRoleDrafts((prev) => ({ ...prev, [agentId]: '' }));
+                          }}
+                          className="w-16 rounded-full border border-subtle bg-canvas px-2 py-0.5 text-[11px] text-primary outline-none focus:border-accent"
+                        />
                       </div>
                     </div>
 

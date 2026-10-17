@@ -73,3 +73,54 @@ test_publish_rejects_review_role_without_fleet_row :: proc(t: ^testing.T) {
 	testing.expect(t, gok, fmt.tprintf("gate publishes without a brief: %s", gerr.message))
 	testing.expect_value(t, gate.publish_state, domain.Publish_State.Published)
 }
+
+// Fleet rows carry custom review roles (`security`, …) set through the service,
+// and legacy `reviewers` on create ADD the reviewer role instead of replacing the
+// brief's review_roles.
+@(test)
+test_fleet_custom_review_roles_and_reviewers_keep_brief_roles :: proc(t: ^testing.T) {
+	home := os.get_env("HOME", context.temp_allocator)
+	db_path := fmt.tprintf("%s/.cache/heimdall-tests/tc_fleet_roles_%d.db", home, os.get_pid())
+	os.remove(db_path)
+	defer os.remove(db_path)
+	conn, open_ok, _ := sqlite.open(db_path)
+	if !testing.expect(t, open_ok, "sqlite open ok") do return
+	defer sqlite.close(&conn)
+	mig_ok, _ := sqlite.run_migrations(&conn)
+	testing.expect(t, mig_ok, "migrations ok")
+	tc_impl := sqlite.Taskchain_Repo_SQLite{conn = &conn}
+	tc_repo := sqlite.new_taskchain_repository(&tc_impl, &conn)
+	ag_impl := sqlite.Agent_Repo_SQLite{conn = &conn}
+	ag_repo := sqlite.new_agent_repository(&ag_impl, &conn)
+	clock := platform.real_clock()
+	ids := platform.real_id_generator()
+	svc := new_taskchain_service(&tc_repo, &ag_repo, &clock, &ids)
+	auth := contracts.Auth_Context{kind = .User_Token, user_id = "user_roles"}
+	now := platform.clock_now(&clock)
+	for id in ([]string{"agt_rev", "agt_sec"}) {
+		_, sok, _ := iface.agent_save(&ag_repo, domain.Agent{agent_id = id, owner_user_id = "user_roles", name = id, slug = id, created_at = now, updated_at = now})
+		testing.expect(t, sok, "agent saved")
+	}
+	chain, cok, _ := create_chain(&svc, auth, Create_Chain_Input{title = "roles"})
+	if !testing.expect(t, cok, "chain created") do return
+
+	// custom review role accepted; duplicates collapse
+	row, err := upsert_fleet(&svc, auth, Upsert_Fleet_Input{chain_id = chain.chain_id, agent_id = "agt_sec", capacity = 1, roles = []string{"security", "security", "reviewer"}, has_roles = true})
+	testing.expect(t, err.code == .None, fmt.tprintf("custom role accepted: %s", err.message))
+	testing.expect_value(t, row.roles_json, `["security","reviewer"]`)
+	// malformed role names are refused
+	for bad in ([]string{"Security", "", "has space", "1st", strings.repeat("r", 33, context.temp_allocator)}) {
+		_, berr := upsert_fleet(&svc, auth, Upsert_Fleet_Input{chain_id = chain.chain_id, agent_id = "agt_sec", capacity = 1, roles = []string{bad}, has_roles = true})
+		testing.expect(t, berr.code == .Validation_Failed, fmt.tprintf("role %q refused", bad))
+	}
+
+	// reviewers[] on create keeps the brief's own review roles and adds reviewer
+	task, tok, terr := create_task(&svc, auth, Create_Task_Input{chain_id = chain.chain_id, title = "rotate",
+		brief_json = `{"goal":"g","acceptance":["a"],"verify":"true","review_roles":["security"]}`,
+		reviewer_agent_ids = []string{"agt_rev"}})
+	if !testing.expect(t, tok, fmt.tprintf("create: %s", terr.message)) do return
+	testing.expect(t, strings.contains(task.brief_json, `"review_roles":["security","reviewer"]`), fmt.tprintf("brief keeps security + adds reviewer: %s", task.brief_json))
+	// both roles are covered by fleet rows → publish passes
+	_, pok, perr := publish_chain(&svc, auth, chain.chain_id)
+	testing.expect(t, pok, fmt.tprintf("publish: %s %s", perr.message, perr.details_json))
+}

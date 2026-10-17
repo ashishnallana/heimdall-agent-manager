@@ -968,8 +968,7 @@ ensure_fleet_role :: proc(service: ^Taskchain_Service, chain: domain.Task_Chain,
 		_, uerr := iface.taskchain_upsert_fleet(service.repo, updated)
 		return uerr
 	}
-	roles := `["worker"]`
-	if role == domain.FLEET_ROLE_REVIEWER do roles = `["reviewer"]`
+	roles := fleet_roles_with(`[]`, role)
 	fleet := domain.Task_Chain_Fleet{task_chain_id = chain.chain_id, agent_id = id, capacity = 1, min_warm = 0, idle_ttl_seconds = 600, roles_json = roles, created_at = now, updated_at = now}
 	return iface.taskchain_ensure_fleet(service.repo, fleet)
 }
@@ -1022,6 +1021,12 @@ create_task_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Conte
 	review_roles := make([dynamic]string, context.temp_allocator)
 	for r in input.review_roles do append(&review_roles, r)
 	if len(input.reviewer_agent_ids) > 0 {
+		// Legacy reviewer refs ADD the reviewer role; without explicit top-level
+		// review_roles they must keep the brief's own roles (as update does), not
+		// replace them with ["reviewer"].
+		if len(review_roles) == 0 {
+			for r in taskv2.brief_review_roles(input.brief_json, context.temp_allocator) do append(&review_roles, r)
+		}
 		has_reviewer := false
 		for r in review_roles do if r == domain.FLEET_ROLE_REVIEWER do has_reviewer = true
 		if !has_reviewer do append(&review_roles, domain.FLEET_ROLE_REVIEWER)
@@ -1901,9 +1906,12 @@ upsert_fleet_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Cont
 		b := strings.builder_make()
 		strings.write_byte(&b, '[')
 		n := 0
+		seen := make(map[string]bool, context.temp_allocator)
 		for r in input.roles {
 			role := strings.trim_space(r)
-			if role != domain.FLEET_ROLE_WORKER && role != domain.FLEET_ROLE_REVIEWER do return {}, domain.domain_error(.Validation_Failed, "fleet roles must be worker or reviewer")
+			if !domain.fleet_role_name_valid(role) do return {}, domain.domain_error(.Validation_Failed, "fleet roles must be 'worker' or a review role name (1-32 chars of a-z, 0-9, _ or -, starting with a letter)")
+			if seen[role] do continue
+			seen[role] = true
 			if n > 0 do strings.write_byte(&b, ',')
 			strings.write_byte(&b, '"'); contracts.write_json_string(&b, role); strings.write_byte(&b, '"')
 			n += 1

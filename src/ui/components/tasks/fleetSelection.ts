@@ -63,20 +63,30 @@ export function fleetProviderCapabilities(providersPayload: any): FleetProviderC
 export const FLEET_ROLES = ['worker', 'reviewer'] as const;
 export type FleetRole = (typeof FLEET_ROLES)[number];
 
-/** Normalize a fleet roles array: filters to valid roles ('worker' | 'reviewer') in canonical order, defaulting to ['worker', 'reviewer'] (or fallback). */
-export function normalizeFleetRoles(roles?: any, fallback: string[] = ['worker', 'reviewer']): string[] {
-  if (!Array.isArray(roles)) return fallback.slice();
-  const valid = FLEET_ROLES.filter((r) =>
-    roles.some((item: any) => String(item || '').trim().toLowerCase() === r)
-  );
-  return valid.length > 0 ? [...valid] : fallback.slice();
+/**
+ * A fleet role name: `worker` is the work role; any other name is a REVIEW role a
+ * brief can require via review_roles (`reviewer`, `security`, `ux`, …). Mirrors the
+ * hub's fleet_role_name_valid: 1–32 chars of [a-z0-9_-], starting with a letter.
+ */
+export function isValidFleetRoleName(role: string): boolean {
+  return /^[a-z][a-z0-9_-]{0,31}$/.test(role);
 }
 
-/** Toggle a role ('worker' | 'reviewer') in a roles array while guaranteeing at least one role stays selected. */
+/** Normalize a fleet roles array: valid, de-duplicated roles with worker/reviewer first (canonical order) and custom review roles after, defaulting to ['worker', 'reviewer'] (or fallback). */
+export function normalizeFleetRoles(roles?: any, fallback: string[] = ['worker', 'reviewer']): string[] {
+  if (!Array.isArray(roles)) return fallback.slice();
+  const cleaned = roles.map((item: any) => String(item || '').trim().toLowerCase()).filter(isValidFleetRoleName);
+  const builtin = FLEET_ROLES.filter((r) => cleaned.includes(r));
+  const custom = Array.from(new Set(cleaned.filter((r) => !(FLEET_ROLES as readonly string[]).includes(r))));
+  const valid = [...builtin, ...custom];
+  return valid.length > 0 ? valid : fallback.slice();
+}
+
+/** Toggle a role (worker, reviewer or a custom review role) in a roles array while guaranteeing at least one role stays selected. */
 export function toggleFleetRole(currentRoles: string[] | undefined, role: string): string[] {
   const normalized = normalizeFleetRoles(currentRoles);
   const target = String(role || '').trim().toLowerCase();
-  if (target !== 'worker' && target !== 'reviewer') return normalized;
+  if (!isValidFleetRoleName(target)) return normalized;
   if (normalized.includes(target)) {
     // Prevent deselecting the last remaining role
     if (normalized.length <= 1) return normalized;
@@ -85,11 +95,10 @@ export function toggleFleetRole(currentRoles: string[] | undefined, role: string
   return normalizeFleetRoles([...normalized, target]);
 }
 
-/** Format a concise role badge label for FleetSlotChips and role cards (e.g. 'worker + reviewer', 'worker', 'reviewer'). */
+/** Format a concise role badge label for FleetSlotChips and role cards (e.g. 'worker + reviewer', 'reviewer + security'). */
 export function formatFleetRolesBadge(roles?: string[]): string {
   const norm = normalizeFleetRoles(roles);
-  if (norm.includes('worker') && norm.includes('reviewer')) return 'worker + reviewer';
-  return norm[0] || 'worker';
+  return norm.join(' + ') || 'worker';
 }
 
 export interface FleetPlacementDrafts {

@@ -283,6 +283,24 @@ FLEET_ROLE_WORKER :: "worker"
 FLEET_ROLE_REVIEWER :: "reviewer"
 FLEET_ROLES_DEFAULT_JSON :: `["worker"]`
 
+// fleet_role_name_valid: `worker` is the work role; every other role is a REVIEW
+// role a brief can require via review_roles (`reviewer`, `security`, `ux`, …).
+// Names are 1–32 chars of [a-z0-9_-] starting with a letter so they stay
+// readable in badges, attention lines and `review_role:<r>` publish errors.
+fleet_role_name_valid :: proc(role: string) -> bool {
+	if len(role) == 0 || len(role) > 32 do return false
+	for c, i in transmute([]u8)role {
+		switch c {
+		case 'a' ..= 'z':
+		case '0' ..= '9', '_', '-':
+			if i == 0 do return false
+		case:
+			return false
+		}
+	}
+	return true
+}
+
 Task_Chain_Fleet :: struct {
 	task_chain_id:    Task_Chain_ID,
 	agent_id:         string,

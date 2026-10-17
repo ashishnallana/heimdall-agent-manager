@@ -399,14 +399,14 @@ on_bridge_hello :: proc(svc: ^Service, bridge_id: string, active_instance_ids: [
 }
 
 // instance_is_fleet_member: the instance's template has a fleet row in the
-// chain with a worker or reviewer role (the only kind of instance the matcher
-// ever grants to or launches).
+// chain with any role — worker or a review role (the only kind of instance the
+// matcher ever grants to or launches).
 instance_is_fleet_member :: proc(svc: ^Service, chain: domain.Task_Chain, inst: domain.Agent_Instance) -> bool {
 	fleets, err := iface.taskchain_list_fleets_by_chain(svc.repo, chain.chain_id, chain.owner_user_id)
 	if err.code != .None do return false
 	for f in fleets {
 		if f.agent_id != inst.agent_id do continue
-		if fleet_row_has_role(f, domain.FLEET_ROLE_WORKER) || fleet_row_has_role(f, domain.FLEET_ROLE_REVIEWER) do return true
+		return true // upsert_fleet rejects an empty role list; a missing one defaults to worker
 	}
 	return false
 }

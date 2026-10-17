@@ -1133,8 +1133,7 @@ ensure_workflow_fleet_role :: proc(svc: ^Service, chain: domain.Task_Chain, agen
 		if f.agent_id == agent_id && fleet_row_has_role(f, role) do return
 	}
 	now := platform.clock_now(svc.clock)
-	roles_json := `["worker"]`
-	if role == domain.FLEET_ROLE_REVIEWER do roles_json = `["reviewer"]`
+	roles_json := fmt.tprintf(`["%s"]`, role) if domain.fleet_role_name_valid(role) else `["worker"]`
 	_ = iface.taskchain_ensure_fleet(svc.repo, domain.Task_Chain_Fleet{
 		task_chain_id    = chain.chain_id,
 		agent_id         = agent_id,
