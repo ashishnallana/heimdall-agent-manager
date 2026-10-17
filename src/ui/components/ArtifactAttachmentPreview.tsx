@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useSelector } from 'react-redux';
 import { VaultText } from './vault/VaultText';
+import { Icon } from '@ui';
 
 export type ArtifactPreviewMeta = {
   artifact_id?: string;
@@ -204,7 +205,7 @@ export function ArtifactAttachmentPreview({
           )}
         </div>
         <div className="flex items-center gap-2 px-2.5 py-1.5 text-caption text-muted">
-          <span className="text-accent">🖼</span>
+          <Icon name="file" size={12} className="text-accent" />
           <span className="min-w-0 flex-1 truncate"><VaultText value={label} fallback={id} /></span>
           <span className="text-faint group-hover:text-accent">Open</span>
         </div>

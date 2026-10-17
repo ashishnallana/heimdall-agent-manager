@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { Badge, Button, Icon, Select, Text, Textarea } from '@ui';
+import { Badge, Button, Icon, Select, Text } from '@ui';
 import type { TaskWire } from '../../api/taskWire';
 import type { TaskChainFleet } from '../../api/endpoints/taskChains';
 import { useListBridgesQuery } from '../../api/endpoints/bridgeSupport';
@@ -14,6 +14,8 @@ import type { TaskActionsApi } from './useTaskActions';
 import { EMPTY_TASK_NAMES, instanceAgentsFromEvents, withInstanceAgents, type TaskNames } from './taskNames';
 import { describeTaskEvent } from './taskEvents';
 import { HolderName } from './HolderName';
+import { TaskComposer } from './TaskComposer';
+import { TaskCommentsThread } from '../taskchain/TaskCommentsThread';
 
 export interface TaskDetailsProps {
   chainId: string;
@@ -141,9 +143,15 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
     { skip: !diffFile || !vcs?.base || !vcs?.head },
   );
 
-  const [findingsText, setFindingsText] = useState('');
-  const [answerText, setAnswerText] = useState('');
-  const [commentText, setCommentText] = useState('');
+  // TaskCommentsThread reads the legacy camelCase summary shape.
+  const commentSummary = task.comment_summary
+    ? {
+        count: Number(task.comment_summary.count || 0),
+        lastCommentAt: String(task.comment_summary.last_comment_at || ''),
+        lastCommentAuthorAgentInstanceId: String(task.comment_summary.last_comment_author_agent_instance_id || ''),
+        lastCommentPreview: String(task.comment_summary.last_comment_preview || ''),
+      }
+    : null;
   const [showAllEvents, setShowAllEvents] = useState(false);
 
   const bridges: any[] = bridgesData?.bridges || [];
@@ -178,48 +186,56 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
               {changedFiles.length} file{changedFiles.length === 1 ? '' : 's'} changed
             </Text>
           )}
-          <Textarea
-            value={findingsText}
-            onChange={setFindingsText}
-            placeholder="What needs to change (required to request changes)"
-            rows={2}
-            size="sm"
+          <TaskComposer
+            chainId={chainId}
+            taskId={taskId}
+            debugId="your-review-composer"
+            placeholder="What needs to change (required to request changes). Paste or attach screenshots."
+            requireText
+            disabled={actions.busy}
+            renderActions={({ body, canSend, reset }) => (
+              <>
+                <Button size="sm" variant="primary" disabled={actions.busy} onClick={() => void actions.approve()}>
+                  Approve
+                </Button>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={!canSend}
+                  onClick={async () => {
+                    if (await actions.requestChanges(body)) reset();
+                  }}
+                >
+                  Request changes
+                </Button>
+              </>
+            )}
           />
-          <div className="flex flex-wrap items-center gap-2">
-            <Button size="sm" variant="primary" disabled={actions.busy} onClick={() => void actions.approve()}>
-              Approve
-            </Button>
-            <Button
-              size="sm"
-              variant="secondary"
-              disabled={actions.busy || !findingsText.trim()}
-              title={findingsText.trim() ? undefined : 'Say what needs to change first'}
-              onClick={async () => {
-                if (await actions.requestChanges(findingsText)) setFindingsText('');
-              }}
-            >
-              Request changes
-            </Button>
-          </div>
         </Block>
       )}
 
       {blockedOnYou(task) && (
         <Block title="Waiting on your answer" debugId="answer-blocker-block">
           {(task.blocked_on as any)?.reason && <p className="text-primary">{(task.blocked_on as any).reason}</p>}
-          <Textarea value={answerText} onChange={setAnswerText} placeholder="Your answer" rows={2} size="sm" />
-          <div>
-            <Button
-              size="sm"
-              variant="primary"
-              disabled={actions.busy}
-              onClick={async () => {
-                if (await actions.answer(answerText)) setAnswerText('');
-              }}
-            >
-              Send answer
-            </Button>
-          </div>
+          <TaskComposer
+            chainId={chainId}
+            taskId={taskId}
+            debugId="answer-composer"
+            placeholder="Your answer. Paste or attach files if it helps."
+            disabled={actions.busy}
+            renderActions={({ body, canSend, reset }) => (
+              <Button
+                size="sm"
+                variant="primary"
+                disabled={!canSend}
+                onClick={async () => {
+                  if (await actions.answer(body)) reset();
+                }}
+              >
+                Send answer
+              </Button>
+            )}
+          />
         </Block>
       )}
 
@@ -398,20 +414,38 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
         )}
       </Block>
 
-      <Block title="Comment" collapsible debugId="task-details-comment">
-        <Textarea value={commentText} onChange={setCommentText} placeholder="Leave a note on this task" rows={2} size="sm" />
-        <div>
-          <Button
-            size="sm"
-            variant="secondary"
-            disabled={actions.busy || !commentText.trim()}
-            onClick={async () => {
-              if (await actions.comment(commentText)) setCommentText('');
-            }}
-          >
-            Post comment
-          </Button>
-        </div>
+      <Block
+        title="Comments"
+        collapsible
+        debugId="task-details-comments"
+        aside={
+          task.comment_summary?.count ? (
+            <Text role="caption" tone="faint">
+              {task.comment_summary.count}
+            </Text>
+          ) : null
+        }
+      >
+        <TaskCommentsThread chainId={chainId} taskId={taskId} summary={commentSummary} enabled hideHeading />
+        <TaskComposer
+          chainId={chainId}
+          taskId={taskId}
+          debugId="comment-composer"
+          placeholder="Leave a comment. Paste or attach images and files."
+          disabled={actions.busy}
+          renderActions={({ body, canSend, reset }) => (
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={!canSend}
+              onClick={async () => {
+                if (await actions.comment(body)) reset();
+              }}
+            >
+              Post comment
+            </Button>
+          )}
+        />
       </Block>
     </div>
   );

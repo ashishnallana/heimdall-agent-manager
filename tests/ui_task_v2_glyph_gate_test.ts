@@ -30,6 +30,9 @@ export const GATE_FILES = [
   'src/ui/components/tasks/taskV2Types.ts',
   'src/ui/components/taskchain/TaskChainOverview.tsx',
   'src/ui/components/taskchain/TaskChainsPage.tsx',
+  'src/ui/components/taskchain/TaskCommentsThread.tsx',
+  'src/ui/components/tasks/TaskComposer.tsx',
+  'src/ui/components/tasks/taskComposer.ts',
 ];
 
 // Typographic punctuation and math that read as text, not as pictographs.

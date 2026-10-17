@@ -95,3 +95,19 @@ export function appendArtifactLinks(body: string, links: string[]): string {
   const prefix = String(body || '').replace(/\s+$/, '');
   return prefix ? `${prefix}\n${cleanLinks.join('\n')}` : cleanLinks.join('\n');
 }
+
+/**
+ * The text of a message without its artifact:// links, for places that render
+ * each artifact as a preview card below the text (so the raw artifact id does
+ * not also show as a link chip). Lines that held only links are dropped.
+ */
+export function stripArtifactLinks(value: string): string {
+  return String(value || '')
+    // Same id alphabet as artifactIdsFromText, minus trailing sentence punctuation.
+    .replace(/artifact:\/\/[A-Za-z0-9._:-]*[A-Za-z0-9_-]/g, '')
+    .split('\n')
+    .map((line) => line.replace(/\s+$/, ''))
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}

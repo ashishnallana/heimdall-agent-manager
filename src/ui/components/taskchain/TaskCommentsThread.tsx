@@ -7,6 +7,7 @@ import Markdown from '../Markdown';
 import { ArtifactAttachmentPreview } from '../ArtifactAttachmentPreview';
 import { useFetchChainTaskCommentsQuery } from '../../api/endpoints/tasks';
 import { useIsMobile } from '../shell/responsive';
+import { stripArtifactLinks } from '../../utils/artifactUpload';
 
 // artifactIdsFromText mirrors the helper in TaskChainOverview; kept local so this
 // component is self-contained.
@@ -43,7 +44,8 @@ const CommentAuthor: React.FC<{ instanceId: string; displayName: string; userId:
 }) => {
   const isMobile = useIsMobile();
   if (instanceId) {
-    const label = displayName || instanceId;
+    // Never show the raw instance id; it stays in the link title.
+    const label = displayName || 'Agent';
     const href = isMobile
       ? shellHash(`/conversations/${encodeURIComponent(instanceId)}`)
       : shellHash(`/conversations/${encodeURIComponent(instanceId)}?panel=tasks`);
@@ -93,7 +95,7 @@ export const TaskCommentBody: React.FC<{ body: string; debugId: string }> = ({ b
     }).catch((err) => {
       if (mounted) {
         console.error('Failed to decrypt comment body:', err);
-        setDecryptedText(body.replace(/vault:v1:[A-Za-z0-9+/=_-]+/g, '[🔒 Encrypted]'));
+        setDecryptedText(body.replace(/vault:v1:[A-Za-z0-9+/=_-]+/g, '[Encrypted]'));
       }
     });
     return () => {
@@ -111,17 +113,18 @@ export const TaskCommentBody: React.FC<{ body: string; debugId: string }> = ({ b
     }
     return (
       <div className="py-1">
-        <Markdown source={body.replace(/vault:v1:[A-Za-z0-9+/=_-]+/g, '[🔒 Encrypted]')} compact copyAll={false} data-debug-id={debugId} />
+        <Markdown source={body.replace(/vault:v1:[A-Za-z0-9+/=_-]+/g, '[Encrypted]')} compact copyAll={false} data-debug-id={debugId} />
       </div>
     );
   }
 
-  const displayText = decryptedText ?? (hasVault ? body.replace(/vault:v1:[A-Za-z0-9+/=_-]+/g, '[🔒 Encrypted]') : body);
+  const displayText = decryptedText ?? (hasVault ? body.replace(/vault:v1:[A-Za-z0-9+/=_-]+/g, '[Encrypted]') : body);
   const artifactIds = artifactIdsFromText(displayText || '');
 
   return (
     <>
-      <Markdown source={displayText || ''} compact copyAll={false} data-debug-id={debugId} />
+      {/* Artifacts render as previews below, so their raw links are not repeated in the text. */}
+      <Markdown source={stripArtifactLinks(displayText || '')} compact copyAll={false} data-debug-id={debugId} />
       {artifactIds.length > 0 ? (
         <div data-debug-id={`${debugId}-artifacts`} className="mt-2 flex flex-wrap gap-2">
           {artifactIds.map((artifactId) => (
@@ -150,7 +153,9 @@ export const TaskCommentsThread: React.FC<{
   summary?: CommentSummary | null;
   enabled: boolean;
   last?: number;
-}> = ({ chainId, taskId, summary, enabled, last = 50 }) => {
+  /** Hide the "Comments (n):" label when the caller already shows a heading. */
+  hideHeading?: boolean;
+}> = ({ chainId, taskId, summary, enabled, last = 50, hideHeading = false }) => {
   const { data, isFetching } = useFetchChainTaskCommentsQuery(
     { chainId, taskId, last },
     { skip: !enabled || !chainId || !taskId, refetchOnMountOrArgChange: true },
@@ -160,16 +165,18 @@ export const TaskCommentsThread: React.FC<{
 
   return (
     <div data-debug-id={`taskchain-task-comments-${taskId}`} className="space-y-2">
-      <span className="font-semibold text-muted">
-        Comments{count ? ` (${count})` : ''}:
-      </span>
+      {!hideHeading && (
+        <span className="font-semibold text-muted">
+          Comments{count ? ` (${count})` : ''}:
+        </span>
+      )}
 
       {/* Summary line while the thread is loading or before any bodies arrive. */}
       {count > 0 && comments.length === 0 ? (
         <div data-debug-id={`taskchain-task-comment-summary-${taskId}`} className="rounded border border-subtle bg-surface-raised/60 p-2 text-caption text-muted">
           {isFetching ? 'Loading comments…' : (
             <>
-              <span className="font-semibold text-primary">{summary?.lastCommentAuthorAgentInstanceId || 'user'}</span>
+              <span className="font-semibold text-primary">{summary?.lastCommentAuthorAgentInstanceId ? 'Agent' : 'You'}</span>
               {summary?.lastCommentPreview ? <>: <VaultText value={summary.lastCommentPreview} as="span" /></> : null}
               {summary?.lastCommentAt ? <span className="ml-1 text-faint">· {summary.lastCommentAt}</span> : null}
             </>
