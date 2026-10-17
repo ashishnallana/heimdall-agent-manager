@@ -224,7 +224,9 @@ export interface TaskPeople {
   // workers: agent ids that can take the work lease (the assignee alone when
   // pinned, otherwise every fleet row with the worker role).
   workers: string[];
-  // reviewers: agent ids of fleet rows holding one of brief.review_roles.
+  // named: agents named as reviewers of this task (brief.reviewers).
+  named: string[];
+  // reviewers: named reviewers, then agents holding one of brief.review_roles.
   reviewers: string[];
   // reviewersByRole: brief.review_roles in order → agent ids of the rows holding
   // that role (every one of them must approve; [] = role not covered).
@@ -246,10 +248,14 @@ export function getTaskPeople(task: TaskWire, chainFleets: any[] = []): TaskPeop
     ? [assignee]
     : fleets.filter((f) => fleetRoles(f).includes('worker')).map(fleetAgent).filter(Boolean);
   const roles = task.brief?.review_roles || [];
-  const reviewers = fleets
-    .filter((f) => fleetRoles(f).some((r) => roles.includes(r)))
-    .map(fleetAgent)
-    .filter(Boolean);
+  const named = Array.from(new Set((task.brief?.reviewers || []).map(String).filter(Boolean)));
+  const reviewers = [
+    ...named,
+    ...fleets
+      .filter((f) => fleetRoles(f).some((r) => roles.includes(r)))
+      .map(fleetAgent)
+      .filter(Boolean),
+  ];
   const work = (task.leases || []).find((l: any) => (l?.kind || 'work') === 'work');
   const reviewersByRole = roles.map((role) => ({
     role,
@@ -258,6 +264,7 @@ export function getTaskPeople(task: TaskWire, chainFleets: any[] = []): TaskPeop
   return {
     assignee,
     workers: Array.from(new Set(workers)),
+    named,
     reviewers: Array.from(new Set(reviewers)),
     reviewersByRole,
     holder: String(work?.holder_instance_id || ''),

@@ -3,6 +3,7 @@ import { Badge, Button, Checkbox, Modal, ModalBody, ModalFooter, Select, StatusP
 import type { TaskWire } from '../../api/taskWire';
 import { useUpdateTaskDetailMutation } from '../../api/endpoints/tasks';
 import { useListAgentIdentitiesQuery } from '../../api/endpoints/agents';
+import { useListChainReviewRolesQuery } from '../../api/endpoints/taskChains';
 import { TASK_STATE_LABELS, TASK_STATE_TONE, normalizeTaskState } from './taskV2Types';
 import { actionErrorMessage } from './useTaskActions';
 import { EMPTY_TASK_NAMES, type TaskNames } from './taskNames';
@@ -50,8 +51,9 @@ export const TaskEditModal: React.FC<TaskEditModalProps> = ({
   const currentDeps: string[] = task.depends_on || [];
 
   const [assignee, setAssignee] = useState(currentAssignee);
+  const currentNamed: string[] = task.brief?.reviewers || [];
   const [roles, setRoles] = useState<string[]>(currentRoles);
-  const [addReviewer, setAddReviewer] = useState('');
+  const [named, setNamed] = useState<string[]>(currentNamed);
   const [userApproval, setUserApproval] = useState(Boolean(task.requires_user_approval));
   const [deps, setDeps] = useState<string[]>(currentDeps);
   const [error, setError] = useState('');
@@ -60,28 +62,23 @@ export const TaskEditModal: React.FC<TaskEditModalProps> = ({
   useEffect(() => {
     setAssignee(currentAssignee);
     setRoles(currentRoles);
-    setAddReviewer('');
+    setNamed(currentNamed);
     setUserApproval(Boolean(task.requires_user_approval));
     setDeps(currentDeps);
     setError('');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [field, task.task_id]);
 
-  // Every review role someone in the fleet holds, plus the default "reviewer".
-  const fleetRoles = useMemo(() => {
-    const set = new Set<string>(['reviewer', ...currentRoles]);
-    for (const f of chainFleets) for (const r of f?.roles || []) if (r !== 'worker') set.add(String(r));
-    return Array.from(set);
-  }, [chainFleets, currentRoles]);
-  const holdersOf = (role: string) =>
-    chainFleets.filter((f) => (f?.roles || []).includes(role)).map((f) => names.agent(String(f.agent_id)));
+  // Chain review roles (optional layer) with their descriptions and holders.
+  const { data: chainRoles = [] } = useListChainReviewRolesQuery({ chainId }, { skip: field !== 'reviewers' });
+  const roleList = useMemo(() => {
+    const byName = new Map(chainRoles.map((r) => [r.name, r]));
+    for (const r of currentRoles) if (!byName.has(r)) byName.set(r, { name: r, description: '', holders: [], openTaskCount: 0 });
+    return Array.from(byName.values());
+  }, [chainRoles, currentRoles]);
 
   const agentOptions = [
     { value: '', text: 'Any worker in the fleet' },
-    ...agents.map((a) => ({ value: String(a.agent_id || a.agentId), text: String(a.name || a.display_name || names.agent(a.agent_id)) })),
-  ];
-  const reviewerOptions = [
-    { value: '', text: 'Add a reviewer agent…' },
     ...agents.map((a) => ({ value: String(a.agent_id || a.agentId), text: String(a.name || a.display_name || names.agent(a.agent_id)) })),
   ];
   const depCandidates = tasks.filter((t) => t.task_id !== task.task_id);
@@ -92,9 +89,10 @@ export const TaskEditModal: React.FC<TaskEditModalProps> = ({
     const args: any = { chainId, taskId: task.task_id };
     if (field === 'assignee') args.assigneeRef = { type: 'agent_id', agent_id: assignee };
     if (field === 'reviewers') {
+      // Replaces the task's named reviewers (an empty list clears them).
+      args.reviewerRefs = named.map((agent_id) => ({ type: 'agent_id', agent_id }));
       args.reviewRoles = roles;
       args.requiresUserApproval = userApproval;
-      if (addReviewer) args.reviewerRefs = [{ type: 'agent_id', agent_id: addReviewer }];
     }
     if (field === 'deps') args.dependsOn = deps;
     try {
@@ -127,29 +125,55 @@ export const TaskEditModal: React.FC<TaskEditModalProps> = ({
           <>
             <div className="space-y-1.5">
               <Text as="p" role="caption" tone="muted">
-                Required reviews (everyone holding a checked role must approve):
+                Reviewers of this task (each must approve):
               </Text>
-              {fleetRoles.map((role) => {
-                const holders = holdersOf(role);
-                return (
-                  <Checkbox
-                    key={role}
-                    checked={roles.includes(role)}
-                    onChange={(on) => setRoles((r) => toggle(r, role, on))}
-                    label={
-                      <span>
-                        {role}{' '}
-                        <span className={holders.length ? 'text-muted' : 'text-warning'}>
-                          {holders.length ? `(${holders.join(', ')})` : '(nobody in the fleet has this role yet)'}
+              <div className="max-h-48 space-y-1 overflow-y-auto">
+                {agents.map((a) => {
+                  const id = String(a.agent_id || a.agentId);
+                  const isAssignee = id === currentAssignee;
+                  return (
+                    <Checkbox
+                      key={id}
+                      checked={named.includes(id)}
+                      disabled={isAssignee}
+                      onChange={(on) => setNamed((n) => toggle(n, id, on))}
+                      label={
+                        <span>
+                          {String(a.name || a.display_name || names.agent(id))}
+                          {isAssignee && <span className="text-faint"> (assignee, can't review its own work)</span>}
                         </span>
-                      </span>
-                    }
-                  />
-                );
-              })}
+                      }
+                    />
+                  );
+                })}
+              </div>
             </div>
-            <Select value={addReviewer} onChange={setAddReviewer} options={reviewerOptions} width="full" aria-label="Add a reviewer agent" />
             <Checkbox checked={userApproval} onChange={setUserApproval} label="I approve it too (final review is mine)" />
+            <details className="space-y-1.5">
+              <summary className="cursor-pointer text-muted hover:text-primary">
+                Review roles (optional){roles.length ? `: ${roles.join(', ')}` : ''}
+              </summary>
+              <Text as="p" role="caption" tone="muted">
+                A role asks every agent holding it to review. Useful for templates and coordinators. Manage roles from the
+                chain's Review roles.
+              </Text>
+              {roleList.map((role) => (
+                <Checkbox
+                  key={role.name}
+                  checked={roles.includes(role.name)}
+                  onChange={(on) => setRoles((r) => toggle(r, role.name, on))}
+                  label={
+                    <span>
+                      {role.name}{' '}
+                      <span className={role.holders.length ? 'text-muted' : 'text-warning'}>
+                        ({role.holders.length ? role.holders.map(names.agent).join(', ') : 'nobody holds it'})
+                      </span>
+                      {role.description && <span className="block text-faint">{role.description}</span>}
+                    </span>
+                  }
+                />
+              ))}
+            </details>
           </>
         )}
 

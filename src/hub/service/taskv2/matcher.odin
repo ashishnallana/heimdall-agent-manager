@@ -211,47 +211,52 @@ grant_work :: proc(svc: ^Service, u: ^Uow, ctx: ^Match_Context, task: domain.Tas
 
 @(private = "file")
 grant_reviews :: proc(svc: ^Service, u: ^Uow, ctx: ^Match_Context, task: domain.Task, trigger: Trigger) {
-	roles := brief_review_roles(task.brief_json, context.temp_allocator)
-	if len(roles) == 0 do return
 	author_agent := ""
 	if holder := last_attempt_holder(svc, task); holder != "" {
 		if inst, iok, _ := iface.agent_get_instance(svc.agents, holder); iok do author_agent = inst.agent_id
 	}
+	pairs := required_review_pairs(task, ctx.fleets[:], author_agent)
+	if len(pairs) == 0 do return
 	reviews, _ := iface.taskchain_list_reviews_by_task(svc.repo, task.task_id, task.owner_user_id)
-	// One review lease per needed (fleet row, role) pair — the gate is a strict
-	// AND over the same pairs (gate.odin).
-	for role in roles {
-		for fleet in ctx.fleets {
-			if !fleet_row_has_role(fleet, role) do continue
-			if author_agent != "" && fleet.agent_id == author_agent do continue // never review your own work
-			if !review_needed_from(reviews, task, fleet.agent_id, role) do continue
-			if review_lease_live_for(ctx, svc, task.task_id, fleet.agent_id, role) do continue
-			placement, pok := resolve_placement(ctx, task, fleet, false)
-			if !pok do continue
-			if !bridge_online(svc, placement.bridge_id) do continue
-			inst, found := pick_instance(svc, u, ctx, fleet, placement, domain.FLEET_ROLE_REVIEWER, "")
-			if !found do continue
-			lease, gok, gerr := grant_in_uow(svc, u, Grant_Request{
-				chain = ctx.chain, task = task, instance = inst,
-				kind = domain.LEASE_KIND_REVIEW, review_role = role, delivery = domain.LEASE_DELIVERY_WAKE,
-				placement = placement, actor = hub_actor(), trigger = trigger,
-			})
-			if !gok {
-				fmt.eprintfln("[taskv2] match: review grant skipped task=%s inst=%s: %s", task.task_id, inst.agent_instance_id, gerr.message)
-				continue
-			}
-			append(&ctx.leases, lease)
-			ctx.held[inst.agent_instance_id] = true
+	// One review lease per AGENT covering every pair it still owes (hybrid model);
+	// the gate is a strict AND over the same pairs (gate.odin).
+	for agent_id in distinct_review_agents(pairs) {
+		owed := owed_review_roles(pairs, reviews, task, agent_id)
+		if len(owed) == 0 do continue
+		if review_lease_live_for(ctx, svc, task.task_id, agent_id, "") do continue
+		fleet, has_row := fleet_row_for_agent(ctx.fleets[:], agent_id)
+		if !has_row do continue
+		placement, pok := resolve_placement(ctx, task, fleet, false)
+		if !pok do continue
+		if !bridge_online(svc, placement.bridge_id) do continue
+		inst, found := pick_instance(svc, u, ctx, fleet, placement, domain.FLEET_ROLE_REVIEWER, "")
+		if !found do continue
+		lease, gok, gerr := grant_in_uow(svc, u, Grant_Request{
+			chain = ctx.chain, task = task, instance = inst,
+			kind = domain.LEASE_KIND_REVIEW, review_role = join_review_roles(owed), delivery = domain.LEASE_DELIVERY_WAKE,
+			placement = placement, actor = hub_actor(), trigger = trigger,
+		})
+		if !gok {
+			fmt.eprintfln("[taskv2] match: review grant skipped task=%s inst=%s: %s", task.task_id, inst.agent_instance_id, gerr.message)
+			continue
 		}
+		append(&ctx.leases, lease)
+		ctx.held[inst.agent_instance_id] = true
 	}
 }
 
 // review_lease_live_for: an instance of `agent_id` already holds a review
-// lease for `role` on the task.
+// lease on the task. One review lease per agent covers all its roles, so
+// `role` only narrows the check when non-empty.
 @(private = "file")
 review_lease_live_for :: proc(ctx: ^Match_Context, svc: ^Service, task_id: domain.Task_ID, agent_id, role: string) -> bool {
 	for l in ctx.leases {
-		if l.task_id != task_id || l.kind != domain.LEASE_KIND_REVIEW || l.review_role != role do continue
+		if l.task_id != task_id || l.kind != domain.LEASE_KIND_REVIEW do continue
+		if role != "" {
+			covers := false
+			for r in split_review_roles(l.review_role) do if r == role { covers = true; break }
+			if !covers do continue
+		}
 		for inst in ctx.instances do if inst.agent_instance_id == l.holder_instance_id && inst.agent_id == agent_id do return true
 		if inst, ok, _ := iface.agent_get_instance(svc.agents, l.holder_instance_id); ok && inst.agent_id == agent_id do return true
 	}
@@ -358,31 +363,29 @@ grant_inline_for_instance :: proc(svc: ^Service, u: ^Uow, chain: domain.Task_Cha
 	// Review pass.
 	for task in ctx.sorted {
 		if task.state != .In_Review || task.kind == .Gate do continue
-		roles := brief_review_roles(task.brief_json, context.temp_allocator)
-		if len(roles) == 0 do continue
 		author_agent := ""
 		if holder := last_attempt_holder(svc, task); holder != "" {
 			if h, hok, _ := iface.agent_get_instance(svc.agents, holder); hok do author_agent = h.agent_id
 		}
 		if author_agent == inst.agent_id do continue
+		pairs := required_review_pairs(task, ctx.fleets[:], author_agent)
+		if len(pairs) == 0 do continue
 		reviews, _ := iface.taskchain_list_reviews_by_task(svc.repo, task.task_id, task.owner_user_id)
-		for role in roles {
-			if !fleet_row_has_role(fleet, role) do continue
-			if !review_needed_from(reviews, task, fleet.agent_id, role) do continue
-			if review_lease_live_for(&ctx, svc, task.task_id, fleet.agent_id, role) do continue
-			placement, pok := resolve_placement(&ctx, task, fleet, false)
-			if !pok do placement = Placement{bridge_id = inst.bridge_id}
-			placement.bridge_id = inst.bridge_id // the caller is where it is
-			placement.directory_id = resolve_directory_for_bridge(ctx.dirs, inst.bridge_id)
-			lease, gok, _ := grant_in_uow(svc, u, Grant_Request{
-				chain = chain, task = task, instance = inst,
-				kind = domain.LEASE_KIND_REVIEW, review_role = role, delivery = domain.LEASE_DELIVERY_INLINE,
-				placement = placement, actor = Actor{kind = ACTOR_AGENT, id = inst.agent_instance_id}, trigger = trigger,
-			})
-			if gok {
-				fresh, _, _ := iface.taskchain_get_task(svc.repo, task.task_id)
-				return lease, fresh, true
-			}
+		owed := owed_review_roles(pairs, reviews, task, inst.agent_id)
+		if len(owed) == 0 do continue
+		if review_lease_live_for(&ctx, svc, task.task_id, inst.agent_id, "") do continue
+		placement, pok := resolve_placement(&ctx, task, fleet, false)
+		if !pok do placement = Placement{bridge_id = inst.bridge_id}
+		placement.bridge_id = inst.bridge_id // the caller is where it is
+		placement.directory_id = resolve_directory_for_bridge(ctx.dirs, inst.bridge_id)
+		lease, gok, _ := grant_in_uow(svc, u, Grant_Request{
+			chain = chain, task = task, instance = inst,
+			kind = domain.LEASE_KIND_REVIEW, review_role = join_review_roles(owed), delivery = domain.LEASE_DELIVERY_INLINE,
+			placement = placement, actor = Actor{kind = ACTOR_AGENT, id = inst.agent_instance_id}, trigger = trigger,
+		})
+		if gok {
+			fresh, _, _ := iface.taskchain_get_task(svc.repo, task.task_id)
+			return lease, fresh, true
 		}
 	}
 	// Work pass.

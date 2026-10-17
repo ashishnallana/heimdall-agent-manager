@@ -1472,6 +1472,7 @@ patch_task_handler :: proc(ctx: rawptr, req: Request) -> Response {
 		title = json_string(req.body, "title"), description = json_string(req.body, "description"), brief_json = brief_json,
 		assignee_agent_id = assignee, has_assignee = json_key_present(req.body, "assignee") || json_key_present(req.body, "assignee_ref"),
 		review_roles = review_roles, has_review_roles = has_roles, reviewer_agent_ids = reviewers,
+		has_reviewers = jsonx.has_key(req.body, "reviewers", top_level_only = true) || jsonx.has_key(req.body, "reviewer_refs", top_level_only = true),
 		requires_user_approval = requires_user_approval, has_requires_user_approval = has_requires_user_approval, priority = priority, has_priority = has_priority, depends_on = deps, has_depends_on = has_deps, bridge_id = bridge_pin,
 	})
 	if !updated do return respond_error(err, req.request_id)
@@ -2959,3 +2960,43 @@ workflow_cancel_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	return respond_success(fmt.tprintf(`{{"chain_id":"%s","status":"cancelled","chain":%s}}`, saved.chain_id, strings.to_string(cb)), req.request_id, auth_ctx_server_time(req))
 }
 
+
+
+// ---- chain review roles (hybrid review model) ---------------------------------------
+
+// GET /api/v1/task-chains/{c}/review-roles
+list_chain_review_roles_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Taskchain_Handlers)(ctx)
+	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
+	if !ok do return auth_resp
+	roles, err := taskchain_service.list_review_roles(h.taskchains, auth_ctx, domain.Task_Chain_ID(path_part(req.path, 4)))
+	if err.code != .None do return respond_error(err, req.request_id)
+	data, _ := json.marshal(roles, JSON_MARSHAL_OPT, allocator = context.temp_allocator)
+	return respond_list(string(data), contracts.API_Page{limit = contracts.API_DEFAULT_PAGE_LIMIT, has_more = false}, req.request_id, auth_ctx_server_time(req))
+}
+
+// PUT /api/v1/task-chains/{c}/review-roles/{name}  {description}
+upsert_chain_review_role_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Taskchain_Handlers)(ctx)
+	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
+	if !ok do return auth_resp
+	chain_id := domain.Task_Chain_ID(path_part(req.path, 4))
+	if err := taskchain_service.set_review_role(h.taskchains, auth_ctx, chain_id, path_part(req.path, 6), json_string(req.body, "description")); err.code != .None {
+		return respond_error(err, req.request_id)
+	}
+	publish_chain_changed(h, auth_ctx.user_id, string(chain_id), "updated")
+	return respond_success(`{"ok":true}`, req.request_id, auth_ctx_server_time(req), 200)
+}
+
+// DELETE /api/v1/task-chains/{c}/review-roles/{name}
+delete_chain_review_role_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Taskchain_Handlers)(ctx)
+	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
+	if !ok do return auth_resp
+	chain_id := domain.Task_Chain_ID(path_part(req.path, 4))
+	if err := taskchain_service.delete_review_role(h.taskchains, auth_ctx, chain_id, path_part(req.path, 6)); err.code != .None {
+		return respond_error(err, req.request_id)
+	}
+	publish_chain_changed(h, auth_ctx.user_id, string(chain_id), "updated")
+	return respond_success(`{"ok":true}`, req.request_id, auth_ctx_server_time(req), 200)
+}

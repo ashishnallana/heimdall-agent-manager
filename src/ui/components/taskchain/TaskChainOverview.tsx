@@ -7,6 +7,7 @@ import { TicketBoardView } from '../tasks/TicketBoardView';
 import { WorkflowPipelineView } from '../tasks/WorkflowPipelineView';
 import { CreateTaskModal } from '../tasks/CreateTaskModal';
 import { FleetManagementDrawer } from '../tasks/FleetManagementDrawer';
+import { ReviewRolesModal } from '../tasks/ReviewRolesModal';
 import { TaskWire } from '../../api/taskWire';
 import { resolveSelectedTaskId } from '../tasks/taskV2Types';
 import { useOpenAgentChat } from '../aux/openAgentChatContext';
@@ -96,6 +97,7 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(focusTaskId || null);
   const [showNewTaskModal, setShowNewTaskModal] = useState(false);
   const [showFleetDrawer, setShowFleetDrawer] = useState(false);
+  const [showReviewRoles, setShowReviewRoles] = useState(false);
   const [publishChain, publishChainState] = usePublishTaskChainMutation();
   const [publishError, setPublishError] = useState('');
 
@@ -171,9 +173,14 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
     }
   };
   const fleetButton = (
-    <Button size="sm" variant="secondary" onClick={() => setShowFleetDrawer(true)}>
-      Fleet
-    </Button>
+    <>
+      <Button size="sm" variant="secondary" onClick={() => setShowFleetDrawer(true)}>
+        Fleet
+      </Button>
+      <Button size="sm" variant="secondary" onClick={() => setShowReviewRoles(true)}>
+        Review roles
+      </Button>
+    </>
   );
 
   return (
@@ -222,6 +229,7 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
             onScrolled={clearScroll}
             onNewTask={() => setShowNewTaskModal(true)}
             onOpenFleetDrawer={() => setShowFleetDrawer(true)}
+            onOpenReviewRoles={() => setShowReviewRoles(true)}
             onPublishChain={chainIsDraft ? handlePublishChain : undefined}
             publishingChain={publishChainState.isLoading}
             publishError={publishError}
@@ -239,6 +247,8 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
           onSuccess={() => setShowNewTaskModal(false)}
         />
       )}
+
+      <ReviewRolesModal chainId={chainId} open={showReviewRoles} onClose={() => setShowReviewRoles(false)} names={names} />
 
       {/* Fleet Management Drawer */}
       <FleetManagementDrawer

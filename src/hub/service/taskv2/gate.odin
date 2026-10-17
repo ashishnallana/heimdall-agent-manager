@@ -8,8 +8,9 @@ import jsonx "odin_test:lib/jsonx"
 // Review gate (plan §2.5). Evaluated inside the UoW after every review post,
 // independent verify exit, and fleet change, for a task in `in_review`:
 //
-//   needed = { (fleet row, role) : role ∈ brief.review_roles ∧ row has role
-//              ∧ row.agent_id ≠ the attempt's author template }
+//   needed = required_review_pairs: { (agent, "named") : agent ∈ brief.reviewers }
+//            ∪ { (fleet row, role) : role ∈ brief.review_roles ∧ row has role },
+//            minus the attempt's author template
 //   gate   = every needed pair has an `approve` review on THIS attempt
 //            ∧ no `request_changes` on this attempt
 //            ∧ (independent verify passed on this attempt, if require_independent_verify)
@@ -81,25 +82,22 @@ evaluate_gate_in_uow :: proc(svc: ^Service, u: ^Uow, chain: domain.Task_Chain, t
 		metric_gate_evaluated(.Approved)
 		return .Approved, true, domain.Domain_Error{}
 	}
-	// 2. every needed (fleet row, role) approved
-	roles := brief_review_roles(task.brief_json, context.temp_allocator)
+	// 2. every required (agent, role) pair approved: named reviewers on the task
+	//    and holders of each review role (review_pairs.odin).
 	author_agent := ""
 	if holder := last_attempt_holder(svc, task); holder != "" {
 		if inst, iok, _ := iface.agent_get_instance(svc.agents, holder); iok do author_agent = inst.agent_id
 	}
 	fleets, ferr := iface.taskchain_list_fleets_by_chain(svc.repo, chain.chain_id, chain.owner_user_id)
 	if ferr.code != .None do return .Waiting, false, ferr
-	for role in roles {
-		for f in fleets {
-			if !fleet_row_has_role(f, role) || f.agent_id == author_agent do continue
-			approved := false
-			for r in reviews {
-				if r.attempt_no == task.attempt_no && r.verdict == "approve" && r.reviewer_kind == "agent" && r.role == role && r.reviewer_agent_id == f.agent_id { approved = true; break }
-			}
-			if !approved {
-				metric_gate_evaluated(.Waiting)
-				return .Waiting, true, domain.Domain_Error{}
-			}
+	for pair in required_review_pairs(task, fleets, author_agent) {
+		approved := false
+		for r in reviews {
+			if r.attempt_no == task.attempt_no && r.verdict == "approve" && r.reviewer_kind == "agent" && r.role == pair.role && r.reviewer_agent_id == pair.agent_id { approved = true; break }
+		}
+		if !approved {
+			metric_gate_evaluated(.Waiting)
+			return .Waiting, true, domain.Domain_Error{}
 		}
 	}
 	// 3. require_independent_verify: requires a passing independent verify facet on this attempt

@@ -149,6 +149,9 @@ Update_Task_Input :: struct {
 	review_roles: []string,
 	has_review_roles: bool,
 	reviewer_agent_ids: []string,
+	// has_reviewers: the request carried `reviewers` (possibly empty), so the
+	// task's named reviewers are replaced; absent leaves them untouched.
+	has_reviewers: bool,
 	requires_user_approval: bool,
 	has_requires_user_approval: bool,
 	// priority sets the task priority (P0/P1/P2). has_priority distinguishes an
@@ -837,7 +840,7 @@ sync_chain_status_from_tasks :: proc(service: ^Taskchain_Service, chain_id: doma
 // brief object. An explicit brief_json wins; otherwise goal defaults to the
 // description (or the title), acceptance/verify stay empty until M2's publish
 // validator requires them.
-build_brief_json :: proc(existing_brief, title, description, assignee_agent_id: string, has_assignee: bool, review_roles: []string, has_review_roles: bool) -> string {
+build_brief_json :: proc(existing_brief, title, description, assignee_agent_id: string, has_assignee: bool, review_roles: []string, has_review_roles: bool, reviewers: []string = nil, has_reviewers := false) -> string {
 	goal := jsonx.extract_string(existing_brief, "goal", "", true)
 	if goal == "" do goal = strings.trim_space(description)
 	if goal == "" do goal = strings.trim_space(title)
@@ -872,6 +875,22 @@ build_brief_json :: proc(existing_brief, title, description, assignee_agent_id: 
 	strings.write_byte(&rb, ']')
 	taskv2.json_raw(&o, "review_roles", strings.to_string(rb))
 	if assignee != "" do taskv2.json_str(&o, "assignee", assignee)
+	// Named reviewers (hybrid review model): the agents that must approve THIS task.
+	named := taskv2.brief_named_reviewers(existing_brief, context.temp_allocator)
+	if has_reviewers {
+		clear(&named)
+		for r in reviewers do if id := strings.trim_space(r); id != "" do append(&named, id)
+	}
+	if len(named) > 0 {
+		nb := strings.builder_make(context.temp_allocator)
+		strings.write_byte(&nb, '[')
+		for r, i in named {
+			if i > 0 do strings.write_byte(&nb, ',')
+			strings.write_byte(&nb, '"'); contracts.write_json_string(&nb, r); strings.write_byte(&nb, '"')
+		}
+		strings.write_byte(&nb, ']')
+		taskv2.json_raw(&o, "reviewers", strings.to_string(nb))
+	}
 	if b_ok do taskv2.json_raw(&o, "budget", budget)
 	if output, ook := jsonx.extract_raw_object(existing_brief, "output", true); ook {
 		taskv2.json_raw(&o, "output", output)
@@ -973,6 +992,19 @@ ensure_fleet_role :: proc(service: ^Taskchain_Service, chain: domain.Task_Chain,
 	return iface.taskchain_ensure_fleet(service.repo, fleet)
 }
 
+// ensure_fleet_row_for_named_reviewer gives a named reviewer a fleet row so the
+// matcher can place and launch it. An existing row (any roles) is enough; a new
+// one carries only FLEET_ROLE_NAMED_REVIEWER, which no task lists in
+// review_roles, so the agent is not pulled into other tasks' role reviews.
+ensure_fleet_row_for_named_reviewer :: proc(service: ^Taskchain_Service, chain: domain.Task_Chain, agent_id: string) -> domain.Domain_Error {
+	id := strings.trim_space(agent_id)
+	if id == "" do return domain.Domain_Error{}
+	fleets, err := iface.taskchain_list_fleets_by_chain(service.repo, chain.chain_id, chain.owner_user_id)
+	if err.code != .None do return err
+	for f in fleets do if f.agent_id == id do return domain.Domain_Error{}
+	return ensure_fleet_role(service, chain, id, taskv2.FLEET_ROLE_NAMED_REVIEWER)
+}
+
 fleet_has_role :: proc(f: domain.Task_Chain_Fleet, role: string) -> bool {
 	roles := jsonx.decode_string_array(f.roles_json if f.roles_json != "" else domain.FLEET_ROLES_DEFAULT_JSON, context.temp_allocator)
 	for r in roles do if r == role do return true
@@ -1020,30 +1052,29 @@ create_task_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Conte
 
 	review_roles := make([dynamic]string, context.temp_allocator)
 	for r in input.review_roles do append(&review_roles, r)
-	if len(input.reviewer_agent_ids) > 0 {
-		// Legacy reviewer refs ADD the reviewer role; without explicit top-level
-		// review_roles they must keep the brief's own roles (as update does), not
-		// replace them with ["reviewer"].
-		if len(review_roles) == 0 {
-			for r in taskv2.brief_review_roles(input.brief_json, context.temp_allocator) do append(&review_roles, r)
-		}
-		has_reviewer := false
-		for r in review_roles do if r == domain.FLEET_ROLE_REVIEWER do has_reviewer = true
-		if !has_reviewer do append(&review_roles, domain.FLEET_ROLE_REVIEWER)
+	// Reviewer agent ids are NAMED reviewers of this task (hybrid review model):
+	// they join the brief's own named reviewers and do not add a chain-wide role.
+	named := taskv2.brief_named_reviewers(input.brief_json, context.temp_allocator)
+	for rid in input.reviewer_agent_ids {
+		id := strings.trim_space(rid)
+		dup := id == ""
+		for n in named do if n == id { dup = true; break }
+		if !dup do append(&named, id)
 	}
+	has_named := len(input.reviewer_agent_ids) > 0
 	brief := input.brief_json
 	if strings.trim_space(brief) == "" || strings.trim_space(brief) == "{}" {
-		brief = build_brief_json("{}", input.title, input.description, input.assignee_agent_id, input.assignee_agent_id != "", review_roles[:], true)
-	} else if input.assignee_agent_id != "" || len(review_roles) > 0 {
-		brief = build_brief_json(brief, input.title, input.description, input.assignee_agent_id, input.assignee_agent_id != "", review_roles[:], len(review_roles) > 0)
+		brief = build_brief_json("{}", input.title, input.description, input.assignee_agent_id, input.assignee_agent_id != "", review_roles[:], true, named[:], has_named)
+	} else if input.assignee_agent_id != "" || len(review_roles) > 0 || has_named {
+		brief = build_brief_json(brief, input.title, input.description, input.assignee_agent_id, input.assignee_agent_id != "", review_roles[:], len(review_roles) > 0, named[:], has_named)
 	}
-	// Fleet rows for every template the task names (worker for the assignee,
-	// reviewer for legacy reviewer refs).
+	// Fleet rows for every template the task names: worker for the assignee, a
+	// quiet named-reviewer row (placement only) for each named reviewer.
 	if a := taskv2.brief_assignee(brief); a != "" {
 		if ferr := ensure_fleet_role(service, chain, a, domain.FLEET_ROLE_WORKER); ferr.code != .None do return domain.Task{}, false, ferr
 	}
-	for rid in input.reviewer_agent_ids {
-		if ferr := ensure_fleet_role(service, chain, rid, domain.FLEET_ROLE_REVIEWER); ferr.code != .None do return domain.Task{}, false, ferr
+	for rid in taskv2.brief_named_reviewers(brief, context.temp_allocator) {
+		if ferr := ensure_fleet_row_for_named_reviewer(service, chain, rid); ferr.code != .None do return domain.Task{}, false, ferr
 	}
 
 	now := platform.clock_now(service.clock)
@@ -1133,19 +1164,13 @@ update_task_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Conte
 	review_roles := make([dynamic]string, context.temp_allocator)
 	for r in input.review_roles do append(&review_roles, r)
 	has_roles := input.has_review_roles
-	if len(input.reviewer_agent_ids) > 0 {
-		has_roles = true
-		if !has_roles || len(review_roles) == 0 {
-			for r in taskv2.brief_review_roles(task.brief_json, context.temp_allocator) do append(&review_roles, r)
-		}
-		has_reviewer := false
-		for r in review_roles do if r == domain.FLEET_ROLE_REVIEWER do has_reviewer = true
-		if !has_reviewer do append(&review_roles, domain.FLEET_ROLE_REVIEWER)
-	}
-	if input.has_assignee || has_roles || input.title != "" || input.description != "" {
-		task.brief_json = build_brief_json(task.brief_json, task.title, task.description, input.assignee_agent_id, input.has_assignee, review_roles[:], has_roles)
+	// `reviewers` REPLACES the task's named reviewers (an empty list clears them).
+	has_named := input.has_reviewers || len(input.reviewer_agent_ids) > 0
+	if input.has_assignee || has_roles || has_named || input.title != "" || input.description != "" {
+		task.brief_json = build_brief_json(task.brief_json, task.title, task.description, input.assignee_agent_id, input.has_assignee, review_roles[:], has_roles, input.reviewer_agent_ids, has_named)
 		if input.has_assignee do append(&changed, "assignee")
 		if has_roles do append(&changed, "review_roles")
+		if has_named do append(&changed, "reviewers")
 	}
 	if input.has_requires_user_approval {
 		task.requires_user_approval = input.requires_user_approval
@@ -1162,8 +1187,8 @@ update_task_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Conte
 	if a := taskv2.brief_assignee(task.brief_json); a != "" {
 		if ferr := ensure_fleet_role(service, chain, a, domain.FLEET_ROLE_WORKER); ferr.code != .None do return domain.Task{}, false, ferr
 	}
-	for rid in input.reviewer_agent_ids {
-		if ferr := ensure_fleet_role(service, chain, rid, domain.FLEET_ROLE_REVIEWER); ferr.code != .None do return domain.Task{}, false, ferr
+	for rid in taskv2.brief_named_reviewers(task.brief_json, context.temp_allocator) {
+		if ferr := ensure_fleet_row_for_named_reviewer(service, chain, rid); ferr.code != .None do return domain.Task{}, false, ferr
 	}
 	task.updated_at = platform.clock_now(service.clock)
 	saved, save_ok, save_err := iface.taskchain_save_task(service.repo, task)

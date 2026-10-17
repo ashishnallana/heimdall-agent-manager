@@ -55,6 +55,17 @@ export interface TaskChainFleet {
   updated_at?: string;
 }
 
+/** A chain review role (hybrid review model). */
+export interface ChainReviewRole {
+  name: string;
+  /** What the role checks; handed to the reviewing agent. */
+  description: string;
+  /** Agent template ids whose fleet row holds the role. */
+  holders: string[];
+  /** Open tasks whose brief requires the role (delete is refused while > 0). */
+  openTaskCount: number;
+}
+
 export interface EffectivePlacement {
   bridge_id: string;
   /** task_pin | fleet | chain_directory | coordinator | none */
@@ -121,6 +132,60 @@ export const taskChainsApi = heimdallApi.injectEndpoints({
         }
       },
       providesTags: (_result, _error, { chainId }) => [{ type: 'TaskChainFleets' as const, id: chainId }],
+    }),
+
+    // Hybrid review model: chain review roles (optional, for templates and
+    // coordinators). Members are the fleet rows holding the role, so these share
+    // the fleets tag and refresh together.
+    listChainReviewRoles: build.query<ChainReviewRole[], { chainId: string }>({
+      queryFn: async ({ chainId }) => {
+        try {
+          const raw = await cookieJsonFetch(`/task-chains/${encodeURIComponent(chainId)}/review-roles`);
+          const list = Array.isArray(raw) ? raw : Array.isArray(raw?.data) ? raw.data : [];
+          return {
+            data: list.map((r: any) => ({
+              name: String(r?.name || ''),
+              description: String(r?.description || ''),
+              holders: Array.isArray(r?.holders) ? r.holders.map(String) : [],
+              openTaskCount: Number(r?.open_task_count || 0),
+            })),
+          };
+        } catch (error: any) {
+          return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
+        }
+      },
+      providesTags: (_result, _error, { chainId }) => [{ type: 'TaskChainFleets' as const, id: chainId }],
+    }),
+
+    upsertChainReviewRole: build.mutation<any, { chainId: string; name: string; description: string }>({
+      queryFn: async ({ chainId, name, description }) => {
+        try {
+          const data = await cookieMutation(
+            `/task-chains/${encodeURIComponent(chainId)}/review-roles/${encodeURIComponent(name)}`,
+            'PUT',
+            { description },
+          );
+          return { data };
+        } catch (error: any) {
+          return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
+        }
+      },
+      invalidatesTags: (_result, _error, { chainId }) => [{ type: 'TaskChainFleets' as const, id: chainId }],
+    }),
+
+    deleteChainReviewRole: build.mutation<any, { chainId: string; name: string }>({
+      queryFn: async ({ chainId, name }) => {
+        try {
+          const data = await cookieMutation(
+            `/task-chains/${encodeURIComponent(chainId)}/review-roles/${encodeURIComponent(name)}`,
+            'DELETE',
+          );
+          return { data };
+        } catch (error: any) {
+          return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
+        }
+      },
+      invalidatesTags: (_result, _error, { chainId }) => [{ type: 'TaskChainFleets' as const, id: chainId }],
     }),
 
     updateTaskChainFleet: build.mutation<TaskChainFleet, {
@@ -357,6 +422,9 @@ export const taskChainsApi = heimdallApi.injectEndpoints({
 });
 
 export const {
+  useListChainReviewRolesQuery,
+  useUpsertChainReviewRoleMutation,
+  useDeleteChainReviewRoleMutation,
   useGetTaskChainFleetsQuery,
   useLazyGetTaskChainFleetsQuery,
   useUpdateTaskChainFleetMutation,

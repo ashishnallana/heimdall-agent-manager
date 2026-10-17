@@ -59,6 +59,9 @@ build_pack_json :: proc(svc: ^Service, chain: domain.Task_Chain, task: domain.Ta
 	json_str(&l, "lease_id", lease.lease_id)
 	json_str(&l, "kind", lease.kind)
 	json_str(&l, "review_role", lease.review_role)
+	// Hybrid review model: one review lease covers every role this agent owes
+	// on the task; each comes with what that role is asked to check.
+	if lease.kind == domain.LEASE_KIND_REVIEW do json_raw(&l, "review_roles", review_roles_pack_json(chain, lease.review_role))
 	json_int(&l, "attempt_no", i64(lease.attempt_no))
 	json_int(&l, "max_attempts", i64(max_attempts))
 	json_int(&l, "review_round", i64(view.review_rounds))

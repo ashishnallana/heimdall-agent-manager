@@ -850,6 +850,7 @@ agent_action_task_update_handler :: proc(ctx: rawptr, req: Request) -> Response 
 		review_roles = review_roles,
 		has_review_roles = has_roles,
 		reviewer_agent_ids = reviewers,
+		has_reviewers = jsonx.has_key(params, "reviewers", top_level_only = true) || jsonx.has_key(params, "reviewer_refs", top_level_only = true),
 		requires_user_approval = requires_user_approval,
 		has_requires_user_approval = has_requires_user_approval,
 		priority = priority,

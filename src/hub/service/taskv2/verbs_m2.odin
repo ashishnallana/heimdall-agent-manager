@@ -360,12 +360,19 @@ review_post :: proc(svc: ^Service, auth: contracts.Auth_Context, input: Review_I
 	if !cok { _, _ = end_uow(svc, &u, false); return {}, false, cerr }
 	findings, _ := findings_json_capped(input.findings_json)
 	now := platform.clock_now(svc.clock)
-	review := domain.Task_Review{
-		task_id = task.task_id, chain_id = task.chain_id, owner_user_id = task.owner_user_id, attempt_no = task.attempt_no,
-		role = lease.review_role, reviewer_kind = "agent", reviewer_agent_id = inst.agent_id, reviewer_instance_id = inst.agent_instance_id,
-		verdict = input.verdict, findings_json = findings, created_at = now,
+	// One lease covers every (agent, role) pair this reviewer owes on the task
+	// (hybrid review model); the verdict is recorded once per pair so the gate
+	// stays a strict AND over pairs.
+	lease_roles := split_review_roles(lease.review_role)
+	if len(lease_roles) == 0 do lease_roles = []string{lease.review_role}
+	for role in lease_roles {
+		review := domain.Task_Review{
+			task_id = task.task_id, chain_id = task.chain_id, owner_user_id = task.owner_user_id, attempt_no = task.attempt_no,
+			role = role, reviewer_kind = "agent", reviewer_agent_id = inst.agent_id, reviewer_instance_id = inst.agent_instance_id,
+			verdict = input.verdict, findings_json = findings, created_at = now,
+		}
+		if _, sok, serr := iface.taskchain_save_review(svc.repo, review); !sok { _, _ = end_uow(svc, &u, false); return {}, false, serr }
 	}
-	if _, sok, serr := iface.taskchain_save_review(svc.repo, review); !sok { _, _ = end_uow(svc, &u, false); return {}, false, serr }
 	// release the review lease (not an attempt; no budget)
 	if deleted, _ := iface.taskchain_delete_lease(svc.repo, lease.lease_id); !deleted { _, _ = end_uow(svc, &u, false); return {}, false, lease_lost_error() }
 	metric_lease_released(lease.kind)

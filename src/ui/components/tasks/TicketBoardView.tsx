@@ -22,6 +22,7 @@ export interface TicketBoardViewProps {
   onScrolled?: () => void;
   onNewTask?: () => void;
   onOpenFleetDrawer?: () => void;
+  onOpenReviewRoles?: () => void;
   /** Shown while the chain itself is still a draft (plan REQ-UI-9). */
   onPublishChain?: () => void;
   publishingChain?: boolean;
@@ -63,6 +64,7 @@ export const TicketBoardView: React.FC<TicketBoardViewProps> = ({
   onScrolled,
   onNewTask,
   onOpenFleetDrawer,
+  onOpenReviewRoles,
   onPublishChain,
   publishingChain = false,
   publishError,
@@ -114,6 +116,11 @@ export const TicketBoardView: React.FC<TicketBoardViewProps> = ({
             {onOpenFleetDrawer && (
               <Button size="sm" variant="secondary" onClick={onOpenFleetDrawer} data-debug-id="task-board-fleet-btn">
                 Fleet
+              </Button>
+            )}
+            {onOpenReviewRoles && (
+              <Button size="sm" variant="secondary" onClick={onOpenReviewRoles} data-debug-id="task-board-review-roles-btn">
+                Review roles
               </Button>
             )}
             {onNewTask && (

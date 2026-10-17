@@ -1106,7 +1106,8 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
                     <div className="flex items-center justify-between gap-2">
                       <span className="text-xs font-medium text-primary">Fleet Roles</span>
                       <div className="flex items-center gap-1.5" role="group" aria-label={`Roles for ${roleName}`}>
-                        {[...FLEET_ROLES, ...effectiveRoles.filter((r) => !(FLEET_ROLES as readonly string[]).includes(r))].map((roleKey) => {
+                        {/* named-reviewer is the hub's placement-only marker for reviewers named on a task; not a role people manage */}
+                        {[...FLEET_ROLES, ...effectiveRoles.filter((r) => !(FLEET_ROLES as readonly string[]).includes(r) && r !== 'named-reviewer')].map((roleKey) => {
                           const selected = effectiveRoles.includes(roleKey);
                           return (
                             <button

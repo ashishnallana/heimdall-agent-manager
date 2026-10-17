@@ -636,6 +636,9 @@ register_routes :: proc(graph: ^App_Graph) {
 	http.router_add(&graph.router, "GET", "/api/v1/task-chains/*/fleets", rawptr(&graph.taskchain_handlers), http.list_chain_fleets_handler)
 	http.router_add(&graph.router, "PUT", "/api/v1/task-chains/*/fleets/*", rawptr(&graph.taskchain_handlers), http.upsert_chain_fleet_handler)
 	http.router_add(&graph.router, "DELETE", "/api/v1/task-chains/*/fleets/*", rawptr(&graph.taskchain_handlers), http.delete_chain_fleet_handler)
+	http.router_add(&graph.router, "GET", "/api/v1/task-chains/*/review-roles", rawptr(&graph.taskchain_handlers), http.list_chain_review_roles_handler)
+	http.router_add(&graph.router, "PUT", "/api/v1/task-chains/*/review-roles/*", rawptr(&graph.taskchain_handlers), http.upsert_chain_review_role_handler)
+	http.router_add(&graph.router, "DELETE", "/api/v1/task-chains/*/review-roles/*", rawptr(&graph.taskchain_handlers), http.delete_chain_review_role_handler)
 	// Task chain directory filesystem browser (resolves chain+directory -> bridge+path, relays fs_* WS commands).
 	http.router_add(&graph.router, "GET", "/api/v1/task-chains/*/directories/*/fs", rawptr(&graph.bridge_handlers), http.list_chain_directory_fs_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/task-chains/*/directories/*/fs/quick-open", rawptr(&graph.bridge_handlers), http.quick_open_chain_directory_fs_handler)

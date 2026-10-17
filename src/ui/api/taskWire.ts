@@ -17,6 +17,8 @@ export interface TaskBriefWire {
   verify?: string;
   inputs?: unknown[];
   review_roles?: string[];
+  /** Agents named as reviewers of THIS task (hybrid review model). */
+  reviewers?: string[];
   assignee?: string;
   budget?: TaskBriefBudgetWire;
   output?: Record<string, unknown>;

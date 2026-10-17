@@ -171,11 +171,15 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
     : people.workers.length
       ? `Any worker: ${people.workers.map(names.agent).join(', ')}`
       : 'No worker in the fleet';
-  const reviewerText = people.reviewersByRole.length
-    ? people.reviewersByRole
-        .map(({ role, agents }) => `${role}: ${agents.length ? agents.map(names.agent).join(', ') : 'nobody in the fleet'}`)
-        .join(' · ')
-    : 'None';
+  const reviewerText =
+    [
+      people.named.length ? people.named.map(names.agent).join(', ') : '',
+      ...people.reviewersByRole.map(
+        ({ role, agents }) => `${role} role: ${agents.length ? agents.map(names.agent).join(', ') : 'nobody holds it'}`,
+      ),
+    ]
+      .filter(Boolean)
+      .join(' · ') || 'None';
 
   const visibleEvents = showAllEvents ? events : events.slice(-TIMELINE_PREVIEW);
 
