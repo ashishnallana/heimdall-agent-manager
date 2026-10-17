@@ -644,13 +644,17 @@ bridge_online :: proc(svc: ^Service, bridge_id: string) -> bool {
 	return bridge.status == .Online
 }
 
-// directory_has_work_lease: the ≤ 1 live work lease per chain directory rule. A
-// lease belongs to a directory when its placement bridge equals the directory's
-// bridge (chain directories are per bridge; the first on a bridge is "the"
-// working tree until per-lease worktrees land in M5).
+// directory_has_work_lease: Task System v2 (Milestone M5). For VCS-tracked directories
+// (git or jj), per-lease worktrees isolate concurrent checkouts, lifting the one-work-lease
+// cap. For directories without VCS isolation, preserve the single-lease safety guard.
 directory_has_work_lease :: proc(svc: ^Service, chain: domain.Task_Chain, directory_id: string) -> bool {
 	dirs, derr := iface.taskchain_list_directories_by_chain(svc.repo, chain.chain_id, chain.owner_user_id)
 	if derr.code != .None do return false
+	for d in dirs {
+		if d.directory_id == directory_id {
+			if d.vcs_kind == "git" || d.vcs_kind == "jj" do return false
+		}
+	}
 	bridge_of_dir := ""
 	for d in dirs do if d.directory_id == directory_id { bridge_of_dir = d.bridge_id; break }
 	if bridge_of_dir == "" do return false

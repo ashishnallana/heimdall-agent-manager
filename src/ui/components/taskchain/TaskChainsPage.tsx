@@ -4,6 +4,7 @@ import Icon from '../Icon';
 import { buildRouteHash } from '../../utils/appLocation';
 import ProjectLaunchModal from '../projects/ProjectLaunchModal';
 import CreateChainModal from './CreateChainModal';
+import WorkflowDefinitionsModal from './WorkflowDefinitionsModal';
 import {
   useFetchTaskChainGroupsQuery,
   useFetchTaskChainProjectPageQuery,
@@ -398,6 +399,7 @@ export const TaskChainsPage: React.FC<TaskChainsPageProps> = ({ chainId: initial
   const [filterStatus, setFilterStatus] = useState<'active' | 'completed' | 'archived' | 'all'>('active');
   const [filterKind, setFilterKind] = useState<'all' | 'ticket' | 'workflow'>('all');
   const [showCreateChainModal, setShowCreateChainModal] = useState(false);
+  const [showWorkflowDefsModal, setShowWorkflowDefsModal] = useState(false);
   const [searchQuery, setSearchQuery] = useState<string>('');
   // Roughly half of real chains carry no tasks yet and have nothing to show, so
   // the list hides them by default; the toggle brings them back.
@@ -740,15 +742,26 @@ export const TaskChainsPage: React.FC<TaskChainsPageProps> = ({ chainId: initial
               {totalChains} {totalChains === 1 ? 'chain' : 'chains'}
             </Badge>
           </span>
-          <button
-            type="button"
-            data-debug-id="task-chains-new-chain-btn"
-            onClick={() => setShowCreateChainModal(true)}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-accent px-3 py-1 text-xs font-semibold text-accent-fg hover:opacity-90 transition-opacity"
-          >
-            <span>+</span>
-            <span>New Chain</span>
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              data-debug-id="task-chains-workflows-btn"
+              onClick={() => setShowWorkflowDefsModal(true)}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-subtle bg-surface px-3 py-1 text-xs font-semibold text-primary hover:border-accent hover:text-accent transition-colors"
+            >
+              <span>⚙</span>
+              <span>Workflows</span>
+            </button>
+            <button
+              type="button"
+              data-debug-id="task-chains-new-chain-btn"
+              onClick={() => setShowCreateChainModal(true)}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-accent px-3 py-1 text-xs font-semibold text-accent-fg hover:opacity-90 transition-opacity"
+            >
+              <span>+</span>
+              <span>New Chain</span>
+            </button>
+          </div>
         </div>
       }
       description="Multi-agent workflows grouped by project. Select a chain to follow its tasks, dependencies, and reviews."
@@ -787,6 +800,14 @@ export const TaskChainsPage: React.FC<TaskChainsPageProps> = ({ chainId: initial
         defaultProjectId={filterProjectId}
         onCreated={(newChainId) => {
           setShowCreateChainModal(false);
+          handleSelectChain(newChainId);
+        }}
+      />
+      <WorkflowDefinitionsModal
+        isOpen={showWorkflowDefsModal}
+        onClose={() => setShowWorkflowDefsModal(false)}
+        onRunCreated={(newChainId) => {
+          setShowWorkflowDefsModal(false);
           handleSelectChain(newChainId);
         }}
       />

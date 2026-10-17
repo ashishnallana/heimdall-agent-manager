@@ -48,6 +48,7 @@ export const HEIMDALL_TAG_TYPES = [
   'Cards',
   'Card',
   'BridgeFigWorkspaces',
+  'WorkflowDefinitions',
   'ShellSessions',
   'ShellSession',
   'Experiments',

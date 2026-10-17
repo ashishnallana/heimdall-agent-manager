@@ -7,9 +7,8 @@ selections. An empty object clears the bridge selections. Each selection must
 refer to an owner-controlled bridge and an active model of a provider enabled
 and present on that bridge.
 
-REQ-FLEET-RECONCILE-1: JIT provisioning uses the task's bridge pin, then the chain's effective bridge
-(coordinator, chain members/instances, directories, owner bridges). It selects
-that bridge's saved fleet settings before the role-wide provider/model. Missing
+REQ-FLEET-PLACEMENT-1: Task System v2 JIT provisioning uses the task's bridge pin, then the fleet row bridge_id, then the chain directory bridge, then coordinator bridge.
+It selects that bridge's saved fleet settings before the role-wide provider/model. Missing
 role-wide values resolve in catalog rank/ID order against active providers and
 models available on the selected bridge. Explicit unavailable values fail rather
 than silently selecting a replacement.

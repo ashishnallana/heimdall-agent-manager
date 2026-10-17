@@ -99,9 +99,9 @@ seed_fleet :: proc(fx: ^Fixture, chain: domain.Task_Chain, agent_id: string, rol
 	_, _ = iface.taskchain_upsert_fleet(&fx.repo, domain.Task_Chain_Fleet{task_chain_id = chain.chain_id, agent_id = agent_id, capacity = capacity, idle_ttl_seconds = idle_ttl, roles_json = roles, bridge_id = bridge_id, created_at = now, updated_at = now})
 }
 
-seed_directory :: proc(fx: ^Fixture, chain: domain.Task_Chain, id, bridge_id: string) {
+seed_directory :: proc(fx: ^Fixture, chain: domain.Task_Chain, id, bridge_id: string, vcs_kind: string = "") {
 	now := platform.clock_now(&fx.clock)
-	_, _, _ = iface.taskchain_save_directory(&fx.repo, domain.Task_Chain_Directory{directory_id = id, chain_id = chain.chain_id, owner_user_id = "u1", path = fmt.tprintf("/srv/%s", id), bridge_id = bridge_id, created_at = now, updated_at = now})
+	_, _, _ = iface.taskchain_save_directory(&fx.repo, domain.Task_Chain_Directory{directory_id = id, chain_id = chain.chain_id, owner_user_id = "u1", path = fmt.tprintf("/srv/%s", id), bridge_id = bridge_id, vcs_kind = vcs_kind, created_at = now, updated_at = now})
 }
 
 // seed_live_chain: Online bridge br_1, coordinator inst_coord (agt_c), the
@@ -276,6 +276,26 @@ test_one_work_lease_per_directory :: proc(t: ^testing.T) {
 	testing.expect_value(t, t3.state, domain.Task_State.In_Progress)
 	l3, held := lease_of(fx, "inst_w3")
 	testing.expect(t, held && l3.bridge_id == "br_2", "pinned task placed on br_2's directory")
+}
+
+@(test)
+test_per_lease_worktrees_lifts_directory_cap :: proc(t: ^testing.T) {
+	fx, log, ok := lease_fixture(t, "m_wt")
+	defer lease_fixture_close(fx, log)
+	if !ok do return
+	chain := seed_live_chain(t, fx, "chain_wt")
+	// Seed a directory with vcs_kind = "git" (supports per-lease worktrees, M5)
+	seed_directory(fx, chain, "dir_git", "br_1", "git")
+	seed_fleet(fx, chain, "agt_w", capacity = 4)
+	seed_instance(fx, chain, "inst_w1", "agt_w", "br_1", "idle")
+	seed_instance(fx, chain, "inst_w2", "agt_w", "br_1", "idle")
+	t1 := publish_task(t, fx, chain, "task_1")
+	t2 := publish_task(t, fx, chain, "task_2")
+	// Under per-lease worktrees, BOTH tasks are granted concurrent work leases!
+	testing.expect_value(t, t1.state, domain.Task_State.In_Progress)
+	testing.expect_value(t, t2.state, domain.Task_State.In_Progress)
+	leases, _ := iface.taskchain_list_leases_by_chain(&fx.repo, chain.chain_id)
+	testing.expect_value(t, len(leases), 2)
 }
 
 // Ports bridge pinning + live-count scope: a task pinned to br_2 is never

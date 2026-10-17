@@ -328,3 +328,32 @@ vcs_git_worktrees_list :: proc(t: ^testing.T) {
 		testing.expect(t, wt_current, "added worktree is_current when queried from itself")
 	}
 }
+
+@(test)
+bridge_taskv2_lease_worktree_lifecycle_test :: proc(t: ^testing.T) {
+	dir, ok := vcs_test_git_repo("lease_wt")
+	defer vcs_test_rm(dir)
+	if !ok do return
+	vcs_test_write(dir, "README.md", "base\n")
+	if !vcs_test_git("git", "-C", dir, "add", "README.md") do return
+	if !vcs_test_git("git", "-C", dir, "commit", "-m", "init") do return
+
+	lease_id := "lease_test_123"
+	expected_path := bridge_taskv2_lease_worktree_path(dir, lease_id, context.temp_allocator)
+	testing.expect(t, strings.has_suffix(expected_path, "/.heimdall/worktrees/lease_test_123"), "canonical path shape")
+
+	wt_path, sok := bridge_taskv2_setup_lease_worktree(dir, lease_id, "HEAD", context.temp_allocator)
+	defer if sok do bridge_taskv2_teardown_lease_worktree(dir, lease_id)
+	testing.expect(t, sok, "setup_lease_worktree succeeds")
+	testing.expect(t, os.exists(wt_path), "lease worktree directory exists on disk")
+
+	// Verify the worktree has the checked-out file
+	readme_path := fmt.tprintf("%s/README.md", wt_path)
+	testing.expect(t, os.exists(readme_path), "worktree contains README.md")
+
+	// Teardown
+	tok := bridge_taskv2_teardown_lease_worktree(dir, lease_id)
+	testing.expect(t, tok, "teardown_lease_worktree succeeds")
+	testing.expect(t, !os.exists(wt_path), "lease worktree directory removed after teardown")
+}
+

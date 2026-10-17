@@ -9,6 +9,29 @@ import { taskCreateBridgeFields, taskPatchBridgeFields } from '../../utils/taskB
 import { publishErrorMessage } from '../../utils/taskBrief';
 import type { TaskBriefWire, TaskLeaseWire } from '../taskWire';
 
+export interface WorkflowDefinitionItem {
+  def_id: string;
+  name: string;
+  version: number;
+  created_at: string;
+  spec: {
+    schema?: string;
+    name?: string;
+    title?: string;
+    description?: string;
+    inputs?: Array<{ name: string; type?: string; description?: string; required?: boolean; default?: any }>;
+    stages?: Array<{
+      key: string;
+      kind: 'task' | 'gate';
+      title?: string;
+      needs?: string[];
+      brief?: any;
+      gate?: any;
+    }>;
+    [key: string]: any;
+  };
+}
+
 // The rewrite shell is cookie-authenticated (same session as /api/v1/me), not the
 // legacy per-client token session. Task-chain reads/writes below must use
 // cookieJsonFetch/cookieMutation against /api/v1/task-chains/... so they work in
@@ -1433,6 +1456,28 @@ export const tasksApi = heimdallApi.injectEndpoints({
         { type: 'Chain' as const, id: 'GROUPED_LIST' },
       ],
     }),
+    fetchWorkflowDefinitions: build.query<{ definitions: WorkflowDefinitionItem[] }, void>({
+      queryFn: async () => {
+        try {
+          const data = await cookieJsonFetch('/workflows/definitions');
+          return { data: { definitions: data?.definitions || [] } };
+        } catch (error: any) {
+          return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
+        }
+      },
+      providesTags: [{ type: 'WorkflowDefinitions' as const, id: 'LIST' }],
+    }),
+    defineWorkflow: build.mutation<WorkflowDefinitionItem, { spec?: any; name?: string; version?: number; spec_json?: string }>({
+      queryFn: async (payload) => {
+        try {
+          const data = await cookieMutation('/workflows/definitions', 'POST', payload);
+          return { data };
+        } catch (error: any) {
+          return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
+        }
+      },
+      invalidatesTags: [{ type: 'WorkflowDefinitions' as const, id: 'LIST' }],
+    }),
     // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
     updateTask: build.mutation<any, { taskId: string; chainId: string; title?: string; description?: string; acceptanceCriteria?: string; dependsOn?: string; agentToken?: string }>({
       queryFn: withSessionQuery(async ({ taskId, chainId, title, description, acceptanceCriteria, dependsOn, agentToken }, { session, state }) => {
@@ -1564,6 +1609,8 @@ export const {
   useFetchCommitDiffQuery,
   useLazyFetchCommitDiffQuery,
   useFetchWorkflowTemplatesQuery,
+  useFetchWorkflowDefinitionsQuery,
+  useDefineWorkflowMutation,
   useFetchWorkflowStatusQuery,
   useRetryWorkflowMutation,
   useCancelWorkflowMutation,

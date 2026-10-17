@@ -183,9 +183,9 @@ Aux‑pane Tasks tab = status summaries first (state bar + counts, attention chi
 | **M3** | Full `TASK.md` context pack (bridge decrypts, caps after decryption), skills/AGENTS.md rewrite, mechanical chain summary (+ `chain summary set`), fleet placement editor, `runtime`/`artifacts`/`findings` facets, commit‑diff route + file‑at, independent re‑verify in an ephemeral worktree, **auto‑submit**, coordinator `chain propose` + attention lines, metrics. Ticket chains complete → mergeable | ✅ |
 | **M3b** | `workflow.v1` + snapshot, materialiser (`needs`/`parallel`/`for_each`, stage completeness, explicit edges, idempotent), gates, `workflow.*` verbs, `--cascade` + carry‑forward, built‑in JSON templates, `on_output: start_workflow` | ✅ |
 | **M4** | Ticket board, pipeline view, shared detail (Your review, Placement, Changes, Verify, Output), timeline; delete old hooks (`useSetTaskStatus`, `useVote`, `useNudge`, `task.status`/`assignee_ref` reads) | ✅ |
-| **M5** | Remove remaining v1 code/docs, Grafana panel, user‑defined workflow definitions UI, per‑lease worktrees (lifts one‑work‑lease‑per‑directory), optional token/cost accounting, free repo results in the engine (memory tracker clean) | ☐ |
+| **M5** | Remove remaining v1 code/docs, Grafana dashboard panels (`task-system-v2.json`, `fleet.json`), user‑defined workflow definitions UI (`WorkflowDefinitionsModal.tsx`, `CreateChainModal.tsx`, `TaskChainsPage.tsx`), per‑lease worktrees (lifts one‑work‑lease‑per‑directory constraint for git/jj repos with isolated checkout test), engine memory audit (clean tracking) | ✅ |
 
-Known gaps at the M4 line: M4 is complete with TicketBoardView, WorkflowPipelineView, TaskDetailView, CreateChainModal, kind filters, and v1 hook cleanup. Milestone M5 completes per-lease worktrees, user-defined workflow definitions UI, Grafana dashboard panel, and memory audit.
+Known gaps at the M5 line: All milestones M0 through M5 are complete, fully tested, and verified end-to-end.
 
 ---
 

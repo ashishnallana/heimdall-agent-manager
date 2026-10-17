@@ -428,6 +428,16 @@ last_attempt_holder :: proc(svc: ^Service, task: domain.Task) -> string {
 
 @(private = "file")
 directory_has_work_lease_ctx :: proc(ctx: ^Match_Context, directory_id: string) -> bool {
+	// Task System v2 (Milestone M5): Per-lease worktrees.
+	// For VCS-tracked directories (git or jj), each lease is isolated into its own
+	// dedicated worktree branch/path, lifting the one-work-lease-per-directory constraint
+	// and allowing concurrent worker execution. For directories without VCS isolation,
+	// preserve the single live work lease safety guard.
+	for d in ctx.dirs {
+		if d.directory_id == directory_id {
+			if d.vcs_kind == "git" || d.vcs_kind == "jj" do return false
+		}
+	}
 	for l in ctx.leases {
 		if l.kind != domain.LEASE_KIND_WORK do continue
 		if resolve_directory_for_bridge(ctx.dirs, l.bridge_id) == directory_id do return true

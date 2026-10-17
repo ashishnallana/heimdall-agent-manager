@@ -719,6 +719,36 @@ bridge_taskv2_worktree_remove_force :: proc(repo_dir, wt_path: string) -> bool {
 	return ok
 }
 
+// bridge_taskv2_lease_worktree_path returns the canonical filesystem path for an isolated lease worktree
+// under `<repo_dir>/.heimdall/worktrees/<lease_id>`.
+bridge_taskv2_lease_worktree_path :: proc(repo_dir, lease_id: string, allocator := context.allocator) -> string {
+	clean_repo := strings.trim_right(repo_dir, "/\\")
+	return fmt.aprintf("%s/.heimdall/worktrees/%s", clean_repo, lease_id, allocator = allocator)
+}
+
+// bridge_taskv2_setup_lease_worktree creates an isolated git worktree for a lease at `<repo_dir>/.heimdall/worktrees/<lease_id>`
+// checked out at `base_ref` (or HEAD if base_ref is empty).
+bridge_taskv2_setup_lease_worktree :: proc(repo_dir, lease_id, base_ref: string, allocator := context.allocator) -> (string, bool) {
+	if strings.trim_space(repo_dir) == "" || strings.trim_space(lease_id) == "" do return "", false
+	wt_path := bridge_taskv2_lease_worktree_path(repo_dir, lease_id, allocator)
+	rev := base_ref if strings.trim_space(base_ref) != "" else "HEAD"
+	parent := fmt.tprintf("%s/.heimdall/worktrees", strings.trim_right(repo_dir, "/\\"))
+	_ = bridge_make_directory_all(parent)
+	ok := bridge_taskv2_worktree_add_detached(repo_dir, wt_path, rev)
+	if !ok {
+		delete(wt_path, allocator)
+		return "", false
+	}
+	return wt_path, true
+}
+
+// bridge_taskv2_teardown_lease_worktree cleans up the isolated git worktree for a lease.
+bridge_taskv2_teardown_lease_worktree :: proc(repo_dir, lease_id: string) -> bool {
+	if strings.trim_space(repo_dir) == "" || strings.trim_space(lease_id) == "" do return false
+	wt_path := bridge_taskv2_lease_worktree_path(repo_dir, lease_id, context.temp_allocator)
+	return bridge_taskv2_worktree_remove_force(repo_dir, wt_path)
+}
+
 // bridge_taskv2_should_auto_submit checks whether a verify run qualifies for automatic
 // lease submission (`brief.auto_submit == true`, `exit_code == 0`, `!independent`, and `!dirty`).
 bridge_taskv2_should_auto_submit :: proc(exit_code: int, independent, dirty, auto_submit: bool) -> bool {

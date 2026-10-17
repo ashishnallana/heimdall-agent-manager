@@ -3,6 +3,7 @@ import {
   useCreateTaskChainMutation,
   useRunWorkflowMutation,
   useFetchWorkflowTemplatesQuery,
+  useFetchWorkflowDefinitionsQuery,
 } from '../../api/endpoints/tasks';
 import { useListAgentIdentitiesQuery } from '../../api/endpoints/agents';
 
@@ -30,7 +31,10 @@ export const CreateChainModal: React.FC<CreateChainModalProps> = ({
   // Workflow template state
   const { data: templatesData } = useFetchWorkflowTemplatesQuery();
   const templates: any[] = templatesData?.templates || [];
-  const [selectedTemplateId, setSelectedTemplateId] = useState<string>('');
+  const { data: defsData } = useFetchWorkflowDefinitionsQuery();
+  const definitions: any[] = defsData?.definitions || [];
+
+  const [selectedWorkflowRef, setSelectedWorkflowRef] = useState<string>('');
   const [workflowInputs, setWorkflowInputs] = useState<Record<string, string>>({});
 
   const { data: agentsData } = useListAgentIdentitiesQuery();
@@ -40,21 +44,37 @@ export const CreateChainModal: React.FC<CreateChainModalProps> = ({
   const [runWorkflow, { isLoading: isRunningWorkflow }] = useRunWorkflowMutation();
 
   useEffect(() => {
-    if (templates.length > 0 && !selectedTemplateId) {
-      setSelectedTemplateId(templates[0].template_id || '');
+    if (!selectedWorkflowRef) {
+      if (templates.length > 0) {
+        setSelectedWorkflowRef(`tpl:${templates[0].template_id}`);
+      } else if (definitions.length > 0) {
+        setSelectedWorkflowRef(`def:${definitions[0].def_id}`);
+      }
     }
-  }, [templates, selectedTemplateId]);
+  }, [templates, definitions, selectedWorkflowRef]);
 
   useEffect(() => {
-    const curTemplate = templates.find((t) => t.template_id === selectedTemplateId);
-    if (curTemplate?.inputs) {
-      const initial: Record<string, string> = {};
-      Object.entries(curTemplate.inputs).forEach(([k, spec]: [string, any]) => {
-        initial[k] = spec.default !== undefined ? String(spec.default) : '';
-      });
-      setWorkflowInputs(initial);
+    if (!selectedWorkflowRef) return;
+    const initial: Record<string, string> = {};
+    if (selectedWorkflowRef.startsWith('def:')) {
+      const defId = selectedWorkflowRef.slice(4);
+      const curDef = definitions.find((d) => d.def_id === defId);
+      if (curDef?.spec?.inputs && Array.isArray(curDef.spec.inputs)) {
+        curDef.spec.inputs.forEach((inp: any) => {
+          initial[inp.name] = inp.default !== undefined ? String(inp.default) : '';
+        });
+      }
+    } else {
+      const tplId = selectedWorkflowRef.startsWith('tpl:') ? selectedWorkflowRef.slice(4) : selectedWorkflowRef;
+      const curTemplate = templates.find((t) => t.template_id === tplId);
+      if (curTemplate?.inputs) {
+        Object.entries(curTemplate.inputs).forEach(([k, spec]: [string, any]) => {
+          initial[k] = spec.default !== undefined ? String(spec.default) : '';
+        });
+      }
     }
-  }, [selectedTemplateId, templates]);
+    setWorkflowInputs(initial);
+  }, [selectedWorkflowRef, templates, definitions]);
 
   if (!isOpen) return null;
 
@@ -64,12 +84,19 @@ export const CreateChainModal: React.FC<CreateChainModalProps> = ({
 
     try {
       if (kind === 'workflow') {
-        const res: any = await runWorkflow({
-          template_id: selectedTemplateId,
+        const payload: any = {
           name: title.trim(),
           inputs: workflowInputs,
           project_id: projectId || undefined,
-        }).unwrap();
+        };
+        if (selectedWorkflowRef.startsWith('def:')) {
+          payload.def_id = selectedWorkflowRef.slice(4);
+        } else {
+          payload.template_id = selectedWorkflowRef.startsWith('tpl:')
+            ? selectedWorkflowRef.slice(4)
+            : selectedWorkflowRef;
+        }
+        const res: any = await runWorkflow(payload).unwrap();
         const cid = res?.chain_id || res?.chain?.chain_id;
         if (cid) onCreated?.(cid);
         else onClose();
@@ -220,17 +247,30 @@ export const CreateChainModal: React.FC<CreateChainModalProps> = ({
           {kind === 'workflow' && (
             <div className="space-y-3 rounded-xl border border-subtle bg-surface-raised p-3">
               <label className="flex flex-col gap-1 text-muted">
-                <span className="font-semibold text-[11px]">Workflow Template</span>
+                <span className="font-semibold text-[11px]">Workflow Template / Definition</span>
                 <select
-                  value={selectedTemplateId}
-                  onChange={(e) => setSelectedTemplateId(e.target.value)}
+                  value={selectedWorkflowRef}
+                  onChange={(e) => setSelectedWorkflowRef(e.target.value)}
                   className="rounded-lg border border-subtle bg-canvas px-3 py-2 text-primary text-xs outline-none focus:border-accent"
                 >
-                  {templates.map((t) => (
-                    <option key={t.template_id} value={t.template_id}>
-                      {t.name || t.template_id} (v{t.version || 1})
-                    </option>
-                  ))}
+                  {templates.length > 0 && (
+                    <optgroup label="Built-in Templates">
+                      {templates.map((t) => (
+                        <option key={t.template_id} value={`tpl:${t.template_id}`}>
+                          {t.name || t.template_id} (v{t.version || 1})
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
+                  {definitions.length > 0 && (
+                    <optgroup label="Custom Workflow Definitions">
+                      {definitions.map((d) => (
+                        <option key={d.def_id} value={`def:${d.def_id}`}>
+                          {d.spec?.title || d.name} (v{d.version})
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
                 </select>
               </label>
 
@@ -238,7 +278,7 @@ export const CreateChainModal: React.FC<CreateChainModalProps> = ({
               {Object.keys(workflowInputs).length > 0 && (
                 <div className="space-y-2 pt-2 border-t border-subtle">
                   <span className="font-semibold text-muted text-[11px] uppercase tracking-wider block">
-                    Template Inputs
+                    Workflow Inputs
                   </span>
                   {Object.entries(workflowInputs).map(([inputKey, val]) => (
                     <label key={inputKey} className="flex flex-col gap-1 text-muted">
