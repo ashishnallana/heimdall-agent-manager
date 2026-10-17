@@ -443,7 +443,10 @@ check_coordinator_attention_on_refold :: proc(svc: ^Service, u: ^Uow, before, af
 			}
 		}
 		if all_done {
-			effect_notify_coordinator(svc, u, after.chain_id, after.owner_user_id, "chain_complete", fmt.tprintf("[taskv2] chain_complete: chain %s has all %d tasks in terminal state", after.chain_id, len(all_tasks)))
+			chain, cok, _ := iface.taskchain_get_chain(svc.repo, after.chain_id)
+			if !cok || chain.kind != domain.CHAIN_KIND_WORKFLOW || workflow_all_stages_complete(svc, chain, all_tasks) {
+				effect_notify_coordinator(svc, u, after.chain_id, after.owner_user_id, "chain_complete", fmt.tprintf("[taskv2] chain_complete: chain %s has all %d tasks in terminal state", after.chain_id, len(all_tasks)))
+			}
 		}
 	}
 }
@@ -612,12 +615,25 @@ event_exists :: proc(svc: ^Service, task: domain.Task, kind: string) -> bool {
 }
 
 // after_chain_change is the one place every chain mutation funnels through
-// inside its UoW: refold the chain's projections, rebuild the mechanical chain
+// inside its UoW: refold the chain's projections, materialise ready workflow
+// stages, trigger on_output workflow spawns, rebuild the mechanical chain
 // summary on task transitions, then run the matcher.
 after_chain_change :: proc(svc: ^Service, u: ^Uow, chain_id: domain.Task_Chain_ID, owner: domain.User_ID, trigger: Trigger) -> (bool, domain.Domain_Error) {
 	chain, ok, err := iface.taskchain_get_chain(svc.repo, chain_id)
 	if !ok do return false, err
-	if _, rok, rerr := refold_chain(svc, u, chain); !rok do return false, rerr
+	tasks, rok, rerr := refold_chain(svc, u, chain)
+	if !rok do return false, rerr
+	if chain.kind == domain.CHAIN_KIND_WORKFLOW && chain.workflow_snapshot_json != "" {
+		if mat_changed, mok, merr := materialize_ready_stages_in_uow(svc, u, chain); !mok {
+			return false, merr
+		} else if mat_changed {
+			tasks, rok, rerr = refold_chain(svc, u, chain)
+			if !rok do return false, rerr
+		}
+	}
+	if tok, terr := trigger_on_output_workflows_in_uow(svc, u, chain, tasks); !tok {
+		return false, terr
+	}
 	#partial switch trigger {
 	case .Lease_Released, .Lease_Expired, .Review_Posted, .Task_Reopened, .Task_Cancelled, .Chain_Published, .Task_Published:
 		rebuild_chain_summary_in_uow(svc, u, chain)

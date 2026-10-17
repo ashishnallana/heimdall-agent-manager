@@ -1,6 +1,6 @@
 ---
 name: coordinator-task-management
-description: How a task-chain COORDINATOR uses ham-ctl in Task System v2 to triage (ticket vs workflow), propose chains (`task-chain propose`), maintain the chain summary (`task-chain summary set`), configure fleet placement (`task-chain fleet set`), react to the 7 one-line attention notifications, post proxy user reviews (`review post --on-behalf-of user`), and complete the chain. Load whenever you are the coordinator of a chain.
+description: How a task-chain COORDINATOR uses ham-ctl in Task System v2 to triage (ticket vs workflow), propose chains (`task-chain propose`), run and manage workflow chains (`ham-ctl workflow templates|define|run|status|output|retry|cancel`), maintain the chain summary (`task-chain summary set`), configure fleet placement (`task-chain fleet set`), react to one-line attention notifications (`proposal_decided`, `blocked_on`, `budget_exhausted`, `oscillation`, `ready_unclaimed`, `review_requested_from_user`, `stage_failed`, `chain_complete`), post proxy user reviews (`review post --on-behalf-of user`), and complete the chain. Load whenever you are the coordinator of a chain.
 ---
 
 # Coordinator task management (Task System v2 — delegate, do not do the work yourself)
@@ -9,16 +9,60 @@ You are the coordinator. Your job is to PLAN, TRIAGE, PROPOSE, and ORCHESTRATE. 
 
 All commands use the managed wrapper from your run directory: `./.heimdall/bin/ham-ctl`. For exact flags of any command, load the `ham-ctl-reference` skill.
 
-## 1. Triage: `ticket` vs `workflow` and `task-chain propose`
+## 1. Triage: `ticket` vs `workflow` and `task-chain propose` / `ham-ctl workflow`
 When the user requests work, first triage the shape of the chain:
-- **`ticket`**: A single, self-contained unit of work with a clear brief (`goal`, `acceptance`, `verify`) and no multi-step dependency fan-out.
-- **`workflow`**: A multi-task DAG with explicit dependencies (`depends_on`), review gates (`review_roles`, `require_independent_verify`, `requires_user_approval`), or parallel worker streams.
+- **`ticket`**: A single, self-contained unit of work with a clear brief (`goal`, `acceptance`, `verify`) and no multi-step dependency fan-out. A ticket brief can also specify `"on_output": {"start_workflow": "<workflow_name>", "inputs": {...}}` so completing the ticket automatically starts a workflow run in the same transaction.
+- **`workflow`**: Either a declarative `workflow.v1` stage pipeline (`ham-ctl workflow run` or `task-chain propose` with `"kind": "workflow", "workflow": "<template_name>"`) with lazy stage materialisation, `parallel: N` or `for_each` expansion (`task_list.v1`, `findings.v1`), and human `gate` stages, or an explicit task DAG proposal.
 
-Create the proposal and all draft tasks atomically in one transaction with `task-chain propose`:
+### Running or proposing a declarative workflow (`workflow.v1`)
+Inspect built-in (`explore_plan_build`, `fix_flaky_tests`, `security_audit`) and owner-defined templates, define custom workflows, or start a workflow run on a chain:
+```bash
+# List available workflow templates (built-in + owner-defined)
+./.heimdall/bin/ham-ctl workflow templates
+
+# Define a custom versioned workflow.v1 JSON definition
+./.heimdall/bin/ham-ctl workflow define --file my_workflow.json
+
+# Start a workflow run directly on a chain (snapshots workflow_snapshot_json and materialises root stages)
+./.heimdall/bin/ham-ctl workflow run explore_plan_build \
+  --chain <chain-id> \
+  --input goal="Add rate limiting to API" \
+  --input verify_cmd="make test"
+
+# Or propose a workflow run for user approval (or immediate execution with --auto-approve)
+cat > wf_proposal.json <<'EOF'
+{
+  "kind": "workflow",
+  "workflow": "fix_flaky_tests",
+  "rationale": "Reproduce, isolate per-failure fixes with for_each, and gate on regression suite.",
+  "inputs": {
+    "target": "src/auth",
+    "test_cmd": "make test-auth"
+  }
+}
+EOF
+./.heimdall/bin/ham-ctl task-chain propose --file wf_proposal.json [--auto-approve]
+
+# Inspect stage views, materialised stage instances, and orphaned_work
+./.heimdall/bin/ham-ctl workflow status [<chain-id>]
+
+# Read ordered output facets across all instances of a completed stage
+./.heimdall/bin/ham-ctl workflow output [<chain-id>] <stage_key>
+
+# Retry a failed/cancelled stage (pass --cascade when downstream stages are already materialised;
+# unchanged .Done items in downstream for_each stages are carried forward automatically)
+./.heimdall/bin/ham-ctl workflow retry [<chain-id>] <stage_key_or_task_id> [--cascade]
+
+# Cancel a workflow chain and reclaim all live leases
+./.heimdall/bin/ham-ctl workflow cancel [<chain-id>]
+```
+> **Note**: Once a chain is running a workflow (`kind == "workflow"`), its task graph is owned by the Hub stage materialiser — manual `task create`, `task update`, and `task depend` return `403 workflow_immutable`.
+
+### Proposing an explicit task DAG with `task-chain propose`
 ```bash
 cat > proposal.json <<'EOF'
 {
-  "kind": "workflow",
+  "kind": "ticket",
   "rationale": "Split backend fold/verbs from UI drawer so both verify independently.",
   "alternative": "Single monolithic task (rejected: mixes Odin and TypeScript verify gates).",
   "tasks": [
@@ -110,33 +154,35 @@ Every executable task requires a complete `brief` before it or its chain can be 
 ```
 - Publish individual draft tasks with `./.heimdall/bin/ham-ctl task publish <task-id>` or publish the whole chain with `./.heimdall/bin/ham-ctl task-chain publish [<chain-id>]`.
 
-## 5. Reacting to the 7 coordinator one-line attention notifications
-The Hub never spams the coordinator on routine `lease_granted`, `lease_heartbeat`, or `verify_finished` events. You receive a concise one-line `attention [<event>] ...` notification **only** on these 7 actionable conditions:
+## 5. Reacting to coordinator one-line attention notifications
+The Hub never spams the coordinator on routine `lease_granted`, `lease_heartbeat`, or `verify_finished` events. You receive a concise one-line `attention [<event>] ...` notification **only** on these actionable conditions:
 
 1. **`proposal_decided`** (`decision=approve` or `decision=reject`):
-   - On `approve`: tasks are now published and dispatching; monitor progress and keep the user informed at milestones.
+   - On `approve`: tasks (or workflow root stages) are now published and dispatching; monitor progress and keep the user informed at milestones.
    - On `reject`: read the rejection reason, revise the task briefs/DAG, and submit an updated `task-chain propose` (or discuss with the user).
 2. **`blocked_on`** (`waiting_on.kind == "human"`):
    - A worker called `lease block --waiting-on human`. Read the task's blocker reason (`ham-ctl task show <task-id>`), formulate a clear question for the user with `ham-ctl chat send --to user --body "..." --options "..."`, and once answered, update the task brief/comments and unblock or re-ready the task.
 3. **`budget_exhausted`** (task reached `max_attempts`):
-   - Inspect the attempt facets (`ham-ctl task fetch <task-id> facet:<task-id>:<attempt>:handoff` and `verify`), diagnose why attempts failed, and either refine the brief / split the task or increase `budget.max_attempts` via `task update`.
+   - Inspect the attempt facets (`ham-ctl task fetch <task-id> facet:<task-id>:<attempt>:handoff` and `verify`), diagnose why attempts failed, and either refine the brief / split the task or retry the workflow stage via `ham-ctl workflow retry [<chain-id>] <stage_key>`.
 4. **`oscillation`** (`review_round >= 3` bounce between worker and reviewer):
    - Read the reviewer's `findings` facet and the worker's `handoff` facet to resolve the ambiguity in `brief.acceptance` or `brief.goal` via `ham-ctl task update <task-id>`.
 5. **`ready_unclaimed`** (task sat `ready` for `> 10m` with no eligible fleet):
    - Check `ham-ctl task-chain fleet list` and `ham-ctl bridge list`; adjust fleet `capacity`, `roles`, or `bridge_id` with `ham-ctl task-chain fleet set` so an eligible worker instance can claim the lease.
-6. **`review_requested_from_user`** (`requires_user_approval` task entered `in_review` and automated gates passed):
+6. **`review_requested_from_user`** (`requires_user_approval` task or workflow `gate` stage entered `in_review`):
    - Present a concise summary and verification evidence to the user (`chat send --to user --options "Approve,Request changes"`). When the user responds in chat, record their verdict via coordinator proxy review (see §6).
-7. **`chain_complete`** (every task in the chain reached `done`):
+7. **`stage_failed`** (a workflow stage had an instance cancel/fail or a gate rejected):
+   - Inspect `ham-ctl workflow status [<chain-id>]`, address the failure or discuss with the user, and re-run the stage via `ham-ctl workflow retry [<chain-id>] <stage_key> [--cascade]`.
+8. **`chain_complete`** (every task / workflow stage in the chain reached `done`):
    - Write the final chain summary (`ham-ctl task-chain summary set`), mark the chain completed (`ham-ctl task-chain set-status --status completed`), and send the final deliverable summary to the user (`ham-ctl chat send --to user`).
 
 ## 6. Coordinator proxy review (`--on-behalf-of user`)
-When a task has `requires_user_approval: true` and the user approves or requests changes in chat, record the verdict on the user's behalf:
+When a task has `requires_user_approval: true` (or is a workflow `gate` stage with `approver != "user"`) and the user approves or requests changes in chat, record the verdict on the user's behalf:
 ```bash
 ./.heimdall/bin/ham-ctl review post <task-id> \
   --verdict approve \
   --on-behalf-of user
 ```
-This records `actor_kind = "coordinator"` and `on_behalf_of = "user"` on the review event and satisfies the `requires_user_approval` gate in the Hub.
+This records `actor_kind = "coordinator"` and `on_behalf_of = "user"` on the review event and satisfies the approval gate in the Hub (triggering downstream workflow stage materialisation in the same UoW when applicable).
 
 ## 7. Out-of-scope defects & issues (report, search, and vote)
 When you encounter unrelated bugs or host toolchain issues:

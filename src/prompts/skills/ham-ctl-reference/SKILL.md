@@ -19,7 +19,7 @@ Conventions used below:
 - Run `./.heimdall/bin/ham-ctl <group> --help` for the built-in reference of any group;
   `./.heimdall/bin/ham-ctl --help` lists all groups.
 
-Groups: `bridge`, `agents`, `task-chain`, `task`, `lease`, `verify`, `review`, `issue`, `chat`, `memory`, `artifact`,
+Groups: `bridge`, `agents`, `task-chain`, `task`, `workflow`, `lease`, `verify`, `review`, `issue`, `chat`, `memory`, `artifact`,
 `shell`, `context`, `start-success`.
 
 ---
@@ -50,11 +50,11 @@ Groups: `bridge`, `agents`, `task-chain`, `task`, `lease`, `verify`, `review`, `
 - `task-chain summary set <text> [--chain <id>]` (or `--stdin`) — set the curated chain summary
   (`<= 60` lines; coordinator only; surfaced in every agent's `TASK.md` context pack).
 - `task-chain propose --file <proposal.json> [--auto-approve] [--chain <id>]` — create a chain
-  proposal (`kind: "ticket"|"workflow"`, `rationale`, `alternative`, `tasks` array) and its draft
+  proposal (`kind: "ticket"|"workflow"`, `rationale`, `alternative`, `tasks` array or `workflow` + `inputs`) and its draft
   tasks in a single transaction (coordinator only). With `--auto-approve`, validates briefs and
-  publishes immediately.
+  publishes (or runs the proposed workflow) immediately.
 - `task-chain decide [<chain-id>] --decision approve|reject [--reason <text>]` — approve or reject
-  a pending chain proposal (publishes all tasks atomically on `approve`).
+  a pending chain proposal (publishes all tasks or starts the proposed workflow atomically on `approve`).
 - `task-chain publish [<chain-id>]` — validate all task briefs and publish the chain (`422 brief_incomplete` lists missing fields per task).
 - `task-chain set-status --status <active|completed|cancelled> [--chain <id>]` — change
   the chain status (coordinator only). Chain statuses are exactly `active`, `completed`,
@@ -170,16 +170,16 @@ globally unique — you rarely need `--chain`).
   (count, last_comment_at, author, preview) — NOT full comment bodies.
 - `task show <task-id> [--chain <id>]` — a task + its `brief` + `comment_summary` + facets.
 - `task comments <task-id> [--last N]` — fetch comment BODIES; `--last N` = newest N (max 100).
-- `task create --title <t> [--description <d>] [--priority p0|p1|p2] [--assignee <agt_id>] [--reviewer <agt_id,agt_id,...>] [--depends-on <id,id>] [--bridge <bridge-id>] [--chain <id>] [--goal <g>] [--acceptance <a>]... [--verify <cmd>] [--input <ref>]... [--review-role <r>]... [--auto-submit] [--require-independent-verify] [--brief-file <path.json>]` — create a task.
+- `task create --title <t> [--description <d>] [--priority p0|p1|p2] [--assignee <agt_id>] [--reviewer <agt_id,agt_id,...>] [--depends-on <id,id>] [--bridge <bridge-id>] [--chain <id>] [--goal <g>] [--acceptance <a>]... [--verify <cmd>] [--input <ref>]... [--review-role <r>]... [--output-schema <task_list.v1|findings.v1>] [--on-output-workflow <name>] [--auto-submit] [--require-independent-verify] [--brief-file <path.json>]` — create a task.
   `--assignee` and `--reviewer` take durable agent IDs (`agt_...`) only.
-- `task update <task-id> [--title <t>] [--description <d>] [--priority p0|p1|p2] [--assignee <agt_id>] [--reviewer <agt_id,agt_id,...>] [--depends-on <id,id>] [--bridge <bridge-id>] [--goal <g>] [--acceptance <a>]... [--verify <cmd>] [--input <ref>]... [--review-role <r>]... [--auto-submit] [--require-independent-verify] [--brief-file <path.json>]` — edit an existing task.
+- `task update <task-id> [--title <t>] [--description <d>] [--priority p0|p1|p2] [--assignee <agt_id>] [--reviewer <agt_id,agt_id,...>] [--depends-on <id,id>] [--bridge <bridge-id>] [--goal <g>] [--acceptance <a>]... [--verify <cmd>] [--input <ref>]... [--review-role <r>]... [--output-schema <task_list.v1|findings.v1>] [--on-output-workflow <name>] [--auto-submit] [--require-independent-verify] [--brief-file <path.json>]` — edit an existing task.
 - `task publish <task-id>` — validate the task's brief and publish it (`422 brief_incomplete` lists any missing fields).
 - `task comment <task-id> --body <t>` (or `--stdin`) `[--notify <id,id>]` — add a comment.
 - `task depend <task-id> --on <task-id>` — add a single dependency (`update --depends-on` replaces the whole list).
 - `task fetch <task-id> <ref>` — fetch one event (`#<event_id>`), output (`output:<task_id>`), facet (`facet:<task_id>:<attempt_no>:<kind>`), or file-at-commit (`dir:<dir_id>:<rev>:<path>`, `<path>@<rev>`, or `<path>`) referenced by `TASK.md`.
 - `lease next` — inspect the lease you hold (status `current`) or claim the next ready task inline (status `granted`), updating `<run_dir>/TASK.md`; returns `none` when idle.
 - `lease heartbeat [--note <text>]` — extend the lease TTL and optionally record a progress note. On `409 lease_lost`, stop immediately without touching the working tree.
-- `lease submit --summary <s> [--handoff-file <json>] [--output-file <json>] [--artifacts-file <json>] [--artifacts <json>] [--verify none]` — finish the attempt (task → `in_review`, or `done` with no review gates). Requires a passing `ham-ctl verify` at the current `HEAD` unless `brief.verify` is `"none"`.
+- `lease submit --summary <s> [--handoff-file <json>] [--output-file <json>] [--artifacts-file <json>] [--artifacts <json>] [--verify none]` — finish the attempt (task → `in_review`, or `done` with no review gates). Requires a passing `ham-ctl verify` at the current `HEAD` unless `brief.verify` is `"none"`. Validates `output` against `task_list.v1` or `findings.v1` when configured on the brief (`422 output_invalid` on mismatch).
 - `lease handoff --summary <s> [--handoff-file <json>]` — release the lease back to `ready` with structured handoff (`done`, `remaining`, `next_steps`, `dead_ends`, `warnings`) for the next attempt.
 - `lease block --waiting-on <kind> --reason <text> [--ref <id>] [--summary <s>]` — park the task on an external blocker (`human`, `task`, `external`).
 - `verify [<task-id>] [--independent]` — run `brief.verify` as a Run session labelled for this attempt (`verify <task_id> #<attempt_no> @<head> [independent]`), heartbeating while it runs. With `--independent`, runs inside an ephemeral detached git worktree at `vcs.head` and records `"independent": true` on the `verify` facet. When `brief.auto_submit` is `true` and a normal `verify` exits `0` on a clean working tree, automatically submits the lease (`auto: true`).
@@ -188,6 +188,28 @@ globally unique — you rarely need `--chain`).
 ### Task states
 A task carries a `state`: `backlog`, `ready`, `in_progress`, `in_review`, `done`, `cancelled`.
 State is driven by the hub (leases, reviews, dependencies); agents do not set it directly.
+
+## workflow — declarative workflow chains (M3b)
+Workflow chains (`kind == "workflow"`) execute a versioned `workflow.v1` stage pipeline with lazy stage materialisation, `parallel: N` or `for_each` expansion (`task_list.v1`, `findings.v1`), and human `gate` stages. Once running, the Hub owns the task graph (`task create`, `task update`, and `task depend` return `403 workflow_immutable`).
+
+- `workflow templates` — list built-in templates (`explore_plan_build`, `fix_flaky_tests`, `security_audit`) and owner-defined `workflow.v1` definitions.
+- `workflow define --file <def.json> [--name <name>]` — validate a `workflow.v1` JSON definition (checking acyclic `needs`, fan-out rules, and output contracts) and store a new immutable version.
+- `workflow run <name> [--chain <cid>] [--input k=v ...] [--inputs-file <json>]` — snapshot `<name>` (or `--file <def.json>`) onto `<cid>` (or a new chain), validate required inputs, and materialise all root stages in one UoW.
+- `workflow status [<chain_id>]` — return chain metadata, `Stage_View[]` (`pending`, `active`, `complete`, `failed`), materialised task instances per stage, `orphaned_work`, and overall completion state.
+- `workflow output [<chain_id>] <stage_key>` — return ordered `output` facets across all instances of `<stage_key>`.
+- `workflow retry [<chain_id>] <stage_key_or_task_id> [--cascade]` — reopen a failed/cancelled stage (`counts_toward_budget = 0`). Refuses with `409 downstream_materialised` when downstream stages exist unless `--cascade` is passed; `--cascade` cancels downstream stages, reopens the target stage, and carries forward unchanged `.Done` items (`EV_CARRIED_FORWARD`) on re-expansion while recording removed items in `orphaned_work`.
+- `workflow cancel [<chain_id>] [--reason <text>]` — cancel the workflow chain and reclaim all live leases in one UoW.
+
+#### Command examples
+```bash
+ham-ctl workflow templates
+ham-ctl workflow define --file custom_workflow.json
+ham-ctl workflow run explore_plan_build --input goal="Add rate limiting" --input verify_cmd="make test"
+ham-ctl workflow status chain_18d711c5384a0119
+ham-ctl workflow output chain_18d711c5384a0119 plan
+ham-ctl workflow retry chain_18d711c5384a0119 plan --cascade
+ham-ctl workflow cancel chain_18d711c5384a0119
+```
 
 ## issue — track, discuss, and vote on issues and blockers
 Manage defects, toolchain quirks, environment problems, and out-of-scope bugs across

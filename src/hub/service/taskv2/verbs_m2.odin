@@ -70,12 +70,10 @@ lease_submit :: proc(svc: ^Service, auth: contracts.Auth_Context, input: Submit_
 	if !uok do return {}, false, uerr
 	c, ok, err := work_lease_caller(svc, auth, input.lease_id)
 	if !ok { _, _ = end_uow(svc, &u, false); return {}, false, err }
-	// output contract: brief.output present → an output object is required
-	if _, has_output_contract := jsonx.extract_raw_object(c.task.brief_json, "output", true, context.temp_allocator); has_output_contract {
-		if !strings.has_prefix(strings.trim_space(input.output_json), "{") {
-			_, _ = end_uow(svc, &u, false)
-			return {}, false, domain.domain_error(.Validation_Failed, "this brief declares an output contract; submit must carry `output`")
-		}
+	// output contract: brief.output present → an output object is required and validated
+	if oerr := validate_task_output_contract(c.task, input.output_json); oerr.code != .None {
+		_, _ = end_uow(svc, &u, false)
+		return {}, false, oerr
 	}
 	// verify gate (plan §4d)
 	if gerr := verify_gate(svc, c.task, c.lease.attempt_no, input); gerr.code != .None {
@@ -131,7 +129,7 @@ verify_gate :: proc(svc: ^Service, task: domain.Task, attempt_no: int, input: Su
 		if bverify != "none" {
 			return domain.domain_error(.Conflict, "verify:none is allowed only when brief.verify is \"none\"", `{"code":"verify_required"}`)
 		}
-		if _, has_output := jsonx.extract_raw_object(task.brief_json, "output", true, context.temp_allocator); has_output do return domain.Domain_Error{}
+		if brief_has_output_contract(task.brief_json) do return domain.Domain_Error{}
 		return domain.domain_error(.Conflict, "verify:none is allowed only when the brief declares an output contract", `{"code":"verify_required"}`)
 	}
 	f, ok := get_facet(svc, task, attempt_no, FACET_VERIFY)
@@ -279,46 +277,67 @@ review_post :: proc(svc: ^Service, auth: contracts.Auth_Context, input: Review_I
 	if input.verdict != "approve" && input.verdict != "request_changes" do return {}, false, domain.domain_error(.Validation_Failed, "verdict must be approve or request_changes")
 	inst, ok, err := instance_from_auth(svc, auth)
 	if !ok do return {}, false, err
-	if strings.trim_space(input.on_behalf_of) != "" {
-		if strings.trim_space(input.on_behalf_of) != "user" {
-			return {}, false, domain.domain_error(.Validation_Failed, "on_behalf_of must be \"user\"")
+	if strings.trim_space(input.on_behalf_of) != "" && strings.trim_space(input.on_behalf_of) != "user" {
+		return {}, false, domain.domain_error(.Validation_Failed, "on_behalf_of must be \"user\"")
+	}
+	u, uok, uerr := begin_uow(svc)
+	if !uok do return {}, false, uerr
+
+	tid := strings.trim_space(input.task_id)
+	target_task := domain.Task{}
+	has_target := false
+	if tid != "" {
+		t_lookup, tok_lookup, _ := iface.taskchain_get_task(svc.repo, domain.Task_ID(tid))
+		if tok_lookup && t_lookup.owner_user_id == inst.owner_user_id && (inst.chain_id == "" || string(t_lookup.chain_id) == inst.chain_id) {
+			target_task = t_lookup
+			has_target = true
 		}
-		tid := strings.trim_space(input.task_id)
-		if tid == "" do return {}, false, domain.domain_error(.Validation_Failed, "task_id is required when reviewing on_behalf_of user")
-		u, uok, uerr := begin_uow(svc)
-		if !uok do return {}, false, uerr
-		task, tok, _ := iface.taskchain_get_task(svc.repo, domain.Task_ID(tid))
-		if !tok || task.owner_user_id != inst.owner_user_id || (inst.chain_id != "" && string(task.chain_id) != inst.chain_id) {
+	}
+
+	if strings.trim_space(input.on_behalf_of) != "" || (has_target && target_task.kind == .Gate) {
+		if tid == "" {
+			_, _ = end_uow(svc, &u, false)
+			return {}, false, domain.domain_error(.Validation_Failed, "task_id is required when reviewing on_behalf_of user")
+		}
+		if !has_target {
 			_, _ = end_uow(svc, &u, false)
 			return {}, false, domain.domain_error(.Not_Found, "task not found")
 		}
+		task := target_task
 		chain, cok, cerr := iface.taskchain_get_chain(svc.repo, task.chain_id)
 		if !cok { _, _ = end_uow(svc, &u, false); return {}, false, cerr }
 		if inst.agent_id != "coordinator" && !is_coordinator(svc, chain, inst.agent_instance_id) {
 			_, _ = end_uow(svc, &u, false)
-			return {}, false, domain.domain_error(.Forbidden, "only the coordinator may review on_behalf_of user")
+			return {}, false, domain.domain_error(.Forbidden, "only the coordinator may review a gate or on_behalf_of user")
 		}
 		if task.state != .In_Review {
 			_, _ = end_uow(svc, &u, false)
 			return {}, false, domain.domain_error(.Conflict, "task is not awaiting review")
 		}
+		if task.kind == .Gate && gate_approver_policy(task) == "user" && strings.trim_space(input.on_behalf_of) == "" {
+			_, _ = end_uow(svc, &u, false)
+			return {}, false, domain.domain_error(.Forbidden, "gate stage requires human user approval", `{"code":"gate_requires_user"}`)
+		}
+		rev_role := "user" if strings.trim_space(input.on_behalf_of) == "user" else "coordinator"
 		findings, _ := findings_json_capped(input.findings_json)
 		now := platform.clock_now(svc.clock)
 		review := domain.Task_Review{
 			task_id = task.task_id, chain_id = task.chain_id, owner_user_id = task.owner_user_id, attempt_no = task.attempt_no,
-			role = "user", reviewer_kind = "user", reviewer_agent_id = inst.agent_id, reviewer_instance_id = inst.agent_instance_id,
+			role = rev_role, reviewer_kind = rev_role, reviewer_agent_id = inst.agent_id, reviewer_instance_id = inst.agent_instance_id,
 			verdict = input.verdict, findings_json = findings, created_at = now,
 		}
 		if _, sok, serr := iface.taskchain_save_review(svc.repo, review); !sok { _, _ = end_uow(svc, &u, false); return {}, false, serr }
 		actor := Actor{kind = ACTOR_COORDINATOR, id = inst.agent_instance_id}
 		p := json_begin()
 		json_int(&p, "attempt_no", i64(task.attempt_no))
-		json_str(&p, "role", "user")
+		json_str(&p, "role", rev_role)
 		json_str(&p, "verdict", input.verdict)
-		json_str(&p, "reviewer", "user")
+		json_str(&p, "reviewer", rev_role if rev_role == "user" else inst.agent_instance_id)
 		json_str(&p, "actor_kind", ACTOR_COORDINATOR)
-		json_str(&p, "on_behalf_of", "user")
-		json_str(&p, "proxy_agent_id", inst.agent_id)
+		if strings.trim_space(input.on_behalf_of) == "user" {
+			json_str(&p, "on_behalf_of", "user")
+			json_str(&p, "proxy_agent_id", inst.agent_id)
+		}
 		json_raw(&p, "findings", findings)
 		refolded, _, rok, rerr := record_event(svc, &u, task, actor, EV_REVIEW_POSTED, json_end(&p))
 		if !rok { _, _ = end_uow(svc, &u, false); return {}, false, rerr }
@@ -330,8 +349,6 @@ review_post :: proc(svc: ^Service, auth: contracts.Auth_Context, input: Review_I
 		fresh, _, _ := iface.taskchain_get_task(svc.repo, task.task_id)
 		return Review_Result{task = fresh, gate = gate}, true, domain.Domain_Error{}
 	}
-	u, uok, uerr := begin_uow(svc)
-	if !uok do return {}, false, uerr
 	lease, held, _ := iface.taskchain_get_lease_by_holder(svc.repo, inst.agent_instance_id)
 	if !held || lease.kind != domain.LEASE_KIND_REVIEW || (strings.trim_space(input.task_id) != "" && input.task_id != string(lease.task_id)) {
 		_, _ = end_uow(svc, &u, false)
@@ -567,12 +584,14 @@ BRIEF_ACCEPTANCE_MAX  :: 20
 BRIEF_ACCEPTANCE_ITEM :: 200
 
 Propose_Input :: struct {
-	chain_id:     string, // optional for agents
-	tasks_json:   string, // optional JSON array of task specs [{id?, title, brief, depends_on?}]
-	kind:         string, // optional chain kind (e.g. "ticket", "workflow")
-	rationale:    string, // optional explanation
-	alternative:  string, // optional alternative plan considered
-	auto_approve: bool,   // when true, immediately approves & publishes in the same UoW
+	chain_id:             string, // optional for agents
+	tasks_json:           string, // optional JSON array of task specs [{id?, title, brief, depends_on?}]
+	kind:                 string, // optional chain kind (e.g. "ticket", "workflow")
+	rationale:            string, // optional explanation
+	alternative:          string, // optional alternative plan considered
+	auto_approve:         bool,   // when true, immediately approves & publishes in the same UoW
+	workflow_ref:         string, // optional workflow template/def name or id when kind == "workflow"
+	workflow_inputs_json: string, // optional JSON object of workflow inputs when kind == "workflow"
 }
 
 // chain_proposal_json extracts the pending proposal JSON object from `chain.defaults_json`
@@ -610,7 +629,7 @@ brief_missing_fields_for_publish :: proc(svc: ^Service, chain: domain.Task_Chain
 	for a in acceptance do if strings.trim_space(a) == "" || (len(a) > BRIEF_ACCEPTANCE_ITEM && !is_vault_armored(a)) do acc_ok = false
 	if !acc_ok do append(&out, "acceptance")
 	verify := strings.trim_space(jsonx.extract_string(brief, "verify", "", true, context.temp_allocator))
-	_, has_output := jsonx.extract_raw_object(brief, "output", true, context.temp_allocator)
+	has_output := brief_has_output_contract(brief)
 	if verify == "" || (verify == "none" && !has_output) do append(&out, "verify")
 	roles := jsonx.extract_string_array(brief, "review_roles", true, context.temp_allocator)
 	if len(roles) > 0 && svc != nil && svc.repo != nil {
@@ -829,6 +848,45 @@ chain_propose :: proc(svc: ^Service, chain_id: domain.Task_Chain_ID, owner_user_
 			chain.kind = norm_k
 		}
 	}
+	is_wf_proposal := strings.trim_space(input.kind) == domain.CHAIN_KIND_WORKFLOW || strings.trim_space(input.workflow_ref) != ""
+	if is_wf_proposal && strings.trim_space(input.workflow_ref) != "" {
+		wf_ref := strings.trim_space(input.workflow_ref)
+		wf_inputs := strings.trim_space(input.workflow_inputs_json)
+		if wf_inputs == "" do wf_inputs = "{}"
+		if input.auto_approve {
+			updated, ap_ok, ap_err := activate_workflow_on_existing_chain_in_uow(svc, &u, chain, actor, wf_ref, wf_inputs)
+			_, cerr2 := end_uow(svc, &u, ap_ok)
+			if !ap_ok do return {}, false, ap_err
+			if cerr2.code != .None do return {}, false, cerr2
+			return updated, true, domain.Domain_Error{}
+		}
+		now := platform.clock_now(svc.clock)
+		p := json_begin()
+		json_str(&p, "status", "pending")
+		json_str(&p, "kind", domain.CHAIN_KIND_WORKFLOW)
+		json_str(&p, "workflow", wf_ref)
+		json_raw(&p, "inputs", wf_inputs)
+		json_str(&p, "proposed_by_kind", actor.kind)
+		json_str(&p, "proposed_by_id", actor.id)
+		json_str(&p, "proposed_by", actor.id)
+		json_str(&p, "proposed_at", now)
+		if strings.trim_space(input.rationale) != "" do json_str(&p, "rationale", strings.trim_space(input.rationale))
+		if strings.trim_space(input.alternative) != "" do json_str(&p, "alternative", strings.trim_space(input.alternative))
+		json_int(&p, "created_at_ms", now_ms(svc.clock))
+		json_raw(&p, "tasks", "[]")
+		chain.defaults_json = set_chain_proposal_json(chain.defaults_json, json_end(&p))
+		chain.updated_at = now
+		updated, sok, serr := iface.taskchain_save_chain(svc.repo, chain)
+		if !sok {
+			_, _ = end_uow(svc, &u, false)
+			return {}, false, serr
+		}
+		effect_publish_chain(&u, updated.chain_id, updated.owner_user_id, "proposal_created")
+		_, cerr2 := end_uow(svc, &u, true)
+		if cerr2.code != .None do return {}, false, cerr2
+		return updated, true, domain.Domain_Error{}
+	}
+
 	existing_tasks, _ := iface.taskchain_list_tasks_by_chain(svc.repo, chain_id, owner_user_id)
 	if len(specs) == 0 && len(existing_tasks) == 0 {
 		_, _ = end_uow(svc, &u, false)
@@ -912,6 +970,20 @@ chain_proposal_decide :: proc(svc: ^Service, chain_id: domain.Task_Chain_ID, own
 		_, cerr2 := end_uow(svc, &u, true)
 		if cerr2.code != .None do return {}, nil, false, cerr2
 		return updated, nil, true, domain.Domain_Error{}
+	}
+
+	prop_kind := strings.trim_space(jsonx.extract_string(prop, "kind", "", true, context.temp_allocator))
+	prop_wf := strings.trim_space(jsonx.extract_string(prop, "workflow", "", true, context.temp_allocator))
+	if prop_wf == "" do prop_wf = strings.trim_space(jsonx.extract_string(prop, "template", "", true, context.temp_allocator))
+	if prop_kind == domain.CHAIN_KIND_WORKFLOW && prop_wf != "" {
+		prop_inputs, has_in := jsonx.extract_raw_object(prop, "inputs", true, context.temp_allocator)
+		if !has_in || strings.trim_space(prop_inputs) == "" do prop_inputs = "{}"
+		updated, ap_ok, ap_err := activate_workflow_on_existing_chain_in_uow(svc, &u, chain, actor, prop_wf, prop_inputs)
+		_, cerr2 := end_uow(svc, &u, ap_ok)
+		if !ap_ok do return {}, nil, false, ap_err
+		if cerr2.code != .None do return {}, nil, false, cerr2
+		mat_tasks, _ := iface.taskchain_list_tasks_by_chain(svc.repo, updated.chain_id, owner_user_id)
+		return updated, mat_tasks, true, domain.Domain_Error{}
 	}
 
 	specs: []Proposed_Task_Item = nil
@@ -1001,7 +1073,6 @@ parse_proposed_tasks_json :: proc(raw_array: string) -> ([]Proposed_Task_Item, b
 	return out[:], true, domain.Domain_Error{}
 }
 
-@(private = "file")
 split_json_array_objects :: proc(raw_array: string, allocator := context.temp_allocator) -> ([]string, bool) {
 	s := strings.trim_space(raw_array)
 	if len(s) < 2 || s[0] != '[' || s[len(s) - 1] != ']' do return nil, false

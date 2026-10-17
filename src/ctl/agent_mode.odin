@@ -46,6 +46,7 @@ ctl_agent_mode :: proc(cmd: []string, args: []string) {
 	case "lease":         ctl_v2_lease(endpoint, token, rest, args); return
 	case "review":        ctl_v2_review(endpoint, token, rest, args); return
 	case "verify":        ctl_v2_verify(endpoint, token, rest, args); return
+	case "workflow", "workflows": ctl_v2_workflow(endpoint, token, rest, args); return
 	case "chat", "chats", "conversation", "conversations": ctl_v2_chat(endpoint, token, rest, args); return
 	case "memory":        ctl_v2_memory(endpoint, token, rest, args); return
 	case "artifact", "artifacts": ctl_v2_artifact(endpoint, token, rest, args); return
@@ -1752,6 +1753,7 @@ print_agent_help :: proc(cmd: []string) {
 	case "lease": print_help_lease(); return
 	case "review": print_help_review(); return
 	case "verify": print_help_verify(); return
+	case "workflow", "workflows": print_help_workflow(); return
 	case "chat", "chats", "conversation", "conversations": print_help_chat(); return
 	case "artifact", "artifacts": print_help_artifact(); return
 	case "memory": print_help_memory(); return
@@ -1779,6 +1781,7 @@ print_help_overview :: proc() {
 	fmt.println("  agents      Durable identities, templates, and runtime instances")
 	fmt.println("  task-chain  Your task chains")
 	fmt.println("  task        Tasks within a chain (one command per action)")
+	fmt.println("  workflow    Workflow chains: templates, define, run, status, output, retry, cancel")
 	fmt.println("  chat        Read your inbox / send to the user or another agent")
 	fmt.println("  memory      List, show, read, or propose memories")
 	fmt.println("  artifact    Create / read / download artifacts")
@@ -1801,6 +1804,8 @@ print_help_overview :: proc() {
 	fmt.println("  ham-ctl agents start   inst_123")
 	fmt.println("  ham-ctl agents stop    inst_123 --reason \"done for now\"")
 	fmt.println("  ham-ctl agents restart inst_123")
+	fmt.println("  ham-ctl workflow templates")
+	fmt.println("  ham-ctl workflow run fix_flaky_tests --input target=src/auth")
 	fmt.println("  ham-ctl lease next")
 	fmt.println("  ham-ctl verify && ham-ctl lease submit --summary \"done; tests green\"")
 	fmt.println("  ham-ctl review post --verdict approve")

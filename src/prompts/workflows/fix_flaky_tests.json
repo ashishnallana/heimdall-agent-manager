@@ -1,0 +1,82 @@
+{
+  "schema": "workflow.v1",
+  "version": 1,
+  "kind": "workflow",
+  "v": 1,
+  "id": "tpl_fix_flaky_tests",
+  "name": "fix_flaky_tests",
+  "title": "Reproduce -> Diagnose -> Fix Flaky Tests",
+  "description": "Scan a test suite for flaky tests, produce a task_list.v1 of reproducers/fixes, and fix each flaky test in parallel with verification.",
+  "inputs": [
+    {
+      "name": "suite",
+      "type": "string",
+      "required": false,
+      "default": ".",
+      "description": "Test suite or package path to scan for flakes"
+    },
+    {
+      "name": "test_command",
+      "type": "string",
+      "required": false,
+      "default": "true",
+      "description": "Test command to reproduce and verify flaky tests"
+    },
+    {
+      "name": "verify_cmd",
+      "type": "string",
+      "required": false,
+      "default": "true",
+      "description": "Command to verify the test suite passes reliably"
+    }
+  ],
+  "defaults": {
+    "priority": "p1"
+  },
+  "stages": [
+    {
+      "key": "reproduce",
+      "kind": "task",
+      "title": "Scan and reproduce flakes in {{inputs.suite}}",
+      "depends_on": [],
+      "brief": {
+        "goal": "Identify flaky tests in {{inputs.suite}} (using {{inputs.test_command}}), determine root causes, and emit a task_list.v1 of isolated fixes.",
+        "acceptance": [
+          "Structured task_list.v1 listing each flaky test with root-cause goal and verification command"
+        ],
+        "verify": "none",
+        "output": {
+          "schema": "task_list.v1"
+        }
+      }
+    },
+    {
+      "key": "fix",
+      "kind": "task",
+      "title": "Fix flake: {{item.title}}",
+      "depends_on": ["reproduce"],
+      "for_each": "reproduce.outputs[0].tasks",
+      "max_parallel": 4,
+      "brief": {
+        "goal": "{{item.goal}}",
+        "acceptance": [
+          "Flake eliminated and test passes deterministically"
+        ],
+        "verify": "{{inputs.verify_cmd}}"
+      }
+    },
+    {
+      "key": "confirm",
+      "kind": "task",
+      "title": "Confirm suite stability: {{inputs.suite}}",
+      "depends_on": ["fix"],
+      "brief": {
+        "goal": "Run the full suite verification for {{inputs.suite}} after all flake fixes.",
+        "acceptance": [
+          "Suite verification command exits 0 without flakes"
+        ],
+        "verify": "{{inputs.verify_cmd}}"
+      }
+    }
+  ]
+}

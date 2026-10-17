@@ -797,7 +797,11 @@ sync_chain_status_from_tasks :: proc(service: ^Taskchain_Service, chain_id: doma
 			modified = true
 		}
 	} else if non_terminal == 0 && len(tasks) > 0 && completed > 0 {
-		if chain.status == .Active {
+		all_stages_done := true
+		if chain.kind == domain.CHAIN_KIND_WORKFLOW && chain.workflow_snapshot_json != "" && service.engine != nil {
+			all_stages_done = taskv2.workflow_all_stages_complete(service.engine, chain, tasks)
+		}
+		if chain.status == .Active && all_stages_done {
 			chain.status = .Completed
 			chain.completed_at = now
 			modified = true
@@ -869,7 +873,12 @@ build_brief_json :: proc(existing_brief, title, description, assignee_agent_id: 
 	taskv2.json_raw(&o, "review_roles", strings.to_string(rb))
 	if assignee != "" do taskv2.json_str(&o, "assignee", assignee)
 	if b_ok do taskv2.json_raw(&o, "budget", budget)
-	if output, ook := jsonx.extract_raw_object(existing_brief, "output", true); ook do taskv2.json_raw(&o, "output", output)
+	if output, ook := jsonx.extract_raw_object(existing_brief, "output", true); ook {
+		taskv2.json_raw(&o, "output", output)
+	} else if output_str := jsonx.extract_string(existing_brief, "output", "", true); output_str != "" {
+		taskv2.json_str(&o, "output", output_str)
+	}
+	if on_output, onok := jsonx.extract_raw_object(existing_brief, "on_output", true); onok do taskv2.json_raw(&o, "on_output", on_output)
 	if auto, aok := jsonx.extract_bool_literal(existing_brief, "auto_submit", true); aok do taskv2.json_bool(&o, "auto_submit", auto)
 	if req_indep, riok := jsonx.extract_bool_literal(existing_brief, "require_independent_verify", true); riok do taskv2.json_bool(&o, "require_independent_verify", req_indep)
 	return taskv2.json_end(&o)
@@ -902,6 +911,9 @@ brief_publish_problems :: proc(service: ^Taskchain_Service, chain: domain.Task_C
 	if !acc_ok do append(&out, "acceptance")
 	verify := strings.trim_space(jsonx.extract_string(brief, "verify", "", true, context.temp_allocator))
 	_, has_output := jsonx.extract_raw_object(brief, "output", true, context.temp_allocator)
+	if !has_output {
+		has_output = strings.trim_space(jsonx.extract_string(brief, "output", "", true, context.temp_allocator)) != ""
+	}
 	if verify == "" || (verify == "none" && !has_output) do append(&out, "verify")
 	roles := jsonx.extract_string_array(brief, "review_roles", true, context.temp_allocator)
 	if len(roles) > 0 {
@@ -982,12 +994,20 @@ fleet_roles_with :: proc(roles_json, role: string) -> string {
 	return strings.to_string(b)
 }
 
+require_not_workflow_chain :: proc(chain: domain.Task_Chain) -> domain.Domain_Error {
+	if chain.kind == domain.CHAIN_KIND_WORKFLOW {
+		return domain.domain_error(.Forbidden, "workflow chain tasks are materialised by the hub; direct task mutations are forbidden", `{"code":"workflow_immutable"}`)
+	}
+	return domain.Domain_Error{}
+}
+
 create_task_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, input: Create_Task_Input) -> (domain.Task, bool, domain.Domain_Error) {
 	// WRITE. REQ-SEC-3 (close the create_task hole): fetch owner-scoped, then
 	// enforce membership EXPLICITLY here. Cross-owner is rejected as Not_Found by
 	// get_chain_for_read (require_owner); a same-owner non-member is Forbidden.
 	chain, ok, err := get_chain_for_read(service, auth, input.chain_id)
 	if !ok do return domain.Task{}, false, err
+	if werr := require_not_workflow_chain(chain); werr.code != .None do return domain.Task{}, false, werr
 	// Task System v2: only the chain COORDINATOR (or the owner) shapes the
 	// ticket board; workers work their lease. (Ticket chains only — M3b.)
 	if auth.kind == .Instance_Token && !is_chain_coordinator(service, chain, auth.agent_instance_id) {
@@ -1083,6 +1103,7 @@ update_task_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Conte
 	if !ok do return domain.Task{}, false, err
 	chain, chain_ok, chain_err := iface.taskchain_get_chain(service.repo, task.chain_id)
 	if !chain_ok do return domain.Task{}, false, chain_err
+	if werr := require_not_workflow_chain(chain); werr.code != .None do return domain.Task{}, false, werr
 
 	if auth.kind == .Instance_Token {
 		if !is_chain_coordinator(service, chain, auth.agent_instance_id) {
@@ -1173,6 +1194,7 @@ publish_task_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Cont
 	if !ok do return domain.Task{}, false, err
 	chain, chain_ok, chain_err := iface.taskchain_get_chain(service.repo, task.chain_id)
 	if !chain_ok do return domain.Task{}, false, chain_err
+	if werr := require_not_workflow_chain(chain); werr.code != .None do return domain.Task{}, false, werr
 	if chain.publish_state != .Published do return domain.Task{}, false, domain.domain_error(.Conflict, "cannot publish task before chain is published")
 	if task.publish_state != .Draft do return domain.Task{}, false, domain.domain_error(.Conflict, "task is already published")
 	if auth.kind == .Instance_Token {
@@ -1541,6 +1563,11 @@ add_task_dependency_row :: proc(service: ^Taskchain_Service, auth: contracts.Aut
 // the chain is re-planned.
 add_task_dependency_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, task_id, depends_on_task_id: domain.Task_ID) -> (domain.Task_Dependency, bool, domain.Domain_Error) {
 	if ferr := require_coordinator_for_task(service, auth, task_id, "add a dependency"); ferr.code != .None do return domain.Task_Dependency{}, false, ferr
+	if t, tok, _ := iface.taskchain_get_task(service.repo, task_id); tok {
+		if c, cok, _ := iface.taskchain_get_chain(service.repo, t.chain_id); cok {
+			if werr := require_not_workflow_chain(c); werr.code != .None do return domain.Task_Dependency{}, false, werr
+		}
+	}
 	saved_dep, dep_save_ok, dep_save_err := add_task_dependency_row(service, auth, task_id, depends_on_task_id)
 	if !dep_save_ok do return domain.Task_Dependency{}, false, dep_save_err
 	if service.engine != nil {
@@ -1555,6 +1582,9 @@ remove_task_dependency_impl :: proc(service: ^Taskchain_Service, auth: contracts
 	if ferr := require_coordinator_for_task(service, auth, task_id, "remove a dependency"); ferr.code != .None do return false, ferr
 	task, ok, err := get_task(service, auth, task_id)
 	if !ok do return false, err
+	if c, cok, _ := iface.taskchain_get_chain(service.repo, task.chain_id); cok {
+		if werr := require_not_workflow_chain(c); werr.code != .None do return false, werr
+	}
 	removed, remove_err := iface.taskchain_remove_dependency(service.repo, task.task_id, depends_on_task_id, task.owner_user_id)
 	if remove_err.code != .None do return removed, remove_err
 	// Removing a dependency can UNBLOCK the task: the engine refolds (→ ready)

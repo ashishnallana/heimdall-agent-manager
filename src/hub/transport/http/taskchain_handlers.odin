@@ -2552,13 +2552,19 @@ propose_task_chain_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	if rationale == "" do rationale = json_string(req.body, "summary")
 	alternative := json_string(req.body, "alternative")
 	auto_approve := jsonx.extract_bool(req.body, "auto_approve", false, true)
+	wf_ref := json_string(req.body, "workflow")
+	if wf_ref == "" do wf_ref = json_string(req.body, "template")
+	if wf_ref == "" do wf_ref = json_string(req.body, "workflow_ref")
+	wf_inputs, _ := jsonx.extract_raw_object(req.body, "inputs", true, context.temp_allocator)
 	updated, pok, err := taskv2.chain_propose(h.task_engine, chain_id, chain.owner_user_id, taskv2.actor_from_auth(auth_ctx), taskv2.Propose_Input{
-		chain_id     = string(chain_id),
-		tasks_json   = tasks_json,
-		kind         = kind,
-		rationale    = rationale,
-		alternative  = alternative,
-		auto_approve = auto_approve,
+		chain_id             = string(chain_id),
+		tasks_json           = tasks_json,
+		kind                 = kind,
+		rationale            = rationale,
+		alternative          = alternative,
+		auto_approve         = auto_approve,
+		workflow_ref         = wf_ref,
+		workflow_inputs_json = wf_inputs,
 	})
 	if !pok do return respond_error(err, req.request_id)
 	publish_chain_changed(h, string(updated.owner_user_id), string(chain_id), "updated")
@@ -2672,3 +2678,278 @@ verify_task_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	strings.write_string(&b, "}")
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req))
 }
+
+// ---- M3b Workflow HTTP Handlers -----------------------------------------------------
+
+build_workflow_templates_response_json :: proc(svc: ^taskv2.Service, owner_user_id: domain.User_ID) -> string {
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_string(&b, `{"templates":[`)
+	tpls := taskv2.workflow_builtin_templates(context.temp_allocator)
+	idx := 0
+	for tpl in tpls {
+		if idx > 0 do strings.write_byte(&b, ',')
+		idx += 1
+		strings.write_string(&b, `{"id":"`); write_handler_json_string(&b, tpl.id)
+		strings.write_string(&b, `","name":"`); write_handler_json_string(&b, tpl.name)
+		strings.write_string(&b, `","title":"`); write_handler_json_string(&b, tpl.title)
+		strings.write_string(&b, `","description":"`); write_handler_json_string(&b, tpl.description)
+		strings.write_string(&b, `","source":"builtin","version":1,"spec":`)
+		strings.write_string(&b, tpl.spec_json)
+		strings.write_byte(&b, '}')
+	}
+	defs, derr := taskv2.workflow_list_definitions(svc, owner_user_id)
+	if derr.code == .None {
+		for d in defs {
+			if idx > 0 do strings.write_byte(&b, ',')
+			idx += 1
+			title := jsonx.extract_string(d.body_json, "title", d.name, true, context.temp_allocator)
+			desc := jsonx.extract_string(d.body_json, "description", "", true, context.temp_allocator)
+			strings.write_string(&b, `{"id":"`); write_handler_json_string(&b, d.def_id)
+			strings.write_string(&b, `","def_id":"`); write_handler_json_string(&b, d.def_id)
+			strings.write_string(&b, `","name":"`); write_handler_json_string(&b, d.name)
+			strings.write_string(&b, `","title":"`); write_handler_json_string(&b, title)
+			strings.write_string(&b, `","description":"`); write_handler_json_string(&b, desc)
+			strings.write_string(&b, fmt.tprintf(`","source":"user","version":%d,"created_at":"`, d.version))
+			write_handler_json_string(&b, d.created_at)
+			strings.write_string(&b, `","spec":`)
+			strings.write_string(&b, d.body_json)
+			strings.write_byte(&b, '}')
+		}
+	}
+	strings.write_string(&b, `],"definitions":[`)
+	if derr.code == .None {
+		for d, i in defs {
+			if i > 0 do strings.write_byte(&b, ',')
+			strings.write_string(&b, `{"def_id":"`); write_handler_json_string(&b, d.def_id)
+			strings.write_string(&b, `","name":"`); write_handler_json_string(&b, d.name)
+			strings.write_string(&b, fmt.tprintf(`","version":%d,"created_at":"`, d.version))
+			write_handler_json_string(&b, d.created_at)
+			strings.write_string(&b, `","spec":`)
+			strings.write_string(&b, d.body_json)
+			strings.write_byte(&b, '}')
+		}
+	}
+	strings.write_string(&b, `]}`)
+	return strings.to_string(b)
+}
+
+// GET /api/v1/workflows/templates
+workflow_templates_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Taskchain_Handlers)(ctx)
+	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
+	if !ok do return auth_resp
+	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
+	return respond_success(build_workflow_templates_response_json(h.task_engine, domain.User_ID(auth_ctx.user_id)), req.request_id, auth_ctx_server_time(req))
+}
+
+// GET /api/v1/workflows/definitions
+workflow_list_definitions_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Taskchain_Handlers)(ctx)
+	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
+	if !ok do return auth_resp
+	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
+	defs, derr := taskv2.workflow_list_definitions(h.task_engine, domain.User_ID(auth_ctx.user_id))
+	if derr.code != .None do return respond_error(derr, req.request_id)
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_string(&b, `{"definitions":[`)
+	for d, i in defs {
+		if i > 0 do strings.write_byte(&b, ',')
+		strings.write_string(&b, `{"def_id":"`); write_handler_json_string(&b, d.def_id)
+		strings.write_string(&b, `","name":"`); write_handler_json_string(&b, d.name)
+		strings.write_string(&b, fmt.tprintf(`","version":%d,"created_at":"`, d.version))
+		write_handler_json_string(&b, d.created_at)
+		strings.write_string(&b, `","spec":`)
+		strings.write_string(&b, d.body_json)
+		strings.write_byte(&b, '}')
+	}
+	strings.write_string(&b, `]}`)
+	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req))
+}
+
+extract_workflow_define_spec :: proc(raw_body: string) -> (spec_json: string, name_override: string, ver_override: int) {
+	trimmed := strings.trim_space(raw_body)
+	name_override = json_string(trimmed, "name")
+	ver_override = json_int(trimmed, "version", 0)
+	if spec_obj, has_spec := jsonx.extract_raw_object(trimmed, "spec", true, context.temp_allocator); has_spec && strings.trim_space(spec_obj) != "" {
+		if _, has_st := jsonx.extract_raw_array(spec_obj, "stages", true, context.temp_allocator); has_st {
+			return spec_obj, name_override, ver_override
+		}
+	}
+	if def_obj, has_def := jsonx.extract_raw_object(trimmed, "definition", true, context.temp_allocator); has_def && strings.trim_space(def_obj) != "" {
+		return def_obj, name_override, ver_override
+	}
+	if body_str := strings.trim_space(json_string(trimmed, "body_json")); strings.has_prefix(body_str, "{") {
+		return body_str, name_override, ver_override
+	}
+	if spec_str := strings.trim_space(json_string(trimmed, "spec_json")); strings.has_prefix(spec_str, "{") {
+		return spec_str, name_override, ver_override
+	}
+	return trimmed, name_override, ver_override
+}
+
+// POST /api/v1/workflows/definitions
+workflow_define_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Taskchain_Handlers)(ctx)
+	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
+	if !ok do return auth_resp
+	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
+	spec_json, name_ov, ver_ov := extract_workflow_define_spec(req.body)
+	def, dok, derr := taskv2.workflow_define(h.task_engine, domain.User_ID(auth_ctx.user_id), spec_json, name_ov, ver_ov)
+	if !dok do return respond_error(derr, req.request_id)
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_string(&b, `{"def_id":"`); write_handler_json_string(&b, def.def_id)
+	strings.write_string(&b, `","name":"`); write_handler_json_string(&b, def.name)
+	strings.write_string(&b, fmt.tprintf(`","version":%d,"created_at":"`, def.version))
+	write_handler_json_string(&b, def.created_at)
+	strings.write_string(&b, `","spec":`)
+	strings.write_string(&b, def.body_json)
+	strings.write_byte(&b, '}')
+	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 201)
+}
+
+extract_workflow_run_input :: proc(raw_body: string) -> taskv2.Workflow_Run_Input {
+	ref := json_string(raw_body, "ref")
+	if ref == "" do ref = json_string(raw_body, "workflow")
+	if ref == "" do ref = json_string(raw_body, "template")
+	if ref == "" do ref = json_string(raw_body, "name")
+	if ref == "" do ref = json_string(raw_body, "def_id")
+	inputs_json, has_in := jsonx.extract_raw_object(raw_body, "inputs", true, context.temp_allocator)
+	if !has_in || strings.trim_space(inputs_json) == "" {
+		if in_str := strings.trim_space(json_string(raw_body, "inputs_json")); strings.has_prefix(in_str, "{") {
+			inputs_json = in_str
+		} else {
+			inputs_json = "{}"
+		}
+	}
+	return taskv2.Workflow_Run_Input{
+		chain_id                      = json_string(raw_body, "chain_id"),
+		ref                           = ref,
+		title                         = json_string(raw_body, "title"),
+		description                   = json_string(raw_body, "description"),
+		inputs_json                   = inputs_json,
+		coordinator_agent_instance_id = json_string(raw_body, "coordinator_agent_instance_id"),
+		bridge_id                     = json_string(raw_body, "bridge_id"),
+		directory_path                = json_string(raw_body, "directory_path"),
+	}
+}
+
+// POST /api/v1/workflows/run
+workflow_run_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Taskchain_Handlers)(ctx)
+	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
+	if !ok do return auth_resp
+	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
+	run_in := extract_workflow_run_input(req.body)
+	chain, rok, rerr := taskv2.workflow_run(h.task_engine, domain.User_ID(auth_ctx.user_id), taskv2.actor_from_auth(auth_ctx), run_in)
+	if !rok do return respond_error(rerr, req.request_id)
+	publish_chain_changed(h, string(chain.owner_user_id), string(chain.chain_id), "created")
+	status_json, _, _ := taskv2.workflow_status_json(h.task_engine, chain.chain_id, chain.owner_user_id)
+	if status_json == "" do status_json = "{}"
+	cb := strings.builder_make(context.temp_allocator)
+	write_chain_json(&cb, chain)
+	return respond_success(fmt.tprintf(`{{"chain_id":"%s","chain":%s,"workflow":%s}}`, chain.chain_id, strings.to_string(cb), status_json), req.request_id, auth_ctx_server_time(req), 201)
+}
+
+// GET /api/v1/task-chains/{cid}/workflow/status  (or GET /api/v1/workflows/{cid}/status)
+workflow_status_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Taskchain_Handlers)(ctx)
+	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
+	if !ok do return auth_resp
+	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
+	chain_id := domain.Task_Chain_ID(path_part(req.path, 4))
+	status_json, sok, serr := taskv2.workflow_status_json(h.task_engine, chain_id, domain.User_ID(auth_ctx.user_id))
+	if !sok do return respond_error(serr, req.request_id)
+	return respond_success(status_json, req.request_id, auth_ctx_server_time(req))
+}
+
+// GET /api/v1/task-chains/{cid}/workflow/stages/{stage_key}/output  (or GET /api/v1/task-chains/{cid}/workflow/output?stage_key=...)
+workflow_output_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Taskchain_Handlers)(ctx)
+	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
+	if !ok do return auth_resp
+	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
+	chain_id := domain.Task_Chain_ID(path_part(req.path, 4))
+	stage_key := path_part(req.path, 7)
+	if stage_key == "" || stage_key == "output" {
+		stage_key = query_value(req.query, "stage_key")
+		if stage_key == "" do stage_key = query_value(req.query, "stage")
+	}
+	out_json, ook, oerr := taskv2.workflow_stage_output_json(h.task_engine, chain_id, domain.User_ID(auth_ctx.user_id), stage_key)
+	if !ook do return respond_error(oerr, req.request_id)
+	return respond_success(out_json, req.request_id, auth_ctx_server_time(req))
+}
+
+// POST /api/v1/task-chains/{cid}/workflow/retry
+workflow_retry_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Taskchain_Handlers)(ctx)
+	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
+	if !ok do return auth_resp
+	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
+	chain_id := domain.Task_Chain_ID(path_part(req.path, 4))
+	stage_key := json_string(req.body, "stage_key")
+	if stage_key == "" do stage_key = json_string(req.body, "stage")
+	task_id := json_string(req.body, "task_id")
+	if stage_key == "" && task_id == "" {
+		target := json_string(req.body, "target")
+		if strings.has_prefix(target, "task_") {
+			task_id = target
+		} else {
+			stage_key = target
+		}
+	}
+	cascade := jsonx.extract_bool(req.body, "cascade", false, true)
+	reason := json_string(req.body, "reason")
+	res, rok, rerr := taskv2.workflow_retry(h.task_engine, chain_id, domain.User_ID(auth_ctx.user_id), taskv2.actor_from_auth(auth_ctx), taskv2.Workflow_Retry_Input{
+		stage_key = stage_key,
+		task_id   = task_id,
+		cascade   = cascade,
+		reason    = reason,
+	})
+	if !rok do return respond_error(rerr, req.request_id)
+	publish_chain_changed(h, string(auth_ctx.user_id), string(chain_id), "updated")
+	return respond_success(marshal_workflow_retry_result(chain_id, res), req.request_id, auth_ctx_server_time(req))
+}
+
+marshal_workflow_retry_result :: proc(chain_id: domain.Task_Chain_ID, res: taskv2.Workflow_Retry_Result) -> string {
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_string(&b, `{"chain_id":"`); write_handler_json_string(&b, string(chain_id))
+	strings.write_string(&b, `","reopened_task_ids":[`)
+	for tid, i in res.reopened_task_ids {
+		if i > 0 do strings.write_byte(&b, ',')
+		strings.write_byte(&b, '"'); write_handler_json_string(&b, string(tid)); strings.write_byte(&b, '"')
+	}
+	strings.write_string(&b, `],"cancelled_task_ids":[`)
+	for tid, i in res.cancelled_task_ids {
+		if i > 0 do strings.write_byte(&b, ',')
+		strings.write_byte(&b, '"'); write_handler_json_string(&b, string(tid)); strings.write_byte(&b, '"')
+	}
+	strings.write_string(&b, `],"carried_forward_keys":[`)
+	for k, i in res.carried_forward_keys {
+		if i > 0 do strings.write_byte(&b, ',')
+		strings.write_byte(&b, '"'); write_handler_json_string(&b, k); strings.write_byte(&b, '"')
+	}
+	strings.write_string(&b, `],"orphaned_task_ids":[`)
+	for tid, i in res.orphaned_task_ids {
+		if i > 0 do strings.write_byte(&b, ',')
+		strings.write_byte(&b, '"'); write_handler_json_string(&b, string(tid)); strings.write_byte(&b, '"')
+	}
+	strings.write_string(&b, `]}`)
+	return strings.to_string(b)
+}
+
+// POST /api/v1/task-chains/{cid}/workflow/cancel
+workflow_cancel_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Taskchain_Handlers)(ctx)
+	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
+	if !ok do return auth_resp
+	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
+	chain_id := domain.Task_Chain_ID(path_part(req.path, 4))
+	reason := json_string(req.body, "reason")
+	saved, cok, cerr := taskv2.workflow_cancel(h.task_engine, chain_id, domain.User_ID(auth_ctx.user_id), taskv2.actor_from_auth(auth_ctx), reason)
+	if !cok do return respond_error(cerr, req.request_id)
+	publish_chain_changed(h, string(saved.owner_user_id), string(saved.chain_id), "cancelled")
+	cb := strings.builder_make(context.temp_allocator)
+	write_chain_json(&cb, saved)
+	return respond_success(fmt.tprintf(`{{"chain_id":"%s","status":"cancelled","chain":%s}}`, saved.chain_id, strings.to_string(cb)), req.request_id, auth_ctx_server_time(req))
+}
+

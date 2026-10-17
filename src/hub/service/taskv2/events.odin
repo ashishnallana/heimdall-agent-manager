@@ -39,6 +39,8 @@ EV_READY_UNCLAIMED   :: "ready_unclaimed"    // {since}  — alert
 EV_BLOCKED_REALERT   :: "blocked_realert"    // {since}  — 24 h re-alert
 EV_SUMMARY_OVERFLOW  :: "summary_overflow"
 EV_STARTED_WORKFLOW  :: "started_workflow"   // {chain_id}
+EV_ORPHANED_WORK     :: "orphaned_work"      // {task_id, stage_key, stage_index, head}
+EV_CARRIED_FORWARD   :: "carried_forward"    // {from_task_id, from_attempt_no}
 
 // Expiry reasons. `replaced`, `dep_added` and `reopen` are STRUCTURAL: the
 // attempt they end does not count toward the budget (fold rule).

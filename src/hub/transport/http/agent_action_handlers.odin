@@ -449,13 +449,19 @@ agent_action_chain_propose_handler :: proc(ctx: rawptr, req: Request) -> Respons
 	if rationale == "" do rationale = json_string(params, "summary")
 	alternative := json_string(params, "alternative")
 	auto_approve := jsonx.extract_bool(params, "auto_approve", false, true)
+	wf_ref := json_string(params, "workflow")
+	if wf_ref == "" do wf_ref = json_string(params, "template")
+	if wf_ref == "" do wf_ref = json_string(params, "workflow_ref")
+	wf_inputs, _ := jsonx.extract_raw_object(params, "inputs", true, context.temp_allocator)
 	updated_chain, pok, err := taskv2.chain_propose(h.task_engine, domain.Task_Chain_ID(chain_id), inst.owner_user_id, taskv2.actor_from_auth(auth), taskv2.Propose_Input{
-		chain_id     = chain_id,
-		tasks_json   = tasks_json,
-		kind         = kind,
-		rationale    = rationale,
-		alternative  = alternative,
-		auto_approve = auto_approve,
+		chain_id             = chain_id,
+		tasks_json           = tasks_json,
+		kind                 = kind,
+		rationale            = rationale,
+		alternative          = alternative,
+		auto_approve         = auto_approve,
+		workflow_ref         = wf_ref,
+		workflow_inputs_json = wf_inputs,
 	})
 	if !pok do return respond_error(err, req.request_id)
 	publish_agent_action(h, inst, "chain_propose", "proposed task chain plan")
@@ -1458,3 +1464,179 @@ verbatim_field :: proc(obj, key: string) -> string {
 	if v, ok := taskv2.raw_value_field(obj, key); ok do return v
 	return ""
 }
+
+// ---- M3b Workflow Agent-Action Handlers ---------------------------------------------
+
+// POST /api/v1/agent-actions/workflow/templates
+agent_action_workflow_templates_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Agent_Action_Handlers)(ctx)
+	_, inst, ok, resp := require_instance_action_auth(h, req)
+	if !ok do return resp
+	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
+	publish_agent_action(h, inst, "workflow_templates", "listed workflow templates")
+	return respond_success(build_workflow_templates_response_json(h.task_engine, inst.owner_user_id), req.request_id, auth_ctx_server_time(req), 200)
+}
+
+// POST /api/v1/agent-actions/workflow/list
+agent_action_workflow_list_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Agent_Action_Handlers)(ctx)
+	_, inst, ok, resp := require_instance_action_auth(h, req)
+	if !ok do return resp
+	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
+	defs, derr := taskv2.workflow_list_definitions(h.task_engine, inst.owner_user_id)
+	if derr.code != .None do return respond_error(derr, req.request_id)
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_string(&b, `{"definitions":[`)
+	for d, i in defs {
+		if i > 0 do strings.write_byte(&b, ',')
+		strings.write_string(&b, `{"def_id":"`); write_handler_json_string(&b, d.def_id)
+		strings.write_string(&b, `","name":"`); write_handler_json_string(&b, d.name)
+		strings.write_string(&b, fmt.tprintf(`","version":%d,"created_at":"`, d.version))
+		write_handler_json_string(&b, d.created_at)
+		strings.write_string(&b, `","spec":`)
+		strings.write_string(&b, d.body_json)
+		strings.write_byte(&b, '}')
+	}
+	strings.write_string(&b, `]}`)
+	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 200)
+}
+
+// POST /api/v1/agent-actions/workflow/define
+agent_action_workflow_define_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Agent_Action_Handlers)(ctx)
+	_, inst, ok, resp := require_instance_action_auth(h, req)
+	if !ok do return resp
+	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
+	params := verbatim_params(req.body)
+	if strings.trim_space(params) == "" do params = req.body
+	spec_json, name_ov, ver_ov := extract_workflow_define_spec(params)
+	def, dok, derr := taskv2.workflow_define(h.task_engine, inst.owner_user_id, spec_json, name_ov, ver_ov)
+	if !dok do return respond_error(derr, req.request_id)
+	publish_agent_action(h, inst, "workflow_define", fmt.tprintf("defined workflow %s v%d", def.name, def.version))
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_string(&b, `{"def_id":"`); write_handler_json_string(&b, def.def_id)
+	strings.write_string(&b, `","name":"`); write_handler_json_string(&b, def.name)
+	strings.write_string(&b, fmt.tprintf(`","version":%d,"created_at":"`, def.version))
+	write_handler_json_string(&b, d_created_or_empty(def.created_at))
+	strings.write_string(&b, `","spec":`)
+	strings.write_string(&b, def.body_json)
+	strings.write_byte(&b, '}')
+	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 200)
+}
+
+@(private = "file")
+d_created_or_empty :: proc(s: string) -> string { return s }
+
+// POST /api/v1/agent-actions/workflow/run
+agent_action_workflow_run_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Agent_Action_Handlers)(ctx)
+	auth, inst, ok, resp := require_instance_action_auth(h, req)
+	if !ok do return resp
+	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
+	params := verbatim_params(req.body)
+	if strings.trim_space(params) == "" do params = req.body
+	run_in := extract_workflow_run_input(params)
+	if run_in.coordinator_agent_instance_id == "" do run_in.coordinator_agent_instance_id = inst.agent_instance_id
+	if run_in.bridge_id == "" do run_in.bridge_id = inst.bridge_id
+	chain, rok, rerr := taskv2.workflow_run(h.task_engine, inst.owner_user_id, taskv2.actor_from_auth(auth), run_in)
+	if !rok do return respond_error(rerr, req.request_id)
+	publish_agent_action(h, inst, "workflow_run", fmt.tprintf("started workflow %s (%s)", run_in.ref, chain.chain_id))
+	publish_chain_event(h.event_bus, string(chain.owner_user_id), string(chain.chain_id), "created")
+	status_json, _, _ := taskv2.workflow_status_json(h.task_engine, chain.chain_id, chain.owner_user_id)
+	if status_json == "" do status_json = "{}"
+	cb := strings.builder_make(context.temp_allocator)
+	write_chain_json(&cb, chain)
+	return respond_success(fmt.tprintf(`{{"chain_id":"%s","chain":%s,"workflow":%s}}`, chain.chain_id, strings.to_string(cb), status_json), req.request_id, auth_ctx_server_time(req), 200)
+}
+
+// POST /api/v1/agent-actions/workflow/status
+agent_action_workflow_status_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Agent_Action_Handlers)(ctx)
+	_, inst, ok, resp := require_instance_action_auth(h, req)
+	if !ok do return resp
+	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
+	params := json_object_raw(req.body, "params")
+	if strings.trim_space(params) == "" do params = req.body
+	cid := strings.trim_space(json_string(params, "chain_id"))
+	if cid == "" do cid = inst.chain_id
+	if cid == "" do return respond_error(domain.domain_error(.Validation_Failed, "chain_id is required"), req.request_id)
+	status_json, sok, serr := taskv2.workflow_status_json(h.task_engine, domain.Task_Chain_ID(cid), inst.owner_user_id)
+	if !sok do return respond_error(serr, req.request_id)
+	return respond_success(status_json, req.request_id, auth_ctx_server_time(req), 200)
+}
+
+// POST /api/v1/agent-actions/workflow/output
+agent_action_workflow_output_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Agent_Action_Handlers)(ctx)
+	_, inst, ok, resp := require_instance_action_auth(h, req)
+	if !ok do return resp
+	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
+	params := json_object_raw(req.body, "params")
+	if strings.trim_space(params) == "" do params = req.body
+	cid := strings.trim_space(json_string(params, "chain_id"))
+	if cid == "" do cid = inst.chain_id
+	if cid == "" do return respond_error(domain.domain_error(.Validation_Failed, "chain_id is required"), req.request_id)
+	stage_key := strings.trim_space(json_string(params, "stage_key"))
+	if stage_key == "" do stage_key = strings.trim_space(json_string(params, "stage"))
+	out_json, ook, oerr := taskv2.workflow_stage_output_json(h.task_engine, domain.Task_Chain_ID(cid), inst.owner_user_id, stage_key)
+	if !ook do return respond_error(oerr, req.request_id)
+	return respond_success(out_json, req.request_id, auth_ctx_server_time(req), 200)
+}
+
+// POST /api/v1/agent-actions/workflow/retry
+agent_action_workflow_retry_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Agent_Action_Handlers)(ctx)
+	auth, inst, ok, resp := require_instance_action_auth(h, req)
+	if !ok do return resp
+	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
+	params := json_object_raw(req.body, "params")
+	if strings.trim_space(params) == "" do params = req.body
+	cid := strings.trim_space(json_string(params, "chain_id"))
+	if cid == "" do cid = inst.chain_id
+	if cid == "" do return respond_error(domain.domain_error(.Validation_Failed, "chain_id is required"), req.request_id)
+	stage_key := json_string(params, "stage_key")
+	if stage_key == "" do stage_key = json_string(params, "stage")
+	task_id := json_string(params, "task_id")
+	if stage_key == "" && task_id == "" {
+		target := json_string(params, "target")
+		if strings.has_prefix(target, "task_") {
+			task_id = target
+		} else {
+			stage_key = target
+		}
+	}
+	cascade := jsonx.extract_bool(params, "cascade", false, true)
+	reason := json_string(params, "reason")
+	res, rok, rerr := taskv2.workflow_retry(h.task_engine, domain.Task_Chain_ID(cid), inst.owner_user_id, taskv2.actor_from_auth(auth), taskv2.Workflow_Retry_Input{
+		stage_key = stage_key,
+		task_id   = task_id,
+		cascade   = cascade,
+		reason    = reason,
+	})
+	if !rok do return respond_error(rerr, req.request_id)
+	publish_agent_action(h, inst, "workflow_retry", fmt.tprintf("retried workflow stage %s", stage_key if stage_key != "" else task_id))
+	publish_chain_event(h.event_bus, string(inst.owner_user_id), cid, "updated")
+	return respond_success(marshal_workflow_retry_result(domain.Task_Chain_ID(cid), res), req.request_id, auth_ctx_server_time(req), 200)
+}
+
+// POST /api/v1/agent-actions/workflow/cancel
+agent_action_workflow_cancel_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Agent_Action_Handlers)(ctx)
+	auth, inst, ok, resp := require_instance_action_auth(h, req)
+	if !ok do return resp
+	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
+	params := json_object_raw(req.body, "params")
+	if strings.trim_space(params) == "" do params = req.body
+	cid := strings.trim_space(json_string(params, "chain_id"))
+	if cid == "" do cid = inst.chain_id
+	if cid == "" do return respond_error(domain.domain_error(.Validation_Failed, "chain_id is required"), req.request_id)
+	reason := json_string(params, "reason")
+	saved, cok, cerr := taskv2.workflow_cancel(h.task_engine, domain.Task_Chain_ID(cid), inst.owner_user_id, taskv2.actor_from_auth(auth), reason)
+	if !cok do return respond_error(cerr, req.request_id)
+	publish_agent_action(h, inst, "workflow_cancel", fmt.tprintf("cancelled workflow %s", cid))
+	publish_chain_event(h.event_bus, string(saved.owner_user_id), string(saved.chain_id), "cancelled")
+	cb := strings.builder_make(context.temp_allocator)
+	write_chain_json(&cb, saved)
+	return respond_success(fmt.tprintf(`{{"chain_id":"%s","status":"cancelled","chain":%s}}`, saved.chain_id, strings.to_string(cb)), req.request_id, auth_ctx_server_time(req), 200)
+}
+

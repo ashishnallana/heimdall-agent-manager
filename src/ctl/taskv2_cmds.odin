@@ -46,7 +46,7 @@ ctl_collect_repeated :: proc(args: []string, names: ..string) -> [dynamic]string
 // ctl_task_brief_flags_present reports whether any brief flag was given, so
 // `task update` without them does not send an (empty) brief.
 ctl_task_brief_flags_present :: proc(args: []string) -> bool {
-	for f in ([?]string{"--goal", "--acceptance", "--verify", "--input", "--inputs", "--review-role", "--review-roles", "--auto-submit", "--require-independent-verify", "--brief-file"}) {
+	for f in ([?]string{"--goal", "--acceptance", "--verify", "--input", "--inputs", "--review-role", "--review-roles", "--auto-submit", "--require-independent-verify", "--on-output-workflow", "--output-schema", "--brief-file"}) {
 		if has_flag(args, f) do return true
 	}
 	return false
@@ -57,7 +57,7 @@ ctl_task_brief_flags_present :: proc(args: []string) -> bool {
 // Pure: the file's text is passed in. Returns ("", false) when there is nothing
 // to send. Only the brief keys the hub documents are carried from the file
 // (goal, acceptance, verify, inputs, review_roles, assignee, budget, output,
-// auto_submit, require_independent_verify); flags win field by field.
+// on_output, auto_submit, require_independent_verify); flags win field by field.
 ctl_task_brief_json :: proc(args: []string, brief_file_text: string) -> (string, bool) {
 	file := strings.trim_space(brief_file_text)
 	fields := make([dynamic]string)
@@ -110,7 +110,24 @@ ctl_task_brief_json :: proc(args: []string, brief_file_text: string) -> (string,
 	if file != "" {
 		if a := extract_json_string_unescaped(file, "assignee", "", context.temp_allocator); a != "" do append(&fields, json_kv("assignee", a))
 		if raw, ok := extract_json_object_raw(file, "budget", context.temp_allocator); ok do append(&fields, json_kv_raw("budget", raw))
-		if raw, ok := extract_json_object_raw(file, "output", context.temp_allocator); ok do append(&fields, json_kv_raw("output", raw))
+	}
+
+	if out_schema := strings.trim_space(option_value(args, "--output-schema", "")); out_schema != "" {
+		append(&fields, json_kv("output", out_schema))
+	} else if file != "" {
+		if raw, ok := extract_json_object_raw(file, "output", context.temp_allocator); ok {
+			append(&fields, json_kv_raw("output", raw))
+		} else if out_s := extract_json_string_unescaped(file, "output", "", context.temp_allocator); out_s != "" {
+			append(&fields, json_kv("output", out_s))
+		}
+	}
+
+	if on_wf := strings.trim_space(option_value(args, "--on-output-workflow", "")); on_wf != "" {
+		append(&fields, json_kv_raw("on_output", json_object(json_kv("start_workflow", on_wf))))
+	} else if file != "" {
+		if raw, ok := extract_json_object_raw(file, "on_output", context.temp_allocator); ok {
+			append(&fields, json_kv_raw("on_output", raw))
+		}
 	}
 
 	if len(fields) == 0 do return "", false
@@ -511,7 +528,20 @@ ctl_v2_task_chain_propose_params :: proc(args: []string, file_text: string) -> (
 	if raw_tasks, ok := ctl_extract_json_array_raw(trimmed, "tasks"); ok {
 		append(&fields, json_kv_raw("tasks", raw_tasks))
 	} else {
-		return "", false
+		wf_ref := option_value(args, "--workflow", option_value(args, "--template", ""))
+		if wf_ref == "" {
+			if s, ok := obj["workflow"].(json.String); ok do wf_ref = string(s)
+		}
+		if wf_ref == "" {
+			if s, ok := obj["template"].(json.String); ok do wf_ref = string(s)
+		}
+		if wf_ref == "" {
+			return "", false
+		}
+		append(&fields, json_kv("workflow", wf_ref))
+		if raw_in, ok := extract_json_object_raw(trimmed, "inputs", context.temp_allocator); ok {
+			append(&fields, json_kv_raw("inputs", raw_in))
+		}
 	}
 	return json_object_from_slice(fields[:]), true
 }
@@ -951,4 +981,374 @@ print_help_verify :: proc() {
 	fmt.println("  ham-ctl verify")
 	fmt.println("  ham-ctl verify --independent")
 	fmt.println("  ham-ctl verify && ham-ctl lease submit --summary 'tests green'")
+}
+
+// ---- workflow (M3b) --------------------------------------------------------------
+
+ctl_v2_workflow_define_params :: proc(args: []string, file_text: string) -> (string, bool) {
+	trimmed := strings.trim_space(file_text)
+	if trimmed == "" || trimmed[0] != '{' do return "", false
+	parsed, perr := json.parse(transmute([]byte)trimmed, json.DEFAULT_SPECIFICATION, false, context.temp_allocator)
+	if perr != nil do return "", false
+	_, is_obj := parsed.(json.Object)
+	if !is_obj do return "", false
+
+	fields := make([dynamic]string)
+	defer delete(fields)
+	if name := strings.trim_space(option_value(args, "--name", "")); name != "" {
+		append(&fields, json_kv("name", name))
+	}
+	append(&fields, json_kv_raw("definition", trimmed))
+	return json_object_from_slice(fields[:]), true
+}
+
+ctl_v2_workflow_inputs_json :: proc(args: []string, inputs_file_text := "") -> (string, bool) {
+	Ordered_KV :: struct {
+		key:   string,
+		field: string,
+	}
+	entries := make([dynamic]Ordered_KV, context.temp_allocator)
+	upsert :: proc(list: ^[dynamic]Ordered_KV, k, field_str: string) {
+		for &e in list^ {
+			if e.key == k {
+				e.field = field_str
+				return
+			}
+		}
+		append(list, Ordered_KV{key = k, field = field_str})
+	}
+
+	base_json := strings.trim_space(inputs_file_text)
+	if base_json == "" {
+		raw_flag := strings.trim_space(option_value(args, "--inputs", ""))
+		if strings.has_prefix(raw_flag, "{") {
+			base_json = raw_flag
+		}
+	}
+	if base_json != "" {
+		if !strings.has_prefix(base_json, "{") do return "", false
+		parsed, perr := json.parse(transmute([]byte)base_json, json.DEFAULT_SPECIFICATION, false, context.temp_allocator)
+		if perr != nil do return "", false
+		obj, is_obj := parsed.(json.Object)
+		if !is_obj do return "", false
+		for k, v in obj {
+			if mb, merr := json.marshal(v, allocator = context.temp_allocator); merr == nil {
+				upsert(&entries, k, json_kv_raw(k, string(mb)))
+			}
+		}
+	}
+
+	kv_flags := ctl_collect_repeated(args, "--input", "--inputs")
+	defer delete(kv_flags)
+	for item in kv_flags {
+		trimmed := strings.trim_space(item)
+		if trimmed == "" || strings.has_prefix(trimmed, "{") do continue
+		eq := strings.index_byte(trimmed, '=')
+		if eq <= 0 do return "", false
+		k := strings.trim_space(trimmed[:eq])
+		v := trimmed[eq + 1:]
+		if k == "" do return "", false
+		upsert(&entries, k, json_kv(k, v))
+	}
+
+	if len(entries) == 0 do return "", true
+	fields := make([dynamic]string, 0, len(entries), context.temp_allocator)
+	for e in entries {
+		append(&fields, e.field)
+	}
+	return json_object_from_slice(fields[:]), true
+}
+
+ctl_v2_workflow_run_params :: proc(tokens, args: []string, inputs_file_text := "", def_file_text := "") -> (string, bool) {
+	name := strings.trim_space(option_value(args, "--template", option_value(args, "--workflow", option_value(args, "--name", pos(tokens, 1)))))
+	def_trimmed := strings.trim_space(def_file_text)
+	if name == "" && def_trimmed == "" do return "", false
+	if def_trimmed != "" {
+		if !strings.has_prefix(def_trimmed, "{") do return "", false
+		if _, perr := json.parse(transmute([]byte)def_trimmed, json.DEFAULT_SPECIFICATION, false, context.temp_allocator); perr != nil {
+			return "", false
+		}
+	}
+	inputs_json, iok := ctl_v2_workflow_inputs_json(args, inputs_file_text)
+	if !iok do return "", false
+
+	fields := make([dynamic]string)
+	defer delete(fields)
+	if name != "" {
+		append(&fields, json_kv("name", name))
+		append(&fields, json_kv("template", name))
+	}
+	if def_trimmed != "" {
+		append(&fields, json_kv_raw("definition", def_trimmed))
+	}
+	if cid := strings.trim_space(option_value(args, "--chain", option_value(args, "--chain-id", ""))); cid != "" {
+		append(&fields, json_kv("chain_id", cid))
+	}
+	if title := strings.trim_space(option_value(args, "--title", "")); title != "" {
+		append(&fields, json_kv("title", title))
+	}
+	if desc := strings.trim_space(option_value(args, "--description", "")); desc != "" {
+		append(&fields, json_kv("description", desc))
+	}
+	if pid := strings.trim_space(option_value(args, "--project", option_value(args, "--project-id", ""))); pid != "" {
+		append(&fields, json_kv("project_id", pid))
+	}
+	if bid := strings.trim_space(option_value(args, "--bridge", option_value(args, "--bridge-id", ""))); bid != "" {
+		append(&fields, json_kv("bridge_id", bid))
+	}
+	if coord := strings.trim_space(option_value(args, "--coordinator", option_value(args, "--coordinator-agent-id", ""))); coord != "" {
+		append(&fields, json_kv("coordinator_agent_id", coord))
+	}
+	if inputs_json != "" {
+		append(&fields, json_kv_raw("inputs", inputs_json))
+	}
+	return json_object_from_slice(fields[:]), true
+}
+
+ctl_v2_workflow_status_params :: proc(tokens, args: []string) -> (chain_id, params: string) {
+	cid := strings.trim_space(option_value(args, "--chain", option_value(args, "--chain-id", pos(tokens, 1))))
+	if cid == "" do return "", "{}"
+	return cid, json_object(json_kv("chain_id", cid))
+}
+
+ctl_v2_workflow_output_params :: proc(tokens, args: []string) -> (chain_id, stage_key, params: string, ok: bool) {
+	p1 := strings.trim_space(pos(tokens, 1))
+	p2 := strings.trim_space(pos(tokens, 2))
+	cid := strings.trim_space(option_value(args, "--chain", option_value(args, "--chain-id", "")))
+	stage := strings.trim_space(option_value(args, "--stage", ""))
+	if p1 != "" && p2 != "" {
+		if cid == "" do cid = p1
+		if stage == "" do stage = p2
+	} else if p1 != "" {
+		if stage != "" && cid == "" {
+			cid = p1
+		} else {
+			stage = p1
+		}
+	}
+	if stage == "" do return "", "", "", false
+	fields := make([dynamic]string)
+	defer delete(fields)
+	if cid != "" do append(&fields, json_kv("chain_id", cid))
+	append(&fields, json_kv("stage_key", stage))
+	return cid, stage, json_object_from_slice(fields[:]), true
+}
+
+ctl_v2_workflow_retry_params :: proc(tokens, args: []string) -> (chain_id, target, params: string, ok: bool) {
+	p1 := strings.trim_space(pos(tokens, 1))
+	p2 := strings.trim_space(pos(tokens, 2))
+	cid := strings.trim_space(option_value(args, "--chain", option_value(args, "--chain-id", "")))
+	tgt := strings.trim_space(option_value(args, "--stage", option_value(args, "--task", option_value(args, "--task-id", ""))))
+	if p1 != "" && p2 != "" {
+		if cid == "" do cid = p1
+		if tgt == "" do tgt = p2
+	} else if p1 != "" {
+		if tgt != "" && cid == "" {
+			cid = p1
+		} else {
+			tgt = p1
+		}
+	}
+	if tgt == "" do return "", "", "", false
+	fields := make([dynamic]string)
+	defer delete(fields)
+	if cid != "" do append(&fields, json_kv("chain_id", cid))
+	append(&fields, json_kv("stage_key", tgt))
+	if strings.has_prefix(tgt, "task_") {
+		append(&fields, json_kv("task_id", tgt))
+	}
+	if has_flag(args, "--cascade") {
+		append(&fields, `"cascade":true`)
+	}
+	if reason := strings.trim_space(option_value(args, "--reason", "")); reason != "" {
+		append(&fields, json_kv("reason", reason))
+	}
+	return cid, tgt, json_object_from_slice(fields[:]), true
+}
+
+ctl_v2_workflow_cancel_params :: proc(tokens, args: []string) -> (chain_id, params: string) {
+	cid := strings.trim_space(option_value(args, "--chain", option_value(args, "--chain-id", pos(tokens, 1))))
+	fields := make([dynamic]string)
+	defer delete(fields)
+	if cid != "" do append(&fields, json_kv("chain_id", cid))
+	if reason := strings.trim_space(option_value(args, "--reason", "")); reason != "" {
+		append(&fields, json_kv("reason", reason))
+	}
+	return cid, json_object_from_slice(fields[:])
+}
+
+ctl_v2_workflow :: proc(endpoint, token: string, tokens, args: []string) {
+	verb := pos(tokens, 0)
+	switch verb {
+	case "", "templates", "list":
+		ctl_agent_call_task(endpoint, token, "agent.workflow.templates", "{}", args)
+	case "define":
+		file_text := ""
+		path := option_value(args, "--file", pos(tokens, 1))
+		if path != "" {
+			data, err := os.read_entire_file(path, context.allocator)
+			if err != nil {
+				fmt.printfln(`{"ok":false,"message":"--file %s: cannot read"}`, path)
+				os.exit(1)
+			}
+			file_text = string(data)
+		} else if has_flag(args, "--stdin") {
+			if data, err := os.read_entire_file("/dev/stdin", context.allocator); err == nil {
+				file_text = string(data)
+			}
+		}
+		params, ok := ctl_v2_workflow_define_params(args, file_text)
+		if !ok {
+			fmt.println(`{"ok":false,"message":"workflow define requires --file <def.json> (or --stdin)"}`)
+			os.exit(1)
+		}
+		ctl_agent_call_task(endpoint, token, "agent.workflow.define", params, args)
+	case "run":
+		in_text, _ := ctl_read_json_file_flag(args, "--inputs-file")
+		def_text, _ := ctl_read_json_file_flag(args, "--file")
+		params, ok := ctl_v2_workflow_run_params(tokens, args, in_text, def_text)
+		if !ok {
+			fmt.println(`{"ok":false,"message":"workflow run requires <name> (or --file <def.json>) [--chain <cid>] [--input k=v ...] [--inputs-file <json>]"}`)
+			os.exit(1)
+		}
+		ctl_agent_call_task(endpoint, token, "agent.workflow.run", params, args)
+	case "status":
+		_, params := ctl_v2_workflow_status_params(tokens, args)
+		defer delete(params)
+		ctl_agent_call_task(endpoint, token, "agent.workflow.status", params, args)
+	case "output":
+		_, _, params, ok := ctl_v2_workflow_output_params(tokens, args)
+		if !ok {
+			fmt.println(`{"ok":false,"message":"workflow output requires [<chain_id>] <stage_key>"}`)
+			os.exit(1)
+		}
+		defer delete(params)
+		ctl_agent_call_task(endpoint, token, "agent.workflow.output", params, args)
+	case "retry":
+		_, _, params, ok := ctl_v2_workflow_retry_params(tokens, args)
+		if !ok {
+			fmt.println(`{"ok":false,"message":"workflow retry requires [<chain_id>] <stage_key_or_task_id> [--cascade]"}`)
+			os.exit(1)
+		}
+		defer delete(params)
+		ctl_agent_call_task(endpoint, token, "agent.workflow.retry", params, args)
+	case "cancel":
+		_, params := ctl_v2_workflow_cancel_params(tokens, args)
+		defer delete(params)
+		ctl_agent_call_task(endpoint, token, "agent.workflow.cancel", params, args)
+	case:
+		print_help_workflow()
+	}
+}
+
+ctl_workflow_user_mode :: proc(cmd, args: []string) {
+	tokens := cmd[1:] if len(cmd) > 1 else []string{}
+	verb := pos(tokens, 0)
+	if verb == "help" || has_flag(args, "--help") || has_flag(args, "-h") {
+		print_help_workflow()
+		return
+	}
+	transport, tok := resolve_ctl_transport(args)
+	if !tok do os.exit(1)
+	if transport.kind == .Agent {
+		ctl_v2_workflow(transport.agent_endpoint, transport.agent_token, tokens, args)
+		return
+	}
+	if transport.user_base_url == "" || transport.user_token == "" {
+		fmt.println(`{"ok":false,"message":"workflow in user mode requires --hub-url and --user-token (or HAM_HUB_URL/HEIMDALL_HUB_URL and HAM_HUB_USER_TOKEN/HEIMDALL_USER_TOKEN)"}`)
+		os.exit(1)
+	}
+	switch verb {
+	case "", "templates", "list":
+		ctl_tasks_request_and_decrypt(transport, "GET", "/api/v1/workflows/templates", "", args)
+	case "define":
+		file_text := ""
+		path := option_value(args, "--file", pos(tokens, 1))
+		if path != "" {
+			data, err := os.read_entire_file(path, context.allocator)
+			if err != nil {
+				fmt.printfln(`{"ok":false,"message":"--file %s: cannot read"}`, path)
+				os.exit(1)
+			}
+			file_text = string(data)
+		} else if has_flag(args, "--stdin") {
+			if data, err := os.read_entire_file("/dev/stdin", context.allocator); err == nil {
+				file_text = string(data)
+			}
+		}
+		params, ok := ctl_v2_workflow_define_params(args, file_text)
+		if !ok {
+			fmt.println(`{"ok":false,"message":"workflow define requires --file <def.json> (or --stdin)"}`)
+			os.exit(1)
+		}
+		ctl_tasks_request_and_decrypt(transport, "POST", "/api/v1/workflows/definitions", params, args)
+	case "run":
+		in_text, _ := ctl_read_json_file_flag(args, "--inputs-file")
+		def_text, _ := ctl_read_json_file_flag(args, "--file")
+		params, ok := ctl_v2_workflow_run_params(tokens, args, in_text, def_text)
+		if !ok {
+			fmt.println(`{"ok":false,"message":"workflow run requires <name> (or --file <def.json>) [--chain <cid>] [--input k=v ...] [--inputs-file <json>]"}`)
+			os.exit(1)
+		}
+		ctl_tasks_request_and_decrypt(transport, "POST", "/api/v1/workflows/run", params, args)
+	case "status":
+		cid, _ := ctl_v2_workflow_status_params(tokens, args)
+		if cid == "" {
+			fmt.println(`{"ok":false,"message":"workflow status in user mode requires <chain_id> (or --chain <id>)"}`)
+			os.exit(1)
+		}
+		ctl_tasks_request_and_decrypt(transport, "GET", fmt.tprintf("/api/v1/task-chains/%s/workflow/status", safe_path_part(cid)), "", args)
+	case "output":
+		cid, stage, _, ok := ctl_v2_workflow_output_params(tokens, args)
+		if !ok || cid == "" {
+			fmt.println(`{"ok":false,"message":"workflow output in user mode requires <chain_id> <stage_key> (or --chain <id>)"}`)
+			os.exit(1)
+		}
+		ctl_tasks_request_and_decrypt(transport, "GET", fmt.tprintf("/api/v1/task-chains/%s/workflow/stages/%s/output", safe_path_part(cid), safe_path_part(stage)), "", args)
+	case "retry":
+		cid, _, params, ok := ctl_v2_workflow_retry_params(tokens, args)
+		if !ok || cid == "" {
+			fmt.println(`{"ok":false,"message":"workflow retry in user mode requires <chain_id> <stage_key_or_task_id> [--cascade]"}`)
+			os.exit(1)
+		}
+		defer delete(params)
+		ctl_tasks_request_and_decrypt(transport, "POST", fmt.tprintf("/api/v1/task-chains/%s/workflow/retry", safe_path_part(cid)), params, args)
+	case "cancel":
+		cid, params := ctl_v2_workflow_cancel_params(tokens, args)
+		defer delete(params)
+		if cid == "" {
+			fmt.println(`{"ok":false,"message":"workflow cancel in user mode requires <chain_id> (or --chain <id>)"}`)
+			os.exit(1)
+		}
+		ctl_tasks_request_and_decrypt(transport, "POST", fmt.tprintf("/api/v1/task-chains/%s/workflow/cancel", safe_path_part(cid)), params, args)
+	case:
+		print_help_workflow()
+	}
+}
+
+print_help_workflow :: proc() {
+	fmt.println("ham-ctl workflow — workflow chains (Task System v2 M3b)")
+	fmt.println("")
+	fmt.println("VERBS")
+	fmt.println("  templates                                           List built-in and owner-defined workflow templates.")
+	fmt.println("  define --file <def.json> [--name <name>]            Validate and save a versioned workflow.v1 definition.")
+	fmt.println("  run <name> [--chain <cid>] [--input k=v ...] [--inputs-file <json>]")
+	fmt.println("                                                      Start a workflow run from a template or definition,")
+	fmt.println("                                                      snapshotting the workflow and materialising root stages.")
+	fmt.println("  status [<chain_id>]                                 Inspect per-stage views, materialised tasks, and orphaned_work.")
+	fmt.println("  output [<chain_id>] <stage_key>                     Fetch ordered output facets across all instances of a stage.")
+	fmt.println("  retry [<chain_id>] <stage_key_or_task_id> [--cascade]")
+	fmt.println("                                                      Reopen a failed/cancelled stage (refuses with 409")
+	fmt.println("                                                      downstream_materialised unless --cascade is given).")
+	fmt.println("  cancel [<chain_id>] [--reason <text>]               Cancel the workflow chain and reclaim all live leases.")
+	fmt.println("")
+	fmt.println("EXAMPLES")
+	fmt.println("  ham-ctl workflow templates")
+	fmt.println("  ham-ctl workflow define --file my_workflow.json")
+	fmt.println("  ham-ctl workflow run explore_plan_build --input goal='Add rate limiting' --input verify_cmd='make test'")
+	fmt.println("  ham-ctl workflow run fix_flaky_tests --chain chain_abc --inputs-file inputs.json")
+	fmt.println("  ham-ctl workflow status chain_abc")
+	fmt.println("  ham-ctl workflow output chain_abc reproduce")
+	fmt.println("  ham-ctl workflow retry chain_abc plan --cascade")
+	fmt.println("  ham-ctl workflow cancel chain_abc")
 }

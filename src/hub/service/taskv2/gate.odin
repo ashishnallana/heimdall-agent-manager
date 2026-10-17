@@ -22,6 +22,15 @@ import jsonx "odin_test:lib/jsonx"
 
 Gate_Result :: enum { Waiting, Approved, Changes_Requested }
 
+gate_approver_policy :: proc(task: domain.Task) -> string {
+	approver := jsonx.extract_string(task.brief_json, "approver", "user_or_coordinator", true, context.temp_allocator)
+	if gate_obj, gok := jsonx.extract_raw_object(task.brief_json, "gate", true, context.temp_allocator); gok {
+		if a := jsonx.extract_string(gate_obj, "approver", "", true, context.temp_allocator); a != "" do approver = a
+	}
+	if task.requires_user_approval do return "user"
+	return approver
+}
+
 evaluate_gate_in_uow :: proc(svc: ^Service, u: ^Uow, chain: domain.Task_Chain, task_in: domain.Task, actor: Actor) -> (Gate_Result, bool, domain.Domain_Error) {
 	task := task_in
 	if task.state != .In_Review do return .Waiting, true, domain.Domain_Error{}
@@ -35,6 +44,12 @@ evaluate_gate_in_uow :: proc(svc: ^Service, u: ^Uow, chain: domain.Task_Chain, t
 		json_str(&p, "role", r.role)
 		json_str(&p, "reviewer", r.reviewer_agent_id if r.reviewer_kind == "agent" else "user")
 		if _, _, ok, err := record_event(svc, u, task, actor, EV_CHANGES_REQUESTED, json_end(&p)); !ok do return .Waiting, false, err
+		if task.kind == .Gate {
+			cp := json_begin()
+			json_str(&cp, "reason", "gate_rejected")
+			if fresh, fok, _ := iface.taskchain_get_task(svc.repo, task.task_id); fok do task = fresh
+			if _, _, ok, err := record_event(svc, u, task, actor, EV_CANCELLED, json_end(&cp)); !ok do return .Waiting, false, err
+		}
 		// other review leases on the task are dropped (reason changes_requested)
 		if leases, lerr := iface.taskchain_list_leases_by_task(svc.repo, task.task_id); lerr.code == .None {
 			for l in leases {
@@ -44,6 +59,27 @@ evaluate_gate_in_uow :: proc(svc: ^Service, u: ^Uow, chain: domain.Task_Chain, t
 		}
 		metric_gate_evaluated(.Changes_Requested)
 		return .Changes_Requested, true, domain.Domain_Error{}
+	}
+	if task.kind == .Gate {
+		approver := gate_approver_policy(task)
+		gate_approved := false
+		for r in reviews {
+			if r.attempt_no != task.attempt_no || r.verdict != "approve" do continue
+			if approver == "user" {
+				if r.reviewer_kind == "user" && r.reviewer_instance_id == "" { gate_approved = true; break }
+			} else {
+				if r.reviewer_kind == "user" || r.role == "coordinator" || r.reviewer_agent_id == "coordinator" { gate_approved = true; break }
+			}
+		}
+		if !gate_approved {
+			metric_gate_evaluated(.Waiting)
+			return .Waiting, true, domain.Domain_Error{}
+		}
+		p := json_begin()
+		json_int(&p, "attempt_no", i64(task.attempt_no))
+		if _, _, ok, err := record_event(svc, u, task, actor, EV_APPROVED, json_end(&p)); !ok do return .Waiting, false, err
+		metric_gate_evaluated(.Approved)
+		return .Approved, true, domain.Domain_Error{}
 	}
 	// 2. every needed (fleet row, role) approved
 	roles := brief_review_roles(task.brief_json, context.temp_allocator)

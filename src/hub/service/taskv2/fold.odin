@@ -176,6 +176,10 @@ fold_task :: proc(events: []domain.Task_Event, input: Fold_Input) -> Task_View {
 			// Verdicts only mean something while the task awaits review.
 			if !v.in_review do continue
 			v.in_review = false
+			if input.kind == .Gate {
+				v.cancelled = true
+				continue
+			}
 			v.review_rounds += 1
 			v.last_release = .Changes_Requested
 			if v.review_rounds >= OSCILLATION_ROUNDS {
@@ -186,6 +190,12 @@ fold_task :: proc(events: []domain.Task_Event, input: Fold_Input) -> Task_View {
 		case EV_APPROVED:
 			if !v.in_review do continue
 			v.in_review = false
+			v.done = true
+		case EV_CARRIED_FORWARD:
+			v.published = true
+			v.in_review = false
+			v.has_work_lease = false
+			v.cancelled = false
 			v.done = true
 		case EV_CANCELLED:
 			v.cancelled = true

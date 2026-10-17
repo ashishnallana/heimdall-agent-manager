@@ -251,3 +251,85 @@ test_m3_ctl_params_and_verify_helpers :: proc(t: ^testing.T) {
 	testing.expect_value(t, lse.vcs_head, "h111")
 }
 
+@(test)
+test_m3b_workflow_ctl_params :: proc(t: ^testing.T) {
+	// 1. command_tokens skips --inputs-file, --stage, --workflow, --on-output-workflow, --output-schema
+	toks := command_tokens([]string{"ham-ctl", "workflow", "run", "fix_flaky_tests", "--chain", "ch_1", "--inputs-file", "in.json", "--input", "target=auth", "--cascade"})
+	defer delete(toks)
+	testing.expect_value(t, len(toks), 3)
+	if len(toks) == 3 {
+		testing.expect_value(t, toks[0], "workflow")
+		testing.expect_value(t, toks[1], "run")
+		testing.expect_value(t, toks[2], "fix_flaky_tests")
+	}
+
+	// 2. workflow define params
+	def_p, def_ok := ctl_v2_workflow_define_params(
+		[]string{"ham-ctl", "workflow", "define", "--file", "wf.json", "--name", "custom_wf"},
+		`{"kind":"workflow","v":1,"name":"custom_wf","stages":[]}`,
+	)
+	defer delete(def_p)
+	testing.expect(t, def_ok, "workflow define params ok")
+	testing.expect(t, strings.contains(def_p, `"name":"custom_wf"`), "name included")
+	testing.expect(t, strings.contains(def_p, `"definition":{"kind":"workflow","v":1,`), "definition included")
+
+	// 3. workflow run params (merges --inputs-file with repeated --input k=v)
+	run_p, run_ok := ctl_v2_workflow_run_params(
+		[]string{"run", "explore_plan_build"},
+		[]string{"ham-ctl", "workflow", "run", "explore_plan_build", "--chain", "ch_wf", "--input", "goal=Add auth", "--input", "verify_cmd=make test"},
+		`{"goal":"from_file","extra":"kept"}`,
+	)
+	defer delete(run_p)
+	testing.expect(t, run_ok, "workflow run params ok")
+	testing.expect(t, strings.contains(run_p, `"name":"explore_plan_build"`), "workflow name included")
+	testing.expect(t, strings.contains(run_p, `"chain_id":"ch_wf"`), "chain_id included")
+	testing.expect(t, strings.contains(run_p, `"goal":"Add auth"`), "--input overrides --inputs-file key")
+	testing.expect(t, strings.contains(run_p, `"extra":"kept"`), "untouched --inputs-file key preserved")
+	testing.expect(t, strings.contains(run_p, `"verify_cmd":"make test"`), "second --input included")
+
+	// 4. workflow output params (1 positional vs 2 positionals)
+	cid1, stg1, out1, ok1 := ctl_v2_workflow_output_params(
+		[]string{"output", "ch_1", "plan"},
+		[]string{"ham-ctl", "workflow", "output", "ch_1", "plan"},
+	)
+	defer delete(out1)
+	testing.expect(t, ok1 && cid1 == "ch_1" && stg1 == "plan", "2-positional workflow output")
+	testing.expect_value(t, out1, `{"chain_id":"ch_1","stage_key":"plan"}`)
+
+	cid2, stg2, out2, ok2 := ctl_v2_workflow_output_params(
+		[]string{"output", "plan"},
+		[]string{"ham-ctl", "workflow", "output", "plan"},
+	)
+	defer delete(out2)
+	testing.expect(t, ok2 && cid2 == "" && stg2 == "plan", "1-positional workflow output")
+	testing.expect_value(t, out2, `{"stage_key":"plan"}`)
+
+	// 5. workflow retry params with --cascade
+	rcid, rtgt, retry_p, rok := ctl_v2_workflow_retry_params(
+		[]string{"retry", "ch_1", "plan"},
+		[]string{"ham-ctl", "workflow", "retry", "ch_1", "plan", "--cascade"},
+	)
+	defer delete(retry_p)
+	testing.expect(t, rok && rcid == "ch_1" && rtgt == "plan", "workflow retry params ok")
+	testing.expect_value(t, retry_p, `{"chain_id":"ch_1","stage_key":"plan","cascade":true}`)
+
+	// 6. brief string output + on_output and workflow proposal
+	brief_wf, bok := ctl_task_brief_json(
+		[]string{"ham-ctl", "task", "create", "--goal", "triage", "--output-schema", "task_list.v1", "--on-output-workflow", "fix_flaky_tests"},
+		"",
+	)
+	defer delete(brief_wf)
+	testing.expect(t, bok, "brief with output-schema and on-output-workflow ok")
+	testing.expect(t, strings.contains(brief_wf, `"output":"task_list.v1"`), "string output contract")
+	testing.expect(t, strings.contains(brief_wf, `"on_output":{"start_workflow":"fix_flaky_tests"}`), "on_output start_workflow")
+
+	wf_prop, wpok := ctl_v2_task_chain_propose_params(
+		[]string{"ham-ctl", "task-chain", "propose", "--file", "wf_prop.json", "--auto-approve"},
+		`{"kind":"workflow","workflow":"fix_flaky_tests","inputs":{"target":"auth"}}`,
+	)
+	defer delete(wf_prop)
+	testing.expect(t, wpok, "workflow proposal params ok")
+	testing.expect(t, strings.contains(wf_prop, `"workflow":"fix_flaky_tests"`), "workflow ref in proposal")
+	testing.expect(t, strings.contains(wf_prop, `"inputs":{"target":"auth"}`), "inputs in proposal")
+}
+

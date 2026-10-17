@@ -25,7 +25,8 @@ ctl_help :: proc(cmd: []string) {
 		switch cmd[1] {
 		case "bridge", "bridges", "agents", "task-chain", "task-chains",
 		     "task", "tasks", "chat", "chats", "artifact", "artifacts",
-		     "memory", "context", "start-success", "issue", "issues", "lease", "review", "verify":
+		     "memory", "context", "start-success", "issue", "issues", "lease", "review", "verify",
+		     "workflow", "workflows":
 			print_agent_help(cmd[1:]); return
 		case "vault":
 			print_vault_help(); return

@@ -36,9 +36,29 @@ match_chain_in_uow :: proc(svc: ^Service, u: ^Uow, chain: domain.Task_Chain, tri
 	for task in ctx.sorted {
 		if task.state != .Ready || task.kind == .Gate do continue
 		if task_has_live_lease(&ctx, task.task_id, domain.LEASE_KIND_WORK) do continue
+		if task.stage_key != "" {
+			if cap := workflow_stage_max_parallel(chain, task.stage_key); cap > 0 {
+				if stage_live_work_lease_count(&ctx, task.stage_key) >= cap do continue
+			}
+		}
 		grant_work(svc, u, &ctx, task, trigger)
 	}
 	return true, domain.Domain_Error{}
+}
+
+@(private = "file")
+stage_live_work_lease_count :: proc(ctx: ^Match_Context, stage_key: string) -> int {
+	count := 0
+	for l in ctx.leases {
+		if l.kind != domain.LEASE_KIND_WORK do continue
+		for t in ctx.tasks {
+			if t.task_id == l.task_id && t.stage_key == stage_key {
+				count += 1
+				break
+			}
+		}
+	}
+	return count
 }
 
 // ---- context ------------------------------------------------------------------------

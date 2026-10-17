@@ -481,5 +481,40 @@ else
 fi
 fi
 
+# =============================================== 7. workflow chains (M3b) ====
+if want 7; then
+section "7. workflow chains: templates → run → lazy materialisation → status → cancel"
+
+# 7a. Templates
+TEMPLATES_RESP="$(api GET "/api/v1/workflows/templates")"
+echo "$TEMPLATES_RESP" | jq -e '.data.templates[] | select(.name == "explore_plan_build")' >/dev/null \
+  && pass "7a built-in explore_plan_build template available via /api/v1/workflows/templates" \
+  || fail "7a explore_plan_build template missing from templates response: $TEMPLATES_RESP"
+
+# 7b. Run workflow
+WF_RUN_RESP="$(api_ok POST "/api/v1/workflows/run" "{\"ref\":\"explore_plan_build\",\"title\":\"Smoke Workflow Run\",\"inputs\":{\"goal\":\"smoke test goal\",\"verify\":\"true\"},\"bridge_id\":\"$BRIDGE_ID\"}")"
+WF_CHAIN="$(printf '%s' "$WF_RUN_RESP" | jqr '.data.chain_id // .chain_id')"
+[ -n "$WF_CHAIN" ] && pass "7b started workflow run (chain_id=$WF_CHAIN)" || fail "7b failed to start workflow: $WF_RUN_RESP"
+
+# 7c. Immutability: manual task create on workflow chain rejected with 403
+CREATE_ATTEMPT="$(api POST "/api/v1/task-chains/$WF_CHAIN/tasks" '{"title":"manual task","goal":"should fail","verify":"true"}' || true)"
+[ "$(printf '%s' "$CREATE_ATTEMPT" | err_code)" = "workflow_immutable" ] \
+  && pass "7c manual task.create on workflow chain rejected with 403 workflow_immutable" \
+  || fail "7c expected workflow_immutable 403, got: $CREATE_ATTEMPT"
+
+# 7d. Check status and root stage materialisation
+WF_STATUS_RESP="$(api_ok GET "/api/v1/task-chains/$WF_CHAIN/workflow/status")"
+echo "$WF_STATUS_RESP" | jq -e '.data.stages[] | select(.key == "explore")' >/dev/null \
+  && pass "7d workflow status returns root explore stage" \
+  || fail "7d explore stage missing from workflow status: $WF_STATUS_RESP"
+
+# 7e. Cancel workflow chain
+CANCEL_RESP="$(api_ok POST "/api/v1/task-chains/$WF_CHAIN/workflow/cancel" '{"reason":"smoke complete"}')"
+[ "$(printf '%s' "$CANCEL_RESP" | jqr '.data.status // .status')" = "cancelled" ] \
+  && pass "7e cancelled workflow chain $WF_CHAIN cleanly" \
+  || fail "7e cancel workflow failed: $CANCEL_RESP"
+
+fi
+
 section "done"
 exit 0

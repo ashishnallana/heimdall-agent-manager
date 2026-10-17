@@ -1,0 +1,101 @@
+{
+  "schema": "workflow.v1",
+  "version": 1,
+  "kind": "workflow",
+  "v": 1,
+  "id": "tpl_explore_plan_build",
+  "name": "explore_plan_build",
+  "title": "Explore -> Plan -> Approve -> Build -> Verify",
+  "description": "Explore the codebase, produce a structured task_list.v1 plan, pause at a human/coordinator gate, then fan out across planned items and run a final integration verification.",
+  "inputs": [
+    {
+      "name": "goal",
+      "type": "string",
+      "required": true,
+      "description": "High-level objective for the feature or change"
+    },
+    {
+      "name": "verify_cmd",
+      "type": "string",
+      "required": false,
+      "default": "true",
+      "description": "Verification command to run on each built item and final integration"
+    }
+  ],
+  "defaults": {
+    "priority": "p2"
+  },
+  "stages": [
+    {
+      "key": "explore",
+      "kind": "task",
+      "title": "Explore: {{inputs.goal}}",
+      "depends_on": [],
+      "brief": {
+        "goal": "Explore the codebase and identify key files, constraints, and risks for: {{inputs.goal}}",
+        "acceptance": [
+          "Summary of relevant modules, entry points, and risks submitted as JSON output"
+        ],
+        "verify": "none",
+        "output": {
+          "schema": "inline",
+          "required_fields": ["summary"]
+        }
+      }
+    },
+    {
+      "key": "plan",
+      "kind": "task",
+      "title": "Plan tasks for: {{inputs.goal}}",
+      "depends_on": ["explore"],
+      "brief": {
+        "goal": "Based on exploration ({{stage.explore.output.summary}}), decompose '{{inputs.goal}}' into concrete, verifiable work items.",
+        "acceptance": [
+          "Structured task_list.v1 output with non-empty goal, acceptance, and verify per item"
+        ],
+        "verify": "none",
+        "output": {
+          "schema": "task_list.v1"
+        }
+      }
+    },
+    {
+      "key": "approve_plan",
+      "kind": "gate",
+      "title": "Approve implementation plan",
+      "depends_on": ["plan"],
+      "gate": {
+        "approver": "user_or_coordinator",
+        "prompt": "Approve the generated plan ({{stage.plan.output.summary}}) before building?"
+      }
+    },
+    {
+      "key": "build",
+      "kind": "task",
+      "title": "Build: {{item.title}}",
+      "depends_on": ["approve_plan"],
+      "for_each": "plan.outputs[0].tasks",
+      "max_parallel": 4,
+      "brief": {
+        "goal": "{{item.goal}}",
+        "acceptance": [
+          "Implementation complete and verification passes for {{item.key}}"
+        ],
+        "verify": "{{inputs.verify_cmd}}"
+      }
+    },
+    {
+      "key": "verify_all",
+      "kind": "task",
+      "title": "Final integration verification",
+      "depends_on": ["build"],
+      "brief": {
+        "goal": "Run full integration verification across all built items for: {{inputs.goal}}",
+        "acceptance": [
+          "Full verification command exits 0 and all changes integrate cleanly"
+        ],
+        "verify": "{{inputs.verify_cmd}}"
+      }
+    }
+  ]
+}

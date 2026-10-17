@@ -1,0 +1,72 @@
+{
+  "schema": "workflow.v1",
+  "version": 1,
+  "kind": "workflow",
+  "v": 1,
+  "id": "tpl_security_audit",
+  "name": "security_audit",
+  "title": "Security Audit -> Triage Gate -> Remediate",
+  "description": "Scan target scope for security vulnerabilities (findings.v1), triage at a gate, and remediate findings.",
+  "inputs": [
+    {
+      "name": "target",
+      "type": "string",
+      "required": true,
+      "description": "Target directory or component to audit"
+    },
+    {
+      "name": "verify_cmd",
+      "type": "string",
+      "required": false,
+      "default": "true",
+      "description": "Verification command for remediation tasks"
+    }
+  ],
+  "defaults": {
+    "priority": "p1"
+  },
+  "stages": [
+    {
+      "key": "scan",
+      "kind": "task",
+      "title": "Security scan: {{inputs.target}}",
+      "depends_on": [],
+      "brief": {
+        "goal": "Audit {{inputs.target}} for security vulnerabilities and emit structured findings.v1 output.",
+        "acceptance": [
+          "Structured findings.v1 output listing discovered issues with severity, summary, and location"
+        ],
+        "verify": "none",
+        "output": {
+          "schema": "findings.v1"
+        }
+      }
+    },
+    {
+      "key": "triage",
+      "kind": "gate",
+      "title": "Triage security findings",
+      "depends_on": ["scan"],
+      "gate": {
+        "approver": "user_or_coordinator",
+        "prompt": "Review security findings for {{inputs.target}} and approve remediation."
+      }
+    },
+    {
+      "key": "remediate",
+      "kind": "task",
+      "title": "Remediate finding: {{item.summary}}",
+      "depends_on": ["triage"],
+      "for_each": "scan.outputs[0].findings",
+      "max_parallel": 4,
+      "brief": {
+        "goal": "Remediate {{item.severity}} security finding at {{item.location}}: {{item.summary}} ({{item.recommendation}})",
+        "acceptance": [
+          "Vulnerability remediated and verification passes"
+        ],
+        "verify": "{{inputs.verify_cmd}}",
+        "review_roles": ["reviewer"]
+      }
+    }
+  ]
+}

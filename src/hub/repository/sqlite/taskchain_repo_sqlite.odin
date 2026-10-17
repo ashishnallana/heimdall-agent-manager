@@ -134,6 +134,19 @@ taskchain_list_chains_by_owner_sqlite :: proc(ctx: rawptr, owner_user_id: domain
 
 taskchain_save_chain_sqlite :: proc(ctx: rawptr, chain: domain.Task_Chain) -> (domain.Task_Chain, bool, domain.Domain_Error) {
 	impl := (^Taskchain_Repo_SQLite)(ctx)
+	existing, exists, _ := taskchain_get_chain_sqlite(ctx, chain.chain_id)
+	if exists && existing.workflow_snapshot_json != "" {
+		if chain.workflow_snapshot_json != existing.workflow_snapshot_json {
+			return domain.Task_Chain{}, false, domain.domain_error(.Conflict, "workflow_snapshot_json is immutable", `{"code":"workflow_snapshot_immutable"}`)
+		}
+		stmt: sqlite3_stmt = nil
+		query := "UPDATE task_chains SET title=?, description=?, publish_state=?, status=?, kind=?, coordinator_agent_instance_id=?, workflow_def_ref=?, defaults_json=?, updated_at=?, published_at=?, completed_at=?, last_activity_at=?, last_title_nudge_at=?, title_source=?, is_pinned=?, pinned_at=? WHERE chain_id=?;"
+		if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return domain.Task_Chain{}, false, domain.domain_error(.Internal_Error, "failed to prepare chain update")
+		defer sqlite3_finalize(stmt)
+		bind_text(stmt, 1, chain.title); bind_text(stmt, 2, chain.description); bind_text(stmt, 3, publish_state_string(chain.publish_state)); bind_text(stmt, 4, chain_status_string(chain.status)); bind_text(stmt, 5, chain.kind); bind_text(stmt, 6, chain.coordinator_agent_instance_id); bind_text(stmt, 7, chain.workflow_def_ref); bind_text(stmt, 8, json_or_empty_object(chain.defaults_json)); bind_text(stmt, 9, chain.updated_at); bind_text(stmt, 10, chain.published_at); bind_text(stmt, 11, chain.completed_at); bind_text(stmt, 12, chain.last_activity_at); bind_text(stmt, 13, chain.last_title_nudge_at); bind_text(stmt, 14, normalize_title_source(chain.title_source)); sqlite3_bind_int(stmt, 15, 1 if chain.is_pinned else 0); bind_text(stmt, 16, chain.pinned_at); bind_text(stmt, 17, string(chain.chain_id))
+		if sqlite3_step(stmt) != SQLITE_DONE do return domain.Task_Chain{}, false, domain.domain_error(.Conflict, "task chain could not be saved")
+		return chain, true, domain.Domain_Error{}
+	}
 	stmt: sqlite3_stmt = nil
 	query := "INSERT INTO task_chains (chain_id, owner_user_id, title, description, publish_state, status, kind, coordinator_agent_instance_id, workflow_def_ref, workflow_snapshot_json, defaults_json, created_at, updated_at, published_at, completed_at, last_activity_at, last_title_nudge_at, title_source, is_pinned, pinned_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(chain_id) DO UPDATE SET title=excluded.title, description=excluded.description, publish_state=excluded.publish_state, status=excluded.status, kind=excluded.kind, coordinator_agent_instance_id=excluded.coordinator_agent_instance_id, workflow_def_ref=excluded.workflow_def_ref, workflow_snapshot_json=excluded.workflow_snapshot_json, defaults_json=excluded.defaults_json, updated_at=excluded.updated_at, published_at=excluded.published_at, completed_at=excluded.completed_at, last_activity_at=excluded.last_activity_at, last_title_nudge_at=excluded.last_title_nudge_at, title_source=excluded.title_source, is_pinned=excluded.is_pinned, pinned_at=excluded.pinned_at;"
 	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return domain.Task_Chain{}, false, domain.domain_error(.Internal_Error, "failed to prepare chain save")

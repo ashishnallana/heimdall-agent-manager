@@ -93,7 +93,8 @@ main :: proc() {
 		case "bridge", "bridges", "agents", "task-chain", "task-chains",
 		     "task", "tasks", "chat", "chats", "artifact", "artifacts",
 		     "memory", "cards", "card", "action", "actions", "context", "search", "shell",
-		     "issue", "issues", "project", "projects", "lease", "review", "verify":
+		     "issue", "issues", "project", "projects", "lease", "review", "verify",
+		     "workflow", "workflows":
 			ctl_agent_mode(cmd[:], os.args)
 			return
 		}
@@ -103,9 +104,14 @@ main :: proc() {
 	// context (so `ham-ctl task --help` documents the agent surface).
 	if has_flag(os.args, "--help") || has_flag(os.args, "-h") {
 		switch cmd[0] {
-		case "bridge", "bridges", "agents", "task-chain", "task-chains", "task", "tasks", "chat", "chats", "artifact", "artifacts", "memory", "cards", "card", "action", "actions", "shell", "issue", "issues", "project", "projects", "lease", "review", "verify":
+		case "bridge", "bridges", "agents", "task-chain", "task-chains", "task", "tasks", "chat", "chats", "artifact", "artifacts", "memory", "cards", "card", "action", "actions", "shell", "issue", "issues", "project", "projects", "lease", "review", "verify", "workflow", "workflows":
 			print_agent_help(cmd[:]); return
 		}
+	}
+
+	if cmd[0] == "workflow" || cmd[0] == "workflows" {
+		ctl_workflow_user_mode(cmd[:], os.args)
+		return
 	}
 
 	// User-mode (no agent context): legacy hub-scoped task/chain commands.

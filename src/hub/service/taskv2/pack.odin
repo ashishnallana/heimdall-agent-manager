@@ -96,6 +96,9 @@ build_pack_json :: proc(svc: ^Service, chain: domain.Task_Chain, task: domain.Ta
 	json_str(&c, "summary", summary)
 	json_raw(&o, "chain", json_end(&c))
 	json_str(&o, "chain_summary", summary)
+	if task.stage_key != "" {
+		json_raw(&o, "workflow_stage", workflow_stage_pack_json(svc, chain, task))
+	}
 
 	json_raw(&o, "inputs", resolve_brief_inputs_json(svc, task))
 

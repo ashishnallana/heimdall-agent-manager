@@ -186,6 +186,22 @@ bridge_agent_route :: proc(method, params: string) -> Bridge_Agent_Route {
 		// {task_id, ref} with ref "#<event_id>" | "facet:<task>:<attempt>:<kind>".
 		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/task/fetch"}
 
+	// ---- workflow (M3b) ---------------------------------------------------
+	case "agent.workflow.templates", "agent.workflow.list":
+		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/workflow/templates"}
+	case "agent.workflow.define":
+		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/workflow/define"}
+	case "agent.workflow.run":
+		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/workflow/run"}
+	case "agent.workflow.status":
+		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/workflow/status"}
+	case "agent.workflow.output":
+		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/workflow/output"}
+	case "agent.workflow.retry":
+		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/workflow/retry"}
+	case "agent.workflow.cancel":
+		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/workflow/cancel"}
+
 	// ---- chat -------------------------------------------------------------
 	case "agent.chat.send":
 		// to == "user" -> send-to-user; else to is an agent-instance-id.
@@ -294,6 +310,9 @@ bridge_agent_method_allowed :: proc(method: string) -> bool {
 	     "agent.task.update", "agent.task.depend", "agent.task.comment", "agent.task.fetch",
 	     "agent.lease.next", "agent.lease.heartbeat", "agent.lease.submit", "agent.lease.handoff",
 	     "agent.lease.block", "agent.review.post",
+	     "agent.workflow.templates", "agent.workflow.list", "agent.workflow.define",
+	     "agent.workflow.run", "agent.workflow.status", "agent.workflow.output",
+	     "agent.workflow.retry", "agent.workflow.cancel",
 	     // chat + self/misc
 	     "agent.chat.send", "agent.chat.read",
 	     "agent.context.get", "agent.conversation.set_title",

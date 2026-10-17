@@ -100,6 +100,25 @@ bridge_lease_verbs_routed :: proc(t: ^testing.T) {
 	}
 }
 
+@(test)
+bridge_workflow_verbs_routed :: proc(t: ^testing.T) {
+	cases := [?][2]string{
+		{"agent.workflow.templates", "/api/v1/agent-actions/workflow/templates"},
+		{"agent.workflow.list", "/api/v1/agent-actions/workflow/templates"},
+		{"agent.workflow.define", "/api/v1/agent-actions/workflow/define"},
+		{"agent.workflow.run", "/api/v1/agent-actions/workflow/run"},
+		{"agent.workflow.status", "/api/v1/agent-actions/workflow/status"},
+		{"agent.workflow.output", "/api/v1/agent-actions/workflow/output"},
+		{"agent.workflow.retry", "/api/v1/agent-actions/workflow/retry"},
+		{"agent.workflow.cancel", "/api/v1/agent-actions/workflow/cancel"},
+	}
+	for c in cases {
+		r := bridge_agent_route(c[0], "{}")
+		testing.expectf(t, r.kind == .Envelope && r.path == c[1], "%s routes to %s (got %v %s)", c[0], c[1], r.kind, r.path)
+		testing.expectf(t, bridge_agent_method_allowed(c[0]), "%s allow-listed", c[0])
+	}
+}
+
 // bridge_taskv2_params_inject is the pure splice behind the lease enrichment.
 @(test)
 bridge_lease_params_inject :: proc(t: ^testing.T) {

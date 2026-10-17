@@ -33,6 +33,14 @@ M2_PATHS = {
     "agent.lease.block": "/api/v1/agent-actions/lease/block",
     "agent.review.post": "/api/v1/agent-actions/review/post",
     "agent.task.fetch": "/api/v1/agent-actions/task/fetch",
+    "agent.workflow.templates": "/api/v1/agent-actions/workflow/templates",
+    "agent.workflow.list": "/api/v1/agent-actions/workflow/templates",
+    "agent.workflow.define": "/api/v1/agent-actions/workflow/define",
+    "agent.workflow.run": "/api/v1/agent-actions/workflow/run",
+    "agent.workflow.status": "/api/v1/agent-actions/workflow/status",
+    "agent.workflow.output": "/api/v1/agent-actions/workflow/output",
+    "agent.workflow.retry": "/api/v1/agent-actions/workflow/retry",
+    "agent.workflow.cancel": "/api/v1/agent-actions/workflow/cancel",
 }
 
 
