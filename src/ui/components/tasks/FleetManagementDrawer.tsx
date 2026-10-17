@@ -353,6 +353,11 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
   const activeBridges = useMemo(() => {
     return (bridgesQuery.data?.bridges || []).filter((b: any) => !isRevokedBridge(b));
   }, [bridgesQuery.data?.bridges]);
+  // Bridge ids never surface in the drawer text; show the bridge's name.
+  const bridgeLabel = (bridgeId: string): string => {
+    const b: any = (bridgesQuery.data?.bridges || []).find((x: any) => String(x.id || x.bridge_id || '') === bridgeId);
+    return String(b?.name || b?.label || 'unknown bridge');
+  };
 
   const bridgeId = effectiveChainBridgeId(chainDetailQuery.data?.chain, allInstancesQuery.data?.instances || [], activeBridges);
 
@@ -1027,7 +1032,7 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
               const pendingParts: string[] = [];
               if (capacityModified) pendingParts.push(`capacity ${origCapacity ?? 0} to ${effectiveCapacity}`);
               if (rolesModified) pendingParts.push(`Roles: ${formatFleetRolesBadge(effectiveRoles)}`);
-              if (bridgeModified) pendingParts.push(`Bridge: ${effectiveBridgeId || 'inherit'}`);
+              if (bridgeModified) pendingParts.push(`Bridge: ${effectiveBridgeId ? bridgeLabel(effectiveBridgeId) : 'fleet default'}`);
               if (runtimeModified) pendingParts.push('Provider/model settings changed');
               if (minWarmModified) pendingParts.push(`Min warm: ${effectiveMinWarm}`);
               if (idleTtlModified) pendingParts.push(`Idle TTL: ${effectiveIdleTtl}s`);

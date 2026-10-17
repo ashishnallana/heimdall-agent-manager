@@ -59,15 +59,11 @@ export function useTaskActions(chainId: string, taskId: string, taskTitle = '') 
     // Titles let a brief_incomplete error name the task instead of its id.
     publish: () => run(() => publishTask({ chainId, taskId, taskTitles: taskTitle ? { [taskId]: taskTitle } : undefined }).unwrap()),
     approve: () => run(() => userReview({ chainId, taskId, verdict: 'approve' }).unwrap()),
+    // The caller must supply findings; an empty request-changes is not sent.
     requestChanges: (findings: string) =>
-      run(() =>
-        userReview({
-          chainId,
-          taskId,
-          verdict: 'request_changes',
-          findings: findings.trim() ? [findings.trim()] : ['Please address the review comments.'],
-        }).unwrap(),
-      ),
+      !findings.trim()
+        ? Promise.resolve(false)
+        : run(() => userReview({ chainId, taskId, verdict: 'request_changes', findings: [findings.trim()] }).unwrap()),
     answer: (note: string) => run(() => answerBlocker({ chainId, taskId, note }).unwrap()),
     reopen: () => run(() => reopenTask({ chainId, taskId }).unwrap()),
     cancel: () => run(() => cancelTask({ chainId, taskId }).unwrap()),

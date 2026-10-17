@@ -31,6 +31,8 @@ export const TASK_STATE_COLORS: Record<string, string> = {
 };
 
 export interface TaskBadge {
+  /** What the badge is about, so views can drop ones they show elsewhere. */
+  kind?: 'gate' | 'lease' | 'bridge' | 'attempt' | 'review' | 'blocked' | 'verified';
   label: string;
   tone?: 'accent' | 'ok' | 'warn' | 'danger' | 'info' | 'neutral';
   title?: string;
@@ -52,7 +54,7 @@ export function getTaskBadges(task: TaskWire, _chainFleets?: any[], nowMs: numbe
   const lease = (task.leases && task.leases.length > 0) ? task.leases[0] : null;
 
   if (task.kind === 'gate') {
-    badges.push({ label: 'gate', tone: 'accent', title: 'Human gate stage' });
+    badges.push({ kind: 'gate', label: 'gate', tone: 'accent', title: 'Human gate stage' });
   }
 
   if (state === 'in_progress' && lease) {
@@ -61,12 +63,14 @@ export function getTaskBadges(task: TaskWire, _chainFleets?: any[], nowMs: numbe
     const holder = (lease.holder_instance_id && names.instance(lease.holder_instance_id)) || GENERIC_AGENT_LABEL;
     const tone = leftMins <= 3 ? 'danger' : leftMins <= 5 ? 'warn' : 'accent';
     badges.push({
+      kind: 'lease',
       label: `${holder} · ${leftMins}m left`,
       tone,
       title: `Lease expires in ${leftMins} minutes (held by ${holder})`,
     });
     if (lease.bridge_id || task.bridge_id) {
       badges.push({
+        kind: 'bridge',
         label: names.bridge(lease.bridge_id || task.bridge_id),
         tone: 'neutral',
         title: `Bridge: ${names.bridge(lease.bridge_id || task.bridge_id)}`,
@@ -74,6 +78,7 @@ export function getTaskBadges(task: TaskWire, _chainFleets?: any[], nowMs: numbe
     }
   } else if (task.bridge_id) {
     badges.push({
+      kind: 'bridge',
       label: names.bridge(task.bridge_id),
       tone: 'neutral',
       title: `Pinned bridge: ${names.bridge(task.bridge_id)}`,
@@ -82,6 +87,7 @@ export function getTaskBadges(task: TaskWire, _chainFleets?: any[], nowMs: numbe
 
   if (task.attempt_no > 1) {
     badges.push({
+      kind: 'attempt',
       label: `attempt ${task.attempt_no}/5`,
       tone: task.attempt_no >= 4 ? 'warn' : 'neutral',
       title: `Attempt ${task.attempt_no} of 5`,
@@ -92,12 +98,14 @@ export function getTaskBadges(task: TaskWire, _chainFleets?: any[], nowMs: numbe
   if (state === 'in_review') {
     if (task.requires_user_approval) {
       badges.push({
+        kind: 'review',
         label: reviewRoles.length ? `${reviewRoles.length} reviews + you` : 'awaiting you',
         tone: 'accent',
         title: 'Awaiting review decision',
       });
     } else if (reviewRoles.length > 0) {
       badges.push({
+        kind: 'review',
         label: `reviews: ${reviewRoles.join(', ')}`,
         tone: 'info',
         title: 'Waiting for reviewer role decisions',
@@ -106,15 +114,20 @@ export function getTaskBadges(task: TaskWire, _chainFleets?: any[], nowMs: numbe
   }
 
   if (task.blocked_on) {
+    // Same rule as taskActions.blockedOnYou(): only a human/user blocker is on you.
+    const waitingKind = String((task.blocked_on as any).kind || '');
+    const onYou = !waitingKind || waitingKind === 'human' || waitingKind === 'user';
     badges.push({
-      label: 'Blocked on you',
-      tone: 'danger',
-      title: String(task.blocked_on.reason || 'Blocked waiting on human answer'),
+      kind: 'blocked',
+      label: onYou ? 'Blocked on you' : `Blocked: waiting on ${waitingKind.replace(/_/g, ' ')}`,
+      tone: onYou ? 'danger' : 'warn',
+      title: String(task.blocked_on.reason || (onYou ? 'Waiting for your answer' : 'Waiting on another task or system')),
     });
   }
 
   if (state === 'done') {
     badges.push({
+      kind: 'verified',
       label: 'Verified',
       tone: 'ok',
       title: 'Task completed and verified',
@@ -134,10 +147,10 @@ export function getTaskStatusLines(task: TaskWire, _chainFleets?: any[], nowMs: 
       const hardMs = lease.hard_deadline_at ? new Date(lease.hard_deadline_at).getTime() : (nowMs + 60 * 60000);
       const leftMins = Math.max(0, Math.round((expiresMs - nowMs) / 60000));
       const hardMins = Math.max(0, Math.round((hardMs - nowMs) / 60000));
-      const holder = lease.holder_instance_id || 'worker';
+      const holder = (lease.holder_instance_id && names.instance(lease.holder_instance_id)) || 'An agent';
       return [
-        `${holder} is working · attempt ${task.attempt_no || 1}/5 · lease ${leftMins} min left`,
-        `hard cap in ${hardMins} min · auto-extends on active agent calls`,
+        `${holder} ${inProgressSentenceRest(leftMins)}`,
+        `attempt ${task.attempt_no || 1} of 5 · hard limit in ${hardMins}m`,
       ];
     }
     return [
@@ -294,4 +307,21 @@ export function uiToneForBadge(tone: TaskBadge['tone']): 'neutral' | 'info' | 's
 export function uiToneForPriority(priority: string | undefined): 'danger' | 'warning' | 'neutral' {
   const p = String(priority || '').toLowerCase();
   return p === 'p0' || p === 'urgent' ? 'danger' : p === 'p1' || p === 'high' ? 'warning' : 'neutral';
+}
+
+/** "is working, 12m left": the in-progress sentence after the holder's name. */
+export function inProgressSentenceRest(leftMins: number): string {
+  return `is working, ${leftMins}m left`;
+}
+
+/**
+ * The work-lease holder of an in-progress task and its minutes left, so a view
+ * can render the holder with <HolderName> when names.instance() cannot name it.
+ */
+export function workLeaseHolder(task: TaskWire, nowMs: number = Date.now()): { instanceId: string; leftMins: number } | null {
+  if (normalizeTaskState(task.state) !== 'in_progress') return null;
+  const lease: any = (task.leases || []).find((l: any) => (l?.kind || 'work') === 'work');
+  if (!lease?.holder_instance_id) return null;
+  const expiresMs = lease.expires_at ? new Date(lease.expires_at).getTime() : nowMs + 15 * 60000;
+  return { instanceId: String(lease.holder_instance_id), leftMins: Math.max(0, Math.round((expiresMs - nowMs) / 60000)) };
 }

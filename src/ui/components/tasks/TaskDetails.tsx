@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { Badge, Button, Select, Text, Textarea } from '@ui';
+import { Badge, Button, Icon, Select, Text, Textarea } from '@ui';
 import type { TaskWire } from '../../api/taskWire';
 import type { TaskChainFleet } from '../../api/endpoints/taskChains';
 import { useListBridgesQuery } from '../../api/endpoints/bridgeSupport';
@@ -27,18 +27,51 @@ export interface TaskDetailsProps {
 
 const TIMELINE_PREVIEW = 6;
 
-/** A titled block inside an expanded card: a heading, no border, no nested card. */
-function Block({ title, aside, children, debugId }: { title: string; aside?: React.ReactNode; children: React.ReactNode; debugId?: string }) {
-  return (
-    <div data-debug-id={debugId} className="space-y-1.5">
-      <div className="flex items-center justify-between gap-2">
-        <Text as="h4" role="overline" tone="muted">
-          {title}
-        </Text>
-        {aside}
+/**
+ * A titled block inside an expanded card: a heading, no border, no nested card.
+ * Decisions (Your review, Answer) stay open; the informational blocks are
+ * collapsible and closed by default (plan REQ-UI-8), so an expanded card stays
+ * calm until you open what you want to read.
+ */
+function Block({
+  title,
+  aside,
+  children,
+  debugId,
+  collapsible = false,
+}: {
+  title: string;
+  aside?: React.ReactNode;
+  children: React.ReactNode;
+  debugId?: string;
+  collapsible?: boolean;
+}) {
+  if (!collapsible) {
+    return (
+      <div data-debug-id={debugId} className="space-y-1.5">
+        <div className="flex items-center justify-between gap-2">
+          <Text as="h4" role="overline" tone="muted">
+            {title}
+          </Text>
+          {aside}
+        </div>
+        {children}
       </div>
-      {children}
-    </div>
+    );
+  }
+  return (
+    <details data-debug-id={debugId} className="group space-y-1.5">
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-2 [&::-webkit-details-marker]:hidden">
+        <span className="inline-flex items-center gap-1">
+          <Icon name="chevron-right" size={12} className="text-muted transition-transform group-open:rotate-90" />
+          <Text as="h4" role="overline" tone="muted">
+            {title}
+          </Text>
+        </span>
+        {aside}
+      </summary>
+      <div className="space-y-1.5 pl-4">{children}</div>
+    </details>
   );
 }
 
@@ -148,7 +181,7 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
           <Textarea
             value={findingsText}
             onChange={setFindingsText}
-            placeholder="Findings (needed when you request changes)"
+            placeholder="What needs to change (required to request changes)"
             rows={2}
             size="sm"
           />
@@ -159,7 +192,8 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
             <Button
               size="sm"
               variant="secondary"
-              disabled={actions.busy}
+              disabled={actions.busy || !findingsText.trim()}
+              title={findingsText.trim() ? undefined : 'Say what needs to change first'}
               onClick={async () => {
                 if (await actions.requestChanges(findingsText)) setFindingsText('');
               }}
@@ -189,7 +223,7 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
         </Block>
       )}
 
-      <Block title="Brief">
+      <Block title="Brief" collapsible debugId="task-details-brief">
         {task.brief?.goal || task.description ? (
           <p className="leading-relaxed text-primary">{task.brief?.goal || task.description}</p>
         ) : (
@@ -221,7 +255,7 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
         )}
       </Block>
 
-      <Block title="Who works on it">
+      <Block title="Who works on it" collapsible debugId="task-details-people">
         <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
           <dt className="text-muted">Assignee</dt>
           <dd data-debug-id="task-detail-assignee" className="text-primary">
@@ -255,14 +289,18 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
       {verify && (
         <Block
           title="Verify"
+          collapsible
+          debugId="task-details-verify"
           aside={
             <div className="flex items-center gap-2">
               <Badge tone={verify.exit_code === 0 ? 'success' : 'danger'}>
                 {verify.exit_code === 0 ? 'Passed' : `Failed (exit ${verify.exit_code})`}
               </Badge>
-              <Button size="sm" variant="ghost" disabled={actions.busy} onClick={() => void actions.rerunVerify()}>
-                Re-run
-              </Button>
+              {state !== 'done' && state !== 'cancelled' && (
+                <Button size="sm" variant="ghost" disabled={actions.busy} onClick={() => void actions.rerunVerify()}>
+                  Re-run
+                </Button>
+              )}
             </div>
           }
         >
@@ -278,14 +316,14 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
       )}
 
       {handoff && (handoff.summary || handoff.next_steps) && !awaitingYourReview(task) && (
-        <Block title="Latest handoff" aside={<Text role="caption" tone="faint">attempt {handoff.attempt_no || attemptNo}</Text>}>
+        <Block title="Latest handoff" collapsible debugId="task-details-handoff" aside={<Text role="caption" tone="faint">attempt {handoff.attempt_no || attemptNo}</Text>}>
           {handoff.summary && <p className="leading-relaxed text-primary">{handoff.summary}</p>}
           {handoff.next_steps && <p className="leading-relaxed text-muted">Next: {handoff.next_steps}</p>}
         </Block>
       )}
 
       {changedFiles.length > 0 && (
-        <Block title="Changes" aside={<Text role="caption" tone="faint">{changedFiles.length} files</Text>}>
+        <Block title="Changes" collapsible debugId="task-details-changes" aside={<Text role="caption" tone="faint">{changedFiles.length} files</Text>}>
           <div className="flex flex-wrap gap-1">
             {changedFiles.map((file) => (
               <Button
@@ -308,7 +346,7 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
       )}
 
       {output && (
-        <Block title="Output">
+        <Block title="Output" collapsible debugId="task-details-output">
           <FacetText value={output.summary || output.text || output} />
           <Text role="caption" tone="faint">
             CLI: ham-ctl task fetch output:{taskId}
@@ -317,13 +355,15 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
       )}
 
       {findings && (
-        <Block title="Review findings">
+        <Block title="Review findings" collapsible debugId="task-details-findings">
           <Findings value={findings} />
         </Block>
       )}
 
       <Block
         title="Timeline"
+        collapsible
+        debugId="task-details-timeline"
         aside={
           events.length > TIMELINE_PREVIEW ? (
             <Button size="sm" variant="ghost" onClick={() => setShowAllEvents((v) => !v)}>
@@ -343,14 +383,22 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
                 <span className="shrink-0 whitespace-nowrap font-mono text-[11px] text-faint">
                   {e.ts_ms ? new Date(e.ts_ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}
                 </span>
-                <span className="min-w-0 text-primary">{describeTaskEvent(e, names).text}</span>
+                <details className="min-w-0 flex-1">
+                  <summary className="cursor-pointer list-none text-primary [&::-webkit-details-marker]:hidden">
+                    {describeTaskEvent(e, names).text}
+                    <span className="ml-1.5 text-[11px] text-faint underline decoration-dotted">Details</span>
+                  </summary>
+                  <pre className="mt-1 max-h-40 overflow-auto rounded-md bg-canvas p-2 font-mono text-[11px] text-muted">
+                    {JSON.stringify({ kind: e.kind, actor: e.actor_kind, ...(e.payload && typeof e.payload === 'object' ? { payload: e.payload } : {}) }, null, 2)}
+                  </pre>
+                </details>
               </li>
             ))}
           </ol>
         )}
       </Block>
 
-      <Block title="Comment">
+      <Block title="Comment" collapsible debugId="task-details-comment">
         <Textarea value={commentText} onChange={setCommentText} placeholder="Leave a note on this task" rows={2} size="sm" />
         <div>
           <Button

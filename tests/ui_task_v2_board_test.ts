@@ -217,8 +217,10 @@ test('getTaskStatusLines generates human-readable status sentences for each stat
     ],
   });
   const [line1, line2] = getTaskStatusLines(taskInProg, [], nowMs);
-  assert.match(line1, /worker-agent is working · attempt 2\/5 · lease 10 min left/);
-  assert.match(line2, /hard cap in 45 min · auto-extends on active agent calls/);
+  // Without a names resolver the holder is "An agent", never the raw instance id.
+  assert.equal(line1, 'An agent is working, 10m left');
+  assert.equal(line2, 'attempt 2 of 5 · hard limit in 45m');
+  assert.ok(!line1.includes('worker-agent'));
 
   // In review gate
   const gateTask = makeTask({ kind: 'gate', state: 'in_review' });

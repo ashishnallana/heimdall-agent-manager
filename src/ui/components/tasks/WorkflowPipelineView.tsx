@@ -17,6 +17,9 @@ export interface WorkflowPipelineViewProps {
   expandedTaskId?: string | null;
   onToggleTask: (taskId: string) => void;
   onSelectTask?: (taskId: string) => void;
+  /** The card to scroll into view once mounted; cleared through onScrolled. */
+  scrollTaskId?: string | null;
+  onScrolled?: () => void;
   /** Chain-level buttons (e.g. Fleet) shown in the header. */
   actions?: React.ReactNode;
   names?: TaskNames;
@@ -64,6 +67,8 @@ export const WorkflowPipelineView: React.FC<WorkflowPipelineViewProps> = ({
   expandedTaskId,
   onToggleTask,
   onSelectTask,
+  scrollTaskId,
+  onScrolled,
   actions,
   names = EMPTY_TASK_NAMES,
   className = '',
@@ -190,6 +195,8 @@ export const WorkflowPipelineView: React.FC<WorkflowPipelineViewProps> = ({
                       expanded={expandedTaskId === task.task_id}
                       onToggle={onToggleTask}
                       onSelectTask={onSelectTask}
+                      scrollIntoView={scrollTaskId === task.task_id}
+                      onScrolled={onScrolled}
                       chainFleets={chainFleets}
                       names={names}
                     />

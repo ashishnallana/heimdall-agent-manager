@@ -133,3 +133,34 @@ test('badges and status lines name the holder, bridge and dependencies', () => {
   const [, line2] = getTaskStatusLines(waiting, [], now, names);
   assert.equal(line2, 'needs "Add refresh_tokens table"');
 });
+
+test('the in-progress sentence names the holder and never prints an instance id', () => {
+  const now = Date.parse('2026-10-17T05:00:00Z');
+  const running = (holder: string) =>
+    ({
+      task_id: 'task_run',
+      chain_id: 'chain_x',
+      title: 'Running',
+      state: 'in_progress',
+      attempt_no: 2,
+      leases: [{ kind: 'work', holder_instance_id: holder, expires_at: '2026-10-17T05:12:00Z', hard_deadline_at: '2026-10-17T05:40:00Z' }],
+    }) as unknown as TaskWire;
+  const [named, detail] = getTaskStatusLines(running('inst_member02'), [], now, names);
+  assert.equal(named, 'Backend Dev is working, 12m left');
+  assert.equal(detail, 'attempt 2 of 5 · hard limit in 40m');
+  const [unknown] = getTaskStatusLines(running('inst_fleet99'), [], now, names);
+  assert.equal(unknown, 'An agent is working, 12m left');
+  for (const line of [named, detail, unknown]) assert.ok(!RAW_ID.test(line), line);
+});
+
+test('badges carry a kind, and "Blocked on you" only for a human blocker', () => {
+  const now = Date.parse('2026-10-17T05:00:00Z');
+  const base = { task_id: 't', chain_id: 'c', title: 'T', state: 'backlog', attempt_no: 3, bridge_id: 'brg_dawn01' } as any;
+  const onYou = getTaskBadges({ ...base, blocked_on: { kind: 'human', reason: 'Which DB?' } } as TaskWire, [], now, names);
+  assert.ok(onYou.some((b) => b.kind === 'blocked' && b.label === 'Blocked on you' && b.tone === 'danger'));
+  const onTask = getTaskBadges({ ...base, blocked_on: { kind: 'task_output' } } as TaskWire, [], now, names);
+  assert.ok(onTask.some((b) => b.kind === 'blocked' && b.label === 'Blocked: waiting on task output' && b.tone === 'warn'));
+  assert.ok(onTask.some((b) => b.kind === 'bridge' && b.label === 'dawnstar'));
+  assert.ok(onTask.some((b) => b.kind === 'attempt'));
+  for (const b of [...onYou, ...onTask]) assert.ok(b.kind, `badge without kind: ${b.label}`);
+});

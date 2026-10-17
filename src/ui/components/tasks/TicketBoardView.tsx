@@ -17,6 +17,9 @@ export interface TicketBoardViewProps {
   onToggleTask: (taskId: string) => void;
   /** Opens a task by id (dependency links): expands it and scrolls to it. */
   onSelectTask?: (taskId: string) => void;
+  /** The card to scroll into view once mounted; cleared through onScrolled. */
+  scrollTaskId?: string | null;
+  onScrolled?: () => void;
   onNewTask?: () => void;
   onOpenFleetDrawer?: () => void;
   /** Shown while the chain itself is still a draft (plan REQ-UI-9). */
@@ -56,6 +59,8 @@ export const TicketBoardView: React.FC<TicketBoardViewProps> = ({
   expandedTaskId,
   onToggleTask,
   onSelectTask,
+  scrollTaskId,
+  onScrolled,
   onNewTask,
   onOpenFleetDrawer,
   onPublishChain,
@@ -81,6 +86,8 @@ export const TicketBoardView: React.FC<TicketBoardViewProps> = ({
       expanded={expandedTaskId === task.task_id}
       onToggle={onToggleTask}
       onSelectTask={onSelectTask}
+      scrollIntoView={scrollTaskId === task.task_id}
+      onScrolled={onScrolled}
       chainFleets={chainFleets}
       names={names}
     />

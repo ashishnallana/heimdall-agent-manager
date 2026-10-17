@@ -99,12 +99,13 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
   const [publishChain, publishChainState] = usePublishTaskChainMutation();
   const [publishError, setPublishError] = useState('');
 
+  // The card scrolls itself into view once mounted (TaskCard scrollIntoView), so
+  // this also works on a cold deep link while the chain is still loading.
+  const [scrollTaskId, setScrollTaskId] = useState<string | null>(focusTaskId || null);
+  const clearScroll = React.useCallback(() => setScrollTaskId(null), []);
   const expandTask = (taskId: string) => {
     setExpandedTaskId(taskId);
-    // Let the card render expanded, then bring it into view.
-    requestAnimationFrame(() => {
-      document.querySelector(`[data-debug-id="task-card-${taskId}"]`)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-    });
+    setScrollTaskId(taskId);
   };
   const toggleTask = (taskId: string) => setExpandedTaskId((cur) => (cur === taskId ? null : taskId));
 
@@ -204,6 +205,8 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
             expandedTaskId={openTaskId}
             onToggleTask={toggleTask}
             onSelectTask={expandTask}
+            scrollTaskId={scrollTaskId}
+            onScrolled={clearScroll}
             actions={fleetButton}
           />
         ) : (
@@ -215,6 +218,8 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
             expandedTaskId={openTaskId}
             onToggleTask={toggleTask}
             onSelectTask={expandTask}
+            scrollTaskId={scrollTaskId}
+            onScrolled={clearScroll}
             onNewTask={() => setShowNewTaskModal(true)}
             onOpenFleetDrawer={() => setShowFleetDrawer(true)}
             onPublishChain={chainIsDraft ? handlePublishChain : undefined}

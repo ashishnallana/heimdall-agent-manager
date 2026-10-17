@@ -1,5 +1,5 @@
 import React from 'react';
-import { Badge, Button, Icon, IconButton, Menu, StatusPill, Text } from '@ui';
+import { Badge, Button, Icon, IconButton, Link, Menu, StatusPill, Text } from '@ui';
 import { TaskWire } from '../../api/taskWire';
 import {
   TASK_STATE_LABELS,
@@ -7,8 +7,10 @@ import {
   getTaskBadges,
   getTaskPeople,
   getTaskStatusLines,
+  inProgressSentenceRest,
   normalizeTaskState,
   uiToneForBadge,
+  workLeaseHolder,
   uiToneForPriority,
 } from './taskV2Types';
 import { TASK_ACTION_LABELS, getTaskActions, isDraft, type TaskActionId } from './taskActions';
@@ -27,6 +29,9 @@ export interface TaskCardProps {
   onSelectTask?: (taskId: string) => void;
   chainFleets?: any[];
   names?: TaskNames;
+  /** Scroll this card into view once it is mounted (deep links, dependency jumps). */
+  scrollIntoView?: boolean;
+  onScrolled?: () => void;
   className?: string;
 }
 
@@ -44,17 +49,27 @@ export const TaskCard: React.FC<TaskCardProps> = ({
   onSelectTask,
   chainFleets,
   names = EMPTY_TASK_NAMES,
+  scrollIntoView = false,
+  onScrolled,
   className = '',
 }) => {
+  const cardRef = React.useRef<HTMLElement | null>(null);
+  // Runs after the card exists in the DOM, so a cold deep link (the chain still
+  // loading when the route is read) scrolls once its tasks arrive.
+  React.useEffect(() => {
+    if (!scrollIntoView || !cardRef.current) return;
+    cardRef.current.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    onScrolled?.();
+  }, [scrollIntoView, onScrolled]);
   const state = normalizeTaskState(task.state);
   const isGate = task.kind === 'gate';
   const now = Date.now();
   const [sentence, detail] = getTaskStatusLines(task, chainFleets, now, names);
-  // The holder and bridge already show in the people line, so the lease badge
-  // keeps only its time left and the bridge badge is dropped.
-  const badges = getTaskBadges(task, chainFleets, now, names)
-    .filter((b) => b.label !== names.bridge(task.bridge_id || ''))
-    .map((b) => (b.label.endsWith('m left') ? { ...b, label: b.label.split(' · ').pop() || b.label } : b));
+  // The holder, time left and bridge already show in the status sentence and the
+  // people line, so those badges are dropped here.
+  const badges = getTaskBadges(task, chainFleets, now, names).filter((b) => b.kind !== 'lease' && b.kind !== 'bridge');
+  const holderLease = workLeaseHolder(task, now);
+  const holderUnnamed = Boolean(holderLease && !names.instance(holderLease.instanceId));
   const people = getTaskPeople(task, chainFleets);
   const actions = useTaskActions(chainId, task.task_id, task.title);
   const { primary, more } = getTaskActions(task);
@@ -99,6 +114,7 @@ export const TaskCard: React.FC<TaskCardProps> = ({
 
   return (
     <article
+      ref={cardRef}
       data-debug-id={`task-card-${task.task_id}`}
       data-id={task.task_id}
       aria-label={task.title}
@@ -143,7 +159,15 @@ export const TaskCard: React.FC<TaskCardProps> = ({
 
         {/* Row 2: what is happening, in one sentence */}
         <Text as="p" role="caption" tone="muted" data-debug-id={`task-card-status-${task.task_id}`}>
-          <span className="text-primary">{sentence}</span>
+          <span className="text-primary">
+            {holderUnnamed && holderLease ? (
+              <>
+                <HolderName instanceId={holderLease.instanceId} names={names} /> {inProgressSentenceRest(holderLease.leftMins)}
+              </>
+            ) : (
+              sentence
+            )}
+          </span>
           {detail ? ` · ${detail}` : ''}
         </Text>
 
@@ -166,7 +190,22 @@ export const TaskCard: React.FC<TaskCardProps> = ({
             </span>
             {deps.length > 0 && (
               <span>
-                waits for: <span className="text-primary">{deps.map((d) => names.task(d)).join(', ')}</span>
+                waits for:{' '}
+                {deps.map((d, i) => (
+                  <React.Fragment key={d}>
+                    {i > 0 ? ', ' : ''}
+                    <Link
+                      href={`#/chains/${encodeURIComponent(chainId)}/tasks/${encodeURIComponent(d)}`}
+                      onClick={(e) => {
+                        if (!onSelectTask) return;
+                        e.preventDefault();
+                        onSelectTask(d);
+                      }}
+                    >
+                      {names.task(d)}
+                    </Link>
+                  </React.Fragment>
+                ))}
               </span>
             )}
             {task.bridge_id && (
