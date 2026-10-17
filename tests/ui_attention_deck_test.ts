@@ -635,29 +635,16 @@ test('deck: quick replies sit outside the scrolling card, numbered; number keys 
   });
 });
 
-test('deck: Message coordinator loads the chain on demand, then sends to the coordinator and moves on', async () => {
-  const routes = {
-    '/task-chains/chain_secret_id': { chain_id: 'chain_secret_id', coordinator_agent_instance_id: 'inst_coord', members: [{ agent_instance_id: 'inst_coord', role: 'coordinator', display_name: 'soloist #19' }] },
-    '/user-rpc': { message_id: 'msg_new' },
-  };
-  await withDeck([taskItem('a'), taskItem('b')], async ({ q, act, text, hits, holdRoutes, releaseRoutes }) => {
-    assert.equal(hits.filter((h) => h.includes('/task-chains/chain_secret_id') && !h.includes('/tasks/')).length, 0, 'nothing fetched before it is used');
-    holdRoutes();
-    await act(async () => { q('[data-debug-id="attention-action-message-coordinator"]').click(); });
+test('deck: task cards have no Message coordinator action, and m does nothing there', async () => {
+  await withDeck([taskItem('a')], async ({ q, act, dom, text, hits }) => {
+    assert.ok(q('[data-debug-id="attention-deck-dock"]'), 'dock is rendered');
+    assert.equal(q('[data-debug-id="attention-action-message-coordinator"]'), null);
+    assert.doesNotMatch(text(), /Message coordinator/);
+    await act(async () => { dom.window.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'm', bubbles: true })); });
     await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
-    assert.ok(q('[data-debug-id="attention-coordinator-loading"]'), 'loader while the chain loads');
-    releaseRoutes();
-    await act(async () => { await new Promise((r) => setTimeout(r, 40)); });
-    assert.match(text(), /Send to soloist #19/);
-    assert.doesNotMatch(text(), /inst_coord|chain_secret/, 'no ids rendered');
-    const input = q('[data-debug-id="attention-coordinator-input"]');
-    await act(async () => { typeInto(input, 'Can you split this task?'); });
-    await act(async () => { q('[data-debug-id="attention-coordinator-submit"]').click(); });
-    await act(async () => { await new Promise((r) => setTimeout(r, 40)); });
-    assert.ok(hits.some((h) => h === 'POST /user-rpc' || h.endsWith('/user-rpc')), 'sent through the agent message path');
-    assert.match(text(), /Message sent to soloist #19/);
-    assert.match(text(), /Review b/, 'moves on to the next card');
-  }, { routes });
+    assert.equal(q('[data-debug-id="attention-coordinator-input"]'), null, 'no composer opens');
+    assert.equal(hits.filter((h) => h.includes('/task-chains/chain_secret_id') && !h.includes('/tasks/')).length, 0, 'no chain fetch');
+  });
 });
 
 test('model: memory phrasing, expiry, live tab order', () => {
