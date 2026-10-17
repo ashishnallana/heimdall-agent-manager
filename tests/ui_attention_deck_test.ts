@@ -39,13 +39,25 @@ function messageItem(id: string, extra: any = {}): any {
   };
 }
 
+function memoryItem(id: string, extra: any = {}): any {
+  return {
+    card_id: `crd_mem_mem_secret_${id}`, kind: 'memory', provider: 'memory_proposal', reason: 'memory_proposal', urgency: 'info', status: 'pending',
+    attention_since: '2026-10-16T11:00:00Z', title: `Remember ${id}`, rationale: 'Waiting on your approval', primary_op: 'memory.approve',
+    operations: [{ op: 'memory.approve', label: 'Approve' }],
+    details: { type: 'expertise', title: `Remember ${id}`, description: '', body: '## Rule\n\nUse **CAS** writes.', expires_at: '2026-10-16T16:00:00Z', proposer_name: 'soloist #21', agent_ids: ['agt_secret'], project_ids: [], bridge_ids: [], template_ids: [] },
+    action_refs: { memory_id: `mem_secret_${id}`, agent_instance_id: 'inst_secret', chain_id: 'chain_secret_id' },
+    context: { chain_title: 'Attention deck rollout', agent_name: 'soloist #21', project_name: '', scope: { agents: ['codex-reviewer', 'soloist'], projects: [], bridges: [], templates: [] } },
+    ...extra,
+  };
+}
+
 // ---------------------------------------------------------------- view model
 
 test('model: visible items, per-tab counts, default tab, stepping, swipe', () => {
   const items = [taskItem('a'), taskItem('b'), messageItem('m')];
   const hidden = new Set(['crd_task_a']);
   assert.deepEqual(model.visibleItems(items, 'task', hidden).map((i: any) => i.card_id), ['crd_task_b']);
-  assert.deepEqual(model.tabCounts({ total: 3, older: 0, message: 1, task: 2, snoozed: 0 }, items, hidden), { message: 1, task: 1, snoozed: 0 });
+  assert.deepEqual(model.tabCounts({ total: 3, older: 0, message: 1, task: 2, memory: 0, snoozed: 0 }, items, hidden), { message: 1, task: 1, memory: 0, snoozed: 0 });
   assert.equal(model.defaultTab({ message: 0, task: 2 }), 'task');
   assert.equal(model.defaultTab({ message: 1, task: 2 }), 'message');
   assert.equal(model.defaultTab({ message: 0, task: 0 }), 'message');
@@ -164,8 +176,8 @@ test('prefs: range persists, falls back to 24h on junk or broken storage', () =>
 });
 
 test('api: counts and items are normalised defensively', () => {
-  assert.deepEqual(api.normalizeAttentionCounts({ total: 3, older: -1, message: '2', task: 1.7 }), { total: 3, older: 0, message: 0, task: 1, snoozed: 0 });
-  assert.deepEqual(api.normalizeAttentionCounts(null), { total: 0, older: 0, message: 0, task: 0, snoozed: 0 });
+  assert.deepEqual(api.normalizeAttentionCounts({ total: 3, older: -1, message: '2', task: 1.7 }), { total: 3, older: 0, message: 0, task: 1, memory: 0, snoozed: 0 });
+  assert.deepEqual(api.normalizeAttentionCounts(null), { total: 0, older: 0, message: 0, task: 0, memory: 0, snoozed: 0 });
   const items = api.normalizeAttentionItems([taskItem('a'), { card_id: 'x', kind: 'shell', details: {}, action_refs: {} }, null, { kind: 'task' }]);
   assert.deepEqual(items.map((i: any) => i.card_id), ['crd_task_a']);
 });
@@ -212,7 +224,7 @@ async function withDeck(initialItems: any[], run: (h: DeckHarness) => Promise<vo
     if (url.pathname.endsWith('/attention')) {
       if (gate) await gate;
       const live = items.filter((i) => !i.snoozed);
-      const counts = { total: live.length, older: 1, message: live.filter((i) => i.kind === 'message').length, task: live.filter((i) => i.kind === 'task').length, snoozed: items.length - live.length };
+      const counts = { total: live.length, older: 1, message: live.filter((i) => i.kind === 'message').length, task: live.filter((i) => i.kind === 'task').length, memory: live.filter((i) => i.kind === 'memory').length, snoozed: items.length - live.length };
       return jsonResponse({ data: { since: '24h', counts, items } });
     }
     for (const [suffix, body] of Object.entries(opts.routes || {})) {
@@ -489,7 +501,7 @@ test('model: snoozed tab, hide keys, next live tab, wake time', () => {
   assert.deepEqual(model.visibleItems(items, 'task', new Set()).map((i: any) => i.card_id), ['crd_task_a'], 'snoozed cards stay out of live tabs');
   assert.equal(model.hideKey(snz), 'crd_task_z#snoozed@2026-10-17T09:00:00Z');
   assert.equal(model.hideKey(live), 'crd_task_a');
-  assert.deepEqual(model.tabCounts({ total: 2, older: 0, message: 1, task: 1, snoozed: 1 }, items, new Set(['crd_task_z#snoozed@2026-10-17T09:00:00Z'])), { message: 1, task: 1, snoozed: 0 });
+  assert.deepEqual(model.tabCounts({ total: 2, older: 0, message: 1, task: 1, memory: 0, snoozed: 1 }, items, new Set(['crd_task_z#snoozed@2026-10-17T09:00:00Z'])), { message: 1, task: 1, memory: 0, snoozed: 0 });
   assert.equal(model.nextLiveTab('message', { message: 0, task: 2, snoozed: 3 }), 'task');
   assert.equal(model.nextLiveTab('task', { message: 0, task: 0, snoozed: 3 }), null, 'never into Snoozed');
   assert.equal(model.nextLiveTab('snoozed', { message: 0, task: 1, snoozed: 0 }), 'task');
@@ -641,6 +653,54 @@ test('deck: Message coordinator loads the chain on demand, then sends to the coo
     assert.match(text(), /Message sent to soloist #19/);
     assert.match(text(), /Review b/, 'moves on to the next card');
   }, { routes });
+});
+
+test('model: memory phrasing, expiry, live tab order', () => {
+  assert.equal(model.memoryTypePhrase('fact'), 'a fact');
+  assert.equal(model.memoryTypePhrase('expertise'), 'an expertise');
+  assert.equal(model.memoryTypePhrase('episode'), 'an episode');
+  assert.equal(model.memoryTypePhrase('weird'), 'a memory');
+  assert.equal(model.expiryLine('2026-10-16T16:00:00Z', NOW), 'Expires in 4h');
+  assert.equal(model.expiryLine('2026-10-16T12:30:00Z', NOW), 'Expires in 30 min');
+  assert.equal(model.expiryLine('2026-10-20T12:00:00Z', NOW), '', 'far off: not shown');
+  assert.equal(model.reasonLine(memoryItem('m'), NOW), 'Waiting on your approval · 1h');
+  assert.equal(model.defaultTab({ message: 0, task: 0, memory: 2, snoozed: 1 }), 'memory');
+  assert.equal(model.nextLiveTab('task', { message: 0, task: 0, memory: 2, snoozed: 1 }), 'memory');
+  assert.equal(model.nextLiveTab('memory', { message: 1, task: 0, memory: 0, snoozed: 1 }), 'message', 'wraps around the live tabs');
+  assert.equal(model.nextLiveTab('snoozed', { message: 0, task: 0, memory: 1, snoozed: 0 }), 'memory');
+});
+
+test('deck: memory card -- human heading, markdown body, who it applies to, approve / reject / edit', async () => {
+  await withDeck([memoryItem('a'), memoryItem('b')], async ({ q, act, dom, text, scheduler, hits }) => {
+    assert.ok(q('[data-debug-id="attention-card-memory"]'), 'opens on the Memories tab (only tab with cards)');
+    assert.match(text(), /Memories2/);
+    assert.match(q('[data-debug-id="attention-card-memory-heading"]').textContent, /soloist #21proposed an expertisewhile working onAttention deck rollout/);
+    assert.match(text(), /Remember a/);
+    const body = q('[data-debug-id="attention-card-memory-body"]');
+    assert.ok(body.querySelector('h2'), 'body rendered as markdown');
+    assert.match(body.className, /overflow-y-auto/, 'body scrolls on its own');
+    const scope = q('[data-debug-id="attention-card-memory-scope"]').textContent;
+    assert.match(scope, /Agentscodex-reviewer, soloist/);
+    assert.match(scope, /ProjectsAll projects/);
+    assert.match(scope, /MachinesAll machines/);
+    assert.match(text(), /Expires in 4h/);
+    assert.doesNotMatch(text(), /secret|crd_|mem_|agt_|inst_/, 'no ids rendered');
+    for (const a of ['approve', 'reject', 'snooze', 'edit']) assert.ok(q(`[data-debug-id="attention-action-${a}"]`), `${a} offered`);
+
+    await act(async () => { dom.window.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'x', bubbles: true })); });
+    assert.equal(scheduler.getSnapshot().pending[0].label, 'Memory rejected');
+    assert.match(text(), /Remember b/, 'moves on');
+    await act(async () => { dom.window.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'a', bubbles: true })); });
+    assert.equal(scheduler.getSnapshot().pending[1].label, 'Memory approved');
+    await act(async () => { await scheduler.flushAll(true); });
+    assert.ok(hits.includes('POST /api/v1/cards/crd_mem_mem_secret_a/reject'));
+    assert.ok(hits.includes('POST /api/v1/cards/crd_mem_mem_secret_b/accept'));
+  });
+  await withDeck([memoryItem('c')], async ({ q, act, dom, closed }) => {
+    await act(async () => { q('[data-debug-id="attention-action-edit"]').click(); });
+    assert.match(dom.window.location.hash, /\/memory\/mem_secret_c\/edit/, 'Edit opens the memory editor');
+    assert.equal(closed(), 1, 'and closes the deck');
+  });
 });
 
 test('status bar: attention pill takes the left slot, rings for unseen items, reads as one number', async () => {

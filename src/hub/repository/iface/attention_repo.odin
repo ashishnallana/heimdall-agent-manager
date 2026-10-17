@@ -27,6 +27,10 @@ Attention_Latest_Actionable_Message_Proc :: proc(ctx: rawptr, owner_user_id: dom
 
 Attention_List_Actionable_Instance_IDs_Proc :: proc(ctx: rawptr, owner_user_id: domain.User_ID) -> ([]string, domain.Domain_Error)
 
+// Attention_List_Pending_Memory_IDs_Proc lists an owner's pending memory
+// proposals (expired ones included: the projector decides and retires them).
+Attention_List_Pending_Memory_IDs_Proc :: proc(ctx: rawptr, owner_user_id: domain.User_ID) -> ([]string, domain.Domain_Error)
+
 // Attention_List_Live_Cards_Proc lists an owner's cards of provider that are
 // still live for the deck (pending or snoozed) -- the reconciliation sweep
 // re-projects each one so a stale card is retired.
@@ -47,6 +51,7 @@ Attention_List_Owners_Proc :: proc(ctx: rawptr) -> ([]domain.User_ID, domain.Dom
 Attention_Counts :: struct {
 	message: int,
 	task:    int,
+	memory:  int,
 	older:   int,
 	snoozed: int,
 }
@@ -66,6 +71,17 @@ Attention_Context :: struct {
 	chain_title:        map[string]string, // chain_id -> title (may be ciphertext)
 	instance_name:      map[string]string, // agent_instance_id -> display_name
 }
+// Attention_Scope_Names names a memory's scope ids in batch, owner-scoped
+// (agent -> name, project -> name, bridge -> label, template -> name). Built-in
+// templates are not stored, so the caller names those.
+Attention_Scope_Names :: struct {
+	agents:    map[string]string,
+	projects:  map[string]string,
+	bridges:   map[string]string,
+	templates: map[string]string,
+}
+Attention_Resolve_Scope_Names_Proc :: proc(ctx: rawptr, owner_user_id: domain.User_ID, agent_ids, project_ids, bridge_ids, template_ids: []string) -> (Attention_Scope_Names, domain.Domain_Error)
+
 Attention_Resolve_Context_Proc :: proc(ctx: rawptr, owner_user_id: domain.User_ID, conversation_ids, chain_ids, instance_ids: []string) -> (Attention_Context, domain.Domain_Error)
 
 Attention_Repository :: struct {
@@ -75,12 +91,14 @@ Attention_Repository :: struct {
 	list_validation_task_ids:      Attention_List_Validation_Task_IDs_Proc,
 	latest_actionable_message:     Attention_Latest_Actionable_Message_Proc,
 	list_actionable_instance_ids:  Attention_List_Actionable_Instance_IDs_Proc,
+	list_pending_memory_ids:       Attention_List_Pending_Memory_IDs_Proc,
 	list_live_cards:               Attention_List_Live_Cards_Proc,
 	list_owners:                   Attention_List_Owners_Proc,
 	list_cards:                    Attention_List_Cards_Proc,
 	list_snoozed_cards:            Attention_List_Snoozed_Cards_Proc,
 	count:                         Attention_Count_Proc,
 	resolve_context:               Attention_Resolve_Context_Proc,
+	resolve_scope_names:           Attention_Resolve_Scope_Names_Proc,
 }
 
 attention_not_configured :: proc() -> domain.Domain_Error {
@@ -112,6 +130,11 @@ attention_list_actionable_instance_ids :: proc(r: ^Attention_Repository, owner: 
 	return r.list_actionable_instance_ids(r.ctx, owner)
 }
 
+attention_list_pending_memory_ids :: proc(r: ^Attention_Repository, owner: domain.User_ID) -> ([]string, domain.Domain_Error) {
+	if r == nil || r.list_pending_memory_ids == nil do return nil, attention_not_configured()
+	return r.list_pending_memory_ids(r.ctx, owner)
+}
+
 attention_list_live_cards :: proc(r: ^Attention_Repository, owner: domain.User_ID, provider: string) -> ([]domain.Card, domain.Domain_Error) {
 	if r == nil || r.list_live_cards == nil do return nil, attention_not_configured()
 	return r.list_live_cards(r.ctx, owner, provider)
@@ -135,6 +158,11 @@ attention_list_snoozed_cards :: proc(r: ^Attention_Repository, owner: domain.Use
 attention_count :: proc(r: ^Attention_Repository, owner: domain.User_ID, cutoff, now: string) -> (Attention_Counts, domain.Domain_Error) {
 	if r == nil || r.count == nil do return {}, attention_not_configured()
 	return r.count(r.ctx, owner, cutoff, now)
+}
+
+attention_resolve_scope_names :: proc(r: ^Attention_Repository, owner: domain.User_ID, agent_ids, project_ids, bridge_ids, template_ids: []string) -> (Attention_Scope_Names, domain.Domain_Error) {
+	if r == nil || r.resolve_scope_names == nil do return {}, attention_not_configured()
+	return r.resolve_scope_names(r.ctx, owner, agent_ids, project_ids, bridge_ids, template_ids)
 }
 
 attention_resolve_context :: proc(r: ^Attention_Repository, owner: domain.User_ID, conversation_ids, chain_ids, instance_ids: []string) -> (Attention_Context, domain.Domain_Error) {

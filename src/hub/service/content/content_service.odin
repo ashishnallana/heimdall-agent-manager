@@ -25,7 +25,7 @@ soloist_template :: proc() -> domain.Template { t, _ := domain.builtin_template(
 empty_template :: proc() -> domain.Template { t, _ := domain.builtin_template(domain.TEMPLATE_EMPTY_ID); return t }
 
 Content_Service :: struct { agent_configuration_service: ^agent_service.Agent_Service, content: ^iface.Content_Repository, agents: ^iface.Agent_Repository, bridges: ^iface.Bridge_Repository, projects: ^iface.Project_Repository, taskchains: ^iface.Taskchain_Repository, bridge_command_sink: project_service.Bridge_Command_Sink, clock: ^platform.Clock, ids: ^platform.ID_Generator, title_nudge_cooldown_seconds: int, audit_mode: bool, attention: ^contracts.Attention_Notifier }
-Memory_Input :: struct { title,description,body,evidence,status,expires_at: string, agent_ids,template_ids,bridge_ids: []string, project_ids: []domain.Project_ID, type: domain.Memory_Type }
+Memory_Input :: struct { title,description,body,evidence,status,expires_at: string, proposed_by_instance_id,proposed_in_chain_id: string, agent_ids,template_ids,bridge_ids: []string, project_ids: []domain.Project_ID, type: domain.Memory_Type }
 Memory_Update_Input :: struct {
 	title:            string,
 	description:      string,
@@ -93,8 +93,8 @@ create_memory :: proc(s:^Content_Service, auth:contracts.Auth_Context, input:Mem
 			expires_at = platform.expires_at_after_seconds(24 * 3600)
 		}
 	}
-	m:=domain.Memory{memory_id=platform.generate_id(s.ids,"mem_"),owner_user_id=owner,agent_ids=input.agent_ids,project_ids=input.project_ids,template_ids=input.template_ids,bridge_ids=input.bridge_ids,type=typ,status=status,title=input.title,description=input.description,body=input.body,evidence=input.evidence,expires_at=expires_at,created_at=now,updated_at=now};
-	return iface.content_save_memory(s.content,m)
+	m:=domain.Memory{memory_id=platform.generate_id(s.ids,"mem_"),owner_user_id=owner,agent_ids=input.agent_ids,project_ids=input.project_ids,template_ids=input.template_ids,bridge_ids=input.bridge_ids,type=typ,status=status,title=input.title,description=input.description,body=input.body,evidence=input.evidence,expires_at=expires_at,created_at=now,updated_at=now,proposed_by_instance_id=input.proposed_by_instance_id,proposed_in_chain_id=input.proposed_in_chain_id};
+	return save_memory(s,m)
 }
 
 // validate_memory_targets checks that every id in each targeting list is owned
@@ -165,9 +165,9 @@ update_memory :: proc(s:^Content_Service, auth:contracts.Auth_Context, id:string
 	if input.has_bridge_ids do m.bridge_ids=input.bridge_ids
 	if input.has_template_ids do m.template_ids=input.template_ids
 	m.updated_at=platform.clock_now(s.clock)
-	return iface.content_save_memory(s.content,m)
+	return save_memory(s,m)
 }
-update_memory_status :: proc(s:^Content_Service, auth:contracts.Auth_Context, id,status:string)->(domain.Memory,bool,domain.Domain_Error){ m,ok,err:=iface.content_get_memory(s.content,id); if !ok do return {},false,err; if m.owner_user_id=="system" do return {},false,domain.domain_error(.Forbidden,"system memories are read-only"); if ok2,e:=ownership.require_owner(auth,m.owner_user_id); !ok2 do return {},false,e; m.status=status; m.updated_at=platform.clock_now(s.clock); return iface.content_save_memory(s.content,m) }
+update_memory_status :: proc(s:^Content_Service, auth:contracts.Auth_Context, id,status:string)->(domain.Memory,bool,domain.Domain_Error){ m,ok,err:=iface.content_get_memory(s.content,id); if !ok do return {},false,err; if m.owner_user_id=="system" do return {},false,domain.domain_error(.Forbidden,"system memories are read-only"); if ok2,e:=ownership.require_owner(auth,m.owner_user_id); !ok2 do return {},false,e; m.status=status; m.updated_at=platform.clock_now(s.clock); return save_memory(s,m) }
 archive_memory :: proc(s:^Content_Service, auth:contracts.Auth_Context,id:string)->(domain.Memory,bool,domain.Domain_Error){ return update_memory_status(s,auth,id,"archived") }
 approve_memory :: proc(s:^Content_Service, auth:contracts.Auth_Context,id:string, input:Memory_Update_Input={}, has_edits:bool=false)->(domain.Memory,bool,domain.Domain_Error){
 	if !has_edits do return update_memory_status(s,auth,id,"active")
@@ -191,7 +191,7 @@ approve_memory :: proc(s:^Content_Service, auth:contracts.Auth_Context,id:string
 	if input.has_template_ids do m.template_ids=input.template_ids
 	m.status="active"
 	m.updated_at=platform.clock_now(s.clock)
-	return iface.content_save_memory(s.content,m)
+	return save_memory(s,m)
 }
 reject_memory :: proc(s:^Content_Service, auth:contracts.Auth_Context,id:string)->(domain.Memory,bool,domain.Domain_Error){ return update_memory_status(s,auth,id,"rejected") }
 

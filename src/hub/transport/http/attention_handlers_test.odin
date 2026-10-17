@@ -48,8 +48,26 @@ test_attention_item_json_message_golden :: proc(t: ^testing.T) {
 @(test)
 test_attention_counts_json_golden :: proc(t: ^testing.T) {
 	b := strings.builder_make(context.temp_allocator)
-	write_attention_counts_json(&b, iface.Attention_Counts{message = 1, task = 2, older = 4, snoozed = 5})
-	testing.expect_value(t, strings.to_string(b), `{"total":3,"older":4,"message":1,"task":2,"snoozed":5}`)
+	write_attention_counts_json(&b, iface.Attention_Counts{message = 1, task = 2, memory = 3, older = 4, snoozed = 5})
+	testing.expect_value(t, strings.to_string(b), `{"total":6,"older":4,"message":1,"task":2,"memory":3,"snoozed":5}`)
+}
+
+@(test)
+test_attention_item_json_memory_golden :: proc(t: ^testing.T) {
+	item := card_service.Attention_Item{
+		card = domain.Card{
+			card_id = "crd_mem_mem_1", kind = "memory", provider = "memory_proposal", status = "pending",
+			attention_since = "2026-10-01T03:00:00Z", title = "vault:v1:t==", rationale = "Waiting on your approval",
+			operations_json = `[{"op":"memory.approve","label":"Approve","args":{"memory_id":"mem_1"}}]`,
+			details_json = `{"type":"fact","title":"vault:v1:t==","description":"","body":"vault:v1:b==","expires_at":"2026-10-02T03:00:00Z","proposer_name":"soloist #21","agent_ids":["agt_1"],"project_ids":[],"bridge_ids":[],"template_ids":[]}`,
+			action_refs_json = `{"memory_id":"mem_1","agent_instance_id":"inst_1","chain_id":"chain_1"}`,
+		},
+		reason = "memory_proposal", urgency = "info", primary_op = "memory.approve",
+		ctx = card_service.Attention_Item_Context{chain_title = "vault:v1:c==", agent_name = "soloist #21", has_scope = true, scope_agents = []string{"codex-reviewer"}, scope_projects = []string{"vault:v1:p=="}},
+	}
+	b := strings.builder_make(context.temp_allocator)
+	write_attention_item_json(&b, item)
+	testing.expect_value(t, strings.to_string(b), `{"card_id":"crd_mem_mem_1","kind":"memory","provider":"memory_proposal","reason":"memory_proposal","urgency":"info","status":"pending","snoozed":false,"snooze_until":"","attention_since":"2026-10-01T03:00:00Z","title":"vault:v1:t==","rationale":"Waiting on your approval","primary_op":"memory.approve","operations":[{"op":"memory.approve","label":"Approve","args":{"memory_id":"mem_1"}}],"details":{"type":"fact","title":"vault:v1:t==","description":"","body":"vault:v1:b==","expires_at":"2026-10-02T03:00:00Z","proposer_name":"soloist #21","agent_ids":["agt_1"],"project_ids":[],"bridge_ids":[],"template_ids":[]},"action_refs":{"memory_id":"mem_1","agent_instance_id":"inst_1","chain_id":"chain_1"},"context":{"chain_title":"vault:v1:c==","agent_name":"soloist #21","project_name":"","scope":{"agents":["codex-reviewer"],"projects":["vault:v1:p=="],"bridges":[],"templates":[]}}}`)
 }
 
 @(test)

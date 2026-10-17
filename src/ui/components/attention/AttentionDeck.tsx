@@ -24,7 +24,7 @@ import {
   useVoteTaskMutation,
 } from '../../api/endpoints';
 import { attentionScheduler, type ActionScheduler } from '../../services/attention/actionScheduler';
-import { acceptCard, assignReviewerAgent, cancelTask, markConversationRead, snoozeCard } from '../../services/attention/attentionActions';
+import { acceptCard, assignReviewerAgent, cancelTask, markConversationRead, rejectCard, snoozeCard } from '../../services/attention/attentionActions';
 import { ATTENTION_RANGE_LABELS } from '../../services/attention/attentionPrefs';
 import { snoozePresets, toHubTimestamp } from '../../services/attention/snoozePresets';
 import { appendArtifactLinks } from '../../utils/artifactUpload';
@@ -135,7 +135,7 @@ export function AttentionDeck({
   const fresh = !!query.data && !query.isFetching && (query.fulfilledTimeStamp ?? 0) >= openedAt.current;
   const snap = useSyncExternalStore(scheduler.subscribe, scheduler.getSnapshot, scheduler.getSnapshot);
   const items = data?.items ?? NO_ITEMS;
-  const counts = data?.counts ?? { total: 0, older: 0, message: 0, task: 0, snoozed: 0 };
+  const counts = data?.counts ?? { total: 0, older: 0, message: 0, task: 0, memory: 0, snoozed: 0 };
   const perTab = tabCounts(counts, items, snap.hidden);
 
   const [tab, setTab] = useState<DeckTab>('message');
@@ -348,7 +348,10 @@ export function AttentionDeck({
   const openSource = (item: AttentionItem) => {
     const path = item.kind === 'task'
       ? `/chains/${encodeURIComponent(item.action_refs.chain_id)}/tasks/${encodeURIComponent(item.action_refs.task_id)}`
-      : `/conversations/${encodeURIComponent(item.action_refs.agent_instance_id)}`;
+      : item.kind === 'memory'
+        // Memories open straight into their editor: "edit it yourself".
+        ? `/memory/${encodeURIComponent(item.action_refs.memory_id)}/edit`
+        : `/conversations/${encodeURIComponent(item.action_refs.agent_instance_id)}`;
     navigateTo(buildRouteHash(path, ''));
     onClose();
   };
@@ -364,6 +367,11 @@ export function AttentionDeck({
     // Cancels the task itself (the card resolves with it), so it says so.
     { key: 'x', label: 'Cancel task', icon: 'stop', tone: 'danger', debug: 'cancel-task', run: () => schedule(current, 'Task cancelled', (k) => cancelTask((current as AttentionTaskItem).action_refs, k)) },
     { key: 'o', label: 'Open', icon: 'arrow-right', debug: 'open', run: () => openSource(current) },
+  ] : current.kind === 'memory' ? [
+    { key: 'a', label: 'Approve', icon: 'check', tone: 'success', debug: 'approve', run: () => schedule(current, 'Memory approved', (k) => acceptCard(current.card_id, k)) },
+    { key: 'x', label: 'Reject', icon: 'close', tone: 'danger', debug: 'reject', run: () => schedule(current, 'Memory rejected', (k) => rejectCard(current.card_id, k)) },
+    { key: 's', label: 'Snooze', icon: 'clock', debug: 'snooze', run: () => { setComposer(null); setPopover(popover === 'snooze' ? null : 'snooze'); } },
+    { key: 'e', label: 'Edit', icon: 'pencil', debug: 'edit', run: () => openSource(current) },
   ] : [
     { key: 'r', label: 'Reply', icon: 'chat', debug: 'reply', run: () => { setPopover(null); setComposer(composer === 'reply' ? null : 'reply'); } },
     { key: 'm', label: 'Mark read', icon: 'check', tone: 'success', debug: 'mark-read', run: () => schedule(current, 'Marked as read', (k) => markConversationRead((current as AttentionMessageItem).action_refs.conversation_id, k)) },

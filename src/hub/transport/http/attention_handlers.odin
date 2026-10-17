@@ -8,7 +8,7 @@ import card_service "odin_test:hub/service/card"
 // time range, and a counts-only read for the always-visible bar. Served by the
 // card service; mounted on Card_Handlers.
 //
-//   GET /api/v1/attention?since=6h|24h|7d|all&kind=message|task|snoozed
+//   GET /api/v1/attention?since=6h|24h|7d|all&kind=message|task|memory|snoozed
 //   GET /api/v1/attention/summary?since=...
 
 attention_handler :: proc(ctx: rawptr, req: Request) -> Response {
@@ -48,13 +48,15 @@ attention_respond :: proc(ctx: rawptr, req: Request, with_items: bool) -> Respon
 write_attention_counts_json :: proc(b: ^strings.Builder, c: iface.Attention_Counts) {
 	// Built piecewise: fmt treats a literal '{' as a format directive.
 	strings.write_string(b, `{"total":`)
-	strings.write_int(b, c.message + c.task)
+	strings.write_int(b, c.message + c.task + c.memory)
 	strings.write_string(b, `,"older":`)
 	strings.write_int(b, c.older)
 	strings.write_string(b, `,"message":`)
 	strings.write_int(b, c.message)
 	strings.write_string(b, `,"task":`)
 	strings.write_int(b, c.task)
+	strings.write_string(b, `,"memory":`)
+	strings.write_int(b, c.memory)
 	strings.write_string(b, `,"snoozed":`)
 	strings.write_int(b, c.snoozed)
 	strings.write_byte(b, '}')
@@ -106,5 +108,29 @@ write_attention_item_json :: proc(b: ^strings.Builder, item: card_service.Attent
 	write_handler_json_string(b, item.ctx.agent_name)
 	strings.write_string(b, `","project_name":"`)
 	write_handler_json_string(b, item.ctx.project_name)
-	strings.write_string(b, `"}}`)
+	strings.write_byte(b, '"')
+	if item.ctx.has_scope {
+		// Memory proposals: who/what it applies to, by name; [] = all.
+		strings.write_string(b, `,"scope":{"agents":`)
+		write_attention_name_list(b, item.ctx.scope_agents)
+		strings.write_string(b, `,"projects":`)
+		write_attention_name_list(b, item.ctx.scope_projects)
+		strings.write_string(b, `,"bridges":`)
+		write_attention_name_list(b, item.ctx.scope_bridges)
+		strings.write_string(b, `,"templates":`)
+		write_attention_name_list(b, item.ctx.scope_templates)
+		strings.write_byte(b, '}')
+	}
+	strings.write_string(b, `}}`)
+}
+
+write_attention_name_list :: proc(b: ^strings.Builder, names: []string) {
+	strings.write_byte(b, '[')
+	for name, i in names {
+		if i > 0 do strings.write_byte(b, ',')
+		strings.write_byte(b, '"')
+		write_handler_json_string(b, name)
+		strings.write_byte(b, '"')
+	}
+	strings.write_byte(b, ']')
 }

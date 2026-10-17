@@ -13,11 +13,11 @@ import { cookieJsonFetch, customQueryError } from '../cookieFetch';
 import { heimdallApi } from '../heimdallApi';
 
 export type AttentionRange = '6h' | '24h' | '7d' | 'all';
-export type AttentionKind = 'message' | 'task';
+export type AttentionKind = 'message' | 'task' | 'memory';
 export const ATTENTION_RANGES: readonly AttentionRange[] = ['6h', '24h', '7d', 'all'];
 
-/** total = message + task (the bar pill); snoozed is separate and never in total. */
-export type AttentionCounts = { total: number; older: number; message: number; task: number; snoozed: number };
+/** total = message + task + memory (the bar pill); snoozed is separate and never in total. */
+export type AttentionCounts = { total: number; older: number; message: number; task: number; memory: number; snoozed: number };
 
 export type AttentionExcerpt = { author_name: string; body: string; at: string };
 
@@ -35,7 +35,21 @@ export type AttentionMessageDetails = {
   other_unread: number;
 };
 
+/** A memory proposal. title/description/body may be vault ciphertext. */
+export type AttentionMemoryDetails = {
+  type: string;
+  title: string;
+  description: string;
+  body: string;
+  expires_at: string;
+  proposer_name: string;
+};
+
+/** Who/what a memory applies to, by name (names may be ciphertext). [] = all. */
+export type AttentionScope = { agents: string[]; projects: string[]; bridges: string[]; templates: string[] };
+
 export type AttentionTaskRefs = { chain_id: string; task_id: string };
+export type AttentionMemoryRefs = { memory_id: string; agent_instance_id: string; chain_id: string };
 export type AttentionMessageRefs = { conversation_id: string; agent_instance_id: string; message_id: string };
 
 type AttentionItemBase = {
@@ -53,22 +67,23 @@ type AttentionItemBase = {
   rationale: string;
   primary_op: string | null;
   operations: Array<{ op: string; label?: string }>;
-  context: { chain_title: string; agent_name: string; project_name: string };
+  context: { chain_title: string; agent_name: string; project_name: string; scope?: AttentionScope };
 };
 
 export type AttentionTaskItem = AttentionItemBase & { kind: 'task'; details: AttentionTaskDetails; action_refs: AttentionTaskRefs };
 export type AttentionMessageItem = AttentionItemBase & { kind: 'message'; details: AttentionMessageDetails; action_refs: AttentionMessageRefs };
-export type AttentionItem = AttentionTaskItem | AttentionMessageItem;
+export type AttentionMemoryItem = AttentionItemBase & { kind: 'memory'; details: AttentionMemoryDetails; action_refs: AttentionMemoryRefs };
+export type AttentionItem = AttentionTaskItem | AttentionMessageItem | AttentionMemoryItem;
 
 export type AttentionSummary = { since: AttentionRange; counts: AttentionCounts };
 export type AttentionResult = AttentionSummary & { items: AttentionItem[] };
 
-const EMPTY_COUNTS: AttentionCounts = { total: 0, older: 0, message: 0, task: 0, snoozed: 0 };
+const EMPTY_COUNTS: AttentionCounts = { total: 0, older: 0, message: 0, task: 0, memory: 0, snoozed: 0 };
 
 export function normalizeAttentionCounts(raw: any): AttentionCounts {
   const n = (v: any) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.floor(v) : 0);
   if (!raw || typeof raw !== 'object') return { ...EMPTY_COUNTS };
-  return { total: n(raw.total), older: n(raw.older), message: n(raw.message), task: n(raw.task), snoozed: n(raw.snoozed) };
+  return { total: n(raw.total), older: n(raw.older), message: n(raw.message), task: n(raw.task), memory: n(raw.memory), snoozed: n(raw.snoozed) };
 }
 
 /** Keeps only well-formed items of the kinds v1 renders. */
@@ -76,7 +91,7 @@ export function normalizeAttentionItems(raw: any): AttentionItem[] {
   if (!Array.isArray(raw)) return [];
   return raw
     .filter((item: any) =>
-      item && typeof item.card_id === 'string' && (item.kind === 'task' || item.kind === 'message') &&
+      item && typeof item.card_id === 'string' && (item.kind === 'task' || item.kind === 'message' || item.kind === 'memory') &&
       item.details && typeof item.details === 'object' && item.action_refs && typeof item.action_refs === 'object')
     .map((item: any) => ({ ...item, snoozed: item.snoozed === true, snooze_until: typeof item.snooze_until === 'string' ? item.snooze_until : '' }));
 }

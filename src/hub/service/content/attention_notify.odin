@@ -42,6 +42,17 @@ notify_message_attention :: proc(s: ^Content_Service, m: domain.Chat_Message) {
 	}
 }
 
+// save_memory is the single memory write path in this package: a proposal
+// being created, edited, approved, rejected or archived changes whether it
+// needs the user, so each write reports it to the projector.
+save_memory :: proc(s: ^Content_Service, m: domain.Memory) -> (domain.Memory, bool, domain.Domain_Error) {
+	saved, ok, err := iface.content_save_memory(s.content, m)
+	if ok && s.attention != nil {
+		contracts.attention_notify(s.attention, string(saved.owner_user_id), contracts.ATTENTION_SOURCE_MEMORY, saved.memory_id)
+	}
+	return saved, ok, err
+}
+
 notify_conversation_attention :: proc(s: ^Content_Service, c: domain.Chat_Conversation) {
 	if s == nil || s.attention == nil do return
 	contracts.attention_notify(s.attention, string(c.owner_user_id), contracts.ATTENTION_SOURCE_AGENT_MESSAGE, c.agent_instance_id)

@@ -17,6 +17,7 @@ Attention_Notifier :: struct {
 // Attention source kinds a service can report.
 ATTENTION_SOURCE_TASK          :: "task"          // source_id = task_id
 ATTENTION_SOURCE_AGENT_MESSAGE :: "agent_message" // source_id = agent_instance_id (the sender)
+ATTENTION_SOURCE_MEMORY        :: "memory"        // source_id = memory_id
 
 // attention_notify is nil-safe so services built without a notifier (most
 // unit tests) need no special casing.

@@ -19,12 +19,14 @@ new_attention_repository :: proc(impl: ^Attention_Repo_SQLite, conn: ^Conn) -> i
 		list_validation_task_ids     = attention_list_validation_task_ids_sqlite,
 		latest_actionable_message    = attention_latest_actionable_message_sqlite,
 		list_actionable_instance_ids = attention_list_actionable_instance_ids_sqlite,
+		list_pending_memory_ids      = attention_list_pending_memory_ids_sqlite,
 		list_live_cards              = attention_list_live_cards_sqlite,
 		list_owners                  = attention_list_owners_sqlite,
 		list_cards                   = attention_list_cards_sqlite,
 		list_snoozed_cards           = attention_list_snoozed_cards_sqlite,
 		count                        = attention_count_sqlite,
 		resolve_context              = attention_resolve_context_sqlite,
+		resolve_scope_names          = attention_resolve_scope_names_sqlite,
 	}
 }
 
@@ -159,6 +161,21 @@ attention_list_actionable_instance_ids_sqlite :: proc(ctx: rawptr, owner_user_id
 	return out[:], domain.Domain_Error{}
 }
 
+attention_list_pending_memory_ids_sqlite :: proc(ctx: rawptr, owner_user_id: domain.User_ID) -> ([]string, domain.Domain_Error) {
+	impl, ok := attention_repo_open(ctx)
+	if !ok do return nil, not_open()
+	stmt: sqlite3_stmt = nil
+	query := "SELECT memory_id FROM memories WHERE owner_user_id = ? AND status = 'pending' ORDER BY 1;"
+	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK {
+		return nil, domain.domain_error(.Internal_Error, "failed to prepare pending memory list")
+	}
+	defer sqlite3_finalize(stmt)
+	bind_text(stmt, 1, string(owner_user_id))
+	out := make([dynamic]string)
+	for sqlite3_step(stmt) == SQLITE_ROW do append(&out, column_text(stmt, 0))
+	return out[:], domain.Domain_Error{}
+}
+
 attention_list_live_cards_sqlite :: proc(ctx: rawptr, owner_user_id: domain.User_ID, provider: string) -> ([]domain.Card, domain.Domain_Error) {
 	impl, ok := attention_repo_open(ctx)
 	if !ok do return nil, not_open()
@@ -181,7 +198,7 @@ attention_list_owners_sqlite :: proc(ctx: rawptr) -> ([]domain.User_ID, domain.D
 	impl, ok := attention_repo_open(ctx)
 	if !ok do return nil, not_open()
 	stmt: sqlite3_stmt = nil
-	query := "SELECT owner_user_id FROM tasks UNION SELECT owner_user_id FROM chat_conversations UNION SELECT owner_user_id FROM cards ORDER BY 1;"
+	query := "SELECT owner_user_id FROM tasks UNION SELECT owner_user_id FROM chat_conversations UNION SELECT owner_user_id FROM cards UNION SELECT owner_user_id FROM memories WHERE status = 'pending' AND owner_user_id != 'system' ORDER BY 1;"
 	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK {
 		return nil, domain.domain_error(.Internal_Error, "failed to prepare attention owner list")
 	}
@@ -210,7 +227,7 @@ attention_list_snoozed_cards_sqlite :: proc(ctx: rawptr, owner_user_id: domain.U
 	impl, ok := attention_repo_open(ctx)
 	if !ok do return nil, not_open()
 	stmt: sqlite3_stmt = nil
-	query := "SELECT " + CARD_COLUMNS + " FROM cards WHERE owner_user_id = ? AND kind IN ('message', 'task') AND" + SNOOZED_CARD_WHERE + " ORDER BY snooze_until = '' ASC, snooze_until ASC, card_id ASC LIMIT ?;"
+	query := "SELECT " + CARD_COLUMNS + " FROM cards WHERE owner_user_id = ? AND kind IN ('message', 'task', 'memory') AND" + SNOOZED_CARD_WHERE + " ORDER BY snooze_until = '' ASC, snooze_until ASC, card_id ASC LIMIT ?;"
 	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK {
 		return nil, domain.domain_error(.Internal_Error, "failed to prepare snoozed attention card list")
 	}
@@ -246,7 +263,7 @@ attention_count_sqlite :: proc(ctx: rawptr, owner_user_id: domain.User_ID, cutof
 	impl, ok := attention_repo_open(ctx)
 	if !ok do return {}, not_open()
 	stmt: sqlite3_stmt = nil
-	query := "SELECT kind, SUM(CASE WHEN attention_since >= ? THEN 1 ELSE 0 END), SUM(CASE WHEN attention_since < ? THEN 1 ELSE 0 END) FROM cards WHERE owner_user_id = ? AND kind IN ('message', 'task') AND" + LIVE_CARD_WHERE + " GROUP BY kind;"
+	query := "SELECT kind, SUM(CASE WHEN attention_since >= ? THEN 1 ELSE 0 END), SUM(CASE WHEN attention_since < ? THEN 1 ELSE 0 END) FROM cards WHERE owner_user_id = ? AND kind IN ('message', 'task', 'memory') AND" + LIVE_CARD_WHERE + " GROUP BY kind;"
 	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK {
 		return {}, domain.domain_error(.Internal_Error, "failed to prepare attention count")
 	}
@@ -263,6 +280,7 @@ attention_count_sqlite :: proc(ctx: rawptr, owner_user_id: domain.User_ID, cutof
 		switch kind {
 		case domain.CARD_KIND_MESSAGE: counts.message = in_range
 		case domain.CARD_KIND_TASK:    counts.task = in_range
+		case domain.CARD_KIND_MEMORY:  counts.memory = in_range
 		}
 	}
 	if err := attention_count_snoozed(impl, owner_user_id, now, &counts); err.code != .None do return {}, err
@@ -272,7 +290,7 @@ attention_count_sqlite :: proc(ctx: rawptr, owner_user_id: domain.User_ID, cutof
 @(private="file")
 attention_count_snoozed :: proc(impl: ^Attention_Repo_SQLite, owner_user_id: domain.User_ID, now: string, counts: ^iface.Attention_Counts) -> domain.Domain_Error {
 	stmt: sqlite3_stmt = nil
-	query := "SELECT COUNT(*) FROM cards WHERE owner_user_id = ? AND kind IN ('message', 'task') AND" + SNOOZED_CARD_WHERE + ";"
+	query := "SELECT COUNT(*) FROM cards WHERE owner_user_id = ? AND kind IN ('message', 'task', 'memory') AND" + SNOOZED_CARD_WHERE + ";"
 	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK {
 		return domain.domain_error(.Internal_Error, "failed to prepare snoozed attention count")
 	}
@@ -317,5 +335,22 @@ attention_resolve_context_sqlite :: proc(ctx: rawptr, owner_user_id: domain.User
 	for _, chain_id in out.conversation_chain do if chain_id != "" do append(&all_chains, chain_id)
 	if err := attention_lookup_pairs(impl, "SELECT chain_id, title FROM task_chains WHERE owner_user_id = ? AND chain_id", owner_user_id, all_chains[:], &out.chain_title); err.code != .None do return out, err
 	if err := attention_lookup_pairs(impl, "SELECT agent_instance_id, display_name FROM agent_instances WHERE owner_user_id = ? AND agent_instance_id", owner_user_id, instance_ids, &out.instance_name); err.code != .None do return out, err
+	return out, domain.Domain_Error{}
+}
+
+attention_resolve_scope_names_sqlite :: proc(ctx: rawptr, owner_user_id: domain.User_ID, agent_ids, project_ids, bridge_ids, template_ids: []string) -> (iface.Attention_Scope_Names, domain.Domain_Error) {
+	impl, ok := attention_repo_open(ctx)
+	if !ok do return {}, not_open()
+	out := iface.Attention_Scope_Names{
+		agents    = make(map[string]string),
+		projects  = make(map[string]string),
+		bridges   = make(map[string]string),
+		templates = make(map[string]string),
+	}
+	if err := attention_lookup_pairs(impl, "SELECT agent_id, name FROM agents WHERE owner_user_id = ? AND agent_id", owner_user_id, agent_ids, &out.agents); err.code != .None do return out, err
+	if err := attention_lookup_pairs(impl, "SELECT project_id, name FROM projects WHERE owner_user_id = ? AND project_id", owner_user_id, project_ids, &out.projects); err.code != .None do return out, err
+	if err := attention_lookup_pairs(impl, "SELECT bridge_id, label FROM bridges WHERE owner_user_id = ? AND bridge_id", owner_user_id, bridge_ids, &out.bridges); err.code != .None do return out, err
+	// User templates are the owner's; system rows (owner 'system' / is_system) are shared.
+	if err := attention_lookup_pairs(impl, "SELECT template_id, name FROM templates WHERE (owner_user_id = ? OR is_system = 1) AND template_id", owner_user_id, template_ids, &out.templates); err.code != .None do return out, err
 	return out, domain.Domain_Error{}
 }

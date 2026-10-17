@@ -445,8 +445,9 @@ sync_projected_cards :: proc(s: ^Card_Service, owner: domain.User_ID) {
 		}
 	}
 
-	// 2. Memory-proposal deterministic provider
-	if s.content != nil && s.content.content != nil {
+	// 2. Memory-proposal deterministic provider. Superseded by the projector
+	// (card_projector.odin) whenever that is wired, like the task provider above.
+	if s.attention_repo == nil && s.content != nil && s.content.content != nil {
 		mems, merr := iface.content_list_memories(s.content.content, owner)
 		if merr.code == .None {
 			defer delete(mems)

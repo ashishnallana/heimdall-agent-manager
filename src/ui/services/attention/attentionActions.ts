@@ -27,6 +27,9 @@ const enc = encodeURIComponent;
 /** Primary task action: runs the card's operations (task.vote lgtm). */
 export const acceptCard = (cardId: string, keepalive: boolean) => send(`/cards/${enc(cardId)}/accept`, 'POST', {}, keepalive);
 
+/** Rejects the card's source (a memory proposal is rejected with it). */
+export const rejectCard = (cardId: string, keepalive: boolean) => send(`/cards/${enc(cardId)}/reject`, 'POST', {}, keepalive);
+
 export const snoozeCard = (cardId: string, until: string, keepalive: boolean) =>
   send(`/cards/${enc(cardId)}/snooze`, 'POST', { snooze_until: until }, keepalive);
 

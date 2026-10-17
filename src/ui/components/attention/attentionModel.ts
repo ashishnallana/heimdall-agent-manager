@@ -7,6 +7,7 @@ export type DeckTab = AttentionKind | 'snoozed';
 export const DECK_TABS: ReadonlyArray<{ id: DeckTab; label: string }> = [
   { id: 'message', label: 'Messages' },
   { id: 'task', label: 'Tasks' },
+  { id: 'memory', label: 'Memories' },
   { id: 'snoozed', label: 'Snoozed' },
 ];
 
@@ -35,13 +36,17 @@ export function tabCounts(counts: AttentionCounts, items: readonly AttentionItem
   return {
     message: Math.max(0, counts.message - hiddenOf('message')),
     task: Math.max(0, counts.task - hiddenOf('task')),
+    memory: Math.max(0, counts.memory - hiddenOf('memory')),
     snoozed: Math.max(0, counts.snoozed - hiddenOf('snoozed')),
   };
 }
 
+/** Live tabs, in deck order (Snoozed is never a destination on its own). */
+export const LIVE_TABS: readonly DeckTab[] = ['message', 'task', 'memory'];
+
 /** The tab to open on: the first live tab with something in it (never Snoozed). */
 export function defaultTab(counts: Record<DeckTab, number>): DeckTab {
-  return counts.message > 0 || counts.task === 0 ? 'message' : 'task';
+  return LIVE_TABS.find((t) => counts[t] > 0) ?? 'message';
 }
 
 /**
@@ -49,9 +54,12 @@ export function defaultTab(counts: Record<DeckTab, number>): DeckTab {
  * tab if it has cards, never Snoozed. null = stay (nothing else to work on).
  */
 export function nextLiveTab(current: DeckTab, counts: Record<DeckTab, number>): DeckTab | null {
-  const other: DeckTab = current === 'message' ? 'task' : 'message';
-  if (current !== 'snoozed' && counts[other] > 0) return other;
-  if (current === 'snoozed') return counts.message > 0 ? 'message' : counts.task > 0 ? 'task' : null;
+  const start = LIVE_TABS.indexOf(current);
+  for (let i = 1; i <= LIVE_TABS.length; i += 1) {
+    // From Snoozed (start -1) this walks the live tabs from the first.
+    const tab = LIVE_TABS[(start + i + LIVE_TABS.length) % LIVE_TABS.length];
+    if (tab !== current && counts[tab] > 0) return tab;
+  }
   return null;
 }
 
@@ -99,7 +107,7 @@ export function reasonLine(item: AttentionItem, now: number): string {
     return wake ? `Snoozed until ${wake}` : 'Snoozed';
   }
   const age = formatAge(item.attention_since, now);
-  const base = item.kind === 'task' ? 'Waiting on your review' : 'Waiting on your reply';
+  const base = item.kind === 'task' ? 'Waiting on your review' : item.kind === 'memory' ? 'Waiting on your approval' : 'Waiting on your reply';
   return age ? `${base} · ${age}` : base;
 }
 
@@ -146,3 +154,28 @@ export function reviewerCandidates(fleet: ReadonlyArray<{ agent_id?: string; age
     .map((a) => ({ agentId: idOf(a), name: nameOf(a), source }) as ReviewerCandidate)
     .sort((x, y) => x.name.localeCompare(y.name));
 }
+
+/** "a fact", "a habit", "an episode", "an expertise", "a skill" (unknown -> "a memory"). */
+export function memoryTypePhrase(type: string): string {
+  const t = (type || '').toLowerCase();
+  if (!['fact', 'habit', 'episode', 'expertise', 'skill'].includes(t)) return 'a memory';
+  return /^[aeiou]/.test(t) ? `an ${t}` : `a ${t}`;
+}
+
+/** "Expires in 6h" when a proposal lapses within a day; '' otherwise. */
+export function expiryLine(expiresAt: string, now: number): string {
+  const at = Date.parse(expiresAt);
+  if (!Number.isFinite(at)) return '';
+  const minutes = Math.floor((at - now) / 60000);
+  if (minutes < 0 || minutes >= 24 * 60) return '';
+  if (minutes < 60) return `Expires in ${Math.max(1, minutes)} min`;
+  return `Expires in ${Math.floor(minutes / 60)}h`;
+}
+
+/** Scope rows for a memory, in reading order; an empty list reads as "All". */
+export const SCOPE_ROWS: ReadonlyArray<{ key: 'agents' | 'projects' | 'bridges' | 'templates'; label: string; all: string }> = [
+  { key: 'agents', label: 'Agents', all: 'All agents' },
+  { key: 'projects', label: 'Projects', all: 'All projects' },
+  { key: 'bridges', label: 'Machines', all: 'All machines' },
+  { key: 'templates', label: 'Templates', all: 'All templates' },
+];

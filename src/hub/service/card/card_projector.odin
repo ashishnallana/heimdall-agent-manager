@@ -45,6 +45,9 @@ import taskchain_service "odin_test:hub/service/taskchain"
 
 ATTENTION_TASK_CARD_PREFIX    :: "crd_task_"
 ATTENTION_MESSAGE_CARD_PREFIX :: "crd_msg_"
+// Same id the legacy list-time provider used, so reject_card's memory path
+// (which strips this prefix) keeps working for projected cards.
+ATTENTION_MEMORY_CARD_PREFIX  :: "crd_mem_"
 
 // ATTENTION_CAS_ATTEMPTS bounds the re-read/recompute loop when the row keeps
 // moving underneath (only possible under a write storm on one card).
@@ -74,6 +77,8 @@ attention_notifier_proc :: proc(ctx: rawptr, owner_user_id: string, source_kind:
 		ok, err = project_task_card(s, domain.User_ID(owner_user_id), domain.Task_ID(source_id))
 	case contracts.ATTENTION_SOURCE_AGENT_MESSAGE:
 		ok, err = project_message_card(s, domain.User_ID(owner_user_id), source_id)
+	case contracts.ATTENTION_SOURCE_MEMORY:
+		ok, err = project_memory_card(s, domain.User_ID(owner_user_id), source_id)
 	case:
 		return
 	}
@@ -83,6 +88,10 @@ attention_notifier_proc :: proc(ctx: rawptr, owner_user_id: string, source_kind:
 
 attention_task_card_id :: proc(task_id: domain.Task_ID) -> domain.Card_ID {
 	return domain.Card_ID(fmt.tprintf("%s%s", ATTENTION_TASK_CARD_PREFIX, string(task_id)))
+}
+
+attention_memory_card_id :: proc(memory_id: string) -> domain.Card_ID {
+	return domain.Card_ID(fmt.tprintf("%s%s", ATTENTION_MEMORY_CARD_PREFIX, memory_id))
 }
 
 attention_message_card_id :: proc(agent_instance_id: string) -> domain.Card_ID {
@@ -289,6 +298,117 @@ write_message_options :: proc(b: ^strings.Builder, metadata_json: string) {
 }
 
 // ---------------------------------------------------------------------------
+// memory_proposal
+
+// memory_awaits_user: a proposal still pending and not past its expiry.
+memory_awaits_user :: proc(m: domain.Memory, now: string) -> bool {
+	return m.status == "pending" && (m.expires_at == "" || m.expires_at > now)
+}
+
+project_memory_card :: proc(s: ^Card_Service, owner: domain.User_ID, memory_id: string) -> (bool, domain.Domain_Error) {
+	if s == nil || s.attention_repo == nil || s.cards == nil do return true, domain.Domain_Error{}
+	if memory_id == "" do return true, domain.Domain_Error{}
+	if s.content == nil || s.content.content == nil do return false, domain.domain_error(.Internal_Error, "content repository is not configured")
+	sync.mutex_lock(&s.projector_mutex)
+	defer sync.mutex_unlock(&s.projector_mutex)
+
+	m, found, get_err := iface.content_get_memory(s.content.content, memory_id)
+	// As for tasks: only a definite "no such memory" may retire a card.
+	if !found && get_err.code != .Not_Found do return false, get_err
+	qualifies := found && m.owner_user_id == owner && memory_awaits_user(m, platform.clock_now(s.clock))
+	desired: domain.Card
+	if qualifies do desired = build_memory_card(s, m)
+	return apply_attention_projection(s, owner, attention_memory_card_id(memory_id), desired, qualifies)
+}
+
+build_memory_card :: proc(s: ^Card_Service, m: domain.Memory) -> domain.Card {
+	ops := strings.builder_make(context.temp_allocator)
+	strings.write_string(&ops, `[{"op":"memory.approve","label":"Approve","args":{"memory_id":"`)
+	contracts.write_json_string(&ops, m.memory_id)
+	strings.write_string(&ops, `"}}]`)
+
+	guard := strings.builder_make(context.temp_allocator)
+	strings.write_string(&guard, `{"memory_proposal_id":"`)
+	contracts.write_json_string(&guard, m.memory_id)
+	strings.write_string(&guard, `","expected_status":"pending"}`)
+
+	refs := strings.builder_make(context.temp_allocator)
+	strings.write_string(&refs, `[{"type":"memory","id":"`)
+	contracts.write_json_string(&refs, m.memory_id)
+	strings.write_string(&refs, `"}]`)
+
+	action_refs := strings.builder_make(context.temp_allocator)
+	strings.write_string(&action_refs, `{"memory_id":"`)
+	contracts.write_json_string(&action_refs, m.memory_id)
+	strings.write_string(&action_refs, `","agent_instance_id":"`)
+	contracts.write_json_string(&action_refs, m.proposed_by_instance_id)
+	strings.write_string(&action_refs, `","chain_id":"`)
+	contracts.write_json_string(&action_refs, m.proposed_in_chain_id)
+	strings.write_string(&action_refs, `"}`)
+
+	// details: what the deck renders. Title/description/body may be vault
+	// ciphertext and are copied verbatim (the client decrypts); the scope lists
+	// are ids, named at read time by the attention API.
+	details := strings.builder_make(context.temp_allocator)
+	strings.write_string(&details, `{"type":"`)
+	contracts.write_json_string(&details, domain.memory_type_string(m.type))
+	strings.write_string(&details, `","title":"`)
+	contracts.write_json_string(&details, m.title)
+	strings.write_string(&details, `","description":"`)
+	contracts.write_json_string(&details, m.description)
+	strings.write_string(&details, `","body":"`)
+	contracts.write_json_string(&details, m.body)
+	strings.write_string(&details, `","expires_at":"`)
+	contracts.write_json_string(&details, m.expires_at)
+	strings.write_string(&details, `","proposer_name":"`)
+	contracts.write_json_string(&details, attention_instance_name(s, m.proposed_by_instance_id))
+	strings.write_string(&details, `","agent_ids":`)
+	write_json_string_list(&details, m.agent_ids)
+	strings.write_string(&details, `,"project_ids":`)
+	project_ids := make([]string, len(m.project_ids), context.temp_allocator)
+	for p, i in m.project_ids do project_ids[i] = string(p)
+	write_json_string_list(&details, project_ids)
+	strings.write_string(&details, `,"bridge_ids":`)
+	write_json_string_list(&details, m.bridge_ids)
+	strings.write_string(&details, `,"template_ids":`)
+	write_json_string_list(&details, m.template_ids)
+	strings.write_byte(&details, '}')
+
+	return domain.Card{
+		owner_user_id    = m.owner_user_id,
+		title            = m.title,
+		rationale        = "Waiting on your approval",
+		scope            = domain.CARD_SCOPE_MEMORY,
+		provider         = domain.CARD_PROVIDER_MEMORY_PROPOSAL,
+		kind             = domain.CARD_KIND_MEMORY,
+		confidence       = 1.0,
+		source_refs_json = strings.to_string(refs),
+		operations_json  = strings.to_string(ops),
+		guard_json       = strings.to_string(guard),
+		action_refs_json = strings.to_string(action_refs),
+		details_json     = strings.to_string(details),
+		attention_since  = m.created_at,
+		// An edit (updated_at) or a new expiry is a new state: it wakes a snooze
+		// and re-opens a dismissed card, like a new review round on a task.
+		source_marker    = fmt.tprintf("%s|%s|%s", m.status, m.updated_at, m.expires_at),
+	}
+}
+
+write_json_string_list :: proc(b: ^strings.Builder, values: []string) {
+	strings.write_byte(b, '[')
+	n := 0
+	for v in values {
+		if v == "" do continue
+		if n > 0 do strings.write_byte(b, ',')
+		strings.write_byte(b, '"')
+		contracts.write_json_string(b, v)
+		strings.write_byte(b, '"')
+		n += 1
+	}
+	strings.write_byte(b, ']')
+}
+
+// ---------------------------------------------------------------------------
 // shared write path
 
 // apply_attention_projection reconciles the stored card cid with the source:
@@ -486,6 +606,28 @@ reconcile_attention_owner :: proc(s: ^Card_Service, owner: domain.User_ID, stats
 			project_result(stats, ok, err)
 		}
 	}
+	memory_ids, mem_err := iface.attention_list_pending_memory_ids(s.attention_repo, owner)
+	if mem_err.code != .None {
+		query_failed(stats, "list pending memories", mem_err)
+	} else {
+		for id in memory_ids {
+			ok, err := project_memory_card(s, owner, id)
+			project_result(stats, ok, err)
+		}
+	}
+	// Also retires expired proposals (the expiry itself writes nothing).
+	live_mems, live_mem_err := iface.attention_list_live_cards(s.attention_repo, owner, domain.CARD_PROVIDER_MEMORY_PROPOSAL)
+	if live_mem_err.code != .None {
+		query_failed(stats, "list live memory cards", live_mem_err)
+	} else {
+		for c in live_mems {
+			id := string(c.card_id)
+			if !strings.has_prefix(id, ATTENTION_MEMORY_CARD_PREFIX) do continue
+			ok, err := project_memory_card(s, owner, id[len(ATTENTION_MEMORY_CARD_PREFIX):])
+			project_result(stats, ok, err)
+		}
+	}
+
 	live_msgs, live_msg_err := iface.attention_list_live_cards(s.attention_repo, owner, domain.CARD_PROVIDER_MESSAGE_OPTIONS)
 	if live_msg_err.code != .None {
 		query_failed(stats, "list live message cards", live_msg_err)
