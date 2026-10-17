@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Badge, ResourceContainer, ResourceSearchFilter, useViewport } from '@ui';
+import { Badge, IconButton, ResourceContainer, ResourceSearchFilter, useViewport } from '@ui';
 import Icon from '../Icon';
 import { buildRouteHash } from '../../utils/appLocation';
 import ProjectLaunchModal from '../projects/ProjectLaunchModal';
@@ -71,11 +71,31 @@ function formatUpdatedAt(value: string): string {
   return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
-// One chain row: status badge + title + updated_at. Clicking the row SELECTS the
-// chain into the detail pane (REQ-TCUI-2) rather than navigating away. The
-// coordinator's conversation stays reachable as an icon button in the action
-// cluster (instance-id route from TC-ROUTING; the id is already in the row, so no
-// extra fetch). Rows without a coordinator simply omit that button.
+/**
+ * What a click on a chain row does (Task v2 plan REQ-UI-5, supersedes REQ-TCUI-2):
+ * a chain with a coordinator opens that coordinator's conversation, where the
+ * aux Tasks tab already shows the chain. On desktop it goes to `?panel=tasks`;
+ * on mobile it goes to the plain conversation route and the sidebar closes. A
+ * chain without a coordinator has no chat to open, so the row selects it into
+ * the detail pane.
+ */
+export function chainRowPrimaryAction(
+  coordinatorInstanceId: string,
+  isMobile: boolean,
+): { kind: 'conversation'; href: string; closeSidebar: boolean } | { kind: 'select' } {
+  const id = String(coordinatorInstanceId || '').trim();
+  if (!id) return { kind: 'select' };
+  const route = `/conversations/${encodeURIComponent(id)}`;
+  return isMobile
+    ? { kind: 'conversation', href: shellHash(route), closeSidebar: true }
+    : { kind: 'conversation', href: shellHash(`${route}?panel=tasks`), closeSidebar: false };
+}
+
+// One chain row: status badge + title + updated_at. Clicking the row opens the
+// coordinator's conversation when the chain has one (chainRowPrimaryAction), and
+// otherwise selects the chain into the detail pane. Rows with a coordinator also
+// get a "Task board" icon button that selects the chain into the detail pane, so
+// the board stays one click away.
 function ChainRow({
   chain,
   active,
@@ -129,9 +149,15 @@ function ChainRow({
     </>
   );
 
-  const href = isMobile
-    ? shellHash(`/conversations/${encodeURIComponent(coordinator)}`)
-    : shellHash(`/conversations/${encodeURIComponent(coordinator)}?panel=tasks`);
+  const primary = chainRowPrimaryAction(coordinator, isMobile);
+  const openRow = () => {
+    if (primary.kind === 'conversation') {
+      window.location.hash = primary.href;
+      if (primary.closeSidebar) window.dispatchEvent(new CustomEvent('heimdall:close-sidebar'));
+      return;
+    }
+    onSelect?.(chain.chainId);
+  };
 
   return (
     <div
@@ -152,9 +178,9 @@ function ChainRow({
       <button
         type="button"
         data-debug-id={`task-chains-row-select-${chain.chainId}`}
-        onClick={() => onSelect?.(chain.chainId)}
+        onClick={openRow}
         aria-current={active ? 'true' : undefined}
-        title="Open this task chain"
+        title={primary.kind === 'conversation' ? 'Open the coordinator chat' : 'Open this task chain'}
         className="min-w-0 flex-1 text-left"
       >
         <span className={`flex w-full min-w-0 flex-col justify-center gap-1.5 overflow-hidden ${isMobile ? 'min-h-11' : 'min-h-[32px]'}`}>
@@ -164,21 +190,17 @@ function ChainRow({
 
       <div className="flex shrink-0 items-center gap-2 pl-2" data-debug-id={`task-chains-row-actions-${chain.chainId}`}>
         {coordinator ? (
-          <a
-            href={href}
-            data-debug-id={`task-chains-row-coordinator-link-${chain.chainId}`}
-            title="Open coordinator conversation"
-            aria-label={`Open coordinator conversation (${coordinator})`}
+          <IconButton
+            icon="tasks"
+            label="Open task board"
+            variant="ghost"
+            size={isMobile ? 'md' : 'sm'}
+            data-debug-id={`task-chains-row-board-btn-${chain.chainId}`}
             onClick={(e) => {
               e.stopPropagation();
-              if (isMobile) {
-                window.dispatchEvent(new CustomEvent('heimdall:close-sidebar'));
-              }
+              onSelect?.(chain.chainId);
             }}
-            className={`inline-flex shrink-0 items-center justify-center border ${isMobile ? 'h-11 w-11 rounded-full' : 'h-[32px] w-[32px] min-h-[32px] rounded-lg'} border-subtle bg-surface text-muted transition-colors hover:border-strong hover:bg-surface-raised hover:text-primary`}
-          >
-            <Icon name="chat" size={isMobile ? 18 : 14} />
-          </a>
+          />
         ) : null}
         {isArchived ? (
           <button
