@@ -283,6 +283,8 @@ Task_Chain_Fleet_Wire :: struct {
 	bridge_id:              string                         `json:"bridge_id"`,
 	restarted_instance_ids: Maybe([]string)                `json:"restarted_instance_ids,omitempty"`,
 	restart_failures:       Maybe([]Fleet_Restart_Failure) `json:"restart_failures,omitempty"`,
+	// What the matcher would apply for this row (plan REQ-UI-12); list only.
+	effective:              Maybe(taskchain_service.Effective_Placement) `json:"effective,omitempty"`,
 }
 
 Task_Comment_Wire :: struct {
@@ -1875,6 +1877,7 @@ list_chain_fleets_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	fleets, err := taskchain_service.list_fleets(h.taskchains, auth_ctx, chain_id)
 	if err.code != .None do return respond_error(err, req.request_id)
 	defer delete(fleets)
+	chain, chain_ok, _ := taskchain_service.get_chain(h.taskchains, auth_ctx, chain_id)
 	members, _ := taskchain_service.list_chain_members(h.taskchains, auth_ctx, chain_id)
 	defer delete(members)
 	b := strings.builder_make()
@@ -1895,7 +1898,10 @@ list_chain_fleets_handler :: proc(ctx: rawptr, req: Request) -> Response {
 				}
 			}
 		}
-		write_fleet_json(&b, f, active_count)
+		wire := make_chain_fleet_wire(f, active_count)
+		if chain_ok do wire.effective = taskchain_service.effective_placement(h.taskchains, chain, f)
+		data, _ := json.marshal(wire, JSON_MARSHAL_OPT, allocator = context.temp_allocator)
+		strings.write_string(&b, string(data))
 	}
 	strings.write_byte(&b, ']')
 	return respond_list(strings.to_string(b), contracts.API_Page{limit = contracts.API_DEFAULT_PAGE_LIMIT, has_more = false}, req.request_id, auth_ctx_server_time(req))

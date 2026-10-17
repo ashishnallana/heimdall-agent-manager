@@ -43,6 +43,8 @@ export interface TaskChainFleet {
   provider?: string;
   model?: string;
   roles?: string[];
+  /** What the matcher would apply for this row (hub-resolved, plan REQ-UI-12). */
+  effective?: EffectivePlacement | null;
   bridge_id?: string;
   bridgeId?: string;
   // PUT-only additive fields, present when the request carried a well-formed
@@ -51,6 +53,16 @@ export interface TaskChainFleet {
   restart_failures?: FleetRestartFailure[];
   created_at?: string;
   updated_at?: string;
+}
+
+export interface EffectivePlacement {
+  bridge_id: string;
+  /** task_pin | fleet | chain_directory | coordinator | none */
+  bridge_source: string;
+  provider: string;
+  model: string;
+  /** fleet | bridge_override | catalog_default | none */
+  model_source: string;
 }
 
 export function normalizeFleet(f: any): TaskChainFleet {
@@ -80,6 +92,7 @@ export function normalizeFleet(f: any): TaskChainFleet {
     roles,
     bridge_id: bridgeId,
     bridgeId,
+    effective: f?.effective && typeof f.effective === 'object' ? (f.effective as EffectivePlacement) : null,
     restarted_instance_ids: Array.isArray(f?.restarted_instance_ids)
       ? f.restarted_instance_ids.map((id: any) => String(id))
       : undefined,

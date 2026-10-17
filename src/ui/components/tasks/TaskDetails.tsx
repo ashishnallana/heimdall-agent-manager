@@ -14,6 +14,7 @@ import type { TaskActionsApi } from './useTaskActions';
 import { EMPTY_TASK_NAMES, instanceAgentsFromEvents, withInstanceAgents, type TaskNames } from './taskNames';
 import { describeTaskEvent } from './taskEvents';
 import { HolderName } from './HolderName';
+import { describeEffectivePlacement, taskEffectivePlacement } from './fleetSelection';
 import { TaskComposer } from './TaskComposer';
 import { TaskCommentsThread } from '../taskchain/TaskCommentsThread';
 
@@ -155,8 +156,10 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
   const [showAllEvents, setShowAllEvents] = useState(false);
 
   const bridges: any[] = bridgesData?.bridges || [];
+  // Unpinned, the task runs where its fleet row resolves; say where (plan REQ-UI-12).
+  const unpinned = describeEffectivePlacement(taskEffectivePlacement({ ...task, bridge_id: '' }, chainFleets), names.bridge);
   const bridgeOptions = [
-    { value: '', text: 'Fleet default' },
+    { value: '', text: unpinned.bridge ? `Fleet default: ${unpinned.bridge}` : "Fleet default: the worker's fleet row decides" },
     ...bridges.map((b: any) => ({
       value: String(b.id || b.bridge_id || ''),
       text: `${b.name || names.bridge(String(b.id || ''))}${b.status === 'online' || b.connected ? '' : ' (offline)'}`,

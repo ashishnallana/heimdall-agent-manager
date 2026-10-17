@@ -58,6 +58,7 @@ import {
   summarizeFleetRestartResults,
   toggleFleetRole,
   isValidFleetRoleName,
+  describeEffectivePlacement,
   modelOptionsForProvider,
   type ChangedFleetEntry,
   type FleetPlacementDrafts,
@@ -991,6 +992,9 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
               const isSaturated = activeCount >= effectiveCapacity;
 
               const effectiveRoles = normalizeFleetRoles(draftRoles[agentId] ?? fleet.roles);
+              // What the hub will actually apply for this row (plan REQ-UI-12).
+              const placement = describeEffectivePlacement((fleet as any).effective, bridgeLabel);
+              const autoModel = (fleet as any).effective?.model_source === 'catalog_default';
               const origRoles = getOriginalFleetRoles(rawFleets, agentId);
               const rolesModified = origRoles === null || !fleetRolesEqual(effectiveRoles, origRoles);
 
@@ -1159,13 +1163,31 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
                         size="sm"
                         width="full"
                         aria-label={`Placement bridge for ${roleName}`}
-                        options={
-                          effectiveBridgeId && !bridgeSelectOptions.some((o) => o.value === effectiveBridgeId)
-                            ? [...bridgeSelectOptions, { value: effectiveBridgeId, label: effectiveBridgeId }]
-                            : bridgeSelectOptions
-                        }
+                        options={(effectiveBridgeId && !bridgeSelectOptions.some((o) => o.value === effectiveBridgeId)
+                          ? [...bridgeSelectOptions, { value: effectiveBridgeId, label: bridgeLabel(effectiveBridgeId) }]
+                          : bridgeSelectOptions
+                        ).map((o) =>
+                          o.value === ''
+                            ? {
+                                ...o,
+                                label:
+                                  (fleet as any).effective?.bridge_source && (fleet as any).effective.bridge_source !== 'fleet' && placement.bridge
+                                    ? `${placement.bridge} (${placement.bridgeSource})`
+                                    : 'Chain default',
+                              }
+                            : o,
+                        )}
                       />
                     </div>
+
+                    <Text
+                      as="p"
+                      role="caption"
+                      tone={placement.bridge ? 'muted' : 'warning'}
+                      data-debug-id={`fleet-effective-placement-${agentId}`}
+                    >
+                      Runs on: {placement.summary}
+                    </Text>
 
                     <div className="grid grid-cols-2 gap-2">
                       <div className="space-y-1">
@@ -1181,7 +1203,10 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
                           width="full"
                           aria-label={`Default provider for ${roleName}`}
                           options={[
-                            { value: '', label: 'Inherit (Auto)' },
+                            {
+                              value: '',
+                              label: autoModel && (fleet as any).effective?.provider ? `${(fleet as any).effective.provider} (default)` : 'Bridge default',
+                            },
                             ...(effectiveTopPT.provider &&
                             !bridgeCapabilities.some((cap) => cap.provider === effectiveTopPT.provider)
                               ? [{ value: effectiveTopPT.provider, label: effectiveTopPT.provider }]
@@ -1203,7 +1228,10 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
                           width="full"
                           aria-label={`Default model for ${roleName}`}
                           options={[
-                            { value: '', label: 'Inherit (Auto)' },
+                            {
+                              value: '',
+                              label: autoModel && (fleet as any).effective?.model ? `${(fleet as any).effective.model} (default)` : 'Bridge default',
+                            },
                             ...(effectiveTopPT.model && !topModelOptions.includes(effectiveTopPT.model)
                               ? [{ value: effectiveTopPT.model, label: effectiveTopPT.model }]
                               : []),

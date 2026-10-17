@@ -895,3 +895,80 @@ export function detectLiveInstanceRuntimeMismatch(
   result.mismatchedRoles = affectedRoleIds;
   return result;
 }
+
+const BRIDGE_SOURCE_TEXT: Record<string, string> = {
+  task_pin: 'pinned on the task',
+  fleet: 'set on this fleet row',
+  chain_directory: "from the chain's directory",
+  coordinator: "the coordinator's bridge",
+};
+const MODEL_SOURCE_TEXT: Record<string, string> = {
+  fleet: 'set on this fleet row',
+  bridge_override: 'set for this bridge',
+  catalog_default: 'default for this bridge',
+};
+
+export interface EffectivePlacementText {
+  /** e.g. "dawnstar"; "" when no bridge resolves. */
+  bridge: string;
+  bridgeSource: string;
+  /** e.g. "claude · claude-sonnet-5-5"; "" when no model resolves. */
+  model: string;
+  modelSource: string;
+  /** One line for the UI, never "inherit" / "default". */
+  summary: string;
+}
+
+/**
+ * Words for what will actually be applied (plan REQ-UI-12). `bridgeName` turns a
+ * bridge id into its label.
+ */
+export function describeEffectivePlacement(
+  eff: { bridge_id?: string; bridge_source?: string; provider?: string; model?: string; model_source?: string } | null | undefined,
+  bridgeName: (bridgeId: string) => string,
+): EffectivePlacementText {
+  const bridgeId = String(eff?.bridge_id || '');
+  if (!bridgeId) {
+    return {
+      bridge: '',
+      bridgeSource: '',
+      model: '',
+      modelSource: '',
+      summary: 'No bridge yet: add a chain directory or pin a bridge',
+    };
+  }
+  const bridge = bridgeName(bridgeId);
+  const bridgeSource = BRIDGE_SOURCE_TEXT[String(eff?.bridge_source || '')] || '';
+  const model = eff?.provider && eff?.model ? `${eff.provider} · ${eff.model}` : '';
+  const modelSource = MODEL_SOURCE_TEXT[String(eff?.model_source || '')] || '';
+  const summary = model
+    ? `${bridge} (${bridgeSource}) · ${model} (${modelSource})`
+    : `${bridge} (${bridgeSource}) · no model available on this bridge`;
+  return { bridge, bridgeSource, model, modelSource, summary };
+}
+
+/**
+ * The placement a task would get: its bridge pin first, then the assignee's
+ * fleet row, else the first worker row (any free worker).
+ */
+export function taskEffectivePlacement(
+  task: { bridge_id?: string; brief?: { assignee?: string } | null },
+  fleets: any[] = [],
+): { bridge_id: string; bridge_source: string; provider: string; model: string; model_source: string } | null {
+  const assignee = String(task.brief?.assignee || '');
+  const rows = (fleets || []).filter((f) => (f?.roles || ['worker']).includes('worker'));
+  const row = (assignee ? rows.find((f) => String(f.agent_id || f.agentId) === assignee) : rows[0]) || null;
+  const eff = row?.effective || null;
+  const pin = String(task.bridge_id || '');
+  if (pin) {
+    // The model shown is the row's; a different pinned bridge may change it.
+    return {
+      bridge_id: pin,
+      bridge_source: 'task_pin',
+      provider: eff?.provider || '',
+      model: eff?.model || '',
+      model_source: eff?.model_source || 'none',
+    };
+  }
+  return eff ? { ...eff } : null;
+}

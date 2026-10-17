@@ -15,6 +15,7 @@ import {
 } from './taskV2Types';
 import { TASK_ACTION_LABELS, editLock, getTaskActions, isDraft, type TaskActionId } from './taskActions';
 import { TaskEditModal, type TaskEditField } from './TaskEditModal';
+import { describeEffectivePlacement, taskEffectivePlacement } from './fleetSelection';
 import { useTaskActions } from './useTaskActions';
 import { TaskDetails } from './TaskDetails';
 import { HolderName } from './HolderName';
@@ -92,6 +93,8 @@ export const TaskCard: React.FC<TaskCardProps> = ({
   const holderLease = workLeaseHolder(task, now);
   const holderUnnamed = Boolean(holderLease && !names.instance(holderLease.instanceId));
   const people = getTaskPeople(task, chainFleets);
+  // The bridge that will actually be used (plan REQ-UI-12), never "inherit".
+  const placement = describeEffectivePlacement(taskEffectivePlacement(task, chainFleets), names.bridge);
   const actions = useTaskActions(chainId, task.task_id, task.title);
   const { primary, more } = getTaskActions(task);
 
@@ -233,11 +236,11 @@ export const TaskCard: React.FC<TaskCardProps> = ({
                 {editButton('deps', 'Change what it waits for')}
               </span>
             )}
-            {task.bridge_id && (
-              <span>
-                bridge: <span className="font-semibold text-primary">{names.bridge(task.bridge_id)}</span>
+            {placement.bridge ? (
+              <span title={`Bridge ${placement.bridgeSource}${placement.model ? `; model ${placement.model} (${placement.modelSource})` : ''}`}>
+                bridge: <span className="font-semibold text-primary">{placement.bridge}</span>
               </span>
-            )}
+            ) : null}
             {badges.map((b, i) => (
               <Badge key={i} tone={uiToneForBadge(b.tone)} title={b.title}>
                 {b.label}

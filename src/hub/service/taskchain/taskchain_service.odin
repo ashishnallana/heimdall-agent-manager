@@ -1990,6 +1990,60 @@ resolve_fleet_launch_model :: proc(service: ^Taskchain_Service, bridge_id, provi
 	return taskv2.resolve_launch_model(service.agent_service, bridge_id, provider, model)
 }
 
+// Effective_Placement is the bridge / provider / model the matcher would apply
+// to a fleet row (Task v2 plan REQ-UI-12), with where each value came from, so
+// the UI shows real values instead of "inherit" / "default". Strings are
+// temp-allocated.
+Effective_Placement :: struct {
+	bridge_id:     string `json:"bridge_id"`,
+	// task_pin | fleet | chain_directory | coordinator | none
+	bridge_source: string `json:"bridge_source"`,
+	provider:      string `json:"provider"`,
+	model:         string `json:"model"`,
+	// fleet | bridge_override | catalog_default | none
+	model_source:  string `json:"model_source"`,
+}
+
+// effective_placement mirrors taskv2.resolve_placement (bridge: task pin, then
+// fleet row, then the chain's first directory, then the coordinator's bridge)
+// and the matcher's model resolution (the fleet row's model for that bridge,
+// else the catalog default the bridge supports). `task_pin` is "" for a fleet
+// row on its own.
+effective_placement :: proc(service: ^Taskchain_Service, chain: domain.Task_Chain, fleet: domain.Task_Chain_Fleet, task_pin := "") -> Effective_Placement {
+	out := Effective_Placement{bridge_source = "none", model_source = "none"}
+	if pin := strings.trim_space(task_pin); pin != "" {
+		out.bridge_id, out.bridge_source = strings.clone(pin, context.temp_allocator), "task_pin"
+	} else if fb := strings.trim_space(fleet.bridge_id); fb != "" {
+		out.bridge_id, out.bridge_source = strings.clone(fb, context.temp_allocator), "fleet"
+	} else {
+		if dirs, derr := iface.taskchain_list_directories_by_chain(service.repo, chain.chain_id, chain.owner_user_id); derr.code == .None {
+			if len(dirs) > 0 && strings.trim_space(dirs[0].bridge_id) != "" {
+				out.bridge_id, out.bridge_source = strings.clone(dirs[0].bridge_id, context.temp_allocator), "chain_directory"
+			}
+			delete(dirs)
+		}
+		if out.bridge_id == "" && chain.coordinator_agent_instance_id != "" && service.agents != nil {
+			if inst, ok, _ := iface.agent_get_instance(service.agents, chain.coordinator_agent_instance_id); ok && inst.bridge_id != "" {
+				out.bridge_id, out.bridge_source = strings.clone(inst.bridge_id, context.temp_allocator), "coordinator"
+			}
+		}
+	}
+	if out.bridge_id == "" do return out
+	provider, model := fleet_model_on_bridge(fleet, out.bridge_id)
+	if provider != "" && model != "" {
+		out.provider, out.model = strings.clone(provider, context.temp_allocator), strings.clone(model, context.temp_allocator)
+		out.model_source = "fleet" if provider == fleet.provider && model == fleet.model else "bridge_override"
+		return out
+	}
+	rp, rm := resolve_fleet_launch_model(service, out.bridge_id, provider, model)
+	defer delete(rp)
+	defer delete(rm)
+	if rp != "" && rm != "" {
+		out.provider, out.model, out.model_source = strings.clone(rp, context.temp_allocator), strings.clone(rm, context.temp_allocator), "catalog_default"
+	}
+	return out
+}
+
 // cancel_task is a human/coordinator verb: the engine records `cancelled`,
 // reclaims any lease (stop[] the holder) and re-plans the chain. Dependents are
 // not touched (a cancelled prerequisite unblocks them — the human decided).
