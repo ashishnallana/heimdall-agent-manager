@@ -104,9 +104,9 @@ test('getTaskBadges derives TTL countdown and tone for in-progress lease', () =>
     ],
   });
   const badges12m = getTaskBadges(task12m, [], nowMs);
-  const ttlBadge12m = badges12m.find((b) => b.label.includes('⏱'));
+  const ttlBadge12m = badges12m.find((b) => b.label.endsWith('m left'));
   assert.ok(ttlBadge12m, 'Should have TTL badge');
-  assert.equal(ttlBadge12m.label, '⏱ worker · 12m');
+  assert.equal(ttlBadge12m.label, 'worker · 12m left');
   assert.equal(ttlBadge12m.tone, 'accent');
 
   // 4 mins left -> warn
@@ -122,7 +122,7 @@ test('getTaskBadges derives TTL countdown and tone for in-progress lease', () =>
     ],
   });
   const badges4m = getTaskBadges(task4m, [], nowMs);
-  const ttlBadge4m = badges4m.find((b) => b.label.includes('⏱'));
+  const ttlBadge4m = badges4m.find((b) => b.label.endsWith('m left'));
   assert.equal(ttlBadge4m?.tone, 'warn');
 
   // 2 mins left -> danger
@@ -138,7 +138,7 @@ test('getTaskBadges derives TTL countdown and tone for in-progress lease', () =>
     ],
   });
   const badges2m = getTaskBadges(task2m, [], nowMs);
-  const ttlBadge2m = badges2m.find((b) => b.label.includes('⏱'));
+  const ttlBadge2m = badges2m.find((b) => b.label.endsWith('m left'));
   assert.equal(ttlBadge2m?.tone, 'danger');
 });
 
@@ -153,7 +153,7 @@ test('getTaskBadges derives bridge pin, attempt count, review roles, blocked on 
   // Bridge pin on idle task
   const pinnedTask = makeTask({ bridge_id: 'prod-edge-1' });
   const pinnedBadges = getTaskBadges(pinnedTask, [], nowMs);
-  assert.ok(pinnedBadges.some((b) => b.label === '⌂ prod-edge-1'));
+  assert.ok(pinnedBadges.some((b) => b.label === 'bridge prod-edge-1'));
 
   // Attempt count >= 2
   const attemptTask = makeTask({ attempt_no: 3 });
@@ -188,12 +188,12 @@ test('getTaskBadges derives bridge pin, attempt count, review roles, blocked on 
     },
   });
   const blockedBadges = getTaskBadges(blockedTask, [], nowMs);
-  assert.ok(blockedBadges.some((b) => b.label === '⛔ blocked on you' && b.tone === 'danger'));
+  assert.ok(blockedBadges.some((b) => b.label === 'Blocked on you' && b.tone === 'danger'));
 
   // Done state
   const doneTask = makeTask({ state: 'done' });
   const doneBadges = getTaskBadges(doneTask, [], nowMs);
-  assert.ok(doneBadges.some((b) => b.label === '✓ verified' && b.tone === 'ok'));
+  assert.ok(doneBadges.some((b) => b.label === 'Verified' && b.tone === 'ok'));
 });
 
 test('getTaskStatusLines generates human-readable status sentences for each state', () => {

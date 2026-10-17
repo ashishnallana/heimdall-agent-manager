@@ -132,11 +132,11 @@ export const TaskCard: React.FC<TaskCardProps> = ({
           className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted"
         >
           <span title={people.assignee ? `Pinned to agent ${people.assignee}` : 'Granted to the next free fleet worker'}>
-            👤 <span className={people.workers.length ? 'text-primary' : 'text-warning'}>{workerLabel}</span>
+            Assignee: <span className={people.workers.length ? 'text-primary' : 'text-warning'}>{workerLabel}</span>
           </span>
           {reviewerLabel && (
             <span title="Must approve before Done">
-              ✓ <span className="text-primary">{reviewerLabel}</span>
+              Reviewers: <span className="text-primary">{reviewerLabel}</span>
             </span>
           )}
         </div>

@@ -60,20 +60,20 @@ export function getTaskBadges(task: TaskWire, _chainFleets?: any[], nowMs: numbe
     const holder = lease.holder_instance_id ? lease.holder_instance_id.split('_').slice(-1)[0] : 'agent';
     const tone = leftMins <= 3 ? 'danger' : leftMins <= 5 ? 'warn' : 'accent';
     badges.push({
-      label: `⏱ ${holder} · ${leftMins}m`,
+      label: `${holder} · ${leftMins}m left`,
       tone,
       title: `Lease expires in ${leftMins} minutes (held by ${lease.holder_instance_id})`,
     });
     if (lease.bridge_id || task.bridge_id) {
       badges.push({
-        label: `⌂ ${lease.bridge_id || task.bridge_id}`,
+        label: `bridge ${lease.bridge_id || task.bridge_id}`,
         tone: 'neutral',
         title: `Bridge: ${lease.bridge_id || task.bridge_id}`,
       });
     }
   } else if (task.bridge_id) {
     badges.push({
-      label: `⌂ ${task.bridge_id}`,
+      label: `bridge ${task.bridge_id}`,
       tone: 'neutral',
       title: `Pinned bridge: ${task.bridge_id}`,
     });
@@ -106,7 +106,7 @@ export function getTaskBadges(task: TaskWire, _chainFleets?: any[], nowMs: numbe
 
   if (task.blocked_on) {
     badges.push({
-      label: '⛔ blocked on you',
+      label: 'Blocked on you',
       tone: 'danger',
       title: String(task.blocked_on.reason || 'Blocked waiting on human answer'),
     });
@@ -114,7 +114,7 @@ export function getTaskBadges(task: TaskWire, _chainFleets?: any[], nowMs: numbe
 
   if (state === 'done') {
     badges.push({
-      label: '✓ verified',
+      label: 'Verified',
       tone: 'ok',
       title: 'Task completed and verified',
     });

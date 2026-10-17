@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
+import { Icon } from '@ui';
 import { TaskWire } from '../../api/taskWire';
 import { TaskSummaryBar } from './TaskSummaryBar';
-import { FleetPlacementSection } from './FleetPlacementSection';
 import { TaskCard } from './TaskCard';
 import {
   TASK_STATES_ORDER,
@@ -92,13 +92,6 @@ export const TicketBoardView: React.FC<TicketBoardViewProps> = ({
         summaryText={summaryText}
       />
 
-      {/* Fleet placement editor */}
-      <FleetPlacementSection
-        chainId={chainId}
-        chainFleets={chainFleets}
-        onOpenDrawer={onOpenFleetDrawer}
-      />
-
       {/* Header with New Task button */}
       <div className="flex items-center justify-between pt-2">
         <h2 className="text-xs font-bold uppercase tracking-wider text-muted">
@@ -156,9 +149,7 @@ export const TicketBoardView: React.FC<TicketBoardViewProps> = ({
                     {list.length}
                   </span>
                 </div>
-                <span className="font-mono text-xs text-muted">
-                  {isOpen ? '▾' : '▸'}
-                </span>
+                <Icon name={isOpen ? 'chevron-down' : 'chevron-right'} size="sm" className="text-muted" />
               </header>
 
               {isOpen && (

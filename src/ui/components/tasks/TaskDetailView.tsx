@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { Icon } from '@ui';
 import { TaskWire } from '../../api/taskWire';
 import {
   useFetchTaskEventsQuery,
@@ -250,7 +251,7 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
           onClick={onClose}
           className="inline-flex items-center gap-1.5 rounded-lg border border-subtle bg-surface px-3 py-1.5 text-xs font-semibold text-primary hover:bg-surface-raised transition-colors"
         >
-          <span>←</span>
+          <Icon name="arrow-left" size="sm" />
           <span>Tasks</span>
         </button>
 
@@ -336,7 +337,7 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
               disabled={isReviewing}
               className="rounded-lg bg-success px-3 py-1.5 text-xs font-semibold text-white hover:opacity-90 transition-opacity"
             >
-              Approve → Done
+              Approve
             </button>
             <button
               type="button"
@@ -463,7 +464,7 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
               disabled={isReviewing}
               className="rounded-lg bg-success px-4 py-1.5 text-xs font-semibold text-white hover:opacity-90"
             >
-              Approve → Done
+              Approve
             </button>
             <button
               type="button"
@@ -504,9 +505,12 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
             <ul className="space-y-1">
               {task.brief.acceptance.map((crit, idx) => (
                 <li key={idx} className="flex items-start gap-2 text-xs text-primary">
-                  <span className={state === 'done' ? 'text-success' : 'text-faint'}>
-                    {state === 'done' ? '✓' : '○'}
-                  </span>
+                  <Icon
+                    name="check"
+                    size="sm"
+                    className={state === 'done' ? 'text-success' : 'text-faint opacity-40'}
+                    title={state === 'done' ? 'Met' : 'Not yet verified'}
+                  />
                   <span>{crit}</span>
                 </li>
               ))}
@@ -617,7 +621,7 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
           {baseSha && headSha && (
             <div className="flex items-center gap-2 font-mono text-[11px] text-faint">
               <span>{baseSha.slice(0, 8)}</span>
-              <span>→</span>
+              <span>to</span>
               <span className="text-primary font-semibold">{headSha.slice(0, 8)}</span>
             </div>
           )}

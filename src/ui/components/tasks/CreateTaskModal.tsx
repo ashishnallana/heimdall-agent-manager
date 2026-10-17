@@ -409,14 +409,14 @@ export const CreateTaskModal: React.FC<CreateTaskModalProps> = ({
                     >
                       <Icon name="check" size={11} className="text-accent" />
                       <span>{label}</span>
-                      <button
-                        type="button"
+                      <IconButton
+                        icon="close"
+                        label="Remove reviewer"
+                        variant="ghost"
+                        size="sm"
                         onClick={() => handleRemoveReviewer(idx)}
-                        className="text-muted hover:text-danger ml-0.5 cursor-pointer"
-                        title="Remove reviewer"
-                      >
-                        ×
-                      </button>
+                        className="ml-0.5"
+                      />
                     </span>
                   );
                 })}

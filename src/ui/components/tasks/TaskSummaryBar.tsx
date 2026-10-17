@@ -1,4 +1,5 @@
 import React from 'react';
+import { Icon } from '@ui';
 import { TaskWire } from '../../api/taskWire';
 import {
   TASK_STATES_ORDER,
@@ -193,7 +194,7 @@ export const TaskSummaryBar: React.FC<TaskSummaryBarProps> = ({
             onClick={() => onSelectTask?.(blockedTasks[0].task_id)}
             className="inline-flex items-center gap-1.5 rounded-lg border border-danger/40 bg-danger-soft px-2.5 py-1 text-xs font-semibold text-danger hover:bg-danger/20 transition-colors"
           >
-            <span>⛔</span>
+            <Icon name="alert" size="sm" />
             <span>{blockedTasks.length} blocked on you</span>
           </button>
         )}
@@ -205,7 +206,7 @@ export const TaskSummaryBar: React.FC<TaskSummaryBarProps> = ({
             onClick={() => onSelectTask?.(awaitingUserTasks[0].task_id)}
             className="inline-flex items-center gap-1.5 rounded-lg border border-accent/40 bg-accent-soft px-2.5 py-1 text-xs font-semibold text-accent hover:bg-accent/20 transition-colors"
           >
-            <span>✎</span>
+            <Icon name="pencil" size="sm" />
             <span>{awaitingUserTasks.length} awaiting your approval</span>
           </button>
         )}
@@ -217,7 +218,7 @@ export const TaskSummaryBar: React.FC<TaskSummaryBarProps> = ({
             onClick={() => onSelectTask?.(expiringTasks[0].task_id)}
             className="inline-flex items-center gap-1.5 rounded-lg border border-warning/40 bg-warning-soft px-2.5 py-1 text-xs font-semibold text-warning hover:bg-warning/20 transition-colors"
           >
-            <span>⏱</span>
+            <Icon name="clock" size="sm" />
             <span>{expiringTasks.length} lease expiring</span>
           </button>
         )}
@@ -229,21 +230,21 @@ export const TaskSummaryBar: React.FC<TaskSummaryBarProps> = ({
             onClick={() => onSelectTask?.(unclaimedTasks[0].task_id)}
             className="inline-flex items-center gap-1.5 rounded-lg border border-warning/40 bg-warning-soft px-2.5 py-1 text-xs font-semibold text-warning hover:bg-warning/20 transition-colors"
           >
-            <span>⏳</span>
+            <Icon name="clock" size="sm" />
             <span>{unclaimedTasks.length} ready but unclaimed</span>
           </button>
         )}
 
         {isWorkflow && anyStageFailed && (
           <span className="inline-flex items-center gap-1.5 rounded-lg border border-danger/40 bg-danger-soft px-2.5 py-1 text-xs font-semibold text-danger">
-            <span>!</span>
+            <Icon name="alert" size="sm" />
             <span>Stage {anyStageFailed.key} failed — downstream on hold</span>
           </span>
         )}
 
         {isWorkflow && allStagesComplete && (
           <span className="inline-flex items-center gap-1.5 rounded-lg border border-success/40 bg-success-soft px-2.5 py-1 text-xs font-semibold text-success">
-            <span>✓</span>
+            <Icon name="check" size="sm" />
             <span>Run complete</span>
           </span>
         )}
@@ -258,8 +259,8 @@ export const TaskSummaryBar: React.FC<TaskSummaryBarProps> = ({
         {/* Nothing needs you chip */}
         {blockedTasks.length === 0 && awaitingUserTasks.length === 0 && !anyStageFailed && (
           <span className="inline-flex items-center gap-1 rounded-lg border border-success/30 bg-success-soft px-2 py-0.5 text-xs font-medium text-success">
-            <span>✓</span>
-            <span>nothing needs you</span>
+            <Icon name="check" size="sm" />
+            <span>Nothing needs you</span>
           </span>
         )}
       </div>

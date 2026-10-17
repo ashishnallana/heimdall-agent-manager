@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { IconButton } from '@ui';
 import { useFetchTaskChainDetailQuery } from '../../api/endpoints/tasks';
 import { useGetTaskChainFleetsQuery } from '../../api/endpoints/taskChains';
 import { useListBridgesQuery } from '../../api/endpoints/bridgeSupport';
@@ -173,13 +174,14 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
               + Task
             </button>
             {onClose && (
-              <button
-                type="button"
+              <IconButton
+                icon="close"
+                label="Close task chain"
+                variant="ghost"
+                size="sm"
                 onClick={onClose}
-                className="text-muted hover:text-primary text-sm font-bold ml-1"
-              >
-                ✕
-              </button>
+                className="ml-1"
+              />
             )}
           </div>
         </header>

@@ -462,7 +462,7 @@ export const TaskChainsPage: React.FC<TaskChainsPageProps> = ({ chainId: initial
       setDecryptedProjects(
         projects.map((p) => ({
           ...p,
-          name: p.name ? p.name.replace(/vault:v1:[A-Za-z0-9+/=_-]+/g, '[🔒 Encrypted]') : p.name,
+          name: p.name ? p.name.replace(/vault:v1:[A-Za-z0-9+/=_-]+/g, '[Encrypted]') : p.name,
         }))
       );
       return;
@@ -749,7 +749,7 @@ export const TaskChainsPage: React.FC<TaskChainsPageProps> = ({ chainId: initial
               onClick={() => setShowWorkflowDefsModal(true)}
               className="inline-flex items-center gap-1.5 rounded-lg border border-subtle bg-surface px-3 py-1 text-xs font-semibold text-primary hover:border-accent hover:text-accent transition-colors"
             >
-              <span>⚙</span>
+              <Icon name="gear" size={14} />
               <span>Workflows</span>
             </button>
             <button

@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { Icon, type IconName } from '@ui';
 import { TaskWire } from '../../api/taskWire';
 import { TaskSummaryBar } from './TaskSummaryBar';
 import { TaskCard } from './TaskCard';
@@ -151,7 +152,7 @@ export const WorkflowPipelineView: React.FC<WorkflowPipelineViewProps> = ({
 
           const isOpen = openStages[st.key] !== false;
 
-          const glyph = complete ? '✓' : failed ? '!' : active ? '◐' : '○';
+          const stageIcon: IconName | null = complete ? 'check' : failed ? 'alert' : active ? 'clock' : null;
           const glyphColor = complete
             ? 'bg-success-soft text-success border-success/40'
             : failed
@@ -186,7 +187,7 @@ export const WorkflowPipelineView: React.FC<WorkflowPipelineViewProps> = ({
                   <span
                     className={`grid h-5 w-5 place-items-center rounded-full border text-[11px] font-bold shrink-0 ${glyphColor}`}
                   >
-                    {glyph}
+                    {stageIcon ? <Icon name={stageIcon} size={12} /> : null}
                   </span>
                   <span className="truncate text-xs font-bold text-primary">
                     {st.title || st.key}
@@ -217,9 +218,7 @@ export const WorkflowPipelineView: React.FC<WorkflowPipelineViewProps> = ({
                             ? `expands from ${st.for_each}`
                             : '1 instance'}
                   </span>
-                  <span className="font-mono text-xs text-muted">
-                    {isOpen ? '▾' : '▸'}
-                  </span>
+                  <Icon name={isOpen ? 'chevron-down' : 'chevron-right'} size="sm" className="text-muted" />
                 </div>
               </header>
 
@@ -249,7 +248,7 @@ export const WorkflowPipelineView: React.FC<WorkflowPipelineViewProps> = ({
                       </p>
                       {normalizeTaskState(gateTask.state) === 'done' ? (
                         <div className="inline-flex items-center gap-1.5 text-xs font-semibold text-success">
-                          <span>✓</span>
+                          <Icon name="check" size="sm" />
                           <span>Approved — downstream stages unlocked</span>
                         </div>
                       ) : (
@@ -273,7 +272,7 @@ export const WorkflowPipelineView: React.FC<WorkflowPipelineViewProps> = ({
                             onClick={() => onSelectTask(gateTask.task_id)}
                             className="ml-auto text-xs text-accent hover:underline"
                           >
-                            View Gate Details →
+                            View gate details
                           </button>
                         </div>
                       )}

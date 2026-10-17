@@ -81,16 +81,6 @@ export function formatFleetRoleName(agentId?: string, identities?: any[]): strin
   return agentId.charAt(0).toUpperCase() + agentId.slice(1);
 }
 
-export function renderSlotDots(active: number, capacity: number): string {
-  const cap = Math.max(1, Math.min(capacity, 10));
-  const act = Math.max(0, Math.min(active, cap));
-  let dots = '';
-  for (let i = 0; i < cap; i++) {
-    dots += i < act ? '●' : '○';
-  }
-  return dots;
-}
-
 export function getQueuedWaitingSlotName(task: any, identities?: any[]): string {
   if (!task) return 'Worker';
   const status = String(task.status || '').toLowerCase();
@@ -186,9 +176,6 @@ export const FleetSlotChips: React.FC<FleetSlotChipsProps> = ({
               {rolesBadge}
             </span>
             <span className="font-mono text-[11px]">{activeCount}/{capacity} active</span>
-            <span className="text-accent text-[11px] tracking-tighter select-none font-mono">
-              {renderSlotDots(activeCount, capacity)}
-            </span>
           </button>
         );
       })}
@@ -1041,7 +1028,7 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
                 idleTtlModified;
 
               const pendingParts: string[] = [];
-              if (capacityModified) pendingParts.push(`${origCapacity ?? 0} → ${effectiveCapacity}`);
+              if (capacityModified) pendingParts.push(`capacity ${origCapacity ?? 0} to ${effectiveCapacity}`);
               if (rolesModified) pendingParts.push(`Roles: ${formatFleetRolesBadge(effectiveRoles)}`);
               if (bridgeModified) pendingParts.push(`Bridge: ${effectiveBridgeId || 'inherit'}`);
               if (runtimeModified) pendingParts.push('Provider/model settings changed');
@@ -1081,7 +1068,6 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
                           </span>
                         </h4>
                         <div className="flex flex-wrap items-center gap-1 text-[11px] text-muted font-mono mt-0.5">
-                          <span className="text-accent">{renderSlotDots(activeCount, effectiveCapacity)}</span>
                           <span>{activeCount}/{effectiveCapacity} active</span>
                           {isModified && (
                             <span
@@ -1467,7 +1453,7 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
               >
                 {restartSummary.restartedByRole.map((role) => (
                   <div key={role.agentId} className="flex items-center gap-1.5 text-xs text-success">
-                    <span>✓</span>
+                    <Icon name="check" size="sm" />
                     <span>
                       {formatFleetRoleName(role.agentId, agentIdentities)}: restarted {role.count}{' '}
                       {role.count === 1 ? 'instance' : 'instances'}
@@ -1496,7 +1482,7 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
               </span>
             ) : successMsg ? (
               <span className="text-success font-medium flex items-center gap-1">
-                ✓ {successMsg}
+                <Icon name="check" size="sm" /> {successMsg}
               </span>
             ) : (
               <span className="text-faint">No pending changes</span>
