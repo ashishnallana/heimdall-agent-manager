@@ -644,15 +644,24 @@ bridge_online :: proc(svc: ^Service, bridge_id: string) -> bool {
 	return bridge.status == .Online
 }
 
-// directory_has_work_lease: Task System v2 (Milestone M5). For VCS-tracked directories
-// (git or jj), per-lease worktrees isolate concurrent checkouts, lifting the one-work-lease
-// cap. For directories without VCS isolation, preserve the single-lease safety guard.
+// PER_LEASE_WORKTREES_ENABLED: per-lease worktrees (M5) let several work leases
+// run in one VCS directory, each in its own checkout. The bridge has the
+// worktree helpers but nothing creates a worktree at grant yet, so concurrent
+// leases would share ONE checkout (seen live: one agent's uncommitted work was
+// wiped by another's cleanup). Until the grant/merge path is wired, keep the
+// one-work-lease-per-directory guard for every directory.
+PER_LEASE_WORKTREES_ENABLED :: false
+
+// directory_has_work_lease: one live work lease per chain directory (VCS
+// directories exempt only when PER_LEASE_WORKTREES_ENABLED).
 directory_has_work_lease :: proc(svc: ^Service, chain: domain.Task_Chain, directory_id: string) -> bool {
 	dirs, derr := iface.taskchain_list_directories_by_chain(svc.repo, chain.chain_id, chain.owner_user_id)
 	if derr.code != .None do return false
-	for d in dirs {
-		if d.directory_id == directory_id {
-			if d.vcs_kind == "git" || d.vcs_kind == "jj" do return false
+	if PER_LEASE_WORKTREES_ENABLED {
+		for d in dirs {
+			if d.directory_id == directory_id {
+				if d.vcs_kind == "git" || d.vcs_kind == "jj" do return false
+			}
 		}
 	}
 	bridge_of_dir := ""
