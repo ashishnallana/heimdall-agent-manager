@@ -90,6 +90,8 @@ export const TicketBoardView: React.FC<TicketBoardViewProps> = ({
       onScrolled={onScrolled}
       chainFleets={chainFleets}
       names={names}
+      chainTasks={tasks}
+      chainKind=''
     />
   );
 

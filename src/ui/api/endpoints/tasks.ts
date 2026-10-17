@@ -813,8 +813,8 @@ export const tasksApi = heimdallApi.injectEndpoints({
       ],
     }),
     // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
-    updateTaskDetail: build.mutation<any, { chainId: string; taskId: string; title?: string; description?: string; assigneeRef?: any; reviewerRefs?: any[]; requiresUserApproval?: boolean; dependsOn?: string[]; bridgeId?: string }>({
-      queryFn: async ({ chainId, taskId, title, description, assigneeRef, reviewerRefs, requiresUserApproval, dependsOn, bridgeId }, api) => {
+    updateTaskDetail: build.mutation<any, { chainId: string; taskId: string; title?: string; description?: string; assigneeRef?: any; reviewerRefs?: any[]; reviewRoles?: string[]; requiresUserApproval?: boolean; dependsOn?: string[]; bridgeId?: string }>({
+      queryFn: async ({ chainId, taskId, title, description, assigneeRef, reviewerRefs, reviewRoles, requiresUserApproval, dependsOn, bridgeId }, api) => {
         try {
           const state: any = api.getState();
           const isUnlocked = Boolean(state?.vault?.isUnlocked);
@@ -837,6 +837,8 @@ export const tasksApi = heimdallApi.injectEndpoints({
           if (encDesc !== undefined) body.description = encDesc;
           if (assigneeRef !== undefined) body.assignee_ref = assigneeRef;
           if (reviewerRefs !== undefined) body.reviewer_refs = reviewerRefs;
+          // Task v2: fleet roles that must approve (brief.review_roles), e.g. ['reviewer', 'security'].
+          if (reviewRoles !== undefined) body.review_roles = reviewRoles;
           if (requiresUserApproval !== undefined) body.requires_user_approval = requiresUserApproval;
           if (dependsOn !== undefined) body.depends_on = dependsOn;
           // REQ-TB-5: presence-checked like the hub PATCH — an undefined bridgeId

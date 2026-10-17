@@ -13,7 +13,8 @@ import {
   workLeaseHolder,
   uiToneForPriority,
 } from './taskV2Types';
-import { TASK_ACTION_LABELS, getTaskActions, isDraft, type TaskActionId } from './taskActions';
+import { TASK_ACTION_LABELS, editLock, getTaskActions, isDraft, type TaskActionId } from './taskActions';
+import { TaskEditModal, type TaskEditField } from './TaskEditModal';
 import { useTaskActions } from './useTaskActions';
 import { TaskDetails } from './TaskDetails';
 import { HolderName } from './HolderName';
@@ -29,6 +30,10 @@ export interface TaskCardProps {
   onSelectTask?: (taskId: string) => void;
   chainFleets?: any[];
   names?: TaskNames;
+  /** Every task of the chain (dependency picker). */
+  chainTasks?: TaskWire[];
+  /** 'workflow' locks manual edits (the run owns its tasks). */
+  chainKind?: string;
   /** Scroll this card into view once it is mounted (deep links, dependency jumps). */
   scrollIntoView?: boolean;
   onScrolled?: () => void;
@@ -51,8 +56,24 @@ export const TaskCard: React.FC<TaskCardProps> = ({
   names = EMPTY_TASK_NAMES,
   scrollIntoView = false,
   onScrolled,
+  chainTasks = [],
+  chainKind = '',
   className = '',
 }) => {
+  const [editing, setEditing] = React.useState<TaskEditField | null>(null);
+  const lock = editLock(task, chainKind);
+  const editButton = (field: TaskEditField, label: string) => (
+    <IconButton
+      icon="pencil"
+      label={lock.locked ? `${label}: ${lock.reason}` : label}
+      variant="ghost"
+      size="sm"
+      disabled={lock.locked}
+      data-debug-id={`task-card-edit-${field}-${task.task_id}`}
+      onClick={() => setEditing(field)}
+      className="-my-1"
+    />
+  );
   const cardRef = React.useRef<HTMLElement | null>(null);
   // Runs after the card exists in the DOM, so a cold deep link (the chain still
   // loading when the route is read) scrolls once its tasks arrive.
@@ -177,20 +198,23 @@ export const TaskCard: React.FC<TaskCardProps> = ({
             data-debug-id={`task-card-people-${task.task_id}`}
             className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted"
           >
-            <span>
+            <span className="inline-flex items-center gap-0.5">
               assignee:{' '}
               {people.holder ? (
                 <HolderName instanceId={people.holder} names={names} className="font-semibold text-primary" />
               ) : (
                 <span className={people.workers.length ? 'font-semibold text-primary' : 'text-warning'}>{workerLabel}</span>
               )}
+              {editButton('assignee', 'Change assignee')}
             </span>
-            <span>
+            <span className="inline-flex items-center gap-0.5">
               reviewers: <span className={reviewerLabel ? 'font-semibold text-primary' : 'text-faint'}>{reviewerLabel || 'none'}</span>
+              {editButton('reviewers', 'Change reviewers')}
             </span>
-            {deps.length > 0 && (
-              <span>
+            {(deps.length > 0 || !lock.locked) && (
+              <span className="inline-flex flex-wrap items-center gap-0.5">
                 waits for:{' '}
+                {deps.length === 0 && <span className="text-faint">nothing</span>}
                 {deps.map((d, i) => (
                   <React.Fragment key={d}>
                     {i > 0 ? ', ' : ''}
@@ -206,6 +230,7 @@ export const TaskCard: React.FC<TaskCardProps> = ({
                     </Link>
                   </React.Fragment>
                 ))}
+                {editButton('deps', 'Change what it waits for')}
               </span>
             )}
             {task.bridge_id && (
@@ -244,6 +269,16 @@ export const TaskCard: React.FC<TaskCardProps> = ({
           </div>
         )}
       </div>
+
+      <TaskEditModal
+        chainId={chainId}
+        task={task}
+        field={editing}
+        onClose={() => setEditing(null)}
+        tasks={chainTasks}
+        chainFleets={chainFleets}
+        names={names}
+      />
 
       {expanded && (
         <TaskDetails

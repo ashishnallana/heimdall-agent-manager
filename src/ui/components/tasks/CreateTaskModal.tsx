@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from 'react';
-import { Button, Checkbox, FormField, Icon, IconButton, Input, Select, Textarea } from '@ui';
+import { Button, Checkbox, FormField, Icon, IconButton, Input, Select, StatusPill, Textarea } from '@ui';
+import { TASK_STATE_LABELS, TASK_STATE_TONE, normalizeTaskState } from './taskV2Types';
 import { useCreateTaskMutation } from '../../api/endpoints/tasks';
 import { useListAgentIdentitiesQuery } from '../../api/endpoints/agents';
 import { useListBridgesQuery } from '../../api/endpoints/bridgeSupport';
@@ -435,9 +436,9 @@ export const CreateTaskModal: React.FC<CreateTaskModalProps> = ({
 
           {/* Depends On Section */}
           {existingTasks.length > 0 && (
-            <div className="rounded-lg border border-subtle bg-surface-raised/40 p-3 space-y-2">
+            <div className="space-y-2 border-t border-subtle pt-3">
               <label className="block font-semibold text-primary">
-                Blocked On (Depends On) {dependsOnIds.length > 0 && `(${dependsOnIds.length})`}
+                Waits for {dependsOnIds.length > 0 && `(${dependsOnIds.length})`}
               </label>
               <div className="max-h-36 overflow-y-auto space-y-1 rounded border border-subtle bg-surface p-2">
                 {existingTasks.map((t) => {
@@ -461,9 +462,10 @@ export const CreateTaskModal: React.FC<CreateTaskModalProps> = ({
                           }
                         }}
                       />
-                      <span className="font-mono text-muted text-[10px]">{tid}</span>
                       <span className="truncate flex-1 font-medium">{t.title}</span>
-                      <span className="text-[10px] text-faint uppercase font-mono">{t.status}</span>
+                      <StatusPill tone={TASK_STATE_TONE[normalizeTaskState(t.state || t.status)]}>
+                        {TASK_STATE_LABELS[normalizeTaskState(t.state || t.status)]}
+                      </StatusPill>
                     </label>
                   );
                 })}

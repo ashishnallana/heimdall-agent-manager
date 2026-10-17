@@ -84,3 +84,27 @@ export function getTaskActions(task: TaskWire): TaskActionSet {
   more.push('copy_id');
   return { primary, more };
 }
+
+export interface EditLock {
+  locked: boolean;
+  /** Why the assignee / reviewers / dependencies can't be changed right now. */
+  reason: string;
+}
+
+/**
+ * When a person may change who works on a task, who reviews it and what it
+ * waits for (plan REQ-UI-11). The hub refuses these edits while an agent holds
+ * the work lease, and always for workflow tasks (the run owns them).
+ */
+export function editLock(task: TaskWire, chainKind = ''): EditLock {
+  const state = normalizeTaskState(task.state);
+  if (chainKind === 'workflow' || String(task.stage_key || '').trim()) {
+    return { locked: true, reason: 'Workflow tasks are set by the run and cannot be edited.' };
+  }
+  if (state === 'done' || state === 'cancelled') return { locked: true, reason: 'Reopen the task to change it.' };
+  const working = (task.leases || []).some((l: any) => (l?.kind || 'work') === 'work');
+  if (working || state === 'in_progress') {
+    return { locked: true, reason: 'An agent is working on it. Wait, or cancel the current attempt first.' };
+  }
+  return { locked: false, reason: '' };
+}

@@ -199,6 +199,8 @@ export const WorkflowPipelineView: React.FC<WorkflowPipelineViewProps> = ({
                       onScrolled={onScrolled}
                       chainFleets={chainFleets}
                       names={names}
+                      chainTasks={tasks}
+                      chainKind='workflow'
                     />
                   ))}
                 </div>
