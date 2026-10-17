@@ -28,7 +28,7 @@ Fold_Input :: struct {
 	kind:                       domain.Task_Kind,
 	requires_user_approval:     bool,
 	require_independent_verify: bool,
-	// review_roles_count: len(brief.review_roles).
+	// review_roles_count: len(brief.review_roles) + len(brief.reviewers).
 	review_roles_count:         int,
 	// max_attempts: brief.budget.max_attempts, 0 → TASK_MAX_ATTEMPTS.
 	max_attempts:               int,
@@ -312,9 +312,13 @@ brief_auto_submit :: proc(brief_json: string) -> bool {
 	return false
 }
 
+// brief_review_roles_count: how many agent review requirements the brief has,
+// counting review roles AND named reviewers (hybrid review model). 0 means no
+// agent reviews the task, so a submit with no user approval goes straight to done.
 brief_review_roles_count :: proc(brief_json: string) -> int {
 	roles := jsonx.extract_string_array(brief_json, "review_roles", true, context.temp_allocator)
-	return len(roles)
+	named := jsonx.extract_string_array(brief_json, "reviewers", true, context.temp_allocator)
+	return len(roles) + len(named)
 }
 
 brief_review_roles :: proc(brief_json: string, allocator := context.allocator) -> [dynamic]string {
