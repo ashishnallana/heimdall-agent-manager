@@ -94,6 +94,24 @@ bridge_revoke_token_family_sqlite :: proc(ctx: rawptr, family_id, revoked_at: st
 	return int(sqlite3_changes(impl.conn.db)), true, domain.Domain_Error{}
 }
 
+// bridge_revoke_token_family_in_scope_sqlite revokes a family's live rows only while
+// they still carry `scope` (REQ-EA-3). The scope test is in the same UPDATE, so it
+// is atomic with the commit's promote: whichever takes the write lock first wins,
+// and a promoted family matches 0 rows here.
+bridge_revoke_token_family_in_scope_sqlite :: proc(ctx: rawptr, family_id, scope, revoked_at: string) -> (int, bool, domain.Domain_Error) {
+	impl := (^Bridge_Repo_SQLite)(ctx)
+	if family_id == "" || scope == "" || revoked_at == "" do return 0, false, domain.domain_error(.Validation_Failed, "family_id, scope and revoked_at are required")
+	stmt: sqlite3_stmt = nil
+	query := "UPDATE bridge_tokens SET revoked_at = ? WHERE family_id = ? AND scope = ? AND revoked_at = '';"
+	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return 0, false, domain.domain_error(.Internal_Error, "failed to prepare scoped bridge token family revoke")
+	defer sqlite3_finalize(stmt)
+	bind_text(stmt, 1, revoked_at)
+	bind_text(stmt, 2, family_id)
+	bind_text(stmt, 3, scope)
+	if sqlite3_step(stmt) != SQLITE_DONE do return 0, false, domain.domain_error(.Internal_Error, "bridge token family could not be revoked")
+	return int(sqlite3_changes(impl.conn.db)), true, domain.Domain_Error{}
+}
+
 // bridge_revoke_tokens_for_bridge_sqlite is per-MACHINE revocation (§11.7.2): the
 // operator revokes a bridge, and every credential of that bridge dies — including
 // families from an earlier enrollment of the same machine. Keyed on bridge_id, so a

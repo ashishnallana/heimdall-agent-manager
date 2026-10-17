@@ -274,10 +274,20 @@ unrelated_write :: proc(w: ^Unrelated_Writer) {
 	w.err = err.message
 }
 
+// The commit hook is one global and the tests run in parallel, so every test installs
+// this same dispatcher and never clears it; each case acts only on its own bridge_id.
+commit_hook_dispatch :: proc(bridge_id: string) {
+	switch bridge_id {
+	case "brg_iso":
+		hook_start_unrelated_write()
+	case "brg_race_rb":
+		hook_start_rollback_revoke()
+	}
+}
+
 // Runs INSIDE the enrollment transaction, between promote and swap: start a request
 // on the shared connection, and give it time to reach SQLite.
-hook_start_unrelated_write :: proc(bridge_id: string) {
-	if bridge_id != "brg_iso" do return
+hook_start_unrelated_write :: proc() {
 	g_unrelated_thread = thread.create_and_start_with_poly_data(g_unrelated, unrelated_write)
 	time.sleep(150 * time.Millisecond)
 }
@@ -293,9 +303,8 @@ test_enroll_commit_is_isolated_from_a_concurrent_unrelated_write :: proc(t: ^tes
 
 	w := Unrelated_Writer{repo = &f.repo}
 	g_unrelated = &w
-	bridge_enroll_commit_test_hook = hook_start_unrelated_write
+	bridge_enroll_commit_test_hook = commit_hook_dispatch
 	_, ok, _ := iface.bridge_commit_enrollment(&f.repo, "brg_iso", "fam_iso", ENROLL_SCOPE, RUNTIME_SCOPE, false, NOW)
-	bridge_enroll_commit_test_hook = nil
 	thread.join(g_unrelated_thread)
 	thread.destroy(g_unrelated_thread)
 
@@ -362,4 +371,74 @@ test_enroll_commit_simultaneous_commits_serialize :: proc(t: ^testing.T) {
 	}
 	// The request connection is not stuck in a transaction afterwards.
 	testing.expect(t, exec(&f.main, "BEGIN; COMMIT;"), "the request connection has no transaction left open")
+}
+
+// --- the rollback's revoke cannot kill a family the commit just promoted ---
+
+@(test)
+test_scoped_family_revoke_only_matches_the_given_scope :: proc(t: ^testing.T) {
+	f: Commit_Fixture
+	if !fixture_open(t, &f) do return
+	defer close(&f.conn)
+	seed_bridge(t, &f, "brg_scoped", "")
+	seed_family(t, &f, "brg_scoped", "fam_scoped_rt", RUNTIME_SCOPE)
+	seed_family(t, &f, "brg_scoped", "fam_scoped_en", ENROLL_SCOPE)
+
+	n, ok, _ := iface.bridge_revoke_token_family_in_scope(&f.repo, "fam_scoped_rt", ENROLL_SCOPE, NOW)
+	testing.expect(t, ok, "scoped revoke runs")
+	testing.expect_value(t, n, 0)
+	_, r, rv := family_state(&f, "fam_scoped_rt")
+	testing.expect_value(t, r, 2)
+	testing.expect_value(t, rv, 0)
+
+	n, ok, _ = iface.bridge_revoke_token_family_in_scope(&f.repo, "fam_scoped_en", ENROLL_SCOPE, NOW)
+	testing.expect(t, ok, "scoped revoke runs")
+	testing.expect_value(t, n, 2)
+	e, _, rv2 := family_state(&f, "fam_scoped_en")
+	testing.expect_value(t, e, 0)
+	testing.expect_value(t, rv2, 2)
+}
+
+Rollback_Revoker :: struct {
+	repo:    ^iface.Bridge_Repository,
+	changed: int,
+	ok:      bool,
+}
+
+g_rollback: ^Rollback_Revoker
+g_rollback_thread: ^thread.Thread
+
+rollback_revoke :: proc(r: ^Rollback_Revoker) {
+	r.changed, r.ok, _ = iface.bridge_revoke_token_family_in_scope(r.repo, "fam_race_rb", ENROLL_SCOPE, NOW)
+}
+
+// Runs INSIDE the commit transaction, after the promote: a rollback (cancel or the
+// reaper) arrives on the request connection. Its revoke blocks on the write lock
+// until the commit finishes, then must find nothing left in the enroll scope.
+hook_start_rollback_revoke :: proc() {
+	g_rollback_thread = thread.create_and_start_with_poly_data(g_rollback, rollback_revoke)
+	time.sleep(150 * time.Millisecond)
+}
+
+@(test)
+test_enroll_rollback_racing_a_commit_leaves_the_committed_family_live :: proc(t: ^testing.T) {
+	f: File_Fixture
+	if !file_fixture_open(t, &f, "race_rb") do return
+	defer file_fixture_close(&f)
+	seed_on(t, &f, "brg_race_rb", "fam_race_rb", ENROLL_SCOPE, "2026-10-16T15:05:00Z")
+
+	rb := Rollback_Revoker{repo = &f.repo}
+	g_rollback = &rb
+	bridge_enroll_commit_test_hook = commit_hook_dispatch
+	outcome, ok, _ := iface.bridge_commit_enrollment(&f.repo, "brg_race_rb", "fam_race_rb", ENROLL_SCOPE, RUNTIME_SCOPE, false, NOW)
+	thread.join(g_rollback_thread)
+	thread.destroy(g_rollback_thread)
+
+	testing.expect(t, ok, "the commit succeeds")
+	testing.expect_value(t, outcome, iface.Enrollment_Commit_Outcome.Committed)
+	testing.expect(t, rb.ok, "the racing revoke ran (after the commit released the lock)")
+	testing.expect_value(t, rb.changed, 0)
+	_, r, rv := state_on(&f, "fam_race_rb")
+	testing.expect_value(t, r, 2)
+	testing.expect_value(t, rv, 0)
 }

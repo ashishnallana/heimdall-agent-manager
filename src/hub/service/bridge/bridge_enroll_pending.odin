@@ -135,15 +135,11 @@ rollback_pending_enrollment :: proc(service: ^Bridge_Service, bridge_id, family_
 	if bridge_id == "" do return false, domain.domain_error(.Validation_Failed, "bridge_id is required")
 	now := platform.clock_now(service.clock)
 	if family_id != "" {
-		// Only a family still in the enroll scope is ours to revoke. A committed one
-		// was promoted and is the bridge's real credential now.
-		family, _ := iface.bridge_list_tokens_by_family(service.repo, family_id)
-		still_pending := false
-		for t in family {
-			if t.scope == BRIDGE_ENROLL_TOKEN_SCOPE && t.revoked_at == "" do still_pending = true
-		}
-		free_bridge_tokens(family)
-		if still_pending do _, _, _ = revoke_token_family(service, family_id, now)
+		// Only a family still in the enroll scope is ours to revoke; a committed one
+		// was promoted and is the bridge's real credential now. The scope test is
+		// inside the revoke statement itself: a read-then-revoke would race a commit
+		// landing in between and revoke the credential it had just made live.
+		_, _, _ = iface.bridge_revoke_token_family_in_scope(service.repo, family_id, BRIDGE_ENROLL_TOKEN_SCOPE, now)
 	}
 	removed, err := iface.bridge_delete_pending(service.repo, bridge_id)
 	return removed, err

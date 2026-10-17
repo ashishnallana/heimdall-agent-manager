@@ -28,6 +28,11 @@ Bridge_List_Tokens_By_Family_Proc :: proc(ctx: rawptr, family_id: string) -> ([]
 // no-op.
 Bridge_Revoke_Token_Family_Proc :: proc(ctx: rawptr, family_id, revoked_at: string) -> (int, bool, domain.Domain_Error)
 Bridge_Revoke_Tokens_For_Bridge_Proc :: proc(ctx: rawptr, bridge_id, revoked_at: string) -> (int, bool, domain.Domain_Error)
+// REQ-EA-3: revoke a family only while it is still in `scope`, as ONE statement. The
+// enrollment rollback uses it so a family the commit promoted a moment earlier is
+// never revoked: a separate "is it still pending?" read followed by an unconditional
+// revoke would race the commit and kill a just-committed bridge's credential.
+Bridge_Revoke_Token_Family_In_Scope_Proc :: proc(ctx: rawptr, family_id, scope, revoked_at: string) -> (int, bool, domain.Domain_Error)
 Bridge_Mark_Token_Rotated_Proc :: proc(ctx: rawptr, token_id, rotated_at: string) -> (bool, domain.Domain_Error)
 // REQ-EA-2/8: the enrollment COMMIT, as ONE transaction. Promote the family from
 // from_scope to to_scope (a compare-and-set on scope), then either revoke every other
@@ -54,6 +59,7 @@ Bridge_Repository :: struct {
 	list_tokens_by_family: Bridge_List_Tokens_By_Family_Proc,
 	revoke_token_family: Bridge_Revoke_Token_Family_Proc,
 	revoke_tokens_for_bridge: Bridge_Revoke_Tokens_For_Bridge_Proc,
+	revoke_token_family_in_scope: Bridge_Revoke_Token_Family_In_Scope_Proc,
 	mark_token_rotated: Bridge_Mark_Token_Rotated_Proc,
 	commit_enrollment: Bridge_Commit_Enrollment_Proc,
 	list_live_tokens_by_scope: Bridge_List_Live_Tokens_By_Scope_Proc,
@@ -112,6 +118,11 @@ bridge_revoke_token_family :: proc(repo: ^Bridge_Repository, family_id, revoked_
 bridge_revoke_tokens_for_bridge :: proc(repo: ^Bridge_Repository, bridge_id, revoked_at: string) -> (int, bool, domain.Domain_Error) {
 	if repo == nil || repo.revoke_tokens_for_bridge == nil do return 0, false, domain.domain_error(.Internal_Error, "bridge repository is not configured")
 	return repo.revoke_tokens_for_bridge(repo.ctx, bridge_id, revoked_at)
+}
+
+bridge_revoke_token_family_in_scope :: proc(repo: ^Bridge_Repository, family_id, scope, revoked_at: string) -> (int, bool, domain.Domain_Error) {
+	if repo == nil || repo.revoke_token_family_in_scope == nil do return 0, false, domain.domain_error(.Internal_Error, "bridge repository is not configured")
+	return repo.revoke_token_family_in_scope(repo.ctx, family_id, scope, revoked_at)
 }
 
 bridge_mark_token_rotated :: proc(repo: ^Bridge_Repository, token_id, rotated_at: string) -> (bool, domain.Domain_Error) {
