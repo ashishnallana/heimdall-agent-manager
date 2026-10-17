@@ -26,6 +26,8 @@ self.addEventListener('activate', (event) => {
 // App icon shown on every notification (falls back to the browser default when
 // absent). Resolved against the SW scope so it works under a sub-path deploy.
 const NOTIFICATION_ICON = 'icon.png';
+const VAULT_ARMOR_PREFIX = 'vault:v1:';
+const ENCRYPTED_NOTIFICATION_BODY = '[🔒 Encrypted notification]';
 
 // Fallback content so a push with a missing/undecodable payload STILL shows a
 // visible notification — on iOS a silent push (one that shows nothing) causes
@@ -42,9 +44,17 @@ const PUSH_FALLBACK = {
 // Total by design: any missing field falls back so we always show something.
 function planForPushPayload(payload) {
   const p = (payload && typeof payload === 'object') ? payload : {};
+  const rawTitle = p.title ? String(p.title) : '';
+  const rawBody = p.body ? String(p.body) : '';
   return {
-    title: (p.title ? String(p.title) : '') || PUSH_FALLBACK.title,
-    body: (p.body ? String(p.body) : '') || PUSH_FALLBACK.body,
+    // Defense in depth for old/cached Hubs and malformed producer payloads.
+    // A service worker has no Vault key, so it must never render ciphertext.
+    title: rawTitle.includes(VAULT_ARMOR_PREFIX)
+      ? ENCRYPTED_NOTIFICATION_BODY
+      : rawTitle || PUSH_FALLBACK.title,
+    body: rawBody.includes(VAULT_ARMOR_PREFIX)
+      ? ENCRYPTED_NOTIFICATION_BODY
+      : rawBody || PUSH_FALLBACK.body,
     tag: (p.tag ? String(p.tag) : '') || PUSH_FALLBACK.tag,
     route: (p.route ? String(p.route) : '') || PUSH_FALLBACK.route,
     href: p.href ? String(p.href) : PUSH_FALLBACK.href,

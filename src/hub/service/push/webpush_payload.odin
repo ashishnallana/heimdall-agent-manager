@@ -11,6 +11,7 @@ package push
 
 import "core:strings"
 import contracts "odin_test:contracts"
+import domain "odin_test:hub/domain"
 
 // Push_Category is the curated bucket carried in the payload; mirrors the
 // client's NotificationCategory ('chat' | 'attention').
@@ -39,6 +40,11 @@ Notification_Content :: struct {
 
 // PUSH_PREVIEW_MAX mirrors the client mapper's 140-rune body/preview cap.
 PUSH_PREVIEW_MAX :: 140
+
+// The service worker cannot access the in-page Vault key. Mask armored content
+// before applying the preview cap so Web Push never carries a truncated,
+// undecryptable ciphertext fragment into operating-system notification history.
+PUSH_ENCRYPTED_PLACEHOLDER :: "[🔒 Encrypted notification]"
 
 // build_chat_notification builds the chat-message notification content,
 // mirroring planForChatEvent in notificationMapper.ts: title reflects
@@ -122,6 +128,12 @@ build_push_payload_json :: proc(content: Notification_Content, app_origin: strin
 push_preview :: proc(body: string, max_len: int) -> string {
 	trimmed := strings.trim_space(body)
 	if trimmed == "" do return ""
+	// Fail closed for both standalone armor and sender-prefixed/embedded armor.
+	// This check must happen before truncation because truncation destroys the
+	// authenticated envelope while leaving a user-visible ciphertext fragment.
+	if strings.contains(trimmed, domain.VAULT_ARMOR_PREFIX) {
+		return strings.clone(PUSH_ENCRYPTED_PLACEHOLDER)
+	}
 	fields := strings.fields(trimmed)
 	defer delete(fields)
 	collapsed := strings.join(fields, " ")

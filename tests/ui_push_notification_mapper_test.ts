@@ -1,5 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import vm from 'node:vm';
 
 test('planForPushPayload maps Web Push payloads and provides total visible fallbacks', async () => {
 const { planForPushPayload } = await import('../src/ui/api/pushNotificationMapper.ts');
@@ -131,4 +133,65 @@ for (const bad of ['a raw string', 42, true, ['not', 'an', 'object']] as unknown
   assert.equal(clipped.length, 140, 'over-limit body clipped to exactly 140 chars');
   assert.ok(clipped.endsWith('…'), 'over-limit body ends with ellipsis');
 }
+});
+
+test('shipped service worker masks armored Web Push bodies before rendering', async () => {
+  const handlers = new Map<string, (event: any) => void>();
+  const shown: Array<{ title: string; options: Record<string, any> }> = [];
+  const self = {
+    addEventListener(type: string, handler: (event: any) => void) {
+      handlers.set(type, handler);
+    },
+    skipWaiting() {},
+    clients: {
+      claim: async () => {},
+      matchAll: async () => [],
+      openWindow: async () => {},
+    },
+    registration: {
+      showNotification: async (title: string, options: Record<string, any>) => {
+        shown.push({ title, options });
+      },
+      pushManager: null,
+    },
+  };
+
+  const source = await readFile(new URL('../public/notification-sw.js', import.meta.url), 'utf8');
+  vm.runInNewContext(source, { self }, { filename: 'public/notification-sw.js' });
+  const push = handlers.get('push');
+  assert.ok(push, 'the shipped worker must register a push handler');
+
+  async function dispatch(payload: unknown, throws = false) {
+    let pending: Promise<void> | undefined;
+    push!({
+      data: throws ? { json: () => { throw new Error('malformed'); } } : { json: () => payload },
+      waitUntil(value: Promise<void>) { pending = value; },
+    });
+    await pending;
+    return shown.at(-1)!;
+  }
+
+  const armored = await dispatch({
+    title: `Notice vault:v1:${'B'.repeat(40)}`,
+    body: `You: vault:v1:${'A'.repeat(180)}`,
+    tag: 'heimdall:chat:conv_secret',
+    route: '/conversations/inst_secret',
+  });
+  assert.equal(armored.title, '[🔒 Encrypted notification]');
+  assert.equal(armored.options.body, '[🔒 Encrypted notification]');
+  assert.doesNotMatch(armored.title, /vault:v1:/);
+  assert.doesNotMatch(armored.options.body, /vault:v1:/);
+
+  const plaintext = await dispatch({ title: 'New message', body: 'Plaintext body' });
+  assert.equal(plaintext.options.body, 'Plaintext body');
+
+  const enrollment = await dispatch({
+    title: 'Bridge enrollment approved',
+    body: 'A machine was just approved to enroll as a bridge on your account.',
+  });
+  assert.match(enrollment.options.body, /machine was just approved/);
+
+  const malformed = await dispatch(null, true);
+  assert.equal(malformed.title, 'Heimdall');
+  assert.equal(malformed.options.body, 'You have a new notification.');
 });

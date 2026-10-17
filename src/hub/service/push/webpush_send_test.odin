@@ -26,6 +26,33 @@ build_chat_notification_plain :: proc(t: ^testing.T) {
 }
 
 @(test)
+build_chat_notification_masks_vault_armor_before_previewing :: proc(t: ^testing.T) {
+	standalone := build_chat_notification(
+		"conv_secret",
+		"inst_secret",
+		"text",
+		"vault:v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+	)
+	defer free_notification_content(standalone)
+	testing.expect_value(t, standalone.body, PUSH_ENCRYPTED_PLACEHOLDER)
+
+	embedded := build_chat_notification(
+		"conv_secret",
+		"inst_secret",
+		"text",
+		"You: vault:v1:AQIDBAUGBwgJCgsM2Ed9QrWXWA/eSrkLieecc4/Y9yN6j/zg",
+	)
+	defer free_notification_content(embedded)
+	testing.expect_value(t, embedded.body, PUSH_ENCRYPTED_PLACEHOLDER)
+
+	payload := build_push_payload_json(embedded, "https://heimdall.example")
+	defer delete(payload)
+	testing.expect(t, strings.contains(payload, PUSH_ENCRYPTED_PLACEHOLDER))
+	testing.expect(t, !strings.contains(payload, domain.VAULT_ARMOR_PREFIX),
+		"serialized Web Push payload leaked Vault armor")
+}
+
+@(test)
 build_chat_notification_route_keys_on_instance_not_conversation :: proc(t: ^testing.T) {
 	// Regression: when BOTH ids are present, the deep-link route MUST use the
 	// agent instance id, never the conversation id (conversation routing is
