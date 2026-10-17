@@ -1,15 +1,10 @@
-import React, { useState, useEffect } from 'react';
-import { Icon } from '@ui';
+import React, { useMemo, useState } from 'react';
+import { Button, EmptyState, Text } from '@ui';
 import { TaskWire } from '../../api/taskWire';
 import { TaskSummaryBar } from './TaskSummaryBar';
 import { TaskCard } from './TaskCard';
-import {
-  TASK_STATES_ORDER,
-  TASK_STATE_COLORS,
-  TASK_STATE_LABELS,
-  TaskStateV2,
-  normalizeTaskState,
-} from './taskV2Types';
+import { TASK_STATES_ORDER, normalizeTaskState } from './taskV2Types';
+import { taskNeedsYou } from './taskActions';
 import { TaskChainFleet } from '../../api/endpoints/taskChains';
 import { EMPTY_TASK_NAMES, type TaskNames } from './taskNames';
 
@@ -17,168 +12,148 @@ export interface TicketBoardViewProps {
   chainId: string;
   tasks: TaskWire[];
   chainFleets?: TaskChainFleet[];
-  bridges?: any[];
-  selectedTaskId?: string | null;
-  onSelectTask: (taskId: string) => void;
+  /** The card expanded inline (plan REQ-UI-8). */
+  expandedTaskId?: string | null;
+  onToggleTask: (taskId: string) => void;
+  /** Opens a task by id (dependency links): expands it and scrolls to it. */
+  onSelectTask?: (taskId: string) => void;
   onNewTask?: () => void;
   onOpenFleetDrawer?: () => void;
+  /** Shown while the chain itself is still a draft (plan REQ-UI-9). */
+  onPublishChain?: () => void;
+  publishingChain?: boolean;
+  publishError?: string;
   summaryText?: string;
   names?: TaskNames;
   className?: string;
 }
 
+const PRIORITY_RANK: Record<string, number> = { p0: 0, p1: 1, p2: 2 };
+
+export function sortTasksForBoard(tasks: TaskWire[]): TaskWire[] {
+  return [...tasks].sort((a, b) => {
+    const needs = Number(taskNeedsYou(b)) - Number(taskNeedsYou(a));
+    if (needs) return needs;
+    const byState = TASK_STATES_ORDER.indexOf(normalizeTaskState(a.state)) - TASK_STATES_ORDER.indexOf(normalizeTaskState(b.state));
+    if (byState) return byState;
+    return (PRIORITY_RANK[String(a.priority).toLowerCase()] ?? 3) - (PRIORITY_RANK[String(b.priority).toLowerCase()] ?? 3);
+  });
+}
+
+function isFinished(t: TaskWire): boolean {
+  const s = normalizeTaskState(t.state);
+  return s === 'done' || s === 'cancelled';
+}
+
+/**
+ * A ticket chain's tasks as one flat list (plan REQ-UI-7; design reference: the
+ * Tasks pane on main). Tasks that need you come first; finished ones fold away.
+ */
 export const TicketBoardView: React.FC<TicketBoardViewProps> = ({
   chainId,
   tasks = [],
   chainFleets = [],
-  bridges = [],
-  selectedTaskId,
+  expandedTaskId,
+  onToggleTask,
   onSelectTask,
   onNewTask,
   onOpenFleetDrawer,
+  onPublishChain,
+  publishingChain = false,
+  publishError,
   summaryText,
   names = EMPTY_TASK_NAMES,
   className = '',
 }) => {
-  // Collapsible section state
-  const [openSections, setOpenSections] = useState<Record<string, boolean>>(() => {
-    try {
-      const saved = localStorage.getItem(`heimdall.taskv2.sections.${chainId}`);
-      if (saved) return JSON.parse(saved);
-    } catch {}
-    return {
-      in_progress: true,
-      in_review: true,
-      ready: true,
-      backlog: true,
-      done: true,
-      cancelled: false,
-    };
-  });
+  const [needsYouOnly, setNeedsYouOnly] = useState(false);
+  const [showFinished, setShowFinished] = useState(false);
 
-  const toggleSection = (stateKey: string) => {
-    setOpenSections((prev) => {
-      const next = { ...prev, [stateKey]: !prev[stateKey] };
-      try {
-        localStorage.setItem(`heimdall.taskv2.sections.${chainId}`, JSON.stringify(next));
-      } catch {}
-      return next;
-    });
-  };
+  const sorted = useMemo(() => sortTasksForBoard(tasks), [tasks]);
+  const visible = needsYouOnly ? sorted.filter(taskNeedsYou) : sorted;
+  const open = visible.filter((t) => !isFinished(t) || t.task_id === expandedTaskId);
+  const finished = visible.filter((t) => isFinished(t) && t.task_id !== expandedTaskId);
 
-  const tasksByState: Record<TaskStateV2, TaskWire[]> = {
-    in_progress: [],
-    in_review: [],
-    ready: [],
-    backlog: [],
-    done: [],
-    cancelled: [],
-  };
-
-  tasks.forEach((t) => {
-    const s = normalizeTaskState(t.state);
-    tasksByState[s].push(t);
-  });
+  const renderCard = (task: TaskWire) => (
+    <TaskCard
+      key={task.task_id}
+      task={task}
+      chainId={chainId}
+      expanded={expandedTaskId === task.task_id}
+      onToggle={onToggleTask}
+      onSelectTask={onSelectTask}
+      chainFleets={chainFleets}
+      names={names}
+    />
+  );
 
   return (
-    <div
-      data-debug-id="ticket-board-view"
-      className={`flex flex-col gap-4 text-left p-4 sm:p-6 overflow-y-auto ${className}`}
-    >
-      {/* Top summary & attention bar */}
+    <div data-debug-id="ticket-board-view" className={`flex flex-col gap-3 p-4 text-left ${className}`}>
       <TaskSummaryBar
         tasks={tasks}
         chainFleets={chainFleets}
-        bridges={bridges}
-        onSelectTask={onSelectTask}
         kind="ticket"
         summaryText={summaryText}
+        needsYouActive={needsYouOnly}
+        onToggleNeedsYou={() => setNeedsYouOnly((v) => !v)}
+        actions={
+          <>
+            {onPublishChain && (
+              <Button size="sm" variant="primary" loading={publishingChain} onClick={onPublishChain} data-debug-id="task-board-publish-chain-btn">
+                Publish chain
+              </Button>
+            )}
+            {onOpenFleetDrawer && (
+              <Button size="sm" variant="secondary" onClick={onOpenFleetDrawer} data-debug-id="task-board-fleet-btn">
+                Fleet
+              </Button>
+            )}
+            {onNewTask && (
+              <Button size="sm" variant="primary" onClick={onNewTask} data-debug-id="task-board-new-task-btn">
+                New task
+              </Button>
+            )}
+          </>
+        }
       />
+      {publishError && (
+        <Text role="caption" tone="danger" className="break-words">
+          {publishError}
+        </Text>
+      )}
 
-      {/* Header with New Task button */}
-      <div className="flex items-center justify-between pt-2">
-        <h2 className="text-xs font-bold uppercase tracking-wider text-muted">
-          Task Board ({tasks.length})
-        </h2>
-        {onNewTask && (
-          <button
-            type="button"
-            data-debug-id="task-board-new-task-btn"
-            onClick={onNewTask}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-accent px-3 py-1 text-xs font-semibold text-accent-fg hover:opacity-90 transition-opacity"
-          >
-            <span>+</span>
-            <span>New Task</span>
-          </button>
-        )}
-      </div>
-
-      {/* Collapsible sections for the 5 states + cancelled */}
-      <div className="flex flex-col gap-3">
-        {TASK_STATES_ORDER.filter(
-          (s) => s !== 'cancelled' || tasksByState[s].length > 0
-        ).map((s) => {
-          const list = tasksByState[s];
-          const isOpen = openSections[s] !== false;
-          const color = TASK_STATE_COLORS[s];
-
-          return (
-            <section
-              key={s}
-              data-debug-id={`state-section-${s}`}
-              className="rounded-xl border border-subtle bg-surface/50 overflow-hidden"
-            >
-              <header
-                role="button"
-                tabIndex={0}
-                onClick={() => toggleSection(s)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault();
-                    toggleSection(s);
-                  }
-                }}
-                className="flex items-center justify-between px-3.5 py-2.5 bg-surface hover:bg-surface-raised cursor-pointer select-none transition-colors"
-              >
-                <div className="flex items-center gap-2">
-                  <span
-                    className="h-2.5 w-2.5 rounded-full shrink-0"
-                    style={{ backgroundColor: color }}
-                  />
-                  <span className="text-xs font-semibold text-primary">
-                    {TASK_STATE_LABELS[s]}
-                  </span>
-                  <span className="rounded bg-neutral-soft px-1.5 py-0.5 font-mono text-[10px] font-medium text-muted">
-                    {list.length}
-                  </span>
-                </div>
-                <Icon name={isOpen ? 'chevron-down' : 'chevron-right'} size="sm" className="text-muted" />
-              </header>
-
-              {isOpen && (
-                <div className="p-3 space-y-2">
-                  {list.length === 0 ? (
-                    <div className="rounded-lg border border-dashed border-subtle p-3 text-center text-xs text-muted">
-                      No tasks in {TASK_STATE_LABELS[s].toLowerCase()}
-                    </div>
-                  ) : (
-                    list.map((task) => (
-                      <TaskCard
-                        key={task.task_id}
-                        task={task}
-                        selected={selectedTaskId === task.task_id}
-                        onSelect={onSelectTask}
-                        chainFleets={chainFleets}
-                        names={names}
-                      />
-                    ))
-                  )}
-                </div>
-              )}
-            </section>
-          );
-        })}
-      </div>
+      {tasks.length === 0 ? (
+        <EmptyState
+          icon="tasks"
+          title="No tasks yet"
+          description="Add a task with a goal, acceptance checks and a verify command."
+          action={
+            onNewTask ? (
+              <Button size="sm" variant="primary" onClick={onNewTask}>
+                New task
+              </Button>
+            ) : undefined
+          }
+        />
+      ) : (
+        <div className="flex flex-col gap-2">
+          {open.map(renderCard)}
+          {open.length === 0 && finished.length === 0 && (
+            <Text role="caption" tone="faint">
+              Nothing here.
+            </Text>
+          )}
+          {finished.length > 0 && (
+            <>
+              <div>
+                <Button size="sm" variant="ghost" onClick={() => setShowFinished((v) => !v)} data-debug-id="task-board-finished-toggle">
+                  {showFinished ? 'Hide finished' : `Show ${finished.length} finished`}
+                </Button>
+              </div>
+              {showFinished && finished.map(renderCard)}
+            </>
+          )}
+        </div>
+      )}
     </div>
   );
 };

@@ -1,149 +1,220 @@
 import React from 'react';
+import { Badge, Button, Icon, IconButton, Menu, StatusPill, Text } from '@ui';
 import { TaskWire } from '../../api/taskWire';
-import { getTaskBadges, getTaskPeople, normalizeTaskState } from './taskV2Types';
+import {
+  TASK_STATE_LABELS,
+  TASK_STATE_TONE,
+  getTaskBadges,
+  getTaskPeople,
+  getTaskStatusLines,
+  normalizeTaskState,
+  uiToneForBadge,
+  uiToneForPriority,
+} from './taskV2Types';
+import { TASK_ACTION_LABELS, getTaskActions, isDraft, type TaskActionId } from './taskActions';
+import { useTaskActions } from './useTaskActions';
+import { TaskDetails } from './TaskDetails';
+import { HolderName } from './HolderName';
 import { EMPTY_TASK_NAMES, type TaskNames } from './taskNames';
 
 export interface TaskCardProps {
   task: TaskWire;
-  selected?: boolean;
-  onSelect?: (taskId: string) => void;
+  chainId?: string;
+  /** Expanded inline (plan REQ-UI-8). */
+  expanded?: boolean;
+  onToggle?: (taskId: string) => void;
+  /** Opens another task of the chain (dependency links). */
+  onSelectTask?: (taskId: string) => void;
   chainFleets?: any[];
   names?: TaskNames;
   className?: string;
 }
 
+/**
+ * One task as a single flat card (plan REQ-UI-7, design reference: the Tasks
+ * pane on main): title, one sentence on what is happening, who works it, and only
+ * the action that matters now. Everything else is one click away: the More menu
+ * or the inline details.
+ */
 export const TaskCard: React.FC<TaskCardProps> = ({
   task,
-  selected = false,
-  onSelect,
+  chainId = '',
+  expanded = false,
+  onToggle,
+  onSelectTask,
   chainFleets,
   names = EMPTY_TASK_NAMES,
   className = '',
 }) => {
   const state = normalizeTaskState(task.state);
-  const badges = getTaskBadges(task, chainFleets, Date.now(), names);
-  const isAwaitingUser = state === 'in_review' && task.requires_user_approval;
   const isGate = task.kind === 'gate';
+  const now = Date.now();
+  const [sentence, detail] = getTaskStatusLines(task, chainFleets, now, names);
+  // The holder and bridge already show in the people line, so the lease badge
+  // keeps only its time left and the bridge badge is dropped.
+  const badges = getTaskBadges(task, chainFleets, now, names)
+    .filter((b) => b.label !== names.bridge(task.bridge_id || ''))
+    .map((b) => (b.label.endsWith('m left') ? { ...b, label: b.label.split(' · ').pop() || b.label } : b));
   const people = getTaskPeople(task, chainFleets);
-  const agentName = (id: string) => names.agent(id);
+  const actions = useTaskActions(chainId, task.task_id);
+  const { primary, more } = getTaskActions(task);
+
   const workerLabel = people.assignee
-    ? agentName(people.assignee)
+    ? names.agent(people.assignee)
     : people.workers.length
-      ? `any of ${people.workers.map(agentName).join(', ')}`
+      ? `any of ${people.workers.map(names.agent).join(', ')}`
       : 'no worker in fleet';
-  const reviewerLabel = [
-    ...people.reviewers.map(agentName),
-    ...(people.userApproval ? ['you'] : []),
-  ].join(', ');
-  // The wire sends lowercase p0|p1|p2; older fixtures use P0 / urgent / high.
-  const priority = String(task.priority || '').toLowerCase();
+  const reviewerLabel = [...people.reviewers.map(names.agent), ...(people.userApproval ? ['you'] : [])].join(', ');
+  const deps = task.depends_on || [];
 
-  const summary = task.comment_summary?.last_comment_preview ||
-    (task.brief?.goal ? String(task.brief.goal) : '');
-
-  const handleClick = () => {
-    onSelect?.(task.task_id);
-  };
-
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' || e.key === ' ') {
-      e.preventDefault();
-      onSelect?.(task.task_id);
+  const runAction = async (id: TaskActionId) => {
+    switch (id) {
+      case 'publish':
+        return actions.publish();
+      case 'approve':
+        return actions.approve();
+      // Decisions that need words open the details, where the text box is.
+      case 'request_changes':
+      case 'answer':
+        if (!expanded) onToggle?.(task.task_id);
+        return true;
+      case 'reopen':
+        return actions.reopen();
+      case 'cancel':
+        if (!window.confirm(`Cancel "${task.title}"?`)) return false;
+        return actions.cancel();
+      case 'rerun_verify':
+        return actions.rerunVerify();
+      case 'copy_id':
+        try {
+          await navigator.clipboard?.writeText(task.task_id);
+        } catch {
+          /* clipboard unavailable: nothing to do */
+        }
+        return true;
     }
   };
+
+  const toggle = () => onToggle?.(task.task_id);
 
   return (
     <article
       data-debug-id={`task-card-${task.task_id}`}
       data-id={task.task_id}
-      tabIndex={0}
-      role="button"
       aria-label={task.title}
-      onClick={handleClick}
-      onKeyDown={handleKeyDown}
-      className={`group relative flex flex-col gap-2 rounded-xl border p-3 text-left transition-all cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-accent ${
-        selected
-          ? 'border-accent bg-accent/10 shadow-sm'
-          : isAwaitingUser
-            ? 'border-accent/60 bg-accent/5 hover:border-accent hover:bg-accent/10'
-            : 'border-subtle bg-surface hover:border-border-strong hover:bg-surface-raised'
-      } ${className}`}
+      className={`rounded-lg border bg-surface text-xs ${expanded ? 'border-strong' : 'border-subtle'} ${className}`}
     >
-      {/* Top row: id, title, priority or gate */}
-      <div className="flex items-center gap-2 min-w-0">
-        <span className="flex-1 truncate text-sm font-semibold text-primary group-hover:text-accent transition-colors">
-          {task.title}
-        </span>
-        {isGate ? (
-          <span className="shrink-0 rounded-md bg-accent-soft px-1.5 py-0.5 font-mono text-[10px] font-semibold text-accent uppercase">
-            Gate
-          </span>
-        ) : (
-          <span
-            className={`shrink-0 rounded-md px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase ${
-              priority === 'p0' || priority === 'urgent'
-                ? 'bg-danger-soft text-danger'
-                : priority === 'p1' || priority === 'high'
-                  ? 'bg-warning-soft text-warning'
-                  : 'bg-neutral-soft text-muted'
-            }`}
+      <div className="space-y-1.5 p-3">
+        {/* Row 1: expand + title + state + priority */}
+        <div className="flex min-w-0 items-center gap-2">
+          <button
+            type="button"
+            data-debug-id={`task-card-toggle-${task.task_id}`}
+            aria-expanded={expanded}
+            onClick={toggle}
+            className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
           >
-            {task.priority || 'P1'}
-          </span>
+            <Icon name={expanded ? 'chevron-down' : 'chevron-right'} size="sm" className="shrink-0 text-muted" />
+            <span className="truncate font-semibold text-primary">{task.title}</span>
+          </button>
+          {isDraft(task) && <Badge tone="neutral">Draft</Badge>}
+          {isGate ? (
+            <Badge tone="info">Gate</Badge>
+          ) : (
+            <Badge tone={uiToneForPriority(task.priority)}>{String(task.priority || 'p2').toUpperCase()}</Badge>
+          )}
+          <StatusPill tone={TASK_STATE_TONE[state]}>{TASK_STATE_LABELS[state]}</StatusPill>
+          {more.length > 0 && (
+            <Menu
+              label={`More actions for ${task.title}`}
+              align="end"
+              trigger={
+                <IconButton icon="more-horizontal" label="More actions" variant="ghost" size="sm" data-debug-id={`task-card-more-${task.task_id}`} />
+              }
+            >
+              {more.map((id) => (
+                <Menu.Item key={id} danger={id === 'cancel'} onClick={() => void runAction(id)}>
+                  {TASK_ACTION_LABELS[id]}
+                </Menu.Item>
+              ))}
+            </Menu>
+          )}
+        </div>
+
+        {/* Row 2: what is happening, in one sentence */}
+        <Text as="p" role="caption" tone="muted" data-debug-id={`task-card-status-${task.task_id}`}>
+          <span className="text-primary">{sentence}</span>
+          {detail ? ` · ${detail}` : ''}
+        </Text>
+
+        {/* Row 3: who works it, who reviews it, what it waits for */}
+        {!isGate && (
+          <div
+            data-debug-id={`task-card-people-${task.task_id}`}
+            className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted"
+          >
+            <span>
+              assignee:{' '}
+              {people.holder ? (
+                <HolderName instanceId={people.holder} names={names} className="font-semibold text-primary" />
+              ) : (
+                <span className={people.workers.length ? 'font-semibold text-primary' : 'text-warning'}>{workerLabel}</span>
+              )}
+            </span>
+            <span>
+              reviewers: <span className={reviewerLabel ? 'font-semibold text-primary' : 'text-faint'}>{reviewerLabel || 'none'}</span>
+            </span>
+            {deps.length > 0 && (
+              <span>
+                waits for: <span className="text-primary">{deps.map((d) => names.task(d)).join(', ')}</span>
+              </span>
+            )}
+            {task.bridge_id && (
+              <span>
+                bridge: <span className="font-semibold text-primary">{names.bridge(task.bridge_id)}</span>
+              </span>
+            )}
+            {badges.map((b, i) => (
+              <Badge key={i} tone={uiToneForBadge(b.tone)} title={b.title}>
+                {b.label}
+              </Badge>
+            ))}
+          </div>
+        )}
+
+        {/* Row 4: the action that matters now (the rest is in the More menu) */}
+        {(primary.length > 0 || actions.error) && (
+          <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+            {primary.map((id) => (
+              <Button
+                key={id}
+                size="sm"
+                variant={id === 'request_changes' ? 'secondary' : 'primary'}
+                disabled={actions.busy}
+                data-debug-id={`task-action-${id}-${task.task_id}`}
+                onClick={() => void runAction(id)}
+              >
+                {TASK_ACTION_LABELS[id]}
+              </Button>
+            ))}
+            {actions.error && (
+              <Text role="caption" tone="danger" className="min-w-0 break-words">
+                {actions.error}
+              </Text>
+            )}
+          </div>
         )}
       </div>
 
-      {/* Badges row */}
-      {badges.length > 0 && (
-        <div className="flex flex-wrap items-center gap-1.5">
-          {badges.map((b, i) => {
-            const toneClasses =
-              b.tone === 'ok'
-                ? 'bg-success-soft text-success border-success/30'
-                : b.tone === 'accent'
-                  ? 'bg-accent-soft text-accent border-accent/30'
-                  : b.tone === 'danger'
-                    ? 'bg-danger-soft text-danger border-danger/30'
-                    : b.tone === 'warn'
-                      ? 'bg-warning-soft text-warning border-warning/30'
-                      : b.tone === 'info'
-                        ? 'bg-info-soft text-info border-info/30'
-                        : 'bg-neutral-soft text-muted border-subtle';
-            return (
-              <span
-                key={i}
-                title={b.title}
-                className={`inline-flex items-center rounded border px-1.5 py-0.5 font-mono text-[10px] font-medium leading-none ${toneClasses}`}
-              >
-                {b.label}
-              </span>
-            );
-          })}
-        </div>
-      )}
-
-      {/* People: who works it, who reviews it */}
-      {!isGate && (
-        <div
-          data-debug-id={`task-card-people-${task.task_id}`}
-          className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted"
-        >
-          <span title={people.assignee ? `Pinned to agent ${people.assignee}` : 'Granted to the next free fleet worker'}>
-            Assignee: <span className={people.workers.length ? 'text-primary' : 'text-warning'}>{workerLabel}</span>
-          </span>
-          {reviewerLabel && (
-            <span title="Must approve before Done">
-              Reviewers: <span className="text-primary">{reviewerLabel}</span>
-            </span>
-          )}
-        </div>
-      )}
-
-      {/* Summary / goal line */}
-      {summary && (
-        <p className="line-clamp-2 text-xs leading-relaxed text-muted font-normal">
-          {summary}
-        </p>
+      {expanded && (
+        <TaskDetails
+          chainId={chainId}
+          task={task}
+          actions={actions}
+          chainFleets={chainFleets}
+          names={names}
+          onSelectTask={onSelectTask}
+        />
       )}
     </article>
   );

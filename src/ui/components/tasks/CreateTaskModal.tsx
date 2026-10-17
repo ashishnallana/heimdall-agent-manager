@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { Checkbox, Icon, IconButton, Select, Spinner } from '@ui';
+import { Button, Checkbox, FormField, Icon, IconButton, Input, Select, Textarea } from '@ui';
 import { useCreateTaskMutation } from '../../api/endpoints/tasks';
 import { useListAgentIdentitiesQuery } from '../../api/endpoints/agents';
 import { useListBridgesQuery } from '../../api/endpoints/bridgeSupport';
@@ -200,36 +200,31 @@ export const CreateTaskModal: React.FC<CreateTaskModalProps> = ({
 
         <form onSubmit={handleSubmit} className="mt-4 space-y-4">
           {/* Title */}
-          <div>
-            <label className="block font-semibold text-primary mb-1">
-              Title <span className="text-danger">*</span>
-            </label>
-            <input
-              type="text"
+          <FormField label="Title" required>
+            <Input
               data-debug-id="create-task-title-input"
               value={title}
-              onChange={(e) => setTitle(e.target.value)}
+              onChange={setTitle}
               placeholder="e.g. Implement user authentication endpoint"
-              className="w-full rounded border border-subtle bg-surface-raised p-2 text-primary focus:outline-none focus:border-accent"
+              width="full"
               autoFocus
             />
-          </div>
+          </FormField>
 
           {/* Description */}
-          <div>
-            <label className="block font-semibold text-primary mb-1">Description (optional)</label>
-            <textarea
+          <FormField label="Description (optional)">
+            <Textarea
               data-debug-id="create-task-description-input"
               value={desc}
-              onChange={(e) => setDesc(e.target.value)}
+              onChange={setDesc}
               rows={3}
-              placeholder="Specify requirements, files, and acceptance criteria..."
-              className="w-full rounded border border-subtle bg-surface-raised p-2 text-primary focus:outline-none focus:border-accent"
+              placeholder="Context for the agent: requirements, files, constraints"
+              width="full"
             />
-          </div>
+          </FormField>
 
           {/* Brief (Task System v2) — what the hub validates at publish. */}
-          <div data-debug-id="create-task-brief" className="rounded-lg border border-subtle bg-surface-raised/40 p-3 space-y-2.5">
+          <div data-debug-id="create-task-brief" className="space-y-2.5 border-t border-subtle pt-3">
             <div>
               <label className="block font-semibold text-primary">Brief</label>
               <p className="text-[11px] text-muted mt-0.5">
@@ -237,68 +232,59 @@ export const CreateTaskModal: React.FC<CreateTaskModalProps> = ({
               </p>
             </div>
 
-            <div>
-              <label className="block font-semibold text-primary mb-1">
-                Goal <span className="text-danger">*</span>
-                <span className="ml-1 font-normal text-faint">({goal.trim().length}/{BRIEF_GOAL_MAX})</span>
-              </label>
-              <textarea
+            <FormField label="Goal" required hint={`${goal.trim().length} of ${BRIEF_GOAL_MAX} characters`}>
+              <Textarea
                 data-debug-id="create-task-goal-input"
                 value={goal}
-                onChange={(e) => setGoal(e.target.value)}
+                onChange={setGoal}
                 rows={3}
                 maxLength={BRIEF_GOAL_MAX}
                 placeholder="What outcome should the agent deliver?"
-                className="w-full rounded border border-subtle bg-surface p-2 text-primary focus:outline-none focus:border-accent"
+                width="full"
               />
-            </div>
+            </FormField>
 
-            <div>
-              <label className="block font-semibold text-primary mb-1">
-                Acceptance criteria <span className="text-danger">*</span>
-                <span className="ml-1 font-normal text-faint">(one per line, 1–{BRIEF_ACCEPTANCE_MAX} items, ≤{BRIEF_ACCEPTANCE_ITEM_MAX} chars each)</span>
-              </label>
-              <textarea
+            <FormField
+              label="Acceptance criteria"
+              required
+              hint={`One per line, 1 to ${BRIEF_ACCEPTANCE_MAX} items, up to ${BRIEF_ACCEPTANCE_ITEM_MAX} characters each`}
+            >
+              <Textarea
                 data-debug-id="create-task-acceptance-input"
                 value={acceptanceText}
-                onChange={(e) => setAcceptanceText(e.target.value)}
+                onChange={setAcceptanceText}
                 rows={3}
                 placeholder={'Endpoint returns 201 on success\nUnit tests cover the error path'}
-                className="w-full rounded border border-subtle bg-surface p-2 text-primary font-mono focus:outline-none focus:border-accent"
+                width="full"
               />
-            </div>
+            </FormField>
 
-            <div>
-              <label className="block font-semibold text-primary mb-1">
-                Verify command <span className="text-danger">*</span>
-              </label>
-              <input
-                type="text"
+            <FormField
+              label="Verify command"
+              required
+              hint="Runs in the chain directory. The task can't be submitted until it passes."
+            >
+              <Input
                 data-debug-id="create-task-verify-input"
                 value={verify}
-                onChange={(e) => setVerify(e.target.value)}
+                onChange={setVerify}
                 placeholder="e.g. npm test"
-                className="w-full rounded border border-subtle bg-surface p-2 text-primary font-mono focus:outline-none focus:border-accent"
+                width="full"
               />
-              <p className="text-[11px] text-muted mt-1">
-                Run by <code>ham-ctl verify</code> in the chain directory; the task cannot be submitted until it passes.
-              </p>
-            </div>
+            </FormField>
 
-            <div>
-              <label className="block font-semibold text-primary mb-1">Review roles (optional)</label>
-              <input
-                type="text"
+            <FormField
+              label="Review roles (optional)"
+              hint="Comma-separated. Each role needs someone in this chain's fleet, or publishing is rejected."
+            >
+              <Input
                 data-debug-id="create-task-review-roles-input"
                 value={reviewRolesText}
-                onChange={(e) => setReviewRolesText(e.target.value)}
+                onChange={setReviewRolesText}
                 placeholder="e.g. reviewer, security"
-                className="w-full rounded border border-subtle bg-surface p-2 text-primary focus:outline-none focus:border-accent"
+                width="full"
               />
-              <p className="text-[11px] text-muted mt-1">
-                Comma-separated. Each role needs a fleet row in this chain, or publish is rejected.
-              </p>
-            </div>
+            </FormField>
           </div>
 
           {/* Bridge (REQ-TB-5) */}
@@ -317,39 +303,39 @@ export const CreateTaskModal: React.FC<CreateTaskModalProps> = ({
           </div>
 
           {/* Assignee Section */}
-          <div className="rounded-lg border border-subtle bg-surface-raised/40 p-3 space-y-2.5">
+          <div className="space-y-2.5 border-t border-subtle pt-3">
             <label className="block font-semibold text-primary">Initial Assignee</label>
             <div data-debug-id="create-task-assignee-mode" className="flex gap-1 rounded bg-surface p-1">
-              <button
+              <Button
                 type="button"
+                size="sm"
+                variant={assigneeMode === 'agent' ? 'primary' : 'ghost'}
+                aria-pressed={assigneeMode === 'agent'}
                 data-debug-id="create-task-assignee-mode-agent"
                 onClick={() => setAssigneeMode('agent')}
-                className={`rounded px-2.5 py-1 font-semibold transition-colors cursor-pointer ${
-                  assigneeMode === 'agent' ? 'bg-accent text-accent-fg' : 'text-muted hover:text-primary'
-                }`}
               >
-                Agent Role
-              </button>
-              <button
+                Agent
+              </Button>
+              <Button
                 type="button"
+                size="sm"
+                variant={assigneeMode === 'unassigned' ? 'primary' : 'ghost'}
+                aria-pressed={assigneeMode === 'unassigned'}
                 data-debug-id="create-task-assignee-mode-unassigned"
                 onClick={() => setAssigneeMode('unassigned')}
-                className={`rounded px-2.5 py-1 font-semibold transition-colors cursor-pointer ${
-                  assigneeMode === 'unassigned' ? 'bg-accent text-accent-fg' : 'text-muted hover:text-primary'
-                }`}
               >
                 Unassigned
-              </button>
-              <button
+              </Button>
+              <Button
                 type="button"
+                size="sm"
+                variant={assigneeMode === 'user' ? 'primary' : 'ghost'}
+                aria-pressed={assigneeMode === 'user'}
                 data-debug-id="create-task-assignee-mode-user"
                 onClick={() => setAssigneeMode('user')}
-                className={`rounded px-2.5 py-1 font-semibold transition-colors cursor-pointer ${
-                  assigneeMode === 'user' ? 'bg-accent text-accent-fg' : 'text-muted hover:text-primary'
-                }`}
               >
                 User
-              </button>
+              </Button>
             </div>
 
             {assigneeMode === 'agent' && (
@@ -369,20 +355,20 @@ export const CreateTaskModal: React.FC<CreateTaskModalProps> = ({
 
             {assigneeMode === 'user' && (
               <div>
-                <input
-                  type="text"
+                <Input
                   data-debug-id="create-task-assignee-userid-input"
                   value={assigneeUserId}
-                  onChange={(e) => setAssigneeUserId(e.target.value)}
-                  placeholder="e.g. user"
-                  className="w-full rounded border border-subtle bg-surface-raised p-2 text-primary focus:outline-none focus:border-accent"
+                  onChange={setAssigneeUserId}
+                  placeholder="User id"
+                  aria-label="Assignee user id"
+                  width="full"
                 />
               </div>
             )}
           </div>
 
           {/* Reviewers Section */}
-          <div className="rounded-lg border border-subtle bg-surface-raised/40 p-3 space-y-2.5">
+          <div className="space-y-2.5 border-t border-subtle pt-3">
             <div className="flex items-center justify-between">
               <label className="font-semibold text-primary">
                 Reviewers ({stagedReviewers.length})
@@ -433,14 +419,16 @@ export const CreateTaskModal: React.FC<CreateTaskModalProps> = ({
                   onChange={setReviewerAgentId}
                   options={agentOptions}
                 />
-                <button
+                <Button
                   type="button"
+                  size="sm"
+                  variant="secondary"
                   data-debug-id="create-task-add-reviewer-btn"
                   onClick={handleAddReviewer}
-                  className="rounded bg-neutral-soft hover:bg-surface-raised px-3 py-1.5 font-semibold text-accent border border-subtle cursor-pointer shrink-0"
+                  className="shrink-0"
                 >
-                  + Add
-                </button>
+                  Add reviewer
+                </Button>
               </div>
             </div>
           </div>
@@ -491,22 +479,19 @@ export const CreateTaskModal: React.FC<CreateTaskModalProps> = ({
 
           {/* Modal Actions */}
           <div className="flex items-center justify-end gap-2 border-t border-subtle pt-3">
-            <button
-              type="button"
-              onClick={onClose}
-              className="rounded bg-neutral-soft px-3 py-1.5 font-semibold text-primary hover:bg-surface-raised cursor-pointer"
-            >
+            <Button type="button" size="sm" variant="ghost" onClick={onClose}>
               Cancel
-            </button>
-            <button
+            </Button>
+            <Button
               type="submit"
+              size="sm"
+              variant="primary"
               data-debug-id="create-task-submit-btn"
               disabled={isCreating || !username}
-              className="rounded bg-accent px-4 py-1.5 font-semibold text-accent-fg hover:opacity-90 disabled:opacity-50 cursor-pointer flex items-center gap-1.5"
+              loading={isCreating}
             >
-              {isCreating ? <Spinner size="sm" /> : null}
-              <span>{isCreating ? 'Creating…' : 'Create Task'}</span>
-            </button>
+              Create task
+            </Button>
           </div>
         </form>
       </div>

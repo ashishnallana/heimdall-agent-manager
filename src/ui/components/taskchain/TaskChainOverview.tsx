@@ -1,11 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import { IconButton } from '@ui';
-import { useFetchTaskChainDetailQuery } from '../../api/endpoints/tasks';
+import { Badge, Button, IconButton, Text } from '@ui';
+import { useFetchTaskChainDetailQuery, usePublishTaskChainMutation } from '../../api/endpoints/tasks';
 import { useGetTaskChainFleetsQuery } from '../../api/endpoints/taskChains';
 import { useListBridgesQuery } from '../../api/endpoints/bridgeSupport';
 import { TicketBoardView } from '../tasks/TicketBoardView';
 import { WorkflowPipelineView } from '../tasks/WorkflowPipelineView';
-import { TaskDetailView } from '../tasks/TaskDetailView';
 import { CreateTaskModal } from '../tasks/CreateTaskModal';
 import { FleetManagementDrawer } from '../tasks/FleetManagementDrawer';
 import { TaskWire } from '../../api/taskWire';
@@ -13,6 +12,7 @@ import { resolveSelectedTaskId } from '../tasks/taskV2Types';
 import { useOpenAgentChat } from '../aux/openAgentChatContext';
 import { useFetchAgentInstanceQuery, useFetchAgentIdentityQuery, useListAgentIdentitiesQuery } from '../../api/endpoints/agents';
 import { buildTaskNames } from '../tasks/taskNames';
+import { actionErrorMessage } from '../tasks/useTaskActions';
 import { useIsMobile } from '../shell/responsive';
 
 function shellHash(path: string): string {
@@ -92,14 +92,24 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
   hideTitleBar = false,
   onClose,
 }) => {
-  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(focusTaskId || null);
+  // The card expanded inline (plan REQ-UI-8). A deep link to a task expands it.
+  const [expandedTaskId, setExpandedTaskId] = useState<string | null>(focusTaskId || null);
   const [showNewTaskModal, setShowNewTaskModal] = useState(false);
   const [showFleetDrawer, setShowFleetDrawer] = useState(false);
+  const [publishChain, publishChainState] = usePublishTaskChainMutation();
+  const [publishError, setPublishError] = useState('');
+
+  const expandTask = (taskId: string) => {
+    setExpandedTaskId(taskId);
+    // Let the card render expanded, then bring it into view.
+    requestAnimationFrame(() => {
+      document.querySelector(`[data-debug-id="task-card-${taskId}"]`)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    });
+  };
+  const toggleTask = (taskId: string) => setExpandedTaskId((cur) => (cur === taskId ? null : taskId));
 
   useEffect(() => {
-    if (focusTaskId) {
-      setSelectedTaskId(focusTaskId);
-    }
+    if (focusTaskId) expandTask(focusTaskId);
   }, [focusTaskId]);
 
   const { data: chainDetailData, isLoading: isLoadingChain, error: chainError } =
@@ -149,78 +159,52 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
   }
 
   const isWorkflow = chain.kind === 'workflow';
-  const openTaskId = resolveSelectedTaskId(selectedTaskId, tasks, Boolean(chain));
+  const openTaskId = resolveSelectedTaskId(expandedTaskId, tasks, Boolean(chain));
+  const chainIsDraft = String(chain.publishState || chain.publish_state || '').toLowerCase() === 'draft';
+  const handlePublishChain = async () => {
+    setPublishError('');
+    try {
+      await publishChain({ chainId, taskTitles: Object.fromEntries(tasks.map((t) => [t.task_id, t.title])) }).unwrap();
+    } catch (err) {
+      setPublishError(actionErrorMessage(err));
+    }
+  };
+  const fleetButton = (
+    <Button size="sm" variant="secondary" onClick={() => setShowFleetDrawer(true)}>
+      Fleet
+    </Button>
+  );
 
   return (
     <div
       data-debug-id="taskchain-overview-container"
       className="flex h-full w-full flex-col min-w-0 bg-canvas overflow-hidden"
     >
-      {/* Title bar (if not hidden) */}
       {!hideTitleBar && (
-        <header className="flex items-center justify-between border-b border-subtle px-4 py-3 bg-surface shrink-0">
-          <div className="flex items-center gap-2 min-w-0">
-            <span className="font-bold text-sm text-primary truncate">
-              {chain.title || chainId}
-            </span>
-            <span
-              className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase ${
-                isWorkflow ? 'bg-accent-soft text-accent' : 'bg-neutral-soft text-muted'
-              }`}
-            >
-              {chain.kind || 'ticket'}
-            </span>
+        <header className="flex shrink-0 items-center justify-between gap-2 border-b border-subtle bg-surface px-4 py-3">
+          <div className="flex min-w-0 items-center gap-2">
+            <Text as="h2" role="title" truncate>
+              {chain.title || 'Untitled chain'}
+            </Text>
+            <Badge tone={isWorkflow ? 'info' : 'neutral'}>{isWorkflow ? 'Workflow' : 'Tickets'}</Badge>
+            {chainIsDraft && <Badge tone="neutral">Draft</Badge>}
           </div>
-
-          <div className="flex items-center gap-2 shrink-0">
-            <button
-              type="button"
-              onClick={() => setShowFleetDrawer(true)}
-              className="rounded border border-subtle bg-surface-raised px-2.5 py-1 text-xs font-semibold text-primary hover:bg-neutral-soft"
-            >
-              Fleet
-            </button>
-            <button
-              type="button"
-              onClick={() => setShowNewTaskModal(true)}
-              className="rounded bg-accent px-2.5 py-1 text-xs font-semibold text-accent-fg hover:opacity-90"
-            >
-              + Task
-            </button>
-            {onClose && (
-              <IconButton
-                icon="close"
-                label="Close task chain"
-                variant="ghost"
-                size="sm"
-                onClick={onClose}
-                className="ml-1"
-              />
-            )}
-          </div>
+          {onClose && <IconButton icon="close" label="Close task chain" variant="ghost" size="sm" onClick={onClose} />}
         </header>
       )}
 
-      {/* Main content: Either Detail View or Board/Pipeline View */}
-      <div className="flex-1 min-h-0 overflow-y-auto">
-        {openTaskId ? (
-          <TaskDetailView
-            chainId={chainId}
-            taskId={openTaskId}
-            tasks={tasks}
-            names={names}
-            onClose={() => setSelectedTaskId(null)}
-            onSelectTask={(id) => setSelectedTaskId(id)}
-            chainFleets={fleets}
-          />
-        ) : isWorkflow ? (
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        {isWorkflow ? (
           <WorkflowPipelineView
             chainId={chainId}
             chain={chain}
             tasks={tasks}
             names={names}
-            selectedTaskId={selectedTaskId}
-            onSelectTask={(id) => setSelectedTaskId(id)}
+            chainFleets={fleets}
+            expandedTaskId={openTaskId}
+            onToggleTask={toggleTask}
+            onSelectTask={expandTask}
+            actions={fleetButton}
           />
         ) : (
           <TicketBoardView
@@ -228,11 +212,14 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
             tasks={tasks}
             names={names}
             chainFleets={fleets}
-            bridges={bridges}
-            selectedTaskId={selectedTaskId}
-            onSelectTask={(id) => setSelectedTaskId(id)}
+            expandedTaskId={openTaskId}
+            onToggleTask={toggleTask}
+            onSelectTask={expandTask}
             onNewTask={() => setShowNewTaskModal(true)}
             onOpenFleetDrawer={() => setShowFleetDrawer(true)}
+            onPublishChain={chainIsDraft ? handlePublishChain : undefined}
+            publishingChain={publishChainState.isLoading}
+            publishError={publishError}
             summaryText={chain.summary}
           />
         )}

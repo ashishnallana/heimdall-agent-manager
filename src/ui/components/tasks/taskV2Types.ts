@@ -187,10 +187,11 @@ export function getTaskStatusLines(task: TaskWire, _chainFleets?: any[], nowMs: 
       ];
     }
     const deps = task.depends_on || [];
-    return [
-      'Waiting for dependencies',
-      deps.length > 0 ? `needs ${deps.map((d) => `"${names.task(d)}"`).join(', ')}` : 'draft / awaiting publish',
-    ];
+    const depList = deps.map((d) => `"${names.task(d)}"`).join(', ');
+    if (String(task.publish_state || '').toLowerCase() === 'draft') {
+      return ['Draft, not visible to agents until you publish it', deps.length > 0 ? `then waits for ${depList}` : ''];
+    }
+    return deps.length > 0 ? ['Waiting for other tasks', `needs ${depList}`] : ['In the backlog', 'not ready to start yet'];
   }
 
   if (state === 'done') {
@@ -259,4 +260,38 @@ export function resolveSelectedTaskId(selectedTaskId: string | null | undefined,
   if (!selectedTaskId) return null;
   if (!loaded) return selectedTaskId;
   return tasks.some((t) => t.task_id === selectedTaskId) ? selectedTaskId : null;
+}
+
+/** @ui Tone for a task state pill. */
+export const TASK_STATE_TONE: Record<TaskStateV2, 'neutral' | 'info' | 'success' | 'warning' | 'danger' | 'pending'> = {
+  in_progress: 'info',
+  in_review: 'pending',
+  ready: 'neutral',
+  backlog: 'neutral',
+  done: 'success',
+  cancelled: 'neutral',
+};
+
+/** Maps the local badge tone vocabulary onto the @ui Tone set (plan REQ-UI-2). */
+export function uiToneForBadge(tone: TaskBadge['tone']): 'neutral' | 'info' | 'success' | 'warning' | 'danger' | 'pending' {
+  switch (tone) {
+    case 'ok':
+      return 'success';
+    case 'accent':
+      return 'info';
+    case 'warn':
+      return 'warning';
+    case 'danger':
+      return 'danger';
+    case 'info':
+      return 'info';
+    default:
+      return 'neutral';
+  }
+}
+
+/** @ui Tone for a priority badge; the wire sends p0|p1|p2. */
+export function uiToneForPriority(priority: string | undefined): 'danger' | 'warning' | 'neutral' {
+  const p = String(priority || '').toLowerCase();
+  return p === 'p0' || p === 'urgent' ? 'danger' : p === 'p1' || p === 'high' ? 'warning' : 'neutral';
 }

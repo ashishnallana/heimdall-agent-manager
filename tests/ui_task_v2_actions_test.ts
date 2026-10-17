@@ -1,0 +1,94 @@
+// Task System v2 UI: which human action a task offers, and the board order
+// (plan REQ-UI-7 / REQ-UI-9).
+//
+// RUN: node --import ./tests/helpers/vaultEndpointHarness.ts --test tests/ui_task_v2_actions_test.ts
+
+import './helpers/vaultEndpointHarness.ts';
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { getTaskActions, taskNeedsYou } from '../src/ui/components/tasks/taskActions.ts';
+import type { TaskWire } from '../src/ui/api/taskWire.ts';
+
+function task(overrides: Partial<TaskWire> & Record<string, unknown> = {}): TaskWire {
+  return {
+    task_id: 'task_x',
+    chain_id: 'chain_x',
+    title: 'T',
+    state: 'ready',
+    publish_state: 'published',
+    kind: 'task',
+    attempt_no: 0,
+    priority: 'p2',
+    brief: { goal: 'g', acceptance: ['a'], verify: 'npm test' },
+    ...overrides,
+  } as unknown as TaskWire;
+}
+
+test('a draft offers Publish and needs you', () => {
+  const t = task({ publish_state: 'draft', state: 'backlog' });
+  assert.deepEqual(getTaskActions(t).primary, ['publish']);
+  assert.ok(taskNeedsYou(t));
+});
+
+test('a task blocked on a human offers Answer', () => {
+  const t = task({ state: 'backlog', blocked_on: { kind: 'human', reason: 'Which DB?' } as any });
+  assert.deepEqual(getTaskActions(t).primary, ['answer']);
+  assert.ok(taskNeedsYou(t));
+  // blocked on something that is not a person: nothing for the user to do
+  const onDep = task({ state: 'backlog', blocked_on: { kind: 'dependency' } as any });
+  assert.deepEqual(getTaskActions(onDep).primary, []);
+  assert.ok(!taskNeedsYou(onDep));
+});
+
+test('review awaiting the user (or a gate) offers Approve and Request changes', () => {
+  for (const t of [task({ state: 'in_review', requires_user_approval: true, attempt_no: 1 }), task({ state: 'in_review', kind: 'gate' })]) {
+    assert.deepEqual(getTaskActions(t).primary, ['approve', 'request_changes']);
+    assert.ok(taskNeedsYou(t));
+  }
+  // reviewed only by agents: the user just watches
+  const agentReview = task({ state: 'in_review', attempt_no: 1 });
+  assert.deepEqual(getTaskActions(agentReview).primary, []);
+  assert.ok(!taskNeedsYou(agentReview));
+});
+
+test('running work has no primary action; verify re-run and cancel live in More', () => {
+  const t = task({ state: 'in_progress', attempt_no: 2 });
+  const { primary, more } = getTaskActions(t);
+  assert.deepEqual(primary, []);
+  assert.deepEqual(more, ['rerun_verify', 'cancel', 'copy_id']);
+  // verify: none has nothing to re-run
+  assert.ok(!getTaskActions(task({ state: 'in_progress', attempt_no: 1, brief: { goal: 'g', acceptance: ['a'], verify: 'none' } as any })).more.includes('rerun_verify'));
+});
+
+test('finished tasks can only be reopened; gates are never cancelled from a card', () => {
+  for (const state of ['done', 'cancelled']) {
+    const { primary, more } = getTaskActions(task({ state }));
+    assert.deepEqual(primary, []);
+    assert.deepEqual(more, ['reopen', 'copy_id']);
+    assert.ok(!taskNeedsYou(task({ state, publish_state: 'draft' })));
+  }
+  assert.ok(!getTaskActions(task({ kind: 'gate', state: 'in_review' })).more.includes('cancel'));
+});
+
+test('the board puts tasks that need you first, then by state and priority', async () => {
+  const { sortTasksForBoard } = await import('../src/ui/components/tasks/TicketBoardView.tsx');
+  const order = sortTasksForBoard([
+    task({ task_id: 'done', state: 'done' }),
+    task({ task_id: 'ready_p2', state: 'ready', priority: 'p2' }),
+    task({ task_id: 'ready_p0', state: 'ready', priority: 'p0' }),
+    task({ task_id: 'running', state: 'in_progress' }),
+    task({ task_id: 'needs_review', state: 'in_review', requires_user_approval: true }),
+  ]).map((t) => t.task_id);
+  assert.deepEqual(order, ['needs_review', 'running', 'ready_p0', 'ready_p2', 'done']);
+});
+
+test('a draft says it is a draft; template stage titles never show raw placeholders', async () => {
+  const { getTaskStatusLines } = await import('../src/ui/components/tasks/taskV2Types.ts');
+  const [line1, line2] = getTaskStatusLines(task({ publish_state: 'draft', state: 'backlog' }));
+  assert.equal(line1, 'Draft, not visible to agents until you publish it');
+  assert.equal(line2, '');
+  const { renderStageTitle } = await import('../src/ui/components/tasks/WorkflowPipelineView.tsx');
+  assert.equal(renderStageTitle('Explore: {{inputs.goal}}', { goal: 'Add CSV export' }), 'Explore: Add CSV export');
+  assert.equal(renderStageTitle('Build: {{item.title}}', {}), 'Build: each planned item');
+  assert.ok(!renderStageTitle('X {{ something.else }}', {}).includes('{{'));
+});

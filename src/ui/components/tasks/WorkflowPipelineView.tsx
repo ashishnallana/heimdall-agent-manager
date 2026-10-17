@@ -1,365 +1,230 @@
 import React, { useState } from 'react';
-import { Icon, type IconName } from '@ui';
-import { type TaskNames } from './taskNames';
+import { Button, Checkbox, Icon, Modal, ModalBody, ModalFooter, Select, Text, type IconName } from '@ui';
 import { TaskWire } from '../../api/taskWire';
 import { TaskSummaryBar } from './TaskSummaryBar';
 import { TaskCard } from './TaskCard';
-import {
-  useFetchWorkflowStatusQuery,
-  useRetryWorkflowMutation,
-  useCancelWorkflowMutation,
-  useUserReviewTaskMutation,
-} from '../../api/endpoints/tasks';
+import { useCancelWorkflowMutation, useFetchWorkflowStatusQuery, useRetryWorkflowMutation } from '../../api/endpoints/tasks';
 import { normalizeTaskState } from './taskV2Types';
+import { EMPTY_TASK_NAMES, type TaskNames } from './taskNames';
+import { actionErrorMessage } from './useTaskActions';
 
 export interface WorkflowPipelineViewProps {
   chainId: string;
   chain: any;
   tasks: TaskWire[];
-  selectedTaskId?: string | null;
-  onSelectTask: (taskId: string) => void;
+  chainFleets?: any[];
+  /** The card expanded inline (plan REQ-UI-8). */
+  expandedTaskId?: string | null;
+  onToggleTask: (taskId: string) => void;
+  onSelectTask?: (taskId: string) => void;
+  /** Chain-level buttons (e.g. Fleet) shown in the header. */
+  actions?: React.ReactNode;
   names?: TaskNames;
   className?: string;
 }
 
+type StageStatus = 'complete' | 'failed' | 'active' | 'pending';
+
+/**
+ * Stage titles come from the workflow template ("Explore: {{inputs.goal}}").
+ * Fill run inputs in, and describe per-item placeholders in words, so a raw
+ * template never shows.
+ */
+export function renderStageTitle(title: string, inputs: Record<string, unknown> = {}): string {
+  return String(title || '')
+    .replace(/\{\{\s*inputs\.([a-zA-Z0-9_]+)\s*\}\}/g, (_m, key) => (inputs[key] != null ? String(inputs[key]) : key.replace(/_/g, ' ')))
+    .replace(/\{\{\s*item\.[a-zA-Z0-9_]+\s*\}\}/g, 'each planned item')
+    .replace(/\{\{[^}]*\}\}/g, '…')
+    .trim();
+}
+
+const STAGE_ICON: Record<StageStatus, IconName | null> = {
+  complete: 'check',
+  failed: 'alert',
+  active: 'clock',
+  pending: null,
+};
+const STAGE_TEXT_TONE: Record<StageStatus, string> = {
+  complete: 'text-success',
+  failed: 'text-danger',
+  active: 'text-info',
+  pending: 'text-faint',
+};
+
+/**
+ * A workflow run as its stages, top to bottom (plan REQ-UI-7). Each stage is a
+ * heading with its tasks below as the same flat cards the ticket board uses, so
+ * a gate offers Approve / Request changes exactly where a review would.
+ */
 export const WorkflowPipelineView: React.FC<WorkflowPipelineViewProps> = ({
   chainId,
   chain,
   tasks = [],
-  selectedTaskId,
+  chainFleets = [],
+  expandedTaskId,
+  onToggleTask,
   onSelectTask,
+  actions,
+  names = EMPTY_TASK_NAMES,
   className = '',
 }) => {
   const { data: workflowStatus } = useFetchWorkflowStatusQuery({ chainId });
-  const [retryWorkflow, { isLoading: isRetrying }] = useRetryWorkflowMutation();
-  const [cancelWorkflow, { isLoading: isCancelling }] = useCancelWorkflowMutation();
-  const [userReviewTask] = useUserReviewTaskMutation();
+  const [retryWorkflow, retryState] = useRetryWorkflowMutation();
+  const [cancelWorkflow, cancelState] = useCancelWorkflowMutation();
 
-  const [openStages, setOpenStages] = useState<Record<string, boolean>>({});
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+  const [retryOpen, setRetryOpen] = useState(false);
+  const [retryStageKey, setRetryStageKey] = useState('');
   const [cascadeRetry, setCascadeRetry] = useState(true);
-  const [retryStageKey, setRetryStageKey] = useState<string>('');
-  const [showRetryModal, setShowRetryModal] = useState(false);
-
-  const toggleStage = (stageKey: string) => {
-    setOpenStages((prev) => ({ ...prev, [stageKey]: !prev[stageKey] }));
-  };
+  const [error, setError] = useState('');
 
   const stages: any[] = workflowStatus?.stages || [];
+  const running = chain?.status === 'active';
 
-  const handleGateAction = async (task: TaskWire, verdict: 'approve' | 'request_changes') => {
+  const handleRetry = async () => {
+    setError('');
     try {
-      await userReviewTask({
-        chainId,
-        taskId: task.task_id,
-        verdict,
-      }).unwrap();
+      await retryWorkflow({ chainId, stageKey: retryStageKey || undefined, cascade: cascadeRetry }).unwrap();
+      setRetryOpen(false);
     } catch (err) {
-      console.error('Failed to submit gate review decision', err);
+      setError(actionErrorMessage(err));
     }
   };
 
-  const handleDoRetry = async () => {
-    try {
-      await retryWorkflow({
-        chainId,
-        stageKey: retryStageKey || undefined,
-        cascade: cascadeRetry,
-      }).unwrap();
-      setShowRetryModal(false);
-    } catch (err) {
-      console.error('Failed to retry workflow', err);
-    }
-  };
-
-  const handleDoCancel = async () => {
-    if (!window.confirm('Cancel this entire workflow run?')) return;
+  const handleCancelRun = async () => {
+    if (!window.confirm('Cancel this whole workflow run?')) return;
+    setError('');
     try {
       await cancelWorkflow({ chainId }).unwrap();
     } catch (err) {
-      console.error('Failed to cancel workflow', err);
+      setError(actionErrorMessage(err));
     }
   };
 
   return (
-    <div
-      data-debug-id="workflow-pipeline-view"
-      className={`flex flex-col gap-4 text-left p-4 sm:p-6 overflow-y-auto ${className}`}
-    >
-      {/* Workflow Summary Bar */}
+    <div data-debug-id="workflow-pipeline-view" className={`flex flex-col gap-3 p-4 text-left ${className}`}>
       <TaskSummaryBar
         tasks={tasks}
+        chainFleets={chainFleets}
         kind="workflow"
         workflowStatus={workflowStatus}
-        onSelectTask={onSelectTask}
         summaryText={chain?.summary}
-      />
-
-      {/* Workflow Controls Bar */}
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-subtle pb-3">
-        <div className="flex items-center gap-2">
-          <span className="text-xs font-bold uppercase tracking-wider text-muted">
-            Pipeline Stages ({stages.length})
-          </span>
-          {chain?.status === 'active' && (
-            <span className="rounded-full bg-accent-soft px-2 py-0.5 font-mono text-[10px] text-accent">
-              running
-            </span>
-          )}
-        </div>
-
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            data-debug-id="workflow-retry-btn"
-            onClick={() => {
-              setRetryStageKey(stages[0]?.key || '');
-              setShowRetryModal(true);
-            }}
-            disabled={isRetrying}
-            className="rounded border border-subtle bg-surface px-2.5 py-1 text-xs font-semibold text-primary hover:bg-surface-raised transition-colors"
-          >
-            Retry Stage…
-          </button>
-
-          {chain?.status === 'active' && (
-            <button
-              type="button"
-              data-debug-id="workflow-cancel-btn"
-              onClick={handleDoCancel}
-              disabled={isCancelling}
-              className="rounded border border-danger/40 bg-danger-soft px-2.5 py-1 text-xs font-semibold text-danger hover:bg-danger/20 transition-colors"
+        actions={
+          <>
+            {actions}
+            <Button
+              size="sm"
+              variant="secondary"
+              data-debug-id="workflow-retry-btn"
+              disabled={stages.length === 0}
+              onClick={() => {
+                setRetryStageKey(stages.find((st) => st.failed)?.key || stages[0]?.key || '');
+                setRetryOpen(true);
+              }}
             >
-              Cancel Run
-            </button>
-          )}
-        </div>
-      </div>
+              Retry stage
+            </Button>
+            {running && (
+              <Button size="sm" variant="secondary" tone="danger" data-debug-id="workflow-cancel-btn" loading={cancelState.isLoading} onClick={handleCancelRun}>
+                Cancel run
+              </Button>
+            )}
+          </>
+        }
+      />
+      {error && (
+        <Text role="caption" tone="danger" className="break-words">
+          {error}
+        </Text>
+      )}
 
-      {/* Stages List */}
-      <div className="relative flex flex-col gap-4">
-        {stages.map((st, i) => {
-          const inst = tasks.filter((t) => t.stage_key === st.key);
-          const done = inst.filter((t) => normalizeTaskState(t.state) === 'done').length;
-          const failed = Boolean(
-            st.failed || inst.some((t) => normalizeTaskState(t.state) === 'cancelled')
-          );
-          const active = inst.some((t) =>
-            ['in_progress', 'in_review'].includes(normalizeTaskState(t.state))
-          );
-          const complete = Boolean(
-            st.complete || (inst.length > 0 && done === inst.length)
-          );
-          const isMaterialised = inst.length > 0;
-          const status = complete ? 'complete' : failed ? 'failed' : active ? 'active' : 'pending';
-
-          const isOpen = openStages[st.key] !== false;
-
-          const stageIcon: IconName | null = complete ? 'check' : failed ? 'alert' : active ? 'clock' : null;
-          const glyphColor = complete
-            ? 'bg-success-soft text-success border-success/40'
-            : failed
-              ? 'bg-danger-soft text-danger border-danger/40'
-              : active
-                ? 'bg-accent-soft text-accent border-accent/40 animate-pulse'
-                : 'bg-neutral-soft text-muted border-subtle';
-
-          const isGate = st.kind === 'gate';
-          const gateTask = isGate && inst.length > 0 ? inst[0] : null;
+      <ol className="flex flex-col gap-4">
+        {stages.map((st) => {
+          const inst = tasks
+            .filter((t) => t.stage_key === st.key)
+            .sort((a, b) => (a.stage_index || 0) - (b.stage_index || 0));
+          const doneCount = inst.filter((t) => normalizeTaskState(t.state) === 'done').length;
+          const status: StageStatus =
+            st.complete || (inst.length > 0 && doneCount === inst.length)
+              ? 'complete'
+              : st.failed || inst.some((t) => normalizeTaskState(t.state) === 'cancelled')
+                ? 'failed'
+                : inst.some((t) => ['in_progress', 'in_review'].includes(normalizeTaskState(t.state)))
+                  ? 'active'
+                  : 'pending';
+          const isOpen = !collapsed[st.key];
+          const icon = STAGE_ICON[status];
+          const progress =
+            inst.length === 0
+              ? st.needs?.length
+                ? `starts after ${st.needs.join(', ')}`
+                : 'not started'
+              : `${doneCount} of ${inst.length} done`;
 
           return (
-            <div
-              key={st.key}
-              data-debug-id={`stage-card-${st.key}`}
-              className="relative flex flex-col rounded-xl border border-subtle bg-surface/50 overflow-hidden"
-            >
-              {/* Stage header */}
-              <header
-                role="button"
-                tabIndex={0}
-                onClick={() => toggleStage(st.key)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault();
-                    toggleStage(st.key);
-                  }
-                }}
-                className="flex items-center justify-between px-4 py-3 bg-surface hover:bg-surface-raised cursor-pointer select-none transition-colors"
+            <li key={st.key} data-debug-id={`stage-card-${st.key}`} className="space-y-2">
+              <button
+                type="button"
+                aria-expanded={isOpen}
+                onClick={() => setCollapsed((prev) => ({ ...prev, [st.key]: isOpen }))}
+                className="flex w-full min-w-0 items-center gap-2 text-left"
               >
-                <div className="flex items-center gap-2.5 min-w-0">
-                  <span
-                    className={`grid h-5 w-5 place-items-center rounded-full border text-[11px] font-bold shrink-0 ${glyphColor}`}
-                  >
-                    {stageIcon ? <Icon name={stageIcon} size={12} /> : null}
-                  </span>
-                  <span className="truncate text-xs font-bold text-primary">
-                    {st.title || st.key}
-                  </span>
-                  <span className="font-mono text-[10px] text-faint rounded bg-neutral-soft px-1.5 py-0.5">
-                    {st.key}
-                  </span>
-                  {st.needs && st.needs.length > 0 && (
-                    <span className="hidden sm:inline-flex font-mono text-[10px] text-muted rounded border border-subtle px-1.5 py-0.5">
-                      needs {st.needs.join(', ')}
-                    </span>
-                  )}
-                </div>
+                <Icon name={isOpen ? 'chevron-down' : 'chevron-right'} size="sm" className="shrink-0 text-muted" />
+                <span className={`inline-flex h-4 w-4 shrink-0 items-center justify-center ${STAGE_TEXT_TONE[status]}`}>
+                  {icon ? <Icon name={icon} size={12} title={status} /> : <span className="h-1.5 w-1.5 rounded-full bg-current" />}
+                </span>
+                <span className="truncate text-xs font-semibold text-primary">
+                  {renderStageTitle(st.title || st.key, workflowStatus?.inputs || {})}
+                </span>
+                <span className="shrink-0 text-[11px] text-muted">· {progress}</span>
+                {st.kind === 'gate' && <span className="shrink-0 text-[11px] text-muted">· needs a decision</span>}
+              </button>
 
-                <div className="flex items-center gap-2 shrink-0">
-                  <span className="font-mono text-[11px] text-muted">
-                    {isGate
-                      ? complete
-                        ? 'approved'
-                        : isMaterialised
-                          ? 'waiting on you'
-                          : 'after dependencies'
-                      : isMaterialised
-                        ? `${done}/${inst.length} done`
-                        : st.parallel
-                          ? `${st.parallel} parallel`
-                          : st.for_each
-                            ? `expands from ${st.for_each}`
-                            : '1 instance'}
-                  </span>
-                  <Icon name={isOpen ? 'chevron-down' : 'chevron-right'} size="sm" className="text-muted" />
-                </div>
-              </header>
-
-              {/* Stage body */}
-              {isOpen && (
-                <div className="p-4 space-y-3">
-                  {!isMaterialised ? (
-                    <div className="rounded-xl border border-dashed border-subtle/80 bg-surface-raised/40 p-4 text-center text-xs text-muted">
-                      materialises when {(st.needs || []).join(' + ') || 'upstream stages'} complete
-                      {st.for_each ? ` · one instance per item of ${st.for_each}` : ''}
-                    </div>
-                  ) : isGate && gateTask ? (
-                    <div
-                      data-debug-id={`stage-gate-${st.key}`}
-                      className="rounded-xl border border-accent/40 bg-accent-soft/20 p-4 flex flex-col gap-3"
-                    >
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs font-semibold text-accent uppercase tracking-wide">
-                          Human Decision Gate
-                        </span>
-                        <span className="truncate text-[11px] text-muted">
-                          {gateTask.title}
-                        </span>
-                      </div>
-                      <p className="text-xs leading-relaxed text-primary">
-                        {gateTask.brief?.goal || 'Review and approve downstream stage execution.'}
-                      </p>
-                      {normalizeTaskState(gateTask.state) === 'done' ? (
-                        <div className="inline-flex items-center gap-1.5 text-xs font-semibold text-success">
-                          <Icon name="check" size="sm" />
-                          <span>Approved — downstream stages unlocked</span>
-                        </div>
-                      ) : (
-                        <div className="flex items-center gap-2 pt-1">
-                          <button
-                            type="button"
-                            onClick={() => handleGateAction(gateTask, 'approve')}
-                            className="rounded-lg bg-success px-3 py-1.5 text-xs font-semibold text-white hover:opacity-90 transition-opacity"
-                          >
-                            Approve Stage
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleGateAction(gateTask, 'request_changes')}
-                            className="rounded-lg border border-subtle bg-surface px-3 py-1.5 text-xs font-semibold text-primary hover:bg-surface-raised transition-colors"
-                          >
-                            Request Changes
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => onSelectTask(gateTask.task_id)}
-                            className="ml-auto text-xs text-accent hover:underline"
-                          >
-                            View gate details
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  ) : (
-                    <div className="space-y-2">
-                      {inst
-                        .slice()
-                        .sort((a, b) => (a.stage_index || 0) - (b.stage_index || 0))
-                        .map((task) => (
-                          <TaskCard
-                            key={task.task_id}
-                            task={task}
-                            selected={selectedTaskId === task.task_id}
-                            onSelect={onSelectTask}
-                          />
-                        ))}
-                    </div>
-                  )}
+              {isOpen && inst.length > 0 && (
+                <div className="flex flex-col gap-2 pl-6">
+                  {inst.map((task) => (
+                    <TaskCard
+                      key={task.task_id}
+                      task={task}
+                      chainId={chainId}
+                      expanded={expandedTaskId === task.task_id}
+                      onToggle={onToggleTask}
+                      onSelectTask={onSelectTask}
+                      chainFleets={chainFleets}
+                      names={names}
+                    />
+                  ))}
                 </div>
               )}
-            </div>
+            </li>
           );
         })}
-      </div>
+      </ol>
 
-      {/* Retry Modal */}
-      {showRetryModal && (
-        <div
-          data-debug-id="workflow-retry-modal"
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
-        >
-          <div className="w-full max-w-md rounded-2xl border border-subtle bg-surface p-5 space-y-4 shadow-xl">
-            <h3 className="text-sm font-bold text-primary">
-              Retry Workflow Stage
-            </h3>
-            <p className="text-xs text-muted leading-relaxed">
-              Re-executes a failed or completed stage. With cascade enabled, downstream tasks are re-run while unchanged items are carried forward.
-            </p>
-
-            <label className="flex flex-col gap-1 text-xs text-muted">
-              <span>Stage to retry</span>
-              <select
-                value={retryStageKey}
-                onChange={(e) => setRetryStageKey(e.target.value)}
-                className="rounded-lg border border-subtle bg-surface-raised px-3 py-2 text-primary text-xs outline-none focus:border-accent"
-              >
-                {stages.map((st) => (
-                  <option key={st.key} value={st.key}>
-                    {st.key} ({st.title || st.key})
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <label className="flex items-center gap-2 text-xs text-primary cursor-pointer select-none">
-              <input
-                type="checkbox"
-                checked={cascadeRetry}
-                onChange={(e) => setCascadeRetry(e.target.checked)}
-                className="h-4 w-4 accent-accent"
-              />
-              <span>--cascade (cancel and re-materialise downstream stages)</span>
-            </label>
-
-            <div className="flex items-center justify-end gap-2 pt-2 border-t border-subtle">
-              <button
-                type="button"
-                onClick={() => setShowRetryModal(false)}
-                className="rounded-lg border border-subtle bg-surface px-3 py-1.5 text-xs font-semibold text-muted hover:text-primary transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={handleDoRetry}
-                disabled={isRetrying}
-                className="rounded-lg bg-accent px-4 py-1.5 text-xs font-semibold text-accent-fg hover:opacity-90 transition-opacity"
-              >
-                {isRetrying ? 'Retrying…' : 'Run Retry'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <Modal open={retryOpen} onOpenChange={setRetryOpen} title="Retry a stage" size="sm">
+        <ModalBody className="space-y-3">
+          <Text as="p" role="caption" tone="muted">
+            Runs the stage again. With the downstream option on, later stages are re-created too, and finished items that did
+            not change are carried forward.
+          </Text>
+          <Select
+            value={retryStageKey}
+            onChange={setRetryStageKey}
+            options={stages.map((st) => ({ value: st.key, text: renderStageTitle(st.title || st.key, workflowStatus?.inputs || {}) }))}
+            aria-label="Stage to retry"
+            width="full"
+          />
+          <Checkbox checked={cascadeRetry} onChange={setCascadeRetry} label="Also redo the stages after it" />
+        </ModalBody>
+        <ModalFooter>
+          <Button size="sm" variant="ghost" onClick={() => setRetryOpen(false)}>
+            Close
+          </Button>
+          <Button size="sm" variant="primary" loading={retryState.isLoading} onClick={handleRetry}>
+            Retry
+          </Button>
+        </ModalFooter>
+      </Modal>
     </div>
   );
 };

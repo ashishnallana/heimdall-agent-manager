@@ -1,274 +1,161 @@
 import React from 'react';
-import { Icon } from '@ui';
+import { Button, ProgressBar, StatusDot, Text } from '@ui';
 import { TaskWire } from '../../api/taskWire';
-import {
-  TASK_STATES_ORDER,
-  TASK_STATE_COLORS,
-  TASK_STATE_LABELS,
-  TaskStateV2,
-  normalizeTaskState,
-} from './taskV2Types';
+import { TASK_STATES_ORDER, TASK_STATE_LABELS, TASK_STATE_TONE, TaskStateV2, normalizeTaskState } from './taskV2Types';
+import { taskNeedsYou } from './taskActions';
 
 export interface TaskSummaryBarProps {
   tasks: TaskWire[];
   chainFleets?: any[];
-  bridges?: any[];
-  onSelectTask?: (taskId: string) => void;
   kind?: string;
   workflowStatus?: any;
   summaryText?: string;
+  /** "N need you" filter (plan REQ-UI-7). Omit to hide the toggle. */
+  needsYouActive?: boolean;
+  onToggleNeedsYou?: () => void;
+  /** Chain-level buttons (Fleet, New task, Publish) rendered on the right. */
+  actions?: React.ReactNode;
 }
 
+const UNCLAIMED_AFTER_MINS = 10;
+const EXPIRING_WITHIN_MINS = 3;
+
+/**
+ * The quiet header above a chain's tasks: progress, counts, and one line that
+ * says whether anything needs you. No card around it (design reference).
+ */
 export const TaskSummaryBar: React.FC<TaskSummaryBarProps> = ({
   tasks,
   chainFleets = [],
-  bridges = [],
-  onSelectTask,
   kind,
   workflowStatus,
   summaryText,
+  needsYouActive = false,
+  onToggleNeedsYou,
+  actions,
 }) => {
-  const counts: Record<TaskStateV2, number> = {
-    in_progress: 0,
-    in_review: 0,
-    ready: 0,
-    backlog: 0,
-    done: 0,
-    cancelled: 0,
-  };
-
+  const counts = TASK_STATES_ORDER.reduce(
+    (acc, s) => ({ ...acc, [s]: 0 }),
+    {} as Record<TaskStateV2, number>,
+  );
   tasks.forEach((t) => {
-    const s = normalizeTaskState(t.state);
-    counts[s] = (counts[s] || 0) + 1;
+    counts[normalizeTaskState(t.state)] += 1;
   });
 
-  const total = tasks.length || 1;
   const nowMs = Date.now();
+  const needsYou = tasks.filter(taskNeedsYou).length;
+  const expiring = tasks.filter((t) => {
+    if (normalizeTaskState(t.state) !== 'in_progress' || !t.leases?.[0]?.expires_at) return false;
+    return (new Date(t.leases[0].expires_at).getTime() - nowMs) / 60000 <= EXPIRING_WITHIN_MINS;
+  }).length;
+  const unclaimed = tasks.filter(
+    (t) =>
+      normalizeTaskState(t.state) === 'ready' &&
+      t.ready_since &&
+      (nowMs - new Date(t.ready_since).getTime()) / 60000 >= UNCLAIMED_AFTER_MINS,
+  ).length;
+  const activeLeases = tasks.reduce((n, t) => n + (t.leases?.length || 0), 0);
+  const workers = chainFleets.filter((f) => (f.roles || []).includes('worker') || !f.roles?.length).length;
+  const reviewers = chainFleets.filter((f) => (f.roles || []).some((r: string) => r !== 'worker')).length;
 
-  // Attention groups
-  const blockedTasks = tasks.filter((t) => Boolean(t.blocked_on));
-  const awaitingUserTasks = tasks.filter(
-    (t) => normalizeTaskState(t.state) === 'in_review' && t.requires_user_approval
-  );
-  const expiringTasks = tasks.filter((t) => {
-    if (normalizeTaskState(t.state) !== 'in_progress') return false;
-    const lease = t.leases?.[0];
-    if (!lease?.expires_at) return false;
-    const leftMins = (new Date(lease.expires_at).getTime() - nowMs) / 60000;
-    return leftMins <= 3;
-  });
-  const unclaimedTasks = tasks.filter((t) => {
-    if (normalizeTaskState(t.state) !== 'ready') return false;
-    if (!t.ready_since) return false;
-    const readyMins = (nowMs - new Date(t.ready_since).getTime()) / 60000;
-    return readyMins >= 10;
-  });
-
-  const activeLeasesCount = tasks.reduce(
-    (acc, t) => acc + (t.leases && t.leases.length > 0 ? t.leases.length : 0),
-    0
-  );
-
-  const workerFleetRows = chainFleets.filter((f) =>
-    (f.roles || []).includes('worker') || !f.roles?.length
-  );
-  const reviewerFleetRows = chainFleets.filter((f) =>
-    (f.roles || []).includes('reviewer')
-  );
-
-  // Workflow checks
   const isWorkflow = kind === 'workflow' || Boolean(workflowStatus);
-  const workflowStages: any[] = workflowStatus?.stages || [];
-  const anyStageFailed = workflowStages.find((st) => st.failed);
-  const allStagesComplete =
-    workflowStages.length > 0 && workflowStages.every((st) => st.complete);
+  const stages: any[] = workflowStatus?.stages || [];
+  const failedStage = stages.find((st) => st.failed);
+  const runComplete = stages.length > 0 && stages.every((st) => st.complete);
+
+  const doneCount = isWorkflow && stages.length ? stages.filter((s) => s.complete).length : counts.done;
+  const totalCount = isWorkflow && stages.length ? stages.length : tasks.length;
+  const progressLabel = `${doneCount} of ${totalCount} ${isWorkflow && stages.length ? 'stages' : 'tasks'} done`;
 
   return (
-    <div
-      data-debug-id="task-summary-bar"
-      className="flex flex-col gap-3 rounded-2xl border border-subtle bg-surface p-4 text-left"
-    >
-      {/* Top summary row: Chain / Workflow Title & Done stats */}
-      <div className="flex items-center justify-between text-xs font-medium text-muted">
-        <span className="font-semibold text-primary uppercase tracking-wider text-[11px]">
-          {isWorkflow ? 'Workflow Pipeline' : 'Chain Status'}
-        </span>
-        <span className="font-mono text-muted">
-          {isWorkflow && workflowStages.length > 0
-            ? `${workflowStages.filter((s) => s.complete).length}/${workflowStages.length} stages complete`
-            : `${counts.done}/${tasks.length} done`}
-        </span>
-      </div>
-
-      {/* Workflow Run Header (if workflow) */}
+    <div data-debug-id="task-summary-bar" className="space-y-2 text-left">
       {isWorkflow && workflowStatus && (
-        <div className="flex flex-col gap-1.5 rounded-lg bg-surface-raised p-2.5 text-xs text-muted">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="font-semibold text-primary">
-              {workflowStatus.workflow_name || 'Workflow'}
-            </span>
-            {workflowStatus.workflow_def_ref && (
-              <span className="font-mono text-[10px] text-faint">
-                {workflowStatus.workflow_def_ref}
-              </span>
-            )}
-          </div>
-          {workflowStatus.inputs && typeof workflowStatus.inputs === 'object' && (
-            <div className="flex flex-wrap gap-2 text-[11px] font-mono text-faint">
-              {Object.entries(workflowStatus.inputs).map(([k, v]) => (
-                <span key={k} className="inline-flex gap-1">
-                  <span className="text-muted">{k}=</span>
-                  <span className="text-primary">{String(v)}</span>
-                </span>
-              ))}
-            </div>
-          )}
-        </div>
+        <Text as="p" role="caption" tone="muted">
+          <span className="font-semibold text-primary">{workflowStatus.workflow_name || 'Workflow'}</span>
+          {workflowStatus.inputs && typeof workflowStatus.inputs === 'object'
+            ? ` · ${Object.entries(workflowStatus.inputs)
+                .map(([k, v]) => `${k.replace(/_/g, ' ')}: ${String(v)}`)
+                .join(' · ')}`
+            : ''}
+        </Text>
       )}
 
-      {/* Progress Bar */}
-      {isWorkflow && workflowStages.length > 0 ? (
-        <div className="flex h-2 w-full gap-1 overflow-hidden rounded-full bg-neutral-soft">
-          {workflowStages.map((st, i) => {
-            const statusClass = st.complete
-              ? 'bg-success'
-              : st.failed
-                ? 'bg-danger'
-                : tasks.some(
-                      (t) =>
-                        t.stage_key === st.key &&
-                        ['in_progress', 'in_review'].includes(normalizeTaskState(t.state))
-                    )
-                  ? 'bg-accent animate-pulse'
-                  : 'bg-neutral-soft border border-subtle';
-            return (
-              <div
-                key={i}
-                title={`${st.title || st.key}: ${st.complete ? 'complete' : st.failed ? 'failed' : 'pending'}`}
-                className={`flex-1 rounded-sm ${statusClass}`}
-              />
-            );
-          })}
-        </div>
-      ) : (
-        <div className="flex h-2 w-full overflow-hidden rounded-full bg-neutral-soft">
-          {TASK_STATES_ORDER.map((state) => {
-            const count = counts[state];
-            if (!count) return null;
-            const pct = (count / total) * 100;
-            return (
-              <div
-                key={state}
-                title={`${TASK_STATE_LABELS[state]}: ${count}`}
-                style={{
-                  width: `${pct}%`,
-                  backgroundColor: TASK_STATE_COLORS[state],
-                }}
-                className="h-full transition-all"
-              />
-            );
-          })}
-        </div>
-      )}
-
-      {/* Legend */}
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-muted">
-        {TASK_STATES_ORDER.filter((s) => s !== 'cancelled' || counts[s] > 0).map((s) => (
-          <div key={s} className="flex items-center gap-1.5">
-            <span
-              className="h-2 w-2 rounded-full shrink-0"
-              style={{ backgroundColor: TASK_STATE_COLORS[s] }}
-            />
-            <span className="font-normal">{TASK_STATE_LABELS[s]}</span>
-            <span className="font-mono font-semibold text-primary">{counts[s]}</span>
-          </div>
-        ))}
+      <div className="flex items-center gap-3">
+        <ProgressBar
+          value={totalCount ? Math.round((doneCount / totalCount) * 100) : 0}
+          label={progressLabel}
+          tone={failedStage ? 'danger' : runComplete ? 'success' : 'accent'}
+          size="sm"
+          className="flex-1"
+        />
+        <Text role="caption" tone="muted" className="shrink-0">
+          {progressLabel}
+        </Text>
       </div>
 
-      {/* Attention Strip */}
-      <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-subtle">
-        {blockedTasks.length > 0 && (
-          <button
-            type="button"
-            data-debug-id="attention-blocked"
-            onClick={() => onSelectTask?.(blockedTasks[0].task_id)}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-danger/40 bg-danger-soft px-2.5 py-1 text-xs font-semibold text-danger hover:bg-danger/20 transition-colors"
-          >
-            <Icon name="alert" size="sm" />
-            <span>{blockedTasks.length} blocked on you</span>
-          </button>
-        )}
-
-        {awaitingUserTasks.length > 0 && (
-          <button
-            type="button"
-            data-debug-id="attention-awaiting-user"
-            onClick={() => onSelectTask?.(awaitingUserTasks[0].task_id)}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-accent/40 bg-accent-soft px-2.5 py-1 text-xs font-semibold text-accent hover:bg-accent/20 transition-colors"
-          >
-            <Icon name="pencil" size="sm" />
-            <span>{awaitingUserTasks.length} awaiting your approval</span>
-          </button>
-        )}
-
-        {expiringTasks.length > 0 && (
-          <button
-            type="button"
-            data-debug-id="attention-expiring"
-            onClick={() => onSelectTask?.(expiringTasks[0].task_id)}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-warning/40 bg-warning-soft px-2.5 py-1 text-xs font-semibold text-warning hover:bg-warning/20 transition-colors"
-          >
-            <Icon name="clock" size="sm" />
-            <span>{expiringTasks.length} lease expiring</span>
-          </button>
-        )}
-
-        {unclaimedTasks.length > 0 && (
-          <button
-            type="button"
-            data-debug-id="attention-unclaimed"
-            onClick={() => onSelectTask?.(unclaimedTasks[0].task_id)}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-warning/40 bg-warning-soft px-2.5 py-1 text-xs font-semibold text-warning hover:bg-warning/20 transition-colors"
-          >
-            <Icon name="clock" size="sm" />
-            <span>{unclaimedTasks.length} ready but unclaimed</span>
-          </button>
-        )}
-
-        {isWorkflow && anyStageFailed && (
-          <span className="inline-flex items-center gap-1.5 rounded-lg border border-danger/40 bg-danger-soft px-2.5 py-1 text-xs font-semibold text-danger">
-            <Icon name="alert" size="sm" />
-            <span>Stage {anyStageFailed.key} failed — downstream on hold</span>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted">
+          {TASK_STATES_ORDER.filter((s) => counts[s] > 0).map((s) => (
+            <span key={s} className="inline-flex items-center gap-1">
+              <StatusDot tone={TASK_STATE_TONE[s]} label={TASK_STATE_LABELS[s]} size="sm" />
+              {counts[s]} {TASK_STATE_LABELS[s].toLowerCase()}
+            </span>
+          ))}
+          <span className="text-faint">
+            {workers} worker{workers === 1 ? '' : 's'} · {reviewers} reviewer{reviewers === 1 ? '' : 's'} · {activeLeases} running
           </span>
+        </div>
+        {actions && <div className="flex flex-wrap items-center gap-1.5">{actions}</div>}
+      </div>
+
+      <div data-debug-id="task-attention-line" className="flex flex-wrap items-center gap-2 text-[11px]">
+        {needsYou > 0 ? (
+          onToggleNeedsYou ? (
+            <Button
+              size="sm"
+              variant={needsYouActive ? 'primary' : 'secondary'}
+              data-debug-id="attention-needs-you"
+              aria-pressed={needsYouActive}
+              onClick={onToggleNeedsYou}
+            >
+              {needsYouActive ? 'Show all tasks' : `${needsYou} ${needsYou === 1 ? 'task needs' : 'tasks need'} you`}
+            </Button>
+          ) : (
+            <Text role="caption" tone="warning">
+              {needsYou} {needsYou === 1 ? 'task needs' : 'tasks need'} you
+            </Text>
+          )
+        ) : (
+          <Text role="caption" tone="success">
+            Nothing needs you
+          </Text>
         )}
-
-        {isWorkflow && allStagesComplete && (
-          <span className="inline-flex items-center gap-1.5 rounded-lg border border-success/40 bg-success-soft px-2.5 py-1 text-xs font-semibold text-success">
-            <Icon name="check" size="sm" />
-            <span>Run complete</span>
-          </span>
+        {expiring > 0 && (
+          <Text role="caption" tone="warning">
+            {expiring} lease{expiring === 1 ? '' : 's'} about to expire
+          </Text>
         )}
-
-        {/* Fleet & Leases info chip */}
-        <span className="inline-flex items-center rounded-lg border border-subtle bg-surface-raised px-2.5 py-1 font-mono text-[11px] text-muted">
-          {activeLeasesCount} active lease{activeLeasesCount === 1 ? '' : 's'} ·{' '}
-          {workerFleetRows.length} worker{workerFleetRows.length === 1 ? '' : 's'} ·{' '}
-          {reviewerFleetRows.length} reviewer{reviewerFleetRows.length === 1 ? '' : 's'}
-        </span>
-
-        {/* Nothing needs you chip */}
-        {blockedTasks.length === 0 && awaitingUserTasks.length === 0 && !anyStageFailed && (
-          <span className="inline-flex items-center gap-1 rounded-lg border border-success/30 bg-success-soft px-2 py-0.5 text-xs font-medium text-success">
-            <Icon name="check" size="sm" />
-            <span>Nothing needs you</span>
-          </span>
+        {unclaimed > 0 && (
+          <Text role="caption" tone="warning">
+            {unclaimed} ready for {UNCLAIMED_AFTER_MINS}+ min with no free worker
+          </Text>
+        )}
+        {failedStage && (
+          <Text role="caption" tone="danger">
+            Stage {failedStage.key.replace(/_/g, ' ')} failed, later stages are on hold
+          </Text>
+        )}
+        {runComplete && (
+          <Text role="caption" tone="success">
+            Run complete
+          </Text>
         )}
       </div>
 
       {summaryText && (
-        <div className="mt-1 border-t border-subtle pt-2 text-xs leading-relaxed text-muted font-normal">
+        <Text as="p" role="caption" tone="muted">
           {summaryText}
-        </div>
+        </Text>
       )}
     </div>
   );
