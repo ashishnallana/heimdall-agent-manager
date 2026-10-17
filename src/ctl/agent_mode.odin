@@ -2144,7 +2144,7 @@ ctl_v2_lease :: proc(endpoint, token: string, tokens, args: []string) {
 	case "handoff":
 		ctl_v2_lease_handoff(endpoint, token, args)
 	case "switch":
-		ctl_v2_lease_switch(endpoint, token, args)
+		ctl_v2_lease_switch(endpoint, token, args, pos(tokens, 1))
 	case "block":
 		ctl_v2_lease_block(endpoint, token, args)
 	case:

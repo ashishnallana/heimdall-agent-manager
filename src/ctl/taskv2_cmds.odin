@@ -409,9 +409,9 @@ ctl_v2_lease_handoff :: proc(endpoint, token: string, args: []string) {
 
 // ctl_v2_lease_switch (solo mode): hand the current task off and take another
 // ready task in one step. `ham-ctl lease switch <task_id> --summary <s>`.
-ctl_v2_lease_switch :: proc(endpoint, token: string, args: []string) {
+ctl_v2_lease_switch :: proc(endpoint, token: string, args: []string, positional_task := "") {
 	task_id := strings.trim_space(option_value(args, "--task", ""))
-	if task_id == "" && len(args) > 0 && !strings.has_prefix(args[0], "--") do task_id = args[0]
+	if task_id == "" do task_id = strings.trim_space(positional_task)
 	summary := strings.trim_space(option_value(args, "--summary", ""))
 	if task_id == "" || summary == "" { fmt.println(`{"ok":false,"message":"lease switch requires <task_id> and --summary <text> (where you left the current task)"}`); os.exit(1) }
 	fields := make([dynamic]string)

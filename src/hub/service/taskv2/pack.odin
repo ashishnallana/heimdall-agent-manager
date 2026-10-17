@@ -392,6 +392,25 @@ open_findings_json :: proc(svc: ^Service, task: domain.Task, lease: domain.Task_
 			written += 1
 		}
 	}
+	// A reviewer's free-text reason (review summary: the user's "what needs to
+	// change", or an agent's --summary) is a finding too — without it a
+	// summary-only request_changes reached the agent as "no findings".
+	if evs, eerr := iface.taskchain_list_events_by_task(svc.repo, task.task_id, task.owner_user_id); eerr.code == .None {
+		for ev in evs {
+			if ev.kind != EV_REVIEW_POSTED do continue
+			if jsonx.extract_string(ev.payload_json, "verdict", "", true, context.temp_allocator) != "request_changes" do continue
+			if jsonx.extract_int(ev.payload_json, "attempt_no", -1, true) != target_attempt do continue
+			summary := strings.trim_space(jsonx.extract_string(ev.payload_json, "summary", "", true, context.temp_allocator))
+			if summary == "" do continue
+			who := jsonx.extract_string(ev.payload_json, "role", "reviewer", true, context.temp_allocator)
+			if written > 0 do strings.write_byte(&b, ',')
+			f := json_begin()
+			json_str(&f, "severity", "blocking")
+			json_str(&f, "text", fmt.tprintf("%s: %s", "The user" if who == "user" else who, summary))
+			strings.write_string(&b, json_end(&f))
+			written += 1
+		}
+	}
 	strings.write_byte(&b, ']')
 	return strings.to_string(b)
 }
