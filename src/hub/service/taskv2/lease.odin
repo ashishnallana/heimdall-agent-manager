@@ -644,13 +644,26 @@ bridge_online :: proc(svc: ^Service, bridge_id: string) -> bool {
 	return bridge.status == .Online
 }
 
-// PER_LEASE_WORKTREES_ENABLED: per-lease worktrees (M5) let several work leases
-// run in one VCS directory, each in its own checkout. The bridge has the
-// worktree helpers but nothing creates a worktree at grant yet, so concurrent
-// leases would share ONE checkout (seen live: one agent's uncommitted work was
-// wiped by another's cleanup). Until the grant/merge path is wired, keep the
-// one-work-lease-per-directory guard for every directory.
-PER_LEASE_WORKTREES_ENABLED :: false
+// PER_LEASE_WORKTREES_ENABLED: several work leases may run in one git
+// directory, each in its own checkout. A task works in
+// `<dir>/.heimdall/worktrees/<task_id>` on branch `heimdall/<task_id>` (the
+// pack's placement.workdir/branch; the bridge creates it on lease.next), and
+// the branch is merged back into the directory's branch when the task is done
+// (merge.odin). A merge conflict blocks the task on a human.
+PER_LEASE_WORKTREES_ENABLED :: true
+
+TASK_WORKTREE_DIR :: ".heimdall/worktrees"
+TASK_BRANCH_PREFIX :: "heimdall/"
+
+// task_worktree returns the per-task checkout and branch for a task placed in
+// directory `dir`, or ("", "") when the directory gets no worktree (not git,
+// no path, or the feature is off). Temp-allocated.
+task_worktree :: proc(dir: domain.Task_Chain_Directory, task_id: domain.Task_ID) -> (workdir, branch: string) {
+	if !PER_LEASE_WORKTREES_ENABLED || dir.vcs_kind != "git" do return "", ""
+	root := strings.trim_right(strings.trim_space(dir.path), "/")
+	if root == "" || task_id == "" do return "", ""
+	return fmt.tprintf("%s/%s/%s", root, TASK_WORKTREE_DIR, task_id), fmt.tprintf("%s%s", TASK_BRANCH_PREFIX, task_id)
+}
 
 // directory_has_work_lease: one live work lease per chain directory (VCS
 // directories exempt only when PER_LEASE_WORKTREES_ENABLED).
@@ -660,7 +673,7 @@ directory_has_work_lease :: proc(svc: ^Service, chain: domain.Task_Chain, direct
 	if PER_LEASE_WORKTREES_ENABLED {
 		for d in dirs {
 			if d.directory_id == directory_id {
-				if d.vcs_kind == "git" || d.vcs_kind == "jj" do return false
+				if d.vcs_kind == "git" do return false
 			}
 		}
 	}

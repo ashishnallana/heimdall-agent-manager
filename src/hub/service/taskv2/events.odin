@@ -23,6 +23,7 @@ EV_APPROVED          :: "approved"           // {attempt_no}
 EV_CANCELLED         :: "cancelled"          // {reason}
 EV_REOPENED          :: "reopened"           // {}
 EV_ANSWERED          :: "answered"           // {}
+EV_MERGE_CONFLICT    :: "merge_conflict"     // {branch, workdir, detail}  — done → blocked on a human
 // Audit-only kinds (no fold effect):
 EV_CREATED           :: "created"
 EV_UPDATED           :: "updated"            // {fields:[…]}
@@ -41,6 +42,8 @@ EV_SUMMARY_OVERFLOW  :: "summary_overflow"
 EV_STARTED_WORKFLOW  :: "started_workflow"   // {chain_id}
 EV_ORPHANED_WORK     :: "orphaned_work"      // {task_id, stage_key, stage_index, head}
 EV_CARRIED_FORWARD   :: "carried_forward"    // {from_task_id, from_attempt_no}
+EV_MERGED            :: "merged"             // {branch, into, head, mode}  — task branch landed
+EV_MERGE_FAILED      :: "merge_failed"       // {branch, detail}  — merge could not run (bridge offline, …)
 
 // Expiry reasons. `replaced`, `dep_added` and `reopen` are STRUCTURAL: the
 // attempt they end does not count toward the budget (fold rule).

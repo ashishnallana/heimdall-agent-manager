@@ -127,6 +127,8 @@ Effects :: struct {
 	reservations: [dynamic]Jit_Reservation,
 	// 1-line coordinator attention notifications (M3 §3c), flushed after commit.
 	notifications: [dynamic]Coordinator_Notification,
+	// task-branch merge-backs for tasks that became done (merge.odin).
+	merges: [dynamic]Merge_Effect,
 	// keys owns the (bridge × chain) map keys of runs/stops (heap-cloned per
 	// UoW, freed in destroy_effects — never the request's temp allocator).
 	keys: [dynamic]string,
@@ -186,6 +188,7 @@ begin_uow :: proc(svc: ^Service) -> (Uow, bool, domain.Domain_Error) {
 	u.effects.changed_chains = make([dynamic]Changed_Chain)
 	u.effects.reservations = make([dynamic]Jit_Reservation)
 	u.effects.notifications = make([dynamic]Coordinator_Notification)
+	u.effects.merges = make([dynamic]Merge_Effect)
 	u.effects.keys = make([dynamic]string)
 	if svc.uow_factory == nil {
 		lockorder.assert_tx_mutex_allowed()
@@ -272,6 +275,8 @@ destroy_effects :: proc(e: ^Effects) {
 		delete(n.line)
 	}
 	delete(e.notifications)
+	for m in e.merges do destroy_merge_effect(m)
+	delete(e.merges)
 	for k in e.keys do delete(k)
 	delete(e.keys)
 }
@@ -306,6 +311,7 @@ flush_effects :: proc(svc: ^Service, e: ^Effects) {
 	for c in e.changed_chains {
 		if svc.on_tasks_changed != nil do svc.on_tasks_changed(svc.on_tasks_changed_ctx, c.chain_id, c.owner)
 	}
+	flush_merges(svc, e)
 }
 
 // effect_notify_coordinator queues a 1-line coordinator attention notification
@@ -411,6 +417,7 @@ refold_task :: proc(svc: ^Service, u: ^Uow, task: domain.Task, tasks: []domain.T
 			effect_tasks_changed(u, saved.chain_id, saved.owner_user_id)
 		}
 		check_coordinator_attention_on_refold(svc, u, task, saved, view, all_tasks)
+		if saved.state == .Done && task.state != .Done do effect_merge_worktree(svc, u, saved, evs)
 	}
 	return saved, view, true, domain.Domain_Error{}
 }

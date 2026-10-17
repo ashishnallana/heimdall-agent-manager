@@ -29,6 +29,7 @@ import "core:os"
 import "core:strings"
 import "core:sync"
 import jsonx "odin_test:lib/jsonx"
+import ws "odin_test:lib/ws"
 
 // Per-instance cached vcs_base captured on `agent.lease.next` so a subsequent
 // `agent.lease.submit` / `handoff` in a clean committed tree still reports
@@ -240,6 +241,9 @@ bridge_agent_lease_local_rpc :: proc(request_id, method, hub_path, params: strin
 					run_dir = bridge_runtime_default_run_dir(rec.agent_instance_id)
 					defer delete(run_dir)
 				}
+				// The task's checkout must exist before the agent reads TASK.md
+				// and cds into it.
+				bridge_taskv2_ensure_pack_worktree(pack_obj)
 				if strings.trim_space(run_dir) != "" {
 					_ = bridge_taskv2_materialize_task_md(run_dir, pack_obj)
 				}
@@ -373,6 +377,15 @@ bridge_taskv2_render_task_md :: proc(pack_json: string, max_bytes: int = BRIDGE_
 	directory_id := jsonx.extract_string(placement_obj, "directory_id", "", true, context.temp_allocator)
 	provider := jsonx.extract_string(placement_obj, "provider", "", true, context.temp_allocator)
 	model := jsonx.extract_string(placement_obj, "model", "", true, context.temp_allocator)
+	workdir := jsonx.extract_string(placement_obj, "workdir", "", true, context.temp_allocator)
+	branch := jsonx.extract_string(placement_obj, "branch", "", true, context.temp_allocator)
+	merge_conflict := ""
+	if mc, has_mc := jsonx.extract_raw_object(pack_json, "merge_conflict", true, context.temp_allocator); has_mc {
+		detail := jsonx.extract_string(mc, "detail", "", true, context.temp_allocator)
+		files := jsonx.extract_string(mc, "files", "", true, context.temp_allocator)
+		merge_conflict = fmt.tprintf("%s%s", detail, fmt.tprintf(" (files: %s)", files) if files != "" else "")
+		if merge_conflict == "" do merge_conflict = "the branch did not merge"
+	}
 
 	raw_title := jsonx.extract_string(task_obj, "title", "", true, context.temp_allocator)
 	raw_desc := jsonx.extract_string(task_obj, "description", "", true, context.temp_allocator)
@@ -474,7 +487,7 @@ bridge_taskv2_render_task_md :: proc(pack_json: string, max_bytes: int = BRIDGE_
 	drop_handoff_summary := false
 
 	build_doc :: proc(
-		task_id, title, role_label, lease_id, expires_at, hard_deadline_at, bridge_id, directory_id, provider, model, why: string,
+		task_id, title, role_label, lease_id, expires_at, hard_deadline_at, bridge_id, directory_id, provider, model, why, workdir, branch, merge_conflict: string,
 		attempt_no, max_attempts, review_rounds: int,
 		goal, verify_cmd: string, acceptance: []string,
 		chain_summary: string,
@@ -496,6 +509,14 @@ bridge_taskv2_render_task_md :: proc(pack_json: string, max_bytes: int = BRIDGE_
 		}
 		if bridge_id != "" || directory_id != "" || provider != "" || model != "" {
 			fmt.sbprintf(&b, "- **Placement**: bridge=`%s` directory=`%s` provider=`%s` model=`%s`\n", bridge_id, directory_id, provider, model)
+		}
+		if workdir != "" {
+			fmt.sbprintf(&b, "- **Workdir**: `%s` on branch `%s`. `cd` there and do all work and commits in it; it is your own checkout, merged into the directory when the task is done.\n", workdir, branch)
+		}
+		if merge_conflict != "" {
+			strings.write_string(&b, "\n## Merge Conflict\n")
+			fmt.sbprintf(&b, "This task was done, but branch `%s` did not merge into its directory: %s\n", branch, merge_conflict)
+			strings.write_string(&b, "In the Workdir, merge the directory's current branch into yours (`git merge <that branch>`), resolve the conflicts, commit, run `ham-ctl verify`, and submit.\n")
 		}
 		strings.write_string(&b, "\n## Brief\n")
 		if goal != "" {
@@ -606,7 +627,7 @@ bridge_taskv2_render_task_md :: proc(pack_json: string, max_bytes: int = BRIDGE_
 	}
 
 	rendered := build_doc(
-		task_id, title, role_label, lease_id, expires_at, hard_deadline_at, bridge_id, directory_id, provider, model, why,
+		task_id, title, role_label, lease_id, expires_at, hard_deadline_at, bridge_id, directory_id, provider, model, why, workdir, branch, merge_conflict,
 		attempt_no, max_attempts, review_rounds,
 		goal, verify_cmd, acceptance[:],
 		chain_summary,
@@ -627,7 +648,7 @@ bridge_taskv2_render_task_md :: proc(pack_json: string, max_bytes: int = BRIDGE_
 			if inputs[i].dropped do continue
 			inputs[i].dropped = true
 			rendered = build_doc(
-				task_id, title, role_label, lease_id, expires_at, hard_deadline_at, bridge_id, directory_id, provider, model, why,
+				task_id, title, role_label, lease_id, expires_at, hard_deadline_at, bridge_id, directory_id, provider, model, why, workdir, branch, merge_conflict,
 				attempt_no, max_attempts, review_rounds,
 				goal, verify_cmd, acceptance[:],
 				chain_summary,
@@ -648,7 +669,7 @@ bridge_taskv2_render_task_md :: proc(pack_json: string, max_bytes: int = BRIDGE_
 	if max_bytes > 0 && len(rendered) > max_bytes && verify_tail != "" {
 		drop_verify_summary = true
 		rendered = build_doc(
-			task_id, title, role_label, lease_id, expires_at, hard_deadline_at, bridge_id, directory_id, provider, model, why,
+			task_id, title, role_label, lease_id, expires_at, hard_deadline_at, bridge_id, directory_id, provider, model, why, workdir, branch, merge_conflict,
 			attempt_no, max_attempts, review_rounds,
 			goal, verify_cmd, acceptance[:],
 			chain_summary,
@@ -668,7 +689,7 @@ bridge_taskv2_render_task_md :: proc(pack_json: string, max_bytes: int = BRIDGE_
 	if max_bytes > 0 && len(rendered) > max_bytes && handoff_summary != "" {
 		drop_handoff_summary = true
 		rendered = build_doc(
-			task_id, title, role_label, lease_id, expires_at, hard_deadline_at, bridge_id, directory_id, provider, model, why,
+			task_id, title, role_label, lease_id, expires_at, hard_deadline_at, bridge_id, directory_id, provider, model, why, workdir, branch, merge_conflict,
 			attempt_no, max_attempts, review_rounds,
 			goal, verify_cmd, acceptance[:],
 			chain_summary,
@@ -719,34 +740,227 @@ bridge_taskv2_worktree_remove_force :: proc(repo_dir, wt_path: string) -> bool {
 	return ok
 }
 
-// bridge_taskv2_lease_worktree_path returns the canonical filesystem path for an isolated lease worktree
-// under `<repo_dir>/.heimdall/worktrees/<lease_id>`.
-bridge_taskv2_lease_worktree_path :: proc(repo_dir, lease_id: string, allocator := context.allocator) -> string {
-	clean_repo := strings.trim_right(repo_dir, "/\\")
-	return fmt.aprintf("%s/.heimdall/worktrees/%s", clean_repo, lease_id, allocator = allocator)
+// ---- per-task worktrees (hub: lease.odin task_worktree, merge.odin) --------
+//
+// A task placed in a git directory works on branch `heimdall/<task_id>` in
+// `<repo>/.heimdall/worktrees/<task_id>`. The hub names both in the pack's
+// placement; the bridge creates the checkout when it materializes TASK.md on
+// `lease.next` and merges it back on the hub's `taskv2_merge_worktree`.
+
+// bridge_taskv2_is_checkout_root reports whether `dir` is the top level of a
+// git checkout (a worktree dir that is merely a subdirectory of the main
+// checkout does not count).
+bridge_taskv2_is_checkout_root :: proc(dir: string) -> bool {
+	if strings.trim_space(dir) == "" || !os.exists(dir) do return false
+	out, ok := vcs_run([]string{"git", "-C", dir, "rev-parse", "--show-toplevel"})
+	defer if len(out) > 0 do delete(out)
+	if !ok do return false
+	return strings.trim_right(strings.trim_space(out), "/") == strings.trim_right(strings.trim_space(dir), "/")
 }
 
-// bridge_taskv2_setup_lease_worktree creates an isolated git worktree for a lease at `<repo_dir>/.heimdall/worktrees/<lease_id>`
-// checked out at `base_ref` (or HEAD if base_ref is empty).
-bridge_taskv2_setup_lease_worktree :: proc(repo_dir, lease_id, base_ref: string, allocator := context.allocator) -> (string, bool) {
-	if strings.trim_space(repo_dir) == "" || strings.trim_space(lease_id) == "" do return "", false
-	wt_path := bridge_taskv2_lease_worktree_path(repo_dir, lease_id, allocator)
-	rev := base_ref if strings.trim_space(base_ref) != "" else "HEAD"
-	parent := fmt.tprintf("%s/.heimdall/worktrees", strings.trim_right(repo_dir, "/\\"))
-	_ = bridge_make_directory_all(parent)
-	ok := bridge_taskv2_worktree_add_detached(repo_dir, wt_path, rev)
-	if !ok {
-		delete(wt_path, allocator)
-		return "", false
+// bridge_taskv2_exclude_worktrees keeps `.heimdall/` out of the main checkout's
+// status (worktrees live inside the repository directory).
+bridge_taskv2_exclude_worktrees :: proc(repo: string) {
+	out, ok := vcs_run([]string{"git", "-C", repo, "rev-parse", "--git-path", "info/exclude"})
+	defer if len(out) > 0 do delete(out)
+	if !ok do return
+	path := strings.trim_space(out)
+	if path == "" do return
+	if !strings.has_prefix(path, "/") do path = fmt.tprintf("%s/%s", strings.trim_right(repo, "/"), path)
+	existing, _ := os.read_entire_file(path, context.temp_allocator)
+	for line in strings.split_lines(string(existing), context.temp_allocator) {
+		if strings.trim_space(line) == ".heimdall/" || strings.trim_space(line) == ".heimdall" do return
 	}
-	return wt_path, true
+	_ = bridge_make_directory_all(path[:strings.last_index_byte(path, '/')])
+	body := string(existing)
+	if body != "" && !strings.has_suffix(body, "\n") do body = strings.concatenate({body, "\n"}, context.temp_allocator)
+	body = strings.concatenate({body, ".heimdall/\n"}, context.temp_allocator)
+	_ = os.write_entire_file(path, transmute([]byte)body)
 }
 
-// bridge_taskv2_teardown_lease_worktree cleans up the isolated git worktree for a lease.
-bridge_taskv2_teardown_lease_worktree :: proc(repo_dir, lease_id: string) -> bool {
-	if strings.trim_space(repo_dir) == "" || strings.trim_space(lease_id) == "" do return false
-	wt_path := bridge_taskv2_lease_worktree_path(repo_dir, lease_id, context.temp_allocator)
-	return bridge_taskv2_worktree_remove_force(repo_dir, wt_path)
+bridge_taskv2_branch_exists :: proc(repo, branch: string) -> bool {
+	out, ok := vcs_run([]string{"git", "-C", repo, "rev-parse", "--verify", "--quiet", strings.concatenate({"refs/heads/", branch}, context.temp_allocator)})
+	defer if len(out) > 0 do delete(out)
+	return ok
+}
+
+// bridge_taskv2_ensure_task_worktree makes `workdir` a checkout of `branch`,
+// creating the branch from the repo's HEAD the first time. Idempotent: an
+// existing checkout (a retry, a review lease, a changes-requested round) is
+// left as is, so the task's work carries across attempts.
+bridge_taskv2_ensure_task_worktree :: proc(repo, workdir, branch: string) -> bool {
+	if strings.trim_space(repo) == "" || strings.trim_space(workdir) == "" || strings.trim_space(branch) == "" do return false
+	if bridge_taskv2_is_checkout_root(workdir) do return true
+	bridge_taskv2_exclude_worktrees(repo)
+	if prune, pok := vcs_run([]string{"git", "-C", repo, "worktree", "prune"}); pok || len(prune) > 0 do delete(prune)
+	if slash := strings.last_index_byte(strings.trim_right(workdir, "/"), '/'); slash > 0 do _ = bridge_make_directory_all(workdir[:slash])
+	args: []string
+	if bridge_taskv2_branch_exists(repo, branch) {
+		args = []string{"git", "-C", repo, "worktree", "add", workdir, branch}
+	} else {
+		args = []string{"git", "-C", repo, "worktree", "add", "-b", branch, workdir, "HEAD"}
+	}
+	out, errs, ok := vcs_run_capture(args)
+	defer if len(out) > 0 do delete(out)
+	defer if len(errs) > 0 do delete(errs)
+	if !ok do fmt.eprintfln("taskv2: worktree add %s failed: %s", workdir, strings.trim_space(errs))
+	return ok
+}
+
+// bridge_taskv2_ensure_pack_worktree creates the checkout a lease pack names
+// (placement.workdir/branch in placement.directory_path). No-op for packs
+// without a workdir.
+bridge_taskv2_ensure_pack_worktree :: proc(pack_json: string) {
+	place, has := jsonx.extract_raw_object(pack_json, "placement", true, context.temp_allocator)
+	if !has {
+		if lease_obj, lok := jsonx.extract_raw_object(pack_json, "lease", true, context.temp_allocator); lok {
+			place, has = jsonx.extract_raw_object(lease_obj, "placement", true, context.temp_allocator)
+		}
+	}
+	if !has do return
+	repo := jsonx.extract_string(place, "directory_path", "", true, context.temp_allocator)
+	workdir := jsonx.extract_string(place, "workdir", "", true, context.temp_allocator)
+	branch := jsonx.extract_string(place, "branch", "", true, context.temp_allocator)
+	if workdir == "" || repo == "" || branch == "" do return
+	_ = bridge_taskv2_ensure_task_worktree(repo, workdir, branch)
+}
+
+Bridge_Taskv2_Merge_Result :: struct {
+	ok:       bool,
+	conflict: bool,
+	detail:   string,
+	head:     string,
+	mode:     string, // "fast-forward" | "merge" | "none"
+	files:    [dynamic]string,
+}
+
+// bridge_taskv2_git_identity_args supplies a committer identity for the merge
+// commit when the repository has none configured (bridge services often run
+// without a global git identity).
+bridge_taskv2_git_identity_args :: proc(repo: string) -> []string {
+	out, ok := vcs_run([]string{"git", "-C", repo, "config", "user.email"})
+	defer if len(out) > 0 do delete(out)
+	if ok && strings.trim_space(out) != "" do return nil
+	args := make([]string, 4, context.temp_allocator)
+	args[0], args[1], args[2], args[3] = "-c", "user.name=Heimdall", "-c", "user.email=heimdall@localhost"
+	return args
+}
+
+// bridge_taskv2_merge_task_worktree merges `branch` into the branch checked
+// out in `repo`, then removes the worktree and the branch. Uncommitted work
+// left in the worktree is committed first so nothing is lost. Any merge
+// failure (conflict, dirty main checkout) aborts the merge and keeps the
+// worktree and branch: the hub blocks the task on a human.
+bridge_taskv2_merge_task_worktree :: proc(repo, workdir, branch, task_id: string) -> Bridge_Taskv2_Merge_Result {
+	r := Bridge_Taskv2_Merge_Result{files = make([dynamic]string, context.temp_allocator)}
+	if strings.trim_space(repo) == "" || strings.trim_space(branch) == "" {
+		r.detail = "missing repo or branch"
+		return r
+	}
+	ident := bridge_taskv2_git_identity_args(repo)
+	if bridge_taskv2_is_checkout_root(workdir) {
+		if dirty, dok := bridge_taskv2_git_dirty(workdir); dok && dirty {
+			add, _ := vcs_run([]string{"git", "-C", workdir, "add", "-A"})
+			if len(add) > 0 do delete(add)
+			commit_args := make([dynamic]string, context.temp_allocator)
+			append(&commit_args, "git", "-C", workdir)
+			for a in ident do append(&commit_args, a)
+			append(&commit_args, "commit", "-m", fmt.tprintf("heimdall: uncommitted work left in %s", task_id))
+			c, _ := vcs_run(commit_args[:])
+			if len(c) > 0 do delete(c)
+		}
+	}
+	if !bridge_taskv2_branch_exists(repo, branch) {
+		r.ok = true
+		r.mode = "none"
+		r.detail = "branch not found; nothing to merge"
+		return r
+	}
+	before, _ := bridge_taskv2_git_head(repo)
+	defer if before != "" do delete(before)
+	tip_out, _ := vcs_run([]string{"git", "-C", repo, "rev-parse", "--verify", branch})
+	defer if len(tip_out) > 0 do delete(tip_out)
+	tip := strings.trim_space(tip_out)
+
+	merge_args := make([dynamic]string, context.temp_allocator)
+	append(&merge_args, "git", "-C", repo)
+	for a in ident do append(&merge_args, a)
+	append(&merge_args, "merge", "--no-edit", "-m", fmt.tprintf("Merge %s (%s)", branch, task_id), branch)
+	mout, merr, mok := vcs_run_capture(merge_args[:])
+	defer if len(mout) > 0 do delete(mout)
+	defer if len(merr) > 0 do delete(merr)
+	if !mok {
+		r.conflict = true
+		if u, uok := vcs_run([]string{"git", "-C", repo, "diff", "--name-only", "--diff-filter=U"}); uok {
+			for line in strings.split_lines(u, context.temp_allocator) {
+				if f := strings.trim_space(line); f != "" do append(&r.files, strings.clone(f, context.temp_allocator))
+			}
+			delete(u)
+		}
+		ab, _ := vcs_run([]string{"git", "-C", repo, "merge", "--abort"})
+		if len(ab) > 0 do delete(ab)
+		detail := strings.trim_space(merr) if strings.trim_space(merr) != "" else strings.trim_space(mout)
+		if len(detail) > VCS_ERROR_DETAIL_MAX do detail = detail[len(detail) - VCS_ERROR_DETAIL_MAX:]
+		r.detail = strings.clone(detail, context.temp_allocator)
+		return r
+	}
+	r.ok = true
+	if after, aok := bridge_taskv2_git_head(repo); aok {
+		r.head = strings.clone(after, context.temp_allocator)
+		delete(after)
+	}
+	switch {
+	case r.head == before: r.mode = "none"
+	case r.head == tip:    r.mode = "fast-forward"
+	case:                  r.mode = "merge"
+	}
+	if bridge_taskv2_is_checkout_root(workdir) do _ = bridge_taskv2_worktree_remove_force(repo, workdir)
+	del, _ := vcs_run([]string{"git", "-C", repo, "branch", "-D", branch})
+	if len(del) > 0 do delete(del)
+	return r
+}
+
+bridge_taskv2_merge_result_json :: proc(command_id: string, r: Bridge_Taskv2_Merge_Result) -> string {
+	b := strings.builder_make()
+	strings.write_string(&b, "{\"type\":\"taskv2_merge_worktree_result\",\"command_id\":\"")
+	bridge_local_write_json_string(&b, command_id)
+	fmt.sbprintf(&b, "\",\"ok\":%v,\"conflict\":%v,\"detail\":\"", r.ok, r.conflict)
+	bridge_local_write_json_string(&b, r.detail)
+	strings.write_string(&b, "\",\"head\":\"")
+	bridge_local_write_json_string(&b, r.head)
+	strings.write_string(&b, "\",\"mode\":\"")
+	bridge_local_write_json_string(&b, r.mode)
+	strings.write_string(&b, "\",\"files\":[")
+	for f, i in r.files {
+		if i > 0 do strings.write_byte(&b, ',')
+		strings.write_byte(&b, '"')
+		bridge_local_write_json_string(&b, f)
+		strings.write_byte(&b, '"')
+	}
+	strings.write_string(&b, "]}")
+	return strings.to_string(b)
+}
+
+// bridge_taskv2_handle_command serves the hub's task-system commands on the
+// runtime WS. Returns false for any other type.
+bridge_taskv2_handle_command :: proc(conn: ^ws.Connection, type, text: string) -> bool {
+	if type != "taskv2_merge_worktree" do return false
+	command_id := jsonx.extract_string(text, "command_id", "", true, context.temp_allocator)
+	if cached, ok := bridge_runtime_cached_command(command_id); ok {
+		_ = bridge_hub_send(conn, cached)
+		return true
+	}
+	r := bridge_taskv2_merge_task_worktree(
+		jsonx.extract_string(text, "repo", "", true, context.temp_allocator),
+		jsonx.extract_string(text, "workdir", "", true, context.temp_allocator),
+		jsonx.extract_string(text, "branch", "", true, context.temp_allocator),
+		jsonx.extract_string(text, "task_id", "", true, context.temp_allocator),
+	)
+	out := bridge_taskv2_merge_result_json(command_id, r)
+	defer delete(out)
+	bridge_runtime_cache_command(command_id, out)
+	_ = bridge_hub_send(conn, out)
+	return true
 }
 
 // bridge_taskv2_should_auto_submit checks whether a verify run qualifies for automatic

@@ -911,6 +911,7 @@ bridge_bootstrap_build_file_set :: proc(manifest_json: string, d: Bridge_Bootstr
 	append(&files, Bridge_Bootstrap_File{file_id = strings.clone(".heimdall/bin/ham-ctl"), relative_path = strings.clone(".heimdall/bin/ham-ctl"), kind = "CTL_WRAPPER", content = ctl_shim, mode = 0o755})
 
 	if strings.has_prefix(strings.trim_space(d.pack_json), "{") {
+		bridge_taskv2_ensure_pack_worktree(d.pack_json)
 		task_md := bridge_taskv2_render_task_md(d.pack_json)
 		if strings.trim_space(task_md) != "" {
 			append(&files, Bridge_Bootstrap_File{file_id = strings.clone("TASK.md"), relative_path = strings.clone("TASK.md"), kind = "TASK_MD", content = task_md, mode = 0o644})

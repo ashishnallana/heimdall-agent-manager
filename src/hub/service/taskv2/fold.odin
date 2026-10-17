@@ -211,6 +211,14 @@ fold_task :: proc(events: []domain.Task_Event, input: Fold_Input) -> Task_View {
 			v.oscillating = false
 			v.review_rounds = 0
 			v.last_release = .Reopened
+		case EV_MERGE_CONFLICT:
+			// The task's branch did not merge into its directory: it is no
+			// longer done. It waits on a human; once answered the next
+			// (non-counting) attempt reconciles the branch and resubmits.
+			if !v.done do continue
+			v.done = false
+			v.last_release = .Reopened
+			v.blocked_on_json = human_block("merge_conflict", ev.ts_ms)
 		case EV_ANSWERED:
 			v.blocked_on_json = ""
 			v.budget_exhausted = false

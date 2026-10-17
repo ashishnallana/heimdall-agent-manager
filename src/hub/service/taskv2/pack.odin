@@ -41,8 +41,19 @@ build_pack_json :: proc(svc: ^Service, chain: domain.Task_Chain, task: domain.Ta
 	// The directory's path on that bridge, so `ham-ctl verify` / submit run in the
 	// task's repository even when the agent's own cwd is its instance dir.
 	dir_path := ""
-	for d in dirs do if d.directory_id == dir_id { dir_path = d.path; break }
+	workdir, branch := "", ""
+	for d in dirs do if d.directory_id == dir_id {
+		dir_path = d.path
+		workdir, branch = task_worktree(d, task.task_id)
+		break
+	}
 	json_str(&placement_obj, "directory_path", dir_path)
+	// Per-task checkout (git directories): the agent works, verifies and
+	// submits here; the hub merges `branch` back when the task is done.
+	if workdir != "" {
+		json_str(&placement_obj, "workdir", workdir)
+		json_str(&placement_obj, "branch", branch)
+	}
 	json_str(&placement_obj, "provider", provider)
 	json_str(&placement_obj, "model", model)
 	placement_json := json_end(&placement_obj)
@@ -115,6 +126,16 @@ build_pack_json :: proc(svc: ^Service, chain: domain.Task_Chain, task: domain.Ta
 	json_raw(&o, "previous_attempt", prev_json)
 	json_raw(&o, "findings", open_findings_json(svc, task, lease))
 	json_str(&o, "why", pack_why(pre, lease, prev_outcome))
+	// The task was done but its branch did not merge into the directory: this
+	// attempt reconciles the branch (merge the directory's branch in, resolve,
+	// verify, resubmit). Only while no later approval has cleared it.
+	for i := len(evs) - 1; i >= 0; i -= 1 {
+		if evs[i].kind == EV_APPROVED || evs[i].kind == EV_MERGED do break
+		if evs[i].kind == EV_MERGE_CONFLICT {
+			json_raw(&o, "merge_conflict", evs[i].payload_json)
+			break
+		}
+	}
 
 	proto := json_begin()
 	json_int(&proto, "heartbeat_ttl_seconds", LEASE_TTL_SECONDS)
@@ -208,7 +229,7 @@ replace_top_level_member_raw :: proc(obj_json, target_key, new_raw_val: string) 
 
 @(private = "file")
 protocol_rules_json :: proc() -> string {
-	return `["1. Read TASK.md first; it is your authoritative lease context pack.","2. Confirm or inspect your lease with: ham-ctl lease next","3. Send a heartbeat every <15m during long work: ham-ctl lease heartbeat --note \"<progress>\"","4. Run verification at the exact commit you will submit: ham-ctl verify","5. Submit completed work on a clean working tree: ham-ctl lease submit --summary \"<summary>\"","6. Hand off unfinished work for a fresh context window: ham-ctl lease handoff --summary \"<summary>\" --next-steps \"<steps>\"","7. Block when waiting on a human or external dependency: ham-ctl lease block --kind human --reason \"<question>\"","8. Reviewers post verdicts with: ham-ctl review post --verdict approve|request_changes [--findings-file <json>]","9. Fetch omitted or referenced context on demand: ham-ctl task fetch <task_id> <ref>","10. On 409 lease_lost, stop immediately; the hub will re-wake you with a fresh pack if needed."]`
+	return `["1. Read TASK.md first; it is your authoritative lease context pack. When it names a Workdir, cd there and do ALL work and commits in it (your own branch); the hub merges it when the task is done.","2. Confirm or inspect your lease with: ham-ctl lease next","3. Send a heartbeat every <15m during long work: ham-ctl lease heartbeat --note \"<progress>\"","4. Run verification at the exact commit you will submit: ham-ctl verify","5. Submit completed work on a clean working tree: ham-ctl lease submit --summary \"<summary>\"","6. Hand off unfinished work for a fresh context window: ham-ctl lease handoff --summary \"<summary>\" --next-steps \"<steps>\"","7. Block when waiting on a human or external dependency: ham-ctl lease block --kind human --reason \"<question>\"","8. Reviewers post verdicts with: ham-ctl review post --verdict approve|request_changes [--findings-file <json>]","9. Fetch omitted or referenced context on demand: ham-ctl task fetch <task_id> <ref>","10. On 409 lease_lost, stop immediately; the hub will re-wake you with a fresh pack if needed."]`
 }
 
 // resolve_brief_inputs_json resolves each ref in `brief.inputs` into a JSON array:

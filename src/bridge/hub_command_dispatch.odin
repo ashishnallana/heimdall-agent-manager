@@ -249,6 +249,9 @@ bridge_command_spec :: proc(command_type: string) -> (Bridge_Command_Spec, bool)
 		return Bridge_Command_Spec{class = .General_IO, priority = .Background, key_kind = .VCS, queued = true, requires_id = true, timeout_ms = 20_000, cost_units = 8, retry_safe = true}, true
 	case "vcs_stage", "vcs_unstage", "vcs_revert", "vcs_save_file", "vcs_commit":
 		return Bridge_Command_Spec{class = .General_IO, priority = .Interactive, key_kind = .VCS, queued = true, requires_id = true, timeout_ms = 30_000, cost_units = 16}, true
+	case "taskv2_merge_worktree":
+		// Task System v2 merge-back of a task's worktree branch; the hub waits 60s.
+		return Bridge_Command_Spec{class = .General_IO, priority = .Interactive, key_kind = .VCS, queued = true, requires_id = true, timeout_ms = 60_000, cost_units = 16}, true
 	case "vcs_upload", "vcs_push", "vcs_sync", "vcs_pull":
 		// Network round trips to the remote: the hub waits 120s for these
 		// (vcs_command_timeout_ms), so the bridge deadline matches it (REQ-ERR-PROTO-B).
@@ -301,6 +304,11 @@ bridge_command_ordering_key :: proc(command_type, text: string) -> string {
 		}
 		defer delete(root)
 		return strings.concatenate({"vcs:", root if root != "" else "global"})
+	}
+	if command_type == "taskv2_merge_worktree" {
+		repo := extract_json_string(text, "repo", "")
+		defer delete(repo)
+		return strings.concatenate({"vcs:", repo if repo != "" else "global"})
 	}
 	if strings.has_prefix(command_type, "shell_") || command_type == "get_shell_output" {
 		id := extract_json_string(text, "session_id", "")

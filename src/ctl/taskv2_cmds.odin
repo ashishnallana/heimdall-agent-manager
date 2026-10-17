@@ -664,7 +664,8 @@ Ctl_Verify_Lease :: struct {
 	auto_submit: bool,
 	vcs_base:    string,
 	vcs_head:    string,
-	// placement.directory_path: the chain directory the task's work lives in.
+	// Where the task's work lives: placement.workdir (the task's own git
+	// worktree) when the hub names one, else placement.directory_path.
 	directory_path: string,
 }
 
@@ -695,6 +696,7 @@ ctl_verify_parse_lease :: proc(response: string) -> (Ctl_Verify_Lease, bool) {
 		if h, hok := lease["vcs_head"].(json.String); hok do out.vcs_head = strings.clone(string(h))
 		if pl, pok := lease["placement"].(json.Object); pok {
 			if dp, dok := pl["directory_path"].(json.String); dok do out.directory_path = strings.clone(string(dp))
+			if wd, wok := pl["workdir"].(json.String); wok && string(wd) != "" do out.directory_path = strings.clone(string(wd))
 		}
 		if vcs_obj, vok := lease["vcs"].(json.Object); vok {
 			if b, bok := vcs_obj["base"].(json.String); bok && out.vcs_base == "" do out.vcs_base = strings.clone(string(b))
@@ -722,6 +724,7 @@ ctl_verify_parse_lease :: proc(response: string) -> (Ctl_Verify_Lease, bool) {
 	if out.directory_path == "" {
 		if pl, pok := node["placement"].(json.Object); pok {
 			if dp, dok := pl["directory_path"].(json.String); dok do out.directory_path = strings.clone(string(dp))
+			if wd, wok := pl["workdir"].(json.String); wok && string(wd) != "" do out.directory_path = strings.clone(string(wd))
 		}
 	}
 	if pack, pok := node["pack"].(json.Object); pok {
@@ -731,12 +734,14 @@ ctl_verify_parse_lease :: proc(response: string) -> (Ctl_Verify_Lease, bool) {
 		if out.directory_path == "" {
 			if pl, plok := pack["placement"].(json.Object); plok {
 				if dp, dok := pl["directory_path"].(json.String); dok do out.directory_path = strings.clone(string(dp))
+				if wd, wok := pl["workdir"].(json.String); wok && string(wd) != "" do out.directory_path = strings.clone(string(wd))
 			}
 		}
 		if out.directory_path == "" {
 			if pl_lease, lok := pack["lease"].(json.Object); lok {
 				if pl, plok := pl_lease["placement"].(json.Object); plok {
 					if dp, dok := pl["directory_path"].(json.String); dok do out.directory_path = strings.clone(string(dp))
+					if wd, wok := pl["workdir"].(json.String); wok && string(wd) != "" do out.directory_path = strings.clone(string(wd))
 				}
 			}
 		}

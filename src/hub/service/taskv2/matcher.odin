@@ -440,12 +440,12 @@ last_attempt_holder :: proc(svc: ^Service, task: domain.Task) -> string {
 @(private = "file")
 directory_has_work_lease_ctx :: proc(ctx: ^Match_Context, directory_id: string) -> bool {
 	// One live work lease per chain directory. VCS directories are exempt only
-	// once per-lease worktrees are actually wired (PER_LEASE_WORKTREES_ENABLED);
-	// until then two leases share one checkout and can wipe each other's work.
+	// for git when per-lease worktrees are on (PER_LEASE_WORKTREES_ENABLED);
+	// otherwise two leases would share one checkout and wipe each other's work.
 	if PER_LEASE_WORKTREES_ENABLED {
 		for d in ctx.dirs {
 			if d.directory_id == directory_id {
-				if d.vcs_kind == "git" || d.vcs_kind == "jj" do return false
+				if d.vcs_kind == "git" do return false
 			}
 		}
 	}
