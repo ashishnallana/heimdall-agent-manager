@@ -474,8 +474,23 @@ refold_task :: proc(svc: ^Service, u: ^Uow, task: domain.Task, tasks: []domain.T
 		}
 		check_coordinator_attention_on_refold(svc, u, task, saved, view, all_tasks)
 		if saved.state == .Done && task.state != .Done do effect_merge_worktree(svc, u, saved, evs)
+		if saved.state == .Ready && task.state != .Ready do nudge_idle_soloist(svc, u, saved)
 	}
 	return saved, view, true, domain.Domain_Error{}
+}
+
+// nudge_idle_soloist (solo mode): the hub never wakes a coordinator, so when a
+// task of a solo chain becomes ready (published, unblocked, changes
+// requested, handed back) while the soloist holds no lease, it is told at once
+// to pull — instead of the 10-minute ready_unclaimed alert.
+nudge_idle_soloist :: proc(svc: ^Service, u: ^Uow, task: domain.Task) {
+	if u == nil do return
+	chain, ok, _ := iface.taskchain_get_chain(svc.repo, task.chain_id)
+	if !ok || !chain_is_solo(svc, chain) do return
+	coord := chain.coordinator_agent_instance_id
+	if coord == "" do return
+	if _, held, _ := iface.taskchain_get_lease_by_holder(svc.repo, coord); held do return
+	effect_notify_coordinator(svc, u, task.chain_id, task.owner_user_id, "solo_task_ready", fmt.tprintf("[taskv2] solo: task %s (%s) is ready for you — run `ham-ctl lease next`", task.task_id, task.title))
 }
 
 @(private = "file")
