@@ -3,11 +3,15 @@ import { useDispatch, useSelector } from 'react-redux';
 import { Icon, StatusDot } from '@ui';
 import { useFetchTaskChainGroupsQuery } from '../../api/endpoints/tasks';
 import { selectSearchChains } from '../../store/searchTitleSlice';
-import { selectIsVaultUnlocked } from '../../store/vaultSlice';
+import { openSearchReauthentication, selectIsUnlockModalOpen, selectIsVaultUnlocked } from '../../store/vaultSlice';
 import { buildRouteHash } from '../../utils/appLocation';
 import { buildConversationHash, navigateToHash } from '../../utils/conversationUrl';
 import { resolveChainConversationAgent } from '../../utils/chainConversation';
-import { searchTaskChainsEncrypted, taskChainSearchErrorMessage } from '../../utils/taskChainSearch';
+import {
+  searchTaskChainsEncrypted,
+  taskChainSearchErrorMessage,
+  taskChainSearchRequiresReauthentication,
+} from '../../utils/taskChainSearch';
 import { useAuthUser } from '../auth/AuthUserContext';
 import { useArchivedProjectIds } from '../projects/projectModel';
 import { chainStatusDot } from '../ui/patterns/commandPaletteLogic';
@@ -53,24 +57,28 @@ export function HomeChainSearch({ onOpenAgent }: HomeChainSearchProps) {
   const archivedProjectIds = useArchivedProjectIds();
   const decryptedTitles = useSelector(selectSearchChains) as Record<string, { decryptedTitle?: string }>;
   const isVaultUnlocked = useSelector(selectIsVaultUnlocked);
+  const isUnlockModalOpen = useSelector(selectIsUnlockModalOpen);
   const authUser = useAuthUser();
   const dispatch = useDispatch();
   const [query, setQuery] = useState('');
   const [remote, setRemote] = useState<HomeChainItem[] | null>(null);
   const [remoteState, setRemoteState] = useState<'idle' | 'searching' | 'stale' | 'error'>('idle');
   const [remoteError, setRemoteError] = useState('');
+  const [remoteNeedsReauthentication, setRemoteNeedsReauthentication] = useState(false);
 
   const loaded = useMemo(() => flattenRecentChains(data?.groups, archivedProjectIds), [data, archivedProjectIds]);
   const trimmed = query.trim();
 
   useEffect(() => {
-    if (!isVaultUnlocked || trimmed.length < HOME_REMOTE_SEARCH_MIN_CHARS || !authUser?.user_id) {
+    if (!isVaultUnlocked || isUnlockModalOpen || trimmed.length < HOME_REMOTE_SEARCH_MIN_CHARS || !authUser?.user_id) {
       setRemote(null);
       setRemoteState('idle');
       return;
     }
     let canceled = false;
     setRemote(null);
+    setRemoteError('');
+    setRemoteNeedsReauthentication(false);
     const timer = setTimeout(() => {
       setRemoteState('searching');
       searchTaskChainsEncrypted(trimmed, authUser.user_id!, { limit: HOME_RECENT_CHAIN_LIMIT })
@@ -84,13 +92,14 @@ export function HomeChainSearch({ onOpenAgent }: HomeChainSearchProps) {
           setRemote(null);
           setRemoteState('error');
           setRemoteError(taskChainSearchErrorMessage(error));
+          setRemoteNeedsReauthentication(taskChainSearchRequiresReauthentication(error));
         });
     }, 150);
     return () => {
       canceled = true;
       clearTimeout(timer);
     };
-  }, [authUser?.user_id, isVaultUnlocked, loaded, trimmed]);
+  }, [authUser?.user_id, isVaultUnlocked, isUnlockModalOpen, loaded, trimmed]);
 
   const rows = remote ?? filterHomeChains(loaded, trimmed, decryptedTitles);
 
@@ -128,6 +137,16 @@ export function HomeChainSearch({ onOpenAgent }: HomeChainSearchProps) {
             : remoteState === 'stale'
               ? 'Results may be stale.'
               : remoteError}
+          {remoteNeedsReauthentication ? (
+            <button
+              type="button"
+              data-debug-id="home-chain-search-reauthenticate"
+              onClick={() => dispatch(openSearchReauthentication())}
+              className="ml-2 font-medium text-accent hover:underline"
+            >
+              Re-enter vault password
+            </button>
+          ) : null}
         </p>
       ) : null}
       <ul data-debug-id="home-chain-list" className="divide-y divide-subtle overflow-hidden rounded-2xl border border-subtle bg-surface">

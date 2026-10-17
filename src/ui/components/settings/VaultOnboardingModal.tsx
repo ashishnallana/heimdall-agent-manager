@@ -40,8 +40,9 @@ export interface VaultOnboardingModalProps {
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
   onDismiss?: () => void;
-  mode?: 'vault-unlock' | 'bridge-reauthentication';
+  mode?: 'vault-unlock' | 'bridge-reauthentication' | 'search-reauthentication';
   onBridgeReauthenticate?: (rawVaultKeyHex: string) => Promise<void>;
+  onSearchReauthenticate?: (rawVaultKeyHex: string) => Promise<void>;
 }
 
 async function copyTextToClipboard(text: string): Promise<boolean> {
@@ -88,6 +89,7 @@ export default function VaultOnboardingModal({
   onDismiss,
   mode = 'vault-unlock',
   onBridgeReauthenticate,
+  onSearchReauthenticate,
 }: VaultOnboardingModalProps) {
   const dispatch = useDispatch();
   const isVaultConfiguredInRedux = useSelector(selectIsVaultConfigured);
@@ -98,6 +100,8 @@ export default function VaultOnboardingModal({
 
   const isConfigured = Boolean(vaultData?.isConfigured || isVaultConfiguredInRedux);
   const isBridgeReauthentication = mode === 'bridge-reauthentication';
+  const isSearchReauthentication = mode === 'search-reauthentication';
+  const isCredentialReauthentication = isBridgeReauthentication || isSearchReauthentication;
 
   // Sync Redux configured state with server query
   useEffect(() => {
@@ -182,10 +186,10 @@ export default function VaultOnboardingModal({
 
   // Close when vault is successfully unlocked
   useEffect(() => {
-    if (!isBridgeReauthentication && isUnlocked && isOpen) {
+    if (!isCredentialReauthentication && isUnlocked && isOpen) {
       handleClose();
     }
-  }, [isBridgeReauthentication, isUnlocked, isOpen, handleClose]);
+  }, [isCredentialReauthentication, isUnlocked, isOpen, handleClose]);
 
   // Setup Wizard Submit Handler
   async function handleSetupSubmit(e: FormEvent) {
@@ -295,6 +299,12 @@ export default function VaultOnboardingModal({
         handleClose();
         return;
       }
+      if (isSearchReauthentication) {
+        await onSearchReauthenticate?.(rawVaultKeyHex);
+        setUnlockPassword('');
+        handleClose();
+        return;
+      }
       const vaultKey = await decryptVaultKeyEnvelope(
         wrappingKey,
         record.encryptedVaultKey,
@@ -349,6 +359,12 @@ export default function VaultOnboardingModal({
         handleClose();
         return;
       }
+      if (isSearchReauthentication) {
+        await onSearchReauthenticate?.(rawVaultKeyHex);
+        setRecoveryPhraseInput('');
+        handleClose();
+        return;
+      }
       const vaultKey = await decryptVaultKeyEnvelope(
         recoveryWrappingKey,
         record.recoveryEncryptedVaultKey,
@@ -374,7 +390,7 @@ export default function VaultOnboardingModal({
     <Modal
       open={isOpen}
       onOpenChange={(next) => { if (!next) handleClose(); }}
-      title={isBridgeReauthentication ? 'Unlock connected bridges' : isConfigured ? 'Unlock vault' : 'Set up vault'}
+      title={isBridgeReauthentication ? 'Unlock connected bridges' : isSearchReauthentication ? 'Enable task-chain search' : isConfigured ? 'Unlock vault' : 'Set up vault'}
       size="md"
       data-debug-id="vault-onboarding-modal"
     >
@@ -459,6 +475,8 @@ export default function VaultOnboardingModal({
             <p className="text-sm text-muted">
               {isBridgeReauthentication
                 ? 'Re-enter your vault credentials to securely unlock connected bridges. Your browser vault stays unlocked.'
+                : isSearchReauthentication
+                  ? 'Re-enter your vault credentials once to enable task-chain search. Your browser vault stays unlocked.'
                 : 'Unlock to view your encrypted content.'}
             </p>
             <div className="flex gap-1" role="group" aria-label="Unlock method">
@@ -485,7 +503,7 @@ export default function VaultOnboardingModal({
                     width="full" rows={3} className="mt-1" disabled={isUnlocking} autoFocus required />
                 </label>
               )}
-              {!isBridgeReauthentication ? (
+              {!isCredentialReauthentication ? (
                 <Checkbox data-debug-id="vault-onboarding-remember-checkbox"
                   checked={rememberSession} onChange={setRememberSession}
                   label="Keep unlocked in this browser session" disabled={isUnlocking} />
@@ -493,7 +511,7 @@ export default function VaultOnboardingModal({
               <div className="flex justify-end">
                 <Button type="submit" variant="primary" data-debug-id="vault-onboarding-unlock-submit-btn"
                   disabled={isUnlocking || !(unlockMode === 'password' ? unlockPassword : recoveryPhraseInput.trim())}>
-                  {isUnlocking ? 'Unlocking…' : isBridgeReauthentication ? 'Unlock bridges' : 'Unlock vault'}
+                  {isUnlocking ? 'Unlocking…' : isBridgeReauthentication ? 'Unlock bridges' : isSearchReauthentication ? 'Enable search' : 'Unlock vault'}
                 </Button>
               </div>
             </form>
@@ -506,7 +524,7 @@ export default function VaultOnboardingModal({
       </Modal.Body>
       {(isConfigured || isVaultLoading || isVaultError) && <Modal.Footer>
         <Button type="button" variant="ghost" data-debug-id="vault-onboarding-skip-btn"
-          onClick={isBridgeReauthentication ? handleClose : handleSkip}>
+          onClick={isCredentialReauthentication ? handleClose : handleSkip}>
           {isConfigured ? 'Cancel' : 'Skip for now'}
         </Button>
       </Modal.Footer>}

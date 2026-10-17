@@ -1,8 +1,15 @@
 import { apiUrl, ApiError } from '../api/cookieFetch';
 import { cookieJsonFetch } from '../api/cookieFetch';
-import { getActiveBridgeVaultKeyMaterial } from '../store/vaultSlice';
+import {
+  getActiveTaskChainSearchKey,
+  getActiveVaultKey,
+  waitForActiveTaskChainSearchKey,
+} from '../store/vaultSlice';
+import {
+  TASK_CHAIN_SEARCH_KEY_DOMAIN,
+} from './taskChainSearchKey';
 
-const DOMAIN = 'heimdall/task-chain-search-rpc/v1';
+const DOMAIN = TASK_CHAIN_SEARCH_KEY_DOMAIN;
 const PREFIX = 'search:v1:';
 const HEDGE_DELAY_MS = 250;
 const DEADLINE_MS = 5000;
@@ -30,6 +37,7 @@ export function taskChainSearchErrorMessage(error: unknown): string {
   switch (code) {
     case 'bridge_offline': return 'No search Bridge is online.';
     case 'vault_locked': return 'Unlock the vault to search task chains.';
+    case 'vault_search_reauthentication_required': return 'Re-enter your vault password once to enable task-chain search.';
     case 'search_not_ready': return 'Bridge search is still preparing.';
     case 'search_stale': return 'Bridge search results may be stale.';
     case 'deadline_exceeded':
@@ -39,6 +47,10 @@ export function taskChainSearchErrorMessage(error: unknown): string {
     case 'limit_exceeded': return 'The search result limit is invalid.';
     default: return 'Bridge search unavailable; showing loaded chains.';
   }
+}
+
+export function taskChainSearchRequiresReauthentication(error: unknown): boolean {
+  return String((error as any)?.code || '') === 'vault_search_reauthentication_required';
 }
 
 type SearchBridge = { bridge_id?: string; id?: string; status?: string; runtime_status?: string; vault_status?: string; task_chain_search_ready?: boolean };
@@ -57,22 +69,7 @@ function base64ToBytes(value: string): Uint8Array {
   return Uint8Array.from(binary, (char) => char.charCodeAt(0));
 }
 
-function hexToBytes(value: string): Uint8Array {
-  if (!/^[0-9a-f]{64}$/i.test(value)) throw new ApiError('Vault key unavailable', 423, 'vault_locked');
-  return Uint8Array.from(value.match(/../g)!, (part) => Number.parseInt(part, 16));
-}
-
-export async function deriveTaskChainSearchKey(rawHex: string): Promise<CryptoKey> {
-  const material = await crypto.subtle.importKey('raw', hexToBytes(rawHex) as unknown as BufferSource, 'HKDF', false, ['deriveKey']);
-  const domain = utf8.encode(DOMAIN);
-  return crypto.subtle.deriveKey(
-    { name: 'HKDF', hash: 'SHA-256', salt: domain as unknown as BufferSource, info: domain as unknown as BufferSource },
-    material,
-    { name: 'AES-GCM', length: 256 },
-    false,
-    ['encrypt', 'decrypt'],
-  );
-}
+export { deriveTaskChainSearchKey } from './taskChainSearchKey';
 
 export function taskChainSearchAad(ownerId: string, bridgeId: string, requestId: string, direction: 'request' | 'response', expiresAtMs: number): Uint8Array {
   return utf8.encode(`${DOMAIN}|${ownerId}|${bridgeId}|${requestId}|${direction}|${expiresAtMs}`);
@@ -171,9 +168,19 @@ export async function searchTaskChainsEncrypted(
   if (trimmed.length < 2) throw new ApiError('Enter at least two characters', 400, 'query_too_short');
   const limit = options.limit ?? 20;
   if (limit < 1 || limit > MAX_LIMIT) throw new ApiError('Search limit exceeded', 400, 'limit_exceeded');
-  const rawKey = getActiveBridgeVaultKeyMaterial();
-  if (!rawKey) throw new ApiError('Vault key unavailable', 423, 'vault_locked');
-  const key = await deriveTaskChainSearchKey(rawKey);
+  let key = getActiveTaskChainSearchKey();
+  if (!key) {
+    try {
+      key = await waitForActiveTaskChainSearchKey();
+    } catch {
+      if (!getActiveVaultKey()) throw new ApiError('Vault key unavailable', 423, 'vault_locked');
+      throw new ApiError('Task-chain search key unavailable', 423, 'vault_search_reauthentication_required');
+    }
+  }
+  if (!key) {
+    if (!getActiveVaultKey()) throw new ApiError('Vault key unavailable', 423, 'vault_locked');
+    throw new ApiError('Task-chain search key unavailable', 423, 'vault_search_reauthentication_required');
+  }
   const raw = await cookieJsonFetch('/bridges');
   const bridges: SearchBridge[] = raw?.bridges ?? (Array.isArray(raw) ? raw : []);
   const candidates = bridges.filter((bridge) => {

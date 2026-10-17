@@ -88,7 +88,7 @@ import SkillViewerPage from '../skills/SkillViewerPage';
 import NotificationsPanel from '../settings/NotificationsPanel';
 import ExperimentalPanel from '../settings/ExperimentalPanel';
 import VaultPanel from '../settings/VaultPanel';
-import VaultOnboardingModal from '../settings/VaultOnboardingModal';
+import { VaultOnboardingHost } from '../settings/VaultOnboardingHost';
 import SettingsModal from '../settings/SettingsModal';
 import { resolveSettingsTab } from '../../utils/settingsRouting';
 import { useShortcuts } from '../../services/shortcuts/ShortcutContext';
@@ -96,7 +96,6 @@ import { useRegisterActions } from '../../services/shortcuts/useRegisterActions'
 import {
   selectIsVaultConfigured,
   selectIsVaultUnlocked,
-  selectIsUnlockModalOpen,
   setUnlockModalOpen,
   readOnboardingDismissed,
   shouldOpenVaultOnboarding,
@@ -1420,7 +1419,6 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
     }
     return null;
   }, [isVaultUnlocked]);
-  const isUnlockModalOpen = useSelector(selectIsUnlockModalOpen);
   const [isOnboardingModalOpen, setIsOnboardingModalOpen] = useState(false);
   const [isVaultLocking, setIsVaultLocking] = useState(false);
   const [isVaultReconciling, setIsVaultReconciling] = useState(false);
@@ -1480,22 +1478,6 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
       setIsOnboardingModalOpen(true);
     }
   }, [isVaultUnlocked]);
-
-  // Open onboarding modal when isUnlockModalOpen is triggered from vault placeholders.
-  // Gated by the same predicate, otherwise a placeholder click reopens the modal by the
-  // back door on an unsupported context (REQ-VAULT-UNSUP-2).
-  useEffect(() => {
-    if (isUnlockModalOpen && isVaultSupported()) {
-      setIsOnboardingModalOpen(true);
-    }
-  }, [isUnlockModalOpen]);
-
-  // When onboarding modal closes, sync back to redux isUnlockModalOpen
-  useEffect(() => {
-    if (!isOnboardingModalOpen && isUnlockModalOpen) {
-      dispatch(setUnlockModalOpen(false));
-    }
-  }, [isOnboardingModalOpen, isUnlockModalOpen, dispatch]);
 
   // Reconcile every and only online bridges that explicitly report Locked. A raw key
   // derived in this browser session can run silently; a cold-restored non-extractable
@@ -2138,10 +2120,11 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
           window.location.hash = buildRouteHash('/conversations/' + encodeURIComponent(instanceId), '');
         }}
       />
-      <VaultOnboardingModal
-        open={isOnboardingModalOpen || isBridgeReauthenticationOpen}
-        mode={isBridgeReauthenticationOpen ? 'bridge-reauthentication' : 'vault-unlock'}
-        onOpenChange={isBridgeReauthenticationOpen ? setIsBridgeReauthenticationOpen : setIsOnboardingModalOpen}
+      <VaultOnboardingHost
+        onboardingOpen={isOnboardingModalOpen}
+        onOnboardingOpenChange={setIsOnboardingModalOpen}
+        bridgeReauthenticationOpen={isBridgeReauthenticationOpen}
+        onBridgeReauthenticationOpenChange={setIsBridgeReauthenticationOpen}
         onBridgeReauthenticate={async (rawVaultKeyHex) => {
           setActiveBridgeVaultKeyMaterial(rawVaultKeyHex);
           await reconcileOnlineLockedBridges(rawVaultKeyHex);
