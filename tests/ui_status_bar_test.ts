@@ -6,7 +6,6 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  countConnectedBridges,
   countRunningInstances,
   countShells,
   formatCount,
@@ -30,16 +29,6 @@ test('REQ-BAR-2: running instances are live agents, de-duplicated across project
   assert.equal(countRunningInstances(projects), 3);
   assert.equal(countRunningInstances([]), 0);
   assert.equal(countRunningInstances(undefined), 0);
-});
-
-test('REQ-BAR-2: connected bridges must be online with a connected runtime and not revoked', () => {
-  assert.equal(countConnectedBridges([
-    { bridge_id: 'b1', status: 'online', runtime_connected: true },
-    { bridge_id: 'b2', status: 'online', runtime_connected: false },
-    { bridge_id: 'b3', status: 'offline', runtime_connected: true },
-    { bridge_id: 'b4', status: 'revoked', runtime_connected: true },
-  ]), 1);
-  assert.equal(countConnectedBridges(null), 0);
 });
 
 test('REQ-BAR-2: previews are live server sessions with a port; a full page is capped', () => {
@@ -69,7 +58,6 @@ test('REQ-BAR-1/4: the shell is a column with the in-flow bar after the app row'
 
 const data = {
   runningInstances: 1,
-  connectedBridges: 2,
   shells: { shells: 5, previews: 2, capped: false },
   shortcutMode: 'normal' as const,
   renderVaultToggle: (compact: boolean) => `vault:${compact}`,
@@ -77,11 +65,11 @@ const data = {
 
 test('BAR-2: registry modules declare slot + order and render per compact context', () => {
   const ids = STATUS_BAR_MODULES.map((m) => m.id);
-  assert.deepEqual([...ids].sort(), ['attention', 'bridges', 'instances', 'previews', 'shells', 'shortcut-mode', 'vault']);
+  assert.deepEqual([...ids].sort(), ['attention', 'instances', 'previews', 'shells', 'shortcut-mode', 'vault']);
   assert.equal(new Set(ids).size, ids.length, 'module ids are unique');
   const left = renderSlot(STATUS_BAR_MODULES, 'left', { compact: false, data });
   const right = renderSlot(STATUS_BAR_MODULES, 'right', { compact: false, data });
-  assert.deepEqual(left.map((e) => e.id), ['shortcut-mode', 'bridges']);
+  assert.deepEqual(left.map((e) => e.id), ['shortcut-mode'], 'attention renders nothing without data; it took the bridge count\'s slot');
   assert.deepEqual(right.map((e) => e.id), ['instances', 'shells', 'previews', 'vault']);
   assert.deepEqual(renderSlot(STATUS_BAR_MODULES, 'center', { compact: false, data }), []);
   // Every module is told whether it is compact.

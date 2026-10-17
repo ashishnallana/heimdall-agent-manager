@@ -29,7 +29,7 @@ import { appendArtifactLinks } from '../../utils/artifactUpload';
 import { buildRouteHash, navigateTo } from '../../utils/appLocation';
 import { AttentionCardBody } from './AttentionCardBody';
 import { AttentionComposer, type ComposerSubmit } from './AttentionComposer';
-import { DECK_TABS, clampIndex, defaultTab, reviewerCandidates, stepIndex, swipeDelta, tabCounts, visibleItems, type DeckTab } from './attentionModel';
+import { DECK_TABS, clampIndex, defaultTab, hideKey, nextLiveTab, reviewerCandidates, stepIndex, swipeDelta, tabCounts, visibleItems, type DeckTab } from './attentionModel';
 
 const NO_ITEMS: AttentionItem[] = [];
 
@@ -131,8 +131,25 @@ export function AttentionDeck({
 
   // Forget locally-settled cards once the server stops returning them.
   useEffect(() => {
-    if (query.data && fresh) scheduler.prune(query.data.items.map((i) => i.card_id));
+    if (query.data && fresh) scheduler.prune(query.data.items.map(hideKey));
   }, [query.data, fresh, scheduler]);
+
+  // Finishing the last card of a tab moves on to a live tab with cards (never
+  // into Snoozed). Only a tab
+  // that RAN OUT moves -- clicking an empty tab stays there.
+  const prevTabCount = useRef<{ tab: DeckTab; count: number } | null>(null);
+  useEffect(() => {
+    const count = perTab[tab];
+    const prev = prevTabCount.current;
+    prevTabCount.current = { tab, count };
+    if (!open || !prev || prev.tab !== tab || prev.count === 0 || count > 0) return;
+    const next = nextLiveTab(tab, perTab);
+    if (next) {
+      setTab(next);
+      setIndex(0);
+      setSlide('right');
+    }
+  }); // eslint-disable-line react-hooks/exhaustive-deps
 
   const list = useMemo(() => visibleItems(items, tab, snap.hidden), [items, tab, snap.hidden]);
   const safeIndex = clampIndex(index, list.length);
@@ -177,7 +194,7 @@ export function AttentionDeck({
   }, [dispatch]);
 
   const schedule = (item: AttentionItem, label: string, send: (keepalive: boolean) => Promise<void>) => {
-    scheduler.schedule({ cardId: item.card_id, label, run: async (keepalive) => { await send(keepalive); invalidate(); } });
+    scheduler.schedule({ cardId: hideKey(item), label, run: async (keepalive) => { await send(keepalive); invalidate(); } });
     setSlide('right');
     resetCardUi();
   };
@@ -207,7 +224,7 @@ export function AttentionDeck({
   const replyAndRead = async (item: AttentionMessageItem, body: string, artifactIds: string[] = []) => {
     const conversationId = item.action_refs.conversation_id;
     // The answered card leaves at once, so the next one slides in.
-    scheduler.settle(item.card_id);
+    scheduler.settle(hideKey(item));
     setSlide('right');
     try {
       await (sendMessage({ conversationId, body, artifactIds }) as any).unwrap();
@@ -215,7 +232,7 @@ export function AttentionDeck({
       invalidate();
       say(`Reply sent to ${item.context.agent_name || 'the agent'}`);
     } catch (err: any) {
-      scheduler.unsettle(item.card_id);
+      scheduler.unsettle(hideKey(item));
       throw err;
     }
   };
@@ -231,12 +248,12 @@ export function AttentionDeck({
     const body = appendArtifactLinks(value.text, value.attachments.map((a) => a.link)).trim();
     const { chain_id: chainId, task_id: taskId } = item.action_refs;
     if (verdict === 'ngtm') {
-      scheduler.settle(item.card_id);
+      scheduler.settle(hideKey(item));
       setSlide('right');
       try {
         await (voteTask({ chainId, taskId, result: 'ngtm', comment: body }) as any).unwrap();
       } catch (err) {
-        scheduler.unsettle(item.card_id);
+        scheduler.unsettle(hideKey(item));
         throw err;
       }
       invalidate();
@@ -261,6 +278,7 @@ export function AttentionDeck({
   };
 
   type DockAction = { key: string; label: string; icon: IconName; tone?: 'success' | 'danger'; run: () => void; debug: string };
+  // Snoozed cards keep their original actions: acting settles them in place.
   const dock: DockAction[] = !current ? [] : current.kind === 'task' ? [
     { key: 'a', label: 'Approve', icon: 'check', tone: 'success', debug: 'approve', run: () => schedule(current, 'Approved', (k) => acceptCard(current.card_id, k)) },
     { key: 'c', label: 'Comment', icon: 'chat', debug: 'comment', run: () => { setPopover(null); setComposer(composer === 'comment' ? null : 'comment'); } },

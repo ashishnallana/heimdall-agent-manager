@@ -22,6 +22,7 @@ new_attention_repository :: proc(impl: ^Attention_Repo_SQLite, conn: ^Conn) -> i
 		list_live_cards              = attention_list_live_cards_sqlite,
 		list_owners                  = attention_list_owners_sqlite,
 		list_cards                   = attention_list_cards_sqlite,
+		list_snoozed_cards           = attention_list_snoozed_cards_sqlite,
 		count                        = attention_count_sqlite,
 		resolve_context              = attention_resolve_context_sqlite,
 	}
@@ -200,6 +201,28 @@ attention_list_owners_sqlite :: proc(ctx: rawptr) -> ([]domain.User_ID, domain.D
 @(private="file")
 LIVE_CARD_WHERE :: ` (status = 'pending' OR (status = 'snoozed' AND snooze_until != '' AND snooze_until <= ?))`
 
+// SNOOZED_CARD_WHERE: a snooze that is still running as of now (the last bound
+// parameter); an open-ended snooze ('') never wakes on its own.
+@(private="file")
+SNOOZED_CARD_WHERE :: ` status = 'snoozed' AND (snooze_until = '' OR snooze_until > ?)`
+
+attention_list_snoozed_cards_sqlite :: proc(ctx: rawptr, owner_user_id: domain.User_ID, now: string, limit: int) -> ([]domain.Card, domain.Domain_Error) {
+	impl, ok := attention_repo_open(ctx)
+	if !ok do return nil, not_open()
+	stmt: sqlite3_stmt = nil
+	query := "SELECT " + CARD_COLUMNS + " FROM cards WHERE owner_user_id = ? AND kind IN ('message', 'task') AND" + SNOOZED_CARD_WHERE + " ORDER BY snooze_until = '' ASC, snooze_until ASC, card_id ASC LIMIT ?;"
+	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK {
+		return nil, domain.domain_error(.Internal_Error, "failed to prepare snoozed attention card list")
+	}
+	defer sqlite3_finalize(stmt)
+	bind_text(stmt, 1, string(owner_user_id))
+	bind_text(stmt, 2, now)
+	sqlite3_bind_int64(stmt, 3, i64(limit))
+	out := make([dynamic]domain.Card)
+	for sqlite3_step(stmt) == SQLITE_ROW do append(&out, card_from_stmt(stmt))
+	return out[:], domain.Domain_Error{}
+}
+
 attention_list_cards_sqlite :: proc(ctx: rawptr, owner_user_id: domain.User_ID, kind, cutoff, now: string, limit: int) -> ([]domain.Card, domain.Domain_Error) {
 	impl, ok := attention_repo_open(ctx)
 	if !ok do return nil, not_open()
@@ -242,7 +265,22 @@ attention_count_sqlite :: proc(ctx: rawptr, owner_user_id: domain.User_ID, cutof
 		case domain.CARD_KIND_TASK:    counts.task = in_range
 		}
 	}
+	if err := attention_count_snoozed(impl, owner_user_id, now, &counts); err.code != .None do return {}, err
 	return counts, domain.Domain_Error{}
+}
+
+@(private="file")
+attention_count_snoozed :: proc(impl: ^Attention_Repo_SQLite, owner_user_id: domain.User_ID, now: string, counts: ^iface.Attention_Counts) -> domain.Domain_Error {
+	stmt: sqlite3_stmt = nil
+	query := "SELECT COUNT(*) FROM cards WHERE owner_user_id = ? AND kind IN ('message', 'task') AND" + SNOOZED_CARD_WHERE + ";"
+	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK {
+		return domain.domain_error(.Internal_Error, "failed to prepare snoozed attention count")
+	}
+	defer sqlite3_finalize(stmt)
+	bind_text(stmt, 1, string(owner_user_id))
+	bind_text(stmt, 2, now)
+	if sqlite3_step(stmt) == SQLITE_ROW do counts.snoozed = int(sqlite3_column_int64(stmt, 0))
+	return domain.Domain_Error{}
 }
 
 // attention_lookup_pairs runs "SELECT key, value FROM <from> WHERE owner_user_id

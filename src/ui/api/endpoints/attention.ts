@@ -16,7 +16,8 @@ export type AttentionRange = '6h' | '24h' | '7d' | 'all';
 export type AttentionKind = 'message' | 'task';
 export const ATTENTION_RANGES: readonly AttentionRange[] = ['6h', '24h', '7d', 'all'];
 
-export type AttentionCounts = { total: number; older: number; message: number; task: number };
+/** total = message + task (the bar pill); snoozed is separate and never in total. */
+export type AttentionCounts = { total: number; older: number; message: number; task: number; snoozed: number };
 
 export type AttentionExcerpt = { author_name: string; body: string; at: string };
 
@@ -43,6 +44,9 @@ type AttentionItemBase = {
   reason: string;
   urgency: 'error' | 'warn' | 'info';
   status: string;
+  /** In the Snoozed tab: its snooze is still running (snooze_until '' = until woken). */
+  snoozed: boolean;
+  snooze_until: string;
   attention_since: string;
   /** May be vault ciphertext; render through the vault helpers. */
   title: string;
@@ -59,20 +63,22 @@ export type AttentionItem = AttentionTaskItem | AttentionMessageItem;
 export type AttentionSummary = { since: AttentionRange; counts: AttentionCounts };
 export type AttentionResult = AttentionSummary & { items: AttentionItem[] };
 
-const EMPTY_COUNTS: AttentionCounts = { total: 0, older: 0, message: 0, task: 0 };
+const EMPTY_COUNTS: AttentionCounts = { total: 0, older: 0, message: 0, task: 0, snoozed: 0 };
 
 export function normalizeAttentionCounts(raw: any): AttentionCounts {
   const n = (v: any) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.floor(v) : 0);
   if (!raw || typeof raw !== 'object') return { ...EMPTY_COUNTS };
-  return { total: n(raw.total), older: n(raw.older), message: n(raw.message), task: n(raw.task) };
+  return { total: n(raw.total), older: n(raw.older), message: n(raw.message), task: n(raw.task), snoozed: n(raw.snoozed) };
 }
 
 /** Keeps only well-formed items of the kinds v1 renders. */
 export function normalizeAttentionItems(raw: any): AttentionItem[] {
   if (!Array.isArray(raw)) return [];
-  return raw.filter((item: any) =>
-    item && typeof item.card_id === 'string' && (item.kind === 'task' || item.kind === 'message') &&
-    item.details && typeof item.details === 'object' && item.action_refs && typeof item.action_refs === 'object');
+  return raw
+    .filter((item: any) =>
+      item && typeof item.card_id === 'string' && (item.kind === 'task' || item.kind === 'message') &&
+      item.details && typeof item.details === 'object' && item.action_refs && typeof item.action_refs === 'object')
+    .map((item: any) => ({ ...item, snoozed: item.snoozed === true, snooze_until: typeof item.snooze_until === 'string' ? item.snooze_until : '' }));
 }
 
 function attentionQuery(path: string, range: AttentionRange, kind?: AttentionKind) {

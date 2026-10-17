@@ -24,6 +24,10 @@ ATTENTION_URGENCY_ERROR :: "error"
 ATTENTION_URGENCY_WARN  :: "warn"
 ATTENTION_URGENCY_INFO  :: "info"
 
+// ATTENTION_FILTER_SNOOZED is the deck's Snoozed tab as a kind filter (not a
+// card kind): cards whose snooze is still running, any served kind.
+ATTENTION_FILTER_SNOOZED :: "snoozed"
+
 ATTENTION_REASON_AWAITING_REVIEW :: "awaiting_review"
 ATTENTION_REASON_QUESTION        :: "question"
 
@@ -38,6 +42,7 @@ Attention_Item :: struct {
 	reason:     string,
 	urgency:    string,
 	primary_op: string, // '' when the card has no one-tap action (messages)
+	snoozed:    bool,   // in the Snoozed tab (snooze still running)
 	ctx:        Attention_Item_Context,
 }
 
@@ -60,8 +65,9 @@ attention_range_duration :: proc(since: string) -> (d: time.Duration, all: bool,
 }
 
 // list_attention returns the deck's counts and, when with_items, its items.
-// since defaults to 24h; kind ('' | message | task) filters items only -- counts
-// always cover every kind in the range.
+// since defaults to 24h; kind ('' | message | task | snoozed) filters items only
+// -- counts always cover every kind. Live items (in range) come first in
+// urgency order; snoozed items (range-independent) follow, soonest to wake first.
 list_attention :: proc(s: ^Card_Service, auth: contracts.Auth_Context, since: string, kind: string, with_items: bool) -> (Attention_Result, domain.Domain_Error) {
 	owner, ok, err := ownership.owner_from_auth(auth)
 	if !ok do return {}, err
@@ -70,8 +76,8 @@ list_attention :: proc(s: ^Card_Service, auth: contracts.Auth_Context, since: st
 	range_label := since if since != "" else "24h"
 	window, all_time, range_ok := attention_range_duration(range_label)
 	if !range_ok do return {}, domain.domain_error(.Validation_Failed, "since must be one of 6h, 24h, 7d, all")
-	if kind != "" && kind != domain.CARD_KIND_MESSAGE && kind != domain.CARD_KIND_TASK {
-		return {}, domain.domain_error(.Validation_Failed, "kind must be message or task")
+	if kind != "" && kind != domain.CARD_KIND_MESSAGE && kind != domain.CARD_KIND_TASK && kind != ATTENTION_FILTER_SNOOZED {
+		return {}, domain.domain_error(.Validation_Failed, "kind must be message, task or snoozed")
 	}
 
 	now := platform.clock_now(s.clock)
@@ -92,8 +98,17 @@ list_attention :: proc(s: ^Card_Service, auth: contracts.Auth_Context, since: st
 		if list_err.code != .None do return {}, list_err
 		for c in cards do append(&items, attention_item_for(c, now_t))
 	}
-	attention_attach_context(s, owner, items[:])
 	slice.sort_by(items[:], attention_item_less)
+	if kind == "" || kind == ATTENTION_FILTER_SNOOZED {
+		snoozed, snoozed_err := iface.attention_list_snoozed_cards(s.attention_repo, owner, now, ATTENTION_ITEMS_PER_KIND)
+		if snoozed_err.code != .None do return {}, snoozed_err
+		for c in snoozed {
+			item := attention_item_for(c, now_t)
+			item.snoozed = true
+			append(&items, item)
+		}
+	}
+	attention_attach_context(s, owner, items[:])
 	result.items = items[:]
 	return result, domain.Domain_Error{}
 }

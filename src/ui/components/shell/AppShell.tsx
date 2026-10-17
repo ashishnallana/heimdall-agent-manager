@@ -30,7 +30,7 @@ import { useListBridgesQuery, type Bridge } from '../../api/endpoints/bridgeSupp
 import { useListShellsQuery } from '../../api/endpoints/shells';
 import { StatusBar } from './statusBar/StatusBar';
 import { STATUS_BAR_MODULES } from './statusBar/modules';
-import { countConnectedBridges, countRunningInstances, countShells } from './statusBar/statusBarModel';
+import { countRunningInstances, countShells } from './statusBar/statusBarModel';
 import { AttentionDeck, AttentionUndoToast } from '../attention';
 import { attentionApi, useGetAttentionSummaryQuery, type AttentionRange } from '../../api/endpoints/attention';
 import { readAttentionRange, writeAttentionRange } from '../../services/attention/attentionPrefs';
@@ -1357,6 +1357,14 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
   const lastAttentionTotal = useRef<{ range: AttentionRange; total: number } | null>(null);
   if (attentionSummaryData) lastAttentionTotal.current = { range: attentionRange, total: attentionSummaryData.counts.total };
   const attentionTotal = lastAttentionTotal.current?.range === attentionRange ? lastAttentionTotal.current.total : null;
+  // The ring spins only for what the user has not seen: opening the deck marks
+  // the current count seen (and keeps it seen while open); a later rise spins it again.
+  const [attentionSeenTotal, setAttentionSeenTotal] = useState(0);
+  useEffect(() => {
+    // Items going away lower the mark too, so the next new one spins the ring.
+    if (attentionTotal !== null && (attentionOpen || attentionTotal < attentionSeenTotal)) setAttentionSeenTotal(attentionTotal);
+  }, [attentionOpen, attentionTotal]); // eslint-disable-line react-hooks/exhaustive-deps
+  const attentionUnseen = attentionTotal !== null && attentionTotal > attentionSeenTotal;
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [launchModalProject, setLaunchModalProject] = useState<{ projectId: string; name: string } | null>(null);
   const [settingsModalOpen, setSettingsModalOpenState] = useState<boolean>(() => routeFromLocation().startsWith('/settings'));
@@ -1427,7 +1435,6 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
     () => selectOnlineLockedBridgeIds(bridges),
     [bridges],
   );
-  const connectedBridgeCount = useMemo(() => countConnectedBridges(bridges), [bridges]);
   const onlineLockedBridgeSignature = onlineLockedBridgeIds.join('\u0000');
   const hasOnlineLockedBridge = isVaultUnlocked && onlineLockedBridgeIds.length > 0;
   const bridgeReconciliationRef = useRef<Promise<BridgeVaultReconciliationResult> | null>(null);
@@ -2090,12 +2097,12 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
         compact={isMobile}
         data={{
           runningInstances: runningInstanceCount,
-          connectedBridges: connectedBridgeCount,
           shells: shellCounts,
           shortcutMode,
           renderVaultToggle: renderVaultStatusButton,
           attention: {
             total: attentionTotal,
+            unseen: attentionUnseen,
             onOpen: () => setAttentionOpen(true),
           },
         }}

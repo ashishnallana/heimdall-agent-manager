@@ -92,6 +92,8 @@ test_attention_ranges_counts_and_order :: proc(t: ^testing.T) {
 	_, bad := list_attention(&h.svc, ph_auth(), "3h", "", true)
 	testing.expect_value(t, bad.code, domain.Error_Code.Validation_Failed)
 	_, bad_kind := list_attention(&h.svc, ph_auth(), "24h", "shell", true)
+	_, snoozed_ok := list_attention(&h.svc, ph_auth(), "24h", ATTENTION_FILTER_SNOOZED, true)
+	testing.expect_value(t, snoozed_ok.code, domain.Error_Code.None)
 	testing.expect_value(t, bad_kind.code, domain.Error_Code.Validation_Failed)
 }
 
@@ -105,6 +107,30 @@ test_attention_snoozed_and_resolved_are_hidden :: proc(t: ^testing.T) {
 	_, _, _ = snooze_card(&h.svc, ph_auth(), attention_task_card_id("task_2h"), "2099-01-01T00:00:00Z")
 	r, _ := list_attention(&h.svc, ph_auth(), "all", "task", true)
 	testing.expect_value(t, r.counts.task, 2)
+	testing.expect_value(t, r.counts.snoozed, 1)
+	for item in r.items do testing.expect(t, !item.snoozed, "the task filter returns live cards only")
+
+	// The Snoozed tab: range-independent (even 6h shows it), flagged, after live items.
+	rs, _ := list_attention(&h.svc, ph_auth(), "6h", ATTENTION_FILTER_SNOOZED, true)
+	testing.expect_value(t, rs.counts.snoozed, 1)
+	testing.expect_value(t, len(rs.items), 1)
+	if len(rs.items) == 1 {
+		testing.expect_value(t, string(rs.items[0].card.card_id), "crd_task_task_2h")
+		testing.expect(t, rs.items[0].snoozed, "snoozed item is flagged")
+		testing.expect_value(t, rs.items[0].card.snooze_until, "2099-01-01T00:00:00Z")
+		testing.expect_value(t, rs.items[0].ctx.chain_title, "vault:v1:chain-title")
+	}
+	rall, _ := list_attention(&h.svc, ph_auth(), "all", "", true)
+	testing.expect_value(t, len(rall.items), 4)
+	if len(rall.items) == 4 do testing.expect(t, rall.items[3].snoozed, "snoozed items come last")
+
+	// Acting on a snoozed card works in place (no wake step): approving it
+	// retires it from the Snoozed tab.
+	_, accepted, _ := accept_card(&h.svc, ph_auth(), attention_task_card_id("task_2h"))
+	testing.expect(t, accepted, "a snoozed card accepts like a pending one")
+	ra2, _ := list_attention(&h.svc, ph_auth(), "all", ATTENTION_FILTER_SNOOZED, true)
+	testing.expect_value(t, ra2.counts.snoozed, 0)
+	testing.expect_value(t, len(ra2.items), 0)
 	// An expired snooze is live again.
 	_, _, _ = snooze_card(&h.svc, ph_auth(), attention_task_card_id("task_30h"), "2000-01-01T00:00:00Z")
 	r2, _ := list_attention(&h.svc, ph_auth(), "all", "task", true)

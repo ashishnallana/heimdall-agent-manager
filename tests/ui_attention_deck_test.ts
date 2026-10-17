@@ -45,7 +45,7 @@ test('model: visible items, per-tab counts, default tab, stepping, swipe', () =>
   const items = [taskItem('a'), taskItem('b'), messageItem('m')];
   const hidden = new Set(['crd_task_a']);
   assert.deepEqual(model.visibleItems(items, 'task', hidden).map((i: any) => i.card_id), ['crd_task_b']);
-  assert.deepEqual(model.tabCounts({ total: 3, older: 0, message: 1, task: 2 }, items, hidden), { message: 1, task: 1 });
+  assert.deepEqual(model.tabCounts({ total: 3, older: 0, message: 1, task: 2, snoozed: 0 }, items, hidden), { message: 1, task: 1, snoozed: 0 });
   assert.equal(model.defaultTab({ message: 0, task: 2 }), 'task');
   assert.equal(model.defaultTab({ message: 1, task: 2 }), 'message');
   assert.equal(model.defaultTab({ message: 0, task: 0 }), 'message');
@@ -160,8 +160,8 @@ test('prefs: range persists, falls back to 24h on junk or broken storage', () =>
 });
 
 test('api: counts and items are normalised defensively', () => {
-  assert.deepEqual(api.normalizeAttentionCounts({ total: 3, older: -1, message: '2', task: 1.7 }), { total: 3, older: 0, message: 0, task: 1 });
-  assert.deepEqual(api.normalizeAttentionCounts(null), { total: 0, older: 0, message: 0, task: 0 });
+  assert.deepEqual(api.normalizeAttentionCounts({ total: 3, older: -1, message: '2', task: 1.7 }), { total: 3, older: 0, message: 0, task: 1, snoozed: 0 });
+  assert.deepEqual(api.normalizeAttentionCounts(null), { total: 0, older: 0, message: 0, task: 0, snoozed: 0 });
   const items = api.normalizeAttentionItems([taskItem('a'), { card_id: 'x', kind: 'shell', details: {}, action_refs: {} }, null, { kind: 'task' }]);
   assert.deepEqual(items.map((i: any) => i.card_id), ['crd_task_a']);
 });
@@ -207,7 +207,8 @@ async function withDeck(initialItems: any[], run: (h: DeckHarness) => Promise<vo
     hits.push(`${String(init?.method || 'GET').toUpperCase()} ${url.pathname}${url.search}`);
     if (url.pathname.endsWith('/attention')) {
       if (gate) await gate;
-      const counts = { total: items.length, older: 1, message: items.filter((i) => i.kind === 'message').length, task: items.filter((i) => i.kind === 'task').length };
+      const live = items.filter((i) => !i.snoozed);
+      const counts = { total: live.length, older: 1, message: live.filter((i) => i.kind === 'message').length, task: live.filter((i) => i.kind === 'task').length, snoozed: items.length - live.length };
       return jsonResponse({ data: { since: '24h', counts, items } });
     }
     for (const [suffix, body] of Object.entries(opts.routes || {})) {
@@ -475,21 +476,86 @@ test('deck: reviewer menu loads the fleet on demand with a loader, then hands th
   }, { routes });
 });
 
-test('status bar: attention pill is hidden without data and reads as one number', async () => {
+test('model: snoozed tab, hide keys, next live tab, wake time', () => {
+  const live = taskItem('a');
+  const snz = taskItem('z', { snoozed: true, snooze_until: '2026-10-17T09:00:00Z', status: 'snoozed' });
+  const items = [live, snz, messageItem('m')];
+  assert.deepEqual(model.visibleItems(items, 'snoozed', new Set()).map((i: any) => i.card_id), ['crd_task_z']);
+  assert.deepEqual(model.visibleItems(items, 'task', new Set()).map((i: any) => i.card_id), ['crd_task_a'], 'snoozed cards stay out of live tabs');
+  assert.equal(model.hideKey(snz), 'crd_task_z#snoozed@2026-10-17T09:00:00Z');
+  assert.equal(model.hideKey(live), 'crd_task_a');
+  assert.deepEqual(model.tabCounts({ total: 2, older: 0, message: 1, task: 1, snoozed: 1 }, items, new Set(['crd_task_z#snoozed@2026-10-17T09:00:00Z'])), { message: 1, task: 1, snoozed: 0 });
+  assert.equal(model.nextLiveTab('message', { message: 0, task: 2, snoozed: 3 }), 'task');
+  assert.equal(model.nextLiveTab('task', { message: 0, task: 0, snoozed: 3 }), null, 'never into Snoozed');
+  assert.equal(model.nextLiveTab('snoozed', { message: 0, task: 1, snoozed: 0 }), 'task');
+  assert.equal(model.defaultTab({ message: 0, task: 0, snoozed: 4 }), 'message');
+  assert.match(model.reasonLine(snz, NOW), /^Snoozed until tomorrow \d\d:\d\d$/);
+  assert.equal(model.formatWake('', NOW), '');
+});
+
+test('deck: finishing the last card of a tab moves to the other live tab, never Snoozed', async () => {
+  await withDeck([messageItem('m'), taskItem('a'), taskItem('z', { snoozed: true, snooze_until: '2099-01-01T09:00:00Z', status: 'snoozed' })], async ({ q, act, dom, text }) => {
+    assert.ok(q('[data-debug-id="attention-card-message"]'), 'starts on Messages');
+    assert.match(text(), /Snoozed1/);
+    await act(async () => { dom.window.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'm', bubbles: true })); });
+    await act(async () => { await new Promise((r) => setTimeout(r, 10)); });
+    assert.equal(q('[data-debug-id="attention-deck-tab-task"]').getAttribute('aria-selected'), 'true', 'moved on to Tasks');
+    assert.match(text(), /Review a/);
+    await act(async () => { dom.window.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'a', bubbles: true })); });
+    await act(async () => { await new Promise((r) => setTimeout(r, 10)); });
+    assert.equal(q('[data-debug-id="attention-deck-tab-task"]').getAttribute('aria-selected'), 'true', 'nothing live left: stays, does not jump into Snoozed');
+    // Clicking an empty tab yourself does not bounce you away.
+    await act(async () => { q('[data-debug-id="attention-deck-tab-message"]').click(); });
+    await act(async () => { await new Promise((r) => setTimeout(r, 10)); });
+    assert.equal(q('[data-debug-id="attention-deck-tab-message"]').getAttribute('aria-selected'), 'true');
+  });
+});
+
+test('deck: Snoozed tab keeps the original actions; approving a snoozed card works in place', async () => {
+  const snz = taskItem('z', { snoozed: true, snooze_until: '2026-10-17T09:00:00Z', status: 'snoozed' });
+  await withDeck([taskItem('a'), snz], async ({ q, act, dom, text, scheduler, hits }) => {
+    await act(async () => { q('[data-debug-id="attention-deck-tab-snoozed"]').click(); });
+    assert.match(text(), /Review z/);
+    assert.match(text(), /Snoozed until tomorrow/);
+    assert.equal(q('[data-debug-id="attention-action-wake"]'), null, 'no separate wake step');
+    for (const a of ['approve', 'comment', 'reviewer', 'snooze', 'discard', 'open']) assert.ok(q(`[data-debug-id="attention-action-${a}"]`), `${a} offered`);
+    await act(async () => { dom.window.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'a', bubbles: true })); });
+    const pending = scheduler.getSnapshot().pending;
+    assert.equal(pending.length, 1);
+    assert.equal(pending[0].cardId, 'crd_task_z#snoozed@2026-10-17T09:00:00Z');
+    assert.equal(pending[0].label, 'Approved');
+    await act(async () => { await new Promise((r) => setTimeout(r, 10)); });
+    assert.equal(q('[data-debug-id="attention-deck-tab-task"]').getAttribute('aria-selected'), 'true', 'last snoozed card done: back to a live tab');
+    await act(async () => { await scheduler.flushAll(true); });
+    assert.ok(hits.includes('POST /api/v1/cards/crd_task_z/accept'));
+  });
+});
+
+test('status bar: attention pill takes the left slot, rings for unseen items, reads as one number', async () => {
   const { attentionModule } = await import('../src/ui/components/shell/statusBar/modules.tsx');
-  const base: any = { runningInstances: 0, connectedBridges: 0, shells: { shells: 0, previews: 0, capped: false }, shortcutMode: 'normal', renderVaultToggle: () => null };
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  assert.equal(attentionModule.slot, 'left');
+  const base: any = { runningInstances: 0, shells: { shells: 0, previews: 0, capped: false }, shortcutMode: 'normal', renderVaultToggle: () => null };
   assert.equal(attentionModule.render({ compact: false, data: base }), null);
   let opened = 0;
-  const waiting: any = attentionModule.render({ compact: false, data: { ...base, attention: { total: 3, onOpen: () => { opened += 1; } } } });
-  assert.equal(waiting.props['data-state'], 'waiting');
-  assert.match(String(waiting.props.children[1].props.children), /^3 need you$/);
-  waiting.props.onClick();
+  const render = (attention: any, compact = false) => attentionModule.render({ compact, data: { ...base, attention } }) as any;
+  const fresh = render({ total: 3, unseen: true, onOpen: () => { opened += 1; } });
+  assert.equal(fresh.props['data-state'], 'waiting');
+  assert.equal(fresh.props['data-ring'], 'spinning');
+  const freshHtml = renderToStaticMarkup(fresh);
+  assert.match(freshHtml, />3 need you</);
+  assert.match(freshHtml, /animate-\[spin_2\.5s_linear_infinite\]/, 'the ring spins');
+  assert.match(freshHtml, /motion-safe:/, 'only when motion is allowed');
+  assert.match(freshHtml, /conic-gradient/);
+  fresh.props.onClick();
   assert.equal(opened, 1);
-  const clear: any = attentionModule.render({ compact: false, data: { ...base, attention: { total: 0, onOpen: () => {} } } });
+  const seen = render({ total: 3, unseen: false, onOpen: () => {} });
+  assert.equal(seen.props['data-ring'], 'static');
+  assert.doesNotMatch(renderToStaticMarkup(seen), /animate-/, 'seen: a still ring');
+  const clear = render({ total: 0, unseen: false, onOpen: () => {} });
   assert.equal(clear.props['data-state'], 'clear');
-  assert.equal(clear.props.children[1].props.children, 'All clear');
-  const compact: any = attentionModule.render({ compact: true, data: { ...base, attention: { total: 12, onOpen: () => {} } } });
-  assert.equal(compact.props.children[1].props.children, '12');
-  const loading: any = attentionModule.render({ compact: false, data: { ...base, attention: { total: null, onOpen: () => {} } } });
-  assert.equal(loading.props['data-state'], 'loading');
+  assert.equal(clear.props['data-ring'], 'none');
+  assert.match(renderToStaticMarkup(clear), />All clear</);
+  assert.match(renderToStaticMarkup(render({ total: 12, unseen: true, onOpen: () => {} }, true)), />12</);
+  assert.equal(render({ total: null, unseen: false, onOpen: () => {} }).props['data-state'], 'loading');
 });

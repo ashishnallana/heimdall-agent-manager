@@ -8,7 +8,7 @@ import card_service "odin_test:hub/service/card"
 // time range, and a counts-only read for the always-visible bar. Served by the
 // card service; mounted on Card_Handlers.
 //
-//   GET /api/v1/attention?since=6h|24h|7d|all&kind=message|task
+//   GET /api/v1/attention?since=6h|24h|7d|all&kind=message|task|snoozed
 //   GET /api/v1/attention/summary?since=...
 
 attention_handler :: proc(ctx: rawptr, req: Request) -> Response {
@@ -55,6 +55,8 @@ write_attention_counts_json :: proc(b: ^strings.Builder, c: iface.Attention_Coun
 	strings.write_int(b, c.message)
 	strings.write_string(b, `,"task":`)
 	strings.write_int(b, c.task)
+	strings.write_string(b, `,"snoozed":`)
+	strings.write_int(b, c.snoozed)
 	strings.write_byte(b, '}')
 }
 
@@ -74,6 +76,10 @@ write_attention_item_json :: proc(b: ^strings.Builder, item: card_service.Attent
 	write_handler_json_string(b, item.urgency)
 	strings.write_string(b, `","status":"`)
 	write_handler_json_string(b, c.status)
+	strings.write_string(b, `","snoozed":`)
+	strings.write_string(b, "true" if item.snoozed else "false")
+	strings.write_string(b, `,"snooze_until":"`)
+	write_handler_json_string(b, c.snooze_until if item.snoozed else "")
 	strings.write_string(b, `","attention_since":"`)
 	write_handler_json_string(b, c.attention_since)
 	strings.write_string(b, `","title":"`)
