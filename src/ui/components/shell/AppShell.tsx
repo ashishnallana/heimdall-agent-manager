@@ -119,7 +119,7 @@ import LibraryPage from '../LibraryPage';
 import ArtifactViewer from '../ArtifactViewer';
 import { clearUserClientState } from '../../store/chatSlice';
 import { priorUserClientStateCleared } from '../../store/store';
-import { selectAuxPane, selectCurrentAuxTreeId } from '../../store/auxPanesSlice';
+import { selectAuxOpen, selectCurrentAuxTreeId } from '../../store/auxPanesSlice';
 import { selectOnlineLockedBridgeIds } from '../../utils/bridgeVaultStatus';
 import TaskChainSelectorModal from '../chains/TaskChainSelectorModal';
 import type { LauncherIntent } from '../../store/workspaceLayoutSlice';
@@ -1408,8 +1408,8 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
   const dispatch = useDispatch();
   const { actions: shortcutActions, runAction, mode: shortcutMode } = useShortcuts();
   const isCurrentAuxPaneOpen = useSelector((state: any) => {
-    const treeId = selectCurrentAuxTreeId(state);
-    return Boolean(selectAuxPane(state, treeId)?.isPaneOpen);
+    // The dock state is global; it only shows where there is an agent tree.
+    return Boolean(selectCurrentAuxTreeId(state) && selectAuxOpen(state));
   });
 
   // Vault state & onboarding modal

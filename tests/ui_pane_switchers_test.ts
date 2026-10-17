@@ -340,7 +340,7 @@ test('auxiliary content chords toggle Tasks, Chat overview, and the focused agen
     const { act } = await import('react');
     const { Provider } = await import('react-redux');
     const { heimdallApi } = await import('../src/ui/api/heimdallApi.ts');
-    const { selectAuxPane } = await import('../src/ui/store/auxPanesSlice.ts');
+    const { selectAuxPane, selectAuxOpen } = await import('../src/ui/store/auxPanesSlice.ts');
     const { Workspace } = await import('../src/ui/components/mainWorkspace/Workspace.tsx');
     const { ChordHud } = await import('../src/ui/components/shortcuts/ChordHud.tsx');
     const { ShortcutProvider } = await import('../src/ui/services/shortcuts/ShortcutContext.tsx');
@@ -394,7 +394,7 @@ test('auxiliary content chords toggle Tasks, Chat overview, and the focused agen
       assert.ok(hud, 'helper remains visible beyond the former 1200ms timeout');
       await press('t');
       assert.equal(selectAuxPane(store.getState(), treeId)?.activeTabId, 'tasks');
-      assert.equal(selectAuxPane(store.getState(), treeId)?.isPaneOpen, true);
+      assert.equal(selectAuxOpen(store.getState()), true);
 
       await press('s', 'a');
       assert.ok(doc.querySelector('[data-debug-id="shortcut-chord-hud"]'));
@@ -402,11 +402,11 @@ test('auxiliary content chords toggle Tasks, Chat overview, and the focused agen
       assert.equal(doc.querySelector('[data-debug-id="shortcut-chord-hud"]'), null, 'Escape dismisses the helper');
 
       await press('s', 'a', 't');
-      assert.equal(selectAuxPane(store.getState(), treeId)?.isPaneOpen, false, 'same active target closes the dock');
+      assert.equal(selectAuxOpen(store.getState()), false, 'same active target closes the dock');
 
       await press('s', 'a', 'c');
       assert.equal(selectAuxPane(store.getState(), treeId)?.activeTabId, 'overview');
-      assert.equal(selectAuxPane(store.getState(), treeId)?.isPaneOpen, true);
+      assert.equal(selectAuxOpen(store.getState()), true);
 
       // The HUD assertion above verifies that the focused-agent PTY action is
       // registered and enabled. Avoid opening it here: xterm requires browser

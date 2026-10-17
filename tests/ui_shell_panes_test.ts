@@ -71,7 +71,9 @@ test('uptime label', () => {
 test('wiring: Workspace renders ShellMainPane for shell ids; picker has Agent|Shell modes', () => {
   const ws = read('src/ui/components/mainWorkspace/Workspace.tsx');
   assert.match(ws, /\) : isShellPaneId\(agentId\) \? \(\s*\/\/[^\n]*\n\s*<ShellMainPane/);
-  assert.match(ws, /isAgentPaneId\(prevFocused\) &&\s*isAgentPaneId\(focused\)/);
+  // A shell pane has no aux tree, so it hides the dock without touching the
+  // global open state the agent conversations share.
+  assert.match(ws, /const auxOpen = Boolean\(auxTreeId && auxOpenGlobal\)/);
   const pane = read('src/ui/components/mainWorkspace/ShellMainPane.tsx');
   assert.match(pane, /data-debug-id="shell-main-pane-bridge"/);
   assert.match(pane, /data-debug-id="shell-main-pane-switcher-btn"/);

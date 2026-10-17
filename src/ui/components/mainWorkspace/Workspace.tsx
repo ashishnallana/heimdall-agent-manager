@@ -27,10 +27,10 @@ import {
   type MainPaneValue,
 } from '../../store/workspaceLayoutSlice';
 import {
-  carryAuxPaneOpenOnFocus,
   ensureAuxPane,
   hydrateAuxPanes,
   openAuxTab,
+  selectAuxOpen,
   selectAuxPane,
   selectAuxPanesState,
   selectCurrentAuxTreeId,
@@ -156,8 +156,8 @@ function useRouteLocation() {
  *   opens the whole group focused on it.
  * - Layout -> URL (ReduxToUrlSyncer): in-app edits replace the URL, only when
  *   the URL was stable since the last run (no ping-pong).
- * - The aux dock shows the FOCUSED pane's agent strip; moving focus within a
- *   split carries the open/closed state to the newly focused strip.
+ * - The aux dock shows the FOCUSED pane's agent strip; whether it is open is
+ *   one global state, so switching conversations never opens or closes it.
  * - Split geometry/groups persist per id set; nothing is keyed by task chain.
  */
 export function Workspace({ focusMessageId, isMobile = false, leading, leadingWidth = 0, trailing }: WorkspaceProps) {
@@ -187,7 +187,10 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
   const ctxAgentId = auxTreeId?.agentInstanceId || '';
   const ctx = useAgentAuxContext(ctxAgentId);
   const hasChain = ctx.isResolved ? Boolean(ctx.chainId) : true;
-  const auxOpen = Boolean(auxTreeId && auxPane?.isPaneOpen);
+  // One dock state for every agent conversation: switching conversations (or
+  // focus within a split) never opens or closes it.
+  const auxOpenGlobal = useSelector(selectAuxOpen);
+  const auxOpen = Boolean(auxTreeId && auxOpenGlobal);
   const auxTabs = visibleAuxTabs(auxPane);
   // The New Tab launcher is always the final aux page once the focused agent's
   // context resolves, even before a materialized tab exists.
@@ -213,8 +216,6 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
   // Main renders only once the layout has been derived from the URL, so the
   // initial placeholder tree never flashes a new-conversation pane.
   const [layoutReady, setLayoutReady] = useState(false);
-  const focusedAgentRef = useRef(focusedAgentId);
-  focusedAgentRef.current = focusedAgentId;
   useEffect(() => {
     const { ids, focused } = route;
     if (ids.length === 0 || !focused) return;
@@ -232,26 +233,10 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
       }
     }
 
-    const prevFocused = focusedAgentRef.current;
     dispatch(
       setLayoutFromUrl({ ids, focusedId: focused, savedLayout: ids.length > 1 ? loadSavedLayout(ids) : null }),
     );
     setLayoutReady(true);
-    // Focus moved within a split: carry the dock open state (Jetski parity).
-    if (
-      ids.length > 1 &&
-      isAgentPaneId(prevFocused) &&
-      isAgentPaneId(focused) &&
-      prevFocused !== focused &&
-      ids.includes(prevFocused)
-    ) {
-      dispatch(
-        carryAuxPaneOpenOnFocus({
-          from: { kind: 'agent', agentInstanceId: prevFocused },
-          to: { kind: 'agent', agentInstanceId: focused },
-        }),
-      );
-    }
   }, [dispatch, route]);
 
   // 3. Layout -> URL (Jetski ReduxToUrlSyncer).
