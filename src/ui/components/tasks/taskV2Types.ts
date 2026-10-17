@@ -32,7 +32,7 @@ export const TASK_STATE_COLORS: Record<string, string> = {
 
 export interface TaskBadge {
   /** What the badge is about, so views can drop ones they show elsewhere. */
-  kind?: 'gate' | 'lease' | 'bridge' | 'attempt' | 'review' | 'blocked' | 'verified';
+  kind?: 'gate' | 'lease' | 'bridge' | 'attempt' | 'review' | 'blocked' | 'verified' | 'merge';
   label: string;
   tone?: 'accent' | 'ok' | 'warn' | 'danger' | 'info' | 'neutral';
   title?: string;
@@ -132,6 +132,16 @@ export function getTaskBadges(task: TaskWire, _chainFleets?: any[], nowMs: numbe
       tone: 'ok',
       title: 'Task completed and verified',
     });
+  }
+
+  // Worktree merge-back of a done task (F5). A conflict already shows as blocked.
+  const merge = task.merge;
+  if (merge && merge.state === 'pending') {
+    badges.push({ kind: 'merge', label: 'Merging…', tone: 'info', title: 'The task branch is being merged into its directory' });
+  } else if (merge && merge.state === 'failed') {
+    badges.push({ kind: 'merge', label: 'Merge failed – retrying', tone: 'warn', title: merge.detail ? `Merge did not run: ${merge.detail}. Retried when the bridge reconnects.` : 'Merge did not run; retried when the bridge reconnects.' });
+  } else if (merge && merge.state === 'merged' && merge.head) {
+    badges.push({ kind: 'merge', label: `Merged → ${merge.head.slice(0, 7)}`, tone: 'ok', title: `Merged${merge.detail ? ` (${merge.detail})` : ''} at ${merge.head}` });
   }
 
   return badges;

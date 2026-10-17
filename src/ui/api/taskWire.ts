@@ -48,6 +48,8 @@ export interface TaskLeaseWire {
 }
 
 export interface TaskWire {
+  /** Where a done task's worktree branch is (Task System v2 F5). */
+  merge?: { state: 'none' | 'pending' | 'merged' | 'conflict' | 'failed'; detail?: string; head?: string };
   task_id: string;
   chain_id: string;
   title: string;

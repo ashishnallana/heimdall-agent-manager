@@ -223,10 +223,19 @@ Task_Detail_Wire :: struct {
 	comment_summary:        Task_Comment_Summary_Wire `json:"comment_summary"`,
 	// lease: the live work/review lease(s) on this task (M1), empty when none.
 	leases:                 []Task_Lease_Wire         `json:"leases"`,
+	// merge: where a done task's worktree branch is (F5): none | pending |
+	// merged | conflict | failed.
+	merge:                  Task_Merge_Wire           `json:"merge"`,
 	created_at:             string                    `json:"created_at"`,
 	updated_at:             string                    `json:"updated_at"`,
 	started_at:             string                    `json:"started_at"`,
 	completed_at:           string                    `json:"completed_at"`,
+}
+
+Task_Merge_Wire :: struct {
+	state:  string `json:"state"`,
+	detail: string `json:"detail"`,
+	head:   string `json:"head"`,
 }
 
 Task_Lease_Wire :: struct {
@@ -434,6 +443,12 @@ json_value_or_null :: proc(raw: string) -> json.Value {
 	return json_value_raw(raw)
 }
 
+make_task_merge_wire :: proc(h: ^Taskchain_Handlers, t: domain.Task) -> Task_Merge_Wire {
+	if h == nil || h.task_engine == nil do return Task_Merge_Wire{state = "none"}
+	st := taskv2.task_merge_status(h.task_engine, t)
+	return Task_Merge_Wire{state = st.state, detail = st.detail, head = st.head}
+}
+
 make_task_lease_wires :: proc(h: ^Taskchain_Handlers, t: domain.Task) -> []Task_Lease_Wire {
 	out := make([dynamic]Task_Lease_Wire, context.temp_allocator)
 	if h == nil || h.taskchains == nil || h.taskchains.repo == nil do return out[:]
@@ -491,6 +506,7 @@ make_task_detail_wire :: proc(h: ^Taskchain_Handlers, auth_ctx: contracts.Auth_C
 		depends_on             = dep_ids[:],
 		comment_summary        = summary_wire,
 		leases                 = make_task_lease_wires(h, t),
+		merge                  = make_task_merge_wire(h, t),
 		created_at             = t.created_at,
 		updated_at             = t.updated_at,
 		started_at             = t.started_at,
@@ -1479,7 +1495,12 @@ patch_task_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	publish_task_changed(h, string(task.owner_user_id), string(task.task_id), string(task.chain_id), "updated")
 	publish_chain_changed(h, string(task.owner_user_id), string(task.chain_id), "updated")
 	b := strings.builder_make(); write_task_json(&b, task)
-	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req))
+	body := strings.to_string(b)
+	// F5: an edit to a done/cancelled task is saved but never runs; say so.
+	if domain.task_state_is_terminal(task.state) && strings.has_suffix(body, "}") {
+		body = strings.concatenate({body[:len(body) - 1], `,"warnings":["task_done_edit_has_no_effect"]}`}, context.temp_allocator)
+	}
+	return respond_success(body, req.request_id, auth_ctx_server_time(req))
 }
 
 update_task_handler :: patch_task_handler

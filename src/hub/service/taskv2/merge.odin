@@ -217,3 +217,46 @@ requeue_pending_merges :: proc(svc: ^Service, u: ^Uow, bridge_id: string) {
 		effect_merge_worktree(svc, u, t, evs, bridge_id)
 	}
 }
+
+// ---- F5: merge status for the task projection --------------------------------------
+
+Merge_Status :: struct {
+	state:  string, // none | pending | merged | conflict | failed
+	detail: string,
+	head:   string,
+}
+
+// task_merge_status derives where a task's branch is: only done tasks (and a
+// task blocked on a merge conflict) in a chain with a git directory carry one.
+task_merge_status :: proc(svc: ^Service, task: domain.Task) -> Merge_Status {
+	st := Merge_Status{state = "none"}
+	if svc == nil || svc.repo == nil || !PER_LEASE_WORKTREES_ENABLED do return st
+	if task.state != .Done && !strings.contains(task.blocked_on_json, `"merge_conflict"`) do return st
+	evs, eerr := iface.taskchain_list_events_by_task(svc.repo, task.task_id, task.owner_user_id)
+	if eerr.code != .None do return st
+	for i := len(evs) - 1; i >= 0; i -= 1 {
+		ev := evs[i]
+		switch ev.kind {
+		case EV_MERGED:
+			st.state = "merged"
+			st.head = jsonx.extract_string(ev.payload_json, "head", "", true, context.temp_allocator)
+			st.detail = jsonx.extract_string(ev.payload_json, "mode", "", true, context.temp_allocator)
+			return st
+		case EV_MERGE_CONFLICT:
+			st.state = "conflict"
+			st.detail = jsonx.extract_string(ev.payload_json, "files", "", true, context.temp_allocator)
+			return st
+		case EV_MERGE_FAILED:
+			st.state = "failed"
+			st.detail = jsonx.extract_string(ev.payload_json, "detail", "", true, context.temp_allocator)
+			return st
+		case EV_APPROVED, EV_SUBMITTED:
+			// Done with no outcome yet: pending only where a worktree applies.
+			dirs, derr := iface.taskchain_list_directories_by_chain(svc.repo, task.chain_id, task.owner_user_id)
+			if derr.code != .None do return st
+			for d in dirs do if d.vcs_kind == "git" { st.state = "pending"; break }
+			return st
+		}
+	}
+	return st
+}
