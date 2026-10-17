@@ -46,6 +46,17 @@ json_obj_string :: proc(obj: json.Object, key: string) -> string {
 	return ""
 }
 
+// op_has_arg: `key` is present (any JSON type) in the op's args or the op itself.
+op_has_arg :: proc(obj: json.Object, key: string) -> bool {
+	if args_val, has_args := obj["args"]; has_args {
+		if args_obj, is_args_obj := args_val.(json.Object); is_args_obj {
+			if _, ok := args_obj[key]; ok do return true
+		}
+	}
+	_, ok := obj[key]
+	return ok
+}
+
 op_arg_string :: proc(obj: json.Object, key: string) -> string {
 	if args_val, has_args := obj["args"]; has_args {
 		if args_obj, is_args_obj := args_val.(json.Object); is_args_obj {
@@ -123,7 +134,7 @@ validate_op_required_args :: proc(op_name: string, op_obj: json.Object) -> (bool
 	switch op_name {
 	case "task.review", "task.answer":
 		if op_arg_string(op_obj, "task_id") == "" do return false, op_field_missing("task_id")
-		if _, ok := op_obj["attempt_no"]; !ok do return false, op_field_missing("attempt_no")
+		if !op_has_arg(op_obj, "attempt_no") do return false, op_field_missing("attempt_no")
 	case "memory.approve", "memory.reject", "memory.update", "memory.delete", "memory.archive":
 		if op_arg_string(op_obj, "memory_id") == "" && op_arg_string(op_obj, "id") == "" do return false, op_field_missing("memory_id")
 	case "memory.create":

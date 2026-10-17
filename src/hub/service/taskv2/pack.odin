@@ -146,6 +146,28 @@ build_pack_json :: proc(svc: ^Service, chain: domain.Task_Chain, task: domain.Ta
 		}
 	}
 
+	// The block this attempt resumes from was answered: the question and the
+	// answer (a human's note, or the hub's auto-answer when the referenced task
+	// finished), until the task submits again.
+	for i := len(evs) - 1; i >= 0; i -= 1 {
+		if evs[i].kind == EV_SUBMITTED do break
+		if evs[i].kind != EV_ANSWERED do continue
+		question := ""
+		for j := i - 1; j >= 0; j -= 1 {
+			if evs[j].kind != EV_BLOCKED do continue
+			if w, wok := jsonx.extract_raw_object(evs[j].payload_json, "waiting_on", true, context.temp_allocator); wok {
+				question = jsonx.extract_string(w, "reason", "", true, context.temp_allocator)
+			}
+			break
+		}
+		a := json_begin()
+		json_str(&a, "question", question)
+		json_str(&a, "note", jsonx.extract_string(evs[i].payload_json, "note", "", true, context.temp_allocator))
+		json_str(&a, "by", evs[i].actor_kind)
+		json_raw(&o, "answer", json_end(&a))
+		break
+	}
+
 	proto := json_begin()
 	json_int(&proto, "heartbeat_ttl_seconds", LEASE_TTL_SECONDS)
 	json_int(&proto, "hard_cap_seconds", LEASE_HARD_CAP_SECONDS)

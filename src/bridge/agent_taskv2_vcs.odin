@@ -391,6 +391,7 @@ bridge_taskv2_render_task_md :: proc(pack_json: string, max_bytes: int = BRIDGE_
 		if merge_conflict == "" do merge_conflict = "the branch did not merge"
 	}
 	gate_feedback := ""
+	answer_section := ""
 	if gf, has_gf := jsonx.extract_raw_object(pack_json, "gate_feedback", true, context.temp_allocator); has_gf {
 		summary := bridge_taskv2_decrypt_field(jsonx.extract_string(gf, "summary", "", true, context.temp_allocator), context.temp_allocator)
 		findings_raw, _ := jsonx.extract_raw_array(gf, "findings", true, context.temp_allocator)
@@ -402,6 +403,27 @@ bridge_taskv2_render_task_md :: proc(pack_json: string, max_bytes: int = BRIDGE_
 		strings.write_string(&gb, "Address this feedback in a new output; a new gate follows your submission.\n")
 		gate_feedback = strings.to_string(gb)
 	}
+
+	// A block this attempt resumes from was answered: shown before the gate
+	// feedback, in the same "notices" slot of the document.
+	if ans, has_ans := jsonx.extract_raw_object(pack_json, "answer", true, context.temp_allocator); has_ans {
+		q := bridge_taskv2_decrypt_field(jsonx.extract_string(ans, "question", "", true, context.temp_allocator), context.temp_allocator)
+		note := bridge_taskv2_decrypt_field(jsonx.extract_string(ans, "note", "", true, context.temp_allocator), context.temp_allocator)
+		by := jsonx.extract_string(ans, "by", "", true, context.temp_allocator)
+		ab := strings.builder_make(context.temp_allocator)
+		strings.write_string(&ab, "\n## Your Block Was Answered\n")
+		if strings.trim_space(q) != "" do fmt.sbprintf(&ab, "**You asked**: %s\n", q)
+		if strings.trim_space(note) != "" {
+			fmt.sbprintf(&ab, "**%s answered**: %s\n", "The user" if by == "user" else "The hub" if by == "hub" else "Answer", note)
+		} else {
+			strings.write_string(&ab, "The block was cleared without a note; continue with what you know.\n")
+		}
+		answer_section = strings.to_string(ab)
+	}
+
+	// Ready-made notice sections for the document (build_doc cannot see locals).
+	if gate_feedback != "" do gate_feedback = strings.concatenate({"\n## Rejected At The Gate\n", gate_feedback}, context.temp_allocator)
+	if answer_section != "" do gate_feedback = strings.concatenate({answer_section, gate_feedback}, context.temp_allocator)
 
 	raw_title := jsonx.extract_string(task_obj, "title", "", true, context.temp_allocator)
 	raw_desc := jsonx.extract_string(task_obj, "description", "", true, context.temp_allocator)
@@ -529,10 +551,8 @@ bridge_taskv2_render_task_md :: proc(pack_json: string, max_bytes: int = BRIDGE_
 		if workdir != "" {
 			fmt.sbprintf(&b, "- **Workdir**: `%s` on branch `%s`. `cd` there and do all work and commits in it; it is your own checkout, merged into the directory when the task is done.\n", workdir, branch)
 		}
-		if gate_feedback != "" {
-			strings.write_string(&b, "\n## Rejected At The Gate\n")
-			strings.write_string(&b, gate_feedback)
-		}
+		// gate_feedback carries ready-made sections (answered block, gate rejection).
+		if gate_feedback != "" do strings.write_string(&b, gate_feedback)
 		if merge_conflict != "" {
 			strings.write_string(&b, "\n## Merge Conflict\n")
 			fmt.sbprintf(&b, "This task was done, but branch `%s` did not merge into its directory: %s\n", branch, merge_conflict)

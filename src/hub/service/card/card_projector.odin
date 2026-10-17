@@ -153,14 +153,21 @@ build_task_card :: proc(s: ^Card_Service, task: domain.Task, kind: taskv2.User_A
 		strings.write_string(&ops, `[{"op":"task.answer","label":"Answer","args":{"task_id":"`)
 	}
 	contracts.write_json_string(&ops, task_id)
-	fmt.sbprintf(&ops, `","attempt_no":%d}}]`, task.attempt_no)
+	// (No fmt here: fmt reads `}}` as an escaped brace.)
+	strings.write_string(&ops, `","attempt_no":`)
+	strings.write_int(&ops, task.attempt_no)
+	strings.write_string(&ops, `}}]`)
 
 	guard := strings.builder_make(context.temp_allocator)
 	strings.write_string(&guard, `{"task_id":"`)
 	contracts.write_json_string(&guard, task_id)
 	strings.write_string(&guard, `","expected_status":"`)
 	contracts.write_json_string(&guard, state)
-	fmt.sbprintf(&guard, `","expected_attempt":%d,"expected_attention":"%s"}`, task.attempt_no, attention)
+	strings.write_string(&guard, `","expected_attempt":`)
+	strings.write_int(&guard, task.attempt_no)
+	strings.write_string(&guard, `,"expected_attention":"`)
+	strings.write_string(&guard, attention)
+	strings.write_string(&guard, `"}`)
 
 	refs := strings.builder_make(context.temp_allocator)
 	strings.write_string(&refs, `[{"type":"task","id":"`)
@@ -237,7 +244,7 @@ build_task_card :: proc(s: ^Card_Service, task: domain.Task, kind: taskv2.User_A
 		// User decision: a task's age is its updated_at.
 		attention_since  = task.updated_at,
 		// A new state, attention kind, block or attempt reactivates the card.
-		source_marker    = fmt.tprintf("%s|%s|%s|%d|%s", state, attention, task.blocked_on_json, task.attempt_no, task.updated_at),
+		source_marker    = fmt.tprintf("v2|%s|%s|%s|%d|%s", state, attention, task.blocked_on_json, task.attempt_no, task.updated_at),
 	}
 }
 
@@ -260,8 +267,19 @@ attention_task_excerpt :: proc(s: ^Card_Service, task: domain.Task, kind: taskv2
 	eng := s.taskchains.engine
 	if kind == .Blocked {
 		reason := jsonx.extract_string(task.blocked_on_json, "reason", "", true, context.temp_allocator)
-		if files := jsonx.extract_string(task.blocked_on_json, "files", "", true, context.temp_allocator); files != "" {
-			reason = fmt.tprintf("%s (files: %s)", reason, files)
+		if reason == "merge_conflict" {
+			// The block only says merge_conflict; the files and git's message are
+			// on the latest merge_conflict event.
+			reason = "The finished branch did not merge."
+			if evs, eerr := iface.taskchain_list_events_by_task(s.taskchains.repo, task.task_id, task.owner_user_id); eerr.code == .None {
+				for i := len(evs) - 1; i >= 0; i -= 1 {
+					if evs[i].kind != taskv2.EV_MERGE_CONFLICT do continue
+					if files := jsonx.extract_string(evs[i].payload_json, "files", "", true, context.temp_allocator); files != "" {
+						reason = fmt.tprintf("The finished branch did not merge. Conflicting files: %s", files)
+					}
+					break
+				}
+			}
 		}
 		if reason != "" do return attention_instance_name(s, holder), reason, task.updated_at
 	} else if eng != nil {
