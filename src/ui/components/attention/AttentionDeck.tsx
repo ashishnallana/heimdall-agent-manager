@@ -284,7 +284,8 @@ export function AttentionDeck({
     { key: 'c', label: 'Comment', icon: 'chat', debug: 'comment', run: () => { setPopover(null); setComposer(composer === 'comment' ? null : 'comment'); } },
     { key: 'r', label: 'Reviewer', icon: 'bot', debug: 'reviewer', run: () => { setComposer(null); setPopover(popover === 'reviewer' ? null : 'reviewer'); } },
     { key: 's', label: 'Snooze', icon: 'clock', debug: 'snooze', run: () => { setComposer(null); setPopover(popover === 'snooze' ? null : 'snooze'); } },
-    { key: 'd', label: 'Discard', icon: 'trash', tone: 'danger', debug: 'discard', run: () => schedule(current, 'Task discarded', (k) => cancelTask((current as AttentionTaskItem).action_refs, k)) },
+    // Cancels the task itself (the card resolves with it), so it says so.
+    { key: 'x', label: 'Cancel task', icon: 'stop', tone: 'danger', debug: 'cancel-task', run: () => schedule(current, 'Task cancelled', (k) => cancelTask((current as AttentionTaskItem).action_refs, k)) },
     { key: 'o', label: 'Open', icon: 'arrow-right', debug: 'open', run: () => openSource(current) },
   ] : [
     { key: 'r', label: 'Reply', icon: 'chat', debug: 'reply', run: () => { setPopover(null); setComposer(composer === 'reply' ? null : 'reply'); } },
