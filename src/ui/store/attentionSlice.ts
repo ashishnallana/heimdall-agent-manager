@@ -1,5 +1,4 @@
 import { createSlice } from '@reduxjs/toolkit';
-export type { ChatApproval, MergeDecision, MultiQuestionPrompt } from '../api/attentionCatalog';
 
 const initialState = {
   loading: false,

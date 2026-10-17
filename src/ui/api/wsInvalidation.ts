@@ -3,7 +3,6 @@ import { tasksApi } from './endpoints/tasks';
 import { normalizeChain, workspaceApi } from './endpoints/workspace';
 import { chatEndpoints } from './endpoints/chats';
 import { patchAgentCachesFromWs } from './endpoints/agents';
-import { patchChatApprovalCachesFromWs, patchMergeDecisionCachesFromWs } from './endpoints/attention';
 import { patchMemoryCachesFromWs } from './endpoints/memory';
 import { bridgeSupportApi } from './endpoints/bridgeSupport';
 import { upsertTaskInList, upsertTaskLogEvent } from './taskCache';
@@ -562,7 +561,6 @@ function handleMergeDecisionPending(dispatch: any, payload: any, ctx: WsCtx) {
     ]));
   }
   dispatch(attentionEventReceived());
-  patchMergeDecisionCachesFromWs(dispatch, payload);
 }
 
 // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
@@ -761,6 +759,23 @@ export function resyncAfterReconnect(dispatch: any) {
   dispatch(heimdallApi.util.invalidateTags([...HEIMDALL_TAG_TYPES]));
 }
 
+// Attention deck: attention_changed is an invalidation hint only ({kinds}, no
+// counts). One user action can still produce a few hints (e.g. a reply sends the
+// message and marks it read, which may straddle the hub's 500ms window), so a
+// burst is coalesced here into ONE invalidation. Only the query on screen has a
+// subscriber -- the bar summary, or the open deck -- so that is one request; RTK
+// defers an invalidation that lands mid-fetch until the fetch settles.
+export const ATTENTION_REFETCH_COALESCE_MS = 300;
+let attentionRefetchTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleAttentionRefetch(dispatch: any) {
+  if (attentionRefetchTimer) return;
+  attentionRefetchTimer = setTimeout(() => {
+    attentionRefetchTimer = null;
+    dispatch(heimdallApi.util.invalidateTags([{ type: 'Attention', id: 'ALL' }]));
+  }, ATTENTION_REFETCH_COALESCE_MS);
+}
+
 // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
 export function handleUserWsEvent(dispatch: any, payload: any, ctx: WsCtx = {}) {
   // Native (OS) notifications: fire from this single funnel for the curated
@@ -789,7 +804,9 @@ export function handleUserWsEvent(dispatch: any, payload: any, ctx: WsCtx = {}) 
       return;
     case 'chat_approval':
       dispatch(attentionEventReceived());
-      patchChatApprovalCachesFromWs(dispatch, payload);
+      return;
+    case 'attention_changed':
+      scheduleAttentionRefetch(dispatch);
       return;
     case 'memory_event':
       handleMemoryEvent(dispatch, payload);

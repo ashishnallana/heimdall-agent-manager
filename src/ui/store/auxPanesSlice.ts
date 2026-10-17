@@ -35,16 +35,21 @@ export interface AuxTabbedPane {
   tabs: AuxTab[];
   /** A tab id in `tabs`, a fixed id (derived tab), or `NEW_TAB_ID`. */
   activeTabId?: string;
-  /** Aux open/closed, per tree (Jetski `isPaneOpen`). */
-  isPaneOpen?: boolean;
 }
 
 export interface AuxPanesState {
   agentPanes: Record<string, AuxTabbedPane>;
+  /**
+   * Dock open/closed, GLOBAL across agent conversations: switching to another
+   * conversation keeps the dock as it is, so it never pops open or shut on a
+   * switch. Tab strips stay per agent.
+   */
+  isOpen: boolean;
 }
 
 const initialState: AuxPanesState = {
   agentPanes: {},
+  isOpen: false,
 };
 
 /**
@@ -194,7 +199,7 @@ const auxPanesSlice = createSlice({
       if (!isAuxContent(content)) return;
       const pane = ensurePane(state, treeId, hasChain);
       upsertTab(pane, content, title);
-      if (openPane) pane.isPaneOpen = true;
+      if (openPane) state.isOpen = true;
     },
 
     setActiveAuxTab(state, action: PayloadAction<{ treeId: AuxTreeId; tabId: string }>) {
@@ -220,7 +225,7 @@ const auxPanesSlice = createSlice({
       const pane = ensurePane(state, action.payload.treeId, action.payload.hasChain);
       materializeActive(pane);
       pane.activeTabId = NEW_TAB_ID;
-      pane.isPaneOpen = true;
+      state.isOpen = true;
     },
 
     closeAuxTab(state, action: PayloadAction<{ treeId: AuxTreeId; tabId: string }>) {
@@ -321,35 +326,13 @@ const auxPanesSlice = createSlice({
       state,
       action: PayloadAction<{ treeId: AuxTreeId; open: boolean; hasChain?: boolean }>,
     ) {
-      const pane = ensurePane(state, action.payload.treeId, action.payload.hasChain);
-      pane.isPaneOpen = action.payload.open;
+      ensurePane(state, action.payload.treeId, action.payload.hasChain);
+      state.isOpen = action.payload.open;
     },
 
     toggleAuxPane(state, action: PayloadAction<{ treeId: AuxTreeId; hasChain?: boolean }>) {
-      const pane = ensurePane(state, action.payload.treeId, action.payload.hasChain);
-      pane.isPaneOpen = !pane.isPaneOpen;
-    },
-
-    /**
-     * Jetski RouteToReduxSync: when focus moves between panes of a split, the
-     * newly focused agent's strip takes over the previously focused strip's
-     * open/closed state (so the dock doesn't flicker shut or pop open).
-     */
-    carryAuxPaneOpenOnFocus(
-      state,
-      action: PayloadAction<{ from: AuxTreeId; to: AuxTreeId }>,
-    ) {
-      const { from, to } = action.payload;
-      if (from.agentInstanceId === to.agentInstanceId) return;
-      const wasOpen = Boolean(getAuxPane(state, from)?.isPaneOpen);
-      const target = getAuxPane(state, to);
-      if (Boolean(target?.isPaneOpen) === wasOpen) return;
-      if (target) {
-        target.isPaneOpen = wasOpen;
-      } else {
-        // Seeding waits for the agent's chain membership (see ensureAuxPane).
-        setAuxPane(state, to, { tabs: [], isPaneOpen: wasOpen });
-      }
+      ensurePane(state, action.payload.treeId, action.payload.hasChain);
+      state.isOpen = !state.isOpen;
     },
 
     hydrateAuxPanes(_state, action: PayloadAction<unknown>) {
@@ -378,22 +361,25 @@ function sanitizePane(raw: any): AuxTabbedPane | null {
     rawActive === NEW_TAB_ID || (rawActive && (seen.has(rawActive) || isFixedAuxTabId(rawActive)))
       ? rawActive
       : tabs[0]?.id ?? NEW_TAB_ID;
-  const pane: AuxTabbedPane = { tabs, activeTabId };
-  if (raw.isPaneOpen === true) pane.isPaneOpen = true;
-  return pane;
+  return { tabs, activeTabId };
 }
 
 export function sanitizeAuxPanesState(raw: unknown): AuxPanesState {
-  const out: AuxPanesState = { agentPanes: {} };
+  const out: AuxPanesState = { agentPanes: {}, isOpen: false };
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
   const r = raw as any;
+  // State saved before the dock went global kept isPaneOpen per strip: it was
+  // open if any strip was.
+  let legacyOpen = false;
   if (r.agentPanes && typeof r.agentPanes === 'object' && !Array.isArray(r.agentPanes)) {
     for (const [agentId, pane] of Object.entries(r.agentPanes)) {
+      if ((pane as any)?.isPaneOpen === true) legacyOpen = true;
       if (!agentId || agentId === NEW_PANE_AGENT_ID || isShellPaneId(agentId)) continue;
       const clean = sanitizePane(pane);
       if (clean) out.agentPanes[agentId] = clean;
     }
   }
+  out.isOpen = typeof r.isOpen === 'boolean' ? r.isOpen : legacyOpen;
   return out;
 }
 
@@ -408,7 +394,6 @@ export const {
   rekeyAuxTab,
   setAuxPaneOpen,
   toggleAuxPane,
-  carryAuxPaneOpenOnFocus,
   hydrateAuxPanes,
   resetAuxPanes,
 } = auxPanesSlice.actions;
@@ -425,6 +410,9 @@ export const selectAuxPanesState = (state: any): AuxPanesState => extract(state)
 export const selectCurrentAuxTreeId = createSelector([selectMainTree], (tree) =>
   resolveAuxTreeId(tree),
 );
+
+/** Whether the aux dock is open (one state for every agent conversation). */
+export const selectAuxOpen = (state: any): boolean => Boolean(extract(state).isOpen);
 
 export const selectAuxPane = (
   state: any,

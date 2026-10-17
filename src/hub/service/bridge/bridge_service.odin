@@ -61,6 +61,9 @@ close_bridge_connection :: proc(service: ^Bridge_Service, bridge_id: string) -> 
 // consumer had to treat them as optional; none of them does any more.
 Enroll_Bridge_Result :: struct {
 	bridge: domain.Bridge,
+	// family_id is the credential lineage just minted; for a pending enrollment it is
+	// what commit_pending_enrollment promotes and a rollback revokes (REQ-EA-2/3).
+	family_id: string,
 	bridge_token: string,
 	refresh_token: string,
 	expires_in: int,
@@ -81,7 +84,44 @@ list_bridges :: proc(service: ^Bridge_Service, auth: contracts.Auth_Context) -> 
 	return iface.bridge_list_by_owner(service.repo, owner)
 }
 
+// list_pending_bridges is an owner's pending enrollments (REQ-EA-1), for the one view
+// that shows them. The caller frees each bridge and the slice.
+list_pending_bridges :: proc(service: ^Bridge_Service, auth: contracts.Auth_Context) -> []domain.Bridge {
+	owner, ok, _ := ownership.owner_from_auth(auth)
+	if !ok do return nil
+	rows, err := iface.bridge_list_pending(service.repo)
+	if err.code != .None do return nil
+	out := make([dynamic]domain.Bridge)
+	for &r in rows {
+		if r.owner_user_id == owner {
+			append(&out, r)
+		} else {
+			domain.bridge_destroy(&r)
+		}
+	}
+	delete(rows)
+	return out[:]
+}
+
+// get_bridge is the owner-scoped lookup behind every user-facing bridge operation,
+// and it does NOT return a pending enrollment (REQ-EA-1): until its vault key is
+// delivered a bridge is not enrolled, so it must not be a launch, command, rename or
+// file target. The anti-enumeration shape is the same as a missing bridge. The
+// enrollment endpoints themselves use get_bridge_for_enrollment.
 get_bridge :: proc(service: ^Bridge_Service, auth: contracts.Auth_Context, bridge_id: string) -> (domain.Bridge, bool, domain.Domain_Error) {
+	bridge, ok, err := get_bridge_for_enrollment(service, auth, bridge_id)
+	if !ok do return domain.Bridge{}, false, err
+	if domain.bridge_is_pending(bridge) {
+		domain.bridge_destroy(&bridge)
+		return domain.Bridge{}, false, domain.domain_error(.Not_Found, "bridge not found")
+	}
+	return bridge, true, domain.Domain_Error{}
+}
+
+// get_bridge_for_enrollment is get_bridge without the pending gate, for the few
+// paths that exist to finish an enrollment: the unseal relay, the public key and
+// the enrollment status. Ownership is still enforced.
+get_bridge_for_enrollment :: proc(service: ^Bridge_Service, auth: contracts.Auth_Context, bridge_id: string) -> (domain.Bridge, bool, domain.Domain_Error) {
 	bridge, ok, err := iface.bridge_get_bridge(service.repo, bridge_id)
 	if !ok do return domain.Bridge{}, false, err
 	if owner_ok, owner_err := ownership.require_owner(auth, bridge.owner_user_id); !owner_ok do return domain.Bridge{}, false, owner_err

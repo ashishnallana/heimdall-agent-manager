@@ -54,7 +54,16 @@ write_card_json :: proc(b: ^strings.Builder, c: domain.Card) {
 	write_handler_json_string(b, c.created_at)
 	strings.write_string(b, "\",\"updated_at\":\"")
 	write_handler_json_string(b, c.updated_at)
-	strings.write_string(b, "\"}")
+	// Attention fields (migration 087).
+	strings.write_string(b, "\",\"kind\":\"")
+	write_handler_json_string(b, c.kind)
+	strings.write_string(b, "\",\"attention_since\":\"")
+	write_handler_json_string(b, c.attention_since)
+	strings.write_string(b, "\",\"details\":")
+	strings.write_string(b, c.details_json if c.details_json != "" else "{}")
+	strings.write_string(b, ",\"action_refs\":")
+	strings.write_string(b, c.action_refs_json if c.action_refs_json != "" else "{}")
+	strings.write_string(b, "}")
 }
 
 json_f32 :: proc(body, key: string, fallback: f32) -> f32 {
@@ -220,6 +229,18 @@ delete_card_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	return respond_success("{\"deleted\":true}", req.request_id, auth_ctx_server_time(req))
 }
 
+// card_decision_from_body: the optional words of a task-card decision —
+// {note} on accept (Answer), {summary, findings} on reject (Request changes).
+card_decision_from_body :: proc(body: string) -> card_service.Card_Decision {
+	if strings.trim_space(body) == "" do return {}
+	findings, _ := jsonx.extract_raw_array(body, "findings", true, context.temp_allocator)
+	return card_service.Card_Decision{
+		note          = json_string(body, "note"),
+		summary       = json_string(body, "summary"),
+		findings_json = findings,
+	}
+}
+
 card_action_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Card_Handlers)(ctx)
 	auth, ok, resp := require_auth(h.auth, req)
@@ -236,9 +257,9 @@ card_action_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	case "discard":
 		card, action_ok, err = card_service.discard_card(h.cards, auth, id)
 	case "accept":
-		card, action_ok, err = card_service.accept_card(h.cards, auth, id)
+		card, action_ok, err = card_service.accept_card(h.cards, auth, id, card_decision_from_body(req.body))
 	case "reject":
-		card, action_ok, err = card_service.reject_card(h.cards, auth, id)
+		card, action_ok, err = card_service.reject_card(h.cards, auth, id, card_decision_from_body(req.body))
 	case "snooze":
 		snooze_until := json_string(req.body, "snooze_until")
 		card, action_ok, err = card_service.snooze_card(h.cards, auth, id, snooze_until)

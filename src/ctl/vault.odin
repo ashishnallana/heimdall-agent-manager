@@ -7,7 +7,7 @@ import "core:strings"
 // ── vault verb group (REQ-VAULT-BRIDGE-CLI-1) ──────────────────────────────
 // Reports where ham-ctl gets its 256-bit AES-GCM vault key from. ham-ctl stores no
 // key of its own: it uses $HEIMDALL_VAULT_KEY when set, otherwise the key the local
-// bridge holds (enable encryption and unseal each bridge from Settings -> Bridges).
+// bridge holds (enable encryption and unseal each bridge from Settings -> User Vault).
 
 print_vault_help :: proc() {
 	fmt.println("ham-ctl vault — inspect the zero-knowledge vault key source")
@@ -16,7 +16,7 @@ print_vault_help :: proc() {
 	fmt.println("  ham-ctl vault status")
 	fmt.println("")
 	fmt.println("The key comes from $HEIMDALL_VAULT_KEY (single-bridge dev override) or,")
-	fmt.println("otherwise, the local bridge. Unseal a bridge from Settings -> Bridges.")
+	fmt.println("otherwise, the local bridge. Unseal a bridge from Settings -> User Vault.")
 }
 
 is_valid_hex_key :: proc(key: string) -> bool {

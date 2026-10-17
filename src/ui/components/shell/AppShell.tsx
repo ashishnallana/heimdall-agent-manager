@@ -30,7 +30,10 @@ import { useListBridgesQuery, type Bridge } from '../../api/endpoints/bridgeSupp
 import { useListShellsQuery } from '../../api/endpoints/shells';
 import { StatusBar } from './statusBar/StatusBar';
 import { STATUS_BAR_MODULES } from './statusBar/modules';
-import { countConnectedBridges, countRunningInstances, countShells } from './statusBar/statusBarModel';
+import { countRunningInstances, countShells } from './statusBar/statusBarModel';
+import { AttentionDeck, AttentionUndoToast } from '../attention';
+import { attentionApi, useGetAttentionSummaryQuery, type AttentionRange } from '../../api/endpoints/attention';
+import { readAttentionRange, writeAttentionRange } from '../../services/attention/attentionPrefs';
 import { useGetAccountBillingQuery } from '../../api/endpoints/accountBilling';
 import SidebarUpdateBadge from './SidebarUpdateBadge';
 import {
@@ -116,7 +119,7 @@ import LibraryPage from '../LibraryPage';
 import ArtifactViewer from '../ArtifactViewer';
 import { clearUserClientState } from '../../store/chatSlice';
 import { priorUserClientStateCleared } from '../../store/store';
-import { selectAuxPane, selectCurrentAuxTreeId } from '../../store/auxPanesSlice';
+import { selectAuxOpen, selectCurrentAuxTreeId } from '../../store/auxPanesSlice';
 import { selectOnlineLockedBridgeIds } from '../../utils/bridgeVaultStatus';
 import TaskChainSelectorModal from '../chains/TaskChainSelectorModal';
 import type { LauncherIntent } from '../../store/workspaceLayoutSlice';
@@ -1337,6 +1340,31 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
   const [focusMessageId, setFocusMessageId] = useState(focusMessageFromLocation);
   const [resourcePicker, setResourcePicker] = useState<'conversation' | 'task-chain' | 'shell' | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  // Attention deck: the bar pill counts what needs the user in the chosen range.
+  // The hub's attention_changed hint refetches it; nothing polls. While the deck
+  // is open its own query is the only one fetching and it upserts its counts into
+  // this cache, so the pill reads the cache directly (lastAttentionTotal bridges
+  // the moment an invalidation drops the unsubscribed entry).
+  const [attentionOpen, setAttentionOpen] = useState(false);
+  const [attentionRange, setAttentionRangeState] = useState<AttentionRange>(() => readAttentionRange());
+  const setAttentionRange = useCallback((range: AttentionRange) => {
+    setAttentionRangeState(range);
+    writeAttentionRange(range);
+  }, []);
+  useGetAttentionSummaryQuery({ since: attentionRange }, { skip: attentionOpen });
+  const selectAttentionSummary = useMemo(() => attentionApi.endpoints.getAttentionSummary.select({ since: attentionRange }), [attentionRange]);
+  const attentionSummaryData = useSelector(selectAttentionSummary).data;
+  const lastAttentionTotal = useRef<{ range: AttentionRange; total: number } | null>(null);
+  if (attentionSummaryData) lastAttentionTotal.current = { range: attentionRange, total: attentionSummaryData.counts.total };
+  const attentionTotal = lastAttentionTotal.current?.range === attentionRange ? lastAttentionTotal.current.total : null;
+  // The ring spins only for what the user has not seen: opening the deck marks
+  // the current count seen (and keeps it seen while open); a later rise spins it again.
+  const [attentionSeenTotal, setAttentionSeenTotal] = useState(0);
+  useEffect(() => {
+    // Items going away lower the mark too, so the next new one spins the ring.
+    if (attentionTotal !== null && (attentionOpen || attentionTotal < attentionSeenTotal)) setAttentionSeenTotal(attentionTotal);
+  }, [attentionOpen, attentionTotal]); // eslint-disable-line react-hooks/exhaustive-deps
+  const attentionUnseen = attentionTotal !== null && attentionTotal > attentionSeenTotal;
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [launchModalProject, setLaunchModalProject] = useState<{ projectId: string; name: string } | null>(null);
   const [settingsModalOpen, setSettingsModalOpenState] = useState<boolean>(() => routeFromLocation().startsWith('/settings'));
@@ -1380,8 +1408,8 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
   const dispatch = useDispatch();
   const { actions: shortcutActions, runAction, mode: shortcutMode } = useShortcuts();
   const isCurrentAuxPaneOpen = useSelector((state: any) => {
-    const treeId = selectCurrentAuxTreeId(state);
-    return Boolean(selectAuxPane(state, treeId)?.isPaneOpen);
+    // The dock state is global; it only shows where there is an agent tree.
+    return Boolean(selectCurrentAuxTreeId(state) && selectAuxOpen(state));
   });
 
   // Vault state & onboarding modal
@@ -1407,7 +1435,6 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
     () => selectOnlineLockedBridgeIds(bridges),
     [bridges],
   );
-  const connectedBridgeCount = useMemo(() => countConnectedBridges(bridges), [bridges]);
   const onlineLockedBridgeSignature = onlineLockedBridgeIds.join('\u0000');
   const hasOnlineLockedBridge = isVaultUnlocked && onlineLockedBridgeIds.length > 0;
   const bridgeReconciliationRef = useRef<Promise<BridgeVaultReconciliationResult> | null>(null);
@@ -1674,6 +1701,13 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
   };
 
   useRegisterActions([
+    {
+      id: 'attention.open',
+      title: 'Open what needs you',
+      category: 'Navigation',
+      sequence: ['g', 'a'],
+      run: () => setAttentionOpen(true),
+    },
     {
       id: 'navigation.home',
       title: 'Go to Home',
@@ -2063,12 +2097,18 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
         compact={isMobile}
         data={{
           runningInstances: runningInstanceCount,
-          connectedBridges: connectedBridgeCount,
           shells: shellCounts,
           shortcutMode,
           renderVaultToggle: renderVaultStatusButton,
+          attention: {
+            total: attentionTotal,
+            unseen: attentionUnseen,
+            onOpen: () => setAttentionOpen(true),
+          },
         }}
       />
+      <AttentionDeck open={attentionOpen} onClose={() => setAttentionOpen(false)} range={attentionRange} onRangeChange={setAttentionRange} />
+      <AttentionUndoToast />
 
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} onNavigate={handlePaletteNavigate} onAction={handlePaletteAction} actions={paletteActions} currentPath={path} conversationGroups={conversationTree.map((group) => ({ projectId: group.project.projectId, projectName: group.project.name, conversations: group.conversations.map((c) => ({ conversationId: c.conversationId, agentInstanceId: c.agentInstanceId, title: displayConversationTitle(c), agentName: c.agentName, isCoordinator: c.isCoordinator, runtimeStatus: c.runtimeStatus, activityStatus: c.activityStatus, unreadCount: c.unreadCount })) }))} chainGroups={chainGroupsQuery.data?.groups ?? []} />
       <ConversationSelectorModal

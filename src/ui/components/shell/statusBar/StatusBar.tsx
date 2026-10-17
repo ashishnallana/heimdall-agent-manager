@@ -19,11 +19,16 @@ export type StatusBarSlot = 'left' | 'center' | 'right';
 /** Data the shell gathers once and hands to every module. Extend as modules need. */
 export type StatusBarData = {
   runningInstances: number;
-  connectedBridges: number;
   shells: ShellCounts;
   shortcutMode: ShortcutMode;
   /** Shell-owned vault toggle (its handlers and modal state live in AppShell). */
   renderVaultToggle: (compact: boolean) => ReactNode;
+  /**
+   * Attention deck pill: how many things need the user in the selected range
+   * (null while unknown) and how to open the deck. Absent = module hidden.
+   */
+  /** unseen: the count went up since the deck was last opened (spins the ring). */
+  attention?: { total: number | null; unseen: boolean; onOpen: () => void };
 };
 
 export type StatusBarContext = {

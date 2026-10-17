@@ -34,6 +34,7 @@ import {
   generateSaltHex,
   DEFAULT_KDF_ITERATIONS,
 } from '../../utils/vaultCrypto';
+import { VaultPasswordPurposeNote } from './VaultPasswordPurposeNote';
 
 export interface VaultOnboardingModalProps {
   open?: boolean;
@@ -385,6 +386,7 @@ export default function VaultOnboardingModal({
         ) : !isConfigured ? (
           <form data-debug-id="vault-onboarding-setup-form" onSubmit={handleSetupSubmit} className="space-y-4">
             <p className="text-sm text-muted">Protect your encrypted content with a password.</p>
+            <VaultPasswordPurposeNote />
             <div className="grid gap-3 sm:grid-cols-2">
               <label className="text-xs font-medium text-primary">
                 Password

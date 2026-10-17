@@ -62,6 +62,12 @@ Device_Enroll_Input :: struct {
 	// before touching anything -- see that proc.
 	target_bridge_id:       string,
 	new_bridge_label:       string,
+	// pending is true when the approving owner has a vault (REQ-EA-1): the
+	// enrollment then does not count until the hub observes the vault key reach the
+	// bridge (commit_pending_enrollment). The credential is minted in
+	// BRIDGE_ENROLL_TOKEN_SCOPE, a new bridge's row is marked pending, and an
+	// attach leaves the target's existing credential and row untouched.
+	pending:                bool,
 }
 
 // enroll_bridge_from_device_grant mints the per-machine identity + credential
@@ -128,16 +134,29 @@ enroll_bridge_from_device_grant :: proc(service: ^Bridge_Service, input: Device_
 		updated_at = now,
 		last_seen_at = now,
 	}
+	scope := BRIDGE_TOKEN_SCOPE
+	if input.pending {
+		pending_until, until_ok := platform.expires_at_after_seconds_from(now, BRIDGE_ENROLL_PENDING_SECONDS)
+		if !until_ok do return Enroll_Bridge_Result{}, false, domain.domain_error(.Internal_Error, "could not derive an enrollment deadline from the hub clock")
+		bridge.enrollment_pending_until = pending_until
+		scope = BRIDGE_ENROLL_TOKEN_SCOPE
+	}
 	saved, ok, err := iface.bridge_save_bridge(service.repo, bridge)
 	if !ok do return Enroll_Bridge_Result{}, false, err
 	// Fail closed when the OS entropy source is unavailable (settled 8): 503 with a
 	// retry hint, never a weaker credential and never `.Internal_Error`. The bridge
 	// row survives an entropy failure; the human approves again and that approval
 	// mints into a new family.
-	pair, pair_ok, pair_err := issue_bridge_token_pair(service, saved.bridge_id)
-	if !pair_ok do return Enroll_Bridge_Result{}, false, pair_err
+	pair, pair_ok, pair_err := issue_bridge_token_pair(service, saved.bridge_id, scope)
+	if !pair_ok {
+		// A pending row with no credential can never be committed; remove it now
+		// rather than leave it for the sweep (REQ-EA-3).
+		if input.pending do _, _ = iface.bridge_delete_pending(service.repo, saved.bridge_id)
+		return Enroll_Bridge_Result{}, false, pair_err
+	}
 	return Enroll_Bridge_Result{
 		bridge = saved,
+		family_id = pair.family_id,
 		bridge_token = pair.access_token,
 		refresh_token = pair.refresh_token,
 		expires_in = pair.expires_in,
@@ -178,6 +197,25 @@ rotate_bridge_for_device_grant :: proc(service: ^Bridge_Service, owner: string, 
 	// revoked bridge they do, must look identical from outside).
 	if bridge.status == .Revoked {
 		return Enroll_Bridge_Result{}, false, domain.domain_error(.Not_Found, "resource not found")
+	}
+
+	// REQ-EA-8: a PENDING attach changes nothing about the target yet. Its current
+	// credential keeps working, its row is not rewritten and its socket is not
+	// kicked; the new device only gets an enroll-scoped family under the same
+	// bridge_id. commit_pending_enrollment performs the swap below once the vault
+	// key has been delivered, and a rollback revokes just the new family — so a
+	// failed attach leaves the existing bridge exactly as it was.
+	if input.pending {
+		pair, pair_ok, pair_err := issue_bridge_token_pair(service, bridge.bridge_id, BRIDGE_ENROLL_TOKEN_SCOPE)
+		if !pair_ok do return Enroll_Bridge_Result{}, false, pair_err
+		return Enroll_Bridge_Result{
+			bridge = bridge,
+			family_id = pair.family_id,
+			bridge_token = pair.access_token,
+			refresh_token = pair.refresh_token,
+			expires_in = pair.expires_in,
+			refresh_expires_in = pair.refresh_expires_in,
+		}, true, domain.Domain_Error{}
 	}
 
 	now := platform.clock_now(service.clock)

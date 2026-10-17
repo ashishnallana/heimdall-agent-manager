@@ -2,7 +2,7 @@
 // REQ-DIST-2/REQ-DIST-3 (task_18d8becfe6c85dd1): CLI core and lifecycle
 // operations. Subcommands: enroll, status, start, stop, restart, logs, doctor,
 // update. (The old `vault` group managed a machine-wide key file that nothing
-// reads any more; bridges are unsealed per bridge from Settings -> Bridges.)
+// reads any more; bridges are unsealed per bridge from Settings -> User Vault.)
 //
 // This binary is the smaller sibling of ham-ctl: it owns only what a plain
 // (non-hub) node needs — enrollment against a Hub and local lifecycle of the

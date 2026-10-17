@@ -3,6 +3,7 @@ package taskv2
 import "core:fmt"
 import "core:strings"
 import "core:sync"
+import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 import platform "odin_test:hub/platform"
@@ -56,6 +57,9 @@ Service :: struct {
 	// vcs_show_file resolves a file at a commit on a chain directory via the bridge (M3 R2.2).
 	vcs_show_file:       proc(ctx: rawptr, chain_id: domain.Task_Chain_ID, owner: domain.User_ID, directory_id, rev, file_path: string) -> (string, bool, domain.Domain_Error),
 	vcs_show_file_ctx:   rawptr,
+	// attention re-projects the user's attention card of every task an
+	// event touched (attention deck), after commit. nil in bare tests.
+	attention:           ^contracts.Attention_Notifier,
 }
 
 new_service :: proc(repo: ^iface.Taskchain_Repository, agents: ^iface.Agent_Repository, bridges: ^iface.Bridge_Repository, clock: ^platform.Clock, ids: ^platform.ID_Generator) -> Service {
@@ -132,6 +136,9 @@ Effects :: struct {
 	merges: [dynamic]Merge_Effect,
 	// one-line nudges typed into an agent's terminal (F2 resume after outage).
 	nudges: [dynamic]Agent_Nudge,
+	// tasks whose attention card may have changed (any event or projection
+	// change); heap-cloned, deduplicated at flush.
+	attention_tasks: [dynamic]Attention_Effect,
 	// keys owns the (bridge × chain) map keys of runs/stops (heap-cloned per
 	// UoW, freed in destroy_effects — never the request's temp allocator).
 	keys: [dynamic]string,
@@ -160,6 +167,18 @@ Jit_Reservation :: struct {
 	bridge_id:   string,
 	generation:  int,
 	instance_id: string,
+}
+
+Attention_Effect :: struct {
+	owner:   string,
+	task_id: string,
+}
+
+// effect_attention queues `task` for an attention-card re-projection.
+effect_attention :: proc(u: ^Uow, task: domain.Task) {
+	if u == nil || task.task_id == "" do return
+	for a in u.effects.attention_tasks do if a.task_id == string(task.task_id) do return
+	append(&u.effects.attention_tasks, Attention_Effect{owner = strings.clone(string(task.owner_user_id)), task_id = strings.clone(string(task.task_id))})
 }
 
 Publish_Effect :: struct {
@@ -193,6 +212,7 @@ begin_uow :: proc(svc: ^Service) -> (Uow, bool, domain.Domain_Error) {
 	u.effects.notifications = make([dynamic]Coordinator_Notification)
 	u.effects.merges = make([dynamic]Merge_Effect)
 	u.effects.nudges = make([dynamic]Agent_Nudge)
+	u.effects.attention_tasks = make([dynamic]Attention_Effect)
 	u.effects.keys = make([dynamic]string)
 	if svc.uow_factory == nil {
 		lockorder.assert_tx_mutex_allowed()
@@ -283,6 +303,8 @@ destroy_effects :: proc(e: ^Effects) {
 	delete(e.merges)
 	for n in e.nudges { delete(n.instance_id); delete(n.bridge_id); delete(n.line) }
 	delete(e.nudges)
+	for a in e.attention_tasks { delete(a.owner); delete(a.task_id) }
+	delete(e.attention_tasks)
 	for k in e.keys do delete(k)
 	delete(e.keys)
 }
@@ -316,6 +338,9 @@ flush_effects :: proc(svc: ^Service, e: ^Effects) {
 	}
 	for c in e.changed_chains {
 		if svc.on_tasks_changed != nil do svc.on_tasks_changed(svc.on_tasks_changed_ctx, c.chain_id, c.owner)
+	}
+	if svc.attention != nil {
+		for a in e.attention_tasks do contracts.attention_notify(svc.attention, a.owner, contracts.ATTENTION_SOURCE_TASK, a.task_id)
 	}
 	flush_merges(svc, e)
 	for n in e.nudges {
@@ -403,6 +428,10 @@ record_event :: proc(svc: ^Service, u: ^Uow, task: domain.Task, actor: Actor, ki
 	if _, ok, err := append_event(svc.repo, svc.clock, task, actor, kind, payload_json); !ok {
 		return task, Task_View{}, false, err
 	}
+	// Any event can change whether the task awaits the user — including ones
+	// that leave the projection as it was (an agent's approve that hands the
+	// gate to the user), so the card is re-projected per event, not per save.
+	effect_attention(u, task)
 	return refold_task(svc, u, task, tasks, deps)
 }
 

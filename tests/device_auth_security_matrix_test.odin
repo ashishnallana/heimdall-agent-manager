@@ -172,6 +172,17 @@ test_bridge_enrollment_end_to_end :: proc() {
 	assert_true(strings.contains(verify_resp.body, BPK_A_FP), "verify exposes the hub-computed fingerprint")
 	assert_true(strings.contains(verify_resp.body, "\"os_user\":\"tanmay\""), "verify exposes host-asserted os_user")
 
+	// REQ-EA decision A: a bridge is enrolled only once its vault is unlocked, so the
+	// approver must already have a vault. Seed one (the envelope content is opaque
+	// to the hub; only its presence matters here).
+	vault_saved, vault_err := iface.user_vault_save(&graph.repos.user_vaults, domain.User_Vault{
+		user_id = "approving-human", encrypted_vault_key = "00", vault_key_nonce = "00", vault_key_tag = "00",
+		kdf_algorithm = "PBKDF2-SHA256", kdf_salt = "00", kdf_iterations = 100000,
+		recovery_encrypted_vault_key = "00", recovery_nonce = "00", recovery_tag = "00", recovery_salt = "00",
+		created_at = "2026-10-16T00:00:00Z", updated_at = "2026-10-16T00:00:00Z",
+	})
+	assert_true(vault_saved, vault_err.message)
+
 	// --- approve: the body tries to name a different owner; it must be ignored ---
 	approve_body := strings.concatenate({
 		"{\"user_code\":\"", res_a.user_code,
@@ -218,6 +229,23 @@ test_bridge_enrollment_end_to_end :: proc() {
 	assert_true(strings.contains(good_resp.body, bridge_id_a), "redemption returns the brg_ the credential is scoped to")
 	token_a := json_field(good_resp.body, "access_token")
 	assert_true(token_a != "", "redemption returns a plaintext credential")
+
+	// --- REQ-EA-1: until the vault key is delivered the credential is PENDING ---
+	// It authenticates the enroll-only socket and nothing else, and the bridge row
+	// is not enrolled: no runtime path may accept it.
+	_, pending_runtime_ok, _ := bridge_service.verify_bridge_token(&graph.bridges, token_a)
+	assert_true(!pending_runtime_ok, "a pending enrollment's credential is refused by the runtime verifier")
+	enroll_ctx, family_a, enroll_ok, enroll_err := bridge_service.verify_enroll_access_token(&graph.bridges, token_a)
+	assert_true(enroll_ok, enroll_err.message)
+	assert_eq(enroll_ctx.bridge_id, bridge_id_a, "the enroll credential resolves to its own brg_")
+	pending_row, pending_row_ok, _ := iface.bridge_get_bridge(graph.bridges.repo, bridge_id_a)
+	assert_true(pending_row_ok, "pending bridge row readable")
+	assert_true(domain.bridge_is_pending(pending_row), "the bridge row is pending until the vault key is delivered")
+	_, owner_get_ok, _ := bridge_service.get_bridge(&graph.bridges, contracts.Auth_Context{kind = .User_Token, user_id = "approving-human"}, bridge_id_a)
+	assert_true(!owner_get_ok, "a pending bridge is not a usable bridge for its owner yet")
+	// The hub observes the delivery and commits (REQ-EA-2).
+	_, commit_ok, commit_err := bridge_service.commit_pending_enrollment(&graph.bridges, bridge_service.Pending_Commit_Input{bridge_id = bridge_id_a, family_id = family_a})
+	assert_true(commit_ok, commit_err.message)
 
 	// --- the credential is BRIDGE-SCOPED, and the Hub stored only a hash ---
 	ctx_a, va_ok, va_err := bridge_service.verify_bridge_token(&graph.bridges, token_a)

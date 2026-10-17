@@ -26,8 +26,8 @@ import {
   isUpdateUnavailableForTarget,
   updateAvailabilityLabel,
 } from './bridgeUpdate';
-import BridgeSettingsPanel from './BridgeSettingsPanel';
 import BridgeRecentErrorsCard from './BridgeRecentErrorsCard';
+import PendingEnrollmentsCard from './PendingEnrollmentsCard';
 
 // UI-11: Settings → Bridges. The user's machines (arch doc §6A).
 // List shows status dot, label, hostname/OS/arch, capabilities, instance count.
@@ -144,9 +144,6 @@ export default function BridgesPanel() {
       {bridgesQuery.isError ? <div data-debug-id="settings-bridges-load-error" className="mt-3 rounded-xl border border-danger/30 bg-danger-soft px-3 py-2 text-sm text-danger">Unable to load bridges. Check your trusted-proxy session and Hub connection.</div> : null}
       {actionError ? <div data-debug-id="settings-bridges-error" className="mt-3 rounded-xl border border-danger/30 bg-danger-soft px-3 py-2 text-sm text-danger">{actionError}</div> : null}
 
-      {/* Bridge Encryption & Vault Settings */}
-      <BridgeSettingsPanel bridges={bridges} />
-
       {/* Global Telemetry Setting */}
       <div data-debug-id="settings-bridges-global-telemetry" className="mt-4 rounded-xl border border-subtle bg-surface-raised/40 p-3.5 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <div className="min-w-0">
@@ -164,6 +161,9 @@ export default function BridgesPanel() {
           </span>
         </div>
       </div>
+
+      {/* Approved bridges whose vault key has not been delivered yet (REQ-EA-6) */}
+      <PendingEnrollmentsCard refreshKey={bridgesQuery.fulfilledTimeStamp} />
 
       {/* Bridge list */}
       <div data-debug-id="settings-bridges-list" className="mt-4">

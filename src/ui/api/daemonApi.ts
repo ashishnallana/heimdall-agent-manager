@@ -537,67 +537,12 @@ export async function focusTaskChain({ daemonUrl, clientToken, chainId }: Omit<U
   });
 }
 
-export async function listPendingChatApprovals({ daemonUrl, clientToken }: { daemonUrl: string; clientToken: string }) {
-  return requestJson(joinUrl(daemonUrl, `/chat-approvals/pending?token=${encodeURIComponent(clientToken)}`), {
-    method: 'GET',
-    headers: { 'Authorization': `Bearer ${clientToken}` },
-  });
-}
-
-export async function answerChatApproval({ daemonUrl, clientToken, approvalId, reply }: { daemonUrl: string; clientToken: string; approvalId: string; reply: string }) {
-  return requestJson(joinUrl(daemonUrl, `/chat-approvals/answer`), {
-    method: 'POST',
-    body: { approval_id: approvalId, reply, token: clientToken },
-    headers: { 'Authorization': `Bearer ${clientToken}` },
-  });
-}
-
-export async function dismissChatApproval({ daemonUrl, clientToken, approvalId, reason = 'user_dismissed', notify = false }: { daemonUrl: string; clientToken: string; approvalId: string; reason?: string; notify?: boolean }) {
-  return requestJson(joinUrl(daemonUrl, `/chat-approvals/dismiss`), {
-    method: 'POST',
-    body: { approval_id: approvalId, reason, notify, token: clientToken },
-    headers: { 'Authorization': `Bearer ${clientToken}` },
-  });
-}
-
 export async function fetchWorkspace({ daemonUrl, clientToken, chainId }: Omit<UserRpcRequest, 'clientInstanceId'> & { chainId: string }) {
   return requestJson(joinUrl(daemonUrl, `/chains/${encodeURIComponent(chainId)}/workspace?agent_token=${encodeURIComponent(clientToken)}`));
 }
 
 export async function previewWorkspaceMerge({ daemonUrl, clientToken, chainId }: Omit<UserRpcRequest, 'clientInstanceId'> & { chainId: string }) {
   return requestJson(joinUrl(daemonUrl, `/chains/${encodeURIComponent(chainId)}/workspace/merge-preview?agent_token=${encodeURIComponent(clientToken)}`));
-}
-
-export async function executeWorkspaceMerge({
-  daemonUrl,
-  clientToken,
-  chainId,
-  target,
-  mode = 'direct',
-  instructions = '',
-}: Omit<UserRpcRequest, 'clientInstanceId'> & {
-  chainId: string;
-  target?: string;
-  mode?: 'direct' | 'chain';
-  instructions?: string;
-}) {
-  return requestJson(joinUrl(daemonUrl, `/chains/${encodeURIComponent(chainId)}/workspace/merge`), {
-    method: 'POST',
-    body: {
-      agent_token: clientToken,
-      target: target || '',
-      mode,
-      instructions,
-    },
-    headers: { 'Authorization': `Bearer ${clientToken}` }
-  });
-}
-
-export async function fetchAttention({ daemonUrl, clientToken }: Omit<UserRpcRequest, 'clientInstanceId'>) {
-  return requestJson(joinUrl(daemonUrl, `/attention?agent_token=${encodeURIComponent(clientToken)}`), {
-    method: 'GET',
-    headers: { 'Authorization': `Bearer ${clientToken}` }
-  });
 }
 
 export async function fetchWorkspaceDiff({ daemonUrl, clientToken, chainId, file = '' }: Omit<UserRpcRequest, 'clientInstanceId'> & { chainId: string; file?: string }) {

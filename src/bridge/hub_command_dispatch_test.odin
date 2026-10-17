@@ -201,7 +201,7 @@ bridge_dispatch_spec_accepts_status_ack_and_connection_replaced :: proc(t: ^test
 	// Both are hub->bridge control frames handled on the reader (queued=false), so
 	// bridge_command_dispatch returns false and they fall through to
 	// bridge_hub_handle_command instead of drawing an unknown_command reply.
-	for command_type in ([]string{"agent_instance_status_ack", "connection_replaced"}) {
+	for command_type in ([]string{"agent_instance_status_ack", "connection_replaced", "bridge_enrollment_result"}) {
 		spec, known := bridge_command_spec(command_type)
 		testing.expectf(t, known, "%s must be a known hub frame", command_type)
 		testing.expectf(t, !spec.queued, "%s must not be queued", command_type)
@@ -278,6 +278,8 @@ HUB_TO_BRIDGE_RUNTIME_FRAME_TYPES := []string{
 	// control / acks
 	"bridge_heartbeat_ack", "agent_instance_status_ack", "connection_replaced",
 	"provider_catalog", "provider_catalog_version",
+	// REQ-EA-4: atomic enrollment verdict (bridge_enroll_ws.odin)
+	"bridge_enrollment_result",
 	// bridge lifecycle
 	"bridge_lock", "bridge_unseal", "set_telemetry", "bridge_update", "provider_discover",
 	// agents

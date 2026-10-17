@@ -265,7 +265,7 @@ bridge_vault_test_sandbox_close :: proc(sb: ^Bridge_Vault_Test_Sandbox) {
 	}
 }
 
-@(private = "file")
+// Package-visible: enroll_atomic_test.odin seals deliveries with it too.
 create_sec_test_envelope :: proc(
 	bridge_id: string,
 	bridge_pub_hex: string,

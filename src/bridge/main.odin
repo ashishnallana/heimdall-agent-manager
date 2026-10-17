@@ -103,6 +103,10 @@ main :: proc() {
 		os.exit(1)
 	}
 
+	// REQ-EA-4: finish or discard an atomic enrollment a crash left staged, BEFORE the
+	// credential is read: a committed one must start with its new credential, a
+	// rolled-back one must not leave its staging behind.
+	_ = bridge_enroll_atomic_recover(os.args)
 	bridge_config = bridge_config_from_args(os.args)
 	default_credential_path := bridge_enroll_default_credential_path()
 	bridge_adopt_default_credential_if_needed(&bridge_config, default_credential_path)

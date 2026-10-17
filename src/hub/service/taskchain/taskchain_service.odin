@@ -45,6 +45,9 @@ Taskchain_Service :: struct {
 	// work under tx_mutex. The engine's own entry points nest as SAVEPOINTs
 	// and hand their effects to the outer commit. nil in bare tests (autocommit).
 	uow_factory: ^iface.Unit_Of_Work_Factory,
+	// attention reports task/comment writes to the card projector (attention
+	// deck). Optional: nil in bare test services; see attention_notify.odin.
+	attention: ^contracts.Attention_Notifier,
 }
 
 // verb_begin / verb_end wrap a mutating taskchain verb in one unit of work.
@@ -628,7 +631,7 @@ publish_chain_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Con
 			t_copy.publish_state = .Published
 			if t_copy.published_at == "" do t_copy.published_at = now
 			t_copy.updated_at = now
-			_, _, _ = iface.taskchain_save_task(service.repo, t_copy)
+			_, _, _ = save_task(service, t_copy)
 		}
 	}
 	// Publishing IS the kickoff: the engine records `published` for every task,
@@ -1104,7 +1107,7 @@ create_task_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Conte
 		}
 		task.published_at = now
 	}
-	saved_task, save_ok, save_err := iface.taskchain_save_task(service.repo, task)
+	saved_task, save_ok, save_err := save_task(service, task)
 	if !save_ok do return domain.Task{}, false, save_err
 
 	for dep_id in input.depends_on {
@@ -1191,7 +1194,7 @@ update_task_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Conte
 		if ferr := ensure_fleet_row_for_named_reviewer(service, chain, rid); ferr.code != .None do return domain.Task{}, false, ferr
 	}
 	task.updated_at = platform.clock_now(service.clock)
-	saved, save_ok, save_err := iface.taskchain_save_task(service.repo, task)
+	saved, save_ok, save_err := save_task(service, task)
 	if !save_ok do return domain.Task{}, false, save_err
 
 	if input.has_depends_on {
@@ -1241,7 +1244,7 @@ publish_task_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Cont
 	task.publish_state = .Published
 	task.published_at = now
 	task.updated_at = now
-	saved, save_ok, save_err := iface.taskchain_save_task(service.repo, task)
+	saved, save_ok, save_err := save_task(service, task)
 	if !save_ok do return domain.Task{}, false, save_err
 	// Publishing a task on a live chain is an engine event: it becomes ready as
 	// soon as its dependencies allow and the matcher runs.
@@ -1264,7 +1267,7 @@ create_comment :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context
 	}
 	now := platform.clock_now(service.clock)
 	comment := domain.Task_Comment{comment_id = platform.generate_id(service.ids, "cmt_"), task_id = task.task_id, chain_id = task.chain_id, owner_user_id = task.owner_user_id, author_agent_instance_id = auth.agent_instance_id, body = input.body, created_at = now, updated_at = now}
-	return iface.taskchain_save_comment(service.repo, comment)
+	return save_comment(service, comment)
 }
 
 list_comments :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, task_id: domain.Task_ID) -> ([]domain.Task_Comment, domain.Domain_Error) {
@@ -1409,7 +1412,7 @@ comment_task :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, 
 	if auth.kind == .Instance_Token && auth.agent_instance_id == "" do return domain.Task_Comment{}, nil, false, domain.domain_error(.Forbidden, "instance token is required")
 	now := platform.clock_now(service.clock)
 	comment := domain.Task_Comment{comment_id = platform.generate_id(service.ids, "cmt_"), task_id = task.task_id, chain_id = task.chain_id, owner_user_id = task.owner_user_id, author_agent_instance_id = auth.agent_instance_id, body = input.body, created_at = now, updated_at = now}
-	saved, ok2, err2 := iface.taskchain_save_comment(service.repo, comment)
+	saved, ok2, err2 := save_comment(service, comment)
 	if !ok2 do return saved, nil, ok2, err2
 	if service.engine != nil do _ = taskv2.task_comment(service.engine, task, engine_actor(auth), saved.comment_id)
 	return saved, nil, true, domain.Domain_Error{}

@@ -60,8 +60,15 @@ import { useDispatch, useSelector } from 'react-redux';
 import { Button, Input, Icon, Modal, ModalBody, ModalFooter, Select } from '@ui';
 
 import { cookieJsonFetch, cookieMutation } from '../../api/cookieFetch';
-import { fetchBridgePublicKey, unsealBridgeE2EE } from '../../api/endpoints/bridges';
+import {
+  cancelBridgeEnrollment,
+  fetchBridgeEnrollmentStatus,
+  fetchBridgePublicKey,
+  unsealBridgeE2EE,
+  unsealEnrollingBridgeE2EE,
+} from '../../api/endpoints/bridges';
 import { useGetUserVaultQuery } from '../../api/endpoints/userVault';
+import VaultOnboardingModal from '../settings/VaultOnboardingModal';
 import {
   getActiveVaultKey,
   getActiveBridgeVaultKeyMaterial,
@@ -78,7 +85,9 @@ import {
 import { canUnsealWithKey } from '../../utils/vaultBridgeUnseal';
 import {
   approvedBridgeIsOnline,
+  ENROLLMENT_PENDING_FALLBACK_SECONDS,
   enrollmentContinueAvailable,
+  enrollmentPendingOutcome,
   enrollmentRestartConfirmation,
   navigateEnrollmentProviderSetup,
   nextAvailableBridgeLabel,
@@ -153,13 +162,15 @@ type DeliveryState =
       error?: string;
     }
   | { phase: 'failed'; message: string }
-  | { phase: 'timed-out' };
+  | { phase: 'timed-out' }
+  /** REQ-EA: the hub rolled the pending enrollment back; the bridge is not enrolled. */
+  | { phase: 'rolled-back'; reason: string };
 
 /**
  * Which process a vault key is wrapped for. `enrollment` is the CLI process whose
  * key the operator confirmed against the terminal; `restarted` is the registered
  * service it hands over to, whose ephemeral key is whatever it advertises now —
- * the same steady-state path Settings → Bridges uses.
+ * the same steady-state path Settings → User Vault uses.
  */
 type UnsealTarget = 'enrollment' | 'restarted';
 
@@ -245,11 +256,25 @@ export default function BridgeEnrollmentApprovalPage() {
   const [deciding, setDeciding] = useState(false);
   const [bridgeId, setBridgeId] = useState('');
   const [bridgeConnected, setBridgeConnected] = useState(false);
+  // REQ-EA: the hub minted this bridge PENDING. It is enrolled only once the vault
+  // key reaches the enrolling process; until then nothing about it is usable.
+  const [enrollmentPending, setEnrollmentPendingState] = useState(false);
+  // Read by the delivery callbacks, which run in the same tick as approval and so
+  // would otherwise see the state from before it.
+  const enrollmentPendingRef = useRef(false);
+  const setEnrollmentPending = useCallback((pending: boolean) => {
+    enrollmentPendingRef.current = pending;
+    setEnrollmentPendingState(pending);
+  }, []);
+  const [cancellingEnrollment, setCancellingEnrollment] = useState(false);
   const [delivery, setDelivery] = useState<DeliveryState>({ phase: 'idle' });
   const [masterPassword, setMasterPassword] = useState('');
   const [passwordError, setPasswordError] = useState('');
   const [passwordBusy, setPasswordBusy] = useState(false);
   const [rememberSession, setRememberSession] = useState(true);
+  // A user with no vault creates it right here rather than detouring to Settings
+  // and losing the device code's short TTL on the way back.
+  const [vaultSetupOpen, setVaultSetupOpen] = useState(false);
   // "Attach to an existing bridge" instead of minting a new one. Empty means
   // the default (unchanged) behaviour: create a new bridge.
   const [bridgeTargets, setBridgeTargets] = useState<BridgeSummary[]>([]);
@@ -481,6 +506,69 @@ export default function BridgeEnrollmentApprovalPage() {
   }, []);
 
   /**
+   * REQ-EA-6: waits for the enrolling process's enroll-only connection, which is
+   * what the vault key is delivered over. A pending bridge never shows as online
+   * in GET /bridges, so this polls the enrollment itself. Returns false, having
+   * set the phase, when the hub rolled the enrollment back first.
+   */
+  const waitForEnrollingBridge = useCallback(async (targetBridgeId: string): Promise<boolean> => {
+    const fallbackDeadline = Date.now() + ENROLLMENT_PENDING_FALLBACK_SECONDS * 1000;
+    for (;;) {
+      let deadline = fallbackDeadline;
+      let outcome: ReturnType<typeof enrollmentPendingOutcome> = 'waiting';
+      try {
+        const status = await fetchBridgeEnrollmentStatus(targetBridgeId);
+        const until = Date.parse(String(status?.enrollment_pending_until || ''));
+        if (Number.isFinite(until)) deadline = until;
+        outcome = enrollmentPendingOutcome(status, Date.now());
+      } catch {
+        // A transient poll failure is not a verdict; the deadline still applies.
+      }
+      if (outcome === 'ready' || outcome === 'committed') return true;
+      if (outcome === 'rolled-back' || Date.now() >= deadline) {
+        setDelivery({ phase: 'rolled-back', reason: 'The bridge did not connect to receive the vault key in time.' });
+        return false;
+      }
+      setDelivery({ phase: 'waiting-for-bridge', secondsLeft: Math.max(0, Math.ceil((deadline - Date.now()) / 1000)) });
+      await new Promise((resolve) => setTimeout(resolve, BRIDGE_POLL_INTERVAL_MS));
+    }
+  }, []);
+
+  /**
+   * After a failed delivery to a pending enrollment, decides between "retry" and
+   * "rolled back" from what the hub says now, not from the error text.
+   */
+  const settlePendingFailure = useCallback(async (targetBridgeId: string, message: string) => {
+    let outcome: ReturnType<typeof enrollmentPendingOutcome> = 'waiting';
+    try {
+      outcome = enrollmentPendingOutcome(await fetchBridgeEnrollmentStatus(targetBridgeId), Date.now());
+    } catch {
+      // Unknown: offer the retry; the hub refuses it if the enrollment is gone.
+    }
+    if (outcome === 'rolled-back') {
+      setDelivery({ phase: 'rolled-back', reason: message });
+    } else {
+      setDelivery({ phase: 'failed', message });
+    }
+  }, []);
+
+  /** The operator abandons the enrollment; the hub rolls it back now. */
+  const cancelEnrollment = useCallback(async () => {
+    if (!bridgeId || cancellingEnrollment) return;
+    setCancellingEnrollment(true);
+    try {
+      const { rolledBack } = await cancelBridgeEnrollment(bridgeId);
+      // The vault key landed and the enrollment committed before the cancel did.
+      if (!rolledBack) setDelivery({ phase: 'delivered' });
+      else setDelivery({ phase: 'rolled-back', reason: 'You cancelled the enrollment.' });
+    } catch (err: any) {
+      setDelivery({ phase: 'failed', message: `Could not cancel: ${String(err?.message || err)}` });
+    } finally {
+      setCancellingEnrollment(false);
+    }
+  }, [bridgeId, cancellingEnrollment]);
+
+  /**
    * After the enrolling process has the key it persists it, restarts the
    * registered service and exits. Poll until the RESTARTED service reports
    * itself unsealed, so the page never claims more than it has seen (REQ-T2-4).
@@ -558,11 +646,19 @@ export default function BridgeEnrollmentApprovalPage() {
             throw new Error('The bridge advertised no public key — it may have gone offline.');
           }
         }
-        // Throws the bridge's typed error when it refuses the unseal.
-        await unsealBridgeE2EE(targetBridgeId, publicKey, vaultKeyMaterial);
+        // Throws the bridge's typed error when it refuses the unseal. For a pending
+        // enrollment a success also means the hub COMMITTED it (REQ-EA-2).
+        if (target === 'enrollment' && enrollmentPendingRef.current) {
+          await unsealEnrollingBridgeE2EE(targetBridgeId, publicKey, vaultKeyMaterial);
+          setBridgeConnected(true);
+        } else {
+          await unsealBridgeE2EE(targetBridgeId, publicKey, vaultKeyMaterial);
+        }
       } catch (err: any) {
         const message = String(err?.message || err);
-        if (target === 'restarted') {
+        if (target === 'enrollment' && enrollmentPendingRef.current) {
+          await settlePendingFailure(targetBridgeId, message);
+        } else if (target === 'restarted') {
           // Enrollment already finished: stay on the warning, with the reason.
           setDelivery({
             phase: 'restart-unconfirmed',
@@ -578,7 +674,7 @@ export default function BridgeEnrollmentApprovalPage() {
       if (target === 'enrollment') setDelivery({ phase: 'delivered' });
       await confirmRestart(targetBridgeId);
     },
-    [bridgeKeyReady, fingerprintConfirmed, hubKey, confirmRestart],
+    [bridgeKeyReady, fingerprintConfirmed, hubKey, confirmRestart, settlePendingFailure],
   );
 
   /** "Unseal now": wrap the key for the restarted service, or ask for the password. */
@@ -610,7 +706,14 @@ export default function BridgeEnrollmentApprovalPage() {
   );
 
   const startDelivery = useCallback(
-    async (targetBridgeId: string) => {
+    async (targetBridgeId: string, pending: boolean) => {
+      if (pending) {
+        // REQ-EA: the vault exists (the hub refuses to approve otherwise), and the
+        // key has to reach the enrolling process before it is enrolled at all.
+        if (!(await waitForEnrollingBridge(targetBridgeId))) return;
+        await deliverToEnrollment(targetBridgeId);
+        return;
+      }
       if (!(await waitForAuthenticatedBridge(targetBridgeId))) return;
 
       if (!vaultQuery.isLoading && !vaultEnvelope) {
@@ -619,7 +722,7 @@ export default function BridgeEnrollmentApprovalPage() {
       }
       await deliverToEnrollment(targetBridgeId);
     },
-    [deliverToEnrollment, vaultEnvelope, vaultQuery.isLoading, waitForAuthenticatedBridge],
+    [deliverToEnrollment, vaultEnvelope, vaultQuery.isLoading, waitForAuthenticatedBridge, waitForEnrollingBridge],
   );
 
   const handlePasswordSubmit = useCallback(
@@ -680,7 +783,12 @@ export default function BridgeEnrollmentApprovalPage() {
     if (target === 'restarted') {
       setDelivery({ phase: 'restart-unconfirmed', reason: 'sealed', vaultStatus: '', error: '' });
     } else {
-      setDelivery({ phase: 'failed', message: 'You closed the password prompt.' });
+      setDelivery({
+        phase: 'failed',
+        message: enrollmentPendingRef.current
+          ? 'You closed the password prompt, so the vault key was not delivered.'
+          : 'You closed the password prompt.',
+      });
     }
   }, [passwordBusy, delivery]);
 
@@ -715,10 +823,13 @@ export default function BridgeEnrollmentApprovalPage() {
         });
         setDecision(approve ? 'approved' : 'rejected');
 
-        const minted = String(unwrap(res)?.hub_observed?.bridge_id || '');
+        const observed = unwrap(res)?.hub_observed;
+        const minted = String(observed?.bridge_id || '');
         if (approve && minted) {
+          const pending = observed?.enrollment_pending === true;
           setBridgeId(minted);
-          void startDelivery(minted);
+          setEnrollmentPending(pending);
+          void startDelivery(minted, pending);
         }
       } catch (err: any) {
         setDecideError(
@@ -730,12 +841,15 @@ export default function BridgeEnrollmentApprovalPage() {
         setDeciding(false);
       }
     },
-    [approvalBlocked, codeInput, verifiedCode, startDelivery, targetBridgeId, grant?.is_bridge_enrollment, newBridgeLabel],
+    [approvalBlocked, codeInput, verifiedCode, startDelivery, targetBridgeId, grant?.is_bridge_enrollment, newBridgeLabel, setEnrollmentPending],
   );
 
   // ── Render ──────────────────────────────────────────────────────────────
 
   const isBridge = grant?.is_bridge_enrollment === true;
+  // Decision A (REQ-EA): a bridge is enrolled only once its vault is unlocked, so a
+  // user without a vault cannot approve one. The hub refuses it too.
+  const vaultRequired = isBridge && !vaultQuery.isLoading && !vaultEnvelope;
 
   return (
     <div
@@ -923,6 +1037,24 @@ export default function BridgeEnrollmentApprovalPage() {
             </div>
           )}
 
+          {decision === 'none' && vaultRequired && (
+            <Banner tone="warn" title="Set up your vault first">
+              <span data-debug-id="enrollment-vault-required">
+                A bridge is enrolled only once your vault key is delivered to it, so you need a vault
+                before approving.
+              </span>
+              <div style={{ marginTop: 10 }}>
+                <Button
+                  data-debug-id="enrollment-vault-setup-btn"
+                  variant="primary"
+                  size="sm"
+                  onClick={() => setVaultSetupOpen(true)}
+                >
+                  Set up vault
+                </Button>
+              </div>
+            </Banner>
+          )}
           {decision === 'none' ? (
             <div style={{ display: 'flex', gap: 8 }}>
               <Button
@@ -932,9 +1064,17 @@ export default function BridgeEnrollmentApprovalPage() {
                 disabled={
                   deciding ||
                   approvalBlocked ||
+                  vaultRequired ||
+                  (isBridge && vaultQuery.isLoading) ||
                   (isBridge && !targetBridgeId && !newBridgeLabel.trim())
                 }
-                title={approvalBlocked ? 'Confirm the bridge fingerprint before approving.' : undefined}
+                title={
+                  vaultRequired
+                    ? 'Set up your vault before enrolling a bridge.'
+                    : approvalBlocked
+                      ? 'Confirm the bridge fingerprint before approving.'
+                      : undefined
+                }
               >
                 {deciding ? 'Working…' : 'Approve'}
               </Button>
@@ -952,7 +1092,9 @@ export default function BridgeEnrollmentApprovalPage() {
               title={decision === 'approved' ? 'Approval accepted.' : 'Rejected.'}
             >
               {decision === 'approved'
-                ? 'Waiting for this bridge to authenticate and connect to the Hub.'
+                ? enrollmentPending
+                  ? 'The bridge is not enrolled until your vault key is delivered to it.'
+                  : 'Waiting for this bridge to authenticate and connect to the Hub.'
                 : 'The code no longer works.'}
             </Banner>
           )}
@@ -961,10 +1103,12 @@ export default function BridgeEnrollmentApprovalPage() {
 
           {/* ── Vault delivery status ───────────────────────────────────── */}
           {delivery.phase === 'waiting-for-bridge' && (
-            <Banner tone="warn" title="Waiting for the bridge to connect…">
+            <Banner tone="warn" title={enrollmentPending ? 'Enrolling…' : 'Waiting for the bridge to connect…'}>
               <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
                 <Icon name="refresh" size={16} className="animate-spin" />
-                Waiting for the approved bridge to authenticate with the Hub. Giving up in{' '}
+                {enrollmentPending
+                  ? 'Waiting for the enrolling bridge to connect so it can receive your vault key. Rolled back in '
+                  : 'Waiting for the approved bridge to authenticate with the Hub. Giving up in '}
                 {delivery.secondsLeft}s.
               </span>
             </Banner>
@@ -1027,6 +1171,7 @@ export default function BridgeEnrollmentApprovalPage() {
             delivery.phase === 'need-password' || delivery.phase === 'delivering'
               ? delivery.target
               : undefined,
+            enrollmentPending,
           ) ? (
             <Button
               variant="primary"
@@ -1045,18 +1190,39 @@ export default function BridgeEnrollmentApprovalPage() {
           {delivery.phase === 'failed' && (
             <Banner tone="danger" title="The vault key was not delivered.">
               <p style={{ margin: '0 0 8px' }}>
-                {delivery.message} The enrollment itself succeeded; the bridge is approved but still sealed.
-                Retry now, or unlock it later from Settings → Bridges.
+                {delivery.message}{' '}
+                {enrollmentPending
+                  ? 'The bridge is not enrolled yet. Retry before the enrollment times out, or cancel it.'
+                  : 'The enrollment itself succeeded; the bridge is approved but still sealed. Retry now, or unlock it later from Settings → User Vault.'}
               </p>
               {bridgeId && (
-                <Button
-                  data-debug-id="enrollment-retry-delivery-btn"
-                  variant="secondary"
-                  onClick={() => void deliverToEnrollment(bridgeId)}
-                >
-                  Retry
-                </Button>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <Button
+                    data-debug-id="enrollment-retry-delivery-btn"
+                    variant="secondary"
+                    onClick={() => void deliverToEnrollment(bridgeId)}
+                  >
+                    Retry
+                  </Button>
+                  {enrollmentPending && (
+                    <Button
+                      data-debug-id="enrollment-cancel-btn"
+                      onClick={() => void cancelEnrollment()}
+                      disabled={cancellingEnrollment}
+                    >
+                      {cancellingEnrollment ? 'Cancelling…' : 'Cancel enrollment'}
+                    </Button>
+                  )}
+                </div>
               )}
+            </Banner>
+          )}
+          {delivery.phase === 'rolled-back' && (
+            <Banner tone="danger" title="Enrollment rolled back">
+              <span data-debug-id="enrollment-rolled-back">
+                {delivery.reason} This machine was not enrolled, and nothing was kept on it or on the Hub.
+                Run <code>ham-bridge enroll</code> again to start over.
+              </span>
             </Banner>
           )}
           <Modal
@@ -1137,6 +1303,16 @@ export default function BridgeEnrollmentApprovalPage() {
         </>
       )}
       </section>
+      {/* Creating the vault also unlocks it, so the key is delivered on approval
+          with no second password prompt. The modal refetches the shared vault
+          query, which clears vaultRequired and enables Approve. */}
+      {vaultSetupOpen ? (
+        <VaultOnboardingModal
+          open={vaultSetupOpen}
+          onOpenChange={setVaultSetupOpen}
+          onDismiss={() => setVaultSetupOpen(false)}
+        />
+      ) : null}
     </div>
   );
 }

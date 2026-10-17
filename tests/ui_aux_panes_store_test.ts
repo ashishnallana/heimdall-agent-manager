@@ -16,7 +16,6 @@ import {
   type AuxContent,
 } from '../src/ui/store/auxTabId.ts';
 import auxPanesReducer, {
-  carryAuxPaneOpenOnFocus,
   closeAuxTab,
   createDefaultAuxPane,
   ensureAuxPane,
@@ -29,6 +28,7 @@ import auxPanesReducer, {
   resolveActiveAuxTab,
   resolveAuxTreeId,
   sanitizeAuxPanesState,
+  selectAuxOpen,
   selectAuxPane,
   selectCurrentAuxTreeId,
   setActiveAuxTab,
@@ -122,24 +122,19 @@ test('tree selection rule: the aux always shows the FOCUSED Main pane agent stri
   );
 });
 
-test('focus change within a split carries the dock open state to the newly focused strip (Jetski RouteToReduxSync)', () => {
+test('the dock open state is global: switching agents keeps it, strips seed lazily', () => {
   const store = makeStore();
   store.dispatch(setAuxPaneOpen({ treeId: A, open: true, hasChain: true }));
-  // Target strip does not exist yet: created open, seeded once its chain is known.
-  store.dispatch(carryAuxPaneOpenOnFocus({ from: A, to: B }));
-  let b = selectAuxPane(store.getState(), B)!;
-  assert.equal(b.isPaneOpen, true);
-  assert.equal(b.activeTabId, undefined);
+  assert.equal(selectAuxOpen(store.getState()), true);
+  // Focusing another agent changes nothing about open/closed.
   store.dispatch(ensureAuxPane({ treeId: B, hasChain: false }));
-  b = selectAuxPane(store.getState(), B)!;
-  assert.equal(b.activeTabId, FILES_TAB_ID, 'deferred seeding uses the real chain membership');
-  // Closing on B then focusing A closes A too.
+  assert.equal(selectAuxOpen(store.getState()), true, 'B shows the dock open too');
+  assert.equal(selectAuxPane(store.getState(), B)!.activeTabId, FILES_TAB_ID, 'seeding uses the real chain membership');
+  // Closing it from B closes it for A as well.
   store.dispatch(setAuxPaneOpen({ treeId: B, open: false }));
-  store.dispatch(carryAuxPaneOpenOnFocus({ from: B, to: A }));
-  assert.equal(selectAuxPane(store.getState(), A)!.isPaneOpen, false);
-  // Same agent is a no-op.
-  store.dispatch(carryAuxPaneOpenOnFocus({ from: A, to: A }));
-  assert.equal(selectAuxPane(store.getState(), A)!.isPaneOpen, false);
+  assert.equal(selectAuxOpen(store.getState()), false);
+  store.dispatch(ensureAuxPane({ treeId: A }));
+  assert.equal(selectAuxOpen(store.getState()), false, 'A stays closed: no jitter on switch');
 });
 
 test('seeding mirrors Jetski createDefaultPaneState: no tabs, fixed overview active (Files without a chain)', () => {
@@ -166,7 +161,7 @@ test('openAuxTab dedupes by content-derived id, materializes the seeded overview
   let pane = selectAuxPane(store.getState(), A)!;
   assert.deepEqual(pane.tabs.map((t) => t.id), ['overview', 'shell__s1']);
   assert.equal(pane.activeTabId, 'shell__s1');
-  assert.equal(pane.isPaneOpen, true);
+  assert.equal(selectAuxOpen(store.getState()), true);
 
   store.dispatch(openAuxTab({ treeId: A, content: { type: 'files', path: 'src/a.ts' } }));
   store.dispatch(openAuxTab({ treeId: A, content: { type: 'files', path: 'src/b.ts' } }));
@@ -230,18 +225,16 @@ test('tab lifecycle: select, new-tab launcher, close neighbours, reorder, params
   assert.equal(pane.activeTabId, NEW_TAB_ID, 'closing every tab shows the launcher');
 });
 
-test('isPaneOpen is per tree and previous agent strips are retained', () => {
+test('one open state for every tree; previous agent strips are retained', () => {
   const store = makeStore();
   store.dispatch(toggleAuxPane({ treeId: A, hasChain: true }));
   store.dispatch(openAuxTab({ treeId: A, content: { type: 'vcs' } }));
-  assert.equal(selectAuxPane(store.getState(), A)!.isPaneOpen, true);
+  assert.equal(selectAuxOpen(store.getState()), true);
   assert.equal(selectAuxPane(store.getState(), B), undefined);
   store.dispatch(ensureAuxPane({ treeId: B, hasChain: true }));
-  assert.ok(!selectAuxPane(store.getState(), B)!.isPaneOpen, 'B starts closed');
-  store.dispatch(setAuxPaneOpen({ treeId: B, open: true }));
-  store.dispatch(toggleAuxPane({ treeId: A }));
-  assert.equal(selectAuxPane(store.getState(), A)!.isPaneOpen, false);
-  assert.equal(selectAuxPane(store.getState(), B)!.isPaneOpen, true);
+  assert.equal(selectAuxOpen(store.getState()), true, 'B does not reset the dock');
+  store.dispatch(toggleAuxPane({ treeId: B }));
+  assert.equal(selectAuxOpen(store.getState()), false, 'toggling from B closes it everywhere');
   assert.deepEqual(selectAuxPane(store.getState(), A)!.tabs.map((t) => t.id), ['overview', 'vcs'], 'A strip retained');
 });
 
@@ -265,12 +258,13 @@ test('hydrate sanitizes persisted aux strips (drops bad tabs, duplicates, smuggl
   } as any);
   assert.deepEqual(clean.agentPanes.a.tabs.map((t) => t.id), ['shell__s1'], 'ids are re-derived from content');
   assert.equal(clean.agentPanes.a.activeTabId, 'shell__s1');
-  assert.equal(clean.agentPanes.a.isPaneOpen, true);
+  assert.equal(clean.isOpen, true, 'a legacy per-strip open flag migrates to the global one');
   assert.equal(clean.agentPanes._new, undefined);
   assert.equal((clean as any).multiPane, undefined, 'the old shared split strip is dropped');
   const store = makeStore();
   store.dispatch(hydrateAuxPanes({ agentPanes: [] }));
-  assert.deepEqual(store.getState().auxPanes, { agentPanes: {} });
+  assert.deepEqual(store.getState().auxPanes, { agentPanes: {}, isOpen: false });
+  assert.equal(sanitizeAuxPanesState({ agentPanes: { a: { tabs: [], isPaneOpen: true } }, isOpen: false }).isOpen, false, 'a saved global flag wins');
 });
 
 test('openPreviewInAux targets the current tree and is a no-op without one', () => {

@@ -293,6 +293,15 @@ WHERE NOT EXISTS (SELECT 1 FROM task_events e WHERE e.task_id = t.task_id AND e.
 -- The legacy votes carry no attempt number and cannot be mapped honestly; they
 -- are dropped (with the table) by upgrade_task_v2_schema.
 
+-- Attention deck (main 087): task cards projected before v2 advertise the v1
+-- `task.vote` op and an `in_validation` guard, neither of which exists any
+-- more. Retire the live ones; startup reconciliation re-projects every task
+-- that awaits the user as a v2 card (task.review / task.answer).
+UPDATE cards SET status = 'resolved', updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+ WHERE card_id LIKE 'crd\_task\_%' ESCAPE '\'
+   AND operations_json LIKE '%"task.vote"%'
+   AND status IN ('pending', 'snoozed');
+
 -- LAST OBJECT (skip-guard key): created only once everything above succeeded.
 CREATE INDEX IF NOT EXISTS idx_tasks_chain_state ON tasks(chain_id, state);
 COMMIT;

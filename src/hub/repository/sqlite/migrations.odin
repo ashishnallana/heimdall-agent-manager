@@ -394,19 +394,27 @@ MIGRATION_085_AGENT_INSTANCE_LAST_ERROR :: #load("migrations/085_agent_instance_
 
 MIGRATION_086_CLAUDE_BYPASS_PERMISSIONS_DETECTION :: #load("migrations/086_claude_bypass_permissions_detection.sql", string)
 
-// MIGRATION_087_TASK_V2 is the Task System v2 cutover: the event-sourced engine
+MIGRATION_087_ATTENTION_CARDS :: #load("migrations/087_attention_cards.sql", string)
+// MIGRATION_088_BRIDGE_ENROLLMENT_PENDING adds enrollment_pending_until
+// to bridges (REQ-EA-1): a bridge is pending until its vault key is delivered.
+MIGRATION_088_BRIDGE_ENROLLMENT_PENDING :: #load("migrations/088_bridge_enrollment_pending.sql", string)
+// MIGRATION_089_MEMORY_PROPOSER records who proposed a memory and on which
+// chain (attention deck memory cards).
+MIGRATION_089_MEMORY_PROPOSER :: #load("migrations/089_memory_proposer.sql", string)
+
+// MIGRATION_090_TASK_V2 is the Task System v2 cutover: the event-sourced engine
 // tables (task_events/attempts/facets/leases/reviews, chain_summaries,
 // workflow_definitions), the new task/chain/fleet columns, and the one-shot
 // legacy status → state / reviewer-ref → fleet-role data migration. The legacy
 // columns and tables are dropped afterwards by upgrade_task_v2_schema.
-MIGRATION_087_TASK_V2 :: #load("migrations/087_task_v2.sql", string)
+MIGRATION_090_TASK_V2 :: #load("migrations/090_task_v2.sql", string)
 
-// 088: agent_instances.stopped_by — a user stop sticks (Task System v2 F4).
-MIGRATION_088_AGENT_INSTANCE_STOPPED_BY :: #load("migrations/088_agent_instance_stopped_by.sql", string)
+// 091: agent_instances.stopped_by — a user stop sticks (Task System v2 F4).
+MIGRATION_091_AGENT_INSTANCE_STOPPED_BY :: #load("migrations/091_agent_instance_stopped_by.sql", string)
 
 MIGRATION_075_CONVERSATION_LAUNCH_PREFERENCES :: #load("migrations/075_conversation_launch_preferences.sql", string)
 
-migration_order :: [92]string {
+migration_order :: [95]string {
 	"001_foundation.sql",
 	"002_owner_scoped_core.sql",
 	"003_device_tokens.sql",
@@ -497,8 +505,11 @@ migration_order :: [92]string {
 	"084_bridge_log_events.sql",
 	"085_agent_instance_last_error.sql",
 	"086_claude_bypass_permissions_detection.sql",
-	"087_task_v2.sql",
-	"088_agent_instance_stopped_by.sql",
+	"087_attention_cards.sql",
+	"088_bridge_enrollment_pending.sql",
+	"089_memory_proposer.sql",
+	"090_task_v2.sql",
+	"091_agent_instance_stopped_by.sql",
 }
 
 // stop_before is a TEST SEAM: when non-empty, the apply loop stops in front of
@@ -777,6 +788,16 @@ run_migrations :: proc(
 			mark_migration_applied(conn, name)
 			continue
 		}
+		if name == "089_memory_proposer.sql" &&
+		   table_column_exists(conn, "memories", "proposed_in_chain_id") {
+			mark_migration_applied(conn, name)
+			continue
+		}
+		if name == "088_bridge_enrollment_pending.sql" &&
+		   table_column_exists(conn, "bridges", "enrollment_pending_until") {
+			mark_migration_applied(conn, name)
+			continue
+		}
 		// 057 creates a TABLE plus two indexes, all with IF NOT EXISTS, so unlike the
 		// ADD COLUMN migrations above it is already idempotent and strictly does not
 		// need a guard. It gets one anyway, for the same reason 053-056 have one: a
@@ -799,12 +820,19 @@ run_migrations :: proc(
 			mark_migration_applied(conn, name)
 			continue
 		}
-		// 087 runs inside its own BEGIN/COMMIT, so it is either fully applied or
+		// 090 runs inside its own BEGIN/COMMIT, so it is either fully applied or
 		// absent; the guard only has to recognise a database that reached the schema
 		// through a pre-ledger path. Keyed on the LAST object the file creates
 		// (idx_tasks_chain_state) so nothing short of a complete apply reads as done.
-		if name == "087_task_v2.sql" &&
+		if name == "090_task_v2.sql" &&
 		   sqlite_object_exists(conn, "idx_tasks_chain_state") {
+			mark_migration_applied(conn, name)
+			continue
+		}
+		// A database that ran this file under its pre-merge name (088) has the
+		// column but not the ledger row for the new name.
+		if name == "091_agent_instance_stopped_by.sql" &&
+		   table_column_exists(conn, "agent_instances", "stopped_by") {
 			mark_migration_applied(conn, name)
 			continue
 		}
@@ -941,8 +969,11 @@ migration_sql :: proc(name, migrations_dir: string) -> string {
 	if name == "084_bridge_log_events.sql" do return strings.clone(MIGRATION_084_BRIDGE_LOG_EVENTS)
 	if name == "085_agent_instance_last_error.sql" do return strings.clone(MIGRATION_085_AGENT_INSTANCE_LAST_ERROR)
 	if name == "086_claude_bypass_permissions_detection.sql" do return strings.clone(MIGRATION_086_CLAUDE_BYPASS_PERMISSIONS_DETECTION)
-	if name == "087_task_v2.sql" do return strings.clone(MIGRATION_087_TASK_V2)
-	if name == "088_agent_instance_stopped_by.sql" do return strings.clone(MIGRATION_088_AGENT_INSTANCE_STOPPED_BY)
+	if name == "087_attention_cards.sql" do return strings.clone(MIGRATION_087_ATTENTION_CARDS)
+	if name == "088_bridge_enrollment_pending.sql" do return strings.clone(MIGRATION_088_BRIDGE_ENROLLMENT_PENDING)
+	if name == "089_memory_proposer.sql" do return strings.clone(MIGRATION_089_MEMORY_PROPOSER)
+	if name == "090_task_v2.sql" do return strings.clone(MIGRATION_090_TASK_V2)
+	if name == "091_agent_instance_stopped_by.sql" do return strings.clone(MIGRATION_091_AGENT_INSTANCE_STOPPED_BY)
 	if name == "081_antigravity_models.sql" do return strings.clone(MIGRATION_081_ANTIGRAVITY_MODELS)
 	if name == "080_copilot_launch_recipe.sql" do return strings.clone(MIGRATION_080_COPILOT_LAUNCH_RECIPE)
 	if name == "079_repair_provider_catalog_etag.sql" do return strings.clone(MIGRATION_079_REPAIR_PROVIDER_CATALOG_ETAG)

@@ -81,6 +81,10 @@ Bridge_Mint_Result :: struct {
 	expires_in:         int,
 	refresh_expires_in: int,
 	vault_delivery_expected: bool,
+	// error, when set on a failed mint, is the reason the approver sees instead of
+	// the generic "could not issue". Used for refusals that are the approver's to fix,
+	// such as enrolling a bridge before setting up a vault (REQ-EA, decision A).
+	error: domain.Domain_Error,
 }
 
 // Bridge_Token_Minter mints a bridge-scoped credential pair. Returns ok=false to
@@ -320,7 +324,10 @@ approve :: proc(service: ^Device_Auth_Service, input: Approve_Input, owner_user_
 				target_bridge_id = input.target_bridge_id,
 				new_bridge_label = input.new_bridge_label,
 			})
-			if !tok_ok do return false, domain.domain_error(.Internal_Error, "could not issue bridge credential")
+			if !tok_ok {
+				if mint.error.code != .None do return false, mint.error
+				return false, domain.domain_error(.Internal_Error, "could not issue bridge credential")
+			}
 			// A minter that returns no bridge_id would leave the credential
 			// unattributable, which defeats the point; refuse it.
 			if mint.bridge_id == "" do return false, domain.domain_error(.Internal_Error, "bridge credential was issued without a bridge id")

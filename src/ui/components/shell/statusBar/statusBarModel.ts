@@ -5,7 +5,6 @@
 import type { LiveProject } from '../../../api/endpoints/agentsLive';
 import type { ShellSession } from '../../../api/endpoints/shells';
 import { isLiveRuntimeStatus } from '../../agents/agentModel';
-import { composerBridgeIsArchived, composerBridgeIsOnline } from '../../../utils/composerBridgeOptions';
 
 /**
  * Live agent instances across every project. A cross-project chain lists an agent
@@ -21,11 +20,6 @@ export function countRunningInstances(projects: readonly LiveProject[] | null | 
     }
   }
   return ids.size;
-}
-
-/** Bridges that are online with a connected runtime (the composer's own rule). */
-export function countConnectedBridges(bridges: readonly any[] | null | undefined): number {
-  return (bridges || []).filter((bridge) => !composerBridgeIsArchived(bridge) && composerBridgeIsOnline(bridge)).length;
 }
 
 /** A shell that is serving a port the hub can tunnel to the user. */

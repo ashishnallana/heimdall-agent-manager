@@ -340,3 +340,34 @@ test('REQ-AUX-10: bridge reauthentication keeps an unlocked browser open and for
   assert.match(source, /!isBridgeReauthentication \? \([\s\S]*vault-onboarding-remember-checkbox/);
 });
 
+
+test('vault setup explains the vault password is separate from login and used for E2E encryption', () => {
+  const read = (rel: string) => fs.readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
+  const note = read('../src/ui/components/settings/VaultPasswordPurposeNote.tsx');
+  assert.match(note, /different from your login password/);
+  assert.match(note, /end-to-end encryption of your messages and remote connections/);
+
+  // Rendered in the modal's CREATION form, before the password field, and not in
+  // its unlock form. VaultPanel's setup wizard is asserted in ui_vault_panel_test.ts.
+  const surfaces = [
+    {
+      file: '../src/ui/components/settings/VaultOnboardingModal.tsx',
+      setupForm: 'data-debug-id="vault-onboarding-setup-form"',
+      passwordInput: 'vault-onboarding-master-password-input',
+      unlockMarkers: ['data-debug-id="vault-onboarding-unlock-form"'],
+    },
+  ];
+  for (const surface of surfaces) {
+    const source = read(surface.file);
+    const uses = source.split('<VaultPasswordPurposeNote />').length - 1;
+    assert.equal(uses, 1, `${surface.file}: note rendered exactly once`);
+    const noteAt = source.indexOf('<VaultPasswordPurposeNote />');
+    const setupAt = source.indexOf(surface.setupForm);
+    assert.ok(setupAt >= 0 && noteAt > setupAt, `${surface.file}: note is inside the setup form`);
+    assert.ok(noteAt < source.indexOf(surface.passwordInput), `${surface.file}: note precedes the password field`);
+    for (const marker of surface.unlockMarkers) {
+      const unlockAt = source.indexOf(marker);
+      assert.ok(unlockAt > noteAt, `${surface.file}: note is not in ${marker}`);
+    }
+  }
+});

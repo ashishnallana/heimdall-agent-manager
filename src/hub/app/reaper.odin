@@ -1,5 +1,6 @@
 package app
 
+import "core:fmt"
 import "core:time"
 import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
@@ -7,6 +8,7 @@ import agent_service "odin_test:hub/service/agent"
 import events "odin_test:hub/service/events"
 import http "odin_test:hub/transport/http"
 import bridge_service "odin_test:hub/service/bridge"
+import card_service "odin_test:hub/service/card"
 import bridge_log_service "odin_test:hub/service/bridge_log"
 import project_service "odin_test:hub/service/project"
 import provider_service "odin_test:hub/service/provider"
@@ -104,10 +106,35 @@ reaper_loop :: proc(graph: ^App_Graph) {
 	if graph == nil do return
 	interval := graph.config.reaper_interval_seconds
 	if interval <= 0 do interval = DEFAULT_REAPER_INTERVAL_SECONDS
+	// Attention cards: reconcile once at startup, then on the sweep cadence below.
+	attention_reconcile_maybe(graph, true)
+	// REQ-EA-3: once at startup, before the first interval, so an enrollment that was
+	// pending when the hub stopped is rolled back as soon as the hub is back.
+	reaper_sweep_pending_enrollments(graph)
 	for {
 		time.sleep(time.Duration(interval) * time.Second)
 		reaper_sweep_once(graph)
+		attention_reconcile_maybe(graph, false)
 	}
+}
+
+// ATTENTION_RECONCILE_INTERVAL_SECONDS: how often the attention-card
+// reconciliation (card_service.reconcile_attention) re-checks every source.
+// Write-through keeps cards current; this only repairs a missed notification,
+// so it can be infrequent.
+ATTENTION_RECONCILE_INTERVAL_SECONDS :: 10 * 60
+
+attention_last_reconcile: time.Tick
+
+// attention_reconcile_maybe rides the reaper thread (no extra timer thread). It
+// runs when forced or when the interval has elapsed since the last run.
+attention_reconcile_maybe :: proc(graph: ^App_Graph, force: bool) {
+	if graph == nil do return
+	now := time.tick_now()
+	if !force && attention_last_reconcile != {} && time.tick_diff(attention_last_reconcile, now) < time.Duration(ATTENTION_RECONCILE_INTERVAL_SECONDS) * time.Second do return
+	attention_last_reconcile = now
+	stats := card_service.reconcile_attention(&graph.cards)
+	if stats.failed > 0 do fmt.eprintfln("ham-hub WARN attention reconcile: owners=%d projected=%d failed=%d last_failure=%s code=%v", stats.owners, stats.projected, stats.failed, stats.last_failure, stats.last_failure_code)
 }
 
 // reaper_sweep_once performs a single stale-instance sweep + event fan-out. Split
@@ -142,6 +169,10 @@ reaper_sweep_once :: proc(graph: ^App_Graph) {
 	// exists to remove. Like retention, a failure is swallowed rather than allowed to
 	// abort the stale-instance reap below, which is the safety net this loop is for.
 	reaper_sweep_gone_bridges(graph)
+
+	// REQ-EA-3: pending enrollments past their deadline are rolled back, so a bridge
+	// whose vault key never arrived is never left enrolled.
+	reaper_sweep_pending_enrollments(graph)
 
 	// bridge_log relay (plan §4.3): the 7-day time prune of bridge_log_events
 	// rides this sweep but runs only every 15 min (by the received_at index);
@@ -195,6 +226,26 @@ reaper_sweep_once :: proc(graph: ^App_Graph) {
 		)
 		delete(summary)
 	}
+}
+
+// reaper_sweep_pending_enrollments rolls back every pending enrollment past its
+// deadline (REQ-EA-3), closes any enroll-only socket still open for it, and tells the
+// owner's UI. Returns how many were rolled back. Everything it allocates is freed:
+// this runs on the reaper thread, which has no per-request arena.
+reaper_sweep_pending_enrollments :: proc(graph: ^App_Graph) -> int {
+	if graph == nil do return 0
+	rolled := bridge_service.sweep_expired_enrollments(&graph.bridges)
+	defer bridge_service.rolled_back_enrollments_destroy(rolled)
+	for r in rolled {
+		key := http.bridge_enroll_registry_key(r.bridge_id)
+		// Before the close: a process that already saved its key undoes it on this.
+		http.bridge_enroll_send_result(&graph.bridge_runtime_registry, key, false)
+		_ = bridge_service.close_bridge_connection(&graph.bridges, key)
+		delete(key)
+		fmt.eprintfln("hub: bridge %s enrollment rolled back (vault key not delivered in time; row deleted: %v)", r.bridge_id, r.row_deleted)
+		events.publish_resource_changed(&graph.event_bus, r.owner_user_id, "bridge", r.bridge_id, "bridge_enrollment_changed", "{}")
+	}
+	return len(rolled)
 }
 
 // reaper_sweep_gone_bridges lands a terminal status on the live shell sessions of every

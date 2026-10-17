@@ -11,7 +11,9 @@
 package sqlite
 
 import "core:strconv"
+import "core:sync"
 import domain "odin_test:hub/domain"
+import iface "odin_test:hub/repository/iface"
 
 BRIDGE_TOKEN_COLUMNS :: "token_id, bridge_id, kind, token_hash, family_id, generation, scope, issued_at, expires_at, family_expires_at, rotated_at, revoked_at"
 
@@ -92,6 +94,24 @@ bridge_revoke_token_family_sqlite :: proc(ctx: rawptr, family_id, revoked_at: st
 	return int(sqlite3_changes(impl.conn.db)), true, domain.Domain_Error{}
 }
 
+// bridge_revoke_token_family_in_scope_sqlite revokes a family's live rows only while
+// they still carry `scope` (REQ-EA-3). The scope test is in the same UPDATE, so it
+// is atomic with the commit's promote: whichever takes the write lock first wins,
+// and a promoted family matches 0 rows here.
+bridge_revoke_token_family_in_scope_sqlite :: proc(ctx: rawptr, family_id, scope, revoked_at: string) -> (int, bool, domain.Domain_Error) {
+	impl := (^Bridge_Repo_SQLite)(ctx)
+	if family_id == "" || scope == "" || revoked_at == "" do return 0, false, domain.domain_error(.Validation_Failed, "family_id, scope and revoked_at are required")
+	stmt: sqlite3_stmt = nil
+	query := "UPDATE bridge_tokens SET revoked_at = ? WHERE family_id = ? AND scope = ? AND revoked_at = '';"
+	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return 0, false, domain.domain_error(.Internal_Error, "failed to prepare scoped bridge token family revoke")
+	defer sqlite3_finalize(stmt)
+	bind_text(stmt, 1, revoked_at)
+	bind_text(stmt, 2, family_id)
+	bind_text(stmt, 3, scope)
+	if sqlite3_step(stmt) != SQLITE_DONE do return 0, false, domain.domain_error(.Internal_Error, "bridge token family could not be revoked")
+	return int(sqlite3_changes(impl.conn.db)), true, domain.Domain_Error{}
+}
+
 // bridge_revoke_tokens_for_bridge_sqlite is per-MACHINE revocation (§11.7.2): the
 // operator revokes a bridge, and every credential of that bridge dies — including
 // families from an earlier enrollment of the same machine. Keyed on bridge_id, so a
@@ -128,6 +148,113 @@ bridge_mark_token_rotated_sqlite :: proc(ctx: rawptr, token_id, rotated_at: stri
 	bind_text(stmt, 2, token_id)
 	if sqlite3_step(stmt) != SQLITE_DONE do return false, domain.domain_error(.Internal_Error, "bridge token could not be marked rotated")
 	return sqlite3_changes(impl.conn.db) > 0, domain.Domain_Error{}
+}
+
+// bridge_commit_enrollment_sqlite is the enrollment COMMIT (REQ-EA-2/8), in ONE
+// transaction:
+//
+//   1. promote the family from_scope -> to_scope. The `scope = from_scope` guard makes
+//      it a compare-and-set: a revoked or already-promoted family changes 0 rows.
+//   2. attach: revoke every OTHER live family of the bridge (the old device);
+//      new bridge: clear enrollment_pending_until, so the sweep never deletes a row
+//      whose credential is now live.
+//
+// Either both happen or neither does. A 0-row promote is told apart: a family that
+// is already live in to_scope is a duplicate result (Already_Committed, nothing
+// changes), anything else was rolled back (Not_Pending).
+//
+// BEGIN IMMEDIATE takes the write lock up front, as billing_repo_sqlite does, so a
+// concurrent sweep cannot revoke the family between the read and the write.
+bridge_commit_enrollment_sqlite :: proc(ctx: rawptr, bridge_id, family_id, from_scope, to_scope: string, attach: bool, now: string) -> (iface.Enrollment_Commit_Outcome, bool, domain.Domain_Error) {
+	impl := (^Bridge_Repo_SQLite)(ctx)
+	if bridge_id == "" || family_id == "" || from_scope == "" || to_scope == "" || now == "" {
+		return .Not_Pending, false, domain.domain_error(.Validation_Failed, "bridge_id, family_id, scopes and now are required")
+	}
+	if impl.commit != nil {
+		sync.mutex_lock(&impl.commit.mutex)
+		defer sync.mutex_unlock(&impl.commit.mutex)
+		return bridge_commit_enrollment_on(&impl.commit.conn, bridge_id, family_id, from_scope, to_scope, attach, now)
+	}
+	// No dedicated connection: only an in-memory database, which a second connection
+	// cannot open. Single-connection use (tests) has nothing to interleave with.
+	return bridge_commit_enrollment_on(impl.conn, bridge_id, family_id, from_scope, to_scope, attach, now)
+}
+
+// bridge_enroll_commit_test_hook runs between the promote and the swap, inside the
+// transaction. Test-only: it lets a test act on ANOTHER connection mid-transaction.
+// It is handed the bridge_id so a test acts only on its own commit: tests run in
+// parallel, and this is a package global.
+bridge_enroll_commit_test_hook: proc(bridge_id: string)
+
+@(private = "file")
+bridge_commit_enrollment_on :: proc(conn: ^Conn, bridge_id, family_id, from_scope, to_scope: string, attach: bool, now: string) -> (iface.Enrollment_Commit_Outcome, bool, domain.Domain_Error) {
+	fail :: proc(msg: string) -> (iface.Enrollment_Commit_Outcome, bool, domain.Domain_Error) {
+		return .Not_Pending, false, domain.domain_error(.Internal_Error, msg)
+	}
+	if !exec(conn, "BEGIN IMMEDIATE;") do return fail("failed to begin the enrollment commit")
+	committed := false
+	defer if !committed do _ = exec(conn, "ROLLBACK;")
+
+	promoted := 0
+	{
+		stmt: sqlite3_stmt = nil
+		query := "UPDATE bridge_tokens SET scope = ? WHERE family_id = ? AND bridge_id = ? AND scope = ? AND revoked_at = '';"
+		if sqlite3_prepare_v2(conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return fail("failed to prepare the enrollment promote")
+		defer sqlite3_finalize(stmt)
+		bind_text(stmt, 1, to_scope)
+		bind_text(stmt, 2, family_id)
+		bind_text(stmt, 3, bridge_id)
+		bind_text(stmt, 4, from_scope)
+		if sqlite3_step(stmt) != SQLITE_DONE do return fail("the enrollment family could not be promoted")
+		promoted = int(sqlite3_changes(conn.db))
+	}
+	when ODIN_TEST {
+		if bridge_enroll_commit_test_hook != nil do bridge_enroll_commit_test_hook(bridge_id)
+	}
+	if promoted == 0 {
+		stmt: sqlite3_stmt = nil
+		query := "SELECT COUNT(*) FROM bridge_tokens WHERE family_id = ? AND bridge_id = ? AND scope = ? AND revoked_at = '';"
+		if sqlite3_prepare_v2(conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return fail("failed to prepare the enrollment state read")
+		defer sqlite3_finalize(stmt)
+		bind_text(stmt, 1, family_id)
+		bind_text(stmt, 2, bridge_id)
+		bind_text(stmt, 3, to_scope)
+		if sqlite3_step(stmt) != SQLITE_ROW do return fail("the enrollment state could not be read")
+		live := int(sqlite3_column_int64(stmt, 0))
+		// Nothing was written; the deferred ROLLBACK ends the read transaction.
+		return (.Already_Committed if live > 0 else .Not_Pending), true, domain.Domain_Error{}
+	}
+	{
+		stmt: sqlite3_stmt = nil
+		query := "UPDATE bridge_tokens SET revoked_at = ? WHERE bridge_id = ? AND family_id != ? AND revoked_at = '';" if attach else "UPDATE bridges SET enrollment_pending_until = '' WHERE bridge_id = ?;"
+		if sqlite3_prepare_v2(conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return fail("failed to prepare the enrollment swap")
+		defer sqlite3_finalize(stmt)
+		if attach {
+			bind_text(stmt, 1, now)
+			bind_text(stmt, 2, bridge_id)
+			bind_text(stmt, 3, family_id)
+		} else {
+			bind_text(stmt, 1, bridge_id)
+		}
+		if sqlite3_step(stmt) != SQLITE_DONE do return fail("the enrollment swap failed; nothing was committed")
+	}
+	if !exec(conn, "COMMIT;") do return fail("failed to commit the enrollment")
+	committed = true
+	return .Committed, true, domain.Domain_Error{}
+}
+
+// bridge_list_live_tokens_by_scope_sqlite returns every unrevoked token of a scope:
+// the pending-enrollment sweep (REQ-EA-3) reads BRIDGE_ENROLL_TOKEN_SCOPE through it.
+bridge_list_live_tokens_by_scope_sqlite :: proc(ctx: rawptr, scope: string) -> ([]domain.Bridge_Token, domain.Domain_Error) {
+	impl := (^Bridge_Repo_SQLite)(ctx)
+	stmt: sqlite3_stmt = nil
+	query := "SELECT " + BRIDGE_TOKEN_COLUMNS + " FROM bridge_tokens WHERE scope = ? AND revoked_at = '';"
+	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return nil, domain.domain_error(.Internal_Error, "failed to prepare bridge token scope list")
+	defer sqlite3_finalize(stmt)
+	bind_text(stmt, 1, scope)
+	out := make([dynamic]domain.Bridge_Token)
+	for sqlite3_step(stmt) == SQLITE_ROW do append(&out, bridge_token_from_stmt(stmt))
+	return out[:], domain.Domain_Error{}
 }
 
 bridge_token_from_stmt :: proc(stmt: sqlite3_stmt) -> domain.Bridge_Token {

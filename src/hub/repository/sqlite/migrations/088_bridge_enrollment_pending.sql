@@ -1,0 +1,15 @@
+-- REQ-EA-1: a bridge enrolled by an owner who has a vault is PENDING until the hub
+-- observes the vault key being delivered to it (REQ-EA-2). Only then does it count as
+-- enrolled. enrollment_pending_until is '' for a committed bridge and the RFC 3339
+-- deadline for a pending one; a pending bridge not committed by then is rolled back,
+-- which hard-deletes this row and revokes its tokens (REQ-EA-3).
+--
+-- This is a separate column, not a Bridge_Status value, because status is LIVENESS:
+-- bridge_runtime_connect and every heartbeat overwrite it with online/offline, which
+-- would silently promote a pending bridge the moment its enroll-only socket connected.
+-- One column rather than a state + deadline pair, so the file is a single statement
+-- and cannot be left half-applied.
+--
+-- DEFAULT '' means "committed", so every bridge that exists when this runs keeps
+-- working exactly as before.
+ALTER TABLE bridges ADD COLUMN enrollment_pending_until TEXT NOT NULL DEFAULT '';

@@ -19,6 +19,7 @@ import agent_service "odin_test:hub/service/agent"
 import events "odin_test:hub/service/events"
 import platform "odin_test:hub/platform"
 import bridge_service "odin_test:hub/service/bridge"
+import device_auth_service "odin_test:hub/service/device_auth"
 import bridge_log_service "odin_test:hub/service/bridge_log"
 import bridge_runtime_service "odin_test:hub/service/bridge_runtime"
 import content_service "odin_test:hub/service/content"
@@ -66,11 +67,25 @@ list_bridges_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	if !ok do return auth_resp
 	bridges, err := bridge_service.list_bridges(h.bridges, auth_ctx)
 	if err.code != .None do return respond_error(err, req.request_id)
+	// REQ-EA-1: list_bridges returns enrolled bridges only. ?include_pending=1 (the
+	// Settings view) also returns the owner's pending enrollments, marked
+	// enrollment_state:"pending", after them. Opt-in, so a picker, an agent or an
+	// older client never offers a bridge that is not enrolled yet.
+	pending: []domain.Bridge
+	if query_bool(req.query, "include_pending", false) do pending = bridge_service.list_pending_bridges(h.bridges, auth_ctx)
+	defer { for &p in pending do domain.bridge_destroy(&p); delete(pending) }
 	b := strings.builder_make()
 	strings.write_byte(&b, '[')
-	for bridge, i in bridges {
-		if i > 0 do strings.write_byte(&b, ',')
+	n := 0
+	for bridge in bridges {
+		if n > 0 do strings.write_byte(&b, ',')
 		write_bridge_json(&b, bridge, h.agents, h.bridges.catalog)
+		n += 1
+	}
+	for bridge in pending {
+		if n > 0 do strings.write_byte(&b, ',')
+		write_bridge_json(&b, bridge, h.agents, h.bridges.catalog)
+		n += 1
 	}
 	strings.write_byte(&b, ']')
 	return respond_list(strings.to_string(b), contracts.API_Page{limit = contracts.API_DEFAULT_PAGE_LIMIT, has_more = false}, req.request_id, auth_ctx_server_time(req))
@@ -271,16 +286,55 @@ mkdir_bridge_path_handler :: proc(ctx: rawptr, req: Request) -> Response {
 
 // Hub-blind E2EE unseal relay handler (REQ-VAULT-HARDEN-3, REQ-VAULT-HARDEN-8).
 // Relays blind ciphertext directly to Bridge via WS send_runtime_command_wait.
+//
+// REQ-EA-2: this is also where an enrollment COMMITS. The relay has two targets:
+//
+//   - the ENROLL-ONLY socket (bridge_enroll_ws.odin), when the bridge is a pending
+//     enrollment or the approval page asked for it with "enrollment":true. An
+//     attach shares its bridge_id with a device that may be online, so the page
+//     says which one it means rather than the hub guessing;
+//   - the RUNTIME socket otherwise, exactly as before (Settings -> Unlock).
+//
+// For the enroll target the hub reads the bridge's answer, and ok:true — which a
+// current bridge sends only after the key is stored, read back and its credential
+// persisted — commits the enrollment. That answer is observed by the hub on its own
+// socket, not reported about itself by the bridge in a later frame, so it may gate
+// enrollment where domain.Bridge.vault_status may not.
 bridge_unseal_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Bridge_Handlers)(ctx)
 	auth_ctx, auth_ok, auth_resp := require_auth(h.auth, req)
 	if !auth_ok do return auth_resp
 
 	bridge_id := path_part(req.path, 4)
-	bridge, bridge_ok, bridge_err := bridge_service.get_bridge(h.bridges, auth_ctx, bridge_id)
+	bridge, bridge_ok, bridge_err := bridge_service.get_bridge_for_enrollment(h.bridges, auth_ctx, bridge_id)
 	if !bridge_ok do return respond_error(bridge_err, req.request_id)
 	if bridge.status == .Revoked do return respond_error(domain.domain_error(.Bridge_Revoked, "bridge is revoked"), req.request_id)
-	if bridge.status != .Online || !project_service.bridge_runtime_registry_has_live(h.bridge_runtime_registry, bridge.bridge_id) {
+
+	pending := domain.bridge_is_pending(bridge)
+	enroll_target := pending || json_bool_value(req.body, "enrollment")
+	target_key := bridge.bridge_id
+	enroll_key := ""
+	defer if enroll_key != "" do delete(enroll_key)
+	if enroll_target {
+		enroll_key = bridge_enroll_registry_key(bridge.bridge_id)
+		if !project_service.bridge_runtime_registry_has_live(h.bridge_runtime_registry, enroll_key) {
+			return respond_error(domain.Domain_Error{code = .Bridge_Offline, cause = "enrollment_not_connected", message = "the enrolling bridge is not connected; its enrollment may have been rolled back — run `ham-bridge enroll` again"}, req.request_id)
+		}
+		// REQ-EA-7: refuse a seal addressed to a key the enrolling process does not
+		// hold, with a reason, instead of relaying it into a bridge-side AEAD failure
+		// that reads like tampering. Advisory only — the crypto is the real check.
+		expected_raw := json_string(req.body, "expected_public_key")
+		defer delete(expected_raw)
+		expected := strings.to_lower(strings.trim_space(expected_raw), context.temp_allocator)
+		if expected != "" {
+			live := project_service.bridge_runtime_registry_public_key(h.bridge_runtime_registry, enroll_key)
+			defer delete(live)
+			if strings.to_lower(live, context.temp_allocator) != expected {
+				return respond_error(domain.Domain_Error{code = .Conflict, cause = "enrollment_key_mismatch", message = "the connected enrolling process does not hold the key you confirmed; run `ham-bridge enroll` again and approve the new request"}, req.request_id)
+			}
+		}
+		target_key = enroll_key
+	} else if bridge.status != .Online || !project_service.bridge_runtime_registry_has_live(h.bridge_runtime_registry, bridge.bridge_id) {
 		return respond_error(domain.domain_error(.Bridge_Offline, fmt.tprintf("Bridge %s is not connected", bridge.bridge_id)), req.request_id)
 	}
 
@@ -317,11 +371,46 @@ bridge_unseal_handler :: proc(ctx: rawptr, req: Request) -> Response {
 
 	reply, reply_ok, reply_err := bridge_runtime_service.send_runtime_command_wait(
 		h.bridge_runtime_registry,
-		project_service.Runtime_Command{bridge_id = bridge.bridge_id, command_id = cmd_id, body_json = cmd_body},
+		project_service.Runtime_Command{bridge_id = target_key, command_id = cmd_id, body_json = cmd_body},
 		10000,
 	)
 	if !reply_ok do return respond_error(reply_err, req.request_id)
+	if enroll_target && json_bool_value(reply, "ok") {
+		commit_err, committed := bridge_enroll_commit(h, bridge)
+		// Tell the enrolling process the verdict: it has already persisted its key
+		// and credential, and undoes them on committed:false (REQ-EA-4).
+		bridge_enroll_send_result(h.bridge_runtime_registry, target_key, committed)
+		if !committed do return respond_error(commit_err, req.request_id)
+	}
 	return respond_success(reply, req.request_id, auth_ctx_server_time(req))
+}
+
+// bridge_enroll_commit turns an observed successful delivery into an enrollment
+// (REQ-EA-2), using what the enroll-only socket's hello recorded. On failure the
+// enrollment is left to the sweep, which rolls it back; the bridge's own credential
+// then stops authenticating, which is the "never enrolled" outcome.
+bridge_enroll_commit :: proc(h: ^Bridge_Handlers, bridge: domain.Bridge) -> (domain.Domain_Error, bool) {
+	hello, found := bridge_enroll_hello_get(bridge.bridge_id)
+	if !found do return domain.Domain_Error{code = .Conflict, cause = "enrollment_not_connected", message = "the enrolling bridge disconnected before its enrollment could be committed"}, false
+	defer bridge_enroll_hello_destroy(&hello)
+	fingerprint, _ := device_auth_service.bridge_key_fingerprint_for(hello.public_key, context.temp_allocator)
+	committed, ok, err := bridge_service.commit_pending_enrollment(h.bridges, bridge_service.Pending_Commit_Input{
+		bridge_id = bridge.bridge_id,
+		family_id = hello.family_id,
+		machine_hostname = hello.hostname,
+		machine_os = hello.os,
+		bridge_version = hello.version,
+		bridge_public_key = hello.public_key,
+		bridge_key_fingerprint = fingerprint,
+	})
+	if !ok {
+		fmt.eprintfln("hub: bridge %s enrollment commit FAILED: %s", bridge.bridge_id, err.message)
+		return err, false
+	}
+	defer { b := committed; domain.bridge_destroy(&b) }
+	fmt.eprintfln("hub: bridge %s enrollment committed (vault key delivered)", bridge.bridge_id)
+	publish_bridge_enrollment_changed(h, string(committed.owner_user_id), committed.bridge_id)
+	return domain.Domain_Error{}, true
 }
 
 // Hub-blind, single-target task-chain search relay. The Hub authorizes only the
@@ -370,20 +459,90 @@ task_chain_search_relay_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	return respond_success(reply, req.request_id, auth_ctx_server_time(req))
 }
 
+// bridge_enrollment_status_handler serves GET /api/v1/bridges/<id>/enrollment for the
+// approval page (REQ-EA-6): whether the enrollment is still pending, whether the
+// enroll-only process is connected to receive the key, and the key it holds — which
+// is what the page seals to and what the REQ-EA-7 guard compares against.
+bridge_enrollment_status_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Bridge_Handlers)(ctx)
+	auth_ctx, auth_ok, auth_resp := require_auth(h.auth, req)
+	if !auth_ok do return auth_resp
+	bridge_id := path_part(req.path, 4)
+	bridge, bridge_ok, bridge_err := bridge_service.get_bridge_for_enrollment(h.bridges, auth_ctx, bridge_id)
+	if !bridge_ok do return respond_error(bridge_err, req.request_id)
+	enroll_key := bridge_enroll_registry_key(bridge.bridge_id)
+	defer delete(enroll_key)
+	connected := project_service.bridge_runtime_registry_has_live(h.bridge_runtime_registry, enroll_key)
+	live_key := ""
+	if connected do live_key = project_service.bridge_runtime_registry_public_key(h.bridge_runtime_registry, enroll_key)
+	defer delete(live_key)
+	family, has_family, family_err := bridge_service.pending_enrollment_family(h.bridges, bridge.bridge_id)
+	defer delete(family)
+	if family_err.code != .None do return respond_error(family_err, req.request_id)
+	// An attach has no pending row; its pending-ness is a live enroll-scoped family.
+	pending := domain.bridge_is_pending(bridge) || has_family
+	b := strings.builder_make()
+	strings.write_string(&b, "{\"bridge_id\":\""); write_handler_json_string(&b, bridge.bridge_id)
+	strings.write_string(&b, "\",\"enrollment_state\":\""); strings.write_string(&b, "pending" if pending else "enrolled")
+	strings.write_string(&b, "\",\"enrollment_pending_until\":\""); write_handler_json_string(&b, bridge.enrollment_pending_until)
+	strings.write_string(&b, "\",\"enroll_connected\":"); strings.write_string(&b, "true" if connected else "false")
+	strings.write_string(&b, ",\"enroll_public_key\":\""); write_handler_json_string(&b, live_key)
+	strings.write_string(&b, "\",\"vault_status\":\""); write_handler_json_string(&b, bridge.vault_status)
+	strings.write_string(&b, "\"}")
+	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req))
+}
+
+// bridge_enrollment_cancel_handler serves POST /api/v1/bridges/<id>/enrollment/cancel:
+// the operator abandons a pending enrollment, which rolls it back now instead of at
+// the deadline (REQ-EA-3). An attach target is left as it was. Idempotent.
+bridge_enrollment_cancel_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Bridge_Handlers)(ctx)
+	auth_ctx, auth_ok, auth_resp := require_auth(h.auth, req)
+	if !auth_ok do return auth_resp
+	bridge_id := path_part(req.path, 4)
+	bridge, bridge_ok, bridge_err := bridge_service.get_bridge_for_enrollment(h.bridges, auth_ctx, bridge_id)
+	if !bridge_ok do return respond_error(bridge_err, req.request_id)
+	enroll_key := bridge_enroll_registry_key(bridge.bridge_id)
+	defer delete(enroll_key)
+	// The verdict comes from the rollback itself, never from the request: a commit
+	// that won the write lock first has made this bridge enrolled, and telling its
+	// process committed:false could make it discard the live credential. Any read
+	// failure on the way is an error response with nothing sent or deleted.
+	rolled_back, removed, err := bridge_service.cancel_pending_enrollment(h.bridges, bridge.bridge_id)
+	if err.code != .None do return respond_error(err, req.request_id)
+	if rolled_back {
+		// Before the close: a process that already saved its key undoes it on this;
+		// one that misses it still sees its credential refused on reconnect.
+		bridge_enroll_send_result(h.bridge_runtime_registry, enroll_key, false)
+		_ = bridge_service.close_bridge_connection(h.bridges, enroll_key)
+	}
+	publish_bridge_enrollment_changed(h, string(bridge.owner_user_id), bridge.bridge_id)
+	return respond_success(fmt.tprintf("{{\"bridge_id\":\"%s\",\"rolled_back\":%v,\"committed\":%v,\"row_deleted\":%v}}", bridge.bridge_id, rolled_back, !rolled_back, removed), req.request_id, auth_ctx_server_time(req))
+}
+
 bridge_public_key_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Bridge_Handlers)(ctx)
 	auth_ctx, auth_ok, auth_resp := require_auth(h.auth, req)
 	if !auth_ok do return auth_resp
 
 	bridge_id := path_part(req.path, 4)
-	bridge, bridge_ok, bridge_err := bridge_service.get_bridge(h.bridges, auth_ctx, bridge_id)
+	bridge, bridge_ok, bridge_err := bridge_service.get_bridge_for_enrollment(h.bridges, auth_ctx, bridge_id)
 	if !bridge_ok do return respond_error(bridge_err, req.request_id)
 
 	pub_key := ""
 	owned_key := ""
 	defer delete(owned_key)
 	if h.bridge_runtime_registry != nil {
-		owned_key = project_service.bridge_runtime_registry_public_key(h.bridge_runtime_registry, bridge.bridge_id)
+		// REQ-EA: while an enrollment is pending, or when the approval page asks for
+		// it (?enrollment=1, an attach whose old device may still be online), the key
+		// that matters is the ENROLL-ONLY process's, not the runtime socket's.
+		if domain.bridge_is_pending(bridge) || query_value(req.query, "enrollment") == "1" {
+			enroll_key := bridge_enroll_registry_key(bridge.bridge_id)
+			defer delete(enroll_key)
+			owned_key = project_service.bridge_runtime_registry_public_key(h.bridge_runtime_registry, enroll_key)
+		} else {
+			owned_key = project_service.bridge_runtime_registry_public_key(h.bridge_runtime_registry, bridge.bridge_id)
+		}
 		pub_key = owned_key
 	}
 	if pub_key == "" && bridge.capabilities_json != "" {
@@ -1464,6 +1623,17 @@ bridge_ws_upgrade_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_Soc
 	validation_url := json_string(hello_text, "validation_ws_url"); defer delete(validation_url)
 	body_bridge_id := json_string(hello_text, "bridge_id"); defer delete(body_bridge_id)
 	bridge_auth, auth_ok, auth_err := bridge_service.verify_bridge_token(h.bridges, token)
+	if !auth_ok && strings.has_prefix(token, bridge_service.ACCESS_TOKEN_PREFIX) {
+		// REQ-EA-1: a pending enrollment's credential is refused by every runtime
+		// path, this one included. It is accepted only for the enroll-only socket,
+		// which shares this upgrade endpoint and nothing after it.
+		enroll_auth, family_id, enroll_ok, _ := bridge_service.verify_enroll_access_token(h.bridges, token)
+		if enroll_ok {
+			if body_bridge_id != "" && body_bridge_id != enroll_auth.bridge_id { _ = write_ws_text_frame(client, bridge_ws_error_payload("bridge_id does not match bearer token")); return }
+			bridge_ws_enroll_session(h, client, &reader, enroll_auth.bridge_id, enroll_auth.user_id, family_id, hello_text, hostname, platform_os, version_str)
+			return
+		}
+	}
 	// Unauthenticated attempts carry no trustworthy bridge_id: they share one series.
 	if !auth_ok { bridge_metrics_connect_result(BRIDGE_ID_UNKNOWN, "auth_failed"); _ = write_ws_text_frame(client, bridge_ws_error_payload(auth_err.message)); return }
 	admitted_bridge, found, lookup_err := iface.bridge_get_bridge(h.bridges.repo, bridge_auth.bridge_id)
@@ -2507,6 +2677,10 @@ write_bridge_json :: proc(b: ^strings.Builder, br: domain.Bridge, agents: ^agent
 	// never reported yields "", and the key is always present, so the UI can tell
 	// "not reported" apart from a real state instead of being told "unlocked".
 	strings.write_string(b, "\",\"vault_status\":\""); write_handler_json_string(b, br.vault_status)
+	// REQ-EA-1: "pending" = approved but its vault key not yet delivered, so not
+	// enrolled; the UI shows it as "Enrolling…" and never offers it as a target.
+	strings.write_string(b, "\",\"enrollment_state\":\""); strings.write_string(b, "pending" if domain.bridge_is_pending(br) else "enrolled")
+	strings.write_string(b, "\",\"enrollment_pending_until\":\""); write_handler_json_string(b, br.enrollment_pending_until)
 	search_ready, search_stale, search_revision := false, false, i64(0)
 	if agents != nil && agents.bridge_runtime_registry != nil {
 		search_ready, search_stale, search_revision = project_service.bridge_runtime_registry_task_chain_search_status(agents.bridge_runtime_registry, br.bridge_id)

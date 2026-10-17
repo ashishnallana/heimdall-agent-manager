@@ -53,6 +53,24 @@
 # A PATH-scoped fake systemctl restarts only this test's bridge process. Nothing
 # in this script touches the installed service.
 #
+# ===== REQ-EA: ATOMIC ENROLLMENT =====
+#
+# Approval no longer enrolls the bridge: the Hub mints it PENDING, and it becomes
+# enrolled only when the enrolling process answers the relayed vault key with
+# ok:true, which it does only after persisting the key AND its credential. So:
+#
+#   success  a deliberately failed delivery first (wrong destination), which must
+#            write nothing, then a good one; the bridge is then enrolled + unlocked.
+#   cancel   the operator cancels while the process waits: enroll exits non-zero
+#            with "enrollment rolled back", and neither the bridge row nor any
+#            credential file survives.
+#   killed   the enroll process dies mid-wait: nothing was written; cancel then
+#            removes the row (the reaper would do the same at the 300s deadline).
+#   legacy   COMPATIBILITY: a bridge built from LEGACY_REF (default v0.4.1, before
+#            REQ-EA) against this hub. It ignores enrollment_pending and persists at
+#            approval, but its ok:true must still commit the enrollment, and its
+#            restarted service must come up enrolled and unlocked.
+#
 # Usage: tests/e2e_req_fix_2_vault_delivery.sh
 
 set -euo pipefail
@@ -117,8 +135,8 @@ now_ms() { date +%s%3N; }
 # One full run against a given ham-bridge binary.
 # Returns 0 if the vault key was delivered, 1 if it was not.
 # ---------------------------------------------------------------------------
-run_delivery_attempt() { # run_delivery_attempt <label> <bridge_binary> <run_dir>
-  local label="$1" bridge_bin="$2" run_dir="$3"
+run_delivery_attempt() { # run_delivery_attempt <label> <bridge_binary> <run_dir> [success|cancel|killed|legacy]
+  local label="$1" bridge_bin="$2" run_dir="$3" mode="${4:-success}"
   local home_dir="$run_dir/home"
   mkdir -p "$home_dir/.config/heimdall" "$home_dir/.local/share/heimdall"
 
@@ -147,7 +165,9 @@ run_delivery_attempt() { # run_delivery_attempt <label> <bridge_binary> <run_dir
   local waited=0
   until [ "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$HUB_PORT/api/v1/bridges" 2>/dev/null)" != "000" ]; do
     sleep 0.5; waited=$((waited + 1))
-    [ "$waited" -gt 60 ] && { tail -20 "$hub_log" >&2; fail "[$label] hub did not become healthy"; }
+    # 120s: a fresh DB runs every migration first, which measured 29s on a loaded
+    # host (2026-10-16) — past the old 30s budget.
+    [ "$waited" -gt 240 ] && { tail -20 "$hub_log" >&2; fail "[$label] hub did not become healthy"; }
     kill -0 "$hub_pid" 2>/dev/null || { tail -20 "$hub_log" >&2; fail "[$label] hub exited"; }
   done
 
@@ -283,38 +303,97 @@ SYSTEMCTL
   [ -n "$bridge_id" ] || fail "[$label] approve returned no bridge_id: $approve_resp"
   say "[$label] approved; bridge_id=$bridge_id"
 
-  # --- wait for the bridge to be ONLINE -----------------------------------
+  # REQ-EA-6: the approve response says the bridge is pending, and approval wrote
+  # nothing on the machine.
+  printf '%s' "$approve_resp" | grep -aq '"enrollment_pending":true' \
+    || fail "[$label] approve did not report enrollment_pending: $approve_resp"
+  if [ "$mode" != legacy ]; then
+    [ ! -e "$token_file" ] || fail "[$label] a credential was written at APPROVAL, before any key was delivered"
+  fi
+  if printf '%s' "$(api GET /api/v1/bridges || true)" | grep -aq "$bridge_id"; then
+    fail "[$label] a pending bridge is listed in the default GET /bridges"
+  fi
+
+  # --- wait for the ENROLL-ONLY connection -------------------------------
   #
-  # This is the window BRIDGE_ONLINE_TIMEOUT_SECONDS=45 bounds in the approval
-  # page. We MEASURE it rather than assume it; the number is reported so a
-  # regression in it is visible instead of silently eating the operator's margin.
-  local online=false online_ms delta_ms bridges
+  # A pending bridge never goes online; the key travels over the enrolling
+  # process's enroll-only socket. MEASURED, as the page budget depends on it.
+  local connected=false online_ms delta_ms bridges status
   waited=0
   while [ "$waited" -lt 120 ]; do
-    bridges="$(api GET /api/v1/bridges || true)"
-    if printf '%s' "$bridges" | tr ',' '\n' | grep -a "$bridge_id" >/dev/null 2>&1 \
-       && printf '%s' "$bridges" | grep -a "\"status\":\"online\"" >/dev/null 2>&1; then
-      online=true; online_ms="$(now_ms)"; break
+    status="$(api GET "/api/v1/bridges/$bridge_id/enrollment" || true)"
+    if printf '%s' "$status" | grep -aq '"enroll_connected":true'; then
+      connected=true; online_ms="$(now_ms)"; break
     fi
     sleep 0.5; waited=$((waited + 1))
   done
 
-  if [ "$online" != true ]; then
-    say "[$label] bridge never came online — nothing to relay a sealed key to"
+  if [ "$connected" != true ]; then
+    say "[$label] the enrolling process never connected — nothing to relay a sealed key to"
     tail -25 "$enroll_log" >&2 || true
     return 1
   fi
   delta_ms=$((online_ms - approve_ms))
-  say "[$label] MEASURED approve->online: ${delta_ms}ms (page budget: 45000ms)"
+  say "[$label] MEASURED approve->enroll-connected: ${delta_ms}ms"
   printf '%s\n' "$delta_ms" > "$run_dir/approve_to_online_ms"
+
+  if [ "$mode" = cancel ] || [ "$mode" = killed ]; then
+    if [ "$mode" = killed ]; then
+      kill -9 "$enroll_pid" 2>/dev/null || true
+      wait "$enroll_pid" 2>/dev/null || true
+      say "[$label] killed the enrolling process mid-wait"
+    fi
+    api POST "/api/v1/bridges/$bridge_id/enrollment/cancel" '{}' >/dev/null \
+      || fail "[$label] cancel call failed"
+    if [ "$mode" = cancel ]; then
+      waited=0
+      while kill -0 "$enroll_pid" 2>/dev/null && [ "$waited" -lt 400 ]; do
+        sleep 0.25; waited=$((waited + 1))
+      done
+      kill -0 "$enroll_pid" 2>/dev/null && fail "[$label] enroll kept waiting after the hub cancelled"
+      if wait "$enroll_pid"; then fail "[$label] enroll exited 0 after a cancelled enrollment"; fi
+      grep -aq "enrollment rolled back" "$enroll_log" || { cat "$enroll_log" >&2; fail "[$label] enroll did not say 'enrollment rolled back'"; }
+    fi
+    [ ! -e "$token_file" ] || fail "[$label] a credential survived the rolled-back enrollment"
+    [ ! -e "$token_file.refresh" ] || fail "[$label] a refresh token survived the rolled-back enrollment"
+    if api GET "/api/v1/bridges/$bridge_id/enrollment" >/dev/null; then
+      fail "[$label] the bridge row survived the rollback"
+    fi
+    if printf '%s' "$(api GET '/api/v1/bridges?include_pending=1' || true)" | grep -aq "$bridge_id"; then
+      fail "[$label] the rolled-back bridge is still listed"
+    fi
+    say "[$label] ROLLED BACK: no row, no credential, enroll reported the rollback"
+    return 0
+  fi
+
+  # --- a FAILED delivery first: it must write nothing and allow a retry ------
+  # (Not for the legacy bridge: it wrote its credential at approval by design.)
+  if [ "$mode" != legacy ]; then
+  say "[$label] delivering a seal addressed to the wrong bridge (must be refused)"
+  local bad_payload bad_resp
+  bad_payload="$(node "$SCRIPT_DIR/helpers/req_fix_2_seal.mjs" "brg_not_this_one" "$bpk" "$VAULT_KEY_HEX")" \
+    || fail "[$label] the sealer itself failed — harness bug, not a product result"
+  bad_resp="$(api POST "/api/v1/bridges/$bridge_id/unseal" "$bad_payload" || true)"
+  printf '%s' "$bad_resp" | grep -aq '"ok":true' && fail "[$label] a mis-addressed seal was acknowledged: $bad_resp"
+  [ ! -e "$token_file" ] || fail "[$label] a failed delivery wrote the credential"
+  status="$(api GET "/api/v1/bridges/$bridge_id/enrollment" || true)"
+  printf '%s' "$status" | grep -aq '"enrollment_state":"pending"' \
+    || fail "[$label] a failed delivery did not leave the enrollment pending for a retry: $status"
+  fi
 
   # --- seal the vault key to the operator-confirmed key and deliver it ------
   say "[$label] sealing a vault key to the verified bpk and POSTing the unseal"
   local payload unseal_resp
   payload="$(node "$SCRIPT_DIR/helpers/req_fix_2_seal.mjs" "$bridge_id" "$bpk" "$VAULT_KEY_HEX")" \
     || fail "[$label] the sealer itself failed — harness bug, not a product result"
+  # The page addresses the enrolling process and names the key it confirmed.
+  payload="$(printf '%s' "$payload" | sed 's/}$/,"enrollment":true,"expected_public_key":"'"$bpk"'"}/')"
   unseal_resp="$(api POST "/api/v1/bridges/$bridge_id/unseal" "$payload" || true)"
   say "[$label] unseal response: ${unseal_resp:0:240}"
+  printf '%s' "$unseal_resp" | grep -aq '"ok":true' || fail "[$label] the good delivery was not acknowledged: $unseal_resp"
+  status="$(api GET "/api/v1/bridges/$bridge_id/enrollment" || true)"
+  printf '%s' "$status" | grep -aq '"enrollment_state":"enrolled"' \
+    || fail "[$label] the hub did not commit the enrollment on ok:true: $status"
 
   # Enrollment must now finish the user-visible workflow: persist the key,
   # restart the registered service, and exit successfully.
@@ -388,12 +467,42 @@ FIX_BIN="$WORK_DIR/ham-bridge-fix"
 [ "$FIX_BIN" -nt "$REPO_ROOT/src/bridge/main.odin" ] \
   || fail "built binary is not newer than main.odin — refusing to trust a stale artifact"
 
+# The pre-REQ-EA bridge, for the compatibility scenario. Built from the tagged
+# source tree, against the same toolchain.
+LEGACY_REF="${LEGACY_REF:-v0.4.1}"
+LEGACY_BIN="$WORK_DIR/ham-bridge-legacy"
+mkdir -p "$WORK_DIR/legacy-src"
+git -C "$REPO_ROOT" archive "$LEGACY_REF" src tools | tar -x -C "$WORK_DIR/legacy-src" \
+  || fail "could not extract $LEGACY_REF for the compatibility bridge"
+( cd "$REPO_ROOT" && nix develop --command "$ODIN_BIN" build "$WORK_DIR/legacy-src/src/bridge" -collection:odin_test="$WORK_DIR/legacy-src/src" -out:"$LEGACY_BIN" ) \
+  || fail "the $LEGACY_REF bridge does not build"
+
 mkdir -p "$WORK_DIR/fix"
-if run_delivery_attempt "fix" "$FIX_BIN" "$WORK_DIR/fix"; then
+if run_delivery_attempt "fix" "$FIX_BIN" "$WORK_DIR/fix" success; then
   say "PASS: local Hub enrollment delivered the vault and handed off to the registered bridge service"
 else
   fail "the fix did NOT deliver a vault key — REQ-FIX-2 is not done"
 fi
+stop_run
+
+# ===========================================================================
+# 2-3. REQ-EA: a rolled-back enrollment leaves nothing behind.
+# ===========================================================================
+for mode in cancel killed; do
+  mkdir -p "$WORK_DIR/$mode"
+  run_delivery_attempt "$mode" "$FIX_BIN" "$WORK_DIR/$mode" "$mode" \
+    || fail "[$mode] the rollback scenario did not complete"
+  say "PASS: $mode rolls the enrollment back completely"
+  stop_run
+done
+
+# ===========================================================================
+# 4. REQ-EA compatibility: an old bridge against this hub still enrolls.
+# ===========================================================================
+mkdir -p "$WORK_DIR/legacy"
+run_delivery_attempt "legacy" "$LEGACY_BIN" "$WORK_DIR/legacy" legacy \
+  || fail "[legacy] a $LEGACY_REF bridge could not enroll against this hub"
+say "PASS: a $LEGACY_REF bridge enrolls, commits and comes up unlocked against this hub"
 stop_run
 say "ALL ASSERTIONS PASSED"
 say "measured approve->online: $(cat "$WORK_DIR/fix/approve_to_online_ms" 2>/dev/null || echo '?')ms against the 45000ms page budget"

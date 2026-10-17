@@ -25,6 +25,9 @@ export function ProviderSetupSurface({ bridgeId, mode, onApply }: ProviderSetupS
   const [busy, setBusy] = useState('');
   const [notice, setNotice] = useState('');
   const [testTarget, setTestTarget] = useState<ProviderTestTarget | null>(null);
+  // Provider cards start collapsed; the header shows status and the Enable toggle,
+  // and a provider is expanded only to look at or test its models.
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const autoScannedBridge = useRef('');
 
   useEffect(() => {
@@ -142,10 +145,23 @@ export function ProviderSetupSurface({ bridgeId, mode, onApply }: ProviderSetupS
           const status = providerStatus(provider);
           const available = provider.state === 'present';
           const providerBusy = busy === `provider:${provider.provider}`;
+          const isExpanded = Boolean(expanded[provider.provider]);
+          const detailsId = `provider-setup-details-${provider.provider}`;
+          const summary = available
+            ? `${provider.models.length} ${provider.models.length === 1 ? 'model' : 'models'}`
+            : 'Not installed';
           return (
             <section key={provider.provider} data-debug-id={`provider-setup-card-${provider.provider}`} className={`overflow-hidden rounded-2xl border bg-surface ${provider.enabled ? 'border-accent/50 shadow-sm' : 'border-subtle'}`}>
               <div className="flex flex-col gap-4 p-4 sm:flex-row sm:items-center sm:justify-between">
-                <div className="flex min-w-0 items-center gap-3">
+                <button
+                  type="button"
+                  data-debug-id={`provider-setup-toggle-${provider.provider}`}
+                  aria-expanded={isExpanded}
+                  aria-controls={detailsId}
+                  onClick={() => setExpanded((prev) => ({ ...prev, [provider.provider]: !isExpanded }))}
+                  className="flex min-w-0 flex-1 items-center gap-3 text-left"
+                >
+                  <Icon name={isExpanded ? 'chevron-down' : 'chevron-right'} size={16} className="shrink-0 text-muted" />
                   <img src={provider.icon_url} alt="" className="h-11 w-11 shrink-0 rounded-xl" />
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
@@ -155,8 +171,9 @@ export function ProviderSetupSurface({ bridgeId, mode, onApply }: ProviderSetupS
                     <p className="mt-1 truncate text-xs text-muted">
                       {available ? `${provider.binary_path} · ${provider.version_text}` : 'No supported executable found in the bridge service PATH'}
                     </p>
+                    <p data-debug-id={`provider-setup-summary-${provider.provider}`} className="mt-0.5 text-xs text-faint">{summary}</p>
                   </div>
-                </div>
+                </button>
                 <div className="flex shrink-0 items-center gap-2">
                   <label data-debug-id={`provider-setup-enable-label-${provider.provider}`} className={`flex min-h-10 items-center gap-2 rounded-xl border px-3 text-sm font-medium ${available ? 'cursor-pointer border-subtle text-primary' : 'cursor-not-allowed border-subtle text-faint'}`}>
                     <input
@@ -171,8 +188,8 @@ export function ProviderSetupSurface({ bridgeId, mode, onApply }: ProviderSetupS
                 </div>
               </div>
 
-              {available ? (
-                <div className="border-t border-subtle bg-surface-raised/30 px-4 py-3">
+              {!isExpanded ? null : available ? (
+                <div id={detailsId} className="border-t border-subtle bg-surface-raised/30 px-4 py-3">
                   <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">Models</div>
                   <div className="space-y-2">
                     {provider.models.map((model) => {
@@ -208,7 +225,7 @@ export function ProviderSetupSurface({ bridgeId, mode, onApply }: ProviderSetupS
                   </div>
                 </div>
               ) : (
-                <div className="border-t border-subtle bg-surface-raised/30 px-4 py-3 text-sm text-muted">
+                <div id={detailsId} className="border-t border-subtle bg-surface-raised/30 px-4 py-3 text-sm text-muted">
                   Install this provider CLI in the bridge service PATH, then scan again.
                 </div>
               )}

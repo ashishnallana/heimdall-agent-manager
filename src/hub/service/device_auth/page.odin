@@ -142,6 +142,7 @@ async function loadBridgeTargets(hostname) {
     newBridgeName.value = candidate;
     for (const br of bridges) {
       if (!br || br.status === "revoked") continue; // a dead bridge has nothing to attach to
+      if (br.enrollment_state === "pending") continue; // not enrolled yet (REQ-EA-1); the hub refuses it as a target
       const opt = document.createElement("option");
       opt.value = br.bridge_id || "";
       opt.textContent = (br.label || br.bridge_id || "bridge") + " (" + (br.machine_hostname || "unknown host") + ")";

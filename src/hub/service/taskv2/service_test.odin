@@ -163,7 +163,7 @@ INSERT INTO task_votes(task_id, reviewer_agent_instance_id, chain_id, owner_user
 // are gone, and every task's cached state equals the fold of its events.
 @(test)
 test_migration_round_trip :: proc(t: ^testing.T) {
-	fx, ok := fixture_open(t, "mig", stop_before = "087_task_v2.sql")
+	fx, ok := fixture_open(t, "mig", stop_before = "090_task_v2.sql")
 	defer fixture_close(fx)
 	if !ok do return
 	if !exec_ok(t, fx, LEGACY_SEED) do return

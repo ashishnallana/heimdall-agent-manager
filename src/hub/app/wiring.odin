@@ -36,6 +36,8 @@ App_Graph :: struct {
 	ids: platform.ID_Generator,
 	bridge_runtime_registry: project_service.Bridge_Runtime_Registry,
 	event_bus: events.User_Event_Bus,
+	// attention_events coalesces card writes into attention_changed hints.
+	attention_events: events.Attention_Debouncer,
 	db: sqlite.Conn,
 	sqlite_billing: sqlite.Billing_Repo_SQLite,
 	billing_repo: iface.Billing_Repository,
@@ -43,6 +45,7 @@ App_Graph :: struct {
 	billing_handlers: http.Billing_Handlers,
 	sqlite_users: sqlite.User_Repo_SQLite,
 	sqlite_bridges: sqlite.Bridge_Repo_SQLite,
+	sqlite_bridge_commit: sqlite.Bridge_Enroll_Commit_Conn,
 	sqlite_agents: sqlite.Agent_Repo_SQLite,
 	sqlite_projects: sqlite.Project_Repo_SQLite,
 	sqlite_content: sqlite.Content_Repo_SQLite,
@@ -53,6 +56,7 @@ App_Graph :: struct {
 	sqlite_scheduled_prompts: sqlite.Scheduled_Prompt_Repo_SQLite,
 	sqlite_push: sqlite.Push_Repo_SQLite,
 	sqlite_cards: sqlite.Card_Repo_SQLite,
+	sqlite_attention: sqlite.Attention_Repo_SQLite,
 	sqlite_issues: sqlite.Issue_Repo_SQLite,
 	sqlite_shell_sessions: sqlite.Shell_Session_Repo_SQLite,
 	sqlite_experiments: sqlite.Experiment_Repo_SQLite,
@@ -214,6 +218,12 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 
 	graph.repos.users = sqlite.new_user_repository(&graph.sqlite_users, &graph.db)
 	graph.repos.bridges = sqlite.new_bridge_repository(&graph.sqlite_bridges, &graph.db)
+	// REQ-EA-2: the enrollment commit runs on its own connection (see
+	// Bridge_Enroll_Commit_Conn). An in-memory database has no second connection.
+	if config.database_path != ":memory:" {
+		if ok, err := sqlite.open_bridge_enroll_commit_conn(&graph.sqlite_bridge_commit, config.database_path); !ok do return false, err.message
+		graph.sqlite_bridges.commit = &graph.sqlite_bridge_commit
+	}
 	graph.repos.agents = sqlite.new_agent_repository(&graph.sqlite_agents, &graph.db)
 	graph.repos.projects = sqlite.new_project_repository(&graph.sqlite_projects, &graph.db)
 	graph.repos.content = sqlite.new_content_repository(&graph.sqlite_content, &graph.db)
@@ -230,6 +240,7 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 	graph.repos.scheduled_prompts = graph.repos.actions
 	graph.repos.push_subscriptions = sqlite.new_push_repository(&graph.sqlite_push, &graph.db)
 	graph.repos.cards = sqlite.new_card_repository(&graph.sqlite_cards, &graph.db)
+	graph.repos.attention = sqlite.new_attention_repository(&graph.sqlite_attention, &graph.db)
 	graph.repos.issues = sqlite.new_issue_repository(&graph.sqlite_issues, &graph.db)
 	graph.shell_session_repo = sqlite.new_shell_session_repository(&graph.sqlite_shell_sessions, &graph.db)
 	graph.experiment_repo = sqlite.new_experiment_repository(&graph.sqlite_experiments, &graph.db)
@@ -428,6 +439,16 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 		&graph.ids,
 		&graph.issues,
 	)
+	// Attention deck: the card projector keeps task-validation and actionable
+	// message cards in step with their sources (write-through), so wire it into
+	// the services that own those sources.
+	card_service.init_attention(&graph.cards, &graph.repos.attention)
+	taskchain_service.set_attention_notifier(&graph.taskchains, &graph.cards.attention_notifier)
+	// The task engine re-projects the attention card of every task an event touched.
+	graph.task_engine.attention = &graph.cards.attention_notifier
+	content_service.set_attention_notifier(&graph.content, &graph.cards.attention_notifier)
+	events.init_attention_debouncer(&graph.attention_events, &graph.event_bus)
+	graph.cards.card_changed = card_service.Card_Changed_Hook{ctx = rawptr(&graph.attention_events), changed = attention_card_changed}
 	graph.experiment_handlers = http.Experiment_Rest_Handlers{auth = &graph.auth, repo = &graph.experiment_repo, clock = &graph.clock}
 	graph.lsp_server_config_handlers = http.Lsp_Server_Config_Rest_Handlers{auth = &graph.auth, repo = &graph.lsp_server_config_repo, clock = &graph.clock, ids = &graph.ids}
 	graph.providers = provider_service.new_provider_service(&graph.provider_repo)
@@ -460,6 +481,7 @@ shutdown_graph :: proc(graph: ^App_Graph) {
 	device_auth_service.grant_store_free(&graph.device_auth_store)
 	delete(graph.action_bridge_versions)
 	sqlite.close(&graph.sqlite_billing.conn)
+	sqlite.close(&graph.sqlite_bridge_commit.conn)
 	sqlite.close(&graph.db)
 }
 
@@ -755,6 +777,9 @@ register_routes :: proc(graph: ^App_Graph) {
 	http.router_add(&graph.router, "POST", "/api/v1/bridges/*/unseal", rawptr(&graph.bridge_handlers), http.bridge_unseal_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/bridges/*/lock", rawptr(&graph.bridge_handlers), http.bridge_lock_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/bridges/*/public-key", rawptr(&graph.bridge_handlers), http.bridge_public_key_handler)
+	// REQ-EA: pending-enrollment status for the approval page, and operator cancel.
+	http.router_add(&graph.router, "GET", "/api/v1/bridges/*/enrollment", rawptr(&graph.bridge_handlers), http.bridge_enrollment_status_handler)
+	http.router_add(&graph.router, "POST", "/api/v1/bridges/*/enrollment/cancel", rawptr(&graph.bridge_handlers), http.bridge_enrollment_cancel_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/bridges/*/events", rawptr(&graph.bridge_handlers), http.bridge_events_list_handler)
 	http.router_add(&graph.router, "DELETE", "/api/v1/bridges/*/events", rawptr(&graph.bridge_handlers), http.bridge_events_purge_handler)
 	// Actions API
@@ -777,6 +802,8 @@ register_routes :: proc(graph: ^App_Graph) {
 	http.router_add(&graph.router, "POST", "/api/v1/bridge/scheduled-prompts/*/execute", rawptr(&graph.action_handlers), http.bridge_execute_scheduled_prompt_handler)
 
 	// Cards API
+	http.router_add(&graph.router, "GET", "/api/v1/attention", rawptr(&graph.card_handlers), http.attention_handler)
+	http.router_add(&graph.router, "GET", "/api/v1/attention/summary", rawptr(&graph.card_handlers), http.attention_summary_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/cards", rawptr(&graph.card_handlers), http.list_cards_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/cards", rawptr(&graph.card_handlers), http.create_card_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/cards/*", rawptr(&graph.card_handlers), http.get_card_handler)
@@ -849,7 +876,19 @@ device_minter :: proc(graph_ptr: rawptr, user_id, client, device_label: string) 
 // Returns (plaintext_token, bridge_id, ok).
 device_bridge_minter :: proc(graph_ptr: rawptr, req: device_auth_service.Bridge_Mint_Request) -> (device_auth_service.Bridge_Mint_Result, bool) {
 	graph := (^App_Graph)(graph_ptr)
-	result, ok, _ := bridge_service.enroll_bridge_from_device_grant(&graph.bridges, bridge_service.Device_Enroll_Input{
+	// The Hub, not the bridge, knows whether approval should also deliver a vault
+	// key: a stored envelope means the browser has key material to relay after the
+	// bridge connects.
+	_, vault_found, _ := iface.user_vault_get(&graph.repos.user_vaults, domain.User_ID(req.owner_user_id))
+	// REQ-EA decision A: a bridge is enrolled only once its vault is unlocked, so an
+	// owner with no vault cannot enroll one yet. Refused HERE, server-side, so a
+	// client that skips the approval page's vault step gets the same answer.
+	if !vault_found {
+		return device_auth_service.Bridge_Mint_Result{
+			error = domain.domain_error(.Validation_Failed, "set up your vault before enrolling a bridge; a bridge is enrolled only once its vault is unlocked"),
+		}, false
+	}
+	result, ok, mint_err := bridge_service.enroll_bridge_from_device_grant(&graph.bridges, bridge_service.Device_Enroll_Input{
 		owner_user_id = req.owner_user_id, // bound from Auth_Context by approve()
 		bridge_public_key = req.bridge_public_key,
 		bridge_key_fingerprint = req.bridge_key_fingerprint,
@@ -859,13 +898,18 @@ device_bridge_minter :: proc(graph_ptr: rawptr, req: device_auth_service.Bridge_
 		bridge_version = req.app_version,
 		target_bridge_id = req.target_bridge_id,
 		new_bridge_label = req.new_bridge_label,
+		// REQ-EA-1: the enrollment stays pending until the vault key is delivered.
+		pending = true,
 	})
-	if !ok do return device_auth_service.Bridge_Mint_Result{}, false
-	// The Hub, not the bridge, knows whether approval should also deliver a vault
-	// key. A stored envelope means the browser has key material to relay after the
-	// bridge connects; absence means enrollment can restart the service at once.
-	_, vault_found, _ := iface.user_vault_get(&graph.repos.user_vaults, domain.User_ID(req.owner_user_id))
-	// REQ-IMPL-3: enroll_bridge_from_device_grant now returns an EXPIRING PAIR
+	if !ok {
+		// Pass ownership/target refusals through (e.g. an attach target that is not
+		// the approver's): they are the approver's to see, not an internal fault.
+		if mint_err.code == .Not_Found || mint_err.code == .Validation_Failed {
+			return device_auth_service.Bridge_Mint_Result{error = mint_err}, false
+		}
+		return device_auth_service.Bridge_Mint_Result{}, false
+	}
+	// REQ-IMPL-3: enroll_bridge_from_device_grant returns an EXPIRING PAIR
 	// (`hba_` + `hbf_`), so the approval hands both halves to the grant and the
 	// bridge receives them together on its single-use poll.
 	return device_auth_service.Bridge_Mint_Result{
@@ -874,6 +918,12 @@ device_bridge_minter :: proc(graph_ptr: rawptr, req: device_auth_service.Bridge_
 		bridge_id = result.bridge.bridge_id,
 		expires_in = result.expires_in,
 		refresh_expires_in = result.refresh_expires_in,
-		vault_delivery_expected = vault_found,
+		vault_delivery_expected = true,
 	}, true
+}
+
+// attention_card_changed adapts the card service's change hook to the
+// debounced attention_changed event (one hint per owner per 500ms).
+attention_card_changed :: proc(ctx: rawptr, owner_user_id: string, kind: string) {
+	events.attention_debouncer_note((^events.Attention_Debouncer)(ctx), owner_user_id, kind)
 }

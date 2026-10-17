@@ -66,6 +66,10 @@ Memory :: struct {
 	expires_at: string,
 	created_at: string,
 	updated_at: string,
+	// Proposals made by an agent: the proposing instance and the task chain it
+	// was working on ('' for user-created memories). Set once at creation.
+	proposed_by_instance_id: string,
+	proposed_in_chain_id: string,
 }
 
 // CONVERSATION_TITLE_MAX_BYTES bounds the PLAINTEXT conversation title

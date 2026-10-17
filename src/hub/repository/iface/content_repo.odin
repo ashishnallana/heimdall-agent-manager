@@ -15,6 +15,9 @@ Content_List_Messages_Proc :: proc(ctx: rawptr, conversation_id: string, owner_u
 Content_List_User_Visible_Messages_Proc :: proc(ctx: rawptr, conversation_id: string, owner_user_id: domain.User_ID, limit: int, cursor: string) -> ([]domain.Chat_Message, domain.Domain_Error)
 Content_List_Agent_Inbox_Messages_Proc :: proc(ctx: rawptr, conversation_id: string, owner_user_id: domain.User_ID, agent_instance_id: string, unread_only: bool, receiver_only: bool, include_outgoing: bool, include_debug: bool, limit: int, cursor: string) -> ([]domain.Chat_Message, domain.Domain_Error)
 Content_Mark_Messages_Read_Proc :: proc(ctx: rawptr, owner_user_id: domain.User_ID, message_ids: []string, updated_at: string) -> (int, domain.Domain_Error)
+// Content_List_Unread_Incoming_IDs_Proc returns the ids of EVERY unread
+// agent_to_user message in a conversation (no page cap), for mark-read.
+Content_List_Unread_Incoming_IDs_Proc :: proc(ctx: rawptr, conversation_id: string, owner_user_id: domain.User_ID) -> ([]string, domain.Domain_Error)
 Content_Save_Artifact_Proc :: proc(ctx: rawptr, a: domain.Artifact) -> (domain.Artifact, bool, domain.Domain_Error)
 Content_Get_Artifact_Proc :: proc(ctx: rawptr, artifact_id: string) -> (domain.Artifact, bool, domain.Domain_Error)
 Content_List_Artifacts_Proc :: proc(ctx: rawptr, owner_user_id: domain.User_ID, filter: domain.Artifact_List_Filter) -> ([]domain.Artifact, domain.Domain_Error)
@@ -47,6 +50,7 @@ Content_Repository :: struct {
 	get_template: Content_Get_Template_Proc,
 	list_templates: Content_List_Templates_Proc,
 	delete_template: Content_Delete_Template_Proc,
+	list_unread_incoming_ids: Content_List_Unread_Incoming_IDs_Proc,
 }
 
 content_save_memory :: proc(r: ^Content_Repository, m: domain.Memory) -> (domain.Memory, bool, domain.Domain_Error) { if r == nil || r.save_memory == nil do return {}, false, domain.domain_error(.Internal_Error, "content repository is not configured"); return r.save_memory(r.ctx, m) }
@@ -70,3 +74,11 @@ content_save_template :: proc(r: ^Content_Repository, t: domain.Template) -> (do
 content_get_template :: proc(r: ^Content_Repository, id: string) -> (domain.Template, bool, domain.Domain_Error) { if r == nil || r.get_template == nil do return {}, false, domain.domain_error(.Internal_Error, "content repository is not configured"); return r.get_template(r.ctx, id) }
 content_list_templates :: proc(r: ^Content_Repository, owner: domain.User_ID) -> ([]domain.Template, domain.Domain_Error) { if r == nil || r.list_templates == nil do return nil, domain.domain_error(.Internal_Error, "content repository is not configured"); return r.list_templates(r.ctx, owner) }
 content_delete_template :: proc(r: ^Content_Repository, id: string, owner: domain.User_ID) -> (bool, domain.Domain_Error) { if r == nil || r.delete_template == nil do return false, domain.domain_error(.Internal_Error, "content repository is not configured"); return r.delete_template(r.ctx, id, owner) }
+
+// content_list_unread_incoming_ids: supported=false when the repository does
+// not implement it (callers then fall back to their paged scan).
+content_list_unread_incoming_ids :: proc(r: ^Content_Repository, conversation_id: string, owner: domain.User_ID) -> (ids: []string, supported: bool, err: domain.Domain_Error) {
+	if r == nil || r.list_unread_incoming_ids == nil do return nil, false, domain.Domain_Error{}
+	ids, err = r.list_unread_incoming_ids(r.ctx, conversation_id, owner)
+	return ids, true, err
+}

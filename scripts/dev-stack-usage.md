@@ -1067,6 +1067,32 @@ nix develop --command sqlite3 $HUB_DB "delete from user_vaults;"   # throwaway D
 
 ---
 
+## 10e. Atomic enrollment — a bridge is enrolled only once its vault key is delivered (REQ-EA, 2026-10-16)
+
+Approving a bridge grant no longer enrolls the bridge. The Hub mints it **pending**, and three facts follow:
+
+- **Approval writes nothing on the machine.** `ham-bridge enroll` sees `"enrollment_pending":true` in the token poll. It keeps its credential in memory and opens an **enroll-only** WebSocket. The registry key for that socket is `enroll:<bridge_id>`, and its token family has scope `bridge:enroll`, which authenticates only that socket.
+- **A pending bridge is invisible by default.** `GET /api/v1/bridges` omits it unless `?include_pending=1` is passed, which Settings → Bridges does. `GET /api/v1/bridges/<id>/enrollment` reports `enrollment_state`, `enroll_connected`, `enroll_public_key` and `enrollment_pending_until`.
+- **Commit happens on an observed ok:true.** `POST /api/v1/bridges/<id>/unseal` relays to the enroll-only socket.
+  - The bridge answers ok:true only after it has stored the key, read it back from the OS keystore, and **staged** the token, refresh token and config.toml as `<file>.pending` siblings plus a `<token file>.enrolling` marker. The marker is written last; the live files are untouched.
+  - The Hub then commits in **one SQLite transaction**: it promotes the token family to `bridge:runtime`, and either clears the pending column (new bridge) or revokes the old device's families (attach). A duplicate ok:true for an already-committed family is an idempotent success.
+  - The Hub sends the bridge `bridge_enrollment_result`. On `committed:true` the bridge renames the staging into place. On `committed:false` it deletes the staging and purges the key; the previous files were never changed.
+  - **Crash recovery.** Every service start and every `enroll` resolves leftover staging before reading the credential:
+    - staging without a marker never reached the ack, so it is deleted;
+    - with a marker, the staged refresh token is presented to the Hub, which refreshes only a committed family. A rotation promotes the staging with the rotated pair; `invalid_grant` deletes it and purges the key; an unreachable Hub keeps it for the next start.
+
+**Rollback.** Pending enrollments roll back in two ways:
+- `POST /api/v1/bridges/<id>/enrollment/cancel`;
+- the reaper, at the 300 s deadline, and also once at Hub startup.
+
+Either way the Hub revokes the family and **hard-deletes** a new bridge's row. An attach leaves its target untouched. The enrolling process prints `enrollment rolled back` and exits 1. On the `heimdall-ct` page, any exit other than 0 or 3 therefore no longer triggers a service restart.
+
+**Verify it.** Run `tests/e2e_req_fix_2_vault_delivery.sh`. It drives the real binaries through three scenarios: success (preceded by a refused delivery), cancel, and an enroll process killed mid-wait. A failed delivery must leave the enrollment `pending`, so the operator can retry before the deadline.
+
+**Compatibility.** The e2e script also builds the `v0.4.1` bridge (`LEGACY_REF`) and enrolls it against this Hub. That bridge ignores `enrollment_pending` and writes its credential at approval, but its ok:true still commits, and its restarted service comes up enrolled and unlocked. Its rollback cannot clean up its own files (it predates staging); the Hub still revokes the credential.
+
+**fmt trap.** In Odin's `fmt`, `{` and `}` are placeholders: a JSON template needs `{{`/`}}`. An unescaped one silently yields `%!(MISSING CLOSE BRACE)…`.
+
 ## 11. Checking logs
 
 ```bash

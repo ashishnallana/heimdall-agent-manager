@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 
 import {
   approvedBridgeIsOnline,
+  ENROLLMENT_PENDING_FALLBACK_SECONDS,
   enrollmentContinueAvailable,
+  enrollmentPendingOutcome,
   enrollmentRestartConfirmation,
   navigateEnrollmentProviderSetup,
   nextAvailableBridgeLabel,
@@ -178,4 +180,34 @@ test('REQ-T4-4: nothing but a restarted bridge reporting `unlocked` is ever conf
       ).sealedPolls;
     }
   }
+});
+
+test('REQ-EA: under atomic enrollment an undelivered key means NOT enrolled, so no provider step', () => {
+  // Legacy hub: failed delivery still leaves an enrolled (sealed) bridge.
+  assert.equal(enrollmentContinueAvailable('failed', undefined, false), true);
+  // Pending enrollment: failed = retry or cancel; rolled-back = start again.
+  assert.equal(enrollmentContinueAvailable('failed', undefined, true), false);
+  assert.equal(enrollmentContinueAvailable('rolled-back', undefined, true), false);
+  assert.equal(enrollmentContinueAvailable('rolled-back'), false);
+  // Once the key is delivered the hub has committed: provider selection stays optional but offered.
+  for (const phase of ['delivered', 'confirming-restart', 'confirmed', 'restart-unconfirmed']) {
+    assert.equal(enrollmentContinueAvailable(phase, undefined, true), true, phase);
+  }
+  assert.equal(enrollmentContinueAvailable('need-password', 'enrollment', true), false);
+});
+
+test('REQ-EA-6: pending outcome reads the hub enrollment status, failing toward rolled back', () => {
+  const now = Date.parse('2026-10-16T15:00:00Z');
+  const future = '2026-10-16T15:04:00Z';
+  const past = '2026-10-16T14:59:59Z';
+  // The row is gone: a new bridge's rollback hard-deletes it.
+  assert.equal(enrollmentPendingOutcome(null, now), 'rolled-back');
+  assert.equal(enrollmentPendingOutcome({ enrollment_state: 'pending', enroll_connected: false, enrollment_pending_until: future }, now), 'waiting');
+  assert.equal(enrollmentPendingOutcome({ enrollment_state: 'pending', enroll_connected: true, enrollment_pending_until: future }, now), 'ready');
+  // Past the deadline the sweep rolls it back, even if the socket is still up.
+  assert.equal(enrollmentPendingOutcome({ enrollment_state: 'pending', enroll_connected: true, enrollment_pending_until: past }, now), 'rolled-back');
+  // An attach has no deadline on its row; the hub's family TTL governs it.
+  assert.equal(enrollmentPendingOutcome({ enrollment_state: 'pending', enroll_connected: true, enrollment_pending_until: '' }, now), 'ready');
+  assert.equal(enrollmentPendingOutcome({ enrollment_state: 'enrolled', enroll_connected: false }, now), 'committed');
+  assert.equal(ENROLLMENT_PENDING_FALLBACK_SECONDS, 300);
 });
