@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 import { useDispatch } from 'react-redux';
-import { Icon, type IconName } from '@ui';
+import { Icon, Spinner, type IconName } from '@ui';
 import { heimdallApi } from '../../api/heimdallApi';
 import {
   ATTENTION_RANGES,
@@ -15,6 +15,7 @@ import {
 } from '../../api/endpoints/attention';
 import {
   useAddTaskCommentMutation,
+  useGetTaskChainFleetsQuery,
   useListAgentIdentitiesQuery,
   useMarkConversationReadMutation,
   useSendConversationMessageMutation,
@@ -28,7 +29,7 @@ import { appendArtifactLinks } from '../../utils/artifactUpload';
 import { buildRouteHash, navigateTo } from '../../utils/appLocation';
 import { AttentionCardBody } from './AttentionCardBody';
 import { AttentionComposer, type ComposerSubmit } from './AttentionComposer';
-import { DECK_TABS, clampIndex, defaultTab, stepIndex, swipeDelta, tabCounts, visibleItems, type DeckTab } from './attentionModel';
+import { DECK_TABS, clampIndex, defaultTab, reviewerCandidates, stepIndex, swipeDelta, tabCounts, visibleItems, type DeckTab } from './attentionModel';
 
 const NO_ITEMS: AttentionItem[] = [];
 
@@ -186,7 +187,14 @@ export function AttentionDeck({
   const [voteTask] = useVoteTaskMutation();
   const [sendMessage] = useSendConversationMessageMutation();
   const [markRead] = useMarkConversationReadMutation();
-  const agentsQuery = useListAgentIdentitiesQuery(undefined, { skip: !open || popover !== 'reviewer' });
+  // Reviewer menu: fetched on demand when it opens -- the chain's fleet, plus the
+  // agent list for names (and the reviewer-template fallback).
+  const reviewerChainId = open && popover === 'reviewer' && current?.kind === 'task' ? current.action_refs.chain_id : '';
+  const fleetQuery = useGetTaskChainFleetsQuery({ chainId: reviewerChainId }, { skip: !reviewerChainId });
+  const agentsQuery = useListAgentIdentitiesQuery({ limit: 200 }, { skip: !reviewerChainId });
+  const reviewersLoading = !!reviewerChainId && (fleetQuery.isFetching || agentsQuery.isFetching) && !(fleetQuery.data && agentsQuery.data);
+  const reviewersError = !reviewersLoading && (fleetQuery.isError || agentsQuery.isError);
+  const reviewers = fleetQuery.data && agentsQuery.data ? reviewerCandidates(fleetQuery.data, agentsQuery.data.agents || []) : [];
 
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => { if (noticeTimer.current) clearTimeout(noticeTimer.current); }, []);
@@ -464,25 +472,35 @@ export function AttentionDeck({
 
           {popover === 'reviewer' && current?.kind === 'task' ? (
             <div role="menu" data-debug-id="attention-reviewer-menu" data-no-drag className="absolute bottom-2 left-1/2 z-10 max-h-64 w-72 -translate-x-1/2 overflow-y-auto rounded-[var(--radius-md)] border border-subtle bg-surface p-1 shadow-panel">
-              <p className="px-2 py-1 text-[11px] uppercase tracking-wide text-faint">Hand the review to</p>
-              {agentsQuery.isLoading ? <p className="px-2 py-1.5 text-[12px] text-muted">Loading agents…</p> : null}
-              {(agentsQuery.data?.agents || []).filter((a: any) => (a?.agent_id || a?.id) && (a?.state ?? 'active') !== 'archived').map((a: any) => {
-                const agentId = String(a.agent_id || a.id);
-                const name = String(a.name || a.display_name || a.slug || 'Agent');
-                return (
+              <p className="px-2 py-1 text-[11px] uppercase tracking-wide text-faint">
+                Hand the review to{reviewers.length > 0 ? (reviewers[0].source === 'fleet' ? ' · this chain\'s fleet' : ' · reviewer agents') : ''}
+              </p>
+              {reviewersLoading ? (
+                <p data-debug-id="attention-reviewer-loading" className="flex items-center gap-2 px-2 py-1.5 text-[12px] text-muted">
+                  <Spinner size="sm" label="Finding reviewers…" /> Finding reviewers…
+                </p>
+              ) : reviewersError ? (
+                <p data-debug-id="attention-reviewer-error" className="px-2 py-1.5 text-[12px] text-danger">
+                  Couldn't load agents.{' '}
+                  <button type="button" className="underline" onClick={() => { fleetQuery.refetch(); agentsQuery.refetch(); }}>Retry</button>
+                </p>
+              ) : reviewers.length === 0 ? (
+                <p data-debug-id="attention-reviewer-empty" className="px-2 py-1.5 text-[12px] text-muted">No reviewer agents set up for this chain.</p>
+              ) : (
+                reviewers.map((r) => (
                   <button
-                    key={agentId}
+                    key={r.agentId}
                     role="menuitem"
                     type="button"
-                    data-debug-id={`attention-reviewer-${a.slug || 'agent'}`}
-                    onClick={() => schedule(current, `Handed to ${name}`, (k) => assignReviewerAgent(current.action_refs, { agentId, displayName: name }, k))}
+                    data-debug-id="attention-reviewer-option"
+                    onClick={() => schedule(current, `Handed to ${r.name}`, (k) => assignReviewerAgent(current.action_refs, { agentId: r.agentId, displayName: r.name }, k))}
                     className="flex w-full items-center gap-2 rounded-[var(--radius-sm)] px-2 py-1.5 text-left text-[13px] text-primary hover:bg-surface-raised"
                   >
                     <Icon name="bot" size={14} />
-                    <span className="truncate">{name}</span>
+                    <span className="truncate">{r.name}</span>
                   </button>
-                );
-              })}
+                ))
+              )}
             </div>
           ) : null}
         </div>

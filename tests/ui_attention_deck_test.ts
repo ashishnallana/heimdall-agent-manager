@@ -172,13 +172,15 @@ function jsonResponse(body: any) {
   return { ok: true, status: 200, headers: { get: () => 'application/json' }, text: async () => JSON.stringify(body), json: async () => body } as any;
 }
 
-type DeckHarness = { dom: any; store: any; scheduler: any; text: () => string; q: (sel: string) => any; act: any; closed: () => number; hits: string[]; setOpen: (open: boolean) => Promise<void>; serve: (items: any[]) => void; release: () => void; hold: () => void };
+type DeckHarness = { dom: any; store: any; scheduler: any; text: () => string; q: (sel: string) => any; act: any; closed: () => number; hits: string[]; setOpen: (open: boolean) => Promise<void>; serve: (items: any[]) => void; release: () => void; hold: () => void; holdRoutes: () => void; releaseRoutes: () => void };
 
-async function withDeck(initialItems: any[], run: (h: DeckHarness) => Promise<void>, opts: { unlocked?: boolean } = {}) {
+async function withDeck(initialItems: any[], run: (h: DeckHarness) => Promise<void>, opts: { unlocked?: boolean; routes?: Record<string, any> } = {}) {
   let items = initialItems;
   // hold() makes /attention responses wait until release(), to observe the deck mid-refetch.
   let gate: Promise<void> | null = null;
   let openGate = () => {};
+  let routeGate: Promise<void> | null = null;
+  let openRouteGate = () => {};
   const { JSDOM } = await import('jsdom');
   const { Provider } = await import('react-redux');
   const { createRoot } = await import('react-dom/client');
@@ -208,6 +210,12 @@ async function withDeck(initialItems: any[], run: (h: DeckHarness) => Promise<vo
       const counts = { total: items.length, older: 1, message: items.filter((i) => i.kind === 'message').length, task: items.filter((i) => i.kind === 'task').length };
       return jsonResponse({ data: { since: '24h', counts, items } });
     }
+    for (const [suffix, body] of Object.entries(opts.routes || {})) {
+      if (url.pathname.endsWith(suffix)) {
+        if (routeGate) await routeGate;
+        return jsonResponse({ data: body });
+      }
+    }
     return jsonResponse({ data: {} });
   };
   const store = await makeVaultStore();
@@ -231,6 +239,8 @@ async function withDeck(initialItems: any[], run: (h: DeckHarness) => Promise<vo
       serve: (next: any[]) => { items = next; },
       hold: () => { gate = new Promise<void>((r) => { openGate = r; }); },
       release: () => { gate = null; openGate(); },
+      holdRoutes: () => { routeGate = new Promise<void>((r) => { openRouteGate = r; }); },
+      releaseRoutes: () => { routeGate = null; openRouteGate(); },
       text: () => dom.window.document.body.textContent || '',
       q: (sel: string) => dom.window.document.querySelector(sel),
       closed: () => closedCount,
@@ -419,6 +429,50 @@ test('ws: a burst of attention_changed hints becomes one invalidation', async ()
   handleUserWsEvent(dispatch, { type: 'attention_changed', kinds: ['message'] });
   await new Promise((r) => setTimeout(r, ATTENTION_REFETCH_COALESCE_MS + 30));
   assert.equal(invalidations().length, 2, 'a later hint gets its own invalidation');
+});
+
+test('model: reviewer candidates come from the chain fleet, else the reviewer template', () => {
+  const agents = [
+    { agent_id: 'agt_w', name: 'worker', template_id: 'tmpl_worker', state: 'active' },
+    { agent_id: 'agt_r', name: 'codex-reviewer', template_id: 'tmpl_reviewer', state: 'active' },
+    { agent_id: 'agt_r2', name: 'arch-reviewer', template_id: 'tmpl_reviewer', state: 'archived' },
+    { agent_id: 'agt_s', name: 'soloist', template_id: 'tmpl_soloist', state: 'active' },
+  ];
+  assert.deepEqual(model.reviewerCandidates([{ agent_id: 'agt_s' }, { agent_id: 'agt_w' }, { agent_id: 'agt_gone' }], agents),
+    [{ agentId: 'agt_s', name: 'soloist', source: 'fleet' }, { agentId: 'agt_w', name: 'worker', source: 'fleet' }]);
+  assert.deepEqual(model.reviewerCandidates([], agents), [{ agentId: 'agt_r', name: 'codex-reviewer', source: 'reviewer_template' }], 'empty fleet -> active reviewer-template agents');
+  assert.deepEqual(model.reviewerCandidates([{ agent_id: 'agt_r2' }], agents), [{ agentId: 'agt_r', name: 'codex-reviewer', source: 'reviewer_template' }], 'archived fleet agents do not count');
+  assert.deepEqual(model.reviewerCandidates([], [{ agent_id: 'agt_w', name: 'worker', template_id: 'tmpl_worker' }]), []);
+});
+
+test('deck: reviewer menu loads the fleet on demand with a loader, then hands the review over', async () => {
+  const routes = {
+    '/task-chains/chain_secret_id/fleets': [{ agent_id: 'agt_rev' }],
+    '/agents': [
+      { agent_id: 'agt_rev', name: 'codex-reviewer', template_id: 'tmpl_reviewer', state: 'active' },
+      { agent_id: 'agt_other', name: 'worker', template_id: 'tmpl_worker', state: 'active' },
+    ],
+  };
+  await withDeck([taskItem('a')], async ({ q, act, text, hits, holdRoutes, releaseRoutes, scheduler }) => {
+    assert.equal(hits.filter((h) => h.includes('/fleets') || h.includes('/agents')).length, 0, 'nothing fetched until the menu opens');
+    holdRoutes();
+    await act(async () => { (q('[data-debug-id="attention-action-reviewer"]') as any).click(); });
+    await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+    assert.ok(q('[data-debug-id="attention-reviewer-loading"]'), 'loader while the fleet loads');
+    assert.ok(hits.some((h) => h === 'GET /api/v1/task-chains/chain_secret_id/fleets'));
+    assert.ok(hits.some((h) => h.startsWith('GET /api/v1/agents?limit=200')));
+    releaseRoutes();
+    await act(async () => { await new Promise((r) => setTimeout(r, 40)); });
+    assert.equal(q('[data-debug-id="attention-reviewer-loading"]'), null);
+    const options = Array.from(document.querySelectorAll('[data-debug-id="attention-reviewer-option"]')) as any[];
+    assert.deepEqual(options.map((o) => o.textContent), ['codex-reviewer'], 'fleet agents only');
+    assert.match(text(), /this chain's fleet/);
+    assert.doesNotMatch(text(), /agt_/, 'no ids rendered');
+    await act(async () => { options[0].click(); });
+    const pending = scheduler.getSnapshot().pending;
+    assert.equal(pending.length, 1);
+    assert.equal(pending[0].label, 'Handed to codex-reviewer');
+  }, { routes });
 });
 
 test('status bar: attention pill is hidden without data and reads as one number', async () => {

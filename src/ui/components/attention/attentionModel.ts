@@ -74,3 +74,26 @@ export function swipeDelta(dx: number): -1 | 0 | 1 {
   if (dx >= SWIPE_COMMIT_PX) return -1;
   return 0;
 }
+
+/** Built-in reviewer template id (hub domain.TEMPLATE_REVIEWER_ID). */
+export const REVIEWER_TEMPLATE_ID = 'tmpl_reviewer';
+
+export type ReviewerCandidate = { agentId: string; name: string; source: 'fleet' | 'reviewer_template' };
+
+/**
+ * Who a task's review can be handed to: the active agents in the task chain's
+ * fleet; when the fleet has none, every active agent made from the reviewer
+ * template. Ids are for the action only -- the menu renders names.
+ */
+export function reviewerCandidates(fleet: ReadonlyArray<{ agent_id?: string; agentId?: string }>, agents: readonly any[]): ReviewerCandidate[] {
+  const active = agents.filter((a) => (a?.agent_id || a?.id) && (a?.state ?? 'active') !== 'archived');
+  const idOf = (a: any) => String(a.agent_id || a.id);
+  const nameOf = (a: any) => String(a.name || a.display_name || a.slug || 'Agent');
+  const inFleet = new Set(fleet.map((f) => String(f.agent_id || f.agentId || '')).filter(Boolean));
+  const fromFleet = active.filter((a) => inFleet.has(idOf(a)));
+  const picked = fromFleet.length > 0 ? fromFleet : active.filter((a) => a?.template_id === REVIEWER_TEMPLATE_ID);
+  const source = fromFleet.length > 0 ? 'fleet' : 'reviewer_template';
+  return picked
+    .map((a) => ({ agentId: idOf(a), name: nameOf(a), source }) as ReviewerCandidate)
+    .sort((x, y) => x.name.localeCompare(y.name));
+}
