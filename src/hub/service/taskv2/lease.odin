@@ -579,7 +579,14 @@ boot :: proc(svc: ^Service) {
 	chains, cerr := iface.taskchain_list_published_active_chains(svc.repo)
 	if cerr.code == .None {
 		for c in chains {
-			if _, rok, _ := refold_chain(svc, &u, c); rok do _, _ = match_chain_in_uow(svc, &u, c, .Boot)
+			tasks, rok, _ := refold_chain(svc, &u, c)
+			if !rok do continue
+			// Blocks on a task that finished while the hub was down (or in
+			// another chain) are released before matching.
+			if released, _, _ := release_task_blocks_in_uow(svc, &u, tasks); released {
+				if _, rok, _ = refold_chain(svc, &u, c); !rok do continue
+			}
+			_, _ = match_chain_in_uow(svc, &u, c, .Boot)
 		}
 	}
 	_, _ = end_uow(svc, &u, true)

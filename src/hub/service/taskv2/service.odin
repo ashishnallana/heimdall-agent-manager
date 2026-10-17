@@ -11,6 +11,7 @@ import events "odin_test:hub/service/events"
 import project "odin_test:hub/service/project"
 
 import lockorder "odin_test:lib/lockorder"
+import jsonx "odin_test:lib/jsonx"
 
 // Service is the Task System v2 engine: events + fold (M0), leases, timers and
 // the matcher (M1). It sits BELOW the taskchain service (which calls into it on
@@ -654,11 +655,48 @@ event_exists :: proc(svc: ^Service, task: domain.Task, kind: string) -> bool {
 // inside its UoW: refold the chain's projections, materialise ready workflow
 // stages, trigger on_output workflow spawns, rebuild the mechanical chain
 // summary on task transitions, then run the matcher.
+// release_task_blocks_in_uow clears a `blocked_on {kind: "task", ref}` badge
+// once the referenced task is done: the hub records `answered` on the agent's
+// behalf, so the task is ready again without a human. Covers both a ref that
+// completes later and one that was already done when the agent blocked (both
+// paths run after_chain_change). A ref in another chain is picked up on this
+// chain's next change or on boot. Returns whether any task was released.
+release_task_blocks_in_uow :: proc(svc: ^Service, u: ^Uow, tasks: []domain.Task) -> (bool, bool, domain.Domain_Error) {
+	released := false
+	for t in tasks {
+		if t.state != .Backlog || strings.trim_space(t.blocked_on_json) == "" do continue
+		if jsonx.extract_string(t.blocked_on_json, "kind", "", true, context.temp_allocator) != "task" do continue
+		ref := strings.trim_space(jsonx.extract_string(t.blocked_on_json, "ref", "", true, context.temp_allocator))
+		if ref == "" || ref == string(t.task_id) do continue
+		ref_done := false
+		found := false
+		for o in tasks do if string(o.task_id) == ref { found = true; ref_done = o.state == .Done; break }
+		if !found {
+			if o, ok, _ := iface.taskchain_get_task(svc.repo, domain.Task_ID(ref)); ok && o.owner_user_id == t.owner_user_id do ref_done = o.state == .Done
+		}
+		if !ref_done do continue
+		p := json_begin()
+		json_bool(&p, "auto", true)
+		json_str(&p, "reason", "ref_task_done")
+		json_str(&p, "ref", ref)
+		json_str(&p, "note", fmt.tprintf("referenced task %s is done", ref))
+		if _, _, ok, err := record_event(svc, u, t, hub_actor(), EV_ANSWERED, json_end(&p), tasks); !ok do return released, false, err
+		released = true
+	}
+	return released, true, domain.Domain_Error{}
+}
+
 after_chain_change :: proc(svc: ^Service, u: ^Uow, chain_id: domain.Task_Chain_ID, owner: domain.User_ID, trigger: Trigger) -> (bool, domain.Domain_Error) {
 	chain, ok, err := iface.taskchain_get_chain(svc.repo, chain_id)
 	if !ok do return false, err
 	tasks, rok, rerr := refold_chain(svc, u, chain)
 	if !rok do return false, rerr
+	if released, uok, uerr := release_task_blocks_in_uow(svc, u, tasks); !uok {
+		return false, uerr
+	} else if released {
+		tasks, rok, rerr = refold_chain(svc, u, chain)
+		if !rok do return false, rerr
+	}
 	if chain.kind == domain.CHAIN_KIND_WORKFLOW && chain.workflow_snapshot_json != "" {
 		if mat_changed, mok, merr := materialize_ready_stages_in_uow(svc, u, chain); !mok {
 			return false, merr
