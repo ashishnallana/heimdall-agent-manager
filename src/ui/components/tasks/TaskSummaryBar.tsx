@@ -1,7 +1,7 @@
 import React from 'react';
 import { Button, ProgressBar, StatusDot, Text } from '@ui';
 import { TaskWire } from '../../api/taskWire';
-import { TASK_STATES_ORDER, TASK_STATE_LABELS, TASK_STATE_TONE, TaskStateV2, normalizeTaskState } from './taskV2Types';
+import { TASK_STATES_ORDER, TASK_STATE_LABELS, TASK_STATE_TONE, TaskStateV2, normalizeTaskState, workLease } from './taskV2Types';
 import { taskNeedsYou } from './taskActions';
 
 export interface TaskSummaryBarProps {
@@ -45,8 +45,9 @@ export const TaskSummaryBar: React.FC<TaskSummaryBarProps> = ({
   const nowMs = Date.now();
   const needsYou = tasks.filter(taskNeedsYou).length;
   const expiring = tasks.filter((t) => {
-    if (normalizeTaskState(t.state) !== 'in_progress' || !t.leases?.[0]?.expires_at) return false;
-    return (new Date(t.leases[0].expires_at).getTime() - nowMs) / 60000 <= EXPIRING_WITHIN_MINS;
+    const lease: any = workLease(t);
+    if (normalizeTaskState(t.state) !== 'in_progress' || !lease?.expires_at) return false;
+    return (new Date(lease.expires_at).getTime() - nowMs) / 60000 <= EXPIRING_WITHIN_MINS;
   }).length;
   const unclaimed = tasks.filter(
     (t) =>

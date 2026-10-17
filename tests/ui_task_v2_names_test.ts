@@ -164,3 +164,20 @@ test('badges carry a kind, and "Blocked on you" only for a human blocker', () =>
   assert.ok(onTask.some((b) => b.kind === 'attempt'));
   for (const b of [...onYou, ...onTask]) assert.ok(b.kind, `badge without kind: ${b.label}`);
 });
+
+test('holder and time left come from the work lease even when a review lease is listed first', () => {
+  const now = Date.parse('2026-10-17T05:00:00Z');
+  const t = {
+    task_id: 'task_mix',
+    chain_id: 'chain_x',
+    title: 'Mixed leases',
+    state: 'in_progress',
+    attempt_no: 1,
+    leases: [
+      { kind: 'review', holder_instance_id: 'inst_coord01', expires_at: '2026-10-17T05:03:00Z' },
+      { kind: 'work', holder_instance_id: 'inst_member02', expires_at: '2026-10-17T05:20:00Z', hard_deadline_at: '2026-10-17T05:50:00Z' },
+    ],
+  } as unknown as TaskWire;
+  assert.equal(getTaskStatusLines(t, [], now, names)[0], 'Backend Dev is working, 20m left');
+  assert.ok(getTaskBadges(t, [], now, names).some((b) => b.kind === 'lease' && b.label === 'Backend Dev · 20m left'));
+});

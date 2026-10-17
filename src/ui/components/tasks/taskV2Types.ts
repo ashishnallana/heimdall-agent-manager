@@ -1,4 +1,4 @@
-import { TaskWire } from '../../api/taskWire';
+import { TaskWire, type TaskLeaseWire } from '../../api/taskWire';
 import { EMPTY_TASK_NAMES, GENERIC_AGENT_LABEL, type TaskNames } from './taskNames';
 
 export type TaskStateV2 = 'in_progress' | 'in_review' | 'ready' | 'backlog' | 'done' | 'cancelled';
@@ -51,7 +51,7 @@ export function normalizeTaskState(raw: string | undefined): TaskStateV2 {
 export function getTaskBadges(task: TaskWire, _chainFleets?: any[], nowMs: number = Date.now(), names: TaskNames = EMPTY_TASK_NAMES): TaskBadge[] {
   const badges: TaskBadge[] = [];
   const state = normalizeTaskState(task.state);
-  const lease = (task.leases && task.leases.length > 0) ? task.leases[0] : null;
+  const lease = workLease(task);
 
   if (task.kind === 'gate') {
     badges.push({ kind: 'gate', label: 'gate', tone: 'accent', title: 'Human gate stage' });
@@ -139,7 +139,7 @@ export function getTaskBadges(task: TaskWire, _chainFleets?: any[], nowMs: numbe
 
 export function getTaskStatusLines(task: TaskWire, _chainFleets?: any[], nowMs: number = Date.now(), names: TaskNames = EMPTY_TASK_NAMES): [string, string] {
   const state = normalizeTaskState(task.state);
-  const lease = (task.leases && task.leases.length > 0) ? task.leases[0] : null;
+  const lease = workLease(task);
 
   if (state === 'in_progress') {
     if (lease) {
@@ -320,8 +320,16 @@ export function inProgressSentenceRest(leftMins: number): string {
  */
 export function workLeaseHolder(task: TaskWire, nowMs: number = Date.now()): { instanceId: string; leftMins: number } | null {
   if (normalizeTaskState(task.state) !== 'in_progress') return null;
-  const lease: any = (task.leases || []).find((l: any) => (l?.kind || 'work') === 'work');
+  const lease: any = workLease(task);
   if (!lease?.holder_instance_id) return null;
   const expiresMs = lease.expires_at ? new Date(lease.expires_at).getTime() : nowMs + 15 * 60000;
   return { instanceId: String(lease.holder_instance_id), leftMins: Math.max(0, Math.round((expiresMs - nowMs) / 60000)) };
+}
+
+/**
+ * The task's work lease (a task can also carry review leases, which may come
+ * first), or null. Every holder / time-left reading goes through this.
+ */
+export function workLease(task: TaskWire): TaskLeaseWire | null {
+  return (task.leases || []).find((l) => (l?.kind || 'work') === 'work') || null;
 }
