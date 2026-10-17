@@ -13,7 +13,7 @@ import jsonx "odin_test:lib/jsonx"
 //   ready ⇔ published ∧ deps done ∧ blocked_on = null ∧ no work lease ∧ kind = task
 //   in_progress ⇔ a live work lease exists
 //   attempt_no increments on lease_granted(work) unless the last release was
-//   `handoff`; attempts whose previous release was replaced|dep_added|reopen
+//   `handoff`; attempts whose previous release was replaced|dep_added|reopen|user_stopped
 //   set counts_toward_budget = 0; budget TASK_MAX_ATTEMPTS counts the rest.
 //   review_rounds = count of changes_requested; ≥ 3 → backlog · blocked_on human.
 //   block / budget exhaustion / no_reviewer_for_role → backlog + blocked_on badge.
@@ -44,6 +44,7 @@ Last_Release :: enum {
 	Replaced,
 	Dep_Added,
 	Reopened,
+	User_Stopped,
 }
 
 Task_View :: struct {
@@ -168,6 +169,7 @@ fold_task :: proc(events: []domain.Task_Event, input: Fold_Input) -> Task_View {
 			switch reason {
 			case EXPIRE_REPLACED: v.last_release = .Replaced
 			case EXPIRE_DEP_ADDED: v.last_release = .Dep_Added
+			case EXPIRE_USER_STOPPED: v.last_release = .User_Stopped
 			case:
 				v.last_release = .Expired
 				apply_budget(&v, max_attempts, ev.ts_ms)
@@ -272,7 +274,7 @@ human_block :: proc(reason: string, since_ms: i64) -> string {
 @(private = "file")
 attempt_counts :: proc(prev: Last_Release) -> bool {
 	#partial switch prev {
-	case .Replaced, .Dep_Added, .Reopened: return false
+	case .Replaced, .Dep_Added, .Reopened, .User_Stopped: return false
 	}
 	return true
 }

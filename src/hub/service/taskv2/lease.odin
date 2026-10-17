@@ -297,6 +297,22 @@ on_instance_terminal :: proc(svc: ^Service, instance_id: string) {
 	_, _ = end_uow(svc, &u, acted)
 }
 
+// on_instance_user_stopped (F4): a person stopped the holder. Called by the
+// agent service after it persisted stopped_by="user" and BEFORE it sends the
+// stop, so the lease ends as user_stopped (non-counting) and the matcher —
+// which never picks a user-stopped instance — hands the task to another
+// instance. The later terminal report finds no lease (no-op).
+on_instance_user_stopped :: proc(svc: ^Service, instance_id: string) {
+	if svc == nil || svc.repo == nil || instance_id == "" do return
+	lease, held, _ := iface.taskchain_get_lease_by_holder(svc.repo, instance_id)
+	if !held do return
+	u, ok, _ := begin_uow(svc)
+	if !ok do return
+	acted := expire_lease_in_uow(svc, &u, lease, EXPIRE_USER_STOPPED, Actor{kind = ACTOR_USER}) == .Expired
+	if acted do acted, _ = after_chain_change(svc, &u, lease.chain_id, lease.owner_user_id, .Instance_Terminal)
+	_, _ = end_uow(svc, &u, acted)
+}
+
 // on_instance_activity: `busy` is an implicit heartbeat and cancels idle grace
 // (by moving last_beat_at); `idle` arms idle_grace for a lease holder.
 on_instance_activity :: proc(svc: ^Service, instance_id, activity_status: string) {

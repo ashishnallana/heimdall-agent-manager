@@ -39,7 +39,16 @@ Lifecycle_Hooks :: struct {
 	on_terminal:      proc(ctx: rawptr, instance_id: string),
 	on_activity:      proc(ctx: rawptr, instance_id, activity_status: string),
 	on_start_success: proc(ctx: rawptr, inst: domain.Agent_Instance),
+	// on_user_stopped: a person stopped the instance (stopped_by is already
+	// persisted). The engine releases its lease without spending an attempt and
+	// hands the task to another instance — BEFORE the stop is sent, so the later
+	// terminal report finds nothing to expire (F4).
+	on_user_stopped:  proc(ctx: rawptr, instance_id: string),
 }
+
+// STOPPED_BY_USER marks an instance a person stopped; the lease matcher never
+// picks it again until a user starts or restarts it.
+STOPPED_BY_USER :: "user"
 
 // notify_instance_terminal is the ONE place every death path (status report
 // stopped|failed|unreachable, heartbeat reconcile, bridge disconnect, reaper,
@@ -759,6 +768,19 @@ stop_instance :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, ins
 	if !ok do return domain.Agent_Instance{}, false, err
 	if !project_service.bridge_runtime_registry_has_live(service.bridge_runtime_registry, inst.bridge_id) do return domain.Agent_Instance{}, false, domain.domain_error(.Bridge_Offline, "bridge is offline")
 	reason := input.reason; if reason == "" do reason = "user_requested"
+	// F4: a user stop sticks. Persist it first (the matcher reads stopped_by),
+	// then let the engine release the lease and re-plan, then send the stop.
+	if strings.has_prefix(reason, "user") && inst.stopped_by != STOPPED_BY_USER {
+		inst.stopped_by = STOPPED_BY_USER
+		inst.updated_at = platform.clock_now(service.clock)
+		saved, sok, serr := iface.agent_save_instance(service.agents, inst)
+		if !sok do return domain.Agent_Instance{}, false, serr
+		inst = saved
+	}
+	if strings.has_prefix(reason, "user") && service.hooks.on_user_stopped != nil {
+		service.hooks.on_user_stopped(service.hooks.ctx, inst.agent_instance_id)
+		if fresh, fok, _ := iface.agent_get_instance(service.agents, inst.agent_instance_id); fok do inst = fresh
+	}
 	command_id := strings.concatenate({platform.generate_id(service.ids, "cmd_stop_"), "_", inst.agent_instance_id})
 	command := project_service.Runtime_Command{bridge_id = inst.bridge_id, command_id = command_id, body_json = stop_command_json(command_id, inst.agent_instance_id, reason, force = input.force)}
 	if sent, send_err := project_service.bridge_command_send_runtime(service.bridge_command_sink, command); !sent do return domain.Agent_Instance{}, false, send_err
@@ -771,7 +793,19 @@ restart_instance :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, 
 	if idle, err := reconfiguration_require_idle(service, instance_id); !idle do return {}, false, err
 	inst, ok, err := get_instance(service, auth, instance_id)
 	if !ok do return domain.Agent_Instance{}, false, err
+	inst = clear_user_stop(service, inst)
 	return relaunch_instance(service, auth, inst, inst.provider, inst.model)
+}
+
+// clear_user_stop: an explicit user start/restart makes the instance eligible
+// for task leases again (F4).
+clear_user_stop :: proc(service: ^Agent_Service, inst: domain.Agent_Instance) -> domain.Agent_Instance {
+	if inst.stopped_by == "" do return inst
+	next := inst
+	next.stopped_by = ""
+	next.updated_at = platform.clock_now(service.clock)
+	if saved, sok, _ := iface.agent_save_instance(service.agents, next); sok do return saved
+	return inst
 }
 
 // start_instance starts a STOPPED instance. Unlike restart (absolute
@@ -786,6 +820,7 @@ start_instance :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, in
 		details := strings.concatenate({"{\"code\":\"already_running\",\"runtime_status\":\"", inst.runtime_status, "\"}"})
 		return domain.Agent_Instance{}, false, domain.domain_error(.Conflict, msg, details)
 	}
+	inst = clear_user_stop(service, inst)
 	return relaunch_instance(service, auth, inst, inst.provider, inst.model)
 }
 

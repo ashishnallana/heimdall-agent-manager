@@ -135,6 +135,10 @@ task_engine_on_instance_activity :: proc(ctx: rawptr, instance_id, activity_stat
 	taskv2.on_instance_activity((^taskv2.Service)(ctx), instance_id, activity_status)
 }
 
+task_engine_on_user_stopped :: proc(ctx: rawptr, instance_id: string) {
+	taskv2.on_instance_user_stopped((^taskv2.Service)(ctx), instance_id)
+}
+
 task_engine_on_start_success :: proc(ctx: rawptr, inst: domain.Agent_Instance) {
 	taskv2.on_start_success((^taskv2.Service)(ctx), inst)
 }
@@ -279,6 +283,7 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 		on_terminal      = task_engine_on_instance_terminal,
 		on_activity      = task_engine_on_instance_activity,
 		on_start_success = task_engine_on_start_success,
+		on_user_stopped  = task_engine_on_user_stopped,
 	}
 	graph.search = search_service.new_search_service(&graph.repos.search)
 	graph.push = push_service.new_push_service(&graph.repos.push_subscriptions, &graph.clock, &graph.ids, push_service.Vapid_Config{

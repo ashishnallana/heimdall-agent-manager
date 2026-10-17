@@ -58,6 +58,7 @@ EXPIRE_CHAIN_CLOSED  :: "chain_closed"
 EXPIRE_CANCELLED     :: "cancelled"
 EXPIRE_CHANGES_REQUESTED :: "changes_requested" // review leases dropped after a request_changes
 EXPIRE_HUB_RESTART   :: "hub_restart_no_lease"  // boot: in_progress row without a lease row
+EXPIRE_USER_STOPPED  :: "user_stopped"          // a person stopped the holder; non-counting (F4)
 
 ACTOR_HUB         :: "hub"
 ACTOR_AGENT       :: "agent"

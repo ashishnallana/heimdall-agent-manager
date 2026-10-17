@@ -281,6 +281,10 @@ pick_instance :: proc(svc: ^Service, u: ^Uow, ctx: ^Match_Context, fleet: domain
 	have_live, have_stopping, have_warm, have_pref := false, false, false, false
 	for inst in ctx.instances {
 		if inst.agent_id != fleet.agent_id || inst.bridge_id != placement.bridge_id do continue
+		// F4: a person stopped this instance — never re-wake or re-grant it
+		// (whatever its runtime state, including as prefer=last holder), and
+		// do not count it toward capacity: a fresh instance takes the work.
+		if inst.stopped_by == agent.STOPPED_BY_USER do continue
 		if is_coordinator(svc, ctx.chain, inst.agent_instance_id) do continue
 		disposition := agent.failed_instance_disposition(inst, ctx.now_ms)
 		if disposition == .Dead do continue
