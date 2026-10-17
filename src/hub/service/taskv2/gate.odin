@@ -158,3 +158,44 @@ review_needed_from :: proc(reviews: []domain.Task_Review, task: domain.Task, age
 	}
 	return true
 }
+
+// regate_after_reviewer_change (F3): the task's named reviewers / review roles
+// changed while it awaits review. Review leases whose (agent, role) is no
+// longer owed are expired (`replaced`; expire stops the live holder, and a late
+// `review post` gets lease_lost). Then the gate is re-run: removing the last
+// owed reviewer can satisfy it, which nothing else would notice (no lease left
+// to post a verdict). The caller runs after_chain_change once afterwards.
+regate_after_reviewer_change :: proc(svc: ^Service, u: ^Uow, task_in: domain.Task, actor: Actor) -> (bool, domain.Domain_Error) {
+	task, tok, terr := iface.taskchain_get_task(svc.repo, task_in.task_id)
+	if !tok do return false, terr
+	if task.state != .In_Review do return true, domain.Domain_Error{}
+	chain, cok, cerr := iface.taskchain_get_chain(svc.repo, task.chain_id)
+	if !cok do return false, cerr
+	author_agent := ""
+	if holder := last_attempt_holder(svc, task); holder != "" {
+		if inst, iok, _ := iface.agent_get_instance(svc.agents, holder); iok do author_agent = inst.agent_id
+	}
+	fleets, ferr := iface.taskchain_list_fleets_by_chain(svc.repo, chain.chain_id, chain.owner_user_id)
+	if ferr.code != .None do return false, ferr
+	pairs := required_review_pairs(task, fleets, author_agent)
+	leases, lerr := iface.taskchain_list_leases_by_task(svc.repo, task.task_id)
+	if lerr.code != .None do return false, lerr
+	for l in leases {
+		if l.kind != domain.LEASE_KIND_REVIEW do continue
+		agent_id := ""
+		if inst, iok, _ := iface.agent_get_instance(svc.agents, l.holder_instance_id); iok do agent_id = inst.agent_id
+		owed := false
+		for role in split_review_roles(l.review_role) {
+			for p in pairs do if p.agent_id == agent_id && p.role == role { owed = true; break }
+			if owed do break
+		}
+		if owed do continue
+		if expire_lease_in_uow(svc, u, l, EXPIRE_REPLACED, actor) == .Failed {
+			return false, domain.domain_error(.Internal_Error, "failed to expire a stale review lease")
+		}
+	}
+	fresh, fok, ferr2 := iface.taskchain_get_task(svc.repo, task.task_id)
+	if !fok do return false, ferr2
+	if _, gok, gerr := evaluate_gate_in_uow(svc, u, chain, fresh, actor); !gok do return false, gerr
+	return true, domain.Domain_Error{}
+}

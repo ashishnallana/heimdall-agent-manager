@@ -556,6 +556,9 @@ task_updated :: proc(svc: ^Service, task: domain.Task, actor: Actor, fields: []s
 	strings.write_byte(&b, ']')
 	json_raw(&payload, "fields", strings.to_string(b))
 	_, _, rok, rerr := record_event(svc, &u, task, actor, EV_UPDATED, json_end(&payload))
+	reviewers_changed := false
+	for f in fields do if f == "reviewers" || f == "review_roles" || f == "brief" { reviewers_changed = true; break }
+	if rok && reviewers_changed do rok, rerr = regate_after_reviewer_change(svc, &u, task, actor)
 	if rok do rok, rerr = after_chain_change(svc, &u, task.chain_id, task.owner_user_id, .Task_Updated)
 	_, cerr := end_uow(svc, &u, rok)
 	if !rok do return rerr
