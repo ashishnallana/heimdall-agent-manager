@@ -309,6 +309,36 @@ destroy_effects :: proc(e: ^Effects) {
 	delete(e.keys)
 }
 
+// agent_notice_command_json: a one-line notice for an agent's terminal, sent as
+// the bridge's `notify_task_nudge` (task_id empty → never debounced), which
+// delivers through the pty-host's agent path and SUBMITS it. Typing the line +
+// "\r" as raw pty input does not: Claude's TUI takes a multi-byte write as a
+// paste, so the "\r" became a newline and notices piled up unsent in the input
+// box (found in the live solo check). Heap-allocated; the caller deletes it.
+agent_notice_command_json :: proc(command_id, instance_id, chain_id, origin, line: string) -> string {
+	b := strings.builder_make()
+	strings.write_string(&b, `{"type":"notify_task_nudge","origin":"`)
+	contracts.write_json_string(&b, origin)
+	strings.write_string(&b, `","command_id":"`)
+	contracts.write_json_string(&b, command_id)
+	strings.write_string(&b, `","agent_instance_id":"`)
+	contracts.write_json_string(&b, instance_id)
+	strings.write_string(&b, `","task_id":"","chain_id":"`)
+	contracts.write_json_string(&b, chain_id)
+	strings.write_string(&b, `","target_instance_id":"`)
+	contracts.write_json_string(&b, instance_id)
+	strings.write_string(&b, `","target_role":"`)
+	contracts.write_json_string(&b, origin)
+	strings.write_string(&b, `","action":"`)
+	contracts.write_json_string(&b, origin)
+	strings.write_string(&b, `","message":"`)
+	contracts.write_json_string(&b, line)
+	strings.write_string(&b, `","human_message":"`)
+	contracts.write_json_string(&b, line)
+	strings.write_string(&b, `"}`)
+	return strings.to_string(b)
+}
+
 @(private = "file")
 flush_effects :: proc(svc: ^Service, e: ^Effects) {
 	flush_wakes(svc, e)
@@ -318,7 +348,7 @@ flush_effects :: proc(svc: ^Service, e: ^Effects) {
 		}
 		if n.bridge_id != "" && svc.bridge_command_sink.send_runtime_command != nil {
 			cmd_id := platform.generate_id(svc.ids, "cmd_notify_")
-			cmd_json := agent.agent_pty_input_command_json(cmd_id, n.coordinator_instance_id, strings.concatenate({n.line, "\r"}, context.temp_allocator))
+			cmd_json := agent_notice_command_json(cmd_id, n.coordinator_instance_id, n.chain_id, n.trigger, n.line)
 			defer delete(cmd_json)
 			_, _ = project.bridge_command_send_runtime(svc.bridge_command_sink, project.Runtime_Command{
 				bridge_id  = n.bridge_id,
@@ -346,7 +376,7 @@ flush_effects :: proc(svc: ^Service, e: ^Effects) {
 	for n in e.nudges {
 		if svc.bridge_command_sink.send_runtime_command == nil do break
 		cmd_id := platform.generate_id(svc.ids, "cmd_nudge_")
-		cmd_json := agent.agent_pty_input_command_json(cmd_id, n.instance_id, strings.concatenate({n.line, "\r"}, context.temp_allocator))
+		cmd_json := agent_notice_command_json(cmd_id, n.instance_id, "", "taskv2_nudge", n.line)
 		defer delete(cmd_json)
 		_, _ = project.bridge_command_send_runtime(svc.bridge_command_sink, project.Runtime_Command{bridge_id = n.bridge_id, command_id = cmd_id, body_json = cmd_json})
 	}
