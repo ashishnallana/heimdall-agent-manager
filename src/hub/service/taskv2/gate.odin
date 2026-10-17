@@ -175,7 +175,10 @@ review_needed_from :: proc(reviews: []domain.Task_Review, task: domain.Task, age
 regate_after_reviewer_change :: proc(svc: ^Service, u: ^Uow, task_in: domain.Task, actor: Actor) -> (bool, domain.Domain_Error) {
 	task, tok, terr := iface.taskchain_get_task(svc.repo, task_in.task_id)
 	if !tok do return false, terr
-	if task.state != .In_Review do return true, domain.Domain_Error{}
+	// Dropping every reviewer can fold the task straight to done (a submit with
+	// nothing owed is done); its review leases are still stale and end here as
+	// `replaced` rather than later as `chain_closed`.
+	if task.state != .In_Review && task.state != .Done do return true, domain.Domain_Error{}
 	chain, cok, cerr := iface.taskchain_get_chain(svc.repo, task.chain_id)
 	if !cok do return false, cerr
 	author_agent := ""
@@ -203,6 +206,7 @@ regate_after_reviewer_change :: proc(svc: ^Service, u: ^Uow, task_in: domain.Tas
 	}
 	fresh, fok, ferr2 := iface.taskchain_get_task(svc.repo, task.task_id)
 	if !fok do return false, ferr2
+	if fresh.state != .In_Review do return true, domain.Domain_Error{}
 	if _, gok, gerr := evaluate_gate_in_uow(svc, u, chain, fresh, actor); !gok do return false, gerr
 	return true, domain.Domain_Error{}
 }
