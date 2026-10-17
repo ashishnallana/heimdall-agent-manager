@@ -325,6 +325,26 @@ ctl_agent_cwd :: proc(allocator := context.temp_allocator) -> string {
 	return cwd
 }
 
+// ctl_lease_dir_or: the lease's chain directory when it exists on this machine,
+// else `fallback` (ham-ctl's own cwd).
+ctl_lease_dir_or :: proc(directory_path, fallback: string) -> string {
+	dp := strings.trim_space(directory_path)
+	if dp != "" && os.exists(dp) do return dp
+	return fallback
+}
+
+// ctl_lease_work_dir: where the current lease's work lives, for the lease verbs'
+// `cwd` (the bridge reads the repository's VCS state from it). Peeks the lease
+// for placement.directory_path; falls back to ham-ctl's own cwd.
+ctl_lease_work_dir :: proc(endpoint, token: string) -> string {
+	cwd := ctl_agent_cwd()
+	resp, ok := ctl_agent_local_call(endpoint, token, "agent.lease.next", json_object(json_kv("cwd", cwd), json_kv_raw("peek", "true")))
+	if !ok do return cwd
+	lease, parsed := ctl_verify_parse_lease(resp)
+	if !parsed do return cwd
+	return ctl_lease_dir_or(lease.directory_path, cwd)
+}
+
 ctl_agent_cwd_field :: proc() -> string {
 	return json_kv("cwd", ctl_agent_cwd())
 }
@@ -369,7 +389,7 @@ ctl_v2_lease_submit :: proc(endpoint, token: string, args: []string) {
 			a = raw_a
 		}
 	}
-	params, ok := ctl_v2_lease_submit_params(args, h, o, a)
+	params, ok := ctl_v2_lease_submit_params(args, h, o, a, ctl_lease_work_dir(endpoint, token))
 	if !ok { fmt.println(`{"ok":false,"message":"lease submit invalid arguments"}`); os.exit(1) }
 	ctl_agent_call_task(endpoint, token, "agent.lease.submit", params, args)
 }
@@ -383,7 +403,7 @@ ctl_v2_lease_handoff :: proc(endpoint, token: string, args: []string) {
 	if v := option_value(args, "--lease", ""); v != "" do append(&fields, json_kv("lease_id", v))
 	if h, ok := ctl_read_json_file_flag(args, "--handoff-file"); ok do append(&fields, json_kv_raw("handoff", h))
 	if v := option_value(args, "--vcs-base", ""); v != "" do append(&fields, json_kv("vcs_base", v))
-	append(&fields, ctl_agent_cwd_field())
+	append(&fields, json_kv("cwd", ctl_lease_work_dir(endpoint, token)))
 	ctl_agent_call_task(endpoint, token, "agent.lease.handoff", json_object_from_slice(fields[:]), args)
 }
 
@@ -644,6 +664,8 @@ Ctl_Verify_Lease :: struct {
 	auto_submit: bool,
 	vcs_base:    string,
 	vcs_head:    string,
+	// placement.directory_path: the chain directory the task's work lives in.
+	directory_path: string,
 }
 
 // ctl_verify_parse_lease reads status / task_id / attempt_no / brief.verify /
@@ -671,6 +693,9 @@ ctl_verify_parse_lease :: proc(response: string) -> (Ctl_Verify_Lease, bool) {
 		if t, tok := lease["task_id"].(json.String); tok do out.task_id = strings.clone(string(t))
 		if b, bok := lease["vcs_base"].(json.String); bok do out.vcs_base = strings.clone(string(b))
 		if h, hok := lease["vcs_head"].(json.String); hok do out.vcs_head = strings.clone(string(h))
+		if pl, pok := lease["placement"].(json.Object); pok {
+			if dp, dok := pl["directory_path"].(json.String); dok do out.directory_path = strings.clone(string(dp))
+		}
 		if vcs_obj, vok := lease["vcs"].(json.Object); vok {
 			if b, bok := vcs_obj["base"].(json.String); bok && out.vcs_base == "" do out.vcs_base = strings.clone(string(b))
 			if h, hok := vcs_obj["head"].(json.String); hok && out.vcs_head == "" do out.vcs_head = strings.clone(string(h))
@@ -692,6 +717,11 @@ ctl_verify_parse_lease :: proc(response: string) -> (Ctl_Verify_Lease, bool) {
 		if brief, bok := task_obj["brief"].(json.Object); bok {
 			if v, vok := brief["verify"].(json.String); vok do out.verify_cmd = strings.clone(string(v))
 			if a, aok := brief["auto_submit"].(json.Boolean); aok do out.auto_submit = bool(a)
+		}
+	}
+	if out.directory_path == "" {
+		if pl, pok := node["placement"].(json.Object); pok {
+			if dp, dok := pl["directory_path"].(json.String); dok do out.directory_path = strings.clone(string(dp))
 		}
 	}
 	if pack, pok := node["pack"].(json.Object); pok {
@@ -799,6 +829,11 @@ ctl_v2_verify :: proc(endpoint, token: string, tokens, args: []string) {
 		fmt.printfln(`{"ok":true,"task_id":"%s","verify":"none","message":"brief.verify is none: nothing to run; submit with --verify none"}`, lease.task_id)
 		return
 	}
+
+	// The task's work lives in the chain directory from the lease placement; an
+	// agent launched without a project path sits in its instance dir, where
+	// brief.verify would find nothing.
+	cwd = ctl_lease_dir_or(lease.directory_path, cwd)
 
 	// 2. head of cwd ("" when not a repo). For --independent, prefer the attempt's
 	//    submitted vcs.head and run inside an ephemeral detached git worktree.

@@ -38,6 +38,11 @@ build_pack_json :: proc(svc: ^Service, chain: domain.Task_Chain, task: domain.Ta
 	placement_obj := json_begin()
 	json_str(&placement_obj, "bridge_id", bridge_id)
 	json_str(&placement_obj, "directory_id", dir_id)
+	// The directory's path on that bridge, so `ham-ctl verify` / submit run in the
+	// task's repository even when the agent's own cwd is its instance dir.
+	dir_path := ""
+	for d in dirs do if d.directory_id == dir_id { dir_path = d.path; break }
+	json_str(&placement_obj, "directory_path", dir_path)
 	json_str(&placement_obj, "provider", provider)
 	json_str(&placement_obj, "model", model)
 	placement_json := json_end(&placement_obj)
