@@ -388,6 +388,7 @@ on_bridge_hello :: proc(svc: ^Service, bridge_id: string, active_instance_ids: [
 	}
 	ok_all := true
 	chains, cerr := iface.taskchain_list_published_active_chains(svc.repo)
+	requeue_pending_merges(svc, &u, bridge_id)
 	if cerr.code == .None {
 		for c in chains {
 			if chain_has_held_task(svc, c) {

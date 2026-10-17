@@ -1,5 +1,6 @@
 package taskv2
 
+import "base:runtime"
 import "core:fmt"
 import "core:strings"
 import "core:thread"
@@ -34,7 +35,7 @@ Merge_Effect :: struct {
 
 // effect_merge_worktree queues the merge-back for a task that just became done.
 // No-op unless its work ran on a bridge whose chain directory gets worktrees.
-effect_merge_worktree :: proc(svc: ^Service, u: ^Uow, task: domain.Task, evs: []domain.Task_Event) {
+effect_merge_worktree :: proc(svc: ^Service, u: ^Uow, task: domain.Task, evs: []domain.Task_Event, only_bridge := "") {
 	if u == nil || !PER_LEASE_WORKTREES_ENABLED do return
 	bridge_id := ""
 	for i := len(evs) - 1; i >= 0; i -= 1 {
@@ -44,7 +45,7 @@ effect_merge_worktree :: proc(svc: ^Service, u: ^Uow, task: domain.Task, evs: []
 		bridge_id = jsonx.extract_string(ev.payload_json, "bridge_id", "", true, context.temp_allocator)
 		break
 	}
-	if bridge_id == "" do return
+	if bridge_id == "" || (only_bridge != "" && bridge_id != only_bridge) do return
 	dirs, derr := iface.taskchain_list_directories_by_chain(svc.repo, task.chain_id, task.owner_user_id)
 	if derr.code != .None do return
 	for d in dirs {
@@ -81,6 +82,11 @@ Merge_Job :: struct {
 // take seconds and flush_effects may run on a bridge frame handler, which must
 // not wait on its own bridge.
 flush_merges :: proc(svc: ^Service, e: ^Effects) {
+	if len(e.merges) == 0 do return
+	// The job, its strings and the Thread itself outlive the caller, which on
+	// the request path allocates from a per-request arena: build them on the
+	// persistent heap (same trap as push.send_to_user_async).
+	context.allocator = runtime.heap_allocator()
 	for m in e.merges {
 		if svc.bridge_command_sink.send_runtime_command_wait == nil do continue
 		job := new(Merge_Job)
@@ -182,4 +188,32 @@ run_merge :: proc(svc: ^Service, m: Merge_Effect) {
 		rok, _ = after_chain_change(svc, &u, saved.chain_id, saved.owner_user_id, .Task_Updated)
 	}
 	_, _ = end_uow(svc, &u, rok)
+}
+
+// merge_pending: the task's latest completion has no merge outcome yet (the
+// hub stopped between Done and the bridge's reply, or the bridge was away).
+merge_pending :: proc(evs: []domain.Task_Event) -> bool {
+	for i := len(evs) - 1; i >= 0; i -= 1 {
+		switch evs[i].kind {
+		case EV_MERGED, EV_MERGE_CONFLICT: return false
+		case EV_APPROVED, EV_SUBMITTED: return true
+		}
+	}
+	return false
+}
+
+// requeue_pending_merges re-sends the merge-back of every done task whose work
+// ran on `bridge_id` and never got a merge outcome. Called on bridge hello;
+// the bridge side is idempotent (an already-merged branch is gone → no-op).
+// Scans done tasks of every chain: the chain of a task that just finished is
+// usually already `completed`, so active chains alone would miss it.
+requeue_pending_merges :: proc(svc: ^Service, u: ^Uow, bridge_id: string) {
+	if !PER_LEASE_WORKTREES_ENABLED do return
+	tasks, terr := iface.taskchain_list_tasks_by_state(svc.repo, .Done)
+	if terr.code != .None do return
+	for t in tasks {
+		evs, eerr := iface.taskchain_list_events_by_task(svc.repo, t.task_id, t.owner_user_id)
+		if eerr.code != .None || !merge_pending(evs) do continue
+		effect_merge_worktree(svc, u, t, evs, bridge_id)
+	}
 }

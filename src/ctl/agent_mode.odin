@@ -1538,7 +1538,17 @@ ctl_agent_jsonl_request :: proc(token, method, params_json: string) -> string {
 	strings.write_string(&b, `","method":"`)
 	json_write_string(&b, method)
 	strings.write_string(&b, `","params":`)
-	if strings.trim_space(params_json) == "" { strings.write_string(&b, "{}") } else { strings.write_string(&b, params_json) }
+	if strings.trim_space(params_json) == "" {
+		strings.write_string(&b, "{}")
+	} else {
+		// JSONL framing: a raw newline ends the request line. Params may splice
+		// pretty-printed JSON (e.g. `lease submit --output-file`); valid JSON
+		// never has a raw newline inside a string, so a space is equivalent.
+		for i in 0..<len(params_json) {
+			ch := params_json[i]
+			strings.write_byte(&b, ' ' if ch == '\n' || ch == '\r' else ch)
+		}
+	}
 	strings.write_string(&b, "}\n")
 	return strings.to_string(b)
 }
