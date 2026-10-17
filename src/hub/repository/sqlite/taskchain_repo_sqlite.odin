@@ -454,8 +454,9 @@ taskchain_remove_directory_sqlite :: proc(ctx: rawptr, directory_id: string, cha
 	bind_text(stmt, 1, directory_id)
 	bind_text(stmt, 2, string(chain_id))
 	bind_text(stmt, 3, string(owner_user_id))
-	if sqlite3_step(stmt) != SQLITE_DONE do return false, domain.domain_error(.Internal_Error, "failed to delete directory")
-	changes := int(sqlite3_changes(impl.conn.db))
+	step_rc, row_changes := step_changes(impl.conn.db, stmt)
+	if step_rc != SQLITE_DONE do return false, domain.domain_error(.Internal_Error, "failed to delete directory")
+	changes := row_changes
 	return changes > 0, domain.Domain_Error{}
 }
 
@@ -550,8 +551,9 @@ taskchain_delete_fleet_sqlite :: proc(ctx: rawptr, chain_id: domain.Task_Chain_I
 	bind_text(stmt, 3, string(chain_id))
 	bind_text(stmt, 4, string(owner_user_id))
 	bind_text(stmt, 5, string(owner_user_id))
-	if sqlite3_step(stmt) != SQLITE_DONE do return false, domain.domain_error(.Internal_Error, "failed to delete fleet")
-	changes := int(sqlite3_changes(impl.conn.db))
+	step_rc, row_changes := step_changes(impl.conn.db, stmt)
+	if step_rc != SQLITE_DONE do return false, domain.domain_error(.Internal_Error, "failed to delete fleet")
+	changes := row_changes
 	return changes > 0, domain.Domain_Error{}
 }
 

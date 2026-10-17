@@ -541,10 +541,11 @@ shell_session_set_server_port_sqlite :: proc(ctx: rawptr, owner_user_id, session
 	sqlite3_bind_int(stmt, 1, c.int(server_port))
 	bind_text(stmt, 2, owner_user_id)
 	bind_text(stmt, 3, session_id)
-	if sqlite3_step(stmt) != SQLITE_DONE {
+	step_rc, row_changes := step_changes(impl.conn.db, stmt)
+	if step_rc != SQLITE_DONE {
 		return false, domain.domain_error(.Internal_Error, "failed to set shell session server_port")
 	}
-	return sqlite3_changes(impl.conn.db) > 0, domain.Domain_Error{}
+	return row_changes > 0, domain.Domain_Error{}
 }
 
 shell_session_delete_sqlite :: proc(ctx: rawptr, owner_user_id, session_id: string) -> (bool, domain.Domain_Error) {
@@ -613,10 +614,11 @@ shell_session_delete_terminal_before_sqlite :: proc(ctx: rawptr, cutoff_rfc3339:
 	defer sqlite3_finalize(stmt)
 	for st, i in terminal do bind_text(stmt, 1 + i, st)
 	bind_text(stmt, 1 + len(terminal), cutoff_rfc3339)
-	if sqlite3_step(stmt) != SQLITE_DONE {
+	step_rc, row_changes := step_changes(impl.conn.db, stmt)
+	if step_rc != SQLITE_DONE {
 		return 0, domain.domain_error(.Internal_Error, "failed to delete expired shell session rows")
 	}
-	return int(sqlite3_changes(impl.conn.db)), domain.Domain_Error{}
+	return row_changes, domain.Domain_Error{}
 }
 
 // shell_session_list_live_bridge_ids_sqlite backs REQ-SHELL-14's gone-bridge sweep:

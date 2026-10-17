@@ -283,8 +283,9 @@ task_lease_delete_sqlite :: proc(ctx: rawptr, lease_id: string) -> (bool, domain
 	if err.code != .None do return false, err
 	defer sqlite3_finalize(stmt)
 	bind_text(stmt, 1, lease_id)
-	if sqlite3_step(stmt) != SQLITE_DONE do return false, domain.domain_error(.Internal_Error, "failed to delete lease")
-	return int(sqlite3_changes(impl.conn.db)) > 0, domain.Domain_Error{}
+	step_rc, row_changes := step_changes(impl.conn.db, stmt)
+	if step_rc != SQLITE_DONE do return false, domain.domain_error(.Internal_Error, "failed to delete lease")
+	return row_changes > 0, domain.Domain_Error{}
 }
 
 // ---- reviews ---------------------------------------------------------------

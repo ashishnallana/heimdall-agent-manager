@@ -235,10 +235,11 @@ issue_update_sqlite :: proc(ctx: rawptr, issue: domain.Issue) -> (domain.Issue, 
 	bind_text(stmt, 9, string(issue.issue_id))
 	bind_text(stmt, 10, string(issue.owner_user_id))
 
-	if sqlite3_step(stmt) != SQLITE_DONE {
+	step_rc, row_changes := step_changes(impl.conn.db, stmt)
+	if step_rc != SQLITE_DONE {
 		return domain.Issue{}, false, domain.domain_error(.Internal_Error, "failed to update issue")
 	}
-	if sqlite3_changes(impl.conn.db) == 0 {
+	if row_changes == 0 {
 		return domain.Issue{}, false, domain.domain_error(.Not_Found, "issue not found")
 	}
 	return issue, true, domain.Domain_Error{}
@@ -259,10 +260,11 @@ issue_delete_sqlite :: proc(ctx: rawptr, issue_id: domain.Issue_ID, owner_user_i
 	bind_text(stmt, 1, string(issue_id))
 	bind_text(stmt, 2, string(owner_user_id))
 
-	if sqlite3_step(stmt) != SQLITE_DONE {
+	step_rc, row_changes := step_changes(impl.conn.db, stmt)
+	if step_rc != SQLITE_DONE {
 		return false, domain.domain_error(.Internal_Error, "failed to delete issue")
 	}
-	changes := int(sqlite3_changes(impl.conn.db))
+	changes := row_changes
 	return changes > 0, domain.Domain_Error{}
 }
 
@@ -348,10 +350,11 @@ issue_comment_delete_sqlite :: proc(ctx: rawptr, comment_id: domain.Issue_Commen
 	bind_text(stmt, 1, string(comment_id))
 	bind_text(stmt, 2, string(owner_user_id))
 
-	if sqlite3_step(stmt) != SQLITE_DONE {
+	step_rc, row_changes := step_changes(impl.conn.db, stmt)
+	if step_rc != SQLITE_DONE {
 		return false, domain.domain_error(.Internal_Error, "failed to delete comment")
 	}
-	changes := int(sqlite3_changes(impl.conn.db))
+	changes := row_changes
 	return changes > 0, domain.Domain_Error{}
 }
 
@@ -385,10 +388,11 @@ issue_vote_save_sqlite :: proc(ctx: rawptr, vote: domain.Issue_Vote) -> (bool, d
 	bind_text(stmt, 4, vote.voter_name)
 	bind_text(stmt, 5, vote.created_at)
 
-	if sqlite3_step(stmt) != SQLITE_DONE {
+	step_rc, row_changes := step_changes(impl.conn.db, stmt)
+	if step_rc != SQLITE_DONE {
 		return false, domain.domain_error(.Conflict, "vote could not be recorded")
 	}
-	changes := int(sqlite3_changes(impl.conn.db))
+	changes := row_changes
 	if changes == 0 {
 		return false, domain.domain_error(.Conflict, "already voted on this issue")
 	}
@@ -411,10 +415,11 @@ issue_vote_remove_sqlite :: proc(ctx: rawptr, issue_id: domain.Issue_ID, voter_i
 	bind_text(stmt, 2, voter_id)
 	bind_text(stmt, 3, string(owner_user_id))
 
-	if sqlite3_step(stmt) != SQLITE_DONE {
+	step_rc, row_changes := step_changes(impl.conn.db, stmt)
+	if step_rc != SQLITE_DONE {
 		return false, domain.domain_error(.Internal_Error, "failed to remove vote")
 	}
-	changes := int(sqlite3_changes(impl.conn.db))
+	changes := row_changes
 	return changes > 0, domain.Domain_Error{}
 }
 

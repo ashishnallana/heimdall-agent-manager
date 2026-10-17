@@ -200,10 +200,11 @@ card_update_status_sqlite :: proc(ctx: rawptr, id: domain.Card_ID, status: strin
 	bind_text(stmt, 2, updated_at)
 	bind_text(stmt, 3, string(id))
 
-	if sqlite3_step(stmt) != SQLITE_DONE {
+	step_rc, row_changes := step_changes(impl.conn.db, stmt)
+	if step_rc != SQLITE_DONE {
 		return false, domain.domain_error(.Internal_Error, "failed to update card status")
 	}
-	return sqlite3_changes(impl.conn.db) > 0, domain.Domain_Error{}
+	return row_changes > 0, domain.Domain_Error{}
 }
 
 card_update_sqlite :: proc(ctx: rawptr, card: domain.Card) -> (domain.Card, bool, domain.Domain_Error) {
@@ -227,10 +228,11 @@ card_update_sqlite :: proc(ctx: rawptr, card: domain.Card) -> (domain.Card, bool
 	bind_card_update_fields(stmt, n)
 	bind_text(stmt, 18, string(n.card_id))
 
-	if sqlite3_step(stmt) != SQLITE_DONE {
+	step_rc, row_changes := step_changes(impl.conn.db, stmt)
+	if step_rc != SQLITE_DONE {
 		return domain.Card{}, false, domain.domain_error(.Internal_Error, "failed to update card")
 	}
-	if sqlite3_changes(impl.conn.db) == 0 {
+	if row_changes == 0 {
 		return domain.Card{}, false, domain.domain_error(.Not_Found, "card not found")
 	}
 	return n, true, domain.Domain_Error{}
@@ -270,8 +272,9 @@ card_delete_sqlite :: proc(ctx: rawptr, id: domain.Card_ID) -> (bool, domain.Dom
 	}
 	defer sqlite3_finalize(stmt)
 	bind_text(stmt, 1, string(id))
-	if sqlite3_step(stmt) != SQLITE_DONE {
+	step_rc, row_changes := step_changes(impl.conn.db, stmt)
+	if step_rc != SQLITE_DONE {
 		return false, domain.domain_error(.Internal_Error, "failed to delete card")
 	}
-	return sqlite3_changes(impl.conn.db) > 0, domain.Domain_Error{}
+	return row_changes > 0, domain.Domain_Error{}
 }

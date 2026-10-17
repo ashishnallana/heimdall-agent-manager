@@ -90,8 +90,9 @@ bridge_revoke_token_family_sqlite :: proc(ctx: rawptr, family_id, revoked_at: st
 	defer sqlite3_finalize(stmt)
 	bind_text(stmt, 1, revoked_at)
 	bind_text(stmt, 2, family_id)
-	if sqlite3_step(stmt) != SQLITE_DONE do return 0, false, domain.domain_error(.Internal_Error, "bridge token family could not be revoked")
-	return int(sqlite3_changes(impl.conn.db)), true, domain.Domain_Error{}
+	step_rc, row_changes := step_changes(impl.conn.db, stmt)
+	if step_rc != SQLITE_DONE do return 0, false, domain.domain_error(.Internal_Error, "bridge token family could not be revoked")
+	return row_changes, true, domain.Domain_Error{}
 }
 
 // bridge_revoke_token_family_in_scope_sqlite revokes a family's live rows only while
@@ -108,8 +109,9 @@ bridge_revoke_token_family_in_scope_sqlite :: proc(ctx: rawptr, family_id, scope
 	bind_text(stmt, 1, revoked_at)
 	bind_text(stmt, 2, family_id)
 	bind_text(stmt, 3, scope)
-	if sqlite3_step(stmt) != SQLITE_DONE do return 0, false, domain.domain_error(.Internal_Error, "bridge token family could not be revoked")
-	return int(sqlite3_changes(impl.conn.db)), true, domain.Domain_Error{}
+	step_rc, row_changes := step_changes(impl.conn.db, stmt)
+	if step_rc != SQLITE_DONE do return 0, false, domain.domain_error(.Internal_Error, "bridge token family could not be revoked")
+	return row_changes, true, domain.Domain_Error{}
 }
 
 // bridge_revoke_tokens_for_bridge_sqlite is per-MACHINE revocation (§11.7.2): the
@@ -125,8 +127,9 @@ bridge_revoke_tokens_for_bridge_sqlite :: proc(ctx: rawptr, bridge_id, revoked_a
 	defer sqlite3_finalize(stmt)
 	bind_text(stmt, 1, revoked_at)
 	bind_text(stmt, 2, bridge_id)
-	if sqlite3_step(stmt) != SQLITE_DONE do return 0, false, domain.domain_error(.Internal_Error, "bridge tokens could not be revoked")
-	return int(sqlite3_changes(impl.conn.db)), true, domain.Domain_Error{}
+	step_rc, row_changes := step_changes(impl.conn.db, stmt)
+	if step_rc != SQLITE_DONE do return 0, false, domain.domain_error(.Internal_Error, "bridge tokens could not be revoked")
+	return row_changes, true, domain.Domain_Error{}
 }
 
 // bridge_mark_token_rotated_sqlite spends a refresh token.
@@ -146,8 +149,9 @@ bridge_mark_token_rotated_sqlite :: proc(ctx: rawptr, token_id, rotated_at: stri
 	defer sqlite3_finalize(stmt)
 	bind_text(stmt, 1, rotated_at)
 	bind_text(stmt, 2, token_id)
-	if sqlite3_step(stmt) != SQLITE_DONE do return false, domain.domain_error(.Internal_Error, "bridge token could not be marked rotated")
-	return sqlite3_changes(impl.conn.db) > 0, domain.Domain_Error{}
+	step_rc, row_changes := step_changes(impl.conn.db, stmt)
+	if step_rc != SQLITE_DONE do return false, domain.domain_error(.Internal_Error, "bridge token could not be marked rotated")
+	return row_changes > 0, domain.Domain_Error{}
 }
 
 // bridge_commit_enrollment_sqlite is the enrollment COMMIT (REQ-EA-2/8), in ONE
@@ -205,8 +209,9 @@ bridge_commit_enrollment_on :: proc(conn: ^Conn, bridge_id, family_id, from_scop
 		bind_text(stmt, 2, family_id)
 		bind_text(stmt, 3, bridge_id)
 		bind_text(stmt, 4, from_scope)
-		if sqlite3_step(stmt) != SQLITE_DONE do return fail("the enrollment family could not be promoted")
-		promoted = int(sqlite3_changes(conn.db))
+		step_rc, row_changes := step_changes(conn.db, stmt)
+		if step_rc != SQLITE_DONE do return fail("the enrollment family could not be promoted")
+		promoted = row_changes
 	}
 	when ODIN_TEST {
 		if bridge_enroll_commit_test_hook != nil do bridge_enroll_commit_test_hook(bridge_id)

@@ -72,10 +72,11 @@ attention_card_insert_if_absent_sqlite :: proc(ctx: rawptr, card: domain.Card) -
 	}
 	defer sqlite3_finalize(stmt)
 	bind_card_insert(stmt, card)
-	if sqlite3_step(stmt) != SQLITE_DONE {
+	step_rc, row_changes := step_changes(impl.conn.db, stmt)
+	if step_rc != SQLITE_DONE {
 		return false, domain.domain_error(.Internal_Error, "attention card insert failed")
 	}
-	return sqlite3_changes(impl.conn.db) > 0, domain.Domain_Error{}
+	return row_changes > 0, domain.Domain_Error{}
 }
 
 attention_card_compare_and_set_sqlite :: proc(ctx: rawptr, card: domain.Card, expect_status, expect_marker: string) -> (bool, domain.Domain_Error) {
@@ -96,10 +97,11 @@ attention_card_compare_and_set_sqlite :: proc(ctx: rawptr, card: domain.Card, ex
 	bind_text(stmt, 18, string(card.card_id))
 	bind_text(stmt, 19, expect_status)
 	bind_text(stmt, 20, expect_marker)
-	if sqlite3_step(stmt) != SQLITE_DONE {
+	step_rc, row_changes := step_changes(impl.conn.db, stmt)
+	if step_rc != SQLITE_DONE {
 		return false, domain.domain_error(.Internal_Error, "attention card update failed")
 	}
-	return sqlite3_changes(impl.conn.db) > 0, domain.Domain_Error{}
+	return row_changes > 0, domain.Domain_Error{}
 }
 
 attention_list_validation_task_ids_sqlite :: proc(ctx: rawptr, owner_user_id: domain.User_ID) -> ([]domain.Task_ID, domain.Domain_Error) {

@@ -128,8 +128,9 @@ lsp_server_config_delete_sqlite :: proc(ctx: rawptr, owner_user_id, config_id: s
 	defer sqlite3_finalize(stmt)
 	bind_text(stmt, 1, owner_user_id)
 	bind_text(stmt, 2, config_id)
-	if sqlite3_step(stmt) != SQLITE_DONE {
+	step_rc, row_changes := step_changes(impl.conn.db, stmt)
+	if step_rc != SQLITE_DONE {
 		return false, domain.domain_error(.Internal_Error, "failed to delete lsp server config")
 	}
-	return sqlite3_changes(impl.conn.db) > 0, domain.Domain_Error{}
+	return row_changes > 0, domain.Domain_Error{}
 }

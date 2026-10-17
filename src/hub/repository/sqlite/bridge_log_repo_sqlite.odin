@@ -94,8 +94,9 @@ bridge_log_cap_bridge_sqlite :: proc(ctx: rawptr, bridge_id: string, keep: int) 
 	defer sqlite3_finalize(stmt)
 	bind_text(stmt, 1, bridge_id)
 	sqlite3_bind_int(stmt, 2, c.int(max(keep, 0)))
-	if sqlite3_step(stmt) != SQLITE_DONE do return 0, domain.domain_error(.Internal_Error, "failed to cap bridge_log_events")
-	return int(sqlite3_changes(impl.conn.db)), domain.Domain_Error{}
+	step_rc, row_changes := step_changes(impl.conn.db, stmt)
+	if step_rc != SQLITE_DONE do return 0, domain.domain_error(.Internal_Error, "failed to cap bridge_log_events")
+	return row_changes, domain.Domain_Error{}
 }
 
 bridge_log_prune_before_sqlite :: proc(ctx: rawptr, received_at_before_ms: i64) -> (int, domain.Domain_Error) {
@@ -108,8 +109,9 @@ bridge_log_prune_before_sqlite :: proc(ctx: rawptr, received_at_before_ms: i64) 
 	}
 	defer sqlite3_finalize(stmt)
 	sqlite3_bind_int64(stmt, 1, received_at_before_ms)
-	if sqlite3_step(stmt) != SQLITE_DONE do return 0, domain.domain_error(.Internal_Error, "failed to prune bridge_log_events")
-	return int(sqlite3_changes(impl.conn.db)), domain.Domain_Error{}
+	step_rc, row_changes := step_changes(impl.conn.db, stmt)
+	if step_rc != SQLITE_DONE do return 0, domain.domain_error(.Internal_Error, "failed to prune bridge_log_events")
+	return row_changes, domain.Domain_Error{}
 }
 
 bridge_log_list_by_bridge_sqlite :: proc(ctx: rawptr, bridge_id: string, limit: int, before_id: i64) -> ([]domain.Bridge_Log_Event, domain.Domain_Error) {
@@ -150,8 +152,9 @@ bridge_log_delete_by_bridge_sqlite :: proc(ctx: rawptr, bridge_id: string) -> (i
 	}
 	defer sqlite3_finalize(stmt)
 	bind_text(stmt, 1, bridge_id)
-	if sqlite3_step(stmt) != SQLITE_DONE do return 0, domain.domain_error(.Internal_Error, "failed to delete bridge_log_events")
-	return int(sqlite3_changes(impl.conn.db)), domain.Domain_Error{}
+	step_rc, row_changes := step_changes(impl.conn.db, stmt)
+	if step_rc != SQLITE_DONE do return 0, domain.domain_error(.Internal_Error, "failed to delete bridge_log_events")
+	return row_changes, domain.Domain_Error{}
 }
 
 bridge_log_count_by_bridge_sqlite :: proc(ctx: rawptr, bridge_id: string) -> (int, domain.Domain_Error) {

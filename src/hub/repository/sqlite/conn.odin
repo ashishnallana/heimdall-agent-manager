@@ -45,7 +45,12 @@ foreign sqlite3_lib {
 	sqlite3_column_text :: proc(pStmt: sqlite3_stmt, iCol: c.int) -> cstring ---
 	sqlite3_column_double :: proc(pStmt: sqlite3_stmt, iCol: c.int) -> c.double ---
 	sqlite3_column_bytes :: proc(pStmt: sqlite3_stmt, iCol: c.int) -> c.int ---
+	// Never call sqlite3_changes directly: it is per-CONNECTION, not per-statement.
+	// Use step_changes, which pairs it with its own step under the connection mutex.
 	sqlite3_changes :: proc(db: sqlite3) -> c.int ---
+	sqlite3_db_mutex :: proc(db: sqlite3) -> rawptr ---
+	sqlite3_mutex_enter :: proc(mutex: rawptr) ---
+	sqlite3_mutex_leave :: proc(mutex: rawptr) ---
 	sqlite3_free :: proc(p: rawptr) ---
 }
 
@@ -98,6 +103,24 @@ exec :: proc(conn: ^Conn, query: string) -> bool {
 		return false
 	}
 	return true
+}
+
+// step_changes steps a write statement and returns the rows THAT statement changed.
+//
+// The hub serves every request on its own thread over ONE shared connection, and
+// sqlite3_changes reports the most recent write on the connection — whichever thread
+// ran it. Read after a bare step, another request's 0-row write could land in between
+// and be mistaken for ours. That turned a successful bridge refresh into "someone
+// already spent this token" and revoked the bridge's whole token family. Holding the
+// connection's own (recursive) mutex across both calls makes the pair atomic; in
+// single-/multi-thread builds sqlite3_db_mutex is NULL and enter/leave are no-ops.
+step_changes :: proc(db: sqlite3, stmt: sqlite3_stmt) -> (rc: c.int, changes: int) {
+	mutex := sqlite3_db_mutex(db)
+	sqlite3_mutex_enter(mutex)
+	defer sqlite3_mutex_leave(mutex)
+	rc = sqlite3_step(stmt)
+	changes = int(sqlite3_changes(db))
+	return
 }
 
 path_dir :: proc(path: string) -> string {

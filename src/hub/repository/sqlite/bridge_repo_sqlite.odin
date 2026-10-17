@@ -136,8 +136,9 @@ bridge_delete_pending_sqlite :: proc(ctx: rawptr, bridge_id: string) -> (bool, d
 	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return false, domain.domain_error(.Internal_Error, "failed to prepare pending bridge delete")
 	defer sqlite3_finalize(stmt)
 	bind_text(stmt, 1, bridge_id)
-	if sqlite3_step(stmt) != SQLITE_DONE do return false, domain.domain_error(.Internal_Error, "failed to delete pending bridge")
-	return sqlite3_changes(impl.conn.db) > 0, domain.Domain_Error{}
+	step_rc, row_changes := step_changes(impl.conn.db, stmt)
+	if step_rc != SQLITE_DONE do return false, domain.domain_error(.Internal_Error, "failed to delete pending bridge")
+	return row_changes > 0, domain.Domain_Error{}
 }
 
 bind_bridge :: proc(stmt: sqlite3_stmt, bridge: domain.Bridge) {

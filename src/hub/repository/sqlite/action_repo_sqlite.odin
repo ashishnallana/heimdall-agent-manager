@@ -189,10 +189,11 @@ action_delete_sqlite :: proc(ctx: rawptr, id: domain.Action_ID) -> (bool, domain
 	}
 	defer sqlite3_finalize(stmt)
 	bind_text(stmt, 1, string(id))
-	if sqlite3_step(stmt) != SQLITE_DONE {
+	step_rc, row_changes := step_changes(impl.conn.db, stmt)
+	if step_rc != SQLITE_DONE {
 		return false, domain.domain_error(.Internal_Error, "failed to delete action")
 	}
-	return sqlite3_changes(impl.conn.db) > 0, domain.Domain_Error{}
+	return row_changes > 0, domain.Domain_Error{}
 }
 
 action_list_sqlite :: proc(ctx: rawptr, owner_user_id: domain.User_ID) -> ([]domain.Action, domain.Domain_Error) {
@@ -276,10 +277,11 @@ action_cas_lease_sqlite :: proc(ctx: rawptr, id: domain.Action_ID, leased_at: st
 	bind_text(stmt, 3, string(id))
 	bind_text(stmt, 4, now)
 
-	if sqlite3_step(stmt) != SQLITE_DONE {
+	step_rc, row_changes := step_changes(impl.conn.db, stmt)
+	if step_rc != SQLITE_DONE {
 		return false, domain.domain_error(.Internal_Error, "failed to execute cas lease")
 	}
-	return sqlite3_changes(impl.conn.db) > 0, domain.Domain_Error{}
+	return row_changes > 0, domain.Domain_Error{}
 }
 
 action_max_updated_at_for_bridge_sqlite :: proc(ctx: rawptr, bridge_id: domain.Bridge_ID) -> (string, domain.Domain_Error) {

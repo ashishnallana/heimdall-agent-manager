@@ -128,10 +128,11 @@ push_delete_by_endpoint_sqlite :: proc(ctx: rawptr, owner_user_id: domain.User_I
 	defer sqlite3_finalize(stmt)
 	bind_text(stmt, 1, string(owner_user_id))
 	bind_text(stmt, 2, endpoint)
-	if sqlite3_step(stmt) != SQLITE_DONE {
+	step_rc, row_changes := step_changes(impl.conn.db, stmt)
+	if step_rc != SQLITE_DONE {
 		return false, domain.domain_error(.Internal_Error, "failed to delete push subscription")
 	}
-	return sqlite3_changes(impl.conn.db) > 0, domain.Domain_Error{}
+	return row_changes > 0, domain.Domain_Error{}
 }
 
 // push_delete_by_id_sqlite removes a subscription by id. This is the pruning
@@ -149,8 +150,9 @@ push_delete_by_id_sqlite :: proc(ctx: rawptr, id: domain.Push_Subscription_ID) -
 	}
 	defer sqlite3_finalize(stmt)
 	bind_text(stmt, 1, string(id))
-	if sqlite3_step(stmt) != SQLITE_DONE {
+	step_rc, row_changes := step_changes(impl.conn.db, stmt)
+	if step_rc != SQLITE_DONE {
 		return false, domain.domain_error(.Internal_Error, "failed to delete push subscription by id")
 	}
-	return sqlite3_changes(impl.conn.db) > 0, domain.Domain_Error{}
+	return row_changes > 0, domain.Domain_Error{}
 }
