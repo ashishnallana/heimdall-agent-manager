@@ -375,8 +375,15 @@ last_heartbeat_note_for_attempt :: proc(evs: []domain.Task_Event, target_attempt
 open_findings_json :: proc(svc: ^Service, task: domain.Task, lease: domain.Task_Lease) -> string {
 	reviews, err := iface.taskchain_list_reviews_by_task(svc.repo, task.task_id, task.owner_user_id)
 	if err.code != .None || len(reviews) == 0 do return "[]"
-	target_attempt := lease.attempt_no - 1
-	if lease.kind == domain.LEASE_KIND_REVIEW do target_attempt = lease.attempt_no
+	// Work: the LATEST request_changes round before this attempt — not simply
+	// attempt-1: a lapsed or handed-off attempt in between (solo re-pulls) must
+	// not hide the findings the work is resuming from.
+	target_attempt := 0
+	if lease.kind == domain.LEASE_KIND_REVIEW {
+		target_attempt = lease.attempt_no
+	} else {
+		for r in reviews do if r.verdict == "request_changes" && r.attempt_no < lease.attempt_no && r.attempt_no > target_attempt do target_attempt = r.attempt_no
+	}
 	if target_attempt < 1 do return "[]"
 	b := strings.builder_make(context.temp_allocator)
 	strings.write_byte(&b, '[')
