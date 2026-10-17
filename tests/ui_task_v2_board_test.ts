@@ -411,6 +411,7 @@ test('getTaskPeople resolves the assignee pin, fleet workers, role reviewers and
   assert.equal(pinned.assignee, 'agt_backend');
   assert.deepEqual(pinned.workers, ['agt_backend']);
   assert.deepEqual(pinned.reviewers, ['agt_rev', 'agt_sec']);
+  assert.deepEqual(pinned.reviewersByRole, [{ role: 'reviewer', agents: ['agt_rev'] }, { role: 'security', agents: ['agt_sec'] }]);
   assert.equal(pinned.userApproval, true);
   // Unpinned: every worker row is eligible; no review roles -> no reviewers.
   const open = getTaskPeople(makeTask({ brief: { goal: 'g', acceptance: ['a'], verify: 'v' } }), fleets);

@@ -591,8 +591,10 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
           <div data-debug-id="task-detail-reviewers" className="flex flex-col gap-1 text-muted">
             <span>Reviewers</span>
             <span className="text-primary pt-1">
-              {task.brief?.review_roles?.length
-                ? `${task.brief.review_roles.join(', ')}: ${people.reviewers.length ? people.reviewers.map(agentName).join(', ') : 'no fleet row'}`
+              {people.reviewersByRole.length
+                ? people.reviewersByRole
+                    .map(({ role, agents }) => `${role}: ${agents.length ? agents.map(agentName).join(', ') : 'no fleet row'}`)
+                    .join(' · ')
                 : 'none'}
               {task.requires_user_approval ? ' + you' : ''}
             </span>

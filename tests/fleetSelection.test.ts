@@ -580,3 +580,10 @@ test('changedFleetEntries and fleetApplyRequests detect and serialize roles, bri
   });
 });
 
+
+test('normalizeFleet keeps custom review roles from the wire', async () => {
+  const { normalizeFleet } = await import('../src/ui/api/endpoints/taskChains.ts');
+  assert.deepEqual(normalizeFleet({ agent_id: 'agt_sec', capacity: 1, roles: ['security'] }).roles, ['security']);
+  assert.deepEqual(normalizeFleet({ agent_id: 'agt_x', capacity: 1, roles: ['reviewer', 'Security', 'bad role'] }).roles, ['reviewer', 'security']);
+  assert.deepEqual(normalizeFleet({ agent_id: 'agt_y', capacity: 1 }).roles, ['worker', 'reviewer']);
+});

@@ -211,6 +211,9 @@ export interface TaskPeople {
   workers: string[];
   // reviewers: agent ids of fleet rows holding one of brief.review_roles.
   reviewers: string[];
+  // reviewersByRole: brief.review_roles in order → agent ids of the rows holding
+  // that role (every one of them must approve; [] = role not covered).
+  reviewersByRole: { role: string; agents: string[] }[];
   // holder: instance currently holding the work lease ('' when none).
   holder: string;
   userApproval: boolean;
@@ -233,10 +236,15 @@ export function getTaskPeople(task: TaskWire, chainFleets: any[] = []): TaskPeop
     .map(fleetAgent)
     .filter(Boolean);
   const work = (task.leases || []).find((l: any) => (l?.kind || 'work') === 'work');
+  const reviewersByRole = roles.map((role) => ({
+    role,
+    agents: fleets.filter((f) => fleetRoles(f).includes(role)).map(fleetAgent).filter(Boolean),
+  }));
   return {
     assignee,
     workers: Array.from(new Set(workers)),
     reviewers: Array.from(new Set(reviewers)),
+    reviewersByRole,
     holder: String(work?.holder_instance_id || ''),
     userApproval: Boolean(task.requires_user_approval),
   };

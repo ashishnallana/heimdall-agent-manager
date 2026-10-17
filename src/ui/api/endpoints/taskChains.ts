@@ -55,7 +55,9 @@ export interface TaskChainFleet {
 
 export function normalizeFleet(f: any): TaskChainFleet {
   const rawRoles: string[] = Array.isArray(f?.roles)
-    ? f.roles.map((r: any) => String(r || '').trim().toLowerCase()).filter((r: string) => r === 'worker' || r === 'reviewer')
+    // `worker` or any review role name (`reviewer`, `security`, …) — same rule as
+    // the hub's fleet_role_name_valid; custom review roles must survive the read.
+    ? f.roles.map((r: any) => String(r || '').trim().toLowerCase()).filter((r: string) => /^[a-z][a-z0-9_-]{0,31}$/.test(r))
     : [];
   const roles: string[] = rawRoles.length > 0 ? Array.from(new Set(rawRoles)) : ['worker', 'reviewer'];
   const bridgeId = String(f?.bridge_id ?? f?.bridgeId ?? '');
