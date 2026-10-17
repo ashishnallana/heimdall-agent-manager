@@ -282,6 +282,8 @@ attention_task_excerpt :: proc(s: ^Card_Service, task: domain.Task, kind: taskv2
 			}
 		}
 		if reason != "" do return attention_instance_name(s, holder), reason, task.updated_at
+	} else if eng != nil && task.kind == .Gate {
+		if body, at, ok := attention_gate_plan_excerpt(s, task); ok do return "Plan", body, at
 	} else if eng != nil {
 		if f, ok := taskv2.get_facet(eng, task, task.attempt_no, taskv2.FACET_HANDOFF); ok {
 			if sum := jsonx.extract_string(f.body_json, "summary", "", true, context.temp_allocator); sum != "" {
@@ -295,6 +297,42 @@ attention_task_excerpt :: proc(s: ^Card_Service, task: domain.Task, kind: taskv2
 		return attention_instance_name(s, latest.author_agent_instance_id), latest.body, latest.created_at
 	}
 	return "", "", ""
+}
+
+// attention_gate_plan_excerpt: what a plan gate asks the user to approve — the
+// output of the stage just before it (the latest done task of the chain created
+// before the gate with an output facet): a task_list renders as a numbered list
+// of item titles/goals, anything else as its summary.
+attention_gate_plan_excerpt :: proc(s: ^Card_Service, gate: domain.Task) -> (string, string, bool) {
+	eng := s.taskchains.engine
+	tasks, err := iface.taskchain_list_tasks_by_chain(s.taskchains.repo, gate.chain_id, gate.owner_user_id)
+	if err.code != .None do return "", "", false
+	best: domain.Task
+	found := false
+	for t in tasks {
+		if t.kind == .Gate || t.state != .Done || t.created_at > gate.created_at do continue
+		if found && t.updated_at <= best.updated_at do continue
+		if _, ok := taskv2.get_facet(eng, t, t.attempt_no, taskv2.FACET_OUTPUT); !ok do continue
+		best = t
+		found = true
+	}
+	if !found do return "", "", false
+	f, _ := taskv2.get_facet(eng, best, best.attempt_no, taskv2.FACET_OUTPUT)
+	b := strings.builder_make(context.temp_allocator)
+	if items_raw, has := jsonx.extract_raw_array(f.body_json, "tasks", true, context.temp_allocator); has {
+		items := taskv2.jsonx_top_level_array_items(items_raw)
+		fmt.sbprintf(&b, "%d task(s) planned:\n", len(items))
+		for it, i in items {
+			label := jsonx.extract_string(it, "title", "", true, context.temp_allocator)
+			if label == "" do label = jsonx.extract_string(it, "goal", "", true, context.temp_allocator)
+			fmt.sbprintf(&b, "%d. %s\n", i + 1, label)
+		}
+	} else {
+		strings.write_string(&b, jsonx.extract_string(f.body_json, "summary", "", true, context.temp_allocator))
+	}
+	body := strings.trim_space(strings.to_string(b))
+	if body == "" do return "", "", false
+	return body, f.written_at, true
 }
 
 attention_instance_name :: proc(s: ^Card_Service, agent_instance_id: string) -> string {
