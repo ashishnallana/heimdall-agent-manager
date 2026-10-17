@@ -201,3 +201,43 @@ export function getTaskStatusLines(task: TaskWire, _chainFleets?: any[], nowMs: 
 
   return ['Cancelled', 'Task was cancelled'];
 }
+
+export interface TaskPeople {
+  // assignee: brief.assignee — the worker agent TEMPLATE the task is pinned to
+  // ('' = any worker in the fleet). The matcher resolves it to an instance.
+  assignee: string;
+  // workers: agent ids that can take the work lease (the assignee alone when
+  // pinned, otherwise every fleet row with the worker role).
+  workers: string[];
+  // reviewers: agent ids of fleet rows holding one of brief.review_roles.
+  reviewers: string[];
+  // holder: instance currently holding the work lease ('' when none).
+  holder: string;
+  userApproval: boolean;
+}
+
+function fleetRoles(f: any): string[] {
+  return Array.isArray(f?.roles) ? f.roles.map(String) : [];
+}
+
+export function getTaskPeople(task: TaskWire, chainFleets: any[] = []): TaskPeople {
+  const assignee = String(task.brief?.assignee || '').trim();
+  const fleets = Array.isArray(chainFleets) ? chainFleets : [];
+  const fleetAgent = (f: any) => String(f?.agent_id || f?.agentId || '');
+  const workers = assignee
+    ? [assignee]
+    : fleets.filter((f) => fleetRoles(f).includes('worker')).map(fleetAgent).filter(Boolean);
+  const roles = task.brief?.review_roles || [];
+  const reviewers = fleets
+    .filter((f) => fleetRoles(f).some((r) => roles.includes(r)))
+    .map(fleetAgent)
+    .filter(Boolean);
+  const work = (task.leases || []).find((l: any) => (l?.kind || 'work') === 'work');
+  return {
+    assignee,
+    workers: Array.from(new Set(workers)),
+    reviewers: Array.from(new Set(reviewers)),
+    holder: String(work?.holder_instance_id || ''),
+    userApproval: Boolean(task.requires_user_approval),
+  };
+}

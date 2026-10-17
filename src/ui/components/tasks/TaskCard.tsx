@@ -1,6 +1,8 @@
 import React from 'react';
 import { TaskWire } from '../../api/taskWire';
-import { getTaskBadges, normalizeTaskState } from './taskV2Types';
+import { getTaskBadges, getTaskPeople, normalizeTaskState } from './taskV2Types';
+import { formatFleetRoleName } from './FleetManagementDrawer';
+import { useListAgentIdentitiesQuery } from '../../api/endpoints/agents';
 
 export interface TaskCardProps {
   task: TaskWire;
@@ -21,6 +23,18 @@ export const TaskCard: React.FC<TaskCardProps> = ({
   const badges = getTaskBadges(task, chainFleets);
   const isAwaitingUser = state === 'in_review' && task.requires_user_approval;
   const isGate = task.kind === 'gate';
+  const people = getTaskPeople(task, chainFleets);
+  const { data: identitiesData } = useListAgentIdentitiesQuery();
+  const agentName = (id: string) => formatFleetRoleName(id, identitiesData?.agents || []);
+  const workerLabel = people.assignee
+    ? agentName(people.assignee)
+    : people.workers.length
+      ? `any of ${people.workers.map(agentName).join(', ')}`
+      : 'no worker in fleet';
+  const reviewerLabel = [
+    ...people.reviewers.map(agentName),
+    ...(people.userApproval ? ['you'] : []),
+  ].join(', ');
   // The wire sends lowercase p0|p1|p2; older fixtures use P0 / urgent / high.
   const priority = String(task.priority || '').toLowerCase();
 
@@ -108,6 +122,23 @@ export const TaskCard: React.FC<TaskCardProps> = ({
               </span>
             );
           })}
+        </div>
+      )}
+
+      {/* People: who works it, who reviews it */}
+      {!isGate && (
+        <div
+          data-debug-id={`task-card-people-${task.task_id}`}
+          className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted"
+        >
+          <span title={people.assignee ? `Pinned to agent ${people.assignee}` : 'Granted to the next free fleet worker'}>
+            👤 <span className={people.workers.length ? 'text-primary' : 'text-warning'}>{workerLabel}</span>
+          </span>
+          {reviewerLabel && (
+            <span title="Must approve before Done">
+              ✓ <span className="text-primary">{reviewerLabel}</span>
+            </span>
+          )}
         </div>
       )}
 

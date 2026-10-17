@@ -14,10 +14,13 @@ import {
 } from '../../api/endpoints/tasks';
 import { TaskChainFleet } from '../../api/endpoints/taskChains';
 import { useListBridgesQuery } from '../../api/endpoints/bridgeSupport';
+import { useListAgentIdentitiesQuery } from '../../api/endpoints/agents';
+import { formatFleetRoleName } from './FleetManagementDrawer';
 import {
   TASK_STATE_COLORS,
   TASK_STATE_LABELS,
   getTaskBadges,
+  getTaskPeople,
   getTaskStatusLines,
   normalizeTaskState,
 } from './taskV2Types';
@@ -60,6 +63,9 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
   const state = normalizeTaskState(task.state);
   const badges = getTaskBadges(task, chainFleets);
   const [statusLine1, statusLine2] = getTaskStatusLines(task, chainFleets);
+  const people = getTaskPeople(task, chainFleets);
+  const { data: identitiesData } = useListAgentIdentitiesQuery();
+  const agentName = (id: string) => formatFleetRoleName(id, identitiesData?.agents || []);
   const attemptNo = task.attempt_no || 1;
 
   // Facet queries for attempt
@@ -568,11 +574,25 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
             </select>
           </label>
 
-          <div className="flex flex-col gap-1 text-muted">
+          <div data-debug-id="task-detail-assignee" className="flex flex-col gap-1 text-muted">
+            <span>Assignee</span>
+            <span className="text-primary pt-1">
+              {people.assignee
+                ? agentName(people.assignee)
+                : people.workers.length
+                  ? `any worker: ${people.workers.map(agentName).join(', ')}`
+                  : 'no worker in fleet'}
+              {people.holder && (
+                <span className="ml-1 font-mono text-[11px] text-faint">· held by {people.holder}</span>
+              )}
+            </span>
+          </div>
+
+          <div data-debug-id="task-detail-reviewers" className="flex flex-col gap-1 text-muted">
             <span>Reviewers</span>
-            <span className="font-mono text-primary pt-1">
+            <span className="text-primary pt-1">
               {task.brief?.review_roles?.length
-                ? task.brief.review_roles.join(', ')
+                ? `${task.brief.review_roles.join(', ')}: ${people.reviewers.length ? people.reviewers.map(agentName).join(', ') : 'no fleet row'}`
                 : 'none'}
               {task.requires_user_approval ? ' + you' : ''}
             </span>

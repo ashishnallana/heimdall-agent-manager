@@ -397,3 +397,29 @@ test('chain detail normalizer keeps the v2 wire fields the board and detail view
   const labels = getTaskBadges(t as TaskWire, []).map((b) => b.label).join(' ');
   assert.ok(!labels.includes('undefined'), `badges must not render undefined: ${labels}`);
 });
+
+test('getTaskPeople resolves the assignee pin, fleet workers, role reviewers and lease holder', async () => {
+  const { getTaskPeople } = await import('../src/ui/components/tasks/taskV2Types.ts');
+  const fleets = [
+    { agent_id: 'agt_coder', roles: ['worker'] },
+    { agent_id: 'agt_backend', roles: ['worker'] },
+    { agent_id: 'agt_rev', roles: ['reviewer'] },
+    { agent_id: 'agt_sec', roles: ['security'] },
+  ];
+  // Pinned assignee: only that template may take the work lease.
+  const pinned = getTaskPeople(makeTask({ brief: { goal: 'g', acceptance: ['a'], verify: 'v', assignee: 'agt_backend', review_roles: ['reviewer', 'security'] }, requires_user_approval: true }), fleets);
+  assert.equal(pinned.assignee, 'agt_backend');
+  assert.deepEqual(pinned.workers, ['agt_backend']);
+  assert.deepEqual(pinned.reviewers, ['agt_rev', 'agt_sec']);
+  assert.equal(pinned.userApproval, true);
+  // Unpinned: every worker row is eligible; no review roles -> no reviewers.
+  const open = getTaskPeople(makeTask({ brief: { goal: 'g', acceptance: ['a'], verify: 'v' } }), fleets);
+  assert.equal(open.assignee, '');
+  assert.deepEqual(open.workers, ['agt_coder', 'agt_backend']);
+  assert.deepEqual(open.reviewers, []);
+  // Live work lease -> holder instance surfaces.
+  const running = getTaskPeople(makeTask({ state: 'in_progress', leases: [{ kind: 'work', holder_instance_id: 'inst_42' } as any] }), fleets);
+  assert.equal(running.holder, 'inst_42');
+  // No fleet at all.
+  assert.deepEqual(getTaskPeople(makeTask(), []).workers, []);
+});
