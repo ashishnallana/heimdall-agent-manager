@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Icon, type IconName } from '@ui';
+import { type TaskNames } from './taskNames';
 import { TaskWire } from '../../api/taskWire';
 import { TaskSummaryBar } from './TaskSummaryBar';
 import { TaskCard } from './TaskCard';
@@ -17,6 +18,7 @@ export interface WorkflowPipelineViewProps {
   tasks: TaskWire[];
   selectedTaskId?: string | null;
   onSelectTask: (taskId: string) => void;
+  names?: TaskNames;
   className?: string;
 }
 
@@ -239,8 +241,8 @@ export const WorkflowPipelineView: React.FC<WorkflowPipelineViewProps> = ({
                         <span className="text-xs font-semibold text-accent uppercase tracking-wide">
                           Human Decision Gate
                         </span>
-                        <span className="font-mono text-[11px] text-muted">
-                          {gateTask.task_id}
+                        <span className="truncate text-[11px] text-muted">
+                          {gateTask.title}
                         </span>
                       </div>
                       <p className="text-xs leading-relaxed text-primary">

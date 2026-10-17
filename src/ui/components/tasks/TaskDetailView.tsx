@@ -15,8 +15,9 @@ import {
 } from '../../api/endpoints/tasks';
 import { TaskChainFleet } from '../../api/endpoints/taskChains';
 import { useListBridgesQuery } from '../../api/endpoints/bridgeSupport';
-import { useListAgentIdentitiesQuery } from '../../api/endpoints/agents';
-import { formatFleetRoleName } from './FleetManagementDrawer';
+import { EMPTY_TASK_NAMES, instanceAgentsFromEvents, withInstanceAgents, type TaskNames } from './taskNames';
+import { describeTaskEvent } from './taskEvents';
+import { HolderName } from './HolderName';
 import {
   TASK_STATE_COLORS,
   TASK_STATE_LABELS,
@@ -33,6 +34,7 @@ export interface TaskDetailViewProps {
   onClose: () => void;
   onSelectTask: (taskId: string) => void;
   chainFleets?: TaskChainFleet[];
+  names?: TaskNames;
   className?: string;
 }
 
@@ -43,6 +45,7 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
   onClose,
   onSelectTask,
   chainFleets = [],
+  names: chainNames = EMPTY_TASK_NAMES,
   className = '',
 }) => {
   const task = tasks.find((t) => t.task_id === taskId) || ({
@@ -62,11 +65,10 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
   } as TaskWire);
 
   const state = normalizeTaskState(task.state);
-  const badges = getTaskBadges(task, chainFleets);
-  const [statusLine1, statusLine2] = getTaskStatusLines(task, chainFleets);
+  const badges = getTaskBadges(task, chainFleets, Date.now(), chainNames);
+  const [statusLine1, statusLine2] = getTaskStatusLines(task, chainFleets, Date.now(), chainNames);
   const people = getTaskPeople(task, chainFleets);
-  const { data: identitiesData } = useListAgentIdentitiesQuery();
-  const agentName = (id: string) => formatFleetRoleName(id, identitiesData?.agents || []);
+  const agentName = (id: string) => chainNames.agent(id);
   const attemptNo = task.attempt_no || 1;
 
   // Facet queries for attempt
@@ -124,6 +126,10 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
   const outputFacet = outputFacetData?.facet;
   const findingsFacet = findingsFacetData?.facet;
   const events = eventsData?.events || [];
+  const names = React.useMemo(
+    () => withInstanceAgents(chainNames, instanceAgentsFromEvents(events)),
+    [chainNames, events],
+  );
 
   // Commit diff query when a file is selected
   const baseSha = vcsFacet?.base || '';
@@ -273,7 +279,6 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
       {/* Title & IDs */}
       <div className="flex flex-col gap-1">
         <div className="flex items-center gap-2">
-          <span className="font-mono text-xs text-muted">{task.task_id}</span>
           <h1 className="text-base font-bold text-primary flex-1">{task.title}</h1>
           {isGate ? (
             <span className="rounded bg-accent-soft px-2 py-0.5 font-mono text-[10px] font-semibold text-accent uppercase">
@@ -540,9 +545,10 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
                   key={depId}
                   type="button"
                   onClick={() => onSelectTask(depId)}
-                  className="font-mono text-info hover:underline"
+                  className="text-info hover:underline"
+                  title={depId}
                 >
-                  {depId}
+                  {names.task(depId)}
                 </button>
               ))}
             </div>
@@ -587,7 +593,9 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
                   ? `any worker: ${people.workers.map(agentName).join(', ')}`
                   : 'no worker in fleet'}
               {people.holder && (
-                <span className="ml-1 font-mono text-[11px] text-faint">· held by {people.holder}</span>
+                <span className="ml-1 text-[11px] text-faint">
+                  · held by <HolderName instanceId={people.holder} names={names} />
+                </span>
               )}
             </span>
           </div>
@@ -782,21 +790,13 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
                 : '';
               return (
                 <div
-                  key={idx}
+                  key={e.event_id ?? idx}
+                  data-debug-id="task-timeline-event"
                   className="flex items-start gap-2.5 text-xs border-b border-subtle/40 pb-2 last:border-0"
                 >
                   <span className="h-1.5 w-1.5 rounded-full bg-accent mt-1.5 shrink-0" />
                   <span className="font-mono text-[11px] text-faint shrink-0">{dateStr}</span>
-                  <div className="flex-1 min-w-0">
-                    <span className="font-mono text-[11px] text-accent font-semibold mr-1.5">
-                      {e.kind}
-                    </span>
-                    <span className="text-primary text-xs">
-                      {typeof e.payload === 'string'
-                        ? e.payload
-                        : e.payload?.text || e.payload?.reason || e.payload?.note || JSON.stringify(e.payload || '')}
-                    </span>
-                  </div>
+                  <span className="flex-1 min-w-0 text-primary text-xs">{describeTaskEvent(e, names).text}</span>
                 </div>
               );
             })}

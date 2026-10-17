@@ -1,14 +1,14 @@
 import React from 'react';
 import { TaskWire } from '../../api/taskWire';
 import { getTaskBadges, getTaskPeople, normalizeTaskState } from './taskV2Types';
-import { formatFleetRoleName } from './FleetManagementDrawer';
-import { useListAgentIdentitiesQuery } from '../../api/endpoints/agents';
+import { EMPTY_TASK_NAMES, type TaskNames } from './taskNames';
 
 export interface TaskCardProps {
   task: TaskWire;
   selected?: boolean;
   onSelect?: (taskId: string) => void;
   chainFleets?: any[];
+  names?: TaskNames;
   className?: string;
 }
 
@@ -17,15 +17,15 @@ export const TaskCard: React.FC<TaskCardProps> = ({
   selected = false,
   onSelect,
   chainFleets,
+  names = EMPTY_TASK_NAMES,
   className = '',
 }) => {
   const state = normalizeTaskState(task.state);
-  const badges = getTaskBadges(task, chainFleets);
+  const badges = getTaskBadges(task, chainFleets, Date.now(), names);
   const isAwaitingUser = state === 'in_review' && task.requires_user_approval;
   const isGate = task.kind === 'gate';
   const people = getTaskPeople(task, chainFleets);
-  const { data: identitiesData } = useListAgentIdentitiesQuery();
-  const agentName = (id: string) => formatFleetRoleName(id, identitiesData?.agents || []);
+  const agentName = (id: string) => names.agent(id);
   const workerLabel = people.assignee
     ? agentName(people.assignee)
     : people.workers.length
@@ -71,9 +71,6 @@ export const TaskCard: React.FC<TaskCardProps> = ({
     >
       {/* Top row: id, title, priority or gate */}
       <div className="flex items-center gap-2 min-w-0">
-        <span className="shrink-0 font-mono text-[11px] text-muted">
-          {task.task_id}
-        </span>
         <span className="flex-1 truncate text-sm font-semibold text-primary group-hover:text-accent transition-colors">
           {task.title}
         </span>

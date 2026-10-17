@@ -11,7 +11,8 @@ import { FleetManagementDrawer } from '../tasks/FleetManagementDrawer';
 import { TaskWire } from '../../api/taskWire';
 import { resolveSelectedTaskId } from '../tasks/taskV2Types';
 import { useOpenAgentChat } from '../aux/openAgentChatContext';
-import { useFetchAgentInstanceQuery, useFetchAgentIdentityQuery } from '../../api/endpoints/agents';
+import { useFetchAgentInstanceQuery, useFetchAgentIdentityQuery, useListAgentIdentitiesQuery } from '../../api/endpoints/agents';
+import { buildTaskNames } from '../tasks/taskNames';
 import { useIsMobile } from '../shell/responsive';
 
 function shellHash(path: string): string {
@@ -111,6 +112,19 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
   const tasks: TaskWire[] = chain?.tasks || [];
   const fleets = Array.isArray(fleetsData) ? fleetsData : [];
   const bridges = bridgesData?.bridges || [];
+  const { data: identitiesData } = useListAgentIdentitiesQuery();
+  // One names resolver per chain view (plan REQ-UI-4): cards, board, pipeline and
+  // detail all show titles / agent names / bridge labels instead of raw ids.
+  const names = React.useMemo(
+    () =>
+      buildTaskNames({
+        tasks,
+        members: chain?.members || [],
+        bridges,
+        identities: identitiesData?.agents || [],
+      }),
+    [tasks, chain?.members, bridges, identitiesData],
+  );
 
   if (isLoadingChain && !chain) {
     return (
@@ -194,6 +208,7 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
             chainId={chainId}
             taskId={openTaskId}
             tasks={tasks}
+            names={names}
             onClose={() => setSelectedTaskId(null)}
             onSelectTask={(id) => setSelectedTaskId(id)}
             chainFleets={fleets}
@@ -203,6 +218,7 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
             chainId={chainId}
             chain={chain}
             tasks={tasks}
+            names={names}
             selectedTaskId={selectedTaskId}
             onSelectTask={(id) => setSelectedTaskId(id)}
           />
@@ -210,6 +226,7 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
           <TicketBoardView
             chainId={chainId}
             tasks={tasks}
+            names={names}
             chainFleets={fleets}
             bridges={bridges}
             selectedTaskId={selectedTaskId}

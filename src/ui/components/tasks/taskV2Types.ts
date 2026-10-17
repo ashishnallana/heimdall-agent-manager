@@ -1,4 +1,5 @@
 import { TaskWire } from '../../api/taskWire';
+import { EMPTY_TASK_NAMES, GENERIC_AGENT_LABEL, type TaskNames } from './taskNames';
 
 export type TaskStateV2 = 'in_progress' | 'in_review' | 'ready' | 'backlog' | 'done' | 'cancelled';
 
@@ -45,7 +46,7 @@ export function normalizeTaskState(raw: string | undefined): TaskStateV2 {
   return 'backlog';
 }
 
-export function getTaskBadges(task: TaskWire, _chainFleets?: any[], nowMs: number = Date.now()): TaskBadge[] {
+export function getTaskBadges(task: TaskWire, _chainFleets?: any[], nowMs: number = Date.now(), names: TaskNames = EMPTY_TASK_NAMES): TaskBadge[] {
   const badges: TaskBadge[] = [];
   const state = normalizeTaskState(task.state);
   const lease = (task.leases && task.leases.length > 0) ? task.leases[0] : null;
@@ -57,25 +58,25 @@ export function getTaskBadges(task: TaskWire, _chainFleets?: any[], nowMs: numbe
   if (state === 'in_progress' && lease) {
     const expiresMs = lease.expires_at ? new Date(lease.expires_at).getTime() : (nowMs + 15 * 60000);
     const leftMins = Math.max(0, Math.round((expiresMs - nowMs) / 60000));
-    const holder = lease.holder_instance_id ? lease.holder_instance_id.split('_').slice(-1)[0] : 'agent';
+    const holder = (lease.holder_instance_id && names.instance(lease.holder_instance_id)) || GENERIC_AGENT_LABEL;
     const tone = leftMins <= 3 ? 'danger' : leftMins <= 5 ? 'warn' : 'accent';
     badges.push({
       label: `${holder} · ${leftMins}m left`,
       tone,
-      title: `Lease expires in ${leftMins} minutes (held by ${lease.holder_instance_id})`,
+      title: `Lease expires in ${leftMins} minutes (held by ${holder})`,
     });
     if (lease.bridge_id || task.bridge_id) {
       badges.push({
-        label: `bridge ${lease.bridge_id || task.bridge_id}`,
+        label: names.bridge(lease.bridge_id || task.bridge_id),
         tone: 'neutral',
-        title: `Bridge: ${lease.bridge_id || task.bridge_id}`,
+        title: `Bridge: ${names.bridge(lease.bridge_id || task.bridge_id)}`,
       });
     }
   } else if (task.bridge_id) {
     badges.push({
-      label: `bridge ${task.bridge_id}`,
+      label: names.bridge(task.bridge_id),
       tone: 'neutral',
-      title: `Pinned bridge: ${task.bridge_id}`,
+      title: `Pinned bridge: ${names.bridge(task.bridge_id)}`,
     });
   }
 
@@ -123,7 +124,7 @@ export function getTaskBadges(task: TaskWire, _chainFleets?: any[], nowMs: numbe
   return badges;
 }
 
-export function getTaskStatusLines(task: TaskWire, _chainFleets?: any[], nowMs: number = Date.now()): [string, string] {
+export function getTaskStatusLines(task: TaskWire, _chainFleets?: any[], nowMs: number = Date.now(), names: TaskNames = EMPTY_TASK_NAMES): [string, string] {
   const state = normalizeTaskState(task.state);
   const lease = (task.leases && task.leases.length > 0) ? task.leases[0] : null;
 
@@ -188,7 +189,7 @@ export function getTaskStatusLines(task: TaskWire, _chainFleets?: any[], nowMs: 
     const deps = task.depends_on || [];
     return [
       'Waiting for dependencies',
-      deps.length > 0 ? `needs ${deps.join(', ')}` : 'draft / awaiting publish',
+      deps.length > 0 ? `needs ${deps.map((d) => `"${names.task(d)}"`).join(', ')}` : 'draft / awaiting publish',
     ];
   }
 

@@ -106,7 +106,8 @@ test('getTaskBadges derives TTL countdown and tone for in-progress lease', () =>
   const badges12m = getTaskBadges(task12m, [], nowMs);
   const ttlBadge12m = badges12m.find((b) => b.label.endsWith('m left'));
   assert.ok(ttlBadge12m, 'Should have TTL badge');
-  assert.equal(ttlBadge12m.label, 'worker · 12m left');
+  // No names resolver: the holder is a generic label, never the raw instance id.
+  assert.equal(ttlBadge12m.label, 'Agent · 12m left');
   assert.equal(ttlBadge12m.tone, 'accent');
 
   // 4 mins left -> warn
@@ -142,7 +143,7 @@ test('getTaskBadges derives TTL countdown and tone for in-progress lease', () =>
   assert.equal(ttlBadge2m?.tone, 'danger');
 });
 
-test('getTaskBadges derives bridge pin, attempt count, review roles, blocked on you, and verified', () => {
+test('getTaskBadges derives bridge pin, attempt count, review roles, blocked on you, and verified', async () => {
   const nowMs = 1700000000000;
 
   // Gate badge
@@ -152,8 +153,10 @@ test('getTaskBadges derives bridge pin, attempt count, review roles, blocked on 
 
   // Bridge pin on idle task
   const pinnedTask = makeTask({ bridge_id: 'prod-edge-1' });
-  const pinnedBadges = getTaskBadges(pinnedTask, [], nowMs);
-  assert.ok(pinnedBadges.some((b) => b.label === 'bridge prod-edge-1'));
+  const { buildTaskNames } = await import('../src/ui/components/tasks/taskNames.ts');
+  const bridgeNames = buildTaskNames({ bridges: [{ id: 'prod-edge-1', name: 'Prod edge 1' }] });
+  const pinnedBadges = getTaskBadges(pinnedTask, [], nowMs, bridgeNames);
+  assert.ok(pinnedBadges.some((b) => b.label === 'Prod edge 1'));
 
   // Attempt count >= 2
   const attemptTask = makeTask({ attempt_no: 3 });

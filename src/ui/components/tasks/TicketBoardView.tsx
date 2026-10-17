@@ -11,6 +11,7 @@ import {
   normalizeTaskState,
 } from './taskV2Types';
 import { TaskChainFleet } from '../../api/endpoints/taskChains';
+import { EMPTY_TASK_NAMES, type TaskNames } from './taskNames';
 
 export interface TicketBoardViewProps {
   chainId: string;
@@ -22,6 +23,7 @@ export interface TicketBoardViewProps {
   onNewTask?: () => void;
   onOpenFleetDrawer?: () => void;
   summaryText?: string;
+  names?: TaskNames;
   className?: string;
 }
 
@@ -35,6 +37,7 @@ export const TicketBoardView: React.FC<TicketBoardViewProps> = ({
   onNewTask,
   onOpenFleetDrawer,
   summaryText,
+  names = EMPTY_TASK_NAMES,
   className = '',
 }) => {
   // Collapsible section state
@@ -166,6 +169,7 @@ export const TicketBoardView: React.FC<TicketBoardViewProps> = ({
                         selected={selectedTaskId === task.task_id}
                         onSelect={onSelectTask}
                         chainFleets={chainFleets}
+                        names={names}
                       />
                     ))
                   )}

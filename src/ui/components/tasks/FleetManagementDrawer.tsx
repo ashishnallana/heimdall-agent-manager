@@ -66,6 +66,7 @@ import {
   type FleetRestartSummary,
 } from './fleetSelection';
 import { useListAgentIdentitiesQuery, useListAgentInstancesQuery } from '../../api/endpoints/agents';
+import { readableAgentFallback } from './taskNames';
 
 export function formatFleetRoleName(agentId?: string, identities?: any[]): string {
   if (!agentId) return 'Worker';
@@ -74,11 +75,7 @@ export function formatFleetRoleName(agentId?: string, identities?: any[]): strin
   );
   if (found?.name) return found.name;
   if (found?.display_name) return found.display_name;
-  if (agentId.startsWith('agt_')) {
-    const raw = agentId.slice(4);
-    return raw.charAt(0).toUpperCase() + raw.slice(1);
-  }
-  return agentId.charAt(0).toUpperCase() + agentId.slice(1);
+  return readableAgentFallback(agentId);
 }
 
 export function getQueuedWaitingSlotName(task: any, identities?: any[]): string {
@@ -1059,13 +1056,7 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
                       </div>
                       <div className="min-w-0">
                         <h4 className="text-xs font-bold text-primary flex min-w-0 flex-wrap items-center gap-x-1.5">
-                          <span className="min-w-0 break-words">{roleName}</span>
-                          <span
-                            className="min-w-0 max-w-full truncate font-mono text-[10px] text-muted font-normal"
-                            title={agentId}
-                          >
-                            ({agentId})
-                          </span>
+                          <span className="min-w-0 break-words" title={agentId}>{roleName}</span>
                         </h4>
                         <div className="flex flex-wrap items-center gap-1 text-[11px] text-muted font-mono mt-0.5">
                           <span>{activeCount}/{effectiveCapacity} active</span>
@@ -1466,7 +1457,7 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
                     data-debug-id="fleet-restart-failure"
                     className="text-xs text-warning"
                   >
-                    {failure.instance_id}: {failure.message}
+                    <span title={failure.instance_id}>Instance restart failed</span>: {failure.message}
                   </div>
                 ))}
               </div>
