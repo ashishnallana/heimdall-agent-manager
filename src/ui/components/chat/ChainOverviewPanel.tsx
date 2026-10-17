@@ -36,12 +36,20 @@ import {
   formatFleetRoleName,
 } from '../tasks/FleetManagementDrawer';
 import ArtifactViewer from '../ArtifactViewer';
+import { HolderName } from '../tasks/HolderName';
+import { EMPTY_TASK_NAMES } from '../tasks/taskNames';
 import Markdown from '../Markdown';
 import { buildRouteHash } from '../../utils/appLocation';
 import {
   readChainOverviewCollapsedState,
   writeChainOverviewCollapsedState,
 } from '../../utils/clientPersistence';
+
+// The running instance holding a task's work lease (Task System v2), if any.
+function workHolder(task: any): string {
+  const lease = (Array.isArray(task?.leases) ? task.leases : []).find((l: any) => (l?.kind || 'work') === 'work');
+  return String(lease?.holder_instance_id || '');
+}
 
 function canUseAmbientApiAuth(): boolean {
   if (typeof window === 'undefined') return false;
@@ -774,7 +782,11 @@ export default function ChainOverviewPanel({
                         </h4>
                         <div className="mt-1 flex items-center justify-between text-[11px] text-muted">
                           <span className="truncate max-w-[140px]">
-                            Worker: <strong className="text-primary font-normal">{assignee}</strong>
+                            Worker:{' '}{workHolder(task) ? (
+                          <HolderName instanceId={workHolder(task)} names={EMPTY_TASK_NAMES} className="text-primary" />
+                        ) : (
+                          <strong className="text-primary font-normal">{assignee}</strong>
+                        )}
                           </span>
                           <span className="truncate max-w-[140px]">
                             Reviewer: <strong className="text-primary font-normal">{reviewer}</strong>
@@ -891,7 +903,11 @@ export default function ChainOverviewPanel({
 
                     <div className="mt-1.5 flex items-center justify-between text-[11px] text-muted">
                       <span className="truncate max-w-[140px]">
-                        Worker: <strong className="text-primary font-normal">{assignee}</strong>
+                        Worker:{' '}{workHolder(task) ? (
+                          <HolderName instanceId={workHolder(task)} names={EMPTY_TASK_NAMES} className="text-primary" />
+                        ) : (
+                          <strong className="text-primary font-normal">{assignee}</strong>
+                        )}
                       </span>
                       <span className="truncate max-w-[140px]">
                         Reviewer: <strong className="text-primary font-normal">{reviewer}</strong>

@@ -91,7 +91,6 @@ export const TaskCard: React.FC<TaskCardProps> = ({
   // people line, so those badges are dropped here.
   const badges = getTaskBadges(task, chainFleets, now, names).filter((b) => b.kind !== 'lease' && b.kind !== 'bridge');
   const holderLease = workLeaseHolder(task, now);
-  const holderUnnamed = Boolean(holderLease && !names.instance(holderLease.instanceId));
   const people = getTaskPeople(task, chainFleets);
   // The bridge that will actually be used (plan REQ-UI-12), never "inherit".
   const placement = describeEffectivePlacement(taskEffectivePlacement(task, chainFleets), names.bridge);
@@ -184,7 +183,7 @@ export const TaskCard: React.FC<TaskCardProps> = ({
         {/* Row 2: what is happening, in one sentence */}
         <Text as="p" role="caption" tone="muted" data-debug-id={`task-card-status-${task.task_id}`}>
           <span className="text-primary">
-            {holderUnnamed && holderLease ? (
+            {holderLease ? (
               <>
                 <HolderName instanceId={holderLease.instanceId} names={names} /> {inProgressSentenceRest(holderLease.leftMins)}
               </>

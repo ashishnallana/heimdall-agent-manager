@@ -113,18 +113,40 @@ export const TaskComposer: React.FC<TaskComposerProps> = ({
     },
   };
 
+  // One row: <text box> <attach> <send…>; uploads and the send hint sit below.
   return (
     <div data-debug-id={debugId} className="space-y-1.5">
-      <Textarea
-        value={text}
-        onChange={setText}
-        onPaste={onPaste}
-        placeholder={placeholder}
-        rows={rows}
-        size="sm"
-        width="full"
-        disabled={disabled}
-      />
+      <div className="flex items-end gap-2">
+        <div className="min-w-0 flex-1">
+          <Textarea
+            value={text}
+            onChange={setText}
+            onPaste={onPaste}
+            placeholder={placeholder}
+            rows={rows}
+            size="sm"
+            width="full"
+            disabled={disabled}
+          />
+        </div>
+        <input
+          ref={fileInput}
+          type="file"
+          multiple
+          className="hidden"
+          aria-hidden="true"
+          tabIndex={-1}
+          onChange={(e) => {
+            const files = Array.from(e.target.files || []) as File[];
+            e.target.value = '';
+            files.forEach((file) => void upload(file));
+          }}
+        />
+        <div className="flex shrink-0 items-center gap-1.5">
+          <IconButton icon="plus" label="Attach a file" variant="ghost" size="sm" disabled={disabled} onClick={() => fileInput.current?.click()} />
+          {renderActions(ctx)}
+        </div>
+      </div>
 
       {attachments.length > 0 && (
         <ul data-debug-id={debugId ? `${debugId}-attachments` : undefined} className="space-y-1">
@@ -156,28 +178,11 @@ export const TaskComposer: React.FC<TaskComposerProps> = ({
         </ul>
       )}
 
-      <div className="flex flex-wrap items-center gap-2">
-        <input
-          ref={fileInput}
-          type="file"
-          multiple
-          className="hidden"
-          aria-hidden="true"
-          tabIndex={-1}
-          onChange={(e) => {
-            const files = Array.from(e.target.files || []) as File[];
-            e.target.value = '';
-            files.forEach((file) => void upload(file));
-          }}
-        />
-        <IconButton icon="plus" label="Attach a file" variant="ghost" size="sm" disabled={disabled} onClick={() => fileInput.current?.click()} />
-        {renderActions(ctx)}
-        {send.hint && (
-          <Text role="caption" tone={send.failed ? 'danger' : 'muted'}>
-            {send.hint}
-          </Text>
-        )}
-      </div>
+      {send.hint && (
+        <Text role="caption" tone={send.failed ? 'danger' : 'muted'}>
+          {send.hint}
+        </Text>
+      )}
     </div>
   );
 };

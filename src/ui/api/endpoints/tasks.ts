@@ -1369,7 +1369,10 @@ export const tasksApi = heimdallApi.injectEndpoints({
         try {
           const url = `/task-chains/${encodeURIComponent(chainId)}/tasks/${encodeURIComponent(taskId)}/attempts/${attemptNo}/facets/${encodeURIComponent(kind)}`;
           const data = await cookieJsonFetch(url);
-          return { data: { facet: data } };
+          // The hub sends {task_id, kind, attempt_no, writer, written_at, body:{…}};
+          // callers read the body's fields (summary, exit_code, files, …) directly.
+          const body = data && typeof data === 'object' && data.body && typeof data.body === 'object' && !Array.isArray(data.body) ? data.body : null;
+          return { data: { facet: body ? { ...data, ...body } : data } };
         } catch (error: any) {
           return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
         }

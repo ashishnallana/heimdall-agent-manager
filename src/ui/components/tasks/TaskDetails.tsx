@@ -327,11 +327,11 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
             </div>
           }
         >
-          {verify.output && (
+          {(verify.output || verify.summary) && (
             <details>
               <summary className="cursor-pointer text-muted hover:text-primary">Output</summary>
               <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap rounded-md bg-canvas p-2 font-mono text-[11px] text-primary">
-                {verify.output}
+                {verify.output || verify.summary}
               </pre>
             </details>
           )}
@@ -339,7 +339,7 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
       )}
 
       {handoff && (handoff.summary || handoff.next_steps) && !awaitingYourReview(task) && (
-        <Block title="Latest handoff" collapsible debugId="task-details-handoff" aside={<Text role="caption" tone="faint">attempt {handoff.attempt_no || attemptNo}</Text>}>
+        <Block title={state === 'done' ? 'Result' : 'Latest handoff'} collapsible debugId="task-details-handoff" aside={<Text role="caption" tone="faint">attempt {handoff.attempt_no || attemptNo}</Text>}>
           {handoff.summary && <p className="leading-relaxed text-primary">{handoff.summary}</p>}
           {handoff.next_steps && <p className="leading-relaxed text-muted">Next: {handoff.next_steps}</p>}
         </Block>
