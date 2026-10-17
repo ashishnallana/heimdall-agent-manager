@@ -725,6 +725,21 @@ ctl_verify_parse_lease :: proc(response: string) -> (Ctl_Verify_Lease, bool) {
 		}
 	}
 	if pack, pok := node["pack"].(json.Object); pok {
+		// lease.next returns {status, lease, task, pack}; the placement (with the
+		// chain directory's path) lives in the pack, at its top level and under
+		// pack.lease.
+		if out.directory_path == "" {
+			if pl, plok := pack["placement"].(json.Object); plok {
+				if dp, dok := pl["directory_path"].(json.String); dok do out.directory_path = strings.clone(string(dp))
+			}
+		}
+		if out.directory_path == "" {
+			if pl_lease, lok := pack["lease"].(json.Object); lok {
+				if pl, plok := pl_lease["placement"].(json.Object); plok {
+					if dp, dok := pl["directory_path"].(json.String); dok do out.directory_path = strings.clone(string(dp))
+				}
+			}
+		}
 		if wya, wok := pack["where_you_are"].(json.Object); wok {
 			if h, hok := wya["head"].(json.String); hok && out.vcs_head == "" do out.vcs_head = strings.clone(string(h))
 			if b, bok := wya["base"].(json.String); bok && out.vcs_base == "" do out.vcs_base = strings.clone(string(b))
