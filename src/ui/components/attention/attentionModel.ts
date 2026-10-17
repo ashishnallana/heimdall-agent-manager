@@ -112,12 +112,16 @@ export function urgencyClass(urgency: AttentionItem['urgency']): string {
 export const PRIORITY_LABELS: Record<string, string> = { p0: 'Urgent priority', p1: 'High priority', p2: 'Normal priority' };
 
 /** A drag/swipe this far (px) commits a card change; less snaps back. */
-export const SWIPE_COMMIT_PX = 90;
+export const SWIPE_COMMIT_PX = 60;
+/** ...or a quick flick: at least this far, released within FLICK_MS. */
+export const FLICK_PX = 25;
+export const FLICK_MS = 250;
 
-export function swipeDelta(dx: number): -1 | 0 | 1 {
-  if (dx <= -SWIPE_COMMIT_PX) return 1;
-  if (dx >= SWIPE_COMMIT_PX) return -1;
-  return 0;
+/** Left swipe = next card, right swipe = previous; navigation only, never an action. */
+export function swipeDelta(dx: number, ms = Infinity): -1 | 0 | 1 {
+  const far = Math.abs(dx) >= SWIPE_COMMIT_PX || (Math.abs(dx) >= FLICK_PX && ms <= FLICK_MS);
+  if (!far) return 0;
+  return dx < 0 ? 1 : -1;
 }
 
 /** Built-in reviewer template id (hub domain.TEMPLATE_REVIEWER_ID). */

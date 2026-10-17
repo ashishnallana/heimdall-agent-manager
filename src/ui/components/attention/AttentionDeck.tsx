@@ -97,7 +97,7 @@ export function AttentionDeck({
   const [composer, setComposer] = useState<Composer>(null);
   const [notice, setNotice] = useState('');
   const [dragX, setDragX] = useState(0);
-  const drag = useRef<{ x: number; id: number } | null>(null);
+  const drag = useRef<{ x: number; id: number; t: number; dx: number } | null>(null);
   // Whether this opening's tab came from the data (cached or fresh) or the user.
   const tabChoice = useRef<'none' | 'cached' | 'fresh' | 'user'>('none');
   const now = nowMs ?? Date.now();
@@ -315,18 +315,25 @@ export function AttentionDeck({
 
   if (!open || typeof document === 'undefined') return null;
 
+  // Swipe / drag to move between cards (navigation only, never an action). The
+  // pointer is captured so the gesture keeps tracking outside the card, and the
+  // distance lives in the ref so a pointercancel still sees the latest value.
   const onPointerDown = (e: React.PointerEvent) => {
     if ((e.target as HTMLElement).closest('button, a, textarea, input, [data-no-drag]')) return;
-    drag.current = { x: e.clientX, id: e.pointerId };
+    drag.current = { x: e.clientX, id: e.pointerId, t: e.timeStamp, dx: 0 };
+    try { (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId); } catch { /* not capturable */ }
   };
   const onPointerMove = (e: React.PointerEvent) => {
-    if (drag.current && drag.current.id === e.pointerId) setDragX(e.clientX - drag.current.x);
+    if (!drag.current || drag.current.id !== e.pointerId) return;
+    drag.current.dx = e.clientX - drag.current.x;
+    setDragX(drag.current.dx);
   };
-  const onPointerUp = () => {
-    if (!drag.current) return;
-    const delta = swipeDelta(dragX);
+  const onPointerUp = (e: React.PointerEvent) => {
+    const g = drag.current;
+    if (!g || g.id !== e.pointerId) return;
     drag.current = null;
     setDragX(0);
+    const delta = swipeDelta(g.dx, e.timeStamp - g.t);
     if (delta !== 0) go(delta);
   };
 
@@ -526,9 +533,13 @@ export function AttentionDeck({
         <div className="flex items-center justify-center gap-3 py-2 text-[12px] text-faint tabular-nums" data-debug-id="attention-deck-counter">
           {list.length > 0 ? (
             <>
-              <button type="button" aria-label="Previous" data-debug-id="attention-deck-prev" disabled={list.length < 2} onClick={() => go(-1)} className="px-2 hover:text-primary disabled:opacity-40">‹</button>
-              <span>{safeIndex + 1} / {list.length}</span>
-              <button type="button" aria-label="Next" data-debug-id="attention-deck-next" disabled={list.length < 2} onClick={() => go(1)} className="px-2 hover:text-primary disabled:opacity-40">›</button>
+              <button type="button" aria-label="Previous card" title="Previous card (←)" data-debug-id="attention-deck-prev" disabled={list.length < 2} onClick={() => go(-1)} className="grid h-8 w-8 place-items-center rounded-full border border-subtle text-muted hover:border-strong hover:text-primary disabled:opacity-40">
+                <Icon name="chevron-left" size={16} />
+              </button>
+              <span className="min-w-[3.5rem] text-center">{safeIndex + 1} / {list.length}</span>
+              <button type="button" aria-label="Next card" title="Next card (→)" data-debug-id="attention-deck-next" disabled={list.length < 2} onClick={() => go(1)} className="grid h-8 w-8 place-items-center rounded-full border border-subtle text-muted hover:border-strong hover:text-primary disabled:opacity-40">
+                <Icon name="chevron-right" size={16} />
+              </button>
             </>
           ) : null}
           {showOlder && list.length > 0 ? (

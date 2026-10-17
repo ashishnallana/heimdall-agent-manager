@@ -22,7 +22,9 @@ export function AttentionCardBody({ item, now, children }: { item: AttentionItem
         {item.context.chain_title && item.context.agent_name ? <span aria-hidden="true" className="text-faint">›</span> : null}
         {item.context.agent_name ? <span className="truncate">{item.context.agent_name}</span> : null}
       </p>
-      <div className="mt-3 min-h-0 flex-1 overflow-y-auto pr-1">
+      {/* touch-pan-y: this is its own scroll container, so it must also leave
+          horizontal gestures to the deck's swipe (or the browser claims them). */}
+      <div className="mt-3 min-h-0 flex-1 touch-pan-y overflow-y-auto pr-1">
         {item.kind === 'task' ? <TaskBody item={item} now={now} /> : <MessageBody item={item} now={now} />}
         {children}
       </div>

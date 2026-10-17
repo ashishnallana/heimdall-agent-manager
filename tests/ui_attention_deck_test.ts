@@ -55,6 +55,10 @@ test('model: visible items, per-tab counts, default tab, stepping, swipe', () =>
   assert.equal(model.swipeDelta(-120), 1);
   assert.equal(model.swipeDelta(120), -1);
   assert.equal(model.swipeDelta(40), 0, 'short drags snap back');
+  assert.equal(model.swipeDelta(-70), 1, 'a 70px drag left moves on');
+  assert.equal(model.swipeDelta(-30, 150), 1, 'a quick flick moves on');
+  assert.equal(model.swipeDelta(-30, 600), 0, 'a slow short drag snaps back');
+  assert.equal(model.swipeDelta(30, 150), -1);
 });
 
 test('model: human age and reason lines never contain ids', () => {
@@ -528,6 +532,32 @@ test('deck: Snoozed tab keeps the original actions; approving a snoozed card wor
     assert.equal(q('[data-debug-id="attention-deck-tab-task"]').getAttribute('aria-selected'), 'true', 'last snoozed card done: back to a live tab');
     await act(async () => { await scheduler.flushAll(true); });
     assert.ok(hits.includes('POST /api/v1/cards/crd_task_z/accept'));
+  });
+});
+
+test('deck: next/previous buttons and a swipe move between cards without acting', async () => {
+  await withDeck([taskItem('a'), taskItem('b'), taskItem('c')], async ({ q, act, text, dom, hits, scheduler }) => {
+    assert.match(text(), /Review a/);
+    await act(async () => { q('[data-debug-id="attention-deck-next"]').click(); });
+    assert.match(text(), /Review b/);
+    assert.match(text(), /2 \/ 3/);
+    await act(async () => { q('[data-debug-id="attention-deck-prev"]').click(); });
+    await act(async () => { q('[data-debug-id="attention-deck-prev"]').click(); });
+    assert.match(text(), /Review c/, 'wraps around');
+    // A left swipe on the card, as touch sends it (jsdom has no PointerEvent, so
+    // a MouseEvent typed as one, carrying a pointerId).
+    const card = q('[data-debug-id="attention-deck-card"]');
+    const fire = (type: string, x: number) => card.dispatchEvent(Object.assign(new dom.window.MouseEvent(type, { bubbles: true, clientX: x }), { pointerId: 7 }));
+    await act(async () => { fire('pointerdown', 200); });
+    await act(async () => { fire('pointermove', 120); });
+    await act(async () => { fire('pointerup', 120); });
+    assert.match(text(), /Review a/, 'swiping left from the last card wraps to the first');
+    await act(async () => { fire('pointerdown', 100); });
+    await act(async () => { fire('pointermove', 110); });
+    await act(async () => { fire('pointerup', 110); });
+    assert.match(text(), /Review a/, 'a tiny drag snaps back');
+    assert.equal(scheduler.getSnapshot().pending.length, 0, 'no action taken');
+    assert.equal(hits.filter((h) => h.startsWith('POST')).length, 0, 'nothing sent');
   });
 });
 
