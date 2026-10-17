@@ -563,6 +563,37 @@ test('deck: next/previous buttons and a swipe move between cards without acting'
   });
 });
 
+test('deck: slides up on open and back down on close before unmounting', async () => {
+  const { SHEET_MS } = await import('../src/ui/components/attention/AttentionDeck.tsx');
+  await withDeck([taskItem('a')], async ({ q, act, setOpen }) => {
+    assert.equal(q('[data-debug-id="attention-deck"]').getAttribute('data-attention-sheet'), 'open', 'opens with the slide-up');
+    assert.equal(q('[data-debug-id="attention-deck-backdrop"]').getAttribute('data-attention-backdrop'), 'open');
+    await setOpen(false);
+    const sheet = q('[data-debug-id="attention-deck"]');
+    assert.ok(sheet, 'still mounted while it slides down');
+    assert.equal(sheet.getAttribute('data-attention-sheet'), 'closing');
+    assert.ok(sheet.hasAttribute('inert'), 'no input while closing');
+    await act(async () => { await new Promise((r) => setTimeout(r, SHEET_MS + 40)); });
+    assert.equal(q('[data-debug-id="attention-deck"]'), null, 'unmounted after the slide-down');
+    await setOpen(true);
+    assert.equal(q('[data-debug-id="attention-deck"]').getAttribute('data-attention-sheet'), 'open', 'reopens');
+  });
+});
+
+test('deck: focus moves into the deck on open; Esc closes it once (menus first)', async () => {
+  await withDeck([taskItem('a')], async ({ q, act, dom, closed }) => {
+    const deck = q('[data-debug-id="attention-deck"]');
+    assert.ok(deck.contains(dom.window.document.activeElement), 'focus is inside the deck');
+    await act(async () => { q('[data-debug-id="attention-action-snooze"]').click(); });
+    const esc = () => dom.window.document.activeElement.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await act(async () => { esc(); });
+    assert.equal(q('[data-debug-id="attention-snooze-menu"]'), null, 'first Esc closes the menu');
+    assert.equal(closed(), 0, 'and not the deck');
+    await act(async () => { esc(); });
+    assert.equal(closed(), 1, 'second Esc closes the deck, exactly once');
+  });
+});
+
 test('status bar: attention pill takes the left slot, rings for unseen items, reads as one number', async () => {
   const { attentionModule } = await import('../src/ui/components/shell/statusBar/modules.tsx');
   const { renderToStaticMarkup } = await import('react-dom/server');

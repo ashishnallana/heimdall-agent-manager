@@ -27,6 +27,7 @@ import { ATTENTION_RANGE_LABELS } from '../../services/attention/attentionPrefs'
 import { snoozePresets, toHubTimestamp } from '../../services/attention/snoozePresets';
 import { appendArtifactLinks } from '../../utils/artifactUpload';
 import { buildRouteHash, navigateTo } from '../../utils/appLocation';
+import { useDialogA11y } from '../ui/composites/useDialogA11y';
 import { AttentionCardBody } from './AttentionCardBody';
 import { AttentionComposer, type ComposerSubmit } from './AttentionComposer';
 import { DECK_TABS, clampIndex, defaultTab, hideKey, nextLiveTab, reviewerCandidates, stepIndex, swipeDelta, tabCounts, visibleItems, type DeckTab } from './attentionModel';
@@ -36,10 +37,29 @@ const NO_ITEMS: AttentionItem[] = [];
 type Popover = null | 'snooze' | 'reviewer';
 type Composer = null | 'reply' | 'comment';
 
+/** The deck sheet slides up from the bottom on open and back down on close. */
+export const SHEET_MS = 220;
+
+function prefersReducedMotion(): boolean {
+  try {
+    return typeof window !== 'undefined' && !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+  } catch {
+    return false;
+  }
+}
+
 const SLIDE_CSS = `
 @keyframes attention-in-right { from { transform: translateX(40%); opacity: 0 } to { transform: none; opacity: 1 } }
 @keyframes attention-in-left { from { transform: translateX(-40%); opacity: 0 } to { transform: none; opacity: 1 } }
-@media (prefers-reduced-motion: reduce) { [data-attention-slide] { animation: none !important } }
+@keyframes attention-sheet-in { from { transform: translateY(calc(100% + var(--ui-bottom-chrome, 32px))) } to { transform: none } }
+@keyframes attention-sheet-out { from { transform: none } to { transform: translateY(calc(100% + var(--ui-bottom-chrome, 32px))) } }
+@keyframes attention-fade-in { from { opacity: 0 } to { opacity: 1 } }
+@keyframes attention-fade-out { from { opacity: 1 } to { opacity: 0 } }
+[data-attention-sheet='open'] { animation: attention-sheet-in ${SHEET_MS}ms cubic-bezier(0.2, 0.8, 0.2, 1) }
+[data-attention-sheet='closing'] { animation: attention-sheet-out ${SHEET_MS}ms ease-in forwards }
+[data-attention-backdrop='open'] { animation: attention-fade-in ${SHEET_MS}ms ease-out }
+[data-attention-backdrop='closing'] { animation: attention-fade-out ${SHEET_MS}ms ease-in forwards; pointer-events: none }
+@media (prefers-reduced-motion: reduce) { [data-attention-slide], [data-attention-sheet], [data-attention-backdrop] { animation: none !important } }
 `;
 
 function isTyping(target: EventTarget | null): boolean {
@@ -72,6 +92,32 @@ export function AttentionDeck({
   nowMs?: number;
 }) {
   const dispatch = useDispatch();
+  // Stay mounted through the slide-down after open turns false (skipped under
+  // reduced motion); input is ignored while closing.
+  const [present, setPresent] = useState(open);
+  useEffect(() => {
+    if (open) {
+      setPresent(true);
+      return;
+    }
+    if (!present) return;
+    if (prefersReducedMotion()) {
+      setPresent(false);
+      return;
+    }
+    const timer = setTimeout(() => setPresent(false), SHEET_MS);
+    return () => clearTimeout(timer);
+  }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
+  const phase: 'open' | 'closing' = open ? 'open' : 'closing';
+  // Focus moves into the deck on open (and back on close), so its keys -- Esc
+  // included -- work even when focus was in a terminal or preview frame.
+  const panelRef = useRef<HTMLElement | null>(null);
+  useDialogA11y(open, onClose, panelRef);
+  // inert while sliding down: no clicks or focus on a closing deck (set on the
+  // node directly; React 18 has no boolean inert prop).
+  useLayoutEffect(() => {
+    panelRef.current?.toggleAttribute('inert', !open);
+  });
   // Every opening revalidates in the background: the cards from last time stay
   // on screen (lastData) while the forced refetch runs, then the response
   // replaces them -- new cards slot in, stale ones drop out, and the card being
@@ -302,6 +348,9 @@ export function AttentionDeck({
         else if (composer) setComposer(null);
         else onClose();
         e.preventDefault();
+        // Handled here (layered: menu, then composer, then the deck); keep the
+        // dialog hook's own Esc from closing the deck on top of it.
+        e.stopPropagation();
         return;
       }
       if (isTyping(e.target) || e.metaKey || e.ctrlKey || e.altKey) return;
@@ -314,7 +363,7 @@ export function AttentionDeck({
     return () => window.removeEventListener('keydown', onKey, true);
   });
 
-  if (!open || typeof document === 'undefined') return null;
+  if ((!open && !present) || typeof document === 'undefined') return null;
 
   // Swipe / drag to move between cards (navigation only, never an action). The
   // pointer is captured so the gesture keeps tracking outside the card, and the
@@ -341,13 +390,16 @@ export function AttentionDeck({
   const showOlder = range !== 'all' && counts.older > 0;
 
   return createPortal(
-    <div data-debug-id="attention-deck-backdrop" className="fixed inset-0 z-modal flex items-end justify-center bg-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+    <div data-debug-id="attention-deck-backdrop" data-attention-backdrop={phase} className="fixed inset-0 z-modal flex items-end justify-center bg-backdrop" onMouseDown={(e) => { if (open && e.target === e.currentTarget) onClose(); }}>
       <style>{SLIDE_CSS}</style>
       <section
         role="dialog"
         aria-modal="true"
         aria-label="What needs you"
         data-debug-id="attention-deck"
+        data-attention-sheet={phase}
+        ref={panelRef}
+        tabIndex={-1}
         className="relative mb-[var(--ui-bottom-chrome,32px)] flex h-[min(680px,calc(100%-48px))] w-full max-w-[620px] flex-col overflow-hidden rounded-t-[var(--radius-lg)] border border-subtle bg-surface shadow-panel max-sm:mb-0 max-sm:h-full max-sm:rounded-none"
       >
         <header className="flex items-start gap-3 px-4 pt-4">
