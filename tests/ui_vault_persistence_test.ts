@@ -17,23 +17,29 @@ import {
   decryptVaultText,
   generateSaltHex,
   getActiveVaultKey,
-  setActiveVaultKey,
   VAULT_KEY_BYTES,
 } from '../src/ui/utils/vaultCrypto.ts';
 import {
   persistVaultKey,
+  persistVaultKeys,
   restoreVaultKey,
+  restoreVaultKeys,
   deleteVaultKey,
   createMockIndexedDB,
   VAULT_DB_NAME,
   VAULT_STORE_NAME,
   VAULT_KEY_RECORD_ID,
 } from '../src/ui/utils/vaultPersistence.ts';
+import { deriveTaskChainSearchKey } from '../src/ui/utils/taskChainSearch.ts';
 import vaultReducer, {
   setVaultConfigured,
   setVaultUnlocked,
   lockVault,
   initializeVaultPersistence,
+  setActiveVaultKey,
+  setActiveBridgeVaultKeyMaterial,
+  unlockVaultWithHex,
+  getActiveTaskChainSearchKey,
   readSessionVaultKey,
   writeSessionVaultKey,
   clearSessionVaultKey,
@@ -152,7 +158,7 @@ test('REQ-VAULT-HARDEN-2: IndexedDB structured cloning stores, restores, and del
   const initializedKey = await initializeVaultPersistence(dispatchMock);
   assert.ok(initializedKey);
   assert.equal(getActiveVaultKey(), initializedKey);
-  assert.equal(dispatchedAction?.type, 'vault/setVaultUnlocked');
+  assert.equal(dispatchedAction?.type, 'vault/hydrateVaultFromSession');
 
   // 5. Locking vault purges IndexedDB and resets unlocked state
   let state = vaultReducer(undefined, { type: '@@INIT' });
@@ -167,6 +173,83 @@ test('REQ-VAULT-HARDEN-2: IndexedDB structured cloning stores, restores, and del
   await deleteVaultKey();
   const keyAfterLock = await restoreVaultKey();
   assert.equal(keyAfterLock, null, 'IndexedDB record must be deleted on vault lock');
+});
+
+test('REQ-SEARCH-BRIDGE-UNLOCK-19: versioned persistence restores the non-extractable content/search key pair', async () => {
+  (globalThis as any).indexedDB = createMockIndexedDB();
+  setActiveVaultKey(null);
+
+  const rawHex = '9a'.repeat(32);
+  const contentKey = await importRawKeyHex(rawHex);
+  const searchKey = await deriveTaskChainSearchKey(rawHex);
+  await persistVaultKeys(contentKey, searchKey);
+
+  const restored = await restoreVaultKeys();
+  assert.ok(restored);
+  assert.equal(restored.version, 2);
+  assert.equal(restored.contentKey.extractable, false);
+  assert.equal(restored.taskChainSearchKey?.extractable, false);
+  await assert.rejects(() => crypto.subtle.exportKey('raw', restored.contentKey));
+  await assert.rejects(() => crypto.subtle.exportKey('raw', restored.taskChainSearchKey!));
+
+  await initializeVaultPersistence();
+  assert.equal(getActiveVaultKey(), restored.contentKey);
+  assert.equal(getActiveTaskChainSearchKey(), restored.taskChainSearchKey);
+
+  let state = vaultReducer(undefined, { type: '@@INIT' });
+  state = vaultReducer(state, lockVault());
+  assert.equal(getActiveVaultKey(), null);
+  assert.equal(getActiveTaskChainSearchKey(), null);
+  await deleteVaultKey();
+  assert.equal(await restoreVaultKeys(), null);
+});
+
+test('REQ-SEARCH-BRIDGE-UNLOCK-19: legacy content-only records restore without inventing a search key', async () => {
+  (globalThis as any).indexedDB = createMockIndexedDB();
+  setActiveVaultKey(null);
+
+  const contentKey = await importRawKeyHex('7b'.repeat(32));
+  await persistVaultKey(contentKey);
+  const restored = await restoreVaultKeys();
+  assert.ok(restored);
+  assert.equal(restored.version, 1);
+  assert.equal(restored.contentKey, contentKey);
+  assert.equal(restored.taskChainSearchKey, null);
+
+  await initializeVaultPersistence();
+  assert.equal(getActiveVaultKey(), contentKey);
+  assert.equal(getActiveTaskChainSearchKey(), null);
+});
+
+test('REQ-SEARCH-BRIDGE-UNLOCK-19: explicit remembered unlock derives and persists both keys without raw bytes', async () => {
+  (globalThis as any).indexedDB = createMockIndexedDB();
+  setActiveVaultKey(null);
+
+  const rawHex = '4c'.repeat(32);
+  const contentKey = await importRawKeyHex(rawHex);
+  const state = vaultReducer(undefined, setVaultUnlocked({ key: contentKey, rememberSession: true }));
+  assert.equal(selectIsVaultUnlocked({ vault: state }), true);
+  await setActiveBridgeVaultKeyMaterial(rawHex);
+  const restored = await restoreVaultKeys();
+  assert.ok(restored);
+  assert.equal(restored.version, 2);
+  assert.equal(restored.contentKey.extractable, false);
+  assert.equal(restored.taskChainSearchKey?.extractable, false);
+  assert.equal(JSON.stringify(restored).includes(rawHex), false);
+});
+
+test('REQ-SEARCH-BRIDGE-UNLOCK-19: remembered unlock propagates key-pair persistence failures', async () => {
+  const previousIndexedDB = (globalThis as any).indexedDB;
+  (globalThis as any).indexedDB = undefined;
+  try {
+    await assert.rejects(
+      () => unlockVaultWithHex('6d'.repeat(32), true),
+      /IndexedDB is not available/,
+    );
+  } finally {
+    setActiveVaultKey(null);
+    (globalThis as any).indexedDB = previousIndexedDB;
+  }
 });
 
 test('REQ-VAULT-HARDEN-1: Redux state is strictly serializable without raw keys', () => {

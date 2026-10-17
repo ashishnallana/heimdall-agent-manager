@@ -333,11 +333,182 @@ test('REQ-AUX-10: bridge reauthentication keeps an unlocked browser open and for
     fileURLToPath(new URL('../src/ui/components/settings/VaultOnboardingModal.tsx', import.meta.url)),
     'utf8',
   );
-  assert.match(source, /mode\?: 'vault-unlock' \| 'bridge-reauthentication'/);
-  assert.match(source, /if \(!isBridgeReauthentication && isUnlocked && isOpen\)/);
+  assert.match(source, /mode\?: 'vault-unlock' \| 'bridge-reauthentication' \| 'search-reauthentication'/);
+  assert.match(source, /if \(!isCredentialReauthentication && isUnlocked && isOpen\)/);
   assert.match(source, /const rawVaultKeyHex = await decryptVaultKeyEnvelopeHex\([\s\S]*if \(isBridgeReauthentication\) \{[\s\S]*await onBridgeReauthenticate\?\.\(rawVaultKeyHex\)/);
   assert.match(source, /isBridgeReauthentication[\s\S]*'Unlock connected bridges'/);
-  assert.match(source, /!isBridgeReauthentication \? \([\s\S]*vault-onboarding-remember-checkbox/);
+  assert.match(source, /!isCredentialReauthentication \? \([\s\S]*vault-onboarding-remember-checkbox/);
+});
+
+test('search reauthentication stays open while unlocked, persists v2, and makes encrypted search usable', async () => {
+  const shellSource = fs.readFileSync(
+    fileURLToPath(new URL('../src/ui/components/shell/AppShell.tsx', import.meta.url)),
+    'utf8',
+  );
+  assert.match(shellSource, /<VaultOnboardingHost/);
+  const hostSource = fs.readFileSync(
+    fileURLToPath(new URL('../src/ui/components/settings/VaultOnboardingHost.tsx', import.meta.url)),
+    'utf8',
+  );
+  assert.match(hostSource, /requestedOpen && isSearchReauthentication \? 'search-reauthentication' : 'vault-unlock'/);
+  const searchCallback = hostSource.match(/onSearchReauthenticate=\{async \(rawVaultKeyHex\) => \{([\s\S]*?)\n\s*\}\}/)?.[1] || '';
+  assert.match(searchCallback, /await setActiveBridgeVaultKeyMaterial\(rawVaultKeyHex\)/);
+  assert.doesNotMatch(searchCallback, /reconcile|unseal/i, 'search reauthentication must not alter bridge unseal behavior');
+
+  const { JSDOM } = await import('jsdom');
+  const dom = new JSDOM('<!DOCTYPE html><html><body><div id="root"></div></body></html>', { url: 'http://localhost/' });
+  const previous = {
+    window: (globalThis as any).window,
+    document: (globalThis as any).document,
+    HTMLElement: (globalThis as any).HTMLElement,
+    navigator: (globalThis as any).navigator,
+    fetch: (globalThis as any).fetch,
+    indexedDB: (globalThis as any).indexedDB,
+  };
+  (globalThis as any).window = dom.window;
+  (globalThis as any).document = dom.window.document;
+  (globalThis as any).HTMLElement = dom.window.HTMLElement;
+  Object.defineProperty(globalThis, 'navigator', { value: dom.window.navigator, configurable: true });
+  (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+  (globalThis as any).indexedDB = createMockIndexedDB();
+
+  const password = 'legacy-search-password';
+  const iterations = 10_000;
+  const salt = '17'.repeat(16);
+  const extractableKey = await generateVaultKey();
+  const rawVaultKeyHex = await exportRawKeyHex(extractableKey);
+  const contentKey = await importRawKeyHex(rawVaultKeyHex);
+  const vaultCrypto = await import('../src/ui/utils/vaultCrypto.ts');
+  const wrappingKey = await vaultCrypto.deriveKeyFromPassword(password, salt, iterations);
+  const envelope = await vaultCrypto.encryptVaultKeyEnvelope(wrappingKey, extractableKey);
+  await persistVaultKey(contentKey);
+
+  const vault = await import('../src/ui/store/vaultSlice.ts');
+  await vault.initializeVaultPersistence();
+  assert.equal(vault.getActiveTaskChainSearchKey(), null, 'legacy v1 restore begins without a search key');
+
+  const response = (body: unknown, status = 200) => ({
+    ok: status >= 200 && status < 300,
+    status,
+    headers: { get: () => 'application/json' },
+    text: async () => JSON.stringify(body),
+    json: async () => body,
+  }) as any;
+  (globalThis as any).fetch = async (input: any, init?: any) => {
+    const url = String(input?.url ?? input);
+    if (url.includes('/user/vault')) {
+      return response({ data: { vault: {
+        encrypted_vault_key: envelope.ciphertextHex,
+        vault_key_nonce: envelope.nonceHex,
+        vault_key_tag: envelope.tagHex,
+        kdf_salt: salt,
+        kdf_iterations: iterations,
+        recovery_encrypted_vault_key: '',
+        recovery_nonce: '',
+        recovery_tag: '',
+        recovery_salt: '',
+      } } });
+    }
+    if (url.includes('/task-chains/search/relay')) {
+      const request = JSON.parse(String(init?.body || '{}'));
+      const search = await import('../src/ui/utils/taskChainSearch.ts');
+      const key = vault.getActiveTaskChainSearchKey();
+      assert.ok(key);
+      await search.openTaskChainSearch(
+        request.envelope,
+        key,
+        search.taskChainSearchAad('usr_legacy', request.bridge_id, request.request_id, 'request', request.expires_at_ms),
+      );
+      const resultEnvelope = await search.sealTaskChainSearch(
+        {
+          request_id: request.request_id,
+          bridge_id: request.bridge_id,
+          indexed_revision: 1,
+          stale: false,
+          hits: [{ chain_id: 'chain_found', project_id: 'proj_1', status: 'active', updated_at: '2026-10-17T00:00:00Z', title: 'Found', description: '' }],
+        },
+        key,
+        search.taskChainSearchAad('usr_legacy', request.bridge_id, request.request_id, 'response', request.expires_at_ms),
+      );
+      return response({ data: { ok: true, envelope: resultEnvelope } });
+    }
+    if (url.includes('/bridges')) {
+      return response({ bridges: [{ bridge_id: 'brg_search', status: 'online', vault_status: 'unlocked', task_chain_search_ready: true }] });
+    }
+    return response({});
+  };
+
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { act } = await import('react');
+  const { Provider } = await import('react-redux');
+  const { configureStore } = await import('@reduxjs/toolkit');
+  const { heimdallApi } = await import('../src/ui/api/heimdallApi.ts');
+  const { VaultOnboardingHost } = await import('../src/ui/components/settings/VaultOnboardingHost.tsx');
+  const store = configureStore({
+    reducer: { vault: vault.default, [heimdallApi.reducerPath]: heimdallApi.reducer },
+    middleware: (getDefault: any) => getDefault({ serializableCheck: false, immutableCheck: false }).concat(heimdallApi.middleware),
+  });
+  store.dispatch(vault.setVaultConfigured(true));
+  store.dispatch(vault.hydrateVaultFromSession());
+  assert.equal(await vault.verifyActiveVaultKeyMaterial(rawVaultKeyHex), true);
+  assert.equal(await vault.verifyActiveVaultKeyMaterial('ef'.repeat(32)), false);
+  store.dispatch(vault.openSearchReauthentication());
+  const root = createRoot(dom.window.document.getElementById('root')!);
+
+  try {
+    await act(async () => {
+      root.render(React.createElement(
+        Provider,
+        { store },
+        React.createElement(VaultOnboardingHost, {
+          onboardingOpen: false,
+          onOnboardingOpenChange: () => {},
+          bridgeReauthenticationOpen: false,
+          onBridgeReauthenticationOpenChange: () => {},
+          onBridgeReauthenticate: async () => {},
+        }),
+      ));
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    });
+    const input = dom.window.document.querySelector('[data-debug-id="vault-onboarding-unlock-password-input"]') as HTMLInputElement;
+    assert.ok(input, `password ceremony remains visible even though the content Vault is already unlocked: ${dom.window.document.body.innerHTML}`);
+    assert.match(dom.window.document.body.textContent || '', /Enable task-chain search/);
+    assert.equal((store.getState() as any).vault.isUnlockModalOpen, true, 'effects do not clear the Redux request before the ceremony closes');
+    assert.equal((store.getState() as any).vault.unlockModalPurpose, 'search-reauthentication');
+
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, 'value')!.set!;
+      setter.call(input, password);
+      input.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      (dom.window.document.querySelector('[data-debug-id="vault-onboarding-unlock-submit-btn"]') as HTMLButtonElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 75));
+    });
+
+    assert.ok(vault.getActiveTaskChainSearchKey(), 'password submission installs the derived search key');
+    assert.equal((store.getState() as any).vault.isUnlockModalOpen, false, 'the Redux request clears only after the ceremony closes');
+    assert.equal((store.getState() as any).vault.unlockModalPurpose, undefined);
+    const restored = await (await import('../src/ui/utils/vaultPersistence.ts')).restoreVaultKeys();
+    assert.equal(restored?.version, 2, 'remembered legacy record is upgraded to a v2 key pair');
+    const search = await import('../src/ui/utils/taskChainSearch.ts');
+    const result = await search.searchTaskChainsEncrypted('found chain', 'usr_legacy');
+    assert.equal(result.hits[0]?.chain_id, 'chain_found');
+  } finally {
+    await act(async () => root.unmount());
+    store.dispatch(heimdallApi.util.resetApiState());
+    vault.setActiveVaultKey(null);
+    dom.window.close();
+    (globalThis as any).window = previous.window;
+    (globalThis as any).document = previous.document;
+    (globalThis as any).HTMLElement = previous.HTMLElement;
+    Object.defineProperty(globalThis, 'navigator', { value: previous.navigator, configurable: true });
+    (globalThis as any).fetch = previous.fetch;
+    (globalThis as any).indexedDB = previous.indexedDB;
+  }
 });
 
 

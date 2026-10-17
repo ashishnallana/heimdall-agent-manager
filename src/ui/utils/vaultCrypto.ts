@@ -5,6 +5,7 @@
 // REQ-VAULT-HARDEN-1, REQ-VAULT-HARDEN-2
 
 import { BIP39_WORDS } from './bip39Words.ts';
+import { clearActiveTaskChainSearchKey } from './taskChainSearchKey.ts';
 
 export const DEFAULT_KDF_ITERATIONS = 100_000;
 export const AES_GCM_KEY_LENGTH = 256;
@@ -54,6 +55,7 @@ export function setActiveVaultKey(key: CryptoKey | null): void {
   // Every key replacement invalidates any material associated with the prior
   // key. A caller that has matching raw material must install it explicitly.
   activeBridgeVaultKeyHex = null;
+  clearActiveTaskChainSearchKey();
 }
 
 /** Check if a string is armored with the vault content encryption prefix */

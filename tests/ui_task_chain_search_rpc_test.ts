@@ -7,7 +7,15 @@ import {
   sealTaskChainSearch,
   taskChainSearchAad,
   taskChainSearchErrorMessage,
+  taskChainSearchRequiresReauthentication,
 } from '../src/ui/utils/taskChainSearch.ts';
+import { searchTaskChainsEncrypted } from '../src/ui/utils/taskChainSearch.ts';
+import {
+  setActiveVaultKey,
+  getActiveTaskChainSearchKey,
+} from '../src/ui/store/vaultSlice.ts';
+import { importRawKeyHex } from '../src/ui/utils/vaultCrypto.ts';
+import { beginTaskChainSearchKeyDerivation } from '../src/ui/utils/taskChainSearchKey.ts';
 
 const KEY_A = '11'.repeat(32);
 const KEY_B = '22'.repeat(32);
@@ -30,6 +38,7 @@ test('task-chain search maps every protocol error to a user-facing state', () =>
   const expected: Record<string, RegExp> = {
     bridge_offline: /online/,
     vault_locked: /Unlock/,
+    vault_search_reauthentication_required: /Re-enter your vault password once/,
     search_not_ready: /preparing/,
     search_stale: /stale/,
     deadline_exceeded: /timed out/,
@@ -40,6 +49,33 @@ test('task-chain search maps every protocol error to a user-facing state', () =>
   for (const [code, message] of Object.entries(expected)) {
     assert.match(taskChainSearchErrorMessage({ code }), message);
   }
+  assert.equal(taskChainSearchRequiresReauthentication({ code: 'vault_search_reauthentication_required' }), true);
+  assert.equal(taskChainSearchRequiresReauthentication({ code: 'vault_locked' }), false);
+});
+
+test('task-chain search distinguishes a restored legacy session from a locked vault', async () => {
+  setActiveVaultKey(await importRawKeyHex(KEY_A));
+  assert.equal(getActiveTaskChainSearchKey(), null);
+  await assert.rejects(
+    () => searchTaskChainsEncrypted('legacy session', OWNER),
+    (error: any) => error?.code === 'vault_search_reauthentication_required',
+  );
+  setActiveVaultKey(null);
+  await assert.rejects(
+    () => searchTaskChainsEncrypted('locked vault', OWNER),
+    (error: any) => error?.code === 'vault_locked',
+  );
+});
+
+test('task-chain search maps a pending key derivation failure to reauthentication', async () => {
+  setActiveVaultKey(await importRawKeyHex(KEY_A));
+  const failedDerivation = beginTaskChainSearchKeyDerivation('invalid');
+  void failedDerivation.catch(() => {});
+  await assert.rejects(
+    () => searchTaskChainsEncrypted('derivation failure', OWNER),
+    (error: any) => error?.code === 'vault_search_reauthentication_required',
+  );
+  setActiveVaultKey(null);
 });
 
 test('task-chain search starts at most one hedge and keeps fast primary single-target', async () => {

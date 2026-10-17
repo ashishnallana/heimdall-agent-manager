@@ -3,22 +3,72 @@ import {
   importRawKeyHex,
   isVaultSupported,
   getActiveVaultKey,
-  setActiveVaultKey,
+  setActiveVaultKey as setActiveVaultKeyHandle,
   getActiveBridgeVaultKeyMaterial,
-  setActiveBridgeVaultKeyMaterial,
+  setActiveBridgeVaultKeyMaterial as setActiveBridgeVaultKeyMaterialHandle,
 } from '../utils/vaultCrypto.ts';
 import {
   persistVaultKey,
-  restoreVaultKey,
+  persistVaultKeys,
+  restoreVaultKeys,
   deleteVaultKey,
 } from '../utils/vaultPersistence.ts';
+import {
+  beginTaskChainSearchKeyDerivation,
+  getActiveTaskChainSearchKey,
+  setActiveTaskChainSearchKey,
+  waitForActiveTaskChainSearchKey,
+} from '../utils/taskChainSearchKey.ts';
 
 export {
   getActiveVaultKey,
-  setActiveVaultKey,
   getActiveBridgeVaultKeyMaterial,
-  setActiveBridgeVaultKeyMaterial,
+  getActiveTaskChainSearchKey,
+  waitForActiveTaskChainSearchKey,
 };
+
+let activeVaultRemembered = false;
+let activeVaultGeneration = 0;
+
+function installActiveVaultKeys(
+  contentKey: CryptoKey | null,
+  taskChainSearchKey: CryptoKey | null = null,
+  remembered = false,
+): void {
+  activeVaultGeneration += 1;
+  activeVaultRemembered = Boolean(contentKey && remembered);
+  setActiveVaultKeyHandle(contentKey);
+  if (contentKey && taskChainSearchKey) setActiveTaskChainSearchKey(taskChainSearchKey);
+}
+
+export function setActiveVaultKey(key: CryptoKey | null): void {
+  installActiveVaultKeys(key);
+}
+
+export function setActiveBridgeVaultKeyMaterial(rawHex: string | null): Promise<CryptoKey | null> {
+  setActiveBridgeVaultKeyMaterialHandle(rawHex);
+  const clean = String(rawHex || '').trim().toLowerCase();
+  const contentKey = getActiveVaultKey();
+  if (!contentKey || !/^[0-9a-f]{64}$/.test(clean)) {
+    setActiveTaskChainSearchKey(null);
+    return Promise.resolve(null);
+  }
+
+  const generation = activeVaultGeneration;
+  const activation = beginTaskChainSearchKeyDerivation(clean).then(async (searchKey) => {
+    if (generation !== activeVaultGeneration || getActiveVaultKey() !== contentKey) return null;
+    if (activeVaultRemembered) {
+      await persistVaultKeys(contentKey, searchKey);
+    }
+    return searchKey;
+  });
+  // Most UI callers intentionally fire-and-forget because the pending key is
+  // consumed by waitForActiveTaskChainSearchKey(). Mark the rejection handled
+  // for those callers while preserving it on the returned promise for callers
+  // such as unlockVaultWithHex() that need persistence failures to propagate.
+  void activation.catch(() => null);
+  return activation;
+}
 
 export const VAULT_SESSION_KEY = 'heimdall:vault:raw-key';
 export const VAULT_ONBOARDING_DISMISSED_KEY = 'heimdall:vault:onboarding-dismissed';
@@ -96,10 +146,10 @@ export function validateHexVaultKey(hexKey: string): string {
 export async function importAndValidateCryptoKey(hexKey: string): Promise<CryptoKey> {
   const clean = validateHexVaultKey(hexKey);
   const key = await importRawKeyHex(clean);
-  setActiveVaultKey(key);
+  installActiveVaultKeys(key);
   // Keep the matching raw material in memory for bridge delivery during this
   // unlocked browser session. It is never put in Redux, browser storage, or IDB.
-  setActiveBridgeVaultKeyMaterial(clean);
+  await setActiveBridgeVaultKeyMaterial(clean);
   return key;
 }
 
@@ -107,11 +157,36 @@ export async function importAndValidateCryptoKey(hexKey: string): Promise<Crypto
  * Unlock vault with a hex key, storing the non-extractable handle and optionally persisting to IndexedDB.
  */
 export async function unlockVaultWithHex(hexKey: string, remember = true): Promise<CryptoKey> {
-  const key = await importAndValidateCryptoKey(hexKey);
-  if (remember) {
-    await persistVaultKey(key);
-  }
+  const clean = validateHexVaultKey(hexKey);
+  const key = await importRawKeyHex(clean);
+  installActiveVaultKeys(key, null, remember);
+  await setActiveBridgeVaultKeyMaterial(clean);
   return key;
+}
+
+/** Prove transient raw material represents the already-active content key. */
+export async function verifyActiveVaultKeyMaterial(rawHex: string): Promise<boolean> {
+  const activeKey = getActiveVaultKey();
+  const clean = String(rawHex || '').trim().toLowerCase();
+  if (!activeKey || !/^[0-9a-f]{64}$/.test(clean)) return false;
+  try {
+    const candidateKey = await importRawKeyHex(clean);
+    const nonce = crypto.getRandomValues(new Uint8Array(12));
+    const probe = crypto.getRandomValues(new Uint8Array(32));
+    const ciphertext = await crypto.subtle.encrypt(
+      { name: 'AES-GCM', iv: nonce },
+      activeKey,
+      probe,
+    );
+    const opened = new Uint8Array(await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: nonce },
+      candidateKey,
+      ciphertext,
+    ));
+    return opened.length === probe.length && opened.every((byte, index) => byte === probe[index]);
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -121,13 +196,13 @@ export async function initializeVaultPersistence(
   dispatch?: (action: any) => void,
 ): Promise<CryptoKey | null> {
   try {
-    const key = await restoreVaultKey();
-    if (key) {
-      setActiveVaultKey(key);
+    const keys = await restoreVaultKeys();
+    if (keys) {
+      installActiveVaultKeys(keys.contentKey, keys.taskChainSearchKey, true);
       if (dispatch) {
-        dispatch(setVaultUnlocked({ key }));
+        dispatch(hydrateVaultFromSession());
       }
-      return key;
+      return keys.contentKey;
     }
   } catch (err) {
     console.warn('Failed to restore vault key from IndexedDB:', err);
@@ -143,6 +218,7 @@ export interface VaultState {
   isConfigured: boolean;
   isUnlocked: boolean;
   isUnlockModalOpen?: boolean;
+  unlockModalPurpose?: 'search-reauthentication';
 }
 
 export function loadInitialVaultState(): VaultState {
@@ -164,19 +240,27 @@ export const vaultSlice = createSlice({
       if (!action.payload) {
         state.isUnlocked = false;
         state.isUnlockModalOpen = false;
-        setActiveVaultKey(null);
+        delete state.unlockModalPurpose;
+        installActiveVaultKeys(null);
         clearSessionVaultKey();
         deleteVaultKey().catch(() => {});
       }
     },
     openUnlockModal(state) {
       state.isUnlockModalOpen = true;
+      delete state.unlockModalPurpose;
+    },
+    openSearchReauthentication(state) {
+      state.isUnlockModalOpen = true;
+      state.unlockModalPurpose = 'search-reauthentication';
     },
     closeUnlockModal(state) {
       state.isUnlockModalOpen = false;
+      delete state.unlockModalPurpose;
     },
     setUnlockModalOpen(state, action: PayloadAction<boolean>) {
       state.isUnlockModalOpen = action.payload;
+      if (!action.payload) delete state.unlockModalPurpose;
     },
     setVaultUnlocked: {
       reducer(
@@ -190,14 +274,16 @@ export const vaultSlice = createSlice({
         state.isConfigured = true;
         state.isUnlocked = true;
         state.isUnlockModalOpen = false;
+        delete state.unlockModalPurpose;
 
         const payload = action.payload;
         if (payload && typeof payload === 'object') {
           if ('algorithm' in payload) {
-            setActiveVaultKey(payload as CryptoKey);
+            installActiveVaultKeys(payload as CryptoKey, null, true);
             persistVaultKey(payload as CryptoKey).catch(() => {});
           } else if (payload.key) {
-            setActiveVaultKey(payload.key);
+            const remembered = payload.rememberSession !== false;
+            installActiveVaultKeys(payload.key, null, remembered);
             if (payload.rawVaultKeyHex) {
               setActiveBridgeVaultKeyMaterial(payload.rawVaultKeyHex);
             }
@@ -207,7 +293,8 @@ export const vaultSlice = createSlice({
           } else if (payload.rawVaultKeyHex) {
             // Asynchronously import hex key for backward compatibility with tests
             importRawKeyHex(payload.rawVaultKeyHex).then((key) => {
-              setActiveVaultKey(key);
+              const remembered = payload.rememberSession === true;
+              installActiveVaultKeys(key, null, remembered);
               setActiveBridgeVaultKeyMaterial(payload.rawVaultKeyHex || null);
               if (payload.rememberSession) {
                 persistVaultKey(key).catch(() => {});
@@ -260,21 +347,24 @@ export const vaultSlice = createSlice({
         state.isConfigured = true;
         state.isUnlocked = true;
         state.isUnlockModalOpen = false;
+        delete state.unlockModalPurpose;
 
         const payload = action.payload;
         if (payload && typeof payload === 'object') {
           if ('algorithm' in payload) {
-            setActiveVaultKey(payload as CryptoKey);
+            installActiveVaultKeys(payload as CryptoKey, null, true);
             persistVaultKey(payload as CryptoKey).catch(() => {});
           } else if (payload.key) {
-            setActiveVaultKey(payload.key);
+            const remembered = payload.rememberSession !== false;
+            installActiveVaultKeys(payload.key, null, remembered);
             if (payload.hexKey) setActiveBridgeVaultKeyMaterial(payload.hexKey);
             if (payload.rememberSession !== false) {
               persistVaultKey(payload.key).catch(() => {});
             }
           } else if (payload.hexKey) {
             importRawKeyHex(payload.hexKey).then((key) => {
-              setActiveVaultKey(key);
+              const remembered = payload.rememberSession === true;
+              installActiveVaultKeys(key, null, remembered);
               setActiveBridgeVaultKeyMaterial(payload.hexKey || null);
               if (payload.rememberSession) {
                 persistVaultKey(key).catch(() => {});
@@ -333,7 +423,8 @@ export const vaultSlice = createSlice({
     lockVault(state) {
       state.isUnlocked = false;
       state.isUnlockModalOpen = false;
-      setActiveVaultKey(null);
+      delete state.unlockModalPurpose;
+      installActiveVaultKeys(null);
       clearSessionVaultKey();
       deleteVaultKey().catch(() => {});
     },
@@ -347,6 +438,7 @@ export const {
   hydrateVaultFromSession,
   lockVault,
   openUnlockModal,
+  openSearchReauthentication,
   closeUnlockModal,
   setUnlockModalOpen,
 } = vaultSlice.actions;
@@ -400,5 +492,8 @@ export const selectIsVaultUnlocked = (state: { vault?: VaultState }) => Boolean(
 export const selectRawVaultKeyHex = (_state?: { vault?: VaultState }): string | null => null;
 export const selectActiveVaultKey = (_state?: { vault?: VaultState }): CryptoKey | null => getActiveVaultKey();
 export const selectIsUnlockModalOpen = (state: { vault?: VaultState }) => Boolean(state?.vault?.isUnlockModalOpen);
+export const selectIsSearchReauthentication = (state: { vault?: VaultState }) => (
+  state?.vault?.unlockModalPurpose === 'search-reauthentication'
+);
 
 export default vaultSlice.reducer;

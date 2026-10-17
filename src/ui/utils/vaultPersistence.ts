@@ -8,6 +8,36 @@ export const VAULT_DB_VERSION = 1;
 export const VAULT_STORE_NAME = 'vault_keys';
 export const VAULT_KEY_RECORD_ID = 'active_vault_key';
 
+export type PersistedVaultKeys = {
+  version: 2;
+  contentKey: CryptoKey;
+  taskChainSearchKey: CryptoKey;
+};
+
+export type RestoredVaultKeys = {
+  contentKey: CryptoKey;
+  taskChainSearchKey: CryptoKey | null;
+  version: 1 | 2;
+};
+
+function isCryptoKey(value: unknown): value is CryptoKey {
+  return Boolean(
+    value
+    && typeof value === 'object'
+    && typeof (value as CryptoKey).type === 'string'
+    && typeof (value as CryptoKey).extractable === 'boolean'
+    && (value as CryptoKey).algorithm,
+  );
+}
+
+let vaultWriteQueue: Promise<void> = Promise.resolve();
+
+function serializeVaultWrite(operation: () => Promise<void>): Promise<void> {
+  const result = vaultWriteQueue.catch(() => {}).then(operation);
+  vaultWriteQueue = result.catch(() => {});
+  return result;
+}
+
 /**
  * Access the IndexedDB factory across browser, electron, and global environments.
  */
@@ -44,12 +74,20 @@ export function openVaultDb(): Promise<IDBDatabase> {
  * Leverages browser HTML5 Structured Clone support for WebCrypto keys.
  */
 export async function persistVaultKey(key: CryptoKey): Promise<void> {
+  return persistVaultRecord(key);
+}
+
+async function persistVaultRecord(record: CryptoKey | PersistedVaultKeys): Promise<void> {
+  return serializeVaultWrite(() => persistVaultRecordNow(record));
+}
+
+async function persistVaultRecordNow(record: CryptoKey | PersistedVaultKeys): Promise<void> {
   const db = await openVaultDb();
   return new Promise((resolve, reject) => {
     try {
       const tx = db.transaction(VAULT_STORE_NAME, 'readwrite');
       const store = tx.objectStore(VAULT_STORE_NAME);
-      const req = store.put(key, VAULT_KEY_RECORD_ID);
+      const req = store.put(record, VAULT_KEY_RECORD_ID);
       req.onsuccess = () => resolve();
       req.onerror = () => reject(req.error || new Error('Failed to persist vault key to IndexedDB'));
       tx.oncomplete = () => {
@@ -66,10 +104,23 @@ export async function persistVaultKey(key: CryptoKey): Promise<void> {
   });
 }
 
+/** Persist the versioned pair without ever serializing raw key bytes. */
+export async function persistVaultKeys(
+  contentKey: CryptoKey,
+  taskChainSearchKey: CryptoKey,
+): Promise<void> {
+  await persistVaultRecord({ version: 2, contentKey, taskChainSearchKey });
+}
+
 /**
  * Restore non-extractable CryptoKey from IndexedDB on page load/init.
  */
 export async function restoreVaultKey(): Promise<CryptoKey | null> {
+  return (await restoreVaultKeys())?.contentKey ?? null;
+}
+
+/** Restore a v2 key pair or adapt a legacy record containing only the content key. */
+export async function restoreVaultKeys(): Promise<RestoredVaultKeys | null> {
   const factory = getIdbFactory();
   if (!factory) return null;
   try {
@@ -81,8 +132,18 @@ export async function restoreVaultKey(): Promise<CryptoKey | null> {
         const req = store.get(VAULT_KEY_RECORD_ID);
         req.onsuccess = () => {
           const result = req.result;
-          if (result && typeof result === 'object') {
-            resolve(result as CryptoKey);
+          if (isCryptoKey(result)) {
+            resolve({ contentKey: result, taskChainSearchKey: null, version: 1 });
+          } else if (
+            result?.version === 2
+            && isCryptoKey(result.contentKey)
+            && isCryptoKey(result.taskChainSearchKey)
+          ) {
+            resolve({
+              contentKey: result.contentKey,
+              taskChainSearchKey: result.taskChainSearchKey,
+              version: 2,
+            });
           } else {
             resolve(null);
           }
@@ -111,6 +172,10 @@ export async function restoreVaultKey(): Promise<CryptoKey | null> {
 export async function deleteVaultKey(): Promise<void> {
   const factory = getIdbFactory();
   if (!factory) return;
+  return serializeVaultWrite(deleteVaultKeyNow);
+}
+
+async function deleteVaultKeyNow(): Promise<void> {
   try {
     const db = await openVaultDb();
     return await new Promise((resolve, reject) => {

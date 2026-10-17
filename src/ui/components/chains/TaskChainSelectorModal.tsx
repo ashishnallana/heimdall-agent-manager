@@ -8,7 +8,9 @@ import {
 } from '../../store/searchTitleSlice';
 import {
   selectIsVaultUnlocked,
+  selectIsUnlockModalOpen,
   getActiveVaultKey,
+  openSearchReauthentication,
 } from '../../store/vaultSlice';
 import { isVaultArmored } from '../../utils/vaultContent';
 import { batchDecryptTitles, type RawSearchItemInput } from '../../utils/vaultSearch';
@@ -18,7 +20,11 @@ import { useDialogA11y } from '../ui/composites/useDialogA11y';
 import { taskChainRoute, chainStatusDot } from '../ui/patterns/commandPaletteLogic';
 import { buildRouteHash } from '../../utils/appLocation';
 import { resolveChainConversationAgent } from '../../utils/chainConversation';
-import { searchTaskChainsEncrypted, taskChainSearchErrorMessage } from '../../utils/taskChainSearch';
+import {
+  searchTaskChainsEncrypted,
+  taskChainSearchErrorMessage,
+  taskChainSearchRequiresReauthentication,
+} from '../../utils/taskChainSearch';
 import { useAuthUser } from '../auth/AuthUserContext';
 import {
   INITIAL_VISIBLE_COUNT,
@@ -71,6 +77,7 @@ export function TaskChainSelectorModal({
   const [remoteChains, setRemoteChains] = useState<ChainSelectorItem[] | null>(null);
   const [remoteSearchState, setRemoteSearchState] = useState<'idle' | 'searching' | 'stale' | 'error'>('idle');
   const [remoteSearchError, setRemoteSearchError] = useState('');
+  const [remoteSearchNeedsReauthentication, setRemoteSearchNeedsReauthentication] = useState(false);
 
   const inputRef = useRef<HTMLInputElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
@@ -88,6 +95,7 @@ export function TaskChainSelectorModal({
       return Boolean(state?.vault?.isUnlocked);
     }
   });
+  const isUnlockModalOpen = useSelector(selectIsUnlockModalOpen);
 
   const activeVaultKey = useMemo(() => {
     if (isVaultUnlocked) {
@@ -170,7 +178,7 @@ export function TaskChainSelectorModal({
   // one navigates to the canonical chain. Nothing here mutates the pinned sidebar.
   useEffect(() => {
     const trimmed = query.trim();
-    if (!open || !isVaultUnlocked || trimmed.length < 2 || !authUser?.user_id) {
+    if (!open || !isVaultUnlocked || isUnlockModalOpen || trimmed.length < 2 || !authUser?.user_id) {
       setRemoteChains(null);
       setRemoteSearchState('idle');
       return;
@@ -178,6 +186,7 @@ export function TaskChainSelectorModal({
     let canceled = false;
     setRemoteChains(null);
     setRemoteSearchError('');
+    setRemoteSearchNeedsReauthentication(false);
     const timer = setTimeout(() => {
       setRemoteSearchState('searching');
       searchTaskChainsEncrypted(trimmed, authUser.user_id!, { projectId, limit: 40 })
@@ -210,11 +219,12 @@ export function TaskChainSelectorModal({
             setRemoteChains(null);
             setRemoteSearchState('error');
             setRemoteSearchError(taskChainSearchErrorMessage(error));
+            setRemoteSearchNeedsReauthentication(taskChainSearchRequiresReauthentication(error));
           }
         });
     }, 150);
     return () => { canceled = true; clearTimeout(timer); };
-  }, [query, open, isVaultUnlocked, authUser?.user_id, projectId, resolvedGroups, currentChainId]);
+  }, [query, open, isVaultUnlocked, isUnlockModalOpen, authUser?.user_id, projectId, resolvedGroups, currentChainId]);
 
   // Real-time search filter
   const filteredChains = useMemo(() => {
@@ -382,6 +392,16 @@ export function TaskChainSelectorModal({
           {qTrim.length >= 2 && remoteSearchState !== 'idle' ? (
             <div data-debug-id="task-chain-search-state" className="px-3 py-1 text-xs text-faint">
               {remoteSearchState === 'searching' ? 'Searching unlocked Bridges…' : remoteSearchState === 'stale' ? 'Results may be stale.' : remoteSearchError}
+              {remoteSearchNeedsReauthentication ? (
+                <button
+                  type="button"
+                  data-debug-id="task-chain-search-reauthenticate"
+                  onClick={() => dispatch(openSearchReauthentication())}
+                  className="ml-2 font-medium text-accent hover:underline"
+                >
+                  Re-enter vault password
+                </button>
+              ) : null}
             </div>
           ) : null}
           {isLoading && allChains.length === 0 ? (
