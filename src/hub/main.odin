@@ -5,12 +5,14 @@ import "core:os"
 import "core:strconv"
 import "core:strings"
 import app "odin_test:hub/app"
+import crashlog "odin_test:lib/crashlog"
 import domain "odin_test:hub/domain"
 import auth_service "odin_test:hub/service/auth"
 import platform "odin_test:hub/platform"
 import user_service "odin_test:hub/service/user"
 
 main :: proc() {
+	crashlog.install("ham-hub")
 	config := app.default_config()
 	if is_users_command() {
 		ok, message := run_users_command(&config)

@@ -13,6 +13,7 @@ import "core:thread"
 import "core:time"
 import contracts "odin_test:contracts"
 import cfg_lib "odin_test:lib/config"
+import crashlog "odin_test:lib/crashlog"
 import http "odin_test:lib/http_client"
 import ws "odin_test:lib/ws"
 import jsonx "odin_test:lib/jsonx"
@@ -51,7 +52,9 @@ bridge_sequence: i64
 main :: proc() {
 	when ODIN_OS != .Windows {
 		_ = posix.signal(.SIGPIPE, auto_cast posix.SIG_IGN)
+		crashlog.install("ham-bridge")
 	}
+	bridge_strip_parent_session_env()
 	if has_flag(os.args, "--version") {
 		fmt.println("ham-bridge", contracts.APP_VERSION, "protocol", contracts.PROTOCOL_VERSION, "bridge", contracts.BRIDGE_LOOPBACK_CONTRACT_VERSION, "ws", contracts.BRIDGE_WS_FRAME_VERSION)
 		return
@@ -903,4 +906,30 @@ bridge_vault_key_status :: proc() -> (configured: bool, permissions_valid: bool,
 	if !ok do return false, false, 0
 	defer delete(key)
 	return true, true, len(key)
+}
+
+// BRIDGE_PARENT_SESSION_ENV are the per-session markers an interactive Claude
+// Code session exports to its children. A bridge started from such a session
+// (dev stacks, manual runs) would pass them on through the pty-host to every
+// agent, which then treats itself as a child session: transcript saving off,
+// messaging wired to the parent. Configuration variables (provider, model,
+// auth) are NOT in this list and keep flowing.
+BRIDGE_PARENT_SESSION_ENV :: [?]string{
+	"CLAUDECODE",
+	"CLAUDE_CODE_ENTRYPOINT",
+	"CLAUDE_CODE_SESSION_ID",
+	"CLAUDE_CODE_CHILD_SESSION",
+	"CLAUDE_CODE_SESSION_ATTENDED",
+	"CLAUDE_CODE_MESSAGING_SOCKET",
+	"CLAUDE_CODE_MESSAGING_TOKEN",
+	"CLAUDE_CODE_EXECPATH",
+	"CLAUDE_PID",
+	"CLAUDE_EFFORT",
+}
+
+// bridge_strip_parent_session_env removes BRIDGE_PARENT_SESSION_ENV from the
+// bridge's own environment at startup, before the pty-host or any agent is
+// spawned, so nothing downstream inherits them.
+bridge_strip_parent_session_env :: proc() {
+	for key in BRIDGE_PARENT_SESSION_ENV do _ = os.unset_env(key)
 }
