@@ -43,8 +43,15 @@ export const markConversationRead = (conversationId: string, keepalive: boolean)
  * Hands the review to an agent: the agent becomes the reviewer instead of the
  * user, so the task no longer awaits the user and its card retires server-side.
  */
-export const assignReviewerAgent = (refs: AttentionTaskRefs, agent: { agentId: string; displayName: string }, keepalive: boolean) =>
-  send(`/task-chains/${enc(refs.chain_id)}/tasks/${enc(refs.task_id)}`, 'PATCH', {
+/**
+ * Hands the review to a durable agent, then reconciles the chain: a changed
+ * reviewer only takes effect once the chain is reconciled (that is what brings
+ * the reviewer up and hands it the review).
+ */
+export const assignReviewerAgent = async (refs: AttentionTaskRefs, agent: { agentId: string; displayName: string }, keepalive: boolean) => {
+  await send(`/task-chains/${enc(refs.chain_id)}/tasks/${enc(refs.task_id)}`, 'PATCH', {
     reviewer_refs: [{ type: 'agent_id', agent_id: agent.agentId, display_name: agent.displayName }],
     requires_user_approval: false,
   }, keepalive);
+  await send(`/task-chains/${enc(refs.chain_id)}/reconcile`, 'POST', {}, keepalive);
+};
