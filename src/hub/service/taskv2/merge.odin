@@ -251,7 +251,11 @@ task_merge_status :: proc(svc: ^Service, task: domain.Task) -> Merge_Status {
 			st.detail = jsonx.extract_string(ev.payload_json, "detail", "", true, context.temp_allocator)
 			return st
 		case EV_APPROVED, EV_SUBMITTED:
-			// Done with no outcome yet: pending only where a worktree applies.
+			// Done with no outcome yet: pending only where a worktree applies —
+			// work ran (a gate never has a work lease) in a git directory.
+			ran := false
+			for e in evs do if e.kind == EV_LEASE_GRANTED && jsonx.extract_string(e.payload_json, "kind", domain.LEASE_KIND_WORK, true, context.temp_allocator) == domain.LEASE_KIND_WORK { ran = true; break }
+			if !ran do return st
 			dirs, derr := iface.taskchain_list_directories_by_chain(svc.repo, task.chain_id, task.owner_user_id)
 			if derr.code != .None do return st
 			for d in dirs do if d.vcs_kind == "git" { st.state = "pending"; break }
