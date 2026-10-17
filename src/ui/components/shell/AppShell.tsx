@@ -32,7 +32,7 @@ import { StatusBar } from './statusBar/StatusBar';
 import { STATUS_BAR_MODULES } from './statusBar/modules';
 import { countConnectedBridges, countRunningInstances, countShells } from './statusBar/statusBarModel';
 import { AttentionDeck, AttentionUndoToast } from '../attention';
-import { useGetAttentionSummaryQuery, type AttentionRange } from '../../api/endpoints/attention';
+import { attentionApi, useGetAttentionSummaryQuery, type AttentionRange } from '../../api/endpoints/attention';
 import { readAttentionRange, writeAttentionRange } from '../../services/attention/attentionPrefs';
 import { useGetAccountBillingQuery } from '../../api/endpoints/accountBilling';
 import SidebarUpdateBadge from './SidebarUpdateBadge';
@@ -1340,15 +1340,23 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
   const [focusMessageId, setFocusMessageId] = useState(focusMessageFromLocation);
   const [resourcePicker, setResourcePicker] = useState<'conversation' | 'task-chain' | 'shell' | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
-  // Attention deck: the bar pill counts what needs the user in the chosen range;
-  // the hub's attention_changed hint refetches it (poll is only a slow fallback).
+  // Attention deck: the bar pill counts what needs the user in the chosen range.
+  // The hub's attention_changed hint refetches it; nothing polls. While the deck
+  // is open its own query is the only one fetching and it upserts its counts into
+  // this cache, so the pill reads the cache directly (lastAttentionTotal bridges
+  // the moment an invalidation drops the unsubscribed entry).
   const [attentionOpen, setAttentionOpen] = useState(false);
   const [attentionRange, setAttentionRangeState] = useState<AttentionRange>(() => readAttentionRange());
   const setAttentionRange = useCallback((range: AttentionRange) => {
     setAttentionRangeState(range);
     writeAttentionRange(range);
   }, []);
-  const attentionSummary = useGetAttentionSummaryQuery({ since: attentionRange }, { pollingInterval: 5 * 60 * 1000 });
+  useGetAttentionSummaryQuery({ since: attentionRange }, { skip: attentionOpen });
+  const selectAttentionSummary = useMemo(() => attentionApi.endpoints.getAttentionSummary.select({ since: attentionRange }), [attentionRange]);
+  const attentionSummaryData = useSelector(selectAttentionSummary).data;
+  const lastAttentionTotal = useRef<{ range: AttentionRange; total: number } | null>(null);
+  if (attentionSummaryData) lastAttentionTotal.current = { range: attentionRange, total: attentionSummaryData.counts.total };
+  const attentionTotal = lastAttentionTotal.current?.range === attentionRange ? lastAttentionTotal.current.total : null;
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [launchModalProject, setLaunchModalProject] = useState<{ projectId: string; name: string } | null>(null);
   const [settingsModalOpen, setSettingsModalOpenState] = useState<boolean>(() => routeFromLocation().startsWith('/settings'));
@@ -2087,7 +2095,7 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
           shortcutMode,
           renderVaultToggle: renderVaultStatusButton,
           attention: {
-            total: attentionSummary.data ? attentionSummary.data.counts.total : null,
+            total: attentionTotal,
             onOpen: () => setAttentionOpen(true),
           },
         }}

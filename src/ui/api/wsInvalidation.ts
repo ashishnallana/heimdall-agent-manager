@@ -759,6 +759,23 @@ export function resyncAfterReconnect(dispatch: any) {
   dispatch(heimdallApi.util.invalidateTags([...HEIMDALL_TAG_TYPES]));
 }
 
+// Attention deck: attention_changed is an invalidation hint only ({kinds}, no
+// counts). One user action can still produce a few hints (e.g. a reply sends the
+// message and marks it read, which may straddle the hub's 500ms window), so a
+// burst is coalesced here into ONE invalidation. Only the query on screen has a
+// subscriber -- the bar summary, or the open deck -- so that is one request; RTK
+// defers an invalidation that lands mid-fetch until the fetch settles.
+export const ATTENTION_REFETCH_COALESCE_MS = 300;
+let attentionRefetchTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleAttentionRefetch(dispatch: any) {
+  if (attentionRefetchTimer) return;
+  attentionRefetchTimer = setTimeout(() => {
+    attentionRefetchTimer = null;
+    dispatch(heimdallApi.util.invalidateTags([{ type: 'Attention', id: 'ALL' }]));
+  }, ATTENTION_REFETCH_COALESCE_MS);
+}
+
 // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
 export function handleUserWsEvent(dispatch: any, payload: any, ctx: WsCtx = {}) {
   // Native (OS) notifications: fire from this single funnel for the curated
@@ -789,10 +806,7 @@ export function handleUserWsEvent(dispatch: any, payload: any, ctx: WsCtx = {}) 
       dispatch(attentionEventReceived());
       return;
     case 'attention_changed':
-      // Attention deck: an invalidation hint only ({kinds}, no counts). Refetch
-      // the bar summary for whatever range the user picked; the open deck's
-      // item query shares the tag, closed decks have no subscriber to refetch.
-      dispatch(heimdallApi.util.invalidateTags([{ type: 'Attention', id: 'ALL' }]));
+      scheduleAttentionRefetch(dispatch);
       return;
     case 'memory_event':
       handleMemoryEvent(dispatch, payload);

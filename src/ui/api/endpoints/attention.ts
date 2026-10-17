@@ -3,10 +3,12 @@
 //   GET /api/v1/attention/summary?since=   counts only (the always-visible bar)
 //   GET /api/v1/attention?since=&kind=     counts + the cards the deck renders
 //
-// Both carry the 'Attention' tag. The hub's attention_changed WebSocket hint
-// invalidates it (wsInvalidation.ts), so the bar refetches for whatever range
-// the user picked, and the deck's item query refetches only while it is open
-// (RTK only refetches subscribed queries).
+// Both carry the 'Attention' tag; the hub's attention_changed WebSocket hint
+// invalidates it (coalesced, wsInvalidation.ts). Nothing polls. Exactly one of
+// the two is subscribed at a time, so a change costs one request: the summary
+// while the deck is closed, the deck's query while it is open (the deck upserts
+// its counts into the summary cache, so the bar stays current and closing the
+// deck needs no fetch). Opening the deck always revalidates.
 import { cookieJsonFetch, customQueryError } from '../cookieFetch';
 import { heimdallApi } from '../heimdallApi';
 
@@ -91,6 +93,9 @@ export const attentionApi = heimdallApi.injectEndpoints({
         }
       },
       providesTags: [{ type: 'Attention' as const, id: 'ALL' }],
+      // Paused while the deck is open (the deck's counts are upserted here
+      // instead), so the cached value must outlive that pause.
+      keepUnusedDataFor: 3600,
     }),
     getAttention: build.query<AttentionResult, { since: AttentionRange; kind?: AttentionKind }>({
       queryFn: async ({ since, kind }) => {

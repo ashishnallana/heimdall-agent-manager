@@ -172,7 +172,13 @@ function jsonResponse(body: any) {
   return { ok: true, status: 200, headers: { get: () => 'application/json' }, text: async () => JSON.stringify(body), json: async () => body } as any;
 }
 
-async function withDeck(items: any[], run: (h: { dom: any; store: any; scheduler: any; text: () => string; q: (sel: string) => any; act: any; closed: () => number; hits: string[] }) => Promise<void>, opts: { unlocked?: boolean } = {}) {
+type DeckHarness = { dom: any; store: any; scheduler: any; text: () => string; q: (sel: string) => any; act: any; closed: () => number; hits: string[]; setOpen: (open: boolean) => Promise<void>; serve: (items: any[]) => void; release: () => void; hold: () => void };
+
+async function withDeck(initialItems: any[], run: (h: DeckHarness) => Promise<void>, opts: { unlocked?: boolean } = {}) {
+  let items = initialItems;
+  // hold() makes /attention responses wait until release(), to observe the deck mid-refetch.
+  let gate: Promise<void> | null = null;
+  let openGate = () => {};
   const { JSDOM } = await import('jsdom');
   const { Provider } = await import('react-redux');
   const { createRoot } = await import('react-dom/client');
@@ -198,6 +204,7 @@ async function withDeck(items: any[], run: (h: { dom: any; store: any; scheduler
     const url = new URL(String(input?.url ?? input), 'http://localhost');
     hits.push(`${String(init?.method || 'GET').toUpperCase()} ${url.pathname}${url.search}`);
     if (url.pathname.endsWith('/attention')) {
+      if (gate) await gate;
       const counts = { total: items.length, older: 1, message: items.filter((i) => i.kind === 'message').length, task: items.filter((i) => i.kind === 'task').length };
       return jsonResponse({ data: { since: '24h', counts, items } });
     }
@@ -209,15 +216,21 @@ async function withDeck(items: any[], run: (h: { dom: any; store: any; scheduler
   const scheduler = createActionScheduler({ delayMs: 60_000 });
   let closedCount = 0;
   const root = createRoot(dom.window.document.getElementById('root')!);
+  const render = (open: boolean) => root.render(React.createElement(Provider, { store }, React.createElement(AttentionDeck, {
+    open, onClose: () => { closedCount += 1; }, range: '24h', onRangeChange: () => {}, scheduler, nowMs: NOW,
+  })));
   try {
-    await act(async () => {
-      root.render(React.createElement(Provider, { store }, React.createElement(AttentionDeck, {
-        open: true, onClose: () => { closedCount += 1; }, range: '24h', onRangeChange: () => {}, scheduler, nowMs: NOW,
-      })));
-    });
+    await act(async () => { render(true); });
     await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
     await run({
       dom, store, scheduler, act, hits,
+      setOpen: async (open: boolean) => {
+        await act(async () => { render(open); });
+        await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
+      },
+      serve: (next: any[]) => { items = next; },
+      hold: () => { gate = new Promise<void>((r) => { openGate = r; }); },
+      release: () => { gate = null; openGate(); },
       text: () => dom.window.document.body.textContent || '',
       q: (sel: string) => dom.window.document.querySelector(sel),
       closed: () => closedCount,
@@ -351,6 +364,61 @@ test('deck: replying or commenting moves on to the next card', async () => {
     assert.match(text(), /Review b/, 'the next card is shown after the comment');
     assert.match(text(), /2 \/ 2/, 'the commented card stays in the deck');
   });
+});
+
+test('deck: reopening shows the cached cards at once, revalidates in the background, keeps the current card', async () => {
+  await withDeck([taskItem('a'), taskItem('b'), taskItem('c')], async ({ q, act, text, dom, hits, setOpen, serve, hold, release, store }) => {
+    // Look at card b, then close.
+    await act(async () => { dom.window.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true })); });
+    assert.match(text(), /Review b/);
+    await setOpen(false);
+    const fetchesBefore = hits.filter((h) => h.startsWith('GET /api/v1/attention?')).length;
+
+    // Server state changed while closed: a is gone, d and e are new and sort first.
+    serve([taskItem('d'), taskItem('e'), taskItem('b'), taskItem('c')]);
+    hold();
+    await setOpen(true);
+    assert.equal(hits.filter((h) => h.startsWith('GET /api/v1/attention?')).length, fetchesBefore + 1, 'opening forces exactly one refetch');
+    assert.equal(q('[data-debug-id="attention-deck-loading"]'), null, 'no loading screen: cached cards show');
+    assert.match(text(), /Review b/, 'the last card is still on screen');
+    assert.ok(q('[data-debug-id="attention-deck-checking"]'), 'a subtle checking hint while the refetch runs');
+
+    release();
+    await act(async () => { await new Promise((r) => setTimeout(r, 40)); });
+    assert.equal(q('[data-debug-id="attention-deck-checking"]'), null);
+    assert.match(text(), /Review b/, 'still on the same card after the merge');
+    assert.match(text(), /3 \/ 4/, 'b keeps its identity at its new position');
+    await act(async () => { dom.window.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true })); });
+    assert.match(text(), /Review e/, 'the new cards were merged in');
+    const { attentionApi } = await import('../src/ui/api/endpoints/attention.ts');
+    assert.equal(attentionApi.endpoints.getAttentionSummary.select({ since: '24h' })(store.getState()).data?.counts.total, 4, 'deck counts upserted into the bar summary cache');
+  });
+});
+
+test('deck: an action does not refetch the deck by itself (the hub hint does)', async () => {
+  await withDeck([taskItem('a'), taskItem('b')], async ({ act, dom, hits, scheduler }) => {
+    const before = hits.filter((h) => h.startsWith('GET /api/v1/attention')).length;
+    await act(async () => { dom.window.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'a', bubbles: true })); });
+    await act(async () => { await scheduler.flushAll(true); });
+    await act(async () => { await new Promise((r) => setTimeout(r, 40)); });
+    assert.ok(hits.includes('POST /api/v1/cards/crd_task_a/accept'));
+    assert.equal(hits.filter((h) => h.startsWith('GET /api/v1/attention')).length, before, 'no self-refetch after the action');
+  });
+});
+
+test('ws: a burst of attention_changed hints becomes one invalidation', async () => {
+  const { handleUserWsEvent, ATTENTION_REFETCH_COALESCE_MS } = await import('../src/ui/api/wsInvalidation.ts');
+  const actions: any[] = [];
+  const dispatch = (a: any) => { if (typeof a !== 'function') actions.push(a); return a; };
+  for (let i = 0; i < 4; i += 1) handleUserWsEvent(dispatch, { type: 'attention_changed', kinds: ['task'] });
+  const invalidations = () => actions.filter((a) => String(a?.type || '').endsWith('invalidateTags'));
+  assert.equal(invalidations().length, 0, 'nothing until the burst settles');
+  await new Promise((r) => setTimeout(r, ATTENTION_REFETCH_COALESCE_MS + 30));
+  assert.equal(invalidations().length, 1, 'one invalidation for the whole burst');
+  assert.deepEqual(invalidations()[0].payload, [{ type: 'Attention', id: 'ALL' }]);
+  handleUserWsEvent(dispatch, { type: 'attention_changed', kinds: ['message'] });
+  await new Promise((r) => setTimeout(r, ATTENTION_REFETCH_COALESCE_MS + 30));
+  assert.equal(invalidations().length, 2, 'a later hint gets its own invalidation');
 });
 
 test('status bar: attention pill is hidden without data and reads as one number', async () => {

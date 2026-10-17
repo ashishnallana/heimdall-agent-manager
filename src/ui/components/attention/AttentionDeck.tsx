@@ -1,14 +1,16 @@
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 import { useDispatch } from 'react-redux';
 import { Icon, type IconName } from '@ui';
 import { heimdallApi } from '../../api/heimdallApi';
 import {
   ATTENTION_RANGES,
+  attentionApi,
   useGetAttentionQuery,
   type AttentionItem,
   type AttentionMessageItem,
   type AttentionRange,
+  type AttentionResult,
   type AttentionTaskItem,
 } from '../../api/endpoints/attention';
 import {
@@ -27,6 +29,8 @@ import { buildRouteHash, navigateTo } from '../../utils/appLocation';
 import { AttentionCardBody } from './AttentionCardBody';
 import { AttentionComposer, type ComposerSubmit } from './AttentionComposer';
 import { DECK_TABS, clampIndex, defaultTab, stepIndex, swipeDelta, tabCounts, visibleItems, type DeckTab } from './attentionModel';
+
+const NO_ITEMS: AttentionItem[] = [];
 
 type Popover = null | 'snooze' | 'reviewer';
 type Composer = null | 'reply' | 'comment';
@@ -67,10 +71,22 @@ export function AttentionDeck({
   nowMs?: number;
 }) {
   const dispatch = useDispatch();
-  const query = useGetAttentionQuery({ since: range }, { skip: !open });
+  // Every opening revalidates in the background: the cards from last time stay
+  // on screen (lastData) while the forced refetch runs, then the response
+  // replaces them -- new cards slot in, stale ones drop out, and the card being
+  // looked at stays selected by identity. Nothing polls; while the deck is open
+  // the hub's attention_changed hint refetches this one query only.
+  const query = useGetAttentionQuery({ since: range }, { skip: !open, refetchOnMountOrArgChange: true });
+  const lastData = useRef<AttentionResult | undefined>(undefined);
+  if (query.data && query.data.since === range) lastData.current = query.data;
+  const data = lastData.current?.since === range ? lastData.current : undefined;
+  const openedAt = useRef(0);
+  if (!open) openedAt.current = 0;
+  else if (openedAt.current === 0) openedAt.current = Date.now();
+  const fresh = !!query.data && !query.isFetching && (query.fulfilledTimeStamp ?? 0) >= openedAt.current;
   const snap = useSyncExternalStore(scheduler.subscribe, scheduler.getSnapshot, scheduler.getSnapshot);
-  const items = query.data?.items ?? [];
-  const counts = query.data?.counts ?? { total: 0, older: 0, message: 0, task: 0 };
+  const items = data?.items ?? NO_ITEMS;
+  const counts = data?.counts ?? { total: 0, older: 0, message: 0, task: 0 };
   const perTab = tabCounts(counts, items, snap.hidden);
 
   const [tab, setTab] = useState<DeckTab>('message');
@@ -81,32 +97,59 @@ export function AttentionDeck({
   const [notice, setNotice] = useState('');
   const [dragX, setDragX] = useState(0);
   const drag = useRef<{ x: number; id: number } | null>(null);
-  const tabChosen = useRef(false);
+  // Whether this opening's tab came from the data (cached or fresh) or the user.
+  const tabChoice = useRef<'none' | 'cached' | 'fresh' | 'user'>('none');
   const now = nowMs ?? Date.now();
 
-  // Open on the first non-empty tab, once per opening.
+  // Reopening resumes where the user left off (same tab, same card). Only when
+  // that tab is empty -- on cached cards or once fresh ones arrive -- does the
+  // deck move to the first non-empty tab, unless the user picked a tab.
   useEffect(() => {
     if (!open) {
-      tabChosen.current = false;
+      tabChoice.current = 'none';
       setPopover(null);
       setComposer(null);
       return;
     }
-    if (!tabChosen.current && query.data) {
-      tabChosen.current = true;
-      setTab(defaultTab(perTab));
-      setIndex(0);
+    if (!data || tabChoice.current === 'user') return;
+    if (perTab[tab] === 0) {
+      const next = defaultTab(perTab);
+      if (next !== tab) {
+        setTab(next);
+        setIndex(0);
+      }
     }
-  }, [open, query.data]); // eslint-disable-line react-hooks/exhaustive-deps
+    tabChoice.current = fresh ? 'fresh' : 'cached';
+  }, [open, data, fresh]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Keep the summary cache in step with the deck's counts, so the bar pill
+  // stays right while its own query is paused and closing the deck needs no fetch.
+  useEffect(() => {
+    if (query.data && fresh) dispatch(attentionApi.util.upsertQueryData('getAttentionSummary', { since: range }, { since: range, counts: query.data.counts }) as any);
+  }, [query.data, fresh, range, dispatch]);
 
   // Forget locally-settled cards once the server stops returning them.
   useEffect(() => {
-    if (query.data) scheduler.prune(items.map((i) => i.card_id));
-  }, [query.data, scheduler]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (query.data && fresh) scheduler.prune(query.data.items.map((i) => i.card_id));
+  }, [query.data, fresh, scheduler]);
 
   const list = useMemo(() => visibleItems(items, tab, snap.hidden), [items, tab, snap.hidden]);
   const safeIndex = clampIndex(index, list.length);
   const current: AttentionItem | undefined = list[safeIndex];
+
+  // When the list itself changes (a refetch merged in, a card settled), stay on
+  // the card that was showing if it is still there; if it left, its neighbour
+  // takes its place. Navigation does not change the list, so it is unaffected.
+  const shownId = useRef<string | undefined>(undefined);
+  useLayoutEffect(() => {
+    const prev = shownId.current;
+    if (!prev) return;
+    const at = list.findIndex((i) => i.card_id === prev);
+    if (at >= 0 && at !== safeIndex) setIndex(at);
+  }, [list]); // eslint-disable-line react-hooks/exhaustive-deps
+  useLayoutEffect(() => {
+    shownId.current = current?.card_id;
+  });
 
   const resetCardUi = () => {
     setPopover(null);
@@ -121,9 +164,11 @@ export function AttentionDeck({
     resetCardUi();
   }, [list.length]);
 
+  // The deck never refetches itself after an action: the card is already hidden
+  // locally and the hub's attention_changed hint brings the one refetch. Only the
+  // other views' lists are refreshed here.
   const invalidate = useCallback(() => {
     dispatch(heimdallApi.util.invalidateTags([
-      { type: 'Attention', id: 'ALL' },
       { type: 'Cards', id: 'LIST' },
       { type: 'Task', id: 'LIST' },
       { type: 'Chain', id: 'LIST' },
@@ -276,9 +321,18 @@ export function AttentionDeck({
             <h2 className="text-[18px] font-semibold text-primary">What needs you</h2>
             <p className="text-[12px] text-muted">Questions from agents and tasks waiting on your review, across all chains.</p>
           </div>
-          <button type="button" data-debug-id="attention-deck-close" aria-label="Close" onClick={onClose} className="ml-auto rounded-full border border-subtle p-1.5 text-muted hover:text-primary">
-            <Icon name="close" size={14} />
-          </button>
+          <div className="ml-auto flex items-center gap-2">
+            {data && query.isError && !query.isFetching ? (
+              <button type="button" data-debug-id="attention-deck-refresh-error" className="text-[11px] text-danger underline" onClick={() => query.refetch()}>
+                Couldn't refresh · Retry
+              </button>
+            ) : data && !fresh ? (
+              <span data-debug-id="attention-deck-checking" aria-live="polite" className="text-[11px] text-faint">Checking…</span>
+            ) : null}
+            <button type="button" data-debug-id="attention-deck-close" aria-label="Close" onClick={onClose} className="rounded-full border border-subtle p-1.5 text-muted hover:text-primary">
+              <Icon name="close" size={14} />
+            </button>
+          </div>
         </header>
 
         <div className="flex flex-wrap items-center gap-2 px-4 py-3">
@@ -290,7 +344,7 @@ export function AttentionDeck({
                 type="button"
                 aria-selected={tab === t.id}
                 data-debug-id={`attention-deck-tab-${t.id}`}
-                onClick={() => { setTab(t.id); setIndex(0); resetCardUi(); }}
+                onClick={() => { tabChoice.current = 'user'; setTab(t.id); setIndex(0); resetCardUi(); }}
                 className={`rounded-full border px-3 py-1 text-[12px] ${tab === t.id ? 'border-strong bg-surface-raised text-primary' : 'border-subtle text-muted hover:text-primary'}`}
               >
                 {t.label}
@@ -315,9 +369,9 @@ export function AttentionDeck({
         </div>
 
         <div className="relative min-h-0 flex-1 px-4" onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerUp}>
-          {query.isLoading ? (
+          {!data && !query.isError ? (
             <p data-debug-id="attention-deck-loading" className="py-10 text-center text-[13px] text-muted">Loading…</p>
-          ) : query.isError ? (
+          ) : !data ? (
             <div data-debug-id="attention-deck-error" className="py-10 text-center text-[13px] text-danger">
               Could not load what needs you. <button type="button" className="underline" onClick={() => query.refetch()}>Retry</button>
             </div>
