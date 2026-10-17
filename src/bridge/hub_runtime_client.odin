@@ -521,6 +521,9 @@ bridge_hub_runtime_worker :: proc() {
 			// (heartbeats and command replies) on every reconnect. The shell_exited
 			// events it enqueues are drained by the loop started just below.
 			thread.run(bridge_shell_session_reconcile_now)
+			// REQ-BR-1: and periodically in between, so a lost exit is reported within
+			// one sweep interval instead of waiting for the next reconnect.
+			bridge_shell_session_sweep_ensure_started()
 			// REQ-REAP-STARTUP-1: reconcile surviving agent instances on pty-host
 			// against Hub's active instance list on reconnect to reap orphaned processes.
 			thread.run(bridge_agent_instance_reconcile_now)
@@ -3970,6 +3973,19 @@ Bridge_Shell_Exited_Event :: struct {
 	run_seq:       int    `json:"run_seq"`,
 }
 
+// Bridge_Shell_Exited_Event_No_Code is the same frame for an exit nobody observed a
+// status for (a run found gone by the sweep, REQ-BR-1). It has NO exit_code key, on
+// purpose: the hub decides exit_code_set by the key's PRESENCE, so sending
+// `"exit_code":0` would record a clean exit that never happened.
+Bridge_Shell_Exited_Event_No_Code :: struct {
+	type:          string `json:"type"`,
+	session_id:    string `json:"session_id"`,
+	exit_code_set: bool   `json:"exit_code_set"`,
+	status:        string `json:"status"`,
+	finished_at:   string `json:"finished_at"`,
+	run_seq:       int    `json:"run_seq"`,
+}
+
 Bridge_Shell_Error_Result :: struct {
 	type:        string     `json:"type"`,
 	session_id:  string     `json:"session_id"`,
@@ -4053,7 +4069,23 @@ Bridge_Shell_Signal_Command :: struct {
 // report whose run_seq is older than its row's, which is what stops an exit replayed
 // from the durable outbox from terminating a session that has since been restarted
 // and is genuinely alive.
+//
+// exit_code_set=false omits the exit_code key entirely (see
+// Bridge_Shell_Exited_Event_No_Code); exit_code is ignored then.
 bridge_shell_exited_event_json :: proc(session_id: string, exit_code: int, exit_code_set: bool, status: string, run_seq: int) -> string {
+	if !exit_code_set {
+		evt := Bridge_Shell_Exited_Event_No_Code{
+			type          = "shell_exited",
+			session_id    = session_id,
+			exit_code_set = false,
+			status        = status,
+			finished_at   = action_scheduler_format_rfc3339_utc(bridge_now_unix_ms()),
+			run_seq       = run_seq,
+		}
+		data, err := json.marshal(evt, allocator = context.allocator)
+		if err != nil do return ""
+		return string(data)
+	}
 	evt := Bridge_Shell_Exited_Event{
 		type          = "shell_exited",
 		session_id    = session_id,
@@ -4433,23 +4465,21 @@ bridge_hub_handle_shell_start :: proc(conn: ^ws.Connection, text: string) {
 	}
 	defer bridge_pty_host_spawn_request_delete(req)
 
-	pid, ok := bridge_pty_host_spawn(socket, req)
+	pid, ok, spawn_err := bridge_pty_host_spawn_detailed(socket, req)
+	defer delete(spawn_err)
 	if !ok {
-		// "spawn failed" is GENERIC — a missing binary, a resource limit, the daemon
-		// refusing, or EACCES on an existing-but-unenterable cwd like /root all land
-		// here. So the cwd is appended as STATE, never as a diagnosis: it is the one
-		// piece of context the reader cannot otherwise recover, and naming it as the
-		// CAUSE would be wrong most of the times this fires. With no cwd requested the
-		// message is unchanged.
-		// (Propagating pty-host's ACTUAL error instead of this string is REQ-SHELL-16's
-		// territory, not this task's.)
+		// The DAEMON'S OWN reason leads the message: "spawn failed (cwd: X)" alone read
+		// as a cwd problem when the real cause was the daemon out of file descriptors.
+		// The cwd is still appended as STATE, never as a diagnosis — it is the one piece
+		// of context the reader cannot otherwise recover.
+		msg: string
 		if cwd_resolved != "" {
-			msg := strings.concatenate({"spawn failed (cwd: ", cwd_resolved, ")"})
-			defer delete(msg)
-			send_error(conn, session_id, command_id, "shell_start_failed", msg)
+			msg = strings.concatenate({"spawn failed: ", spawn_err, " (cwd: ", cwd_resolved, ")"})
 		} else {
-			send_error(conn, session_id, command_id, "shell_start_failed", "spawn failed")
+			msg = strings.concatenate({"spawn failed: ", spawn_err})
 		}
+		defer delete(msg)
+		send_error(conn, session_id, command_id, "shell_start_failed", msg)
 		return
 	}
 
@@ -4623,6 +4653,11 @@ bridge_shell_kill_shell_is_alive :: proc(socket, shell_id: string) -> bool {
 // shell_exited notification that carries status="killed" to the hub.
 bridge_shell_kill_worker :: proc(data: rawptr) {
 	ctx := (^Bridge_Shell_Kill_Ctx)(data)
+	defer {
+		delete(ctx.session_id)
+		delete(ctx.shell_id)
+		free(ctx)
+	}
 	socket, ok := bridge_pty_host_ensure_daemon()
 	if ok {
 		// The signal results ARE checked now (REQ-SHELL-23). Both were `_ =`, so a kill
@@ -4633,6 +4668,11 @@ bridge_shell_kill_worker :: proc(data: rawptr) {
 		// that it is retrying rather than succeeding.
 		if !bridge_pty_host_signal(&Pty_Host_Client{socket = socket}, ctx.shell_id, 15) {
 			fmt.println("bridge shell_kill: SIGTERM was REFUSED by the pty-host daemon", ctx.shell_id)
+			// REQ-BR-2: a refusal usually means there is nothing left to kill — the
+			// daemon already reaped the process and its ChildExited never reached us.
+			// Logging alone left the session running on the hub forever; resolve it
+			// against the roster and report it if it is gone.
+			if bridge_shell_kill_refused_finalize(socket, ctx.session_id) do return
 		}
 		time.sleep(5 * time.Second)
 		if bridge_shell_kill_shell_is_alive(socket, ctx.shell_id) {
@@ -4644,9 +4684,18 @@ bridge_shell_kill_worker :: proc(data: rawptr) {
 		fmt.println("bridge shell_kill: pty-host daemon unreachable; kill not executed", ctx.shell_id)
 		blog_warn(.pty_host_unreachable, blog_sym(.stage, .exec))
 	}
-	delete(ctx.session_id)
-	delete(ctx.shell_id)
-	free(ctx)
+}
+
+// bridge_shell_kill_refused_finalize reads the roster and hands it to
+// bridge_shell_kill_resolve_refused (shell_exit_sweep.odin). Returns true when the
+// session was found gone and reported, so the caller has nothing left to escalate.
+bridge_shell_kill_refused_finalize :: proc(socket, session_id: string) -> bool {
+	reply, ok := bridge_pty_host_list(socket)
+	if !ok do return false
+	defer pty_host_reply_delete(reply)
+	data_dir := bridge_shell_data_dir()
+	defer delete(data_dir)
+	return bridge_shell_kill_resolve_refused(&bridge_shell_session_map, session_id, reply.agents, data_dir)
 }
 
 // bridge_hub_handle_shell_kill handles the "shell_kill" command.

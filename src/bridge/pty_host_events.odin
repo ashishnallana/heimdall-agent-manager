@@ -19,6 +19,7 @@ package main
 // not read as false-active. This keeps the daemon dumb (raw hash) and the policy
 // in the bridge, exactly as the design requires.
 
+import "core:fmt"
 import "core:strings"
 import "core:sync"
 import "core:sys/posix"
@@ -102,20 +103,68 @@ bridge_pty_host_activity_worker :: proc() {
 // subscribes to all currently-registered instances, and reads the event stream,
 // dispatching each event. On disconnect it backs off and reconnects; the daemon
 // (and its children) outlive a bridge reconnect.
+//
+// Every connection after the first is followed by an exit sweep (REQ-BR-3): any
+// ChildExited broadcast while we were not subscribed — the gap between losing one
+// connection and opening the next, or the whole life of a daemon we were not
+// watching — is otherwise lost for good.
 bridge_pty_host_events_worker :: proc() {
+	connected_before := false
 	for {
 		socket := pty_host_socket_path()
-		if !bridge_pty_host_events_run_once(socket) {
+		if bridge_pty_host_events_run_once(socket, sweep_after_subscribe = connected_before) {
+			connected_before = true
+		} else {
 			time.sleep(500 * time.Millisecond)
 		}
 		delete(socket)
 	}
 }
 
+// How often the read loop wakes with nothing to read, to check whether the daemon it
+// is attached to is still the one serving the socket.
+PTY_HOST_EVENTS_POLL_MS :: 1000
+// A connection that has delivered nothing at all for this long is presumed dead and
+// re-dialled. The daemon pushes Host_Heartbeat every 30s, so this is three missed beats.
+PTY_HOST_EVENTS_SILENCE_LIMIT :: 90 * time.Second
+
+// Pty_Host_Events_Daemon_Mark is what the event connection remembers about the daemon
+// it dialled: the bridge's start counter and the socket's identity at that moment.
+Pty_Host_Events_Daemon_Mark :: struct {
+	generation: u64,
+	identity:   Pty_Host_Daemon_Identity,
+	has_id:     bool,
+}
+
+bridge_pty_host_events_daemon_mark :: proc(socket: string) -> Pty_Host_Events_Daemon_Mark {
+	id, has_id := bridge_pty_host_daemon_identity(socket)
+	return {generation = sync.atomic_load(&pty_host_daemon_generation), identity = id, has_id = has_id}
+}
+
+// bridge_pty_host_events_should_redial is REQ-BR-3's decision, kept pure so it can be
+// tested without a daemon. Re-dial when:
+//   * the bridge started a daemon since we dialled (generation moved), or
+//   * the socket path now names a different socket (another daemon bound it), or
+//   * the connection has been silent past PTY_HOST_EVENTS_SILENCE_LIMIT.
+// The second rule is the one the incident needed: the replacement daemon unlinked and
+// re-bound the socket while the old daemon — and our connection to it — stayed alive
+// and kept sending heartbeats, so neither EOF nor silence ever came. A socket that is
+// momentarily missing is NOT a reason: that is a daemon mid-restart, and the dial would
+// just fail.
+bridge_pty_host_events_should_redial :: proc(at_dial, now: Pty_Host_Events_Daemon_Mark, silent_for: time.Duration) -> bool {
+	if now.generation != at_dial.generation do return true
+	if at_dial.has_id && now.has_id && now.identity != at_dial.identity do return true
+	return silent_for >= PTY_HOST_EVENTS_SILENCE_LIMIT
+}
+
 // bridge_pty_host_events_run_once opens one connection, attaches to every known
-// instance, then reads+dispatches until the connection drops. Returns false on a
-// failed dial so the caller backs off.
-bridge_pty_host_events_run_once :: proc(socket: string) -> bool {
+// instance, then reads+dispatches until the connection drops OR the daemon it is
+// attached to is no longer the one serving the socket. Returns false on a failed dial
+// so the caller backs off. sweep_after_subscribe runs an exit sweep once subscribed.
+bridge_pty_host_events_run_once :: proc(socket: string, sweep_after_subscribe := false) -> bool {
+	// Marked BEFORE the dial: a daemon replaced between the two then reads as a change
+	// and costs one spurious re-dial, rather than being adopted as "ours" unnoticed.
+	at_dial := bridge_pty_host_events_daemon_mark(socket)
 	fd, ok := pty_host_dial(socket)
 	if !ok do return false
 	defer posix.close(fd)
@@ -132,15 +181,36 @@ bridge_pty_host_events_run_once :: proc(socket: string) -> bool {
 		defer delete(frame)
 		if !pty_host_send_all(fd, frame) do return true
 	}
+	// Subscribed: from here on no exit is missed, so sweeping now catches every exit
+	// that happened while we were not listening.
+	if sweep_after_subscribe do thread.run(bridge_shell_session_sweep_now)
 
+	last_frame := time.tick_now()
+	last_check := last_frame
 	for {
-		payload, pok := pty_host_read_frame(fd)
-		if !pok do return true // clean disconnect; caller will reconnect
-		reply, dok := pty_host_decode_reply(payload)
-		delete(payload)
-		if !dok do continue
-		bridge_pty_host_dispatch_event(socket, reply)
-		pty_host_reply_delete(reply)
+		pfd := posix.pollfd{fd = fd, events = {.IN}}
+		n := posix.poll(&pfd, 1, PTY_HOST_EVENTS_POLL_MS)
+		if n < 0 && posix.errno() != .EINTR do return true
+		if n > 0 {
+			// Readable, or hung up/errored — the read then fails and we reconnect.
+			payload, pok := pty_host_read_frame(fd)
+			if !pok do return true // clean disconnect; caller will reconnect
+			last_frame = time.tick_now()
+			reply, dok := pty_host_decode_reply(payload)
+			delete(payload)
+			if dok {
+				bridge_pty_host_dispatch_event(socket, reply)
+				pty_host_reply_delete(reply)
+			}
+		}
+		// At most once per poll interval, however busy the stream is.
+		if time.tick_since(last_check) < PTY_HOST_EVENTS_POLL_MS * time.Millisecond do continue
+		last_check = time.tick_now()
+		now := bridge_pty_host_events_daemon_mark(socket)
+		if bridge_pty_host_events_should_redial(at_dial, now, time.tick_since(last_frame)) {
+			fmt.println("bridge pty-host events: the daemon serving", socket, "changed (or went silent); re-dialling")
+			return true
+		}
 	}
 }
 

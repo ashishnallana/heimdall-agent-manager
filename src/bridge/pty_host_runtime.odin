@@ -66,6 +66,89 @@ pty_host_daemon_started: bool
 pty_host_daemon_socket:  string
 pty_host_daemon_lock:    sync.Mutex
 
+// REQ-BR-4: the daemon process THIS bridge started, kept so it can be reaped and, if
+// it is still alive when its socket stops answering, retired before a replacement is
+// started. Dropping the handle is how a wedged daemon (listener dead, process alive)
+// came to run alongside its replacement: two daemons, the old one still holding the
+// event connection and every run it had spawned. Guarded by pty_host_daemon_lock.
+pty_host_daemon_process:     os.Process
+pty_host_daemon_has_process: bool
+
+// How long a retiring daemon gets after SIGTERM before SIGKILL, and after SIGKILL
+// before we give up waiting on it.
+PTY_HOST_DAEMON_TERM_GRACE :: 3 * time.Second
+PTY_HOST_DAEMON_KILL_GRACE :: 2 * time.Second
+
+// REQ-BR-3: bumped every time ensure_daemon starts a daemon process. The event watcher
+// records it when it dials and re-dials when it moves, so it can never stay attached to
+// a daemon the bridge has replaced. Read/written atomically.
+pty_host_daemon_generation: u64
+
+// Pty_Host_Daemon_Identity identifies the daemon currently BOUND to the socket path,
+// whoever started it: a daemon binds by unlink + bind, which creates a new socket
+// inode with a fresh ctime. Comparing inode AND ctime (not inode alone) matters because
+// a filesystem may hand the unlinked inode number straight back to the new socket.
+Pty_Host_Daemon_Identity :: struct {
+	dev:        u64,
+	ino:        u64,
+	ctime_sec:  i64,
+	ctime_nsec: i64,
+}
+
+// bridge_pty_host_daemon_identity stats the socket path. ok=false when nothing is there.
+bridge_pty_host_daemon_identity :: proc(socket: string) -> (Pty_Host_Daemon_Identity, bool) {
+	path := strings.trim_prefix(socket, "unix:")
+	cpath := strings.clone_to_cstring(path)
+	defer delete(cpath)
+	st: posix.stat_t
+	if posix.stat(cpath, &st) != .OK do return {}, false
+	return Pty_Host_Daemon_Identity{
+		dev        = u64(st.st_dev),
+		ino        = u64(st.st_ino),
+		ctime_sec  = i64(st.st_ctim.tv_sec),
+		ctime_nsec = i64(st.st_ctim.tv_nsec),
+	}, true
+}
+
+// bridge_pty_host_daemon_process_running reports whether the daemon process this
+// bridge started is still running, without blocking. An exited one is reaped (it is
+// our child; left alone it would stay a zombie) and forgotten, as is one we cannot
+// wait on at all.
+bridge_pty_host_daemon_process_running :: proc(p: ^os.Process, has: ^bool) -> bool {
+	if !has^ do return false
+	_, err := os.process_wait(p^, 0)
+	if err == os.General_Error.Timeout do return true
+	// nil: it exited and was reaped just now. Anything else (ECHILD): not ours to wait
+	// on. Either way process_wait has already closed the handle — closing it again
+	// could close an unrelated fd that reused the number.
+	has^ = false
+	return false
+}
+
+// bridge_pty_host_retire_daemon_process makes sure the daemon process this bridge
+// started is gone before another is started (REQ-BR-4). An exited one is just reaped.
+// A live one is a daemon whose socket stopped answering — never leave it running beside
+// a replacement: SIGTERM, wait, SIGKILL, wait. Returns false only if it survived both,
+// in which case the caller must not start another. Caller holds pty_host_daemon_lock.
+bridge_pty_host_retire_daemon_process :: proc(p: ^os.Process, has: ^bool, term_grace := PTY_HOST_DAEMON_TERM_GRACE, kill_grace := PTY_HOST_DAEMON_KILL_GRACE) -> bool {
+	if !bridge_pty_host_daemon_process_running(p, has) do return true
+	fmt.eprintln("bridge pty-host: the daemon this bridge started (pid", p.pid, ") is ALIVE but not answering on its socket; terminating it before starting a replacement so two daemons never run at once")
+	blog_error(.pty_host_unreachable, blog_sym(.stage, .ready))
+	_ = os.process_terminate(p^)
+	if _, err := os.process_wait(p^, term_grace); err == nil {
+		has^ = false
+		return true
+	}
+	fmt.eprintln("bridge pty-host: daemon pid", p.pid, "ignored SIGTERM; sending SIGKILL")
+	_ = os.process_kill(p^)
+	if _, err := os.process_wait(p^, kill_grace); err == nil {
+		has^ = false
+		return true
+	}
+	fmt.eprintln("bridge pty-host: daemon pid", p.pid, "survived SIGKILL; NOT starting a replacement")
+	return false
+}
+
 // The delivery path receives only an instance id, so retain the provider chosen
 // while assembling that instance's spawn request. This store uses the process
 // heap explicitly: both strings outlive the request allocator (which is a
@@ -121,10 +204,14 @@ bridge_pty_host_instance_wants_bracketed_paste :: proc(instance: string) -> bool
 
 // bridge_pty_host_bin resolves the ham-pty-host binary: the HEIMDALL_HAM_PTY_HOST_BIN
 // env override (set by the flake app to the matching build) wins, else PATH.
+// Always an owned allocation, so the caller can free it on every path (the env value
+// used to leak on each daemon start, and the literal fallback could not be freed).
 bridge_pty_host_bin :: proc() -> string {
-	if v := os.get_env_alloc("HEIMDALL_HAM_PTY_HOST_BIN", context.allocator); strings.trim_space(v) != "" do return v
+	v := os.get_env_alloc("HEIMDALL_HAM_PTY_HOST_BIN", context.allocator)
+	if strings.trim_space(v) != "" do return v
+	delete(v)
 	if found := bridge_runtime_find_on_path("ham-pty-host"); found != "" do return found
-	return "ham-pty-host"
+	return strings.clone("ham-pty-host")
 }
 
 // bridge_pty_host_ensure_daemon starts the daemon once (idempotent) and returns
@@ -161,6 +248,24 @@ bridge_pty_host_ensure_daemon :: proc() -> (string, bool) {
 		return socket, true
 	}
 
+	// REQ-BR-4: never start a second daemon while the one we started is still alive.
+	// Retiring it takes down every run it hosts, so first make sure it is really not
+	// answering rather than momentarily busy: a few more pings over ~1.5s.
+	if bridge_pty_host_daemon_process_running(&pty_host_daemon_process, &pty_host_daemon_has_process) {
+		for _ in 0..<3 {
+			time.sleep(500 * time.Millisecond)
+			if bridge_pty_host_ping(socket) {
+				pty_host_daemon_started = true
+				bridge_dependency_breaker_record(breaker_key, true)
+				return socket, true
+			}
+		}
+	}
+	if !bridge_pty_host_retire_daemon_process(&pty_host_daemon_process, &pty_host_daemon_has_process) {
+		bridge_dependency_breaker_record(breaker_key, false)
+		return "", false
+	}
+
 	// Ensure the socket's parent dir exists, then spawn the daemon detached.
 	if !bridge_unix_socket_prepare_parent(socket) {
 		fmt.eprintln("bridge pty-host: cannot prepare socket directory", socket)
@@ -168,6 +273,7 @@ bridge_pty_host_ensure_daemon :: proc() -> (string, bool) {
 		return "", false
 	}
 	bin := bridge_pty_host_bin()
+	defer delete(bin)
 	cmd := []string{bin, "daemon", "--socket", socket}
 	// env = nil => the daemon inherits the bridge's environment. The per-agent
 	// HEIMDALL_* env is delivered in each Spawn request, not the daemon's env.
@@ -178,8 +284,11 @@ bridge_pty_host_ensure_daemon :: proc() -> (string, bool) {
 		bridge_dependency_breaker_record(breaker_key, false)
 		return "", false
 	}
-	// Detach — the daemon outlives this call and is reaped by the OS on exit.
-	_ = proc_handle
+	// The daemon outlives this call, but the handle is KEPT (REQ-BR-4): it is how the
+	// next ensure_daemon reaps it once it exits, and retires it if it wedges.
+	pty_host_daemon_process = proc_handle
+	pty_host_daemon_has_process = true
+	sync.atomic_add(&pty_host_daemon_generation, 1)
 
 	// Poll until the daemon accepts + answers Ping.
 	deadline := time.time_add(time.now(), 5 * time.Second)
@@ -283,21 +392,30 @@ bridge_pty_host_spawn_request_delete :: proc(req: Pty_Host_Spawn_Request) {
 // returns an Error; the caller should use bridge_pty_host_restart for a known
 // relaunch. Returns (pid, true) on Spawned.
 bridge_pty_host_spawn :: proc(socket: string, req: Pty_Host_Spawn_Request) -> (i32, bool) {
+	pid, ok, err_msg := bridge_pty_host_spawn_detailed(socket, req)
+	delete(err_msg)
+	return pid, ok
+}
+
+// bridge_pty_host_spawn_detailed is bridge_pty_host_spawn that also says WHY a spawn
+// failed: the daemon's own Error message when it refused, or a fixed description when
+// it never answered. err_msg is "" on success; the caller owns it either way.
+bridge_pty_host_spawn_detailed :: proc(socket: string, req: Pty_Host_Spawn_Request) -> (pid: i32, ok: bool, err_msg: string) {
 	frame := pty_host_encode_spawn(req)
 	defer delete(frame)
 	for attempt in 1..=PTY_HOST_SPAWN_MAX_ATTEMPTS {
-		reply, ok := pty_host_request(socket, frame)
-		if ok {
+		reply, rok := pty_host_request(socket, frame)
+		if rok {
 			defer pty_host_reply_delete(reply)
-			if reply.kind == .Spawned do return reply.pid, true
+			if reply.kind == .Spawned do return reply.pid, true, ""
 			if reply.kind == .Error {
 				fmt.eprintln("bridge pty-host spawn error:", reply.message)
-				return 0, false
+				return 0, false, strings.clone(reply.message)
 			}
 		}
 		if attempt < PTY_HOST_SPAWN_MAX_ATTEMPTS do bridge_pty_host_backoff(attempt)
 	}
-	return 0, false
+	return 0, false, strings.clone("the pty-host daemon did not answer the spawn request")
 }
 
 // bridge_pty_host_restart re-spawns an instance from its remembered spec. Maps
@@ -737,34 +855,18 @@ bridge_pty_host_apply_child_exited :: proc(instance: string, code: i32) {
 	bridge_runtime_set_status(instance, "stopped", "idle")
 
 	// Emit shell_exited WS event for any T4-registered shell session matching this daemon shell_id.
-	// An OWNED snapshot: session_id is read repeatedly below, after the map lock is
-	// released and after this path has itself mutated the entry — which under the old
-	// by-value getter meant reading a pointer into the entry it was updating.
+	// An OWNED snapshot: session_id is read after the map lock is released and after
+	// the finalize below has mutated the entry.
+	//
+	// The finalize is shared with the exit safety nets (shell_exit_sweep.odin): the
+	// periodic sweep and a refused kill report through the very same path, and its
+	// exit claim makes a late or duplicate ChildExited for an already-reported run a
+	// no-op instead of a second shell_exited.
 	if sess, ok := bridge_shell_session_snapshot_by_shell_id(&bridge_shell_session_map, instance); ok {
 		defer bridge_shell_session_snapshot_destroy(&bridge_shell_session_map, sess)
-		final_status := Bridge_Shell_Session_Status.Exited
-		status_str := "exited"
-		if sess.status == .Killed {
-			final_status = .Killed
-			status_str = "killed"
-		}
-		bridge_shell_session_update_status(&bridge_shell_session_map, sess.session_id, final_status, int(code), true)
-		data_dir := bridge_expand_home(bridge_config.data_dir)
-		if strings.trim_space(data_dir) == "" do data_dir = bridge_expand_home("~/.local/share/heimdall")
-		if updated, has := bridge_shell_session_snapshot(&bridge_shell_session_map, sess.session_id); has {
-			bridge_shell_session_save_spec(data_dir, updated)
-			bridge_shell_session_snapshot_destroy(&bridge_shell_session_map, updated)
-		}
-		bridge_shell_session_delete_spec(data_dir, sess.session_id)
-		// REQ-SHELL-2 (W3): ONE exit event, TWO independent consumers. This releases
-		// a blocked FOREGROUND caller waiting on the session; the enqueue below is
-		// the hub notification path, which is unchanged and must never be starved or
-		// replaced by the local waiter. A run nobody is waiting on takes the signal
-		// as a no-op and behaves exactly as it did before waiters existed.
-		bridge_shell_wait_signal_exit(sess.session_id, final_status, int(code), true)
-		event := bridge_shell_exited_event_json(sess.session_id, int(code), true, status_str, sess.run_seq)
-		bridge_shell_exited_enqueue(event)
-		delete(event)
+		data_dir := bridge_shell_data_dir()
+		defer delete(data_dir)
+		_ = bridge_shell_session_finalize_exit(&bridge_shell_session_map, sess.session_id, int(code), true, data_dir)
 	}
 }
 

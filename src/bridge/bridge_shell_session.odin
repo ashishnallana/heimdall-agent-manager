@@ -105,6 +105,13 @@ Bridge_Shell_Session :: struct {
 	// implementation-only (not in spec JSON):
 	started_unix_ms:   i64,
 	finished_unix_ms:  i64,
+	// exit_reported — this run's exit has been handed to the hub (shell_exited
+	// enqueued) by bridge_shell_session_finalize_exit. It is the claim that makes the
+	// ChildExited event, the periodic sweep and the refused-kill path safe to race: the
+	// first one to claim reports, the others no-op, so the hub never sees two exits for
+	// one run. Cleared whenever the session goes back to a live status (a restart), so
+	// the next run's exit is reported too.
+	exit_reported:     bool,
 }
 
 // ---- session map ---------------------------------------------------------
@@ -195,6 +202,7 @@ Bridge_Shell_Session_Scalars :: struct {
 	background:       bool,
 	pty_host:         bool,
 	pty_host_provenance_known: bool,
+	exit_reported:    bool,
 	started_unix_ms:  i64,
 	finished_unix_ms: i64,
 }
@@ -358,6 +366,7 @@ bridge_shell_session_scalars :: proc(m: ^Bridge_Shell_Session_Map, session_id: s
 		background       = s.background,
 		pty_host         = s.pty_host,
 		pty_host_provenance_known = s.pty_host_provenance_known,
+		exit_reported    = s.exit_reported,
 		started_unix_ms  = s.started_unix_ms,
 		finished_unix_ms = s.finished_unix_ms,
 	}, true
@@ -432,6 +441,9 @@ bridge_shell_session_update_status :: proc(m: ^Bridge_Shell_Session_Map, session
 		s.status = status
 		s.exit_code = exit_code
 		s.exit_code_set = exit_code_set
+		// A session put back into a live status is a NEW run (shell_restart), whose
+		// exit has not been reported yet.
+		if !bridge_shell_session_status_is_terminal(status) do s.exit_reported = false
 	}
 }
 
@@ -997,6 +1009,26 @@ _bridge_shell_reconcile_running: bool
 @(private = "file")
 _bridge_shell_reconcile_mu: sync.Mutex
 
+// bridge_shell_reconcile_try_begin / _end are the single-flight gate shared by the
+// reconnect reconcile and the periodic exit sweep (shell_exit_sweep.odin). They act on
+// the same sessions, and the reconcile's dead-spec path registers a fresh terminal
+// record without the exit claim, so letting the two overlap could report one exit
+// twice. A pass that finds the gate taken is a no-op; the next tick or reconnect picks
+// up whatever the running pass did not.
+bridge_shell_reconcile_try_begin :: proc() -> bool {
+	sync.mutex_lock(&_bridge_shell_reconcile_mu)
+	defer sync.mutex_unlock(&_bridge_shell_reconcile_mu)
+	if _bridge_shell_reconcile_running do return false
+	_bridge_shell_reconcile_running = true
+	return true
+}
+
+bridge_shell_reconcile_end :: proc() {
+	sync.mutex_lock(&_bridge_shell_reconcile_mu)
+	defer sync.mutex_unlock(&_bridge_shell_reconcile_mu)
+	_bridge_shell_reconcile_running = false
+}
+
 // bridge_shell_session_reconcile_now resolves the data dir and the live pty-host
 // agent list, then runs a reconcile pass. Intended to be launched on a background
 // thread from the hub-runtime-ready path (REQ-RECON-1).
@@ -1010,18 +1042,8 @@ _bridge_shell_reconcile_mu: sync.Mutex
 // daemon list we cannot distinguish a live session from a dead one, and guessing
 // would mark healthy sessions dead.
 bridge_shell_session_reconcile_now :: proc() {
-	sync.mutex_lock(&_bridge_shell_reconcile_mu)
-	if _bridge_shell_reconcile_running {
-		sync.mutex_unlock(&_bridge_shell_reconcile_mu)
-		return
-	}
-	_bridge_shell_reconcile_running = true
-	sync.mutex_unlock(&_bridge_shell_reconcile_mu)
-	defer {
-		sync.mutex_lock(&_bridge_shell_reconcile_mu)
-		_bridge_shell_reconcile_running = false
-		sync.mutex_unlock(&_bridge_shell_reconcile_mu)
-	}
+	if !bridge_shell_reconcile_try_begin() do return
+	defer bridge_shell_reconcile_end()
 
 	// bridge_expand_home allocates only when the path starts with "~/", so free
 	// it only when it actually handed back a different allocation. This runs on
@@ -1070,6 +1092,14 @@ bridge_shell_session_reconcile_now :: proc() {
 	reply, list_ok := bridge_pty_host_list(socket)
 	if !list_ok do return
 	defer pty_host_reply_delete(reply)
+
+	// REQ-BR-1: finalize the IN-MEMORY sessions whose process is gone first, through
+	// the ChildExited path, so a run the daemon reports exited is reported with its
+	// real exit code. Done before the spec pass below, which would otherwise find the
+	// same session's spec, see it dead in the roster and report it "failed" with a
+	// made-up code 1. The sweep deletes the spec of every session it finalizes, so the
+	// spec pass never sees them.
+	bridge_shell_session_sweep(&bridge_shell_session_map, reply.agents, data_dir)
 
 	bridge_shell_session_reconcile(&bridge_shell_session_map, reply.agents, data_dir)
 

@@ -12,6 +12,7 @@ import "core:mem"
 import "core:net"
 import "core:testing"
 import "core:thread"
+import "core:time"
 import ws "odin_test:lib/ws"
 
 // BR-2 runtime-layer tests: the flag gate, env-pair conversion, and spawn-request
@@ -1361,4 +1362,167 @@ pane_decrypts_real_browser_golden_input :: proc(t: ^testing.T) {
 	defer if ok do delete(plain)
 	testing.expect(t, ok)
 	testing.expect_value(t, plain, "ls -la\n")
+}
+
+// ---- REQ-BR-3: the event watcher follows a replaced daemon --------------------
+
+// The pure decision. The incident's case is the identity row: the replacement daemon
+// unlinked and re-bound the socket while the old daemon — and our connection to it —
+// stayed alive and kept heartbeating, so there was neither EOF nor silence.
+@(test)
+bridge_br3_events_redial_decision :: proc(t: ^testing.T) {
+	base := Pty_Host_Events_Daemon_Mark{generation = 4, identity = {dev = 1, ino = 100, ctime_sec = 10, ctime_nsec = 5}, has_id = true}
+
+	testing.expect(t, !bridge_pty_host_events_should_redial(base, base, 0), "same daemon, fresh traffic: stay")
+	testing.expect(t, !bridge_pty_host_events_should_redial(base, base, 89 * time.Second), "under the silence limit: stay")
+
+	started := base
+	started.generation = 5
+	testing.expect(t, bridge_pty_host_events_should_redial(base, started, 0), "the bridge started a daemon: re-dial")
+
+	rebound := base
+	rebound.identity.ino = 101
+	testing.expect(t, bridge_pty_host_events_should_redial(base, rebound, 0), "a different socket inode: re-dial")
+	reused_ino := base
+	reused_ino.identity.ctime_nsec = 6
+	testing.expect(t, bridge_pty_host_events_should_redial(base, reused_ino, 0), "same inode number, new socket: re-dial")
+
+	missing := base
+	missing.has_id = false
+	missing.identity = {}
+	testing.expect(t, !bridge_pty_host_events_should_redial(base, missing, 0), "socket momentarily absent: a dial would fail, stay")
+
+	testing.expect(t, bridge_pty_host_events_should_redial(base, base, 90 * time.Second), "silent for three heartbeats: re-dial")
+}
+
+@(private = "file")
+br3_listen :: proc(path: string) -> posix.FD {
+	fd := posix.socket(.UNIX, .STREAM)
+	if fd < 0 do return -1
+	addr: posix.sockaddr_un
+	addr.sun_family = .UNIX
+	for i in 0..<len(path) do addr.sun_path[i] = c.char(path[i])
+	if posix.bind(fd, (^posix.sockaddr)(&addr), posix.socklen_t(size_of(addr))) != .OK || posix.listen(fd, 4) != .OK {
+		posix.close(fd)
+		return -1
+	}
+	return fd
+}
+
+@(private = "file")
+br3_run_once_thread :: proc(th: ^thread.Thread) {
+	path := (^string)(th.data)^
+	_ = bridge_pty_host_events_run_once(path)
+}
+
+// End to end against real sockets: run_once dials daemon A; then "daemon B" unlinks
+// the path and binds a new socket there while A's connection stays open and silent —
+// exactly the split brain. run_once must notice and return so the worker re-dials (to
+// B). Before REQ-BR-3 it re-dialled only on EOF and sat on A forever.
+@(test)
+bridge_br3_events_worker_redials_when_the_socket_is_rebound :: proc(t: ^testing.T) {
+	path := fmt.aprintf("/tmp/ham-br3-%d.sock", os.get_pid())
+	defer delete(path)
+	cpath := strings.clone_to_cstring(path)
+	defer delete(cpath)
+	_ = posix.unlink(cpath)
+	defer posix.unlink(cpath)
+
+	a := br3_listen(path)
+	testing.expect(t, a >= 0, "listener A")
+	if a < 0 do return
+	defer posix.close(a)
+
+	th := thread.create(br3_run_once_thread)
+	th.data = &path
+	thread.start(th)
+	conn_a := posix.accept(a, nil, nil)
+	testing.expect(t, conn_a >= 0, "run_once dialled daemon A")
+
+	// Let it settle into its read loop on A, then replace the daemon.
+	time.sleep(300 * time.Millisecond)
+	testing.expect(t, !thread.is_done(th), "still attached to A before the replacement")
+	_ = posix.unlink(cpath)
+	b := br3_listen(path)
+	testing.expect(t, b >= 0, "listener B bound on the same path")
+	defer if b >= 0 do posix.close(b)
+
+	deadline := time.tick_now()
+	for !thread.is_done(th) && time.tick_since(deadline) < 5 * time.Second do time.sleep(50 * time.Millisecond)
+	testing.expect(t, thread.is_done(th), "run_once returned (to re-dial) although A's connection is still open")
+
+	// Cleanup: closing A's end unblocks a run_once that did NOT notice (the pre-fix
+	// behaviour), so the thread is always joinable.
+	if conn_a >= 0 do posix.close(conn_a)
+	thread.join(th)
+	thread.destroy(th)
+}
+
+// ---- REQ-BR-4: never two daemons ----------------------------------------------
+
+// ensure_daemon is asked for a daemon while the one THIS bridge started is still
+// alive but not answering on its socket (the wedged-listener case). It must retire that
+// process before starting a replacement. A `sleep` stands in for the wedged daemon and
+// a script that just sleeps for the replacement; nothing listens on the socket, so the
+// replacement never becomes ready — ensure_daemon fails, which is fine: what is asserted
+// is the process count.
+@(test)
+bridge_br4_ensure_daemon_retires_a_live_prior_daemon_first :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+
+	saved_socket := pty_host_daemon_socket
+	saved_started := pty_host_daemon_started
+	saved_process := pty_host_daemon_process
+	saved_has := pty_host_daemon_has_process
+	defer {
+		pty_host_daemon_socket = saved_socket
+		pty_host_daemon_started = saved_started
+		pty_host_daemon_process = saved_process
+		pty_host_daemon_has_process = saved_has
+	}
+
+	sock := fmt.aprintf("/tmp/ham-br4-%d.sock", os.get_pid())
+	defer delete(sock)
+	pty_host_daemon_socket = sock
+	pty_host_daemon_started = true
+
+	script := fmt.aprintf("/tmp/ham-br4-fake-daemon-%d.sh", os.get_pid())
+	defer delete(script)
+	_ = os.write_entire_file(script, transmute([]byte)string("#!/bin/sh\nexec sleep 600\n"))
+	defer os.remove(script)
+	cscript := strings.clone_to_cstring(script)
+	defer delete(cscript)
+	_ = posix.chmod(cscript, {.IRUSR, .IWUSR, .IXUSR})
+	saved_bin := os.get_env_alloc("HEIMDALL_HAM_PTY_HOST_BIN", context.allocator)
+	defer delete(saved_bin)
+	_ = os.set_env("HEIMDALL_HAM_PTY_HOST_BIN", script)
+	defer { if saved_bin != "" do _ = os.set_env("HEIMDALL_HAM_PTY_HOST_BIN", saved_bin); else do _ = os.unset_env("HEIMDALL_HAM_PTY_HOST_BIN") }
+
+	prior, err := os.process_start(os.Process_Desc{command = []string{"sleep", "600"}})
+	testing.expect(t, err == nil, "fake prior daemon started")
+	if err != nil do return
+	pty_host_daemon_process = prior
+	pty_host_daemon_has_process = true
+
+	_, ok := bridge_pty_host_ensure_daemon()
+	testing.expect(t, !ok, "nothing answers on the socket, so no daemon is ready")
+
+	// kill(pid, 0) rather than process_wait: a retired daemon's handle was already
+	// closed by the wait that reaped it, and waiting on it again would close that fd
+	// number a second time.
+	prior_gone := posix.kill(posix.pid_t(prior.pid), posix.Signal(0)) != .OK && posix.errno() == .ESRCH
+	testing.expect(t, prior_gone, "the live prior daemon was retired (and reaped) before a replacement was started")
+	if !prior_gone {
+		_ = os.process_kill(prior)
+		_, _ = os.process_wait(prior)
+	}
+
+	testing.expect(t, pty_host_daemon_has_process, "the replacement is tracked")
+	if pty_host_daemon_has_process {
+		testing.expect(t, pty_host_daemon_process.pid != prior.pid, "and it is a different process")
+		_ = os.process_kill(pty_host_daemon_process)
+		_, _ = os.process_wait(pty_host_daemon_process)
+		pty_host_daemon_has_process = false
+	}
 }

@@ -16,6 +16,8 @@ package main
 // logic lives; the arming sequence itself is unchanged code, extracted verbatim into
 // bridge_shell_kill_arm.
 
+import "core:fmt"
+import "core:os"
 import "core:strings"
 import "core:sync"
 import "core:testing"
@@ -375,4 +377,66 @@ bridge_shell23_resolve_is_one_shot :: proc(t: ^testing.T) {
 	testing.expect_value(t, second_armed, 0)
 	testing.expect_value(t, second_discarded, 0)
 	testing.expect_value(t, len(arm_rec.calls), 1)
+}
+
+// --- REQ-BR-2: a REFUSED kill of a run that is already gone ---------------------
+
+// The daemon refuses to signal a pid it has already reaped. That refusal used to be
+// only logged: the session stayed .Killed-but-unreported in the bridge and "running" on
+// the hub, with a Kill button that could never work. The refusal is now resolved
+// against the roster — the state bridge_shell_kill_arm leaves (.Killed, exit -1, no
+// code) plus a roster that says the run is gone must end in a "killed" shell_exited.
+@(test)
+bridge_br2_refused_kill_of_a_gone_run_is_finalized_and_reported :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	bridge_shell_test_reset()
+	defer bridge_shell_test_reset()
+	saved := bridge_config.data_dir
+	defer { bridge_config.data_dir = saved }
+	dir := fmt.aprintf("/tmp/ham-br2-refused-%d", os.get_pid())
+	defer delete(dir)
+	bridge_config.data_dir = dir
+	exit_sweep_queue_init()
+
+	// (a) the daemon still lists it, exited.
+	exited_sid := "sh_br2_exited"
+	a := exit_sweep_session(exited_sid, .Killed, 4_100_001, -1, false) // as kill_arm leaves it
+	bridge_shell_session_register(&bridge_shell_session_map, &a)
+	// (b) the daemon has forgotten it and its pid is gone.
+	lost_sid := "sh_br2_lost"
+	b := exit_sweep_session(lost_sid, .Killed, 4_100_002, -1, false)
+	bridge_shell_session_register(&bridge_shell_session_map, &b)
+	// (c) control: the daemon still reports it ALIVE — the refusal was something else,
+	// and the kill must stay in flight (nothing reported, escalation proceeds).
+	alive_sid := "sh_br2_alive"
+	c := exit_sweep_session(alive_sid, .Killed, 4_100_003, -1, false)
+	bridge_shell_session_register(&bridge_shell_session_map, &c)
+
+	roster := []Pty_Host_Agent_Info{
+		{instance_id = exited_sid, pid = 4_100_001, alive = false, has_exit_code = true, exit_code = 0},
+		{instance_id = alive_sid, pid = 4_100_003, alive = true},
+	}
+
+	testing.expect(t, bridge_shell_kill_resolve_refused(&bridge_shell_session_map, exited_sid, roster, dir, exit_sweep_pid_dead), "exited-in-roster run is finalized")
+	testing.expect(t, bridge_shell_kill_resolve_refused(&bridge_shell_session_map, lost_sid, roster, dir, exit_sweep_pid_dead), "unknown run with a dead pid is finalized")
+	testing.expect(t, !bridge_shell_kill_resolve_refused(&bridge_shell_session_map, alive_sid, roster, dir, exit_sweep_pid_dead), "a run the daemon reports alive is left to the escalation")
+
+	for sid in ([]string{exited_sid, lost_sid}) {
+		sc, _ := bridge_shell_session_scalars(&bridge_shell_session_map, sid)
+		testing.expectf(t, sc.status == .Killed && sc.exit_reported, "%s: still Killed, exit now reported", sid)
+		events := exit_sweep_take_events(sid)
+		testing.expectf(t, len(events) == 1, "%s: exactly one shell_exited, got %d", sid, len(events))
+		if len(events) == 1 do testing.expectf(t, strings.contains(events[0], `"status":"killed"`), "%s: reported as killed: %s", sid, events[0])
+		exit_sweep_events_delete(events)
+	}
+	none := exit_sweep_take_events(alive_sid)
+	testing.expect_value(t, len(none), 0)
+	exit_sweep_events_delete(none)
+
+	// A redelivered refusal (or the late ChildExited) reports nothing further.
+	testing.expect(t, !bridge_shell_kill_resolve_refused(&bridge_shell_session_map, exited_sid, roster, dir, exit_sweep_pid_dead), "second resolution is a no-op")
+	again := exit_sweep_take_events(exited_sid)
+	testing.expect_value(t, len(again), 0)
+	exit_sweep_events_delete(again)
 }
