@@ -52,6 +52,8 @@ PTY_HOST_T_SHUTTING_DOWN :: 0xAC
 PTY_HOST_T_HOST_HEARTBEAT :: 0xAD
 PTY_HOST_T_STREAM_READY :: 0xAE
 PTY_HOST_T_STREAM_CLOSED :: 0xAF
+// REQ-PTY-1 (pty-host 52cebd54): Signal's reply when the target already exited.
+PTY_HOST_T_ALREADY_EXITED :: 0xB0
 PTY_HOST_T_WATCH_EVENTS :: 0x38
 PTY_HOST_T_SIGNAL :: 0x39 // Send POSIX signal to a shell's process group (T2/REQ-SH-CONTRACT §4)
 
@@ -144,6 +146,8 @@ Pty_Host_Reply_Kind :: enum {
 	// REQ-STREAM-EVENT-2: stream lifecycle events
 	Stream_Ready,
 	Stream_Closed,
+	// Reply to Signal: the target had already exited (code = its exit code).
+	Already_Exited,
 }
 
 // One agent's liveness entry inside a Host_Heartbeat reply.
@@ -464,6 +468,11 @@ pty_host_decode_reply :: proc(payload: []byte) -> (Pty_Host_Reply, bool) {
 		r.kind = .Stream_Ready
 		inst, ok := pty_host_get_str(rest, &off); if !ok do return {}, false
 		r.instance = inst
+	case PTY_HOST_T_ALREADY_EXITED:
+		r.kind = .Already_Exited
+		inst, ok := pty_host_get_str(rest, &off); if !ok do return {}, false
+		code, ok2 := pty_host_get_i32(rest, &off); if !ok2 { delete(inst); return {}, false }
+		r.instance = inst; r.code = code
 	case PTY_HOST_T_STREAM_CLOSED:
 		r.kind = .Stream_Closed
 		inst, ok := pty_host_get_str(rest, &off); if !ok do return {}, false
@@ -695,14 +704,33 @@ pty_host_encode_signal :: proc(shell_id: string, signal: u8) -> []byte {
 	return pty_host_frame(p[:])
 }
 
-// bridge_pty_host_signal sends a POSIX signal to the process group of
-// shell_id and waits for the daemon's ack (Closed on success, Error on
-// failure). Returns true on success.
-bridge_pty_host_signal :: proc(client: ^Pty_Host_Client, shell_id: string, signal: u8) -> bool {
+// Pty_Host_Signal_Result is the daemon's answer to a Signal request.
+Pty_Host_Signal_Result :: enum {
+	Delivered,      // Closed: the signal was sent to the process group
+	Already_Exited, // the target had already exited; the exit code comes with it
+	Refused,        // Error, an unexpected reply, or no answer at all
+}
+
+// bridge_pty_host_signal_detailed sends a POSIX signal to the process group of
+// shell_id and says what the daemon did with it. exit_code is meaningful only for
+// .Already_Exited, which a daemon older than pty-host 52cebd54 never sends (it
+// answers an exited target with a generic Error, i.e. .Refused).
+bridge_pty_host_signal_detailed :: proc(client: ^Pty_Host_Client, shell_id: string, signal: u8) -> (result: Pty_Host_Signal_Result, exit_code: i32) {
 	frame := pty_host_encode_signal(shell_id, signal)
 	defer delete(frame)
 	reply, ok := pty_host_request(client.socket, frame)
-	if !ok do return false
+	if !ok do return .Refused, 0
 	defer pty_host_reply_delete(reply)
-	return reply.kind == .Closed
+	#partial switch reply.kind {
+	case .Closed:         return .Delivered, 0
+	case .Already_Exited: return .Already_Exited, reply.code
+	}
+	return .Refused, 0
+}
+
+// bridge_pty_host_signal is bridge_pty_host_signal_detailed for callers that only
+// care whether the signal was delivered. Returns true on success.
+bridge_pty_host_signal :: proc(client: ^Pty_Host_Client, shell_id: string, signal: u8) -> bool {
+	result, _ := bridge_pty_host_signal_detailed(client, shell_id, signal)
+	return result == .Delivered
 }

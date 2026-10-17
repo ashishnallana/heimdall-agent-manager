@@ -2537,7 +2537,8 @@ bridge_runtime_stop_agent :: proc(instance_id: string, force: bool = false) -> b
 	pty_host_reply_delete(reply)
 	if force && registered && alive {
 		client := Pty_Host_Client{socket = socket}
-		if !bridge_pty_host_signal(&client, instance_id, 9) do return false
+		// An instance that exited between the list and the SIGKILL is already stopped.
+		if result, _ := bridge_pty_host_signal_detailed(&client, instance_id, 9); result == .Refused do return false
 	}
 	if registered && !bridge_pty_host_close(socket, instance_id) do return false
 
@@ -4666,11 +4667,21 @@ bridge_shell_kill_worker :: proc(data: rawptr) {
 		// kill this bridge could not execute must say so: the hub's row still carries the
 		// intent, so the next reconnect retries, but an operator needs to be able to see
 		// that it is retrying rather than succeeding.
-		if !bridge_pty_host_signal(&Pty_Host_Client{socket = socket}, ctx.shell_id, 15) {
+		switch result, exit_code := bridge_pty_host_signal_detailed(&Pty_Host_Client{socket = socket}, ctx.shell_id, 15); result {
+		case .Delivered:
+		case .Already_Exited:
+			// REQ-BR-2: the daemon says outright that the process is gone and hands us
+			// its exit code — report it now (a no-op if already reported). There is
+			// nothing left to escalate either way.
+			data_dir := bridge_shell_data_dir()
+			defer delete(data_dir)
+			_ = bridge_shell_kill_resolve_already_exited(&bridge_shell_session_map, ctx.session_id, int(exit_code), data_dir)
+			return
+		case .Refused:
 			fmt.println("bridge shell_kill: SIGTERM was REFUSED by the pty-host daemon", ctx.shell_id)
 			// REQ-BR-2: a refusal usually means there is nothing left to kill — the
 			// daemon already reaped the process and its ChildExited never reached us.
-			// Logging alone left the session running on the hub forever; resolve it
+			// An older daemon says so only with a generic Error, so resolve the session
 			// against the roster and report it if it is gone.
 			if bridge_shell_kill_refused_finalize(socket, ctx.session_id) do return
 		}

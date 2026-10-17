@@ -16,11 +16,14 @@ package main
 // logic lives; the arming sequence itself is unchanged code, extracted verbatim into
 // bridge_shell_kill_arm.
 
+import "core:c"
 import "core:fmt"
 import "core:os"
 import "core:strings"
 import "core:sync"
+import "core:sys/posix"
 import "core:testing"
+import "core:thread"
 import "core:time"
 
 @(private = "file")
@@ -437,6 +440,138 @@ bridge_br2_refused_kill_of_a_gone_run_is_finalized_and_reported :: proc(t: ^test
 	// A redelivered refusal (or the late ChildExited) reports nothing further.
 	testing.expect(t, !bridge_shell_kill_resolve_refused(&bridge_shell_session_map, exited_sid, roster, dir, exit_sweep_pid_dead), "second resolution is a no-op")
 	again := exit_sweep_take_events(exited_sid)
+	testing.expect_value(t, len(again), 0)
+	exit_sweep_events_delete(again)
+}
+
+// --- REQ-BR-2: AlreadyExited (pty-host 52cebd54) -----------------------------
+
+// A daemon that has the kill target's tombstone answers Signal with
+// AlreadyExited{instance, code} instead of a generic Error. The bridge must read that
+// as "gone, with this code" — not as a refusal — and report the run with that code
+// straight away, with no roster round-trip.
+
+@(private = "file")
+Already_Exited_Fake_Daemon :: struct {
+	listener: posix.FD,
+	reply:    []byte, // one reply payload (tag + fields), framed by the fake
+	got_tag:  byte,   // the request's tag, as received
+}
+
+@(private = "file")
+already_exited_listen :: proc(path: string) -> posix.FD {
+	fd := posix.socket(.UNIX, .STREAM)
+	if fd < 0 do return -1
+	addr: posix.sockaddr_un
+	addr.sun_family = .UNIX
+	for i in 0..<len(path) do addr.sun_path[i] = c.char(path[i])
+	if posix.bind(fd, (^posix.sockaddr)(&addr), posix.socklen_t(size_of(addr))) != .OK || posix.listen(fd, 4) != .OK {
+		posix.close(fd)
+		return -1
+	}
+	return fd
+}
+
+// Serves exactly one request: read its frame, answer with fake.reply.
+@(private = "file")
+already_exited_fake_daemon_serve :: proc(th: ^thread.Thread) {
+	fake := (^Already_Exited_Fake_Daemon)(th.data)
+	conn := posix.accept(fake.listener, nil, nil)
+	if conn < 0 do return
+	defer posix.close(conn)
+	req, ok := pty_host_read_frame(conn)
+	if !ok do return
+	if len(req) > 0 do fake.got_tag = req[0]
+	delete(req)
+	frame := pty_host_frame(fake.reply)
+	defer delete(frame)
+	_ = pty_host_send_all(conn, frame)
+}
+
+@(private = "file")
+already_exited_signal_against :: proc(t: ^testing.T, reply: []byte) -> (result: Pty_Host_Signal_Result, code: i32, got_tag: byte) {
+	path := fmt.aprintf("/tmp/ham-br2-sig-%d.sock", os.get_pid())
+	defer delete(path)
+	cpath := strings.clone_to_cstring(path)
+	defer delete(cpath)
+	_ = posix.unlink(cpath)
+	defer posix.unlink(cpath)
+	fake := Already_Exited_Fake_Daemon{listener = already_exited_listen(path), reply = reply}
+	testing.expect(t, fake.listener >= 0, "fake daemon listening")
+	if fake.listener < 0 do return .Refused, 0, 0
+	defer posix.close(fake.listener)
+	th := thread.create(already_exited_fake_daemon_serve)
+	th.data = &fake
+	thread.start(th)
+	result, code = bridge_pty_host_signal_detailed(&Pty_Host_Client{socket = path}, "sh_br2_sig", 15)
+	thread.join(th)
+	thread.destroy(th)
+	return result, code, fake.got_tag
+}
+
+@(test)
+bridge_br2_signal_reply_already_exited_is_decoded :: proc(t: ^testing.T) {
+	// The frame dproto.rs writes: tag 0xB0, instance (u32-len string), code (i32 BE).
+	p := make([dynamic]byte); defer delete(p)
+	append(&p, PTY_HOST_T_ALREADY_EXITED)
+	pty_host_put_str(&p, "sh_br2_sig")
+	pty_host_put_i32(&p, 143)
+	r, ok := pty_host_decode_reply(p[:])
+	defer pty_host_reply_delete(r)
+	testing.expect(t, ok, "AlreadyExited decodes")
+	testing.expect_value(t, r.kind, Pty_Host_Reply_Kind.Already_Exited)
+	testing.expect_value(t, r.instance, "sh_br2_sig")
+	testing.expect_value(t, r.code, i32(143))
+
+	// Over a real socket, the Signal round-trip classifies each reply.
+	result, code, tag := already_exited_signal_against(t, p[:])
+	testing.expect_value(t, tag, byte(PTY_HOST_T_SIGNAL))
+	testing.expect_value(t, result, Pty_Host_Signal_Result.Already_Exited)
+	testing.expect_value(t, code, i32(143))
+
+	closed := make([dynamic]byte); defer delete(closed)
+	append(&closed, PTY_HOST_T_CLOSED)
+	pty_host_put_str(&closed, "sh_br2_sig")
+	result, _, _ = already_exited_signal_against(t, closed[:])
+	testing.expect_value(t, result, Pty_Host_Signal_Result.Delivered)
+
+	// An older daemon's answer for the same situation stays a refusal (roster fallback).
+	e := make([dynamic]byte); defer delete(e)
+	append(&e, PTY_HOST_T_ERROR)
+	pty_host_put_str(&e, "sh_br2_sig")
+	pty_host_put_str(&e, "killpg: ESRCH")
+	result, _, _ = already_exited_signal_against(t, e[:])
+	testing.expect_value(t, result, Pty_Host_Signal_Result.Refused)
+}
+
+@(test)
+bridge_br2_already_exited_kill_is_finalized_with_its_code :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	bridge_shell_test_reset()
+	defer bridge_shell_test_reset()
+	dir := fmt.aprintf("/tmp/ham-br2-already-%d", os.get_pid())
+	defer delete(dir)
+	exit_sweep_queue_init()
+
+	sid := "sh_br2_already"
+	s := exit_sweep_session(sid, .Killed, 4_200_001, -1, false) // as kill_arm leaves it
+	bridge_shell_session_register(&bridge_shell_session_map, &s)
+
+	testing.expect(t, bridge_shell_kill_resolve_already_exited(&bridge_shell_session_map, sid, 143, dir), "finalized from the daemon's answer alone")
+	sc, _ := bridge_shell_session_scalars(&bridge_shell_session_map, sid)
+	testing.expect_value(t, sc.status, Bridge_Shell_Session_Status.Killed)
+	testing.expect(t, sc.exit_code_set && sc.exit_code == 143 && sc.exit_reported, "the daemon's code is recorded and the exit claimed")
+	events := exit_sweep_take_events(sid)
+	testing.expect_value(t, len(events), 1)
+	if len(events) == 1 {
+		testing.expectf(t, strings.contains(events[0], `"status":"killed"`) && strings.contains(events[0], `"exit_code":143`), "killed with code 143: %s", events[0])
+	}
+	exit_sweep_events_delete(events)
+
+	// The late ChildExited (or a repeated answer) reports nothing further.
+	testing.expect(t, !bridge_shell_kill_resolve_already_exited(&bridge_shell_session_map, sid, 143, dir), "second resolution is a no-op")
+	again := exit_sweep_take_events(sid)
 	testing.expect_value(t, len(again), 0)
 	exit_sweep_events_delete(again)
 }

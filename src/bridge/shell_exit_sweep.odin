@@ -19,6 +19,9 @@ package main
 //   events re-dial    — after the event watcher follows a replaced daemon (REQ-BR-3)
 //   refused kill      — bridge_shell_kill_resolve_refused (REQ-BR-2)
 //
+// plus bridge_shell_kill_resolve_already_exited, for a daemon that answers the kill's
+// Signal with AlreadyExited{code} and so needs no roster to decide.
+//
 // and every finalization goes through bridge_shell_session_finalize_exit, the same path
 // ChildExited takes, so the hub sees exactly what it would have seen had the event
 // arrived. The exit claim inside it (Bridge_Shell_Session.exit_reported) makes all of
@@ -247,5 +250,16 @@ bridge_shell_kill_resolve_refused :: proc(m: ^Bridge_Shell_Session_Map, session_
 	outcome := bridge_shell_session_sweep_one(m, session_id, daemon_agents, data_dir, pid_alive)
 	if outcome == .Untouched do return false
 	fmt.println("bridge shell_kill: refused kill resolved —", session_id, "was already gone; reported as", outcome)
+	return true
+}
+
+// bridge_shell_kill_resolve_already_exited is REQ-BR-2 for a daemon that answers the
+// kill's Signal with AlreadyExited: it has already told us the process is gone and
+// with which code, so no roster is needed — report it with that code (as "killed",
+// the session being .Killed by now). Returns false when the exit was already reported
+// (by ChildExited or a sweep).
+bridge_shell_kill_resolve_already_exited :: proc(m: ^Bridge_Shell_Session_Map, session_id: string, exit_code: int, data_dir: string) -> bool {
+	if !bridge_shell_session_finalize_exit(m, session_id, exit_code, true, data_dir) do return false
+	fmt.println("bridge shell_kill: the pty-host daemon reports", session_id, "already exited with code", exit_code, "— reported")
 	return true
 }
