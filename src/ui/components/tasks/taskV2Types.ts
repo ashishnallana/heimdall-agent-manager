@@ -241,3 +241,13 @@ export function getTaskPeople(task: TaskWire, chainFleets: any[] = []): TaskPeop
     userApproval: Boolean(task.requires_user_approval),
   };
 }
+
+// resolveSelectedTaskId: the detail view only opens for a task of THIS chain. A
+// selection left over from another chain (or a deleted task) falls back to the
+// board instead of rendering a "No goal defined" stub. While the chain's tasks
+// are still loading the selection is kept so deep links survive.
+export function resolveSelectedTaskId(selectedTaskId: string | null | undefined, tasks: TaskWire[], loaded: boolean): string | null {
+  if (!selectedTaskId) return null;
+  if (!loaded) return selectedTaskId;
+  return tasks.some((t) => t.task_id === selectedTaskId) ? selectedTaskId : null;
+}

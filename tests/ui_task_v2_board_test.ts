@@ -423,3 +423,24 @@ test('getTaskPeople resolves the assignee pin, fleet workers, role reviewers and
   // No fleet at all.
   assert.deepEqual(getTaskPeople(makeTask(), []).workers, []);
 });
+
+test('resolveSelectedTaskId drops a selection that is not in the current chain', async () => {
+  const { resolveSelectedTaskId } = await import('../src/ui/components/tasks/taskV2Types.ts');
+  const tasks = [makeTask({ task_id: 'task_a' }), makeTask({ task_id: 'task_b' })];
+  assert.equal(resolveSelectedTaskId('task_a', tasks, true), 'task_a');
+  // Left over from another chain → back to the board, not a stub detail view.
+  assert.equal(resolveSelectedTaskId('task_other_chain', tasks, true), null);
+  assert.equal(resolveSelectedTaskId(null, tasks, true), null);
+  // While the chain is loading, a deep-linked task id is kept.
+  assert.equal(resolveSelectedTaskId('task_deep', [], false), 'task_deep');
+});
+
+test('TaskChainOverview is keyed by chain at both mount points', () => {
+  for (const rel of ['src/ui/components/taskchain/TaskChainsPage.tsx', 'src/ui/components/aux/AuxTabContent.tsx']) {
+    const src = fs.readFileSync(path.join(REPO_ROOT, rel), 'utf8');
+    const at = src.indexOf('<TaskChainOverview');
+    assert.ok(at >= 0, `${rel} mounts TaskChainOverview`);
+    const tag = src.slice(at, src.indexOf('/>', at));
+    assert.match(tag, /key=\{(selectedChainId|ctx\.chainId)\}/, `${rel} keys TaskChainOverview by chain id`);
+  }
+});

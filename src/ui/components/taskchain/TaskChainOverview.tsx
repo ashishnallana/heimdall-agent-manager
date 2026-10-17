@@ -8,6 +8,7 @@ import { TaskDetailView } from '../tasks/TaskDetailView';
 import { CreateTaskModal } from '../tasks/CreateTaskModal';
 import { FleetManagementDrawer } from '../tasks/FleetManagementDrawer';
 import { TaskWire } from '../../api/taskWire';
+import { resolveSelectedTaskId } from '../tasks/taskV2Types';
 import { useOpenAgentChat } from '../aux/openAgentChatContext';
 import { useFetchAgentInstanceQuery, useFetchAgentIdentityQuery } from '../../api/endpoints/agents';
 import { useIsMobile } from '../shell/responsive';
@@ -133,6 +134,7 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
   }
 
   const isWorkflow = chain.kind === 'workflow';
+  const openTaskId = resolveSelectedTaskId(selectedTaskId, tasks, Boolean(chain));
 
   return (
     <div
@@ -185,10 +187,10 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
 
       {/* Main content: Either Detail View or Board/Pipeline View */}
       <div className="flex-1 min-h-0 overflow-y-auto">
-        {selectedTaskId ? (
+        {openTaskId ? (
           <TaskDetailView
             chainId={chainId}
-            taskId={selectedTaskId}
+            taskId={openTaskId}
             tasks={tasks}
             onClose={() => setSelectedTaskId(null)}
             onSelectTask={(id) => setSelectedTaskId(id)}

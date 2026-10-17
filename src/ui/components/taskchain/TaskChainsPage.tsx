@@ -775,6 +775,9 @@ export const TaskChainsPage: React.FC<TaskChainsPageProps> = ({ chainId: initial
       detail={
         selectedChainId ? (
           <TaskChainOverview
+            // Keyed by chain: switching chains only changes the hash, so without a
+            // key React reuses the overview and keeps the previous chain's task open.
+            key={selectedChainId}
             embedded
             chainId={selectedChainId}
             focusTaskId={focusTaskId}

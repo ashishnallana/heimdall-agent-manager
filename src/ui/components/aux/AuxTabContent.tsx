@@ -156,6 +156,7 @@ function renderAuxTabBody({
       }
       return (
         <TaskChainOverview
+          key={ctx.chainId}
           chainId={ctx.chainId}
           focusTaskId={c.taskId}
           isMobile={isMobile}
