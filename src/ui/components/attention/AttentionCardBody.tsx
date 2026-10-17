@@ -1,7 +1,7 @@
 import { Icon } from '@ui';
 import { DecryptedMarkdown, VaultText } from '../vault';
 import type { AttentionItem, AttentionMemoryItem, AttentionMessageItem, AttentionTaskItem } from '../../api/endpoints/attention';
-import { PRIORITY_LABELS, SCOPE_ROWS, expiryLine, formatAge, memoryTypePhrase, reasonLine, urgencyClass } from './attentionModel';
+import { PRIORITY_LABELS, SCOPE_ROWS, TASK_BADGE_LABELS, expiryLine, formatAge, memoryTypePhrase, reasonLine, urgencyClass } from './attentionModel';
 
 /**
  * The read-only part of an attention card: why it is here, where it comes from,
@@ -12,7 +12,7 @@ import { PRIORITY_LABELS, SCOPE_ROWS, expiryLine, formatAge, memoryTypePhrase, r
  */
 export function AttentionCardBody({ item, now, children }: { item: AttentionItem; now: number; children?: React.ReactNode }) {
   return (
-    <article data-debug-id={`attention-card-${item.kind}`} aria-label={item.kind === 'task' ? 'Task waiting on your review' : item.kind === 'memory' ? 'Memory proposal' : 'Agent question'} className="flex h-full min-h-0 flex-col">
+    <article data-debug-id={`attention-card-${item.kind}`} aria-label={item.kind === 'task' ? (item.details.attention === 'blocked' ? 'Task blocked on you' : 'Task waiting on your review') : item.kind === 'memory' ? 'Memory proposal' : 'Agent question'} className="flex h-full min-h-0 flex-col">
       <p data-debug-id="attention-card-reason" className={`text-[13px] font-semibold ${urgencyClass(item.urgency)}`}>
         {reasonLine(item, now)}
       </p>
@@ -43,13 +43,19 @@ function TaskBody({ item, now }: { item: AttentionTaskItem; now: number }) {
       </h3>
       <ul data-debug-id="attention-card-facts" className="mt-2 flex flex-wrap gap-1.5">
         <li className="rounded-[var(--radius-sm)] bg-surface-raised px-1.5 py-0.5 text-[11px] text-muted">{PRIORITY_LABELS[d.priority] || 'Normal priority'}</li>
-        <li className="rounded-[var(--radius-sm)] bg-info-soft px-1.5 py-0.5 text-[11px] text-info">Waiting on review</li>
+        <li
+          data-debug-id="attention-card-badge"
+          className={`rounded-[var(--radius-sm)] px-1.5 py-0.5 text-[11px] ${d.attention === 'blocked' ? 'bg-warning-soft text-warning' : 'bg-info-soft text-info'}`}
+        >
+          {TASK_BADGE_LABELS[d.badge || (d.attention === 'blocked' ? 'question' : 'review')] || 'Waiting on review'}
+        </li>
+        {d.attempt_no && d.attempt_no > 1 ? <li className="rounded-[var(--radius-sm)] bg-surface-raised px-1.5 py-0.5 text-[11px] text-muted">attempt {d.attempt_no}</li> : null}
         {d.assignee_name ? <li className="rounded-[var(--radius-sm)] bg-surface-raised px-1.5 py-0.5 text-[11px] text-muted">by {d.assignee_name}</li> : null}
       </ul>
       {d.excerpt ? (
         <blockquote data-debug-id="attention-card-excerpt" className="mt-3 border-l-2 border-subtle pl-3 text-[13px] text-primary">
           <span className="mb-1 block text-[11px] text-faint">
-            {d.excerpt.author_name || 'Latest comment'}
+            {d.excerpt.author_name || (d.attention === 'blocked' ? 'The agent asks' : 'Latest comment')}
             {d.excerpt.at ? ` · ${formatAge(d.excerpt.at, now)} ago` : ''}
           </span>
           <DecryptedMarkdown source={d.excerpt.body} compact copyAll={false} data-debug-id="attention-card-excerpt-body" />

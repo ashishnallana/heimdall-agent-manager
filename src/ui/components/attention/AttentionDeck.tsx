@@ -19,7 +19,6 @@ import {
   useListAgentIdentitiesQuery,
   useMarkConversationReadMutation,
   useSendConversationMessageMutation,
-  useVoteTaskMutation,
 } from '../../api/endpoints';
 import { attentionScheduler, type ActionScheduler } from '../../services/attention/actionScheduler';
 import { acceptCard, assignReviewerAgent, cancelTask, markConversationRead, rejectCard, snoozeCard } from '../../services/attention/attentionActions';
@@ -35,7 +34,7 @@ import { DECK_TABS, clampIndex, defaultTab, hideKey, nextLiveTab, reviewerCandid
 const NO_ITEMS: AttentionItem[] = [];
 
 type Popover = null | 'snooze' | 'reviewer';
-type Composer = null | 'reply' | 'comment';
+type Composer = null | 'reply' | 'comment' | 'answer';
 
 /** The deck sheet slides up from the bottom on open and back down on close. */
 export const SHEET_MS = 220;
@@ -266,7 +265,6 @@ export function AttentionDeck({
 
   // Immediate (encrypting) actions.
   const [addComment] = useAddTaskCommentMutation();
-  const [voteTask] = useVoteTaskMutation();
   const [sendMessage] = useSendConversationMessageMutation();
   const [markRead] = useMarkConversationReadMutation();
 
@@ -323,7 +321,9 @@ export function AttentionDeck({
       scheduler.settle(hideKey(item));
       setSlide('right');
       try {
-        await (voteTask({ chainId, taskId, result: 'ngtm', comment: body }) as any).unwrap();
+        // Through the card (its guard pins the attempt): Request changes with the
+        // reason; on a plan gate this re-plans with it.
+        await rejectCard(item.card_id, false, { summary: body });
       } catch (err) {
         scheduler.unsettle(hideKey(item));
         throw err;
@@ -341,6 +341,23 @@ export function AttentionDeck({
     setComposer(null);
   };
 
+  // Answer a blocked task (the agent's question, a merge conflict, an exhausted
+  // budget): clears the block through the card, so the task is ready again.
+  const submitAnswer = async (item: AttentionTaskItem, value: ComposerSubmit) => {
+    const note = appendArtifactLinks(value.text, value.attachments.map((a) => a.link)).trim();
+    scheduler.settle(hideKey(item));
+    setSlide('right');
+    try {
+      await acceptCard(item.card_id, false, { note });
+    } catch (err) {
+      scheduler.unsettle(hideKey(item));
+      throw err;
+    }
+    invalidate();
+    say('Answer sent');
+    setComposer(null);
+  };
+
   const openSource = (item: AttentionItem) => {
     const path = item.kind === 'task'
       ? `/chains/${encodeURIComponent(item.action_refs.chain_id)}/tasks/${encodeURIComponent(item.action_refs.task_id)}`
@@ -354,10 +371,18 @@ export function AttentionDeck({
 
   type DockAction = { key: string; label: string; icon: IconName; tone?: 'success' | 'danger'; run: () => void; debug: string };
   // Snoozed cards keep their original actions: acting settles them in place.
-  const dock: DockAction[] = !current ? [] : current.kind === 'task' ? [
+  const dock: DockAction[] = !current ? [] : current.kind === 'task' && current.details.attention === 'blocked' ? [
+    { key: 'a', label: 'Answer', icon: 'chat', tone: 'success', debug: 'answer', run: () => { setPopover(null); setComposer(composer === 'answer' ? null : 'answer'); } },
+    { key: 'c', label: 'Comment', icon: 'chat', debug: 'comment', run: () => { setPopover(null); setComposer(composer === 'comment' ? null : 'comment'); } },
+    { key: 's', label: 'Snooze', icon: 'clock', debug: 'snooze', run: () => { setComposer(null); setPopover(popover === 'snooze' ? null : 'snooze'); } },
+    { key: 'x', label: 'Cancel task', icon: 'stop', tone: 'danger', debug: 'cancel-task', run: () => schedule(current, 'Task cancelled', (k) => cancelTask((current as AttentionTaskItem).action_refs, k)) },
+    { key: 'o', label: 'Open', icon: 'arrow-right', debug: 'open', run: () => openSource(current) },
+  ] : current.kind === 'task' ? [
     { key: 'a', label: 'Approve', icon: 'check', tone: 'success', debug: 'approve', run: () => schedule(current, 'Approved', (k) => acceptCard(current.card_id, k)) },
     { key: 'c', label: 'Comment', icon: 'chat', debug: 'comment', run: () => { setPopover(null); setComposer(composer === 'comment' ? null : 'comment'); } },
-    { key: 'r', label: 'Reviewer', icon: 'bot', debug: 'reviewer', run: () => { setComposer(null); setPopover(popover === 'reviewer' ? null : 'reviewer'); } },
+    ...(current.details.badge === 'gate' ? [] : [
+      { key: 'r', label: 'Reviewer', icon: 'bot' as IconName, debug: 'reviewer', run: () => { setComposer(null); setPopover(popover === 'reviewer' ? null : 'reviewer'); } },
+    ]),
     { key: 's', label: 'Snooze', icon: 'clock', debug: 'snooze', run: () => { setComposer(null); setPopover(popover === 'snooze' ? null : 'snooze'); } },
     // Cancels the task itself (the card resolves with it), so it says so.
     { key: 'x', label: 'Cancel task', icon: 'stop', tone: 'danger', debug: 'cancel-task', run: () => schedule(current, 'Task cancelled', (k) => cancelTask((current as AttentionTaskItem).action_refs, k)) },
@@ -526,6 +551,17 @@ export function AttentionDeck({
                     onCancel={() => setComposer(null)}
                   />
                 ) : null}
+                {composer === 'answer' && current.kind === 'task' ? (
+                  <AttentionComposer
+                    debugId="attention-answer"
+                    placeholder={current.details.badge === 'merge_conflict' ? 'How should the agent resolve it?' : 'Your answer…'}
+                    originKind="task_comment"
+                    originRef={`${current.action_refs.chain_id}:${current.action_refs.task_id}`}
+                    submitLabel="Send answer"
+                    onSubmit={(v) => submitAnswer(current, v)}
+                    onCancel={() => setComposer(null)}
+                  />
+                ) : null}
                 {composer === 'comment' && current.kind === 'task' ? (
                   <AttentionComposer
                     debugId="attention-comment"
@@ -533,7 +569,7 @@ export function AttentionDeck({
                     originKind="task_comment"
                     originRef={`${current.action_refs.chain_id}:${current.action_refs.task_id}`}
                     submitLabel="Comment"
-                    secondaryLabel="Request changes"
+                    secondaryLabel={current.details.attention === 'blocked' ? undefined : 'Request changes'}
                     onSubmit={(v) => submitComment(current, v, 'comment')}
                     onSecondary={(v) => submitComment(current, v, 'ngtm')}
                     onCancel={() => setComposer(null)}

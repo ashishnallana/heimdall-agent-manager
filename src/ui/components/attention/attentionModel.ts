@@ -101,13 +101,36 @@ export function formatAge(sinceIso: string, now: number): string {
 }
 
 /** Human reason line, e.g. "Waiting on your review · 2h". Never shows ids. */
+/** Why a task card is in the deck (Task System v2 attention kind + badge). */
+export function taskReason(d: { attention?: string; badge?: string }): string {
+  if (d.attention === 'blocked') {
+    switch (d.badge) {
+      case 'merge_conflict': return 'Merge conflict needs you';
+      case 'budget_exhausted': return 'Out of attempts, needs you';
+      case 'oscillation': return 'Stuck in review rounds, needs you';
+      default: return 'Agent is asking you';
+    }
+  }
+  return d.badge === 'gate' ? 'Approve the plan to continue' : 'Waiting on your review';
+}
+
+/** The short chip for a task card's attention badge. */
+export const TASK_BADGE_LABELS: Record<string, string> = {
+  review: 'Waiting on review',
+  gate: 'Plan gate',
+  question: 'Question',
+  merge_conflict: 'Merge conflict',
+  budget_exhausted: 'Out of attempts',
+  oscillation: 'Review rounds',
+};
+
 export function reasonLine(item: AttentionItem, now: number): string {
   if (item.snoozed) {
     const wake = formatWake(item.snooze_until, now);
     return wake ? `Snoozed until ${wake}` : 'Snoozed';
   }
   const age = formatAge(item.attention_since, now);
-  const base = item.kind === 'task' ? 'Waiting on your review' : item.kind === 'memory' ? 'Waiting on your approval' : 'Waiting on your reply';
+  const base = item.kind === 'task' ? taskReason(item.details) : item.kind === 'memory' ? 'Waiting on your approval' : 'Waiting on your reply';
   return age ? `${base} · ${age}` : base;
 }
 
