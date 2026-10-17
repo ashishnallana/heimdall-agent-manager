@@ -87,7 +87,7 @@ export function AttentionDeck({
   const fresh = !!query.data && !query.isFetching && (query.fulfilledTimeStamp ?? 0) >= openedAt.current;
   const snap = useSyncExternalStore(scheduler.subscribe, scheduler.getSnapshot, scheduler.getSnapshot);
   const items = data?.items ?? NO_ITEMS;
-  const counts = data?.counts ?? { total: 0, older: 0, message: 0, task: 0 };
+  const counts = data?.counts ?? { total: 0, older: 0, message: 0, task: 0, snoozed: 0 };
   const perTab = tabCounts(counts, items, snap.hidden);
 
   const [tab, setTab] = useState<DeckTab>('message');
