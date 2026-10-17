@@ -81,6 +81,7 @@ metric_gate_evaluated :: proc(res: Gate_Result) {
 	case .Waiting:           label = "waiting"
 	case .Approved:          label = "approved"
 	case .Changes_Requested: label = "changes_requested"
+	case .Rejected:          label = "rejected"
 	}
 	metrics.counter_inc(metrics.with(task_metrics.gate_evaluations_total, label))
 }

@@ -136,6 +136,15 @@ build_pack_json :: proc(svc: ^Service, chain: domain.Task_Chain, task: domain.Ta
 			break
 		}
 	}
+	// A gate rejected this stage's previous output (F1): the reviewer's reason,
+	// until this task submits again.
+	for i := len(evs) - 1; i >= 0; i -= 1 {
+		if evs[i].kind == EV_SUBMITTED do break
+		if evs[i].kind == EV_GATE_FEEDBACK {
+			json_raw(&o, "gate_feedback", evs[i].payload_json)
+			break
+		}
+	}
 
 	proto := json_begin()
 	json_int(&proto, "heartbeat_ttl_seconds", LEASE_TTL_SECONDS)
@@ -382,6 +391,7 @@ pack_why :: proc(view: Task_View, lease: domain.Task_Lease, prev_outcome: string
 	case .Changes_Requested: return "changes_requested"
 	case .Handoff: return "handoff"
 	case .Reopened: return "reopened"
+	case .User_Stopped: return "user_stopped"
 	case .Blocked: return "answered"
 	}
 	return "first_grant"

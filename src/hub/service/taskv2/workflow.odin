@@ -1798,6 +1798,25 @@ workflow_retry_in_uow :: proc(
 	actor: Actor,
 	input: Workflow_Retry_Input,
 ) -> (Workflow_Retry_Result, bool, domain.Domain_Error) {
+	res, ok, err := workflow_retry_core_in_uow(svc, u, chain_id, owner_user_id, actor, input)
+	if !ok do return {}, false, err
+	if aok, aerr := after_chain_change(svc, u, chain_id, owner_user_id, .Task_Reopened); !aok {
+		return {}, false, aerr
+	}
+	return res, true, domain.Domain_Error{}
+}
+
+// workflow_retry_core_in_uow reopens a stage (cascading downstream) WITHOUT
+// running after_chain_change, for callers that run it once themselves at the
+// end of their own unit of work (gate_replan_in_uow, F1).
+workflow_retry_core_in_uow :: proc(
+	svc: ^Service,
+	u: ^Uow,
+	chain_id: domain.Task_Chain_ID,
+	owner_user_id: domain.User_ID,
+	actor: Actor,
+	input: Workflow_Retry_Input,
+) -> (Workflow_Retry_Result, bool, domain.Domain_Error) {
 	chain, cok, _ := iface.taskchain_get_chain(svc.repo, chain_id)
 	if !cok || chain.owner_user_id != owner_user_id {
 		return {}, false, domain.domain_error(.Not_Found, "workflow chain not found")
@@ -1963,9 +1982,6 @@ workflow_retry_in_uow :: proc(
 		_, _, _ = iface.taskchain_save_chain(svc.repo, chain)
 	}
 
-	if aok, aerr := after_chain_change(svc, u, chain.chain_id, owner_user_id, .Task_Reopened); !aok {
-		return {}, false, aerr
-	}
 	return Workflow_Retry_Result{
 		reopened_task_ids    = reopened_ids[:],
 		cancelled_task_ids   = cancelled_ids[:],
@@ -2179,3 +2195,75 @@ substitute_on_output_placeholders :: proc(template: string, output_json: string,
 	return strings.to_string(b)
 }
 
+
+// ---- F1: a rejected gate re-plans -------------------------------------------------------
+
+GATE_MAX_REPLANS_DEFAULT :: 3
+
+// gate_replan_in_uow runs after an explicit verdict rejected a workflow gate
+// (evaluate_gate_in_uow → .Rejected; the gate is already cancelled). It
+// retries the gate stage's upstream stage(s) with cascade, so they run again
+// and the gate stage is re-materialised once they finish, and records the
+// rejection as gate_feedback on each reopened upstream task (pack → TASK.md).
+// No-op (the stage stays failed; "Retry stage" in the UI) when:
+//   - the gate says on_reject = "fail",
+//   - an upstream stage fans out (for_each) — only single-task upstreams re-plan,
+//   - max_replans (default 3) rejected gates already exist for this stage.
+// The caller runs after_chain_change once afterwards.
+gate_replan_in_uow :: proc(svc: ^Service, u: ^Uow, chain: domain.Task_Chain, gate: domain.Task, actor: Actor) -> (bool, domain.Domain_Error) {
+	if chain.kind != domain.CHAIN_KIND_WORKFLOW || gate.stage_key == "" do return true, domain.Domain_Error{}
+	gate_obj, _ := jsonx.extract_raw_object(gate.brief_json, "gate", true, context.temp_allocator)
+	on_reject := jsonx.extract_string(gate_obj, "on_reject", jsonx.extract_string(gate.brief_json, "on_reject", "replan", true, context.temp_allocator), true, context.temp_allocator)
+	if on_reject == "fail" do return true, domain.Domain_Error{}
+	max_replans := jsonx.extract_int(gate_obj, "max_replans", jsonx.extract_int(gate.brief_json, "max_replans", GATE_MAX_REPLANS_DEFAULT, true), true)
+
+	snap, sok := extract_workflow_snapshot(chain, context.temp_allocator)
+	if !sok do return true, domain.Domain_Error{}
+	stage_by_key := make(map[string]Workflow_Stage_Spec, len(snap.spec.stages), context.temp_allocator)
+	for st in snap.spec.stages do stage_by_key[st.key] = st
+	gate_stage, has_gate := stage_by_key[gate.stage_key]
+	if !has_gate || len(gate_stage.depends_on) == 0 do return true, domain.Domain_Error{}
+	for dep in gate_stage.depends_on {
+		up, has_up := stage_by_key[strings.trim_space(dep)]
+		if !has_up || strings.trim_space(up.for_each) != "" do return true, domain.Domain_Error{}
+	}
+
+	tasks, terr := iface.taskchain_list_tasks_by_chain(svc.repo, chain.chain_id, chain.owner_user_id)
+	if terr.code != .None do return false, terr
+	rejected := 0
+	cancelled_prefix := fmt.tprintf("~cancelled~%s~", gate.stage_key)
+	for t in tasks do if t.kind == .Gate && (t.task_id == gate.task_id || strings.has_prefix(t.stage_key, cancelled_prefix)) do rejected += 1
+	if rejected > max_replans {
+		effect_notify_coordinator(svc, u, chain.chain_id, chain.owner_user_id, "gate_rejected", fmt.tprintf("[taskv2] gate %s rejected %d times; not re-planning again (max_replans=%d). Retry the stage by hand.", gate.task_id, rejected, max_replans))
+		return true, domain.Domain_Error{}
+	}
+
+	// The rejection: the latest request_changes review_posted on the gate.
+	summary, findings := "", "[]"
+	if evs, eerr := iface.taskchain_list_events_by_task(svc.repo, gate.task_id, gate.owner_user_id); eerr.code == .None {
+		for i := len(evs) - 1; i >= 0; i -= 1 {
+			if evs[i].kind != EV_REVIEW_POSTED do continue
+			if jsonx.extract_string(evs[i].payload_json, "verdict", "", true, context.temp_allocator) != "request_changes" do continue
+			summary = jsonx.extract_string(evs[i].payload_json, "summary", "", true, context.temp_allocator)
+			if raw, ok := raw_value_field(evs[i].payload_json, "findings"); ok && strings.trim_space(raw) != "" do findings = raw
+			break
+		}
+	}
+
+	for dep in gate_stage.depends_on {
+		res, rok, rerr := workflow_retry_core_in_uow(svc, u, chain.chain_id, chain.owner_user_id, actor, Workflow_Retry_Input{stage_key = strings.trim_space(dep), cascade = true, reason = "gate_rejected"})
+		if !rok do return false, rerr
+		for tid in res.reopened_task_ids {
+			t, tok, _ := iface.taskchain_get_task(svc.repo, tid)
+			if !tok do continue
+			p := json_begin()
+			json_str(&p, "gate_task_id", string(gate.task_id))
+			json_int(&p, "round", i64(rejected))
+			if summary != "" do json_str(&p, "summary", summary)
+			json_raw(&p, "findings", findings)
+			json_str(&p, "rejected_at", platform.clock_now(svc.clock))
+			if _, _, eok, eerr := record_event(svc, u, t, actor, EV_GATE_FEEDBACK, json_end(&p)); !eok do return false, eerr
+		}
+	}
+	return true, domain.Domain_Error{}
+}

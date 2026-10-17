@@ -1293,11 +1293,13 @@ export const tasksApi = heimdallApi.injectEndpoints({
       invalidatesTags: (_result, _error, { taskId, chainId }) => preciseTaskTags(taskId, chainId, true),
     }),
     // Task System v2 (M4): human action verbs replacing legacy set-status/vote/nudge.
-    userReviewTask: build.mutation<any, { chainId: string; taskId: string; verdict: 'approve' | 'request_changes'; findings?: any }>({
-      queryFn: async ({ chainId, taskId, verdict, findings }) => {
+    userReviewTask: build.mutation<any, { chainId: string; taskId: string; verdict: 'approve' | 'request_changes'; findings?: any; summary?: string }>({
+      queryFn: async ({ chainId, taskId, verdict, findings, summary }) => {
         try {
           const body: any = { verdict };
           if (findings !== undefined) body.findings = findings;
+          // The reason a rejected workflow gate hands to the re-plan (F1).
+          if (summary) body.summary = summary;
           const data = await cookieMutation(`/task-chains/${encodeURIComponent(chainId)}/tasks/${encodeURIComponent(taskId)}/review`, 'POST', body);
           return { data };
         } catch (error: any) {

@@ -151,7 +151,7 @@ agent_action_review_post_handler :: proc(ctx: rawptr, req: Request) -> Response 
 	if !ok do return resp
 	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
 	params := verbatim_params(req.body)
-	res, rok, err := taskv2.review_post(h.task_engine, auth, taskv2.Review_Input{task_id = json_string(params, "task_id"), verdict = json_string(params, "verdict"), findings_json = verbatim_field(params, "findings"), on_behalf_of = json_string(params, "on_behalf_of")})
+	res, rok, err := taskv2.review_post(h.task_engine, auth, taskv2.Review_Input{task_id = json_string(params, "task_id"), verdict = json_string(params, "verdict"), findings_json = verbatim_field(params, "findings"), on_behalf_of = json_string(params, "on_behalf_of"), summary = json_string(params, "summary")})
 	if !rok do return respond_error(err, req.request_id)
 	publish_agent_action(h, inst, "review_post", fmt.tprintf("reviewed %s: %s", res.task.task_id, json_string(params, "verdict")))
 	publish_task_event(h.event_bus, string(res.task.owner_user_id), string(res.task.task_id), string(res.task.chain_id), "updated")
@@ -162,7 +162,7 @@ agent_action_review_post_handler :: proc(ctx: rawptr, req: Request) -> Response 
 gate_label :: proc(g: taskv2.Gate_Result) -> string {
 	switch g {
 	case .Approved: return "approved"
-	case .Changes_Requested: return "changes_requested"
+	case .Changes_Requested, .Rejected: return "changes_requested"
 	case .Waiting: return "waiting"
 	}
 	return "waiting"

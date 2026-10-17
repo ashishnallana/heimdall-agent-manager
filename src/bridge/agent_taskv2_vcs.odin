@@ -390,6 +390,18 @@ bridge_taskv2_render_task_md :: proc(pack_json: string, max_bytes: int = BRIDGE_
 		merge_conflict = fmt.tprintf("%s%s", detail, fmt.tprintf(" (files: %s)", files) if files != "" else "")
 		if merge_conflict == "" do merge_conflict = "the branch did not merge"
 	}
+	gate_feedback := ""
+	if gf, has_gf := jsonx.extract_raw_object(pack_json, "gate_feedback", true, context.temp_allocator); has_gf {
+		summary := bridge_taskv2_decrypt_field(jsonx.extract_string(gf, "summary", "", true, context.temp_allocator), context.temp_allocator)
+		findings_raw, _ := jsonx.extract_raw_array(gf, "findings", true, context.temp_allocator)
+		round := jsonx.extract_int(gf, "round", 1, true)
+		gb := strings.builder_make(context.temp_allocator)
+		fmt.sbprintf(&gb, "Your previous output was rejected at the approval gate (round %d).\n", round)
+		if strings.trim_space(summary) != "" do fmt.sbprintf(&gb, "**Reviewer's reason**: %s\n", summary)
+		if strings.trim_space(findings_raw) != "" && strings.trim_space(findings_raw) != "[]" do fmt.sbprintf(&gb, "**Findings**: `%s`\n", strings.trim_space(findings_raw))
+		strings.write_string(&gb, "Address this feedback in a new output; a new gate follows your submission.\n")
+		gate_feedback = strings.to_string(gb)
+	}
 
 	raw_title := jsonx.extract_string(task_obj, "title", "", true, context.temp_allocator)
 	raw_desc := jsonx.extract_string(task_obj, "description", "", true, context.temp_allocator)
@@ -491,7 +503,7 @@ bridge_taskv2_render_task_md :: proc(pack_json: string, max_bytes: int = BRIDGE_
 	drop_handoff_summary := false
 
 	build_doc :: proc(
-		task_id, title, role_label, lease_id, expires_at, hard_deadline_at, bridge_id, directory_id, provider, model, why, workdir, branch, merge_conflict: string,
+		task_id, title, role_label, lease_id, expires_at, hard_deadline_at, bridge_id, directory_id, provider, model, why, workdir, branch, merge_conflict, gate_feedback: string,
 		attempt_no, max_attempts, review_rounds: int,
 		goal, verify_cmd: string, acceptance: []string,
 		chain_summary: string,
@@ -516,6 +528,10 @@ bridge_taskv2_render_task_md :: proc(pack_json: string, max_bytes: int = BRIDGE_
 		}
 		if workdir != "" {
 			fmt.sbprintf(&b, "- **Workdir**: `%s` on branch `%s`. `cd` there and do all work and commits in it; it is your own checkout, merged into the directory when the task is done.\n", workdir, branch)
+		}
+		if gate_feedback != "" {
+			strings.write_string(&b, "\n## Rejected At The Gate\n")
+			strings.write_string(&b, gate_feedback)
 		}
 		if merge_conflict != "" {
 			strings.write_string(&b, "\n## Merge Conflict\n")
@@ -631,7 +647,7 @@ bridge_taskv2_render_task_md :: proc(pack_json: string, max_bytes: int = BRIDGE_
 	}
 
 	rendered := build_doc(
-		task_id, title, role_label, lease_id, expires_at, hard_deadline_at, bridge_id, directory_id, provider, model, why, workdir, branch, merge_conflict,
+		task_id, title, role_label, lease_id, expires_at, hard_deadline_at, bridge_id, directory_id, provider, model, why, workdir, branch, merge_conflict, gate_feedback,
 		attempt_no, max_attempts, review_rounds,
 		goal, verify_cmd, acceptance[:],
 		chain_summary,
@@ -652,7 +668,7 @@ bridge_taskv2_render_task_md :: proc(pack_json: string, max_bytes: int = BRIDGE_
 			if inputs[i].dropped do continue
 			inputs[i].dropped = true
 			rendered = build_doc(
-				task_id, title, role_label, lease_id, expires_at, hard_deadline_at, bridge_id, directory_id, provider, model, why, workdir, branch, merge_conflict,
+				task_id, title, role_label, lease_id, expires_at, hard_deadline_at, bridge_id, directory_id, provider, model, why, workdir, branch, merge_conflict, gate_feedback,
 				attempt_no, max_attempts, review_rounds,
 				goal, verify_cmd, acceptance[:],
 				chain_summary,
@@ -673,7 +689,7 @@ bridge_taskv2_render_task_md :: proc(pack_json: string, max_bytes: int = BRIDGE_
 	if max_bytes > 0 && len(rendered) > max_bytes && verify_tail != "" {
 		drop_verify_summary = true
 		rendered = build_doc(
-			task_id, title, role_label, lease_id, expires_at, hard_deadline_at, bridge_id, directory_id, provider, model, why, workdir, branch, merge_conflict,
+			task_id, title, role_label, lease_id, expires_at, hard_deadline_at, bridge_id, directory_id, provider, model, why, workdir, branch, merge_conflict, gate_feedback,
 			attempt_no, max_attempts, review_rounds,
 			goal, verify_cmd, acceptance[:],
 			chain_summary,
@@ -693,7 +709,7 @@ bridge_taskv2_render_task_md :: proc(pack_json: string, max_bytes: int = BRIDGE_
 	if max_bytes > 0 && len(rendered) > max_bytes && handoff_summary != "" {
 		drop_handoff_summary = true
 		rendered = build_doc(
-			task_id, title, role_label, lease_id, expires_at, hard_deadline_at, bridge_id, directory_id, provider, model, why, workdir, branch, merge_conflict,
+			task_id, title, role_label, lease_id, expires_at, hard_deadline_at, bridge_id, directory_id, provider, model, why, workdir, branch, merge_conflict, gate_feedback,
 			attempt_no, max_attempts, review_rounds,
 			goal, verify_cmd, acceptance[:],
 			chain_summary,

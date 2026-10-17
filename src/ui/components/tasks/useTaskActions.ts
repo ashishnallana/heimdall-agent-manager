@@ -63,7 +63,9 @@ export function useTaskActions(chainId: string, taskId: string, taskTitle = '') 
     requestChanges: (findings: string) =>
       !findings.trim()
         ? Promise.resolve(false)
-        : run(() => userReview({ chainId, taskId, verdict: 'request_changes', findings: [findings.trim()] }).unwrap()),
+        : run(() =>
+            userReview({ chainId, taskId, verdict: 'request_changes', findings: [findings.trim()], summary: findings.trim() }).unwrap(),
+          ),
     answer: (note: string) => run(() => answerBlocker({ chainId, taskId, note }).unwrap()),
     reopen: () => run(() => reopenTask({ chainId, taskId }).unwrap()),
     cancel: () => run(() => cancelTask({ chainId, taskId }).unwrap()),

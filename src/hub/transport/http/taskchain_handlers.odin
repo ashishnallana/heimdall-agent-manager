@@ -1511,7 +1511,7 @@ user_review_task_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	chain_id := domain.Task_Chain_ID(path_part(req.path, 4))
 	task_id := domain.Task_ID(path_part(req.path, 6))
 	if matched, mismatch_resp := require_task_path_scope(h, auth_ctx, chain_id, task_id, req); !matched do return mismatch_resp
-	res, rok, err := taskv2.user_review(h.task_engine, auth_ctx, task_id, taskv2.Review_Input{verdict = json_string(req.body, "verdict"), findings_json = verbatim_field(req.body, "findings")})
+	res, rok, err := taskv2.user_review(h.task_engine, auth_ctx, task_id, taskv2.Review_Input{verdict = json_string(req.body, "verdict"), findings_json = verbatim_field(req.body, "findings"), summary = json_string(req.body, "summary")})
 	if !rok do return respond_error(err, req.request_id)
 	publish_task_changed(h, string(res.task.owner_user_id), string(res.task.task_id), string(res.task.chain_id), "updated")
 	b := strings.builder_make(); write_task_json(&b, res.task)

@@ -216,6 +216,7 @@ function AttentionTaskReviewCard({
         taskId,
         verdict,
         findings,
+        summary: verdict === 'request_changes' ? voteComment.trim() || undefined : undefined,
       }).unwrap();
       onVoteSuccess?.();
     } catch (err: any) {

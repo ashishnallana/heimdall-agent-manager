@@ -21,7 +21,10 @@ import jsonx "odin_test:lib/jsonx"
 // expired); the oscillation guard (fold) parks the task after 3 rounds. A new
 // attempt invalidates prior reviews because reviews are keyed by attempt_no.
 
-Gate_Result :: enum { Waiting, Approved, Changes_Requested }
+// Rejected: a request_changes on a GATE task (it is cancelled). Explicit-verdict
+// callers (review_post, user_review) then run gate_replan_in_uow; the fleet
+// change and verify paths keep the plain cancel (F1).
+Gate_Result :: enum { Waiting, Approved, Changes_Requested, Rejected }
 
 gate_approver_policy :: proc(task: domain.Task) -> string {
 	approver := jsonx.extract_string(task.brief_json, "approver", "user_or_coordinator", true, context.temp_allocator)
@@ -57,6 +60,10 @@ evaluate_gate_in_uow :: proc(svc: ^Service, u: ^Uow, chain: domain.Task_Chain, t
 				if l.kind != domain.LEASE_KIND_REVIEW do continue
 				if expire_lease_in_uow(svc, u, l, EXPIRE_CHANGES_REQUESTED, actor) == .Failed do return .Waiting, false, domain.domain_error(.Internal_Error, "failed to drop a review lease")
 			}
+		}
+		if task.kind == .Gate {
+			metric_gate_evaluated(.Rejected)
+			return .Rejected, true, domain.Domain_Error{}
 		}
 		metric_gate_evaluated(.Changes_Requested)
 		return .Changes_Requested, true, domain.Domain_Error{}

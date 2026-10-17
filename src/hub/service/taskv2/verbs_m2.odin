@@ -262,6 +262,7 @@ Review_Input :: struct {
 	verdict:       string, // approve | request_changes
 	findings_json: string, // array, verbatim (capped)
 	on_behalf_of:  string, // optional: "user" (coordinator proxy review)
+	summary:       string, // optional free-text reason (kept on review_posted; a rejected gate's re-plan reads it)
 }
 
 Review_Result :: struct {
@@ -339,9 +340,11 @@ review_post :: proc(svc: ^Service, auth: contracts.Auth_Context, input: Review_I
 			json_str(&p, "proxy_agent_id", inst.agent_id)
 		}
 		json_raw(&p, "findings", findings)
+		if strings.trim_space(input.summary) != "" do json_str(&p, "summary", strings.trim_space(input.summary))
 		refolded, _, rok, rerr := record_event(svc, &u, task, actor, EV_REVIEW_POSTED, json_end(&p))
 		if !rok { _, _ = end_uow(svc, &u, false); return {}, false, rerr }
 		gate, gok, gerr := evaluate_gate_in_uow(svc, &u, chain, refolded, actor)
+		if gok && gate == .Rejected do gok, gerr = gate_replan_in_uow(svc, &u, chain, refolded, actor)
 		if gok do gok, gerr = after_chain_change(svc, &u, task.chain_id, task.owner_user_id, .Review_Posted)
 		_, cerr2 := end_uow(svc, &u, gok)
 		if !gok do return {}, false, gerr
@@ -383,12 +386,14 @@ review_post :: proc(svc: ^Service, auth: contracts.Auth_Context, input: Review_I
 	json_str(&p, "verdict", input.verdict)
 	json_str(&p, "reviewer", inst.agent_id)
 	json_raw(&p, "findings", findings)
+	if strings.trim_space(input.summary) != "" do json_str(&p, "summary", strings.trim_space(input.summary))
 	refolded, _, rok, rerr := record_event(svc, &u, task, actor, EV_REVIEW_POSTED, json_end(&p))
 	if !rok { _, _ = end_uow(svc, &u, false); return {}, false, rerr }
 	mark_instance_idle(svc, inst.agent_instance_id, now)
 	effect_stop(&u, inst.bridge_id, string(task.chain_id), inst.agent_instance_id)
 	arm_idle_ttl(svc, inst.agent_instance_id, fleet_idle_ttl(svc, task.chain_id, task.owner_user_id, inst.agent_id), now)
 	gate, gok, gerr := evaluate_gate_in_uow(svc, &u, chain, refolded, actor)
+	if gok && gate == .Rejected do gok, gerr = gate_replan_in_uow(svc, &u, chain, refolded, actor)
 	if gok do gok, gerr = after_chain_change(svc, &u, task.chain_id, task.owner_user_id, .Review_Posted)
 	_, cerr2 := end_uow(svc, &u, gok)
 	if !gok do return {}, false, gerr
@@ -420,9 +425,11 @@ user_review :: proc(svc: ^Service, auth: contracts.Auth_Context, task_id: domain
 	json_str(&p, "verdict", input.verdict)
 	json_str(&p, "reviewer", "user")
 	json_raw(&p, "findings", findings)
+	if strings.trim_space(input.summary) != "" do json_str(&p, "summary", strings.trim_space(input.summary))
 	refolded, _, rok, rerr := record_event(svc, &u, task, actor, EV_REVIEW_POSTED, json_end(&p))
 	if !rok { _, _ = end_uow(svc, &u, false); return {}, false, rerr }
 	gate, gok, gerr := evaluate_gate_in_uow(svc, &u, chain, refolded, actor)
+	if gok && gate == .Rejected do gok, gerr = gate_replan_in_uow(svc, &u, chain, refolded, actor)
 	if gok do gok, gerr = after_chain_change(svc, &u, task.chain_id, task.owner_user_id, .Review_Posted)
 	_, cerr2 := end_uow(svc, &u, gok)
 	if !gok do return {}, false, gerr
