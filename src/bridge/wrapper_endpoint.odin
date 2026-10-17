@@ -490,6 +490,7 @@ bridge_local_handle_agent_method :: proc(request_id, method, params: string, rec
 	}
 	if route.kind == .Envelope {
 		if strings.trim_space(rec.instance_token) == "" do return bridge_local_response_error(request_id, "unavailable", "Bridge-held instance token is unavailable")
+		if !sync.atomic_load(&bridge_hub_runtime_up) do return bridge_local_response_error(request_id, "hub_unreachable", "Hub is unreachable; the request was not sent")
 		eff_params := bridge_agent_rewrite_params(method, params)
 		relay := bridge_local_relay_agent_envelope(route.path, method, eff_params, rec)
 		if !relay.ok do return bridge_local_response_error(request_id, "retryable_unavailable", "Hub relay failed")
@@ -499,6 +500,7 @@ bridge_local_handle_agent_method :: proc(request_id, method, params: string, rec
 	}
 	if route.kind == .Raw {
 		if strings.trim_space(rec.instance_token) == "" do return bridge_local_response_error(request_id, "unavailable", "Bridge-held instance token is unavailable")
+		if !sync.atomic_load(&bridge_hub_runtime_up) do return bridge_local_response_error(request_id, "hub_unreachable", "Hub is unreachable; the request was not sent")
 		body := ""
 		if route.send_body { body = strings.trim_space(params); if body == "" do body = "{}" }
 		relay := bridge_local_relay_raw(route.http_method, route.path, body, rec)

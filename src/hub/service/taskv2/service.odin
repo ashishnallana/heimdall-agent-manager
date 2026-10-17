@@ -129,6 +129,8 @@ Effects :: struct {
 	notifications: [dynamic]Coordinator_Notification,
 	// task-branch merge-backs for tasks that became done (merge.odin).
 	merges: [dynamic]Merge_Effect,
+	// one-line nudges typed into an agent's terminal (F2 resume after outage).
+	nudges: [dynamic]Agent_Nudge,
 	// keys owns the (bridge × chain) map keys of runs/stops (heap-cloned per
 	// UoW, freed in destroy_effects — never the request's temp allocator).
 	keys: [dynamic]string,
@@ -189,6 +191,7 @@ begin_uow :: proc(svc: ^Service) -> (Uow, bool, domain.Domain_Error) {
 	u.effects.reservations = make([dynamic]Jit_Reservation)
 	u.effects.notifications = make([dynamic]Coordinator_Notification)
 	u.effects.merges = make([dynamic]Merge_Effect)
+	u.effects.nudges = make([dynamic]Agent_Nudge)
 	u.effects.keys = make([dynamic]string)
 	if svc.uow_factory == nil {
 		lockorder.assert_tx_mutex_allowed()
@@ -277,6 +280,8 @@ destroy_effects :: proc(e: ^Effects) {
 	delete(e.notifications)
 	for m in e.merges do destroy_merge_effect(m)
 	delete(e.merges)
+	for n in e.nudges { delete(n.instance_id); delete(n.bridge_id); delete(n.line) }
+	delete(e.nudges)
 	for k in e.keys do delete(k)
 	delete(e.keys)
 }
@@ -312,6 +317,27 @@ flush_effects :: proc(svc: ^Service, e: ^Effects) {
 		if svc.on_tasks_changed != nil do svc.on_tasks_changed(svc.on_tasks_changed_ctx, c.chain_id, c.owner)
 	}
 	flush_merges(svc, e)
+	for n in e.nudges {
+		if svc.bridge_command_sink.send_runtime_command == nil do break
+		cmd_id := platform.generate_id(svc.ids, "cmd_nudge_")
+		cmd_json := agent.agent_pty_input_command_json(cmd_id, n.instance_id, strings.concatenate({n.line, "\r"}, context.temp_allocator))
+		defer delete(cmd_json)
+		_, _ = project.bridge_command_send_runtime(svc.bridge_command_sink, project.Runtime_Command{bridge_id = n.bridge_id, command_id = cmd_id, body_json = cmd_json})
+	}
+}
+
+Agent_Nudge :: struct {
+	instance_id: string,
+	bridge_id:   string,
+	line:        string,
+}
+
+// effect_nudge_instance queues one line typed into an agent's terminal after
+// commit; deduplicated per instance within the unit of work.
+effect_nudge_instance :: proc(u: ^Uow, instance_id, bridge_id, line: string) {
+	if u == nil || instance_id == "" || bridge_id == "" do return
+	for n in u.effects.nudges do if n.instance_id == instance_id do return
+	append(&u.effects.nudges, Agent_Nudge{instance_id = strings.clone(instance_id), bridge_id = strings.clone(bridge_id), line = strings.clone(first_line_trimmed(line))})
 }
 
 // effect_notify_coordinator queues a 1-line coordinator attention notification

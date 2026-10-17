@@ -371,6 +371,35 @@ on_start_success :: proc(svc: ^Service, inst: domain.Agent_Instance) {
 	_, _ = end_uow(svc, &u, acted)
 }
 
+// BOOT_LEASE_GRACE_SECONDS: after a hub restart every lease gets at least this
+// long before its TTL fires, so an outage longer than the TTL does not expire
+// (and count) attempts before the bridges are back to say their agents live.
+BOOT_LEASE_GRACE_SECONDS :: 300
+
+// grant_boot_lease_grace (boot, F2): extend leases that would expire within the
+// grace window to now + grace (never past the hard cap). Audited as
+// lease_extended{reason:hub_restart_grace}; extended_at is NOT set, so the
+// lease keeps its one-shot clock-jump extension.
+grant_boot_lease_grace :: proc(svc: ^Service) {
+	leases, lerr := iface.taskchain_list_all_leases(svc.repo)
+	if lerr.code != .None do return
+	now := platform.clock_now(svc.clock)
+	grace_until := add_seconds(now, BOOT_LEASE_GRACE_SECONDS)
+	for l in leases {
+		if to_ms(l.expires_at) >= to_ms(grace_until) do continue
+		next := l
+		next.expires_at = min_rfc3339(grace_until, l.hard_deadline_at)
+		if next.expires_at == l.expires_at do continue
+		if _, sok, _ := iface.taskchain_save_lease(svc.repo, next); !sok do continue
+		if task, tok, _ := iface.taskchain_get_task(svc.repo, l.task_id); tok {
+			p := json_begin()
+			json_str(&p, "lease_id", l.lease_id)
+			json_str(&p, "reason", "hub_restart_grace")
+			_, _, _ = append_event(svc.repo, svc.clock, task, hub_actor(), EV_LEASE_EXTENDED, json_end(&p))
+		}
+	}
+}
+
 // on_bridge_hello (plan §2.4): re-send unconfirmed grants on that bridge; stop
 // live non-coordinator instances that hold no lease (orphans whose lease expired
 // while the bridge was away); re-plan every chain with a held task.
@@ -381,8 +410,22 @@ on_bridge_hello :: proc(svc: ^Service, bridge_id: string, active_instance_ids: [
 	leases, lerr := iface.taskchain_list_all_leases(svc.repo)
 	if lerr.code == .None {
 		for l in leases {
-			if l.bridge_id != bridge_id || l.confirmed_at != "" || l.delivery != domain.LEASE_DELIVERY_WAKE do continue
-			if task, tok, _ := iface.taskchain_get_task(svc.repo, l.task_id); tok do effect_wake_lease(svc, &u, l, task)
+			if l.bridge_id != bridge_id do continue
+			if l.confirmed_at == "" {
+				if l.delivery != domain.LEASE_DELIVERY_WAKE do continue
+				if task, tok, _ := iface.taskchain_get_task(svc.repo, l.task_id); tok do effect_wake_lease(svc, &u, l, task)
+				continue
+			}
+			// F2: a confirmed holder that is still alive may have given up on a
+			// ham-ctl call while the hub/bridge link was down. Count the outage
+			// as presence (hub-side heartbeat) and tell it to carry on.
+			live := false
+			for id in active_instance_ids do if id == l.holder_instance_id { live = true; break }
+			if !live do continue
+			if _, hok, _ := heartbeat_in_uow(svc, &u, l, hub_actor(), "bridge_hello"); !hok do continue
+			if task, tok, _ := iface.taskchain_get_task(svc.repo, l.task_id); tok {
+				effect_nudge_instance(&u, l.holder_instance_id, bridge_id, fmt.tprintf("[taskv2] Hub connection restored: continue lease %s on '%s'. Re-run the ham-ctl command that failed (ham-ctl lease next shows your lease).", l.lease_id, task.title))
+			}
 		}
 	}
 	// Orphans: ONLY instances the lease system itself would have launched —
@@ -506,6 +549,7 @@ cancel_task :: proc(svc: ^Service, task: domain.Task, actor: Actor, reason: stri
 boot :: proc(svc: ^Service) {
 	if svc == nil || svc.repo == nil do return
 	init_task_metrics()
+	grant_boot_lease_grace(svc)
 	rebuild_timers(svc)
 	u, ok, _ := begin_uow(svc)
 	if !ok do return

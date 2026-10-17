@@ -9,6 +9,7 @@ import base64 "core:encoding/base64"
 import json "core:encoding/json"
 import "core:strings"
 import "core:sys/posix"
+import "core:time"
 
 // ── agent mode: local Bridge endpoint client (RTE2E-7) ───────────────────────
 // Agent mode talks ONLY to the local Bridge endpoint over JSONL v1 using the
@@ -1526,6 +1527,34 @@ ctl_agent_call_task :: proc(endpoint, token, method, params_json: string, args: 
 // line. Supports unix:<path> (primary, §12.0.2) and tcp:<host>:<port> (fallback).
 ctl_agent_local_call :: proc(endpoint, token, method, params_json: string) -> (string, bool) {
 	request := ctl_agent_jsonl_request(token, method, params_json)
+	// Task System v2 F2: while the bridge has no hub session it answers
+	// `hub_unreachable` WITHOUT sending anything, so the call is safe to retry.
+	// `retryable_unavailable` (sent, outcome unknown) is never retried.
+	started := time.tick_now()
+	backoff := CTL_HUB_RETRY_FIRST_BACKOFF
+	announced := false
+	for {
+		response, ok := ctl_agent_local_send(endpoint, request)
+		if ok && strings.contains(response, `"retryable_unavailable"`) {
+			fmt.eprintln("ham-ctl: the hub relay failed after the request was sent; its outcome is unknown. Check with `ham-ctl lease next` before retrying.")
+		}
+		if !ok || !strings.contains(response, `"hub_unreachable"`) do return response, ok
+		if time.tick_since(started) >= CTL_HUB_RETRY_WINDOW do return response, ok
+		if !announced {
+			fmt.eprintln("ham-ctl: hub unavailable (request not sent); retrying for up to 90s…")
+			announced = true
+		}
+		delete(response)
+		time.sleep(backoff)
+		backoff = min(backoff * 2, CTL_HUB_RETRY_MAX_BACKOFF)
+	}
+}
+
+CTL_HUB_RETRY_WINDOW :: 90 * time.Second
+CTL_HUB_RETRY_FIRST_BACKOFF :: 2 * time.Second
+CTL_HUB_RETRY_MAX_BACKOFF :: 15 * time.Second
+
+ctl_agent_local_send :: proc(endpoint, request: string) -> (string, bool) {
 	if strings.has_prefix(endpoint, "tcp:") do return ctl_agent_send_tcp(endpoint, request)
 	if strings.has_prefix(endpoint, "unix:") do return ctl_agent_send_unix(endpoint, request)
 	return "", false

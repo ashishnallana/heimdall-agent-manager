@@ -521,7 +521,9 @@ bridge_hub_runtime_worker :: proc() {
 			// REQ-REAP-SHELL-1: reconcile surviving shell sessions on pty-host
 			// against Hub's active shells list on reconnect to reap orphaned processes.
 			thread.run(bridge_shell_orphan_reconcile_now)
+			sync.atomic_store(&bridge_hub_runtime_up, true)
 			bridge_hub_runtime_loop(&conn)
+			sync.atomic_store(&bridge_hub_runtime_up, false)
 			// NOT beside the PTY stream teardown, and not inside
 			// bridge_hub_connection_teardown with it, deliberately: this one has no
 			// before-close requirement. It closes stdin fds, SIGTERMs language servers
@@ -553,6 +555,12 @@ bridge_hub_runtime_worker :: proc() {
 		bridge_hub_reconnect_sleep(&reconnect_failures)
 	}
 }
+
+// bridge_hub_runtime_up: true while a hub runtime session is established
+// (between bridge_ready and the loop ending). The local endpoint answers lease
+// verbs with `hub_unreachable` while it is false — the request was provably
+// never sent, so ham-ctl may retry it (Task System v2 F2).
+bridge_hub_runtime_up: bool
 
 // REQ-ERR-PROTO-B: reconnects back off exponentially from 500ms to 30s with +-20%
 // jitter, so a hub restart is not met by every bridge redialling twice a second in
