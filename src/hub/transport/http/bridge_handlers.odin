@@ -500,15 +500,19 @@ bridge_enrollment_cancel_handler :: proc(ctx: rawptr, req: Request) -> Response 
 	defer delete(family)
 	enroll_key := bridge_enroll_registry_key(bridge.bridge_id)
 	defer delete(enroll_key)
-	// FIRST, while the socket is certainly still up: revoking the family below
-	// tears it down. A process that already saved its key undoes it on this; one
-	// that misses it still sees its credential refused on reconnect.
-	bridge_enroll_send_result(h.bridge_runtime_registry, enroll_key, false)
-	removed, err := bridge_service.rollback_pending_enrollment(h.bridges, bridge.bridge_id, family)
+	// The verdict comes from the rollback itself, never from the request: a commit
+	// that won the write lock first has made this bridge enrolled, and telling its
+	// process committed:false could make it discard the live credential.
+	rolled_back, removed, err := bridge_service.rollback_pending_enrollment(h.bridges, bridge.bridge_id, family)
 	if err.code != .None do return respond_error(err, req.request_id)
-	_ = bridge_service.close_bridge_connection(h.bridges, enroll_key)
+	if rolled_back {
+		// Before the close: a process that already saved its key undoes it on this;
+		// one that misses it still sees its credential refused on reconnect.
+		bridge_enroll_send_result(h.bridge_runtime_registry, enroll_key, false)
+		_ = bridge_service.close_bridge_connection(h.bridges, enroll_key)
+	}
 	publish_bridge_enrollment_changed(h, string(bridge.owner_user_id), bridge.bridge_id)
-	return respond_success(fmt.tprintf("{{\"bridge_id\":\"%s\",\"rolled_back\":true,\"row_deleted\":%v}}", bridge.bridge_id, removed), req.request_id, auth_ctx_server_time(req))
+	return respond_success(fmt.tprintf("{{\"bridge_id\":\"%s\",\"rolled_back\":%v,\"committed\":%v,\"row_deleted\":%v}}", bridge.bridge_id, rolled_back, !rolled_back, removed), req.request_id, auth_ctx_server_time(req))
 }
 
 bridge_public_key_handler :: proc(ctx: rawptr, req: Request) -> Response {

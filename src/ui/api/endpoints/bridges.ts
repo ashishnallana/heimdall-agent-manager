@@ -114,8 +114,15 @@ export async function fetchPendingBridgeEnrollments(): Promise<PendingBridgeEnro
 }
 
 /** Abandons a pending enrollment now instead of at its deadline. Idempotent. */
-export async function cancelBridgeEnrollment(bridgeId: string): Promise<void> {
-  await cookieMutation(`/bridges/${encodeURIComponent(bridgeId)}/enrollment/cancel`, 'POST', {});
+/**
+ * Cancels a pending enrollment (REQ-EA-3). `rolledBack` is the Hub's verdict: it is
+ * false when the bridge's commit won the race and it is enrolled after all, so the
+ * caller must not report a rollback. A Hub that predates the field reports none,
+ * which reads as rolled back, as it always did.
+ */
+export async function cancelBridgeEnrollment(bridgeId: string): Promise<{ rolledBack: boolean }> {
+  const res = await cookieMutation(`/bridges/${encodeURIComponent(bridgeId)}/enrollment/cancel`, 'POST', {});
+  return { rolledBack: (res as any)?.rolled_back !== false };
 }
 
 /**

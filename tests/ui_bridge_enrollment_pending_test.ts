@@ -69,10 +69,17 @@ test('REQ-EA-3: cancel posts to the per-bridge cancel endpoint', async () => {
       calls.push({ url: String(url), method: String(init?.method || 'GET') });
       return json({ data: { bridge_id: 'brg_p', rolled_back: true, row_deleted: true } });
     }) as any;
-    await cancelBridgeEnrollment('brg_p');
+    assert.deepEqual(await cancelBridgeEnrollment('brg_p'), { rolledBack: true });
     assert.equal(calls.length, 1);
     assert.match(calls[0].url, /\/bridges\/brg_p\/enrollment\/cancel$/);
     assert.equal(calls[0].method, 'POST');
+
+    // A commit that won the race: the Hub says so, and the caller must not report a rollback.
+    globalThis.fetch = (async () => json({ data: { bridge_id: 'brg_p', rolled_back: false, committed: true, row_deleted: false } })) as any;
+    assert.deepEqual(await cancelBridgeEnrollment('brg_p'), { rolledBack: false });
+    // An older Hub without the field keeps the old meaning.
+    globalThis.fetch = (async () => json({ data: { bridge_id: 'brg_p' } })) as any;
+    assert.deepEqual(await cancelBridgeEnrollment('brg_p'), { rolledBack: true });
   } finally {
     globalThis.fetch = realFetch;
   }

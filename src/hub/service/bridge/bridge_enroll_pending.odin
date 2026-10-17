@@ -129,20 +129,43 @@ commit_pending_enrollment :: proc(service: ^Bridge_Service, input: Pending_Commi
 // revoked, then a new bridge's row is hard-deleted. delete_pending only matches a
 // row that is still pending, so an attach target — or a bridge committed a moment
 // ago — is never removed by this path. Idempotent: rolling back twice is harmless.
-// Returns whether a row was deleted.
-rollback_pending_enrollment :: proc(service: ^Bridge_Service, bridge_id, family_id: string) -> (bool, domain.Domain_Error) {
-	if service == nil || service.repo == nil do return false, domain.domain_error(.Internal_Error, "bridge service is not configured")
-	if bridge_id == "" do return false, domain.domain_error(.Validation_Failed, "bridge_id is required")
+//
+// `rolled_back` is the VERDICT, and callers must gate on it: only when it is true may
+// they tell the enrolling process committed:false, close its socket, or report a
+// rollback. It is false exactly when a commit won the write lock first and promoted
+// the family — the bridge is enrolled, and a committed:false sent now could reach the
+// process before the commit's committed:true and make it discard a credential the
+// hub already treats as live.
+rollback_pending_enrollment :: proc(service: ^Bridge_Service, bridge_id, family_id: string) -> (rolled_back: bool, row_deleted: bool, err: domain.Domain_Error) {
+	if service == nil || service.repo == nil do return false, false, domain.domain_error(.Internal_Error, "bridge service is not configured")
+	if bridge_id == "" do return false, false, domain.domain_error(.Validation_Failed, "bridge_id is required")
 	now := platform.clock_now(service.clock)
+	committed := false
 	if family_id != "" {
 		// Only a family still in the enroll scope is ours to revoke; a committed one
 		// was promoted and is the bridge's real credential now. The scope test is
 		// inside the revoke statement itself: a read-then-revoke would race a commit
 		// landing in between and revoke the credential it had just made live.
-		_, _, _ = iface.bridge_revoke_token_family_in_scope(service.repo, family_id, BRIDGE_ENROLL_TOKEN_SCOPE, now)
+		changed, revoke_ok, revoke_err := iface.bridge_revoke_token_family_in_scope(service.repo, family_id, BRIDGE_ENROLL_TOKEN_SCOPE, now)
+		if !revoke_ok do return false, false, revoke_err
+		// Nothing left to revoke: either an earlier rollback did it (still rolled
+		// back), or a commit promoted the family. Only the latter has live
+		// runtime-scope rows, and the promote is final, so this read cannot race.
+		if changed == 0 do committed = family_has_live_scope(service, family_id, BRIDGE_TOKEN_SCOPE)
 	}
-	removed, err := iface.bridge_delete_pending(service.repo, bridge_id)
-	return removed, err
+	if committed do return false, false, domain.Domain_Error{}
+	removed, del_err := iface.bridge_delete_pending(service.repo, bridge_id)
+	if del_err.code != .None do return false, removed, del_err
+	// With no family to judge by, the deleted row is the only evidence of a rollback.
+	return family_id != "" || removed, removed, domain.Domain_Error{}
+}
+
+@(private = "file")
+family_has_live_scope :: proc(service: ^Bridge_Service, family_id, scope: string) -> bool {
+	tokens, _ := iface.bridge_list_tokens_by_family(service.repo, family_id)
+	defer free_bridge_tokens(tokens)
+	for t in tokens do if t.scope == scope && t.revoked_at == "" do return true
+	return false
 }
 
 // Rolled_Back_Enrollment names one enrollment the sweep undid, so the caller can
@@ -199,7 +222,12 @@ sweep_expired_enrollments :: proc(service: ^Bridge_Service) -> []Rolled_Back_Enr
 		if issued_ok && now_ms - issued_ms < i64(BRIDGE_ENROLL_PENDING_SECONDS) * 1000 do continue
 		seen[strings.clone(t.family_id)] = true
 		owner := pending_owner_clone(service, t.bridge_id)
-		removed, _ := rollback_pending_enrollment(service, t.bridge_id, t.family_id)
+		rolled_back, removed, _ := rollback_pending_enrollment(service, t.bridge_id, t.family_id)
+		// A commit that landed after the listing above wins: no rollback to report.
+		if !rolled_back {
+			delete(owner)
+			continue
+		}
 		append(&out, Rolled_Back_Enrollment{bridge_id = strings.clone(t.bridge_id), owner_user_id = owner, row_deleted = removed})
 	}
 	free_bridge_tokens(tokens)
@@ -208,7 +236,7 @@ sweep_expired_enrollments :: proc(service: ^Bridge_Service) -> []Rolled_Back_Enr
 	for b in rows {
 		until_ms, until_ok := platform.rfc3339_to_unix_ms(b.enrollment_pending_until)
 		if until_ok && now_ms < until_ms do continue
-		removed, _ := rollback_pending_enrollment(service, b.bridge_id, "")
+		_, removed, _ := rollback_pending_enrollment(service, b.bridge_id, "")
 		if !removed do continue
 		append(&out, Rolled_Back_Enrollment{bridge_id = strings.clone(b.bridge_id), owner_user_id = strings.clone(string(b.owner_user_id)), row_deleted = true})
 	}

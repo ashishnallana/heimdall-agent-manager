@@ -167,3 +167,76 @@ test_duplicate_commit_is_idempotent_at_the_service :: proc(t: ^testing.T) {
 	testing.expectf(t, b_ok, "a duplicate commit is a success, got %v", b_err.message)
 	testing.expect_value(t, live_scope_count(f, enrolled.family_id, BRIDGE_TOKEN_SCOPE), 2)
 }
+
+// --- the rollback's verdict: a commit that won the race is NOT reported rolled back ---
+//
+// Cancel and the reaper gate committed:false, the socket close and the 'rolled back'
+// event on this verdict. Calling rollback after the commit is exactly the interleaving
+// where the commit takes the write lock between the caller's read and its revoke.
+
+@(test)
+test_rollback_after_a_commit_reports_committed_new_bridge :: proc(t: ^testing.T) {
+	f := pending_fixture_open(t, "rb_after_new")
+	defer pending_fixture_close(f)
+	enrolled, ok, err := enroll_bridge_from_device_grant(&f.svc, enroll_input("", "ea-new", true))
+	testing.expect(t, ok, err.message)
+	bridge_id := strings.clone(enrolled.bridge.bridge_id, context.temp_allocator)
+	family := strings.clone(enrolled.family_id, context.temp_allocator)
+	committed, commit_ok, commit_err := commit_pending_enrollment(&f.svc, Pending_Commit_Input{bridge_id = bridge_id, family_id = family})
+	defer domain.bridge_destroy(&committed)
+	testing.expect(t, commit_ok, commit_err.message)
+
+	rolled_back, removed, rb_err := rollback_pending_enrollment(&f.svc, bridge_id, family)
+	testing.expect_value(t, rb_err.code, domain.Error_Code.None)
+	testing.expect(t, !rolled_back, "a committed enrollment must not be reported rolled back")
+	testing.expect(t, !removed, "the committed row is kept")
+	testing.expect_value(t, live_scope_count(f, family, BRIDGE_TOKEN_SCOPE), 2)
+	row, row_ok, _ := iface.bridge_get_bridge(&f.repo, bridge_id)
+	defer domain.bridge_destroy(&row)
+	testing.expect(t, row_ok, "the row survives")
+}
+
+@(test)
+test_rollback_after_a_commit_reports_committed_attach :: proc(t: ^testing.T) {
+	f := pending_fixture_open(t, "rb_after_attach")
+	defer pending_fixture_close(f)
+	first, ok, err := enroll_bridge_from_device_grant(&f.svc, enroll_input("", "ea-old", false))
+	testing.expect(t, ok, err.message)
+	bridge_id := strings.clone(first.bridge.bridge_id, context.temp_allocator)
+	attach, attach_ok, attach_err := enroll_bridge_from_device_grant(&f.svc, enroll_input(bridge_id, "", true))
+	testing.expect(t, attach_ok, attach_err.message)
+	new_family := strings.clone(attach.family_id, context.temp_allocator)
+	committed, commit_ok, commit_err := commit_pending_enrollment(&f.svc, Pending_Commit_Input{bridge_id = bridge_id, family_id = new_family})
+	defer domain.bridge_destroy(&committed)
+	testing.expect(t, commit_ok, commit_err.message)
+
+	rolled_back, _, rb_err := rollback_pending_enrollment(&f.svc, bridge_id, new_family)
+	testing.expect_value(t, rb_err.code, domain.Error_Code.None)
+	testing.expect(t, !rolled_back, "a committed attach must not be reported rolled back")
+	testing.expect_value(t, live_scope_count(f, new_family, BRIDGE_TOKEN_SCOPE), 2)
+}
+
+@(test)
+test_rollback_before_a_commit_rolls_back_and_is_idempotent :: proc(t: ^testing.T) {
+	f := pending_fixture_open(t, "rb_before")
+	defer pending_fixture_close(f)
+	enrolled, ok, err := enroll_bridge_from_device_grant(&f.svc, enroll_input("", "ea-new", true))
+	testing.expect(t, ok, err.message)
+	bridge_id := strings.clone(enrolled.bridge.bridge_id, context.temp_allocator)
+	family := strings.clone(enrolled.family_id, context.temp_allocator)
+
+	rolled_back, removed, _ := rollback_pending_enrollment(&f.svc, bridge_id, family)
+	testing.expect(t, rolled_back, "a pending enrollment rolls back")
+	testing.expect(t, removed, "a new bridge's pending row is deleted")
+	testing.expect_value(t, live_scope_count(f, family, BRIDGE_ENROLL_TOKEN_SCOPE), 0)
+
+	again, removed_again, _ := rollback_pending_enrollment(&f.svc, bridge_id, family)
+	testing.expect(t, again, "rolling back twice still reads as rolled back")
+	testing.expect(t, !removed_again, "nothing left to delete")
+
+	// The commit that loses the race finds nothing to promote.
+	committed, commit_ok, _ := commit_pending_enrollment(&f.svc, Pending_Commit_Input{bridge_id = bridge_id, family_id = family})
+	defer domain.bridge_destroy(&committed)
+	testing.expect(t, !commit_ok, "a rolled-back family cannot be committed")
+	testing.expect_value(t, live_scope_count(f, family, BRIDGE_TOKEN_SCOPE), 0)
+}

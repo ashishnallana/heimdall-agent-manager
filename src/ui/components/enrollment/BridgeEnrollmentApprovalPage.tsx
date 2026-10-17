@@ -557,8 +557,10 @@ export default function BridgeEnrollmentApprovalPage() {
     if (!bridgeId || cancellingEnrollment) return;
     setCancellingEnrollment(true);
     try {
-      await cancelBridgeEnrollment(bridgeId);
-      setDelivery({ phase: 'rolled-back', reason: 'You cancelled the enrollment.' });
+      const { rolledBack } = await cancelBridgeEnrollment(bridgeId);
+      // The vault key landed and the enrollment committed before the cancel did.
+      if (!rolledBack) setDelivery({ phase: 'delivered' });
+      else setDelivery({ phase: 'rolled-back', reason: 'You cancelled the enrollment.' });
     } catch (err: any) {
       setDelivery({ phase: 'failed', message: `Could not cancel: ${String(err?.message || err)}` });
     } finally {
