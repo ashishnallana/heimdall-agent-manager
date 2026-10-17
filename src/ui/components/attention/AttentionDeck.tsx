@@ -348,7 +348,8 @@ export function AttentionDeck({
     scheduler.settle(hideKey(item));
     setSlide('right');
     try {
-      await acceptCard(item.card_id, false, { note });
+      // expected_block: answer the question the user actually saw, not a newer one.
+      await acceptCard(item.card_id, false, { note, expected_block: item.details.block_id || undefined });
     } catch (err) {
       scheduler.unsettle(hideKey(item));
       throw err;

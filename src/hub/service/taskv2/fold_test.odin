@@ -265,3 +265,27 @@ test_raw_object_field_is_verbatim :: proc(t: ^testing.T) {
 	_, nested_key := raw_object_field(`{"outer":{"waiting_on":{"kind":"x"}}}`, "waiting_on")
 	testing.expect(t, !nested_key, "only top-level keys match")
 }
+
+// answered_question names the block an `answered` event cleared — never an
+// older, already-answered question, and system blocks (no `blocked` event)
+// included (review of task_18df5257ac412b52, finding 2).
+@(test)
+test_answered_question_is_the_active_block :: proc(t: ^testing.T) {
+	q1 := ev(2, EV_BLOCKED, `{"lease_id":"l1","attempt_no":1,"waiting_on":{"kind":"human","reason":"Q1?"}}`)
+	// Order A: an agent question answered, then a merge conflict answered.
+	a := []domain.Task_Event{
+		grant(1), q1, ev(3, EV_ANSWERED, `{"note":"A1"}`),
+		grant(4, "l2"), ev(5, EV_SUBMITTED, `{"lease_id":"l2","attempt_no":2}`), ev(6, EV_APPROVED),
+		ev(7, EV_MERGE_CONFLICT, `{"branch":"b","files":"calc/stats.py"}`), ev(8, EV_ANSWERED, `{"note":"A2"}`),
+	}
+	testing.expect_value(t, answered_question(a, 2, input_task()), "Q1?")
+	testing.expect_value(t, answered_question(a, 7, input_task()), "Your finished branch did not merge (conflicting files: calc/stats.py).")
+	// Order B: the merge conflict first, then an agent question.
+	b := []domain.Task_Event{
+		grant(1), ev(2, EV_SUBMITTED, `{"lease_id":"l1","attempt_no":1}`), ev(3, EV_APPROVED),
+		ev(4, EV_MERGE_CONFLICT, `{"branch":"b","files":"README.md"}`), ev(5, EV_ANSWERED, `{"note":"A1"}`),
+		grant(6, "l2"), ev(7, EV_BLOCKED, `{"lease_id":"l2","attempt_no":2,"waiting_on":{"kind":"human","reason":"Q2?"}}`), ev(8, EV_ANSWERED, `{"note":"A2"}`),
+	}
+	testing.expect_value(t, answered_question(b, 4, input_task()), "Your finished branch did not merge (conflicting files: README.md).")
+	testing.expect_value(t, answered_question(b, 7, input_task()), "Q2?")
+}

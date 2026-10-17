@@ -29,7 +29,7 @@ const enc = encodeURIComponent;
  * (task.review) or, with `{note}`, Answer (task.answer) — checked server-side
  * against the card's guard, so a stale card never acts on a newer attempt.
  */
-export const acceptCard = (cardId: string, keepalive: boolean, body: { note?: string } = {}) =>
+export const acceptCard = (cardId: string, keepalive: boolean, body: { note?: string; expected_block?: string } = {}) =>
   send(`/cards/${enc(cardId)}/accept`, 'POST', body, keepalive);
 
 /**

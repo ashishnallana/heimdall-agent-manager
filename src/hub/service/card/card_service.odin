@@ -479,6 +479,9 @@ evaluate_guard :: proc(s: ^Card_Service, owner: domain.User_ID, card: domain.Car
 		if want := json_obj_string(obj, "expected_attention"); want != "" && want != ("review" if kind == .Review else "blocked") {
 			return false, "task now needs something else from you"
 		}
+		if want := json_obj_string(obj, "expected_block"); want != "" && want != attention_block_id(task.blocked_on_json) {
+			return false, "the task is blocked on something newer"
+		}
 	}
 
 	mem_id := json_obj_string(obj, "memory_proposal_id")
@@ -721,6 +724,10 @@ Card_Decision :: struct {
 	note:          string,
 	summary:       string,
 	findings_json: string,
+	// expected_block: the block the client showed the user (details.block_id).
+	// The card row is re-projected server-side when the agent blocks again, so
+	// only the client knows which question the user actually answered.
+	expected_block: string,
 }
 
 // task_card_op: the op a task card advertises (task.review | task.answer), "" for
@@ -870,6 +877,8 @@ accept_card :: proc(s: ^Card_Service, auth: contracts.Auth_Context, id: domain.C
 				task, found, gerr := iface.taskchain_get_task(s.taskchains.repo, tid)
 				if !found {
 					t_err = gerr
+				} else if decision.expected_block != "" && decision.expected_block != attention_block_id(task.blocked_on_json) {
+					t_err = domain.domain_error(.Conflict, "the agent has asked something newer; reload the card")
 				} else {
 					_, t_ok, t_err = taskv2.task_answer(s.taskchains.engine, task, taskv2.actor_from_auth(user_auth), decision.note)
 				}

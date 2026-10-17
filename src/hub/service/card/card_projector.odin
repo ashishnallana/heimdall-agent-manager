@@ -3,6 +3,7 @@ package card
 import "base:runtime"
 import "core:encoding/json"
 import "core:fmt"
+import "core:hash"
 import "core:strings"
 import "core:mem/virtual"
 import "core:sync"
@@ -167,6 +168,12 @@ build_task_card :: proc(s: ^Card_Service, task: domain.Task, kind: taskv2.User_A
 	strings.write_int(&guard, task.attempt_no)
 	strings.write_string(&guard, `,"expected_attention":"`)
 	strings.write_string(&guard, attention)
+	if kind == .Blocked {
+		// Pin WHICH block the card answers: a newer block in the same attempt
+		// (the agent asks again) must not take the answer written for this one.
+		strings.write_string(&guard, `","expected_block":"`)
+		strings.write_string(&guard, attention_block_id(task.blocked_on_json))
+	}
 	strings.write_string(&guard, `"}`)
 
 	refs := strings.builder_make(context.temp_allocator)
@@ -199,7 +206,7 @@ build_task_card :: proc(s: ^Card_Service, task: domain.Task, kind: taskv2.User_A
 	contracts.write_json_string(&details, badge)
 	strings.write_string(&details, `","task_kind":"`)
 	contracts.write_json_string(&details, domain.task_kind_string(task.kind))
-	fmt.sbprintf(&details, `","attempt_no":%d,"bridge_id":"`, task.attempt_no)
+	fmt.sbprintf(&details, `","attempt_no":%d,"block_id":"%s","bridge_id":"`, task.attempt_no, attention_block_id(task.blocked_on_json) if kind == .Blocked else "")
 	contracts.write_json_string(&details, task.bridge_id)
 	strings.write_string(&details, `","holder_instance_id":"`)
 	contracts.write_json_string(&details, holder)
@@ -246,6 +253,12 @@ build_task_card :: proc(s: ^Card_Service, task: domain.Task, kind: taskv2.User_A
 		// A new state, attention kind, block or attempt reactivates the card.
 		source_marker    = fmt.tprintf("v2|%s|%s|%s|%d|%s", state, attention, task.blocked_on_json, task.attempt_no, task.updated_at),
 	}
+}
+
+// attention_block_id identifies one block: a hash of the task's blocked_on
+// JSON, which carries the block's since_ms, kind and reason.
+attention_block_id :: proc(blocked_on_json: string) -> string {
+	return fmt.tprintf("%08x", hash.fnv32a(transmute([]u8)blocked_on_json))
 }
 
 // attention_task_holder: the instance that worked the task — the live work

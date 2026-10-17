@@ -152,16 +152,8 @@ build_pack_json :: proc(svc: ^Service, chain: domain.Task_Chain, task: domain.Ta
 	for i := len(evs) - 1; i >= 0; i -= 1 {
 		if evs[i].kind == EV_SUBMITTED do break
 		if evs[i].kind != EV_ANSWERED do continue
-		question := ""
-		for j := i - 1; j >= 0; j -= 1 {
-			if evs[j].kind != EV_BLOCKED do continue
-			if w, wok := jsonx.extract_raw_object(evs[j].payload_json, "waiting_on", true, context.temp_allocator); wok {
-				question = jsonx.extract_string(w, "reason", "", true, context.temp_allocator)
-			}
-			break
-		}
 		a := json_begin()
-		json_str(&a, "question", question)
+		json_str(&a, "question", answered_question(evs, i, fold_input_for_task(task, true)))
 		json_str(&a, "note", jsonx.extract_string(evs[i].payload_json, "note", "", true, context.temp_allocator))
 		json_str(&a, "by", evs[i].actor_kind)
 		json_raw(&o, "answer", json_end(&a))
@@ -663,4 +655,31 @@ chain_summary_set :: proc(svc: ^Service, auth: contracts.Auth_Context, chain_id_
 	if !sok do return {}, false, serr
 	if cerr.code != .None do return {}, false, cerr
 	return saved, true, domain.Domain_Error{}
+}
+
+// answered_question: what the `answered` event at evs[at] answered — the
+// blocked_on that was active just before it, read from the fold of the events
+// before it (so system blocks the fold raises itself — budget, oscillation,
+// merge_conflict — are covered, and an older, already-answered question never
+// is). Pure; temp-allocated.
+answered_question :: proc(evs: []domain.Task_Event, at: int, input: Fold_Input) -> string {
+	if at <= 0 || at >= len(evs) do return ""
+	blocked := fold_task(evs[:at], input).blocked_on_json
+	if blocked == "" do return ""
+	reason := jsonx.extract_string(blocked, "reason", "", true, context.temp_allocator)
+	switch reason {
+	case "merge_conflict":
+		for j := at - 1; j >= 0; j -= 1 {
+			if evs[j].kind != EV_MERGE_CONFLICT do continue
+			if files := jsonx.extract_string(evs[j].payload_json, "files", "", true, context.temp_allocator); files != "" {
+				return fmt.tprintf("Your finished branch did not merge (conflicting files: %s).", files)
+			}
+			break
+		}
+		return "Your finished branch did not merge."
+	case "budget_exhausted": return "The task ran out of attempts."
+	case "oscillation":      return "The task went through too many review rounds."
+	case "blocked":          return ""
+	}
+	return reason
 }

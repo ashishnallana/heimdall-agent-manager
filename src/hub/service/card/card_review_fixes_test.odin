@@ -118,3 +118,31 @@ test_review_fix_read_errors_never_retire_cards :: proc(t: ^testing.T) {
 	testing.expectf(t, c3_ok, "card readable after reconcile: %v %s", c3_err.code, c3_err.message)
 	testing.expect_value(t, c3.status, domain.CARD_STATUS_PENDING)
 }
+
+// A blocked card pins the block it shows: once the agent blocks again (a new
+// question in the same attempt), the old card's guard and a client Answer that
+// names the old block are refused (review of task_18df5257ac412b52, finding 1).
+@(test)
+test_review_fix_blocked_card_pins_the_block :: proc(t: ^testing.T) {
+	h: Projector_Harness
+	ph_open(t, &h, "att_fix_pin_block")
+	defer ph_close(&h)
+	task := ph_task("task_q", .In_Validation, "2026-10-01T02:00:00Z")
+	ph_save_task(t, &h, task)
+	cid := attention_task_card_id("task_q")
+	old_card, ok := ph_card(t, &h, cid)
+	testing.expect(t, ok, "question card projected")
+	old_block := attention_block_id(task.blocked_on_json)
+
+	// The agent asks something newer in the same attempt.
+	task.blocked_on_json = `{"kind":"human","reason":"And which port?","since_ms":2}`
+	task.updated_at = "2026-10-01T03:00:00Z"
+	_, _, _ = iface.taskchain_save_task(&h.tasks, task) // no notify: the deck still holds the old card
+	guard_ok, _ := evaluate_guard(&h.svc, PH_OWNER, old_card)
+	testing.expect(t, !guard_ok, "the old card's guard refuses the newer block")
+
+	ph_save_task(t, &h, task) // re-projected for the new question
+	_, acc_ok, acc_err := accept_card(&h.svc, contracts.Auth_Context{kind = .User_Token, user_id = string(PH_OWNER)}, cid, Card_Decision{note = "answer to the old question", expected_block = old_block})
+	testing.expect(t, !acc_ok, "an Answer written for the old block is refused")
+	testing.expect_value(t, acc_err.code, domain.Error_Code.Conflict)
+}

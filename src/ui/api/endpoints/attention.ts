@@ -34,6 +34,8 @@ export type AttentionTaskDetails = {
   state?: string;
   task_kind?: string;
   attempt_no?: number;
+  /** Identity of the block a blocked card shows; sent back with Answer. */
+  block_id?: string;
   holder_instance_id?: string;
 };
 
