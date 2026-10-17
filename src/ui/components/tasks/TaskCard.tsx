@@ -100,7 +100,7 @@ export const TaskCard: React.FC<TaskCardProps> = ({
   const workerLabel = people.assignee
     ? names.agent(people.assignee)
     : people.workers.length
-      ? `any of ${people.workers.map(names.agent).join(', ')}`
+      ? people.workers.map(names.agent).join(', ')
       : 'no worker in fleet';
   const reviewerLabel = [...people.reviewers.map(names.agent), ...(people.userApproval ? ['you'] : [])].join(', ');
   const deps = task.depends_on || [];

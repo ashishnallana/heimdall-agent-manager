@@ -136,7 +136,10 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
   const verify = verifyData?.facet;
   const output = outputData?.facet;
   const findings = findingsData?.facet;
-  const changedFiles: string[] = Array.isArray(vcs?.files) ? vcs.files : [];
+  // The bridge reports files as paths or as {path, status, add, del} objects.
+  const changedFiles: { path: string; add?: number; del?: number }[] = (Array.isArray(vcs?.files) ? vcs.files : [])
+    .map((f: any) => (typeof f === 'string' ? { path: f } : { path: String(f?.path || ''), add: f?.add, del: f?.del }))
+    .filter((f: { path: string }) => f.path);
 
   const [diffFile, setDiffFile] = useState<string | null>(null);
   const { data: diffData } = useFetchCommitDiffQuery(
@@ -348,14 +351,17 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
       {changedFiles.length > 0 && (
         <Block title="Changes" collapsible debugId="task-details-changes" aside={<Text role="caption" tone="faint">{changedFiles.length} files</Text>}>
           <div className="flex flex-wrap gap-1">
-            {changedFiles.map((file) => (
+            {changedFiles.map(({ path, add, del }) => (
               <Button
-                key={file}
+                key={path}
                 size="sm"
-                variant={diffFile === file ? 'secondary' : 'ghost'}
-                onClick={() => setDiffFile(diffFile === file ? null : file)}
+                variant={diffFile === path ? 'secondary' : 'ghost'}
+                onClick={() => setDiffFile(diffFile === path ? null : path)}
               >
-                <span className="font-mono">{file}</span>
+                <span className="font-mono">{path}</span>
+                {typeof add === 'number' && typeof del === 'number' && (
+                  <span className="ml-1 font-mono text-faint">+{add} -{del}</span>
+                )}
               </Button>
             ))}
           </div>

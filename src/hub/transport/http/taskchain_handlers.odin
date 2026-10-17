@@ -294,6 +294,9 @@ Task_Chain_Fleet_Wire :: struct {
 	restart_failures:       Maybe([]Fleet_Restart_Failure) `json:"restart_failures,omitempty"`,
 	// What the matcher would apply for this row (plan REQ-UI-12); list only.
 	effective:              Maybe(taskchain_service.Effective_Placement) `json:"effective,omitempty"`,
+	// implicit: not a stored row — the Soloist coordinator works as the chain's
+	// worker without one (list only; editing it creates a real row).
+	implicit:               bool                           `json:"implicit,omitempty"`,
 }
 
 Task_Comment_Wire :: struct {
@@ -1902,9 +1905,18 @@ list_chain_fleets_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	chain, chain_ok, _ := taskchain_service.get_chain(h.taskchains, auth_ctx, chain_id)
 	members, _ := taskchain_service.list_chain_members(h.taskchains, auth_ctx, chain_id)
 	defer delete(members)
+	rows := make([dynamic]domain.Task_Chain_Fleet, 0, len(fleets) + 1, context.temp_allocator)
+	append(&rows, ..fleets)
+	implicit_agent := ""
+	if chain_ok {
+		if row, has := taskchain_service.implicit_solo_worker(h.taskchains, chain, fleets); has {
+			append(&rows, row)
+			implicit_agent = row.agent_id
+		}
+	}
 	b := strings.builder_make()
 	strings.write_byte(&b, '[')
-	for f, i in fleets {
+	for f, i in rows {
 		if i > 0 do strings.write_byte(&b, ',')
 		active_count := 0
 		for m in members {
@@ -1921,6 +1933,7 @@ list_chain_fleets_handler :: proc(ctx: rawptr, req: Request) -> Response {
 			}
 		}
 		wire := make_chain_fleet_wire(f, active_count)
+		wire.implicit = implicit_agent != "" && f.agent_id == implicit_agent
 		if chain_ok do wire.effective = taskchain_service.effective_placement(h.taskchains, chain, f)
 		data, _ := json.marshal(wire, JSON_MARSHAL_OPT, allocator = context.temp_allocator)
 		strings.write_string(&b, string(data))

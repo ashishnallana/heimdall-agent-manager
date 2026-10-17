@@ -1898,6 +1898,13 @@ list_fleets :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, c
 
 list_chain_fleets :: list_fleets
 
+// implicit_solo_worker: the Soloist coordinator's implicit worker row (no fleet
+// row of its own), for read paths; false on a bare service or any other chain.
+implicit_solo_worker :: proc(service: ^Taskchain_Service, chain: domain.Task_Chain, fleets: []domain.Task_Chain_Fleet) -> (domain.Task_Chain_Fleet, bool) {
+	if service.engine == nil do return {}, false
+	return taskv2.implicit_solo_worker(service.engine, chain, fleets)
+}
+
 upsert_fleet_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, input: Upsert_Fleet_Input) -> (domain.Task_Chain_Fleet, domain.Domain_Error) {
 	trimmed_agent := strings.trim_space(input.agent_id)
 	if trimmed_agent == "" do return domain.Task_Chain_Fleet{}, domain.domain_error(.Validation_Failed, "agent_id is required")

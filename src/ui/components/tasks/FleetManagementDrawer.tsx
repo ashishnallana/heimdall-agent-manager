@@ -988,6 +988,9 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
               const effectiveCapacity = draftCapacities[agentId] ?? fleet.capacity ?? 1;
               const origCapacity = getOriginalCapacity(agentId);
               const isPersisted = origCapacity !== null;
+              // The Soloist coordinator's implicit worker row: not stored, so there is
+              // nothing to delete; saving an edit stores it as a real row.
+              const isImplicit = Boolean((fleet as any).implicit);
               const activeCount = fleet.active_count ?? fleet.activeCount ?? 0;
               const isSaturated = activeCount >= effectiveCapacity;
 
@@ -1084,7 +1087,12 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
                       <Badge tone={isSaturated ? 'warning' : 'neutral'} className="shrink-0 whitespace-nowrap">
                         {isSaturated ? 'Saturated' : 'Available'}
                       </Badge>
-                      <button
+                      {isImplicit && (
+                        <span title="Solo mode: the coordinator works the tasks itself without a stored fleet row.">
+                          <Badge tone="info" className="shrink-0 whitespace-nowrap">Solo</Badge>
+                        </span>
+                      )}
+                      {!isImplicit && <button
                         type="button"
                         data-debug-id={`fleet-delete-role-btn-${agentId}`}
                         onClick={() => void handleRemoveFleet(agentId, isPersisted)}
@@ -1094,7 +1102,7 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
                         className="rounded border border-subtle bg-surface px-1.5 py-1 text-[10px] font-semibold text-muted hover:text-danger hover:border-danger/40 transition-colors cursor-pointer disabled:opacity-40"
                       >
                         Remove
-                      </button>
+                      </button>}
                     </div>
                   </div>
 

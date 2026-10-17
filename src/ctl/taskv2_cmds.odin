@@ -299,6 +299,17 @@ ctl_v2_task_publish :: proc(endpoint, token, tid: string, args: []string) {
 // ctl_read_json_file_flag reads `--<flag> <path>` and returns the file's JSON
 // text (validated to parse). Exits 1 on a missing/invalid file. ("", false)
 // when the flag is absent.
+// ctl_handoff_flags: the handoff object from --handoff-file, or {next_steps}
+// from --next-steps (the one-line form TASK.md teaches). Not both.
+ctl_handoff_flags :: proc(args: []string) -> (string, bool) {
+	next := strings.trim_space(option_value(args, "--next-steps", ""))
+	h, has_file := ctl_read_json_file_flag(args, "--handoff-file")
+	if has_file && next != "" { fmt.println(`{"ok":false,"message":"use --next-steps or --handoff-file (put next_steps in the file), not both"}`); os.exit(1) }
+	if has_file do return h, true
+	if next == "" do return "", false
+	return fmt.aprintf("{{%s}}", json_kv("next_steps", next)), true
+}
+
 ctl_read_json_file_flag :: proc(args: []string, flag: string) -> (string, bool) {
 	path := option_value(args, flag, "")
 	if path == "" do return "", false
@@ -401,7 +412,7 @@ ctl_v2_lease_handoff :: proc(endpoint, token: string, args: []string) {
 	defer delete(fields)
 	append(&fields, json_kv("summary", summary))
 	if v := option_value(args, "--lease", ""); v != "" do append(&fields, json_kv("lease_id", v))
-	if h, ok := ctl_read_json_file_flag(args, "--handoff-file"); ok do append(&fields, json_kv_raw("handoff", h))
+	if h, ok := ctl_handoff_flags(args); ok do append(&fields, json_kv_raw("handoff", h))
 	if v := option_value(args, "--vcs-base", ""); v != "" do append(&fields, json_kv("vcs_base", v))
 	append(&fields, json_kv("cwd", ctl_lease_work_dir(endpoint, token)))
 	ctl_agent_call_task(endpoint, token, "agent.lease.handoff", json_object_from_slice(fields[:]), args)
@@ -419,7 +430,7 @@ ctl_v2_lease_switch :: proc(endpoint, token: string, args: []string, positional_
 	append(&fields, json_kv("task_id", task_id))
 	append(&fields, json_kv("summary", summary))
 	if v := option_value(args, "--lease", ""); v != "" do append(&fields, json_kv("lease_id", v))
-	if h, ok := ctl_read_json_file_flag(args, "--handoff-file"); ok do append(&fields, json_kv_raw("handoff", h))
+	if h, ok := ctl_handoff_flags(args); ok do append(&fields, json_kv_raw("handoff", h))
 	append(&fields, json_kv("cwd", ctl_lease_work_dir(endpoint, token)))
 	ctl_agent_call_task(endpoint, token, "agent.lease.switch", json_object_from_slice(fields[:]), args)
 }

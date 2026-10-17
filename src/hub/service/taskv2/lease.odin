@@ -720,6 +720,19 @@ chain_is_solo :: proc(svc: ^Service, chain: domain.Task_Chain) -> bool {
 	return false
 }
 
+// implicit_solo_worker: the worker row the built-in Soloist coordinator works
+// under when the fleet has no row for its agent (puller_fleet_row grants on the
+// same shape). Read paths list it so the board can name the soloist.
+implicit_solo_worker :: proc(svc: ^Service, chain: domain.Task_Chain, fleets: []domain.Task_Chain_Fleet) -> (domain.Task_Chain_Fleet, bool) {
+	if svc == nil do return {}, false
+	coord_agent := chain_coordinator_agent_id(svc, chain)
+	if coord_agent == "" do return {}, false
+	for f in fleets do if f.agent_id == coord_agent do return {}, false
+	ag, aok, _ := iface.agent_get(svc.agents, coord_agent)
+	if !aok || (ag.slug != SOLOIST_AGENT_SLUG && ag.template_id != domain.TEMPLATE_SOLOIST_ID) do return {}, false
+	return domain.Task_Chain_Fleet{task_chain_id = chain.chain_id, agent_id = coord_agent, roles_json = `["worker"]`, capacity = 1}, true
+}
+
 // solo_default_user_approval (REQ-SOLO-1a): an explicit value wins (true or
 // false); when the brief/spec says nothing, a solo chain's tasks wait for the
 // user's review and other chains' do not.
