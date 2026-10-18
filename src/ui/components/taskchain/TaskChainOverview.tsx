@@ -183,17 +183,6 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
       setPublishError(actionErrorMessage(err));
     }
   };
-  const fleetButton = (
-    <>
-      <Button size="sm" variant="secondary" onClick={() => setShowFleetDrawer(true)}>
-        Fleet
-      </Button>
-      <Button size="sm" variant="secondary" onClick={() => setShowReviewRoles(true)}>
-        Review roles
-      </Button>
-    </>
-  );
-
   return (
     <div
       data-debug-id="taskchain-overview-container"
@@ -230,7 +219,8 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
             onSelectTask={expandTask}
             scrollTaskId={scrollTaskId}
             onScrolled={clearScroll}
-            actions={fleetButton}
+            onOpenFleetDrawer={() => setShowFleetDrawer(true)}
+            onOpenReviewRoles={() => setShowReviewRoles(true)}
           />
         ) : (
           <TicketBoardView

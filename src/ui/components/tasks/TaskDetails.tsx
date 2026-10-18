@@ -36,6 +36,12 @@ const TIMELINE_PREVIEW = 6;
  * collapsible and closed by default (plan REQ-UI-8), so an expanded card stays
  * calm until you open what you want to read.
  */
+/** What the blocked agent asked: hubs and agents use reason, question or message. */
+function blockerQuestion(task: TaskWire): string {
+  const b: any = task.blocked_on || {};
+  return String(b.question || b.reason || b.message || '').trim();
+}
+
 function Block({
   title,
   aside,
@@ -184,7 +190,7 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
   const visibleEvents = showAllEvents ? events : events.slice(-TIMELINE_PREVIEW);
 
   return (
-    <div data-debug-id={`task-details-${taskId}`} className="space-y-4 border-t border-subtle px-3 pb-3 pt-3 text-xs">
+    <div data-debug-id={`task-details-${taskId}`} className="space-y-4 border-t border-subtle pb-4 pl-5 pr-3 pt-3 text-xs">
       {awaitingYourReview(task) && (
         <Block title="Your review" debugId="your-review-block">
           {handoff?.summary && <p className="leading-relaxed text-primary">{handoff.summary}</p>}
@@ -197,7 +203,7 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
             chainId={chainId}
             taskId={taskId}
             debugId="your-review-composer"
-            placeholder="What needs to change (required to request changes). Paste or attach screenshots."
+            placeholder="What should change? Needed to request changes."
             requireText
             disabled={actions.busy}
             renderActions={({ body, canSend, reset }) => (
@@ -223,12 +229,20 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
 
       {blockedOnYou(task) && (
         <Block title="Waiting on your answer" debugId="answer-blocker-block">
-          {(task.blocked_on as any)?.reason && <p className="text-primary">{(task.blocked_on as any).reason}</p>}
+          {blockerQuestion(task) ? (
+            <blockquote data-debug-id="answer-question" className="rounded-md border-l-2 border-accent bg-accent-soft px-3 py-2 text-body-sm text-primary">
+              {blockerQuestion(task)}
+            </blockquote>
+          ) : (
+            <Text as="p" role="body-sm" tone="muted">
+              The agent is waiting on you but did not say what it needs. Check the latest comments, or ask it.
+            </Text>
+          )}
           <TaskComposer
             chainId={chainId}
             taskId={taskId}
             debugId="answer-composer"
-            placeholder="Your answer. Paste or attach files if it helps."
+            placeholder="Type your answer. You can paste or attach files."
             disabled={actions.busy}
             renderActions={({ body, canSend, reset }) => (
               <Button

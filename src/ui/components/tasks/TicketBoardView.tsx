@@ -1,6 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { Button, EmptyState, Icon, IconButton, Menu, Text } from '@ui';
-import { useIsMobile } from '../shell/responsive';
+import { Button, EmptyState, Icon, Text } from '@ui';
 import { TaskWire } from '../../api/taskWire';
 import { TaskSummaryBar } from './TaskSummaryBar';
 import { TaskCard } from './TaskCard';
@@ -109,7 +108,6 @@ export const TicketBoardView: React.FC<TicketBoardViewProps> = ({
 }) => {
   const [needsYouOnly, setNeedsYouOnly] = useState(false);
   const [showFinished, setShowFinished] = useState(false);
-  const isMobile = useIsMobile();
 
   const sorted = useMemo(() => sortTasksForBoard(tasks), [tasks]);
   // The needs-you filter turns itself off once nothing needs you, so it can
@@ -145,42 +143,21 @@ export const TicketBoardView: React.FC<TicketBoardViewProps> = ({
         summaryText={summaryText}
         needsYouActive={filtering}
         onToggleNeedsYou={() => setNeedsYouOnly((v) => !v)}
-        actions={
-          <>
-            {onPublishChain && (
-              <Button size="sm" variant="primary" loading={publishingChain} onClick={onPublishChain} data-debug-id="task-board-publish-chain-btn">
-                Publish chain
-              </Button>
-            )}
-            {isMobile && (onOpenFleetDrawer || onOpenReviewRoles) ? (
-              <Menu
-                label="Chain settings"
-                align="end"
-                trigger={<IconButton icon="more-horizontal" label="Chain settings" variant="solid" size="sm" data-debug-id="task-board-settings-menu" />}
-              >
-                {onOpenFleetDrawer && <Menu.Item onClick={onOpenFleetDrawer}>Fleet</Menu.Item>}
-                {onOpenReviewRoles && <Menu.Item onClick={onOpenReviewRoles}>Review roles</Menu.Item>}
-              </Menu>
-            ) : (
-              <>
-                {onOpenFleetDrawer && (
-                  <Button size="sm" variant="secondary" onClick={onOpenFleetDrawer} data-debug-id="task-board-fleet-btn">
-                    Fleet
-                  </Button>
-                )}
-                {onOpenReviewRoles && (
-                  <Button size="sm" variant="secondary" onClick={onOpenReviewRoles} data-debug-id="task-board-review-roles-btn">
-                    Review roles
-                  </Button>
-                )}
-              </>
-            )}
-            {onNewTask && (
-              <Button size="sm" variant="primary" onClick={onNewTask} data-debug-id="task-board-new-task-btn">
-                New task
-              </Button>
-            )}
-          </>
+        menuItems={[
+          ...(onOpenFleetDrawer ? [{ label: 'Fleet', onClick: onOpenFleetDrawer, debugId: 'task-board-fleet-btn' }] : []),
+          ...(onOpenReviewRoles ? [{ label: 'Review roles', onClick: onOpenReviewRoles, debugId: 'task-board-review-roles-btn' }] : []),
+          ...(onPublishChain && onNewTask ? [{ label: 'New task', onClick: onNewTask, debugId: 'task-board-new-task-menu' }] : []),
+        ]}
+        primaryAction={
+          onPublishChain ? (
+            <Button size="sm" variant="primary" loading={publishingChain} onClick={onPublishChain} data-debug-id="task-board-publish-chain-btn">
+              Publish chain
+            </Button>
+          ) : onNewTask ? (
+            <Button size="sm" variant="primary" leading={<Icon name="plus" size="sm" />} onClick={onNewTask} data-debug-id="task-board-new-task-btn">
+              New task
+            </Button>
+          ) : undefined
         }
       />
       {publishError && (

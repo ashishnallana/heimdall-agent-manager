@@ -21,8 +21,8 @@ export interface WorkflowPipelineViewProps {
   /** The card to scroll into view once mounted; cleared through onScrolled. */
   scrollTaskId?: string | null;
   onScrolled?: () => void;
-  /** Chain-level buttons (e.g. Fleet) shown in the header. */
-  actions?: React.ReactNode;
+  onOpenFleetDrawer?: () => void;
+  onOpenReviewRoles?: () => void;
   names?: TaskNames;
   className?: string;
 }
@@ -101,7 +101,8 @@ export const WorkflowPipelineView: React.FC<WorkflowPipelineViewProps> = ({
   onSelectTask,
   scrollTaskId,
   onScrolled,
-  actions,
+  onOpenFleetDrawer,
+  onOpenReviewRoles,
   names = EMPTY_TASK_NAMES,
   className = '',
 }) => {
@@ -146,28 +147,20 @@ export const WorkflowPipelineView: React.FC<WorkflowPipelineViewProps> = ({
         kind="workflow"
         workflowStatus={workflowStatus}
         summaryText={chain?.summary}
-        actions={
-          <>
-            {actions}
-            <Button
-              size="sm"
-              variant="secondary"
-              data-debug-id="workflow-retry-btn"
-              disabled={stages.length === 0}
-              onClick={() => {
-                setRetryStageKey(stages.find((st) => st.failed)?.key || stages[0]?.key || '');
-                setRetryOpen(true);
-              }}
-            >
-              Retry stage
-            </Button>
-            {running && (
-              <Button size="sm" variant="secondary" tone="danger" data-debug-id="workflow-cancel-btn" loading={cancelState.isLoading} onClick={handleCancelRun}>
-                Cancel run
-              </Button>
-            )}
-          </>
-        }
+        menuItems={[
+          ...(onOpenFleetDrawer ? [{ label: 'Fleet', onClick: onOpenFleetDrawer }] : []),
+          ...(onOpenReviewRoles ? [{ label: 'Review roles', onClick: onOpenReviewRoles }] : []),
+          {
+            label: 'Retry a stage…',
+            debugId: 'workflow-retry-btn',
+            disabled: stages.length === 0,
+            onClick: () => {
+              setRetryStageKey(stages.find((st) => st.failed)?.key || stages[0]?.key || '');
+              setRetryOpen(true);
+            },
+          },
+          ...(running ? [{ label: 'Cancel run', danger: true, debugId: 'workflow-cancel-btn', disabled: cancelState.isLoading, onClick: () => void handleCancelRun() }] : []),
+        ]}
       />
       {error && (
         <Text role="caption" tone="danger" className="break-words">

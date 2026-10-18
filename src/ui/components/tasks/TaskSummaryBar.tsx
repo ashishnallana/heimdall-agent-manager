@@ -1,5 +1,5 @@
 import React from 'react';
-import { Button, StatusDot, Text } from '@ui';
+import { Button, IconButton, Menu, StatusDot, Text } from '@ui';
 import { TaskWire } from '../../api/taskWire';
 import { TASK_STATES_ORDER, TASK_STATE_LABELS, TASK_STATE_TONE, TaskStateV2, normalizeTaskState, workLease } from './taskV2Types';
 import { taskNeedsYou } from './taskActions';
@@ -13,8 +13,18 @@ export interface TaskSummaryBarProps {
   /** "N need you" filter (plan REQ-UI-7). Omit to hide the toggle. */
   needsYouActive?: boolean;
   onToggleNeedsYou?: () => void;
-  /** Chain-level buttons (Fleet, New task, Publish) rendered on the right. */
-  actions?: React.ReactNode;
+  /** The one main chain action (New task / Publish chain), right-aligned. */
+  primaryAction?: React.ReactNode;
+  /** Everything else (Fleet, Review roles, Retry, Cancel) goes in one menu. */
+  menuItems?: SummaryMenuItem[];
+}
+
+export interface SummaryMenuItem {
+  label: string;
+  onClick: () => void;
+  danger?: boolean;
+  disabled?: boolean;
+  debugId?: string;
 }
 
 const UNCLAIMED_AFTER_MINS = 10;
@@ -32,7 +42,8 @@ export const TaskSummaryBar: React.FC<TaskSummaryBarProps> = ({
   summaryText,
   needsYouActive = false,
   onToggleNeedsYou,
-  actions,
+  primaryAction,
+  menuItems = [],
 }) => {
   const counts = TASK_STATES_ORDER.reduce(
     (acc, s) => ({ ...acc, [s]: 0 }),
@@ -83,54 +94,38 @@ export const TaskSummaryBar: React.FC<TaskSummaryBarProps> = ({
           { key: 'ready', value: counts.ready, className: 'bg-strong', label: 'ready' },
         ];
 
-  const attention = (
-    <div data-debug-id="task-attention-line" className="flex min-w-0 flex-wrap items-center gap-2">
-      {needsYou > 0 ? (
-        onToggleNeedsYou ? (
-          <Button
-            size="sm"
-            variant={needsYouActive ? 'secondary' : 'primary'}
-            data-debug-id="attention-needs-you"
-            aria-pressed={needsYouActive}
-            onClick={onToggleNeedsYou}
-          >
-            {needsYouActive ? 'Show all tasks' : `${needsYou} ${needsYou === 1 ? 'task needs' : 'tasks need'} you`}
-          </Button>
-        ) : (
-          <Text role="label" tone="accent">
-            {needsYou} {needsYou === 1 ? 'task needs' : 'tasks need'} you
-          </Text>
-        )
+  const needsYouControl =
+    needsYou > 0 ? (
+      onToggleNeedsYou ? (
+        <Button
+          size="sm"
+          variant={needsYouActive ? 'secondary' : 'primary'}
+          data-debug-id="attention-needs-you"
+          aria-pressed={needsYouActive}
+          onClick={onToggleNeedsYou}
+        >
+          {needsYouActive ? 'Show all tasks' : `${needsYou} ${needsYou === 1 ? 'task needs' : 'tasks need'} you`}
+        </Button>
       ) : (
-        <span className="inline-flex items-center gap-1.5">
-          <StatusDot tone="success" label="Nothing needs you" size="sm" />
-          <Text role="label" tone="muted">
-            Nothing needs you
-          </Text>
-        </span>
-      )}
-      {expiring > 0 && (
-        <Text role="caption" tone="warning">
-          {expiring} lease{expiring === 1 ? '' : 's'} about to expire
+        <Text role="label" tone="accent">
+          {needsYou} {needsYou === 1 ? 'task needs' : 'tasks need'} you
         </Text>
-      )}
-      {unclaimed > 0 && (
-        <Text role="caption" tone="warning">
-          {unclaimed} ready for {UNCLAIMED_AFTER_MINS}+ min with no free worker
+      )
+    ) : (
+      <span className="inline-flex items-center gap-1.5">
+        <StatusDot tone="success" label="Nothing needs you" size="sm" />
+        <Text role="label" tone="muted">
+          Nothing needs you
         </Text>
-      )}
-      {failedStage && (
-        <Text role="caption" tone="danger">
-          Stage {failedStage.key.replace(/_/g, ' ')} failed, later stages are on hold
-        </Text>
-      )}
-      {runComplete && (
-        <Text role="caption" tone="success">
-          Run complete
-        </Text>
-      )}
-    </div>
-  );
+      </span>
+    );
+
+  const warnings = [
+    expiring > 0 && { tone: 'warning' as const, text: `${expiring} lease${expiring === 1 ? '' : 's'} about to expire` },
+    unclaimed > 0 && { tone: 'warning' as const, text: `${unclaimed} ready for ${UNCLAIMED_AFTER_MINS}+ min with no free worker` },
+    failedStage && { tone: 'danger' as const, text: `Stage ${failedStage.key.replace(/_/g, ' ')} failed, later stages are on hold` },
+    runComplete && { tone: 'success' as const, text: 'Run complete' },
+  ].filter(Boolean) as { tone: 'warning' | 'danger' | 'success'; text: string }[];
 
   return (
     <div data-debug-id="task-summary-bar" className="space-y-3 text-left">
@@ -145,10 +140,34 @@ export const TaskSummaryBar: React.FC<TaskSummaryBarProps> = ({
         </Text>
       )}
 
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        {attention}
-        {actions && <div className="flex flex-wrap items-center gap-1.5">{actions}</div>}
+      {/* One row that never wraps its controls: what needs you on the left, the
+          chain menu and the single main action on the right. */}
+      <div data-debug-id="task-attention-line" className="flex items-center gap-2">
+        <div className="min-w-0 flex-1">{needsYouControl}</div>
+        {menuItems.length > 0 && (
+          <Menu
+            label="Chain options"
+            align="end"
+            trigger={<IconButton icon="more-horizontal" label="Chain options" variant="solid" size="sm" data-debug-id="task-summary-menu" />}
+          >
+            {menuItems.map((it) => (
+              <Menu.Item key={it.label} danger={it.danger} disabled={it.disabled} onClick={it.onClick} data-debug-id={it.debugId}>
+                {it.label}
+              </Menu.Item>
+            ))}
+          </Menu>
+        )}
+        {primaryAction}
       </div>
+      {warnings.length > 0 && (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+          {warnings.map((w) => (
+            <Text key={w.text} role="caption" tone={w.tone}>
+              {w.text}
+            </Text>
+          ))}
+        </div>
+      )}
 
       <div className="space-y-1.5">
         <div

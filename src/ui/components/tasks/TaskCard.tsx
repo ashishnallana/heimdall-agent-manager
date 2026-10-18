@@ -32,6 +32,9 @@ const STATE_RAIL: Record<string, string> = {
   cancelled: 'bg-subtle',
 };
 
+/** Actions whose controls are in TaskDetails (Your review / Waiting on your answer). */
+const DECISION_IN_DETAILS = new Set<TaskActionId>(['approve', 'request_changes', 'answer']);
+
 export interface TaskCardProps {
   task: TaskWire;
   chainId?: string;
@@ -147,6 +150,8 @@ export const TaskCard: React.FC<TaskCardProps> = ({
         { field: 'deps', label: 'Change what it waits for' },
       ];
   const hasMenu = more.length > 0 || editItems.length > 0;
+  // Decisions that need words live in the open details; don't repeat them above.
+  const shownPrimary = expanded ? primary.filter((id) => !DECISION_IN_DETAILS.has(id)) : primary;
 
   return (
     <article
@@ -156,7 +161,7 @@ export const TaskCard: React.FC<TaskCardProps> = ({
       data-needs-you={needsYou ? 'true' : undefined}
       aria-label={task.title}
       className={[
-        'group relative overflow-hidden rounded-lg border text-xs transition-[background-color,border-color,box-shadow] duration-150 motion-reduce:transition-none',
+        'group relative rounded-lg border text-xs transition-[background-color,border-color,box-shadow] duration-150 motion-reduce:transition-none',
         needsYou
           ? 'border-accent bg-accent-soft shadow-glow-accent'
           : expanded
@@ -166,7 +171,7 @@ export const TaskCard: React.FC<TaskCardProps> = ({
       ].join(' ')}
     >
       {/* State rail: the card's status at a glance, before reading anything. */}
-      <span aria-hidden="true" className={`absolute inset-y-0 left-0 w-[3px] ${rail}`} />
+      <span aria-hidden="true" className={`absolute inset-y-0 left-0 w-[3px] rounded-l-lg ${rail}`} />
 
       <div className="space-y-2 py-3 pl-5 pr-3">
         {/* Row 1: title (wraps to two lines) + state + menu */}
@@ -289,9 +294,9 @@ export const TaskCard: React.FC<TaskCardProps> = ({
         )}
 
         {/* Row 4: the action that matters now (the rest is in the More menu) */}
-        {(primary.length > 0 || actions.error) && (
+        {(shownPrimary.length > 0 || actions.error) && (
           <div className="flex flex-wrap items-center gap-2 pt-1">
-            {primary.map((id) => (
+            {shownPrimary.map((id) => (
               <Button
                 key={id}
                 size="sm"
@@ -323,16 +328,14 @@ export const TaskCard: React.FC<TaskCardProps> = ({
       />
 
       {expanded && (
-        <div className="border-t border-subtle">
-          <TaskDetails
-            chainId={chainId}
-            task={task}
-            actions={actions}
-            chainFleets={chainFleets}
-            names={names}
-            onSelectTask={onSelectTask}
-          />
-        </div>
+        <TaskDetails
+          chainId={chainId}
+          task={task}
+          actions={actions}
+          chainFleets={chainFleets}
+          names={names}
+          onSelectTask={onSelectTask}
+        />
       )}
     </article>
   );

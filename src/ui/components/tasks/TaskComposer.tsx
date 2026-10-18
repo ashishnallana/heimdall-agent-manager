@@ -1,5 +1,5 @@
 import React, { useRef, useState } from 'react';
-import { Badge, Button, IconButton, Spinner, Text, Textarea } from '@ui';
+import { Badge, Button, Icon, Spinner, Text, Textarea } from '@ui';
 import { useCreateArtifactMutation } from '../../api/endpoints/artifacts';
 import { MAX_UPLOAD_BYTES } from '../ArtifactUpload';
 import {
@@ -49,7 +49,7 @@ export const TaskComposer: React.FC<TaskComposerProps> = ({
   placeholder,
   requireText = false,
   disabled = false,
-  rows = 2,
+  rows = 3,
   debugId,
   renderActions,
 }) => {
@@ -113,11 +113,12 @@ export const TaskComposer: React.FC<TaskComposerProps> = ({
     },
   };
 
-  // One row: <text box> <attach> <send…>; uploads and the send hint sit below.
+  // The text box takes the full width; attach sits under it on the left and the
+  // send actions on the right, so the box never shrinks to fit the buttons.
   return (
-    <div data-debug-id={debugId} className="space-y-1.5">
-      <div className="flex items-end gap-2">
-        <div className="min-w-0 flex-1">
+    <div data-debug-id={debugId} className="space-y-2">
+      <div className="space-y-2">
+        <div className="min-w-0">
           <Textarea
             value={text}
             onChange={setText}
@@ -142,9 +143,11 @@ export const TaskComposer: React.FC<TaskComposerProps> = ({
             files.forEach((file) => void upload(file));
           }}
         />
-        <div className="flex shrink-0 items-center gap-1.5">
-          <IconButton icon="plus" label="Attach a file" variant="ghost" size="sm" disabled={disabled} onClick={() => fileInput.current?.click()} />
-          {renderActions(ctx)}
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <Button size="sm" variant="ghost" leading={<Icon name="plus" size="sm" />} disabled={disabled} onClick={() => fileInput.current?.click()}>
+            Attach
+          </Button>
+          <div className="flex flex-wrap items-center justify-end gap-1.5">{renderActions(ctx)}</div>
         </div>
       </div>
 
