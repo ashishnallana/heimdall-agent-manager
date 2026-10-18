@@ -264,3 +264,34 @@ bridge_os_ps :: proc(cpu: Bridge_Ps_Cpu_Column, allocator := context.allocator) 
 	}
 	return strings.to_string(b), true
 }
+
+// ---- self-update ----
+
+BRIDGE_EXE_SUFFIX :: ".exe"
+BRIDGE_UPDATE_SUPERVISOR_NAME :: "apply-bridge-update.ps1"
+
+// bridge_os_supervisor_argv starts the update supervisor script with the Windows
+// PowerShell every Windows ships; the caller appends the script's --flags, which
+// the .ps1 parses exactly like the .sh does.
+bridge_os_supervisor_argv :: proc(script: string) -> [dynamic]string {
+	argv := make([dynamic]string, context.temp_allocator)
+	append(&argv, "powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script)
+	return argv
+}
+
+// bridge_os_default_data_dir is %LOCALAPPDATA%\heimdall (per user, not roamed).
+bridge_os_default_data_dir :: proc() -> string {
+	if local := os.get_env("LOCALAPPDATA", context.temp_allocator); local != "" {
+		return strings.concatenate({local, "/heimdall"})
+	}
+	return bridge_expand_home("~/.local/share/heimdall")
+}
+
+// bridge_os_is_executable: Windows has no execute bit (the CRT's _access cannot
+// test X_OK); a regular file with an extension CreateProcess or cmd.exe will run
+// counts as executable.
+bridge_os_is_executable :: proc(path: string) -> bool {
+	if !os.is_file(path) do return false
+	ext := strings.to_lower(path[max(strings.last_index_byte(path, '.'), 0):], context.temp_allocator)
+	return ext == ".exe" || ext == ".cmd" || ext == ".bat" || ext == ".com"
+}

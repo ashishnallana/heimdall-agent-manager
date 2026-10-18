@@ -1473,16 +1473,16 @@ bridge_update_launch_supervisor :: proc(
 	pty_host_socket: string = "",
 ) -> bool {
 	if spawn == nil do return false
-	argv := []string{
-		"bash", supervisor_path,
+	argv := bridge_os_supervisor_argv(supervisor_path)
+	append(&argv,
 		"--data-dir", data_dir,
 		"--stage-dir", stage_dir,
 		"--bridge-port", bridge_port,
 		"--hub-url", hub_url,
 		"--bridge-pid", bridge_pid,
 		"--pty-host-socket", pty_host_socket,
-	}
-	return spawn(argv)
+	)
+	return spawn(argv[:])
 }
 
 bridge_hub_handle_update_command :: proc(conn: ^ws.Connection, text: string) {
@@ -1579,7 +1579,7 @@ bridge_runtime_apply_update :: proc(
 	// 2. Resolve data and staging directories
 	data_dir := bridge_expand_home(bridge_config.data_dir)
 	if strings.trim_space(data_dir) == "" {
-		data_dir = bridge_expand_home("~/.local/share/heimdall")
+		data_dir = bridge_os_default_data_dir()
 	}
 	updates_dir := fmt.tprintf("%s/updates", data_dir)
 	stage_dir := fmt.tprintf("%s/updates/stage", data_dir)
@@ -1666,12 +1666,12 @@ bridge_runtime_apply_update :: proc(
 	// 6. In-situ preflight check: locate ham-bridge and run `./stage/bin/ham-bridge --version`
 	_ = bridge_update_send_progress(conn, command_id, "preflight", 70, "Validating staged bridge binaries...")
 	stage_bin_dir := fmt.tprintf("%s/bin", stage_dir)
-	bridge_binary := fmt.tprintf("%s/ham-bridge", stage_bin_dir)
+	bridge_binary := fmt.tprintf("%s/ham-bridge%s", stage_bin_dir, BRIDGE_EXE_SUFFIX)
 	if !os.exists(bridge_binary) {
 		candidates := []string{
-			fmt.tprintf("%s/extract/bin/ham-bridge", stage_dir),
-			fmt.tprintf("%s/heimdall-cloudtop/bin/ham-bridge", stage_dir),
-			fmt.tprintf("%s/ham-bridge", stage_dir),
+			fmt.tprintf("%s/extract/bin/ham-bridge%s", stage_dir, BRIDGE_EXE_SUFFIX),
+			fmt.tprintf("%s/heimdall-cloudtop/bin/ham-bridge%s", stage_dir, BRIDGE_EXE_SUFFIX),
+			fmt.tprintf("%s/ham-bridge%s", stage_dir, BRIDGE_EXE_SUFFIX),
 		}
 		found := false
 		for c in candidates {
@@ -1700,16 +1700,17 @@ bridge_runtime_apply_update :: proc(
 		return false, fmt.tprintf("preflight execution check failed (%s --version)", bridge_binary)
 	}
 
-	// 7. Locate supervisor script scripts/apply-bridge-update.sh
+	// 7. Locate supervisor script scripts/apply-bridge-update.sh (.ps1 on Windows)
 	_ = bridge_make_directory_all(updates_dir)
-	supervisor_target := fmt.tprintf("%s/apply-bridge-update.sh", updates_dir)
+	supervisor_name := BRIDGE_UPDATE_SUPERVISOR_NAME
+	supervisor_target := fmt.tprintf("%s/%s", updates_dir, supervisor_name)
 	supervisor_found := false
 	script_candidates := []string{
-		fmt.tprintf("%s/scripts/apply-bridge-update.sh", stage_dir),
-		fmt.tprintf("%s/apply-bridge-update.sh", stage_dir),
-		"scripts/apply-bridge-update.sh",
-		fmt.tprintf("%s/scripts/apply-bridge-update.sh", data_dir),
-		"/usr/local/google/home/tanmayvijay/heimdall-cloudtop/scripts/apply-bridge-update.sh",
+		fmt.tprintf("%s/scripts/%s", stage_dir, supervisor_name),
+		fmt.tprintf("%s/%s", stage_dir, supervisor_name),
+		fmt.tprintf("scripts/%s", supervisor_name),
+		fmt.tprintf("%s/scripts/%s", data_dir, supervisor_name),
+		fmt.tprintf("/usr/local/google/home/tanmayvijay/heimdall-cloudtop/scripts/%s", supervisor_name),
 	}
 	for sc in script_candidates {
 		if os.exists(sc) {
@@ -1724,7 +1725,7 @@ bridge_runtime_apply_update :: proc(
 	if !supervisor_found {
 		_ = os.remove_all(stage_dir)
 		blog_error(.update_apply_failed, blog_sym(.stage, .supervisor), blog_sym(.reason, .missing_binary))
-		return false, "supervisor script apply-bridge-update.sh not found"
+		return false, fmt.tprintf("supervisor script %s not found", supervisor_name)
 	}
 	_ = os.chmod(supervisor_target, os.Permissions{.Read_User, .Write_User, .Execute_User, .Read_Group, .Execute_Group, .Read_Other, .Execute_Other})
 	_ = bridge_update_send_progress(conn, command_id, "staged", 78, "Update bundle staged and validated.")
@@ -1735,8 +1736,9 @@ bridge_runtime_apply_update :: proc(
 	pty_socket := pty_host_socket_path()
 	defer delete(pty_socket)
 	_ = bridge_update_send_progress(conn, command_id, "stopping_pty_host", 82, "Stopping bridge-owned PTY host and agent processes...")
-	stop_pty_argv := []string{"bash", supervisor_target, "--data-dir", data_dir, "--stop-pty-hosts-only", "--pty-host-socket", pty_socket}
-	stop_pty_out, stop_pty_err, stop_pty_ok, _ := bridge_process_run_capture(stop_pty_argv, 15 * time.Second)
+	stop_pty_argv := bridge_os_supervisor_argv(supervisor_target)
+	append(&stop_pty_argv, "--data-dir", data_dir, "--stop-pty-hosts-only", "--pty-host-socket", pty_socket)
+	stop_pty_out, stop_pty_err, stop_pty_ok, _ := bridge_process_run_capture(stop_pty_argv[:], 15 * time.Second)
 	defer { delete(stop_pty_out); delete(stop_pty_err) }
 	if !stop_pty_ok {
 		blog_error(.update_apply_failed, blog_sym(.stage, .drain))
@@ -3646,6 +3648,8 @@ bridge_os_string :: proc() -> string {
 		return "linux"
 	} else when ODIN_OS == .Darwin {
 		return "darwin"
+	} else when ODIN_OS == .Windows {
+		return "windows"
 	} else {
 		return "unknown"
 	}

@@ -1,5 +1,6 @@
 package main
 
+import os_random "odin_test:lib/os_random"
 import "core:fmt"
 import "core:net"
 import "core:os"
@@ -1717,17 +1718,9 @@ artifact_download_random_filename :: proc(ext: string) -> string {
 
 random_hex_agent :: proc(n: int) -> (string, bool) {
 	if n <= 0 do return "", true
-	f, err := os.open("/dev/urandom")
-	if err != nil do return "", false
-	defer os.close(f)
 	buf := make([]byte, n)
 	defer delete(buf)
-	got := 0
-	for got < n {
-		r, rerr := os.read(f, buf[got:])
-		if rerr != nil || r <= 0 do return "", false
-		got += r
-	}
+	if !os_random.fill(buf) do return "", false
 	b := strings.builder_make()
 	hex := "0123456789abcdef"
 	for byte_value in buf {

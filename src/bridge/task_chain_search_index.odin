@@ -9,7 +9,13 @@ import "core:sync"
 // Task-chain search plaintext is deliberately confined to this in-memory SQLite
 // database. The Hub remains a ciphertext source and relay; closing this handle on
 // vault lock makes the searchable plaintext unreachable without leaving a file.
-foreign import task_chain_search_sqlite "system:sqlite3"
+when ODIN_OS == .Windows {
+	// Windows has no system SQLite; link the static sqlite3.lib built from the
+	// official amalgamation (scripts/windows/build.ps1).
+	foreign import task_chain_search_sqlite "system:sqlite3.lib"
+} else {
+	foreign import task_chain_search_sqlite "system:sqlite3"
+}
 
 Task_Chain_Search_SQLite :: distinct rawptr
 Task_Chain_Search_Stmt :: distinct rawptr

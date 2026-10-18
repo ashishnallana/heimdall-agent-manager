@@ -12,7 +12,7 @@
 // under REQ-IMPL-2, so de-duplicating them is a follow-up, not part of this task.
 package platform
 
-import "core:os"
+import os_random "odin_test:lib/os_random"
 
 // RANDOM_SOURCE is the OS CSPRNG. Reading it blocks only until the kernel pool
 // is initialised, which has already happened long before the hub accepts
@@ -29,17 +29,7 @@ HEX_DIGITS :: "0123456789abcdef"
 // `source` exists so tests can point at a path that cannot be read and assert
 // the fail-closed contract for real. Production callers leave it at the default.
 random_bytes :: proc(dst: []byte, source := RANDOM_SOURCE) -> bool {
-	if len(dst) == 0 do return true
-	f, err := os.open(source)
-	if err != nil do return false
-	defer os.close(f)
-	got := 0
-	for got < len(dst) {
-		n, read_err := os.read(f, dst[got:])
-		if read_err != nil || n <= 0 do return false
-		got += n
-	}
-	return true
+	return os_random.fill(dst, source)
 }
 
 // random_hex returns n_bytes of CSPRNG output, lower-case hex encoded: a string

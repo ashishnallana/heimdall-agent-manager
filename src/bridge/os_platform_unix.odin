@@ -229,3 +229,26 @@ bridge_os_ps :: proc(cpu: Bridge_Ps_Cpu_Column, allocator := context.allocator) 
 	}
 	return string(stdout), true
 }
+
+// ---- self-update ----
+
+BRIDGE_EXE_SUFFIX :: ""
+BRIDGE_UPDATE_SUPERVISOR_NAME :: "apply-bridge-update.sh"
+
+// bridge_os_supervisor_argv starts the update supervisor script; the caller
+// appends the script's --flags.
+bridge_os_supervisor_argv :: proc(script: string) -> [dynamic]string {
+	argv := make([dynamic]string, context.temp_allocator)
+	append(&argv, "bash", script)
+	return argv
+}
+
+bridge_os_default_data_dir :: proc() -> string {
+	return bridge_expand_home("~/.local/share/heimdall")
+}
+
+// bridge_os_is_executable is access(2) X_OK.
+bridge_os_is_executable :: proc(path: string) -> bool {
+	c_path := strings.clone_to_cstring(path, context.temp_allocator)
+	return posix.access(c_path, {.X_OK}) == .OK
+}

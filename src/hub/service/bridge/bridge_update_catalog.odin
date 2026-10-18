@@ -80,6 +80,10 @@ canonical_bridge_platform :: proc(os_name, arch_name, target: string) -> (canoni
 		return "darwin", "arm64", true
 	case "termux-arm64", "termux-aarch64":
 		return "termux", "arm64", true
+	case "windows-amd64", "windows-x86_64":
+		return "windows", "amd64", true
+	case "windows-arm64", "windows-aarch64":
+		return "windows", "arm64", true
 	}
 	return "", "", false
 }

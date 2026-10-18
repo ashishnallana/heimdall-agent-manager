@@ -8,7 +8,13 @@ import domain "odin_test:hub/domain"
 
 // SQLite FFI lives only in hub/repository/sqlite. Higher layers receive Conn through
 // repository interfaces and never import this package except from the app composition root.
-foreign import sqlite3_lib "system:sqlite3"
+when ODIN_OS == .Windows {
+	// Windows has no system SQLite; link the static sqlite3.lib built from the
+	// official amalgamation.
+	foreign import sqlite3_lib "system:sqlite3.lib"
+} else {
+	foreign import sqlite3_lib "system:sqlite3"
+}
 
 sqlite3 :: distinct rawptr
 sqlite3_stmt :: distinct rawptr

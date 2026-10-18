@@ -7,7 +7,6 @@ import "core:os"
 import "core:slice"
 import "core:strings"
 import "core:sync"
-import "core:sys/posix"
 import "core:time"
 import ws "odin_test:lib/ws"
 
@@ -82,8 +81,7 @@ bridge_provider_path_destroy :: proc(value: ^Bridge_Provider_Path, allocator := 
 
 bridge_provider_path_executable :: proc(path: string) -> bool {
 	if strings.trim_space(path) == "" do return false
-	c_path := strings.clone_to_cstring(path, context.temp_allocator)
-	return posix.access(c_path, {.X_OK}) == .OK
+	return bridge_os_is_executable(path)
 }
 
 bridge_provider_probe_version :: proc(path: string) -> string {

@@ -14,6 +14,7 @@
 
 package device_auth
 
+import os_random "odin_test:lib/os_random"
 import "core:os"
 import "core:strings"
 
@@ -32,18 +33,10 @@ USER_CODE_LENGTH :: 8 // two groups of 4 separated by a dash: "ABCD-2345"
 // entropy source is unavailable — callers MUST fail closed (deny the request).
 crypto_random_bytes :: proc(n: int) -> ([]byte, bool) {
 	if n <= 0 do return {}, true
-	f, err := os.open("/dev/urandom")
-	if err != nil do return {}, false
-	defer os.close(f)
 	buf := make([]byte, n)
-	got := 0
-	for got < n {
-		r, rerr := os.read(f, buf[got:])
-		if rerr != nil || r <= 0 {
-			delete(buf)
-			return {}, false
-		}
-		got += r
+	if !os_random.fill(buf) {
+		delete(buf)
+		return {}, false
 	}
 	return buf, true
 }

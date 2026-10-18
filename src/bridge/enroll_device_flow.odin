@@ -30,6 +30,7 @@
 //     be a SECOND key, not a replacement.
 package main
 
+import os_random "odin_test:lib/os_random"
 import "core:crypto/hash"
 import base64 "core:encoding/base64"
 import "core:encoding/hex"
@@ -165,9 +166,10 @@ bridge_base64url_unpadded :: proc(data: []byte, allocator := context.allocator) 
 	return out
 }
 
-// bridge_enroll_entropy fills dst from /dev/urandom and FAILS CLOSED.
+// bridge_enroll_entropy fills dst from the OS CSPRNG (/dev/urandom; BCryptGenRandom
+// on Windows) and FAILS CLOSED.
 //
-// It reads the device directly, with an explicit ok, rather than calling
+// It goes through os_random, with an explicit ok, rather than calling
 // crypto.rand_bytes, for one reason: this is the call that must be PROVABLY
 // unable to degrade. The PKCE verifier is the secret the redemption proof rests
 // on, and a silent fallback to anything weaker is the exact
@@ -175,20 +177,9 @@ bridge_base64url_unpadded :: proc(data: []byte, allocator := context.allocator) 
 // a failure, not a partial success.
 bridge_enroll_entropy :: proc(dst: []byte) -> bool {
 	if len(dst) == 0 do return false
-	fd, err := os.open("/dev/urandom", os.O_RDONLY)
-	if err != nil {
-		fmt.eprintln("enroll: secure random source /dev/urandom is unavailable; refusing to generate a weaker secret")
+	if !os_random.fill(dst) {
+		fmt.eprintln("enroll: the OS secure random source is unavailable or returned short; refusing to generate a weaker secret")
 		return false
-	}
-	defer os.close(fd)
-	filled := 0
-	for filled < len(dst) {
-		n, read_err := os.read(fd, dst[filled:])
-		if read_err != nil || n <= 0 {
-			fmt.eprintln("enroll: short read from /dev/urandom; refusing to generate a weaker secret")
-			return false
-		}
-		filled += n
 	}
 	return true
 }
