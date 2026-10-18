@@ -23,31 +23,32 @@ repeat_bytes :: proc(n: int) -> string {
 // fake_armored builds a value with the real wire SHAPE and the exact byte
 // length a genuine ciphertext of this plaintext would have. The cap is a pure
 // byte-length check, so shape+length is all that matters here; round-tripping
-// real AES-GCM is covered by src/ctl/vault_content_test.odin.
+// real AES-GCM is covered by src/lib/vault/vault_test.odin.
 @(private = "file")
 fake_armored :: proc(plaintext_len: int) -> string {
 	payload := 4 * ((plaintext_len + VAULT_HEADER_BYTES + 2) / 3)
 	return strings.concatenate(
-		{VAULT_ARMOR_PREFIX, strings.repeat("A", payload, context.temp_allocator)},
+		{VAULT_ARMOR_PREFIX, "e4294967295:", strings.repeat("A", payload, context.temp_allocator)},
 		context.temp_allocator,
 	)
 }
 
 @(test)
 test_vault_armored_max_bytes_matches_wire_overhead :: proc(t: ^testing.T) {
-	// Values derived in vault_text_caps.odin from src/ctl/vault_content.odin.
-	testing.expect_value(t, vault_armored_max_bytes(4000), 5381)
-	testing.expect_value(t, vault_armored_max_bytes(120), 209)
-	testing.expect_value(t, vault_armored_max_bytes(0), 9 + 40)
+	// Values derived in vault_text_caps.odin (max 10-digit epoch header).
+	testing.expect_value(t, vault_armored_max_bytes(4000), 5393)
+	testing.expect_value(t, vault_armored_max_bytes(120), 221)
+	testing.expect_value(t, vault_armored_max_bytes(0), 21 + 40)
 	// A real armored value of an at-cap plaintext must fit the derived budget
 	// exactly -- not one byte over, or the cap still rejects a legal value.
-	testing.expect_value(t, len(fake_armored(4000)), 5381)
-	testing.expect_value(t, len(fake_armored(120)), 209)
+	testing.expect_value(t, len(fake_armored(4000)), 5393)
+	testing.expect_value(t, len(fake_armored(120)), 221)
 }
 
 @(test)
 test_is_vault_armored_requires_prefix_not_substring :: proc(t: ^testing.T) {
-	testing.expect(t, is_vault_armored("vault:v1:AQID"), "prefix must be detected")
+	testing.expect(t, is_vault_armored("vault:v2:e1:AQID"), "prefix must be detected")
+	testing.expect(t, !is_vault_armored("vault:v1:AQID"), "v1 is dead: not armored")
 	testing.expect(t, !is_vault_armored(""), "empty is not armored")
 	testing.expect(t, !is_vault_armored("plain title"), "plaintext is not armored")
 	// A mid-string marker must NOT grant the inflated budget, or any caller
@@ -58,7 +59,7 @@ test_is_vault_armored_requires_prefix_not_substring :: proc(t: ^testing.T) {
 		"a mid-string vault marker must not count as armored",
 	)
 	testing.expect_value(t, text_cap_limit_bytes("plain", 120), 120)
-	testing.expect_value(t, text_cap_limit_bytes("vault:v1:AQID", 120), 209)
+	testing.expect_value(t, text_cap_limit_bytes("vault:v2:e1:AQID", 120), 221)
 }
 
 // ── Site 1: chain description (taskchain_service.odin set_own_chain_description)
@@ -71,7 +72,7 @@ test_chain_description_plaintext_at_cap_accepted :: proc(t: ^testing.T) {
 
 @(test)
 test_chain_description_armored_at_cap_accepted :: proc(t: ^testing.T) {
-	// THE REPORTED REGRESSION: 4000 bytes of plaintext arrive as 5381 armored
+	// THE REPORTED REGRESSION: 4000 bytes of plaintext arrive as 5393 armored
 	// bytes and were rejected against a cap of 4000.
 	armored := fake_armored(CHAIN_DESCRIPTION_MAX_BYTES)
 	testing.expect(t, len(armored) > CHAIN_DESCRIPTION_MAX_BYTES, "armored value must exceed the plaintext cap (else the test proves nothing)")
@@ -92,8 +93,8 @@ test_chain_description_over_cap_rejected_with_numbers :: proc(t: ^testing.T) {
 	over := strings.concatenate({fake_armored(CHAIN_DESCRIPTION_MAX_BYTES), "A"}, context.temp_allocator)
 	armored_err := validate_capped_text("chain description", over, CHAIN_DESCRIPTION_MAX_BYTES)
 	testing.expect_value(t, armored_err.code, Error_Code.Validation_Failed)
-	testing.expect(t, strings.contains(armored_err.message, "5382"), "message must name the actual armored length")
-	testing.expect(t, strings.contains(armored_err.message, "5381"), "message must name the effective armored limit")
+	testing.expect(t, strings.contains(armored_err.message, "5394"), "message must name the actual armored length")
+	testing.expect(t, strings.contains(armored_err.message, "5393"), "message must name the effective armored limit")
 	testing.expect(t, strings.contains(armored_err.message, "4000"), "message must name the plaintext budget")
 	testing.expect(t, strings.contains(armored_err.message, "encrypted"), "message must say the value is encrypted")
 }
@@ -128,8 +129,8 @@ test_chain_title_over_cap_rejected_with_numbers :: proc(t: ^testing.T) {
 	over := strings.concatenate({fake_armored(CHAIN_TITLE_MAX_BYTES), "A"}, context.temp_allocator)
 	armored_err := validate_capped_text("chain title", over, CHAIN_TITLE_MAX_BYTES)
 	testing.expect_value(t, armored_err.code, Error_Code.Validation_Failed)
-	testing.expect(t, strings.contains(armored_err.message, "210"), "message must name the actual armored length")
-	testing.expect(t, strings.contains(armored_err.message, "209"), "message must name the effective armored limit")
+	testing.expect(t, strings.contains(armored_err.message, "222"), "message must name the actual armored length")
+	testing.expect(t, strings.contains(armored_err.message, "221"), "message must name the effective armored limit")
 	testing.expect(t, strings.contains(armored_err.message, "120"), "message must name the plaintext budget")
 }
 
@@ -160,8 +161,8 @@ test_conversation_title_over_cap_rejected_with_numbers :: proc(t: ^testing.T) {
 	over := strings.concatenate({fake_armored(CONVERSATION_TITLE_MAX_BYTES), "A"}, context.temp_allocator)
 	armored_err := validate_capped_text("conversation title", over, CONVERSATION_TITLE_MAX_BYTES)
 	testing.expect_value(t, armored_err.code, Error_Code.Validation_Failed)
-	testing.expect(t, strings.contains(armored_err.message, "210"), "message must name the actual armored length")
-	testing.expect(t, strings.contains(armored_err.message, "209"), "message must name the effective armored limit")
+	testing.expect(t, strings.contains(armored_err.message, "222"), "message must name the actual armored length")
+	testing.expect(t, strings.contains(armored_err.message, "221"), "message must name the effective armored limit")
 }
 
 // Guard against the OLD predicate silently coming back: for every site, an
@@ -180,4 +181,18 @@ test_old_raw_length_predicate_would_reject_every_site :: proc(t: ^testing.T) {
 			i,
 		)
 	}
+}
+
+@(test)
+test_vault_token_header_helpers :: proc(t: ^testing.T) {
+	testing.expect_value(t, vault_token_prefix_len("vault:v2:e12:QUJD"), len("vault:v2:e12:"))
+	ep, ok := vault_token_epoch("vault:v2:e12:QUJD")
+	testing.expect(t, ok && ep == 12)
+	testing.expect_value(t, vault_token_prefix_len("vault:v1:QUJD"), 0)
+	testing.expect_value(t, vault_token_prefix_len("ENC:v1:QUJD"), 0)
+	testing.expect_value(t, vault_token_prefix_len("vault:v2:e0:QUJD"), 0)
+	testing.expect_value(t, vault_token_prefix_len("vault:v2:e01:QUJD"), 0)
+	testing.expect_value(t, vault_token_prefix_len("vault:v2:"), 0)
+	testing.expect(t, contains_vault_token("x vault:v2:e1:QUJD y"))
+	testing.expect(t, !contains_vault_token("x vault:v1:QUJD y"))
 }

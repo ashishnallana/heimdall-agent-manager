@@ -260,7 +260,7 @@ test_handoff_keeps_attempt_and_block_parks :: proc(t: ^testing.T) {
 	_, bad, berr := lease_handoff(&fx.svc, inst_auth("inst_w1"), Handoff_Input{summary = ""})
 	testing.expect(t, !bad && berr.code == .Validation_Failed, "handoff needs a summary")
 	wake_log_reset(log)
-	_, hok, herr := lease_handoff(&fx.svc, inst_auth("inst_w1"), Handoff_Input{summary = "halfway", handoff_json = `{"next_steps":"finish b","vault":"vault:v1:ZGF0YQ=="}`})
+	_, hok, herr := lease_handoff(&fx.svc, inst_auth("inst_w1"), Handoff_Input{summary = "halfway", handoff_json = `{"next_steps":"finish b","vault":"vault:v2:e1:ZGF0YQ=="}`})
 	if !testing.expect(t, hok, fmt.tprintf("handoff: %s", herr.message)) do return
 	testing.expect(t, wake_log_has_stop(log, "inst_w1") || wake_log_has_run(log, "inst_w1"), "holder released")
 	// re-granted (prefers inst_w1) with the SAME attempt number
@@ -270,7 +270,7 @@ test_handoff_keeps_attempt_and_block_parks :: proc(t: ^testing.T) {
 	testing.expect(t, holder != "", "handoff → re-granted, attempt kept")
 	testing.expect_value(t, get_task(fx, "task_1").attempt_no, 1)
 	h, fok := get_facet(&fx.svc, task, 1, FACET_HANDOFF)
-	testing.expect(t, fok && strings.contains(h.body_json, "vault:v1:ZGF0YQ==") && strings.contains(h.body_json, `"next_steps":"finish b"`), "armored handoff stored verbatim")
+	testing.expect(t, fok && strings.contains(h.body_json, "vault:v2:e1:ZGF0YQ==") && strings.contains(h.body_json, `"next_steps":"finish b"`), "armored handoff stored verbatim")
 	// the pack for the new holder carries the previous handoff
 	lease, _ := lease_of(fx, holder)
 	inst, _, _ := iface.agent_get_instance(&fx.agents, holder)
@@ -332,9 +332,9 @@ test_facets_verbatim_round_trip_and_fetch :: proc(t: ^testing.T) {
 @(test)
 test_vault_armored_handoff_passes_shape_validation :: proc(t: ^testing.T) {
 	// A bridge-encrypted summary is an opaque string; the hub validates shape only.
-	body := handoff_body_json("vault:v1:c3VtbWFyeQ==", `{"next_steps":"vault:v1:bmV4dA==","files":["vault:v1:Zg=="]}`)
-	testing.expect(t, strings.has_prefix(body, `{"summary":"vault:v1:c3VtbWFyeQ=="`), "armored summary kept")
-	testing.expect(t, strings.contains(body, `"next_steps":"vault:v1:bmV4dA=="`) && strings.contains(body, `"files":["vault:v1:Zg=="]`), "armored members verbatim")
+	body := handoff_body_json("vault:v2:e1:c3VtbWFyeQ==", `{"next_steps":"vault:v2:e1:bmV4dA==","files":["vault:v2:e1:Zg=="]}`)
+	testing.expect(t, strings.has_prefix(body, `{"summary":"vault:v2:e1:c3VtbWFyeQ=="`), "armored summary kept")
+	testing.expect(t, strings.contains(body, `"next_steps":"vault:v2:e1:bmV4dA=="`) && strings.contains(body, `"files":["vault:v2:e1:Zg=="]`), "armored members verbatim")
 	testing.expect(t, !strings.contains(body, "truncated"), "not truncated")
 }
 
@@ -428,11 +428,11 @@ test_m2_review_fixes_verify_none_peek_and_vault_caps :: proc(t: ^testing.T) {
 	testing.expect(t, !has_v, "stale attempt verify exit ignored")
 
 	// 4. M2-M5: oversized vault-armored strings are not truncated in handoff_body_json or findings_json_capped
-	big_cipher := strings.concatenate({"ENC:v1:", strings.repeat("A", HANDOFF_SUMMARY_MAX + 500, context.temp_allocator)}, context.temp_allocator)
+	big_cipher := strings.concatenate({"vault:v2:e1:", strings.repeat("A", HANDOFF_SUMMARY_MAX + 500, context.temp_allocator)}, context.temp_allocator)
 	hb := handoff_body_json(big_cipher, fmt.tprintf(`{{"next_steps":"%s"}}`, big_cipher))
-	testing.expect(t, !strings.contains(hb, `"truncated":true`) && strings.contains(hb, big_cipher), "ENC:v1: handoff never byte-sliced")
+	testing.expect(t, !strings.contains(hb, `"truncated":true`) && strings.contains(hb, big_cipher), "vault:v2:e1: handoff never byte-sliced")
 	fc, ftrunc := findings_json_capped(fmt.tprintf(`[{{"text":"%s"}}]`, big_cipher))
-	testing.expect(t, !ftrunc && strings.contains(fc, big_cipher), "ENC:v1: finding never byte-sliced")
+	testing.expect(t, !ftrunc && strings.contains(fc, big_cipher), "vault:v2:e1: finding never byte-sliced")
 }
 
 @(test)

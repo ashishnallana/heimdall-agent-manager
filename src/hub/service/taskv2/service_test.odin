@@ -136,11 +136,11 @@ INSERT INTO users(user_id, name, display_name, status, created_at, updated_at) V
 INSERT INTO bridges(bridge_id, owner_user_id, created_at, updated_at) VALUES ('br_1','u1','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
 INSERT INTO agents(agent_id, owner_user_id, name, slug, created_at, updated_at) VALUES ('agt_w','u1','w','w','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'),('agt_r','u1','r','r','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
 INSERT INTO agent_instances(agent_instance_id, agent_id, owner_user_id, bridge_id, provider, runtime_status, chain_id, created_at, updated_at) VALUES ('inst_coord','agt_w','u1','br_1','p','running','chain_1','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'),('inst_rev','agt_r','u1','br_1','p','running','chain_1','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
-INSERT INTO task_chains(chain_id, owner_user_id, title, description, publish_state, status, kind, coordinator_agent_instance_id, default_reviewer_refs_json, created_at, updated_at) VALUES ('chain_1','u1','vault:v1:dGl0bGU=','vault:v1:ZGVzYw==','published','active','team_work','inst_coord','[{"type":"agent_instance","agent_instance_id":"inst_rev"}]','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
+INSERT INTO task_chains(chain_id, owner_user_id, title, description, publish_state, status, kind, coordinator_agent_instance_id, default_reviewer_refs_json, created_at, updated_at) VALUES ('chain_1','u1','vault:v2:e1:dGl0bGU=','vault:v2:e1:ZGVzYw==','published','active','team_work','inst_coord','[{"type":"agent_instance","agent_instance_id":"inst_rev"}]','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
 INSERT INTO task_chain_members(chain_id, agent_instance_id, agent_id, owner_user_id, role, created_at) VALUES ('chain_1','inst_coord','agt_w','u1','coordinator','2026-01-01T00:00:00Z');
 INSERT INTO task_chain_fleets(task_chain_id, agent_id, created_at, updated_at) VALUES ('chain_1','agt_w','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
 INSERT INTO tasks(task_id, chain_id, owner_user_id, title, description, publish_state, status, assignee_ref_json, reviewer_refs_json, created_at, updated_at) VALUES
- ('t_assigned','chain_1','u1','A','vault:v1:ZGVzY3JpcHRpb24=','published','assigned','{"type":"agent_id","agent_id":"agt_w"}','[{"type":"user","user_id":"u1"}]','2026-01-01T00:00:00Z','2026-01-02T00:00:00Z'),
+ ('t_assigned','chain_1','u1','A','vault:v2:e1:ZGVzY3JpcHRpb24=','published','assigned','{"type":"agent_id","agent_id":"agt_w"}','[{"type":"user","user_id":"u1"}]','2026-01-01T00:00:00Z','2026-01-02T00:00:00Z'),
  ('t_queued','chain_1','u1','Q','','published','queued','{"type":"agent_id","agent_id":"agt_w"}','[]','2026-01-01T00:00:00Z','2026-01-02T00:00:00Z'),
  ('t_inprog','chain_1','u1','P','','published','in_progress','{"type":"agent_instance","agent_instance_id":"inst_coord"}','[{"type":"agent_id","agent_id":"agt_r"}]','2026-01-01T00:00:00Z','2026-01-02T00:00:00Z'),
  ('t_inval','chain_1','u1','V','','published','in_validation','{}','[]','2026-01-01T00:00:00Z','2026-01-02T00:00:00Z'),
@@ -195,7 +195,7 @@ test_migration_round_trip :: proc(t: ^testing.T) {
 	testing.expect_value(t, scalar_int(fx, "SELECT requires_user_approval FROM tasks WHERE task_id = 't_queued';"), 0)
 	// brief: goal keeps the armored description verbatim; assignee template resolved from agent_id and from an instance ref
 	brief_a := scalar_text(fx, "SELECT brief_json FROM tasks WHERE task_id = 't_assigned';")
-	testing.expect(t, jsonx.extract_string(brief_a, "goal", "", true, context.temp_allocator) == "vault:v1:ZGVzY3JpcHRpb24=", "armored goal preserved")
+	testing.expect(t, jsonx.extract_string(brief_a, "goal", "", true, context.temp_allocator) == "vault:v2:e1:ZGVzY3JpcHRpb24=", "armored goal preserved")
 	testing.expect(t, jsonx.extract_string(brief_a, "assignee", "", true, context.temp_allocator) == "agt_w", "assignee from agent_id ref")
 	brief_p := scalar_text(fx, "SELECT brief_json FROM tasks WHERE task_id = 't_inprog';")
 	testing.expect(t, jsonx.extract_string(brief_p, "assignee", "", true, context.temp_allocator) == "agt_w", "assignee from instance ref resolved to its template")
@@ -210,7 +210,7 @@ test_migration_round_trip :: proc(t: ^testing.T) {
 	testing.expect(t, scalar_text(fx, "SELECT bridge_id FROM task_chain_fleets WHERE agent_id = 'agt_w';") == "br_1", "fleet row defaults to the chain's effective bridge")
 	// chain kind + armored title untouched
 	testing.expect(t, scalar_text(fx, "SELECT kind FROM task_chains WHERE chain_id = 'chain_1';") == "ticket", "team_work → ticket")
-	testing.expect(t, scalar_text(fx, "SELECT title FROM task_chains WHERE chain_id = 'chain_1';") == "vault:v1:dGl0bGU=", "armored title untouched")
+	testing.expect(t, scalar_text(fx, "SELECT title FROM task_chains WHERE chain_id = 'chain_1';") == "vault:v2:e1:dGl0bGU=", "armored title untouched")
 	// attempts: tasks that had run start at attempt 1
 	testing.expect_value(t, scalar_int(fx, "SELECT attempt_no FROM tasks WHERE task_id = 't_inprog';"), 1)
 	testing.expect_value(t, scalar_int(fx, "SELECT attempt_no FROM tasks WHERE task_id = 't_queued';"), 0)

@@ -58,7 +58,7 @@ get_facet :: proc(svc: ^Service, task: domain.Task, attempt_no: int, kind: strin
 
 is_vault_armored :: proc(s: string) -> bool {
 	t := strings.trim_space(s)
-	return strings.has_prefix(t, "vault:v1:") || strings.has_prefix(t, "ENC:v1:")
+	return domain.is_vault_armored(t)
 }
 
 // handoff_body_json builds the stored handoff facet from the agent's object:
@@ -104,7 +104,7 @@ findings_json_capped :: proc(findings_json: string) -> (string, bool) {
 		if n >= FINDINGS_MAX { truncated = true; break }
 		if n > 0 do strings.write_byte(&b, ',')
 		item := it
-		if len(item) > FINDING_TEXT_MAX + 2 && !strings.contains(item, "vault:v1:") && !strings.contains(item, "ENC:v1:") {
+		if len(item) > FINDING_TEXT_MAX + 2 && !domain.contains_vault_token(item) {
 			// an oversized finding is replaced by its (object-preserving) stub
 			item = fmt.tprintf(`{{"text":"(finding truncated: %d bytes)","truncated":true}}`, len(it))
 			truncated = true

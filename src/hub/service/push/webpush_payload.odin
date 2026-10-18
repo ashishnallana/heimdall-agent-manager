@@ -131,7 +131,7 @@ push_preview :: proc(body: string, max_len: int) -> string {
 	// Fail closed for both standalone armor and sender-prefixed/embedded armor.
 	// This check must happen before truncation because truncation destroys the
 	// authenticated envelope while leaving a user-visible ciphertext fragment.
-	if strings.contains(trimmed, domain.VAULT_ARMOR_PREFIX) {
+	if domain.contains_vault_token(trimmed) {
 		return strings.clone(PUSH_ENCRYPTED_PLACEHOLDER)
 	}
 	fields := strings.fields(trimmed)

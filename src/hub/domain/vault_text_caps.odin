@@ -2,6 +2,7 @@ package domain
 
 import "core:fmt"
 import "core:strings"
+import vault "odin_test:lib/vault"
 
 // ── Armor-aware length caps for vault-encrypted text fields (REQ-VCAP-1/2/3) ──
 //
@@ -11,17 +12,15 @@ import "core:strings"
 // that envelope against a plaintext cap rejects callers far below the documented
 // limit (iss_18d940db15f9accb).
 //
-// Armor overhead, derived from src/ctl/vault_content.odin:15-56:
+// Armor overhead, derived from src/lib/vault/envelope.odin (the single producer):
 //
-//	armored = "vault:v1:" + base64(12B nonce || 16B GCM tag || ciphertext)
+//	armored = "vault:v2:e<epoch>:" + base64(12B nonce || 16B GCM tag || ciphertext)
 //
-// AES-GCM is a stream mode, so len(ciphertext) == len(plaintext), and Odin's
-// base64.encode emits PADDED output (4 chars per 3 input bytes, rounded up).
-// Hence for a plaintext of n bytes:
+// AES-GCM is a stream mode, so len(ciphertext) == len(plaintext), and base64 is
+// PADDED (4 chars per 3 input bytes, rounded up). The epoch is 1..10 decimal digits,
+// so the budget assumes the longest header. For a plaintext of n bytes:
 //
-//	armored_len(n) = len("vault:v1:") + 4*ceil((n + 28) / 3)
-//	armored_len(4000) = 9 + 4*1343 = 5381
-//	armored_len(120)  = 9 + 4*50   = 209
+//	armored_len(n) <= len("vault:v2:e") + 10 + 1 + 4*ceil((n + 28) / 3)
 //
 // The Hub CANNOT verify the plaintext length of an armored value — that is
 // inherent to the zero-knowledge design and is accepted. These caps are a
@@ -29,31 +28,54 @@ import "core:strings"
 // budget locally before encrypting (REQ-VCAP-4).
 
 // VAULT_ARMOR_PREFIX is the self-describing wire marker for an encrypted value.
-// Must stay in sync with VAULT_ARMOR_PREFIX in src/ctl/vault_content.odin:15.
-VAULT_ARMOR_PREFIX :: "vault:v1:"
+// v1 ('vault:v1:'/'ENC:v1:') is dead: the hub treats it as ordinary text.
+VAULT_ARMOR_PREFIX :: vault.VAULT_V2_PREFIX
 
-// VAULT_HEADER_BYTES is the per-value nonce+tag overhead carried inside the
-// base64 payload (12B nonce + 16B GCM tag). See src/ctl/vault_content.odin:16-19.
-VAULT_HEADER_BYTES :: 28
+// VAULT_HEADER_BYTES is the per-value nonce+tag overhead inside the base64 payload.
+VAULT_HEADER_BYTES :: vault.HEADER_BYTES
 
-// is_vault_armored reports whether a value is an encrypted vault envelope.
+// VAULT_MAX_TOKEN_HEADER_LEN is len("vault:v2:e" + 10 digits + ":").
+VAULT_MAX_TOKEN_HEADER_LEN :: len(VAULT_ARMOR_PREFIX) + 1 + 10 + 1
+
+// is_vault_armored reports whether a value is a v2 encrypted vault envelope.
 //
-// This deliberately uses has_prefix, matching is_vault_armored in
-// src/ctl/vault_content.odin:22 (the producer of the format). Note that the
-// Hub's PREVIEW/redaction helpers instead ask strings.contains(s, "vault:v1:")
-// — correct there, because redaction should fail safe if the marker appears
-// anywhere — but wrong for a length cap, where `contains` would let any caller
-// bypass the plaintext cap by embedding the marker mid-string.
+// has_prefix, deliberately: for a length cap `contains` would let any caller bypass
+// the plaintext cap by embedding the marker mid-string. Redaction/preview helpers
+// that must fail safe use contains_vault_token instead.
 is_vault_armored :: proc(text: string) -> bool {
-	return strings.has_prefix(text, VAULT_ARMOR_PREFIX)
+	return vault.is_armored(text)
+}
+
+// vault_token_prefix_len returns the length of the full "vault:v2:e<N>:" header when
+// s starts with a well-formed v2 token, else 0.
+vault_token_prefix_len :: proc(s: string) -> int {
+	if !vault.is_armored(s) do return 0
+	start, end := vault.next_token(s, 0)
+	if start != 0 || end <= 0 do return 0
+	colon := strings.index_byte(s[len(VAULT_ARMOR_PREFIX):], ':')
+	if colon < 0 do return 0
+	return len(VAULT_ARMOR_PREFIX) + colon + 1
+}
+
+// vault_token_epoch parses the epoch from a value that starts with a v2 token header.
+vault_token_epoch :: proc(s: string) -> (epoch: u32, ok: bool) {
+	n := vault_token_prefix_len(s)
+	if n == 0 do return 0, false
+	return vault.parse_epoch(s[len(VAULT_ARMOR_PREFIX) + 1:n - 1])
+}
+
+// contains_vault_token reports whether s carries the v2 armor marker anywhere. It is
+// the fail-safe test for redaction/preview paths: a body that merely mentions the
+// prefix is treated as armored too, so no ciphertext shape is ever previewed raw.
+contains_vault_token :: proc(s: string) -> bool {
+	return strings.contains(s, VAULT_ARMOR_PREFIX)
 }
 
 // vault_armored_max_bytes returns the storage budget for a vault-armored value
-// whose plaintext is capped at plaintext_max bytes, i.e. armored_len(plaintext_max)
-// using the derivation above. The `+ 2) / 3` is the integer ceiling of /3.
+// whose plaintext is capped at plaintext_max bytes (see derivation above).
 vault_armored_max_bytes :: proc(plaintext_max: int) -> int {
-	if plaintext_max < 0 do return len(VAULT_ARMOR_PREFIX)
-	return len(VAULT_ARMOR_PREFIX) + 4 * ((plaintext_max + VAULT_HEADER_BYTES + 2) / 3)
+	if plaintext_max < 0 do return VAULT_MAX_TOKEN_HEADER_LEN
+	return VAULT_MAX_TOKEN_HEADER_LEN + 4 * ((plaintext_max + VAULT_HEADER_BYTES + 2) / 3)
 }
 
 // text_cap_limit_bytes returns the effective byte limit to enforce against
@@ -85,4 +107,20 @@ validate_capped_text :: proc(label: string, value: string, plaintext_max: int) -
 	return domain_error(.Validation_Failed, fmt.tprintf(
 		"%s is too long: %d bytes, limit %d", label, len(value), limit,
 	))
+}
+
+// vault_pty_v2_payload_from_armor converts a "vault:v2:e<N>:<b64(nonce|tag|ct)>" token
+// into the PTY v2 binary layout u32be(N) | nonce | tag | ct, preserving the epoch the
+// bridge/browser must check. The hub never decrypts; it only re-frames. Returns false
+// for anything that is not exactly one well-formed v2 token.
+vault_pty_v2_payload_from_armor :: proc(armor: string, allocator := context.allocator) -> (payload: []byte, ok: bool) {
+	epoch, body, res := vault.envelope_parse(armor, context.temp_allocator)
+	if res != .Ok do return nil, false
+	out := make([]byte, 4 + len(body), allocator)
+	out[0] = byte(epoch >> 24)
+	out[1] = byte(epoch >> 16)
+	out[2] = byte(epoch >> 8)
+	out[3] = byte(epoch)
+	copy(out[4:], body)
+	return out, true
 }

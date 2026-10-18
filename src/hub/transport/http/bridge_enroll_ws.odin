@@ -157,9 +157,10 @@ bridge_ws_enroll_session :: proc(
 	defer project_service.bridge_runtime_registry_mark_offline(h.bridge_runtime_registry, key, hello.generation)
 
 	project_service.bridge_runtime_registry_set_command_socket(h.bridge_runtime_registry, key, client, hello.generation)
-	public_key := json_string(hello_text, "public_key")
-	defer delete(public_key)
-	if public_key != "" do project_service.bridge_runtime_registry_set_public_key(h.bridge_runtime_registry, key, public_key, hello.generation)
+	unseal_identity := bridge_hello_unseal_identity(hello_text)
+	defer project_service.bridge_unseal_identity_destroy(&unseal_identity)
+	public_key := unseal_identity.public_key
+	if public_key != "" do project_service.bridge_runtime_registry_set_unseal_identity(h.bridge_runtime_registry, key, unseal_identity, hello.generation)
 	bridge_enroll_hello_store(bridge_id, Bridge_Enroll_Hello{
 		generation = hello.generation,
 		family_id = family_id,

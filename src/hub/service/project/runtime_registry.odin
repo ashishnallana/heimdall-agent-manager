@@ -52,6 +52,13 @@ Bridge_Runtime_Connection :: struct {
 	path_validation_adapter_registered: bool,
 	path_validation_url: string,
 	public_key: string,
+	// Passwordless vault P1: the bridge's signed ephemeral unseal key. Always set
+	// together with public_key (bridge_runtime_registry_set_unseal_identity) so a
+	// signature can never be paired with a different key.
+	unseal_boot_id: string,
+	unseal_key_signature: string, // raw {"alg","sig"} object, or ""
+	identity_public_key: string,
+	identity_sign_alg: string,
 	task_chain_search_ready: bool,
 	task_chain_search_stale: bool,
 	task_chain_search_revision: i64,
@@ -157,6 +164,10 @@ bridge_runtime_connection_release :: proc(r: ^Bridge_Runtime_Registry, c: ^Bridg
 	delete(c.owner_id, heap)
 	delete(c.path_validation_url, heap)
 	delete(c.public_key, heap)
+	delete(c.unseal_boot_id, heap)
+	delete(c.unseal_key_signature, heap)
+	delete(c.identity_public_key, heap)
+	delete(c.identity_sign_alg, heap)
 	free(c, heap)
 }
 
@@ -364,15 +375,51 @@ bridge_runtime_registry_set_command_socket :: proc(r: ^Bridge_Runtime_Registry, 
 	c.socket = socket
 	sync.unlock(&r.metadata_mutex)
 }
+// Bridge_Unseal_Identity is what a bridge_hello advertises for unseal: its ephemeral
+// ECDH public key, the boot id, the identity key's signature over both, and the
+// identity public key itself. The hub only relays these; clients verify them.
+Bridge_Unseal_Identity :: struct {
+	public_key:           string,
+	unseal_boot_id:       string,
+	unseal_key_signature: string,
+	identity_public_key:  string,
+	identity_sign_alg:    string,
+}
+
+bridge_unseal_identity_destroy :: proc(u: ^Bridge_Unseal_Identity, allocator := context.allocator) {
+	delete(u.public_key, allocator)
+	delete(u.unseal_boot_id, allocator)
+	delete(u.unseal_key_signature, allocator)
+	delete(u.identity_public_key, allocator)
+	delete(u.identity_sign_alg, allocator)
+	u^ = {}
+}
+
 bridge_runtime_registry_set_public_key :: proc(r: ^Bridge_Runtime_Registry, id, public_key: string, generation: int = 0) {
+	bridge_runtime_registry_set_unseal_identity(r, id, Bridge_Unseal_Identity{public_key = public_key}, generation)
+}
+
+// bridge_runtime_registry_set_unseal_identity replaces ALL unseal fields at once:
+// absent fields are cleared, never kept from an earlier hello.
+bridge_runtime_registry_set_unseal_identity :: proc(r: ^Bridge_Runtime_Registry, id: string, u: Bridge_Unseal_Identity, generation: int = 0) {
 	c := bridge_runtime_connection_acquire(r, id, generation)
 	if c == nil do return
 	defer bridge_runtime_connection_release(r, c)
 	sync.lock(&c.writer_mutex)
 	defer sync.unlock(&c.writer_mutex)
-	delete(c.public_key, runtime.default_allocator())
-	c.public_key = strings.clone(public_key, runtime.default_allocator())
+	heap := runtime.default_allocator()
+	delete(c.public_key, heap)
+	delete(c.unseal_boot_id, heap)
+	delete(c.unseal_key_signature, heap)
+	delete(c.identity_public_key, heap)
+	delete(c.identity_sign_alg, heap)
+	c.public_key = strings.clone(u.public_key, heap)
+	c.unseal_boot_id = strings.clone(u.unseal_boot_id, heap)
+	c.unseal_key_signature = strings.clone(u.unseal_key_signature, heap)
+	c.identity_public_key = strings.clone(u.identity_public_key, heap)
+	c.identity_sign_alg = strings.clone(u.identity_sign_alg, heap)
 }
+
 // Metadata strings are returned as caller-owned copies, never borrowed across retirement.
 bridge_runtime_registry_public_key :: proc(r: ^Bridge_Runtime_Registry, id: string) -> string {
 	c := bridge_runtime_connection_acquire(r, id)
@@ -381,6 +428,23 @@ bridge_runtime_registry_public_key :: proc(r: ^Bridge_Runtime_Registry, id: stri
 	sync.lock(&c.writer_mutex)
 	defer sync.unlock(&c.writer_mutex)
 	return strings.clone(c.public_key)
+}
+
+// bridge_runtime_registry_unseal_identity returns a caller-owned copy of all unseal
+// fields, read under one lock so they are mutually consistent.
+bridge_runtime_registry_unseal_identity :: proc(r: ^Bridge_Runtime_Registry, id: string, allocator := context.allocator) -> (u: Bridge_Unseal_Identity, found: bool) {
+	c := bridge_runtime_connection_acquire(r, id)
+	if c == nil do return {}, false
+	defer bridge_runtime_connection_release(r, c)
+	sync.lock(&c.writer_mutex)
+	defer sync.unlock(&c.writer_mutex)
+	return Bridge_Unseal_Identity{
+		public_key = strings.clone(c.public_key, allocator),
+		unseal_boot_id = strings.clone(c.unseal_boot_id, allocator),
+		unseal_key_signature = strings.clone(c.unseal_key_signature, allocator),
+		identity_public_key = strings.clone(c.identity_public_key, allocator),
+		identity_sign_alg = strings.clone(c.identity_sign_alg, allocator),
+	}, true
 }
 
 bridge_runtime_registry_set_task_chain_search_status :: proc(r: ^Bridge_Runtime_Registry, id: string, generation: int, ready, stale: bool, revision: i64) {

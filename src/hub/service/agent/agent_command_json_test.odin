@@ -29,7 +29,7 @@ test_agent_pty_input_command_json_relays_one_ciphertext :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(got, "\"data_b64\":\"QUJDREVG\""))
 	testing.expect(t, strings.contains(got, "\"is_encrypted\":true"))
 	testing.expect(t, !strings.contains(got, "enc_b64"))
-	testing.expect(t, !strings.contains(got, "vault:v1:"))
+	testing.expect(t, !strings.contains(got, "vault:v2:"))
 	testing.expect(t, !strings.contains(got, "\"data\":"))
 }
 

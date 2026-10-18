@@ -473,9 +473,10 @@ bridge_enrollment_status_handler :: proc(ctx: rawptr, req: Request) -> Response 
 	enroll_key := bridge_enroll_registry_key(bridge.bridge_id)
 	defer delete(enroll_key)
 	connected := project_service.bridge_runtime_registry_has_live(h.bridge_runtime_registry, enroll_key)
-	live_key := ""
-	if connected do live_key = project_service.bridge_runtime_registry_public_key(h.bridge_runtime_registry, enroll_key)
-	defer delete(live_key)
+	unseal: project_service.Bridge_Unseal_Identity
+	defer project_service.bridge_unseal_identity_destroy(&unseal)
+	if connected do unseal, _ = project_service.bridge_runtime_registry_unseal_identity(h.bridge_runtime_registry, enroll_key)
+	live_key := unseal.public_key
 	family, has_family, family_err := bridge_service.pending_enrollment_family(h.bridges, bridge.bridge_id)
 	defer delete(family)
 	if family_err.code != .None do return respond_error(family_err, req.request_id)
@@ -488,7 +489,9 @@ bridge_enrollment_status_handler :: proc(ctx: rawptr, req: Request) -> Response 
 	strings.write_string(&b, "\",\"enroll_connected\":"); strings.write_string(&b, "true" if connected else "false")
 	strings.write_string(&b, ",\"enroll_public_key\":\""); write_handler_json_string(&b, live_key)
 	strings.write_string(&b, "\",\"vault_status\":\""); write_handler_json_string(&b, bridge.vault_status)
-	strings.write_string(&b, "\"}")
+	strings.write_string(&b, "\"")
+	write_bridge_unseal_identity_fields(&b, unseal)
+	strings.write_string(&b, "}")
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req))
 }
 
@@ -530,8 +533,8 @@ bridge_public_key_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	if !bridge_ok do return respond_error(bridge_err, req.request_id)
 
 	pub_key := ""
-	owned_key := ""
-	defer delete(owned_key)
+	unseal: project_service.Bridge_Unseal_Identity
+	defer project_service.bridge_unseal_identity_destroy(&unseal)
 	if h.bridge_runtime_registry != nil {
 		// REQ-EA: while an enrollment is pending, or when the approval page asks for
 		// it (?enrollment=1, an attach whose old device may still be online), the key
@@ -539,13 +542,15 @@ bridge_public_key_handler :: proc(ctx: rawptr, req: Request) -> Response {
 		if domain.bridge_is_pending(bridge) || query_value(req.query, "enrollment") == "1" {
 			enroll_key := bridge_enroll_registry_key(bridge.bridge_id)
 			defer delete(enroll_key)
-			owned_key = project_service.bridge_runtime_registry_public_key(h.bridge_runtime_registry, enroll_key)
+			unseal, _ = project_service.bridge_runtime_registry_unseal_identity(h.bridge_runtime_registry, enroll_key)
 		} else {
-			owned_key = project_service.bridge_runtime_registry_public_key(h.bridge_runtime_registry, bridge.bridge_id)
+			unseal, _ = project_service.bridge_runtime_registry_unseal_identity(h.bridge_runtime_registry, bridge.bridge_id)
 		}
-		pub_key = owned_key
+		pub_key = unseal.public_key
 	}
 	if pub_key == "" && bridge.capabilities_json != "" {
+		// Enrollment-time key only: it carries no live unseal signature, so a client
+		// that requires one (every unseal v2 client) will refuse it.
 		pub_key = json_string(bridge.capabilities_json, "public_key", context.temp_allocator)
 	}
 
@@ -556,7 +561,9 @@ bridge_public_key_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	write_handler_json_string(&b, pub_key)
 	strings.write_string(&b, "\",\"bridge_public_key\":\"")
 	write_handler_json_string(&b, pub_key)
-	strings.write_string(&b, "\"}")
+	strings.write_string(&b, "\"")
+	write_bridge_unseal_identity_fields(&b, unseal)
+	strings.write_string(&b, "}")
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req))
 }
 
@@ -1668,11 +1675,11 @@ bridge_ws_upgrade_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_Soc
 	// Inbound bytes for this connection land on the registry-owned series.
 	reader.bytes_series = connection.rx_bytes
 	project_service.bridge_runtime_registry_set_command_socket(h.bridge_runtime_registry, bridge.bridge_id, client, hello.generation)
-	hello_pub_key := json_string(hello_text, "public_key")
-	if hello_pub_key != "" {
-		project_service.bridge_runtime_registry_set_public_key(h.bridge_runtime_registry, bridge.bridge_id, hello_pub_key, hello.generation)
+	hello_unseal := bridge_hello_unseal_identity(hello_text)
+	if hello_unseal.public_key != "" {
+		project_service.bridge_runtime_registry_set_unseal_identity(h.bridge_runtime_registry, bridge.bridge_id, hello_unseal, hello.generation)
 	}
-	delete(hello_pub_key)
+	project_service.bridge_unseal_identity_destroy(&hello_unseal)
 	// From here the socket is registered, so other threads (fs/file commands) may
 	// write it — serialize this and every subsequent write.
 	// Provider discovery is an optional capability sync, not part of Bridge
@@ -2689,18 +2696,20 @@ write_bridge_json :: proc(b: ^strings.Builder, br: domain.Bridge, agents: ^agent
 	strings.write_string(b, `,"task_chain_search_stale":`); strings.write_string(b, "true" if search_stale else "false")
 	strings.write_string(b, `,"task_chain_search_revision":`); strings.write_string(b, fmt.tprintf("%d", search_revision))
 	pub_key := ""
-	owned_key := ""
-	defer delete(owned_key)
+	unseal: project_service.Bridge_Unseal_Identity
+	defer project_service.bridge_unseal_identity_destroy(&unseal)
 	if agents != nil && agents.bridge_runtime_registry != nil {
-		owned_key = project_service.bridge_runtime_registry_public_key(agents.bridge_runtime_registry, br.bridge_id)
-		pub_key = owned_key
+		unseal, _ = project_service.bridge_runtime_registry_unseal_identity(agents.bridge_runtime_registry, br.bridge_id)
+		pub_key = unseal.public_key
 	}
 	if pub_key == "" && br.capabilities_json != "" {
 		pub_key = json_string(br.capabilities_json, "public_key", context.temp_allocator)
 	}
 	strings.write_string(b, ",\"public_key\":\""); write_handler_json_string(b, pub_key)
 	strings.write_string(b, "\",\"bridge_public_key\":\""); write_handler_json_string(b, pub_key)
-	strings.write_string(b, "\"}")
+	strings.write_string(b, "\"")
+	write_bridge_unseal_identity_fields(b, unseal)
+	strings.write_string(b, "}")
 }
 
 json_string :: proc(body, key: string, allocator := context.allocator) -> string {

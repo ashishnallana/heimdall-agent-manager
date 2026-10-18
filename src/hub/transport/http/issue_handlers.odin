@@ -17,7 +17,7 @@ Issue_Handlers :: struct {
 issue_description_preview :: proc(desc: string, max_len: int = 160) -> string {
 	trimmed := strings.trim_space(desc)
 	if trimmed == "" do return ""
-	if strings.contains(trimmed, "vault:v1:") {
+	if domain.contains_vault_token(trimmed) {
 		return strings.clone(trimmed)
 	}
 	fields := strings.fields(trimmed)

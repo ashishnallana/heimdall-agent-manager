@@ -103,6 +103,6 @@ test_agent_pane_relays_real_browser_armored_frame :: proc(t: ^testing.T) {
 	)
 	testing.expect(t, strings.contains(cmd, "\"is_encrypted\":true"))
 	testing.expect(t, !strings.contains(cmd, "enc_b64"))
-	testing.expect(t, !strings.contains(cmd, "vault:v1:"))
+	testing.expect(t, !strings.contains(cmd, "vault:v2:"))
 	testing.expect(t, !strings.contains(cmd, "\"data\":"))
 }

@@ -287,7 +287,7 @@ task_comment_summary_sqlite :: proc(ctx: rawptr, task_id: domain.Task_ID, owner_
 // ellipsis when the body was longer. Rune-safe so multibyte text is not cut.
 comment_preview :: proc(body: string) -> string {
 	trimmed := strings.trim_space(body)
-	if strings.contains(trimmed, "vault:v1:") {
+	if domain.contains_vault_token(trimmed) {
 		return strings.clone(trimmed)
 	}
 	runes := 0

@@ -182,16 +182,16 @@ _log_publish_write :: proc(result: ws.Text_Write_Result, size: int) {
 //
 //   PRIMARY UNBOUNDED FIELD — THE AGENT CHAT BODY. This is the everyday path.
 //     agent_action_handlers.odin:82  builds the event with chat_event_preview(m.body, 140)
-//     agent_action_handlers.odin:99  if strings.contains(trimmed, "vault:v1:") do return collapsed
+//     agent_action_handlers.odin:99  if domain.contains_vault_token(trimmed) do return collapsed
 //   That early return hands back the WHOLE collapsed body; the rune clip below it is never
 //   reached. And bodies arrive armored by default — ctl_agentmode_chat_send_params
 //   (src/ctl/agent_mode.odin:1307-1317) encrypts every non-armored body whenever a vault key
-//   is configured, producing exactly that `vault:v1:` prefix. So the bound is ~4/3 of the
+//   is configured, producing exactly that `vault:v2:` prefix. So the bound is ~4/3 of the
 //   plaintext (base64) with NO cap: roughly 49 KB of plaintext crossed the old 65535 cliff,
 //   and multi-KB agent messages are routine.
 //
 //   AND THE GUARD IS `strings.contains`, NOT `has_prefix` — which is the more alarming half.
-//   A body that merely MENTIONS the literal `vault:v1:` anywhere takes the uncapped branch
+//   A body that merely MENTIONS the literal `vault:v2:` anywhere takes the uncapped branch
 //   with no encryption involved at all. Discussing the armor prefix in a message is enough.
 //   (The same pattern appears at taskchain_service.odin:1322 and :1361 and at
 //   taskchain_repo_sqlite.odin:220 — those are the notice/persistence paths, not this bus.)

@@ -918,7 +918,7 @@ BRIEF_ACCEPTANCE_ITEM :: 200
 // exempt (decided, not worked).
 is_brief_armored :: proc(s: string) -> bool {
 	t := strings.trim_space(s)
-	return strings.has_prefix(t, "vault:v1:") || strings.has_prefix(t, "ENC:v1:")
+	return domain.is_vault_armored(t)
 }
 
 brief_publish_problems :: proc(service: ^Taskchain_Service, chain: domain.Task_Chain, task: domain.Task) -> []string {
@@ -1289,7 +1289,7 @@ task_display_name :: proc(task: domain.Task) -> string {
 
 comment_preview_safe :: proc(body: string) -> string {
 	trimmed := strings.trim_space(body)
-	if strings.contains(trimmed, "vault:v1:") {
+	if domain.contains_vault_token(trimmed) {
 		return strings.clone(trimmed)
 	}
 	b := strings.builder_make()
@@ -1324,12 +1324,12 @@ NOTICE_TITLE_MAX_RUNES :: 20
 NOTICE_EXCERPT_MAX_RUNES :: 20
 
 // truncate_runes clamps s to max runes, appending an ellipsis when it had to cut.
-// If s is an encrypted vault token (starts with "vault:v1:"), rune truncation
+// If s is an encrypted vault token (carries the "vault:v2:" marker), rune truncation
 // is bypassed so complete ciphertext is preserved for downstream client decryption.
 // Caller owns the returned string.
 truncate_runes :: proc(s: string, max: int) -> string {
 	trimmed := strings.trim_space(s)
-	if strings.contains(trimmed, "vault:v1:") {
+	if domain.contains_vault_token(trimmed) {
 		return strings.clone(trimmed)
 	}
 	b := strings.builder_make()

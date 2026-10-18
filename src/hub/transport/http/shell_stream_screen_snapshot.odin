@@ -25,13 +25,13 @@ package http
 // For the case that motivates the task — switching back to an idle shell sitting at a
 // prompt — no output is in flight, so the repaint is exact.
 
-import base64 "core:encoding/base64"
 import "core:fmt"
 import "core:net"
 import "core:strings"
 import "core:sync"
 import "core:time"
 import contracts "odin_test:contracts"
+import domain "odin_test:hub/domain"
 import agent_service "odin_test:hub/service/agent"
 import shell_session_svc "odin_test:hub/service/shell_session"
 
@@ -276,8 +276,8 @@ _shell_stream_screen_frames :: proc(pane_reply: string) -> (frames: [dynamic][]b
 	output := json_string(pane_reply, "output")
 	defer delete(output)
 	if output == "" do return nil, false
-	encrypted_capture := strings.has_prefix(output, "vault:v1:")
-	max_bytes := ((1024 * 1024 + 28 + 2) / 3) * 4 + len("vault:v1:") if encrypted_capture else 1024 * 1024
+	encrypted_capture := domain.is_vault_armored(output)
+	max_bytes := ((1024 * 1024 + domain.VAULT_HEADER_BYTES + 2) / 3) * 4 + domain.VAULT_MAX_TOKEN_HEADER_LEN if encrypted_capture else 1024 * 1024
 	if len(output) > max_bytes do return nil, false
 
 	cursor_row := json_int(pane_reply, "cursor_row", -1)
@@ -285,10 +285,12 @@ _shell_stream_screen_frames :: proc(pane_reply: string) -> (frames: [dynamic][]b
 	frames = make([dynamic][]byte)
 
 	if encrypted_capture {
-		// The bridge armors an encrypted capture as vault:v1:base64(nonce|tag|ct) on the
-		// command/reply channel; the viewer gets the raw bytes.
-		sealed, derr := base64.decode(output[len("vault:v1:"):], allocator = context.temp_allocator)
-		if derr != nil { delete(frames); return nil, false }
+		// The bridge armors an encrypted capture as vault:v2:e<N>:base64(nonce|tag|ct)
+		// on the command/reply channel; the viewer gets the PTY v2 payload
+		// u32be(N) | nonce | tag | ct, so it can pick the key and bind the AAD epoch.
+		// A malformed token paints nothing: never fall through to the text path.
+		sealed, ok_framed := domain.vault_pty_v2_payload_from_armor(output, context.temp_allocator)
+		if !ok_framed { delete(frames); return nil, false }
 		append(&frames, shell_stream_screen_frame(sealed, cursor_row, cursor_col, true))
 		return frames, true
 	}

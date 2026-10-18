@@ -31,7 +31,7 @@ build_chat_notification_masks_vault_armor_before_previewing :: proc(t: ^testing.
 		"conv_secret",
 		"inst_secret",
 		"text",
-		"vault:v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+		"vault:v2:e1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 	)
 	defer free_notification_content(standalone)
 	testing.expect_value(t, standalone.body, PUSH_ENCRYPTED_PLACEHOLDER)
@@ -40,7 +40,7 @@ build_chat_notification_masks_vault_armor_before_previewing :: proc(t: ^testing.
 		"conv_secret",
 		"inst_secret",
 		"text",
-		"You: vault:v1:AQIDBAUGBwgJCgsM2Ed9QrWXWA/eSrkLieecc4/Y9yN6j/zg",
+		"You: vault:v2:e1:AQIDBAUGBwgJCgsM2Ed9QrWXWA/eSrkLieecc4/Y9yN6j/zg",
 	)
 	defer free_notification_content(embedded)
 	testing.expect_value(t, embedded.body, PUSH_ENCRYPTED_PLACEHOLDER)
