@@ -337,6 +337,104 @@ Bridge_Task_Md_Input :: struct {
 	dropped:  bool,
 }
 
+// A task this one waits for, as the hub's pack `dependencies` entry describes
+// it: its latest handoff, output, VCS state and verify result. `dropped` hides
+// the output for size (the summary and dead ends always stay).
+Bridge_Task_Md_Dependency :: struct {
+	task_id, title, state, summary:   string,
+	decisions, dead_ends, next_steps: []string,
+	output, output_ref:               string,
+	output_omitted, dropped:          bool,
+	head:                             string,
+	files:                            []string,
+	files_total:                      int,
+	verify_cmd:                       string,
+	has_exit:                         bool,
+	exit_code:                        int,
+}
+
+bridge_taskv2_parse_dependencies :: proc(pack_json: string) -> []Bridge_Task_Md_Dependency {
+	out := make([dynamic]Bridge_Task_Md_Dependency, context.temp_allocator)
+	arr, has := bridge_provider_json_extract_array(pack_json, "dependencies")
+	if !has do return out[:]
+	defer delete(arr)
+	objs := bridge_provider_json_top_level_objects(arr)
+	defer bridge_bootstrap_free_object_slice(objs)
+	dec_list :: proc(obj, key: string) -> []string {
+		raw := jsonx.extract_string_array(obj, key, true, context.temp_allocator)
+		for &v in raw do v = bridge_taskv2_decrypt_field(v, context.temp_allocator)
+		return raw[:]
+	}
+	for obj in objs {
+		d := Bridge_Task_Md_Dependency{
+			task_id        = jsonx.extract_string(obj, "task_id", "", true, context.temp_allocator),
+			title          = bridge_taskv2_decrypt_field(jsonx.extract_string(obj, "title", "", true, context.temp_allocator), context.temp_allocator),
+			state          = jsonx.extract_string(obj, "state", "", true, context.temp_allocator),
+			summary        = bridge_taskv2_decrypt_field(jsonx.extract_string(obj, "summary", "", true, context.temp_allocator), context.temp_allocator),
+			decisions      = dec_list(obj, "decisions"),
+			dead_ends      = dec_list(obj, "dead_ends"),
+			next_steps     = dec_list(obj, "next_steps"),
+			output_ref     = jsonx.extract_string(obj, "output_ref", "", true, context.temp_allocator),
+			head           = jsonx.extract_string(obj, "head", "", true, context.temp_allocator),
+			files          = dec_list(obj, "changed_files"),
+			files_total    = jsonx.extract_int(obj, "changed_files_total", 0, true),
+		}
+		d.output_omitted, _ = jsonx.extract_bool_literal(obj, "output_omitted", true)
+		if o, ok := jsonx.extract_raw_object(obj, "output", true, context.temp_allocator); ok do d.output = bridge_taskv2_decrypt_field(o, context.temp_allocator)
+		if v, ok := jsonx.extract_raw_object(obj, "verify", true, context.temp_allocator); ok {
+			d.verify_cmd = bridge_taskv2_decrypt_field(jsonx.extract_string(v, "cmd", "", true, context.temp_allocator), context.temp_allocator)
+			d.exit_code, d.has_exit = jsonx.extract_int_found(v, "exit_code", true)
+		}
+		append(&out, d)
+	}
+	return out[:]
+}
+
+// bridge_taskv2_write_dependencies renders the "From The Tasks This One Waits
+// For" section of TASK.md.
+bridge_taskv2_write_dependencies :: proc(b: ^strings.Builder, deps: []Bridge_Task_Md_Dependency, task_id: string) {
+	if len(deps) == 0 do return
+	strings.write_string(b, "\n## From The Tasks This One Waits For\n")
+	strings.write_string(b, "Their work is already merged into your checkout. Build on it; do not redo it, and do not repeat their dead ends.\n")
+	for d in deps {
+		fmt.sbprintf(b, "\n### %s: %s (%s)\n", d.task_id, d.title, d.state if d.state != "" else "unknown")
+		if d.state == "cancelled" do strings.write_string(b, "- This task was **cancelled**; its work may be missing or partial.\n")
+		if d.summary != "" {
+			fmt.sbprintf(b, "- **Handoff Summary**: %s\n", d.summary)
+		} else {
+			strings.write_string(b, "- No handoff summary was recorded.\n")
+		}
+		write_list :: proc(b: ^strings.Builder, label: string, items: []string) {
+			if len(items) == 0 do return
+			fmt.sbprintf(b, "- **%s**:\n", label)
+			for it in items do fmt.sbprintf(b, "  - %s\n", it)
+		}
+		write_list(b, "Decisions", d.decisions)
+		write_list(b, "Dead Ends (DO NOT REPEAT)", d.dead_ends)
+		write_list(b, "Next Steps It Left", d.next_steps)
+		if d.head != "" do fmt.sbprintf(b, "- **Last Commit**: `%s`\n", d.head)
+		if len(d.files) > 0 {
+			strings.write_string(b, "- **Changed Files**: ")
+			for f, i in d.files {
+				if i > 0 do strings.write_string(b, ", ")
+				fmt.sbprintf(b, "`%s`", f)
+			}
+			if d.files_total > len(d.files) do fmt.sbprintf(b, " (+%d more)", d.files_total - len(d.files))
+			strings.write_byte(b, '\n')
+		}
+		if d.verify_cmd != "" || d.has_exit do fmt.sbprintf(b, "- **Verify**: `%s` exit_code=`%d`\n", d.verify_cmd, d.exit_code)
+		ref := d.output_ref if d.output_ref != "" else fmt.tprintf("output:%s", d.task_id)
+		switch {
+		case d.output != "" && !d.dropped:
+			fmt.sbprintf(b, "- **Output**: `%s`\n", d.output)
+		case d.output != "" || d.output_omitted:
+			fmt.sbprintf(b, "- **Output**: omitted for size — fetch with `ham-ctl task fetch %s %s`\n", task_id, ref)
+		case d.output_ref != "":
+			fmt.sbprintf(b, "- **Output**: see `%s` under Resolved Inputs\n", d.output_ref)
+		}
+	}
+}
+
 bridge_taskv2_decrypt_field :: proc(s: string, allocator := context.temp_allocator) -> string {
 	if !bridge_has_vault_token(s) do return strings.clone(s, allocator)
 	return bridge_decrypt_embedded_vault_tokens(s, allocator = allocator, locked_marker = VAULT_LOCKED_MARKER)
@@ -344,7 +442,7 @@ bridge_taskv2_decrypt_field :: proc(s: string, allocator := context.temp_allocat
 
 // bridge_taskv2_render_task_md decrypts all vault:v1: / ENC:v1: tokens in pack_json,
 // applies the field-safe 8k-token (max_bytes) cap AFTER decryption (never inside a
-// field, dropping in order: 1. resolved input bodies -> 2. previous verify summary/tail
+// field, dropping in order: 1. resolved input bodies, then dependency outputs -> 2. previous verify summary/tail
 // -> 3. previous handoff summary; preserving brief, dead_ends, and open findings intact),
 // and renders the Markdown document for <run_dir>/TASK.md.
 bridge_taskv2_render_task_md :: proc(pack_json: string, max_bytes: int = BRIDGE_TASK_MD_MAX_BYTES, allocator := context.allocator) -> string {
@@ -469,6 +567,8 @@ bridge_taskv2_render_task_md :: proc(pack_json: string, max_bytes: int = BRIDGE_
 		}
 	}
 
+	deps := bridge_taskv2_parse_dependencies(pack_json)
+
 	// Where You Are (vcs)
 	vcs_head := jsonx.extract_string(where_obj, "head", "", true, context.temp_allocator)
 	vcs_dirty, vcs_has_dirty := jsonx.extract_bool_literal(where_obj, "dirty", true)
@@ -535,6 +635,7 @@ bridge_taskv2_render_task_md :: proc(pack_json: string, max_bytes: int = BRIDGE_
 		goal, verify_cmd: string, acceptance: []string,
 		chain_summary: string,
 		inputs: []Bridge_Task_Md_Input,
+		deps: []Bridge_Task_Md_Dependency,
 		vcs_head: string, vcs_has_dirty, vcs_dirty: bool, vcs_files_arr: string,
 		has_prev: bool, prev_attempt_no: int, prev_outcome, prev_note: string,
 		handoff_summary: string, drop_handoff_summary: bool,
@@ -584,6 +685,8 @@ bridge_taskv2_render_task_md :: proc(pack_json: string, max_bytes: int = BRIDGE_
 		} else {
 			strings.write_string(&b, "_(none)_\n")
 		}
+
+		bridge_taskv2_write_dependencies(&b, deps, task_id)
 
 		if len(inputs) > 0 {
 			strings.write_string(&b, "\n## Resolved Inputs\n")
@@ -677,6 +780,7 @@ bridge_taskv2_render_task_md :: proc(pack_json: string, max_bytes: int = BRIDGE_
 		goal, verify_cmd, acceptance[:],
 		chain_summary,
 		inputs[:],
+		deps[:],
 		vcs_head, vcs_has_dirty, vcs_dirty, vcs_files_arr,
 		has_prev, prev_attempt_no, prev_outcome, prev_note,
 		handoff_summary, drop_handoff_summary,
@@ -698,6 +802,32 @@ bridge_taskv2_render_task_md :: proc(pack_json: string, max_bytes: int = BRIDGE_
 				goal, verify_cmd, acceptance[:],
 				chain_summary,
 				inputs[:],
+				deps[:],
+				vcs_head, vcs_has_dirty, vcs_dirty, vcs_files_arr,
+				has_prev, prev_attempt_no, prev_outcome, prev_note,
+				handoff_summary, drop_handoff_summary,
+				handoff_decisions[:], handoff_dead_ends[:], handoff_next_steps[:],
+				verify_cmd_prev, has_verify_exit, verify_exit, verify_head, verify_tail, drop_verify_summary,
+				findings_lines[:],
+				rules[:],
+				context.temp_allocator,
+			)
+		}
+	}
+
+	// Step 1b: drop dependency outputs (from last to first); their summaries and
+	// dead ends stay, and the agent can fetch the output by ref.
+	if max_bytes > 0 && len(rendered) > max_bytes {
+		for i := len(deps) - 1; i >= 0 && len(rendered) > max_bytes; i -= 1 {
+			if deps[i].dropped || deps[i].output == "" do continue
+			deps[i].dropped = true
+			rendered = build_doc(
+				task_id, title, role_label, lease_id, expires_at, hard_deadline_at, bridge_id, directory_id, provider, model, why, workdir, branch, merge_conflict, gate_feedback,
+				attempt_no, max_attempts, review_rounds,
+				goal, verify_cmd, acceptance[:],
+				chain_summary,
+				inputs[:],
+				deps[:],
 				vcs_head, vcs_has_dirty, vcs_dirty, vcs_files_arr,
 				has_prev, prev_attempt_no, prev_outcome, prev_note,
 				handoff_summary, drop_handoff_summary,
@@ -719,6 +849,7 @@ bridge_taskv2_render_task_md :: proc(pack_json: string, max_bytes: int = BRIDGE_
 			goal, verify_cmd, acceptance[:],
 			chain_summary,
 			inputs[:],
+			deps[:],
 			vcs_head, vcs_has_dirty, vcs_dirty, vcs_files_arr,
 			has_prev, prev_attempt_no, prev_outcome, prev_note,
 			handoff_summary, drop_handoff_summary,
@@ -739,6 +870,7 @@ bridge_taskv2_render_task_md :: proc(pack_json: string, max_bytes: int = BRIDGE_
 			goal, verify_cmd, acceptance[:],
 			chain_summary,
 			inputs[:],
+			deps[:],
 			vcs_head, vcs_has_dirty, vcs_dirty, vcs_files_arr,
 			has_prev, prev_attempt_no, prev_outcome, prev_note,
 			handoff_summary, drop_handoff_summary,

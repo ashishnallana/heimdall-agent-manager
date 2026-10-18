@@ -288,6 +288,10 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
                 {names.task(depId)}
               </Button>
             ))}
+            {/* The hub puts each one's latest handoff in this task's pack. */}
+            <Text as="p" role="caption" tone="faint" className="w-full" data-debug-id="task-details-receives-handoffs">
+              The agent receives their handoffs: summary, decisions, dead ends, output, changed files and verify result.
+            </Text>
           </div>
         )}
       </Block>

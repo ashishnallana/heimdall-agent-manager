@@ -122,6 +122,7 @@ build_pack_json :: proc(svc: ^Service, chain: domain.Task_Chain, task: domain.Ta
 	}
 
 	json_raw(&o, "inputs", resolve_brief_inputs_json(svc, task))
+	json_raw(&o, "dependencies", dependencies_pack_json(svc, task))
 
 	prev_json, where_vcs, prev_outcome := previous_attempt_and_vcs_json(svc, task, lease, pre.last_release == .Handoff, evs)
 	json_raw(&o, "where_you_are", where_vcs)
@@ -711,4 +712,125 @@ answered_question :: proc(evs: []domain.Task_Event, at: int, input: Fold_Input) 
 	case "blocked":          return ""
 	}
 	return reason
+}
+
+// ---- Dependency handoffs -------------------------------------------------------------
+// A task that waits for others gets each one's latest handoff (summary,
+// decisions, dead ends, next steps), structured output, last VCS state and
+// verify result, the way workflow stages get upstream outputs. Without this a
+// dependent ticket only saw the merged code and one chain-summary line.
+
+DEP_SUMMARY_MAX_BYTES :: 2 * 1024
+DEP_OUTPUT_MAX_BYTES :: 2 * 1024
+DEP_FILES_MAX :: 20
+
+// dependencies_pack_json returns the `dependencies` array for `task` ("[]" when
+// it waits for nothing). An output already listed in brief.inputs as
+// `output:<id>` is not repeated; an oversized output is replaced by a fetch
+// hint so the brief is never what the size cap cuts.
+dependencies_pack_json :: proc(svc: ^Service, task: domain.Task) -> string {
+	deps, derr := iface.taskchain_list_dependencies_by_chain(svc.repo, task.chain_id, task.owner_user_id)
+	if derr.code != .None do return "[]"
+	input_refs := jsonx.extract_string_array(task.brief_json, "inputs", true, context.temp_allocator)
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_byte(&b, '[')
+	written := 0
+	for d in deps {
+		if d.task_id != task.task_id do continue
+		dep, ok, _ := iface.taskchain_get_task(svc.repo, d.depends_on_task_id)
+		if !ok do continue
+		if written > 0 do strings.write_byte(&b, ',')
+		strings.write_string(&b, dependency_entry_json(svc, dep, input_refs[:]))
+		written += 1
+	}
+	strings.write_byte(&b, ']')
+	return strings.to_string(b)
+}
+
+@(private = "file")
+dependency_entry_json :: proc(svc: ^Service, dep: domain.Task, input_refs: []string) -> string {
+	handoff, output, vcs, verify := "", "", "", ""
+	handoff_at, output_at, vcs_at, verify_at := -1, -1, -1, -1
+	if facets, ferr := iface.taskchain_list_facets_by_task(svc.repo, dep.task_id, dep.owner_user_id); ferr.code == .None {
+		for f in facets {
+			switch f.kind {
+			case FACET_HANDOFF: if f.attempt_no >= handoff_at { handoff, handoff_at = f.body_json, f.attempt_no }
+			case FACET_OUTPUT:  if f.attempt_no >= output_at { output, output_at = f.body_json, f.attempt_no }
+			case FACET_VCS:     if f.attempt_no >= vcs_at { vcs, vcs_at = f.body_json, f.attempt_no }
+			case FACET_VERIFY:  if f.attempt_no >= verify_at { verify, verify_at = f.body_json, f.attempt_no }
+			}
+		}
+	}
+	o := json_begin()
+	json_str(&o, "task_id", string(dep.task_id))
+	json_str(&o, "title", dep.title)
+	json_str(&o, "state", domain.task_state_string(dep.state))
+	json_int(&o, "attempt_no", i64(max(handoff_at, output_at, vcs_at, verify_at, dep.attempt_no)))
+	summary := jsonx.extract_string(handoff, "summary", "", true, context.temp_allocator)
+	json_str(&o, "summary", truncate_utf8(summary, DEP_SUMMARY_MAX_BYTES))
+	for key in ([]string{"decisions", "dead_ends", "next_steps"}) {
+		json_raw(&o, key, string_list_json(handoff, key))
+	}
+	output_ref := fmt.tprintf("output:%s", dep.task_id)
+	listed := false
+	for r in input_refs do if strings.trim_space(r) == output_ref { listed = true; break }
+	out_trim := strings.trim_space(output)
+	switch {
+	case out_trim == "" || out_trim == "{}" || out_trim == "null":
+		// no structured output
+	case listed:
+		json_str(&o, "output_ref", output_ref) // already in Resolved Inputs
+	case len(out_trim) > DEP_OUTPUT_MAX_BYTES:
+		json_str(&o, "output_ref", output_ref)
+		json_bool(&o, "output_omitted", true)
+	case:
+		json_raw(&o, "output", out_trim)
+	}
+	if vcs != "" {
+		json_str(&o, "head", jsonx.extract_string(vcs, "head", "", true, context.temp_allocator))
+		files := jsonx.extract_string_array(vcs, "files", true, context.temp_allocator)
+		json_int(&o, "changed_files_total", i64(len(files)))
+		json_raw(&o, "changed_files", strings_json(files[:min(len(files), DEP_FILES_MAX)]))
+	}
+	if verify != "" {
+		v := json_begin()
+		json_str(&v, "cmd", jsonx.extract_string(verify, "cmd", "", true, context.temp_allocator))
+		if code, found := jsonx.extract_int_found(verify, "exit_code", true); found do json_int(&v, "exit_code", i64(code))
+		json_raw(&o, "verify", json_end(&v))
+	}
+	return json_end(&o)
+}
+
+// string_list_json reads `key` as a string array, or a single string, from a
+// facet body and returns a JSON string array.
+@(private = "file")
+string_list_json :: proc(body, key: string) -> string {
+	items := jsonx.extract_string_array(body, key, true, context.temp_allocator)
+	if len(items) == 0 {
+		if s := strings.trim_space(jsonx.extract_string(body, key, "", true, context.temp_allocator)); s != "" do append(&items, s)
+	}
+	return strings_json(items[:])
+}
+
+@(private = "file")
+strings_json :: proc(items: []string) -> string {
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_byte(&b, '[')
+	for s, i in items {
+		if i > 0 do strings.write_byte(&b, ',')
+		strings.write_byte(&b, '"')
+		contracts.write_json_string(&b, s)
+		strings.write_byte(&b, '"')
+	}
+	strings.write_byte(&b, ']')
+	return strings.to_string(b)
+}
+
+// truncate_utf8 cuts s to at most max_bytes without splitting a code point.
+@(private = "file")
+truncate_utf8 :: proc(s: string, max_bytes: int) -> string {
+	if len(s) <= max_bytes do return s
+	cut := max_bytes
+	for cut > 0 && (s[cut] & 0xC0) == 0x80 do cut -= 1
+	return fmt.tprintf("%s…", s[:cut])
 }
