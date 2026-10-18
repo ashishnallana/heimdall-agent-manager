@@ -24,6 +24,8 @@ export interface WorkflowPipelineViewProps {
   onScrolled?: () => void;
   onOpenFleetDrawer?: () => void;
   onOpenReviewRoles?: () => void;
+  /** Rendered directly under the summary bar (the chain overview mounts its Active servers panel here). */
+  summarySlot?: React.ReactNode;
   names?: TaskNames;
   className?: string;
 }
@@ -104,6 +106,7 @@ export const WorkflowPipelineView: React.FC<WorkflowPipelineViewProps> = ({
   onScrolled,
   onOpenFleetDrawer,
   onOpenReviewRoles,
+  summarySlot,
   names = EMPTY_TASK_NAMES,
   className = '',
 }) => {
@@ -170,6 +173,7 @@ export const WorkflowPipelineView: React.FC<WorkflowPipelineViewProps> = ({
           {error}
         </Text>
       )}
+      {summarySlot}
 
       <ol data-debug-id="workflow-stepper" className="flex flex-col">
         {stages.map((st, idx) => {

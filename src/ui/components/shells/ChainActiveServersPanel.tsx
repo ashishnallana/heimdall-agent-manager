@@ -1,9 +1,13 @@
 import React from 'react';
-import { useDispatch } from 'react-redux';
 import { useListShellsQuery } from '../../api/endpoints/shells';
 import type { ShellSession } from '../../api/endpoints/shells';
-import { openPreviewInAux } from '../../store/auxPanesSlice';
-import { activeServersOf, statusPresentation, supportsLivePreview } from './shellModel';
+import {
+  activeServersOf,
+  openPreviewInNewTab,
+  previewBlockedText,
+  statusPresentation,
+  supportsLivePreview,
+} from './shellModel';
 import { ShellLogViewer } from './ShellLogViewer';
 
 /**
@@ -43,8 +47,8 @@ import { ShellLogViewer } from './ShellLogViewer';
  * drop on the floor and now handles.
  */
 export function ChainActiveServersPanel({ chainId }: { chainId: string }) {
-  const dispatch = useDispatch();
   const [openLogSessionId, setOpenLogSessionId] = React.useState('');
+  const [previewError, setPreviewError] = React.useState('');
 
   // The scoped query. No pollingInterval (§6): shell events invalidate the
   // ShellSessions tag this provides, which refetches it.
@@ -60,6 +64,12 @@ export function ChainActiveServersPanel({ chainId }: { chainId: string }) {
      §4's "only ACTIVE servers appear — a terminal server drops off the panel". */
   const servers = React.useMemo(() => activeServersOf(data?.sessions ?? []), [data]);
 
+  const openPreview = (session: ShellSession) => {
+    // The chain summary has no aux dock, so the preview opens in a new tab.
+    const result = openPreviewInNewTab(session);
+    setPreviewError(result.opened ? '' : previewBlockedText(result.url));
+  };
+
   return (
     <section data-debug-id="chain-active-servers-panel" className="rounded-xl border border-subtle bg-surface">
       <header className="flex items-center justify-between border-b border-subtle px-3 py-2">
@@ -72,6 +82,11 @@ export function ChainActiveServersPanel({ chainId }: { chainId: string }) {
       </header>
 
       <div className="p-3">
+        {previewError && (
+          <div data-debug-id="chain-active-servers-preview-error" role="alert" className="mb-2 break-all text-xs text-danger">
+            {previewError}
+          </div>
+        )}
         {isLoading ? (
           <div data-debug-id="chain-active-servers-loading" className="text-xs text-faint italic">Loading…</div>
         ) : error ? (
@@ -100,15 +115,7 @@ export function ChainActiveServersPanel({ chainId }: { chainId: string }) {
                   onToggleLog={() =>
                     setOpenLogSessionId((current) => (current === session.session_id ? '' : session.session_id))
                   }
-                  onOpenPreview={() =>
-                    dispatch(
-                      openPreviewInAux({
-                        sessionId: session.session_id,
-                        label: session.label || session.cmd || session.session_id,
-                        port: session.server_port,
-                      }) as any,
-                    )
-                  }
+                  onOpenPreview={() => openPreview(session)}
                 />
               </li>
             ))}

@@ -81,8 +81,7 @@ import {
   type ShellSessionKind,
   type ShellSessionStatus,
 } from '../../api/endpoints/shells';
-import { useDispatch, useSelector } from 'react-redux';
-import { openPreviewInAux } from '../../store/auxPanesSlice';
+import { useSelector } from 'react-redux';
 import type { ShellState } from '../../store/shellSlice';
 import { SetShellPortDialog } from './SetShellPortDialog';
 import { bridgeLabel, catalogNote, projectLabel, useActionCatalog } from '../actions/actionCatalog';
@@ -104,7 +103,9 @@ import {
   matchesQuery,
   navigateTo,
   needsConfirm,
+  openPreviewInNewTab,
   parseShellListUrl,
+  previewBlockedText,
   previewAccessUrl,
   rememberRow,
   replaceListSearch,
@@ -354,7 +355,6 @@ export default function ShellListPage({ selectedId = '' }: { selectedId?: string
   const [portSession, setPortSession] = React.useState<ShellSession | null>(null);
   const [restartShell] = useRestartShellMutation();
   const [signalShell] = useSignalShellMutation();
-  const dispatch = useDispatch();
 
   const executeRowVerb = React.useCallback(
     async (session: ShellSession, verb: ShellVerb) => {
@@ -402,13 +402,12 @@ export default function ShellListPage({ selectedId = '' }: { selectedId?: string
         return;
       }
       if (verb === 'preview') {
-        dispatch(
-          openPreviewInAux({
-            sessionId: session.session_id,
-            label: session.label || session.cmd || session.session_id,
-            port: session.server_port,
-          }) as any,
-        );
+        // No aux dock on this page: the preview opens in a new tab, and a blocked popup
+        // still hands the user the URL.
+        const result = openPreviewInNewTab(session);
+        if (!result.opened) {
+          pushToast({ tone: 'danger', title: "Couldn't open the preview", message: previewBlockedText(result.url) });
+        }
         return;
       }
       if (verb === 'copy-url') {
@@ -431,7 +430,7 @@ export default function ShellListPage({ selectedId = '' }: { selectedId?: string
       }
       void executeRowVerb(session, verb);
     },
-    [dispatch, executeRowVerb, pushToast],
+    [executeRowVerb, pushToast],
   );
 
   /* ---------------- Keyboard ----------------

@@ -9,6 +9,7 @@ import { CreateTaskModal } from '../tasks/CreateTaskModal';
 import { TaskBoardSkeleton } from '../tasks/TaskBoardSkeleton';
 import { FleetManagementDrawer } from '../tasks/FleetManagementDrawer';
 import { ReviewRolesModal } from '../tasks/ReviewRolesModal';
+import ChainActiveServersPanel from '../shells/ChainActiveServersPanel';
 import { TaskWire } from '../../api/taskWire';
 import { resolveSelectedTaskId } from '../tasks/taskV2Types';
 import { useOpenAgentChat } from '../aux/openAgentChatContext';
@@ -181,6 +182,11 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
       setPublishError(actionErrorMessage(err));
     }
   };
+  /* REQ-SHELL-6 §4: this chain's ACTIVE SERVERS, whoever started them. It sits in the chain
+     summary because `server` is CHAIN + BRIDGE scoped, and chain is in no other kind's scope
+     key (shell_session.odin:87-91). */
+  const activeServers = <ChainActiveServersPanel chainId={chainId} />;
+
   return (
     <div
       data-debug-id="taskchain-overview-container"
@@ -219,6 +225,7 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
             onScrolled={clearScroll}
             onOpenFleetDrawer={() => setShowFleetDrawer(true)}
             onOpenReviewRoles={() => setShowReviewRoles(true)}
+            summarySlot={activeServers}
           />
         ) : (
           <TicketBoardView
@@ -238,6 +245,7 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
             publishingChain={publishChainState.isLoading}
             publishError={publishError}
             summaryText={chain.summary}
+            summarySlot={activeServers}
           />
         )}
       </div>

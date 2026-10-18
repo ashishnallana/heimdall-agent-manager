@@ -51,8 +51,6 @@ import {
 import { ShellLogViewer } from './ShellLogViewer';
 import { ShellTerminalPane } from './ShellTerminalPane';
 import { SetShellPortDialog } from './SetShellPortDialog';
-import { openPreviewInAux } from '../../store/auxPanesSlice';
-import { useDispatch } from 'react-redux';
 import { buildRouteHash } from '../../utils/appLocation';
 // Reused rather than duplicated: `useActionCatalog` resolves instance / agent /
 // bridge / project ids to names and carries Amendment 5's loading/empty/failed
@@ -74,6 +72,8 @@ import {
   isTerminal,
   kindLabel,
   needsConfirm,
+  openPreviewInNewTab,
+  previewBlockedText,
   previewAccessUrl,
   previewUnavailableReason,
   relativeTime,
@@ -131,7 +131,6 @@ export function useShellDetail(sessionId: string, onAfterVerb?: (verb: ShellVerb
   const [killShell] = useKillShellMutation();
   const [restartShell] = useRestartShellMutation();
   const [signalShell] = useSignalShellMutation();
-  const dispatch = useDispatch();
 
   const [busy, setBusy] = React.useState<ShellVerb | ''>('');
   const [actionError, setActionError] = React.useState('');
@@ -183,13 +182,10 @@ export function useShellDetail(sessionId: string, onAfterVerb?: (verb: ShellVerb
         return;
       }
       if (verb === 'preview') {
-        dispatch(
-          openPreviewInAux({
-            sessionId: session.session_id,
-            label: session.label || session.cmd || session.session_id,
-            port: session.server_port,
-          }) as any,
-        );
+        // Off the conversation workspace there is no aux dock, so the preview opens in
+        // a new tab. A blocked popup still hands the user the URL.
+        const result = openPreviewInNewTab(session);
+        if (!result.opened) setActionError(previewBlockedText(result.url));
         return;
       }
       if (verb === 'copy-url') {
@@ -214,7 +210,7 @@ export function useShellDetail(sessionId: string, onAfterVerb?: (verb: ShellVerb
       }
       void execute(verb, session);
     },
-    [dispatch, execute, record],
+    [execute, record],
   );
 
   const resolveConfirm = React.useCallback(

@@ -28,6 +28,8 @@ export interface TicketBoardViewProps {
   publishingChain?: boolean;
   publishError?: string;
   summaryText?: string;
+  /** Rendered directly under the summary bar (the chain overview mounts its Active servers panel here). */
+  summarySlot?: React.ReactNode;
   names?: TaskNames;
   className?: string;
 }
@@ -103,6 +105,7 @@ export const TicketBoardView: React.FC<TicketBoardViewProps> = ({
   publishingChain = false,
   publishError,
   summaryText,
+  summarySlot,
   names = EMPTY_TASK_NAMES,
   className = '',
 }) => {
@@ -165,6 +168,7 @@ export const TicketBoardView: React.FC<TicketBoardViewProps> = ({
           {publishError}
         </Text>
       )}
+      {summarySlot}
 
       {tasks.length === 0 ? (
         <EmptyState

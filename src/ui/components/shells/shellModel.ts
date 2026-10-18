@@ -480,6 +480,43 @@ export function previewAccessUrl(session: ShellSession): string {
   return `${origin}/api/v1/preview/${encodeURIComponent(session.session_id)}/`;
 }
 
+export type OpenPreviewResult = { opened: true; url: string } | { opened: false; url: string };
+
+/**
+ * Open a session's preview in a new browser tab. This is for surfaces outside the
+ * conversation workspace (the Shells pages, the chain summary), where there is no aux dock.
+ * `openPreviewInAux` only adds a tab to the focused conversation's dock, so on those pages
+ * it does nothing visible.
+ *
+ * WHY NOT `window.open(url, '_blank', 'noopener,noreferrer')`: with `noopener` the spec
+ * makes window.open return null EVEN ON SUCCESS. A null would then never tell us the
+ * popup was blocked, so every click would look like a block. Instead we open a blank,
+ * same-origin tab (a null handle here really does mean blocked), cut `opener` BEFORE the
+ * preview loads (the noopener guarantee: the previewed app can't reach back into the UI),
+ * and only then navigate. The caller gets the URL back so a block can show it, the same
+ * way the copy-url failure does.
+ */
+export interface PreviewTabHandle {
+  opener: unknown;
+  location: { replace(url: string): void };
+}
+
+export function openPreviewInNewTab(
+  session: ShellSession,
+  open: (url: string, target: string) => PreviewTabHandle | null = (url, target) => window.open(url, target),
+): OpenPreviewResult {
+  const url = previewAccessUrl(session);
+  const tab = open('', '_blank');
+  if (!tab) return { opened: false, url };
+  tab.opener = null;
+  tab.location.replace(url);
+  return { opened: true, url };
+}
+
+export function previewBlockedText(url: string): string {
+  return `The browser blocked the new tab. Open the preview at ${url}`;
+}
+
 /* ------------------------------------------------------------------ *
  * Confirm + failure copy
  * ------------------------------------------------------------------ *
