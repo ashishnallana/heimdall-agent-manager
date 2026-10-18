@@ -531,7 +531,9 @@ check_coordinator_attention_on_refold :: proc(svc: ^Service, u: ^Uow, before, af
 			effect_notify_coordinator(svc, u, after.chain_id, after.owner_user_id, "budget_exhausted", fmt.tprintf("[taskv2] budget_exhausted: task %s (%s) exhausted attempt budget (#%d)", after.task_id, after.title, after.attempt_no))
 		} else if view.oscillating || strings.contains(after.blocked_on_json, `"oscillation"`) {
 			effect_notify_coordinator(svc, u, after.chain_id, after.owner_user_id, "oscillation", fmt.tprintf("[taskv2] oscillation: task %s (%s) parked after %d review rounds", after.task_id, after.title, view.review_rounds))
-		} else if strings.contains(after.blocked_on_json, `"human"`) {
+		} else if strings.contains(after.blocked_on_json, `"human"`) || strings.contains(after.blocked_on_json, `"user"`) {
+			// `lease block --waiting-on user` (what TASK.md teaches) and the older
+			// `human` both mean the task waits on the user, as the UI treats them.
 			effect_notify_coordinator(svc, u, after.chain_id, after.owner_user_id, "blocked_on human", fmt.tprintf("[taskv2] blocked_on human: task %s (%s) is waiting on human input", after.task_id, after.title))
 		}
 	}

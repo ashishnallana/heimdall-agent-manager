@@ -46,3 +46,15 @@ test_bridge_taskv2_render_task_md_dependencies :: proc(t: ^testing.T) {
 	defer delete(plain)
 	testing.expect(t, !strings.contains(plain, "From The Tasks This One Waits For"), "no section without dependencies")
 }
+
+// The hub's verify facet writes `command` / `head_at_end`; Previous Verify must
+// show them (it read only the older `cmd` / `head` and rendered blank).
+@(test)
+test_bridge_taskv2_render_previous_verify_hub_keys :: proc(t: ^testing.T) {
+	pack := `{"task_id":"t","attempt_no":2,"task":{"title":"x"},"brief":{"goal":"g"},` +
+		`"previous_attempt":{"attempt_no":1,"outcome":"changes_requested",` +
+		`"verify":{"command":"pytest -q","exit_code":1,"head_at_start":"aaa","head_at_end":"bbb","summary":"1 failed"}}}`
+	md := bridge_taskv2_render_task_md(pack, 32_000)
+	defer delete(md)
+	testing.expect(t, strings.contains(md, "**Previous Verify**: cmd=`pytest -q` exit_code=`1` head=`bbb`"), md)
+}

@@ -589,9 +589,11 @@ bridge_taskv2_render_task_md :: proc(pack_json: string, max_bytes: int = BRIDGE_
 	}
 
 	verify_obj, _ := jsonx.extract_raw_object(prev_obj, "verify", true, context.temp_allocator)
-	verify_cmd_prev := bridge_taskv2_decrypt_field(jsonx.extract_string(verify_obj, "cmd", "", true, context.temp_allocator), context.temp_allocator)
+	// The hub's verify facet writes `command` and `head_at_end`; `cmd`/`head`
+	// are the older names.
+	verify_cmd_prev := bridge_taskv2_decrypt_field(jsonx.extract_string(verify_obj, "command", jsonx.extract_string(verify_obj, "cmd", "", true, context.temp_allocator), true, context.temp_allocator), context.temp_allocator)
 	verify_exit, has_verify_exit := jsonx.extract_int_found(verify_obj, "exit_code", true)
-	verify_head := jsonx.extract_string(verify_obj, "head", "", true, context.temp_allocator)
+	verify_head := jsonx.extract_string(verify_obj, "head_at_end", jsonx.extract_string(verify_obj, "head", "", true, context.temp_allocator), true, context.temp_allocator)
 	verify_tail := bridge_taskv2_decrypt_field(jsonx.extract_string(verify_obj, "tail", jsonx.extract_string(verify_obj, "summary", "", true, context.temp_allocator), true, context.temp_allocator), context.temp_allocator)
 
 	// Open Findings (never dropped)

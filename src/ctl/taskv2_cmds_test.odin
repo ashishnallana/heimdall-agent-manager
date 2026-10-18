@@ -183,6 +183,13 @@ test_m3_ctl_params_and_verify_helpers :: proc(t: ^testing.T) {
 	defer delete(rev_p)
 	testing.expect(t, rev_ok, "review post params ok")
 	testing.expect(t, strings.contains(rev_p, `"on_behalf_of":"user"`), "on_behalf_of included in review post params")
+	rev_s, rev_s_ok := ctl_v2_review_post_params(
+		[]string{"post", "t1"},
+		[]string{"ham-ctl", "review", "post", "t1", "--verdict", "request_changes", "--summary", "zero case crashes"},
+		"",
+	)
+	defer delete(rev_s)
+	testing.expect(t, rev_s_ok && strings.contains(rev_s, `"summary":"zero case crashes"`), "review post --summary reaches the hub")
 
 	// 4. task-chain summary set (positional, --body, --file)
 	sum_p, sum_ok := ctl_v2_task_chain_summary_params(

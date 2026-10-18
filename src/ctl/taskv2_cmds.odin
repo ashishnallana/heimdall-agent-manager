@@ -481,6 +481,9 @@ ctl_v2_review_post_params :: proc(tokens, args: []string, findings_json := "") -
 	if v := option_value(args, "--task", option_value(args, "--task-id", pos(tokens, 1))); v != "" do append(&fields, json_kv("task_id", v))
 	append(&fields, json_kv("verdict", verdict))
 	if findings_json != "" do append(&fields, json_kv_raw("findings", findings_json))
+	// --summary: the reason in words (enough on its own for request_changes;
+	// a rejected gate's re-plan reads it).
+	if v := strings.trim_space(option_value(args, "--summary", "")); v != "" do append(&fields, json_kv("summary", v))
 	if obo := strings.trim_space(option_value(args, "--on-behalf-of", "")); obo != "" {
 		append(&fields, json_kv("on_behalf_of", obo))
 	}
@@ -494,7 +497,7 @@ ctl_v2_review :: proc(endpoint, token: string, tokens, args: []string) {
 		f, _ := ctl_read_json_file_flag(args, "--findings-file")
 		params, ok := ctl_v2_review_post_params(tokens, args, f)
 		if !ok {
-			fmt.println(`{"ok":false,"message":"review post requires --verdict approve|request_changes [--findings-file <json>] [--task <id>] [--on-behalf-of user]"}`)
+			fmt.println(`{"ok":false,"message":"review post requires --verdict approve|request_changes [--summary <reason>] [--findings-file <json>] [--task <id>] [--on-behalf-of user]"}`)
 			os.exit(1)
 		}
 		ctl_agent_call_task(endpoint, token, "agent.review.post", params, args)
@@ -1051,8 +1054,9 @@ print_help_review :: proc() {
 	fmt.println("ham-ctl review — post a review verdict on the task you were woken to review")
 	fmt.println("")
 	fmt.println("VERBS")
-	fmt.println("  post --verdict approve|request_changes [--findings-file <json>] [--task <id>] [--on-behalf-of user]")
-	fmt.println("      Record your verdict. --task defaults to the task your lease names. The")
+	fmt.println("  post --verdict approve|request_changes [--summary <reason>] [--findings-file <json>] [--task <id>] [--on-behalf-of user]")
+	fmt.println("      Record your verdict. --task defaults to the task your lease names. request_changes")
+	fmt.println("      needs --summary or findings. The")
 	fmt.println("      findings file is a JSON array of {path?, line?, severity?, text}.")
 	fmt.println("      Coordinator instances can pass `--on-behalf-of user` when the user said so in chat.")
 	fmt.println("      Response: {gate: waiting|approved|changes_requested, task}.")
@@ -1060,6 +1064,7 @@ print_help_review :: proc() {
 	fmt.println("EXAMPLES")
 	fmt.println("  ham-ctl review post --verdict approve")
 	fmt.println("  ham-ctl review post --verdict request_changes --findings-file findings.json")
+	fmt.println("  ham-ctl review post --verdict request_changes --summary \"the zero case still crashes\"")
 	fmt.println("  ham-ctl review post --task task_1 --verdict approve --on-behalf-of user")
 }
 
