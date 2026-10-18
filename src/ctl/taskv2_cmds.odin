@@ -299,15 +299,34 @@ ctl_v2_task_publish :: proc(endpoint, token, tid: string, args: []string) {
 // ctl_read_json_file_flag reads `--<flag> <path>` and returns the file's JSON
 // text (validated to parse). Exits 1 on a missing/invalid file. ("", false)
 // when the flag is absent.
-// ctl_handoff_flags: the handoff object from --handoff-file, or {next_steps}
-// from --next-steps (the one-line form TASK.md teaches). Not both.
+// ctl_handoff_flags: the handoff object from --handoff-file, or one built from
+// the inline flags TASK.md teaches: --next-steps <text>, and repeatable
+// --decision <text> / --dead-end <text> (one item per flag). Not both forms.
+// Decisions and dead ends reach every task that waits for this one.
 ctl_handoff_flags :: proc(args: []string) -> (string, bool) {
 	next := strings.trim_space(option_value(args, "--next-steps", ""))
+	decisions := option_values_trimmed(args, "--decision")
+	dead_ends := option_values_trimmed(args, "--dead-end")
+	inline := next != "" || len(decisions) > 0 || len(dead_ends) > 0
 	h, has_file := ctl_read_json_file_flag(args, "--handoff-file")
-	if has_file && next != "" { fmt.println(`{"ok":false,"message":"use --next-steps or --handoff-file (put next_steps in the file), not both"}`); os.exit(1) }
+	if has_file && inline { fmt.println(`{"ok":false,"message":"use --next-steps/--decision/--dead-end or --handoff-file (put them in the file), not both"}`); os.exit(1) }
 	if has_file do return h, true
-	if next == "" do return "", false
-	return fmt.aprintf("{{%s}}", json_kv("next_steps", next)), true
+	if !inline do return "", false
+	fields := make([dynamic]string, context.temp_allocator)
+	if next != "" do append(&fields, json_kv("next_steps", next))
+	if len(decisions) > 0 do append(&fields, json_string_array_field("decisions", decisions))
+	if len(dead_ends) > 0 do append(&fields, json_string_array_field("dead_ends", dead_ends))
+	return json_object_from_slice(fields[:]), true
+}
+
+// option_values_trimmed: every non-blank value of a repeatable `name <value>` flag.
+option_values_trimmed :: proc(args: []string, name: string) -> []string {
+	out := make([dynamic]string, context.temp_allocator)
+	for i := 0; i + 1 < len(args); i += 1 {
+		if args[i] != name do continue
+		if v := strings.trim_space(args[i + 1]); v != "" do append(&out, v)
+	}
+	return out[:]
 }
 
 ctl_read_json_file_flag :: proc(args: []string, flag: string) -> (string, bool) {
@@ -388,7 +407,7 @@ ctl_v2_lease_submit :: proc(endpoint, token: string, args: []string) {
 		fmt.println(`{"ok":false,"message":"lease submit --verify accepts only 'none' (skip the verify gate for tasks with an output contract)"}`)
 		os.exit(1)
 	}
-	h, _ := ctl_read_json_file_flag(args, "--handoff-file")
+	h, _ := ctl_handoff_flags(args)
 	o, _ := ctl_read_json_file_flag(args, "--output-file")
 	a, a_ok := ctl_read_json_file_flag(args, "--artifacts-file")
 	if !a_ok {

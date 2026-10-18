@@ -15,9 +15,9 @@ You never set task status by hand. A task is `in_progress` exactly while you hol
 1. **Pull your next task** with `ham-ctl lease next`. It returns the lease you hold, or grants the next ready task, and writes `TASK.md` (brief, why, previous attempt, the user's answers). Work in the **Workdir** it names (your own branch, merged when the task is done). Post a brief numbered plan as a task comment.
 2. **Do the work.** Post comments at meaningful milestones. During long work, `ham-ctl lease heartbeat --note "<progress>"` at least every 15 minutes. If the lease lapses you are *not* stopped: just `lease next` again, and the attempt is not counted.
 3. **Verify** with `ham-ctl verify` at the exact commit you submit. Build every affected component and run the relevant tests and linters. Review your own diff.
-4. **Submit** with `ham-ctl lease submit --summary "<commands run, files changed, outcomes>"`. The task goes to the user's review (their attention deck) and your lease is released. **Pull the next task right away**: work waiting on the user never blocks you.
+4. **Submit** with `ham-ctl lease submit --summary "<commands run, files changed, outcomes>"`, adding `--decision "<choice and why>"` and `--dead-end "<what did not work>"` for each one (tasks that wait for this one receive them). The task goes to the user's review (their attention deck) and your lease is released. **Pull the next task right away**: work waiting on the user never blocks you.
 5. **The user asks for something urgent mid-task:** create the task, then `ham-ctl lease switch <new_task_id> --summary "<where you left the current one>"`. The current task goes back to `ready` with your notes (not counted as an attempt), and you hold the new one.
-6. **You need the user's input:** `ham-ctl lease block --kind human --reason "<question>"`. Their answer comes back in `TASK.md` ("Your Block Was Answered") when you next pull the task.
+6. **You need the user's input:** `ham-ctl lease block --waiting-on user --reason "<question>"`. Their answer comes back in `TASK.md` ("Your Block Was Answered") when you next pull the task.
 7. **Changes requested:** the task returns to `ready` with the user's findings. It comes back to you on a later `lease next`. You never review or approve your own work (the hub refuses it in solo mode).
 
 ## 3. Confidence Calculation Matrix
