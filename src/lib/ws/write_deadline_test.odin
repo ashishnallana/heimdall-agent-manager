@@ -1,41 +1,8 @@
 package ws
 
-import "core:os"
 import "core:strings"
 import "core:testing"
 import "core:time"
-
-@(test)
-tls_pipe_write_obeys_total_deadline :: proc(t: ^testing.T) {
-	r, w, err := os.pipe()
-	testing.expect(t, err == nil)
-	defer os.close(r)
-	defer os.close(w)
-	data := make([]byte, 1024 * 1024)
-	defer delete(data)
-	before := send_timeouts()
-	started := time.tick_now()
-	ok := send_all_file(w, data)
-	elapsed := time.tick_since(started)
-	testing.expect(t, !ok, "a full undrained pipe must fail")
-	testing.expect(t, elapsed >= WRITE_DEADLINE && elapsed < WRITE_DEADLINE + time.Second)
-	testing.expect(t, send_timeouts() > before, "TLS timeout must be observable")
-}
-
-@(test)
-tls_pipe_small_write_is_exact :: proc(t: ^testing.T) {
-	r, w, err := os.pipe()
-	testing.expect(t, err == nil)
-	defer os.close(r)
-	defer os.close(w)
-	payload := "payload"
-	testing.expect(t, send_all_file(w, transmute([]byte)payload))
-	data: [7]byte
-	n, read_err := os.read(r, data[:])
-	testing.expect(t, read_err == nil)
-	testing.expect_value(t, n, 7)
-	testing.expect_value(t, string(data[:]), "payload")
-}
 
 @(test)
 chunk_reassembly_reserves_a_total_byte_budget :: proc(t: ^testing.T) {

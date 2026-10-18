@@ -25,7 +25,6 @@ import "core:net"
 import "core:os"
 import "core:strings"
 import "core:sync"
-import "core:sys/posix"
 import "core:testing"
 import "core:thread"
 import cfg_lib "odin_test:lib/config"
@@ -409,7 +408,7 @@ test_vault_legacy_file_does_not_shadow_bridge :: proc(t: ^testing.T) {
 	}
 	file_key := "aaaabbbbccccddddaaaabbbbccccddddaaaabbbbccccddddaaaabbbbccccdddd"
 	testing.expect(t, os.write_entire_file(path, transmute([]byte)file_key) == nil, "write legacy key file")
-	_ = posix.chmod(strings.clone_to_cstring(path, context.temp_allocator), posix.mode_t{.IRUSR, .IWUSR})
+	_ = os.chmod(path, {.Read_User, .Write_User})
 
 	data := ctl_vault_test_key_data(VAULT_BRIDGE_TEST_KEY)
 	defer delete(data)

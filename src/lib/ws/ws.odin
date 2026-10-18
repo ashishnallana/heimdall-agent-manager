@@ -6,17 +6,16 @@ import "core:os"
 import "core:strconv"
 import "core:strings"
 import "core:sync"
-import "core:sys/posix"
 import "core:time"
+import tls "../tls_stream"
 
 WS_KEY :: "dGhlIHNhbXBsZSBub25jZQ=="
 
 Connection :: struct {
 	socket: net.TCP_Socket,
 	secure: bool,
-	process: os.Process,
-	stdin_w: ^os.File,
-	stdout_r: ^os.File,
+	// The TLS transport when secure (a relay subprocess on Unix, SChannel on Windows).
+	tls: tls.Stream,
 	connected: bool,
 	pending_texts: [dynamic]string,
 	// Opcode (0x1 text / 0x2 binary) of each pending_texts entry, same index.
@@ -143,15 +142,9 @@ handshake_failure_reason :: proc(response: string, timed_out: bool, deadline: ti
 }
 
 connect_tls_with_bearer :: proc(host: string, port: u16, path, bearer_token: string) -> (Connection, bool) {
-	stdin_r, stdin_w, stdin_err := os.pipe()
-	if stdin_err != nil { set_last_connect_error("pipe creation failed"); return {}, false }
-	stdout_r, stdout_w, stdout_err := os.pipe()
-	if stdout_err != nil { _ = os.close(stdin_r); _ = os.close(stdin_w); return {}, false }
-	cmd := tls_client_command(host, port)
-	process, start_err := os.process_start(os.Process_Desc{command = cmd, stdin = stdin_r, stdout = stdout_w})
-	_ = os.close(stdin_r)
-	_ = os.close(stdout_w)
-	if start_err != nil { set_last_connect_error(fmt.tprintf("could not start the TLS relay %s: %v", cmd[0], start_err)); _ = os.close(stdin_w); _ = os.close(stdout_r); return {}, false }
+	budget := handshake_deadline()
+	stream, dial_ok := tls.dial(host, port, budget)
+	if !dial_ok { set_last_connect_error(tls.last_dial_error()); return {}, false }
 
 	auth_header := ""
 	if strings.trim_space(bearer_token) != "" {
@@ -165,28 +158,24 @@ connect_tls_with_bearer :: proc(host: string, port: u16, path, bearer_token: str
 		WS_KEY,
 		auth_header,
 	)
-	_, send_err := os.write(stdin_w, transmute([]byte)request)
-	if send_err != nil {
+	if tls.write_all(&stream, transmute([]byte)request) != .Ok {
 		set_last_connect_error("could not write the handshake to the TLS relay")
-		_ = os.close(stdin_w)
-		_ = os.close(stdout_r)
-		_ = os.process_kill(process)
-		_, _ = os.process_wait(process)
+		tls.abort(&stream)
+		tls.close(&stream)
 		return {}, false
 	}
 
 	data := make([dynamic]byte)
 	defer delete(data)
 	buf: [4096]byte
-	budget := handshake_deadline()
 	deadline := time.to_unix_nanoseconds(time.now()) + i64(budget)
 	timed_out := true
 	for time.to_unix_nanoseconds(time.now()) < deadline {
-		if ready, pipe_err := os.pipe_has_data(stdout_r); pipe_err != nil {
+		if ready, has_ok := tls.has_data(&stream); !has_ok {
 			break
 		} else if ready {
-			n, read_err := os.read(stdout_r, buf[:])
-			if read_err != nil || n <= 0 { timed_out = false; break }
+			n, read_ok := tls.read(&stream, buf[:])
+			if !read_ok || n <= 0 { timed_out = false; break }
 			append(&data, ..buf[:n])
 			if strings.contains(string(data[:]), "\r\n\r\n") { timed_out = false; break }
 		} else {
@@ -196,10 +185,8 @@ connect_tls_with_bearer :: proc(host: string, port: u16, path, bearer_token: str
 	response := string(data[:])
 	if !(strings.has_prefix(response, "HTTP/1.1 101") || strings.has_prefix(response, "HTTP/1.0 101")) {
 		set_last_connect_error(handshake_failure_reason(response, timed_out, budget, host, port))
-		_ = os.close(stdin_w)
-		_ = os.close(stdout_r)
-		_ = os.process_kill(process)
-		_, _ = os.process_wait(process)
+		tls.abort(&stream)
+		tls.close(&stream)
 		return {}, false
 	}
 	pending_bytes := make([dynamic]byte)
@@ -207,7 +194,7 @@ connect_tls_with_bearer :: proc(host: string, port: u16, path, bearer_token: str
 		extra_start := header_end + 4
 		if extra_start < len(data) do append(&pending_bytes, ..data[extra_start:])
 	}
-	return Connection{secure = true, process = process, stdin_w = stdin_w, stdout_r = stdout_r, connected = true, pending_texts = make([dynamic]string), pending_bytes = pending_bytes}, true
+	return Connection{secure = true, tls = stream, connected = true, pending_texts = make([dynamic]string), pending_bytes = pending_bytes}, true
 }
 
 close :: proc(conn: ^Connection) {
@@ -226,18 +213,14 @@ close :: proc(conn: ^Connection) {
 
 	if conn.secure || conn.socket != 0 {
 		if conn.secure {
-			if conn.stdin_w != nil do _ = os.close(conn.stdin_w)
-			if conn.stdout_r != nil do _ = os.close(conn.stdout_r)
-			_ = os.process_terminate(conn.process)
-			_, _ = os.process_wait(conn.process, 250 * time.Millisecond)
+			tls.close(&conn.tls)
 		} else {
 			net.close(conn.socket)
 		}
 		conn.connected = false
 		conn.socket = 0
 		conn.secure = false
-		conn.stdin_w = nil
-		conn.stdout_r = nil
+		conn.tls = {}
 	}
 }
 
@@ -263,14 +246,14 @@ poll_frame :: proc(conn: ^Connection) -> (text: string, opcode: u8, ok: bool) {
 	buf: [131072]byte
 	n := 0
 	if conn.secure {
-		if ready, pipe_err := os.pipe_has_data(conn.stdout_r); pipe_err != nil {
+		if ready, has_ok := tls.has_data(&conn.tls); !has_ok {
 			conn.connected = false
 			return "", 0, false
 		} else if !ready {
 			return "", 0, false
 		}
-		read_n, read_err := os.read(conn.stdout_r, buf[:])
-		if read_err != nil || read_n <= 0 {
+		read_n, read_ok := tls.read(&conn.tls, buf[:])
+		if !read_ok || read_n <= 0 {
 			conn.connected = false
 			return "", 0, false
 		}
@@ -423,15 +406,15 @@ send_frame :: proc(conn: ^Connection, opcode: u8, text: string, timeout: time.Du
 	header: [WS_MAX_HEADER_BYTES]byte
 	header_len := server_frame_header_with_opcode(header[:], opcode, n)
 	frame := make([]byte, header_len + n)
-	// REQ-SHELL-52A: send_all_tcp/send_all_file BORROW this slice and free nothing on any
+	// REQ-SHELL-52A: send_all_tcp/send_all_tls BORROW this slice and free nothing on any
 	// exit, so without this every frame leaked header_len+len(text) bytes on the heap.
 	defer delete(frame)
 	copy(frame[:header_len], header[:header_len])
 	copy(frame[header_len:], transmute([]byte)text)
 	ok := false
-	if conn.secure { ok = send_all_file(conn.stdin_w, frame, timeout) } else { ok = send_all_tcp(conn.socket, frame, timeout) }
+	if conn.secure { ok = send_all_tls(&conn.tls, frame, timeout) } else { ok = send_all_tcp(conn.socket, frame, timeout) }
 	if !ok {
-		if conn.secure { _ = os.process_kill(conn.process) } else { _ = net.shutdown(conn.socket, .Both) }
+		if conn.secure { tls.abort(&conn.tls) } else { _ = net.shutdown(conn.socket, .Both) }
 		conn.connected = false
 	}
 	return ok
@@ -465,119 +448,34 @@ send_socket_bytes :: proc(socket: net.TCP_Socket, bytes: []byte, timeout: time.D
 	started := time.tick_now()
 	for sent < len(bytes) {
 		if time.tick_since(started) >= timeout { sync.atomic_add(&_send_timeouts, 1); return sent, false }
-		n := posix.send(posix.FD(socket), raw_data(bytes[sent:]), uint(int(len(bytes))-sent), {.NOSIGNAL})
-		if n < 0 {
-			err := posix.errno()
-			if err == .EAGAIN || err == .EINTR { time.sleep(time.Millisecond); continue }
-			return sent, false
-		}
-		if n == 0 do return sent, false
-		sent += int(n)
+		n, retry := socket_send_once(socket, bytes[sent:])
+		if retry { time.sleep(time.Millisecond); continue }
+		if n <= 0 do return sent, false
+		sent += n
 	}
 	return sent, true
 }
 
-// TLS helpers consume a nonblocking pipe. A stalled child must obey the same
-// deadline as TCP; a partial frame is fatal to this connection.
+// A stalled TLS transport must obey the same deadline as TCP; a partial frame is
+// fatal to this connection.
 @(private)
-send_all_file :: proc(file: ^os.File, bytes: []byte, timeout: time.Duration = WRITE_DEADLINE) -> bool {
-	if file == nil do return false
-	fd := posix.FD(os.fd(file))
-	flags := posix.fcntl(fd, .GETFL)
-	if flags < 0 || posix.fcntl(fd, .SETFL, flags | posix.O_NONBLOCK) < 0 do return false
-	sent := 0
-	started := time.tick_now()
-	for sent < len(bytes) {
-		if time.tick_since(started) >= timeout { sync.atomic_add(&_send_timeouts, 1); return false }
-		n := posix.write(fd, raw_data(bytes[sent:]), uint(int(len(bytes))-sent))
-		if n < 0 {
-			err := posix.errno()
-			if err == .EAGAIN || err == .EINTR { time.sleep(time.Millisecond); continue }
-			return false
-		}
-		if n == 0 do return false
-		sent += int(n)
+send_all_tls :: proc(stream: ^tls.Stream, bytes: []byte, timeout: time.Duration = WRITE_DEADLINE) -> bool {
+	switch tls.write_all(stream, bytes, timeout) {
+	case .Ok:
+		return true
+	case .Timed_Out:
+		sync.atomic_add(&_send_timeouts, 1)
+	case .Failed:
 	}
-	return true
+	return false
 }
 
 // Wake the transport reader without closing a descriptor it may still use.
 abort :: proc(conn: ^Connection) {
 	sync.mutex_lock(&conn.send_mu)
 	defer sync.mutex_unlock(&conn.send_mu)
-	if conn.secure { _ = os.process_kill(conn.process) } else { _ = net.shutdown(conn.socket, .Both) }
+	if conn.secure { tls.abort(&conn.tls) } else { _ = net.shutdown(conn.socket, .Both) }
 	conn.connected = false
-}
-
-// tls_client_command builds the argv for the subprocess that terminates TLS for
-// the bridge->hub wss:// control channel. The transport is selected by the
-// HAM_TLS_BACKEND env toggle:
-//   - "s_client"      -> legacy `openssl s_client` (kept as an instant, no-rebuild
-//                        fallback; suffers the 16 KB multi-read teardown).
-//   - anything else   -> `socat OPENSSL-CONNECT` (the DEFAULT: a purpose-built
-//     (default socat)   full-duplex relay that does not tear down on multi-read
-//                        bursts, which is what unblocks large FS reads/artifacts).
-// SHARED CONTRACT: the exact same rule ("s_client" == legacy, else socat) is
-// duplicated in src/lib/http_client/http_client.odin and in the bridge's
-// bridge_tls_backend_is_socat (src/bridge/fs_management.odin) — keep them in sync.
-tls_client_command :: proc(host: string, port: u16) -> []string {
-	clean_host := host
-	if len(clean_host) >= 2 && clean_host[0] == '[' && clean_host[len(clean_host)-1] == ']' {
-		clean_host = clean_host[1:len(clean_host)-1]
-	}
-	ca_file := strings.trim_space(os.get_env("HAM_TLS_CA_FILE", context.temp_allocator))
-	backend := strings.to_lower(strings.trim_space(os.get_env("HAM_TLS_BACKEND", context.temp_allocator)))
-	if backend == "s_client" {
-		return openssl_s_client_command(clean_host, port, ca_file)
-	}
-	return socat_openssl_command(clean_host, port, ca_file)
-}
-
-// openssl_s_client_command is the legacy fallback transport (HAM_TLS_BACKEND=s_client).
-openssl_s_client_command :: proc(clean_host: string, port: u16, ca_file: string) -> []string {
-	cmd := make([dynamic]string)
-	append(&cmd, "openssl")
-	append(&cmd, "s_client")
-	append(&cmd, "-quiet")
-	append(&cmd, "-verify_return_error")
-	append(&cmd, "-servername")
-	append(&cmd, clean_host)
-	append(&cmd, "-verify_hostname")
-	append(&cmd, clean_host)
-	if ca_file != "" {
-		append(&cmd, "-CAfile")
-		append(&cmd, ca_file)
-	}
-	append(&cmd, "-connect")
-	append(&cmd, fmt.tprintf("%s:%d", clean_host, port))
-	return cmd[:]
-}
-
-// socat_openssl_command is the default transport. It relays STDIO <-> an OpenSSL
-// TLS connection. TLS verification is EQUIVALENT to the s_client path and MUST NOT
-// be weakened:
-//   - verify=1        : require + verify the peer certificate chain (fail closed).
-//   - commonname=<h>  : check the cert's CN/SAN against the intended host — this is
-//                       the hostname verification (mirrors s_client -verify_hostname).
-//   - snihost=<h>     : send SNI so the server presents the right cert (mirrors
-//                       s_client -servername).
-//   - cafile=<ca>     : trust anchor when HAM_TLS_CA_FILE is set; when unset, socat
-//                       uses OpenSSL's default CA store, exactly like s_client with
-//                       no -CAfile. NEVER emit verify=0.
-socat_openssl_command :: proc(clean_host: string, port: u16, ca_file: string) -> []string {
-	opts := strings.builder_make()
-	fmt.sbprintf(&opts, "OPENSSL-CONNECT:%s:%d", clean_host, port)
-	fmt.sbprintf(&opts, ",snihost=%s", clean_host)
-	strings.write_string(&opts, ",verify=1")
-	fmt.sbprintf(&opts, ",commonname=%s", clean_host)
-	if ca_file != "" {
-		fmt.sbprintf(&opts, ",cafile=%s", ca_file)
-	}
-	cmd := make([dynamic]string)
-	append(&cmd, "socat")
-	append(&cmd, "STDIO")
-	append(&cmd, strings.to_string(opts))
-	return cmd[:]
 }
 
 parse_ws_url :: proc(ws_url: string) -> (host: string, port: u16, path: string, secure: bool, ok: bool) {

@@ -1,6 +1,5 @@
 package main
 
-import "core:c"
 import "core:fmt"
 import "core:net"
 import "core:os"
@@ -8,8 +7,8 @@ import "core:strconv"
 import base64 "core:encoding/base64"
 import json "core:encoding/json"
 import "core:strings"
-import "core:sys/posix"
 import "core:time"
+import local_socket "odin_test:lib/local_socket"
 
 // ── agent mode: local Bridge endpoint client (RTE2E-7) ───────────────────────
 // Agent mode talks ONLY to the local Bridge endpoint over JSONL v1 using the
@@ -1600,21 +1599,12 @@ ctl_agent_send_tcp :: proc(endpoint, line: string) -> (string, bool) {
 
 ctl_agent_send_unix :: proc(endpoint, line: string) -> (string, bool) {
 	path := strings.trim_prefix(endpoint, "unix:")
-	if strings.trim_space(path) == "" || len(path) + 1 > len(posix.sockaddr_un{}.sun_path) do return "", false
-	fd := posix.socket(.UNIX, .STREAM)
-	if fd < 0 do return "", false
-	defer posix.close(fd)
-	addr: posix.sockaddr_un
-	when ODIN_OS == .Darwin || ODIN_OS == .FreeBSD || ODIN_OS == .NetBSD || ODIN_OS == .OpenBSD {
-		addr.sun_len = c.uchar(size_of(addr))
-	}
-	addr.sun_family = .UNIX
-	for i in 0..<len(path) do addr.sun_path[i] = c.char(path[i])
-	addr.sun_path[len(path)] = 0
-	if posix.connect(fd, (^posix.sockaddr)(&addr), posix.socklen_t(size_of(addr))) != .OK do return "", false
-	bytes := transmute([]byte)line
-	if posix.send(fd, raw_data(bytes), c.size_t(len(bytes)), {}) < 0 do return "", false
-	return ctl_agent_recv_unix(fd)
+	if strings.trim_space(path) == "" || !local_socket.path_fits(path) do return "", false
+	sock, ok := local_socket.dial(path)
+	if !ok do return "", false
+	defer local_socket.close(sock)
+	if local_socket.send(sock, transmute([]byte)line) < 0 do return "", false
+	return ctl_agent_recv_unix(sock)
 }
 
 ctl_agent_recv_tcp :: proc(socket: net.TCP_Socket) -> (string, bool) {
@@ -1630,13 +1620,13 @@ ctl_agent_recv_tcp :: proc(socket: net.TCP_Socket) -> (string, bool) {
 	return string(out[:]), true
 }
 
-ctl_agent_recv_unix :: proc(fd: posix.FD) -> (string, bool) {
+ctl_agent_recv_unix :: proc(sock: local_socket.Socket) -> (string, bool) {
 	out := make([dynamic]byte, 0, 8192)
 	buf: [8192]byte
 	for len(out) < 64 * 1024 * 1024 {
-		n := posix.recv(fd, raw_data(buf[:]), c.size_t(len(buf)), {})
+		n := local_socket.recv(sock, buf[:])
 		if n <= 0 do break
-		append(&out, ..buf[:int(n)])
+		append(&out, ..buf[:n])
 		if byte_slice_contains(out[:], '\n') do return string(out[:]), true
 	}
 	if len(out) == 0 do return "", false

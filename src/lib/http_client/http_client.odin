@@ -5,8 +5,8 @@ import "core:net"
 import "core:os"
 import "core:strconv"
 import "core:strings"
-import "core:sys/posix"
 import "core:time"
+import tls "../tls_stream"
 
 DEFAULT_TIMEOUT_MS :: 20000
 
@@ -89,58 +89,39 @@ request_blocking_with_headers :: proc(method, base_url, path, body: string, extr
 }
 
 request_tls_with_headers :: proc(method, host: string, port: u16, path, body: string, extra_headers: []Header, timeout_ms := 0, include_port_in_host := true) -> (Response, bool) {
-	stdin_r, stdin_w, stdin_err := os.pipe()
-	if stdin_err != nil do return {}, false
-	defer os.close(stdin_r)
-	stdout_r, stdout_w, stdout_err := os.pipe()
-	if stdout_err != nil { _ = os.close(stdin_w); return {}, false }
-	defer os.close(stdout_r)
-
-	command := tls_client_command(host, port)
-	process, start_err := os.process_start(os.Process_Desc{command = command, stdin = stdin_r, stdout = stdout_w})
-	_ = os.close(stdout_w)
-	if start_err != nil { _ = os.close(stdin_w); return {}, false }
+	budget := time.Duration(timeout_ms if timeout_ms > 0 else DEFAULT_TIMEOUT_MS) * time.Millisecond
+	stream, dial_ok := tls.dial(host, port, budget)
+	if !dial_ok do return {}, false
+	// Keep the request side OPEN until we are done reading. Half-closing the Unix
+	// relay right after the request gives the other side only socat's default
+	// 0.5 s grace (-t) before exiting, so any Hub whose first byte takes longer
+	// than that to arrive (a Cloudflare-fronted Hub from a phone, for instance)
+	// produced "no HTTP response" although the request had been sent. The request
+	// carries Connection: close and response_complete() ends the read, so nothing
+	// waits on EOF.
+	defer tls.close(&stream)
 
 	req := build_http_request(method, host, port, path, body, extra_headers, include_port_in_host)
 	defer delete(req)
-	_, write_err := os.write(stdin_w, transmute([]byte)req)
-	if write_err != nil {
-		_ = os.close(stdin_w)
-		_ = os.process_kill(process)
-		_, _ = os.process_wait(process)
-		return {}, false
-	}
-	// Keep socat's stdin OPEN until we are done reading. Closing it right after
-	// the request half-closes the relay: socat then gives the other side only
-	// its default 0.5 s grace (-t) before exiting, so any Hub whose first
-	// byte takes longer than that to arrive (a Cloudflare-fronted Hub from a
-	// phone, for instance) produced "no HTTP response" although the request
-	// had been sent. The request carries Connection: close and
-	// response_complete() ends the read, so nothing waits on EOF.
-	defer os.close(stdin_w)
+	if tls.write_all(&stream, transmute([]byte)req) != .Ok do return {}, false
 
-	deadline := time.to_unix_nanoseconds(time.now()) + i64(time.Duration(timeout_ms if timeout_ms > 0 else DEFAULT_TIMEOUT_MS) * time.Millisecond)
+	deadline := time.to_unix_nanoseconds(time.now()) + i64(budget)
 	data := make([dynamic]byte, 0, 8192)
 	defer delete(data)
 	buf: [8192]byte
 	for time.to_unix_nanoseconds(time.now()) < deadline {
-		if ready, pipe_err := os.pipe_has_data(stdout_r); pipe_err != nil {
+		if ready, has_ok := tls.has_data(&stream); !has_ok {
 			break
 		} else if ready {
-			n, read_err := os.read(stdout_r, buf[:])
-			if read_err != nil || n <= 0 do break
+			n, read_ok := tls.read(&stream, buf[:])
+			if !read_ok || n <= 0 do break
 			append(&data, ..buf[:n])
 			if response_complete(string(data[:])) do break
 		} else {
-			if state, wait_err := os.process_wait(process, 0); wait_err == nil {
-				_ = state
-				break
-			}
+			if tls.relay_exited(&stream) do break
 			time.sleep(10 * time.Millisecond)
 		}
 	}
-	_ = os.process_terminate(process)
-	_, _ = os.process_wait(process, 250 * time.Millisecond)
 	if len(data) == 0 do return {}, false
 	return parse_response_bytes(data[:])
 }
@@ -324,20 +305,7 @@ dial_tcp_with_timeout :: proc(host: string, port, timeout_ms: int) -> (net.TCP_S
 	defer if !success { net.close(socket) }
 	if net.set_blocking(socket, false) != nil do return 0, false
 
-	sockaddr, addr_len := endpoint_to_sockaddr(endpoint)
-	result := posix.connect(posix.FD(socket), (^posix.sockaddr)(&sockaddr), addr_len)
-	if result != .OK {
-		errno := posix.errno()
-		if errno != .EINPROGRESS do return 0, false
-		poll_timeout := i32(-1) if timeout_ms <= 0 else i32(timeout_ms)
-		poll_fd := posix.pollfd{fd = posix.FD(socket), events = {.OUT}}
-		ready := posix.poll(&poll_fd, 1, poll_timeout)
-		if ready <= 0 do return 0, false
-		so_error: posix.Errno
-		size := posix.socklen_t(size_of(so_error))
-		if posix.getsockopt(posix.FD(socket), posix.SOL_SOCKET, .ERROR, &so_error, &size) != .OK do return 0, false
-		if so_error != nil do return 0, false
-	}
+	if !connect_with_timeout(socket, endpoint, timeout_ms) do return 0, false
 	if net.set_blocking(socket, true) != nil do return 0, false
 	success = true
 	return socket, true
@@ -379,6 +347,9 @@ resolve_host_via_command :: proc(host: string, port, timeout_ms: int) -> (net.En
 		command = []string{"getent", "ahosts", host}
 	} else when ODIN_OS == .Darwin {
 		command = []string{"dscacheutil", "-q", "host", "-a", "name", host}
+	} else when ODIN_OS == .Windows {
+		// No resolver CLI to bound with a timeout; the system resolver is used directly.
+		return resolve_host_blocking(host, port)
 	} else {
 		return net.Endpoint{}, false
 	}
@@ -421,82 +392,10 @@ endpoint_from_resolution_output :: proc(output: string, port: int) -> (net.Endpo
 	return net.Endpoint{}, false
 }
 
-// tls_client_command builds the argv for the subprocess that terminates TLS for
-// the bridge->hub https:// REST/artifact relay. The transport is selected by the
-// HAM_TLS_BACKEND env toggle:
-//   - "s_client"      -> legacy `openssl s_client` (fallback; 16 KB teardown).
-//   - anything else   -> `socat OPENSSL-CONNECT` (DEFAULT; full-duplex, no teardown).
-// SHARED CONTRACT: identical rule to src/lib/ws/ws.odin and the bridge's
-// bridge_tls_backend_is_socat (src/bridge/fs_management.odin) — keep in sync.
-// Either helper must be on PATH for ANY outbound https:// call through this client
-// to work, including the hub's own (src/hub/service/billing) — see the ham-hub
-// runtimeInputs in flake.nix.
-tls_client_command :: proc(host: string, port: u16) -> []string {
-	ca_file := strings.trim_space(os.get_env("HAM_TLS_CA_FILE", context.temp_allocator))
-	return tls_client_command_for_backend(os.get_env("HAM_TLS_BACKEND", context.temp_allocator), host, port, ca_file)
-}
-
-// tls_client_command_for_backend is the pure core of tls_client_command with the
-// backend toggle and CA path passed in explicitly. Splitting it out lets unit tests
-// pin a specific backend deterministically WITHOUT mutating the global
-// HAM_TLS_BACKEND env (the Odin test runner executes tests concurrently, so env
-// mutation would race other tests' transport selection) — same reason as the
-// bridge's bridge_hub_chunk_frames_with_payload. `backend` is normalized here
-// (trimmed + lowercased) rather than by the caller, so the raw env value and a
-// test-supplied value cannot diverge; only the exact value "s_client" selects the
-// legacy path.
-tls_client_command_for_backend :: proc(backend: string, host: string, port: u16, ca_file: string) -> []string {
-	clean_host := host_trim_brackets(host)
-	if strings.to_lower(strings.trim_space(backend), context.temp_allocator) == "s_client" {
-		return openssl_s_client_command(clean_host, port, ca_file)
-	}
-	return socat_openssl_command(clean_host, port, ca_file)
-}
-
-// openssl_s_client_command is the legacy fallback transport (HAM_TLS_BACKEND=s_client).
-openssl_s_client_command :: proc(clean_host: string, port: u16, ca_file: string) -> []string {
-	cmd := make([dynamic]string)
-	append(&cmd, "openssl")
-	append(&cmd, "s_client")
-	append(&cmd, "-quiet")
-	append(&cmd, "-verify_return_error")
-	append(&cmd, "-servername")
-	append(&cmd, clean_host)
-	append(&cmd, "-verify_hostname")
-	append(&cmd, clean_host)
-	if ca_file != "" {
-		append(&cmd, "-CAfile")
-		append(&cmd, ca_file)
-	}
-	append(&cmd, "-connect")
-	append(&cmd, fmt.tprintf("%s:%d", clean_host, port))
-	return cmd[:]
-}
-
-// socat_openssl_command is the default transport. TLS verification is EQUIVALENT to
-// the s_client path and MUST NOT be weakened: verify=1 (require+verify chain),
-// commonname=<h> (hostname check, mirrors -verify_hostname), snihost=<h> (SNI,
-// mirrors -servername), cafile=<ca> when HAM_TLS_CA_FILE is set (else OpenSSL's
-// default CA store, like s_client with no -CAfile). NEVER emit verify=0.
-socat_openssl_command :: proc(clean_host: string, port: u16, ca_file: string) -> []string {
-	// Temp allocator: the argv is consumed immediately by os.process_start in the same
-	// frame, and ca_file above is already temp-allocated, so the returned strings were
-	// always temp-lived. On the default allocator this builder leaked on every https
-	// call -- a per-request leak in a long-running hub.
-	opts := strings.builder_make(context.temp_allocator)
-	fmt.sbprintf(&opts, "OPENSSL-CONNECT:%s:%d", clean_host, port)
-	fmt.sbprintf(&opts, ",snihost=%s", clean_host)
-	strings.write_string(&opts, ",verify=1")
-	fmt.sbprintf(&opts, ",commonname=%s", clean_host)
-	if ca_file != "" {
-		fmt.sbprintf(&opts, ",cafile=%s", ca_file)
-	}
-	cmd := make([dynamic]string)
-	append(&cmd, "socat")
-	append(&cmd, "STDIO")
-	append(&cmd, strings.to_string(opts))
-	return cmd[:]
-}
+// The TLS relay argv (Unix transport) lives in tls_stream; these names remain for
+// the tests that pin the socat / s_client selection rule.
+tls_client_command :: tls.relay_command
+tls_client_command_for_backend :: tls.relay_command_for_backend
 
 host_trim_brackets :: proc(host: string) -> string {
 	if len(host) >= 2 && host[0] == '[' && host[len(host)-1] == ']' {
@@ -529,8 +428,7 @@ Download_Stream :: struct {
 }
 
 Download_Tls_Ctx :: struct {
-	fd:        ^os.File,
-	process:   os.Process,
+	stream:    ^tls.Stream,
 	deadline:  i64, // unix nanoseconds
 }
 
@@ -627,26 +525,22 @@ download_socket_read :: proc(ctx: rawptr, out: []byte) -> (int, bool) {
 	return n, true
 }
 
-// download_tls_read mirrors the pipe/poll loop of request_tls_with_headers:
-// the TLS subprocess owns the socket; data arrives on its stdout pipe. EOF is
-// reported once the pipe drains (parent closed the write end at spawn).
+// download_tls_read mirrors the poll loop of request_tls_with_headers. EOF is
+// reported once the stream drains; tls.read delivers data that arrived with the
+// end of stream first and reports the EOF on the next call.
 download_tls_read :: proc(ctx: rawptr, out: []byte) -> (int, bool) {
 	c := cast(^Download_Tls_Ctx)ctx
 	for time.to_unix_nanoseconds(time.now()) < c.deadline {
-		ready, perr := os.pipe_has_data(c.fd)
-		if perr != nil do return 0, false
+		ready, has_ok := tls.has_data(c.stream)
+		if !has_ok do return 0, false
 		if ready {
-			n, rerr := os.read(c.fd, out)
-			// os.read signals end-of-file as the .EOF error; deliver any data
-			// carried with it and report the EOF on the next call
-			if rerr == .EOF do return n, true
-			if rerr != nil do return 0, false
-			if n <= 0 do return 0, true
-			return n, true
+			n, read_ok := tls.read(c.stream, out)
+			if !read_ok do return 0, false
+			return max(n, 0), true
 		}
-		if _, werr := os.process_wait(c.process, 0); werr == nil {
-			n, rerr := os.read(c.fd, out)
-			if rerr != nil || n <= 0 do return 0, true
+		if tls.relay_exited(c.stream) {
+			n, read_ok := tls.read(c.stream, out)
+			if !read_ok || n <= 0 do return 0, true
 			return n, true
 		}
 		time.sleep(10 * time.Millisecond)
@@ -754,36 +648,16 @@ download_to_file_once :: proc(url, dest_path: string, timeout_ms: int) -> (statu
 	stream: Download_Stream
 	tls_ctx: Download_Tls_Ctx
 	socket: net.TCP_Socket
-	process: os.Process
-	stdin_r, stdin_w, stdout_r: ^os.File
+	tls_stream: tls.Stream
 	have_socket := false
-	have_proc := false
-	have_pipe_fds := false
-	have_stdin_w := false
+	have_tls := false
+	budget := time.Duration(timeout_ms if timeout_ms > 0 else DEFAULT_TIMEOUT_MS) * time.Millisecond
 
 	if secure {
-		r1, w1, e1 := os.pipe()
-		if e1 != nil do return 0, "", false
-		r2, w2, e2 := os.pipe()
-		if e2 != nil {
-			_ = os.close(r1)
-			_ = os.close(w1)
-			return 0, "", false
-		}
-		stdin_r, stdin_w, stdout_r = r1, w1, r2
-		have_pipe_fds = true
-		have_stdin_w = true
-		started, start_err := os.process_start(os.Process_Desc{command = tls_client_command(host, port), stdin = r1, stdout = w2})
-		_ = os.close(w2)
-		if start_err != nil {
-			_ = os.close(stdin_r)
-			_ = os.close(stdin_w)
-			_ = os.close(stdout_r)
-			have_pipe_fds = false
-			return 0, "", false
-		}
-		process = started
-		have_proc = true
+		dialed, dial_ok := tls.dial(host, port, budget)
+		if !dial_ok do return 0, "", false
+		tls_stream = dialed
+		have_tls = true
 	} else {
 		dialed, dial_ok := dial_tcp_with_timeout(host, int(port), timeout_ms)
 		if !dial_ok do return 0, "", false
@@ -795,27 +669,17 @@ download_to_file_once :: proc(url, dest_path: string, timeout_ms: int) -> (statu
 	// the end of the enclosing BLOCK, so branch-local defers would release the
 	// transport before the response body is read.
 	defer if have_socket do net.close(socket)
-	defer if have_pipe_fds {
-		_ = os.close(stdin_r)
-		if have_stdin_w do os.close(stdin_w)
-		_ = os.close(stdout_r)
-	}
-	defer if have_proc {
-		_ = os.process_terminate(process)
-		_, _ = os.process_wait(process, 250 * time.Millisecond)
-	}
+	defer if have_tls do tls.close(&tls_stream)
 
 	req := build_http_request("GET", host, port, path, "", nil, true)
 	defer delete(req)
 	if secure {
-		_, write_err := os.write(stdin_w, transmute([]byte)req)
-		_ = os.close(stdin_w)
-		have_stdin_w = false
-		if write_err != nil do return 0, "", false
+		write_res := tls.write_all(&tls_stream, transmute([]byte)req)
+		tls.close_write(&tls_stream)
+		if write_res != .Ok do return 0, "", false
 		tls_ctx = Download_Tls_Ctx{
-			fd = stdout_r,
-			process = process,
-			deadline = time.to_unix_nanoseconds(time.now()) + i64(time.Duration(timeout_ms if timeout_ms > 0 else DEFAULT_TIMEOUT_MS) * time.Millisecond),
+			stream = &tls_stream,
+			deadline = time.to_unix_nanoseconds(time.now()) + i64(budget),
 		}
 		stream = Download_Stream{read = download_tls_read, ctx = &tls_ctx}
 	} else {
@@ -915,47 +779,6 @@ os_error_is_timeout :: proc(err: os.Error) -> bool {
 	general, ok := err.(os.General_Error)
 	if !ok do return false
 	return general == .Timeout
-}
-
-endpoint_to_sockaddr :: proc(ep: net.Endpoint) -> (sockaddr: posix.sockaddr_storage, addr_len: posix.socklen_t) {
-	switch a in ep.address {
-	case net.IP4_Address:
-		when ODIN_OS == .Linux {
-			(^posix.sockaddr_in)(&sockaddr)^ = posix.sockaddr_in{
-				sin_family = .INET,
-				sin_port = u16be(ep.port),
-				sin_addr = transmute(posix.in_addr)a,
-			}
-		} else {
-			(^posix.sockaddr_in)(&sockaddr)^ = posix.sockaddr_in{
-				sin_len = size_of(posix.sockaddr_in),
-				sin_family = .INET,
-				sin_port = u16be(ep.port),
-				sin_addr = transmute(posix.in_addr)a,
-			}
-		}
-		addr_len = posix.socklen_t(size_of(posix.sockaddr_in))
-		return
-	case net.IP6_Address:
-		when ODIN_OS == .Linux {
-			(^posix.sockaddr_in6)(&sockaddr)^ = posix.sockaddr_in6{
-				sin6_family = .INET6,
-				sin6_port = u16be(ep.port),
-				sin6_addr = transmute(posix.in6_addr)a,
-			}
-		} else {
-			(^posix.sockaddr_in6)(&sockaddr)^ = posix.sockaddr_in6{
-				sin6_len = size_of(posix.sockaddr_in6),
-				sin6_family = .INET6,
-				sin6_port = u16be(ep.port),
-				sin6_addr = transmute(posix.in6_addr)a,
-			}
-		}
-		addr_len = posix.socklen_t(size_of(posix.sockaddr_in6))
-		return
-	case:
-		return
-	}
 }
 
 parse_base_url :: proc(base_url: string) -> (host: string, port: u16, secure: bool, ok: bool) {

@@ -4,7 +4,6 @@ import "core:fmt"
 import "core:os"
 import "core:strings"
 import "core:sync"
-import "core:sys/posix"
 import "core:testing"
 import cfg_lib "odin_test:lib/config"
 
@@ -76,7 +75,8 @@ ctl_vault_test_sandbox_open :: proc(label: string) -> Ctl_Vault_Test_Sandbox {
 
 	// pid-qualified and atomically counted: unique even across concurrent opens.
 	n := sync.atomic_add(&ctl_vault_test_sandbox_counter, 1)
-	sb.dir = fmt.aprintf("/tmp/heimdall-ctl-vault-test-%s-%d-%d", label, int(posix.getpid()), n)
+	tmp, _ := os.temp_dir(context.temp_allocator)
+	sb.dir = fmt.aprintf("%s/heimdall-ctl-vault-test-%s-%d-%d", tmp, label, os.get_pid(), n)
 	_ = os.make_directory_all(sb.dir)
 
 	// Create the config dir the legacy key file would live in, so a test can plant
@@ -173,14 +173,13 @@ test_vault_legacy_key_file_is_ignored :: proc(t: ^testing.T) {
 
 	content := strings.concatenate({test_key, "\n"}, context.temp_allocator)
 	testing.expect(t, os.write_entire_file(path, transmute([]byte)content) == nil, "write legacy key file")
-	_ = posix.chmod(strings.clone_to_cstring(path, context.temp_allocator), posix.mode_t{.IRUSR, .IWUSR})
+	_ = os.chmod(path, {.Read_User, .Write_User})
 
 	_, ok := ctl_read_vault_key(nil, context.temp_allocator)
 	testing.expect(t, !ok, "a legacy ~/.config/heimdall/vault_key must be ignored when there is no env or bridge")
 
 	// Ignored, not deleted: ctl leaves an existing file alone.
-	st: posix.stat_t
-	testing.expect(t, posix.stat(strings.clone_to_cstring(path, context.temp_allocator), &st) == .OK, "the legacy file must be left on disk")
+	testing.expect(t, os.exists(path), "the legacy file must be left on disk")
 
 	// Explicit sources are unaffected: a valid flag still resolves, an invalid one
 	// still rejects without falling through.
@@ -222,8 +221,7 @@ test_vault_removed_commands_do_not_touch_key_file :: proc(t: ^testing.T) {
 		ctl_vault_command(cmd[:], args[:])
 	}
 
-	st: posix.stat_t
-	testing.expect(t, posix.stat(strings.clone_to_cstring(path, context.temp_allocator), &st) != .OK, "no vault command may create ~/.config/heimdall/vault_key")
+	testing.expect(t, !os.exists(path), "no vault command may create ~/.config/heimdall/vault_key")
 }
 
 // `ham-ctl vault status` reports only the env override and the bridge's view.

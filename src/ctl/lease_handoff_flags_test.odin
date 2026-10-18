@@ -24,7 +24,8 @@ test_handoff_flags_absent_or_blank_sends_nothing :: proc(t: ^testing.T) {
 
 @(test)
 test_handoff_flags_file_passes_through :: proc(t: ^testing.T) {
-	path := "/tmp/ham_ctl_handoff_flags_test.json"
+	tmp, _ := os.temp_dir(context.temp_allocator)
+	path := strings.concatenate({tmp, "/ham_ctl_handoff_flags_test.json"}, context.temp_allocator)
 	_ = os.write_entire_file(path, transmute([]byte)string(`{"next_steps":"a","decisions":["x"]}`))
 	defer os.remove(path)
 	h, ok := ctl_handoff_flags([]string{"lease", "handoff", "--summary", "s", "--handoff-file", path})
