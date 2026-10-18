@@ -5,7 +5,7 @@
 import './helpers/vaultEndpointHarness.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildComposerBody, composerSendState, type ComposerAttachment } from '../src/ui/components/tasks/taskComposer.ts';
+import { buildComposerBody, composerSendState, type ComposerAttachment } from '../src/ui/components/tasks/taskComposerState.ts';
 
 const att = (status: ComposerAttachment['status'], link = ''): ComposerAttachment => ({
   localId: `a_${status}_${link}`,

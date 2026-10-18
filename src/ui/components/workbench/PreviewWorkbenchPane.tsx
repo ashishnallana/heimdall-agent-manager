@@ -5,7 +5,7 @@ import {
   type ShellSession,
 } from '../../api/endpoints/shells';
 import { buildPreviewUrl } from '../../store/auxTabId';
-import { useAuxTabActions } from '../aux/auxTabActions';
+import { useAuxTabActions } from '../auxiliary/auxTabActions';
 import { ShellLogViewer } from '../shells/ShellLogViewer';
 import { restartFailureText } from '../shells/shellModel';
 

@@ -70,7 +70,7 @@ test('interactive request trims and forwards a configured cwd', () => {
 
 test('aux launch opens a fresh provisional shell tab and a guarded retryable auto-start', () => {
   const launcher = fs.readFileSync(
-    path.join(REPO_ROOT, 'src/ui/components/aux/AuxNewTabLauncher.tsx'),
+    path.join(REPO_ROOT, 'src/ui/components/auxiliary/AuxNewTabLauncher.tsx'),
     'utf8',
   );
   const pane = fs.readFileSync(
@@ -99,7 +99,7 @@ test('successful auto-start creates once and reports the real session for tab re
   const { Provider } = await import('react-redux');
   const { createRoot } = await import('react-dom/client');
   const { act } = await import('react');
-  const { AuxTabContent } = await import('../src/ui/components/aux/AuxTabContent.tsx');
+  const { AuxTabContent } = await import('../src/ui/components/auxiliary/AuxTabContent.tsx');
   const { heimdallApi } = await import('../src/ui/api/heimdallApi.ts');
 
   const dom = new JSDOM('<!DOCTYPE html><html><body><div id="root"></div></body></html>', {

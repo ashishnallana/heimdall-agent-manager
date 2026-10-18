@@ -50,6 +50,11 @@ registerHooks({
     return nextLoad(url, context);
   },
   resolve(specifier, context, nextResolve) {
+    // Tests import `${REPO_ROOT}/...`; on Windows that is `C:\...`, which the ESM
+    // loader reads as a URL with scheme `c:`. Hand it on as a file:// URL instead.
+    if (/^[A-Za-z]:[\\/]/.test(specifier)) {
+      return nextResolve(pathToFileURL(specifier).href, context);
+    }
     if (specifier === '@ui' || specifier.startsWith('@ui/')) {
       const rel = specifier === '@ui' ? '' : specifier.slice(4);
       const targetBase = path.join(REPO_ROOT, 'src', 'ui', 'components', 'ui', rel);

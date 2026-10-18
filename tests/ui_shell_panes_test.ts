@@ -135,7 +135,7 @@ test('SH-3: tmux-style active border on the focused pane or the focused aux dock
   assert.match(ws, /isActive=\{showActiveBorder && auxFocused\}\s+onActivate=\{\(\) => setAuxFocused\(true\)\}/);
   assert.match(ws, /data-debug-id="workspace-main"\s+onMouseDownCapture=\{\(\) => setAuxFocused\(false\)\}/);
   assert.match(read('src/ui/components/mainWorkspace/MainPaneFrame.tsx'), /\{isActive \? <div aria-hidden="true" data-debug-id=\{`main-pane-active-border-\$\{paneId\}`\} className="ui-pane-active-border" \/> : null\}/);
-  assert.match(read('src/ui/components/aux/AuxDock.tsx'), /isActive && !isMobile \? <div aria-hidden="true" data-debug-id="aux-active-border" className="ui-pane-active-border" \/>/);
+  assert.match(read('src/ui/components/auxiliary/AuxDock.tsx'), /isActive && !isMobile \? <div aria-hidden="true" data-debug-id="aux-active-border" className="ui-pane-active-border" \/>/);
   const css = read('src/ui/styles.css');
   assert.match(css, /\.ui-pane-active-border \{[^}]*border-color: var\(--color-accent\);[^}]*border-width: 0 1px 1px 1px;/);
 });

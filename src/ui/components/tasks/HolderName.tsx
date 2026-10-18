@@ -1,6 +1,6 @@
 import React from 'react';
 import { useFetchAgentInstanceQuery } from '../../api/endpoints/agents';
-import { useOpenAgentChat } from '../aux/openAgentChatContext';
+import { useOpenAgentChat } from '../auxiliary/openAgentChatContext';
 import { useIsMobile } from '../shell/responsive';
 import { GENERIC_AGENT_LABEL, type TaskNames } from './taskNames';
 

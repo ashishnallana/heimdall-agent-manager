@@ -7,7 +7,7 @@ import {
 } from '../../api/endpoints/agents';
 import { useGetAgentsLiveQuery } from '../../api/endpoints/agentsLive';
 import AgentPaneComposerPanel from '../chat/AgentPaneComposerPanel';
-import { useAuxTabActions, type AuxTabAction } from '../aux/auxTabActions';
+import { useAuxTabActions, type AuxTabAction } from '../auxiliary/auxTabActions';
 
 export interface AgentPtyWorkbenchPaneProps {
   agentInstanceId: string;

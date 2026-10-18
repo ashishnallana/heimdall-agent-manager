@@ -464,7 +464,7 @@ test('resolveSelectedTaskId drops a selection that is not in the current chain',
 });
 
 test('TaskChainOverview is keyed by chain at both mount points', () => {
-  for (const rel of ['src/ui/components/taskchain/TaskChainsPage.tsx', 'src/ui/components/aux/AuxTabContent.tsx']) {
+  for (const rel of ['src/ui/components/taskchain/TaskChainsPage.tsx', 'src/ui/components/auxiliary/AuxTabContent.tsx']) {
     const src = fs.readFileSync(path.join(REPO_ROOT, rel), 'utf8');
     const at = src.indexOf('<TaskChainOverview');
     assert.ok(at >= 0, `${rel} mounts TaskChainOverview`);

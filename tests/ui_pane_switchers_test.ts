@@ -842,7 +842,7 @@ test('inside the aux dock, agent links open the agent chat as an aux tab instead
     const { Provider } = await import('react-redux');
     const { heimdallApi } = await import('../src/ui/api/heimdallApi.ts');
     const { InstanceIdLink } = await import('../src/ui/components/taskchain/TaskChainOverview.tsx');
-    const { OpenAgentChatContext } = await import('../src/ui/components/aux/openAgentChatContext.tsx');
+    const { OpenAgentChatContext } = await import('../src/ui/components/auxiliary/openAgentChatContext.tsx');
     const store = await makeStore();
     const doc = dom.window.document;
     const root = createRoot(doc.getElementById('root')!);
@@ -871,7 +871,7 @@ test('inside the aux dock, agent links open the agent chat as an aux tab instead
       store.dispatch(heimdallApi.util.resetApiState());
     }
   });
-  const content = fs.readFileSync(path.join(REPO_ROOT, 'src/ui/components/aux/AuxTabContent.tsx'), 'utf8');
+  const content = fs.readFileSync(path.join(REPO_ROOT, 'src/ui/components/auxiliary/AuxTabContent.tsx'), 'utf8');
   assert.match(content, /onOpenTab\(\{ type: 'subagentChat', agentInstanceId \}, title\)/);
   assert.match(content, /onOpenAgentChat=\{\(agentInstanceId, title\) => \{\s*openAgentChat\(agentInstanceId, title\);/);
   assert.match(content, /<OpenAgentChatContext\.Provider value=\{openAgentChat\}>/);

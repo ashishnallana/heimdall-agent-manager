@@ -7,7 +7,7 @@ import {
   useRestartShellMutation,
   type ShellSession,
 } from '../../api/endpoints/shells';
-import { useAuxTabActions, type AuxTabAction } from '../aux/auxTabActions';
+import { useAuxTabActions, type AuxTabAction } from '../auxiliary/auxTabActions';
 import { ShellTerminalPane } from '../shells/ShellTerminalPane';
 import { buildInteractiveShellRequest } from '../shells/interactiveShellLaunch';
 import { describeApiError } from '../../utils/bridgeVaultStatus';

@@ -15,7 +15,7 @@ import {
   newAttachmentId,
   type ComposerAttachment,
   type ComposerSendState,
-} from './taskComposer';
+} from './taskComposerState';
 
 export interface TaskComposerActionsContext extends ComposerSendState {
   /** Text plus artifact:// links of finished uploads. */

@@ -7,9 +7,9 @@ import { fileURLToPath } from 'node:url';
 import React from 'react';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const auxDockSource = fs.readFileSync(path.join(REPO_ROOT, 'src/ui/components/aux/AuxDock.tsx'), 'utf8');
-const launcherSource = fs.readFileSync(path.join(REPO_ROOT, 'src/ui/components/aux/AuxNewTabLauncher.tsx'), 'utf8');
-const tabContentSource = fs.readFileSync(path.join(REPO_ROOT, 'src/ui/components/aux/AuxTabContent.tsx'), 'utf8');
+const auxDockSource = fs.readFileSync(path.join(REPO_ROOT, 'src/ui/components/auxiliary/AuxDock.tsx'), 'utf8');
+const launcherSource = fs.readFileSync(path.join(REPO_ROOT, 'src/ui/components/auxiliary/AuxNewTabLauncher.tsx'), 'utf8');
+const tabContentSource = fs.readFileSync(path.join(REPO_ROOT, 'src/ui/components/auxiliary/AuxTabContent.tsx'), 'utf8');
 const artifactViewerSource = fs.readFileSync(path.join(REPO_ROOT, 'src/ui/components/ArtifactViewer.tsx'), 'utf8');
 
 test('mobile aux sheet stays above fixed shell chrome while it transitions', () => {
@@ -153,7 +153,7 @@ test('aux dock: one strip, only the active tab is mounted, multiple shell tabs, 
     const { Provider } = await import('react-redux');
     const { heimdallApi } = await import('../src/ui/api/heimdallApi.ts');
     const { openAuxTab, setActiveAuxTab, selectAuxPane } = await import('../src/ui/store/auxPanesSlice.ts');
-    const { AuxDock } = await import('../src/ui/components/aux/AuxDock.tsx');
+    const { AuxDock } = await import('../src/ui/components/auxiliary/AuxDock.tsx');
 
     const store = await makeStore();
     const treeId = { kind: 'agent' as const, agentInstanceId: 'agent-a' };
@@ -248,7 +248,7 @@ test('clean aux tabs: surfaces no longer render their own header chrome', () => 
   assert.match(chat, /\{!isAuxSubagent \? \(\s*<header/, 'sub-agent chat renders no header');
   assert.match(chat, /projectId && !isAuxSubagent/, 'sub-agent chat renders no project chip');
   assert.doesNotMatch(chat, /workbench-chain-overview-popup/, 'floating overview popup is gone');
-  assert.match(read('src/ui/components/aux/AuxTabContent.tsx'), /hideTitleBar=\{true\}/);
+  assert.match(read('src/ui/components/auxiliary/AuxTabContent.tsx'), /hideTitleBar=\{true\}/);
 });
 
 test('workspace: URL <-> layout sync (pane set in the URL, replace pushes, no loops), split groups, mobile sheet', async () => {

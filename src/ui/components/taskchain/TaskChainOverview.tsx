@@ -12,7 +12,7 @@ import { ReviewRolesModal } from '../tasks/ReviewRolesModal';
 import ChainActiveServersPanel from '../shells/ChainActiveServersPanel';
 import { TaskWire } from '../../api/taskWire';
 import { resolveSelectedTaskId } from '../tasks/taskV2Types';
-import { useOpenAgentChat } from '../aux/openAgentChatContext';
+import { useOpenAgentChat } from '../auxiliary/openAgentChatContext';
 import { useFetchAgentInstanceQuery, useFetchAgentIdentityQuery, useListAgentIdentitiesQuery } from '../../api/endpoints/agents';
 import { buildTaskNames } from '../tasks/taskNames';
 import { actionErrorMessage } from '../tasks/useTaskActions';

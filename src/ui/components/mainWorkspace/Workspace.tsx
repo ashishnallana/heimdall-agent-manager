@@ -69,8 +69,8 @@ import {
   writeAuxPanesState,
   writeWorkspaceChromeState,
 } from '../../utils/clientPersistence';
-import { AuxDock } from '../aux/AuxDock';
-import { useAgentAuxContext } from '../aux/useAgentAuxContext';
+import { AuxDock } from '../auxiliary/AuxDock';
+import { useAgentAuxContext } from '../auxiliary/useAgentAuxContext';
 import { AgentChatPane } from '../workbench/AgentChatPane';
 import { ShellMainPane } from './ShellMainPane';
 import { getContentPaneIds } from '../../tiling';
