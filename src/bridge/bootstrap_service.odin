@@ -871,7 +871,7 @@ bridge_bootstrap_build_file_set :: proc(manifest_json: string, d: Bridge_Bootstr
 		return nil, Bridge_Bootstrap_Result{ok = false, stage = "assemble", detail = "failed to assemble AGENTS.md from cached fragments"}
 	}
 	// The hub holds no vault key, so encrypted template variables (project name,
-	// description, ...), memories and skills reach the bridge as vault:v1 tokens.
+	// description, ...), memories and skills reach the bridge as vault:v2 tokens.
 	// Decrypt each file's content here, the one point every bootstrap file passes
 	// through, so the agent never reads raw ciphertext.
 	agents_md = bridge_bootstrap_decrypt_owned(agents_md)

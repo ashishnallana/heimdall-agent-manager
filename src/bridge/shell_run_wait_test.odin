@@ -1,3 +1,4 @@
+#+build !windows
 package main
 
 // REQ-SHELL-2 bridge-side acceptance tests: the deleted 15s threshold, explicit

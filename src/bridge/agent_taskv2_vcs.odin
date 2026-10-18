@@ -431,7 +431,7 @@ bridge_taskv2_decrypt_field :: proc(s: string, allocator := context.temp_allocat
 	return bridge_decrypt_embedded_vault_tokens(s, allocator = allocator, locked_marker = VAULT_LOCKED_MARKER)
 }
 
-// bridge_taskv2_render_task_md decrypts all vault:v1: / ENC:v1: tokens in pack_json,
+// bridge_taskv2_render_task_md decrypts all vault:v2 tokens in pack_json,
 // applies the field-safe 8k-token (max_bytes) cap AFTER decryption (never inside a
 // field, dropping in order: 1. resolved input bodies, then dependency outputs -> 2. previous verify summary/tail
 // -> 3. previous handoff summary; preserving brief, dead_ends, and open findings intact),

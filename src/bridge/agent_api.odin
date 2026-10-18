@@ -19,8 +19,11 @@ package main
 // forwards to hub with the bridge token + X-Heimdall-Instance-Token. Agents
 // never see a hub URL or hub token.
 
+import "core:crypto"
+import "core:encoding/base64"
 import "core:strconv"
 import "core:strings"
+import vault "odin_test:lib/vault"
 
 Bridge_Agent_Route_Kind :: enum {
 	Unknown,     // method not allowed / not found
@@ -458,16 +461,26 @@ bridge_local_handle_agent_local_op :: proc(request_id, op, params: string, rec: 
 	}
 	if op == "vault.reset" do return bridge_vault_reset_response(request_id)
 	if op == "vault.get" {
-		key, ok := bridge_read_vault_key()
+		// Hands the local agent this bridge's WHOLE keyring (every epoch it holds), so
+		// ham-ctl can read history sealed under older epochs. That is the existing trust
+		// level for local agents (they could already ask for the key), now with history.
+		kr, ok := bridge_read_vault_keyring()
+		defer vault.keyring_wipe(&kr)
 		if !ok {
-			return bridge_local_response_error(request_id, "not_found", "vault key not configured or permissions invalid")
+			return bridge_local_response_error(request_id, "not_found", "vault keyring not configured")
 		}
-		defer delete(key)
+		raw: [vault.KEYRING_MAX_BYTES]byte
+		defer crypto.zero_explicit(&raw, size_of(raw))
+		used, ser_ok := vault.keyring_serialize_into(&kr, raw[:])
+		if !ser_ok do return bridge_local_response_error(request_id, "not_found", "vault keyring not configured")
+		encoded, enc_err := base64.encode(used, allocator = context.temp_allocator)
+		if enc_err != nil do return bridge_local_response_error(request_id, "internal", "could not encode keyring")
+		defer crypto.zero_explicit(raw_data(encoded), len(encoded))
 		b := strings.builder_make()
-		strings.write_string(&b, "{\"key\":\"")
-		bridge_local_write_json_string(&b, key)
-		strings.write_string(&b, "\",\"key_length\":")
-		bridge_agent_write_int(&b, len(key))
+		strings.write_string(&b, "{\"keyring_b64\":\"")
+		strings.write_string(&b, encoded)
+		strings.write_string(&b, "\",\"current_epoch\":")
+		bridge_agent_write_int(&b, int(kr.current_epoch))
 		strings.write_byte(&b, '}')
 		return bridge_local_response_data(request_id, strings.to_string(b))
 	}

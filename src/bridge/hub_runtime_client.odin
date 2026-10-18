@@ -18,6 +18,7 @@ import contracts "odin_test:contracts"
 import cfg_lib "odin_test:lib/config"
 import ws "odin_test:lib/ws"
 import jsonx "odin_test:lib/jsonx"
+import vault "odin_test:lib/vault"
 
 PROVIDER_TEST_TIMEOUT_SECONDS :: 120
 
@@ -136,23 +137,23 @@ bridge_vault_is_workspace_configured :: proc() -> bool {
 }
 
 bridge_vault_status :: proc() -> Vault_Status {
-	status, key := bridge_vault_status_and_key()
-	if status == .Unlocked do delete(key)
+	status, kr := bridge_vault_status_and_key()
+	vault.keyring_wipe(&kr)
 	return status
 }
 
 // bridge_vault_status_and_key resolves the tri-state AND hands back the key it
 // read, so a gate that needs both decides on one read rather than two (a key that
-// vanished between them must not turn Unlocked into a plaintext path). key is only
-// set — and only owned by the caller — when status is .Unlocked.
+// vanished between them must not turn Unlocked into a plaintext path). kr is only
+// populated when status is .Unlocked; the caller always wipes it.
 //
 // Gates must branch on status, never on "a key is present": a missing key means
 // Disabled only when the bridge was never configured; a configured bridge with no
 // key is Locked and must fail closed (T9).
-bridge_vault_status_and_key :: proc() -> (status: Vault_Status, key: string) {
-	if k, ok := bridge_read_vault_key(); ok do return .Unlocked, k
-	if bridge_vault_is_workspace_configured() do return .Locked, ""
-	return .Disabled, ""
+bridge_vault_status_and_key :: proc() -> (status: Vault_Status, kr: vault.Vault_Keyring) {
+	if k, ok := bridge_read_vault_keyring(); ok do return .Unlocked, k
+	if bridge_vault_is_workspace_configured() do return .Locked, {}
+	return .Disabled, {}
 }
 
 bridge_vault_status_string :: proc(status: Maybe(Vault_Status) = nil) -> string {
@@ -1894,8 +1895,8 @@ bridge_hub_handle_binary_frame :: proc(conn: ^ws.Connection, frame: []byte) {
 		return
 	}
 	encrypted := contracts.pty_wire_is_encrypted(flags)
-	vault_status, key_hex := bridge_vault_status_and_key()
-	defer if vault_status == .Unlocked do delete(key_hex)
+	vault_status, kr := bridge_vault_status_and_key()
+	defer vault.keyring_wipe(&kr)
 	data := ""
 	decoded_ok := false
 	reject_reason := "invalid payload or vault encryption mode"
@@ -1904,7 +1905,9 @@ bridge_hub_handle_binary_frame :: proc(conn: ^ws.Connection, frame: []byte) {
 		reject_reason = "vault_locked"
 	case .Unlocked:
 		if encrypted {
-			plain, pok := bridge_pty_stream_decrypt_chunk_raw(payload, key_hex, context.temp_allocator)
+			// Command epoch floor: input sealed under any epoch but the current one is
+			// refused, even when this keyring still holds that older key.
+			plain, pok := vault.pty_open(payload, &kr, shell_id, .In, kr.current_epoch, context.temp_allocator)
 			if pok { data = string(plain); decoded_ok = true }
 		}
 	case .Disabled:
@@ -1947,8 +1950,8 @@ bridge_hub_handle_shell_pty_input :: proc(conn: ^ws.Connection, text: string) {
 	if !flag_ok && has_payload { encrypted, flag_ok = jsonx.extract_bool_literal(payload, "is_encrypted") }
 	// T9 (REQ-T9-1): same tri-state gate as shell_start. Keystrokes are execution
 	// too, so a Locked bridge drops them whatever the payload claims to be.
-	vault_status, key_hex := bridge_vault_status_and_key()
-	defer if vault_status == .Unlocked do delete(key_hex)
+	vault_status, kr := bridge_vault_status_and_key()
+	defer vault.keyring_wipe(&kr)
 	data := ""
 	decoded_ok := false
 	reject_reason := "invalid payload or vault encryption mode"
@@ -1957,8 +1960,11 @@ bridge_hub_handle_shell_pty_input :: proc(conn: ^ws.Connection, text: string) {
 		reject_reason = "vault_locked"
 	case .Unlocked:
 		if flag_ok && encrypted {
-			armored := strings.concatenate({VAULT_ARMOR_PREFIX, data_b64}, context.temp_allocator)
-			data, decoded_ok = bridge_decrypt_vault_ciphertext_hex(armored, key_hex, context.temp_allocator)
+			// data_b64 is base64 of a PTY v2 "in" frame; current epoch only.
+			if frame, frame_ok := vault.b64_decode_strict(data_b64, context.temp_allocator); frame_ok {
+				plain, pok := vault.pty_open(frame, &kr, shell_id, .In, kr.current_epoch, context.temp_allocator)
+				if pok { data = string(plain); decoded_ok = true }
+			}
 		}
 	case .Disabled:
 		// Never configured: plaintext input is allowed by design.
@@ -3718,7 +3724,11 @@ bridge_hub_hello_json :: proc() -> string {
 	pub_key := bridge_get_public_key_hex()
 	strings.write_string(&b, "\",\"public_key\":\"")
 	bridge_runtime_write_json_string(&b, pub_key)
-	strings.write_string(&b, "\",\"capabilities\":")
+	strings.write_string(&b, "\"")
+	// Unseal v2: the boot id, the identity-signed ephemeral key and the identity key.
+	// Omitted (so no browser will unseal) when the key cannot be signed.
+	bridge_unseal_write_hello_fields(&b, bridge_config.daemon_id)
+	strings.write_string(&b, ",\"capabilities\":")
 	strings.write_string(&b, caps)
 	strings.write_string(&b, ",\"features\":")
 	strings.write_string(&b, features)
@@ -4242,9 +4252,8 @@ bridge_hub_handle_shell_start :: proc(conn: ^ws.Connection, text: string) {
 	// T9 (REQ-T9-1): gate on the vault STATE, not on "a key is present". Keying it on
 	// the key alone made a Locked bridge (configured, key absent) indistinguishable
 	// from a never-configured one, so it ran the hub-supplied plaintext `cmd`.
-	vault_status, key_hex := bridge_vault_status_and_key()
-	vault_active := vault_status == .Unlocked
-	defer if vault_active do delete(key_hex)
+	vault_status, kr := bridge_vault_status_and_key()
+	defer vault.keyring_wipe(&kr)
 	switch vault_status {
 	case .Locked:
 		// Fail closed before anything below can reach `cmd`: with no key there is no
@@ -4257,12 +4266,14 @@ bridge_hub_handle_shell_start :: proc(conn: ^ws.Connection, text: string) {
 		// Never configured: encryption is optional by design, so the plaintext
 		// cmd/cwd from the wire are used as-is.
 	case .Unlocked:
-		if cmd_wire.enc_spec == "" || !strings.has_prefix(cmd_wire.enc_spec, VAULT_ARMOR_PREFIX) {
+		if cmd_wire.enc_spec == "" || !vault.is_armored(cmd_wire.enc_spec) {
 			send_error(conn, session_id, command_id, "invalid_vault_key", "unauthorized: missing or invalid vault enc_spec")
 			return
 		}
 
-		plaintext, dec_ok := bridge_decrypt_vault_ciphertext_hex(cmd_wire.enc_spec, key_hex, context.temp_allocator)
+		// Command epoch floor: an enc_spec sealed under any epoch but the current one
+		// is refused, even when the keyring still holds that older key.
+		plaintext, dec_ok := bridge_open_current_epoch_token(cmd_wire.enc_spec, &kr, context.temp_allocator)
 		if !dec_ok || len(plaintext) == 0 {
 			send_error(conn, session_id, command_id, "invalid_vault_key", "unauthorized: invalid vault encryption")
 			return
@@ -4425,7 +4436,7 @@ bridge_hub_handle_shell_start :: proc(conn: ^ws.Connection, text: string) {
 	// path itself comes from bridge_shell_output_path (src/bridge/shell_common.odin),
 	// which is also what the log and retention paths resolve, so the three agree.
 	spawn_env: [][2]string = nil
-	if vault_active && has_decrypted_env {
+	if vault_status == .Unlocked && has_decrypted_env {
 		dyn_env := make([dynamic][2]string, context.allocator)
 		for pair in decrypted_env {
 			append(&dyn_env, [2]string{strings.clone(pair[0]), strings.clone(pair[1])})

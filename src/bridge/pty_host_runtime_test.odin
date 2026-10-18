@@ -1,3 +1,4 @@
+#+build !windows
 package main
 
 import "base:runtime"
@@ -701,16 +702,16 @@ pty_stream_worker_emit_frame_encodes_base64_and_queues :: proc(t: ^testing.T) {
 	bridge_pty_stream_reset()
 	defer bridge_pty_stream_reset()
 
-	prev_key, had_key := os.lookup_env("HEIMDALL_VAULT_KEY", context.allocator)
+	prev_key, had_key := os.lookup_env("HEIMDALL_VAULT_KEYRING", context.allocator)
 	defer {
 		if had_key {
-			_ = os.set_env("HEIMDALL_VAULT_KEY", prev_key)
+			_ = os.set_env("HEIMDALL_VAULT_KEYRING", prev_key)
 			delete(prev_key)
 		} else {
-			os.unset_env("HEIMDALL_VAULT_KEY")
+			os.unset_env("HEIMDALL_VAULT_KEYRING")
 		}
 	}
-	_ = os.set_env("HEIMDALL_VAULT_KEY", "unconfigured_key")
+	_ = os.set_env("HEIMDALL_VAULT_KEYRING", "unconfigured_key")
 
 	prev_configured, had_configured := os.lookup_env("HEIMDALL_VAULT_CONFIGURED", context.allocator)
 	saved_workspace := bridge_workspace_vault_configured
@@ -1330,9 +1331,9 @@ pane_large_encrypted_snapshot_splits_before_encryption :: proc(t: ^testing.T) {
 	defer sync.mutex_unlock(&keystore_test_mutex)
 	bridge_pty_stream_reset()
 	defer bridge_pty_stream_reset()
-	prev_key, found := os.lookup_env("HEIMDALL_VAULT_KEY", context.allocator)
-	defer { if found { _ = os.set_env("HEIMDALL_VAULT_KEY", prev_key); delete(prev_key) } else { os.unset_env("HEIMDALL_VAULT_KEY") } }
-	_ = os.set_env("HEIMDALL_VAULT_KEY", TEST_ENC_VAULT_KEY)
+	prev_key, found := os.lookup_env("HEIMDALL_VAULT_KEYRING", context.allocator)
+	defer { if found { _ = os.set_env("HEIMDALL_VAULT_KEYRING", prev_key); delete(prev_key) } else { os.unset_env("HEIMDALL_VAULT_KEYRING") } }
+	_ = os.set_env("HEIMDALL_VAULT_KEYRING", test_keyring_env_value(TEST_ENC_VAULT_KEY))
 	worker := Bridge_PTY_Stream_Worker{active = true, emitting_snapshot = true, fd = -1}
 	source := strings.repeat("λ", 256 * 1024)
 	defer delete(source)
@@ -1352,16 +1353,6 @@ pane_large_encrypted_snapshot_splits_before_encryption :: proc(t: ^testing.T) {
 		append(&result, ..transmute([]byte)plain)
 	}
 	testing.expect_value(t, string(result[:]), source)
-}
-
-@(test)
-pane_decrypts_real_browser_golden_input :: proc(t: ^testing.T) {
-	ciphertext := "vault:v1:vFQrdD8pfrvPMg80AH82Q+0Ryd+5fD++WZUYiGUzlU+BsSo="
-	key := "4f1c2a9d8e7b6a5c4d3e2f10112233445566778899aabbccddeeff0011223344"
-	plain, ok := bridge_decrypt_vault_ciphertext_hex(ciphertext, key)
-	defer if ok do delete(plain)
-	testing.expect(t, ok)
-	testing.expect_value(t, plain, "ls -la\n")
 }
 
 // ---- REQ-BR-3: the event watcher follows a replaced daemon --------------------

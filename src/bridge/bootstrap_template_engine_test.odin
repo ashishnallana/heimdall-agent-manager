@@ -7,6 +7,7 @@ import "core:os"
 import "core:strings"
 import "core:sync"
 import "core:testing"
+import vault "odin_test:lib/vault"
 
 // BT-3: unit tests for the single-template substitution + role-conditional engine
 // (bridge_bootstrap_eval_role_sections + bridge_bootstrap_substitute_scalars).
@@ -325,7 +326,7 @@ bt_file_set_decrypts_vault_tokens :: proc(t: ^testing.T) {
 	defer sync.mutex_unlock(&keystore_test_mutex)
 
 	enc :: proc(s: string) -> string {
-		a, _ := bridge_encrypt_vault_ciphertext_hex(s, TEST_VAULT_KEY_HEX, context.temp_allocator)
+		a, _ := test_encrypt_hex(s, TEST_VAULT_KEY_HEX, context.temp_allocator)
 		return a
 	}
 	tpl_body := "Project: {project_name}\n"
@@ -357,8 +358,8 @@ bt_file_set_decrypts_vault_tokens :: proc(t: ^testing.T) {
 		delete(prev)
 	}
 	_ = os.set_env("HEIMDALL_HAM_CTL_BIN", "/bin/sh")
-	os.set_env("HEIMDALL_VAULT_KEY", TEST_VAULT_KEY_HEX)
-	defer os.unset_env("HEIMDALL_VAULT_KEY")
+	os.set_env("HEIMDALL_VAULT_KEYRING", test_keyring_env_value(TEST_VAULT_KEY_HEX))
+	defer os.unset_env("HEIMDALL_VAULT_KEYRING")
 
 	cache: Bootstrap_Cache
 	tmp := fmt.tprintf("/tmp/ham-test-bootstrap-decrypt-%d", os.get_pid())
@@ -396,7 +397,7 @@ bt_file_set_decrypts_vault_tokens :: proc(t: ^testing.T) {
 
 	seen_agents, seen_mem, seen_skill := false, false, false
 	for f in files {
-		testing.expect(t, !strings.contains(f.content, VAULT_ARMOR_PREFIX), f.relative_path)
+		testing.expect(t, !strings.contains(f.content, vault.VAULT_V2_PREFIX), f.relative_path)
 		switch f.kind {
 		case "AGENTS_MD":
 			seen_agents = true

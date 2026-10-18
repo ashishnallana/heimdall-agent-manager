@@ -1,9 +1,10 @@
 package main
 
-// Linux persistence for the unsealed vault key: one `user` key per bridge in the
-// kernel user keyring (@u, KEY_SPEC_USER_KEYRING), described as
-// "heimdall:vault_key:<bridge_id>" so bridges of the same OS user never share or
-// purge each other's key (REQ-T5-1). Lookups use only KEYCTL_SEARCH rooted at @u
+// Linux persistence for this bridge's secrets (keystore_common.odin): `user` keys
+// in the kernel user keyring (@u, KEY_SPEC_USER_KEYRING), described as
+// "heimdall:vault_keyring:<bridge_id>" (binary HKR1 keyring) and
+// "heimdall:vault_identity:<bridge_id>" (identity scalar), so bridges of the same
+// OS user never share or purge each other's secrets (REQ-T5-1). Lookups use only KEYCTL_SEARCH rooted at @u
 // for that exact description, never request_key(), which walks the
 // thread/process/session keyrings a bridge may have inherited from another
 // (REQ-T5-6). The mlock'd in-memory buffer is per process, i.e. per bridge.
@@ -13,11 +14,7 @@ package main
 // syscall is made: the keyring is seccomp-blocked there and must not be probed.
 
 import "core:c"
-import "core:encoding/hex"
-import "core:fmt"
-import "core:mem"
 import "core:strings"
-import "core:sync"
 import "core:sys/linux"
 import "core:sys/posix"
 
@@ -32,17 +29,13 @@ KEYCTL_READ           :: 11
 KEYCTL_INVALIDATE     :: 21
 
 KEY_TYPE_USER         :: "user"
-KEY_DESC_VAULT_PREFIX :: "heimdall:vault_key:"
+KEY_DESC_KEYRING_PREFIX  :: "heimdall:vault_keyring:"
+KEY_DESC_IDENTITY_PREFIX :: "heimdall:vault_identity:"
 
 KEYSTORE_ERR_EPERM    :: 1
 KEYSTORE_ERR_EACCES   :: 13
 KEYSTORE_ERR_ENOSYS   :: 38
 KEYSTORE_ERR_ENOKEY   :: 126
-
-// Global state for in-memory JIT unsealed buffer fallback
-g_keystore_in_memory_buffer: Secure_Key
-g_keystore_in_memory_set: bool
-g_keystore_mu: sync.Mutex
 
 // Testing hooks for container / sandbox restriction simulation
 _keystore_mock_syscall_errno: int = 0
@@ -89,71 +82,17 @@ sys_keyctl :: proc "contextless" (cmd: int, arg2: uintptr = 0, arg3: uintptr = 0
 	return ret, 0
 }
 
-// Stores the unsealed vault key in process-isolated JIT memory (mlock'd buffer with MADV_DONTDUMP)
-keystore_store_in_memory_vault_key :: proc(key_hex: string) -> bool {
-	sync.mutex_lock(&g_keystore_mu)
-	defer sync.mutex_unlock(&g_keystore_mu)
-
-	if !bridge_is_valid_hex_key(key_hex) do return false
-
-	if g_keystore_in_memory_set {
-		secure_key_wipe_and_free(&g_keystore_in_memory_buffer)
-		g_keystore_in_memory_set = false
-	}
-
-	key, ok := secure_key_alloc(len(key_hex))
-	if !ok {
-		return false
-	}
-
-	mem.copy(rawptr(key.ptr), raw_data(key_hex), len(key_hex))
-	g_keystore_in_memory_buffer = key
-	g_keystore_in_memory_set = true
-	return true
-}
-
-// Retrieves the unsealed vault key from process-isolated JIT memory
-keystore_read_in_memory_vault_key :: proc(allocator := context.allocator) -> (key_hex: string, ok: bool) {
-	sync.mutex_lock(&g_keystore_mu)
-	defer sync.mutex_unlock(&g_keystore_mu)
-
-	if !g_keystore_in_memory_set || g_keystore_in_memory_buffer.ptr == nil {
-		return "", false
-	}
-
-	bytes := g_keystore_in_memory_buffer.ptr[:g_keystore_in_memory_buffer.len]
-	str_val := string(bytes)
-	if !bridge_is_valid_hex_key(str_val) {
-		return "", false
-	}
-
-	return strings.clone(str_val, allocator), true
-}
-
-// Explicitly wipes and frees the process-isolated JIT memory buffer
-keystore_wipe_in_memory_vault_key :: proc() {
-	sync.mutex_lock(&g_keystore_mu)
-	defer sync.mutex_unlock(&g_keystore_mu)
-
-	if g_keystore_in_memory_set {
-		secure_key_wipe_and_free(&g_keystore_in_memory_buffer)
-		g_keystore_in_memory_set = false
-	}
-}
-
-// The @u description of bridge_id's vault key (temp-allocated); ok is false for
-// an id that cannot name one (keystore_bridge_id_ok).
 @(private="file")
-keystore_key_description :: proc(bridge_id: string) -> (desc: cstring, ok: bool) {
-	if !keystore_bridge_id_ok(bridge_id) do return nil, false
-	return strings.clone_to_cstring(strings.concatenate({KEY_DESC_VAULT_PREFIX, bridge_id}, context.temp_allocator), context.temp_allocator), true
+keystore_key_description :: proc(slot: Keystore_Slot, bridge_id: string) -> cstring {
+	prefix := KEY_DESC_KEYRING_PREFIX if slot == .Keyring else KEY_DESC_IDENTITY_PREFIX
+	return strings.clone_to_cstring(strings.concatenate({prefix, bridge_id}, context.temp_allocator), context.temp_allocator)
 }
 
-// Finds bridge_id's vault key in @u (and keyrings linked under it) by exact
-// description. Deliberately not request_key(): see the file header.
+// Finds the slot's key in @u (and keyrings linked under it) by exact description.
+// Deliberately not request_key(): see the file header.
 @(private="file")
-keystore_search_vault_key :: proc(bridge_id: string) -> (key_id: int, ok: bool) {
-	key_desc := keystore_key_description(bridge_id) or_return
+keystore_search_key :: proc(slot: Keystore_Slot, bridge_id: string) -> (key_id: int, ok: bool) {
+	key_desc := keystore_key_description(slot, bridge_id)
 	key_type := cstring(KEY_TYPE_USER)
 	found, err := sys_keyctl(
 		KEYCTL_SEARCH,
@@ -166,100 +105,50 @@ keystore_search_vault_key :: proc(bridge_id: string) -> (key_id: int, ok: bool) 
 	return found, true
 }
 
-// Stores bridge_id's vault key in the Linux kernel user keyring (@u / KEY_SPEC_USER_KEYRING).
-// If syscall returns EPERM, ENOSYS, or EACCES (container/sandbox restriction), logs a warning
-// and falls back gracefully to process-isolated JIT memory (mlock'd buffer) without failing startup (REQ-VAULT-HARDEN-9).
-// An id that cannot name a key stores nothing anywhere (KEYSTORE_ERR_BAD_BRIDGE_ID).
-keystore_store_vault_key :: proc(bridge_id: string, key_hex: string) -> (ok: bool, err_code: int) {
-	if keystore_android_selected() do return keystore_android_store_vault_key(bridge_id, key_hex)
-	if !bridge_is_valid_hex_key(key_hex) {
-		return false, -1
-	}
-	key_desc, desc_ok := keystore_key_description(bridge_id)
-	if !desc_ok do return false, KEYSTORE_ERR_BAD_BRIDGE_ID
-
-	key_type := cstring(KEY_TYPE_USER)
-	payload := transmute([]u8)key_hex
-
-	_, err := sys_add_key(key_type, key_desc, raw_data(payload), c.size_t(len(payload)), KEY_SPEC_USER_KEYRING)
-	if err != 0 {
-		blog_warn(.keystore_unavailable, blog_sym(.reason, .linux_keyring), blog_int(.errno, i64(err)))
-		if err == KEYSTORE_ERR_EPERM || err == KEYSTORE_ERR_EACCES || err == KEYSTORE_ERR_ENOSYS {
-			fmt.eprintfln(
-				"WARN: Linux kernel keyring restricted (errno %d). Falling back gracefully to process-isolated JIT memory (REQ-VAULT-HARDEN-9).",
-				err,
-			)
-			mem_ok := keystore_store_in_memory_vault_key(key_hex)
-			return mem_ok, err
-		}
-		// Other error: store in memory buffer as safety net, return error code
-		_ = keystore_store_in_memory_vault_key(key_hex)
-		return false, err
-	}
-
-	// Also sync to process-isolated memory buffer for quick access
-	keystore_store_in_memory_vault_key(key_hex)
-	return true, 0
+// Termux cannot use the keyring at all, so it must persist or fail.
+keystore_os_requires_persistence :: proc() -> bool {
+	return keystore_android_selected()
 }
 
-// Retrieves bridge_id's vault key from the Linux kernel user keyring (@u) via KEYCTL_SEARCH / keyctl_read.
-keystore_read_keyring_vault_key :: proc(bridge_id: string, allocator := context.allocator) -> (key_hex: string, ok: bool) {
-	if keystore_android_selected() do return keystore_android_read_vault_key(bridge_id, allocator)
-	key_id := keystore_search_vault_key(bridge_id) or_return
+// keystore_os_write_secret adds (or replaces) the slot's key in @u. Returns 0 or
+// the errno; EPERM/EACCES/ENOSYS mean a container/sandbox restriction
+// (REQ-VAULT-HARDEN-9), which keystore_common answers with a memory-only copy.
+keystore_os_write_secret :: proc(slot: Keystore_Slot, bridge_id: string, data: []byte) -> int {
+	if keystore_android_selected() do return keystore_android_write_secret(slot, bridge_id, data)
+	if len(data) == 0 do return -1
+	key_type := cstring(KEY_TYPE_USER)
+	_, err := sys_add_key(key_type, keystore_key_description(slot, bridge_id), raw_data(data), c.size_t(len(data)), KEY_SPEC_USER_KEYRING)
+	if err != 0 do blog_warn(.keystore_unavailable, blog_sym(.reason, .linux_keyring), blog_int(.errno, i64(err)))
+	return err
+}
 
-	buf: [128]u8
+keystore_os_read_secret :: proc(slot: Keystore_Slot, bridge_id: string, dst: []byte) -> (n: int, ok: bool) {
+	if keystore_android_selected() do return keystore_android_read_secret(slot, bridge_id, dst)
+	key_id := keystore_search_key(slot, bridge_id) or_return
 	read_len, r_err := sys_keyctl(
 		KEYCTL_READ,
 		uintptr(key_id),
-		transmute(uintptr)raw_data(buf[:]),
-		uintptr(len(buf)),
+		transmute(uintptr)raw_data(dst),
+		uintptr(len(dst)),
 	)
-	if r_err != 0 || read_len <= 0 {
-		return "", false
-	}
-
-	if read_len == 64 {
-		hex_candidate := string(buf[:64])
-		if bridge_is_valid_hex_key(hex_candidate) {
-			return strings.clone(hex_candidate, allocator), true
-		}
-	}
-
-	if read_len == 32 {
-		encoded, enc_err := hex.encode(buf[:32], allocator)
-		if enc_err == nil && bridge_is_valid_hex_key(string(encoded)) {
-			return string(encoded), true
-		}
-	}
-
-	return "", false
+	// keyctl_read returns the full payload size even when dst is too small.
+	if r_err != 0 || read_len <= 0 || read_len > len(dst) do return 0, false
+	return read_len, true
 }
 
-// Revokes and unlinks bridge_id's vault key from KEY_SPEC_USER_KEYRING via keyctl_unlink.
-// Another bridge's key is never found, so never touched.
-keystore_unlink_vault_key :: proc(bridge_id: string) -> bool {
-	if keystore_android_selected() do return keystore_android_unlink_vault_key(bridge_id)
-	key_id := keystore_search_vault_key(bridge_id) or_return
-
-	// Revoke to immediately invalidate
-	_, _ = sys_keyctl(KEYCTL_REVOKE, uintptr(key_id))
-
-	// Unlink from KEY_SPEC_USER_KEYRING
-	res, u_err := sys_keyctl(KEYCTL_UNLINK, uintptr(key_id), transmute(uintptr)int(KEY_SPEC_USER_KEYRING))
-	return u_err == 0 && res == 0
-}
-
-// The Darwin Keychain item can exist yet be unreadable; a present @u key is always
-// readable and already reports Unlocked, so there is nothing extra to detect here.
-// Under Termux a sealed file proves the vault was configured even when the
-// Keystore cannot unwrap it right now.
-keystore_persisted_vault_item_present :: proc(bridge_id: string) -> bool {
-	if keystore_android_selected() do return keystore_android_persisted_vault_item_present(bridge_id)
+// A present @u key is always readable, so only Termux's sealed file can be
+// "present but unreadable".
+keystore_os_secret_present :: proc(slot: Keystore_Slot, bridge_id: string) -> bool {
+	if keystore_android_selected() do return keystore_android_secret_present(slot, bridge_id)
 	return false
 }
 
-// Purges bridge_id's kernel keyring entry and wipes all in-memory unsealed buffers on bridge lock / shutdown.
-keystore_lock_and_purge :: proc(bridge_id: string) {
-	_ = keystore_unlink_vault_key(bridge_id)
-	keystore_wipe_in_memory_vault_key()
+// Revokes and unlinks the slot's key. True when no key remains.
+keystore_os_delete_secret :: proc(slot: Keystore_Slot, bridge_id: string) -> bool {
+	if keystore_android_selected() do return keystore_android_delete_secret(slot, bridge_id)
+	key_id, found := keystore_search_key(slot, bridge_id)
+	if !found do return _keystore_mock_syscall_errno == 0
+	_, _ = sys_keyctl(KEYCTL_REVOKE, uintptr(key_id))
+	res, u_err := sys_keyctl(KEYCTL_UNLINK, uintptr(key_id), transmute(uintptr)int(KEY_SPEC_USER_KEYRING))
+	return u_err == 0 && res == 0
 }

@@ -1,3 +1,4 @@
+#+build !windows
 package main
 
 // REQ-PTY-NET-3 — ack-less binary pty input on the bridge.
@@ -54,9 +55,9 @@ test_binary_pty_input_is_delivered_in_order_without_a_command_result :: proc(t: 
 	sync.mutex_lock(&keystore_test_mutex)
 	defer sync.mutex_unlock(&keystore_test_mutex)
 
-	prev_key, had_key := os.lookup_env("HEIMDALL_VAULT_KEY", context.allocator)
-	defer { if had_key { _ = os.set_env("HEIMDALL_VAULT_KEY", prev_key); delete(prev_key) } else { os.unset_env("HEIMDALL_VAULT_KEY") } }
-	_ = os.set_env("HEIMDALL_VAULT_KEY", TEST_ENC_VAULT_KEY)
+	prev_key, had_key := os.lookup_env("HEIMDALL_VAULT_KEYRING", context.allocator)
+	defer { if had_key { _ = os.set_env("HEIMDALL_VAULT_KEYRING", prev_key); delete(prev_key) } else { os.unset_env("HEIMDALL_VAULT_KEYRING") } }
+	_ = os.set_env("HEIMDALL_VAULT_KEYRING", test_keyring_env_value(TEST_ENC_VAULT_KEY))
 
 	sock_path := fmt.tprintf("%s/.cache/heimdall-tests/bin-input-%d.sock", os.get_env("HOME", context.temp_allocator), os.get_pid())
 	cpath := strings.clone_to_cstring(sock_path, context.temp_allocator)
@@ -94,7 +95,7 @@ test_binary_pty_input_is_delivered_in_order_without_a_command_result :: proc(t: 
 	// Three keystroke chunks, encrypted the way the browser does it (random nonce each).
 	chunks := []string{"ls ", "-la", "\n"}
 	for chunk, i in chunks {
-		sealed, ok := bridge_pty_stream_encrypt_chunk_raw(transmute([]byte)chunk, [4]byte{9, 9, 9, 9}, u64(i + 1), TEST_ENC_VAULT_KEY, context.temp_allocator)
+		sealed, ok := test_pty_input_payload(chunk, TEST_ENC_VAULT_KEY, 1, "sh_bin_input")
 		testing.expect(t, ok)
 		frame := contracts.pty_wire_encode_session_frame(contracts.PTY_WIRE_KIND_INPUT, contracts.pty_wire_flags(false, true), "sh_bin_input", sealed, context.temp_allocator)
 		bridge_hub_handle_binary_frame(nil, frame)

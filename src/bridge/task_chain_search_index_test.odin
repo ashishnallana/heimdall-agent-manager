@@ -3,6 +3,7 @@ package main
 import "core:strings"
 import "core:sync"
 import "core:testing"
+import vault "odin_test:lib/vault"
 
 // The bridge search index is process-global, and the test runner is
 // multi-threaded. Tests that rebuild or lock the global index hold this mutex so
@@ -84,11 +85,12 @@ task_chain_search_query_treats_fts_syntax_as_text :: proc(t: ^testing.T) {
 @(test)
 task_chain_search_feed_decrypts_documents_and_preserves_tombstones :: proc(t: ^testing.T) {
 	key_hex := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-	title, title_ok := bridge_encrypt_vault_ciphertext_hex("Encrypted title", key_hex)
-	testing.expect(t, title_ok, "title fixture should encrypt")
+	// Content fields may be sealed under any epoch the keyring holds.
+	kr := test_keyring_two_epochs(key_hex, TEST_ENC_VAULT_KEY)
+	defer vault.keyring_wipe(&kr)
+	title := test_vault_seal("Encrypted title", key_hex, 1)
 	defer delete(title)
-	description, description_ok := bridge_encrypt_vault_ciphertext_hex("Secret description", key_hex)
-	testing.expect(t, description_ok, "description fixture should encrypt")
+	description := test_vault_seal("Secret description", TEST_ENC_VAULT_KEY, 2)
 	defer delete(description)
 	body := strings.concatenate({
 		`{"data":{"next_revision":9,"has_more":false,"documents":[{"revision":8,"operation":"upsert","chain_id":"chain_secure","project_id":"proj_secure","status":"active","updated_at":"2026-10-14T00:00:00Z","title":"`,
@@ -98,7 +100,7 @@ task_chain_search_feed_decrypts_documents_and_preserves_tombstones :: proc(t: ^t
 		`"},{"revision":9,"operation":"delete","chain_id":"chain_old","project_id":"","status":"","updated_at":"","title":"","description":""}]}}`,
 	})
 	defer delete(body)
-	documents, deleted, revision, has_more, parsed := bridge_task_chain_search_parse_feed(body, key_hex)
+	documents, deleted, revision, has_more, parsed := bridge_task_chain_search_parse_feed(body, &kr)
 	testing.expect(t, parsed, "feed should parse")
 	defer bridge_task_chain_search_documents_destroy(documents)
 	defer bridge_task_chain_search_strings_destroy(deleted)

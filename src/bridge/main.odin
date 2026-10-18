@@ -17,6 +17,7 @@ import crashlog "odin_test:lib/crashlog"
 import http "odin_test:lib/http_client"
 import ws "odin_test:lib/ws"
 import jsonx "odin_test:lib/jsonx"
+import vault "odin_test:lib/vault"
 
 Bridge_Config :: struct {
 	bind_host: string,
@@ -871,45 +872,36 @@ bridge_now_unix_ms :: proc() -> i64 {
 	return time.to_unix_nanoseconds(time.now()) / 1_000_000
 }
 
-// Resolves the running bridge's vault key. The keyring/Keychain lookup is scoped
-// to bridge_config.daemon_id, so another bridge of the same OS user is never read
-// (REQ-T5-2). The machine-wide ~/.config/heimdall/vault_key is deliberately NOT a
-// source any more (REQ-T5-1): it would be shared by every bridge on the host. It
-// remains a ham-ctl-side source only (src/ctl/vault.odin).
-bridge_read_vault_key :: proc() -> (string, bool) {
-	// a) Check HEIMDALL_VAULT_KEY env var. Global to the process environment, so a
-	// single-bridge development convenience, not a per-bridge store.
-	if env_val, found := os.lookup_env("HEIMDALL_VAULT_KEY", context.temp_allocator); found {
-		trimmed := strings.trim_space(env_val)
-		if trimmed != "" {
-			if len(trimmed) == 64 && bridge_is_valid_hex_key(trimmed) {
-				return strings.clone(trimmed), true
-			}
-			// Explicit env var set but invalid: do not fall through to other sources
-			return "", false
-		}
+// Resolves the running bridge's vault keyring (HKR1, lib/vault). The OS store
+// lookup is scoped to bridge_config.daemon_id, so another bridge of the same OS
+// user is never read (REQ-T5-2). The caller wipes the result (vault.keyring_wipe).
+//
+// HEIMDALL_VAULT_KEYRING (standard base64 of the HKR1 bytes) is a single-bridge
+// development override, global to the process environment. A set but invalid value
+// is "no keyring" and does NOT fall through to the OS store.
+bridge_read_vault_keyring :: proc() -> (vault.Vault_Keyring, bool) {
+	if env_val, found := os.lookup_env("HEIMDALL_VAULT_KEYRING", context.temp_allocator); found {
+		kr, present, ok := bridge_keyring_from_env_value(env_val)
+		if present do return kr, ok
 	}
+	return keystore_read_vault_keyring(bridge_config.daemon_id)
+}
 
-	// b) This bridge's persisted key: Linux kernel keyring @u, macOS login Keychain,
-	//    or the Termux sealed file unwrapped by the Android Keystore
-	if key_k, ok := keystore_read_keyring_vault_key(bridge_config.daemon_id); ok {
-		return key_k, true
-	}
-
-	// c) Check process in-memory JIT unsealed buffer
-	if key_m, ok := keystore_read_in_memory_vault_key(); ok {
-		return key_m, true
-	}
-	return "", false
+// bridge_current_vault_epoch returns the keyring's current epoch, or 0 when locked.
+bridge_current_vault_epoch :: proc() -> u32 {
+	kr, ok := bridge_read_vault_keyring()
+	defer vault.keyring_wipe(&kr)
+	if !ok do return 0
+	return kr.current_epoch
 }
 
 // permissions_valid is kept for the vault.status wire shape; with no on-disk key
-// source left it simply mirrors `configured`.
+// source left it simply mirrors `configured`. key_length is the epoch key size.
 bridge_vault_key_status :: proc() -> (configured: bool, permissions_valid: bool, key_length: int) {
-	key, ok := bridge_read_vault_key()
+	kr, ok := bridge_read_vault_keyring()
+	defer vault.keyring_wipe(&kr)
 	if !ok do return false, false, 0
-	defer delete(key)
-	return true, true, len(key)
+	return true, true, vault.KEY_BYTES
 }
 
 // BRIDGE_PARENT_SESSION_ENV are the per-session markers an interactive Claude

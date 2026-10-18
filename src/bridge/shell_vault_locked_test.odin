@@ -1,6 +1,8 @@
+#+build !windows
 package main
 
 import "base:runtime"
+import "core:encoding/base64"
 import "core:fmt"
 import "core:net"
 import "core:os"
@@ -41,9 +43,9 @@ fixture_open :: proc(t: ^testing.T, label: string, marker: bool, key: string) ->
 	f.prev_daemon_id = keystore_test_set_daemon_id(id_a)
 	keystore_lock_and_purge(id_a)
 	f.saved_flag = bridge_workspace_vault_configured
-	f.prev_key, f.had_key = os.lookup_env("HEIMDALL_VAULT_KEY", context.allocator)
+	f.prev_key, f.had_key = os.lookup_env("HEIMDALL_VAULT_KEYRING", context.allocator)
 	f.prev_configured, f.had_configured = os.lookup_env("HEIMDALL_VAULT_CONFIGURED", context.allocator)
-	os.unset_env("HEIMDALL_VAULT_KEY")
+	os.unset_env("HEIMDALL_VAULT_KEYRING")
 	os.unset_env("HEIMDALL_VAULT_CONFIGURED")
 
 	f.sb, ok = bridge_vault_test_sandbox_open(t, label)
@@ -57,7 +59,7 @@ fixture_open :: proc(t: ^testing.T, label: string, marker: bool, key: string) ->
 	}
 	// Only the marker (or its absence) decides "configured" from here on.
 	bridge_workspace_vault_configured = false
-	if key != "" do _ = os.set_env("HEIMDALL_VAULT_KEY", key)
+	if key != "" do _ = os.set_env("HEIMDALL_VAULT_KEYRING", test_keyring_env_value(key))
 	return f, true
 }
 
@@ -68,7 +70,7 @@ fixture_close :: proc(f: ^Vault_Gate_Fixture) {
 	_ = bridge_vault_set_configured(f.bridge_id, false)
 	bridge_vault_test_sandbox_close(&f.sb)
 	bridge_workspace_vault_configured = f.saved_flag
-	if f.had_key { _ = os.set_env("HEIMDALL_VAULT_KEY", f.prev_key); delete(f.prev_key) } else { os.unset_env("HEIMDALL_VAULT_KEY") }
+	if f.had_key { _ = os.set_env("HEIMDALL_VAULT_KEYRING", f.prev_key); delete(f.prev_key) } else { os.unset_env("HEIMDALL_VAULT_KEYRING") }
 	if f.had_configured { _ = os.set_env("HEIMDALL_VAULT_CONFIGURED", f.prev_configured); delete(f.prev_configured) } else { os.unset_env("HEIMDALL_VAULT_CONFIGURED") }
 	keystore_lock_and_purge(f.bridge_id)
 	bridge_config.daemon_id = f.prev_daemon_id
@@ -138,7 +140,8 @@ test_t9_locked_shell_start_refuses_enc_spec :: proc(t: ^testing.T) {
 
 	canary := fmt.tprintf("%s/t9_enc", f.sb.dir)
 	spec := fmt.tprintf(`{{"cmd":"touch %s","cwd":"%s","timestamp":%d,"nonce":"n_t9_b"}}`, canary, f.sb.dir, bridge_now_unix_ms())
-	armored, enc_ok := bridge_encrypt_vault_ciphertext_hex(spec, TEST_ENC_VAULT_KEY)
+	armored := test_vault_seal(spec, TEST_ENC_VAULT_KEY)
+	enc_ok := armored != ""
 	testing.expect(t, enc_ok, "enc_spec built")
 	defer delete(armored)
 
@@ -222,7 +225,8 @@ test_t9_locked_shell_pty_input_is_dropped :: proc(t: ^testing.T) {
 	testing.expect(t, res_ok, "result recorded")
 	testing.expect(t, strings.contains(res, `"failed"`), fmt.tprintf("plaintext input must be dropped when locked, got %q", res))
 
-	enc_b64, enc_ok := bridge_pty_stream_encrypt_chunk(transmute([]byte)string("echo hi\n"), [4]byte{9, 9, 9, 9}, 1, TEST_ENC_VAULT_KEY, context.temp_allocator)
+	enc_frame, enc_ok := test_pty_input_payload("echo hi\n", TEST_ENC_VAULT_KEY, 1, "sh_t9_pty")
+	enc_b64, _ := base64.encode(enc_frame, allocator = context.temp_allocator)
 	testing.expect(t, enc_ok, "chunk encrypted")
 	bridge_hub_handle_shell_pty_input(nil, fmt.tprintf(`{{"type":"shell_pty_input","command_id":"cmd_t9_pty_enc","shell_id":"sh_t9_pty","data_b64":"%s","is_encrypted":true}}`, enc_b64))
 	res2, res2_ok := bridge_runtime_cached_command("cmd_t9_pty_enc")

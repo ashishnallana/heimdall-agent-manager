@@ -1,3 +1,4 @@
+#+build !windows
 package main
 
 // REQ-SHELL-3 bridge-side tests — the DELIVERY half of durable kill intent:

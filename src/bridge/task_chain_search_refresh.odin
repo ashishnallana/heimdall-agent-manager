@@ -1,12 +1,12 @@
 package main
 
 import "core:fmt"
-import "core:mem"
 import "core:strings"
 import "core:sync"
 import "core:thread"
 import "core:time"
 import http "odin_test:lib/http_client"
+import vault "odin_test:lib/vault"
 
 TASK_CHAIN_SEARCH_REFRESH_SECONDS :: 30
 
@@ -91,7 +91,7 @@ bridge_task_chain_document_source :: proc() -> Task_Chain_Document_Source {
 }
 
 
-bridge_task_chain_search_parse_changes :: proc(body, key_hex: string) -> (changes: []Task_Chain_Search_Change, next_revision: i64, has_more: bool, ok: bool) {
+bridge_task_chain_search_parse_changes :: proc(body: string, kr: ^vault.Vault_Keyring) -> (changes: []Task_Chain_Search_Change, next_revision: i64, has_more: bool, ok: bool) {
 	out := make([dynamic]Task_Chain_Search_Change)
 	data_obj, data_ok := bridge_provider_json_extract_object(body, "data")
 	if !data_ok do return bridge_task_chain_search_change_parse_failure(&out)
@@ -116,8 +116,8 @@ bridge_task_chain_search_parse_changes :: proc(body, key_hex: string) -> (change
 		if operation == "upsert" {
 			title_ciphertext := bridge_provider_json_extract_string(object, "title", "")
 			description_ciphertext := bridge_provider_json_extract_string(object, "description", "")
-			title, title_ok := bridge_decrypt_vault_ciphertext_hex(title_ciphertext, key_hex)
-			description, description_ok := bridge_decrypt_vault_ciphertext_hex(description_ciphertext, key_hex)
+			title, title_ok := bridge_vault_decrypt_field(title_ciphertext, kr)
+			description, description_ok := bridge_vault_decrypt_field(description_ciphertext, kr)
 			delete(title_ciphertext); delete(description_ciphertext)
 			if !title_ok || !description_ok {
 				delete(title); delete(description); delete(operation); delete(chain_id)
@@ -134,7 +134,7 @@ bridge_task_chain_search_parse_changes :: proc(body, key_hex: string) -> (change
 	return out[:], i64(next_int), has_more, true
 }
 
-bridge_task_chain_search_parse_feed :: proc(body, key_hex: string) -> (
+bridge_task_chain_search_parse_feed :: proc(body: string, kr: ^vault.Vault_Keyring) -> (
 	documents: []Task_Chain_Search_Document,
 	deleted_chain_ids: []string,
 	next_revision: i64,
@@ -175,9 +175,9 @@ bridge_task_chain_search_parse_feed :: proc(body, key_hex: string) -> (
 		defer delete(title_ciphertext)
 		description_ciphertext := bridge_provider_json_extract_string(object, "description", "")
 		defer delete(description_ciphertext)
-		title, title_ok := bridge_decrypt_vault_ciphertext_hex(title_ciphertext, key_hex)
+		title, title_ok := bridge_vault_decrypt_field(title_ciphertext, kr)
 		if !title_ok do return bridge_task_chain_search_parse_failure(&documents_out, &deleted_out)
-		description, description_ok := bridge_decrypt_vault_ciphertext_hex(description_ciphertext, key_hex)
+		description, description_ok := bridge_vault_decrypt_field(description_ciphertext, kr)
 		if !description_ok {
 			delete(title)
 			return bridge_task_chain_search_parse_failure(&documents_out, &deleted_out)
@@ -209,13 +209,10 @@ bridge_task_chain_search_refresh_once :: proc() {
 		sync.mutex_unlock(&bridge_task_chain_search_refresh_mutex)
 	}
 
-	key_hex, key_ok := bridge_read_vault_key()
+	kr, key_ok := bridge_read_vault_keyring()
+	defer vault.keyring_wipe(&kr)
 	if !key_ok do return
 	vault_generation := bridge_task_chain_search_generation()
-	defer {
-		mem.zero_explicit(raw_data(key_hex), len(key_hex))
-		delete(key_hex)
-	}
 
 	ready, _, indexed_revision := bridge_task_chain_search_status()
 	after_revision := indexed_revision if ready else 0
@@ -232,9 +229,9 @@ bridge_task_chain_search_refresh_once :: proc() {
 		next_revision: i64
 		has_more, parsed := false, false
 		if !ready {
-			documents, deleted, next_revision, has_more, parsed = bridge_task_chain_search_parse_feed(body, key_hex)
+			documents, deleted, next_revision, has_more, parsed = bridge_task_chain_search_parse_feed(body, &kr)
 		} else {
-			changes, next_revision, has_more, parsed = bridge_task_chain_search_parse_changes(body, key_hex)
+			changes, next_revision, has_more, parsed = bridge_task_chain_search_parse_changes(body, &kr)
 		}
 		delete(body)
 		if !parsed {

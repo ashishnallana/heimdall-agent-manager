@@ -1,3 +1,4 @@
+#+build !windows
 package main
 
 // REQ-XM-4 — hermetic tests for the local proxy's pure parsing layer.

@@ -93,14 +93,14 @@ bridge_prespawn_rmdir_all :: proc(dir: string) {
 //   HEIMDALL_AGENT_INSTANCE_ID — the agent instance id
 //   HEIMDALL_CTL_BIN           — absolute path to the materialized ham-ctl shim
 //
-// The vault key is deliberately NOT injected here. It used to be, but the env is
+// The vault keyring is deliberately NOT injected here. It used to be, but the env is
 // built once at spawn and never refreshed, so after an operator rotates the key a
 // running agent's env held the OLD value — and because ctl checks
-// $HEIMDALL_VAULT_KEY before asking the bridge, that stale value WON over the
+// $HEIMDALL_VAULT_KEYRING before asking the bridge, that stale value WON over the
 // correct key and decryption failed silently for the rest of the instance's
 // life. ctl now resolves the key at invocation time from this bridge via
 // agent.vault.get (the bridge holds a per-bridge key in the keyring/Keychain),
-// so it is always live; $HEIMDALL_VAULT_KEY remains only as an explicit override.
+// so it is always live; $HEIMDALL_VAULT_KEYRING remains only as an explicit override.
 //
 // The caller owns the returned slice and each string.
 bridge_prespawn_env :: proc(run_dir, bridge_endpoint, agent_token, instance_id: string) -> []string {

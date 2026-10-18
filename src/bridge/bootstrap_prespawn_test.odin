@@ -1,3 +1,4 @@
+#+build !windows
 package main
 
 import "core:fmt"
@@ -181,16 +182,16 @@ bridge_bootstrap_shim_omits_vault_key :: proc(t: ^testing.T) {
 
 	// A key IS configured while this renders, which is the whole point: even with a
 	// key available, the shim must not capture it.
-	prev_key, had_key := os.lookup_env("HEIMDALL_VAULT_KEY", context.allocator)
+	prev_key, had_key := os.lookup_env("HEIMDALL_VAULT_KEYRING", context.allocator)
 	defer {
 		if had_key {
-			_ = os.set_env("HEIMDALL_VAULT_KEY", prev_key)
+			_ = os.set_env("HEIMDALL_VAULT_KEYRING", prev_key)
 		} else {
-			os.unset_env("HEIMDALL_VAULT_KEY")
+			os.unset_env("HEIMDALL_VAULT_KEYRING")
 		}
 		delete(prev_key)
 	}
-	_ = os.set_env("HEIMDALL_VAULT_KEY", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	_ = os.set_env("HEIMDALL_VAULT_KEYRING", test_keyring_env_value("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"))
 
 	script, ok := bridge_bootstrap_render_ham_ctl_shim("unix:/tmp/bridge.sock", "hlat_tok_1", "inst_abc")
 	testing.expect(t, ok, "shim must render when ham-ctl resolves")
@@ -199,7 +200,7 @@ bridge_bootstrap_shim_omits_vault_key :: proc(t: ^testing.T) {
 
 	testing.expect(
 		t,
-		!strings.contains(script, "HEIMDALL_VAULT_KEY"),
+		!strings.contains(script, "HEIMDALL_VAULT_KEYRING"),
 		"the rendered ham-ctl shim must not bake the vault key",
 	)
 
@@ -236,16 +237,16 @@ bridge_bootstrap_written_wrapper_omits_vault_key :: proc(t: ^testing.T) {
 
 	// A key IS configured while the wrapper is written: that is the condition under
 	// which the old code baked it in.
-	prev_key, had_key := os.lookup_env("HEIMDALL_VAULT_KEY", context.allocator)
+	prev_key, had_key := os.lookup_env("HEIMDALL_VAULT_KEYRING", context.allocator)
 	defer {
 		if had_key {
-			_ = os.set_env("HEIMDALL_VAULT_KEY", prev_key)
+			_ = os.set_env("HEIMDALL_VAULT_KEYRING", prev_key)
 		} else {
-			os.unset_env("HEIMDALL_VAULT_KEY")
+			os.unset_env("HEIMDALL_VAULT_KEYRING")
 		}
 		delete(prev_key)
 	}
-	_ = os.set_env("HEIMDALL_VAULT_KEY", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	_ = os.set_env("HEIMDALL_VAULT_KEYRING", test_keyring_env_value("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"))
 
 	run_dir := fmt.aprintf("/tmp/heimdall-bridge-wrapper-test-%d", int(posix.getpid()))
 	defer delete(run_dir)
@@ -266,7 +267,7 @@ bridge_bootstrap_written_wrapper_omits_vault_key :: proc(t: ^testing.T) {
 	script := string(data)
 	testing.expect(
 		t,
-		!strings.contains(script, "HEIMDALL_VAULT_KEY"),
+		!strings.contains(script, "HEIMDALL_VAULT_KEYRING"),
 		"the written ham-ctl wrapper must not bake the vault key",
 	)
 	testing.expect(t, strings.contains(script, "HEIMDALL_BRIDGE_ENDPOINT="), "wrapper keeps the endpoint")

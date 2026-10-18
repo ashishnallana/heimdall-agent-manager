@@ -22,6 +22,7 @@ import json "core:encoding/json"
 import ws "odin_test:lib/ws"
 import jsonx "odin_test:lib/jsonx"
 import cfg_lib "odin_test:lib/config"
+import vault "odin_test:lib/vault"
 
 // The resolved (symlink-free, absolute) sandbox root. Set once at startup by
 // bridge_fs_init. Empty means FS management is effectively disabled (deny all).
@@ -930,12 +931,20 @@ bridge_fs_read_file :: proc(requested: string, sandbox_root: string = "", offset
 		}
 	}
 
-	if key_hex, ok := bridge_read_vault_key(); ok {
-		defer delete(key_hex)
-		if encrypted, enc_ok := bridge_encrypt_vault_ciphertext_hex(result.content, key_hex); enc_ok {
-			delete(result.content)
-			result.content = encrypted
+	if kr, ok := bridge_read_vault_keyring(); ok {
+		defer vault.keyring_wipe(&kr)
+		encrypted, enc_ok := bridge_encrypt_vault_text(result.content, &kr)
+		delete(result.content)
+		if !enc_ok {
+			// Fail closed: a keyring is held, so the content must not leave in plaintext.
+			result.content = ""
+			result.ok = false
+			result.viewable = false
+			result.error_code = "encryption_failed"
+			result.message = "Could not encrypt file content"
+			return result
 		}
+		result.content = encrypted
 	}
 
 	return result
@@ -1006,8 +1015,9 @@ bridge_fs_write_file :: proc(requested: string, content: string, sandbox_root: s
 	has_decrypted := false
 	defer if has_decrypted do delete(decrypted_payload)
 
-	if strings.has_prefix(content, VAULT_ARMOR_PREFIX) {
-		key_hex, ok := bridge_read_vault_key()
+	if vault.is_armored(content) {
+		kr, ok := bridge_read_vault_keyring()
+		defer vault.keyring_wipe(&kr)
 		if !ok {
 			return Bridge_Fs_Write_File_Result{
 				ok = false,
@@ -1017,9 +1027,7 @@ bridge_fs_write_file :: proc(requested: string, content: string, sandbox_root: s
 				message = "Vault decryption failed for file write",
 			}
 		}
-		defer delete(key_hex)
-
-		decrypted, dec_ok := bridge_decrypt_vault_ciphertext_hex(content, key_hex)
+		decrypted, dec_ok := bridge_decrypt_vault_token(content, &kr)
 		if !dec_ok {
 			return Bridge_Fs_Write_File_Result{
 				ok = false,
@@ -1595,13 +1603,13 @@ bridge_fs_grep :: proc(query: string, case_sensitive: bool, max_results: int, sa
 		return Bridge_Fs_Grep_Result{ok = false, root = root, matches = matches[:], truncated = true, error_code = "deadline_exceeded", message = "Filesystem command deadline exceeded"}
 	}
 
-	if key_hex, ok := bridge_read_vault_key(); ok {
-		defer delete(key_hex)
+	if kr, ok := bridge_read_vault_keyring(); ok {
+		defer vault.keyring_wipe(&kr)
 		for &m in matches {
-			if encrypted, enc_ok := bridge_encrypt_vault_ciphertext_hex(m.line, key_hex, context.allocator); enc_ok {
-				delete(m.line)
-				m.line = encrypted
-			}
+			encrypted, enc_ok := bridge_encrypt_vault_text(m.line, &kr, context.allocator)
+			delete(m.line)
+			// Fail closed: never return a matched line in plaintext while a keyring is held.
+			m.line = encrypted if enc_ok else strings.clone(vault.FAILED_MARKER)
 		}
 	}
 

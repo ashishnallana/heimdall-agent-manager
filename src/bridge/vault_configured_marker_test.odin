@@ -15,6 +15,7 @@ import "core:sync"
 import "core:sys/posix"
 import "core:testing"
 import "core:time"
+import vault "odin_test:lib/vault"
 
 // The marker and the keyring/Keychain key share this process's test-only bridge
 // id, so no real bridge's state is reachable (REQ-T5-4).
@@ -48,12 +49,12 @@ vault_marker_test_open :: proc(t: ^testing.T, label: string) -> (env: Vault_Mark
 	sync.mutex_lock(&bridge_test_config_mutex)
 	sync.mutex_lock(&keystore_test_mutex)
 
-	env.prev_key, env.had_key = os.lookup_env("HEIMDALL_VAULT_KEY", context.allocator)
+	env.prev_key, env.had_key = os.lookup_env("HEIMDALL_VAULT_KEYRING", context.allocator)
 	env.prev_configured, env.had_configured = os.lookup_env("HEIMDALL_VAULT_CONFIGURED", context.allocator)
 	env.prev_daemon_id = bridge_config.daemon_id
 	env.prev_flag = bridge_workspace_vault_configured
 
-	os.unset_env("HEIMDALL_VAULT_KEY")
+	os.unset_env("HEIMDALL_VAULT_KEYRING")
 	os.unset_env("HEIMDALL_VAULT_CONFIGURED")
 	bridge_config.daemon_id = vault_marker_test_bridge_id()
 	bridge_workspace_vault_configured = false
@@ -72,10 +73,10 @@ vault_marker_test_close :: proc(env: ^Vault_Marker_Test_Env) {
 	bridge_workspace_vault_configured = env.prev_flag
 	bridge_config.daemon_id = env.prev_daemon_id
 	if env.had_key {
-		_ = os.set_env("HEIMDALL_VAULT_KEY", env.prev_key)
+		_ = os.set_env("HEIMDALL_VAULT_KEYRING", env.prev_key)
 		delete(env.prev_key)
 	} else {
-		os.unset_env("HEIMDALL_VAULT_KEY")
+		os.unset_env("HEIMDALL_VAULT_KEYRING")
 	}
 	if env.had_configured {
 		_ = os.set_env("HEIMDALL_VAULT_CONFIGURED", env.prev_configured)
@@ -214,7 +215,7 @@ test_vault_lock_keeps_marker_and_reset_removes_it :: proc(t: ^testing.T) {
 	if !ok do return
 
 	testing.expect(t, bridge_vault_set_configured(vault_marker_test_bridge_id(), true), "marker write must succeed")
-	stored, _ := keystore_store_vault_key(vault_marker_test_bridge_id(), TEST_VAULT_KEY_HEX)
+	stored := test_store_keyring(vault_marker_test_bridge_id(), TEST_VAULT_KEY_HEX)
 	testing.expect(t, stored, "key store must succeed")
 	testing.expect_value(t, bridge_vault_status(), Vault_Status.Unlocked)
 
@@ -230,14 +231,14 @@ test_vault_lock_keeps_marker_and_reset_removes_it :: proc(t: ^testing.T) {
 	testing.expect_value(t, route.local_op, "vault.reset")
 	testing.expect(t, bridge_agent_method_allowed("agent.vault.reset"), "vault.reset must be dispatchable")
 
-	_, _ = keystore_store_vault_key(vault_marker_test_bridge_id(), TEST_VAULT_KEY_HEX)
+	_ = test_store_keyring(vault_marker_test_bridge_id(), TEST_VAULT_KEY_HEX)
 	resp := bridge_vault_reset_response("req_t3_reset")
 	defer delete(resp)
 	testing.expect(t, strings.contains(resp, "\"ok\":true,\"data\":{\"ok\":true,\"status\":\"disabled\""), fmt.tprintf("reset response must report disabled, got %s", resp))
 	testing.expect(t, strings.contains(resp, "\"marker_removed\":true"), "reset response must say the marker is gone")
 	testing.expect(t, strings.contains(resp, "\"note\":\""), "reset response must document what it did")
 	testing.expect(t, !bridge_vault_marker_present(vault_marker_test_bridge_id()), "reset must remove the marker")
-	_, key_left := bridge_read_vault_key()
+	_, key_left := bridge_read_vault_keyring()
 	testing.expect(t, !key_left, "reset must purge the key")
 	vault_marker_test_simulate_restart()
 	testing.expect_value(t, bridge_vault_status(), Vault_Status.Disabled)
@@ -252,7 +253,9 @@ test_vault_hub_unseal_frame_persists_marker :: proc(t: ^testing.T) {
 	unseal_nonce_cache_clear(&g_unseal_nonce_cache)
 	bridge_unseal_init()
 	now_ms := time.to_unix_nanoseconds(time.now()) / 1_000_000
-	envelope := test_create_unseal_envelope(vault_marker_test_bridge_id(), bridge_get_public_key_hex(), TEST_VAULT_KEY_HEX, now_ms, "nonce_t3_marker_01")
+	kr := test_keyring_from_hex(TEST_VAULT_KEY_HEX)
+	defer vault.keyring_wipe(&kr)
+	envelope := test_create_unseal_v2_payload(vault_marker_test_bridge_id(), &kr, now_ms, "nonce_t3_marker_01")
 	defer delete(envelope)
 	// A command id of its own, so the handler's command cache cannot replay
 	// another test's result.
@@ -276,16 +279,16 @@ test_on_connect_heartbeat_reports_persisted_vault_after_restart :: proc(t: ^test
 	sync.mutex_lock(&keystore_test_mutex)
 	defer sync.mutex_unlock(&keystore_test_mutex)
 
-	prev_env, had_env := os.lookup_env("HEIMDALL_VAULT_KEY", context.allocator)
+	prev_env, had_env := os.lookup_env("HEIMDALL_VAULT_KEYRING", context.allocator)
 	defer {
 		if had_env {
-			_ = os.set_env("HEIMDALL_VAULT_KEY", prev_env)
+			_ = os.set_env("HEIMDALL_VAULT_KEYRING", prev_env)
 			delete(prev_env)
 		} else {
-			_ = os.unset_env("HEIMDALL_VAULT_KEY")
+			_ = os.unset_env("HEIMDALL_VAULT_KEYRING")
 		}
 	}
-	os.unset_env("HEIMDALL_VAULT_KEY")
+	os.unset_env("HEIMDALL_VAULT_KEYRING")
 
 	id_a, _ := keystore_test_bridge_ids()
 	prev_daemon_id := keystore_test_set_daemon_id(id_a)
@@ -295,15 +298,17 @@ test_on_connect_heartbeat_reports_persisted_vault_after_restart :: proc(t: ^test
 	keystore_lock_and_purge(id_a)
 	defer keystore_lock_and_purge(id_a)
 
-	ok, err := keystore_store_vault_key(id_a, KEYSTORE_SEC_TEST_KEY_1)
+	want := test_keyring_from_hex(KEYSTORE_SEC_TEST_KEY_1)
+	defer vault.keyring_wipe(&want)
+	ok, err := keystore_store_vault_keyring(id_a, test_keyring_bytes(&want))
 	testing.expect(t, ok, "store must succeed")
 	testing.expect_value(t, err, 0)
 
 	keystore_wipe_in_memory_vault_key()
-	persisted, persisted_ok := keystore_read_keyring_vault_key(id_a)
-	testing.expect(t, persisted_ok, "the OS store must still hold the key after the memory wipe")
-	defer if persisted_ok do delete(persisted)
-	testing.expect_value(t, persisted, KEYSTORE_SEC_TEST_KEY_1)
+	persisted, persisted_ok := keystore_read_persisted_vault_keyring(id_a)
+	testing.expect(t, persisted_ok, "the OS store must still hold the keyring after the memory wipe")
+	defer vault.keyring_wipe(&persisted)
+	testing.expect(t, vault.keyring_equal(&persisted, &want), "the persisted keyring must read back unchanged")
 
 	hb := bridge_hub_heartbeat_json()
 	defer delete(hb)
@@ -322,20 +327,25 @@ test_enroll_only_runtime_never_reports_unlocked :: proc(t: ^testing.T) {
 	sync.mutex_lock(&keystore_test_mutex)
 	defer sync.mutex_unlock(&keystore_test_mutex)
 
-	prev_env, had_env := os.lookup_env("HEIMDALL_VAULT_KEY", context.allocator)
+	prev_env, had_env := os.lookup_env("HEIMDALL_VAULT_KEYRING", context.allocator)
 	defer {
 		if had_env {
-			_ = os.set_env("HEIMDALL_VAULT_KEY", prev_env)
+			_ = os.set_env("HEIMDALL_VAULT_KEYRING", prev_env)
 			delete(prev_env)
 		} else {
-			_ = os.unset_env("HEIMDALL_VAULT_KEY")
+			_ = os.unset_env("HEIMDALL_VAULT_KEYRING")
 		}
 	}
-	os.unset_env("HEIMDALL_VAULT_KEY")
+	os.unset_env("HEIMDALL_VAULT_KEYRING")
 
+	id_a, _ := keystore_test_bridge_ids()
+	prev_daemon_id := keystore_test_set_daemon_id(id_a)
+	defer bridge_config.daemon_id = prev_daemon_id
 	keystore_wipe_in_memory_vault_key()
 	defer keystore_wipe_in_memory_vault_key()
-	testing.expect(t, keystore_store_in_memory_vault_key(KEYSTORE_SEC_TEST_KEY_1), "in-memory store must succeed")
+	kr := test_keyring_from_hex(KEYSTORE_SEC_TEST_KEY_1)
+	defer vault.keyring_wipe(&kr)
+	testing.expect(t, keystore_store_in_memory_vault_keyring(id_a, test_keyring_bytes(&kr)), "in-memory store must succeed")
 
 	testing.expect_value(t, bridge_vault_status_reported(true), Vault_Status.Locked)
 	testing.expect_value(t, bridge_vault_status_reported(false), Vault_Status.Unlocked)

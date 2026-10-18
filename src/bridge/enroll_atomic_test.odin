@@ -11,6 +11,7 @@ import "core:strings"
 import "core:sync"
 import "core:testing"
 import "core:time"
+import vault "odin_test:lib/vault"
 
 @(private = "file")
 ENROLL_ATOMIC_TEST_KEY :: "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
@@ -75,6 +76,8 @@ enroll_atomic_fixture_open :: proc(t: ^testing.T, f: ^Enroll_Atomic_Fixture, lab
 enroll_atomic_fixture_close :: proc(f: ^Enroll_Atomic_Fixture) {
 	bridge_enroll_atomic_disarm()
 	keystore_lock_and_purge(f.bridge_id)
+	_ = keystore_delete_identity_key(f.bridge_id)
+	bridge_unseal_forget_identity()
 	delete(f.token_file)
 	delete(f.config_path)
 	bridge_vault_test_sandbox_close(&f.sb)
@@ -83,9 +86,9 @@ enroll_atomic_fixture_close :: proc(f: ^Enroll_Atomic_Fixture) {
 @(private = "file")
 enroll_atomic_test_envelope :: proc(bridge_id, nonce: string, tamper := false) -> (string, i64) {
 	now_ms := time.to_unix_nanoseconds(time.now()) / 1_000_000
-	pub := bridge_get_public_key_hex()
-	defer delete(pub)
-	return create_sec_test_envelope(bridge_id, pub, ENROLL_ATOMIC_TEST_KEY, now_ms, nonce, tamper), now_ms
+	kr := test_keyring_from_hex(ENROLL_ATOMIC_TEST_KEY)
+	defer vault.keyring_wipe(&kr)
+	return test_create_unseal_v2_payload(bridge_id, &kr, now_ms, nonce, Test_Unseal_Options{tamper_aad = tamper}), now_ms
 }
 
 @(test)

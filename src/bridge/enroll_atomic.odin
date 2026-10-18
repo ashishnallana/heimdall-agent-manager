@@ -190,6 +190,7 @@ bridge_enroll_atomic_discard_locked :: proc() {
 	a := &g_enroll_atomic
 	bridge_enroll_stage_discard(bridge_enroll_stage_for(a.token_file, a.config_path))
 	keystore_lock_and_purge(a.cred.bridge_id)
+	_ = keystore_delete_identity_key(a.cred.bridge_id)
 	_ = bridge_vault_set_configured(a.cred.bridge_id, false)
 }
 
@@ -309,6 +310,7 @@ bridge_enroll_atomic_recover_paths :: proc(token_file, config_path: string, refr
 	case .Revoked:
 		bridge_enroll_stage_discard(st)
 		keystore_lock_and_purge(marker_bridge_id)
+		_ = keystore_delete_identity_key(marker_bridge_id)
 		_ = bridge_vault_set_configured(marker_bridge_id, false)
 		fmt.printfln("bridge enroll recovery: enrollment of %s was rolled back by the hub; discarded its staged credential and key", marker_bridge_id)
 		return .Discarded

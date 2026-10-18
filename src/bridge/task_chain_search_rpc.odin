@@ -1,18 +1,18 @@
 package main
 
-import "core:crypto"
-import "core:crypto/aes"
-import "core:crypto/hkdf"
-import base64 "core:encoding/base64"
 import "core:fmt"
 import "core:mem"
 import "core:strings"
 import "core:sync"
 import "core:time"
 import ws "odin_test:lib/ws"
+import os_random "odin_test:lib/os_random"
+import vault "odin_test:lib/vault"
 
-TASK_CHAIN_SEARCH_RPC_PREFIX :: "search:v1:"
-TASK_CHAIN_SEARCH_RPC_DOMAIN :: "heimdall/task-chain-search-rpc/v1"
+// Search RPC v2 (docs/plans/passwordless-vault.md §1 "Search key v2"):
+// envelope "search:v2:e<epoch>:<b64(nonce|tag|ct)>", key HKDF(epoch key, domain,
+// domain|e<epoch>), AAD domain|owner|bridge|request|direction|expires|e<epoch>.
+// The bridge accepts ONLY the keyring's current epoch (command epoch floor).
 TASK_CHAIN_SEARCH_RPC_MAX_LIMIT :: 50
 TASK_CHAIN_SEARCH_RPC_NONCE_CACHE :: 512
 
@@ -24,27 +24,6 @@ task_chain_search_nonce_count: int
 task_chain_search_nonce_next: int
 @(private = "file")
 task_chain_search_nonce_mutex: sync.Mutex
-
-task_chain_search_derive_key :: proc(key_hex: string, dst: []u8) -> bool {
-	if len(dst) != 32 || !bridge_is_valid_hex_key(key_hex) do return false
-	raw: [32]u8
-	defer mem.zero_explicit(&raw, size_of(raw))
-	if !bridge_hex_decode_to_buf(raw[:], key_hex) do return false
-	domain := transmute([]u8)string(TASK_CHAIN_SEARCH_RPC_DOMAIN)
-	hkdf.extract_and_expand(.SHA256, domain, raw[:], domain, dst)
-	return true
-}
-
-task_chain_search_aad :: proc(owner_user_id, bridge_id, request_id, direction: string, expires_at_ms: i64, allocator := context.allocator) -> string {
-	b := strings.builder_make(allocator = allocator)
-	strings.write_string(&b, TASK_CHAIN_SEARCH_RPC_DOMAIN)
-	strings.write_byte(&b, '|'); strings.write_string(&b, owner_user_id)
-	strings.write_byte(&b, '|'); strings.write_string(&b, bridge_id)
-	strings.write_byte(&b, '|'); strings.write_string(&b, request_id)
-	strings.write_byte(&b, '|'); strings.write_string(&b, direction)
-	strings.write_byte(&b, '|'); strings.write_string(&b, fmt.tprintf("%d", expires_at_ms))
-	return strings.to_string(b)
-}
 
 task_chain_search_nonce_accept :: proc(nonce: []u8) -> bool {
 	if len(nonce) != 12 do return false
@@ -59,41 +38,34 @@ task_chain_search_nonce_accept :: proc(nonce: []u8) -> bool {
 	return true
 }
 
-task_chain_search_open :: proc(envelope, key_hex, aad: string, reject_replay := true, allocator := context.allocator) -> (string, bool) {
-	if !strings.has_prefix(envelope, TASK_CHAIN_SEARCH_RPC_PREFIX) do return "", false
-	payload, err := base64.decode(envelope[len(TASK_CHAIN_SEARCH_RPC_PREFIX):], allocator = context.temp_allocator)
-	if err != nil || len(payload) < 28 do return "", false
-	nonce, tag, ciphertext := payload[:12], payload[12:28], payload[28:]
-	key: [32]u8
-	defer mem.zero_explicit(&key, size_of(key))
-	if !task_chain_search_derive_key(key_hex, key[:]) do return "", false
-	plain := make([]u8, len(ciphertext), allocator)
-	gcm: aes.Context_GCM
-	aes.init_gcm(&gcm, key[:]); defer aes.reset_gcm(&gcm)
-	if !aes.open_gcm(&gcm, plain, nonce, transmute([]u8)aad, ciphertext, tag) {
-		delete(plain, allocator); return "", false
+// task_chain_search_open opens a request envelope. It must be sealed under kr's
+// CURRENT epoch; the AAD is built for that epoch. epoch is returned so the response
+// is sealed under the same one.
+task_chain_search_open :: proc(envelope: string, kr: ^vault.Vault_Keyring, owner_user_id, bridge_id, request_id, direction: string, expires_at_ms: i64, reject_replay := true, allocator := context.allocator) -> (plaintext: string, epoch: u32, ok: bool) {
+	if kr == nil do return "", 0, false
+	ep, payload, parsed := vault.search_envelope_parse(envelope, context.temp_allocator)
+	if !parsed || ep != kr.current_epoch do return "", 0, false
+	key, key_ok := vault.keyring_key_for_epoch(kr, ep)
+	if !key_ok do return "", 0, false
+	aad := vault.search_aad(owner_user_id, bridge_id, request_id, direction, expires_at_ms, ep, context.temp_allocator)
+	plain, opened := vault.search_open_payload(payload, key, ep, aad, allocator)
+	if !opened do return "", 0, false
+	if reject_replay && !task_chain_search_nonce_accept(payload[:12]) {
+		delete(plain, allocator)
+		return "", 0, false
 	}
-	if reject_replay && !task_chain_search_nonce_accept(nonce) {
-		delete(plain, allocator); return "", false
-	}
-	return string(plain), true
+	return string(plain), ep, true
 }
 
-task_chain_search_seal :: proc(plaintext, key_hex, aad: string, allocator := context.allocator) -> (string, bool) {
-	key: [32]u8
-	defer mem.zero_explicit(&key, size_of(key))
-	if !task_chain_search_derive_key(key_hex, key[:]) do return "", false
-	nonce: [12]u8; crypto.rand_bytes(nonce[:])
-	ciphertext := make([]u8, len(plaintext), context.temp_allocator)
-	tag: [16]u8
-	gcm: aes.Context_GCM
-	aes.init_gcm(&gcm, key[:]); defer aes.reset_gcm(&gcm)
-	aes.seal_gcm(&gcm, ciphertext, tag[:], nonce[:], transmute([]u8)aad, transmute([]u8)plaintext)
-	payload := make([]u8, 28 + len(ciphertext), context.temp_allocator)
-	copy(payload[:12], nonce[:]); copy(payload[12:28], tag[:]); copy(payload[28:], ciphertext)
-	encoded, err := base64.encode(payload, allocator = context.temp_allocator)
-	if err != nil do return "", false
-	return strings.concatenate({TASK_CHAIN_SEARCH_RPC_PREFIX, encoded}, allocator), true
+// task_chain_search_seal seals a response under epoch with a fresh CSPRNG nonce. A
+// randomness failure returns ok=false and nothing is sealed.
+task_chain_search_seal :: proc(plaintext: string, kr: ^vault.Vault_Keyring, epoch: u32, owner_user_id, bridge_id, request_id, direction: string, expires_at_ms: i64, allocator := context.allocator) -> (string, bool) {
+	key, key_ok := vault.keyring_key_for_epoch(kr, epoch)
+	if !key_ok do return "", false
+	nonce: [12]u8
+	if !os_random.fill(nonce[:]) do return "", false
+	aad := vault.search_aad(owner_user_id, bridge_id, request_id, direction, expires_at_ms, epoch, context.temp_allocator)
+	return vault.search_seal_with_nonce(transmute([]u8)plaintext, key, epoch, aad, nonce[:], allocator)
 }
 
 task_chain_search_error_result :: proc(command_id, request_id, code: string) -> string {
@@ -123,11 +95,10 @@ bridge_task_chain_search_handle_command :: proc(conn: ^ws.Connection, text: stri
 	if request_id == "" || owner_user_id == "" || bridge_id != bridge_config.daemon_id || expires_at_ms < now_ms || expires_at_ms > now_ms + 5_000 || len(envelope) > 32_768 {
 		task_chain_search_send_error(conn, command_id, request_id, "invalid_envelope"); return
 	}
-	key_hex, key_ok := bridge_read_vault_key()
+	kr, key_ok := bridge_read_vault_keyring()
+	defer vault.keyring_wipe(&kr)
 	if !key_ok { task_chain_search_send_error(conn, command_id, request_id, "vault_locked"); return }
-	defer { mem.zero_explicit(raw_data(key_hex), len(key_hex)); delete(key_hex) }
-	aad := task_chain_search_aad(owner_user_id, bridge_id, request_id, "request", expires_at_ms); defer delete(aad)
-	plain, opened := task_chain_search_open(envelope, key_hex, aad); defer delete(plain)
+	plain, epoch, opened := task_chain_search_open(envelope, &kr, owner_user_id, bridge_id, request_id, "request", expires_at_ms); defer delete(plain)
 	if !opened { task_chain_search_send_error(conn, command_id, request_id, "invalid_envelope"); return }
 	inner_request_id := bridge_provider_json_extract_string(plain, "request_id", ""); defer delete(inner_request_id)
 	query := bridge_provider_json_extract_string(plain, "query", ""); defer delete(query)
@@ -158,8 +129,7 @@ bridge_task_chain_search_handle_command :: proc(conn: ^ws.Connection, text: stri
 	}
 	strings.write_string(&b, `]}`)
 	response_plain := strings.to_string(b); defer delete(response_plain)
-	response_aad := task_chain_search_aad(owner_user_id, bridge_id, request_id, "response", expires_at_ms); defer delete(response_aad)
-	sealed, sealed_ok := task_chain_search_seal(response_plain, key_hex, response_aad); defer delete(sealed)
+	sealed, sealed_ok := task_chain_search_seal(response_plain, &kr, epoch, owner_user_id, bridge_id, request_id, "response", expires_at_ms); defer delete(sealed)
 	if !sealed_ok { task_chain_search_send_error(conn, command_id, request_id, "invalid_envelope"); return }
 	out := strings.builder_make()
 	strings.write_string(&out, `{"type":"task_chain_search_result","command_id":"`); bridge_runtime_write_json_string(&out, command_id)

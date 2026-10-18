@@ -312,12 +312,12 @@ test_wake_unpark_triggers_for_recoverable_causes :: proc(t: ^testing.T) {
 	defer sync.mutex_unlock(&bridge_test_config_mutex)
 	sync.mutex_lock(&keystore_test_mutex)
 	defer sync.mutex_unlock(&keystore_test_mutex)
-	prev_key, had_key := os.lookup_env("HEIMDALL_VAULT_KEY", context.allocator)
+	prev_key, had_key := os.lookup_env("HEIMDALL_VAULT_KEYRING", context.allocator)
 	defer {
 		if had_key {
-			os.set_env("HEIMDALL_VAULT_KEY", prev_key)
+			os.set_env("HEIMDALL_VAULT_KEYRING", prev_key)
 		} else {
-			os.unset_env("HEIMDALL_VAULT_KEY")
+			os.unset_env("HEIMDALL_VAULT_KEYRING")
 		}
 		delete(prev_key)
 	}
@@ -328,9 +328,9 @@ test_wake_unpark_triggers_for_recoverable_causes :: proc(t: ^testing.T) {
 	testing.expect_value(t, locked.err.class, contracts.Bridge_Error_Class.recoverable)
 	locked.catalog_etag = bridge_provider_catalog_current_etag()
 	defer delete(locked.catalog_etag)
-	os.set_env("HEIMDALL_VAULT_KEY", "not-a-valid-key") // set but invalid: locked, no fallthrough
+	os.set_env("HEIMDALL_VAULT_KEYRING", "not-a-valid-key") // set but invalid: locked, no fallthrough
 	testing.expect_value(t, bridge_wake_unpark_trigger(&locked, BRIDGE_WAKE_PARK_PROBE_MS), "")
-	os.set_env("HEIMDALL_VAULT_KEY", TEST_VAULT_KEY_HEX)
+	os.set_env("HEIMDALL_VAULT_KEYRING", test_keyring_env_value(TEST_VAULT_KEY_HEX))
 	testing.expect_value(t, bridge_wake_unpark_trigger(&locked, BRIDGE_WAKE_PARK_PROBE_MS), "") // probed this tick already
 	testing.expect_value(t, bridge_wake_unpark_trigger(&locked, 2 * BRIDGE_WAKE_PARK_PROBE_MS), "vault_unsealed")
 

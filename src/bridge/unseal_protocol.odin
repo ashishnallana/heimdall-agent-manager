@@ -1,19 +1,34 @@
 package main
 
 import "core:crypto"
-import "core:crypto/aes"
 import "core:crypto/ecdh"
-import "core:crypto/hkdf"
-import base64 "core:encoding/base64"
-import "core:encoding/hex"
+import "core:crypto/ecdsa"
+import "core:encoding/json"
 import "core:fmt"
 import "core:mem"
 import "core:strings"
 import "core:sync"
-import "core:time"
 import jsonx "odin_test:lib/jsonx"
+import os_random "odin_test:lib/os_random"
+import vault "odin_test:lib/vault"
 
-// ── Ephemeral ECDH & Anti-Replay Unseal Protocol (REQ-VAULT-HARDEN-3, REQ-VAULT-HARDEN-8) ──
+// ── Bridge unseal v2 (docs/plans/passwordless-vault.md §1) ──────────────────
+//
+// Two keys, two jobs:
+//
+//   - The EPHEMERAL ECDH P-256 key (per process, never persisted) receives the
+//     keyring: browser ECDH → HKDF("heimdall-bridge-unseal-v2") → AES-256-GCM.
+//     Ephemerality keeps every captured unseal ciphertext undecryptable after a
+//     restart.
+//   - The persistent IDENTITY ECDSA P-256 key (keystore .Identity slot) is created
+//     at enrollment, shown to the approving human, and each boot signs
+//     "heimdall-bridge-unseal-key/v1\n<bridge_id>\n<ecdh_pub_hex>\n<boot_id>".
+//     A browser only encrypts to an ephemeral key that verifies under the identity
+//     it trusts, and echoes the signature back so this bridge can tell the browser
+//     encrypted to the key it actually holds.
+//
+// Everything fails closed: no randomness → no key; no identity → no signature →
+// no unseal; any mismatch → nothing stored.
 
 UNSEAL_NONCE_TTL_MS :: 60_000
 UNSEAL_CLOCK_SKEW_MAX_MS :: 30_000
@@ -21,55 +36,264 @@ UNSEAL_NONCE_CACHE_CAPACITY :: 512
 P256_POINT_SIZE :: 65
 P256_COORD_SIZE :: 32
 P256_UNCOMPRESSED_PREFIX :: 0x04
+UNSEAL_BOOT_ID_BYTES :: 16
 
 g_bridge_ecdh_priv: ecdh.Private_Key
-g_bridge_ecdh_pub: ecdh.Public_Key
-g_bridge_ecdh_pub_bytes: [P256_POINT_SIZE]byte
 g_bridge_ecdh_pub_hex_buf: [P256_POINT_SIZE * 2]byte
+g_bridge_boot_id_buf: [UNSEAL_BOOT_ID_BYTES * 2]byte
 g_bridge_ecdh_initialized: bool
 g_bridge_ecdh_mu: sync.Mutex
+
+// Identity state, guarded by g_bridge_identity_mu.
+@(private = "file")
+g_bridge_identity_mu: sync.Mutex
+@(private = "file")
+g_bridge_identity_priv: ecdsa.Private_Key
+@(private = "file")
+g_bridge_identity_pub_hex_buf: [P256_POINT_SIZE * 2]byte
+@(private = "file")
+g_bridge_identity_loaded: bool
+// The bridge id the loaded identity is persisted under; "" while an enrollment
+// holds a not-yet-persisted identity in memory.
+@(private = "file")
+g_bridge_identity_owner_buf: [128]byte
+@(private = "file")
+g_bridge_identity_owner_len: int
+// Cached signature object over the current ephemeral key for one bridge id.
+@(private = "file")
+g_bridge_unseal_sig_buf: [256]byte
+@(private = "file")
+g_bridge_unseal_sig_len: int
+@(private = "file")
+g_bridge_unseal_sig_bridge_buf: [128]byte
+@(private = "file")
+g_bridge_unseal_sig_bridge_len: int
+
+// bridge_unseal_random_source is the CSPRNG for the ephemeral key, boot id and
+// identity key; tests point it at an unreadable path to prove fail-closed behavior.
+bridge_unseal_random_source := os_random.DEFAULT_SOURCE
 
 @(private = "file")
 HEX_LOWER := "0123456789abcdef"
 
-// Initializes the ephemeral ECDH keypair (SK_bridge, PK_bridge) for this bridge instance.
+@(private = "file")
+hex_into :: proc(dst: []byte, src: []byte) {
+	for b, i in src {
+		dst[i * 2] = HEX_LOWER[b >> 4]
+		dst[i * 2 + 1] = HEX_LOWER[b & 0x0f]
+	}
+}
+
+// bridge_unseal_init creates this process's ephemeral ECDH key and boot id from
+// the OS CSPRNG. On a randomness failure nothing is initialized and no public key
+// is ever advertised.
 bridge_unseal_init :: proc() {
 	sync.mutex_lock(&g_bridge_ecdh_mu)
 	defer sync.mutex_unlock(&g_bridge_ecdh_mu)
 	if g_bridge_ecdh_initialized do return
 
-	if !ecdh.private_key_generate(&g_bridge_ecdh_priv, .SECP256R1) {
-		fmt.eprintln("ERROR: failed to generate ephemeral bridge ECDH private key")
+	scalar: [P256_COORD_SIZE]byte
+	defer crypto.zero_explicit(&scalar, size_of(scalar))
+	generated := false
+	for _ in 0 ..< 8 {
+		if !os_random.fill(scalar[:], bridge_unseal_random_source) do break
+		if ecdh.private_key_set_bytes(&g_bridge_ecdh_priv, .SECP256R1, scalar[:]) {
+			generated = true
+			break
+		}
+	}
+	boot: [UNSEAL_BOOT_ID_BYTES]byte
+	if !generated || !os_random.fill(boot[:], bridge_unseal_random_source) {
+		ecdh.private_key_clear(&g_bridge_ecdh_priv)
+		fmt.eprintln("ERROR: OS random source failed; this bridge cannot accept an unseal")
 		return
 	}
-	ecdh.public_key_set_priv(&g_bridge_ecdh_pub, &g_bridge_ecdh_priv)
-	ecdh.public_key_bytes(&g_bridge_ecdh_pub, g_bridge_ecdh_pub_bytes[:])
-
-	for i in 0 ..< P256_POINT_SIZE {
-		b := g_bridge_ecdh_pub_bytes[i]
-		g_bridge_ecdh_pub_hex_buf[i * 2] = HEX_LOWER[b >> 4]
-		g_bridge_ecdh_pub_hex_buf[i * 2 + 1] = HEX_LOWER[b & 0x0f]
-	}
+	pub_bytes: [P256_POINT_SIZE]byte
+	ecdh.private_key_public_bytes(&g_bridge_ecdh_priv, pub_bytes[:])
+	hex_into(g_bridge_ecdh_pub_hex_buf[:], pub_bytes[:])
+	hex_into(g_bridge_boot_id_buf[:], boot[:])
 	g_bridge_ecdh_initialized = true
 }
 
-// Returns the bridge's ephemeral public key advertised in bridge registration metadata.
+// Returns the bridge's ephemeral public key ("" when it could not be created).
 bridge_get_public_key_hex :: proc() -> string {
-	if !g_bridge_ecdh_initialized {
-		bridge_unseal_init()
-	}
+	bridge_unseal_init()
+	sync.mutex_lock(&g_bridge_ecdh_mu)
+	defer sync.mutex_unlock(&g_bridge_ecdh_mu)
+	if !g_bridge_ecdh_initialized do return ""
 	return string(g_bridge_ecdh_pub_hex_buf[:])
 }
 
-// Resets the ephemeral key state (primarily for isolated test assertions).
-bridge_unseal_reset_for_test :: proc() {
+bridge_unseal_boot_id :: proc() -> string {
+	bridge_unseal_init()
 	sync.mutex_lock(&g_bridge_ecdh_mu)
 	defer sync.mutex_unlock(&g_bridge_ecdh_mu)
+	if !g_bridge_ecdh_initialized do return ""
+	return string(g_bridge_boot_id_buf[:])
+}
+
+// Resets the ephemeral key and identity state (test isolation only).
+bridge_unseal_reset_for_test :: proc() {
+	sync.mutex_lock(&g_bridge_ecdh_mu)
 	if g_bridge_ecdh_initialized {
 		ecdh.private_key_clear(&g_bridge_ecdh_priv)
 		mem.zero_explicit(&g_bridge_ecdh_pub_hex_buf, size_of(g_bridge_ecdh_pub_hex_buf))
 		g_bridge_ecdh_initialized = false
 	}
+	sync.mutex_unlock(&g_bridge_ecdh_mu)
+	bridge_unseal_forget_identity()
+}
+
+// bridge_unseal_forget_identity drops the in-memory identity and cached signature
+// (vault.reset, an aborted enrollment, tests). It does not touch the keystore.
+bridge_unseal_forget_identity :: proc() {
+	sync.mutex_lock(&g_bridge_identity_mu)
+	defer sync.mutex_unlock(&g_bridge_identity_mu)
+	bridge_unseal_forget_identity_locked()
+}
+
+@(private = "file")
+bridge_unseal_forget_identity_locked :: proc() {
+	ecdsa.private_key_clear(&g_bridge_identity_priv)
+	g_bridge_identity_loaded = false
+	g_bridge_identity_owner_len = 0
+	g_bridge_unseal_sig_len = 0
+	g_bridge_unseal_sig_bridge_len = 0
+}
+
+@(private = "file")
+bridge_unseal_identity_install_locked :: proc(scalar: []byte) -> bool {
+	if !ecdsa.private_key_set_bytes(&g_bridge_identity_priv, .SECP256R1, scalar) do return false
+	pub: [P256_POINT_SIZE]byte
+	ecdsa.private_key_public_bytes(&g_bridge_identity_priv, pub[:])
+	hex_into(g_bridge_identity_pub_hex_buf[:], pub[:])
+	g_bridge_identity_loaded = true
+	g_bridge_unseal_sig_len = 0
+	g_bridge_unseal_sig_bridge_len = 0
+	return true
+}
+
+@(private = "file")
+bridge_unseal_identity_generate_locked :: proc() -> bool {
+	priv: ecdsa.Private_Key
+	defer ecdsa.private_key_clear(&priv)
+	if !vault.p256_private_key_generate(&priv, bridge_unseal_random_source) do return false
+	scalar: [vault.P256_PRIVATE_KEY_BYTES]byte
+	defer crypto.zero_explicit(&scalar, size_of(scalar))
+	ecdsa.private_key_bytes(&priv, scalar[:])
+	return bridge_unseal_identity_install_locked(scalar[:])
+}
+
+// bridge_unseal_identity_generate_for_enrollment creates a fresh in-memory identity
+// before the bridge id exists (`ham-bridge enroll`). It is persisted under the
+// bridge id the first time bridge_unseal_identity_for runs with that id.
+bridge_unseal_identity_generate_for_enrollment :: proc() -> (public_key_hex: string, ok: bool) {
+	sync.mutex_lock(&g_bridge_identity_mu)
+	defer sync.mutex_unlock(&g_bridge_identity_mu)
+	bridge_unseal_forget_identity_locked()
+	if !bridge_unseal_identity_generate_locked() do return "", false
+	return strings.clone(string(g_bridge_identity_pub_hex_buf[:]), context.temp_allocator), true
+}
+
+// bridge_unseal_identity_for makes the identity for bridge_id available: already
+// loaded for it; an enrollment's in-memory identity, now persisted under it; read
+// back from the keystore; or (a bridge enrolled before identities existed) freshly
+// generated and persisted. Any persistence failure leaves NO identity, so no
+// signature is advertised and every unseal is refused.
+@(private = "file")
+bridge_unseal_identity_for_locked :: proc(bridge_id: string) -> bool {
+	if bridge_id == "" || len(bridge_id) > len(g_bridge_identity_owner_buf) do return false
+	owner := string(g_bridge_identity_owner_buf[:g_bridge_identity_owner_len])
+	if g_bridge_identity_loaded && owner == bridge_id do return true
+
+	scalar: [vault.P256_PRIVATE_KEY_BYTES]byte
+	defer crypto.zero_explicit(&scalar, size_of(scalar))
+	if g_bridge_identity_loaded && g_bridge_identity_owner_len == 0 {
+		ecdsa.private_key_bytes(&g_bridge_identity_priv, scalar[:])
+		if !keystore_store_identity_key(bridge_id, scalar[:]) {
+			fmt.eprintln("ERROR: could not persist this bridge's identity key; unseal is unavailable")
+			bridge_unseal_forget_identity_locked()
+			return false
+		}
+	} else {
+		bridge_unseal_forget_identity_locked()
+		if keystore_read_identity_key(bridge_id, scalar[:]) {
+			if !bridge_unseal_identity_install_locked(scalar[:]) do return false
+		} else {
+			if !bridge_unseal_identity_generate_locked() do return false
+			ecdsa.private_key_bytes(&g_bridge_identity_priv, scalar[:])
+			if !keystore_store_identity_key(bridge_id, scalar[:]) {
+				fmt.eprintln("ERROR: could not persist this bridge's identity key; unseal is unavailable")
+				bridge_unseal_forget_identity_locked()
+				return false
+			}
+		}
+	}
+	copy(g_bridge_identity_owner_buf[:], bridge_id)
+	g_bridge_identity_owner_len = len(bridge_id)
+	return true
+}
+
+bridge_unseal_identity_for :: proc(bridge_id: string) -> bool {
+	sync.mutex_lock(&g_bridge_identity_mu)
+	defer sync.mutex_unlock(&g_bridge_identity_mu)
+	return bridge_unseal_identity_for_locked(bridge_id)
+}
+
+// bridge_identity_public_key_hex returns bridge_id's identity public key, or "".
+// Temp-allocated.
+bridge_identity_public_key_hex :: proc(bridge_id: string) -> string {
+	sync.mutex_lock(&g_bridge_identity_mu)
+	defer sync.mutex_unlock(&g_bridge_identity_mu)
+	if !bridge_unseal_identity_for_locked(bridge_id) do return ""
+	return strings.clone(string(g_bridge_identity_pub_hex_buf[:]), context.temp_allocator)
+}
+
+// bridge_unseal_key_signature_json returns the signature object over this boot's
+// ephemeral key for bridge_id, signing on first use per bridge id. ok=false means
+// there is nothing to advertise (no identity, no ephemeral key). Temp-allocated.
+bridge_unseal_key_signature_json :: proc(bridge_id: string) -> (sig_json: string, ok: bool) {
+	pub_hex := bridge_get_public_key_hex()
+	boot_id := bridge_unseal_boot_id()
+	if pub_hex == "" || boot_id == "" do return "", false
+	sync.mutex_lock(&g_bridge_identity_mu)
+	defer sync.mutex_unlock(&g_bridge_identity_mu)
+	if !bridge_unseal_identity_for_locked(bridge_id) do return "", false
+	if g_bridge_unseal_sig_len > 0 && string(g_bridge_unseal_sig_bridge_buf[:g_bridge_unseal_sig_bridge_len]) == bridge_id {
+		return strings.clone(string(g_bridge_unseal_sig_buf[:g_bridge_unseal_sig_len]), context.temp_allocator), true
+	}
+	canonical, c_ok := vault.bridge_unseal_key_canonical(bridge_id, pub_hex, boot_id, context.temp_allocator)
+	if !c_ok do return "", false
+	sig, s_ok := vault.sign_p256(&g_bridge_identity_priv, transmute([]byte)canonical)
+	if !s_ok do return "", false
+	obj, o_ok := vault.signature_object(&sig, context.temp_allocator)
+	if !o_ok || len(obj) > len(g_bridge_unseal_sig_buf) || len(bridge_id) > len(g_bridge_unseal_sig_bridge_buf) do return "", false
+	copy(g_bridge_unseal_sig_buf[:], obj)
+	g_bridge_unseal_sig_len = len(obj)
+	copy(g_bridge_unseal_sig_bridge_buf[:], bridge_id)
+	g_bridge_unseal_sig_bridge_len = len(bridge_id)
+	return obj, true
+}
+
+// bridge_unseal_write_hello_fields appends the unseal-key advertisement to a hello
+// JSON object under construction (leading comma included). Nothing is written when
+// there is no signed key: an unsigned key is never advertised as unsealable.
+bridge_unseal_write_hello_fields :: proc(b: ^strings.Builder, bridge_id: string) {
+	// An unenrolled bridge (no `brg_` id) has nowhere to keep an identity.
+	if !keystore_bridge_id_ok(bridge_id) do return
+	sig_json, ok := bridge_unseal_key_signature_json(bridge_id)
+	if !ok do return
+	identity := bridge_identity_public_key_hex(bridge_id)
+	if identity == "" do return
+	strings.write_string(b, ",\"unseal_boot_id\":\"")
+	strings.write_string(b, bridge_unseal_boot_id())
+	strings.write_string(b, "\",\"unseal_key_signature\":")
+	strings.write_string(b, sig_json)
+	strings.write_string(b, ",\"identity_public_key\":\"")
+	strings.write_string(b, identity)
+	strings.write_string(b, "\",\"identity_sign_alg\":\"")
+	strings.write_string(b, vault.SIGN_ALG_ECDSA_P256_SHA256)
+	strings.write_string(b, "\"")
 }
 
 // ── Sliding Nonce Deduplication Cache (60s TTL Ring Buffer) ──────────────────
@@ -91,7 +315,7 @@ g_unseal_nonce_cache: Unseal_Nonce_Cache
 g_enrollment_unseal_mu: sync.Mutex
 g_enrollment_unseal_received: bool
 
-// Enrollment uses the normal Hub runtime relay, but exits after the key has
+// Enrollment uses the normal Hub runtime relay, but exits after the keyring has
 // crossed into the secure keystore. These helpers let the enrollment thread
 // wait for that concrete event without treating an older keyring entry as proof
 // that this approval delivered anything.
@@ -114,11 +338,10 @@ bridge_enrollment_unseal_was_received :: proc() -> bool {
 }
 
 unseal_nonce_cache_check_and_insert :: proc(cache: ^Unseal_Nonce_Cache, nonce: string, now_ms: i64) -> bool {
-	if nonce == "" do return false
+	if nonce == "" || len(nonce) > 64 do return false
 	sync.mutex_lock(&cache.mu)
 	defer sync.mutex_unlock(&cache.mu)
 
-	// Check if nonce is currently active in the cache within 60s TTL
 	for i in 0 ..< cache.count {
 		entry := &cache.entries[i]
 		if entry.nonce_len == len(nonce) && (now_ms - entry.timestamp_ms) <= UNSEAL_NONCE_TTL_MS {
@@ -128,11 +351,9 @@ unseal_nonce_cache_check_and_insert :: proc(cache: ^Unseal_Nonce_Cache, nonce: s
 		}
 	}
 
-	// Insert at head (ring buffer) without dynamic allocation
 	entry := &cache.entries[cache.head]
-	n_len := min(len(nonce), len(entry.nonce_buf))
-	mem.copy(raw_data(entry.nonce_buf[:]), raw_data(nonce), n_len)
-	entry.nonce_len = n_len
+	mem.copy(raw_data(entry.nonce_buf[:]), raw_data(nonce), len(nonce))
+	entry.nonce_len = len(nonce)
 	entry.timestamp_ms = now_ms
 
 	cache.head = (cache.head + 1) % UNSEAL_NONCE_CACHE_CAPACITY
@@ -153,169 +374,123 @@ unseal_nonce_cache_clear :: proc(cache: ^Unseal_Nonce_Cache) {
 	cache.count = 0
 }
 
-// ── Decoding and Decryption Utilities ────────────────────────────────────────
-
-decode_bytes_flexible :: proc(str: string, allocator := context.temp_allocator) -> ([]byte, bool) {
-	trimmed := strings.trim_space(str)
-	if len(trimmed) == 0 do return nil, false
-
-	// If valid hex string of even length
-	if len(trimmed) % 2 == 0 {
-		all_hex := true
-		for b in transmute([]byte)trimmed {
-			switch b {
-			case '0'..='9', 'a'..='f', 'A'..='F':
-			case: all_hex = false; break
-			}
-		}
-		if all_hex {
-			if out, hex_ok := hex.decode(transmute([]byte)trimmed, allocator); hex_ok {
-				return out, true
-			}
-		}
-	}
-
-	// Try standard base64 decoding
-	if out, err := base64.decode(trimmed, allocator = allocator); err == nil {
-		return out, true
-	}
-	return nil, false
+// bridge_unseal_signature_echo reads the payload's unseal_key_signature object and
+// renders it canonically. A missing, non-object or oddly typed member is "" (no echo).
+@(private = "file")
+bridge_unseal_signature_echo :: proc(payload_json: string) -> string {
+	parsed, ok := jsonx.parse_body(payload_json, context.temp_allocator)
+	if !ok do return ""
+	root, is_obj := parsed.(json.Object)
+	if !is_obj do return ""
+	sig_v, has := root["unseal_key_signature"]
+	if !has do return ""
+	sig_obj, sig_is_obj := sig_v.(json.Object)
+	if !sig_is_obj || len(sig_obj) != 2 do return ""
+	alg, alg_ok := sig_obj["alg"].(json.String)
+	sig, sig_ok := sig_obj["sig"].(json.String)
+	if !alg_ok || !sig_ok do return ""
+	return strings.concatenate({`{"alg":"`, string(alg), `","sig":"`, string(sig), `"}`}, context.temp_allocator)
 }
 
-// Decrypts unseal payload, verifies AAD, enforces anti-replay, and stores key material.
+// bridge_unseal_decrypt_and_verify checks an unseal v2 payload end to end and, only
+// when every check passes, stores the keyring. Checks, in order: required fields,
+// format, clock skew (±30 s), target bridge id, nonce replay, epoch range, the
+// identity-key echo, the signature echo (must equal this boot's signature and
+// verify under this bridge's identity key), the AEAD (v2 AAD only), the keyring's
+// validity and current epoch, and that it belongs to the same user as any keyring
+// already stored. v1 payloads (old AAD forms, 32/64-byte plaintexts) cannot pass.
 bridge_unseal_decrypt_and_verify :: proc(
 	payload_json: string,
 	local_bridge_id: string,
 	current_clock_ms: i64,
 ) -> (ok: bool, err_msg: string) {
-	if !g_bridge_ecdh_initialized {
-		bridge_unseal_init()
-	}
+	bridge_unseal_init()
 
-	bridge_id := jsonx.extract_string(payload_json, "bridge_id", "", false, context.temp_allocator)
-	nonce := jsonx.extract_string(payload_json, "nonce", "", false, context.temp_allocator)
-	client_pub_str := jsonx.extract_string(payload_json, "client_public_key", "", false, context.temp_allocator)
-	iv_str := jsonx.extract_string(payload_json, "iv", "", false, context.temp_allocator)
-	tag_str := jsonx.extract_string(payload_json, "tag", "", false, context.temp_allocator)
-	ciphertext_str := jsonx.extract_string(payload_json, "ciphertext", "", false, context.temp_allocator)
+	bridge_id := jsonx.extract_string(payload_json, "bridge_id", "", true, context.temp_allocator)
+	nonce := jsonx.extract_string(payload_json, "nonce", "", true, context.temp_allocator)
+	client_pub := jsonx.extract_string(payload_json, "client_public_key", "", true, context.temp_allocator)
+	iv := jsonx.extract_string(payload_json, "iv", "", true, context.temp_allocator)
+	tag := jsonx.extract_string(payload_json, "tag", "", true, context.temp_allocator)
+	ciphertext := jsonx.extract_string(payload_json, "ciphertext", "", true, context.temp_allocator)
+	format := jsonx.extract_string(payload_json, "format", "", true, context.temp_allocator)
+	identity_echo := jsonx.extract_string(payload_json, "bridge_identity_public_key", "", true, context.temp_allocator)
+	timestamp_int, ts_ok := jsonx.extract_int_found(payload_json, "timestamp", true)
+	epoch_int, epoch_ok := jsonx.extract_int_found(payload_json, "current_epoch", true)
 
-	timestamp_int, ts_ok := jsonx.extract_int_found(payload_json, "timestamp")
-	if !ts_ok {
-		return false, "missing timestamp in unseal payload"
-	}
-	timestamp := i64(timestamp_int)
-
-	if bridge_id == "" || nonce == "" || client_pub_str == "" || iv_str == "" || ciphertext_str == "" {
+	if !ts_ok do return false, "missing timestamp in unseal payload"
+	if bridge_id == "" || nonce == "" || client_pub == "" || iv == "" || tag == "" || ciphertext == "" || identity_echo == "" || !epoch_ok {
 		return false, "missing required unseal parameters"
 	}
+	if format != vault.UNSEAL_V2_FORMAT do return false, "unsupported unseal format (keyring-v1 required)"
+	timestamp := i64(timestamp_int)
 
-	// a) Check timestamp within 30,000ms of current bridge clock
 	skew := current_clock_ms - timestamp
 	if skew < -UNSEAL_CLOCK_SKEW_MAX_MS || skew > UNSEAL_CLOCK_SKEW_MAX_MS {
 		return false, "clock skew expired or out of window"
 	}
-
-	// b) Check nonce has not been seen; insert nonce into cache
-	if !unseal_nonce_cache_check_and_insert(&g_unseal_nonce_cache, nonce, current_clock_ms) {
-		return false, "replay rejected: nonce already used"
-	}
-
-	// c) Check payload.bridge_id matches local bridge_id
 	if bridge_id != local_bridge_id {
 		return false, "cross-bridge replay rejected: target bridge_id mismatch"
 	}
+	if !unseal_nonce_cache_check_and_insert(&g_unseal_nonce_cache, nonce, current_clock_ms) {
+		return false, "replay rejected: nonce already used"
+	}
+	if epoch_int < 1 || i64(epoch_int) > i64(vault.MAX_EPOCH) {
+		return false, "invalid current_epoch"
+	}
 
-	// d) Parse client public key
-	client_pub_bytes, pub_ok := decode_bytes_flexible(client_pub_str, context.temp_allocator)
-	if !pub_ok || len(client_pub_bytes) != P256_POINT_SIZE || client_pub_bytes[0] != P256_UNCOMPRESSED_PREFIX {
+	// The browser must have encrypted to THIS boot's key, as certified by THIS
+	// bridge's identity: both echoes must match what we advertise.
+	our_identity := bridge_identity_public_key_hex(local_bridge_id)
+	if our_identity == "" do return false, "this bridge has no identity key; unseal unavailable"
+	if len(identity_echo) != len(our_identity) || crypto.compare_constant_time(transmute([]byte)identity_echo, transmute([]byte)our_identity) != 1 {
+		return false, "identity key mismatch: the payload was prepared for a different bridge identity"
+	}
+	our_sig, sig_ok := bridge_unseal_key_signature_json(local_bridge_id)
+	if !sig_ok do return false, "this bridge has no signed unseal key; unseal unavailable"
+	echo := bridge_unseal_signature_echo(payload_json)
+	canonical, c_ok := vault.bridge_unseal_key_canonical(local_bridge_id, bridge_get_public_key_hex(), bridge_unseal_boot_id(), context.temp_allocator)
+	if !c_ok || echo == "" || !vault.verify(vault.SIGN_ALG_ECDSA_P256_SHA256, our_identity, transmute([]byte)canonical, echo) {
+		return false, "unseal key signature does not verify under this bridge's identity"
+	}
+	if len(echo) != len(our_sig) || crypto.compare_constant_time(transmute([]byte)echo, transmute([]byte)our_sig) != 1 {
+		return false, "unseal key signature is not this boot's signature"
+	}
+
+	sync.mutex_lock(&g_bridge_ecdh_mu)
+	kr, open_err := vault.unseal_v2_open(&g_bridge_ecdh_priv, client_pub, iv, tag, ciphertext, bridge_id, timestamp, nonce, u32(epoch_int))
+	sync.mutex_unlock(&g_bridge_ecdh_mu)
+	defer vault.keyring_wipe(&kr)
+	switch open_err {
+	case .None:
+	case .Bad_Public_Key:
 		return false, "invalid client public key point"
-	}
-
-	client_pub: ecdh.Public_Key
-	if !ecdh.public_key_set_bytes(&client_pub, .SECP256R1, client_pub_bytes) {
-		return false, "invalid client public key curve point"
-	}
-
-	// Compute shared secret via ECDH(SK_bridge, PK_client)
-	shared_secret: [P256_COORD_SIZE]byte
-	defer crypto.zero_explicit(&shared_secret, size_of(shared_secret))
-	if !ecdh.ecdh(&g_bridge_ecdh_priv, &client_pub, shared_secret[:]) {
-		return false, "ECDH key agreement failed"
-	}
-
-	// Compute AES-256 key via HKDF (RFC 5869)
-	salt: [32]byte
-	info := "heimdall-bridge-unseal-v1"
-	aes_key: [32]byte
-	defer crypto.zero_explicit(&aes_key, size_of(aes_key))
-	hkdf.extract_and_expand(.SHA256, salt[:], shared_secret[:], transmute([]byte)info, aes_key[:])
-
-	// e) Parse IV, Tag, and Ciphertext
-	iv_bytes, iv_ok := decode_bytes_flexible(iv_str, context.temp_allocator)
-	if !iv_ok || len(iv_bytes) != 12 {
-		return false, "invalid IV length (expected 12 bytes)"
-	}
-
-	ciphertext_bytes, ct_ok := decode_bytes_flexible(ciphertext_str, context.temp_allocator)
-	if !ct_ok || len(ciphertext_bytes) == 0 {
-		return false, "invalid ciphertext"
-	}
-
-	tag_bytes: []byte
-	ct_data := ciphertext_bytes
-	if tag_str != "" {
-		t_bytes, t_ok := decode_bytes_flexible(tag_str, context.temp_allocator)
-		if !t_ok || len(t_bytes) != 16 {
-			return false, "invalid authentication tag length (expected 16 bytes)"
-		}
-		tag_bytes = t_bytes
-	} else {
-		if len(ciphertext_bytes) < 16 {
-			return false, "ciphertext too short to contain authentication tag"
-		}
-		ct_data = ciphertext_bytes[:len(ciphertext_bytes) - 16]
-		tag_bytes = ciphertext_bytes[len(ciphertext_bytes) - 16:]
-	}
-
-	plaintext := make([]byte, len(ct_data), context.temp_allocator)
-	defer mem.zero_explicit(raw_data(plaintext), len(plaintext))
-
-	// Canonical AAD bindings
-	aad1 := fmt.tprintf("%s:%d:%s", bridge_id, timestamp, nonce)
-	aad2 := fmt.tprintf("{\"bridge_id\":\"%s\",\"nonce\":\"%s\",\"timestamp\":%d}", bridge_id, nonce, timestamp)
-
-	gcm: aes.Context_GCM
-	aes.init_gcm(&gcm, aes_key[:])
-	defer aes.reset_gcm(&gcm)
-
-	dec_ok := aes.open_gcm(&gcm, plaintext, iv_bytes, transmute([]byte)aad1, ct_data, tag_bytes)
-	if !dec_ok {
-		aes.reset_gcm(&gcm)
-		aes.init_gcm(&gcm, aes_key[:])
-		dec_ok = aes.open_gcm(&gcm, plaintext, iv_bytes, transmute([]byte)aad2, ct_data, tag_bytes)
-	}
-
-	if !dec_ok {
+	case .Bad_Parameters:
+		return false, "invalid unseal parameters (iv/tag/ciphertext must be lowercase hex)"
+	case .Auth_Failed:
 		return false, "AEAD tag verification failed: tamper detected or authentication failure"
+	case .Bad_Keyring:
+		return false, "decrypted payload is not a valid keyring"
+	case .Epoch_Mismatch:
+		return false, "keyring current epoch does not match the signed current_epoch"
 	}
 
-	// f) On success: parse key and store in mlock'd memory and kernel keyring @u
-	key_hex := ""
-	if len(plaintext) == 64 && bridge_is_valid_hex_key(string(plaintext)) {
-		key_hex = string(plaintext)
-	} else if len(plaintext) == 32 {
-		hex_bytes, _ := hex.encode(plaintext, context.temp_allocator)
-		key_hex = string(hex_bytes)
-	} else {
-		return false, "invalid decrypted key format: expected 32 raw bytes or 64 hex chars"
+	// Never let one unseal swap in another user's keyring over an existing one.
+	if existing, has := keystore_read_vault_keyring(local_bridge_id); has {
+		same := vault.keyring_user_id(&existing) == vault.keyring_user_id(&kr)
+		vault.keyring_wipe(&existing)
+		if !same do return false, "keyring belongs to a different user than the one this bridge holds"
 	}
 
-	// Persisted under this bridge's own id (REQ-T5-2); bridge_id == local_bridge_id here.
-	store_ok, _ := keystore_store_vault_key(local_bridge_id, key_hex)
-	if !store_ok {
-		return false, "failed to store unsealed vault key in secure keystore"
-	}
+	raw: [vault.KEYRING_MAX_BYTES]byte
+	defer crypto.zero_explicit(&raw, size_of(raw))
+	bytes, ser_ok := vault.keyring_serialize_into(&kr, raw[:])
+	if !ser_ok do return false, "keyring could not be serialized"
+	store_ok, _ := keystore_store_vault_keyring(local_bridge_id, bytes)
+	if !store_ok do return false, "failed to store unsealed vault keyring in secure keystore"
+
+	// A new keyring: rebuild the search index under it and re-salt every PTY stream.
+	bridge_task_chain_search_lock()
+	bridge_pty_stream_resalt_all()
 	bridge_enrollment_unseal_mark_received()
-
 	return true, ""
 }

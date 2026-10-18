@@ -1,3 +1,4 @@
+#+build !windows
 package main
 
 // REQ-PTY-NET-1 — coalescing in the bridge pty drain.
@@ -15,18 +16,19 @@ import "core:sync"
 import "core:testing"
 import contracts "odin_test:contracts"
 import ws "odin_test:lib/ws"
+import vault "odin_test:lib/vault"
 
 @(private = "file")
 _p1_disable_vault :: proc() -> (restore: proc(prev_key, prev_cfg: string, had_key, had_cfg, saved_ws: bool), prev_key, prev_cfg: string, had_key, had_cfg, saved_ws: bool) {
-	prev_key, had_key = os.lookup_env("HEIMDALL_VAULT_KEY", context.allocator)
+	prev_key, had_key = os.lookup_env("HEIMDALL_VAULT_KEYRING", context.allocator)
 	prev_cfg, had_cfg = os.lookup_env("HEIMDALL_VAULT_CONFIGURED", context.allocator)
 	saved_ws = bridge_workspace_vault_configured
 	bridge_workspace_vault_configured = false
-	_ = os.set_env("HEIMDALL_VAULT_KEY", "unconfigured_key")
+	_ = os.set_env("HEIMDALL_VAULT_KEYRING", "unconfigured_key")
 	_ = os.set_env("HEIMDALL_VAULT_CONFIGURED", "false")
 	restore = proc(prev_key, prev_cfg: string, had_key, had_cfg, saved_ws: bool) {
 		bridge_workspace_vault_configured = saved_ws
-		if had_key { _ = os.set_env("HEIMDALL_VAULT_KEY", prev_key); delete(prev_key) } else { os.unset_env("HEIMDALL_VAULT_KEY") }
+		if had_key { _ = os.set_env("HEIMDALL_VAULT_KEYRING", prev_key); delete(prev_key) } else { os.unset_env("HEIMDALL_VAULT_KEYRING") }
 		if had_cfg { _ = os.set_env("HEIMDALL_VAULT_CONFIGURED", prev_cfg); delete(prev_cfg) } else { os.unset_env("HEIMDALL_VAULT_CONFIGURED") }
 	}
 	return
@@ -42,7 +44,9 @@ pty_test_decode_output :: proc(frame: string, key_hex := "") -> (session_id: str
 	encrypted = contracts.pty_wire_is_encrypted(flags)
 	if encrypted {
 		if key_hex == "" do return sid, "", snapshot, encrypted, true
-		plain, pok := bridge_pty_stream_decrypt_chunk_raw(body, key_hex, context.temp_allocator)
+		kr := test_keyring_from_hex(key_hex)
+		defer vault.keyring_wipe(&kr)
+		plain, pok := vault.pty_open(body, &kr, sid, .Out, 0, context.temp_allocator)
 		if !pok do return sid, "", snapshot, encrypted, false
 		return sid, string(plain), snapshot, encrypted, true
 	}
@@ -186,9 +190,9 @@ pty_drain_encrypts_once_per_merged_frame_and_round_trips :: proc(t: ^testing.T) 
 	defer sync.mutex_unlock(&keystore_test_mutex)
 	bridge_pty_stream_reset()
 	defer bridge_pty_stream_reset()
-	prev_key, found := os.lookup_env("HEIMDALL_VAULT_KEY", context.allocator)
-	defer { if found { _ = os.set_env("HEIMDALL_VAULT_KEY", prev_key); delete(prev_key) } else { os.unset_env("HEIMDALL_VAULT_KEY") } }
-	_ = os.set_env("HEIMDALL_VAULT_KEY", TEST_ENC_VAULT_KEY)
+	prev_key, found := os.lookup_env("HEIMDALL_VAULT_KEYRING", context.allocator)
+	defer { if found { _ = os.set_env("HEIMDALL_VAULT_KEYRING", prev_key); delete(prev_key) } else { os.unset_env("HEIMDALL_VAULT_KEYRING") } }
+	_ = os.set_env("HEIMDALL_VAULT_KEYRING", test_keyring_env_value(TEST_ENC_VAULT_KEY))
 
 	w := Bridge_PTY_Stream_Worker{active = true, fd = -1, salt = {1, 2, 3, 4}}
 	bridge_pty_stream_emit_frame(&w, "sh_enc", transmute([]byte)string("hello "))
@@ -208,7 +212,7 @@ pty_drain_encrypts_once_per_merged_frame_and_round_trips :: proc(t: ^testing.T) 
 	_, _, _, body, _ := contracts.pty_wire_decode_session_frame(transmute([]byte)frames[0])
 	testing.expect_value(t, body[11], byte(1))
 	// And the wire frame carries NO base64 and NO JSON: header + 28 B GCM + plaintext length.
-	testing.expect_value(t, len(frames[0]), contracts.PTY_WIRE_SESSION_HEADER_BYTES + len("sh_enc") + VAULT_HEADER_BYTES + len(plain))
+	testing.expect_value(t, len(frames[0]), contracts.PTY_WIRE_SESSION_HEADER_BYTES + len("sh_enc") + vault.PTY_V2_HEADER_BYTES + len(plain))
 }
 
 // REQ-PTY-NET-7: the s_client "double base64" is moot for pty output — a binary frame never
@@ -221,7 +225,7 @@ pty_binary_frames_fit_every_transport_cap_without_the_chunker :: proc(t: ^testin
 	testing.expect_value(t, incr_s, BRIDGE_PTY_STREAM_EMIT_SCLIENT_BYTES)
 	testing.expect_value(t, snap_s, BRIDGE_PTY_STREAM_EMIT_SCLIENT_BYTES)
 	long_sid := strings.repeat("s", 256, context.temp_allocator)
-	worst := contracts.pty_wire_session_frame_len(long_sid, snap_s + VAULT_HEADER_BYTES)
+	worst := contracts.pty_wire_session_frame_len(long_sid, snap_s + vault.PTY_V2_HEADER_BYTES)
 	testing.expect(t, worst <= contracts.BRIDGE_WS_HUB_RUNTIME_CHUNK_PAYLOAD_BYTES, "worst-case s_client frame fits the 6000 B cap whole")
 	// And it is not chunkable material anyway: chunk_frames would only split TEXT above the cap.
 	testing.expect(t, ws.chunk_frames(strings.repeat("x", worst, context.temp_allocator), contracts.BRIDGE_WS_HUB_RUNTIME_CHUNK_PAYLOAD_BYTES) == nil, "a frame of that size never reaches the chunker")
@@ -229,7 +233,7 @@ pty_binary_frames_fit_every_transport_cap_without_the_chunker :: proc(t: ^testin
 	incr_c, snap_c := bridge_pty_stream_emit_caps_for(contracts.BRIDGE_WS_HUB_RUNTIME_CHUNK_PAYLOAD_BYTES_SOCAT)
 	testing.expect_value(t, incr_c, BRIDGE_PTY_STREAM_EMIT_EDGE_SAFE_BYTES)
 	testing.expect_value(t, snap_c, BRIDGE_PTY_STREAM_EMIT_EDGE_SAFE_BYTES)
-	worst_c := contracts.pty_wire_session_frame_len(long_sid, snap_c + VAULT_HEADER_BYTES) + 8 /* ws header */
+	worst_c := contracts.pty_wire_session_frame_len(long_sid, snap_c + vault.PTY_V2_HEADER_BYTES) + 8 /* ws header */
 	testing.expect(t, worst_c < 16 * 1024, "worst-case socat frame stays under the edge-proxy per-message ceiling")
 }
 

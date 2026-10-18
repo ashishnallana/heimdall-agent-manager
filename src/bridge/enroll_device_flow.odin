@@ -22,12 +22,13 @@
 //     verifier. There is no loopback listener or browser-to-bridge callback.
 //
 //  3. THE ECDH KEY IS ENCRYPTION-ONLY AND EPHEMERAL. bridge_unseal_init's P-256
-//     keypair agrees the vault key and does nothing else. It is NOT a signing key
-//     (PKCE provides proof-of-possession instead, design §3.6) and it is NOT
+//     keypair agrees the vault keyring and does nothing else, and it is NOT
 //     persisted: ephemerality is what makes every archived approval link and every
 //     captured unseal ciphertext permanently undecryptable after a restart
-//     (§5.4.6). Do not "harden" it by persisting it; a durable identity key would
-//     be a SECOND key, not a replacement.
+//     (§5.4.6). The durable identity is a SECOND, separate ECDSA key
+//     (unseal_protocol.odin): generated here, sent as bridge_identity_public_key,
+//     persisted under the bridge id once it exists, and used only to sign each
+//     boot's ephemeral key.
 package main
 
 import os_random "odin_test:lib/os_random"
@@ -44,6 +45,7 @@ import "core:time"
 import contracts "odin_test:contracts"
 import cfg_lib "odin_test:lib/config"
 import http "odin_test:lib/http_client"
+import vault "odin_test:lib/vault"
 
 // ===== Endpoints, all derived from the one UI origin (REQ-ENROLL-10) =====
 //
@@ -333,6 +335,7 @@ bridge_enroll_descriptor_usable :: proc(d: Bridge_Machine_Descriptor) -> bool {
 bridge_enroll_authorize_body :: proc(
 	d: Bridge_Machine_Descriptor,
 	public_key_hex, code_challenge: string,
+	identity_public_key_hex: string = "",
 	allocator := context.allocator,
 ) -> string {
 	b := strings.builder_make(allocator)
@@ -346,6 +349,10 @@ bridge_enroll_authorize_body :: proc(
 	json_write_string(&b, d.os_user)
 	strings.write_string(&b, "\",\"bridge_public_key\":\"")
 	json_write_string(&b, public_key_hex)
+	if identity_public_key_hex != "" {
+		strings.write_string(&b, "\",\"bridge_identity_public_key\":\"")
+		json_write_string(&b, identity_public_key_hex)
+	}
 	strings.write_string(&b, "\",\"code_challenge\":\"")
 	json_write_string(&b, code_challenge)
 	strings.write_string(&b, "\",\"code_challenge_method\":\"S256\"}")
@@ -849,22 +856,13 @@ bridge_enroll_service_start_failed: bool
 // this process's memory, so the check unwraps the sealed FILE through the
 // Keystore and bypasses that cache.
 bridge_enroll_vault_key_persisted :: proc(bridge_id: string) -> bool {
-	key: string
-	persisted: bool
-	when ODIN_OS == .Linux {
-		if keystore_android_selected() {
-			key, persisted = keystore_android_read_sealed_file(bridge_id)
-		} else {
-			key, persisted = keystore_read_keyring_vault_key(bridge_id)
-		}
-	} else {
-		key, persisted = keystore_read_keyring_vault_key(bridge_id)
-	}
-	if len(key) > 0 {
-		mem.zero_explicit(raw_data(key), len(key))
-		delete(key)
-	}
-	return persisted
+	kr, persisted := keystore_read_persisted_vault_keyring(bridge_id)
+	vault.keyring_wipe(&kr)
+	if !persisted do return false
+	// The restarted service must also find the identity that signs its unseal key.
+	scalar: [KEYSTORE_IDENTITY_KEY_BYTES]byte
+	defer mem.zero_explicit(&scalar, size_of(scalar))
+	return keystore_read_identity_key(bridge_id, scalar[:])
 }
 
 // Bring up only the Hub WebSocket, not either bridge-local listener. This can
@@ -939,6 +937,17 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 	// Step 2b — the ephemeral ECDH key. Encryption only, never persisted (§5.4.6).
 	bridge_unseal_init()
 	public_key_hex := bridge_get_public_key_hex()
+	if public_key_hex == "" {
+		fmt.eprintln("ham-bridge enroll: the OS random source failed; cannot create this bridge's keys")
+		return false
+	}
+	// Step 2b' — the persistent identity key, generated now and persisted under the
+	// bridge id once the hub assigns one. Fail closed on entropy.
+	identity_hex, identity_ok := bridge_unseal_identity_generate_for_enrollment()
+	if !identity_ok {
+		fmt.eprintln("ham-bridge enroll: the OS random source failed; cannot create this bridge's identity key")
+		return false
+	}
 	fingerprint, fp_ok := bridge_enroll_fingerprint(public_key_hex, context.temp_allocator)
 	if !fp_ok {
 		fmt.eprintln("ham-bridge enroll: this bridge's ephemeral ECDH key is not a well-formed uncompressed P-256 point; cannot continue")
@@ -951,7 +960,7 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 	code_challenge := bridge_pkce_challenge(code_verifier)
 
 	// Step 4 — the anonymous device-authorization request.
-	body := bridge_enroll_authorize_body(descriptor, public_key_hex, code_challenge, context.temp_allocator)
+	body := bridge_enroll_authorize_body(descriptor, public_key_hex, code_challenge, identity_hex, context.temp_allocator)
 	fmt.printfln("bridge enroll: POST %s%s (no token — host=%s user=%s)",
 		api_base, BRIDGE_ENROLL_AUTHORIZE_PATH, descriptor.hostname, descriptor.os_user)
 	resp, sent := http.request_with_headers_timeout(
@@ -1073,6 +1082,7 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 			if cred.vault_delivery_expected {
 				if !bridge_enroll_wait_for_vault_delivery(args, cred.bridge_id) {
 					keystore_lock_and_purge(cred.bridge_id)
+					_ = keystore_delete_identity_key(cred.bridge_id)
 					return false
 				}
 			}

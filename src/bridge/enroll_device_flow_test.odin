@@ -1,3 +1,4 @@
+#+build !windows
 // Tests for the browser-approval enrollment flow (REQ-IMPL-4).
 //
 // These are @(test) in `package main` because the flow is package-main code and a
@@ -165,7 +166,7 @@ enroll_authorize_body_sends_the_descriptor_and_no_fingerprint :: proc(t: ^testin
 		hostname = "dawnstar", os = "Linux", os_version = "6.18.49", arch = "amd64",
 		os_user = "tanmay", bridge_version = "1.2.3",
 	}
-	body := bridge_enroll_authorize_body(d, TEST_PUBKEY_HEX, "challenge-value", context.temp_allocator)
+	body := bridge_enroll_authorize_body(d, TEST_PUBKEY_HEX, "challenge-value", allocator = context.temp_allocator)
 	// device_label is the field the Hub maps into the bridge row's machine_hostname,
 	// so the real hostname has to land THERE specifically.
 	testing.expect(t, strings.contains(body, "\"device_label\":\"dawnstar\""), "device_label must carry the real hostname")
