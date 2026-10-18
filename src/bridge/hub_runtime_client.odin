@@ -18,7 +18,6 @@ import contracts "odin_test:contracts"
 import cfg_lib "odin_test:lib/config"
 import ws "odin_test:lib/ws"
 import jsonx "odin_test:lib/jsonx"
-import "core:sys/posix"
 
 PROVIDER_TEST_TIMEOUT_SECONDS :: 120
 
@@ -103,15 +102,11 @@ bridge_vault_set_configured :: proc(bridge_id: string, configured: bool) -> bool
 bridge_vault_write_configured_marker :: proc(path: string) -> bool {
 	dir := path[:strings.last_index_byte(path, '/') + 1]
 	if bridge_make_directory_all(dir) != nil && !os.exists(dir) do return false
-	c_path := strings.clone_to_cstring(path)
-	defer delete(c_path)
-	// O_EXCL: two racing unseals must not interleave writes, and a file that
-	// appeared meanwhile already says "configured".
-	fd := posix.open(c_path, {.WRONLY, .CREAT, .EXCL, .CLOEXEC}, {.IRUSR, .IWUSR})
-	if fd < 0 do return posix.errno() == .EEXIST
-	defer posix.close(fd)
+	// Exclusive create: two racing unseals must not interleave writes, and a file
+	// that appeared meanwhile already says "configured".
 	content := fmt.tprintf("%s\n", action_scheduler_format_rfc3339_utc(bridge_now_unix_ms()))
-	return posix.write(fd, raw_data(content), uint(len(content))) == len(content)
+	written, existed := bridge_os_create_exclusive(path, content)
+	return written || existed
 }
 
 bridge_vault_is_workspace_configured :: proc() -> bool {

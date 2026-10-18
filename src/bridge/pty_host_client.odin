@@ -9,16 +9,15 @@ package main
 // byte-for-byte port of the dproto codec plus a blocking request/response helper
 // and a lazy daemon starter.
 //
-// Kept deliberately dependency-light (pure encode/decode + a posix unix-socket
+// Kept deliberately dependency-light (pure encode/decode + a unix-socket
 // round-trip) so the codec is unit-testable without a live daemon; the launch
 // path (bridge_runtime_launch_agent) calls the high-level host_* ops behind the
 // PTY-host runtime flag.
 
-import "core:c"
+import local_socket "odin_test:lib/local_socket"
 import "core:fmt"
 import "core:os"
 import "core:strings"
-import "core:sys/posix"
 import "core:time"
 
 // ---- protocol tags (must match dproto.rs) -------------------------------
@@ -580,40 +579,25 @@ pty_host_bridge_identity :: proc() -> string {
 }
 
 // pty_host_dial connects to the daemon unix socket, returning the fd or (-1,false).
-pty_host_dial :: proc(socket_path: string) -> (posix.FD, bool) {
-	path := strings.trim_prefix(socket_path, "unix:")
-	if len(path) + 1 > len(posix.sockaddr_un{}.sun_path) do return -1, false
-	fd := posix.socket(.UNIX, .STREAM)
-	if fd < 0 do return -1, false
-	addr: posix.sockaddr_un
-	when ODIN_OS == .Darwin || ODIN_OS == .FreeBSD || ODIN_OS == .NetBSD || ODIN_OS == .OpenBSD {
-		addr.sun_len = c.uchar(size_of(addr))
-	}
-	addr.sun_family = .UNIX
-	for i in 0..<len(path) do addr.sun_path[i] = c.char(path[i])
-	addr.sun_path[len(path)] = 0
-	if posix.connect(fd, (^posix.sockaddr)(&addr), posix.socklen_t(size_of(addr))) != .OK {
-		posix.close(fd)
-		return -1, false
-	}
-	return fd, true
+pty_host_dial :: proc(socket_path: string) -> (local_socket.Socket, bool) {
+	return local_socket.dial(strings.trim_prefix(socket_path, "unix:"))
 }
 
 // pty_host_send_all writes every byte of buf to fd.
-pty_host_send_all :: proc(fd: posix.FD, buf: []byte) -> bool {
+pty_host_send_all :: proc(fd: local_socket.Socket, buf: []byte) -> bool {
 	sent := 0
 	for sent < len(buf) {
 		remaining := len(buf) - sent
-		n := posix.send(fd, raw_data(buf[sent:]), c.size_t(remaining), {})
+		n := local_socket.send(fd, buf[sent:][:remaining])
 		if n <= 0 do return false
-		sent += int(n)
+		sent += n
 	}
 	return true
 }
 
 // pty_host_read_frame reads one length-prefixed frame payload from fd. Returns
 // (payload, true) or ({}, false) on EOF/error. Caller owns the payload.
-pty_host_read_frame :: proc(fd: posix.FD) -> ([]byte, bool) {
+pty_host_read_frame :: proc(fd: local_socket.Socket) -> ([]byte, bool) {
 	len_buf: [4]byte
 	if !pty_host_read_exact(fd, len_buf[:]) do return {}, false
 	length := u32(len_buf[0]) << 24 | u32(len_buf[1]) << 16 | u32(len_buf[2]) << 8 | u32(len_buf[3])
@@ -626,13 +610,13 @@ pty_host_read_frame :: proc(fd: posix.FD) -> ([]byte, bool) {
 	return payload, true
 }
 
-pty_host_read_exact :: proc(fd: posix.FD, buf: []byte) -> bool {
+pty_host_read_exact :: proc(fd: local_socket.Socket, buf: []byte) -> bool {
 	got := 0
 	for got < len(buf) {
 		remaining := len(buf) - got
-		n := posix.recv(fd, raw_data(buf[got:]), c.size_t(remaining), {})
+		n := local_socket.recv(fd, buf[got:][:remaining])
 		if n <= 0 do return false
-		got += int(n)
+		got += n
 	}
 	return true
 }
@@ -666,7 +650,7 @@ pty_host_reply_is_async :: proc(kind: Pty_Host_Reply_Kind) -> bool {
 pty_host_request :: proc(socket_path: string, request: []byte) -> (Pty_Host_Reply, bool) {
 	fd, ok := pty_host_dial(socket_path)
 	if !ok do return {}, false
-	defer posix.close(fd)
+	defer local_socket.close(fd)
 	if !pty_host_send_all(fd, request) do return {}, false
 	return pty_host_read_control_reply(fd)
 }
@@ -674,7 +658,7 @@ pty_host_request :: proc(socket_path: string, request: []byte) -> (Pty_Host_Repl
 // pty_host_read_control_reply reads frames from fd, skipping unsolicited async
 // events, and returns the first control reply. Split out from pty_host_request so
 // the skip loop is unit-testable over a socketpair without a live daemon.
-pty_host_read_control_reply :: proc(fd: posix.FD) -> (Pty_Host_Reply, bool) {
+pty_host_read_control_reply :: proc(fd: local_socket.Socket) -> (Pty_Host_Reply, bool) {
 	for _ in 0..<PTY_HOST_REQUEST_MAX_SKIP {
 		payload, pok := pty_host_read_frame(fd)
 		if !pok do return {}, false

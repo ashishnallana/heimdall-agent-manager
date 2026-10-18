@@ -38,7 +38,6 @@ import "core:mem"
 import "core:os"
 import "core:strings"
 import "core:sync"
-import "core:sys/posix"
 import "core:thread"
 import "core:time"
 import contracts "odin_test:contracts"
@@ -280,13 +279,7 @@ bridge_enroll_automatic_approval_url :: proc(
 // — and the caller REFUSES TO ENROLL rather than substituting a constant, which
 // is the defect this replaces.
 bridge_enroll_hostname :: proc(allocator := context.allocator) -> string {
-	buf: [256]byte
-	if posix.gethostname(cast([^]byte)(&buf[0]), len(buf) - 1) == .OK {
-		end := 0
-		for end < len(buf) && buf[end] != 0 do end += 1
-		name := strings.trim_space(string(buf[:end]))
-		if name != "" do return strings.clone(name, allocator)
-	}
+	if name := bridge_os_hostname(allocator); name != "" do return name
 	if data, err := os.read_entire_file("/proc/sys/kernel/hostname", context.temp_allocator); err == nil {
 		name := strings.trim_space(string(data))
 		if name != "" do return strings.clone(name, allocator)
@@ -303,10 +296,7 @@ bridge_enroll_hostname :: proc(allocator := context.allocator) -> string {
 // the environment is operator-settable and this value is shown to a human who is
 // about to grant the account access.
 bridge_enroll_os_user :: proc(allocator := context.allocator) -> string {
-	if pw := posix.getpwuid(posix.getuid()); pw != nil && pw.pw_name != nil {
-		name := strings.trim_space(string(pw.pw_name))
-		if name != "" do return strings.clone(name, allocator)
-	}
+	if name := bridge_os_user_name(allocator); name != "" do return name
 	for key in ([?]string{"USER", "LOGNAME"}) {
 		if env, found := os.lookup_env(key, context.temp_allocator); found {
 			name := strings.trim_space(env)
@@ -327,12 +317,7 @@ bridge_enroll_machine_descriptor :: proc(allocator := context.allocator) -> Brid
 		os_user        = bridge_enroll_os_user(allocator),
 		bridge_version = strings.clone(contracts.APP_VERSION, allocator),
 	}
-	uts: posix.utsname
-	if posix.uname(&uts) == 0 {
-		end := 0
-		for end < len(uts.release) && uts.release[end] != 0 do end += 1
-		d.os_version = strings.clone(strings.trim_space(string(transmute([]byte)(uts.release[:end]))), allocator)
-	}
+	d.os_version = bridge_os_release(allocator)
 	if d.os_version == "" do d.os_version = strings.clone("", allocator)
 	return d
 }
@@ -787,6 +772,12 @@ bridge_enroll_try_open_approval_url :: proc(url: string) -> bool {
 	when ODIN_OS == .Darwin {
 		if bridge_enroll_run_browser_opener("open", url) do return true
 		return bridge_enroll_run_browser_opener("xdg-open", url)
+	} else when ODIN_OS == .Windows {
+		// rundll32 hands the URL to the default browser and exits at once.
+		process, start_err := os.process_start(os.Process_Desc{command = []string{"rundll32", "url.dll,FileProtocolHandler", url}})
+		if start_err != nil do return false
+		_, _ = os.process_wait(process, 1 * time.Second)
+		return true
 	} else {
 		if bridge_enroll_run_browser_opener("xdg-open", url) do return true
 		return bridge_enroll_run_browser_opener("open", url)
@@ -825,7 +816,7 @@ bridge_enroll_restart_argv :: proc(runit_dir: string) -> []string {
 	} else when ODIN_OS == .Darwin {
 		argv := make([]string, 4, context.temp_allocator)
 		argv[0], argv[1], argv[2] = "launchctl", "kickstart", "-k"
-		argv[3] = fmt.tprintf("gui/%d/works.earendil.heimdall-bridge", int(posix.getuid()))
+		argv[3] = fmt.tprintf("gui/%d/works.earendil.heimdall-bridge", bridge_os_uid())
 		return argv
 	} else {
 		return nil

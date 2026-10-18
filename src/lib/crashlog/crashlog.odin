@@ -1,3 +1,4 @@
+#+build !windows
 // Package crashlog writes a one-line reason plus a raw backtrace to stderr when
 // the process dies on a fatal signal (SIGSEGV/SIGBUS/SIGABRT/SIGFPE/SIGILL), then
 // re-raises it so the default action (core dump) still happens.

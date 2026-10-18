@@ -386,8 +386,11 @@ write_all :: proc(s: ^Stream, bytes: []byte, timeout: time.Duration = 0) -> Writ
 close_write :: proc(s: ^Stream) {}
 
 // abort wakes a reader blocked in recv without invalidating the socket it owns.
+// Winsock shutdown alone does not interrupt a recv that is already parked;
+// CancelIoEx does, and the shutdown makes later calls fail at once.
 abort :: proc(s: ^Stream) {
 	_ = win.shutdown(win.SOCKET(s.socket), win.SD_BOTH)
+	win.CancelIoEx(win.HANDLE(uintptr(s.socket)), nil)
 }
 
 close :: proc(s: ^Stream) {

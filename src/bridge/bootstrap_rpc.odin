@@ -18,7 +18,6 @@ import "core:fmt"
 import "core:os"
 import "core:strings"
 import "core:sync"
-import "core:sys/posix"
 
 Bridge_Bootstrap_Fileset_Entry :: struct {
 	instance_id: string,
@@ -115,9 +114,7 @@ bridge_bootstrap_fileset_store_write_run_dir :: proc(instance_id, run_dir: strin
 		}
 		write_err := os.write_entire_file(full, transmute([]byte)f.content)
 		if f.mode == 0o755 && write_err == nil {
-			cpath := strings.clone_to_cstring(full)
-			_ = posix.chmod(cpath, posix.mode_t{.IRUSR, .IWUSR, .IXUSR})
-			delete(cpath)
+			bridge_os_make_owner_executable(full)
 		}
 		delete(full)
 		if write_err != nil do return false

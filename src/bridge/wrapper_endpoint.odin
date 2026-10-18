@@ -1,12 +1,11 @@
 package main
 
-import "core:c"
+import local_socket "odin_test:lib/local_socket"
 import "core:fmt"
 import "core:net"
 import "core:os"
 import "core:strings"
 import "core:sync"
-import "core:sys/posix"
 import "core:thread"
 import http "odin_test:lib/http_client"
 import jsonx "odin_test:lib/jsonx"
@@ -28,7 +27,7 @@ Bridge_Local_Relay_Result :: struct {
 }
 
 Bridge_Wrapper_Push_Conn_Kind :: enum { TCP, Unix }
-Bridge_Wrapper_Push_Conn :: struct { agent_instance_id: string, kind: Bridge_Wrapper_Push_Conn_Kind, tcp: net.TCP_Socket, unix: posix.FD }
+Bridge_Wrapper_Push_Conn :: struct { agent_instance_id: string, kind: Bridge_Wrapper_Push_Conn_Kind, tcp: net.TCP_Socket, unix: local_socket.Socket }
 bridge_wrapper_push_mutex: sync.Mutex
 bridge_wrapper_push_conns: [dynamic]Bridge_Wrapper_Push_Conn
 
@@ -56,24 +55,10 @@ bridge_local_endpoint_prepare_unix_socket_path :: proc(config: Bridge_Local_Endp
 bridge_local_endpoint_start_unix :: proc(config: Bridge_Local_Endpoint_Config) -> bool {
 	if !bridge_local_endpoint_prepare_unix_socket_path(config) do return false
 	path := strings.trim_space(config.unix_socket_path)
-	if len(path) + 1 > len(posix.sockaddr_un{}.sun_path) do return false
-	fd := posix.socket(.UNIX, .STREAM)
-	if fd < 0 do return false
-	success := false
-	defer if !success { _ = posix.close(fd) }
-	_ = posix.unlink(cstring(raw_data(path)))
-	addr: posix.sockaddr_un
-	when ODIN_OS == .Darwin || ODIN_OS == .FreeBSD || ODIN_OS == .NetBSD || ODIN_OS == .OpenBSD {
-		addr.sun_len = c.uchar(size_of(addr))
-	}
-	addr.sun_family = .UNIX
-	for i in 0..<len(path) do addr.sun_path[i] = c.char(path[i])
-	addr.sun_path[len(path)] = 0
-	if posix.bind(fd, (^posix.sockaddr)(&addr), posix.socklen_t(size_of(addr))) != .OK do return false
-	_ = posix.chmod(cstring(raw_data(path)), posix.mode_t{.IRUSR, .IWUSR}) // 0600 owner-only local Bridge socket
-	if posix.listen(fd, 16) != .OK do return false
+	// Replaces a stale socket file; 0600 owner-only local Bridge socket on Unix.
+	fd, ok := local_socket.listen(path, 16)
+	if !ok do return false
 	thread.run_with_poly_data(fd, bridge_local_endpoint_accept_unix_loop)
-	success = true
 	return true
 }
 
@@ -85,15 +70,15 @@ bridge_local_endpoint_start_loopback :: proc(config: Bridge_Local_Endpoint_Confi
 	return true
 }
 
-bridge_local_endpoint_accept_unix_loop :: proc(listener: posix.FD) {
+bridge_local_endpoint_accept_unix_loop :: proc(listener: local_socket.Socket) {
 	for {
-		client := bridge_accept_unix(listener)
-		if client < 0 do continue
+		client, ok := local_socket.accept(listener)
+		if !ok do continue
 		thread.run_with_poly_data(client, bridge_local_endpoint_unix_client_thread)
 	}
 }
 
-bridge_local_endpoint_unix_client_thread :: proc(client: posix.FD) {
+bridge_local_endpoint_unix_client_thread :: proc(client: local_socket.Socket) {
 	registered_instance := ""
 	// REQ-XM-4: see bridge_local_endpoint_client_thread — the proxy path takes
 	// ownership of the socket and closes it itself.
@@ -101,14 +86,14 @@ bridge_local_endpoint_unix_client_thread :: proc(client: posix.FD) {
 	first_line := true
 	defer {
 		if registered_instance != "" do bridge_wrapper_push_drop(registered_instance)
-		if !proxy_owned do posix.close(client)
+		if !proxy_owned do local_socket.close(client)
 	}
 	buf: [8192]byte
 	pending := ""
 	for {
-		n := posix.recv(client, raw_data(buf[:]), c.size_t(len(buf)), {})
+		n := local_socket.recv(client, buf[:])
 		if n <= 0 do return
-		pending = strings.concatenate({pending, string(buf[:int(n)])})
+		pending = strings.concatenate({pending, string(buf[:n])})
 		// REQ-XM-4: same first-line HTTP demultiplex as the loopback listener.
 		if first_line {
 			if idx := strings.index_byte(pending, '\n'); idx >= 0 {
@@ -117,14 +102,14 @@ bridge_local_endpoint_unix_client_thread :: proc(client: posix.FD) {
 					resp := bridge_telemetry_agents_count_http_response()
 					defer delete(resp)
 					bytes := transmute([]byte)resp
-					_ = posix.send(client, raw_data(bytes), c.size_t(len(bytes)), {})
+					_ = local_socket.send(client, bytes)
 					return
 				}
 				if bridge_telemetry_looks_like_processes(first_line_str) {
 					resp := bridge_telemetry_processes_http_response()
 					defer delete(resp)
 					bytes := transmute([]byte)resp
-					_ = posix.send(client, raw_data(bytes), c.size_t(len(bytes)), {})
+					_ = local_socket.send(client, bytes)
 					return
 				}
 				if bridge_config.local_proxy_enabled && bridge_proxy_looks_like_http(first_line_str) {
@@ -147,7 +132,7 @@ bridge_local_endpoint_unix_client_thread :: proc(client: posix.FD) {
 			resp_line := strings.concatenate({resp, "\n"})
 			defer delete(resp_line)
 			bytes := transmute([]byte)resp_line
-			_ = posix.send(client, raw_data(bytes), c.size_t(len(bytes)), {})
+			_ = local_socket.send(client, bytes)
 		}
 	}
 }
@@ -265,7 +250,7 @@ bridge_local_subscribe_instance :: proc(line: string) -> (string, bool) {
 }
 
 bridge_wrapper_push_register_tcp :: proc(instance_id: string, socket: net.TCP_Socket) { bridge_wrapper_push_register(Bridge_Wrapper_Push_Conn{agent_instance_id=strings.clone(instance_id),kind=.TCP,tcp=socket}) }
-bridge_wrapper_push_register_unix :: proc(instance_id: string, socket: posix.FD) { bridge_wrapper_push_register(Bridge_Wrapper_Push_Conn{agent_instance_id=strings.clone(instance_id),kind=.Unix,unix=socket}) }
+bridge_wrapper_push_register_unix :: proc(instance_id: string, socket: local_socket.Socket) { bridge_wrapper_push_register(Bridge_Wrapper_Push_Conn{agent_instance_id=strings.clone(instance_id),kind=.Unix,unix=socket}) }
 bridge_wrapper_push_register :: proc(conn: Bridge_Wrapper_Push_Conn) {
 	if bridge_wrapper_push_conns == nil do bridge_wrapper_push_conns = make([dynamic]Bridge_Wrapper_Push_Conn)
 	sync.mutex_lock(&bridge_wrapper_push_mutex)
@@ -303,7 +288,7 @@ bridge_wrapper_push_line :: proc(instance_id, line: string) -> bool {
 	for i in 0..<len(bridge_wrapper_push_conns) {
 		if bridge_wrapper_push_conns[i].agent_instance_id != instance_id do continue
 		ok := false
-		if bridge_wrapper_push_conns[i].kind == .TCP { _, err := net.send_tcp(bridge_wrapper_push_conns[i].tcp, bytes); ok = err == nil } else { ok = posix.send(bridge_wrapper_push_conns[i].unix, raw_data(bytes), c.size_t(len(bytes)), {}) >= 0 }
+		if bridge_wrapper_push_conns[i].kind == .TCP { _, err := net.send_tcp(bridge_wrapper_push_conns[i].tcp, bytes); ok = err == nil } else { ok = local_socket.send(bridge_wrapper_push_conns[i].unix, bytes) >= 0 }
 		if !ok { unordered_remove(&bridge_wrapper_push_conns, i); return false }
 		return true
 	}

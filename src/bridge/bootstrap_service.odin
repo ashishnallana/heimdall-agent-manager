@@ -4,7 +4,6 @@ import "core:c"
 import "core:fmt"
 import "core:os"
 import "core:strings"
-import "core:sys/posix"
 import "core:time"
 import http "odin_test:lib/http_client"
 
@@ -170,7 +169,7 @@ bridge_bootstrap_cleanup_stale_agents_md :: proc(run_dir, active_name: string) {
 		if candidate == active_name do continue
 		path := strings.concatenate({strings.trim_right(run_dir, "/"), "/", candidate})
 		if _, err := os.stat(path, context.allocator); err == nil {
-			_ = posix.unlink(cstring(raw_data(path)))
+			bridge_os_remove_file(path)
 		}
 	}
 }
@@ -246,7 +245,7 @@ bridge_bootstrap_write_ham_ctl_wrapper :: proc(run_dir, bridge_endpoint, agent_t
 	bin_dir := strings.concatenate({strings.trim_right(run_dir, "/"), "/.heimdall/bin"})
 	_ = bridge_make_directory_all(bin_dir)
 	wrapper_path := strings.concatenate({bin_dir, "/ham-ctl"})
-	_ = posix.unlink(cstring(raw_data(wrapper_path)))
+	bridge_os_remove_file(wrapper_path)
 	b := strings.builder_make()
 	strings.write_string(&b, "#!/bin/sh\n")
 	strings.write_string(&b, "export HEIMDALL_BRIDGE_ENDPOINT="); bridge_bootstrap_shell_quote(&b, bridge_endpoint); strings.write_byte(&b, '\n')
@@ -254,7 +253,7 @@ bridge_bootstrap_write_ham_ctl_wrapper :: proc(run_dir, bridge_endpoint, agent_t
 	strings.write_string(&b, "export HEIMDALL_AGENT_INSTANCE_ID="); bridge_bootstrap_shell_quote(&b, instance_id); strings.write_byte(&b, '\n')
 	strings.write_string(&b, "exec "); bridge_bootstrap_shell_quote(&b, ctl); strings.write_string(&b, " \"$@\"\n")
 	if os.write_entire_file(wrapper_path, strings.to_string(b)) != nil do return false
-	_ = posix.chmod(cstring(raw_data(wrapper_path)), posix.mode_t{.IRUSR, .IWUSR, .IXUSR})
+	bridge_os_make_owner_executable(wrapper_path)
 	return true
 }
 
@@ -999,9 +998,7 @@ bridge_bootstrap_materialize_run_dir :: proc(manifest_json: string, d: Bridge_Bo
 		}
 		// Executable bit for the ham-ctl shim (mode 0755): owner rwx.
 		if f.mode == 0o755 {
-			cpath := strings.clone_to_cstring(full)
-			_ = posix.chmod(cpath, posix.mode_t{.IRUSR, .IWUSR, .IXUSR})
-			delete(cpath)
+			bridge_os_make_owner_executable(full)
 		}
 	}
 	return Bridge_Bootstrap_Result{ok = true, stage = "materialized"}

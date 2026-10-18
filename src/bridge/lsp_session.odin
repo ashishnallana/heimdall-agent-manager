@@ -26,7 +26,6 @@ import "core:path/filepath"
 import "core:strconv"
 import "core:strings"
 import "core:sync"
-import "core:sys/posix"
 import "core:thread"
 import "core:time"
 import contracts "odin_test:contracts"
@@ -855,7 +854,7 @@ bridge_lsp_handle_stop :: proc(conn: ^ws.Connection, text: string) {
 	// SIGTERM the process so it shuts down even if it ignores EOF.
 	if bridge_lsp_session_exists(session_id) {
 		if pid := bridge_lsp_session_pid(session_id); pid > 0 {
-			_ = posix.kill(posix.pid_t(pid), .SIGTERM)
+			_ = bridge_os_terminate(pid)
 		}
 		// A requested stop is a clean shutdown, not a failure. .Failed is
 		// reserved for spawn errors and unexpected exits so the status field
@@ -918,7 +917,7 @@ bridge_lsp_stop_all :: proc() {
 			os.close(w)
 		}
 		if pid := bridge_lsp_session_pid(id); pid > 0 {
-			_ = posix.kill(posix.pid_t(pid), .SIGTERM)
+			_ = bridge_os_terminate(pid)
 		}
 		// A forced kill on WS disconnect, not a clean shutdown — .Failed.
 		bridge_lsp_session_set_status(id, .Failed)

@@ -176,6 +176,8 @@ Bridge_Log_Sym :: enum u8 {
 	claude, codex, copilot, antigravity, gemini,
 	// command_kind
 	launch_agent, wake_agent, shell_start, shell_restart, agent_pty_input, provider_test, bridge_update,
+	// stage (appended: values above keep their numbers)
+	windows_credential_manager,
 }
 
 BRIDGE_LOG_SYM_NAMES :: [Bridge_Log_Sym]string{
@@ -212,6 +214,7 @@ BRIDGE_LOG_SYM_NAMES :: [Bridge_Log_Sym]string{
 	.android_keystore = "android_keystore",
 	.linux_keyring    = "linux_keyring",
 	.macos_keychain   = "macos_keychain",
+	.windows_credential_manager = "windows_credential_manager",
 	.sqlite           = "sqlite",
 	.eof              = "eof",
 	.timeout          = "timeout",

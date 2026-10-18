@@ -4,7 +4,6 @@ import "core:os"
 import "core:strconv"
 import "core:strings"
 import "core:sync"
-import "core:sys/posix"
 import "core:time"
 
 // Heartbeat resource stats (hub telemetry plan 4.3). Piggybacked on the existing
@@ -128,7 +127,7 @@ heartbeat_stats_collect :: proc(allocator := context.allocator) -> (st: Heartbea
 	ps_out, ps_ok := heartbeat_stats_run_ps(allocator)
 	if !ps_ok do return
 	procs := heartbeat_stats_parse_ps(ps_out, allocator)
-	self_pid := i32(posix.getpid())
+	self_pid := i32(os.get_pid())
 	for p in procs {
 		if p.pid == self_pid {
 			st.rss = p.rss_bytes
@@ -296,10 +295,8 @@ heartbeat_stats_collect_host :: proc(st: ^Heartbeat_Stats, allocator := context.
 		}
 	}
 	root := bridge_scratch_root(allocator)
-	croot := strings.clone_to_cstring(root, allocator)
-	vfs: posix.statvfs_t
-	if posix.statvfs(croot, &vfs) == .OK {
-		st.disk_free = i64(vfs.f_bavail) * i64(vfs.f_frsize)
+	if free, ok := bridge_os_disk_free(root); ok {
+		st.disk_free = free
 		st.has_disk_free = true
 	}
 }

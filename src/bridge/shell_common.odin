@@ -44,7 +44,6 @@ package main
 //     session's background flag and the agent's conversation.
 
 import "core:strings"
-import "core:sys/posix"
 import "core:time"
 
 // Hard cap for a run measured from spawn; exceeded -> SIGKILL the process group +
@@ -173,12 +172,7 @@ bridge_shell_data_dir :: proc() -> string {
 // used to die with; the group kill now cannot reach anything but the child.
 bridge_shell_test_kill_pid :: proc(pid: int) {
 	if pid <= 0 do return
-	own_pgid := posix.getpgid(0)
-	child_pgid := posix.getpgid(posix.pid_t(pid))
-	if child_pgid > 0 && int(child_pgid) == pid && child_pgid != own_pgid {
-		_ = posix.kill(posix.pid_t(-i32(pid)), .SIGKILL)
-	}
-	_ = posix.kill(posix.pid_t(pid), .SIGKILL)
+	bridge_os_test_kill_pid(pid)
 }
 
 // bridge_shell_test_wait_for_own_session blocks (up to `deadline`) until the
@@ -190,9 +184,9 @@ bridge_shell_test_wait_for_own_session :: proc(pid: int, deadline := 2 * time.Se
 	if pid <= 0 do return false
 	start := time.tick_now()
 	for time.tick_since(start) < deadline {
-		pgid := posix.getpgid(posix.pid_t(pid))
-		if pgid <= 0 do return false // gone (or not ours to query)
-		if int(pgid) == pid do return true
+		leader, found := bridge_os_test_is_own_group_leader(pid)
+		if !found do return false // gone (or not ours to query)
+		if leader do return true
 		time.sleep(2 * time.Millisecond)
 	}
 	return false

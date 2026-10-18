@@ -1,5 +1,6 @@
 package main
 
+import local_socket "odin_test:lib/local_socket"
 import "base:runtime"
 import "core:crypto"
 import "core:crypto/aes"
@@ -9,7 +10,6 @@ import "core:fmt"
 import "core:slice"
 import "core:strings"
 import "core:sync"
-import "core:sys/posix"
 import "core:thread"
 import "core:time"
 import contracts "odin_test:contracts"
@@ -22,7 +22,7 @@ import ws "odin_test:lib/ws"
 Bridge_PTY_Stream_Worker :: struct {
 	session_id:            string,
 	shell_id:              string,
-	fd:                    posix.FD,
+	fd:                    local_socket.Socket,
 	active:                bool,
 	conn:                  ^ws.Connection,
 	salt:                  [4]byte,
@@ -194,7 +194,7 @@ bridge_pty_stream_worker_start :: proc(session_id, shell_id: string, conn: ^ws.C
 	attach_frame := pty_host_encode_attach(sh_id)
 	defer delete(attach_frame)
 	if !pty_host_send_all(fd, attach_frame) {
-		posix.close(fd)
+		local_socket.close(fd)
 		return false
 	}
 
@@ -242,7 +242,7 @@ bridge_pty_stream_worker_detach :: proc(session_id: string) -> bool {
 	}
 	sync.atomic_store(&worker.active, false)
 	// The reader closes under this same map lock. Shutdown here cannot race fd reuse.
-	_ = posix.shutdown(worker.fd, .RDWR)
+	_ = local_socket.shutdown(worker.fd, .Both)
 	delete(key_to_delete, runtime.heap_allocator())
 	sync.mutex_unlock(&bridge_pty_stream_map.mu)
 
@@ -574,7 +574,7 @@ bridge_pty_stream_reader_worker :: proc(data: rawptr) {
 			break
 		}
 	}
-	posix.close(local_fd)
+	local_socket.close(local_fd)
 	sync.mutex_unlock(&bridge_pty_stream_map.mu)
 
 	delete(worker.session_id, heap)
@@ -874,7 +874,7 @@ _bridge_pty_stream_deliver_or_queue :: proc(worker: ^Bridge_PTY_Stream_Worker, i
 		fmt.eprintln("bridge WARN pane queue overflow; detaching stream for a fresh screen")
 		if worker != nil {
 			sync.atomic_store(&worker.active, false)
-			if worker.fd > 0 do _ = posix.shutdown(worker.fd, .RDWR)
+			if local_socket.valid(worker.fd) && worker.fd != 0 do _ = local_socket.shutdown(worker.fd, .Both)
 		}
 	}
 }
@@ -1140,8 +1140,8 @@ bridge_pty_stream_reset :: proc() {
 	heap := runtime.heap_allocator()
 	for k, w in bridge_pty_stream_map.workers {
 		w.active = false
-		_ = posix.shutdown(w.fd, .RDWR)
-		posix.close(w.fd)
+		_ = local_socket.shutdown(w.fd, .Both)
+		local_socket.close(w.fd)
 		delete(w.session_id, heap)
 		delete(w.shell_id, heap)
 		free(w, heap)

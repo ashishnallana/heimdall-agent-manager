@@ -1,0 +1,187 @@
+#+build !windows
+package main
+
+// The bridge's POSIX-only process, file and host calls. Each proc here has a twin
+// with the same signature in os_platform_windows.odin; everything that calls them
+// is shared.
+
+import "core:fmt"
+import "core:strings"
+import "core:sys/posix"
+
+// bridge_os_terminate asks pid to exit (SIGTERM).
+bridge_os_terminate :: proc(pid: int) -> bool {
+	return posix.kill(posix.pid_t(pid), .SIGTERM) == .OK
+}
+
+// bridge_os_kill ends pid unconditionally (SIGKILL).
+bridge_os_kill :: proc(pid: int) -> bool {
+	return posix.kill(posix.pid_t(pid), .SIGKILL) == .OK
+}
+
+// bridge_os_pid_alive: only ESRCH proves pid gone; EPERM means it exists under
+// another uid. See bridge_shell_pid_alive for why "alive" is the safe answer.
+bridge_os_pid_alive :: proc(pid: int) -> bool {
+	if posix.kill(posix.pid_t(pid), posix.Signal(0)) == .OK do return true
+	return posix.errno() != .ESRCH
+}
+
+// bridge_os_process_lstart_and_command returns the start time and command line of
+// pid as `ps` reports them. Force C locale and UTC timezone so the lstart format is
+// predictable and in UTC on both Linux and macOS.
+bridge_os_process_lstart_and_command :: proc(pid: int) -> (start_unix_sec: i64, command: string, ok: bool) {
+	ps_cmd := fmt.tprintf("TZ=UTC LC_ALL=C ps -p %d -o lstart=,command= 2>/dev/null", pid)
+	c_ps_cmd := strings.clone_to_cstring(ps_cmd)
+	defer delete(c_ps_cmd)
+	f := posix.popen(c_ps_cmd, "r")
+	if f == nil do return 0, "", false
+	defer posix.pclose(f)
+
+	buf: [512]byte
+	n := posix.fread(&buf, 1, size_of(buf) - 1, f)
+	if n == 0 do return 0, "", false
+	output := strings.trim_space(string(buf[:n]))
+	if len(output) < 25 do return 0, "", false  // at minimum lstart (24) + space + 1 char
+
+	// lstart is fixed 24 chars in C locale ("Www Mmm DD HH:MM:SS YYYY").
+	lstart_sec, lstart_ok := bridge_shell_session_parse_lstart(output[:24])
+	if !lstart_ok do return 0, "", false
+	return lstart_sec, strings.clone(strings.trim_space(output[24:]), context.temp_allocator), true
+}
+
+// bridge_os_exe_base reduces a command line to its executable's base name.
+bridge_os_exe_base :: proc(command: string) -> string {
+	exe := command
+	if i := strings.index_byte(exe, ' '); i >= 0 do exe = exe[:i]
+	if i := strings.last_index_byte(exe, '/'); i >= 0 do exe = exe[i+1:]
+	return exe
+}
+
+bridge_os_disk_free :: proc(path: string) -> (free_bytes: i64, ok: bool) {
+	cpath := strings.clone_to_cstring(path, context.temp_allocator)
+	vfs: posix.statvfs_t
+	if posix.statvfs(cpath, &vfs) != .OK do return 0, false
+	return i64(vfs.f_bavail) * i64(vfs.f_frsize), true
+}
+
+// bridge_os_hostname is gethostname(2), "" on failure.
+bridge_os_hostname :: proc(allocator := context.allocator) -> string {
+	buf: [256]byte
+	if posix.gethostname(cast([^]byte)(&buf[0]), len(buf) - 1) != .OK do return ""
+	end := 0
+	for end < len(buf) && buf[end] != 0 do end += 1
+	name := strings.trim_space(string(buf[:end]))
+	if name == "" do return ""
+	return strings.clone(name, allocator)
+}
+
+// bridge_os_user_name reads the passwd database for the real uid, "" on failure.
+bridge_os_user_name :: proc(allocator := context.allocator) -> string {
+	pw := posix.getpwuid(posix.getuid())
+	if pw == nil || pw.pw_name == nil do return ""
+	name := strings.trim_space(string(pw.pw_name))
+	if name == "" do return ""
+	return strings.clone(name, allocator)
+}
+
+// bridge_os_release is uname(2)'s release, "" on failure.
+bridge_os_release :: proc(allocator := context.allocator) -> string {
+	uts: posix.utsname
+	if posix.uname(&uts) != 0 do return ""
+	end := 0
+	for end < len(uts.release) && uts.release[end] != 0 do end += 1
+	return strings.clone(strings.trim_space(string(transmute([]byte)(uts.release[:end]))), allocator)
+}
+
+bridge_os_uid :: proc() -> int {
+	return int(posix.getuid())
+}
+
+// bridge_os_make_owner_executable sets mode 0700 (owner rwx).
+bridge_os_make_owner_executable :: proc(path: string) {
+	cpath := strings.clone_to_cstring(path, context.temp_allocator)
+	_ = posix.chmod(cpath, posix.mode_t{.IRUSR, .IWUSR, .IXUSR})
+}
+
+bridge_os_remove_file :: proc(path: string) {
+	_ = posix.unlink(strings.clone_to_cstring(path, context.temp_allocator))
+}
+
+// bridge_os_create_exclusive writes content to a NEW owner-only (0600) file.
+// O_EXCL: two racing writers must not interleave, and a file that appeared
+// meanwhile reports existed = true.
+bridge_os_create_exclusive :: proc(path, content: string) -> (written: bool, existed: bool) {
+	c_path := strings.clone_to_cstring(path)
+	defer delete(c_path)
+	fd := posix.open(c_path, {.WRONLY, .CREAT, .EXCL, .CLOEXEC}, {.IRUSR, .IWUSR})
+	if fd < 0 do return false, posix.errno() == .EEXIST
+	defer posix.close(fd)
+	return posix.write(fd, raw_data(content), uint(len(content))) == len(content), false
+}
+
+// bridge_os_socket_file_identity stats a socket path; a daemon that re-created its
+// socket shows up as a different identity. ok=false when nothing is there.
+bridge_os_socket_file_identity :: proc(path: string) -> (Pty_Host_Daemon_Identity, bool) {
+	cpath := strings.clone_to_cstring(path)
+	defer delete(cpath)
+	st: posix.stat_t
+	if posix.stat(cpath, &st) != .OK do return {}, false
+	return Pty_Host_Daemon_Identity{
+		dev        = u64(st.st_dev),
+		ino        = u64(st.st_ino),
+		ctime_sec  = i64(st.st_ctim.tv_sec),
+		ctime_nsec = i64(st.st_ctim.tv_nsec),
+	}, true
+}
+
+// bridge_os_private_dir_name is the per-user directory under the scratch root that
+// holds sockets whose natural path is too long ("heimdall-<euid>").
+bridge_os_private_dir_name :: proc() -> string {
+	return fmt.tprintf("heimdall-%d", posix.geteuid())
+}
+
+// bridge_os_dir_exists is stat + S_ISDIR (follows symlinks: a configured run dir
+// may legitimately be one).
+bridge_os_dir_exists :: proc(dir: string) -> bool {
+	cdir := strings.clone_to_cstring(dir)
+	defer delete(cdir)
+	info: posix.stat_t
+	return posix.stat(cdir, &info) == .OK && posix.S_ISDIR(info.st_mode)
+}
+
+// bridge_os_prepare_private_dir creates dir owner-only (0700) and rejects a
+// pre-existing symlink, a non-directory, or a directory owned by another user.
+bridge_os_prepare_private_dir :: proc(dir: string) -> bool {
+	cdir := strings.clone_to_cstring(dir)
+	defer delete(cdir)
+	_ = posix.mkdir(cdir, posix.mode_t{.IRUSR, .IWUSR, .IXUSR})
+	info: posix.stat_t
+	if posix.lstat(cdir, &info) != .OK || !posix.S_ISDIR(info.st_mode) || info.st_uid != posix.geteuid() do return false
+	return posix.chmod(cdir, posix.mode_t{.IRUSR, .IWUSR, .IXUSR}) == .OK
+}
+
+// ---- test-only process helpers (see shell_common.odin) ----
+
+// bridge_os_test_kill_pid kills the child's PROCESS GROUP only when that group is
+// provably the child's own -- the child called setsid, so getpgid(pid) == pid --
+// and never a group that is also ours. kill(-pid) on anything else is either a
+// no-op (ESRCH) or, if `pid` ever names the test runner's own group (a pid reused
+// after the child was reaped, or a spawn that never reached setsid on a platform
+// without it), a SIGKILL of the whole `odin test` process tree.
+bridge_os_test_kill_pid :: proc(pid: int) {
+	own_pgid := posix.getpgid(0)
+	child_pgid := posix.getpgid(posix.pid_t(pid))
+	if child_pgid > 0 && int(child_pgid) == pid && child_pgid != own_pgid {
+		_ = posix.kill(posix.pid_t(-i32(pid)), .SIGKILL)
+	}
+	_ = posix.kill(posix.pid_t(pid), .SIGKILL)
+}
+
+// bridge_os_test_is_own_group_leader: getpgid(pid) == pid. found=false once the
+// process is gone (or not ours to query).
+bridge_os_test_is_own_group_leader :: proc(pid: int) -> (leader: bool, found: bool) {
+	pgid := posix.getpgid(posix.pid_t(pid))
+	if pgid <= 0 do return false, false
+	return int(pgid) == pid, true
+}
+

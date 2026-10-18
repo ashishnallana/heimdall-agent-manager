@@ -30,7 +30,6 @@ package main
 import "core:fmt"
 import "core:strings"
 import "core:sync"
-import "core:sys/posix"
 import "core:thread"
 import "core:time"
 
@@ -54,8 +53,7 @@ Bridge_Shell_Pid_Alive_Proc :: #type proc(pid: int) -> bool
 // worse mistake (the next sweep gets another chance at a dead one).
 bridge_shell_pid_alive :: proc(pid: int) -> bool {
 	if pid <= 0 do return true
-	if posix.kill(posix.pid_t(pid), posix.Signal(0)) == .OK do return true
-	return posix.errno() != .ESRCH
+	return bridge_os_pid_alive(pid)
 }
 
 // bridge_shell_session_is_sweep_candidate: a pty-host session whose exit the hub has

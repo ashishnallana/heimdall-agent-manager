@@ -19,10 +19,10 @@ package main
 // not read as false-active. This keeps the daemon dumb (raw hash) and the policy
 // in the bridge, exactly as the design requires.
 
+import local_socket "odin_test:lib/local_socket"
 import "core:fmt"
 import "core:strings"
 import "core:sync"
-import "core:sys/posix"
 import "core:thread"
 import "core:time"
 
@@ -167,7 +167,7 @@ bridge_pty_host_events_run_once :: proc(socket: string, sweep_after_subscribe :=
 	at_dial := bridge_pty_host_events_daemon_mark(socket)
 	fd, ok := pty_host_dial(socket)
 	if !ok do return false
-	defer posix.close(fd)
+	defer local_socket.close(fd)
 
 	// Subscribe to host-level events (WatchEvents) instead of Attaching. The daemon
 	// then delivers all bridge-relevant frames — HostHeartbeat, ChildExited,
@@ -188,10 +188,9 @@ bridge_pty_host_events_run_once :: proc(socket: string, sweep_after_subscribe :=
 	last_frame := time.tick_now()
 	last_check := last_frame
 	for {
-		pfd := posix.pollfd{fd = fd, events = {.IN}}
-		n := posix.poll(&pfd, 1, PTY_HOST_EVENTS_POLL_MS)
-		if n < 0 && posix.errno() != .EINTR do return true
-		if n > 0 {
+		ready, poll_ok := local_socket.poll_readable(fd, PTY_HOST_EVENTS_POLL_MS)
+		if !poll_ok do return true
+		if ready {
 			// Readable, or hung up/errored — the read then fails and we reconnect.
 			payload, pok := pty_host_read_frame(fd)
 			if !pok do return true // clean disconnect; caller will reconnect

@@ -20,6 +20,7 @@ package main
 // is layered on in BR-3; BR-2 wires the control plane + a ChildExited-to-status
 // mapping helper the subscriber will call.
 
+import local_socket "odin_test:lib/local_socket"
 import "base:runtime"
 import crypto_hash "core:crypto/hash"
 import "core:encoding/hex"
@@ -27,7 +28,6 @@ import "core:fmt"
 import "core:os"
 import "core:strings"
 import "core:sync"
-import "core:sys/posix"
 import "core:time"
 
 // Retry/backoff for a spawn that races daemon startup (AC-5 parity with the tmux
@@ -97,17 +97,7 @@ Pty_Host_Daemon_Identity :: struct {
 
 // bridge_pty_host_daemon_identity stats the socket path. ok=false when nothing is there.
 bridge_pty_host_daemon_identity :: proc(socket: string) -> (Pty_Host_Daemon_Identity, bool) {
-	path := strings.trim_prefix(socket, "unix:")
-	cpath := strings.clone_to_cstring(path)
-	defer delete(cpath)
-	st: posix.stat_t
-	if posix.stat(cpath, &st) != .OK do return {}, false
-	return Pty_Host_Daemon_Identity{
-		dev        = u64(st.st_dev),
-		ino        = u64(st.st_ino),
-		ctime_sec  = i64(st.st_ctim.tv_sec),
-		ctime_nsec = i64(st.st_ctim.tv_nsec),
-	}, true
+	return bridge_os_socket_file_identity(strings.trim_prefix(socket, "unix:"))
 }
 
 // bridge_pty_host_daemon_process_running reports whether the daemon process this
@@ -520,7 +510,7 @@ bridge_pty_host_deliver_line :: proc(socket, instance, text: string) -> bool {
 bridge_pty_host_send_oneway :: proc(socket: string, frame: []byte) -> bool {
 	fd, ok := pty_host_dial(socket)
 	if !ok do return false
-	defer posix.close(fd)
+	defer local_socket.close(fd)
 	return pty_host_send_all(fd, frame)
 }
 

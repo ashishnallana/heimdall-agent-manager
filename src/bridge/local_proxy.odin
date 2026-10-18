@@ -27,14 +27,13 @@ package main
 // The feature is ENABLED BY DEFAULT (user decision) and disabled by
 // --no-local-proxy / [bridge] local_proxy_enabled=false.
 
+import local_socket "odin_test:lib/local_socket"
 import "base:runtime"
 import base64 "core:encoding/base64"
-import c2 "core:c"
 import "core:net"
 import "core:strconv"
 import "core:strings"
 import "core:sync"
-import "core:sys/posix"
 import "core:time"
 
 // Bridge_Proxy_Stream maps a proxy_id to the LOCAL client socket that originated it.
@@ -45,7 +44,7 @@ Bridge_Proxy_Stream :: struct {
 	proxy_id: string,
 	kind:     Bridge_Wrapper_Push_Conn_Kind,
 	tcp:      net.TCP_Socket,
-	unix:     posix.FD,
+	unix:     local_socket.Socket,
 	closed:   bool,
 }
 
@@ -231,7 +230,7 @@ bridge_proxy_send_to_client :: proc(stream: ^Bridge_Proxy_Stream, payload: []byt
 	case .TCP:
 		_, _ = net.send_tcp(stream.tcp, payload)
 	case .Unix:
-		_ = posix.send(stream.unix, raw_data(payload), c2.size_t(len(payload)), {})
+		_ = local_socket.send(stream.unix, payload)
 	}
 }
 
@@ -249,9 +248,11 @@ bridge_proxy_send_to_client :: proc(stream: ^Bridge_Proxy_Stream, payload: []byt
 bridge_proxy_wake_client :: proc(stream: ^Bridge_Proxy_Stream) {
 	switch stream.kind {
 	case .TCP:
-		_ = net.shutdown(stream.tcp, .Receive)
+		// Same call as net.shutdown(.Receive) on Unix; on Windows it also cancels the
+		// parked recv, which Winsock's shutdown alone does not wake.
+		_ = local_socket.shutdown(local_socket.Socket(stream.tcp), .Read)
 	case .Unix:
-		_ = posix.shutdown(stream.unix, .RD)
+		_ = local_socket.shutdown(stream.unix, .Read)
 	}
 }
 
@@ -370,7 +371,7 @@ bridge_proxy_serve_client :: proc(
 	head: string,
 	kind: Bridge_Wrapper_Push_Conn_Kind,
 	tcp: net.TCP_Socket,
-	unix: posix.FD,
+	unix: local_socket.Socket,
 	recv_more: proc(rawptr, []byte) -> int,
 	recv_ctx: rawptr,
 ) -> (string, bool) {
@@ -427,7 +428,7 @@ bridge_proxy_serve_client :: proc(
 
 // bridge_proxy_write_local_error answers the local caller directly. Used only for
 // requests the bridge rejects before anything reaches the hub.
-bridge_proxy_write_local_error :: proc(kind: Bridge_Wrapper_Push_Conn_Kind, tcp: net.TCP_Socket, unix: posix.FD, status: int, message: string) {
+bridge_proxy_write_local_error :: proc(kind: Bridge_Wrapper_Push_Conn_Kind, tcp: net.TCP_Socket, unix: local_socket.Socket, status: int, message: string) {
 	heap := runtime.heap_allocator()
 	b := strings.builder_make(heap)
 	defer strings.builder_destroy(&b)
@@ -446,7 +447,7 @@ bridge_proxy_write_local_error :: proc(kind: Bridge_Wrapper_Push_Conn_Kind, tcp:
 	case .TCP:
 		_, _ = net.send_tcp(tcp, payload)
 	case .Unix:
-		_ = posix.send(unix, raw_data(payload), c2.size_t(len(payload)), {})
+		_ = local_socket.send(unix, payload)
 	}
 }
 
@@ -509,7 +510,7 @@ bridge_proxy_read_head :: proc(initial: string, recv_more: proc(rawptr, []byte) 
 }
 
 Bridge_Proxy_Tcp_Ctx :: struct { sock: net.TCP_Socket }
-Bridge_Proxy_Unix_Ctx :: struct { fd: posix.FD }
+Bridge_Proxy_Unix_Ctx :: struct { fd: local_socket.Socket }
 
 bridge_proxy_recv_tcp :: proc(ctx: rawptr, buf: []byte) -> int {
 	c := (^Bridge_Proxy_Tcp_Ctx)(ctx)
@@ -520,9 +521,9 @@ bridge_proxy_recv_tcp :: proc(ctx: rawptr, buf: []byte) -> int {
 
 bridge_proxy_recv_unix :: proc(ctx: rawptr, buf: []byte) -> int {
 	c := (^Bridge_Proxy_Unix_Ctx)(ctx)
-	n := posix.recv(c.fd, raw_data(buf), c2.size_t(len(buf)), {})
+	n := local_socket.recv(c.fd, buf)
 	if n <= 0 do return -1
-	return int(n)
+	return n
 }
 
 bridge_local_proxy_serve_tcp :: proc(client: net.TCP_Socket, head_in: string) {
@@ -531,11 +532,11 @@ bridge_local_proxy_serve_tcp :: proc(client: net.TCP_Socket, head_in: string) {
 	head, head_ok := bridge_proxy_read_head(head_in, bridge_proxy_recv_tcp, rawptr(&ctx))
 	defer delete(head, heap)
 	if !head_ok {
-		bridge_proxy_write_local_error(.TCP, client, posix.FD(-1), 400, "incomplete or oversized request head")
+		bridge_proxy_write_local_error(.TCP, client, local_socket.INVALID_SOCKET, 400, "incomplete or oversized request head")
 		net.close(client)
 		return
 	}
-	proxy_id, ok := bridge_proxy_serve_client(head, .TCP, client, posix.FD(-1), bridge_proxy_recv_tcp, rawptr(&ctx))
+	proxy_id, ok := bridge_proxy_serve_client(head, .TCP, client, local_socket.INVALID_SOCKET, bridge_proxy_recv_tcp, rawptr(&ctx))
 	if !ok {
 		net.close(client)
 		return
@@ -565,44 +566,39 @@ bridge_local_proxy_serve_tcp :: proc(client: net.TCP_Socket, head_in: string) {
 	bridge_proxy_finish_local(proxy_id)
 }
 
-bridge_local_proxy_serve_unix :: proc(client: posix.FD, head_in: string) {
+bridge_local_proxy_serve_unix :: proc(client: local_socket.Socket, head_in: string) {
 	heap := runtime.heap_allocator()
 	ctx := Bridge_Proxy_Unix_Ctx{fd = client}
 	head, head_ok := bridge_proxy_read_head(head_in, bridge_proxy_recv_unix, rawptr(&ctx))
 	defer delete(head, heap)
 	if !head_ok {
 		bridge_proxy_write_local_error(.Unix, net.TCP_Socket(0), client, 400, "incomplete or oversized request head")
-		posix.close(client)
+		local_socket.close(client)
 		return
 	}
 	proxy_id, ok := bridge_proxy_serve_client(head, .Unix, net.TCP_Socket(0), client, bridge_proxy_recv_unix, rawptr(&ctx))
 	if !ok {
-		posix.close(client)
+		local_socket.close(client)
 		return
 	}
 	defer delete(proxy_id, heap)
 
 	// THE FD: same rule as the TCP transport above — this proc is the only closer.
-	defer posix.close(client)
+	defer local_socket.close(client)
 
-	// Backstop wake.  posix.recv has no Odin-side timeout wrapper, so SO_RCVTIMEO goes on
-	// directly; a timeout surfaces as -1/EAGAIN, which the loop must not read as a close.
-	tv := posix.timeval{tv_sec = posix.time_t(BRIDGE_PROXY_RECV_TIMEOUT_SECS), tv_usec = 0}
-	_ = posix.setsockopt(client, posix.SOL_SOCKET, .RCVTIMEO, &tv, posix.socklen_t(size_of(tv)))
+	// Backstop wake: a timeout surfaces as .Would_Block, which the loop must not read
+	// as a close.
+	_ = local_socket.set_recv_timeout(client, BRIDGE_PROXY_RECV_TIMEOUT)
 
 	buf: [4096]byte
 	for {
-		n := posix.recv(client, raw_data(buf[:]), c2.size_t(len(buf)), {})
-		if n < 0 {
-			e := posix.errno()
-			if e == .EAGAIN || e == .EWOULDBLOCK {
-				if !bridge_proxy_stream_registered(proxy_id) do break
-				continue
-			}
-			if e == .EINTR do continue
-			break
+		n, err := local_socket.recv_ex(client, buf[:])
+		if err == .Would_Block {
+			if !bridge_proxy_stream_registered(proxy_id) do break
+			continue
 		}
-		if n == 0 do break
+		if err == .Interrupted do continue
+		if err != .None || n == 0 do break
 	}
 	bridge_proxy_finish_local(proxy_id)
 }

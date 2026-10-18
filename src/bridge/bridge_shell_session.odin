@@ -13,7 +13,6 @@ import json "core:encoding/json"
 import "base:runtime"
 import "core:fmt"
 import "core:os"
-import "core:sys/posix"
 import "core:strconv"
 import "core:strings"
 import "core:sync"
@@ -1176,11 +1175,11 @@ bridge_shell_session_orphan_kill_worker :: proc(data: rawptr) {
 		free_all(context.temp_allocator)
 	}
 
-	_ = posix.kill(posix.pid_t(ctx.pid), .SIGTERM)
+	_ = bridge_os_terminate(int(ctx.pid))
 	time.sleep(5 * time.Second)
 	// Re-verify identity, not just liveness, before escalating.
 	if bridge_shell_session_pid_is_plausible(int(ctx.pid), ctx.cmd, ctx.started_at) {
-		_ = posix.kill(posix.pid_t(ctx.pid), .SIGKILL)
+		_ = bridge_os_kill(int(ctx.pid))
 	}
 }
 
@@ -1229,38 +1228,14 @@ bridge_shell_session_parse_lstart :: proc(s: string) -> (i64, bool) {
 bridge_shell_session_pid_is_plausible :: proc(pid: int, cmd: string, started_at: string) -> bool {
 	if pid <= 0 || cmd == "" || started_at == "" do return false
 
-	// Force C locale and UTC timezone so lstart format is predictable and in UTC on both Linux and macOS.
-	ps_cmd := fmt.tprintf("TZ=UTC LC_ALL=C ps -p %d -o lstart=,command= 2>/dev/null", pid)
-	c_ps_cmd := strings.clone_to_cstring(ps_cmd)
-	defer delete(c_ps_cmd)
-	f := posix.popen(c_ps_cmd, "r")
-	if f == nil do return false
-	defer posix.pclose(f)
-
-	buf: [512]byte
-	n := posix.fread(&buf, 1, size_of(buf) - 1, f)
-	if n == 0 do return false
-	output := strings.trim_space(string(buf[:n]))
-	if len(output) < 25 do return false  // at minimum lstart (24) + space + 1 char
-
-	// lstart is fixed 24 chars in C locale ("Www Mmm DD HH:MM:SS YYYY").
-	lstart_str := output[:24]
-	ps_command  := strings.trim_space(output[24:])
+	// The OS reports the process's start time and command (`ps` on Unix).
+	lstart_sec, ps_command, ps_ok := bridge_os_process_lstart_and_command(pid)
+	if !ps_ok do return false
 
 	// (a) Base executable name match.
-	// Extract base from ps command: strip path prefix of first word.
-	ps_exe := ps_command
-	if i := strings.index_byte(ps_exe, ' '); i >= 0 do ps_exe = ps_exe[:i]
-	if i := strings.last_index_byte(ps_exe, '/'); i >= 0 do ps_exe = ps_exe[i+1:]
-	// Extract base from spec cmd.
-	spec_exe := cmd
-	if i := strings.index_byte(spec_exe, ' '); i >= 0 do spec_exe = spec_exe[:i]
-	if i := strings.last_index_byte(spec_exe, '/'); i >= 0 do spec_exe = spec_exe[i+1:]
-	if ps_exe != spec_exe do return false
+	if bridge_os_exe_base(ps_command) != bridge_os_exe_base(cmd) do return false
 
 	// (b) Start-time check: lstart vs started_at within 5 s.
-	lstart_sec, lstart_ok := bridge_shell_session_parse_lstart(lstart_str)
-	if !lstart_ok do return false
 	started_time, consumed := time.rfc3339_to_time_utc(started_at)
 	if consumed == 0 do return false
 	started_sec := time.to_unix_seconds(started_time)
