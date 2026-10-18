@@ -44,7 +44,7 @@ test_pack_dependencies_carry_handoffs :: proc(t: ^testing.T) {
 	dep_facet(fx, a, 2, FACET_HANDOFF, `{"summary":"Added the refresh_tokens table","decisions":["hash with sha256"],"dead_ends":["bcrypt was too slow"],"next_steps":"wire rotation"}`)
 	dep_facet(fx, a, 2, FACET_OUTPUT, `{"tables":["refresh_tokens"]}`)
 	dep_facet(fx, a, 2, FACET_VCS, `{"head":"abc123","files":["db/migrations/010.sql","src/auth.py"]}`)
-	dep_facet(fx, a, 2, FACET_VERIFY, `{"cmd":"pytest -q","exit_code":0}`)
+	dep_facet(fx, a, 2, FACET_VERIFY, `{"command":"pytest -q","exit_code":0,"summary":"OK"}`)
 	// task_c was cancelled without a handoff.
 	c.state = .Cancelled
 	_, _, _ = iface.taskchain_save_task(&fx.repo, c)
@@ -58,8 +58,8 @@ test_pack_dependencies_carry_handoffs :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(deps, `"dead_ends":["bcrypt was too slow"]`), "dead ends")
 	testing.expect(t, strings.contains(deps, `"next_steps":["wire rotation"]`), "a single-string list becomes an array")
 	testing.expect(t, strings.contains(deps, `"output":{"tables":["refresh_tokens"]}`), "output inline")
-	testing.expect(t, strings.contains(deps, `"head":"abc123"`) && strings.contains(deps, `"changed_files":["db/migrations/010.sql","src/auth.py"]`), "vcs")
-	testing.expect(t, strings.contains(deps, `"verify":{"cmd":"pytest -q","exit_code":0}`), "verify")
+	testing.expect(t, strings.contains(deps, `"head":"abc123"`) && !strings.contains(deps, "changed_files"), "vcs: head only (files is the uncommitted list)")
+	testing.expect(t, strings.contains(deps, `"verify":{"cmd":"pytest -q","exit_code":0}`), "verify reads the hub's `command` key")
 	testing.expect(t, strings.contains(deps, `"task_id":"task_c"`) && strings.contains(deps, `"state":"cancelled"`) && strings.contains(deps, `"summary":""`), "cancelled dependency is listed with its state")
 	testing.expect(t, strings.contains(build_pack_dependencies_probe(fx, chain, b), `"dependencies":[`), "build_pack_json splices the field")
 
@@ -79,23 +79,14 @@ test_pack_dependencies_size_caps :: proc(t: ^testing.T) {
 	a := seed_task(t, fx, chain, "task_big")
 	b := seed_task(t, fx, chain, "task_next")
 	big := strings.repeat("x", 5000, context.temp_allocator)
-	files := strings.builder_make(context.temp_allocator)
-	strings.write_byte(&files, '[')
-	for i in 0 ..< 30 {
-		if i > 0 do strings.write_byte(&files, ',')
-		fmt.sbprintf(&files, `"f%d.py"`, i)
-	}
-	strings.write_byte(&files, ']')
 	dep_facet(fx, a, 1, FACET_HANDOFF, fmt.tprintf(`{{"summary":"%s"}}`, big))
 	dep_facet(fx, a, 1, FACET_OUTPUT, fmt.tprintf(`{{"blob":"%s"}}`, big))
-	dep_facet(fx, a, 1, FACET_VCS, fmt.tprintf(`{{"head":"h","files":%s}}`, strings.to_string(files)))
 	dep_link(fx, b, a)
 
 	deps := dependencies_pack_json(&fx.svc, b)
 	testing.expect(t, len(deps) < 2 * DEP_SUMMARY_MAX_BYTES + 1500, fmt.tprintf("capped entry, got %d bytes", len(deps)))
 	testing.expect(t, strings.contains(deps, "…"), "summary truncated with an ellipsis")
 	testing.expect(t, strings.contains(deps, `"output_omitted":true`) && strings.contains(deps, `"output_ref":"output:task_big"`), "oversized output becomes a fetch ref")
-	testing.expect(t, strings.contains(deps, `"changed_files_total":30`) && strings.contains(deps, `"f19.py"`) && !strings.contains(deps, `"f20.py"`), "first 20 files + total")
 }
 
 // build_pack_dependencies_probe builds a full pack for `task` with a synthetic

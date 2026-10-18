@@ -13,7 +13,7 @@ DEP_PACK :: `{"version":1,"lease_id":"lease_1","task_id":"task_b","attempt_no":1
 	`{"task_id":"task_a","title":"Add refresh_tokens table","state":"done","attempt_no":2,"summary":"DEP_SUMMARY_TABLE_ADDED",` +
 	`"decisions":["hash with sha256"],"dead_ends":["DEP_DEAD_END_BCRYPT"],"next_steps":["wire rotation"],` +
 	`"output":{"blob":"DEP_OUTPUT_BODY_` + "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" + `"},` +
-	`"head":"abc123","changed_files_total":21,"changed_files":["db/010.sql","src/auth.py"],"verify":{"cmd":"pytest -q","exit_code":0}},` +
+	`"head":"abc123","verify":{"cmd":"pytest -q","exit_code":0}},` +
 	`{"task_id":"task_c","title":"Spike","state":"cancelled","summary":"","decisions":[],"dead_ends":[],"next_steps":[]}` +
 	`],"where_you_are":null,"previous_attempt":null,"findings":[],"why":"first_grant","protocol":{"rules":[]}}`
 
@@ -25,7 +25,7 @@ test_bridge_taskv2_render_task_md_dependencies :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(md, "### task_a: Add refresh_tokens table (done)"), "dependency heading")
 	testing.expect(t, strings.contains(md, "**Handoff Summary**: DEP_SUMMARY_TABLE_ADDED"), "summary")
 	testing.expect(t, strings.contains(md, "  - DEP_DEAD_END_BCRYPT"), "dead ends")
-	testing.expect(t, strings.contains(md, "`db/010.sql`, `src/auth.py` (+19 more)"), "changed files + remainder")
+	testing.expect(t, strings.contains(md, "**Last Commit**: `abc123` (see what it changed with `git show --stat abc123`)"), "last commit + how to see the change")
 	testing.expect(t, strings.contains(md, "**Verify**: `pytest -q` exit_code=`0`"), "verify")
 	testing.expect(t, strings.contains(md, "DEP_OUTPUT_BODY_"), "uncapped output inline")
 	testing.expect(t, strings.contains(md, "### task_c: Spike (cancelled)") && strings.contains(md, "was **cancelled**"), "cancelled dependency flagged")

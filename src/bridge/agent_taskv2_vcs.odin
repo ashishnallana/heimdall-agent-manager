@@ -338,7 +338,7 @@ Bridge_Task_Md_Input :: struct {
 }
 
 // A task this one waits for, as the hub's pack `dependencies` entry describes
-// it: its latest handoff, output, VCS state and verify result. `dropped` hides
+// it: its latest handoff, output, last commit and verify result. `dropped` hides
 // the output for size (the summary and dead ends always stay).
 Bridge_Task_Md_Dependency :: struct {
 	task_id, title, state, summary:   string,
@@ -346,8 +346,6 @@ Bridge_Task_Md_Dependency :: struct {
 	output, output_ref:               string,
 	output_omitted, dropped:          bool,
 	head:                             string,
-	files:                            []string,
-	files_total:                      int,
 	verify_cmd:                       string,
 	has_exit:                         bool,
 	exit_code:                        int,
@@ -376,8 +374,6 @@ bridge_taskv2_parse_dependencies :: proc(pack_json: string) -> []Bridge_Task_Md_
 			next_steps     = dec_list(obj, "next_steps"),
 			output_ref     = jsonx.extract_string(obj, "output_ref", "", true, context.temp_allocator),
 			head           = jsonx.extract_string(obj, "head", "", true, context.temp_allocator),
-			files          = dec_list(obj, "changed_files"),
-			files_total    = jsonx.extract_int(obj, "changed_files_total", 0, true),
 		}
 		d.output_omitted, _ = jsonx.extract_bool_literal(obj, "output_omitted", true)
 		if o, ok := jsonx.extract_raw_object(obj, "output", true, context.temp_allocator); ok do d.output = bridge_taskv2_decrypt_field(o, context.temp_allocator)
@@ -412,17 +408,12 @@ bridge_taskv2_write_dependencies :: proc(b: ^strings.Builder, deps: []Bridge_Tas
 		write_list(b, "Decisions", d.decisions)
 		write_list(b, "Dead Ends (DO NOT REPEAT)", d.dead_ends)
 		write_list(b, "Next Steps It Left", d.next_steps)
-		if d.head != "" do fmt.sbprintf(b, "- **Last Commit**: `%s`\n", d.head)
-		if len(d.files) > 0 {
-			strings.write_string(b, "- **Changed Files**: ")
-			for f, i in d.files {
-				if i > 0 do strings.write_string(b, ", ")
-				fmt.sbprintf(b, "`%s`", f)
-			}
-			if d.files_total > len(d.files) do fmt.sbprintf(b, " (+%d more)", d.files_total - len(d.files))
-			strings.write_byte(b, '\n')
+		if d.head != "" do fmt.sbprintf(b, "- **Last Commit**: `%s` (see what it changed with `git show --stat %s`)\n", d.head, d.head)
+		if d.verify_cmd != "" {
+			fmt.sbprintf(b, "- **Verify**: `%s` exit_code=`%d`\n", d.verify_cmd, d.exit_code)
+		} else if d.has_exit {
+			fmt.sbprintf(b, "- **Verify**: exit_code=`%d`\n", d.exit_code)
 		}
-		if d.verify_cmd != "" || d.has_exit do fmt.sbprintf(b, "- **Verify**: `%s` exit_code=`%d`\n", d.verify_cmd, d.exit_code)
 		ref := d.output_ref if d.output_ref != "" else fmt.tprintf("output:%s", d.task_id)
 		switch {
 		case d.output != "" && !d.dropped:

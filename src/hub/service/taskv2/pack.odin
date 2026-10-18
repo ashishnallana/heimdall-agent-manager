@@ -716,13 +716,12 @@ answered_question :: proc(evs: []domain.Task_Event, at: int, input: Fold_Input) 
 
 // ---- Dependency handoffs -------------------------------------------------------------
 // A task that waits for others gets each one's latest handoff (summary,
-// decisions, dead ends, next steps), structured output, last VCS state and
+// decisions, dead ends, next steps), structured output, last commit and
 // verify result, the way workflow stages get upstream outputs. Without this a
 // dependent ticket only saw the merged code and one chain-summary line.
 
 DEP_SUMMARY_MAX_BYTES :: 2 * 1024
 DEP_OUTPUT_MAX_BYTES :: 2 * 1024
-DEP_FILES_MAX :: 20
 
 // dependencies_pack_json returns the `dependencies` array for `task` ("[]" when
 // it waits for nothing). An output already listed in brief.inputs as
@@ -786,15 +785,14 @@ dependency_entry_json :: proc(svc: ^Service, dep: domain.Task, input_refs: []str
 	case:
 		json_raw(&o, "output", out_trim)
 	}
-	if vcs != "" {
-		json_str(&o, "head", jsonx.extract_string(vcs, "head", "", true, context.temp_allocator))
-		files := jsonx.extract_string_array(vcs, "files", true, context.temp_allocator)
-		json_int(&o, "changed_files_total", i64(len(files)))
-		json_raw(&o, "changed_files", strings_json(files[:min(len(files), DEP_FILES_MAX)]))
-	}
+	// The vcs facet's `files` is the attempt's uncommitted list (empty once the
+	// work is committed), not what the task changed, so only the head is
+	// passed; the agent reads the change with `git show --stat <head>`.
+	if vcs != "" do json_str(&o, "head", jsonx.extract_string(vcs, "head", "", true, context.temp_allocator))
 	if verify != "" {
 		v := json_begin()
-		json_str(&v, "cmd", jsonx.extract_string(verify, "cmd", "", true, context.temp_allocator))
+		// The hub writes `command`; older facets used `cmd`.
+		json_str(&v, "cmd", jsonx.extract_string(verify, "command", jsonx.extract_string(verify, "cmd", "", true, context.temp_allocator), true, context.temp_allocator))
 		if code, found := jsonx.extract_int_found(verify, "exit_code", true); found do json_int(&v, "exit_code", i64(code))
 		json_raw(&o, "verify", json_end(&v))
 	}
