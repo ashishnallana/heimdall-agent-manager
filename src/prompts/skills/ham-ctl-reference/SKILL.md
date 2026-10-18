@@ -31,11 +31,11 @@ Groups: `bridge`, `agents`, `task-chain`, `task`, `workflow`, `lease`, `verify`,
 
 ## agents — durable identities, templates, and runtime instances
 - `agents list` — your durable agent identities.
-- `agents identity create --name <n> [--template <id>] [--provider <p>] [--tier <t>] [--slug <s>] [--instructions <t>]` — create a durable agent.
+- `agents identity create --name <n> [--template <id>] [--provider <p>] [--slug <s>] [--instructions <t>]` — create a durable agent.
 - `agents template list` — list agent templates (personas).
 - `agents template create --name <n> [--description <d>] [--persona <t>] [--instructions <t>]` — create a template.
 - `agents instance list [--agent <id>] [--live]` — list instances (durable, or only live with `--live`).
-- `agents new-instance <agent-id> [--project <id>] [--bridge <id>] [--provider <p>] [--tier <t>] [--chain <id>]` — launch a NEW instance of a durable agent.
+- `agents new-instance <agent-id> [--project <id>] [--bridge <id>] [--provider <p>] [--chain <id>]` — launch a NEW instance of a durable agent.
 - `agents start <instance-id>` — start a STOPPED instance (errors if already running).
 - `agents stop <instance-id> [--reason <t>]` — stop a running instance.
 - `agents restart <instance-id>` — restart (stop-then-start) an instance.
@@ -43,7 +43,7 @@ Groups: `bridge`, `agents`, `task-chain`, `task`, `workflow`, `lease`, `verify`,
 ## task-chain — your task chains
 - `task-chain list [--mine] [--project <id>]` — chains (`--mine` = ones you coordinate).
 - `task-chain show [<chain-id>]` — show a chain (defaults to your current chain), including embedded `tasks` and `directories`.
-- `task-chain create --title <title> [--description <desc>] [--kind <kind>] [--coordinator <agt_id>] [--bridge <brg_id>] [--project <proj_id>] [--provider <p>] [--tier <t>]` — create a task chain. If `--coordinator` is provided, provisions or assigns the coordinator agent instance.
+- `task-chain create --title <title> [--description <desc>] [--kind <kind>] [--coordinator <agt_id>] [--bridge <brg_id>] [--project <proj_id>] [--provider <p>]` — create a task chain. If `--coordinator` is provided, provisions or assigns the coordinator agent instance.
 - `task-chain set-title <title> [--chain <id>]` — rename a chain (coordinator only).
 - `task-chain set-description <text> [--chain <id>]` (or `--stdin`) — set the chain
   description (coordinator only; pass `""` to clear; `--chain` defaults to your chain).
@@ -53,12 +53,13 @@ Groups: `bridge`, `agents`, `task-chain`, `task`, `workflow`, `lease`, `verify`,
   proposal (`kind: "ticket"|"workflow"`, `rationale`, `alternative`, `tasks` array or `workflow` + `inputs`) and its draft
   tasks in a single transaction (coordinator only). With `--auto-approve`, validates briefs and
   publishes (or runs the proposed workflow) immediately.
-- `task-chain decide [<chain-id>] --decision approve|reject [--reason <text>]` — approve or reject
+- `task-chain decide <chain-id> --decision approve|reject [--reason <text>]` — approve or reject
   a pending chain proposal (publishes all tasks or starts the proposed workflow atomically on `approve`).
-- `task-chain publish [<chain-id>]` — validate all task briefs and publish the chain (`422 brief_incomplete` lists missing fields per task).
-- `task-chain set-status --status <active|completed|cancelled> [--chain <id>]` — change
-  the chain status (coordinator only). Chain statuses are exactly `active`, `completed`,
-  `cancelled`. This is how a coordinator completes a chain.
+- `task-chain publish <chain-id>` — validate all task briefs and publish the chain (`422 brief_incomplete` lists missing fields per task, including `review_role:<r>` when no fleet row holds a requested role). `decide` and `publish` need the chain id (positional or `--chain`).
+- `task-chain set-status --status <active|completed|cancelled|archived> [--chain <id>]` — change
+  the chain status (coordinator only). This is how a coordinator completes a chain.
+- `task-chain archive [<chain-id>]` / `unarchive [<chain-id>]` — archive or restore a chain (coordinator only).
+- `task-chain pin <chain-id>` / `unpin <chain-id>` — pin a chain to the top of the sidebar.
 
 ### Relevant directories (`task-chain directory`)
 Associate one or more working directories (local checkouts, CitC workspaces, repos) with a task chain so participating agents and the UI know which workspaces/directories are in scope. Directories are also embedded directly in `task-chain show [<chain-id>]` and `GET /api/v1/task-chains/:id` output under the `"directories"` array.
@@ -170,34 +171,42 @@ globally unique — you rarely need `--chain`).
   (count, last_comment_at, author, preview) — NOT full comment bodies.
 - `task show <task-id> [--chain <id>]` — a task + its `brief` + `comment_summary` + facets.
 - `task comments <task-id> [--last N]` — fetch comment BODIES; `--last N` = newest N (max 100).
-- `task create --title <t> [--description <d>] [--priority p0|p1|p2] [--assignee <agt_id>] [--reviewer <agt_id,agt_id,...>] [--depends-on <id,id>] [--bridge <bridge-id>] [--chain <id>] [--goal <g>] [--acceptance <a>]... [--verify <cmd>] [--input <ref>]... [--review-role <r>]... [--output-schema <task_list.v1|findings.v1>] [--on-output-workflow <name>] [--auto-submit] [--require-independent-verify] [--brief-file <path.json>]` — create a task.
+- `task create --title <t> [--description <d>] [--priority p0|p1|p2] [--assignee <agt_id>] [--reviewer <agt_id,agt_id,...>] [--depends-on <id,id>] [--bridge <bridge-id>] [--chain <id>] [--goal <g>] [--acceptance <a>]... [--verify <cmd>] [--input <ref>]... [--review-role <r>]... [--output-schema <task_list.v1|findings.v1>] [--on-output-workflow <name>] [--auto-submit] [--require-independent-verify] [--require-user-approval] [--brief-file <path.json>]` — create a task.
   `--assignee` and `--reviewer` take durable agent IDs (`agt_...`) only.
-- `task update <task-id> [--title <t>] [--description <d>] [--priority p0|p1|p2] [--assignee <agt_id>] [--reviewer <agt_id,agt_id,...>] [--depends-on <id,id>] [--bridge <bridge-id>] [--goal <g>] [--acceptance <a>]... [--verify <cmd>] [--input <ref>]... [--review-role <r>]... [--output-schema <task_list.v1|findings.v1>] [--on-output-workflow <name>] [--auto-submit] [--require-independent-verify] [--brief-file <path.json>]` — edit an existing task.
+- `task update <task-id> [--title <t>] [--description <d>] [--priority p0|p1|p2] [--assignee <agt_id>] [--reviewer <agt_id,agt_id,...>] [--depends-on <id,id>] [--bridge <bridge-id>] [--goal <g>] [--acceptance <a>]... [--verify <cmd>] [--input <ref>]... [--review-role <r>]... [--output-schema <task_list.v1|findings.v1>] [--on-output-workflow <name>] [--auto-submit] [--require-independent-verify] [--require-user-approval | --no-require-user-approval] [--brief-file <path.json>]` — edit an existing task.
 - `task publish <task-id>` — validate the task's brief and publish it (`422 brief_incomplete` lists any missing fields).
 - `task comment <task-id> --body <t>` (or `--stdin`) `[--notify <id,id>]` — add a comment.
 - `task depend <task-id> --on <task-id>` — add a single dependency (`update --depends-on` replaces the whole list).
 - `task fetch <task-id> <ref>` — fetch one event (`#<event_id>`), output (`output:<task_id>`), facet (`facet:<task_id>:<attempt_no>:<kind>`), or file-at-commit (`dir:<dir_id>:<rev>:<path>`, `<path>@<rev>`, or `<path>`) referenced by `TASK.md`.
 - `lease next` — inspect the lease you hold (status `current`) or claim the next ready task inline (status `granted`), updating `<run_dir>/TASK.md`; returns `none` when idle.
 - `lease heartbeat [--note <text>]` — extend the lease TTL and optionally record a progress note. On `409 lease_lost`, stop immediately without touching the working tree.
-- `lease submit --summary <s> [--handoff-file <json>] [--output-file <json>] [--artifacts-file <json>] [--artifacts <json>] [--verify none]` — finish the attempt (task → `in_review`, or `done` with no review gates). Requires a passing `ham-ctl verify` at the current `HEAD` unless `brief.verify` is `"none"`. Validates `output` against `task_list.v1` or `findings.v1` when configured on the brief (`422 output_invalid` on mismatch).
-- `lease handoff --summary <s> [--handoff-file <json>]` — release the lease back to `ready` with structured handoff (`done`, `remaining`, `next_steps`, `dead_ends`, `warnings`) for the next attempt.
-- `lease block --waiting-on <kind> --reason <text> [--ref <id>] [--summary <s>]` — park the task on an external blocker (`human`, `task`, `external`).
-- `verify [<task-id>] [--independent]` — run `brief.verify` as a Run session labelled for this attempt (`verify <task_id> #<attempt_no> @<head> [independent]`), heartbeating while it runs. With `--independent`, runs inside an ephemeral detached git worktree at `vcs.head` and records `"independent": true` on the `verify` facet. When `brief.auto_submit` is `true` and a normal `verify` exits `0` on a clean working tree, automatically submits the lease (`auto: true`).
-- `review post [<task-id>] --verdict approve|request_changes [--findings-file <json>] [--task <id>] [--on-behalf-of user]` — record a review verdict and optional structured findings (`[{severity, file, line, message}]`). Coordinators pass `--on-behalf-of user` to record a proxy user review when the user approves or requests changes in chat.
+- `lease submit --summary <s> [handoff flags] [--output-file <json>] [--artifacts-file <json>] [--artifacts <json>] [--verify none] [--lease <id>]` — finish the attempt (task → `in_review`, or `done` with no review gates). Requires a passing `ham-ctl verify` at the current head unless `brief.verify` is `"none"` (`409 verify_required|verify_failed|verify_stale|verify_dirty`). Validates `output` against the brief's output contract (`task_list.v1`, `findings.v1`).
+- `lease handoff --summary <s> [handoff flags] [--lease <id>]` — stop without finishing; the task returns to `ready` and the next holder gets your handoff.
+- `lease switch <task_id> --summary <s> [handoff flags]` — solo mode: hand off the current task (attempt not counted) and take `<task_id>` (must be `ready`) in one step.
+- **Handoff flags** (submit, handoff, switch): `--decision <text>` and `--dead-end <text>` (repeat per item), `--next-steps <text>`; or `--handoff-file <json>` (`{"decisions":[…],"dead_ends":[…],"next_steps":"…"}`) instead, not both. Decisions and dead ends reach every task that waits for this one and the next attempt; dead ends also go into the chain summary for all tasks.
+- `lease block --waiting-on <kind> --reason <text> [--ref <id>] [--summary <s>]` — park the task in `backlog` on a blocker. `<kind>` is free text: `user` (the user must answer; the answer appears in `TASK.md`), `task`, or an external system.
+- `verify [<task-id>] [--independent] [--bridge <id>]` — run `brief.verify` as a Run session labelled for this attempt (`verify <task_id> #<attempt_no> @<head> [independent]`), heartbeating while it runs. With `--independent`, runs inside an ephemeral detached git worktree at `vcs.head` and records `"independent": true` on the `verify` facet. When `brief.auto_submit` is `true` and a normal `verify` exits `0` on a clean working tree, automatically submits the lease (`auto: true`).
+- `review post [<task-id>] --verdict approve|request_changes [--summary <reason>] [--findings-file <json>] [--task <id>] [--on-behalf-of user]` — record a review verdict. Findings: `[{"path","line","severity","text"}]`. `request_changes` needs `--summary` or findings. Response: `gate: waiting|approved|changes_requested`. Coordinators pass `--on-behalf-of user` to record the user's verdict on tasks that require user approval (or gates whose approver is `user`); refused in solo mode for your own work.
 
 ### Task states
 A task carries a `state`: `backlog`, `ready`, `in_progress`, `in_review`, `done`, `cancelled`.
 State is driven by the hub (leases, reviews, dependencies); agents do not set it directly.
+The v1 verbs `task status`, `task vote`, `task nudge` and `task set-current` no longer exist.
+
+### Ticket chain or workflow?
+Default to a ticket chain when you can write every task now (1-5 known tasks). Use a workflow when
+the task list comes from an exploration or scan step and similar items run in parallel, or the recipe recurs
+(explore → plan → approve → build, scan → fix each). Details: `coordinator-task-management`.
 
 ## workflow — declarative workflow chains (M3b)
 Workflow chains (`kind == "workflow"`) execute a versioned `workflow.v1` stage pipeline with lazy stage materialisation, `parallel: N` or `for_each` expansion (`task_list.v1`, `findings.v1`), and human `gate` stages. Once running, the Hub owns the task graph (`task create`, `task update`, and `task depend` return `403 workflow_immutable`).
 
 - `workflow templates` — list built-in templates (`explore_plan_build`, `fix_flaky_tests`, `security_audit`) and owner-defined `workflow.v1` definitions.
 - `workflow define --file <def.json> [--name <name>]` — validate a `workflow.v1` JSON definition (checking acyclic `needs`, fan-out rules, and output contracts) and store a new immutable version.
-- `workflow run <name> [--chain <cid>] [--input k=v ...] [--inputs-file <json>]` — snapshot `<name>` (or `--file <def.json>`) onto `<cid>` (or a new chain), validate required inputs, and materialise all root stages in one UoW.
+- `workflow run <name> [--chain <cid>] [--input k=v ...] [--inputs-file <json>] [--file <def.json>] [--title <t>] [--description <d>] [--project <id>] [--bridge <id>] [--coordinator <agt_id>]` — snapshot `<name>` (or `--file <def.json>`) onto `<cid>` (or a new chain), validate required inputs, and materialise all root stages in one UoW.
 - `workflow status [<chain_id>]` — return chain metadata, `Stage_View[]` (`pending`, `active`, `complete`, `failed`), materialised task instances per stage, `orphaned_work`, and overall completion state.
 - `workflow output [<chain_id>] <stage_key>` — return ordered `output` facets across all instances of `<stage_key>`.
-- `workflow retry [<chain_id>] <stage_key_or_task_id> [--cascade]` — reopen a failed/cancelled stage (`counts_toward_budget = 0`). Refuses with `409 downstream_materialised` when downstream stages exist unless `--cascade` is passed; `--cascade` cancels downstream stages, reopens the target stage, and carries forward unchanged `.Done` items (`EV_CARRIED_FORWARD`) on re-expansion while recording removed items in `orphaned_work`.
+- `workflow retry [<chain_id>] <stage_key_or_task_id> [--cascade] [--reason <text>]` — reopen a failed/cancelled stage (`counts_toward_budget = 0`). Refuses with `409 downstream_materialised` when downstream stages exist unless `--cascade` is passed; `--cascade` cancels downstream stages, reopens the target stage, and carries forward unchanged `.Done` items (`EV_CARRIED_FORWARD`) on re-expansion while recording removed items in `orphaned_work`.
 - `workflow cancel [<chain_id>] [--reason <text>]` — cancel the workflow chain and reclaim all live leases in one UoW.
 
 #### Command examples
