@@ -17,7 +17,6 @@
 //! Selecting an agent performs `Detach{old}` + `Attach{new}` + `Resize`.
 
 use std::io::Write;
-use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -34,7 +33,8 @@ use crate::client::AttachOutcome;
 use crate::dashboard_tui::Key;
 use crate::dproto::{self, AgentInfo, CtlMsg, CtlReply};
 use crate::selector::{SelectorAction, SelectorItem, SelectorState};
-use crate::termios::{current_winsize, RawGuard};
+use crate::ipc::UnixStream;
+use crate::termios::{current_winsize, read_stdin_timeout, take_resize, watch_resize, RawGuard};
 
 /// Byte that triggers a clean detach (Ctrl-\, aka FS / 0x1c).
 const DETACH_BYTE: u8 = 0x1c;
@@ -260,30 +260,17 @@ fn spawn_stdin_reader(
     in_tx: std::sync::mpsc::Sender<Vec<u8>>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
-        let mut buf = [0u8; 4096];
+        // 8 KiB: on Windows a smaller read would leave bytes in std's stdin buffer.
+        let mut buf = [0u8; 8192];
         while !done.load(Ordering::SeqCst) {
-            let mut pfd = libc::pollfd {
-                fd: libc::STDIN_FILENO,
-                events: libc::POLLIN,
-                revents: 0,
-            };
-            let res = unsafe { libc::poll(&mut pfd, 1, 50) };
-            if res > 0 && (pfd.revents & libc::POLLIN) != 0 {
-                match unsafe {
-                    libc::read(
-                        libc::STDIN_FILENO,
-                        buf.as_mut_ptr() as *mut libc::c_void,
-                        buf.len(),
-                    )
-                } {
-                    n if n > 0 => {
-                        if in_tx.send(buf[..n as usize].to_vec()).is_err() {
-                            break;
-                        }
+            match read_stdin_timeout(&mut buf, 50) {
+                Ok(Some(0)) => break, // EOF
+                Ok(Some(n)) => {
+                    if in_tx.send(buf[..n].to_vec()).is_err() {
+                        break;
                     }
-                    0 => break, // EOF
-                    _ => {}
                 }
+                _ => {}
             }
         }
     })
@@ -421,7 +408,7 @@ pub fn attach_instance(socket_path: &std::path::Path, instance: &str) -> Result<
     let agent_list = Arc::new(Mutex::new(Vec::<AgentInfo>::new()));
     let in_selector = Arc::new(AtomicBool::new(false));
 
-    install_sigwinch_handler();
+    watch_resize();
 
     // Reader thread: daemon -> stdout / handle control frames.
     let reader = {
@@ -481,7 +468,7 @@ pub fn attach_instance(socket_path: &std::path::Path, instance: &str) -> Result<
         }
 
         // Pending resize from SIGWINCH.
-        if take_sigwinch() {
+        if take_resize() {
             if let Some((rows, cols)) = current_winsize() {
                 let inst = current_inst_arc.lock().unwrap().clone();
                 let mut ws = write_stream.lock().unwrap();
@@ -977,26 +964,6 @@ fn parse_keys_from_bytes(bytes: &[u8]) -> Vec<Key> {
     }
     keys
 }
-
-// ---- SIGWINCH plumbing (shares the FFI in termios.rs) -------------------
-
-static SIGWINCH_FLAG: AtomicBool = AtomicBool::new(false);
-
-extern "C" fn sigwinch_handler(_sig: i32) {
-    SIGWINCH_FLAG.store(true, Ordering::SeqCst);
-}
-
-fn install_sigwinch_handler() {
-    unsafe {
-        libc_signal(libc_sigwinch(), sigwinch_handler as *const () as usize);
-    }
-}
-
-fn take_sigwinch() -> bool {
-    SIGWINCH_FLAG.swap(false, Ordering::SeqCst)
-}
-
-use crate::termios::{libc_signal, libc_sigwinch};
 
 #[cfg(test)]
 mod tests {

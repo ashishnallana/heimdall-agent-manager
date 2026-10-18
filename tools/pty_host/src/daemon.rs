@@ -19,7 +19,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
@@ -31,6 +30,7 @@ use anyhow::{anyhow, Context, Result};
 use crate::detect::{screen_hash, DetectAction, Detector, StartupDetectionConfig, StartupOutcome};
 use crate::dproto::{self, AgentInfo, CtlMsg, CtlReply, HostHeartbeatAgent, SignalRequest, SpawnRequest};
 use crate::host::{PtyHost, SpawnConfig};
+use crate::ipc::{UnixListener, UnixStream};
 use crate::proto::ScreenSnapshot;
 
 pub use crate::dproto::{Shell, ShellInfo};
@@ -61,6 +61,7 @@ const ACCEPT_EMFILE_BACKOFF: Duration = Duration::from_millis(100);
 
 /// REQ-PTY-3: the daemon raises its RLIMIT_NOFILE soft limit to the hard limit,
 /// capped here.
+#[cfg(unix)]
 const NOFILE_TARGET: libc::rlim_t = 65536;
 
 /// CRT resolution constants for unattached agents (REQ-CRT-1).
@@ -257,6 +258,14 @@ impl Agent {
             if !dead {
                 self.host.lock().unwrap().kill();
             }
+        }
+        // ConPTY only EOFs the reader (ending the pump) once the pseudoconsole
+        // is closed, which a dead child alone does not do.
+        #[cfg(windows)]
+        {
+            let mut host = self.host.lock().unwrap();
+            host.wait_timeout(TERM_GRACE);
+            host.release_pty();
         }
         if let Some(t) = self.pump.take() {
             let _ = t.join();
@@ -651,37 +660,55 @@ impl Daemon {
             .unwrap_or(false)
     }
 
-    /// Send POSIX signal `signum` to the process group of `shell_id` via `killpg`.
+    /// Send POSIX signal `signum` to the process group of `shell_id` via `killpg`
+    /// (Windows: mapped onto the session's ConPTY/job, see [`PtyHost::signal`]).
     ///
     /// Returns [`SignalOutcome::AlreadyExited`] when the child has already
     /// exited (REQ-PTY-1); a reaped pid is never signalled, since its process
     /// group id may since have been reused. `Err` if the instance is unknown or
     /// `killpg` fails on a live child.
     pub fn signal(&self, shell_id: &str, signum: u8) -> Result<SignalOutcome> {
-        let (pid, alive) = {
+        let (pid, alive, host) = {
             let agents = self.agents.lock().unwrap();
             let a = agents
                 .get(shell_id)
                 .ok_or_else(|| anyhow!("signal: no such instance {shell_id}"))?;
-            (a.pid, Arc::clone(&a.alive))
+            (a.pid, Arc::clone(&a.alive), Arc::clone(&a.host))
         };
         let exited = || SignalOutcome::AlreadyExited(self.exit_code(shell_id).unwrap_or(-1));
         if !alive.load(Ordering::SeqCst) {
             return Ok(exited());
         }
-        let ret = unsafe { libc::killpg(pid as libc::pid_t, signum as libc::c_int) };
-        if ret == 0 {
-            return Ok(SignalOutcome::Delivered);
-        }
-        let err = std::io::Error::last_os_error();
-        // ESRCH while still flagged alive: the child exited but its wait
-        // thread has not recorded it yet. Give it a moment to catch up.
-        if err.raw_os_error() == Some(libc::ESRCH)
-            && wait_until(|| !alive.load(Ordering::SeqCst), Duration::from_millis(500))
+        #[cfg(unix)]
         {
-            return Ok(exited());
+            let _ = host;
+            let ret = unsafe { libc::killpg(pid as libc::pid_t, signum as libc::c_int) };
+            if ret == 0 {
+                return Ok(SignalOutcome::Delivered);
+            }
+            let err = std::io::Error::last_os_error();
+            // ESRCH while still flagged alive: the child exited but its wait
+            // thread has not recorded it yet. Give it a moment to catch up.
+            if err.raw_os_error() == Some(libc::ESRCH)
+                && wait_until(|| !alive.load(Ordering::SeqCst), Duration::from_millis(500))
+            {
+                return Ok(exited());
+            }
+            Err(anyhow!("killpg({pid}, {signum}) failed: {err}"))
         }
-        Err(anyhow!("killpg({pid}, {signum}) failed: {err}"))
+        #[cfg(windows)]
+        {
+            let _ = pid;
+            let res = host.lock().unwrap().signal(signum);
+            match res {
+                Ok(()) => Ok(SignalOutcome::Delivered),
+                // The child exited before the signal landed (see ESRCH above).
+                Err(_) if wait_until(|| !alive.load(Ordering::SeqCst), Duration::from_millis(500)) => {
+                    Ok(exited())
+                }
+                Err(e) => Err(e),
+            }
+        }
     }
 
     /// Exit code of `instance` (or `shell_id`) if it exists and has exited.
@@ -1161,7 +1188,6 @@ static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
 /// lock), this fails without touching the socket. Only a stale socket file
 /// (no lock holder, connect refused) is removed so the caller can bind.
 fn claim_socket(socket_path: &std::path::Path) -> Result<std::fs::File> {
-    use std::os::unix::io::AsRawFd;
     let mut lock_path = socket_path.as_os_str().to_owned();
     lock_path.push(".lock");
     let lock = std::fs::OpenOptions::new()
@@ -1170,14 +1196,31 @@ fn claim_socket(socket_path: &std::path::Path) -> Result<std::fs::File> {
         .write(true)
         .open(&lock_path)
         .with_context(|| format!("open daemon lock {lock_path:?}"))?;
-    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        let err = std::io::Error::last_os_error();
-        if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
+                return Err(anyhow!(
+                    "another ham-pty-host daemon owns {socket_path:?} (lock {lock_path:?} is held)"
+                ));
+            }
+            return Err(anyhow!("flock {lock_path:?}: {err}"));
+        }
+    }
+    // Windows: an exclusive LockFileEx on the same file.
+    #[cfg(windows)]
+    match lock.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => {
             return Err(anyhow!(
                 "another ham-pty-host daemon owns {socket_path:?} (lock {lock_path:?} is held)"
             ));
         }
-        return Err(anyhow!("flock {lock_path:?}: {err}"));
+        Err(std::fs::TryLockError::Error(err)) => {
+            return Err(anyhow!("lock {lock_path:?}: {err}"));
+        }
     }
     if UnixStream::connect(socket_path).is_ok() {
         return Err(anyhow!(
@@ -1194,6 +1237,8 @@ fn claim_socket(socket_path: &std::path::Path) -> Result<std::fs::File> {
 
 /// REQ-PTY-3: raise this process's RLIMIT_NOFILE soft limit to its hard limit,
 /// capped at [`NOFILE_TARGET`]; never lowers it. Returns the resulting soft limit.
+/// Unix only: Windows has no per-process handle limit to raise.
+#[cfg(unix)]
 pub fn raise_nofile_limit() -> std::io::Result<libc::rlim_t> {
     let mut lim = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
     if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) } != 0 {
@@ -1212,10 +1257,14 @@ pub fn raise_nofile_limit() -> std::io::Result<libc::rlim_t> {
 /// True for the accept/clone errors that mean "out of fds or kernel memory":
 /// the daemon backs off and keeps going rather than spinning.
 fn is_resource_exhaustion(e: &std::io::Error) -> bool {
-    matches!(
+    #[cfg(unix)]
+    return matches!(
         e.raw_os_error(),
         Some(libc::EMFILE | libc::ENFILE | libc::ENOBUFS | libc::ENOMEM)
-    )
+    );
+    // WSAEMFILE, WSAENOBUFS, ERROR_NOT_ENOUGH_MEMORY, ERROR_OUTOFMEMORY.
+    #[cfg(windows)]
+    return matches!(e.raw_os_error(), Some(10024 | 10055 | 8 | 14));
 }
 
 fn accept_loop(listener: UnixListener, daemon: Daemon, shutdown: Arc<AtomicBool>) {
@@ -1424,6 +1473,7 @@ fn handle_ctl(daemon: &Daemon, id: u64, msg: CtlMsg, tx: &ReplySink) {
 /// signalled. Convenience entrypoint used by `main`. Blocks forever (until
 /// Ctrl-C), serving clients.
 pub fn serve(socket_path: impl Into<std::path::PathBuf>) -> Result<()> {
+    #[cfg(unix)]
     match raise_nofile_limit() {
         Ok(n) => eprintln!("[ham-pty-host] RLIMIT_NOFILE soft limit {n}"),
         Err(e) => eprintln!("[ham-pty-host] could not raise RLIMIT_NOFILE: {e}"),
@@ -1433,7 +1483,8 @@ pub fn serve(socket_path: impl Into<std::path::PathBuf>) -> Result<()> {
         "[ham-pty-host] daemon listening on {}",
         server.socket_path().display()
     );
-    // Install a SIGINT/SIGTERM handler that flips a flag; park until then.
+    // Install a SIGINT/SIGTERM (Windows: console Ctrl-C/Break/close) handler
+    // that flips a flag; park until then.
     install_stop_handler();
     while !STOP_REQUESTED.load(Ordering::SeqCst) {
         std::thread::sleep(Duration::from_millis(200));
@@ -1444,14 +1495,34 @@ pub fn serve(socket_path: impl Into<std::path::PathBuf>) -> Result<()> {
 
 static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 
+#[cfg(unix)]
 extern "C" fn stop_handler(_sig: i32) {
     STOP_REQUESTED.store(true, Ordering::SeqCst);
 }
 
+#[cfg(unix)]
 fn install_stop_handler() {
     unsafe {
         libc::signal(libc::SIGINT, stop_handler as *const () as usize);
         libc::signal(libc::SIGTERM, stop_handler as *const () as usize);
+    }
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn stop_handler(ctrl_type: u32) -> windows_sys::core::BOOL {
+    STOP_REQUESTED.store(true, Ordering::SeqCst);
+    // Close/logoff/shutdown end the process as soon as this returns: give
+    // `serve` a moment to tear the agents down first.
+    if ctrl_type >= windows_sys::Win32::System::Console::CTRL_CLOSE_EVENT {
+        std::thread::sleep(Duration::from_secs(3));
+    }
+    1
+}
+
+#[cfg(windows)]
+fn install_stop_handler() {
+    unsafe {
+        windows_sys::Win32::System::Console::SetConsoleCtrlHandler(Some(stop_handler), 1);
     }
 }
 
@@ -1474,7 +1545,7 @@ mod tests {
 
     #[test]
     fn reply_overflow_wakes_its_socket_reader() {
-        let (server, mut client) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (server, mut client) = UnixStream::pair().unwrap();
         let (sink, _rx) = super::reply_channel(Some(server));
         let huge = super::CtlReply::Output { instance: "pane".into(), data: vec![0; super::REPLY_QUEUE_BYTES] };
         assert!(sink.send(huge).is_err());
@@ -3164,6 +3235,7 @@ mod tests {
 
     /// Open /dev/null until the fd table is full; the caller drops some to
     /// leave an exact number free.
+    #[cfg(unix)]
     fn fill_fd_table() -> Vec<std::fs::File> {
         let mut fill = Vec::new();
         loop {
@@ -3249,12 +3321,14 @@ mod tests {
         server.shutdown();
     }
 
+    #[cfg(unix)]
     #[test]
     fn daemon_keeps_serving_after_fd_exhaustion() {
         require_pty!();
         run_child_scenario("child_daemon_keeps_serving_after_fd_exhaustion");
     }
 
+    #[cfg(unix)]
     #[test]
     #[ignore = "run in a fresh process by daemon_keeps_serving_after_fd_exhaustion"]
     fn child_daemon_keeps_serving_after_fd_exhaustion() {

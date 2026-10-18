@@ -7,6 +7,7 @@
 //!   * [`server`]  — unix-socket host server, multi-client fan-out (PTYH-2).
 //!   * [`client`]  — raw-mode `attach` client (PTYH-2).
 //!   * [`termios`] — local terminal raw mode + winsize FFI (PTYH-2).
+//!   * [`ipc`]     — AF_UNIX listener/stream for Unix and Windows.
 //!   * [`debug_tui`] — pure state machine for the in-app debug TUI (PTYH-3).
 //!   * [`debug_ui`]  — ratatui/crossterm runtime for the debug TUI (PTYH-3).
 //!   * [`dproto`]  — instance-scoped multi-agent daemon protocol (HOST-1).
@@ -25,6 +26,9 @@ pub mod debug_ui;
 pub mod detect;
 pub mod dproto;
 pub mod host;
+pub mod ipc;
+#[cfg(windows)]
+mod job;
 pub mod proto;
 pub mod selector;
 pub mod server;
