@@ -466,6 +466,8 @@ export function AttentionDeck({
   return createPortal(
     <div data-debug-id="attention-deck-backdrop" data-attention-backdrop={phase} className="fixed inset-0 z-modal flex items-end justify-center bg-backdrop" onMouseDown={(e) => { if (open && e.target === e.currentTarget) onClose(); }}>
       <style>{DECK_CSS}</style>
+      {/* Desktop: a tall sheet, centered, nearly full height (a 40px gap above,
+          the bottom chrome below) with a readable max width. Phones: full screen. */}
       <section
         role="dialog"
         aria-modal="true"
@@ -474,7 +476,7 @@ export function AttentionDeck({
         data-attention-sheet={phase}
         ref={panelRef}
         tabIndex={-1}
-        className="relative mb-[var(--ui-bottom-chrome,32px)] flex h-[min(680px,calc(100%-48px))] w-full max-w-[620px] flex-col overflow-hidden rounded-t-[var(--radius-lg)] border border-subtle bg-surface shadow-panel max-sm:mb-0 max-sm:h-full max-sm:rounded-none"
+        className="relative mb-[var(--ui-bottom-chrome,32px)] flex h-[calc(100%-var(--ui-bottom-chrome,32px)-40px)] w-full max-w-[760px] flex-col overflow-hidden rounded-t-[var(--radius-lg)] border border-subtle bg-surface shadow-panel max-sm:mb-0 max-sm:h-full max-sm:rounded-none"
       >
         {/* Header and filters share one grid so short / narrow screens (foldables,
             phones in landscape) can reflow them into a single compact band; see
