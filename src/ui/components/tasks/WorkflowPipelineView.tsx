@@ -6,6 +6,7 @@ import { TaskCard } from './TaskCard';
 import { useCancelWorkflowMutation, useFetchWorkflowStatusQuery, useRetryWorkflowMutation } from '../../api/endpoints/tasks';
 import { normalizeTaskState } from './taskV2Types';
 import { EMPTY_TASK_NAMES, type TaskNames } from './taskNames';
+import { taskNeedsYou } from './taskActions';
 import { actionErrorMessage } from './useTaskActions';
 
 export interface WorkflowPipelineViewProps {
@@ -43,8 +44,8 @@ export function renderStageTitle(title: string, inputs: Record<string, unknown> 
 
 const STAGE_ICON: Record<StageStatus, IconName | null> = {
   complete: 'check',
-  failed: 'alert',
-  active: 'clock',
+  failed: 'close',
+  active: 'play',
   pending: null,
 };
 const STAGE_TEXT_TONE: Record<StageStatus, string> = {
@@ -53,6 +54,37 @@ const STAGE_TEXT_TONE: Record<StageStatus, string> = {
   active: 'text-info',
   pending: 'text-faint',
 };
+const STAGE_STATUS_LABEL: Record<StageStatus, string> = {
+  complete: 'complete',
+  failed: 'failed',
+  active: 'running',
+  pending: 'waiting',
+};
+const STAGE_NODE: Record<StageStatus, string> = {
+  complete: 'border-success bg-success text-canvas',
+  failed: 'border-danger bg-danger-soft text-danger',
+  active: 'border-info bg-info-soft text-info',
+  pending: 'border-subtle bg-surface text-faint',
+};
+
+/** The stepper marker: a circle per stage, a diamond for gates. */
+function StageNode({ status, gate, awaitingDecision }: { status: StageStatus; gate: boolean; awaitingDecision: boolean }) {
+  const tone = awaitingDecision ? 'border-accent bg-accent-soft text-accent' : STAGE_NODE[status];
+  const icon = STAGE_ICON[status];
+  return (
+    <span className="relative z-[1] inline-flex h-6 w-6 shrink-0 items-center justify-center" aria-label={awaitingDecision ? 'waiting for your decision' : status}>
+      {status === 'active' && !awaitingDecision && (
+        <span aria-hidden="true" className="absolute inset-0 rounded-full border border-info opacity-60 motion-safe:animate-ping" />
+      )}
+      <span
+        aria-hidden="true"
+        className={`inline-flex items-center justify-center border ${tone} ${gate ? 'h-4 w-4 rotate-45 rounded-[3px]' : 'h-6 w-6 rounded-full'}`}
+      >
+        {icon && <Icon name={icon} size={gate ? 10 : 12} className={gate ? '-rotate-45' : ''} />}
+      </span>
+    </span>
+  );
+}
 
 /**
  * A workflow run as its stages, top to bottom (plan REQ-UI-7). Each stage is a
@@ -107,7 +139,7 @@ export const WorkflowPipelineView: React.FC<WorkflowPipelineViewProps> = ({
   };
 
   return (
-    <div data-debug-id="workflow-pipeline-view" className={`flex flex-col gap-3 p-4 text-left ${className}`}>
+    <div data-debug-id="workflow-pipeline-view" className={`flex flex-col gap-5 p-4 text-left sm:p-5 ${className}`}>
       <TaskSummaryBar
         tasks={tasks}
         chainFleets={chainFleets}
@@ -143,8 +175,8 @@ export const WorkflowPipelineView: React.FC<WorkflowPipelineViewProps> = ({
         </Text>
       )}
 
-      <ol className="flex flex-col gap-4">
-        {stages.map((st) => {
+      <ol data-debug-id="workflow-stepper" className="flex flex-col">
+        {stages.map((st, idx) => {
           const inst = tasks
             .filter((t) => t.stage_key === st.key)
             .sort((a, b) => (a.stage_index || 0) - (b.stage_index || 0));
@@ -157,54 +189,78 @@ export const WorkflowPipelineView: React.FC<WorkflowPipelineViewProps> = ({
                 : inst.some((t) => ['in_progress', 'in_review'].includes(normalizeTaskState(t.state)))
                   ? 'active'
                   : 'pending';
+          const isGate = st.kind === 'gate';
+          // A gate only asks for a decision while one is actually pending.
+          const awaitingDecision = isGate && inst.some(taskNeedsYou);
           const isOpen = !collapsed[st.key];
-          const icon = STAGE_ICON[status];
+          const isLast = idx === stages.length - 1;
+          const title = renderStageTitle(st.title || st.key, workflowStatus?.inputs || {});
+          // One task per stage: the card carries the title, so the stage row only
+          // names the step instead of repeating it.
+          const single = inst.length === 1;
           const progress =
             inst.length === 0
               ? st.needs?.length
-                ? `starts after ${st.needs.join(', ')}`
+                ? `starts after ${st.needs.map((n: string) => n.replace(/_/g, ' ')).join(', ')}`
                 : 'not started'
-              : `${doneCount} of ${inst.length} done`;
+              : single
+                ? STAGE_STATUS_LABEL[status]
+                : `${doneCount} of ${inst.length} done`;
 
           return (
-            <li key={st.key} data-debug-id={`stage-card-${st.key}`} className="space-y-2">
-              <button
-                type="button"
-                aria-expanded={isOpen}
-                onClick={() => setCollapsed((prev) => ({ ...prev, [st.key]: isOpen }))}
-                className="flex w-full min-w-0 items-center gap-2 text-left"
-              >
-                <Icon name={isOpen ? 'chevron-down' : 'chevron-right'} size="sm" className="shrink-0 text-muted" />
-                <span className={`inline-flex h-4 w-4 shrink-0 items-center justify-center ${STAGE_TEXT_TONE[status]}`}>
-                  {icon ? <Icon name={icon} size={12} title={status} /> : <span className="h-1.5 w-1.5 rounded-full bg-current" />}
-                </span>
-                <span className="truncate text-xs font-semibold text-primary">
-                  {renderStageTitle(st.title || st.key, workflowStatus?.inputs || {})}
-                </span>
-                <span className="shrink-0 text-[11px] text-muted">· {progress}</span>
-                {st.kind === 'gate' && <span className="shrink-0 text-[11px] text-muted">· needs a decision</span>}
-              </button>
-
-              {isOpen && inst.length > 0 && (
-                <div className="flex flex-col gap-2 pl-6">
-                  {inst.map((task) => (
-                    <TaskCard
-                      key={task.task_id}
-                      task={task}
-                      chainId={chainId}
-                      expanded={expandedTaskId === task.task_id}
-                      onToggle={onToggleTask}
-                      onSelectTask={onSelectTask}
-                      scrollIntoView={scrollTaskId === task.task_id}
-                      onScrolled={onScrolled}
-                      chainFleets={chainFleets}
-                      names={names}
-                      chainTasks={tasks}
-                      chainKind='workflow'
-                    />
-                  ))}
-                </div>
+            <li key={st.key} data-debug-id={`stage-card-${st.key}`} className="relative flex gap-3 pb-5 last:pb-0">
+              {/* Connector to the next stage: solid once this stage is complete. */}
+              {!isLast && (
+                <span
+                  aria-hidden="true"
+                  className={`absolute left-3 top-7 bottom-0 w-px -translate-x-1/2 ${status === 'complete' ? 'bg-success' : 'bg-subtle'}`}
+                />
               )}
+              <StageNode status={status} gate={isGate} awaitingDecision={awaitingDecision} />
+
+              <div className="min-w-0 flex-1 space-y-2">
+                <button
+                  type="button"
+                  aria-expanded={isOpen}
+                  onClick={() => setCollapsed((prev) => ({ ...prev, [st.key]: isOpen }))}
+                  className="flex min-h-6 w-full min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 rounded-sm text-left focus-visible:outline-none focus-visible:shadow-focus"
+                >
+                  <Text as="span" role="overline" tone="faint" className="shrink-0 uppercase tabular-nums">
+                    Step {idx + 1}
+                    {isGate ? ' · Gate' : ''}
+                  </Text>
+                  {!single && <span className="min-w-0 truncate text-title text-primary">{title}</span>}
+                  <span className={`shrink-0 text-caption ${awaitingDecision ? 'text-accent' : STAGE_TEXT_TONE[status]}`}>
+                    {awaitingDecision ? 'Waiting for your decision' : progress}
+                  </span>
+                  <Icon
+                    name="chevron-right"
+                    size="sm"
+                    className={`ml-auto shrink-0 text-faint transition-transform duration-150 motion-reduce:transition-none ${isOpen ? 'rotate-90' : ''}`}
+                  />
+                </button>
+
+                {isOpen && inst.length > 0 && (
+                  <div className="flex flex-col gap-2">
+                    {inst.map((task) => (
+                      <TaskCard
+                        key={task.task_id}
+                        task={task}
+                        chainId={chainId}
+                        expanded={expandedTaskId === task.task_id}
+                        onToggle={onToggleTask}
+                        onSelectTask={onSelectTask}
+                        scrollIntoView={scrollTaskId === task.task_id}
+                        onScrolled={onScrolled}
+                        chainFleets={chainFleets}
+                        names={names}
+                        chainTasks={tasks}
+                        chainKind='workflow'
+                      />
+                    ))}
+                  </div>
+                )}
+              </div>
             </li>
           );
         })}

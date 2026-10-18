@@ -13,13 +13,24 @@ import {
   workLeaseHolder,
   uiToneForPriority,
 } from './taskV2Types';
-import { TASK_ACTION_LABELS, editLock, getTaskActions, isDraft, type TaskActionId } from './taskActions';
+import { TASK_ACTION_LABELS, editLock, getTaskActions, isDraft, taskNeedsYou, type TaskActionId } from './taskActions';
 import { TaskEditModal, type TaskEditField } from './TaskEditModal';
 import { describeEffectivePlacement, taskEffectivePlacement } from './fleetSelection';
 import { useTaskActions } from './useTaskActions';
 import { TaskDetails } from './TaskDetails';
 import { HolderName } from './HolderName';
+import { PersonChip } from './PersonChip';
 import { EMPTY_TASK_NAMES, type TaskNames } from './taskNames';
+
+/** Left-rail color per state (needs-you overrides it with the accent). */
+const STATE_RAIL: Record<string, string> = {
+  in_progress: 'bg-info',
+  in_review: 'bg-warning',
+  ready: 'bg-strong',
+  backlog: 'bg-subtle',
+  done: 'bg-success',
+  cancelled: 'bg-subtle',
+};
 
 export interface TaskCardProps {
   task: TaskWire;
@@ -63,18 +74,6 @@ export const TaskCard: React.FC<TaskCardProps> = ({
 }) => {
   const [editing, setEditing] = React.useState<TaskEditField | null>(null);
   const lock = editLock(task, chainKind);
-  const editButton = (field: TaskEditField, label: string) => (
-    <IconButton
-      icon="pencil"
-      label={lock.locked ? `${label}: ${lock.reason}` : label}
-      variant="ghost"
-      size="sm"
-      disabled={lock.locked}
-      data-debug-id={`task-card-edit-${field}-${task.task_id}`}
-      onClick={() => setEditing(field)}
-      className="-my-1"
-    />
-  );
   const cardRef = React.useRef<HTMLElement | null>(null);
   // Runs after the card exists in the DOM, so a cold deep link (the chain still
   // loading when the route is read) scrolls once its tasks arrive.
@@ -102,7 +101,6 @@ export const TaskCard: React.FC<TaskCardProps> = ({
     : people.workers.length
       ? people.workers.map(names.agent).join(', ')
       : 'no worker in fleet';
-  const reviewerLabel = [...people.reviewers.map(names.agent), ...(people.userApproval ? ['you'] : [])].join(', ');
   const deps = task.depends_on || [];
 
   const runAction = async (id: TaskActionId) => {
@@ -134,54 +132,93 @@ export const TaskCard: React.FC<TaskCardProps> = ({
   };
 
   const toggle = () => onToggle?.(task.task_id);
+  const needsYou = taskNeedsYou(task);
+  const finished = state === 'done' || state === 'cancelled';
+  const priority = String(task.priority || 'p2').toLowerCase();
+  // Priority only earns a badge while the work is open and urgent.
+  const showPriority = !isGate && !finished && (priority === 'p0' || priority === 'p1');
+  const rail = needsYou ? 'bg-accent' : STATE_RAIL[state];
+  const holderName = people.holder ? names.instance(people.holder) || workerLabel : workerLabel;
+  const editItems: { field: TaskEditField; label: string }[] = lock.locked
+    ? []
+    : [
+        { field: 'assignee', label: 'Change assignee' },
+        { field: 'reviewers', label: 'Change reviewers' },
+        { field: 'deps', label: 'Change what it waits for' },
+      ];
+  const hasMenu = more.length > 0 || editItems.length > 0;
 
   return (
     <article
       ref={cardRef}
       data-debug-id={`task-card-${task.task_id}`}
       data-id={task.task_id}
+      data-needs-you={needsYou ? 'true' : undefined}
       aria-label={task.title}
-      className={`rounded-lg border bg-surface text-xs ${expanded ? 'border-strong' : 'border-subtle'} ${className}`}
+      className={[
+        'group relative overflow-hidden rounded-lg border text-xs transition-[background-color,border-color,box-shadow] duration-150 motion-reduce:transition-none',
+        needsYou
+          ? 'border-accent bg-accent-soft shadow-glow-accent'
+          : expanded
+            ? 'border-strong bg-surface-raised shadow-panel'
+            : 'border-subtle bg-surface hover:border-strong hover:bg-surface-raised',
+        className,
+      ].join(' ')}
     >
-      <div className="space-y-1.5 p-3">
-        {/* Row 1: expand + title + state + priority */}
-        <div className="flex min-w-0 items-center gap-2">
+      {/* State rail: the card's status at a glance, before reading anything. */}
+      <span aria-hidden="true" className={`absolute inset-y-0 left-0 w-[3px] ${rail}`} />
+
+      <div className="space-y-2 py-3 pl-5 pr-3">
+        {/* Row 1: title (wraps to two lines) + state + menu */}
+        <div className="flex min-w-0 items-start gap-2">
           <button
             type="button"
             data-debug-id={`task-card-toggle-${task.task_id}`}
             aria-expanded={expanded}
             onClick={toggle}
-            className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+            className="flex min-w-0 flex-1 items-start gap-1.5 rounded-sm text-left focus-visible:outline-none focus-visible:shadow-focus"
           >
-            <Icon name={expanded ? 'chevron-down' : 'chevron-right'} size="sm" className="shrink-0 text-muted" />
-            <span className="truncate font-semibold text-primary">{task.title}</span>
+            <Icon
+              name="chevron-right"
+              size="sm"
+              className={`mt-0.5 shrink-0 text-muted transition-transform duration-150 motion-reduce:transition-none ${expanded ? 'rotate-90' : ''}`}
+            />
+            <span className={`line-clamp-2 text-title ${finished ? 'text-muted' : 'text-primary'}`}>{task.title}</span>
           </button>
-          {isDraft(task) && <Badge tone="neutral">Draft</Badge>}
-          {isGate ? (
-            <Badge tone="info">Gate</Badge>
-          ) : (
-            <Badge tone={uiToneForPriority(task.priority)}>{String(task.priority || 'p2').toUpperCase()}</Badge>
-          )}
-          <StatusPill tone={TASK_STATE_TONE[state]}>{TASK_STATE_LABELS[state]}</StatusPill>
-          {more.length > 0 && (
-            <Menu
-              label={`More actions for ${task.title}`}
-              align="end"
-              trigger={
-                <IconButton icon="more-horizontal" label="More actions" variant="ghost" size="sm" data-debug-id={`task-card-more-${task.task_id}`} />
-              }
-            >
-              {more.map((id) => (
-                <Menu.Item key={id} danger={id === 'cancel'} onClick={() => void runAction(id)}>
-                  {TASK_ACTION_LABELS[id]}
-                </Menu.Item>
-              ))}
-            </Menu>
-          )}
+          <div className="-my-1 flex shrink-0 items-center">
+            {hasMenu && (
+              <Menu
+                label={`More actions for ${task.title}`}
+                align="end"
+                trigger={
+                  <IconButton icon="more-horizontal" label="More actions" variant="ghost" size="sm" data-debug-id={`task-card-more-${task.task_id}`} />
+                }
+              >
+                {editItems.map((it) => (
+                  <Menu.Item key={it.field} onClick={() => setEditing(it.field)}>
+                    {it.label}
+                  </Menu.Item>
+                ))}
+                {more.map((id) => (
+                  <Menu.Item key={id} danger={id === 'cancel'} onClick={() => void runAction(id)}>
+                    {TASK_ACTION_LABELS[id]}
+                  </Menu.Item>
+                ))}
+              </Menu>
+            )}
+          </div>
         </div>
 
-        {/* Row 2: what is happening, in one sentence */}
-        <Text as="p" role="caption" tone="muted" data-debug-id={`task-card-status-${task.task_id}`}>
+        {/* Row 2: state first, then what is happening, in one sentence. The
+            pills sit here rather than beside the title so the title keeps the
+            full width on narrow screens. */}
+        <div className="flex flex-wrap items-center gap-1.5">
+          <StatusPill tone={TASK_STATE_TONE[state]}>{TASK_STATE_LABELS[state]}</StatusPill>
+          {showPriority && <Badge tone={uiToneForPriority(task.priority)}>{priority.toUpperCase()}</Badge>}
+          {isDraft(task) && <Badge tone="neutral">Draft</Badge>}
+          {isGate && <Badge tone="info">Gate</Badge>}
+        </div>
+        <Text as="p" role="body-sm" tone="muted" data-debug-id={`task-card-status-${task.task_id}`}>
           <span className="text-primary">
             {holderLease ? (
               <>
@@ -194,29 +231,29 @@ export const TaskCard: React.FC<TaskCardProps> = ({
           {detail ? ` · ${detail}` : ''}
         </Text>
 
-        {/* Row 3: who works it, who reviews it, what it waits for */}
-        {!isGate && (
-          <div
-            data-debug-id={`task-card-people-${task.task_id}`}
-            className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted"
-          >
-            <span className="inline-flex items-center gap-0.5">
-              assignee:{' '}
-              {people.holder ? (
-                <HolderName instanceId={people.holder} names={names} className="font-semibold text-primary" />
-              ) : (
-                <span className={people.workers.length ? 'font-semibold text-primary' : 'text-warning'}>{workerLabel}</span>
-              )}
-              {editButton('assignee', 'Change assignee')}
-            </span>
-            <span className="inline-flex items-center gap-0.5">
-              reviewers: <span className={reviewerLabel ? 'font-semibold text-primary' : 'text-faint'}>{reviewerLabel || 'none'}</span>
-              {editButton('reviewers', 'Change reviewers')}
-            </span>
-            {(deps.length > 0 || !lock.locked) && (
-              <span className="inline-flex flex-wrap items-center gap-0.5">
-                waits for:{' '}
-                {deps.length === 0 && <span className="text-faint">nothing</span>}
+        {/* Row 3: who works it, who reviews it, what it waits for. Finished
+            cards keep only the sentence; the rest is in the details. */}
+        {!isGate && (!finished || expanded) && (
+          <div data-debug-id={`task-card-people-${task.task_id}`} className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-caption text-muted">
+            {people.holder ? (
+              <PersonChip name={holderName} title="Working on it">
+                <HolderName instanceId={people.holder} names={names} className="text-primary" />
+              </PersonChip>
+            ) : (
+              <PersonChip name={workerLabel} tone={people.assignee || people.workers.length ? 'default' : 'missing'} title="Assignee" />
+            )}
+            {(people.reviewers.length > 0 || people.userApproval) && (
+              <span className="inline-flex items-center gap-1.5">
+                <Icon name="eye" size={12} className="text-faint" title="Reviewers" />
+                {people.reviewers.map((r) => (
+                  <PersonChip key={r} name={names.agent(r)} title="Reviewer" />
+                ))}
+                {people.userApproval && <PersonChip name="You" tone="you" title="Needs your approval" />}
+              </span>
+            )}
+            {deps.length > 0 && (
+              <span className="inline-flex min-w-0 flex-wrap items-center gap-1">
+                <Icon name="git-branch" size={12} className="text-faint" title="Waits for" />
                 {deps.map((d, i) => (
                   <React.Fragment key={d}>
                     {i > 0 ? ', ' : ''}
@@ -232,12 +269,15 @@ export const TaskCard: React.FC<TaskCardProps> = ({
                     </Link>
                   </React.Fragment>
                 ))}
-                {editButton('deps', 'Change what it waits for')}
               </span>
             )}
             {placement.bridge ? (
-              <span title={`Bridge ${placement.bridgeSource}${placement.model ? `; model ${placement.model} (${placement.modelSource})` : ''}`}>
-                bridge: <span className="font-semibold text-primary">{placement.bridge}</span>
+              <span
+                className="inline-flex items-center gap-1"
+                title={`Bridge ${placement.bridgeSource}${placement.model ? `; model ${placement.model} (${placement.modelSource})` : ''}`}
+              >
+                <Icon name="device" size={12} className="text-faint" />
+                {placement.bridge}
               </span>
             ) : null}
             {badges.map((b, i) => (
@@ -250,12 +290,12 @@ export const TaskCard: React.FC<TaskCardProps> = ({
 
         {/* Row 4: the action that matters now (the rest is in the More menu) */}
         {(primary.length > 0 || actions.error) && (
-          <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+          <div className="flex flex-wrap items-center gap-2 pt-1">
             {primary.map((id) => (
               <Button
                 key={id}
                 size="sm"
-                variant={id === 'request_changes' ? 'secondary' : 'primary'}
+                variant={id === 'request_changes' || !needsYou ? 'secondary' : 'primary'}
                 disabled={actions.busy}
                 data-debug-id={`task-action-${id}-${task.task_id}`}
                 onClick={() => void runAction(id)}
@@ -283,14 +323,16 @@ export const TaskCard: React.FC<TaskCardProps> = ({
       />
 
       {expanded && (
-        <TaskDetails
-          chainId={chainId}
-          task={task}
-          actions={actions}
-          chainFleets={chainFleets}
-          names={names}
-          onSelectTask={onSelectTask}
-        />
+        <div className="border-t border-subtle">
+          <TaskDetails
+            chainId={chainId}
+            task={task}
+            actions={actions}
+            chainFleets={chainFleets}
+            names={names}
+            onSelectTask={onSelectTask}
+          />
+        </div>
       )}
     </article>
   );

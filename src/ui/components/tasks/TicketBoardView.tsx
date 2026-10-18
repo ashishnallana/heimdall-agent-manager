@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from 'react';
-import { Button, EmptyState, Text } from '@ui';
+import { Button, EmptyState, Icon, IconButton, Menu, Text } from '@ui';
+import { useIsMobile } from '../shell/responsive';
 import { TaskWire } from '../../api/taskWire';
 import { TaskSummaryBar } from './TaskSummaryBar';
 import { TaskCard } from './TaskCard';
@@ -44,6 +45,40 @@ export function sortTasksForBoard(tasks: TaskWire[]): TaskWire[] {
   });
 }
 
+type BoardSectionKey = 'needs_you' | 'in_progress' | 'in_review' | 'up_next';
+
+const SECTION_LABELS: Record<BoardSectionKey, string> = {
+  needs_you: 'Needs you',
+  in_progress: 'In progress',
+  in_review: 'In review',
+  up_next: 'Up next',
+};
+
+/** Open tasks in headed groups, in board order; empty groups are dropped. */
+export function groupForBoard(sorted: TaskWire[], expandedTaskId?: string | null) {
+  const buckets: Record<BoardSectionKey, TaskWire[]> = { needs_you: [], in_progress: [], in_review: [], up_next: [] };
+  for (const t of sorted) {
+    if (isFinished(t) && t.task_id !== expandedTaskId) continue;
+    const s = normalizeTaskState(t.state);
+    const key: BoardSectionKey = taskNeedsYou(t) ? 'needs_you' : s === 'in_progress' ? 'in_progress' : s === 'in_review' ? 'in_review' : 'up_next';
+    buckets[key].push(t);
+  }
+  return (Object.keys(buckets) as BoardSectionKey[])
+    .filter((k) => buckets[k].length > 0)
+    .map((k) => ({ key: k, label: SECTION_LABELS[k], tasks: buckets[k] }));
+}
+
+function SectionLabel({ label, count, accent = false }: { label: string; count: number; accent?: boolean }) {
+  return (
+    <span className="flex items-center gap-2">
+      <Text as="span" role="overline" tone={accent ? 'accent' : 'faint'} className="uppercase">
+        {label}
+      </Text>
+      <span className={`text-caption tabular-nums ${accent ? 'text-accent' : 'text-faint'}`}>{count}</span>
+    </span>
+  );
+}
+
 function isFinished(t: TaskWire): boolean {
   const s = normalizeTaskState(t.state);
   return s === 'done' || s === 'cancelled';
@@ -74,10 +109,14 @@ export const TicketBoardView: React.FC<TicketBoardViewProps> = ({
 }) => {
   const [needsYouOnly, setNeedsYouOnly] = useState(false);
   const [showFinished, setShowFinished] = useState(false);
+  const isMobile = useIsMobile();
 
   const sorted = useMemo(() => sortTasksForBoard(tasks), [tasks]);
-  const visible = needsYouOnly ? sorted.filter(taskNeedsYou) : sorted;
-  const open = visible.filter((t) => !isFinished(t) || t.task_id === expandedTaskId);
+  // The needs-you filter turns itself off once nothing needs you, so it can
+  // never strand the board empty with no way back (audit finding).
+  const filtering = needsYouOnly && sorted.some(taskNeedsYou);
+  const visible = filtering ? sorted.filter(taskNeedsYou) : sorted;
+  const sections = useMemo(() => groupForBoard(visible, expandedTaskId), [visible, expandedTaskId]);
   const finished = visible.filter((t) => isFinished(t) && t.task_id !== expandedTaskId);
 
   const renderCard = (task: TaskWire) => (
@@ -98,13 +137,13 @@ export const TicketBoardView: React.FC<TicketBoardViewProps> = ({
   );
 
   return (
-    <div data-debug-id="ticket-board-view" className={`flex flex-col gap-3 p-4 text-left ${className}`}>
+    <div data-debug-id="ticket-board-view" className={`flex flex-col gap-5 p-4 text-left sm:p-5 ${className}`}>
       <TaskSummaryBar
         tasks={tasks}
         chainFleets={chainFleets}
         kind="ticket"
         summaryText={summaryText}
-        needsYouActive={needsYouOnly}
+        needsYouActive={filtering}
         onToggleNeedsYou={() => setNeedsYouOnly((v) => !v)}
         actions={
           <>
@@ -113,15 +152,28 @@ export const TicketBoardView: React.FC<TicketBoardViewProps> = ({
                 Publish chain
               </Button>
             )}
-            {onOpenFleetDrawer && (
-              <Button size="sm" variant="secondary" onClick={onOpenFleetDrawer} data-debug-id="task-board-fleet-btn">
-                Fleet
-              </Button>
-            )}
-            {onOpenReviewRoles && (
-              <Button size="sm" variant="secondary" onClick={onOpenReviewRoles} data-debug-id="task-board-review-roles-btn">
-                Review roles
-              </Button>
+            {isMobile && (onOpenFleetDrawer || onOpenReviewRoles) ? (
+              <Menu
+                label="Chain settings"
+                align="end"
+                trigger={<IconButton icon="more-horizontal" label="Chain settings" variant="solid" size="sm" data-debug-id="task-board-settings-menu" />}
+              >
+                {onOpenFleetDrawer && <Menu.Item onClick={onOpenFleetDrawer}>Fleet</Menu.Item>}
+                {onOpenReviewRoles && <Menu.Item onClick={onOpenReviewRoles}>Review roles</Menu.Item>}
+              </Menu>
+            ) : (
+              <>
+                {onOpenFleetDrawer && (
+                  <Button size="sm" variant="secondary" onClick={onOpenFleetDrawer} data-debug-id="task-board-fleet-btn">
+                    Fleet
+                  </Button>
+                )}
+                {onOpenReviewRoles && (
+                  <Button size="sm" variant="secondary" onClick={onOpenReviewRoles} data-debug-id="task-board-review-roles-btn">
+                    Review roles
+                  </Button>
+                )}
+              </>
             )}
             {onNewTask && (
               <Button size="sm" variant="primary" onClick={onNewTask} data-debug-id="task-board-new-task-btn">
@@ -151,22 +203,36 @@ export const TicketBoardView: React.FC<TicketBoardViewProps> = ({
           }
         />
       ) : (
-        <div className="flex flex-col gap-2">
-          {open.map(renderCard)}
-          {open.length === 0 && finished.length === 0 && (
+        <div className="flex flex-col gap-5">
+          {sections.map((sec) => (
+            <section key={sec.key} aria-label={sec.label} data-debug-id={`task-board-section-${sec.key}`} className="flex flex-col gap-2">
+              <SectionLabel label={sec.label} count={sec.tasks.length} accent={sec.key === 'needs_you'} />
+              {sec.tasks.map(renderCard)}
+            </section>
+          ))}
+          {sections.length === 0 && finished.length === 0 && (
             <Text role="caption" tone="faint">
               Nothing here.
             </Text>
           )}
           {finished.length > 0 && (
-            <>
-              <div>
-                <Button size="sm" variant="ghost" onClick={() => setShowFinished((v) => !v)} data-debug-id="task-board-finished-toggle">
-                  {showFinished ? 'Hide finished' : `Show ${finished.length} finished`}
-                </Button>
-              </div>
+            <section aria-label="Finished" className="flex flex-col gap-2">
+              <button
+                type="button"
+                aria-expanded={showFinished}
+                onClick={() => setShowFinished((v) => !v)}
+                data-debug-id="task-board-finished-toggle"
+                className="flex items-center gap-1.5 self-start rounded-sm text-left focus-visible:outline-none focus-visible:shadow-focus"
+              >
+                <Icon
+                  name="chevron-right"
+                  size="sm"
+                  className={`text-faint transition-transform duration-150 motion-reduce:transition-none ${showFinished ? 'rotate-90' : ''}`}
+                />
+                <SectionLabel label="Finished" count={finished.length} />
+              </button>
               {showFinished && finished.map(renderCard)}
-            </>
+            </section>
           )}
         </div>
       )}

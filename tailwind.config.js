@@ -44,6 +44,7 @@ export default {
         accent: {
           DEFAULT: 'var(--color-accent)',
           fg: 'var(--color-accent-fg)',
+          soft: 'var(--color-accent-soft)',
         },
         // Semantic tones. `DEFAULT` = solid tone (bg-success / text-success /
         // border-success); `soft` = the `emphasis="soft"` tint (bg-success-soft).
