@@ -173,16 +173,21 @@ Consequences for the formats below: every signature is a JSON object `{"alg":…
 - Token regex: `vault:v2:e[1-9][0-9]{0,9}:[A-Za-z0-9+/]+={0,2}`.
 - Encryption always uses the current epoch. Decryption picks the key by the epoch in the header; an unknown epoch shows as the locked marker.
 
-**PTY payload v2.**
-- Layout: `u32be epoch | nonce12 | tag16 | ct`.
-- AAD = `heimdall-pty-v2|e<epoch>|<session_id>|<out|in>`.
-- The bridge's 4-byte salt must be fresh CSPRNG output for every stream-worker start and every epoch change.
-- The hub snapshot code (`shell_stream_screen_snapshot.odin:279-290`) passes the epoch through.
+**PTY payload v2** (revised after the P1 security review, finding H2).
+- Per-stream subkey: `HKDF-SHA256(ikm=epoch_key, salt=salt16, info="heimdall-pty-v2|<session_id>|<out|in>")`; `in` and `out` use separate subkeys.
+- Layout: `u32be epoch | salt16 | nonce12 | tag16 | ct`. A fresh random `salt16` on every stream-worker start and every epoch change; the nonce may be a counter within a subkey and is never reused under it.
+- AAD = `heimdall-pty-v2|e<epoch>|<session_id>|<out|in>`; input frames also carry a monotonic per-session counter in the AAD, and the bridge rejects any counter that does not increase (finding M1). `enc_spec` nonces are cached for their ±60 s window.
+- The hub snapshot code (`shell_stream_screen_snapshot.odin`) passes these fields through unchanged.
 
 **Search key v2.**
 - HKDF(ikm = current epoch key, salt = `heimdall/task-chain-search-rpc/v2`, info = `…/v2|e<epoch>`).
 - The RPC envelope carries `epoch`, and the AAD appends `|e<epoch>`.
 - The bridge accepts only the current epoch.
+
+**Bridge keyring authentication** (added after the P1 security review, finding C1). The ECDH unseal alone does not say who sent the keyring, so a hostile hub could seal its own keyring to a bridge.
+- P1 (in place): the keyring's `user_id` must equal the bridge's enrolled owner, and once a keyring is stored a new one is accepted only as a strict superset (identical keys for every shared epoch, `current_epoch` not lower). No rollback.
+- P2/P3 (required): at enrollment approval the approving device gives the bridge, inside the sealed unseal payload, the account `root_sign_pub` to pin. Every later unseal carries the signed `epoch` statement for `current_epoch` plus the approval chain of its issuer; the bridge verifies the chain to the pinned root, checks that the issuer is an approved, non-bridge device, and checks `epoch_commit` against the unwrapped key before installing anything. Missing or invalid proof → refuse.
+- The bridge identity key lives in persistent storage on every OS and is created only at enrollment. If it is lost, the bridge enters "identity lost; re-enroll" and never regenerates on its own (finding H1).
 
 **Command epoch floor.** `enc_spec`, PTY input frames and search RPCs are rejected by the bridge unless epoch == current epoch.
 
