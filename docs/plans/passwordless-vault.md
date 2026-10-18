@@ -253,7 +253,8 @@ CREATE TABLE vault_directories(user_id TEXT PRIMARY KEY, version INTEGER NOT NUL
   genesis_statement TEXT NOT NULL, genesis_signature TEXT NOT NULL,
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE vault_devices(device_id TEXT PRIMARY KEY, user_id TEXT NOT NULL,
-  kind TEXT NOT NULL CHECK(kind IN('browser','bridge','recovery')), label TEXT NOT NULL,
+  kind TEXT NOT NULL, label TEXT NOT NULL,  -- validated in domain code (credential agility)
+  sign_alg TEXT NOT NULL, wrap_alg TEXT NOT NULL DEFAULT '',
   sign_public_key TEXT NOT NULL, ecdh_public_key TEXT NOT NULL DEFAULT '',
   fingerprint TEXT NOT NULL, bridge_id TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL CHECK(status IN('pending','approved','revoked')),
