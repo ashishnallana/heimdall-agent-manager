@@ -71,6 +71,10 @@ test('model: visible items, per-tab counts, default tab, stepping, swipe', () =>
   assert.equal(model.swipeDelta(-30, 150), 1, 'a quick flick moves on');
   assert.equal(model.swipeDelta(-30, 600), 0, 'a slow short drag snaps back');
   assert.equal(model.swipeDelta(30, 150), -1);
+  assert.equal(model.swipeAxis(4, 3), 'pending', 'under the slop nothing is decided');
+  assert.equal(model.swipeAxis(-30, 5), 'x', 'clearly horizontal is a swipe');
+  assert.equal(model.swipeAxis(2, 30), 'y', 'vertical is a scroll');
+  assert.equal(model.swipeAxis(20, 15), 'y', 'a diagonal drag is a scroll: scrolling wins');
 });
 
 test('model: human age and reason lines never contain ids', () => {
@@ -567,8 +571,9 @@ test('deck: next/previous buttons and a swipe move between cards without acting'
     assert.match(text(), /Review c/, 'wraps around');
     // A left swipe on the card, as touch sends it (jsdom has no PointerEvent, so
     // a MouseEvent typed as one, carrying a pointerId).
-    const card = q('[data-debug-id="attention-deck-card"]');
-    const fire = (type: string, x: number) => card.dispatchEvent(Object.assign(new dom.window.MouseEvent(type, { bubbles: true, clientX: x }), { pointerId: 7 }));
+    // Re-query each time: the card remounts when it changes.
+    const card = () => q('[data-debug-id="attention-deck-card"]');
+    const fire = (type: string, x: number, y = 300) => card().dispatchEvent(Object.assign(new dom.window.MouseEvent(type, { bubbles: true, clientX: x, clientY: y }), { pointerId: 7 }));
     await act(async () => { fire('pointerdown', 200); });
     await act(async () => { fire('pointermove', 120); });
     await act(async () => { fire('pointerup', 120); });
@@ -577,6 +582,25 @@ test('deck: next/previous buttons and a swipe move between cards without acting'
     await act(async () => { fire('pointermove', 110); });
     await act(async () => { fire('pointerup', 110); });
     assert.match(text(), /Review a/, 'a tiny drag snaps back');
+    // Scrolling the card's content wins over swiping.
+    await act(async () => { fire('pointerdown', 200, 300); });
+    await act(async () => { fire('pointermove', 198, 270); });
+    await act(async () => { fire('pointermove', 120, 240); });
+    assert.equal(card().style.transform, '', 'a gesture that started vertical never moves the card');
+    await act(async () => { fire('pointerup', 120, 240); });
+    assert.match(text(), /Review a/, 'a vertical-first gesture never switches cards');
+    await act(async () => { fire('pointerdown', 200, 300); });
+    await act(async () => { fire('pointermove', 130, 250); });
+    await act(async () => { fire('pointerup', 130, 250); });
+    assert.match(text(), /Review a/, 'a diagonal scroll never switches cards');
+    await act(async () => { fire('pointerdown', 200); });
+    await act(async () => { fire('pointermove', 120); });
+    await act(async () => { fire('pointercancel', 120); });
+    assert.match(text(), /Review a/, 'a cancelled gesture (the browser took it to scroll) never switches cards');
+    await act(async () => { fire('pointerdown', 200); });
+    await act(async () => { fire('pointermove', 280, 305); });
+    await act(async () => { fire('pointerup', 280, 305); });
+    assert.match(text(), /Review c/, 'a clearly horizontal swipe right still goes back');
     assert.equal(scheduler.getSnapshot().pending.length, 0, 'no action taken');
     assert.equal(hits.filter((h) => h.startsWith('POST')).length, 0, 'nothing sent');
   });

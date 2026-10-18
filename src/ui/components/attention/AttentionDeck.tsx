@@ -29,7 +29,7 @@ import { buildRouteHash, navigateTo } from '../../utils/appLocation';
 import { useDialogA11y } from '../ui/composites/useDialogA11y';
 import { AttentionCardBody } from './AttentionCardBody';
 import { AttentionComposer, type ComposerSubmit } from './AttentionComposer';
-import { DECK_TABS, clampIndex, defaultTab, hideKey, nextLiveTab, reviewerCandidates, stepIndex, swipeDelta, tabCounts, visibleItems, type DeckTab } from './attentionModel';
+import { DECK_TABS, clampIndex, defaultTab, hideKey, nextLiveTab, reviewerCandidates, stepIndex, swipeAxis, swipeDelta, tabCounts, visibleItems, type DeckTab } from './attentionModel';
 
 const NO_ITEMS: AttentionItem[] = [];
 
@@ -161,7 +161,7 @@ export function AttentionDeck({
   const [composer, setComposer] = useState<Composer>(null);
   const [notice, setNotice] = useState('');
   const [dragX, setDragX] = useState(0);
-  const drag = useRef<{ x: number; id: number; t: number; dx: number } | null>(null);
+  const drag = useRef<{ x: number; y: number; id: number; t: number; dx: number; axis: 'pending' | 'x' | 'y' } | null>(null);
   // Whether this opening's tab came from the data (cached or fresh) or the user.
   const tabChoice = useRef<'none' | 'cached' | 'fresh' | 'user'>('none');
   const now = nowMs ?? Date.now();
@@ -430,24 +430,33 @@ export function AttentionDeck({
 
   if ((!open && !present) || typeof document === 'undefined') return null;
 
-  // Swipe / drag to move between cards (navigation only, never an action). The
-  // pointer is captured so the gesture keeps tracking outside the card, and the
-  // distance lives in the ref so a pointercancel still sees the latest value.
+  // Swipe / drag to move between cards (navigation only, never an action).
+  // Scrolling the card's content wins: the gesture only moves the card once it
+  // is clearly horizontal (swipeAxis); a vertical one is left to the browser for
+  // the rest of the touch. The pointer is captured only after that horizontal
+  // lock, and a pointercancel (the browser took the gesture) never navigates.
   const onPointerDown = (e: React.PointerEvent) => {
     if ((e.target as HTMLElement).closest('button, a, textarea, input, [data-no-drag]')) return;
-    drag.current = { x: e.clientX, id: e.pointerId, t: e.timeStamp, dx: 0 };
-    try { (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId); } catch { /* not capturable */ }
+    drag.current = { x: e.clientX, y: e.clientY, id: e.pointerId, t: e.timeStamp, dx: 0, axis: 'pending' };
   };
   const onPointerMove = (e: React.PointerEvent) => {
-    if (!drag.current || drag.current.id !== e.pointerId) return;
-    drag.current.dx = e.clientX - drag.current.x;
-    setDragX(drag.current.dx);
+    const g = drag.current;
+    if (!g || g.id !== e.pointerId || g.axis === 'y') return;
+    const dx = e.clientX - g.x;
+    if (g.axis === 'pending') {
+      g.axis = swipeAxis(dx, e.clientY - g.y);
+      if (g.axis !== 'x') return;
+      try { (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId); } catch { /* not capturable */ }
+    }
+    g.dx = dx;
+    setDragX(dx);
   };
   const onPointerUp = (e: React.PointerEvent) => {
     const g = drag.current;
     if (!g || g.id !== e.pointerId) return;
     drag.current = null;
     setDragX(0);
+    if (e.type === 'pointercancel' || g.axis !== 'x') return;
     const delta = swipeDelta(g.dx, e.timeStamp - g.t);
     if (delta !== 0) go(delta);
   };

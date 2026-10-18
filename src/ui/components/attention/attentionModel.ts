@@ -148,6 +148,23 @@ export const SWIPE_COMMIT_PX = 60;
 export const FLICK_PX = 25;
 export const FLICK_MS = 250;
 
+/** Movement (px) before a gesture is classified as a swipe or a scroll. */
+export const SWIPE_SLOP_PX = 10;
+/** A gesture is a swipe only when it is this many times more horizontal than vertical. */
+export const SWIPE_AXIS_RATIO = 2;
+
+/**
+ * Direction lock for a card gesture. Scrolling the card's content wins: the
+ * gesture is a swipe only once it is clearly horizontal; anything else past the
+ * slop is a scroll and the card stays put for the rest of it.
+ */
+export function swipeAxis(dx: number, dy: number): 'pending' | 'x' | 'y' {
+  const ax = Math.abs(dx);
+  const ay = Math.abs(dy);
+  if (Math.max(ax, ay) < SWIPE_SLOP_PX) return 'pending';
+  return ax >= SWIPE_AXIS_RATIO * ay ? 'x' : 'y';
+}
+
 /** Left swipe = next card, right swipe = previous; navigation only, never an action. */
 export function swipeDelta(dx: number, ms = Infinity): -1 | 0 | 1 {
   const far = Math.abs(dx) >= SWIPE_COMMIT_PX || (Math.abs(dx) >= FLICK_PX && ms <= FLICK_MS);
