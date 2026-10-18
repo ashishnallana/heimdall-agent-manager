@@ -14,7 +14,7 @@ Proposal: https://claude.ai/artifact/SkGGa5tdZEnW92UbKxkXVL
 ## Engineering rules for every phase
 
 - Treat the hub as hostile for confidentiality and integrity of the device directory. Clients verify every signature/chain before wrapping or trusting keys; fail closed.
-- Every crypto primitive gets shared test vectors (TS + Odin) and the phase's listed negative tests. A phase is not done until those negative tests exist and pass.
+- Tests are kept MINIMAL for now (owner decision): shared TS+Odin vectors plus a compact set of security-critical negatives (tamper, epoch swap, unknown epoch/alg, replay, unsigned keys, CAS/self-revoke on the hub). The longer per-phase negative lists are a backlog, not a gate. Implementation must still be fully fail-closed.
 - No plaintext fallbacks for fields that must be encrypted. No silent catch-and-continue around crypto. Randomness failure aborts.
 - Constant-time comparison for MACs/tags/fingerprints where compared outside GCM. Zero raw key bytes after use where the runtime allows.
 - CAS (version) on every directory mutation; 409 on conflict.
