@@ -81,7 +81,7 @@ pub struct PtyHost {
     /// PTY master write half and the master itself. Each holds its own
     /// `/dev/ptmx` fd; both become `None` once [`PtyHost::release_pty`] frees
     /// them after the child exits (REQ-PTY-1).
-    writer: Mutex<Option<Box<dyn Write + Send>>>,
+    writer: Arc<Mutex<Option<Box<dyn Write + Send>>>>,
     master: Option<Box<dyn portable_pty::MasterPty + Send>>,
     killer: Arc<Mutex<Box<dyn portable_pty::ChildKiller + Send + Sync>>>,
     child_alive: Arc<AtomicBool>,
@@ -135,6 +135,9 @@ impl PtyHost {
             .context("failed to spawn child under PTY")?;
         let pid = child.process_id().map(|p| p as i32).unwrap_or(-1);
         let killer = child.clone_killer();
+        // Windows: the session's tree lives in a job, killed as one (HOST-1).
+        #[cfg(windows)]
+        let killer = crate::job::job_killer(&*child, killer);
         // Slave is owned by the child now; drop our handle so EOF propagates.
         drop(pair.slave);
 
@@ -146,6 +149,7 @@ impl PtyHost {
             .master
             .take_writer()
             .context("failed to take PTY writer")?;
+        let writer = Arc::new(Mutex::new(Some(writer)));
         let mut reader = pair
             .master
             .try_clone_reader()
@@ -160,7 +164,13 @@ impl PtyHost {
         // rather than panicking the caller (REQ-PTY-3).
         let reader_thread = {
             let engine = Arc::clone(&engine);
+            #[cfg(windows)]
+            let writer = Arc::clone(&writer);
             std::thread::Builder::new().spawn(move || {
+                // ConPTY opens with a cursor-position request (DSR, `ESC[6n`)
+                // and holds all output until it is answered.
+                #[cfg(windows)]
+                let mut dsr_answered = false;
                 let mut buf = [0u8; 8192];
                 loop {
                     match reader.read(&mut buf) {
@@ -169,6 +179,16 @@ impl PtyHost {
                             {
                                 let mut eng = engine.lock().unwrap();
                                 eng.feed(&buf[..n]);
+                                #[cfg(windows)]
+                                if !dsr_answered && buf[..n].windows(4).any(|w| w == b"\x1b[6n") {
+                                    dsr_answered = true;
+                                    let cap = eng.capture();
+                                    let reply = format!("\x1b[{};{}R", cap.cursor_row + 1, cap.cursor_col + 1);
+                                    if let Some(w) = writer.lock().unwrap().as_mut() {
+                                        let _ = w.write_all(reply.as_bytes());
+                                        let _ = w.flush();
+                                    }
+                                }
                             }
                             // Best-effort broadcast; ignore if no consumer.
                             if output_tx.send(buf[..n].to_vec()).is_err() { break; }
@@ -212,7 +232,7 @@ impl PtyHost {
 
         Ok(PtyHost {
             engine,
-            writer: Mutex::new(Some(writer)),
+            writer,
             master: Some(pair.master),
             killer: Arc::new(Mutex::new(killer)),
             child_alive,
@@ -287,12 +307,34 @@ impl PtyHost {
 
     /// Send SIGTERM to the child for a graceful shutdown (HOST-1 close path).
     /// Falls back to no-op if the pid is unknown. The hard SIGKILL fallback is
-    /// [`PtyHost::kill`].
+    /// [`PtyHost::kill`]. Windows has no SIGTERM: the session's job is killed.
     pub fn terminate(&self) {
+        #[cfg(unix)]
         if self.pid > 0 {
             unsafe {
                 libc::kill(self.pid, libc::SIGTERM);
             }
+        }
+        #[cfg(windows)]
+        self.kill();
+    }
+
+    /// Windows stand-in for `killpg(pid, signum)` (HOST-1 `Signal`): SIGINT
+    /// writes Ctrl-C (0x03) into the ConPTY input; SIGHUP/SIGKILL/SIGTERM kill
+    /// the session's job (the whole tree); 0 only probes. Others are refused.
+    #[cfg(windows)]
+    pub fn signal(&self, signum: u8) -> Result<()> {
+        const SIGHUP: u8 = 1;
+        const SIGINT: u8 = 2;
+        const SIGKILL: u8 = 9;
+        const SIGTERM: u8 = 15;
+        match signum {
+            0 => Ok(()),
+            SIGINT => self.write_input(&[0x03]),
+            SIGHUP | SIGKILL | SIGTERM => {
+                self.killer.lock().unwrap().kill().context("terminate job")
+            }
+            _ => Err(anyhow::anyhow!("signal {signum} is not supported on Windows")),
         }
     }
 

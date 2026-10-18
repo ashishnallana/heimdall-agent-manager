@@ -18,7 +18,7 @@
 //!
 //! `attach --debug` renders the in-app ratatui debug TUI (PTYH-3).
 
-use std::os::unix::net::UnixStream;
+use ham_pty_host::ipc::UnixStream;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -64,14 +64,17 @@ struct Cli {
 ///
 /// Generated paths over 103 bytes use /tmp/heimdall-<uid>/<path-hash>.sock.
 ///
+/// On Windows the default run_dir is %LOCALAPPDATA%\heimdall\run (else
+/// %TEMP%\heimdall\run), which also holds the hashed fallback paths.
+///
 /// Env overrides (match the bridge's `--local-run-dir` / `--local-endpoint-port`
 /// / `--daemon-id`): HAM_LOCAL_RUN_DIR, HAM_LOCAL_ENDPOINT_PORT, HAM_DAEMON_ID.
 fn default_socket() -> String {
     let run_dir = std::env::var("HAM_LOCAL_RUN_DIR")
         .ok()
         .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "/tmp/heimdall-bridge-local".to_string());
-    let run_dir = run_dir.trim_end_matches('/');
+        .unwrap_or_else(default_run_dir);
+    let run_dir = run_dir.trim_end_matches(SEPARATORS);
 
     let daemon_id = std::env::var("HAM_DAEMON_ID")
         .ok()
@@ -97,12 +100,29 @@ fn default_socket() -> String {
         "default".to_string()
     };
 
-    let path = if run_dir.split('/').any(|part| part == identity) {
-        format!("{run_dir}/pty-host.sock")
+    let sep = std::path::MAIN_SEPARATOR;
+    let path = if run_dir.split(SEPARATORS).any(|part| part == identity) {
+        format!("{run_dir}{sep}pty-host.sock")
     } else {
-        format!("{run_dir}/pty-host-{identity}.sock")
+        format!("{run_dir}{sep}pty-host-{identity}.sock")
     };
-    ham_pty_host::socket_path::bounded(&path, unsafe { libc::geteuid() })
+    ham_pty_host::socket_path::bounded_default(&path)
+}
+
+/// Path separators accepted in HAM_LOCAL_RUN_DIR.
+#[cfg(unix)]
+const SEPARATORS: &[char] = &['/'];
+#[cfg(windows)]
+const SEPARATORS: &[char] = &['/', '\\'];
+
+#[cfg(unix)]
+fn default_run_dir() -> String {
+    "/tmp/heimdall-bridge-local".to_string()
+}
+
+#[cfg(windows)]
+fn default_run_dir() -> String {
+    ham_pty_host::socket_path::fallback_dir()
 }
 
 #[derive(Subcommand)]

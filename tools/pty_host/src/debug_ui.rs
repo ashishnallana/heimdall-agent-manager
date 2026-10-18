@@ -5,7 +5,7 @@
 //! key events into [`debug_tui::Key`], drives a background socket reader that
 //! feeds Screen/ChildExited frames into the app, and renders the split layout.
 
-use std::os::unix::net::UnixStream;
+use crate::ipc::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};

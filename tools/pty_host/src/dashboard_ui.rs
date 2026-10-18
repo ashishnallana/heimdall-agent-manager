@@ -11,7 +11,7 @@
 //! geometry and calls [`Dashboard::on_pane_resize`], which emits an
 //! instance-scoped `Resize` so the contained process's PTY reflows to match.
 
-use std::os::unix::net::UnixStream;
+use crate::ipc::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};

@@ -7,14 +7,14 @@
 //! the child's code.
 
 use std::io::{Read, Write};
-use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
+use crate::ipc::UnixStream;
 use crate::proto::{self, ClientMsg, HostMsg};
-use crate::termios::{current_winsize, RawGuard};
+use crate::termios::{current_winsize, take_resize, watch_resize, RawGuard};
 
 /// Byte that triggers a clean detach (Ctrl-\, aka FS / 0x1c).
 const DETACH_BYTE: u8 = 0x1c;
@@ -48,8 +48,8 @@ pub fn attach(socket_path: &std::path::Path) -> Result<AttachOutcome> {
     let child_exit = Arc::new(AtomicI32::new(i32::MIN));
     let done = Arc::new(AtomicBool::new(false));
 
-    // SIGWINCH -> Resize. We poll a flag set by the signal handler.
-    install_sigwinch_handler();
+    // SIGWINCH -> Resize. We poll a flag set by the resize watcher.
+    watch_resize();
 
     // Reader thread: host -> stdout / handle control frames.
     let reader = {
@@ -115,7 +115,7 @@ pub fn attach(socket_path: &std::path::Path) -> Result<AttachOutcome> {
             break AttachOutcome::Disconnected;
         }
         // Handle a pending resize.
-        if take_sigwinch() {
+        if take_resize() {
             if let Some((rows, cols)) = current_winsize() {
                 let _ = proto::write_client_msg(
                     &mut write_stream,
@@ -157,26 +157,3 @@ pub fn attach(socket_path: &std::path::Path) -> Result<AttachOutcome> {
     // RawGuard restores the terminal on drop.
     Ok(outcome)
 }
-
-// ---- SIGWINCH plumbing --------------------------------------------------
-
-static SIGWINCH_FLAG: AtomicBool = AtomicBool::new(false);
-
-extern "C" fn sigwinch_handler(_sig: i32) {
-    SIGWINCH_FLAG.store(true, Ordering::SeqCst);
-}
-
-fn install_sigwinch_handler() {
-    unsafe {
-        libc_signal(libc_sigwinch(), sigwinch_handler as *const () as usize);
-    }
-}
-
-fn take_sigwinch() -> bool {
-    SIGWINCH_FLAG.swap(false, Ordering::SeqCst)
-}
-
-// Minimal libc bindings without pulling the `libc` crate: we only need signal()
-// and the SIGWINCH constant. These are declared in `termios.rs` to keep all the
-// unsafe FFI in one place.
-use crate::termios::{libc_signal, libc_sigwinch};

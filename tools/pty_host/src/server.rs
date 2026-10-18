@@ -11,7 +11,6 @@
 
 use std::collections::HashMap;
 use std::io::Write;
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -20,6 +19,7 @@ use std::thread::JoinHandle;
 use anyhow::{Context, Result};
 
 use crate::host::{PtyHost, SpawnConfig};
+use crate::ipc::{UnixListener, UnixStream};
 use crate::proto::{
     self, ClientMsg, HostMsg, ScreenSnapshot,
 };
@@ -134,6 +134,14 @@ impl HostServer {
         self.shutdown.store(true, Ordering::SeqCst);
         if self.alive.load(Ordering::SeqCst) {
             let _ = self.killer.lock().unwrap().kill();
+        }
+        // ConPTY only EOFs the reader once the pseudoconsole is closed, which a
+        // dead child alone does not do.
+        #[cfg(windows)]
+        {
+            let mut host = self.host.lock().unwrap();
+            host.wait_timeout(std::time::Duration::from_secs(2));
+            host.release_pty();
         }
         // Poke the accept loop by connecting once.
         let _ = UnixStream::connect(&self.socket_path);
