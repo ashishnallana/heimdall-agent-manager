@@ -82,6 +82,29 @@ test('the board puts tasks that need you first, then by state and priority', asy
   assert.deepEqual(order, ['needs_review', 'running', 'ready_p0', 'ready_p2', 'done']);
 });
 
+test('the board groups open tasks into needs-you, in-progress, in-review and up-next sections', async () => {
+  const { groupForBoard, sortTasksForBoard } = await import('../src/ui/components/tasks/TicketBoardView.tsx');
+  const sorted = sortTasksForBoard([
+    task({ task_id: 'done', state: 'done' }),
+    task({ task_id: 'ready', state: 'ready' }),
+    task({ task_id: 'backlog', state: 'backlog' }),
+    task({ task_id: 'running', state: 'in_progress' }),
+    task({ task_id: 'agent_review', state: 'in_review' }),
+    task({ task_id: 'needs_review', state: 'in_review', requires_user_approval: true }),
+    task({ task_id: 'draft', state: 'backlog', publish_state: 'draft' }),
+  ]);
+  const sections = groupForBoard(sorted).map((s: any) => [s.key, s.tasks.map((t: any) => t.task_id)]);
+  assert.deepEqual(sections, [
+    ['needs_you', ['needs_review', 'draft']],
+    ['in_progress', ['running']],
+    ['in_review', ['agent_review']],
+    ['up_next', ['ready', 'backlog']],
+  ]);
+  // Finished tasks fold away unless they are the expanded one; empty sections are dropped.
+  assert.deepEqual(groupForBoard(sorted, 'done').at(-1)?.tasks.map((t: any) => t.task_id), ['ready', 'backlog', 'done']);
+  assert.deepEqual(groupForBoard([task({ task_id: 'r', state: 'ready' })]).map((s: any) => s.key), ['up_next']);
+});
+
 test('a draft says it is a draft; template stage titles never show raw placeholders', async () => {
   const { getTaskStatusLines } = await import('../src/ui/components/tasks/taskV2Types.ts');
   const [line1, line2] = getTaskStatusLines(task({ publish_state: 'draft', state: 'backlog' }));
