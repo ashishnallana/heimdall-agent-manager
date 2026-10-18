@@ -154,6 +154,16 @@ test_command_tokens_skips_v2_flag_values :: proc(t: ^testing.T) {
 	}
 }
 
+// The handoff flags take values: `lease switch --dead-end x task_b` must keep
+// task_b as the positional, not x.
+@(test)
+test_command_tokens_skips_handoff_flag_values :: proc(t: ^testing.T) {
+	tokens := command_tokens([]string{"ham-ctl", "lease", "switch", "--dead-end", "tried x", "--next-steps", "do y", "--decision", "z", "task_b", "--summary", "s"})
+	defer delete(tokens)
+	testing.expect_value(t, len(tokens), 3)
+	if len(tokens) == 3 do testing.expect_value(t, tokens[2], "task_b")
+}
+
 @(test)
 test_m3_ctl_params_and_verify_helpers :: proc(t: ^testing.T) {
 	// 1. --require-independent-verify in brief
