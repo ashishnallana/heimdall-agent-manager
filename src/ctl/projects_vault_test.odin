@@ -26,10 +26,10 @@ test_project_show_transparent_decryption :: proc(t: ^testing.T) {
 	)
 
 	// Decrypt with valid key configured
-	decrypted_json := ctl_decrypt_vault_json(raw_json, TEST_PROJECT_VAULT_KEY, true, context.temp_allocator)
+	decrypted_json := ctl_decrypt_vault_json(raw_json, tkr(TEST_PROJECT_VAULT_KEY), true, context.temp_allocator)
 	testing.expect(t, strings.contains(decrypted_json, orig_name), "decrypted json must contain original name")
 	testing.expect(t, strings.contains(decrypted_json, orig_desc), "decrypted json must contain original description")
-	testing.expect(t, !strings.contains(decrypted_json, "vault:v1:"), "decrypted json must not contain armor prefix")
+	testing.expect(t, !strings.contains(decrypted_json, "vault:v2:"), "decrypted json must not contain armor prefix")
 }
 
 @(test)
@@ -43,10 +43,10 @@ test_project_unconfigured_fallback :: proc(t: ^testing.T) {
 	)
 
 	// Decrypt with key NOT configured (unlocked = false)
-	fallback_json := ctl_decrypt_vault_json(raw_json, "", false, context.temp_allocator)
+	fallback_json := ctl_decrypt_vault_json(raw_json, nil, false, context.temp_allocator)
 
 	expected_fallback := fmt.tprintf("[Encrypted: %s]", enc_name)
-	testing.expect(t, strings.contains(fallback_json, expected_fallback), "must format as [Encrypted: vault:v1:...]")
+	testing.expect(t, strings.contains(fallback_json, expected_fallback), "must format as [Encrypted: vault:v2:...]")
 	testing.expect(t, !strings.contains(fallback_json, orig_name), "must not expose plaintext when unconfigured")
 }
 
@@ -66,7 +66,7 @@ test_project_list_transparent_decryption :: proc(t: ^testing.T) {
 	)
 
 	// Decrypt list with valid key
-	decrypted_json := ctl_decrypt_vault_json(raw_json, TEST_PROJECT_VAULT_KEY, true, context.temp_allocator)
+	decrypted_json := ctl_decrypt_vault_json(raw_json, tkr(TEST_PROJECT_VAULT_KEY), true, context.temp_allocator)
 
 	testing.expect(t, strings.contains(decrypted_json, "Secret Project Alpha"), "must decrypt armored project name")
 	testing.expect(t, strings.contains(decrypted_json, "Secret Desc Alpha"), "must decrypt armored project desc")

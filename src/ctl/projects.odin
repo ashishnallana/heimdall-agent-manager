@@ -13,8 +13,8 @@ ctl_projects_request_and_decrypt :: proc(transport: Ctl_Transport, method, path,
 		return
 	}
 
-	key_hex, key_ok := ctl_read_vault_key(args, context.temp_allocator)
-	decrypted_json := ctl_decrypt_vault_json(resp_str, key_hex, key_ok)
+	keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
+	decrypted_json := ctl_decrypt_vault_json(resp_str, keyring, key_ok)
 	defer delete(decrypted_json)
 	fmt.println(decrypted_json)
 }
@@ -66,17 +66,13 @@ ctl_projects_command :: proc(cmd: []string, args: []string) {
 		}
 		desc := option_value(args, "--description", option_value(args, "--desc", ""))
 
-		key_hex, key_ok := ctl_read_vault_key(args, context.temp_allocator)
+		keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
 		if key_ok {
 			if !is_vault_armored(name) {
-				if enc_name, ok := vault_encrypt_text_hex(name, key_hex, context.temp_allocator); ok {
-					name = enc_name
-				}
+				name = ctl_seal_or_exit(name, keyring)
 			}
 			if desc != "" && !is_vault_armored(desc) {
-				if enc_desc, ok := vault_encrypt_text_hex(desc, key_hex, context.temp_allocator); ok {
-					desc = enc_desc
-				}
+				desc = ctl_seal_or_exit(desc, keyring)
 			}
 		}
 
@@ -104,17 +100,13 @@ ctl_projects_command :: proc(cmd: []string, args: []string) {
 		name := option_value(args, "--name", "")
 		desc := option_value(args, "--description", option_value(args, "--desc", ""))
 
-		key_hex, key_ok := ctl_read_vault_key(args, context.temp_allocator)
+		keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
 		if key_ok {
 			if name != "" && !is_vault_armored(name) {
-				if enc_name, ok := vault_encrypt_text_hex(name, key_hex, context.temp_allocator); ok {
-					name = enc_name
-				}
+				name = ctl_seal_or_exit(name, keyring)
 			}
 			if desc != "" && !is_vault_armored(desc) {
-				if enc_desc, ok := vault_encrypt_text_hex(desc, key_hex, context.temp_allocator); ok {
-					desc = enc_desc
-				}
+				desc = ctl_seal_or_exit(desc, keyring)
 			}
 		}
 

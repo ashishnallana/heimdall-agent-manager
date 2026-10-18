@@ -25,11 +25,11 @@ test_issue_show_transparent_decryption :: proc(t: ^testing.T) {
 		enc_title, enc_desc, enc_body,
 	)
 
-	dec_user := ctl_decrypt_issues_json(user_json, TEST_ISSUE_VAULT_KEY, true, context.temp_allocator)
+	dec_user := ctl_decrypt_issues_json(user_json, tkr(TEST_ISSUE_VAULT_KEY), true, context.temp_allocator)
 	testing.expect(t, strings.contains(dec_user, orig_title), "user-mode response contains decrypted title")
 	testing.expect(t, strings.contains(dec_user, orig_desc), "user-mode response contains decrypted description")
 	testing.expect(t, strings.contains(dec_user, orig_body), "user-mode response contains decrypted comment body")
-	testing.expect(t, !strings.contains(dec_user, "vault:v1:"), "user-mode response contains no raw armored strings")
+	testing.expect(t, !strings.contains(dec_user, "vault:v2:"), "user-mode response contains no raw armored strings")
 
 	// Agent-mode response envelope (wrapped in {"v":1,"id":"ham-ctl-agent","ok":true,"data":{"data":...}})
 	agent_json := fmt.tprintf(
@@ -37,11 +37,11 @@ test_issue_show_transparent_decryption :: proc(t: ^testing.T) {
 		enc_title, enc_desc, enc_body,
 	)
 
-	dec_agent := ctl_decrypt_issues_json(agent_json, TEST_ISSUE_VAULT_KEY, true, context.temp_allocator)
+	dec_agent := ctl_decrypt_issues_json(agent_json, tkr(TEST_ISSUE_VAULT_KEY), true, context.temp_allocator)
 	testing.expect(t, strings.contains(dec_agent, orig_title), "agent-mode response contains decrypted title")
 	testing.expect(t, strings.contains(dec_agent, orig_desc), "agent-mode response contains decrypted description")
 	testing.expect(t, strings.contains(dec_agent, orig_body), "agent-mode response contains decrypted comment body")
-	testing.expect(t, !strings.contains(dec_agent, "vault:v1:"), "agent-mode response contains no raw armored strings")
+	testing.expect(t, !strings.contains(dec_agent, "vault:v2:"), "agent-mode response contains no raw armored strings")
 }
 
 @(test)
@@ -61,12 +61,12 @@ test_issue_list_transparent_decryption :: proc(t: ^testing.T) {
 		enc_title1, enc_preview1, enc_title2, enc_preview2,
 	)
 
-	dec_list := ctl_decrypt_issues_json(list_json, TEST_ISSUE_VAULT_KEY, true, context.temp_allocator)
+	dec_list := ctl_decrypt_issues_json(list_json, tkr(TEST_ISSUE_VAULT_KEY), true, context.temp_allocator)
 	testing.expect(t, strings.contains(dec_list, orig_title1), "list contains decrypted title 1")
 	testing.expect(t, strings.contains(dec_list, orig_preview1), "list contains decrypted preview 1")
 	testing.expect(t, strings.contains(dec_list, orig_title2), "list contains decrypted title 2")
 	testing.expect(t, strings.contains(dec_list, orig_preview2), "list contains decrypted preview 2")
-	testing.expect(t, !strings.contains(dec_list, "vault:v1:"), "list contains no raw armored strings")
+	testing.expect(t, !strings.contains(dec_list, "vault:v2:"), "list contains no raw armored strings")
 }
 
 @(test)
@@ -80,14 +80,14 @@ test_issue_unconfigured_fallback :: proc(t: ^testing.T) {
 	)
 
 	// Decrypt without vault key (key_configured = false)
-	fallback_json := ctl_decrypt_issues_json(raw_json, "", false, context.temp_allocator)
+	fallback_json := ctl_decrypt_issues_json(raw_json, nil, false, context.temp_allocator)
 
-	// Fallback should format as [Encrypted: vault:v1:...] without crashing
+	// Fallback should format as [Encrypted: vault:v2:...] without crashing
 	expected_title_fallback := fmt.tprintf("[Encrypted: %s]", enc_title)
 	expected_desc_fallback  := fmt.tprintf("[Encrypted: %s]", enc_desc)
 
-	testing.expect(t, strings.contains(fallback_json, expected_title_fallback), "fallback contains [Encrypted: vault:v1:...] title")
-	testing.expect(t, strings.contains(fallback_json, expected_desc_fallback), "fallback contains [Encrypted: vault:v1:...] description")
+	testing.expect(t, strings.contains(fallback_json, expected_title_fallback), "fallback contains [Encrypted: vault:v2:...] title")
+	testing.expect(t, strings.contains(fallback_json, expected_desc_fallback), "fallback contains [Encrypted: vault:v2:...] description")
 	testing.expect(t, strings.contains(fallback_json, `"status":"new"`), "non-armored metadata preserved")
 }
 
@@ -97,16 +97,16 @@ test_issue_tampered_or_wrong_key_fallback :: proc(t: ^testing.T) {
 	raw_json := fmt.tprintf(`{{"ok":true,"data":{{"issue_id":"iss_tamper","title":"%s"}}}}`, enc_title)
 
 	// Decrypt with a completely different vault key
-	fallback_wrong_key := ctl_decrypt_issues_json(raw_json, ALT_ISSUE_VAULT_KEY, true, context.temp_allocator)
+	fallback_wrong_key := ctl_decrypt_issues_json(raw_json, tkr(ALT_ISSUE_VAULT_KEY), true, context.temp_allocator)
 
 	expected_fallback := fmt.tprintf("[Encrypted: %s]", enc_title)
-	testing.expect(t, strings.contains(fallback_wrong_key, expected_fallback), "wrong key falls back to [Encrypted: vault:v1:...]")
+	testing.expect(t, strings.contains(fallback_wrong_key, expected_fallback), "wrong key falls back to [Encrypted: vault:v2:...]")
 
 	// Decrypt with truncated armored string
 	truncated_armored := enc_title[:20]
 	trunc_json := fmt.tprintf(`{{"ok":true,"data":{{"issue_id":"iss_trunc","title":"%s"}}}}`, truncated_armored)
-	fallback_trunc := ctl_decrypt_issues_json(trunc_json, TEST_ISSUE_VAULT_KEY, true, context.temp_allocator)
+	fallback_trunc := ctl_decrypt_issues_json(trunc_json, tkr(TEST_ISSUE_VAULT_KEY), true, context.temp_allocator)
 
 	expected_trunc_fallback := fmt.tprintf("[Encrypted: %s]", truncated_armored)
-	testing.expect(t, strings.contains(fallback_trunc, expected_trunc_fallback), "truncated payload falls back to [Encrypted: vault:v1:...]")
+	testing.expect(t, strings.contains(fallback_trunc, expected_trunc_fallback), "truncated payload falls back to [Encrypted: vault:v2:...]")
 }

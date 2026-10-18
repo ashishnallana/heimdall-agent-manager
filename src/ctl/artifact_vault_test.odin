@@ -24,7 +24,7 @@ test_artifact_create_encryption_with_vault_key :: proc(t: ^testing.T) {
 		"--content", orig_content,
 		"--kind", "markdown",
 		"--project", "proj_security_99",
-		"--vault-key", TEST_ARTIFACT_VAULT_KEY,
+		"--vault-keyring", tkr_b64(TEST_ARTIFACT_VAULT_KEY),
 	}
 
 	out := ctl_agentmode_artifact_create_params(args)
@@ -35,15 +35,15 @@ test_artifact_create_encryption_with_vault_key :: proc(t: ^testing.T) {
 
 	// Name must be encrypted
 	testing.expect(t, !strings.contains(out, orig_name), "name must not leak plaintext")
-	testing.expect(t, strings.contains(out, `"name":"vault:v1:`), "name must be armored with vault:v1:")
+	testing.expect(t, strings.contains(out, `"name":"vault:v2:`), "name must be armored with vault:v2:")
 
 	// Description must be encrypted
 	testing.expect(t, !strings.contains(out, orig_desc), "description must not leak plaintext")
-	testing.expect(t, strings.contains(out, `"description":"vault:v1:`), "description must be armored with vault:v1:")
+	testing.expect(t, strings.contains(out, `"description":"vault:v2:`), "description must be armored with vault:v2:")
 
 	// Content must be encrypted
 	testing.expect(t, !strings.contains(out, orig_content), "content must not leak plaintext")
-	testing.expect(t, strings.contains(out, `"content":"vault:v1:`), "content must be armored with vault:v1:")
+	testing.expect(t, strings.contains(out, `"content":"vault:v2:`), "content must be armored with vault:v2:")
 
 	// Round-trip decryption check
 	val, err := json.parse_string(out, parse_integers = true, allocator = context.temp_allocator)
@@ -86,7 +86,7 @@ test_artifact_create_without_vault_key_leaves_plaintext :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(out, `"name":"public-readme.md"`), "name must remain plaintext")
 	testing.expect(t, strings.contains(out, `"description":"Public documentation for open-source library"`), "description must remain plaintext")
 	testing.expect(t, strings.contains(out, `"content":"# Public Library\nOpen documentation."`), "content must remain plaintext")
-	testing.expect(t, !strings.contains(out, "vault:v1:"), "must not contain vault armor")
+	testing.expect(t, !strings.contains(out, "vault:v2:"), "must not contain vault armor")
 }
 
 @(test)
@@ -105,11 +105,11 @@ test_artifact_show_and_list_transparent_decryption :: proc(t: ^testing.T) {
 	)
 
 	// Decrypt with correct key
-	decrypted := ctl_decrypt_json_string(raw_json, TEST_ARTIFACT_VAULT_KEY, true, context.temp_allocator)
+	decrypted := ctl_decrypt_json_string(raw_json, tkr(TEST_ARTIFACT_VAULT_KEY), true, context.temp_allocator)
 	testing.expect(t, strings.contains(decrypted, orig_name), "decrypted JSON must contain orig name")
 	testing.expect(t, strings.contains(decrypted, orig_desc), "decrypted JSON must contain orig description")
 	testing.expect(t, strings.contains(decrypted, orig_content), "decrypted JSON must contain orig content")
-	testing.expect(t, !strings.contains(decrypted, "vault:v1:"), "decrypted JSON must have zero vault armor")
+	testing.expect(t, !strings.contains(decrypted, "vault:v2:"), "decrypted JSON must have zero vault armor")
 }
 
 @(test)
@@ -119,8 +119,8 @@ test_artifact_show_and_list_unconfigured_key_fallback :: proc(t: ^testing.T) {
 	raw_json := fmt.tprintf(`{{"ok":true,"data":{{"artifact_id":"art_1","name":"%s"}}}}`, enc_name)
 
 	// Decrypt without configured key (fallback expected)
-	fallback := ctl_decrypt_json_string(raw_json, "", false, context.temp_allocator)
-	testing.expect(t, strings.contains(fallback, "[Encrypted: vault:v1:"), "unconfigured key must yield [Encrypted: vault:v1:...]")
+	fallback := ctl_decrypt_json_string(raw_json, nil, false, context.temp_allocator)
+	testing.expect(t, strings.contains(fallback, "[Encrypted: vault:v2:"), "unconfigured key must yield [Encrypted: vault:v2:...]")
 }
 
 @(test)
@@ -130,19 +130,19 @@ test_artifact_content_decryption_and_fallbacks :: proc(t: ^testing.T) {
 	testing.expect(t, enc_ok, "encrypt must succeed")
 
 	// 1. Correct key decrypts cleanly
-	dec := ctl_decrypt_or_fallback_armored(enc_content, TEST_ARTIFACT_VAULT_KEY, true, context.temp_allocator)
+	dec := ctl_decrypt_or_fallback_armored(enc_content, tkr(TEST_ARTIFACT_VAULT_KEY), true, context.temp_allocator)
 	testing.expect_value(t, dec, orig_content)
 
 	// 2. Unconfigured key returns fallback
-	fallback_unconf := ctl_decrypt_or_fallback_armored(enc_content, "", false, context.temp_allocator)
-	testing.expect(t, strings.has_prefix(fallback_unconf, "[Encrypted: vault:v1:"), "unconfigured must return fallback")
+	fallback_unconf := ctl_decrypt_or_fallback_armored(enc_content, nil, false, context.temp_allocator)
+	testing.expect(t, strings.has_prefix(fallback_unconf, "[Encrypted: vault:v2:"), "unconfigured must return fallback")
 
 	// 3. Wrong key returns fallback
-	fallback_wrong := ctl_decrypt_or_fallback_armored(enc_content, ALT_ARTIFACT_VAULT_KEY, true, context.temp_allocator)
-	testing.expect(t, strings.has_prefix(fallback_wrong, "[Encrypted: vault:v1:"), "wrong key must return fallback")
+	fallback_wrong := ctl_decrypt_or_fallback_armored(enc_content, tkr(ALT_ARTIFACT_VAULT_KEY), true, context.temp_allocator)
+	testing.expect(t, strings.has_prefix(fallback_wrong, "[Encrypted: vault:v2:"), "wrong key must return fallback")
 
 	// 4. Legacy plaintext returns as-is
 	legacy := "Plaintext unencrypted legacy content"
-	dec_legacy := ctl_decrypt_or_fallback_armored(legacy, TEST_ARTIFACT_VAULT_KEY, true, context.temp_allocator)
+	dec_legacy := ctl_decrypt_or_fallback_armored(legacy, tkr(TEST_ARTIFACT_VAULT_KEY), true, context.temp_allocator)
 	testing.expect_value(t, dec_legacy, legacy)
 }

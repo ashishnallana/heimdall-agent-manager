@@ -197,8 +197,8 @@ ctl_tasks_request_and_decrypt :: proc(transport: Ctl_Transport, method, path, bo
 		return
 	}
 
-	key_hex, key_ok := ctl_read_vault_key(args, context.temp_allocator)
-	decrypted_json := ctl_decrypt_json_string(resp_str, key_hex, key_ok)
+	keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
+	decrypted_json := ctl_decrypt_json_string(resp_str, keyring, key_ok)
 	defer delete(decrypted_json)
 	fmt.println(decrypted_json)
 }
@@ -302,8 +302,8 @@ ctl_task_chain_request_and_decrypt :: proc(transport: Ctl_Transport, method, pat
 		return
 	}
 
-	key_hex, key_ok := ctl_read_vault_key(args, context.temp_allocator)
-	decrypted_json := ctl_decrypt_vault_json(resp_str, key_hex, key_ok)
+	keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
+	decrypted_json := ctl_decrypt_vault_json(resp_str, keyring, key_ok)
 	defer delete(decrypted_json)
 	fmt.println(decrypted_json)
 }
@@ -407,17 +407,13 @@ ctl_task_chains_command :: proc(cmd: []string, args: []string) {
 			return
 		}
 		desc := option_value(args, "--description", "")
-		key_hex, key_ok := ctl_read_vault_key(args, context.temp_allocator)
+		keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
 		if key_ok {
 			if !is_vault_armored(title) {
-				if enc, enc_ok := vault_encrypt_text_hex(title, key_hex, context.temp_allocator); enc_ok {
-					title = enc
-				}
+				title = ctl_seal_or_exit(title, keyring)
 			}
 			if desc != "" && !is_vault_armored(desc) {
-				if enc, enc_ok := vault_encrypt_text_hex(desc, key_hex, context.temp_allocator); enc_ok {
-					desc = enc
-				}
+				desc = ctl_seal_or_exit(desc, keyring)
 			}
 		}
 		fields := make([dynamic]string)
@@ -462,20 +458,16 @@ ctl_task_chains_command :: proc(cmd: []string, args: []string) {
 	if action == "update" {
 		fields := make([dynamic]string)
 		defer delete(fields)
-		key_hex, key_ok := ctl_read_vault_key(args, context.temp_allocator)
+		keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
 		if title := option_value(args, "--title", ""); title != "" {
 			if key_ok && !is_vault_armored(title) {
-				if enc, enc_ok := vault_encrypt_text_hex(title, key_hex, context.temp_allocator); enc_ok {
-					title = enc
-				}
+				title = ctl_seal_or_exit(title, keyring)
 			}
 			append(&fields, json_kv("title", title))
 		}
 		if desc := option_value(args, "--description", ""); desc != "" {
 			if key_ok && !is_vault_armored(desc) {
-				if enc, enc_ok := vault_encrypt_text_hex(desc, key_hex, context.temp_allocator); enc_ok {
-					desc = enc
-				}
+				desc = ctl_seal_or_exit(desc, keyring)
 			}
 			append(&fields, json_kv("description", desc))
 		}
@@ -683,17 +675,13 @@ ctl_tasks_command :: proc(cmd: []string, args: []string) {
 		}
 		if !ctl_task_reviewer_flags_valid(args, false) do return
 		desc := option_value(args, "--description", "")
-		key_hex, key_ok := ctl_read_vault_key(args, context.temp_allocator)
+		keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
 		if key_ok {
 			if !is_vault_armored(title) {
-				if enc, ok := vault_encrypt_text_hex(title, key_hex, context.temp_allocator); ok {
-					title = enc
-				}
+				title = ctl_seal_or_exit(title, keyring)
 			}
 			if desc != "" && !is_vault_armored(desc) {
-				if enc, ok := vault_encrypt_text_hex(desc, key_hex, context.temp_allocator); ok {
-					desc = enc
-				}
+				desc = ctl_seal_or_exit(desc, keyring)
 			}
 		}
 		fields := make([dynamic]string)
@@ -793,17 +781,13 @@ ctl_tasks_command :: proc(cmd: []string, args: []string) {
 		if !ctl_task_reviewer_flags_valid(args, true) do return
 		title := option_value(args, "--title", "")
 		desc := option_value(args, "--description", "")
-		key_hex, key_ok := ctl_read_vault_key(args, context.temp_allocator)
+		keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
 		if key_ok {
 			if title != "" && !is_vault_armored(title) {
-				if enc, ok := vault_encrypt_text_hex(title, key_hex, context.temp_allocator); ok {
-					title = enc
-				}
+				title = ctl_seal_or_exit(title, keyring)
 			}
 			if desc != "" && !is_vault_armored(desc) {
-				if enc, ok := vault_encrypt_text_hex(desc, key_hex, context.temp_allocator); ok {
-					desc = enc
-				}
+				desc = ctl_seal_or_exit(desc, keyring)
 			}
 		}
 		fields := make([dynamic]string)
@@ -854,12 +838,10 @@ ctl_tasks_command :: proc(cmd: []string, args: []string) {
 			fmt.println("usage: ham-ctl tasks comment --chain <id> --task <id> --body <text> [--notify <id,id...>]")
 			return
 		}
-		key_hex, key_ok := ctl_read_vault_key(args, context.temp_allocator)
+		keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
 		if key_ok {
 			if !is_vault_armored(body) {
-				if enc, ok := vault_encrypt_text_hex(body, key_hex, context.temp_allocator); ok {
-					body = enc
-				}
+				body = ctl_seal_or_exit(body, keyring)
 			}
 		}
 		fields := make([dynamic]string)
@@ -899,12 +881,10 @@ ctl_tasks_command :: proc(cmd: []string, args: []string) {
 				fmt.println("usage: ham-ctl tasks comments --chain <id> --task <id> add --body <text> [--notify <id,id...>]")
 				return
 			}
-			key_hex, key_ok := ctl_read_vault_key(args, context.temp_allocator)
+			keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
 			if key_ok {
 				if !is_vault_armored(body) {
-					if enc, ok := vault_encrypt_text_hex(body, key_hex, context.temp_allocator); ok {
-						body = enc
-					}
+					body = ctl_seal_or_exit(body, keyring)
 				}
 			}
 			fields := make([dynamic]string)

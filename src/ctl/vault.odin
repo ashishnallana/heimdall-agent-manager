@@ -1,127 +1,123 @@
 package main
 
+import "core:crypto"
 import "core:fmt"
 import "core:os"
 import "core:strings"
+import jsonx "odin_test:lib/jsonx"
+import vault "odin_test:lib/vault"
 
-// ── vault verb group (REQ-VAULT-BRIDGE-CLI-1) ──────────────────────────────
-// Reports where ham-ctl gets its 256-bit AES-GCM vault key from. ham-ctl stores no
-// key of its own: it uses $HEIMDALL_VAULT_KEY when set, otherwise the key the local
-// bridge holds (enable encryption and unseal each bridge from Settings -> User Vault).
+// ── vault verb group (REQ-VAULT-BRIDGE-CLI-1, passwordless vault P1) ─────────
+// Reports where ham-ctl gets its vault KEYRING from. ham-ctl stores no key material
+// of its own: it uses --vault-keyring / $HEIMDALL_VAULT_KEYRING when set, otherwise
+// the keyring the local bridge holds.
+//
+// TRUST NOTE: agent.vault.get hands every local agent process the bridge's WHOLE
+// keyring — every epoch it holds, not just the current one. That is the same trust
+// level as before (agents on an unsealed bridge could always read the vault key), now
+// including history: such an agent can read old-epoch content. A revoked device's
+// residual access is bounded by the epoch rotation done on revoke, not by this call.
 
 print_vault_help :: proc() {
-	fmt.println("ham-ctl vault — inspect the zero-knowledge vault key source")
+	fmt.println("ham-ctl vault — inspect the zero-knowledge vault keyring source")
 	fmt.println("")
 	fmt.println("USAGE:")
 	fmt.println("  ham-ctl vault status")
 	fmt.println("")
-	fmt.println("The key comes from $HEIMDALL_VAULT_KEY (single-bridge dev override) or,")
-	fmt.println("otherwise, the local bridge. Unseal a bridge from Settings -> User Vault.")
+	fmt.println("The keyring comes from --vault-keyring / $HEIMDALL_VAULT_KEYRING (base64 HKR1,")
+	fmt.println("a single-bridge dev override) or, otherwise, the local bridge.")
 }
 
-is_valid_hex_key :: proc(key: string) -> bool {
-	if len(key) != 64 do return false
-	for i in 0 ..< len(key) {
-		ch := key[i]
-		switch ch {
-		case '0'..='9', 'a'..='f', 'A'..='F':
-		case:
-			return false
-		}
+// g_ctl_keyring holds the most recently resolved keyring. ham-ctl is a short-lived,
+// single-threaded process; keeping ONE copy lets ctl_vault_wipe zero it on the way out
+// instead of scattering copies through temp allocations.
+@(private = "file")
+g_ctl_keyring: vault.Vault_Keyring
+
+// ctl_vault_wipe zeroes the resolved keyring. main defers it.
+ctl_vault_wipe :: proc() {
+	vault.keyring_wipe(&g_ctl_keyring)
+}
+
+// ctl_keyring_from_b64 strictly decodes a base64 HKR1 keyring. When want_epoch is
+// non-zero the keyring's current epoch must equal it.
+ctl_keyring_from_b64 :: proc(b64: string, want_epoch: u32 = 0) -> (kr: vault.Vault_Keyring, ok: bool) {
+	raw, dec_ok := vault.b64_decode_strict(b64, context.temp_allocator)
+	if !dec_ok do return {}, false
+	defer crypto.zero_explicit(raw_data(raw), len(raw))
+	parsed, p_ok := vault.keyring_parse(raw)
+	if !p_ok do return {}, false
+	if want_epoch != 0 && parsed.current_epoch != want_epoch {
+		vault.keyring_wipe(&parsed)
+		return {}, false
 	}
-	return true
+	return parsed, true
 }
 
-// ctl_read_vault_key resolves the vault key from, in order:
-//   1. --vault-key <hex>
-//   2. $HEIMDALL_VAULT_KEY (a single-bridge dev override)
+// ctl_read_vault_keyring resolves the vault keyring from, in order:
+//   1. --vault-keyring <base64 HKR1>
+//   2. $HEIMDALL_VAULT_KEYRING (a single-bridge dev override)
 //   3. the local bridge, via agent.vault.get (agent mode only)
 //
-// Sources 1 and 2 are EXPLICIT: if either is present but not a valid key it is
-// rejected immediately and the bridge is NOT consulted, so a typo'd key surfaces as
-// an error instead of silently resolving to a different one. Only genuine ABSENCE
-// falls through to the bridge.
+// Sources 1 and 2 are EXPLICIT: if either is present but invalid it is rejected and
+// the bridge is NOT consulted, so a typo surfaces as an error instead of silently
+// resolving to a different keyring. Only genuine ABSENCE falls through.
 //
-// The bridge is the only implicit source because it is the only one that holds the
-// key live: it is unsealed per bridge from the UI and keeps its key in the keyring /
-// Keychain, so an agent that asks it on each invocation picks up an unseal or a
-// rotation with no respawn. The fetched key is never written to disk.
+// DO NOT add a file source. The machine-wide ~/.config/heimdall/vault_key file is
+// ignored (pinned by test_vault_legacy_key_file_is_ignored).
 //
-// DO NOT add a file source back. ham-ctl used to read the machine-wide
-// ~/.config/heimdall/vault_key here; that file was shared by every bridge on the
-// host, so it could hand one bridge's agents another bridge's key. It is no longer
-// created, read or migrated by anything — an existing file is simply ignored
-// (pinned by test_vault_legacy_key_file_is_ignored).
-ctl_read_vault_key :: proc(args: []string = nil, allocator := context.allocator) -> (key_hex: string, ok: bool) {
-	// 1. Check --vault-key command line flag if args passed
-	if args != nil && has_flag(args, "--vault-key") {
-		flag_val := option_value(args, "--vault-key", "")
-		trimmed := strings.trim_space(flag_val)
-		if len(trimmed) == 64 && is_valid_hex_key(trimmed) {
-			return strings.clone(trimmed, allocator), true
-		}
-		// Explicit flag provided but invalid hex key: reject immediately, do NOT fall through
-		return "", false
+// The returned pointer refers to the process-wide copy wiped by ctl_vault_wipe.
+ctl_read_vault_keyring :: proc(args: []string = nil, allocator := context.allocator) -> (kr: ^vault.Vault_Keyring, ok: bool) {
+	_ = allocator
+	vault.keyring_wipe(&g_ctl_keyring)
+	if args != nil && has_flag(args, "--vault-keyring") {
+		parsed, p_ok := ctl_keyring_from_b64(strings.trim_space(option_value(args, "--vault-keyring", "")))
+		if !p_ok do return nil, false
+		g_ctl_keyring = parsed
+		return &g_ctl_keyring, true
 	}
-
-	// 2. Check environment variable HEIMDALL_VAULT_KEY
-	if env_val, found := os.lookup_env("HEIMDALL_VAULT_KEY", context.temp_allocator); found {
+	if env_val, found := os.lookup_env("HEIMDALL_VAULT_KEYRING", context.temp_allocator); found {
 		trimmed := strings.trim_space(env_val)
 		if trimmed != "" {
-			if len(trimmed) == 64 && is_valid_hex_key(trimmed) {
-				return strings.clone(trimmed, allocator), true
-			}
-			// Explicit env var set but invalid hex key: reject immediately, do NOT fall through
-			return "", false
+			parsed, p_ok := ctl_keyring_from_b64(trimmed)
+			if !p_ok do return nil, false
+			g_ctl_keyring = parsed
+			return &g_ctl_keyring, true
 		}
 	}
-
-	// 3. Ask the live bridge.
-	return ctl_vault_key_from_bridge(allocator)
+	parsed, b_ok := ctl_vault_keyring_from_bridge()
+	if !b_ok do return nil, false
+	g_ctl_keyring = parsed
+	return &g_ctl_keyring, true
 }
 
-// ctl_vault_key_from_bridge is source 3 of ctl_read_vault_key: ask the local bridge
-// for the key it currently holds. Reached only once sources 1 and 2 are both absent.
-//
-// It deliberately uses ctl_agent_local_call, NOT ctl_agent_call: the latter prints
-// the response to stdout and os.exit(1)s on failure, which inside a decrypt path
-// would corrupt the JSON of every command that needs a key. We need the value
-// returned to us, and an unreachable bridge must be an ordinary "no key".
-//
-// Any failure — no endpoint, no token, unreachable socket, an error response such
-// as `not_found`, malformed JSON, or a key that is not 64 hex chars — resolves to
-// ("", false), i.e. exactly the "no key" the caller already handles by emitting the
-// [Encrypted: ...] fallback. It never aborts and never partially applies a key.
-ctl_vault_key_from_bridge :: proc(allocator := context.allocator) -> (key_hex: string, ok: bool) {
-	// Agent mode only: in hub mode these are unset and behaviour is unchanged.
+// ctl_vault_keyring_from_bridge asks the local bridge for the keyring it holds. Any
+// failure (no endpoint, unreachable socket, error envelope, malformed value) is "no
+// keyring". It uses ctl_agent_local_call, which neither prints nor exits.
+ctl_vault_keyring_from_bridge :: proc() -> (kr: vault.Vault_Keyring, ok: bool) {
 	endpoint, has_endpoint := os.lookup_env("HEIMDALL_BRIDGE_ENDPOINT", context.temp_allocator)
-	if !has_endpoint || strings.trim_space(endpoint) == "" do return "", false
+	if !has_endpoint || strings.trim_space(endpoint) == "" do return {}, false
 	token, has_token := os.lookup_env("HEIMDALL_AGENT_TOKEN", context.temp_allocator)
-	if !has_token || strings.trim_space(token) == "" do return "", false
+	if !has_token || strings.trim_space(token) == "" do return {}, false
 
 	response, call_ok := ctl_agent_local_call(endpoint, token, "agent.vault.get", "{}")
-	if !call_ok do return "", false
-	// We own the response buffer, and the key is cloned out below, so release it
-	// rather than leaving the whole read buffer alive for the rest of the process.
-	defer delete(response)
-
-	return ctl_vault_key_from_response(response, allocator)
+	if !call_ok do return {}, false
+	defer {
+		crypto.zero_explicit(raw_data(response), len(response))
+		delete(response)
+	}
+	return ctl_vault_keyring_from_response(response)
 }
 
-// ctl_vault_key_from_response pulls the key out of an agent.vault.get response and
-// validates it. Split out from the socket call so the parsing and validation rules
-// can be tested exhaustively without standing up a bridge.
-//
-// Returns ("", false) for every non-conforming response: an error envelope such as
-// `not_found` (which has no "key" member at all), truncated or malformed JSON, or a
-// value that is not exactly 64 hex characters. There is deliberately no separate
-// `"ok":true` check — absence of a usable key is already the same outcome, and
-// validating the value itself is the stronger test.
-ctl_vault_key_from_response :: proc(response: string, allocator := context.allocator) -> (key_hex: string, ok: bool) {
-	// The matched pattern is `"key":"`, so this cannot pick up "key_length".
-	fetched := strings.trim_space(extract_json_string(response, "key", ""))
-	if len(fetched) != 64 || !is_valid_hex_key(fetched) do return "", false
-	return strings.clone(fetched, allocator), true
+// ctl_vault_keyring_from_response validates an agent.vault.get response:
+// {"keyring_b64":"<base64 HKR1>","current_epoch":N}. The keyring must decode
+// strictly, parse, and its current epoch must equal current_epoch.
+ctl_vault_keyring_from_response :: proc(response: string) -> (kr: vault.Vault_Keyring, ok: bool) {
+	b64 := jsonx.extract_string(response, "keyring_b64", "", false, context.temp_allocator)
+	defer crypto.zero_explicit(raw_data(b64), len(b64))
+	epoch, epoch_ok := jsonx.extract_int_found(response, "current_epoch")
+	if b64 == "" || !epoch_ok || epoch < 1 || i64(epoch) > i64(vault.MAX_EPOCH) do return {}, false
+	return ctl_keyring_from_b64(b64, u32(epoch))
 }
 
 ctl_vault_command :: proc(cmd: []string, args: []string) {
@@ -145,8 +141,8 @@ ctl_vault_command :: proc(cmd: []string, args: []string) {
 	}
 }
 
-// ctl_vault_status reports the two places a key can come from: whether a
-// $HEIMDALL_VAULT_KEY override is present (and well formed), and the bridge's own
+// ctl_vault_status reports the two places a keyring can come from: whether a
+// $HEIMDALL_VAULT_KEYRING override is present (and well formed), and the bridge's own
 // view from agent.vault.status, forwarded verbatim under "bridge" so the two cannot
 // drift. Nothing here looks at the filesystem.
 //
@@ -178,14 +174,16 @@ ctl_vault_status :: proc(args: []string) {
 	fmt.println(strings.to_string(b))
 }
 
-// ctl_vault_env_override reports whether $HEIMDALL_VAULT_KEY is set (non-blank) and
-// whether its value is a usable key, mirroring source 2 of ctl_read_vault_key.
+// ctl_vault_env_override reports whether $HEIMDALL_VAULT_KEYRING is set (non-blank)
+// and whether its value is a usable keyring, mirroring source 2 of ctl_read_vault_keyring.
 ctl_vault_env_override :: proc() -> (present: bool, valid: bool) {
-	env_val, found := os.lookup_env("HEIMDALL_VAULT_KEY", context.temp_allocator)
+	env_val, found := os.lookup_env("HEIMDALL_VAULT_KEYRING", context.temp_allocator)
 	if !found do return false, false
 	trimmed := strings.trim_space(env_val)
 	if trimmed == "" do return false, false
-	return true, len(trimmed) == 64 && is_valid_hex_key(trimmed)
+	kr, ok := ctl_keyring_from_b64(trimmed)
+	vault.keyring_wipe(&kr)
+	return true, ok
 }
 
 // ctl_vault_status_bridge_json renders the "bridge" object of the status payload:

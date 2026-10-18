@@ -7,6 +7,8 @@ import "odin_test:contracts"
 import cfg_lib "odin_test:lib/config"
 
 main :: proc() {
+	// Zero the resolved vault keyring on every normal return path.
+	defer ctl_vault_wipe()
 	if len(os.args) == 2 && os.args[1] == "--version" {
 		fmt.println("ham-ctl", contracts.APP_VERSION, "protocol", contracts.PROTOCOL_VERSION)
 		return

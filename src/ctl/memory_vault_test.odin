@@ -26,7 +26,7 @@ test_memory_propose_encryption_with_vault_key :: proc(t: ^testing.T) {
 		"--body", orig_body,
 		"--evidence", orig_evidence,
 		"--agent-ids", "agt_worker_1",
-		"--vault-key", TEST_MEMORY_VAULT_KEY,
+		"--vault-keyring", tkr_b64(TEST_MEMORY_VAULT_KEY),
 	}
 
 	out := ctl_agentmode_memory_propose_params(args)
@@ -36,19 +36,19 @@ test_memory_propose_encryption_with_vault_key :: proc(t: ^testing.T) {
 
 	// Title must be encrypted
 	testing.expect(t, !strings.contains(out, orig_title), "title must not leak plaintext")
-	testing.expect(t, strings.contains(out, `"title":"vault:v1:`), "title must be armored with vault:v1:")
+	testing.expect(t, strings.contains(out, `"title":"vault:v2:`), "title must be armored with vault:v2:")
 
 	// Description must be encrypted
 	testing.expect(t, !strings.contains(out, orig_desc), "description must not leak plaintext")
-	testing.expect(t, strings.contains(out, `"description":"vault:v1:`), "description must be armored with vault:v1:")
+	testing.expect(t, strings.contains(out, `"description":"vault:v2:`), "description must be armored with vault:v2:")
 
 	// Body must be encrypted
 	testing.expect(t, !strings.contains(out, orig_body), "body must not leak plaintext")
-	testing.expect(t, strings.contains(out, `"body":"vault:v1:`), "body must be armored with vault:v1:")
+	testing.expect(t, strings.contains(out, `"body":"vault:v2:`), "body must be armored with vault:v2:")
 
 	// Evidence must be encrypted
 	testing.expect(t, !strings.contains(out, orig_evidence), "evidence must not leak plaintext")
-	testing.expect(t, strings.contains(out, `"evidence":"vault:v1:`), "evidence must be armored with vault:v1:")
+	testing.expect(t, strings.contains(out, `"evidence":"vault:v2:`), "evidence must be armored with vault:v2:")
 
 	// Targeting is preserved
 	testing.expect(t, strings.contains(out, `"agent_ids":["agt_worker_1"]`), "agent_ids must be preserved")
@@ -97,7 +97,7 @@ test_memory_propose_without_vault_key_leaves_plaintext :: proc(t: ^testing.T) {
 	out := ctl_agentmode_memory_propose_params(args)
 	testing.expect(t, strings.contains(out, `"title":"Plaintext Memory Title"`), "title must remain plaintext")
 	testing.expect(t, strings.contains(out, `"body":"Plaintext Memory Body"`), "body must remain plaintext")
-	testing.expect(t, !strings.contains(out, "vault:v1:"), "must not contain vault armor")
+	testing.expect(t, !strings.contains(out, "vault:v2:"), "must not contain vault armor")
 }
 
 @(test)
@@ -117,12 +117,12 @@ test_memory_show_and_list_transparent_decryption :: proc(t: ^testing.T) {
 		enc_title, enc_desc, enc_body, enc_ev,
 	)
 
-	decrypted := ctl_decrypt_memory_json(raw_json, TEST_MEMORY_VAULT_KEY, true, context.temp_allocator)
+	decrypted := ctl_decrypt_memory_json(raw_json, tkr(TEST_MEMORY_VAULT_KEY), true, context.temp_allocator)
 	testing.expect(t, strings.contains(decrypted, orig_title), "decrypted json must contain original title")
 	testing.expect(t, strings.contains(decrypted, orig_desc), "decrypted json must contain original description")
 	testing.expect(t, strings.contains(decrypted, orig_body), "decrypted json must contain original body")
 	testing.expect(t, strings.contains(decrypted, orig_evidence), "decrypted json must contain original evidence")
-	testing.expect(t, !strings.contains(decrypted, "vault:v1:"), "decrypted json must not contain vault armor")
+	testing.expect(t, !strings.contains(decrypted, "vault:v2:"), "decrypted json must not contain vault armor")
 }
 
 @(test)
@@ -136,10 +136,10 @@ test_memory_unconfigured_fallback :: proc(t: ^testing.T) {
 	)
 
 	// Key not configured -> fallback
-	decrypted := ctl_decrypt_memory_json(raw_json, "", false, context.temp_allocator)
+	decrypted := ctl_decrypt_memory_json(raw_json, nil, false, context.temp_allocator)
 	testing.expect(t, !strings.contains(decrypted, orig_title), "must not leak plaintext without key")
 	expected_fallback := fmt.tprintf(`[Encrypted: %s]`, enc_title)
-	testing.expect(t, strings.contains(decrypted, expected_fallback), "must contain [Encrypted: vault:v1:...] fallback")
+	testing.expect(t, strings.contains(decrypted, expected_fallback), "must contain [Encrypted: vault:v2:...] fallback")
 	testing.expect(t, strings.contains(decrypted, "regular body"), "unencrypted body must remain intact")
 }
 
@@ -154,7 +154,7 @@ test_memory_wrong_key_fallback :: proc(t: ^testing.T) {
 	)
 
 	// Wrong key -> fallback
-	decrypted := ctl_decrypt_memory_json(raw_json, ALT_MEMORY_VAULT_KEY, true, context.temp_allocator)
+	decrypted := ctl_decrypt_memory_json(raw_json, tkr(ALT_MEMORY_VAULT_KEY), true, context.temp_allocator)
 	testing.expect(t, !strings.contains(decrypted, orig_title), "must not decrypt with wrong key")
 	expected_fallback := fmt.tprintf(`[Encrypted: %s]`, enc_title)
 	testing.expect(t, strings.contains(decrypted, expected_fallback), "must contain fallback on decryption failure")
@@ -166,7 +166,7 @@ test_memory_content_transparent_decryption :: proc(t: ^testing.T) {
 	enc_body, _ := vault_encrypt_text_hex(orig_body, TEST_MEMORY_VAULT_KEY, context.temp_allocator)
 
 	// 1. With configured key
-	decrypted := ctl_decrypt_or_fallback_armored(enc_body, TEST_MEMORY_VAULT_KEY, true, context.temp_allocator)
+	decrypted := ctl_decrypt_or_fallback_armored(enc_body, tkr(TEST_MEMORY_VAULT_KEY), true, context.temp_allocator)
 	testing.expect_value(t, decrypted, orig_body)
 
 	// 2. Unconfigured key.
@@ -176,7 +176,7 @@ test_memory_content_transparent_decryption :: proc(t: ^testing.T) {
 	// (an agent was hard-blocked because nothing in the CLI named the cause or the remedy).
 	// The hint is spelled out literally rather than referencing VAULT_HINT_NO_KEY so that an
 	// accidental edit of that constant fails here instead of silently agreeing with itself.
-	fallback := ctl_decrypt_or_fallback_armored(enc_body, "", false, context.temp_allocator)
+	fallback := ctl_decrypt_or_fallback_armored(enc_body, nil, false, context.temp_allocator)
 	expected_prefix := fmt.tprintf(`[Encrypted: %s]`, enc_body)
 	expected_fallback := fmt.tprintf(
 		"%s (vault key not configured — see `ham-ctl vault status`)",
@@ -197,14 +197,14 @@ test_memory_content_transparent_decryption :: proc(t: ^testing.T) {
 
 	// 3. Plaintext passthrough
 	plain_body := "Legacy plaintext body"
-	passthrough := ctl_decrypt_or_fallback_armored(plain_body, TEST_MEMORY_VAULT_KEY, true, context.temp_allocator)
+	passthrough := ctl_decrypt_or_fallback_armored(plain_body, tkr(TEST_MEMORY_VAULT_KEY), true, context.temp_allocator)
 	testing.expect_value(t, passthrough, plain_body)
 }
 
 @(test)
 test_legacy_plaintext_memories_unaltered :: proc(t: ^testing.T) {
 	raw_json := `{"v":1,"ok":true,"data":{"data":[{"memory_id":"mem_legacy","title":"Plain Title","description":"Plain Desc","body":"Plain Body","evidence":"Plain Evidence"}]}}`
-	decrypted := ctl_decrypt_memory_json(raw_json, TEST_MEMORY_VAULT_KEY, true, context.temp_allocator)
+	decrypted := ctl_decrypt_memory_json(raw_json, tkr(TEST_MEMORY_VAULT_KEY), true, context.temp_allocator)
 	testing.expect(t, strings.contains(decrypted, `"title":"Plain Title"`), "title preserved")
 	testing.expect(t, strings.contains(decrypted, `"description":"Plain Desc"`), "description preserved")
 	testing.expect(t, strings.contains(decrypted, `"body":"Plain Body"`), "body preserved")

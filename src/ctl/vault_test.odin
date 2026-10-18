@@ -5,10 +5,9 @@ import "core:os"
 import "core:strings"
 import "core:sync"
 import "core:testing"
-import cfg_lib "odin_test:lib/config"
 
 // Serialises every test that touches AMBIENT vault state — the HEIMDALL_HOME /
-// HEIMDALL_VAULT_KEY environment and the vault key file they resolve to. Those
+// HEIMDALL_VAULT_KEYRING environment and the vault key file they resolve to. Those
 // are process-wide, so such tests cannot run concurrently under the multi-thread
 // test runner. Hold this for the whole body, and open the sandbox below inside it.
 vault_test_mutex: sync.Mutex
@@ -32,7 +31,7 @@ vault_test_mutex: sync.Mutex
 // two distinct reasons:
 //   1. it can then never write outside its own temp dir, and
 //   2. a test named "without_vault_key" CREATES that condition (empty temp home,
-//      HEIMDALL_VAULT_KEY unset) instead of inheriting it from the host, so the
+//      HEIMDALL_VAULT_KEYRING unset) instead of inheriting it from the host, so the
 //      suite passes identically whether or not a key is configured on the machine.
 // Tests that pass the key and the configured flag as explicit arguments read no
 // ambient state and deliberately do NOT take the sandbox.
@@ -88,12 +87,12 @@ ctl_vault_test_sandbox_open :: proc(label: string) -> Ctl_Vault_Test_Sandbox {
 	// Capture PRESENCE, not just value: restoring an absent variable as "" would
 	// turn "unset" into "set but empty" for every sibling test that follows.
 	sb.prev_home, sb.had_home = os.lookup_env("HEIMDALL_HOME", context.allocator)
-	sb.prev_key, sb.had_key = os.lookup_env("HEIMDALL_VAULT_KEY", context.allocator)
+	sb.prev_key, sb.had_key = os.lookup_env("HEIMDALL_VAULT_KEYRING", context.allocator)
 	sb.prev_endpoint, sb.had_endpoint = os.lookup_env("HEIMDALL_BRIDGE_ENDPOINT", context.allocator)
 	sb.prev_token, sb.had_token = os.lookup_env("HEIMDALL_AGENT_TOKEN", context.allocator)
 
 	_ = os.set_env("HEIMDALL_HOME", sb.dir)
-	os.unset_env("HEIMDALL_VAULT_KEY")
+	os.unset_env("HEIMDALL_VAULT_KEYRING")
 
 	// The bridge source needs BOTH to be usable, so clearing both is belt-and-braces; it also
 	// means a test that wants the bridge source can set them itself without fighting
@@ -114,9 +113,9 @@ ctl_vault_test_sandbox_close :: proc(sb: ^Ctl_Vault_Test_Sandbox) {
 	delete(sb.prev_home)
 
 	if sb.had_key {
-		_ = os.set_env("HEIMDALL_VAULT_KEY", sb.prev_key)
+		_ = os.set_env("HEIMDALL_VAULT_KEYRING", sb.prev_key)
 	} else {
-		os.unset_env("HEIMDALL_VAULT_KEY")
+		os.unset_env("HEIMDALL_VAULT_KEYRING")
 	}
 	delete(sb.prev_key)
 
@@ -138,113 +137,3 @@ ctl_vault_test_sandbox_close :: proc(sb: ^Ctl_Vault_Test_Sandbox) {
 	delete(sb.dir)
 }
 
-@(test)
-test_vault_hex_validation :: proc(t: ^testing.T) {
-	testing.expect(t, !is_valid_hex_key(""), "empty key should fail")
-	testing.expect(t, !is_valid_hex_key("abcd"), "short key should fail")
-	testing.expect(t, !is_valid_hex_key("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef00"), "long key should fail")
-	testing.expect(t, !is_valid_hex_key("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeg"), "non-hex char 'g' should fail")
-	testing.expect(t, is_valid_hex_key("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"), "lowercase 64-char hex should pass")
-	testing.expect(t, is_valid_hex_key("0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"), "uppercase 64-char hex should pass")
-}
-
-// REQ-T6-5: the legacy machine-wide ~/.config/heimdall/vault_key is no longer a
-// key source. With a perfectly valid 0600 file present and no flag, no env and no
-// bridge, ctl_read_vault_key must report "no key" rather than read the file.
-@(test)
-test_vault_legacy_key_file_is_ignored :: proc(t: ^testing.T) {
-	sync.mutex_lock(&vault_test_mutex)
-	defer sync.mutex_unlock(&vault_test_mutex)
-	sb := ctl_vault_test_sandbox_open("legacy-file")
-	defer ctl_vault_test_sandbox_close(&sb)
-
-	test_key := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-	path := cfg_lib.expand_home("~/.config/heimdall/vault_key")
-	defer delete(path)
-
-	// The sandbox is only real if the path actually landed inside it. Check that
-	// BEFORE writing, and bail out rather than continuing: testing.expect records a
-	// failure but does NOT abort, so on a broken redirect the write below would
-	// clobber the operator's real file.
-	if !strings.has_prefix(path, sb.dir) {
-		testing.expect(t, false, fmt.tprintf("vault key path must resolve inside the sandbox %s, got %s — refusing to write", sb.dir, path))
-		return
-	}
-
-	content := strings.concatenate({test_key, "\n"}, context.temp_allocator)
-	testing.expect(t, os.write_entire_file(path, transmute([]byte)content) == nil, "write legacy key file")
-	_ = os.chmod(path, {.Read_User, .Write_User})
-
-	_, ok := ctl_read_vault_key(nil, context.temp_allocator)
-	testing.expect(t, !ok, "a legacy ~/.config/heimdall/vault_key must be ignored when there is no env or bridge")
-
-	// Ignored, not deleted: ctl leaves an existing file alone.
-	testing.expect(t, os.exists(path), "the legacy file must be left on disk")
-
-	// Explicit sources are unaffected: a valid flag still resolves, an invalid one
-	// still rejects without falling through.
-	args_good := [?]string{"ham-ctl", "issue", "list", "--vault-key", test_key}
-	key, good_ok := ctl_read_vault_key(args_good[:], context.temp_allocator)
-	testing.expect(t, good_ok, "a valid --vault-key must resolve")
-	testing.expect_value(t, key, test_key)
-
-	args_bad_flag := [?]string{"ham-ctl", "issue", "list", "--vault-key", "invalid_short_hex"}
-	_, bad_flag_ok := ctl_read_vault_key(args_bad_flag[:], context.temp_allocator)
-	testing.expect(t, !bad_flag_ok, "an invalid --vault-key must reject")
-
-	_ = os.set_env("HEIMDALL_VAULT_KEY", "invalid_short_hex")
-	_, bad_env_ok := ctl_read_vault_key(nil, context.temp_allocator)
-	testing.expect(t, !bad_env_ok, "an invalid HEIMDALL_VAULT_KEY must reject")
-}
-
-// Every vault action other than `status` — including the removed key-writing,
-// `show` and `clear` commands — is now an unknown command, and none may create the
-// legacy file as a side effect.
-@(test)
-test_vault_removed_commands_do_not_touch_key_file :: proc(t: ^testing.T) {
-	sync.mutex_lock(&vault_test_mutex)
-	defer sync.mutex_unlock(&vault_test_mutex)
-	sb := ctl_vault_test_sandbox_open("removed-cmds")
-	defer ctl_vault_test_sandbox_close(&sb)
-
-	path := cfg_lib.expand_home("~/.config/heimdall/vault_key")
-	defer delete(path)
-	if !strings.has_prefix(path, sb.dir) {
-		testing.expect(t, false, fmt.tprintf("vault key path must resolve inside the sandbox %s, got %s", sb.dir, path))
-		return
-	}
-
-	test_key := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-	for action in ([]string{"set", "show", "clear", "write-key"}) {
-		cmd := [?]string{"vault", action, test_key}
-		args := [?]string{"ham-ctl", "vault", action, test_key}
-		ctl_vault_command(cmd[:], args[:])
-	}
-
-	testing.expect(t, !os.exists(path), "no vault command may create ~/.config/heimdall/vault_key")
-}
-
-// `ham-ctl vault status` reports only the env override and the bridge's view.
-@(test)
-test_vault_status_sources :: proc(t: ^testing.T) {
-	sync.mutex_lock(&vault_test_mutex)
-	defer sync.mutex_unlock(&vault_test_mutex)
-	sb := ctl_vault_test_sandbox_open("status")
-	defer ctl_vault_test_sandbox_close(&sb)
-
-	present, valid := ctl_vault_env_override()
-	testing.expect(t, !present && !valid, "no HEIMDALL_VAULT_KEY means no env override")
-
-	_ = os.set_env("HEIMDALL_VAULT_KEY", "invalid_short_hex")
-	present, valid = ctl_vault_env_override()
-	testing.expect(t, present && !valid, "a malformed HEIMDALL_VAULT_KEY is present but invalid")
-
-	_ = os.set_env("HEIMDALL_VAULT_KEY", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
-	present, valid = ctl_vault_env_override()
-	testing.expect(t, present && valid, "a 64-hex HEIMDALL_VAULT_KEY is a valid override")
-
-	// Hub mode (no endpoint/token): the bridge cannot be asked.
-	bridge := ctl_vault_status_bridge_json()
-	defer delete(bridge)
-	testing.expect_value(t, bridge, "{\"available\":false}")
-}

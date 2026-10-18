@@ -328,12 +328,12 @@ ctl_hub_tasks :: proc(base, token, action: string, args: []string) {
 }
 
 ctl_hub_projects :: proc(base, token, action: string, args: []string) {
-	key_hex, key_ok := ctl_read_vault_key(args, context.temp_allocator)
+	keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
 
 	if action == "" || action == "list" {
 		resp, ok := ctl_hub_request_string(base, token, "GET", "/api/v1/projects", "")
 		if !ok do return
-		dec := ctl_decrypt_vault_json(resp, key_hex, key_ok)
+		dec := ctl_decrypt_vault_json(resp, keyring, key_ok)
 		defer delete(dec)
 		fmt.println(dec)
 		return
@@ -344,10 +344,10 @@ ctl_hub_projects :: proc(base, token, action: string, args: []string) {
 		desc := option_value(args, "--description", option_value(args, "--desc", ""))
 		if key_ok {
 			if !is_vault_armored(name) {
-				if enc_name, ok := vault_encrypt_text_hex(name, key_hex, context.temp_allocator); ok do name = enc_name
+				name = ctl_seal_or_exit(name, keyring)
 			}
 			if desc != "" && !is_vault_armored(desc) {
-				if enc_desc, ok := vault_encrypt_text_hex(desc, key_hex, context.temp_allocator); ok do desc = enc_desc
+				desc = ctl_seal_or_exit(desc, keyring)
 			}
 		}
 		fields := make([dynamic]string)
@@ -360,7 +360,7 @@ ctl_hub_projects :: proc(base, token, action: string, args: []string) {
 		append(&fields, json_kv("default_path", option_value(args, "--default-path", option_value(args, "--path", ""))))
 		resp, ok := ctl_hub_request_string(base, token, "POST", "/api/v1/projects", json_object_from_slice(fields[:]))
 		if !ok do return
-		dec := ctl_decrypt_vault_json(resp, key_hex, key_ok)
+		dec := ctl_decrypt_vault_json(resp, keyring, key_ok)
 		defer delete(dec)
 		fmt.println(dec)
 		return
@@ -370,7 +370,7 @@ ctl_hub_projects :: proc(base, token, action: string, args: []string) {
 	if action == "show" {
 		resp, ok := ctl_hub_request_string(base, token, "GET", fmt.tprintf("/api/v1/projects/%s", safe_path_part(project_id)), "")
 		if !ok do return
-		dec := ctl_decrypt_vault_json(resp, key_hex, key_ok)
+		dec := ctl_decrypt_vault_json(resp, keyring, key_ok)
 		defer delete(dec)
 		fmt.println(dec)
 		return
@@ -380,14 +380,14 @@ ctl_hub_projects :: proc(base, token, action: string, args: []string) {
 		defer delete(fields)
 		if name := option_value(args, "--name", ""); name != "" {
 			if key_ok && !is_vault_armored(name) {
-				if enc_name, ok := vault_encrypt_text_hex(name, key_hex, context.temp_allocator); ok do name = enc_name
+				name = ctl_seal_or_exit(name, keyring)
 			}
 			append(&fields, json_kv("name", name))
 		}
 		if slug := option_value(args, "--slug", ""); slug != "" do append(&fields, json_kv("slug", slug))
 		if desc := option_value(args, "--description", option_value(args, "--desc", "")); desc != "" {
 			if key_ok && !is_vault_armored(desc) {
-				if enc_desc, ok := vault_encrypt_text_hex(desc, key_hex, context.temp_allocator); ok do desc = enc_desc
+				desc = ctl_seal_or_exit(desc, keyring)
 			}
 			append(&fields, json_kv("description", desc))
 		}
@@ -396,7 +396,7 @@ ctl_hub_projects :: proc(base, token, action: string, args: []string) {
 		if path := option_value(args, "--default-path", option_value(args, "--path", "")); path != "" do append(&fields, json_kv("default_path", path))
 		resp, ok := ctl_hub_request_string(base, token, "PATCH", fmt.tprintf("/api/v1/projects/%s", safe_path_part(project_id)), json_object_from_slice(fields[:]))
 		if !ok do return
-		dec := ctl_decrypt_vault_json(resp, key_hex, key_ok)
+		dec := ctl_decrypt_vault_json(resp, keyring, key_ok)
 		defer delete(dec)
 		fmt.println(dec)
 		return

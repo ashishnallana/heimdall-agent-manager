@@ -10,6 +10,7 @@ import json "core:encoding/json"
 import "core:strings"
 import "core:time"
 import local_socket "odin_test:lib/local_socket"
+import vault "odin_test:lib/vault"
 
 // ── agent mode: local Bridge endpoint client (RTE2E-7) ───────────────────────
 // Agent mode talks ONLY to the local Bridge endpoint over JSONL v1 using the
@@ -237,11 +238,9 @@ ctl_v2_task_chain :: proc(endpoint, token: string, tokens, args: []string) {
 		// REQ-VCAP-4: check the PLAINTEXT budget before encrypting, so the error
 		// is in the units the caller controls (the Hub only sees ciphertext).
 		if !is_vault_armored(title) && !ctl_check_plaintext_cap("chain title", title, CTL_CHAIN_TITLE_MAX_BYTES) { os.exit(1) }
-		key_hex, key_ok := ctl_read_vault_key(args, context.temp_allocator)
+		keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
 		if key_ok && !is_vault_armored(title) {
-			if enc, enc_ok := vault_encrypt_text_hex(title, key_hex, context.temp_allocator); enc_ok {
-				title = enc
-			}
+			title = ctl_seal_or_exit(title, keyring)
 		}
 		fields := make([dynamic]string)
 		defer delete(fields)
@@ -255,11 +254,9 @@ ctl_v2_task_chain :: proc(endpoint, token: string, tokens, args: []string) {
 		// REQ-VCAP-4: check the PLAINTEXT budget before encrypting, so the error
 		// is in the units the caller controls (the Hub only sees ciphertext).
 		if !is_vault_armored(desc) && !ctl_check_plaintext_cap("chain description", desc, CTL_CHAIN_DESCRIPTION_MAX_BYTES) { os.exit(1) }
-		key_hex, key_ok := ctl_read_vault_key(args, context.temp_allocator)
+		keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
 		if key_ok && desc != "" && !is_vault_armored(desc) {
-			if enc, enc_ok := vault_encrypt_text_hex(desc, key_hex, context.temp_allocator); enc_ok {
-				desc = enc
-			}
+			desc = ctl_seal_or_exit(desc, keyring)
 		}
 		fields := make([dynamic]string)
 		defer delete(fields)
@@ -724,8 +721,8 @@ ctl_agent_artifact_call_and_decrypt :: proc(endpoint, token, method, params_json
 	response, ok := ctl_agent_local_call(endpoint, token, method, params_json)
 	if !ok { fmt.println(`{"ok":false,"message":"local Bridge endpoint is not reachable"}`); os.exit(1) }
 	artifact_require_ok(response)
-	key_hex, key_ok := ctl_read_vault_key(args, context.temp_allocator)
-	decrypted_json := ctl_decrypt_json_string(response, key_hex, key_ok)
+	keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
+	decrypted_json := ctl_decrypt_json_string(response, keyring, key_ok)
 	defer delete(decrypted_json)
 	fmt.println(decrypted_json)
 	if strings.contains(response, `"ok":false`) do os.exit(1)
@@ -746,30 +743,23 @@ ctl_agentmode_artifact_create_params :: proc(args: []string) -> string {
 	}
 	desc := option_value(args, "--description", "")
 
-	key_hex, key_ok := ctl_read_vault_key(args, context.temp_allocator)
+	keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
 	if key_ok {
 		if !is_vault_armored(name) {
-			if enc_name, ok := vault_encrypt_text_hex(name, key_hex, context.temp_allocator); ok {
-				name = enc_name
-			}
+			name = ctl_seal_or_exit(name, keyring)
 		}
 		if desc != "" && !is_vault_armored(desc) {
-			if enc_desc, ok := vault_encrypt_text_hex(desc, key_hex, context.temp_allocator); ok {
-				desc = enc_desc
-			}
+			desc = ctl_seal_or_exit(desc, keyring)
 		}
 		if content != "" && !is_vault_armored(content) {
-			if enc_content, ok := vault_encrypt_text_hex(content, key_hex, context.temp_allocator); ok {
-				content = enc_content
-			}
+			content = ctl_seal_or_exit(content, keyring)
 		} else if content_base64 != "" {
 			raw_bytes, b_err := base64.decode(content_base64, allocator = context.temp_allocator)
 			if b_err == nil {
 				raw_text := string(raw_bytes)
 				if !is_vault_armored(raw_text) {
-					if enc_content, ok := vault_encrypt_text_hex(raw_text, key_hex, context.temp_allocator); ok {
-						content_base64 = base64.encode(transmute([]byte)enc_content, allocator = context.temp_allocator)
-					}
+					enc_content := ctl_seal_or_exit(raw_text, keyring)
+					content_base64 = base64.encode(transmute([]byte)enc_content, allocator = context.temp_allocator)
 				}
 			}
 		}
@@ -854,8 +844,8 @@ ctl_agent_artifact_content :: proc(endpoint, token, artifact_id: string, args: [
 	if !ok { fmt.println(`{"ok":false,"message":"local Bridge endpoint is not reachable"}`); os.exit(1) }
 	artifact_require_ok(response)
 	content := extract_json_string_unescaped(response, "content", "")
-	key_hex, key_ok := ctl_read_vault_key(args, context.temp_allocator)
-	decrypted := ctl_decrypt_or_fallback_armored(content, key_hex, key_ok, context.temp_allocator)
+	keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
+	decrypted := ctl_decrypt_or_fallback_armored(content, keyring, key_ok, context.temp_allocator)
 	fmt.print(decrypted)
 }
 
@@ -875,9 +865,9 @@ ctl_agent_artifact_download :: proc(endpoint, token, artifact_id, dir: string, a
 	filename := artifact_download_random_filename(ext)
 	path := path_join_agent(dir, filename)
 	content := extract_json_string_unescaped(content_response, "content", "")
-	key_hex, key_ok := ctl_read_vault_key(args, context.temp_allocator)
+	keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
 	if is_vault_armored(content) && key_ok {
-		if decrypted, dec_ok := vault_decrypt_text_hex(content, key_hex, context.temp_allocator); dec_ok {
+		if decrypted, res := ctl_vault_open(content, keyring, context.temp_allocator); res == .Ok {
 			content = decrypted
 		}
 	}
@@ -1225,16 +1215,16 @@ ctl_agentmode_memory :: proc(endpoint, token: string, tokens, args: []string) {
 	ctl_v2_memory(endpoint, token, tokens, args)
 }
 
-ctl_decrypt_memory_json :: proc(raw_json: string, key_hex: string, key_configured: bool, allocator := context.allocator) -> string {
-	return ctl_decrypt_issues_json(raw_json, key_hex, key_configured, allocator)
+ctl_decrypt_memory_json :: proc(raw_json: string, keyring: ^vault.Vault_Keyring, key_configured: bool, allocator := context.allocator) -> string {
+	return ctl_decrypt_issues_json(raw_json, keyring, key_configured, allocator)
 }
 
 ctl_agent_memory_call_and_decrypt :: proc(endpoint, token, method, params_json: string, args: []string) {
 	response, ok := ctl_agent_local_call(endpoint, token, method, params_json)
 	if !ok { fmt.println(`{"ok":false,"message":"local Bridge endpoint is not reachable"}`); os.exit(1) }
 	artifact_require_ok(response)
-	key_hex, key_ok := ctl_read_vault_key(args, context.temp_allocator)
-	decrypted_json := ctl_decrypt_memory_json(response, key_hex, key_ok)
+	keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
+	decrypted_json := ctl_decrypt_memory_json(response, keyring, key_ok)
 	defer delete(decrypted_json)
 	fmt.println(decrypted_json)
 }
@@ -1244,8 +1234,8 @@ ctl_agent_memory_content :: proc(endpoint, token, memory_id: string, args: []str
 	if !ok { fmt.println(`{"ok":false,"message":"local Bridge endpoint is not reachable"}`); os.exit(1) }
 	artifact_require_ok(response)
 	content := extract_json_string_unescaped(response, "content", "")
-	key_hex, key_ok := ctl_read_vault_key(args, context.temp_allocator)
-	decrypted := ctl_decrypt_or_fallback_armored(content, key_hex, key_ok, context.temp_allocator)
+	keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
+	decrypted := ctl_decrypt_or_fallback_armored(content, keyring, key_ok, context.temp_allocator)
 	fmt.print(decrypted)
 }
 
@@ -1287,27 +1277,19 @@ ctl_agentmode_memory_propose_params :: proc(args: []string) -> string {
 	body := option_value(args, "--body", "")
 	ev := option_value(args, "--evidence", "")
 
-	key_hex, key_ok := ctl_read_vault_key(args, context.temp_allocator)
+	keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
 	if key_ok {
 		if !is_vault_armored(title) {
-			if enc_title, ok := vault_encrypt_text_hex(title, key_hex, context.temp_allocator); ok {
-				title = enc_title
-			}
+			title = ctl_seal_or_exit(title, keyring)
 		}
 		if desc != "" && !is_vault_armored(desc) {
-			if enc_desc, ok := vault_encrypt_text_hex(desc, key_hex, context.temp_allocator); ok {
-				desc = enc_desc
-			}
+			desc = ctl_seal_or_exit(desc, keyring)
 		}
 		if body != "" && !is_vault_armored(body) {
-			if enc_body, ok := vault_encrypt_text_hex(body, key_hex, context.temp_allocator); ok {
-				body = enc_body
-			}
+			body = ctl_seal_or_exit(body, keyring)
 		}
 		if ev != "" && !is_vault_armored(ev) {
-			if enc_ev, ok := vault_encrypt_text_hex(ev, key_hex, context.temp_allocator); ok {
-				ev = enc_ev
-			}
+			ev = ctl_seal_or_exit(ev, keyring)
 		}
 	}
 
@@ -1336,17 +1318,13 @@ ctl_agentmode_task_chain_create_params :: proc(args: []string, positional_title:
 		data, err := os.read_entire_file("/dev/stdin", context.allocator)
 		if err == nil do desc = string(data)
 	}
-	key_hex, key_ok := ctl_read_vault_key(args, context.temp_allocator)
+	keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
 	if key_ok {
 		if title != "" && !is_vault_armored(title) {
-			if enc, enc_ok := vault_encrypt_text_hex(title, key_hex, context.temp_allocator); enc_ok {
-				title = enc
-			}
+			title = ctl_seal_or_exit(title, keyring)
 		}
 		if desc != "" && !is_vault_armored(desc) {
-			if enc, enc_ok := vault_encrypt_text_hex(desc, key_hex, context.temp_allocator); enc_ok {
-				desc = enc
-			}
+			desc = ctl_seal_or_exit(desc, keyring)
 		}
 	}
 	fields := make([dynamic]string)
@@ -1375,17 +1353,13 @@ ctl_agentmode_task_chain_create_params :: proc(args: []string, positional_title:
 ctl_agentmode_task_create_params :: proc(args: []string) -> string {
 	title := option_value(args, "--title", "")
 	desc := option_value(args, "--description", "")
-	key_hex, key_ok := ctl_read_vault_key(args, context.temp_allocator)
+	keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
 	if key_ok {
 		if title != "" && !is_vault_armored(title) {
-			if enc, ok := vault_encrypt_text_hex(title, key_hex, context.temp_allocator); ok {
-				title = enc
-			}
+			title = ctl_seal_or_exit(title, keyring)
 		}
 		if desc != "" && !is_vault_armored(desc) {
-			if enc, ok := vault_encrypt_text_hex(desc, key_hex, context.temp_allocator); ok {
-				desc = enc
-			}
+			desc = ctl_seal_or_exit(desc, keyring)
 		}
 	}
 	fields := make([dynamic]string)
@@ -1406,12 +1380,10 @@ ctl_agentmode_task_create_params :: proc(args: []string) -> string {
 
 ctl_agentmode_task_comment_params :: proc(tid: string, body: string, args: []string) -> string {
 	comment_body := body
-	key_hex, key_ok := ctl_read_vault_key(args, context.temp_allocator)
+	keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
 	if key_ok {
 		if comment_body != "" && !is_vault_armored(comment_body) {
-			if enc, ok := vault_encrypt_text_hex(comment_body, key_hex, context.temp_allocator); ok {
-				comment_body = enc
-			}
+			comment_body = ctl_seal_or_exit(comment_body, keyring)
 		}
 	}
 	fields := make([dynamic]string)
@@ -1424,17 +1396,13 @@ ctl_agentmode_task_comment_params :: proc(tid: string, body: string, args: []str
 ctl_agentmode_task_update_params :: proc(tid: string, args: []string) -> string {
 	title := option_value(args, "--title", "")
 	desc := option_value(args, "--description", "")
-	key_hex, key_ok := ctl_read_vault_key(args, context.temp_allocator)
+	keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
 	if key_ok {
 		if title != "" && !is_vault_armored(title) {
-			if enc, ok := vault_encrypt_text_hex(title, key_hex, context.temp_allocator); ok {
-				title = enc
-			}
+			title = ctl_seal_or_exit(title, keyring)
 		}
 		if desc != "" && !is_vault_armored(desc) {
-			if enc, ok := vault_encrypt_text_hex(desc, key_hex, context.temp_allocator); ok {
-				desc = enc
-			}
+			desc = ctl_seal_or_exit(desc, keyring)
 		}
 	}
 	fields := make([dynamic]string)
@@ -1456,12 +1424,10 @@ ctl_agentmode_task_update_params :: proc(tid: string, args: []string) -> string 
 
 ctl_agentmode_chat_send_params :: proc(to: string, body: string, args: []string) -> string {
 	chat_body := body
-	key_hex, key_ok := ctl_read_vault_key(args, context.temp_allocator)
+	keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
 	if key_ok {
 		if chat_body != "" && !is_vault_armored(chat_body) {
-			if enc, ok := vault_encrypt_text_hex(chat_body, key_hex, context.temp_allocator); ok {
-				chat_body = enc
-			}
+			chat_body = ctl_seal_or_exit(chat_body, keyring)
 		}
 	}
 	opts := collect_multi_values(args, "--options", "--option", "--expected-answers", "--choices")
@@ -1489,12 +1455,10 @@ ctl_agentmode_chat_send_params :: proc(to: string, body: string, args: []string)
 
 ctl_agentmode_chat_set_title_params :: proc(title: string, args: []string) -> string {
 	chat_title := title
-	key_hex, key_ok := ctl_read_vault_key(args, context.temp_allocator)
+	keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
 	if key_ok {
 		if chat_title != "" && !is_vault_armored(chat_title) {
-			if enc, ok := vault_encrypt_text_hex(chat_title, key_hex, context.temp_allocator); ok {
-				chat_title = enc
-			}
+			chat_title = ctl_seal_or_exit(chat_title, keyring)
 		}
 	}
 	return json_object(json_kv("title", chat_title))
@@ -1516,8 +1480,8 @@ ctl_agent_call_task :: proc(endpoint, token, method, params_json: string, args: 
 		fmt.println(`{"ok":false,"message":"local Bridge endpoint is not reachable"}`)
 		os.exit(1)
 	}
-	key_hex, key_ok := ctl_read_vault_key(args, context.temp_allocator)
-	decrypted_json := ctl_decrypt_json_string(response, key_hex, key_ok)
+	keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
+	decrypted_json := ctl_decrypt_json_string(response, keyring, key_ok)
 	defer delete(decrypted_json)
 	fmt.println(decrypted_json)
 	if strings.contains(response, `"ok":false`) do os.exit(1)

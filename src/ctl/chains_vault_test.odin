@@ -27,10 +27,10 @@ test_chain_show_transparent_decryption :: proc(t: ^testing.T) {
 	)
 
 	// Decrypt with valid key configured
-	decrypted_json := ctl_decrypt_vault_json(raw_json, TEST_CHAIN_VAULT_KEY, true, context.temp_allocator)
+	decrypted_json := ctl_decrypt_vault_json(raw_json, tkr(TEST_CHAIN_VAULT_KEY), true, context.temp_allocator)
 	testing.expect(t, strings.contains(decrypted_json, orig_title), "decrypted json must contain original title")
 	testing.expect(t, strings.contains(decrypted_json, orig_desc), "decrypted json must contain original description")
-	testing.expect(t, !strings.contains(decrypted_json, "vault:v1:"), "decrypted json must not contain armor prefix")
+	testing.expect(t, !strings.contains(decrypted_json, "vault:v2:"), "decrypted json must not contain armor prefix")
 }
 
 @(test)
@@ -44,10 +44,10 @@ test_chain_unconfigured_fallback :: proc(t: ^testing.T) {
 	)
 
 	// Decrypt with key NOT configured (unlocked = false)
-	fallback_json := ctl_decrypt_vault_json(raw_json, "", false, context.temp_allocator)
+	fallback_json := ctl_decrypt_vault_json(raw_json, nil, false, context.temp_allocator)
 
 	expected_fallback := fmt.tprintf("[Encrypted: %s]", enc_title)
-	testing.expect(t, strings.contains(fallback_json, expected_fallback), "must format as [Encrypted: vault:v1:...]")
+	testing.expect(t, strings.contains(fallback_json, expected_fallback), "must format as [Encrypted: vault:v2:...]")
 	testing.expect(t, !strings.contains(fallback_json, orig_title), "must not expose plaintext when unconfigured")
 }
 
@@ -63,7 +63,7 @@ test_chain_list_transparent_decryption :: proc(t: ^testing.T) {
 	)
 
 	// Decrypt list with valid key
-	decrypted_json := ctl_decrypt_vault_json(raw_json, TEST_CHAIN_VAULT_KEY, true, context.temp_allocator)
+	decrypted_json := ctl_decrypt_vault_json(raw_json, tkr(TEST_CHAIN_VAULT_KEY), true, context.temp_allocator)
 
 	testing.expect(t, strings.contains(decrypted_json, "Secret Chain Alpha"), "must decrypt armored chain")
 	testing.expect(t, strings.contains(decrypted_json, plain_title2), "must preserve legacy plaintext chain untouched")
@@ -108,7 +108,7 @@ test_task_chain_create_params_plaintext :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(params, `"project_id":"proj_alpha"`), "project_id should match")
 	testing.expect(t, strings.contains(params, `"provider":"claude"`), "provider should match")
 	testing.expect(t, strings.contains(params, `"model":"smart"`), "model should match")
-	testing.expect(t, !strings.contains(params, "vault:v1:"), "should not be encrypted without vault key")
+	testing.expect(t, !strings.contains(params, "vault:v2:"), "should not be encrypted without vault key")
 }
 
 @(test)
@@ -161,7 +161,7 @@ test_task_chain_create_params_with_vault_encryption :: proc(t: ^testing.T) {
 		"--coordinator", "agt_sec_coord",
 		"--bridge", "brg_sec_1",
 		"--project", "proj_sec",
-		"--vault-key", TEST_CHAIN_VAULT_KEY,
+		"--vault-keyring", tkr_b64(TEST_CHAIN_VAULT_KEY),
 	}
 
 	params := ctl_agentmode_task_chain_create_params(args)
@@ -169,8 +169,8 @@ test_task_chain_create_params_with_vault_encryption :: proc(t: ^testing.T) {
 
 	testing.expect(t, !strings.contains(params, orig_title), "title must not leak in plaintext")
 	testing.expect(t, !strings.contains(params, orig_desc), "description must not leak in plaintext")
-	testing.expect(t, strings.contains(params, `"title":"vault:v1:`), "title must be vault armored")
-	testing.expect(t, strings.contains(params, `"description":"vault:v1:`), "description must be vault armored")
+	testing.expect(t, strings.contains(params, `"title":"vault:v2:`), "title must be vault armored")
+	testing.expect(t, strings.contains(params, `"description":"vault:v2:`), "description must be vault armored")
 	testing.expect(t, strings.contains(params, `"coordinator_agent_id":"agt_sec_coord"`), "coordinator must remain plaintext")
 	testing.expect(t, strings.contains(params, `"bridge_id":"brg_sec_1"`), "bridge must remain plaintext")
 	testing.expect(t, strings.contains(params, `"project_id":"proj_sec"`), "project must remain plaintext")

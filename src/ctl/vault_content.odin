@@ -1,147 +1,76 @@
 package main
 
-import "core:crypto"
-import "core:crypto/aes"
-import "core:encoding/base64"
-import "core:encoding/hex"
 import "core:encoding/json"
 import "core:fmt"
+import "core:os"
 import "core:strings"
 import jsonx "odin_test:lib/jsonx"
+import vault "odin_test:lib/vault"
 
-// ── Reusable Content Cryptography Library (REQ-VAULT-CONTENT-LIB-1) ──────────
-// Implements wire format 'vault:v1:<base64(12B_nonce + 16B_tag + ciphertext)>',
-// transparent unarmored fallback, and cross-platform interoperability with WebCrypto.
+// ── Content cryptography (REQ-VAULT-CONTENT-LIB-1, passwordless vault P1) ────
+// The wire format lives in src/lib/vault: 'vault:v2:e<epoch>:<b64(nonce|tag|ct)>'
+// with AAD 'heimdall-vault-v2|e<epoch>'. ham-ctl seals under the keyring's CURRENT
+// epoch and opens by the epoch in the token header. v1 ('vault:v1:'/'ENC:v1:') tokens
+// are dead: they are not armored as far as ham-ctl is concerned and are never decoded.
 
-VAULT_ARMOR_PREFIX :: "vault:v1:"
-VAULT_NONCE_BYTES  :: 12
-VAULT_TAG_BYTES    :: 16
-VAULT_KEY_BYTES    :: 32
-VAULT_HEADER_BYTES :: VAULT_NONCE_BYTES + VAULT_TAG_BYTES // 28
+VAULT_ARMOR_PREFIX :: vault.VAULT_V2_PREFIX
 
-// Check if a string has the self-describing vault armor prefix.
+// Check if a string has the self-describing v2 vault armor prefix.
 is_vault_armored :: proc(text: string) -> bool {
-	return strings.has_prefix(text, VAULT_ARMOR_PREFIX)
+	return vault.is_armored(text)
 }
 
-// Encrypt plaintext string using 256-bit AES-GCM and return armored envelope string:
-// 'vault:v1:<base64(12B_nonce + 16B_tag + ciphertext)>'
-vault_encrypt_text :: proc(plaintext: string, key_bytes: []u8, allocator := context.allocator) -> (armored: string, ok: bool) {
-	if len(key_bytes) != VAULT_KEY_BYTES do return "", false
-
-	plaintext_bytes := transmute([]byte)plaintext
-
-	nonce: [VAULT_NONCE_BYTES]byte
-	crypto.rand_bytes(nonce[:])
-
-	ciphertext := make([]byte, len(plaintext_bytes), context.temp_allocator)
-	tag: [VAULT_TAG_BYTES]byte
-
-	gcm: aes.Context_GCM
-	aes.init_gcm(&gcm, key_bytes)
-	defer aes.reset_gcm(&gcm)
-
-	aes.seal_gcm(&gcm, ciphertext, tag[:], nonce[:], nil, plaintext_bytes)
-
-	payload_len := VAULT_HEADER_BYTES + len(ciphertext)
-	payload := make([]byte, payload_len, context.temp_allocator)
-	copy(payload[0:VAULT_NONCE_BYTES], nonce[:])
-	copy(payload[VAULT_NONCE_BYTES:VAULT_HEADER_BYTES], tag[:])
-	copy(payload[VAULT_HEADER_BYTES:], ciphertext)
-
-	b64, err := base64.encode(payload, allocator = context.temp_allocator)
-	if err != nil do return "", false
-
-	res := strings.concatenate({VAULT_ARMOR_PREFIX, b64}, allocator)
-	return res, true
+// ctl_vault_seal encrypts plaintext under the keyring's current epoch. ok=false on a
+// missing keyring or a CSPRNG failure; nothing is produced in that case.
+ctl_vault_seal :: proc(plaintext: string, kr: ^vault.Vault_Keyring, allocator := context.allocator) -> (armored: string, ok: bool) {
+	if kr == nil do return "", false
+	return vault.seal(transmute([]byte)plaintext, kr, allocator)
 }
 
-// Encrypt plaintext using a 64-character hex key string.
-vault_encrypt_text_hex :: proc(plaintext: string, key_hex: string, allocator := context.allocator) -> (armored: string, ok: bool) {
-	if !is_valid_hex_key(key_hex) do return "", false
-	raw_key, hex_ok := hex.decode(transmute([]byte)key_hex, context.temp_allocator)
-	if !hex_ok || len(raw_key) != VAULT_KEY_BYTES do return "", false
-	return vault_encrypt_text(plaintext, raw_key, allocator)
+// ctl_seal_or_exit is the call-site form for fields that MUST be encrypted once a
+// keyring is configured: if sealing fails the command aborts instead of sending the
+// plaintext (fail closed, never a silent downgrade).
+ctl_seal_or_exit :: proc(plaintext: string, kr: ^vault.Vault_Keyring) -> string {
+	armored, ok := ctl_vault_seal(plaintext, kr, context.temp_allocator)
+	if !ok {
+		fmt.println(`{"ok":false,"message":"vault encryption failed; refusing to send plaintext"}`)
+		os.exit(1)
+	}
+	return armored
 }
 
-// Decrypt a vault armored string. If the string does not start with 'vault:v1:',
-// returns a copy of the input string as-is with ok = true (transparent fallback).
-vault_decrypt_text :: proc(armored: string, key_bytes: []u8, allocator := context.allocator) -> (plaintext: string, ok: bool) {
-	if !is_vault_armored(armored) {
-		return strings.clone(armored, allocator), true
-	}
-
-	if len(key_bytes) != VAULT_KEY_BYTES do return "", false
-
-	b64 := strings.trim_space(armored[len(VAULT_ARMOR_PREFIX):])
-	if len(b64) == 0 do return "", false
-
-	// Validate base64 alphabet
-	for i in 0 ..< len(b64) {
-		c := b64[i]
-		switch c {
-		case 'A'..='Z', 'a'..='z', '0'..='9', '+', '/', '=':
-		case:
-			return "", false
-		}
-	}
-
-	payload, err := base64.decode(b64, allocator = context.temp_allocator)
-	if err != nil do return "", false
-
-	if len(payload) < VAULT_HEADER_BYTES do return "", false
-
-	nonce := payload[0:VAULT_NONCE_BYTES]
-	tag := payload[VAULT_NONCE_BYTES:VAULT_HEADER_BYTES]
-	ciphertext := payload[VAULT_HEADER_BYTES:]
-
-	dst := make([]byte, len(ciphertext), allocator)
-	gcm: aes.Context_GCM
-	aes.init_gcm(&gcm, key_bytes)
-	defer aes.reset_gcm(&gcm)
-
-	if !aes.open_gcm(&gcm, dst, nonce, nil, ciphertext, tag) {
-		delete(dst, allocator)
-		return "", false
-	}
-
-	return string(dst), true
-}
-
-// Decrypt a vault armored string using a 64-character hex key string.
-vault_decrypt_text_hex :: proc(armored: string, key_hex: string, allocator := context.allocator) -> (plaintext: string, ok: bool) {
-	if !is_vault_armored(armored) {
-		return strings.clone(armored, allocator), true
-	}
-	if !is_valid_hex_key(key_hex) do return "", false
-	raw_key, hex_ok := hex.decode(transmute([]byte)key_hex, context.temp_allocator)
-	if !hex_ok || len(raw_key) != VAULT_KEY_BYTES do return "", false
-	return vault_decrypt_text(armored, raw_key, allocator)
+// ctl_vault_open decrypts a v2 token. A value that is not v2-armored (plain text or
+// a dead v1 token) is returned unchanged with result .Not_Armored.
+ctl_vault_open :: proc(armored: string, kr: ^vault.Vault_Keyring, allocator := context.allocator) -> (plaintext: string, result: vault.Open_Result) {
+	if !vault.is_armored(armored) do return strings.clone(armored, allocator), .Not_Armored
+	return vault.open(armored, kr, allocator)
 }
 
 // Remedy hints appended after the '[Encrypted: ...]' fallback so a reader learns both the
-// cause and the next step (REQ-VAULT-3). They are additive: everything up to and including
-// the closing bracket keeps the exact historical shape '[Encrypted: <armored>]'.
+// cause and the next step (REQ-VAULT-3).
 VAULT_HINT_NO_KEY   :: "(vault key not configured — see `ham-ctl vault status`)"
+VAULT_HINT_LOCKED   :: "(this value uses a vault epoch this keyring does not hold — see `ham-ctl vault status`)"
 VAULT_HINT_BAD_KEY  :: "(configured vault key cannot decrypt this value — see `ham-ctl vault status`)"
 
-// Decrypt an armored field if key is configured, or return fallback formatted string:
-// '[Encrypted: vault:v1:...] (<remedy hint>)' if key is unconfigured or decryption fails.
-// The hint distinguishes the two causes: an unconfigured key needs the bridge unsealed, whereas a
-// configured-but-wrong key would be actively misdiagnosed by a "not configured" message.
-ctl_decrypt_or_fallback_armored :: proc(val: string, key_hex: string, key_configured: bool, allocator := context.allocator) -> string {
+// Decrypt an armored field, or return '[Encrypted: vault:v2:...] (<remedy hint>)' when it
+// cannot be decrypted. The hint distinguishes: no keyring, an epoch the keyring does
+// not hold (locked), and a value that fails to parse or authenticate.
+ctl_decrypt_or_fallback_armored :: proc(val: string, kr: ^vault.Vault_Keyring, key_configured: bool, allocator := context.allocator) -> string {
 	if !is_vault_armored(val) {
 		return strings.clone(val, allocator)
 	}
-	if key_configured {
-		decrypted, ok := vault_decrypt_text_hex(val, key_hex, allocator)
-		if ok {
+	hint := VAULT_HINT_NO_KEY
+	if key_configured && kr != nil {
+		decrypted, res := vault.open(val, kr, allocator)
+		#partial switch res {
+		case .Ok:
 			return decrypted
+		case .Unknown_Epoch:
+			hint = VAULT_HINT_LOCKED
+		case:
+			hint = VAULT_HINT_BAD_KEY
 		}
 	}
-	// Missing key or decryption failure (e.g. wrong key, truncated preview or tampered):
-	// graceful fallback that names the cause and the remedy.
-	hint := key_configured ? VAULT_HINT_BAD_KEY : VAULT_HINT_NO_KEY
 	return fmt.aprintf("[Encrypted: %s] %s", val, hint, allocator = allocator)
 }
 
@@ -150,7 +79,7 @@ Json_Field_Update :: struct {
 	v: json.Value,
 }
 
-ctl_decrypt_json_value :: proc(v: ^json.Value, key_hex: string, key_configured: bool, allocator := context.allocator) {
+ctl_decrypt_json_value :: proc(v: ^json.Value, kr: ^vault.Vault_Keyring, key_configured: bool, allocator := context.allocator) {
 	if v == nil do return
 	#partial switch &val in v^ {
 	case json.Object:
@@ -162,7 +91,7 @@ ctl_decrypt_json_value :: proc(v: ^json.Value, key_hex: string, key_configured: 
 				if s, is_str := sub_v.(json.String); is_str {
 					str_val := string(s)
 					if is_vault_armored(str_val) {
-						new_str := ctl_decrypt_or_fallback_armored(str_val, key_hex, key_configured, allocator)
+						new_str := ctl_decrypt_or_fallback_armored(str_val, kr, key_configured, allocator)
 						append(&updates, Json_Field_Update{k = k, v = json.String(new_str)})
 					}
 				}
@@ -170,7 +99,7 @@ ctl_decrypt_json_value :: proc(v: ^json.Value, key_hex: string, key_configured: 
 				#partial switch _ in sub_v {
 				case json.Object, json.Array:
 					var := sub_v
-					ctl_decrypt_json_value(&var, key_hex, key_configured, allocator)
+					ctl_decrypt_json_value(&var, kr, key_configured, allocator)
 					append(&updates, Json_Field_Update{k = k, v = var})
 				}
 			}
@@ -180,7 +109,7 @@ ctl_decrypt_json_value :: proc(v: ^json.Value, key_hex: string, key_configured: 
 		}
 	case json.Array:
 		for i in 0 ..< len(val) {
-			ctl_decrypt_json_value(&val[i], key_hex, key_configured, allocator)
+			ctl_decrypt_json_value(&val[i], kr, key_configured, allocator)
 		}
 	}
 }
@@ -204,7 +133,7 @@ ctl_decrypt_json_value :: proc(v: ^json.Value, key_hex: string, key_configured: 
 //     round-trip through core is not available in either direction.
 //
 // WHAT WE DO INSTEAD -- we never re-serialize. The tree is only ever used to LEARN which
-// `vault:v1:` tokens sit in fields that `ctl_decrypt_json_value` decrypts and what each
+// `vault:v2:` tokens sit in fields that `ctl_decrypt_json_value` decrypts and what each
 // one becomes; those substitutions are then spliced into the original text. Anything not
 // armored -- binary artifact content above all -- is copied through verbatim, so the
 // output is the hub's own JSON with ciphertext swapped for plaintext.
@@ -212,8 +141,8 @@ ctl_decrypt_json_value :: proc(v: ^json.Value, key_hex: string, key_configured: 
 // Deliberately NOT changed: the armored-field list (`ctl_decrypt_json_value`, :160) and
 // the decrypt/fallback semantics. The two-parse-and-diff below exists precisely so that
 // this proc can observe what those do without restating or altering any of it.
-ctl_decrypt_json_string :: proc(raw_json: string, key_hex: string, key_configured: bool, allocator := context.allocator) -> string {
-	// Fast path: `vault:v1:` is pure ASCII and contains nothing JSON escaping would
+ctl_decrypt_json_string :: proc(raw_json: string, kr: ^vault.Vault_Keyring, key_configured: bool, allocator := context.allocator) -> string {
+	// Fast path: `vault:v2:` is pure ASCII and contains nothing JSON escaping would
 	// alter, so an armored value's prefix ALWAYS appears verbatim in the raw response.
 	// Its absence therefore proves no field is armored -- no false negatives -- and
 	// there is nothing to do but hand the bytes back.
@@ -235,7 +164,7 @@ ctl_decrypt_json_string :: proc(raw_json: string, key_hex: string, key_configure
 	}
 	defer json.destroy_value(decrypted, context.temp_allocator)
 
-	ctl_decrypt_json_value(&decrypted, key_hex, key_configured, context.temp_allocator)
+	ctl_decrypt_json_value(&decrypted, kr, key_configured, context.temp_allocator)
 
 	pairs := make([dynamic][2]string, context.temp_allocator)
 	ctl_collect_decrypted_pairs(original, decrypted, &pairs)

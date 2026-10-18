@@ -5,6 +5,7 @@ import "core:fmt"
 import "core:os"
 import "core:strings"
 import http "odin_test:lib/http_client"
+import vault "odin_test:lib/vault"
 
 ctl_issue_request_local :: proc(transport: Ctl_Transport, method, path, body_json: string) -> (string, bool) {
 	if transport.kind == .User {
@@ -35,8 +36,8 @@ ctl_issue_request_local :: proc(transport: Ctl_Transport, method, path, body_jso
 ctl_decrypt_issues_json :: ctl_decrypt_json_string
 
 
-ctl_decrypt_vault_json :: proc(raw_json: string, key_hex: string, key_configured: bool, allocator := context.allocator) -> string {
-	return ctl_decrypt_issues_json(raw_json, key_hex, key_configured, allocator)
+ctl_decrypt_vault_json :: proc(raw_json: string, keyring: ^vault.Vault_Keyring, key_configured: bool, allocator := context.allocator) -> string {
+	return ctl_decrypt_issues_json(raw_json, keyring, key_configured, allocator)
 }
 
 ctl_issue_request_and_decrypt :: proc(transport: Ctl_Transport, method, path, body_json: string, args: []string = nil) {
@@ -48,8 +49,8 @@ ctl_issue_request_and_decrypt :: proc(transport: Ctl_Transport, method, path, bo
 		return
 	}
 
-	key_hex, key_ok := ctl_read_vault_key(args, context.temp_allocator)
-	decrypted_json := ctl_decrypt_issues_json(resp_str, key_hex, key_ok)
+	keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
+	decrypted_json := ctl_decrypt_issues_json(resp_str, keyring, key_ok)
 	defer delete(decrypted_json)
 	fmt.println(decrypted_json)
 }
@@ -134,15 +135,11 @@ ctl_issues_command :: proc(cmd: []string, args: []string) {
 		}
 		desc := option_value(args, "--description", option_value(args, "--desc", ""))
 
-		key_hex, key_ok := ctl_read_vault_key(args, context.temp_allocator)
+		keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
 		if key_ok {
-			if enc_title, ok := vault_encrypt_text_hex(title, key_hex, context.temp_allocator); ok {
-				title = enc_title
-			}
+			title = ctl_seal_or_exit(title, keyring)
 			if desc != "" {
-				if enc_desc, ok := vault_encrypt_text_hex(desc, key_hex, context.temp_allocator); ok {
-					desc = enc_desc
-				}
+				desc = ctl_seal_or_exit(desc, keyring)
 			}
 		}
 
@@ -168,17 +165,13 @@ ctl_issues_command :: proc(cmd: []string, args: []string) {
 		t := option_value(args, "--title", "")
 		desc := option_value(args, "--description", option_value(args, "--desc", ""))
 
-		key_hex, key_ok := ctl_read_vault_key(args, context.temp_allocator)
+		keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
 		if key_ok {
 			if t != "" {
-				if enc_t, ok := vault_encrypt_text_hex(t, key_hex, context.temp_allocator); ok {
-					t = enc_t
-				}
+				t = ctl_seal_or_exit(t, keyring)
 			}
 			if desc != "" {
-				if enc_desc, ok := vault_encrypt_text_hex(desc, key_hex, context.temp_allocator); ok {
-					desc = enc_desc
-				}
+				desc = ctl_seal_or_exit(desc, keyring)
 			}
 		}
 
@@ -215,11 +208,9 @@ ctl_issues_command :: proc(cmd: []string, args: []string) {
 			return
 		}
 
-		key_hex, key_ok := ctl_read_vault_key(args, context.temp_allocator)
+		keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
 		if key_ok {
-			if enc_body, ok := vault_encrypt_text_hex(body, key_hex, context.temp_allocator); ok {
-				body = enc_body
-			}
+			body = ctl_seal_or_exit(body, keyring)
 		}
 
 		fields := make([dynamic]string)

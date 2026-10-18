@@ -3,8 +3,10 @@ package main
 import "core:crypto"
 import json "core:encoding/json"
 import "core:fmt"
+import "core:os"
 import "core:strings"
 import "core:time"
+import os_random "odin_test:lib/os_random"
 
 // ── shell verb group ─────────────────────────────────────────────────────────
 // Subcommands managing the three session kinds on the Bridge host. All calls
@@ -101,10 +103,13 @@ ctl_shell_rest_with_preview :: proc(endpoint, token, method, path, body: string)
 }
 
 ctl_shell_attach_enc_spec :: proc(args: []string, cmd_str, cwd_str: string, fields: ^[dynamic]string) {
-	if key_hex, key_ok := ctl_read_vault_key(args, context.temp_allocator); key_ok && len(key_hex) == 64 {
+	if keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator); key_ok {
 		now_ms := time.to_unix_nanoseconds(time.now()) / 1_000_000
 		nonce_bytes: [16]byte
-		crypto.rand_bytes(nonce_bytes[:])
+		if !os_random.fill(nonce_bytes[:]) {
+			fmt.println(`{"ok":false,"message":"system randomness unavailable; refusing to build enc_spec"}`)
+			os.exit(1)
+		}
 		nonce_hex := fmt.tprintf("%x", nonce_bytes)
 		spec_json := json_object(
 			json_kv("cmd", cmd_str),
@@ -113,9 +118,9 @@ ctl_shell_attach_enc_spec :: proc(args: []string, cmd_str, cwd_str: string, fiel
 			json_kv("nonce", nonce_hex),
 		)
 		defer delete(spec_json)
-		if enc_spec, enc_ok := vault_encrypt_text_hex(spec_json, key_hex, context.temp_allocator); enc_ok {
-			append(fields, json_kv("enc_spec", enc_spec))
-		}
+		// The bridge rejects enc_spec under any epoch but its current one (command
+		// epoch floor); ctl_seal_or_exit always seals under the current epoch.
+		append(fields, json_kv("enc_spec", ctl_seal_or_exit(spec_json, keyring)))
 	}
 }
 

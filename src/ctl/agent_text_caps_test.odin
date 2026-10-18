@@ -1,8 +1,8 @@
 package main
 
-import "core:encoding/hex"
 import "core:strings"
 import "core:testing"
+import vault "odin_test:lib/vault"
 
 // ── REQ-VCAP-4/5: ctl's early PLAINTEXT cap, iss_18d940db15f9accb ────────────
 //
@@ -41,23 +41,22 @@ test_ctl_plaintext_cap_boundary :: proc(t: ^testing.T) {
 }
 
 // An at-cap plaintext, once really encrypted, must fit the armored budget the
-// Hub enforces (len("vault:v1:") + 4*ceil((n+28)/3)). This is the contract that
+// Hub enforces (len("vault:v2:e") + 10 epoch digits + 1 + 4*ceil((n+28)/3)). This is the contract that
 // keeps the two sides from disagreeing.
 @(test)
 test_ctl_at_cap_plaintext_fits_hub_armored_budget :: proc(t: ^testing.T) {
-	key_bytes, hex_ok := hex.decode(transmute([]byte)string(TEST_VAULT_KEY_HEX), context.temp_allocator)
-	testing.expect(t, hex_ok, "test key hex decode must succeed")
+	kr := tkr("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
 
 	for n in ([2]int{CTL_CHAIN_TITLE_MAX_BYTES, CTL_CHAIN_DESCRIPTION_MAX_BYTES}) {
 		plaintext := strings.repeat("a", n, context.temp_allocator)
-		armored, ok := vault_encrypt_text(plaintext, key_bytes, context.temp_allocator)
+		armored, ok := ctl_vault_seal(plaintext, kr, context.temp_allocator)
 		testing.expect(t, ok, "encryption of an at-cap plaintext must succeed")
 		testing.expect(t, is_vault_armored(armored), "value must be armored")
 
-		budget := len(VAULT_ARMOR_PREFIX) + 4 * ((n + VAULT_HEADER_BYTES + 2) / 3)
+		budget := len(VAULT_ARMOR_PREFIX) + 1 + 10 + 1 + 4 * ((n + vault.HEADER_BYTES + 2) / 3)
 		testing.expectf(
 			t,
-			len(armored) == budget,
+			len(armored) <= budget,
 			"plaintext %d bytes -> armored %d bytes, but the Hub's derived budget is %d",
 			n,
 			len(armored),

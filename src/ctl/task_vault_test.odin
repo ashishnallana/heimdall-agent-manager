@@ -38,7 +38,7 @@ test_task_create_encryption_with_vault_key :: proc(t: ^testing.T) {
 		"--assignee", "agt_worker_1",
 		"--reviewer", "agt_reviewer_1,agt_reviewer_2",
 		"--depends-on", "task_dep_alpha",
-		"--vault-key", TEST_TASK_VAULT_KEY,
+		"--vault-keyring", tkr_b64(TEST_TASK_VAULT_KEY),
 	}
 
 	out := ctl_agentmode_task_create_params(args)
@@ -52,11 +52,11 @@ test_task_create_encryption_with_vault_key :: proc(t: ^testing.T) {
 
 	// Title must be encrypted
 	testing.expect(t, !strings.contains(out, orig_title), "title must not leak plaintext")
-	testing.expect(t, strings.contains(out, `"title":"vault:v1:`), "title must be armored with vault:v1:")
+	testing.expect(t, strings.contains(out, `"title":"vault:v2:`), "title must be armored with vault:v2:")
 
 	// Description must be encrypted
 	testing.expect(t, !strings.contains(out, orig_desc), "description must not leak plaintext")
-	testing.expect(t, strings.contains(out, `"description":"vault:v1:`), "description must be armored with vault:v1:")
+	testing.expect(t, strings.contains(out, `"description":"vault:v2:`), "description must be armored with vault:v2:")
 
 	// Parse JSON to extract encrypted fields and test round-trip decryption
 	val, err := json.parse_string(out, parse_integers = true, allocator = context.temp_allocator)
@@ -93,7 +93,7 @@ test_task_create_without_vault_key_leaves_plaintext :: proc(t: ^testing.T) {
 	out := ctl_agentmode_task_create_params(args)
 	testing.expect(t, strings.contains(out, `"title":"Plaintext Task Title"`), "title must remain plaintext")
 	testing.expect(t, strings.contains(out, `"description":"Plaintext Task Description"`), "description must remain plaintext")
-	testing.expect(t, !strings.contains(out, "vault:v1:"), "must not contain vault armor")
+	testing.expect(t, !strings.contains(out, "vault:v2:"), "must not contain vault armor")
 }
 
 @(test)
@@ -102,7 +102,7 @@ test_task_comment_encryption_with_vault_key :: proc(t: ^testing.T) {
 
 	args := []string{
 		"--notify", "agt_lead,agt_worker_2",
-		"--vault-key", TEST_TASK_VAULT_KEY,
+		"--vault-keyring", tkr_b64(TEST_TASK_VAULT_KEY),
 	}
 
 	out := ctl_agentmode_task_comment_params("task_abc_1", orig_body, args)
@@ -111,7 +111,7 @@ test_task_comment_encryption_with_vault_key :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(out, `"notify":["agt_lead","agt_worker_2"]`), "notify must remain plaintext")
 
 	testing.expect(t, !strings.contains(out, orig_body), "comment body must not leak plaintext")
-	testing.expect(t, strings.contains(out, `"body":"vault:v1:`), "comment body must be armored with vault:v1:")
+	testing.expect(t, strings.contains(out, `"body":"vault:v2:`), "comment body must be armored with vault:v2:")
 
 	val, err := json.parse_string(out, parse_integers = true, allocator = context.temp_allocator)
 	testing.expect(t, err == .None, "emitted params must be valid JSON")
@@ -134,7 +134,7 @@ test_task_comment_without_vault_key_leaves_plaintext :: proc(t: ^testing.T) {
 
 	out := ctl_agentmode_task_comment_params("task_xyz_2", orig_body, args)
 	testing.expect(t, strings.contains(out, `"body":"Regular plaintext comment body with no vault key."`), "body must remain plaintext")
-	testing.expect(t, !strings.contains(out, "vault:v1:"), "must not contain vault armor")
+	testing.expect(t, !strings.contains(out, "vault:v2:"), "must not contain vault armor")
 }
 
 @(test)
@@ -146,7 +146,7 @@ test_task_update_encryption_with_vault_key :: proc(t: ^testing.T) {
 		"--title", orig_title,
 		"--description", orig_desc,
 		"--priority", "p0",
-		"--vault-key", TEST_TASK_VAULT_KEY,
+		"--vault-keyring", tkr_b64(TEST_TASK_VAULT_KEY),
 	}
 
 	out := ctl_agentmode_task_update_params("task_upd_3", args)
@@ -155,8 +155,8 @@ test_task_update_encryption_with_vault_key :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(out, `"priority":"p0"`), "priority must remain plaintext")
 	testing.expect(t, !strings.contains(out, orig_title), "title must not leak plaintext")
 	testing.expect(t, !strings.contains(out, orig_desc), "description must not leak plaintext")
-	testing.expect(t, strings.contains(out, `"title":"vault:v1:`), "title must be armored")
-	testing.expect(t, strings.contains(out, `"description":"vault:v1:`), "description must be armored")
+	testing.expect(t, strings.contains(out, `"title":"vault:v2:`), "title must be armored")
+	testing.expect(t, strings.contains(out, `"description":"vault:v2:`), "description must be armored")
 
 	val, err := json.parse_string(out, parse_integers = true, allocator = context.temp_allocator)
 	testing.expect(t, err == .None, "emitted params must be valid JSON")
@@ -188,12 +188,12 @@ test_task_show_and_list_transparent_decryption :: proc(t: ^testing.T) {
 		enc_title, enc_desc, enc_preview,
 	)
 
-	decrypted := ctl_decrypt_json_string(raw_json, TEST_TASK_VAULT_KEY, true, context.temp_allocator)
+	decrypted := ctl_decrypt_json_string(raw_json, tkr(TEST_TASK_VAULT_KEY), true, context.temp_allocator)
 	testing.expect(t, strings.contains(decrypted, orig_title), "decrypted json must contain original title")
 	testing.expect(t, strings.contains(decrypted, orig_desc), "decrypted json must contain original description")
 	testing.expect(t, strings.contains(decrypted, orig_preview), "decrypted json must contain original comment preview")
 	testing.expect(t, strings.contains(decrypted, `"priority":"p1"`), "priority must be preserved")
-	testing.expect(t, !strings.contains(decrypted, "vault:v1:"), "decrypted json must not contain vault armor")
+	testing.expect(t, !strings.contains(decrypted, "vault:v2:"), "decrypted json must not contain vault armor")
 }
 
 @(test)
@@ -209,10 +209,10 @@ test_task_comments_list_transparent_decryption :: proc(t: ^testing.T) {
 		enc_body_1, enc_body_2,
 	)
 
-	decrypted := ctl_decrypt_json_string(raw_json, TEST_TASK_VAULT_KEY, true, context.temp_allocator)
+	decrypted := ctl_decrypt_json_string(raw_json, tkr(TEST_TASK_VAULT_KEY), true, context.temp_allocator)
 	testing.expect(t, strings.contains(decrypted, orig_body_1), "decrypted comments must contain first body")
 	testing.expect(t, strings.contains(decrypted, orig_body_2), "decrypted comments must contain second body")
-	testing.expect(t, !strings.contains(decrypted, "vault:v1:"), "decrypted comments must not contain vault armor")
+	testing.expect(t, !strings.contains(decrypted, "vault:v2:"), "decrypted comments must not contain vault armor")
 }
 
 @(test)
@@ -225,11 +225,11 @@ test_task_unconfigured_fallback :: proc(t: ^testing.T) {
 		enc_title,
 	)
 
-	// Key not configured -> fallback [Encrypted: vault:v1:...]
-	decrypted := ctl_decrypt_json_string(raw_json, "", false, context.temp_allocator)
+	// Key not configured -> fallback [Encrypted: vault:v2:...]
+	decrypted := ctl_decrypt_json_string(raw_json, nil, false, context.temp_allocator)
 	testing.expect(t, !strings.contains(decrypted, orig_title), "must not leak plaintext without key")
 	expected_fallback := fmt.tprintf(`[Encrypted: %s]`, enc_title)
-	testing.expect(t, strings.contains(decrypted, expected_fallback), "must contain [Encrypted: vault:v1:...] fallback")
+	testing.expect(t, strings.contains(decrypted, expected_fallback), "must contain [Encrypted: vault:v2:...] fallback")
 	testing.expect(t, strings.contains(decrypted, `"state":"backlog"`), "unencrypted fields remain intact")
 }
 
@@ -244,7 +244,7 @@ test_task_wrong_key_fallback :: proc(t: ^testing.T) {
 	)
 
 	// Wrong key -> fallback
-	decrypted := ctl_decrypt_json_string(raw_json, ALT_TASK_VAULT_KEY, true, context.temp_allocator)
+	decrypted := ctl_decrypt_json_string(raw_json, tkr(ALT_TASK_VAULT_KEY), true, context.temp_allocator)
 	testing.expect(t, !strings.contains(decrypted, orig_title), "must not decrypt with wrong key")
 	expected_fallback := fmt.tprintf(`[Encrypted: %s]`, enc_title)
 	testing.expect(t, strings.contains(decrypted, expected_fallback), "must contain fallback on decryption failure")
@@ -253,7 +253,7 @@ test_task_wrong_key_fallback :: proc(t: ^testing.T) {
 @(test)
 test_legacy_plaintext_tasks_unaltered :: proc(t: ^testing.T) {
 	raw_json := `{"v":1,"ok":true,"data":{"task_id":"task_legacy","title":"Legacy Plain Title","description":"Legacy Plain Description","priority":"p2"}}`
-	decrypted := ctl_decrypt_json_string(raw_json, TEST_TASK_VAULT_KEY, true, context.temp_allocator)
+	decrypted := ctl_decrypt_json_string(raw_json, tkr(TEST_TASK_VAULT_KEY), true, context.temp_allocator)
 	testing.expect(t, strings.contains(decrypted, `"title":"Legacy Plain Title"`), "title preserved")
 	testing.expect(t, strings.contains(decrypted, `"description":"Legacy Plain Description"`), "description preserved")
 	testing.expect(t, strings.contains(decrypted, `"priority":"p2"`), "priority preserved")

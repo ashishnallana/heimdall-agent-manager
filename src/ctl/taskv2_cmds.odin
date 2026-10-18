@@ -1010,8 +1010,8 @@ ctl_v2_verify :: proc(endpoint, token: string, tokens, args: []string) {
 			if lease.vcs_base != "" do append(&sub_fields, json_kv("vcs_base", lease.vcs_base))
 			append(&sub_fields, json_kv("cwd", cwd))
 			if sub_resp, sub_ok := ctl_agent_local_call(endpoint, token, "agent.lease.submit", json_object_from_slice(sub_fields[:])); sub_ok {
-				key_hex, key_ok := ctl_read_vault_key(args, context.temp_allocator)
-				dec_sub := ctl_decrypt_json_string(sub_resp, key_hex, key_ok)
+				keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
+				dec_sub := ctl_decrypt_json_string(sub_resp, keyring, key_ok)
 				defer delete(dec_sub)
 				fmt.println(dec_sub)
 			}

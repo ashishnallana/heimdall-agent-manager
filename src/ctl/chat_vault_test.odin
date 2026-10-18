@@ -18,14 +18,14 @@ test_chat_send_encryption_with_vault_key :: proc(t: ^testing.T) {
 	orig_body := "Confidential coordination message: all cryptographic primitives operational."
 
 	args := []string{
-		"--vault-key", TEST_CHAT_VAULT_KEY,
+		"--vault-keyring", tkr_b64(TEST_CHAT_VAULT_KEY),
 	}
 
 	out := ctl_agentmode_chat_send_params(orig_to, orig_body, args)
 
 	testing.expect(t, strings.contains(out, `"to":"inst_coordinator_1"`), "to must be preserved in plaintext")
 	testing.expect(t, !strings.contains(out, orig_body), "chat body must not leak plaintext")
-	testing.expect(t, strings.contains(out, `"body":"vault:v1:`), "chat body must be armored with vault:v1:")
+	testing.expect(t, strings.contains(out, `"body":"vault:v2:`), "chat body must be armored with vault:v2:")
 
 	val, err := json.parse_string(out, parse_integers = true, allocator = context.temp_allocator)
 	testing.expect(t, err == .None, "emitted params must be valid JSON")
@@ -52,7 +52,7 @@ test_chat_send_without_vault_key_leaves_plaintext :: proc(t: ^testing.T) {
 
 	testing.expect(t, strings.contains(out, `"to":"user"`), "to must be preserved in plaintext")
 	testing.expect(t, strings.contains(out, `"body":"Standard unencrypted status update."`), "chat body must remain plaintext")
-	testing.expect(t, !strings.contains(out, "vault:v1:"), "output must not contain vault armor")
+	testing.expect(t, !strings.contains(out, "vault:v2:"), "output must not contain vault armor")
 }
 
 @(test)
@@ -60,13 +60,13 @@ test_chat_set_title_encryption_with_vault_key :: proc(t: ^testing.T) {
 	orig_title := "Zero-Knowledge Vault Operations Thread"
 
 	args := []string{
-		"--vault-key", TEST_CHAT_VAULT_KEY,
+		"--vault-keyring", tkr_b64(TEST_CHAT_VAULT_KEY),
 	}
 
 	out := ctl_agentmode_chat_set_title_params(orig_title, args)
 
 	testing.expect(t, !strings.contains(out, orig_title), "title must not leak plaintext")
-	testing.expect(t, strings.contains(out, `"title":"vault:v1:`), "title must be armored with vault:v1:")
+	testing.expect(t, strings.contains(out, `"title":"vault:v2:`), "title must be armored with vault:v2:")
 
 	val, err := json.parse_string(out, parse_integers = true, allocator = context.temp_allocator)
 	testing.expect(t, err == .None, "emitted params must be valid JSON")
@@ -91,7 +91,7 @@ test_chat_set_title_without_vault_key_leaves_plaintext :: proc(t: ^testing.T) {
 	out := ctl_agentmode_chat_set_title_params(orig_title, args)
 
 	testing.expect(t, strings.contains(out, `"title":"Standard Conversation Title"`), "title must remain plaintext")
-	testing.expect(t, !strings.contains(out, "vault:v1:"), "output must not contain vault armor")
+	testing.expect(t, !strings.contains(out, "vault:v2:"), "output must not contain vault armor")
 }
 
 @(test)
@@ -111,13 +111,13 @@ test_chat_read_transparent_decryption :: proc(t: ^testing.T) {
 		enc_title, enc_preview, enc_msg_1, enc_msg_2,
 	)
 
-	decrypted := ctl_decrypt_json_string(raw_json, TEST_CHAT_VAULT_KEY, true, context.temp_allocator)
+	decrypted := ctl_decrypt_json_string(raw_json, tkr(TEST_CHAT_VAULT_KEY), true, context.temp_allocator)
 
 	testing.expect(t, strings.contains(decrypted, orig_msg_1), "decrypted json must contain msg 1")
 	testing.expect(t, strings.contains(decrypted, orig_msg_2), "decrypted json must contain msg 2")
 	testing.expect(t, strings.contains(decrypted, orig_title), "decrypted json must contain title")
 	testing.expect(t, strings.contains(decrypted, orig_preview), "decrypted json must contain preview")
-	testing.expect(t, !strings.contains(decrypted, "vault:v1:"), "decrypted json must not contain vault armor")
+	testing.expect(t, !strings.contains(decrypted, "vault:v2:"), "decrypted json must not contain vault armor")
 }
 
 @(test)
@@ -131,10 +131,10 @@ test_chat_read_fallback_when_vault_locked :: proc(t: ^testing.T) {
 	)
 
 	// Vault key not configured (key_ok = false)
-	fallback := ctl_decrypt_json_string(raw_json, "", false, context.temp_allocator)
+	fallback := ctl_decrypt_json_string(raw_json, nil, false, context.temp_allocator)
 
 	testing.expect(t, !strings.contains(fallback, orig_msg), "must not leak plaintext when locked")
-	testing.expect(t, strings.contains(fallback, "[Encrypted: vault:v1:"), "must wrap armored body in [Encrypted: vault:v1:...]")
+	testing.expect(t, strings.contains(fallback, "[Encrypted: vault:v2:"), "must wrap armored body in [Encrypted: vault:v2:...]")
 }
 
 @(test)
@@ -145,7 +145,7 @@ test_chat_read_unarmored_legacy_messages_pass_through :: proc(t: ^testing.T) {
 		legacy_msg,
 	)
 
-	res := ctl_decrypt_json_string(raw_json, TEST_CHAT_VAULT_KEY, true, context.temp_allocator)
+	res := ctl_decrypt_json_string(raw_json, tkr(TEST_CHAT_VAULT_KEY), true, context.temp_allocator)
 	testing.expect(t, strings.contains(res, legacy_msg), "legacy plaintext message must pass through unaltered")
 }
 
@@ -160,9 +160,9 @@ test_chat_read_wrong_key_fallback :: proc(t: ^testing.T) {
 	)
 
 	// Decrypt with wrong key
-	fallback := ctl_decrypt_json_string(raw_json, ALT_CHAT_VAULT_KEY, true, context.temp_allocator)
+	fallback := ctl_decrypt_json_string(raw_json, tkr(ALT_CHAT_VAULT_KEY), true, context.temp_allocator)
 	testing.expect(t, !strings.contains(fallback, orig_msg), "must not leak plaintext with wrong key")
-	testing.expect(t, strings.contains(fallback, "[Encrypted: vault:v1:"), "must provide fallback on wrong key")
+	testing.expect(t, strings.contains(fallback, "[Encrypted: vault:v2:"), "must provide fallback on wrong key")
 }
 
 @(test)
