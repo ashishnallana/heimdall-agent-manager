@@ -244,6 +244,11 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
   const prevUrlKeyRef = useRef<string | null>(null);
   useEffect(() => {
     if (route.ids.length === 0) return; // not a conversation route
+    // Not until step 2 has derived the layout from the URL. Under StrictMode's dev
+    // double-invoke this effect re-runs with the FIRST render's leafIds (the initial
+    // picker tree) while the URL key already reads as stable, and the empty-layout
+    // guard below would bounce every launch from Home straight back to /home.
+    if (!layoutReady) return;
     // Only push for in-app edits (URL stable since last run); if the URL just
     // changed, step 2 reconciles the layout and echoing stale state would loop.
     if (prevUrlKeyRef.current !== urlKey) {
@@ -261,7 +266,7 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
     if (!idsMatch || targetFocused !== route.focused) {
       replaceHash(buildConversationHash(leafIds, { focusedId: targetFocused }));
     }
-  }, [focusedAgentId, leafIds, route, urlKey]);
+  }, [focusedAgentId, layoutReady, leafIds, route, urlKey]);
 
   // A non-focusable pane surface does not move browser focus on its own. Keep
   // controls in the previously focused pane from receiving later keystrokes,
