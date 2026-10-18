@@ -6,6 +6,7 @@ import { useListBridgesQuery } from '../../api/endpoints/bridgeSupport';
 import { TicketBoardView } from '../tasks/TicketBoardView';
 import { WorkflowPipelineView } from '../tasks/WorkflowPipelineView';
 import { CreateTaskModal } from '../tasks/CreateTaskModal';
+import { TaskBoardSkeleton } from '../tasks/TaskBoardSkeleton';
 import { FleetManagementDrawer } from '../tasks/FleetManagementDrawer';
 import { ReviewRolesModal } from '../tasks/ReviewRolesModal';
 import { TaskWire } from '../../api/taskWire';
@@ -152,11 +153,8 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
 
   if (isLoadingChain && !chain) {
     return (
-      <div
-        data-debug-id="taskchain-loading"
-        className="flex h-full items-center justify-center p-6 text-xs text-muted"
-      >
-        Loading task chain…
+      <div data-debug-id="taskchain-loading" className="h-full overflow-hidden bg-canvas">
+        <TaskBoardSkeleton />
       </div>
     );
   }
@@ -249,6 +247,7 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
         <CreateTaskModal
           isOpen={showNewTaskModal}
           chainId={chainId}
+          existingTasks={tasks}
           onClose={() => setShowNewTaskModal(false)}
           onSuccess={() => setShowNewTaskModal(false)}
         />

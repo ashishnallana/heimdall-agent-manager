@@ -1,9 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
 import { useDispatch } from 'react-redux';
 import {
   Badge,
   Button,
+  Drawer,
   Icon,
   IconButton,
   Modal,
@@ -405,7 +405,6 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
   // backdrop's handlers): a press inside the panel — or on the restart modal's
   // portal overlay, whose mouseup lands on the backdrop once the modal unmounts —
   // must not dismiss the drawer.
-  const backdropPressStartedRef = useRef(false);
 
   const seedDrafts = useCallback(() => {
     const validFleets = rawFleets.filter((f) => validIdentitiesSet.has(f.agent_id));
@@ -931,25 +930,18 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
   // rendered inline from ChainHeader / TaskChainOverview it sat inside the shell, where
   // the fixed mobile sidebar rail painted over its left edge and the bottom chrome over its
   // footer. As a body-level overlay mounted after the shell it covers both.
-  return createPortal(
-    <div
-      data-debug-id="fleet-management-drawer-backdrop"
-      className="fixed inset-x-0 top-0 app-viewport-height z-modal flex justify-end bg-surface-overlay/80 backdrop-blur-sm transition-opacity"
-      onMouseDown={(e) => {
-        backdropPressStartedRef.current = e.target === e.currentTarget;
-      }}
-      onClick={(e) => {
-        if (backdropPressStartedRef.current && e.target === e.currentTarget) onClose();
-      }}
+  // The shared Drawer primitive (portal on z-modal, Esc, focus trap, focus
+  // return, scroll lock) replaces the hand-rolled overlay (audit finding).
+  return (
+    <Drawer
+      open={isOpen}
+      onOpenChange={(o) => !o && onClose()}
+      title="Fleet"
+      hideHeader
+      size="md"
+      data-debug-id="fleet-management-drawer"
     >
-      <div
-        data-debug-id="fleet-management-drawer"
-        role="dialog"
-        aria-modal="true"
-        aria-label="Fleet Management"
-        className="flex h-full w-full md:max-w-md flex-col bg-surface md:border-l md:border-subtle shadow-panel overflow-hidden"
-        onClick={(e) => e.stopPropagation()}
-      >
+      <div className="flex h-full flex-col">
         {/* Drawer Header */}
         <div className="flex items-center justify-between border-b border-subtle px-4 py-3.5 bg-canvas/90">
           <div className="flex items-center gap-2">
@@ -1092,17 +1084,24 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
                           <Badge tone="info" className="shrink-0 whitespace-nowrap">Solo</Badge>
                         </span>
                       )}
-                      {!isImplicit && <button
-                        type="button"
-                        data-debug-id={`fleet-delete-role-btn-${agentId}`}
-                        onClick={() => void handleRemoveFleet(agentId, isPersisted)}
-                        disabled={isUpdating || isApplying || isDeleting}
-                        title={isPersisted ? `Delete ${roleName} fleet row` : `Remove staged ${roleName}`}
-                        aria-label={`Remove ${roleName} from fleet`}
-                        className="rounded border border-subtle bg-surface px-1.5 py-1 text-[10px] font-semibold text-muted hover:text-danger hover:border-danger/40 transition-colors cursor-pointer disabled:opacity-40"
-                      >
-                        Remove
-                      </button>}
+                      {!isImplicit && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          tone="danger"
+                          data-debug-id={`fleet-delete-role-btn-${agentId}`}
+                          onClick={() => {
+                            // Deleting a saved row stops its agents getting work: ask first.
+                            if (isPersisted && !window.confirm(`Remove ${roleName} from this chain's fleet? Its agents stop getting new tasks.`)) return;
+                            void handleRemoveFleet(agentId, isPersisted);
+                          }}
+                          disabled={isUpdating || isApplying || isDeleting}
+                          title={isPersisted ? `Delete ${roleName} fleet row` : `Remove staged ${roleName}`}
+                          aria-label={`Remove ${roleName} from fleet`}
+                        >
+                          Remove
+                        </Button>
+                      )}
                     </div>
                   </div>
 
@@ -1111,9 +1110,9 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
                     data-debug-id={`fleet-placement-section-${agentId}`}
                     className="rounded-lg border border-subtle bg-surface p-2.5 space-y-2.5"
                   >
-                    <div className="flex items-center justify-between gap-2">
+                    <div className="space-y-1.5">
                       <span className="text-xs font-medium text-primary">Fleet Roles</span>
-                      <div className="flex items-center gap-1.5" role="group" aria-label={`Roles for ${roleName}`}>
+                      <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label={`Roles for ${roleName}`}>
                         {/* named-reviewer is the hub's placement-only marker for reviewers named on a task; not a role people manage */}
                         {[...FLEET_ROLES, ...effectiveRoles.filter((r) => !(FLEET_ROLES as readonly string[]).includes(r) && r !== 'named-reviewer')].map((roleKey) => {
                           const selected = effectiveRoles.includes(roleKey);
@@ -1125,12 +1124,13 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
                               aria-pressed={selected}
                               disabled={isUpdating || isApplying}
                               onClick={() => handleDraftRoleToggle(agentId, roleKey, effectiveRoles)}
-                              className={`rounded-full px-2.5 py-0.5 text-[11px] font-semibold border transition-colors cursor-pointer ${
+                              className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-[11px] font-semibold transition-colors cursor-pointer disabled:opacity-40 ${
                                 selected
-                                  ? 'border-accent bg-accent/15 text-accent'
-                                  : 'border-subtle bg-surface-raised text-muted hover:text-primary'
+                                  ? 'border-accent bg-accent text-accent-fg'
+                                  : 'border-dashed border-strong bg-transparent text-muted hover:border-solid hover:text-primary'
                               }`}
                             >
+                              {selected ? <Icon name="check" size={10} /> : <Icon name="plus" size={10} />}
                               {roleKey}
                             </button>
                           );
@@ -1155,7 +1155,7 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
                             if (!effectiveRoles.includes(role)) handleDraftRoleToggle(agentId, role, effectiveRoles);
                             setCustomRoleDrafts((prev) => ({ ...prev, [agentId]: '' }));
                           }}
-                          className="w-16 rounded-full border border-subtle bg-canvas px-2 py-0.5 text-[11px] text-primary outline-none focus:border-accent"
+                          className="w-24 rounded-full border border-subtle bg-canvas px-2.5 py-0.5 text-[11px] text-primary outline-none focus:border-accent"
                         />
                       </div>
                     </div>
@@ -1637,7 +1637,6 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
           </Modal>
         )}
       </div>
-    </div>,
-    document.body
+    </Drawer>
   );
 };

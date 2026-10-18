@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { Button, Checkbox, FormField, Icon, IconButton, Input, Select, StatusPill, Textarea } from '@ui';
+import { Button, Checkbox, FormField, Icon, IconButton, Input, Modal, ModalBody, ModalFooter, Select, StatusPill, Textarea } from '@ui';
 import { TASK_STATE_LABELS, TASK_STATE_TONE, normalizeTaskState } from './taskV2Types';
 import { useCreateTaskMutation } from '../../api/endpoints/tasks';
 import { useListAgentIdentitiesQuery } from '../../api/endpoints/agents';
@@ -178,28 +178,20 @@ export const CreateTaskModal: React.FC<CreateTaskModalProps> = ({
     }
   };
 
-  if (!isOpen) return null;
+  // Typed work is never thrown away silently: Esc, the backdrop and the close
+  // button all ask first when the form has content (audit finding).
+  const dirty = Boolean(title.trim() || desc.trim() || goal.trim() || acceptanceText.trim() || verify.trim() || reviewRolesText.trim());
+  const requestClose = (next: boolean) => {
+    if (next) return;
+    if (dirty && !window.confirm('Discard this new task?')) return;
+    onClose();
+  };
 
   return (
-    <div
-      data-debug-id="create-task-modal-backdrop"
-      className="fixed inset-x-0 top-0 app-viewport-height z-50 flex items-center justify-center bg-surface-overlay/80 backdrop-blur-sm p-4 overflow-y-auto"
-      onClick={onClose}
-    >
-      <div
-        data-debug-id="create-task-modal"
-        className="w-full max-w-lg rounded-xl border border-subtle bg-surface p-5 text-xs text-primary shadow-panel my-8"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between border-b border-subtle pb-3">
-          <div>
-            <h3 className="text-sm font-bold text-primary">Create New Task</h3>
-            <p className="text-caption text-muted mt-0.5">Assign tasks to durable agent roles for automated fleet provisioning.</p>
-          </div>
-          <IconButton icon="close" label="Close" size="sm" onClick={onClose} />
-        </div>
-
-        <form onSubmit={handleSubmit} className="mt-4 space-y-4">
+    <Modal open={isOpen} onOpenChange={requestClose} title="New task" size="lg" data-debug-id="create-task-modal">
+      <ModalBody>
+        <p className="mb-4 text-caption text-muted">A goal, acceptance checks and a verify command make it publishable as-is.</p>
+        <form id="create-task-form" onSubmit={handleSubmit} className="space-y-4 text-xs">
           {/* Title */}
           <FormField label="Title" required>
             <Input
@@ -479,25 +471,25 @@ export const CreateTaskModal: React.FC<CreateTaskModalProps> = ({
             </div>
           )}
 
-          {/* Modal Actions */}
-          <div className="flex items-center justify-end gap-2 border-t border-subtle pt-3">
-            <Button type="button" size="sm" variant="ghost" onClick={onClose}>
-              Cancel
-            </Button>
-            <Button
-              type="submit"
-              size="sm"
-              variant="primary"
-              data-debug-id="create-task-submit-btn"
-              disabled={isCreating || !username}
-              loading={isCreating}
-            >
-              Create task
-            </Button>
-          </div>
         </form>
-      </div>
-    </div>
+      </ModalBody>
+      <ModalFooter>
+        <Button type="button" size="sm" variant="ghost" onClick={() => requestClose(false)}>
+          Cancel
+        </Button>
+        <Button
+          type="submit"
+          form="create-task-form"
+          size="sm"
+          variant="primary"
+          data-debug-id="create-task-submit-btn"
+          disabled={isCreating || !username}
+          loading={isCreating}
+        >
+          Create task
+        </Button>
+      </ModalFooter>
+    </Modal>
   );
 };
 

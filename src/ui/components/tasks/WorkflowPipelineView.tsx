@@ -3,6 +3,7 @@ import { Button, Checkbox, Icon, Modal, ModalBody, ModalFooter, Select, Text, ty
 import { TaskWire } from '../../api/taskWire';
 import { TaskSummaryBar } from './TaskSummaryBar';
 import { TaskCard } from './TaskCard';
+import { TaskBoardSkeleton } from './TaskBoardSkeleton';
 import { useCancelWorkflowMutation, useFetchWorkflowStatusQuery, useRetryWorkflowMutation } from '../../api/endpoints/tasks';
 import { normalizeTaskState } from './taskV2Types';
 import { EMPTY_TASK_NAMES, type TaskNames } from './taskNames';
@@ -106,7 +107,7 @@ export const WorkflowPipelineView: React.FC<WorkflowPipelineViewProps> = ({
   names = EMPTY_TASK_NAMES,
   className = '',
 }) => {
-  const { data: workflowStatus } = useFetchWorkflowStatusQuery({ chainId });
+  const { data: workflowStatus, isLoading: loadingStatus } = useFetchWorkflowStatusQuery({ chainId });
   const [retryWorkflow, retryState] = useRetryWorkflowMutation();
   const [cancelWorkflow, cancelState] = useCancelWorkflowMutation();
 
@@ -138,6 +139,8 @@ export const WorkflowPipelineView: React.FC<WorkflowPipelineViewProps> = ({
       setError(actionErrorMessage(err));
     }
   };
+
+  if (loadingStatus && !workflowStatus) return <TaskBoardSkeleton stepper cards={3} />;
 
   return (
     <div data-debug-id="workflow-pipeline-view" className={`flex flex-col gap-5 p-4 text-left sm:p-5 ${className}`}>

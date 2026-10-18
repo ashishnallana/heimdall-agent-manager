@@ -86,11 +86,14 @@ export const ReviewRolesModal: React.FC<ReviewRolesModalProps> = ({ chainId, ope
     }
   };
 
-  const RoleRow = ({ role }: { role: ChainReviewRole }) => {
+  // A render function, not a nested component: a component defined inside
+  // render is a new type every render, so React remounted each row and the
+  // description box lost focus after every keystroke (audit finding).
+  const renderRoleRow = (role: ChainReviewRole) => {
     const draft = drafts[role.name] ?? role.description;
     const candidates = agents.filter((a) => !role.holders.includes(String(a.agent_id || a.agentId)));
     return (
-      <li data-debug-id={`review-role-${role.name}`} className="space-y-1.5 border-t border-subtle pt-3 first:border-t-0 first:pt-0">
+      <li key={role.name} data-debug-id={`review-role-${role.name}`} className="space-y-1.5 border-t border-subtle pt-3 first:border-t-0 first:pt-0">
         <div className="flex flex-wrap items-center gap-2">
           <Text as="span" role="label">
             {role.name}
@@ -163,9 +166,7 @@ export const ReviewRolesModal: React.FC<ReviewRolesModalProps> = ({ chainId, ope
           suits templates and coordinators. Its description tells the reviewer what to check.
         </Text>
         <ul className="space-y-3">
-          {roles.map((r) => (
-            <RoleRow key={r.name} role={r} />
-          ))}
+          {roles.map(renderRoleRow)}
         </ul>
         <div className="space-y-1.5 border-t border-subtle pt-3">
           <Text as="p" role="label">
