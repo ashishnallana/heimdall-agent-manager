@@ -545,7 +545,7 @@ export function ProjectDetailBody({
         })
         .catch(() => {
           // Never fall back to the armored source: null routes the render below to the
-          // VaultText placeholder instead of printing `vault:v1:` on screen.
+          // VaultText placeholder instead of printing `vault:v2:` on screen.
           if (active) setDecryptedDescription(null);
         });
     } else {

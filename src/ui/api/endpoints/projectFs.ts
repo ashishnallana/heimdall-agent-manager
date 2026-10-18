@@ -15,6 +15,7 @@
 // UI cache is keyed by (projectId, bridgeId, path) so switching project/bridge or
 // mutating a directory only refetches the affected listing.
 
+import type { VaultKeyring } from '../../utils/vaultKeyring';
 import { heimdallApi } from '../heimdallApi';
 import type { WireError } from '../wireError';
 import { cookieJsonFetch, cookieMutation } from '../cookieFetch';
@@ -531,7 +532,7 @@ function parentOf(path: string): string {
 }
 
 // Decrypt line_content and line for grep search matches when vault is unlocked
-async function decryptSearchMatches(rawMatches: any[], activeKey?: CryptoKey | string | null): Promise<any[]> {
+async function decryptSearchMatches(rawMatches: any[], activeKey?: VaultKeyring | null): Promise<any[]> {
   return await Promise.all(
     rawMatches.map(async (m: any) => {
       const updated = { ...m };

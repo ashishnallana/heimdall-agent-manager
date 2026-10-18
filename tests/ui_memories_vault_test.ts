@@ -3,6 +3,7 @@
 //
 // RUN: node --test tests/ui_memories_vault_test.ts
 
+import { keyringFromHex } from './helpers/vaultTestKeyring.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -19,8 +20,10 @@ import {
   decryptMemoryRecord,
 } from '../src/ui/utils/vaultMemories.ts';
 
-const TEST_KEY_HEX = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
-const DIFFERENT_KEY_HEX = 'fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210';
+const TEST_KEY_HEX_RAW = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+const TEST_KEY_HEX = await keyringFromHex(TEST_KEY_HEX_RAW);
+const DIFFERENT_KEY_HEX_RAW = 'fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210';
+const DIFFERENT_KEY_HEX = await keyringFromHex(DIFFERENT_KEY_HEX_RAW);
 
 // -----------------------------------------------------------------------------
 // Test 1: <VaultText /> resolution for plaintext and legacy unencrypted memories
@@ -63,7 +66,7 @@ test('VaultText helper renders locked placeholder with data-debug-id for armored
 // Test 4: Memory field encryption encrypts title, description, body, evidence when unlocked
 // -----------------------------------------------------------------------------
 
-test('encryptMemoryFields encrypts title, description, body, evidence into "vault:v1:<base64>" when vault is unlocked', async () => {
+test('encryptMemoryFields encrypts title, description, body, evidence into "vault:v2:e1:<base64>" when vault is unlocked', async () => {
   const rawMemoryPayload = {
     title: 'Secret architectural rule: do not call external API directly',
     description: 'Guidelines for secure outbound network calls from agents',

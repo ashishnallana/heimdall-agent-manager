@@ -8,24 +8,31 @@ import {
   repaintCapturedScreen,
   splitPaneInput,
 } from '../src/ui/components/shells/paneDeliveryQueue.ts';
-import { encryptShellStreamPayload, decryptShellStreamPayload } from '../src/ui/components/shells/useShellStream.ts';
+import { decryptShellStreamPayload } from '../src/ui/components/shells/useShellStream.ts';
+import { sealPtyPayload } from '../src/ui/components/shells/ptyWire.ts';
+import { bytesToBase64 } from '../src/ui/utils/vaultCrypto.ts';
+import { keyringFromHex } from './helpers/vaultTestKeyring.ts';
 
 const Terminal = (xtermModule as any).Terminal ?? (xtermModule as any).default.Terminal;
-const key = '0123456789abcdef'.repeat(4);
+const key = await keyringFromHex('0123456789abcdef'.repeat(4));
+const SESSION = 'shs_pane_test';
+// Bridge output frames: PTY v2, `out` direction, epoch 1.
+const encryptShellStreamPayload = async (value: string) =>
+  bytesToBase64(await sealPtyPayload(new TextEncoder().encode(value), key.keys.get(1)!, 1, SESSION, 'out'));
 const text = (value: string) => new TextEncoder().encode(value);
 const write = (term: any, bytes: Uint8Array): Promise<void> => new Promise(resolve => term.write(bytes, resolve));
 
 test('encrypted output, capture repaint and following plaintext render in wire order', async () => {
   const term = new Terminal({ cols: 80, rows: 24, convertEol: false });
   const queue = new PaneDeliveryQueue(() => assert.fail('queue unexpectedly failed'));
-  const oldOutput = await encryptShellStreamPayload('obsolete\r\n', key);
-  const capture = await encryptShellStreamPayload('hub α\nbridge β\n\n', key);
+  const oldOutput = await encryptShellStreamPayload('obsolete\r\n');
+  const capture = await encryptShellStreamPayload('hub α\nbridge β\n\n');
   queue.enqueue(oldOutput.length * 2, async () => {
     await new Promise(resolve => setTimeout(resolve, 20));
-    await write(term, await decryptShellStreamPayload(oldOutput, key));
+    await write(term, (await decryptShellStreamPayload(oldOutput, key, SESSION))!);
   });
   queue.enqueue(capture.length * 2, async () => {
-    const bytes = await decryptShellStreamPayload(capture, key);
+    const bytes = (await decryptShellStreamPayload(capture, key, SESSION))!;
     await write(term, repaintCapturedScreen(bytes, 1, 8));
   });
   queue.enqueue(20, async () => { await write(term, text(' live')); });

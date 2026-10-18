@@ -4,6 +4,7 @@
 //
 // RUN: node --test tests/ui_vault_home_decryption_test.ts
 
+import { keyringFromHex } from './helpers/vaultTestKeyring.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -18,7 +19,8 @@ import {
   resolveDecryptedMarkdownContent,
 } from '../src/ui/components/vault/vaultTextHelper.ts';
 
-const TEST_KEY_HEX = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+const TEST_KEY_HEX_RAW = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+const TEST_KEY_HEX = await keyringFromHex(TEST_KEY_HEX_RAW);
 
 // -----------------------------------------------------------------------------
 // Section 4: DecryptedMarkdown Unit Tests
@@ -69,7 +71,7 @@ test('DecryptedMarkdown properly decrypts embedded vault tokens before markdown 
     unlocked.text.includes('Public Note: Visible to everyone.'),
     'Unencrypted text must be preserved',
   );
-  assert.ok(!unlocked.text.includes('vault:v1:'), 'No raw vault ciphertext should remain');
+  assert.ok(!unlocked.text.includes('vault:v2:e1:'), 'No raw vault ciphertext should remain');
 
   // 2. Locked resolution -> tokens masked with [🔒 Encrypted]
   const locked = await resolveDecryptedMarkdownContent(markdownWithTokens, null, false);
@@ -82,7 +84,7 @@ test('DecryptedMarkdown properly decrypts embedded vault tokens before markdown 
     locked.text.includes('API Key: `[🔒 Encrypted]`'),
     'Token B must be shielded with [🔒 Encrypted] when locked',
   );
-  assert.ok(!locked.text.includes('vault:v1:'), 'Ciphertext must be completely shielded');
+  assert.ok(!locked.text.includes('vault:v2:e1:'), 'Ciphertext must be completely shielded');
 });
 
 test('DecryptedMarkdown passes through plain markdown unchanged', async () => {

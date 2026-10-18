@@ -146,7 +146,7 @@ export function useActionCatalog(): ActionCatalog {
         // REQ-CACHE-1: project names are vault-armored (`encryptProjectFields` at
         // `vaultProjects.ts:23`) and the projects query decrypts them inside its
         // `queryFn` only when the vault was already unlocked at FETCH time, so while
-        // locked this catalog receives `vault:v1:...` strings. Masked HERE because
+        // locked this catalog receives `vault:v2:...` strings. Masked HERE because
         // every consumer funnels through `projectLabel` below and `keywords` is derived
         // from the same string -- so one line covers all five consumers and keeps
         // armored text out of the searchable index too. Masking, not decrypting: these

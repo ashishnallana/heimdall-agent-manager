@@ -85,7 +85,7 @@ export function filterTaskChains(
 
   return items.filter((item) => {
     // Zero-Knowledge Armor Shield:
-    // If the title is armored (e.g. vault:v1:...), never match query against raw ciphertext.
+    // If the title is armored (e.g. vault:v2:...), never match query against raw ciphertext.
     const titleMatches =
       !isVaultArmored(item.title) &&
       item.title.toLowerCase().includes(q);

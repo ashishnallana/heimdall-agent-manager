@@ -116,6 +116,9 @@ export function useAgentStream({
   const [connected, setConnected] = useState(false);
   const [isStreamReady, setIsStreamReady] = useState(false);
   const isStreamReadyRef = useRef(false);
+  // PTY v2 AAD binds the stream's session id; read through a ref so callbacks never seal under a stale one.
+  const streamSessionIdRef = useRef(agentInstanceId);
+  streamSessionIdRef.current = agentInstanceId;
   const pendingKeyEventsRef = useRef<Array<{ data: string; timestamp: number }>>([]);
   const streamReadyFallbackTimerRef = useRef<number | undefined>(undefined);
   const dispatchInputRef = useRef<(data: string) => void>(() => {});
@@ -327,7 +330,10 @@ export function useAgentStream({
             const isUnlocked = isVaultUnlockedRef.current || Boolean(keyToUse);
             if (!isUnlocked || !keyToUse) return;
             try {
-              bytes = await decryptPtyPayload(frame.payload, keyToUse);
+              // Agent panes are keyed by agent_instance_id end to end (hub and bridge).
+              const opened = await decryptPtyPayload(frame.payload, keyToUse, String(streamSessionIdRef.current || ''), 'out');
+              if (!opened) return; // epoch not held: stay locked rather than show ciphertext
+              bytes = opened;
             } catch { socket.close(4007, 'pane decryption failed'); return; }
             if (activeConnectIdRef.current !== connectId || socket.readyState !== WebSocket.OPEN) return;
           }
@@ -504,7 +510,7 @@ export function useAgentStream({
       inputQueueRef.current = inputQueueRef.current.then(async () => {
         if (s.readyState !== WebSocket.OPEN) return;
         try {
-          const sealed = await encryptPtyPayload(bytes, keyToUse);
+          const sealed = await encryptPtyPayload(bytes, keyToUse, String(streamSessionIdRef.current || ''));
           if (s.readyState === WebSocket.OPEN) {
             s.send(encodePtyViewerFrame(PTY_WIRE_KIND_INPUT, PTY_WIRE_FLAG_ENCRYPTED, sealed));
           }

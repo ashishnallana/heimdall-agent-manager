@@ -8,6 +8,7 @@ import { ArtifactAttachmentPreview } from '../ArtifactAttachmentPreview';
 import { useFetchChainTaskCommentsQuery } from '../../api/endpoints/tasks';
 import { useIsMobile } from '../shell/responsive';
 import { stripArtifactLinks } from '../../utils/artifactUpload';
+import { replaceVaultTokens } from '../../utils/vaultCrypto.ts';
 
 // artifactIdsFromText mirrors the helper in TaskChainOverview; kept local so this
 // component is self-contained.
@@ -95,7 +96,7 @@ export const TaskCommentBody: React.FC<{ body: string; debugId: string }> = ({ b
     }).catch((err) => {
       if (mounted) {
         console.error('Failed to decrypt comment body:', err);
-        setDecryptedText(body.replace(/vault:v1:[A-Za-z0-9+/=_-]+/g, '[Encrypted]'));
+        setDecryptedText(replaceVaultTokens(body, '[Encrypted]'));
       }
     });
     return () => {
@@ -113,12 +114,12 @@ export const TaskCommentBody: React.FC<{ body: string; debugId: string }> = ({ b
     }
     return (
       <div className="py-1">
-        <Markdown source={body.replace(/vault:v1:[A-Za-z0-9+/=_-]+/g, '[Encrypted]')} compact copyAll={false} data-debug-id={debugId} />
+        <Markdown source={replaceVaultTokens(body, '[Encrypted]')} compact copyAll={false} data-debug-id={debugId} />
       </div>
     );
   }
 
-  const displayText = decryptedText ?? (hasVault ? body.replace(/vault:v1:[A-Za-z0-9+/=_-]+/g, '[Encrypted]') : body);
+  const displayText = decryptedText ?? (hasVault ? replaceVaultTokens(body, '[Encrypted]') : body);
   const artifactIds = artifactIdsFromText(displayText || '');
 
   return (

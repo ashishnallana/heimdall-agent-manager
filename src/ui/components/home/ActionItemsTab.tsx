@@ -33,6 +33,7 @@ import { useSelector } from 'react-redux';
 import { selectIsVaultUnlocked } from '../../store/vaultSlice';
 import { decryptProjectList } from '../../utils/vaultProjects';
 import { VaultText, DecryptedMarkdown } from '../vault/VaultText';
+import { replaceVaultTokens } from '../../utils/vaultCrypto.ts';
 
 const STATUS_TABS = [
   { id: 'pending', label: 'Pending' },
@@ -111,7 +112,7 @@ export function ActionItemsTab() {
       setDecryptedProjects(
         projects.map((p) => ({
           ...p,
-          name: p.name && isVaultArmored(p.name) ? p.name.replace(/vault:v1:[A-Za-z0-9+/=_-]+/g, '[🔒 Encrypted]') : p.name,
+          name: p.name && isVaultArmored(p.name) ? replaceVaultTokens(p.name, '[🔒 Encrypted]') : p.name,
         }))
       );
       return;

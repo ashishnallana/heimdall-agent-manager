@@ -3,10 +3,12 @@
 //
 // RUN: node --test tests/ui_vault_palette_issues_notifications_test.ts
 
+import { keyringFromHex } from './helpers/vaultTestKeyring.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-const TEST_KEY_HEX = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+const TEST_KEY_HEX_RAW = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+const TEST_KEY_HEX = await keyringFromHex(TEST_KEY_HEX_RAW);
 
 // -----------------------------------------------------------------------------
 // Section 2: Command Palette Vault Decryption & Client-Side Search
@@ -19,7 +21,7 @@ test('Command Palette: project names decryption enables client-side search by de
   const secretProjectName = 'Project Supernova';
   const armoredProjectName = await encryptVaultText(secretProjectName, TEST_KEY_HEX);
 
-  assert.ok(isVaultArmored(armoredProjectName), 'Armored project name must be detected as vault:v1:');
+  assert.ok(isVaultArmored(armoredProjectName), 'Armored project name must be detected as vault:v2:e1:');
 
   // Before decryption: search with query 'supernova' fails against raw ciphertext
   const beforeSearch = !isVaultArmored(armoredProjectName) && matchesQuery(armoredProjectName, 'supernova');
@@ -61,7 +63,7 @@ test('Hub issue_description_preview logic preserves full vault armored ciphertex
   // Emulate issue_description_preview in Odin:
   const trimmed = armoredDescription.trim();
   let preview: string;
-  if (trimmed.includes('vault:v1:')) {
+  if (trimmed.includes('vault:v2:e1:')) {
     preview = trimmed;
   } else {
     preview = trimmed.slice(0, 160);
@@ -219,7 +221,7 @@ test('notificationService.ts: decrypts from the active CryptoKey even when Redux
   // assertion names the mechanism it really covers.
   mockCreatedNotifications.length = 0;
   clearSessionVaultKey();
-  await importAndValidateCryptoKey(TEST_KEY_HEX);
+  await importAndValidateCryptoKey(TEST_KEY_HEX_RAW);
 
   const secretBody = 'Agent completed deployment without errors.';
   const armoredBody = await encryptVaultText(secretBody, TEST_KEY_HEX);
@@ -265,7 +267,7 @@ test('notificationService.ts: truncates title/body AFTER successful decryption',
 
   const extraLongSecret = 'A'.repeat(250);
   const armoredBody = await encryptVaultText(extraLongSecret, TEST_KEY_HEX);
-  await importAndValidateCryptoKey(TEST_KEY_HEX);
+  await importAndValidateCryptoKey(TEST_KEY_HEX_RAW);
 
   const unlockedState = () => ({
     notifications: {

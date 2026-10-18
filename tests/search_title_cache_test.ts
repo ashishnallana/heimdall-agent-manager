@@ -19,6 +19,7 @@ if (typeof (globalThis as any).window === 'undefined') {
   (globalThis as any).window.sessionStorage = fakeSessionStorage;
 }
 
+import { keyringFromHex } from './helpers/vaultTestKeyring.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { configureStore } from '@reduxjs/toolkit';
@@ -64,8 +65,10 @@ import {
 
 const { handleUserWsEvent } = await import('../src/ui/api/wsInvalidation.ts');
 
-const TEST_KEY_HEX = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
-const ALT_KEY_HEX = 'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789';
+const TEST_KEY_HEX_RAW = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+const TEST_KEY_HEX = await keyringFromHex(TEST_KEY_HEX_RAW);
+const ALT_KEY_HEX_RAW = 'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789';
+const ALT_KEY_HEX = await keyringFromHex(ALT_KEY_HEX_RAW);
 
 // -----------------------------------------------------------------------------
 // 1. Redux Slice: Initial State and Selectors
@@ -96,7 +99,7 @@ test('upsertChainTitle adds new entry and updates existing without losing proper
     state,
     upsertChainTitle({
       id: 'chain_1',
-      rawTitle: 'vault:v1:abc',
+      rawTitle: 'vault:v2:e1:abc',
       decryptedTitle: 'Decrypted Chain 1',
       projectId: 'proj_1',
       status: 'in_progress',
@@ -107,7 +110,7 @@ test('upsertChainTitle adds new entry and updates existing without losing proper
   assert.ok(state.chains['chain_1']);
   assert.equal(state.chains['chain_1'].id, 'chain_1');
   assert.equal(state.chains['chain_1'].type, 'chain');
-  assert.equal(state.chains['chain_1'].rawTitle, 'vault:v1:abc');
+  assert.equal(state.chains['chain_1'].rawTitle, 'vault:v2:e1:abc');
   assert.equal(state.chains['chain_1'].decryptedTitle, 'Decrypted Chain 1');
   assert.equal(state.chains['chain_1'].projectId, 'proj_1');
   assert.equal(state.chains['chain_1'].status, 'in_progress');
@@ -117,7 +120,7 @@ test('upsertChainTitle adds new entry and updates existing without losing proper
     state,
     upsertChainTitle({
       id: 'chain_1',
-      rawTitle: 'vault:v1:abc',
+      rawTitle: 'vault:v2:e1:abc',
       status: 'completed',
     }),
   );
@@ -147,7 +150,7 @@ test('upsertConversationTitle adds and updates conversation search entries', () 
     state,
     upsertConversationTitle({
       id: 'chat_1',
-      rawTitle: 'vault:v1:xyz',
+      rawTitle: 'vault:v2:e1:xyz',
       decryptedTitle: 'Direct Agent Chat',
       projectId: 'proj_1',
       updatedAt: '2026-09-26T12:05:00Z',
@@ -424,9 +427,9 @@ test('Full Store: encrypted resource_changed decrypts via the active CryptoKey a
   // Install the key the PRODUCTION way so the background decryption in
   // wsInvalidation.ts:380 can resolve it. This used to call writeSessionVaultKey(hex),
   // which is now a hardened no-op -- the test therefore asserted a decrypted title while
-  // the store legitimately held `vault:v1:...`, i.e. it was failing for the mechanism and
+  // the store legitimately held `vault:v2:e1:...`, i.e. it was failing for the mechanism and
   // not for the behaviour under test (REQ-VAULT-HARDEN-1, REQ-RAWKEY-A8).
-  setActiveVaultKey(await importRawKeyHex(TEST_KEY_HEX), null);
+  setActiveVaultKey(await keyringFromHex(TEST_KEY_HEX_RAW), null);
 
   const payload = {
     type: 'resource_changed',

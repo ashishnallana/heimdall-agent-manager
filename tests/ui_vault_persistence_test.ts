@@ -4,6 +4,7 @@
 //
 // RUN: node --test tests/ui_vault_persistence_test.ts
 
+import { asKeyring } from './helpers/vaultTestKeyring.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -98,8 +99,8 @@ test('REQ-VAULT-HARDEN-1: WebCrypto keys imported and derived with extractable: 
 
   // Non-extractable key encrypts and decrypts correctly
   const plaintext = 'Zero-Trust Confidential Data Payload';
-  const ciphertext = await encryptVaultText(plaintext, importedKey);
-  const decrypted = await decryptVaultText(ciphertext, importedKey);
+  const ciphertext = await encryptVaultText(plaintext, asKeyring(importedKey));
+  const decrypted = await decryptVaultText(ciphertext, asKeyring(importedKey));
   assert.equal(decrypted, plaintext, 'Non-extractable key must round-trip encryption/decryption successfully');
 });
 
@@ -148,8 +149,8 @@ test('REQ-VAULT-HARDEN-2: IndexedDB structured cloning stores, restores, and del
 
   // 3. Restored key decrypts data encrypted by original key
   const secretText = 'Project architectural secrets';
-  const cipher = await encryptVaultText(secretText, nonExtractableKey);
-  const plain = await decryptVaultText(cipher, restoredKey);
+  const cipher = await encryptVaultText(secretText, asKeyring(nonExtractableKey));
+  const plain = await decryptVaultText(cipher, asKeyring(restoredKey));
   assert.equal(plain, secretText, 'Restored key must decrypt original ciphertext');
 
   // 4. initializeVaultPersistence integration test
@@ -157,7 +158,7 @@ test('REQ-VAULT-HARDEN-2: IndexedDB structured cloning stores, restores, and del
   const dispatchMock = (action: any) => { dispatchedAction = action; };
   const initializedKey = await initializeVaultPersistence(dispatchMock);
   assert.ok(initializedKey);
-  assert.equal(getActiveVaultKey(), initializedKey);
+  assert.equal(getActiveVaultKey()?.keys.get(1), initializedKey);
   assert.equal(dispatchedAction?.type, 'vault/hydrateVaultFromSession');
 
   // 5. Locking vault purges IndexedDB and resets unlocked state
@@ -181,20 +182,20 @@ test('REQ-SEARCH-BRIDGE-UNLOCK-19: versioned persistence restores the non-extrac
 
   const rawHex = '9a'.repeat(32);
   const contentKey = await importRawKeyHex(rawHex);
-  const searchKey = await deriveTaskChainSearchKey(rawHex);
-  await persistVaultKeys(contentKey, searchKey);
+  const searchKey = await deriveTaskChainSearchKey(rawHex, 1);
+  await persistVaultKeys(contentKey, searchKey.key);
 
   const restored = await restoreVaultKeys();
   assert.ok(restored);
-  assert.equal(restored.version, 2);
+  assert.equal(restored.version, 3);
   assert.equal(restored.contentKey.extractable, false);
   assert.equal(restored.taskChainSearchKey?.extractable, false);
   await assert.rejects(() => crypto.subtle.exportKey('raw', restored.contentKey));
   await assert.rejects(() => crypto.subtle.exportKey('raw', restored.taskChainSearchKey!));
 
   await initializeVaultPersistence();
-  assert.equal(getActiveVaultKey(), restored.contentKey);
-  assert.equal(getActiveTaskChainSearchKey(), restored.taskChainSearchKey);
+  assert.equal(getActiveVaultKey()?.keys.get(1), restored.contentKey);
+  assert.equal(getActiveTaskChainSearchKey()?.key, restored.taskChainSearchKey);
 
   let state = vaultReducer(undefined, { type: '@@INIT' });
   state = vaultReducer(state, lockVault());
@@ -217,7 +218,7 @@ test('REQ-SEARCH-BRIDGE-UNLOCK-19: legacy content-only records restore without i
   assert.equal(restored.taskChainSearchKey, null);
 
   await initializeVaultPersistence();
-  assert.equal(getActiveVaultKey(), contentKey);
+  assert.equal(getActiveVaultKey()?.keys.get(1), contentKey);
   assert.equal(getActiveTaskChainSearchKey(), null);
 });
 
@@ -232,7 +233,7 @@ test('REQ-SEARCH-BRIDGE-UNLOCK-19: explicit remembered unlock derives and persis
   await setActiveBridgeVaultKeyMaterial(rawHex);
   const restored = await restoreVaultKeys();
   assert.ok(restored);
-  assert.equal(restored.version, 2);
+  assert.equal(restored.version, 3);
   assert.equal(restored.contentKey.extractable, false);
   assert.equal(restored.taskChainSearchKey?.extractable, false);
   assert.equal(JSON.stringify(restored).includes(rawHex), false);

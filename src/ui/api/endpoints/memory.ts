@@ -202,7 +202,7 @@ export function memoryErrorText(err: unknown, fallback = "Something went wrong")
 }
 
 /**
- * Collapse any surviving `vault:v1:` token to the locked marker.
+ * Collapse any surviving `vault:v2:` token to the locked marker.
  *
  * The decrypt above is the real fix and covers every record fetched while the vault
  * is unlocked. This is the guard for the states it cannot reach, and it exists

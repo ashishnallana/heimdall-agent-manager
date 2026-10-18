@@ -1,6 +1,7 @@
 // Zero-Knowledge Vault Transformers for Projects
 // REQ-VAULT-PROJECTS-1
 
+import type { VaultKeyring } from './vaultKeyring.ts';
 import { isVaultArmored, encryptVaultText, decryptVaultText, getActiveVaultKey } from './vaultContent.ts';
 
 export interface ProjectPayload {
@@ -14,7 +15,7 @@ export interface ProjectPayload {
  */
 export async function encryptProjectFields<T extends ProjectPayload>(
   payload: T,
-  activeKey?: CryptoKey | string | null,
+  activeKey?: VaultKeyring | null,
 ): Promise<T> {
   const resolvedKey = activeKey || getActiveVaultKey();
   if (!resolvedKey) return { ...payload };
@@ -34,7 +35,7 @@ export async function encryptProjectFields<T extends ProjectPayload>(
  */
 export async function decryptProjectRecord<T extends ProjectPayload>(
   project: T,
-  activeKey?: CryptoKey | string | null,
+  activeKey?: VaultKeyring | null,
 ): Promise<T> {
   const resolvedKey = activeKey || getActiveVaultKey();
   if (!resolvedKey) return project;
@@ -64,7 +65,7 @@ export async function decryptProjectRecord<T extends ProjectPayload>(
  */
 export async function decryptProjectList<T extends ProjectPayload>(
   projects: T[],
-  activeKey?: CryptoKey | string | null,
+  activeKey?: VaultKeyring | null,
 ): Promise<T[]> {
   const resolvedKey = activeKey || getActiveVaultKey();
   if (!resolvedKey || !Array.isArray(projects)) return projects;

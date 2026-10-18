@@ -1,6 +1,7 @@
 // Zero-Knowledge Vault Transformers for Tasks and Task Comments
 // REQ-VAULT-TASKS-1
 
+import type { VaultKeyring } from './vaultKeyring.ts';
 import {
   isVaultArmored,
   containsVaultArmored,
@@ -26,7 +27,7 @@ export interface TaskCommentPayload {
  */
 export async function encryptTaskFields<T extends TaskPayload>(
   payload: T,
-  activeKey?: CryptoKey | string | null,
+  activeKey?: VaultKeyring | null,
 ): Promise<T> {
   const resolvedKey = activeKey || getActiveVaultKey();
   if (!resolvedKey) return { ...payload };
@@ -45,7 +46,7 @@ export async function encryptTaskFields<T extends TaskPayload>(
  */
 export async function encryptTaskCommentFields<T extends TaskCommentPayload>(
   payload: T,
-  activeKey?: CryptoKey | string | null,
+  activeKey?: VaultKeyring | null,
 ): Promise<T> {
   const resolvedKey = activeKey || getActiveVaultKey();
   if (!resolvedKey || !payload.body) return { ...payload };
@@ -61,7 +62,7 @@ export async function encryptTaskCommentFields<T extends TaskCommentPayload>(
  */
 export async function decryptTaskRecord<T extends TaskPayload>(
   task: T,
-  activeKey?: CryptoKey | string | null,
+  activeKey?: VaultKeyring | null,
 ): Promise<T> {
   const resolvedKey = activeKey || getActiveVaultKey();
   if (!resolvedKey) return task;
@@ -131,7 +132,7 @@ export async function decryptTaskRecord<T extends TaskPayload>(
  */
 export async function decryptTaskCommentRecord<T extends TaskCommentPayload>(
   comment: T,
-  activeKey?: CryptoKey | string | null,
+  activeKey?: VaultKeyring | null,
 ): Promise<T> {
   const resolvedKey = activeKey || getActiveVaultKey();
   if (!resolvedKey || (!isVaultArmored(comment.body) && !containsVaultArmored(comment.body))) return comment;
@@ -150,7 +151,7 @@ export async function decryptTaskCommentRecord<T extends TaskCommentPayload>(
 
 export async function decryptTaskList<T extends TaskPayload>(
   tasks: T[],
-  activeKey?: CryptoKey | string | null,
+  activeKey?: VaultKeyring | null,
 ): Promise<T[]> {
   const resolvedKey = activeKey || getActiveVaultKey();
   if (!resolvedKey || !Array.isArray(tasks)) return tasks;
@@ -159,7 +160,7 @@ export async function decryptTaskList<T extends TaskPayload>(
 
 export async function decryptTaskComments<T extends TaskCommentPayload>(
   comments: T[],
-  activeKey?: CryptoKey | string | null,
+  activeKey?: VaultKeyring | null,
 ): Promise<T[]> {
   const resolvedKey = activeKey || getActiveVaultKey();
   if (!resolvedKey || !Array.isArray(comments)) return comments;

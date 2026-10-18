@@ -3,6 +3,7 @@
 //
 // RUN: node --test tests/ui_chains_vault_test.ts
 
+import { keyringFromHex } from './helpers/vaultTestKeyring.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -27,7 +28,8 @@ import {
   decryptChainList,
 } from '../src/ui/utils/vaultChains.ts';
 
-const TEST_KEY_HEX = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+const TEST_KEY_HEX_RAW = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+const TEST_KEY_HEX = await keyringFromHex(TEST_KEY_HEX_RAW);
 
 // -----------------------------------------------------------------------------
 // Test 1: encryptChainFields encrypts title and description when unlocked
@@ -43,8 +45,8 @@ test('encryptChainFields encrypts title and description when vault key is provid
 
   const encrypted = await encryptChainFields(plainChain, TEST_KEY_HEX);
 
-  assert.ok(isVaultArmored(encrypted.title), 'Chain title must have vault:v1: armor');
-  assert.ok(isVaultArmored(encrypted.description), 'Chain description must have vault:v1: armor');
+  assert.ok(isVaultArmored(encrypted.title), 'Chain title must have vault:v2:e1: armor');
+  assert.ok(isVaultArmored(encrypted.description), 'Chain description must have vault:v2:e1: armor');
   assert.notEqual(encrypted.title, plainChain.title);
   assert.notEqual(encrypted.description, plainChain.description);
   assert.equal(encrypted.kind, 'team_work');

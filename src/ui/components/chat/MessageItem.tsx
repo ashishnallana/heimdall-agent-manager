@@ -11,6 +11,7 @@ import { selectActiveVaultKey } from '../../store/vaultSlice';
 import { visibleMessageOptions } from './types';
 import Markdown from '../Markdown';
 import ChatActionCard from './ChatActionCard';
+import { replaceVaultTokens } from '../../utils/vaultCrypto.ts';
 
 export interface MessageItemProps {
   message: {
@@ -78,7 +79,7 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onReply, clas
           <VaultText value={body} as="div" />
         ) : containsArmored && !activeKey ? (
           <Markdown
-            source={body.replace(/vault:v1:[A-Za-z0-9+/=]+/g, '[🔒 Encrypted]')}
+            source={replaceVaultTokens(body, '[🔒 Encrypted]')}
             compact
             copyAll={false}
           />

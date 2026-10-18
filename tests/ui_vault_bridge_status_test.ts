@@ -270,12 +270,12 @@ test('REQ-BVS-5: a successful bridge lock leaves this client’s CryptoKey in pl
     })) as any;
     await lockBridge('brg_one');
 
-    assert.equal(getActiveVaultKey(), key, 'locking a bridge must not clear the client key');
+    assert.equal(getActiveVaultKey()?.keys.get(1), key, 'locking a bridge must not clear the client key');
 
     // And a FAILED lock must not clear it either.
     globalThis.fetch = (async () => new Response('nope', { status: 503 })) as any;
     await assert.rejects(() => lockBridge('brg_one'));
-    assert.equal(getActiveVaultKey(), key, 'a failed lock must not clear the client key');
+    assert.equal(getActiveVaultKey()?.keys.get(1), key, 'a failed lock must not clear the client key');
 
     setActiveVaultKey(null);
   } finally {

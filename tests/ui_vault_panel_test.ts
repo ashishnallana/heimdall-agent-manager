@@ -3,6 +3,7 @@
 //
 // RUN: node --test tests/ui_vault_panel_test.ts
 
+import { asKeyring } from './helpers/vaultTestKeyring.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -83,8 +84,8 @@ test('End-to-End Vault lifecycle: Setup -> Master Password Unlock -> Recovery Ph
     storedVaultRecord.vault_key_tag,
   );
   assert.equal(decryptedVaultKeyPw.extractable, false, 'Password unlock must yield non-extractable key');
-  const pwCipher = await encryptVaultText('pw test', vaultKey);
-  const pwDecrypted = await decryptVaultText(pwCipher, decryptedVaultKeyPw);
+  const pwCipher = await encryptVaultText('pw test', asKeyring(vaultKey));
+  const pwDecrypted = await decryptVaultText(pwCipher, asKeyring(decryptedVaultKeyPw));
   assert.equal(pwDecrypted, 'pw test');
 
   // 3. Unlock with wrong Master Password must fail
@@ -119,8 +120,8 @@ test('End-to-End Vault lifecycle: Setup -> Master Password Unlock -> Recovery Ph
     storedVaultRecord.recovery_tag,
   );
   assert.equal(decryptedVaultKeyRec.extractable, false, 'Recovery words unlock must yield non-extractable key');
-  const recCipher = await encryptVaultText('rec test', vaultKey);
-  const recDecrypted = await decryptVaultText(recCipher, decryptedVaultKeyRec);
+  const recCipher = await encryptVaultText('rec test', asKeyring(vaultKey));
+  const recDecrypted = await decryptVaultText(recCipher, asKeyring(decryptedVaultKeyRec));
   assert.equal(recDecrypted, 'rec test');
 
   // 5. Redux state transitions

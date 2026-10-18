@@ -6,6 +6,9 @@ import {
   setActiveVaultKey as setActiveVaultKeyHandle,
   getActiveBridgeVaultKeyMaterial,
   setActiveBridgeVaultKeyMaterial as setActiveBridgeVaultKeyMaterialHandle,
+  currentKey,
+  setActiveVaultUserId,
+  type VaultKeyring,
 } from '../utils/vaultCrypto.ts';
 import {
   persistVaultKey,
@@ -18,10 +21,12 @@ import {
   getActiveTaskChainSearchKey,
   setActiveTaskChainSearchKey,
   waitForActiveTaskChainSearchKey,
+  type TaskChainSearchKey,
 } from '../utils/taskChainSearchKey.ts';
 
 export {
   getActiveVaultKey,
+  setActiveVaultUserId,
   getActiveBridgeVaultKeyMaterial,
   getActiveTaskChainSearchKey,
   waitForActiveTaskChainSearchKey,
@@ -29,6 +34,11 @@ export {
 
 let activeVaultRemembered = false;
 let activeVaultGeneration = 0;
+
+// P1-TEMPORARY ADAPTER (deleted in P3): the password-vault CryptoKey is installed as
+// epoch 1 of the active keyring (see vaultCrypto.setActiveVaultKey). Persistence and
+// the search key therefore always refer to epoch 1 here.
+const ADAPTER_EPOCH = 1;
 
 function installActiveVaultKeys(
   contentKey: CryptoKey | null,
@@ -38,27 +48,36 @@ function installActiveVaultKeys(
   activeVaultGeneration += 1;
   activeVaultRemembered = Boolean(contentKey && remembered);
   setActiveVaultKeyHandle(contentKey);
-  if (contentKey && taskChainSearchKey) setActiveTaskChainSearchKey(taskChainSearchKey);
+  if (contentKey && taskChainSearchKey) {
+    setActiveTaskChainSearchKey(Object.freeze({ epoch: ADAPTER_EPOCH, key: taskChainSearchKey }));
+  }
 }
 
-export function setActiveVaultKey(key: CryptoKey | null): void {
-  installActiveVaultKeys(key);
+export function setActiveVaultKey(key: CryptoKey | VaultKeyring | null): void {
+  if (key && !('algorithm' in key)) {
+    activeVaultGeneration += 1;
+    activeVaultRemembered = false;
+    setActiveVaultKeyHandle(key);
+    return;
+  }
+  installActiveVaultKeys(key as CryptoKey | null);
 }
 
-export function setActiveBridgeVaultKeyMaterial(rawHex: string | null): Promise<CryptoKey | null> {
+export function setActiveBridgeVaultKeyMaterial(rawHex: string | null): Promise<TaskChainSearchKey | null> {
   setActiveBridgeVaultKeyMaterialHandle(rawHex);
   const clean = String(rawHex || '').trim().toLowerCase();
-  const contentKey = getActiveVaultKey();
-  if (!contentKey || !/^[0-9a-f]{64}$/.test(clean)) {
+  const keyring = getActiveVaultKey();
+  if (!keyring || keyring.currentEpoch !== ADAPTER_EPOCH || !/^[0-9a-f]{64}$/.test(clean)) {
     setActiveTaskChainSearchKey(null);
     return Promise.resolve(null);
   }
+  const contentKey = currentKey(keyring);
 
   const generation = activeVaultGeneration;
-  const activation = beginTaskChainSearchKeyDerivation(clean).then(async (searchKey) => {
-    if (generation !== activeVaultGeneration || getActiveVaultKey() !== contentKey) return null;
+  const activation = beginTaskChainSearchKeyDerivation(clean, ADAPTER_EPOCH).then(async (searchKey) => {
+    if (generation !== activeVaultGeneration || getActiveVaultKey() !== keyring) return null;
     if (activeVaultRemembered) {
-      await persistVaultKeys(contentKey, searchKey);
+      await persistVaultKeys(contentKey, searchKey.key);
     }
     return searchKey;
   });
@@ -166,9 +185,11 @@ export async function unlockVaultWithHex(hexKey: string, remember = true): Promi
 
 /** Prove transient raw material represents the already-active content key. */
 export async function verifyActiveVaultKeyMaterial(rawHex: string): Promise<boolean> {
-  const activeKey = getActiveVaultKey();
+  const keyring = getActiveVaultKey();
   const clean = String(rawHex || '').trim().toLowerCase();
-  if (!activeKey || !/^[0-9a-f]{64}$/.test(clean)) return false;
+  if (!keyring || !/^[0-9a-f]{64}$/.test(clean)) return false;
+  const activeKey = keyring.keys.get(ADAPTER_EPOCH);
+  if (!activeKey) return false;
   try {
     const candidateKey = await importRawKeyHex(clean);
     const nonce = crypto.getRandomValues(new Uint8Array(12));
@@ -490,7 +511,7 @@ export const selectIsVaultUnlocked = (state: { vault?: VaultState }) => Boolean(
  * `getActiveVaultKey()` instead -- note `selectActiveVaultKey` below is NOT reactive.
  */
 export const selectRawVaultKeyHex = (_state?: { vault?: VaultState }): string | null => null;
-export const selectActiveVaultKey = (_state?: { vault?: VaultState }): CryptoKey | null => getActiveVaultKey();
+export const selectActiveVaultKey = (_state?: { vault?: VaultState }): VaultKeyring | null => getActiveVaultKey();
 export const selectIsUnlockModalOpen = (state: { vault?: VaultState }) => Boolean(state?.vault?.isUnlockModalOpen);
 export const selectIsSearchReauthentication = (state: { vault?: VaultState }) => (
   state?.vault?.unlockModalPurpose === 'search-reauthentication'

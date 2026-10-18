@@ -1,10 +1,11 @@
 // REQ-SEARCH-SHIELD-TEST:
 // Automated regression test suite ensuring no search filter in the Heimdall UI
-// matches raw armored ciphertext (vault:v1:...) or ciphertext substrings,
+// matches raw armored ciphertext (vault:v2:e1:...) or ciphertext substrings,
 // and that searches against plaintext work correctly when decrypted.
 //
 // RUN: node --test tests/ui_search_boxes_armor_shield_test.ts
 
+import { keyringFromHex } from './helpers/vaultTestKeyring.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -16,7 +17,8 @@ import {
 } from '../src/ui/utils/vaultContent.ts';
 import { batchDecryptTitles } from '../src/ui/utils/vaultSearch.ts';
 
-const TEST_KEY_HEX = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+const TEST_KEY_HEX_RAW = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+const TEST_KEY_HEX = await keyringFromHex(TEST_KEY_HEX_RAW);
 
 // =============================================================================
 // Helper Search Filter Logic (mirrors exact component implementations)
@@ -289,9 +291,9 @@ test('Area 1: RecentTaskChainsTab - armored chain titles and project names never
   assert.equal(filterRecentTaskChains(chains, 'vault').length, 0, "Query 'vault' must return 0 matches");
   assert.equal(filterRecentTaskChains(chains, 'Vault').length, 0, "Query 'Vault' must return 0 matches");
 
-  // 2. Searching for armor prefix 'vault:v1' or 'vault:v1:' must return 0 matches
+  // 2. Searching for armor prefix 'vault:v1' or 'vault:v2:e1:' must return 0 matches
   assert.equal(filterRecentTaskChains(chains, 'vault:v1').length, 0, "Query 'vault:v1' must return 0 matches");
-  assert.equal(filterRecentTaskChains(chains, 'vault:v1:').length, 0, "Query 'vault:v1:' must return 0 matches");
+  assert.equal(filterRecentTaskChains(chains, 'vault:v2:e1:').length, 0, "Query 'vault:v2:e1:' must return 0 matches");
 
   // 3. Searching for raw ciphertext tokens must return 0 matches
   assert.equal(filterRecentTaskChains(chains, cipherTokenTitle).length, 0, 'Ciphertext token from title must return 0 matches');
@@ -326,7 +328,7 @@ test('Area 1: RecentTaskChainsTab - armored chain titles and project names never
 
   // Even when decrypted, searching for raw ciphertext or armor prefix still yields 0 matches
   assert.equal(filterRecentTaskChains(chains, cipherTokenTitle, searchChainsMap).length, 0);
-  assert.equal(filterRecentTaskChains(chains, 'vault:v1:', searchChainsMap).length, 0);
+  assert.equal(filterRecentTaskChains(chains, 'vault:v2:e1:', searchChainsMap).length, 0);
 });
 
 // =============================================================================
@@ -394,9 +396,9 @@ test('Area 2: ActionItemsTab & CardsPanel - armored card titles, rationales, and
     assert.equal(filterFn(cards, 'vault', projectMap).length, 0, `${panelName}: Query 'vault' must return 0 matches`);
     assert.equal(filterFn(cards, 'Vault', projectMap).length, 0, `${panelName}: Query 'Vault' must return 0 matches`);
 
-    // 2. Searching for 'vault:v1' or 'vault:v1:' returns 0 matches
+    // 2. Searching for 'vault:v1' or 'vault:v2:e1:' returns 0 matches
     assert.equal(filterFn(cards, 'vault:v1', projectMap).length, 0, `${panelName}: Query 'vault:v1' must return 0 matches`);
-    assert.equal(filterFn(cards, 'vault:v1:', projectMap).length, 0, `${panelName}: Query 'vault:v1:' must return 0 matches`);
+    assert.equal(filterFn(cards, 'vault:v2:e1:', projectMap).length, 0, `${panelName}: Query 'vault:v2:e1:' must return 0 matches`);
 
     // 3. Searching for raw ciphertext tokens returns 0 matches
     assert.equal(filterFn(cards, cipherTokenTitle, projectMap).length, 0, `${panelName}: Ciphertext token from title must return 0 matches`);
@@ -448,7 +450,7 @@ test('Area 3: ActionListPage - armored prompt_text is omitted from searchableTex
   // 1. searchableText of row with armored prompt must NOT contain ciphertext or armor prefix
   const hay = actionListPageSearchableText(rowArmored, catalog);
   assert.ok(!hay.includes('vault'), "searchableText must NOT contain 'vault'");
-  assert.ok(!hay.includes('vault:v1:'), "searchableText must NOT contain 'vault:v1:'");
+  assert.ok(!hay.includes('vault:v2:e1:'), "searchableText must NOT contain 'vault:v2:e1:'");
   assert.ok(!hay.includes(cipherTokenPrompt.toLowerCase()), 'searchableText must NOT contain ciphertext token');
   assert.ok(!hay.includes(armoredPrompt.toLowerCase()), 'searchableText must NOT contain raw armored prompt');
 
@@ -456,7 +458,7 @@ test('Area 3: ActionListPage - armored prompt_text is omitted from searchableTex
   assert.equal(actionListPageMatchesQuery(rowArmored, catalog, 'vault'), false, "Query 'vault' must return false");
   assert.equal(actionListPageMatchesQuery(rowArmored, catalog, 'Vault'), false, "Query 'Vault' must return false");
   assert.equal(actionListPageMatchesQuery(rowArmored, catalog, 'vault:v1'), false, "Query 'vault:v1' must return false");
-  assert.equal(actionListPageMatchesQuery(rowArmored, catalog, 'vault:v1:'), false, "Query 'vault:v1:' must return false");
+  assert.equal(actionListPageMatchesQuery(rowArmored, catalog, 'vault:v2:e1:'), false, "Query 'vault:v2:e1:' must return false");
   assert.equal(actionListPageMatchesQuery(rowArmored, catalog, cipherTokenPrompt), false, 'Ciphertext token query must return false');
 
   // 3. Plaintext prompt before decryption must return false
@@ -523,9 +525,9 @@ test('Area 4: LibraryPage - armored artifact name, description, and originRef ne
   assert.equal(filterLibraryArtifacts(artifacts, 'vault').length, 0, "Query 'vault' must return 0 matches");
   assert.equal(filterLibraryArtifacts(artifacts, 'Vault').length, 0, "Query 'Vault' must return 0 matches");
 
-  // 2. Searching for 'vault:v1' or 'vault:v1:' must return 0 matches
+  // 2. Searching for 'vault:v1' or 'vault:v2:e1:' must return 0 matches
   assert.equal(filterLibraryArtifacts(artifacts, 'vault:v1').length, 0, "Query 'vault:v1' must return 0 matches");
-  assert.equal(filterLibraryArtifacts(artifacts, 'vault:v1:').length, 0, "Query 'vault:v1:' must return 0 matches");
+  assert.equal(filterLibraryArtifacts(artifacts, 'vault:v2:e1:').length, 0, "Query 'vault:v2:e1:' must return 0 matches");
 
   // 3. Searching for raw ciphertext tokens must return 0 matches
   assert.equal(filterLibraryArtifacts(artifacts, cipherTokenName).length, 0, 'Ciphertext token from name must return 0 matches');
@@ -571,9 +573,9 @@ test('Area 5: NewConversationWindowPane - armored display_name never matches sea
   assert.equal(filterWorkbenchAgentInstances(instances, 'vault').length, 0, "Query 'vault' must return 0 matches");
   assert.equal(filterWorkbenchAgentInstances(instances, 'Vault').length, 0, "Query 'Vault' must return 0 matches");
 
-  // 2. Searching for 'vault:v1' or 'vault:v1:' must return 0 matches
+  // 2. Searching for 'vault:v1' or 'vault:v2:e1:' must return 0 matches
   assert.equal(filterWorkbenchAgentInstances(instances, 'vault:v1').length, 0, "Query 'vault:v1' must return 0 matches");
-  assert.equal(filterWorkbenchAgentInstances(instances, 'vault:v1:').length, 0, "Query 'vault:v1:' must return 0 matches");
+  assert.equal(filterWorkbenchAgentInstances(instances, 'vault:v2:e1:').length, 0, "Query 'vault:v2:e1:' must return 0 matches");
 
   // 3. Searching for raw ciphertext tokens must return 0 matches
   assert.equal(filterWorkbenchAgentInstances(instances, cipherTokenAgent).length, 0, 'Ciphertext token must return 0 matches');
@@ -645,9 +647,9 @@ test('Area 6: Combobox - armored option titles and subtitles never match search 
   assert.equal(filterComboboxOptions(options, 'vault').length, 0, "Query 'vault' must return 0 matches");
   assert.equal(filterComboboxOptions(options, 'Vault').length, 0, "Query 'Vault' must return 0 matches");
 
-  // 2. Searching for 'vault:v1' or 'vault:v1:' must return 0 matches
+  // 2. Searching for 'vault:v1' or 'vault:v2:e1:' must return 0 matches
   assert.equal(filterComboboxOptions(options, 'vault:v1').length, 0, "Query 'vault:v1' must return 0 matches");
-  assert.equal(filterComboboxOptions(options, 'vault:v1:').length, 0, "Query 'vault:v1:' must return 0 matches");
+  assert.equal(filterComboboxOptions(options, 'vault:v2:e1:').length, 0, "Query 'vault:v2:e1:' must return 0 matches");
 
   // 3. Searching for raw ciphertext tokens must return 0 matches
   assert.equal(filterComboboxOptions(options, cipherTokenTitle).length, 0, 'Ciphertext token from title must return 0 matches');
@@ -722,9 +724,9 @@ test('Area 7: shellModel - armored session labels and commands never match searc
     assert.equal(shellModelMatchesQuery(session, 'vault'), false, `Session ${session.session_id} must not match 'vault'`);
     assert.equal(shellModelMatchesQuery(session, 'Vault'), false, `Session ${session.session_id} must not match 'Vault'`);
 
-    // 2. Searching for 'vault:v1' or 'vault:v1:' must return false
+    // 2. Searching for 'vault:v1' or 'vault:v2:e1:' must return false
     assert.equal(shellModelMatchesQuery(session, 'vault:v1'), false, `Session ${session.session_id} must not match 'vault:v1'`);
-    assert.equal(shellModelMatchesQuery(session, 'vault:v1:'), false, `Session ${session.session_id} must not match 'vault:v1:'`);
+    assert.equal(shellModelMatchesQuery(session, 'vault:v2:e1:'), false, `Session ${session.session_id} must not match 'vault:v2:e1:'`);
 
     // 3. Searching for raw ciphertext tokens must return false
     assert.equal(shellModelMatchesQuery(session, cipherTokenLabel), false, `Session ${session.session_id} must not match cipherTokenLabel`);
@@ -771,7 +773,7 @@ test('Cross-cutting: Encrypted items across all 7 areas are completely immune to
       'VAULT',
       'vault:',
       'vault:v1',
-      'vault:v1:',
+      'vault:v2:e1:',
       armored.slice(9, 20),
       armored.slice(15, 30),
       armored.slice(armored.length - 10),

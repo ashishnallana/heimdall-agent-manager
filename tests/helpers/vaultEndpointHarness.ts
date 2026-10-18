@@ -171,14 +171,15 @@ export async function makeVaultStore(): Promise<any> {
  * `rawVaultKeyHex` field no longer exists, so a fixture that injects hex into mock
  * state is testing a mechanism no production read can reach.
  */
-export async function unlockVault(store: any, keyHex: string): Promise<CryptoKey> {
-  const { importRawKeyHex, setActiveVaultKey } = await import(`${REPO_ROOT}/src/ui/utils/vaultCrypto.ts`);
+export async function unlockVault(store: any, keyHex: string): Promise<any> {
+  const { importRawKeyHex, setActiveVaultKey, getActiveVaultKey } = await import(`${REPO_ROOT}/src/ui/utils/vaultCrypto.ts`);
   const { setVaultConfigured, setVaultUnlocked } = await import(`${REPO_ROOT}/src/ui/store/vaultSlice.ts`);
   const key = await importRawKeyHex(keyHex);
-  setActiveVaultKey(key, null);
+  setActiveVaultKey(key);
   store.dispatch(setVaultConfigured(true));
   store.dispatch(setVaultUnlocked(keyHex));
-  return key;
+  // P1 adapter: the installed password-vault key is the epoch-1 keyring.
+  return getActiveVaultKey();
 }
 
 /** Lock the vault: dispatch lockVault AND clear the active key, as the real lock does. */

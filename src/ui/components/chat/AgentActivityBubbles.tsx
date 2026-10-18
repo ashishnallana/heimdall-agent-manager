@@ -14,6 +14,7 @@ import {
   decryptEmbeddedVaultTokens,
 } from '../../utils/vaultContent';
 import { selectActiveVaultKey } from '../../store/vaultSlice';
+import { replaceVaultTokens } from '../../utils/vaultCrypto.ts';
 
 // Push-only, ephemeral row of small "activity bubbles" rendered in a reserved,
 // fixed-height gutter just above the chat composer, for the CURRENTLY-VIEWED
@@ -76,16 +77,16 @@ function ActivityBubbleItem({
     // Key material lives only as a non-extractable CryptoKey (REQ-VAULT-HARDEN-1),
     // so the gate is the real key, not the permanently-null state.vault.rawVaultKeyHex.
     if (!activeKey) {
-      setSummary(raw.replace(/vault:v1:[A-Za-z0-9+/=_-]+/g, '[🔒 Encrypted]'));
+      setSummary(replaceVaultTokens(raw, '[🔒 Encrypted]'));
       return;
     }
     const p = isVaultArmored(raw)
       ? decryptVaultText(raw, activeKey)
       : decryptEmbeddedVaultTokens(raw, activeKey);
     p.then((res) => {
-      if (active) setSummary(res.replace(/vault:v1:[A-Za-z0-9+/=_-]+/g, '[🔒 Encrypted]'));
+      if (active) setSummary(replaceVaultTokens(res, '[🔒 Encrypted]'));
     }).catch(() => {
-      if (active) setSummary(raw.replace(/vault:v1:[A-Za-z0-9+/=_-]+/g, '[🔒 Encrypted]'));
+      if (active) setSummary(replaceVaultTokens(raw, '[🔒 Encrypted]'));
     });
     return () => {
       active = false;

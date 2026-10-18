@@ -17,129 +17,11 @@ import {
   clearActiveKey,
 } from './helpers/vaultEndpointHarness.ts';
 
-import {
-  encryptShellStreamPayload,
-  decryptShellStreamPayload,
-} from '../src/ui/components/shells/useShellStream.ts';
-import {
-  base64ToBytes,
-  bytesToBase64,
-  VAULT_ARMOR_PREFIX,
-  decryptVaultText,
-  isVaultArmored,
-} from '../src/ui/utils/vaultContent.ts';
-import { importRawKeyHex, getActiveVaultKey } from '../src/ui/utils/vaultCrypto.ts';
+import { decryptShellStreamPayload } from '../src/ui/components/shells/useShellStream.ts';
+import { decryptVaultText, isVaultArmored } from '../src/ui/utils/vaultContent.ts';
+import { getActiveVaultKey } from '../src/ui/utils/vaultCrypto.ts';
 
-const TEST_VAULT_KEY = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
-const ALT_VAULT_KEY = 'fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210';
-
-// -----------------------------------------------------------------------------
-// 1. Stream Cryptographic Round-Trip & Wire Format
-// -----------------------------------------------------------------------------
-
-test('encryptShellStreamPayload produces valid 12B IV + 16B tag + ciphertext structure', async () => {
-  const plaintext = 'echo "Hello, Zero-Trust Bridge PTY!"\r\n';
-  const enc_b64 = await encryptShellStreamPayload(plaintext, TEST_VAULT_KEY);
-
-  assert.ok(typeof enc_b64 === 'string', 'enc_b64 must be a string');
-  assert.ok(enc_b64.length > 0, 'enc_b64 must not be empty');
-
-  const rawBytes = base64ToBytes(enc_b64);
-  const expectedPlaintextBytes = new TextEncoder().encode(plaintext);
-  const expectedTotalBytes = 12 + 16 + expectedPlaintextBytes.length; // 28 header bytes + ciphertext
-  assert.equal(rawBytes.length, expectedTotalBytes, 'payload must be 28 bytes header + ciphertext');
-});
-
-test('decryptShellStreamPayload correctly decrypts encrypted PTY output', async () => {
-  const originalText = '\x1b[32muser@cloudtop:~$ ls -la\r\ntotal 64\r\ndrwxr-xr-x 2 user user 4096\x1b[0m\r\n';
-  const enc_b64 = await encryptShellStreamPayload(originalText, TEST_VAULT_KEY);
-
-  const decryptedBytes = await decryptShellStreamPayload(enc_b64, TEST_VAULT_KEY);
-  const decryptedText = new TextDecoder().decode(decryptedBytes);
-
-  assert.equal(decryptedText, originalText, 'decrypted text must match original plaintext exactly');
-});
-
-test('decryptShellStreamPayload transparently strips vault:v1: prefix if present', async () => {
-  const original = 'cat /etc/os-release';
-  const raw_b64 = await encryptShellStreamPayload(original, TEST_VAULT_KEY);
-  const armored = `${VAULT_ARMOR_PREFIX}${raw_b64}`;
-
-  const decrypted = await decryptShellStreamPayload(armored, TEST_VAULT_KEY);
-  assert.equal(new TextDecoder().decode(decrypted), original);
-});
-
-test('decryptShellStreamPayload handles Uint8Array input and binary terminal control sequences', async () => {
-  // VT100 / ANSI escape sequence with binary data
-  const binaryData = new Uint8Array([0x1b, 0x5b, 0x32, 0x4a, 0x1b, 0x5b, 0x48, 0x00, 0xff, 0x7f]);
-  const enc_b64 = await encryptShellStreamPayload(binaryData, TEST_VAULT_KEY);
-
-  const decrypted = await decryptShellStreamPayload(enc_b64, TEST_VAULT_KEY);
-  assert.deepEqual(decrypted, binaryData, 'binary bytes must match exactly');
-});
-
-test('encryptShellStreamPayload generates unique random 12B nonces for semantic security', async () => {
-  const data = 'repeat keystroke test';
-  const enc1 = await encryptShellStreamPayload(data, TEST_VAULT_KEY);
-  const enc2 = await encryptShellStreamPayload(data, TEST_VAULT_KEY);
-
-  assert.notEqual(enc1, enc2, 'consecutive encryptions of identical data must produce distinct ciphertexts');
-
-  const bytes1 = base64ToBytes(enc1);
-  const bytes2 = base64ToBytes(enc2);
-  const nonce1 = bytes1.subarray(0, 12);
-  const nonce2 = bytes2.subarray(0, 12);
-  assert.notDeepEqual(nonce1, nonce2, 'nonces must be randomized');
-});
-
-test('decryptShellStreamPayload rejects tampered ciphertext or authentication tag', async () => {
-  const message = 'sensitive command execution';
-  const enc_b64 = await encryptShellStreamPayload(message, TEST_VAULT_KEY);
-  const bytes = base64ToBytes(enc_b64);
-
-  // Tamper with the last byte of ciphertext
-  bytes[bytes.length - 1] ^= 0x01;
-  const tamperedB64 = bytesToBase64(bytes);
-
-  await assert.rejects(
-    async () => {
-      await decryptShellStreamPayload(tamperedB64, TEST_VAULT_KEY);
-    },
-    'decryption of tampered ciphertext must fail authentication'
-  );
-});
-
-test('decryptShellStreamPayload rejects decryption with mismatched vault key', async () => {
-  const message = 'confidential shell session';
-  const enc_b64 = await encryptShellStreamPayload(message, TEST_VAULT_KEY);
-
-  await assert.rejects(
-    async () => {
-      await decryptShellStreamPayload(enc_b64, ALT_VAULT_KEY);
-    },
-    'decryption with incorrect key must fail authentication'
-  );
-});
-
-test('decryptShellStreamPayload rejects truncated payloads', async () => {
-  const truncated = bytesToBase64(new Uint8Array(20)); // Less than 28 bytes header
-  await assert.rejects(
-    async () => {
-      await decryptShellStreamPayload(truncated, TEST_VAULT_KEY);
-    },
-    /shorter than header/
-  );
-});
-
-test('WebCrypto CryptoKey instance can be passed directly to encrypt and decrypt', async () => {
-  const cryptoKey = await importRawKeyHex(TEST_VAULT_KEY);
-  const text = 'direct CryptoKey instance test';
-
-  const enc = await encryptShellStreamPayload(text, cryptoKey);
-  const dec = await decryptShellStreamPayload(enc, cryptoKey);
-
-  assert.equal(new TextDecoder().decode(dec), text);
-});
+const TEST_VAULT_KEY_RAW = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
 
 // -----------------------------------------------------------------------------
 // 3b. REQ-SHELL-ENC-8 / REQ-FIX-ENC-1 / REQ-RAWKEY-A8: createShell through the REAL endpoint.
@@ -177,12 +59,12 @@ test('REQ-SHELL-ENC-8: createShell puts an armored enc_spec with cmd, cwd, times
   const startTime = Date.now();
 
   const store = await makeVaultStore();
-  const key = await unlockVault(store, TEST_VAULT_KEY);
+  const key = await unlockVault(store, TEST_VAULT_KEY_RAW);
   try {
     const body = await captureCreateShell(store, { cmd, cwd, kind: 'shell' });
 
     assert.ok(body.enc_spec, 'request body must carry enc_spec');
-    assert.ok(isVaultArmored(body.enc_spec), 'enc_spec must start with vault:v1:');
+    assert.ok(isVaultArmored(body.enc_spec), 'enc_spec must start with vault:v2:e1:');
     // NOTE ON SCOPE -- enc_spec is INTEGRITY/AUTHORIZATION, not confidentiality.
     // cmd and cwd deliberately ALSO travel in plaintext: the hub persists them
     // (shell_session_rest_handlers.odin:163-164) so sessions can be listed and
@@ -201,8 +83,8 @@ test('REQ-SHELL-ENC-8: createShell puts an armored enc_spec with cmd, cwd, times
     assert.ok(typeof parsedSpec.timestamp === 'number', 'timestamp must be a number');
     assert.ok(parsedSpec.timestamp >= startTime && parsedSpec.timestamp <= Date.now(), 'timestamp must be current');
     assert.ok(
-      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(parsedSpec.nonce),
-      `nonce must be a valid UUID string, got: ${parsedSpec.nonce}`,
+      /^[0-9a-f]{32}$/.test(parsedSpec.nonce),
+      `nonce must be 16 CSPRNG bytes as hex, got: ${parsedSpec.nonce}`,
     );
   } finally {
     await clearActiveKey();
@@ -211,7 +93,7 @@ test('REQ-SHELL-ENC-8: createShell puts an armored enc_spec with cmd, cwd, times
 
 test('REQ-FIX-ENC-1: createShell encrypts enc_spec with the CryptoKey from getActiveVaultKey(), with no hex anywhere', async () => {
   const store = await makeVaultStore();
-  const key = await unlockVault(store, TEST_VAULT_KEY);
+  const key = await unlockVault(store, TEST_VAULT_KEY_RAW);
   try {
     // The production unlock path stores ONLY a non-extractable CryptoKey. Prove the
     // endpoint encrypts from that, with no hex key reachable from state.
@@ -231,7 +113,7 @@ test('REQ-FIX-ENC-1: createShell encrypts enc_spec with the CryptoKey from getAc
 
 test('REQ-SHELL-ENC-8: createShell omits enc_spec and sends plaintext when the vault is locked', async () => {
   const store = await makeVaultStore();
-  await unlockVault(store, TEST_VAULT_KEY);
+  await unlockVault(store, TEST_VAULT_KEY_RAW);
   await lockVaultFully(store);
   try {
     assert.equal(getActiveVaultKey(), null, 'precondition: locking clears the active key');
@@ -247,7 +129,7 @@ test('REQ-SHELL-ENC-8: createShell omits enc_spec and sends plaintext when the v
 
 test('REQ-SHELL-ENC-8: createShell omits enc_spec when no key is active even though state says unlocked', async () => {
   const store = await makeVaultStore();
-  await unlockVault(store, TEST_VAULT_KEY);
+  await unlockVault(store, TEST_VAULT_KEY_RAW);
   // The failure mode this guards: Redux still flags unlocked, but the key is gone (a
   // reload, or a lock that did not propagate). Encryption must be skipped, not attempted.
   await clearActiveKey();
@@ -263,7 +145,7 @@ test('REQ-SHELL-ENC-8: createShell omits enc_spec when no key is active even tho
 
 test('REQ-SHELL-ENC-8: createShell defaults omitted cmd and cwd to empty strings in the encrypted spec', async () => {
   const store = await makeVaultStore();
-  const key = await unlockVault(store, TEST_VAULT_KEY);
+  const key = await unlockVault(store, TEST_VAULT_KEY_RAW);
   try {
     const body = await captureCreateShell(store, { kind: 'shell' });
     assert.ok(body.enc_spec, 'enc_spec must be present');
@@ -277,7 +159,7 @@ test('REQ-SHELL-ENC-8: createShell defaults omitted cmd and cwd to empty strings
 
 test('REQ-SHELL-ENC-8: two identical createShell calls produce distinct ciphertexts and distinct nonces', async () => {
   const store = await makeVaultStore();
-  const key = await unlockVault(store, TEST_VAULT_KEY);
+  const key = await unlockVault(store, TEST_VAULT_KEY_RAW);
   try {
     const args = { cmd: 'test', cwd: '/dir', kind: 'run' as const };
     const first = await captureCreateShell(store, args);
@@ -307,20 +189,18 @@ async function captureSendShellInput(store: any, data: string) {
   return shellFetch.find((r) => r.method === 'POST' && /\/shells\/sh_test\/input$/.test(r.url)).body;
 }
 
-test('REQ-SHELL-ENC-10: sendShellInput puts enc_b64 and armored data_b64 on the wire when unlocked', async () => {
+test('REQ-SHELL-ENC-10: sendShellInput puts a PTY v2 enc_b64 and NO plaintext on the wire when unlocked', async () => {
   const data = 'ls -la\n';
   const store = await makeVaultStore();
-  const key = await unlockVault(store, TEST_VAULT_KEY);
+  const key = await unlockVault(store, TEST_VAULT_KEY_RAW);
   try {
     const body = await captureSendShellInput(store, data);
 
     assert.ok(body.enc_b64, 'enc_b64 must be attached to the request');
-    assert.ok(
-      String(body.data_b64).startsWith(VAULT_ARMOR_PREFIX),
-      `data_b64 must be armored, got: ${String(body.data_b64).slice(0, 32)}`,
-    );
-    const decrypted = await decryptShellStreamPayload(body.enc_b64, key);
-    assert.equal(new TextDecoder().decode(decrypted), data, 'enc_b64 must decrypt to the keystrokes');
+    assert.equal(body.data, '', 'plaintext keystrokes must not travel next to the ciphertext');
+    assert.strictEqual(body.data_b64, undefined, 'the v1 armored data_b64 is gone');
+    const decrypted = await decryptShellStreamPayload(body.enc_b64, key, 'sh_test', 'in');
+    assert.equal(new TextDecoder().decode(decrypted!), data, 'enc_b64 must decrypt to the keystrokes');
   } finally {
     await clearActiveKey();
   }
@@ -329,7 +209,7 @@ test('REQ-SHELL-ENC-10: sendShellInput puts enc_b64 and armored data_b64 on the 
 test('REQ-SHELL-ENC-10: sendShellInput omits enc_b64 and data_b64 when the vault is locked', async () => {
   const data = 'ls -la\n';
   const store = await makeVaultStore();
-  await unlockVault(store, TEST_VAULT_KEY);
+  await unlockVault(store, TEST_VAULT_KEY_RAW);
   await lockVaultFully(store);
   try {
     const body = await captureSendShellInput(store, data);
@@ -340,47 +220,3 @@ test('REQ-SHELL-ENC-10: sendShellInput omits enc_b64 and data_b64 when the vault
     await clearActiveKey();
   }
 });
-
-test('REQ-SHELL-ENC-12: decryptShellStreamPayload transparently decrypts vault:v1: armored data_b64', async () => {
-  const plaintext = '\x1b[32mhello from encrypted pty\x1b[0m\r\n';
-  const enc_b64 = await encryptShellStreamPayload(plaintext, TEST_VAULT_KEY);
-  const armored_data_b64 = `${VAULT_ARMOR_PREFIX}${enc_b64}`;
-
-  assert.ok(armored_data_b64.startsWith('vault:v1:'), 'must have vault:v1: prefix');
-  const decrypted = await decryptShellStreamPayload(armored_data_b64, TEST_VAULT_KEY);
-  assert.equal(new TextDecoder().decode(decrypted), plaintext);
-});
-
-test('REQ-FIX-ENC-2: useAgentStream message decoding handles armored output and screen frames', async () => {
-  const cryptoKey = await importRawKeyHex(TEST_VAULT_KEY);
-  const sampleOutput = '\r\nAgent output stream line 1\r\n';
-  const enc_b64 = await encryptShellStreamPayload(sampleOutput, cryptoKey);
-  const armored = `${VAULT_ARMOR_PREFIX}${enc_b64}`;
-
-  // Test decrypting armored output payload
-  const decryptedOutputBytes = await decryptShellStreamPayload(armored, cryptoKey);
-  assert.equal(new TextDecoder().decode(decryptedOutputBytes), sampleOutput);
-
-  // Test decrypting screen snapshot payload
-  const screenContent = '\x1b[2J\x1b[HWelcome to Heimdall Terminal';
-  const encScreen = await encryptShellStreamPayload(screenContent, cryptoKey);
-  const decryptedScreenBytes = await decryptShellStreamPayload(encScreen, cryptoKey);
-  assert.equal(new TextDecoder().decode(decryptedScreenBytes), screenContent);
-});
-
-test('REQ-FIX-ENC-3: sendInput payload generation matches zero-trust protocol', async () => {
-  const cryptoKey = await importRawKeyHex(TEST_VAULT_KEY);
-  const keystroke = 'cargo build\r';
-  const enc_b64 = await encryptShellStreamPayload(keystroke, cryptoKey);
-  const frame = { type: 'input', data_b64: enc_b64, is_encrypted: true };
-
-  assert.equal(frame.type, 'input');
-  assert.equal(frame.is_encrypted, true);
-  assert.ok(!frame.data_b64.startsWith('vault:v1:'));
-  assert.ok(!('enc_b64' in frame));
-  const decrypted = await decryptShellStreamPayload(frame.data_b64, cryptoKey);
-  assert.equal(new TextDecoder().decode(decrypted), keystroke);
-});
-
-
-

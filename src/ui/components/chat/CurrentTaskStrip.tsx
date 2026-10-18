@@ -14,6 +14,7 @@ import { selectActiveVaultKey } from '../../store/vaultSlice';
 import { useListAgentIdentitiesQuery } from '../../api/endpoints/agents';
 import { formatFleetRoleName } from '../tasks/FleetManagementDrawer';
 import { useAuthUser } from '../auth/AuthUserContext';
+import { replaceVaultTokens } from '../../utils/vaultCrypto.ts';
 
 export type CurrentTaskStripProps = {
   task: TaskLike;
@@ -181,7 +182,7 @@ export default function CurrentTaskStrip({
       setDecryptedSwitchableTasks(
         switchableTasks.map((t) => ({
           ...t,
-          title: t.title ? t.title.replace(/vault:v1:[A-Za-z0-9+/=_-]+/g, '[🔒 Encrypted]') : t.title,
+          title: t.title ? replaceVaultTokens(t.title, '[🔒 Encrypted]') : t.title,
         }))
       );
       return;
@@ -196,7 +197,7 @@ export default function CurrentTaskStrip({
             : await decryptEmbeddedVaultTokens(rawTitle, activeKey);
           return { ...t, title: dec };
         } catch {
-          return { ...t, title: rawTitle.replace(/vault:v1:[A-Za-z0-9+/=_-]+/g, '[🔒 Encrypted]') };
+          return { ...t, title: replaceVaultTokens(rawTitle, '[🔒 Encrypted]') };
         }
       })
     ).then((res) => {

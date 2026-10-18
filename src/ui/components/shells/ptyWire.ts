@@ -7,7 +7,8 @@
  *
  *   kind  : 1 output, 2 input, 3 screen (hub pane-capture repaint)
  *   flags : 0x01 snapshot (absolute repaint; reset the UTF-8 decoder), 0x02 encrypted
- *           (payload = nonce(12) | tag(16) | AES-256-GCM ciphertext), 0x04 cursor block present
+ *           (payload = u32be epoch | nonce(12) | tag(16) | AES-256-GCM ciphertext, AAD
+ *           `heimdall-pty-v2|e<epoch>|<session_id>|<out|in>`), 0x04 cursor block present
  *           (*) only when 0x04 is set.
  *
  * Control frames (ready / stream_ready / stream_closed / status / error / resize / heartbeat)
@@ -15,6 +16,7 @@
  */
 
 import { AES_GCM_NONCE_BYTES, AES_GCM_TAG_BYTES, MIN_ARMOR_PAYLOAD_BYTES } from '../../utils/vaultCrypto.ts';
+import { currentKey, keyFor, type VaultKeyring } from '../../utils/vaultKeyring.ts';
 
 export const PTY_WIRE_KIND_OUTPUT = 0x01;
 export const PTY_WIRE_KIND_INPUT = 0x02;
@@ -74,23 +76,77 @@ export function encodePtyViewerFrame(kind: number, flags: number, payload: Uint8
   return out;
 }
 
+export type PtyDirection = 'out' | 'in';
+
+/** PTY payload v2 header: u32be epoch | nonce(12) | tag(16). */
+export const PTY_V2_HEADER_BYTES = 4 + MIN_ARMOR_PAYLOAD_BYTES;
+
+/** AAD for a PTY v2 payload: `heimdall-pty-v2|e<epoch>|<session_id>|<out|in>`. */
+export function ptyAad(epoch: number, sessionId: string, direction: PtyDirection): Uint8Array {
+  return new TextEncoder().encode(`heimdall-pty-v2|e${epoch}|${sessionId}|${direction}`);
+}
+
+/** The epoch in a v2 payload header, or 0 when the payload is too short or names epoch 0. */
+export function ptyPayloadEpoch(payload: Uint8Array): number {
+  if (payload.length < PTY_V2_HEADER_BYTES) return 0;
+  return new DataView(payload.buffer, payload.byteOffset, 4).getUint32(0);
+}
+
+/** Seal one v2 payload. `nonce` is supplied by callers that need determinism (tests). */
+export async function sealPtyPayload(
+  data: Uint8Array,
+  key: CryptoKey,
+  epoch: number,
+  sessionId: string,
+  direction: PtyDirection,
+  nonce?: Uint8Array,
+): Promise<Uint8Array> {
+  if (!sessionId) throw new Error('PTY payload needs a session id');
+  if (!Number.isInteger(epoch) || epoch < 1 || epoch > 0xffffffff) throw new Error('invalid PTY epoch');
+  const iv = nonce ? Uint8Array.from(nonce) : crypto.getRandomValues(new Uint8Array(AES_GCM_NONCE_BYTES));
+  if (iv.length !== AES_GCM_NONCE_BYTES) throw new Error('invalid PTY nonce');
+  const sealed = new Uint8Array(await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv: iv as unknown as BufferSource, additionalData: ptyAad(epoch, sessionId, direction) as unknown as BufferSource, tagLength: 128 },
+    key,
+    data as unknown as BufferSource,
+  ));
+  const ciphertextLen = sealed.length - AES_GCM_TAG_BYTES;
+  const out = new Uint8Array(PTY_V2_HEADER_BYTES + ciphertextLen);
+  new DataView(out.buffer).setUint32(0, epoch);
+  out.set(iv, 4);
+  out.set(sealed.subarray(ciphertextLen), 4 + AES_GCM_NONCE_BYTES);
+  out.set(sealed.subarray(0, ciphertextLen), PTY_V2_HEADER_BYTES);
+  return out;
+}
+
 /**
- * Decrypt a pty_wire encrypted payload (nonce(12) | tag(16) | ciphertext) with WebCrypto,
- * straight from the binary frame — no base64 round-trip.
+ * Decrypt a PTY v2 payload (u32be epoch | nonce | tag | ct) with the key for the
+ * epoch in its header, straight from the binary frame. Returns null when this
+ * keyring does not hold that epoch (the caller shows the locked notice); throws when
+ * the payload is malformed or does not authenticate.
  */
-export async function decryptPtyPayload(payload: Uint8Array, key: CryptoKey): Promise<Uint8Array> {
-  if (payload.length < MIN_ARMOR_PAYLOAD_BYTES) {
-    throw new Error(`Encrypted pty frame shorter than header (${payload.length} < ${MIN_ARMOR_PAYLOAD_BYTES})`);
+export async function decryptPtyPayload(
+  payload: Uint8Array,
+  keyring: VaultKeyring,
+  sessionId: string,
+  direction: PtyDirection = 'out',
+): Promise<Uint8Array | null> {
+  if (payload.length < PTY_V2_HEADER_BYTES) {
+    throw new Error(`Encrypted pty frame shorter than header (${payload.length} < ${PTY_V2_HEADER_BYTES})`);
   }
-  const nonce = payload.subarray(0, AES_GCM_NONCE_BYTES);
-  const tag = payload.subarray(AES_GCM_NONCE_BYTES, MIN_ARMOR_PAYLOAD_BYTES);
-  const ciphertext = payload.subarray(MIN_ARMOR_PAYLOAD_BYTES);
+  const epoch = ptyPayloadEpoch(payload);
+  if (epoch < 1) throw new Error('Encrypted pty frame names epoch 0');
+  const key = keyFor(keyring, epoch);
+  if (!key) return null;
+  const nonce = payload.subarray(4, 4 + AES_GCM_NONCE_BYTES);
+  const tag = payload.subarray(4 + AES_GCM_NONCE_BYTES, PTY_V2_HEADER_BYTES);
+  const ciphertext = payload.subarray(PTY_V2_HEADER_BYTES);
   // WebCrypto AES-GCM expects ciphertext || auth_tag.
   const combined = new Uint8Array(ciphertext.length + AES_GCM_TAG_BYTES);
   combined.set(ciphertext, 0);
   combined.set(tag, ciphertext.length);
   const plain = await crypto.subtle.decrypt(
-    { name: 'AES-GCM', iv: nonce as unknown as BufferSource, tagLength: 128 },
+    { name: 'AES-GCM', iv: nonce as unknown as BufferSource, additionalData: ptyAad(epoch, sessionId, direction) as unknown as BufferSource, tagLength: 128 },
     key,
     combined as unknown as BufferSource,
   );
@@ -98,22 +154,11 @@ export async function decryptPtyPayload(payload: Uint8Array, key: CryptoKey): Pr
 }
 
 /**
- * Encrypt browser input for the bridge: returns nonce(12) | tag(16) | ciphertext, the same
- * layout the bridge emits, with a random 12-byte IV.
+ * Encrypt browser input for the bridge under the keyring's CURRENT epoch (the bridge
+ * rejects any other), with a random 12-byte IV and the `in` direction AAD.
  */
-export async function encryptPtyPayload(data: Uint8Array, key: CryptoKey): Promise<Uint8Array> {
-  const iv = crypto.getRandomValues(new Uint8Array(AES_GCM_NONCE_BYTES));
-  const sealed = new Uint8Array(await crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv: iv as unknown as BufferSource, tagLength: 128 },
-    key,
-    data as unknown as BufferSource,
-  ));
-  const ciphertextLen = sealed.length - AES_GCM_TAG_BYTES;
-  const out = new Uint8Array(MIN_ARMOR_PAYLOAD_BYTES + ciphertextLen);
-  out.set(iv, 0);
-  out.set(sealed.subarray(ciphertextLen), AES_GCM_NONCE_BYTES);
-  out.set(sealed.subarray(0, ciphertextLen), MIN_ARMOR_PAYLOAD_BYTES);
-  return out;
+export async function encryptPtyPayload(data: Uint8Array, keyring: VaultKeyring, sessionId: string): Promise<Uint8Array> {
+  return sealPtyPayload(data, currentKey(keyring), keyring.currentEpoch, sessionId, 'in');
 }
 
 /**

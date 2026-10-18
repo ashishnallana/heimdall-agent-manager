@@ -1,5 +1,6 @@
 import { PTY_COLOR_RESET, PaneDeliveryQueue, PaneWriteBatcher, normalizeSnapshotText, repaintCapturedScreenText } from './paneDeliveryQueue.ts';
-import { PTY_WIRE_FLAG_ENCRYPTED, PTY_WIRE_KIND_INPUT, PTY_WIRE_KIND_OUTPUT, PTY_WIRE_KIND_SCREEN, PTY_WIRE_VIEWER_HEADER_BYTES, PtyTextDecoder, decodePtyViewerFrame, decryptPtyPayload, encodePtyViewerFrame, encryptPtyPayload, type PtyViewerFrame } from './ptyWire.ts';
+import { PTY_WIRE_FLAG_ENCRYPTED, PTY_WIRE_KIND_INPUT, PTY_WIRE_KIND_OUTPUT, PTY_WIRE_KIND_SCREEN, PTY_WIRE_VIEWER_HEADER_BYTES, PtyTextDecoder, decodePtyViewerFrame, decryptPtyPayload, encodePtyViewerFrame, encryptPtyPayload, type PtyDirection, type PtyViewerFrame } from './ptyWire.ts';
+import { decodeBase64Strict, type VaultKeyring } from '../../utils/vaultCrypto.ts';
 import { createInputCoalescer, type InputCoalescer } from './ptyInputCoalescer.ts';
 import { createVisibilityGate } from './paneVisibilityGate.ts';
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -7,8 +8,7 @@ import { useSelector } from 'react-redux';
 import { apiAbsoluteUrl } from '../../api/apiBase.ts';
 import { shellResizeFrame } from './shellStreamFrames.ts';
 import { getActiveVaultKey } from '../../store/vaultSlice.ts';
-import { importRawKeyHex, AES_GCM_NONCE_BYTES, AES_GCM_TAG_BYTES } from '../../utils/vaultCrypto.ts';
-import { bytesToBase64, base64ToBytes, VAULT_ARMOR_PREFIX, MIN_ARMOR_PAYLOAD_BYTES } from '../../utils/vaultContent.ts';
+import { bytesToBase64 } from '../../utils/vaultContent.ts';
 import { isVaultLockedError } from '../../utils/vaultLockedError.ts';
 
 const HEARTBEAT_INTERVAL_MS = 30000;
@@ -117,85 +117,31 @@ async function shellStreamUrl(sessionId: string): Promise<string> {
   return httpUrlToWs(apiAbsoluteUrl(path));
 }
 
-let cachedRawKeyHex: string | null = null;
-let cachedCryptoKey: CryptoKey | null = null;
-
-async function getCryptoKey(rawKeyHex: string): Promise<CryptoKey> {
-  if (cachedCryptoKey && cachedRawKeyHex === rawKeyHex) {
-    return cachedCryptoKey;
-  }
-  const key = await importRawKeyHex(rawKeyHex);
-  cachedRawKeyHex = rawKeyHex;
-  cachedCryptoKey = key;
-  return key;
-}
-
 /**
- * Decrypts an incoming AES-GCM encrypted shell stream chunk (enc_b64).
- * Expects wire format: base64(12B nonce + 16B auth_tag + ciphertext),
- * with optional 'vault:v1:' prefix.
+ * Decrypts a base64 PTY v2 payload (u32be epoch | nonce | tag | ct) carried in JSON
+ * (`enc_b64`). Returns null when the keyring does not hold the payload's epoch.
  */
 export async function decryptShellStreamPayload(
   enc_b64: string,
-  keyOrHex: CryptoKey | string,
-): Promise<Uint8Array> {
-  const cryptoKey = typeof keyOrHex === 'string' ? await getCryptoKey(keyOrHex) : keyOrHex;
-  let clean = enc_b64.trim();
-  if (clean.startsWith(VAULT_ARMOR_PREFIX)) {
-    clean = clean.slice(VAULT_ARMOR_PREFIX.length);
-  }
-  const payload = base64ToBytes(clean);
-  if (payload.length < MIN_ARMOR_PAYLOAD_BYTES) {
-    throw new Error(`Encrypted stream frame shorter than header (${payload.length} < ${MIN_ARMOR_PAYLOAD_BYTES})`);
-  }
-
-  const nonce = payload.subarray(0, AES_GCM_NONCE_BYTES);
-  const tag = payload.subarray(AES_GCM_NONCE_BYTES, MIN_ARMOR_PAYLOAD_BYTES);
-  const ciphertext = payload.subarray(MIN_ARMOR_PAYLOAD_BYTES);
-
-  // WebCrypto AES-GCM expects ciphertext || auth_tag
-  const combined = new Uint8Array(ciphertext.length + tag.length);
-  combined.set(ciphertext, 0);
-  combined.set(tag, ciphertext.length);
-
-  const decrypted = await crypto.subtle.decrypt(
-    { name: 'AES-GCM', iv: nonce as unknown as BufferSource, tagLength: 128 },
-    cryptoKey,
-    combined as unknown as BufferSource,
-  );
-
-  return new Uint8Array(decrypted);
+  keyring: VaultKeyring,
+  sessionId: string,
+  direction: PtyDirection = 'out',
+): Promise<Uint8Array | null> {
+  const payload = decodeBase64Strict(enc_b64.trim());
+  return decryptPtyPayload(payload, keyring, sessionId, direction);
 }
 
 /**
- * Encrypts outgoing keystrokes using WebCrypto AES-GCM with a random 12B IV.
- * Returns base64(12B IV + 16B auth_tag + ciphertext).
+ * Encrypts outgoing keystrokes as a PTY v2 `in` payload under the keyring's current
+ * epoch and returns it base64-encoded.
  */
 export async function encryptShellStreamPayload(
   data: string | Uint8Array,
-  keyOrHex: CryptoKey | string,
+  keyring: VaultKeyring,
+  sessionId: string,
 ): Promise<string> {
-  const cryptoKey = typeof keyOrHex === 'string' ? await getCryptoKey(keyOrHex) : keyOrHex;
   const inputBytes = typeof data === 'string' ? new TextEncoder().encode(data) : data;
-  const iv = crypto.getRandomValues(new Uint8Array(AES_GCM_NONCE_BYTES));
-
-  const encrypted = await crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv: iv as unknown as BufferSource, tagLength: 128 },
-    cryptoKey,
-    inputBytes as unknown as BufferSource,
-  );
-
-  const encryptedBytes = new Uint8Array(encrypted);
-  const ciphertextLen = encryptedBytes.length - AES_GCM_TAG_BYTES;
-  const ciphertext = encryptedBytes.subarray(0, ciphertextLen);
-  const tag = encryptedBytes.subarray(ciphertextLen);
-
-  const payload = new Uint8Array(MIN_ARMOR_PAYLOAD_BYTES + ciphertextLen);
-  payload.set(iv, 0);
-  payload.set(tag, AES_GCM_NONCE_BYTES);
-  payload.set(ciphertext, MIN_ARMOR_PAYLOAD_BYTES);
-
-  return bytesToBase64(payload);
+  return bytesToBase64(await encryptPtyPayload(inputBytes, keyring, sessionId));
 }
 
 export function useShellStream({
@@ -214,6 +160,9 @@ export function useShellStream({
   const [connected, setConnected] = useState(false);
   const [isStreamReady, setIsStreamReady] = useState(false);
   const isStreamReadyRef = useRef(false);
+  // PTY v2 AAD binds the stream's session id; read through a ref so callbacks never seal under a stale one.
+  const streamSessionIdRef = useRef(sessionId);
+  streamSessionIdRef.current = sessionId;
   const pendingKeyEventsRef = useRef<Array<{ data: string; timestamp: number }>>([]);
   const streamReadyFallbackTimerRef = useRef<number | undefined>(undefined);
   const dispatchInputRef = useRef<(data: string) => void>(() => {});
@@ -426,7 +375,9 @@ export function useShellStream({
             const isUnlocked = isVaultUnlockedRef.current || Boolean(activeKey);
             if (!isUnlocked || !activeKey) { showVaultLockedNoticeOnce(); return; }
             try {
-              bytes = await decryptPtyPayload(frame.payload, activeKey);
+              const opened = await decryptPtyPayload(frame.payload, activeKey, String(streamSessionIdRef.current || ''), 'out');
+              if (!opened) { showVaultLockedNoticeOnce(); return; }
+              bytes = opened;
             } catch (err) {
               console.error('[useShellStream] decryption failed for pane frame:', err);
               socket.close(4007, 'pane decryption failed');
@@ -639,7 +590,7 @@ export function useShellStream({
       inputQueueRef.current = inputQueueRef.current.then(async () => {
         if (s.readyState !== WebSocket.OPEN) return;
         try {
-          const sealed = await encryptPtyPayload(bytes, activeKey);
+          const sealed = await encryptPtyPayload(bytes, activeKey, String(streamSessionIdRef.current || ''));
           if (s.readyState === WebSocket.OPEN) {
             s.send(encodePtyViewerFrame(PTY_WIRE_KIND_INPUT, PTY_WIRE_FLAG_ENCRYPTED, sealed));
           }

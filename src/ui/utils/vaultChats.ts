@@ -1,6 +1,7 @@
 // Zero-Knowledge Vault Transformers for Chat Messages and Conversations
 // REQ-VAULT-CHAT-1
 
+import type { VaultKeyring } from './vaultKeyring.ts';
 import {
   isVaultArmored,
   containsVaultArmored,
@@ -28,7 +29,7 @@ export interface ConversationPayload {
  */
 export async function encryptChatFields<T extends ChatMessagePayload>(
   payload: T,
-  activeKey?: CryptoKey | string | null,
+  activeKey?: VaultKeyring | null,
 ): Promise<T> {
   const resolvedKey = activeKey || getActiveVaultKey();
   if (!resolvedKey || !payload.body) return { ...payload };
@@ -44,7 +45,7 @@ export async function encryptChatFields<T extends ChatMessagePayload>(
  */
 export async function encryptConversationFields<T extends ConversationPayload>(
   payload: T,
-  activeKey?: CryptoKey | string | null,
+  activeKey?: VaultKeyring | null,
 ): Promise<T> {
   const resolvedKey = activeKey || getActiveVaultKey();
   if (!resolvedKey) return { ...payload };
@@ -57,12 +58,12 @@ export async function encryptConversationFields<T extends ConversationPayload>(
 
 /**
  * Decrypt chat message body using active CryptoKey or key string.
- * Supports both fully armored strings and strings with embedded vault:v1: tokens.
+ * Supports both fully armored strings and strings with embedded vault:v2: tokens.
  * Gracefully preserves unarmored plaintext or returns original text if locked/failed.
  */
 export async function decryptChatMessage<T extends ChatMessagePayload>(
   message: T,
-  activeKey?: CryptoKey | string | null,
+  activeKey?: VaultKeyring | null,
 ): Promise<T> {
   const resolvedKey = activeKey || getActiveVaultKey();
   if (!resolvedKey || !message.body || (!isVaultArmored(message.body) && !containsVaultArmored(message.body))) {
@@ -86,7 +87,7 @@ export async function decryptChatMessage<T extends ChatMessagePayload>(
  */
 export async function decryptChatMessages<T extends ChatMessagePayload>(
   messages: T[],
-  activeKey?: CryptoKey | string | null,
+  activeKey?: VaultKeyring | null,
 ): Promise<T[]> {
   const resolvedKey = activeKey || getActiveVaultKey();
   if (!resolvedKey || !Array.isArray(messages)) return messages;
@@ -99,7 +100,7 @@ export async function decryptChatMessages<T extends ChatMessagePayload>(
  */
 export async function decryptConversationRecord<T extends ConversationPayload>(
   conv: T,
-  activeKey?: CryptoKey | string | null,
+  activeKey?: VaultKeyring | null,
 ): Promise<T> {
   const resolvedKey = activeKey || getActiveVaultKey();
   if (!resolvedKey) return conv;
@@ -163,7 +164,7 @@ export async function decryptConversationRecord<T extends ConversationPayload>(
  */
 export async function decryptConversationList<T extends ConversationPayload>(
   conversations: T[],
-  activeKey?: CryptoKey | string | null,
+  activeKey?: VaultKeyring | null,
 ): Promise<T[]> {
   const resolvedKey = activeKey || getActiveVaultKey();
   if (!resolvedKey || !Array.isArray(conversations)) return conversations;

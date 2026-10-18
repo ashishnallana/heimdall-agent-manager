@@ -197,7 +197,7 @@ export function useDecryptedText(value?: string | null): {
   const hasVault = isArmored || isEmbedded;
 
   // Seed masked, never raw: React commits initial state before effects run, so
-  // seeding `raw` paints one frame of vault:v1: ciphertext on every consumer --
+  // seeding `raw` paints one frame of vault:v2: ciphertext on every consumer --
   // locked vaults included (iss_18db4e292b0c5b57).
   const [text, setText] = useState<string>(() => (hasVault ? maskVaultArmored(raw) : raw));
   const [isDecrypting, setIsDecrypting] = useState<boolean>(false);

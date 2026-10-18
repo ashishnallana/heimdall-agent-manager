@@ -3,6 +3,7 @@
 //
 // RUN: node --test tests/ui_projects_vault_test.ts
 
+import { keyringFromHex } from './helpers/vaultTestKeyring.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -27,7 +28,8 @@ import {
   decryptProjectList,
 } from '../src/ui/utils/vaultProjects.ts';
 
-const TEST_KEY_HEX = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+const TEST_KEY_HEX_RAW = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+const TEST_KEY_HEX = await keyringFromHex(TEST_KEY_HEX_RAW);
 
 // -----------------------------------------------------------------------------
 // Test 1: encryptProjectFields encrypts name and description when unlocked
@@ -45,8 +47,8 @@ test('encryptProjectFields encrypts name and description when vault key is provi
 
   const encrypted = await encryptProjectFields(plainProject, TEST_KEY_HEX);
 
-  assert.ok(isVaultArmored(encrypted.name), 'Project name must have vault:v1: armor');
-  assert.ok(isVaultArmored(encrypted.description), 'Project description must have vault:v1: armor');
+  assert.ok(isVaultArmored(encrypted.name), 'Project name must have vault:v2:e1: armor');
+  assert.ok(isVaultArmored(encrypted.description), 'Project description must have vault:v2:e1: armor');
   assert.notEqual(encrypted.name, plainProject.name);
   assert.notEqual(encrypted.description, plainProject.description);
   assert.equal(encrypted.slug, 'prod-infra');

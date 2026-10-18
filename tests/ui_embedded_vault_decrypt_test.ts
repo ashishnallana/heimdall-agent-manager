@@ -4,11 +4,14 @@
 //
 // RUN: node --test tests/ui_embedded_vault_decrypt_test.ts
 
+import { keyringFromHex } from './helpers/vaultTestKeyring.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-const TEST_KEY_HEX = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
-const DIFFERENT_KEY_HEX = 'fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210';
+const TEST_KEY_HEX_RAW = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+const TEST_KEY_HEX = await keyringFromHex(TEST_KEY_HEX_RAW);
+const DIFFERENT_KEY_HEX_RAW = 'fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210';
+const DIFFERENT_KEY_HEX = await keyringFromHex(DIFFERENT_KEY_HEX_RAW);
 
 // -----------------------------------------------------------------------------
 // Section 1: Embedded Vault Token Detection & Multi-Token Decryption
@@ -23,7 +26,7 @@ import {
   VAULT_ARMOR_PREFIX,
 } from '../src/ui/utils/vaultContent.ts';
 
-test('containsVaultArmored accurately detects embedded and standalone vault:v1:... tokens', async () => {
+test('containsVaultArmored accurately detects embedded and standalone vault:v2:e1:... tokens', async () => {
   const secret = 'Confidential Token Data';
   const armored = await encryptVaultText(secret, TEST_KEY_HEX);
 
@@ -44,7 +47,7 @@ test('containsVaultArmored accurately detects embedded and standalone vault:v1:.
   assert.equal(containsVaultArmored('Completely plain text without armor'), false);
   assert.equal(containsVaultArmored('vault:v2:unsupported-version-data'), false);
   assert.equal(containsVaultArmored('vault:'), false);
-  assert.equal(containsVaultArmored('vault:v1:'), false);
+  assert.equal(containsVaultArmored('vault:v2:e1:'), false);
   assert.equal(containsVaultArmored(''), false);
   assert.equal(containsVaultArmored(null), false);
   assert.equal(containsVaultArmored(undefined), false);
@@ -357,7 +360,7 @@ test('fireNotificationForWsEvent asynchronously decrypts notifications when vaul
   });
 
   // Unlocked means a live CryptoKey in the active-key slot.
-  setActiveVaultKey(await importRawKeyHex(TEST_KEY_HEX));
+  setActiveVaultKey(await keyringFromHex(TEST_KEY_HEX_RAW));
 
   const payload = {
     type: 'chat_event',
@@ -502,7 +505,7 @@ test('embedded vault decryption is a no-op without an active key, touching no Su
     '../src/ui/utils/vaultContent.ts'
   );
 
-  const armored = 'Task note: vault:v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA= end.';
+  const armored = 'Task note: vault:v2:e1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA= end.';
   assert.equal(containsVaultArmored(armored), true, 'fixture must contain an armored token');
 
   // Simulate the unsupported context: crypto present, subtle absent, no unlocked key.

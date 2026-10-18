@@ -18,6 +18,7 @@ import type { ChatDeliveryStatus, ChatMessage, ChatTimestamp } from './types';
 import ChatActionCard from './ChatActionCard';
 import { useIsMobile } from '../shell/responsive';
 import { Icon, Spinner } from '@ui';
+import { replaceVaultTokens } from '../../utils/vaultCrypto.ts';
 
 const EMPTY_TIMESTAMP: ChatTimestamp = { label: '', iso: '' };
 const EMPTY_DELIVERY: ChatDeliveryStatus = { glyph: '', label: '', tone: '' };
@@ -87,7 +88,7 @@ function DefaultMessageBody({ body }: { body: string }) {
     return <VaultText value={body} as="div" />;
   }
   if (containsArmored && !activeKey) {
-    const sanitized = body.replace(/vault:v1:[A-Za-z0-9+/=]+/g, '[🔒 Encrypted]');
+    const sanitized = replaceVaultTokens(body, '[🔒 Encrypted]');
     return <Markdown source={sanitized} compact copyAll={false} />;
   }
   return <Markdown source={decrypted !== null ? decrypted : body} compact copyAll={false} />;

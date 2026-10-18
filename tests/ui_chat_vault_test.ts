@@ -3,6 +3,7 @@
 //
 // RUN: node --test tests/ui_chat_vault_test.ts
 
+import { keyringFromHex } from './helpers/vaultTestKeyring.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -23,8 +24,10 @@ import {
   decryptConversationList,
 } from '../src/ui/utils/vaultChats.ts';
 
-const TEST_KEY_HEX = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
-const DIFFERENT_KEY_HEX = 'fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210';
+const TEST_KEY_HEX_RAW = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+const TEST_KEY_HEX = await keyringFromHex(TEST_KEY_HEX_RAW);
+const DIFFERENT_KEY_HEX_RAW = 'fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210';
+const DIFFERENT_KEY_HEX = await keyringFromHex(DIFFERENT_KEY_HEX_RAW);
 
 // -----------------------------------------------------------------------------
 // Test 1: Chat message body encryption and decryption round-trip
@@ -38,7 +41,7 @@ test('encryptChatFields encrypts message body when key is provided', async () =>
 
   assert.equal(encrypted.author, 'user', 'author metadata must remain unaltered');
   assert.ok(encrypted.body !== origBody, 'body must not leak plaintext');
-  assert.ok(isVaultArmored(encrypted.body), 'body must start with vault:v1:');
+  assert.ok(isVaultArmored(encrypted.body), 'body must start with vault:v2:e1:');
 
   // Round-trip decrypt
   const decrypted = await decryptChatMessage(encrypted, TEST_KEY_HEX);
@@ -211,7 +214,7 @@ test('embedded ciphertext tokens in message bodies and sender-prefixed previews 
   const decryptedMsg = await decryptChatMessage(embeddedMsg, TEST_KEY_HEX);
   assert.equal(decryptedMsg.body, `Execution report: ${secretBody} (verified).`);
 
-  // Sender-prefixed preview: "You: vault:v1:..."
+  // Sender-prefixed preview: "You: vault:v2:e1:..."
   const convWithPrefix = {
     conversationId: 'chat_prefix',
     title: 'Deployment Chat',

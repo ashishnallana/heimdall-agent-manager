@@ -3,13 +3,16 @@
 //
 // RUN: node --import ./tests/helpers/vaultEndpointHarness.ts --test tests/ui_bridge_enrollment_pending_test.ts
 
+import { signedUnsealRecord, TEST_USER_ID } from './helpers/vaultTestKeyring.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { bytesToHex } from '../src/ui/utils/vaultCrypto.ts';
+import { bytesToHex, setActiveVaultUserId } from '../src/ui/utils/vaultCrypto.ts';
 
-const TEST_VAULT_KEY_HEX = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+setActiveVaultUserId(TEST_USER_ID);
+
+const TEST_VAULT_KEY_HEX_RAW = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
@@ -94,22 +97,40 @@ test('REQ-EA-2/7: delivery to an enrolling bridge names the target and the confi
     const raw = new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey));
     const pubHex = bytesToHex(raw).toUpperCase();
 
-    globalThis.fetch = (async (_url: any, init: any) => {
+    const record = await signedUnsealRecord('brg_p', pubHex);
+    const withKey = (handler: (url: string, init: any) => Promise<Response> | Response) => (async (url: any, init: any) => {
+      if (String(url).includes('/public-key')) {
+        assert.match(String(url), /enrollment=1/, 'the enrolling process key is requested');
+        return json({ data: record });
+      }
+      return handler(String(url), init);
+    }) as any;
+    globalThis.fetch = withKey((_url, init) => {
       bodies.push(JSON.parse(String(init?.body || '{}')));
       return json({ data: { ok: true, status: 'unlocked' } });
-    }) as any;
-    await unsealEnrollingBridgeE2EE('brg_p', pubHex, TEST_VAULT_KEY_HEX);
+    });
+    await unsealEnrollingBridgeE2EE('brg_p', pubHex, TEST_VAULT_KEY_HEX_RAW);
     assert.equal(bodies[0].enrollment, true, 'the relay targets the enroll-only socket');
     assert.equal(bodies[0].expected_public_key, pubHex.toLowerCase(), 'the hub compares against the operator-confirmed key');
     assert.ok(bodies[0].ciphertext, 'the key itself travels sealed');
 
     // The hub's enrollment_key_mismatch refusal must surface as an error, not a success.
-    globalThis.fetch = (async () => json({ error: { message: 'the connected enrolling process does not hold the key you confirmed', code: 'conflict', cause: 'enrollment_key_mismatch' } }, 409)) as any;
-    await assert.rejects(() => unsealEnrollingBridgeE2EE('brg_p', pubHex, TEST_VAULT_KEY_HEX), /does not hold the key/);
+    globalThis.fetch = withKey(() => json({ error: { message: 'the connected enrolling process does not hold the key you confirmed', code: 'conflict', cause: 'enrollment_key_mismatch' } }, 409));
+    await assert.rejects(() => unsealEnrollingBridgeE2EE('brg_p', pubHex, TEST_VAULT_KEY_HEX_RAW), /does not hold the key/);
 
     // A bridge that refused (e.g. could not persist) answers ok:false: not committed.
-    globalThis.fetch = (async () => json({ data: { ok: false, status: 'error', error: { message: 'credential could not be written' } } })) as any;
-    await assert.rejects(() => unsealEnrollingBridgeE2EE('brg_p', pubHex, TEST_VAULT_KEY_HEX), /credential could not be written/);
+    globalThis.fetch = withKey(() => json({ data: { ok: false, status: 'error', error: { message: 'credential could not be written' } } }));
+    await assert.rejects(() => unsealEnrollingBridgeE2EE('brg_p', pubHex, TEST_VAULT_KEY_HEX_RAW), /credential could not be written/);
+
+    // An unsigned ephemeral key is never sealed to.
+    bodies.length = 0;
+    globalThis.fetch = (async (url: any, init: any) => {
+      if (String(url).includes('/public-key')) return json({ data: { ...record, unseal_key_signature: '' } });
+      bodies.push(init?.body);
+      return json({ data: { ok: true } });
+    }) as any;
+    await assert.rejects(() => unsealEnrollingBridgeE2EE('brg_p', pubHex, TEST_VAULT_KEY_HEX_RAW), /unsigned/);
+    assert.equal(bodies.length, 0, 'nothing is sent for an unsigned key');
   } finally {
     globalThis.fetch = realFetch;
   }

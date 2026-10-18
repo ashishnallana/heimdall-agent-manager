@@ -1,6 +1,7 @@
 // Zero-Knowledge Vault Transformers for Issues and Comments
 // REQ-VAULT-ISSUES-UI-1
 
+import type { VaultKeyring } from './vaultKeyring.ts';
 import { isVaultArmored, encryptVaultText, decryptVaultText, getActiveVaultKey } from './vaultContent.ts';
 
 export interface IssuePayload {
@@ -19,7 +20,7 @@ export interface CommentPayload {
  */
 export async function encryptIssueFields<T extends IssuePayload>(
   payload: T,
-  activeKey?: CryptoKey | string | null,
+  activeKey?: VaultKeyring | null,
 ): Promise<T> {
   const resolvedKey = activeKey || getActiveVaultKey();
   if (!resolvedKey) return { ...payload };
@@ -38,7 +39,7 @@ export async function encryptIssueFields<T extends IssuePayload>(
  */
 export async function encryptCommentFields<T extends CommentPayload>(
   payload: T,
-  activeKey?: CryptoKey | string | null,
+  activeKey?: VaultKeyring | null,
 ): Promise<T> {
   const resolvedKey = activeKey || getActiveVaultKey();
   if (!resolvedKey || !payload.body) return { ...payload };
@@ -54,7 +55,7 @@ export async function encryptCommentFields<T extends CommentPayload>(
  */
 export async function decryptIssueRecord<T extends IssuePayload>(
   issue: T,
-  activeKey?: CryptoKey | string | null,
+  activeKey?: VaultKeyring | null,
 ): Promise<T> {
   const resolvedKey = activeKey || getActiveVaultKey();
   if (!resolvedKey) return issue;
@@ -109,7 +110,7 @@ export async function decryptIssueRecord<T extends IssuePayload>(
  */
 export async function decryptCommentRecord<T extends CommentPayload>(
   comment: T,
-  activeKey?: CryptoKey | string | null,
+  activeKey?: VaultKeyring | null,
 ): Promise<T> {
   const resolvedKey = activeKey || getActiveVaultKey();
   if (!resolvedKey || !isVaultArmored(comment.body)) return comment;

@@ -1,6 +1,7 @@
 // Zero-Knowledge Vault Transformers for Memories
 // REQ-VAULT-MEMORIES-1
 
+import type { VaultKeyring } from './vaultKeyring.ts';
 import { isVaultArmored, encryptVaultText, decryptVaultText, getActiveVaultKey } from './vaultContent.ts';
 
 export interface MemoryPayload {
@@ -16,7 +17,7 @@ export interface MemoryPayload {
  */
 export async function encryptMemoryFields<T extends MemoryPayload>(
   payload: T,
-  activeKey?: CryptoKey | string | null,
+  activeKey?: VaultKeyring | null,
 ): Promise<T> {
   const resolvedKey = activeKey || getActiveVaultKey();
   if (!resolvedKey) return { ...payload };
@@ -41,7 +42,7 @@ export async function encryptMemoryFields<T extends MemoryPayload>(
  */
 export async function decryptMemoryRecord<T extends MemoryPayload>(
   memory: T,
-  activeKey?: CryptoKey | string | null,
+  activeKey?: VaultKeyring | null,
 ): Promise<T> {
   const resolvedKey = activeKey || getActiveVaultKey();
   if (!resolvedKey) return memory;

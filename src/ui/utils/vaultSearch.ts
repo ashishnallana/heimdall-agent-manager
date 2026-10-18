@@ -1,3 +1,4 @@
+import type { VaultKeyring } from './vaultKeyring.ts';
 import { isVaultArmored, decryptVaultText, getActiveVaultKey } from './vaultContent.ts';
 import type { SearchItem } from '../store/searchTitleSlice.ts';
 
@@ -26,7 +27,7 @@ const yieldEventLoop = (): Promise<void> =>
 
 export async function decryptSearchTitle(
   rawTitle: string,
-  activeKey?: CryptoKey | string | null,
+  activeKey?: VaultKeyring | null,
 ): Promise<string> {
   if (!rawTitle) return '';
   const resolvedKey = activeKey || getActiveVaultKey();
@@ -40,7 +41,7 @@ export async function decryptSearchTitle(
 
 export async function batchDecryptTitles(
   items: RawSearchItemInput[],
-  activeKey?: CryptoKey | string | null,
+  activeKey?: VaultKeyring | null,
   batchSize: number = SEARCH_DECRYPT_BATCH_SIZE,
 ): Promise<SearchItem[]> {
   if (!items || items.length === 0) {

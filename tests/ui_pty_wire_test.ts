@@ -2,6 +2,7 @@
 //
 // RUN: node --import ./tests/helpers/vaultEndpointHarness.ts --test tests/ui_pty_wire_test.ts
 
+import { keyringFromHex } from './helpers/vaultTestKeyring.ts';
 import './helpers/vaultEndpointHarness.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -90,15 +91,17 @@ test('PtyTextDecoder keeps a multi-byte character split across two frames whole'
   assert.equal(decoder.decode(enc.encode('\x1b[2J\x1b[Hfresh')), '\x1b[2J\x1b[Hfresh');
 });
 
-test('decryptPtyPayload opens nonce|tag|ciphertext produced by encryptPtyPayload', async () => {
-  const key = await importRawKeyHex('0123456789abcdef'.repeat(4));
-  const sealed = await encryptPtyPayload(enc.encode('secret λ'), key);
-  assert.equal(sealed.length, 12 + 16 + enc.encode('secret λ').length);
-  const plain = await decryptPtyPayload(sealed, key);
-  assert.equal(new TextDecoder().decode(plain), 'secret λ');
-  await assert.rejects(decryptPtyPayload(sealed.subarray(0, 20), key));
+test('decryptPtyPayload opens a v2 payload (epoch | nonce | tag | ct) bound to session and direction', async () => {
+  const kr = await keyringFromHex('0123456789abcdef'.repeat(4));
+  const sealed = await encryptPtyPayload(enc.encode('secret λ'), kr, 'shs_1');
+  assert.equal(sealed.length, 4 + 12 + 16 + enc.encode('secret λ').length);
+  const plain = await decryptPtyPayload(sealed, kr, 'shs_1', 'in');
+  assert.equal(new TextDecoder().decode(plain!), 'secret λ');
+  await assert.rejects(decryptPtyPayload(sealed, kr, 'shs_1', 'out'));
+  await assert.rejects(decryptPtyPayload(sealed, kr, 'shs_2', 'in'));
+  await assert.rejects(decryptPtyPayload(sealed.subarray(0, 20), kr, 'shs_1', 'in'));
   sealed[sealed.length - 1] ^= 0x01;
-  await assert.rejects(decryptPtyPayload(sealed, key));
+  await assert.rejects(decryptPtyPayload(sealed, kr, 'shs_1', 'in'));
 });
 
 test('snapshot text helpers produce absolute repaints without a byte round-trip', async () => {

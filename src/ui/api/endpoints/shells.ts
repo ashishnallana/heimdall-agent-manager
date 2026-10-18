@@ -1,7 +1,7 @@
 import { heimdallApi } from '../heimdallApi';
 import { ApiError, cookieJsonFetch, cookieJsonFetchEnvelope, cookieMutation, customQueryError } from '../cookieFetch';
 import { announcePaneVaultLocked } from '../../utils/vaultLockedError';
-import { encryptVaultText, VAULT_ARMOR_PREFIX, getActiveVaultKey } from '../../utils/vaultContent';
+import { encryptVaultText, getActiveVaultKey } from '../../utils/vaultContent';
 import { selectIsVaultUnlocked } from '../../store/vaultSlice';
 import { encryptShellStreamPayload } from '../../components/shells/useShellStream';
 
@@ -167,7 +167,7 @@ export interface CreateShellArgs {
   server_port?: number;
   chain_id?: string;
   project_id?: string;
-  // REQ-SHELL-ENC-8: Encrypted shell spawn authorization envelope (vault:v1:...)
+  // REQ-SHELL-ENC-8: Encrypted shell spawn authorization envelope (vault:v2:...)
   // containing { cmd, cwd, timestamp, nonce } for zero-trust bridge verification.
   enc_spec?: string;
 }
@@ -321,8 +321,9 @@ export const shellsApi = heimdallApi.injectEndpoints({
       ],
     }),
 
-    // REQ-SHELL-ENC-8: Attach zero-trust armored enc_spec (vault:v1:...) when vault
-    // is unlocked so host bridge can authorize shell spawn, with transparent fallback when locked.
+    // REQ-SHELL-ENC-8: attach the armored enc_spec (vault:v2:e<current epoch>:...) when the
+    // vault is unlocked so the host bridge can authorize the spawn; the bridge rejects any
+    // epoch but its current one. Encryption failure aborts the request.
     createShell: build.mutation<ShellSession, CreateShellArgs>({
       queryFn: async ({ bridgeId, ...body }, api) => {
         try {
@@ -338,9 +339,7 @@ export const shellsApi = heimdallApi.injectEndpoints({
               cmd: body.cmd || '',
               cwd: body.cwd || '',
               timestamp: Date.now(),
-              nonce: typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-                ? crypto.randomUUID()
-                : (globalThis as any).crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+              nonce: Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join(''),
             };
             const enc_spec = body.enc_spec || await encryptVaultText(JSON.stringify(spec), activeKey);
             requestBody = { ...body, enc_spec };
@@ -516,20 +515,17 @@ export const shellsApi = heimdallApi.injectEndpoints({
             ? Boolean(selectIsVaultUnlocked(state) || activeKey)
             : Boolean(activeKey);
 
+          // An unlocked vault means input is encrypted (PTY v2, `in` direction, current
+          // epoch) and the plaintext is NOT sent alongside it. Encryption failure aborts
+          // the send; there is no plaintext fallback.
           let resolvedEncB64 = enc_b64;
           if (!resolvedEncB64 && isUnlocked && activeKey) {
-            try {
-              resolvedEncB64 = await encryptShellStreamPayload(data, activeKey);
-            } catch {
-              // fallback to unencrypted if encryption fails
-            }
+            resolvedEncB64 = await encryptShellStreamPayload(data, activeKey, sessionId);
           }
 
-          const payload: { data: string; enc_b64?: string; data_b64?: string } = { data };
-          if (resolvedEncB64) {
-            payload.enc_b64 = resolvedEncB64;
-            payload.data_b64 = `${VAULT_ARMOR_PREFIX}${resolvedEncB64}`;
-          }
+          const payload: { data: string; enc_b64?: string } = resolvedEncB64
+            ? { data: '', enc_b64: resolvedEncB64 }
+            : { data };
 
           const res = await cookieMutation(`/shells/${encodeURIComponent(sessionId)}/input`, 'POST', payload);
           return { data: res || { ok: true } };

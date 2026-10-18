@@ -3,7 +3,12 @@
 import { ApiError, cookieJsonFetch, cookieMutation } from '../cookieFetch';
 import type { WireError } from '../wireError';
 import { heimdallApi } from '../heimdallApi';
-import type { BridgeUnsealPayload, BridgeUnsealResult } from '../../utils/vaultBridgeUnseal';
+import type {
+  BridgeUnsealPayload,
+  BridgeUnsealResult,
+  BridgeUnsealTarget,
+  UnsealKeyMaterial,
+} from '../../utils/vaultBridgeUnseal';
 import {
   selectOnlineLockedBridgeIds,
   type BridgeVaultStatusRecord,
@@ -42,15 +47,46 @@ export async function fetchBridgePublicKey(bridgeId: string): Promise<string> {
 }
 
 /**
- * End-to-end unseal helper: wraps the vault key and sends unseal payload to Hub.
+ * Fetches everything an unseal needs about a bridge's current unseal key: the
+ * ephemeral ECDH key, its boot id, the identity key and the identity signature over
+ * the ephemeral key. `enrollment` asks for the enrolling process's key.
+ */
+export async function fetchBridgeUnsealTarget(bridgeId: string, enrollment = false): Promise<BridgeUnsealTarget> {
+  const { bridgeUnsealTargetFromRecord } = await import('../../utils/vaultBridgeUnseal');
+  const query = enrollment ? '?enrollment=1' : '';
+  const res = await cookieJsonFetch(`/bridges/${encodeURIComponent(bridgeId)}/public-key${query}`);
+  return bridgeUnsealTargetFromRecord(bridgeId, (res as any)?.data ?? res);
+}
+
+/**
+ * Builds the v2 payload for `target`. When the caller confirmed a specific public key
+ * (`expectedPublicKey`), the bridge's current key must be that key; a bridge that
+ * restarted in between is refused rather than silently re-targeted.
+ */
+async function prepareForTarget(
+  target: BridgeUnsealTarget,
+  expectedPublicKey: string,
+  vaultKey: UnsealKeyMaterial,
+): Promise<BridgeUnsealPayload> {
+  const expected = String(expectedPublicKey || '').trim().toLowerCase();
+  if (expected && target.publicKey.trim().toLowerCase() !== expected) {
+    throw new Error(`Bridge ${target.bridgeId} now holds a different unseal key; reload and try again`);
+  }
+  const { prepareUnsealPayload, keyringBytesForUnseal } = await import('../../utils/vaultBridgeUnseal');
+  return prepareUnsealPayload(target, await keyringBytesForUnseal(vaultKey));
+}
+
+/**
+ * End-to-end unseal helper: verifies the bridge's signed unseal key, wraps the
+ * keyring and sends the v2 unseal payload to the Hub.
  */
 export async function unsealBridgeE2EE(
   bridgeId: string,
   bridgePublicKey: string,
-  vaultKey: string | CryptoKey | Uint8Array
+  vaultKey: UnsealKeyMaterial,
 ): Promise<BridgeUnsealResult> {
-  const { prepareUnsealPayload } = await import('../../utils/vaultBridgeUnseal');
-  const payload = await prepareUnsealPayload(bridgeId, bridgePublicKey, vaultKey);
+  const target = await fetchBridgeUnsealTarget(bridgeId);
+  const payload = await prepareForTarget(target, bridgePublicKey, vaultKey);
   return await unsealBridge(bridgeId, payload);
 }
 
@@ -135,10 +171,10 @@ export async function cancelBridgeEnrollment(bridgeId: string): Promise<{ rolled
 export async function unsealEnrollingBridgeE2EE(
   bridgeId: string,
   expectedPublicKey: string,
-  vaultKey: string | CryptoKey | Uint8Array,
+  vaultKey: UnsealKeyMaterial,
 ): Promise<BridgeUnsealResult> {
-  const { prepareUnsealPayload } = await import('../../utils/vaultBridgeUnseal');
-  const payload = await prepareUnsealPayload(bridgeId, expectedPublicKey, vaultKey);
+  const target = await fetchBridgeUnsealTarget(bridgeId, true);
+  const payload = await prepareForTarget(target, expectedPublicKey, vaultKey);
   return await unsealBridge(bridgeId, {
     ...payload,
     enrollment: true,
@@ -194,7 +230,7 @@ export interface BridgeVaultReconciliationResult {
  */
 export async function reconcileLockedBridges(
   bridges: readonly BridgeVaultStatusRecord[],
-  vaultKey?: CryptoKey | string | null,
+  vaultKey?: UnsealKeyMaterial | null,
 ): Promise<BridgeVaultReconciliationResult> {
   const { getActiveBridgeVaultKeyMaterial } = await import('../../store/vaultSlice');
   const targetBridgeIds = selectOnlineLockedBridgeIds(bridges);
@@ -211,9 +247,10 @@ export async function reconcileLockedBridges(
   result.attemptedBridgeIds = [...targetBridgeIds];
   const outcomes = await Promise.all(targetBridgeIds.map(async (bridgeId) => {
     try {
-      const pubKey = await fetchBridgePublicKey(bridgeId);
-      if (!pubKey) throw new Error(`Bridge ${bridgeId} advertised no public key`);
-      await unsealBridgeE2EE(bridgeId, pubKey, key);
+      // One fetch: the verified target IS the key the payload is sealed to.
+      const target = await fetchBridgeUnsealTarget(bridgeId);
+      if (!target.publicKey) throw new Error(`Bridge ${bridgeId} advertised no public key`);
+      await unsealBridge(bridgeId, await prepareForTarget(target, '', key));
       return true;
     } catch (err) {
       console.warn(`[reconcileLockedBridges] failed unsealing bridge ${bridgeId}:`, err);
@@ -226,7 +263,7 @@ export async function reconcileLockedBridges(
   return result;
 }
 
-export async function unsealAllConnectedBridges(vaultKey?: CryptoKey | string | null): Promise<number> {
+export async function unsealAllConnectedBridges(vaultKey?: UnsealKeyMaterial | null): Promise<number> {
 
   try {
     const data = await cookieJsonFetch('/bridges');

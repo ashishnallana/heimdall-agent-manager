@@ -93,6 +93,7 @@ import { type TaskLike } from '../chat/chainTaskInference';
 import { groupTranscriptMessages, isAgentStartMessage } from '../chat/transcriptGrouping';
 import type { ChatDeliveryStatus, ChatMessage, ChatTimestamp } from '../chat/types';
 import type { SplitDirection } from '../../tiling/types';
+import { replaceVaultTokens } from '../../utils/vaultCrypto.ts';
 
 export const COMPOSER_DRAFT_KEY = 'heimdall:composer:draft';
 
@@ -396,7 +397,7 @@ function ThreadMessageBody({ body }: { body: string }) {
     return <VaultText value={body} as="div" />;
   }
   if (containsArmored && !activeKey) {
-    const sanitized = body.replace(/vault:v1:[A-Za-z0-9+/=]+/g, '[🔒 Encrypted]');
+    const sanitized = replaceVaultTokens(body, '[🔒 Encrypted]');
     return <Markdown source={sanitized} compact copyAll={false} />;
   }
   return <Markdown source={decrypted !== null ? decrypted : body} compact copyAll={false} />;

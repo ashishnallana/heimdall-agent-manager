@@ -15,6 +15,7 @@ import { VaultText } from './vault/VaultText';
 import { isVaultArmored, getActiveVaultKey } from '../utils/vaultContent.ts';
 
 import { Button, Icon, Input, Select } from '@ui';
+import { replaceVaultTokens } from '../utils/vaultCrypto.ts';
 export type LibraryPageProps = {
   session: any;
   projects?: Record<string, any> | any[];
@@ -136,7 +137,7 @@ export default function LibraryPage({ session, projects, chains = [], onBack }: 
       setProjectsList(
         rawProjectsList.map((p: any) => ({
           ...p,
-          name: p.name && isVaultArmored(p.name) ? p.name.replace(/vault:v1:[A-Za-z0-9+/=_-]+/g, '[🔒 Encrypted]') : p.name,
+          name: p.name && isVaultArmored(p.name) ? replaceVaultTokens(p.name, '[🔒 Encrypted]') : p.name,
         }))
       );
       return;

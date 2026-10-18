@@ -1,11 +1,16 @@
 // Zero-Knowledge WebCrypto Vault Client Library
-// Implements 256-bit AES-GCM vault key generation, PBKDF2 key derivation,
-// BIP-39 12-word mnemonic recovery phrase generation, envelope wrapping/unwrapping,
-// non-extractable CryptoKey management, and transient memory zeroing.
+// v2 content envelope (docs/plans/passwordless-vault.md §1), keyring-aware encrypt /
+// decrypt, BIP-39 recovery words, and the P1-temporary password-vault adapter.
+// The Odin twin of the envelope is src/lib/vault/envelope.odin; both are pinned by
+// tests/fixtures/vault_v2_vectors.json.
 // REQ-VAULT-HARDEN-1, REQ-VAULT-HARDEN-2
 
 import { BIP39_WORDS } from './bip39Words.ts';
 import { clearActiveTaskChainSearchKey } from './taskChainSearchKey.ts';
+import { ID_VALUE_RE, isVaultKeyring, serializeKeyringBytes, keyFor, currentKey, type VaultKeyring } from './vaultKeyring.ts';
+
+export type { VaultKeyring } from './vaultKeyring.ts';
+export { currentKey, keyFor } from './vaultKeyring.ts';
 
 export const DEFAULT_KDF_ITERATIONS = 100_000;
 export const AES_GCM_KEY_LENGTH = 256;
@@ -14,26 +19,81 @@ export const AES_GCM_TAG_BYTES = 16;
 export const VAULT_KEY_BYTES = 32;
 export const RECOVERY_ENTROPY_BYTES = 16;
 
-export const VAULT_ARMOR_PREFIX = 'vault:v1:';
+export const VAULT_ARMOR_PREFIX = 'vault:v2:';
 export const MIN_ARMOR_PAYLOAD_BYTES = AES_GCM_NONCE_BYTES + AES_GCM_TAG_BYTES; // 28 bytes
+/** Upper bound on one envelope's decoded nonce|tag|ct (matches src/lib/vault MAX_PAYLOAD_BYTES). */
+export const MAX_ARMOR_PAYLOAD_BYTES = 64 * 1024 * 1024;
+const MAX_ARMOR_B64_LEN = Math.floor((MAX_ARMOR_PAYLOAD_BYTES + 2) / 3) * 4;
 
-// Module-scoped active CryptoKey reference (in-memory C++ browser reference).
+/**
+ * The ONE vault token pattern for the app: `vault:v2:e<epoch>:<b64std(nonce|tag|ct)>`.
+ * Global; use it with `replace`/`match` (which reset lastIndex) or via the helpers
+ * below. Dead v1 tokens do not match and are never decrypted.
+ */
+export const VAULT_TOKEN_RE = /vault:v2:e[1-9][0-9]{0,9}:[A-Za-z0-9+/]+={0,2}/g;
+const VAULT_TOKEN_TEST_RE = /vault:v2:e[1-9][0-9]{0,9}:[A-Za-z0-9+/]+={0,2}/;
+const VAULT_TOKEN_EXACT_RE = /^vault:v2:e([1-9][0-9]{0,9}):([A-Za-z0-9+/]+={0,2})$/;
+
+/** Shown in place of a token whose epoch key this browser does not hold. */
+export const VAULT_LOCKED_MARKER = '[🔒 Encrypted]';
+
+/** Replace every vault token in `text` with `replacement` (default: the locked marker). */
+export function replaceVaultTokens(text: string, replacement: string = VAULT_LOCKED_MARKER): string {
+  return text.replace(VAULT_TOKEN_RE, () => replacement);
+}
+
+/** Every vault token in `text`, in order (duplicates included). */
+export function findVaultTokens(text: string): string[] {
+  return text.match(VAULT_TOKEN_RE) ?? [];
+}
+
+// ── Active keyring ──────────────────────────────────────────────────────────
 //
-// The active key and the optional bridge-delivery material have separate setters on
-// purpose. Replacing the key always clears the delivery material, so raw bytes from
-// a previous vault can never be paired with a newer CryptoKey. Callers that obtained
-// both values install the key first and then its matching raw material.
-let activeVaultCryptoKey: CryptoKey | null = null;
+// P1-TEMPORARY ADAPTER (deleted in P3): the password vault still supplies a single
+// 256-bit key, presented to the rest of the app as the single-epoch keyring
+// {epoch 1}. The user id is the authenticated session's (`/api/v1/me`, recorded by
+// AppShell's AuthGate via setActiveVaultUserId). It is only needed to serialize the
+// HKR1 bytes a bridge receives; content encryption does not depend on it.
+let activePasswordVaultKey: CryptoKey | null = null;
+let activeVaultKeyring: VaultKeyring | null = null;
+let activeVaultUserId = '';
 let activeBridgeVaultKeyHex: string | null = null;
 
-export function getActiveVaultKey(): CryptoKey | null {
-  return activeVaultCryptoKey;
+function rebuildAdapterKeyring(): void {
+  if (!activePasswordVaultKey) return;
+  activeVaultKeyring = Object.freeze({
+    userId: activeVaultUserId,
+    currentEpoch: 1,
+    keys: new Map([[1, activePasswordVaultKey]]),
+  });
+}
+
+/** The active keyring, or null when the vault is locked. */
+export function getActiveVaultKey(): VaultKeyring | null {
+  return activeVaultKeyring;
+}
+
+/** The authenticated user id the active keyring belongs to ('' until known). */
+export function getActiveVaultUserId(): string {
+  return activeVaultUserId;
 }
 
 /**
- * Raw key material retained in memory only for the lifetime of an explicitly
- * unlocked browser session, so adding a bridge does not ask for the same master
- * password again. It is never written to Redux, sessionStorage, or IndexedDB.
+ * Record the authenticated user. A change of user purges every key held for the
+ * previous one, so keys are never paired with another account's id.
+ */
+export function setActiveVaultUserId(userId: string | null | undefined): void {
+  const raw = String(userId || '').trim();
+  const clean = raw.length <= 64 && ID_VALUE_RE.test(raw) ? raw : '';
+  if (clean === activeVaultUserId) return;
+  if (activeVaultUserId) setActiveVaultKey(null);
+  activeVaultUserId = clean;
+  rebuildAdapterKeyring();
+}
+
+/**
+ * P1 adapter material for bridge delivery: the raw password-vault key, retained in
+ * memory only for an explicitly unlocked session. Never written to Redux or storage.
  */
 export function getActiveBridgeVaultKeyMaterial(): string | null {
   return activeBridgeVaultKeyHex;
@@ -45,27 +105,50 @@ export function setActiveBridgeVaultKeyMaterial(rawHex: string | null): void {
 }
 
 /**
- * Install (or, with `null`, purge) the active vault key.
- *
- * This remains a one-parameter API so every key replacement unconditionally
- * invalidates bridge-delivery material from the previous key.
+ * P1 adapter: HKR1 bytes `{session user, epoch 1: raw key}` for a bridge unseal.
+ * Throws when the session user is unknown -- a keyring is never built for a guessed
+ * user. The caller owns (and must zero) the result.
  */
-export function setActiveVaultKey(key: CryptoKey | null): void {
-  activeVaultCryptoKey = key;
-  // Every key replacement invalidates any material associated with the prior
-  // key. A caller that has matching raw material must install it explicitly.
+export function adapterKeyringBytesFromRawHex(rawHex: string, userId: string = activeVaultUserId): Uint8Array {
+  const clean = String(rawHex || '').trim().toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(clean)) throw new Error('Invalid vault key material for bridge delivery');
+  if (!userId) throw new Error('Vault keyring unavailable: the signed-in user is not known yet');
+  const key = hexToBytes(clean);
+  try {
+    return serializeKeyringBytes({ userId, currentEpoch: 1, entries: [{ epoch: 1, key }] });
+  } finally {
+    key.fill(0);
+  }
+}
+
+/**
+ * Install (or, with `null`, purge) the active vault keyring.
+ *
+ * P1 adapter: a bare CryptoKey is the password-vault key and becomes epoch 1. A
+ * VaultKeyring is installed as-is. Every replacement invalidates bridge-delivery
+ * material and the derived search key of the previous key.
+ */
+export function setActiveVaultKey(key: CryptoKey | VaultKeyring | null): void {
+  if (key && isVaultKeyring(key)) {
+    activePasswordVaultKey = null;
+    activeVaultKeyring = key;
+  } else {
+    activePasswordVaultKey = (key as CryptoKey | null) ?? null;
+    activeVaultKeyring = null;
+    rebuildAdapterKeyring();
+  }
   activeBridgeVaultKeyHex = null;
   clearActiveTaskChainSearchKey();
 }
 
-/** Check if a string is armored with the vault content encryption prefix */
+/** Whether a string is a v2 vault envelope (prefix test; decryption validates it). */
 export function isVaultArmored(text: unknown): boolean {
   return typeof text === 'string' && text.startsWith(VAULT_ARMOR_PREFIX);
 }
 
-/** Check if a string contains any vault armored token */
+/** Whether a string contains at least one complete v2 vault token. */
 export function containsVaultArmored(text: unknown): boolean {
-  return typeof text === 'string' && /vault:v1:[A-Za-z0-9+/=_-]+/.test(text);
+  return typeof text === 'string' && VAULT_TOKEN_TEST_RE.test(text);
 }
 
 /** Validate standard base64 string syntax */
@@ -503,122 +586,138 @@ export async function decryptVaultKeyEnvelopeHex(
   }
 }
 
-/**
- * Resolve a hex string, CryptoKey, or fallback to active in-memory CryptoKey instance.
- * Accepts CryptoKey directly without re-importing raw hex strings (REQ-VAULT-HARDEN-1).
- */
-export async function resolveCryptoKey(key?: string | CryptoKey | null): Promise<CryptoKey> {
-  if (key && typeof key === 'object' && 'algorithm' in key) {
-    return key;
+/** Thrown for a token that claims to be v2 but is not exactly canonical. */
+export class VaultEnvelopeFormatError extends Error {
+  constructor(reason: string) {
+    super(`Invalid vault armored ciphertext: ${reason}`);
+    this.name = 'VaultEnvelopeFormatError';
   }
-  if (typeof key === 'string' && key.trim()) {
-    return await importRawKeyHex(key.trim());
-  }
-  const activeKey = getActiveVaultKey();
-  if (activeKey) {
-    return activeKey;
-  }
-  throw new Error('Invalid vault key: expected a 64-character hex string or CryptoKey instance');
 }
 
 /**
- * Encrypt plaintext using 256-bit AES-GCM and return self-describing armored string:
- * 'vault:v1:<base64(12B_nonce + 16B_tag + ciphertext)>'
- * Accepts CryptoKey directly without re-importing raw strings.
- * Securely wipes transient byte arrays immediately after use.
+ * Strict standard-base64 decode: padded, length % 4 === 0, no foreign characters
+ * (URL-safe included) and zero trailing bits, so every payload has one spelling.
  */
-export async function encryptVaultText(
-  plaintext: string,
-  key?: string | CryptoKey | null,
-): Promise<string> {
-  const cryptoKey = await resolveCryptoKey(key);
-  const nonce = crypto.getRandomValues(new Uint8Array(AES_GCM_NONCE_BYTES));
-
-  const enc = new TextEncoder();
-  const plaintextBytes = enc.encode(plaintext);
-
-  let encrypted: ArrayBuffer;
-  try {
-    encrypted = await crypto.subtle.encrypt(
-      { name: 'AES-GCM', iv: nonce as unknown as BufferSource, tagLength: 128 },
-      cryptoKey,
-      plaintextBytes as unknown as BufferSource,
-    );
-  } finally {
-    plaintextBytes.fill(0);
+export function decodeBase64Strict(b64: string): Uint8Array {
+  if (!isValidBase64(b64)) throw new VaultEnvelopeFormatError('malformed base64 payload');
+  const bytes = base64ToBytes(b64);
+  if (bytesToBase64(bytes) !== b64) {
+    bytes.fill(0);
+    throw new VaultEnvelopeFormatError('non-canonical base64 payload');
   }
+  return bytes;
+}
 
-  const encryptedBytes = new Uint8Array(encrypted);
-  const ciphertextLen = encryptedBytes.length - AES_GCM_TAG_BYTES;
-  const ciphertextBytes = encryptedBytes.subarray(0, ciphertextLen);
-  const tagBytes = encryptedBytes.subarray(ciphertextLen);
+/** Parse one complete token into its epoch and decoded payload. Throws when malformed. */
+export function parseVaultEnvelope(token: string): { epoch: number; payload: Uint8Array } {
+  const m = VAULT_TOKEN_EXACT_RE.exec(token);
+  if (!m) throw new VaultEnvelopeFormatError('not a canonical v2 token');
+  const epoch = Number(m[1]);
+  if (!Number.isInteger(epoch) || epoch < 1 || epoch > 0xffffffff) throw new VaultEnvelopeFormatError('epoch out of range');
+  if (m[2].length > MAX_ARMOR_B64_LEN) throw new VaultEnvelopeFormatError('payload too large');
+  const payload = decodeBase64Strict(m[2]);
+  if (payload.length < MIN_ARMOR_PAYLOAD_BYTES || payload.length > MAX_ARMOR_PAYLOAD_BYTES) {
+    payload.fill(0);
+    throw new VaultEnvelopeFormatError(`payload length ${payload.length} out of range`);
+  }
+  return { epoch, payload };
+}
 
-  const payload = new Uint8Array(MIN_ARMOR_PAYLOAD_BYTES + ciphertextLen);
-  payload.set(nonce, 0);
-  payload.set(tagBytes, AES_GCM_NONCE_BYTES);
-  payload.set(ciphertextBytes, MIN_ARMOR_PAYLOAD_BYTES);
+export function vaultEnvelopeAad(epoch: number): Uint8Array {
+  return new TextEncoder().encode(`heimdall-vault-v2|e${epoch}`);
+}
 
-  const result = `${VAULT_ARMOR_PREFIX}${bytesToBase64(payload)}`;
+function requireKeyring(keyring?: VaultKeyring | null): VaultKeyring {
+  const kr = keyring ?? getActiveVaultKey();
+  if (!kr) throw new Error('Vault keyring unavailable');
+  return kr;
+}
 
-  nonce.fill(0);
+/** Resolve an explicit keyring or fall back to the active one; throws when neither exists. */
+export async function resolveKeyring(keyring?: VaultKeyring | null): Promise<VaultKeyring> {
+  return requireKeyring(keyring);
+}
+
+/**
+ * Seal `plaintext` under `key` for `epoch`. `nonce` is for test vectors only;
+ * production callers omit it and get a fresh CSPRNG nonce (getRandomValues throws on
+ * failure, so nothing is sealed without randomness).
+ */
+export async function sealVaultEnvelope(plaintext: Uint8Array, key: CryptoKey, epoch: number, nonce?: Uint8Array): Promise<string> {
+  if (!Number.isInteger(epoch) || epoch < 1 || epoch > 0xffffffff) throw new Error('invalid epoch');
+  if (plaintext.length > MAX_ARMOR_PAYLOAD_BYTES - MIN_ARMOR_PAYLOAD_BYTES) throw new Error('plaintext too large for a vault envelope');
+  const iv = nonce ? Uint8Array.from(nonce) : crypto.getRandomValues(new Uint8Array(AES_GCM_NONCE_BYTES));
+  if (iv.length !== AES_GCM_NONCE_BYTES) throw new Error('invalid nonce length');
+  const encryptedBytes = new Uint8Array(await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv: iv as unknown as BufferSource, additionalData: vaultEnvelopeAad(epoch) as unknown as BufferSource, tagLength: 128 },
+    key,
+    plaintext as unknown as BufferSource,
+  ));
+  const ctLen = encryptedBytes.length - AES_GCM_TAG_BYTES;
+  const payload = new Uint8Array(MIN_ARMOR_PAYLOAD_BYTES + ctLen);
+  payload.set(iv, 0);
+  payload.set(encryptedBytes.subarray(ctLen), AES_GCM_NONCE_BYTES);
+  payload.set(encryptedBytes.subarray(0, ctLen), MIN_ARMOR_PAYLOAD_BYTES);
+  const result = `${VAULT_ARMOR_PREFIX}e${epoch}:${bytesToBase64(payload)}`;
+  iv.fill(0);
   payload.fill(0);
   encryptedBytes.fill(0);
-
   return result;
 }
 
 /**
- * Decrypt a vault armored string. If input is not armored with 'vault:v1:',
- * returns original input string as-is (transparent fallback).
- * Accepts CryptoKey directly without re-importing raw strings.
- * Securely wipes transient byte arrays immediately after use.
+ * Encrypt plaintext under the keyring's CURRENT epoch (never an older one):
+ * `vault:v2:e<epoch>:<base64(12B nonce + 16B tag + ciphertext)>`.
  */
-export async function decryptVaultText(
-  armored: string,
-  key?: string | CryptoKey | null,
-): Promise<string> {
-  if (!isVaultArmored(armored)) {
-    return armored;
+export async function encryptVaultText(plaintext: string, keyring?: VaultKeyring | null): Promise<string> {
+  const kr = requireKeyring(keyring);
+  const bytes = new TextEncoder().encode(plaintext);
+  try {
+    return await sealVaultEnvelope(bytes, currentKey(kr), kr.currentEpoch);
+  } finally {
+    bytes.fill(0);
   }
+}
 
-  const b64 = armored.slice(VAULT_ARMOR_PREFIX.length).trim();
-  if (!isValidBase64(b64)) {
-    throw new Error('Invalid vault armored ciphertext: malformed base64 payload');
-  }
-
-  const payload = base64ToBytes(b64);
-  if (payload.length < MIN_ARMOR_PAYLOAD_BYTES) {
-    payload.fill(0);
-    throw new Error(
-      `Invalid vault armored ciphertext: payload length (${payload.length} bytes) is less than header (${MIN_ARMOR_PAYLOAD_BYTES} bytes)`,
-    );
-  }
-
+/** Open a decoded payload for `epoch` under `key`; throws when it does not authenticate. */
+export async function openVaultPayload(payload: Uint8Array, key: CryptoKey, epoch: number): Promise<Uint8Array> {
   const nonce = payload.subarray(0, AES_GCM_NONCE_BYTES);
   const tag = payload.subarray(AES_GCM_NONCE_BYTES, MIN_ARMOR_PAYLOAD_BYTES);
   const ciphertext = payload.subarray(MIN_ARMOR_PAYLOAD_BYTES);
-
   const combined = new Uint8Array(ciphertext.length + tag.length);
   combined.set(ciphertext, 0);
   combined.set(tag, ciphertext.length);
-
   try {
-    const cryptoKey = await resolveCryptoKey(key);
-    const decryptedRaw = await crypto.subtle.decrypt(
-      { name: 'AES-GCM', iv: nonce as unknown as BufferSource, tagLength: 128 },
-      cryptoKey,
+    return new Uint8Array(await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: nonce as unknown as BufferSource, additionalData: vaultEnvelopeAad(epoch) as unknown as BufferSource, tagLength: 128 },
+      key,
       combined as unknown as BufferSource,
-    );
+    ));
+  } finally {
+    combined.fill(0);
+  }
+}
 
-    const decryptedBytes = new Uint8Array(decryptedRaw);
+/**
+ * Decrypt a vault envelope with the key for the epoch in its header.
+ * - Not armored (plain text, or a dead v1 token): returned unchanged.
+ * - Unknown epoch: VAULT_LOCKED_MARKER -- never an exception, never ciphertext.
+ * - Malformed, or does not authenticate: throws.
+ */
+export async function decryptVaultText(armored: string, keyring?: VaultKeyring | null): Promise<string> {
+  if (!isVaultArmored(armored)) return armored;
+  const { epoch, payload } = parseVaultEnvelope(armored);
+  try {
+    const kr = requireKeyring(keyring);
+    const key = keyFor(kr, epoch);
+    if (!key) return VAULT_LOCKED_MARKER;
+    const plain = await openVaultPayload(payload, key, epoch);
     try {
-      const dec = new TextDecoder();
-      return dec.decode(decryptedBytes);
+      return new TextDecoder().decode(plain);
     } finally {
-      decryptedBytes.fill(0);
+      plain.fill(0);
     }
   } finally {
     payload.fill(0);
-    combined.fill(0);
   }
 }

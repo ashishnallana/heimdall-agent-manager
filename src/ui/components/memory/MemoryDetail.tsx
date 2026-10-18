@@ -394,7 +394,7 @@ export function MemoryDetailBody({
         if (active) setDecryptedBody(t);
       })
       .catch(() => {
-        // Never fall back to the armored source: that is how `vault:v1:` strings reach
+        // Never fall back to the armored source: that is how `vault:v2:` strings reach
         // the screen. Empty routes the render below to the VaultText placeholder.
         if (active) setDecryptedBody('');
       });

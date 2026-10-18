@@ -23,6 +23,7 @@ import { decryptProjectList } from '../../utils/vaultProjects';
 import { decryptChainList } from '../../utils/vaultChains';
 import { isVaultArmored } from '../../utils/vaultContent';
 import { VaultText } from '../vault/VaultText';
+import { replaceVaultTokens } from '../../utils/vaultCrypto.ts';
 
 interface TaskChainsPageProps {
   chainId?: string;
@@ -484,7 +485,7 @@ export const TaskChainsPage: React.FC<TaskChainsPageProps> = ({ chainId: initial
       setDecryptedProjects(
         projects.map((p) => ({
           ...p,
-          name: p.name ? p.name.replace(/vault:v1:[A-Za-z0-9+/=_-]+/g, '[Encrypted]') : p.name,
+          name: p.name ? replaceVaultTokens(p.name, '[Encrypted]') : p.name,
         }))
       );
       return;

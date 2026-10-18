@@ -3,6 +3,7 @@
 //
 // RUN: node --test tests/ui_vault_crypto_test.ts
 
+import { asKeyring } from './helpers/vaultTestKeyring.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -126,8 +127,8 @@ test('importRawKeyHex imports non-extractable 256-bit AES-GCM key (REQ-VAULT-HAR
   }, (err: any) => err.name === 'InvalidAccessError' || String(err).includes('not extractable'));
 
   // Round-trip encryption and decryption functions correctly with non-extractable key
-  const testCipher = await encryptVaultText('roundtrip test', importedKey);
-  const testPlain = await decryptVaultText(testCipher, importedKey);
+  const testCipher = await encryptVaultText('roundtrip test', asKeyring(importedKey));
+  const testPlain = await decryptVaultText(testCipher, asKeyring(importedKey));
   assert.equal(testPlain, 'roundtrip test');
 
   // Input validation
@@ -156,21 +157,21 @@ test('deriveKeyFromPassword deterministically derives non-extractable 256-bit AE
   }, (err: any) => err.name === 'InvalidAccessError' || String(err).includes('not extractable'));
 
   // Verify key1 and key2 are functionally identical: encrypt with key1, decrypt with key2
-  const cipher1 = await encryptVaultText('deterministic check', key1);
-  const plain2 = await decryptVaultText(cipher1, key2);
+  const cipher1 = await encryptVaultText('deterministic check', asKeyring(key1));
+  const plain2 = await decryptVaultText(cipher1, asKeyring(key2));
   assert.equal(plain2, 'deterministic check');
 
   // Different password produces different key (decryption fails)
   const keyDiffPass = await deriveKeyFromPassword('DifferentPassword!2026', saltHex, 10_000);
   await assert.rejects(async () => {
-    await decryptVaultText(cipher1, keyDiffPass);
+    await decryptVaultText(cipher1, asKeyring(keyDiffPass));
   });
 
   // Different salt produces different key (decryption fails)
   const saltHex2 = generateSaltHex(16);
   const keyDiffSalt = await deriveKeyFromPassword(password, saltHex2, 10_000);
   await assert.rejects(async () => {
-    await decryptVaultText(cipher1, keyDiffSalt);
+    await decryptVaultText(cipher1, asKeyring(keyDiffSalt));
   });
 });
 
@@ -242,8 +243,8 @@ test('encryptVaultKeyEnvelope and decryptVaultKeyEnvelope round-trip with passwo
     envelope.tagHex,
   );
   assert.equal(decryptedVaultKey.extractable, false);
-  const testCipher = await encryptVaultText('envelope test', vaultKey);
-  const testDecrypted = await decryptVaultText(testCipher, decryptedVaultKey);
+  const testCipher = await encryptVaultText('envelope test', asKeyring(vaultKey));
+  const testDecrypted = await decryptVaultText(testCipher, asKeyring(decryptedVaultKey));
   assert.equal(testDecrypted, 'envelope test');
 
   // Wrong password fails
@@ -312,8 +313,8 @@ test('deriveKeyFromRecoveryWords enables full recovery envelope round-trip', asy
   );
 
   assert.equal(recoveredVaultKey.extractable, false);
-  const recCipher = await encryptVaultText('recovery test', vaultKey);
-  const recDecrypted = await decryptVaultText(recCipher, recoveredVaultKey);
+  const recCipher = await encryptVaultText('recovery test', asKeyring(vaultKey));
+  const recDecrypted = await decryptVaultText(recCipher, asKeyring(recoveredVaultKey));
   assert.equal(recDecrypted, 'recovery test');
 
   // Wrong recovery phrase fails

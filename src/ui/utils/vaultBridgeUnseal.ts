@@ -1,12 +1,31 @@
 // REQ-VAULT-HARDEN-3, REQ-VAULT-HARDEN-8:
 // Hub-blind E2EE bridge key wrapping and authenticated anti-replay unseal protocol.
 
+// v2 only (docs/plans/passwordless-vault.md §1 "Bridge unseal v2"): the plaintext is the
+// HKR1 keyring, HKDF info is `heimdall-bridge-unseal-v2`, and the AAD is
+// `heimdall-bridge-unseal-v2|<bridge_id>|<timestamp>|<nonce>|<current_epoch>`. Before
+// anything is encrypted, the bridge's ephemeral ECDH key must carry a valid signature by
+// its identity key; otherwise nothing is sent.
+
 import {
   bytesToHex,
-  hexToBytes,
-  base64ToBytes,
   generateNonceHex,
+  adapterKeyringBytesFromRawHex,
 } from './vaultCrypto.ts';
+import { parseKeyringBytes, isVaultKeyring, type VaultKeyring } from './vaultKeyring.ts';
+import {
+  SIGN_ALG_ECDSA_P256_SHA256,
+  bridgeUnsealKeyCanonical,
+  ecdhHkdfAesKey,
+  isLowerHex,
+  parseSignatureObject,
+  signAlgFromId,
+  signatureObjectText,
+  verifySignature,
+} from './vaultStatements.ts';
+
+export const UNSEAL_V2_INFO = 'heimdall-bridge-unseal-v2';
+export const UNSEAL_V2_FORMAT = 'keyring-v1';
 
 export interface BridgeUnsealPayload {
   type: 'bridge_unseal';
@@ -18,6 +37,29 @@ export interface BridgeUnsealPayload {
   iv: string;
   tag: string;
   ciphertext: string;
+  format: typeof UNSEAL_V2_FORMAT;
+  current_epoch: number;
+  /** Echo of the bridge's signature object over its ephemeral key. */
+  unseal_key_signature: { alg: string; sig: string };
+  bridge_identity_public_key: string;
+  [extra: string]: unknown;
+}
+
+/**
+ * What the hub reports about a bridge's unseal key. P1 trusts the identity key as
+ * served by the hub; P3 pins it through the signed approval chain.
+ */
+export interface BridgeUnsealTarget {
+  bridgeId: string;
+  /** Ephemeral ECDH P-256 public key, 130 lowercase hex. */
+  publicKey: string;
+  bootId: string;
+  /** Signature object (JSON text or parsed object) by the identity key. */
+  unsealKeySignature: unknown;
+  /** Persistent identity public key, 130 lowercase hex. */
+  identityPublicKey: string;
+  /** Identity key algorithm; defaults to the only allowlisted one. */
+  identitySignAlg?: string;
 }
 
 export interface BridgeUnsealResult {
@@ -32,6 +74,9 @@ export interface UnsealOptions {
   timestamp?: number;
   nonce?: string;
   commandId?: string;
+  /** Test vectors only: fixed IV and client key pair. */
+  iv?: Uint8Array;
+  clientKeyPair?: CryptoKeyPair;
 }
 
 /** Discriminator for `VaultKeyNotExportableError`, stable across module instances. */
@@ -116,165 +161,155 @@ export function resolveUnsealOutcome(args: {
  * network work, so the rule lives here next to the code that enforces it rather
  * than being re-derived (and drifting) in each UI surface.
  */
-export function canUnsealWithKey(vaultKey: string | CryptoKey | Uint8Array | null | undefined): boolean {
+export type UnsealKeyMaterial = string | CryptoKey | Uint8Array | VaultKeyring;
+
+export function canUnsealWithKey(vaultKey: UnsealKeyMaterial | null | undefined): boolean {
   if (!vaultKey) return false;
   if (typeof vaultKey === 'string') return vaultKey.trim().length > 0;
   if (vaultKey instanceof Uint8Array) return vaultKey.length > 0;
+  if (isVaultKeyring(vaultKey)) return false; // holds only non-extractable keys
   return vaultKey.extractable === true;
 }
 
-/**
- * Builds the canonical AAD binding envelope for E2EE unseal requests (REQ-VAULT-HARDEN-3, REQ-VAULT-HARDEN-8).
- * Binds bridge_id, timestamp, and nonce to guarantee anti-replay integrity.
- */
-export function buildUnsealAad(bridgeId: string, timestamp: number, nonce: string): Uint8Array {
-  return new TextEncoder().encode(`${bridgeId}:${timestamp}:${nonce}`);
+/** `heimdall-bridge-unseal-v2|<bridge_id>|<timestamp>|<nonce>|<current_epoch>` */
+export function buildUnsealAad(bridgeId: string, timestamp: number, nonce: string, currentEpoch: number): Uint8Array {
+  return new TextEncoder().encode(`${UNSEAL_V2_INFO}|${bridgeId}|${timestamp}|${nonce}|${currentEpoch}`);
 }
 
 /**
- * Encrypts and wraps the master vault key for a target bridge using Hub-blind E2EE.
- * Performs ephemeral ECDH key agreement, HKDF-SHA256 key derivation, and AES-256-GCM encryption with AAD binding.
+ * Verify that the bridge's ephemeral ECDH key is signed by its identity key. Throws
+ * (and so prevents any unseal) on a missing, malformed, unknown-alg or invalid
+ * signature.
  */
-export async function prepareUnsealPayload(
-  bridgeId: string,
-  bridgePublicKey: string,
-  vaultKey: string | CryptoKey | Uint8Array,
-  options?: UnsealOptions
-): Promise<BridgeUnsealPayload> {
-  const cleanPk = bridgePublicKey.trim();
-  let bridgePubBytes: Uint8Array;
-  if (/^[0-9a-fA-F]{130}$/.test(cleanPk)) {
-    bridgePubBytes = hexToBytes(cleanPk);
-  } else {
-    bridgePubBytes = base64ToBytes(cleanPk);
-  }
-
-  if (bridgePubBytes.length !== 65 || bridgePubBytes[0] !== 0x04) {
+export async function verifyBridgeUnsealKey(target: BridgeUnsealTarget): Promise<void> {
+  const publicKey = String(target.publicKey || '').trim().toLowerCase();
+  const identity = String(target.identityPublicKey || '').trim().toLowerCase();
+  const alg = signAlgFromId(target.identitySignAlg ?? SIGN_ALG_ECDSA_P256_SHA256);
+  if (!alg) throw new Error('Bridge identity key uses an unsupported algorithm; unseal refused');
+  if (!isLowerHex(publicKey, 65) || !publicKey.startsWith('04')) {
     throw new Error('Invalid bridge public key: expected 65-byte uncompressed P-256 point starting with 0x04');
   }
-
-  // Import bridge public key into WebCrypto ECDH
-  const bridgeCryptoKey = await crypto.subtle.importKey(
-    'raw',
-    bridgePubBytes as any,
-    { name: 'ECDH', namedCurve: 'P-256' },
-    false,
-    []
-  );
-
-  // Generate ephemeral client keypair (SK_client, PK_client)
-  const clientKeyPair = await crypto.subtle.generateKey(
-    { name: 'ECDH', namedCurve: 'P-256' },
-    true,
-    ['deriveBits', 'deriveKey']
-  );
-
-  // Export client public key to raw bytes (65 bytes)
-  const clientPubRaw = await crypto.subtle.exportKey('raw', clientKeyPair.publicKey);
-  const clientPublicKeyHex = bytesToHex(new Uint8Array(clientPubRaw));
-
-  // Compute ECDH shared secret bits (256 bits = 32 bytes)
-  const sharedSecretBits = await crypto.subtle.deriveBits(
-    { name: 'ECDH', public: bridgeCryptoKey },
-    clientKeyPair.privateKey,
-    256
-  );
-
-  // HKDF key derivation (RFC 5869 with SHA-256)
-  const hkdfKey = await crypto.subtle.importKey(
-    'raw',
-    sharedSecretBits as any,
-    'HKDF',
-    false,
-    ['deriveKey']
-  );
-
-  const aesKey = await crypto.subtle.deriveKey(
-    {
-      name: 'HKDF',
-      hash: 'SHA-256',
-      salt: new Uint8Array(32),
-      info: new TextEncoder().encode('heimdall-bridge-unseal-v1'),
-    },
-    hkdfKey,
-    { name: 'AES-GCM', length: 256 },
-    false,
-    ['encrypt']
-  );
-
-  const timestamp = options?.timestamp ?? Date.now();
-  const nonce = options?.nonce ?? generateNonceHex(16);
-  const commandId = options?.commandId ?? `cmd_unseal_${Date.now()}`;
-
-  const aadBytes = buildUnsealAad(bridgeId, timestamp, nonce);
-  const ivBytes = crypto.getRandomValues(new Uint8Array(12));
-
-  // REQ-UNSEAL-1, REQ-UNSEAL-4: the bytes come from the `vaultKey` the caller passed
-  // and from nowhere else.
-  //
-  // This block used to be `try { exportKey } catch { module-level hex cache }`. For a
-  // non-extractable key -- which is the hardened default (REQ-VAULT-HARDEN-1) -- the
-  // `catch` was the NORMAL path, so a thrown DOMException was load-bearing control
-  // flow and the real key source was a global that some unrelated earlier call site
-  // may or may not have populated. That is what made unseal succeed in the session
-  // where the operator typed the key and fail after a reload, with no difference in
-  // the call itself. The fallback is deleted: both paths now reach these bytes the
-  // same way, and `extractable` is read directly instead of being probed by
-  // exception.
-  let plaintextBytes: Uint8Array;
-  if (typeof vaultKey === 'string') {
-    plaintextBytes = new TextEncoder().encode(vaultKey.trim());
-  } else if (vaultKey instanceof Uint8Array) {
-    plaintextBytes = vaultKey;
-  } else if (!vaultKey.extractable) {
-    // Loud and specific, never a weaker payload: there is no key material to wrap, so
-    // the caller must obtain it from the operator. Callers branch on `code`.
-    throw new VaultKeyNotExportableError();
-  } else {
-    const raw = await crypto.subtle.exportKey('raw', vaultKey);
-    const hexStr = bytesToHex(new Uint8Array(raw));
-    plaintextBytes = new TextEncoder().encode(hexStr);
+  if (!isLowerHex(identity, 65) || !identity.startsWith('04')) {
+    throw new Error('Bridge identity key is missing or malformed; unseal refused');
   }
+  const sigText = signatureObjectText(target.unsealKeySignature);
+  if (!parseSignatureObject(sigText)) throw new Error('Bridge unseal key is unsigned or the signature is malformed; unseal refused');
+  let canonical: string;
+  try {
+    canonical = bridgeUnsealKeyCanonical(target.bridgeId, publicKey, String(target.bootId || '').trim().toLowerCase());
+  } catch (err) {
+    throw new Error(`Bridge unseal key statement is malformed (${(err as Error).message}); unseal refused`);
+  }
+  const ok = await verifySignature(alg, identity, new TextEncoder().encode(canonical), sigText);
+  if (!ok) throw new Error('Bridge unseal key signature does not verify under its identity key; unseal refused');
+}
 
-  const encryptedBuf = await crypto.subtle.encrypt(
-    {
-      name: 'AES-GCM',
-      iv: ivBytes as any,
-      additionalData: aadBytes as any,
-      tagLength: 128,
-    },
-    aesKey,
-    plaintextBytes as any
-  );
+/**
+ * P1-TEMPORARY ADAPTER (deleted in P3): turn whatever key material a caller holds into
+ * HKR1 keyring bytes. Hex and extractable keys come from the password vault and
+ * become `{session user, epoch 1}`; a Uint8Array is taken to already be HKR1. A
+ * non-extractable key or keyring cannot be wrapped and raises
+ * VaultKeyNotExportableError, never a weaker payload.
+ */
+export async function keyringBytesForUnseal(vaultKey: UnsealKeyMaterial): Promise<Uint8Array> {
+  if (typeof vaultKey === 'string') return adapterKeyringBytesFromRawHex(vaultKey);
+  if (vaultKey instanceof Uint8Array) return Uint8Array.from(vaultKey);
+  if (isVaultKeyring(vaultKey) || !vaultKey.extractable) throw new VaultKeyNotExportableError();
+  const raw = new Uint8Array(await crypto.subtle.exportKey('raw', vaultKey));
+  try {
+    return adapterKeyringBytesFromRawHex(bytesToHex(raw));
+  } finally {
+    raw.fill(0);
+  }
+}
 
-  const encryptedBytes = new Uint8Array(encryptedBuf);
-  const tagBytes = encryptedBytes.slice(encryptedBytes.length - 16);
-  const ciphertextBytes = encryptedBytes.slice(0, encryptedBytes.length - 16);
+/**
+ * Wrap a keyring for one bridge (Hub-blind E2EE): verify its signed ephemeral key,
+ * then ECDH (fresh client key) -> HKDF-SHA256 -> AES-256-GCM over the HKR1 bytes with
+ * the v2 AAD. `keyringBytes` is zeroed before this returns.
+ */
+export async function prepareUnsealPayload(
+  target: BridgeUnsealTarget,
+  keyringBytes: Uint8Array,
+  options?: UnsealOptions,
+): Promise<BridgeUnsealPayload> {
+  try {
+    await verifyBridgeUnsealKey(target);
+    const parsed = parseKeyringBytes(keyringBytes);
+    for (const e of parsed.entries) e.key.fill(0);
+    const currentEpoch = parsed.currentEpoch;
 
+    const publicKey = target.publicKey.trim().toLowerCase();
+    const clientKeyPair = options?.clientKeyPair ?? await crypto.subtle.generateKey(
+      { name: 'ECDH', namedCurve: 'P-256' },
+      false,
+      ['deriveBits'],
+    );
+    const clientPublicKeyHex = bytesToHex(new Uint8Array(await crypto.subtle.exportKey('raw', clientKeyPair.publicKey)));
+    const aesKey = await ecdhHkdfAesKey(clientKeyPair.privateKey, publicKey, UNSEAL_V2_INFO, ['encrypt']);
+
+    const timestamp = options?.timestamp ?? Date.now();
+    const nonce = options?.nonce ?? generateNonceHex(16);
+    if (!isLowerHex(nonce) || nonce.length === 0) throw new Error('Invalid unseal nonce');
+    const commandId = options?.commandId ?? `cmd_unseal_${Date.now()}`;
+    const ivBytes = options?.iv ? Uint8Array.from(options.iv) : crypto.getRandomValues(new Uint8Array(12));
+    if (ivBytes.length !== 12) throw new Error('Invalid unseal IV');
+
+    const encryptedBytes = new Uint8Array(await crypto.subtle.encrypt(
+      {
+        name: 'AES-GCM',
+        iv: ivBytes as unknown as BufferSource,
+        additionalData: buildUnsealAad(target.bridgeId, timestamp, nonce, currentEpoch) as unknown as BufferSource,
+        tagLength: 128,
+      },
+      aesKey,
+      keyringBytes as unknown as BufferSource,
+    ));
+    const tagBytes = encryptedBytes.slice(encryptedBytes.length - 16);
+    const ciphertextBytes = encryptedBytes.slice(0, encryptedBytes.length - 16);
+    const sig = parseSignatureObject(signatureObjectText(target.unsealKeySignature))!;
+
+    return {
+      type: 'bridge_unseal',
+      command_id: commandId,
+      bridge_id: target.bridgeId,
+      timestamp,
+      nonce,
+      client_public_key: clientPublicKeyHex,
+      iv: bytesToHex(ivBytes),
+      tag: bytesToHex(tagBytes),
+      ciphertext: bytesToHex(ciphertextBytes),
+      format: UNSEAL_V2_FORMAT,
+      current_epoch: currentEpoch,
+      unseal_key_signature: { alg: sig.alg, sig: sig.sig },
+      bridge_identity_public_key: target.identityPublicKey.trim().toLowerCase(),
+    };
+  } finally {
+    keyringBytes.fill(0);
+  }
+}
+
+/** Build a target from a hub bridge / public-key record. */
+export function bridgeUnsealTargetFromRecord(bridgeId: string, record: any): BridgeUnsealTarget {
   return {
-    type: 'bridge_unseal',
-    command_id: commandId,
-    bridge_id: bridgeId,
-    timestamp,
-    nonce,
-    client_public_key: clientPublicKeyHex,
-    iv: bytesToHex(ivBytes),
-    tag: bytesToHex(tagBytes),
-    ciphertext: bytesToHex(ciphertextBytes),
+    bridgeId,
+    publicKey: String(record?.public_key || record?.bridge_public_key || ''),
+    bootId: String(record?.unseal_boot_id || ''),
+    unsealKeySignature: record?.unseal_key_signature ?? '',
+    identityPublicKey: String(record?.bridge_identity_public_key || ''),
+    identitySignAlg: record?.bridge_identity_sign_alg ? String(record.bridge_identity_sign_alg) : undefined,
   };
 }
 
 /**
- * Executes full E2EE bridge unseal workflow from Web UI (REQ-VAULT-HARDEN-3).
- * Wraps vault key with ephemeral ECDH key agreement + AES-256-GCM and dispatches to Bridge via Hub relay.
+ * Executes the full E2EE bridge unseal workflow from the Web UI (REQ-VAULT-HARDEN-3).
  */
 export async function unsealBridgeE2EE(
-  bridgeId: string,
-  bridgePublicKey: string,
-  vaultKey: string | CryptoKey | Uint8Array,
+  target: BridgeUnsealTarget,
+  vaultKey: UnsealKeyMaterial,
   dispatchFn: (bridgeId: string, payload: BridgeUnsealPayload) => Promise<BridgeUnsealResult>,
-  options?: UnsealOptions
+  options?: UnsealOptions,
 ): Promise<BridgeUnsealResult> {
-  const payload = await prepareUnsealPayload(bridgeId, bridgePublicKey, vaultKey, options);
-  return await dispatchFn(bridgeId, payload);
+  const payload = await prepareUnsealPayload(target, await keyringBytesForUnseal(vaultKey), options);
+  return await dispatchFn(target.bridgeId, payload);
 }

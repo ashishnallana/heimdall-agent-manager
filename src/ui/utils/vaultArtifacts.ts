@@ -1,6 +1,7 @@
 // Zero-Knowledge Vault Transformers for Artifacts
 // REQ-VAULT-ARTIFACTS-1
 
+import type { VaultKeyring } from './vaultKeyring.ts';
 import {
   isVaultArmored,
   encryptVaultText,
@@ -25,7 +26,7 @@ export interface ArtifactPayload {
  */
 export async function encryptArtifactFields<T extends ArtifactPayload>(
   payload: T,
-  activeKey?: CryptoKey | string | null,
+  activeKey?: VaultKeyring | null,
 ): Promise<T> {
   const resolvedKey = activeKey || getActiveVaultKey();
   if (!resolvedKey) return { ...payload };
@@ -64,7 +65,7 @@ export async function encryptArtifactFields<T extends ArtifactPayload>(
  */
 export async function decryptArtifactRecord<T extends ArtifactPayload>(
   artifact: T,
-  activeKey?: CryptoKey | string | null,
+  activeKey?: VaultKeyring | null,
 ): Promise<T> {
   const resolvedKey = activeKey || getActiveVaultKey();
   if (!resolvedKey) return artifact;
@@ -103,7 +104,7 @@ export async function decryptArtifactRecord<T extends ArtifactPayload>(
  */
 export async function decryptArtifactText(
   text: string,
-  activeKey?: CryptoKey | string | null,
+  activeKey?: VaultKeyring | null,
 ): Promise<string> {
   const resolvedKey = activeKey || getActiveVaultKey();
   if (!resolvedKey || !text || !isVaultArmored(text)) return text;

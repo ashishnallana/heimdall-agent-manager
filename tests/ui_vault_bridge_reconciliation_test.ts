@@ -3,6 +3,11 @@
 import './helpers/vaultEndpointHarness.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { signedUnsealRecord, TEST_USER_ID } from './helpers/vaultTestKeyring.ts';
+import { setActiveVaultUserId } from '../src/ui/utils/vaultCrypto.ts';
+
+// P1 adapter: hex material becomes the session user's epoch-1 keyring.
+setActiveVaultUserId(TEST_USER_ID);
 
 function response(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -11,26 +16,15 @@ function response(body: unknown, status = 200): Response {
   });
 }
 
-async function bridgePublicKeyBase64(): Promise<string> {
-  const pair = await crypto.subtle.generateKey(
-    { name: 'ECDH', namedCurve: 'P-256' },
-    true,
-    ['deriveBits', 'deriveKey'],
-  );
-  const raw = new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey));
-  return Buffer.from(raw).toString('base64');
-}
-
 test('REQ-AUX-10: reconciliation calls public-key and unseal for every and only online locked bridge', async () => {
   const realFetch = globalThis.fetch;
-  const publicKey = await bridgePublicKeyBase64();
   const calls: Array<{ url: string; method: string }> = [];
   try {
     globalThis.fetch = (async (input: any, init: RequestInit = {}) => {
       const url = String(input?.url ?? input);
       const method = String(init.method || 'GET').toUpperCase();
       calls.push({ url, method });
-      if (url.endsWith('/public-key')) return response({ public_key: publicKey });
+      if (url.endsWith('/public-key')) return response(await signedUnsealRecord(url.match(/bridges\/([^/]+)\/public-key/)![1]));
       if (url.endsWith('/unseal')) return response({ type: 'bridge_unseal_result', command_id: 'cmd_test', ok: true });
       throw new Error(`unexpected request: ${method} ${url}`);
     }) as typeof fetch;
@@ -83,11 +77,10 @@ test('REQ-AUX-10: missing transfer material requests reauthentication without ne
 
 test('REQ-AUX-10: partial failures are reported per bridge after all targets are attempted', async () => {
   const realFetch = globalThis.fetch;
-  const publicKey = await bridgePublicKeyBase64();
   try {
     globalThis.fetch = (async (input: any) => {
       const url = String(input?.url ?? input);
-      if (url.endsWith('/public-key')) return response({ public_key: publicKey });
+      if (url.endsWith('/public-key')) return response(await signedUnsealRecord(url.match(/bridges\/([^/]+)\/public-key/)![1]));
       if (url.includes('/brg_bad/unseal')) return response({ error: { message: 'bridge refused unseal' } }, 500);
       if (url.endsWith('/unseal')) return response({ type: 'bridge_unseal_result', command_id: 'cmd_test', ok: true });
       throw new Error(`unexpected request: ${url}`);

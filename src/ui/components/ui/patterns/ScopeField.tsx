@@ -21,7 +21,7 @@ import { containsVaultArmored, maskVaultArmored } from '../../../utils/vaultCont
  * `vaultProjects.ts:23`), and `useListSidebarProjectsQuery` decrypts them inside
  * its `queryFn` only when the vault was already unlocked at FETCH time
  * (`sidebar.ts:238-242`). While locked, the catalog therefore receives
- * `vault:v1:...` strings. The catalog is the choke point for every scope control
+ * `vault:v2:...` strings. The catalog is the choke point for every scope control
  * -- the chips, their `aria-label`s, the comboboxes and the `byId` lookups all
  * read these names -- so the armored form is masked HERE rather than at each
  * render site, which is the per-site inconsistency this bug class came from.

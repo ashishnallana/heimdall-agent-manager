@@ -3,6 +3,7 @@
 //
 // RUN: node --test tests/ui_issues_vault_test.ts
 
+import { keyringFromHex } from './helpers/vaultTestKeyring.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -32,8 +33,10 @@ import {
   decryptCommentRecord,
 } from '../src/ui/utils/vaultIssues.ts';
 
-const TEST_KEY_HEX = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
-const DIFFERENT_KEY_HEX = 'fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210';
+const TEST_KEY_HEX_RAW = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+const TEST_KEY_HEX = await keyringFromHex(TEST_KEY_HEX_RAW);
+const DIFFERENT_KEY_HEX_RAW = 'fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210';
+const DIFFERENT_KEY_HEX = await keyringFromHex(DIFFERENT_KEY_HEX_RAW);
 
 // -----------------------------------------------------------------------------
 // Test 1: <VaultText /> renders plaintext for unencrypted strings
@@ -117,10 +120,10 @@ test('<VaultText /> decrypts and renders plaintext when vault is unlocked', asyn
 });
 
 // -----------------------------------------------------------------------------
-// Test 5: Issue creation encrypts title and description into 'vault:v1:<base64>' when vault is unlocked
+// Test 5: Issue creation encrypts title and description into 'vault:v2:e1:<base64>' when vault is unlocked
 // -----------------------------------------------------------------------------
 
-test('Issue creation encrypts title and description into "vault:v1:<base64>" when vault is unlocked', async () => {
+test('Issue creation encrypts title and description into "vault:v2:e1:<base64>" when vault is unlocked', async () => {
   const rawIssuePayload = {
     title: 'Kernel deadlock on sqlite busy timeout',
     description: 'Stack trace details with sensitive environment variables:\nAPI_KEY=secret_123',
@@ -135,19 +138,19 @@ test('Issue creation encrypts title and description into "vault:v1:<base64>" whe
   // Title and description must be armored
   assert.ok(
     isVaultArmored(encryptedPayload.title),
-    'Title must be armored with vault:v1: prefix',
+    'Title must be armored with vault:v2:e1: prefix',
   );
   assert.ok(
     isVaultArmored(encryptedPayload.description),
-    'Description must be armored with vault:v1: prefix',
+    'Description must be armored with vault:v2:e1: prefix',
   );
   assert.ok(
     encryptedPayload.title.startsWith(VAULT_ARMOR_PREFIX),
-    'Title must start with vault:v1:',
+    'Title must start with vault:v2:e1:',
   );
   assert.ok(
     encryptedPayload.description.startsWith(VAULT_ARMOR_PREFIX),
-    'Description must start with vault:v1:',
+    'Description must start with vault:v2:e1:',
   );
 
   // Plaintext must not leak into armored payload
@@ -171,10 +174,10 @@ test('Issue creation encrypts title and description into "vault:v1:<base64>" whe
 });
 
 // -----------------------------------------------------------------------------
-// Test 6: Issue comment creation encrypts comment body into 'vault:v1:<base64>' when vault is unlocked
+// Test 6: Issue comment creation encrypts comment body into 'vault:v2:e1:<base64>' when vault is unlocked
 // -----------------------------------------------------------------------------
 
-test('Issue comment creation encrypts comment body into "vault:v1:<base64>" when vault is unlocked', async () => {
+test('Issue comment creation encrypts comment body into "vault:v2:e1:<base64>" when vault is unlocked', async () => {
   const commentPayload = {
     issueId: 'iss_123',
     body: 'Investigated: reproduction confirmed with gdb stack trace attached.',
@@ -186,11 +189,11 @@ test('Issue comment creation encrypts comment body into "vault:v1:<base64>" when
   const encryptedComment = await encryptCommentFields(commentPayload, TEST_KEY_HEX);
   assert.ok(
     isVaultArmored(encryptedComment.body),
-    'Comment body must be armored with vault:v1: prefix',
+    'Comment body must be armored with vault:v2:e1: prefix',
   );
   assert.ok(
     encryptedComment.body.startsWith(VAULT_ARMOR_PREFIX),
-    'Comment body must start with vault:v1:',
+    'Comment body must start with vault:v2:e1:',
   );
   assert.ok(!encryptedComment.body.includes('Investigated'));
 
@@ -329,7 +332,7 @@ test('vaultSlice manages isUnlockModalOpen state and auto-resets on unlock and l
   // Opening modal then unlocking vault automatically closes unlock modal
   state = vaultReducer(state, openUnlockModal());
   assert.equal(selectIsUnlockModalOpen({ vault: state }), true);
-  state = vaultReducer(state, setVaultUnlocked(TEST_KEY_HEX));
+  state = vaultReducer(state, setVaultUnlocked(TEST_KEY_HEX_RAW));
   assert.equal(selectIsVaultUnlocked({ vault: state }), true);
   assert.equal(selectIsUnlockModalOpen({ vault: state }), false, 'Unlock must close unlock modal');
 

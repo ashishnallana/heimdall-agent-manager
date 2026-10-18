@@ -1,3 +1,4 @@
+import type { VaultKeyring } from '../../utils/vaultKeyring';
 import { apiErrorText, cookieJsonFetch, cookieJsonFetchEnvelope, cookieMutation } from '../cookieFetch';
 import { heimdallApi } from '../heimdallApi';
 import { encryptVaultText, decryptVaultText, isVaultArmored, getActiveVaultKey } from '../../utils/vaultContent';
@@ -564,7 +565,7 @@ export const {
  */
 export async function encryptIssueFields<T extends { title?: string; description?: string }>(
   payload: T,
-  activeKey: CryptoKey | string | null = getActiveVaultKey(),
+  activeKey: VaultKeyring | null = getActiveVaultKey(),
 ): Promise<T> {
   if (!activeKey) return { ...payload };
   const res = { ...payload };
@@ -583,7 +584,7 @@ export async function encryptIssueFields<T extends { title?: string; description
  */
 export async function encryptCommentFields<T extends { body: string }>(
   payload: T,
-  activeKey: CryptoKey | string | null = getActiveVaultKey(),
+  activeKey: VaultKeyring | null = getActiveVaultKey(),
 ): Promise<T> {
   if (!activeKey || !payload.body) return { ...payload };
   const res = { ...payload };
@@ -599,7 +600,7 @@ export async function encryptCommentFields<T extends { body: string }>(
  */
 export async function decryptIssueRecord(
   issue: Issue,
-  activeKey: CryptoKey | string | null = getActiveVaultKey(),
+  activeKey: VaultKeyring | null = getActiveVaultKey(),
 ): Promise<Issue> {
   if (!activeKey) return issue;
   let title = issue.title;
@@ -653,7 +654,7 @@ export async function decryptIssueRecord(
  */
 export async function decryptCommentRecord(
   comment: IssueComment,
-  activeKey: CryptoKey | string | null = getActiveVaultKey(),
+  activeKey: VaultKeyring | null = getActiveVaultKey(),
 ): Promise<IssueComment> {
   if (!activeKey || !isVaultArmored(comment.body)) return comment;
   return {

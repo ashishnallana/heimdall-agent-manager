@@ -18,6 +18,7 @@
 // The `tests/ui_*_vault_test.ts` glob in package.json picks this file up
 // automatically -- no test-script change is needed.
 
+import { keyringFromHex } from './helpers/vaultTestKeyring.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -62,7 +63,8 @@ const { importRawKeyHex, setActiveVaultKey, getActiveVaultKey,
 const artifacts = await import(`${R}/src/ui/api/endpoints/artifacts.ts`);
 const taskChains = await import(`${R}/src/ui/api/endpoints/taskChains.ts`);
 
-const KEY_HEX = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+const KEY_HEX_RAW = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+const KEY_HEX = await keyringFromHex(KEY_HEX_RAW);
 
 // daemonApi's requestJson uses window.setTimeout/clearTimeout, and artifacts.ts
 // isBrowserAmbientAuth() reads window.location.protocol. Shim ONLY those — a bare
@@ -115,10 +117,10 @@ async function go(store: any, thunk: any) {
 }
 
 async function unlock(store: any) {
-  const key = await importRawKeyHex(KEY_HEX);
+  const key = await keyringFromHex(KEY_HEX_RAW);
   setActiveVaultKey(key, null);           // hardened path: CryptoKey only, no hex
   store.dispatch(setVaultConfigured(true));
-  store.dispatch(setVaultUnlocked(KEY_HEX));
+  store.dispatch(setVaultUnlocked(KEY_HEX_RAW));
 }
 
 function assertNoError(res: any, label: string) {
@@ -136,7 +138,7 @@ function body(pred: (c: Captured) => boolean) {
 // STATE: ENABLED + UNLOCKED  — writes must be armored on the wire
 // =============================================================================
 
-test('UNLOCKED: createArtifact sends vault:v1: name and description on the wire', async () => {
+test('UNLOCKED: createArtifact sends vault:v2:e1: name and description on the wire', async () => {
   captured = []; nextResponseBody = { data: { artifact: { artifact_id: 'art_1' } } };
   const store = makeStore();
   await unlock(store);
@@ -157,7 +159,7 @@ test('UNLOCKED: createArtifact sends vault:v1: name and description on the wire'
   assert.ok(!String(b.description).includes('confidential'), 'plaintext description must NOT appear on the wire');
 });
 
-test('UNLOCKED: updateArtifact sends vault:v1: name and description on the wire', async () => {
+test('UNLOCKED: updateArtifact sends vault:v2:e1: name and description on the wire', async () => {
   captured = []; nextResponseBody = { data: { artifact: { artifact_id: 'art_1' } } };
   const store = makeStore();
   await unlock(store);
@@ -170,7 +172,7 @@ test('UNLOCKED: updateArtifact sends vault:v1: name and description on the wire'
   assert.ok(isVaultArmored(b.description), 'updated description must be armored');
 });
 
-test('UNLOCKED: createTaskChain sends vault:v1: title and description on the wire', async () => {
+test('UNLOCKED: createTaskChain sends vault:v2:e1: title and description on the wire', async () => {
   captured = []; nextResponseBody = { data: { chain_id: 'chain_1' } };
   const store = makeStore();
   await unlock(store);
@@ -183,7 +185,7 @@ test('UNLOCKED: createTaskChain sends vault:v1: title and description on the wir
   assert.ok(!String(b.title).includes('Secret'), 'plaintext chain title must NOT appear on the wire');
 });
 
-test('UNLOCKED: updateTaskChain sends vault:v1: title and description on the wire', async () => {
+test('UNLOCKED: updateTaskChain sends vault:v2:e1: title and description on the wire', async () => {
   captured = []; nextResponseBody = { data: { chain_id: 'chain_1' } };
   const store = makeStore();
   await unlock(store);
@@ -197,7 +199,7 @@ test('UNLOCKED: updateTaskChain sends vault:v1: title and description on the wir
 
 test('UNLOCKED: fetchArtifactTextContent decrypts pre-existing armored content to plaintext', async () => {
   captured = [];
-  const key = await importRawKeyHex(KEY_HEX);
+  const key = await keyringFromHex(KEY_HEX_RAW);
   setActiveVaultKey(key, null);
   const armored = await encryptVaultText('previously stored secret body', key);
   assert.ok(isVaultArmored(armored));
@@ -210,7 +212,7 @@ test('UNLOCKED: fetchArtifactTextContent decrypts pre-existing armored content t
   } as any));
   assert.equal(res.data?.text, 'previously stored secret body',
     `content must render decrypted, got: ${String(res.data?.text).slice(0, 60)}`);
-  assert.ok(!isVaultArmored(res.data?.text), 'no vault:v1: string may reach the screen');
+  assert.ok(!isVaultArmored(res.data?.text), 'no vault:v2:e1: string may reach the screen');
 });
 
 // =============================================================================
@@ -256,7 +258,7 @@ test('DISABLED: fetchArtifactTextContent returns pre-existing plaintext unchange
 
 test('UNLOCKED: already-armored name/title is NOT re-encrypted (no double armor)', async () => {
   captured = []; nextResponseBody = { data: { artifact: { artifact_id: 'art_3' } } };
-  const key = await importRawKeyHex(KEY_HEX);
+  const key = await keyringFromHex(KEY_HEX_RAW);
   setActiveVaultKey(key, null);
   const store = makeStore();
   await unlock(store);
@@ -283,7 +285,7 @@ test('UNLOCKED: already-armored name/title is NOT re-encrypted (no double armor)
 // =============================================================================
 
 test('LOCKED: writes do not throw and armored reads stay armored (locked placeholder path)', async () => {
-  const key = await importRawKeyHex(KEY_HEX);
+  const key = await keyringFromHex(KEY_HEX_RAW);
   const armored = await encryptVaultText('secret body', key);
 
   const store = makeStore();

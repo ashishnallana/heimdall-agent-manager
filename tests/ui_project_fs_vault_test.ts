@@ -4,6 +4,7 @@
 //
 // RUN: node --test tests/ui_project_fs_vault_test.ts
 
+import { keyringFromHex } from './helpers/vaultTestKeyring.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 // Imported FIRST: registers the module resolve hook that lets node load
@@ -31,8 +32,10 @@ import vaultReducer, {
   selectRawVaultKeyHex,
 } from '../src/ui/store/vaultSlice.ts';
 
-const TEST_KEY_HEX = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
-const DIFFERENT_KEY_HEX = 'fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210';
+const TEST_KEY_HEX_RAW = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+const TEST_KEY_HEX = await keyringFromHex(TEST_KEY_HEX_RAW);
+const DIFFERENT_KEY_HEX_RAW = 'fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210';
+const DIFFERENT_KEY_HEX = await keyringFromHex(DIFFERENT_KEY_HEX_RAW);
 
 // -----------------------------------------------------------------------------
 // REAL-ENDPOINT wire verification
@@ -74,13 +77,13 @@ const q = { subscribe: false, forceRefetch: true };
 
 // ---- Section 2: readProjectFile decryption ----------------------------------
 
-test('readProjectFile: transparently decrypts vault:v1: content when the vault is unlocked', async () => {
+test('readProjectFile: transparently decrypts vault:v2:e1: content when the vault is unlocked', async () => {
   const secretFileText = 'DATABASE_URL="postgres://admin:supersecret@db:5432/main"\nJWT_SECRET="xyz-token"';
   const armoredCiphertext = await encryptVaultText(secretFileText, TEST_KEY_HEX);
-  assert.ok(isVaultArmored(armoredCiphertext), 'fixture ciphertext must start with vault:v1:');
+  assert.ok(isVaultArmored(armoredCiphertext), 'fixture ciphertext must start with vault:v2:e1:');
 
   const store = await freshStore();
-  await unlockVault(store, TEST_KEY_HEX);
+  await unlockVault(store, TEST_KEY_HEX_RAW);
   cap.setNextResponse({ ok: true, path: 'secrets/.env', content: armoredCiphertext });
 
   const data = await runQuery(store, endpoints.readProjectFile.initiate(READ_ARGS('secrets/.env'), q));
@@ -110,7 +113,7 @@ test('readProjectFile: leaves content armored when no key is active even though 
   const armoredCiphertext = await encryptVaultText('SUPER_SECRET_TOKEN=abc12345', TEST_KEY_HEX);
 
   const store = await freshStore();
-  await unlockVault(store, TEST_KEY_HEX);
+  await unlockVault(store, TEST_KEY_HEX_RAW);
   await clearActiveKey();
   assert.equal(getActiveVaultKey(), null, 'precondition: no active CryptoKey');
   assert.equal(selectIsVaultUnlocked(store.getState()), true, 'precondition: slice still says unlocked');
@@ -126,7 +129,7 @@ test('readProjectFile: leaves content armored when decryption fails (wrong key) 
   const armoredCiphertext = await encryptVaultText('CONFIDENTIAL_NOTE', TEST_KEY_HEX);
 
   const store = await freshStore();
-  await unlockVault(store, DIFFERENT_KEY_HEX);
+  await unlockVault(store, DIFFERENT_KEY_HEX_RAW);
   cap.setNextResponse({ ok: true, path: 'wrongkey/.env', content: armoredCiphertext });
 
   const data = await runQuery(store, endpoints.readProjectFile.initiate(READ_ARGS('wrongkey/.env'), q));
@@ -139,7 +142,7 @@ test('readProjectFile: leaves unarmored plain text untouched when unlocked', asy
   const plainText = '# Public README\nThis is a standard repository.';
 
   const store = await freshStore();
-  await unlockVault(store, TEST_KEY_HEX);
+  await unlockVault(store, TEST_KEY_HEX_RAW);
   cap.setNextResponse({ ok: true, path: 'README.md', content: plainText });
 
   const data = await runQuery(store, endpoints.readProjectFile.initiate(READ_ARGS('README.md'), q));
@@ -154,7 +157,7 @@ test('writeProjectFile: puts armored content on the wire when the vault is unloc
   const plainContent = 'AWS_SECRET_ACCESS_KEY="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"';
 
   const store = await freshStore();
-  await unlockVault(store, TEST_KEY_HEX);
+  await unlockVault(store, TEST_KEY_HEX_RAW);
   cap.setNextResponse({ ok: true });
 
   const res = await store.dispatch(
@@ -194,7 +197,7 @@ test('writeProjectFile: does not double-encrypt already-armored content', async 
   const alreadyArmored = await encryptVaultText('secret data', TEST_KEY_HEX);
 
   const store = await freshStore();
-  await unlockVault(store, TEST_KEY_HEX);
+  await unlockVault(store, TEST_KEY_HEX_RAW);
   cap.setNextResponse({ ok: true });
 
   const res = await store.dispatch(
@@ -221,7 +224,7 @@ test('batchWriteProjectFiles: armors every file content on the wire when unlocke
   ];
 
   const store = await freshStore();
-  await unlockVault(store, TEST_KEY_HEX);
+  await unlockVault(store, TEST_KEY_HEX_RAW);
   cap.setNextResponse({ ok: true });
 
   const res = await store.dispatch(endpoints.batchWriteProjectFiles.initiate({ projectId: 'proj_test', files }));
@@ -279,7 +282,7 @@ async function searchFixtureMatches(): Promise<any[]> {
 
 test('searchProjectFiles: decrypts armored line and line_content in grep matches when unlocked', async () => {
   const store = await freshStore();
-  await unlockVault(store, TEST_KEY_HEX);
+  await unlockVault(store, TEST_KEY_HEX_RAW);
   cap.setNextResponse({ matches: await searchFixtureMatches() });
 
   const data = await runQuery(

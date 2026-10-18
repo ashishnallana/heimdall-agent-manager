@@ -82,7 +82,7 @@ import {
   decryptVaultKeyEnvelopeHex,
   DEFAULT_KDF_ITERATIONS,
 } from '../../utils/vaultCrypto';
-import { canUnsealWithKey } from '../../utils/vaultBridgeUnseal';
+import { canUnsealWithKey, type UnsealKeyMaterial } from '../../utils/vaultBridgeUnseal';
 import {
   approvedBridgeIsOnline,
   ENROLLMENT_PENDING_FALLBACK_SECONDS,
@@ -625,7 +625,7 @@ export default function BridgeEnrollmentApprovalPage() {
   const deliverVaultKey = useCallback(
     async (
       targetBridgeId: string,
-      vaultKeyMaterial: string | CryptoKey,
+      vaultKeyMaterial: UnsealKeyMaterial,
       target: UnsealTarget = 'enrollment',
     ) => {
       if (target === 'enrollment' && (!bridgeKeyReady || !fingerprintConfirmed)) {

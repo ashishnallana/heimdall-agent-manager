@@ -3,6 +3,7 @@
 //
 // RUN: node --test tests/ui_artifacts_vault_test.ts
 
+import { keyringFromHex } from './helpers/vaultTestKeyring.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -20,7 +21,8 @@ import {
   decryptArtifactText,
 } from '../src/ui/utils/vaultArtifacts.ts';
 
-const TEST_KEY_HEX = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+const TEST_KEY_HEX_RAW = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+const TEST_KEY_HEX = await keyringFromHex(TEST_KEY_HEX_RAW);
 
 // -----------------------------------------------------------------------------
 // Test 1: Legacy unarmored plaintext artifact tolerance and passthrough
@@ -79,10 +81,10 @@ test('Locked vault preserves armored strings without errors', async () => {
 });
 
 // -----------------------------------------------------------------------------
-// Test 4: encryptArtifactFields encrypts name, description, and content into vault:v1:...
+// Test 4: encryptArtifactFields encrypts name, description, and content into vault:v2:e1:...
 // -----------------------------------------------------------------------------
 
-test('encryptArtifactFields encrypts name, description, and content into vault:v1:<base64> when unlocked', async () => {
+test('encryptArtifactFields encrypts name, description, and content into vault:v2:e1:<base64> when unlocked', async () => {
   const payload = {
     name: 'security-audit-report.md',
     description: 'Comprehensive pen-test report for authentication gateway',

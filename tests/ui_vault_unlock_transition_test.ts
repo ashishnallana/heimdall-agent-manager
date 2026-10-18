@@ -22,6 +22,7 @@
 // `importLocalKey({ key, rememberSession })` -- the OBJECT form, which hit the
 // working object branch. The defect below is the BARE `importLocalKey(key)` form.
 
+import { keyringFromHex, asKeyring } from './helpers/vaultTestKeyring.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -36,7 +37,8 @@ import { vaultCacheInvalidationMiddleware } from '../src/ui/api/vaultCacheInvali
 import { heimdallApi } from '../src/ui/api/heimdallApi.ts';
 import { encryptVaultText, VAULT_MASK_PLACEHOLDER, containsVaultArmored, maskVaultArmored } from '../src/ui/utils/vaultContent.ts';
 
-const TEST_KEY_HEX = '00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff';
+const TEST_KEY_HEX_RAW = '00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff';
+const TEST_KEY_HEX = await keyringFromHex(TEST_KEY_HEX_RAW);
 const RESET_TYPE = heimdallApi.util.resetApiState().type;
 
 function hexToBytes(hex: string): Uint8Array {
@@ -47,7 +49,7 @@ function hexToBytes(hex: string): Uint8Array {
 
 function importTestKey(): Promise<CryptoKey> {
   return crypto.subtle.importKey(
-    'raw', hexToBytes(TEST_KEY_HEX), { name: 'AES-GCM' }, false, ['encrypt', 'decrypt'],
+    'raw', hexToBytes(TEST_KEY_HEX_RAW), { name: 'AES-GCM' }, false, ['encrypt', 'decrypt'],
   );
 }
 
@@ -112,7 +114,7 @@ test('A10: importLocalKey(bare CryptoKey) installs the key, not just the isUnloc
 
   const state = vaultSlice.reducer(undefined as any, action);
   assert.equal(state.isUnlocked, true, 'isUnlocked flips');
-  const installed = getActiveVaultKey();
+  const installed = getActiveVaultKey()?.keys.get(1) ?? null;
   assert.notEqual(installed, null, 'a store that claims unlocked must hold a usable key');
 
   // Behavioral proof over real WebCrypto: the installed handle actually decrypts.
@@ -155,16 +157,16 @@ test('A10: no raw key material is left in vault state by the bare-key path', asy
 
 test('REQ-CACHE-1: a real armored project name masks rather than reaching a plain string', async () => {
   const key = await importTestKey();
-  const armored = await encryptVaultText('Classified Project', key);
+  const armored = await encryptVaultText('Classified Project', asKeyring(key));
 
   // Precondition: a genuinely armored value, not a hand-written lookalike.
   assert.ok(containsVaultArmored(armored), 'fixture must really be armored');
-  assert.ok(armored.startsWith('vault:v1:'));
+  assert.ok(armored.startsWith('vault:v2:e1:'));
 
   const masked = containsVaultArmored(armored) ? maskVaultArmored(armored) : armored;
 
   assert.equal(masked, VAULT_MASK_PLACEHOLDER, 'armored name must degrade to the placeholder');
-  assert.equal(masked.includes('vault:v1:'), false, 'no ciphertext may survive into the label');
+  assert.equal(masked.includes('vault:v2:e1:'), false, 'no ciphertext may survive into the label');
   assert.equal(masked.includes('Classified Project'), false, 'and no plaintext either, while locked');
 });
 
@@ -177,7 +179,7 @@ test('REQ-CACHE-1: masking is a no-op on an unarmored name, so unlocked labels a
 
 test('REQ-CACHE-1: the masked label is what feeds the search haystack, so armored text is not searchable', async () => {
   const key = await importTestKey();
-  const armored = await encryptVaultText('Classified Project', key);
+  const armored = await encryptVaultText('Classified Project', asKeyring(key));
   const id = 'proj_18c6879e443756f1';
 
   // Mirrors actionCatalog.ts:151 -- `keywords` derives from the SAME masked label,
@@ -185,6 +187,6 @@ test('REQ-CACHE-1: the masked label is what feeds the search haystack, so armore
   const label = containsVaultArmored(armored) ? maskVaultArmored(armored) : armored;
   const keywords = [id, label].filter(Boolean).join(' ');
 
-  assert.equal(keywords.includes('vault:v1:'), false, 'armored text must not enter the keyword index');
+  assert.equal(keywords.includes('vault:v2:e1:'), false, 'armored text must not enter the keyword index');
   assert.ok(keywords.includes(id), 'the id stays searchable, so a row is still findable while locked');
 });

@@ -50,7 +50,7 @@ test('home chain local search is vault-safe and matches decrypted titles, ids an
     {
       projectId: 'p1',
       projectName: 'Apollo',
-      chains: [chain('c1', '2026-01-02', { title: 'vault:v1:abcdef' }), chain('c2', '2026-01-01', { title: 'Release train' })],
+      chains: [chain('c1', '2026-01-02', { title: 'vault:v2:e1:abcdef' }), chain('c2', '2026-01-01', { title: 'Release train' })],
     },
   ] as any);
   assert.deepEqual(filterHomeChains(items, 'vault').map((c) => c.chainId), []);

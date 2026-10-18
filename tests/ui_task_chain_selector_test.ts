@@ -24,6 +24,7 @@ if (typeof (globalThis as any).window === 'undefined') {
   (globalThis as any).window.sessionStorage = fakeSessionStorage;
 }
 
+import { asKeyring, keyringFromHex } from './helpers/vaultTestKeyring.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import React from 'react';
@@ -278,13 +279,13 @@ test('Live search filter filters chains by decrypted title, project name, or cha
 // 5. Armor Shielding Guard (REQ-CHAIN-SELECTOR-VAULT-1)
 // -----------------------------------------------------------------------------
 
-test('Armor shielding: raw vault:v1:... ciphertext never matches search queries', async () => {
+test('Armor shielding: raw vault:v2:e1:... ciphertext never matches search queries', async () => {
   const TEST_KEY = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
   const plaintextTitle = 'Master Password Vault Key Storage';
   const otherPlaintext = 'General Hub Infrastructure';
 
-  const armoredVaultTitle = await encryptVaultText(plaintextTitle, TEST_KEY);
-  const armoredOtherTitle = await encryptVaultText(otherPlaintext, TEST_KEY);
+  const armoredVaultTitle = await encryptVaultText(plaintextTitle, await keyringFromHex(TEST_KEY));
+  const armoredOtherTitle = await encryptVaultText(otherPlaintext, await keyringFromHex(TEST_KEY));
 
   assert.ok(isVaultArmored(armoredVaultTitle), 'Vault title must be armored');
 
@@ -316,9 +317,9 @@ test('Armor shielding: raw vault:v1:... ciphertext never matches search queries'
     'Searching "Vault" must not match raw ciphertext before decryption',
   );
 
-  // Searching "vault:v1:" or "v1" prefix MUST yield 0 matches
-  const matchPrefix = filterTaskChains(armoredItems, 'vault:v1:');
-  assert.equal(matchPrefix.length, 0, 'Must not match "vault:v1:" prefix');
+  // Searching "vault:v2:e1:" or "v1" prefix MUST yield 0 matches
+  const matchPrefix = filterTaskChains(armoredItems, 'vault:v2:e1:');
+  assert.equal(matchPrefix.length, 0, 'Must not match "vault:v2:e1:" prefix');
 
   const matchV1 = filterTaskChains(armoredItems, 'v1');
   assert.equal(matchV1.length, 0, 'Must not match "v1" token');
@@ -334,7 +335,7 @@ test('Armor shielding: raw vault:v1:... ciphertext never matches search queries'
         projectId: 'proj_sec',
       },
     ],
-    TEST_KEY,
+    await keyringFromHex(TEST_KEY),
   );
 
   assert.equal(decryptedItems[0].decryptedTitle, plaintextTitle);

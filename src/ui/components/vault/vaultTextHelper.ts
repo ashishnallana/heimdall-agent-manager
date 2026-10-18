@@ -1,3 +1,4 @@
+import type { VaultKeyring } from '../../utils/vaultKeyring.ts';
 import {
   isVaultArmored,
   containsVaultArmored,
@@ -6,6 +7,7 @@ import {
   decryptList,
   getActiveVaultKey,
 } from '../../utils/vaultContent.ts';
+import { replaceVaultTokens } from '../../utils/vaultCrypto.ts';
 
 export interface VaultTextModelProps {
   value?: string | null;
@@ -71,7 +73,7 @@ export function resolveVaultText(
  */
 export async function decryptVaultTextContent(
   value: string | null | undefined,
-  key?: CryptoKey | string | null,
+  key?: VaultKeyring | null,
   fallback = '',
 ): Promise<string> {
   // Omitting `key` resolves the active vault key; passing an explicit null still
@@ -97,7 +99,7 @@ export interface DecryptedMarkdownResolved {
  */
 export async function resolveDecryptedMarkdownContent(
   source: string | null | undefined,
-  key: CryptoKey | string | null | undefined,
+  key: VaultKeyring | null | undefined,
   isUnlocked: boolean,
   fallback = '',
 ): Promise<DecryptedMarkdownResolved> {
@@ -118,7 +120,7 @@ export async function resolveDecryptedMarkdownContent(
 
   if (!isUnlocked || !resolvedKey) {
     return {
-      text: raw.replace(/vault:v1:[A-Za-z0-9+/=_-]+/g, '[🔒 Encrypted]'),
+      text: replaceVaultTokens(raw, '[🔒 Encrypted]'),
       isArmored: true,
       isLocked: true,
     };
@@ -129,7 +131,7 @@ export async function resolveDecryptedMarkdownContent(
     : await decryptEmbeddedVaultTokens(raw, resolvedKey);
 
   return {
-    text: decrypted.replace(/vault:v1:[A-Za-z0-9+/=_-]+/g, '[🔒 Encrypted]'),
+    text: replaceVaultTokens(decrypted, '[🔒 Encrypted]'),
     isArmored: true,
     isLocked: false,
   };

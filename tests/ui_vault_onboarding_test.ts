@@ -417,7 +417,7 @@ test('search reauthentication stays open while unlocked, persists v2, and makes 
       await search.openTaskChainSearch(
         request.envelope,
         key,
-        search.taskChainSearchAad('usr_legacy', request.bridge_id, request.request_id, 'request', request.expires_at_ms),
+        search.taskChainSearchAad('usr_legacy', request.bridge_id, request.request_id, 'request', request.expires_at_ms, key.epoch),
       );
       const resultEnvelope = await search.sealTaskChainSearch(
         {
@@ -428,7 +428,7 @@ test('search reauthentication stays open while unlocked, persists v2, and makes 
           hits: [{ chain_id: 'chain_found', project_id: 'proj_1', status: 'active', updated_at: '2026-10-17T00:00:00Z', title: 'Found', description: '' }],
         },
         key,
-        search.taskChainSearchAad('usr_legacy', request.bridge_id, request.request_id, 'response', request.expires_at_ms),
+        search.taskChainSearchAad('usr_legacy', request.bridge_id, request.request_id, 'response', request.expires_at_ms, key.epoch),
       );
       return response({ data: { ok: true, envelope: resultEnvelope } });
     }
@@ -493,7 +493,7 @@ test('search reauthentication stays open while unlocked, persists v2, and makes 
     assert.equal((store.getState() as any).vault.isUnlockModalOpen, false, 'the Redux request clears only after the ceremony closes');
     assert.equal((store.getState() as any).vault.unlockModalPurpose, undefined);
     const restored = await (await import('../src/ui/utils/vaultPersistence.ts')).restoreVaultKeys();
-    assert.equal(restored?.version, 2, 'remembered legacy record is upgraded to a v2 key pair');
+    assert.equal(restored?.version, 3, 'remembered legacy record is upgraded to a v3 (search key v2) key pair');
     const search = await import('../src/ui/utils/taskChainSearch.ts');
     const result = await search.searchTaskChainsEncrypted('found chain', 'usr_legacy');
     assert.equal(result.hits[0]?.chain_id, 'chain_found');

@@ -8,8 +8,11 @@ export const VAULT_DB_VERSION = 1;
 export const VAULT_STORE_NAME = 'vault_keys';
 export const VAULT_KEY_RECORD_ID = 'active_vault_key';
 
+// version 3: the search key is the v2 per-epoch derivation (P1 adapter: epoch 1).
+// A version-2 record's search key was derived under the retired v1 domain, so only
+// its content key is restored.
 export type PersistedVaultKeys = {
-  version: 2;
+  version: 3;
   contentKey: CryptoKey;
   taskChainSearchKey: CryptoKey;
 };
@@ -17,7 +20,7 @@ export type PersistedVaultKeys = {
 export type RestoredVaultKeys = {
   contentKey: CryptoKey;
   taskChainSearchKey: CryptoKey | null;
-  version: 1 | 2;
+  version: 1 | 2 | 3;
 };
 
 function isCryptoKey(value: unknown): value is CryptoKey {
@@ -109,7 +112,7 @@ export async function persistVaultKeys(
   contentKey: CryptoKey,
   taskChainSearchKey: CryptoKey,
 ): Promise<void> {
-  await persistVaultRecord({ version: 2, contentKey, taskChainSearchKey });
+  await persistVaultRecord({ version: 3, contentKey, taskChainSearchKey });
 }
 
 /**
@@ -135,15 +138,17 @@ export async function restoreVaultKeys(): Promise<RestoredVaultKeys | null> {
           if (isCryptoKey(result)) {
             resolve({ contentKey: result, taskChainSearchKey: null, version: 1 });
           } else if (
-            result?.version === 2
+            result?.version === 3
             && isCryptoKey(result.contentKey)
             && isCryptoKey(result.taskChainSearchKey)
           ) {
             resolve({
               contentKey: result.contentKey,
               taskChainSearchKey: result.taskChainSearchKey,
-              version: 2,
+              version: 3,
             });
+          } else if (result?.version === 2 && isCryptoKey(result.contentKey)) {
+            resolve({ contentKey: result.contentKey, taskChainSearchKey: null, version: 2 });
           } else {
             resolve(null);
           }

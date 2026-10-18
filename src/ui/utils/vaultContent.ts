@@ -1,5 +1,5 @@
 // Zero-Knowledge Vault Content Cryptography & Declarative Transformers
-// Implements armored envelope wire format 'vault:v1:<base64(12B_nonce + 16B_tag + ciphertext)>',
+// Implements armored envelope wire format 'vault:v2:e<epoch>:<base64(12B_nonce + 16B_tag + ciphertext)>',
 // transparent unarmored fallback, and declarative field/list transformers.
 // REQ-VAULT-CONTENT-LIB-1, REQ-VAULT-HARDEN-1
 
@@ -11,28 +11,32 @@ export {
   isValidBase64,
   bytesToBase64,
   base64ToBytes,
-  resolveCryptoKey,
+  resolveKeyring,
   encryptVaultText,
   decryptVaultText,
   getActiveVaultKey,
   setActiveVaultKey,
+  VAULT_TOKEN_RE,
+  VAULT_LOCKED_MARKER,
+  replaceVaultTokens,
+  findVaultTokens,
 } from './vaultCrypto.ts';
 
 import {
   isVaultArmored,
   containsVaultArmored,
-  resolveCryptoKey,
+  resolveKeyring,
   encryptVaultText,
   decryptVaultText,
   getActiveVaultKey,
+  findVaultTokens,
+  replaceVaultTokens,
+  VAULT_LOCKED_MARKER,
+  type VaultKeyring,
 } from './vaultCrypto.ts';
 
 /** Placeholder substituted for vault-armored text that is not available in plaintext. */
-export const VAULT_MASK_PLACEHOLDER = '[🔒 Encrypted]';
-
-/** Matches one armored vault token. Module-scoped; only ever used with `String.replace`,
- *  which resets `lastIndex`, so the `g` flag carries no state between calls. */
-const VAULT_ARMORED_TOKEN_RE = /vault:v1:[A-Za-z0-9+/=_-]+/g;
+export const VAULT_MASK_PLACEHOLDER = VAULT_LOCKED_MARKER;
 
 /**
  * Replace every armored vault token in `value` with the locked placeholder.
@@ -48,39 +52,34 @@ const VAULT_ARMORED_TOKEN_RE = /vault:v1:[A-Za-z0-9+/=_-]+/g;
  * `api/endpoints/memory.ts` and `maskVaultTokens` in `components/vault/VaultText.tsx`.
  */
 export function maskVaultArmored(value: string): string {
-  return value.replace(VAULT_ARMORED_TOKEN_RE, VAULT_MASK_PLACEHOLDER);
+  return replaceVaultTokens(value, VAULT_MASK_PLACEHOLDER);
 }
 
 /**
- * Decrypt any embedded vault armored tokens (/vault:v1:[A-Za-z0-9+/=]+/) found inside a string.
- * Tokens that successfully decrypt are replaced with their plaintext; tokens that fail
- * decryption or non-token surrounding text are preserved intact.
+ * Decrypt every embedded v2 vault token (VAULT_TOKEN_RE) found inside a string.
+ * Tokens that decrypt are replaced with their plaintext; tokens of an epoch this
+ * keyring does not hold become the locked marker; tokens that fail to authenticate
+ * become the mask placeholder. Surrounding text is preserved.
  *
  * @param text The input string potentially containing one or more embedded vault tokens.
- * @param key The vault key as a 64-character hex string, CryptoKey, or fallback to active vault key.
+ * @param keyring The keyring to use, or the active keyring.
  */
 export async function decryptEmbeddedVaultTokens(
   text: string,
-  key?: string | CryptoKey | null,
+  keyring?: VaultKeyring | null,
 ): Promise<string> {
   if (typeof text !== 'string' || !containsVaultArmored(text)) {
     return text;
   }
 
-  // If explicit empty key or no key available anywhere, return text as-is without throwing
-  if (key === '' || (!key && !getActiveVaultKey())) {
+  // No keyring anywhere: return text as-is without throwing
+  const kr = keyring ?? getActiveVaultKey();
+  if (!kr) {
     return text;
   }
 
-  let cryptoKey: CryptoKey;
-  try {
-    cryptoKey = await resolveCryptoKey(key);
-  } catch {
-    return text;
-  }
-
-  const matches = text.match(/vault:v1:[A-Za-z0-9+/=_-]+/g);
-  if (!matches || matches.length === 0) {
+  const matches = findVaultTokens(text);
+  if (matches.length === 0) {
     return text;
   }
 
@@ -89,7 +88,7 @@ export async function decryptEmbeddedVaultTokens(
   const replacements = await Promise.all(
     uniqueTokens.map(async (token) => {
       try {
-        const decrypted = await decryptVaultText(token, cryptoKey);
+        const decrypted = await decryptVaultText(token, kr);
         return { token, decrypted };
       } catch {
         return { token, decrypted: VAULT_MASK_PLACEHOLDER };
@@ -115,7 +114,7 @@ export async function decryptEmbeddedVaultTokens(
  */
 export async function resolveCopyableVaultText(
   text: string,
-  key?: string | CryptoKey | null,
+  key?: VaultKeyring | null,
 ): Promise<string> {
   if (typeof text !== 'string' || !containsVaultArmored(text)) return text;
   let result = text;
@@ -137,18 +136,18 @@ export async function resolveCopyableVaultText(
  *
  * @param data Target object.
  * @param fields List of keys to encrypt.
- * @param key The vault key as a 64-char hex string, CryptoKey, or fallback to active key.
+ * @param key The keyring, or fallback to the active keyring.
  */
 export async function encryptFields<T>(
   data: T,
   fields: (keyof T)[],
-  key?: string | CryptoKey | null,
+  key?: VaultKeyring | null,
 ): Promise<T> {
   if (data == null || typeof data !== 'object') {
     return data;
   }
 
-  const cryptoKey = await resolveCryptoKey(key);
+  const cryptoKey = await resolveKeyring(key);
   const result = (Array.isArray(data) ? [...data] : { ...data }) as T;
 
   for (const field of fields) {
@@ -167,18 +166,18 @@ export async function encryptFields<T>(
  *
  * @param data Target object.
  * @param fields List of keys to decrypt.
- * @param key The vault key as a 64-char hex string, CryptoKey, or fallback to active key.
+ * @param key The keyring, or fallback to the active keyring.
  */
 export async function decryptFields<T>(
   data: T,
   fields: (keyof T)[],
-  key?: string | CryptoKey | null,
+  key?: VaultKeyring | null,
 ): Promise<T> {
   if (data == null || typeof data !== 'object') {
     return data;
   }
 
-  const cryptoKey = await resolveCryptoKey(key);
+  const cryptoKey = await resolveKeyring(key);
   const result = (Array.isArray(data) ? [...data] : { ...data }) as T;
 
   for (const field of fields) {
@@ -196,17 +195,17 @@ export async function decryptFields<T>(
  *
  * @param items Array of target objects.
  * @param fields List of keys to decrypt on each item.
- * @param key The vault key as a 64-char hex string, CryptoKey, or fallback to active key.
+ * @param key The keyring, or fallback to the active keyring.
  */
 export async function decryptList<T>(
   items: T[],
   fields: (keyof T)[],
-  key?: string | CryptoKey | null,
+  key?: VaultKeyring | null,
 ): Promise<T[]> {
   if (!Array.isArray(items)) {
     return [];
   }
-  const cryptoKey = await resolveCryptoKey(key);
+  const cryptoKey = await resolveKeyring(key);
   return await Promise.all(items.map((item) => decryptFields(item, fields, cryptoKey)));
 }
 
@@ -215,16 +214,16 @@ export async function decryptList<T>(
  *
  * @param items Array of target objects.
  * @param fields List of keys to encrypt on each item.
- * @param key The vault key as a 64-char hex string, CryptoKey, or fallback to active key.
+ * @param key The keyring, or fallback to the active keyring.
  */
 export async function encryptList<T>(
   items: T[],
   fields: (keyof T)[],
-  key?: string | CryptoKey | null,
+  key?: VaultKeyring | null,
 ): Promise<T[]> {
   if (!Array.isArray(items)) {
     return [];
   }
-  const cryptoKey = await resolveCryptoKey(key);
+  const cryptoKey = await resolveKeyring(key);
   return await Promise.all(items.map((item) => encryptFields(item, fields, cryptoKey)));
 }

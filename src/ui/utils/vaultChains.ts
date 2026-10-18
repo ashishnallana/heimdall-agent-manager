@@ -1,6 +1,7 @@
 // Zero-Knowledge Vault Transformers for Task Chains
 // REQ-VAULT-CHAINS-1
 
+import type { VaultKeyring } from './vaultKeyring.ts';
 import { isVaultArmored, encryptVaultText, decryptVaultText, getActiveVaultKey } from './vaultContent.ts';
 
 export interface ChainPayload {
@@ -14,7 +15,7 @@ export interface ChainPayload {
  */
 export async function encryptChainFields<T extends ChainPayload>(
   payload: T,
-  activeKey?: CryptoKey | string | null,
+  activeKey?: VaultKeyring | null,
 ): Promise<T> {
   const resolvedKey = activeKey || getActiveVaultKey();
   if (!resolvedKey) return { ...payload };
@@ -34,7 +35,7 @@ export async function encryptChainFields<T extends ChainPayload>(
  */
 export async function decryptChainRecord<T extends ChainPayload>(
   chain: T,
-  activeKey?: CryptoKey | string | null,
+  activeKey?: VaultKeyring | null,
 ): Promise<T> {
   const resolvedKey = activeKey || getActiveVaultKey();
   if (!resolvedKey) return chain;
@@ -72,7 +73,7 @@ export async function decryptChainRecord<T extends ChainPayload>(
  */
 export async function decryptChainList<T extends ChainPayload>(
   chains: T[],
-  activeKey?: CryptoKey | string | null,
+  activeKey?: VaultKeyring | null,
 ): Promise<T[]> {
   const resolvedKey = activeKey || getActiveVaultKey();
   if (!resolvedKey || !Array.isArray(chains)) return chains;

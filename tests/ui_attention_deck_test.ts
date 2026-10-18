@@ -3,6 +3,7 @@
 //
 // RUN: node --import ./tests/helpers/vaultEndpointHarness.ts --test tests/ui_attention_deck_test.ts
 
+import { asKeyring } from './helpers/vaultTestKeyring.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import React from 'react';
@@ -331,9 +332,9 @@ test('deck: task card, tab switch, keyboard approve is deferred and undoable', a
 });
 
 test('deck: locked vault shows the lock placeholder instead of ciphertext', async () => {
-  const cipherTitle = 'vault:v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+  const cipherTitle = 'vault:v2:e1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
   await withDeck([taskItem('c', { title: cipherTitle })], async ({ text, q }) => {
-    assert.doesNotMatch(text(), /vault:v1:/, 'ciphertext is never painted');
+    assert.doesNotMatch(text(), /vault:v2:e1:/, 'ciphertext is never painted');
     assert.ok(q('[data-debug-id="vault-locked-placeholder"]'), 'lock placeholder shown');
   });
 });
@@ -341,14 +342,14 @@ test('deck: locked vault shows the lock placeholder instead of ciphertext', asyn
 test('deck: unlocked vault decrypts the card title and excerpt', async () => {
   const { encryptVaultText, importRawKeyHex } = await import('../src/ui/utils/vaultCrypto.ts');
   const key = await importRawKeyHex('00'.repeat(32));
-  const title = await encryptVaultText('Secret review title', key);
-  const body = await encryptVaultText('Secret excerpt body', key);
+  const title = await encryptVaultText('Secret review title', asKeyring(key));
+  const body = await encryptVaultText('Secret excerpt body', asKeyring(key));
   const item = taskItem('d', { title, details: { ...taskItem('d').details, excerpt: { author_name: 'soloist #3', body, at: '2026-10-16T11:00:00Z' } } });
   await withDeck([item], async ({ text, act }) => {
     await act(async () => { await new Promise((r) => setTimeout(r, 80)); });
     assert.match(text(), /Secret review title/);
     assert.match(text(), /Secret excerpt body/);
-    assert.doesNotMatch(text(), /vault:v1:/);
+    assert.doesNotMatch(text(), /vault:v2:e1:/);
   }, { unlocked: true });
 });
 

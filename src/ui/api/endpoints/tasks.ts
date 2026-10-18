@@ -1,3 +1,4 @@
+import type { VaultKeyring } from '../../utils/vaultKeyring';
 import * as daemonApi from '../daemonApi';
 import { upsertTaskLogEvent } from '../taskCache';
 import { heimdallApi, withSessionQuery } from '../heimdallApi';
@@ -442,7 +443,7 @@ function normalizeChainProjectGroup(g: any): ChainProjectGroup {
   };
 }
 
-async function decryptChainListItem<T extends ChainListItem>(c: T, key: CryptoKey | string): Promise<T> {
+async function decryptChainListItem<T extends ChainListItem>(c: T, key: VaultKeyring): Promise<T> {
   let title = c.title;
   let projectName = c.projectName;
   if (title && isVaultArmored(title)) {
@@ -458,7 +459,7 @@ async function decryptChainListItem<T extends ChainListItem>(c: T, key: CryptoKe
   return { ...c, title, projectName };
 }
 
-async function decryptChainProjectGroup(g: ChainProjectGroup, key: CryptoKey | string): Promise<ChainProjectGroup> {
+async function decryptChainProjectGroup(g: ChainProjectGroup, key: VaultKeyring): Promise<ChainProjectGroup> {
   let projectName = g.projectName;
   if (projectName && isVaultArmored(projectName)) {
     try {

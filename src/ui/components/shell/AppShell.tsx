@@ -102,6 +102,7 @@ import {
   getActiveVaultKey,
   getActiveBridgeVaultKeyMaterial,
   setActiveBridgeVaultKeyMaterial,
+  setActiveVaultUserId,
   lockVault,
 } from '../../store/vaultSlice';
 import { isVaultSupported } from '../../utils/vaultCrypto';
@@ -970,6 +971,8 @@ function AuthGate() {
             writeLastSeenUserId(nextUserId);
             lastSeenUserRef.current = nextUserId;
           }
+          // P1 vault adapter: the keyring belongs to the authenticated user.
+          setActiveVaultUserId(nextUserId);
         }
         setAuth(next);
       } catch (err: any) {

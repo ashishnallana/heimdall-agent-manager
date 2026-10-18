@@ -4,6 +4,7 @@
 //
 // RUN: node --test tests/ui_vault_sidebar_and_files_test.ts
 
+import { keyringFromHex } from './helpers/vaultTestKeyring.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -18,7 +19,8 @@ import {
   encryptProjectFields,
 } from '../src/ui/utils/vaultProjects.ts';
 
-const TEST_KEY_HEX = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+const TEST_KEY_HEX_RAW = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+const TEST_KEY_HEX = await keyringFromHex(TEST_KEY_HEX_RAW);
 
 // -----------------------------------------------------------------------------
 // Section 2: Behavioral & Cryptographic Decryption Verification

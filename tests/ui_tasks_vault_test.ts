@@ -3,6 +3,7 @@
 //
 // RUN: node --test tests/ui_tasks_vault_test.ts
 
+import { keyringFromHex } from './helpers/vaultTestKeyring.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -22,8 +23,10 @@ import {
   decryptTaskCommentRecord,
 } from '../src/ui/utils/vaultTasks.ts';
 
-const TEST_KEY_HEX = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
-const DIFFERENT_KEY_HEX = 'fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210';
+const TEST_KEY_HEX_RAW = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+const TEST_KEY_HEX = await keyringFromHex(TEST_KEY_HEX_RAW);
+const DIFFERENT_KEY_HEX_RAW = 'fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210';
+const DIFFERENT_KEY_HEX = await keyringFromHex(DIFFERENT_KEY_HEX_RAW);
 
 // -----------------------------------------------------------------------------
 // Test 2: <VaultText /> resolution for plaintext and legacy unencrypted tasks
@@ -73,7 +76,7 @@ test('VaultText helper renders locked placeholder with data-debug-id for armored
 // Test 4: Task field encryption encrypts title and description when unlocked
 // -----------------------------------------------------------------------------
 
-test('encryptTaskFields encrypts title and description into "vault:v1:<base64>" when vault is unlocked', async () => {
+test('encryptTaskFields encrypts title and description into "vault:v2:e1:<base64>" when vault is unlocked', async () => {
   const rawTaskPayload = {
     title: 'Migrate production database with zero downtime',
     description: 'Detailed steps for migrating database: 1. Set up replica, 2. Catch up binlog, 3. Switch DNS.',
@@ -123,7 +126,7 @@ test('encryptTaskFields encrypts title and description into "vault:v1:<base64>" 
 // Test 5: Task comment field encryption encrypts body when unlocked
 // -----------------------------------------------------------------------------
 
-test('encryptTaskCommentFields encrypts comment body into "vault:v1:<base64>" when vault is unlocked', async () => {
+test('encryptTaskCommentFields encrypts comment body into "vault:v2:e1:<base64>" when vault is unlocked', async () => {
   const rawCommentPayload = {
     taskId: 'task_abc',
     chainId: 'chain_123',
@@ -268,7 +271,7 @@ Acceptance criteria:
   // 1. When vault is locked (no key), effectiveDescription is empty string and never raw ciphertext
   const lockedEffectiveDescription = isVaultArmored(armoredDescription) ? ('' || '') : armoredDescription;
   assert.equal(lockedEffectiveDescription, '');
-  assert.ok(!lockedEffectiveDescription.includes('vault:v1:'), 'Ciphertext must never be present in effectiveDescription when locked');
+  assert.ok(!lockedEffectiveDescription.includes('vault:v2:e1:'), 'Ciphertext must never be present in effectiveDescription when locked');
 
   // 2. When vault is unlocked, decryptVaultText decrypts description
   const decrypted = await decryptVaultText(armoredDescription, TEST_KEY_HEX);
@@ -319,7 +322,7 @@ test('Agent card task titles resolve through VaultText and raw ciphertext never 
   assert.equal(lockedResolution.mode, 'locked');
   assert.equal(lockedResolution.displayText, 'Encrypted content');
   assert.equal(lockedResolution.dataDebugId, 'vault-locked-placeholder');
-  assert.ok(!lockedResolution.displayText.includes('vault:v1:'), 'Raw ciphertext must never leak when locked');
+  assert.ok(!lockedResolution.displayText.includes('vault:v2:e1:'), 'Raw ciphertext must never leak when locked');
 
   // 4. When vault is unlocked, decryptVaultText decrypts and returns original task title
   const unlockedResolution = resolveVaultText(armoredTitle, true);
@@ -327,7 +330,7 @@ test('Agent card task titles resolve through VaultText and raw ciphertext never 
   assert.equal(unlockedResolution.mode, 'unlocked');
   const decryptedTitle = await decryptVaultText(armoredTitle, TEST_KEY_HEX);
   assert.equal(decryptedTitle, originalTaskTitle);
-  assert.ok(!decryptedTitle.includes('vault:v1:'), 'Decrypted title must not contain armor prefix');
+  assert.ok(!decryptedTitle.includes('vault:v2:e1:'), 'Decrypted title must not contain armor prefix');
 
   // 5. Unencrypted task titles pass through without modification
   const unencryptedTitle = 'Unencrypted Task Title';
