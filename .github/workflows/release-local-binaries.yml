@@ -140,13 +140,15 @@ jobs:
           - target: linux-arm64
             runner: ubuntu-24.04-arm
             nix_system: aarch64-linux
-          # T12: Android/Termux. Same layout as linux-arm64, but the Odin
-          # binaries are musl-static (release-termux-* attrs): Android's app
-          # seccomp SIGSYS-kills glibc-static at set_robust_list.
-          - target: termux-arm64
-            runner: ubuntu-24.04-arm
-            nix_system: aarch64-linux
-            odin_attr_prefix: release-termux-
+          # T12 termux-arm64 is TEMPORARILY DISABLED: release-termux-ham-bridge
+          # fails to link (musl has no backtrace/backtrace_symbols_fd, used by
+          # crashlog.odin). Restore the entry below once that is fixed, along
+          # with the other termux-arm64 lines disabled in this file and in
+          # promote-release.yml.
+          #   - target: termux-arm64
+          #     runner: ubuntu-24.04-arm
+          #     nix_system: aarch64-linux
+          #     odin_attr_prefix: release-termux-
           - target: darwin-amd64
             runner: macos-15-intel
             nix_system: x86_64-darwin
@@ -349,8 +351,7 @@ jobs:
             runner: ubuntu-24.04
           - target: linux-arm64
             runner: ubuntu-24.04-arm
-          - target: termux-arm64
-            runner: ubuntu-24.04-arm
+          # termux-arm64 temporarily disabled (see the build matrix).
           - target: darwin-amd64
             runner: macos-15-intel
           - target: darwin-arm64
@@ -413,7 +414,7 @@ jobs:
             heimdall-local-darwin-amd64.tar.gz
             heimdall-local-linux-amd64.tar.gz
             heimdall-local-linux-arm64.tar.gz
-            heimdall-local-termux-arm64.tar.gz
+            # heimdall-local-termux-arm64.tar.gz  (temporarily disabled)
           )
           versioned=()
           for tarball in "${expected[@]}"; do
@@ -464,7 +465,6 @@ jobs:
           - heimdall-local-darwin-amd64-$VERSION.tar.gz
           - heimdall-local-linux-amd64-$VERSION.tar.gz
           - heimdall-local-linux-arm64-$VERSION.tar.gz
-          - heimdall-local-termux-arm64-$VERSION.tar.gz (Android/Termux; musl-static)
           - SHA256SUMS
           NOTES
           release_flags=()

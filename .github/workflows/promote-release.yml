@@ -46,7 +46,8 @@ jobs:
           # Same bundle set the release job requires (keep in sync with
           # release-local-binaries.yml "Verify tarballs and create SHA256SUMS").
           missing=0
-          for target in darwin-arm64 darwin-amd64 linux-amd64 linux-arm64 termux-arm64; do
+          # termux-arm64 temporarily disabled (see release-local-binaries.yml build matrix).
+          for target in darwin-arm64 darwin-amd64 linux-amd64 linux-arm64; do
             name="heimdall-local-$target-$VERSION.tar.gz"
             jq -e --arg n "$name" '.assets | any(.name == $n)' release.json >/dev/null || {
               echo "missing asset: $name" >&2; missing=1; }
