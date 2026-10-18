@@ -1,0 +1,489 @@
+#!/usr/bin/env node
+// Deterministic generator for tests/fixtures/vault_v2_vectors.json.
+//
+// Every value is derived from fixed seeds, so re-running this script reproduces the
+// committed file byte for byte (`--check` exits non-zero when it does not). ECDSA
+// signatures use RFC 6979 deterministic nonces, implemented here with BigInt because
+// node:crypto only offers randomized ECDSA. Every signature is cross-checked against
+// node:crypto before it is written, and the Odin suite re-signs with core:crypto/ecdsa
+// (deterministic mode) and compares the bytes.
+//
+// The formats are specified in docs/plans/passwordless-vault.md §1. Consumers:
+//   - tests/ui_vault_v2_envelope_test.ts, tests/ui_vault_keyring_test.ts (TS / WebCrypto)
+//   - src/lib/vault/vault_test.odin (Odin, via #load)
+//
+// Usage: node tools/vault_vectors/gen_vault_v2_vectors.mjs [--check]
+
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const outPath = path.resolve(here, '../../tests/fixtures/vault_v2_vectors.json');
+
+// ── deterministic byte sources ────────────────────────────────────────────────
+const seeded = (label, n) => {
+  const out = Buffer.alloc(n);
+  let off = 0;
+  for (let ctr = 0; off < n; ctr += 1) {
+    const block = crypto.createHash('sha256').update(`heimdall-vault-v2-vectors|${label}|${ctr}`).digest();
+    block.copy(out, off, 0, Math.min(32, n - off));
+    off += 32;
+  }
+  return out;
+};
+const hex = (b) => Buffer.from(b).toString('hex');
+const b64 = (b) => Buffer.from(b).toString('base64');
+const utf8 = (s) => Buffer.from(s, 'utf8');
+const sha256 = (b) => crypto.createHash('sha256').update(b).digest();
+const hmac256 = (key, msg) => crypto.createHmac('sha256', key).update(msg).digest();
+const hkdf = (ikm, salt, info, len = 32) => Buffer.from(crypto.hkdfSync('sha256', ikm, salt, info, len));
+
+const gcmSeal = (key, iv, aad, plaintext) => {
+  const c = crypto.createCipheriv('aes-256-gcm', key, iv);
+  if (aad) c.setAAD(aad);
+  const ct = Buffer.concat([c.update(plaintext), c.final()]);
+  return { ct, tag: c.getAuthTag() };
+};
+
+// ── P-256 with BigInt (only what signing and public-key derivation need) ─────
+const P = 0xffffffff00000001000000000000000000000000ffffffffffffffffffffffffn;
+const N = 0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551n;
+const A = P - 3n;
+const G = [
+  0x6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296n,
+  0x4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5n,
+];
+const mod = (a, m) => ((a % m) + m) % m;
+const inv = (a, m) => {
+  let [r0, r1, s0, s1] = [mod(a, m), m, 1n, 0n];
+  while (r1 !== 0n) {
+    const q = r0 / r1;
+    [r0, r1] = [r1, r0 - q * r1];
+    [s0, s1] = [s1, s0 - q * s1];
+  }
+  if (r0 !== 1n) throw new Error('not invertible');
+  return mod(s0, m);
+};
+const ptAdd = (p1, p2) => {
+  if (p1 === null) return p2;
+  if (p2 === null) return p1;
+  const [x1, y1] = p1;
+  const [x2, y2] = p2;
+  if (x1 === x2 && mod(y1 + y2, P) === 0n) return null;
+  const l = x1 === x2 && y1 === y2
+    ? mod((3n * x1 * x1 + A) * inv(2n * y1, P), P)
+    : mod((y2 - y1) * inv(x2 - x1, P), P);
+  const x3 = mod(l * l - x1 - x2, P);
+  return [x3, mod(l * (x1 - x3) - y1, P)];
+};
+const ptMul = (k, pt) => {
+  let acc = null;
+  let add = pt;
+  for (let e = k; e > 0n; e >>= 1n) {
+    if (e & 1n) acc = ptAdd(acc, add);
+    add = ptAdd(add, add);
+  }
+  return acc;
+};
+const toBig = (b) => BigInt(`0x${hex(b) || '0'}`);
+const fromBig = (x, len = 32) => Buffer.from(x.toString(16).padStart(len * 2, '0'), 'hex');
+const pubRaw = (d) => {
+  const [x, y] = ptMul(d, G);
+  return Buffer.concat([Buffer.from([4]), fromBig(x), fromBig(y)]);
+};
+// A private scalar in [1, n-1] from a seed label.
+const scalar = (label) => {
+  for (let i = 0; ; i += 1) {
+    const d = toBig(seeded(`${label}#${i}`, 32));
+    if (d > 0n && d < N) return d;
+  }
+};
+
+// RFC 6979 §3.2 with HMAC-SHA256, qlen = 256.
+const signRfc6979 = (d, msg) => {
+  const h1 = sha256(msg);
+  const x = fromBig(d);
+  const h1o = fromBig(mod(toBig(h1), N));
+  let V = Buffer.alloc(32, 1);
+  let K = Buffer.alloc(32, 0);
+  K = hmac256(K, Buffer.concat([V, Buffer.from([0]), x, h1o]));
+  V = hmac256(K, V);
+  K = hmac256(K, Buffer.concat([V, Buffer.from([1]), x, h1o]));
+  V = hmac256(K, V);
+  const z = mod(toBig(h1), N);
+  for (;;) {
+    V = hmac256(K, V);
+    const k = toBig(V);
+    if (k >= 1n && k < N) {
+      const r = mod(ptMul(k, G)[0], N);
+      if (r !== 0n) {
+        const s = mod(inv(k, N) * (z + r * d), N);
+        if (s !== 0n) return Buffer.concat([fromBig(r), fromBig(s)]);
+      }
+    }
+    K = hmac256(K, Buffer.concat([V, Buffer.from([0])]));
+    V = hmac256(K, V);
+  }
+};
+
+const spkiFromRaw = (raw) => crypto.createPublicKey({
+  key: Buffer.concat([Buffer.from('3059301306072a8648ce3d020106082a8648ce3d030107034200', 'hex'), raw]),
+  format: 'der',
+  type: 'spki',
+});
+const verifyNode = (raw, msg, sig) => crypto.verify('sha256', msg, { key: spkiFromRaw(raw), dsaEncoding: 'ieee-p1363' }, sig);
+const signChecked = (d, msg) => {
+  const sig = signRfc6979(d, msg);
+  if (!verifyNode(pubRaw(d), msg, sig)) throw new Error('self-check: RFC 6979 signature did not verify');
+  return sig;
+};
+const ecdhShared = (d, peerRaw) => {
+  const e = crypto.createECDH('prime256v1');
+  e.setPrivateKey(fromBig(d));
+  return e.computeSecret(peerRaw);
+};
+
+// ── formats ───────────────────────────────────────────────────────────────────
+const u16be = (n) => { const b = Buffer.alloc(2); b.writeUInt16BE(n); return b; };
+const u32be = (n) => { const b = Buffer.alloc(4); b.writeUInt32BE(n); return b; };
+
+const keyringBytes = (userId, currentEpoch, entries) => Buffer.concat([
+  Buffer.from('HKR1', 'ascii'),
+  u16be(utf8(userId).length), utf8(userId),
+  u32be(currentEpoch),
+  u16be(entries.length),
+  ...entries.flatMap(([epoch, key]) => [u32be(epoch), key]),
+]);
+
+const envelopeAad = (epoch) => utf8(`heimdall-vault-v2|e${epoch}`);
+const envelopeToken = (epoch, key, nonce, plaintext) => {
+  const { ct, tag } = gcmSeal(key, nonce, envelopeAad(epoch), plaintext);
+  return `vault:v2:e${epoch}:${b64(Buffer.concat([nonce, tag, ct]))}`;
+};
+
+const STATEMENT_FIELDS = [
+  'type', 'user_id', 'directory_version', 'issuer_device_id', 'issued_at_ms',
+  'subject_device_id', 'subject_kind', 'subject_sign_pub', 'subject_ecdh_pub',
+  'subject_sign_alg', 'subject_wrap_alg', 'subject_label_b64', 'epoch', 'epoch_commit', 'wrap_sha256',
+];
+const statementCanonical = (fields) => ['heimdall-vault-statement/v1',
+  ...STATEMENT_FIELDS.map((k) => `${k}=${fields[k] ?? ''}`)].join('\n');
+
+const epochCommit = (key, userId, epoch) => hmac256(key, utf8(`heimdall-epoch-commit|${userId}|${epoch}`));
+
+const SIGN_ALG = 'ecdsa-p256-sha256';
+const WRAP_ALG = 'ecdh-p256-hkdf-sha256-aes256gcm';
+// Signature objects are serialized with this exact key order and no whitespace.
+const sigObject = (sig) => `{"alg":"${SIGN_ALG}","sig":"${hex(sig)}"}`;
+const wrapCanonicalJson = (w) => `{"v":1,"alg":${JSON.stringify(w.alg)},"recipient_device_id":${JSON.stringify(w.recipient_device_id)},"directory_version":${w.directory_version},"current_epoch":${w.current_epoch},"ephemeral_public_key":${JSON.stringify(w.ephemeral_public_key)},"iv":${JSON.stringify(w.iv)},"ciphertext":${JSON.stringify(w.ciphertext)},"wrapped_by_device_id":${JSON.stringify(w.wrapped_by_device_id)}}`;
+
+const ptyAad = (epoch, sessionId, dir) => utf8(`heimdall-pty-v2|e${epoch}|${sessionId}|${dir}`);
+const ptyFrame = (epoch, key, nonce, sessionId, dir, plaintext) => {
+  const { ct, tag } = gcmSeal(key, nonce, ptyAad(epoch, sessionId, dir), plaintext);
+  return Buffer.concat([u32be(epoch), nonce, tag, ct]);
+};
+
+const SEARCH_DOMAIN = 'heimdall/task-chain-search-rpc/v2';
+const searchKey = (epochKey, epoch) => hkdf(epochKey, utf8(SEARCH_DOMAIN), utf8(`${SEARCH_DOMAIN}|e${epoch}`));
+const searchAad = (owner, bridge, req, dir, expires, epoch) => utf8(`${SEARCH_DOMAIN}|${owner}|${bridge}|${req}|${dir}|${expires}|e${epoch}`);
+
+// ── build ─────────────────────────────────────────────────────────────────────
+const USER_ID = 'usr_0123456789abcdef';
+const K1 = seeded('epoch-key-1', 32);
+const K2 = seeded('epoch-key-2', 32);
+
+const flip = (buf, i) => { const c = Buffer.from(buf); c[i] ^= 0x01; return c; };
+const tokenPayload = (tok) => Buffer.from(tok.slice(tok.lastIndexOf(':') + 1), 'base64');
+const tokenWith = (epochStr, payload) => `vault:v2:e${epochStr}:${b64(payload)}`;
+
+const envCases = [
+  { name: 'epoch1_ascii', epoch: 1, plaintext: 'hello vault v2' },
+  { name: 'epoch2_unicode', epoch: 2, plaintext: 'naïve – 日本語 – 🔐' },
+  { name: 'epoch1_empty', epoch: 1, plaintext: '' },
+].map((c) => {
+  const nonce = seeded(`envelope-nonce-${c.name}`, 12);
+  const key = c.epoch === 1 ? K1 : K2;
+  return { ...c, nonce: hex(nonce), aad: `heimdall-vault-v2|e${c.epoch}`, token: envelopeToken(c.epoch, key, nonce, utf8(c.plaintext)) };
+});
+
+const base = envCases[0].token;
+const basePayload = tokenPayload(base);
+// Same plaintext sealed under K1 but labelled epoch 2 in the AAD: proves the AAD binds the
+// epoch even when the key would match.
+const k1AsE2 = (() => {
+  const nonce = seeded('envelope-nonce-k1-as-e2', 12);
+  const { ct, tag } = gcmSeal(K1, nonce, envelopeAad(2), utf8('hello vault v2'));
+  return Buffer.concat([nonce, tag, ct]);
+})();
+
+const envNegative = [
+  // Structurally valid, authentication must fail.
+  { name: 'flipped_nonce', kind: 'auth', token: tokenWith('1', flip(basePayload, 0)) },
+  { name: 'flipped_tag', kind: 'auth', token: tokenWith('1', flip(basePayload, 12)) },
+  { name: 'flipped_ciphertext', kind: 'auth', token: tokenWith('1', flip(basePayload, 28)) },
+  { name: 'epoch_header_changed_1_to_2', kind: 'auth', token: tokenWith('2', basePayload) },
+  { name: 'aad_epoch_mismatch_key1_header1', kind: 'auth', token: tokenWith('1', k1AsE2) },
+  // Unknown epoch: locked marker, never an exception.
+  { name: 'unknown_epoch_3', kind: 'unknown_epoch', token: tokenWith('3', basePayload) },
+  { name: 'unknown_epoch_max', kind: 'unknown_epoch', token: tokenWith('4294967295', basePayload) },
+  // Malformed: rejected before any key lookup.
+  { name: 'epoch_zero', kind: 'malformed', token: tokenWith('0', basePayload) },
+  { name: 'epoch_leading_zero', kind: 'malformed', token: tokenWith('01', basePayload) },
+  { name: 'epoch_overflow', kind: 'malformed', token: tokenWith('4294967296', basePayload) },
+  { name: 'epoch_missing', kind: 'malformed', token: `vault:v2:e:${b64(basePayload)}` },
+  { name: 'truncated_payload_27_bytes', kind: 'malformed', token: tokenWith('1', basePayload.subarray(0, 27)) },
+  { name: 'bad_base64_char', kind: 'malformed', token: `vault:v2:e1:${b64(basePayload).replace(/^./, '*')}` },
+  { name: 'bad_base64_length', kind: 'malformed', token: `vault:v2:e1:${b64(basePayload).replace(/=+$/, '').slice(0, -1)}` },
+  { name: 'bad_base64_noncanonical_bits', kind: 'malformed', token: `vault:v2:e1:${(() => { const s = b64(Buffer.concat([basePayload, Buffer.from([0xff])])); return s.slice(0, -3) + 'B=='.slice(0, 3); })()}` },
+  { name: 'base64url_alphabet', kind: 'malformed', token: `vault:v2:e1:${b64(basePayload).replace(/\+/g, '-').replace(/\//g, '_')}-_` },
+  { name: 'trailing_garbage', kind: 'malformed', token: `${base} ` },
+  { name: 'v1_token', kind: 'not_armored', token: `vault:v1:${b64(basePayload)}` },
+  { name: 'enc_v1_token', kind: 'not_armored', token: `ENC:v1:${b64(basePayload)}` },
+];
+
+const kr = keyringBytes(USER_ID, 2, [[1, K1], [2, K2]]);
+const krSingle = keyringBytes(USER_ID, 1, [[1, K1]]);
+const many = (n) => Array.from({ length: n }, (_, i) => [i + 1, seeded(`many-${i + 1}`, 32)]);
+const kr64 = keyringBytes('u'.repeat(64), 64, many(64));
+const keyringNegative = [
+  { name: 'wrong_magic', hex: hex(Buffer.concat([Buffer.from('HKR2'), kr.subarray(4)])) },
+  { name: 'empty_user_id', hex: hex(keyringBytes('', 1, [[1, K1]])) },
+  { name: 'user_id_too_long', hex: hex(keyringBytes('u'.repeat(65), 1, [[1, K1]])) },
+  { name: 'user_id_bad_chars', hex: hex(keyringBytes('usr 1', 1, [[1, K1]])) },
+  { name: 'zero_entries', hex: hex(keyringBytes(USER_ID, 1, [])) },
+  { name: 'sixty_five_entries', hex: hex(keyringBytes(USER_ID, 65, many(65))) },
+  { name: 'duplicate_epoch', hex: hex(keyringBytes(USER_ID, 1, [[1, K1], [1, K2]])) },
+  { name: 'unsorted_epochs', hex: hex(keyringBytes(USER_ID, 2, [[2, K2], [1, K1]])) },
+  { name: 'epoch_zero_entry', hex: hex(keyringBytes(USER_ID, 1, [[0, K2], [1, K1]])) },
+  { name: 'current_epoch_not_latest', hex: hex(keyringBytes(USER_ID, 1, [[1, K1], [2, K2]])) },
+  { name: 'current_epoch_absent', hex: hex(keyringBytes(USER_ID, 3, [[1, K1], [2, K2]])) },
+  { name: 'truncated', hex: hex(kr.subarray(0, kr.length - 1)) },
+  { name: 'trailing_byte', hex: hex(Buffer.concat([kr, Buffer.from([0])])) },
+  { name: 'different_user_id', hex: hex(keyringBytes('usr_someone_else', 2, [[1, K1], [2, K2]])), expected_user_id: USER_ID },
+];
+
+// Statement + signature.
+const issuerD = scalar('statement-issuer');
+const subjectSignD = scalar('statement-subject-sign');
+const subjectEcdhD = scalar('statement-subject-ecdh');
+const stFields = {
+  type: 'approve',
+  user_id: USER_ID,
+  directory_version: '7',
+  issuer_device_id: `dev_${hex(sha256(pubRaw(issuerD))).slice(0, 32)}`,
+  issued_at_ms: '1760000000000',
+  subject_device_id: `dev_${hex(sha256(pubRaw(subjectSignD))).slice(0, 32)}`,
+  subject_kind: 'browser',
+  subject_sign_pub: hex(pubRaw(subjectSignD)),
+  subject_ecdh_pub: hex(pubRaw(subjectEcdhD)),
+  subject_sign_alg: SIGN_ALG,
+  subject_wrap_alg: WRAP_ALG,
+  subject_label_b64: Buffer.from('Laptop – Firefox').toString('base64url'),
+  epoch: '2',
+  epoch_commit: hex(epochCommit(K2, USER_ID, 2)),
+  wrap_sha256: '',
+};
+const stCanonical = statementCanonical(stFields);
+const stSig = signChecked(issuerD, utf8(stCanonical));
+const stInvalid = [
+  { name: 'value_with_space', field: 'user_id', value: 'usr 1' },
+  { name: 'value_with_newline', field: 'issuer_device_id', value: 'dev_a\ntype=revoke' },
+  { name: 'value_with_equals', field: 'subject_label_b64', value: 'TGFwdG9w==' },
+  { name: 'unknown_type', field: 'type', value: 'promote' },
+  { name: 'unknown_kind', field: 'subject_kind', value: 'phone' },
+  { name: 'unknown_sign_alg', field: 'subject_sign_alg', value: 'webauthn-es256' },
+  { name: 'unknown_wrap_alg', field: 'subject_wrap_alg', value: 'webauthn-prf-hkdf-sha256-aes256gcm' },
+];
+
+// Bridge unseal-key statement.
+const bridgeIdentityD = scalar('bridge-identity');
+const bridgeEcdhD = scalar('bridge-ecdh-ephemeral');
+const bridgeId = 'brg_00112233445566778899aabbccddeeff';
+const bootId = hex(seeded('bridge-boot-id', 16));
+const unsealKeyCanonical = `heimdall-bridge-unseal-key/v1\n${bridgeId}\n${hex(pubRaw(bridgeEcdhD))}\n${bootId}`;
+const unsealKeySig = signChecked(bridgeIdentityD, utf8(unsealKeyCanonical));
+const otherIdentityD = scalar('bridge-identity-other');
+
+// Unseal v2.
+const clientD = scalar('unseal-client-ephemeral');
+const unsealShared = ecdhShared(clientD, pubRaw(bridgeEcdhD));
+if (!unsealShared.equals(ecdhShared(bridgeEcdhD, pubRaw(clientD)))) throw new Error('ECDH self-check failed');
+const unsealKey = hkdf(unsealShared, Buffer.alloc(32), utf8('heimdall-bridge-unseal-v2'));
+const unsealTs = 1760000000123;
+const unsealNonce = hex(seeded('unseal-nonce', 16));
+const unsealAad = `heimdall-bridge-unseal-v2|${bridgeId}|${unsealTs}|${unsealNonce}|2`;
+const unsealIv = seeded('unseal-iv', 12);
+const unsealSealed = gcmSeal(unsealKey, unsealIv, utf8(unsealAad), kr);
+
+// Keyring wrap.
+const recipientD = scalar('wrap-recipient-ecdh');
+const wrapEphD = scalar('wrap-ephemeral');
+const recipientDeviceId = `dev_${hex(sha256(pubRaw(scalar('wrap-recipient-sign')))).slice(0, 32)}`;
+const wrapAad = `heimdall-keyring-wrap-v1|${USER_ID}|${recipientDeviceId}|7|2`;
+const wrapKey = hkdf(ecdhShared(wrapEphD, pubRaw(recipientD)), Buffer.alloc(32), utf8('heimdall-keyring-wrap-v1'));
+const wrapIv = seeded('wrap-iv', 12);
+const wrapSealed = gcmSeal(wrapKey, wrapIv, utf8(wrapAad), kr);
+const wrapObj = {
+  alg: WRAP_ALG,
+  recipient_device_id: recipientDeviceId,
+  directory_version: 7,
+  current_epoch: 2,
+  ephemeral_public_key: hex(pubRaw(wrapEphD)),
+  iv: hex(wrapIv),
+  ciphertext: hex(Buffer.concat([wrapSealed.ct, wrapSealed.tag])),
+  wrapped_by_device_id: stFields.issuer_device_id,
+};
+const wrapCanonical = wrapCanonicalJson(wrapObj);
+
+// PTY v2.
+const ptySession = 'shs_0011223344556677';
+const ptyOutSalt = seeded('pty-salt', 4);
+const ptyOutNonce = Buffer.concat([ptyOutSalt, Buffer.from('0000000000000005', 'hex')]);
+const ptyInNonce = seeded('pty-in-nonce', 12);
+const ptyCases = [
+  { direction: 'out', epoch: 2, key: K2, nonce: ptyOutNonce, plaintext: utf8('\x1b[32mok\x1b[0m\r\n') },
+  { direction: 'in', epoch: 2, key: K2, nonce: ptyInNonce, plaintext: utf8('ls -la\r') },
+  { direction: 'out', epoch: 1, key: K1, nonce: ptyOutNonce, plaintext: utf8('') },
+].map((c) => ({
+  direction: c.direction,
+  epoch: c.epoch,
+  session_id: ptySession,
+  nonce: hex(c.nonce),
+  plaintext_hex: hex(c.plaintext),
+  aad: ptyAad(c.epoch, ptySession, c.direction).toString('utf8'),
+  frame_hex: hex(ptyFrame(c.epoch, c.key, c.nonce, ptySession, c.direction, c.plaintext)),
+}));
+
+// Search key v2 + one RPC envelope.
+const sk2 = searchKey(K2, 2);
+const searchNonce = seeded('search-nonce', 12);
+const searchPlain = '{"request_id":"req_1","query":"deploy","project_id":"","status":"","limit":10}';
+const searchAadStr = searchAad(USER_ID, bridgeId, 'req_1', 'request', 1760000005000, 2).toString('utf8');
+const searchSealed = gcmSeal(sk2, searchNonce, utf8(searchAadStr), utf8(searchPlain));
+
+const vectors = {
+  description: 'Generated by tools/vault_vectors/gen_vault_v2_vectors.mjs. Do not edit by hand; regenerate and commit.',
+  version: 1,
+  user_id: USER_ID,
+  epoch_keys: { 1: hex(K1), 2: hex(K2) },
+  envelope: {
+    prefix: 'vault:v2:',
+    token_regex: 'vault:v2:e[1-9][0-9]{0,9}:[A-Za-z0-9+/]+={0,2}',
+    max_payload_bytes: 64 * 1024 * 1024,
+    cases: envCases,
+    negative: envNegative,
+    embedded: {
+      text: `before ${envCases[0].token} middle ${envCases[1].token}. v1 stays vault:v1:${b64(basePayload)} unknown ${tokenWith('9', basePayload)} bare vault:v2: end`,
+      decrypted_with_locked_marker_LOCKED: `before ${envCases[0].plaintext} middle ${envCases[1].plaintext}. v1 stays vault:v1:${b64(basePayload)} unknown LOCKED bare vault:v2: end`,
+    },
+  },
+  keyring: {
+    user_id: USER_ID,
+    current_epoch: 2,
+    entries: [{ epoch: 1, key: hex(K1) }, { epoch: 2, key: hex(K2) }],
+    hex: hex(kr),
+    single_epoch_hex: hex(krSingle),
+    max_64_hex: hex(kr64),
+    max_64_len: kr64.length,
+    negative: keyringNegative,
+  },
+  algorithms: { sign: [SIGN_ALG], wrap: [WRAP_ALG], unknown_sign: ['webauthn-es256', 'ecdsa-p384-sha384', ''], unknown_wrap: ['webauthn-prf-hkdf-sha256-aes256gcm', 'x25519', ''] },
+  epoch_commit: { user_id: USER_ID, epoch: 2, key: hex(K2), message: `heimdall-epoch-commit|${USER_ID}|2`, commit: hex(epochCommit(K2, USER_ID, 2)) },
+  statement: {
+    fields: stFields,
+    canonical: stCanonical,
+    issuer_private_key: hex(fromBig(issuerD)),
+    issuer_public_key: hex(pubRaw(issuerD)),
+    signature: hex(stSig),
+    signature_object: sigObject(stSig),
+    // Signature objects that must be rejected before any verification is attempted.
+    invalid_signature_objects: [
+      `{"alg":"webauthn-es256","sig":"${hex(stSig)}"}`,
+      `{"alg":"ECDSA-P256-SHA256","sig":"${hex(stSig)}"}`,
+      `{"sig":"${hex(stSig)}"}`,
+      `{"alg":"${SIGN_ALG}"}`,
+      `{"alg":"${SIGN_ALG}","sig":"${hex(stSig).slice(0, 126)}"}`,
+      `{"alg":"${SIGN_ALG}","sig":"${hex(stSig).toUpperCase()}"}`,
+      `"${hex(stSig)}"`,
+    ],
+    invalid_values: stInvalid,
+  },
+  bridge_unseal_key: {
+    bridge_id: bridgeId,
+    ecdh_public_key: hex(pubRaw(bridgeEcdhD)),
+    boot_id: bootId,
+    canonical: unsealKeyCanonical,
+    identity_private_key: hex(fromBig(bridgeIdentityD)),
+    identity_public_key: hex(pubRaw(bridgeIdentityD)),
+    signature: hex(unsealKeySig),
+    signature_object: sigObject(unsealKeySig),
+    other_identity_public_key: hex(pubRaw(otherIdentityD)),
+    other_identity_signature: hex(signChecked(otherIdentityD, utf8(unsealKeyCanonical))),
+    other_identity_signature_object: sigObject(signChecked(otherIdentityD, utf8(unsealKeyCanonical))),
+  },
+  unseal_v2: {
+    bridge_id: bridgeId,
+    bridge_ecdh_private_key: hex(fromBig(bridgeEcdhD)),
+    bridge_ecdh_public_key: hex(pubRaw(bridgeEcdhD)),
+    client_private_key: hex(fromBig(clientD)),
+    client_public_key: hex(pubRaw(clientD)),
+    hkdf_info: 'heimdall-bridge-unseal-v2',
+    aes_key: hex(unsealKey),
+    timestamp: unsealTs,
+    nonce: unsealNonce,
+    current_epoch: 2,
+    aad: unsealAad,
+    iv: hex(unsealIv),
+    keyring_hex: hex(kr),
+    tag: hex(unsealSealed.tag),
+    ciphertext: hex(unsealSealed.ct),
+  },
+  wrap: {
+    user_id: USER_ID,
+    recipient_ecdh_private_key: hex(fromBig(recipientD)),
+    recipient_ecdh_public_key: hex(pubRaw(recipientD)),
+    ephemeral_private_key: hex(fromBig(wrapEphD)),
+    hkdf_info: 'heimdall-keyring-wrap-v1',
+    aad: wrapAad,
+    keyring_hex: hex(kr),
+    json: wrapObj,
+    canonical_json: wrapCanonical,
+    wrap_sha256: hex(sha256(utf8(wrapCanonical))),
+  },
+  pty: { cases: ptyCases },
+  search: {
+    domain: SEARCH_DOMAIN,
+    epoch: 2,
+    epoch_key: hex(K2),
+    salt: SEARCH_DOMAIN,
+    info: `${SEARCH_DOMAIN}|e2`,
+    derived_key: hex(sk2),
+    rpc: {
+      owner_user_id: USER_ID,
+      bridge_id: bridgeId,
+      request_id: 'req_1',
+      direction: 'request',
+      expires_at_ms: 1760000005000,
+      aad: searchAadStr,
+      nonce: hex(searchNonce),
+      plaintext: searchPlain,
+      envelope: `search:v2:e2:${b64(Buffer.concat([searchNonce, searchSealed.tag, searchSealed.ct]))}`,
+    },
+  },
+};
+
+const text = `${JSON.stringify(vectors, null, 2)}\n`;
+if (process.argv.includes('--check')) {
+  const existing = fs.existsSync(outPath) ? fs.readFileSync(outPath, 'utf8') : '';
+  if (existing !== text) {
+    console.error(`${outPath} is stale; re-run without --check`);
+    process.exit(1);
+  }
+  console.log('vault_v2_vectors.json is up to date');
+} else {
+  fs.mkdirSync(path.dirname(outPath), { recursive: true });
+  fs.writeFileSync(outPath, text);
+  console.log(`wrote ${outPath} (${text.length} bytes)`);
+}
