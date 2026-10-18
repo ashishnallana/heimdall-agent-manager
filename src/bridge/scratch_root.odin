@@ -8,7 +8,11 @@ import "core:strings"
 // $TMPDIR when that is an absolute path, else /tmp. Termux/Android has no
 // writable /tmp at all (TMPDIR=$PREFIX/tmp), which is how the PTY host failed
 // with "cannot prepare socket directory /tmp/heimdall-<uid>/..." on a phone.
+// On Windows it is the user's temp directory (%TEMP%, inside the profile).
 bridge_scratch_root :: proc(allocator := context.allocator) -> string {
+	when ODIN_OS == .Windows {
+		if tmp, err := os.temp_dir(allocator); err == nil && tmp != "" do return tmp
+	}
 	if raw, found := os.lookup_env("TMPDIR", context.temp_allocator); found {
 		t := strings.trim_right(strings.trim_space(raw), "/")
 		if strings.has_prefix(t, "/") do return strings.clone(t, allocator)

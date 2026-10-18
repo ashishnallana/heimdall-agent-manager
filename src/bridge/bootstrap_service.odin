@@ -225,7 +225,7 @@ bridge_bootstrap_json_string :: proc(b: ^strings.Builder, value: string) {
 // so it renders the shim and the wrapper merely places it (chmod +x). Returns
 // ("", false) when ham-ctl cannot be resolved.
 bridge_bootstrap_render_ham_ctl_shim :: proc(bridge_endpoint, agent_token, instance_id: string) -> (string, bool) {
-	ctl := bridge_bootstrap_ham_ctl_path()
+	ctl := bridge_bootstrap_sh_path(bridge_bootstrap_ham_ctl_path())
 	if strings.trim_space(ctl) == "" do return "", false
 	b := strings.builder_make()
 	strings.write_string(&b, "#!/bin/sh\n")
@@ -237,7 +237,7 @@ bridge_bootstrap_render_ham_ctl_shim :: proc(bridge_endpoint, agent_token, insta
 }
 
 bridge_bootstrap_write_ham_ctl_wrapper :: proc(run_dir, bridge_endpoint, agent_token, instance_id: string) -> bool {
-	ctl := bridge_bootstrap_ham_ctl_path()
+	ctl := bridge_bootstrap_sh_path(bridge_bootstrap_ham_ctl_path())
 	if strings.trim_space(ctl) == "" {
 		fmt.eprintln("bridge bootstrap failed: ham-ctl not found; set HEIMDALL_HAM_CTL_BIN or put ham-ctl on PATH (the flake `bridge` app sets this automatically)")
 		return false
@@ -254,7 +254,50 @@ bridge_bootstrap_write_ham_ctl_wrapper :: proc(run_dir, bridge_endpoint, agent_t
 	strings.write_string(&b, "exec "); bridge_bootstrap_shell_quote(&b, ctl); strings.write_string(&b, " \"$@\"\n")
 	if os.write_entire_file(wrapper_path, strings.to_string(b)) != nil do return false
 	bridge_os_make_owner_executable(wrapper_path)
+	when ODIN_OS == .Windows {
+		cmd_shim, cmd_ok := bridge_bootstrap_render_ham_ctl_cmd_shim(bridge_endpoint, agent_token, instance_id)
+		if !cmd_ok do return false
+		defer delete(cmd_shim)
+		cmd_path := strings.concatenate({wrapper_path, ".cmd"}, context.temp_allocator)
+		if os.write_entire_file(cmd_path, cmd_shim) != nil do return false
+	}
 	return true
+}
+
+// bridge_bootstrap_sh_path writes a Windows path with forward slashes, which both
+// Git Bash (the shell agent CLIs use on Windows) and Win32 accept, and which needs
+// no escaping inside the sh shim. Unix paths are returned unchanged.
+bridge_bootstrap_sh_path :: proc(path: string) -> string {
+	when ODIN_OS == .Windows {
+		out, _ := strings.replace_all(path, "\\", "/", context.temp_allocator)
+		return out
+	} else {
+		return path
+	}
+}
+
+// bridge_bootstrap_render_ham_ctl_cmd_shim renders the cmd.exe twin of the sh shim
+// (.heimdall/bin/ham-ctl.cmd) so `./.heimdall/bin/ham-ctl` also works from
+// PowerShell and cmd on Windows (both resolve it through PATHEXT). `%` is doubled;
+// a value cmd cannot hold inside set "..." (a quote or a line break) is refused
+// rather than written wrongly. Caller owns the result.
+bridge_bootstrap_render_ham_ctl_cmd_shim :: proc(bridge_endpoint, agent_token, instance_id: string) -> (string, bool) {
+	ctl := bridge_bootstrap_ham_ctl_path()
+	if strings.trim_space(ctl) == "" do return "", false
+	for v in ([?]string{bridge_endpoint, agent_token, instance_id, ctl}) {
+		if strings.contains_any(v, "\"\r\n") do return "", false
+	}
+	esc :: proc(v: string) -> string {
+		out, _ := strings.replace_all(v, "%", "%%", context.temp_allocator)
+		return out
+	}
+	b := strings.builder_make()
+	strings.write_string(&b, "@echo off\r\n")
+	strings.write_string(&b, "set \"HEIMDALL_BRIDGE_ENDPOINT="); strings.write_string(&b, esc(bridge_endpoint)); strings.write_string(&b, "\"\r\n")
+	strings.write_string(&b, "set \"HEIMDALL_AGENT_TOKEN="); strings.write_string(&b, esc(agent_token)); strings.write_string(&b, "\"\r\n")
+	strings.write_string(&b, "set \"HEIMDALL_AGENT_INSTANCE_ID="); strings.write_string(&b, esc(instance_id)); strings.write_string(&b, "\"\r\n")
+	strings.write_string(&b, "\""); strings.write_string(&b, esc(ctl)); strings.write_string(&b, "\" %*\r\n")
+	return strings.to_string(b), true
 }
 
 bridge_bootstrap_shell_quote :: proc(b: ^strings.Builder, value: string) {
@@ -284,7 +327,7 @@ bridge_bootstrap_ham_ctl_path :: proc() -> string {
 bridge_bootstrap_normalize_executable_path :: proc(value: string) -> string {
 	trimmed := strings.trim_space(value)
 	if trimmed == "" do return ""
-	if strings.contains(trimmed, "/") {
+	if bridge_os_path_is_explicit(trimmed) {
 		expanded := bridge_expand_home(trimmed)
 		if absolute, err := os.get_absolute_path(expanded, context.allocator); err == nil && strings.trim_space(absolute) != "" do return absolute
 		return expanded
@@ -293,24 +336,7 @@ bridge_bootstrap_normalize_executable_path :: proc(value: string) -> string {
 }
 
 bridge_bootstrap_find_on_path :: proc(name: string) -> string {
-	path := os.get_env_alloc("PATH", context.allocator)
-	start := 0
-	for start <= len(path) {
-		end_rel := strings.index_byte(path[start:], ':')
-		end := len(path)
-		if end_rel >= 0 do end = start + end_rel
-		dir := path[start:end]
-		if strings.trim_space(dir) != "" {
-			candidate := strings.concatenate({strings.trim_right(dir, "/"), "/", name})
-			if _, err := os.stat(candidate, context.allocator); err == nil {
-				if absolute, abs_err := os.get_absolute_path(candidate, context.allocator); abs_err == nil && strings.trim_space(absolute) != "" do return absolute
-				return candidate
-			}
-		}
-		if end_rel < 0 do break
-		start = end + 1
-	}
-	return ""
+	return bridge_runtime_find_on_path(name)
 }
 
 bootstrap_global_cache: Bootstrap_Cache
@@ -908,6 +934,14 @@ bridge_bootstrap_build_file_set :: proc(manifest_json: string, d: Bridge_Bootstr
 		return nil, Bridge_Bootstrap_Result{ok = false, stage = "assemble", detail = "ham-ctl not found; set HEIMDALL_HAM_CTL_BIN or put ham-ctl on PATH"}
 	}
 	append(&files, Bridge_Bootstrap_File{file_id = strings.clone(".heimdall/bin/ham-ctl"), relative_path = strings.clone(".heimdall/bin/ham-ctl"), kind = "CTL_WRAPPER", content = ctl_shim, mode = 0o755})
+	when ODIN_OS == .Windows {
+		cmd_shim, cmd_ok := bridge_bootstrap_render_ham_ctl_cmd_shim(bridge_endpoint, agent_token, d.instance_id)
+		if !cmd_ok {
+			bridge_bootstrap_free_file_set(files)
+			return nil, Bridge_Bootstrap_Result{ok = false, stage = "assemble", detail = "ham-ctl.cmd shim could not be rendered"}
+		}
+		append(&files, Bridge_Bootstrap_File{file_id = strings.clone(".heimdall/bin/ham-ctl.cmd"), relative_path = strings.clone(".heimdall/bin/ham-ctl.cmd"), kind = "CTL_WRAPPER", content = cmd_shim, mode = 0o644})
+	}
 
 	if strings.has_prefix(strings.trim_space(d.pack_json), "{") {
 		bridge_taskv2_ensure_pack_worktree(d.pack_json)
@@ -1287,6 +1321,14 @@ bridge_bootstrap_fetch_manifest_and_materialize :: proc(hub_url, bridge_token, i
 		file_id = strings.clone(".heimdall/bin/ham-ctl"), relative_path = strings.clone(".heimdall/bin/ham-ctl"),
 		kind = "CTL_WRAPPER", content = ctl_shim, mode = 0o755,
 	})
+	when ODIN_OS == .Windows {
+		cmd_shim, cmd_ok := bridge_bootstrap_render_ham_ctl_cmd_shim(bridge_endpoint, agent_token, instance_id)
+		if !cmd_ok do return false
+		append(&files, Bridge_Bootstrap_File{
+			file_id = strings.clone(".heimdall/bin/ham-ctl.cmd"), relative_path = strings.clone(".heimdall/bin/ham-ctl.cmd"),
+			kind = "CTL_WRAPPER", content = cmd_shim, mode = 0o644,
+		})
+	}
 
 	mb := strings.builder_make()
 	strings.write_string(&mb, "{\"agent_instance_id\":\""); strings.write_string(&mb, instance_id)

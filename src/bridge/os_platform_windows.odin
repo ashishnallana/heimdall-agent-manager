@@ -167,3 +167,100 @@ bridge_os_test_kill_pid :: proc(pid: int) {
 bridge_os_test_is_own_group_leader :: proc(pid: int) -> (leader: bool, found: bool) {
 	return false, bridge_os_pid_alive(pid)
 }
+
+// ---- executables, PATH and the system shell ----
+
+BRIDGE_PATH_LIST_SEPARATOR :: ';'
+
+// bridge_os_executable_names lists the file names `name` may have on disk: as
+// given when it carries an extension, else with each PATHEXT-style extension in
+// order. A bare name is not tried -- npm installs an extension-less bash shim
+// next to the .cmd one (for Git Bash), and CreateProcess cannot run it.
+bridge_os_executable_names :: proc(name: string) -> []string {
+	base := name[strings.last_index_any(name, "/\\") + 1:]
+	if strings.contains_rune(base, '.') {
+		names := make([]string, 1, context.temp_allocator)
+		names[0] = name
+		return names
+	}
+	exts := [?]string{".exe", ".cmd", ".bat", ".com"}
+	names := make([]string, len(exts), context.temp_allocator)
+	for ext, i in exts do names[i] = strings.concatenate({name, ext}, context.temp_allocator)
+	return names
+}
+
+// bridge_os_path_is_explicit: a value naming a file rather than a PATH lookup.
+bridge_os_path_is_explicit :: proc(value: string) -> bool {
+	if strings.contains_any(value, "/\\") do return true
+	return len(value) >= 2 && value[1] == ':'
+}
+
+// bridge_os_default_shell is the interactive shell: PowerShell 7 (pwsh) when it
+// is installed, else the Windows PowerShell every Windows ships with.
+bridge_os_default_shell :: proc() -> string {
+	if pwsh := bridge_runtime_find_on_path("pwsh"); pwsh != "" {
+		defer delete(pwsh)
+		return strings.clone(pwsh, context.temp_allocator)
+	}
+	return "powershell.exe"
+}
+
+// bridge_os_shell_argv runs a command line through the system shell, cmd.exe.
+// /s with /c keeps the caller's command verbatim: cmd strips only the outer
+// quotes the argv encoding adds. /d skips AutoRun registry hooks.
+bridge_os_shell_argv :: proc(cmd: string) -> []string {
+	argv := make([]string, 5, context.temp_allocator)
+	argv[0], argv[1], argv[2], argv[3], argv[4] = "cmd.exe", "/d", "/s", "/c", cmd
+	return argv
+}
+
+// bridge_os_ps renders the process table in the same row format `ps -A -o
+// pid=,ppid=,rss=,<cpu>=,args=` prints on Unix, so the parsers stay shared:
+// rss is the working set in KiB, cputime is [hh:]mm:ss of user+kernel time,
+// %cpu is the lifetime average (as Linux ps reports it), args is the image name
+// (Windows keeps no cheap view of another process's command line).
+bridge_os_ps :: proc(cpu: Bridge_Ps_Cpu_Column, allocator := context.allocator) -> (output: string, ok: bool) {
+	snap := win.CreateToolhelp32Snapshot(win.TH32CS_SNAPPROCESS, 0)
+	if snap == win.INVALID_HANDLE_VALUE do return "", false
+	defer win.CloseHandle(snap)
+	now_ft: win.FILETIME
+	win.GetSystemTimeAsFileTime(&now_ft)
+	now_ticks := i64(u64(now_ft.dwHighDateTime) << 32 | u64(now_ft.dwLowDateTime))
+
+	b := strings.builder_make(allocator)
+	entry := win.PROCESSENTRY32W{dwSize = size_of(win.PROCESSENTRY32W)}
+	for more := win.Process32FirstW(snap, &entry); more; more = win.Process32NextW(snap, &entry) {
+		pid := entry.th32ProcessID
+		if pid == 0 do continue
+		rss_kib: i64
+		cpu_secs: f64
+		created_ticks: i64
+		if h := win.OpenProcess(win.PROCESS_QUERY_LIMITED_INFORMATION, false, pid); h != nil {
+			counters := Process_Memory_Counters{cb = size_of(Process_Memory_Counters)}
+			if K32GetProcessMemoryInfo(h, &counters, counters.cb) do rss_kib = i64(counters.WorkingSetSize / 1024)
+			c, e, k, u: win.FILETIME
+			if win.GetProcessTimes(h, &c, &e, &k, &u) {
+				kt := u64(k.dwHighDateTime) << 32 | u64(k.dwLowDateTime)
+				ut := u64(u.dwHighDateTime) << 32 | u64(u.dwLowDateTime)
+				cpu_secs = f64(kt + ut) / 10_000_000
+				created_ticks = i64(u64(c.dwHighDateTime) << 32 | u64(c.dwLowDateTime))
+			}
+			win.CloseHandle(h)
+		}
+		name_len := 0
+		for name_len < len(entry.szExeFile) && entry.szExeFile[name_len] != 0 do name_len += 1
+		name, _ := win.utf16_to_utf8(entry.szExeFile[:name_len], context.temp_allocator)
+		cpu_text: string
+		switch cpu {
+		case .Cputime:
+			total := int(cpu_secs)
+			cpu_text = fmt.tprintf("%d:%02d:%02d", total / 3600, (total / 60) % 60, total % 60)
+		case .Percent:
+			wall := f64(now_ticks - created_ticks) / 10_000_000
+			pct := cpu_secs / wall * 100 if created_ticks > 0 && wall > 0 else 0
+			cpu_text = fmt.tprintf("%.1f", pct)
+		}
+		fmt.sbprintf(&b, "%d %d %d %s %s\n", pid, entry.th32ParentProcessID, rss_kib, cpu_text, name)
+	}
+	return strings.to_string(b), true
+}

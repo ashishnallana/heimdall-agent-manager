@@ -355,18 +355,14 @@ process_tree_build_nodes :: proc(
 	return nodes
 }
 
+// Bridge_Ps_Cpu_Column picks the cpu column of bridge_os_ps rows.
+Bridge_Ps_Cpu_Column :: enum {
+	Cputime, // [[dd-]hh:]mm:ss of cpu time
+	Percent, // %cpu
+}
+
 process_tree_run_ps :: proc(allocator := context.allocator) -> (output: string, ok: bool) {
-	cmd := [?]string{"ps", "-A", "-o", "pid=,ppid=,rss=,%cpu=,args="}
-	state, stdout, stderr, err := os.process_exec(os.Process_Desc{
-		command = cmd[:],
-		env = []string{"LC_ALL=C"},
-	}, allocator)
-	if len(stderr) > 0 do delete(stderr, allocator)
-	if err != nil || !state.success {
-		if len(stdout) > 0 do delete(stdout, allocator)
-		return "", false
-	}
-	return string(stdout), true
+	return bridge_os_ps(.Percent, allocator)
 }
 
 process_tree_collect_live :: proc(allocator := context.allocator) -> ([dynamic]Process_Node, bool) {

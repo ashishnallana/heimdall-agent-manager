@@ -37,7 +37,7 @@ bridge_provider_store_init :: proc() {
 
 bridge_expand_home :: proc(path: string) -> string {
 	if strings.has_prefix(path, "~/") {
-		home := os.get_env_alloc("HOME", context.allocator)
+		home := cfg_lib.home_dir()
 		defer delete(home)
 		if home != "" do return strings.concatenate({home, path[1:]})
 	}

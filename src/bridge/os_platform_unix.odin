@@ -6,6 +6,7 @@ package main
 // is shared.
 
 import "core:fmt"
+import "core:os"
 import "core:strings"
 import "core:sys/posix"
 
@@ -185,3 +186,46 @@ bridge_os_test_is_own_group_leader :: proc(pid: int) -> (leader: bool, found: bo
 	return int(pgid) == pid, true
 }
 
+
+// ---- executables, PATH and the system shell ----
+
+BRIDGE_PATH_LIST_SEPARATOR :: ':'
+
+// bridge_os_executable_names lists the file names `name` may have on disk.
+bridge_os_executable_names :: proc(name: string) -> []string {
+	names := make([]string, 1, context.temp_allocator)
+	names[0] = name
+	return names
+}
+
+// bridge_os_path_is_explicit: a value naming a file rather than a PATH lookup.
+bridge_os_path_is_explicit :: proc(value: string) -> bool {
+	return strings.contains(value, "/")
+}
+
+// bridge_os_default_shell is the interactive shell: $SHELL, else /bin/sh.
+bridge_os_default_shell :: proc() -> string {
+	shell_env := os.get_env("SHELL", context.temp_allocator)
+	return shell_env if len(shell_env) > 0 else "/bin/sh"
+}
+
+// bridge_os_shell_argv runs a command line through the system shell.
+bridge_os_shell_argv :: proc(cmd: string) -> []string {
+	argv := make([]string, 3, context.temp_allocator)
+	argv[0], argv[1], argv[2] = "sh", "-c", cmd
+	return argv
+}
+
+// bridge_os_ps lists every process as `ps -A -o pid=,ppid=,rss=,<cpu>=,args=`
+// rows (rss in KiB; cpu is cputime or %cpu per `cpu`).
+bridge_os_ps :: proc(cpu: Bridge_Ps_Cpu_Column, allocator := context.allocator) -> (output: string, ok: bool) {
+	cols := "pid=,ppid=,rss=,cputime=,args=" if cpu == .Cputime else "pid=,ppid=,rss=,%cpu=,args="
+	cmd := [?]string{"ps", "-A", "-o", cols}
+	state, stdout, stderr, err := os.process_exec(os.Process_Desc{command = cmd[:], env = []string{"LC_ALL=C"}}, allocator)
+	if len(stderr) > 0 do delete(stderr, allocator)
+	if err != nil || !state.success {
+		if len(stdout) > 0 do delete(stdout, allocator)
+		return "", false
+	}
+	return string(stdout), true
+}

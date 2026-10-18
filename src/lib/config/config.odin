@@ -196,13 +196,26 @@ load :: proc(path: string) -> (Load_Result, bool) {
 	}, true
 }
 
+// home_dir is the user's home directory: $HOME, or on Windows (where HOME is
+// usually unset) %USERPROFILE%. "" when neither is known. Caller owns the result.
+home_dir :: proc(allocator := context.allocator) -> string {
+	home := os.get_env_alloc("HOME", allocator)
+	when ODIN_OS == .Windows {
+		if home == "" {
+			delete(home, allocator)
+			home = os.get_env_alloc("USERPROFILE", allocator)
+		}
+	}
+	return home
+}
+
 expand_home :: proc(path: string) -> string {
 	// Only the "~" case hands `home` itself back; every other path owns a fresh
 	// string, so the lookup is freed here instead of leaking on each call.
 	home := os.get_env_alloc("HEIMDALL_HOME", context.allocator)
 	if home == "" {
 		delete(home)
-		home = os.get_env_alloc("HOME", context.allocator)
+		home = home_dir()
 	}
 	if path == "~" {
 		if home != "" do return home

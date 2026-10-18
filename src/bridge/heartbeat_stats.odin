@@ -194,14 +194,7 @@ heartbeat_stats_sum_tree :: proc(procs: []Stats_Proc, root: i32, allocator := co
 
 @(private = "file")
 heartbeat_stats_run_ps :: proc(allocator := context.allocator) -> (output: string, ok: bool) {
-	cmd := [?]string{"ps", "-A", "-o", "pid=,ppid=,rss=,cputime=,args="}
-	state, stdout, stderr, err := os.process_exec(os.Process_Desc{command = cmd[:], env = []string{"LC_ALL=C"}}, allocator)
-	if len(stderr) > 0 do delete(stderr, allocator)
-	if err != nil || !state.success {
-		if len(stdout) > 0 do delete(stdout, allocator)
-		return "", false
-	}
-	return string(stdout), true
+	return bridge_os_ps(.Cputime, allocator)
 }
 
 // heartbeat_stats_parse_ps parses `pid ppid rss cputime args` rows. rss is in

@@ -2611,12 +2611,12 @@ bridge_runtime_find_on_path :: proc(name: string) -> string {
 	defer delete(path)
 	start := 0
 	for start <= len(path) {
-		end_rel := strings.index_byte(path[start:], ':')
+		end_rel := strings.index_byte(path[start:], BRIDGE_PATH_LIST_SEPARATOR)
 		end := len(path)
 		if end_rel >= 0 do end = start + end_rel
 		dir := path[start:end]
-		if strings.trim_space(dir) != "" {
-			candidate := strings.concatenate({strings.trim_right(dir, "/"), "/", name})
+		if strings.trim_space(dir) != "" do for file_name in bridge_os_executable_names(name) {
+			candidate := strings.concatenate({strings.trim_right(dir, "/\\"), "/", file_name})
 			if _, err := os.stat(candidate, context.allocator); err == nil {
 				if absolute, abs_err := os.get_absolute_path(candidate, context.allocator); abs_err == nil && strings.trim_space(absolute) != "" {
 					// get_absolute_path may return its input unchanged when candidate is
@@ -4288,12 +4288,12 @@ bridge_hub_handle_shell_start :: proc(conn: ^ws.Connection, text: string) {
 	}
 
 	// T11-BUG-3: an interactive `shell` has no command of its own — it *is* the
-	// user's login shell. Default to $SHELL (falling back to /bin/sh) instead of
-	// rejecting the request. Every other kind still requires an explicit cmd.
+	// user's login shell. Default to $SHELL (falling back to /bin/sh; PowerShell on
+	// Windows) instead of rejecting the request. Every other kind still requires an
+	// explicit cmd.
 	cmd_defaulted := false
 	if kind == .Shell && cmd == "" {
-		shell_env := os.get_env("SHELL", context.temp_allocator)
-		cmd = len(shell_env) > 0 ? shell_env : "/bin/sh"
+		cmd = bridge_os_default_shell()
 		cmd_defaulted = true
 	}
 	if cmd == "" {
@@ -4346,10 +4346,13 @@ bridge_hub_handle_shell_start :: proc(conn: ^ws.Connection, text: string) {
 	spawn_cmd := cmd
 	spawn_cmd_owned := false
 	defer if spawn_cmd_owned do delete(spawn_cmd)
-	if kind == .Server {
+	// Both rewrites below are sh syntax. On Windows a server needs no exec: the
+	// pty-host keeps the whole session tree in one Job Object, so cmd.exe staying
+	// as the parent does not end the session early.
+	if kind == .Server && ODIN_OS != .Windows {
 		spawn_cmd = strings.concatenate({"exec ", cmd})
 		spawn_cmd_owned = true
-	} else if cmd_defaulted {
+	} else if cmd_defaulted && ODIN_OS != .Windows {
 		// T11-BUG-11 (REQ-SHELL-ENV-1): a `shell` session with no cmd means
 		// "give me my shell", so start it as a *login* shell. Without -l only
 		// ~/.zshrc runs; ~/.zprofile, ~/.zlogin and /etc/profile never do, so the
@@ -4402,8 +4405,14 @@ bridge_hub_handle_shell_start :: proc(conn: ^ws.Connection, text: string) {
 	// exec the setsid binary, it sees EPERM (already a leader), forks, and the
 	// parent exits immediately with code 0 — pty-host sees the direct child exit
 	// while the actual shell runs as an orphan grandchild disconnected from the PTY.
-	argv: []string
-	argv = []string{"sh", "-c", spawn_cmd}
+	argv := bridge_os_shell_argv(spawn_cmd)
+	when ODIN_OS == .Windows {
+		// The defaulted interactive shell is launched directly, not via cmd.exe /c.
+		if cmd_defaulted {
+			argv = make([]string, 1, context.temp_allocator)
+			argv[0] = spawn_cmd
+		}
+	}
 	cloned_argv := make([]string, len(argv))
 	for a, i in argv { cloned_argv[i] = strings.clone(a) }
 
@@ -4990,8 +4999,7 @@ bridge_hub_handle_shell_restart :: proc(conn: ^ws.Connection, text: string) {
 
 	// Re-spawn with same cmd/cwd/label. AFTER the cwd check, so the refusal above
 	// cannot leak this argv — only `req` has a deferred delete.
-	argv: []string
-	argv = []string{"sh", "-c", sess.cmd}
+	argv := bridge_os_shell_argv(sess.cmd)
 	cloned_argv := make([]string, len(argv))
 	for a, i in argv { cloned_argv[i] = strings.clone(a) }
 

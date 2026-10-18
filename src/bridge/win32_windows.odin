@@ -42,3 +42,21 @@ foreign advapi32 {
 	CredDeleteW :: proc(TargetName: win.wstring, Type: u32, Flags: u32) -> win.BOOL ---
 	CredFree :: proc(Buffer: rawptr) ---
 }
+
+Process_Memory_Counters :: struct {
+	cb:                         u32,
+	PageFaultCount:             u32,
+	PeakWorkingSetSize:         uint,
+	WorkingSetSize:             uint,
+	QuotaPeakPagedPoolUsage:    uint,
+	QuotaPagedPoolUsage:        uint,
+	QuotaPeakNonPagedPoolUsage: uint,
+	QuotaNonPagedPoolUsage:     uint,
+	PagefileUsage:              uint,
+	PeakPagefileUsage:          uint,
+}
+
+@(default_calling_convention = "system")
+foreign kernel32 {
+	K32GetProcessMemoryInfo :: proc(Process: win.HANDLE, ppsmemCounters: ^Process_Memory_Counters, cb: u32) -> win.BOOL ---
+}

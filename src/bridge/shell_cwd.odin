@@ -76,6 +76,7 @@ package main
 // it is checked literally and refused naming what was checked.
 
 import "core:os"
+import cfg_lib "odin_test:lib/config"
 import "core:strings"
 
 // Bridge_Shell_Cwd_Verdict is the outcome of resolving a requested cwd.
@@ -99,7 +100,7 @@ Bridge_Shell_Cwd_Verdict :: enum {
 // whitespace-only `cwd` means "no cwd requested" and yields ("", .Ok), which callers
 // pass through as has_cwd=false to keep today's inherit-the-bridge's-cwd default.
 bridge_shell_cwd_resolve :: proc(cwd: string, allocator := context.allocator) -> (resolved: string, verdict: Bridge_Shell_Cwd_Verdict) {
-	return bridge_shell_cwd_resolve_with_home(cwd, os.get_env("HOME", context.temp_allocator), allocator)
+	return bridge_shell_cwd_resolve_with_home(cwd, cfg_lib.home_dir(context.temp_allocator), allocator)
 }
 
 // bridge_shell_cwd_resolve_with_home is the whole of the logic, with HOME PASSED IN.

@@ -21,6 +21,7 @@ import base64 "core:encoding/base64"
 import json "core:encoding/json"
 import ws "odin_test:lib/ws"
 import jsonx "odin_test:lib/jsonx"
+import cfg_lib "odin_test:lib/config"
 
 // The resolved (symlink-free, absolute) sandbox root. Set once at startup by
 // bridge_fs_init. Empty means FS management is effectively disabled (deny all).
@@ -48,7 +49,7 @@ bridge_fs_init :: proc(configured_root: string, read_page_bytes: i64 = BRIDGE_FS
 		if page > BRIDGE_FS_READ_PAGE_BYTES do page = BRIDGE_FS_READ_PAGE_BYTES
 		bridge_fs_read_page_bytes = page
 	}
-	home := os.get_env_alloc("HOME", context.allocator)
+	home := cfg_lib.home_dir()
 	root := strings.trim_space(configured_root)
 	// Default to $HOME when unset. Also expand a bare "~" or "~/..." to $HOME
 	// (bridge_expand_home only handles the "~/" form, so handle bare "~" here).
