@@ -111,6 +111,13 @@ All binary values are hex unless marked b64. Signatures are ECDSA P-256 / SHA-25
 
   `heimdall-bridge-unseal-key/v1\n<bridge_id>\n<ecdh_pub_hex>\n<boot_id>`
 
+**Credential agility (passkeys / YubiKeys later — design for it now, do not build it).**
+A directory entry is a *credential* with two independent capabilities, each named by an algorithm id, verified/dispatched through one allowlist on every runtime (unknown id → reject, fail closed):
+- `sign_alg` — how the entry signs statements and request signatures. Now: `ecdsa-p256-sha256` (raw r‖s over the canonical bytes). Later: `webauthn-es256` (assertion where `challenge = SHA256(canonical bytes)`; signature object carries `authenticator_data` + `client_data_json`), which a passkey or YubiKey can produce.
+- `wrap_alg` — how a keyring copy is wrapped to the entry. Now: `ecdh-p256-hkdf-sha256-aes256gcm`. Later: `webauthn-prf-hkdf-sha256-aes256gcm` (PRF/hmac-secret output → HKDF → AES-GCM; per-wrap PRF salt in the wrap JSON) for passkeys/YubiKeys.
+- `kind` is a display/policy class (`browser|bridge|recovery` now; `passkey|security_key` later). Policy (who may approve, who counts toward the last-approver guard) is computed by ONE function per runtime from `kind`, never by scattered string compares. Bridges: never approve.
+Consequences for the formats below: every signature is a JSON object `{"alg":…,"sig":…}` (plus alg-specific fields), every wrap JSON carries `"alg"`, statements carry `subject_sign_alg` and `subject_wrap_alg`, and the hub stores `sign_alg`/`wrap_alg` columns. `kind` is validated in domain code (not an SQL CHECK) so a new kind needs no table rebuild. No passkey code ships now; the extension points are the allowlists and the dispatch functions, each with a test proving unknown ids are rejected.
+
 **Signed statements.** Canonical bytes are UTF-8 lines joined by `\n` in a fixed field order, with no trailing newline.
 - Values must match `[A-Za-z0-9_.:-]*`. Free text such as labels is base64url.
 - Template:
@@ -126,6 +133,8 @@ All binary values are hex unless marked b64. Signatures are ECDSA P-256 / SHA-25
   subject_kind=<browser|bridge|recovery>
   subject_sign_pub=…
   subject_ecdh_pub=…           (empty for bridge)
+  subject_sign_alg=…           (e.g. ecdsa-p256-sha256)
+  subject_wrap_alg=…           (e.g. ecdh-p256-hkdf-sha256-aes256gcm; empty for bridge)
   subject_label_b64=…
   epoch=<n>
   epoch_commit=…
@@ -147,7 +156,7 @@ All binary values are hex unless marked b64. Signatures are ECDSA P-256 / SHA-25
 - JSON shape:
 
   ```json
-  {"v":1,"recipient_device_id","directory_version","current_epoch",
+  {"v":1,"alg":"ecdh-p256-hkdf-sha256-aes256gcm","recipient_device_id","directory_version","current_epoch",
    "ephemeral_public_key","iv","ciphertext" /* ct‖tag */,
    "wrapped_by_device_id","signature" /* wrap statement; wrap_sha256 = SHA256(canonical wrap JSON minus signature) */}
   ```
@@ -316,6 +325,16 @@ Statement signatures are verified on the hub too, as defense in depth. Clients s
 - Register with a mismatched proof is rejected. A duplicate key is idempotent.
 - Expired code is rejected. Code brute force is rate-limited.
 - A browser code cannot resolve as a bridge grant and vice versa.
+
+### P2.5 — Headless API end-to-end test (no UI)
+
+Prove P1+P2 work together through real HTTP before any UI exists. Add `tests/e2e/vault_devices_api_e2e.mjs` (Node, global WebCrypto, no new deps) plus a runner script `scripts/e2e-vault-devices.ps1` (and `.sh`) that starts a throwaway hub (temp DB, `--trusted-proxy-cidr 127.0.0.1/32`, dev proxy or trusted-proxy user header) and drives it with **simulated devices** built on the same TS crypto modules the UI will use (`vaultKeyring.ts`, `vaultStatements.ts`, wrap code):
+1. Device A: register + genesis (epoch 1), wraps to itself; fetch directory, verify the chain client-side.
+2. Device B: register → pending with user_code; A resolves the code via `/device/verify`, signs approval, wraps keyring to B; B polls `/vault/devices/self`, unwraps, verifies `epoch_commit`; A and B decrypt each other's v2 content.
+3. Bridge: run a real `ham-bridge` enrollment against the throwaway hub where possible (device code approved by A via the API, then unseal v2 to the bridge's signed ephemeral key) and confirm the bridge reports the vault unlocked; if a real bridge cannot run in CI on this OS, simulate the bridge side with the Odin unseal code exercised by an Odin test, and say so.
+4. Revoke B from A → epoch 2, wraps to remaining devices; B can no longer fetch a wrap; new content is `e2`; A reads e1 and e2.
+5. Attacks via raw HTTP: self-revoke (409), last-approver revoke without recovery (409), stale version (409), concurrent approvals (exactly one wins), replayed request nonce, forged signature, hub-side injected device row (insert directly into the temp DB) → clients refuse to wrap to it, wrong-user cookie.
+Acceptance: script exits 0 on Windows; output lists each step PASS/FAIL. Add it to the plan's verification list and keep it green in P3/P4. If any step cannot be automated, document the manual equivalent with exact curl/PowerShell commands.
 
 ### P3 — UI device identity, unified approval, devices page and rotation (delete every password and lock surface)
 
