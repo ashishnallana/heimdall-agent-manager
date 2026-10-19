@@ -13,6 +13,7 @@ import app "odin_test:hub/app"
 import platform "odin_test:hub/platform"
 import iface "odin_test:hub/repository/iface"
 import api_http "odin_test:hub/transport/http"
+import bridge_service "odin_test:hub/service/bridge"
 
 VT_NOW    :: "2026-10-19T10:00:00Z"
 VT_NOW_MS :: i64(1_792_404_000_000)
@@ -118,8 +119,21 @@ test_vault_directory_http_flow :: proc(t: ^testing.T) {
 
 	// A bridge without a vault approval is refused; with one it enrolls, and its
 	// 8-symbol grant code resolves as kind=bridge only.
-	bridge_id, _, enrolled := device_enroll_test_bridge(&graph, alice, "box")
+	bridge_id, bridge_token, enrolled := device_enroll_test_bridge(&graph, alice, "box")
 	testing.expect(t, enrolled && bridge_id != "", "bridge enrolls with a vault approval")
+
+	// L4: an (enrolled) bridge credential of the same account cannot resolve a
+	// pending browser code; the user session can.
+	_, family, fam_ok, _ := bridge_service.verify_enroll_access_token(&graph.bridges, bridge_token)
+	_, committed, _ := bridge_service.commit_pending_enrollment(&graph.bridges, bridge_service.Pending_Commit_Input{bridge_id = bridge_id, family_id = family})
+	testing.expect(t, fam_ok && committed)
+	c := vt_make_dev(3)
+	c_st := vt_statement("register", user_id, &c, &c, "", "")
+	c_reg := dispatch(&graph, "POST", "/api/v1/vault/devices/register", strings.concatenate({`{"statement":"`, vt_escape(c_st), `","proof_signature":`, vt_sign(&c, c_st), "}"}), alice)
+	c_code_body := strings.concatenate({`{"user_code":"`, device_test_json_string(c_reg.body, "user_code"), `"}`})
+	as_bridge := dispatch(&graph, "POST", "/api/v1/device/verify", c_code_body, []contracts.HTTP_Header{{name = "Authorization", value = strings.concatenate({"Bearer ", bridge_token})}})
+	testing.expect_value(t, as_bridge.status, 403)
+	testing.expect_value(t, dispatch(&graph, "POST", "/api/v1/device/verify", c_code_body, alice).status, 200)
 	dir := dispatch(&graph, "GET", "/api/v1/vault/directory", "", alice)
 	testing.expect_value(t, dir.status, 200)
 	testing.expect(t, strings.contains(dir.body, `"kind":"bridge"`) && strings.contains(dir.body, bridge_id), "bridge listed in the directory")
@@ -148,10 +162,12 @@ test_vault_directory_http_flow :: proc(t: ^testing.T) {
 	// M3(a): the operator cancels the still-pending enrollment after its directory
 	// commit: the bridge identity's entry is retired, not left approved.
 	testing.expect(t, !strings.contains(dir.body, `"status":"revoked"`))
-	cancel := dispatch(&graph, "POST", strings.concatenate({"/api/v1/bridges/", bridge_id, "/enrollment/cancel"}), "{}", alice)
+	pending_id, _, pending_ok := device_enroll_test_bridge(&graph, alice, "box2")
+	testing.expect(t, pending_ok)
+	cancel := dispatch(&graph, "POST", strings.concatenate({"/api/v1/bridges/", pending_id, "/enrollment/cancel"}), "{}", alice)
 	testing.expect(t, cancel.status == 200 && strings.contains(cancel.body, `"rolled_back":true`), cancel.body)
 	after := dispatch(&graph, "GET", "/api/v1/vault/directory", "", alice)
-	testing.expect(t, strings.contains(after.body, `"status":"revoked","sign_alg"`), after.body)
+	testing.expect(t, strings.contains(after.body, `"status":"revoked","sign_alg"`), "the rolled-back bridge entry is retired")
 }
 
 // M2: the unsigned entry points (genesis, register, reset) take only an interactive

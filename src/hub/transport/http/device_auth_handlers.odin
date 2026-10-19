@@ -436,6 +436,11 @@ parse_vault_approval :: proc(body: string) -> device_auth.Vault_Approval {
 // Rate-limited with the same per-IP verify budget as bridge codes, and scoped to
 // the session user's own directory: another account's code is "invalid or expired".
 vault_device_verify :: proc(handlers: ^Device_Auth_Handlers, req: Request, auth_ctx: contracts.Auth_Context, raw_code, request_ip: string) -> Response {
+	// A user principal only: a bridge, enrollment or instance credential carries a
+	// user id too, but must never resolve (and so learn the keys of) a pending device.
+	if auth_ctx.kind != .Trusted_Proxy && auth_ctx.kind != .User_Token {
+		return respond_error(domain.domain_error(.Forbidden, "resolving a device code requires a user session"), req.request_id)
+	}
 	if !device_auth.rate_check(handlers.service, "", request_ip) {
 		device_auth_record("verify", "rate_limited")
 		return respond_error(domain.domain_error(.Rate_Limited, "too many device verification attempts from this IP"), req.request_id)
