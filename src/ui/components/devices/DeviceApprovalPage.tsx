@@ -61,6 +61,24 @@ function errText(err: unknown): string {
   return String((err as Error)?.message || err);
 }
 
+/**
+ * Canonical device code: strip whitespace and dashes, uppercase, then re-insert the
+ * dashes by length — 8 symbols is a bridge code (XXXX-XXXX), 12 a browser code
+ * (XXXX-XXXX-XXXX). The hub accepts only that exact form. Throws on anything else.
+ */
+export function normalizeDeviceCode(raw: string): string {
+  const s = String(raw ?? '').replace(/[\s-]+/g, '').toUpperCase();
+  if (!/^[A-Z0-9]*$/.test(s)) throw new Error('A device code has only letters and digits.');
+  if (s.length === 8) return `${s.slice(0, 4)}-${s.slice(4)}`;
+  if (s.length === 12) return `${s.slice(0, 4)}-${s.slice(4, 8)}-${s.slice(8)}`;
+  throw new Error(`A device code has 8 symbols (bridge) or 12 symbols (browser); this one has ${s.length}.`);
+}
+
+function initialCode(): string {
+  const raw = codeFromLocation();
+  try { return raw ? normalizeDeviceCode(raw) : ''; } catch { return raw; }
+}
+
 /** Fingerprint the approver shows: recomputed locally from the served keys, never just echoed. */
 export async function codeInfoFingerprint(info: DeviceCodeInfo): Promise<string> {
   if (info.kind === 'browser') {
@@ -100,14 +118,21 @@ async function waitForEnrollingBridge(bridgeId: string, onTick: (s: string) => v
 }
 
 export default function DeviceApprovalPage() {
-  const [code, setCode] = useState(codeFromLocation());
+  const [code, setCode] = useState(initialCode());
   const [phase, setPhase] = useState<Phase>({ kind: 'enter' });
   const [confirmed, setConfirmed] = useState(false);
   const [label, setLabel] = useState('');
 
   const lookUp = useCallback(async (raw: string) => {
-    const userCode = raw.trim().toUpperCase();
-    if (!userCode) return;
+    if (!raw.trim()) return;
+    let userCode: string;
+    try {
+      userCode = normalizeDeviceCode(raw);
+    } catch (err) {
+      setPhase({ kind: 'failed', message: String((err as Error).message) });
+      return;
+    }
+    setCode(userCode);
     setPhase({ kind: 'loading' });
     setConfirmed(false);
     try {
@@ -135,10 +160,10 @@ export default function DeviceApprovalPage() {
       setPhase({ kind: 'failed', message: 'This device is not ready to approve.' });
       return;
     }
-    const userCode = code.trim().toUpperCase();
     const info = phase.info;
     const finalLabel = label.trim() || phase.label;
     try {
+      const userCode = normalizeDeviceCode(code);
       setPhase({ kind: 'working', message: 'Verifying your device directory…' });
       const chain = await verifiedChainForApproval();
       if (info.kind === 'browser') {
@@ -179,7 +204,7 @@ export default function DeviceApprovalPage() {
         const { chain } = await fetchVerifiedChain();
         await postDenyDevice(phase.info.device_id, chain.version, signed);
       } else {
-        await postApproveBridge({ user_code: code.trim().toUpperCase(), approve: false });
+        await postApproveBridge({ user_code: normalizeDeviceCode(code), approve: false });
       }
       setPhase({ kind: 'done', message: 'Denied. The device was not added.' });
     } catch (err) {
