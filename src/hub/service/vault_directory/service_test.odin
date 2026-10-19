@@ -95,8 +95,8 @@ itoa :: proc(v: i64) -> string {
 	return strings.clone(strconv.write_int(buf[:], v, 10), context.temp_allocator)
 }
 
-statement :: proc(type: string, issuer: ^Dev, subject: ^Dev, version, epoch: string, user := USER) -> string {
-	st := vault.Statement{type = type, user_id = user, directory_version = version, issuer_device_id = issuer.id, issued_at_ms = "1760868000000", epoch = epoch}
+statement :: proc(type: string, issuer: ^Dev, subject: ^Dev, version, epoch: string, user := USER, wrap_sha := "") -> string {
+	st := vault.Statement{type = type, user_id = user, directory_version = version, issuer_device_id = issuer.id, issued_at_ms = "1760868000000", epoch = epoch, wrap_sha256 = wrap_sha}
 	if subject != nil {
 		st.subject_device_id = subject.id
 		st.subject_kind = subject.kind
@@ -106,7 +106,7 @@ statement :: proc(type: string, issuer: ^Dev, subject: ^Dev, version, epoch: str
 		st.subject_wrap_alg = "" if subject.kind == "bridge" else vault.WRAP_ALG_ECDH_P256_HKDF_AES
 		st.subject_label_b64 = LABEL_B64
 	}
-	if type == "epoch" do st.epoch_commit = COMMIT
+	if type == "epoch" || type == "approve" do st.epoch_commit = COMMIT
 	text, ok := vault.statement_canonical(&st, context.temp_allocator)
 	assert(ok)
 	return text
@@ -149,13 +149,49 @@ dev_row :: proc(f: ^Fixture, id: string) -> domain.Vault_Device {
 	return d
 }
 
+wrap_sha :: proc(w: Wrap_Input) -> string {
+	digest: [32]byte
+	ww := w.wrap
+	_ = vault.wrap_sha256(&ww, digest[:])
+	return vault.hex_encode_lower(digest[:], context.temp_allocator)
+}
+
 approve_b :: proc(t: ^testing.T, f: ^Fixture, a, b: ^Dev, version: i64) -> (i64, domain.Domain_Error) {
 	row := dev_row(f, b.id)
-	st := statement("approve", a, b, itoa(version), "1")
+	w := wrap_for(a, b, version, 1)
+	st := statement("approve", a, b, itoa(version), "1", wrap_sha = wrap_sha(w))
 	return approve(&f.svc, Approve_Input{
 		user_id = USER, device_id = b.id, user_code = row.user_code, expected_version = version,
-		statement = st, signature = sign(a, st), wrap = wrap_for(a, b, version, 1), signer = dev_row(f, a.id),
+		statement = st, signature = sign(a, st), wrap = w, signer = dev_row(f, a.id),
 	})
+}
+
+// L7: the approval must commit to the wrap (wrap_sha256) and the current epoch_commit.
+@(test)
+test_vault_approve_binds_wrap_and_epoch_commit :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	f := fixture(t)
+	defer fixture_close(f)
+	a, b := make_dev(1), make_dev(2)
+	do_genesis(t, f, &a)
+	do_register(t, f, &b)
+	row := dev_row(f, b.id)
+	w := wrap_for(&a, &b, 1, 1)
+	try :: proc(f: ^Fixture, a, b: ^Dev, code: string, w: Wrap_Input, st: string) -> domain.Error_Code {
+		_, err := approve(&f.svc, Approve_Input{user_id = USER, device_id = b.id, user_code = code, expected_version = 1, statement = st, signature = sign(a, st), wrap = w, signer = dev_row(f, a.id)})
+		return err.code
+	}
+	no_sha := statement("approve", &a, &b, "1", "1")
+	other_sha := statement("approve", &a, &b, "1", "1", wrap_sha = wrap_sha(wrap_for(&a, &a, 1, 1)))
+	testing.expect_value(t, try(f, &a, &b, row.user_code, w, no_sha), domain.Error_Code.Validation_Failed)
+	testing.expect_value(t, try(f, &a, &b, row.user_code, w, other_sha), domain.Error_Code.Validation_Failed)
+	bad_commit := vault.Statement{type = "approve", user_id = USER, directory_version = "1", issuer_device_id = a.id, issued_at_ms = "1760868000000", epoch = "1",
+		subject_device_id = b.id, subject_kind = "browser", subject_sign_pub = b.sign_pub, subject_ecdh_pub = b.ecdh_pub,
+		subject_sign_alg = vault.SIGN_ALG_ECDSA_P256_SHA256, subject_wrap_alg = vault.WRAP_ALG_ECDH_P256_HKDF_AES, subject_label_b64 = LABEL_B64,
+		epoch_commit = strings.repeat("0", 64, context.temp_allocator), wrap_sha256 = wrap_sha(w)}
+	bad_text, _ := vault.statement_canonical(&bad_commit, context.temp_allocator)
+	testing.expect_value(t, try(f, &a, &b, row.user_code, w, bad_text), domain.Error_Code.Validation_Failed)
+	testing.expect_value(t, try(f, &a, &b, row.user_code, w, statement("approve", &a, &b, "1", "1", wrap_sha = wrap_sha(w))), domain.Error_Code.None)
 }
 
 @(test)

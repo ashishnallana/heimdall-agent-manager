@@ -105,7 +105,7 @@ test_vault_directory_http_flow :: proc(t: ^testing.T) {
 
 	// Approve B: unsigned -> 401; signed by the root -> 200, version 2.
 	approve_path := strings.concatenate({"/api/v1/vault/devices/", b.id, "/approve"})
-	st := vt_statement("approve", user_id, &root, &b, "1", "1")
+	st := vt_statement("approve", user_id, &root, &b, "1", "1", vt_wrap_sha(&root, &b, 1, 1))
 	body := strings.concatenate({`{"user_code":"`, code, `","expected_version":1,"statement":"`, vt_escape(st), `","signature":`, vt_sign(&root, st), `,"wrap":`, vt_wrap_json(user_id, &root, &b, 1, 1), "}"})
 	unsigned := dispatch(&graph, "POST", approve_path, body, alice)
 	testing.expect_value(t, unsigned.status, 401)

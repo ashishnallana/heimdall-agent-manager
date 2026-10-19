@@ -223,6 +223,21 @@ parse_signed_statement :: proc(text, signature, type, user_id, version: string, 
 	return st, domain.Domain_Error{}
 }
 
+// current_epoch_commit is the epoch_commit of the directory's current epoch, taken
+// from its stored (signed) epoch statement. An approval must name exactly this.
+@(private)
+current_epoch_commit :: proc(svc: ^Service, user_id: string, current_epoch: i64) -> (string, domain.Domain_Error) {
+	epochs, err := iface.vault_list_epochs(svc.repo, user_id)
+	if err.code != .None do return "", err
+	for e in epochs {
+		if e.epoch != current_epoch do continue
+		st, ok := vault.statement_parse(e.statement)
+		if !ok || len(st.epoch_commit) != vault.EPOCH_COMMIT_HEX_CHARS do break
+		return st.epoch_commit, domain.Domain_Error{}
+	}
+	return "", domain.domain_error(.Internal_Error, "the current epoch statement is missing or malformed")
+}
+
 Wrap_Input :: struct {
 	wrap:      vault.Keyring_Wrap,
 	signature: string,
@@ -572,7 +587,9 @@ approve :: proc(svc: ^Service, in_: Approve_Input) -> (i64, domain.Domain_Error)
 	if !subject_matches(&st, target) do return 0, invalid("approval statement does not describe the pending device")
 	label, l_ok := vault.label_from_b64(st.subject_label_b64, context.temp_allocator)
 	if !l_ok do return 0, invalid("subject_label_b64 is not a valid label")
-	if st.epoch != i64_str(dir.current_epoch) || !is_hex64_or_empty(st.epoch_commit) do return 0, invalid("approval must name the current epoch")
+	commit, cerr := current_epoch_commit(svc, in_.user_id, dir.current_epoch)
+	if cerr.code != .None do return 0, cerr
+	if st.epoch != i64_str(dir.current_epoch) || st.epoch_commit != commit do return 0, invalid("approval must name the current epoch and its epoch_commit")
 
 	cm := domain.Vault_Directory_Commit{
 		user_id = in_.user_id, expected_version = in_.expected_version, now = now,
@@ -583,13 +600,14 @@ approve :: proc(svc: ^Service, in_: Approve_Input) -> (i64, domain.Domain_Error)
 	if domain.vault_kind_policy(target.kind).receives_wrap {
 		row, werr := check_wrap(svc, in_.wrap, in_.user_id, target, dir.version, dir.current_epoch, in_.signer, now)
 		if werr.code != .None do return 0, werr
-		if st.wrap_sha256 != "" {
-			digest: [32]byte
-			w := in_.wrap.wrap
-			_ = vault.wrap_sha256(&w, digest[:])
-			if st.wrap_sha256 != vault.hex_encode_lower(digest[:], context.temp_allocator) do return 0, invalid("approval statement names a different wrap")
-		}
+		// The signed approval must commit to exactly this wrap.
+		digest: [32]byte
+		w := in_.wrap.wrap
+		if !vault.wrap_sha256(&w, digest[:]) do return 0, invalid("wrap is malformed")
+		if st.wrap_sha256 == "" || st.wrap_sha256 != vault.hex_encode_lower(digest[:], context.temp_allocator) do return 0, invalid("approval statement must name this wrap in wrap_sha256")
 		cm.wraps = []domain.Vault_Wrap_Row{row}
+	} else if st.wrap_sha256 != "" {
+		return 0, invalid("this device kind receives no wrap")
 	}
 	return iface.vault_commit(svc.repo, cm)
 }
@@ -638,7 +656,9 @@ check_bridge_approval :: proc(svc: ^Service, in_: Bridge_Approval_Input) -> (dom
 	if st.subject_kind != "bridge" || st.subject_sign_pub != in_.bridge_identity_public_key do return {}, invalid("vault_approval does not describe this bridge's identity key")
 	dev, sderr := subject_device_from_statement(&st, in_.user_id)
 	if sderr.code != .None do return {}, sderr
-	if st.epoch != i64_str(dir.current_epoch) || !is_hex64_or_empty(st.epoch_commit) || st.wrap_sha256 != "" do return {}, invalid("vault_approval must name the current epoch and no wrap")
+	commit, cerr := current_epoch_commit(svc, in_.user_id, dir.current_epoch)
+	if cerr.code != .None do return {}, cerr
+	if st.epoch != i64_str(dir.current_epoch) || st.epoch_commit != commit || st.wrap_sha256 != "" do return {}, invalid("vault_approval must name the current epoch, its epoch_commit, and no wrap")
 	if _, exists := find_device(devices, dev.device_id); exists do return {}, domain.vault_reason_error(.Conflict, "device_exists", "this bridge identity is already in the directory")
 	now := platform.clock_now(svc.clock)
 	dev.status = .Approved
