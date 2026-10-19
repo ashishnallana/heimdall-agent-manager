@@ -92,7 +92,7 @@ test_envelope_embedded_replace :: proc(t: ^testing.T) {
 	// No keyring at all: every v2 token is locked, the dead older-format token stays opaque.
 	locked := replace_embedded_tokens(str(emb, "text"), nil, "LOCKED", FAILED_MARKER, context.temp_allocator)
 	testing.expect(t, !contains_token(locked))
-	testing.expect(t, strings.contains(locked, "stays vault:v1:"))
+	testing.expect(t, strings.contains(locked, "v1 stays vault:"))
 	testing.expect(t, strings.contains(locked, "bare vault:v2: end"))
 	// Empty locked marker keeps tokens verbatim.
 	kept := replace_embedded_tokens(str(emb, "text"), nil, "", FAILED_MARKER, context.temp_allocator)

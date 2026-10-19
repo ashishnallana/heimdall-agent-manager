@@ -1,7 +1,7 @@
 // Opt-in recovery key (docs/plans/passwordless-vault.md §2 P4).
 //
 // 12 BIP-39 words carry 128 bits of entropy. HKDF-SHA256(entropy, salt
-// "heimdall-recovery-v1", info "wrap") gives an AES-256-GCM key (no PBKDF2: the
+// "heimdall-recovery-v1", info "wrap") gives an AES-256-GCM key (no password stretching: the
 // entropy is already full strength). The browser that creates the key generates a
 // `recovery`-kind directory credential -- an ECDSA P-256 signing key and an ECDH
 // P-256 wrap key, extractable ONLY for the moment their PKCS#8 bytes are sealed --
@@ -26,7 +26,7 @@ import { sealKeyringWrap } from './vaultKeyringWrap.ts';
 import { bytesToBase64, base64ToBytes, recoveryWordsToEntropy } from './vaultCrypto.ts';
 import type { RecoveryKeyBody } from '../api/endpoints/vaultDevices.ts';
 
-export const RECOVERY_HKDF_SALT = 'heimdall-recovery-v1';
+export const RECOVERY_SALT = 'heimdall-recovery-v1';
 export const RECOVERY_HKDF_INFO = 'wrap';
 export const RECOVERY_BLOB_ALG = 'bip39-hkdf-sha256-aes256gcm';
 const utf8 = new TextEncoder();
@@ -64,7 +64,7 @@ export async function recoveryAesKey(entropy: Uint8Array): Promise<CryptoKey> {
   if (entropy.length !== 16) throw new RecoveryKeyError('recovery entropy must be 128 bits');
   const ikm = await crypto.subtle.importKey('raw', entropy as unknown as BufferSource, 'HKDF', false, ['deriveKey']);
   return crypto.subtle.deriveKey(
-    { name: 'HKDF', hash: 'SHA-256', salt: utf8.encode(RECOVERY_HKDF_SALT) as unknown as BufferSource, info: utf8.encode(RECOVERY_HKDF_INFO) as unknown as BufferSource },
+    { name: 'HKDF', hash: 'SHA-256', salt: utf8.encode(RECOVERY_SALT) as unknown as BufferSource, info: utf8.encode(RECOVERY_HKDF_INFO) as unknown as BufferSource },
     ikm,
     { name: 'AES-GCM', length: 256 },
     false,
