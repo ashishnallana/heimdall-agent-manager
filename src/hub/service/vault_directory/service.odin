@@ -38,10 +38,13 @@ Service :: struct {
 	// random_source is the CSPRNG path for pending codes (tests point it at a missing
 	// path to prove the fail-closed contract).
 	random_source: string,
+	// reset_delay_seconds is how long an owner reset waits before it executes
+	// (RESET_DELAY_SECONDS). Tests drive the delay with the injected clock.
+	reset_delay_seconds: int,
 }
 
 new_service :: proc(repo: ^iface.Vault_Directory_Repository, clock: ^platform.Clock) -> Service {
-	return Service{repo = repo, clock = clock, nonces = nonce_cache_make(NONCE_DEVICE_QUOTA), random_source = os_random.DEFAULT_SOURCE}
+	return Service{repo = repo, clock = clock, nonces = nonce_cache_make(NONCE_DEVICE_QUOTA), random_source = os_random.DEFAULT_SOURCE, reset_delay_seconds = RESET_DELAY_SECONDS}
 }
 
 service_free :: proc(svc: ^Service) {
@@ -728,4 +731,49 @@ relabel :: proc(svc: ^Service, user_id, device_id: string, expected_version: i64
 		user_id = user_id, expected_version = expected_version, now = platform.clock_now(svc.clock),
 		label_device_id = device_id, label = label,
 	})
+}
+
+// ── Owner reset ─────────────────────────────────────────────────────────────
+// The only way to replace a directory's root. It is requested from an interactive
+// browser session (Trusted_Proxy; the handler enforces it), and it is DELAYED: the
+// directory is destroyed RESET_DELAY_SECONDS (72 h) later, never at once. The request
+// is announced to every session and device of the account (WS + push), and any
+// approved device may cancel it with a signed request during the delay. So a stolen
+// session cannot quietly swap the root: the owner's devices see the notice and cancel.
+// An owner who really lost every approver waits out the delay, then runs genesis
+// again. The delay is always 72 h (no "no device seen recently" shortcut).
+//
+// Execution (app reaper, reaper_sweep_vault_resets) first revokes the credentials of
+// every bridge the account owns — and fails closed, keeping the directory and
+// retrying on the next sweep, if any revoke fails — then deletes the directory, its
+// devices, epochs and wraps in one transaction.
+
+RESET_DELAY_SECONDS :: 72 * 60 * 60
+
+schedule_reset :: proc(svc: ^Service, user_id: string) -> (reset: domain.Vault_Reset, newly: bool, err: domain.Domain_Error) {
+	if user_id == "" do return {}, false, unauth("user is required")
+	now := platform.clock_now(svc.clock)
+	due, ok := platform.expires_at_after_seconds_from(now, svc.reset_delay_seconds)
+	if !ok do return {}, false, domain.domain_error(.Internal_Error, "clock unavailable")
+	return iface.vault_schedule_reset(svc.repo, domain.Vault_Reset{user_id = user_id, requested_at = now, due_at = due})
+}
+
+get_reset :: proc(svc: ^Service, user_id: string) -> (domain.Vault_Reset, bool, domain.Domain_Error) {
+	return iface.vault_get_reset(svc.repo, user_id)
+}
+
+// cancel_reset is called only after verify_request(.Approver) authenticated the
+// cancelling device. Idempotent: false when nothing was scheduled.
+cancel_reset :: proc(svc: ^Service, user_id: string) -> (bool, domain.Domain_Error) {
+	return iface.vault_cancel_reset(svc.repo, user_id)
+}
+
+due_resets :: proc(svc: ^Service) -> ([]string, domain.Domain_Error) {
+	return iface.vault_list_due_resets(svc.repo, platform.clock_now(svc.clock))
+}
+
+// execute_reset destroys the directory if its reset is (still) due. The caller must
+// already have revoked the account's bridge credentials.
+execute_reset :: proc(svc: ^Service, user_id: string) -> (bool, domain.Domain_Error) {
+	return iface.vault_execute_reset(svc.repo, user_id, platform.clock_now(svc.clock))
 }

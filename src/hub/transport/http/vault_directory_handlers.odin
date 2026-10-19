@@ -1,7 +1,10 @@
 // HTTP handlers for the passwordless vault device directory
 // (docs/plans/passwordless-vault.md §2 P2). Cookie (trusted-proxy) or user-token auth;
-// every mutation except register/genesis also needs the device request signature
-// headers X-Heimdall-Device-{Id,Ts,Nonce,Sig}, verified by the service.
+// every mutation except register/genesis/reset also needs the device request
+// signature headers X-Heimdall-Device-{Id,Ts,Nonce,Sig}, verified by the service.
+// register, genesis and reset are the unsigned entry points, so they accept ONLY an
+// interactive browser session (Trusted_Proxy) — never a user token, which a script or
+// a stolen ham-ctl credential could hold.
 package http
 
 import "core:encoding/json"
@@ -28,7 +31,8 @@ Vault_Directory_Handlers :: struct {
 	public_app_origin: string,
 }
 
-VAULT_DEVICES_RESOURCE :: "vault_devices"
+VAULT_DEVICES_RESOURCE   :: "vault_devices"
+VAULT_DIRECTORY_RESOURCE :: "vault_directory"
 
 // ── Request plumbing ────────────────────────────────────────────────────────
 
@@ -39,6 +43,18 @@ require_vault_user :: proc(h: ^Vault_Directory_Handlers, req: Request) -> (contr
 	// A user principal only: never a bridge, enrollment or instance credential.
 	if ctx.kind != .Trusted_Proxy && ctx.kind != .User_Token {
 		return ctx, false, respond_error(domain.domain_error(.Forbidden, "vault directory requires a user session"), req.request_id)
+	}
+	return ctx, true, Response{}
+}
+
+// require_interactive_user admits only the interactive browser session (the
+// authenticating proxy's cookie). Used by the unsigned entry points.
+@(private = "file")
+require_interactive_user :: proc(h: ^Vault_Directory_Handlers, req: Request) -> (contracts.Auth_Context, bool, Response) {
+	ctx, ok, resp := require_auth(h.auth, req)
+	if !ok do return ctx, false, resp
+	if ctx.kind != .Trusted_Proxy {
+		return ctx, false, respond_error(domain.domain_error(.Forbidden, "this vault action requires an interactive browser session"), req.request_id)
 	}
 	return ctx, true, Response{}
 }
@@ -164,6 +180,32 @@ publish :: proc(h: ^Vault_Directory_Handlers, user_id, device_id, change: string
 	events.publish_resource_changed(h.event_bus, user_id, VAULT_DEVICES_RESOURCE, device_id, change, "{}")
 }
 
+// announce_directory tells every session (WS resource_changed on "vault_directory",
+// resource id = the user id) and every push-subscribed device about a directory-level
+// event: "genesis", "reset_scheduled", "reset_cancelled", "reset_executed".
+vault_announce_directory :: proc(event_bus: ^events.User_Event_Bus, push: ^push_service.Push_Service, public_app_origin, user_id, change, due_at: string) {
+	if event_bus != nil do events.publish_resource_changed(event_bus, user_id, VAULT_DIRECTORY_RESOURCE, user_id, change, "{}")
+	if push == nil do return
+	push_event := "created" if change == "genesis" else change
+	content := push_service.build_vault_directory_notification(push_event, due_at)
+	defer push_service.free_notification_content(content)
+	payload := push_service.build_push_payload_json(content, public_app_origin)
+	defer delete(payload)
+	push_service.send_to_user_async(push, domain.User_ID(user_id), payload)
+}
+
+@(private = "file")
+write_reset_json :: proc(b: ^strings.Builder, r: domain.Vault_Reset, has: bool) {
+	if !has {
+		strings.write_string(b, "null")
+		return
+	}
+	strings.write_byte(b, '{')
+	w_str(b, "requested_at", r.requested_at, true)
+	w_str(b, "due_at", r.due_at)
+	strings.write_byte(b, '}')
+}
+
 // ── GET /api/v1/vault/directory ─────────────────────────────────────────────
 // Everything a client (and, relayed by its approver, a bridge) needs to verify the
 // chain: the pinned root key, the self-signed genesis, every device with its
@@ -181,6 +223,8 @@ vault_directory_get_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	}
 	view, err := vd.get_directory(h.vault, auth.user_id)
 	if err.code != .None do return respond_error(err, req.request_id)
+	reset, has_reset, rerr := vd.get_reset(h.vault, auth.user_id)
+	if rerr.code != .None do return respond_error(rerr, req.request_id)
 	b := strings.builder_make(context.temp_allocator)
 	d := view.directory
 	strings.write_string(&b, `{"configured":true,"version":`)
@@ -190,6 +234,9 @@ vault_directory_get_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	w_str(&b, "root_device_id", d.root_device_id)
 	w_str(&b, "root_sign_public_key", view.root_sign_public_key)
 	w_str(&b, "root_sign_alg", view.root_sign_alg)
+	// A scheduled owner reset ({requested_at, due_at}) or null.
+	strings.write_string(&b, `,"reset":`)
+	write_reset_json(&b, reset, has_reset)
 	strings.write_string(&b, `,"genesis":{`)
 	w_str(&b, "statement", d.genesis_statement, true)
 	w_raw(&b, "signature", d.genesis_signature)
@@ -212,10 +259,11 @@ vault_directory_get_handler :: proc(ctx: rawptr, req: Request) -> Response {
 }
 
 // ── POST /api/v1/vault/directory/genesis ────────────────────────────────────
-// {genesis_statement, signature, epoch_statement, epoch_signature, wrap}
+// {genesis_statement, signature, epoch_statement, epoch_signature, wrap}. Interactive
+// browser session only; announced to every session and device of the account.
 vault_genesis_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Vault_Directory_Handlers)(ctx)
-	auth, ok, resp := require_vault_user(h, req)
+	auth, ok, resp := require_interactive_user(h, req)
 	if !ok do return resp
 	o, parsed := body_object(req)
 	if !parsed do return bad_request(req, "body must be a JSON object")
@@ -229,6 +277,7 @@ vault_genesis_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	})
 	if err.code != .None do return respond_error(err, req.request_id)
 	publish(h, auth.user_id, dev.device_id, "approved")
+	vault_announce_directory(h.event_bus, h.push, h.public_app_origin, auth.user_id, "genesis", "")
 	b := strings.builder_make(context.temp_allocator)
 	strings.write_string(&b, `{"directory_version":1,"current_epoch":1,"device":`)
 	write_vault_device_json(&b, dev)
@@ -238,10 +287,11 @@ vault_genesis_handler :: proc(ctx: rawptr, req: Request) -> Response {
 
 // ── POST /api/v1/vault/devices/register ─────────────────────────────────────
 // {statement, proof_signature}: a self-signed `register` statement. Idempotent per
-// key. Rate-limited per IP. The push notification never carries the code.
+// key. Rate-limited per IP. The push notification never carries the code. Interactive
+// browser session only.
 vault_register_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Vault_Directory_Handlers)(ctx)
-	auth, ok, resp := require_vault_user(h, req)
+	auth, ok, resp := require_interactive_user(h, req)
 	if !ok do return resp
 	if h.device_auth != nil && !device_auth.rate_check(h.device_auth, "vault-register:", client_ip(h, req)) {
 		return respond_error(domain.domain_error(.Rate_Limited, "too many device registrations from this IP"), req.request_id)
@@ -383,4 +433,37 @@ vault_patch_device_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	if err.code != .None do return respond_error(err, req.request_id)
 	publish(h, auth.user_id, device_id, "updated")
 	return respond_success(version_json(new_version), req.request_id, auth_ctx_server_time(req))
+}
+
+// ── POST /api/v1/vault/directory/reset ──────────────────────────────────────
+// Schedules destruction of the whole directory RESET_DELAY_SECONDS (72 h) from now
+// (see vd.schedule_reset). Interactive browser session only; body ignored. Returns
+// {reset:{requested_at,due_at}} — 201 when this call scheduled it, 200 when one was
+// already scheduled (the due time never moves). Announced (WS + push) on scheduling.
+vault_reset_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Vault_Directory_Handlers)(ctx)
+	auth, ok, resp := require_interactive_user(h, req)
+	if !ok do return resp
+	reset, newly, err := vd.schedule_reset(h.vault, auth.user_id)
+	if err.code != .None do return respond_error(err, req.request_id)
+	if newly do vault_announce_directory(h.event_bus, h.push, h.public_app_origin, auth.user_id, "reset_scheduled", reset.due_at)
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_string(&b, `{"reset":`)
+	write_reset_json(&b, reset, true)
+	strings.write_byte(&b, '}')
+	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 201 if newly else 200)
+}
+
+// ── POST /api/v1/vault/directory/reset/cancel ───────────────────────────────
+// Signed by an approved approver device. {cancelled:bool}; idempotent.
+vault_reset_cancel_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Vault_Directory_Handlers)(ctx)
+	auth, ok, resp := require_vault_user(h, req)
+	if !ok do return resp
+	_, serr := vd.verify_request(h.vault, auth.user_id, signed_request(req), .Approver)
+	if serr.code != .None do return respond_error(serr, req.request_id)
+	cancelled, err := vd.cancel_reset(h.vault, auth.user_id)
+	if err.code != .None do return respond_error(err, req.request_id)
+	if cancelled do vault_announce_directory(h.event_bus, h.push, h.public_app_origin, auth.user_id, "reset_cancelled", "")
+	return respond_success(`{"cancelled":true}` if cancelled else `{"cancelled":false}`, req.request_id, auth_ctx_server_time(req))
 }

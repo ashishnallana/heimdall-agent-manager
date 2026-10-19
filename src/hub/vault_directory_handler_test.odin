@@ -11,25 +11,30 @@ import "core:testing"
 import contracts "odin_test:contracts"
 import app "odin_test:hub/app"
 import platform "odin_test:hub/platform"
+import iface "odin_test:hub/repository/iface"
 import api_http "odin_test:hub/transport/http"
 
 VT_NOW    :: "2026-10-19T10:00:00Z"
 VT_NOW_MS :: i64(1_792_404_000_000)
 
+// The clock reads a per-test string (tests run in parallel), VT_NOW by default.
 @(private = "file")
-vt_clock_now :: proc(ctx: rawptr) -> string { return VT_NOW }
+vt_clock_now :: proc(ctx: rawptr) -> string {
+	if ctx == nil do return VT_NOW
+	return (^string)(ctx)^
+}
 
 // A per-test throwaway database file (billing needs a file-backed DB).
 @(private = "file")
-vt_db_path :: proc() -> string {
+vt_db_path :: proc(tag: string) -> string {
 	dir := os.get_env("TEMP", context.temp_allocator)
 	if dir == "" do dir = os.get_env("TMPDIR", context.temp_allocator)
 	if dir == "" do dir = "/tmp"
-	return fmt.tprintf("%s/heimdall-vault-dir-test-%d.db", dir, os.get_pid())
+	return fmt.tprintf("%s/heimdall-vault-dir-test-%d-%s.db", dir, os.get_pid(), tag)
 }
 
 @(private = "file")
-vt_graph :: proc(t: ^testing.T, graph: ^app.App_Graph, db_path: string) -> bool {
+vt_graph :: proc(t: ^testing.T, graph: ^app.App_Graph, db_path: string, now: ^string = nil) -> bool {
 	// The config keeps the slice: it must outlive this proc.
 	cidrs := new([1]string)
 	cidrs[0] = "127.0.0.1/32"
@@ -45,7 +50,7 @@ vt_graph :: proc(t: ^testing.T, graph: ^app.App_Graph, db_path: string) -> bool 
 		paddle_environment   = "sandbox",
 	})
 	testing.expect(t, ok, msg)
-	graph.clock = platform.Clock{now = vt_clock_now}
+	graph.clock = platform.Clock{ctx = rawptr(now), now = vt_clock_now}
 	return ok
 }
 
@@ -58,7 +63,7 @@ dispatch :: proc(graph: ^app.App_Graph, method, path, body: string, headers: []c
 test_vault_directory_http_flow :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	graph: app.App_Graph
-	db_path := vt_db_path()
+	db_path := vt_db_path("flow")
 	defer for suffix in ([]string{"", "-wal", "-shm"}) do _ = os.remove(strings.concatenate({db_path, suffix}))
 	if !vt_graph(t, &graph, db_path) do return
 	defer app.shutdown_graph(&graph)
@@ -134,4 +139,72 @@ test_vault_directory_http_flow :: proc(t: ^testing.T) {
 	// The bridge's code as a pending-device code: never found.
 	as_device := dispatch(&graph, "POST", approve_path, strings.concatenate({`{"user_code":"`, grant_code, `","expected_version":3}`}), vt_signed_headers(alice, &root, user_id, "POST", approve_path, strings.concatenate({`{"user_code":"`, grant_code, `","expected_version":3}`}), "nonce-vt-000000000003", VT_NOW_MS))
 	testing.expect(t, as_device.status == 404 || as_device.status == 409, as_device.body)
+}
+
+// M2: the unsigned entry points (genesis, register, reset) take only an interactive
+// browser session; an owner reset is announced, visible in the directory, cancellable
+// by a signed approver request, and executes only after its delay.
+@(test)
+test_vault_directory_reset_and_session_kinds :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	graph: app.App_Graph
+	db_path := vt_db_path("reset")
+	defer for suffix in ([]string{"", "-wal", "-shm"}) do _ = os.remove(strings.concatenate({db_path, suffix}))
+	now := VT_NOW
+	if !vt_graph(t, &graph, db_path, &now) do return
+	defer app.shutdown_graph(&graph)
+	alice := []contracts.HTTP_Header{{name = "X-authentik-username", value = "alice"}}
+	user_id := vt_user_id(&graph, alice)
+	root := vt_make_dev(VT_ROOT_SEED)
+
+	// A user API token (ham-ctl / script credential) may neither genesis nor register
+	// nor reset.
+	tok := dispatch(&graph, "POST", "/api/v1/me/tokens", `{"label":"ctl"}`, alice)
+	testing.expect_value(t, tok.status, 201)
+	bearer := []contracts.HTTP_Header{{name = "Authorization", value = strings.concatenate({"Bearer ", device_test_json_string(tok.body, "plaintext")})}}
+	testing.expect_value(t, dispatch(&graph, "POST", "/api/v1/vault/directory/genesis", vt_genesis_body(user_id, &root), bearer).status, 403)
+	b := vt_make_dev(2)
+	reg_st := vt_statement("register", user_id, &b, &b, "", "")
+	reg_body := strings.concatenate({`{"statement":"`, vt_escape(reg_st), `","proof_signature":`, vt_sign(&b, reg_st), "}"})
+	testing.expect_value(t, dispatch(&graph, "POST", "/api/v1/vault/devices/register", reg_body, bearer).status, 403)
+
+	_, _, vok := vt_ensure_vault(&graph, alice)
+	testing.expect(t, vok)
+	testing.expect_value(t, dispatch(&graph, "POST", "/api/v1/vault/directory/reset", "{}", bearer).status, 403)
+
+	// Schedule: 201, then idempotent 200 with the same due time.
+	sched := dispatch(&graph, "POST", "/api/v1/vault/directory/reset", "{}", alice)
+	testing.expect_value(t, sched.status, 201)
+	testing.expect(t, strings.contains(sched.body, `"due_at":"2026-10-22T10:00:00Z"`), sched.body)
+	testing.expect_value(t, dispatch(&graph, "POST", "/api/v1/vault/directory/reset", "{}", alice).status, 200)
+	dir := dispatch(&graph, "GET", "/api/v1/vault/directory", "", alice)
+	testing.expect(t, strings.contains(dir.body, `"reset":{"requested_at":"2026-10-19T10:00:00Z","due_at":"2026-10-22T10:00:00Z"}`), dir.body)
+
+	// Cancel: unsigned refused; signed by the root accepted.
+	cancel_path :: "/api/v1/vault/directory/reset/cancel"
+	testing.expect_value(t, dispatch(&graph, "POST", cancel_path, "{}", alice).status, 401)
+	cancelled := dispatch(&graph, "POST", cancel_path, "{}", vt_signed_headers(alice, &root, user_id, "POST", cancel_path, "{}", "nonce-vt-reset-000001", VT_NOW_MS))
+	testing.expect(t, cancelled.status == 200 && strings.contains(cancelled.body, `"cancelled":true`), cancelled.body)
+	dir = dispatch(&graph, "GET", "/api/v1/vault/directory", "", alice)
+	testing.expect(t, strings.contains(dir.body, `"reset":null`), dir.body)
+
+	// Schedule again with a bridge enrolled; before the delay nothing happens, after
+	// it the directory is gone and the bridge's credential is revoked.
+	bridge_id, bridge_token, enrolled := device_enroll_test_bridge(&graph, alice, "box")
+	testing.expect(t, enrolled)
+	_, before_found, _ := iface.bridge_get_bridge(graph.bridges.repo, bridge_id)
+	testing.expect(t, before_found)
+	testing.expect_value(t, dispatch(&graph, "POST", "/api/v1/vault/directory/reset", "{}", alice).status, 201)
+	now = "2026-10-22T09:59:59Z"
+	testing.expect_value(t, app.reaper_sweep_vault_resets(&graph), 0)
+	testing.expect_value(t, dispatch(&graph, "GET", "/api/v1/vault/directory", "", alice).status, 200)
+	now = "2026-10-22T10:00:00Z"
+	testing.expect_value(t, app.reaper_sweep_vault_resets(&graph), 1)
+	testing.expect_value(t, dispatch(&graph, "GET", "/api/v1/vault/directory", "", alice).status, 404)
+	_ = bridge_token
+	// A still-pending enrollment is rolled back (row deleted); an enrolled one revoked.
+	row, row_found, _ := iface.bridge_get_bridge(graph.bridges.repo, bridge_id)
+	testing.expect(t, !row_found || row.status == .Revoked, "the bridge lost its credentials")
+	// A new genesis is possible again.
+	testing.expect_value(t, dispatch(&graph, "POST", "/api/v1/vault/directory/genesis", vt_genesis_body(user_id, &root), alice).status, 201)
 }

@@ -544,6 +544,8 @@ register_routes :: proc(graph: ^App_Graph) {
 	// Passwordless vault device directory (plan §2 P2). Literal paths before wildcards.
 	http.router_add(&graph.router, "GET", "/api/v1/vault/directory", rawptr(&graph.vault_directory_handlers), http.vault_directory_get_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/vault/directory/genesis", rawptr(&graph.vault_directory_handlers), http.vault_genesis_handler)
+	http.router_add(&graph.router, "POST", "/api/v1/vault/directory/reset", rawptr(&graph.vault_directory_handlers), http.vault_reset_handler)
+	http.router_add(&graph.router, "POST", "/api/v1/vault/directory/reset/cancel", rawptr(&graph.vault_directory_handlers), http.vault_reset_cancel_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/vault/devices/register", rawptr(&graph.vault_directory_handlers), http.vault_register_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/vault/devices/self", rawptr(&graph.vault_directory_handlers), http.vault_self_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/vault/devices/*/approve", rawptr(&graph.vault_directory_handlers), http.vault_approve_handler)

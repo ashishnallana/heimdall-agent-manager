@@ -56,6 +56,11 @@ new_vault_directory_repository :: proc(impl: ^Vault_Directory_Repo_SQLite, conn:
 		touch_last_seen      = vault_touch_last_seen_sqlite,
 		create_genesis       = vault_create_genesis_sqlite,
 		commit               = vault_commit_sqlite,
+		get_reset            = vault_get_reset_sqlite,
+		schedule_reset       = vault_schedule_reset_sqlite,
+		cancel_reset         = vault_cancel_reset_sqlite,
+		list_due_resets      = vault_list_due_resets_sqlite,
+		execute_reset        = vault_execute_reset_sqlite,
 	}
 }
 
@@ -520,4 +525,122 @@ vault_commit_sqlite :: proc(ctx: rawptr, cm: domain.Vault_Directory_Commit) -> (
 	if !exec(conn, "COMMIT;") do return 0, repo_err("failed to commit the vault directory")
 	committed = true
 	return new_version, domain.Domain_Error{}
+}
+
+// ── Owner reset ─────────────────────────────────────────────────────────────
+
+@(private = "file")
+get_reset_on :: proc(conn: ^Conn, user_id: string) -> (domain.Vault_Reset, bool, domain.Domain_Error) {
+	stmt, ok := prepare(conn, "SELECT user_id, requested_at, due_at FROM vault_directory_resets WHERE user_id = ?;")
+	if !ok do return {}, false, repo_err("failed to prepare vault reset read")
+	defer sqlite3_finalize(stmt)
+	bind_text(stmt, 1, user_id)
+	rc := sqlite3_step(stmt)
+	if rc == SQLITE_DONE do return {}, false, domain.Domain_Error{}
+	if rc != SQLITE_ROW do return {}, false, repo_err("failed to read vault reset")
+	return domain.Vault_Reset{user_id = column_text(stmt, 0), requested_at = column_text(stmt, 1), due_at = column_text(stmt, 2)}, true, domain.Domain_Error{}
+}
+
+vault_get_reset_sqlite :: proc(ctx: rawptr, user_id: string) -> (domain.Vault_Reset, bool, domain.Domain_Error) {
+	impl := (^Vault_Directory_Repo_SQLite)(ctx)
+	return get_reset_on(impl.conn, user_id)
+}
+
+vault_schedule_reset_sqlite :: proc(ctx: rawptr, r: domain.Vault_Reset) -> (domain.Vault_Reset, bool, domain.Domain_Error) {
+	impl := (^Vault_Directory_Repo_SQLite)(ctx)
+	sync.mutex_lock(&impl.mutex)
+	defer sync.mutex_unlock(&impl.mutex)
+	conn := write_conn(impl)
+	if !exec(conn, "BEGIN IMMEDIATE;") do return {}, false, repo_err("failed to begin vault reset")
+	committed := false
+	defer if !committed do _ = exec(conn, "ROLLBACK;")
+	if _, exists, err := get_directory_on(conn, r.user_id); err.code != .None {
+		return {}, false, err
+	} else if !exists {
+		return {}, false, domain.domain_error(.Not_Found, "vault directory is not configured", `{"configured":false}`)
+	}
+	existing, found, rerr := get_reset_on(conn, r.user_id)
+	if rerr.code != .None do return {}, false, rerr
+	if found {
+		if !exec(conn, "COMMIT;") do return {}, false, repo_err("failed to end vault reset")
+		committed = true
+		return existing, false, domain.Domain_Error{}
+	}
+	stmt, ok := prepare(conn, "INSERT INTO vault_directory_resets (user_id, requested_at, due_at) VALUES (?, ?, ?);")
+	if !ok do return {}, false, repo_err("failed to prepare vault reset")
+	defer sqlite3_finalize(stmt)
+	bind_text(stmt, 1, r.user_id)
+	bind_text(stmt, 2, r.requested_at)
+	bind_text(stmt, 3, r.due_at)
+	if sqlite3_step(stmt) != SQLITE_DONE do return {}, false, repo_err("failed to schedule vault reset")
+	if !exec(conn, "COMMIT;") do return {}, false, repo_err("failed to commit vault reset")
+	committed = true
+	return r, true, domain.Domain_Error{}
+}
+
+vault_cancel_reset_sqlite :: proc(ctx: rawptr, user_id: string) -> (bool, domain.Domain_Error) {
+	impl := (^Vault_Directory_Repo_SQLite)(ctx)
+	sync.mutex_lock(&impl.mutex)
+	defer sync.mutex_unlock(&impl.mutex)
+	conn := write_conn(impl)
+	stmt, ok := prepare(conn, "DELETE FROM vault_directory_resets WHERE user_id = ?;")
+	if !ok do return false, repo_err("failed to prepare vault reset cancel")
+	defer sqlite3_finalize(stmt)
+	bind_text(stmt, 1, user_id)
+	rc, changes := step_changes(conn.db, stmt)
+	if rc != SQLITE_DONE do return false, repo_err("failed to cancel vault reset")
+	return changes == 1, domain.Domain_Error{}
+}
+
+vault_list_due_resets_sqlite :: proc(ctx: rawptr, now: string) -> ([]string, domain.Domain_Error) {
+	impl := (^Vault_Directory_Repo_SQLite)(ctx)
+	stmt, ok := prepare(impl.conn, "SELECT user_id FROM vault_directory_resets WHERE due_at <= ? ORDER BY due_at;")
+	if !ok do return nil, repo_err("failed to prepare due vault resets")
+	defer sqlite3_finalize(stmt)
+	bind_text(stmt, 1, now)
+	out := make([dynamic]string)
+	for {
+		rc := sqlite3_step(stmt)
+		if rc == SQLITE_DONE do break
+		if rc != SQLITE_ROW do return nil, repo_err("failed to list due vault resets")
+		append(&out, column_text(stmt, 0))
+	}
+	return out[:], domain.Domain_Error{}
+}
+
+VAULT_RESET_DELETES :: [5]string{
+	"DELETE FROM vault_wrapped_keyrings WHERE user_id = ?;",
+	"DELETE FROM vault_epochs WHERE user_id = ?;",
+	"DELETE FROM vault_devices WHERE user_id = ?;",
+	"DELETE FROM vault_directories WHERE user_id = ?;",
+	"DELETE FROM vault_directory_resets WHERE user_id = ?;",
+}
+
+vault_execute_reset_sqlite :: proc(ctx: rawptr, user_id, now: string) -> (bool, domain.Domain_Error) {
+	impl := (^Vault_Directory_Repo_SQLite)(ctx)
+	sync.mutex_lock(&impl.mutex)
+	defer sync.mutex_unlock(&impl.mutex)
+	conn := write_conn(impl)
+	if !exec(conn, "BEGIN IMMEDIATE;") do return false, repo_err("failed to begin vault reset execution")
+	committed := false
+	defer if !committed do _ = exec(conn, "ROLLBACK;")
+	r, found, rerr := get_reset_on(conn, user_id)
+	if rerr.code != .None do return false, rerr
+	if !found || r.due_at > now {
+		if !exec(conn, "COMMIT;") do return false, repo_err("failed to end vault reset execution")
+		committed = true
+		return false, domain.Domain_Error{}
+	}
+	deletes := VAULT_RESET_DELETES
+	for q in deletes {
+		stmt, ok := prepare(conn, q)
+		if !ok do return false, repo_err("failed to prepare vault reset execution")
+		bind_text(stmt, 1, user_id)
+		rc := sqlite3_step(stmt)
+		sqlite3_finalize(stmt)
+		if rc != SQLITE_DONE do return false, repo_err("vault reset execution failed")
+	}
+	if !exec(conn, "COMMIT;") do return false, repo_err("failed to commit vault reset execution")
+	committed = true
+	return true, domain.Domain_Error{}
 }

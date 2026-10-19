@@ -94,6 +94,15 @@ Vault_Wrap_Row :: struct {
 	updated_at:        string,
 }
 
+// Vault_Reset is a scheduled owner reset of the whole directory (see
+// service/vault_directory schedule_reset): at due_at the directory, its devices,
+// epochs and wraps are deleted and the owner's bridges lose their credentials.
+Vault_Reset :: struct {
+	user_id:      string,
+	requested_at: string,
+	due_at:       string,
+}
+
 // Vault_Directory_Commit is ONE versioned directory mutation. The repository applies
 // every populated part inside a single transaction that starts with
 //   UPDATE vault_directories SET version = version + 1 ... WHERE user_id = ? AND version = ?
