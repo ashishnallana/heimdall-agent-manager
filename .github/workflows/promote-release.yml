@@ -52,10 +52,21 @@ jobs:
             jq -e --arg n "$name" '.assets | any(.name == $n)' release.json >/dev/null || {
               echo "missing asset: $name" >&2; missing=1; }
           done
-          # windows-amd64 ships a zip for scripts/install.ps1.
+          # windows-amd64 (a zip for scripts/install.ps1) exists only for releases
+          # built since it was added: required when the release's SHA256SUMS lists
+          # it (the release job wrote it, so it must have been uploaded), and the
+          # asset must never be present without a checksum line.
           name="heimdall-local-windows-amd64-$VERSION.zip"
-          jq -e --arg n "$name" '.assets | any(.name == $n)' release.json >/dev/null || {
-            echo "missing asset: $name" >&2; missing=1; }
+          gh release download "$VERSION" --pattern SHA256SUMS --output sums.txt --clobber
+          listed=0
+          awk -v n="$name" '{ sub(/^\*/, "", $2) } $2 == n { found = 1 } END { exit !found }' sums.txt && listed=1
+          present=0
+          jq -e --arg n "$name" '.assets | any(.name == $n)' release.json >/dev/null && present=1
+          if [ "$listed" = 1 ] && [ "$present" = 0 ]; then
+            echo "missing asset: $name (listed in SHA256SUMS)" >&2; missing=1
+          elif [ "$listed" = 0 ] && [ "$present" = 1 ]; then
+            echo "asset $name has no SHA256SUMS line" >&2; missing=1
+          fi
           jq -e '.assets | any(.name == "SHA256SUMS")' release.json >/dev/null || {
             echo "missing asset: SHA256SUMS" >&2; missing=1; }
           [ "$missing" = 0 ]

@@ -353,6 +353,7 @@ jobs:
     env:
       ODIN_TAG: dev-2026-09
       ODIN_ZIP_SHA256: 8ed8abd95b82e0af1eb7e86cb75f380fd8bde104947721817b35929f5fc19388
+      RUST_TOOLCHAIN: 1.99.1
     steps:
       - name: Checkout clean source
         uses: actions/checkout@v4
@@ -388,7 +389,9 @@ jobs:
       - name: Build Windows binaries
         shell: pwsh
         run: |
-          rustup default stable
+          rustup toolchain install "$env:RUST_TOOLCHAIN" --profile minimal
+          rustup default "$env:RUST_TOOLCHAIN"
+          rustc --version
           scripts/windows/build.ps1 -OutDir dist/windows-bin -Odin $env:ODIN -Version "${{ needs.prepare.outputs.version }}"
 
       - name: Verify Windows binaries are self-contained and run

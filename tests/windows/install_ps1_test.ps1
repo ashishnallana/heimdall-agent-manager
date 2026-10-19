@@ -21,8 +21,12 @@ elseif (-not (Test-Path $Engine)) { $Engine = (Get-Command $Engine).Source }
 $root = Join-Path ([IO.Path]::GetTempPath()) ('heimdall-ps1-test-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
 $fake = Join-Path $root 'fake'
 $mirror = Join-Path $root 'mirror'
-$roaming = Join-Path $root 'home\Roaming'
-$local = Join-Path $root 'home\Local'
+# The profile is deliberately non-ASCII (C:\...\home-Jos<e-acute>): every file the
+# installer generates (.cmd in the OEM code page, .js UTF-16LE, .ps1 UTF-8 BOM)
+# must still name the right paths. e-acute exists in every Latin OEM code page.
+$home8 = 'home-Jos' + [char]0x00E9
+$roaming = Join-Path $root "$home8\Roaming"
+$local = Join-Path $root "$home8\Local"
 $fakeLog = Join-Path $root 'fake-calls.log'
 foreach ($d in @($fake, $mirror, $roaming, $local, (Join-Path $root 'out'))) { New-Item -ItemType Directory -Force $d | Out-Null }
 $script:failures = 0
@@ -69,7 +73,7 @@ function Invoke-Installer {
 function Get-Calls {
   param([string]$Path, [string]$Kind)
   if (-not (Test-Path $Path)) { return @() }
-  return @(Get-Content $Path | Where-Object { $_.StartsWith("$Kind`t") } | ForEach-Object { , ($_ -split "`t") })
+  return @(Get-Content -Encoding UTF8 $Path | Where-Object { $_.StartsWith("$Kind`t") } | ForEach-Object { , ($_ -split "`t") })
 }
 
 function Get-FieldValue {
@@ -148,6 +152,15 @@ try {
   $r = Invoke-Installer @('-Hub', 'http://[::1]:8080', '-DryRun', '-Version', 'v1.2.3')
   Check ($r.Code -eq 0 -and $r.Out -match 'heimdall-bridge---1-8080' -and $r.Out -match 'windows-amd64-v1\.2\.3\.zip') 'IPv6 Hub naming and -Version in the plan' $r.Out
   Check (-not (Test-Path (Join-Path $roaming 'heimdall'))) 'dry runs write nothing'
+  $r = Invoke-Installer @('-Hub', $hub, '-DryRun') @{ APPDATA = (Join-Path $root 'pct%USERNAME%\Roaming') }
+  Check ($r.Code -eq 1 -and $r.Out -match "contains '%'") "a profile path with '%' is refused up front" $r.Out
+  # U+10380 (a surrogate pair) is in no OEM code page except UTF-8 (65001).
+  $odd = Join-Path $root ('odd-' + [char]0xD800 + [char]0xDF80 + '\Roaming')
+  $r = Invoke-Installer @('-Hub', $hub, '-DryRun') @{ APPDATA = $odd }
+  $oem = [Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage
+  try { $oem = [int](Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Nls\CodePage' -Name OEMCP).OEMCP } catch { }
+  if ($oem -eq 65001) { Check ($r.Code -eq 0) 'UTF-8 OEM code page accepts any profile path' $r.Out }
+  else { Check ($r.Code -eq 1 -and $r.Out -match 'not representable in this system''s OEM code page') 'a profile path the OEM code page cannot hold is refused up front' $r.Out }
 
   # ---- failures before anything is replaced ----
   $closed = Get-FreePort
@@ -171,10 +184,10 @@ try {
     Check ("$($st.Principal.RunLevel)" -eq 'Limited' -and "$($st.Principal.LogonType)" -eq 'Interactive') 'task runs as the user without elevation'
     Check ($st.Settings.RestartCount -gt 0 -and $st.Settings.ExecutionTimeLimit -eq 'PT0S') 'task restarts on failure and has no time limit'
   }
-  $ports = @(foreach ($x in (Get-Content -Raw (Join-Path $stateDir 'ports.json') | ConvertFrom-Json)) { [int]$x })
+  $ports = @(foreach ($x in (Get-Content -Encoding UTF8 -Raw (Join-Path $stateDir 'ports.json') | ConvertFrom-Json)) { [int]$x })
   Check ($ports.Count -eq 2 -and $ports[0] -ne $ports[1]) "ports.json holds a port pair ($($ports -join ', '))"
-  Check ((Get-Content -Raw (Join-Path $stateDir 'hub-url')).Trim() -eq $hub) 'hub-url recorded'
-  $cfg = Get-Content -Raw (Join-Path $stateDir 'config.toml')
+  Check ((Get-Content -Encoding UTF8 -Raw (Join-Path $stateDir 'hub-url')).Trim() -eq $hub) 'hub-url recorded'
+  $cfg = Get-Content -Encoding UTF8 -Raw (Join-Path $stateDir 'config.toml')
   Check ($cfg -match "daemon_url = `"$([regex]::Escape($hub))`"" -and $cfg -match ('data_dir = "' + [regex]::Escape($dataDir.Replace('\', '/')) + '"')) 'config.toml carries the Hub and forward-slash data dir' $cfg
   Check ((Test-OwnerOnly $stateDir) -and (Test-OwnerOnly $dataDir) -and (Test-OwnerOnly (Join-Path $stateDir 'bridge-token'))) 'state dir, data dir and token are owner-only'
   Check (Test-Path (Join-Path $stateDir 'enroll.ps1')) 'enroll.ps1 persisted'
@@ -242,7 +255,7 @@ try {
   $relEnv = @{ HEIMDALL_INSTALL_TEST_RELEASES = "$hub/rel" }
   $r = Invoke-Installer @('-Hub', $hub, '-KeepEnrollment') $relEnv
   Check ($r.Code -eq 0 -and $r.Out -match 'Downloading v9\.9\.9' -and $r.Out -match 'Release checksum and bundle verified' -and $r.Out -match 'Existing enrollment preserved' -and $r.Out -match 'Service running') 'release install resolves the newest promoted release, verifies it and keeps enrollment' $r.Out
-  $ports2 = @(foreach ($x in (Get-Content -Raw (Join-Path $stateDir 'ports.json') | ConvertFrom-Json)) { [int]$x })
+  $ports2 = @(foreach ($x in (Get-Content -Encoding UTF8 -Raw (Join-Path $stateDir 'ports.json') | ConvertFrom-Json)) { [int]$x })
   Check (($ports2 -join ',') -eq ($ports -join ',')) 'reinstall keeps this Hub''s ports'
   Check (Test-Path (Join-Path $dataDir 'updates\apply-bridge-update.ps1')) 'update supervisor installed to <data>\updates'
   Check (Test-Path (Join-Path $local "heimdall\cache\releases\heimdall-local-windows-amd64-$tag.zip")) 'verified bundle cached'
@@ -260,6 +273,17 @@ try {
   $r = Invoke-Installer @('-Hub', $hub, '-NonInteractive', '-Version', 'v9.9.8') $relEnv
   Check ($r.Code -eq 1 -and $r.Out -match 'Unsafe path in release bundle') 'a bundle with a ../ entry is refused' $r.Out
   Check (-not (Test-Path (Join-Path ([IO.Path]::GetTempPath()) 'evil.txt'))) 'nothing written outside the work dir'
+
+  $r = Invoke-Installer @('-Hub', $hub, '-NonInteractive', '-Version', 'v9.9.9') @{ HEIMDALL_INSTALL_TEST_RELEASES = 'https://example.com/rel' }
+  Check ($r.Code -eq 1 -and $r.Out -match 'must be a loopback http:// URL') 'the test release seam only accepts loopback URLs' $r.Out
+
+  # ---- generated file encodings (non-ASCII profile) ----
+  $jsBytes = [IO.File]::ReadAllBytes((Join-Path $binDir 'bridge-service.js'))
+  Check ($jsBytes[0] -eq 0xFF -and $jsBytes[1] -eq 0xFE -and [Text.Encoding]::Unicode.GetString($jsBytes, 2, $jsBytes.Length - 2).Contains($home8)) 'bridge-service.js is UTF-16LE with BOM and names the profile path'
+  $psBytes = [IO.File]::ReadAllBytes((Join-Path $stateDir 'enroll.ps1'))
+  Check ($psBytes[0] -eq 0xEF -and $psBytes[1] -eq 0xBB -and $psBytes[2] -eq 0xBF -and [Text.Encoding]::UTF8.GetString($psBytes).Contains($home8)) 'enroll.ps1 is UTF-8 with BOM and names the profile path'
+  $oemEnc = [Text.Encoding]::GetEncoding($oem)
+  Check ($oemEnc.GetString([IO.File]::ReadAllBytes((Join-Path $binDir 'bridge-run.cmd'))).Contains($home8)) 'bridge-run.cmd is in the OEM code page'
 
   # ---- install lock ----
   $lock = Join-Path $roaming 'heimdall\bridges\.install-lock'

@@ -106,6 +106,55 @@ function Write-Utf8File {
   [IO.File]::WriteAllText($Path, $Text, (New-Object System.Text.UTF8Encoding($false)))
 }
 
+# Each generated file in the encoding its reader assumes, so a non-ASCII profile
+# path (C:\Users\Jos<e-acute>) survives: wscript reads a BOM-less .js as ANSI
+# (UTF-16LE with BOM is exact), Windows PowerShell 5.1 a BOM-less .ps1 as ANSI
+# (UTF-8 with BOM), and cmd.exe a batch file in the console's OEM code page.
+function Get-OemEncoding {
+  param()
+  try { [Text.Encoding]::RegisterProvider([Text.CodePagesEncodingProvider]::Instance) } catch { }
+  $cp = [Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage
+  try { $cp = [int](Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Nls\CodePage' -Name OEMCP -ErrorAction Stop).OEMCP } catch { }
+  return [Text.Encoding]::GetEncoding($cp, (New-Object Text.EncoderExceptionFallback), (New-Object Text.DecoderExceptionFallback))
+}
+
+function Test-OemRepresentable {
+  param([string]$Text)
+  try { [void](Get-OemEncoding).GetBytes($Text); return $true } catch { return $false }
+}
+
+function Write-GeneratedFile {
+  param([string]$Path, [string]$Text, [ValidateSet('js', 'ps1', 'cmd')][string]$Kind)
+  switch ($Kind) {
+    'js' { $enc = New-Object System.Text.UnicodeEncoding($false, $true) }
+    'ps1' { $enc = New-Object System.Text.UTF8Encoding($true) }
+    'cmd' {
+      $enc = Get-OemEncoding
+      # cmd.exe decodes each batch line in the console's CURRENT code page, which
+      # an interactive console may have changed (chcp 65001). Switch to the code
+      # page this file is written in right after the ASCII header lines, and
+      # restore the caller's one (and the exit code) at the end.
+      $lines = New-Object System.Collections.Generic.List[string]
+      foreach ($l in ($Text.TrimEnd("`r", "`n") -split "`r`n")) {
+        if ($l -eq 'exit /b %ERRORLEVEL%') {
+          $lines.Add('set "HEIMDALL_RC=%ERRORLEVEL%"')
+          $lines.Add('if defined HEIMDALL_CP for /f "tokens=1 delims=. " %%c in ("%HEIMDALL_CP%") do chcp %%c >nul 2>nul')
+          $lines.Add('exit /b %HEIMDALL_RC%')
+          continue
+        }
+        $lines.Add($l)
+        if ($l -eq 'setlocal DisableDelayedExpansion') {
+          $lines.Add('for /f "tokens=2 delims=:" %%c in (''chcp'') do set "HEIMDALL_CP=%%c"')
+          $lines.Add("chcp $($enc.CodePage) >nul 2>nul")
+        }
+      }
+      $Text = ($lines -join "`r`n") + "`r`n"
+    }
+  }
+  try { $bytes = $enc.GetPreamble() + $enc.GetBytes($Text) } catch { Fail "Cannot write ${Path}: a path in it is not representable in the OEM code page $($enc.CodePage) that cmd.exe reads batch files in." }
+  [IO.File]::WriteAllBytes($Path, [byte[]]$bytes)
+}
+
 # Owner-only ACL (the 0700/0600 intent of install.sh): inheritance cut, every
 # inherited entry dropped, one full-control entry for the current user's SID.
 # Directories pass it on to everything created below them.
@@ -403,7 +452,8 @@ function Select-BridgePorts {
 
 function ConvertTo-PsLiteral {
   param([string]$Value)
-  return "'" + $Value.Replace("'", "''") + "'"
+  # Also escapes the typographic quotes PowerShell treats as single quotes.
+  return "'" + [Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent($Value) + "'"
 }
 
 function ConvertTo-CmdValue {
@@ -556,7 +606,7 @@ try {
   exit 1
 }
 '@)
-  Write-Utf8File $C.EnrollScript $sb.ToString()
+  Write-GeneratedFile $C.EnrollScript $sb.ToString() ps1
 }
 
 function New-TaskXml {
@@ -687,6 +737,13 @@ function Invoke-HeimdallInstaller {
   Write-Log INFO "Service: $serviceName ($HeimdallTarget, Scheduled Task)"
   Write-Log INFO "Config/token: $stateDir"
   Write-Log INFO "Data/binaries: $dataDir"
+  # Fail before anything is touched if a path cannot go into the generated files:
+  # cmd.exe and WScript.Shell.Run expand %VAR% (there is no escape on a command
+  # line), and batch files are read in the OEM code page.
+  foreach ($d in @($stateDir, $dataDir)) {
+    if ($d.Contains('%')) { Fail "The profile path $d contains '%', which cmd.exe would expand; set APPDATA/LOCALAPPDATA to a path without it." }
+    if (-not (Test-OemRepresentable $d)) { Fail "The profile path $d is not representable in this system's OEM code page, which cmd.exe reads the bridge's batch files in; set APPDATA/LOCALAPPDATA to a path that is (or enable 'Beta: Use Unicode UTF-8' in Region settings)." }
+  }
   $hubFile = Join-Path $stateDir 'hub-url'
   if (Test-Path -LiteralPath $hubFile) {
     $owner = ([IO.File]::ReadAllText($hubFile)).Trim()
@@ -778,6 +835,8 @@ function Invoke-HeimdallInstaller {
       $api = $HeimdallRepoApi
       $dlRoot = $HeimdallRepoDownload
       if ($env:HEIMDALL_INSTALL_TEST_RELEASES) {
+        # Loopback only: the seam must never point a real install at a remote mirror.
+        if ($env:HEIMDALL_INSTALL_TEST_RELEASES -notmatch '^http://(127\.0\.0\.1|localhost|\[::1\])(:[0-9]+)?(/|$)') { Fail 'HEIMDALL_INSTALL_TEST_RELEASES must be a loopback http:// URL (test seam only).' }
         # Test seam for the hermetic installer test: a local release mirror.
         $api = $env:HEIMDALL_INSTALL_TEST_RELEASES.TrimEnd('/') + '/releases.json'
         $dlRoot = $env:HEIMDALL_INSTALL_TEST_RELEASES.TrimEnd('/') + '/download'
@@ -875,7 +934,7 @@ function Invoke-HeimdallInstaller {
     }
     $endpoint = "tcp:127.0.0.1:$($C.EndpointPort)"
     # Do not override the endpoint injected into agent run directories.
-    Write-Utf8File $C.CtlWrapper ((@(
+    Write-GeneratedFile -Kind cmd -Path $C.CtlWrapper -Text ((@(
           '@echo off',
           "rem Heimdall ham-ctl for $hubUrl (generated by install.ps1)",
           'setlocal DisableDelayedExpansion',
@@ -897,7 +956,7 @@ function Invoke-HeimdallInstaller {
     foreach ($k in $env1.Keys) { $runLines += "set `"$k=$(ConvertTo-CmdValue $env1[$k])`"" }
     $runLines += "`"$(ConvertTo-CmdValue (Join-Path $binDir 'ham-bridge.exe'))`" $quoted 1>>`"$(ConvertTo-CmdValue (Join-Path $C.LogDir 'bridge.out.log'))`" 2>>`"$(ConvertTo-CmdValue (Join-Path $C.LogDir 'bridge.err.log'))`""
     $runLines += 'exit /b %ERRORLEVEL%'
-    Write-Utf8File $C.RunCmd (($runLines -join "`r`n") + "`r`n")
+    Write-GeneratedFile $C.RunCmd (($runLines -join "`r`n") + "`r`n") cmd
     # wscript.exe has no console, and Run(..., 0) starts cmd hidden: the task never
     # shows a window (powershell -WindowStyle Hidden flashes one, or opens a
     # Windows Terminal tab). The loop is the restart policy: like systemd
@@ -924,7 +983,7 @@ for (;;) {
   WScript.Sleep(5000);
 }
 "@
-    Write-Utf8File $C.Launcher $js
+    Write-GeneratedFile $C.Launcher $js js
     New-EnrollScript $C
     Write-Log OK "Hub-specific CLI: $($C.CtlWrapper)"
 
