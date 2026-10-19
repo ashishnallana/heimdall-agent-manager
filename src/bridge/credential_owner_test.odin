@@ -6,10 +6,13 @@ package main
 import "core:fmt"
 import "core:os"
 import "core:strings"
+import "core:sync"
 import "core:testing"
 
 @(test)
 test_credential_file_is_per_bridge_and_records_its_owner :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
 	sb, ok := bridge_vault_test_sandbox_open(t, "cred-owner")
 	if !ok do return
 	defer bridge_vault_test_sandbox_close(&sb)
@@ -50,4 +53,28 @@ test_credential_file_is_per_bridge_and_records_its_owner :: proc(t: ^testing.T) 
 	testing.expect(t, conflict_bare && !bridge_credential_file_belongs_to(bare, hub1, a), "a file without an owner record is never adopted or overwritten")
 	_ = os.remove(shared)
 	_ = os.remove(bare)
+}
+
+@(test)
+test_config_lock_is_keyed_by_the_canonical_path :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sb, ok := bridge_vault_test_sandbox_open(t, "cfg-lock")
+	if !ok do return
+	defer bridge_vault_test_sandbox_close(&sb)
+	_ = bridge_make_directory_all(fmt.tprintf("%s/a", sb.dir))
+	plain := fmt.tprintf("%s/config.toml", sb.dir)
+	dotted := fmt.tprintf("%s/a/../config.toml", sb.dir)
+	c1, ok1 := bridge_canonical_file_path(plain)
+	c2, ok2 := bridge_canonical_file_path(dotted)
+	testing.expectf(t, ok1 && ok2 && c1 == c2, "two spellings of one (not yet existing) config: %s vs %s", c1, c2)
+	testing.expect(t, os.write_entire_file(plain, transmute([]byte)string("[daemon]\n")) == nil, "config written")
+	c3, ok3 := bridge_canonical_file_path(dotted)
+	testing.expectf(t, ok3 && c3 == c1, "existing config resolves the same: %s", c3)
+	l1, locked := bridge_config_lock(plain)
+	testing.expect(t, locked && strings.has_prefix(l1, sb.dir), l1)
+	bridge_instance_unlock(l1)
+	l2, relocked := bridge_config_lock(dotted)
+	testing.expect(t, relocked && l2 == l1, "the same lock file for both spellings")
+	bridge_instance_unlock(l2)
 }

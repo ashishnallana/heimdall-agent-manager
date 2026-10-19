@@ -1034,6 +1034,15 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 	// Nor is a credential file of another hub or bridge overwritten: the other bridge
 	// would then present this bridge's token to its own hub. The default path is per
 	// bridge; only an explicit --bridge-token-file / HAM_BRIDGE_TOKEN_FILE can collide.
+	// One enrollment or running bridge per config: the config is locked for the whole
+	// ceremony and released only to restart the registered service.
+	enroll_config_lock, config_locked := bridge_config_lock(cfg_lib.config_path_from_args(args))
+	if !config_locked {
+		fmt.eprintfln("ham-bridge enroll REFUSED: another ham-bridge instance (a running bridge or enrollment) uses config %s.", cfg_lib.config_path_from_args(args))
+		fmt.eprintln("  Stop it first (the enrollment restarts the registered service when it is done), or use another --config.")
+		return false
+	}
+	defer bridge_instance_unlock(enroll_config_lock)
 	replacing_bridge_id := bridge_enroll_config_bridge_id(cfg_lib.config_path_from_args(args))
 	if explicit_token_file := bridge_enroll_token_file_from_args(args, "", "", context.temp_allocator); explicit_token_file != "" {
 		if reason, conflict := bridge_enroll_token_file_conflict(explicit_token_file, api_base, replacing_bridge_id); conflict {
@@ -1232,7 +1241,8 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 				// REQ-EA-4: write nothing until the vault key is delivered and the hub
 				// commits; enroll_atomic.odin owns the whole sequence.
 				if !bridge_enroll_atomic_run(args, cred, token_file, config_path, api_base) do return false
-				restart_ok, restarted := bridge_enroll_restart_service(args)
+				bridge_instance_unlock(enroll_config_lock) // the restarted service takes it
+			restart_ok, restarted := bridge_enroll_restart_service(args)
 				if !restart_ok do return false
 				if restarted do fmt.println("  registered bridge service restarted with the new credential")
 				return true
@@ -1263,6 +1273,7 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 				}
 				bridge_enroll_print_account_fingerprint(cred.bridge_id)
 			}
+			bridge_instance_unlock(enroll_config_lock) // the restarted service takes it
 			restart_ok, restarted := bridge_enroll_restart_service(args)
 			if !restart_ok {
 				// The key (when delivered) was verified persisted above; a restart
@@ -1418,7 +1429,7 @@ bridge_bind_runtime_hub :: proc(cfg: Bridge_Config, config_path: string) -> bool
 		fmt.eprintfln("ham-bridge REFUSING TO START: the configured hub %q is not a usable http(s) URL.", cfg.daemon_url)
 		return false
 	}
-	if config_path != "" && os.exists(config_path) && !bridge_instance_lock(strings.concatenate({config_path, ".lock"}, context.temp_allocator)) {
+	if _, locked := bridge_config_lock(config_path); config_path != "" && !locked {
 		fmt.eprintfln("ham-bridge REFUSING TO START: another ham-bridge instance is running with config %s. Each bridge needs its own --config/--bridge-token-file.", config_path)
 		return false
 	}
@@ -1446,14 +1457,9 @@ bridge_bind_runtime_hub :: proc(cfg: Bridge_Config, config_path: string) -> bool
 		fmt.eprintln("  Each bridge needs its own credential file; re-enroll: ham-bridge enroll --hub <url>")
 		return false
 	}
-	if name, scoped := keystore_scope_name(bridge_id); scoped {
-		if dir, dir_ok := bridge_vault_bridge_dir(name, context.temp_allocator); dir_ok {
-			_ = bridge_make_directory_all(dir)
-			if !bridge_instance_lock(strings.concatenate({dir, "instance.lock"}, context.temp_allocator)) {
-				fmt.eprintfln("ham-bridge REFUSING TO START: another ham-bridge instance already runs as %s for this hub.", bridge_id)
-				return false
-			}
-		}
+	if name, scoped := keystore_scope_name(bridge_id); scoped && !bridge_scope_lock(name) {
+		fmt.eprintfln("ham-bridge REFUSING TO START: another ham-bridge instance already runs as %s for this hub.", bridge_id)
+		return false
 	}
 	return true
 }
