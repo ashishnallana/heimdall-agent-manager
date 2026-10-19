@@ -930,11 +930,11 @@ bridge_now_unix_ms :: proc() -> i64 {
 	return time.to_unix_nanoseconds(time.now()) / 1_000_000
 }
 
-// Resolves the running bridge's vault keyring (HKR1, lib/vault). The OS store
+// Resolves the running bridge's vault keyring (HKR2, lib/vault). The OS store
 // lookup is scoped to bridge_config.daemon_id, so another bridge of the same OS
 // user is never read (REQ-T5-2). The caller wipes the result (vault.keyring_wipe).
 //
-// HEIMDALL_VAULT_KEYRING (standard base64 of the HKR1 bytes) is a single-bridge
+// HEIMDALL_VAULT_KEYRING (standard base64 of the HKR2 bytes) is a single-bridge
 // development override, global to the process environment. A set but invalid value
 // is "no keyring" and does NOT fall through to the OS store.
 bridge_read_vault_keyring :: proc() -> (vault.Vault_Keyring, bool) {

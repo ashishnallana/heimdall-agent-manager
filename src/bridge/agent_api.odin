@@ -573,7 +573,7 @@ Bridge_Agent_Vault_Op_Result :: struct {
 	status: string,
 }
 
-// keyring_b64 is the whole keyring (HKR1, every epoch); see agent.vault.get.
+// keyring_b64 is the whole keyring (HKR2, every epoch); see agent.vault.get.
 Bridge_Agent_Vault_Keyring :: struct {
 	keyring_b64:   string,
 	current_epoch: u32,

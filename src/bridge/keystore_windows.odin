@@ -10,7 +10,7 @@ KEYSTORE_ERR_ENOSYS   :: 38
 KEYSTORE_ERR_ENOKEY   :: 126
 
 // Windows Credential Manager generic credentials carry this bridge's secrets
-// across restarts (keystore_common.odin): one for the binary HKR1 keyring (<= 2380
+// across restarts (keystore_common.odin): one for the binary HKR2 keyring (<= 2388
 // bytes, under the 2560-byte CredentialBlob limit) and one for the identity key.
 // DPAPI encrypts each blob under the user's logon secret. The bridge id is part of
 // the target name (REQ-T5-1), so bridges of the same user never share or purge

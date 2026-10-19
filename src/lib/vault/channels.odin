@@ -12,7 +12,7 @@ import "core:strings"
 
 // ── Bridge unseal v2 ────────────────────────────────────────────────────────
 // ECDH P-256 (browser ephemeral × bridge ephemeral) → HKDF-SHA256(zero salt,
-// "heimdall-bridge-unseal-v2") → AES-256-GCM over the HKR1 keyring bytes with
+// "heimdall-bridge-unseal-v2") → AES-256-GCM over the HKR2 keyring bytes with
 // AAD "heimdall-bridge-unseal-v2|<bridge_id>|<timestamp>|<nonce>|<current_epoch>".
 // There is exactly one AAD form and the plaintext must be a valid keyring.
 

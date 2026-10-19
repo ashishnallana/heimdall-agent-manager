@@ -1,4 +1,4 @@
-// Shared v2 vectors on the TS side: HKR1 keyring, canonical statements and signature
+// Shared v2 vectors on the TS side: HKR2 keyring, canonical statements and signature
 // objects, algorithm allowlists, keyring wraps and bridge unseal v2 (including the
 // signed-ephemeral-key gate). The Odin twin is src/lib/vault/vault_test.odin.
 //

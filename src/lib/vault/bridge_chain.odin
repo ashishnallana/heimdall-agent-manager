@@ -9,7 +9,7 @@ import "core:strings"
 //
 // The ECDH unseal proves only that the sender saw this boot's signed key, never WHO
 // the sender is: a hostile hub can seal a keyring of its own choosing. So every unseal
-// v2 payload carries, next to the sealed HKR1 keyring, a `chain_proof` member: public,
+// v2 payload carries, next to the sealed HKR2 keyring, a `chain_proof` member: public,
 // signed directory-log data showing that EVERY epoch in the keyring was introduced by
 // an approver of the bridge's account, and that this bridge is itself approved. The
 // sender is the approving browser (src/ui/utils/vaultDirectoryVerify.ts

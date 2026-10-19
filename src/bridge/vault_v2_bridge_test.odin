@@ -70,6 +70,7 @@ test_v2_keystore_keyring_and_identity_round_trip :: proc(t: ^testing.T) {
 	}
 	copy(big.user_id_buf[:], strings.repeat("u", 64, context.temp_allocator))
 	big.user_id_len = 64
+	big.vault_id = test_vault_id()
 	big.count = vault.KEYRING_MAX_EPOCHS
 	big.current_epoch = vault.KEYRING_MAX_EPOCHS
 	ok, err := keystore_store_vault_keyring(f.id_a, test_keyring_bytes(&big))

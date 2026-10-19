@@ -14,7 +14,7 @@ export interface BridgeDeliveryDeps {
   fetchTarget: (bridgeId: string, enrollment: boolean) => Promise<BridgeUnsealTarget>;
   /** POST /bridges/{id}/unseal. */
   dispatch: (bridgeId: string, payload: BridgeUnsealPayload) => Promise<BridgeUnsealResult>;
-  /** Runs `fn` with transient HKR1 bytes at the chain's current epoch (zeroed afterwards). */
+  /** Runs `fn` with transient HKR2 bytes at the chain's current epoch (zeroed afterwards). */
   withKeyringBytes: <T>(fn: (bytes: Uint8Array) => Promise<T>) => Promise<T>;
 }
 

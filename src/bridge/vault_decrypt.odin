@@ -1,7 +1,7 @@
 package main
 
 // Bridge glue over lib/vault (the single Odin implementation of the v2 envelope and
-// the HKR1 keyring). Nothing here knows a wire format: tokens of any older format
+// the HKR2 keyring). Nothing here knows a wire format: tokens of any older format
 // are plain text to this bridge and are never decrypted.
 
 import "core:crypto"
@@ -100,7 +100,7 @@ bridge_vault_shutdown :: proc() {
 }
 
 // bridge_keyring_bytes_from_env decodes HEIMDALL_VAULT_KEYRING (standard base64 of
-// the HKR1 bytes). present reports the variable is set and non-blank: a present but
+// the HKR2 bytes). present reports the variable is set and non-blank: a present but
 // invalid value yields no keyring and must not fall through to other sources.
 bridge_keyring_from_env_value :: proc(value: string) -> (kr: vault.Vault_Keyring, present: bool, ok: bool) {
 	trimmed := strings.trim_space(value)

@@ -17,7 +17,7 @@ package main
 //	         AAD = "HMVS" | 0x02 | <slot name> | ":" | bridge_id
 //
 // written 0600 to ~/.config/heimdall/bridges/<bridge_id>/vault_keyring.sealed (the
-// binary HKR1 keyring) or identity_key.sealed (the identity scalar). The file
+// binary HKR2 keyring) or identity_key.sealed (the identity scalar). The file
 // alone is useless off the device: the KEK needs the Keystore key. Once unwrapped,
 // the keyring is served from keystore_common's mlock'd in-memory cache, so only
 // the first read after a restart pays the Termux:API round trip.

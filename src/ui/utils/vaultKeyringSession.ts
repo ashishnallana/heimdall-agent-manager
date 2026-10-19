@@ -79,7 +79,7 @@ export function keyringSessionGeneration(): number {
 }
 
 /**
- * Run `fn` with the raw HKR1 bytes of the installed keyring, re-opened from the
+ * Run `fn` with the raw HKR2 bytes of the installed keyring, re-opened from the
  * stored wrap. The buffer is zeroed when `fn` settles; `fn` must not keep it.
  * `chain` (when given) is the freshly verified chain to check the wrap against.
  */
@@ -98,7 +98,7 @@ export async function withKeyringBytes<T>(fn: (bytes: Uint8Array) => Promise<T>,
 }
 
 /**
- * HKR1 bytes for the next epoch: every existing entry plus a fresh random key at
+ * HKR2 bytes for the next epoch: every existing entry plus a fresh random key at
  * `current+1`. Refuses when the keyring is full (64 epochs). Caller zeroes the result;
  * `current` is not modified.
  */

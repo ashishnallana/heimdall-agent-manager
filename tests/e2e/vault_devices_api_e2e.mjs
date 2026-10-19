@@ -185,7 +185,7 @@ class SimDevice {
     }
     d.id = await deviceIdFor(d.signPub);
     d.fingerprint = await fingerprintFor(d.signPub, d.ecdhPub);
-    d.keyringBytes = null; // HKR1 (the simulation keeps it; the UI holds it only transiently)
+    d.keyringBytes = null; // HKR2 (the simulation keeps it; the UI holds it only transiently)
     d.keyring = null;
     return d;
   }

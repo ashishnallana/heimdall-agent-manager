@@ -1,5 +1,5 @@
 // Package vault is the single Odin implementation of the passwordless-vault wire
-// formats (docs/plans/passwordless-vault.md §1): the v2 content envelope, the HKR1
+// formats (docs/plans/passwordless-vault.md §1): the v2 content envelope, the HKR2
 // keyring, canonical signed statements and their algorithm allowlist, the bridge
 // unseal v2 cipher, PTY v2 frames and the v2 search key. The bridge, ham-ctl and the
 // hub all use it, so each format exists in exactly one Odin place; the TypeScript

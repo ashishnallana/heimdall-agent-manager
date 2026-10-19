@@ -25,7 +25,7 @@ print_vault_help :: proc() {
 	fmt.println("USAGE:")
 	fmt.println("  ham-ctl vault status")
 	fmt.println("")
-	fmt.println("The keyring comes from $HEIMDALL_VAULT_KEYRING (base64 HKR1,")
+	fmt.println("The keyring comes from $HEIMDALL_VAULT_KEYRING (base64 HKR2,")
 	fmt.println("a single-bridge dev override) or, otherwise, the local bridge.")
 }
 
@@ -42,7 +42,7 @@ ctl_vault_wipe :: proc() {
 	vault.keyring_wipe(&g_ctl_keyring)
 }
 
-// ctl_keyring_from_b64 strictly decodes a base64 HKR1 keyring. When want_epoch is
+// ctl_keyring_from_b64 strictly decodes a base64 HKR2 keyring. When want_epoch is
 // non-zero the keyring's current epoch must equal it.
 ctl_keyring_from_b64 :: proc(b64: string, want_epoch: u32 = 0) -> (kr: vault.Vault_Keyring, ok: bool) {
 	raw, dec_ok := vault.b64_decode_strict(b64, context.temp_allocator)
@@ -61,7 +61,7 @@ ctl_keyring_from_b64 :: proc(b64: string, want_epoch: u32 = 0) -> (kr: vault.Vau
 //   1. $HEIMDALL_VAULT_KEYRING (a single-bridge dev override; a bridge never passes
 //      it to the agents it spawns)
 //   2. the local bridge, via agent.vault.get (agent mode only)
-// (Test builds also accept --vault-keyring <base64 HKR1> first; see below.)
+// (Test builds also accept --vault-keyring <base64 HKR2> first; see below.)
 //
 // Source 1 is EXPLICIT: if it is present but invalid it is rejected and
 // the bridge is NOT consulted, so a typo surfaces as an error instead of silently
@@ -119,7 +119,7 @@ ctl_vault_keyring_from_bridge :: proc() -> (kr: vault.Vault_Keyring, ok: bool) {
 }
 
 // ctl_vault_keyring_from_response validates an agent.vault.get response:
-// {"keyring_b64":"<base64 HKR1>","current_epoch":N}. The keyring must decode
+// {"keyring_b64":"<base64 HKR2>","current_epoch":N}. The keyring must decode
 // strictly, parse, and its current epoch must equal current_epoch.
 // Ctl_Vault_Get_Data is the agent.vault.get answer (bare or under "data").
 Ctl_Vault_Get_Data :: struct {
