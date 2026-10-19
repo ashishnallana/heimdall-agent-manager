@@ -345,7 +345,7 @@ test_shell_session_create_forwards_enc_spec_to_the_bridge :: proc(t: ^testing.T)
 	fixture_make(&fx)
 	defer fixture_free(&fx)
 
-	TEST_ENC_SPEC :: "vault:v1:test_armored_ciphertext_spec"
+	TEST_ENC_SPEC :: "vault:v2:test_armored_ciphertext_spec"
 	_, _, _ = shell_session_create(&fx.svc, test_auth(), Shell_Session_Create_Input{
 		bridge_id = "brg_1",
 		kind      = domain.Shell_Session_Kind_Shell,

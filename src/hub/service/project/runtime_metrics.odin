@@ -192,7 +192,7 @@ bridge_frame_kind :: proc(frame_type: string) -> string {
 	case strings.has_prefix(frame_type, "proxy_"):         return "proxy"
 	case strings.has_prefix(frame_type, "tunnel_"):        return "tunnel"
 	case strings.has_prefix(frame_type, "provider_"):      return "provider"
-	case strings.has_prefix(frame_type, "bridge_vault") || strings.has_prefix(frame_type, "bridge_lock") || strings.has_prefix(frame_type, "bridge_unseal"): return "vault"
+	case strings.has_prefix(frame_type, "bridge_vault") || strings.has_prefix(frame_type, "bridge_unseal"): return "vault"
 	case strings.has_prefix(frame_type, "bridge_update"):  return "update"
 	case strings.has_prefix(frame_type, "task_chain_search"): return "search"
 	case strings.has_prefix(frame_type, "project_path_validation"): return "path_validation"

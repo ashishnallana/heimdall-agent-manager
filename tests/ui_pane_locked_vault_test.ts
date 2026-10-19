@@ -90,7 +90,7 @@ const after = (...events: Parameters<typeof reducePaneVaultLock>[1][]): PaneVaul
 
 test('a bridge row reporting Locked locks the pane on its own (late joiner / opened while locked)', () => {
   assert.equal(isPaneVaultLocked(PANE_VAULT_LOCK_INITIAL, 'Locked'), true);
-  for (const s of ['Unlocked', 'NotConfigured', 'NotRunning', 'Unknown', undefined] as const) {
+  for (const s of ['Unlocked', 'NotRunning', 'Unknown', undefined] as const) {
     assert.equal(isPaneVaultLocked(PANE_VAULT_LOCK_INITIAL, s), false, `no signal + ${s}`);
   }
 });
@@ -101,7 +101,6 @@ test('a signal on a Locked row stays locked until the row reports the vault open
   assert.equal(isPaneVaultLocked(st, 'NotRunning'), true, 'offline says nothing about the key');
   assert.equal(isPaneVaultLocked(st, 'Unknown'), true);
   assert.equal(isPaneVaultLocked(st, 'Unlocked'), false, 'unsealed -> overlay clears');
-  assert.equal(isPaneVaultLocked(st, 'NotConfigured'), false);
 });
 
 test('race: a signal before the row hears Locked is not hidden by the stale Unlocked row', () => {

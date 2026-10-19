@@ -104,7 +104,7 @@ export function enrollmentRestartConfirmation(
     return { outcome: 'confirmed', sealedPolls: 0, vaultStatus };
   }
   const nextSealed =
-    restarted && (vaultStatus === 'locked' || vaultStatus === 'disabled') ? sealedPolls + 1 : 0;
+    restarted && vaultStatus === 'locked' ? sealedPolls + 1 : 0;
   if (nextSealed >= RESTART_SEALED_CONFIRM_POLLS) {
     return { outcome: 'sealed', sealedPolls: nextSealed, vaultStatus };
   }
@@ -145,7 +145,7 @@ export function enrollmentPendingOutcome(
  */
 export function enrollmentContinueAvailable(
   phase: string,
-  passwordTarget?: string,
+  deliveryTarget?: string,
   enrollmentPending = false,
 ): boolean {
   switch (phase) {
@@ -162,10 +162,9 @@ export function enrollmentContinueAvailable(
       return !enrollmentPending;
     case 'rolled-back':
       return false;
-    case 'need-password':
     case 'delivering':
       // Re-unsealing the restarted service: the enrollment already completed.
-      return passwordTarget === 'restarted';
+      return deliveryTarget === 'restarted';
     default:
       return false;
   }

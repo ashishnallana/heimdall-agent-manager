@@ -117,8 +117,8 @@ test('restart confirmation: only the SAME bridge, and only while online, counts'
   assert.equal(enrollmentRestartConfirmation(restartInput({ rows: null })).outcome, 'waiting');
 });
 
-test('restart confirmation: locked/disabled is terminal only after consecutive polls', () => {
-  for (const vault of ['locked', 'disabled']) {
+test('restart confirmation: locked is terminal only after consecutive polls', () => {
+  for (const vault of ['locked']) {
     const rows = [{ bridge_id: 'brg_1', status: 'online', vault_status: vault }];
     const first = enrollmentRestartConfirmation(restartInput({ rows }));
     assert.equal(first.outcome, 'waiting', `${vault}: one poll may race the on-connect heartbeat`);
@@ -153,9 +153,8 @@ test('continue to provider selection stays available in every terminal state', (
     assert.equal(enrollmentContinueAvailable(phase), true, phase);
   }
   // Re-unsealing the restarted service keeps it; the initial delivery does not offer it yet.
-  assert.equal(enrollmentContinueAvailable('need-password', 'restarted'), true);
   assert.equal(enrollmentContinueAvailable('delivering', 'restarted'), true);
-  assert.equal(enrollmentContinueAvailable('need-password', 'enrollment'), false);
+  assert.equal(enrollmentContinueAvailable('delivering', 'enrollment'), false);
   for (const phase of ['idle', 'waiting-for-bridge', 'timed-out']) {
     assert.equal(enrollmentContinueAvailable(phase), false, phase);
   }

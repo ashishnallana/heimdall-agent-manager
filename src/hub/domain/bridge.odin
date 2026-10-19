@@ -32,7 +32,7 @@ Bridge :: struct {
 	update_error: string,
 	telemetry_enabled: string,
 	// vault_status is the bridge's SELF-REPORTED vault tri-state (REQ-BVS-1):
-	// "unlocked" | "locked" | "disabled", or "" for a bridge that has never reported
+	// "unlocked" | "locked", or "" for a bridge that has never reported
 	// one (an older build, or one not yet heard from since the hub started).
 	//
 	// IT IS A UX AND LIVENESS INDICATOR ONLY. Nothing may gate on it. The

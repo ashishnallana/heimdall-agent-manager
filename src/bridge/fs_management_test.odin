@@ -1179,12 +1179,12 @@ fs_vault_read_file_encryption_lifecycle :: proc(t: ^testing.T) {
 
 	test_key := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
-	// 1. With active vault key: read_file encrypts content with vault:v1:
+	// 1. With active vault key: read_file encrypts content as a v2 vault token
 	_ = os.set_env("HEIMDALL_VAULT_KEYRING", test_keyring_env_value(test_key))
 	res_enc := bridge_fs_read_file("confidential.txt", root)
 	defer delete(res_enc.content)
 	testing.expect(t, res_enc.ok && res_enc.viewable, "read encrypted ok")
-	testing.expect(t, strings.has_prefix(res_enc.content, vault.VAULT_V2_PREFIX), "content must have vault:v1: prefix")
+	testing.expect(t, strings.has_prefix(res_enc.content, vault.VAULT_V2_PREFIX), "content must be a v2 vault token")
 	decrypted, dec_ok := test_decrypt_hex(res_enc.content, test_key)
 	testing.expect(t, dec_ok, "decryption of read content ok")
 	defer delete(decrypted)
@@ -1346,7 +1346,7 @@ fs_vault_grep_encrypts_matched_lines :: proc(t: ^testing.T) {
 
 	testing.expect(t, grep_enc.ok, "grep ok")
 	if !testing.expect_value(t, len(grep_enc.matches), 1) do return
-	testing.expect(t, strings.has_prefix(grep_enc.matches[0].line, vault.VAULT_V2_PREFIX), "grep match line must have vault:v1: prefix")
+	testing.expect(t, strings.has_prefix(grep_enc.matches[0].line, vault.VAULT_V2_PREFIX), "grep match line must be a v2 vault token")
 	decrypted_line, dec_ok := test_decrypt_hex(grep_enc.matches[0].line, test_key)
 	testing.expect(t, dec_ok, "decryption of grep match line ok")
 	defer delete(decrypted_line)
@@ -1359,7 +1359,7 @@ fs_vault_grep_encrypts_matched_lines :: proc(t: ^testing.T) {
 
 	testing.expect(t, grep_plain.ok, "grep plain ok")
 	if !testing.expect_value(t, len(grep_plain.matches), 1) do return
-	testing.expect(t, !strings.has_prefix(grep_plain.matches[0].line, vault.VAULT_V2_PREFIX), "grep match line must NOT have vault:v1: prefix")
+	testing.expect(t, !strings.has_prefix(grep_plain.matches[0].line, vault.VAULT_V2_PREFIX), "grep match line must NOT be a vault token")
 	testing.expect_value(t, grep_plain.matches[0].line, "def sensitive_function():")
 }
 

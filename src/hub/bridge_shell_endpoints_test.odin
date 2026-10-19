@@ -434,7 +434,7 @@ test_bridge_shell_input_on_locked_bridge_returns_423 :: proc(t: ^testing.T) {
 
 	path := fmt.tprintf("/api/v1/bridges/%s/shells/sh_t10/input", bridge_id)
 	locked := api_http.router_dispatch(&graph.router, api_http.Request{
-		method = "POST", path = path, body = `{"enc_b64":"vault:v1:AAAA"}`,
+		method = "POST", path = path, body = `{"enc_b64":"vault:v2:AAAA"}`,
 		request_id = "req_t10_locked", remote_addr = "127.0.0.1", headers = alice[:],
 	})
 	testing.expect_value(t, locked.status, 423)
@@ -444,7 +444,7 @@ test_bridge_shell_input_on_locked_bridge_returns_423 :: proc(t: ^testing.T) {
 
 	state.reply = `{"type":"command_result","protocol_version":1,"command_id":"x","payload":{"status":"succeeded"}}`
 	delivered := api_http.router_dispatch(&graph.router, api_http.Request{
-		method = "POST", path = path, body = `{"enc_b64":"vault:v1:AAAA"}`,
+		method = "POST", path = path, body = `{"enc_b64":"vault:v2:AAAA"}`,
 		request_id = "req_t10_ok", remote_addr = "127.0.0.1", headers = alice[:],
 	})
 	testing.expect_value(t, delivered.status, 200)

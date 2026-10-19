@@ -62,8 +62,8 @@ test_attention_ranges_counts_and_order :: proc(t: ^testing.T) {
 		testing.expect_value(t, r7.items[2].primary_op, "task.answer")
 		testing.expect_value(t, r7.items[2].reason, ATTENTION_REASON_AWAITING_REVIEW)
 		// Context resolved in batch: the chain title (ciphertext, verbatim).
-		testing.expect_value(t, r7.items[2].ctx.chain_title, "vault:v1:chain-title")
-		testing.expect_value(t, r7.items[1].ctx.chain_title, "vault:v1:chain-title")
+		testing.expect_value(t, r7.items[2].ctx.chain_title, "vault:v2:chain-title")
+		testing.expect_value(t, r7.items[1].ctx.chain_title, "vault:v2:chain-title")
 	}
 
 	// All time: everything, nothing older. 6h: only the 2h task and the 3h message.
@@ -118,7 +118,7 @@ test_attention_snoozed_and_resolved_are_hidden :: proc(t: ^testing.T) {
 		testing.expect_value(t, string(rs.items[0].card.card_id), "crd_task_task_2h")
 		testing.expect(t, rs.items[0].snoozed, "snoozed item is flagged")
 		testing.expect_value(t, rs.items[0].card.snooze_until, "2099-01-01T00:00:00Z")
-		testing.expect_value(t, rs.items[0].ctx.chain_title, "vault:v1:chain-title")
+		testing.expect_value(t, rs.items[0].ctx.chain_title, "vault:v2:chain-title")
 	}
 	rall, _ := list_attention(&h.svc, ph_auth(), "all", "", true)
 	testing.expect_value(t, len(rall.items), 4)

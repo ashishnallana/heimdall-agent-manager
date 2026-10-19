@@ -40,7 +40,7 @@ export function taskChainSearchErrorMessage(error: unknown): string {
   switch (code) {
     case 'bridge_offline': return 'No search Bridge is online.';
     case 'vault_locked': return 'Unlock the vault to search task chains.';
-    case 'vault_search_reauthentication_required': return 'Re-enter your vault password once to enable task-chain search.';
+    case 'vault_search_reauthentication_required': return 'Task-chain search needs the vault keys of this device; it works once this device is approved.';
     case 'search_not_ready': return 'Bridge search is still preparing.';
     case 'search_stale': return 'Bridge search results may be stale.';
     case 'deadline_exceeded':

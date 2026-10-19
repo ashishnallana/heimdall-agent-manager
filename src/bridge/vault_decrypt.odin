@@ -1,8 +1,8 @@
 package main
 
 // Bridge glue over lib/vault (the single Odin implementation of the v2 envelope and
-// the HKR1 keyring). Nothing here knows a wire format: v1 tokens (`vault:v1:`,
-// `ENC:v1:`) are plain text to this bridge and are never decrypted.
+// the HKR1 keyring). Nothing here knows a wire format: tokens of any older format
+// are plain text to this bridge and are never decrypted.
 
 import "core:crypto"
 import "core:strings"

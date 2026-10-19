@@ -1230,26 +1230,6 @@ bridge_hub_handle_command :: proc(conn: ^ws.Connection, text: string) {
 		bridge_enroll_atomic_on_result(text)
 		return
 	}
-	if type == "bridge_lock" {
-		command_id := extract_json_string(text, "command_id", "")
-		defer delete(command_id)
-		bridge_vault_lock()
-
-		b := strings.builder_make()
-		strings.write_string(&b, "{\"type\":\"bridge_lock_result\",\"command_id\":\"")
-		bridge_runtime_write_json_string(&b, command_id)
-		strings.write_string(&b, "\",\"ok\":true,\"status\":\"locked\"}")
-		res := strings.to_string(b)
-		defer delete(res)
-		bridge_runtime_cache_command(command_id, res)
-		if conn != nil {
-			_ = bridge_hub_send(conn, res)
-		}
-		// bridge_vault_lock() above always succeeds (it drops the in-memory key and
-		// the keyring entry), so the report is unconditional here.
-		bridge_hub_send_vault_status(conn)
-		return
-	}
 	if bridge_fs_handle_command(conn, type, text) do return
 	if bridge_vcs_handle_command(conn, type, text) do return
 	if bridge_taskv2_handle_command(conn, type, text) do return

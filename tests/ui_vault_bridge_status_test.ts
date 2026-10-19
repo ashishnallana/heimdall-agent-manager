@@ -46,9 +46,7 @@ registerHooks({
 
 import {
   resolveBridgeVaultStatus,
-  canLockBridgeVault,
   canUnlockBridgeVault,
-  canConfigureBridgeVault,
   BRIDGE_VAULT_STATUS_TONE,
   BRIDGE_VAULT_STATUSES,
   selectOnlineLockedBridgeIds,
@@ -65,7 +63,6 @@ const VAULT_STATUSES = ['disabled', 'locked', 'unlocked', '', undefined, null, '
 function expectedCell(bridgeStatus: unknown, vaultStatus: unknown): BridgeVaultStatus {
   if (String(bridgeStatus ?? '').toLowerCase() !== 'online') return 'NotRunning';
   switch (String(vaultStatus ?? '').toLowerCase()) {
-    case 'disabled': return 'NotConfigured';
     case 'locked': return 'Locked';
     case 'unlocked': return 'Unlocked';
     default: return 'Unknown';
@@ -92,8 +89,8 @@ test('REQ-BVS-3: resolveBridgeVaultStatus covers every {bridge.status} x {vault_
   assert.equal(cells, 49, 'the table is 7x7 — guards against a silently shrunk matrix');
 });
 
-test('REQ-BVS-3: the four online states are exactly the documented mapping', () => {
-  assert.equal(resolveBridgeVaultStatus({ bridgeStatus: 'online', vaultStatus: 'disabled' }), 'NotConfigured');
+test('REQ-BVS-3: the online states are exactly the documented mapping (no plaintext mode)', () => {
+  assert.equal(resolveBridgeVaultStatus({ bridgeStatus: 'online', vaultStatus: 'disabled' }), 'Unknown', 'the dead plaintext vocabulary is not a state');
   assert.equal(resolveBridgeVaultStatus({ bridgeStatus: 'online', vaultStatus: 'locked' }), 'Locked');
   assert.equal(resolveBridgeVaultStatus({ bridgeStatus: 'online', vaultStatus: 'unlocked' }), 'Unlocked');
   assert.equal(resolveBridgeVaultStatus({ bridgeStatus: 'online', vaultStatus: '' }), 'Unknown');
@@ -151,7 +148,6 @@ test('REQ-BVS-3: only Unlocked is painted success; Unknown and Not running are n
   assert.equal(BRIDGE_VAULT_STATUS_TONE.Locked, 'warning');
   assert.equal(BRIDGE_VAULT_STATUS_TONE.Unknown, 'neutral');
   assert.equal(BRIDGE_VAULT_STATUS_TONE.NotRunning, 'neutral');
-  assert.equal(BRIDGE_VAULT_STATUS_TONE.NotConfigured, 'neutral');
 
   const successStates = BRIDGE_VAULT_STATUSES.filter((s) => BRIDGE_VAULT_STATUS_TONE[s] === 'success');
   assert.deepEqual(successStates, ['Unlocked'], 'exactly one state may look green');
@@ -159,38 +155,17 @@ test('REQ-BVS-3: only Unlocked is painted success; Unknown and Not running are n
   for (const s of BRIDGE_VAULT_STATUSES) {
     assert.ok(BRIDGE_VAULT_STATUS_TONE[s], `state ${s} has a tone`);
   }
-  assert.equal(BRIDGE_VAULT_STATUSES.length, 5, 'there are exactly five states');
+  assert.equal(BRIDGE_VAULT_STATUSES.length, 4, 'there are exactly four states');
 });
 
-test('REQ-BVS-3: lock/unlock affordances follow the state', () => {
-  assert.equal(canLockBridgeVault('Unlocked'), true, 'only an unsealed bridge can be locked');
-  for (const s of ['Locked', 'NotRunning', 'NotConfigured', 'Unknown'] as BridgeVaultStatus[]) {
-    assert.equal(canLockBridgeVault(s), false, `${s} offers no lock`);
-  }
+test('REQ-BVS-3: the key-delivery affordance follows the state', () => {
   assert.equal(canUnlockBridgeVault('Locked'), true);
   assert.equal(canUnlockBridgeVault('Unknown'), true, 'an unreported bridge may still be sent a key');
-  for (const s of ['Unlocked', 'NotRunning', 'NotConfigured'] as BridgeVaultStatus[]) {
+  for (const s of ['Unlocked', 'NotRunning'] as BridgeVaultStatus[]) {
     assert.equal(canUnlockBridgeVault(s), false, `${s} offers no unseal`);
   }
 });
 
-test('REQ-T4-1: canConfigureBridgeVault — all five states x ownerHasVault', () => {
-  let cells = 0;
-  for (const s of BRIDGE_VAULT_STATUSES) {
-    for (const ownerHasVault of [true, false]) {
-      assert.equal(
-        canConfigureBridgeVault(s, ownerHasVault),
-        s === 'NotConfigured' && ownerHasVault,
-        `status=${s} ownerHasVault=${ownerHasVault}`,
-      );
-      cells++;
-    }
-  }
-  assert.equal(cells, 10, 'the table is 5x2 — guards against a silently shrunk matrix');
-  // Configure is a third affordance, not a change to the other two.
-  assert.equal(canUnlockBridgeVault('NotConfigured'), false, 'NotConfigured still offers no plain Unlock');
-  assert.equal(canLockBridgeVault('NotConfigured'), false, 'Lock stays disabled for NotConfigured');
-});
 
 // --------------------------------------------------------------------------------
 // 3. REQ-BVS-4: lockBridge must propagate failure instead of returning { ok: true }.

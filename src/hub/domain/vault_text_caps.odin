@@ -28,7 +28,7 @@ import vault "odin_test:lib/vault"
 // budget locally before encrypting (REQ-VCAP-4).
 
 // VAULT_ARMOR_PREFIX is the self-describing wire marker for an encrypted value.
-// v1 ('vault:v1:'/'ENC:v1:') is dead: the hub treats it as ordinary text.
+// Older formats are dead: the hub treats them as ordinary text.
 VAULT_ARMOR_PREFIX :: vault.VAULT_V2_PREFIX
 
 // VAULT_HEADER_BYTES is the per-value nonce+tag overhead inside the base64 payload.

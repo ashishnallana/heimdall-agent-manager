@@ -54,7 +54,7 @@ test_bridge_vault_status_repo_roundtrip :: proc(t: ^testing.T) {
 	testing.expect_value(t, loaded.vault_status, "")
 
 	// 2. Each legal value round-trips verbatim.
-	for value in ([3]string{"unlocked", "locked", "disabled"}) {
+	for value in ([2]string{"unlocked", "locked"}) {
 		updated := base
 		updated.vault_status = value
 		_, ok, _ := iface.bridge_save_bridge(&repo, updated)
@@ -78,7 +78,7 @@ test_bridge_vault_status_repo_roundtrip :: proc(t: ^testing.T) {
 	testing.expect_value(t, list_err.code, domain.Error_Code.None)
 	testing.expect_value(t, len(listed), 1)
 	if len(listed) == 1 {
-		testing.expect_value(t, listed[0].vault_status, "disabled")
+		testing.expect_value(t, listed[0].vault_status, "locked")
 	}
 }
 

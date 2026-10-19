@@ -11,8 +11,8 @@ import vault "odin_test:lib/vault"
 // ── Content cryptography (REQ-VAULT-CONTENT-LIB-1, passwordless vault P1) ────
 // The wire format lives in src/lib/vault: 'vault:v2:e<epoch>:<b64(nonce|tag|ct)>'
 // with AAD 'heimdall-vault-v2|e<epoch>'. ham-ctl seals under the keyring's CURRENT
-// epoch and opens by the epoch in the token header. v1 ('vault:v1:'/'ENC:v1:') tokens
-// are dead: they are not armored as far as ham-ctl is concerned and are never decoded.
+// epoch and opens by the epoch in the token header. Tokens of older formats are dead:
+// they are not armored as far as ham-ctl is concerned and are never decoded.
 
 VAULT_ARMOR_PREFIX :: vault.VAULT_V2_PREFIX
 

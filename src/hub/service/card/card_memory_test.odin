@@ -38,7 +38,7 @@ test_memory_proposal_card_lifecycle :: proc(t: ^testing.T) {
 	defer ph_close(&h)
 	pm_seed_memory_fixtures(t, &h)
 
-	m := pm_propose(t, &h, "vault:v1:mem-title", templates = []string{"tmpl_reviewer"})
+	m := pm_propose(t, &h, "vault:v2:mem-title", templates = []string{"tmpl_reviewer"})
 	testing.expect_value(t, m.proposed_by_instance_id, "inst_prop")
 	testing.expect_value(t, m.proposed_in_chain_id, string(PH_CHAIN))
 
@@ -60,7 +60,7 @@ test_memory_proposal_card_lifecycle :: proc(t: ^testing.T) {
 		testing.expect_value(t, it.reason, ATTENTION_REASON_MEMORY_PROPOSAL)
 		testing.expect_value(t, it.primary_op, "memory.approve")
 		testing.expect_value(t, it.ctx.agent_name, "soloist #21")
-		testing.expect_value(t, it.ctx.chain_title, "vault:v1:chain-title")
+		testing.expect_value(t, it.ctx.chain_title, "vault:v2:chain-title")
 		testing.expect(t, it.ctx.has_scope, "memory items carry a named scope")
 		testing.expect_value(t, len(it.ctx.scope_agents), 1)
 		if len(it.ctx.scope_agents) == 1 do testing.expect_value(t, it.ctx.scope_agents[0], "codex-reviewer")

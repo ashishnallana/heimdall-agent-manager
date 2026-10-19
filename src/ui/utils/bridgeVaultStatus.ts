@@ -26,16 +26,15 @@
 
 import type { Tone } from '../components/ui/types';
 
-/** The five states a bridge's vault can present in the UI. */
+/** The four states a bridge's vault can present in the UI (there is no plaintext mode). */
 export type BridgeVaultStatus =
   | 'NotRunning'
-  | 'NotConfigured'
   | 'Locked'
   | 'Unlocked'
   | 'Unknown';
 
 /** The values `bridges.vault_status` is documented to carry (plus "" for unreported). */
-export type ReportedVaultStatus = 'disabled' | 'locked' | 'unlocked' | '' | string;
+export type ReportedVaultStatus = 'locked' | 'unlocked' | '' | string;
 
 export interface BridgeVaultStatusInput {
   /** `bridge.status` / `bridge.runtime_status` as reported by the hub. */
@@ -62,8 +61,6 @@ export function resolveBridgeVaultStatus(input: BridgeVaultStatusInput): BridgeV
   if (!online) return 'NotRunning';
 
   switch (String(input.vaultStatus ?? '').trim().toLowerCase()) {
-    case 'disabled':
-      return 'NotConfigured';
     case 'locked':
       return 'Locked';
     case 'unlocked':
@@ -108,36 +105,21 @@ export function selectOnlineLockedBridgeIds(
  */
 export const BRIDGE_VAULT_STATUS_TONE: Record<BridgeVaultStatus, Tone> = {
   NotRunning: 'neutral',
-  NotConfigured: 'neutral',
   Locked: 'warning',
   Unlocked: 'success',
   Unknown: 'neutral',
 };
 
-/** Lock is only meaningful while the bridge actually holds a key. */
-export function canLockBridgeVault(status: BridgeVaultStatus): boolean {
-  return status === 'Unlocked';
-}
 
 /** Unseal is only meaningful for an online bridge that is not already unsealed. */
 export function canUnlockBridgeVault(status: BridgeVaultStatus): boolean {
   return status === 'Locked' || status === 'Unknown';
 }
 
-/**
- * REQ-T4-1: "Configure encryption" is offered for an online bridge that has no key
- * yet, but only when the OWNER has a vault to give it — `ownerHasVault` is "this
- * client's vault is configured". Without an owner vault there is no key to send, and
- * the client-scoped "Enable Encryption" is the right control instead.
- */
-export function canConfigureBridgeVault(status: BridgeVaultStatus, ownerHasVault: boolean): boolean {
-  return status === 'NotConfigured' && ownerHasVault;
-}
 
-/** All five states, in the order the UI documents them. */
+/** All four states, in the order the UI documents them. */
 export const BRIDGE_VAULT_STATUSES: readonly BridgeVaultStatus[] = [
   'NotRunning',
-  'NotConfigured',
   'Locked',
   'Unlocked',
   'Unknown',
