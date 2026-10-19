@@ -540,6 +540,7 @@ register_routes :: proc(graph: ^App_Graph) {
 	http.router_add(&graph.router, "POST", "/api/v1/vault/directory/rotate", rawptr(&graph.vault_directory_handlers), http.vault_rotate_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/vault/devices/register", rawptr(&graph.vault_directory_handlers), http.vault_register_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/vault/devices/self", rawptr(&graph.vault_directory_handlers), http.vault_self_handler)
+	http.router_add(&graph.router, "POST", "/api/v1/vault/devices/recovery", rawptr(&graph.vault_directory_handlers), http.vault_recovery_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/vault/devices/*/approve", rawptr(&graph.vault_directory_handlers), http.vault_approve_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/vault/devices/*/revoke", rawptr(&graph.vault_directory_handlers), http.vault_revoke_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/vault/devices/*/deny", rawptr(&graph.vault_directory_handlers), http.vault_deny_handler)

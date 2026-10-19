@@ -152,6 +152,10 @@ Vault_Device_Wire :: struct {
 	revoked_at:            string,
 	last_seen_at:          string,
 	retired_at:            string,
+	// Recovery credentials only: the sealed recovery key blob (opaque to the hub; it
+	// opens only with the 12 recovery words). Served to the session user so a new
+	// browser can restore with the words.
+	recovery_blob:         string,
 }
 
 @(private = "file")
@@ -174,6 +178,7 @@ vault_device_wire :: proc(d: domain.Vault_Device) -> Vault_Device_Wire {
 		revocation_signature = sig_wire(d.revocation_signature),
 		created_at = d.created_at, approved_at = d.approved_at, revoked_at = d.revoked_at,
 		last_seen_at = d.last_seen_at, retired_at = d.retired_at,
+		recovery_blob = d.recovery_blob if d.kind == "recovery" else "",
 	}
 }
 
@@ -422,6 +427,45 @@ vault_approve_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	if err.code != .None do return respond_error(err, req.request_id)
 	publish(h, auth.user_id, device_id, "approved")
 	return vault_respond(Vault_Version_Wire{directory_version = new_version}, req)
+}
+
+// ── POST /api/v1/vault/devices/recovery ─────────────────────────────────────
+// Signed by an approved approver: adds a recovery credential (signed approve op,
+// its wrap, the sealed blob). Plan P4.
+
+@(private = "file")
+Recovery_Request :: struct {
+	expected_version: json.Value,
+	statement:        string,
+	signature:        json.Value,
+	wrap:             json.Value,
+	recovery_blob:    string,
+}
+
+Vault_Recovery_Wire :: struct {
+	directory_version: i64,
+	device_id:         string,
+}
+
+vault_recovery_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Vault_Directory_Handlers)(ctx)
+	auth, ok, resp := require_vault_user(h, req)
+	if !ok do return resp
+	signer, serr := vd.verify_request(h.vault, auth.user_id, signed_request(req), .Approver)
+	if serr.code != .None do return respond_error(serr, req.request_id)
+	body: Recovery_Request
+	if !vault_decode(req, &body) do return bad_request(req, "body must be a JSON object")
+	version, v_ok := version_of(body.expected_version)
+	if !v_ok do return bad_request(req, "expected_version is required")
+	wrap, w_ok := wrap_input(body.wrap)
+	if !w_ok do return bad_request(req, "wrap is required")
+	new_version, dev, err := vd.add_recovery(h.vault, vd.Recovery_Input{
+		user_id = auth.user_id, expected_version = version, statement = body.statement,
+		signature = vault_sig_text(body.signature), wrap = wrap, recovery_blob = body.recovery_blob, signer = signer,
+	})
+	if err.code != .None do return respond_error(err, req.request_id)
+	publish(h, auth.user_id, dev.device_id, "approved")
+	return vault_respond(Vault_Recovery_Wire{directory_version = new_version, device_id = dev.device_id}, req, 201)
 }
 
 // ── POST /api/v1/vault/devices/{id}/deny ────────────────────────────────────

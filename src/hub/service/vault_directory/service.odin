@@ -646,6 +646,66 @@ approve :: proc(svc: ^Service, in_: Approve_Input) -> (i64, domain.Domain_Error)
 	return iface.vault_commit(svc.repo, cm)
 }
 
+// ── Recovery key (plan P4) ──────────────────────────────────────────────────
+// An approved approver adds a `recovery` credential: a signed `approve` log op whose
+// subject is the recovery key (kind recovery; ECDSA + ECDH P-256 generated in the
+// browser), its keyring wrap (the approval names it in wrap_sha256) and the sealed
+// recovery blob. The recovery credential then approves, counts toward the
+// last-approver guard and receives wraps like any wrap-capable device; it can never
+// be the root (genesis refuses it).
+
+Recovery_Input :: struct {
+	user_id:          string,
+	expected_version: i64,
+	statement:        string,
+	signature:        string,
+	wrap:             Wrap_Input,
+	recovery_blob:    string,
+	signer:           domain.Vault_Device,
+}
+
+add_recovery :: proc(svc: ^Service, in_: Recovery_Input) -> (i64, domain.Vault_Device, domain.Domain_Error) {
+	dir, found, err := iface.vault_get_directory(svc.repo, in_.user_id)
+	if err.code != .None do return 0, {}, err
+	if !found do return 0, {}, not_configured_error()
+	if in_.expected_version != dir.version do return 0, {}, domain.vault_conflict_error(dir.version)
+	if !domain.vault_recovery_blob_valid(in_.recovery_blob) do return 0, {}, invalid("recovery_blob is malformed")
+	st, serr := parse_signed_statement(in_.statement, in_.signature, "approve", in_.user_id, next_slot(dir), in_.signer)
+	if serr.code != .None do return 0, {}, serr
+	if st.subject_kind != "recovery" do return 0, {}, invalid("a recovery key approval must describe a recovery credential")
+	dev, derr := subject_device_from_statement(&st, in_.user_id)
+	if derr.code != .None do return 0, {}, derr
+	devices, lerr := iface.vault_list_devices(svc.repo, in_.user_id)
+	if lerr.code != .None do return 0, {}, lerr
+	if _, exists := find_device(devices, dev.device_id); exists do return 0, {}, domain.vault_reason_error(.Conflict, "device_exists", "this recovery key is already in the directory")
+	commit, cerr := current_epoch_commit(svc, in_.user_id, dir.current_epoch)
+	if cerr.code != .None do return 0, {}, cerr
+	if st.epoch != i64_str(dir.current_epoch) || st.epoch_commit != commit do return 0, {}, invalid("approval must name the current epoch and its epoch_commit")
+	now := platform.clock_now(svc.clock)
+	row, werr := check_wrap(svc, in_.wrap, in_.user_id, dev, dir.version + 1, dir.current_epoch, in_.signer, now)
+	if werr.code != .None do return 0, {}, werr
+	digest: [32]byte
+	w := in_.wrap.wrap
+	if !vault.wrap_sha256(&w, digest[:]) do return 0, {}, invalid("wrap is malformed")
+	if st.wrap_sha256 == "" || st.wrap_sha256 != vault.hex_encode_lower(digest[:], context.temp_allocator) do return 0, {}, invalid("approval statement must name this wrap in wrap_sha256")
+	dev.status = .Approved
+	dev.approval_statement = in_.statement
+	dev.approval_signature = in_.signature
+	dev.approved_by_device_id = in_.signer.device_id
+	dev.recovery_blob = in_.recovery_blob
+	dev.created_at = now
+	dev.approved_at = now
+	v, cmerr := iface.vault_commit(svc.repo, domain.Vault_Directory_Commit{
+		user_id = in_.user_id, expected_version = in_.expected_version, now = now,
+		expected_head_hash = dir.head_hash,
+		log_statement = in_.statement, log_signature = in_.signature, log_entry_hash = vault.log_entry_hash(in_.statement, context.temp_allocator),
+		insert_device = dev,
+		wraps = []domain.Vault_Wrap_Row{row},
+	})
+	if cmerr.code != .None do return 0, {}, cmerr
+	return v, dev, domain.Domain_Error{}
+}
+
 // ── Deny ────────────────────────────────────────────────────────────────────
 
 // deny removes a pending device. Called after verify_request(.Approver), so only an
@@ -812,14 +872,18 @@ revoke_prepare :: proc(svc: ^Service, in_: Revoke_Input) -> (Revoke_Plan, domain
 	target, has := find_device(devices, in_.device_id)
 	if !has || target.status != .Approved do return {}, domain.domain_error(.Not_Found, "no approved device with that id")
 
-	// The last-approver guard: at least one approver-capable device (a browser or a
-	// recovery device) must remain approved.
+	// The last-approver guard: revoking must leave at least one approver-capable
+	// device (kind_policy.counts_as_approver: a browser or a recovery key) OTHER THAN
+	// the signer. The signer always remains, so counting it would make the guard
+	// unreachable; what it protects against is ending with a single approver and no
+	// recovery key (losing that one device would then lock the account out). With a
+	// recovery key the revoke is allowed: the recovery key counts.
 	remaining_approvers := 0
 	for d in devices {
-		if d.device_id == target.device_id || d.status != .Approved do continue
+		if d.device_id == target.device_id || d.device_id == in_.signer.device_id || d.status != .Approved do continue
 		if domain.vault_kind_policy(d.kind).counts_as_approver do remaining_approvers += 1
 	}
-	if remaining_approvers == 0 do return {}, domain.vault_reason_error(.Conflict, "last_approver", "revoking this device would leave no device able to approve; add a recovery key first")
+	if remaining_approvers == 0 do return {}, domain.vault_reason_error(.Conflict, "last_approver", "revoking this device would leave this device as the only one able to approve; create a recovery key first")
 
 	new_epoch := dir.current_epoch + 1
 	new_epoch_s := i64_str(new_epoch)

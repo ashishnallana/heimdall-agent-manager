@@ -178,6 +178,19 @@ approve_b :: proc(t: ^testing.T, f: ^Fixture, a, b: ^Dev, version: i64) -> (i64,
 	})
 }
 
+BLOB :: `{"v":1,"alg":"bip39-hkdf-sha256-aes256gcm","iv":"bc20a2fb46127e3a719bdb68","ciphertext":"00112233445566778899aabbccddeeff00112233"}`
+
+// add_recovery_by signs the approval of recovery credential r by `by` at `version`.
+add_recovery_by :: proc(f: ^Fixture, by, r: ^Dev, version, epoch: i64, blob := BLOB) -> (i64, domain.Domain_Error) {
+	w := wrap_for(by, r, version + 1, epoch)
+	st := statement("approve", by, r, itoa(version + 1), itoa(epoch), wrap_sha = wrap_sha(w), prev = head(f))
+	v, _, err := add_recovery(&f.svc, Recovery_Input{
+		user_id = USER, expected_version = version, statement = st, signature = sign(by, st), wrap = w,
+		recovery_blob = blob, signer = dev_row(f, by.id),
+	})
+	return v, err
+}
+
 // L7: the approval must commit to the wrap (wrap_sha256) and the current epoch_commit.
 @(test)
 test_vault_approve_binds_wrap_and_epoch_commit :: proc(t: ^testing.T) {
@@ -267,20 +280,69 @@ test_vault_genesis_register_approve_revoke_flow :: proc(t: ^testing.T) {
 	_, self := revoke(&f.svc, revoke_in(&a, &a, signer, 2, 2, {wrap_for(&a, &b, 3, 2)}, h2))
 	testing.expect_value(t, self.code, domain.Error_Code.Conflict)
 	testing.expect_value(t, self.details_json, `{"reason":"self_revoke"}`)
-	_, missing := revoke(&f.svc, revoke_in(&a, &b, signer, 2, 2, {}, h2))
-	_, extra := revoke(&f.svc, revoke_in(&a, &b, signer, 2, 2, {wrap_for(&a, &a, 3, 2), wrap_for(&a, &b, 3, 2)}, h2))
-	_, bad_epoch := revoke(&f.svc, revoke_in(&a, &b, signer, 2, 3, {wrap_for(&a, &a, 3, 3)}, h2))
+	// Last-approver guard: B is the only approver besides the signer and there is no
+	// recovery key, so revoking it would leave A as the single approver. Refused.
+	_, last := revoke(&f.svc, revoke_in(&a, &b, signer, 2, 2, {wrap_for(&a, &a, 3, 2)}, h2))
+	testing.expect_value(t, last.code, domain.Error_Code.Conflict)
+	testing.expect_value(t, last.details_json, `{"reason":"last_approver"}`)
+	// With a recovery key the revoke is allowed (the recovery key counts as an approver).
+	r := make_dev(3, "recovery")
+	rv, rerr2 := add_recovery_by(f, &a, &r, 2, 1)
+	testing.expect_value(t, rerr2.code, domain.Error_Code.None)
+	testing.expect_value(t, rv, i64(3))
+	testing.expect_value(t, dev_row(f, r.id).recovery_blob, BLOB)
+	h3 := head(f)
+	_, missing := revoke(&f.svc, revoke_in(&a, &b, signer, 3, 2, {wrap_for(&a, &a, 4, 2)}, h3))
+	_, extra := revoke(&f.svc, revoke_in(&a, &b, signer, 3, 2, {wrap_for(&a, &a, 4, 2), wrap_for(&a, &r, 4, 2), wrap_for(&a, &b, 4, 2)}, h3))
+	_, bad_epoch := revoke(&f.svc, revoke_in(&a, &b, signer, 3, 3, {wrap_for(&a, &a, 4, 3), wrap_for(&a, &r, 4, 3)}, h3))
 	testing.expect(t, missing.code == .Validation_Failed && extra.code == .Validation_Failed && bad_epoch.code == .Validation_Failed)
-	res, ok_err := revoke(&f.svc, revoke_in(&a, &b, signer, 2, 2, {wrap_for(&a, &a, 3, 2)}, h2))
+	res, ok_err := revoke(&f.svc, revoke_in(&a, &b, signer, 3, 2, {wrap_for(&a, &a, 4, 2), wrap_for(&a, &r, 4, 2)}, h3))
 	testing.expect_value(t, ok_err.code, domain.Error_Code.None)
-	testing.expect_value(t, res.version, i64(3))
+	testing.expect_value(t, res.version, i64(4))
 	dir, _, _ := iface.vault_get_directory(&f.repo, USER)
 	testing.expect_value(t, dir.current_epoch, i64(2))
 	_, b_wrap, _ := iface.vault_get_wrap(&f.repo, USER, b.id)
 	testing.expect(t, !b_wrap, "the revoked device's wrap is gone")
-	// The only approver left cannot revoke itself (the last-approver path).
-	_, last := revoke(&f.svc, revoke_in(&a, &a, signer, 3, 3, {}, head(f)))
-	testing.expect_value(t, last.code, domain.Error_Code.Conflict)
+	_, r_wrap, _ := iface.vault_get_wrap(&f.repo, USER, r.id)
+	testing.expect(t, r_wrap, "the recovery key receives the new epoch's wrap")
+	// Now A and R remain: revoking R (the only other approver) is refused too.
+	_, last_r := revoke(&f.svc, revoke_in(&a, &r, signer, 4, 3, {wrap_for(&a, &a, 5, 3)}, head(f)))
+	testing.expect_value(t, last_r.details_json, `{"reason":"last_approver"}`)
+}
+
+// P4 recovery key: shape, kind, binding; a revoked recovery credential cannot approve.
+@(test)
+test_vault_recovery_key_add_and_revoked_cannot_approve :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	f := fixture(t)
+	defer fixture_close(f)
+	a, b, r := make_dev(1), make_dev(2), make_dev(3, "recovery")
+	do_genesis(t, f, &a)
+	// Malformed blobs and a non-recovery subject are refused; nothing changes.
+	_, bad_blob := add_recovery_by(f, &a, &r, 1, 1, `{"v":1,"alg":"bip39-hkdf-sha256-aes256gcm","iv":"bc20a2fb46127e3a719bdb68","ciphertext":"00112233445566778899aabbccddeeff00112233","x":1}`)
+	_, no_blob := add_recovery_by(f, &a, &r, 1, 1, "")
+	testing.expect(t, bad_blob.code == .Validation_Failed && no_blob.code == .Validation_Failed)
+	bb := make_dev(9)
+	_, not_rec := add_recovery_by(f, &a, &bb, 1, 1)
+	testing.expect_value(t, not_rec.code, domain.Error_Code.Validation_Failed)
+	// The recovery key can never be the root.
+	g := statement("genesis", &r, &r, "1", "1", user = OTHER)
+	_, root_err := genesis(&f.svc, Genesis_Input{user_id = OTHER, genesis_statement = g, genesis_signature = sign(&r, g), wrap = wrap_for(&r, &r, 1, 1, OTHER)})
+	testing.expect_value(t, root_err.code, domain.Error_Code.Validation_Failed)
+	v, err := add_recovery_by(f, &a, &r, 1, 1)
+	testing.expect_value(t, err.code, domain.Error_Code.None)
+	// The recovery credential approves a new browser (the restore path) and signs requests.
+	do_register(t, f, &b)
+	_, rapprove := approve_b(t, f, &r, &b, v)
+	testing.expect_value(t, rapprove.code, domain.Error_Code.None)
+	_, req_ok := verify_request(&f.svc, USER, signed_req(&r, "POST", "/x", "{}", "nonce-recovery-0000001"), .Approver)
+	testing.expect_value(t, req_ok.code, domain.Error_Code.None)
+	// B revokes the recovery key (A remains besides B): afterwards R cannot sign.
+	rs := statement("revoke", &b, &r, "4", "2", prev = head(f))
+	_, rev_err := revoke(&f.svc, Revoke_Input{user_id = USER, device_id = r.id, expected_version = 3, revoke_statement = rs, signature = sign(&b, rs), wraps = {wrap_for(&b, &a, 4, 2), wrap_for(&b, &b, 4, 2)}, signer = dev_row(f, b.id)})
+	testing.expect_value(t, rev_err.code, domain.Error_Code.None)
+	_, revoked_req := verify_request(&f.svc, USER, signed_req(&r, "POST", "/x", "{}", "nonce-recovery-0000002"), .Approver)
+	testing.expect_value(t, revoked_req.code, domain.Error_Code.Forbidden)
 }
 
 @(test)
@@ -354,8 +416,12 @@ test_vault_request_signature_rejections :: proc(t: ^testing.T) {
 	// Revoked signer: approve B, revoke B (A signs), then B is refused.
 	_, aerr := approve_b(t, f, &a, &b, 2)
 	testing.expect_value(t, aerr.code, domain.Error_Code.None)
-	r := statement("revoke", &a, &b, "4", "2", prev = head(f))
-	_, rerr := revoke(&f.svc, Revoke_Input{user_id = USER, device_id = b.id, expected_version = 3, revoke_statement = r, signature = sign(&a, r), wraps = {wrap_for(&a, &a, 4, 2)}, signer = dev_row(f, a.id)})
+	// (A recovery key first: revoking B must not leave A as the single approver.)
+	rk := make_dev(3, "recovery")
+	_, rk_err := add_recovery_by(f, &a, &rk, 3, 1)
+	testing.expect_value(t, rk_err.code, domain.Error_Code.None)
+	r := statement("revoke", &a, &b, "5", "2", prev = head(f))
+	_, rerr := revoke(&f.svc, Revoke_Input{user_id = USER, device_id = b.id, expected_version = 4, revoke_statement = r, signature = sign(&a, r), wraps = {wrap_for(&a, &a, 5, 2), wrap_for(&a, &rk, 5, 2)}, signer = dev_row(f, a.id)})
 	testing.expect_value(t, rerr.code, domain.Error_Code.None)
 	_, revoked := verify_request(&f.svc, USER, signed_req(&b, "POST", PATH, BODY, "nonce-0000000000000011"), .Approver)
 	testing.expect_value(t, revoked.code, domain.Error_Code.Forbidden)
