@@ -30,6 +30,8 @@ package main
 import "core:strings"
 import contracts "odin_test:contracts"
 import app "odin_test:hub/app"
+import domain "odin_test:hub/domain"
+import iface "odin_test:hub/repository/iface"
 import api_http "odin_test:hub/transport/http"
 import bridge_service "odin_test:hub/service/bridge"
 
@@ -91,6 +93,23 @@ device_enroll_test_bridge :: proc(graph: ^app.App_Graph, headers: []contracts.HT
 	bridge_id = device_test_json_string(issued.body, "bridge_id")
 	bridge_token = device_test_json_string(issued.body, "access_token")
 	if bridge_id == "" || bridge_token == "" do return "", "", false
+
+	// ===== THE VAULT KEY IS DELIVERED =====
+	//
+	// REQ-EA-1: the enrollment stays PENDING (invisible to the owner's bridge
+	// routes) until the hub observes the bridge acknowledge its vault keyring on the
+	// enroll-only socket (bridge_unseal_handler → bridge_enroll_commit). No bridge
+	// connects here, so commit the pending family the same way that path does.
+	family_id := ""
+	pending_tokens, list_err := iface.bridge_list_live_tokens_by_scope(graph.bridges.repo, bridge_service.BRIDGE_ENROLL_TOKEN_SCOPE)
+	if list_err.code != .None do return "", "", false
+	for tok in pending_tokens do if tok.bridge_id == bridge_id do family_id = strings.clone(tok.family_id, context.temp_allocator)
+	for &tok in pending_tokens do domain.bridge_token_destroy(&tok)
+	delete(pending_tokens)
+	if family_id == "" do return "", "", false
+	committed, commit_ok, _ := bridge_service.commit_pending_enrollment(&graph.bridges, bridge_service.Pending_Commit_Input{bridge_id = bridge_id, family_id = family_id})
+	if !commit_ok do return "", "", false
+	domain.bridge_destroy(&committed)
 
 	// ===== CAPABILITIES ARE REPORTED, NOT ENROLLED =====
 	//
