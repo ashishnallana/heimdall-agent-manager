@@ -33,6 +33,11 @@ Configure shared fleet roles before starting a recipe; runs never widen the flee
 ./.heimdall/bin/ham-ctl task-chain depend --chain <chain-id> --item task:<validation-id> --on workflow_run:<run-id>
 ```
 
+To fan out over a list you already know, define a stage with
+`"for_each": "inputs.<array-input>"` and pass the list with `--inputs-file`; no
+echo stage is needed. An empty list completes that stage with zero tasks. See
+ham-ctl-reference "Authoring workflow definitions" for item placeholders.
+
 Creation request keys are caller-selected and reused on network retries. A key
 with different inputs fails. Retry creates a new execution with fresh tasks and
 preserves all old attempts. Stage/cascade retry is unsupported. If outputs have

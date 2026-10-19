@@ -63,6 +63,11 @@ Workflow_Input_Spec :: struct {
 	required:    bool,
 	default_val: string,
 	has_default: bool,
+	// default_raw is the declared default as raw JSON (any type), so array
+	// defaults can feed `for_each: "inputs.<name>"`. type_declared records
+	// whether the spec stated a type (the parser otherwise assumes "string").
+	default_raw:   string,
+	type_declared: bool,
 	description: string,
 }
 
@@ -272,7 +277,14 @@ parse_and_validate_workflow_spec :: proc(raw_spec: string, name_override := "", 
 	for st in stages {
 		ancestors := make(map[string]bool, len(stages), allocator)
 		collect_stage_ancestors(st.key, stage_by_key, &ancestors)
-		if st.for_each != "" {
+		if input_field, is_input := parse_for_each_input_expr(st.for_each); is_input {
+			if input_field == "" {
+				return {}, false, domain.domain_error(.Validation_Failed, fmt.tprintf("stage %s has invalid for_each expression: %s (use inputs.<array-input-name>)", st.key, st.for_each), `{"code":"workflow_invalid"}`)
+			}
+			if verr := validate_for_each_input_declaration(st.key, input_field, inputs_specs); verr.code != .None {
+				return {}, false, verr
+			}
+		} else if st.for_each != "" {
 			up_stage, up_field, ok_fe := parse_for_each_expr(st.for_each)
 			if !ok_fe || up_stage == "" || up_field == "" {
 				return {}, false, domain.domain_error(.Validation_Failed, fmt.tprintf("stage %s has invalid for_each expression: %s", st.key, st.for_each), `{"code":"workflow_invalid"}`)
@@ -344,6 +356,101 @@ collect_stage_ancestors :: proc(key: string, stage_by_key: map[string]Workflow_S
 			collect_stage_ancestors(d, stage_by_key, out)
 		}
 	}
+}
+
+// parse_for_each_input_expr recognises workflow-input fan-out:
+//   "inputs.<name>" (canonical) or "workflow.input.<name>" (placeholder alias).
+// is_input is true whenever the expression uses an input prefix; field is ""
+// when the remainder is not a single top-level input name (nested paths are
+// not supported), which callers report as an invalid expression.
+parse_for_each_input_expr :: proc(expr: string) -> (field: string, is_input: bool) {
+	s := strings.trim_space(expr)
+	rest := ""
+	if strings.has_prefix(s, "inputs.") {
+		rest = s[len("inputs."):]
+	} else if strings.has_prefix(s, "workflow.input.") {
+		rest = s[len("workflow.input."):]
+	} else {
+		return "", false
+	}
+	// A stage that happens to be keyed "inputs" keeps its stage-output form.
+	if strings.has_prefix(rest, "output.") || strings.has_prefix(rest, "outputs[") do return "", false
+	if len(rest) == 0 || len(rest) > 128 do return "", true
+	for i in 0..<len(rest) {
+		ch := rest[i]
+		if !((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' || ch == '-') do return "", true
+	}
+	return rest, true
+}
+
+// workflow_input_type_is_array reports whether a declared input type names a
+// JSON array ("array", "list", "array<object>", "string[]", ...).
+@(private = "file")
+workflow_input_type_is_array :: proc(type_name: string) -> bool {
+	t := strings.to_lower(strings.trim_space(type_name), context.temp_allocator)
+	return t == "array" || t == "list" || strings.has_prefix(t, "array<") || strings.has_prefix(t, "list<") || strings.has_suffix(t, "[]")
+}
+
+// validate_for_each_input_declaration checks an input fan-out against the
+// definition's declared inputs. Undeclared inputs are allowed only when the
+// definition declares no inputs at all (the run then validates the value).
+@(private = "file")
+validate_for_each_input_declaration :: proc(stage_key, field: string, inputs: []Workflow_Input_Spec) -> domain.Domain_Error {
+	if len(inputs) == 0 do return domain.Domain_Error{}
+	for inp in inputs {
+		if inp.name != field do continue
+		if inp.type_declared && !workflow_input_type_is_array(inp.type_name) {
+			return domain.domain_error(.Validation_Failed, fmt.tprintf("stage %s for_each input %s is declared as type %s; declare it as \"type\": \"array\"", stage_key, field, inp.type_name), `{"code":"workflow_invalid"}`)
+		}
+		if raw := strings.trim_space(inp.default_raw); raw != "" && raw != "null" && !strings.has_prefix(raw, "[") {
+			return domain.domain_error(.Validation_Failed, fmt.tprintf("stage %s for_each input %s has a non-array default", stage_key, field), `{"code":"workflow_invalid"}`)
+		}
+		return domain.Domain_Error{}
+	}
+	return domain.domain_error(.Validation_Failed, fmt.tprintf("stage %s for_each references undeclared input %s", stage_key, field), `{"code":"workflow_invalid"}`)
+}
+
+// workflow_input_raw_member returns the raw JSON text of a top-level member.
+@(private = "file")
+workflow_input_raw_member :: proc(obj: string, key: string) -> (string, bool) {
+	raw, ok := jsonx_top_level_members(obj)[key]
+	if !ok do return "", false
+	return strings.trim_space(raw), true
+}
+
+// resolve_for_each_input_items resolves `for_each: "inputs.<field>"` from the
+// execution's immutable input snapshot (falling back to the declared default).
+// Items keep array order, so stage indexes are deterministic across
+// reconciliation passes and retries. An empty array is valid (zero items).
+resolve_for_each_input_items :: proc(stage_key, field: string, inputs_json: string, inputs: []Workflow_Input_Spec, allocator := context.temp_allocator) -> ([]string, domain.Domain_Error) {
+	raw, supplied := workflow_input_raw_member(inputs_json, field)
+	if !supplied || raw == "null" {
+		raw, supplied = "", false
+		for inp in inputs {
+			if inp.name == field && strings.trim_space(inp.default_raw) != "" && strings.trim_space(inp.default_raw) != "null" {
+				raw, supplied = strings.trim_space(inp.default_raw), true
+			}
+		}
+	}
+	if !supplied {
+		return nil, domain.domain_error(.Validation_Failed, fmt.tprintf("stage %s for_each needs input %s: supply it as a JSON array (for example --inputs-file with {\"%s\": [...]})", stage_key, field, field), `{"code":"workflow_input_invalid"}`)
+	}
+	if len(raw) < 2 || raw[0] != '[' || raw[len(raw) - 1] != ']' {
+		return nil, domain.domain_error(.Validation_Failed, fmt.tprintf("stage %s for_each input %s must be a JSON array", stage_key, field), `{"code":"workflow_input_invalid"}`)
+	}
+	if objs, ok := split_json_array_objects(raw, allocator); ok do return objs, domain.Domain_Error{}
+	return jsonx_top_level_array_items(raw), domain.Domain_Error{}
+}
+
+// validate_workflow_run_inputs checks every input fan-out before a run is
+// created, so a missing or non-array input never dispatches part of a run.
+validate_workflow_run_inputs :: proc(parsed: Workflow_Parsed_Spec, inputs_json: string) -> domain.Domain_Error {
+	for st in parsed.stages {
+		field, is_input := parse_for_each_input_expr(st.for_each)
+		if !is_input do continue
+		if _, err := resolve_for_each_input_items(st.key, field, inputs_json, parsed.inputs); err.code != .None do return err
+	}
+	return domain.Domain_Error{}
 }
 
 // parse_for_each_expr accepts all four path forms:
@@ -434,14 +541,18 @@ parse_workflow_inputs_spec :: proc(raw_spec: string, allocator := context.temp_a
 				itype := strings.trim_space(jsonx.extract_string(obj, "type", "string", true, allocator))
 				req := jsonx.extract_bool(obj, "required", true, true)
 				def_val, has_def := jsonx.extract_string_found(obj, "default", true, allocator)
+				def_raw, has_def_raw := workflow_input_raw_member(obj, "default")
+				_, type_declared := jsonx_top_level_members(obj)["type"]
 				desc := strings.trim_space(jsonx.extract_string(obj, "description", "", true, allocator))
 				append(&out, Workflow_Input_Spec{
-					name        = iname,
-					type_name   = itype,
-					required    = req,
-					default_val = def_val,
-					has_default = has_def,
-					description = desc,
+					name          = iname,
+					type_name     = itype,
+					required      = req,
+					default_val   = def_val,
+					has_default   = has_def || has_def_raw,
+					default_raw   = def_raw,
+					type_declared = type_declared,
+					description   = desc,
 				})
 			}
 		}
@@ -454,23 +565,28 @@ parse_workflow_inputs_spec :: proc(raw_spec: string, allocator := context.temp_a
 				itype := strings.trim_space(jsonx.extract_string(trimmed_v, "type", "string", true, allocator))
 				req := jsonx.extract_bool(trimmed_v, "required", true, true)
 				def_val, has_def := jsonx.extract_string_found(trimmed_v, "default", true, allocator)
+				def_raw, has_def_raw := workflow_input_raw_member(trimmed_v, "default")
+				_, type_declared := jsonx_top_level_members(trimmed_v)["type"]
 				desc := strings.trim_space(jsonx.extract_string(trimmed_v, "description", "", true, allocator))
 				append(&out, Workflow_Input_Spec{
-					name        = k,
-					type_name   = itype,
-					required    = req,
-					default_val = def_val,
-					has_default = has_def,
-					description = desc,
+					name          = k,
+					type_name     = itype,
+					required      = req,
+					default_val   = def_val,
+					has_default   = has_def || has_def_raw,
+					default_raw   = def_raw,
+					type_declared = type_declared,
+					description   = desc,
 				})
 			} else {
 				// Shorthand: {"goal": "string"}
 				tstr := strings.trim(trimmed_v, "\"")
 				req := !strings.has_suffix(tstr, "?")
 				append(&out, Workflow_Input_Spec{
-					name      = k,
-					type_name = strings.trim_suffix(tstr, "?"),
-					required  = req,
+					name          = k,
+					type_name     = strings.trim_suffix(tstr, "?"),
+					required      = req,
+					type_declared = true,
 				})
 			}
 		}
@@ -776,7 +892,19 @@ materialize_single_stage_in_uow :: proc(
 ) -> (bool, domain.Domain_Error) {
 	items_raw := make([dynamic]string, context.temp_allocator)
 	source_task_id := ""
-	if st.for_each != "" {
+	input_field, input_fan_out := parse_for_each_input_expr(st.for_each)
+	if input_fan_out {
+		items, ierr := resolve_for_each_input_items(st.key, input_field, snap.inputs_json, snap.spec.inputs)
+		if ierr.code != .None do return false, ierr
+		for it in items do append(&items_raw, it)
+		if len(items_raw) == 0 {
+			_, ok, err := iface.taskchain_insert_workflow_stage_execution(svc.repo, domain.Workflow_Stage_Execution{
+				run_id = chain.run.run_id, execution_no = chain.execution.execution_no, stage_key = st.key,
+				chain_id = chain.chain_id, owner_user_id = chain.owner_user_id, item_count = 0, expanded_at = platform.clock_now(svc.clock),
+			})
+			return ok, err
+		}
+	} else if st.for_each != "" {
 		up_stage, up_field, ok_fe := parse_for_each_expr(st.for_each)
 		if !ok_fe do return false, domain.domain_error(.Validation_Failed, "invalid for_each expression")
 		up_view := stage_views[up_stage]
@@ -859,14 +987,19 @@ materialize_single_stage_in_uow :: proc(
 		gen_by := "{}"
 		if st.for_each != "" {
 			g := json_begin()
-			up_stage, _, _ := parse_for_each_expr(st.for_each)
-			json_str(&g, "stage", up_stage)
+			if input_fan_out {
+				json_str(&g, "input", input_field)
+			} else {
+				up_stage, _, _ := parse_for_each_expr(st.for_each)
+				json_str(&g, "stage", up_stage)
+			}
 			if source_task_id != "" do json_str(&g, "source_task_id", source_task_id)
 			item_key := jsonx.extract_string(item_json, "key", "", true, context.temp_allocator)
 			if item_key == "" do item_key = jsonx.extract_string(item_json, "id", fmt.tprintf("item_%d", idx), true, context.temp_allocator)
 			json_str(&g, "item_key", item_key)
 			json_int(&g, "item_index", i64(idx))
-			json_raw(&g, "item", item_json if strings.has_prefix(strings.trim_space(item_json), "{") else "{}")
+			// Object and scalar items are both kept verbatim (raw JSON).
+			json_raw(&g, "item", item_json if strings.trim_space(item_json) != "" else "{}")
 			gen_by = json_end(&g)
 		} else {
 			g := json_begin()

@@ -197,7 +197,7 @@ The v1 verbs `task status`, `task vote`, `task nudge` and `task set-current` no 
 All chains have `kind: mixed_work`. Choose tickets or workflow runs per item while
 keeping the same chain, coordinator, team, and directories. See coordinator-task-management.
 
-## workflow ? runs inside a mixed-work task chain
+## workflow — runs inside a mixed-work task chain
 - `workflow templates` lists built-ins and owner definitions; `workflow define --file <definition.json>` saves a version.
 - `workflow run <ref> --chain <id> --request-id <stable-key> [--title <text>] [--input k=v ...] [--inputs-file <json>] [--after task:<id>|workflow_run:<id> ...]` snapshots a recipe into that chain. Reuse the request key on network retries.
 - `workflow list --chain <id>` lists runs and the chain work revision.
@@ -208,6 +208,16 @@ keeping the same chain, coordinator, team, and directories. See coordinator-task
 - `workflow cancel <run-id> --execution <number> [--reason <text>]` cancels only that run.
 - Agents may omit `--chain` on create/list to use their own chain; run IDs are explicit.
 - Configure the chain fleet before starting; recipes never create fleet rows.
+
+### Authoring workflow definitions (fan-out)
+- A stage may set `for_each` to fan out one task per array item. Two sources are supported:
+  - Stage output: `"<stage>.outputs[0].<field>"` (also `<stage>.output.<field>`, `stage.<stage>.output.<field>`, or `<stage>.outputs[].<field>` to concatenate every instance's array). The stage must be in `depends_on` and declare an output contract.
+  - Workflow input: `"inputs.<name>"` (alias `workflow.input.<name>`), a top-level input that is a JSON array. No echo stage is needed. If the definition declares `inputs`, the name must be declared with `"type": "array"` (or `list`, `array<...>`, `T[]`); an array `default` is allowed. Nested paths (`inputs.a.b`) are rejected at `workflow define`.
+- Supply array inputs with `--inputs-file <json>` (for example `{"subtopics":[{"key":"auth","title":"Auth"},"billing"]}`); `--input k=v` always passes a string.
+- `workflow run` rejects a missing, `null` or non-array input before anything is created, so a bad input never dispatches part of a run. The value is resolved from the run's immutable input snapshot; `workflow retry` re-expands from that same snapshot.
+- Items expand in array order: item *i* becomes `stage_index` *i*, and re-reconciliation never duplicates a task.
+- An empty array is valid: the stage completes with zero tasks and its downstream stages start as usual.
+- Placeholders per item: `{{item.<field>}}` for object items (`{{item.key}}` falls back to `id`, then `item_<index>`; an item `priority` overrides the stage priority), `{{item}}` for the whole item (a string item renders unquoted, a number as written, an object as JSON), plus `{{stage.index}}` and `{{stage.count}}`. For a scalar item, `{{item.<field>}}` is empty.
 
 ### Mixed-work graph, scope, and completion
 - `task-chain graph --chain <id>` reads dependency/scope history and `work_revision`.
