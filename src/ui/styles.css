@@ -482,6 +482,15 @@ body {
   }
 }
 
+/* REQ-FROST-1: bottom padding of the floating composer form. The dock itself is plain CSS
+   (`absolute bottom-0` in a shell sized `var(--app-viewport-height)`), so it already ends where
+   the software keyboard begins. The home-indicator safe area is only needed while the dock
+   sits at the screen edge: once a keyboard occludes `--app-viewport-bottom-offset` px, the
+   subtraction goes negative and the floor of 0.75rem wins, so no gap opens above the keys. */
+.ui-float-dock-pad {
+  padding-bottom: max(0.75rem, calc(env(safe-area-inset-bottom, 0px) - var(--app-viewport-bottom-offset)));
+}
+
 /* REQ-FROST-1: a floating dock passes touches in the gaps around its cards through to
    the transcript underneath; only the cards themselves take input. */
 .ui-float-dock {

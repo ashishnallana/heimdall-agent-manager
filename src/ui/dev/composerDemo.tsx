@@ -380,7 +380,7 @@ function ComposerDemo() {
             <form
               onSubmit={submit}
               data-debug-id="composer-demo-composer-shell"
-              className="w-full max-w-4xl mx-auto px-3 pt-2 pb-[max(env(safe-area-inset-bottom),0.75rem)]"
+              className="w-full max-w-4xl mx-auto px-3 pt-2 ui-float-dock-pad"
             >
               <div className="mx-auto w-full max-w-4xl">
                 <div

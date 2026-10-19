@@ -2131,7 +2131,7 @@ export function AgentChatPane({
         data-debug-id="conversation-composer-shell"
         className={
           isMobile
-            ? 'w-full max-w-4xl mx-auto px-3 pt-2 pb-[max(env(safe-area-inset-bottom),0.75rem)]'
+            ? 'w-full max-w-4xl mx-auto px-3 pt-2 ui-float-dock-pad'
             : 'w-full max-w-4xl mx-auto px-3 sm:px-0 py-4'
         }
       >
