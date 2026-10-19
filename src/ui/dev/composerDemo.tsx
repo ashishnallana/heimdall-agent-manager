@@ -16,10 +16,11 @@
  * - MIRRORED: the dock + card markup from the mobile branch of
  *   `AgentChatPane.renderComposer` (AgentChatPane itself needs the API and vault).
  *   Keep the two in sync when the mobile composer markup changes.
- * - MIRRORED: the floating header (menu, title, runtime indicator, "…") from the
- *   reference screenshots.
+ * - MIRRORED: the floating header (menu, status dot + title, terminal and tasks
+ *   buttons, runtime indicator, "…") from the reference screenshots.
  * - STUBBED: composer callbacks; "sending" appends locally and fakes an agent reply;
- *   the runtime status is local state (tap the indicator to toggle it).
+ *   the runtime status is local state (tap the indicator to toggle it); the terminal
+ *   and tasks buttons only show a toast (see `DemoHeader` for the real handlers).
  *
  * URL presets, so a state can be linked or screenshotted without interaction:
  *   ?theme=light|dark   start in that appearance
@@ -162,22 +163,41 @@ const HEADER_WASH_STYLE = {
 
 /**
  * Mirrors the floating mobile header from the reference screenshots: round menu button,
- * centered title/subtitle, and at top right the runtime indicator next to a round "…"
- * button, all floating over the transcript. The indicator uses the app's real primitives
- * (`Spinner` while running, `StatusDot` with the canonical runtime tone when stopped);
- * tapping it toggles the stubbed state. The "…" menu holds the light/dark switch.
+ * title/subtitle with the real `StatusDot` beside the title (as in AgentChatPane's top
+ * bar), and at top right the terminal and tasks buttons, the runtime indicator and a
+ * round "…" button, all floating over the transcript. The indicator uses the app's real
+ * primitives (`Spinner` while running, `StatusDot` with the canonical runtime tone when
+ * stopped); tapping it toggles the stubbed state. The "…" menu holds the light/dark switch.
+ *
+ * The terminal and tasks buttons are stubbed with a toast. In the app they map to:
+ * - Terminal: `AgentChatPane.handleOpenPtyTab` (openAux({ type: 'agentPty', agentInstanceId })),
+ *   the same handler the composer's terminal toggle gets as `onPaneToggle`.
+ * - Tasks: `openAux({ type: 'tasks' })` from AgentChatPane, i.e. `onOpenAuxTab` ->
+ *   `Workspace.openAuxFromPane`, which opens the chain's Tasks aux tab (`TASKS_TAB_ID`).
+ *   Workspace's `workspace.toggle-aux-tasks` command (`toggleAuxContent({ type: 'tasks' })`)
+ *   is the toggling variant. Icons come from `AUX_TAB_ICONS` (shell: 'terminal', tasks: 'tasks').
  */
-function DemoHeader({ status, onToggleStatus }: { status: DemoRuntimeStatus; onToggleStatus: () => void }) {
+function DemoHeader({
+  status,
+  onToggleStatus,
+  onStubAction,
+}: {
+  status: DemoRuntimeStatus;
+  onToggleStatus: () => void;
+  onStubAction: (message: string) => void;
+}) {
   const [appearance, setAppearance] = useState(currentAppearance);
   const [menuOpen, setMenuOpen] = useState(false);
   const nextAppearance = appearance === 'dark' ? 'light' : 'dark';
   const running = status === 'running';
+  const statusLabel = running ? 'Running' : 'Stopped';
+  // 44px glass buttons: five of them plus the title still fit a 390px-wide phone.
   const roundButton =
-    'ui-liquid-glass pointer-events-auto grid h-12 w-12 shrink-0 place-items-center rounded-full text-primary';
+    'ui-liquid-glass pointer-events-auto grid h-11 w-11 shrink-0 place-items-center rounded-full text-primary';
   return (
     <header
       data-debug-id="composer-demo-header"
-      className="pointer-events-none absolute inset-x-0 top-0 z-30 flex items-center gap-2 px-3 pb-2 pt-[max(env(safe-area-inset-top),0.75rem)]"
+      className="pointer-events-none absolute inset-x-0 top-0 z-30 flex items-center gap-1.5 px-3 pb-2 pt-[max(env(safe-area-inset-top),0.75rem)]"
     >
       {/* Blurred wash behind the floating controls so the title stays legible over the
           transcript; fades out below the header like the reference. */}
@@ -189,16 +209,44 @@ function DemoHeader({ status, onToggleStatus }: { status: DemoRuntimeStatus; onT
       <button type="button" data-debug-id="composer-demo-header-menu-btn" aria-label="Open navigation" className={roundButton}>
         <Icon name="menu" size={22} />
       </button>
-      <div data-debug-id="composer-demo-header-title" className="min-w-0 flex-1 text-center">
-        <div className="truncate text-[15px] font-semibold text-primary">Reconnect loop after sleep</div>
+      <div data-debug-id="composer-demo-header-title" className="min-w-0 flex-1 px-1">
+        <div className="flex min-w-0 items-center gap-1.5">
+          <StatusDot
+            size="sm"
+            tone={runtimeStatusToTone(status)}
+            label={statusLabel}
+            data-debug-id="composer-demo-header-status-dot"
+          />
+          <span className="truncate text-[15px] font-semibold text-primary">Reconnect loop after sleep</span>
+        </div>
         <div className="truncate text-xs text-muted">worker · Opus 5.5</div>
       </div>
+      <button
+        type="button"
+        data-debug-id="composer-demo-header-terminal-btn"
+        aria-label="Open terminal"
+        title="Terminal"
+        onClick={() => onStubAction('Would open Terminal tab')}
+        className={roundButton}
+      >
+        <Icon name="terminal" size={20} />
+      </button>
+      <button
+        type="button"
+        data-debug-id="composer-demo-header-tasks-btn"
+        aria-label="Open tasks"
+        title="Tasks"
+        onClick={() => onStubAction('Would open Tasks tab')}
+        className={roundButton}
+      >
+        <Icon name="tasks" size={20} />
+      </button>
       <button
         type="button"
         data-debug-id="composer-demo-runtime-status-btn"
         data-status={status}
         aria-label={running ? 'Agent running, tap to stop (demo)' : 'Agent stopped, tap to start (demo)'}
-        title={running ? 'Running' : 'Stopped'}
+        title={statusLabel}
         onClick={onToggleStatus}
         className={roundButton}
       >
@@ -252,6 +300,14 @@ function ComposerDemo() {
   const [runtimeStatus, setRuntimeStatus] = useState<DemoRuntimeStatus>(() =>
     PRESETS.get('status') === 'stopped' ? 'stopped' : 'running',
   );
+  const [toast, setToast] = useState('');
+  const toastTimerRef = useRef(0);
+
+  const showStubToast = useCallback((text: string) => {
+    setToast(text);
+    window.clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = window.setTimeout(() => setToast(''), 1800);
+  }, []);
 
   // Same measurement as AgentChatPane (REQ-FROST-1): the dock's height is the list's inset.
   useEffect(() => {
@@ -264,7 +320,13 @@ function ComposerDemo() {
     return () => observer.disconnect();
   }, []);
 
-  useEffect(() => () => window.clearTimeout(replyTimerRef.current), []);
+  useEffect(
+    () => () => {
+      window.clearTimeout(replyTimerRef.current);
+      window.clearTimeout(toastTimerRef.current);
+    },
+    [],
+  );
 
   useEffect(() => {
     if (PRESETS.get('scroll') !== 'top') return;
@@ -321,7 +383,17 @@ function ComposerDemo() {
           <DemoHeader
             status={runtimeStatus}
             onToggleStatus={() => setRuntimeStatus((prev) => (prev === 'running' ? 'stopped' : 'running'))}
+            onStubAction={showStubToast}
           />
+          {toast ? (
+            <div
+              role="status"
+              data-debug-id="composer-demo-toast"
+              className="ui-liquid-glass pointer-events-none absolute left-1/2 top-[calc(max(env(safe-area-inset-top),0.75rem)+3.75rem)] z-40 -translate-x-1/2 whitespace-nowrap rounded-full px-4 py-2 text-sm text-primary"
+            >
+              {toast}
+            </div>
+          ) : null}
           <ChatMessageList
             conversationKey="composer-demo"
             messages={messages}
@@ -371,7 +443,8 @@ function ComposerDemo() {
                           send(draft);
                         }
                       }}
-                      placeholder="Type / for commands"
+                      // The app's mobile placeholder (AgentChatPane renderComposer).
+                      placeholder="Message the agent…"
                     />
                   </div>
                   <MessageComposerActions {...composerActions} sendDisabled={!draft.trim()} />
