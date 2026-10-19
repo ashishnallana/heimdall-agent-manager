@@ -486,3 +486,32 @@ test_search_v2_vector :: proc(t: ^testing.T) {
 	_, b := search_open_payload(payload, unhex(str(sv, "epoch_key")), 1, aad, context.temp_allocator)
 	testing.expect(t, !b)
 }
+
+@(test)
+test_keyring_check_update_superset_only :: proc(t: ^testing.T) {
+	k1, k2, kx: [KEY_BYTES]byte
+	k1[0], k2[0], kx[0] = 1, 2, 9
+	stored, _ := keyring_from_single_key("usr_a", 1, k1[:])
+	defer keyring_wipe(&stored)
+	// {1:k1, 2:k2}: a rotation that keeps history is accepted, as is the same keyring.
+	grown := stored
+	defer keyring_wipe(&grown)
+	grown.entries[1] = Keyring_Entry{epoch = 2, key = k2}
+	grown.count, grown.current_epoch = 2, 2
+	testing.expect_value(t, keyring_check_update(&stored, &grown), Keyring_Update_Error.None)
+	testing.expect_value(t, keyring_check_update(&stored, &stored), Keyring_Update_Error.None)
+	// Rollback to an older current epoch.
+	testing.expect_value(t, keyring_check_update(&grown, &stored), Keyring_Update_Error.Epoch_Rollback)
+	// Same epoch, different key: a substituted keyring.
+	swapped, _ := keyring_from_single_key("usr_a", 1, kx[:])
+	defer keyring_wipe(&swapped)
+	testing.expect_value(t, keyring_check_update(&stored, &swapped), Keyring_Update_Error.Key_Mismatch)
+	// History dropped: {2:k2} does not contain epoch 1.
+	only2, _ := keyring_from_single_key("usr_a", 2, k2[:])
+	defer keyring_wipe(&only2)
+	testing.expect_value(t, keyring_check_update(&stored, &only2), Keyring_Update_Error.Missing_Epoch)
+	// Another user.
+	other, _ := keyring_from_single_key("usr_b", 1, k1[:])
+	defer keyring_wipe(&other)
+	testing.expect_value(t, keyring_check_update(&stored, &other), Keyring_Update_Error.Different_User)
+}

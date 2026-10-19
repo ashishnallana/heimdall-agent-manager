@@ -127,6 +127,9 @@ Bridge_Machine_Descriptor :: struct {
 // timer and never comparing its wall clock against a Hub value.
 Bridge_Enroll_Credential :: struct {
 	approver_username: string,
+	// The approving account (hub-reported). Pinned with the identity key as this
+	// bridge's enrolled owner: only that user's keyring is ever accepted.
+	owner_user_id:      string,
 	bridge_id:          string,
 	access_token:       string,
 	refresh_token:      string,
@@ -441,6 +444,7 @@ bridge_enroll_poll_once :: proc(
 bridge_enroll_credential_from_json :: proc(body: string, allocator := context.allocator) -> Bridge_Enroll_Credential {
 	return Bridge_Enroll_Credential{
 		approver_username = extract_json_string(body, "approver_username", "", allocator),
+		owner_user_id      = extract_json_string(body, "owner_user_id", "", allocator),
 		bridge_id          = extract_json_string(body, "bridge_id", "", allocator),
 		access_token       = extract_json_string(body, "access_token", "", allocator),
 		refresh_token      = extract_json_string(body, "refresh_token", "", allocator),
@@ -860,9 +864,9 @@ bridge_enroll_vault_key_persisted :: proc(bridge_id: string) -> bool {
 	vault.keyring_wipe(&kr)
 	if !persisted do return false
 	// The restarted service must also find the identity that signs its unseal key.
-	scalar: [KEYSTORE_IDENTITY_KEY_BYTES]byte
-	defer mem.zero_explicit(&scalar, size_of(scalar))
-	return keystore_read_identity_key(bridge_id, scalar[:])
+	rec: Bridge_Identity_Record
+	defer mem.zero_explicit(&rec, size_of(rec))
+	return keystore_read_identity(bridge_id, &rec) == .Found
 }
 
 // Bring up only the Hub WebSocket, not either bridge-local listener. This can
@@ -1058,6 +1062,16 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 				return false
 			}
 			config_path := cfg_lib.config_path_from_args(args)
+			// Pin the identity and the enrolled owner under the new bridge id before
+			// anything else: the unseal that follows is checked against both.
+			if !bridge_unseal_identity_commit_enrollment(cred.bridge_id, cred.owner_user_id) {
+				if cred.owner_user_id == "" {
+					fmt.eprintln("bridge enroll FAILED: the hub did not report the approving account (owner_user_id); this bridge cannot pin its owner. Upgrade the hub and enroll again.")
+				} else {
+					fmt.eprintln("bridge enroll FAILED: this bridge's identity key could not be persisted. Nothing else was written.")
+				}
+				return false
+			}
 			if cred.enrollment_pending {
 				// REQ-EA-4: write nothing until the vault key is delivered and the hub
 				// commits; enroll_atomic.odin owns the whole sequence.
@@ -1066,7 +1080,11 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 				fmt.println("  registered bridge service restarted with the new credential")
 				return true
 			}
-			if !bridge_enroll_persist(cred, token_file, config_path, api_base) do return false
+			if !bridge_enroll_persist(cred, token_file, config_path, api_base) {
+				_ = keystore_delete_identity_key(cred.bridge_id)
+				bridge_unseal_forget_identity()
+				return false
+			}
 			fmt.println("")
 			fmt.printfln("bridge enroll SUCCESS: enrolled as bridge_id=%s", cred.bridge_id)
 			if cred.approver_username != "" {

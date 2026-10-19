@@ -1,5 +1,6 @@
 package main
 
+import "core:crypto"
 import "core:crypto/legacy/sha1"
 import base64 "core:encoding/base64"
 import "core:fmt"
@@ -56,6 +57,10 @@ main :: proc() {
 		crashlog.install("ham-bridge")
 	}
 	bridge_strip_parent_session_env()
+	if !bridge_capture_keyring_env_override() {
+		fmt.eprintln("ERROR: could not remove HEIMDALL_VAULT_KEYRING from the environment; refusing to start so no child inherits it")
+		os.exit(1)
+	}
 	if has_flag(os.args, "--version") {
 		fmt.println("ham-bridge", contracts.APP_VERSION, "protocol", contracts.PROTOCOL_VERSION, "bridge", contracts.BRIDGE_LOOPBACK_CONTRACT_VERSION, "ws", contracts.BRIDGE_WS_FRAME_VERSION)
 		return
@@ -880,6 +885,7 @@ bridge_now_unix_ms :: proc() -> i64 {
 // development override, global to the process environment. A set but invalid value
 // is "no keyring" and does NOT fall through to the OS store.
 bridge_read_vault_keyring :: proc() -> (vault.Vault_Keyring, bool) {
+	if kr, present, ok := bridge_captured_env_keyring(); present do return kr, ok
 	if env_val, found := os.lookup_env("HEIMDALL_VAULT_KEYRING", context.temp_allocator); found {
 		kr, present, ok := bridge_keyring_from_env_value(env_val)
 		if present do return kr, ok
@@ -921,6 +927,51 @@ BRIDGE_PARENT_SESSION_ENV :: [?]string{
 	"CLAUDE_CODE_EXECPATH",
 	"CLAUDE_PID",
 	"CLAUDE_EFFORT",
+}
+
+// The HEIMDALL_VAULT_KEYRING override as captured at startup (finding L3). main
+// moves it out of the process environment before anything is spawned, so no
+// agent, shell, pty-host or helper child can inherit the keyring.
+@(private = "file")
+g_bridge_env_keyring: vault.Vault_Keyring
+@(private = "file")
+g_bridge_env_keyring_present: bool
+@(private = "file")
+g_bridge_env_keyring_ok: bool
+@(private = "file")
+g_bridge_env_keyring_mu: sync.Mutex
+
+// bridge_capture_keyring_env_override reads HEIMDALL_VAULT_KEYRING into memory and
+// removes it from the environment. Returns false only if it could not be removed.
+bridge_capture_keyring_env_override :: proc() -> bool {
+	env_val, found := os.lookup_env("HEIMDALL_VAULT_KEYRING", context.temp_allocator)
+	if !found do return true
+	defer crypto.zero_explicit(raw_data(env_val), len(env_val))
+	sync.mutex_lock(&g_bridge_env_keyring_mu)
+	vault.keyring_wipe(&g_bridge_env_keyring)
+	kr, present, ok := bridge_keyring_from_env_value(env_val)
+	g_bridge_env_keyring, g_bridge_env_keyring_present, g_bridge_env_keyring_ok = kr, present, ok
+	sync.mutex_unlock(&g_bridge_env_keyring_mu)
+	_ = os.unset_env("HEIMDALL_VAULT_KEYRING")
+	_, still := os.lookup_env("HEIMDALL_VAULT_KEYRING", context.temp_allocator)
+	return !still
+}
+
+// bridge_captured_env_keyring returns a copy of the captured override (wipe it).
+bridge_captured_env_keyring :: proc() -> (kr: vault.Vault_Keyring, present: bool, ok: bool) {
+	sync.mutex_lock(&g_bridge_env_keyring_mu)
+	defer sync.mutex_unlock(&g_bridge_env_keyring_mu)
+	if !g_bridge_env_keyring_present do return {}, false, false
+	if !g_bridge_env_keyring_ok do return {}, true, false
+	return g_bridge_env_keyring, true, true
+}
+
+// bridge_forget_captured_env_keyring drops the captured override (tests).
+bridge_forget_captured_env_keyring :: proc() {
+	sync.mutex_lock(&g_bridge_env_keyring_mu)
+	defer sync.mutex_unlock(&g_bridge_env_keyring_mu)
+	vault.keyring_wipe(&g_bridge_env_keyring)
+	g_bridge_env_keyring_present, g_bridge_env_keyring_ok = false, false
 }
 
 // bridge_strip_parent_session_env removes BRIDGE_PARENT_SESSION_ENV from the

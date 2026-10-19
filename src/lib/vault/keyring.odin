@@ -175,3 +175,32 @@ keyring_equal :: proc(a, b: ^Vault_Keyring) -> bool {
 	}
 	return diff == 0
 }
+
+// Keyring_Update_Error says why a newly delivered keyring may not replace the
+// stored one (plan §1 "Bridge keyring authentication", finding C1).
+Keyring_Update_Error :: enum {
+	None,
+	Invalid,         // either keyring fails keyring_validate
+	Different_User,  // the user ids differ
+	Epoch_Rollback,  // incoming.current_epoch < stored.current_epoch
+	Missing_Epoch,   // an epoch the stored keyring holds is absent from incoming
+	Key_Mismatch,    // an epoch both hold maps to different keys
+}
+
+// keyring_check_update accepts incoming only as a superset of stored: same user,
+// every stored epoch present with an identical key (compared in constant time),
+// and no current-epoch rollback. An identical keyring is accepted.
+keyring_check_update :: proc(stored, incoming: ^Vault_Keyring) -> Keyring_Update_Error {
+	if !keyring_validate(stored) || !keyring_validate(incoming) do return .Invalid
+	a, b := keyring_user_id(stored), keyring_user_id(incoming)
+	if len(a) != len(b) || crypto.compare_constant_time(transmute([]byte)a, transmute([]byte)b) != 1 do return .Different_User
+	if incoming.current_epoch < stored.current_epoch do return .Epoch_Rollback
+	diff := 0
+	for i in 0 ..< stored.count {
+		key, ok := keyring_key_for_epoch(incoming, stored.entries[i].epoch)
+		if !ok do return .Missing_Epoch
+		diff |= 1 - crypto.compare_constant_time(key, stored.entries[i].key[:])
+	}
+	if diff != 0 do return .Key_Mismatch
+	return .None
+}

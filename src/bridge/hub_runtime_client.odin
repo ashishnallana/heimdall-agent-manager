@@ -3935,6 +3935,42 @@ Bridge_Shell_Enc_Spec :: struct {
 	nonce:     string,
 }
 
+// enc_spec freshness (finding M1): the timestamp must be within ±60 s and the
+// nonce must not have been seen inside that window. The nonce is recorded for
+// ENC_SPEC_NONCE_TTL_MS, which outlives any timestamp the window accepts, and a
+// full cache refuses rather than evicting a live nonce. Called only after the
+// enc_spec decrypted under the current epoch, so only authenticated nonces are
+// recorded. Returns "" or the error message.
+ENC_SPEC_MAX_SKEW_MS :: 60_000
+ENC_SPEC_NONCE_TTL_MS :: 2 * ENC_SPEC_MAX_SKEW_MS + 1_000
+ENC_SPEC_NONCE_MIN_LEN :: 16
+
+g_enc_spec_nonce_cache: Nonce_Replay_Cache
+
+bridge_enc_spec_check_fresh :: proc(timestamp: i64, nonce: string, now_ms: i64) -> string {
+	ts_ms := timestamp
+	if ts_ms > 0 && ts_ms < 10_000_000_000 {
+		ts_ms *= 1000
+	}
+	drift := now_ms - ts_ms
+	if ts_ms == 0 || drift < -ENC_SPEC_MAX_SKEW_MS || drift > ENC_SPEC_MAX_SKEW_MS {
+		return "unauthorized: expired execution timestamp"
+	}
+	if len(nonce) < ENC_SPEC_NONCE_MIN_LEN || len(nonce) > 64 {
+		return "unauthorized: missing or invalid execution nonce"
+	}
+	switch nonce_cache_insert(&g_enc_spec_nonce_cache, nonce, now_ms, ENC_SPEC_NONCE_TTL_MS) {
+	case .Inserted:
+		return ""
+	case .Replay:
+		return "unauthorized: replayed execution request"
+	case .Full:
+		return "unauthorized: too many recent execution requests; retry shortly"
+	case .Invalid:
+	}
+	return "unauthorized: missing or invalid execution nonce"
+}
+
 bridge_shell_parse_enc_spec :: proc(json_text: string, allocator := context.temp_allocator) -> (spec: Bridge_Shell_Enc_Spec, ok: bool) {
 	val, err := json.parse_string(json_text, json.DEFAULT_SPECIFICATION, false, allocator)
 	if err != nil do return {}, false
@@ -4335,14 +4371,8 @@ bridge_hub_handle_shell_start :: proc(conn: ^ws.Connection, text: string) {
 			return
 		}
 
-		now_ms := bridge_now_unix_ms()
-		ts_ms := spec.timestamp
-		if ts_ms > 0 && ts_ms < 10_000_000_000 {
-			ts_ms *= 1000
-		}
-		drift := now_ms - ts_ms
-		if ts_ms == 0 || drift < -60_000 || drift > 60_000 {
-			send_error(conn, session_id, command_id, "invalid_vault_key", "unauthorized: expired execution timestamp")
+		if fresh_err := bridge_enc_spec_check_fresh(spec.timestamp, spec.nonce, bridge_now_unix_ms()); fresh_err != "" {
+			send_error(conn, session_id, command_id, "invalid_vault_key", fresh_err)
 			return
 		}
 

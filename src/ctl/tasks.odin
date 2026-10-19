@@ -407,7 +407,7 @@ ctl_task_chains_command :: proc(cmd: []string, args: []string) {
 			return
 		}
 		desc := option_value(args, "--description", "")
-		keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
+		keyring, key_ok := ctl_vault_keyring_for_write(args, transport)
 		if key_ok {
 			if !is_vault_armored(title) {
 				title = ctl_seal_or_exit(title, keyring)
@@ -458,7 +458,7 @@ ctl_task_chains_command :: proc(cmd: []string, args: []string) {
 	if action == "update" {
 		fields := make([dynamic]string)
 		defer delete(fields)
-		keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
+		keyring, key_ok := ctl_vault_keyring_for_write(args, transport)
 		if title := option_value(args, "--title", ""); title != "" {
 			if key_ok && !is_vault_armored(title) {
 				title = ctl_seal_or_exit(title, keyring)
@@ -675,7 +675,7 @@ ctl_tasks_command :: proc(cmd: []string, args: []string) {
 		}
 		if !ctl_task_reviewer_flags_valid(args, false) do return
 		desc := option_value(args, "--description", "")
-		keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
+		keyring, key_ok := ctl_vault_keyring_for_write(args, transport)
 		if key_ok {
 			if !is_vault_armored(title) {
 				title = ctl_seal_or_exit(title, keyring)
@@ -781,7 +781,7 @@ ctl_tasks_command :: proc(cmd: []string, args: []string) {
 		if !ctl_task_reviewer_flags_valid(args, true) do return
 		title := option_value(args, "--title", "")
 		desc := option_value(args, "--description", "")
-		keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
+		keyring, key_ok := ctl_vault_keyring_for_write(args, transport)
 		if key_ok {
 			if title != "" && !is_vault_armored(title) {
 				title = ctl_seal_or_exit(title, keyring)
@@ -838,7 +838,7 @@ ctl_tasks_command :: proc(cmd: []string, args: []string) {
 			fmt.println("usage: ham-ctl tasks comment --chain <id> --task <id> --body <text> [--notify <id,id...>]")
 			return
 		}
-		keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
+		keyring, key_ok := ctl_vault_keyring_for_write(args, transport)
 		if key_ok {
 			if !is_vault_armored(body) {
 				body = ctl_seal_or_exit(body, keyring)
@@ -881,7 +881,7 @@ ctl_tasks_command :: proc(cmd: []string, args: []string) {
 				fmt.println("usage: ham-ctl tasks comments --chain <id> --task <id> add --body <text> [--notify <id,id...>]")
 				return
 			}
-			keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
+			keyring, key_ok := ctl_vault_keyring_for_write(args, transport)
 			if key_ok {
 				if !is_vault_armored(body) {
 					body = ctl_seal_or_exit(body, keyring)

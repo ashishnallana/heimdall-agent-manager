@@ -61,6 +61,7 @@ KEYSTORE_ANDROID_SIGN_ALG      :: "SHA256withRSA"
 KEYSTORE_ANDROID_SIG_LEN       :: 256 // RSA-2048
 KEYSTORE_ANDROID_KEYRING_FILE  :: "vault_keyring.sealed"
 KEYSTORE_ANDROID_IDENTITY_FILE :: "identity_key.sealed"
+KEYSTORE_ANDROID_FLOOR_FILE    :: "epoch_floor.sealed"
 KEYSTORE_ANDROID_SEALED_MAGIC  :: "HMVS"
 KEYSTORE_ANDROID_SEALED_VER    :: u8(2)
 KEYSTORE_ANDROID_HEADER_LEN    :: len(KEYSTORE_ANDROID_SEALED_MAGIC) + 1
@@ -107,7 +108,12 @@ keystore_android_alias :: proc(bridge_id: string) -> (alias: string, ok: bool) {
 keystore_android_sealed_path :: proc(slot: Keystore_Slot, bridge_id: string) -> (path: string, ok: bool) {
 	if !keystore_bridge_id_ok(bridge_id) do return "", false
 	dir := bridge_vault_bridge_dir(bridge_id, context.temp_allocator) or_return
-	name := KEYSTORE_ANDROID_KEYRING_FILE if slot == .Keyring else KEYSTORE_ANDROID_IDENTITY_FILE
+	name: string
+	switch slot {
+	case .Keyring:     name = KEYSTORE_ANDROID_KEYRING_FILE
+	case .Identity:    name = KEYSTORE_ANDROID_IDENTITY_FILE
+	case .Epoch_Floor: name = KEYSTORE_ANDROID_FLOOR_FILE
+	}
 	return strings.concatenate({dir, name}, context.temp_allocator), true
 }
 
@@ -246,7 +252,12 @@ keystore_android_derive_kek :: proc(bridge_id: string, kek: []u8) -> (ok: bool, 
 @(private = "file")
 keystore_android_aad :: proc(slot: Keystore_Slot, bridge_id: string) -> []u8 {
 	header := [KEYSTORE_ANDROID_HEADER_LEN]u8{'H', 'M', 'V', 'S', KEYSTORE_ANDROID_SEALED_VER}
-	slot_name := "keyring:" if slot == .Keyring else "identity:"
+	slot_name: string
+	switch slot {
+	case .Keyring:     slot_name = "keyring:"
+	case .Identity:    slot_name = "identity:"
+	case .Epoch_Floor: slot_name = "epoch_floor:"
+	}
 	return transmute([]u8)strings.concatenate({string(header[:]), slot_name, bridge_id}, context.temp_allocator)
 }
 
@@ -316,8 +327,11 @@ keystore_android_write_secret :: proc(slot: Keystore_Slot, bridge_id: string, da
 	kek: [32]u8
 	defer mem.zero_explicit(&kek, size_of(kek))
 	if derived, sign_err := keystore_android_derive_kek(bridge_id, kek[:]); !derived {
-		other, _ := keystore_android_sealed_path(.Identity if slot == .Keyring else .Keyring, bridge_id)
-		if os.exists(path) || os.exists(other) {
+		existing := false
+		for other_slot in Keystore_Slot {
+			if other, ok := keystore_android_sealed_path(other_slot, bridge_id); ok && os.exists(other) do existing = true
+		}
+		if existing {
 			present, known := keystore_android_alias_listed(alias)
 			if !known || present {
 				fmt.eprintfln(
@@ -437,12 +451,17 @@ keystore_android_unwrap_file_locked :: proc(slot: Keystore_Slot, bridge_id: stri
 	return
 }
 
-// Any failure — no file, a bad header, the tool unavailable, a different Keystore
-// key — is "not found".
-keystore_android_read_secret :: proc(slot: Keystore_Slot, bridge_id: string, dst: []byte) -> (n: int, ok: bool) {
+// No sealed file is .Not_Found; a file that exists but does not open (a bad
+// header, the tool unavailable, a different Keystore key) is .Error.
+keystore_android_read_secret_status :: proc(slot: Keystore_Slot, bridge_id: string, dst: []byte) -> (n: int, status: Keystore_Read_Status) {
+	path, path_ok := keystore_android_sealed_path(slot, bridge_id)
+	if !path_ok do return 0, .Error
 	sync.mutex_lock(&keystore_android_mu)
 	defer sync.mutex_unlock(&keystore_android_mu)
-	return keystore_android_unwrap_file_locked(slot, bridge_id, dst)
+	if !os.exists(path) do return 0, .Not_Found
+	got, ok := keystore_android_unwrap_file_locked(slot, bridge_id, dst)
+	if !ok do return 0, .Error
+	return got, .Found
 }
 
 keystore_android_secret_present :: proc(slot: Keystore_Slot, bridge_id: string) -> bool {

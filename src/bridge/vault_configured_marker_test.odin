@@ -252,6 +252,11 @@ test_vault_hub_unseal_frame_persists_marker :: proc(t: ^testing.T) {
 
 	unseal_nonce_cache_clear(&g_unseal_nonce_cache)
 	bridge_unseal_init()
+	testing.expect(t, test_provision_identity(vault_marker_test_bridge_id()), "enrollment identity provisioned")
+	defer {
+		_ = keystore_delete_identity_key(vault_marker_test_bridge_id())
+		bridge_unseal_forget_identity()
+	}
 	now_ms := time.to_unix_nanoseconds(time.now()) / 1_000_000
 	kr := test_keyring_from_hex(TEST_VAULT_KEY_HEX)
 	defer vault.keyring_wipe(&kr)

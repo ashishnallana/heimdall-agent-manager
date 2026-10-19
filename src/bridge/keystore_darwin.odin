@@ -17,6 +17,7 @@ KEYSTORE_ERR_ENOKEY   :: 126
 // overwrite and then delete a developer Mac's real enrolled secrets.
 KEYCHAIN_SERVICE_KEYRING  :: "works.earendil.heimdall-bridge.vault-keyring.test" when ODIN_TEST else "works.earendil.heimdall-bridge.vault-keyring"
 KEYCHAIN_SERVICE_IDENTITY :: "works.earendil.heimdall-bridge.vault-identity.test" when ODIN_TEST else "works.earendil.heimdall-bridge.vault-identity"
+KEYCHAIN_SERVICE_FLOOR    :: "works.earendil.heimdall-bridge.vault-epoch-floor.test" when ODIN_TEST else "works.earendil.heimdall-bridge.vault-epoch-floor"
 
 // OSStatus values from <Security/SecBase.h>.
 KEYCHAIN_ERR_SEC_SUCCESS        :: 0
@@ -52,7 +53,12 @@ keystore_set_mock_syscall_error :: proc(errno: int) {
 
 @(private = "file")
 keychain_service :: proc(slot: Keystore_Slot) -> string {
-	return KEYCHAIN_SERVICE_KEYRING if slot == .Keyring else KEYCHAIN_SERVICE_IDENTITY
+	switch slot {
+	case .Keyring:     return KEYCHAIN_SERVICE_KEYRING
+	case .Identity:    return KEYCHAIN_SERVICE_IDENTITY
+	case .Epoch_Floor: return KEYCHAIN_SERVICE_FLOOR
+	}
+	return KEYCHAIN_SERVICE_IDENTITY
 }
 
 // Looks up the slot's item. A nil `item` is a valid out: the lookup then only
@@ -99,12 +105,15 @@ keystore_os_write_secret :: proc(slot: Keystore_Slot, bridge_id: string, data: [
 	))
 }
 
-// keystore_os_read_secret copies the slot's secret into dst; the Keychain's own
-// copy is zeroed before it is freed.
-keystore_os_read_secret :: proc(slot: Keystore_Slot, bridge_id: string, dst: []byte) -> (n: int, ok: bool) {
+// keystore_os_read_secret_status copies the slot's secret into dst; the
+// Keychain's own copy is zeroed before it is freed. Only errSecItemNotFound is
+// absence; any other failure (a locked keychain, a denied ACL) is an error.
+keystore_os_read_secret_status :: proc(slot: Keystore_Slot, bridge_id: string, dst: []byte) -> (n: int, status: Keystore_Read_Status) {
 	password_len: u32
 	password_data: rawptr
-	if keychain_find_item(slot, bridge_id, nil, &password_len, &password_data) != KEYCHAIN_ERR_SEC_SUCCESS do return 0, false
+	found := keychain_find_item(slot, bridge_id, nil, &password_len, &password_data)
+	if found == KEYCHAIN_ERR_SEC_ITEM_NOT_FOUND do return 0, .Not_Found
+	if found != KEYCHAIN_ERR_SEC_SUCCESS do return 0, .Error
 	defer {
 		if password_data != nil {
 			mem.zero_explicit(password_data, int(password_len))
@@ -112,9 +121,9 @@ keystore_os_read_secret :: proc(slot: Keystore_Slot, bridge_id: string, dst: []b
 		}
 	}
 	size := int(password_len)
-	if password_data == nil || size == 0 || size > len(dst) do return 0, false
+	if password_data == nil || size == 0 || size > len(dst) do return 0, .Error
 	copy(dst, ([^]u8)(password_data)[:size])
-	return size, true
+	return size, .Found
 }
 
 // An item the process can no longer read (e.g. after a self-update changed the

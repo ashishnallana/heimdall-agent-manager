@@ -66,7 +66,7 @@ ctl_projects_command :: proc(cmd: []string, args: []string) {
 		}
 		desc := option_value(args, "--description", option_value(args, "--desc", ""))
 
-		keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
+		keyring, key_ok := ctl_vault_keyring_for_write(args, transport)
 		if key_ok {
 			if !is_vault_armored(name) {
 				name = ctl_seal_or_exit(name, keyring)
@@ -100,7 +100,7 @@ ctl_projects_command :: proc(cmd: []string, args: []string) {
 		name := option_value(args, "--name", "")
 		desc := option_value(args, "--description", option_value(args, "--desc", ""))
 
-		keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
+		keyring, key_ok := ctl_vault_keyring_for_write(args, transport)
 		if key_ok {
 			if name != "" && !is_vault_armored(name) {
 				name = ctl_seal_or_exit(name, keyring)

@@ -1,5 +1,6 @@
 package main
 
+import "core:crypto"
 import "core:encoding/json"
 import "core:fmt"
 import "core:os"
@@ -16,8 +17,15 @@ import vault "odin_test:lib/vault"
 VAULT_ARMOR_PREFIX :: vault.VAULT_V2_PREFIX
 
 // Check if a string has the self-describing v2 vault armor prefix.
+// is_vault_armored is the WRITE-side test "is this value already sealed?". Display
+// code uses vault.is_armored (prefix) so a broken token is still shown as encrypted.
 is_vault_armored :: proc(text: string) -> bool {
-	return vault.is_armored(text)
+	// A value counts as already sealed only if it parses as one complete v2
+	// envelope (finding M2): a mere "vault:v2:" prefix on attacker- or user-typed
+	// text must not let it skip encryption.
+	_, payload, res := vault.envelope_parse(text, context.temp_allocator)
+	if payload != nil do crypto.zero_explicit(raw_data(payload), len(payload))
+	return res == .Ok
 }
 
 // ctl_vault_seal encrypts plaintext under the keyring's current epoch. ok=false on a
@@ -56,7 +64,8 @@ VAULT_HINT_BAD_KEY  :: "(configured vault key cannot decrypt this value — see 
 // cannot be decrypted. The hint distinguishes: no keyring, an epoch the keyring does
 // not hold (locked), and a value that fails to parse or authenticate.
 ctl_decrypt_or_fallback_armored :: proc(val: string, kr: ^vault.Vault_Keyring, key_configured: bool, allocator := context.allocator) -> string {
-	if !is_vault_armored(val) {
+	// Display side: anything that LOOKS armored is shown as encrypted, never as text.
+	if !vault.is_armored(val) {
 		return strings.clone(val, allocator)
 	}
 	hint := VAULT_HINT_NO_KEY
@@ -90,7 +99,7 @@ ctl_decrypt_json_value :: proc(v: ^json.Value, kr: ^vault.Vault_Keyring, key_con
 			case "title", "description", "description_preview", "body", "evidence", "last_comment_preview", "last_message_preview", "name", "content":
 				if s, is_str := sub_v.(json.String); is_str {
 					str_val := string(s)
-					if is_vault_armored(str_val) {
+					if vault.is_armored(str_val) {
 						new_str := ctl_decrypt_or_fallback_armored(str_val, kr, key_configured, allocator)
 						append(&updates, Json_Field_Update{k = k, v = json.String(new_str)})
 					}
@@ -212,7 +221,7 @@ ctl_collect_decrypted_pairs :: proc(before, after: json.Value, pairs: ^[dynamic]
 		b_str, a_str := string(b), string(a)
 		// Only an armored value can have been rewritten, and an unchanged one means the
 		// field was not in the list (or decryption fell back to the armored text itself).
-		if b_str != a_str && is_vault_armored(b_str) {
+		if b_str != a_str && vault.is_armored(b_str) {
 			append(pairs, [2]string{b_str, a_str})
 		}
 	}

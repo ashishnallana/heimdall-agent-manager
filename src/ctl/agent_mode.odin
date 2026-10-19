@@ -238,7 +238,7 @@ ctl_v2_task_chain :: proc(endpoint, token: string, tokens, args: []string) {
 		// REQ-VCAP-4: check the PLAINTEXT budget before encrypting, so the error
 		// is in the units the caller controls (the Hub only sees ciphertext).
 		if !is_vault_armored(title) && !ctl_check_plaintext_cap("chain title", title, CTL_CHAIN_TITLE_MAX_BYTES) { os.exit(1) }
-		keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
+		keyring, key_ok := ctl_vault_keyring_for_write(args)
 		if key_ok && !is_vault_armored(title) {
 			title = ctl_seal_or_exit(title, keyring)
 		}
@@ -254,7 +254,7 @@ ctl_v2_task_chain :: proc(endpoint, token: string, tokens, args: []string) {
 		// REQ-VCAP-4: check the PLAINTEXT budget before encrypting, so the error
 		// is in the units the caller controls (the Hub only sees ciphertext).
 		if !is_vault_armored(desc) && !ctl_check_plaintext_cap("chain description", desc, CTL_CHAIN_DESCRIPTION_MAX_BYTES) { os.exit(1) }
-		keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
+		keyring, key_ok := ctl_vault_keyring_for_write(args)
 		if key_ok && desc != "" && !is_vault_armored(desc) {
 			desc = ctl_seal_or_exit(desc, keyring)
 		}
@@ -743,7 +743,7 @@ ctl_agentmode_artifact_create_params :: proc(args: []string) -> string {
 	}
 	desc := option_value(args, "--description", "")
 
-	keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
+	keyring, key_ok := ctl_vault_keyring_for_write(args)
 	if key_ok {
 		if !is_vault_armored(name) {
 			name = ctl_seal_or_exit(name, keyring)
@@ -1277,7 +1277,7 @@ ctl_agentmode_memory_propose_params :: proc(args: []string) -> string {
 	body := option_value(args, "--body", "")
 	ev := option_value(args, "--evidence", "")
 
-	keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
+	keyring, key_ok := ctl_vault_keyring_for_write(args)
 	if key_ok {
 		if !is_vault_armored(title) {
 			title = ctl_seal_or_exit(title, keyring)
@@ -1318,7 +1318,7 @@ ctl_agentmode_task_chain_create_params :: proc(args: []string, positional_title:
 		data, err := os.read_entire_file("/dev/stdin", context.allocator)
 		if err == nil do desc = string(data)
 	}
-	keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
+	keyring, key_ok := ctl_vault_keyring_for_write(args)
 	if key_ok {
 		if title != "" && !is_vault_armored(title) {
 			title = ctl_seal_or_exit(title, keyring)
@@ -1353,7 +1353,7 @@ ctl_agentmode_task_chain_create_params :: proc(args: []string, positional_title:
 ctl_agentmode_task_create_params :: proc(args: []string) -> string {
 	title := option_value(args, "--title", "")
 	desc := option_value(args, "--description", "")
-	keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
+	keyring, key_ok := ctl_vault_keyring_for_write(args)
 	if key_ok {
 		if title != "" && !is_vault_armored(title) {
 			title = ctl_seal_or_exit(title, keyring)
@@ -1380,7 +1380,7 @@ ctl_agentmode_task_create_params :: proc(args: []string) -> string {
 
 ctl_agentmode_task_comment_params :: proc(tid: string, body: string, args: []string) -> string {
 	comment_body := body
-	keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
+	keyring, key_ok := ctl_vault_keyring_for_write(args)
 	if key_ok {
 		if comment_body != "" && !is_vault_armored(comment_body) {
 			comment_body = ctl_seal_or_exit(comment_body, keyring)
@@ -1396,7 +1396,7 @@ ctl_agentmode_task_comment_params :: proc(tid: string, body: string, args: []str
 ctl_agentmode_task_update_params :: proc(tid: string, args: []string) -> string {
 	title := option_value(args, "--title", "")
 	desc := option_value(args, "--description", "")
-	keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
+	keyring, key_ok := ctl_vault_keyring_for_write(args)
 	if key_ok {
 		if title != "" && !is_vault_armored(title) {
 			title = ctl_seal_or_exit(title, keyring)
@@ -1424,7 +1424,7 @@ ctl_agentmode_task_update_params :: proc(tid: string, args: []string) -> string 
 
 ctl_agentmode_chat_send_params :: proc(to: string, body: string, args: []string) -> string {
 	chat_body := body
-	keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
+	keyring, key_ok := ctl_vault_keyring_for_write(args)
 	if key_ok {
 		if chat_body != "" && !is_vault_armored(chat_body) {
 			chat_body = ctl_seal_or_exit(chat_body, keyring)
@@ -1455,7 +1455,7 @@ ctl_agentmode_chat_send_params :: proc(to: string, body: string, args: []string)
 
 ctl_agentmode_chat_set_title_params :: proc(title: string, args: []string) -> string {
 	chat_title := title
-	keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
+	keyring, key_ok := ctl_vault_keyring_for_write(args)
 	if key_ok {
 		if chat_title != "" && !is_vault_armored(chat_title) {
 			chat_title = ctl_seal_or_exit(chat_title, keyring)

@@ -4,12 +4,14 @@ import "core:crypto"
 import "core:fmt"
 import "core:os"
 import "core:strings"
+import "core:encoding/json"
+import http "odin_test:lib/http_client"
 import jsonx "odin_test:lib/jsonx"
 import vault "odin_test:lib/vault"
 
 // ── vault verb group (REQ-VAULT-BRIDGE-CLI-1, passwordless vault P1) ─────────
 // Reports where ham-ctl gets its vault KEYRING from. ham-ctl stores no key material
-// of its own: it uses --vault-keyring / $HEIMDALL_VAULT_KEYRING when set, otherwise
+// of its own: it uses $HEIMDALL_VAULT_KEYRING when set, otherwise
 // the keyring the local bridge holds.
 //
 // TRUST NOTE: agent.vault.get hands every local agent process the bridge's WHOLE
@@ -24,14 +26,16 @@ print_vault_help :: proc() {
 	fmt.println("USAGE:")
 	fmt.println("  ham-ctl vault status")
 	fmt.println("")
-	fmt.println("The keyring comes from --vault-keyring / $HEIMDALL_VAULT_KEYRING (base64 HKR1,")
+	fmt.println("The keyring comes from $HEIMDALL_VAULT_KEYRING (base64 HKR1,")
 	fmt.println("a single-bridge dev override) or, otherwise, the local bridge.")
 }
 
 // g_ctl_keyring holds the most recently resolved keyring. ham-ctl is a short-lived,
 // single-threaded process; keeping ONE copy lets ctl_vault_wipe zero it on the way out
 // instead of scattering copies through temp allocations.
-@(private = "file")
+// Thread-local so parallel tests cannot wipe each other's copy; ham-ctl itself is
+// single-threaded, so this changes nothing in production.
+@(private = "file", thread_local)
 g_ctl_keyring: vault.Vault_Keyring
 
 // ctl_vault_wipe zeroes the resolved keyring. main defers it.
@@ -55,11 +59,12 @@ ctl_keyring_from_b64 :: proc(b64: string, want_epoch: u32 = 0) -> (kr: vault.Vau
 }
 
 // ctl_read_vault_keyring resolves the vault keyring from, in order:
-//   1. --vault-keyring <base64 HKR1>
-//   2. $HEIMDALL_VAULT_KEYRING (a single-bridge dev override)
-//   3. the local bridge, via agent.vault.get (agent mode only)
+//   1. $HEIMDALL_VAULT_KEYRING (a single-bridge dev override; a bridge never passes
+//      it to the agents it spawns)
+//   2. the local bridge, via agent.vault.get (agent mode only)
+// (Test builds also accept --vault-keyring <base64 HKR1> first; see below.)
 //
-// Sources 1 and 2 are EXPLICIT: if either is present but invalid it is rejected and
+// Source 1 is EXPLICIT: if it is present but invalid it is rejected and
 // the bridge is NOT consulted, so a typo surfaces as an error instead of silently
 // resolving to a different keyring. Only genuine ABSENCE falls through.
 //
@@ -70,11 +75,16 @@ ctl_keyring_from_b64 :: proc(b64: string, want_epoch: u32 = 0) -> (kr: vault.Vau
 ctl_read_vault_keyring :: proc(args: []string = nil, allocator := context.allocator) -> (kr: ^vault.Vault_Keyring, ok: bool) {
 	_ = allocator
 	vault.keyring_wipe(&g_ctl_keyring)
-	if args != nil && has_flag(args, "--vault-keyring") {
-		parsed, p_ok := ctl_keyring_from_b64(strings.trim_space(option_value(args, "--vault-keyring", "")))
-		if !p_ok do return nil, false
-		g_ctl_keyring = parsed
-		return &g_ctl_keyring, true
+	// --vault-keyring exists ONLY in test builds, as a per-call injection point.
+	// A production ham-ctl never takes key material on argv, where `ps` and shell
+	// history can read it (finding L3).
+	when ODIN_TEST {
+		if args != nil && has_flag(args, "--vault-keyring") {
+			parsed, p_ok := ctl_keyring_from_b64(strings.trim_space(option_value(args, "--vault-keyring", "")))
+			if !p_ok do return nil, false
+			g_ctl_keyring = parsed
+			return &g_ctl_keyring, true
+		}
 	}
 	if env_val, found := os.lookup_env("HEIMDALL_VAULT_KEYRING", context.temp_allocator); found {
 		trimmed := strings.trim_space(env_val)
@@ -207,4 +217,116 @@ ctl_vault_status_bridge_json :: proc() -> string {
 	defer delete(data_raw)
 
 	return strings.concatenate({"{\"available\":true,\"status\":", data_raw, "}"})
+}
+
+// ── Write-side policy (finding M2) ──────────────────────────────────────────
+//
+// Content ham-ctl sends must be sealed whenever the vault is configured. Having no
+// keyring is NOT evidence that it is not: the bridge may be locked or unreachable.
+// So without a keyring ham-ctl asks (agent.vault.status, or the hub's
+// /api/v1/user/vault in user mode) and sends plaintext only when the answer is a
+// definite "not configured". Anything else aborts.
+
+Ctl_Vault_Config :: enum {
+	Unknown,
+	Configured,
+	Not_Configured,
+}
+
+Ctl_Vault_Write :: enum {
+	Seal,
+	Plaintext,
+	Abort,
+}
+
+// ctl_vault_write_decision is the pure policy behind ctl_vault_keyring_for_write.
+ctl_vault_write_decision :: proc(have_keyring: bool, env_override_invalid: bool, cfg: Ctl_Vault_Config) -> Ctl_Vault_Write {
+	if have_keyring do return .Seal
+	if env_override_invalid do return .Abort
+	if cfg == .Not_Configured do return .Plaintext
+	return .Abort
+}
+
+// ctl_vault_config_from_agent_status reads agent.vault.status's response: only
+// {"status":"disabled","configured":false} is Not_Configured.
+ctl_vault_config_from_agent_status :: proc(response: string) -> Ctl_Vault_Config {
+	parsed, ok := jsonx.parse_body(response, context.temp_allocator)
+	if !ok do return .Unknown
+	root, is_obj := parsed.(json.Object)
+	if !is_obj do return .Unknown
+	data, has_data := root["data"].(json.Object)
+	if !has_data do return .Unknown
+	status, s_ok := data["status"].(json.String)
+	configured, c_ok := data["configured"].(json.Boolean)
+	if !s_ok || !c_ok do return .Unknown
+	if string(status) == "disabled" && !bool(configured) do return .Not_Configured
+	if string(status) == "locked" || string(status) == "unlocked" || bool(configured) do return .Configured
+	return .Unknown
+}
+
+// ctl_vault_config_probe is how ctl_vault_keyring_for_write learns the vault's
+// state. Test builds never contact a bridge or hub: they answer Not_Configured
+// (the pre-M2 behaviour the param-builder suites assert), and the fail-closed
+// policy itself is covered through ctl_vault_write_decision.
+when ODIN_TEST {
+	ctl_vault_config_probe := proc(transport: Ctl_Transport) -> Ctl_Vault_Config { return .Not_Configured }
+} else {
+	ctl_vault_config_probe := ctl_vault_config_probe_live
+}
+
+// ctl_vault_config_probe_live asks the bridge (agent transport or the agent env)
+// or, in user mode, the hub.
+ctl_vault_config_probe_live :: proc(transport: Ctl_Transport) -> Ctl_Vault_Config {
+	endpoint, token := transport.agent_endpoint, transport.agent_token
+	if transport.kind != .Agent || endpoint == "" || token == "" {
+		endpoint, _ = os.lookup_env("HEIMDALL_BRIDGE_ENDPOINT", context.temp_allocator)
+		token, _ = os.lookup_env("HEIMDALL_AGENT_TOKEN", context.temp_allocator)
+	}
+	if strings.trim_space(endpoint) != "" && strings.trim_space(token) != "" {
+		response, ok := ctl_agent_local_call(endpoint, token, "agent.vault.status", "{}")
+		if !ok do return .Unknown
+		defer delete(response)
+		return ctl_vault_config_from_agent_status(response)
+	}
+	if transport.kind == .User && transport.user_base_url != "" && transport.user_token != "" {
+		full_path := hub_url_path_prefix_join(transport.user_base_url, "/api/v1/user/vault")
+		headers := [?]http.Header{{name = "Authorization", value = strings.concatenate({"Bearer ", transport.user_token}, context.temp_allocator)}}
+		resp, ok := http.request_with_headers_timeout("GET", transport.user_base_url, full_path, "", headers[:], http.DEFAULT_TIMEOUT_MS)
+		if !ok do return .Unknown
+		if resp.status == 200 do return .Configured
+		if resp.status == 404 && strings.contains(resp.body, `"configured":false`) do return .Not_Configured
+	}
+	return .Unknown
+}
+
+// ctl_vault_keyring_for_write returns the keyring to seal outgoing content with
+// (ok=true), or ok=false only when the vault is definitely not configured, in which
+// case plaintext is allowed. In every other case it prints an error and exits 1.
+ctl_vault_keyring_for_write :: proc(args: []string, transport: Ctl_Transport = {}) -> (kr: ^vault.Vault_Keyring, ok: bool) {
+	keyring, have := ctl_read_vault_keyring(args)
+	env_present, env_valid := ctl_vault_env_override()
+	cfg := Ctl_Vault_Config.Unknown
+	if !have && !(env_present && !env_valid) do cfg = ctl_vault_config_probe(transport)
+	switch ctl_vault_write_decision(have, env_present && !env_valid, cfg) {
+	case .Seal:
+		return keyring, true
+	case .Plaintext:
+		return nil, false
+	case .Abort:
+	}
+	fmt.println(`{"ok":false,"message":"vault keyring unavailable and the vault is not known to be unconfigured; refusing to send plaintext (unlock the bridge vault and retry)"}`)
+	os.exit(1)
+}
+
+// ctl_user_transport wraps hub user-mode credentials for ctl_vault_keyring_for_write.
+ctl_user_transport :: proc(base, token: string) -> Ctl_Transport {
+	return Ctl_Transport{kind = .User, user_base_url = base, user_token = token}
+}
+
+// ctl_seal_if seals value when encrypt is set (and it is not empty or already a
+// valid envelope); with encrypt unset it is returned as is, which
+// ctl_vault_keyring_for_write only allows for a definitely unconfigured vault.
+ctl_seal_if :: proc(value: string, kr: ^vault.Vault_Keyring, encrypt: bool) -> string {
+	if !encrypt || value == "" || is_vault_armored(value) do return value
+	return ctl_seal_or_exit(value, kr)
 }

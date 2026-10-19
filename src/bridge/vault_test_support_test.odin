@@ -103,6 +103,13 @@ test_store_keyring :: proc(bridge_id: string, key_hex: string, epoch: u32 = 1) -
 	return ok
 }
 
+// test_provision_identity runs the enrollment half of the identity lifecycle for
+// bridge_id: generate in memory, then commit with owner as the enrolled owner.
+test_provision_identity :: proc(bridge_id: string, owner: string = TEST_VAULT_USER_ID) -> bool {
+	if _, ok := bridge_unseal_identity_generate_for_enrollment(); !ok do return false
+	return bridge_unseal_identity_commit_enrollment(bridge_id, owner)
+}
+
 // ── unseal v2 payload builder (the browser side) ────────────────────────────
 
 Test_Unseal_Options :: struct {

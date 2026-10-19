@@ -20,6 +20,7 @@ KEYSTORE_ERR_ENOKEY   :: 126
 // overwrite and then delete a developer machine's real enrolled secrets.
 CREDENTIAL_TARGET_KEYRING_PREFIX  :: "works.earendil.heimdall-bridge.vault-keyring.test:" when ODIN_TEST else "works.earendil.heimdall-bridge.vault-keyring:"
 CREDENTIAL_TARGET_IDENTITY_PREFIX :: "works.earendil.heimdall-bridge.vault-identity.test:" when ODIN_TEST else "works.earendil.heimdall-bridge.vault-identity:"
+CREDENTIAL_TARGET_FLOOR_PREFIX    :: "works.earendil.heimdall-bridge.vault-epoch-floor.test:" when ODIN_TEST else "works.earendil.heimdall-bridge.vault-epoch-floor:"
 CREDENTIAL_MAX_BLOB_BYTES         :: 2560
 
 // Testing hooks for simulation: a non-zero value makes every Credential Manager
@@ -32,7 +33,12 @@ keystore_set_mock_syscall_error :: proc(errno: int) {
 
 @(private = "file")
 credential_target :: proc(slot: Keystore_Slot, bridge_id: string) -> win.wstring {
-	prefix := CREDENTIAL_TARGET_KEYRING_PREFIX if slot == .Keyring else CREDENTIAL_TARGET_IDENTITY_PREFIX
+	prefix: string
+	switch slot {
+	case .Keyring:     prefix = CREDENTIAL_TARGET_KEYRING_PREFIX
+	case .Identity:    prefix = CREDENTIAL_TARGET_IDENTITY_PREFIX
+	case .Epoch_Floor: prefix = CREDENTIAL_TARGET_FLOOR_PREFIX
+	}
 	return win.utf8_to_wstring(strings.concatenate({prefix, bridge_id}, context.temp_allocator), context.temp_allocator)
 }
 
@@ -56,20 +62,23 @@ keystore_os_write_secret :: proc(slot: Keystore_Slot, bridge_id: string, data: [
 	return 0
 }
 
-// keystore_os_read_secret copies the slot's blob into dst. Credential Manager's own
-// copy is zeroed before it is freed.
-keystore_os_read_secret :: proc(slot: Keystore_Slot, bridge_id: string, dst: []byte) -> (n: int, ok: bool) {
-	if _keystore_mock_syscall_errno != 0 do return 0, false
+// keystore_os_read_secret_status copies the slot's blob into dst. Credential
+// Manager's own copy is zeroed before it is freed. Only ERROR_NOT_FOUND is absence.
+keystore_os_read_secret_status :: proc(slot: Keystore_Slot, bridge_id: string, dst: []byte) -> (n: int, status: Keystore_Read_Status) {
+	if _keystore_mock_syscall_errno != 0 do return 0, .Error
 	cred: ^Credential_W
-	if !CredReadW(credential_target(slot, bridge_id), CRED_TYPE_GENERIC, 0, &cred) || cred == nil do return 0, false
+	if !CredReadW(credential_target(slot, bridge_id), CRED_TYPE_GENERIC, 0, &cred) || cred == nil {
+		if win.GetLastError() == ERROR_NOT_FOUND do return 0, .Not_Found
+		return 0, .Error
+	}
 	defer {
 		if cred.CredentialBlob != nil do mem.zero_explicit(rawptr(cred.CredentialBlob), int(cred.CredentialBlobSize))
 		CredFree(cred)
 	}
 	size := int(cred.CredentialBlobSize)
-	if cred.CredentialBlob == nil || size == 0 || size > len(dst) do return 0, false
+	if cred.CredentialBlob == nil || size == 0 || size > len(dst) do return 0, .Error
 	copy(dst, cred.CredentialBlob[:size])
-	return size, true
+	return size, .Found
 }
 
 keystore_os_secret_present :: proc(slot: Keystore_Slot, bridge_id: string) -> bool {
