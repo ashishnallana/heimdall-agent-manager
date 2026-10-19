@@ -258,6 +258,9 @@ validate_bridge_authorize_input :: proc(input: Authorize_Input, allocator := con
 		if input.bridge_key_fingerprint != "" {
 			return "", kind, false, domain.domain_error(.Validation_Failed, "bridge_key_fingerprint requires bridge_public_key")
 		}
+		if input.bridge_identity_public_key != "" {
+			return "", kind, false, domain.domain_error(.Validation_Failed, "bridge_identity_public_key requires bridge_public_key")
+		}
 		return "", kind, true, domain.Domain_Error{}
 	}
 	if !valid_bridge_public_key(input.bridge_public_key) {
@@ -265,6 +268,15 @@ validate_bridge_authorize_input :: proc(input: Authorize_Input, allocator := con
 	}
 	if input.code_challenge == "" {
 		return "", kind, false, domain.domain_error(.Validation_Failed, "bridge enrollment requires a PKCE code_challenge")
+	}
+	// Passwordless vault: the persistent identity key is what the approving device
+	// signs into the directory. Required (no compat path), and distinct from the
+	// per-process ECDH key so the two roles can never be confused.
+	if !valid_bridge_public_key(input.bridge_identity_public_key) {
+		return "", kind, false, domain.domain_error(.Validation_Failed, "bridge_identity_public_key must be a 130-char lowercase-hex uncompressed P-256 point")
+	}
+	if input.bridge_identity_public_key == input.bridge_public_key {
+		return "", kind, false, domain.domain_error(.Validation_Failed, "bridge_identity_public_key must differ from bridge_public_key")
 	}
 	fingerprint, fok := bridge_key_fingerprint_for(input.bridge_public_key, allocator)
 	if !fok {

@@ -61,6 +61,19 @@ Bridge_Mint_Request :: struct {
 	// Operator-chosen display label for a NEW bridge. Empty falls back to the
 	// host-asserted hostname. Invalid when target_bridge_id is also present.
 	new_bridge_label:       string,
+	// Passwordless vault: the bridge's persistent identity key (from the grant) and
+	// the approving device's signed vault approval (from the approve body). The
+	// minter validates the approval BEFORE minting and commits it with the mint.
+	bridge_identity_public_key: string,
+	vault_approval:             Vault_Approval,
+}
+
+// Vault_Approval is the `vault_approval` object of POST /device/approve.
+Vault_Approval :: struct {
+	present:          bool,
+	expected_version: i64,
+	statement:        string,
+	signature:        string,
 }
 
 // Bridge_Mint_Result is what the bridge minter hands back.
@@ -176,6 +189,8 @@ Device_Info :: struct {
 	bridge_key_fingerprint: string, // hub-computed from the key above
 	os_user:                string, // host-asserted
 	is_bridge_enrollment:   bool,
+	bridge_identity_public_key:  string, // host-asserted persistent identity key
+	bridge_identity_fingerprint: string, // hub-computed
 	// server_time is the Hub's own clock reading at the moment it answered this
 	// verify, in unix seconds -- the SAME units as requested_at, so the two are
 	// directly subtractable.
@@ -247,6 +262,8 @@ verify_with_ip :: proc(service: ^Device_Auth_Service, user_code, request_ip: str
 		bridge_key_fingerprint = grant.bridge_key_fingerprint,
 		os_user = grant.os_user,
 		is_bridge_enrollment = is_bridge_grant(grant),
+		bridge_identity_public_key = grant.bridge_identity_public_key,
+		bridge_identity_fingerprint = grant.bridge_identity_fingerprint,
 		server_time = now,
 	}, true, domain.Domain_Error{}
 }
@@ -267,6 +284,7 @@ Approve_Input :: struct {
 	approve:          bool,
 	target_bridge_id: string,
 	new_bridge_label: string,
+	vault_approval:   Vault_Approval,
 }
 
 // approve records the user's terminal decision on a grant.
@@ -323,6 +341,8 @@ approve :: proc(service: ^Device_Auth_Service, input: Approve_Input, owner_user_
 				app_version = grant.app_version,
 				target_bridge_id = input.target_bridge_id,
 				new_bridge_label = input.new_bridge_label,
+				bridge_identity_public_key = grant.bridge_identity_public_key,
+				vault_approval = input.vault_approval,
 			})
 			if !tok_ok {
 				if mint.error.code != .None do return false, mint.error
@@ -549,6 +569,17 @@ poll :: proc(service: ^Device_Auth_Service, device_code, request_ip: string, cod
 set_grant_status :: proc(store: ^Grant_Store, device_code: string, status: Grant_Status, grant: ^Grant) {
 	grant.status = status
 	set_grant(store, device_code, grant^)
+}
+
+// rate_check applies the per-IP verify budget (verify_rate_allow) from outside the
+// package. Pending vault-device codes share the "verify:" budget with bridge codes, so
+// brute force is bounded across both code namespaces; registration uses its own.
+rate_check :: proc(service: ^Device_Auth_Service, namespace, request_ip: string) -> bool {
+	if request_ip == "" do return true
+	key := strings.concatenate({namespace, request_ip}, context.temp_allocator)
+	sync.mutex_lock(&service.store.mutex)
+	defer sync.mutex_unlock(&service.store.mutex)
+	return verify_rate_allow(service.store, key, service.clock.now())
 }
 
 // verify_rate_allow enforces per-IP brute-force protection for the short

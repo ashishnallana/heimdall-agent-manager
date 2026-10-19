@@ -53,6 +53,8 @@ grant_clone_strings :: proc(g: Grant, heap: runtime.Allocator) -> Grant {
 	c.code_challenge_method = strings.clone(g.code_challenge_method, heap)
 	c.minted_bridge_id = strings.clone(g.minted_bridge_id, heap)
 	c.minted_refresh_token = strings.clone(g.minted_refresh_token, heap)
+	c.bridge_identity_public_key = strings.clone(g.bridge_identity_public_key, heap)
+	c.bridge_identity_fingerprint = strings.clone(g.bridge_identity_fingerprint, heap)
 	return c
 }
 
@@ -78,6 +80,8 @@ grant_free_strings :: proc(g: Grant, heap: runtime.Allocator) {
 	delete(g.code_challenge_method, heap)
 	delete(g.minted_bridge_id, heap)
 	delete(g.minted_refresh_token, heap)
+	delete(g.bridge_identity_public_key, heap)
+	delete(g.bridge_identity_fingerprint, heap)
 }
 
 // Grant_Kind is WHAT a grant will mint when it is approved, decided ONCE at
@@ -159,6 +163,12 @@ Grant :: struct {
 	minted_expires_in:          int,
 	minted_refresh_expires_in:  int,
 	vault_delivery_expected:    bool,
+	// Passwordless vault (plan §1 "Bridge identity", §2 P2): the bridge's persistent
+	// ECDSA identity key (host-asserted, REQUIRED for a bridge grant) and its
+	// hub-computed fingerprint. The approving device signs a vault `approve`
+	// statement naming exactly this key.
+	bridge_identity_public_key:  string,
+	bridge_identity_fingerprint: string,
 }
 
 // Authorize_Input is the public /device/authorize request body (ELDA-1).
@@ -175,6 +185,7 @@ Authorize_Input :: struct {
 	os_user:                string,
 	code_challenge:         string,
 	code_challenge_method:  string,
+	bridge_identity_public_key: string,
 }
 
 // Authorize_Result is what /device/authorize hands back to the device (ELDA-1).
@@ -338,6 +349,11 @@ create_grant :: proc(store: ^Grant_Store, input: Authorize_Input, request_ip: st
 		os_user = input.os_user,
 		code_challenge = input.code_challenge,
 		code_challenge_method = input.code_challenge_method,
+		bridge_identity_public_key = input.bridge_identity_public_key,
+	}
+	if input.bridge_identity_public_key != "" {
+		// Validated by validate_bridge_authorize_input before we get here.
+		grant.bridge_identity_fingerprint, _ = bridge_key_fingerprint_for(input.bridge_identity_public_key, context.temp_allocator)
 	}
 	heap := runtime.heap_allocator()
 	// Persist heap-owned copies: `grant`'s request-derived fields (device_label,
