@@ -135,7 +135,7 @@ ctl_issues_command :: proc(cmd: []string, args: []string) {
 		}
 		desc := option_value(args, "--description", option_value(args, "--desc", ""))
 
-		keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
+		keyring, key_ok := ctl_vault_keyring_for_write(args, transport)
 		if key_ok {
 			title = ctl_seal_or_exit(title, keyring)
 			if desc != "" {
@@ -165,7 +165,7 @@ ctl_issues_command :: proc(cmd: []string, args: []string) {
 		t := option_value(args, "--title", "")
 		desc := option_value(args, "--description", option_value(args, "--desc", ""))
 
-		keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
+		keyring, key_ok := ctl_vault_keyring_for_write(args, transport)
 		if key_ok {
 			if t != "" {
 				t = ctl_seal_or_exit(t, keyring)
@@ -208,7 +208,7 @@ ctl_issues_command :: proc(cmd: []string, args: []string) {
 			return
 		}
 
-		keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator)
+		keyring, key_ok := ctl_vault_keyring_for_write(args, transport)
 		if key_ok {
 			body = ctl_seal_or_exit(body, keyring)
 		}

@@ -114,3 +114,26 @@ tkr_b64 :: proc(key_hex: string) -> string {
 	out, _ := base64.encode(bytes, allocator = context.temp_allocator)
 	return out
 }
+
+@(test)
+test_ctl_vault_write_policy_fails_closed :: proc(t: ^testing.T) {
+	// No keyring: plaintext only on a definite "not configured".
+	testing.expect_value(t, ctl_vault_write_decision(true, false, .Unknown), Ctl_Vault_Write.Seal)
+	testing.expect_value(t, ctl_vault_write_decision(false, false, .Not_Configured), Ctl_Vault_Write.Plaintext)
+	testing.expect_value(t, ctl_vault_write_decision(false, false, .Configured), Ctl_Vault_Write.Abort)
+	testing.expect_value(t, ctl_vault_write_decision(false, false, .Unknown), Ctl_Vault_Write.Abort)
+	testing.expect_value(t, ctl_vault_write_decision(false, true, .Not_Configured), Ctl_Vault_Write.Abort)
+
+	// agent.vault.status: only disabled + configured:false is "not configured".
+	testing.expect_value(t, ctl_vault_config_from_agent_status(`{"ok":true,"data":{"status":"disabled","configured":false}}`), Ctl_Vault_Config.Not_Configured)
+	testing.expect_value(t, ctl_vault_config_from_agent_status(`{"ok":true,"data":{"status":"locked","configured":true}}`), Ctl_Vault_Config.Configured)
+	testing.expect_value(t, ctl_vault_config_from_agent_status(`{"ok":false,"error":"x"}`), Ctl_Vault_Config.Unknown)
+	testing.expect_value(t, ctl_vault_config_from_agent_status(`{"ok":true,"data":{"status":"disabled"}}`), Ctl_Vault_Config.Unknown)
+
+	// "Already armored" means a parseable envelope, not a prefix.
+	testing.expect(t, !is_vault_armored("vault:v2:e1:not-really-a-token"), "a bare prefix is not armored")
+	kr := tkr("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	defer vault.keyring_wipe(kr)
+	tok, ok := ctl_vault_seal("hello", kr, context.temp_allocator)
+	testing.expect(t, ok && is_vault_armored(tok), "a real token is armored")
+}

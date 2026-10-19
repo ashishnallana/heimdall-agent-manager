@@ -342,6 +342,7 @@ ctl_hub_projects :: proc(base, token, action: string, args: []string) {
 		name := option_value(args, "--name", "")
 		if name == "" { fmt.println("usage: ham-ctl hub projects create --name <name> [--slug <slug>] [--description <text>] [--repo-url <url>] [--vcs-kind <git|jj|none>] [--default-path <path>]"); return }
 		desc := option_value(args, "--description", option_value(args, "--desc", ""))
+		keyring, key_ok = ctl_vault_keyring_for_write(args, ctl_user_transport(base, token))
 		if key_ok {
 			if !is_vault_armored(name) {
 				name = ctl_seal_or_exit(name, keyring)
@@ -376,6 +377,7 @@ ctl_hub_projects :: proc(base, token, action: string, args: []string) {
 		return
 	}
 	if action == "update" {
+		keyring, key_ok = ctl_vault_keyring_for_write(args, ctl_user_transport(base, token))
 		fields := make([dynamic]string)
 		defer delete(fields)
 		if name := option_value(args, "--name", ""); name != "" {
