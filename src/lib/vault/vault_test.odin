@@ -624,3 +624,39 @@ test_bridge_enroll_proof_binds_key_and_challenge :: proc(t: ^testing.T) {
 	other, _ := bridge_enroll_proof_canonical(ecdh_pub, "another-challenge", context.temp_allocator)
 	testing.expect(t, !verify(SIGN_ALG_ECDSA_P256_SHA256, pub_hex, transmute([]byte)other, obj))
 }
+
+@(test)
+test_pairing_vectors :: proc(t: ^testing.T) {
+	p := obj(load_vectors(t), "pairing")
+	canon, ok := pair_code_normalize(str(p, "code_typed"), context.temp_allocator)
+	testing.expect(t, ok && canon == str(p, "code"), "typed code normalizes")
+	for v in arr(p, "invalid_codes") {
+		_, bad := pair_code_symbols(string(v.(json.String)))
+		testing.expect(t, !bad, "invalid code rejected")
+	}
+	keys, k_ok := pair_keys_derive(str(p, "code_typed"))
+	defer pair_keys_wipe(&keys)
+	testing.expect(t, k_ok, "keys derive")
+	testing.expect_value(t, pair_lookup_hex(&keys, context.temp_allocator), str(p, "lookup"))
+	testing.expect_value(t, hex_encode_lower(keys.mac_key[:], context.temp_allocator), str(p, "mac_key"))
+	bm, _ := pair_key_mac_hex(&keys, "browser", str(p, "browser_register_statement"), context.temp_allocator)
+	testing.expect(t, pair_mac_equal(bm, str(p, "browser_key_mac")), "browser key_mac")
+	payload, pl_ok := pair_bridge_payload(str(p, "bridge_identity_public_key"), str(p, "bridge_ecdh_public_key"), str(p, "bridge_code_challenge"), context.temp_allocator)
+	testing.expect(t, pl_ok, "bridge payload")
+	km, _ := pair_key_mac_hex(&keys, "bridge", payload, context.temp_allocator)
+	testing.expect(t, pair_mac_equal(km, str(p, "bridge_key_mac")), "bridge key_mac")
+	am, _ := pair_approve_mac_hex(&keys, str(p, "approval_statement"), str(p, "root_sign_pub"), context.temp_allocator)
+	testing.expect(t, pair_mac_equal(am, str(p, "approve_mac")), "approve mac")
+	testing.expect_value(t, log_entry_hash(str(p, "approval_statement"), context.temp_allocator), str(p, "head_hash"))
+	// A different root (hub-substituted) or a different code never verifies.
+	other, _ := pair_approve_mac_hex(&keys, str(p, "approval_statement"), str(p, "bridge_identity_public_key"), context.temp_allocator)
+	testing.expect(t, !pair_mac_equal(other, str(p, "approve_mac")), "root is bound")
+	wrong, _ := pair_keys_derive("AAAA-AAAA-AAAA")
+	wm, _ := pair_approve_mac_hex(&wrong, str(p, "approval_statement"), str(p, "root_sign_pub"), context.temp_allocator)
+	testing.expect(t, !pair_mac_equal(wm, str(p, "approve_mac")), "code is bound")
+	g1, g_ok := pair_code_generate(context.temp_allocator)
+	_, g_valid := pair_code_symbols(g1)
+	testing.expect(t, g_ok && g_valid && len(g1) == 14, "generated code is canonical")
+	_, fail := pair_code_generate(context.temp_allocator, "/nonexistent/heimdall-random")
+	testing.expect(t, !fail, "randomness failure fails closed")
+}

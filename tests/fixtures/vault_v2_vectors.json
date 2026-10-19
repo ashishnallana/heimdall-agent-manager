@@ -346,6 +346,29 @@
     "tag": "81ac9138714bfd7cbb8154d7aa6bd34f",
     "ciphertext": "dd0e4d193d467604813459a405e61a6b1eb1e4ebcd1df6e09b2e42585dcd93fba173a2832c70874bd2a4c2e5882bcc7027e33a1e573584a52069adf6e597e8fb8d276a9fa5ba864f36e964daf8595262564b027cf84cd854c8edb7806361f72a3a07a8c964262dd9"
   },
+  "pairing": {
+    "code": "K7QX-M2PA-ZD4H",
+    "code_typed": " k7qx m2pa-zd4h ",
+    "lookup": "4b326b1b7834ff5001daf1a3a6897d2c8fcf6f19ce9cfebea00f3938fe72d06a",
+    "mac_key": "95a86d37e582976c2a3d2e465d0a8f6cbf67b2e591e212c71db3e557c6509301",
+    "browser_register_statement": "heimdall-vault-statement/v2\ntype=register\nuser_id=usr_0123456789abcdef\nseq=\nprev_hash=\nissuer_device_id=dev_60e9bc00a186bc8864e0bc6b47742675\nissued_at_ms=1760000000500\nsubject_device_id=dev_60e9bc00a186bc8864e0bc6b47742675\nsubject_kind=browser\nsubject_sign_pub=045f6766c82340e6be0c4f577b9d9ce33583e2dbbeee825f0101d52a95008c23a39501070b324b7d28534fc0feb47c5a165356676d235994f7a3ee38e1f69a3989\nsubject_ecdh_pub=0441a5fda06cf5a7b4acfa26de1a0758038941fb0f58db00cc3a187362a043cd2f99a8215aedff9e7faa9921e456141d4f4e48c368d268b3ea8da1ed684c50b7c0\nsubject_sign_alg=ecdsa-p256-sha256\nsubject_wrap_alg=ecdh-p256-hkdf-sha256-aes256gcm\nsubject_label_b64=TGFwdG9wIENocm9tZQ\nepoch=\nepoch_commit=\nwrap_sha256=",
+    "browser_key_mac": "2024213a793fd4e20d5422e2d03651a7e80906de302794b6a414cae93664eaaa",
+    "bridge_identity_public_key": "04c3aff4d1055303dcc6b8910adc29b50a1980ad204cf9ef237027eaa6388a1aae40b2c948e711469eb35acffd04d185d7aa5f6d3b4ec1ccf59cdc83424df1ed8a",
+    "bridge_ecdh_public_key": "045f75015f893ef6ed59b660266ccb41f1063ff3f72db1c02b68b4a439b4aa2a52937923003e50e404cd460afc99bd91605559f945bebc2df094f4982eb62f55fd",
+    "bridge_code_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+    "bridge_key_mac": "3411b7930ebc5c456378aed8947c5c5d9519a570d5b2f045e68a8909f8773085",
+    "approval_statement": "heimdall-vault-statement/v2\ntype=approve\nuser_id=usr_0123456789abcdef\nseq=3\nprev_hash=b1ea61d59463e83e77df80b4b57a300a097ff47fefab8160242e176bae941916\nissuer_device_id=dev_60e9bc00a186bc8864e0bc6b47742675\nissued_at_ms=1760000002000\nsubject_device_id=dev_b156045ab0afd50cddc11f59a0084871\nsubject_kind=bridge\nsubject_sign_pub=04c3aff4d1055303dcc6b8910adc29b50a1980ad204cf9ef237027eaa6388a1aae40b2c948e711469eb35acffd04d185d7aa5f6d3b4ec1ccf59cdc83424df1ed8a\nsubject_ecdh_pub=\nsubject_sign_alg=ecdsa-p256-sha256\nsubject_wrap_alg=\nsubject_label_b64=YnVpbGQtYm94\nepoch=1\nepoch_commit=fba96f93139316081c3d5047a9c11bcf19a91a521a5843b73aaa661e21881006\nwrap_sha256=",
+    "root_sign_pub": "04668f04bc0ff1b2b76c78960c0ce53099acc48af87732d429a521ae5f83f0fa9e2a2a1ed19e869d2c256d361d5a802c32569d1ba6c9bd7e376059d36ae1bc06ff",
+    "head_hash": "18a22f07c77f854f494e5d66577dfd56513305a1ea091097222c963e252718c8",
+    "approve_mac": "6c033a6a855e3ea76d3d804c9dea92b8777cff304075550bc7c704472ba05320",
+    "invalid_codes": [
+      "K7QX-M2PA-ZD4",
+      "K7QX-M2PA-ZD4HA",
+      "K7QX-M2PA-ZD40",
+      "K7QX_M2PA_ZD4H",
+      ""
+    ]
+  },
   "bridge_chain": {
     "user_id": "usr_0123456789abcdef",
     "current_epoch": 2,
