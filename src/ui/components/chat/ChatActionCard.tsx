@@ -8,7 +8,10 @@ import {
 } from '../../api/endpoints/cards';
 import type { Card } from '../../api/endpoints/cards';
 import { useSendConversationMessageMutation } from '../../api/endpoints/chats';
+import { resolveCardTitle, UNTITLED_CARD } from '../../utils/vaultCardOps';
+import { VaultText } from '../vault/VaultText';
 import { extractMessageActionIds } from './types';
+import { buildActionFeedback } from './actionFeedback';
 
 export interface SingleActionCardProps {
   actionId: string;
@@ -41,11 +44,10 @@ export const SingleActionCard: React.FC<SingleActionCardProps> = ({
   const [sendMessageMutation, { isLoading: isSending }] = useSendConversationMessageMutation();
 
   const card = initialCard || cardData?.card;
-  const title = card?.title || `Action ${actionId}`;
 
   const operationsSummary = useMemo(() => {
     if (card?.operations && Array.isArray(card.operations) && card.operations.length > 0) {
-      return card.operations.map((op) => formatOpLabel(op)).join('; ');
+      return card.operations.map((op) => formatOpLabel(op, { withIds: false })).join('; ');
     }
     return '';
   }, [card?.operations]);
@@ -61,20 +63,24 @@ export const SingleActionCard: React.FC<SingleActionCardProps> = ({
   const isResolved = status === 'accepted' || status === 'rejected';
   const isBusy = isAccepting || isDiscarding || isSending;
 
+  const sendFeedback = async (body: string) => {
+    if (onSendFeedback) {
+      await onSendFeedback(body);
+    } else if (onReply) {
+      onReply(body);
+    } else if (conversationId) {
+      await sendMessageMutation({ conversationId, body });
+    }
+  };
+
   const handleApprove = async () => {
     if (isResolved || isBusy) return;
     setActionError(null);
     try {
       await acceptCardMutation({ cardId: actionId, id: actionId }).unwrap();
       setLocalStatus('accepted');
-      const confirmationMsg = `[Action Approved] Action ${actionId} (${title}) was approved by user`;
-      if (onSendFeedback) {
-        await onSendFeedback(confirmationMsg);
-      } else if (onReply) {
-        onReply(confirmationMsg);
-      } else if (conversationId) {
-        await sendMessageMutation({ conversationId, body: confirmationMsg });
-      }
+      const title = await resolveCardTitle(card?.title);
+      await sendFeedback(buildActionFeedback('approved', actionId, title));
     } catch (err: any) {
       setActionError(cardErrorText(err, 'Failed to approve action'));
     }
@@ -86,17 +92,8 @@ export const SingleActionCard: React.FC<SingleActionCardProps> = ({
     try {
       await discardCardMutation({ cardId: actionId, id: actionId }).unwrap();
       setLocalStatus('rejected');
-      const trimmedComment = comment.trim();
-      const confirmationMsg = trimmedComment
-        ? `[Action Rejected] Action ${actionId} (${title}) was rejected by user: ${trimmedComment}`
-        : `[Action Rejected] Action ${actionId} (${title}) was rejected by user`;
-      if (onSendFeedback) {
-        await onSendFeedback(confirmationMsg);
-      } else if (onReply) {
-        onReply(confirmationMsg);
-      } else if (conversationId) {
-        await sendMessageMutation({ conversationId, body: confirmationMsg });
-      }
+      const title = await resolveCardTitle(card?.title);
+      await sendFeedback(buildActionFeedback('rejected', actionId, title, comment));
     } catch (err: any) {
       setActionError(cardErrorText(err, 'Failed to reject action'));
     }
@@ -105,21 +102,15 @@ export const SingleActionCard: React.FC<SingleActionCardProps> = ({
   return (
     <div
       data-debug-id={`action-card-${actionId}`}
-      className={`rounded-xl border border-subtle bg-surface-raised/80 p-3.5 my-2 shadow-sm flex flex-col gap-2.5 text-left text-sm ${className}`}
+      className={`rounded-lg border border-subtle bg-surface-raised/80 px-3 py-2 my-1.5 shadow-sm flex flex-col gap-1.5 text-left text-sm ${className}`}
     >
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex flex-col gap-0.5 min-w-0">
-          <div className="flex items-center gap-2">
-            <span className="text-[10px] font-semibold uppercase tracking-wider text-faint">Action Card</span>
-            <span className="font-mono text-[11px] text-muted">{actionId}</span>
-          </div>
-          <h4 data-debug-id={`action-card-title-${actionId}`} className="font-semibold text-primary break-words text-sm">
-            {title}
-          </h4>
-        </div>
+      <div className="flex items-center justify-between gap-2">
+        <h4 data-debug-id={`action-card-title-${actionId}`} className="min-w-0 font-semibold text-primary break-words text-sm">
+          <VaultText value={card?.title} fallback={UNTITLED_CARD} as="span" />
+        </h4>
         <span
           data-debug-id={`action-card-status-${actionId}`}
-          className={`shrink-0 inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium border capitalize ${
+          className={`shrink-0 inline-flex items-center rounded-full px-2 py-px text-[11px] font-medium border capitalize ${
             status === 'accepted'
               ? 'border-success/40 bg-success-soft text-success'
               : status === 'rejected'
@@ -132,57 +123,50 @@ export const SingleActionCard: React.FC<SingleActionCardProps> = ({
       </div>
 
       {operationsSummary ? (
-        <div
-          data-debug-id={`action-card-summary-${actionId}`}
-          className="rounded-lg bg-surface/80 border border-subtle/50 px-2.5 py-2 text-xs text-muted leading-relaxed"
-        >
-          <span className="font-medium text-faint mr-1.5 uppercase text-[10px] tracking-wider">Operations:</span>
-          <span className="text-primary">{operationsSummary}</span>
+        <div data-debug-id={`action-card-summary-${actionId}`} className="text-xs text-muted leading-snug break-words">
+          {operationsSummary}
         </div>
       ) : isCardLoading ? (
-        <div className="text-xs text-muted">Loading operations…</div>
+        <div className="text-xs text-muted">Loading…</div>
       ) : null}
 
       {actionError ? (
-        <div className="text-xs text-danger rounded bg-danger/10 border border-danger/30 p-2">
+        <div className="text-xs text-danger rounded bg-danger/10 border border-danger/30 px-2 py-1">
           {actionError}
         </div>
       ) : null}
 
       {!isResolved && (
-        <div className="flex flex-col gap-1.5">
+        <div className="flex items-center gap-1.5">
           <input
             type="text"
             data-debug-id={`action-card-comment-input-${actionId}`}
-            placeholder="Optional comment / reason…"
+            placeholder="Optional reason…"
             value={comment}
             onChange={(e) => setComment(e.target.value)}
-            disabled={isResolved || isBusy}
-            className="w-full rounded-lg border border-subtle bg-surface px-3 py-1.5 text-xs text-primary placeholder-muted/60 focus:border-accent focus:outline-none disabled:opacity-50"
+            disabled={isBusy}
+            className="min-w-0 flex-1 rounded-md border border-subtle bg-surface px-2 py-1 text-xs text-primary placeholder-muted/60 focus:border-accent focus:outline-none disabled:opacity-50"
           />
+          <button
+            type="button"
+            data-debug-id={`action-card-reject-btn-${actionId}`}
+            onClick={handleReject}
+            disabled={isBusy}
+            className="shrink-0 rounded-md border border-subtle bg-surface px-2.5 py-1 text-xs font-medium text-muted hover:text-danger hover:border-danger/40 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {isDiscarding ? 'Rejecting…' : 'Reject'}
+          </button>
+          <button
+            type="button"
+            data-debug-id={`action-card-approve-btn-${actionId}`}
+            onClick={handleApprove}
+            disabled={isBusy}
+            className="shrink-0 rounded-md bg-accent px-2.5 py-1 text-xs font-medium text-white hover:bg-accent/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {isAccepting ? 'Approving…' : 'Approve'}
+          </button>
         </div>
       )}
-
-      <div className="flex items-center justify-end gap-2 pt-1">
-        <button
-          type="button"
-          data-debug-id={`action-card-reject-btn-${actionId}`}
-          onClick={handleReject}
-          disabled={isResolved || isBusy}
-          className="rounded-lg border border-subtle bg-surface px-3 py-1.5 text-xs font-medium text-muted hover:text-danger hover:border-danger/40 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          {isDiscarding ? 'Rejecting…' : 'Reject'}
-        </button>
-        <button
-          type="button"
-          data-debug-id={`action-card-approve-btn-${actionId}`}
-          onClick={handleApprove}
-          disabled={isResolved || isBusy}
-          className="rounded-lg bg-accent px-3.5 py-1.5 text-xs font-medium text-white hover:bg-accent/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          {isAccepting ? 'Approving…' : 'Approve'}
-        </button>
-      </div>
     </div>
   );
 };
