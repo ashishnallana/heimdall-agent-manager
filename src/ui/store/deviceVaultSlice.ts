@@ -57,6 +57,8 @@ export interface DeviceVaultState {
   errorCode: string;
   errorMessage: string;
   busy: boolean;
+  /** Bridges whose last key delivery failed (bridge id -> error); cleared on success. */
+  bridgeKeyFailures: Record<string, string>;
 }
 
 export const initialDeviceVaultState: DeviceVaultState = {
@@ -74,6 +76,7 @@ export const initialDeviceVaultState: DeviceVaultState = {
   errorCode: '',
   errorMessage: '',
   busy: false,
+  bridgeKeyFailures: {},
 };
 
 export const deviceVaultSlice = createSlice({
@@ -111,6 +114,10 @@ export const deviceVaultSlice = createSlice({
       state.errorMessage = action.payload.message;
       state.busy = false;
     },
+    bridgeKeyDeliveryReported(state, action: PayloadAction<{ succeeded: string[]; failed: Array<{ bridgeId: string; error: string }> }>) {
+      for (const id of action.payload.succeeded) delete state.bridgeKeyFailures[id];
+      for (const f of action.payload.failed) state.bridgeKeyFailures[f.bridgeId] = f.error;
+    },
     deviceVaultSignedOut() {
       return initialDeviceVaultState;
     },
@@ -124,6 +131,7 @@ export const {
   deviceVaultBusy,
   deviceVaultFailed,
   deviceVaultSignedOut,
+  bridgeKeyDeliveryReported,
 } = deviceVaultSlice.actions;
 
 type WithDeviceVault = { deviceVault?: DeviceVaultState };

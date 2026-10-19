@@ -15,7 +15,7 @@ import {
   statementCanonical,
   wrapAlgFromId,
 } from './vaultStatements.ts';
-import type { BrowserCodeInfo, BridgeCodeInfo, GenesisBody, RevokeBody } from '../api/endpoints/vaultDevices.ts';
+import type { BrowserCodeInfo, BridgeCodeInfo, GenesisBody, RevokeBody, RotateBody } from '../api/endpoints/vaultDevices.ts';
 
 const sig = async (identity: DeviceIdentity, text: string) => JSON.parse(await signDeviceText(identity, text));
 
@@ -161,6 +161,70 @@ export async function buildRevocation(
     next.fill(0);
     throw err;
   }
+}
+
+/**
+ * Rotation without a revocation (POST /vault/directory/rotate), e.g. after the hub
+ * retired a bridge identity that may hold the current keyring. Same epoch-advance as
+ * revoke: new key at current+1, epoch statement, wraps to EXACTLY the chain-trusted
+ * wrap recipients. Returns the body and the next keyring bytes (caller zeroes them).
+ */
+export async function buildRotation(
+  approver: DeviceIdentity,
+  chain: VerifiedChain,
+  currentKeyringBytes: Uint8Array,
+  now = Date.now(),
+): Promise<{ body: RotateBody; nextKeyring: Uint8Array }> {
+  requireApprover(chain, approver);
+  const next = nextEpochKeyringBytes(currentKeyringBytes, chain.userId);
+  try {
+    const epoch = chain.currentEpoch + 1;
+    const commit = await epochCommitHex(next, chain.userId, epoch);
+    const epochSt = statementCanonical({ type: 'epoch', user_id: chain.userId, directory_version: String(chain.version), issuer_device_id: approver.deviceId, issued_at_ms: String(now), epoch: String(epoch), epoch_commit: commit });
+    const wraps: SignedKeyringWrap[] = [];
+    for (const d of wrapRecipients(chain)) wraps.push((await sealKeyringWrap(approver, chain.userId, d, chain.version, next)).json);
+    return { body: { expected_version: chain.version, epoch_statement: epochSt, epoch_signature: await sig(approver, epochSt), wraps }, nextKeyring: next };
+  } catch (err) {
+    next.fill(0);
+    throw err;
+  }
+}
+
+export interface RotateDeps {
+  fetchChain: () => Promise<VerifiedChain>;
+  withKeyringBytes: <T>(chain: VerifiedChain, fn: (bytes: Uint8Array) => Promise<T>) => Promise<T>;
+  post: (body: RotateBody) => Promise<{ directory_version: number }>;
+  afterRotation?: () => Promise<void>;
+  isConflict: (err: unknown) => boolean;
+}
+
+export type RotateOutcome = { kind: 'rotated'; epoch: number } | { kind: 'not-needed' };
+
+/**
+ * Rotate when the verified chain recommends it. On a 409, re-fetch and re-verify; if
+ * another device already rotated (no longer recommended), stop — never rotate twice.
+ */
+export async function rotateWithRetry(approver: DeviceIdentity, deps: RotateDeps): Promise<RotateOutcome> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const chain = await deps.fetchChain();
+    if (!chain.rotationRecommended) return { kind: 'not-needed' };
+    let nextKeyring: Uint8Array | null = null;
+    try {
+      await deps.withKeyringBytes(chain, async (bytes) => {
+        const built = await buildRotation(approver, chain, bytes);
+        nextKeyring = built.nextKeyring;
+        await deps.post(built.body);
+      });
+    } catch (err) {
+      (nextKeyring as Uint8Array | null)?.fill(0);
+      if (attempt === 0 && deps.isConflict(err)) continue;
+      throw err;
+    }
+    (nextKeyring as Uint8Array | null)?.fill(0);
+    if (deps.afterRotation) await deps.afterRotation();
+    return { kind: 'rotated', epoch: chain.currentEpoch + 1 };
+  }
+  throw new FlowRefused('The directory kept changing; rotation not done');
 }
 
 export interface RevokeDeps {

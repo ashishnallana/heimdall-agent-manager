@@ -36,7 +36,7 @@ import { signedRequestHeaders, newRequestNonce } from '../../src/ui/utils/vaultR
 import { verifyDirectory, wrapRecipients, buildBridgeChainProof, verifyBridgeChainProof } from '../../src/ui/utils/vaultDirectoryVerify.ts';
 import { openVerifiedWrap } from '../../src/ui/utils/vaultKeyringWrap.ts';
 import { deliverKeyringToBridge } from '../../src/ui/utils/vaultBridgeDelivery.ts';
-import { buildBridgeApproval, buildBrowserApproval, buildGenesis, buildRegistration, buildRevocation } from '../../src/ui/utils/vaultDeviceFlows.ts';
+import { buildBridgeApproval, buildBrowserApproval, buildGenesis, buildRegistration, buildRevocation, buildRotation } from '../../src/ui/utils/vaultDeviceFlows.ts';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const USER_HEADER = 'X-authentik-username';
@@ -620,6 +620,42 @@ async function main() {
       expect(c2.status === 200 && c2.data.cancelled === false, 'second cancel -> cancelled:false');
       const after = await http('GET', '/api/v1/vault/directory', { user: ALICE });
       expect(after.status === 200 && !after.data.reset, 'directory intact, reset null');
+    });
+
+    await step('7 bridge enrollment rolled back -> hub-retired, rotation_recommended; signed rotate', async () => {
+      // Clean up step 5's injected row (a hostile-hub artefact) so the hub's wrap
+      // coverage check matches the chain-trusted set again.
+      const db = new DatabaseSync(HUB.dbPath);
+      try { db.exec('PRAGMA busy_timeout = 5000'); db.prepare("DELETE FROM vault_devices WHERE label = 'injected'").run(); } finally { db.close(); }
+      const br = S.bridge;
+      // The simulated bridge never opened its enroll connection, so its enrollment is
+      // still pending: cancelling it rolls it back and hub-retires its identity (the
+      // same retirement a bridge revoke from bridge settings performs).
+      const rv = await http('POST', `/api/v1/bridges/${br.bridgeId}/enrollment/cancel`, { user: ALICE, body: '{}' });
+      expect(rv.status === 200 && rv.data.rolled_back === true, `pending enrollment cancelled (rolled back) -> 200 (${rv.status} ${rv.status !== 200 ? rv.raw : ''})`);
+      const { dir, chain } = await fetchVerified(ALICE, S.uid, S.pins);
+      expect(dir.rotation_recommended === true && (dir.retired_device_ids || []).includes(br.identity.id), 'hub flags rotation_recommended and names the retired identity');
+      expect(!chain.trusted.has(br.identity.id) && chain.retired.includes(br.identity.id) && chain.rotationRecommended, 'client chain verifies: retired bridge untrusted, rotation recommended');
+      // The hub's retire/epoch timestamps have 1 s resolution: an epoch created in the
+      // same second as the retirement would still look 'before' it (the UI waits >= 1 s).
+      await new Promise((r) => setTimeout(r, 1100));
+      const unsigned = await http('POST', '/api/v1/vault/directory/rotate', { user: ALICE, body: '{}' });
+      expect(unsigned.status === 401, `unsigned rotate -> 401 (${unsigned.status})`);
+      const { body, nextKeyring } = await buildRotation(S.A.identity, chain, S.A.keyringBytes);
+      nextKeyring.fill(0);
+      const missing = await signedCall(S.A, ALICE, S.uid, 'POST', '/api/v1/vault/directory/rotate', { ...body, wraps: body.wraps.slice(1) });
+      expect(missing.status === 400, `rotate missing a wrap -> 400 (${missing.status})`);
+      const stale = await signedCall(S.A, ALICE, S.uid, 'POST', '/api/v1/vault/directory/rotate', { ...body, expected_version: chain.version - 1 });
+      expect(stale.status === 409, `rotate at a stale version -> 409 (${stale.status})`);
+      const ok = await signedCall(S.A, ALICE, S.uid, 'POST', '/api/v1/vault/directory/rotate', body);
+      expect(ok.status === 200 && ok.data.directory_version === chain.version + 1, `signed rotate -> 200, version ${chain.version + 1} (${ok.status} ${ok.status !== 200 ? ok.raw : ''})`);
+      const after = await fetchVerified(ALICE, S.uid, S.pins);
+      expect(after.chain.currentEpoch === chain.currentEpoch + 1 && !after.chain.rotationRecommended, `chain verifies a standalone epoch ${chain.currentEpoch + 1}; rotation no longer recommended`);
+      const selfA = await signedCall(S.A, ALICE, S.uid, 'GET', '/api/v1/vault/devices/self');
+      const bytes = await openWrap(S.A, selfA.data.wrap, after.chain);
+      expect(await commitHex(bytes, S.uid, after.chain.currentEpoch) === after.chain.commits.get(after.chain.currentEpoch), 'A opens its new wrap; epoch_commit checks');
+      const again = await signedCall(S.A, ALICE, S.uid, 'POST', '/api/v1/vault/directory/rotate', body);
+      expect(again.status === 409, `replaying the old rotation -> 409 (${again.status})`);
     });
   } finally {
     await HUB.stop();

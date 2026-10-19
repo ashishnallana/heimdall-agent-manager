@@ -77,6 +77,9 @@ export interface VaultDirectory {
   devices: DirectoryDevice[];
   epochs: DirectoryEpoch[];
   reset?: DirectoryReset | null;
+  /** Hub hint: an identity was hub-retired after the current epoch was created. */
+  rotation_recommended?: boolean;
+  retired_device_ids?: string[];
 }
 
 // ── statement parsing ────────────────────────────────────────────────────────
@@ -149,6 +152,10 @@ export interface VerifiedChain {
   /** epoch -> epoch_commit (hex), from signed epoch statements. */
   commits: Map<number, string>;
   epochs: Map<number, EpochProof>;
+  /** Identities hub-retired without a signed revocation (never trusted for wraps). */
+  retired: string[];
+  /** Rotate to a new epoch: the hub flags it and this chain saw a retired identity. */
+  rotationRecommended: boolean;
 }
 
 export class DirectoryVerificationError extends Error {
@@ -258,6 +265,10 @@ export async function verifyDirectory(dir: VaultDirectory, userId: string, pins:
     }
     const st = parseStatement(d.approval_statement);
     ops.push({ op: 'approve', st, text: d.approval_statement ?? '', sig: signatureObjectText(d.approval_signature), row: d, v: Number(st?.directory_version ?? -1) });
+    // Hub-retired (bridge revoked from bridge settings, superseded attach, rolled-back
+    // enrollment): status revoked with NO signed revocation. It can only reduce trust,
+    // so it is honored after the walk (never wrapped to) without an epoch of its own.
+    if (d.status === 'revoked' && !d.revocation_statement) continue;
     if (d.status === 'revoked') {
       const rs = parseStatement(d.revocation_statement);
       ops.push({ op: 'revoke', st: rs, text: d.revocation_statement ?? '', sig: signatureObjectText(d.revocation_signature), row: d, v: Number(rs?.directory_version ?? -1) });
@@ -303,10 +314,15 @@ export async function verifyDirectory(dir: VaultDirectory, userId: string, pins:
       revokedRows.push(o.row);
       lastRevoke = { v: o.v, issuer: st!.issuer_device_id, commit: st!.epoch_commit };
     } else {
+      // Either the epoch half of a revocation at the same version (same issuer and
+      // commit), or a standalone rotation (POST /vault/directory/rotate) at its own version.
+      const paired = lastRevoke !== null;
       if (!sigOk || st!.type !== 'epoch' || st!.epoch !== String(epoch + 1) || !COMMIT_RE.test(st!.epoch_commit)
-        || !lastRevoke || lastRevoke.v !== o.v || lastRevoke.issuer !== st!.issuer_device_id || lastRevoke.commit !== st!.epoch_commit) {
+        || (paired && (lastRevoke!.v !== o.v || lastRevoke!.issuer !== st!.issuer_device_id || lastRevoke!.commit !== st!.epoch_commit))
+        || (!paired && (o.v < 1 || o.v >= dir.version || usedVersions.has(o.v)))) {
         fail(`epoch statement ${st?.epoch ?? '?'}`);
       }
+      usedVersions.add(o.v);
       epoch += 1;
       commits.set(epoch, st!.epoch_commit);
       epochs.set(epoch, { epoch, statement: o.text, signature: o.sig, issuer_device_id: st!.issuer_device_id, epoch_commit: st!.epoch_commit });
@@ -316,6 +332,14 @@ export async function verifyDirectory(dir: VaultDirectory, userId: string, pins:
   if (lastRevoke) fail('revocation without a new epoch');
   if (epoch !== dir.current_epoch) fail('current_epoch does not match the signed epochs');
   if (epochs.size !== dir.epochs.length) fail('unsigned or duplicate epoch rows');
+  // Hub-retired identities lose trust (see above); their past approvals stay in everApproved.
+  const retired: string[] = [];
+  for (const d of dir.devices) {
+    if (d.status === 'revoked' && !d.revocation_statement && d.device_id !== root.device_id) {
+      if (trusted.delete(d.device_id)) retired.push(d.device_id);
+      revokedRows.push(d);
+    }
+  }
   // Approved rows the chain could not reach (e.g. issuer never trusted) are untrusted.
   for (const d of dir.devices) {
     if (d.status === 'approved' && !trusted.has(d.device_id) && !untrusted.includes(d)) untrusted.push(d);
@@ -338,6 +362,8 @@ export async function verifyDirectory(dir: VaultDirectory, userId: string, pins:
     revoked: revokedRows,
     commits,
     epochs,
+    retired,
+    rotationRecommended: dir.rotation_recommended === true && revokedRows.some((d) => !d.revocation_statement),
   };
   checkAgainstPins(pins, pinsFromChain(chain));
   return chain;

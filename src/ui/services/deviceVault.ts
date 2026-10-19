@@ -23,7 +23,7 @@ import {
 import { isVaultSupported } from '../utils/vaultCrypto';
 import { pinsFromChain, trustedBridgeById, verifyDirectory, type VaultDirectory, type VerifiedChain } from '../utils/vaultDirectoryVerify';
 import { clearKeyringSession, getKeyringSession, installKeyringFromWrap, withKeyringBytes } from '../utils/vaultKeyringSession';
-import { buildGenesis, buildRegistration, revokeWithRetry, type RevokeOutcome } from '../utils/vaultDeviceFlows';
+import { buildGenesis, buildRegistration, revokeWithRetry, rotateWithRetry, type RevokeOutcome, type RotateOutcome } from '../utils/vaultDeviceFlows';
 import { deliverKeyringToBridges, type BridgeDeliveryDeps, type BridgeFanoutResult } from '../utils/vaultBridgeDelivery';
 import {
   deviceVaultBusy,
@@ -33,6 +33,7 @@ import {
   deviceVaultStatusChanged,
   type DeviceVaultReset,
   type PendingDeviceSummary,
+  bridgeKeyDeliveryReported,
 } from '../store/deviceVaultSlice';
 import { keyringCleared, keyringInstalled } from '../store/vaultSlice';
 
@@ -43,7 +44,11 @@ export interface DeviceVaultDeps {
   kv: DeviceKeyValueStore;
   api: VaultApi;
   /** Bridge transport for unseal delivery (null: bridges are not re-unsealed). */
-  bridges: Pick<BridgeDeliveryDeps, 'fetchTarget' | 'dispatch'> & { listOnlineBridgeIds: () => Promise<string[]> } | null;
+  bridges: Pick<BridgeDeliveryDeps, 'fetchTarget' | 'dispatch'> & {
+    listOnlineBridgeIds: () => Promise<string[]>;
+    /** Online bridges reporting no vault key (awaiting the key). */
+    listOnlineLockedBridgeIds: () => Promise<string[]>;
+  } | null;
   pollIntervalMs: number;
   label: () => string;
 }
@@ -152,6 +157,8 @@ async function publishChain(chain: VerifiedChain, dir: VaultDirectory): Promise<
     reset: resetFrom(dir),
     pendingDevices: pendingFrom(chain),
   }));
+  // Only a device whose keyring is installed may rotate.
+  if (chain.rotationRecommended && getKeyringSession()) scheduleAutoRotate();
 }
 
 /** Start (or restart) the device vault for `userId`. Idempotent for the same user while running. */
@@ -432,6 +439,108 @@ export async function unsealApprovedBridges(only?: readonly string[]): Promise<B
   return deliverKeyringToBridges(targets, chain, deps2);
 }
 
+// ── automatic bridge key delivery ───────────────────────────────────────────
+//
+// Owner decision: an approved browser that sees an approved bridge awaiting the key
+// delivers it automatically, after the same checks as the manual path (bridge
+// identity chain-approved; ephemeral key signed by that identity; chain_proof). To
+// avoid several tabs / devices stampeding one bridge: random jitter, a re-check that
+// the bridge is STILL awaiting the key just before sending, a per-bridge cooldown in
+// this tab and a short cross-tab lease in localStorage. Failures are reported to the
+// slice so Settings → Devices can offer "Send key" with the error.
+
+const AUTO_UNSEAL_COOLDOWN_MS = 30_000;
+const AUTO_UNSEAL_LEASE_MS = 20_000;
+const lastAutoAttempt = new Map<string, number>();
+let autoUnsealRunning: Promise<void> | null = null;
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const jitter = (min: number, max: number) => min + Math.random() * (max - min);
+
+function takeLease(bridgeId: string): boolean {
+  try {
+    const key = `heimdall:bridge-unseal-lease:${bridgeId}`;
+    const now = Date.now();
+    const held = Number(globalThis.localStorage?.getItem(key) || 0);
+    if (held && now - held < AUTO_UNSEAL_LEASE_MS) return false;
+    globalThis.localStorage?.setItem(key, String(now));
+    return true;
+  } catch {
+    return true; // no storage: jitter + re-check still apply
+  }
+}
+
+/** Deliver the keyring to approved bridges that report awaiting the key. Never throws. */
+export function autoUnsealLockedBridges(candidateIds: readonly string[]): Promise<void> {
+  if (autoUnsealRunning || candidateIds.length === 0 || !getKeyringSession()) return autoUnsealRunning ?? Promise.resolve();
+  autoUnsealRunning = (async () => {
+    try {
+      const b = d().bridges;
+      if (!b) return;
+      await sleep(jitter(400, 3000));
+      const still = new Set(await b.listOnlineLockedBridgeIds());
+      const now = Date.now();
+      const targets = candidateIds.filter((id) => still.has(id) && now - (lastAutoAttempt.get(id) ?? 0) >= AUTO_UNSEAL_COOLDOWN_MS && takeLease(id));
+      if (targets.length === 0) return;
+      for (const id of targets) lastAutoAttempt.set(id, now);
+      const result = await unsealApprovedBridges(targets);
+      ctx?.dispatch(bridgeKeyDeliveryReported(result));
+    } catch (err) {
+      console.warn('[vault] automatic bridge key delivery failed:', err);
+    } finally {
+      autoUnsealRunning = null;
+    }
+  })();
+  return autoUnsealRunning;
+}
+
+/** Manual fallback ("Send key"): no cooldown, result reported to the slice. */
+export async function sendKeyToBridge(bridgeId: string): Promise<BridgeFanoutResult> {
+  const result = await unsealApprovedBridges([bridgeId]);
+  ctx?.dispatch(bridgeKeyDeliveryReported(result));
+  return result;
+}
+
+// ── automatic rotation after a hub retirement ───────────────────────────────
+
+let rotateTimer: ReturnType<typeof setTimeout> | null = null;
+let rotating = false;
+
+function scheduleAutoRotate(): void {
+  if (rotateTimer || rotating) return;
+  rotateTimer = setTimeout(() => {
+    rotateTimer = null;
+    if (rotating) return;
+    rotating = true;
+    rotateKeys()
+      .catch((err) => console.warn('[vault] automatic key rotation failed:', err))
+      .finally(() => { rotating = false; });
+  }, jitter(1000, 5000));
+}
+
+/** Rotate to a new epoch (no revocation), then re-unseal every approved online bridge. */
+export async function rotateKeys(): Promise<{ outcome: RotateOutcome; bridges: BridgeFanoutResult }> {
+  const c = ctx;
+  if (!c?.identity) throw new Error('This device cannot sign');
+  let bridges: BridgeFanoutResult = { succeeded: [], failed: [] };
+  const outcome = await rotateWithRetry(c.identity, {
+    fetchChain: async () => {
+      const { chain } = await fetchVerifiedChain();
+      await ensureKeyringCurrent(chain);
+      return chain;
+    },
+    withKeyringBytes: (chain, fn) => withKeyringBytes(fn, chain),
+    post: (body) => d().api.postRotateDirectory(body, deviceSignerContext()!),
+    isConflict: (err) => isStatus(err, 409),
+    afterRotation: async () => {
+      await refreshDeviceVault('rotated');
+      bridges = await unsealApprovedBridges();
+      ctx?.dispatch(bridgeKeyDeliveryReported(bridges));
+    },
+  });
+  return { outcome, bridges };
+}
+
 /** Revoke a device (never this one): new epoch, wraps to the rest, re-unseal bridges. */
 export async function revokeDevice(targetId: string): Promise<{ outcome: RevokeOutcome; bridges: BridgeFanoutResult }> {
   const c = ctx;
@@ -451,6 +560,7 @@ export async function revokeDevice(targetId: string): Promise<{ outcome: RevokeO
     afterRotation: async () => {
       await refreshDeviceVault('rotated');
       bridges = await unsealApprovedBridges();
+      ctx?.dispatch(bridgeKeyDeliveryReported(bridges));
     },
   });
   if (outcome.kind === 'already-revoked') await refreshDeviceVault('already-revoked');

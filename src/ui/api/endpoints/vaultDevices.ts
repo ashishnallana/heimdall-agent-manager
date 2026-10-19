@@ -177,6 +177,18 @@ export async function postRevokeDevice(deviceId: string, body: RevokeBody, signe
   return vaultRequest('POST', `/vault/devices/${encodeURIComponent(deviceId)}/revoke`, { body, signed });
 }
 
+export interface RotateBody {
+  expected_version: number;
+  epoch_statement: string;
+  epoch_signature: unknown;
+  wraps: SignedKeyringWrap[];
+}
+
+/** Advance to epoch current+1 without a revocation (after a hub retirement). */
+export async function postRotateDirectory(body: RotateBody, signed: VaultSignerContext): Promise<{ directory_version: number }> {
+  return vaultRequest('POST', '/vault/directory/rotate', { body, signed });
+}
+
 // ── reset (72 h delayed) ────────────────────────────────────────────────────
 
 /** Request a vault reset from a fresh login. Signed by this (pending) device when it has a key. */

@@ -158,6 +158,7 @@ export const bridgeUnsealTransport = {
   fetchTarget: (bridgeId: string, enrollment: boolean) => fetchBridgeUnsealTarget(bridgeId, enrollment),
   dispatch: (bridgeId: string, payload: BridgeUnsealPayload) => unsealBridge(bridgeId, payload),
   listOnlineBridgeIds,
+  listOnlineLockedBridgeIds,
 };
 
 export const bridgesApi = heimdallApi.injectEndpoints({

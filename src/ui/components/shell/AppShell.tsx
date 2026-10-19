@@ -54,7 +54,7 @@ import DeviceApprovalPage from '../devices/DeviceApprovalPage';
 import { DeviceVaultGate } from '../devices/DeviceVaultScreens';
 import { VaultResetBanner } from '../devices/VaultResetBanner';
 import DevicesPanel from '../settings/DevicesPanel';
-import { bootDeviceVault, unsealApprovedBridges } from '../../services/deviceVault';
+import { bootDeviceVault, autoUnsealLockedBridges } from '../../services/deviceVault';
 import ProviderEnrollmentSetupPage from '../providers/ProviderEnrollmentSetupPage';
 import BridgesPanel from '../settings/BridgesPanel';
 import ProjectsPanel from '../settings/ProjectsPanel';
@@ -1434,16 +1434,10 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
     const targetBridgeIds = selectOnlineLockedBridgeIds(bridges);
     if (targetBridgeIds.length === 0) return Promise.resolve(null);
     setIsVaultReconciling(true);
-    const run = unsealApprovedBridges(targetBridgeIds)
-      .then(async (result) => {
-        if (result.succeeded.length > 0) await refetchBridges();
-        for (const f of result.failed) console.warn(`[vault] could not deliver the key to bridge ${f.bridgeId}: ${f.error}`);
-        return result;
-      })
-      .catch((err) => {
-        console.warn('[vault] bridge key delivery failed:', err);
-        return null;
-      })
+    // Automatic (owner decision): jittered, re-checked and leased in deviceVault so
+    // several tabs/devices do not stampede one bridge; failures surface in Devices.
+    const run = autoUnsealLockedBridges(targetBridgeIds)
+      .then(() => refetchBridges())
       .finally(() => {
         bridgeReconciliationRef.current = null;
         setIsVaultReconciling(false);

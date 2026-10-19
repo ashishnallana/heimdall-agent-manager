@@ -14,7 +14,7 @@ import {
   denyPendingDevice,
   fetchVerifiedChain,
   revokeDevice,
-  unsealApprovedBridges,
+  sendKeyToBridge,
 } from '../../services/deviceVault';
 import { buildRouteHash } from '../../utils/appLocation';
 
@@ -29,6 +29,8 @@ function when(iso: string): string {
 export interface DevicesListProps {
   rows: DeviceRow[];
   busyId?: string;
+  /** Bridge id -> error of the last failed automatic/manual key delivery. "Send key" shows only then. */
+  keyFailures?: Record<string, string>;
   confirmRevokeId?: string;
   onRevoke?: (id: string) => void;
   onConfirmRevoke?: (id: string) => void;
@@ -38,7 +40,7 @@ export interface DevicesListProps {
 }
 
 /** Presentational list. The current device never gets a revoke button. */
-export function DevicesList({ rows, busyId, confirmRevokeId, onRevoke, onConfirmRevoke, onCancelRevoke, onDeny, onSendKey }: DevicesListProps) {
+export function DevicesList({ rows, busyId, keyFailures = {}, confirmRevokeId, onRevoke, onConfirmRevoke, onCancelRevoke, onDeny, onSendKey }: DevicesListProps) {
   if (rows.length === 0) return <p data-debug-id="settings-devices-empty" className="text-sm text-muted">No devices.</p>;
   return (
     <ul data-debug-id="settings-devices-list" className="divide-y divide-subtle rounded-2xl border border-subtle bg-surface">
@@ -59,7 +61,10 @@ export function DevicesList({ rows, busyId, confirmRevokeId, onRevoke, onConfirm
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            {r.canSendKey && onSendKey ? (
+            {r.canSendKey && onSendKey && keyFailures[r.bridgeId] ? (
+              <span data-debug-id={`settings-device-key-error-${r.deviceId}`} className="text-xs text-danger">Key delivery failed: {keyFailures[r.bridgeId]}</span>
+            ) : null}
+            {r.canSendKey && onSendKey && keyFailures[r.bridgeId] ? (
               <Button size="sm" data-debug-id={`settings-device-send-key-btn-${r.deviceId}`} loading={busyId === r.deviceId} onClick={() => onSendKey(r.bridgeId)}>Send key</Button>
             ) : null}
             {r.canDeny && onDeny ? (
@@ -143,6 +148,7 @@ export default function DevicesPanel() {
         </div>
         <DevicesList
           rows={rows}
+          keyFailures={state.bridgeKeyFailures}
           busyId={busyId}
           confirmRevokeId={confirmRevokeId}
           onRevoke={(id) => setConfirmRevokeId(id)}
@@ -157,7 +163,7 @@ export default function DevicesPanel() {
           onSendKey={(bridgeId) => {
             const row = rows.find((r) => r.bridgeId === bridgeId);
             void act(row?.deviceId ?? bridgeId, async () => {
-              const res = await unsealApprovedBridges([bridgeId]);
+              const res = await sendKeyToBridge(bridgeId);
               if (res.failed.length) throw new Error(res.failed[0].error);
               return res.succeeded.length ? 'Key delivered to the bridge.' : 'That bridge is not chain-approved.';
             });
