@@ -172,8 +172,9 @@ Consequences for the formats below: every signature is a JSON object `{"alg":…
 - WS-triggered refreshes are coalesced into one follow-up run.
 
 **Keyring plaintext (binary).**
-- Layout: `"HKR1" | u16be uid_len | user_id | u32be current_epoch | u16be count | count × (u32be epoch | key[32])`, entries ascending.
-- Capped at 64 epochs: 4+2+64+4+2+64·36 = 2380 bytes, which fits the Windows Credential limit.
+- Layout (P4: HKR2): `"HKR2" | u16be uid_len | user_id | vault_id[8] | u32be current_epoch | u16be count | count × (u32be epoch | key[32])`, entries ascending.
+- `vault_id` = first 8 bytes of SHA-256(root_sign_pub raw65). Every receiver checks it against the verified root (browser wrap open, bridge chain proof `Wrong_Vault`, bridge keyring update `Different_Vault`).
+- Capped at 64 epochs: 4+2+64+8+4+2+64·36 = 2388 bytes, which fits the Windows Credential limit.
 - Epochs start at 1.
 
 **Keyring wrap (stored on the hub, one per recipient).**
@@ -194,10 +195,11 @@ Consequences for the formats below: every signature is a JSON object `{"alg":…
 - The plaintext is the keyring bytes. The v1 AAD forms and the 32/64-byte plaintext paths are deleted.
 
 **Content envelope v2.**
-- Format: `vault:v2:e<epoch>:<b64std(nonce12‖tag16‖ct)>`, where epoch is decimal 1..4294967295 with no leading zero.
-- AAD = `heimdall-vault-v2|e<epoch>`.
-- Token regex: `vault:v2:e[1-9][0-9]{0,9}:[A-Za-z0-9+/]+={0,2}`.
-- Encryption always uses the current epoch. Decryption picks the key by the epoch in the header; an unknown epoch shows as the locked marker.
+- Format (P4): `vault:v2:<vault_id 16 hex>:e<epoch>:<b64std(nonce12‖tag16‖ct)>`, where epoch is decimal 1..4294967295 with no leading zero.
+- AAD = `heimdall-vault-v2|<vault_id>|e<epoch>`.
+- Token regex: `vault:v2:[0-9a-f]{16}:e[1-9][0-9]{0,9}:[A-Za-z0-9+/]+={0,2}`. The pre-P4 layout without a vault id is a dead format (malformed, never decrypted).
+- Encryption always uses the current epoch. A token of another vault (after a reset) is `Other_Vault` and shows "from a previous vault" without trying any key; an unknown epoch shows as the locked marker.
+- Pane captures use the same header over a PTY v2 `out` frame body (their AAD is the PTY AAD; the hub re-frames them for live viewers, so their vault id is only checked, not authenticated). File writes use it with the fs-write AAD below.
 
 **PTY payload v2** (revised after the P1 security review, finding H2).
 - Per-stream subkey: `HKDF-SHA256(ikm=epoch_key, salt=salt16, info="heimdall-pty-v2|<session_id>|<out|in>")`; `in` and `out` use separate subkeys.
@@ -521,7 +523,17 @@ $out="$env:USERPROFILE\.cache\heimdall-tests"
 - C:\Users\Tanmay\heimdall-agent-manager\src\bridge\vault_decrypt.odin (plus keystore_*.odin and main.odin:879)
 - C:\Users\Tanmay\heimdall-agent-manager\src\hub\repository\sqlite\migrations.odin (plus app\wiring.odin)
 - C:\Users\Tanmay\heimdall-agent-manager\src\ui\components\enrollment\BridgeEnrollmentApprovalPage.tsx (to be replaced by DeviceApprovalPage.tsx)
-## Backlog carried into P4 (from P1 fix round 2)
+### P4 — as implemented
+
+- **Recovery key.** `src/ui/utils/vaultRecovery.ts`. HKDF-SHA256(entropy16, salt `heimdall-recovery-v1`, info `wrap`) → AES-256-GCM. Blob `{"v":1,"alg":"bip39-hkdf-sha256-aes256gcm","iv","ciphertext"}` (the hub checks this exact typed shape), AAD `heimdall-recovery-v1|<user_id>|<device_id>`, sealed plaintext `{v, sign_pkcs8, ecdh_pkcs8, root_sign_pub, approval_hash}`; `approval_hash` = log entry hash of the credential's own approve op, so a restore accepts only a log whose root and whose recovery approval (with its whole prefix) are the ones the creating browser saw. Creation: `POST /vault/devices/recovery {expected_version, statement, signature, wrap, recovery_blob}` (approver-signed). Restore (`restoreWithRecoveryKey`, from the waiting/pairing screen): verify the log from genesis, open the blob, unwrap with the recovery ECDH key, then sign THIS browser's approval as the recovery credential with a pair_mac under the browser's own pairing code, so the normal pairing install path pins the root. Replace = create new, then revoke the old. The vault-missing screen offers no restore: with no directory there is nothing to restore into.
+- **Last-approver guard** (hub `revoke_prepare`, TS `remainingApprovers`): revoking an approver-capable target is refused when no approver-capable device other than the target AND the signer remains; a recovery key counts. (Counting the signer made the guard unreachable.)
+- **fs writes v3.** AAD `heimdall-fs-write-v3|<vault_id>|e<epoch>|<bridge_id>|<hex sha256(root)>|<hex sha256(path)>`, root = the canonical sandbox root the bridge resolves (the `root` its fs results report; the UI reads it with a one-entry listing, VCS saves use the selected worktree path).
+- **Card operations.** Sealed (store-only): issue.create title/description; memory.create/update title/body/description/evidence; project.update name/description. In clear (executed): ids, status, result, attempt_no, scope/scope_type, type, expires_at; agent.prompt/agent.update unchanged. (ham-ctl `CARD_OP_SEALED_FIELDS`, UI `vaultCardOps.ts`.)
+- **Shell starts** carry cmd/cwd only inside enc_spec; **shell_capture** replies are content envelopes (locked → `vault_locked`, seal failure → `encryption_failed`).
+- **`ham-bridge vault prune`** lists scope directories; `--config … --remove` prunes only a bridge whose hub answers 401/403 to its token; `--remove-scope <id> --hub <url>` removes a selected scope; never silent.
+- Deleted: user_vaults (migration 095 drops it; 047 removed from the order), the bridge lock route/frame/agent op, the `disabled` bridge vault status and the UI NotConfigured badge.
+
+## Backlog carried into P4 (from P1 fix round 2) — done in P4 except the Linux-only test runs
 
 - fs-write channel binds bridge + path but not the project root; include the resolved absolute path (or root id) in the AAD.
 - Card `operations` (e.g. `issue.create` title/description) stay plaintext because the hub executes them; seal the content fields the hub only stores.
