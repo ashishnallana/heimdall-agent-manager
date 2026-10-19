@@ -177,3 +177,71 @@ test_workflow_input_fan_out_invalid_and_empty_inputs :: proc(t: ^testing.T) {
 	wf, _, _ := workflow_context(&fx.svc, run.run_id, "u1")
 	testing.expect(t, is_stage_marked_empty_done(&fx.svc, wf, "write"), "empty fan-out recorded as a zero-item expansion")
 }
+
+@(test)
+test_workflow_fan_out_size_cap :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	fx, ok := fixture_open(t, "wf_input_fanout_cap")
+	defer fixture_close(fx)
+	if !ok do return
+	chain := seed_chain(t, fx, "chain_fanout_cap", true)
+	seed_fleet(fx, chain, "agt_w")
+	user := Actor{kind = ACTOR_USER, id = "u1"}
+	workflow_example_definition(t, fx, "fanout_inputs", FANOUT_SPEC)
+
+	// One item over the cap: rejected before the run (or any task) exists.
+	b := strings.builder_make()
+	strings.write_string(&b, `{"subtopics":[`)
+	for i in 0 ..< WORKFLOW_FAN_OUT_MAX_ITEMS + 1 {
+		if i > 0 do strings.write_byte(&b, ',')
+		fmt.sbprintf(&b, `"t%d"`, i)
+	}
+	strings.write_string(&b, `]}`)
+	_, rok, rerr := workflow_run(&fx.svc, "u1", user, Workflow_Run_Input{chain_id = string(chain.chain_id), ref = "fanout_inputs", request_id = "too_many", inputs_json = strings.to_string(b)})
+	testing.expectf(t, !rok && rerr.code == .Validation_Failed && strings.contains(rerr.details_json, "workflow_input_invalid"), "oversized input fan-out rejected (ok=%v %s)", rok, rerr.message)
+	runs, _ := iface.taskchain_list_workflow_runs(&fx.repo, chain.chain_id, "u1")
+	tasks, _ := iface.taskchain_list_tasks_by_chain(&fx.repo, chain.chain_id, "u1")
+	testing.expectf(t, len(runs) == 0 && len(tasks) == 0, "oversized input creates nothing (runs=%d tasks=%d)", len(runs), len(tasks))
+
+	// The same limit applies to stage-output fan-out (checked at expansion).
+	testing.expect(t, workflow_check_fan_out_size("fix", "scan.outputs[0].tasks", WORKFLOW_FAN_OUT_MAX_ITEMS, false).code == .None, "cap is inclusive")
+	over := workflow_check_fan_out_size("fix", "scan.outputs[0].tasks", WORKFLOW_FAN_OUT_MAX_ITEMS + 1, false)
+	testing.expectf(t, over.code == .Validation_Failed && strings.contains(over.details_json, "workflow_fan_out_too_large"), "stage-output over cap fails: %s", over.message)
+}
+
+@(test)
+test_workflow_input_fan_out_item_rendering_and_defaults :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	fx, ok := fixture_open(t, "wf_input_fanout_render")
+	defer fixture_close(fx)
+	if !ok do return
+	chain := seed_chain(t, fx, "chain_fanout_render", true)
+	seed_fleet(fx, chain, "agt_w")
+	user := Actor{kind = ACTOR_USER, id = "u1"}
+	workflow_example_definition(t, fx, "fanout_inputs", FANOUT_SPEC)
+	workflow_example_definition(t, fx, "fanout_default", `{"schema":"workflow.v1","name":"fanout_default","inputs":{"topics":{"type":"array","required":false,"default":["a","b"]}},"stages":[
+		{"key":"w","title":"T {{item}}","for_each":"inputs.topics","brief":{"goal":"All {{inputs.topics}}","acceptance":["a"],"verify":"none","review_roles":[]}}]}`)
+
+	// A string item renders decoded, not as escaped JSON; scalar items have no
+	// fields, so a "priority"-looking string does not override and item_key is positional.
+	run, rok, rerr := workflow_run(&fx.svc, "u1", user, Workflow_Run_Input{chain_id = string(chain.chain_id), ref = "fanout_inputs", request_id = "escaped",
+		inputs_json = `{"subtopics":["say \"hi\" \\ é"]}`})
+	if !testing.expect(t, rok, rerr.message) do return
+	w := fanout_stage_tasks(fx, chain, run.run_id, "write")
+	if testing.expectf(t, len(w) == 1, "one task, got %d", len(w)) {
+		testing.expectf(t, w[0].title == "Write say \"hi\" \\ é", "decoded string item, got %q", w[0].title)
+		testing.expectf(t, strings.contains(w[0].generated_by_json, `"item_key":"item_0"`), "scalar item_key positional: %s", w[0].generated_by_json)
+	}
+
+	// Missing and null inputs fall back to the declared array default, and
+	// {{inputs.<array>}} renders that default as JSON.
+	for inputs, i in ([?]string{`{}`, `{"topics":null}`}) {
+		dr, dok, derr := workflow_run(&fx.svc, "u1", user, Workflow_Run_Input{chain_id = string(chain.chain_id), ref = "fanout_default", request_id = fmt.tprintf("default_%d", i), inputs_json = inputs})
+		if !testing.expect(t, dok, derr.message) do continue
+		dt := fanout_stage_tasks(fx, chain, dr.run_id, "w")
+		testing.expectf(t, len(dt) == 2, "default array expands (%s), got %d", inputs, len(dt))
+		for task in dt {
+			testing.expectf(t, strings.contains(task.brief_json, `All [\"a\",\"b\"]`), "default renders in {{inputs.topics}}: %s", task.brief_json)
+		}
+	}
+}
