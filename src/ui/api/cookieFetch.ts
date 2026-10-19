@@ -49,7 +49,7 @@ export class ApiError extends Error {
 
 // Shared by all three helpers: turn a non-2xx Response into an ApiError, preferring
 // the hub's own sentence and code over a synthesised one.
-async function errorFromResponse(res: Response): Promise<ApiError> {
+export async function errorFromResponse(res: Response): Promise<ApiError> {
   let msg = `Request failed (${res.status})`;
   let code: string | undefined;
   let errorClass: WireErrorClass | undefined;
