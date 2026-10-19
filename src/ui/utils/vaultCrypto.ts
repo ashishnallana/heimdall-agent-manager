@@ -696,13 +696,13 @@ export async function resolveKeyring(keyring?: VaultKeyring | null): Promise<Vau
  * production callers omit it and get a fresh CSPRNG nonce (getRandomValues throws on
  * failure, so nothing is sealed without randomness).
  */
-export async function sealVaultEnvelope(plaintext: Uint8Array, key: CryptoKey, epoch: number, nonce?: Uint8Array): Promise<string> {
+export async function sealVaultEnvelope(plaintext: Uint8Array, key: CryptoKey, epoch: number, nonce?: Uint8Array, aad?: Uint8Array): Promise<string> {
   if (!Number.isInteger(epoch) || epoch < 1 || epoch > 0xffffffff) throw new Error('invalid epoch');
   if (plaintext.length > MAX_ARMOR_PAYLOAD_BYTES - MIN_ARMOR_PAYLOAD_BYTES) throw new Error('plaintext too large for a vault envelope');
   const iv = nonce ? Uint8Array.from(nonce) : crypto.getRandomValues(new Uint8Array(AES_GCM_NONCE_BYTES));
   if (iv.length !== AES_GCM_NONCE_BYTES) throw new Error('invalid nonce length');
   const encryptedBytes = new Uint8Array(await crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv: iv as unknown as BufferSource, additionalData: vaultEnvelopeAad(epoch) as unknown as BufferSource, tagLength: 128 },
+    { name: 'AES-GCM', iv: iv as unknown as BufferSource, additionalData: (aad ?? vaultEnvelopeAad(epoch)) as unknown as BufferSource, tagLength: 128 },
     key,
     plaintext as unknown as BufferSource,
   ));
@@ -729,6 +729,57 @@ export async function encryptVaultText(plaintext: string, keyring?: VaultKeyring
     return await sealVaultEnvelope(bytes, currentKey(kr), kr.currentEpoch);
   } finally {
     bytes.fill(0);
+  }
+}
+
+// ── File write v2 (finding N4) ────────────────────────────────────────────────
+// File content sent for a bridge to write uses the v2 token format under the current
+// epoch key with AAD "heimdall-fs-write-v2|e<epoch>|<bridge_id>|<hex sha256(path)>",
+// binding it to one bridge and the exact path string of the request. Mirrors
+// lib/vault fs_write_aad / fs_write_open; vectors in tests/fixtures/vault_v2_vectors.json.
+
+export async function fsWriteAad(epoch: number, bridgeId: string, path: string): Promise<Uint8Array> {
+  if (!Number.isInteger(epoch) || epoch < 1 || epoch > 0xffffffff) throw new Error('invalid epoch');
+  if (!bridgeId || bridgeId.length > 256 || !ID_VALUE_RE.test(bridgeId)) throw new Error('a file write needs the target bridge id');
+  if (!path) throw new Error('a file write needs the target path');
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(path) as unknown as BufferSource));
+  return new TextEncoder().encode(`heimdall-fs-write-v2|e${epoch}|${bridgeId}|${bytesToHex(digest)}`);
+}
+
+/** Seal file content for `bridgeId` to write at exactly `path` (current epoch). */
+export async function sealFsWriteContent(plaintext: string, bridgeId: string, path: string, keyring?: VaultKeyring | null, nonce?: Uint8Array): Promise<string> {
+  const kr = requireKeyring(keyring);
+  const aad = await fsWriteAad(kr.currentEpoch, bridgeId, path);
+  const bytes = new TextEncoder().encode(plaintext);
+  try {
+    return await sealVaultEnvelope(bytes, currentKey(kr), kr.currentEpoch, nonce, aad);
+  } finally {
+    bytes.fill(0);
+  }
+}
+
+/** Open a file-write token for (`bridgeId`, `path`); throws when it does not authenticate. */
+export async function openFsWriteContent(token: string, bridgeId: string, path: string, keyring?: VaultKeyring | null): Promise<string> {
+  const kr = requireKeyring(keyring);
+  const { epoch, payload } = parseVaultEnvelope(token);
+  try {
+    const key = keyFor(kr, epoch);
+    if (!key) throw new Error('unknown epoch');
+    const aad = await fsWriteAad(epoch, bridgeId, path);
+    const nonce = payload.subarray(0, AES_GCM_NONCE_BYTES);
+    const tag = payload.subarray(AES_GCM_NONCE_BYTES, MIN_ARMOR_PAYLOAD_BYTES);
+    const ct = payload.subarray(MIN_ARMOR_PAYLOAD_BYTES);
+    const combined = new Uint8Array(ct.length + tag.length);
+    combined.set(ct, 0);
+    combined.set(tag, ct.length);
+    const plain = new Uint8Array(await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: nonce as unknown as BufferSource, additionalData: aad as unknown as BufferSource, tagLength: 128 },
+      key,
+      combined as unknown as BufferSource,
+    ));
+    return new TextDecoder().decode(plain);
+  } finally {
+    payload.fill(0);
   }
 }
 

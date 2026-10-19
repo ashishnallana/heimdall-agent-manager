@@ -66,28 +66,6 @@ test_artifact_create_encryption_with_vault_key :: proc(t: ^testing.T) {
 	testing.expect_value(t, dec_content, orig_content)
 }
 
-@(test)
-test_artifact_create_without_vault_key_leaves_plaintext :: proc(t: ^testing.T) {
-	sync.mutex_lock(&vault_test_mutex)
-	defer sync.mutex_unlock(&vault_test_mutex)
-	sb := ctl_vault_test_sandbox_open("artifact-create-without-vault-key-leaves-plaintext")
-	defer ctl_vault_test_sandbox_close(&sb)
-	orig_name := "public-readme.md"
-	orig_desc := "Public documentation for open-source library"
-	orig_content := "# Public Library\nOpen documentation."
-
-	args := []string{
-		"--name", orig_name,
-		"--description", orig_desc,
-		"--content", orig_content,
-	}
-
-	out := ctl_agentmode_artifact_create_params(args)
-	testing.expect(t, strings.contains(out, `"name":"public-readme.md"`), "name must remain plaintext")
-	testing.expect(t, strings.contains(out, `"description":"Public documentation for open-source library"`), "description must remain plaintext")
-	testing.expect(t, strings.contains(out, `"content":"# Public Library\nOpen documentation."`), "content must remain plaintext")
-	testing.expect(t, !strings.contains(out, "vault:v2:"), "must not contain vault armor")
-}
 
 @(test)
 test_artifact_show_and_list_transparent_decryption :: proc(t: ^testing.T) {

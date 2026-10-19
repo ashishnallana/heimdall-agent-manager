@@ -19,7 +19,8 @@ import type { VaultKeyring } from '../../utils/vaultKeyring';
 import { heimdallApi } from '../heimdallApi';
 import type { WireError } from '../wireError';
 import { cookieJsonFetch, cookieMutation } from '../cookieFetch';
-import { isVaultArmored, decryptVaultText, encryptVaultText, getActiveVaultKey } from '../../utils/vaultContent';
+import { isVaultArmored, decryptVaultText, getActiveVaultKey } from '../../utils/vaultContent';
+import { sealFsWriteContent } from '../../utils/vaultCrypto';
 
 // ---- Contract types (mirror the LOCKED contract exactly) --------------------
 
@@ -223,6 +224,19 @@ function bridgeParam(bridgeId?: string): string {
   return bridgeId ? `bridge_id=${encodeURIComponent(bridgeId)}` : '';
 }
 
+/**
+ * Seal file content for `bridgeId` to write at exactly `path`
+ * (heimdall-fs-write-v2 AAD). There is no plaintext write: a missing key or bridge
+ * id throws and the request is never sent.
+ */
+async function sealFsWrite(content: string, bridgeId: string, path: string): Promise<string> {
+  if (typeof content !== 'string') throw new Error('file content must be text');
+  const activeKey = getActiveVaultKey();
+  if (!activeKey) throw new Error('Vault key unavailable: file content cannot be encrypted');
+  if (!bridgeId) throw new Error('No bridge selected for this write');
+  return sealFsWriteContent(content, bridgeId, path, activeKey);
+}
+
 export const projectFsApi = heimdallApi.injectEndpoints({
   endpoints: (build) => ({
     // List a single directory (project-root-relative `path`, '' => project root).
@@ -363,20 +377,12 @@ export const projectFsApi = heimdallApi.injectEndpoints({
 
     // Write / overwrite file content at `path` (PUT /projects/{projectId}/fs/file).
     writeProjectFile: build.mutation<FsWriteResult, WriteFileArgs>({
-      queryFn: async ({ projectId, chainId, directoryId, agentInstanceId, bridgeId = '', path, content, encoding }, api) => {
+      queryFn: async ({ projectId, chainId, directoryId, agentInstanceId, bridgeId = '', path, content, encoding }) => {
         try {
           const bp = bridgeParam(bridgeId);
-          let outgoingContent = content;
-          const state: any = api?.getState?.();
-          const activeKey = getActiveVaultKey();
-          const isUnlocked = state?.vault != null
-            ? Boolean(state.vault.isUnlocked || state.vault.unlocked || activeKey)
-            : Boolean(activeKey);
-          if (isUnlocked && activeKey && typeof outgoingContent === 'string') {
-            if (!isVaultArmored(outgoingContent)) {
-              outgoingContent = await encryptVaultText(outgoingContent, activeKey);
-            }
-          }
+          // File content is always sealed for the target bridge and this exact path
+          // (finding N4); without a key or a bridge id nothing is sent.
+          const outgoingContent = await sealFsWrite(content, bridgeId, path);
           const data = await cookieMutation(
             `${base({ projectId, chainId, directoryId, agentInstanceId })}/file${bp ? `?${bp}` : ''}`,
             'PUT',
@@ -395,28 +401,12 @@ export const projectFsApi = heimdallApi.injectEndpoints({
 
     // Batch write multiple files (PUT /projects/{projectId}/fs/files).
     batchWriteProjectFiles: build.mutation<FsBatchWriteResult, BatchWriteFilesArgs>({
-      queryFn: async ({ projectId, chainId, directoryId, agentInstanceId, bridgeId = '', files }, api) => {
+      queryFn: async ({ projectId, chainId, directoryId, agentInstanceId, bridgeId = '', files }) => {
         try {
           const bp = bridgeParam(bridgeId);
-          const state: any = api?.getState?.();
-          const activeKey = getActiveVaultKey();
-          const isUnlocked = state?.vault != null
-            ? Boolean(state.vault.isUnlocked || state.vault.unlocked || activeKey)
-            : Boolean(activeKey);
-          let outgoingFiles = files;
-          if (isUnlocked && activeKey && Array.isArray(files)) {
-            outgoingFiles = await Promise.all(
-              files.map(async (file) => {
-                if (typeof file.content === 'string') {
-                  const content = isVaultArmored(file.content)
-                    ? file.content
-                    : await encryptVaultText(file.content, activeKey);
-                  return { ...file, content };
-                }
-                return file;
-              }),
-            );
-          }
+          const outgoingFiles = await Promise.all(
+            (files || []).map(async (file) => ({ ...file, content: await sealFsWrite(file.content, bridgeId, file.path) })),
+          );
           const data = await cookieMutation(
             `${base({ projectId, chainId, directoryId, agentInstanceId })}/files${bp ? `?${bp}` : ''}`,
             'PUT',

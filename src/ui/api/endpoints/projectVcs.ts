@@ -14,6 +14,8 @@
 
 import { heimdallApi } from '../heimdallApi';
 import { cookieJsonFetch, cookieMutation } from '../cookieFetch';
+import { getActiveVaultKey } from '../../utils/vaultContent';
+import { sealFsWriteContent } from '../../utils/vaultCrypto';
 
 // ---- Contract types (mirror the bridge vcs_* result JSON exactly) -----------
 
@@ -427,7 +429,13 @@ export const projectVcsApi = heimdallApi.injectEndpoints({
           if (bridgeId) qs.set('bridge_id', bridgeId);
           if (worktree_path) qs.set('worktree_path', worktree_path);
           const url = `${base(projectId)}/save-file${qs.size ? `?${qs}` : ''}`;
-          const data = await cookieMutation(url, 'POST', { file, content });
+          // The buffer is sealed for the target bridge and this exact file path
+          // (finding N4; the bridge writes it through the same check as fs writes).
+          const activeKey = getActiveVaultKey();
+          if (!activeKey) throw new Error('Vault key unavailable: file content cannot be encrypted');
+          if (!bridgeId) throw new Error('No bridge selected for this save');
+          const sealed = await sealFsWriteContent(content, bridgeId, file.trim(), activeKey);
+          const data = await cookieMutation(url, 'POST', { file, content: sealed });
           return { data: data as VcsMutationResult };
         } catch (error: any) {
           return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };

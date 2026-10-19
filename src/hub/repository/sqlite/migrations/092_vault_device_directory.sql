@@ -58,3 +58,10 @@ CREATE TABLE IF NOT EXISTS vault_wrapped_keyrings (
   updated_at        TEXT NOT NULL,
   PRIMARY KEY (user_id, device_id)
 );
+-- An owner-requested directory reset (POST /vault/directory/reset): destruction is
+-- scheduled for due_at and can be cancelled by any approved device until then.
+CREATE TABLE IF NOT EXISTS vault_directory_resets (
+  user_id      TEXT PRIMARY KEY,
+  requested_at TEXT NOT NULL,
+  due_at       TEXT NOT NULL
+);

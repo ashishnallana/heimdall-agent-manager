@@ -186,6 +186,9 @@ Authorize_Input :: struct {
 	code_challenge:         string,
 	code_challenge_method:  string,
 	bridge_identity_public_key: string,
+	// Signature object (canonical JSON text) by the identity key over
+	// vault.bridge_enroll_proof_canonical(bridge_public_key, code_challenge).
+	bridge_identity_proof:      string,
 }
 
 // Authorize_Result is what /device/authorize hands back to the device (ELDA-1).

@@ -75,8 +75,17 @@ ctl_hub_chats :: proc(base, token, action: string, args: []string) {
 		instance_id := option_value(args, "--agent-instance-id", option_value(args, "--instance-id", ""))
 		if agent_id == "" && instance_id == "" { fmt.println("usage: ham-ctl hub chats create --agent-id <agent_id>|--agent-instance-id <id> [--body <text>]"); return }
 		fields := make([dynamic]string)
-		append(&fields, json_kv("agent_id", agent_id)); append(&fields, json_kv("agent_instance_id", instance_id)); append(&fields, json_kv("bridge_id", option_value(args, "--bridge-id", ""))); append(&fields, json_kv("provider", option_value(args, "--provider", ""))); append(&fields, json_kv("model", option_value(args, "--model", ""))); append(&fields, json_kv("project_id", option_value(args, "--project-id", option_value(args, "--project", "")))); append(&fields, json_kv("chain_id", option_value(args, "--chain-id", option_value(args, "--chain", "")))); append(&fields, json_kv("title", option_value(args, "--title", "")))
+		append(&fields, json_kv("agent_id", agent_id)); append(&fields, json_kv("agent_instance_id", instance_id)); append(&fields, json_kv("bridge_id", option_value(args, "--bridge-id", ""))); append(&fields, json_kv("provider", option_value(args, "--provider", ""))); append(&fields, json_kv("model", option_value(args, "--model", ""))); append(&fields, json_kv("project_id", option_value(args, "--project-id", option_value(args, "--project", "")))); append(&fields, json_kv("chain_id", option_value(args, "--chain-id", option_value(args, "--chain", ""))))
+		// The title and the first message are vault content (the UI seals and decrypts
+		// both); sealed here too, never sent in plaintext (finding N3).
+		title := option_value(args, "--title", "")
 		body := option_value(args, "--body", "")
+		if title != "" || body != "" {
+			kr := ctl_vault_keyring_for_write(args)
+			title = ctl_seal_if(title, kr)
+			body = ctl_seal_if(body, kr)
+		}
+		append(&fields, json_kv("title", title))
 		if body != "" do append(&fields, strings.concatenate({"\"initial_message\":", json_object(json_kv("body", body))}))
 		ctl_hub_request(base, token, "POST", "/api/v1/chats", json_object_from_slice(fields[:]))
 		return
@@ -86,6 +95,7 @@ ctl_hub_chats :: proc(base, token, action: string, args: []string) {
 		body := option_value(args, "--body", "")
 		if has_flag(args, "--stdin") { data, err := os.read_entire_file("/dev/stdin", context.allocator); if err == nil do body = string(data) }
 		if cid == "" || body == "" { fmt.println("usage: ham-ctl hub chats send --conversation-id <id> --body <text>"); return }
+		body = ctl_seal_if(body, ctl_vault_keyring_for_write(args))
 		ctl_hub_request(base, token, "POST", fmt.tprintf("/api/v1/chats/%s/messages", safe_path_part(cid)), json_object(json_kv("body", body)))
 		return
 	}
@@ -107,9 +117,9 @@ ctl_hub_task_chains :: proc(base, token, action: string, args: []string) {
 	if action == "create" {
 		title := option_value(args, "--title", "")
 		if title == "" { fmt.println("usage: ham-ctl hub task-chains create --title <title> [--description <text>] [--kind <kind>] [--coordinator <id>]"); return }
-		kr, enc := ctl_vault_keyring_for_write(args, ctl_user_transport(base, token))
+		kr := ctl_vault_keyring_for_write(args)
 		fields := make([dynamic]string)
-		append(&fields, json_kv("title", ctl_seal_if(title, kr, enc))); append(&fields, json_kv("description", ctl_seal_if(option_value(args, "--description", ""), kr, enc))); append(&fields, json_kv("kind", option_value(args, "--kind", "team_work"))); append(&fields, json_kv("coordinator_agent_id", option_value(args, "--coordinator-agent-id", option_value(args, "--coordinator", "")))); append(&fields, json_kv("bridge_id", option_value(args, "--bridge-id", ""))); append(&fields, json_kv("project_id", option_value(args, "--project-id", option_value(args, "--project", ""))))
+		append(&fields, json_kv("title", ctl_seal_if(title, kr))); append(&fields, json_kv("description", ctl_seal_if(option_value(args, "--description", ""), kr))); append(&fields, json_kv("kind", option_value(args, "--kind", "team_work"))); append(&fields, json_kv("coordinator_agent_id", option_value(args, "--coordinator-agent-id", option_value(args, "--coordinator", "")))); append(&fields, json_kv("bridge_id", option_value(args, "--bridge-id", ""))); append(&fields, json_kv("project_id", option_value(args, "--project-id", option_value(args, "--project", ""))))
 		ctl_hub_request(base, token, "POST", "/api/v1/task-chains", json_object_from_slice(fields[:]))
 		return
 	}
@@ -119,10 +129,10 @@ ctl_hub_task_chains :: proc(base, token, action: string, args: []string) {
 	if action == "unpin" { ctl_hub_request(base, token, "POST", fmt.tprintf("/api/v1/task-chains/%s/pin", safe_path_part(chain_id)), "{\"pinned\":false}"); return }
 	if action == "show" { ctl_hub_request(base, token, "GET", fmt.tprintf("/api/v1/task-chains/%s", safe_path_part(chain_id)), ""); return }
 	if action == "update" {
-		kr, enc := ctl_vault_keyring_for_write(args, ctl_user_transport(base, token))
+		kr := ctl_vault_keyring_for_write(args)
 		fields := make([dynamic]string)
-		if title := option_value(args, "--title", ""); title != "" do append(&fields, json_kv("title", ctl_seal_if(title, kr, enc)))
-		if desc := option_value(args, "--description", ""); desc != "" do append(&fields, json_kv("description", ctl_seal_if(desc, kr, enc)))
+		if title := option_value(args, "--title", ""); title != "" do append(&fields, json_kv("title", ctl_seal_if(title, kr)))
+		if desc := option_value(args, "--description", ""); desc != "" do append(&fields, json_kv("description", ctl_seal_if(desc, kr)))
 		if status := option_value(args, "--status", ""); status != "" do append(&fields, json_kv("status", status))
 		ctl_hub_request(base, token, "PATCH", fmt.tprintf("/api/v1/task-chains/%s", safe_path_part(chain_id)), json_object_from_slice(fields[:]))
 		return
@@ -244,10 +254,10 @@ ctl_hub_tasks :: proc(base, token, action: string, args: []string) {
 		title := option_value(args, "--title", "")
 		if chain_id == "" || title == "" { fmt.println("usage: ham-ctl hub tasks create --chain-id <id> --title <title> [--description <desc>] [--assignee <agt_id>] [--reviewer <agt_id>]... [--require-user-approval] [--depends-on <id,id>]"); return }
 		if !ctl_task_reviewer_flags_valid(args, false) do return
-		kr, enc := ctl_vault_keyring_for_write(args, ctl_user_transport(base, token))
+		kr := ctl_vault_keyring_for_write(args)
 		fields := make([dynamic]string)
-		append(&fields, json_kv("title", ctl_seal_if(title, kr, enc)))
-		if desc := option_value(args, "--description", ""); desc != "" do append(&fields, json_kv("description", ctl_seal_if(desc, kr, enc)))
+		append(&fields, json_kv("title", ctl_seal_if(title, kr)))
+		if desc := option_value(args, "--description", ""); desc != "" do append(&fields, json_kv("description", ctl_seal_if(desc, kr)))
 		if assignee := option_value(args, "--assignee", option_value(args, "--assignee-agent-id", "")); assignee != "" do append(&fields, ctl_v2_assignee_field(assignee))
 		if has_flag(args, "--reviewer") || has_flag(args, "--reviewer-agent-id") do append(&fields, ctl_v2_reviewers_field(args))
 		if has_flag(args, "--require-user-approval") do append(&fields, `"requires_user_approval":true`)
@@ -271,10 +281,10 @@ ctl_hub_tasks :: proc(base, token, action: string, args: []string) {
 	if chain_id == "" || task_id == "" { fmt.println("usage: ham-ctl hub tasks <update|publish|cancel|depend|comments> --chain-id <id> --task-id <id>"); return }
 	if action == "update" {
 		if !ctl_task_reviewer_flags_valid(args, true) do return
-		kr, enc := ctl_vault_keyring_for_write(args, ctl_user_transport(base, token))
+		kr := ctl_vault_keyring_for_write(args)
 		fields := make([dynamic]string)
-		if title := option_value(args, "--title", ""); title != "" do append(&fields, json_kv("title", ctl_seal_if(title, kr, enc)))
-		if desc := option_value(args, "--description", ""); desc != "" do append(&fields, json_kv("description", ctl_seal_if(desc, kr, enc)))
+		if title := option_value(args, "--title", ""); title != "" do append(&fields, json_kv("title", ctl_seal_if(title, kr)))
+		if desc := option_value(args, "--description", ""); desc != "" do append(&fields, json_kv("description", ctl_seal_if(desc, kr)))
 		if assignee := option_value(args, "--assignee", option_value(args, "--assignee-agent-id", "")); assignee != "" do append(&fields, ctl_v2_assignee_field(assignee))
 		if has_flag(args, "--reviewer") || has_flag(args, "--reviewer-agent-id") do append(&fields, ctl_v2_reviewers_field(args))
 		if has_flag(args, "--require-user-approval") do append(&fields, `"requires_user_approval":true`)
@@ -309,9 +319,9 @@ ctl_hub_tasks :: proc(base, token, action: string, args: []string) {
 		if sub == "add" {
 			body := option_value(args, "--body", "")
 			if body == "" { fmt.println("usage: ham-ctl hub tasks comments --chain-id <id> --task-id <id> add --body <text> [--notify <id,id...>]"); return }
-			kr, enc := ctl_vault_keyring_for_write(args, ctl_user_transport(base, token))
+			kr := ctl_vault_keyring_for_write(args)
 			fields := make([dynamic]string)
-			append(&fields, json_kv("body", ctl_seal_if(body, kr, enc)))
+			append(&fields, json_kv("body", ctl_seal_if(body, kr)))
 			if notify := option_value(args, "--notify", ""); notify != "" {
 				parts := strings.split(notify, ",")
 				defer delete(parts)
@@ -347,14 +357,13 @@ ctl_hub_projects :: proc(base, token, action: string, args: []string) {
 		name := option_value(args, "--name", "")
 		if name == "" { fmt.println("usage: ham-ctl hub projects create --name <name> [--slug <slug>] [--description <text>] [--repo-url <url>] [--vcs-kind <git|jj|none>] [--default-path <path>]"); return }
 		desc := option_value(args, "--description", option_value(args, "--desc", ""))
-		keyring, key_ok = ctl_vault_keyring_for_write(args, ctl_user_transport(base, token))
-		if key_ok {
-			if !is_vault_armored(name) {
-				name = ctl_seal_or_exit(name, keyring)
-			}
-			if desc != "" && !is_vault_armored(desc) {
-				desc = ctl_seal_or_exit(desc, keyring)
-			}
+		keyring = ctl_vault_keyring_for_write(args)
+		key_ok = true
+		if !is_vault_armored(name) {
+			name = ctl_seal_or_exit(name, keyring)
+		}
+		if desc != "" && !is_vault_armored(desc) {
+			desc = ctl_seal_or_exit(desc, keyring)
 		}
 		fields := make([dynamic]string)
 		defer delete(fields)
@@ -382,18 +391,19 @@ ctl_hub_projects :: proc(base, token, action: string, args: []string) {
 		return
 	}
 	if action == "update" {
-		keyring, key_ok = ctl_vault_keyring_for_write(args, ctl_user_transport(base, token))
+		keyring = ctl_vault_keyring_for_write(args)
+		key_ok = true
 		fields := make([dynamic]string)
 		defer delete(fields)
 		if name := option_value(args, "--name", ""); name != "" {
-			if key_ok && !is_vault_armored(name) {
+			if !is_vault_armored(name) {
 				name = ctl_seal_or_exit(name, keyring)
 			}
 			append(&fields, json_kv("name", name))
 		}
 		if slug := option_value(args, "--slug", ""); slug != "" do append(&fields, json_kv("slug", slug))
 		if desc := option_value(args, "--description", option_value(args, "--desc", "")); desc != "" {
-			if key_ok && !is_vault_armored(desc) {
+			if !is_vault_armored(desc) {
 				desc = ctl_seal_or_exit(desc, keyring)
 			}
 			append(&fields, json_kv("description", desc))

@@ -402,6 +402,15 @@
       }
     ]
   },
+  "fs_write": {
+    "epoch": 2,
+    "bridge_id": "brg_00112233445566778899aabbccddeeff",
+    "path": "src/main.ts",
+    "aad": "heimdall-fs-write-v2|e2|brg_00112233445566778899aabbccddeeff|4fab5baaca5c14d2de62d8d2fceef376ddddcc8e9509d86cfa5643f51b89ce3d",
+    "nonce": "5a704472268bd755f523ea6f",
+    "plaintext": "export const x = 1;",
+    "token": "vault:v2:e2:WnBEciaL11X1I+pvu6DKdTuwujyp8JpbywfyCm59QtAATF4UWQgPCkUWCnsh43Y="
+  },
   "search": {
     "domain": "heimdall/task-chain-search-rpc/v2",
     "epoch": 2,

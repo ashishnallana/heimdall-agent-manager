@@ -74,27 +74,23 @@ bridge_decrypt_embedded_vault_tokens :: proc(text: string, allocator := context.
 // Explicitly lock and purge this bridge's unsealed keyring from the kernel keyring
 // / Keychain / Credential Manager / Termux sealed file and RAM; other bridges' keys
 // are untouched (REQ-T5-3). The identity key stays: a locked bridge is still the
-// same bridge. The vault_configured marker stays, so a locked bridge keeps
-// reporting "locked" rather than "disabled" across restarts (REQ-T3-2).
+// same, enrolled bridge and keeps reporting "locked".
 bridge_vault_lock :: proc() {
 	bridge_task_chain_search_lock()
 	keystore_lock_and_purge(bridge_config.daemon_id)
 }
 
-// Turns vault encryption off for this bridge: purges the keyring like a lock,
-// deletes the identity key (a human must approve a new one before this bridge is
-// trusted with a keyring again), and forgets that the vault was ever configured.
-// Bridge-local only (agent vault.reset op); the hub never triggers it. Returns
-// false if the marker could not be removed. Under Termux it also deletes this
-// bridge's Android Keystore key.
-bridge_vault_reset :: proc() -> bool {
+// Purges the keyring like a lock and deletes the identity key, so a human must
+// approve a new enrollment before this bridge is trusted with a keyring again
+// (purge-on-revoke). Bridge-local only (agent vault.reset op); the hub never
+// triggers it. Under Termux it also deletes this bridge's Android Keystore key.
+bridge_vault_reset :: proc() {
 	bridge_vault_lock()
 	_ = keystore_delete_identity_key(bridge_config.daemon_id)
 	bridge_unseal_forget_identity()
 	when ODIN_OS == .Linux {
 		if keystore_android_selected() do _ = keystore_android_delete_keystore_key(bridge_config.daemon_id)
 	}
-	return bridge_vault_set_configured(bridge_config.daemon_id, false)
 }
 
 // Explicitly wipe unsealed vault key material on bridge shutdown

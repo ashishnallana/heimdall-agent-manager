@@ -13,6 +13,9 @@
 package device_auth_security_matrix_test
 
 import "core:fmt"
+import "core:crypto/ecdsa"
+import vd "odin_test:hub/service/vault_directory"
+import vault "odin_test:lib/vault"
 import "core:os"
 import "core:strings"
 import "core:testing"
@@ -140,9 +143,12 @@ test_bridge_enrollment_end_to_end :: proc() {
 	}
 
 	// --- authorize over HTTP, as an unauthenticated bridge would ---
+	// Passwordless vault: the grant carries the bridge's identity key and its proof.
+	id_a := sm_dev(101, "bridge")
 	auth_body := strings.concatenate({
 		"{\"client\":\"ham-bridge\",\"device_label\":\"dawnstar\",\"os\":\"linux\",\"app_version\":\"0.9.1\"",
 		",\"bridge_public_key\":\"", BPK_A, "\"",
+		",\"bridge_identity_public_key\":\"", id_a.sign_pub, "\",\"bridge_identity_proof\":", sm_enroll_proof(&id_a, BPK_A, PKCE_CHALLENGE),
 		",\"os_user\":\"tanmay\"",
 		",\"code_challenge\":\"", PKCE_CHALLENGE, "\",\"code_challenge_method\":\"S256\"}",
 	})
@@ -172,21 +178,17 @@ test_bridge_enrollment_end_to_end :: proc() {
 	assert_true(strings.contains(verify_resp.body, BPK_A_FP), "verify exposes the hub-computed fingerprint")
 	assert_true(strings.contains(verify_resp.body, "\"os_user\":\"tanmay\""), "verify exposes host-asserted os_user")
 
-	// REQ-EA decision A: a bridge is enrolled only once its vault is unlocked, so the
-	// approver must already have a vault. Seed one (the envelope content is opaque
-	// to the hub; only its presence matters here).
-	vault_saved, vault_err := iface.user_vault_save(&graph.repos.user_vaults, domain.User_Vault{
-		user_id = "approving-human", encrypted_vault_key = "00", vault_key_nonce = "00", vault_key_tag = "00",
-		kdf_algorithm = "PBKDF2-SHA256", kdf_salt = "00", kdf_iterations = 100000,
-		recovery_encrypted_vault_key = "00", recovery_nonce = "00", recovery_tag = "00", recovery_salt = "00",
-		created_at = "2026-10-16T00:00:00Z", updated_at = "2026-10-16T00:00:00Z",
-	})
-	assert_true(vault_saved, vault_err.message)
+	// Passwordless vault: a bridge enrolls only into an existing vault directory, with
+	// a signed vault approval from an approved device. Seed the directory (genesis by
+	// a fixed root device) directly through the service.
+	root := sm_dev(1, "browser")
+	assert_true(sm_genesis(&graph, "approving-human", &root), "vault directory genesis")
 
 	// --- approve: the body tries to name a different owner; it must be ignored ---
 	approve_body := strings.concatenate({
 		"{\"user_code\":\"", res_a.user_code,
-		"\",\"approve\":true,\"owner_user_id\":\"spoof-owner\",\"user\":\"spoof-user\"}",
+		"\",\"approve\":true,\"owner_user_id\":\"spoof-owner\",\"user\":\"spoof-user\"",
+		",\"vault_approval\":", sm_vault_approval("approving-human", &root, &id_a, 1), "}",
 	})
 	approve_resp := api_http.device_approve_handler(rawptr(&graph.device_auth_handlers), api_http.Request{
 		method = "POST", path = "/api/v1/device/approve", body = approve_body,
@@ -208,7 +210,8 @@ test_bridge_enrollment_end_to_end :: proc() {
 	// poll on the same grant within `interval` would be slow_down, not a verifier
 	// result. The interval gate itself is covered in the token-poll test with a
 	// fake clock; here each grant is polled once.
-	bad_grant, bad_found := seed_bridge_grant(&graph, "wrong-verifier-host", BPK_A, PKCE_CHALLENGE, trusted_headers[:])
+	id_bad := sm_dev(102, "bridge")
+	bad_grant, bad_found := seed_bridge_grant(&graph, "wrong-verifier-host", BPK_A, PKCE_CHALLENGE, trusted_headers[:], &id_bad, sm_vault_approval("approving-human", &root, &id_bad, 2))
 	assert_true(bad_found, "seeded a second bridge grant for the wrong-verifier case")
 	bad_poll := strings.concatenate({"{\"device_code\":\"", bad_grant.device_code, "\",\"code_verifier\":\"", WRONG_VERIFIER, "\"}"})
 	bad_resp := api_http.device_token_handler(rawptr(&graph.device_auth_handlers), api_http.Request{
@@ -356,10 +359,11 @@ test_bridge_enrollment_end_to_end :: proc() {
 // seed_bridge_grant drives authorize + approve over HTTP for one more bridge
 // grant and returns it, so a test needing a second independent grant does not
 // have to repeat the whole body construction.
-seed_bridge_grant :: proc(graph: ^app.App_Graph, label, public_key, challenge: string, headers: []contracts.HTTP_Header) -> (device_auth.Grant, bool) {
+seed_bridge_grant :: proc(graph: ^app.App_Graph, label, public_key, challenge: string, headers: []contracts.HTTP_Header, identity: ^Sm_Dev, vault_approval: string) -> (device_auth.Grant, bool) {
 	body := strings.concatenate({
 		"{\"client\":\"ham-bridge\",\"device_label\":\"", label, "\",\"os\":\"linux\"",
 		",\"bridge_public_key\":\"", public_key, "\"",
+		",\"bridge_identity_public_key\":\"", identity.sign_pub, "\",\"bridge_identity_proof\":", sm_enroll_proof(identity, public_key, challenge),
 		",\"code_challenge\":\"", challenge, "\",\"code_challenge_method\":\"S256\"}",
 	})
 	resp := api_http.device_authorize_handler(rawptr(&graph.device_auth_handlers), api_http.Request{
@@ -369,7 +373,7 @@ seed_bridge_grant :: proc(graph: ^app.App_Graph, label, public_key, challenge: s
 	if resp.status != 200 do return device_auth.Grant{}, false
 	grant, found := grant_for_label(&graph.device_auth_store, label)
 	if !found do return device_auth.Grant{}, false
-	approve_body := strings.concatenate({"{\"user_code\":\"", grant.user_code, "\",\"approve\":true}"})
+	approve_body := strings.concatenate({"{\"user_code\":\"", grant.user_code, "\",\"approve\":true,\"vault_approval\":", vault_approval, "}"})
 	aresp := api_http.device_approve_handler(rawptr(&graph.device_auth_handlers), api_http.Request{
 		method = "POST", path = "/api/v1/device/approve", body = approve_body,
 		request_id = "req_seed_approve", remote_addr = "127.0.0.1:4444", headers = headers,
@@ -564,4 +568,93 @@ test_http_owner_spoof_and_audit_queryability :: proc() {
 		assert_true(row.created_from != "" && row.device_label != "", "token provenance query by id includes audit fields")
 	}
 	fmt.println("ELDA-6/ELDA-7 OK: HTTP owner spoof guard + queryable approve/deny audit/provenance")
+}
+
+// ── Passwordless vault helpers (fixed key scalars; no randomness) ───────────
+
+Sm_Dev :: struct {
+	priv:     ecdsa.Private_Key,
+	sign_pub: string,
+	ecdh_pub: string,
+	id:       string,
+	kind:     string,
+}
+
+SM_COMMIT :: "aabe8c0490f1e4d6754740170728a4ef286c80c1c2d180db826f956c3d9bd402"
+
+sm_pub_hex :: proc(priv: ^ecdsa.Private_Key) -> string {
+	pub: [65]byte
+	ecdsa.private_key_public_bytes(priv, pub[:])
+	return vault.hex_encode_lower(pub[:])
+}
+
+sm_dev :: proc(seed: byte, kind: string) -> Sm_Dev {
+	d := Sm_Dev{kind = kind}
+	scalar: [32]byte
+	scalar[0] = 0x31
+	scalar[31] = seed
+	_ = ecdsa.private_key_set_bytes(&d.priv, .SECP256R1, scalar[:])
+	d.sign_pub = sm_pub_hex(&d.priv)
+	if kind != "bridge" {
+		other: ecdsa.Private_Key
+		scalar[1] = 0x44
+		_ = ecdsa.private_key_set_bytes(&other, .SECP256R1, scalar[:])
+		d.ecdh_pub = sm_pub_hex(&other)
+	}
+	d.id, _ = vault.device_id_from_sign_pub(d.sign_pub)
+	return d
+}
+
+sm_sign :: proc(d: ^Sm_Dev, msg: string) -> string {
+	sig, _ := vault.sign_p256(&d.priv, transmute([]byte)msg)
+	text, _ := vault.signature_object(&sig)
+	return text
+}
+
+sm_enroll_proof :: proc(d: ^Sm_Dev, ecdh_pub, challenge: string) -> string {
+	msg, _ := vault.bridge_enroll_proof_canonical(ecdh_pub, challenge)
+	return sm_sign(d, msg)
+}
+
+sm_statement :: proc(type, user_id: string, issuer, subject: ^Sm_Dev, version, epoch: string) -> string {
+	st := vault.Statement{type = type, user_id = user_id, directory_version = version, issuer_device_id = issuer.id, issued_at_ms = "1792404000000", epoch = epoch, epoch_commit = SM_COMMIT}
+	if subject != nil {
+		st.subject_device_id = subject.id
+		st.subject_kind = subject.kind
+		st.subject_sign_pub = subject.sign_pub
+		st.subject_ecdh_pub = subject.ecdh_pub
+		st.subject_sign_alg = vault.SIGN_ALG_ECDSA_P256_SHA256
+		st.subject_wrap_alg = "" if subject.kind == "bridge" else vault.WRAP_ALG_ECDH_P256_HKDF_AES
+		st.subject_label_b64 = "VGVzdA"
+	}
+	text, _ := vault.statement_canonical(&st)
+	return text
+}
+
+sm_genesis :: proc(graph: ^app.App_Graph, user_id: string, root: ^Sm_Dev) -> bool {
+	g := sm_statement("genesis", user_id, root, root, "0", "1")
+	e := sm_statement("epoch", user_id, root, nil, "0", "1")
+	w := vault.Keyring_Wrap{
+		alg = vault.WRAP_ALG_ECDH_P256_HKDF_AES, recipient_device_id = root.id,
+		directory_version = 0, current_epoch = 1,
+		ephemeral_public_key = root.ecdh_pub, iv = "bc20a2fb46127e3a719bdb68",
+		ciphertext = "00112233445566778899aabbccddeeff00112233", wrapped_by_device_id = root.id,
+	}
+	ws, _ := vault.wrap_statement(&w, user_id)
+	_, err := vd.genesis(&graph.vault_directory, vd.Genesis_Input{
+		user_id = user_id, genesis_statement = g, genesis_signature = sm_sign(root, g),
+		epoch_statement = e, epoch_signature = sm_sign(root, e), wrap = {wrap = w, signature = sm_sign(root, ws)},
+	})
+	return err.code == .None
+}
+
+sm_json_escape :: proc(s: string) -> string {
+	out, _ := strings.replace_all(s, "\n", `\n`)
+	return out
+}
+
+// sm_vault_approval is the `vault_approval` object the root signs for a bridge identity.
+sm_vault_approval :: proc(user_id: string, root, bridge: ^Sm_Dev, version: i64) -> string {
+	st := sm_statement("approve", user_id, root, bridge, fmt.tprintf("%d", version), "1")
+	return strings.concatenate({`{"expected_version":`, fmt.tprintf("%d", version), `,"statement":"`, sm_json_escape(st), `","signature":`, sm_sign(root, st), "}"})
 }

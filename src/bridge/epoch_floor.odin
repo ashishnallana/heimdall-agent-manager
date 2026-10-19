@@ -47,6 +47,7 @@ Epoch_Floor_Error :: enum {
 	None,
 	Rollback,     // current_epoch below the floor
 	Key_Mismatch, // a known epoch with a different key
+	Missing_Epoch, // the newest accepted epoch is absent (a keyring of only unknown epochs)
 }
 
 epoch_floor_commit :: proc(bridge_id: string, epoch: u32, key: []byte, dst: ^[EPOCH_FLOOR_COMMIT_BYTES]byte) {
@@ -89,10 +90,17 @@ epoch_floor_parse :: proc(data: []byte) -> (f: Epoch_Floor, ok: bool) {
 	return f, true
 }
 
-// epoch_floor_check: kr must not roll back below the floor, and every epoch the
-// floor knows must carry the committed key (constant-time compare).
+// epoch_floor_check: kr must not roll back below the floor, must contain the newest
+// epoch the floor has accepted, and every epoch the floor knows must carry the
+// committed key (constant-time compare). Requiring the newest accepted epoch is what
+// stops a hostile hub, after a lock or restart purged the stored keyring, from
+// installing a keyring made only of fresh epochs (> floor) under keys it chose: it
+// cannot produce the committed key for an epoch it never held.
 epoch_floor_check :: proc(f: ^Epoch_Floor, bridge_id: string, kr: ^vault.Vault_Keyring) -> Epoch_Floor_Error {
 	if kr.current_epoch < f.floor_epoch do return .Rollback
+	if f.count > 0 {
+		if _, has := vault.keyring_key_for_epoch(kr, f.entries[f.count - 1].epoch); !has do return .Missing_Epoch
+	}
 	diff := 0
 	for i in 0 ..< kr.count {
 		for j in 0 ..< f.count {

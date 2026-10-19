@@ -275,6 +275,12 @@ test_pty_random_source_mu: sync.Mutex
 // counter sequence but cannot replay an evicted stream below the floor.
 @(test)
 test_v2_pty_input_replay_is_rejected :: proc(t: ^testing.T) {
+	// Fixed counters: start from (and leave) an empty replay table, under the lock the
+	// other PTY tests hold, so no other test's state or floor can leak in.
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	bridge_pty_input_replay_reset()
+	defer bridge_pty_input_replay_reset()
 	kr := test_keyring_two_epochs(TEST_VAULT_KEY_HEX, V2_KEY_2)
 	defer vault.keyring_wipe(&kr)
 	sid := "sh_replay_test"
@@ -361,10 +367,9 @@ test_v2_pane_capture_is_sealed :: proc(t: ^testing.T) {
 	locked := bridge_pane_reply_from_seal("cmd_pane_seal_locked", false, "h1", "", lres, 1, false)
 	defer delete(locked)
 	testing.expect(t, !strings.contains(locked, "top secret") && strings.contains(locked, "vault_locked"), locked)
-	// Never configured: the capture goes out as is.
-	plain_out, dres := bridge_pane_output_seal_with(.Disabled, nil, "plain screen", "sh_pane", os_random.DEFAULT_SOURCE)
-	defer delete(plain_out)
-	testing.expect(t, dres == .Plain && plain_out == "plain screen")
+	// Not enrolled refuses exactly like locked: there is no plaintext mode.
+	_, nres := bridge_pane_output_seal_with(.Not_Enrolled, nil, "plain screen", "sh_pane", os_random.DEFAULT_SOURCE)
+	testing.expect(t, nres == .Locked)
 }
 
 // capture_agent_pane (chat pane capture) is sealed as a v2 content envelope the UI
@@ -388,9 +393,9 @@ test_v2_chat_pane_capture_result_is_sealed :: proc(t: ^testing.T) {
 	failed := bridge_pane_capture_result_sealed_json(pending, .Unlocked, &kr, "secret pane", 1, false, "/nonexistent/heimdall-no-random")
 	defer delete(failed)
 	testing.expect(t, strings.contains(failed, `"cause":"encryption_failed"`) && !strings.contains(failed, "secret pane"), failed)
-	disabled := bridge_pane_capture_result_sealed_json(pending, .Disabled, nil, "plain pane", 1, false, os_random.DEFAULT_SOURCE)
-	defer delete(disabled)
-	testing.expect(t, strings.contains(disabled, `"output":"plain pane"`), disabled)
+	unenrolled := bridge_pane_capture_result_sealed_json(pending, .Not_Enrolled, nil, "plain pane", 1, false, os_random.DEFAULT_SOURCE)
+	defer delete(unenrolled)
+	testing.expect(t, strings.contains(unenrolled, `"cause":"vault_locked"`) && !strings.contains(unenrolled, "plain pane"), unenrolled)
 
 	// An oversized capture keeps its tail from a line start, fits the hub cap, is marked truncated.
 	big := strings.concatenate({strings.repeat("x", BRIDGE_PANE_CAPTURE_SEAL_MAX_PLAIN, context.temp_allocator), "\nlast line"}, context.temp_allocator)
@@ -560,6 +565,19 @@ test_v2_enc_spec_nonce_replay_rejected :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_v2_enc_spec_binding_rejects_mismatch :: proc(t: ^testing.T) {
+	spec, ok := bridge_shell_parse_enc_spec(`{"cmd":"true","cwd":"","timestamp":1,"nonce":"n","bridge_id":"brg_a","session_id":"sh_1","kind":"run","boot_id":"b00t"}`)
+	testing.expect(t, ok, "spec parses")
+	testing.expect_value(t, bridge_enc_spec_check_binding(spec, "brg_a", "sh_1", "run", "b00t"), "")
+	testing.expect(t, bridge_enc_spec_check_binding(spec, "brg_b", "sh_1", "run", "b00t") != "", "other bridge rejected")
+	testing.expect(t, bridge_enc_spec_check_binding(spec, "brg_a", "sh_2", "run", "b00t") != "", "other session rejected")
+	testing.expect(t, bridge_enc_spec_check_binding(spec, "brg_a", "sh_1", "shell", "b00t") != "", "other kind rejected")
+	testing.expect(t, bridge_enc_spec_check_binding(spec, "brg_a", "sh_1", "run", "0ther") != "", "spec from before a restart rejected")
+	unbound, _ := bridge_shell_parse_enc_spec(`{"cmd":"true","timestamp":1,"nonce":"n"}`)
+	testing.expect(t, bridge_enc_spec_check_binding(unbound, "", "", "", "") != "", "an unbound spec is rejected even against empty values")
+}
+
+@(test)
 test_v2_fs_read_uses_one_vault_snapshot :: proc(t: ^testing.T) {
 	sync.mutex_lock(&bridge_test_config_mutex)
 	defer sync.mutex_unlock(&bridge_test_config_mutex)
@@ -580,13 +598,13 @@ test_v2_fs_read_uses_one_vault_snapshot :: proc(t: ^testing.T) {
 
 	// The vault locks right after the command's snapshot: the content must still
 	// leave encrypted under the snapshot's keyring, never in plaintext.
-	prev := bridge_fs_vault_snapshot
-	defer bridge_fs_vault_snapshot = prev
-	bridge_fs_vault_snapshot = proc() -> (Vault_Status, vault.Vault_Keyring) {
+	// Injected per test thread (bridge_fs_test_vault_hook), not a global swap.
+	bridge_fs_test_vault_hook = proc() -> (Vault_Status, vault.Vault_Keyring) {
 		status, kr := bridge_vault_status_and_key()
 		keystore_lock_and_purge(bridge_config.daemon_id)
 		return status, kr
 	}
+	defer bridge_fs_test_vault_hook = nil
 	// read_file's per-file path check rejects Windows temp paths (pre-existing,
 	// unrelated to L2), so its half runs on unix; grep covers the same snapshot.
 	when ODIN_OS != .Windows {
@@ -658,6 +676,12 @@ test_v2_epoch_floor_survives_lock :: proc(t: ^testing.T) {
 	sub.entries[1].epoch = 3
 	sub.count, sub.current_epoch = 2, 3
 	testing.expect(t, !unseal(f.id_a, &sub, now, "n_floor_swap"), "substituted key for a known epoch refused after a lock")
+
+	// A keyring of only fresh epochs (a hostile hub's own key at 3) is refused: it
+	// lacks the newest accepted epoch 2, whose key the hub never held.
+	fresh := test_keyring_from_hex(TEST_ENC_VAULT_KEY, 3)
+	defer vault.keyring_wipe(&fresh)
+	testing.expect(t, !unseal(f.id_a, &fresh, now, "n_floor_fresh_only"), "keyring without the newest accepted epoch refused after a lock")
 
 	// A genuine rotation {1,2,3} is accepted and raises the floor.
 	three := two

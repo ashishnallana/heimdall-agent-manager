@@ -56,12 +56,13 @@ device_enroll_test_bridge :: proc(graph: ^app.App_Graph, headers: []contracts.HT
 	// vault approval (signed by the root device) naming its persistent identity key.
 	user_id, version, vault_ok := vt_ensure_vault(graph, headers)
 	if !vault_ok do return "", "", false
-	identity_pub, approval := vt_bridge_approval(user_id, version)
+	br, approval := vt_bridge_approval(user_id, version)
 	authorize_body := strings.concatenate({
 		`{"client":"ham-bridge","device_label":"`, label,
 		`","os":"linux","os_user":"tester","bridge_public_key":"`, DEVICE_TEST_PUBLIC_KEY,
-		`","bridge_identity_public_key":"`, identity_pub,
-		`","code_challenge":"`, DEVICE_TEST_CODE_CHALLENGE, `","code_challenge_method":"S256"}`,
+		`","bridge_identity_public_key":"`, br.sign_pub,
+		`","bridge_identity_proof":`, vt_enroll_proof(&br, DEVICE_TEST_PUBLIC_KEY, DEVICE_TEST_CODE_CHALLENGE),
+		`,"code_challenge":"`, DEVICE_TEST_CODE_CHALLENGE, `","code_challenge_method":"S256"}`,
 	})
 	authorized := api_http.router_dispatch(&graph.router, api_http.Request{
 		method = "POST", path = "/api/v1/device/authorize", body = authorize_body,

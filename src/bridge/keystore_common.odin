@@ -152,11 +152,6 @@ keystore_lock_and_purge :: proc(bridge_id: string) {
 	keystore_wipe_in_memory_vault_key()
 }
 
-keystore_persisted_vault_item_present :: proc(bridge_id: string) -> bool {
-	if !keystore_bridge_id_ok(bridge_id) do return false
-	return keystore_backend_present(.Keyring, bridge_id)
-}
-
 // ── Identity record ─────────────────────────────────────────────────────────
 //
 // The .Identity slot holds this bridge's enrollment record, written once at
@@ -265,18 +260,6 @@ keystore_backend_delete :: proc(slot: Keystore_Slot, bridge_id: string) -> bool 
 		if g_keystore_use_fake do return keystore_fake_delete(slot, bridge_id)
 	}
 	return keystore_os_delete_secret(slot, bridge_id)
-}
-
-keystore_backend_present :: proc(slot: Keystore_Slot, bridge_id: string) -> bool {
-	when ODIN_TEST {
-		if g_keystore_use_fake {
-			buf: [KEYSTORE_FAKE_MAX_BYTES]byte
-			defer crypto.zero_explicit(&buf, size_of(buf))
-			_, status := keystore_fake_read(slot, bridge_id, buf[:])
-			return status != .Not_Found
-		}
-	}
-	return keystore_os_secret_present(slot, bridge_id)
 }
 
 when ODIN_TEST {

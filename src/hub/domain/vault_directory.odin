@@ -94,6 +94,15 @@ Vault_Wrap_Row :: struct {
 	updated_at:        string,
 }
 
+// Vault_Reset is a scheduled owner reset of the whole directory (see
+// service/vault_directory schedule_reset): at due_at the directory, its devices,
+// epochs and wraps are deleted and the owner's bridges lose their credentials.
+Vault_Reset :: struct {
+	user_id:      string,
+	requested_at: string,
+	due_at:       string,
+}
+
 // Vault_Directory_Commit is ONE versioned directory mutation. The repository applies
 // every populated part inside a single transaction that starts with
 //   UPDATE vault_directories SET version = version + 1 ... WHERE user_id = ? AND version = ?
@@ -112,6 +121,17 @@ Vault_Directory_Commit :: struct {
 	// Insert an already-approved device (bridge path: approved together with its grant).
 	insert_device: Maybe(Vault_Device),
 
+	// Hub-side retirement of an approved BRIDGE entry, guarded on status='approved'
+	// AND bridge_id = retire_bridge_id. No signed revocation statement exists for it:
+	//   - an enrollment rolled back after its directory commit (sweep or operator
+	//     cancel): the vault key was never delivered to that identity;
+	//   - an attach approving a new identity for the same bridge_id: the old identity
+	//     is superseded in the same CAS, so at most one approved identity maps to a
+	//     bridge_id at any time.
+	// Status 'revoked' with an empty revoked_by_device_id marks it hub-retired.
+	retire_device_id: string,
+	retire_bridge_id: string,
+
 	// Revoke an approved device. Guarded on status='approved'.
 	revoke_device_id:     string,
 	revocation_statement: string,
@@ -123,7 +143,8 @@ Vault_Directory_Commit :: struct {
 	epoch_statement: string,
 	epoch_signature: string,
 
-	// Relabel an approved device.
+	// Set an approved device's label. Only from a signed approval statement (the
+	// browser approve path): there is no unsigned relabel endpoint.
 	label_device_id: string,
 	label:           string,
 
@@ -171,6 +192,9 @@ vault_kind_policy :: proc(kind: string) -> vault.Kind_Policy {
 VAULT_CODE_ALPHABET :: "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
 VAULT_CODE_SYMBOLS  :: 12
 VAULT_CODE_TTL_SECONDS :: 600
+// At most this many live (unexpired) pending devices per account; expired ones are
+// purged on every registration and hidden from the directory listing.
+VAULT_PENDING_PER_USER_MAX :: 10
 
 // normalize_vault_device_code folds case and ignores spaces/dashes; anything else, or
 // a symbol count other than 12, is rejected. The result is rebuilt from validated

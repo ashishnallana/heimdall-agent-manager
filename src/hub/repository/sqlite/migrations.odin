@@ -843,7 +843,7 @@ run_migrations :: proc(
 		}
 		// Keyed on the LAST object 092 creates.
 		if name == "092_vault_device_directory.sql" &&
-		   sqlite_object_exists(conn, "vault_wrapped_keyrings") {
+		   sqlite_object_exists(conn, "vault_directory_resets") {
 			mark_migration_applied(conn, name)
 			continue
 		}
