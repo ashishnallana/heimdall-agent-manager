@@ -659,6 +659,12 @@ test_v2_epoch_floor_survives_lock :: proc(t: ^testing.T) {
 	sub.count, sub.current_epoch = 2, 3
 	testing.expect(t, !unseal(f.id_a, &sub, now, "n_floor_swap"), "substituted key for a known epoch refused after a lock")
 
+	// A keyring of only fresh epochs (a hostile hub's own key at 3) is refused: it
+	// lacks the newest accepted epoch 2, whose key the hub never held.
+	fresh := test_keyring_from_hex(TEST_ENC_VAULT_KEY, 3)
+	defer vault.keyring_wipe(&fresh)
+	testing.expect(t, !unseal(f.id_a, &fresh, now, "n_floor_fresh_only"), "keyring without the newest accepted epoch refused after a lock")
+
 	// A genuine rotation {1,2,3} is accepted and raises the floor.
 	three := two
 	defer vault.keyring_wipe(&three)

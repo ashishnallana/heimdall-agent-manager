@@ -642,6 +642,8 @@ bridge_unseal_decrypt_and_verify :: proc(
 		return false, "keyring rollback rejected: current epoch is below this bridge's epoch floor"
 	case .Key_Mismatch:
 		return false, "keyring rejected: an epoch's key differs from the one this bridge accepted before"
+	case .Missing_Epoch:
+		return false, "keyring rejected: it lacks the newest epoch this bridge accepted before"
 	}
 	//  (c) P2/P3 HOOK — signed epoch statement chain (plan §1, required before P3).
 	//      This is where the bridge must verify, BEFORE installing anything below:
