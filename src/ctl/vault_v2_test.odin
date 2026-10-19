@@ -182,3 +182,15 @@ test_ctl_shell_enc_spec_is_bound_to_bridge_session_kind_boot :: proc(t: ^testing
 	testing.expect(t, strings.contains(spec, session_id), spec)
 	testing.expect(t, strings.contains(spec, `"cmd":"npm start"`), spec)
 }
+
+@(test)
+test_ctl_card_title_and_rationale_are_sealed :: proc(t: ^testing.T) {
+	out, ok := ctl_agentmode_action_create_params(with_kr([]string{"--title", "Secret card", "--rationale", "because secret", "--operations", `[{"op":"task.vote","task_id":"task_1","result":"lgtm"}]`}))
+	testing.expect(t, ok, "params built")
+	defer delete(out)
+	testing.expect(t, !strings.contains(out, "Secret card") && !strings.contains(out, "because secret"), out)
+	testing.expect(t, strings.contains(out, `"title":"vault:v2:`) && strings.contains(out, `"rationale":"vault:v2:`), out)
+	cards := ctl_agentmode_cards_create_params("Secret card", with_kr([]string{"--rationale", "because secret"}))
+	defer delete(cards)
+	testing.expect(t, !strings.contains(cards, "Secret card") && !strings.contains(cards, "because secret"), cards)
+}

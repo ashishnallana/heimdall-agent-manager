@@ -75,8 +75,17 @@ ctl_hub_chats :: proc(base, token, action: string, args: []string) {
 		instance_id := option_value(args, "--agent-instance-id", option_value(args, "--instance-id", ""))
 		if agent_id == "" && instance_id == "" { fmt.println("usage: ham-ctl hub chats create --agent-id <agent_id>|--agent-instance-id <id> [--body <text>]"); return }
 		fields := make([dynamic]string)
-		append(&fields, json_kv("agent_id", agent_id)); append(&fields, json_kv("agent_instance_id", instance_id)); append(&fields, json_kv("bridge_id", option_value(args, "--bridge-id", ""))); append(&fields, json_kv("provider", option_value(args, "--provider", ""))); append(&fields, json_kv("model", option_value(args, "--model", ""))); append(&fields, json_kv("project_id", option_value(args, "--project-id", option_value(args, "--project", "")))); append(&fields, json_kv("chain_id", option_value(args, "--chain-id", option_value(args, "--chain", "")))); append(&fields, json_kv("title", option_value(args, "--title", "")))
+		append(&fields, json_kv("agent_id", agent_id)); append(&fields, json_kv("agent_instance_id", instance_id)); append(&fields, json_kv("bridge_id", option_value(args, "--bridge-id", ""))); append(&fields, json_kv("provider", option_value(args, "--provider", ""))); append(&fields, json_kv("model", option_value(args, "--model", ""))); append(&fields, json_kv("project_id", option_value(args, "--project-id", option_value(args, "--project", "")))); append(&fields, json_kv("chain_id", option_value(args, "--chain-id", option_value(args, "--chain", ""))))
+		// The title and the first message are vault content (the UI seals and decrypts
+		// both); sealed here too, never sent in plaintext (finding N3).
+		title := option_value(args, "--title", "")
 		body := option_value(args, "--body", "")
+		if title != "" || body != "" {
+			kr := ctl_vault_keyring_for_write(args)
+			title = ctl_seal_if(title, kr)
+			body = ctl_seal_if(body, kr)
+		}
+		append(&fields, json_kv("title", title))
 		if body != "" do append(&fields, strings.concatenate({"\"initial_message\":", json_object(json_kv("body", body))}))
 		ctl_hub_request(base, token, "POST", "/api/v1/chats", json_object_from_slice(fields[:]))
 		return
@@ -86,6 +95,7 @@ ctl_hub_chats :: proc(base, token, action: string, args: []string) {
 		body := option_value(args, "--body", "")
 		if has_flag(args, "--stdin") { data, err := os.read_entire_file("/dev/stdin", context.allocator); if err == nil do body = string(data) }
 		if cid == "" || body == "" { fmt.println("usage: ham-ctl hub chats send --conversation-id <id> --body <text>"); return }
+		body = ctl_seal_if(body, ctl_vault_keyring_for_write(args))
 		ctl_hub_request(base, token, "POST", fmt.tprintf("/api/v1/chats/%s/messages", safe_path_part(cid)), json_object(json_kv("body", body)))
 		return
 	}

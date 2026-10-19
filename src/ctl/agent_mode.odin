@@ -990,11 +990,15 @@ ctl_agentmode_action_create_params :: proc(args: []string, tokens: []string = ni
 		if ops_json == "" do return "", false
 	}
 
+	// Card title and rationale are vault content the UI decrypts (VaultText /
+	// DecryptedMarkdown); they are sealed, never sent in plaintext (finding N3).
+	// operations stay plaintext: the hub executes them.
+	kr := ctl_vault_keyring_for_write(args)
 	fields := make([dynamic]string)
 	defer delete(fields)
-	append(&fields, json_kv("title", title))
+	append(&fields, json_kv("title", ctl_seal_if(title, kr)))
 	append(&fields, json_kv_raw("operations", ops_json))
-	if r := option_value(args, "--rationale", ""); r != "" do append(&fields, json_kv("rationale", r))
+	if r := option_value(args, "--rationale", ""); r != "" do append(&fields, json_kv("rationale", ctl_seal_if(r, kr)))
 	if sc := option_value(args, "--scope", ""); sc != "" do append(&fields, json_kv("scope", sc))
 	if p := option_value(args, "--provider", ""); p != "" do append(&fields, json_kv("provider", p))
 	if c := option_value(args, "--confidence", ""); c != "" do append(&fields, json_kv_raw("confidence", c))
@@ -1057,10 +1061,12 @@ ctl_agentmode_cards_list_params :: proc(args: []string) -> string {
 }
 
 ctl_agentmode_cards_create_params :: proc(title: string, args: []string) -> string {
+	// Sealed like ctl_agentmode_action_create_params (finding N3).
+	kr := ctl_vault_keyring_for_write(args)
 	fields := make([dynamic]string)
 	defer delete(fields)
-	append(&fields, json_kv("title", title))
-	if r := option_value(args, "--rationale", ""); r != "" do append(&fields, json_kv("rationale", r))
+	append(&fields, json_kv("title", ctl_seal_if(title, kr)))
+	if r := option_value(args, "--rationale", ""); r != "" do append(&fields, json_kv("rationale", ctl_seal_if(r, kr)))
 	if sc := option_value(args, "--scope", ""); sc != "" do append(&fields, json_kv("scope", sc))
 	if p := option_value(args, "--provider", ""); p != "" do append(&fields, json_kv("provider", p))
 	if c := option_value(args, "--confidence", ""); c != "" do append(&fields, json_kv_raw("confidence", c))

@@ -300,7 +300,8 @@ test_action_create_params_memory_approve :: proc(t: ^testing.T) {
 		"--title", "Approve memory proposal 42",
 	}
 
-	params, ok := ctl_agentmode_action_create_params(args)
+	params, ok := ctl_agentmode_action_create_params(with_kr(args))
+	if ok do params = unseal_out(params)
 	testing.expect(t, ok, "action create params should succeed")
 
 	val, err := json.parse_string(params, allocator = context.temp_allocator)
@@ -329,7 +330,8 @@ test_action_create_params_issue_create :: proc(t: ^testing.T) {
 		"--scope", "project",
 	}
 
-	params, ok := ctl_agentmode_action_create_params(args)
+	params, ok := ctl_agentmode_action_create_params(with_kr(args))
+	if ok do params = unseal_out(params)
 	testing.expect(t, ok, "action create params should succeed")
 
 	val, err := json.parse_string(params, allocator = context.temp_allocator)
@@ -358,7 +360,8 @@ test_action_create_params_custom_operations :: proc(t: ^testing.T) {
 		"--operations", `[{"op":"task.vote","task_id":"task_123","result":"lgtm"}]`,
 	}
 
-	params, ok := ctl_agentmode_action_create_params(args)
+	params, ok := ctl_agentmode_action_create_params(with_kr(args))
+	if ok do params = unseal_out(params)
 	testing.expect(t, ok, "action create params with custom operations should succeed")
 
 	val, err := json.parse_string(params, allocator = context.temp_allocator)
