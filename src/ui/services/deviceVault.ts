@@ -253,6 +253,14 @@ async function runRefresh(_reason: string): Promise<void> {
     stopPolling();
     noticePending(c, chain);
 
+    // The device that created the vault IS the root: its own key needs no confirmation.
+    if (!pins && chain.rootDeviceId === identity.deviceId && chain.rootSignPub === identity.signPub) {
+      await advancePins(kv, c.userId, pinsFromChain(chain));
+      const keyring = await installKeyringFromWrap(identity, self.wrap, chain);
+      dispatch(keyringInstalled({ currentEpoch: keyring.currentEpoch }));
+      dispatch(deviceVaultStatusChanged({ status: 'ready', currentEpoch: chain.currentEpoch, directoryVersion: chain.version }));
+      return;
+    }
     if (!pins) {
       // First sight of the account on this device: the user confirms the account
       // fingerprint before any key is installed (threat model: hub-injected root).
