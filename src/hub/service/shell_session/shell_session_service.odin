@@ -436,12 +436,14 @@ shell_session_broadcast_status :: proc(svc: ^Shell_Session_Service, session_id, 
 }
 
 // shell_session_broadcast_stream_ready relays stream_ready to all attached WebSocket viewers (REQ-STREAM-EVENT-3).
-shell_session_broadcast_stream_ready :: proc(svc: ^Shell_Session_Service, session_id: string) {
+// bridge_boot_id is the bridge's unseal boot id from its shell_pty_stream_ready event;
+// viewers bind it into PTY v2 input frames (a restarted bridge refuses older ones).
+shell_session_broadcast_stream_ready :: proc(svc: ^Shell_Session_Service, session_id: string, bridge_boot_id := "") {
 	if svc == nil || session_id == "" do return
 	sockets := _copy_viewers(svc, session_id)
 	defer delete(sockets)
 	if len(sockets) == 0 do return
-	frame := _stream_ready_frame_json(session_id)
+	frame := stream_ready_frame_json(session_id, bridge_boot_id)
 	defer delete(frame)
 	for sock in sockets {
 		result := shell_session_write_viewer_frame(svc, session_id, sock, frame)
@@ -2032,10 +2034,16 @@ _status_frame_json :: proc(status: string, exit_code: int, exit_code_set: bool) 
 	return strings.to_string(b)
 }
 
-_stream_ready_frame_json :: proc(session_id: string) -> string {
+// stream_ready_frame_json is the viewer's stream_ready control frame. A non-empty
+// bridge_boot_id rides along (see shell_session_broadcast_stream_ready).
+stream_ready_frame_json :: proc(session_id: string, bridge_boot_id := "") -> string {
 	b := strings.builder_make()
 	strings.write_string(&b, "{\"type\":\"stream_ready\",\"session_id\":\"")
 	contracts.write_json_string(&b, session_id)
+	if bridge_boot_id != "" {
+		strings.write_string(&b, "\",\"bridge_boot_id\":\"")
+		contracts.write_json_string(&b, bridge_boot_id)
+	}
 	strings.write_string(&b, "\"}")
 	return strings.to_string(b)
 }

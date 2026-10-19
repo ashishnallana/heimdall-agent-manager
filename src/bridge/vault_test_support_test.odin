@@ -285,7 +285,8 @@ test_pty_input_counter: u64
 test_pty_input_payload :: proc(chunk: string, key_hex: string, epoch: u32, session_id: string) -> ([]byte, bool) {
 	salt: [vault.PTY_V2_SALT_BYTES]byte
 	crypto.rand_bytes(salt[:])
-	return test_pty_input_payload_with(chunk, key_hex, epoch, session_id, salt, test_pty_input_next_counter())
+	// The handlers open input under this process's own unseal boot_id.
+	return test_pty_input_payload_with(chunk, key_hex, epoch, session_id, salt, test_pty_input_next_counter(), bridge_unseal_boot_id())
 }
 
 test_pty_input_next_counter :: proc() -> u64 {
@@ -297,12 +298,12 @@ test_pty_input_next_counter :: proc() -> u64 {
 	}
 }
 
-test_pty_input_payload_with :: proc(chunk: string, key_hex: string, epoch: u32, session_id: string, salt: [vault.PTY_V2_SALT_BYTES]byte, counter: u64) -> ([]byte, bool) {
+test_pty_input_payload_with :: proc(chunk: string, key_hex: string, epoch: u32, session_id: string, salt: [vault.PTY_V2_SALT_BYTES]byte, counter: u64, boot_id: string) -> ([]byte, bool) {
 	key: [32]byte
 	defer crypto.zero_explicit(&key, size_of(key))
 	_ = vault.hex_decode_into(key[:], key_hex)
 	salt_copy := salt
-	return vault.pty_seal(transmute([]byte)chunk, key[:], epoch, salt_copy[:], counter, session_id, .In, context.temp_allocator)
+	return vault.pty_seal(transmute([]byte)chunk, key[:], epoch, salt_copy[:], counter, session_id, .In, boot_id, context.temp_allocator)
 }
 
 // test_encrypt_hex / test_decrypt_hex: one-epoch (epoch 1) keyring helpers for

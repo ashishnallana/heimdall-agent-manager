@@ -1,5 +1,5 @@
 import { PTY_COLOR_RESET, PaneDeliveryQueue, PaneWriteBatcher, normalizeSnapshotText, repaintCapturedScreenText } from './paneDeliveryQueue.ts';
-import { PTY_WIRE_FLAG_ENCRYPTED, PTY_WIRE_KIND_INPUT, PTY_WIRE_KIND_OUTPUT, PTY_WIRE_KIND_SCREEN, PTY_WIRE_VIEWER_HEADER_BYTES, PtyTextDecoder, decodePtyViewerFrame, decryptPtyPayload, encodePtyViewerFrame, encryptPtyPayload, resetPtyInputStream, type PtyDirection, type PtyViewerFrame } from './ptyWire.ts';
+import { PTY_WIRE_FLAG_ENCRYPTED, PTY_WIRE_KIND_INPUT, PTY_WIRE_KIND_OUTPUT, PTY_WIRE_KIND_SCREEN, PTY_WIRE_VIEWER_HEADER_BYTES, PtyTextDecoder, decodePtyViewerFrame, decryptPtyPayload, encodePtyViewerFrame, encryptPtyPayload, resetPtyInputStream, setPtyBridgeBootId, type PtyDirection, type PtyViewerFrame } from './ptyWire.ts';
 import { decodeBase64Strict, type VaultKeyring } from '../../utils/vaultCrypto.ts';
 import { createInputCoalescer, type InputCoalescer } from './ptyInputCoalescer.ts';
 import { createVisibilityGate } from './paneVisibilityGate.ts';
@@ -126,9 +126,10 @@ export async function decryptShellStreamPayload(
   keyring: VaultKeyring,
   sessionId: string,
   direction: PtyDirection = 'out',
+  bootId?: string,
 ): Promise<Uint8Array | null> {
   const payload = decodeBase64Strict(enc_b64.trim());
-  return decryptPtyPayload(payload, keyring, sessionId, direction);
+  return decryptPtyPayload(payload, keyring, sessionId, direction, bootId);
 }
 
 /**
@@ -406,6 +407,11 @@ export function useShellStream({
 
         const handleControlMessage = (msg: ShellStreamMsg) => {
           if (activeConnectIdRef.current !== connectId) return;
+          // PTY v2: input is sealed to the bridge's current unseal boot id, announced on
+          // ready / stream_ready (so a restarted bridge's re-attach refreshes it).
+          if ((msg.type === 'ready' || msg.type === 'stream_ready') && (msg as any).bridge_boot_id) {
+            setPtyBridgeBootId(String(sessionId || ''), (msg as any).bridge_boot_id);
+          }
           if (msg.type === 'stream_ready') {
             console.log('[useShellStream] received stream_ready frame:', msg);
             clearStreamReadyFallbackTimer();

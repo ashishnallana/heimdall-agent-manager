@@ -46,7 +46,7 @@ pty_test_decode_output :: proc(frame: string, key_hex := "") -> (session_id: str
 		if key_hex == "" do return sid, "", snapshot, encrypted, true
 		kr := test_keyring_from_hex(key_hex)
 		defer vault.keyring_wipe(&kr)
-		plain, _, _, pok := vault.pty_open(body, &kr, sid, .Out, 0, context.temp_allocator)
+		plain, _, _, pok := vault.pty_open(body, &kr, sid, .Out, 0, "", context.temp_allocator)
 		if !pok do return sid, "", snapshot, encrypted, false
 		return sid, string(plain), snapshot, encrypted, true
 	}

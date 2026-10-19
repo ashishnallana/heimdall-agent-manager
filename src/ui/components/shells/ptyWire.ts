@@ -84,8 +84,9 @@ export type PtyDirection = 'out' | 'in';
 //   subkey = HKDF-SHA256(ikm = epoch key, salt = salt16, info = `heimdall-pty-v2|<session_id>|<out|in>`)
 //   nonce  = u32be(0) | u64be(counter), counter >= 1, never repeated under one salt
 //   AAD    = `heimdall-pty-v2|e<epoch>|<session_id>|out`, or for input
-//            `heimdall-pty-v2|e<epoch>|<session_id>|in|<counter>` (the bridge refuses any
-//            input counter that does not increase for its stream -- replay defence).
+//            `heimdall-pty-v2|e<epoch>|<session_id>|in|<counter>|<bridge_boot_id>` (the
+//            bridge refuses any input counter that does not increase for its stream, and
+//            any frame bound to another boot id -- replay defence across restarts too).
 
 export const PTY_V2_SALT_BYTES = 16;
 /** PTY payload v2 header: u32be epoch | salt(16) | nonce(12) | tag(16). */
@@ -108,15 +109,19 @@ function assertPtySession(sessionId: string): void {
   if (!isValidAadId(sessionId)) throw new Error('invalid PTY session id');
 }
 
-/** AAD for a PTY v2 payload; `counter` is required (and bound) for input frames. */
-export function ptyAad(epoch: number, sessionId: string, direction: PtyDirection, counter?: number | bigint): Uint8Array {
+/**
+ * AAD for a PTY v2 payload. Input frames require (and bind) the counter and the
+ * receiving bridge's unseal boot id.
+ */
+export function ptyAad(epoch: number, sessionId: string, direction: PtyDirection, counter?: number | bigint, bootId?: string): Uint8Array {
   assertPtyEpoch(epoch);
   assertPtySession(sessionId);
   if (direction === 'in') {
     if (counter === undefined) throw new Error('PTY input AAD needs a counter');
     const c = BigInt(counter);
     assertPtyCounter(c);
-    return utf8.encode(`${PTY_V2_INFO}|e${epoch}|${sessionId}|in|${c.toString()}`);
+    if (!isValidAadId(bootId)) throw new Error('PTY input AAD needs the bridge boot id');
+    return utf8.encode(`${PTY_V2_INFO}|e${epoch}|${sessionId}|in|${c.toString()}|${bootId}`);
   }
   return utf8.encode(`${PTY_V2_INFO}|e${epoch}|${sessionId}|out`);
 }
@@ -177,8 +182,9 @@ export async function sealPtyPayload(
   direction: PtyDirection,
   salt: Uint8Array,
   counter: number | bigint,
+  bootId?: string,
 ): Promise<Uint8Array> {
-  const aad = ptyAad(epoch, sessionId, direction, counter);
+  const aad = ptyAad(epoch, sessionId, direction, counter, bootId);
   const nonce = ptyNonce(counter);
   const subkey = await derivePtySubkey(baseKey, salt, sessionId, direction);
   return sealPtyWithSubkey(data, subkey, epoch, salt, nonce, aad);
@@ -234,6 +240,7 @@ export async function decryptPtyPayload(
   keyring: VaultKeyring,
   sessionId: string,
   direction: PtyDirection = 'out',
+  bootId?: string,
 ): Promise<Uint8Array | null> {
   if (payload.length < PTY_V2_HEADER_BYTES) {
     throw new Error(`Encrypted pty frame shorter than header (${payload.length} < ${PTY_V2_HEADER_BYTES})`);
@@ -257,7 +264,7 @@ export async function decryptPtyPayload(
   combined.set(tag, ciphertext.length);
   const subkey = await cachedPtySubkey(baseKey, salt, sessionId, direction);
   const plain = await crypto.subtle.decrypt(
-    { name: 'AES-GCM', iv: nonce as unknown as BufferSource, additionalData: ptyAad(epoch, sessionId, direction, counter) as unknown as BufferSource, tagLength: 128 },
+    { name: 'AES-GCM', iv: nonce as unknown as BufferSource, additionalData: ptyAad(epoch, sessionId, direction, counter, bootId) as unknown as BufferSource, tagLength: 128 },
     subkey,
     combined as unknown as BufferSource,
   );
@@ -302,6 +309,7 @@ export async function openPaneReplyOutput<T extends { output?: unknown }>(data: 
 
 interface PtyInputStream {
   keyring: VaultKeyring;
+  bootId: string;
   epoch: number;
   salt: Uint8Array;
   subkey: Promise<CryptoKey>;
@@ -310,6 +318,20 @@ interface PtyInputStream {
 
 const ptyInputStreams = new Map<string, PtyInputStream>();
 const ptyInputHighWater = new Map<string, bigint>();
+const ptyBridgeBootIds = new Map<string, string>();
+
+/**
+ * Record the session's bridge unseal boot id, as announced in the stream's
+ * `ready` / `stream_ready` control frames (refreshed on every (re)connect and bridge
+ * re-attach). Input is sealed to it; a changed id starts a new input stream.
+ */
+export function setPtyBridgeBootId(sessionId: string, bootId: unknown): void {
+  if (!sessionId || !isValidAadId(bootId)) return;
+  if (ptyBridgeBootIds.get(sessionId) !== bootId) {
+    ptyBridgeBootIds.set(sessionId, bootId);
+    ptyInputStreams.delete(sessionId);
+  }
+}
 
 /** Start a new input stream (new salt) for the session on its next keystroke. */
 export function resetPtyInputStream(sessionId: string): void {
@@ -325,18 +347,22 @@ export async function encryptPtyPayload(data: Uint8Array, keyring: VaultKeyring,
   assertPtySession(sessionId);
   const epoch = keyring.currentEpoch;
   assertPtyEpoch(epoch);
+  // Fail closed: without the bridge's boot id there is nothing valid to seal to.
+  const bootId = ptyBridgeBootIds.get(sessionId);
+  if (!bootId) throw new Error('PTY input unavailable: bridge boot id not yet known');
   let stream = ptyInputStreams.get(sessionId);
-  if (!stream || stream.keyring !== keyring || stream.epoch !== epoch) {
+  if (!stream || stream.keyring !== keyring || stream.epoch !== epoch || stream.bootId !== bootId) {
     const baseKey = await ptyBaseKeyFor(keyring, epoch);
     if (!baseKey) throw new Error('Vault PTY key unavailable');
     // Re-check after the await: a concurrent call may already have started the stream.
     stream = ptyInputStreams.get(sessionId);
-    if (!stream || stream.keyring !== keyring || stream.epoch !== epoch) {
+    if (!stream || stream.keyring !== keyring || stream.epoch !== epoch || stream.bootId !== bootId) {
       const salt = crypto.getRandomValues(new Uint8Array(PTY_V2_SALT_BYTES));
       const seed = BigInt(Math.max(0, Math.floor(now()))) * 1000n;
       const prev = ptyInputHighWater.get(sessionId) ?? 0n;
       stream = {
         keyring,
+        bootId,
         epoch,
         salt,
         subkey: derivePtySubkey(baseKey, salt, sessionId, 'in'),
@@ -350,7 +376,7 @@ export async function encryptPtyPayload(data: Uint8Array, keyring: VaultKeyring,
   const counter = stream.counter;
   ptyInputHighWater.set(sessionId, counter);
   const subkey = await stream.subkey;
-  return sealPtyWithSubkey(data, subkey, epoch, stream.salt, ptyNonce(counter), ptyAad(epoch, sessionId, 'in', counter));
+  return sealPtyWithSubkey(data, subkey, epoch, stream.salt, ptyNonce(counter), ptyAad(epoch, sessionId, 'in', counter, stream.bootId));
 }
 
 /**

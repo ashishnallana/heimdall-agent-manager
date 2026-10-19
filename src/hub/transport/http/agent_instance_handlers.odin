@@ -186,11 +186,17 @@ agent_instance_stream_handler :: proc(ctx: rawptr, req: Request, client: net.TCP
 	}
 
 	// Send ready frame.
+	boot_id := stream_bridge_boot_id(h.agents.bridge_runtime_registry if h.agents != nil else nil, inst.bridge_id)
+	defer delete(boot_id)
 	ready_b := strings.builder_make()
 	strings.write_string(&ready_b, "{\"type\":\"ready\",\"agent_instance_id\":\"")
 	write_handler_json_string(&ready_b, instance_id)
 	strings.write_string(&ready_b, "\",\"session_id\":\"")
 	write_handler_json_string(&ready_b, instance_id)
+	if boot_id != "" {
+		strings.write_string(&ready_b, "\",\"bridge_boot_id\":\"")
+		write_handler_json_string(&ready_b, boot_id)
+	}
 	strings.write_string(&ready_b, "\"}")
 	ready_json := strings.to_string(ready_b)
 	_ = shell_session_svc.shell_session_write_viewer_frame(h.shell_sessions, instance_id, client, ready_json)
@@ -209,11 +215,7 @@ agent_instance_stream_handler :: proc(ctx: rawptr, req: Request, client: net.TCP
 
 	// REQ-STREAM-EVENT-3: If late_join is true, stream is already running; emit stream_ready directly to this viewer.
 	if late_join {
-		sr_b := strings.builder_make()
-		strings.write_string(&sr_b, "{\"type\":\"stream_ready\",\"session_id\":\"")
-		write_handler_json_string(&sr_b, instance_id)
-		strings.write_string(&sr_b, "\"}")
-		sr_json := strings.to_string(sr_b)
+		sr_json := shell_session_svc.stream_ready_frame_json(instance_id, boot_id)
 		_ = shell_session_svc.shell_session_write_viewer_frame(h.shell_sessions, instance_id, client, sr_json)
 		delete(sr_json)
 	}

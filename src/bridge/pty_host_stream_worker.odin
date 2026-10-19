@@ -619,7 +619,7 @@ bridge_pty_stream_seal_v2 :: proc(data: []byte, kr: ^vault.Vault_Keyring, epoch:
 	key, key_ok := vault.keyring_key_for_epoch(kr, epoch)
 	if !key_ok do return nil, false
 	salt_copy := salt
-	return vault.pty_seal(data, key, epoch, salt_copy[:], seq, session_id, .Out, allocator)
+	return vault.pty_seal(data, key, epoch, salt_copy[:], seq, session_id, .Out, "", allocator)
 }
 
 BRIDGE_PANE_QUEUE_BYTES :: 8 * 1024 * 1024
@@ -924,6 +924,7 @@ bridge_pty_stream_format_lifecycle_event :: proc(
 	has_exit_code := false,
 	exit_code: i32 = 0,
 	allocator := context.allocator,
+	boot_id := "",
 ) -> string {
 	b := strings.builder_make(allocator)
 	strings.write_string(&b, "{\"type\":\"")
@@ -933,6 +934,13 @@ bridge_pty_stream_format_lifecycle_event :: proc(
 	strings.write_string(&b, "\",\"shell_id\":\"")
 	bridge_runtime_write_json_string(&b, shell_id)
 	strings.write_string(&b, "\"")
+	if boot_id != "" {
+		// PTY v2 input frames bind this bridge process's unseal boot_id in their AAD;
+		// the viewer learns it here, on every (re)attach.
+		strings.write_string(&b, ",\"bridge_boot_id\":\"")
+		bridge_runtime_write_json_string(&b, boot_id)
+		strings.write_string(&b, "\"")
+	}
 	if has_exit_code {
 		fmt.sbprintf(&b, ",\"exit_code\":%d", exit_code)
 	}
@@ -950,7 +958,8 @@ bridge_pty_stream_emit_lifecycle_event :: proc(
 	exit_code: i32 = 0,
 ) {
 	heap := runtime.heap_allocator()
-	frame := bridge_pty_stream_format_lifecycle_event(event_type, session_id, shell_id, has_exit_code, exit_code, heap)
+	boot_id := bridge_unseal_boot_id() if event_type == "shell_pty_stream_ready" else ""
+	frame := bridge_pty_stream_format_lifecycle_event(event_type, session_id, shell_id, has_exit_code, exit_code, heap, boot_id)
 	_bridge_pty_stream_queue_control(worker, frame, heap, session_id)
 }
 
@@ -1197,11 +1206,13 @@ bridge_pty_input_replay_accept :: proc(session_id: string, salt: [vault.PTY_V2_S
 }
 
 // bridge_pty_open_input authenticates one browser input frame for session_id under the
-// keyring's CURRENT epoch (the command epoch floor) and enforces the replay rule.
-// Nothing is returned for a frame that fails either check. Temp-allocated plaintext.
-bridge_pty_open_input :: proc(frame: []byte, kr: ^vault.Vault_Keyring, session_id: string) -> (plaintext: string, ok: bool) {
-	if kr == nil do return "", false
-	plain, salt, counter, opened := vault.pty_open(frame, kr, session_id, .In, kr.current_epoch, context.temp_allocator)
+// keyring's CURRENT epoch (the command epoch floor) and this bridge process's unseal
+// boot_id (bound in the AAD: a frame captured before a restart, when the replay state
+// was lost, no longer authenticates), then enforces the replay rule. Nothing is
+// returned for a frame that fails any check. Temp-allocated plaintext.
+bridge_pty_open_input :: proc(frame: []byte, kr: ^vault.Vault_Keyring, session_id: string, boot_id: string) -> (plaintext: string, ok: bool) {
+	if kr == nil || boot_id == "" do return "", false
+	plain, salt, counter, opened := vault.pty_open(frame, kr, session_id, .In, kr.current_epoch, boot_id, context.temp_allocator)
 	if !opened do return "", false
 	if !bridge_pty_input_replay_accept(session_id, salt, counter) {
 		crypto.zero_explicit(raw_data(plain), len(plain))
@@ -1247,7 +1258,7 @@ bridge_pane_output_seal_with :: proc(status: Vault_Status, kr: ^vault.Vault_Keyr
 	if !key_ok do return "", .Failed
 	salt: Bridge_PTY_Salt
 	if !os_random.fill(salt[:], random_source) do return "", .Failed
-	frame, sealed := vault.pty_seal(transmute([]byte)output, key, kr.current_epoch, salt[:], 1, session_id, .Out, context.temp_allocator)
+	frame, sealed := vault.pty_seal(transmute([]byte)output, key, kr.current_epoch, salt[:], 1, session_id, .Out, "", context.temp_allocator)
 	if !sealed do return "", .Failed
 	b64, err := base64.encode(frame[4:], allocator = context.temp_allocator)
 	if err != nil do return "", .Failed

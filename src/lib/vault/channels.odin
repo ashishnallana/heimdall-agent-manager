@@ -207,8 +207,10 @@ wrap_open :: proc(w: ^Keyring_Wrap, user_id: string, recipient_ecdh_priv: ^ecdh.
 // and never repeats under one salt, and every stream (or epoch change) draws a fresh
 // CSPRNG salt, so a (subkey, nonce) pair is never reused.
 // AAD: "heimdall-pty-v2|e<epoch>|<session_id>|out" for output, and
-//      "heimdall-pty-v2|e<epoch>|<session_id>|in|<counter>" for input, so the receiver
-// can enforce a strictly increasing per-session input counter (replay defence).
+//      "heimdall-pty-v2|e<epoch>|<session_id>|in|<counter>|<boot_id>" for input, so the
+// receiver can enforce a strictly increasing per-session input counter (replay
+// defence) and, through its unseal boot_id, refuse any frame captured before it last
+// restarted (its in-memory counter state is gone then).
 
 PTY_V2_INFO         :: "heimdall-pty-v2"
 PTY_V2_SALT_BYTES   :: 16
@@ -230,14 +232,15 @@ pty_session_id_valid :: proc(session_id: string) -> bool {
 	return session_id != "" && len(session_id) <= 256 && valid_id_value(session_id)
 }
 
-// pty_aad builds the frame AAD. Input frames require counter >= 1 and bind it; the
-// counter is ignored for output frames.
-pty_aad :: proc(epoch: u32, session_id: string, dir: Pty_Direction, counter: u64 = 0, allocator := context.allocator) -> (aad: string, ok: bool) {
+// pty_aad builds the frame AAD. Input frames require counter >= 1 and the receiving
+// bridge's unseal boot_id (non-empty, id grammar) and bind both; output frames ignore
+// them.
+pty_aad :: proc(epoch: u32, session_id: string, dir: Pty_Direction, counter: u64 = 0, boot_id: string = "", allocator := context.allocator) -> (aad: string, ok: bool) {
 	if epoch == 0 || !pty_session_id_valid(session_id) do return "", false
 	e_buf, c_buf: [24]byte
 	if dir == .In {
-		if counter == 0 do return "", false
-		return strings.concatenate({PTY_V2_INFO, "|e", strconv.write_uint(e_buf[:], u64(epoch), 10), "|", session_id, "|in|", strconv.write_uint(c_buf[:], counter, 10)}, allocator), true
+		if counter == 0 || !pty_session_id_valid(boot_id) do return "", false
+		return strings.concatenate({PTY_V2_INFO, "|e", strconv.write_uint(e_buf[:], u64(epoch), 10), "|", session_id, "|in|", strconv.write_uint(c_buf[:], counter, 10), "|", boot_id}, allocator), true
 	}
 	return strings.concatenate({PTY_V2_INFO, "|e", strconv.write_uint(e_buf[:], u64(epoch), 10), "|", session_id, "|out"}, allocator), true
 }
@@ -261,9 +264,9 @@ PTY_V2_NONCE_OFFSET :: 4 + PTY_V2_SALT_BYTES
 
 // pty_seal writes a v2 frame under the subkey derived from epoch_key and salt. The
 // caller owns counter uniqueness: one salt, strictly increasing counters from 1.
-pty_seal :: proc(plaintext: []byte, epoch_key: []byte, epoch: u32, salt: []byte, counter: u64, session_id: string, dir: Pty_Direction, allocator := context.allocator) -> (frame: []byte, ok: bool) {
+pty_seal :: proc(plaintext: []byte, epoch_key: []byte, epoch: u32, salt: []byte, counter: u64, session_id: string, dir: Pty_Direction, boot_id: string = "", allocator := context.allocator) -> (frame: []byte, ok: bool) {
 	if counter == 0 || len(salt) != PTY_V2_SALT_BYTES do return nil, false
-	aad, aad_ok := pty_aad(epoch, session_id, dir, counter, context.temp_allocator)
+	aad, aad_ok := pty_aad(epoch, session_id, dir, counter, boot_id, context.temp_allocator)
 	if !aad_ok do return nil, false
 	subkey: [KEY_BYTES]byte
 	defer crypto.zero_explicit(&subkey, size_of(subkey))
@@ -301,7 +304,7 @@ pty_frame_salt_counter :: proc(frame: []byte) -> (salt: [PTY_V2_SALT_BYTES]byte,
 // require_epoch non-zero (the bridge's command floor) any other epoch is rejected
 // before decryption. On success it also returns the frame's salt and counter, which
 // an input receiver feeds to pty_replay_accept.
-pty_open :: proc(frame: []byte, kr: ^Vault_Keyring, session_id: string, dir: Pty_Direction, require_epoch: u32 = 0, allocator := context.allocator) -> (plaintext: []byte, salt: [PTY_V2_SALT_BYTES]byte, counter: u64, ok: bool) {
+pty_open :: proc(frame: []byte, kr: ^Vault_Keyring, session_id: string, dir: Pty_Direction, require_epoch: u32 = 0, boot_id: string = "", allocator := context.allocator) -> (plaintext: []byte, salt: [PTY_V2_SALT_BYTES]byte, counter: u64, ok: bool) {
 	epoch, e_ok := pty_frame_epoch(frame)
 	if !e_ok || kr == nil do return
 	if require_epoch != 0 && epoch != require_epoch do return
@@ -309,7 +312,7 @@ pty_open :: proc(frame: []byte, kr: ^Vault_Keyring, session_id: string, dir: Pty
 	if !sc_ok do return
 	key, k_ok := keyring_key_for_epoch(kr, epoch)
 	if !k_ok do return
-	aad, aad_ok := pty_aad(epoch, session_id, dir, c, context.temp_allocator)
+	aad, aad_ok := pty_aad(epoch, session_id, dir, c, boot_id, context.temp_allocator)
 	if !aad_ok do return
 	subkey: [KEY_BYTES]byte
 	defer crypto.zero_explicit(&subkey, size_of(subkey))

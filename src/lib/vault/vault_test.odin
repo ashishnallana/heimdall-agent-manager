@@ -387,7 +387,8 @@ test_pty_v2_vectors :: proc(t: ^testing.T) {
 		sid := str(co, "session_id")
 		salt := unhex(str(co, "salt"))
 		key, _ := keyring_key_for_epoch(&kr, epoch)
-		aad, aad_ok := pty_aad(epoch, sid, dir, counter, context.temp_allocator)
+		boot := str(co, "boot_id") if dir == .In else ""
+		aad, aad_ok := pty_aad(epoch, sid, dir, counter, boot, context.temp_allocator)
 		testing.expect(t, aad_ok)
 		testing.expect_value(t, aad, str(co, "aad"))
 		subkey: [32]byte
@@ -395,53 +396,63 @@ test_pty_v2_vectors :: proc(t: ^testing.T) {
 		testing.expect_value(t, hex_encode_lower(subkey[:], context.temp_allocator), str(co, "subkey"))
 		nonce := pty_nonce_from_counter(counter)
 		testing.expect_value(t, hex_encode_lower(nonce[:], context.temp_allocator), str(co, "nonce"))
-		frame, ok := pty_seal(unhex(str(co, "plaintext_hex")), key, epoch, salt, counter, sid, dir, context.temp_allocator)
+		frame, ok := pty_seal(unhex(str(co, "plaintext_hex")), key, epoch, salt, counter, sid, dir, boot, context.temp_allocator)
 		testing.expect(t, ok)
 		testing.expect_value(t, hex_encode_lower(frame, context.temp_allocator), str(co, "frame_hex"))
-		plain, f_salt, f_counter, pok := pty_open(frame, &kr, sid, dir, 0, context.temp_allocator)
+		plain, f_salt, f_counter, pok := pty_open(frame, &kr, sid, dir, 0, boot, context.temp_allocator)
 		testing.expect(t, pok)
 		testing.expect_value(t, hex_encode_lower(plain, context.temp_allocator), str(co, "plaintext_hex"))
 		testing.expect(t, string(f_salt[:]) == string(salt) && f_counter == counter)
 		// Wrong session, wrong direction, flipped epoch, and a non-current floor fail.
 		other: Pty_Direction = .In if dir == .Out else .Out
-		_, _, _, b1 := pty_open(frame, &kr, "shs_other", dir, 0, context.temp_allocator)
-		_, _, _, b2 := pty_open(frame, &kr, sid, other, 0, context.temp_allocator)
-		_, _, _, b3 := pty_open(frame, &kr, sid, dir, epoch + 1, context.temp_allocator)
+		_, _, _, b1 := pty_open(frame, &kr, "shs_other", dir, 0, boot, context.temp_allocator)
+		_, _, _, b2 := pty_open(frame, &kr, sid, other, 0, "", context.temp_allocator)
+		_, _, _, b3 := pty_open(frame, &kr, sid, dir, epoch + 1, boot, context.temp_allocator)
 		flipped := make([]byte, len(frame), context.temp_allocator)
 		copy(flipped, frame)
 		flipped[3] ~= 0x03 // epoch 1<->2
-		_, _, _, b4 := pty_open(flipped, &kr, sid, dir, 0, context.temp_allocator)
+		_, _, _, b4 := pty_open(flipped, &kr, sid, dir, 0, boot, context.temp_allocator)
 		// A different salt is a different subkey; a rewritten counter breaks the AAD/nonce.
 		resalted := make([]byte, len(frame), context.temp_allocator)
 		copy(resalted, frame)
 		resalted[4] ~= 0x01
-		_, _, _, b5 := pty_open(resalted, &kr, sid, dir, 0, context.temp_allocator)
+		_, _, _, b5 := pty_open(resalted, &kr, sid, dir, 0, boot, context.temp_allocator)
 		recounted := make([]byte, len(frame), context.temp_allocator)
 		copy(recounted, frame)
 		recounted[PTY_V2_NONCE_OFFSET + NONCE_BYTES - 1] ~= 0x02
-		_, _, _, b6 := pty_open(recounted, &kr, sid, dir, 0, context.temp_allocator)
+		_, _, _, b6 := pty_open(recounted, &kr, sid, dir, 0, boot, context.temp_allocator)
 		// A nonce outside the counter form is rejected before decryption.
 		bad_nonce := make([]byte, len(frame), context.temp_allocator)
 		copy(bad_nonce, frame)
 		bad_nonce[PTY_V2_NONCE_OFFSET] = 0x01
-		_, _, _, b7 := pty_open(bad_nonce, &kr, sid, dir, 0, context.temp_allocator)
-		_, _, _, b8 := pty_open(frame[:PTY_V2_HEADER_BYTES - 1], &kr, sid, dir, 0, context.temp_allocator)
-		testing.expect(t, !b1 && !b2 && !b3 && !b4 && !b5 && !b6 && !b7 && !b8)
+		_, _, _, b7 := pty_open(bad_nonce, &kr, sid, dir, 0, boot, context.temp_allocator)
+		_, _, _, b8 := pty_open(frame[:PTY_V2_HEADER_BYTES - 1], &kr, sid, dir, 0, boot, context.temp_allocator)
+		// Input is bound to the receiving bridge's boot_id: another (restarted) bridge
+		// or a missing boot_id cannot open it.
+		b9, b10 := false, false
+		if dir == .In {
+			_, _, _, b9 = pty_open(frame, &kr, sid, dir, 0, "ffeeddccbbaa99887766554433221100", context.temp_allocator)
+			_, _, _, b10 = pty_open(frame, &kr, sid, dir, 0, "", context.temp_allocator)
+		}
+		testing.expect(t, !b1 && !b2 && !b3 && !b4 && !b5 && !b6 && !b7 && !b8 && !b9 && !b10)
 	}
 }
 
 // L4: AAD components must be non-empty statement-grammar values; fail closed.
 @(test)
 test_pty_and_search_aad_reject_bad_ids :: proc(t: ^testing.T) {
-	_, ok1 := pty_aad(1, "", .Out, 0, context.temp_allocator)
-	_, ok2 := pty_aad(1, "sh|in|9", .Out, 0, context.temp_allocator)
-	_, ok3 := pty_aad(1, "sh_ok", .In, 0, context.temp_allocator) // input needs a counter
-	_, ok4 := pty_aad(0, "sh_ok", .Out, 0, context.temp_allocator)
+	_, ok1 := pty_aad(1, "", .Out, 0, "", context.temp_allocator)
+	_, ok2 := pty_aad(1, "sh|in|9", .Out, 0, "", context.temp_allocator)
+	_, ok3 := pty_aad(1, "sh_ok", .In, 0, "b00t", context.temp_allocator) // input needs a counter
+	_, ok5 := pty_aad(1, "sh_ok", .In, 1, "", context.temp_allocator) // ...and a boot_id
+	_, ok6 := pty_aad(1, "sh_ok", .In, 1, "b|x", context.temp_allocator)
+	testing.expect(t, !ok5 && !ok6)
+	_, ok4 := pty_aad(0, "sh_ok", .Out, 0, "", context.temp_allocator)
 	testing.expect(t, !ok1 && !ok2 && !ok3 && !ok4)
 	key: [32]byte
 	salt: [PTY_V2_SALT_BYTES]byte
-	_, s_ok := pty_seal(transmute([]byte)string("x"), key[:], 1, salt[:], 1, "bad id", .Out, context.temp_allocator)
-	_, c_ok := pty_seal(transmute([]byte)string("x"), key[:], 1, salt[:], 0, "sh_ok", .Out, context.temp_allocator)
+	_, s_ok := pty_seal(transmute([]byte)string("x"), key[:], 1, salt[:], 1, "bad id", .Out, "", context.temp_allocator)
+	_, c_ok := pty_seal(transmute([]byte)string("x"), key[:], 1, salt[:], 0, "sh_ok", .Out, "", context.temp_allocator)
 	testing.expect(t, !s_ok && !c_ok)
 	_, a1 := search_aad("", "brg", "req", "request", 1, 1, context.temp_allocator)
 	_, a2 := search_aad("usr|x", "brg", "req", "request", 1, 1, context.temp_allocator)

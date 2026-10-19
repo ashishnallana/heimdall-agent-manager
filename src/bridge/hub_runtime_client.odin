@@ -1908,7 +1908,7 @@ bridge_hub_handle_binary_frame :: proc(conn: ^ws.Connection, frame: []byte) {
 			// Command epoch floor: input sealed under any epoch but the current one is
 			// refused, even when this keyring still holds that older key. A replayed
 			// (non-increasing) input counter is refused too (finding M1).
-			if plain, pok := bridge_pty_open_input(payload, &kr, shell_id); pok { data = plain; decoded_ok = true }
+			if plain, pok := bridge_pty_open_input(payload, &kr, shell_id, bridge_unseal_boot_id()); pok { data = plain; decoded_ok = true }
 		}
 	case .Disabled:
 		if !encrypted { data = string(payload); decoded_ok = true }
@@ -1963,7 +1963,7 @@ bridge_hub_handle_shell_pty_input :: proc(conn: ^ws.Connection, text: string) {
 			// data_b64 is base64 of a PTY v2 "in" frame; current epoch only, and its
 			// input counter must increase (replay defence, finding M1).
 			if frame, frame_ok := vault.b64_decode_strict(data_b64, context.temp_allocator); frame_ok {
-				if plain, pok := bridge_pty_open_input(frame, &kr, shell_id); pok { data = plain; decoded_ok = true }
+				if plain, pok := bridge_pty_open_input(frame, &kr, shell_id, bridge_unseal_boot_id()); pok { data = plain; decoded_ok = true }
 			}
 		}
 	case .Disabled:

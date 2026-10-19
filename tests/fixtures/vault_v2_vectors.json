@@ -383,9 +383,10 @@
         "counter": 1760000000000001,
         "subkey": "23dbc35c9fba4352fea4f76853dfdd491ce6664b67412a195c2a3aeb8689f3a4",
         "nonce": "00000000000640b5eece0001",
+        "boot_id": "2a796f6ceeb33e61636ab97f87801511",
         "plaintext_hex": "6c73202d6c610d",
-        "aad": "heimdall-pty-v2|e2|shs_0011223344556677|in|1760000000000001",
-        "frame_hex": "00000002a98a7cacf6e9a3d42f36fb54ef4ad72000000000000640b5eece0001fe1286bf5d1b186c722c06009d4589fcd0ee9b01147b83"
+        "aad": "heimdall-pty-v2|e2|shs_0011223344556677|in|1760000000000001|2a796f6ceeb33e61636ab97f87801511",
+        "frame_hex": "00000002a98a7cacf6e9a3d42f36fb54ef4ad72000000000000640b5eece000118923068d4b0e3bd65f62aad2c73f8a4d0ee9b01147b83"
       },
       {
         "direction": "out",

@@ -250,9 +250,9 @@ test_v2_pty_salt_is_fresh_per_worker_epoch_and_install :: proc(t: ^testing.T) {
 	testing.expect(t, sealed)
 	ep, _ := vault.pty_frame_epoch(frame)
 	testing.expect_value(t, ep, u32(2))
-	_, _, _, wrong_dir := vault.pty_open(frame, &kr, "sh_v2", .In, 2, context.temp_allocator)
+	_, _, _, wrong_dir := vault.pty_open(frame, &kr, "sh_v2", .In, 2, "", context.temp_allocator)
 	testing.expect(t, !wrong_dir, "an output frame is not valid input")
-	_, _, _, right := vault.pty_open(frame, &kr, "sh_v2", .Out, 2, context.temp_allocator)
+	_, _, _, right := vault.pty_open(frame, &kr, "sh_v2", .Out, 2, "", context.temp_allocator)
 	testing.expect(t, right)
 	// Two workers (restart) never produce the same (subkey, nonce): the frames differ
 	// in their salt and therefore in their key stream even at the same seq.
@@ -271,30 +271,40 @@ test_v2_pty_input_replay_is_rejected :: proc(t: ^testing.T) {
 	kr := test_keyring_two_epochs(TEST_VAULT_KEY_HEX, V2_KEY_2)
 	defer vault.keyring_wipe(&kr)
 	sid := "sh_replay_test"
+	BOOT :: "00112233445566778899aabbccddeeff"
 	salt_a: [vault.PTY_V2_SALT_BYTES]byte
 	salt_a[0] = 0xa1
-	f1, _ := test_pty_input_payload_with("a", V2_KEY_2, 2, sid, salt_a, 1000)
-	f2, _ := test_pty_input_payload_with("b", V2_KEY_2, 2, sid, salt_a, 1001)
-	p1, ok1 := bridge_pty_open_input(f1, &kr, sid)
+	f1, _ := test_pty_input_payload_with("a", V2_KEY_2, 2, sid, salt_a, 1000, BOOT)
+	f2, _ := test_pty_input_payload_with("b", V2_KEY_2, 2, sid, salt_a, 1001, BOOT)
+	p1, ok1 := bridge_pty_open_input(f1, &kr, sid, BOOT)
 	testing.expect(t, ok1 && p1 == "a")
-	_, replay := bridge_pty_open_input(f1, &kr, sid)
+	_, replay := bridge_pty_open_input(f1, &kr, sid, BOOT)
 	testing.expect(t, !replay, "the same frame twice is a replay")
-	_, ok2 := bridge_pty_open_input(f2, &kr, sid)
+	_, ok2 := bridge_pty_open_input(f2, &kr, sid, BOOT)
 	testing.expect(t, ok2)
-	_, stale := bridge_pty_open_input(f1, &kr, sid)
+	_, stale := bridge_pty_open_input(f1, &kr, sid, BOOT)
 	testing.expect(t, !stale, "an older counter under the same salt is refused")
 	// Another session id: the AAD and subkey differ, so the frame does not authenticate.
-	_, cross := bridge_pty_open_input(f2, &kr, "sh_replay_other")
+	_, cross := bridge_pty_open_input(f2, &kr, "sh_replay_other", BOOT)
 	testing.expect(t, !cross)
+	// Bridge restart: a new boot_id. A frame sealed for the previous process does not
+	// authenticate, whatever its counter -- the lost replay state cannot be exploited.
+	salt_r: [vault.PTY_V2_SALT_BYTES]byte
+	salt_r[0] = 0xc3
+	fr, _ := test_pty_input_payload_with("r", V2_KEY_2, 2, "sh_replay_restart", salt_r, 9000, BOOT)
+	_, after_restart := bridge_pty_open_input(fr, &kr, "sh_replay_restart", "ffeeddccbbaa99887766554433221100")
+	testing.expect(t, !after_restart, "a frame bound to an old boot_id is refused")
+	_, no_boot := bridge_pty_open_input(fr, &kr, "sh_replay_restart", "")
+	testing.expect(t, !no_boot, "no boot_id, no input")
 	// A new stream (new salt) may start its own sequence.
 	salt_b: [vault.PTY_V2_SALT_BYTES]byte
 	salt_b[0] = 0xb2
-	f3, _ := test_pty_input_payload_with("c", V2_KEY_2, 2, sid, salt_b, 5000)
-	_, ok3 := bridge_pty_open_input(f3, &kr, sid)
+	f3, _ := test_pty_input_payload_with("c", V2_KEY_2, 2, sid, salt_b, 5000, BOOT)
+	_, ok3 := bridge_pty_open_input(f3, &kr, sid, BOOT)
 	testing.expect(t, ok3)
 	// Non-current epoch input is refused (command epoch floor).
-	f4, _ := test_pty_input_payload_with("d", TEST_VAULT_KEY_HEX, 1, sid, salt_b, 5001)
-	_, old_epoch := bridge_pty_open_input(f4, &kr, sid)
+	f4, _ := test_pty_input_payload_with("d", TEST_VAULT_KEY_HEX, 1, sid, salt_b, 5001, BOOT)
+	_, old_epoch := bridge_pty_open_input(f4, &kr, sid, BOOT)
 	testing.expect(t, !old_epoch)
 
 	// The replay table itself: eviction raises the floor so evicted salts stay dead.
@@ -332,7 +342,7 @@ test_v2_pane_capture_is_sealed :: proc(t: ^testing.T) {
 	frame := make([]byte, 4 + len(body), context.temp_allocator)
 	frame[3] = 1
 	copy(frame[4:], body)
-	plain, _, _, ok := vault.pty_open(frame, &kr, "sh_pane", .Out, 0, context.temp_allocator)
+	plain, _, _, ok := vault.pty_open(frame, &kr, "sh_pane", .Out, 0, "", context.temp_allocator)
 	testing.expect(t, ok && string(plain) == "top secret screen")
 
 	// Randomness failure and a locked vault: an error, never plaintext.
@@ -382,4 +392,13 @@ test_v2_chat_pane_capture_result_is_sealed :: proc(t: ^testing.T) {
 	testing.expect(t, bres == .Sealed && cut && len(tok) <= 48000)
 	tail, _ := vault.open(tok, &kr, context.temp_allocator)
 	testing.expect_value(t, tail, "last line")
+}
+
+// The viewer learns the bridge's unseal boot id from stream_ready (PTY v2 input AAD).
+@(test)
+test_v2_stream_ready_carries_boot_id :: proc(t: ^testing.T) {
+	with_boot := bridge_pty_stream_format_lifecycle_event("shell_pty_stream_ready", "sh_b", "sh_b", false, 0, context.temp_allocator, "00112233445566778899aabbccddeeff")
+	testing.expect(t, strings.contains(with_boot, `"bridge_boot_id":"00112233445566778899aabbccddeeff"`), with_boot)
+	closed := bridge_pty_stream_format_lifecycle_event("shell_pty_stream_closed", "sh_b", "sh_b", false, 0, context.temp_allocator)
+	testing.expect(t, !strings.contains(closed, "bridge_boot_id"), closed)
 }
