@@ -79,7 +79,16 @@ work starts, regardless of size. There is no carve-out for "quick fixes."
    `inst_...` id.
 4. **Keep tasks current.** Record findings and evidence via structured handoff/artifacts and task comments, and submit a
    task for review only after `ham-ctl verify` passes.
-5. **Close the loop.** The chain is complete only when every task reaches `done`.
+5. **Choose work per item.** Every chain is `mixed_work`. Keep the same chain and
+   coordinator while adding ordinary tickets or workflow runs as the work evolves.
+   Use `ham-ctl workflow templates`, `workflow run <ref> --chain <id> --request-id <stable-key>`,
+   and `workflow list --chain <id>`. Workflow stage tasks are engine-managed; inspect
+   them with `workflow status/output/history` and use whole-run retry or cancellation.
+6. **Close the loop explicitly.** Finishing a batch does not complete the chain.
+   Read `ham-ctl task-chain graph --chain <id>` for the current work revision and
+   ticket/run prerequisites. Every included ticket must be done and every included
+   workflow run must succeed, with no active leases or pending proposal. Then use
+   `ham-ctl task-chain complete --chain <id> --expected-work-revision <n> --summary "<final acceptance>"`.
 
 > Task System v2: Read `TASK.md` in your run directory on every wake. Use `task-chain propose`,
 > `task-chain summary set`, `task create/update/publish`, `lease next/heartbeat/submit/handoff/block`,
