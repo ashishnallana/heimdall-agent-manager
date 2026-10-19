@@ -810,20 +810,6 @@ revoke_prepare :: proc(svc: ^Service, in_: Revoke_Input) -> (Revoke_Plan, domain
 	}, domain.Domain_Error{}
 }
 
-// ── Relabel ─────────────────────────────────────────────────────────────────
-
-relabel :: proc(svc: ^Service, user_id, device_id: string, expected_version: i64, label: string) -> (i64, domain.Domain_Error) {
-	if !vault.label_valid(label) do return 0, invalid("label must be 1..128 bytes of printable UTF-8")
-	dir, found, err := iface.vault_get_directory(svc.repo, user_id)
-	if err.code != .None do return 0, err
-	if !found do return 0, not_configured_error()
-	if expected_version != dir.version do return 0, domain.vault_conflict_error(dir.version)
-	return iface.vault_commit(svc.repo, domain.Vault_Directory_Commit{
-		user_id = user_id, expected_version = expected_version, now = platform.clock_now(svc.clock),
-		label_device_id = device_id, label = label,
-	})
-}
-
 // ── Owner reset ─────────────────────────────────────────────────────────────
 // The only way to replace a directory's root. It is requested from an interactive
 // browser session (Trusted_Proxy; the handler enforces it), and it is DELAYED: the

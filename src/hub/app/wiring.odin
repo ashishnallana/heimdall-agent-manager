@@ -551,7 +551,6 @@ register_routes :: proc(graph: ^App_Graph) {
 	http.router_add(&graph.router, "POST", "/api/v1/vault/devices/*/approve", rawptr(&graph.vault_directory_handlers), http.vault_approve_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/vault/devices/*/revoke", rawptr(&graph.vault_directory_handlers), http.vault_revoke_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/vault/devices/*/deny", rawptr(&graph.vault_directory_handlers), http.vault_deny_handler)
-	http.router_add(&graph.router, "PATCH", "/api/v1/vault/devices/*", rawptr(&graph.vault_directory_handlers), http.vault_patch_device_handler)
 	// LSP server config CRUD (REQ-LSP-CFG-1). The /resolve literal route must be
 	// registered before the /* wildcard so first-match-wins selects it correctly.
 	http.router_add(&graph.router, "POST", "/api/v1/bridges/*/lsp-servers", rawptr(&graph.lsp_server_config_handlers), http.lsp_server_config_create_handler)

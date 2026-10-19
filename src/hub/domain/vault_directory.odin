@@ -143,7 +143,8 @@ Vault_Directory_Commit :: struct {
 	epoch_statement: string,
 	epoch_signature: string,
 
-	// Relabel an approved device.
+	// Set an approved device's label. Only from a signed approval statement (the
+	// browser approve path): there is no unsigned relabel endpoint.
 	label_device_id: string,
 	label:           string,
 

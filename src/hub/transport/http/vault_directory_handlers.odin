@@ -459,25 +459,6 @@ vault_revoke_bridge_credentials :: proc(bridges: ^bridge_service.Bridge_Service,
 	return domain.Domain_Error{}
 }
 
-// ── PATCH /api/v1/vault/devices/{id} ────────────────────────────────────────
-// {expected_version, label}; device-signed.
-vault_patch_device_handler :: proc(ctx: rawptr, req: Request) -> Response {
-	h := (^Vault_Directory_Handlers)(ctx)
-	auth, ok, resp := require_vault_user(h, req)
-	if !ok do return resp
-	_, serr := vd.verify_request(h.vault, auth.user_id, signed_request(req), .Approver)
-	if serr.code != .None do return respond_error(serr, req.request_id)
-	o, parsed := body_object(req)
-	if !parsed do return bad_request(req, "body must be a JSON object")
-	version, v_ok := obj_i64(o, "expected_version")
-	if !v_ok do return bad_request(req, "expected_version is required")
-	device_id := device_id_from_path(req)
-	new_version, err := vd.relabel(h.vault, auth.user_id, device_id, version, obj_str(o, "label"))
-	if err.code != .None do return respond_error(err, req.request_id)
-	publish(h, auth.user_id, device_id, "updated")
-	return respond_success(version_json(new_version), req.request_id, auth_ctx_server_time(req))
-}
-
 // ── POST /api/v1/vault/directory/reset ──────────────────────────────────────
 // Schedules destruction of the whole directory RESET_DELAY_SECONDS (72 h) from now
 // (see vd.schedule_reset). Interactive browser session only; body ignored. Returns
