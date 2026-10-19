@@ -253,7 +253,7 @@ function KeyboardReadout() {
           `vv h ${r(vv?.height)} top ${r(vv?.offsetTop)} pageTop ${r(vv?.pageTop)} s ${vv?.scale?.toFixed(2) ?? '-'}`,
           `var h ${css.getPropertyValue('--app-viewport-height').trim()} off ${css.getPropertyValue('--app-viewport-bottom-offset').trim()}`,
           `root ${r(root?.top)}..${r(root?.bottom)} card ${r(card?.top)}..${r(card?.bottom)}`,
-          `focus ${document.activeElement?.tagName ?? '-'}`,
+          `shell ${PRESETS.get('shell') ?? 'flow'} focus ${document.activeElement?.tagName ?? '-'}`,
         ].join('\n'),
       );
     };
@@ -379,7 +379,16 @@ function ComposerDemo() {
   );
 
   return (
-    <div data-debug-id="composer-demo-root" className="flex h-full w-full justify-center bg-canvas text-primary">
+    <div
+      data-debug-id="composer-demo-root"
+      className={
+        // `?shell=fixed` mirrors AppShell's mobile shell (`fixed inset-x-0 top-0 app-viewport-height`)
+        // so the keyboard behaviour of the real app can be compared with the in-flow default.
+        PRESETS.get('shell') === 'fixed'
+          ? 'fixed inset-x-0 top-0 app-viewport-height flex w-full max-w-full justify-center overflow-hidden bg-canvas text-primary'
+          : 'flex h-full w-full justify-center bg-canvas text-primary'
+      }
+    >
       {PRESETS.get('kbd') === '1' ? <KeyboardReadout /> : null}
       {/* Phone-width column so the demo reads the same on a desktop preview. */}
       <div className="flex h-full w-full max-w-[440px] flex-col sm:border-x sm:border-subtle">
