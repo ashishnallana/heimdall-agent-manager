@@ -293,8 +293,15 @@ device_approve_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	// "decision recorded, nothing to address".
 	if input.approve {
 		if bridge_id, has_bridge := device_auth.approved_bridge_id(handlers.service, input.user_code); has_bridge {
-			// The bridge's vault directory entry was committed with the approval.
-			if handlers.event_bus != nil do events.publish_resource_changed(handlers.event_bus, auth_ctx.user_id, VAULT_DEVICES_RESOURCE, bridge_id, "approved", "{}")
+			// The bridge's vault directory entry was committed with the approval; the
+			// event names the directory DEVICE id, like every other vault_devices event.
+			if handlers.event_bus != nil {
+				if identity_key, has_key := device_auth.approved_bridge_identity_key(handlers.service, input.user_code); has_key {
+					if device_id, id_ok := vault.device_id_from_sign_pub(identity_key, context.temp_allocator); id_ok {
+						events.publish_resource_changed(handlers.event_bus, auth_ctx.user_id, VAULT_DEVICES_RESOURCE, device_id, "approved", "{}")
+					}
+				}
+			}
 			data := strings.builder_make()
 			strings.write_string(&data, "{\"hub_observed\":{\"bridge_id\":\"")
 			write_handler_json_string(&data, bridge_id)
