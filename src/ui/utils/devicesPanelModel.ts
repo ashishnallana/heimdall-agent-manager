@@ -15,6 +15,12 @@ export interface DeviceRow {
   status: DeviceRowStatus;
   approvedByLabel: string;
   lastSeenAt: string;
+  /** When the device was approved (or registered), for telling same-named devices apart. */
+  addedAt: string;
+  /** Revoking it leaves exactly one approver (this device): warned on confirm. */
+  leavesSingleApprover: boolean;
+  /** The hub retired this bridge identity; this browser revokes it (signed). */
+  retiredHint: boolean;
   bridgeId: string;
   isCurrent: boolean;
   /** Revoke offered: approved, not this device, not the last approver. */
@@ -48,6 +54,9 @@ export async function buildDeviceRows(chain: VerifiedChain, currentDeviceId: str
       status: 'approved',
       approvedByLabel: d.approved_by_device_id === d.device_id ? '(account root)' : labelOf(d.approved_by_device_id),
       lastSeenAt: String(d.row.last_seen_at ?? ''),
+      addedAt: String(d.row.approved_at || d.row.created_at || ''),
+      leavesSingleApprover: kindPolicy(d.kind).countsAsApprover && remainingApprovers(chain, d.device_id).length === 1,
+      retiredHint: chain.retiredHints.includes(d.device_id),
       bridgeId: String(d.row.bridge_id ?? ''),
       isCurrent,
       canRevoke: !isCurrent && !lastApprover,
@@ -63,6 +72,9 @@ export async function buildDeviceRows(chain: VerifiedChain, currentDeviceId: str
     status,
     approvedByLabel: status === 'revoked' && chain.everApproved.get(d.device_id) ? labelOf(chain.everApproved.get(d.device_id)!.approved_by_device_id) : '',
     lastSeenAt: String(d.last_seen_at ?? ''),
+    addedAt: String(d.approved_at || d.created_at || ''),
+    leavesSingleApprover: false,
+    retiredHint: false,
     bridgeId: String(d.bridge_id ?? ''),
     isCurrent: d.device_id === currentDeviceId,
     canRevoke: false,
@@ -73,5 +85,6 @@ export async function buildDeviceRows(chain: VerifiedChain, currentDeviceId: str
   for (const d of chain.pending) rows.push({ ...other(d, 'pending'), fingerprint: await rowFingerprint(d) });
   for (const d of chain.untrusted) rows.push({ ...other(d, 'untrusted'), fingerprint: await rowFingerprint(d) });
   for (const d of chain.revoked) rows.push({ ...other(d, 'revoked'), fingerprint: await rowFingerprint(d) });
-  return rows;
+  // This device first, so it is never confused with a same-named one further down.
+  return rows.sort((a, b) => Number(b.isCurrent) - Number(a.isCurrent));
 }

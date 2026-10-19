@@ -54,7 +54,8 @@ export interface DeviceVaultDeps {
     listOnlineLockedBridgeIds: () => Promise<string[]>;
   } | null;
   pollIntervalMs: number;
-  label: () => string;
+  /** Default label for this browser (signed into its approval; editable by the approver). */
+  label: (identity: DeviceIdentity) => string;
 }
 
 interface Ctx {
@@ -94,7 +95,19 @@ function d(): DeviceVaultDeps {
   return deps;
 }
 
-export function defaultBrowserLabel(): string {
+/**
+ * "Firefox on Windows · 3fa2 · added 2026-10-19": browser and OS, the first group of
+ * the device fingerprint and the date, so two browsers of the same kind (a normal and
+ * a private window) are never listed under the same name.
+ */
+export function defaultBrowserLabel(identity?: Pick<DeviceIdentity, 'fingerprint'>, now: Date = new Date()): string {
+  const base = baseBrowserLabel();
+  const fp = identity?.fingerprint ? identity.fingerprint.slice(0, 4) : '';
+  const day = now.toISOString().slice(0, 10);
+  return [base, fp, `added ${day}`].filter(Boolean).join(' · ');
+}
+
+function baseBrowserLabel(): string {
   const ua = typeof navigator !== 'undefined' ? navigator.userAgent : '';
   const browser = /Edg\//.test(ua) ? 'Edge' : /Firefox\//.test(ua) ? 'Firefox' : /Chrome\//.test(ua) ? 'Chrome' : /Safari\//.test(ua) ? 'Safari' : 'Browser';
   const osName = /Windows/.test(ua) ? 'Windows' : /Android/.test(ua) ? 'Android' : /iPhone|iPad/.test(ua) ? 'iOS' : /Mac OS X/.test(ua) ? 'macOS' : /Linux/.test(ua) ? 'Linux' : '';
@@ -357,7 +370,7 @@ async function runGenesis(c: Ctx): Promise<void> {
   const identity = c.identity ?? (c.identity = await createDeviceIdentity(kv, c.userId));
   dispatch(deviceVaultIdentityKnown({ userId: c.userId, deviceId: identity.deviceId, fingerprint: identity.fingerprint }));
   dispatch(deviceVaultStatusChanged({ status: 'genesis' }));
-  const body = await buildGenesis(identity, d().label());
+  const body = await buildGenesis(identity, d().label(identity));
   try {
     await d().api.postVaultGenesis(body);
   } catch (err) {
@@ -377,7 +390,7 @@ async function loadPendingCode(c: Ctx): Promise<{ userCode: string; codeExpiresA
 
 async function register(c: Ctx, dir: VaultDirectory): Promise<void> {
   const identity = c.identity!;
-  const { statement, signature } = await buildRegistration(identity, d().label());
+  const { statement, signature } = await buildRegistration(identity, d().label(identity));
   const res = await d().api.postVaultRegister(statement, signature);
   if (res.device_id !== identity.deviceId || res.fingerprint !== identity.fingerprint) {
     throw new Error('The hub registered a different device id or fingerprint than this device computed');

@@ -45,17 +45,19 @@ export function DevicesList({ rows, busyId, keyFailures = {}, confirmRevokeId, o
   return (
     <ul data-debug-id="settings-devices-list" className="divide-y divide-subtle rounded-2xl border border-subtle bg-surface">
       {rows.map((r) => (
-        <li key={r.deviceId} data-debug-id={`settings-device-row-${r.deviceId}`} className="flex flex-wrap items-start gap-3 p-3">
+        <li key={r.deviceId} data-debug-id={`settings-device-row-${r.deviceId}`} className={`flex flex-wrap items-start gap-3 p-3 ${r.isCurrent ? 'border-l-4 border-accent bg-accent-soft' : ''}`}>
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
               <span className="truncate font-medium text-primary">{r.label}</span>
               <StatusPill tone="neutral">{KIND_LABEL[r.kind] ?? r.kind}</StatusPill>
               <StatusPill tone={STATUS_TONE[r.status]}>{r.status === 'untrusted' ? 'unverified — never given keys' : r.status}</StatusPill>
-              {r.isCurrent ? <StatusPill tone="info" data-debug-id="settings-device-current-badge">This device</StatusPill> : null}
+              {r.isCurrent ? <StatusPill tone="info" data-debug-id="settings-device-current-badge">This device (the one you are using)</StatusPill> : null}
+              {r.retiredHint ? <StatusPill tone="warning" data-debug-id={`settings-device-retired-hint-${r.deviceId}`}>retired — being revoked</StatusPill> : null}
             </div>
             <div className="mt-1 grid gap-x-4 text-xs text-muted sm:grid-cols-2">
               <span>Fingerprint <code className="font-mono text-primary">{r.fingerprint}</code></span>
               <span>Approved by {r.approvedByLabel || '—'}</span>
+              <span>Added {when(r.addedAt)}</span>
               <span>Last seen {when(r.lastSeenAt)}</span>
               {r.bridgeId ? <span>Bridge {r.bridgeId}</span> : null}
             </div>
@@ -75,10 +77,14 @@ export function DevicesList({ rows, busyId, keyFailures = {}, confirmRevokeId, o
             ) : null}
             {r.status === 'approved' && !r.isCurrent ? (
               confirmRevokeId === r.deviceId ? (
-                <>
+                <div data-debug-id={`settings-device-revoke-confirm-${r.deviceId}`} className="flex w-full flex-col gap-2 rounded-lg border border-danger p-2 text-xs text-primary">
+                  <span>Revoke <strong>{r.label}</strong> — fingerprint <code className="font-mono">{r.fingerprint}</code>, added {when(r.addedAt)}, last seen {when(r.lastSeenAt)}. Check this is NOT the device you are using.</span>
+                  {r.leavesSingleApprover ? <span data-debug-id={`settings-device-revoke-single-approver-${r.deviceId}`} className="font-medium text-danger">This is your only other device that can approve. After revoking it, this device is the only one left that can add devices.</span> : null}
+                  <div className="flex flex-wrap gap-2">
                   <Button size="sm" variant="danger" data-debug-id={`settings-device-revoke-confirm-btn-${r.deviceId}`} loading={busyId === r.deviceId} onClick={() => onConfirmRevoke?.(r.deviceId)}>Revoke and rotate keys</Button>
                   <Button size="sm" variant="ghost" data-debug-id={`settings-device-revoke-cancel-btn-${r.deviceId}`} onClick={() => onCancelRevoke?.()}>Cancel</Button>
-                </>
+                  </div>
+                </div>
               ) : (
                 <Button size="sm" variant="danger" data-debug-id={`settings-device-revoke-btn-${r.deviceId}`} disabled={!r.canRevoke} title={r.revokeBlockedReason || undefined} onClick={() => onRevoke?.(r.deviceId)}>Revoke</Button>
               )
