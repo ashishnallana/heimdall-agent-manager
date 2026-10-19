@@ -19,10 +19,24 @@ export const MAX_EPOCH = 0xffffffff;
 /** Statement/AAD value grammar; user ids appear verbatim in canonical bytes. */
 export const ID_VALUE_RE = /^[A-Za-z0-9_.:-]*$/;
 
+/** A non-empty AAD identifier (session, owner, request ids): ID_VALUE_RE, at most 256 chars. */
+export function isValidAadId(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= 256 && ID_VALUE_RE.test(value);
+}
+
+/**
+ * A per-epoch HKDF base key (non-extractable, usage `deriveKey`) for the PTY v2
+ * per-stream subkeys, or a pending import of one. WebCrypto cannot use an AES-GCM key
+ * as HKDF input, so the epoch key is imported a second time for this purpose.
+ */
+export type PtyBaseKey = CryptoKey | Promise<CryptoKey | null>;
+
 export interface VaultKeyring {
   readonly userId: string;
   readonly currentEpoch: number;
   readonly keys: ReadonlyMap<number, CryptoKey>;
+  /** PTY v2 HKDF base keys by epoch. Absent epoch = PTY traffic for it is locked. */
+  readonly ptyBaseKeys?: ReadonlyMap<number, PtyBaseKey>;
 }
 
 export interface KeyringEntryBytes {
@@ -126,6 +140,12 @@ async function importEpochKey(raw: Uint8Array): Promise<CryptoKey> {
   return crypto.subtle.importKey('raw', raw as unknown as BufferSource, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
 }
 
+/** Import raw epoch-key bytes as the non-extractable HKDF base key for PTY v2 subkeys. */
+export async function importPtyBaseKey(raw: Uint8Array): Promise<CryptoKey> {
+  if (raw.length !== KEYRING_KEY_BYTES) throw new KeyringFormatError('key length');
+  return crypto.subtle.importKey('raw', raw as unknown as BufferSource, 'HKDF', false, ['deriveKey']);
+}
+
 /**
  * Import HKR1 bytes as a keyring of non-extractable keys. `bytes` and every
  * intermediate copy are zeroed before this returns, whether it succeeds or throws.
@@ -135,8 +155,12 @@ export async function importKeyring(bytes: Uint8Array, expectedUserId?: string):
   try {
     parsed = parseKeyringBytes(bytes, expectedUserId);
     const keys = new Map<number, CryptoKey>();
-    for (const e of parsed.entries) keys.set(e.epoch, await importEpochKey(e.key));
-    return Object.freeze({ userId: parsed.userId, currentEpoch: parsed.currentEpoch, keys });
+    const ptyBaseKeys = new Map<number, PtyBaseKey>();
+    for (const e of parsed.entries) {
+      keys.set(e.epoch, await importEpochKey(e.key));
+      ptyBaseKeys.set(e.epoch, await importPtyBaseKey(e.key));
+    }
+    return Object.freeze({ userId: parsed.userId, currentEpoch: parsed.currentEpoch, keys, ptyBaseKeys });
   } finally {
     bytes.fill(0);
     if (parsed) for (const e of parsed.entries) e.key.fill(0);

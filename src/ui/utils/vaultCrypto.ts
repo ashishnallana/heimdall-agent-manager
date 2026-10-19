@@ -7,7 +7,7 @@
 
 import { BIP39_WORDS } from './bip39Words.ts';
 import { clearActiveTaskChainSearchKey } from './taskChainSearchKey.ts';
-import { ID_VALUE_RE, isVaultKeyring, serializeKeyringBytes, keyFor, currentKey, type VaultKeyring } from './vaultKeyring.ts';
+import { ID_VALUE_RE, importPtyBaseKey, isVaultKeyring, serializeKeyringBytes, keyFor, currentKey, type PtyBaseKey, type VaultKeyring } from './vaultKeyring.ts';
 
 export type { VaultKeyring } from './vaultKeyring.ts';
 export { currentKey, keyFor } from './vaultKeyring.ts';
@@ -58,14 +58,51 @@ let activePasswordVaultKey: CryptoKey | null = null;
 let activeVaultKeyring: VaultKeyring | null = null;
 let activeVaultUserId = '';
 let activeBridgeVaultKeyHex: string | null = null;
+// P1 adapter: the PTY v2 HKDF base key for epoch 1 (or its pending import). It can only
+// be created while raw key material is in hand (unlock), or restored from IndexedDB.
+let activeAdapterPtyBaseKey: PtyBaseKey | null = null;
+// The adapter keyring's PTY base-key map. Mutable on purpose: a base key that arrives
+// after the keyring was built is added WITHOUT replacing the keyring object, so
+// identity-based checks elsewhere (`getActiveVaultKey() === keyring`) stay valid.
+let activeAdapterPtyBaseKeys: Map<number, PtyBaseKey> | null = null;
 
 function rebuildAdapterKeyring(): void {
   if (!activePasswordVaultKey) return;
+  activeAdapterPtyBaseKeys = new Map();
+  if (activeAdapterPtyBaseKey) activeAdapterPtyBaseKeys.set(1, activeAdapterPtyBaseKey);
   activeVaultKeyring = Object.freeze({
     userId: activeVaultUserId,
     currentEpoch: 1,
     keys: new Map([[1, activePasswordVaultKey]]),
+    ptyBaseKeys: activeAdapterPtyBaseKeys,
   });
+}
+
+function installAdapterPtyBaseKey(key: PtyBaseKey | null): void {
+  activeAdapterPtyBaseKey = key;
+  if (!activeAdapterPtyBaseKeys) return;
+  if (key) activeAdapterPtyBaseKeys.set(1, key);
+  else activeAdapterPtyBaseKeys.delete(1);
+}
+
+/**
+ * P1 adapter: install the epoch-1 PTY v2 HKDF base key (e.g. restored from IndexedDB).
+ * Ignored when a real keyring (which carries its own base keys) is active.
+ */
+export function setActiveVaultPtyBaseKey(key: CryptoKey | null): void {
+  if (!activePasswordVaultKey) return;
+  installAdapterPtyBaseKey(key);
+}
+
+/** P1 adapter: the epoch-1 PTY base key, once its import (if any) has finished. */
+export async function getActiveVaultPtyBaseKey(): Promise<CryptoKey | null> {
+  const key = activeAdapterPtyBaseKey;
+  if (!key) return null;
+  try {
+    return await key;
+  } catch {
+    return null;
+  }
 }
 
 /** The active keyring, or null when the vault is locked. */
@@ -102,6 +139,17 @@ export function getActiveBridgeVaultKeyMaterial(): string | null {
 export function setActiveBridgeVaultKeyMaterial(rawHex: string | null): void {
   const clean = String(rawHex || '').trim().toLowerCase();
   activeBridgeVaultKeyHex = /^[0-9a-f]{64}$/.test(clean) ? clean : null;
+  // The raw key is in hand: derive the PTY v2 HKDF base key for the adapter's epoch 1.
+  if (activeBridgeVaultKeyHex && activePasswordVaultKey) {
+    const raw = hexToBytes(activeBridgeVaultKeyHex);
+    const pending: Promise<CryptoKey | null> = importPtyBaseKey(raw)
+      .catch(() => null)
+      .finally(() => raw.fill(0));
+    installAdapterPtyBaseKey(pending);
+    void pending.then((key) => {
+      if (activeAdapterPtyBaseKey === pending) installAdapterPtyBaseKey(key);
+    });
+  }
 }
 
 /**
@@ -135,7 +183,12 @@ export function setActiveVaultKey(key: CryptoKey | VaultKeyring | null): void {
   } else {
     activePasswordVaultKey = (key as CryptoKey | null) ?? null;
     activeVaultKeyring = null;
+    activeAdapterPtyBaseKey = null;
     rebuildAdapterKeyring();
+  }
+  if (key && isVaultKeyring(key)) {
+    activeAdapterPtyBaseKey = null;
+    activeAdapterPtyBaseKeys = null;
   }
   activeBridgeVaultKeyHex = null;
   clearActiveTaskChainSearchKey();

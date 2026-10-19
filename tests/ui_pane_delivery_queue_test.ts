@@ -17,8 +17,11 @@ const Terminal = (xtermModule as any).Terminal ?? (xtermModule as any).default.T
 const key = await keyringFromHex('0123456789abcdef'.repeat(4));
 const SESSION = 'shs_pane_test';
 // Bridge output frames: PTY v2, `out` direction, epoch 1.
+// Fixed salt and a counter that never repeats under it, as the bridge's stream worker does.
+const OUT_SALT = new Uint8Array(16).fill(0x5a);
+let outCounter = 0;
 const encryptShellStreamPayload = async (value: string) =>
-  bytesToBase64(await sealPtyPayload(new TextEncoder().encode(value), key.keys.get(1)!, 1, SESSION, 'out'));
+  bytesToBase64(await sealPtyPayload(new TextEncoder().encode(value), (await key.ptyBaseKeys!.get(1))!, 1, SESSION, 'out', OUT_SALT, ++outCounter));
 const text = (value: string) => new TextEncoder().encode(value);
 const write = (term: any, bytes: Uint8Array): Promise<void> => new Promise(resolve => term.write(bytes, resolve));
 

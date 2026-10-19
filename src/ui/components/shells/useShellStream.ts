@@ -1,5 +1,5 @@
 import { PTY_COLOR_RESET, PaneDeliveryQueue, PaneWriteBatcher, normalizeSnapshotText, repaintCapturedScreenText } from './paneDeliveryQueue.ts';
-import { PTY_WIRE_FLAG_ENCRYPTED, PTY_WIRE_KIND_INPUT, PTY_WIRE_KIND_OUTPUT, PTY_WIRE_KIND_SCREEN, PTY_WIRE_VIEWER_HEADER_BYTES, PtyTextDecoder, decodePtyViewerFrame, decryptPtyPayload, encodePtyViewerFrame, encryptPtyPayload, type PtyDirection, type PtyViewerFrame } from './ptyWire.ts';
+import { PTY_WIRE_FLAG_ENCRYPTED, PTY_WIRE_KIND_INPUT, PTY_WIRE_KIND_OUTPUT, PTY_WIRE_KIND_SCREEN, PTY_WIRE_VIEWER_HEADER_BYTES, PtyTextDecoder, decodePtyViewerFrame, decryptPtyPayload, encodePtyViewerFrame, encryptPtyPayload, resetPtyInputStream, type PtyDirection, type PtyViewerFrame } from './ptyWire.ts';
 import { decodeBase64Strict, type VaultKeyring } from '../../utils/vaultCrypto.ts';
 import { createInputCoalescer, type InputCoalescer } from './ptyInputCoalescer.ts';
 import { createVisibilityGate } from './paneVisibilityGate.ts';
@@ -118,7 +118,7 @@ async function shellStreamUrl(sessionId: string): Promise<string> {
 }
 
 /**
- * Decrypts a base64 PTY v2 payload (u32be epoch | nonce | tag | ct) carried in JSON
+ * Decrypts a base64 PTY v2 payload (u32be epoch | salt | nonce | tag | ct) carried in JSON
  * (`enc_b64`). Returns null when the keyring does not hold the payload's epoch.
  */
 export async function decryptShellStreamPayload(
@@ -319,6 +319,8 @@ export function useShellStream({
             return;
           }
           console.log('[useShellStream] socket.onopen connected successfully for session:', sessionId);
+          // A new connection is a new input stream: fresh salt, fresh subkey (PTY v2).
+          resetPtyInputStream(String(sessionId || ''));
           reconnectAttemptsRef.current = 0;
           vaultLockedNoticeShownRef.current = false;
                 inputQueueRef.current = Promise.resolve();

@@ -1,5 +1,5 @@
 import { PTY_COLOR_RESET, PaneDeliveryQueue, PaneWriteBatcher, normalizeSnapshotText, repaintCapturedScreenText } from '../shells/paneDeliveryQueue.ts';
-import { PTY_WIRE_FLAG_ENCRYPTED, PTY_WIRE_KIND_INPUT, PTY_WIRE_KIND_OUTPUT, PTY_WIRE_KIND_SCREEN, PTY_WIRE_VIEWER_HEADER_BYTES, PtyTextDecoder, decodePtyViewerFrame, decryptPtyPayload, encodePtyViewerFrame, encryptPtyPayload, type PtyViewerFrame } from '../shells/ptyWire.ts';
+import { PTY_WIRE_FLAG_ENCRYPTED, PTY_WIRE_KIND_INPUT, PTY_WIRE_KIND_OUTPUT, PTY_WIRE_KIND_SCREEN, PTY_WIRE_VIEWER_HEADER_BYTES, PtyTextDecoder, decodePtyViewerFrame, decryptPtyPayload, encodePtyViewerFrame, encryptPtyPayload, resetPtyInputStream, type PtyViewerFrame } from '../shells/ptyWire.ts';
 import { createInputCoalescer, type InputCoalescer } from '../shells/ptyInputCoalescer.ts';
 import { createVisibilityGate } from '../shells/paneVisibilityGate.ts';
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -260,6 +260,8 @@ export function useAgentStream({
             try { socket.close(); } catch { /* ignore */ }
             return;
           }
+          // A new connection is a new input stream: fresh salt, fresh subkey (PTY v2).
+          resetPtyInputStream(String(streamSessionIdRef.current || ''));
           reconnectAttemptsRef.current = 0;
           setConnected(true);
           startHeartbeat(socket);

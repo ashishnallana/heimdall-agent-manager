@@ -7,16 +7,16 @@
  *
  *   kind  : 1 output, 2 input, 3 screen (hub pane-capture repaint)
  *   flags : 0x01 snapshot (absolute repaint; reset the UTF-8 decoder), 0x02 encrypted
- *           (payload = u32be epoch | nonce(12) | tag(16) | AES-256-GCM ciphertext, AAD
- *           `heimdall-pty-v2|e<epoch>|<session_id>|<out|in>`), 0x04 cursor block present
+ *           (payload = PTY v2: u32be epoch | salt(16) | nonce(12) | tag(16) | AES-256-GCM
+ *           ciphertext under a per-stream subkey -- see below), 0x04 cursor block present
  *           (*) only when 0x04 is set.
  *
  * Control frames (ready / stream_ready / stream_closed / status / error / resize / heartbeat)
  * remain JSON text frames. There is no base64 on this path any more.
  */
 
-import { AES_GCM_NONCE_BYTES, AES_GCM_TAG_BYTES, MIN_ARMOR_PAYLOAD_BYTES } from '../../utils/vaultCrypto.ts';
-import { currentKey, keyFor, type VaultKeyring } from '../../utils/vaultKeyring.ts';
+import { AES_GCM_NONCE_BYTES, AES_GCM_TAG_BYTES, MIN_ARMOR_PAYLOAD_BYTES, getActiveVaultKey, isVaultArmored, parseVaultEnvelope } from '../../utils/vaultCrypto.ts';
+import { isValidAadId, type VaultKeyring } from '../../utils/vaultKeyring.ts';
 
 export const PTY_WIRE_KIND_OUTPUT = 0x01;
 export const PTY_WIRE_KIND_INPUT = 0x02;
@@ -37,7 +37,7 @@ export interface PtyViewerFrame {
   /** -1 when the frame carries no cursor block. */
   cursorRow: number;
   cursorCol: number;
-  /** Raw bytes or nonce|tag|ciphertext; a VIEW over the frame buffer, not a copy. */
+  /** Raw bytes or the PTY v2 payload; a VIEW over the frame buffer, not a copy. */
   payload: Uint8Array;
 }
 
@@ -78,12 +78,85 @@ export function encodePtyViewerFrame(kind: number, flags: number, payload: Uint8
 
 export type PtyDirection = 'out' | 'in';
 
-/** PTY payload v2 header: u32be epoch | nonce(12) | tag(16). */
-export const PTY_V2_HEADER_BYTES = 4 + MIN_ARMOR_PAYLOAD_BYTES;
+// ── PTY payload v2 (docs/plans/passwordless-vault.md §1; Odin twin: src/lib/vault/channels.odin)
+//
+//   frame  = u32be epoch | salt(16) | nonce(12) | tag(16) | ct
+//   subkey = HKDF-SHA256(ikm = epoch key, salt = salt16, info = `heimdall-pty-v2|<session_id>|<out|in>`)
+//   nonce  = u32be(0) | u64be(counter), counter >= 1, never repeated under one salt
+//   AAD    = `heimdall-pty-v2|e<epoch>|<session_id>|out`, or for input
+//            `heimdall-pty-v2|e<epoch>|<session_id>|in|<counter>` (the bridge refuses any
+//            input counter that does not increase for its stream -- replay defence).
 
-/** AAD for a PTY v2 payload: `heimdall-pty-v2|e<epoch>|<session_id>|<out|in>`. */
-export function ptyAad(epoch: number, sessionId: string, direction: PtyDirection): Uint8Array {
-  return new TextEncoder().encode(`heimdall-pty-v2|e${epoch}|${sessionId}|${direction}`);
+export const PTY_V2_SALT_BYTES = 16;
+/** PTY payload v2 header: u32be epoch | salt(16) | nonce(12) | tag(16). */
+export const PTY_V2_HEADER_BYTES = 4 + PTY_V2_SALT_BYTES + MIN_ARMOR_PAYLOAD_BYTES;
+const PTY_V2_NONCE_OFFSET = 4 + PTY_V2_SALT_BYTES;
+const PTY_V2_INFO = 'heimdall-pty-v2';
+const utf8 = new TextEncoder();
+
+function assertPtyEpoch(epoch: number): void {
+  if (!Number.isInteger(epoch) || epoch < 1 || epoch > 0xffffffff) throw new Error('invalid PTY epoch');
+}
+
+function assertPtyCounter(counter: bigint): void {
+  if (counter < 1n || counter > 0xffffffffffffffffn) throw new Error('invalid PTY counter');
+}
+
+function assertPtySession(sessionId: string): void {
+  // Mirror of lib/vault pty_session_id_valid: fail closed on anything that could shift
+  // the AAD / HKDF info fields.
+  if (!isValidAadId(sessionId)) throw new Error('invalid PTY session id');
+}
+
+/** AAD for a PTY v2 payload; `counter` is required (and bound) for input frames. */
+export function ptyAad(epoch: number, sessionId: string, direction: PtyDirection, counter?: number | bigint): Uint8Array {
+  assertPtyEpoch(epoch);
+  assertPtySession(sessionId);
+  if (direction === 'in') {
+    if (counter === undefined) throw new Error('PTY input AAD needs a counter');
+    const c = BigInt(counter);
+    assertPtyCounter(c);
+    return utf8.encode(`${PTY_V2_INFO}|e${epoch}|${sessionId}|in|${c.toString()}`);
+  }
+  return utf8.encode(`${PTY_V2_INFO}|e${epoch}|${sessionId}|out`);
+}
+
+/** The 12-byte nonce u32be(0) | u64be(counter). */
+export function ptyNonce(counter: number | bigint): Uint8Array {
+  const c = BigInt(counter);
+  assertPtyCounter(c);
+  const n = new Uint8Array(AES_GCM_NONCE_BYTES);
+  new DataView(n.buffer).setBigUint64(4, c);
+  return n;
+}
+
+/** Derive the per-stream AES-GCM subkey from an HKDF base key (non-extractable). */
+export async function derivePtySubkey(baseKey: CryptoKey, salt: Uint8Array, sessionId: string, direction: PtyDirection): Promise<CryptoKey> {
+  assertPtySession(sessionId);
+  if (salt.length !== PTY_V2_SALT_BYTES) throw new Error('invalid PTY salt');
+  return crypto.subtle.deriveKey(
+    {
+      name: 'HKDF',
+      hash: 'SHA-256',
+      salt: Uint8Array.from(salt) as unknown as BufferSource,
+      info: utf8.encode(`${PTY_V2_INFO}|${sessionId}|${direction}`) as unknown as BufferSource,
+    },
+    baseKey,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt'],
+  );
+}
+
+/** The epoch's PTY HKDF base key, or null when this keyring cannot do PTY for it. */
+export async function ptyBaseKeyFor(keyring: VaultKeyring | null | undefined, epoch: number): Promise<CryptoKey | null> {
+  const entry = keyring?.ptyBaseKeys?.get(epoch);
+  if (!entry) return null;
+  try {
+    return (await entry) ?? null;
+  } catch {
+    return null;
+  }
 }
 
 /** The epoch in a v2 payload header, or 0 when the payload is too short or names epoch 0. */
@@ -92,38 +165,69 @@ export function ptyPayloadEpoch(payload: Uint8Array): number {
   return new DataView(payload.buffer, payload.byteOffset, 4).getUint32(0);
 }
 
-/** Seal one v2 payload. `nonce` is supplied by callers that need determinism (tests). */
+/**
+ * Seal one v2 payload under the (salt, session, direction) subkey of `baseKey`. The
+ * caller owns counter uniqueness: one salt, strictly increasing counters from 1.
+ */
 export async function sealPtyPayload(
   data: Uint8Array,
-  key: CryptoKey,
+  baseKey: CryptoKey,
   epoch: number,
   sessionId: string,
   direction: PtyDirection,
-  nonce?: Uint8Array,
+  salt: Uint8Array,
+  counter: number | bigint,
 ): Promise<Uint8Array> {
-  if (!sessionId) throw new Error('PTY payload needs a session id');
-  if (!Number.isInteger(epoch) || epoch < 1 || epoch > 0xffffffff) throw new Error('invalid PTY epoch');
-  const iv = nonce ? Uint8Array.from(nonce) : crypto.getRandomValues(new Uint8Array(AES_GCM_NONCE_BYTES));
-  if (iv.length !== AES_GCM_NONCE_BYTES) throw new Error('invalid PTY nonce');
+  const aad = ptyAad(epoch, sessionId, direction, counter);
+  const nonce = ptyNonce(counter);
+  const subkey = await derivePtySubkey(baseKey, salt, sessionId, direction);
+  return sealPtyWithSubkey(data, subkey, epoch, salt, nonce, aad);
+}
+
+async function sealPtyWithSubkey(data: Uint8Array, subkey: CryptoKey, epoch: number, salt: Uint8Array, nonce: Uint8Array, aad: Uint8Array): Promise<Uint8Array> {
   const sealed = new Uint8Array(await crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv: iv as unknown as BufferSource, additionalData: ptyAad(epoch, sessionId, direction) as unknown as BufferSource, tagLength: 128 },
-    key,
+    { name: 'AES-GCM', iv: nonce as unknown as BufferSource, additionalData: aad as unknown as BufferSource, tagLength: 128 },
+    subkey,
     data as unknown as BufferSource,
   ));
   const ciphertextLen = sealed.length - AES_GCM_TAG_BYTES;
   const out = new Uint8Array(PTY_V2_HEADER_BYTES + ciphertextLen);
   new DataView(out.buffer).setUint32(0, epoch);
-  out.set(iv, 4);
-  out.set(sealed.subarray(ciphertextLen), 4 + AES_GCM_NONCE_BYTES);
+  out.set(salt, 4);
+  out.set(nonce, PTY_V2_NONCE_OFFSET);
+  out.set(sealed.subarray(ciphertextLen), PTY_V2_NONCE_OFFSET + AES_GCM_NONCE_BYTES);
   out.set(sealed.subarray(0, ciphertextLen), PTY_V2_HEADER_BYTES);
   return out;
 }
 
+// Derived subkeys are cached per base key, so a stream pays HKDF once, not per frame.
+const PTY_SUBKEY_CACHE_MAX = 32;
+const ptySubkeyCache = new WeakMap<CryptoKey, Map<string, Promise<CryptoKey>>>();
+
+function cachedPtySubkey(baseKey: CryptoKey, salt: Uint8Array, sessionId: string, direction: PtyDirection): Promise<CryptoKey> {
+  let byStream = ptySubkeyCache.get(baseKey);
+  if (!byStream) {
+    byStream = new Map();
+    ptySubkeyCache.set(baseKey, byStream);
+  }
+  let saltHex = '';
+  for (const b of salt) saltHex += b.toString(16).padStart(2, '0');
+  const id = `${saltHex}|${sessionId}|${direction}`;
+  let subkey = byStream.get(id);
+  if (!subkey) {
+    subkey = derivePtySubkey(baseKey, salt, sessionId, direction);
+    subkey.catch(() => byStream!.delete(id));
+    if (byStream.size >= PTY_SUBKEY_CACHE_MAX) byStream.delete(byStream.keys().next().value as string);
+    byStream.set(id, subkey);
+  }
+  return subkey;
+}
+
 /**
- * Decrypt a PTY v2 payload (u32be epoch | nonce | tag | ct) with the key for the
- * epoch in its header, straight from the binary frame. Returns null when this
- * keyring does not hold that epoch (the caller shows the locked notice); throws when
- * the payload is malformed or does not authenticate.
+ * Decrypt a PTY v2 payload (u32be epoch | salt | nonce | tag | ct) straight from the
+ * binary frame. Returns null when this keyring does not hold that epoch (the caller
+ * shows the locked notice); throws when the payload is malformed or does not
+ * authenticate.
  */
 export async function decryptPtyPayload(
   payload: Uint8Array,
@@ -136,29 +240,117 @@ export async function decryptPtyPayload(
   }
   const epoch = ptyPayloadEpoch(payload);
   if (epoch < 1) throw new Error('Encrypted pty frame names epoch 0');
-  const key = keyFor(keyring, epoch);
-  if (!key) return null;
-  const nonce = payload.subarray(4, 4 + AES_GCM_NONCE_BYTES);
-  const tag = payload.subarray(4 + AES_GCM_NONCE_BYTES, PTY_V2_HEADER_BYTES);
+  assertPtySession(sessionId);
+  const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+  if (view.getUint32(PTY_V2_NONCE_OFFSET) !== 0) throw new Error('Encrypted pty frame has a non-counter nonce');
+  const counter = view.getBigUint64(PTY_V2_NONCE_OFFSET + 4);
+  if (counter < 1n) throw new Error('Encrypted pty frame has counter 0');
+  const baseKey = await ptyBaseKeyFor(keyring, epoch);
+  if (!baseKey) return null;
+  const salt = payload.slice(4, PTY_V2_NONCE_OFFSET);
+  const nonce = payload.subarray(PTY_V2_NONCE_OFFSET, PTY_V2_NONCE_OFFSET + AES_GCM_NONCE_BYTES);
+  const tag = payload.subarray(PTY_V2_NONCE_OFFSET + AES_GCM_NONCE_BYTES, PTY_V2_HEADER_BYTES);
   const ciphertext = payload.subarray(PTY_V2_HEADER_BYTES);
   // WebCrypto AES-GCM expects ciphertext || auth_tag.
   const combined = new Uint8Array(ciphertext.length + AES_GCM_TAG_BYTES);
   combined.set(ciphertext, 0);
   combined.set(tag, ciphertext.length);
+  const subkey = await cachedPtySubkey(baseKey, salt, sessionId, direction);
   const plain = await crypto.subtle.decrypt(
-    { name: 'AES-GCM', iv: nonce as unknown as BufferSource, additionalData: ptyAad(epoch, sessionId, direction) as unknown as BufferSource, tagLength: 128 },
-    key,
+    { name: 'AES-GCM', iv: nonce as unknown as BufferSource, additionalData: ptyAad(epoch, sessionId, direction, counter) as unknown as BufferSource, tagLength: 128 },
+    subkey,
     combined as unknown as BufferSource,
   );
   return new Uint8Array(plain);
 }
 
 /**
- * Encrypt browser input for the bridge under the keyring's CURRENT epoch (the bridge
- * rejects any other), with a random 12-byte IV and the `in` direction AAD.
+ * Decrypt an armored PTY capture `vault:v2:e<N>:<b64(salt|nonce|tag|ct)>` (the bridge's
+ * sealed pane reply) to text. Returns null when the keyring cannot open that epoch;
+ * throws on a malformed or unauthenticated capture.
  */
-export async function encryptPtyPayload(data: Uint8Array, keyring: VaultKeyring, sessionId: string): Promise<Uint8Array> {
-  return sealPtyPayload(data, currentKey(keyring), keyring.currentEpoch, sessionId, 'in');
+export async function decryptPtyCaptureText(armored: string, keyring: VaultKeyring, sessionId: string): Promise<string | null> {
+  const { epoch, payload } = parseVaultEnvelope(armored);
+  const frame = new Uint8Array(4 + payload.length);
+  new DataView(frame.buffer).setUint32(0, epoch);
+  frame.set(payload, 4);
+  const plain = await decryptPtyPayload(frame, keyring, sessionId, 'out');
+  return plain ? new TextDecoder().decode(plain) : null;
+}
+
+/**
+ * A pane reply whose `output` is an armored PTY v2 capture (the bridge seals pane
+ * captures whenever its vault is configured) is decrypted for `sessionId`. Fails
+ * closed: a capture this browser cannot open throws instead of returning ciphertext
+ * or a partial screen.
+ */
+export async function openPaneReplyOutput<T extends { output?: unknown }>(data: T, sessionId: string): Promise<T> {
+  const output = data?.output;
+  if (typeof output !== 'string' || !isVaultArmored(output)) return data;
+  const keyring = getActiveVaultKey();
+  if (!keyring) throw new Error('vault_locked: unlock the vault to view this pane');
+  const text = await decryptPtyCaptureText(output, keyring, sessionId);
+  if (text === null) throw new Error('vault_locked: this pane was sealed under a key this browser does not hold');
+  return { ...data, output: text };
+}
+
+// ── Browser input streams ────────────────────────────────────────────────────
+// One input stream per session: a fresh CSPRNG salt (hence a fresh subkey) whenever the
+// stream starts, the keyring changes or its current epoch changes, and a counter seeded
+// from the wall clock (ms x 1000) that only ever increases -- also across salts, so a
+// later stream always starts above an earlier one (the bridge's replay floor).
+
+interface PtyInputStream {
+  keyring: VaultKeyring;
+  epoch: number;
+  salt: Uint8Array;
+  subkey: Promise<CryptoKey>;
+  counter: bigint;
+}
+
+const ptyInputStreams = new Map<string, PtyInputStream>();
+const ptyInputHighWater = new Map<string, bigint>();
+
+/** Start a new input stream (new salt) for the session on its next keystroke. */
+export function resetPtyInputStream(sessionId: string): void {
+  ptyInputStreams.delete(sessionId);
+}
+
+/**
+ * Encrypt browser input for the bridge under the keyring's CURRENT epoch (the bridge
+ * rejects any other), on this session's input stream. Throws (fail closed: nothing is
+ * sent) when the keyring has no PTY base key for that epoch.
+ */
+export async function encryptPtyPayload(data: Uint8Array, keyring: VaultKeyring, sessionId: string, now: () => number = Date.now): Promise<Uint8Array> {
+  assertPtySession(sessionId);
+  const epoch = keyring.currentEpoch;
+  assertPtyEpoch(epoch);
+  let stream = ptyInputStreams.get(sessionId);
+  if (!stream || stream.keyring !== keyring || stream.epoch !== epoch) {
+    const baseKey = await ptyBaseKeyFor(keyring, epoch);
+    if (!baseKey) throw new Error('Vault PTY key unavailable');
+    // Re-check after the await: a concurrent call may already have started the stream.
+    stream = ptyInputStreams.get(sessionId);
+    if (!stream || stream.keyring !== keyring || stream.epoch !== epoch) {
+      const salt = crypto.getRandomValues(new Uint8Array(PTY_V2_SALT_BYTES));
+      const seed = BigInt(Math.max(0, Math.floor(now()))) * 1000n;
+      const prev = ptyInputHighWater.get(sessionId) ?? 0n;
+      stream = {
+        keyring,
+        epoch,
+        salt,
+        subkey: derivePtySubkey(baseKey, salt, sessionId, 'in'),
+        counter: (seed > prev ? seed : prev),
+      };
+      ptyInputStreams.set(sessionId, stream);
+    }
+  }
+  // Reserve the counter synchronously so concurrent calls never share one.
+  stream.counter += 1n;
+  const counter = stream.counter;
+  ptyInputHighWater.set(sessionId, counter);
+  const subkey = await stream.subkey;
+  return sealPtyWithSubkey(data, subkey, epoch, stream.salt, ptyNonce(counter), ptyAad(epoch, sessionId, 'in', counter));
 }
 
 /**
