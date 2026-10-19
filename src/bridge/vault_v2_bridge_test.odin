@@ -807,3 +807,15 @@ test_v2_shell_capture_is_sealed :: proc(t: ^testing.T) {
 	_, failed := bridge_shell_capture_seal_with(.Unlocked, nil, "secret screen")
 	testing.expect(t, failed == .Failed)
 }
+
+// vault prune: only an explicit hub rejection (401/403) marks a scope dead; an
+// unreachable or erroring hub never does.
+@(test)
+test_vault_prune_verdict :: proc(t: ^testing.T) {
+	testing.expect_value(t, bridge_prune_verdict(true, 200), Prune_Verdict.Alive)
+	testing.expect_value(t, bridge_prune_verdict(true, 401), Prune_Verdict.Dead)
+	testing.expect_value(t, bridge_prune_verdict(true, 403), Prune_Verdict.Dead)
+	testing.expect_value(t, bridge_prune_verdict(true, 500), Prune_Verdict.Unknown)
+	testing.expect_value(t, bridge_prune_verdict(true, 404), Prune_Verdict.Unknown)
+	testing.expect_value(t, bridge_prune_verdict(false, 0), Prune_Verdict.Unknown)
+}
