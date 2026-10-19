@@ -68,13 +68,14 @@ Kind_Policy :: struct {
 	can_approve:       bool, // may sign approve/revoke/epoch/wrap statements
 	counts_as_approver: bool, // counts toward the last-approver guard
 	receives_wrap:     bool, // gets a hub-stored keyring wrap
+	can_be_root:       bool, // may self-sign a genesis: an interactive, approver-capable credential
 }
 
 // kind_policy is the ONE place that decides what a device kind may do. Bridges never
 // approve anything; an unknown kind may do nothing.
 kind_policy :: proc(kind: Device_Kind) -> Kind_Policy {
 	switch kind {
-	case .Browser:  return {can_approve = true, counts_as_approver = true, receives_wrap = true}
+	case .Browser:  return {can_approve = true, counts_as_approver = true, receives_wrap = true, can_be_root = true}
 	case .Recovery: return {can_approve = true, counts_as_approver = true, receives_wrap = true}
 	case .Bridge:   return {}
 	case .Unknown:  return {}
@@ -255,7 +256,7 @@ Statement :: struct {
 
 valid_statement_type :: proc(t: string) -> bool {
 	switch t {
-	case "genesis", "approve", "revoke", "epoch", "wrap", "recovery":
+	case "genesis", "approve", "revoke", "epoch", "wrap", "recovery", "register":
 		return true
 	}
 	return false
@@ -329,4 +330,19 @@ bridge_unseal_key_canonical :: proc(bridge_id, ecdh_pub_hex, boot_id: string, al
 	if len(ecdh_pub_hex) != P256_PUBLIC_KEY_BYTES * 2 || !is_lower_hex(ecdh_pub_hex) do return "", false
 	if boot_id == "" || !is_lower_hex(boot_id) do return "", false
 	return strings.concatenate({BRIDGE_UNSEAL_KEY_HEADER, "\n", bridge_id, "\n", ecdh_pub_hex, "\n", boot_id}, allocator), true
+}
+
+// ── Bridge enrollment proof of possession ───────────────────────────────────
+
+BRIDGE_ENROLL_PROOF_HEADER :: "heimdall-bridge-enroll/v1"
+
+// bridge_enroll_proof_canonical renders
+// "heimdall-bridge-enroll/v1\n<bridge_ecdh_public_key>\n<code_challenge>", which the
+// bridge's persistent IDENTITY key signs at /device/authorize. It proves the host
+// holds that identity key and binds it to this grant's per-process ECDH key and PKCE
+// challenge, so a grant cannot carry someone else's identity key.
+bridge_enroll_proof_canonical :: proc(ecdh_pub_hex, code_challenge: string, allocator := context.allocator) -> (string, bool) {
+	if len(ecdh_pub_hex) != P256_PUBLIC_KEY_BYTES * 2 || !is_lower_hex(ecdh_pub_hex) do return "", false
+	if code_challenge == "" || len(code_challenge) > 128 || !valid_id_value(code_challenge) do return "", false
+	return strings.concatenate({BRIDGE_ENROLL_PROOF_HEADER, "\n", ecdh_pub_hex, "\n", code_challenge}, allocator), true
 }

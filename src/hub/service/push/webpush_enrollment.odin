@@ -65,3 +65,52 @@ build_enrollment_approval_notification :: proc(key_fingerprint: string) -> Notif
 		category = .Attention,
 	}
 }
+
+// build_vault_device_pending_notification: "a new device is waiting for approval".
+// It deliberately carries NO user code (plan §3: a stolen cookie can register a
+// pending device, but approving it needs the code shown on the NEW screen, so the
+// code must never travel to the other devices) and no host-chosen label — only the
+// hub-computed fingerprint, which the approver compares on the new device's screen.
+build_vault_device_pending_notification :: proc(fingerprint: string) -> Notification_Content {
+	body := strings.concatenate({
+		"A new device asked to join your vault (fingerprint ",
+		fingerprint,
+		"). To approve it, enter the code shown on that device. If this was not you, ignore it.",
+	})
+	return Notification_Content{
+		title    = "New device waiting for approval",
+		body     = body,
+		tag      = strings.clone("heimdall:attention:vault-device"),
+		route    = strings.clone("/device/add"),
+		category = .Attention,
+	}
+}
+
+// build_vault_directory_notification announces a directory-level event to every
+// session and device of the account: "created" (genesis), "reset_scheduled",
+// "reset_cancelled" or "reset_executed". `due_at` is shown for a scheduled reset.
+// These are the owner's alarm against a hijacked session, so they always fire.
+build_vault_directory_notification :: proc(event, due_at: string) -> Notification_Content {
+	title, body: string
+	switch event {
+	case "created":
+		title = "Vault created"
+		body = strings.clone("A new vault was set up for your account. If this was not you, schedule a reset from a trusted device and revoke your sessions.")
+	case "reset_scheduled":
+		title = "Vault reset scheduled"
+		body = strings.concatenate({"A reset of your vault was requested. It will be destroyed at ", due_at, " unless an approved device cancels it. If this was not you, cancel it now."})
+	case "reset_cancelled":
+		title = "Vault reset cancelled"
+		body = strings.clone("The scheduled reset of your vault was cancelled by one of your approved devices.")
+	case:
+		title = "Vault reset completed"
+		body = strings.clone("Your vault was reset: its devices were removed and your bridges must be enrolled again.")
+	}
+	return Notification_Content{
+		title    = title,
+		body     = body,
+		tag      = strings.clone("heimdall:attention:vault-directory"),
+		route    = strings.clone("/settings"),
+		category = .Attention,
+	}
+}

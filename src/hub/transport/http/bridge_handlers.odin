@@ -17,6 +17,7 @@ import iface "odin_test:hub/repository/iface"
 import auth_service "odin_test:hub/service/auth"
 import agent_service "odin_test:hub/service/agent"
 import events "odin_test:hub/service/events"
+import vd "odin_test:hub/service/vault_directory"
 import platform "odin_test:hub/platform"
 import bridge_service "odin_test:hub/service/bridge"
 import device_auth_service "odin_test:hub/service/device_auth"
@@ -56,6 +57,8 @@ Bridge_Handlers :: struct {
 	// stops lease-less orphans and re-plans chains with held tasks; the bridge
 	// `busy` push is an implicit heartbeat. nil in tests that do not wire it.
 	task_engine: ^taskv2.Service,
+	// Passwordless vault: a rolled-back enrollment's directory entry is retired.
+	vault: ^vd.Service,
 }
 
 list_bridges_handler :: proc(ctx: rawptr, req: Request) -> Response {
@@ -518,6 +521,15 @@ bridge_enrollment_cancel_handler :: proc(ctx: rawptr, req: Request) -> Response 
 		// one that misses it still sees its credential refused on reconnect.
 		bridge_enroll_send_result(h.bridge_runtime_registry, enroll_key, false)
 		_ = bridge_service.close_bridge_connection(h.bridges, enroll_key)
+		// The identity approved with this enrollment never got the vault key; its
+		// directory entry is retired so the host can re-enroll with a new identity.
+		if h.vault != nil {
+			if retired, rerr := vd.retire_bridge_entry(h.vault, string(bridge.owner_user_id), bridge.bridge_id); rerr.code != .None {
+				return respond_error(rerr, req.request_id)
+			} else if retired != "" && h.event_bus != nil {
+				events.publish_resource_changed(h.event_bus, string(bridge.owner_user_id), VAULT_DEVICES_RESOURCE, retired, "revoked", "{}")
+			}
+		}
 	}
 	publish_bridge_enrollment_changed(h, string(bridge.owner_user_id), bridge.bridge_id)
 	return respond_success(fmt.tprintf("{{\"bridge_id\":\"%s\",\"rolled_back\":%v,\"committed\":%v,\"row_deleted\":%v}}", bridge.bridge_id, rolled_back, !rolled_back, removed), req.request_id, auth_ctx_server_time(req))

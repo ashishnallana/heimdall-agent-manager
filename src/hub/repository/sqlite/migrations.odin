@@ -412,9 +412,13 @@ MIGRATION_090_TASK_V2 :: #load("migrations/090_task_v2.sql", string)
 // 091: agent_instances.stopped_by — a user stop sticks (Task System v2 F4).
 MIGRATION_091_AGENT_INSTANCE_STOPPED_BY :: #load("migrations/091_agent_instance_stopped_by.sql", string)
 
+// 092: passwordless vault device directory (vault_directories, vault_devices,
+// vault_epochs, vault_wrapped_keyrings). Idempotent; re-run by upgrade_vault_directory_schema.
+MIGRATION_092_VAULT_DEVICE_DIRECTORY :: #load("migrations/092_vault_device_directory.sql", string)
+
 MIGRATION_075_CONVERSATION_LAUNCH_PREFERENCES :: #load("migrations/075_conversation_launch_preferences.sql", string)
 
-migration_order :: [95]string {
+migration_order :: [96]string {
 	"001_foundation.sql",
 	"002_owner_scoped_core.sql",
 	"003_device_tokens.sql",
@@ -510,6 +514,7 @@ migration_order :: [95]string {
 	"089_memory_proposer.sql",
 	"090_task_v2.sql",
 	"091_agent_instance_stopped_by.sql",
+	"092_vault_device_directory.sql",
 }
 
 // stop_before is a TEST SEAM: when non-empty, the apply loop stops in front of
@@ -836,6 +841,12 @@ run_migrations :: proc(
 			mark_migration_applied(conn, name)
 			continue
 		}
+		// Keyed on the LAST object 092 creates.
+		if name == "092_vault_device_directory.sql" &&
+		   sqlite_object_exists(conn, "vault_directory_resets") {
+			mark_migration_applied(conn, name)
+			continue
+		}
 		sql := migration_sql(name, migrations_dir)
 		if sql == "" {
 			return false, domain.domain_error(
@@ -882,6 +893,7 @@ run_migrations :: proc(
 	if !upgrade_bridge_update_progress_schema(conn) do return false, domain.domain_error(.Internal_Error, "bridge update progress schema upgrade failed")
 	if !upgrade_memory_action_expiry_schema(conn) do return false, domain.domain_error(.Internal_Error, "memory action expiry schema upgrade failed")
 	if !upgrade_task_v2_schema(conn) do return false, domain.domain_error(.Internal_Error, "task v2 schema upgrade failed")
+	if !upgrade_vault_directory_schema(conn) do return false, domain.domain_error(.Internal_Error, "vault directory schema upgrade failed")
 	return true, domain.Domain_Error{}
 }
 
@@ -974,6 +986,7 @@ migration_sql :: proc(name, migrations_dir: string) -> string {
 	if name == "089_memory_proposer.sql" do return strings.clone(MIGRATION_089_MEMORY_PROPOSER)
 	if name == "090_task_v2.sql" do return strings.clone(MIGRATION_090_TASK_V2)
 	if name == "091_agent_instance_stopped_by.sql" do return strings.clone(MIGRATION_091_AGENT_INSTANCE_STOPPED_BY)
+	if name == "092_vault_device_directory.sql" do return strings.clone(MIGRATION_092_VAULT_DEVICE_DIRECTORY)
 	if name == "081_antigravity_models.sql" do return strings.clone(MIGRATION_081_ANTIGRAVITY_MODELS)
 	if name == "080_copilot_launch_recipe.sql" do return strings.clone(MIGRATION_080_COPILOT_LAUNCH_RECIPE)
 	if name == "079_repair_provider_catalog_etag.sql" do return strings.clone(MIGRATION_079_REPAIR_PROVIDER_CATALOG_ETAG)
@@ -1459,6 +1472,12 @@ drop_legacy_column :: proc(conn: ^Conn, table, column: string) {
 	if !exec(conn, stmt) {
 		fmt.eprintfln("[migrations] task v2: could not drop legacy column %s.%s (left in place; the engine never reads it)", table, column)
 	}
+}
+
+// upgrade_vault_directory_schema is the idempotent self-heal twin of migration 092:
+// the file is written with IF NOT EXISTS throughout, so it is simply re-run.
+upgrade_vault_directory_schema :: proc(conn: ^Conn) -> bool {
+	return exec(conn, MIGRATION_092_VAULT_DEVICE_DIRECTORY)
 }
 
 // upgrade_user_vaults_schema idempotently ensures the user_vaults
