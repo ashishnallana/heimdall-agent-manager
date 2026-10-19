@@ -44,8 +44,8 @@ test('encryptProjectFields encrypts name and description when vault key is provi
 
   const encrypted = await encryptProjectFields(plainProject, TEST_KEY_HEX);
 
-  assert.ok(isVaultArmored(encrypted.name), 'Project name must have vault:v2:e1: armor');
-  assert.ok(isVaultArmored(encrypted.description), 'Project description must have vault:v2:e1: armor');
+  assert.ok(isVaultArmored(encrypted.name), 'Project name must have vault:v2:7e57000000000001:e1: armor');
+  assert.ok(isVaultArmored(encrypted.description), 'Project description must have vault:v2:7e57000000000001:e1: armor');
   assert.notEqual(encrypted.name, plainProject.name);
   assert.notEqual(encrypted.description, plainProject.description);
   assert.equal(encrypted.slug, 'prod-infra');

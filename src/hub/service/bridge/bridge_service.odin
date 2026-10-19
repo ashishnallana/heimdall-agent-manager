@@ -266,7 +266,8 @@ update_runtime_capabilities :: proc(service: ^Bridge_Service, bridge_id, capabil
 // free to send whatever it likes down the WS, so the hub pins the vocabulary here.
 // "unpaired": enrolled, but it never pinned an account root and can no longer (it
 // missed its enrollment's first unseal); the UI offers revoke + re-enroll.
-BRIDGE_VAULT_STATUS_VALUES :: [4]string{"unlocked", "locked", "disabled", "unpaired"}
+// There is no plaintext ("disabled") mode: a bridge either holds the keyring or not.
+BRIDGE_VAULT_STATUS_VALUES :: [3]string{"unlocked", "locked", "unpaired"}
 
 bridge_vault_status_valid :: proc(value: string) -> bool {
 	for allowed in BRIDGE_VAULT_STATUS_VALUES {
@@ -297,7 +298,7 @@ bridge_vault_status_valid :: proc(value: string) -> bool {
 // NOTHING MAY GATE ON THE RESULT. See the field comment on domain.Bridge.vault_status.
 update_vault_status :: proc(service: ^Bridge_Service, bridge_id, vault_status: string) -> (bridge: domain.Bridge, changed: bool, err: domain.Domain_Error) {
 	if service == nil || service.repo == nil || bridge_id == "" do return domain.Bridge{}, false, domain.domain_error(.Validation_Failed, "bridge_id is required")
-	if !bridge_vault_status_valid(vault_status) do return domain.Bridge{}, false, domain.domain_error(.Validation_Failed, "vault_status must be 'unlocked', 'locked', or 'disabled'")
+	if !bridge_vault_status_valid(vault_status) do return domain.Bridge{}, false, domain.domain_error(.Validation_Failed, "vault_status must be 'unlocked' or 'locked'")
 	existing, ok, get_err := iface.bridge_get_bridge(service.repo, bridge_id)
 	if !ok do return domain.Bridge{}, false, get_err
 	if existing.status == .Revoked {

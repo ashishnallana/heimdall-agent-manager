@@ -276,8 +276,6 @@ bridge_agent_route :: proc(method, params: string) -> Bridge_Agent_Route {
 		return Bridge_Agent_Route{kind = .Local, local_op = "vault.status"}
 	case "agent.vault.get":
 		return Bridge_Agent_Route{kind = .Local, local_op = "vault.get"}
-	case "agent.vault.lock":
-		return Bridge_Agent_Route{kind = .Local, local_op = "vault.lock"}
 	case "agent.vault.reset":
 		return Bridge_Agent_Route{kind = .Local, local_op = "vault.reset"}
 
@@ -332,7 +330,7 @@ bridge_agent_method_allowed :: proc(method: string) -> bool {
 	     // shell sessions (bridge-local block on a hub-created run)
 	     "agent.shell.wait",
 	     // vault commands (bridge-local)
-	     "agent.vault.status", "agent.vault.get", "agent.vault.lock", "agent.vault.reset",
+	     "agent.vault.status", "agent.vault.get", "agent.vault.reset",
 	     // telemetry (bridge-local)
 	     "agent.telemetry.agents_count":
 		return true
@@ -445,11 +443,6 @@ bridge_local_handle_agent_local_op :: proc(request_id, op, params: string, rec: 
 			status = status_str, vault_status = status_str, configured = status != .Not_Enrolled,
 			permissions_valid = permissions_valid, key_length = key_length,
 		}, context.temp_allocator)
-		return bridge_local_response_data(request_id, data)
-	}
-	if op == "vault.lock" {
-		bridge_vault_lock()
-		data, _ := vault.wire_encode(Bridge_Agent_Vault_Op_Result{ok = true, status = "locked"}, context.temp_allocator)
 		return bridge_local_response_data(request_id, data)
 	}
 	if op == "vault.reset" do return bridge_vault_reset_response(request_id)
@@ -580,7 +573,7 @@ Bridge_Agent_Vault_Op_Result :: struct {
 	status: string,
 }
 
-// keyring_b64 is the whole keyring (HKR1, every epoch); see agent.vault.get.
+// keyring_b64 is the whole keyring (HKR2, every epoch); see agent.vault.get.
 Bridge_Agent_Vault_Keyring :: struct {
 	keyring_b64:   string,
 	current_epoch: u32,

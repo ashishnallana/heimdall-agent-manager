@@ -8,6 +8,7 @@ import { nextLogSlot, parseStatement, remainingApprovers, wrapRecipients, type V
 import { pairApproveMac, pairBridgePayload, pairKeyMac, verifyPairKeyMac, type PairKeys } from './vaultPairing.ts';
 import { epochCommitHex, sealKeyringWrap, type SignedKeyringWrap } from './vaultKeyringWrap.ts';
 import { genesisKeyringBytes, nextEpochKeyringBytes } from './vaultKeyringSession.ts';
+import { vaultIdFor } from './vaultKeyring.ts';
 import {
   SIGN_ALG_ECDSA_P256_SHA256,
   deviceKindFromId,
@@ -55,7 +56,8 @@ export async function buildPairedRegistration(identity: DeviceIdentity, label: s
  */
 export async function buildGenesis(identity: DeviceIdentity, label: string, now = Date.now()): Promise<GenesisBody> {
   const userId = identity.userId;
-  const kr = genesisKeyringBytes(userId);
+  // The genesis device is the root: the vault id is derived from its signing key.
+  const kr = genesisKeyringBytes(userId, await vaultIdFor(identity.signPub));
   try {
     const commit = await epochCommitHex(kr, userId, 1);
     const wrap = await sealKeyringWrap(identity, userId, { device_id: identity.deviceId, ecdh_public_key: identity.ecdhPub, wrap_alg: identity.wrapAlg }, 1, kr);
@@ -209,7 +211,9 @@ export async function buildRevocation(
   if (targetId === approver.deviceId) throw new FlowRefused('This device cannot revoke itself');
   const target = chain.trusted.get(targetId);
   if (!target) throw new FlowRefused('That device is not approved');
-  if (kindPolicy(target.kind).countsAsApprover && remainingApprovers(chain, targetId).length === 0) throw new FlowRefused('Refusing to revoke the last approver');
+  if (kindPolicy(target.kind).countsAsApprover && remainingApprovers(chain, targetId, approver.deviceId).length === 0) {
+    throw new FlowRefused('Refusing to revoke the only other approver: create a recovery key first');
+  }
   const next = nextEpochKeyringBytes(currentKeyringBytes, chain.userId);
   try {
     const epoch = chain.currentEpoch + 1;

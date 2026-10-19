@@ -50,7 +50,7 @@ export async function buildDeviceRows(chain: VerifiedChain, currentDeviceId: str
   const labelOf = (id: string) => chain.everApproved.get(id)?.label || id;
   for (const d of chain.trusted.values()) {
     const isCurrent = d.device_id === currentDeviceId;
-    const lastApprover = kindPolicy(d.kind).countsAsApprover && remainingApprovers(chain, d.device_id).length === 0;
+    const lastApprover = kindPolicy(d.kind).countsAsApprover && remainingApprovers(chain, d.device_id, currentDeviceId).length === 0;
     rows.push({
       deviceId: d.device_id,
       kind: d.kind,
@@ -63,12 +63,12 @@ export async function buildDeviceRows(chain: VerifiedChain, currentDeviceId: str
       approvedDeviceLabels: [...chain.trusted.values()]
         .filter((t) => t.approved_by_device_id === d.device_id && t.device_id !== d.device_id)
         .map((t) => t.label || t.device_id),
-      leavesSingleApprover: kindPolicy(d.kind).countsAsApprover && remainingApprovers(chain, d.device_id).length === 1,
+      leavesSingleApprover: kindPolicy(d.kind).countsAsApprover && remainingApprovers(chain, d.device_id, currentDeviceId).length === 1,
       retiredHint: chain.retiredHints.includes(d.device_id),
       bridgeId: String(d.row.bridge_id ?? ''),
       isCurrent,
       canRevoke: !isCurrent && !lastApprover,
-      revokeBlockedReason: isCurrent ? 'This device' : lastApprover ? 'Last approver (add another device or a recovery key first)' : '',
+      revokeBlockedReason: isCurrent ? 'This device' : lastApprover ? 'Only other approver (create a recovery key first)' : '',
       canDeny: false,
       canSendKey: d.kind === 'bridge' && Boolean(d.row.bridge_id),
     });

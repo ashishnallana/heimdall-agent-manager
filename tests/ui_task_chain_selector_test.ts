@@ -279,7 +279,7 @@ test('Live search filter filters chains by decrypted title, project name, or cha
 // 5. Armor Shielding Guard (REQ-CHAIN-SELECTOR-VAULT-1)
 // -----------------------------------------------------------------------------
 
-test('Armor shielding: raw vault:v2:e1:... ciphertext never matches search queries', async () => {
+test('Armor shielding: raw vault:v2:7e57000000000001:e1:... ciphertext never matches search queries', async () => {
   const TEST_KEY = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
   const plaintextTitle = 'Master Password Vault Key Storage';
   const otherPlaintext = 'General Hub Infrastructure';
@@ -317,9 +317,9 @@ test('Armor shielding: raw vault:v2:e1:... ciphertext never matches search queri
     'Searching "Vault" must not match raw ciphertext before decryption',
   );
 
-  // Searching "vault:v2:e1:" or "v1" prefix MUST yield 0 matches
-  const matchPrefix = filterTaskChains(armoredItems, 'vault:v2:e1:');
-  assert.equal(matchPrefix.length, 0, 'Must not match "vault:v2:e1:" prefix');
+  // Searching "vault:v2:7e57000000000001:e1:" or "v1" prefix MUST yield 0 matches
+  const matchPrefix = filterTaskChains(armoredItems, 'vault:v2:7e57000000000001:e1:');
+  assert.equal(matchPrefix.length, 0, 'Must not match "vault:v2:7e57000000000001:e1:" prefix');
 
   const matchV1 = filterTaskChains(armoredItems, 'v1');
   assert.equal(matchV1.length, 0, 'Must not match "v1" token');

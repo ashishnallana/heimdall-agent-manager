@@ -2,7 +2,7 @@
 // Hub-blind E2EE bridge key wrapping and authenticated anti-replay unseal protocol.
 
 // v2 only (docs/plans/passwordless-vault.md §1 "Bridge unseal v2"): the plaintext is the
-// HKR1 keyring, HKDF info is `heimdall-bridge-unseal-v2`, and the AAD is
+// HKR2 keyring, HKDF info is `heimdall-bridge-unseal-v2`, and the AAD is
 // `heimdall-bridge-unseal-v2|<bridge_id>|<timestamp>|<nonce>|<current_epoch>`. Before
 // anything is encrypted, the bridge's ephemeral ECDH key must carry a valid signature by
 // its identity key; otherwise nothing is sent.
@@ -118,7 +118,7 @@ export async function verifyBridgeUnsealKey(target: BridgeUnsealTarget): Promise
 
 /**
  * Wrap a keyring for one bridge (Hub-blind E2EE): verify its signed ephemeral key,
- * then ECDH (fresh client key) -> HKDF-SHA256 -> AES-256-GCM over the HKR1 bytes with
+ * then ECDH (fresh client key) -> HKDF-SHA256 -> AES-256-GCM over the HKR2 bytes with
  * the v2 AAD. `keyringBytes` is zeroed before this returns.
  */
 export async function prepareUnsealPayload(

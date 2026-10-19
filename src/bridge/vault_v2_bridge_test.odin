@@ -70,6 +70,7 @@ test_v2_keystore_keyring_and_identity_round_trip :: proc(t: ^testing.T) {
 	}
 	copy(big.user_id_buf[:], strings.repeat("u", 64, context.temp_allocator))
 	big.user_id_len = 64
+	big.vault_id = test_vault_id()
 	big.count = vault.KEYRING_MAX_EPOCHS
 	big.current_epoch = vault.KEYRING_MAX_EPOCHS
 	ok, err := keystore_store_vault_keyring(f.id_a, test_keyring_bytes(&big))
@@ -349,9 +350,10 @@ test_v2_pane_capture_is_sealed :: proc(t: ^testing.T) {
 	reply := bridge_pane_reply_from_seal("cmd_pane_seal", false, "h1", output, res, 1, false)
 	defer delete(reply)
 	testing.expect(t, !strings.contains(reply, "top secret"), "no plaintext in the reply")
-	testing.expect(t, strings.has_prefix(output, "vault:v2:e1:"), output)
-	epoch, body, pres := vault.envelope_parse(output, context.temp_allocator)
-	testing.expect(t, pres == .Ok && epoch == 1)
+	prefix_buf: [64]byte
+	testing.expect(t, strings.has_prefix(output, vault.token_prefix(kr.vault_id, 1, prefix_buf[:])), output)
+	vid, epoch, body, pres := vault.envelope_parse(output, context.temp_allocator)
+	testing.expect(t, pres == .Ok && epoch == 1 && vid == kr.vault_id)
 	frame := make([]byte, 4 + len(body), context.temp_allocator)
 	frame[3] = 1
 	copy(frame[4:], body)
@@ -798,4 +800,33 @@ test_v2_unseal_requires_chain_to_pinned_root :: proc(t: ^testing.T) {
 	defer vault.keyring_wipe(&two)
 	ok, msg = unseal(f.id_a, &two, now, "n_chain_two")
 	testing.expectf(t, ok, "rotation under the pinned root accepted: %s", msg)
+}
+
+// shell_capture seals the screen like the pane paths: a content envelope under the
+// current epoch; a locked vault or a failed seal is an error, never plaintext.
+@(test)
+test_v2_shell_capture_is_sealed :: proc(t: ^testing.T) {
+	kr := test_keyring_from_hex("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	defer vault.keyring_wipe(&kr)
+	armored, res := bridge_shell_capture_seal_with(.Unlocked, &kr, "secret screen")
+	defer delete(armored)
+	testing.expect(t, res == .Sealed && vault.is_armored(armored) && !strings.contains(armored, "secret"), armored)
+	plain, ores := vault.open(armored, &kr, context.temp_allocator)
+	testing.expect(t, ores == .Ok && plain == "secret screen")
+	_, locked := bridge_shell_capture_seal_with(.Locked, &kr, "secret screen")
+	testing.expect(t, locked == .Locked)
+	_, failed := bridge_shell_capture_seal_with(.Unlocked, nil, "secret screen")
+	testing.expect(t, failed == .Failed)
+}
+
+// vault prune: only an explicit hub rejection (401/403) marks a scope dead; an
+// unreachable or erroring hub never does.
+@(test)
+test_vault_prune_verdict :: proc(t: ^testing.T) {
+	testing.expect_value(t, bridge_prune_verdict(true, 200), Prune_Verdict.Alive)
+	testing.expect_value(t, bridge_prune_verdict(true, 401), Prune_Verdict.Dead)
+	testing.expect_value(t, bridge_prune_verdict(true, 403), Prune_Verdict.Dead)
+	testing.expect_value(t, bridge_prune_verdict(true, 500), Prune_Verdict.Unknown)
+	testing.expect_value(t, bridge_prune_verdict(true, 404), Prune_Verdict.Unknown)
+	testing.expect_value(t, bridge_prune_verdict(false, 0), Prune_Verdict.Unknown)
 }

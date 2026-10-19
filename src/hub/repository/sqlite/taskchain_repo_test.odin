@@ -32,13 +32,13 @@ test_task_chain_search_change_feed_is_monotonic_and_owner_scoped :: proc(t: ^tes
 	owner_b := domain.User_ID("user_search_b")
 	chain_a := domain.Task_Chain{
 		chain_id = "chain_search_a", owner_user_id = owner_a,
-		title = "vault:v1:cipher-a", description = "vault:v1:description-a",
+		title = "vault:v2:cipher-a", description = "vault:v2:description-a",
 		publish_state = .Published, status = .Active, kind = domain.CHAIN_KIND_TICKET,
 		created_at = "2026-10-14T00:00:00Z", updated_at = "2026-10-14T00:00:00Z",
 	}
 	chain_b := domain.Task_Chain{
 		chain_id = "chain_search_b", owner_user_id = owner_b,
-		title = "vault:v1:cipher-b", publish_state = .Published, status = .Active,
+		title = "vault:v2:cipher-b", publish_state = .Published, status = .Active,
 		kind = "team_work", created_at = "2026-10-14T00:00:00Z", updated_at = "2026-10-14T00:00:00Z",
 	}
 	_, saved_a, _ := iface.taskchain_save_chain(&repo, chain_a)
@@ -57,7 +57,7 @@ test_task_chain_search_change_feed_is_monotonic_and_owner_scoped :: proc(t: ^tes
 		testing.expect_value(t, initial[0].operation, "upsert")
 	}
 
-	chain_a.title = "vault:v1:cipher-a2"
+	chain_a.title = "vault:v2:cipher-a2"
 	chain_a.updated_at = "2026-10-14T00:01:00Z"
 	_, updated, _ := iface.taskchain_save_chain(&repo, chain_a)
 	testing.expect(t, updated, "chain update should save")

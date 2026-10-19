@@ -52,11 +52,11 @@ test_envelope_vectors_open_and_reseal :: proc(t: ^testing.T) {
 		testing.expect_value(t, plain, str(co, "plaintext"))
 		epoch := u32(num(co, "epoch"))
 		key, _ := keyring_key_for_epoch(&kr, epoch)
-		resealed, ok := seal_with_nonce(transmute([]byte)str(co, "plaintext"), key, epoch, unhex(str(co, "nonce")), context.temp_allocator)
+		resealed, ok := seal_with_nonce(transmute([]byte)str(co, "plaintext"), key, kr.vault_id, epoch, unhex(str(co, "nonce")), context.temp_allocator)
 		testing.expect(t, ok)
 		testing.expect_value(t, resealed, token)
 		aad_buf: [64]byte
-		testing.expect_value(t, string(envelope_aad(epoch, aad_buf[:])), str(co, "aad"))
+		testing.expect_value(t, string(envelope_aad(kr.vault_id, epoch, aad_buf[:])), str(co, "aad"))
 	}
 }
 
@@ -75,6 +75,7 @@ test_envelope_negative_vectors :: proc(t: ^testing.T) {
 		case "unknown_epoch": want = .Unknown_Epoch
 		case "malformed":     want = .Malformed
 		case "not_armored":   want = .Not_Armored
+		case "other_vault":   want = .Other_Vault
 		}
 		testing.expectf(t, res == want, "%s: want %v got %v", name, want, res)
 	}
@@ -86,12 +87,12 @@ test_envelope_embedded_replace :: proc(t: ^testing.T) {
 	kr := vector_keyring(t, root)
 	defer keyring_wipe(&kr)
 	emb := obj(obj(root, "envelope"), "embedded")
-	out := replace_embedded_tokens(str(emb, "text"), &kr, "LOCKED", FAILED_MARKER, context.temp_allocator)
+	out := replace_embedded_tokens(str(emb, "text"), &kr, "LOCKED", FAILED_MARKER, context.temp_allocator, "OTHER")
 	testing.expect_value(t, out, str(emb, "decrypted_with_locked_marker_LOCKED"))
-	// No keyring at all: every v2 token is locked, the v1 token stays opaque.
+	// No keyring at all: every v2 token is locked, the dead older-format token stays opaque.
 	locked := replace_embedded_tokens(str(emb, "text"), nil, "LOCKED", FAILED_MARKER, context.temp_allocator)
-	testing.expect(t, !strings.contains(locked, "vault:v2:e"))
-	testing.expect(t, strings.contains(locked, "vault:v1:"))
+	testing.expect(t, !contains_token(locked))
+	testing.expect(t, strings.contains(locked, "v1 stays vault:"))
 	testing.expect(t, strings.contains(locked, "bare vault:v2: end"))
 	// Empty locked marker keeps tokens verbatim.
 	kept := replace_embedded_tokens(str(emb, "text"), nil, "", FAILED_MARKER, context.temp_allocator)
@@ -105,12 +106,13 @@ test_envelope_round_trip_across_epochs_and_current_epoch_seal :: proc(t: ^testin
 	defer keyring_wipe(&kr)
 	tok, ok := seal_string("cross-epoch", &kr, context.temp_allocator)
 	testing.expect(t, ok)
-	testing.expect(t, strings.has_prefix(tok, "vault:v2:e2:"), "seals under the current epoch")
+	vid_buf: [64]byte
+	testing.expect(t, strings.has_prefix(tok, token_prefix(kr.vault_id, 2, vid_buf[:])), "seals under the current epoch, naming this vault")
 	plain, res := open(tok, &kr, context.temp_allocator)
 	testing.expect(t, res == .Ok && plain == "cross-epoch")
 	// A keyring that only holds epoch 1 shows epoch-2 content as locked, never throws.
 	k1, _ := keyring_key_for_epoch(&kr, 1)
-	single, s_ok := keyring_from_single_key(keyring_user_id(&kr), 1, k1)
+	single, s_ok := keyring_from_single_key(keyring_user_id(&kr), kr.vault_id, 1, k1)
 	testing.expect(t, s_ok)
 	_, res2 := open(tok, &single, context.temp_allocator)
 	testing.expect(t, res2 == .Unknown_Epoch)
@@ -119,8 +121,8 @@ test_envelope_round_trip_across_epochs_and_current_epoch_seal :: proc(t: ^testin
 
 @(test)
 test_envelope_oversized_rejected :: proc(t: ^testing.T) {
-	big := strings.concatenate({"vault:v2:e1:", strings.repeat("A", MAX_B64_LEN + 4, context.temp_allocator)}, context.temp_allocator)
-	_, _, res := envelope_parse(big, context.temp_allocator)
+	big := strings.concatenate({"vault:v2:0123456789abcdef:e1:", strings.repeat("A", MAX_B64_LEN + 4, context.temp_allocator)}, context.temp_allocator)
+	_, _, _, res := envelope_parse(big, context.temp_allocator)
 	testing.expect(t, res == .Malformed)
 }
 
@@ -488,32 +490,40 @@ test_search_v2_vector :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_fs_write_v2_vector_and_binding :: proc(t: ^testing.T) {
+test_fs_write_vector_and_root_binding :: proc(t: ^testing.T) {
 	root := load_vectors(t)
 	fv := obj(root, "fs_write")
 	kr := vector_keyring(t, root)
 	defer keyring_wipe(&kr)
-	bridge_id, path := str(fv, "bridge_id"), str(fv, "path")
-	aad, aad_ok := fs_write_aad(2, bridge_id, path, context.temp_allocator)
+	bridge_id, fs_root, path := str(fv, "bridge_id"), str(fv, "root"), str(fv, "path")
+	aad, aad_ok := fs_write_aad(kr.vault_id, 2, bridge_id, fs_root, path, context.temp_allocator)
 	testing.expect(t, aad_ok)
 	testing.expect_value(t, aad, str(fv, "aad"))
 	key, _ := keyring_key_for_epoch(&kr, 2)
-	tok, ok := fs_write_seal_with_nonce(transmute([]byte)str(fv, "plaintext"), key, 2, bridge_id, path, unhex(str(fv, "nonce")), context.temp_allocator)
+	tok, ok := fs_write_seal_with_nonce(transmute([]byte)str(fv, "plaintext"), key, kr.vault_id, 2, bridge_id, fs_root, path, unhex(str(fv, "nonce")), context.temp_allocator)
 	testing.expect(t, ok)
 	testing.expect_value(t, tok, str(fv, "token"))
-	plain, pok := fs_write_open(tok, &kr, bridge_id, path, 2, context.temp_allocator)
+	plain, pok := fs_write_open(tok, &kr, bridge_id, fs_root, path, 2, context.temp_allocator)
 	testing.expect(t, pok && string(plain) == str(fv, "plaintext"))
-	// Bound to the path, the bridge and the channel; the epoch floor applies.
-	_, other_path := fs_write_open(tok, &kr, bridge_id, "src/other.ts", 2, context.temp_allocator)
+	// Bound to the path, the project ROOT, the bridge, the vault and the channel; the
+	// epoch floor applies.
+	_, other_path := fs_write_open(tok, &kr, bridge_id, fs_root, "src/other.ts", 2, context.temp_allocator)
 	testing.expect(t, !other_path, "a different path is rejected")
-	_, other_bridge := fs_write_open(tok, &kr, "brg_other", path, 2, context.temp_allocator)
+	_, other_root := fs_write_open(tok, &kr, bridge_id, "/home/dev/projects/other", path, 2, context.temp_allocator)
+	testing.expect(t, !other_root, "the same relative path under another project root is rejected")
+	_, other_bridge := fs_write_open(tok, &kr, "brg_other", fs_root, path, 2, context.temp_allocator)
 	testing.expect(t, !other_bridge, "a different bridge is rejected")
-	_, old_epoch := fs_write_open(tok, &kr, bridge_id, path, 3, context.temp_allocator)
+	_, old_epoch := fs_write_open(tok, &kr, bridge_id, fs_root, path, 3, context.temp_allocator)
 	testing.expect(t, !old_epoch, "a non-current epoch is rejected")
+	other_vault := kr
+	defer keyring_wipe(&other_vault)
+	other_vault.vault_id[0] ~= 0xff
+	_, wrong_vault := fs_write_open(tok, &other_vault, bridge_id, fs_root, path, 2, context.temp_allocator)
+	testing.expect(t, !wrong_vault, "a keyring of another vault is rejected")
 	_, as_content := open(tok, &kr, context.temp_allocator)
 	testing.expect(t, as_content != .Ok, "an fs-write token is not a content envelope")
-	content, _ := seal_with_nonce(transmute([]byte)str(fv, "plaintext"), key, 2, unhex(str(fv, "nonce")), context.temp_allocator)
-	_, as_write := fs_write_open(content, &kr, bridge_id, path, 2, context.temp_allocator)
+	content, _ := seal_with_nonce(transmute([]byte)str(fv, "plaintext"), key, kr.vault_id, 2, unhex(str(fv, "nonce")), context.temp_allocator)
+	_, as_write := fs_write_open(content, &kr, bridge_id, fs_root, path, 2, context.temp_allocator)
 	testing.expect(t, !as_write, "a content envelope is not an fs-write token")
 }
 
@@ -521,7 +531,8 @@ test_fs_write_v2_vector_and_binding :: proc(t: ^testing.T) {
 test_keyring_check_update_superset_only :: proc(t: ^testing.T) {
 	k1, k2, kx: [KEY_BYTES]byte
 	k1[0], k2[0], kx[0] = 1, 2, 9
-	stored, _ := keyring_from_single_key("usr_a", 1, k1[:])
+	vid := Vault_Id{1, 2, 3, 4, 5, 6, 7, 8}
+	stored, _ := keyring_from_single_key("usr_a", vid, 1, k1[:])
 	defer keyring_wipe(&stored)
 	// {1:k1, 2:k2}: a rotation that keeps history is accepted, as is the same keyring.
 	grown := stored
@@ -533,17 +544,21 @@ test_keyring_check_update_superset_only :: proc(t: ^testing.T) {
 	// Rollback to an older current epoch.
 	testing.expect_value(t, keyring_check_update(&grown, &stored), Keyring_Update_Error.Epoch_Rollback)
 	// Same epoch, different key: a substituted keyring.
-	swapped, _ := keyring_from_single_key("usr_a", 1, kx[:])
+	swapped, _ := keyring_from_single_key("usr_a", vid, 1, kx[:])
 	defer keyring_wipe(&swapped)
 	testing.expect_value(t, keyring_check_update(&stored, &swapped), Keyring_Update_Error.Key_Mismatch)
 	// History dropped: {2:k2} does not contain epoch 1.
-	only2, _ := keyring_from_single_key("usr_a", 2, k2[:])
+	only2, _ := keyring_from_single_key("usr_a", vid, 2, k2[:])
 	defer keyring_wipe(&only2)
 	testing.expect_value(t, keyring_check_update(&stored, &only2), Keyring_Update_Error.Missing_Epoch)
 	// Another user.
-	other, _ := keyring_from_single_key("usr_b", 1, k1[:])
+	other, _ := keyring_from_single_key("usr_b", vid, 1, k1[:])
 	defer keyring_wipe(&other)
 	testing.expect_value(t, keyring_check_update(&stored, &other), Keyring_Update_Error.Different_User)
+	// Same user and keys, another vault (the account was reset).
+	reset, _ := keyring_from_single_key("usr_a", Vault_Id{9, 9, 9, 9, 9, 9, 9, 9}, 1, k1[:])
+	defer keyring_wipe(&reset)
+	testing.expect_value(t, keyring_check_update(&stored, &reset), Keyring_Update_Error.Different_Vault)
 }
 
 // P2 directory helpers: strict statement parsing, wrap signing/parsing, labels, ids.

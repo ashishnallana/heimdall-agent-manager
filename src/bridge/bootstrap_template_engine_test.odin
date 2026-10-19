@@ -316,7 +316,7 @@ bootstrap_run_dir_ctl_routes_to_each_bridge :: proc(t: ^testing.T) {
 }
 
 // The hub holds no vault key, so encrypted template variables, memories and skills
-// reach the bridge as vault:v1 tokens. The bridge must decrypt them before any
+// reach the bridge as vault tokens. The bridge must decrypt them before any
 // bootstrap file is written.
 @(test)
 bt_file_set_decrypts_vault_tokens :: proc(t: ^testing.T) {

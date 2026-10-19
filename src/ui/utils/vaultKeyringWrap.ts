@@ -60,7 +60,7 @@ export async function exportPublicHex(key: CryptoKey): Promise<string> {
   return toLowerHex(new Uint8Array(await crypto.subtle.exportKey('raw', key)));
 }
 
-/** epoch_commit hex for `epoch` of HKR1 `bytes` (does not modify `bytes`). */
+/** epoch_commit hex for `epoch` of HKR2 `bytes` (does not modify `bytes`). */
 export async function epochCommitHex(bytes: Uint8Array, userId: string, epoch: number): Promise<string> {
   const parsed = parseKeyringBytes(bytes);
   try {
@@ -80,7 +80,7 @@ export function hexEqualConstantTime(a: string, b: string): boolean {
   return diff === 0;
 }
 
-/** Seal HKR1 `keyringBytes` (not modified) to `recipient` at `directoryVersion`, signed by `signer`. */
+/** Seal HKR2 `keyringBytes` (not modified) to `recipient` at `directoryVersion`, signed by `signer`. */
 export async function sealKeyringWrap(
   signer: WrapSigner,
   userId: string,
@@ -167,6 +167,7 @@ export async function openVerifiedWrap(wrapJson: unknown, exp: OpenWrapExpectati
     throw new WrapRejectedError(`cannot open (${(err as Error).message})`);
   }
   try {
+    if (parsed.vaultId !== exp.chain.vaultId) throw new WrapRejectedError('the keyring belongs to another vault than the verified root');
     const cur = parsed.entries.find((e) => e.epoch === parsed.currentEpoch)!;
     const commit = toLowerHex(await epochCommit(cur.key, exp.userId, parsed.currentEpoch));
     const signed = exp.chain.commits.get(parsed.currentEpoch) ?? '';

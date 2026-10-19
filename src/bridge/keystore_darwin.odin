@@ -9,7 +9,7 @@ KEYSTORE_ERR_ENOSYS   :: 38
 KEYSTORE_ERR_ENOKEY   :: 126
 
 // Login-keychain generic-password items carry this bridge's secrets across
-// restarts (keystore_common.odin): one service for the binary HKR1 keyring and one
+// restarts (keystore_common.odin): one service for the binary HKR2 keyring and one
 // for the identity key. The account is the bridge id (REQ-T5-1), so bridges of the
 // same macOS user never share or purge each other's secrets.
 //

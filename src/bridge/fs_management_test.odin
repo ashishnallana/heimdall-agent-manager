@@ -1179,12 +1179,12 @@ fs_vault_read_file_encryption_lifecycle :: proc(t: ^testing.T) {
 
 	test_key := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
-	// 1. With active vault key: read_file encrypts content with vault:v1:
+	// 1. With active vault key: read_file encrypts content as a v2 vault token
 	_ = os.set_env("HEIMDALL_VAULT_KEYRING", test_keyring_env_value(test_key))
 	res_enc := bridge_fs_read_file("confidential.txt", root)
 	defer delete(res_enc.content)
 	testing.expect(t, res_enc.ok && res_enc.viewable, "read encrypted ok")
-	testing.expect(t, strings.has_prefix(res_enc.content, vault.VAULT_V2_PREFIX), "content must have vault:v1: prefix")
+	testing.expect(t, strings.has_prefix(res_enc.content, vault.VAULT_V2_PREFIX), "content must be a v2 vault token")
 	decrypted, dec_ok := test_decrypt_hex(res_enc.content, test_key)
 	testing.expect(t, dec_ok, "decryption of read content ok")
 	defer delete(decrypted)
@@ -1199,14 +1199,16 @@ fs_vault_read_file_encryption_lifecycle :: proc(t: ^testing.T) {
 }
 
 // test_fs_write_seal seals plaintext the way the UI does for a file write: bound to
-// this bridge (bridge_config.daemon_id) and the exact request path (finding N4).
-test_fs_write_seal :: proc(plaintext, key_hex, path: string, epoch: u32 = 1) -> string {
+// this bridge (bridge_config.daemon_id), the sandbox root the bridge resolves for
+// `root` (what fs results report as `root`) and the exact request path (finding N4).
+test_fs_write_seal :: proc(plaintext, key_hex, root, path: string, epoch: u32 = 1) -> string {
 	key: [32]byte
 	defer crypto.zero_explicit(&key, size_of(key))
 	_ = vault.hex_decode_into(key[:], key_hex)
 	nonce: [vault.NONCE_BYTES]byte
 	crypto.rand_bytes(nonce[:])
-	tok, _ := vault.fs_write_seal_with_nonce(transmute([]byte)plaintext, key[:], epoch, bridge_config.daemon_id, path, nonce[:], context.temp_allocator)
+	canonical_root, _ := bridge_fs_effective_root(root)
+	tok, _ := vault.fs_write_seal_with_nonce(transmute([]byte)plaintext, key[:], test_vault_id(), epoch, bridge_config.daemon_id, canonical_root, path, nonce[:], context.temp_allocator)
 	return tok
 }
 
@@ -1216,6 +1218,10 @@ fs_vault_write_file_requires_path_bound_ciphertext :: proc(t: ^testing.T) {
 	defer sync.mutex_unlock(&bridge_test_config_mutex)
 	sync.mutex_lock(&keystore_test_mutex)
 	defer sync.mutex_unlock(&keystore_test_mutex)
+	// Writes are sealed for THIS bridge id (the AAD binds it).
+	test_bridge_a, _ := keystore_test_bridge_ids()
+	prev_daemon := keystore_test_set_daemon_id(test_bridge_a)
+	defer bridge_config.daemon_id = prev_daemon
 
 	prev_key, had_key := os.lookup_env("HEIMDALL_VAULT_KEYRING", context.allocator)
 	defer {
@@ -1243,7 +1249,7 @@ fs_vault_write_file_requires_path_bound_ciphertext :: proc(t: ^testing.T) {
 
 	// 1. Content sealed for this bridge and this path is written in plaintext to disk.
 	plaintext := "Decrypted disk content 999"
-	res_write := bridge_fs_write_file("valid.txt", test_fs_write_seal(plaintext, test_key, "valid.txt"), root)
+	res_write := bridge_fs_write_file("valid.txt", test_fs_write_seal(plaintext, test_key, root, "valid.txt"), root)
 	testing.expect(t, res_write.ok, "write with a path-bound payload ok")
 	testing.expect_value(t, res_write.bytes_written, len(plaintext))
 	disk_content, rerr := os.read_entire_file_from_path(res_write.path, context.allocator)
@@ -1253,18 +1259,23 @@ fs_vault_write_file_requires_path_bound_ciphertext :: proc(t: ^testing.T) {
 
 	// 2. Everything else is refused before the disk is touched.
 	expect_rejected(t, root, "plain.txt", "plaintext content", "plaintext")
-	expect_rejected(t, root, "wrong.txt", test_fs_write_seal("x", wrong_key, "wrong.txt"), "a wrong key")
-	expect_rejected(t, root, "other.txt", test_fs_write_seal("x", test_key, "valid.txt"), "a token sealed for another path")
+	expect_rejected(t, root, "wrong.txt", test_fs_write_seal("x", wrong_key, root, "wrong.txt"), "a wrong key")
+	expect_rejected(t, root, "other.txt", test_fs_write_seal("x", test_key, root, "valid.txt"), "a token sealed for another path")
+	// P4 root binding: a write sealed for the same relative path under ANOTHER project
+	// root (a hub replaying project A's write into project B) is refused.
+	other_root := fs_test_make_root(t, "vault_write_other")
+	defer fs_test_cleanup(other_root)
+	expect_rejected(t, root, "env.txt", test_fs_write_seal("x", test_key, other_root, "env.txt"), "a token sealed for another project root")
 	content_env, _ := test_encrypt_hex("x", test_key)
 	defer delete(content_env)
 	expect_rejected(t, root, "content.txt", content_env, "a content envelope")
-	good := test_fs_write_seal("x", test_key, "tampered.txt")
+	good := test_fs_write_seal("x", test_key, root, "tampered.txt")
 	tampered := strings.concatenate({good[:len(good) - 4], "AAA="}, context.temp_allocator)
 	expect_rejected(t, root, "tampered.txt", tampered, "tampered ciphertext")
 
 	// 3. Without a keyring the write is vault_locked.
 	_ = os.set_env("HEIMDALL_VAULT_KEYRING", "unconfigured_key")
-	res_locked := bridge_fs_write_file("locked.txt", test_fs_write_seal("x", test_key, "locked.txt"), root)
+	res_locked := bridge_fs_write_file("locked.txt", test_fs_write_seal("x", test_key, root, "locked.txt"), root)
 	testing.expect(t, !res_locked.ok && res_locked.error_code == "vault_locked", res_locked.error_code)
 }
 
@@ -1274,6 +1285,10 @@ fs_vault_batch_write_enforces_decryption_per_item :: proc(t: ^testing.T) {
 	defer sync.mutex_unlock(&bridge_test_config_mutex)
 	sync.mutex_lock(&keystore_test_mutex)
 	defer sync.mutex_unlock(&keystore_test_mutex)
+	// Writes are sealed for THIS bridge id (the AAD binds it).
+	test_bridge_a, _ := keystore_test_bridge_ids()
+	prev_daemon := keystore_test_set_daemon_id(test_bridge_a)
+	defer bridge_config.daemon_id = prev_daemon
 
 	prev_key, had_key := os.lookup_env("HEIMDALL_VAULT_KEYRING", context.allocator)
 	defer {
@@ -1294,8 +1309,8 @@ fs_vault_batch_write_enforces_decryption_per_item :: proc(t: ^testing.T) {
 
 	items := make([dynamic]Bridge_Fs_Write_Item)
 	defer delete(items)
-	append(&items, Bridge_Fs_Write_Item{path = "good.txt", content = test_fs_write_seal("Good file content", test_key, "good.txt")})
-	append(&items, Bridge_Fs_Write_Item{path = "bad.txt", content = test_fs_write_seal("Bad file content", wrong_key, "bad.txt")})
+	append(&items, Bridge_Fs_Write_Item{path = "good.txt", content = test_fs_write_seal("Good file content", test_key, root, "good.txt")})
+	append(&items, Bridge_Fs_Write_Item{path = "bad.txt", content = test_fs_write_seal("Bad file content", wrong_key, root, "bad.txt")})
 
 	batch_res := bridge_fs_batch_write(items, root)
 	defer bridge_fs_batch_write_result_delete(&batch_res)
@@ -1346,7 +1361,7 @@ fs_vault_grep_encrypts_matched_lines :: proc(t: ^testing.T) {
 
 	testing.expect(t, grep_enc.ok, "grep ok")
 	if !testing.expect_value(t, len(grep_enc.matches), 1) do return
-	testing.expect(t, strings.has_prefix(grep_enc.matches[0].line, vault.VAULT_V2_PREFIX), "grep match line must have vault:v1: prefix")
+	testing.expect(t, strings.has_prefix(grep_enc.matches[0].line, vault.VAULT_V2_PREFIX), "grep match line must be a v2 vault token")
 	decrypted_line, dec_ok := test_decrypt_hex(grep_enc.matches[0].line, test_key)
 	testing.expect(t, dec_ok, "decryption of grep match line ok")
 	defer delete(decrypted_line)
@@ -1359,7 +1374,7 @@ fs_vault_grep_encrypts_matched_lines :: proc(t: ^testing.T) {
 
 	testing.expect(t, grep_plain.ok, "grep plain ok")
 	if !testing.expect_value(t, len(grep_plain.matches), 1) do return
-	testing.expect(t, !strings.has_prefix(grep_plain.matches[0].line, vault.VAULT_V2_PREFIX), "grep match line must NOT have vault:v1: prefix")
+	testing.expect(t, !strings.has_prefix(grep_plain.matches[0].line, vault.VAULT_V2_PREFIX), "grep match line must NOT be a vault token")
 	testing.expect_value(t, grep_plain.matches[0].line, "def sensitive_function():")
 }
 

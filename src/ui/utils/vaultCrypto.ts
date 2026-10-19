@@ -7,7 +7,7 @@
 
 import { BIP39_WORDS } from './bip39Words.ts';
 import { clearActiveTaskChainSearchKey } from './taskChainSearchKey.ts';
-import { ID_VALUE_RE, isVaultKeyring, keyFor, currentKey, type VaultKeyring } from './vaultKeyring.ts';
+import { ID_VALUE_RE, VAULT_ID_RE, isVaultKeyring, keyFor, currentKey, type VaultKeyring } from './vaultKeyring.ts';
 
 export type { VaultKeyring } from './vaultKeyring.ts';
 export { currentKey, keyFor } from './vaultKeyring.ts';
@@ -25,16 +25,19 @@ export const MAX_ARMOR_PAYLOAD_BYTES = 64 * 1024 * 1024;
 const MAX_ARMOR_B64_LEN = Math.floor((MAX_ARMOR_PAYLOAD_BYTES + 2) / 3) * 4;
 
 /**
- * The ONE vault token pattern for the app: `vault:v2:e<epoch>:<b64std(nonce|tag|ct)>`.
+ * The ONE vault token pattern for the app:
+ * `vault:v2:<vault_id 16 hex>:e<epoch>:<b64std(nonce|tag|ct)>`.
  * Global; use it with `replace`/`match` (which reset lastIndex) or via the helpers
- * below. Dead v1 tokens do not match and are never decrypted.
+ * below. Dead older-format tokens do not match and are never decrypted.
  */
-export const VAULT_TOKEN_RE = /vault:v2:e[1-9][0-9]{0,9}:[A-Za-z0-9+/]+={0,2}/g;
-const VAULT_TOKEN_TEST_RE = /vault:v2:e[1-9][0-9]{0,9}:[A-Za-z0-9+/]+={0,2}/;
-const VAULT_TOKEN_EXACT_RE = /^vault:v2:e([1-9][0-9]{0,9}):([A-Za-z0-9+/]+={0,2})$/;
+export const VAULT_TOKEN_RE = /vault:v2:[0-9a-f]{16}:e[1-9][0-9]{0,9}:[A-Za-z0-9+/]+={0,2}/g;
+const VAULT_TOKEN_TEST_RE = /vault:v2:[0-9a-f]{16}:e[1-9][0-9]{0,9}:[A-Za-z0-9+/]+={0,2}/;
+const VAULT_TOKEN_EXACT_RE = /^vault:v2:([0-9a-f]{16}):e([1-9][0-9]{0,9}):([A-Za-z0-9+/]+={0,2})$/;
 
 /** Shown in place of a token whose epoch key this browser does not hold. */
 export const VAULT_LOCKED_MARKER = '[🔒 Encrypted]';
+/** Shown in place of a token sealed in a previous (reset) vault: never tried with these keys. */
+export const VAULT_OTHER_VAULT_MARKER = '[🔒 From a previous vault]';
 
 /** Replace every vault token in `text` with `replacement` (default: the locked marker). */
 export function replaceVaultTokens(text: string, replacement: string = VAULT_LOCKED_MARKER): string {
@@ -303,6 +306,19 @@ export function validateRecoveryWords(words: string[]): boolean {
   return checksumBits === expectedChecksumBits;
 }
 
+/**
+ * The 128-bit entropy of a valid 12-word BIP-39 mnemonic (checksum verified). Throws
+ * on anything else. The caller zeroes the result.
+ */
+export function recoveryWordsToEntropy(words: string[]): Uint8Array {
+  if (!validateRecoveryWords(words)) throw new Error('These are not 12 valid recovery words');
+  let bits = '';
+  for (const word of words) bits += (wordToBip39IndexMap.get(word.trim().toLowerCase()) as number).toString(2).padStart(11, '0');
+  const entropy = new Uint8Array(RECOVERY_ENTROPY_BYTES);
+  for (let i = 0; i < RECOVERY_ENTROPY_BYTES; i++) entropy[i] = parseInt(bits.slice(i * 8, (i + 1) * 8), 2);
+  return entropy;
+}
+
 /** Thrown for a token that claims to be v2 but is not exactly canonical. */
 export class VaultEnvelopeFormatError extends Error {
   constructor(reason: string) {
@@ -325,23 +341,31 @@ export function decodeBase64Strict(b64: string): Uint8Array {
   return bytes;
 }
 
-/** Parse one complete token into its epoch and decoded payload. Throws when malformed. */
-export function parseVaultEnvelope(token: string): { epoch: number; payload: Uint8Array } {
+/** Parse one complete token into its vault id, epoch and decoded payload. Throws when malformed. */
+export function parseVaultEnvelope(token: string): { vaultId: string; epoch: number; payload: Uint8Array } {
   const m = VAULT_TOKEN_EXACT_RE.exec(token);
   if (!m) throw new VaultEnvelopeFormatError('not a canonical v2 token');
-  const epoch = Number(m[1]);
+  const vaultId = m[1];
+  const epoch = Number(m[2]);
   if (!Number.isInteger(epoch) || epoch < 1 || epoch > 0xffffffff) throw new VaultEnvelopeFormatError('epoch out of range');
-  if (m[2].length > MAX_ARMOR_B64_LEN) throw new VaultEnvelopeFormatError('payload too large');
-  const payload = decodeBase64Strict(m[2]);
+  if (m[3].length > MAX_ARMOR_B64_LEN) throw new VaultEnvelopeFormatError('payload too large');
+  const payload = decodeBase64Strict(m[3]);
   if (payload.length < MIN_ARMOR_PAYLOAD_BYTES || payload.length > MAX_ARMOR_PAYLOAD_BYTES) {
     payload.fill(0);
     throw new VaultEnvelopeFormatError(`payload length ${payload.length} out of range`);
   }
-  return { epoch, payload };
+  return { vaultId, epoch, payload };
 }
 
-export function vaultEnvelopeAad(epoch: number): Uint8Array {
-  return new TextEncoder().encode(`heimdall-vault-v2|e${epoch}`);
+/** "vault:v2:<vault_id>:e<epoch>:" -- the header every token-format channel uses. */
+export function vaultTokenPrefix(vaultId: string, epoch: number): string {
+  if (!VAULT_ID_RE.test(vaultId)) throw new Error('invalid vault id');
+  if (!Number.isInteger(epoch) || epoch < 1 || epoch > 0xffffffff) throw new Error('invalid epoch');
+  return `${VAULT_ARMOR_PREFIX}${vaultId}:e${epoch}:`;
+}
+
+export function vaultEnvelopeAad(vaultId: string, epoch: number): Uint8Array {
+  return new TextEncoder().encode(`heimdall-vault-v2|${vaultId}|e${epoch}`);
 }
 
 function requireKeyring(keyring?: VaultKeyring | null): VaultKeyring {
@@ -360,13 +384,13 @@ export async function resolveKeyring(keyring?: VaultKeyring | null): Promise<Vau
  * production callers omit it and get a fresh CSPRNG nonce (getRandomValues throws on
  * failure, so nothing is sealed without randomness).
  */
-export async function sealVaultEnvelope(plaintext: Uint8Array, key: CryptoKey, epoch: number, nonce?: Uint8Array, aad?: Uint8Array): Promise<string> {
-  if (!Number.isInteger(epoch) || epoch < 1 || epoch > 0xffffffff) throw new Error('invalid epoch');
+export async function sealVaultEnvelope(plaintext: Uint8Array, key: CryptoKey, vaultId: string, epoch: number, nonce?: Uint8Array, aad?: Uint8Array): Promise<string> {
+  const prefix = vaultTokenPrefix(vaultId, epoch);
   if (plaintext.length > MAX_ARMOR_PAYLOAD_BYTES - MIN_ARMOR_PAYLOAD_BYTES) throw new Error('plaintext too large for a vault envelope');
   const iv = nonce ? Uint8Array.from(nonce) : crypto.getRandomValues(new Uint8Array(AES_GCM_NONCE_BYTES));
   if (iv.length !== AES_GCM_NONCE_BYTES) throw new Error('invalid nonce length');
   const encryptedBytes = new Uint8Array(await crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv: iv as unknown as BufferSource, additionalData: (aad ?? vaultEnvelopeAad(epoch)) as unknown as BufferSource, tagLength: 128 },
+    { name: 'AES-GCM', iv: iv as unknown as BufferSource, additionalData: (aad ?? vaultEnvelopeAad(vaultId, epoch)) as unknown as BufferSource, tagLength: 128 },
     key,
     plaintext as unknown as BufferSource,
   ));
@@ -375,7 +399,7 @@ export async function sealVaultEnvelope(plaintext: Uint8Array, key: CryptoKey, e
   payload.set(iv, 0);
   payload.set(encryptedBytes.subarray(ctLen), AES_GCM_NONCE_BYTES);
   payload.set(encryptedBytes.subarray(0, ctLen), MIN_ARMOR_PAYLOAD_BYTES);
-  const result = `${VAULT_ARMOR_PREFIX}e${epoch}:${bytesToBase64(payload)}`;
+  const result = `${prefix}${bytesToBase64(payload)}`;
   iv.fill(0);
   payload.fill(0);
   encryptedBytes.fill(0);
@@ -384,52 +408,61 @@ export async function sealVaultEnvelope(plaintext: Uint8Array, key: CryptoKey, e
 
 /**
  * Encrypt plaintext under the keyring's CURRENT epoch (never an older one):
- * `vault:v2:e<epoch>:<base64(12B nonce + 16B tag + ciphertext)>`.
+ * `vault:v2:<vault_id>:e<epoch>:<base64(12B nonce + 16B tag + ciphertext)>`.
  */
 export async function encryptVaultText(plaintext: string, keyring?: VaultKeyring | null): Promise<string> {
   const kr = requireKeyring(keyring);
   const bytes = new TextEncoder().encode(plaintext);
   try {
-    return await sealVaultEnvelope(bytes, currentKey(kr), kr.currentEpoch);
+    return await sealVaultEnvelope(bytes, currentKey(kr), kr.vaultId, kr.currentEpoch);
   } finally {
     bytes.fill(0);
   }
 }
 
-// ── File write v2 (finding N4) ────────────────────────────────────────────────
+// ── File write v3 (finding N4 + P4 root binding) ──────────────────────────────
 // File content sent for a bridge to write uses the v2 token format under the current
-// epoch key with AAD "heimdall-fs-write-v2|e<epoch>|<bridge_id>|<hex sha256(path)>",
-// binding it to one bridge and the exact path string of the request. Mirrors
+// epoch key with AAD
+//   "heimdall-fs-write-v3|<vault_id>|e<epoch>|<bridge_id>|<hex sha256(root)>|<hex sha256(path)>",
+// binding it to one vault, one bridge, one sandbox ROOT (the canonical root directory
+// the bridge reports as `root` in its fs results) and the exact path string of the
+// request, so a write sealed for project A cannot be replayed into project B. Mirrors
 // lib/vault fs_write_aad / fs_write_open; vectors in tests/fixtures/vault_v2_vectors.json.
 
-export async function fsWriteAad(epoch: number, bridgeId: string, path: string): Promise<Uint8Array> {
-  if (!Number.isInteger(epoch) || epoch < 1 || epoch > 0xffffffff) throw new Error('invalid epoch');
-  if (!bridgeId || bridgeId.length > 256 || !ID_VALUE_RE.test(bridgeId)) throw new Error('a file write needs the target bridge id');
-  if (!path) throw new Error('a file write needs the target path');
-  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(path) as unknown as BufferSource));
-  return new TextEncoder().encode(`heimdall-fs-write-v2|e${epoch}|${bridgeId}|${bytesToHex(digest)}`);
+async function sha256Hex(s: string): Promise<string> {
+  return bytesToHex(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s) as unknown as BufferSource)));
 }
 
-/** Seal file content for `bridgeId` to write at exactly `path` (current epoch). */
-export async function sealFsWriteContent(plaintext: string, bridgeId: string, path: string, keyring?: VaultKeyring | null, nonce?: Uint8Array): Promise<string> {
+export async function fsWriteAad(vaultId: string, epoch: number, bridgeId: string, root: string, path: string): Promise<Uint8Array> {
+  if (!VAULT_ID_RE.test(vaultId)) throw new Error('invalid vault id');
+  if (!Number.isInteger(epoch) || epoch < 1 || epoch > 0xffffffff) throw new Error('invalid epoch');
+  if (!bridgeId || bridgeId.length > 256 || !ID_VALUE_RE.test(bridgeId)) throw new Error('a file write needs the target bridge id');
+  if (!root) throw new Error('a file write needs the project root the bridge writes under');
+  if (!path) throw new Error('a file write needs the target path');
+  return new TextEncoder().encode(`heimdall-fs-write-v3|${vaultId}|e${epoch}|${bridgeId}|${await sha256Hex(root)}|${await sha256Hex(path)}`);
+}
+
+/** Seal file content for `bridgeId` to write at exactly `path` under `root` (current epoch). */
+export async function sealFsWriteContent(plaintext: string, bridgeId: string, root: string, path: string, keyring?: VaultKeyring | null, nonce?: Uint8Array): Promise<string> {
   const kr = requireKeyring(keyring);
-  const aad = await fsWriteAad(kr.currentEpoch, bridgeId, path);
+  const aad = await fsWriteAad(kr.vaultId, kr.currentEpoch, bridgeId, root, path);
   const bytes = new TextEncoder().encode(plaintext);
   try {
-    return await sealVaultEnvelope(bytes, currentKey(kr), kr.currentEpoch, nonce, aad);
+    return await sealVaultEnvelope(bytes, currentKey(kr), kr.vaultId, kr.currentEpoch, nonce, aad);
   } finally {
     bytes.fill(0);
   }
 }
 
-/** Open a file-write token for (`bridgeId`, `path`); throws when it does not authenticate. */
-export async function openFsWriteContent(token: string, bridgeId: string, path: string, keyring?: VaultKeyring | null): Promise<string> {
+/** Open a file-write token for (`bridgeId`, `root`, `path`); throws when it does not authenticate. */
+export async function openFsWriteContent(token: string, bridgeId: string, root: string, path: string, keyring?: VaultKeyring | null): Promise<string> {
   const kr = requireKeyring(keyring);
-  const { epoch, payload } = parseVaultEnvelope(token);
+  const { vaultId, epoch, payload } = parseVaultEnvelope(token);
   try {
+    if (vaultId !== kr.vaultId) throw new Error('sealed in another vault');
     const key = keyFor(kr, epoch);
     if (!key) throw new Error('unknown epoch');
-    const aad = await fsWriteAad(epoch, bridgeId, path);
+    const aad = await fsWriteAad(vaultId, epoch, bridgeId, root, path);
     const nonce = payload.subarray(0, AES_GCM_NONCE_BYTES);
     const tag = payload.subarray(AES_GCM_NONCE_BYTES, MIN_ARMOR_PAYLOAD_BYTES);
     const ct = payload.subarray(MIN_ARMOR_PAYLOAD_BYTES);
@@ -447,8 +480,8 @@ export async function openFsWriteContent(token: string, bridgeId: string, path: 
   }
 }
 
-/** Open a decoded payload for `epoch` under `key`; throws when it does not authenticate. */
-export async function openVaultPayload(payload: Uint8Array, key: CryptoKey, epoch: number): Promise<Uint8Array> {
+/** Open a decoded payload for (`vaultId`, `epoch`) under `key`; throws when it does not authenticate. */
+export async function openVaultPayload(payload: Uint8Array, key: CryptoKey, vaultId: string, epoch: number): Promise<Uint8Array> {
   const nonce = payload.subarray(0, AES_GCM_NONCE_BYTES);
   const tag = payload.subarray(AES_GCM_NONCE_BYTES, MIN_ARMOR_PAYLOAD_BYTES);
   const ciphertext = payload.subarray(MIN_ARMOR_PAYLOAD_BYTES);
@@ -457,7 +490,7 @@ export async function openVaultPayload(payload: Uint8Array, key: CryptoKey, epoc
   combined.set(tag, ciphertext.length);
   try {
     return new Uint8Array(await crypto.subtle.decrypt(
-      { name: 'AES-GCM', iv: nonce as unknown as BufferSource, additionalData: vaultEnvelopeAad(epoch) as unknown as BufferSource, tagLength: 128 },
+      { name: 'AES-GCM', iv: nonce as unknown as BufferSource, additionalData: vaultEnvelopeAad(vaultId, epoch) as unknown as BufferSource, tagLength: 128 },
       key,
       combined as unknown as BufferSource,
     ));
@@ -468,18 +501,20 @@ export async function openVaultPayload(payload: Uint8Array, key: CryptoKey, epoc
 
 /**
  * Decrypt a vault envelope with the key for the epoch in its header.
- * - Not armored (plain text, or a dead v1 token): returned unchanged.
+ * - Not armored (plain text, or a dead older-format token): returned unchanged.
+ * - Another (reset) vault: VAULT_OTHER_VAULT_MARKER -- never tried with these keys.
  * - Unknown epoch: VAULT_LOCKED_MARKER -- never an exception, never ciphertext.
  * - Malformed, or does not authenticate: throws.
  */
 export async function decryptVaultText(armored: string, keyring?: VaultKeyring | null): Promise<string> {
   if (!isVaultArmored(armored)) return armored;
-  const { epoch, payload } = parseVaultEnvelope(armored);
+  const { vaultId, epoch, payload } = parseVaultEnvelope(armored);
   try {
     const kr = requireKeyring(keyring);
+    if (vaultId !== kr.vaultId) return VAULT_OTHER_VAULT_MARKER;
     const key = keyFor(kr, epoch);
     if (!key) return VAULT_LOCKED_MARKER;
-    const plain = await openVaultPayload(payload, key, epoch);
+    const plain = await openVaultPayload(payload, key, vaultId, epoch);
     try {
       return new TextDecoder().decode(plain);
     } finally {

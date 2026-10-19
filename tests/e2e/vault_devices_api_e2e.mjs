@@ -38,6 +38,8 @@ import { openVerifiedWrap } from '../../src/ui/utils/vaultKeyringWrap.ts';
 import { deliverKeyringToBridge } from '../../src/ui/utils/vaultBridgeDelivery.ts';
 import { buildBridgeApproval, buildBrowserApproval, buildGenesis, buildPairedRegistration, buildRevocation, buildRotation, checkBridgeCodeInfo, checkBrowserCodeInfo } from '../../src/ui/utils/vaultDeviceFlows.ts';
 import { derivePairKeys, generatePairCode, generatePairSalt, pairApproveMac, pairBridgePayload, pairHubOrigin, pairKeyMac, verifyPairApproveMac } from '../../src/ui/utils/vaultPairing.ts';
+import { asApproverIdentity, buildRecoveryKey, openRecoveryKey } from '../../src/ui/utils/vaultRecovery.ts';
+import { generate12RecoveryWords, recoveryWordsToEntropy } from '../../src/ui/utils/vaultCrypto.ts';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const USER_HEADER = 'X-authentik-username';
@@ -183,7 +185,7 @@ class SimDevice {
     }
     d.id = await deviceIdFor(d.signPub);
     d.fingerprint = await fingerprintFor(d.signPub, d.ecdhPub);
-    d.keyringBytes = null; // HKR1 (the simulation keeps it; the UI holds it only transiently)
+    d.keyringBytes = null; // HKR2 (the simulation keeps it; the UI holds it only transiently)
     d.keyring = null;
     return d;
   }
@@ -282,7 +284,7 @@ class SimBridge {
       for (const e of parsed.entries) e.key.fill(0);
       if (parsed.currentEpoch !== payload.current_epoch) throw new Error('epoch mismatch');
       const root = await verifyBridgeChainProof(payload.chain_proof, await keyringCommits(plain, ownerUserId), {
-        ownerUserId, bridgeIdentityPub: this.identity.signPub, pinnedRootSignPub: this.pinnedRoot,
+        ownerUserId, bridgeIdentityPub: this.identity.signPub, pinnedRootSignPub: this.pinnedRoot, keyringVaultId: parsed.vaultId,
       });
       // First unseal (no pinned root): only with a pair_mac under this bridge's pairing
       // code over its approval + the root (mirror of the Odin bridge's first-pin check).
@@ -437,7 +439,7 @@ async function main() {
       await S.B.setKeyring(bytes);
       S.e1FromA = await encryptVaultText('secret from A @e1', S.A.keyring);
       S.e1FromB = await encryptVaultText('secret from B @e1', S.B.keyring);
-      expect(S.e1FromA.startsWith('vault:v2:e1:') && S.e1FromB.startsWith('vault:v2:e1:'), 'both seal v2 content under e1');
+      expect(S.e1FromA.startsWith(`vault:v2:${vb.chain.vaultId}:e1:`) && S.e1FromB.startsWith(`vault:v2:${vb.chain.vaultId}:e1:`), 'both seal v2 content under e1, naming the vault');
       expect(await decryptVaultText(S.e1FromA, S.B.keyring) === 'secret from A @e1', 'B decrypts A\'s content');
       expect(await decryptVaultText(S.e1FromB, S.A.keyring) === 'secret from B @e1', 'A decrypts B\'s content');
     });
@@ -547,11 +549,38 @@ async function main() {
       await br.receiveUnseal(evil, S.uid).then(() => expect(false, 'swapped root accepted'), () => expect(true, 'bridge refuses a chain proof for a root other than the pinned one'));
     });
 
+    await step('4a last-approver guard; A creates a recovery key (signed approve op, wrap, sealed blob)', async () => {
+      const { chain } = await fetchVerified(ALICE, S.uid, S.pins);
+      await buildRevocation(S.A.identity, chain, S.B.id, S.A.keyringBytes).then(() => expect(false, 'client built a last-approver revoke'), () => expect(true, 'client refuses to revoke the only other approver without a recovery key'));
+      // The hub refuses it too (a correctly signed revoke of B with A's wrap only).
+      const { body: forcedBody, nextKeyring: nk0 } = await buildRevocation(S.A.identity, { ...chain, trusted: new Map([...chain.trusted, ['dev_' + 'f'.repeat(32), { ...chain.trusted.get(S.A.id), device_id: 'dev_' + 'f'.repeat(32), kind: 'browser' }]]) }, S.B.id, S.A.keyringBytes).catch(() => ({ body: null, nextKeyring: new Uint8Array() }));
+      nk0.fill(0);
+      if (forcedBody) {
+        const wraps = forcedBody.wraps.filter((w) => w.recipient_device_id === S.A.id);
+        const r409 = await signedCall(S.A, ALICE, S.uid, 'POST', `/api/v1/vault/devices/${S.B.id}/revoke`, { ...forcedBody, wraps });
+        expect(r409.status === 409 && r409.raw.includes('last_approver'), `hub: revoking the only other approver without a recovery key -> 409 last_approver (${r409.status})`);
+      }
+      S.recoveryWords = generate12RecoveryWords().words;
+      const entropy = recoveryWordsToEntropy(S.recoveryWords);
+      const { body, deviceId } = await buildRecoveryKey(S.A.identity, chain, S.A.keyringBytes, entropy);
+      entropy.fill(0);
+      const unsigned = await http('POST', '/api/v1/vault/devices/recovery', { user: ALICE, body });
+      expect(unsigned.status === 401, `unsigned recovery key -> 401 (${unsigned.status})`);
+      const badBlob = await signedCall(S.A, ALICE, S.uid, 'POST', '/api/v1/vault/devices/recovery', { ...body, recovery_blob: body.recovery_blob.replace('{"v":1', '{"v":1,"x":0') });
+      expect(badBlob.status === 400, `non-canonical recovery blob -> 400 (${badBlob.status})`);
+      const ok = await signedCall(S.A, ALICE, S.uid, 'POST', '/api/v1/vault/devices/recovery', body);
+      expect(ok.status === 201 && ok.data.device_id === deviceId, `signed recovery key -> 201 (${ok.status} ${ok.status !== 201 ? ok.raw : ''})`);
+      S.recoveryId = deviceId;
+      const v = await fetchVerified(ALICE, S.uid, S.pins);
+      expect(v.chain.trusted.get(deviceId)?.kind === 'recovery' && v.dir.devices.find((d) => d.device_id === deviceId)?.recovery_blob === body.recovery_blob, 'the log approves the recovery credential; its row serves the sealed blob');
+      expect(!JSON.stringify(v.dir).includes(S.recoveryWords.join(' ')), 'the words never reach the hub');
+    });
+
     await step('4 A revokes B -> epoch 2; wraps to remaining; B cut off; e2 content; bridge re-unsealed', async () => {
       const { chain } = await fetchVerified(ALICE, S.uid, S.pins);
       const { body, nextKeyring } = await buildRevocation(S.A.identity, chain, S.B.id, S.A.keyringBytes);
       nextKeyring.fill(0);
-      expect(body.wraps.length === 1 && body.wraps[0].recipient_device_id === S.A.id, 'remaining wrap recipients = {A} (bridge gets re-unseal, not a wrap)');
+      expect(body.wraps.length === 2 && body.wraps.some((w) => w.recipient_device_id === S.A.id) && body.wraps.some((w) => w.recipient_device_id === S.recoveryId), 'remaining wrap recipients = {A, recovery key} (bridge gets re-unseal, not a wrap)');
       const missing = await signedCall(S.A, ALICE, S.uid, 'POST', `/api/v1/vault/devices/${S.B.id}/revoke`, { ...body, wraps: [] });
       expect(missing.status === 400, `revoke with missing wraps -> 400 (${missing.status})`);
       const r = await signedCall(S.A, ALICE, S.uid, 'POST', `/api/v1/vault/devices/${S.B.id}/revoke`, body);
@@ -569,7 +598,7 @@ async function main() {
       const bMut = await signedCall(S.B, ALICE, S.uid, 'POST', `/api/v1/vault/devices/${S.A.id}/revoke`, { expected_version: after.chain.version, wraps: [] });
       expect(bMut.status === 403, `revoked B cannot sign a mutation (${bMut.status})`);
       const e2 = await encryptVaultText('secret from A @e2', S.A.keyring);
-      expect(e2.startsWith('vault:v2:e2:'), 'new content is sealed under e2');
+      expect(e2.startsWith(`vault:v2:${after.chain.vaultId}:e2:`), 'new content is sealed under e2');
       expect(await decryptVaultText(e2, S.A.keyring) === 'secret from A @e2' && await decryptVaultText(S.e1FromB, S.A.keyring) === 'secret from B @e1', 'A reads e1 and e2');
       expect(await decryptVaultText(e2, S.B.keyring) === VAULT_LOCKED_MARKER, 'B (old keyring) sees e2 as locked');
       // Re-unseal the bridge with the e2 keyring (what the P3 revoke flow does).
@@ -836,6 +865,44 @@ async function main() {
       await openWrap(S.A, selfA0.data.wrap, after.chain).then(() => expect(false, 'old wrap accepted'), () => expect(true, 'a wrap outside the current epoch segment of the log is refused'));
       const again = await signedCall(S.A, ALICE, S.uid, 'POST', '/api/v1/vault/directory/rotate', body);
       expect(again.status === 409, `replaying the old rotation -> 409 (${again.status})`);
+    });
+
+    await step('9 recovery restore: a new browser approves itself AS the recovery key; wrong words refused', async () => {
+      const N = await SimDevice.create(S.uid, 'e2e restored laptop');
+      const rn = await register(N, ALICE);
+      expect(rn.status === 201, 'N registered pending (it shows its pairing code; nobody types it)');
+      const { chain } = await fetchVerified(ALICE, S.uid, null); // N has no pins: verified from genesis
+      await openRecoveryKey(generate12RecoveryWords().words, chain).then(() => expect(false, 'wrong words accepted'), () => expect(true, 'wrong words open nothing'));
+      const cred = await openRecoveryKey(S.recoveryWords, chain);
+      expect(cred.deviceId === S.recoveryId, 'the words open the account recovery credential (bound to this root and its approval op)');
+      const credSigned = { deviceId: cred.deviceId, signPrivateKey: cred.signPrivateKey };
+      const credSelfPath = '/api/v1/vault/devices/self';
+      const credSelf = await http('GET', credSelfPath, { user: ALICE, headers: await signedRequestHeaders(credSigned, S.uid, 'GET', credSelfPath, '') });
+      expect(credSelf.status === 200 && credSelf.data.wrap, 'the recovery credential fetches its wrap');
+      const kr = await openVerifiedWrap(credSelf.data.wrap, { userId: S.uid, recipientDeviceId: cred.deviceId, recipientEcdhPrivate: cred.ecdhPrivateKey, chain });
+      const { serializeKeyringBytes } = await import('../../src/ui/utils/vaultKeyring.ts');
+      const krBytes = serializeKeyringBytes(kr);
+      for (const e of kr.entries) e.key.fill(0);
+      const me = { device_id: N.id, sign_public_key: N.signPub, ecdh_public_key: N.ecdhPub, sign_alg: SIGN_ALG_ECDSA_P256_SHA256, wrap_alg: WRAP_ALG_ECDH_P256_HKDF_AES, label: N.label, fingerprint: N.fingerprint, register_statement: N.lastRegisterBody.statement };
+      const body = await buildBrowserApproval(asApproverIdentity(cred), chain, me, N.pairKeys, N.label, krBytes);
+      krBytes.fill(0);
+      const p = `/api/v1/vault/devices/${N.id}/approve`;
+      const raw = JSON.stringify(body);
+      const ap = await http('POST', p, { user: ALICE, body: raw, headers: await signedRequestHeaders(credSigned, S.uid, 'POST', p, raw) });
+      expect(ap.status === 200, `approval of N signed AS the recovery key -> 200 (${ap.status} ${ap.status !== 200 ? ap.raw : ''})`);
+      const selfN = await signedCall(N, ALICE, S.uid, 'GET', '/api/v1/vault/devices/self');
+      const after = await fetchVerified(ALICE, S.uid, null);
+      const mine = after.chain.trusted.get(N.id);
+      expect(mine && mine.approved_by_device_id === S.recoveryId, 'the log shows N approved by the recovery key');
+      expect(await verifyPairApproveMac(N.pairKeys, mine.approval_statement, after.chain.rootSignPub, selfN.data.pair_mac), 'N verifies the pair_mac under its own code and pins the root');
+      const bytes = await openWrap(N, selfN.data.wrap, after.chain);
+      await N.setKeyring(bytes);
+      expect(await decryptVaultText(S.e1FromA, N.keyring) === 'secret from A @e1', 'N reads the account history');
+      // N revokes the "lost" A: the recovery key remains besides N, so the guard allows it.
+      const { body: rb, nextKeyring } = await buildRevocation(N.identity, after.chain, S.A.id, bytes);
+      nextKeyring.fill(0);
+      const rr = await signedCall(N, ALICE, S.uid, 'POST', `/api/v1/vault/devices/${S.A.id}/revoke`, rb);
+      expect(rr.status === 200, `N revokes the lost device A -> 200 (${rr.status} ${rr.status !== 200 ? rr.raw : ''})`);
     });
 
     await step('8 changed user id: an established browser is warned, never auto-trusts another account (M2)', async () => {

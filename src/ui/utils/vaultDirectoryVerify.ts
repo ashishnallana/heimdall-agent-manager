@@ -23,6 +23,7 @@
 // pinned seq) is refused as a rollback / fork.
 
 import { deviceIdFor, labelFromB64, checkAgainstPins, PinViolationError, type DevicePins } from './deviceIdentity.ts';
+import { vaultIdFor } from './vaultKeyring.ts';
 import {
   STATEMENT_FIELDS,
   STATEMENT_HEADER,
@@ -45,6 +46,8 @@ const utf8 = new TextEncoder();
 export interface DirectoryDevice {
   device_id: string;
   kind: string;
+  /** Recovery credentials only: the sealed recovery blob (opens with the 12 words). */
+  recovery_blob?: string;
   label?: string;
   fingerprint?: string;
   status: 'pending' | 'approved' | 'revoked' | string;
@@ -150,6 +153,8 @@ export interface VerifiedChain {
   rootDeviceId: string;
   rootSignPub: string;
   rootSignAlg: string;
+  /** The vault id (SHA-256(root_sign_pub)[:8], 16 hex): every keyring of this account names it. */
+  vaultId: string;
   version: number;
   /** Entry hash of the op at seq = version. */
   headHash: string;
@@ -367,6 +372,7 @@ export async function verifyDirectory(dir: VaultDirectory, userId: string, pins:
     rootDeviceId: root.device_id,
     rootSignPub: root.sign_public_key,
     rootSignAlg: root.sign_alg,
+    vaultId: await vaultIdFor(root.sign_public_key),
     version: dir.version,
     headHash: prev,
     logHashes,
@@ -407,8 +413,20 @@ export function wrapRecipients(chain: VerifiedChain): VerifiedDevice[] {
 }
 
 /** Approver-capable devices that remain after removing `excludeId`. */
-export function remainingApprovers(chain: VerifiedChain, excludeId: string): VerifiedDevice[] {
-  return [...chain.trusted.values()].filter((d) => d.device_id !== excludeId && kindPolicy(d.kind).countsAsApprover);
+/**
+ * Approver-capable devices (browsers, recovery keys) that remain trusted besides
+ * `excludeId` (the revoke target) and `signerId` (the device that would sign the
+ * revoke). The last-approver guard (hub revoke_prepare mirrors it): revoking an
+ * approver is refused when this is empty -- the signer would be the only approver and
+ * no recovery key would remain.
+ */
+export function remainingApprovers(chain: VerifiedChain, excludeId: string, signerId = ''): VerifiedDevice[] {
+  return [...chain.trusted.values()].filter((d) => d.device_id !== excludeId && d.device_id !== signerId && kindPolicy(d.kind).countsAsApprover);
+}
+
+/** Chain-trusted recovery credentials (kind `recovery`). */
+export function trustedRecoveryKeys(chain: VerifiedChain): VerifiedDevice[] {
+  return [...chain.trusted.values()].filter((d) => d.kind === 'recovery');
 }
 
 // ── chain proof for bridges ──────────────────────────────────────────────────
@@ -512,6 +530,8 @@ export interface BridgeProofContext {
   bridgeIdentityPub: string;
   /** The root pinned at enrollment; null only for the FIRST (enrollment) unseal. */
   pinnedRootSignPub: string | null;
+  /** The opened keyring's vault id: must be the proof root's (a reset vault's keyring never passes). */
+  keyringVaultId: string;
 }
 
 interface Signer { id: string; alg: string; pub: string; seq: number }
@@ -550,6 +570,7 @@ export async function verifyBridgeChainProof(proof: BridgeChainProof, keyringCom
   if (!proof || proof.v !== 2 || proof.user_id !== ctx.ownerUserId) fail('chain proof version/user');
   if (ctx.pinnedRootSignPub !== null && proof.root_sign_pub !== ctx.pinnedRootSignPub) fail('chain proof root differs from the pinned root');
   if (!signAlgFromId(proof.root_sign_alg) || proof.root_device_id !== await deviceIdFor(proof.root_sign_pub)) fail('chain proof root');
+  if (ctx.keyringVaultId !== await vaultIdFor(proof.root_sign_pub)) fail('the keyring belongs to another vault than the proof root');
   const g = parseStatement(proof.genesis?.statement);
   if (!g || g.type !== 'genesis' || g.seq !== '1' || g.prev_hash !== '' || g.user_id !== proof.user_id || g.issuer_device_id !== proof.root_device_id
     || g.subject_device_id !== proof.root_device_id || g.subject_sign_pub !== proof.root_sign_pub || g.subject_sign_alg !== proof.root_sign_alg) fail('chain proof genesis');

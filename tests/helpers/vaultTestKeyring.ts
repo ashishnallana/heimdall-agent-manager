@@ -5,17 +5,19 @@ import { importKeyring, type VaultKeyring } from '../../src/ui/utils/vaultKeyrin
 import { serializeKeyringBytes } from '../../src/ui/utils/vaultKeyring.ts';
 
 export const TEST_USER_ID = 'usr_test';
+/** The vault id of every test keyring (any non-zero 16 hex). */
+export const TEST_VAULT_ID = '7e57000000000001';
 
 export async function keyringFromHex(hex: string, userId: string = TEST_USER_ID): Promise<VaultKeyring> {
   const key = Uint8Array.from(Buffer.from(hex, 'hex'));
   if (key.length !== 32) throw new Error('test key must be 64 hex chars');
-  try { return await importKeyring(serializeKeyringBytes({ userId, currentEpoch: 1, entries: [{ epoch: 1, key }] })); } finally { key.fill(0); }
+  try { return await importKeyring(serializeKeyringBytes({ userId, vaultId: TEST_VAULT_ID, currentEpoch: 1, entries: [{ epoch: 1, key }] })); } finally { key.fill(0); }
 }
 
 /** Present a bare CryptoKey as the P1 epoch-1 keyring; keyrings and nullish pass through. */
 export function asKeyring<T>(key: T): any {
   if (key && typeof key === 'object' && 'algorithm' in (key as object)) {
-    return Object.freeze({ userId: TEST_USER_ID, currentEpoch: 1, keys: new Map([[1, key as unknown as CryptoKey]]) });
+    return Object.freeze({ userId: TEST_USER_ID, vaultId: TEST_VAULT_ID, currentEpoch: 1, keys: new Map([[1, key as unknown as CryptoKey]]) });
   }
   return key;
 }

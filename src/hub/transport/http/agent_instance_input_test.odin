@@ -57,7 +57,7 @@ test_input_frame_requires_unambiguous_flag_and_payload :: proc(t: ^testing.T) {
 		`{"type":"input","enc_b64":"QUJD"}`,
 		`{"type":"input","data_b64":"QUJD"}`,
 		`{"type":"input","data_b64":"QUJD","is_encrypted":"false"}`,
-		`{"type":"input","data_b64":"vault:v1:QUJD","is_encrypted":true}`,
+		`{"type":"input","data_b64":"vault:v2:QUJD","is_encrypted":true}`,
 		`{"type":"input","data_b64":"not!base64","is_encrypted":false}`,
 		`{"type":"input","data_b64":"QUJD","is_encrypted":true}`,
 	}

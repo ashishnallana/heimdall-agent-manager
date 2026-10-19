@@ -71,7 +71,7 @@ test('REQ-SHELL-ENC-8: createShell puts an armored enc_spec with cmd, cwd, times
     const body = await captureCreateShell(store, { cmd, cwd, kind: 'shell' });
 
     assert.ok(body.enc_spec, 'request body must carry enc_spec');
-    assert.ok(isVaultArmored(body.enc_spec), 'enc_spec must start with vault:v2:e1:');
+    assert.ok(isVaultArmored(body.enc_spec), 'enc_spec must start with vault:v2:7e57000000000001:e1:');
     // NOTE ON SCOPE -- enc_spec is INTEGRITY/AUTHORIZATION, not confidentiality.
     // cmd and cwd deliberately ALSO travel in plaintext: the hub persists them
     // (shell_session_rest_handlers.odin:163-164) so sessions can be listed and

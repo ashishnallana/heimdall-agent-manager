@@ -111,7 +111,7 @@ bridge_dispatch_ordering_keys_serialize_conflicting_mutations :: proc(t: ^testin
 bridge_command_registry_covers_every_reader_command :: proc(t: ^testing.T) {
 	types := []string{
 		"bridge_heartbeat_ack", "provider_catalog_version", "provider_catalog", "lsp_send", "tunnel_open", "tunnel_data", "tunnel_close", "proxy_data", "proxy_close",
-		"launch_agent", "launch_provider_test", "stop_agent", "wake_agent", "agent_pty_input", "agent_pty_resize", "bridge_unseal", "bridge_lock", "set_telemetry", "lsp_start", "lsp_stop",
+		"launch_agent", "launch_provider_test", "stop_agent", "wake_agent", "agent_pty_input", "agent_pty_resize", "bridge_unseal", "set_telemetry", "lsp_start", "lsp_stop",
 		"notify_agent_message", "notify_task_nudge", "notify_shell_run", "notify_title_nudge", "task_status_changed_notify", "capture_agent_pane", "get_agent_pane",
 		"provider_discover", "shell_stream_attach", "bridge_update",
 		"fs_list_dir", "fs_stat", "fs_make_dir", "fs_read_file", "agent_run_dir_list", "agent_run_dir_read", "fs_create_file", "fs_write_file", "fs_batch_write", "fs_move", "fs_delete", "fs_find_files", "fs_grep",
@@ -281,7 +281,7 @@ HUB_TO_BRIDGE_RUNTIME_FRAME_TYPES := []string{
 	// REQ-EA-4: atomic enrollment verdict (bridge_enroll_ws.odin)
 	"bridge_enrollment_result",
 	// bridge lifecycle
-	"bridge_lock", "bridge_unseal", "set_telemetry", "bridge_update", "provider_discover",
+	"bridge_unseal", "set_telemetry", "bridge_update", "provider_discover",
 	// agents
 	"launch_agent", "launch_provider_test", "stop_agent", "wake_agent",
 	"get_agent_pane", "capture_agent_pane",

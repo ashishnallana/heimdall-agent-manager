@@ -17,13 +17,14 @@ relay_test_token :: proc(epoch: u32) -> (token: string, body: []byte) {
 	salt[0] = 9
 	frame, ok := vault.pty_seal(transmute([]byte)string("screen bytes"), key[:], epoch, salt[:], 1, "sh_relay", .Out, "", context.temp_allocator)
 	assert(ok)
-	// Armored PTY frame: vault:v2:e<N>:b64(salt|nonce|tag|ct) -- everything past the epoch.
+	// Armored PTY frame: vault:v2:<vault_id>:e<N>:b64(salt|nonce|tag|ct) -- everything past the epoch.
 	b64, _ := base64.encode(frame[4:], allocator = context.temp_allocator)
-	tok := strings.concatenate({"vault:v2:e", "258" if epoch == 258 else "3", ":", b64}, context.temp_allocator)
+	prefix_buf: [64]byte
+	tok := strings.concatenate({vault.token_prefix(vault.Vault_Id{1, 2, 3, 4, 5, 6, 7, 8}, epoch, prefix_buf[:]), b64}, context.temp_allocator)
 	return tok, frame[4:]
 }
 
-// The snapshot path re-frames vault:v2:e<N>:<b64> as u32be(N) | nonce | tag | ct.
+// The snapshot path re-frames vault:v2:<vault_id>:e<N>:<b64> as u32be(N) | nonce | tag | ct.
 @(test)
 test_screen_snapshot_passes_epoch_through :: proc(t: ^testing.T) {
 	tok, body := relay_test_token(258)
@@ -37,13 +38,13 @@ test_screen_snapshot_passes_epoch_through :: proc(t: ^testing.T) {
 	testing.expect(t, bytes.has_suffix(frames[0], want), "SCREEN payload must be the PTY v2 layout")
 
 	// A malformed or dead-v1 encrypted capture paints nothing / is not decrypted.
-	bad, bad_ok := _shell_stream_screen_frames(`{"output":"vault:v2:e0:AAAA"}`)
+	bad, bad_ok := _shell_stream_screen_frames(`{"output":"vault:v2:0102030405060708:e0:AAAA"}`)
 	defer delete(bad)
 	testing.expect(t, !bad_ok)
 	// A v2 content token too short to carry salt16|nonce|tag is not a PTY frame.
 	key: [32]byte
 	nonce: [12]byte
-	short, _ := vault.seal_with_nonce(transmute([]byte)string("x"), key[:], 3, nonce[:], context.temp_allocator)
+	short, _ := vault.seal_with_nonce(transmute([]byte)string("x"), key[:], vault.Vault_Id{1, 2, 3, 4, 5, 6, 7, 8}, 3, nonce[:], context.temp_allocator)
 	short_reply := strings.concatenate({`{"output":"`, short, `"}`}, context.temp_allocator)
 	short_frames, short_ok := _shell_stream_screen_frames(short_reply)
 	defer delete(short_frames)

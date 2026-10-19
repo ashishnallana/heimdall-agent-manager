@@ -5,8 +5,8 @@ package main
 // Two secrets are kept per bridge, each in its own OS item (keystore_os_* in the
 // per-OS files, addressed by Keystore_Slot + bridge_id):
 //
-//   - .Keyring  — the binary HKR1 keyring (lib/vault), at most
-//     vault.KEYRING_MAX_BYTES = 2380 bytes, which fits the Windows Credential
+//   - .Keyring  — the binary HKR2 keyring (lib/vault), at most
+//     vault.KEYRING_MAX_BYTES = 2388 bytes, which fits the Windows Credential
 //     Manager's 2560-byte blob limit. Lock purges it.
 //   - .Identity — the bridge's enrollment record: its persistent ECDSA P-256
 //     identity scalar and the enrolled owner's user id (see below). The scalar
@@ -53,7 +53,7 @@ keystore_wipe_in_memory_locked :: proc() {
 	g_keystore_in_memory_owner_len = 0
 }
 
-// keystore_store_in_memory_vault_keyring keeps a validated copy of bridge_id's HKR1
+// keystore_store_in_memory_vault_keyring keeps a validated copy of bridge_id's HKR2
 // keyring in locked memory.
 keystore_store_in_memory_vault_keyring :: proc(bridge_id: string, data: []byte) -> bool {
 	kr, ok := vault.keyring_parse(data)

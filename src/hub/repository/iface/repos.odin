@@ -13,6 +13,5 @@ Repositories :: struct {
 	push_subscriptions: Push_Repository,
 	cards: Card_Repository,
 	issues: Issue_Repository,
-	user_vaults: User_Vault_Repository,
 	attention: Attention_Repository,
 }

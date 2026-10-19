@@ -9,10 +9,10 @@ import jsonx "odin_test:lib/jsonx"
 import vault "odin_test:lib/vault"
 
 // ── Content cryptography (REQ-VAULT-CONTENT-LIB-1, passwordless vault P1) ────
-// The wire format lives in src/lib/vault: 'vault:v2:e<epoch>:<b64(nonce|tag|ct)>'
-// with AAD 'heimdall-vault-v2|e<epoch>'. ham-ctl seals under the keyring's CURRENT
-// epoch and opens by the epoch in the token header. v1 ('vault:v1:'/'ENC:v1:') tokens
-// are dead: they are not armored as far as ham-ctl is concerned and are never decoded.
+// The wire format lives in src/lib/vault: 'vault:v2:<vault_id>:e<epoch>:<b64(nonce|tag|ct)>'
+// with AAD 'heimdall-vault-v2|<vault_id>|e<epoch>'. ham-ctl seals under the keyring's CURRENT
+// epoch and opens by the epoch in the token header. Tokens of older formats are dead:
+// they are not armored as far as ham-ctl is concerned and are never decoded.
 
 VAULT_ARMOR_PREFIX :: vault.VAULT_V2_PREFIX
 
@@ -23,7 +23,7 @@ is_vault_armored :: proc(text: string) -> bool {
 	// A value counts as already sealed only if it parses as one complete v2
 	// envelope (finding M2): a mere "vault:v2:" prefix on attacker- or user-typed
 	// text must not let it skip encryption.
-	_, payload, res := vault.envelope_parse(text, context.temp_allocator)
+	_, _, payload, res := vault.envelope_parse(text, context.temp_allocator)
 	if payload != nil do crypto.zero_explicit(raw_data(payload), len(payload))
 	return res == .Ok
 }

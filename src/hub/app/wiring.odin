@@ -24,7 +24,6 @@ import taskchain_service "odin_test:hub/service/taskchain"
 import taskv2 "odin_test:hub/service/taskv2"
 import user_service "odin_test:hub/service/user"
 import billing_service "odin_test:hub/service/billing"
-import user_vault_service "odin_test:hub/service/user_vault"
 import vault_directory_service "odin_test:hub/service/vault_directory"
 import card_service "odin_test:hub/service/card"
 import issue_service "odin_test:hub/service/issue"
@@ -63,7 +62,6 @@ App_Graph :: struct {
 	sqlite_experiments: sqlite.Experiment_Repo_SQLite,
 	sqlite_lsp_server_configs: sqlite.Lsp_Server_Config_Repo_SQLite,
 	sqlite_providers: sqlite.Provider_Repo_SQLite,
-	sqlite_user_vaults: sqlite.User_Vault_Repo_SQLite,
 	sqlite_vault_directory: sqlite.Vault_Directory_Repo_SQLite,
 	sqlite_vault_directory_write: sqlite.Vault_Directory_Write_Conn,
 	vault_directory_repo: iface.Vault_Directory_Repository,
@@ -77,7 +75,6 @@ App_Graph :: struct {
 	repos: iface.Repositories,
 	uow_factory: iface.Unit_Of_Work_Factory,
 	users: user_service.User_Service,
-	user_vaults: user_vault_service.User_Vault_Service,
 	vault_directory: vault_directory_service.Service,
 	bridge_update_catalog: bridge_service.Bridge_Update_Catalog,
 	bridges: bridge_service.Bridge_Service,
@@ -93,7 +90,6 @@ App_Graph :: struct {
 	device_auth: device_auth_service.Device_Auth_Service,
 	device_auth_handlers: http.Device_Auth_Handlers,
 	user_handlers: http.User_Handlers,
-	user_vault_handlers: http.User_Vault_Handlers,
 	vault_directory_handlers: http.Vault_Directory_Handlers,
 	bridge_handlers: http.Bridge_Handlers,
 	agent_handlers: http.Agent_Handlers,
@@ -258,7 +254,6 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 		bridge_log_service.install_push(&graph.bridge_logs, &graph.bridge_log_push)
 	}
 	graph.provider_repo = sqlite.new_provider_repository(&graph.sqlite_providers, &graph.db)
-	graph.repos.user_vaults = sqlite.new_user_vault_repository(&graph.sqlite_user_vaults, &graph.db)
 	// Passwordless vault directory: writes on their own connection (see
 	// Vault_Directory_Write_Conn); an in-memory database has no second connection.
 	if config.database_path != ":memory:" {
@@ -270,7 +265,6 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 	graph.vault_directory = vault_directory_service.new_service(&graph.vault_directory_repo, &graph.clock)
 	graph.uow_factory = sqlite.new_unit_of_work_factory(&graph.sqlite_uow_factory, &graph.db, &graph.repos)
 	graph.users = user_service.new_user_service(&graph.repos.users, &graph.repos.agents, &graph.repos.projects, &graph.clock, &graph.ids)
-	graph.user_vaults = user_vault_service.new_user_vault_service(&graph.repos.user_vaults, &graph.clock)
 	bridge_command_sink := bridge_runtime_service.new_bridge_command_sink(&graph.bridge_runtime_registry)
 	graph.bridges = bridge_service.new_bridge_service_with_runtime(&graph.repos.bridges, bridge_command_sink, &graph.clock, &graph.ids)
 	// REQ-IMPL-3 / audit F6: revocation must terminate the bridge's LIVE control
@@ -354,7 +348,6 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 	device_auth_service.with_bridge_token_minter(&graph.device_auth, device_bridge_minter, rawptr(graph))
 	graph.users.bridges = &graph.repos.bridges
 	graph.user_handlers = http.User_Handlers{launch_preferences = &graph.users, auth = &graph.auth, event_bus = &graph.event_bus, ws_tickets = http.new_user_ws_ticket_store()}
-	graph.user_vault_handlers = http.User_Vault_Handlers{auth = &graph.auth, user_vault = &graph.user_vaults}
 	graph.shell_session_service = shell_session_svc.new_shell_session_service(
 		repo                = &graph.shell_session_repo,
 		bridge_command_sink = bridge_command_sink,
@@ -540,8 +533,6 @@ register_routes :: proc(graph: ^App_Graph) {
 	http.router_add(&graph.router, "GET", "/api/v1/provider-tests/*", rawptr(&graph.provider_handlers), http.provider_test_get_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/provider-tests/*/validate", rawptr(&graph.provider_handlers), http.provider_test_validate_handler)
 	http.router_add(&graph.router, "DELETE", "/api/v1/provider-tests/*", rawptr(&graph.provider_handlers), http.provider_test_cancel_handler)
-	http.router_add(&graph.router, "GET", "/api/v1/user/vault", rawptr(&graph.user_vault_handlers), http.get_user_vault_handler)
-	http.router_add(&graph.router, "POST", "/api/v1/user/vault", rawptr(&graph.user_vault_handlers), http.set_user_vault_handler)
 	// Passwordless vault device directory (plan §2 P2). Literal paths before wildcards.
 	http.router_add(&graph.router, "GET", "/api/v1/vault/directory", rawptr(&graph.vault_directory_handlers), http.vault_directory_get_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/vault/directory/genesis", rawptr(&graph.vault_directory_handlers), http.vault_genesis_handler)
@@ -550,6 +541,7 @@ register_routes :: proc(graph: ^App_Graph) {
 	http.router_add(&graph.router, "POST", "/api/v1/vault/directory/rotate", rawptr(&graph.vault_directory_handlers), http.vault_rotate_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/vault/devices/register", rawptr(&graph.vault_directory_handlers), http.vault_register_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/vault/devices/self", rawptr(&graph.vault_directory_handlers), http.vault_self_handler)
+	http.router_add(&graph.router, "POST", "/api/v1/vault/devices/recovery", rawptr(&graph.vault_directory_handlers), http.vault_recovery_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/vault/devices/*/approve", rawptr(&graph.vault_directory_handlers), http.vault_approve_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/vault/devices/*/revoke", rawptr(&graph.vault_directory_handlers), http.vault_revoke_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/vault/devices/*/deny", rawptr(&graph.vault_directory_handlers), http.vault_deny_handler)
@@ -807,7 +799,6 @@ register_routes :: proc(graph: ^App_Graph) {
 	http.router_add(&graph.router, "POST", "/api/v1/bridges/*/revoke", rawptr(&graph.bridge_handlers), http.revoke_bridge_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/bridges/*/update", rawptr(&graph.bridge_handlers), http.bridge_update_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/bridges/*/unseal", rawptr(&graph.bridge_handlers), http.bridge_unseal_handler)
-	http.router_add(&graph.router, "POST", "/api/v1/bridges/*/lock", rawptr(&graph.bridge_handlers), http.bridge_lock_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/bridges/*/public-key", rawptr(&graph.bridge_handlers), http.bridge_public_key_handler)
 	// REQ-EA: pending-enrollment status for the approval page, and operator cancel.
 	http.router_add(&graph.router, "GET", "/api/v1/bridges/*/enrollment", rawptr(&graph.bridge_handlers), http.bridge_enrollment_status_handler)

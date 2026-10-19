@@ -1,6 +1,7 @@
 package main
 
 import "base:runtime"
+import "core:crypto"
 import "core:crypto/hash"
 import base64 "core:encoding/base64"
 import "core:encoding/hex"
@@ -1221,21 +1222,6 @@ bridge_hub_handle_command :: proc(conn: ^ws.Connection, text: string) {
 	if type == "bridge_enrollment_result" {
 		// REQ-EA-4: the hub's verdict on an atomic enrollment this process acked.
 		bridge_enroll_atomic_on_result(text)
-		return
-	}
-	if type == "bridge_lock" {
-		command_id := bridge_vault_command_id(text)
-		bridge_vault_lock()
-
-		res, _ := vault.wire_encode(Bridge_Vault_Command_Result{type = "bridge_lock_result", command_id = command_id, ok = true, status = "locked"})
-		defer delete(res)
-		bridge_runtime_cache_command(command_id, res)
-		if conn != nil {
-			_ = bridge_hub_send(conn, res)
-		}
-		// bridge_vault_lock() above always succeeds (it drops the in-memory key and
-		// the keyring entry), so the report is unconditional here.
-		bridge_hub_send_vault_status(conn)
 		return
 	}
 	if bridge_fs_handle_command(conn, type, text) do return
@@ -3013,7 +2999,7 @@ bridge_vault_status_report_json :: proc() -> string {
 	return out
 }
 
-// Bridge_Vault_Command is the part of a bridge_unseal / bridge_lock command the
+// Bridge_Vault_Command is the part of a bridge_unseal command the
 // dispatcher reads (the unseal payload itself is decoded by unseal_protocol.odin).
 Bridge_Vault_Command :: struct {
 	command_id: string,
@@ -3027,7 +3013,7 @@ bridge_vault_command_id :: proc(text: string) -> string {
 	return cmd.command_id
 }
 
-// Bridge_Vault_Command_Result is the reply to bridge_unseal / bridge_lock: ok:true
+// Bridge_Vault_Command_Result is the reply to bridge_unseal: ok:true
 // with the new status, or ok:false, status "error" and the typed wire error.
 Bridge_Vault_Command_Result :: struct {
 	type:       string,
@@ -5368,6 +5354,22 @@ bridge_hub_handle_shell_get_pane :: proc(conn: ^ws.Connection, text: string) {
 	_ = bridge_hub_send(conn, result)
 }
 
+// bridge_shell_capture_seal seals a shell screen capture (empty stays empty).
+bridge_shell_capture_seal :: proc(plain: string) -> (armored: string, res: Bridge_Pane_Seal) {
+	status, kr := bridge_vault_status_and_key()
+	defer vault.keyring_wipe(&kr)
+	return bridge_shell_capture_seal_with(status, &kr, plain)
+}
+
+// bridge_shell_capture_seal_with is the pure core (tests pass the state in).
+bridge_shell_capture_seal_with :: proc(status: Vault_Status, kr: ^vault.Vault_Keyring, plain: string, allocator := context.allocator) -> (armored: string, res: Bridge_Pane_Seal) {
+	if status != .Unlocked do return "", .Locked
+	if plain == "" do return strings.clone("", allocator), .Sealed
+	tok, ok := vault.seal_string(plain, kr, allocator)
+	if !ok do return "", .Failed
+	return tok, .Sealed
+}
+
 // bridge_hub_handle_shell_capture handles the "shell_capture" command.
 // REQUEST/REPLY: returns a pty screen snapshot for the session.
 bridge_hub_handle_shell_capture :: proc(conn: ^ws.Connection, text: string) {
@@ -5406,7 +5408,23 @@ bridge_hub_handle_shell_capture :: proc(conn: ^ws.Connection, text: string) {
 	}
 	defer pty_host_reply_delete(reply)
 
-	content, _, _ := bridge_pty_host_screen_to_output(reply.screen.lines, 0)
+	plain, _, _ := bridge_pty_host_screen_to_output(reply.screen.lines, 0)
+	defer {
+		crypto.zero_explicit(raw_data(plain), len(plain))
+		delete(plain)
+	}
+	// The screen is sealed as a v2 content envelope under the current epoch, like the
+	// pane captures: a locked vault or a seal failure is an error, never plaintext.
+	content, cres := bridge_shell_capture_seal(plain)
+	switch cres {
+	case .Locked:
+		send_error(conn, session_id, command_id, "vault_locked", "bridge vault is locked; the screen cannot be sent")
+		return
+	case .Failed:
+		send_error(conn, session_id, command_id, "encryption_failed", "could not seal the screen capture")
+		return
+	case .Sealed:
+	}
 	defer delete(content)
 
 	b := strings.builder_make()

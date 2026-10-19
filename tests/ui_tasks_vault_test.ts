@@ -76,7 +76,7 @@ test('VaultText helper renders locked placeholder with data-debug-id for armored
 // Test 4: Task field encryption encrypts title and description when unlocked
 // -----------------------------------------------------------------------------
 
-test('encryptTaskFields encrypts title and description into "vault:v2:e1:<base64>" when vault is unlocked', async () => {
+test('encryptTaskFields encrypts title and description into "vault:v2:7e57000000000001:e1:<base64>" when vault is unlocked', async () => {
   const rawTaskPayload = {
     title: 'Migrate production database with zero downtime',
     description: 'Detailed steps for migrating database: 1. Set up replica, 2. Catch up binlog, 3. Switch DNS.',
@@ -126,7 +126,7 @@ test('encryptTaskFields encrypts title and description into "vault:v2:e1:<base64
 // Test 5: Task comment field encryption encrypts body when unlocked
 // -----------------------------------------------------------------------------
 
-test('encryptTaskCommentFields encrypts comment body into "vault:v2:e1:<base64>" when vault is unlocked', async () => {
+test('encryptTaskCommentFields encrypts comment body into "vault:v2:7e57000000000001:e1:<base64>" when vault is unlocked', async () => {
   const rawCommentPayload = {
     taskId: 'task_abc',
     chainId: 'chain_123',
@@ -271,7 +271,7 @@ Acceptance criteria:
   // 1. When vault is locked (no key), effectiveDescription is empty string and never raw ciphertext
   const lockedEffectiveDescription = isVaultArmored(armoredDescription) ? ('' || '') : armoredDescription;
   assert.equal(lockedEffectiveDescription, '');
-  assert.ok(!lockedEffectiveDescription.includes('vault:v2:e1:'), 'Ciphertext must never be present in effectiveDescription when locked');
+  assert.ok(!lockedEffectiveDescription.includes('vault:v2:7e57000000000001:e1:'), 'Ciphertext must never be present in effectiveDescription when locked');
 
   // 2. When vault is unlocked, decryptVaultText decrypts description
   const decrypted = await decryptVaultText(armoredDescription, TEST_KEY_HEX);
@@ -322,7 +322,7 @@ test('Agent card task titles resolve through VaultText and raw ciphertext never 
   assert.equal(lockedResolution.mode, 'locked');
   assert.equal(lockedResolution.displayText, 'Encrypted content');
   assert.equal(lockedResolution.dataDebugId, 'vault-locked-placeholder');
-  assert.ok(!lockedResolution.displayText.includes('vault:v2:e1:'), 'Raw ciphertext must never leak when locked');
+  assert.ok(!lockedResolution.displayText.includes('vault:v2:7e57000000000001:e1:'), 'Raw ciphertext must never leak when locked');
 
   // 4. When vault is unlocked, decryptVaultText decrypts and returns original task title
   const unlockedResolution = resolveVaultText(armoredTitle, true);
@@ -330,7 +330,7 @@ test('Agent card task titles resolve through VaultText and raw ciphertext never 
   assert.equal(unlockedResolution.mode, 'unlocked');
   const decryptedTitle = await decryptVaultText(armoredTitle, TEST_KEY_HEX);
   assert.equal(decryptedTitle, originalTaskTitle);
-  assert.ok(!decryptedTitle.includes('vault:v2:e1:'), 'Decrypted title must not contain armor prefix');
+  assert.ok(!decryptedTitle.includes('vault:v2:7e57000000000001:e1:'), 'Decrypted title must not contain armor prefix');
 
   // 5. Unencrypted task titles pass through without modification
   const unencryptedTitle = 'Unencrypted Task Title';

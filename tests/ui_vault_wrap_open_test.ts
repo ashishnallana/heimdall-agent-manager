@@ -74,7 +74,7 @@ test('an AAD mismatch is refused even when a trusted approver signed the altered
 test('a wrap of a keyring whose epoch_commit differs from the signed log is refused', async () => {
   const { a, b, chain } = await setup();
   // A trusted approver wraps a DIFFERENT epoch-1 keyring (a hub-chosen key) to B.
-  const fake = genesisKeyringBytes(USER);
+  const fake = genesisKeyringBytes(USER, chain.vaultId);
   const w = await sealKeyringWrap(a, USER, { device_id: b.deviceId, ecdh_public_key: b.ecdhPub, wrap_alg: b.wrapAlg }, 2, fake);
   fake.fill(0);
   await assert.rejects(open(w.json, b, chain), rejected(/epoch_commit does not match/));

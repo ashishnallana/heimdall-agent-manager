@@ -28,14 +28,14 @@ import { isBridgeVaultLockedError } from '../src/ui/utils/bridgeVaultStatus.ts';
 // ---------------------------------------------------------------------------
 
 test('REST: the hub 423 body is vault_locked and names the bridge', () => {
-  const rtk = { status: 423, data: { error: { code: 'vault_locked', message: "This bridge's vault is locked. Unseal it to continue.", details: { bridge_id: 'brg_1' } } } };
+  const rtk = { status: 423, data: { error: { code: 'vault_locked', message: "This bridge is awaiting the vault key.", details: { bridge_id: 'brg_1' } } } };
   assert.equal(isVaultLockedError(rtk), true);
   assert.equal(vaultLockedBridgeId(rtk), 'brg_1');
   assert.equal(isBridgeVaultLockedError(rtk), true, 'T9 dialog helper also recognises the typed 423');
 });
 
 test('REST: a queryFn CUSTOM_ERROR that kept code/originalStatus is vault_locked', () => {
-  const custom = { status: 'CUSTOM_ERROR', error: "This bridge's vault is locked. Unseal it to continue.", code: 'vault_locked', originalStatus: 423 };
+  const custom = { status: 'CUSTOM_ERROR', error: "This bridge is awaiting the vault key.", code: 'vault_locked', originalStatus: 423 };
   assert.equal(isVaultLockedError(custom), true);
   assert.equal(isBridgeVaultLockedError(custom), true, 'NewShellDialog keeps working against the new hub message');
   assert.equal(isVaultLockedError({ status: 'CUSTOM_ERROR', error: 'x', originalStatus: 423 }), true);
@@ -89,7 +89,7 @@ const after = (...events: Parameters<typeof reducePaneVaultLock>[1][]): PaneVaul
 
 test('a bridge row reporting Locked locks the pane on its own (late joiner / opened while locked)', () => {
   assert.equal(isPaneVaultLocked(PANE_VAULT_LOCK_INITIAL, 'Locked'), true);
-  for (const s of ['Unlocked', 'NotConfigured', 'NotRunning', 'Unknown', undefined] as const) {
+  for (const s of ['Unlocked', 'NotRunning', 'Unknown', undefined] as const) {
     assert.equal(isPaneVaultLocked(PANE_VAULT_LOCK_INITIAL, s), false, `no signal + ${s}`);
   }
 });
@@ -100,7 +100,6 @@ test('a signal on a Locked row stays locked until the row reports the vault open
   assert.equal(isPaneVaultLocked(st, 'NotRunning'), true, 'offline says nothing about the key');
   assert.equal(isPaneVaultLocked(st, 'Unknown'), true);
   assert.equal(isPaneVaultLocked(st, 'Unlocked'), false, 'unsealed -> overlay clears');
-  assert.equal(isPaneVaultLocked(st, 'NotConfigured'), false);
 });
 
 test('race: a signal before the row hears Locked is not hidden by the stale Unlocked row', () => {

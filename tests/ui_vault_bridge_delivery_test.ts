@@ -60,12 +60,12 @@ test('delivery to a chain-approved bridge carries a chain proof the bridge accep
   const { payload } = t.delivered[0];
   assert.equal(payload.bridge_identity_public_key, bridges.brg_ok.identityPub, 'the identity the LOG approved');
   const root = await verifyBridgeChainProof(payload.chain_proof, [{ epoch: 1, commit: chain.commits.get(1)! }], {
-    ownerUserId: USER, bridgeIdentityPub: bridges.brg_ok.identityPub, pinnedRootSignPub: null,
+    ownerUserId: USER, bridgeIdentityPub: bridges.brg_ok.identityPub, pinnedRootSignPub: null, keyringVaultId: chain.vaultId,
   });
   assert.equal(root, chain.rootSignPub);
   // The proof names THIS bridge: another bridge identity refuses it.
   await assert.rejects(verifyBridgeChainProof(payload.chain_proof, [{ epoch: 1, commit: chain.commits.get(1)! }], {
-    ownerUserId: USER, bridgeIdentityPub: bridges.brg_hint.identityPub, pinnedRootSignPub: null,
+    ownerUserId: USER, bridgeIdentityPub: bridges.brg_hint.identityPub, pinnedRootSignPub: null, keyringVaultId: chain.vaultId,
   }), /bridge approval/);
 });
 

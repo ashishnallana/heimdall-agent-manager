@@ -25,7 +25,7 @@ print_vault_help :: proc() {
 	fmt.println("USAGE:")
 	fmt.println("  ham-ctl vault status")
 	fmt.println("")
-	fmt.println("The keyring comes from $HEIMDALL_VAULT_KEYRING (base64 HKR1,")
+	fmt.println("The keyring comes from $HEIMDALL_VAULT_KEYRING (base64 HKR2,")
 	fmt.println("a single-bridge dev override) or, otherwise, the local bridge.")
 }
 
@@ -42,7 +42,7 @@ ctl_vault_wipe :: proc() {
 	vault.keyring_wipe(&g_ctl_keyring)
 }
 
-// ctl_keyring_from_b64 strictly decodes a base64 HKR1 keyring. When want_epoch is
+// ctl_keyring_from_b64 strictly decodes a base64 HKR2 keyring. When want_epoch is
 // non-zero the keyring's current epoch must equal it.
 ctl_keyring_from_b64 :: proc(b64: string, want_epoch: u32 = 0) -> (kr: vault.Vault_Keyring, ok: bool) {
 	raw, dec_ok := vault.b64_decode_strict(b64, context.temp_allocator)
@@ -61,7 +61,7 @@ ctl_keyring_from_b64 :: proc(b64: string, want_epoch: u32 = 0) -> (kr: vault.Vau
 //   1. $HEIMDALL_VAULT_KEYRING (a single-bridge dev override; a bridge never passes
 //      it to the agents it spawns)
 //   2. the local bridge, via agent.vault.get (agent mode only)
-// (Test builds also accept --vault-keyring <base64 HKR1> first; see below.)
+// (Test builds also accept --vault-keyring <base64 HKR2> first; see below.)
 //
 // Source 1 is EXPLICIT: if it is present but invalid it is rejected and
 // the bridge is NOT consulted, so a typo surfaces as an error instead of silently
@@ -119,7 +119,7 @@ ctl_vault_keyring_from_bridge :: proc() -> (kr: vault.Vault_Keyring, ok: bool) {
 }
 
 // ctl_vault_keyring_from_response validates an agent.vault.get response:
-// {"keyring_b64":"<base64 HKR1>","current_epoch":N}. The keyring must decode
+// {"keyring_b64":"<base64 HKR2>","current_epoch":N}. The keyring must decode
 // strictly, parse, and its current epoch must equal current_epoch.
 // Ctl_Vault_Get_Data is the agent.vault.get answer (bare or under "data").
 Ctl_Vault_Get_Data :: struct {
@@ -260,6 +260,54 @@ ctl_vault_keyring_for_write :: proc(args: []string) -> ^vault.Vault_Keyring {
 	if have do return keyring
 	fmt.println(`{"ok":false,"message":"vault keyring unavailable; refusing to send plaintext (approve or unseal the bridge and retry)"}`)
 	os.exit(1)
+}
+
+// CARD_OP_SEALED_FIELDS names, per card operation, the content fields the hub only
+// STORES when it executes the op (it copies them into the issue / memory / project it
+// creates), so they travel sealed. Everything else stays in clear because the hub
+// must read it to execute: ids (task_id, memory_id, chain_id, project_id, agent_id,
+// instance_id, target_id), status, result, attempt_no, scope/scope_type, type,
+// expires_at. agent.prompt's prompt is delivered to the agent sealed by the normal
+// chat path and agent.update edits identity metadata the hub indexes, so both are
+// left as they are.
+CARD_OP_SEALED_FIELDS :: [?][2]string{
+	{"issue.create", "title"}, {"issue.create", "description"},
+	{"memory.create", "title"}, {"memory.create", "body"}, {"memory.create", "description"}, {"memory.create", "evidence"},
+	{"memory.update", "title"}, {"memory.update", "body"}, {"memory.update", "description"}, {"memory.update", "evidence"},
+	{"project.update", "name"}, {"project.update", "description"},
+}
+
+@(private = "file")
+card_op_field_sealed :: proc(op, field: string) -> bool {
+	fields := CARD_OP_SEALED_FIELDS
+	for f in fields do if f[0] == op && f[1] == field do return true
+	return false
+}
+
+// ctl_seal_card_operations seals the store-only content fields of every operation in
+// a card's `operations` JSON array (top level and inside `args`). Returns false when
+// the value is not a JSON array of objects.
+ctl_seal_card_operations :: proc(ops_json: string, kr: ^vault.Vault_Keyring, allocator := context.allocator) -> (string, bool) {
+	value, err := json.parse_string(ops_json, json.DEFAULT_SPECIFICATION, true, context.temp_allocator)
+	if err != nil do return "", false
+	ops, is_arr := value.(json.Array)
+	if !is_arr do return "", false
+	seal_obj :: proc(op: string, obj: ^json.Object, kr: ^vault.Vault_Keyring) {
+		for k, v in obj^ {
+			s, is_str := v.(json.String)
+			if is_str && card_op_field_sealed(op, k) do obj^[k] = json.String(ctl_seal_if(string(s), kr))
+		}
+	}
+	for item in ops {
+		obj, is_obj := item.(json.Object)
+		if !is_obj do return "", false
+		op, _ := obj["op"].(json.String)
+		seal_obj(string(op), &obj, kr)
+		if args, has_args := obj["args"].(json.Object); has_args do seal_obj(string(op), &args, kr)
+	}
+	out, merr := json.marshal(value, allocator = allocator)
+	if merr != nil do return "", false
+	return string(out), true
 }
 
 // ctl_seal_if seals value unless it is empty or already a valid envelope.

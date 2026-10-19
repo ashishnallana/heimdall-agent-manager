@@ -66,7 +66,7 @@ test('VaultText helper renders locked placeholder with data-debug-id for armored
 // Test 4: Memory field encryption encrypts title, description, body, evidence when unlocked
 // -----------------------------------------------------------------------------
 
-test('encryptMemoryFields encrypts title, description, body, evidence into "vault:v2:e1:<base64>" when vault is unlocked', async () => {
+test('encryptMemoryFields encrypts title, description, body, evidence into "vault:v2:7e57000000000001:e1:<base64>" when vault is unlocked', async () => {
   const rawMemoryPayload = {
     title: 'Secret architectural rule: do not call external API directly',
     description: 'Guidelines for secure outbound network calls from agents',

@@ -222,8 +222,6 @@ bridge_command_spec :: proc(command_type: string) -> (Bridge_Command_Spec, bool)
 		return Bridge_Command_Spec{priority = .Control, queued = false, timeout_ms = 1000, cost_units = 1}, true
 	case "stop_agent":
 		return Bridge_Command_Spec{class = .Lifecycle, priority = .Recovery, key_kind = .Agent, queued = true, requires_id = true, timeout_ms = 15_000, cost_units = 4}, true
-	case "bridge_lock":
-		return Bridge_Command_Spec{class = .Lifecycle, priority = .Recovery, key_kind = .Bridge, queued = true, requires_id = true, timeout_ms = 5000, cost_units = 2}, true
 	case "lsp_stop":
 		return Bridge_Command_Spec{class = .Lifecycle, priority = .Recovery, key_kind = .LSP, queued = true, requires_id = true, timeout_ms = 5000, cost_units = 2}, true
 	case "shell_kill", "shell_signal", "shell_stream_detach":
@@ -296,7 +294,7 @@ bridge_command_ordering_key :: proc(command_type, text: string) -> string {
 	// the scheduler key empty lets the second background worker join that flight.
 	case "provider_discover": return ""
 	case "bridge_update": return strings.clone("bridge-update")
-	case "bridge_unseal", "bridge_lock", "set_telemetry": return strings.clone("bridge-control")
+	case "bridge_unseal", "set_telemetry": return strings.clone("bridge-control")
 	case "fs_make_dir", "fs_create_file", "fs_write_file", "fs_batch_write", "fs_move", "fs_delete":
 		// Batch operations can touch several paths. A single filesystem mutation key
 		// is conservative but correct until canonical roots are part of the contract.

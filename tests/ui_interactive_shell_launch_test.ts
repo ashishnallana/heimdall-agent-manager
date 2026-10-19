@@ -286,7 +286,6 @@ test('auto-start attempts once and exposes an explicit retry after failure', asy
     const { enc_spec, session_id, ...plain } = posts[0] as Record<string, any>;
     assert.deepEqual(plain, {
       kind: 'shell',
-      cwd: '/srv/project-a',
       chain_id: 'chain-a',
       project_id: 'project-a',
     });

@@ -152,7 +152,7 @@ test('openPaneReplyOutput decrypts a sealed pane capture and fails closed withou
   const kr = await keyringFromHex('0123456789abcdef'.repeat(4));
   const base = (await ptyBaseKeyFor(kr, 1))!;
   const frame = await sealPtyPayload(enc.encode('pane text'), base, 1, 'shs_pane', 'out', new Uint8Array(16).fill(7), 1);
-  const armored = `vault:v2:e1:${Buffer.from(frame.subarray(4)).toString('base64')}`;
+  const armored = `vault:v2:7e57000000000001:e1:${Buffer.from(frame.subarray(4)).toString('base64')}`;
   setActiveVaultKey(kr);
   try {
     const opened = await openPaneReplyOutput({ ok: true, output: armored, hash: 'h' }, 'shs_pane');

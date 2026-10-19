@@ -1,5 +1,6 @@
 import { heimdallApi } from '../heimdallApi';
 import { cookieJsonFetch, cookieMutation } from '../cookieFetch';
+import { openCardOperations, sealCardOperations } from '../../utils/vaultCardOps';
 export { isCardExpired } from '../../components/cards/CardsPanel';
 
 export type CardStatus = 'pending' | 'accepted' | 'rejected' | 'snoozed' | 'discarded';
@@ -214,9 +215,10 @@ export const cardsApi = heimdallApi.injectEndpoints({
           }
           const queryStr = params.toString() ? `?${params.toString()}` : '';
           const data = await cookieJsonFetch(`/cards${queryStr}`);
-          const cards: Card[] = Array.isArray(data)
+          const raw: Card[] = Array.isArray(data)
             ? data
             : (Array.isArray(data?.data) ? data.data : (data?.cards || []));
+          const cards = await Promise.all(raw.map(async (c) => ({ ...c, operations: (await openCardOperations(c.operations)) ?? [] })));
           return { data: { cards } };
         } catch (error: any) {
           return { error: { status: 'CUSTOM_ERROR', error: cardErrorText(error, 'Failed to list cards') } as any };
@@ -235,6 +237,7 @@ export const cardsApi = heimdallApi.injectEndpoints({
         try {
           const data = await cookieJsonFetch(`/cards/${encodeURIComponent(id)}`);
           const card = data?.data || data?.card || data || null;
+          if (card && Array.isArray(card.operations)) card.operations = await openCardOperations(card.operations);
           return { data: { card } };
         } catch (error: any) {
           return { error: { status: 'CUSTOM_ERROR', error: cardErrorText(error, 'Failed to get card') } as any };
@@ -246,7 +249,8 @@ export const cardsApi = heimdallApi.injectEndpoints({
     createCard: build.mutation<Card, CreateCardInput>({
       queryFn: async (input) => {
         try {
-          const card = await cookieMutation('/cards', 'POST', input);
+          const sealed = input?.operations ? { ...input, operations: await sealCardOperations(input.operations) } : input;
+          const card = await cookieMutation('/cards', 'POST', sealed);
           return { data: card };
         } catch (error: any) {
           return { error: { status: 'CUSTOM_ERROR', error: cardErrorText(error, 'Failed to create card') } as any };

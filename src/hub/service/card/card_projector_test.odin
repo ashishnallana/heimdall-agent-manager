@@ -68,7 +68,7 @@ ph_open :: proc(t: ^testing.T, h: ^Projector_Harness, name: string) {
 	}}
 	taskchain_service.set_attention_notifier(&h.taskchains, &h.svc.attention_notifier)
 	content_service.set_attention_notifier(&h.content_svc, &h.svc.attention_notifier)
-	_, chain_ok, _ := iface.taskchain_save_chain(&h.tasks, domain.Task_Chain{chain_id = PH_CHAIN, owner_user_id = PH_OWNER, title = "vault:v1:chain-title", status = .Active, publish_state = .Published, created_at = "2026-10-01T00:00:00Z", updated_at = "2026-10-01T00:00:00Z"})
+	_, chain_ok, _ := iface.taskchain_save_chain(&h.tasks, domain.Task_Chain{chain_id = PH_CHAIN, owner_user_id = PH_OWNER, title = "vault:v2:chain-title", status = .Active, publish_state = .Published, created_at = "2026-10-01T00:00:00Z", updated_at = "2026-10-01T00:00:00Z"})
 	testing.expect(t, chain_ok, "seed chain")
 }
 
@@ -103,7 +103,7 @@ ph_marker :: proc(updated_at: string) -> string {
 }
 
 ph_task :: proc(id: string, status: Ph_Status, updated_at: string, reviewers := PH_USER_REVIEWER) -> domain.Task {
-	task := domain.Task{task_id = domain.Task_ID(id), chain_id = PH_CHAIN, owner_user_id = PH_OWNER, title = "vault:v1:task-title", priority = .P1, publish_state = .Published, kind = .Task, brief_json = "{}", created_at = "2026-10-01T00:00:00Z", updated_at = updated_at}
+	task := domain.Task{task_id = domain.Task_ID(id), chain_id = PH_CHAIN, owner_user_id = PH_OWNER, title = "vault:v2:task-title", priority = .P1, publish_state = .Published, kind = .Task, brief_json = "{}", created_at = "2026-10-01T00:00:00Z", updated_at = updated_at}
 	switch status {
 	case .In_Progress: task.state = .In_Progress
 	case .Completed:   task.state = .Done
@@ -143,7 +143,7 @@ test_projector_task_card_lifecycle :: proc(t: ^testing.T) {
 	testing.expect_value(t, c.provider, domain.CARD_PROVIDER_TASK_VALIDATION)
 	testing.expect_value(t, c.attention_since, "2026-10-01T02:00:00Z")
 	testing.expect_value(t, c.source_marker, ph_marker("2026-10-01T02:00:00Z"))
-	testing.expect_value(t, c.title, "vault:v1:task-title") // ciphertext verbatim
+	testing.expect_value(t, c.title, "vault:v2:task-title") // ciphertext verbatim
 	testing.expect_value(t, c.action_refs_json, `{"chain_id":"chain_att","task_id":"task_a"}`)
 	testing.expect_value(t, c.ttl_at, "")
 	testing.expect(t, strings.contains(c.details_json, `"priority":"p1"`), "details carry priority")
@@ -160,7 +160,7 @@ test_projector_task_card_lifecycle :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(h.changed_kinds), changes_before)
 
 	// A comment re-projects the card without changing the marker.
-	_, cm_ok, _ := taskchain_service.save_comment(&h.taskchains, domain.Task_Comment{comment_id = "cmt_1", task_id = "task_a", chain_id = PH_CHAIN, owner_user_id = PH_OWNER, body = "vault:v1:comment", created_at = "2026-10-01T02:30:00Z", updated_at = "2026-10-01T02:30:00Z"})
+	_, cm_ok, _ := taskchain_service.save_comment(&h.taskchains, domain.Task_Comment{comment_id = "cmt_1", task_id = "task_a", chain_id = PH_CHAIN, owner_user_id = PH_OWNER, body = "vault:v2:comment", created_at = "2026-10-01T02:30:00Z", updated_at = "2026-10-01T02:30:00Z"})
 	testing.expect(t, cm_ok, "save comment")
 	c3, _ := ph_card(t, &h, cid)
 	// A blocked card quotes the block, not the latest comment (v2).
@@ -295,7 +295,7 @@ ph_conversation :: proc(t: ^testing.T, h: ^Projector_Harness, conv_id, instance_
 }
 
 ph_message :: proc(t: ^testing.T, h: ^Projector_Harness, id, conv_id, instance_id, direction, created_at, metadata: string) {
-	_, ok, err := content_service.save_message(&h.content_svc, domain.Chat_Message{message_id = id, conversation_id = conv_id, owner_user_id = PH_OWNER, direction = direction, sender_agent_instance_id = instance_id, body = fmt.tprintf("vault:v1:%s", id), metadata_json = metadata, created_at = created_at})
+	_, ok, err := content_service.save_message(&h.content_svc, domain.Chat_Message{message_id = id, conversation_id = conv_id, owner_user_id = PH_OWNER, direction = direction, sender_agent_instance_id = instance_id, body = fmt.tprintf("vault:v2:%s", id), metadata_json = metadata, created_at = created_at})
 	testing.expectf(t, ok, "save message: %s", err.message)
 }
 
@@ -323,7 +323,7 @@ test_projector_message_card_per_instance :: proc(t: ^testing.T) {
 	testing.expect_value(t, a.kind, domain.CARD_KIND_MESSAGE)
 	testing.expect_value(t, a.source_marker, "msg_a2")
 	testing.expect_value(t, a.attention_since, "2026-10-01T01:05:00Z")
-	testing.expect_value(t, a.title, "vault:v1:msg_a2")
+	testing.expect_value(t, a.title, "vault:v2:msg_a2")
 	testing.expect(t, strings.contains(a.details_json, `"options":["Keep it","Skip it"]`), "options of the latest option message")
 	testing.expect(t, strings.contains(a.details_json, `"other_unread":2`), "other unread counted")
 	testing.expect_value(t, a.action_refs_json, `{"conversation_id":"chat_a","agent_instance_id":"inst_a","message_id":"msg_a2"}`)

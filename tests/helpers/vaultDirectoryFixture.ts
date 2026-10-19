@@ -130,7 +130,7 @@ export class FakeHub {
     return r;
   }
 
-  /** Raw HKR1 bytes of the current keyring, opened from `holder`'s wrap (caller zeroes). */
+  /** Raw HKR2 bytes of the current keyring, opened from `holder`'s wrap (caller zeroes). */
   async keyringBytes(holder: DeviceIdentity): Promise<Uint8Array> {
     const chain = await this.chain();
     const parsed = await openVerifiedWrap(this.wraps.get(holder.deviceId), {

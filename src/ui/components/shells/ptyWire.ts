@@ -311,12 +311,14 @@ export async function decryptPtyPayload(
 }
 
 /**
- * Decrypt an armored PTY capture `vault:v2:e<N>:<b64(salt|nonce|tag|ct)>` (the bridge's
- * sealed pane reply) to text. Returns null when the keyring cannot open that epoch;
- * throws on a malformed or unauthenticated capture.
+ * Decrypt an armored PTY capture `vault:v2:<vault_id>:e<N>:<b64(salt|nonce|tag|ct)>`
+ * (the bridge's sealed pane reply) to text. Returns null when the keyring cannot open
+ * that epoch or the capture names another vault (never tried with these keys); throws
+ * on a malformed or unauthenticated capture.
  */
 export async function decryptPtyCaptureText(armored: string, keyring: VaultKeyring, sessionId: string): Promise<string | null> {
-  const { epoch, payload } = parseVaultEnvelope(armored);
+  const { vaultId, epoch, payload } = parseVaultEnvelope(armored);
+  if (vaultId !== keyring.vaultId) return null;
   const frame = new Uint8Array(4 + payload.length);
   new DataView(frame.buffer).setUint32(0, epoch);
   frame.set(payload, 4);

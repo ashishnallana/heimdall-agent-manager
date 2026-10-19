@@ -1,5 +1,5 @@
 // Package vault is the single Odin implementation of the passwordless-vault wire
-// formats (docs/plans/passwordless-vault.md §1): the v2 content envelope, the HKR1
+// formats (docs/plans/passwordless-vault.md §1): the v2 content envelope, the HKR2
 // keyring, canonical signed statements and their algorithm allowlist, the bridge
 // unseal v2 cipher, PTY v2 frames and the v2 search key. The bridge, ham-ctl and the
 // hub all use it, so each format exists in exactly one Odin place; the TypeScript
@@ -28,18 +28,25 @@ MAX_EPOCH           :: u32(4294967295)
 // hub's 80 MiB request cap; anything larger is rejected before it is decoded.
 MAX_PAYLOAD_BYTES   :: 64 * 1024 * 1024
 MAX_B64_LEN         :: ((MAX_PAYLOAD_BYTES + 2) / 3) * 4
-ENVELOPE_AAD_PREFIX :: "heimdall-vault-v2|e"
+ENVELOPE_AAD_PREFIX :: "heimdall-vault-v2|"
+// A complete token is "vault:v2:<vault_id 16 hex>:e<epoch>:<b64(nonce|tag|ct)>"; the
+// AAD is "heimdall-vault-v2|<vault_id>|e<epoch>", so neither the vault id nor the
+// epoch in the header can be changed without failing authentication.
 
 // LOCKED_MARKER is what a token becomes when its epoch key is not held (no keyring,
 // or an epoch this keyring does not contain). FAILED_MARKER is a token that names a
 // held epoch but does not authenticate.
 LOCKED_MARKER :: "[encrypted: vault key unavailable]"
 FAILED_MARKER :: "[Encrypted]"
+// OTHER_VAULT_MARKER is a token sealed in a different vault (one that was reset): it is
+// never tried with this keyring's keys.
+OTHER_VAULT_MARKER :: "[encrypted: from a previous vault]"
 
 Open_Result :: enum {
 	Ok,
-	Not_Armored,   // not a v2 token at all (plain text, or a dead v1 token)
+	Not_Armored,   // not a v2 token at all (plain text, or a dead older-format token)
 	Malformed,     // claims to be v2 but is not exactly canonical
+	Other_Vault,   // well formed, but sealed in another vault (not this keyring's)
 	Unknown_Epoch, // well formed, but the keyring holds no key for its epoch
 	Auth_Failed,   // the key for its epoch does not authenticate it
 	No_Keyring,    // well formed, but no keyring was supplied
@@ -71,11 +78,25 @@ parse_epoch :: proc(digits: string) -> (epoch: u32, ok: bool) {
 	return u32(v), true
 }
 
-// write_epoch_aad renders "heimdall-vault-v2|e<epoch>" into buf.
-envelope_aad :: proc(epoch: u32, buf: []byte) -> []byte {
+// envelope_aad renders "heimdall-vault-v2|<vault_id>|e<epoch>" into buf (>= 64 bytes).
+envelope_aad :: proc(vault_id: Vault_Id, epoch: u32, buf: []byte) -> []byte {
 	n := copy(buf, ENVELOPE_AAD_PREFIX)
+	n += len(vault_id_hex(vault_id, buf[n:]))
+	n += copy(buf[n:], "|e")
 	digits := strconv.write_uint(buf[n:], u64(epoch), 10)
 	return buf[:n + len(digits)]
+}
+
+// token_prefix renders "vault:v2:<vault_id>:e<epoch>:" into buf (>= 48 bytes). Every
+// channel that uses the token format (content, fs writes, pane captures) builds its
+// header here.
+token_prefix :: proc(vault_id: Vault_Id, epoch: u32, buf: []byte) -> string {
+	n := copy(buf, VAULT_V2_PREFIX)
+	n += len(vault_id_hex(vault_id, buf[n:]))
+	n += copy(buf[n:], ":e")
+	n += len(strconv.write_uint(buf[n:], u64(epoch), 10))
+	n += copy(buf[n:], ":")
+	return string(buf[:n])
 }
 
 @(private)
@@ -125,10 +146,22 @@ b64_decode_strict :: proc(s: string, allocator := context.allocator) -> (out: []
 
 // token_end returns the end of the token grammar match that starts at text[start]
 // (which must begin with VAULT_V2_PREFIX), or -1. It reproduces the TS regex
-// /vault:v2:e[1-9][0-9]{0,9}:[A-Za-z0-9+/]+={0,2}/ exactly, including greediness.
+// /vault:v2:[0-9a-f]{16}:e[1-9][0-9]{0,9}:[A-Za-z0-9+/]+={0,2}/ exactly, including
+// greediness.
 @(private)
 token_end :: proc(text: string, start: int) -> int {
 	i := start + len(VAULT_V2_PREFIX)
+	for k in 0 ..< VAULT_ID_HEX_CHARS {
+		if i + k >= len(text) do return -1
+		switch text[i + k] {
+		case '0' ..= '9', 'a' ..= 'f':
+		case:
+			return -1
+		}
+	}
+	i += VAULT_ID_HEX_CHARS
+	if i >= len(text) || text[i] != ':' do return -1
+	i += 1
 	if i >= len(text) || text[i] != 'e' do return -1
 	i += 1
 	if i >= len(text) || text[i] < '1' || text[i] > '9' do return -1
@@ -167,40 +200,51 @@ next_token :: proc(text: string, from: int) -> (start: int, end: int) {
 	return -1, -1
 }
 
-// envelope_parse splits a complete token (and nothing else) into its epoch and decoded
-// payload. The payload is allocated with allocator.
-envelope_parse :: proc(token: string, allocator := context.allocator) -> (epoch: u32, payload: []byte, result: Open_Result) {
-	if !is_armored(token) do return 0, nil, .Not_Armored
-	if token_end(token, 0) != len(token) do return 0, nil, .Malformed
-	rest := token[len(VAULT_V2_PREFIX) + 1:] // past "e"
+// envelope_header parses the "vault:v2:<vault_id>:e<epoch>:" header of a complete
+// token (and nothing else) without decoding the payload; body is the base64 part.
+envelope_header :: proc(token: string) -> (vault_id: Vault_Id, epoch: u32, body: string, result: Open_Result) {
+	if !is_armored(token) do return {}, 0, "", .Not_Armored
+	if token_end(token, 0) != len(token) do return {}, 0, "", .Malformed
+	vid_start := len(VAULT_V2_PREFIX)
+	vid, vid_ok := vault_id_from_hex(token[vid_start:vid_start + VAULT_ID_HEX_CHARS])
+	if !vid_ok do return {}, 0, "", .Malformed
+	rest := token[vid_start + VAULT_ID_HEX_CHARS + 2:] // past ":e"
 	colon := strings.index_byte(rest, ':')
-	if colon < 0 do return 0, nil, .Malformed
+	if colon < 0 do return {}, 0, "", .Malformed
 	ep, ep_ok := parse_epoch(rest[:colon])
-	if !ep_ok do return 0, nil, .Malformed
+	if !ep_ok do return {}, 0, "", .Malformed
 	b64 := rest[colon + 1:]
-	if len(b64) > MAX_B64_LEN do return 0, nil, .Malformed
+	if len(b64) > MAX_B64_LEN do return {}, 0, "", .Malformed
+	return vid, ep, b64, .Ok
+}
+
+// envelope_parse splits a complete token (and nothing else) into its vault id, epoch
+// and decoded payload. The payload is allocated with allocator.
+envelope_parse :: proc(token: string, allocator := context.allocator) -> (vault_id: Vault_Id, epoch: u32, payload: []byte, result: Open_Result) {
+	vid, ep, b64, res := envelope_header(token)
+	if res != .Ok do return {}, 0, nil, res
 	decoded, dec_ok := b64_decode_strict(b64, allocator)
-	if !dec_ok do return 0, nil, .Malformed
+	if !dec_ok do return {}, 0, nil, .Malformed
 	if len(decoded) < HEADER_BYTES || len(decoded) > MAX_PAYLOAD_BYTES {
 		crypto.zero_explicit(raw_data(decoded), len(decoded))
 		delete(decoded, allocator)
-		return 0, nil, .Malformed
+		return {}, 0, nil, .Malformed
 	}
-	return ep, decoded, .Ok
+	return vid, ep, decoded, .Ok
 }
 
 // seal_with_nonce is the deterministic core of seal. Production callers use seal or
 // seal_with_key, which draw the nonce from the OS CSPRNG; this exists for vectors.
-seal_with_nonce :: proc(plaintext: []byte, key: []byte, epoch: u32, nonce: []byte, allocator := context.allocator) -> (token: string, ok: bool) {
+seal_with_nonce :: proc(plaintext: []byte, key: []byte, vault_id: Vault_Id, epoch: u32, nonce: []byte, allocator := context.allocator) -> (token: string, ok: bool) {
 	aad_buf: [64]byte
-	return seal_with_nonce_aad(plaintext, key, epoch, nonce, envelope_aad(epoch, aad_buf[:]), allocator)
+	return seal_with_nonce_aad(plaintext, key, vault_id, epoch, nonce, envelope_aad(vault_id, epoch, aad_buf[:]), allocator)
 }
 
 // seal_with_nonce_aad produces the v2 token format under an explicit AAD. Channels
 // that reuse the token format with their own AAD (fs writes) go through this, so a
 // token sealed for one channel never opens in another.
-seal_with_nonce_aad :: proc(plaintext: []byte, key: []byte, epoch: u32, nonce: []byte, aad: []byte, allocator := context.allocator) -> (token: string, ok: bool) {
-	if len(key) != KEY_BYTES || len(nonce) != NONCE_BYTES || epoch == 0 do return "", false
+seal_with_nonce_aad :: proc(plaintext: []byte, key: []byte, vault_id: Vault_Id, epoch: u32, nonce: []byte, aad: []byte, allocator := context.allocator) -> (token: string, ok: bool) {
+	if len(key) != KEY_BYTES || len(nonce) != NONCE_BYTES || epoch == 0 || vault_id == (Vault_Id{}) do return "", false
 	if len(plaintext) > MAX_PAYLOAD_BYTES - HEADER_BYTES do return "", false
 	payload := make([]byte, HEADER_BYTES + len(plaintext), context.temp_allocator)
 	defer crypto.zero_explicit(raw_data(payload), len(payload))
@@ -211,17 +255,16 @@ seal_with_nonce_aad :: proc(plaintext: []byte, key: []byte, epoch: u32, nonce: [
 	aes.seal_gcm(&gcm, payload[HEADER_BYTES:], payload[NONCE_BYTES:HEADER_BYTES], nonce, aad, plaintext)
 	b64, err := base64.encode(payload, allocator = context.temp_allocator)
 	if err != nil do return "", false
-	epoch_buf: [16]byte
-	epoch_str := strconv.write_uint(epoch_buf[:], u64(epoch), 10)
-	return strings.concatenate({VAULT_V2_PREFIX, "e", epoch_str, ":", b64}, allocator), true
+	prefix_buf: [64]byte
+	return strings.concatenate({token_prefix(vault_id, epoch, prefix_buf[:]), b64}, allocator), true
 }
 
 // seal_with_key seals under an explicit epoch key with a fresh CSPRNG nonce. A
 // randomness failure returns ok=false and nothing is produced.
-seal_with_key :: proc(plaintext: []byte, key: []byte, epoch: u32, allocator := context.allocator, random_source := os_random.DEFAULT_SOURCE) -> (token: string, ok: bool) {
+seal_with_key :: proc(plaintext: []byte, key: []byte, vault_id: Vault_Id, epoch: u32, allocator := context.allocator, random_source := os_random.DEFAULT_SOURCE) -> (token: string, ok: bool) {
 	nonce: [NONCE_BYTES]byte
 	if !os_random.fill(nonce[:], random_source) do return "", false
-	return seal_with_nonce(plaintext, key, epoch, nonce[:], allocator)
+	return seal_with_nonce(plaintext, key, vault_id, epoch, nonce[:], allocator)
 }
 
 // seal encrypts under the keyring's CURRENT epoch; encryption never uses an older one.
@@ -229,7 +272,7 @@ seal :: proc(plaintext: []byte, kr: ^Vault_Keyring, allocator := context.allocat
 	if kr == nil do return "", false
 	key, key_ok := keyring_key_for_epoch(kr, kr.current_epoch)
 	if !key_ok do return "", false
-	return seal_with_key(plaintext, key, kr.current_epoch, allocator, random_source)
+	return seal_with_key(plaintext, key, kr.vault_id, kr.current_epoch, allocator, random_source)
 }
 
 seal_string :: proc(plaintext: string, kr: ^Vault_Keyring, allocator := context.allocator) -> (token: string, ok: bool) {
@@ -237,9 +280,9 @@ seal_string :: proc(plaintext: string, kr: ^Vault_Keyring, allocator := context.
 }
 
 // open_with_key authenticates payload (nonce|tag|ct) for epoch under key.
-open_payload_with_key :: proc(payload: []byte, key: []byte, epoch: u32, allocator := context.allocator) -> (plaintext: []byte, ok: bool) {
+open_payload_with_key :: proc(payload: []byte, key: []byte, vault_id: Vault_Id, epoch: u32, allocator := context.allocator) -> (plaintext: []byte, ok: bool) {
 	aad_buf: [64]byte
-	return open_payload_with_key_aad(payload, key, envelope_aad(epoch, aad_buf[:]), allocator)
+	return open_payload_with_key_aad(payload, key, envelope_aad(vault_id, epoch, aad_buf[:]), allocator)
 }
 
 // open_payload_with_key_aad authenticates nonce|tag|ct under key and an explicit AAD.
@@ -259,14 +302,17 @@ open_payload_with_key_aad :: proc(payload: []byte, key: []byte, aad: []byte, all
 
 // open decrypts a complete token with the key for the epoch in its header. The
 // returned plaintext is allocated with allocator and is set only when result == .Ok.
+// A token of another vault is .Other_Vault before any key is looked up: it is never
+// tried with this keyring's keys.
 open :: proc(token: string, kr: ^Vault_Keyring, allocator := context.allocator) -> (plaintext: string, result: Open_Result) {
-	epoch, payload, parse_result := envelope_parse(token, context.temp_allocator)
+	vault_id, epoch, payload, parse_result := envelope_parse(token, context.temp_allocator)
 	if parse_result != .Ok do return "", parse_result
 	defer crypto.zero_explicit(raw_data(payload), len(payload))
 	if kr == nil do return "", .No_Keyring
+	if vault_id != kr.vault_id do return "", .Other_Vault
 	key, key_ok := keyring_key_for_epoch(kr, epoch)
 	if !key_ok do return "", .Unknown_Epoch
-	plain, ok := open_payload_with_key(payload, key, epoch, allocator)
+	plain, ok := open_payload_with_key(payload, key, vault_id, epoch, allocator)
 	if !ok do return "", .Auth_Failed
 	return string(plain), .Ok
 }
@@ -275,11 +321,13 @@ open :: proc(token: string, kr: ^Vault_Keyring, allocator := context.allocator) 
 //   - decrypted to its plaintext when it opens;
 //   - locked_marker when there is no keyring or its epoch is not held (an empty
 //     locked_marker keeps the token verbatim);
+//   - other_vault_marker when it was sealed in another (reset) vault (kept verbatim
+//     when locked_marker is empty);
 //   - failed_marker when it names a held epoch but is malformed or does not
 //     authenticate.
-// Dead v1 tokens are not v2 tokens and stay verbatim; they are never decrypted.
-// Caller owns the result.
-replace_embedded_tokens :: proc(text: string, kr: ^Vault_Keyring, locked_marker: string = LOCKED_MARKER, failed_marker: string = FAILED_MARKER, allocator := context.allocator) -> string {
+// Dead older-format tokens are not v2 tokens and stay verbatim; they are never
+// decrypted. Caller owns the result.
+replace_embedded_tokens :: proc(text: string, kr: ^Vault_Keyring, locked_marker: string = LOCKED_MARKER, failed_marker: string = FAILED_MARKER, allocator := context.allocator, other_vault_marker: string = OTHER_VAULT_MARKER) -> string {
 	b := strings.builder_make(allocator)
 	pos := 0
 	for pos < len(text) {
@@ -294,6 +342,8 @@ replace_embedded_tokens :: proc(text: string, kr: ^Vault_Keyring, locked_marker:
 			crypto.zero_explicit(raw_data(plain), len(plain))
 		case .No_Keyring, .Unknown_Epoch:
 			strings.write_string(&b, locked_marker if locked_marker != "" else token)
+		case .Other_Vault:
+			strings.write_string(&b, other_vault_marker if locked_marker != "" else token)
 		case .Malformed, .Auth_Failed, .Not_Armored:
 			strings.write_string(&b, failed_marker)
 		}

@@ -157,7 +157,7 @@ test('Client-side task chain search filters strictly across decrypted titles', (
       {
         id: 'chain_vault_auth',
         type: 'chain',
-        rawTitle: 'vault:v2:e1:armoredCiphertext1',
+        rawTitle: 'vault:v2:7e57000000000001:e1:armoredCiphertext1',
         decryptedTitle: 'Implement User Vault & Master Password',
         projectId: 'proj_security',
         status: 'in_progress',
@@ -166,7 +166,7 @@ test('Client-side task chain search filters strictly across decrypted titles', (
       {
         id: 'chain_lsp',
         type: 'chain',
-        rawTitle: 'vault:v2:e1:armoredCiphertext2',
+        rawTitle: 'vault:v2:7e57000000000001:e1:armoredCiphertext2',
         decryptedTitle: 'Language Server Protocol Client Support',
         projectId: 'proj_core',
         status: 'completed',
@@ -175,7 +175,7 @@ test('Client-side task chain search filters strictly across decrypted titles', (
       {
         id: 'chain_fleet',
         type: 'chain',
-        rawTitle: 'vault:v2:e1:armoredCiphertext3',
+        rawTitle: 'vault:v2:7e57000000000001:e1:armoredCiphertext3',
         decryptedTitle: 'Worker Fleet Auto-Scaling and Recovery',
         projectId: 'proj_infra',
         status: 'active',
@@ -346,7 +346,7 @@ test('Query filtering separates quick navigation on empty from strict chain sear
 // -----------------------------------------------------------------------------
 
 test('matchesQuery returns false for any isVaultArmored string regardless of query', () => {
-  const armoredSample = 'vault:v2:e1:WUgAS1y82QZU5dYC/488DrhnJXBmKsJTwengYlT7uLDJLbV09m8d2Lq3W';
+  const armoredSample = 'vault:v2:7e57000000000001:e1:WUgAS1y82QZU5dYC/488DrhnJXBmKsJTwengYlT7uLDJLbV09m8d2Lq3W';
 
   assert.ok(isVaultArmored(armoredSample), 'Sample string must be armored');
 
@@ -354,7 +354,7 @@ test('matchesQuery returns false for any isVaultArmored string regardless of que
   assert.equal(matchesQuery(armoredSample, 'vault'), false, 'Must not match "vault" in armored string');
   assert.equal(matchesQuery(armoredSample, 'Vault'), false, 'Must not match "Vault" (case insensitive) in armored string');
   assert.equal(matchesQuery(armoredSample, 'v1'), false, 'Must not match "v1" in armored string');
-  assert.equal(matchesQuery(armoredSample, 'vault:v2:e1:'), false, 'Must not match "vault:v2:e1:" in armored string');
+  assert.equal(matchesQuery(armoredSample, 'vault:v2:7e57000000000001:e1:'), false, 'Must not match "vault:v2:7e57000000000001:e1:" in armored string');
 
   // Ciphertext substrings must return false
   assert.equal(matchesQuery(armoredSample, 'WUgAS1y82Q'), false, 'Must not match base64 ciphertext substring');
@@ -395,7 +395,7 @@ test('Typing "Vault" matches only chains whose decrypted title genuinely contain
   );
   assert.equal(matchingBeforeVault.length, 0, 'Searching "Vault" must not match raw ciphertext before decryption');
 
-  // Searching 'v1' or 'vault:v2:e1:' before decryption: matches 0 items
+  // Searching 'v1' or 'vault:v2:7e57000000000001:e1:' before decryption: matches 0 items
   const matchingBeforeV1 = rawChains.filter(
     (ch) => !isVaultArmored(ch.title) && matchesQuery(ch.title, 'v1'),
   );

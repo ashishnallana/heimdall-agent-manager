@@ -9,7 +9,7 @@ import "core:strings"
 //
 // The ECDH unseal proves only that the sender saw this boot's signed key, never WHO
 // the sender is: a hostile hub can seal a keyring of its own choosing. So every unseal
-// v2 payload carries, next to the sealed HKR1 keyring, a `chain_proof` member: public,
+// v2 payload carries, next to the sealed HKR2 keyring, a `chain_proof` member: public,
 // signed directory-log data showing that EVERY epoch in the keyring was introduced by
 // an approver of the bridge's account, and that this bridge is itself approved. The
 // sender is the approving browser (src/ui/utils/vaultDirectoryVerify.ts
@@ -127,6 +127,7 @@ Chain_Error :: enum {
 	Epoch_Mismatch,    // the epoch carriers do not match the keyring's epochs
 	Commit_Mismatch,   // an epoch_commit does not match the delivered key
 	Not_This_Bridge,   // subject_approval does not approve this bridge's identity
+	Wrong_Vault,       // the keyring's vault id is not the one the proof's root names
 }
 
 chain_error_message :: proc(e: Chain_Error) -> string {
@@ -142,6 +143,7 @@ chain_error_message :: proc(e: Chain_Error) -> string {
 	case .Epoch_Mismatch:  return "keyring chain proof: the signed epochs do not match the keyring's epochs"
 	case .Commit_Mismatch: return "keyring chain proof: an epoch_commit does not match the delivered key"
 	case .Not_This_Bridge: return "keyring chain proof: the approval does not name this bridge's identity key"
+	case .Wrong_Vault:     return "keyring chain proof: the keyring belongs to another vault than the proof's root"
 	}
 	return "keyring chain proof rejected"
 }
@@ -272,6 +274,11 @@ bridge_chain_verify :: proc(
 	pin, pin_ok := root_pin_from_hex(root_id, root_alg, root_pub)
 	if !pin_ok do return {}, .Root_Invalid
 	if pinned != nil && pinned.set && !root_pin_equal(pinned, &pin) do return {}, .Root_Mismatch
+	// The keyring names its vault (vault id = SHA-256(root key)[:8]): it must be this
+	// root's, so a keyring of another (or a reset) vault never passes as this one's.
+	want_vault, wv_ok := vault_id_from_root_sign_pub(root_pub)
+	if !wv_ok do return {}, .Root_Invalid
+	if want_vault != kr.vault_id do return {}, .Wrong_Vault
 	root_signer := Signer{root_id, root_alg, root_pub, 1}
 
 	// Genesis, self-signed by the root, log seq 1.

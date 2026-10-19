@@ -244,9 +244,6 @@ MIGRATION_045_LSP_SERVER_PATTERNS :: #load("migrations/045_lsp_server_patterns.s
 // agent instance pooling (REQ-FLEET-SCHEMA-1).
 MIGRATION_046_TASK_CHAIN_FLEETS :: #load("migrations/046_task_chain_fleets.sql", string)
 
-// MIGRATION_047_USER_VAULTS creates user_vaults table for Zero-Knowledge
-// dual-wrapped vault key envelopes and KDF parameters (REQ-VAULT-DB-SCHEMA-1).
-MIGRATION_047_USER_VAULTS :: #load("migrations/047_user_vaults.sql", string)
 
 // MIGRATION_048_TASK_SUBSCRIPTIONS creates task_subscriptions table for
 // reactive status event fanout (REQ-TCC-2).
@@ -310,7 +307,7 @@ MIGRATION_054_BRIDGE_TELEMETRY :: #load("migrations/054_bridge_telemetry.sql", s
 MIGRATION_055_MEMORY_ACTION_EXPIRY :: #load("migrations/055_memory_action_expiry.sql", string)
 
 // MIGRATION_056_BRIDGE_VAULT_STATUS adds vault_status to bridges (REQ-BVS-1): the
-// bridge's self-reported "unlocked"/"locked"/"disabled", defaulting to '' for a bridge
+// bridge's self-reported "unlocked"/"locked", defaulting to '' for a bridge
 // that has never reported one. UX indicator only; nothing gates on it.
 MIGRATION_056_BRIDGE_VAULT_STATUS :: #load("migrations/056_bridge_vault_status.sql", string)
 
@@ -423,6 +420,10 @@ MIGRATION_093_VAULT_SIGNED_LOG :: #load("migrations/093_vault_signed_log.sql", s
 // 094: hub-blind pairing; drops the vault tables (no backward compatibility) and
 // upgrade_vault_directory_schema re-creates them from 092 (pair_lookup, no user_code).
 MIGRATION_094_VAULT_HUB_BLIND_PAIRING :: #load("migrations/094_vault_hub_blind_pairing.sql", string)
+// MIGRATION_096_DROP_PASSWORD_VAULT removes the password-era vault table (the
+// passwordless vault replaced it; no backward compatibility). Migration
+// 047 that created it is gone from the order and the tree.
+MIGRATION_096_DROP_PASSWORD_VAULT :: #load("migrations/096_drop_password_vault.sql", string)
 
 // 095: pairing stretch (pair_salt on pending devices); drops the vault tables (no
 // backward compatibility) and upgrade_vault_directory_schema re-creates them from 092.
@@ -479,7 +480,6 @@ migration_order :: [99]string {
 	"044_lsp_servers.sql",
 	"045_lsp_server_patterns.sql",
 	"046_task_chain_fleets.sql",
-	"047_user_vaults.sql",
 	"048_task_subscriptions.sql",
 	"048_shell_sessions_kind_and_key.sql",
 	"049_shell_sessions_background_and_conversation.sql",
@@ -530,6 +530,7 @@ migration_order :: [99]string {
 	"093_vault_signed_log.sql",
 	"094_vault_hub_blind_pairing.sql",
 	"095_vault_pairing_stretch.sql",
+	"096_drop_password_vault.sql",
 }
 
 // stop_before is a TEST SEAM: when non-empty, the apply loop stops in front of
@@ -692,10 +693,6 @@ run_migrations :: proc(
 		}
 		if (name == "046_task_chain_fleets.sql" || name == "044_task_chain_fleets.sql") &&
 		   sqlite_object_exists(conn, "task_chain_fleets") {
-			mark_migration_applied(conn, name)
-			continue
-		}
-		if name == "047_user_vaults.sql" && sqlite_object_exists(conn, "user_vaults") {
 			mark_migration_applied(conn, name)
 			continue
 		}
@@ -899,7 +896,6 @@ run_migrations :: proc(
 	if !upgrade_task_chain_directories_schema(conn) do return false, domain.domain_error(.Internal_Error, "task_chain_directories schema upgrade failed")
 	if !upgrade_task_chain_fleets_schema(conn) do return false, domain.domain_error(.Internal_Error, "task_chain_fleets schema upgrade failed")
 	if !upgrade_task_bridge_schema(conn) do return false, domain.domain_error(.Internal_Error, "task bridge_id schema upgrade failed")
-	if !upgrade_user_vaults_schema(conn) do return false, domain.domain_error(.Internal_Error, "user vaults schema upgrade failed")
 	if !upgrade_shell_sessions_kind_and_key_schema(conn) do return false, domain.domain_error(.Internal_Error, "shell_sessions kind + key schema upgrade failed")
 	if !upgrade_shell_sessions_background_schema(conn) do return false, domain.domain_error(.Internal_Error, "shell_sessions background + conversation schema upgrade failed")
 	if !upgrade_shell_sessions_kill_intent_schema(conn) do return false, domain.domain_error(.Internal_Error, "shell_sessions kill intent schema upgrade failed")
@@ -968,7 +964,6 @@ migration_sql :: proc(name, migrations_dir: string) -> string {
 	if name == "044_lsp_servers.sql" do return strings.clone(MIGRATION_044_LSP_SERVERS)
 	if name == "045_lsp_server_patterns.sql" || name == "046_lsp_server_patterns.sql" do return strings.clone(MIGRATION_045_LSP_SERVER_PATTERNS)
 	if name == "046_task_chain_fleets.sql" || name == "044_task_chain_fleets.sql" do return strings.clone(MIGRATION_046_TASK_CHAIN_FLEETS)
-	if name == "047_user_vaults.sql" do return strings.clone(MIGRATION_047_USER_VAULTS)
 	if name == "048_task_subscriptions.sql" || name == "049_task_subscriptions.sql" do return strings.clone(MIGRATION_048_TASK_SUBSCRIPTIONS)
 	if name == "048_shell_sessions_kind_and_key.sql" do return strings.clone(MIGRATION_048_SHELL_SESSIONS_KIND_AND_KEY)
 	if name == "049_shell_sessions_background_and_conversation.sql" do return strings.clone(MIGRATION_049_SHELL_SESSIONS_BACKGROUND_AND_CONVERSATION)
@@ -1005,6 +1000,7 @@ migration_sql :: proc(name, migrations_dir: string) -> string {
 	if name == "093_vault_signed_log.sql" do return strings.clone(MIGRATION_093_VAULT_SIGNED_LOG)
 	if name == "094_vault_hub_blind_pairing.sql" do return strings.clone(MIGRATION_094_VAULT_HUB_BLIND_PAIRING)
 	if name == "095_vault_pairing_stretch.sql" do return strings.clone(MIGRATION_095_VAULT_PAIRING_STRETCH)
+	if name == "096_drop_password_vault.sql" do return strings.clone(MIGRATION_096_DROP_PASSWORD_VAULT)
 	if name == "081_antigravity_models.sql" do return strings.clone(MIGRATION_081_ANTIGRAVITY_MODELS)
 	if name == "080_copilot_launch_recipe.sql" do return strings.clone(MIGRATION_080_COPILOT_LAUNCH_RECIPE)
 	if name == "079_repair_provider_catalog_etag.sql" do return strings.clone(MIGRATION_079_REPAIR_PROVIDER_CATALOG_ETAG)
@@ -1033,9 +1029,6 @@ migration_applied :: proc(conn: ^Conn, version: string) -> bool {
 	if sqlite3_step(stmt) == SQLITE_ROW do return true
 	if version == "046_task_chain_fleets.sql" {
 		return migration_applied(conn, "044_task_chain_fleets.sql")
-	}
-	if version == "047_user_vaults.sql" {
-		return sqlite_object_exists(conn, "user_vaults")
 	}
 	if version == "048_task_subscriptions.sql" || version == "049_task_subscriptions.sql" {
 		return sqlite_object_exists(conn, "task_subscriptions")
@@ -1498,28 +1491,6 @@ upgrade_vault_directory_schema :: proc(conn: ^Conn) -> bool {
 	return exec(conn, MIGRATION_092_VAULT_DEVICE_DIRECTORY)
 }
 
-// upgrade_user_vaults_schema idempotently ensures the user_vaults
-// table exists (REQ-VAULT-DB-SCHEMA-1).
-upgrade_user_vaults_schema :: proc(conn: ^Conn) -> bool {
-	return exec(
-		conn,
-		`CREATE TABLE IF NOT EXISTS user_vaults (
-  user_id                      TEXT PRIMARY KEY,
-  encrypted_vault_key          TEXT NOT NULL,
-  vault_key_nonce              TEXT NOT NULL,
-  vault_key_tag                TEXT NOT NULL,
-  kdf_algorithm                TEXT NOT NULL,
-  kdf_salt                     TEXT NOT NULL,
-  kdf_iterations               INTEGER NOT NULL,
-  recovery_encrypted_vault_key TEXT NOT NULL,
-  recovery_nonce               TEXT NOT NULL,
-  recovery_tag                 TEXT NOT NULL,
-  recovery_salt                TEXT NOT NULL,
-  created_at                   TEXT NOT NULL,
-  updated_at                   TEXT NOT NULL
-);`,
-	)
-}
 
 
 // upgrade_shell_sessions_kind_and_key_schema is the idempotent self-heal twin of

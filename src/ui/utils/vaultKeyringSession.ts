@@ -79,7 +79,7 @@ export function keyringSessionGeneration(): number {
 }
 
 /**
- * Run `fn` with the raw HKR1 bytes of the installed keyring, re-opened from the
+ * Run `fn` with the raw HKR2 bytes of the installed keyring, re-opened from the
  * stored wrap. The buffer is zeroed when `fn` settles; `fn` must not keep it.
  * `chain` (when given) is the freshly verified chain to check the wrap against.
  */
@@ -98,7 +98,7 @@ export async function withKeyringBytes<T>(fn: (bytes: Uint8Array) => Promise<T>,
 }
 
 /**
- * HKR1 bytes for the next epoch: every existing entry plus a fresh random key at
+ * HKR2 bytes for the next epoch: every existing entry plus a fresh random key at
  * `current+1`. Refuses when the keyring is full (64 epochs). Caller zeroes the result;
  * `current` is not modified.
  */
@@ -109,7 +109,7 @@ export function nextEpochKeyringBytes(current: Uint8Array, userId: string): Uint
     const fresh = crypto.getRandomValues(new Uint8Array(KEYRING_KEY_BYTES));
     const next = parsed.currentEpoch + 1;
     try {
-      return serializeKeyringBytes({ userId, currentEpoch: next, entries: [...parsed.entries, { epoch: next, key: fresh }] });
+      return serializeKeyringBytes({ userId, vaultId: parsed.vaultId, currentEpoch: next, entries: [...parsed.entries, { epoch: next, key: fresh }] });
     } finally {
       fresh.fill(0);
     }
@@ -118,11 +118,11 @@ export function nextEpochKeyringBytes(current: Uint8Array, userId: string): Uint
   }
 }
 
-/** A brand-new epoch-1 keyring for genesis. Caller zeroes the result. */
-export function genesisKeyringBytes(userId: string): Uint8Array {
+/** A brand-new epoch-1 keyring of vault `vaultId` for genesis. Caller zeroes the result. */
+export function genesisKeyringBytes(userId: string, vaultId: string): Uint8Array {
   const key = crypto.getRandomValues(new Uint8Array(KEYRING_KEY_BYTES));
   try {
-    return serializeKeyringBytes({ userId, currentEpoch: 1, entries: [{ epoch: 1, key }] });
+    return serializeKeyringBytes({ userId, vaultId, currentEpoch: 1, entries: [{ epoch: 1, key }] });
   } finally {
     key.fill(0);
   }

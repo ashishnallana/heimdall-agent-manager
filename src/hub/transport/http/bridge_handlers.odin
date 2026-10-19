@@ -617,42 +617,6 @@ bridge_public_key_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	return vault_respond(out, req)
 }
 
-Bridge_Lock_Command :: struct {
-	type:       string,
-	command_id: string,
-}
-
-bridge_lock_handler :: proc(ctx: rawptr, req: Request) -> Response {
-	h := (^Bridge_Handlers)(ctx)
-	auth_ctx, auth_ok, auth_resp := require_auth(h.auth, req)
-	if !auth_ok do return auth_resp
-
-	bridge_id := path_part(req.path, 4)
-	bridge, bridge_ok, bridge_err := bridge_service.get_bridge(h.bridges, auth_ctx, bridge_id)
-	if !bridge_ok do return respond_error(bridge_err, req.request_id)
-	if bridge.status == .Revoked do return respond_error(domain.domain_error(.Bridge_Revoked, "bridge is revoked"), req.request_id)
-	if bridge.status != .Online || !project_service.bridge_runtime_registry_has_live(h.bridge_runtime_registry, bridge.bridge_id) {
-		return respond_error(domain.domain_error(.Bridge_Offline, fmt.tprintf("Bridge %s is not connected", bridge.bridge_id)), req.request_id)
-	}
-
-	lock_req: struct {
-		command_id: string,
-	}
-	_ = vault.wire_decode(req.body, &lock_req) // an empty / malformed body gets a hub-made id
-	cmd_id := lock_req.command_id
-	if cmd_id == "" do cmd_id = fmt.tprintf("cmd_lock_%d", time.to_unix_nanoseconds(time.now()))
-	cmd_body, cmd_ok := vault.wire_encode(Bridge_Lock_Command{type = "bridge_lock", command_id = cmd_id}, context.temp_allocator)
-	if !cmd_ok do return respond_error(domain.domain_error(.Internal_Error, "could not encode the lock command"), req.request_id)
-
-	reply, reply_ok, reply_err := bridge_runtime_service.send_runtime_command_wait(
-		h.bridge_runtime_registry,
-		project_service.Runtime_Command{bridge_id = bridge.bridge_id, command_id = cmd_id, body_json = cmd_body},
-		10000,
-	)
-	if !reply_ok do return respond_error(reply_err, req.request_id)
-	return respond_success(reply, req.request_id, auth_ctx_server_time(req))
-}
-
 // --- Project-scoped filesystem browser (browse/read/CRUD) -----------------
 // Resolves (project_id -> bridge_id, root_path) via Project_Bridge_Path, then
 // relays a WS command carrying that project root so the bridge re-sandboxes every
@@ -2210,7 +2174,7 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
 		}
 		delete(stage)
 		delete(message)
-	case "command_result", "project_path_validation_result", "provider_discovery_report", "fs_list_dir_result", "fs_stat_result", "fs_make_dir_result", "fs_read_file_result", "fs_create_file_result", "fs_write_file_result", "fs_batch_write_result", "fs_move_result", "fs_delete_result", "vcs_capabilities_result", "vcs_status_result", "vcs_files_result", "vcs_diff_result", "vcs_log_result", "vcs_commit_diff_result", "vcs_show_file_result", "vcs_workspaces_result", "vcs_stage_result", "vcs_unstage_result", "vcs_revert_result", "vcs_save_file_result", "vcs_commit_result", "vcs_upload_result", "vcs_sync_result", "fs_find_files_result", "fs_grep_result", "shell_start_result", "shell_restart_result", "shell_list_result", "shell_logs_result", "shell_capture_result", "shell_set_port_result", "bridge_unseal_result", "bridge_lock_result", "task_chain_search_result", "taskv2_merge_worktree_result":
+	case "command_result", "project_path_validation_result", "provider_discovery_report", "fs_list_dir_result", "fs_stat_result", "fs_make_dir_result", "fs_read_file_result", "fs_create_file_result", "fs_write_file_result", "fs_batch_write_result", "fs_move_result", "fs_delete_result", "vcs_capabilities_result", "vcs_status_result", "vcs_files_result", "vcs_diff_result", "vcs_log_result", "vcs_commit_diff_result", "vcs_show_file_result", "vcs_workspaces_result", "vcs_stage_result", "vcs_unstage_result", "vcs_revert_result", "vcs_save_file_result", "vcs_commit_result", "vcs_upload_result", "vcs_sync_result", "fs_find_files_result", "fs_grep_result", "shell_start_result", "shell_restart_result", "shell_list_result", "shell_logs_result", "shell_capture_result", "shell_set_port_result", "bridge_unseal_result", "task_chain_search_result", "taskv2_merge_worktree_result":
 		command_id := json_string(text, "command_id")
 		_ = bridge_runtime_service.runtime_command_result_for_connection(h.bridge_runtime_registry, bridge_id, connection_generation, command_id, text)
 		if type == "command_result" && h.agents != nil do agent_service.apply_reconfiguration_command_result(h.agents, bridge_id, command_id, text)

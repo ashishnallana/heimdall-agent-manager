@@ -138,7 +138,7 @@ function body(pred: (c: Captured) => boolean) {
 // STATE: ENABLED + UNLOCKED  — writes must be armored on the wire
 // =============================================================================
 
-test('UNLOCKED: createArtifact sends vault:v2:e1: name and description on the wire', async () => {
+test('UNLOCKED: createArtifact sends vault:v2:7e57000000000001:e1: name and description on the wire', async () => {
   captured = []; nextResponseBody = { data: { artifact: { artifact_id: 'art_1' } } };
   const store = makeStore();
   await unlock(store);
@@ -157,7 +157,7 @@ test('UNLOCKED: createArtifact sends vault:v2:e1: name and description on the wi
   assert.ok(!String(b.description).includes('confidential'), 'plaintext description must NOT appear on the wire');
 });
 
-test('UNLOCKED: updateArtifact sends vault:v2:e1: name and description on the wire', async () => {
+test('UNLOCKED: updateArtifact sends vault:v2:7e57000000000001:e1: name and description on the wire', async () => {
   captured = []; nextResponseBody = { data: { artifact: { artifact_id: 'art_1' } } };
   const store = makeStore();
   await unlock(store);
@@ -170,7 +170,7 @@ test('UNLOCKED: updateArtifact sends vault:v2:e1: name and description on the wi
   assert.ok(isVaultArmored(b.description), 'updated description must be armored');
 });
 
-test('UNLOCKED: createTaskChain sends vault:v2:e1: title and description on the wire', async () => {
+test('UNLOCKED: createTaskChain sends vault:v2:7e57000000000001:e1: title and description on the wire', async () => {
   captured = []; nextResponseBody = { data: { chain_id: 'chain_1' } };
   const store = makeStore();
   await unlock(store);
@@ -183,7 +183,7 @@ test('UNLOCKED: createTaskChain sends vault:v2:e1: title and description on the 
   assert.ok(!String(b.title).includes('Secret'), 'plaintext chain title must NOT appear on the wire');
 });
 
-test('UNLOCKED: updateTaskChain sends vault:v2:e1: title and description on the wire', async () => {
+test('UNLOCKED: updateTaskChain sends vault:v2:7e57000000000001:e1: title and description on the wire', async () => {
   captured = []; nextResponseBody = { data: { chain_id: 'chain_1' } };
   const store = makeStore();
   await unlock(store);
@@ -210,7 +210,7 @@ test('UNLOCKED: fetchArtifactTextContent decrypts pre-existing armored content t
   } as any));
   assert.equal(res.data?.text, 'previously stored secret body',
     `content must render decrypted, got: ${String(res.data?.text).slice(0, 60)}`);
-  assert.ok(!isVaultArmored(res.data?.text), 'no vault:v2:e1: string may reach the screen');
+  assert.ok(!isVaultArmored(res.data?.text), 'no vault:v2:7e57000000000001:e1: string may reach the screen');
 });
 
 // =============================================================================

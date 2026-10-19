@@ -14,17 +14,17 @@ test_attention_item_json_task_golden :: proc(t: ^testing.T) {
 	item := card_service.Attention_Item{
 		card = domain.Card{
 			card_id = "crd_task_task_1", kind = "task", provider = "task_validation", status = "pending",
-			attention_since = "2026-10-01T02:00:00Z", title = "vault:v1:abc==", rationale = "Waiting on your review",
+			attention_since = "2026-10-01T02:00:00Z", title = "vault:v2:abc==", rationale = "Waiting on your review",
 			operations_json = `[{"op":"task.vote","label":"Approve","args":{"task_id":"task_1","result":"lgtm"}}]`,
 			details_json = `{"priority":"p1","status":"in_validation","bridge_id":"brg_1","assignee_name":"soloist #1","excerpt":null}`,
 			action_refs_json = `{"chain_id":"chain_1","task_id":"task_1"}`,
 		},
 		reason = "awaiting_review", urgency = "warn", primary_op = "task.vote",
-		ctx = card_service.Attention_Item_Context{chain_title = "vault:v1:chain==", agent_name = "soloist #1"},
+		ctx = card_service.Attention_Item_Context{chain_title = "vault:v2:chain==", agent_name = "soloist #1"},
 	}
 	b := strings.builder_make(context.temp_allocator)
 	write_attention_item_json(&b, item)
-	testing.expect_value(t, strings.to_string(b), `{"card_id":"crd_task_task_1","kind":"task","provider":"task_validation","reason":"awaiting_review","urgency":"warn","status":"pending","snoozed":false,"snooze_until":"","attention_since":"2026-10-01T02:00:00Z","title":"vault:v1:abc==","rationale":"Waiting on your review","primary_op":"task.vote","operations":[{"op":"task.vote","label":"Approve","args":{"task_id":"task_1","result":"lgtm"}}],"details":{"priority":"p1","status":"in_validation","bridge_id":"brg_1","assignee_name":"soloist #1","excerpt":null},"action_refs":{"chain_id":"chain_1","task_id":"task_1"},"context":{"chain_title":"vault:v1:chain==","agent_name":"soloist #1","project_name":""}}`)
+	testing.expect_value(t, strings.to_string(b), `{"card_id":"crd_task_task_1","kind":"task","provider":"task_validation","reason":"awaiting_review","urgency":"warn","status":"pending","snoozed":false,"snooze_until":"","attention_since":"2026-10-01T02:00:00Z","title":"vault:v2:abc==","rationale":"Waiting on your review","primary_op":"task.vote","operations":[{"op":"task.vote","label":"Approve","args":{"task_id":"task_1","result":"lgtm"}}],"details":{"priority":"p1","status":"in_validation","bridge_id":"brg_1","assignee_name":"soloist #1","excerpt":null},"action_refs":{"chain_id":"chain_1","task_id":"task_1"},"context":{"chain_title":"vault:v2:chain==","agent_name":"soloist #1","project_name":""}}`)
 }
 
 @(test)
@@ -32,9 +32,9 @@ test_attention_item_json_message_golden :: proc(t: ^testing.T) {
 	item := card_service.Attention_Item{
 		card = domain.Card{
 			card_id = "crd_msg_inst_1", kind = "message", provider = "message_options", status = "pending",
-			attention_since = "2026-10-01T01:05:00Z", title = "vault:v1:q==", rationale = "Waiting on your reply",
+			attention_since = "2026-10-01T01:05:00Z", title = "vault:v2:q==", rationale = "Waiting on your reply",
 			operations_json = "[]",
-			details_json = `{"excerpt":{"author_name":"soloist #1","body":"vault:v1:q==","at":"2026-10-01T01:05:00Z"},"options":["Yes","No"],"other_unread":2}`,
+			details_json = `{"excerpt":{"author_name":"soloist #1","body":"vault:v2:q==","at":"2026-10-01T01:05:00Z"},"options":["Yes","No"],"other_unread":2}`,
 			action_refs_json = `{"conversation_id":"chat_1","agent_instance_id":"inst_1","message_id":"msg_1"}`,
 		},
 		reason = "question", urgency = "info",
@@ -42,7 +42,7 @@ test_attention_item_json_message_golden :: proc(t: ^testing.T) {
 	}
 	b := strings.builder_make(context.temp_allocator)
 	write_attention_item_json(&b, item)
-	testing.expect_value(t, strings.to_string(b), `{"card_id":"crd_msg_inst_1","kind":"message","provider":"message_options","reason":"question","urgency":"info","status":"pending","snoozed":false,"snooze_until":"","attention_since":"2026-10-01T01:05:00Z","title":"vault:v1:q==","rationale":"Waiting on your reply","primary_op":null,"operations":[],"details":{"excerpt":{"author_name":"soloist #1","body":"vault:v1:q==","at":"2026-10-01T01:05:00Z"},"options":["Yes","No"],"other_unread":2},"action_refs":{"conversation_id":"chat_1","agent_instance_id":"inst_1","message_id":"msg_1"},"context":{"chain_title":"","agent_name":"soloist #1","project_name":""}}`)
+	testing.expect_value(t, strings.to_string(b), `{"card_id":"crd_msg_inst_1","kind":"message","provider":"message_options","reason":"question","urgency":"info","status":"pending","snoozed":false,"snooze_until":"","attention_since":"2026-10-01T01:05:00Z","title":"vault:v2:q==","rationale":"Waiting on your reply","primary_op":null,"operations":[],"details":{"excerpt":{"author_name":"soloist #1","body":"vault:v2:q==","at":"2026-10-01T01:05:00Z"},"options":["Yes","No"],"other_unread":2},"action_refs":{"conversation_id":"chat_1","agent_instance_id":"inst_1","message_id":"msg_1"},"context":{"chain_title":"","agent_name":"soloist #1","project_name":""}}`)
 }
 
 @(test)
@@ -57,17 +57,17 @@ test_attention_item_json_memory_golden :: proc(t: ^testing.T) {
 	item := card_service.Attention_Item{
 		card = domain.Card{
 			card_id = "crd_mem_mem_1", kind = "memory", provider = "memory_proposal", status = "pending",
-			attention_since = "2026-10-01T03:00:00Z", title = "vault:v1:t==", rationale = "Waiting on your approval",
+			attention_since = "2026-10-01T03:00:00Z", title = "vault:v2:t==", rationale = "Waiting on your approval",
 			operations_json = `[{"op":"memory.approve","label":"Approve","args":{"memory_id":"mem_1"}}]`,
-			details_json = `{"type":"fact","title":"vault:v1:t==","description":"","body":"vault:v1:b==","expires_at":"2026-10-02T03:00:00Z","proposer_name":"soloist #21","agent_ids":["agt_1"],"project_ids":[],"bridge_ids":[],"template_ids":[]}`,
+			details_json = `{"type":"fact","title":"vault:v2:t==","description":"","body":"vault:v2:b==","expires_at":"2026-10-02T03:00:00Z","proposer_name":"soloist #21","agent_ids":["agt_1"],"project_ids":[],"bridge_ids":[],"template_ids":[]}`,
 			action_refs_json = `{"memory_id":"mem_1","agent_instance_id":"inst_1","chain_id":"chain_1"}`,
 		},
 		reason = "memory_proposal", urgency = "info", primary_op = "memory.approve",
-		ctx = card_service.Attention_Item_Context{chain_title = "vault:v1:c==", agent_name = "soloist #21", has_scope = true, scope_agents = []string{"codex-reviewer"}, scope_projects = []string{"vault:v1:p=="}},
+		ctx = card_service.Attention_Item_Context{chain_title = "vault:v2:c==", agent_name = "soloist #21", has_scope = true, scope_agents = []string{"codex-reviewer"}, scope_projects = []string{"vault:v2:p=="}},
 	}
 	b := strings.builder_make(context.temp_allocator)
 	write_attention_item_json(&b, item)
-	testing.expect_value(t, strings.to_string(b), `{"card_id":"crd_mem_mem_1","kind":"memory","provider":"memory_proposal","reason":"memory_proposal","urgency":"info","status":"pending","snoozed":false,"snooze_until":"","attention_since":"2026-10-01T03:00:00Z","title":"vault:v1:t==","rationale":"Waiting on your approval","primary_op":"memory.approve","operations":[{"op":"memory.approve","label":"Approve","args":{"memory_id":"mem_1"}}],"details":{"type":"fact","title":"vault:v1:t==","description":"","body":"vault:v1:b==","expires_at":"2026-10-02T03:00:00Z","proposer_name":"soloist #21","agent_ids":["agt_1"],"project_ids":[],"bridge_ids":[],"template_ids":[]},"action_refs":{"memory_id":"mem_1","agent_instance_id":"inst_1","chain_id":"chain_1"},"context":{"chain_title":"vault:v1:c==","agent_name":"soloist #21","project_name":"","scope":{"agents":["codex-reviewer"],"projects":["vault:v1:p=="],"bridges":[],"templates":[]}}}`)
+	testing.expect_value(t, strings.to_string(b), `{"card_id":"crd_mem_mem_1","kind":"memory","provider":"memory_proposal","reason":"memory_proposal","urgency":"info","status":"pending","snoozed":false,"snooze_until":"","attention_since":"2026-10-01T03:00:00Z","title":"vault:v2:t==","rationale":"Waiting on your approval","primary_op":"memory.approve","operations":[{"op":"memory.approve","label":"Approve","args":{"memory_id":"mem_1"}}],"details":{"type":"fact","title":"vault:v2:t==","description":"","body":"vault:v2:b==","expires_at":"2026-10-02T03:00:00Z","proposer_name":"soloist #21","agent_ids":["agt_1"],"project_ids":[],"bridge_ids":[],"template_ids":[]},"action_refs":{"memory_id":"mem_1","agent_instance_id":"inst_1","chain_id":"chain_1"},"context":{"chain_title":"vault:v2:c==","agent_name":"soloist #21","project_name":"","scope":{"agents":["codex-reviewer"],"projects":["vault:v2:p=="],"bridges":[],"templates":[]}}}`)
 }
 
 @(test)

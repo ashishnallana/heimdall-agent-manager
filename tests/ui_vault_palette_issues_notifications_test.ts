@@ -21,7 +21,7 @@ test('Command Palette: project names decryption enables client-side search by de
   const secretProjectName = 'Project Supernova';
   const armoredProjectName = await encryptVaultText(secretProjectName, TEST_KEY_HEX);
 
-  assert.ok(isVaultArmored(armoredProjectName), 'Armored project name must be detected as vault:v2:e1:');
+  assert.ok(isVaultArmored(armoredProjectName), 'Armored project name must be detected as vault:v2:7e57000000000001:e1:');
 
   // Before decryption: search with query 'supernova' fails against raw ciphertext
   const beforeSearch = !isVaultArmored(armoredProjectName) && matchesQuery(armoredProjectName, 'supernova');
@@ -63,7 +63,7 @@ test('Hub issue_description_preview logic preserves full vault armored ciphertex
   // Emulate issue_description_preview in Odin:
   const trimmed = armoredDescription.trim();
   let preview: string;
-  if (trimmed.includes('vault:v2:e1:')) {
+  if (trimmed.includes('vault:v2:7e57000000000001:e1:')) {
     preview = trimmed;
   } else {
     preview = trimmed.slice(0, 160);

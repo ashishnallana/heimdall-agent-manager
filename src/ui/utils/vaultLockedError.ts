@@ -116,7 +116,7 @@ export function announcePaneVaultLocked(sessionId: string | null | undefined, si
 }
 
 function isOpenStatus(status: BridgeVaultStatus | undefined): boolean {
-  return status === 'Unlocked' || status === 'NotConfigured';
+  return status === 'Unlocked';
 }
 
 /**

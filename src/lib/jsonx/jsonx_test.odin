@@ -313,7 +313,7 @@ test_jsonx_valid_utf8_and_escapes_still_decode :: proc(t: ^testing.T) {
 	// Guard against the fix regressing the paths that already worked --
 	// notably vault-armored content, which is pure-ASCII base64 and currently
 	// takes core's fast clone_string path.
-	armored := `vault:v1:YWJjZGVmZ2hpamtsbW5vcA==`
+	armored := `vault:v2:YWJjZGVmZ2hpamtsbW5vcA==`
 	body := strings.concatenate({`{"content":"`, armored, `"}`})
 	defer delete(body)
 	got := extract_string(body, "content")

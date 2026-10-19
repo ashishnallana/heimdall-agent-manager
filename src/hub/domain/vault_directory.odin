@@ -225,6 +225,34 @@ vault_kind_policy :: proc(kind: string) -> vault.Kind_Policy {
 	return vault.kind_policy(vault.device_kind_from_id(kind))
 }
 
+// ── Recovery key blob (plan P4) ─────────────────────────────────────────────
+// A `recovery` credential's private keys, sealed in the browser under a key derived
+// from the 12 recovery words (the hub never sees them). The hub stores the blob on the
+// recovery device row and serves it to the session user so a new browser can restore.
+// It only checks the shape: one canonical typed JSON object, bounded.
+
+VAULT_RECOVERY_BLOB_ALG :: "bip39-hkdf-sha256-aes256gcm"
+VAULT_RECOVERY_BLOB_MAX_CT_HEX :: 8192
+
+Vault_Recovery_Blob :: struct {
+	v:          int    `json:"v"`,
+	alg:        string `json:"alg"`,
+	iv:         string `json:"iv"`,
+	ciphertext: string `json:"ciphertext"`,
+}
+
+vault_recovery_blob_valid :: proc(text: string) -> bool {
+	if len(text) == 0 || len(text) > VAULT_RECOVERY_BLOB_MAX_CT_HEX + 256 do return false
+	b: Vault_Recovery_Blob
+	if json.unmarshal_string(text, &b, json.Specification.JSON, context.temp_allocator) != nil do return false
+	if b.v != 1 || b.alg != VAULT_RECOVERY_BLOB_ALG do return false
+	if len(b.iv) != vault.NONCE_BYTES * 2 || !vault.is_lower_hex(b.iv) do return false
+	if len(b.ciphertext) < vault.TAG_BYTES * 2 || len(b.ciphertext) % 2 != 0 || len(b.ciphertext) > VAULT_RECOVERY_BLOB_MAX_CT_HEX || !vault.is_lower_hex(b.ciphertext) do return false
+	// Exactly one spelling: no extra members, no reordering, no whitespace.
+	canonical, err := json.marshal(b, allocator = context.temp_allocator)
+	return err == nil && string(canonical) == text
+}
+
 // ── Pending devices ─────────────────────────────────────────────────────────
 // A pending request lives as long as its pairing code (vault.PAIR_CODE_TTL_SECONDS);
 // expired requests are purged on every registration and hidden from the listing.

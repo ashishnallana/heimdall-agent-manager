@@ -18,12 +18,13 @@ import {
   replaceVaultTokens,
   containsVaultArmored,
   VAULT_LOCKED_MARKER,
+  VAULT_OTHER_VAULT_MARKER,
   VAULT_TOKEN_RE,
   fsWriteAad,
   sealFsWriteContent,
   openFsWriteContent,
 } from '../src/ui/utils/vaultCrypto.ts';
-import { importKeyring, keyFor, type VaultKeyring } from '../src/ui/utils/vaultKeyring.ts';
+import { importKeyring, keyFor, vaultIdFor, type VaultKeyring } from '../src/ui/utils/vaultKeyring.ts';
 import { decryptEmbeddedVaultTokens } from '../src/ui/utils/vaultContent.ts';
 import { decryptPtyPayload, derivePtySubkey, ptyAad, ptyBaseKeyFor, ptyNonce, sealPtyPayload, PtyOutputReplayGuard, PtyReplayError } from '../src/ui/components/shells/ptyWire.ts';
 import { deriveTaskChainSearchKey } from '../src/ui/utils/taskChainSearchKey.ts';
@@ -41,16 +42,18 @@ test('envelope vectors decrypt, and resealing with the fixed nonce reproduces th
   const kr = await vectorKeyring();
   for (const c of V.envelope.cases) {
     assert.equal(await decryptVaultText(c.token, kr), c.plaintext, c.name);
-    const resealed = await sealVaultEnvelope(new TextEncoder().encode(c.plaintext), keyFor(kr, c.epoch)!, c.epoch, hex(c.nonce));
+    const resealed = await sealVaultEnvelope(new TextEncoder().encode(c.plaintext), keyFor(kr, c.epoch)!, kr.vaultId, c.epoch, hex(c.nonce));
     assert.equal(resealed, c.token, c.name);
   }
   assert.equal(new RegExp(V.envelope.token_regex).source, VAULT_TOKEN_RE.source);
+  assert.equal(kr.vaultId, V.envelope.vault_id);
+  assert.equal(await vaultIdFor(V.keyring.root_sign_pub), V.keyring.vault_id, 'vault id = SHA-256(root_sign_pub)[:8]');
 });
 
 test('encryption uses the current epoch and round-trips across epochs 1 and 2', async () => {
   const kr = await vectorKeyring();
   const tok = await encryptVaultText('cross-epoch', kr);
-  assert.match(tok, /^vault:v2:e2:/);
+  assert.ok(tok.startsWith(`vault:v2:${V.envelope.vault_id}:e2:`));
   assert.equal(await decryptVaultText(tok, kr), 'cross-epoch');
   assert.equal(await decryptVaultText(V.envelope.cases[0].token, kr), V.envelope.cases[0].plaintext);
 });
@@ -65,6 +68,10 @@ test('envelope negatives: tamper fails, unknown epoch is locked, malformed is re
       case 'unknown_epoch':
         assert.equal(await decryptVaultText(c.token, kr), VAULT_LOCKED_MARKER, c.name);
         break;
+      case 'other_vault':
+        // Content of a previous (reset) vault: a distinct marker, never tried with these keys.
+        assert.equal(await decryptVaultText(c.token, kr), VAULT_OTHER_VAULT_MARKER, c.name);
+        break;
       case 'malformed':
         await assert.rejects(decryptVaultText(c.token, kr), c.name);
         break;
@@ -76,17 +83,17 @@ test('envelope negatives: tamper fails, unknown epoch is locked, malformed is re
         assert.fail(`unhandled kind ${c.kind}`);
     }
   }
-  const big = `vault:v2:e1:${'A'.repeat(Math.floor((V.envelope.max_payload_bytes + 2) / 3) * 4 + 4)}`;
+  const big = `vault:v2:${V.envelope.vault_id}:e1:${'A'.repeat(Math.floor((V.envelope.max_payload_bytes + 2) / 3) * 4 + 4)}`;
   assert.throws(() => parseVaultEnvelope(big), /too large/);
 });
 
 test('embedded tokens: decrypted, unknown epoch locked, v1 and bare prefix kept', async () => {
   const kr = await vectorKeyring();
   const emb = V.envelope.embedded;
-  const expected = emb.decrypted_with_locked_marker_LOCKED.replace('LOCKED', VAULT_LOCKED_MARKER);
+  const expected = emb.decrypted_with_locked_marker_LOCKED.replace('LOCKED', VAULT_LOCKED_MARKER).replace('OTHER', VAULT_OTHER_VAULT_MARKER);
   assert.equal(await decryptEmbeddedVaultTokens(emb.text, kr), expected);
-  assert.equal(findVaultTokens(emb.text).length, 3);
-  assert.ok(!replaceVaultTokens(emb.text).includes('vault:v2:e'));
+  assert.equal(findVaultTokens(emb.text).length, 4);
+  assert.ok(!containsVaultArmored(replaceVaultTokens(emb.text)));
 });
 
 test('PTY v2 vectors: per-stream subkey, counter nonce, AAD binding (session, direction, epoch, salt, counter)', async () => {
@@ -131,13 +138,14 @@ test('PTY v2 vectors: per-stream subkey, counter nonce, AAD binding (session, di
   assert.throws(() => taskChainSearchAad('usr', 'brg', '', 'request', 1, 1));
 });
 
-test('fs write v2 vector: path- and bridge-bound AAD', async () => {
+test('fs write vector: vault-, bridge-, project-root- and path-bound AAD', async () => {
   const f = V.fs_write;
   const kr = await vectorKeyring();
-  assert.equal(new TextDecoder().decode(await fsWriteAad(f.epoch, f.bridge_id, f.path)), f.aad);
-  assert.equal(await sealFsWriteContent(f.plaintext, f.bridge_id, f.path, kr, hex(f.nonce)), f.token);
-  assert.equal(await openFsWriteContent(f.token, f.bridge_id, f.path, kr), f.plaintext);
-  await assert.rejects(openFsWriteContent(f.token, f.bridge_id, 'src/other.ts', kr));
+  assert.equal(new TextDecoder().decode(await fsWriteAad(kr.vaultId, f.epoch, f.bridge_id, f.root, f.path)), f.aad);
+  assert.equal(await sealFsWriteContent(f.plaintext, f.bridge_id, f.root, f.path, kr, hex(f.nonce)), f.token);
+  assert.equal(await openFsWriteContent(f.token, f.bridge_id, f.root, f.path, kr), f.plaintext);
+  await assert.rejects(openFsWriteContent(f.token, f.bridge_id, f.root, 'src/other.ts', kr));
+  await assert.rejects(openFsWriteContent(f.token, f.bridge_id, '/home/dev/projects/other', f.path, kr), 'another project root');
   await assert.rejects(decryptVaultText(f.token, kr));
 });
 
@@ -183,6 +191,6 @@ test('chat pane capture: sealed body decrypts, and fails closed to the locked ma
   assert.equal(await decryptPaneCaptureBody(tampered, kr), VAULT_LOCKED_MARKER);
   const other = await importKeyring(hex(V.keyring.single_epoch_hex));
   const otherToken = await encryptVaultText('x', kr);
-  const lockedOut = await decryptPaneCaptureBody(otherToken, Object.freeze({ userId: other.userId, currentEpoch: 1, keys: new Map() }) as any);
+  const lockedOut = await decryptPaneCaptureBody(otherToken, Object.freeze({ userId: other.userId, vaultId: other.vaultId, currentEpoch: 1, keys: new Map() }) as any);
   assert.equal(lockedOut, VAULT_LOCKED_MARKER);
 });

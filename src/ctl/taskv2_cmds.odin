@@ -945,11 +945,10 @@ ctl_v2_verify :: proc(endpoint, token: string, tokens, args: []string) {
 	}
 	fields := make([dynamic]string, context.temp_allocator)
 	append(&fields, json_kv("kind", "run"))
-	append(&fields, json_kv("cmd", verify_cmd))
+	// cmd and cwd go only inside the sealed enc_spec (never in clear to the hub).
 	append(&fields, json_kv("agent_instance_id", ctx.agent_instance_id))
 	if ctx.conversation_id != "" do append(&fields, json_kv("conversation_id", ctx.conversation_id))
 	if v := option_value(args, "--project", ctx.project_id); v != "" do append(&fields, json_kv("project_id", v))
-	append(&fields, json_kv("cwd", run_cwd))
 	append(&fields, json_kv("label", label))
 	ctl_shell_attach_enc_spec(endpoint, token, bridge_id, "run", args, verify_cmd, run_cwd, &fields)
 	create_resp, cok := ctl_agent_local_call(endpoint, token, "agent.rest.request", json_object(
