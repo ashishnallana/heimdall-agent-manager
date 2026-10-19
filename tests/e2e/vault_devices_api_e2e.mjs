@@ -36,7 +36,8 @@ import { signedRequestHeaders, newRequestNonce } from '../../src/ui/utils/vaultR
 import { verifyDirectory, wrapRecipients, buildBridgeChainProof, verifyBridgeChainProof, pinsFromChain } from '../../src/ui/utils/vaultDirectoryVerify.ts';
 import { openVerifiedWrap } from '../../src/ui/utils/vaultKeyringWrap.ts';
 import { deliverKeyringToBridge } from '../../src/ui/utils/vaultBridgeDelivery.ts';
-import { buildBridgeApproval, buildBrowserApproval, buildGenesis, buildRegistration, buildRevocation, buildRotation } from '../../src/ui/utils/vaultDeviceFlows.ts';
+import { buildBridgeApproval, buildBrowserApproval, buildGenesis, buildPairedRegistration, buildRevocation, buildRotation, checkBridgeCodeInfo, checkBrowserCodeInfo } from '../../src/ui/utils/vaultDeviceFlows.ts';
+import { derivePairKeys, generatePairCode, pairApproveMac, pairBridgePayload, pairKeyMac, verifyPairApproveMac } from '../../src/ui/utils/vaultPairing.ts';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const USER_HEADER = 'X-authentik-username';
@@ -240,6 +241,9 @@ class SimBridge {
     b.seenNonces = new Set();
     b.unlocked = false;
     b.pinnedRoot = null; // pinned from the chain proof of the FIRST (enrollment) unseal
+    // Hub-blind pairing: the code `ham-bridge enroll` prints; only derived values go to the hub.
+    b.pairCode = generatePairCode();
+    b.pairKeys = await derivePairKeys(b.pairCode);
     return b;
   }
   // POST /device/authorize body, with the identity-key proof of possession over the ECDH key + PKCE challenge.
@@ -250,6 +254,8 @@ class SimBridge {
       bridge_public_key: this.ecdhPub, bridge_identity_public_key: this.identity.signPub,
       code_challenge: this.challenge, code_challenge_method: 'S256',
       bridge_identity_proof: proof,
+      pair_lookup: this.pairKeys.lookup,
+      pair_key_mac: await pairKeyMac(this.pairKeys, 'bridge', pairBridgePayload(this.identity.signPub, this.ecdhPub, this.challenge)),
     };
   }
   async signUnsealKey() {
@@ -276,6 +282,11 @@ class SimBridge {
       const root = await verifyBridgeChainProof(payload.chain_proof, await keyringCommits(plain, ownerUserId), {
         ownerUserId, bridgeIdentityPub: this.identity.signPub, pinnedRootSignPub: this.pinnedRoot,
       });
+      // First unseal (no pinned root): only with a pair_mac under this bridge's pairing
+      // code over its approval + the root (mirror of the Odin bridge's first-pin check).
+      if (!this.pinnedRoot && !(await verifyPairApproveMac(this.pairKeys, payload.chain_proof.subject_approval.statement, payload.chain_proof.root_sign_pub, payload.pair_mac))) {
+        throw new Error('first unseal without a valid pair_mac');
+      }
       this.seenNonces.add(payload.nonce);
       this.pinnedRoot = root;
       this.keyringBytes = Uint8Array.from(plain);
@@ -305,9 +316,22 @@ async function genesis(dev, user, auth = { user }) {
   return http('POST', '/api/v1/vault/directory/genesis', { ...auth, body });
 }
 
-async function register(dev, user, auth = { user }) {
-  const { statement, signature } = await buildRegistration(dev.identity, dev.label);
-  return http('POST', '/api/v1/vault/devices/register', { ...auth, body: { statement, proof_signature: signature } });
+// Hub-blind pairing: the device draws a secret code and sends only derived values.
+async function register(dev, user, auth = { user }, now = Date.now()) {
+  dev.pairCode = generatePairCode();
+  dev.pairKeys = await derivePairKeys(dev.pairCode);
+  const r = await buildPairedRegistration(dev.identity, dev.label, dev.pairKeys, now);
+  dev.lastRegisterBody = { statement: r.statement, proof_signature: r.signature, pair_lookup: r.pairLookup, pair_key_mac: r.pairKeyMac };
+  return http('POST', '/api/v1/vault/devices/register', { ...auth, body: dev.lastRegisterBody });
+}
+
+// The approver side: the user typed dev.pairCode; resolve, check key_mac, build the approval.
+async function approvalFor(dev, chain, approver = S.A) {
+  const keys = await derivePairKeys(dev.pairCode);
+  const ver = await http('POST', '/api/v1/device/verify', { user: ALICE, body: { pair_lookup: keys.lookup } });
+  if (ver.status !== 200) throw new CheckFailed(`verify(lookup) -> ${ver.status} ${ver.raw}`);
+  const paired = await checkBrowserCodeInfo(ver.data, keys, S.uid);
+  return { ver, body: await buildBrowserApproval(approver.identity, chain, paired, keys, paired.label, approver.keyringBytes) };
 }
 
 async function main() {
@@ -352,33 +376,42 @@ async function main() {
       await S.A.setKeyring(bytes);
     });
 
-    await step('2 device B: register -> pending code; A approves + wraps; B unwraps; cross-decrypt', async () => {
+    await step('2 device B: one pairing code typed once on A; key_mac + pair_mac; B pins the root with no fingerprint typing', async () => {
       S.B = await SimDevice.create(S.uid, 'e2e device B');
+      const first = await register(S.B, ALICE, { user: ALICE }, Date.now() - 5000);
+      const oldBody = S.B.lastRegisterBody;
+      const oldLookup = oldBody.pair_lookup;
+      expect(first.status === 201 && first.data.status === 'pending' && first.data.user_code === undefined && !first.raw.includes(oldLookup), `B registered pending; the hub returns no code (${first.status})`);
+      expect(first.data.device_id === S.B.id && first.data.fingerprint === S.B.fingerprint, 'hub device id + fingerprint match B\'s local derivation');
+      // "New code": a newer register statement re-pairs; a replay of the old body cannot take it back.
       const reg = await register(S.B, ALICE);
-      expect(reg.status === 201 && reg.data.status === 'pending' && /^[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(reg.data.user_code), `B registered pending with a code (${reg.status})`);
-      expect(reg.data.device_id === S.B.id && reg.data.fingerprint === S.B.fingerprint, 'hub device id + fingerprint match B\'s local derivation');
-      S.bCode = reg.data.user_code;
-      const again = await register(S.B, ALICE);
-      expect(again.status === 200 && again.data.device_id === S.B.id && again.data.user_code === undefined, `repeat register -> ${again.status}, same device, no user_code`);
+      expect(reg.status === 201, `B draws a new code (newer register statement) -> 201 (${reg.status})`);
+      const replay = await http('POST', '/api/v1/vault/devices/register', { user: ALICE, body: oldBody });
+      expect(replay.status === 409, `a replayed older register body cannot replace the live pairing (${replay.status})`);
+      const oldVer = await http('POST', '/api/v1/device/verify', { user: ALICE, body: { pair_lookup: oldLookup } });
+      expect(oldVer.status === 404, `the superseded code no longer resolves (${oldVer.status})`);
       const viaToken = await register(await SimDevice.create(S.uid, 'token device'), ALICE, { bearer: S.aliceToken });
       expect(viaToken.status === 403, `a user API token cannot register a device (${viaToken.status})`);
       const pending = await signedCall(S.B, ALICE, S.uid, 'GET', '/api/v1/vault/devices/self');
-      expect(pending.status === 200 && pending.data.status === 'pending' && !pending.data.wrap, 'B polls self: pending, no wrap');
+      expect(pending.status === 200 && pending.data.status === 'pending' && !pending.data.wrap && !pending.data.pair_mac, 'B polls self: pending, no wrap, no pair_mac');
 
-      const ver = await http('POST', '/api/v1/device/verify', { user: ALICE, body: { user_code: S.bCode } });
-      expect(ver.status === 200 && ver.data.kind === 'browser' && ver.data.device_id === S.B.id, '/device/verify resolves the code as kind=browser');
-      expect(ver.data.fingerprint === S.B.fingerprint, 'A sees the fingerprint B displays (user comparison)');
+      // The ONE user action: type B's code on A.
       const { chain } = await fetchVerified(ALICE, S.uid, S.pins);
-      const body = await buildBrowserApproval(S.A.identity, chain, ver.data, S.bCode, ver.data.label, S.A.keyringBytes);
+      const { ver, body } = await approvalFor(S.B, chain);
+      expect(ver.data.kind === 'browser' && ver.data.device_id === S.B.id && ver.data.fingerprint === S.B.fingerprint, '/device/verify resolves the lookup as kind=browser; key_mac verified under the typed code');
+      expect(!JSON.stringify(body).includes(S.B.pairCode.replace(/-/g, '')) && !JSON.stringify(body).includes(S.B.pairCode), 'the approval request never carries the code');
       const unsigned = await http('POST', `/api/v1/vault/devices/${S.B.id}/approve`, { user: ALICE, body });
       expect(unsigned.status === 401, 'unsigned approval -> 401');
       const ok = await signedCall(S.A, ALICE, S.uid, 'POST', `/api/v1/vault/devices/${S.B.id}/approve`, body);
       expect(ok.status === 200 && ok.data.directory_version === chain.version + 1, `signed approval -> 200, version ${chain.version + 1}`);
-
       const self = await signedCall(S.B, ALICE, S.uid, 'GET', '/api/v1/vault/devices/self');
       expect(self.status === 200 && self.data.status === 'approved' && self.data.wrap, 'B polls self: approved, wrap present');
       const vb = await fetchVerified(ALICE, S.uid, null);
       expect(vb.chain.trusted.has(S.B.id) && vb.chain.trusted.get(S.B.id).label === 'e2e device B', 'B verifies the chain and finds its own signed approval + label');
+      const mine = vb.chain.trusted.get(S.B.id).approval_statement;
+      expect(await verifyPairApproveMac(S.B.pairKeys, mine, vb.chain.rootSignPub, self.data.pair_mac), 'B verifies the approver\'s pair_mac with its own code: the root is authentic, pinned without fingerprint typing');
+      const other = await derivePairKeys(generatePairCode());
+      expect(!(await verifyPairApproveMac(other, mine, vb.chain.rootSignPub, self.data.pair_mac)), 'the pair_mac does not verify under another code');
       const bytes = await openWrap(S.B, self.data.wrap, vb.chain);
       await openVerifiedWrap(self.data.wrap, { userId: S.uid, recipientDeviceId: S.A.id, recipientEcdhPrivate: S.A.identity.ecdhPrivateKey, chain: vb.chain })
         .then(() => expect(false, 'wrap for B opened as A'), () => expect(true, 'a wrap naming another recipient is refused'));
@@ -391,6 +424,53 @@ async function main() {
       expect(await decryptVaultText(S.e1FromB, S.A.keyring) === 'secret from B @e1', 'A decrypts B\'s content');
     });
 
+    await step('2b hostile hub: swapped pending keys refused by the approver; fake-root approval refused by the new device', async () => {
+      // (1) The hub swaps a pending device's keys (row + register statement): A refuses.
+      const H = await SimDevice.create(S.uid, 'e2e device H');
+      const rh = await register(H, ALICE);
+      expect(rh.status === 201, 'H registered pending');
+      const evil = await SimDevice.create(S.uid, 'hub-made keys');
+      const { statementCanonical } = await import('../../src/ui/utils/vaultStatements.ts');
+      const evilStatement = statementCanonical({ type: 'register', user_id: S.uid, issuer_device_id: evil.id, issued_at_ms: String(Date.now()), ...evil.subject() });
+      const db = new DatabaseSync(HUB.dbPath);
+      try {
+        db.exec('PRAGMA busy_timeout = 5000');
+        db.prepare('UPDATE vault_devices SET device_id = ?, sign_public_key = ?, ecdh_public_key = ?, fingerprint = ?, register_statement = ? WHERE device_id = ?')
+          .run(evil.id, evil.signPub, evil.ecdhPub, evil.fingerprint, evilStatement, H.id);
+      } finally { db.close(); }
+      const { chain } = await fetchVerified(ALICE, S.uid, S.pins);
+      await approvalFor(H, chain).then(() => expect(false, 'approver accepted hub-swapped keys'), (e) => expect(/pairing check failed/i.test(String(e.message)), `the approver refuses: key_mac does not verify over the swapped statement (${e.message})`));
+      // ... and the hub cannot recompute key_mac without the code (it only has lookup + old key_mac).
+      const db2 = new DatabaseSync(HUB.dbPath);
+      try { db2.exec('PRAGMA busy_timeout = 5000'); db2.prepare('DELETE FROM vault_devices WHERE device_id = ?').run(evil.id); } finally { db2.close(); }
+
+      // (2) A fresh device N is "approved" by the hub into a FAKE account (Mallory's root).
+      const N = await SimDevice.create(S.uid, 'e2e device N');
+      await register(N, ALICE);
+      const M = await SimDevice.create(S.uid, 'mallory root');
+      const { logEntryHash } = await import('../../src/ui/utils/vaultStatements.ts');
+      const g = statementCanonical({ type: 'genesis', user_id: S.uid, seq: '1', prev_hash: '', issuer_device_id: M.id, issued_at_ms: String(Date.now()), ...M.subject(), epoch: '1', epoch_commit: randHex(32) });
+      const gh = await logEntryHash(g);
+      const ap = statementCanonical({ type: 'approve', user_id: S.uid, seq: '2', prev_hash: gh, issuer_device_id: M.id, issued_at_ms: String(Date.now()), ...N.subject(), epoch: '1', epoch_commit: g.match(/epoch_commit=([0-9a-f]+)/)[1], wrap_sha256: randHex(32) });
+      const fakeDir = {
+        configured: true, version: 2, current_epoch: 1, root_device_id: M.id, head_hash: await logEntryHash(ap), retired_hints: [], reset: null,
+        log: [{ seq: 1, statement: g, signature: JSON.parse(await M.signText(g)) }, { seq: 2, statement: ap, signature: JSON.parse(await M.signText(ap)) }],
+        devices: [
+          { device_id: M.id, kind: 'browser', status: 'approved', sign_alg: SIGN_ALG_ECDSA_P256_SHA256, wrap_alg: WRAP_ALG_ECDH_P256_HKDF_AES, sign_public_key: M.signPub, ecdh_public_key: M.ecdhPub },
+          { device_id: N.id, kind: 'browser', status: 'approved', sign_alg: SIGN_ALG_ECDSA_P256_SHA256, wrap_alg: WRAP_ALG_ECDH_P256_HKDF_AES, sign_public_key: N.signPub, ecdh_public_key: N.ecdhPub },
+        ],
+      };
+      const fake = await verifyDirectory(fakeDir, S.uid, null);
+      expect(fake.rootSignPub === M.signPub && fake.trusted.has(N.id), 'the fake log is internally valid (an unpinned device cannot tell from the log alone)');
+      expect(!(await verifyPairApproveMac(N.pairKeys, ap, fake.rootSignPub, undefined)), 'no pair_mac -> N refuses the fake account (installs nothing)');
+      expect(!(await verifyPairApproveMac(N.pairKeys, ap, fake.rootSignPub, randHex(32))), 'a hub-forged pair_mac -> N refuses');
+      // Replaying a genuine pair_mac (B's) onto the fake approval fails too.
+      const selfB = await signedCall(S.B, ALICE, S.uid, 'GET', '/api/v1/vault/devices/self');
+      expect(!(await verifyPairApproveMac(N.pairKeys, ap, fake.rootSignPub, selfB.data.pair_mac)), 'a pair_mac from another pairing does not transfer');
+      // N was never really approved: deny its pending request (keeps later steps' device set).
+      const denied = await signedCall(S.A, ALICE, S.uid, 'POST', `/api/v1/vault/devices/${N.id}/deny`, {});
+      expect(denied.status === 200, `N's pending request denied (${denied.status})`);
+    });
     await step('3 bridge: device-flow enrollment approved by A with vault_approval; unseal v2 + chain proof (bridge side simulated)', async () => {
       const br = await SimBridge.create(S.uid);
       br.ownerUserId = S.uid;
@@ -399,14 +479,20 @@ async function main() {
       const noPop = await http('POST', '/api/v1/device/authorize', { body: await br.authorizeBody(stranger) });
       expect(noPop.status === 400, `authorize with an identity proof by another key -> 400 (${noPop.status})`);
       const authz = await http('POST', '/api/v1/device/authorize', { body: await br.authorizeBody() });
-      expect(authz.status === 200 && authz.data.user_code && authz.data.device_code, `bridge /device/authorize -> 200 (${authz.status} ${authz.status !== 200 ? authz.raw : ''})`);
-      const ver = await http('POST', '/api/v1/device/verify', { user: ALICE, body: { user_code: authz.data.user_code } });
-      expect(ver.status === 200 && ver.data.kind === 'bridge' && ver.data.bridge_identity_public_key === br.identity.signPub, '/device/verify resolves kind=bridge with its identity key');
+      expect(authz.status === 200 && authz.data.device_code && authz.data.user_code === undefined && !String(authz.data.verification_uri_complete ?? '').includes('code='), `bridge /device/authorize -> 200, no hub code, code-less link (${authz.status} ${authz.status !== 200 ? authz.raw : ''})`);
+      // The operator types the code the bridge printed, once.
+      const typedKeys = await derivePairKeys(br.pairCode.toLowerCase());
+      const ver = await http('POST', '/api/v1/device/verify', { user: ALICE, body: { pair_lookup: typedKeys.lookup } });
+      expect(ver.status === 200 && ver.data.kind === 'bridge' && ver.data.bridge_identity_public_key === br.identity.signPub, '/device/verify resolves the lookup as kind=bridge with its identity key');
+      await checkBridgeCodeInfo(ver.data, typedKeys);
+      expect(true, 'the bridge key_mac verifies under the typed code');
+      await checkBridgeCodeInfo({ ...ver.data, bridge_public_key: S.A.ecdhPub, hub_observed: { ...ver.data.hub_observed, bridge_public_key_on_record: S.A.ecdhPub } }, typedKeys)
+        .then(() => expect(false, 'swapped bridge key accepted'), () => expect(true, 'a hub-swapped bridge ECDH key fails the key_mac check'));
       const { chain } = await fetchVerified(ALICE, S.uid, S.pins);
-      const { vault_approval } = await buildBridgeApproval(S.A.identity, chain, ver.data, 'e2e-bridge');
-      const noVa = await http('POST', '/api/v1/device/approve', { user: ALICE, body: { user_code: authz.data.user_code, approve: true } });
+      const { vault_approval, statement: bridgeApproval } = await buildBridgeApproval(S.A.identity, chain, ver.data, 'e2e-bridge');
+      const noVa = await http('POST', '/api/v1/device/approve', { user: ALICE, body: { pair_lookup: typedKeys.lookup, approve: true } });
       expect(noVa.status === 400, 'bridge approval without vault_approval -> 400');
-      const appr = await http('POST', '/api/v1/device/approve', { user: ALICE, body: { user_code: authz.data.user_code, approve: true, vault_approval } });
+      const appr = await http('POST', '/api/v1/device/approve', { user: ALICE, body: { pair_lookup: typedKeys.lookup, approve: true, vault_approval } });
       expect(appr.status === 200 && appr.data?.hub_observed?.bridge_id, `/device/approve with vault_approval -> 200 (${appr.status} ${appr.status !== 200 ? appr.raw : ''})`);
       const tok = await http('POST', '/api/v1/device/token', { body: { device_code: authz.data.device_code, code_verifier: br.verifier } });
       expect(tok.status === 200 && tok.data.bridge_id === appr.data.hub_observed.bridge_id && tok.data.access_token, 'bridge collects its credential with the PKCE verifier');
@@ -427,8 +513,15 @@ async function main() {
       await deliverKeyringToBridge(br.bridgeId, v.chain, br.deps(S.A.keyringBytes, { fetchTarget: async () => br.target(forged.signPub, forgedSig) }))
         .then(() => expect(false, 'hub-swapped identity key accepted'), () => expect(true, 'A refuses when the hub serves an identity key other than the approved one'));
       expect(!br.unlocked, 'nothing reached the bridge from the refused attempts');
+      // First unseal without a pair_mac (e.g. another browser's automatic delivery, or a
+      // hub racing the approver with its own root): refused, nothing pinned.
+      await deliverKeyringToBridge(br.bridgeId, v.chain, br.deps(S.A.keyringBytes))
+        .then(() => expect(false, 'first unseal without pair_mac accepted'), () => expect(!br.unlocked && !br.pinnedRoot, 'bridge refuses a first unseal without a pair_mac'));
+      await deliverKeyringToBridge(br.bridgeId, v.chain, br.deps(S.A.keyringBytes), { extra: { pair_mac: randHex(32) } })
+        .then(() => expect(false, 'forged pair_mac accepted'), () => expect(!br.unlocked, 'bridge refuses a forged pair_mac'));
+      const pairMac = await pairApproveMac(typedKeys, bridgeApproval, v.chain.rootSignPub);
       let captured = null;
-      await deliverKeyringToBridge(br.bridgeId, v.chain, br.deps(S.A.keyringBytes, { dispatch: async (_id, payload) => { captured = payload; return br.receiveUnseal(payload, S.uid); } }));
+      await deliverKeyringToBridge(br.bridgeId, v.chain, br.deps(S.A.keyringBytes, { dispatch: async (_id, payload) => { captured = payload; return br.receiveUnseal(payload, S.uid); } }), { extra: { pair_mac: pairMac } });
       expect(br.unlocked && br.currentEpoch === 1 && br.pinnedRoot === S.root, 'simulated bridge verifies chain proof + epoch_commit, pins the root, reports unlocked at e1');
       await br.receiveUnseal(captured, S.uid).then(() => expect(false, 'replay accepted'), () => expect(true, 'replayed unseal payload refused'));
       // A hostile hub re-targeting the proof at another root is refused once the root is pinned.
@@ -530,10 +623,8 @@ async function main() {
       const rc = await register(C, ALICE);
       const rd = await register(D, ALICE);
       expect(rc.status === 201 && rd.status === 201, 'C and D registered pending');
-      const vc = await http('POST', '/api/v1/device/verify', { user: ALICE, body: { user_code: rc.data.user_code } });
-      const vdv = await http('POST', '/api/v1/device/verify', { user: ALICE, body: { user_code: rd.data.user_code } });
-      const bc = await buildBrowserApproval(S.A.identity, chain, vc.data, rc.data.user_code, vc.data.label, S.A.keyringBytes);
-      const bd = await buildBrowserApproval(S.A.identity, chain, vdv.data, rd.data.user_code, vdv.data.label, S.A.keyringBytes);
+      const { body: bc } = await approvalFor(C, chain);
+      const { body: bd } = await approvalFor(D, chain);
       const pc = `/api/v1/vault/devices/${C.id}/approve`;
       const pd = `/api/v1/vault/devices/${D.id}/approve`;
       const nC = newRequestNonce();
@@ -555,15 +646,14 @@ async function main() {
       // Forged signature: A's device id, signed by another key.
       const E = await SimDevice.create(S.uid, 'forger');
       const fresh = (await fetchVerified(ALICE, S.uid, S.pins)).chain;
-      const lv = loser === C ? vc : vdv;
-      const fb = await buildBrowserApproval(S.A.identity, fresh, lv.data, (loser === C ? rc : rd).data.user_code, lv.data.label, S.A.keyringBytes);
+      const { body: fb } = await approvalFor(loser, fresh);
       const fh = await E.signedHeaders(S.uid, 'POST', loserPath, JSON.stringify(fb));
       fh['X-Heimdall-Device-Id'] = S.A.id;
       const forged = await http('POST', loserPath, { user: ALICE, body: JSON.stringify(fb), headers: fh });
       expect(forged.status === 401, `forged request signature -> 401 (${forged.status})`);
       // Body tampered after signing.
       const th = await S.A.signedHeaders(S.uid, 'POST', loserPath, JSON.stringify(fb));
-      const tampered = await http('POST', loserPath, { user: ALICE, body: JSON.stringify({ ...fb, user_code: fb.user_code.toLowerCase() }), headers: th });
+      const tampered = await http('POST', loserPath, { user: ALICE, body: JSON.stringify({ ...fb, pair_mac: randHex(32) }), headers: th });
       expect(tampered.status === 401, `body tampered after signing -> 401 (${tampered.status})`);
       // Forged statement signature inside a correctly signed request.
       const badStmt = { ...fb, signature: JSON.parse(await E.signText(fb.statement)) };
@@ -581,12 +671,12 @@ async function main() {
       expect(bobDir.status === 200 && bobDir.data.devices.length === 1 && bobDir.data.devices[0].device_id === S.Bob.id && !bobDir.raw.includes(S.A.id), 'bob sees only his own directory');
       const F = await SimDevice.create(S.uid, 'e2e device F');
       const rf = await register(F, ALICE);
-      const bv = await http('POST', '/api/v1/device/verify', { user: BOB, body: { user_code: rf.data.user_code } });
-      expect(bv.status === 404, `bob cannot resolve alice's pending code (${bv.status})`);
+      expect(rf.status === 201, 'F registered pending');
+      const bv = await http('POST', '/api/v1/device/verify', { user: BOB, body: { pair_lookup: F.pairKeys.lookup } });
+      expect(bv.status === 404, `bob cannot resolve alice's pending lookup (${bv.status})`);
       const before = (await http('GET', '/api/v1/vault/directory', { user: ALICE })).data.version;
-      const vf = await http('POST', '/api/v1/device/verify', { user: ALICE, body: { user_code: rf.data.user_code } });
       const cur = (await fetchVerified(ALICE, S.uid, S.pins)).chain;
-      const fBody = await buildBrowserApproval(S.A.identity, cur, vf.data, rf.data.user_code, vf.data.label, S.A.keyringBytes);
+      const { body: fBody } = await approvalFor(F, cur);
       const pf = `/api/v1/vault/devices/${F.id}/approve`;
       const asAinBob = await signedCall(S.A, BOB, S.uid, 'POST', pf, fBody);
       expect(asAinBob.status === 403 || asAinBob.status === 401, `alice's device signature in bob's session is refused (${asAinBob.status})`);
@@ -629,9 +719,9 @@ async function main() {
       // Deny: an approver removes a pending device; it cannot then use or be approved.
       const G = await SimDevice.create(S.uid, 'e2e device G');
       const rg = await register(G, ALICE);
-      expect(rg.status === 201 && rg.data.user_code, 'G registered pending');
-      const brVerify = await http('POST', '/api/v1/device/verify', { bearer: S.bridge.token, body: { user_code: rg.data.user_code } });
-      expect(brVerify.status === 403, `a bridge credential cannot resolve a browser code (${brVerify.status})`);
+      expect(rg.status === 201, 'G registered pending');
+      const brVerify = await http('POST', '/api/v1/device/verify', { bearer: S.bridge.token, body: { pair_lookup: G.pairKeys.lookup } });
+      expect(brVerify.status === 403, `a bridge credential cannot resolve a browser lookup (${brVerify.status})`);
       const pg = `/api/v1/vault/devices/${G.id}/deny`;
       const unsigned = await http('POST', pg, { user: ALICE, body: '{}' });
       expect(unsigned.status === 401, `unsigned deny -> 401 (${unsigned.status})`);
@@ -641,8 +731,8 @@ async function main() {
       expect(denied.status === 200, `approver-signed deny -> 200 (${denied.status})`);
       const dir = await http('GET', '/api/v1/vault/directory', { user: ALICE });
       expect(!dir.raw.includes(G.id), 'denied device is gone from the directory');
-      const gv = await http('POST', '/api/v1/device/verify', { user: ALICE, body: { user_code: rg.data.user_code } });
-      expect(gv.status === 404, `denied device's code no longer resolves (${gv.status})`);
+      const gv = await http('POST', '/api/v1/device/verify', { user: ALICE, body: { pair_lookup: G.pairKeys.lookup } });
+      expect(gv.status === 404, `denied device's lookup no longer resolves (${gv.status})`);
       const gSelf = await signedCall(G, ALICE, S.uid, 'GET', '/api/v1/vault/devices/self');
       expect(gSelf.status === 403, `denied device cannot poll self (${gSelf.status})`);
       const again = await signedCall(S.A, ALICE, S.uid, 'POST', pg, {});

@@ -5,7 +5,11 @@
 // verified against this device's pins and its wrap opened with a matching
 // epoch_commit; any failure leaves no keys installed (fail closed).
 //
-// Never shows or sends the pending code anywhere but the waiting screen.
+// Hub-blind pairing (plan §1 "Pairing"): a new device draws a secret pairing code,
+// shows it on the waiting screen and sends the hub only values derived from it. The
+// approving device proves, with that code, that the approval (and so the account
+// root it chains to) is genuine: this device pins the root only after verifying the
+// approver's pair_mac. The code never leaves this device and is wiped once paired.
 
 import * as vaultApi from '../api/endpoints/vaultDevices';
 import { ApiError } from '../api/cookieFetch';
@@ -31,7 +35,8 @@ import {
 import { isVaultSupported } from '../utils/vaultCrypto';
 import { pinsFromChain, trustedBridgeById, verifyDirectory, type VaultDirectory, type VerifiedChain } from '../utils/vaultDirectoryVerify';
 import { clearKeyringSession, getKeyringSession, installKeyringFromWrap, withKeyringBytes } from '../utils/vaultKeyringSession';
-import { buildGenesis, buildRegistration, revokeWithRetry, rotateWithRetry, type RevokeOutcome, type RotateOutcome } from '../utils/vaultDeviceFlows';
+import { buildGenesis, buildPairedRegistration, revokeWithRetry, rotateWithRetry, type RevokeOutcome, type RotateOutcome } from '../utils/vaultDeviceFlows';
+import { derivePairKeys, generatePairCode, pairCodeSymbols, PAIR_CODE_TTL_MS, verifyPairApproveMac } from '../utils/vaultPairing';
 import { kindPolicy } from '../utils/vaultStatements';
 import { deliverKeyringToBridges, type BridgeDeliveryDeps, type BridgeFanoutResult } from '../utils/vaultBridgeDelivery';
 import {
@@ -67,8 +72,6 @@ interface Ctx {
   userId: string;
   dispatch: Dispatch;
   identity: DeviceIdentity | null;
-  /** Approved but awaiting the account-fingerprint confirmation (snapshot + token). */
-  pendingInstall: { chain: VerifiedChain; wrap: unknown; fingerprint: string; token: number } | null;
   /** The signed log revoked this device (verified): it may re-enroll with a new identity. */
   revokedVerified: boolean;
   pollTimer: ReturnType<typeof setInterval> | null;
@@ -262,7 +265,7 @@ export async function bootDeviceVault(userId: string, dispatch: Dispatch): Promi
   if (ctx && ctx.userId === userId && ctx.identity) return refreshDeviceVault('boot');
   stopPolling();
   if (ctx && ctx.userId !== userId) purgeKeys(dispatch);
-  ctx = { userId, dispatch, identity: null, pendingInstall: null, revokedVerified: false, pollTimer: null, seq: 0, lastPendingIds: new Set(), staleHead: false };
+  ctx = { userId, dispatch, identity: null, revokedVerified: false, pollTimer: null, seq: 0, lastPendingIds: new Set(), staleHead: false };
   dispatch(deviceVaultStatusChanged({ status: 'initializing', userId }));
   if (!isVaultSupported() || (typeof indexedDB === 'undefined' && !deps?.kv)) {
     dispatch(deviceVaultStatusChanged({ status: 'unsupported', userId }));
@@ -384,8 +387,9 @@ async function runRefresh(_reason: string): Promise<void> {
     }
     if (self.status === 'pending') {
       const reset = resetFrom(dir);
-      const code = await loadPendingCode(c);
-      dispatch(deviceVaultStatusChanged({ status: reset ? 'reset-scheduled' : 'pending-approval', reset, userCode: code?.userCode ?? '', codeExpiresAt: code?.codeExpiresAt ?? '' }));
+      const pending = await loadPendingCode(c);
+      const live = pending && Date.now() < pending.expiresAt ? pending : null;
+      dispatch(deviceVaultStatusChanged({ status: reset ? 'reset-scheduled' : 'pending-approval', reset, userCode: live?.code ?? '', codeExpiresAt: live ? new Date(live.expiresAt).toISOString() : '' }));
       startPolling();
       return;
     }
@@ -396,13 +400,14 @@ async function runRefresh(_reason: string): Promise<void> {
     const chain = await verifyDirectory(dir, c.userId, pins);
     if (stale()) return;
     await publishChain(chain, dir);
-    if (!chain.trusted.has(identity.deviceId)) throw new Error('This device is not approved by a verified chain');
-    await kv.delete(`pending:${c.userId}`);
+    const mine = chain.trusted.get(identity.deviceId);
+    if (!mine) throw new Error('This device is not approved by a verified chain');
     stopPolling();
     noticePending(c, chain);
 
-    // The device that created the vault IS the root: its own key needs no confirmation.
+    // The device that created the vault IS the root: its own key needs no pairing proof.
     if (!pins && chain.rootDeviceId === identity.deviceId && chain.rootSignPub === identity.signPub) {
+      await kv.delete(`pending:${c.userId}`);
       await advancePins(kv, c.userId, pinsFromChain(chain));
       const keyring = await installKeyringFromWrap(identity, self.wrap, chain);
       dispatch(keyringInstalled({ currentEpoch: keyring.currentEpoch }));
@@ -410,20 +415,37 @@ async function runRefresh(_reason: string): Promise<void> {
       return;
     }
     if (!pins) {
-      // First sight of the account on this device: the user confirms the account
-      // fingerprint before any key is installed (threat model: hub-injected root).
+      // First sight of the account on this device (threat model: hub-injected root).
       // Never automatically when this browser already pinned ANOTHER account (M2).
       if (await refuseUnacknowledgedAccount(c)) return;
-      const fingerprint = await accountFingerprint(chain.rootSignPub);
+      // Hub-blind pairing: the approver MACed this device's approval, the root and
+      // the head with the code shown here. The approval's prev_hash chain covers the
+      // whole log prefix (genesis included), so a valid pair_mac proves the root is
+      // the one the user's other device trusts. No pair_mac, no keys.
+      const pending = await loadPendingCode(c);
+      if (!pending || Date.now() > pending.expiresAt + PAIR_GRACE_MS) {
+        await kv.delete(`pending:${c.userId}`);
+        dispatch(deviceVaultFailed({ code: 'pairing_unverified', message: PAIRING_LOST_MESSAGE }));
+        return;
+      }
+      const keys = await derivePairKeys(pending.code);
       if (stale()) return;
-      // A refresh with the same root keeps the token the user is typing against; a
-      // different root is a new snapshot (and invalidates any in-flight confirmation).
-      const token = c.pendingInstall && c.pendingInstall.fingerprint === fingerprint ? c.pendingInstall.token : ++confirmTokens;
-      c.pendingInstall = { chain, wrap: self.wrap, fingerprint, token };
-      dispatch(deviceVaultStatusChanged({ status: 'confirm-account', reset: resetFrom(dir), confirmFingerprint: fingerprint, confirmToken: token }));
+      if (!(await verifyPairApproveMac(keys, mine.approval_statement, chain.rootSignPub, self.pair_mac))) {
+        dispatch(deviceVaultFailed({
+          code: 'pairing_mismatch',
+          message: 'This device was approved, but the approval does not carry proof from the device you typed the pairing code into. No keys were installed. The server may be misbehaving; retry, or pair again.',
+        }));
+        return;
+      }
+      if (stale()) return;
+      await advancePins(kv, c.userId, pinsFromChain(chain));
+      await kv.delete(`pending:${c.userId}`);
+      const keyring = await installKeyringFromWrap(identity, self.wrap, chain);
+      dispatch(keyringInstalled({ currentEpoch: keyring.currentEpoch }));
+      dispatch(deviceVaultStatusChanged({ status: 'ready', currentEpoch: chain.currentEpoch, directoryVersion: chain.version }));
       return;
     }
-    await advancePins(kv, c.userId, pinsFromChain(chain));
+    await kv.delete(`pending:${c.userId}`);    await advancePins(kv, c.userId, pinsFromChain(chain));
     const session = getKeyringSession();
     if (!session || session.keyring.currentEpoch !== chain.currentEpoch || session.identity.deviceId !== identity.deviceId) {
       const keyring = await installKeyringFromWrap(identity, self.wrap, chain);
@@ -458,7 +480,7 @@ export const RESET_DEVICE_DATA_PHRASE = 'RESET THIS BROWSER';
  * Recovery for unreadable local device data (malformed / older-format identity or
  * pins): only while it IS unreadable, and only with the typed phrase. Archives (never
  * deletes) identity, pins and the observed reset, then restarts as a fresh device
- * (register -> waiting screen; a later approval asks for the account fingerprint).
+ * (register -> waiting screen with a new pairing code).
  */
 export async function resetBrowserDeviceData(typedPhrase: string): Promise<void> {
   const c = ctx;
@@ -477,7 +499,6 @@ export async function resetBrowserDeviceData(typedPhrase: string): Promise<void>
   await archiveDeviceState(kv, c.userId);
   await kv.delete(`pending:${c.userId}`);
   c.identity = null;
-  c.pendingInstall = null;
   c.revokedVerified = false;
   await refreshDeviceVault('device-data-reset');
 }
@@ -510,29 +531,42 @@ async function runGenesis(c: Ctx): Promise<void> {
   if (ctx === c) await runRefresh('after-genesis');
 }
 
-async function loadPendingCode(c: Ctx): Promise<{ userCode: string; codeExpiresAt: string } | null> {
-  const v = await d().kv.get(`pending:${c.userId}`) as { userCode?: string; codeExpiresAt?: string } | undefined;
-  if (!v?.userCode) return null;
-  const exp = Date.parse(String(v.codeExpiresAt ?? ''));
-  if (Number.isFinite(exp) && exp <= Date.now()) return null;
-  return { userCode: String(v.userCode), codeExpiresAt: String(v.codeExpiresAt ?? '') };
+/** Pairing code lifetime on this device: the hub's TTL plus a small clock grace. */
+const PAIR_GRACE_MS = 60_000;
+const PAIRING_LOST_MESSAGE = 'This device was approved, but it no longer holds a live pairing code to verify the approval with (the code expired or this browser\'s data was cleared). No keys were installed. Pair again: this browser gets a new identity and code; revoke the old entry in Settings → Devices on your other device.';
+
+interface PendingPairing {
+  /** The secret pairing code S ("XXXX-XXXX-XXXX"); never sent anywhere. */
+  code: string;
+  issuedAt: number;
+  expiresAt: number;
+}
+
+async function loadPendingCode(c: Ctx): Promise<PendingPairing | null> {
+  const v = await d().kv.get(`pending:${c.userId}`) as Partial<PendingPairing> | undefined;
+  if (!v || !pairCodeSymbols(v.code) || !Number.isFinite(v.issuedAt) || !Number.isFinite(v.expiresAt)) return null;
+  return { code: String(v.code), issuedAt: Number(v.issuedAt), expiresAt: Number(v.expiresAt) };
 }
 
 async function register(c: Ctx, dir: VaultDirectory): Promise<void> {
   const identity = c.identity!;
-  const { statement, signature } = await buildRegistration(identity, d().label(identity));
-  const res = await d().api.postVaultRegister(statement, signature);
+  // A fresh secret code per registration; kept locally (IndexedDB) until paired.
+  const code = generatePairCode();
+  const keys = await derivePairKeys(code);
+  const issuedAt = Date.now();
+  const pending: PendingPairing = { code, issuedAt, expiresAt: issuedAt + PAIR_CODE_TTL_MS };
+  const body = await buildPairedRegistration(identity, d().label(identity), keys, issuedAt);
+  await d().kv.put(`pending:${c.userId}`, pending);
+  const res = await d().api.postVaultRegister(body.statement, body.signature, body.pairLookup, body.pairKeyMac);
   if (res.device_id !== identity.deviceId || res.fingerprint !== identity.fingerprint) {
     throw new Error('The hub registered a different device id or fingerprint than this device computed');
   }
-  if (res.user_code) await d().kv.put(`pending:${c.userId}`, { userCode: res.user_code, codeExpiresAt: res.code_expires_at ?? '' });
-  const code = res.user_code ? { userCode: res.user_code, codeExpiresAt: res.code_expires_at ?? '' } : await loadPendingCode(c);
   const reset = resetFrom(dir);
-  c.dispatch(deviceVaultStatusChanged({ status: reset ? 'reset-scheduled' : 'pending-approval', reset, userCode: code?.userCode ?? '', codeExpiresAt: code?.codeExpiresAt ?? '' }));
+  c.dispatch(deviceVaultStatusChanged({ status: reset ? 'reset-scheduled' : 'pending-approval', reset, userCode: code, codeExpiresAt: new Date(pending.expiresAt).toISOString() }));
   startPolling();
 }
 
-/** Ask the hub for a fresh code (only issued when the old one expired). */
+/** Draw a new pairing code (the old one is discarded here and superseded at the hub). */
 export async function requestNewDeviceCode(): Promise<void> {
   const c = ctx;
   if (!c?.identity) return;
@@ -546,56 +580,21 @@ export async function requestNewDeviceCode(): Promise<void> {
   }
 }
 
-let confirmTokens = 0;
-
-/** Digits a user must type to confirm an account fingerprint: its first two groups. */
-export const CONFIRM_FINGERPRINT_GROUPS = 2;
-
-export function fingerprintPrefix(fingerprint: string): string {
-  return fingerprint.split(' ').slice(0, CONFIRM_FINGERPRINT_GROUPS).join('').toLowerCase();
-}
-
 /**
- * The user typed the first groups of the account fingerprint shown in Settings on a
- * device they already use. Binds to the EXACT snapshot rendered (`renderedFingerprint`,
- * `token`): if the pending install changed since, nothing is installed.
+ * The approval could not be verified with a live pairing code: discard this browser's
+ * identity (its approved entry stays in the log for the user to revoke), keep the
+ * pins (there are none yet), and register a fresh identity with a new code.
  */
-export async function confirmAccountFingerprint(typed: string, renderedFingerprint: string, token: number): Promise<void> {
-  const c = ctx;
-  if (!c?.identity || !c.pendingInstall) throw new Error('Nothing is waiting for confirmation; reload.');
-  const p = c.pendingInstall;
-  if (p.token !== token || p.fingerprint !== renderedFingerprint || await accountFingerprint(p.chain.rootSignPub) !== renderedFingerprint) {
-    throw new Error('The account shown changed while you were confirming. Compare the fingerprint again.');
-  }
-  const want = fingerprintPrefix(renderedFingerprint);
-  if (String(typed ?? '').replace(/[\s-]+/g, '').toLowerCase() !== want) {
-    throw new Error('That does not match. Type the first groups exactly as Settings → Devices shows them on your other device.');
-  }
-  const { chain, wrap } = p;
-  c.pendingInstall = null;
-  try {
-    await advancePins(d().kv, c.userId, pinsFromChain(chain));
-    const keyring = await installKeyringFromWrap(c.identity, wrap, chain);
-    c.dispatch(keyringInstalled({ currentEpoch: keyring.currentEpoch }));
-    c.dispatch(deviceVaultStatusChanged({ status: 'ready', currentEpoch: chain.currentEpoch, directoryVersion: chain.version }));
-  } catch (err) {
-    purgeKeys(c.dispatch);
-    c.dispatch(deviceVaultFailed({ code: 'verification_failed', message: message(err) }));
-  }
-}
-
-/** The fingerprints differ: refuse the account, install nothing. */
-export function rejectAccountFingerprint(): void {
+export async function restartPairing(): Promise<void> {
   const c = ctx;
   if (!c) return;
-  c.pendingInstall = null;
-  purgeKeys(c.dispatch);
-  c.dispatch(deviceVaultFailed({
-    code: 'account_mismatch',
-    message: 'The account fingerprint did not match. No keys were installed on this device. Check that you are signed in to the right account; if the vault was set up by someone else, request a reset.',
-  }));
+  if (await loadPins(d().kv, c.userId)) throw new Error('This device already trusts this account; nothing to pair.');
+  await forgetDeviceIdentity(d().kv, c.userId);
+  await d().kv.delete(`pending:${c.userId}`);
+  c.identity = null;
+  c.revokedVerified = false;
+  await refreshDeviceVault('pair-again');
 }
-
 /**
  * M2: this browser already pinned another account and the user has not accepted the
  * current one: show the warning instead of any automatic genesis / confirmation.

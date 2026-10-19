@@ -3,8 +3,9 @@
 // builder takes a VERIFIED chain (vaultDirectoryVerify) and refuses to sign about,
 // or wrap to, anything the chain does not vouch for.
 
-import { deviceIdFor, deviceSubject, fingerprintFor, labelB64, signDeviceText, type DeviceIdentity } from './deviceIdentity.ts';
-import { nextLogSlot, remainingApprovers, wrapRecipients, type VerifiedChain, type VerifiedDevice } from './vaultDirectoryVerify.ts';
+import { deviceIdFor, deviceSubject, fingerprintFor, labelB64, labelFromB64, signDeviceText, type DeviceIdentity } from './deviceIdentity.ts';
+import { nextLogSlot, parseStatement, remainingApprovers, wrapRecipients, type VerifiedChain, type VerifiedDevice } from './vaultDirectoryVerify.ts';
+import { pairApproveMac, pairBridgePayload, pairKeyMac, verifyPairKeyMac, type PairKeys } from './vaultPairing.ts';
 import { epochCommitHex, sealKeyringWrap, type SignedKeyringWrap } from './vaultKeyringWrap.ts';
 import { genesisKeyringBytes, nextEpochKeyringBytes } from './vaultKeyringSession.ts';
 import {
@@ -15,7 +16,7 @@ import {
   statementCanonical,
   wrapAlgFromId,
 } from './vaultStatements.ts';
-import type { BrowserCodeInfo, BridgeCodeInfo, GenesisBody, RevokeBody, RotateBody } from '../api/endpoints/vaultDevices.ts';
+import type { BrowserApprovalBody, BrowserCodeInfo, BridgeCodeInfo, GenesisBody, RevokeBody, RotateBody } from '../api/endpoints/vaultDevices.ts';
 
 const sig = async (identity: DeviceIdentity, text: string) => JSON.parse(await signDeviceText(identity, text));
 
@@ -36,6 +37,15 @@ export async function buildRegistration(identity: DeviceIdentity, label: string,
     issued_at_ms: String(now),
   });
   return { statement, signature: await sig(identity, statement) };
+}
+
+/**
+ * Registration bound to this device's secret pairing code (plan §1 "Pairing"): the
+ * hub gets the lookup and a key_mac over the register statement, never the code.
+ */
+export async function buildPairedRegistration(identity: DeviceIdentity, label: string, keys: PairKeys, now = Date.now()) {
+  const reg = await buildRegistration(identity, label, now);
+  return { ...reg, pairLookup: keys.lookup, pairKeyMac: await pairKeyMac(keys, 'browser', reg.statement) };
 }
 
 /**
@@ -66,38 +76,100 @@ function requireApprover(chain: VerifiedChain, identity: DeviceIdentity): Verifi
   return me;
 }
 
-/** Recompute and check what the hub served about a pending browser before signing anything. */
-export async function checkBrowserCodeInfo(info: BrowserCodeInfo): Promise<void> {
-  if (info.kind !== 'browser' || deviceKindFromId(info.device_kind) !== 'browser') throw new FlowRefused('Not a browser device code');
-  if (!signAlgFromId(info.sign_alg) || !wrapAlgFromId(info.wrap_alg)) throw new FlowRefused('The device uses an unsupported algorithm');
-  if (info.device_id !== await deviceIdFor(info.sign_public_key)) throw new FlowRefused('The device id does not match its key');
-  if (info.fingerprint !== await fingerprintFor(info.sign_public_key, info.ecdh_public_key)) throw new FlowRefused('The fingerprint does not match the device keys');
+/** A pending browser as its OWN self-signed register statement describes it. */
+export interface PairedBrowser {
+  device_id: string;
+  sign_public_key: string;
+  ecdh_public_key: string;
+  sign_alg: string;
+  wrap_alg: string;
+  /** Label the device proposed (the approver may rename it). */
+  label: string;
+  fingerprint: string;
+  register_statement: string;
 }
 
-/** Approval statement + wrap of the current keyring for a pending browser. */
+/**
+ * Hub-blind pairing (plan §1 "Pairing"): the hub served `info` for the lookup derived
+ * from the code the user typed. Its pair_key_mac must verify under that code over the
+ * device's register statement — proof the hub did not swap the device's keys — and
+ * the statement must be a well-formed self-registration of a browser in `userId`.
+ * Everything the approval names is taken from that statement, never from the row.
+ */
+export async function checkBrowserCodeInfo(info: BrowserCodeInfo, keys: PairKeys, userId: string): Promise<PairedBrowser> {
+  if (info.kind !== 'browser') throw new FlowRefused('Not a browser pairing request');
+  if (!(await verifyPairKeyMac(keys, 'browser', String(info.register_statement ?? ''), info.pair_key_mac))) {
+    throw new FlowRefused('The pairing check failed: the code does not match this request, or the server changed the device keys. Nothing was approved.');
+  }
+  const st = parseStatement(info.register_statement);
+  if (!st || st.type !== 'register' || st.user_id !== userId) throw new FlowRefused('The pairing request is not a registration for this account');
+  if (deviceKindFromId(st.subject_kind) !== 'browser' || st.issuer_device_id !== st.subject_device_id) throw new FlowRefused('The pairing request is not a self-registered browser');
+  if (!signAlgFromId(st.subject_sign_alg) || !wrapAlgFromId(st.subject_wrap_alg)) throw new FlowRefused('The device uses an unsupported algorithm');
+  if (st.subject_device_id !== await deviceIdFor(st.subject_sign_pub)) throw new FlowRefused('The device id does not match its key');
+  const fingerprint = await fingerprintFor(st.subject_sign_pub, st.subject_ecdh_pub);
+  // The row is display metadata; a row that contradicts the MACed statement is refused.
+  if (info.device_id !== st.subject_device_id || info.sign_public_key !== st.subject_sign_pub || info.ecdh_public_key !== st.subject_ecdh_pub) {
+    throw new FlowRefused('The server described a different device than the one that registered');
+  }
+  return {
+    device_id: st.subject_device_id, sign_public_key: st.subject_sign_pub, ecdh_public_key: st.subject_ecdh_pub,
+    sign_alg: st.subject_sign_alg, wrap_alg: st.subject_wrap_alg, label: labelFromB64(st.subject_label_b64),
+    fingerprint, register_statement: info.register_statement,
+  };
+}
+
+/**
+ * Approval statement + wrap of the current keyring for a pending browser, plus the
+ * pair_mac the new device checks with its code before trusting the account root.
+ */
 export async function buildBrowserApproval(
   approver: DeviceIdentity,
   chain: VerifiedChain,
-  info: BrowserCodeInfo,
-  userCode: string,
+  device: PairedBrowser,
+  keys: PairKeys,
   label: string,
   keyringBytes: Uint8Array,
   now = Date.now(),
-) {
+): Promise<BrowserApprovalBody> {
   requireApprover(chain, approver);
-  await checkBrowserCodeInfo(info);
-  if (chain.trusted.has(info.device_id)) throw new FlowRefused('This device is already approved');
-  if (chain.everApproved.has(info.device_id)) throw new FlowRefused('This device key was approved before and cannot be approved again');
+  if (chain.trusted.has(device.device_id)) throw new FlowRefused('This device is already approved');
+  if (chain.everApproved.has(device.device_id)) throw new FlowRefused('This device key was approved before and cannot be approved again');
   const slot = nextLogSlot(chain);
-  const wrap = await sealKeyringWrap(approver, chain.userId, { device_id: info.device_id, ecdh_public_key: info.ecdh_public_key, wrap_alg: info.wrap_alg }, chain.version + 1, keyringBytes);
+  const wrap = await sealKeyringWrap(approver, chain.userId, { device_id: device.device_id, ecdh_public_key: device.ecdh_public_key, wrap_alg: device.wrap_alg }, chain.version + 1, keyringBytes);
   if (wrap.json.current_epoch !== chain.currentEpoch) throw new FlowRefused('Keyring is not at the signed current epoch');
   const statement = statementCanonical({
     type: 'approve', user_id: chain.userId, ...slot, issuer_device_id: approver.deviceId, issued_at_ms: String(now),
-    subject_device_id: info.device_id, subject_kind: 'browser', subject_sign_pub: info.sign_public_key, subject_ecdh_pub: info.ecdh_public_key,
-    subject_sign_alg: info.sign_alg, subject_wrap_alg: info.wrap_alg, subject_label_b64: labelB64(label || 'browser'),
+    subject_device_id: device.device_id, subject_kind: 'browser', subject_sign_pub: device.sign_public_key, subject_ecdh_pub: device.ecdh_public_key,
+    subject_sign_alg: device.sign_alg, subject_wrap_alg: device.wrap_alg, subject_label_b64: labelB64(label || 'browser'),
     epoch: String(chain.currentEpoch), epoch_commit: chain.commits.get(chain.currentEpoch) ?? '', wrap_sha256: wrap.sha,
   });
-  return { user_code: userCode, expected_version: chain.version, statement, signature: await sig(approver, statement), wrap: wrap.json };
+  return {
+    pair_lookup: keys.lookup,
+    pair_mac: await pairApproveMac(keys, statement, chain.rootSignPub),
+    expected_version: chain.version, statement, signature: await sig(approver, statement), wrap: wrap.json,
+  };
+}
+
+/**
+ * Hub-blind pairing for a bridge: its pair_key_mac (made by `ham-bridge enroll` under
+ * the code it printed) must verify over identity key | enrollment ECDH key | PKCE
+ * challenge as the hub served them.
+ */
+export async function checkBridgeCodeInfo(info: BridgeCodeInfo, keys: PairKeys): Promise<void> {
+  if (info.kind !== 'bridge' || info.is_bridge_enrollment !== true) throw new FlowRefused('Not a bridge pairing request');
+  const identity = String(info.bridge_identity_public_key ?? '');
+  const ecdh = String(info.bridge_public_key ?? '');
+  const onRecord = String((info.hub_observed as Record<string, unknown> | undefined)?.bridge_public_key_on_record ?? '');
+  if (onRecord !== ecdh) throw new FlowRefused('The server reported two different bridge keys');
+  let payload: string;
+  try {
+    payload = pairBridgePayload(identity, ecdh, String(info.code_challenge ?? ''));
+  } catch {
+    throw new FlowRefused('The server sent a malformed bridge request');
+  }
+  if (!(await verifyPairKeyMac(keys, 'bridge', payload, info.pair_key_mac))) {
+    throw new FlowRefused('The pairing check failed: the code does not match this bridge, or the server changed its keys. Nothing was approved.');
+  }
 }
 
 /** Approval statement for a bridge identity key (`vault_approval` on /device/approve). No wrap. */
@@ -113,9 +185,8 @@ export async function buildBridgeApproval(approver: DeviceIdentity, chain: Verif
     subject_sign_alg: SIGN_ALG_ECDSA_P256_SHA256, subject_wrap_alg: '', subject_label_b64: labelB64(label || 'bridge'),
     epoch: String(chain.currentEpoch), epoch_commit: chain.commits.get(chain.currentEpoch) ?? '',
   });
-  return { subjectDeviceId: subjectId, vault_approval: { expected_version: chain.version, statement, signature: await sig(approver, statement) } };
+  return { subjectDeviceId: subjectId, statement, vault_approval: { expected_version: chain.version, statement, signature: await sig(approver, statement) } };
 }
-
 /** The identity fingerprint of a bridge as the approver computes it (sign key only). */
 export async function bridgeIdentityFingerprint(identityPubHex: string): Promise<string> {
   return fingerprintFor(identityPubHex, '');

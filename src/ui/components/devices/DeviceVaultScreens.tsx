@@ -1,19 +1,16 @@
 // Gate screens for the passwordless vault (docs/plans/passwordless-vault.md §2 P3).
-// No password anywhere: a device either created the vault (genesis), waits for an
-// approved device to enter its code, confirms the account fingerprint, or is ready.
+// No password anywhere: a device either created the vault (genesis), shows its secret
+// pairing code until an approved device types it (hub-blind pairing), or is ready.
 
 import React, { useState } from 'react';
 import { useSelector } from 'react-redux';
 import { Alert, Button, Icon, Input } from '@ui';
 import { selectDeviceVault, type DeviceVaultState } from '../../store/deviceVaultSlice';
 import {
-  CONFIRM_FINGERPRINT_GROUPS,
   acceptOtherAccount,
-  confirmAccountFingerprint,
-  fingerprintPrefix,
   requestNewApproval,
   refreshDeviceVault,
-  rejectAccountFingerprint,
+  restartPairing,
   requestNewDeviceCode,
   requestVaultReset,
   resetBrowserDeviceData,
@@ -74,16 +71,17 @@ export function DeviceWaitingScreen({ state }: { state: DeviceVaultState }) {
   return (
     <Shell debugId="device-waiting-screen" title="Approve this device">
       <p className="mb-3 text-sm text-muted">
-        On a device that already uses Heimdall, open <strong>/device/add</strong> (or the notification there) and enter this code.
-        Check that the fingerprint shown there matches this one.
+        On a device that already uses Heimdall, open <strong>Add a device</strong> (<strong>/device/add</strong>, or the notification there) and type this code.
+        That is all: this browser checks the approval with the code and installs your keys on its own.
       </p>
+      <p className="mb-3 text-xs text-muted">The code is a secret for the next few minutes. Type it only on your own device; never send it to anyone.</p>
       <div className="mb-3">
-        <div className="mb-1 text-xs font-medium text-muted">Code</div>
+        <div className="mb-1 text-xs font-medium text-muted">Pairing code</div>
         {state.userCode ? (
           <Fingerprint debugId="device-waiting-code" value={state.userCode} />
         ) : (
           <div className="flex items-center gap-2 text-sm text-muted">
-            <span data-debug-id="device-waiting-no-code">This code is no longer shown.</span>
+            <span data-debug-id="device-waiting-no-code">The pairing code expired.</span>
             <Button data-debug-id="device-waiting-new-code-btn" size="sm" loading={busy} onClick={() => run(requestNewDeviceCode)}>Get a new code</Button>
           </div>
         )}
@@ -112,52 +110,6 @@ export function DeviceWaitingScreen({ state }: { state: DeviceVaultState }) {
         </div>
       )}
       {error ? <p data-debug-id="device-waiting-error" className="mt-2 text-xs text-danger">{error}</p> : null}
-    </Shell>
-  );
-}
-
-/**
- * The new device shows the ACCOUNT fingerprint; keys install only after the user types
- * its first groups as shown on a device they already use. The confirmation is bound to
- * the exact fingerprint rendered here (snapshot + token): if the pending account changes
- * meanwhile, nothing is installed.
- */
-export function AccountFingerprintConfirm({ state }: { state: DeviceVaultState }) {
-  const [busy, error, run] = useAsyncAction();
-  const [typed, setTyped] = useState('');
-  const rendered = state.confirmFingerprint;
-  const token = state.confirmToken;
-  return (
-    <Shell debugId="account-fingerprint-confirm" title="Confirm your account">
-      <p className="mb-3 text-sm text-muted">
-        This device was approved. Before it receives your keys, open <strong>Settings → Devices</strong> on a device you
-        already use and compare its account fingerprint with this one:
-      </p>
-      <Fingerprint debugId="account-fingerprint-value" value={rendered} />
-      <label className="mb-1 mt-4 block text-xs font-medium text-muted" htmlFor="account-fingerprint-typed">
-        Type the first {CONFIRM_FINGERPRINT_GROUPS} groups as your OTHER device shows them
-      </label>
-      <Input
-        id="account-fingerprint-typed"
-        data-debug-id="account-fingerprint-typed-input"
-        value={typed}
-        onChange={setTyped}
-        placeholder="xxxx xxxx"
-        autoFocus
-      />
-      <div className="mt-4 flex flex-wrap gap-2">
-        <Button
-          data-debug-id="account-fingerprint-match-btn"
-          variant="primary"
-          loading={busy}
-          disabled={!rendered || typed.replace(/[\s-]+/g, '').length !== fingerprintPrefix(rendered).length}
-          onClick={() => run(() => confirmAccountFingerprint(typed, rendered, token))}
-        >
-          Confirm and install keys
-        </Button>
-        <Button data-debug-id="account-fingerprint-mismatch-btn" variant="danger" onClick={() => rejectAccountFingerprint()}>They differ</Button>
-      </div>
-      {error ? <p data-debug-id="account-fingerprint-error" className="mt-2 text-xs text-danger">{error}</p> : null}
     </Shell>
   );
 }
@@ -215,7 +167,7 @@ export function DeviceVaultProblemScreen({ state }: { state: DeviceVaultState })
     );
   }
   return (
-    <Shell debugId="device-vault-error" title={state.errorCode === 'vault_missing' ? 'Vault missing' : state.errorCode === 'vault_reset' ? 'Vault was reset' : state.errorCode === 'device_state_malformed' ? "This browser's device data is unreadable" : 'Vault check failed'}>
+    <Shell debugId="device-vault-error" title={state.errorCode === 'pairing_unverified' || state.errorCode === 'pairing_mismatch' ? 'Pairing not verified' : state.errorCode === 'vault_missing' ? 'Vault missing' : state.errorCode === 'vault_reset' ? 'Vault was reset' : state.errorCode === 'device_state_malformed' ? "This browser's device data is unreadable" : 'Vault check failed'}>
       <div data-debug-id="device-vault-error-message"><Alert tone="danger">{state.errorMessage || "Unknown error"}</Alert></div>
       <p className="mt-2 text-xs text-muted">Nothing was decrypted and no key was installed on this device.</p>
       {state.errorCode === 'vault_missing' && state.startOverPhrase ? (
@@ -238,6 +190,9 @@ export function DeviceVaultProblemScreen({ state }: { state: DeviceVaultState })
       ) : null}
       <div className="mt-4 flex flex-wrap gap-2">
         <Button data-debug-id="device-vault-retry-btn" loading={busy} onClick={() => run(() => refreshDeviceVault('retry'))}>Retry</Button>
+        {state.errorCode === 'pairing_unverified' || state.errorCode === 'pairing_mismatch' ? (
+          <Button data-debug-id="device-vault-pair-again-btn" variant="danger" loading={busy} onClick={() => run(restartPairing)}>Pair again</Button>
+        ) : null}
         {state.errorCode === 'vault_reset' ? (
           <Button data-debug-id="device-vault-start-over-btn" variant="danger" loading={busy} onClick={() => run(() => startOverAfterReset())}>Start a new vault on this device</Button>
         ) : null}
@@ -282,7 +237,7 @@ export function DeviceVaultGate({ children }: { children: React.ReactNode }) {
 
 /** The route an untrusted device is parked on (it shows the code; no app route renders). */
 export const DEVICE_ENROLL_ROUTE = '/device/enroll';
-const PARKED_STATUSES = new Set(['pending-approval', 'reset-scheduled', 'confirm-account', 'other-account', 'revoked']);
+const PARKED_STATUSES = new Set(['pending-approval', 'reset-scheduled', 'other-account', 'revoked']);
 
 function currentHashPath(): string {
   const hash = typeof window !== 'undefined' ? window.location.hash || '' : '';
@@ -315,8 +270,6 @@ export function renderDeviceVaultGate(state: DeviceVaultState, children: React.R
     case 'pending-approval':
     case 'reset-scheduled':
       return <DeviceWaitingScreen state={state} />;
-    case 'confirm-account':
-      return <AccountFingerprintConfirm state={state} />;
     case 'other-account':
       return <OtherAccountWarning state={state} />;
     default:

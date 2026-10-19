@@ -7,10 +7,10 @@
 //   unsupported      no WebCrypto/IndexedDB: the app cannot run its vault
 //   initializing     loading the identity / directory
 //   genesis          first device of the account: creating the vault (automatic)
-//   pending-approval this device waits for an approved device to enter its code
-//   confirm-account  approved; the user must confirm the account fingerprint first
+//   pending-approval this device shows its secret pairing code and waits for an approved
+//                    device to type it (hub-blind pairing; no fingerprint typing here)
 //   other-account    this browser already holds pins for another account: no automatic
-//                    genesis or confirmation until the user accepts it explicitly
+//                    genesis or pairing until the user accepts it explicitly
 //   ready            keyring installed; the app is usable
 //   revoked          the signed log revoked this device; keys purged
 //   reset-scheduled  a vault reset is pending and this device is not approved
@@ -23,7 +23,6 @@ export type DeviceVaultStatus =
   | 'initializing'
   | 'genesis'
   | 'pending-approval'
-  | 'confirm-account'
   | 'other-account'
   | 'ready'
   | 'revoked'
@@ -46,7 +45,7 @@ export interface DeviceVaultState {
   userId: string;
   deviceId: string;
   fingerprint: string;
-  /** Pending only: the code to type on an approved device. Never sent to notifications. */
+  /** Pending only: the secret pairing code to type on an approved device. Never sent anywhere. */
   userCode: string;
   codeExpiresAt: string;
   /** SHA256(root_sign_pub) in quads, once a verified directory is known. */
@@ -69,9 +68,6 @@ export interface DeviceVaultState {
   busy: boolean;
   /** Bridges whose last key delivery failed (bridge id -> error); cleared on success. */
   bridgeKeyFailures: Record<string, string>;
-  /** confirm-account: the account fingerprint snapshot the user confirms, and its token. */
-  confirmFingerprint: string;
-  confirmToken: number;
   /** other-account: account ids this browser already holds pins for. */
   otherAccounts: string[];
   /**
@@ -100,8 +96,6 @@ export const initialDeviceVaultState: DeviceVaultState = {
   errorMessage: '',
   busy: false,
   bridgeKeyFailures: {},
-  confirmFingerprint: '',
-  confirmToken: 0,
   otherAccounts: [],
   startOverPhrase: '',
 };

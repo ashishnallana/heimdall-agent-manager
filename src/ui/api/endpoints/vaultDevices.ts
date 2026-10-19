@@ -62,6 +62,8 @@ export interface VaultSelfStatus {
   status: 'pending' | 'approved' | 'revoked' | string;
   directory_version: number;
   wrap?: SignedKeyringWrap | null;
+  /** The approver's pair_mac over this device's approval (hub-blind pairing). */
+  pair_mac?: string;
 }
 
 export async function fetchVaultSelf(signed: VaultSignerContext): Promise<VaultSelfStatus> {
@@ -86,13 +88,16 @@ export interface RegisterResult {
   device_id: string;
   fingerprint: string;
   status: string;
-  /** Present only when the hub just issued/refreshed the code. */
-  user_code?: string;
+  /** How long the pending request lives (the hub never knows the pairing code). */
   code_expires_at?: string;
 }
 
-export async function postVaultRegister(statement: string, proofSignature: unknown): Promise<RegisterResult> {
-  return vaultRequest('POST', '/vault/devices/register', { body: { statement, proof_signature: proofSignature } });
+/**
+ * Register this device as pending. `pairLookup` / `pairKeyMac` are derived from the
+ * secret pairing code this device shows; the code itself never leaves the device.
+ */
+export async function postVaultRegister(statement: string, proofSignature: unknown, pairLookup: string, pairKeyMac: string): Promise<RegisterResult> {
+  return vaultRequest('POST', '/vault/devices/register', { body: { statement, proof_signature: proofSignature, pair_lookup: pairLookup, pair_key_mac: pairKeyMac } });
 }
 
 // ── approval surface (/device/add) ──────────────────────────────────────────
@@ -109,6 +114,9 @@ export interface BrowserCodeInfo {
   wrap_alg: string;
   created_at?: string;
   code_expires_at?: string;
+  /** The self-signed register statement the device made; pair_key_mac covers it. */
+  register_statement: string;
+  pair_key_mac: string;
 }
 
 export interface BridgeCodeInfo {
@@ -123,17 +131,23 @@ export interface BridgeCodeInfo {
   bridge_key_fingerprint?: string;
   hub_observed?: Record<string, unknown>;
   host_asserted?: Record<string, unknown>;
+  /** MAC over identity|ecdh|code_challenge under the bridge's pairing code. */
+  pair_key_mac: string;
+  code_challenge: string;
   [k: string]: unknown;
 }
 
 export type DeviceCodeInfo = BrowserCodeInfo | BridgeCodeInfo;
 
-export async function verifyDeviceCode(userCode: string): Promise<DeviceCodeInfo> {
-  return vaultRequest('POST', '/device/verify', { body: { user_code: userCode } });
+/** Resolve a pending device by the lookup the APPROVER derived from the typed code. */
+export async function verifyPairLookup(pairLookup: string): Promise<DeviceCodeInfo> {
+  return vaultRequest('POST', '/device/verify', { body: { pair_lookup: pairLookup } });
 }
 
 export interface BrowserApprovalBody {
-  user_code: string;
+  pair_lookup: string;
+  /** HMAC under the pairing code over (approval, root, head): the new device verifies it. */
+  pair_mac: string;
   expected_version: number;
   statement: string;
   signature: unknown;
@@ -145,7 +159,7 @@ export async function postApproveBrowser(deviceId: string, body: BrowserApproval
 }
 
 export interface BridgeApprovalBody {
-  user_code: string;
+  pair_lookup: string;
   approve: boolean;
   vault_approval?: { expected_version: number; statement: string; signature: unknown };
   target_bridge_id?: string;
