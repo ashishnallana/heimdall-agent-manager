@@ -8,6 +8,8 @@ package main
 //   - .Identity: a 0600 file "identity_key" in the bridge's private 0700 directory
 //     (bridge_vault_bridge_dir). The identity is created only at enrollment and is
 //     never regenerated, so it must survive a reboot (finding H1); @u cannot hold it.
+//   - .Epoch_Floor: a 0600 file "epoch_floor" beside it, for the same reason: a
+//     reboot must not reset the anti-rollback floor.
 //
 // Bridge ids name both, so bridges of the same OS user never share or purge each
 // other's secrets (REQ-T5-1). Lookups use only KEYCTL_SEARCH rooted at @u
@@ -39,6 +41,7 @@ KEYCTL_INVALIDATE     :: 21
 KEY_TYPE_USER         :: "user"
 KEY_DESC_KEYRING_PREFIX  :: "heimdall:vault_keyring:"
 IDENTITY_FILE_NAME :: "identity_key"
+EPOCH_FLOOR_FILE_NAME :: "epoch_floor"
 
 KEYSTORE_ERR_EPERM    :: 1
 KEYSTORE_ERR_EACCES   :: 13
@@ -124,7 +127,7 @@ keystore_os_requires_persistence :: proc() -> bool {
 keystore_os_write_secret :: proc(slot: Keystore_Slot, bridge_id: string, data: []byte) -> int {
 	if keystore_android_selected() do return keystore_android_write_secret(slot, bridge_id, data)
 	if len(data) == 0 do return -1
-	if slot == .Identity do return keystore_identity_file_write(bridge_id, data)
+	if slot != .Keyring do return keystore_identity_file_write(slot, bridge_id, data)
 	key_type := cstring(KEY_TYPE_USER)
 	_, err := sys_add_key(key_type, keystore_key_description(slot, bridge_id), raw_data(data), c.size_t(len(data)), KEY_SPEC_USER_KEYRING)
 	if err != 0 do blog_warn(.keystore_unavailable, blog_sym(.reason, .linux_keyring), blog_int(.errno, i64(err)))
@@ -133,7 +136,7 @@ keystore_os_write_secret :: proc(slot: Keystore_Slot, bridge_id: string, data: [
 
 keystore_os_read_secret_status :: proc(slot: Keystore_Slot, bridge_id: string, dst: []byte) -> (n: int, status: Keystore_Read_Status) {
 	if keystore_android_selected() do return keystore_android_read_secret_status(slot, bridge_id, dst)
-	if slot == .Identity do return keystore_identity_file_read(bridge_id, dst)
+	if slot != .Keyring do return keystore_identity_file_read(slot, bridge_id, dst)
 	if _keystore_mock_syscall_errno != 0 do return 0, .Error
 	key_id, found := keystore_search_key(slot, bridge_id)
 	if !found do return 0, .Not_Found
@@ -152,8 +155,8 @@ keystore_os_read_secret_status :: proc(slot: Keystore_Slot, bridge_id: string, d
 // "present but unreadable".
 keystore_os_secret_present :: proc(slot: Keystore_Slot, bridge_id: string) -> bool {
 	if keystore_android_selected() do return keystore_android_secret_present(slot, bridge_id)
-	if slot == .Identity {
-		path, ok := keystore_identity_file_path(bridge_id)
+	if slot != .Keyring {
+		path, ok := keystore_identity_file_path(slot, bridge_id)
 		return ok && os.exists(path)
 	}
 	return false
@@ -162,9 +165,9 @@ keystore_os_secret_present :: proc(slot: Keystore_Slot, bridge_id: string) -> bo
 // Revokes and unlinks the slot's key. True when no key remains.
 keystore_os_delete_secret :: proc(slot: Keystore_Slot, bridge_id: string) -> bool {
 	if keystore_android_selected() do return keystore_android_delete_secret(slot, bridge_id)
-	if slot == .Identity {
+	if slot != .Keyring {
 		if _keystore_mock_syscall_errno != 0 do return false
-		path, ok := keystore_identity_file_path(bridge_id)
+		path, ok := keystore_identity_file_path(slot, bridge_id)
 		if !ok do return true
 		if !os.exists(path) do return true
 		return os.remove(path) == nil
@@ -179,18 +182,19 @@ keystore_os_delete_secret :: proc(slot: Keystore_Slot, bridge_id: string) -> boo
 // ── Identity file (persistent across reboots) ───────────────────────────────
 
 @(private = "file")
-keystore_identity_file_path :: proc(bridge_id: string) -> (path: string, ok: bool) {
+keystore_identity_file_path :: proc(slot: Keystore_Slot, bridge_id: string) -> (path: string, ok: bool) {
 	if !keystore_bridge_id_ok(bridge_id) do return "", false
 	dir := bridge_vault_bridge_dir(bridge_id, context.temp_allocator) or_return
-	return strings.concatenate({dir, IDENTITY_FILE_NAME}, context.temp_allocator), true
+	name := IDENTITY_FILE_NAME if slot == .Identity else EPOCH_FLOOR_FILE_NAME
+	return strings.concatenate({dir, name}, context.temp_allocator), true
 }
 
 // Writes the record 0600 via an exclusive temp file + fsync + rename inside a
 // 0700 directory, so a crash never leaves a truncated record. Returns 0 or -1.
 @(private = "file")
-keystore_identity_file_write :: proc(bridge_id: string, data: []byte) -> int {
+keystore_identity_file_write :: proc(slot: Keystore_Slot, bridge_id: string, data: []byte) -> int {
 	if _keystore_mock_syscall_errno != 0 do return _keystore_mock_syscall_errno
-	path, ok := keystore_identity_file_path(bridge_id)
+	path, ok := keystore_identity_file_path(slot, bridge_id)
 	if !ok do return KEYSTORE_ERR_BAD_BRIDGE_ID
 	dir := path[:strings.last_index_byte(path, '/')]
 	if mk_err := bridge_make_directory_all(dir); mk_err != nil && !os.exists(dir) do return -1
@@ -216,9 +220,9 @@ keystore_identity_file_write :: proc(bridge_id: string, data: []byte) -> int {
 // A missing file is .Not_Found; anything else that keeps the record from being
 // trusted (unreadable, wrong type, group/other access, oversized) is .Error.
 @(private = "file")
-keystore_identity_file_read :: proc(bridge_id: string, dst: []byte) -> (n: int, status: Keystore_Read_Status) {
+keystore_identity_file_read :: proc(slot: Keystore_Slot, bridge_id: string, dst: []byte) -> (n: int, status: Keystore_Read_Status) {
 	if _keystore_mock_syscall_errno != 0 do return 0, .Error
-	path, ok := keystore_identity_file_path(bridge_id)
+	path, ok := keystore_identity_file_path(slot, bridge_id)
 	if !ok do return 0, .Error
 	if !os.exists(path) do return 0, .Not_Found
 	info, st_err := os.stat(path, context.temp_allocator)

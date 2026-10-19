@@ -30,6 +30,7 @@ import vault "odin_test:lib/vault"
 Keystore_Slot :: enum {
 	Keyring,
 	Identity,
+	Epoch_Floor, // highest accepted current epoch + per-epoch key commitments
 }
 
 KEYSTORE_IDENTITY_KEY_BYTES :: vault.P256_PRIVATE_KEY_BYTES
@@ -230,9 +231,12 @@ keystore_read_identity :: proc(bridge_id: string, rec: ^Bridge_Identity_Record) 
 	return .Found
 }
 
+// keystore_delete_identity_key deletes the enrollment record and its epoch floor
+// (they are created together at enrollment and only make sense together).
 keystore_delete_identity_key :: proc(bridge_id: string) -> bool {
 	if !keystore_bridge_id_ok(bridge_id) do return true
-	return keystore_backend_delete(.Identity, bridge_id)
+	floor_ok := keystore_delete_epoch_floor(bridge_id)
+	return keystore_backend_delete(.Identity, bridge_id) && floor_ok
 }
 
 // ── Backend dispatch ────────────────────────────────────────────────────────

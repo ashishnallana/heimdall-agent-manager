@@ -20,6 +20,7 @@ KEYSTORE_ERR_ENOKEY   :: 126
 // overwrite and then delete a developer machine's real enrolled secrets.
 CREDENTIAL_TARGET_KEYRING_PREFIX  :: "works.earendil.heimdall-bridge.vault-keyring.test:" when ODIN_TEST else "works.earendil.heimdall-bridge.vault-keyring:"
 CREDENTIAL_TARGET_IDENTITY_PREFIX :: "works.earendil.heimdall-bridge.vault-identity.test:" when ODIN_TEST else "works.earendil.heimdall-bridge.vault-identity:"
+CREDENTIAL_TARGET_FLOOR_PREFIX    :: "works.earendil.heimdall-bridge.vault-epoch-floor.test:" when ODIN_TEST else "works.earendil.heimdall-bridge.vault-epoch-floor:"
 CREDENTIAL_MAX_BLOB_BYTES         :: 2560
 
 // Testing hooks for simulation: a non-zero value makes every Credential Manager
@@ -32,7 +33,12 @@ keystore_set_mock_syscall_error :: proc(errno: int) {
 
 @(private = "file")
 credential_target :: proc(slot: Keystore_Slot, bridge_id: string) -> win.wstring {
-	prefix := CREDENTIAL_TARGET_KEYRING_PREFIX if slot == .Keyring else CREDENTIAL_TARGET_IDENTITY_PREFIX
+	prefix: string
+	switch slot {
+	case .Keyring:     prefix = CREDENTIAL_TARGET_KEYRING_PREFIX
+	case .Identity:    prefix = CREDENTIAL_TARGET_IDENTITY_PREFIX
+	case .Epoch_Floor: prefix = CREDENTIAL_TARGET_FLOOR_PREFIX
+	}
 	return win.utf8_to_wstring(strings.concatenate({prefix, bridge_id}, context.temp_allocator), context.temp_allocator)
 }
 

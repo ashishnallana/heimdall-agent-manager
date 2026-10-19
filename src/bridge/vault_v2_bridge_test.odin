@@ -472,3 +472,89 @@ test_v2_keyring_env_override_is_scrubbed_from_children :: proc(t: ^testing.T) {
 	defer vault.keyring_wipe(&want)
 	testing.expect(t, ok && vault.keyring_equal(&kr, &want), "the bridge still uses the captured keyring")
 }
+
+@(test)
+test_v2_epoch_floor_survives_lock :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
+	f := v2_open()
+	defer v2_close(&f)
+	now := v2_now()
+	unseal :: proc(id: string, kr: ^vault.Vault_Keyring, now: i64, nonce: string) -> bool {
+		payload := test_create_unseal_v2_payload(id, kr, now, nonce)
+		defer delete(payload)
+		ok, _ := bridge_unseal_decrypt_and_verify(payload, id, now)
+		return ok
+	}
+
+	two := test_keyring_two_epochs(TEST_VAULT_KEY_HEX, V2_KEY_2)
+	defer vault.keyring_wipe(&two)
+	testing.expect(t, unseal(f.id_a, &two, now, "n_floor_two"), "{1,2} accepted")
+
+	// A lock deletes the keyring; the floor stays.
+	keystore_lock_and_purge(f.id_a)
+	one := test_keyring_from_hex(TEST_VAULT_KEY_HEX, 1)
+	defer vault.keyring_wipe(&one)
+	testing.expect(t, !unseal(f.id_a, &one, now, "n_floor_rollback"), "rollback below the floor refused after a lock")
+
+	// Epoch 2 with a substituted key (wrapped in a newer {2', 3}) is refused.
+	sub := test_keyring_from_hex(TEST_ENC_VAULT_KEY, 2)
+	defer vault.keyring_wipe(&sub)
+	sub.entries[1] = sub.entries[0]
+	sub.entries[1].epoch = 3
+	sub.count, sub.current_epoch = 2, 3
+	testing.expect(t, !unseal(f.id_a, &sub, now, "n_floor_swap"), "substituted key for a known epoch refused after a lock")
+
+	// A genuine rotation {1,2,3} is accepted and raises the floor.
+	three := two
+	defer vault.keyring_wipe(&three)
+	three.entries[2] = Keyring_Entry_For_Test(3, 0x33)
+	three.count, three.current_epoch = 3, 3
+	testing.expect(t, unseal(f.id_a, &three, now, "n_floor_three"), "rotation accepted")
+	floor, st := keystore_read_epoch_floor(f.id_a)
+	testing.expect(t, st == .Found && floor.floor_epoch == 3 && floor.count == 3, "floor raised to 3 with three commitments")
+
+	// Unreadable or missing floor: refuse.
+	keystore_lock_and_purge(f.id_a)
+	testing.expect_value(t, keystore_backend_write(.Epoch_Floor, f.id_a, transmute([]byte)string("junk")), 0)
+	testing.expect(t, !unseal(f.id_a, &three, now, "n_floor_junk"), "unreadable floor refuses")
+	testing.expect(t, keystore_delete_epoch_floor(f.id_a))
+	testing.expect(t, !unseal(f.id_a, &three, now, "n_floor_missing"), "missing floor refuses")
+}
+
+@(private = "file")
+Keyring_Entry_For_Test :: proc(epoch: u32, fill: byte) -> vault.Keyring_Entry {
+	e := vault.Keyring_Entry{epoch = epoch}
+	for &b in e.key do b = fill
+	return e
+}
+
+@(test)
+test_v2_epoch_floor_merge_keeps_newest :: proc(t: ^testing.T) {
+	f: Epoch_Floor
+	kr: vault.Vault_Keyring
+	defer vault.keyring_wipe(&kr)
+	copy(kr.user_id_buf[:], "usr_x")
+	kr.user_id_len = 5
+	for i in 0 ..< vault.KEYRING_MAX_EPOCHS {
+		kr.entries[i] = Keyring_Entry_For_Test(u32(i + 1), byte(i))
+	}
+	kr.count, kr.current_epoch = vault.KEYRING_MAX_EPOCHS, vault.KEYRING_MAX_EPOCHS
+	epoch_floor_merge(&f, "brg_x", &kr)
+	// A later keyring that dropped epoch 1 and added 65.
+	for i in 0 ..< vault.KEYRING_MAX_EPOCHS {
+		kr.entries[i] = Keyring_Entry_For_Test(u32(i + 2), byte(i + 1))
+	}
+	kr.current_epoch = vault.KEYRING_MAX_EPOCHS + 1
+	testing.expect_value(t, epoch_floor_check(&f, "brg_x", &kr), Epoch_Floor_Error.None)
+	epoch_floor_merge(&f, "brg_x", &kr)
+	testing.expect(t, f.count == EPOCH_FLOOR_MAX_ENTRIES && f.entries[0].epoch == 2 && f.floor_epoch == vault.KEYRING_MAX_EPOCHS + 1)
+	buf: [EPOCH_FLOOR_MAX_BYTES]byte
+	out, ok := epoch_floor_serialize(&f, buf[:])
+	back, back_ok := epoch_floor_parse(out)
+	testing.expect(t, ok && back_ok && back == f, "floor round-trips")
+	kr.entries[5].key[0] ~= 1
+	testing.expect_value(t, epoch_floor_check(&f, "brg_x", &kr), Epoch_Floor_Error.Key_Mismatch)
+}

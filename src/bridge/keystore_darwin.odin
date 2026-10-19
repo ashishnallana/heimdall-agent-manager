@@ -17,6 +17,7 @@ KEYSTORE_ERR_ENOKEY   :: 126
 // overwrite and then delete a developer Mac's real enrolled secrets.
 KEYCHAIN_SERVICE_KEYRING  :: "works.earendil.heimdall-bridge.vault-keyring.test" when ODIN_TEST else "works.earendil.heimdall-bridge.vault-keyring"
 KEYCHAIN_SERVICE_IDENTITY :: "works.earendil.heimdall-bridge.vault-identity.test" when ODIN_TEST else "works.earendil.heimdall-bridge.vault-identity"
+KEYCHAIN_SERVICE_FLOOR    :: "works.earendil.heimdall-bridge.vault-epoch-floor.test" when ODIN_TEST else "works.earendil.heimdall-bridge.vault-epoch-floor"
 
 // OSStatus values from <Security/SecBase.h>.
 KEYCHAIN_ERR_SEC_SUCCESS        :: 0
@@ -52,7 +53,12 @@ keystore_set_mock_syscall_error :: proc(errno: int) {
 
 @(private = "file")
 keychain_service :: proc(slot: Keystore_Slot) -> string {
-	return KEYCHAIN_SERVICE_KEYRING if slot == .Keyring else KEYCHAIN_SERVICE_IDENTITY
+	switch slot {
+	case .Keyring:     return KEYCHAIN_SERVICE_KEYRING
+	case .Identity:    return KEYCHAIN_SERVICE_IDENTITY
+	case .Epoch_Floor: return KEYCHAIN_SERVICE_FLOOR
+	}
+	return KEYCHAIN_SERVICE_IDENTITY
 }
 
 // Looks up the slot's item. A nil `item` is a valid out: the lookup then only

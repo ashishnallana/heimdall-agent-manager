@@ -238,6 +238,15 @@ bridge_unseal_identity_commit_enrollment :: proc(bridge_id: string, owner_user_i
 		bridge_unseal_forget_identity_locked()
 		return false
 	}
+	// A fresh enrollment starts an empty anti-rollback floor. From here on a
+	// missing floor record is an error, never "start over".
+	empty_floor: Epoch_Floor
+	if !keystore_store_epoch_floor(bridge_id, &empty_floor) {
+		fmt.eprintln("ERROR: could not persist this bridge's epoch floor; enrollment cannot complete")
+		_ = keystore_delete_identity_key(bridge_id)
+		bridge_unseal_forget_identity_locked()
+		return false
+	}
 	copy(g_bridge_identity_owner_buf[:], bridge_id)
 	g_bridge_identity_owner_len = len(bridge_id)
 	copy(g_bridge_identity_user_buf[:], owner_user_id)
@@ -616,6 +625,24 @@ bridge_unseal_decrypt_and_verify :: proc(
 			return false, "keyring rejected: an epoch's key differs from the one this bridge holds"
 		}
 	}
+	//  (b') The persistent floor survives a lock (which deletes the stored keyring):
+	//      no current epoch below the highest ever accepted, and no known epoch with
+	//      a key other than the one committed. Unreadable or missing → refuse.
+	floor, floor_status := keystore_read_epoch_floor(local_bridge_id)
+	switch floor_status {
+	case .Found:
+	case .Not_Found:
+		return false, "this bridge's epoch floor record is missing; re-enroll it"
+	case .Error:
+		return false, "this bridge's epoch floor record could not be read; unseal refused"
+	}
+	switch epoch_floor_check(&floor, local_bridge_id, &kr) {
+	case .None:
+	case .Rollback:
+		return false, "keyring rollback rejected: current epoch is below this bridge's epoch floor"
+	case .Key_Mismatch:
+		return false, "keyring rejected: an epoch's key differs from the one this bridge accepted before"
+	}
 	//  (c) P2/P3 HOOK — signed epoch statement chain (plan §1, required before P3).
 	//      This is where the bridge must verify, BEFORE installing anything below:
 	//      the `epoch` statement for kr.current_epoch carried in the payload, the
@@ -628,6 +655,9 @@ bridge_unseal_decrypt_and_verify :: proc(
 	defer crypto.zero_explicit(&raw, size_of(raw))
 	bytes, ser_ok := vault.keyring_serialize_into(&kr, raw[:])
 	if !ser_ok do return false, "keyring could not be serialized"
+	// Raise the floor BEFORE installing: a keyring is never live without its floor.
+	epoch_floor_merge(&floor, local_bridge_id, &kr)
+	if !keystore_store_epoch_floor(local_bridge_id, &floor) do return false, "failed to persist the epoch floor; unseal refused"
 	store_ok, _ := keystore_store_vault_keyring(local_bridge_id, bytes)
 	if !store_ok do return false, "failed to store unsealed vault keyring in secure keystore"
 
