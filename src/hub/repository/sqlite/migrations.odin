@@ -441,7 +441,10 @@ MIGRATION_099_MIXED_WORK_EXECUTION :: #load("migrations/099_mixed_work_execution
 // An ALTER (keeps existing vault data); fresh databases get the column from 092.
 MIGRATION_100_VAULT_PAIR_HUB_ORIGIN :: #load("migrations/100_vault_pair_hub_origin.sql", string)
 
-migration_order :: [103]string {
+// 101: Codex/Pi GPT-6 models (codex-cli 0.162); retires the GPT-5.6 rows.
+MIGRATION_101_CODEX_GPT6_MODELS :: #load("migrations/101_codex_gpt6_models.sql", string)
+
+migration_order :: [104]string {
 	"001_foundation.sql",
 	"002_owner_scoped_core.sql",
 	"003_device_tokens.sql",
@@ -545,6 +548,7 @@ migration_order :: [103]string {
 	"098_mixed_work_graph.sql",
 	"099_mixed_work_execution.sql",
 	"100_vault_pair_hub_origin.sql",
+	"101_codex_gpt6_models.sql",
 }
 
 // stop_before is a TEST SEAM: when non-empty, the apply loop stops in front of
@@ -1043,6 +1047,7 @@ migration_sql :: proc(name, migrations_dir: string) -> string {
 	if name == "098_mixed_work_graph.sql" do return strings.clone(MIGRATION_098_MIXED_WORK_GRAPH)
 	if name == "099_mixed_work_execution.sql" do return strings.clone(MIGRATION_099_MIXED_WORK_EXECUTION)
 	if name == "100_vault_pair_hub_origin.sql" do return strings.clone(MIGRATION_100_VAULT_PAIR_HUB_ORIGIN)
+	if name == "101_codex_gpt6_models.sql" do return strings.clone(MIGRATION_101_CODEX_GPT6_MODELS)
 	if name == "081_antigravity_models.sql" do return strings.clone(MIGRATION_081_ANTIGRAVITY_MODELS)
 	if name == "080_copilot_launch_recipe.sql" do return strings.clone(MIGRATION_080_COPILOT_LAUNCH_RECIPE)
 	if name == "079_repair_provider_catalog_etag.sql" do return strings.clone(MIGRATION_079_REPAIR_PROVIDER_CATALOG_ETAG)
