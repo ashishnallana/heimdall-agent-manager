@@ -37,7 +37,7 @@ import { verifyDirectory, wrapRecipients, buildBridgeChainProof, verifyBridgeCha
 import { openVerifiedWrap } from '../../src/ui/utils/vaultKeyringWrap.ts';
 import { deliverKeyringToBridge } from '../../src/ui/utils/vaultBridgeDelivery.ts';
 import { buildBridgeApproval, buildBrowserApproval, buildGenesis, buildPairedRegistration, buildRevocation, buildRotation, checkBridgeCodeInfo, checkBrowserCodeInfo } from '../../src/ui/utils/vaultDeviceFlows.ts';
-import { derivePairKeys, generatePairCode, generatePairSalt, isPairHubOrigin, pairApproveMac, pairBridgePayload, pairHubOrigin, pairKeyMac, verifyPairApproveMac } from '../../src/ui/utils/vaultPairing.ts';
+import { acceptedPairOrigins, derivePairKeys, generatePairCode, generatePairSalt, isPairHubOrigin, pairApproveMac, pairBridgePayload, pairHubOrigin, pairKeyMac, verifyPairApproveMac } from '../../src/ui/utils/vaultPairing.ts';
 import { asApproverIdentity, buildRecoveryKey, openRecoveryKey } from '../../src/ui/utils/vaultRecovery.ts';
 import { generate12RecoveryWords, recoveryWordsToEntropy } from '../../src/ui/utils/vaultCrypto.ts';
 
@@ -90,6 +90,8 @@ async function startHub() {
   const child = spawn(bin, [
     '--listen', `127.0.0.1:${port}`, '--db', dbPath, '--migrations-dir', migrations,
     '--trusted-proxy-cidr', '127.0.0.1/32',
+    // A configured hub alias (written non-canonically: the hub canonicalizes it).
+    '--pairing-hub-origins', 'https://Hub.Mundus.test/',
   ], { cwd: dir, env, stdio: ['ignore', log, log] });
   let exited = false;
   child.on('exit', () => { exited = true; });
@@ -338,14 +340,16 @@ async function register(dev, user, auth = { user }, now = Date.now()) {
 
 // What the approval page does with a typed code (lookUpPairing): fetch the public
 // salts and DECLARED hub origins of the pending requests, run the stretch per
-// candidate with its declared origin (never the approver's own origin), resolve the
-// lookup. `tamper` rewrites candidates as a hostile hub would serve them.
+// candidate with its declared origin (never the approver's own origin) when that origin
+// is the approver's own API origin or a hub-configured alias, resolve the lookup.
+// `tamper` rewrites candidates as a hostile hub would serve them.
 async function approverLookup(code, user, uid, tamper = (c) => c, headers = {}) {
   const salts = await http('POST', '/api/v1/device/pair-salts', { user, body: {}, headers });
   if (salts.status !== 200) throw new CheckFailed(`pair-salts -> ${salts.status} ${salts.raw}`);
+  const accepted = acceptedPairOrigins(pairHubOrigin(HUB.base), salts.data.pairing_hub_origins);
   const tried = [];
   for (const c of salts.data.candidates.map(tamper)) {
-    if (!isPairHubOrigin(c.pair_hub_origin)) continue;
+    if (!isPairHubOrigin(c.pair_hub_origin) || !accepted.has(c.pair_hub_origin)) continue;
     tried.push({ ...c, keys: await derivePairKeys(code, { kind: c.kind, userId: c.kind === 'browser' ? uid : '', hubOrigin: c.pair_hub_origin, pairSalt: c.pair_salt }) });
   }
   if (tried.length === 0) throw new CheckFailed('no pairing candidate with a declared hub origin');
@@ -562,7 +566,7 @@ async function main() {
       await br.receiveUnseal(evil, S.uid).then(() => expect(false, 'swapped root accepted'), () => expect(true, 'bridge refuses a chain proof for a root other than the pinned one'));
     });
 
-    await step('3c bridge enrolled against another hub origin than the approving page: pairs via its declared origin; a tampered origin is refused', async () => {
+    await step('3c bridge enrolled against a configured hub alias pairs via its declared origin; a relay origin or a tampered origin is refused', async () => {
       // Production shape: `ham-bridge enroll -Hub https://hub.mundus.in` while the UI runs at
       // https://heimdall.mundus.in and calls its API on its own origin (here: HUB.base).
       const declared = 'https://hub.mundus.test:443';
@@ -580,6 +584,7 @@ async function main() {
       expect(authz.status === 200, `bridge /device/authorize with a declared origin -> 200 (${authz.status} ${authz.status !== 200 ? authz.raw : ''})`);
       const salts = await http('POST', '/api/v1/device/pair-salts', { user: ALICE, body: {}, headers: xff });
       expect(salts.data.candidates.some((c) => c.kind === 'bridge' && c.pair_salt === br.pairSalt && c.pair_hub_origin === declared), '/device/pair-salts lists the declared origin next to the salt');
+      expect(JSON.stringify(salts.data.pairing_hub_origins) === JSON.stringify([declared]), `/device/pair-salts serves the canonical configured aliases (${JSON.stringify(salts.data.pairing_hub_origins)})`);
       // Old behaviour (derive with the approver's own origin): no device is waiting.
       await approverLookup(br.pairCode, ALICE, S.uid, (c) => ({ ...c, pair_hub_origin: pairHubOrigin(HUB.base) }), xff)
         .then(() => expect(false, 'page-origin derivation matched'), () => expect(true, 'deriving with the page origin finds nothing (the production bug)'));
@@ -596,6 +601,17 @@ async function main() {
         .then(() => expect(false, 'key_mac under another origin accepted'), () => expect(true, 'key_mac under another origin is refused'));
       const deny = await http('POST', '/api/v1/device/approve', { user: ALICE, body: { pair_lookup: keys.lookup, approve: false }, headers: xff });
       expect(deny.status === 200, `deny the extra bridge request -> 200 (${deny.status} ${deny.status !== 200 ? deny.raw : ''})`);
+
+      // Relay/phishing: a user tricked into `ham-bridge enroll -Hub https://evil.example`
+      // (a transparent relay to this hub). The bridge honestly declares the relay origin,
+      // which this hub does not list, so the approver never derives it: no match.
+      const relayed = await SimBridge.create(S.uid, 'https://evil.example.test:443');
+      const rAuthz = await http('POST', '/api/v1/device/authorize', { body: await relayed.authorizeBody() });
+      expect(rAuthz.status === 200, `relayed bridge /device/authorize -> 200 (${rAuthz.status})`);
+      await approverLookup(relayed.pairCode, ALICE, S.uid, (c) => c, xff)
+        .then(() => expect(false, 'relay-origin bridge matched'), () => expect(true, 'a bridge that declares a non-listed (relay) origin is refused'));
+      const rDeny = await http('POST', '/api/v1/device/approve', { user: ALICE, body: { pair_lookup: relayed.pairKeys.lookup, approve: false }, headers: xff });
+      expect(rDeny.status === 200, `deny the relayed bridge request -> 200 (${rDeny.status})`);
     });
 
     await step('4a last-approver guard; A creates a recovery key (signed approve op, wrap, sealed blob)', async () => {

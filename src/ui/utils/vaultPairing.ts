@@ -116,6 +116,19 @@ export function isPairHubOrigin(s: unknown): s is string {
   return host.startsWith('[') || (!host.startsWith('.') && !host.endsWith('.') && !host.includes('..'));
 }
 
+/**
+ * The origins an approver accepts as a pending device's DECLARED pairing origin: its
+ * own API origin plus the aliases the hub is configured with (--pairing-hub-origins).
+ * Anything else is refused, so a device tricked into enrolling through a third-party
+ * relay (which it then declares) is never approved here. Malformed entries are dropped.
+ */
+export function acceptedPairOrigins(own: string | null, listed: unknown): Set<string> {
+  const out = new Set<string>();
+  if (isPairHubOrigin(own)) out.add(own);
+  if (Array.isArray(listed)) for (const o of listed) if (isPairHubOrigin(o)) out.add(o);
+  return out;
+}
+
 /** The PBKDF2 salt string for ctx; throws when ctx is malformed. */
 export function pairStretchSalt(ctx: PairContext): string {
   if (ctx.kind === 'browser') {

@@ -39,10 +39,13 @@ import os_random "odin_test:lib/os_random"
 // <hub_origin> is the canonical "scheme://host:port" of the hub API (explicit port,
 // no path, valid_pair_hub_origin) the NEW device enrolled against. The new device
 // DECLARES it publicly next to its pair_salt (pair_hub_origin) and the approver derives
-// with that declared origin (its UI may be served on another origin than the hub API
-// base). A hostile hub altering the declared origin only makes the approver derive a
-// different lookup / key_mac: the pairing is refused, and the secret code is still
-// required either way.
+// with that declared origin, but only if it is the approver's own API origin or one
+// of the hub's configured aliases (--pairing-hub-origins, served with the salts).
+// Guarantee: a code typed on an approver of hub H verifies only for a device that
+// bound H's own API origin or an alias H's operator listed, so a device tricked into
+// enrolling through a third-party relay (another origin) is refused. A hostile hub
+// altering the declared origin only makes the derived lookup / key_mac miss
+// (refusal); the secret code is still required either way.
 //
 // key_mac lets the approver prove the hub did not swap the new device's keys;
 // pair_mac lets the new device prove its approval (and, through the approval's

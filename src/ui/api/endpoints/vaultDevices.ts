@@ -165,14 +165,23 @@ export interface PairCandidate {
   pair_hub_origin: string;
 }
 
+export interface PairCandidateList {
+  candidates: PairCandidate[];
+  /** Hub-configured aliases (besides this page's own API origin) a declared origin may name. */
+  pairingHubOrigins: string[];
+}
+
 /**
  * Public salts and declared hub origins of the requests this user could approve (own
  * pending browsers, then pending bridges): the lookup is derived from the typed code,
  * a request's salt and the hub origin that request declared.
  */
-export async function fetchPairCandidates(): Promise<PairCandidate[]> {
+export async function fetchPairCandidates(): Promise<PairCandidateList> {
   const res = await vaultRequest('POST', '/device/pair-salts', { body: {} });
-  return Array.isArray(res?.candidates) ? res.candidates : [];
+  return {
+    candidates: Array.isArray(res?.candidates) ? res.candidates : [],
+    pairingHubOrigins: Array.isArray(res?.pairing_hub_origins) ? res.pairing_hub_origins.filter((o: unknown) => typeof o === 'string') : [],
+  };
 }
 
 /**

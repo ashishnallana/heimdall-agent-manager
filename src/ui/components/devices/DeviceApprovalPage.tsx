@@ -17,6 +17,7 @@ import { Alert, Button, Icon, Input } from '@ui';
 import { ApiError } from '../../api/cookieFetch';
 import {
   fetchPairCandidates,
+  pairingHubOrigin,
   postApproveBridge,
   postApproveBrowser,
   postDenyDevice,
@@ -29,7 +30,7 @@ import { fetchBridgeEnrollmentStatus, fetchBridgeUnsealTarget, unsealBridge } fr
 import { enrollmentPendingOutcome, ENROLLMENT_PENDING_FALLBACK_SECONDS } from '../enrollment/bridgeEnrollmentCompletion';
 import { fingerprintFor } from '../../utils/deviceIdentity';
 import { buildBridgeApproval, buildBrowserApproval, checkBridgeCodeInfo, checkBrowserCodeInfo, type PairedBrowser } from '../../utils/vaultDeviceFlows';
-import { derivePairKeys, isPairHubOrigin, isPairSalt, normalizePairCode, pairApproveMac, type PairKeys } from '../../utils/vaultPairing';
+import { acceptedPairOrigins, derivePairKeys, isPairHubOrigin, isPairSalt, normalizePairCode, pairApproveMac, type PairKeys } from '../../utils/vaultPairing';
 import { deliverKeyringToBridge } from '../../utils/vaultBridgeDelivery';
 import { withKeyringBytes } from '../../utils/vaultKeyringSession';
 import {
@@ -53,6 +54,10 @@ interface Review {
   browser: PairedBrowser | null;
   fingerprint: string;
   label: string;
+  /** The hub origin the device declared (and bound into its pairing code). */
+  hubOrigin: string;
+  /** True when that origin is a configured alias, not this page's own API origin. */
+  foreignOrigin: boolean;
 }
 
 type Phase =
@@ -86,31 +91,64 @@ export function hostLabelOf(info: DeviceCodeInfo): string {
  *
  * The hub origin is the one each candidate DECLARES it bound into its own stretch
  * (pair_hub_origin): a bridge enrolled with `-Hub https://hub.example` pairs while
- * this page is served from, and calls its API on, another origin. There is no
- * page-origin fallback. A hostile hub that alters a declared origin gains nothing:
- * the derived lookup / key_mac then simply do not match (refusal), the secret code is
- * still required, and key_mac / pair_mac bind the declared origin through K.
+ * this page is served from, and calls its API on, another origin. A declared origin
+ * is ACCEPTED only if it is this page's own API origin or one of the hub's configured
+ * aliases (--pairing-hub-origins); other candidates are never derived. That keeps
+ * relay protection: a device tricked into `ham-bridge enroll -Hub https://evil.example`
+ * (a transparent relay to this hub) declares evil's origin and is refused here, so the
+ * relay never gets an approved PKCE exchange. The alias list comes from the hub; a
+ * hostile hub gains nothing by lying in it (it could mint bridge tokens itself), and
+ * one that alters a declared origin only makes the lookup / key_mac miss (refusal).
+ * The secret code is always required; key_mac / pair_mac bind the origin through K.
  */
-export async function lookUpPairing(rawCode: string, userId: string): Promise<Review> {
+export async function lookUpPairing(rawCode: string, userId: string, ownOrigin: string | null = ownPairingOrigin()): Promise<Review> {
   const code = normalizePairCode(rawCode);
+  const listed = await fetchPairCandidates();
+  const accepted = acceptedPairOrigins(ownOrigin, listed.pairingHubOrigins);
+  const refusedOrigins = new Set<string>();
   const tried: Array<{ kind: 'browser' | 'bridge'; salt: string; origin: string; keys: PairKeys }> = [];
-  for (const cand of (await fetchPairCandidates()).slice(0, MAX_PAIR_CANDIDATES)) {
+  for (const cand of listed.candidates.slice(0, MAX_PAIR_CANDIDATES)) {
     if ((cand?.kind !== 'browser' && cand?.kind !== 'bridge') || !isPairSalt(cand.pair_salt) || !isPairHubOrigin(cand.pair_hub_origin)) continue;
+    if (!accepted.has(cand.pair_hub_origin)) {
+      refusedOrigins.add(cand.pair_hub_origin);
+      continue;
+    }
     const keys = await derivePairKeys(code, { kind: cand.kind, userId: cand.kind === 'browser' ? userId : '', hubOrigin: cand.pair_hub_origin, pairSalt: cand.pair_salt });
     tried.push({ kind: cand.kind, salt: cand.pair_salt, origin: cand.pair_hub_origin, keys });
   }
-  if (tried.length === 0) throw new Error(NO_MATCH_MESSAGE);
-  const info = await verifyPairLookups(tried.map((c) => c.keys.lookup));
+  const noMatch = () => new Error(refusedOrigins.size > 0 ? notAcceptedMessage([...refusedOrigins], [...accepted]) : NO_MATCH_MESSAGE);
+  if (tried.length === 0) throw noMatch();
+  let info: DeviceCodeInfo;
+  try {
+    info = await verifyPairLookups(tried.map((c) => c.keys.lookup));
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 404) throw noMatch();
+    throw err;
+  }
   const match = tried.find((c) => c.kind === info.kind && c.salt === info.pair_salt && c.origin === info.pair_hub_origin);
   if (!match) throw new Error('The server answered for a different pairing request. Nothing was approved.');
   const { keys } = match;
+  const origin = { hubOrigin: match.origin, foreignOrigin: match.origin !== ownOrigin };
   if (info.kind === 'browser') {
     const browser = await checkBrowserCodeInfo(info as BrowserCodeInfo, keys, userId);
-    return { info, keys, browser, fingerprint: browser.fingerprint, label: browser.label || 'Browser' };
+    return { info, keys, browser, fingerprint: browser.fingerprint, label: browser.label || 'Browser', ...origin };
   }
   await checkBridgeCodeInfo(info as BridgeCodeInfo, keys);
   const fingerprint = await fingerprintFor(String((info as BridgeCodeInfo).bridge_identity_public_key || ''), '');
-  return { info, keys, browser: null, fingerprint, label: hostLabelOf(info) };
+  return { info, keys, browser: null, fingerprint, label: hostLabelOf(info), ...origin };
+}
+
+/** This page's own API origin, or null outside an http(s) page. */
+function ownPairingOrigin(): string | null {
+  try {
+    return pairingHubOrigin();
+  } catch {
+    return null;
+  }
+}
+
+function notAcceptedMessage(refused: string[], accepted: string[]): string {
+  return `No device this hub accepts is waiting with that code. A pending request was started against ${refused.join(', ')}, which is not one of this hub's pairing addresses (${accepted.join(', ') || 'none'}). Restart it with this hub's address (ham-bridge enroll -Hub <address>); if that address really is this hub, its operator must add it to --pairing-hub-origins.`;
 }
 
 async function waitForEnrollingBridge(bridgeId: string, onTick: (s: string) => void): Promise<void> {
@@ -243,6 +281,11 @@ export default function DeviceApprovalPage() {
             <dd data-debug-id="device-approval-host-label" className="truncate text-primary">{phase.label}</dd>
             <dt className="text-muted">Fingerprint</dt>
             <dd><code data-debug-id="device-approval-fingerprint" className="font-mono tracking-wider text-primary">{phase.fingerprint}</code></dd>
+            <dt className="text-muted">Hub address</dt>
+            <dd data-debug-id="device-approval-hub-origin" className={phase.foreignOrigin ? 'font-medium text-warning' : 'text-primary'}>
+              <code className="font-mono">{phase.hubOrigin}</code>
+              {phase.foreignOrigin ? <span data-debug-id="device-approval-hub-origin-alias" className="ml-2 text-xs">differs from this page; accepted as a configured alias of this hub</span> : null}
+            </dd>
             {phase.browser && (phase.info as BrowserCodeInfo).created_at ? (<>
               <dt className="text-muted">Requested</dt>
               <dd data-debug-id="device-approval-requested-at" className="text-primary">{new Date(String((phase.info as BrowserCodeInfo).created_at)).toLocaleString()}</dd>

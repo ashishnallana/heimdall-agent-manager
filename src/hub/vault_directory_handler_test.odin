@@ -112,6 +112,7 @@ test_vault_directory_http_flow :: proc(t: ^testing.T) {
 	// session user's own pending browsers are listed.
 	salts := dispatch(&graph, "POST", "/api/v1/device/pair-salts", "{}", alice)
 	testing.expect(t, salts.status == 200 && strings.contains(salts.body, `{"kind":"browser","pair_salt":"0123456789abcdef0123456789abcdef","pair_hub_origin":"https://hub.example.test:443"}`), salts.body)
+	testing.expect(t, strings.contains(salts.body, `"pairing_hub_origins":[]`), salts.body) // no aliases configured: an empty list, never null
 	bob_salts := dispatch(&graph, "POST", "/api/v1/device/pair-salts", "{}", bob)
 	testing.expect(t, bob_salts.status == 200 && !strings.contains(bob_salts.body, `"kind":"browser"`), bob_salts.body)
 

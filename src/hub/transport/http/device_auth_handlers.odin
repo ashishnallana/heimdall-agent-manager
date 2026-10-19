@@ -44,6 +44,10 @@ Device_Auth_Handlers :: struct {
 	// session user by its pairing lookup.
 	vault:             ^vd.Service,
 	event_bus:         ^events.User_Event_Bus,
+	// --pairing-hub-origins (canonical): other hub addresses this deployment answers
+	// on. Served with the pair salts; the approver accepts a declared pairing origin
+	// only if it is its own API origin or one of these.
+	pairing_hub_origins: []string,
 }
 
 // ── POST /api/v1/device/authorize ───────────────────────────────────────────
@@ -342,9 +346,14 @@ device_verify_handler :: proc(ctx: rawptr, req: Request) -> Response {
 // Each candidate carries pair_hub_origin: the canonical hub origin the NEW device
 // declared it bound into its stretch (a bridge enrolled with `-Hub https://hub.x`
 // while the approving UI calls its API on its own origin). The approver derives with
-// the declared origin, never its page origin. A hostile hub that alters the declared
-// origin gains nothing: the approver then derives a different lookup / key_mac, the
-// pairing simply fails (refusal), and the secret code is still required either way.
+// the declared origin, never its page origin, and ACCEPTS it only if it is the
+// approver's own API origin or one of `pairing_hub_origins` (this hub's configured
+// aliases, served here). That keeps relay protection: a device tricked into
+// enrolling against https://evil.example (a transparent relay to this hub) declares
+// that origin and is refused, so the relay never sees an approved PKCE exchange.
+// The alias list is honest-hub configuration; a hostile hub gains nothing from
+// lying in it (it could mint bridge tokens itself), and altering a declared origin
+// only makes the derived lookup / key_mac miss (refusal); the code is still required.
 
 PAIR_CANDIDATES_MAX :: 8
 
@@ -355,7 +364,10 @@ Device_Pair_Candidate_Wire :: struct {
 }
 
 Device_Pair_Salts_Wire :: struct {
-	candidates: []Device_Pair_Candidate_Wire,
+	candidates:          []Device_Pair_Candidate_Wire,
+	// Canonical hub origins (besides the approver's own API origin) a declared
+	// pairing origin may name (--pairing-hub-origins).
+	pairing_hub_origins: []string,
 }
 
 device_pair_salts_handler :: proc(ctx: rawptr, req: Request) -> Response {
@@ -379,7 +391,8 @@ device_pair_salts_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	for p in device_auth.pending_bridge_pair_salts(handlers.service, PAIR_CANDIDATES_MAX - len(out)) {
 		append(&out, Device_Pair_Candidate_Wire{kind = "bridge", pair_salt = p.pair_salt, pair_hub_origin = p.pair_hub_origin})
 	}
-	return vault_respond(Device_Pair_Salts_Wire{candidates = out[:]}, req)
+	origins := handlers.pairing_hub_origins if handlers.pairing_hub_origins != nil else []string{}
+	return vault_respond(Device_Pair_Salts_Wire{candidates = out[:], pairing_hub_origins = origins}, req)
 }
 
 // ── POST /api/v1/device/approve ─────────────────────────────────────────────

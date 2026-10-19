@@ -40,16 +40,28 @@ The passwordless vault is implemented end to end and was tested manually on Wind
 7. **Windows port leftovers** (from the earlier Windows work): UTF-8 loss in `ham-ctl` arguments, child processes inheriting socket handles, startup-nudge race, Windows service (Scheduled Task) and the `.ps1` update supervisor, release packaging.
 8. **Housekeeping**: remove merged worktrees (`ham-wt-chain`, `ham-wt-p3`, `ham-wt-p4`, `ham-wt-pair`) and their branches; `ham-wt-mixed-work` and `docs/plans/mixed-work-task-chains.md` belong to other work and were left alone. Open a PR for `passwordless-vault`.
 
+## Release notes
+
+- Pairing origin fix (migration 100, `pair_hub_origin`): pending pairing requests made
+  before the deploy cannot be approved; restart them (`ham-bridge enroll` again, or
+  "new code" on the new browser). Production hubs whose UI and API run on different
+  origins must set `--pairing-hub-origins` (or `HEIMDALL_PAIRING_HUB_ORIGINS`), e.g.
+  `https://hub.mundus.in` for bridges enrolled with `-Hub https://hub.mundus.in` while
+  the UI is at `https://heimdall.mundus.in`.
+
 ## Running the dev stack on Windows
 
 Binaries are built with `odin build src/<pkg> -collection:odin_test=src "-extra-linker-flags:/LIBPATH:<dir with sqlite3.lib>"` (static SQLite 3.54.1 with FTS5).
 
 ```sh
 ham-hub --listen 127.0.0.1:8081 --db <dir>/hub.db --migrations-dir src/hub/repository/sqlite/migrations \
-        --trusted-proxy-cidr 127.0.0.1/32 --ui-origin http://127.0.0.1:5173
+        --trusted-proxy-cidr 127.0.0.1/32 --ui-origin http://127.0.0.1:5173 \
+        --pairing-hub-origins http://127.0.0.1:8081
 ham-dev-proxy --listen 127.0.0.1:8080 --hub-url http://127.0.0.1:8081 --default-user <user>
-# UI (PowerShell): HEIMDALL_HUB_API_URL, HEIMDALL_DEV_PROXY_URL. Pairing works across
-# origins: each new device declares the hub origin it bound (pair_hub_origin).
+# UI (PowerShell): HEIMDALL_HUB_API_URL, HEIMDALL_DEV_PROXY_URL. Each new device declares
+# the hub origin it bound (pair_hub_origin); the approver (Vite on :5173, API origin
+# http://127.0.0.1:5173) accepts it only if it is its own API origin or listed in the
+# hub's --pairing-hub-origins, hence http://127.0.0.1:8081 above for `enroll --hub :8081`.
 npx vite --host 127.0.0.1 --port 5173
 ham-bridge enroll --hub http://127.0.0.1:8081 --config <dir>/config.toml --bridge-token-file <dir>/bridge-token --headless
 ham-bridge --config <dir>/config.toml --bridge-token-file <dir>/bridge-token
