@@ -1228,6 +1228,12 @@ Bridge_Pane_Seal :: enum {
 bridge_pane_output_seal :: proc(output: string, session_id: string, allocator := context.allocator) -> (armored: string, res: Bridge_Pane_Seal) {
 	status, kr := bridge_vault_status_and_key()
 	defer vault.keyring_wipe(&kr)
+	return bridge_pane_output_seal_with(status, &kr, output, session_id, bridge_pty_random_source, allocator)
+}
+
+// bridge_pane_output_seal_with is the pure core of bridge_pane_output_seal: vault
+// state, keyring and randomness are passed in (tests drive it without the keystore).
+bridge_pane_output_seal_with :: proc(status: Vault_Status, kr: ^vault.Vault_Keyring, output: string, session_id: string, random_source: string, allocator := context.allocator) -> (armored: string, res: Bridge_Pane_Seal) {
 	switch status {
 	case .Disabled:
 		return strings.clone(output, allocator), .Plain
@@ -1236,14 +1242,49 @@ bridge_pane_output_seal :: proc(output: string, session_id: string, allocator :=
 	case .Unlocked:
 	}
 	if output == "" do return "", .Sealed
-	key, key_ok := vault.keyring_key_for_epoch(&kr, kr.current_epoch)
+	if kr == nil do return "", .Failed
+	key, key_ok := vault.keyring_key_for_epoch(kr, kr.current_epoch)
 	if !key_ok do return "", .Failed
 	salt: Bridge_PTY_Salt
-	if !os_random.fill(salt[:], bridge_pty_random_source) do return "", .Failed
+	if !os_random.fill(salt[:], random_source) do return "", .Failed
 	frame, sealed := vault.pty_seal(transmute([]byte)output, key, kr.current_epoch, salt[:], 1, session_id, .Out, context.temp_allocator)
 	if !sealed do return "", .Failed
 	b64, err := base64.encode(frame[4:], allocator = context.temp_allocator)
 	if err != nil do return "", .Failed
 	e_buf: [16]byte
 	return strings.concatenate({vault.VAULT_V2_PREFIX, "e", strconv.write_uint(e_buf[:], u64(kr.current_epoch), 10), ":", b64}, allocator), .Sealed
+}
+
+// BRIDGE_PANE_CAPTURE_SEAL_MAX_PLAIN keeps a sealed chat pane capture under the hub's
+// 48000-byte message cap (content_service.pane_capture_limit_output): a token cut by
+// that cap could never be decrypted. 48000 * 3/4 minus the envelope header and prefix.
+BRIDGE_PANE_CAPTURE_SEAL_MAX_PLAIN :: 35_000
+
+// bridge_pane_capture_seal_with seals a chat pane capture (capture_agent_pane) as a
+// standard v2 content envelope: the hub stores it as the chat message body, which the
+// UI already decrypts like any other vault message. A capture over the cap keeps its
+// TAIL (the live end of the screen) from a line start and reports truncated.
+bridge_pane_capture_seal_with :: proc(status: Vault_Status, kr: ^vault.Vault_Keyring, output: string, random_source: string, allocator := context.allocator) -> (armored: string, res: Bridge_Pane_Seal, truncated: bool) {
+	switch status {
+	case .Disabled:
+		return strings.clone(output, allocator), .Plain, false
+	case .Locked:
+		return "", .Locked, false
+	case .Unlocked:
+	}
+	if kr == nil do return "", .Failed, false
+	text := output
+	if len(text) > BRIDGE_PANE_CAPTURE_SEAL_MAX_PLAIN {
+		truncated = true
+		start := len(text) - BRIDGE_PANE_CAPTURE_SEAL_MAX_PLAIN
+		if nl := strings.index_byte(text[start:], '\n'); nl >= 0 {
+			start += nl + 1
+		} else {
+			for start < len(text) && (text[start] & 0xC0) == 0x80 do start += 1
+		}
+		text = text[start:]
+	}
+	token, ok := vault.seal(transmute([]byte)text, kr, allocator, random_source)
+	if !ok do return "", .Failed, false
+	return token, .Sealed, truncated
 }

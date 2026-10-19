@@ -48,7 +48,7 @@ pty_host_capture_result_json_shape_ok :: proc(t: ^testing.T) {
 		width                   = 80,
 	}
 	// Success shape carries output + line_count + ok:true.
-	ok_json := bridge_pane_capture_result_json(pending, true, "", "", "hello\nworld", 2, false)
+	ok_json := bridge_pane_capture_result_wire_json(pending, true, "", "", "hello\nworld", 2, false)
 	defer delete(ok_json)
 	testing.expect(t, strings.contains(ok_json, "\"type\":\"pane_capture_result\""), "type present")
 	testing.expect(t, strings.contains(ok_json, "\"ok\":true"), "ok true")
@@ -58,7 +58,7 @@ pty_host_capture_result_json_shape_ok :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(ok_json, "\"line_count\":2"), "line count")
 
 	// Failure shape carries error_code + message, no output.
-	fail_json := bridge_pane_capture_result_json(pending, false, "host_unavailable", "The ham-pty-host daemon is not available.", "", 0, false)
+	fail_json := bridge_pane_capture_result_wire_json(pending, false, "host_unavailable", "The ham-pty-host daemon is not available.", "", 0, false)
 	defer delete(fail_json)
 	testing.expect(t, strings.contains(fail_json, "\"ok\":false"), "ok false")
 	testing.expect(t, strings.contains(fail_json, "\"cause\":\"host_unavailable\""), "error code")

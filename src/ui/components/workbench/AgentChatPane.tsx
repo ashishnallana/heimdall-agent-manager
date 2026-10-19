@@ -71,6 +71,8 @@ import { ArtifactAttachmentPreview } from '../ArtifactAttachmentPreview';
 import Icon from '../Icon';
 import Markdown from '../Markdown';
 import { VaultText } from '../vault/VaultText';
+import { decryptPaneCaptureBody } from '../../utils/vaultChats';
+import { VAULT_LOCKED_MARKER } from '../../utils/vaultCrypto';
 import { describeCron, formatInTimeZone, timeZoneLabel } from '../actions/scheduleUtils';
 import { TaskChainSelectorModal } from '../chains/TaskChainSelectorModal';
 import { useIsMobile } from '../shell/responsive';
@@ -333,8 +335,27 @@ function failedPaneCaptureMessage(message: Message, error: string): Message {
   };
 }
 
-function PaneCaptureOutput({ body, messageId }: { body: string; messageId: string }) {
+function PaneCaptureOutput({ body: rawBody, messageId }: { body: string; messageId: string }) {
   const preRef = useRef<HTMLPreElement | null>(null);
+  const activeKey = useSelector(selectActiveVaultKey);
+  const armored = isVaultArmored(rawBody);
+  // A sealed capture shows the locked marker until it decrypts; never the ciphertext.
+  const [body, setBody] = useState<string>(armored ? VAULT_LOCKED_MARKER : rawBody);
+
+  useEffect(() => {
+    let mounted = true;
+    if (!armored) {
+      setBody(rawBody);
+      return;
+    }
+    setBody(VAULT_LOCKED_MARKER);
+    void decryptPaneCaptureBody(rawBody, activeKey).then((text) => {
+      if (mounted) setBody(text);
+    });
+    return () => {
+      mounted = false;
+    };
+  }, [rawBody, armored, activeKey]);
 
   useEffect(() => {
     const node = preRef.current;

@@ -3500,12 +3500,38 @@ bridge_pane_capture_expire_pending :: proc() {
 		i += 1
 	}
 	sync.mutex_unlock(&bridge_runtime_mutex)
-	for pending in expired { bridge_pane_capture_enqueue_result(bridge_pane_capture_result_json(pending,false,"capture_timeout","The pane capture request timed out.","",0,false), pending.command_id) }
+	for pending in expired { bridge_pane_capture_enqueue_result(bridge_pane_capture_result_wire_json(pending,false,"capture_timeout","The pane capture request timed out.","",0,false), pending.command_id) }
 }
 
 bridge_pane_capture_push_json :: proc(pending: Bridge_Pane_Capture_Pending, settle_ms:int)->string{ b:=strings.builder_make(); strings.write_string(&b,"{\"push\":\"pane_capture_request\",\"payload\":{\"protocol_version\":1,\"command_id\":\""); bridge_runtime_write_json_string(&b,pending.command_id); strings.write_string(&b,"\",\"pane_capture_request_id\":\""); bridge_runtime_write_json_string(&b,pending.pane_capture_request_id); strings.write_string(&b,"\",\"message_id\":\""); bridge_runtime_write_json_string(&b,pending.message_id); strings.write_string(&b,"\",\"width\":"); strings.write_string(&b,fmt.tprintf("%d",pending.width)); strings.write_string(&b,",\"settle_ms\":"); strings.write_string(&b,fmt.tprintf("%d",settle_ms)); strings.write_string(&b,",\"line_limit\":"); strings.write_string(&b,fmt.tprintf("%d",pending.line_limit)); strings.write_string(&b,"}}\n"); return strings.to_string(b) }
 
-bridge_pane_capture_result_json :: proc(pending: Bridge_Pane_Capture_Pending, ok:bool, error_code,message,output:string,line_count:int,truncated:bool)->string{ b:=strings.builder_make(); strings.write_string(&b,"{\"type\":\"pane_capture_result\",\"protocol_version\":1,\"command_id\":\""); bridge_runtime_write_json_string(&b,pending.command_id); strings.write_string(&b,"\",\"pane_capture_request_id\":\""); bridge_runtime_write_json_string(&b,pending.pane_capture_request_id); strings.write_string(&b,"\",\"conversation_id\":\""); bridge_runtime_write_json_string(&b,pending.conversation_id); strings.write_string(&b,"\",\"message_id\":\""); bridge_runtime_write_json_string(&b,pending.message_id); strings.write_string(&b,"\",\"agent_instance_id\":\""); bridge_runtime_write_json_string(&b,pending.agent_instance_id); strings.write_string(&b,"\""); if ok do strings.write_string(&b,",\"ok\":true"); strings.write_string(&b,",\"width\":"); strings.write_string(&b,fmt.tprintf("%d",pending.width)); strings.write_string(&b,",\"line_count\":"); strings.write_string(&b,fmt.tprintf("%d",line_count)); strings.write_string(&b,",\"truncated\":"); strings.write_string(&b,"true" if truncated else "false"); if ok { strings.write_string(&b,",\"output\":\""); bridge_runtime_write_json_string(&b,output); strings.write_string(&b,"\"") } else { strings.write_string(&b,","); bridge_write_failure(&b, bridge_cause_wire_error(error_code, message)) }; strings.write_string(&b,"}"); return strings.to_string(b) }
+// bridge_pane_capture_result_json is the pane_capture_result every capture path sends.
+// A successful capture is sealed when the vault is configured
+// (bridge_pane_capture_seal_with): a locked vault answers vault_locked and a sealing
+// failure encryption_failed -- never the plaintext screen.
+bridge_pane_capture_result_json :: proc(pending: Bridge_Pane_Capture_Pending, ok:bool, error_code,message,output:string,line_count:int,truncated:bool)->string{
+	if !ok do return bridge_pane_capture_result_wire_json(pending, false, error_code, message, "", line_count, truncated)
+	status, kr := bridge_vault_status_and_key()
+	defer vault.keyring_wipe(&kr)
+	return bridge_pane_capture_result_sealed_json(pending, status, &kr, output, line_count, truncated, bridge_pty_random_source)
+}
+
+// bridge_pane_capture_result_sealed_json is the testable core: vault state, keyring
+// and randomness are passed in.
+bridge_pane_capture_result_sealed_json :: proc(pending: Bridge_Pane_Capture_Pending, status: Vault_Status, kr: ^vault.Vault_Keyring, output: string, line_count: int, truncated: bool, random_source: string) -> string {
+	sealed, res, cut := bridge_pane_capture_seal_with(status, kr, output, random_source)
+	defer if sealed != "" do delete(sealed)
+	switch res {
+	case .Locked:
+		return bridge_pane_capture_result_wire_json(pending, false, "vault_locked", "the bridge vault is locked", "", 0, false)
+	case .Failed:
+		return bridge_pane_capture_result_wire_json(pending, false, "encryption_failed", "the pane capture could not be encrypted", "", 0, false)
+	case .Plain, .Sealed:
+	}
+	return bridge_pane_capture_result_wire_json(pending, true, "", "", sealed, line_count, truncated || cut)
+}
+
+bridge_pane_capture_result_wire_json :: proc(pending: Bridge_Pane_Capture_Pending, ok:bool, error_code,message,output:string,line_count:int,truncated:bool)->string{ b:=strings.builder_make(); strings.write_string(&b,"{\"type\":\"pane_capture_result\",\"protocol_version\":1,\"command_id\":\""); bridge_runtime_write_json_string(&b,pending.command_id); strings.write_string(&b,"\",\"pane_capture_request_id\":\""); bridge_runtime_write_json_string(&b,pending.pane_capture_request_id); strings.write_string(&b,"\",\"conversation_id\":\""); bridge_runtime_write_json_string(&b,pending.conversation_id); strings.write_string(&b,"\",\"message_id\":\""); bridge_runtime_write_json_string(&b,pending.message_id); strings.write_string(&b,"\",\"agent_instance_id\":\""); bridge_runtime_write_json_string(&b,pending.agent_instance_id); strings.write_string(&b,"\""); if ok do strings.write_string(&b,",\"ok\":true"); strings.write_string(&b,",\"width\":"); strings.write_string(&b,fmt.tprintf("%d",pending.width)); strings.write_string(&b,",\"line_count\":"); strings.write_string(&b,fmt.tprintf("%d",line_count)); strings.write_string(&b,",\"truncated\":"); strings.write_string(&b,"true" if truncated else "false"); if ok { strings.write_string(&b,",\"output\":\""); bridge_runtime_write_json_string(&b,output); strings.write_string(&b,"\"") } else { strings.write_string(&b,","); bridge_write_failure(&b, bridge_cause_wire_error(error_code, message)) }; strings.write_string(&b,"}"); return strings.to_string(b) }
 
 // bridge_get_pane_reply_json is the get_agent_pane / shell_get_pane reply with the
 // capture sealed for the viewer (bridge_pane_output_seal) whenever the vault is
@@ -3516,6 +3542,11 @@ bridge_get_pane_reply_json :: proc(command_id, session_id: string, ok: bool, unc
 	if !ok do return bridge_get_agent_pane_result_json(command_id, false, false, "", "", 0, false, 0, 0, err_msg)
 	sealed, res := bridge_pane_output_seal("" if unchanged else output, session_id)
 	defer if sealed != "" do delete(sealed)
+	return bridge_pane_reply_from_seal(command_id, unchanged, hash_val, sealed, res, line_count, truncated, cursor_row, cursor_col)
+}
+
+// bridge_pane_reply_from_seal renders the pane reply for an already sealed capture.
+bridge_pane_reply_from_seal :: proc(command_id: string, unchanged: bool, hash_val: string, sealed: string, res: Bridge_Pane_Seal, line_count: int, truncated: bool, cursor_row: int = 0, cursor_col: int = 0) -> string {
 	switch res {
 	case .Locked:
 		return bridge_get_agent_pane_result_json(command_id, false, false, "", "", 0, false, 0, 0, "the bridge vault is locked", "vault_locked")

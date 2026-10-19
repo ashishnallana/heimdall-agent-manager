@@ -1,16 +1,16 @@
 package main
 
-// Passwordless vault P1 — bridge-side security tests (compact by design; the
+// Passwordless vault P1 â€” bridge-side security tests (compact by design; the
 // format-level vectors and negatives live in src/lib/vault/vault_test.odin).
 // None of these spawn a shell, so they run on Windows too:
 //   odin test src/bridge -collection:odin_test=src -define:ODIN_TEST_NAMES=main.test_v2_...
 
 import "core:crypto/ecdsa"
-import "core:os"
 import "core:strings"
 import "core:sync"
 import "core:testing"
 import "core:time"
+import os_random "odin_test:lib/os_random"
 import vault "odin_test:lib/vault"
 
 @(private = "file")
@@ -313,39 +313,73 @@ test_v2_pty_input_replay_is_rejected :: proc(t: ^testing.T) {
 	testing.expect(t, vault.pty_replay_accept(&r, s_old, 101), "a live evicted stream may continue above the floor")
 }
 
-// The pane capture reply never carries plaintext on a configured vault.
+// The pane reply never carries plaintext on a configured vault. Hermetic: the vault
+// state and keyring are passed to the sealing core; no env, no keystore.
 @(test)
 test_v2_pane_capture_is_sealed :: proc(t: ^testing.T) {
-	sync.mutex_lock(&bridge_test_config_mutex)
-	defer sync.mutex_unlock(&bridge_test_config_mutex)
-	sync.mutex_lock(&keystore_test_mutex)
-	defer sync.mutex_unlock(&keystore_test_mutex)
-	prev_key, found := os.lookup_env("HEIMDALL_VAULT_KEYRING", context.allocator)
-	defer { if found { _ = os.set_env("HEIMDALL_VAULT_KEYRING", prev_key); delete(prev_key) } else { os.unset_env("HEIMDALL_VAULT_KEYRING") } }
-	_ = os.set_env("HEIMDALL_VAULT_KEYRING", test_keyring_env_value(TEST_ENC_VAULT_KEY))
+	kr := test_keyring_from_hex(TEST_ENC_VAULT_KEY)
+	defer vault.keyring_wipe(&kr)
 
-	reply := bridge_get_pane_reply_json("cmd_pane_seal", "sh_pane", true, false, "h1", "top secret screen", 1, false, 0, 0)
+	output, res := bridge_pane_output_seal_with(.Unlocked, &kr, "top secret screen", "sh_pane", os_random.DEFAULT_SOURCE)
+	defer delete(output)
+	testing.expect(t, res == .Sealed)
+	reply := bridge_pane_reply_from_seal("cmd_pane_seal", false, "h1", output, res, 1, false)
 	defer delete(reply)
 	testing.expect(t, !strings.contains(reply, "top secret"), "no plaintext in the reply")
-	output := extract_json_string(reply, "output", "", context.temp_allocator)
 	testing.expect(t, strings.has_prefix(output, "vault:v2:e1:"), output)
-	epoch, body, res := vault.envelope_parse(output, context.temp_allocator)
-	testing.expect(t, res == .Ok && epoch == 1)
+	epoch, body, pres := vault.envelope_parse(output, context.temp_allocator)
+	testing.expect(t, pres == .Ok && epoch == 1)
 	frame := make([]byte, 4 + len(body), context.temp_allocator)
 	frame[3] = 1
 	copy(frame[4:], body)
-	kr := test_keyring_from_hex(TEST_ENC_VAULT_KEY)
-	defer vault.keyring_wipe(&kr)
 	plain, _, _, ok := vault.pty_open(frame, &kr, "sh_pane", .Out, 0, context.temp_allocator)
 	testing.expect(t, ok && string(plain) == "top secret screen")
 
-	// Randomness failure: an error, never plaintext.
-	sync.mutex_lock(&test_pty_random_source_mu)
-	prev := bridge_pty_random_source
-	bridge_pty_random_source = "/nonexistent/heimdall-no-random"
-	failed := bridge_get_pane_reply_json("cmd_pane_seal_fail", "sh_pane", true, false, "h1", "top secret screen", 1, false, 0, 0)
-	bridge_pty_random_source = prev
-	sync.mutex_unlock(&test_pty_random_source_mu)
+	// Randomness failure and a locked vault: an error, never plaintext.
+	_, fres := bridge_pane_output_seal_with(.Unlocked, &kr, "top secret screen", "sh_pane", "/nonexistent/heimdall-no-random")
+	failed := bridge_pane_reply_from_seal("cmd_pane_seal_fail", false, "h1", "", fres, 1, false)
 	defer delete(failed)
 	testing.expect(t, !strings.contains(failed, "top secret") && strings.contains(failed, "encryption_failed"), failed)
+	_, lres := bridge_pane_output_seal_with(.Locked, nil, "top secret screen", "sh_pane", os_random.DEFAULT_SOURCE)
+	locked := bridge_pane_reply_from_seal("cmd_pane_seal_locked", false, "h1", "", lres, 1, false)
+	defer delete(locked)
+	testing.expect(t, !strings.contains(locked, "top secret") && strings.contains(locked, "vault_locked"), locked)
+	// Never configured: the capture goes out as is.
+	plain_out, dres := bridge_pane_output_seal_with(.Disabled, nil, "plain screen", "sh_pane", os_random.DEFAULT_SOURCE)
+	defer delete(plain_out)
+	testing.expect(t, dres == .Plain && plain_out == "plain screen")
+}
+
+// capture_agent_pane (chat pane capture) is sealed as a v2 content envelope the UI
+// decrypts like any vault chat body; locked / seal failure never leak the screen.
+@(test)
+test_v2_chat_pane_capture_result_is_sealed :: proc(t: ^testing.T) {
+	kr := test_keyring_from_hex(TEST_ENC_VAULT_KEY)
+	defer vault.keyring_wipe(&kr)
+	pending := Bridge_Pane_Capture_Pending{command_id = "cmd_cap", pane_capture_request_id = "pcr_cap", agent_instance_id = "inst_cap", width = 80}
+
+	sealed := bridge_pane_capture_result_sealed_json(pending, .Unlocked, &kr, "secret pane\nline 2", 2, false, os_random.DEFAULT_SOURCE)
+	defer delete(sealed)
+	testing.expect(t, strings.contains(sealed, `"ok":true`) && !strings.contains(sealed, "secret pane"), sealed)
+	token := extract_json_string(sealed, "output", "", context.temp_allocator)
+	plain, opened := vault.open(token, &kr, context.temp_allocator)
+	testing.expect(t, opened == .Ok && plain == "secret pane\nline 2", token)
+
+	locked := bridge_pane_capture_result_sealed_json(pending, .Locked, nil, "secret pane", 1, false, os_random.DEFAULT_SOURCE)
+	defer delete(locked)
+	testing.expect(t, strings.contains(locked, `"cause":"vault_locked"`) && !strings.contains(locked, "secret pane"), locked)
+	failed := bridge_pane_capture_result_sealed_json(pending, .Unlocked, &kr, "secret pane", 1, false, "/nonexistent/heimdall-no-random")
+	defer delete(failed)
+	testing.expect(t, strings.contains(failed, `"cause":"encryption_failed"`) && !strings.contains(failed, "secret pane"), failed)
+	disabled := bridge_pane_capture_result_sealed_json(pending, .Disabled, nil, "plain pane", 1, false, os_random.DEFAULT_SOURCE)
+	defer delete(disabled)
+	testing.expect(t, strings.contains(disabled, `"output":"plain pane"`), disabled)
+
+	// An oversized capture keeps its tail from a line start, fits the hub cap, is marked truncated.
+	big := strings.concatenate({strings.repeat("x", BRIDGE_PANE_CAPTURE_SEAL_MAX_PLAIN, context.temp_allocator), "\nlast line"}, context.temp_allocator)
+	tok, bres, cut := bridge_pane_capture_seal_with(.Unlocked, &kr, big, os_random.DEFAULT_SOURCE)
+	defer delete(tok)
+	testing.expect(t, bres == .Sealed && cut && len(tok) <= 48000)
+	tail, _ := vault.open(tok, &kr, context.temp_allocator)
+	testing.expect_value(t, tail, "last line")
 }

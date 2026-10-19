@@ -134,3 +134,17 @@ test('search key v2 vector and epoch-bound RPC envelope', async () => {
   await assert.rejects(openTaskChainSearch(r.envelope, otherEpoch, aad), /Invalid encrypted search response/);
   await assert.rejects(openTaskChainSearch(r.envelope.replace(':e2:', ':e1:'), sk, aad), /Invalid encrypted search response/);
 });
+
+test('chat pane capture: sealed body decrypts, and fails closed to the locked marker', async () => {
+  const { decryptPaneCaptureBody } = await import('../src/ui/utils/vaultChats.ts');
+  const kr = await vectorKeyring();
+  const token = await encryptVaultText('pane line 1\npane line 2', kr);
+  assert.equal(await decryptPaneCaptureBody(token, kr), 'pane line 1\npane line 2');
+  assert.equal(await decryptPaneCaptureBody('plain capture', kr), 'plain capture');
+  const tampered = token.slice(0, -4) + (token.endsWith('AAAA') ? 'BBBB' : 'AAAA');
+  assert.equal(await decryptPaneCaptureBody(tampered, kr), VAULT_LOCKED_MARKER);
+  const other = await importKeyring(hex(V.keyring.single_epoch_hex));
+  const otherToken = await encryptVaultText('x', kr);
+  const lockedOut = await decryptPaneCaptureBody(otherToken, Object.freeze({ userId: other.userId, currentEpoch: 1, keys: new Map() }) as any);
+  assert.equal(lockedOut, VAULT_LOCKED_MARKER);
+});
