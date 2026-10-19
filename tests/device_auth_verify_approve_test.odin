@@ -204,13 +204,13 @@ main :: proc() {
 
 	bres, bok2, _ := device_auth.authorize(&svc, {
 		client = "ham-bridge", device_label = "dawnstar", os = "linux", app_version = "0.9.1",
-		bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF, os_user = "tanmay",
+		bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF, pair_lookup = "1111111111111111111111111111111111111111111111111111111111111111", pair_key_mac = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", os_user = "tanmay",
 		code_challenge = PKCE_CHALLENGE, code_challenge_method = "S256",
 	}, "127.0.0.1:1", "")
 	assert_true(bok2, "bridge authorize succeeds")
 
 	// --- verify exposes the pair REQ-IMPL-5 needs for the fragment cross-check ---
-	binfo, bvok, _ := device_auth.verify(&svc, bres.user_code)
+	binfo, bvok, _ := device_auth.verify(&svc, "1111111111111111111111111111111111111111111111111111111111111111")
 	assert_true(bvok, "verify bridge grant succeeds")
 	assert_true(binfo.is_bridge_enrollment, "verify marks the grant as a bridge enrollment")
 	assert_eq(binfo.bridge_public_key, BPK, "verify exposes the Hub's copy of the bridge key")
@@ -233,7 +233,7 @@ main :: proc() {
 	// makes the staleness reading move. A constant here would look like a pass
 	// while the screen showed a frozen "now".
 	FAKE_NOW += 42
-	binfo_later, bvok_later, _ := device_auth.verify(&svc, bres.user_code)
+	binfo_later, bvok_later, _ := device_auth.verify(&svc, "1111111111111111111111111111111111111111111111111111111111111111")
 	assert_true(bvok_later, "verify still succeeds 42s later")
 	assert_eq(binfo_later.server_time, FAKE_NOW, "server_time advances with the Hub clock")
 	assert_eq(binfo_later.server_time - binfo_later.requested_at, 42, "request age is computed from two hub values")
@@ -243,7 +243,7 @@ main :: proc() {
 	user_mints_before := len(MINT_CALLS)
 	bridge_mints_before := len(BRIDGE_MINT_CALLS)
 	abok, aberr := device_auth.approve(&svc, {
-		user_code = bres.user_code,
+		user_code = "1111111111111111111111111111111111111111111111111111111111111111",
 		approve = true,
 		new_bridge_label = "dawnstar-2",
 	},
@@ -278,13 +278,13 @@ main :: proc() {
 	// The two identity choices are mutually exclusive. Reject the request before
 	// the minter can rotate an existing bridge while also accepting a new label.
 	conflict_res, conflict_ok, _ := device_auth.authorize(&svc, {
-		client = "ham-bridge", bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF,
+		client = "ham-bridge", bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF, pair_lookup = "2222222222222222222222222222222222222222222222222222222222222222", pair_key_mac = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
 		code_challenge = PKCE_CHALLENGE, code_challenge_method = "S256",
 	}, "127.0.0.1:1", "")
 	assert_true(conflict_ok, "authorize bridge grant for conflicting identity choices")
 	conflict_mints_before := len(BRIDGE_MINT_CALLS)
 	conflict_approved, conflict_err := device_auth.approve(&svc, {
-		user_code = conflict_res.user_code,
+		user_code = "2222222222222222222222222222222222222222222222222222222222222222",
 		approve = true,
 		target_bridge_id = "brg_existing",
 		new_bridge_label = "dawnstar-2",
@@ -318,12 +318,12 @@ main :: proc() {
 	nsvc := device_auth.new_device_auth_service(nstore, fake_clock(), []string{"127.0.0.1/32"})
 	device_auth.with_token_minter(&nsvc, fake_minter) // user minter wired, bridge minter NOT
 	nres, nok, _ := device_auth.authorize(&nsvc, {
-		client = "ham-bridge", bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF,
+		client = "ham-bridge", bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF, pair_lookup = "3333333333333333333333333333333333333333333333333333333333333333", pair_key_mac = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
 		code_challenge = PKCE_CHALLENGE, code_challenge_method = "S256",
 	}, "127.0.0.1:1", "")
 	assert_true(nok, "bridge authorize succeeds without a wired bridge minter")
 	nu_before := len(MINT_CALLS)
-	naok, naerr := device_auth.approve(&nsvc, {user_code = nres.user_code, approve = true}, "owner-n", "1.2.3.4", "UA")
+	naok, naerr := device_auth.approve(&nsvc, {user_code = "3333333333333333333333333333333333333333333333333333333333333333", approve = true}, "owner-n", "1.2.3.4", "UA")
 	assert_true(!naok, "approve FAILS when the bridge minter is unwired")
 	assert_eq(naerr.code, domain.Error_Code.Internal_Error, "unwired bridge minter -> Internal_Error")
 	assert_eq(len(MINT_CALLS), nu_before, "unwired bridge minter does NOT fall back to the user minter")
@@ -335,11 +335,11 @@ main :: proc() {
 	// unattributable credential defeats the point of per-machine scoping. ---
 	BRIDGE_MINT_ID = ""
 	ires, iok, _ := device_auth.authorize(&svc, {
-		client = "ham-bridge", bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF,
+		client = "ham-bridge", bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF, pair_lookup = "4444444444444444444444444444444444444444444444444444444444444444", pair_key_mac = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
 		code_challenge = PKCE_CHALLENGE, code_challenge_method = "S256",
 	}, "127.0.0.1:1", "")
 	assert_true(iok, "authorize for the no-id case succeeds")
-	iaok, iaerr := device_auth.approve(&svc, {user_code = ires.user_code, approve = true}, "owner-i", "1.2.3.4", "UA")
+	iaok, iaerr := device_auth.approve(&svc, {user_code = "4444444444444444444444444444444444444444444444444444444444444444", approve = true}, "owner-i", "1.2.3.4", "UA")
 	assert_true(!iaok, "approve FAILS when the minter returns no bridge_id")
 	assert_eq(iaerr.code, domain.Error_Code.Internal_Error, "missing bridge_id -> Internal_Error")
 	BRIDGE_MINT_ID = "brg_fake_001"
@@ -358,7 +358,7 @@ main :: proc() {
 	// bridge" would deliver the vault key to the wrong machine, so each negative
 	// case below is a real hazard rather than tidiness.
 	// =====================================================================
-	bid, bid_ok := device_auth.approved_bridge_id(&svc, bres.user_code)
+	bid, bid_ok := device_auth.approved_bridge_id(&svc, "1111111111111111111111111111111111111111111111111111111111111111")
 	assert_true(bid_ok, "approved bridge grant exposes its minted bridge id")
 	assert_eq(bid, "brg_fake_001", "the id is the one the minter returned")
 	assert_eq(bid, bgrant_after.minted_bridge_id, "it is the same value the poll path hands the bridge")
@@ -366,21 +366,21 @@ main :: proc() {
 	// A PENDING bridge grant has no credential yet, so there is nothing to
 	// address and nothing may be returned.
 	pres, pok3, _ := device_auth.authorize(&svc, {
-		client = "ham-bridge", bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF,
+		client = "ham-bridge", bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF, pair_lookup = "5555555555555555555555555555555555555555555555555555555555555555", pair_key_mac = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
 		code_challenge = PKCE_CHALLENGE, code_challenge_method = "S256",
 	}, "127.0.0.1:1", "")
 	assert_true(pok3, "authorize a second bridge grant for the pending case")
-	_, pending_ok := device_auth.approved_bridge_id(&svc, pres.user_code)
+	_, pending_ok := device_auth.approved_bridge_id(&svc, "5555555555555555555555555555555555555555555555555555555555555555")
 	assert_true(!pending_ok, "a PENDING bridge grant exposes no bridge id")
 
 	// A DENIED bridge grant must not expose one either: the operator said no.
 	dres, dok3, _ := device_auth.authorize(&svc, {
-		client = "ham-bridge", bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF,
+		client = "ham-bridge", bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF, pair_lookup = "6666666666666666666666666666666666666666666666666666666666666666", pair_key_mac = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
 		code_challenge = PKCE_CHALLENGE, code_challenge_method = "S256",
 	}, "127.0.0.1:1", "")
 	assert_true(dok3, "authorize a bridge grant for the denied case")
-	device_auth.approve(&svc, {user_code = dres.user_code, approve = false}, "owner-deny", "1.2.3.4", "UA")
-	_, denied_ok := device_auth.approved_bridge_id(&svc, dres.user_code)
+	device_auth.approve(&svc, {user_code = "6666666666666666666666666666666666666666666666666666666666666666", approve = false}, "owner-deny", "1.2.3.4", "UA")
+	_, denied_ok := device_auth.approved_bridge_id(&svc, "6666666666666666666666666666666666666666666666666666666666666666")
 	assert_true(!denied_ok, "a DENIED bridge grant exposes no bridge id")
 
 	// A USER-TOKEN grant has no bridge at all. Returning the user's token id here

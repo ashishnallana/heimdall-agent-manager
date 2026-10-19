@@ -82,33 +82,35 @@ test_vault_directory_http_flow :: proc(t: ^testing.T) {
 	again := dispatch(&graph, "POST", "/api/v1/vault/directory/genesis", vt_genesis_body(user_id, &root), alice)
 	testing.expect_value(t, again.status, 409)
 
-	// Register B (self-signed proof); the response carries the 12-symbol code.
+	// Register B (self-signed proof + the pairing values it derived from its own code);
+	// the hub never sees or returns a code.
 	b := vt_make_dev(2)
 	reg_st := vt_statement("register", user_id, &b, &b, "", "")
-	reg := dispatch(&graph, "POST", "/api/v1/vault/devices/register", strings.concatenate({`{"statement":"`, vt_escape(reg_st), `","proof_signature":`, vt_sign(&b, reg_st), "}"}), alice)
+	code := vt_lookup("b")
+	reg_body := strings.concatenate({`{"statement":"`, vt_escape(reg_st), `","proof_signature":`, vt_sign(&b, reg_st), `,"pair_lookup":"`, code, `","pair_key_mac":"`, vt_lookup("mac-b"), `"}`})
+	reg := dispatch(&graph, "POST", "/api/v1/vault/devices/register", reg_body, alice)
 	testing.expect_value(t, reg.status, 201)
-	code := device_test_json_string(reg.body, "user_code")
-	testing.expect_value(t, len(code), 14)
-	// L5: a repeat registration of the same key is idempotent and returns no code.
-	reg_again := dispatch(&graph, "POST", "/api/v1/vault/devices/register", strings.concatenate({`{"statement":"`, vt_escape(reg_st), `","proof_signature":`, vt_sign(&b, reg_st), "}"}), alice)
-	testing.expect(t, reg_again.status == 200 && !strings.contains(reg_again.body, "user_code"), reg_again.body)
+	testing.expect(t, !strings.contains(reg.body, "user_code") && !strings.contains(reg.body, code), reg.body)
+	no_pairing := dispatch(&graph, "POST", "/api/v1/vault/devices/register", strings.concatenate({`{"statement":"`, vt_escape(reg_st), `","proof_signature":`, vt_sign(&b, reg_st), "}"}), alice)
+	testing.expect_value(t, no_pairing.status, 400)
 
-	// /device/verify resolves it as kind=browser; /device/approve never treats it as a grant.
-	ver := dispatch(&graph, "POST", "/api/v1/device/verify", strings.concatenate({`{"user_code":"`, code, `"}`}), alice)
+	// /device/verify resolves the lookup as kind=browser with the register statement and
+	// key_mac; /device/approve never treats it as a grant.
+	ver := dispatch(&graph, "POST", "/api/v1/device/verify", strings.concatenate({`{"pair_lookup":"`, code, `"}`}), alice)
 	testing.expect_value(t, ver.status, 200)
-	testing.expect(t, strings.contains(ver.body, `"kind":"browser"`) && strings.contains(ver.body, b.id))
-	as_grant := dispatch(&graph, "POST", "/api/v1/device/approve", strings.concatenate({`{"user_code":"`, code, `","approve":true}`}), alice)
+	testing.expect(t, strings.contains(ver.body, `"kind":"browser"`) && strings.contains(ver.body, b.id) && strings.contains(ver.body, `"pair_key_mac":"`) && strings.contains(ver.body, `"register_statement":"`), ver.body)
+	as_grant := dispatch(&graph, "POST", "/api/v1/device/approve", strings.concatenate({`{"pair_lookup":"`, code, `","approve":true}`}), alice)
 	testing.expect_value(t, as_grant.status, 404)
-	// Another account cannot resolve alice's code.
+	// Another account cannot resolve alice's lookup.
 	bob := []contracts.HTTP_Header{{name = "X-authentik-username", value = "bob"}}
-	bob_ver := dispatch(&graph, "POST", "/api/v1/device/verify", strings.concatenate({`{"user_code":"`, code, `"}`}), bob)
+	bob_ver := dispatch(&graph, "POST", "/api/v1/device/verify", strings.concatenate({`{"pair_lookup":"`, code, `"}`}), bob)
 	testing.expect_value(t, bob_ver.status, 404)
 
 	// Approve B: unsigned -> 401; signed by the root -> 200, version 2.
 	approve_path := strings.concatenate({"/api/v1/vault/devices/", b.id, "/approve"})
 	head_view, _ := vd.get_directory(&graph.vault_directory, user_id)
 	st := vt_statement("approve", user_id, &root, &b, "2", "1", vt_wrap_sha(&root, &b, 2, 1), prev = head_view.directory.head_hash)
-	body := strings.concatenate({`{"user_code":"`, code, `","expected_version":1,"statement":"`, vt_escape(st), `","signature":`, vt_sign(&root, st), `,"wrap":`, vt_wrap_json(user_id, &root, &b, 2, 1), "}"})
+	body := strings.concatenate({`{"pair_lookup":"`, code, `","pair_mac":"`, vt_lookup("pair-mac"), `","expected_version":1,"statement":"`, vt_escape(st), `","signature":`, vt_sign(&root, st), `,"wrap":`, vt_wrap_json(user_id, &root, &b, 2, 1), "}"})
 	unsigned := dispatch(&graph, "POST", approve_path, body, alice)
 	testing.expect_value(t, unsigned.status, 401)
 	signed := dispatch(&graph, "POST", approve_path, body, vt_signed_headers(alice, &root, user_id, "POST", approve_path, body, "nonce-vt-000000000001", VT_NOW_MS))
@@ -120,7 +122,7 @@ test_vault_directory_http_flow :: proc(t: ^testing.T) {
 	// B fetches its wrap.
 	self := dispatch(&graph, "GET", "/api/v1/vault/devices/self", "", vt_signed_headers(alice, &b, user_id, "GET", "/api/v1/vault/devices/self", "", "nonce-vt-000000000002", VT_NOW_MS))
 	testing.expect_value(t, self.status, 200)
-	testing.expect(t, strings.contains(self.body, `"status":"approved"`) && strings.contains(self.body, `"wrap":{`), self.body)
+	testing.expect(t, strings.contains(self.body, `"status":"approved"`) && strings.contains(self.body, `"wrap":{`) && strings.contains(self.body, vt_lookup("pair-mac")), self.body)
 
 	// A bridge without a vault approval is refused; with one it enrolls, and its
 	// 8-symbol grant code resolves as kind=bridge only.
@@ -134,8 +136,9 @@ test_vault_directory_http_flow :: proc(t: ^testing.T) {
 	testing.expect(t, fam_ok && committed)
 	c := vt_make_dev(3)
 	c_st := vt_statement("register", user_id, &c, &c, "", "")
-	c_reg := dispatch(&graph, "POST", "/api/v1/vault/devices/register", strings.concatenate({`{"statement":"`, vt_escape(c_st), `","proof_signature":`, vt_sign(&c, c_st), "}"}), alice)
-	c_code_body := strings.concatenate({`{"user_code":"`, device_test_json_string(c_reg.body, "user_code"), `"}`})
+	c_reg := dispatch(&graph, "POST", "/api/v1/vault/devices/register", strings.concatenate({`{"statement":"`, vt_escape(c_st), `","proof_signature":`, vt_sign(&c, c_st), `,"pair_lookup":"`, vt_lookup("c"), `","pair_key_mac":"`, vt_lookup("mac-c"), `"}`}), alice)
+	testing.expect_value(t, c_reg.status, 201)
+	c_code_body := strings.concatenate({`{"pair_lookup":"`, vt_lookup("c"), `"}`})
 	as_bridge := dispatch(&graph, "POST", "/api/v1/device/verify", c_code_body, []contracts.HTTP_Header{{name = "Authorization", value = strings.concatenate({"Bearer ", bridge_token})}})
 	testing.expect_value(t, as_bridge.status, 403)
 	testing.expect_value(t, dispatch(&graph, "POST", "/api/v1/device/verify", c_code_body, alice).status, 200)
@@ -149,19 +152,27 @@ test_vault_directory_http_flow :: proc(t: ^testing.T) {
 		`{"client":"ham-bridge","device_label":"x","os":"linux","bridge_public_key":"`, DEVICE_TEST_PUBLIC_KEY,
 		`","bridge_identity_public_key":"`, other_br.sign_pub, `","bridge_identity_proof":`,
 	})
-	authz_suffix := strings.concatenate({`,"code_challenge":"`, DEVICE_TEST_CODE_CHALLENGE, `","code_challenge_method":"S256"}`})
+	authz_suffix := strings.concatenate({`,"code_challenge":"`, DEVICE_TEST_CODE_CHALLENGE, `","code_challenge_method":"S256","pair_lookup":"`, vt_lookup("grant"), `","pair_key_mac":"`, vt_lookup("mac-grant"), `"}`})
 	// L1: a proof by another key (or over another challenge) is refused.
 	forged := dispatch(&graph, "POST", "/api/v1/device/authorize", strings.concatenate({authz_prefix, vt_enroll_proof(&root, DEVICE_TEST_PUBLIC_KEY, DEVICE_TEST_CODE_CHALLENGE), authz_suffix}), nil)
 	testing.expect_value(t, forged.status, 400)
 	authz := dispatch(&graph, "POST", "/api/v1/device/authorize", strings.concatenate({authz_prefix, vt_enroll_proof(&other_br, DEVICE_TEST_PUBLIC_KEY, DEVICE_TEST_CODE_CHALLENGE), authz_suffix}), nil)
 	testing.expect_value(t, authz.status, 200)
-	grant_code := device_test_json_string(authz.body, "user_code")
-	gver := dispatch(&graph, "POST", "/api/v1/device/verify", strings.concatenate({`{"user_code":"`, grant_code, `"}`}), alice)
-	testing.expect(t, gver.status == 200 && strings.contains(gver.body, `"kind":"bridge"`), gver.body)
-	no_approval := dispatch(&graph, "POST", "/api/v1/device/approve", strings.concatenate({`{"user_code":"`, grant_code, `","approve":true}`}), alice)
+	// A bridge grant has no hub-known code: no user_code, and a code-less link.
+	testing.expect(t, !strings.contains(authz.body, "user_code") && !strings.contains(authz.body, "code="), authz.body)
+	grant_code := vt_lookup("grant")
+	gver := dispatch(&graph, "POST", "/api/v1/device/verify", strings.concatenate({`{"pair_lookup":"`, grant_code, `"}`}), alice)
+	testing.expect(t, gver.status == 200 && strings.contains(gver.body, `"kind":"bridge"`) && strings.contains(gver.body, vt_lookup("mac-grant")), gver.body)
+	// The lookup never resolves as an (Electron) user code.
+	as_user_code := dispatch(&graph, "POST", "/api/v1/device/verify", strings.concatenate({`{"user_code":"`, grant_code, `"}`}), alice)
+	testing.expect_value(t, as_user_code.status, 404)
+	// The same lookup cannot open a second grant.
+	dup := dispatch(&graph, "POST", "/api/v1/device/authorize", strings.concatenate({authz_prefix, vt_enroll_proof(&other_br, DEVICE_TEST_PUBLIC_KEY, DEVICE_TEST_CODE_CHALLENGE), authz_suffix}), nil)
+	testing.expect_value(t, dup.status, 409)
+	no_approval := dispatch(&graph, "POST", "/api/v1/device/approve", strings.concatenate({`{"pair_lookup":"`, grant_code, `","approve":true}`}), alice)
 	testing.expect_value(t, no_approval.status, 400)
-	// The bridge's code as a pending-device code: never found.
-	as_device := dispatch(&graph, "POST", approve_path, strings.concatenate({`{"user_code":"`, grant_code, `","expected_version":3}`}), vt_signed_headers(alice, &root, user_id, "POST", approve_path, strings.concatenate({`{"user_code":"`, grant_code, `","expected_version":3}`}), "nonce-vt-000000000003", VT_NOW_MS))
+	// The bridge's lookup as a pending-device lookup: never found.
+	as_device := dispatch(&graph, "POST", approve_path, strings.concatenate({`{"pair_lookup":"`, grant_code, `","pair_mac":"`, grant_code, `","expected_version":3}`}), vt_signed_headers(alice, &root, user_id, "POST", approve_path, strings.concatenate({`{"pair_lookup":"`, grant_code, `","pair_mac":"`, grant_code, `","expected_version":3}`}), "nonce-vt-000000000003", VT_NOW_MS))
 	testing.expect(t, as_device.status == 404 || as_device.status == 409, as_device.body)
 
 	// M3(a): the operator cancels the still-pending enrollment after its directory

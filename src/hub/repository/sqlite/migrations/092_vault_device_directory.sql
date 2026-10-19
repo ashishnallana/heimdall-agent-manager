@@ -39,7 +39,14 @@ CREATE TABLE IF NOT EXISTS vault_devices (
   fingerprint           TEXT NOT NULL,
   bridge_id             TEXT NOT NULL DEFAULT '',
   status                TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'revoked')),
-  user_code             TEXT,
+  -- Hub-blind pairing: the pending request is found by pair_lookup (derived from the
+  -- code the new device shows; the hub never sees the code), the approver checks
+  -- pair_key_mac over register_statement, and pair_mac is stored at approval for the
+  -- new device to verify. Pending fields are NULL once approved.
+  pair_lookup           TEXT,
+  pair_key_mac          TEXT,
+  register_statement    TEXT,
+  pair_mac              TEXT,
   code_expires_at       TEXT,
   approval_statement    TEXT,
   approval_signature    TEXT,
@@ -59,7 +66,7 @@ CREATE TABLE IF NOT EXISTS vault_devices (
   UNIQUE (user_id, sign_public_key)
 );
 CREATE INDEX IF NOT EXISTS vault_devices_user ON vault_devices(user_id);
-CREATE UNIQUE INDEX IF NOT EXISTS vault_devices_pending_code ON vault_devices(user_code) WHERE status = 'pending';
+CREATE UNIQUE INDEX IF NOT EXISTS vault_devices_pending_lookup ON vault_devices(pair_lookup) WHERE status = 'pending';
 -- The log op that introduced each epoch (genesis, revoke or rotate).
 CREATE TABLE IF NOT EXISTS vault_epochs (
   user_id    TEXT NOT NULL,

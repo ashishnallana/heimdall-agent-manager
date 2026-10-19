@@ -55,6 +55,7 @@ grant_clone_strings :: proc(g: Grant, heap: runtime.Allocator) -> Grant {
 	c.minted_refresh_token = strings.clone(g.minted_refresh_token, heap)
 	c.bridge_identity_public_key = strings.clone(g.bridge_identity_public_key, heap)
 	c.bridge_identity_fingerprint = strings.clone(g.bridge_identity_fingerprint, heap)
+	c.pair_key_mac = strings.clone(g.pair_key_mac, heap)
 	return c
 }
 
@@ -82,6 +83,7 @@ grant_free_strings :: proc(g: Grant, heap: runtime.Allocator) {
 	delete(g.minted_refresh_token, heap)
 	delete(g.bridge_identity_public_key, heap)
 	delete(g.bridge_identity_fingerprint, heap)
+	delete(g.pair_key_mac, heap)
 }
 
 // Grant_Kind is WHAT a grant will mint when it is approved, decided ONCE at
@@ -169,6 +171,10 @@ Grant :: struct {
 	// statement naming exactly this key.
 	bridge_identity_public_key:  string,
 	bridge_identity_fingerprint: string,
+	// Hub-blind pairing (plan §1 "Pairing"): for a bridge grant `user_code` holds the
+	// pair_lookup the bridge derived from its secret code (the hub never sees the
+	// code), and pair_key_mac is the bridge's MAC over its keys that the approver checks.
+	pair_key_mac:                string,
 }
 
 // Authorize_Input is the public /device/authorize request body (ELDA-1).
@@ -189,6 +195,10 @@ Authorize_Input :: struct {
 	// Signature object (canonical JSON text) by the identity key over
 	// vault.bridge_enroll_proof_canonical(bridge_public_key, code_challenge).
 	bridge_identity_proof:      string,
+	// Bridge grants: the hub-blind pairing values (REQUIRED). pair_lookup indexes the
+	// grant instead of a hub-generated user code.
+	pair_lookup:                string,
+	pair_key_mac:               string,
 }
 
 // Authorize_Result is what /device/authorize hands back to the device (ELDA-1).
@@ -318,8 +328,20 @@ create_grant :: proc(store: ^Grant_Store, input: Authorize_Input, request_ip: st
 	for _ in 0..<8 {
 		candidate_device, device_ok := generate_device_code()
 		if !device_ok do return Authorize_Result{}, false
-		candidate_user, user_ok := generate_user_code()
-		if !user_ok do return Authorize_Result{}, false
+		// A bridge grant is indexed by the pair_lookup the bridge derived from its own
+		// code; the hub never generates (or sees) that code. A taken lookup refuses.
+		candidate_user: string
+		if input.pair_lookup != "" {
+			if _, taken := store.by_user_code[input.pair_lookup]; taken {
+				delete(candidate_device)
+				return Authorize_Result{}, false
+			}
+			candidate_user = strings.clone(input.pair_lookup)
+		} else {
+			user, user_ok := generate_user_code()
+			if !user_ok do return Authorize_Result{}, false
+			candidate_user = user
+		}
 		_, device_exists := store.grants[candidate_device]
 		_, user_exists := store.by_user_code[candidate_user]
 		if !device_exists && !user_exists {
@@ -353,6 +375,7 @@ create_grant :: proc(store: ^Grant_Store, input: Authorize_Input, request_ip: st
 		code_challenge = input.code_challenge,
 		code_challenge_method = input.code_challenge_method,
 		bridge_identity_public_key = input.bridge_identity_public_key,
+		pair_key_mac = input.pair_key_mac,
 	}
 	if input.bridge_identity_public_key != "" {
 		// Validated by validate_bridge_authorize_input before we get here.
@@ -366,7 +389,8 @@ create_grant :: proc(store: ^Grant_Store, input: Authorize_Input, request_ip: st
 	store.by_user_code[stored.user_code] = stored.device_code
 	return Authorize_Result{
 		device_code = device_code,
-		user_code = user_code,
+		// A pair_lookup is never echoed back as if it were a code to show.
+		user_code = user_code if input.pair_lookup == "" else "",
 		verification_uri = store.config.verification_uri,
 		interval = store.config.interval,
 		expires_in = expires_in,

@@ -164,6 +164,7 @@ authorize :: proc(service: ^Device_Auth_Service, input: Authorize_Input, remote_
 	// Mint the grant (independent CSPRNG draws => unlinkable codes).
 	result, ok := create_grant(service.store, input, request_ip, service.clock, bridge_fingerprint, grant_kind)
 	if !ok {
+		if input.pair_lookup != "" do return Authorize_Result{}, false, domain.domain_error(.Conflict, "this pairing code is already in use; run the enrollment again")
 		return Authorize_Result{}, false, domain.domain_error(.Provider_Unavailable, "could not generate secure codes; try again")
 	}
 	return result, true, domain.Domain_Error{}
@@ -207,6 +208,11 @@ Device_Info :: struct {
 	// operator is shown is then the very reading that decided this grant was
 	// still alive.
 	server_time:            i64, // hub-measured
+	// Hub-blind pairing (bridge grants): the bridge's MAC over identity|ecdh|challenge
+	// under its secret code, and the PKCE challenge it covers. The approver recomputes
+	// the MAC with the code the operator typed; the hub cannot.
+	pair_key_mac:           string,
+	code_challenge:         string,
 }
 
 // GENERIC_UNKNOWN_CODE_ERROR is the single error returned for an unknown,
@@ -265,6 +271,8 @@ verify_with_ip :: proc(service: ^Device_Auth_Service, user_code, request_ip: str
 		bridge_identity_public_key = grant.bridge_identity_public_key,
 		bridge_identity_fingerprint = grant.bridge_identity_fingerprint,
 		server_time = now,
+		pair_key_mac = grant.pair_key_mac,
+		code_challenge = grant.code_challenge,
 	}, true, domain.Domain_Error{}
 }
 

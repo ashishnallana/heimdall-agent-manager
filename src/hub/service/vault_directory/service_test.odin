@@ -130,9 +130,16 @@ do_genesis :: proc(t: ^testing.T, f: ^Fixture, root: ^Dev) {
 	testing.expect_value(t, err.code, domain.Error_Code.None)
 }
 
+// lookup_of stands in for the pairing lookup a device derives from its code.
+lookup_of :: proc(d: ^Dev) -> string {
+	return vault.log_entry_hash(strings.concatenate({"lookup|", d.id}, context.temp_allocator), context.temp_allocator)
+}
+
+PAIR_MAC :: "5555555555555555555555555555555555555555555555555555555555555555"
+
 do_register :: proc(t: ^testing.T, f: ^Fixture, d: ^Dev) -> domain.Vault_Device {
 	s := statement("register", d, d, "", "")
-	res, err := register(&f.svc, USER, s, sign(d, s))
+	res, err := register(&f.svc, USER, s, sign(d, s), lookup_of(d), vault.log_entry_hash(strings.concatenate({"mac|", d.id}, context.temp_allocator), context.temp_allocator))
 	testing.expect_value(t, err.code, domain.Error_Code.None)
 	return res.device
 }
@@ -166,7 +173,7 @@ approve_b :: proc(t: ^testing.T, f: ^Fixture, a, b: ^Dev, version: i64) -> (i64,
 	w := wrap_for(a, b, version + 1, 1)
 	st := statement("approve", a, b, itoa(version + 1), "1", wrap_sha = wrap_sha(w), prev = head(f))
 	return approve(&f.svc, Approve_Input{
-		user_id = USER, device_id = b.id, user_code = row.user_code, expected_version = version,
+		user_id = USER, device_id = b.id, pair_lookup = row.pair_lookup, pair_mac = PAIR_MAC, expected_version = version,
 		statement = st, signature = sign(a, st), wrap = w, signer = dev_row(f, a.id),
 	})
 }
@@ -184,22 +191,22 @@ test_vault_approve_binds_wrap_and_epoch_commit :: proc(t: ^testing.T) {
 	w := wrap_for(&a, &b, 2, 1)
 	h := head(f)
 	try :: proc(f: ^Fixture, a, b: ^Dev, code: string, w: Wrap_Input, st: string) -> domain.Error_Code {
-		_, err := approve(&f.svc, Approve_Input{user_id = USER, device_id = b.id, user_code = code, expected_version = 1, statement = st, signature = sign(a, st), wrap = w, signer = dev_row(f, a.id)})
+		_, err := approve(&f.svc, Approve_Input{user_id = USER, device_id = b.id, pair_lookup = code, pair_mac = PAIR_MAC, expected_version = 1, statement = st, signature = sign(a, st), wrap = w, signer = dev_row(f, a.id)})
 		return err.code
 	}
 	no_sha := statement("approve", &a, &b, "2", "1", prev = h)
 	other_sha := statement("approve", &a, &b, "2", "1", wrap_sha = wrap_sha(wrap_for(&a, &a, 2, 1)), prev = h)
 	unlinked := statement("approve", &a, &b, "2", "1", wrap_sha = wrap_sha(w), prev = strings.repeat("0", 64, context.temp_allocator))
-	testing.expect_value(t, try(f, &a, &b, row.user_code, w, unlinked), domain.Error_Code.Conflict)
-	testing.expect_value(t, try(f, &a, &b, row.user_code, w, no_sha), domain.Error_Code.Validation_Failed)
-	testing.expect_value(t, try(f, &a, &b, row.user_code, w, other_sha), domain.Error_Code.Validation_Failed)
+	testing.expect_value(t, try(f, &a, &b, row.pair_lookup, w, unlinked), domain.Error_Code.Conflict)
+	testing.expect_value(t, try(f, &a, &b, row.pair_lookup, w, no_sha), domain.Error_Code.Validation_Failed)
+	testing.expect_value(t, try(f, &a, &b, row.pair_lookup, w, other_sha), domain.Error_Code.Validation_Failed)
 	bad_commit := vault.Statement{type = "approve", user_id = USER, seq = "2", prev_hash = h, issuer_device_id = a.id, issued_at_ms = "1760868000000", epoch = "1",
 		subject_device_id = b.id, subject_kind = "browser", subject_sign_pub = b.sign_pub, subject_ecdh_pub = b.ecdh_pub,
 		subject_sign_alg = vault.SIGN_ALG_ECDSA_P256_SHA256, subject_wrap_alg = vault.WRAP_ALG_ECDH_P256_HKDF_AES, subject_label_b64 = LABEL_B64,
 		epoch_commit = strings.repeat("0", 64, context.temp_allocator), wrap_sha256 = wrap_sha(w)}
 	bad_text, _ := vault.statement_canonical(&bad_commit, context.temp_allocator)
-	testing.expect_value(t, try(f, &a, &b, row.user_code, w, bad_text), domain.Error_Code.Validation_Failed)
-	testing.expect_value(t, try(f, &a, &b, row.user_code, w, statement("approve", &a, &b, "2", "1", wrap_sha = wrap_sha(w), prev = h)), domain.Error_Code.None)
+	testing.expect_value(t, try(f, &a, &b, row.pair_lookup, w, bad_text), domain.Error_Code.Validation_Failed)
+	testing.expect_value(t, try(f, &a, &b, row.pair_lookup, w, statement("approve", &a, &b, "2", "1", wrap_sha = wrap_sha(w), prev = h)), domain.Error_Code.None)
 }
 
 @(test)
@@ -211,14 +218,25 @@ test_vault_genesis_register_approve_revoke_flow :: proc(t: ^testing.T) {
 	do_genesis(t, f, &a)
 	pending := do_register(t, f, &b)
 	testing.expect_value(t, pending.status, domain.Vault_Device_Status.Pending)
-	testing.expect_value(t, len(pending.user_code), 14)
+	testing.expect_value(t, pending.pair_lookup, lookup_of(&b))
 
-	// The 12-symbol code resolves for this user only; an 8-symbol (bridge) code never does.
-	got, rerr := resolve_pending_code(&f.svc, USER, strings.to_lower(pending.user_code, context.temp_allocator))
-	testing.expect(t, rerr.code == .None && got.device_id == b.id)
-	_, other_user := resolve_pending_code(&f.svc, OTHER, pending.user_code)
-	_, short := resolve_pending_code(&f.svc, USER, pending.user_code[:9])
+	// The pairing lookup resolves for this user only; malformed lookups never do.
+	got, rerr := resolve_pending_lookup(&f.svc, USER, pending.pair_lookup)
+	testing.expect(t, rerr.code == .None && got.device_id == b.id && got.register_statement != "")
+	_, other_user := resolve_pending_lookup(&f.svc, OTHER, pending.pair_lookup)
+	_, short := resolve_pending_lookup(&f.svc, USER, pending.pair_lookup[:63])
 	testing.expect(t, other_user.code == .Not_Found && short.code == .Not_Found)
+
+	// A replayed (not newer) register body cannot take over the live request.
+	replay := statement("register", &b, &b, "", "")
+	_, rp := register(&f.svc, USER, replay, sign(&b, replay), lookup_of(&a), PAIR_MAC)
+	testing.expect_value(t, rp.code, domain.Error_Code.Conflict)
+	testing.expect_value(t, dev_row(f, b.id).pair_lookup, lookup_of(&b))
+
+	// Approving needs the request's own lookup (the approver derived it from the code).
+	wrong := Approve_Input{user_id = USER, device_id = b.id, pair_lookup = lookup_of(&a), pair_mac = PAIR_MAC, expected_version = 1}
+	_, wl := approve(&f.svc, wrong)
+	testing.expect_value(t, wl.code, domain.Error_Code.Not_Found)
 
 	// Second genesis is rejected.
 	g := statement("genesis", &b, &b, "1", "1")
@@ -236,6 +254,8 @@ test_vault_genesis_register_approve_revoke_flow :: proc(t: ^testing.T) {
 	testing.expect_value(t, v, i64(2))
 	_, has_wrap, _ := iface.vault_get_wrap(&f.repo, USER, b.id)
 	testing.expect(t, has_wrap)
+	approved := dev_row(f, b.id)
+	testing.expect(t, approved.pair_mac == PAIR_MAC && approved.pair_lookup == "" && approved.pair_key_mac == "", "pair_mac stored, pending pairing fields cleared")
 
 	// Revoke rules.
 	signer := dev_row(f, a.id)
@@ -270,9 +290,9 @@ test_vault_register_rejects_mismatched_proof :: proc(t: ^testing.T) {
 	defer fixture_close(f)
 	a, b := make_dev(1), make_dev(2)
 	s := statement("register", &b, &b, "", "")
-	_, err := register(&f.svc, USER, s, sign(&a, s))
+	_, err := register(&f.svc, USER, s, sign(&a, s), lookup_of(&a), PAIR_MAC)
 	testing.expect_value(t, err.code, domain.Error_Code.Unauthenticated)
-	_, cross := register(&f.svc, OTHER, s, sign(&b, s))
+	_, cross := register(&f.svc, OTHER, s, sign(&b, s), lookup_of(&b), PAIR_MAC)
 	testing.expect_value(t, cross.code, domain.Error_Code.Forbidden)
 }
 
@@ -462,7 +482,7 @@ test_vault_pending_cap_purge_and_deny :: proc(t: ^testing.T) {
 	}
 	extra := make_dev(80)
 	s := statement("register", &extra, &extra, "", "")
-	_, capped := register(&f.svc, USER, s, sign(&extra, s))
+	_, capped := register(&f.svc, USER, s, sign(&extra, s), lookup_of(&extra), PAIR_MAC)
 	testing.expect_value(t, capped.code, domain.Error_Code.Rate_Limited)
 
 	// Deny frees a slot; denying again (or a non-pending device) is 404.
@@ -470,7 +490,7 @@ test_vault_pending_cap_purge_and_deny :: proc(t: ^testing.T) {
 	testing.expect_value(t, deny(&f.svc, USER, first.id).code, domain.Error_Code.None)
 	testing.expect_value(t, deny(&f.svc, USER, first.id).code, domain.Error_Code.Not_Found)
 	testing.expect_value(t, deny(&f.svc, USER, a.id).code, domain.Error_Code.Not_Found)
-	_, ok_err := register(&f.svc, USER, s, sign(&extra, s))
+	_, ok_err := register(&f.svc, USER, s, sign(&extra, s), lookup_of(&extra), PAIR_MAC)
 	testing.expect_value(t, ok_err.code, domain.Error_Code.None)
 
 	// After the codes expire they are hidden from the listing and purged on the next

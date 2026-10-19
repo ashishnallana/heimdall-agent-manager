@@ -16,12 +16,14 @@ Vault_List_Log_Proc :: proc(ctx: rawptr, user_id: string) -> ([]domain.Vault_Log
 // op. False when no such row.
 Vault_Mark_Retired_Proc :: proc(ctx: rawptr, user_id, device_id, bridge_id, now: string) -> (bool, domain.Domain_Error)
 Vault_Get_Wrap_Proc :: proc(ctx: rawptr, user_id, device_id: string) -> (domain.Vault_Wrap_Row, bool, domain.Domain_Error)
-Vault_Find_Pending_By_Code_Proc :: proc(ctx: rawptr, user_id, user_code: string) -> (domain.Vault_Device, bool, domain.Domain_Error)
+Vault_Find_Pending_By_Lookup_Proc :: proc(ctx: rawptr, user_id, pair_lookup: string) -> (domain.Vault_Device, bool, domain.Domain_Error)
 // register_pending first purges the user's expired pending rows, then inserts a
 // pending device, or returns the existing row for the same (user_id,
 // sign_public_key). A NEW row is refused with Rate_Limited (reason "pending_cap")
-// when the user already has VAULT_PENDING_PER_USER_MAX live pending devices. A code
-// collision returns Conflict with reason "code_collision" (the caller retries).
+// when the user already has VAULT_PENDING_PER_USER_MAX live pending devices. A live
+// pending row is re-paired (new lookup/key_mac/register statement/expiry) only when
+// domain.vault_register_supersedes says the new register statement is newer. A lookup
+// collision returns Conflict with reason "lookup_collision".
 Vault_Register_Pending_Proc :: proc(ctx: rawptr, device: domain.Vault_Device, now: string) -> (domain.Vault_Device, domain.Domain_Error)
 // delete_pending removes a PENDING device (deny). False when no such pending row.
 Vault_Delete_Pending_Proc :: proc(ctx: rawptr, user_id, device_id: string) -> (bool, domain.Domain_Error)
@@ -52,7 +54,7 @@ Vault_Directory_Repository :: struct {
 	list_log:             Vault_List_Log_Proc,
 	mark_retired:         Vault_Mark_Retired_Proc,
 	get_wrap:             Vault_Get_Wrap_Proc,
-	find_pending_by_code: Vault_Find_Pending_By_Code_Proc,
+	find_pending_by_lookup: Vault_Find_Pending_By_Lookup_Proc,
 	register_pending:     Vault_Register_Pending_Proc,
 	touch_last_seen:      Vault_Touch_Last_Seen_Proc,
 	delete_pending:       Vault_Delete_Pending_Proc,
@@ -100,9 +102,9 @@ vault_get_wrap :: proc(repo: ^Vault_Directory_Repository, user_id, device_id: st
 	return repo.get_wrap(repo.ctx, user_id, device_id)
 }
 
-vault_find_pending_by_code :: proc(repo: ^Vault_Directory_Repository, user_id, user_code: string) -> (domain.Vault_Device, bool, domain.Domain_Error) {
-	if repo == nil || repo.find_pending_by_code == nil do return {}, false, vault_repo_missing()
-	return repo.find_pending_by_code(repo.ctx, user_id, user_code)
+vault_find_pending_by_lookup :: proc(repo: ^Vault_Directory_Repository, user_id, pair_lookup: string) -> (domain.Vault_Device, bool, domain.Domain_Error) {
+	if repo == nil || repo.find_pending_by_lookup == nil do return {}, false, vault_repo_missing()
+	return repo.find_pending_by_lookup(repo.ctx, user_id, pair_lookup)
 }
 
 vault_register_pending :: proc(repo: ^Vault_Directory_Repository, device: domain.Vault_Device, now: string) -> (domain.Vault_Device, domain.Domain_Error) {

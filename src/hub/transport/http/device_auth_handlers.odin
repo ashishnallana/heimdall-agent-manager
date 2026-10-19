@@ -64,6 +64,9 @@ device_authorize_handler :: proc(ctx: rawptr, req: Request) -> Response {
 		bridge_identity_public_key = json_string(req.body, "bridge_identity_public_key"),
 		// ...and its proof of possession (signature object; see vault.bridge_enroll_proof_canonical).
 		bridge_identity_proof = json_signature(req.body, "bridge_identity_proof"),
+		// Hub-blind pairing (bridge grants): derived by the bridge from a code the hub never sees.
+		pair_lookup = json_string(req.body, "pair_lookup"),
+		pair_key_mac = json_string(req.body, "pair_key_mac"),
 	}
 	xff := header_value(req.headers, "X-Forwarded-For")
 	result, ok, err := device_auth.authorize(handlers.service, input, req.remote_addr, xff)
@@ -72,16 +75,19 @@ device_authorize_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	data := strings.builder_make()
 	strings.write_string(&data, "{\"device_code\":\"")
 	write_handler_json_string(&data, result.device_code)
-	strings.write_string(&data, "\",\"user_code\":\"")
-	write_handler_json_string(&data, result.user_code)
+	// A bridge grant has no hub-known code (its operator types the bridge's own
+	// secret pairing code): user_code is present only for a user-token grant.
+	if result.user_code != "" {
+		strings.write_string(&data, "\",\"user_code\":\"")
+		write_handler_json_string(&data, result.user_code)
+	}
 	strings.write_string(&data, "\",\"verification_uri\":\"")
 	write_handler_json_string(&data, result.verification_uri)
-	// RFC 8628 verification_uri_complete: the UI's real approval route with the code
-	// pre-filled (`<ui-origin>/#/device/add?code=XXXX-XXXX`). Built only from the
-	// configured UI origin and the canonical code; omitted when no UI origin is set.
+	// The UI's approval route. Links NEVER carry a code: whoever opens a link with
+	// the pairing code would approve on the code's strength alone.
 	if handlers.ui_origin != "" {
 		strings.write_string(&data, "\",\"verification_uri_complete\":\"")
-		write_handler_json_string(&data, device_add_redirect_location(handlers.ui_origin, result.user_code))
+		write_handler_json_string(&data, device_add_redirect_location(handlers.ui_origin))
 	}
 	strings.write_string(&data, fmt.tprintf("\",\"interval\":%d", result.interval))
 	strings.write_string(&data, fmt.tprintf(",\"expires_in\":%d", result.expires_in))
@@ -117,33 +123,19 @@ DEVICE_ADD_UI_ROUTE :: "/#/device/add"
 // survives the round trip and this 302 restores the hash route.
 //
 // No auth here: it only redirects, and the page it targets authenticates
-// itself. The code is re-derived by normalize_user_code and only that canonical
-// XXXX-XXXX form is written into Location — an absent or invalid code is
-// dropped, never echoed, so the header cannot carry injected bytes.
+// itself. The query is ignored entirely: an approval link never carries a code
+// (hub-blind pairing, plan §1 "Pairing" — the operator types the code the new
+// device shows), so nothing from the request reaches the Location header.
 device_add_redirect_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	handlers := (^Device_Auth_Handlers)(ctx)
 	headers := make([]contracts.HTTP_Header, 1)
-	// query_value returns either a slice of the query or a fresh decode, so it
-	// cannot be freed uniformly: keep it on the temp allocator.
-	raw_code: string
-	{
-		context.allocator = context.temp_allocator
-		raw_code = query_value(req.query, "code")
-	}
-	headers[0] = contracts.HTTP_Header{name = "Location", value = device_add_redirect_location(handlers.ui_origin, raw_code)}
+	headers[0] = contracts.HTTP_Header{name = "Location", value = device_add_redirect_location(handlers.ui_origin)}
 	return Response{status = 302, content_type = "text/plain; charset=utf-8", body = "", headers = headers}
 }
 
 // device_add_redirect_location builds the 302 target for device_add_redirect_handler.
-device_add_redirect_location :: proc(ui_origin, raw_code: string, allocator := context.temp_allocator) -> string {
-	base := strings.trim_right(ui_origin, "/")
-	code, ok := device_auth.normalize_user_code(raw_code, context.temp_allocator)
-	if !ok {
-		// A pending browser device's 12-symbol code (passwordless vault).
-		code, ok = domain.normalize_vault_device_code(raw_code, context.temp_allocator)
-	}
-	if !ok do return strings.concatenate({base, DEVICE_ADD_UI_ROUTE}, allocator)
-	return strings.concatenate({base, DEVICE_ADD_UI_ROUTE, "?code=", code}, allocator)
+device_add_redirect_location :: proc(ui_origin: string, allocator := context.temp_allocator) -> string {
+	return strings.concatenate({strings.trim_right(ui_origin, "/"), DEVICE_ADD_UI_ROUTE}, allocator)
 }
 
 // device_verify_handler shows the requesting device's info for the given
@@ -156,16 +148,44 @@ device_verify_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	request_ip := device_auth.resolve_client_ip(
 		req.remote_addr, header_value(req.headers, "X-Forwarded-For"),
 		handlers.service.trusted_cidrs)
-	raw_code := json_string(req.body, "user_code")
-	// The code's LENGTH routes it: 12 symbols is a pending browser device, 8 is a
-	// bridge grant. A code is never tried against the other namespace, so a browser
-	// code cannot resolve as a bridge grant or vice versa.
-	if _, is_vault_code := domain.normalize_vault_device_code(raw_code, context.temp_allocator); is_vault_code {
-		return vault_device_verify(handlers, req, auth_ctx, raw_code, request_ip)
+	// Hub-blind pairing (plan §1 "Pairing"): browsers and bridges are resolved by the
+	// pair_lookup the APPROVER derived from the code it was given; the hub never sees
+	// the code. A pending browser of the session user is tried first, then a bridge
+	// grant. `user_code` is only the Electron (user-token grant) code.
+	pair_lookup := json_string(req.body, "pair_lookup")
+	info: device_auth.Device_Info
+	if pair_lookup != "" {
+		// A user principal only: a bridge, enrollment or instance credential carries a
+		// user id too, but must never resolve (and so learn the keys of) a pending device.
+		if auth_ctx.kind != .Trusted_Proxy && auth_ctx.kind != .User_Token {
+			return respond_error(domain.domain_error(.Forbidden, "resolving a pairing code requires a user session"), req.request_id)
+		}
+		if !device_auth.rate_check(handlers.service, "", request_ip) {
+			device_auth_record("verify", "rate_limited")
+			return respond_error(domain.domain_error(.Rate_Limited, "too many device verification attempts from this IP"), req.request_id)
+		}
+		if !vault.valid_pair_hex(pair_lookup) do return respond_error(device_auth.GENERIC_UNKNOWN_CODE_ERROR(), req.request_id)
+		if handlers.vault != nil {
+			if dev, derr := vd.resolve_pending_lookup(handlers.vault, auth_ctx.user_id, pair_lookup); derr.code == .None {
+				device_auth_record("verify", "ok")
+				return vault_device_verify_response(req, dev)
+			} else if derr.code != .Not_Found {
+				return respond_error(derr, req.request_id)
+			}
+		}
+		vinfo, vok, err := device_auth.verify(handlers.service, pair_lookup)
+		if vok && !vinfo.is_bridge_enrollment do vok, err = false, device_auth.GENERIC_UNKNOWN_CODE_ERROR()
+		device_auth_record("verify", device_auth_error_result(err) if !vok else "ok")
+		if !vok do return respond_error(err, req.request_id)
+		info = vinfo
+	} else {
+		vinfo, vok, err := device_auth.verify_with_ip(handlers.service, json_string(req.body, "user_code"), request_ip)
+		// A bridge grant resolves only by its pairing lookup, never as a user code.
+		if vok && vinfo.is_bridge_enrollment do vok, err = false, device_auth.GENERIC_UNKNOWN_CODE_ERROR()
+		device_auth_record("verify", device_auth_error_result(err) if !vok else "ok")
+		if !vok do return respond_error(err, req.request_id)
+		info = vinfo
 	}
-	info, vok, err := device_auth.verify_with_ip(handlers.service, raw_code, request_ip)
-	device_auth_record("verify", device_auth_error_result(err) if !vok else "ok")
-	if !vok do return respond_error(err, req.request_id)
 	data := strings.builder_make()
 	strings.write_string(&data, "{\"device_label\":\"")
 	write_handler_json_string(&data, info.device_label)
@@ -198,6 +218,12 @@ device_verify_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	write_handler_json_string(&data, info.bridge_identity_public_key)
 	strings.write_string(&data, "\",\"bridge_identity_fingerprint\":\"")
 	write_handler_json_string(&data, info.bridge_identity_fingerprint)
+	// Hub-blind pairing: the approver recomputes pair_key_mac over identity|ecdh|challenge
+	// with the code the operator typed, proving the hub served the bridge's real keys.
+	strings.write_string(&data, "\",\"pair_key_mac\":\"")
+	write_handler_json_string(&data, info.pair_key_mac)
+	strings.write_string(&data, "\",\"code_challenge\":\"")
+	write_handler_json_string(&data, info.code_challenge)
 	strings.write_string(&data, "\"")
 	strings.write_string(&data, ",\"is_bridge_enrollment\":")
 	strings.write_string(&data, "true" if info.is_bridge_enrollment else "false")
@@ -241,8 +267,12 @@ device_approve_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	handlers := (^Device_Auth_Handlers)(ctx)
 	auth_ctx, ok, auth_resp := require_auth(handlers.auth, req)
 	if !ok do return auth_resp
+	// A bridge grant is addressed by its pairing lookup (plan §1 "Pairing"); only a
+	// user-token grant still has a hub-issued user_code.
+	grant_key := json_string(req.body, "pair_lookup")
+	if grant_key == "" do grant_key = json_string(req.body, "user_code")
 	input := device_auth.Approve_Input{
-		user_code = json_string(req.body, "user_code"),
+		user_code = grant_key,
 		// approve defaults to false; body must explicitly send true to approve.
 		approve = json_bool(req.body, "approve"),
 		// Optional "attach to an existing bridge" choice from the approval page.
@@ -446,23 +476,11 @@ parse_vault_approval :: proc(body: string) -> device_auth.Vault_Approval {
 	return out
 }
 
-// vault_device_verify answers /device/verify for a pending BROWSER device code.
-// Rate-limited with the same per-IP verify budget as bridge codes, and scoped to
-// the session user's own directory: another account's code is "invalid or expired".
-vault_device_verify :: proc(handlers: ^Device_Auth_Handlers, req: Request, auth_ctx: contracts.Auth_Context, raw_code, request_ip: string) -> Response {
-	// A user principal only: a bridge, enrollment or instance credential carries a
-	// user id too, but must never resolve (and so learn the keys of) a pending device.
-	if auth_ctx.kind != .Trusted_Proxy && auth_ctx.kind != .User_Token {
-		return respond_error(domain.domain_error(.Forbidden, "resolving a device code requires a user session"), req.request_id)
-	}
-	if !device_auth.rate_check(handlers.service, "", request_ip) {
-		device_auth_record("verify", "rate_limited")
-		return respond_error(domain.domain_error(.Rate_Limited, "too many device verification attempts from this IP"), req.request_id)
-	}
-	if handlers.vault == nil do return respond_error(vd.GENERIC_CODE_ERROR(), req.request_id)
-	dev, err := vd.resolve_pending_code(handlers.vault, auth_ctx.user_id, raw_code)
-	device_auth_record("verify", device_auth_error_result(err) if err.code != .None else "ok")
-	if err.code != .None do return respond_error(err, req.request_id)
+// vault_device_verify_response answers /device/verify for a pending BROWSER device of
+// the session user resolved by its pairing lookup. It carries the self-signed
+// register statement and pair_key_mac: the approver verifies the MAC with the code it
+// was given before trusting any key here.
+vault_device_verify_response :: proc(req: Request, dev: domain.Vault_Device) -> Response {
 	data := strings.builder_make()
 	strings.write_string(&data, "{\"kind\":\"browser\",\"device_id\":\"")
 	write_handler_json_string(&data, dev.device_id)
@@ -484,6 +502,10 @@ vault_device_verify :: proc(handlers: ^Device_Auth_Handlers, req: Request, auth_
 	write_handler_json_string(&data, dev.created_at)
 	strings.write_string(&data, "\",\"code_expires_at\":\"")
 	write_handler_json_string(&data, dev.code_expires_at)
+	strings.write_string(&data, "\",\"register_statement\":\"")
+	write_handler_json_string(&data, dev.register_statement)
+	strings.write_string(&data, "\",\"pair_key_mac\":\"")
+	write_handler_json_string(&data, dev.pair_key_mac)
 	strings.write_string(&data, "\"}")
 	return respond_success(strings.to_string(data), req.request_id, "", 200)
 }

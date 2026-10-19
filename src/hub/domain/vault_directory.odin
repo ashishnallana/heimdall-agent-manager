@@ -64,7 +64,15 @@ Vault_Device :: struct {
 	fingerprint:           string,
 	bridge_id:             string,
 	status:                Vault_Device_Status,
-	user_code:             string,
+	// Hub-blind pairing (plan §1 "Pairing"): a pending request is indexed by
+	// pair_lookup (derived from the code the new device shows; the hub never sees the
+	// code). pair_key_mac + register_statement let the approver verify the keys;
+	// pair_mac (stored at approval) lets the new device verify its approval. The
+	// pending fields are cleared on approval.
+	pair_lookup:           string,
+	pair_key_mac:          string,
+	register_statement:    string,
+	pair_mac:              string,
 	code_expires_at:       string,
 	approval_statement:    string,
 	approval_signature:    string,
@@ -142,6 +150,8 @@ Vault_Directory_Commit :: struct {
 	approval_statement:    string,
 	approval_signature:    string,
 	approved_by_device_id: string,
+	// The approver's pair_mac for the new device (the pending pairing fields are cleared).
+	approve_pair_mac:      string,
 
 	// Insert an already-approved device (bridge path: approved together with its grant).
 	insert_device: Maybe(Vault_Device),
@@ -204,56 +214,23 @@ vault_kind_policy :: proc(kind: string) -> vault.Kind_Policy {
 	return vault.kind_policy(vault.device_kind_from_id(kind))
 }
 
-// ── Pending-device codes ────────────────────────────────────────────────────
-// A browser's pending code is 12 base32 symbols "XXXX-XXXX-XXXX"; a bridge grant's
-// user code is 8 ("XXXX-XXXX"). The lengths differ on purpose so a code can never be
-// resolved against the wrong namespace: the length alone routes it.
+// ── Pending devices ─────────────────────────────────────────────────────────
+// A pending request lives as long as its pairing code (vault.PAIR_CODE_TTL_SECONDS);
+// expired requests are purged on every registration and hidden from the listing.
 
-VAULT_CODE_ALPHABET :: "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
-VAULT_CODE_SYMBOLS  :: 12
-VAULT_CODE_TTL_SECONDS :: 600
-// At most this many live (unexpired) pending devices per account; expired ones are
-// purged on every registration and hidden from the directory listing.
+VAULT_CODE_TTL_SECONDS :: vault.PAIR_CODE_TTL_SECONDS
+// At most this many live (unexpired) pending devices per account.
 VAULT_PENDING_PER_USER_MAX :: 10
 
-// normalize_vault_device_code folds case and ignores spaces/dashes; anything else, or
-// a symbol count other than 12, is rejected. The result is rebuilt from validated
-// symbols only.
-normalize_vault_device_code :: proc(raw: string, allocator := context.allocator) -> (string, bool) {
-	symbols: [VAULT_CODE_SYMBOLS]u8
-	count := 0
-	if len(raw) > 64 do return "", false
-	for i := 0; i < len(raw); i += 1 {
-		c := raw[i]
-		switch c {
-		case ' ', '\t', '-':
-			continue
-		case 'a' ..= 'z':
-			c -= 'a' - 'A'
-		}
-		if strings.index_byte(VAULT_CODE_ALPHABET, c) < 0 do return "", false
-		if count == VAULT_CODE_SYMBOLS do return "", false
-		symbols[count] = c
-		count += 1
-	}
-	if count != VAULT_CODE_SYMBOLS do return "", false
-	return strings.concatenate({string(symbols[0:4]), "-", string(symbols[4:8]), "-", string(symbols[8:12])}, allocator), true
-}
-
-// vault_device_code_from_random renders 12 random bytes as a code (256 % 32 == 0, so
-// the mapping has no modulo bias).
-vault_device_code_from_random :: proc(raw: []byte, allocator := context.allocator) -> (string, bool) {
-	if len(raw) != VAULT_CODE_SYMBOLS do return "", false
-	out: [VAULT_CODE_SYMBOLS + 2]u8
-	j := 0
-	alphabet := VAULT_CODE_ALPHABET
-	for i in 0 ..< VAULT_CODE_SYMBOLS {
-		if i == 4 || i == 8 {
-			out[j] = '-'
-			j += 1
-		}
-		out[j] = alphabet[int(raw[i]) % len(alphabet)]
-		j += 1
-	}
-	return strings.clone(string(out[:]), allocator), true
+// vault_register_supersedes reports whether a self-signed register statement is
+// strictly newer than the one a live pending request was made with. Only then does a
+// re-registration replace the request's pairing lookup (a new code on the device): a
+// replayed register body can never take over a live request.
+vault_register_supersedes :: proc(new_statement, old_statement: string) -> bool {
+	n, n_ok := vault.statement_parse(new_statement)
+	o, o_ok := vault.statement_parse(old_statement)
+	if !n_ok || !o_ok do return false
+	nt, nt_ok := vault.decimal_u64(n.issued_at_ms)
+	ot, ot_ok := vault.decimal_u64(o.issued_at_ms)
+	return nt_ok && ot_ok && nt > ot
 }

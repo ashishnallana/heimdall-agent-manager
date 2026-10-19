@@ -299,8 +299,10 @@ vault_genesis_handler :: proc(ctx: rawptr, req: Request) -> Response {
 }
 
 // ── POST /api/v1/vault/devices/register ─────────────────────────────────────
-// {statement, proof_signature}: a self-signed `register` statement. Idempotent per
-// key; user_code/code_expires_at only in the response that issued the code. Rate-limited per IP. The push notification never carries the code. Interactive
+// {statement, proof_signature, pair_lookup, pair_key_mac}: a self-signed `register`
+// statement plus the pairing values the device derived from its own code (plan §1
+// "Pairing"; the code never reaches the hub). Idempotent per key; a live request is
+// re-paired only by a newer register statement. Rate-limited per IP. Interactive
 // browser session only.
 vault_register_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Vault_Directory_Handlers)(ctx)
@@ -311,7 +313,7 @@ vault_register_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	}
 	o, parsed := body_object(req)
 	if !parsed do return bad_request(req, "body must be a JSON object")
-	res, err := vd.register(h.vault, auth.user_id, obj_str(o, "statement"), obj_sig(o, "proof_signature"))
+	res, err := vd.register(h.vault, auth.user_id, obj_str(o, "statement"), obj_sig(o, "proof_signature"), obj_str(o, "pair_lookup"), obj_str(o, "pair_key_mac"))
 	if err.code != .None do return respond_error(err, req.request_id)
 	dev := res.device
 	if res.newly_pending {
@@ -329,13 +331,9 @@ vault_register_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	w_str(&b, "device_id", dev.device_id, true)
 	w_str(&b, "fingerprint", dev.fingerprint)
 	w_str(&b, "status", domain.vault_device_status_string(dev.status))
-	// The code is returned only by the call that issued it (insert or refresh of an
-	// expired code). A repeat registration of the same key gets no code: whoever
-	// holds a session cannot read back another tab's or device's pending code.
-	if res.newly_pending {
-		w_str(&b, "user_code", dev.user_code)
-		w_str(&b, "code_expires_at", dev.code_expires_at)
-	}
+	// The hub never knows the pairing code (the device derived pair_lookup from it);
+	// it only reports how long the pending request lives.
+	if dev.status == .Pending do w_str(&b, "code_expires_at", dev.code_expires_at)
 	strings.write_byte(&b, '}')
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 201 if res.newly_pending else 200)
 }
@@ -361,6 +359,9 @@ vault_self_handler :: proc(ctx: rawptr, req: Request) -> Response {
 		strings.write_string(&b, `,"wrap":`)
 		strings.write_string(&b, view.wrap.wrap_json)
 	}
+	// The approver's pair_mac over this device's approval (plan §1 "Pairing"): the new
+	// device verifies it with its own code before pinning the account root.
+	if signer.status == .Approved && signer.pair_mac != "" do w_str(&b, "pair_mac", signer.pair_mac)
 	strings.write_byte(&b, '}')
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req))
 }
@@ -372,7 +373,7 @@ device_id_from_path :: proc(req: Request) -> string {
 }
 
 // ── POST /api/v1/vault/devices/{id}/approve ─────────────────────────────────
-// {user_code, expected_version, statement, signature, wrap}
+// {pair_lookup, pair_mac, expected_version, statement, signature, wrap}
 vault_approve_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Vault_Directory_Handlers)(ctx)
 	auth, ok, resp := require_vault_user(h, req)
@@ -386,7 +387,7 @@ vault_approve_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	wrap, _ := obj_wrap(o, "wrap") // required for wrap-receiving kinds; checked by the service
 	device_id := device_id_from_path(req)
 	new_version, err := vd.approve(h.vault, vd.Approve_Input{
-		user_id = auth.user_id, device_id = device_id, user_code = obj_str(o, "user_code"),
+		user_id = auth.user_id, device_id = device_id, pair_lookup = obj_str(o, "pair_lookup"), pair_mac = obj_str(o, "pair_mac"),
 		expected_version = version, statement = obj_str(o, "statement"), signature = obj_sig(o, "signature"),
 		wrap = wrap, signer = signer,
 	})

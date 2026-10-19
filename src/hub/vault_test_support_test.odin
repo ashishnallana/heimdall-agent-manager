@@ -168,3 +168,8 @@ vt_bridge_approval :: proc(graph: ^app.App_Graph, user_id: string, version: i64)
 	st := vt_statement("approve", user_id, &root, &br, fmt.tprintf("%d", version + 1), "1", prev = view.directory.head_hash)
 	return br, strings.concatenate({`{"expected_version":`, fmt.tprintf("%d", version), `,"statement":"`, vt_escape(st), `","signature":`, vt_sign(&root, st), "}"})
 }
+
+// vt_lookup stands in for a 64-hex pairing value a device derives from its code.
+vt_lookup :: proc(tag: string) -> string {
+	return vault.log_entry_hash(strings.concatenate({"vt-pair|", tag}, context.temp_allocator), context.temp_allocator)
+}

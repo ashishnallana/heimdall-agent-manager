@@ -190,12 +190,12 @@ main :: proc() {
 
 	bres, bok, _ := device_auth.authorize(&psvc, {
 		client = "ham-bridge", device_label = "dawnstar", os = "linux",
-		bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF, os_user = "tanmay",
+		bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF, pair_lookup = "1111111111111111111111111111111111111111111111111111111111111111", pair_key_mac = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", os_user = "tanmay",
 		code_challenge = PKCE_CHALLENGE, code_challenge_method = "S256",
 	}, "127.0.0.1:1", "")
 	assert_true(bok, "bridge authorize for PKCE poll succeeds")
 	bmints_before := BRIDGE_MINT_COUNT
-	abok, _ := device_auth.approve(&psvc, {user_code = bres.user_code, approve = true}, "owner-pkce", "203.0.113.30", "UA")
+	abok, _ := device_auth.approve(&psvc, {user_code = "1111111111111111111111111111111111111111111111111111111111111111", approve = true}, "owner-pkce", "203.0.113.30", "UA")
 	assert_true(abok, "approve bridge grant for PKCE poll succeeds")
 	assert_eq(BRIDGE_MINT_COUNT, bmints_before + 1, "bridge minter ran on approve")
 
@@ -266,12 +266,12 @@ main :: proc() {
 	//    status field, so a bridge with the wrong verifier cannot mistake it for
 	//    "keep polling".
 	hres, hok, _ := device_auth.authorize(&psvc, {
-		client = "ham-bridge", bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF,
+		client = "ham-bridge", bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF, pair_lookup = "2222222222222222222222222222222222222222222222222222222222222222", pair_key_mac = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
 		code_challenge = PKCE_CHALLENGE, code_challenge_method = "S256",
 	}, "127.0.0.1:1", "")
 	assert_true(hok, "bridge authorize for handler test succeeds")
 	FAKE_NOW += 5
-	device_auth.approve(&psvc, {user_code = hres.user_code, approve = true}, "owner-h", "203.0.113.30", "UA", "alice")
+	device_auth.approve(&psvc, {user_code = "2222222222222222222222222222222222222222222222222222222222222222", approve = true}, "owner-h", "203.0.113.30", "UA", "alice")
 	phandlers := api_http.Device_Auth_Handlers{service = &psvc}
 	FAKE_NOW += 5
 	bad_resp := api_http.device_token_handler(rawptr(&phandlers), api_http.Request{

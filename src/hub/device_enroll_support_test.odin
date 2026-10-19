@@ -60,26 +60,27 @@ device_enroll_test_bridge :: proc(graph: ^app.App_Graph, headers: []contracts.HT
 	user_id, version, vault_ok := vt_ensure_vault(graph, headers)
 	if !vault_ok do return "", "", false
 	br, approval := vt_bridge_approval(graph, user_id, version)
+	// Hub-blind pairing: the bridge derives these from its own code; any 64-hex stand-in will do here.
+	pair_lookup := vt_lookup(br.sign_pub)
 	authorize_body := strings.concatenate({
 		`{"client":"ham-bridge","device_label":"`, label,
 		`","os":"linux","os_user":"tester","bridge_public_key":"`, DEVICE_TEST_PUBLIC_KEY,
 		`","bridge_identity_public_key":"`, br.sign_pub,
 		`","bridge_identity_proof":`, vt_enroll_proof(&br, DEVICE_TEST_PUBLIC_KEY, DEVICE_TEST_CODE_CHALLENGE),
-		`,"code_challenge":"`, DEVICE_TEST_CODE_CHALLENGE, `","code_challenge_method":"S256"}`,
+		`,"code_challenge":"`, DEVICE_TEST_CODE_CHALLENGE, `","code_challenge_method":"S256","pair_lookup":"`, pair_lookup, `","pair_key_mac":"`, vt_lookup(strings.concatenate({"mac|", br.sign_pub}, context.temp_allocator)), `"}`,
 	})
 	authorized := api_http.router_dispatch(&graph.router, api_http.Request{
 		method = "POST", path = "/api/v1/device/authorize", body = authorize_body,
 		request_id = "req_device_authorize", remote_addr = "127.0.0.1",
 	})
 	if authorized.status != 200 do return "", "", false
-	user_code := device_test_json_string(authorized.body, "user_code")
 	device_code := device_test_json_string(authorized.body, "device_code")
-	if user_code == "" || device_code == "" do return "", "", false
+	if device_code == "" do return "", "", false
 
 	// The human approves. Ownership comes from this Auth_Context, never the body.
 	approved := api_http.router_dispatch(&graph.router, api_http.Request{
 		method = "POST", path = "/api/v1/device/approve",
-		body = strings.concatenate({`{"user_code":"`, user_code, `","approve":true,"vault_approval":`, approval, `}`}),
+		body = strings.concatenate({`{"pair_lookup":"`, pair_lookup, `","approve":true,"vault_approval":`, approval, `}`}),
 		request_id = "req_device_approve", remote_addr = "127.0.0.1", headers = headers,
 	})
 	if approved.status != 200 do return "", "", false

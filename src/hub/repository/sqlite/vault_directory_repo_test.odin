@@ -35,7 +35,7 @@ vd_device :: proc(id, key: string, status: domain.Vault_Device_Status, code := "
 		device_id = id, user_id = VD_USER, kind = "browser", label = id,
 		sign_alg = "ecdsa-p256-sha256", wrap_alg = "ecdh-p256-hkdf-sha256-aes256gcm",
 		sign_public_key = key, ecdh_public_key = key, fingerprint = "0000 0000 0000 0000",
-		status = status, user_code = code, code_expires_at = VD_LATER if code != "" else "",
+		status = status, pair_lookup = code, pair_key_mac = "m" if code != "" else "", register_statement = "r" if code != "" else "", code_expires_at = VD_LATER if code != "" else "",
 		created_at = VD_NOW,
 	}
 }
@@ -177,9 +177,9 @@ test_vault_repo_register_is_idempotent_per_key :: proc(t: ^testing.T) {
 	defer close(&f.conn)
 	first, _ := iface.vault_register_pending(&f.repo, vd_device("dev_b", "k_b", .Pending, "AAAA-BBBB-CCCC"), VD_NOW)
 	again, _ := iface.vault_register_pending(&f.repo, vd_device("dev_b", "k_b", .Pending, "GGGG-HHHH-IIII"), VD_NOW)
-	testing.expect_value(t, again.user_code, first.user_code) // live code kept
+	testing.expect_value(t, again.pair_lookup, first.pair_lookup) // live lookup kept (no newer register statement)
 	refreshed, _ := iface.vault_register_pending(&f.repo, vd_device("dev_b", "k_b", .Pending, "GGGG-HHHH-IIII"), "2026-10-19T11:00:00Z")
-	testing.expect_value(t, refreshed.user_code, "GGGG-HHHH-IIII") // expired code refreshed
+	testing.expect_value(t, refreshed.pair_lookup, "GGGG-HHHH-IIII") // expired request replaced
 	_, collide := iface.vault_register_pending(&f.repo, vd_device("dev_c", "k_c", .Pending, "GGGG-HHHH-IIII"), VD_NOW)
 	testing.expect_value(t, collide.code, domain.Error_Code.Conflict)
 }

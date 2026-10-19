@@ -435,13 +435,12 @@ get_self :: proc(svc: ^Service, user_id: string, signer: domain.Vault_Device) ->
 	return view, domain.Domain_Error{}
 }
 
-// resolve_pending_code looks a 12-symbol browser code up among the SESSION USER's
-// pending devices. Unknown, malformed, another account's and expired codes all get
-// the same generic answer.
-resolve_pending_code :: proc(svc: ^Service, user_id, raw_code: string) -> (domain.Vault_Device, domain.Domain_Error) {
-	code, ok := domain.normalize_vault_device_code(raw_code, context.temp_allocator)
-	if !ok do return {}, GENERIC_CODE_ERROR()
-	dev, found, err := iface.vault_find_pending_by_code(svc.repo, user_id, code)
+// resolve_pending_lookup finds a pending device of the SESSION USER by its pairing
+// lookup (derived from the code on the new device; the hub never sees the code).
+// Unknown, malformed, another account's and expired lookups all get the same answer.
+resolve_pending_lookup :: proc(svc: ^Service, user_id, pair_lookup: string) -> (domain.Vault_Device, domain.Domain_Error) {
+	if !vault.valid_pair_hex(pair_lookup) do return {}, GENERIC_CODE_ERROR()
+	dev, found, err := iface.vault_find_pending_by_lookup(svc.repo, user_id, pair_lookup)
 	if err.code != .None do return {}, err
 	if !found || dev.code_expires_at <= platform.clock_now(svc.clock) do return {}, GENERIC_CODE_ERROR()
 	return dev, domain.Domain_Error{}
@@ -534,12 +533,16 @@ genesis :: proc(svc: ^Service, in_: Genesis_Input) -> (domain.Vault_Device, doma
 
 Register_Result :: struct {
 	device:   domain.Vault_Device,
-	// newly_pending: a code was issued by THIS call (insert or expired-code refresh);
-	// the caller notifies the user's other devices only then.
+	// newly_pending: THIS call's pairing lookup is now the live one (insert or
+	// re-pairing with a newer register statement); the caller notifies the user's
+	// other devices only then.
 	newly_pending: bool,
 }
 
-register :: proc(svc: ^Service, user_id, statement, signature: string) -> (Register_Result, domain.Domain_Error) {
+// register records a pending device under the pairing lookup and key_mac the device
+// derived from its own code (plan §1 "Pairing"). The hub cannot check key_mac (it
+// lacks the code); the approver does.
+register :: proc(svc: ^Service, user_id, statement, signature, pair_lookup, pair_key_mac: string) -> (Register_Result, domain.Domain_Error) {
 	if user_id == "" do return {}, unauth("user is required")
 	if !vault.valid_id_value(user_id) do return {}, invalid("user id cannot be used in vault statements")
 	st, ok := vault.statement_parse(statement)
@@ -554,6 +557,7 @@ register :: proc(svc: ^Service, user_id, statement, signature: string) -> (Regis
 	if dev.kind == "bridge" do return {}, invalid("bridges enroll with ham-bridge enroll")
 	if st.issuer_device_id != dev.device_id do return {}, invalid("register statements are self-signed")
 	if !vault.verify(dev.sign_alg, dev.sign_public_key, transmute([]byte)statement, signature) do return {}, unauth("proof_signature does not verify")
+	if !vault.valid_pair_hex(pair_lookup) || !vault.valid_pair_hex(pair_key_mac) do return {}, invalid("pair_lookup and pair_key_mac must be 64 lowercase hex")
 
 	now := platform.clock_now(svc.clock)
 	expires, exp_ok := platform.expires_at_after_seconds_from(now, domain.VAULT_CODE_TTL_SECONDS)
@@ -561,19 +565,17 @@ register :: proc(svc: ^Service, user_id, statement, signature: string) -> (Regis
 	dev.status = .Pending
 	dev.created_at = now
 	dev.code_expires_at = expires
-	for _ in 0 ..< 4 {
-		raw: [domain.VAULT_CODE_SYMBOLS]byte
-		if !os_random.fill(raw[:], svc.random_source) do return {}, domain.domain_error(.Provider_Unavailable, "could not generate a secure code; try again")
-		code, _ := domain.vault_device_code_from_random(raw[:], context.temp_allocator)
-		crypto.zero_explicit(&raw, size_of(raw))
-		dev.user_code = code
-		stored, err := iface.vault_register_pending(svc.repo, dev, now)
-		if err.code == .Conflict do continue // code collision: draw again
-		if err.code != .None do return {}, err
-		if stored.status == .Revoked do return {}, forbidden("this device key was revoked; generate a new device identity")
-		return Register_Result{device = stored, newly_pending = stored.status == .Pending && stored.user_code == code}, domain.Domain_Error{}
+	dev.pair_lookup = pair_lookup
+	dev.pair_key_mac = pair_key_mac
+	dev.register_statement = statement
+	stored, err := iface.vault_register_pending(svc.repo, dev, now)
+	if err.code != .None do return {}, err
+	if stored.status == .Revoked do return {}, forbidden("this device key was revoked; generate a new device identity")
+	if stored.status == .Pending && stored.pair_lookup != pair_lookup {
+		// A live request with a NEWER register statement exists (this one is stale or replayed).
+		return {}, domain.vault_reason_error(.Conflict, "stale_register", "a newer pairing request exists for this device")
 	}
-	return {}, domain.domain_error(.Conflict, "could not register the device; retry")
+	return Register_Result{device = stored, newly_pending = stored.status == .Pending}, domain.Domain_Error{}
 }
 
 // ── Approve (browser) ───────────────────────────────────────────────────────
@@ -581,7 +583,10 @@ register :: proc(svc: ^Service, user_id, statement, signature: string) -> (Regis
 Approve_Input :: struct {
 	user_id:          string,
 	device_id:        string,
-	user_code:        string,
+	// The lookup the approver derived from the code it was given (must be the pending
+	// request's), and its pair_mac over the approval for the new device to verify.
+	pair_lookup:      string,
+	pair_mac:         string,
 	expected_version: i64,
 	statement:        string,
 	signature:        string,
@@ -598,10 +603,11 @@ approve :: proc(svc: ^Service, in_: Approve_Input) -> (i64, domain.Domain_Error)
 	if derr.code != .None do return 0, derr
 	target, has := find_device(devices, in_.device_id)
 	if !has || target.status != .Pending do return 0, GENERIC_CODE_ERROR()
-	// The code typed on the approving device must be the one the new device shows:
-	// a stolen session alone, even with an approver's signature, cannot pick a target.
-	code, code_ok := domain.normalize_vault_device_code(in_.user_code, context.temp_allocator)
-	if !code_ok || len(code) != len(target.user_code) || crypto.compare_constant_time(transmute([]byte)code, transmute([]byte)target.user_code) != 1 do return 0, GENERIC_CODE_ERROR()
+	// The approver resolved this request from the code on the new device: its lookup
+	// must be the pending request's. The pair_mac is for the new device to verify
+	// (the hub cannot), so only its shape is checked here.
+	if !vault.valid_pair_hex(in_.pair_lookup) || !vault.pair_mac_equal(in_.pair_lookup, target.pair_lookup) do return 0, GENERIC_CODE_ERROR()
+	if !vault.valid_pair_hex(in_.pair_mac) do return 0, invalid("pair_mac must be 64 lowercase hex")
 	now := platform.clock_now(svc.clock)
 	if target.code_expires_at <= now do return 0, GENERIC_CODE_ERROR()
 	if target.kind == "bridge" || !domain.vault_kind_valid(target.kind) do return 0, invalid("this device kind is not approved here")
@@ -622,6 +628,7 @@ approve :: proc(svc: ^Service, in_: Approve_Input) -> (i64, domain.Domain_Error)
 		log_statement = in_.statement, log_signature = in_.signature, log_entry_hash = vault.log_entry_hash(in_.statement, context.temp_allocator),
 		approve_device_id = target.device_id, approval_statement = in_.statement,
 		approval_signature = in_.signature, approved_by_device_id = in_.signer.device_id,
+		approve_pair_mac = in_.pair_mac,
 		label_device_id = target.device_id, label = label,
 	}
 	if domain.vault_kind_policy(target.kind).receives_wrap {

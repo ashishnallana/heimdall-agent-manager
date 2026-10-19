@@ -53,7 +53,7 @@ new_vault_directory_repository :: proc(impl: ^Vault_Directory_Repo_SQLite, conn:
 		list_log             = vault_list_log_sqlite,
 		mark_retired         = vault_mark_retired_sqlite,
 		get_wrap             = vault_get_wrap_sqlite,
-		find_pending_by_code = vault_find_pending_by_code_sqlite,
+		find_pending_by_lookup = vault_find_pending_by_lookup_sqlite,
 		register_pending     = vault_register_pending_sqlite,
 		touch_last_seen      = vault_touch_last_seen_sqlite,
 		delete_pending       = vault_delete_pending_sqlite,
@@ -86,7 +86,7 @@ prepare :: proc(conn: ^Conn, query: string) -> (sqlite3_stmt, bool) {
 }
 
 // bind_opt binds NULL for an empty value (nullable columns; the partial UNIQUE index on
-// user_code relies on non-pending rows carrying NULL).
+// pair_lookup relies on non-pending rows carrying NULL).
 @(private = "file")
 bind_opt :: proc(stmt: sqlite3_stmt, index: int, value: string) {
 	if value == "" {
@@ -96,7 +96,7 @@ bind_opt :: proc(stmt: sqlite3_stmt, index: int, value: string) {
 	bind_text(stmt, index, value)
 }
 
-DEVICE_COLUMNS :: "device_id, user_id, kind, label, sign_alg, wrap_alg, sign_public_key, ecdh_public_key, fingerprint, bridge_id, status, user_code, code_expires_at, approval_statement, approval_signature, approved_by_device_id, revocation_statement, revocation_signature, revoked_by_device_id, recovery_blob, created_at, approved_at, revoked_at, last_seen_at, retired_at"
+DEVICE_COLUMNS :: "device_id, user_id, kind, label, sign_alg, wrap_alg, sign_public_key, ecdh_public_key, fingerprint, bridge_id, status, pair_lookup, code_expires_at, approval_statement, approval_signature, approved_by_device_id, revocation_statement, revocation_signature, revoked_by_device_id, recovery_blob, created_at, approved_at, revoked_at, last_seen_at, retired_at, pair_key_mac, register_statement, pair_mac"
 
 @(private = "file")
 device_from_stmt :: proc(stmt: sqlite3_stmt) -> domain.Vault_Device {
@@ -113,7 +113,7 @@ device_from_stmt :: proc(stmt: sqlite3_stmt) -> domain.Vault_Device {
 		fingerprint = column_text(stmt, 8),
 		bridge_id = column_text(stmt, 9),
 		status = status,
-		user_code = column_text(stmt, 11),
+		pair_lookup = column_text(stmt, 11),
 		code_expires_at = column_text(stmt, 12),
 		approval_statement = column_text(stmt, 13),
 		approval_signature = column_text(stmt, 14),
@@ -127,6 +127,9 @@ device_from_stmt :: proc(stmt: sqlite3_stmt) -> domain.Vault_Device {
 		revoked_at = column_text(stmt, 22),
 		last_seen_at = column_text(stmt, 23),
 		retired_at = column_text(stmt, 24),
+		pair_key_mac = column_text(stmt, 25),
+		register_statement = column_text(stmt, 26),
+		pair_mac = column_text(stmt, 27),
 	}
 }
 
@@ -143,7 +146,7 @@ bind_device_insert :: proc(stmt: sqlite3_stmt, d: domain.Vault_Device) {
 	bind_text(stmt, 9, d.fingerprint)
 	bind_text(stmt, 10, d.bridge_id)
 	bind_text(stmt, 11, domain.vault_device_status_string(d.status))
-	bind_opt(stmt, 12, d.user_code)
+	bind_opt(stmt, 12, d.pair_lookup)
 	bind_opt(stmt, 13, d.code_expires_at)
 	bind_opt(stmt, 14, d.approval_statement)
 	bind_opt(stmt, 15, d.approval_signature)
@@ -157,11 +160,14 @@ bind_device_insert :: proc(stmt: sqlite3_stmt, d: domain.Vault_Device) {
 	bind_opt(stmt, 23, d.revoked_at)
 	bind_opt(stmt, 24, d.last_seen_at)
 	bind_opt(stmt, 25, d.retired_at)
+	bind_opt(stmt, 26, d.pair_key_mac)
+	bind_opt(stmt, 27, d.register_statement)
+	bind_opt(stmt, 28, d.pair_mac)
 }
 
 @(private = "file")
 insert_device_on :: proc(conn: ^Conn, d: domain.Vault_Device) -> bool {
-	stmt, ok := prepare(conn, "INSERT INTO vault_devices (" + DEVICE_COLUMNS + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);")
+	stmt, ok := prepare(conn, "INSERT INTO vault_devices (" + DEVICE_COLUMNS + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);")
 	if !ok do return false
 	defer sqlite3_finalize(stmt)
 	bind_device_insert(stmt, d)
@@ -311,14 +317,14 @@ vault_get_wrap_sqlite :: proc(ctx: rawptr, user_id, device_id: string) -> (domai
 	}, true, domain.Domain_Error{}
 }
 
-vault_find_pending_by_code_sqlite :: proc(ctx: rawptr, user_id, user_code: string) -> (domain.Vault_Device, bool, domain.Domain_Error) {
+vault_find_pending_by_lookup_sqlite :: proc(ctx: rawptr, user_id, pair_lookup: string) -> (domain.Vault_Device, bool, domain.Domain_Error) {
 	impl := (^Vault_Directory_Repo_SQLite)(ctx)
-	if user_code == "" do return {}, false, domain.Domain_Error{}
-	stmt, ok := prepare(impl.conn, "SELECT " + DEVICE_COLUMNS + " FROM vault_devices WHERE user_id = ? AND user_code = ? AND status = 'pending';")
+	if pair_lookup == "" do return {}, false, domain.Domain_Error{}
+	stmt, ok := prepare(impl.conn, "SELECT " + DEVICE_COLUMNS + " FROM vault_devices WHERE user_id = ? AND pair_lookup = ? AND status = 'pending';")
 	if !ok do return {}, false, repo_err("failed to prepare vault pending lookup")
 	defer sqlite3_finalize(stmt)
 	bind_text(stmt, 1, user_id)
-	bind_text(stmt, 2, user_code)
+	bind_text(stmt, 2, pair_lookup)
 	rc := sqlite3_step(stmt)
 	if rc == SQLITE_DONE do return {}, false, domain.Domain_Error{}
 	if rc != SQLITE_ROW do return {}, false, repo_err("failed to look up pending vault device")
@@ -348,8 +354,8 @@ current_version_on :: proc(conn: ^Conn, user_id: string) -> i64 {
 
 vault_register_pending_sqlite :: proc(ctx: rawptr, device: domain.Vault_Device, now: string) -> (domain.Vault_Device, domain.Domain_Error) {
 	impl := (^Vault_Directory_Repo_SQLite)(ctx)
-	if device.status != .Pending || device.user_code == "" || device.code_expires_at == "" {
-		return {}, domain.domain_error(.Validation_Failed, "a registered device must be pending with a code")
+	if device.status != .Pending || device.pair_lookup == "" || device.pair_key_mac == "" || device.register_statement == "" || device.code_expires_at == "" {
+		return {}, domain.domain_error(.Validation_Failed, "a registered device must be pending with a pairing lookup")
 	}
 	sync.mutex_lock(&impl.mutex)
 	defer sync.mutex_unlock(&impl.mutex)
@@ -371,23 +377,32 @@ vault_register_pending_sqlite :: proc(ctx: rawptr, device: domain.Vault_Device, 
 	existing, found, read_ok := find_by_key_on(conn, device.user_id, device.sign_public_key)
 	if !read_ok do return {}, repo_err("failed to read vault device")
 	if found {
-		// Same key, same user: idempotent. Only an expired pending code is refreshed.
-		if existing.status != .Pending || existing.code_expires_at > now {
+		// Same key, same user. Approved/revoked rows are returned unchanged. A live
+		// pending request (expired ones were purged above) is re-paired only by a
+		// strictly newer self-signed register statement (the device drew a new code);
+		// anything else, such as a replayed body, leaves it untouched.
+		if existing.status != .Pending || !domain.vault_register_supersedes(device.register_statement, existing.register_statement) {
 			if !exec(conn, "COMMIT;") do return {}, repo_err("failed to end vault registration")
 			committed = true
 			return existing, domain.Domain_Error{}
 		}
-		stmt, ok := prepare(conn, "UPDATE vault_devices SET user_code = ?, code_expires_at = ? WHERE device_id = ? AND user_id = ? AND status = 'pending';")
-		if !ok do return {}, repo_err("failed to prepare vault code refresh")
+		stmt, ok := prepare(conn, "UPDATE vault_devices SET pair_lookup = ?, pair_key_mac = ?, register_statement = ?, label = ?, code_expires_at = ? WHERE device_id = ? AND user_id = ? AND status = 'pending';")
+		if !ok do return {}, repo_err("failed to prepare the pairing refresh")
 		defer sqlite3_finalize(stmt)
-		bind_text(stmt, 1, device.user_code)
-		bind_text(stmt, 2, device.code_expires_at)
-		bind_text(stmt, 3, existing.device_id)
-		bind_text(stmt, 4, existing.user_id)
+		bind_text(stmt, 1, device.pair_lookup)
+		bind_text(stmt, 2, device.pair_key_mac)
+		bind_text(stmt, 3, device.register_statement)
+		bind_text(stmt, 4, device.label)
+		bind_text(stmt, 5, device.code_expires_at)
+		bind_text(stmt, 6, existing.device_id)
+		bind_text(stmt, 7, existing.user_id)
 		rc, changes := step_changes(conn.db, stmt)
-		if rc != SQLITE_DONE do return {}, domain.vault_reason_error(.Conflict, "code_collision", "pending code collided; retry")
-		if changes != 1 do return {}, repo_err("vault code refresh changed no row")
-		existing.user_code = device.user_code
+		if rc != SQLITE_DONE do return {}, domain.vault_reason_error(.Conflict, "lookup_collision", "pairing lookup collided; retry with a new code")
+		if changes != 1 do return {}, repo_err("the pairing refresh changed no row")
+		existing.pair_lookup = device.pair_lookup
+		existing.pair_key_mac = device.pair_key_mac
+		existing.register_statement = device.register_statement
+		existing.label = device.label
 		existing.code_expires_at = device.code_expires_at
 		if !exec(conn, "COMMIT;") do return {}, repo_err("failed to commit vault registration")
 		committed = true
@@ -404,9 +419,9 @@ vault_register_pending_sqlite :: proc(ctx: rawptr, device: domain.Vault_Device, 
 		}
 	}
 	if !insert_device_on(conn, device) {
-		// UNIQUE(user_code) for a collision, or the global device_id primary key when
+		// UNIQUE(pair_lookup) for a collision, or the global device_id primary key when
 		// another account registered this exact key: both refuse without writing.
-		return {}, domain.vault_reason_error(.Conflict, "code_collision", "device could not be registered; retry")
+		return {}, domain.vault_reason_error(.Conflict, "lookup_collision", "device could not be registered; retry with a new code")
 	}
 	if !exec(conn, "COMMIT;") do return {}, repo_err("failed to commit vault registration")
 	committed = true
@@ -578,15 +593,16 @@ vault_commit_sqlite :: proc(ctx: rawptr, cm: domain.Vault_Directory_Commit) -> (
 	}
 	// 2. Guarded row writes. Any 0-row guard rolls the whole commit back.
 	if cm.approve_device_id != "" {
-		stmt, ok := prepare(conn, "UPDATE vault_devices SET status = 'approved', approval_statement = ?, approval_signature = ?, approved_by_device_id = ?, approved_at = ?, user_code = NULL, code_expires_at = NULL WHERE device_id = ? AND user_id = ? AND status = 'pending';")
+		stmt, ok := prepare(conn, "UPDATE vault_devices SET status = 'approved', approval_statement = ?, approval_signature = ?, approved_by_device_id = ?, approved_at = ?, pair_mac = ?, pair_lookup = NULL, pair_key_mac = NULL, register_statement = NULL, code_expires_at = NULL WHERE device_id = ? AND user_id = ? AND status = 'pending';")
 		if !ok do return 0, repo_err("failed to prepare the approval")
 		defer sqlite3_finalize(stmt)
 		bind_text(stmt, 1, cm.approval_statement)
 		bind_text(stmt, 2, cm.approval_signature)
 		bind_text(stmt, 3, cm.approved_by_device_id)
 		bind_text(stmt, 4, cm.now)
-		bind_text(stmt, 5, cm.approve_device_id)
-		bind_text(stmt, 6, cm.user_id)
+		bind_opt(stmt, 5, cm.approve_pair_mac)
+		bind_text(stmt, 6, cm.approve_device_id)
+		bind_text(stmt, 7, cm.user_id)
 		rc, changes := step_changes(conn.db, stmt)
 		if rc != SQLITE_DONE do return 0, repo_err("the approval failed")
 		if changes != 1 do return conflict(conn, cm.user_id)

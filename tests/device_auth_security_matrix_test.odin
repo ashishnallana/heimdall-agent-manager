@@ -149,7 +149,7 @@ test_bridge_enrollment_end_to_end :: proc() {
 		"{\"client\":\"ham-bridge\",\"device_label\":\"dawnstar\",\"os\":\"linux\",\"app_version\":\"0.9.1\"",
 		",\"bridge_public_key\":\"", BPK_A, "\"",
 		",\"bridge_identity_public_key\":\"", id_a.sign_pub, "\",\"bridge_identity_proof\":", sm_enroll_proof(&id_a, BPK_A, PKCE_CHALLENGE),
-		",\"os_user\":\"tanmay\"",
+		",\"os_user\":\"tanmay\",\"pair_lookup\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"pair_key_mac\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"",
 		",\"code_challenge\":\"", PKCE_CHALLENGE, "\",\"code_challenge_method\":\"S256\"}",
 	})
 	auth_resp := api_http.device_authorize_handler(rawptr(&graph.device_auth_handlers), api_http.Request{
@@ -165,7 +165,7 @@ test_bridge_enrollment_end_to_end :: proc() {
 	assert_eq(res_a.bridge_key_fingerprint, BPK_A_FP, "fingerprint on the grant is hub-computed")
 
 	// --- the approval page sees BOTH provenance groups (REQ-ENROLL-14) ---
-	verify_body := strings.concatenate({"{\"user_code\":\"", res_a.user_code, "\"}"})
+	verify_body := strings.concatenate({"{\"pair_lookup\":\"", res_a.user_code, "\"}"})
 	verify_resp := api_http.device_verify_handler(rawptr(&graph.device_auth_handlers), api_http.Request{
 		method = "POST", path = "/api/v1/device/verify", body = verify_body,
 		request_id = "req_bridge_verify", remote_addr = "127.0.0.1:4444", headers = trusted_headers[:],
@@ -186,7 +186,7 @@ test_bridge_enrollment_end_to_end :: proc() {
 
 	// --- approve: the body tries to name a different owner; it must be ignored ---
 	approve_body := strings.concatenate({
-		"{\"user_code\":\"", res_a.user_code,
+		"{\"pair_lookup\":\"", res_a.user_code,
 		"\",\"approve\":true,\"owner_user_id\":\"spoof-owner\",\"user\":\"spoof-user\"",
 		",\"vault_approval\":", sm_vault_approval(&graph, "approving-human", &root, &id_a, 1), "}",
 	})
@@ -364,7 +364,7 @@ seed_bridge_grant :: proc(graph: ^app.App_Graph, label, public_key, challenge: s
 		"{\"client\":\"ham-bridge\",\"device_label\":\"", label, "\",\"os\":\"linux\"",
 		",\"bridge_public_key\":\"", public_key, "\"",
 		",\"bridge_identity_public_key\":\"", identity.sign_pub, "\",\"bridge_identity_proof\":", sm_enroll_proof(identity, public_key, challenge),
-		",\"code_challenge\":\"", challenge, "\",\"code_challenge_method\":\"S256\"}",
+		",\"code_challenge\":\"", challenge, "\",\"code_challenge_method\":\"S256\",\"pair_lookup\":\"", vault.log_entry_hash(label, context.temp_allocator), "\",\"pair_key_mac\":\"", vault.log_entry_hash(public_key, context.temp_allocator), "\"}",
 	})
 	resp := api_http.device_authorize_handler(rawptr(&graph.device_auth_handlers), api_http.Request{
 		method = "POST", path = "/api/v1/device/authorize", body = body,
@@ -373,7 +373,7 @@ seed_bridge_grant :: proc(graph: ^app.App_Graph, label, public_key, challenge: s
 	if resp.status != 200 do return device_auth.Grant{}, false
 	grant, found := grant_for_label(&graph.device_auth_store, label)
 	if !found do return device_auth.Grant{}, false
-	approve_body := strings.concatenate({"{\"user_code\":\"", grant.user_code, "\",\"approve\":true,\"vault_approval\":", vault_approval, "}"})
+	approve_body := strings.concatenate({"{\"pair_lookup\":\"", grant.user_code, "\",\"approve\":true,\"vault_approval\":", vault_approval, "}"})
 	aresp := api_http.device_approve_handler(rawptr(&graph.device_auth_handlers), api_http.Request{
 		method = "POST", path = "/api/v1/device/approve", body = approve_body,
 		request_id = "req_seed_approve", remote_addr = "127.0.0.1:4444", headers = headers,
