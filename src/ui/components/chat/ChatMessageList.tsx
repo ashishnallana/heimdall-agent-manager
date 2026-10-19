@@ -135,6 +135,7 @@ export default function ChatMessageList({
   children,
   wrapperClassName = 'relative min-h-0 min-w-0 max-w-full flex-1 overflow-hidden overflow-x-hidden',
   scrollClassName = 'chat-scrollbar h-full min-h-0 max-w-full space-y-[22px] overflow-y-auto overflow-x-hidden rounded-none bg-canvas px-1 py-4 sm:space-y-4 sm:rounded-[18px] sm:px-4 sm:py-4',
+  bottomInset = 0,
 }: {
   conversationKey: string;
   messages: ChatMessage[];
@@ -169,6 +170,14 @@ export default function ChatMessageList({
   children?: ReactNode;
   wrapperClassName?: string;
   scrollClassName?: string;
+  /**
+   * REQ-FROST-1: height (px) of a caller overlay floating over the bottom of the list,
+   * e.g. the mobile composer card. The list ends with an empty spacer this tall, so
+   * auto-scroll and "jump to latest" leave the newest message above the overlay, and
+   * the jump button sits just above it. This is empty space, not caller content, so it
+   * does not reintroduce the REQ-VIEWPORT-SWEEP-1 bug described on `children`.
+   */
+  bottomInset?: number;
 }) {
   const isMobile = useIsMobile();
   const activeKey = useSelector(selectActiveVaultKey);
@@ -329,6 +338,12 @@ export default function ChatMessageList({
     return () => observer.disconnect();
   }, [hasMore, loadingOlder, onLoadOlder, messages.length]);
 
+  // REQ-FROST-1: when the overlay grows (multi-line draft, attachment tray), keep a
+  // reader who was at the bottom pinned there instead of letting the overlay cover it.
+  useLayoutEffect(() => {
+    if (stickyRef.current && didInitialScrollRef.current) scrollToBottom('auto');
+  }, [bottomInset, scrollToBottom]);
+
   const onScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
     onScrollProp?.(event);
     const node = scrollRef.current;
@@ -416,6 +431,9 @@ export default function ChatMessageList({
           )}
           {children}
         </div>
+        {bottomInset > 0 ? (
+          <div data-debug-id={`${debugPrefix}-bottom-inset`} aria-hidden="true" className="!mt-0 shrink-0" style={{ height: bottomInset }} />
+        ) : null}
       </div>
       {showJump ? (
         <button
@@ -424,7 +442,8 @@ export default function ChatMessageList({
           aria-label="Jump to latest"
           title="Jump to latest"
           onClick={() => scrollToBottom('smooth')}
-          className={`ui-liquid-glass absolute bottom-3 left-1/2 grid -translate-x-1/2 place-items-center rounded-full text-primary transition-transform active:scale-95 ${isMobile ? 'h-11 w-11' : 'h-9 w-9'}`}
+          style={bottomInset > 0 ? { bottom: bottomInset + 12 } : undefined}
+          className={`ui-liquid-glass absolute bottom-3 left-1/2 z-30 grid -translate-x-1/2 place-items-center rounded-full text-primary transition-transform active:scale-95 ${isMobile ? 'h-11 w-11' : 'h-9 w-9'}`}
         >
           <Icon name="arrow-down" size={isMobile ? 20 : 18} />
         </button>
