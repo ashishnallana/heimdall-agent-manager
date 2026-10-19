@@ -126,12 +126,6 @@ keystore_os_read_secret_status :: proc(slot: Keystore_Slot, bridge_id: string, d
 	return size, .Found
 }
 
-// An item the process can no longer read (e.g. after a self-update changed the
-// binary's identity) still proves the vault was configured.
-keystore_os_secret_present :: proc(slot: Keystore_Slot, bridge_id: string) -> bool {
-	return keychain_find_item(slot, bridge_id, nil) == KEYCHAIN_ERR_SEC_SUCCESS
-}
-
 keystore_os_delete_secret :: proc(slot: Keystore_Slot, bridge_id: string) -> bool {
 	item: rawptr
 	status := keychain_find_item(slot, bridge_id, &item)

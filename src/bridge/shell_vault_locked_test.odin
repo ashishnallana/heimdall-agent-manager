@@ -16,11 +16,10 @@ import ws "odin_test:lib/ws"
 // was keyed on "a key is present", so a configured bridge with no key in hand was
 // treated as never-configured and ran the hub-supplied plaintext cmd.
 //
-// Every test here runs inside bridge_vault_test_sandbox_open (temp HOME, so the
-// vault_configured marker lands in /tmp) and points bridge_config.daemon_id at this
-// process's keystore_test_bridge_ids() id, so no real bridge's keyring or marker is
-// touched. Locked is produced the way a real restart produces it: the on-disk marker
-// is present and the in-memory flag is cleared, so only the marker says "configured".
+// Every test here runs inside bridge_vault_test_sandbox_open (temp HOME) with the
+// fake keystore backend and points bridge_config.daemon_id at this process's
+// keystore_test_bridge_ids() id, so no real bridge's keyring is touched. Locked is
+// produced the way a real restart produces it: an enrolled identity, no keyring.
 
 @(private = "file")
 Vault_Gate_Fixture :: struct {
@@ -28,51 +27,39 @@ Vault_Gate_Fixture :: struct {
 	prev_daemon_id:  string,
 	prev_key:        string,
 	had_key:         bool,
-	prev_configured: string,
-	had_configured:  bool,
-	saved_flag:      bool,
 	bridge_id:       string,
 }
 
 // Caller holds bridge_test_config_mutex then keystore_test_mutex (the order the
-// vault_decrypt tests use) and must call fixture_close on every path.
+// vault_decrypt tests use) and must call fixture_close on every path. enrolled
+// provisions an identity (Locked without a key); otherwise the bridge is
+// Not_Enrolled.
 @(private = "file")
-fixture_open :: proc(t: ^testing.T, label: string, marker: bool, key: string) -> (f: Vault_Gate_Fixture, ok: bool) {
+fixture_open :: proc(t: ^testing.T, label: string, enrolled: bool, key: string) -> (f: Vault_Gate_Fixture, ok: bool) {
 	id_a, _ := keystore_test_bridge_ids()
 	f.bridge_id = id_a
 	f.prev_daemon_id = keystore_test_set_daemon_id(id_a)
 	keystore_lock_and_purge(id_a)
-	f.saved_flag = bridge_workspace_vault_configured
+	_ = keystore_delete_identity_key(id_a)
+	bridge_unseal_forget_identity()
 	f.prev_key, f.had_key = os.lookup_env("HEIMDALL_VAULT_KEYRING", context.allocator)
-	f.prev_configured, f.had_configured = os.lookup_env("HEIMDALL_VAULT_CONFIGURED", context.allocator)
 	os.unset_env("HEIMDALL_VAULT_KEYRING")
-	os.unset_env("HEIMDALL_VAULT_CONFIGURED")
 
 	f.sb, ok = bridge_vault_test_sandbox_open(t, label)
 	if !ok do return
 
-	if marker {
-		testing.expect(t, bridge_vault_set_configured(id_a, true), "marker written into the sandbox")
-		path, _ := bridge_vault_configured_marker_path(id_a, context.temp_allocator)
-		testing.expect(t, strings.has_prefix(path, f.sb.dir), "marker path is inside the sandbox")
-		testing.expect(t, os.exists(path), "marker present on disk")
-	}
-	// Only the marker (or its absence) decides "configured" from here on.
-	bridge_workspace_vault_configured = false
+	if enrolled do testing.expect(t, test_provision_identity(id_a), "identity provisioned")
 	if key != "" do _ = os.set_env("HEIMDALL_VAULT_KEYRING", test_keyring_env_value(key))
 	return f, true
 }
 
 @(private = "file")
 fixture_close :: proc(f: ^Vault_Gate_Fixture) {
-	// Marker removal while HOME still points into the sandbox, then the sandbox
-	// removal takes the rest.
-	_ = bridge_vault_set_configured(f.bridge_id, false)
 	bridge_vault_test_sandbox_close(&f.sb)
-	bridge_workspace_vault_configured = f.saved_flag
 	if f.had_key { _ = os.set_env("HEIMDALL_VAULT_KEYRING", f.prev_key); delete(f.prev_key) } else { os.unset_env("HEIMDALL_VAULT_KEYRING") }
-	if f.had_configured { _ = os.set_env("HEIMDALL_VAULT_CONFIGURED", f.prev_configured); delete(f.prev_configured) } else { os.unset_env("HEIMDALL_VAULT_CONFIGURED") }
 	keystore_lock_and_purge(f.bridge_id)
+	_ = keystore_delete_identity_key(f.bridge_id)
+	bridge_unseal_forget_identity()
 	bridge_config.daemon_id = f.prev_daemon_id
 }
 
@@ -102,7 +89,7 @@ run_shell_start :: proc(t: ^testing.T, cmd_json: string) -> string {
 	return read_reply(read_fd)
 }
 
-// (a) marker present + no key + plaintext cmd -> refused, nothing executed.
+// (a) enrolled + no key + plaintext cmd -> refused, nothing executed.
 @(test)
 test_t9_locked_shell_start_refuses_plaintext_cmd :: proc(t: ^testing.T) {
 	sync.mutex_lock(&bridge_test_config_mutex)
@@ -125,7 +112,7 @@ test_t9_locked_shell_start_refuses_plaintext_cmd :: proc(t: ^testing.T) {
 	testing.expect(t, !os.exists(canary), "the plaintext cmd must never run on a locked bridge")
 }
 
-// (b) marker present + no key + enc_spec -> vault_locked, not a fall-through to plaintext.
+// (b) enrolled + no key + enc_spec -> vault_locked, not a fall-through to plaintext.
 @(test)
 test_t9_locked_shell_start_refuses_enc_spec :: proc(t: ^testing.T) {
 	sync.mutex_lock(&bridge_test_config_mutex)
@@ -154,12 +141,10 @@ test_t9_locked_shell_start_refuses_enc_spec :: proc(t: ^testing.T) {
 	testing.expect(t, !os.exists(canary), "nothing executed")
 }
 
-// (c) marker absent + no key + plaintext -> Disabled lets plaintext through the vault
-// gate. Proven daemon-free: the request carries a cwd that does not exist, so the
-// first refusal AFTER the gate (REQ-SHELL-20's cwd check) is what answers. Reaching it
-// at all means the vault gate passed the plaintext request on.
+// (c) never enrolled + no key + plaintext -> refused like a locked bridge: there is
+// no plaintext "vault not configured" mode.
 @(test)
-test_t9_disabled_shell_start_allows_plaintext :: proc(t: ^testing.T) {
+test_t9_not_enrolled_shell_start_refuses_plaintext :: proc(t: ^testing.T) {
 	sync.mutex_lock(&bridge_test_config_mutex)
 	defer sync.mutex_unlock(&bridge_test_config_mutex)
 	sync.mutex_lock(&keystore_test_mutex)
@@ -168,21 +153,18 @@ test_t9_disabled_shell_start_allows_plaintext :: proc(t: ^testing.T) {
 	f, ok := fixture_open(t, "t9_c", false, "")
 	defer fixture_close(&f)
 	if !ok do return
-	testing.expect_value(t, bridge_vault_status(), Vault_Status.Disabled)
+	testing.expect_value(t, bridge_vault_status(), Vault_Status.Not_Enrolled)
 
-	missing_cwd := fmt.tprintf("%s/does_not_exist", f.sb.dir)
+	canary := fmt.tprintf("%s/t9_not_enrolled", f.sb.dir)
 	reply := run_shell_start(t, fmt.tprintf(
-		`{{"type":"shell_start","session_id":"sh_t9_c","command_id":"cmd_t9_c","kind":"run","cmd":"echo ok","cwd":"%s"}}`,
-		missing_cwd,
+		`{{"type":"shell_start","session_id":"sh_t9_c","command_id":"cmd_t9_c","kind":"run","cmd":"touch %s","cwd":"%s"}}`,
+		canary, f.sb.dir,
 	))
-	testing.expect(t, reply != "", "a reply was sent")
-	testing.expect(t, !strings.contains(reply, "vault_locked"), fmt.tprintf("Disabled must not be treated as locked, got %q", reply))
-	testing.expect(t, !strings.contains(reply, "invalid_vault_key"), fmt.tprintf("Disabled must not demand an enc_spec, got %q", reply))
-	testing.expect(t, strings.contains(reply, "does_not_exist"), fmt.tprintf("the post-gate cwd refusal must be what answers, got %q", reply))
+	testing.expect(t, strings.contains(reply, `"cause":"vault_locked"`), fmt.tprintf("must refuse with vault_locked, got %q", reply))
+	testing.expect(t, !os.exists(canary), "nothing executed")
 }
 
-// (d) key present + no enc_spec -> refused (existing behaviour preserved), even with
-// the marker present (Unlocked wins over the marker).
+// (d) key present + no enc_spec -> refused.
 @(test)
 test_t9_unlocked_shell_start_still_requires_enc_spec :: proc(t: ^testing.T) {
 	sync.mutex_lock(&bridge_test_config_mutex)
@@ -345,26 +327,6 @@ test_t10_unlocked_agent_pty_input_refuses_plaintext :: proc(t: ^testing.T) {
 	testing.expect(t, res_ok, "result recorded")
 	testing.expect(t, strings.contains(res, `"status":"failed"`), fmt.tprintf("plaintext on an unlocked vault must fail, got %q", res))
 	testing.expect(t, !strings.contains(res, "vault_locked"), fmt.tprintf("an unlocked vault is not locked, got %q", res))
-}
-
-// Disabled: plaintext passes the gate. Daemon-free, so delivery itself fails — but with
-// a plain "failed" and no vault error code, which is the proof the gate let it through.
-@(test)
-test_t10_disabled_agent_pty_input_passes_gate :: proc(t: ^testing.T) {
-	sync.mutex_lock(&bridge_test_config_mutex)
-	defer sync.mutex_unlock(&bridge_test_config_mutex)
-	sync.mutex_lock(&keystore_test_mutex)
-	defer sync.mutex_unlock(&keystore_test_mutex)
-
-	f, ok := fixture_open(t, "t10_agent_disabled", false, "")
-	defer fixture_close(&f)
-	if !ok do return
-	testing.expect_value(t, bridge_vault_status(), Vault_Status.Disabled)
-
-	bridge_hub_handle_agent_pty_input(nil, `{"type":"agent_pty_input","command_id":"cmd_t10_agent_disabled","agent_instance_id":"inst_t10_none","data":"ls\n"}`)
-	res, res_ok := bridge_runtime_cached_command("cmd_t10_agent_disabled")
-	testing.expect(t, res_ok, "result recorded")
-	testing.expect(t, !strings.contains(res, "vault_locked") && !strings.contains(res, "invalid_vault_key"), fmt.tprintf("Disabled must not be refused by the vault gate, got %q", res))
 }
 
 // shell_pty_input (the wire type the current hub uses for BOTH agent and shell panes)

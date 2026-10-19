@@ -151,17 +151,6 @@ keystore_os_read_secret_status :: proc(slot: Keystore_Slot, bridge_id: string, d
 	return read_len, .Found
 }
 
-// A present @u key is always readable, so only Termux's sealed file can be
-// "present but unreadable".
-keystore_os_secret_present :: proc(slot: Keystore_Slot, bridge_id: string) -> bool {
-	if keystore_android_selected() do return keystore_android_secret_present(slot, bridge_id)
-	if slot != .Keyring {
-		path, ok := keystore_identity_file_path(slot, bridge_id)
-		return ok && os.exists(path)
-	}
-	return false
-}
-
 // Revokes and unlinks the slot's key. True when no key remains.
 keystore_os_delete_secret :: proc(slot: Keystore_Slot, bridge_id: string) -> bool {
 	if keystore_android_selected() do return keystore_android_delete_secret(slot, bridge_id)

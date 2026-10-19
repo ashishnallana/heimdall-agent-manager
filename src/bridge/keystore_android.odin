@@ -464,11 +464,6 @@ keystore_android_read_secret_status :: proc(slot: Keystore_Slot, bridge_id: stri
 	return got, .Found
 }
 
-keystore_android_secret_present :: proc(slot: Keystore_Slot, bridge_id: string) -> bool {
-	path := keystore_android_sealed_path(slot, bridge_id) or_return
-	return os.exists(path)
-}
-
 // Deletes the slot's sealed file. The Keystore key stays, so the next store reuses
 // it. Returns true when no sealed file remains.
 keystore_android_delete_secret :: proc(slot: Keystore_Slot, bridge_id: string) -> bool {

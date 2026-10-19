@@ -361,10 +361,9 @@ test_v2_pane_capture_is_sealed :: proc(t: ^testing.T) {
 	locked := bridge_pane_reply_from_seal("cmd_pane_seal_locked", false, "h1", "", lres, 1, false)
 	defer delete(locked)
 	testing.expect(t, !strings.contains(locked, "top secret") && strings.contains(locked, "vault_locked"), locked)
-	// Never configured: the capture goes out as is.
-	plain_out, dres := bridge_pane_output_seal_with(.Disabled, nil, "plain screen", "sh_pane", os_random.DEFAULT_SOURCE)
-	defer delete(plain_out)
-	testing.expect(t, dres == .Plain && plain_out == "plain screen")
+	// Not enrolled refuses exactly like locked: there is no plaintext mode.
+	_, nres := bridge_pane_output_seal_with(.Not_Enrolled, nil, "plain screen", "sh_pane", os_random.DEFAULT_SOURCE)
+	testing.expect(t, nres == .Locked)
 }
 
 // capture_agent_pane (chat pane capture) is sealed as a v2 content envelope the UI
@@ -388,9 +387,9 @@ test_v2_chat_pane_capture_result_is_sealed :: proc(t: ^testing.T) {
 	failed := bridge_pane_capture_result_sealed_json(pending, .Unlocked, &kr, "secret pane", 1, false, "/nonexistent/heimdall-no-random")
 	defer delete(failed)
 	testing.expect(t, strings.contains(failed, `"cause":"encryption_failed"`) && !strings.contains(failed, "secret pane"), failed)
-	disabled := bridge_pane_capture_result_sealed_json(pending, .Disabled, nil, "plain pane", 1, false, os_random.DEFAULT_SOURCE)
-	defer delete(disabled)
-	testing.expect(t, strings.contains(disabled, `"output":"plain pane"`), disabled)
+	unenrolled := bridge_pane_capture_result_sealed_json(pending, .Not_Enrolled, nil, "plain pane", 1, false, os_random.DEFAULT_SOURCE)
+	defer delete(unenrolled)
+	testing.expect(t, strings.contains(unenrolled, `"cause":"vault_locked"`) && !strings.contains(unenrolled, "plain pane"), unenrolled)
 
 	// An oversized capture keeps its tail from a line start, fits the hub cap, is marked truncated.
 	big := strings.concatenate({strings.repeat("x", BRIDGE_PANE_CAPTURE_SEAL_MAX_PLAIN, context.temp_allocator), "\nlast line"}, context.temp_allocator)

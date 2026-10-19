@@ -869,7 +869,8 @@ _bridge_pty_stream_next_nonce :: proc(worker: ^Bridge_PTY_Stream_Worker, epoch: 
 // frame (once per lock) and suppresses raw stream bytes.
 // When Unlocked, it reserves a monotonic (salt, seq) nonce and marks the record for AES-256-GCM
 // encryption AT DRAIN TIME — after coalescing — see Bridge_PTY_Stream_Outgoing.
-// When Disabled (or unconfigured fallback), it queues plaintext without encryption or delay.
+// Without a key it queues the locked banner and a typed vault_locked frame; output
+// never leaves in plaintext.
 bridge_pty_stream_emit_frame :: proc(worker: ^Bridge_PTY_Stream_Worker, session_id: string, data: []byte) {
 	if len(data) == 0 do return
 	snapshot := worker != nil && worker.emitting_snapshot
@@ -884,8 +885,8 @@ bridge_pty_stream_emit_frame :: proc(worker: ^Bridge_PTY_Stream_Worker, session_
 	status, kr := bridge_vault_status_and_key()
 	epoch := kr.current_epoch
 	vault.keyring_wipe(&kr)
-	#partial switch status {
-	case .Locked:
+	switch status {
+	case .Not_Enrolled, .Locked:
 		if worker != nil {
 			if worker.locked_banner_emitted do return
 			worker.locked_banner_emitted = true
@@ -911,9 +912,6 @@ bridge_pty_stream_emit_frame :: proc(worker: ^Bridge_PTY_Stream_Worker, session_
 		_bridge_pty_stream_queue_output(worker, slice.clone(data, heap), heap, session_id, true, salt, seq, epoch)
 		return
 	}
-
-	// Plaintext fallback (e.g. Disabled status): zero encryption overhead or blocking
-	_bridge_pty_stream_queue_output(worker, slice.clone(data, heap), heap, session_id, false, {}, 0)
 }
 
 // bridge_pty_stream_format_lifecycle_event formats shell_pty_stream_ready or shell_pty_stream_closed JSON.
@@ -1224,18 +1222,16 @@ bridge_pty_open_input :: proc(frame: []byte, kr: ^vault.Vault_Keyring, session_i
 // ── Pane capture sealing (get_agent_pane / shell_get_pane replies) ──────────
 
 Bridge_Pane_Seal :: enum {
-	Plain,  // vault never configured: the output goes out as is
 	Sealed, // armored PTY v2 frame
 	Locked, // configured but locked: send an error, never plaintext
 	Failed, // sealing failed (randomness, bad session id): send an error
 }
 
-// bridge_pane_output_seal seals a pane capture for the hub when the vault is
-// configured. The armor is vault:v2:e<N>:b64(salt16 | nonce | tag | ct): a PTY v2
+// bridge_pane_output_seal seals a pane capture for the hub. The armor is vault:v2:e<N>:b64(salt16 | nonce | tag | ct): a PTY v2
 // `out` frame for session_id under a fresh CSPRNG salt (its own subkey, counter 1),
 // minus the epoch prefix the token header already carries. The hub re-frames it to the
 // binary PTY v2 layout (domain.vault_pty_v2_payload_from_armor) without decrypting.
-// Caller owns `armored` when res == .Sealed or .Plain.
+// Caller owns `armored` when res == .Sealed.
 bridge_pane_output_seal :: proc(output: string, session_id: string, allocator := context.allocator) -> (armored: string, res: Bridge_Pane_Seal) {
 	status, kr := bridge_vault_status_and_key()
 	defer vault.keyring_wipe(&kr)
@@ -1245,13 +1241,7 @@ bridge_pane_output_seal :: proc(output: string, session_id: string, allocator :=
 // bridge_pane_output_seal_with is the pure core of bridge_pane_output_seal: vault
 // state, keyring and randomness are passed in (tests drive it without the keystore).
 bridge_pane_output_seal_with :: proc(status: Vault_Status, kr: ^vault.Vault_Keyring, output: string, session_id: string, random_source: string, allocator := context.allocator) -> (armored: string, res: Bridge_Pane_Seal) {
-	switch status {
-	case .Disabled:
-		return strings.clone(output, allocator), .Plain
-	case .Locked:
-		return "", .Locked
-	case .Unlocked:
-	}
+	if status != .Unlocked do return "", .Locked
 	if output == "" do return "", .Sealed
 	if kr == nil do return "", .Failed
 	key, key_ok := vault.keyring_key_for_epoch(kr, kr.current_epoch)
@@ -1276,13 +1266,7 @@ BRIDGE_PANE_CAPTURE_SEAL_MAX_PLAIN :: 35_000
 // UI already decrypts like any other vault message. A capture over the cap keeps its
 // TAIL (the live end of the screen) from a line start and reports truncated.
 bridge_pane_capture_seal_with :: proc(status: Vault_Status, kr: ^vault.Vault_Keyring, output: string, random_source: string, allocator := context.allocator) -> (armored: string, res: Bridge_Pane_Seal, truncated: bool) {
-	switch status {
-	case .Disabled:
-		return strings.clone(output, allocator), .Plain, false
-	case .Locked:
-		return "", .Locked, false
-	case .Unlocked:
-	}
+	if status != .Unlocked do return "", .Locked, false
 	if kr == nil do return "", .Failed, false
 	text := output
 	if len(text) > BRIDGE_PANE_CAPTURE_SEAL_MAX_PLAIN {

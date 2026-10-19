@@ -18,20 +18,18 @@ import contracts "odin_test:contracts"
 import ws "odin_test:lib/ws"
 import vault "odin_test:lib/vault"
 
+// _p1_unlock_vault gives the process a keyring (there is no plaintext stream mode),
+// so every output record is sealed and the helpers below decrypt it.
 @(private = "file")
-_p1_disable_vault :: proc() -> (restore: proc(prev_key, prev_cfg: string, had_key, had_cfg, saved_ws: bool), prev_key, prev_cfg: string, had_key, had_cfg, saved_ws: bool) {
+_p1_unlock_vault :: proc() -> (prev_key: string, had_key: bool) {
 	prev_key, had_key = os.lookup_env("HEIMDALL_VAULT_KEYRING", context.allocator)
-	prev_cfg, had_cfg = os.lookup_env("HEIMDALL_VAULT_CONFIGURED", context.allocator)
-	saved_ws = bridge_workspace_vault_configured
-	bridge_workspace_vault_configured = false
-	_ = os.set_env("HEIMDALL_VAULT_KEYRING", "unconfigured_key")
-	_ = os.set_env("HEIMDALL_VAULT_CONFIGURED", "false")
-	restore = proc(prev_key, prev_cfg: string, had_key, had_cfg, saved_ws: bool) {
-		bridge_workspace_vault_configured = saved_ws
-		if had_key { _ = os.set_env("HEIMDALL_VAULT_KEYRING", prev_key); delete(prev_key) } else { os.unset_env("HEIMDALL_VAULT_KEYRING") }
-		if had_cfg { _ = os.set_env("HEIMDALL_VAULT_CONFIGURED", prev_cfg); delete(prev_cfg) } else { os.unset_env("HEIMDALL_VAULT_CONFIGURED") }
-	}
+	_ = os.set_env("HEIMDALL_VAULT_KEYRING", test_keyring_env_value(TEST_ENC_VAULT_KEY))
 	return
+}
+
+@(private = "file")
+_p1_restore_vault :: proc(prev_key: string, had_key: bool) {
+	if had_key { _ = os.set_env("HEIMDALL_VAULT_KEYRING", prev_key); delete(prev_key) } else { os.unset_env("HEIMDALL_VAULT_KEYRING") }
 }
 
 // pty_test_decode_output decodes one bridge->hub pty_wire OUTPUT frame as the hub would
@@ -62,19 +60,19 @@ pty_test_frame_is_output :: proc(frame: string) -> bool {
 
 @(private = "file")
 _p1_payload :: proc(frame: string) -> string {
-	_, payload, _, _, _ := pty_test_decode_output(frame)
+	_, payload, _, _, _ := pty_test_decode_output(frame, TEST_ENC_VAULT_KEY)
 	return payload
 }
 
 @(private = "file")
 _p1_session :: proc(frame: string) -> string {
-	sid, _, _, _, _ := pty_test_decode_output(frame)
+	sid, _, _, _, _ := pty_test_decode_output(frame, TEST_ENC_VAULT_KEY)
 	return sid
 }
 
 @(private = "file")
 _p1_snapshot :: proc(frame: string) -> bool {
-	_, _, snap, _, _ := pty_test_decode_output(frame)
+	_, _, snap, _, _ := pty_test_decode_output(frame, TEST_ENC_VAULT_KEY)
 	return snap
 }
 
@@ -86,15 +84,16 @@ pty_drain_merges_adjacent_same_session_records_in_order :: proc(t: ^testing.T) {
 	defer sync.mutex_unlock(&keystore_test_mutex)
 	bridge_pty_stream_reset()
 	defer bridge_pty_stream_reset()
-	restore, pk, pc, hk, hc, sw := _p1_disable_vault()
-	defer restore(pk, pc, hk, hc, sw)
+	pk, hk := _p1_unlock_vault()
+	defer _p1_restore_vault(pk, hk)
 
+	mw := Bridge_PTY_Stream_Worker{active = true, fd = -1}
 	for i in 0 ..< 20 {
 		chunk := strings.repeat("x", 150, context.temp_allocator)
 		buf := strings.concatenate({chunk, "|"}, context.temp_allocator)
 		buf_bytes := transmute([]byte)buf
 		buf_bytes[0] = byte('a' + i)
-		bridge_pty_stream_emit_frame(nil, "sh_merge", buf_bytes)
+		bridge_pty_stream_emit_frame(&mw, "sh_merge", buf_bytes)
 	}
 	testing.expect_value(t, bridge_pty_stream_queued_frames(), 20)
 	frames := bridge_pty_stream_take_outgoing()
@@ -117,8 +116,8 @@ pty_drain_never_merges_across_session_snapshot_or_control_boundaries :: proc(t: 
 	defer sync.mutex_unlock(&keystore_test_mutex)
 	bridge_pty_stream_reset()
 	defer bridge_pty_stream_reset()
-	restore, pk, pc, hk, hc, sw := _p1_disable_vault()
-	defer restore(pk, pc, hk, hc, sw)
+	pk, hk := _p1_unlock_vault()
+	defer _p1_restore_vault(pk, hk)
 
 	w := Bridge_PTY_Stream_Worker{active = true, fd = -1}
 	bridge_pty_stream_emit_frame(&w, "A", transmute([]byte)string("a1"))
@@ -155,12 +154,13 @@ pty_drain_respects_the_per_frame_byte_cap :: proc(t: ^testing.T) {
 	defer sync.mutex_unlock(&keystore_test_mutex)
 	bridge_pty_stream_reset()
 	defer bridge_pty_stream_reset()
-	restore, pk, pc, hk, hc, sw := _p1_disable_vault()
-	defer restore(pk, pc, hk, hc, sw)
+	pk, hk := _p1_unlock_vault()
+	defer _p1_restore_vault(pk, hk)
 
 	// 5 x 5 KiB = 25 KiB incremental: fits in 12 KiB frames as 10 + 10 + 5.
+	cw := Bridge_PTY_Stream_Worker{active = true, fd = -1}
 	chunk := strings.repeat("y", 5 * 1024, context.temp_allocator)
-	for _ in 0 ..< 5 do bridge_pty_stream_emit_frame(nil, "sh_cap", transmute([]byte)chunk)
+	for _ in 0 ..< 5 do bridge_pty_stream_emit_frame(&cw, "sh_cap", transmute([]byte)chunk)
 	frames := bridge_pty_stream_take_outgoing()
 	defer { for f in frames do delete(f, runtime.heap_allocator()); delete(frames) }
 	testing.expect_value(t, len(frames), 3)
@@ -174,7 +174,7 @@ pty_drain_respects_the_per_frame_byte_cap :: proc(t: ^testing.T) {
 
 	// A single oversized emit is split at enqueue, never dropped.
 	big := strings.repeat("z", 30 * 1024, context.temp_allocator)
-	bridge_pty_stream_emit_frame(nil, "sh_big", transmute([]byte)big)
+	bridge_pty_stream_emit_frame(&cw, "sh_big", transmute([]byte)big)
 	frames2 := bridge_pty_stream_take_outgoing()
 	defer { for f in frames2 do delete(f, runtime.heap_allocator()); delete(frames2) }
 	testing.expect_value(t, len(frames2), 3) // 12 + 12 + 6

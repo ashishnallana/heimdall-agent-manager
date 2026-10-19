@@ -191,7 +191,6 @@ bridge_enroll_atomic_discard_locked :: proc() {
 	bridge_enroll_stage_discard(bridge_enroll_stage_for(a.token_file, a.config_path))
 	keystore_lock_and_purge(a.cred.bridge_id)
 	_ = keystore_delete_identity_key(a.cred.bridge_id)
-	_ = bridge_vault_set_configured(a.cred.bridge_id, false)
 }
 
 // bridge_enroll_atomic_on_unseal runs on the hub socket's thread for a bridge_unseal
@@ -221,7 +220,6 @@ bridge_enroll_atomic_on_unseal :: proc(text: string, now_ms: i64) -> (ok: bool, 
 		bridge_enroll_atomic_discard_locked()
 		return false, "the vault key was stored but this bridge's credential could not be staged"
 	}
-	_ = bridge_vault_set_configured(a.cred.bridge_id, true)
 	a.state = .Acked
 	return true, ""
 }
@@ -311,7 +309,6 @@ bridge_enroll_atomic_recover_paths :: proc(token_file, config_path: string, refr
 		bridge_enroll_stage_discard(st)
 		keystore_lock_and_purge(marker_bridge_id)
 		_ = keystore_delete_identity_key(marker_bridge_id)
-		_ = bridge_vault_set_configured(marker_bridge_id, false)
 		fmt.printfln("bridge enroll recovery: enrollment of %s was rolled back by the hub; discarded its staged credential and key", marker_bridge_id)
 		return .Discarded
 	case .Retry:
