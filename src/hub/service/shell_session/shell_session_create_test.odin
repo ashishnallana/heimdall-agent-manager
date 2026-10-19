@@ -1389,3 +1389,30 @@ test_req25_started_event_is_not_run_only :: proc(t: ^testing.T) {
 		)
 	}
 }
+
+// --- P4 backlog: client-chosen session ids --------------------------------------
+// The browser/ham-ctl picks the session id it seals into enc_spec. The hub accepts only
+// sh_ + 32 lowercase hex, uses it verbatim, and never adopts an id already in use.
+@(test)
+test_shell_session_create_client_chosen_session_id :: proc(t: ^testing.T) {
+	fx: Fixture
+	fixture_make(&fx)
+	defer fixture_free(&fx)
+	ID :: "sh_0123456789abcdef0123456789abcdef"
+	for bad in ([?]string{"sh_short", "sh_0123456789ABCDEF0123456789ABCDEF", "xx_0123456789abcdef0123456789abcdef", "sh_0123456789abcdef0123456789abcdef0"}) {
+		_, ok, err := shell_session_create(&fx.svc, test_auth(), Shell_Session_Create_Input{bridge_id = "brg_1", kind = domain.Shell_Session_Kind_Shell, enc_spec = "vault:v2:x", session_id = bad})
+		testing.expectf(t, !ok && err.code == .Validation_Failed, "malformed client session id %q refused", bad)
+	}
+	// The repository knows TAKEN (a stored session); ID is free.
+	fx.repo.get_by_id = proc(ctx: rawptr, bridge_id, session_id: string) -> (domain.Shell_Session, bool, domain.Domain_Error) {
+		if session_id == "sh_ffffffffffffffffffffffffffffffff" do return domain.Shell_Session{session_id = session_id, bridge_id = bridge_id}, true, domain.Domain_Error{}
+		return domain.Shell_Session{}, false, domain.Domain_Error{}
+	}
+	_, taken, taken_err := shell_session_create(&fx.svc, test_auth(), Shell_Session_Create_Input{bridge_id = "brg_1", kind = domain.Shell_Session_Kind_Shell, enc_spec = "vault:v2:x", session_id = "sh_ffffffffffffffffffffffffffffffff"})
+	testing.expect(t, !taken && taken_err.code == .Conflict, "an id already in use is never adopted")
+	_, _, _ = shell_session_create(&fx.svc, test_auth(), Shell_Session_Create_Input{bridge_id = "brg_1", kind = domain.Shell_Session_Kind_Shell, enc_spec = "vault:v2:x", session_id = ID})
+	sync.mutex_lock(&fx.sink.mu)
+	body := strings.clone(fx.sink.last_body, context.temp_allocator)
+	sync.mutex_unlock(&fx.sink.mu)
+	testing.expect(t, strings.contains(body, `"session_id":"` + ID + `"`), "the bridge is told the client's id verbatim")
+}
