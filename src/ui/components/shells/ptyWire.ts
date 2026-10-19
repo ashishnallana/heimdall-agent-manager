@@ -235,12 +235,50 @@ function cachedPtySubkey(baseKey: CryptoKey, salt: Uint8Array, sessionId: string
  * shows the locked notice); throws when the payload is malformed or does not
  * authenticate.
  */
+/** Thrown by decryptPtyPayload for an authentic frame the replay guard refuses. */
+export class PtyReplayError extends Error {
+  constructor() { super('replayed or reordered pty frame'); this.name = 'PtyReplayError'; }
+}
+
+/**
+ * Per-connection replay guard for PTY OUTPUT frames: within one salt (one sender
+ * stream / subkey) the nonce counter must strictly increase, so a replayed or
+ * reordered frame is dropped. A new salt starts fresh, but only for a frame that
+ * authenticated (the guard is consulted after decryption). Salts pushed out of the
+ * bounded table are remembered as retired and never start fresh again.
+ */
+export class PtyOutputReplayGuard {
+  private readonly last = new Map<string, bigint>();
+  private readonly retired = new Set<string>();
+  constructor(private readonly maxSalts = 8, private readonly maxRetired = 1024) {}
+
+  accept(salt: Uint8Array, counter: bigint): boolean {
+    const id = Array.from(salt, (b) => b.toString(16).padStart(2, '0')).join('');
+    const prev = this.last.get(id);
+    if (prev !== undefined) {
+      if (counter <= prev) return false;
+      this.last.delete(id); // re-insert below: Map order is recency
+    } else {
+      if (this.retired.has(id)) return false;
+      if (this.last.size >= this.maxSalts) {
+        const oldest = this.last.keys().next().value as string;
+        this.last.delete(oldest);
+        if (this.retired.size >= this.maxRetired) this.retired.delete(this.retired.values().next().value as string);
+        this.retired.add(oldest);
+      }
+    }
+    this.last.set(id, counter);
+    return true;
+  }
+}
+
 export async function decryptPtyPayload(
   payload: Uint8Array,
   keyring: VaultKeyring,
   sessionId: string,
   direction: PtyDirection = 'out',
   bootId?: string,
+  replay?: PtyOutputReplayGuard,
 ): Promise<Uint8Array | null> {
   if (payload.length < PTY_V2_HEADER_BYTES) {
     throw new Error(`Encrypted pty frame shorter than header (${payload.length} < ${PTY_V2_HEADER_BYTES})`);
@@ -268,6 +306,7 @@ export async function decryptPtyPayload(
     subkey,
     combined as unknown as BufferSource,
   );
+  if (replay && !replay.accept(salt, counter)) throw new PtyReplayError();
   return new Uint8Array(plain);
 }
 

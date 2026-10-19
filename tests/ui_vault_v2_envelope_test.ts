@@ -25,7 +25,7 @@ import {
 } from '../src/ui/utils/vaultCrypto.ts';
 import { importKeyring, keyFor, type VaultKeyring } from '../src/ui/utils/vaultKeyring.ts';
 import { decryptEmbeddedVaultTokens } from '../src/ui/utils/vaultContent.ts';
-import { decryptPtyPayload, derivePtySubkey, ptyAad, ptyBaseKeyFor, ptyNonce, sealPtyPayload } from '../src/ui/components/shells/ptyWire.ts';
+import { decryptPtyPayload, derivePtySubkey, ptyAad, ptyBaseKeyFor, ptyNonce, sealPtyPayload, PtyOutputReplayGuard, PtyReplayError } from '../src/ui/components/shells/ptyWire.ts';
 import { deriveTaskChainSearchKey } from '../src/ui/utils/taskChainSearchKey.ts';
 import { openTaskChainSearch, sealTaskChainSearch, taskChainSearchAad } from '../src/ui/utils/taskChainSearch.ts';
 
@@ -139,6 +139,25 @@ test('fs write v2 vector: path- and bridge-bound AAD', async () => {
   assert.equal(await openFsWriteContent(f.token, f.bridge_id, f.path, kr), f.plaintext);
   await assert.rejects(openFsWriteContent(f.token, f.bridge_id, 'src/other.ts', kr));
   await assert.rejects(decryptVaultText(f.token, kr));
+});
+
+test('PTY output replay guard: strictly increasing counter per salt; a new salt starts fresh only after it authenticates', async () => {
+  const kr = await vectorKeyring();
+  const c = V.pty.cases.find((x: any) => x.direction === 'out' && x.epoch === 2);
+  const base = (await ptyBaseKeyFor(kr, c.epoch))!;
+  const seal = (counter: number, salt = hex(c.salt)) => sealPtyPayload(new Uint8Array([1]), base, c.epoch, c.session_id, 'out', salt, counter);
+  const guard = new PtyOutputReplayGuard();
+  const f5 = await seal(5);
+  assert.ok(await decryptPtyPayload(f5, kr, c.session_id, 'out', undefined, guard));
+  await assert.rejects(decryptPtyPayload(f5, kr, c.session_id, 'out', undefined, guard), PtyReplayError, 'a replay is dropped');
+  await assert.rejects(decryptPtyPayload(await seal(4), kr, c.session_id, 'out', undefined, guard), PtyReplayError, 'a reorder is dropped');
+  assert.ok(await decryptPtyPayload(await seal(6), kr, c.session_id, 'out', undefined, guard));
+  const otherSalt = new Uint8Array(16).fill(7);
+  assert.ok(await decryptPtyPayload(await seal(1, otherSalt), kr, c.session_id, 'out', undefined, guard), 'a new salt starts fresh');
+  const forged = Uint8Array.from(await seal(1, new Uint8Array(16).fill(9)));
+  forged[forged.length - 1] ^= 1;
+  await assert.rejects(decryptPtyPayload(forged, kr, c.session_id, 'out', undefined, guard));
+  assert.ok(!(await decryptPtyPayload(await seal(2, new Uint8Array(16).fill(9)), kr, c.session_id, 'out', undefined, guard).then(() => false, () => true)), 'a forged frame did not register its salt');
 });
 
 test('search key v2 vector and epoch-bound RPC envelope', async () => {

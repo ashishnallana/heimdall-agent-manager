@@ -1,5 +1,5 @@
 import { PTY_COLOR_RESET, PaneDeliveryQueue, PaneWriteBatcher, normalizeSnapshotText, repaintCapturedScreenText } from './paneDeliveryQueue.ts';
-import { PTY_WIRE_FLAG_ENCRYPTED, PTY_WIRE_KIND_INPUT, PTY_WIRE_KIND_OUTPUT, PTY_WIRE_KIND_SCREEN, PTY_WIRE_VIEWER_HEADER_BYTES, PtyTextDecoder, decodePtyViewerFrame, decryptPtyPayload, encodePtyViewerFrame, encryptPtyPayload, resetPtyInputStream, setPtyBridgeBootId, type PtyDirection, type PtyViewerFrame } from './ptyWire.ts';
+import { PTY_WIRE_FLAG_ENCRYPTED, PTY_WIRE_KIND_INPUT, PTY_WIRE_KIND_OUTPUT, PTY_WIRE_KIND_SCREEN, PTY_WIRE_VIEWER_HEADER_BYTES, PtyTextDecoder, decodePtyViewerFrame, decryptPtyPayload, PtyOutputReplayGuard, PtyReplayError, encodePtyViewerFrame, encryptPtyPayload, resetPtyInputStream, setPtyBridgeBootId, type PtyDirection, type PtyViewerFrame } from './ptyWire.ts';
 import { decodeBase64Strict, type VaultKeyring } from '../../utils/vaultCrypto.ts';
 import { createInputCoalescer, type InputCoalescer } from './ptyInputCoalescer.ts';
 import { createVisibilityGate } from './paneVisibilityGate.ts';
@@ -359,6 +359,8 @@ export function useShellStream({
         let previousWasSnapshot = false;
         // REQ-PTY-NET-7: one term.write per animation frame; a repaint always leads its own write.
         const writeBatcher = new PaneWriteBatcher((text) => onOutputRef.current?.(text));
+        // Output frames of this connection: strictly increasing counter per salt.
+        const outputReplay = new PtyOutputReplayGuard();
 
         const showVaultLockedNoticeOnce = () => {
           console.warn('[useShellStream] vault is locked; cannot decrypt encrypted pane frame');
@@ -378,10 +380,11 @@ export function useShellStream({
             const isUnlocked = isVaultUnlockedRef.current || Boolean(activeKey);
             if (!isUnlocked || !activeKey) { showVaultLockedNoticeOnce(); return; }
             try {
-              const opened = await decryptPtyPayload(frame.payload, activeKey, String(streamSessionIdRef.current || ''), 'out');
+              const opened = await decryptPtyPayload(frame.payload, activeKey, String(streamSessionIdRef.current || ''), 'out', undefined, outputReplay);
               if (!opened) { showVaultLockedNoticeOnce(); return; }
               bytes = opened;
             } catch (err) {
+              if (err instanceof PtyReplayError) { console.warn('[useShellStream] dropped a replayed pane frame'); return; }
               console.error('[useShellStream] decryption failed for pane frame:', err);
               socket.close(4007, 'pane decryption failed');
               return;

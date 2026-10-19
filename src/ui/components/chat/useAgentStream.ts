@@ -1,5 +1,5 @@
 import { PTY_COLOR_RESET, PaneDeliveryQueue, PaneWriteBatcher, normalizeSnapshotText, repaintCapturedScreenText } from '../shells/paneDeliveryQueue.ts';
-import { PTY_WIRE_FLAG_ENCRYPTED, PTY_WIRE_KIND_INPUT, PTY_WIRE_KIND_OUTPUT, PTY_WIRE_KIND_SCREEN, PTY_WIRE_VIEWER_HEADER_BYTES, PtyTextDecoder, decodePtyViewerFrame, decryptPtyPayload, encodePtyViewerFrame, encryptPtyPayload, resetPtyInputStream, setPtyBridgeBootId, type PtyViewerFrame } from '../shells/ptyWire.ts';
+import { PTY_WIRE_FLAG_ENCRYPTED, PTY_WIRE_KIND_INPUT, PTY_WIRE_KIND_OUTPUT, PTY_WIRE_KIND_SCREEN, PTY_WIRE_VIEWER_HEADER_BYTES, PtyTextDecoder, decodePtyViewerFrame, decryptPtyPayload, PtyOutputReplayGuard, PtyReplayError, encodePtyViewerFrame, encryptPtyPayload, resetPtyInputStream, setPtyBridgeBootId, type PtyViewerFrame } from '../shells/ptyWire.ts';
 import { createInputCoalescer, type InputCoalescer } from '../shells/ptyInputCoalescer.ts';
 import { createVisibilityGate } from '../shells/paneVisibilityGate.ts';
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -322,6 +322,8 @@ export function useAgentStream({
         let previousWasSnapshot = false;
         // REQ-PTY-NET-7: one term.write per animation frame; a repaint always leads its own write.
         const writeBatcher = new PaneWriteBatcher((text) => onOutputRef.current?.(text));
+        // Output frames of this connection: strictly increasing counter per salt.
+        const outputReplay = new PtyOutputReplayGuard();
 
         const handleBinaryFrame = async (frame: PtyViewerFrame) => {
           if (activeConnectIdRef.current !== connectId) return;
@@ -333,10 +335,14 @@ export function useAgentStream({
             if (!isUnlocked || !keyToUse) return;
             try {
               // Agent panes are keyed by agent_instance_id end to end (hub and bridge).
-              const opened = await decryptPtyPayload(frame.payload, keyToUse, String(streamSessionIdRef.current || ''), 'out');
+              const opened = await decryptPtyPayload(frame.payload, keyToUse, String(streamSessionIdRef.current || ''), 'out', undefined, outputReplay);
               if (!opened) return; // epoch not held: stay locked rather than show ciphertext
               bytes = opened;
-            } catch { socket.close(4007, 'pane decryption failed'); return; }
+            } catch (err) {
+              if (err instanceof PtyReplayError) return; // replayed / reordered frame: drop it
+              socket.close(4007, 'pane decryption failed');
+              return;
+            }
             if (activeConnectIdRef.current !== connectId || socket.readyState !== WebSocket.OPEN) return;
           }
           const isScreen = frame.kind === PTY_WIRE_KIND_SCREEN;
