@@ -36,12 +36,14 @@ test_scope_canonical_hub_base :: proc(t: ^testing.T) {
 		{"https://hub-a.example.com:443/", "https://hub-a.example.com:443"},
 		{"http://10.0.0.5:8080/heimdall/", "http://10.0.0.5:8080/heimdall"},
 		{"http://[::1]:9000/x", "http://[::1]:9000/x"},
+		{"https://hub-a.example.com.:0443", "https://hub-a.example.com:443"},
+		{"http://127.0.0.1:08080", "http://127.0.0.1:8080"},
 	}
 	for c in cases {
 		got, ok := bridge_hub_canonical_base(c[0], context.temp_allocator)
 		testing.expectf(t, ok && got == c[1], "%s -> %s (want %s)", c[0], got, c[1])
 	}
-	for bad in ([]string{"ftp://hub", "https://hub/a?x=1", "https://hub/#f", "https://hub/a/../b", "https://"}) {
+	for bad in ([]string{"ftp://hub", "https://hub/a?x=1", "https://hub/#f", "https://hub/a/../b", "https://", "https://hub:0", "https://hub:65536", "https://hub:99999999999", "http://127.1", "http://2130706433", "http://0x7f.0.0.1", "http://127.000.0.1", "http://256.0.0.1", "https://hub..example.com"}) {
 		_, ok := bridge_hub_canonical_base(bad, context.temp_allocator)
 		testing.expectf(t, !ok, "%s must be refused", bad)
 	}
