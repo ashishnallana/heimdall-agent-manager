@@ -496,108 +496,11 @@ test('selection keys map arrows and Ctrl-N/Ctrl-P without Meta or Alt', () => {
   assert.equal(navigateIndex(0, 0, 'down'), 0, 'empty lists remain stable');
 });
 
-test('legacy remembered sessions offer a selector action that opens Vault reauthentication', async () => {
-  const { JSDOM } = await import('jsdom');
-  const dom = new JSDOM('<!DOCTYPE html><html><body><div id="root"></div></body></html>', { url: 'http://localhost/' });
-  (dom.window.HTMLElement.prototype as any).scrollIntoView = () => {};
-  const previous = {
-    window: (globalThis as any).window,
-    document: (globalThis as any).document,
-    HTMLElement: (globalThis as any).HTMLElement,
-    navigator: (globalThis as any).navigator,
-    fetch: (globalThis as any).fetch,
-  };
-  (globalThis as any).window = dom.window;
-  (globalThis as any).document = dom.window.document;
-  (globalThis as any).HTMLElement = dom.window.HTMLElement;
-  Object.defineProperty(globalThis, 'navigator', { value: dom.window.navigator, configurable: true });
-  (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
-  const fetchCalls: string[] = [];
-  (globalThis as any).fetch = async (input: any) => {
-    fetchCalls.push(String(input?.url ?? input));
-    const body = { groups: [] };
-    return { ok: true, status: 200, headers: { get: () => 'application/json' }, text: async () => JSON.stringify(body), json: async () => body } as any;
-  };
-
-  const { createRoot } = await import('react-dom/client');
-  const { act } = await import('react');
-  const { Provider } = await import('react-redux');
-  const { configureStore } = await import('@reduxjs/toolkit');
-  const { heimdallApi } = await import('../src/ui/api/heimdallApi.ts');
-  const vault = await import('../src/ui/store/vaultSlice.ts');
-  const { default: searchTitle } = await import('../src/ui/store/searchTitleSlice.ts');
-  const { AuthUserProvider } = await import('../src/ui/components/auth/AuthUserContext.tsx');
-  const { TaskChainSelectorModal } = await import('../src/ui/components/chains/TaskChainSelectorModal.tsx');
-  const store = configureStore({
-    reducer: {
-      vault: vault.default,
-      searchTitle,
-      [heimdallApi.reducerPath]: heimdallApi.reducer,
-    },
-    middleware: (getDefault: any) => getDefault({ serializableCheck: false, immutableCheck: false }).concat(heimdallApi.middleware),
-  });
-  const contentKey = await crypto.subtle.importKey(
-    'raw',
-    Uint8Array.from({ length: 32 }, () => 0x5a),
-    { name: 'AES-GCM' },
-    false,
-    ['encrypt', 'decrypt'],
-  );
-  vault.setActiveVaultKey(contentKey);
-  store.dispatch(vault.hydrateVaultFromSession());
-
-  const root = createRoot(dom.window.document.getElementById('root')!);
-  try {
-    await act(async () => {
-      root.render(React.createElement(
-        Provider,
-        { store },
-        React.createElement(
-          AuthUserProvider,
-          { value: { user_id: 'usr_legacy' } },
-          React.createElement(TaskChainSelectorModal, { open: true, onClose: () => {}, chainGroups: [] }),
-        ),
-      ));
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    });
-
-    const input = dom.window.document.querySelector('[data-debug-id="task-chain-selector-search-input"]') as HTMLInputElement;
-    await act(async () => {
-      const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, 'value')!.set!;
-      setter.call(input, 'legacy session');
-      input.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
-      await new Promise((resolve) => setTimeout(resolve, 225));
-    });
-
-    const action = dom.window.document.querySelector('[data-debug-id="task-chain-search-reauthenticate"]') as HTMLButtonElement;
-    assert.ok(action, 'the legacy-session search error exposes a reauthentication action');
-    assert.match(dom.window.document.querySelector('[data-debug-id="task-chain-search-state"]')?.textContent || '', /Re-enter your vault password once/);
-    await act(async () => {
-      action.click();
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    });
-    assert.equal((store.getState() as any).vault.isUnlockModalOpen, true);
-    assert.equal((store.getState() as any).vault.unlockModalPurpose, 'search-reauthentication');
-
-    await vault.setActiveBridgeVaultKeyMaterial('5a'.repeat(32));
-    await act(async () => {
-      store.dispatch(vault.setUnlockModalOpen(false));
-    });
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 250));
-    });
-    assert.equal((store.getState() as any).vault.isUnlockModalOpen, false);
-    assert.ok(fetchCalls.some((url) => url.includes('/bridges')), 'closing the successful unlock ceremony reruns the encrypted search');
-    assert.equal(dom.window.document.querySelector('[data-debug-id="task-chain-search-reauthenticate"]'), null);
-  } finally {
-    await act(async () => root.unmount());
-    store.dispatch(heimdallApi.util.resetApiState());
-    vault.setActiveVaultKey(null);
-    dom.window.close();
-    (globalThis as any).window = previous.window;
-    (globalThis as any).document = previous.document;
-    (globalThis as any).HTMLElement = previous.HTMLElement;
-    Object.defineProperty(globalThis, 'navigator', { value: previous.navigator, configurable: true });
-    (globalThis as any).fetch = previous.fetch;
+test('search errors without an installed key name no password, unlock or re-entry step', async () => {
+  const { taskChainSearchErrorMessage } = await import('../src/ui/utils/taskChainSearch.ts');
+  for (const code of ['vault_locked', 'search_key_unavailable']) {
+    const msg = taskChainSearchErrorMessage({ code });
+    assert.doesNotMatch(msg, /password|unlock|re-enter/i, code);
+    assert.notEqual(msg, taskChainSearchErrorMessage({ code: 'unknown_code' }), `${code} has its own message`);
   }
 });

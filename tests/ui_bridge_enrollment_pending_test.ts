@@ -1,18 +1,11 @@
 // REQ-EA-1/2/6: the browser half of atomic bridge enrollment — the API calls the
-// approval page and Settings make against a pending enrollment.
+// approval page and Settings make against a pending enrollment. (Key delivery to the
+// enrolling process is covered in ui_vault_bridge_delivery_test.ts.)
 //
 // RUN: node --import ./tests/helpers/vaultEndpointHarness.ts --test tests/ui_bridge_enrollment_pending_test.ts
 
-import { signedUnsealRecord, TEST_USER_ID } from './helpers/vaultTestKeyring.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { bytesToHex, setActiveVaultUserId } from '../src/ui/utils/vaultCrypto.ts';
-
-setActiveVaultUserId(TEST_USER_ID);
-
-const TEST_VAULT_KEY_HEX_RAW = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
@@ -86,67 +79,4 @@ test('REQ-EA-3: cancel posts to the per-bridge cancel endpoint', async () => {
   } finally {
     globalThis.fetch = realFetch;
   }
-});
-
-test('REQ-EA-2/7: delivery to an enrolling bridge names the target and the confirmed key; a refusal throws', async () => {
-  const realFetch = globalThis.fetch;
-  const bodies: any[] = [];
-  try {
-    const { unsealEnrollingBridgeE2EE } = await import('../src/ui/api/endpoints/bridges.ts');
-    const pair = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
-    const raw = new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey));
-    const pubHex = bytesToHex(raw).toUpperCase();
-
-    const record = await signedUnsealRecord('brg_p', pubHex);
-    const withKey = (handler: (url: string, init: any) => Promise<Response> | Response) => (async (url: any, init: any) => {
-      if (String(url).includes('/public-key')) {
-        assert.match(String(url), /enrollment=1/, 'the enrolling process key is requested');
-        return json({ data: record });
-      }
-      return handler(String(url), init);
-    }) as any;
-    globalThis.fetch = withKey((_url, init) => {
-      bodies.push(JSON.parse(String(init?.body || '{}')));
-      return json({ data: { ok: true, status: 'unlocked' } });
-    });
-    await unsealEnrollingBridgeE2EE('brg_p', pubHex, TEST_VAULT_KEY_HEX_RAW);
-    assert.equal(bodies[0].enrollment, true, 'the relay targets the enroll-only socket');
-    assert.equal(bodies[0].expected_public_key, pubHex.toLowerCase(), 'the hub compares against the operator-confirmed key');
-    assert.ok(bodies[0].ciphertext, 'the key itself travels sealed');
-
-    // The hub's enrollment_key_mismatch refusal must surface as an error, not a success.
-    globalThis.fetch = withKey(() => json({ error: { message: 'the connected enrolling process does not hold the key you confirmed', code: 'conflict', cause: 'enrollment_key_mismatch' } }, 409));
-    await assert.rejects(() => unsealEnrollingBridgeE2EE('brg_p', pubHex, TEST_VAULT_KEY_HEX_RAW), /does not hold the key/);
-
-    // A bridge that refused (e.g. could not persist) answers ok:false: not committed.
-    globalThis.fetch = withKey(() => json({ data: { ok: false, status: 'error', error: { message: 'credential could not be written' } } }));
-    await assert.rejects(() => unsealEnrollingBridgeE2EE('brg_p', pubHex, TEST_VAULT_KEY_HEX_RAW), /credential could not be written/);
-
-    // An unsigned ephemeral key is never sealed to.
-    bodies.length = 0;
-    globalThis.fetch = (async (url: any, init: any) => {
-      if (String(url).includes('/public-key')) return json({ data: { ...record, unseal_key_signature: '' } });
-      bodies.push(init?.body);
-      return json({ data: { ok: true } });
-    }) as any;
-    await assert.rejects(() => unsealEnrollingBridgeE2EE('brg_p', pubHex, TEST_VAULT_KEY_HEX_RAW), /unsigned/);
-    assert.equal(bodies.length, 0, 'nothing is sent for an unsigned key');
-  } finally {
-    globalThis.fetch = realFetch;
-  }
-});
-
-test('REQ-EA-6: a user with no vault creates it on the approval page, not via Settings', () => {
-  const source = fs.readFileSync(
-    fileURLToPath(new URL('../src/ui/components/enrollment/BridgeEnrollmentApprovalPage.tsx', import.meta.url)),
-    'utf8',
-  );
-  // The vault-required banner carries the setup button, and no longer sends the user away.
-  assert.match(source, /enrollment-vault-required[\s\S]*data-debug-id="enrollment-vault-setup-btn"[\s\S]*onClick=\{\(\) => setVaultSetupOpen\(true\)\}/);
-  assert.doesNotMatch(source, /Create one in Settings/);
-  // The button opens the shared create-and-unlock modal, controlled by the page.
-  assert.match(source, /import VaultOnboardingModal from '\.\.\/settings\/VaultOnboardingModal'/);
-  assert.match(source, /<VaultOnboardingModal\s+open=\{vaultSetupOpen\}\s+onOpenChange=\{setVaultSetupOpen\}/);
-  // Approve stays gated on the vault query, which the modal refetches after creation.
-  assert.match(source, /const vaultRequired = isBridge && !vaultQuery\.isLoading && !vaultEnvelope;/);
 });

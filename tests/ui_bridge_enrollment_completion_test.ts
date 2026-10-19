@@ -11,13 +11,7 @@ import {
   nextAvailableBridgeLabel,
   RESTART_CONFIRMATION_TIMEOUT_SECONDS,
   RESTART_SEALED_CONFIRM_POLLS,
-  WRONG_MASTER_PASSWORD_MESSAGE,
 } from '../src/ui/components/enrollment/bridgeEnrollmentCompletion.ts';
-import {
-  getActiveBridgeVaultKeyMaterial,
-  setActiveBridgeVaultKeyMaterial,
-  setActiveVaultKey,
-} from '../src/ui/utils/vaultCrypto.ts';
 
 test('completion requires the exact approved bridge to be online', () => {
   const bridges = [
@@ -43,20 +37,6 @@ test('new bridge names start at hostname and use the first free numeric suffix',
     'dawnstar-3',
   );
   assert.equal(nextAvailableBridgeLabel('', []), 'bridge');
-});
-
-test('bridge key material is session-only and invalidated whenever the active key changes', () => {
-  const raw = 'ab'.repeat(32);
-  setActiveVaultKey({} as CryptoKey);
-  setActiveBridgeVaultKeyMaterial(raw);
-  assert.equal(getActiveBridgeVaultKeyMaterial(), raw);
-
-  setActiveVaultKey({} as CryptoKey);
-  assert.equal(getActiveBridgeVaultKeyMaterial(), null);
-
-  setActiveBridgeVaultKeyMaterial(raw);
-  setActiveVaultKey(null);
-  assert.equal(getActiveBridgeVaultKeyMaterial(), null);
 });
 
 test('provider setup route retains the enrolled bridge id', () => {
@@ -158,10 +138,6 @@ test('continue to provider selection stays available in every terminal state', (
   for (const phase of ['idle', 'waiting-for-bridge', 'timed-out']) {
     assert.equal(enrollmentContinueAvailable(phase), false, phase);
   }
-});
-
-test('a wrong master password gets one plain, browser-independent message', () => {
-  assert.equal(WRONG_MASTER_PASSWORD_MESSAGE, 'Incorrect master password. Try again.');
 });
 
 test('REQ-T4-4: nothing but a restarted bridge reporting `unlocked` is ever confirmed', () => {
