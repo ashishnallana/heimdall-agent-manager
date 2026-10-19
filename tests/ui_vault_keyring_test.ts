@@ -141,7 +141,7 @@ test('unseal v2 vector: fixed inputs reproduce ciphertext and tag', async () => 
   const clientPrivate = await importP256Private(u.client_private_key, u.client_public_key, 'ECDH');
   const clientPublic = await crypto.subtle.importKey('raw', hex(u.client_public_key), { name: 'ECDH', namedCurve: 'P-256' }, true, []);
   const bytes = hex(u.keyring_hex);
-  const payload = await prepareUnsealPayload(vectorTarget(), bytes, {
+  const payload = await prepareUnsealPayload(vectorTarget(), bytes, V.bridge_chain.proof as any, {
     timestamp: u.timestamp,
     nonce: u.nonce,
     iv: hex(u.iv),
@@ -174,5 +174,5 @@ test('unseal refuses an unsigned, wrongly signed or mismatched ephemeral key', a
     assert.ok(bytes.every((x) => x === 0), `${name}: keyring bytes zeroed even on refusal`);
   }
   // A raw 32-byte key is not a keyring.
-  await assert.rejects(prepareUnsealPayload(vectorTarget(), hex(V.epoch_keys['1'])), /Invalid vault keyring/);
+  await assert.rejects(prepareUnsealPayload(vectorTarget(), hex(V.epoch_keys['1']), V.bridge_chain.proof as any), /Invalid vault keyring/);
 });

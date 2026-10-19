@@ -148,12 +148,16 @@ export async function signP256(privateKey: CryptoKey, msg: Uint8Array): Promise<
 
 // ── canonical statements ─────────────────────────────────────────────────────
 
-export const STATEMENT_HEADER = 'heimdall-vault-statement/v1';
-export const STATEMENT_TYPES = ['genesis', 'approve', 'revoke', 'epoch', 'wrap', 'recovery', 'register'] as const;
+export const STATEMENT_HEADER = 'heimdall-vault-statement/v2';
+export const STATEMENT_TYPES = ['genesis', 'approve', 'revoke', 'rotate', 'wrap', 'register'] as const;
+/** Statement types that occupy a slot in the signed directory log. */
+export const LOG_OP_TYPES = ['genesis', 'approve', 'revoke', 'rotate'] as const;
+/** Log ops that introduce a new current epoch (their epoch + epoch_commit). */
+export const EPOCH_INTRODUCING_TYPES = ['genesis', 'revoke', 'rotate'] as const;
 export type StatementType = (typeof STATEMENT_TYPES)[number];
 
 export const STATEMENT_FIELDS = [
-  'type', 'user_id', 'directory_version', 'issuer_device_id', 'issued_at_ms',
+  'type', 'user_id', 'seq', 'prev_hash', 'issuer_device_id', 'issued_at_ms',
   'subject_device_id', 'subject_kind', 'subject_sign_pub', 'subject_ecdh_pub',
   'subject_sign_alg', 'subject_wrap_alg', 'subject_label_b64', 'epoch', 'epoch_commit', 'wrap_sha256',
 ] as const;
@@ -179,6 +183,15 @@ export function statementCanonical(st: Statement): string {
 export async function epochCommit(epochKeyRaw: Uint8Array, userId: string, epoch: number): Promise<Uint8Array> {
   const k = await crypto.subtle.importKey('raw', epochKeyRaw as unknown as BufferSource, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
   return new Uint8Array(await crypto.subtle.sign('HMAC', k, utf8.encode(`heimdall-epoch-commit|${userId}|${epoch}`)));
+}
+
+/**
+ * Directory log entry hash: lowercase hex SHA-256 of the canonical statement bytes.
+ * The signature is NOT hashed (ECDSA signatures are malleable; see lib/vault
+ * directory.odin). A log op's prev_hash is the previous op's entry hash.
+ */
+export async function logEntryHash(statement: string): Promise<string> {
+  return toLowerHex(new Uint8Array(await crypto.subtle.digest('SHA-256', utf8.encode(statement) as unknown as BufferSource)));
 }
 
 export const BRIDGE_UNSEAL_KEY_HEADER = 'heimdall-bridge-unseal-key/v1';

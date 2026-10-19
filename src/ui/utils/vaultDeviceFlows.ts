@@ -4,7 +4,7 @@
 // or wrap to, anything the chain does not vouch for.
 
 import { deviceIdFor, deviceSubject, fingerprintFor, labelB64, signDeviceText, type DeviceIdentity } from './deviceIdentity.ts';
-import { remainingApprovers, wrapRecipients, type VerifiedChain, type VerifiedDevice } from './vaultDirectoryVerify.ts';
+import { nextLogSlot, remainingApprovers, wrapRecipients, type VerifiedChain, type VerifiedDevice } from './vaultDirectoryVerify.ts';
 import { epochCommitHex, sealKeyringWrap, type SignedKeyringWrap } from './vaultKeyringWrap.ts';
 import { genesisKeyringBytes, nextEpochKeyringBytes } from './vaultKeyringSession.ts';
 import {
@@ -39,22 +39,22 @@ export async function buildRegistration(identity: DeviceIdentity, label: string,
 }
 
 /**
- * Genesis body for the first device: a fresh epoch-1 keyring, self-wrapped, plus the
- * self-signed genesis and epoch-1 statements. The keyring bytes are zeroed here.
+ * Genesis body for the first device: a fresh epoch-1 keyring, self-wrapped at version 1,
+ * plus the self-signed genesis (log seq 1, introduces epoch 1). The keyring bytes are
+ * zeroed here.
  */
 export async function buildGenesis(identity: DeviceIdentity, label: string, now = Date.now()): Promise<GenesisBody> {
   const userId = identity.userId;
   const kr = genesisKeyringBytes(userId);
   try {
     const commit = await epochCommitHex(kr, userId, 1);
-    const wrap = await sealKeyringWrap(identity, userId, { device_id: identity.deviceId, ecdh_public_key: identity.ecdhPub, wrap_alg: identity.wrapAlg }, 0, kr);
+    const wrap = await sealKeyringWrap(identity, userId, { device_id: identity.deviceId, ecdh_public_key: identity.ecdhPub, wrap_alg: identity.wrapAlg }, 1, kr);
     const ts = String(now);
     const genesis = statementCanonical({
-      ...deviceSubject(identity, label), type: 'genesis', user_id: userId, directory_version: '0', issuer_device_id: identity.deviceId,
+      ...deviceSubject(identity, label), type: 'genesis', user_id: userId, seq: '1', prev_hash: '', issuer_device_id: identity.deviceId,
       issued_at_ms: ts, epoch: '1', epoch_commit: commit, wrap_sha256: wrap.sha,
     });
-    const epoch = statementCanonical({ type: 'epoch', user_id: userId, directory_version: '0', issuer_device_id: identity.deviceId, issued_at_ms: ts, epoch: '1', epoch_commit: commit });
-    return { genesis_statement: genesis, signature: await sig(identity, genesis), epoch_statement: epoch, epoch_signature: await sig(identity, epoch), wrap: wrap.json };
+    return { genesis_statement: genesis, signature: await sig(identity, genesis), wrap: wrap.json };
   } finally {
     kr.fill(0);
   }
@@ -87,10 +87,12 @@ export async function buildBrowserApproval(
   requireApprover(chain, approver);
   await checkBrowserCodeInfo(info);
   if (chain.trusted.has(info.device_id)) throw new FlowRefused('This device is already approved');
-  const wrap = await sealKeyringWrap(approver, chain.userId, { device_id: info.device_id, ecdh_public_key: info.ecdh_public_key, wrap_alg: info.wrap_alg }, chain.version, keyringBytes);
+  if (chain.everApproved.has(info.device_id)) throw new FlowRefused('This device key was approved before and cannot be approved again');
+  const slot = nextLogSlot(chain);
+  const wrap = await sealKeyringWrap(approver, chain.userId, { device_id: info.device_id, ecdh_public_key: info.ecdh_public_key, wrap_alg: info.wrap_alg }, chain.version + 1, keyringBytes);
   if (wrap.json.current_epoch !== chain.currentEpoch) throw new FlowRefused('Keyring is not at the signed current epoch');
   const statement = statementCanonical({
-    type: 'approve', user_id: chain.userId, directory_version: String(chain.version), issuer_device_id: approver.deviceId, issued_at_ms: String(now),
+    type: 'approve', user_id: chain.userId, ...slot, issuer_device_id: approver.deviceId, issued_at_ms: String(now),
     subject_device_id: info.device_id, subject_kind: 'browser', subject_sign_pub: info.sign_public_key, subject_ecdh_pub: info.ecdh_public_key,
     subject_sign_alg: info.sign_alg, subject_wrap_alg: info.wrap_alg, subject_label_b64: labelB64(label || 'browser'),
     epoch: String(chain.currentEpoch), epoch_commit: chain.commits.get(chain.currentEpoch) ?? '', wrap_sha256: wrap.sha,
@@ -104,8 +106,9 @@ export async function buildBridgeApproval(approver: DeviceIdentity, chain: Verif
   const identityPub = String(info.bridge_identity_public_key || '').trim();
   const subjectId = await deviceIdFor(identityPub); // throws on a malformed key
   if (chain.trusted.has(subjectId)) throw new FlowRefused('This bridge identity is already approved');
+  if (chain.everApproved.has(subjectId)) throw new FlowRefused('This bridge identity was approved before and cannot be approved again');
   const statement = statementCanonical({
-    type: 'approve', user_id: chain.userId, directory_version: String(chain.version), issuer_device_id: approver.deviceId, issued_at_ms: String(now),
+    type: 'approve', user_id: chain.userId, ...nextLogSlot(chain), issuer_device_id: approver.deviceId, issued_at_ms: String(now),
     subject_device_id: subjectId, subject_kind: 'bridge', subject_sign_pub: identityPub, subject_ecdh_pub: '',
     subject_sign_alg: SIGN_ALG_ECDSA_P256_SHA256, subject_wrap_alg: '', subject_label_b64: labelB64(label || 'bridge'),
     epoch: String(chain.currentEpoch), epoch_commit: chain.commits.get(chain.currentEpoch) ?? '',
@@ -119,9 +122,10 @@ export async function bridgeIdentityFingerprint(identityPubHex: string): Promise
 }
 
 /**
- * Revocation of `targetId` with rotation to a new epoch. Wraps go to EXACTLY the
- * chain-trusted wrap recipients minus the target (never to an untrusted row).
- * Returns the body and the next keyring bytes (caller zeroes them).
+ * Revocation of `targetId`: ONE signed `revoke` log op that names the target and
+ * introduces epoch current+1 (so a revocation can never be split from its rotation).
+ * Wraps go to EXACTLY the chain-trusted wrap recipients minus the target, at the
+ * version the op creates. Returns the body and the next keyring bytes (caller zeroes).
  */
 export async function buildRevocation(
   approver: DeviceIdentity,
@@ -139,23 +143,18 @@ export async function buildRevocation(
   try {
     const epoch = chain.currentEpoch + 1;
     const commit = await epochCommitHex(next, chain.userId, epoch);
-    const ts = String(now);
     const revoke = statementCanonical({
-      type: 'revoke', user_id: chain.userId, directory_version: String(chain.version), issuer_device_id: approver.deviceId, issued_at_ms: ts,
+      type: 'revoke', user_id: chain.userId, ...nextLogSlot(chain), issuer_device_id: approver.deviceId, issued_at_ms: String(now),
       subject_device_id: target.device_id, subject_kind: target.kind, subject_sign_pub: target.sign_public_key, subject_ecdh_pub: target.ecdh_public_key,
-      subject_sign_alg: target.sign_alg, subject_wrap_alg: target.wrap_alg, subject_label_b64: labelB64(target.label),
+      subject_sign_alg: target.sign_alg, subject_wrap_alg: target.wrap_alg, subject_label_b64: labelB64(target.label || target.kind),
       epoch: String(epoch), epoch_commit: commit,
     });
-    const epochSt = statementCanonical({ type: 'epoch', user_id: chain.userId, directory_version: String(chain.version), issuer_device_id: approver.deviceId, issued_at_ms: ts, epoch: String(epoch), epoch_commit: commit });
     const wraps: SignedKeyringWrap[] = [];
     for (const d of wrapRecipients(chain)) {
       if (d.device_id === targetId) continue;
-      wraps.push((await sealKeyringWrap(approver, chain.userId, d, chain.version, next)).json);
+      wraps.push((await sealKeyringWrap(approver, chain.userId, d, chain.version + 1, next)).json);
     }
-    const body: RevokeBody = {
-      expected_version: chain.version, revoke_statement: revoke, signature: await sig(approver, revoke),
-      epoch_statement: epochSt, epoch_signature: await sig(approver, epochSt), wraps,
-    };
+    const body: RevokeBody = { expected_version: chain.version, revoke_statement: revoke, signature: await sig(approver, revoke), wraps };
     return { body, nextKeyring: next };
   } catch (err) {
     next.fill(0);
@@ -164,10 +163,9 @@ export async function buildRevocation(
 }
 
 /**
- * Rotation without a revocation (POST /vault/directory/rotate), e.g. after the hub
- * retired a bridge identity that may hold the current keyring. Same epoch-advance as
- * revoke: new key at current+1, epoch statement, wraps to EXACTLY the chain-trusted
- * wrap recipients. Returns the body and the next keyring bytes (caller zeroes them).
+ * Explicit user-initiated rotation (POST /vault/directory/rotate): one signed
+ * `rotate` log op with no subject, introducing epoch current+1, and wraps to EXACTLY
+ * the chain-trusted wrap recipients. Returns the body and the next keyring bytes.
  */
 export async function buildRotation(
   approver: DeviceIdentity,
@@ -180,10 +178,10 @@ export async function buildRotation(
   try {
     const epoch = chain.currentEpoch + 1;
     const commit = await epochCommitHex(next, chain.userId, epoch);
-    const epochSt = statementCanonical({ type: 'epoch', user_id: chain.userId, directory_version: String(chain.version), issuer_device_id: approver.deviceId, issued_at_ms: String(now), epoch: String(epoch), epoch_commit: commit });
+    const statement = statementCanonical({ type: 'rotate', user_id: chain.userId, ...nextLogSlot(chain), issuer_device_id: approver.deviceId, issued_at_ms: String(now), epoch: String(epoch), epoch_commit: commit });
     const wraps: SignedKeyringWrap[] = [];
-    for (const d of wrapRecipients(chain)) wraps.push((await sealKeyringWrap(approver, chain.userId, d, chain.version, next)).json);
-    return { body: { expected_version: chain.version, epoch_statement: epochSt, epoch_signature: await sig(approver, epochSt), wraps }, nextKeyring: next };
+    for (const d of wrapRecipients(chain)) wraps.push((await sealKeyringWrap(approver, chain.userId, d, chain.version + 1, next)).json);
+    return { body: { expected_version: chain.version, statement, signature: await sig(approver, statement), wraps }, nextKeyring: next };
   } catch (err) {
     next.fill(0);
     throw err;
@@ -201,13 +199,16 @@ export interface RotateDeps {
 export type RotateOutcome = { kind: 'rotated'; epoch: number } | { kind: 'not-needed' };
 
 /**
- * Rotate when the verified chain recommends it. On a 409, re-fetch and re-verify; if
- * another device already rotated (no longer recommended), stop — never rotate twice.
+ * Rotate once (explicit user action). On a 409, re-fetch and re-verify; if the epoch
+ * already advanced meanwhile (another device rotated or revoked), stop — never
+ * rotate twice for one request.
  */
 export async function rotateWithRetry(approver: DeviceIdentity, deps: RotateDeps): Promise<RotateOutcome> {
+  let startEpoch = 0;
   for (let attempt = 0; attempt < 2; attempt++) {
     const chain = await deps.fetchChain();
-    if (!chain.rotationRecommended) return { kind: 'not-needed' };
+    if (attempt === 0) startEpoch = chain.currentEpoch;
+    else if (chain.currentEpoch > startEpoch) return { kind: 'not-needed' };
     let nextKeyring: Uint8Array | null = null;
     try {
       await deps.withKeyringBytes(chain, async (bytes) => {
@@ -249,7 +250,7 @@ export async function revokeWithRetry(approver: DeviceIdentity, targetId: string
   for (let attempt = 0; attempt < 2; attempt++) {
     const chain = await deps.fetchChain();
     if (!chain.trusted.has(targetId)) {
-      if (attempt > 0 || chain.revoked.some((d) => d.device_id === targetId)) return { kind: 'already-revoked' };
+      if (attempt > 0 || chain.revokedIds.has(targetId)) return { kind: 'already-revoked' };
       throw new FlowRefused('That device is not approved');
     }
     let posted: { directory_version: number } | null = null;

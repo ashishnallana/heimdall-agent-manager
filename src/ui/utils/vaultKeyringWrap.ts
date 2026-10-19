@@ -120,7 +120,7 @@ export async function sealKeyringWrap(
 
 function wrapStatement(userId: string, w: KeyringWrap, sha: string): string {
   return statementCanonical({
-    type: 'wrap', user_id: userId, directory_version: String(w.directory_version), issuer_device_id: w.wrapped_by_device_id,
+    type: 'wrap', user_id: userId, seq: String(w.directory_version), issuer_device_id: w.wrapped_by_device_id,
     subject_device_id: w.recipient_device_id, epoch: String(w.current_epoch), wrap_sha256: sha,
   });
 }
@@ -130,14 +130,12 @@ export interface OpenWrapExpectation {
   recipientDeviceId: string;
   recipientEcdhPrivate: CryptoKey;
   chain: VerifiedChain;
-  /** When set, the wrap's directory_version must equal it. */
-  directoryVersion?: number;
 }
 
 /**
  * Verify and open a wrap addressed to this device. Returns the parsed keyring (the
  * caller zeroes the entry keys). Refuses: wrong recipient, wrong version, a maker
- * that is not a chain-trusted approver, a bad wrap signature, an AAD mismatch, a
+ * (outside the current epoch's segment of the verified log), a maker that is not a chain-trusted approver, a bad wrap signature, an AAD mismatch, a
  * keyring for another user/epoch, or an epoch_commit that differs from the signed one.
  */
 export async function openVerifiedWrap(wrapJson: unknown, exp: OpenWrapExpectation): Promise<ParsedKeyringBytes> {
@@ -146,8 +144,15 @@ export async function openVerifiedWrap(wrapJson: unknown, exp: OpenWrapExpectati
   const w = rest as KeyringWrap;
   if (v !== 1) throw new WrapRejectedError('unknown wrap version');
   if (w.recipient_device_id !== exp.recipientDeviceId) throw new WrapRejectedError('wrap names a different recipient');
-  if (exp.directoryVersion !== undefined && w.directory_version !== exp.directoryVersion) throw new WrapRejectedError('wrap names a different directory version');
   if (w.current_epoch !== exp.chain.currentEpoch) throw new WrapRejectedError('wrap epoch is not the signed current epoch');
+  // A wrap is made by the log op that creates it (the approval of its recipient, or the
+  // genesis/revoke/rotate that introduced the current epoch), so its directory_version
+  // must lie within the current epoch's segment of the VERIFIED log: from the op that
+  // introduced the current epoch up to the verified head.
+  const epochStart = exp.chain.epochs.get(exp.chain.currentEpoch)?.seq ?? Number.POSITIVE_INFINITY;
+  if (!Number.isSafeInteger(w.directory_version) || w.directory_version < epochStart || w.directory_version > exp.chain.version) {
+    throw new WrapRejectedError('wrap names a directory version outside the current epoch of the verified log');
+  }
   const maker = exp.chain.trusted.get(w.wrapped_by_device_id);
   if (!maker || !kindPolicy(maker.kind).canApprove) throw new WrapRejectedError('wrap made by a device that is not a chain-trusted approver');
   let sha: string;

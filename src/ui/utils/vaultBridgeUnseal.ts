@@ -129,11 +129,14 @@ export async function prepareUnsealPayload(
 ): Promise<BridgeUnsealPayload> {
   try {
     await verifyBridgeUnsealKey(target);
-    if (!chainProof || chainProof.v !== 1) throw new Error('Missing keyring chain proof; unseal refused');
+    if (!chainProof || chainProof.v !== 2 || !Array.isArray(chainProof.epochs)) throw new Error('Missing keyring chain proof; unseal refused');
     const parsed = parseKeyringBytes(keyringBytes, chainProof.user_id);
     for (const e of parsed.entries) e.key.fill(0);
     const currentEpoch = parsed.currentEpoch;
-    if (chainProof.epoch.epoch !== currentEpoch) throw new Error('Chain proof is for a different epoch than the keyring; unseal refused');
+    // The bridge requires exactly one signed carrier per keyring epoch, in order.
+    const carriers = parsed.entries.map((e) => chainProof.epochs.find((c) => c.epoch === e.epoch));
+    if (carriers.some((c) => !c)) throw new Error('Chain proof does not attest every epoch in the keyring; unseal refused');
+    chainProof = { ...chainProof, epochs: carriers as BridgeChainProof['epochs'] };
 
     const publicKey = target.publicKey.trim().toLowerCase();
     const clientKeyPair = options?.clientKeyPair ?? await crypto.subtle.generateKey(

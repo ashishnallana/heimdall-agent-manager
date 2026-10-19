@@ -213,6 +213,15 @@ export async function forgetDeviceState(store: DeviceKeyValueStore, userId: stri
   await store.delete(pinsKey(userId));
 }
 
+/**
+ * Forget only this browser's identity keys for `userId`, KEEPING its pins: used after
+ * a revocation verified in the signed log, so the browser can re-enroll under a new
+ * identity and still refuses a swapped root or a rolled-back log.
+ */
+export async function forgetDeviceIdentity(store: DeviceKeyValueStore, userId: string): Promise<void> {
+  await store.delete(identityKey(requireUserId(userId)));
+}
+
 /** Sign UTF-8 text with the device's identity key; returns the signature object JSON text. */
 export async function signDeviceText(identity: DeviceIdentity, text: string): Promise<string> {
   return signP256(identity.signPrivateKey, utf8.encode(text));
@@ -252,10 +261,17 @@ export function deviceSubject(identity: DeviceIdentity, label: string): Statemen
 
 // ── pins ─────────────────────────────────────────────────────────────────────
 
+/**
+ * What this device has verified about the account directory: the root, and the head
+ * of the signed log (seq + entry hash). A later directory must keep the root and
+ * EXTEND this head (vaultDirectoryVerify checks the op at head_seq hashes to
+ * head_hash), so a rollback or a fork is refused.
+ */
 export interface DevicePins {
   readonly root_device_id: string;
   readonly root_sign_pub: string;
-  readonly max_directory_version: number;
+  readonly head_seq: number;
+  readonly head_hash: string;
   readonly max_epoch: number;
 }
 
@@ -269,7 +285,7 @@ export class PinViolationError extends Error {
 function isPins(v: unknown): v is DevicePins {
   const p = v as DevicePins;
   return Boolean(p) && typeof p.root_device_id === 'string' && isLowerHex(p.root_sign_pub, 65)
-    && Number.isSafeInteger(p.max_directory_version) && Number.isSafeInteger(p.max_epoch);
+    && Number.isSafeInteger(p.head_seq) && p.head_seq >= 1 && isLowerHex(p.head_hash, 32) && Number.isSafeInteger(p.max_epoch);
 }
 
 export async function loadPins(store: DeviceKeyValueStore, userId: string): Promise<DevicePins | null> {
@@ -279,26 +295,70 @@ export async function loadPins(store: DeviceKeyValueStore, userId: string): Prom
   return v;
 }
 
-/** Throws PinViolationError when `next` swaps the root or moves version/epoch backwards. */
+/**
+ * Throws PinViolationError when `next` swaps the root or moves the head/epoch
+ * backwards. (That the log EXTENDS the pinned head is checked by verifyDirectory,
+ * which holds every op hash.)
+ */
 export function checkAgainstPins(pins: DevicePins | null, next: DevicePins): void {
   if (!pins) return;
   if (next.root_device_id !== pins.root_device_id || next.root_sign_pub !== pins.root_sign_pub) {
     throw new PinViolationError('the account root differs from the pinned root');
   }
-  if (next.max_directory_version < pins.max_directory_version) throw new PinViolationError('directory version rolled back');
+  if (next.head_seq < pins.head_seq) throw new PinViolationError('directory log rolled back');
+  if (next.head_seq === pins.head_seq && next.head_hash !== pins.head_hash) throw new PinViolationError('directory log forked from the pinned head');
   if (next.max_epoch < pins.max_epoch) throw new PinViolationError('epoch rolled back');
 }
 
-/** Advance the pins monotonically (never lowers anything; refuses a root change). */
+/** Advance the pins to a verified head (never backwards; refuses a root change). */
 export async function advancePins(store: DeviceKeyValueStore, userId: string, next: DevicePins): Promise<DevicePins> {
   const current = await loadPins(store, userId);
   checkAgainstPins(current, next);
   const merged: DevicePins = {
     root_device_id: next.root_device_id,
     root_sign_pub: next.root_sign_pub,
-    max_directory_version: Math.max(current?.max_directory_version ?? 0, next.max_directory_version),
+    head_seq: next.head_seq,
+    head_hash: next.head_hash,
     max_epoch: Math.max(current?.max_epoch ?? 0, next.max_epoch),
   };
   await store.put(pinsKey(userId), merged);
+  await rememberPinnedUser(store, userId);
   return merged;
+}
+
+// ── accounts seen on this browser (finding M2) ──────────────────────────────
+//
+// Identity and pins are keyed per user id, so a hub that changes the /me user id
+// would silently get a fresh, unpinned TOFU (genesis or account confirmation) on an
+// established browser. This browser therefore remembers every user id it pinned; a
+// different id never gets AUTOMATIC genesis/confirmation — the user is warned and
+// must explicitly accept it as their other account.
+
+const PINNED_USERS_KEY = 'pinned-users';
+const otherAccountAckKey = (userId: string) => `other-account-ack:${userId}`;
+
+async function pinnedUsers(store: DeviceKeyValueStore): Promise<string[]> {
+  const v = await store.get(PINNED_USERS_KEY);
+  return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+}
+
+async function rememberPinnedUser(store: DeviceKeyValueStore, userId: string): Promise<void> {
+  const users = await pinnedUsers(store);
+  if (!users.includes(userId)) await store.put(PINNED_USERS_KEY, [...users, userId]);
+}
+
+/**
+ * The other account ids this browser already holds pins for, when `userId` has none
+ * and the user has not explicitly accepted it. Empty: no warning is needed.
+ */
+export async function otherPinnedAccounts(store: DeviceKeyValueStore, userId: string): Promise<string[]> {
+  requireUserId(userId);
+  if (await store.get(pinsKey(userId))) return [];
+  if (await store.get(otherAccountAckKey(userId))) return [];
+  return (await pinnedUsers(store)).filter((u) => u !== userId);
+}
+
+/** The user explicitly accepted `userId` as a separate account on this browser. */
+export async function acknowledgeOtherAccount(store: DeviceKeyValueStore, userId: string): Promise<void> {
+  await store.put(otherAccountAckKey(requireUserId(userId)), true);
 }

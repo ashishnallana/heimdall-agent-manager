@@ -11,9 +11,12 @@ import * as vaultApi from '../api/endpoints/vaultDevices';
 import { ApiError } from '../api/cookieFetch';
 import {
   accountFingerprint,
+  acknowledgeOtherAccount,
   advancePins,
   createDeviceIdentity,
+  forgetDeviceIdentity,
   forgetDeviceState,
+  otherPinnedAccounts,
   indexedDbDeviceStore,
   loadDeviceIdentity,
   loadPins,
@@ -24,6 +27,7 @@ import { isVaultSupported } from '../utils/vaultCrypto';
 import { pinsFromChain, trustedBridgeById, verifyDirectory, type VaultDirectory, type VerifiedChain } from '../utils/vaultDirectoryVerify';
 import { clearKeyringSession, getKeyringSession, installKeyringFromWrap, withKeyringBytes } from '../utils/vaultKeyringSession';
 import { buildGenesis, buildRegistration, revokeWithRetry, rotateWithRetry, type RevokeOutcome, type RotateOutcome } from '../utils/vaultDeviceFlows';
+import { kindPolicy } from '../utils/vaultStatements';
 import { deliverKeyringToBridges, type BridgeDeliveryDeps, type BridgeFanoutResult } from '../utils/vaultBridgeDelivery';
 import {
   deviceVaultBusy,
@@ -57,8 +61,10 @@ interface Ctx {
   userId: string;
   dispatch: Dispatch;
   identity: DeviceIdentity | null;
-  /** Approved but awaiting the account-fingerprint confirmation. */
-  pendingInstall: { chain: VerifiedChain; wrap: unknown } | null;
+  /** Approved but awaiting the account-fingerprint confirmation (snapshot + token). */
+  pendingInstall: { chain: VerifiedChain; wrap: unknown; fingerprint: string; token: number } | null;
+  /** The signed log revoked this device (verified): it may re-enroll with a new identity. */
+  revokedVerified: boolean;
   pollTimer: ReturnType<typeof setInterval> | null;
   seq: number;
   lastPendingIds: Set<string>;
@@ -157,8 +163,9 @@ async function publishChain(chain: VerifiedChain, dir: VaultDirectory): Promise<
     reset: resetFrom(dir),
     pendingDevices: pendingFrom(chain),
   }));
-  // Only a device whose keyring is installed may rotate.
-  if (chain.rotationRecommended && getKeyringSession()) scheduleAutoRotate();
+  // Hub retirement hints for trusted bridges: an approved device with its keyring
+  // installed signs their real revoke (rate-limited, see scheduleHintRevocation).
+  if (chain.retiredHints.length > 0 && getKeyringSession()) scheduleHintRevocation(chain);
 }
 
 /** Start (or restart) the device vault for `userId`. Idempotent for the same user while running. */
@@ -166,7 +173,7 @@ export async function bootDeviceVault(userId: string, dispatch: Dispatch): Promi
   if (ctx && ctx.userId === userId && ctx.identity) return refreshDeviceVault('boot');
   stopPolling();
   if (ctx && ctx.userId !== userId) purgeKeys(dispatch);
-  ctx = { userId, dispatch, identity: null, pendingInstall: null, pollTimer: null, seq: 0, lastPendingIds: new Set() };
+  ctx = { userId, dispatch, identity: null, pendingInstall: null, revokedVerified: false, pollTimer: null, seq: 0, lastPendingIds: new Set() };
   dispatch(deviceVaultStatusChanged({ status: 'initializing', userId }));
   if (!isVaultSupported() || (typeof indexedDB === 'undefined' && !deps?.kv)) {
     dispatch(deviceVaultStatusChanged({ status: 'unsupported', userId }));
@@ -183,11 +190,25 @@ export function stopDeviceVault(dispatch?: Dispatch): void {
 }
 
 let refreshing: Promise<void> | null = null;
+let followUp: Promise<void> | null = null;
 
-/** Re-evaluate the device state (boot, poll, WS nudge, after a mutation). Serialized. */
+/**
+ * Re-evaluate the device state (boot, poll, WS nudge, after a mutation). Serialized
+ * AND coalesced: while a refresh runs, any number of further requests (a burst of WS
+ * events) share ONE follow-up run that starts after it, so a hub cannot make a
+ * browser queue unbounded directory fetches/verifications.
+ */
 export function refreshDeviceVault(reason = 'refresh'): Promise<void> {
   if (!ctx) return Promise.resolve();
-  if (refreshing) return refreshing.then(() => (ctx ? runRefresh(reason) : undefined));
+  if (refreshing) {
+    if (!followUp) {
+      followUp = refreshing.then(() => {
+        followUp = null;
+        return ctx ? refreshDeviceVault(reason) : undefined;
+      });
+    }
+    return followUp;
+  }
   refreshing = runRefresh(reason).finally(() => { refreshing = null; });
   return refreshing;
 }
@@ -207,6 +228,7 @@ async function runRefresh(_reason: string): Promise<void> {
     if (!dir) {
       purgeKeys(dispatch);
       stopPolling();
+      if (await refuseUnacknowledgedAccount(c)) return;
       if (await loadPins(kv, c.userId)) {
         dispatch(deviceVaultFailed({
           code: 'vault_missing',
@@ -236,8 +258,22 @@ async function runRefresh(_reason: string): Promise<void> {
       return;
     }
     if (self.status === 'revoked') {
+      // Keys in memory go at once (fail closed), but the hub's word alone never makes
+      // this browser treat itself as revoked: only a revoke of THIS device id in the
+      // verified signed log does (it then may discard its identity and re-enroll).
       purgeKeys(dispatch);
       stopPolling();
+      const chain = await verifyDirectory(dir, c.userId, await loadPins(kv, c.userId));
+      if (stale()) return;
+      if (!chain.revokedIds.has(identity.deviceId)) {
+        c.revokedVerified = false;
+        dispatch(deviceVaultFailed({
+          code: 'unverified_revocation',
+          message: 'The server says this device was revoked, but the signed device log has no such revocation. Nothing was deleted from this browser. Retry later; if this persists, the server is misbehaving.',
+        }));
+        return;
+      }
+      c.revokedVerified = true;
       dispatch(deviceVaultStatusChanged({ status: 'revoked' }));
       return;
     }
@@ -271,8 +307,15 @@ async function runRefresh(_reason: string): Promise<void> {
     if (!pins) {
       // First sight of the account on this device: the user confirms the account
       // fingerprint before any key is installed (threat model: hub-injected root).
-      c.pendingInstall = { chain, wrap: self.wrap };
-      dispatch(deviceVaultStatusChanged({ status: 'confirm-account', reset: resetFrom(dir) }));
+      // Never automatically when this browser already pinned ANOTHER account (M2).
+      if (await refuseUnacknowledgedAccount(c)) return;
+      const fingerprint = await accountFingerprint(chain.rootSignPub);
+      if (stale()) return;
+      // A refresh with the same root keeps the token the user is typing against; a
+      // different root is a new snapshot (and invalidates any in-flight confirmation).
+      const token = c.pendingInstall && c.pendingInstall.fingerprint === fingerprint ? c.pendingInstall.token : ++confirmTokens;
+      c.pendingInstall = { chain, wrap: self.wrap, fingerprint, token };
+      dispatch(deviceVaultStatusChanged({ status: 'confirm-account', reset: resetFrom(dir), confirmFingerprint: fingerprint, confirmToken: token }));
       return;
     }
     await advancePins(kv, c.userId, pinsFromChain(chain));
@@ -360,11 +403,32 @@ export async function requestNewDeviceCode(): Promise<void> {
   }
 }
 
-/** The user compared the account fingerprint with an approved device: pin and install. */
-export async function confirmAccountFingerprint(): Promise<void> {
+let confirmTokens = 0;
+
+/** Digits a user must type to confirm an account fingerprint: its first two groups. */
+export const CONFIRM_FINGERPRINT_GROUPS = 2;
+
+export function fingerprintPrefix(fingerprint: string): string {
+  return fingerprint.split(' ').slice(0, CONFIRM_FINGERPRINT_GROUPS).join('').toLowerCase();
+}
+
+/**
+ * The user typed the first groups of the account fingerprint shown in Settings on a
+ * device they already use. Binds to the EXACT snapshot rendered (`renderedFingerprint`,
+ * `token`): if the pending install changed since, nothing is installed.
+ */
+export async function confirmAccountFingerprint(typed: string, renderedFingerprint: string, token: number): Promise<void> {
   const c = ctx;
-  if (!c?.identity || !c.pendingInstall) return;
-  const { chain, wrap } = c.pendingInstall;
+  if (!c?.identity || !c.pendingInstall) throw new Error('Nothing is waiting for confirmation; reload.');
+  const p = c.pendingInstall;
+  if (p.token !== token || p.fingerprint !== renderedFingerprint || await accountFingerprint(p.chain.rootSignPub) !== renderedFingerprint) {
+    throw new Error('The account shown changed while you were confirming. Compare the fingerprint again.');
+  }
+  const want = fingerprintPrefix(renderedFingerprint);
+  if (String(typed ?? '').replace(/[\s-]+/g, '').toLowerCase() !== want) {
+    throw new Error('That does not match. Type the first groups exactly as Settings → Devices shows them on your other device.');
+  }
+  const { chain, wrap } = p;
   c.pendingInstall = null;
   try {
     await advancePins(d().kv, c.userId, pinsFromChain(chain));
@@ -387,6 +451,41 @@ export function rejectAccountFingerprint(): void {
     code: 'account_mismatch',
     message: 'The account fingerprint did not match. No keys were installed on this device. Check that you are signed in to the right account; if the vault was set up by someone else, request a reset.',
   }));
+}
+
+/**
+ * M2: this browser already pinned another account and the user has not accepted the
+ * current one: show the warning instead of any automatic genesis / confirmation.
+ */
+async function refuseUnacknowledgedAccount(c: Ctx): Promise<boolean> {
+  const others = await otherPinnedAccounts(d().kv, c.userId);
+  if (others.length === 0) return false;
+  stopPolling();
+  c.dispatch(deviceVaultStatusChanged({ status: 'other-account', otherAccounts: others }));
+  return true;
+}
+
+/** The user explicitly accepted the signed-in account as a separate account here. */
+export async function acceptOtherAccount(): Promise<void> {
+  const c = ctx;
+  if (!c) return;
+  await acknowledgeOtherAccount(d().kv, c.userId);
+  await refreshDeviceVault('other-account-accepted');
+}
+
+/**
+ * After a revocation VERIFIED in the signed log: discard this browser's (revoked)
+ * identity, keep the pins, create a fresh identity and register it, so the user can
+ * approve this browser again from another device.
+ */
+export async function requestNewApproval(): Promise<void> {
+  const c = ctx;
+  if (!c || !c.revokedVerified) throw new Error('This device is not verifiably revoked.');
+  await forgetDeviceIdentity(d().kv, c.userId);
+  await d().kv.delete(`pending:${c.userId}`);
+  c.identity = null;
+  c.revokedVerified = false;
+  await refreshDeviceVault('re-enroll');
 }
 
 /** After a reset (directory gone): forget this device's identity and pins, then start fresh. */
@@ -501,24 +600,73 @@ export async function sendKeyToBridge(bridgeId: string): Promise<BridgeFanoutRes
   return result;
 }
 
-// ── automatic rotation after a hub retirement ───────────────────────────────
+// ── hub retirement hints → signed revocation ─────────────────────────────────
+//
+// The hub retires a bridge identity (bridge revoked in settings, replaced by an
+// attach, rolled-back enrollment) only as a HINT; it can neither revoke nor rotate.
+// An approved browser with its keyring installed turns a hint into a real signed
+// `revoke` (new epoch + wraps) — but only for an id the VERIFIED log trusts as a
+// bridge (the verifier drops every other hint), at most one automatic revocation per
+// AUTO_REVOKE_INTERVAL_MS per account on this browser (cross-tab, in localStorage),
+// and each id is attempted once (remembered in the device store). So junk hints
+// cause nothing, and a hostile hub cannot drive unbounded epoch growth.
 
-let rotateTimer: ReturnType<typeof setTimeout> | null = null;
-let rotating = false;
+export const AUTO_REVOKE_INTERVAL_MS = 10 * 60 * 1000;
+let hintTimer: ReturnType<typeof setTimeout> | null = null;
+let hintRunning = false;
 
-function scheduleAutoRotate(): void {
-  if (rotateTimer || rotating) return;
-  rotateTimer = setTimeout(() => {
-    rotateTimer = null;
-    if (rotating) return;
-    rotating = true;
-    rotateKeys()
-      .catch((err) => console.warn('[vault] automatic key rotation failed:', err))
-      .finally(() => { rotating = false; });
+const handledHintsKey = (userId: string) => `handled-retired-hints:${userId}`;
+
+async function handledHints(userId: string): Promise<string[]> {
+  const v = await d().kv.get(handledHintsKey(userId));
+  return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+}
+
+function takeAutoRevokeSlot(userId: string, now = Date.now()): boolean {
+  const key = `heimdall:vault-auto-revoke:${userId}`;
+  try {
+    const last = Number(globalThis.localStorage?.getItem(key) || 0);
+    if (last && now - last < AUTO_REVOKE_INTERVAL_MS) return false;
+    globalThis.localStorage?.setItem(key, String(now));
+    return true;
+  } catch {
+    // No storage: fall back to this tab's own clock.
+    if (lastAutoRevokeAt && now - lastAutoRevokeAt < AUTO_REVOKE_INTERVAL_MS) return false;
+    lastAutoRevokeAt = now;
+    return true;
+  }
+}
+let lastAutoRevokeAt = 0;
+
+function scheduleHintRevocation(chain: VerifiedChain): void {
+  if (hintTimer || hintRunning) return;
+  const me = ctx?.identity ? chain.trusted.get(ctx.identity.deviceId) : undefined;
+  if (!me || !kindPolicy(me.kind).canApprove) return;
+  hintTimer = setTimeout(() => {
+    hintTimer = null;
+    if (hintRunning) return;
+    hintRunning = true;
+    revokeRetiredHint()
+      .catch((err) => console.warn('[vault] automatic revocation of a retired bridge identity failed:', err))
+      .finally(() => { hintRunning = false; });
   }, jitter(1000, 5000));
 }
 
-/** Rotate to a new epoch (no revocation), then re-unseal every approved online bridge. */
+/** Revoke (signed) ONE hub-retired bridge identity the verified log still trusts. */
+export async function revokeRetiredHint(): Promise<{ revoked: string | null }> {
+  const c = ctx;
+  if (!c?.identity) return { revoked: null };
+  const { chain } = await fetchVerifiedChain();
+  const done = await handledHints(c.userId);
+  const target = chain.retiredHints.find((id) => !done.includes(id));
+  if (!target) return { revoked: null };
+  if (!takeAutoRevokeSlot(c.userId)) return { revoked: null };
+  await d().kv.put(handledHintsKey(c.userId), [...done, target].slice(-64));
+  const { outcome } = await revokeDevice(target);
+  return { revoked: outcome.kind === 'revoked' ? target : null };
+}
+
+/** Explicit user rotation: a signed `rotate` to a new epoch, then re-unseal every approved online bridge. */
 export async function rotateKeys(): Promise<{ outcome: RotateOutcome; bridges: BridgeFanoutResult }> {
   const c = ctx;
   if (!c?.identity) throw new Error('This device cannot sign');

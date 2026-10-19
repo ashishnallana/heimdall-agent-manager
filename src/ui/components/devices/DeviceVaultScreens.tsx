@@ -4,10 +4,14 @@
 
 import React, { useState } from 'react';
 import { useSelector } from 'react-redux';
-import { Alert, Button, Icon } from '@ui';
+import { Alert, Button, Icon, Input } from '@ui';
 import { selectDeviceVault, type DeviceVaultState } from '../../store/deviceVaultSlice';
 import {
+  CONFIRM_FINGERPRINT_GROUPS,
+  acceptOtherAccount,
   confirmAccountFingerprint,
+  fingerprintPrefix,
+  requestNewApproval,
   refreshDeviceVault,
   rejectAccountFingerprint,
   requestNewDeviceCode,
@@ -111,20 +115,71 @@ export function DeviceWaitingScreen({ state }: { state: DeviceVaultState }) {
   );
 }
 
-/** The new device shows the ACCOUNT fingerprint; keys install only after the user confirms it. */
+/**
+ * The new device shows the ACCOUNT fingerprint; keys install only after the user types
+ * its first groups as shown on a device they already use. The confirmation is bound to
+ * the exact fingerprint rendered here (snapshot + token): if the pending account changes
+ * meanwhile, nothing is installed.
+ */
 export function AccountFingerprintConfirm({ state }: { state: DeviceVaultState }) {
-  const [busy, , run] = useAsyncAction();
+  const [busy, error, run] = useAsyncAction();
+  const [typed, setTyped] = useState('');
+  const rendered = state.confirmFingerprint;
+  const token = state.confirmToken;
   return (
     <Shell debugId="account-fingerprint-confirm" title="Confirm your account">
       <p className="mb-3 text-sm text-muted">
-        This device was approved. Before it receives your keys, compare this account fingerprint with the one in
-        <strong> Settings → Devices</strong> on a device you already use.
+        This device was approved. Before it receives your keys, open <strong>Settings → Devices</strong> on a device you
+        already use and compare its account fingerprint with this one:
       </p>
-      <Fingerprint debugId="account-fingerprint-value" value={state.accountFingerprint} />
+      <Fingerprint debugId="account-fingerprint-value" value={rendered} />
+      <label className="mb-1 mt-4 block text-xs font-medium text-muted" htmlFor="account-fingerprint-typed">
+        Type the first {CONFIRM_FINGERPRINT_GROUPS} groups as your OTHER device shows them
+      </label>
+      <Input
+        id="account-fingerprint-typed"
+        data-debug-id="account-fingerprint-typed-input"
+        value={typed}
+        onChange={setTyped}
+        placeholder="xxxx xxxx"
+        autoFocus
+      />
       <div className="mt-4 flex flex-wrap gap-2">
-        <Button data-debug-id="account-fingerprint-match-btn" variant="primary" loading={busy} onClick={() => run(confirmAccountFingerprint)}>They match</Button>
+        <Button
+          data-debug-id="account-fingerprint-match-btn"
+          variant="primary"
+          loading={busy}
+          disabled={!rendered || typed.replace(/[\s-]+/g, '').length !== fingerprintPrefix(rendered).length}
+          onClick={() => run(() => confirmAccountFingerprint(typed, rendered, token))}
+        >
+          Confirm and install keys
+        </Button>
         <Button data-debug-id="account-fingerprint-mismatch-btn" variant="danger" onClick={() => rejectAccountFingerprint()}>They differ</Button>
       </div>
+      {error ? <p data-debug-id="account-fingerprint-error" className="mt-2 text-xs text-danger">{error}</p> : null}
+    </Shell>
+  );
+}
+
+/** M2: this browser already holds keys/pins for another account. Never automatic. */
+export function OtherAccountWarning({ state }: { state: DeviceVaultState }) {
+  const [busy, error, run] = useAsyncAction();
+  const [ack, setAck] = useState(false);
+  return (
+    <Shell debugId="device-other-account-warning" title="A different account">
+      <div data-debug-id="device-other-account-alert"><Alert tone="warning" title="This browser already belongs to another Heimdall account">
+        This browser holds keys for {state.otherAccounts.length === 1 ? 'another account' : `${state.otherAccounts.length} other accounts`}, but the
+        server now says you are signed in as <code>{state.userId}</code>. If you did not just switch accounts on purpose, the server may be
+        trying to make this browser trust keys that are not yours. Sign out and do not continue.
+      </Alert></div>
+      <label className="mt-4 flex items-start gap-2 text-sm text-primary">
+        <input type="checkbox" data-debug-id="device-other-account-ack-checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} className="mt-1" />
+        <span>I deliberately signed in to a second account ({state.userId}) on this browser.</span>
+      </label>
+      <div className="mt-4 flex flex-wrap gap-2">
+        <Button data-debug-id="device-other-account-continue-btn" variant="danger" disabled={!ack} loading={busy} onClick={() => run(acceptOtherAccount)}>Continue with this account</Button>
+      </div>
+      {error ? <p data-debug-id="device-other-account-error" className="mt-2 text-xs text-danger">{error}</p> : null}
     </Shell>
   );
 }
@@ -141,7 +196,12 @@ export function DeviceVaultProblemScreen({ state }: { state: DeviceVaultState })
   if (state.status === 'revoked') {
     return (
       <Shell debugId="device-vault-revoked" title="This device was removed">
-        <p className="text-sm text-muted">Another device revoked this one. Its keys were deleted from this browser. Sign out, or ask for a new approval after signing in again.</p>
+        <p className="text-sm text-muted">Another device revoked this one (verified in the signed device log). Its keys were deleted from this browser.</p>
+        <p className="mt-2 text-sm text-muted">To use this browser again, request a new approval: it gets a new identity and a new code to enter on a device you still use.</p>
+        <div className="mt-4 flex flex-wrap gap-2">
+          <Button data-debug-id="device-vault-reapprove-btn" variant="primary" loading={busy} onClick={() => run(requestNewApproval)}>Request new approval</Button>
+        </div>
+        {error ? <p data-debug-id="device-vault-reapprove-error" className="mt-2 text-xs text-danger">{error}</p> : null}
       </Shell>
     );
   }
@@ -180,7 +240,7 @@ export function DeviceVaultGate({ children }: { children: React.ReactNode }) {
 
 /** The route an untrusted device is parked on (it shows the code; no app route renders). */
 export const DEVICE_ENROLL_ROUTE = '/device/enroll';
-const PARKED_STATUSES = new Set(['pending-approval', 'reset-scheduled', 'confirm-account', 'revoked']);
+const PARKED_STATUSES = new Set(['pending-approval', 'reset-scheduled', 'confirm-account', 'other-account', 'revoked']);
 
 function currentHashPath(): string {
   const hash = typeof window !== 'undefined' ? window.location.hash || '' : '';
@@ -215,6 +275,8 @@ export function renderDeviceVaultGate(state: DeviceVaultState, children: React.R
       return <DeviceWaitingScreen state={state} />;
     case 'confirm-account':
       return <AccountFingerprintConfirm state={state} />;
+    case 'other-account':
+      return <OtherAccountWarning state={state} />;
     default:
       return <DeviceVaultProblemScreen state={state} />;
   }

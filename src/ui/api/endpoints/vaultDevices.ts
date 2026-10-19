@@ -71,10 +71,9 @@ export async function fetchVaultSelf(signed: VaultSignerContext): Promise<VaultS
 // ── enrollment of this device ───────────────────────────────────────────────
 
 export interface GenesisBody {
+  /** Log seq 1: self-signed, introduces epoch 1. */
   genesis_statement: string;
   signature: unknown;
-  epoch_statement: string;
-  epoch_signature: unknown;
   wrap: SignedKeyringWrap;
 }
 
@@ -166,10 +165,9 @@ export async function postDenyDevice(deviceId: string, expectedVersion: number, 
 
 export interface RevokeBody {
   expected_version: number;
+  /** One `revoke` log op: names the target and introduces epoch current+1. */
   revoke_statement: string;
   signature: unknown;
-  epoch_statement: string;
-  epoch_signature: unknown;
   wraps: SignedKeyringWrap[];
 }
 
@@ -179,12 +177,13 @@ export async function postRevokeDevice(deviceId: string, body: RevokeBody, signe
 
 export interface RotateBody {
   expected_version: number;
-  epoch_statement: string;
-  epoch_signature: unknown;
+  /** One `rotate` log op (no subject), introducing epoch current+1. */
+  statement: string;
+  signature: unknown;
   wraps: SignedKeyringWrap[];
 }
 
-/** Advance to epoch current+1 without a revocation (after a hub retirement). */
+/** Advance to epoch current+1 without a revocation (explicit user rotation). */
 export async function postRotateDirectory(body: RotateBody, signed: VaultSignerContext): Promise<{ directory_version: number }> {
   return vaultRequest('POST', '/vault/directory/rotate', { body, signed });
 }
