@@ -217,10 +217,14 @@ vault_directory_get_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	auth, ok, resp := require_vault_user(h, req)
 	if !ok do return resp
 	sreq := signed_request(req)
+	// The directory is readable by the session user alone; a device signature on
+	// this read only refreshes that device's last_seen. A signer the hub does not
+	// know (a browser whose directory was reset, or one that has not registered
+	// yet) still gets the directory -- or the not-configured 404 -- so it can
+	// recover, instead of a 403 that strands it.
 	if vd.has_signature_headers(sreq) {
 		signer, err := vd.verify_request(h.vault, auth.user_id, sreq, .Self)
-		if err.code != .None do return respond_error(err, req.request_id)
-		vd.touch_last_seen(h.vault, auth.user_id, signer.device_id)
+		if err.code == .None do vd.touch_last_seen(h.vault, auth.user_id, signer.device_id)
 	}
 	view, err := vd.get_directory(h.vault, auth.user_id)
 	if err.code != .None do return respond_error(err, req.request_id)
