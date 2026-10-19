@@ -166,37 +166,32 @@ export async function makeVaultStore(): Promise<any> {
 }
 
 /**
- * Unlock the vault the PRODUCTION way: a real non-extractable CryptoKey in the
- * module-level active-key slot. Nothing writes the key into Redux state -- the
- * `rawVaultKeyHex` field no longer exists, so a fixture that injects hex into mock
- * state is testing a mechanism no production read can reach.
+ * Install a keyring the PRODUCTION way: non-extractable keys in the module-level
+ * active-keyring slot (as vaultKeyringSession does after a verified unwrap) and
+ * `keyringInstalled` in Redux. `keyHex` is the epoch-1 key of a single-epoch test
+ * keyring. Nothing writes key material into Redux state.
  */
 export async function unlockVault(store: any, keyHex: string): Promise<any> {
-  const { importRawKeyHex, setActiveVaultKey, getActiveVaultKey, setActiveBridgeVaultKeyMaterial, getActiveVaultPtyBaseKey } = await import(`${REPO_ROOT}/src/ui/utils/vaultCrypto.ts`);
-  const { setVaultConfigured, setVaultUnlocked } = await import(`${REPO_ROOT}/src/ui/store/vaultSlice.ts`);
-  const key = await importRawKeyHex(keyHex);
-  setActiveVaultKey(key);
-  // As a real unlock does: the raw key also yields the PTY v2 HKDF base key.
-  setActiveBridgeVaultKeyMaterial(keyHex);
-  await getActiveVaultPtyBaseKey();
-  store.dispatch(setVaultConfigured(true));
-  store.dispatch(setVaultUnlocked(keyHex));
-  // P1 adapter: the installed password-vault key is the epoch-1 keyring.
+  const { setActiveVaultKey, getActiveVaultKey } = await import(`${REPO_ROOT}/src/ui/utils/vaultCrypto.ts`);
+  const { keyringInstalled } = await import(`${REPO_ROOT}/src/ui/store/vaultSlice.ts`);
+  const { keyringFromHex } = await import(`${REPO_ROOT}/tests/helpers/vaultTestKeyring.ts`);
+  setActiveVaultKey(await keyringFromHex(keyHex));
+  store.dispatch(keyringInstalled({ currentEpoch: 1 }));
   return getActiveVaultKey();
 }
 
-/** Lock the vault: dispatch lockVault AND clear the active key, as the real lock does. */
+/** Purge the keyring (revoked device / user switch): Redux, cache and the active slot. */
 export async function lockVaultFully(store: any): Promise<void> {
   const { setActiveVaultKey } = await import(`${REPO_ROOT}/src/ui/utils/vaultCrypto.ts`);
-  const { lockVault } = await import(`${REPO_ROOT}/src/ui/store/vaultSlice.ts`);
+  const { keyringCleared } = await import(`${REPO_ROOT}/src/ui/store/vaultSlice.ts`);
   const { heimdallApi } = await import(`${REPO_ROOT}/src/ui/api/heimdallApi.ts`);
-  store.dispatch(lockVault());
+  store.dispatch(keyringCleared());
   store.dispatch(heimdallApi.util.resetApiState());
   setActiveVaultKey(null);
 }
 
-/** Encryption disabled: no vault configured and no key anywhere. */
+/** No keyring installed anywhere. */
 export async function clearActiveKey(): Promise<void> {
   const { setActiveVaultKey } = await import(`${REPO_ROOT}/src/ui/utils/vaultCrypto.ts`);
-  setActiveVaultKey(null, null);
+  setActiveVaultKey(null);
 }

@@ -18,6 +18,7 @@
 // The `tests/ui_*_vault_test.ts` glob in package.json picks this file up
 // automatically -- no test-script change is needed.
 
+import { importRawKeyHex } from './helpers/vaultTestKeyring.ts';
 import { keyringFromHex } from './helpers/vaultTestKeyring.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -56,9 +57,9 @@ const { configureStore } = await import(`${R}/node_modules/@reduxjs/toolkit/dist
 
 const { heimdallApi } = await import(`${R}/src/ui/api/heimdallApi.ts`);
 const vaultSlice = await import(`${R}/src/ui/store/vaultSlice.ts`);
-const { setVaultConfigured, setVaultUnlocked, lockVault } = vaultSlice;
+const { keyringInstalled, keyringCleared } = vaultSlice;
 const vaultReducer = vaultSlice.default;
-const { importRawKeyHex, setActiveVaultKey, getActiveVaultKey,
+const { setActiveVaultKey, getActiveVaultKey,
         isVaultArmored, encryptVaultText } = await import(`${R}/src/ui/utils/vaultCrypto.ts`);
 const artifacts = await import(`${R}/src/ui/api/endpoints/artifacts.ts`);
 const taskChains = await import(`${R}/src/ui/api/endpoints/taskChains.ts`);
@@ -119,8 +120,7 @@ async function go(store: any, thunk: any) {
 async function unlock(store: any) {
   const key = await keyringFromHex(KEY_HEX_RAW);
   setActiveVaultKey(key, null);           // hardened path: CryptoKey only, no hex
-  store.dispatch(setVaultConfigured(true));
-  store.dispatch(setVaultUnlocked(KEY_HEX_RAW));
+  store.dispatch(keyringInstalled({ currentEpoch: 1 }));
 }
 
 function assertNoError(res: any, label: string) {
@@ -143,8 +143,6 @@ test('UNLOCKED: createArtifact sends vault:v2:e1: name and description on the wi
   const store = makeStore();
   await unlock(store);
   assert.ok(getActiveVaultKey(), 'precondition: active CryptoKey present');
-  assert.equal(vaultSlice.selectRawVaultKeyHex(store.getState()), null,
-    'precondition: the legacy rawVaultKeyHex source is dead (null)');
 
   await go(store, artifacts.artifactsApi.endpoints.createArtifact.initiate({
     daemonUrl: 'http://127.0.0.1:7777', clientToken: 'tok_test',
@@ -290,8 +288,8 @@ test('LOCKED: writes do not throw and armored reads stay armored (locked placeho
 
   const store = makeStore();
   await unlock(store);
-  store.dispatch(lockVault());
-  setActiveVaultKey(null, null);                    // lockVault purges the active key
+  store.dispatch(keyringCleared());
+  setActiveVaultKey(null);                          // a purge clears the active keyring
   assert.equal(getActiveVaultKey(), null, 'precondition: locked means no active key');
 
   captured = []; nextResponseBody = { content: armored };
@@ -315,26 +313,4 @@ test('LOCKED: writes do not throw and armored reads stay armored (locked placeho
 // EXACT pre-fix operand against a real, fully unlocked store.
 // =============================================================================
 
-test('COUNTERFACTUAL: the pre-fix operand state.vault.rawVaultKeyHex is dead even when fully unlocked', async () => {
-  const store = makeStore();
-  await unlock(store);
-  const state: any = store.getState();
-
-  // Preconditions: the vault really is unlocked and a real CryptoKey is active.
-  assert.equal(Boolean(state?.vault?.isUnlocked), true, 'vault must be unlocked');
-  assert.ok(getActiveVaultKey(), 'an active non-extractable CryptoKey must exist');
-
-  // The pre-fix sites read exactly this. It is undefined/null on every branch,
-  // so `if (isUnlocked && rawKeyHex)` was unreachable and the encrypt/decrypt
-  // body never ran — which is the P0 data loss this task fixes.
-  const preFixOperand = state?.vault?.rawVaultKeyHex;
-  assert.equal(preFixOperand, undefined, 'rawVaultKeyHex is never assigned by setVaultUnlocked');
-  assert.equal(vaultSlice.selectRawVaultKeyHex(state), null, 'selectRawVaultKeyHex always returns null');
-  assert.equal(Boolean(state?.vault?.isUnlocked && preFixOperand), false,
-    'PRE-FIX GATE: always false — encryption/decryption was silently skipped');
-
-  // The post-fix expression is truthy under the same conditions.
-  assert.equal(Boolean(state?.vault?.isUnlocked && getActiveVaultKey()), true,
-    'POST-FIX GATE: true when unlocked — encryption/decryption actually runs');
-});
 

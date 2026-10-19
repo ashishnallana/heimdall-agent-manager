@@ -2,11 +2,12 @@
 //
 // RUN: node --test tests/ui_chat_copy_decrypted_test.ts
 
+import { importRawKeyHex } from './helpers/vaultTestKeyring.ts';
 import { keyringFromHex } from './helpers/vaultTestKeyring.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { importRawKeyHex, encryptVaultText } from '../src/ui/utils/vaultCrypto.ts';
+import { encryptVaultText } from '../src/ui/utils/vaultCrypto.ts';
 import { resolveCopyableVaultText, VAULT_MASK_PLACEHOLDER } from '../src/ui/utils/vaultContent.ts';
 
 const TEST_KEY_HEX_RAW = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';

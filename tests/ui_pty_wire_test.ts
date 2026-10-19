@@ -2,6 +2,7 @@
 //
 // RUN: node --import ./tests/helpers/vaultEndpointHarness.ts --test tests/ui_pty_wire_test.ts
 
+import { importRawKeyHex } from './helpers/vaultTestKeyring.ts';
 import { keyringFromHex } from './helpers/vaultTestKeyring.ts';
 import './helpers/vaultEndpointHarness.ts';
 import { test } from 'node:test';
@@ -29,7 +30,7 @@ import {
 
 const BOOT = '00112233445566778899aabbccddeeff';
 import { normalizeSnapshotText, repaintCapturedScreenText } from '../src/ui/components/shells/paneDeliveryQueue.ts';
-import { importRawKeyHex, setActiveVaultKey } from '../src/ui/utils/vaultCrypto.ts';
+import { setActiveVaultKey } from '../src/ui/utils/vaultCrypto.ts';
 
 const Terminal = (xtermModule as any).Terminal ?? (xtermModule as any).default.Terminal;
 const enc = new TextEncoder();

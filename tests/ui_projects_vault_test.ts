@@ -12,12 +12,9 @@ import {
   encryptVaultText,
 } from '../src/ui/utils/vaultContent.ts';
 import vaultReducer, {
-  setVaultUnlocked,
-  lockVault,
-  openUnlockModal,
+  keyringInstalled,
+  keyringCleared,
   selectIsVaultUnlocked,
-  selectRawVaultKeyHex,
-  selectIsUnlockModalOpen,
 } from '../src/ui/store/vaultSlice.ts';
 import {
   resolveVaultText,
@@ -194,23 +191,12 @@ test('Vault locked state displays interactive placeholder and triggers unlock mo
   assert.equal(unlockedResolved.mode, 'unlocked');
   assert.equal(unlockedResolved.isLocked, false);
 
-  // Redux state transitions
+  // Redux state transitions: keyring installed / purged; no key material in state
   let state = vaultReducer(undefined, { type: '@@INIT' });
   assert.equal(selectIsVaultUnlocked({ vault: state }), false);
-  assert.equal(selectIsUnlockModalOpen({ vault: state }), false);
-
-  // Unlock with key
-  state = vaultReducer(state, setVaultUnlocked());
+  state = vaultReducer(state, keyringInstalled({ currentEpoch: 1 }));
   assert.equal(selectIsVaultUnlocked({ vault: state }), true);
-  assert.equal((state as any).rawVaultKeyHex, undefined);
-  assert.equal(selectRawVaultKeyHex({ vault: state }), null);
-
-  // Lock vault
-  state = vaultReducer(state, lockVault());
+  assert.deepEqual(Object.keys(state).sort(), ['currentEpoch', 'isUnlocked']);
+  state = vaultReducer(state, keyringCleared());
   assert.equal(selectIsVaultUnlocked({ vault: state }), false);
-  assert.equal(selectRawVaultKeyHex({ vault: state }), null);
-
-  // Open unlock modal
-  state = vaultReducer(state, openUnlockModal());
-  assert.equal(selectIsUnlockModalOpen({ vault: state }), true);
 });

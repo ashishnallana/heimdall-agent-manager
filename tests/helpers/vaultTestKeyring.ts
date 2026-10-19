@@ -1,13 +1,15 @@
-// Test helper: present a raw 64-hex test key as the P1 single-epoch keyring {epoch 1}
-// (the same shape the password-vault adapter produces), so suites that predate the
+// Test helper: present a raw 64-hex test key as a single-epoch keyring {epoch 1}
+// so suites that predate the
 // keyring API can keep their fixed hex keys.
 import { importKeyring, type VaultKeyring } from '../../src/ui/utils/vaultKeyring.ts';
-import { adapterKeyringBytesFromRawHex } from '../../src/ui/utils/vaultCrypto.ts';
+import { serializeKeyringBytes } from '../../src/ui/utils/vaultKeyring.ts';
 
 export const TEST_USER_ID = 'usr_test';
 
 export async function keyringFromHex(hex: string, userId: string = TEST_USER_ID): Promise<VaultKeyring> {
-  return importKeyring(adapterKeyringBytesFromRawHex(hex, userId));
+  const key = Uint8Array.from(Buffer.from(hex, 'hex'));
+  if (key.length !== 32) throw new Error('test key must be 64 hex chars');
+  try { return await importKeyring(serializeKeyringBytes({ userId, currentEpoch: 1, entries: [{ epoch: 1, key }] })); } finally { key.fill(0); }
 }
 
 /** Present a bare CryptoKey as the P1 epoch-1 keyring; keyrings and nullish pass through. */
@@ -43,4 +45,15 @@ export async function signedUnsealRecord(bridgeId: string, ecdhPublicKeyHex?: st
     bridge_identity_public_key: hexOf(await crypto.subtle.exportKey('raw', identity.publicKey)),
     bridge_identity_sign_alg: 'ecdsa-p256-sha256',
   };
+}
+
+/** Test-only: import a 64-hex AES-256-GCM key (non-extractable by default). */
+export async function importRawKeyHex(hex: string, extractable = false): Promise<CryptoKey> {
+  const bytes = Uint8Array.from(Buffer.from(hex, 'hex'));
+  if (bytes.length !== 32) throw new Error('test key must be 64 hex chars');
+  try {
+    return await crypto.subtle.importKey('raw', bytes, { name: 'AES-GCM', length: 256 }, extractable, ['encrypt', 'decrypt']);
+  } finally {
+    bytes.fill(0);
+  }
 }
