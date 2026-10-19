@@ -7,7 +7,7 @@
 
 import { BIP39_WORDS } from './bip39Words.ts';
 import { clearActiveTaskChainSearchKey } from './taskChainSearchKey.ts';
-import { isVaultKeyring, keyFor, currentKey, type VaultKeyring } from './vaultKeyring.ts';
+import { ID_VALUE_RE, isVaultKeyring, keyFor, currentKey, type VaultKeyring } from './vaultKeyring.ts';
 
 export type { VaultKeyring } from './vaultKeyring.ts';
 export { currentKey, keyFor } from './vaultKeyring.ts';

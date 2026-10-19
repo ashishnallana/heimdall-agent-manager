@@ -33,19 +33,16 @@ export const VAULT_LOCKED_HTTP_STATUS = 423;
  * (the hub's 423 message does too: domain.VAULT_LOCKED_MESSAGE), and only the second
  * sentence says what is blocked where.
  */
-export const VAULT_LOCKED_HEADLINE = "This bridge's vault is locked.";
+export const VAULT_LOCKED_HEADLINE = 'This bridge is awaiting the vault key.';
 
 /** The pane overlay's wording (REQ-T10-3). */
-export const VAULT_LOCKED_OVERLAY_MESSAGE = `${VAULT_LOCKED_HEADLINE} Input is disabled until it is unsealed.`;
+export const VAULT_LOCKED_OVERLAY_MESSAGE = `${VAULT_LOCKED_HEADLINE} Input is disabled until an approved device delivers it (Settings → Devices).`;
 
 /** New-shell / restart refusal (T9's dialog copy). */
-export const VAULT_LOCKED_SHELL_START_MESSAGE = `${VAULT_LOCKED_HEADLINE} Unseal it from bridge settings to run commands.`;
+export const VAULT_LOCKED_SHELL_START_MESSAGE = `${VAULT_LOCKED_HEADLINE} Send it the key from Settings → Devices to run commands.`;
 
-/** Settings -> User Vault row description for a Locked bridge. */
-export const VAULT_LOCKED_SETTINGS_DESCRIPTION = `${VAULT_LOCKED_HEADLINE} Unseal it to resume encrypted file and terminal access.`;
-
-/** Label of the overlay's primary action. */
-export const VAULT_LOCKED_UNLOCK_LABEL = 'Unlock vault';
+/** Settings -> Devices description for a bridge that holds no key. */
+export const VAULT_LOCKED_SETTINGS_DESCRIPTION = `${VAULT_LOCKED_HEADLINE} Send it the key to resume encrypted file and terminal access.`;
 
 function codeIsLocked(value: unknown): boolean {
   return typeof value === 'string' && value.trim().toLowerCase() === VAULT_LOCKED_CODE;

@@ -111,8 +111,6 @@ export function enrollmentRestartConfirmation(
   return { outcome: expired ? 'timed-out' : 'waiting', sealedPolls: nextSealed, vaultStatus };
 }
 
-/** Shown in the unlock prompt when the master password does not decrypt the vault. */
-export const WRONG_MASTER_PASSWORD_MESSAGE = 'Incorrect master password. Try again.';
 
 /**
  * How long the page waits for the enrolling process to connect when the hub gave

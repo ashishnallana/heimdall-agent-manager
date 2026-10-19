@@ -7,7 +7,7 @@ import { useCreateLaunchConversationMutation } from '../../api/endpoints/chats';
 import { useCreateProjectMutation, useListProjectsQuery } from '../../api/endpoints/projects';
 import { useCreateArtifactMutation } from '../../api/endpoints/artifacts';
 import { useGetConversationLaunchPreferencesQuery, useSaveConversationLaunchSelectionMutation, useSetAgentFavoriteMutation } from '../../api/endpoints/conversationLaunch';
-import { selectIsVaultConfigured, selectIsVaultUnlocked } from '../../store/vaultSlice';
+import { selectIsVaultUnlocked } from '../../store/vaultSlice';
 import { buildRouteHash, getRouteSearch, getRoutePathname } from '../../utils/appLocation';
 import { apiErrorText } from '../../api/cookieFetch';
 import { artifactKindForFile, artifactLinkFromResponse, artifactMimeForFile, artifactUploadName, clipboardFilesFromEvent } from '../../utils/artifactUpload';
@@ -98,7 +98,6 @@ export default function NewConversationPage({ footer, onLaunched, launchIntent }
   const [createProject, createProjectState] = useCreateProjectMutation();
   const [launch, launchState] = useCreateLaunchConversationMutation();
   const [createArtifact] = useCreateArtifactMutation();
-  const vaultConfigured = useSelector(selectIsVaultConfigured);
   const vaultUnlocked = useSelector(selectIsVaultUnlocked);
   const [hydrated, setHydrated] = useState(false);
   const [agentId, setAgentId] = useState('');
@@ -204,7 +203,7 @@ export default function NewConversationPage({ footer, onLaunched, launchIntent }
   if (selectedBridge && (!runtime.provider || !capabilities.some(c => c.provider === runtime.provider))) issues.push('Choose a provider available on the selected bridge.');
   else if (selectedBridge && !capabilities.find(c => c.provider === runtime.provider)?.models.includes(runtime.model)) issues.push('Choose a model available for this provider on the selected bridge.');
   if (support.data?.entries?.some((row: any) => String(row.bridgeId || row.bridge_id) === runtime.bridgeId && row.enabled === false)) issues.push('This agent is disabled on the selected bridge. Choose another bridge.');
-  if (vaultConfigured && (!vaultUnlocked || !getActiveVaultKey())) issues.push('Unlock your vault before sending a message.');
+  if (!vaultUnlocked || !getActiveVaultKey()) issues.push("This device's vault keys are not installed yet.");
   const uploading = attachments.some(a => a.status === 'uploading');
   const failedUpload = attachments.some(a => a.status === 'error');
   const sending = launchState.isLoading || transitioning;
@@ -313,7 +312,7 @@ export default function NewConversationPage({ footer, onLaunched, launchIntent }
       <div ref={composerRef} data-debug-id="new-convo-launch-dock" className={`relative w-full ${transitioning ? 'z-20' : ''}`}>
       <div className="flex flex-wrap items-center justify-between gap-2 rounded-t-2xl border border-b-0 border-subtle bg-surface px-4 py-2 sm:max-w-lg">
         <div className="min-w-0 flex-1"><Combobox debugId="new-convo-project-select" options={[...projects.filter((p: any) => p.state === 'active').map((p: any) => ({ value: p.project_id, title: label(p.name, 'Project') }))]} value={projectId} onChange={chooseProject} placeholder="Choose project" searchPlaceholder="Search projects…" disabled={sending || !hydrated} width="full" /></div>
-        <button type="button" data-debug-id="new-convo-new-project-btn" disabled={sending || !hydrated || (vaultConfigured && !vaultUnlocked)} onClick={() => { setManagementError(''); setProjectOpen(true); }} className="inline-flex min-h-10 items-center gap-1.5 rounded-xl px-2 text-sm text-muted hover:bg-neutral-soft hover:text-primary disabled:opacity-40"><Icon name="plus" size={15} />New Project</button>
+        <button type="button" data-debug-id="new-convo-new-project-btn" disabled={sending || !hydrated || !vaultUnlocked} onClick={() => { setManagementError(''); setProjectOpen(true); }} className="inline-flex min-h-10 items-center gap-1.5 rounded-xl px-2 text-sm text-muted hover:bg-neutral-soft hover:text-primary disabled:opacity-40"><Icon name="plus" size={15} />New Project</button>
       </div>
       <form onSubmit={submit} data-debug-id="new-convo-composer-shell" className="rounded-b-2xl border border-subtle bg-surface px-3 py-3 focus-within:border-accent sm:rounded-tr-2xl sm:px-4">
         <button type="button" data-debug-id="new-convo-composer-bridge-btn" aria-haspopup="dialog" aria-expanded={settingsOpen} aria-label="Change bridge, provider or model" disabled={sending} onClick={() => setSettingsOpen(true)} className="mb-2 inline-flex max-w-full items-center gap-1.5 rounded-lg px-1 py-1 text-xs text-muted hover:bg-neutral-soft hover:text-primary disabled:opacity-40"><Icon name="device" size={13} /><span className="truncate">{selectedBridge?.label || selectedBridge?.machine_hostname || 'Choose bridge'}</span><Icon name="chevron-down" size={12} /></button>

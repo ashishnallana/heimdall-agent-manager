@@ -225,12 +225,14 @@ class SimBridge {
     b.pinnedRoot = null; // pinned from the chain proof of the FIRST (enrollment) unseal
     return b;
   }
-  // POST /device/authorize body. Kept in one place: P2 fixes add an identity-key proof of possession here.
-  authorizeBody() {
+  // POST /device/authorize body, with the identity-key proof of possession over the ECDH key + PKCE challenge.
+  async authorizeBody() {
+    const proof = JSON.parse(await this.identity.signText(['heimdall-bridge-enroll/v1', this.ecdhPub, this.challenge].join('\n')));
     return {
       client: 'ham-bridge', device_label: 'e2e-bridge', os: 'windows', os_user: 'e2e', app_version: 'e2e',
       bridge_public_key: this.ecdhPub, bridge_identity_public_key: this.identity.signPub,
       code_challenge: this.challenge, code_challenge_method: 'S256',
+      bridge_identity_proof: proof,
     };
   }
   async signUnsealKey() {
@@ -366,7 +368,7 @@ async function main() {
       const br = await SimBridge.create(S.uid);
       br.ownerUserId = S.uid;
       S.bridge = br;
-      const authz = await http('POST', '/api/v1/device/authorize', { body: br.authorizeBody() });
+      const authz = await http('POST', '/api/v1/device/authorize', { body: await br.authorizeBody() });
       expect(authz.status === 200 && authz.data.user_code && authz.data.device_code, `bridge /device/authorize -> 200 (${authz.status} ${authz.status !== 200 ? authz.raw : ''})`);
       const ver = await http('POST', '/api/v1/device/verify', { user: ALICE, body: { user_code: authz.data.user_code } });
       expect(ver.status === 200 && ver.data.kind === 'bridge' && ver.data.bridge_identity_public_key === br.identity.signPub, '/device/verify resolves kind=bridge with its identity key');

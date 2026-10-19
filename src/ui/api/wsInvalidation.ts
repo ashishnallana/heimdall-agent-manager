@@ -18,6 +18,7 @@ import { agentActionReceived } from '../store/agentActivitySlice';
 import { fireNotificationForWsEvent } from '../services/notificationService';
 import { upsertChainTitle, upsertConversationTitle } from '../store/searchTitleSlice';
 import { isVaultArmored, decryptVaultText, getActiveVaultKey } from '../utils/vaultContent';
+import { handleVaultDirectoryEvent } from '../services/deviceVaultEvents';
 
 // Focus context read at WS-event time (populated by the shell from the live
 // route). Only focusedChainId is consumed — it lets a resource/chat/agent event
@@ -725,6 +726,13 @@ function handleResourceChanged(dispatch: any, payload: any, ctx: WsCtx) {
       // Forward the summary (runtime/startup/activity) so the caches can be patched
       // IN PLACE without refetching the whole /agents list on every status change.
       handleAgentEvent(dispatch, { ...payload, type: 'agent_update', agent_instance_id: resourceId, summary }, ctx);
+      return;
+    }
+    case 'vault_devices':
+    case 'vault_directory': {
+      // Passwordless vault: never carries a code. Re-verify the directory; a new
+      // pending device raises a toast / attention entry on approved devices.
+      handleVaultDirectoryEvent(dispatch, resource, resourceId, String(payload.change || ''));
       return;
     }
     case 'bridge': {

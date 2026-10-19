@@ -10,7 +10,7 @@ import NotificationsPanel from './NotificationsPanel';
 import { ProvidersPanel } from './ProvidersPanel';
 import BridgesPanel from './BridgesPanel';
 import ExperimentalPanel from './ExperimentalPanel';
-import VaultPanel from './VaultPanel';
+import DevicesPanel from './DevicesPanel';
 import LspPanel from './LspPanel';
 import UserTokensPanel from './UserTokensPanel';
 import TemplatesPanel from './TemplatesPanel';
@@ -56,10 +56,10 @@ export const SETTINGS_CATEGORIES: SettingsCategory[] = [
     description: 'Manage host machines, connected local/remote bridges, and agent runtimes.',
   },
   {
-    id: 'vault',
-    label: 'User Vault',
-    title: 'User Vault',
-    description: 'Zero-Knowledge User Vault management, recovery words, and unlock keys.',
+    id: 'devices',
+    label: 'Devices',
+    title: 'Devices',
+    description: 'Browsers, bridges and recovery keys that hold your vault keys. Approve, deny and revoke devices.',
   },
   {
     id: 'lsp',
@@ -209,8 +209,8 @@ export function SettingsModal({
       case 'workspace':
       case 'bridges':
         return <BridgesPanel />;
-      case 'vault':
-        return <VaultPanel />;
+      case 'devices':
+        return <DevicesPanel />;
       case 'lsp':
         return lspEnabled ? (
           <LspPanel />

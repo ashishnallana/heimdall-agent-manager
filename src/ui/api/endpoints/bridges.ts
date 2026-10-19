@@ -7,7 +7,6 @@ import type {
   BridgeUnsealPayload,
   BridgeUnsealResult,
   BridgeUnsealTarget,
-  UnsealKeyMaterial,
 } from '../../utils/vaultBridgeUnseal';
 import {
   selectOnlineLockedBridgeIds,
@@ -56,38 +55,6 @@ export async function fetchBridgeUnsealTarget(bridgeId: string, enrollment = fal
   const query = enrollment ? '?enrollment=1' : '';
   const res = await cookieJsonFetch(`/bridges/${encodeURIComponent(bridgeId)}/public-key${query}`);
   return bridgeUnsealTargetFromRecord(bridgeId, (res as any)?.data ?? res);
-}
-
-/**
- * Builds the v2 payload for `target`. When the caller confirmed a specific public key
- * (`expectedPublicKey`), the bridge's current key must be that key; a bridge that
- * restarted in between is refused rather than silently re-targeted.
- */
-async function prepareForTarget(
-  target: BridgeUnsealTarget,
-  expectedPublicKey: string,
-  vaultKey: UnsealKeyMaterial,
-): Promise<BridgeUnsealPayload> {
-  const expected = String(expectedPublicKey || '').trim().toLowerCase();
-  if (expected && target.publicKey.trim().toLowerCase() !== expected) {
-    throw new Error(`Bridge ${target.bridgeId} now holds a different unseal key; reload and try again`);
-  }
-  const { prepareUnsealPayload, keyringBytesForUnseal } = await import('../../utils/vaultBridgeUnseal');
-  return prepareUnsealPayload(target, await keyringBytesForUnseal(vaultKey));
-}
-
-/**
- * End-to-end unseal helper: verifies the bridge's signed unseal key, wraps the
- * keyring and sends the v2 unseal payload to the Hub.
- */
-export async function unsealBridgeE2EE(
-  bridgeId: string,
-  bridgePublicKey: string,
-  vaultKey: UnsealKeyMaterial,
-): Promise<BridgeUnsealResult> {
-  const target = await fetchBridgeUnsealTarget(bridgeId);
-  const payload = await prepareForTarget(target, bridgePublicKey, vaultKey);
-  return await unsealBridge(bridgeId, payload);
 }
 
 /**
@@ -161,151 +128,37 @@ export async function cancelBridgeEnrollment(bridgeId: string): Promise<{ rolled
   return { rolledBack: (res as any)?.rolled_back !== false };
 }
 
-/**
- * Delivers the vault key to the ENROLLING process of a pending enrollment
- * (REQ-EA-2). `expectedPublicKey` is the key the operator confirmed: the hub
- * refuses with `enrollment_key_mismatch` when the connected process holds a
- * different one, instead of relaying a seal it cannot open. A success means the
- * hub observed the bridge persist the key and committed the enrollment.
- */
-export async function unsealEnrollingBridgeE2EE(
-  bridgeId: string,
-  expectedPublicKey: string,
-  vaultKey: UnsealKeyMaterial,
-): Promise<BridgeUnsealResult> {
-  const target = await fetchBridgeUnsealTarget(bridgeId, true);
-  const payload = await prepareForTarget(target, expectedPublicKey, vaultKey);
-  return await unsealBridge(bridgeId, {
-    ...payload,
-    enrollment: true,
-    expected_public_key: expectedPublicKey.trim().toLowerCase(),
-  } as BridgeUnsealPayload);
+/** GET /bridges rows (list or `{bridges}`), tolerant of either envelope. */
+async function listBridgeRows(): Promise<any[]> {
+  const data = await cookieJsonFetch('/bridges');
+  return data?.bridges || (Array.isArray(data) ? data : []);
 }
 
 /**
- * Locks (purges the vault key on) a single bridge.
- *
- * REQ-BVS-4: this used to swallow EVERY error and `return { ok: true }`, so a lock
- * that never reached the bridge — offline bridge, 401, network failure — rendered as
- * a success and the UI happily reported the vault purged. A status indicator cannot
- * be built on top of a call that cannot fail, so the error now propagates: callers
- * that want to tolerate a failure must catch it explicitly (as
- * `lockAllConnectedBridges` below does), and callers that render state must surface
- * it. The returned `ok` is the hub's own answer, not a fabricated one.
- *
- * @throws ApiError (or the underlying network error) when the lock did not succeed.
+ * Bridges whose vault reports locked while online — the ones a chain-verified
+ * re-unseal should reach (see services/deviceVault.unsealApprovedBridges).
  */
-export async function lockBridge(bridgeId: string): Promise<{ ok: boolean }> {
-  const res = await cookieMutation(`/bridges/${encodeURIComponent(bridgeId)}/lock`, 'POST', {});
-  // A 2xx with an explicit `ok: false` is still a failed lock — do not report success.
-  const ok = (res as any)?.ok;
-  if (ok === false) {
-    throw new Error(
-      String((res as any)?.message || (res as any)?.error?.message || `Bridge ${bridgeId} refused the lock request`),
-    );
-  }
-  return { ok: true };
+export async function listOnlineLockedBridgeIds(): Promise<string[]> {
+  return selectOnlineLockedBridgeIds(await listBridgeRows() as BridgeVaultStatusRecord[]);
 }
 
-/**
- * Unseals online bridges that explicitly report a locked vault.
- *
- * REQ-AUX-10: pass raw HEX when it was derived during this browser session. The
- * hardened/IndexedDB-restored CryptoKey is deliberately non-extractable, so this flow
- * never treats that handle as transferable material; callers use
- * `needsReauthentication` to open the secure password/recovery ceremony.
- */
-export interface BridgeVaultReconciliationResult {
-  targetBridgeIds: string[];
-  attemptedBridgeIds: string[];
-  succeededBridgeIds: string[];
-  failedBridgeIds: string[];
-  needsReauthentication: boolean;
-}
-
-/**
- * Reconcile a known bridge-list snapshot. Keeping targeting separate from `/bridges`
- * fetching lets AppShell use the same authoritative list it renders and makes partial
- * failures observable instead of collapsing them into a misleading success count.
- */
-export async function reconcileLockedBridges(
-  bridges: readonly BridgeVaultStatusRecord[],
-  vaultKey?: UnsealKeyMaterial | null,
-): Promise<BridgeVaultReconciliationResult> {
-  const { getActiveBridgeVaultKeyMaterial } = await import('../../store/vaultSlice');
-  const targetBridgeIds = selectOnlineLockedBridgeIds(bridges);
-  const key = vaultKey || getActiveBridgeVaultKeyMaterial();
-  const result: BridgeVaultReconciliationResult = {
-    targetBridgeIds,
-    attemptedBridgeIds: [],
-    succeededBridgeIds: [],
-    failedBridgeIds: [],
-    needsReauthentication: targetBridgeIds.length > 0 && !key,
-  };
-  if (!key || targetBridgeIds.length === 0) return result;
-
-  result.attemptedBridgeIds = [...targetBridgeIds];
-  const outcomes = await Promise.all(targetBridgeIds.map(async (bridgeId) => {
-    try {
-      // One fetch: the verified target IS the key the payload is sealed to.
-      const target = await fetchBridgeUnsealTarget(bridgeId);
-      if (!target.publicKey) throw new Error(`Bridge ${bridgeId} advertised no public key`);
-      await unsealBridge(bridgeId, await prepareForTarget(target, '', key));
-      return true;
-    } catch (err) {
-      console.warn(`[reconcileLockedBridges] failed unsealing bridge ${bridgeId}:`, err);
-      return false;
-    }
-  }));
-  outcomes.forEach((succeeded, index) => {
-    (succeeded ? result.succeededBridgeIds : result.failedBridgeIds).push(targetBridgeIds[index]);
-  });
-  return result;
-}
-
-export async function unsealAllConnectedBridges(vaultKey?: UnsealKeyMaterial | null): Promise<number> {
-
-  try {
-    const data = await cookieJsonFetch('/bridges');
-    const rawBridges: any[] = data?.bridges || (Array.isArray(data) ? data : []);
-    const result = await reconcileLockedBridges(rawBridges, vaultKey);
-    return result.succeededBridgeIds.length;
-  } catch (err) {
-    console.warn('[unsealAllConnectedBridges] failed to list bridges:', err);
-    return 0;
-  }
-}
-
-/**
- * Locks all online bridges and purges vault keys on remote bridges.
- */
-export async function lockAllConnectedBridges(): Promise<number> {
-  try {
-    const data = await cookieJsonFetch('/bridges');
-    const rawBridges: any[] = data?.bridges || (Array.isArray(data) ? data : []);
-    const onlineBridges = rawBridges.filter((b) => {
-      const id = String(b?.bridge_id || b?.bridgeId || b?.id || '');
-      if (!id) return false;
+/** Every online, non-revoked bridge id (re-unseal after a rotation). */
+export async function listOnlineBridgeIds(): Promise<string[]> {
+  return (await listBridgeRows())
+    .filter((b) => {
       const status = String(b?.status || b?.runtime_status || '').toLowerCase();
-      return status !== 'revoked';
-    });
-
-    let lockedCount = 0;
-    for (const bridge of onlineBridges) {
-      const bridgeId = String(bridge?.bridge_id || bridge?.bridgeId || bridge?.id || '');
-      try {
-        await lockBridge(bridgeId);
-        lockedCount++;
-      } catch (err) {
-        console.warn(`[lockAllConnectedBridges] failed locking bridge ${bridgeId}:`, err);
-      }
-    }
-    return lockedCount;
-  } catch (err) {
-    console.warn('[lockAllConnectedBridges] failed to list bridges:', err);
-    return 0;
-  }
+      return status === 'online' || status === 'connected';
+    })
+    .map((b) => String(b?.bridge_id || b?.bridgeId || b?.id || ''))
+    .filter(Boolean);
 }
+
+/** The transport the device vault uses to deliver keyrings to bridges. */
+export const bridgeUnsealTransport = {
+  fetchTarget: (bridgeId: string, enrollment: boolean) => fetchBridgeUnsealTarget(bridgeId, enrollment),
+  dispatch: (bridgeId: string, payload: BridgeUnsealPayload) => unsealBridge(bridgeId, payload),
+  listOnlineBridgeIds,
+};
 
 export const bridgesApi = heimdallApi.injectEndpoints({
   endpoints: (build) => ({

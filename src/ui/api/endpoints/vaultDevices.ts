@@ -150,7 +150,7 @@ export interface BridgeApprovalBody {
   approve: boolean;
   vault_approval?: { expected_version: number; statement: string; signature: unknown };
   target_bridge_id?: string;
-  bridge_label?: string;
+  new_bridge_label?: string;
 }
 
 /** Bridge approvals go through the device-auth flow with the signed vault approval attached. */

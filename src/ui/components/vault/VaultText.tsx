@@ -1,11 +1,10 @@
 // Zero-Knowledge VaultText Reusable Component & Decryption Hooks
 // REQ-VAULT-ISSUES-UI-1
 import React, { useState, useEffect } from 'react';
-import { useDispatch, useSelector } from 'react-redux';
+import { useSelector } from 'react-redux';
 import {
   selectIsVaultUnlocked,
   selectActiveVaultKey,
-  openUnlockModal,
 } from '../../store/vaultSlice';
 import {
   isVaultArmored,
@@ -50,7 +49,6 @@ export interface VaultTextProps {
   fallback?: string;
   as?: 'span' | 'p' | 'div';
   className?: string;
-  onUnlockClick?: () => void;
   title?: string;
 }
 
@@ -58,18 +56,17 @@ export interface VaultTextProps {
  * Reusable VaultText component:
  * - If value is unencrypted / not armored, renders plaintext directly.
  * - If value is armored and vault is unlocked, decrypts and renders plaintext.
- * - If value is armored and vault is locked, renders an interactive placeholder
- *   with data-debug-id='vault-locked-placeholder' that triggers openUnlockModal on click.
+ * - If value is armored and this device holds no key for it, renders a static
+ *   placeholder (data-debug-id='vault-locked-placeholder'). There is no unlock action:
+ *   keys arrive only through device approval (passwordless vault).
  */
 export function VaultText({
   value,
   fallback = '',
   as = 'span',
   className,
-  onUnlockClick,
   title,
 }: VaultTextProps) {
-  const dispatch = useDispatch();
   const isUnlocked = useSelector(selectIsVaultUnlocked);
   const activeVaultKey = useSelector(selectActiveVaultKey) || getActiveVaultKey();
 
@@ -136,24 +133,15 @@ export function VaultText({
   if (!isUnlocked || !activeKey) {
     if (isArmored) {
       return (
-        <button
-          type="button"
+        <span
           data-debug-id="vault-locked-placeholder"
-          onClick={(e) => {
-            e.stopPropagation();
-            if (onUnlockClick) {
-              onUnlockClick();
-            } else {
-              dispatch(openUnlockModal());
-            }
-          }}
-          title={title || 'Unlock vault to view encrypted content'}
-          aria-label="Unlock vault to view encrypted content"
-          className={`inline-flex max-w-full items-center gap-1.5 rounded text-xs font-medium text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent cursor-pointer transition-colors ${className || ''}`}
+          title={title || 'Encrypted with a key this device does not hold'}
+          aria-label="Encrypted content"
+          className={`inline-flex max-w-full items-center gap-1.5 rounded text-xs font-medium text-muted ${className || ''}`}
         >
           <Icon name="lock" size={12} />
           <span className="truncate">Encrypted content</span>
-        </button>
+        </span>
       );
     }
     return (

@@ -10,17 +10,10 @@
 // stay on screen until some unrelated action happens to refetch them.
 //
 // WHY A MIDDLEWARE AND NOT EDITS AT THE DISPATCH SITES
-// There are eight `setVaultUnlocked` dispatch sites (`vaultSlice.ts:124` session
-// restore, `BridgeSettingsPanel.tsx:370`, `VaultOnboardingModal.tsx:260/:299/:340`,
-// `VaultPanel.tsx:235/:275/:318`) plus three paths that clear the flag
-// (`lockVault`, `setVaultConfigured(false)`, and `setVaultUnlocked(undefined)`).
-// Per-site invalidation is what produced this bug class in the first place -- it is
-// correct only until the next site is added. This middleware keys on the STATE
-// TRANSITION instead, so it covers all eleven paths and every future one for free,
-// including transitions that originate outside the vault slice entirely.
-//
-// The line numbers above are a reading aid and nothing here depends on them -- they
-// drift as those components are edited, so re-grep rather than trusting them.
+// With the passwordless vault the keyring is installed (`keyringInstalled`) when this
+// device's wrap verifies, and purged (`keyringCleared`) on revoke / reset / user
+// switch, from services/deviceVault.ts. Keying on the STATE TRANSITION rather than on
+// those action types covers every present and future path for free.
 //
 // WHY `resetApiState` AND NOT `invalidateTags`
 // The surgical option would be an `invalidateTags` over the vault-bearing tag
@@ -36,8 +29,8 @@
 // is complete by construction. Its cost is a one-time refetch of the non-vault
 // queries on a user action that happens about once per session.
 //
-// WHY LOCK RESETS TOO (criterion 3)
-// On lock, decrypted PLAINTEXT is sitting in the cache. `invalidateTags` would
+// WHY A PURGE RESETS TOO (criterion 3)
+// On a key purge, decrypted PLAINTEXT is sitting in the cache. `invalidateTags` would
 // leave it resident in unsubscribed entries for `keepUnusedDataFor: 30` seconds
 // (`heimdallApi.ts:108`); a reset drops it in the same tick. The idiom precedent
 // is `clearPriorUserClientState` at `AppShell.tsx:904`.

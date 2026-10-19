@@ -43,11 +43,6 @@ import {
   isAgentConversationRoute,
 } from './shellChrome';
 import type { PendingBridgeUpdate } from '../settings/bridgeUpdate';
-import {
-  lockAllConnectedBridges,
-  reconcileLockedBridges,
-  type BridgeVaultReconciliationResult,
-} from '../../api/endpoints/bridges';
 import { buildRouteHash, getRoutePathname, getRouteSearch } from '../../utils/appLocation';
 import {
   readLastSeenUserId,
@@ -55,7 +50,11 @@ import {
   writeLastSeenUserId,
 } from '../../utils/clientPersistence';
 import { Workspace } from '../mainWorkspace/Workspace';
-import BridgeEnrollmentApprovalPage from '../enrollment/BridgeEnrollmentApprovalPage';
+import DeviceApprovalPage from '../devices/DeviceApprovalPage';
+import { DeviceVaultGate } from '../devices/DeviceVaultScreens';
+import { VaultResetBanner } from '../devices/VaultResetBanner';
+import DevicesPanel from '../settings/DevicesPanel';
+import { bootDeviceVault, unsealApprovedBridges } from '../../services/deviceVault';
 import ProviderEnrollmentSetupPage from '../providers/ProviderEnrollmentSetupPage';
 import BridgesPanel from '../settings/BridgesPanel';
 import ProjectsPanel from '../settings/ProjectsPanel';
@@ -87,25 +86,14 @@ import IssueFormPage from '../issues/IssueFormPage';
 import SkillViewerPage from '../skills/SkillViewerPage';
 import NotificationsPanel from '../settings/NotificationsPanel';
 import ExperimentalPanel from '../settings/ExperimentalPanel';
-import VaultPanel from '../settings/VaultPanel';
-import { VaultOnboardingHost } from '../settings/VaultOnboardingHost';
 import SettingsModal from '../settings/SettingsModal';
 import { resolveSettingsTab } from '../../utils/settingsRouting';
 import { useShortcuts } from '../../services/shortcuts/ShortcutContext';
 import { useRegisterActions } from '../../services/shortcuts/useRegisterActions';
 import {
-  selectIsVaultConfigured,
   selectIsVaultUnlocked,
-  setUnlockModalOpen,
-  readOnboardingDismissed,
-  shouldOpenVaultOnboarding,
   getActiveVaultKey,
-  getActiveBridgeVaultKeyMaterial,
-  setActiveBridgeVaultKeyMaterial,
-  setActiveVaultUserId,
-  lockVault,
 } from '../../store/vaultSlice';
-import { isVaultSupported } from '../../utils/vaultCrypto';
 import {
   setBulkChainTitles,
   selectSearchChains,
@@ -302,7 +290,7 @@ function routeTitle(path: string): string {
   if (path.startsWith('/settings/providers')) return 'Provider settings';
   if (path.startsWith('/settings/templates')) return 'Templates';
   if (path.startsWith('/settings/notifications')) return 'Notification settings';
-  if (path.startsWith('/settings/vault')) return 'User Vault';
+  if (path.startsWith('/settings/devices')) return 'Devices';
   if (path.startsWith('/settings')) return 'Settings';
   if (path.startsWith('/agents')) return 'Agents';
   if (path.startsWith('/chains')) return 'Task Chains';
@@ -327,7 +315,7 @@ function routeDescription(path: string): string {
   if (path.startsWith('/memory')) return 'Durable facts, habits and skills targeted to agents, projects, bridges, and templates. Empty scope applies to all.';
   if (path.startsWith('/shells/')) return "One shell session: its live output, its details, and the preview when it declares a port.";
   if (path.startsWith('/shells')) return 'Every shell session your bridges are running.';
-  if (path.startsWith('/settings/vault')) return 'Zero-Knowledge User Vault management, recovery words, and unlock keys.';
+  if (path.startsWith('/settings/devices')) return 'Browsers, bridges and recovery keys that hold your vault keys. Approve, deny and revoke devices.';
   if (path.startsWith('/settings')) return 'Settings surface for Bridges, Providers, Appearance, User tokens, Projects, and Defaults.';
   return 'Chat-first home with the routed main region ready for conversation surfaces.';
 }
@@ -340,7 +328,7 @@ const SETTINGS_NAV = [
   { path: '/settings/providers', label: 'Providers' },
   { path: '/settings/appearance', label: 'Appearance' },
   { path: '/settings/user-tokens', label: 'User tokens' },
-  { path: '/settings/vault', label: 'User Vault' },
+  { path: '/settings/devices', label: 'Devices' },
   { path: '/settings/projects', label: 'Projects' },
   { path: '/settings/templates', label: 'Templates' },
   { path: '/settings/notifications', label: 'Notifications' },
@@ -971,8 +959,8 @@ function AuthGate() {
             writeLastSeenUserId(nextUserId);
             lastSeenUserRef.current = nextUserId;
           }
-          // P1 vault adapter: the keyring belongs to the authenticated user.
-          setActiveVaultUserId(nextUserId);
+          // Passwordless vault: boot this browser's device identity for the user.
+          if (nextUserId) void bootDeviceVault(nextUserId, dispatch);
         }
         setAuth(next);
       } catch (err: any) {
@@ -1012,7 +1000,9 @@ function AuthGate() {
   if (auth.status === 'error') return <AuthStatusScreen debugId="auth-error" title="Unable to verify session" body={auth.error || 'The app could not reach /api/v1/me.'} />;
   return (
     <AuthUserProvider value={auth.user}>
-      <AuthenticatedShell key={authUserId(auth.user) || 'authenticated'} user={auth.user || {}} logoutUrl={auth.logoutUrl} />
+      <DeviceVaultGate>
+        <AuthenticatedShell key={authUserId(auth.user) || 'authenticated'} user={auth.user || {}} logoutUrl={auth.logoutUrl} />
+      </DeviceVaultGate>
     </AuthUserProvider>
   );
 }
@@ -1238,9 +1228,8 @@ function RouteOutlet({
         ) : path.startsWith('/projects/') ? (
           <ProjectViewPage projectId={decodeURIComponent(path.slice('/projects/'.length))} />
         ) : path === '/device/add' ? (
-          // Authenticated bridge-enrollment approval. The operator enters the
-          // short code and confirms the terminal fingerprint before approval.
-          <BridgeEnrollmentApprovalPage />
+          // The one approval surface for new browsers and bridges.
+          <DeviceApprovalPage />
         ) : path === '/conversations/new' ? (
           <NewConversationPage key={routeSearch || 'default'} launchIntent={launcherIntentFromSearch(routeSearch || '')} />
         ) : path === '/settings' || path === '/settings/bridges' ? (
@@ -1251,8 +1240,8 @@ function RouteOutlet({
           <ProvidersPanel />
         ) : path === '/settings/user-tokens' ? (
           <UserTokensPanel />
-        ) : path === '/settings/vault' || path.startsWith('/settings/vault/') ? (
-          <VaultPanel />
+        ) : path === '/settings/devices' || path.startsWith('/settings/devices/') ? (
+          <DevicesPanel />
         ) : path === '/settings/providers/new' ? (
           <ProviderEditorPage />
         ) : path.startsWith('/settings/providers/') && path.endsWith('/edit') ? (
@@ -1414,7 +1403,7 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
     return Boolean(selectCurrentAuxTreeId(state) && selectAuxOpen(state));
   });
 
-  // Vault state & onboarding modal
+  // Vault keyring state (passwordless: installed once this device is approved)
   const isVaultUnlocked = useSelector(selectIsVaultUnlocked);
   const activeVaultKey = useMemo(() => {
     if (isVaultUnlocked) {
@@ -1422,10 +1411,7 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
     }
     return null;
   }, [isVaultUnlocked]);
-  const [isOnboardingModalOpen, setIsOnboardingModalOpen] = useState(false);
-  const [isVaultLocking, setIsVaultLocking] = useState(false);
   const [isVaultReconciling, setIsVaultReconciling] = useState(false);
-  const [isBridgeReauthenticationOpen, setIsBridgeReauthenticationOpen] = useState(false);
   const {
     data: bridgesData,
     fulfilledTimeStamp: bridgesFulfilledTimeStamp,
@@ -1438,32 +1424,25 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
   );
   const onlineLockedBridgeSignature = onlineLockedBridgeIds.join('\u0000');
   const hasOnlineLockedBridge = isVaultUnlocked && onlineLockedBridgeIds.length > 0;
-  const bridgeReconciliationRef = useRef<Promise<BridgeVaultReconciliationResult> | null>(null);
+  const bridgeReconciliationRef = useRef<Promise<unknown> | null>(null);
   const lastAutomaticReconciliationRef = useRef<number | undefined>(undefined);
 
-  const reconcileOnlineLockedBridges = useCallback((providedKey?: string) => {
+  // Deliver the keyring (unseal v2 + chain proof) to online bridges reporting no key.
+  // Only chain-approved bridge identities are targeted; no password is involved.
+  const reconcileOnlineLockedBridges = useCallback(() => {
     if (bridgeReconciliationRef.current) return bridgeReconciliationRef.current;
-
     const targetBridgeIds = selectOnlineLockedBridgeIds(bridges);
-    const key = providedKey || getActiveBridgeVaultKeyMaterial();
-    if (targetBridgeIds.length > 0 && !key) {
-      setIsBridgeReauthenticationOpen(true);
-      return Promise.resolve({
-        targetBridgeIds,
-        attemptedBridgeIds: [],
-        succeededBridgeIds: [],
-        failedBridgeIds: [],
-        needsReauthentication: true,
-      });
-    }
-
+    if (targetBridgeIds.length === 0) return Promise.resolve(null);
     setIsVaultReconciling(true);
-    const run = reconcileLockedBridges(bridges, key)
+    const run = unsealApprovedBridges(targetBridgeIds)
       .then(async (result) => {
-        if (result.attemptedBridgeIds.length > 0) {
-          await refetchBridges();
-        }
+        if (result.succeeded.length > 0) await refetchBridges();
+        for (const f of result.failed) console.warn(`[vault] could not deliver the key to bridge ${f.bridgeId}: ${f.error}`);
         return result;
+      })
+      .catch((err) => {
+        console.warn('[vault] bridge key delivery failed:', err);
+        return null;
       })
       .finally(() => {
         bridgeReconciliationRef.current = null;
@@ -1473,18 +1452,7 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
     return run;
   }, [bridges, refetchBridges]);
 
-  // Auto-pop onboarding modal on first visit if vault is unconfigured or locked and not
-  // dismissed. Suppressed entirely when SubtleCrypto is unavailable (REQ-VAULT-UNSUP-2).
-  useEffect(() => {
-    const dismissed = readOnboardingDismissed();
-    if (shouldOpenVaultOnboarding({ isVaultUnlocked, dismissed })) {
-      setIsOnboardingModalOpen(true);
-    }
-  }, [isVaultUnlocked]);
-
-  // Reconcile every and only online bridges that explicitly report Locked. A raw key
-  // derived in this browser session can run silently; a cold-restored non-extractable
-  // key opens the existing secure credential ceremony instead.
+  // Reconcile every and only online bridges that explicitly report Locked.
   useEffect(() => {
     if (!isVaultUnlocked || !onlineLockedBridgeSignature || !bridgesFulfilledTimeStamp) return;
     if (lastAutomaticReconciliationRef.current === bridgesFulfilledTimeStamp) return;
@@ -1849,45 +1817,31 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
       <Icon name="panel-left" size={isMobile ? 20 : 16} />
     </button>
   );
-  const vaultSupported = isVaultSupported();
-  // Rendered by the status bar's vault module, which supplies `compact` (mobile).
+  // Status-bar vault module (compact on mobile). No lock/unlock: it shows whether
+  // connected bridges still await the key and delivers it; otherwise it opens Devices.
   const renderVaultStatusButton = (compact: boolean) => (
     <button
       data-debug-id="shell-vault-status-toggle"
       type="button"
-      disabled={!vaultSupported || isVaultLocking || isVaultReconciling}
+      disabled={isVaultReconciling}
       onClick={() => {
-        if (!vaultSupported || isVaultLocking || isVaultReconciling) return;
-        if (!isVaultUnlocked) {
-          dispatch(setUnlockModalOpen(true));
-          return;
-        }
+        if (isVaultReconciling) return;
         if (hasOnlineLockedBridge) {
           void reconcileOnlineLockedBridges();
           return;
         }
-        setIsVaultLocking(true);
-        void lockAllConnectedBridges()
-          .finally(() => {
-            dispatch(lockVault());
-            setIsVaultLocking(false);
-          });
+        window.location.hash = buildRouteHash('/settings/devices', '');
       }}
-      aria-label={hasOnlineLockedBridge ? 'Unlock locked bridges' : isVaultUnlocked ? 'Lock vault' : 'Unlock vault'}
-      aria-pressed={isVaultUnlocked && !hasOnlineLockedBridge}
-      title={!vaultSupported
-        ? 'Vault unavailable in this browser context'
-        : hasOnlineLockedBridge
-          ? `${onlineLockedBridgeIds.length} connected bridge${onlineLockedBridgeIds.length === 1 ? '' : 's'} locked — click to unlock`
-          : isVaultUnlocked
-            ? 'Vault unlocked — click to lock'
-            : 'Vault locked — click to unlock'}
+      aria-label={hasOnlineLockedBridge ? 'Send the vault key to waiting bridges' : 'Devices'}
+      title={hasOnlineLockedBridge
+          ? `${onlineLockedBridgeIds.length} connected bridge${onlineLockedBridgeIds.length === 1 ? '' : 's'} awaiting the key — click to send it`
+        : 'Vault keys installed on this device — open Devices'}
       className={`inline-flex shrink-0 items-center gap-1 px-1.5 font-bold transition-[filter] hover:brightness-125 disabled:cursor-not-allowed disabled:opacity-50 ${compact ? 'h-8 text-[13px]' : 'h-6 text-[11px]'} ${
-        hasOnlineLockedBridge ? 'text-warning' : isVaultUnlocked ? 'text-success' : 'text-danger'
+        hasOnlineLockedBridge ? 'text-warning' : 'text-success'
       }`}
     >
-      <Icon name={isVaultUnlocked && !hasOnlineLockedBridge ? 'lock-open' : 'lock'} size={compact ? 14 : 12} />
-      <span>{hasOnlineLockedBridge ? `${onlineLockedBridgeIds.length} locked` : isVaultUnlocked ? 'Unlocked' : 'Locked'}</span>
+      <Icon name={hasOnlineLockedBridge ? 'lock' : 'lock-open'} size={compact ? 14 : 12} />
+      <span>{hasOnlineLockedBridge ? `${onlineLockedBridgeIds.length} awaiting key` : 'Vault'}</span>
     </button>
   );
   const brandLink = (
@@ -1909,7 +1863,7 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
         data-debug-id="enrollment-standalone-page"
         className="fixed inset-x-0 top-0 app-viewport-height w-full overflow-auto bg-canvas text-primary"
       >
-        <BridgeEnrollmentApprovalPage />
+        <DeviceApprovalPage />
       </main>
     );
   }
@@ -2123,16 +2077,7 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
           window.location.hash = buildRouteHash('/conversations/' + encodeURIComponent(instanceId), '');
         }}
       />
-      <VaultOnboardingHost
-        onboardingOpen={isOnboardingModalOpen}
-        onOnboardingOpenChange={setIsOnboardingModalOpen}
-        bridgeReauthenticationOpen={isBridgeReauthenticationOpen}
-        onBridgeReauthenticationOpenChange={setIsBridgeReauthenticationOpen}
-        onBridgeReauthenticate={async (rawVaultKeyHex) => {
-          setActiveBridgeVaultKeyMaterial(rawVaultKeyHex);
-          await reconcileOnlineLockedBridges(rawVaultKeyHex);
-        }}
-      />
+      <VaultResetBanner />
       <SettingsModal
         open={settingsModalOpen}
         onOpenChange={setSettingsModalOpen}
