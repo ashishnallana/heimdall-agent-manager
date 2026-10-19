@@ -423,6 +423,9 @@ Poll_Result :: struct {
 	// envelope. The enrolling process uses this to decide whether it must remain
 	// connected for the encrypted unseal relay before restarting the service.
 	vault_delivery_expected: bool,
+	// The approving account, for a bridge grant only. The bridge pins it as its
+	// enrolled owner and refuses any keyring for another user (plan §1, C1).
+	owner_user_id: string,
 }
 
 // poll implements the device token-poll lifecycle (ELDA-3):
@@ -535,7 +538,7 @@ poll :: proc(service: ^Device_Auth_Service, device_code, request_ip: string, cod
 		// and conflating them is how a bridge ends up scheduling its refresh off the
 		// 900-second device-code window.
 		expires_in := minted_expires_in if minted_expires_in > 0 else service.store.config.expires_in
-		return Poll_Result{status = .Approved, approver_username = grant.approver_username, access_token = token, token_id = tid, bridge_id = grant.minted_bridge_id, expires_in = expires_in, refresh_token = refresh, refresh_expires_in = minted_refresh_expires_in, vault_delivery_expected = grant.vault_delivery_expected}, domain.Domain_Error{}
+		return Poll_Result{status = .Approved, approver_username = grant.approver_username, access_token = token, token_id = tid, bridge_id = grant.minted_bridge_id, expires_in = expires_in, refresh_token = refresh, refresh_expires_in = minted_refresh_expires_in, vault_delivery_expected = grant.vault_delivery_expected, owner_user_id = grant.owner_user_id if grant.minted_bridge_id != "" else ""}, domain.Domain_Error{}
 	case: // .Pending (covers Pending only; exhaustiveness)
 		set_grant(service.store, device_code, grant)
 	}

@@ -59,6 +59,24 @@ g_bridge_identity_loaded: bool
 g_bridge_identity_owner_buf: [128]byte
 @(private = "file")
 g_bridge_identity_owner_len: int
+// The enrolled owner's user id from the identity record ("" until committed).
+@(private = "file")
+g_bridge_identity_user_buf: [vault.KEYRING_MAX_USER_ID]byte
+@(private = "file")
+g_bridge_identity_user_len: int
+// Why the identity is unavailable, for status reporting (finding H1).
+@(private = "file")
+g_bridge_identity_state: Bridge_Identity_State
+
+// Bridge_Identity_State: .Lost means the bridge is enrolled but its identity record
+// is gone; it never regenerates one and must be re-enrolled. .Unreadable means a
+// record exists but cannot be read or parsed (also fail closed).
+Bridge_Identity_State :: enum {
+	Unknown,
+	Ready,
+	Lost,
+	Unreadable,
+}
 // Cached signature object over the current ephemeral key for one bridge id.
 @(private = "file")
 g_bridge_unseal_sig_buf: [256]byte
@@ -157,6 +175,9 @@ bridge_unseal_forget_identity_locked :: proc() {
 	ecdsa.private_key_clear(&g_bridge_identity_priv)
 	g_bridge_identity_loaded = false
 	g_bridge_identity_owner_len = 0
+	crypto.zero_explicit(&g_bridge_identity_user_buf, size_of(g_bridge_identity_user_buf))
+	g_bridge_identity_user_len = 0
+	g_bridge_identity_state = .Unknown
 	g_bridge_unseal_sig_len = 0
 	g_bridge_unseal_sig_bridge_len = 0
 }
@@ -185,8 +206,8 @@ bridge_unseal_identity_generate_locked :: proc() -> bool {
 }
 
 // bridge_unseal_identity_generate_for_enrollment creates a fresh in-memory identity
-// before the bridge id exists (`ham-bridge enroll`). It is persisted under the
-// bridge id the first time bridge_unseal_identity_for runs with that id.
+// before the bridge id exists (`ham-bridge enroll`). This is the ONLY place an
+// identity is ever generated; bridge_unseal_identity_commit_enrollment persists it.
 bridge_unseal_identity_generate_for_enrollment :: proc() -> (public_key_hex: string, ok: bool) {
 	sync.mutex_lock(&g_bridge_identity_mu)
 	defer sync.mutex_unlock(&g_bridge_identity_mu)
@@ -195,42 +216,77 @@ bridge_unseal_identity_generate_for_enrollment :: proc() -> (public_key_hex: str
 	return strings.clone(string(g_bridge_identity_pub_hex_buf[:]), context.temp_allocator), true
 }
 
+// bridge_unseal_identity_commit_enrollment persists the enrollment's in-memory
+// identity under the hub-assigned bridge id together with the approving account
+// (the enrolled owner). Called once, right after approval and before any unseal.
+// Fails closed: no pending identity, an unusable owner, or a persistence failure
+// leaves NO identity.
+bridge_unseal_identity_commit_enrollment :: proc(bridge_id: string, owner_user_id: string) -> bool {
+	sync.mutex_lock(&g_bridge_identity_mu)
+	defer sync.mutex_unlock(&g_bridge_identity_mu)
+	if !g_bridge_identity_loaded || g_bridge_identity_owner_len != 0 do return false
+	if bridge_id == "" || len(bridge_id) > len(g_bridge_identity_owner_buf) do return false
+	if len(owner_user_id) < 1 || len(owner_user_id) > len(g_bridge_identity_user_buf) || !vault.valid_id_value(owner_user_id) {
+		bridge_unseal_forget_identity_locked()
+		return false
+	}
+	scalar: [vault.P256_PRIVATE_KEY_BYTES]byte
+	defer crypto.zero_explicit(&scalar, size_of(scalar))
+	ecdsa.private_key_bytes(&g_bridge_identity_priv, scalar[:])
+	if !keystore_store_identity(bridge_id, scalar[:], owner_user_id) {
+		fmt.eprintln("ERROR: could not persist this bridge's identity key; enrollment cannot complete")
+		bridge_unseal_forget_identity_locked()
+		return false
+	}
+	copy(g_bridge_identity_owner_buf[:], bridge_id)
+	g_bridge_identity_owner_len = len(bridge_id)
+	copy(g_bridge_identity_user_buf[:], owner_user_id)
+	g_bridge_identity_user_len = len(owner_user_id)
+	g_bridge_identity_state = .Ready
+	return true
+}
+
 // bridge_unseal_identity_for makes the identity for bridge_id available: already
-// loaded for it; an enrollment's in-memory identity, now persisted under it; read
-// back from the keystore; or (a bridge enrolled before identities existed) freshly
-// generated and persisted. Any persistence failure leaves NO identity, so no
-// signature is advertised and every unseal is refused.
+// loaded for it, or read back from the keystore. It NEVER generates one: an
+// enrolled bridge whose record is missing enters .Lost ("identity lost;
+// re-enroll"), and one whose record cannot be read enters .Unreadable. Either way
+// no signature is advertised and every unseal is refused.
 @(private = "file")
 bridge_unseal_identity_for_locked :: proc(bridge_id: string) -> bool {
 	if bridge_id == "" || len(bridge_id) > len(g_bridge_identity_owner_buf) do return false
 	owner := string(g_bridge_identity_owner_buf[:g_bridge_identity_owner_len])
-	if g_bridge_identity_loaded && owner == bridge_id do return true
+	if g_bridge_identity_loaded && g_bridge_identity_owner_len > 0 && owner == bridge_id do return true
+	// An enrollment's identity that was never committed belongs to no bridge yet.
+	if g_bridge_identity_loaded && g_bridge_identity_owner_len == 0 do return false
 
-	scalar: [vault.P256_PRIVATE_KEY_BYTES]byte
-	defer crypto.zero_explicit(&scalar, size_of(scalar))
-	if g_bridge_identity_loaded && g_bridge_identity_owner_len == 0 {
-		ecdsa.private_key_bytes(&g_bridge_identity_priv, scalar[:])
-		if !keystore_store_identity_key(bridge_id, scalar[:]) {
-			fmt.eprintln("ERROR: could not persist this bridge's identity key; unseal is unavailable")
-			bridge_unseal_forget_identity_locked()
-			return false
+	prev_state := g_bridge_identity_state
+	bridge_unseal_forget_identity_locked()
+	rec: Bridge_Identity_Record
+	defer crypto.zero_explicit(&rec, size_of(rec))
+	switch keystore_read_identity(bridge_id, &rec) {
+	case .Found:
+	case .Not_Found:
+		if prev_state != .Lost {
+			fmt.eprintln("ERROR: this bridge's identity key is missing (identity lost); unseal is refused. Re-enroll with `ham-bridge enroll`.")
 		}
-	} else {
-		bridge_unseal_forget_identity_locked()
-		if keystore_read_identity_key(bridge_id, scalar[:]) {
-			if !bridge_unseal_identity_install_locked(scalar[:]) do return false
-		} else {
-			if !bridge_unseal_identity_generate_locked() do return false
-			ecdsa.private_key_bytes(&g_bridge_identity_priv, scalar[:])
-			if !keystore_store_identity_key(bridge_id, scalar[:]) {
-				fmt.eprintln("ERROR: could not persist this bridge's identity key; unseal is unavailable")
-				bridge_unseal_forget_identity_locked()
-				return false
-			}
+		g_bridge_identity_state = .Lost
+		return false
+	case .Error:
+		if prev_state != .Unreadable {
+			fmt.eprintln("ERROR: this bridge's identity record could not be read; unseal is refused. Fix the keystore or re-enroll.")
 		}
+		g_bridge_identity_state = .Unreadable
+		return false
+	}
+	if !bridge_unseal_identity_install_locked(rec.scalar[:]) {
+		g_bridge_identity_state = .Unreadable
+		return false
 	}
 	copy(g_bridge_identity_owner_buf[:], bridge_id)
 	g_bridge_identity_owner_len = len(bridge_id)
+	copy(g_bridge_identity_user_buf[:], bridge_identity_record_owner(&rec))
+	g_bridge_identity_user_len = rec.owner_len
+	g_bridge_identity_state = .Ready
 	return true
 }
 
@@ -238,6 +294,23 @@ bridge_unseal_identity_for :: proc(bridge_id: string) -> bool {
 	sync.mutex_lock(&g_bridge_identity_mu)
 	defer sync.mutex_unlock(&g_bridge_identity_mu)
 	return bridge_unseal_identity_for_locked(bridge_id)
+}
+
+// bridge_identity_state reports why bridge_id's identity is or is not available.
+bridge_identity_state :: proc(bridge_id: string) -> Bridge_Identity_State {
+	sync.mutex_lock(&g_bridge_identity_mu)
+	defer sync.mutex_unlock(&g_bridge_identity_mu)
+	_ = bridge_unseal_identity_for_locked(bridge_id)
+	return g_bridge_identity_state
+}
+
+// bridge_enrolled_owner_user_id returns the account bridge_id was enrolled to, or
+// "" when the identity record is unavailable. Temp-allocated.
+bridge_enrolled_owner_user_id :: proc(bridge_id: string) -> string {
+	sync.mutex_lock(&g_bridge_identity_mu)
+	defer sync.mutex_unlock(&g_bridge_identity_mu)
+	if !bridge_unseal_identity_for_locked(bridge_id) do return ""
+	return strings.clone(string(g_bridge_identity_user_buf[:g_bridge_identity_user_len]), context.temp_allocator)
 }
 
 // bridge_identity_public_key_hex returns bridge_id's identity public key, or "".
@@ -282,7 +355,16 @@ bridge_unseal_write_hello_fields :: proc(b: ^strings.Builder, bridge_id: string)
 	// An unenrolled bridge (no `brg_` id) has nowhere to keep an identity.
 	if !keystore_bridge_id_ok(bridge_id) do return
 	sig_json, ok := bridge_unseal_key_signature_json(bridge_id)
-	if !ok do return
+	if !ok {
+		// Tell the hub (and so the UI) why this bridge cannot be unsealed.
+		#partial switch bridge_identity_state(bridge_id) {
+		case .Lost:
+			strings.write_string(b, ",\"identity_state\":\"lost\"")
+		case .Unreadable:
+			strings.write_string(b, ",\"identity_state\":\"unreadable\"")
+		}
+		return
+	}
 	identity := bridge_identity_public_key_hex(bridge_id)
 	if identity == "" do return
 	strings.write_string(b, ",\"unseal_boot_id\":\"")
@@ -397,8 +479,9 @@ bridge_unseal_signature_echo :: proc(payload_json: string) -> string {
 // format, clock skew (±30 s), target bridge id, nonce replay, epoch range, the
 // identity-key echo, the signature echo (must equal this boot's signature and
 // verify under this bridge's identity key), the AEAD (v2 AAD only), the keyring's
-// validity and current epoch, and that it belongs to the same user as any keyring
-// already stored. v1 payloads (old AAD forms, 32/64-byte plaintexts) cannot pass.
+// validity and current epoch, that it belongs to this bridge's enrolled owner, and
+// that it is a superset of any keyring already stored (no substitution, no
+// rollback). v1 payloads (old AAD forms, 32/64-byte plaintexts) cannot pass.
 bridge_unseal_decrypt_and_verify :: proc(
 	payload_json: string,
 	local_bridge_id: string,
@@ -474,12 +557,44 @@ bridge_unseal_decrypt_and_verify :: proc(
 		return false, "keyring current epoch does not match the signed current_epoch"
 	}
 
-	// Never let one unseal swap in another user's keyring over an existing one.
-	if existing, has := keystore_read_vault_keyring(local_bridge_id); has {
-		same := vault.keyring_user_id(&existing) == vault.keyring_user_id(&kr)
-		vault.keyring_wipe(&existing)
-		if !same do return false, "keyring belongs to a different user than the one this bridge holds"
+	// ── Keyring authentication (plan §1, finding C1) ──────────────────────
+	// The ECDH unseal proves only that the sender saw this boot's signed key, not
+	// who the sender is: a hostile hub can seal its own keyring to it. So:
+	//
+	//  (a) the keyring must belong to the account this bridge was enrolled to
+	//      (pinned in the identity record at enrollment). Unknown owner → refuse.
+	owner := bridge_enrolled_owner_user_id(local_bridge_id)
+	if owner == "" do return false, "this bridge's enrolled owner is unknown; re-enroll it"
+	kr_user := vault.keyring_user_id(&kr)
+	if len(kr_user) != len(owner) || crypto.compare_constant_time(transmute([]byte)kr_user, transmute([]byte)owner) != 1 {
+		return false, "keyring does not belong to this bridge's enrolled owner"
 	}
+	//  (b) once a keyring is stored, a new one is accepted only as a superset of
+	//      it: identical keys for every stored epoch and no current-epoch rollback.
+	if existing, has := keystore_read_vault_keyring(local_bridge_id); has {
+		update_err := vault.keyring_check_update(&existing, &kr)
+		vault.keyring_wipe(&existing)
+		switch update_err {
+		case .None:
+		case .Invalid:
+			return false, "stored or delivered keyring is invalid"
+		case .Different_User:
+			return false, "keyring belongs to a different user than the one this bridge holds"
+		case .Epoch_Rollback:
+			return false, "keyring rollback rejected: current epoch is older than the stored keyring's"
+		case .Missing_Epoch:
+			return false, "keyring rejected: it drops an epoch this bridge already holds"
+		case .Key_Mismatch:
+			return false, "keyring rejected: an epoch's key differs from the one this bridge holds"
+		}
+	}
+	//  (c) P2/P3 HOOK — signed epoch statement chain (plan §1, required before P3).
+	//      This is where the bridge must verify, BEFORE installing anything below:
+	//      the `epoch` statement for kr.current_epoch carried in the payload, the
+	//      approval chain of its issuer back to the account root_sign_pub pinned at
+	//      enrollment, that the issuer is an approved non-bridge device, and that
+	//      epoch_commit matches the unwrapped current key. Missing or invalid proof
+	//      must return false here. Until then (a) and (b) are the only gates.
 
 	raw: [vault.KEYRING_MAX_BYTES]byte
 	defer crypto.zero_explicit(&raw, size_of(raw))

@@ -30,6 +30,7 @@ v2_open :: proc() -> (f: V2_Fixture) {
 	bridge_unseal_forget_identity()
 	unseal_nonce_cache_clear(&g_unseal_nonce_cache)
 	bridge_unseal_init()
+	_ = test_provision_identity(f.id_a)
 	return
 }
 
@@ -85,15 +86,20 @@ test_v2_keystore_keyring_and_identity_round_trip :: proc(t: ^testing.T) {
 	testing.expect(t, !cross, "memory cache is per bridge id")
 	keystore_wipe_in_memory_vault_key()
 
-	// Identity: persisted under the bridge id, survives lock, removed by delete.
+	// Identity record: persisted under the bridge id with its owner, survives lock,
+	// removed by delete; absence and a read error are told apart.
 	scalar: [32]byte
 	scalar[31] = 7
-	testing.expect(t, keystore_store_identity_key(f.id_a, scalar[:]))
+	testing.expect(t, keystore_store_identity(f.id_a, scalar[:], "usr_owner"))
 	keystore_lock_and_purge(f.id_a)
-	got: [32]byte
-	testing.expect(t, keystore_read_identity_key(f.id_a, got[:]) && got == scalar, "lock keeps the identity key")
+	rec: Bridge_Identity_Record
+	testing.expect_value(t, keystore_read_identity(f.id_a, &rec), Keystore_Read_Status.Found)
+	testing.expect(t, rec.scalar == scalar && bridge_identity_record_owner(&rec) == "usr_owner", "lock keeps the identity record")
+	keystore_set_mock_syscall_error(KEYSTORE_ERR_EACCES)
+	testing.expect_value(t, keystore_read_identity(f.id_a, &rec), Keystore_Read_Status.Error)
+	keystore_set_mock_syscall_error(0)
 	testing.expect(t, keystore_delete_identity_key(f.id_a))
-	testing.expect(t, !keystore_read_identity_key(f.id_a, got[:]), "identity deleted")
+	testing.expect_value(t, keystore_read_identity(f.id_a, &rec), Keystore_Read_Status.Not_Found)
 }
 
 @(test)
@@ -105,8 +111,7 @@ test_v2_unseal_accepts_signed_payload_and_rejects_negatives :: proc(t: ^testing.
 	f := v2_open()
 	defer v2_close(&f)
 
-	// Nothing is advertised or accepted before the identity exists; once asked for,
-	// it is created and persisted.
+	// v2_open enrolled an identity; its signed unseal key is advertised.
 	sig, sig_ok := bridge_unseal_key_signature_json(f.id_a)
 	testing.expect(t, sig_ok, "signed unseal key available")
 	identity := bridge_identity_public_key_hex(f.id_a)
@@ -249,4 +254,102 @@ test_v2_pty_salt_is_fresh_per_worker_epoch_and_install :: proc(t: ^testing.T) {
 	testing.expect_value(t, ep, u32(2))
 	_, wrong_dir := vault.pty_open(frame, &kr, "sh_v2", .In, 2, context.temp_allocator)
 	testing.expect(t, !wrong_dir, "an output frame is not valid input")
+}
+
+@(test)
+test_v2_identity_is_never_regenerated :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
+	f := v2_open()
+	defer v2_close(&f)
+
+	enrolled := bridge_identity_public_key_hex(f.id_a)
+	testing.expect(t, enrolled != "", "enrollment committed an identity")
+	testing.expect_value(t, bridge_enrolled_owner_user_id(f.id_a), TEST_VAULT_USER_ID)
+
+	// A restart reads the same identity back.
+	bridge_unseal_forget_identity()
+	testing.expect_value(t, bridge_identity_public_key_hex(f.id_a), enrolled)
+
+	// A keystore read error is not absence, and never mints a new identity.
+	bridge_unseal_forget_identity()
+	keystore_set_mock_syscall_error(KEYSTORE_ERR_EACCES)
+	testing.expect_value(t, bridge_identity_public_key_hex(f.id_a), "")
+	testing.expect_value(t, bridge_identity_state(f.id_a), Bridge_Identity_State.Unreadable)
+	keystore_set_mock_syscall_error(0)
+	testing.expect_value(t, bridge_identity_public_key_hex(f.id_a), enrolled)
+
+	// A lost record puts the bridge in "identity lost; re-enroll": no identity,
+	// no signed key, no hello advertisement, and nothing regenerated.
+	testing.expect(t, keystore_delete_identity_key(f.id_a))
+	bridge_unseal_forget_identity()
+	testing.expect_value(t, bridge_identity_public_key_hex(f.id_a), "")
+	testing.expect_value(t, bridge_identity_state(f.id_a), Bridge_Identity_State.Lost)
+	_, sig_ok := bridge_unseal_key_signature_json(f.id_a)
+	testing.expect(t, !sig_ok, "no signed unseal key without an identity")
+	b := strings.builder_make(context.temp_allocator)
+	bridge_unseal_write_hello_fields(&b, f.id_a)
+	testing.expect(t, strings.contains(strings.to_string(b), `"identity_state":"lost"`), "hello reports the lost identity")
+	testing.expect(t, !strings.contains(strings.to_string(b), "unseal_key_signature"), "hello advertises no unseal key")
+	rec: Bridge_Identity_Record
+	testing.expect_value(t, keystore_read_identity(f.id_a, &rec), Keystore_Read_Status.Not_Found)
+
+	// Committing requires an enrollment's pending identity and a valid owner.
+	testing.expect(t, !bridge_unseal_identity_commit_enrollment(f.id_a, TEST_VAULT_USER_ID), "no pending identity to commit")
+	_, gen_ok := bridge_unseal_identity_generate_for_enrollment()
+	testing.expect(t, gen_ok)
+	testing.expect(t, !bridge_unseal_identity_commit_enrollment(f.id_a, ""), "an unknown owner cannot be pinned")
+}
+
+@(test)
+test_v2_unseal_keyring_owner_and_superset :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
+	f := v2_open()
+	defer v2_close(&f)
+	now := v2_now()
+
+	try_unseal :: proc(id: string, kr: ^vault.Vault_Keyring, now: i64, nonce: string) -> bool {
+		payload := test_create_unseal_v2_payload(id, kr, now, nonce)
+		defer delete(payload)
+		ok, _ := bridge_unseal_decrypt_and_verify(payload, id, now)
+		return ok
+	}
+
+	// (a) First unseal: a keyring for anyone but the enrolled owner is refused.
+	hostile := test_keyring_from_hex(TEST_VAULT_KEY_HEX, 1, "usr_hostile_hub")
+	defer vault.keyring_wipe(&hostile)
+	testing.expect(t, !try_unseal(f.id_a, &hostile, now, "n_c1_foreign"), "a non-owner keyring is refused on first unseal")
+	_, stored := bridge_read_vault_keyring()
+	testing.expect(t, !stored, "nothing stored")
+
+	// The owner's {1} is accepted; the same keyring again is accepted.
+	one := test_keyring_from_hex(TEST_VAULT_KEY_HEX, 1)
+	defer vault.keyring_wipe(&one)
+	testing.expect(t, try_unseal(f.id_a, &one, now, "n_c1_one"), "owner keyring accepted")
+	testing.expect(t, try_unseal(f.id_a, &one, now, "n_c1_one_again"), "identical keyring accepted")
+
+	// (b) Substituting epoch 1's key is refused.
+	swapped := test_keyring_from_hex(V2_KEY_2, 1)
+	defer vault.keyring_wipe(&swapped)
+	testing.expect(t, !try_unseal(f.id_a, &swapped, now, "n_c1_swap"), "key substitution refused")
+
+	// A rotation that keeps history is accepted; rolling back to {1} is then refused.
+	two := test_keyring_two_epochs(TEST_VAULT_KEY_HEX, V2_KEY_2)
+	defer vault.keyring_wipe(&two)
+	testing.expect(t, try_unseal(f.id_a, &two, now, "n_c1_two"), "superset accepted")
+	testing.expect(t, !try_unseal(f.id_a, &one, now, "n_c1_rollback"), "rollback refused")
+	got, got_ok := bridge_read_vault_keyring()
+	defer vault.keyring_wipe(&got)
+	testing.expect(t, got_ok && vault.keyring_equal(&got, &two), "the superset stays installed")
+
+	// An enrolled bridge with no recorded owner refuses every unseal.
+	_ = keystore_delete_identity_key(f.id_a)
+	bridge_unseal_forget_identity()
+	keystore_lock_and_purge(f.id_a)
+	testing.expect(t, !try_unseal(f.id_a, &one, now, "n_c1_no_owner"), "unknown owner refused")
 }

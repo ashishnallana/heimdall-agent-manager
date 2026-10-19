@@ -20,6 +20,7 @@ ENROLL_ATOMIC_TEST_KEY :: "aabbccddeeff00112233445566778899aabbccddeeff001122334
 enroll_atomic_test_cred :: proc(bridge_id: string) -> Bridge_Enroll_Credential {
 	return Bridge_Enroll_Credential{
 		bridge_id = bridge_id,
+		owner_user_id = TEST_VAULT_USER_ID,
 		access_token = "hba_enrolltest.secret",
 		refresh_token = "hbf_enrolltest.secret",
 		expires_in = 3600,
@@ -68,6 +69,7 @@ enroll_atomic_fixture_open :: proc(t: ^testing.T, f: ^Enroll_Atomic_Fixture, lab
 	}
 	unseal_nonce_cache_clear(&g_unseal_nonce_cache)
 	bridge_unseal_init()
+	if !test_provision_identity(f.bridge_id) do testing.fail_now(t, "could not provision the enrollment identity")
 	bridge_enroll_atomic_arm(enroll_atomic_test_cred(f.bridge_id), f.token_file, f.config_path, "https://hub.example.test")
 	return true
 }

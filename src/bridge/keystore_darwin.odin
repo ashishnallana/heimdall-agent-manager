@@ -99,12 +99,15 @@ keystore_os_write_secret :: proc(slot: Keystore_Slot, bridge_id: string, data: [
 	))
 }
 
-// keystore_os_read_secret copies the slot's secret into dst; the Keychain's own
-// copy is zeroed before it is freed.
-keystore_os_read_secret :: proc(slot: Keystore_Slot, bridge_id: string, dst: []byte) -> (n: int, ok: bool) {
+// keystore_os_read_secret_status copies the slot's secret into dst; the
+// Keychain's own copy is zeroed before it is freed. Only errSecItemNotFound is
+// absence; any other failure (a locked keychain, a denied ACL) is an error.
+keystore_os_read_secret_status :: proc(slot: Keystore_Slot, bridge_id: string, dst: []byte) -> (n: int, status: Keystore_Read_Status) {
 	password_len: u32
 	password_data: rawptr
-	if keychain_find_item(slot, bridge_id, nil, &password_len, &password_data) != KEYCHAIN_ERR_SEC_SUCCESS do return 0, false
+	found := keychain_find_item(slot, bridge_id, nil, &password_len, &password_data)
+	if found == KEYCHAIN_ERR_SEC_ITEM_NOT_FOUND do return 0, .Not_Found
+	if found != KEYCHAIN_ERR_SEC_SUCCESS do return 0, .Error
 	defer {
 		if password_data != nil {
 			mem.zero_explicit(password_data, int(password_len))
@@ -112,9 +115,9 @@ keystore_os_read_secret :: proc(slot: Keystore_Slot, bridge_id: string, dst: []b
 		}
 	}
 	size := int(password_len)
-	if password_data == nil || size == 0 || size > len(dst) do return 0, false
+	if password_data == nil || size == 0 || size > len(dst) do return 0, .Error
 	copy(dst, ([^]u8)(password_data)[:size])
-	return size, true
+	return size, .Found
 }
 
 // An item the process can no longer read (e.g. after a self-update changed the

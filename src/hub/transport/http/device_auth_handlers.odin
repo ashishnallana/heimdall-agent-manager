@@ -320,6 +320,8 @@ device_token_handler :: proc(ctx: rawptr, req: Request) -> Response {
 			write_handler_json_string(&data, result.bridge_id)
 			strings.write_string(&data, "\",\"approver_username\":\"")
 			write_handler_json_string(&data, result.approver_username)
+			strings.write_string(&data, "\",\"owner_user_id\":\"")
+			write_handler_json_string(&data, result.owner_user_id)
 		}
 		// REQ-IMPL-3: the refresh half, present only for a bridge grant whose
 		// credential expires. Omitted entirely otherwise, so the ELDA response

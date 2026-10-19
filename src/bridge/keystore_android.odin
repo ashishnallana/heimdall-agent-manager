@@ -437,12 +437,17 @@ keystore_android_unwrap_file_locked :: proc(slot: Keystore_Slot, bridge_id: stri
 	return
 }
 
-// Any failure — no file, a bad header, the tool unavailable, a different Keystore
-// key — is "not found".
-keystore_android_read_secret :: proc(slot: Keystore_Slot, bridge_id: string, dst: []byte) -> (n: int, ok: bool) {
+// No sealed file is .Not_Found; a file that exists but does not open (a bad
+// header, the tool unavailable, a different Keystore key) is .Error.
+keystore_android_read_secret_status :: proc(slot: Keystore_Slot, bridge_id: string, dst: []byte) -> (n: int, status: Keystore_Read_Status) {
+	path, path_ok := keystore_android_sealed_path(slot, bridge_id)
+	if !path_ok do return 0, .Error
 	sync.mutex_lock(&keystore_android_mu)
 	defer sync.mutex_unlock(&keystore_android_mu)
-	return keystore_android_unwrap_file_locked(slot, bridge_id, dst)
+	if !os.exists(path) do return 0, .Not_Found
+	got, ok := keystore_android_unwrap_file_locked(slot, bridge_id, dst)
+	if !ok do return 0, .Error
+	return got, .Found
 }
 
 keystore_android_secret_present :: proc(slot: Keystore_Slot, bridge_id: string) -> bool {
