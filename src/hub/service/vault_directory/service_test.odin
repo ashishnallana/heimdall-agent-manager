@@ -303,12 +303,37 @@ test_vault_request_signature_rejections :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_vault_nonce_cache_refuses_when_full :: proc(t: ^testing.T) {
+test_vault_nonce_cache_is_partitioned_per_device :: proc(t: ^testing.T) {
 	c := nonce_cache_make(2)
 	defer nonce_cache_free(&c)
-	testing.expect_value(t, nonce_cache_insert(&c, "a", 0, 100), Nonce_Result.Inserted)
-	testing.expect_value(t, nonce_cache_insert(&c, "b", 0, 100), Nonce_Result.Inserted)
-	testing.expect_value(t, nonce_cache_insert(&c, "c", 50, 100), Nonce_Result.Full) // live entries are never evicted
-	testing.expect_value(t, nonce_cache_insert(&c, "a", 50, 100), Nonce_Result.Replay)
-	testing.expect_value(t, nonce_cache_insert(&c, "c", 101, 100), Nonce_Result.Inserted) // expired ones are
+	testing.expect_value(t, nonce_cache_insert(&c, "u|a", "n1", 0, 100), Nonce_Result.Inserted)
+	testing.expect_value(t, nonce_cache_insert(&c, "u|a", "n2", 0, 100), Nonce_Result.Inserted)
+	testing.expect_value(t, nonce_cache_insert(&c, "u|a", "n3", 50, 100), Nonce_Result.Full) // live entries are never evicted
+	testing.expect_value(t, nonce_cache_insert(&c, "u|a", "n1", 50, 100), Nonce_Result.Replay)
+	// A full bucket does not affect another device or another account.
+	testing.expect_value(t, nonce_cache_insert(&c, "u|b", "n1", 50, 100), Nonce_Result.Inserted)
+	testing.expect_value(t, nonce_cache_insert(&c, "v|a", "n3", 50, 100), Nonce_Result.Inserted)
+	testing.expect_value(t, nonce_cache_insert(&c, "u|a", "n3", 101, 100), Nonce_Result.Inserted) // expired ones are purged
+	nonce_cache_sweep(&c, 1_000)
+	testing.expect_value(t, len(c.buckets), 0)
+}
+
+@(test)
+test_vault_reads_do_not_consume_nonces :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	f := fixture(t)
+	defer fixture_close(f)
+	a, b := make_dev(1), make_dev(2)
+	do_genesis(t, f, &a)
+	do_register(t, f, &b)
+	// A pending device polling GET self far beyond any quota never fills a bucket.
+	for i in 0 ..< NONCE_DEVICE_QUOTA + 8 {
+		nonce := strings.concatenate({"nonce-self-", itoa(i64(100000 + i))}, context.temp_allocator)
+		_, err := verify_request(&f.svc, USER, signed_req(&b, "GET", "/api/v1/vault/devices/self", "", nonce), .Self)
+		testing.expect_value(t, err.code, domain.Error_Code.None)
+	}
+	testing.expect_value(t, len(f.svc.nonces.buckets), 0)
+	// The approver's mutation still goes through.
+	_, err := verify_request(&f.svc, USER, signed_req(&a, "POST", "/api/v1/vault/devices/x/deny", "{}"), .Approver)
+	testing.expect_value(t, err.code, domain.Error_Code.None)
 }
