@@ -32,6 +32,8 @@ $odin="$env:LOCALAPPDATA\Programs\Odin\dist\odin.exe"
 # tests needing sqlite
 & $odin test <pkg> -collection:odin_test=src "-extra-linker-flags:/LIBPATH:C:/Users/Tanmay/heimdall-win-build/deps/lib" -out:$env:USERPROFILE\.cache\heimdall-tests\x.exe
 npm run typecheck; npm test; npm run build
+# P2.5 headless API e2e (throwaway hub on an ephemeral port, temp DB; keep green in P3/P4)
+npm run test:e2e:vault   # = scripts/e2e-vault-devices.ps1 (Windows) / .sh
 ```
 
 Bridge/ctl suites that spawn `sh`/`setsid` can't run on Windows; select tests with `-define:ODIN_TEST_NAMES=...`.
