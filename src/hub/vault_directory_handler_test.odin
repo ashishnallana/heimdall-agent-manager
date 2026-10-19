@@ -125,11 +125,16 @@ test_vault_directory_http_flow :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(dir.body, `"kind":"bridge"`) && strings.contains(dir.body, bridge_id), "bridge listed in the directory")
 	testing.expect(t, strings.contains(dir.body, `"root_sign_public_key":"`) && strings.contains(dir.body, `"epochs":[{"epoch":1`), "chain material exposed")
 
-	authz := dispatch(&graph, "POST", "/api/v1/device/authorize", strings.concatenate({
+	other_br := vt_make_dev(4000, "bridge")
+	authz_prefix := strings.concatenate({
 		`{"client":"ham-bridge","device_label":"x","os":"linux","bridge_public_key":"`, DEVICE_TEST_PUBLIC_KEY,
-		`","bridge_identity_public_key":"`, vt_make_dev(4000, "bridge").sign_pub,
-		`","code_challenge":"`, DEVICE_TEST_CODE_CHALLENGE, `","code_challenge_method":"S256"}`,
-	}), nil)
+		`","bridge_identity_public_key":"`, other_br.sign_pub, `","bridge_identity_proof":`,
+	})
+	authz_suffix := strings.concatenate({`,"code_challenge":"`, DEVICE_TEST_CODE_CHALLENGE, `","code_challenge_method":"S256"}`})
+	// L1: a proof by another key (or over another challenge) is refused.
+	forged := dispatch(&graph, "POST", "/api/v1/device/authorize", strings.concatenate({authz_prefix, vt_enroll_proof(&root, DEVICE_TEST_PUBLIC_KEY, DEVICE_TEST_CODE_CHALLENGE), authz_suffix}), nil)
+	testing.expect_value(t, forged.status, 400)
+	authz := dispatch(&graph, "POST", "/api/v1/device/authorize", strings.concatenate({authz_prefix, vt_enroll_proof(&other_br, DEVICE_TEST_PUBLIC_KEY, DEVICE_TEST_CODE_CHALLENGE), authz_suffix}), nil)
 	testing.expect_value(t, authz.status, 200)
 	grant_code := device_test_json_string(authz.body, "user_code")
 	gver := dispatch(&graph, "POST", "/api/v1/device/verify", strings.concatenate({`{"user_code":"`, grant_code, `"}`}), alice)

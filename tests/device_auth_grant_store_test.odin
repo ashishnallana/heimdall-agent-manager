@@ -12,6 +12,8 @@
 package device_auth_grant_store_test
 
 import "core:fmt"
+import "core:crypto/ecdsa"
+import vault "odin_test:lib/vault"
 import "core:testing"
 import "core:os"
 import "core:strings"
@@ -181,6 +183,7 @@ main :: proc() {
 	// A well-formed uncompressed P-256 point: "04" + 128 hex chars, the shape
 	// bridge_get_public_key_hex() produces (src/bridge/unseal_protocol.odin).
 	BPK :: "04030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bc"
+	IDP, IDPROOF := test_bridge_identity(BPK, PKCE_CHALLENGE)
 	// The fingerprint of BPK, computed independently (python hashlib) rather than
 	// by the code under test: SHA-256 over the DECODED 65 bytes, first 8 bytes,
 	// as four space-separated hex quads. A change to WHAT gets hashed — the hex
@@ -236,7 +239,7 @@ main :: proc() {
 
 	bres, bok, berr := device_auth.authorize(&bsvc, {
 		client = "ham-bridge", device_label = "dawnstar", os = "linux", app_version = "0.9.1",
-		bridge_public_key = BPK, os_user = "tanmay",
+		bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF, os_user = "tanmay",
 		code_challenge = PKCE_CHALLENGE, code_challenge_method = "S256",
 	}, "127.0.0.1:5555", "203.0.113.42")
 	assert_true(bok, "bridge authorize succeeds")
@@ -292,7 +295,7 @@ main :: proc() {
 	// body-supplied one that disagrees is surfaced — never silently preferred in
 	// either direction.
 	_, m1ok, m1err := device_auth.authorize(&bsvc, {
-		client = "ham-bridge", bridge_public_key = BPK,
+		client = "ham-bridge", bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF,
 		bridge_key_fingerprint = "0000 0000 0000 0000",
 		code_challenge = PKCE_CHALLENGE, code_challenge_method = "S256",
 	}, "127.0.0.1:1", "203.0.113.56")
@@ -301,7 +304,7 @@ main :: proc() {
 	// An AGREEING body fingerprint is accepted, and the stored value is still the
 	// Hub's own derivation.
 	m2res, m2ok, _ := device_auth.authorize(&bsvc, {
-		client = "ham-bridge", bridge_public_key = BPK, bridge_key_fingerprint = BPK_FP,
+		client = "ham-bridge", bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF, bridge_key_fingerprint = BPK_FP,
 		code_challenge = PKCE_CHALLENGE, code_challenge_method = "S256",
 	}, "127.0.0.1:1", "203.0.113.57")
 	assert_true(m2ok, "body fingerprint that agrees is accepted")
@@ -333,7 +336,7 @@ main :: proc() {
 	lsvc := device_auth.new_device_auth_service(&lstore, fake_clock(), TRUSTED)
 	lres, lok, _ := device_auth.authorize(&lsvc, {
 		client = "ham-bridge", device_label = "dawnstar", os = "linux", app_version = "0.9.1",
-		bridge_public_key = BPK, os_user = "tanmay",
+		bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF, os_user = "tanmay",
 		code_challenge = PKCE_CHALLENGE, code_challenge_method = "S256",
 	}, "127.0.0.1:1", "203.0.113.70")
 	assert_true(lok, "lifecycle grant created with all new fields")
@@ -362,4 +365,21 @@ main :: proc() {
 		fmt.printfln("{} FAILURES", FAILURES)
 		os.exit(1)
 	}
+}
+
+// Passwordless vault: every bridge grant carries a persistent identity key and its
+// proof of possession over (bridge_public_key, code_challenge). Fixed scalar.
+test_bridge_identity :: proc(ecdh_pub, challenge: string) -> (pub_hex: string, proof: string) {
+	priv: ecdsa.Private_Key
+	scalar: [32]byte
+	scalar[0] = 0x42
+	scalar[31] = 0x07
+	_ = ecdsa.private_key_set_bytes(&priv, .SECP256R1, scalar[:])
+	pub: [65]byte
+	ecdsa.private_key_public_bytes(&priv, pub[:])
+	pub_hex = vault.hex_encode_lower(pub[:])
+	msg, _ := vault.bridge_enroll_proof_canonical(ecdh_pub, challenge)
+	sig, _ := vault.sign_p256(&priv, transmute([]byte)msg)
+	proof, _ = vault.signature_object(&sig)
+	return
 }

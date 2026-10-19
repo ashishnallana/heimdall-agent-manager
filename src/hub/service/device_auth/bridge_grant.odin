@@ -57,6 +57,7 @@ import "core:crypto/hash"
 import "core:encoding/base64"
 import "core:encoding/hex"
 import "core:strings"
+import vault "odin_test:lib/vault"
 import domain "odin_test:hub/domain"
 
 // P256_UNCOMPRESSED_HEX_LEN is the hex length of an uncompressed SECP256R1
@@ -258,7 +259,7 @@ validate_bridge_authorize_input :: proc(input: Authorize_Input, allocator := con
 		if input.bridge_key_fingerprint != "" {
 			return "", kind, false, domain.domain_error(.Validation_Failed, "bridge_key_fingerprint requires bridge_public_key")
 		}
-		if input.bridge_identity_public_key != "" {
+		if input.bridge_identity_public_key != "" || input.bridge_identity_proof != "" {
 			return "", kind, false, domain.domain_error(.Validation_Failed, "bridge_identity_public_key requires bridge_public_key")
 		}
 		return "", kind, true, domain.Domain_Error{}
@@ -277,6 +278,12 @@ validate_bridge_authorize_input :: proc(input: Authorize_Input, allocator := con
 	}
 	if input.bridge_identity_public_key == input.bridge_public_key {
 		return "", kind, false, domain.domain_error(.Validation_Failed, "bridge_identity_public_key must differ from bridge_public_key")
+	}
+	// Proof of possession: the identity key signs this grant's ECDH key and PKCE
+	// challenge. Without it a host could enroll under an identity key it does not hold.
+	proof_msg, pm_ok := vault.bridge_enroll_proof_canonical(input.bridge_public_key, input.code_challenge, context.temp_allocator)
+	if !pm_ok || !vault.verify(vault.SIGN_ALG_ECDSA_P256_SHA256, input.bridge_identity_public_key, transmute([]byte)proof_msg, input.bridge_identity_proof) {
+		return "", kind, false, domain.domain_error(.Validation_Failed, "bridge_identity_proof does not verify under bridge_identity_public_key")
 	}
 	fingerprint, fok := bridge_key_fingerprint_for(input.bridge_public_key, allocator)
 	if !fok {

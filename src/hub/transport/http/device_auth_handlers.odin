@@ -62,6 +62,8 @@ device_authorize_handler :: proc(ctx: rawptr, req: Request) -> Response {
 		code_challenge_method = json_string(req.body, "code_challenge_method"),
 		// Passwordless vault: the bridge's persistent identity key (required for a bridge grant).
 		bridge_identity_public_key = json_string(req.body, "bridge_identity_public_key"),
+		// ...and its proof of possession (signature object; see vault.bridge_enroll_proof_canonical).
+		bridge_identity_proof = json_signature(req.body, "bridge_identity_proof"),
 	}
 	xff := header_value(req.headers, "X-Forwarded-For")
 	result, ok, err := device_auth.authorize(handlers.service, input, req.remote_addr, xff)
@@ -396,6 +398,19 @@ json_bool :: proc(body, key: string) -> bool {
 // json_bool_literal requires the field to be present AND be a JSON boolean literal (true or false).
 json_bool_literal :: proc(body, key: string) -> (value: bool, ok: bool) {
 	return jsonx.extract_bool_literal(body, key)
+}
+
+// json_signature reads a top-level signature (object or its canonical text) as
+// canonical text; "" when absent or malformed (the validator then rejects it).
+json_signature :: proc(body, key: string) -> string {
+	v, ok := jsonx.parse_body(body, context.temp_allocator)
+	if !ok do return ""
+	root, is_obj := v.(json.Object)
+	if !is_obj do return ""
+	sig_v, has := root[key]
+	if !has do return ""
+	text, _ := vault.signature_text_from_value(sig_v, context.temp_allocator)
+	return text
 }
 
 // parse_vault_approval reads the optional `vault_approval:{expected_version,

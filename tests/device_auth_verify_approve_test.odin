@@ -14,6 +14,8 @@
 package device_auth_verify_approve_test
 
 import "core:fmt"
+import "core:crypto/ecdsa"
+import vault "odin_test:lib/vault"
 import "core:testing"
 import "core:os"
 import device_auth "odin_test:hub/service/device_auth"
@@ -196,12 +198,13 @@ main :: proc() {
 	// Additive — every case above is pre-existing ELDA coverage.
 	// =====================================================================
 	BPK :: "04030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bc"
+	IDP, IDPROOF := test_bridge_identity(BPK, PKCE_CHALLENGE)
 	BPK_FP :: "fb41 9516 cc0c f6ae"
 	PKCE_CHALLENGE :: "ZtNPunH49FD35FWYhT5Tv8I7vRKQJ8uxMaL0_9eHjNA"
 
 	bres, bok2, _ := device_auth.authorize(&svc, {
 		client = "ham-bridge", device_label = "dawnstar", os = "linux", app_version = "0.9.1",
-		bridge_public_key = BPK, os_user = "tanmay",
+		bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF, os_user = "tanmay",
 		code_challenge = PKCE_CHALLENGE, code_challenge_method = "S256",
 	}, "127.0.0.1:1", "")
 	assert_true(bok2, "bridge authorize succeeds")
@@ -275,7 +278,7 @@ main :: proc() {
 	// The two identity choices are mutually exclusive. Reject the request before
 	// the minter can rotate an existing bridge while also accepting a new label.
 	conflict_res, conflict_ok, _ := device_auth.authorize(&svc, {
-		client = "ham-bridge", bridge_public_key = BPK,
+		client = "ham-bridge", bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF,
 		code_challenge = PKCE_CHALLENGE, code_challenge_method = "S256",
 	}, "127.0.0.1:1", "")
 	assert_true(conflict_ok, "authorize bridge grant for conflicting identity choices")
@@ -315,7 +318,7 @@ main :: proc() {
 	nsvc := device_auth.new_device_auth_service(nstore, fake_clock(), []string{"127.0.0.1/32"})
 	device_auth.with_token_minter(&nsvc, fake_minter) // user minter wired, bridge minter NOT
 	nres, nok, _ := device_auth.authorize(&nsvc, {
-		client = "ham-bridge", bridge_public_key = BPK,
+		client = "ham-bridge", bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF,
 		code_challenge = PKCE_CHALLENGE, code_challenge_method = "S256",
 	}, "127.0.0.1:1", "")
 	assert_true(nok, "bridge authorize succeeds without a wired bridge minter")
@@ -332,7 +335,7 @@ main :: proc() {
 	// unattributable credential defeats the point of per-machine scoping. ---
 	BRIDGE_MINT_ID = ""
 	ires, iok, _ := device_auth.authorize(&svc, {
-		client = "ham-bridge", bridge_public_key = BPK,
+		client = "ham-bridge", bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF,
 		code_challenge = PKCE_CHALLENGE, code_challenge_method = "S256",
 	}, "127.0.0.1:1", "")
 	assert_true(iok, "authorize for the no-id case succeeds")
@@ -363,7 +366,7 @@ main :: proc() {
 	// A PENDING bridge grant has no credential yet, so there is nothing to
 	// address and nothing may be returned.
 	pres, pok3, _ := device_auth.authorize(&svc, {
-		client = "ham-bridge", bridge_public_key = BPK,
+		client = "ham-bridge", bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF,
 		code_challenge = PKCE_CHALLENGE, code_challenge_method = "S256",
 	}, "127.0.0.1:1", "")
 	assert_true(pok3, "authorize a second bridge grant for the pending case")
@@ -372,7 +375,7 @@ main :: proc() {
 
 	// A DENIED bridge grant must not expose one either: the operator said no.
 	dres, dok3, _ := device_auth.authorize(&svc, {
-		client = "ham-bridge", bridge_public_key = BPK,
+		client = "ham-bridge", bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF,
 		code_challenge = PKCE_CHALLENGE, code_challenge_method = "S256",
 	}, "127.0.0.1:1", "")
 	assert_true(dok3, "authorize a bridge grant for the denied case")
@@ -401,4 +404,21 @@ main :: proc() {
 	device_auth.approve(&svc, {user_code = res_f.user_code, approve = true}, "o", "127.0.0.1:1", "ua")
 	// (full trusted-XFF branch coverage lives in the grant_store unit test.)
 	fmt.println("AC6 OK: approve over HTTP supplies trusted-XFF approver_ip")
+}
+
+// Passwordless vault: every bridge grant carries a persistent identity key and its
+// proof of possession over (bridge_public_key, code_challenge). Fixed scalar.
+test_bridge_identity :: proc(ecdh_pub, challenge: string) -> (pub_hex: string, proof: string) {
+	priv: ecdsa.Private_Key
+	scalar: [32]byte
+	scalar[0] = 0x42
+	scalar[31] = 0x07
+	_ = ecdsa.private_key_set_bytes(&priv, .SECP256R1, scalar[:])
+	pub: [65]byte
+	ecdsa.private_key_public_bytes(&priv, pub[:])
+	pub_hex = vault.hex_encode_lower(pub[:])
+	msg, _ := vault.bridge_enroll_proof_canonical(ecdh_pub, challenge)
+	sig, _ := vault.sign_p256(&priv, transmute([]byte)msg)
+	proof, _ = vault.signature_object(&sig)
+	return
 }

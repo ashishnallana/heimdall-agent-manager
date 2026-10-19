@@ -330,3 +330,18 @@ bridge_unseal_key_canonical :: proc(bridge_id, ecdh_pub_hex, boot_id: string, al
 	if boot_id == "" || !is_lower_hex(boot_id) do return "", false
 	return strings.concatenate({BRIDGE_UNSEAL_KEY_HEADER, "\n", bridge_id, "\n", ecdh_pub_hex, "\n", boot_id}, allocator), true
 }
+
+// ── Bridge enrollment proof of possession ───────────────────────────────────
+
+BRIDGE_ENROLL_PROOF_HEADER :: "heimdall-bridge-enroll/v1"
+
+// bridge_enroll_proof_canonical renders
+// "heimdall-bridge-enroll/v1\n<bridge_ecdh_public_key>\n<code_challenge>", which the
+// bridge's persistent IDENTITY key signs at /device/authorize. It proves the host
+// holds that identity key and binds it to this grant's per-process ECDH key and PKCE
+// challenge, so a grant cannot carry someone else's identity key.
+bridge_enroll_proof_canonical :: proc(ecdh_pub_hex, code_challenge: string, allocator := context.allocator) -> (string, bool) {
+	if len(ecdh_pub_hex) != P256_PUBLIC_KEY_BYTES * 2 || !is_lower_hex(ecdh_pub_hex) do return "", false
+	if code_challenge == "" || len(code_challenge) > 128 || !valid_id_value(code_challenge) do return "", false
+	return strings.concatenate({BRIDGE_ENROLL_PROOF_HEADER, "\n", ecdh_pub_hex, "\n", code_challenge}, allocator), true
+}

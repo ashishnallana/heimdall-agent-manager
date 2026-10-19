@@ -570,3 +570,27 @@ test_directory_helpers :: proc(t: ^testing.T) {
 	stmt3, _ := wrap_statement(&w2, "usr_0123456789abcdef", context.temp_allocator)
 	testing.expect(t, !verify(SIGN_ALG_ECDSA_P256_SHA256, str(so, "issuer_public_key"), transmute([]byte)stmt3, sig2))
 }
+
+@(test)
+test_bridge_enroll_proof_binds_key_and_challenge :: proc(t: ^testing.T) {
+	ecdh_pub := strings.concatenate({"04", strings.repeat("ab", 64, context.temp_allocator)}, context.temp_allocator)
+	msg, ok := bridge_enroll_proof_canonical(ecdh_pub, "ZtNPunH49FD35FWYhT5Tv8I7vRKQJ8uxMaL0_9eHjNA", context.temp_allocator)
+	testing.expect(t, ok)
+	testing.expect_value(t, msg, strings.concatenate({"heimdall-bridge-enroll/v1\n", ecdh_pub, "\nZtNPunH49FD35FWYhT5Tv8I7vRKQJ8uxMaL0_9eHjNA"}, context.temp_allocator))
+	_, bad_key := bridge_enroll_proof_canonical("04ab", "abc", context.temp_allocator)
+	_, bad_chal := bridge_enroll_proof_canonical(ecdh_pub, "a b", context.temp_allocator)
+	_, empty_chal := bridge_enroll_proof_canonical(ecdh_pub, "", context.temp_allocator)
+	testing.expect(t, !bad_key && !bad_chal && !empty_chal)
+	priv: ecdsa.Private_Key
+	scalar: [32]byte
+	scalar[31] = 9
+	_ = ecdsa.private_key_set_bytes(&priv, .SECP256R1, scalar[:])
+	pub: [65]byte
+	ecdsa.private_key_public_bytes(&priv, pub[:])
+	pub_hex := hex_encode_lower(pub[:], context.temp_allocator)
+	sig, _ := sign_p256(&priv, transmute([]byte)msg)
+	obj, _ := signature_object(&sig, context.temp_allocator)
+	testing.expect(t, verify(SIGN_ALG_ECDSA_P256_SHA256, pub_hex, transmute([]byte)msg, obj))
+	other, _ := bridge_enroll_proof_canonical(ecdh_pub, "another-challenge", context.temp_allocator)
+	testing.expect(t, !verify(SIGN_ALG_ECDSA_P256_SHA256, pub_hex, transmute([]byte)other, obj))
+}

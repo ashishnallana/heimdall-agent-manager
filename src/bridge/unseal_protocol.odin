@@ -216,6 +216,20 @@ bridge_unseal_identity_generate_for_enrollment :: proc() -> (public_key_hex: str
 	return strings.clone(string(g_bridge_identity_pub_hex_buf[:]), context.temp_allocator), true
 }
 
+// bridge_unseal_identity_enrollment_proof signs the /device/authorize proof of
+// possession (vault.bridge_enroll_proof_canonical) with the enrollment's in-memory
+// identity. Only for a generated-but-uncommitted identity. Temp-allocated.
+bridge_unseal_identity_enrollment_proof :: proc(ecdh_pub_hex, code_challenge: string) -> (sig_json: string, ok: bool) {
+	sync.mutex_lock(&g_bridge_identity_mu)
+	defer sync.mutex_unlock(&g_bridge_identity_mu)
+	if !g_bridge_identity_loaded || g_bridge_identity_owner_len != 0 do return "", false
+	msg, m_ok := vault.bridge_enroll_proof_canonical(ecdh_pub_hex, code_challenge, context.temp_allocator)
+	if !m_ok do return "", false
+	sig, s_ok := vault.sign_p256(&g_bridge_identity_priv, transmute([]byte)msg)
+	if !s_ok do return "", false
+	return vault.signature_object(&sig, context.temp_allocator)
+}
+
 // bridge_unseal_identity_commit_enrollment persists the enrollment's in-memory
 // identity under the hub-assigned bridge id together with the approving account
 // (the enrolled owner). Called once, right after approval and before any unseal.
