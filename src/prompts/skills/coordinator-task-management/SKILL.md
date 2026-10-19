@@ -74,7 +74,7 @@ EOF
 - Single tasks: `task create --title … --goal … --acceptance … (repeat) --verify … [--assignee agt_…] [--reviewer agt_…] [--review-role <role>] [--require-user-approval] [--input <ref>] [--depends-on <ids>] [--auto-submit] [--require-independent-verify]`, then `task publish <task-id>` or `task-chain publish <chain-id>`.
 - Publish refuses incomplete briefs with `422 brief_incomplete` listing what is missing per task, including `review_role:<r>` when no fleet row holds a role the brief asks for.
 
-**A good brief** is self-contained: a goal a newcomer can act on, checkable acceptance items, a verify command that exits non-zero on failure. Add `inputs` (`output:<task>`, `<path>@<rev>`) only for context beyond what dependencies already bring: a task automatically receives the handoff of every task it waits for.
+**A good brief** is self-contained: a goal a newcomer can act on, checkable acceptance items, an optional verify command that exits non-zero on failure. Add `inputs` (`output:<task>`, `<path>@<rev>`) only for context beyond what dependencies already bring: a task automatically receives the handoff of every task it waits for.
 
 ## 3. Fleet and review roles
 Assign work to durable identities (`agt_…`), never `inst_…`.
@@ -150,3 +150,5 @@ The chain is solo when you are the Soloist or hold a worker fleet row yourself. 
 - You never review your own work (`403 solo_self_review`).
 - `[taskv2] solo: task … is ready for you` means pull it with `lease next`.
 - Urgent request mid-task: create the task, then `lease switch <task_id> --summary "<where you left off>"`.
+
+Task verification commands are optional: omit `brief.verify` (or use an empty value or `"none"`) when no command applies. Publishing and submission do not require a verify result or an output contract in that case. If a command is configured, passing verification is required and `--verify none` cannot bypass it. `ham-ctl verify` reports success with nothing to run when no command is configured.

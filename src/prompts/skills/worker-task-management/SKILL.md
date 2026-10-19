@@ -146,3 +146,5 @@ When `TASK.md` says `reviewer` (a review lease):
 
 ## 8. Solo mode
 When `TASK.md` has a **Solo Mode** section you are the coordinator and the worker; the user reviews. Pull work with `lease next` (nothing is pushed to you), submit, and pull the next task right away. To take an urgent task mid-way: `ham-ctl lease switch <task_id> --summary "<where you left the current one>"` (the current task returns to `ready`; the attempt is not counted). You never review your own work; the Hub refuses it.
+
+Task verification commands are optional: omit `brief.verify` (or use an empty value or `"none"`) when no command applies. Publishing and submission do not require a verify result or an output contract in that case. If a command is configured, passing verification is required and `--verify none` cannot bypass it. `ham-ctl verify` reports success with nothing to run when no command is configured.

@@ -10,7 +10,6 @@ import { CreateTaskModal } from '../tasks/CreateTaskModal';
 import { TaskBoardSkeleton } from '../tasks/TaskBoardSkeleton';
 import { FleetManagementDrawer } from '../tasks/FleetManagementDrawer';
 import { ReviewRolesModal } from '../tasks/ReviewRolesModal';
-import ChainActiveServersPanel from '../shells/ChainActiveServersPanel';
 import { TaskWire } from '../../api/taskWire';
 import { resolveSelectedTaskId } from '../tasks/taskV2Types';
 import { useOpenAgentChat } from '../auxiliary/openAgentChatContext';
@@ -195,7 +194,6 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
   /* REQ-SHELL-6 §4: this chain's ACTIVE SERVERS, whoever started them. It sits in the chain
      summary because `server` is CHAIN + BRIDGE scoped, and chain is in no other kind's scope
      key (shell_session.odin:87-91). */
-  const activeServers = <ChainActiveServersPanel chainId={chainId} />;
 
   return (
     <div
@@ -239,7 +237,6 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
             publishingChain={publishChainState.isLoading}
             publishError={publishError}
             summaryText={chain.summary}
-            summarySlot={activeServers}
             hasWorkflowRuns={workflowRuns.length > 0}
             workSlot={<WorkflowRunsReadOnly runs={workflowRuns} loading={workflowRunsQuery.isLoading || workflowRunsQuery.isFetching && !workflowRunsQuery.currentData} error={workflowRunsQuery.error} refresh={() => { void workflowRunsQuery.refetch(); }} focusTaskId={focusTaskId} />}
           />

@@ -733,3 +733,26 @@ test_pack_full_sections_and_field_safe_cap :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(capped, "keep_finding_1"), "findings preserved under cap")
 }
 
+
+@(test)
+test_optional_verify_publish_and_submit :: proc(t: ^testing.T) {
+ fx, log, ok := lease_fixture(t, "optional_verify")
+ defer lease_fixture_close(fx, log)
+ if !ok do return
+ chain := seed_live_chain(t, fx, "chain_optional_verify")
+ seed_fleet(fx, chain, "agt_w")
+ seed_instance(fx, chain, "inst_w1", "agt_w", "br_1", "idle")
+ briefs := []string{
+  `{"goal":"Document findings","acceptance":["Findings recorded"],"review_roles":[]}`,
+  `{"goal":"Document findings","acceptance":["Findings recorded"],"verify":"","review_roles":[]}`,
+  `{"goal":"Document findings","acceptance":["Findings recorded"],"verify":"none","review_roles":[]}`,
+ }
+ for brief, i in briefs {
+  id := fmt.tprintf("optional_verify_%d", i)
+  _ = publish_task(t, fx, chain, id, brief = brief)
+  claim, cok, _ := lease_next(&fx.svc, inst_auth("inst_w1"), Lease_Next_Input{})
+  testing.expect(t, cok && (claim.status == "granted" || claim.status == "current"), "task without a verify command is publishable and leasable")
+  _, sok, serr := lease_submit(&fx.svc, inst_auth("inst_w1"), Submit_Input{summary = "Findings recorded"})
+  testing.expect(t, sok && serr.code == .None, "submission needs neither a verify facet nor an output contract")
+ }
+}

@@ -180,7 +180,7 @@ globally unique — you rarely need `--chain`).
 - `task fetch <task-id> <ref>` — fetch one event (`#<event_id>`), output (`output:<task_id>`), facet (`facet:<task_id>:<attempt_no>:<kind>`), or file-at-commit (`dir:<dir_id>:<rev>:<path>`, `<path>@<rev>`, or `<path>`) referenced by `TASK.md`.
 - `lease next` — inspect the lease you hold (status `current`) or claim the next ready task inline (status `granted`), updating `<run_dir>/TASK.md`; returns `none` when idle.
 - `lease heartbeat [--note <text>]` — extend the lease TTL and optionally record a progress note. On `409 lease_lost`, stop immediately without touching the working tree.
-- `lease submit --summary <s> [handoff flags] [--output-file <json>] [--artifacts-file <json>] [--artifacts <json>] [--verify none] [--lease <id>]` — finish the attempt (task → `in_review`, or `done` with no review gates). Requires a passing `ham-ctl verify` at the current head unless `brief.verify` is `"none"` (`409 verify_required|verify_failed|verify_stale|verify_dirty`). Validates `output` against the brief's output contract (`task_list.v1`, `findings.v1`).
+- `lease submit --summary <s> [handoff flags] [--output-file <json>] [--artifacts-file <json>] [--artifacts <json>] [--verify none] [--lease <id>]` — finish the attempt (task → `in_review`, or `done` with no review gates). Requires a passing `ham-ctl verify` at the current head when `brief.verify` configures a command (omitted, blank, or `"none"` skips verification) (`409 verify_required|verify_failed|verify_stale|verify_dirty`). Validates `output` against the brief's output contract (`task_list.v1`, `findings.v1`).
 - `lease handoff --summary <s> [handoff flags] [--lease <id>]` — stop without finishing; the task returns to `ready` and the next holder gets your handoff.
 - `lease switch <task_id> --summary <s> [handoff flags]` — solo mode: hand off the current task (attempt not counted) and take `<task_id>` (must be `ready`) in one step.
 - **Handoff flags** (submit, handoff, switch): `--decision <text>` and `--dead-end <text>` (repeat per item), `--next-steps <text>`; or `--handoff-file <json>` (`{"decisions":[…],"dead_ends":[…],"next_steps":"…"}`) instead, not both. Decisions and dead ends reach every task that waits for this one and the next attempt; dead ends also go into the chain summary for all tasks.
@@ -526,3 +526,5 @@ caller's own agent. "Global" scope = omit the scope flags. Repeatable or comma-s
 
 ## start-success — startup signal
 - `start-success` — signal this instance is ready. Run once at startup; idempotent.
+
+Task verification commands are optional: omit `brief.verify` (or use an empty value or `"none"`) when no command applies. Publishing and submission do not require a verify result or an output contract in that case. If a command is configured, passing verification is required and `--verify none` cannot bypass it. `ham-ctl verify` reports success with nothing to run when no command is configured.

@@ -120,17 +120,14 @@ write_submit_facets :: proc(svc: ^Service, u: ^Uow, task: domain.Task, attempt_n
 // attempt with exit_code==0 ∧ head_at_start==head_at_end==submit.head ∧
 // dirty==false (and submit's own working tree not dirty). `dirty` may be null
 // when the chain has no VCS directory; the facet must then postdate the
-// attempt's last handoff/note. verify:"none" is allowed only when the brief
-// itself says `verify: "none"` AND declares an output contract.
+// attempt's last handoff/note. Verification is optional when brief.verify is
+// omitted, blank, or "none"; a configured command still requires passing evidence.
 @(private = "file")
 verify_gate :: proc(svc: ^Service, task: domain.Task, attempt_no: int, input: Submit_Input) -> domain.Domain_Error {
 	bverify := strings.trim_space(jsonx.extract_string(task.brief_json, "verify", "", true, context.temp_allocator))
-	if input.verify == "none" || bverify == "none" {
-		if bverify != "none" {
-			return domain.domain_error(.Conflict, "verify:none is allowed only when brief.verify is \"none\"", `{"code":"verify_required"}`)
-		}
-		if brief_has_output_contract(task.brief_json) do return domain.Domain_Error{}
-		return domain.domain_error(.Conflict, "verify:none is allowed only when the brief declares an output contract", `{"code":"verify_required"}`)
+	if bverify == "" || bverify == "none" do return domain.Domain_Error{}
+	if input.verify == "none" {
+		return domain.domain_error(.Conflict, "brief.verify requires a command: run `ham-ctl verify`", `{"code":"verify_required"}`)
 	}
 	f, ok := get_facet(svc, task, attempt_no, FACET_VERIFY)
 	if !ok do return domain.domain_error(.Conflict, "no verify result on this attempt: run `ham-ctl verify` (brief.verify) at the head you are submitting", `{"code":"verify_required"}`)
@@ -727,9 +724,6 @@ brief_missing_fields_for_publish :: proc(svc: ^Service, chain: domain.Task_Chain
 	acc_ok := len(acceptance) >= 1 && len(acceptance) <= BRIEF_ACCEPTANCE_MAX
 	for a in acceptance do if strings.trim_space(a) == "" || (len(a) > BRIEF_ACCEPTANCE_ITEM && !is_vault_armored(a)) do acc_ok = false
 	if !acc_ok do append(&out, "acceptance")
-	verify := strings.trim_space(jsonx.extract_string(brief, "verify", "", true, context.temp_allocator))
-	has_output := brief_has_output_contract(brief)
-	if verify == "" || (verify == "none" && !has_output) do append(&out, "verify")
 	roles := jsonx.extract_string_array(brief, "review_roles", true, context.temp_allocator)
 	if len(roles) > 0 && svc != nil && svc.repo != nil {
 		fleets, ferr := iface.taskchain_list_fleets_by_chain(svc.repo, chain.chain_id, chain.owner_user_id)
@@ -781,7 +775,7 @@ validate_brief_for_publish :: proc(svc: ^Service, chain: domain.Task_Chain, exis
 	}
 	strings.write_string(&b, "]}")
 	if has_problem {
-		return false, domain.domain_error(.Validation_Failed, "brief incomplete: every published task needs goal (≤2k), ≥1 acceptance item (≤20×200), verify (or verify:none with an output contract) and a fleet row per review role", strings.to_string(b))
+		return false, domain.domain_error(.Validation_Failed, "brief incomplete: every published task needs goal (≤2k), ≥1 acceptance item (≤20×200), an optional verify command, and a fleet row per review role", strings.to_string(b))
 	}
 	return true, domain.Domain_Error{}
 }

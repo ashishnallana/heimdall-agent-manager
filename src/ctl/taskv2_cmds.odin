@@ -250,7 +250,7 @@ ctl_brief_incomplete_render :: proc(response: string) -> (string, bool) {
 			strings.write_byte(&b, '\n')
 		}
 	}
-	strings.write_string(&b, "rules: goal (≤2000 chars); 1..20 acceptance items (≤200 chars each); verify command (or \"none\" with an output contract); every review_role needs a fleet row carrying that role.\n")
+	strings.write_string(&b, "rules: goal (≤2000 chars); 1..20 acceptance items (≤200 chars each); optional verify command; every review_role needs a fleet row carrying that role.\n")
 	return strings.to_string(b), true
 }
 
@@ -405,7 +405,7 @@ ctl_v2_lease_submit :: proc(endpoint, token: string, args: []string) {
 	summary := strings.trim_space(option_value(args, "--summary", ""))
 	if summary == "" { fmt.println(`{"ok":false,"message":"lease submit requires --summary <text>"}`); os.exit(1) }
 	if v := strings.trim_space(option_value(args, "--verify", "")); v != "" && v != "none" {
-		fmt.println(`{"ok":false,"message":"lease submit --verify accepts only 'none' (skip the verify gate for tasks with an output contract)"}`)
+		fmt.println(`{"ok":false,"message":"lease submit --verify accepts only 'none' (only tasks without a configured verify command may skip verification)"}`)
 		os.exit(1)
 	}
 	h, _ := ctl_handoff_flags(args)
@@ -892,12 +892,8 @@ ctl_v2_verify :: proc(endpoint, token: string, tokens, args: []string) {
 		os.exit(1)
 	}
 	verify_cmd := strings.trim_space(lease.verify_cmd)
-	if verify_cmd == "" {
-		fmt.printfln(`{"ok":false,"message":"verify: task %s has no brief.verify command; update the brief first"}`, lease.task_id)
-		os.exit(1)
-	}
-	if verify_cmd == "none" {
-		fmt.printfln(`{"ok":true,"task_id":"%s","verify":"none","message":"brief.verify is none: nothing to run; submit with --verify none"}`, lease.task_id)
+	if verify_cmd == "" || verify_cmd == "none" {
+		fmt.printfln(`{"ok":true,"task_id":"%s","verify":"none","message":"No verification command configured; nothing to run"}`, lease.task_id)
 		return
 	}
 

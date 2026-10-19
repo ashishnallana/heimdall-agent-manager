@@ -215,7 +215,7 @@ parse_and_validate_workflow_spec :: proc(raw_spec: string, name_override := "", 
 			bver := strings.trim_space(jsonx.extract_string(brief_raw, "verify", "", true, allocator))
 			has_out := brief_has_output_contract(brief_raw)
 			if bgoal == "" || (len(bacc) == 0 && bver == "") {
-				return {}, false, domain.domain_error(.Validation_Failed, fmt.tprintf("stage %s brief requires non-empty goal, acceptance, and verify", skey), `{"code":"workflow_invalid"}`)
+				return {}, false, domain.domain_error(.Validation_Failed, fmt.tprintf("stage %s brief requires non-empty goal and acceptance or a verify command", skey), `{"code":"workflow_invalid"}`)
 			}
 			if bver == "" do bver = "none"
 			if bver == "none" && !has_out && len(bacc) == 0 {
@@ -554,10 +554,7 @@ validate_task_list_v1_json :: proc(output_json: string) -> domain.Domain_Error {
 		if goal == "" {
 			return domain.domain_error(.Validation_Failed, fmt.tprintf("task_list.v1 item[%d] is missing non-empty `goal`", idx), `{"code":"output_contract_invalid"}`)
 		}
-		verify, has_v := jsonx.extract_string_found(obj, "verify", true, context.temp_allocator)
-		if has_v && (strings.trim_space(verify) == "" || strings.trim_space(verify) == "none") {
-			return domain.domain_error(.Validation_Failed, fmt.tprintf("task_list.v1 item[%d] has invalid verify command", idx), `{"code":"output_contract_invalid"}`)
-		}
+
 	}
 	return domain.Domain_Error{}
 }
