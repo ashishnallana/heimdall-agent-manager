@@ -10,6 +10,7 @@ Proposal: https://claude.ai/artifact/SkGGa5tdZEnW92UbKxkXVL
 3. **Device list with revoke.** Settings lists every connected device (browsers, bridges, recovery) with label, kind, fingerprint, approved-by and last-seen. Any device can be revoked **except the current device** (enforced in UI and by the hub). Revoking the last approver-capable device is refused unless a recovery key exists. Revoke rotates to a new epoch and re-unseals the remaining bridges.
 4. **No backward compatibility.** v1 envelopes, PBKDF2, `user_vaults`, password migration, "vault not configured" plaintext modes and any legacy-format fallbacks are deleted, not shimmed. Dev data may be wiped; old bridges re-enroll.
 5. **Production security bar — no shortcuts.** This ships to real users.
+6. **Vault reset (decided by the engineering lead, revisit if needed).** Creating the account root (genesis) and registering devices need an interactive browser login, not a CLI token. If the root was set up by someone else or every device is lost and there is no recovery key, the user can request a reset from a fresh login; it runs after a 72-hour delay, every session and device is notified, and any approved device can cancel it. A reset destroys the directory and all keys (history becomes unreadable).
 
 ## Engineering rules for every phase
 
