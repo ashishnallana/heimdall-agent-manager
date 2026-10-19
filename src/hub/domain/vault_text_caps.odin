@@ -109,13 +109,18 @@ validate_capped_text :: proc(label: string, value: string, plaintext_max: int) -
 	))
 }
 
-// vault_pty_v2_payload_from_armor converts a "vault:v2:e<N>:<b64(nonce|tag|ct)>" token
-// into the PTY v2 binary layout u32be(N) | nonce | tag | ct, preserving the epoch the
-// bridge/browser must check. The hub never decrypts; it only re-frames. Returns false
-// for anything that is not exactly one well-formed v2 token.
+// VAULT_PTY_V2_ARMOR_MIN_BYTES is the smallest armored PTY v2 body: salt16 | nonce | tag.
+VAULT_PTY_V2_ARMOR_MIN_BYTES :: vault.PTY_V2_HEADER_BYTES - 4
+
+// vault_pty_v2_payload_from_armor converts a "vault:v2:e<N>:<b64(salt16|nonce|tag|ct)>"
+// token (an armored PTY v2 frame: pane capture, REST input) into the PTY v2 binary
+// layout u32be(N) | salt16 | nonce | tag | ct, preserving the epoch the bridge/browser
+// must check. The hub never decrypts; it only re-frames, passing salt and nonce through
+// unchanged. Returns false for anything that is not exactly one well-formed v2 token
+// long enough to hold a PTY v2 header.
 vault_pty_v2_payload_from_armor :: proc(armor: string, allocator := context.allocator) -> (payload: []byte, ok: bool) {
 	epoch, body, res := vault.envelope_parse(armor, context.temp_allocator)
-	if res != .Ok do return nil, false
+	if res != .Ok || len(body) < VAULT_PTY_V2_ARMOR_MIN_BYTES do return nil, false
 	out := make([]byte, 4 + len(body), allocator)
 	out[0] = byte(epoch >> 24)
 	out[1] = byte(epoch >> 16)

@@ -11,15 +11,19 @@ export const VAULT_KEY_RECORD_ID = 'active_vault_key';
 // version 3: the search key is the v2 per-epoch derivation (P1 adapter: epoch 1).
 // A version-2 record's search key was derived under the retired v1 domain, so only
 // its content key is restored.
+// ptyBaseKey (optional): the non-extractable HKDF base key for PTY v2 subkeys. Without
+// it a restored session cannot open terminal streams until the vault is unlocked again.
 export type PersistedVaultKeys = {
   version: 3;
   contentKey: CryptoKey;
   taskChainSearchKey: CryptoKey;
+  ptyBaseKey?: CryptoKey;
 };
 
 export type RestoredVaultKeys = {
   contentKey: CryptoKey;
   taskChainSearchKey: CryptoKey | null;
+  ptyBaseKey?: CryptoKey | null;
   version: 1 | 2 | 3;
 };
 
@@ -111,8 +115,11 @@ async function persistVaultRecordNow(record: CryptoKey | PersistedVaultKeys): Pr
 export async function persistVaultKeys(
   contentKey: CryptoKey,
   taskChainSearchKey: CryptoKey,
+  ptyBaseKey: CryptoKey | null = null,
 ): Promise<void> {
-  await persistVaultRecord({ version: 3, contentKey, taskChainSearchKey });
+  const record: PersistedVaultKeys = { version: 3, contentKey, taskChainSearchKey };
+  if (ptyBaseKey) record.ptyBaseKey = ptyBaseKey;
+  await persistVaultRecord(record);
 }
 
 /**
@@ -145,6 +152,7 @@ export async function restoreVaultKeys(): Promise<RestoredVaultKeys | null> {
             resolve({
               contentKey: result.contentKey,
               taskChainSearchKey: result.taskChainSearchKey,
+              ptyBaseKey: isCryptoKey(result.ptyBaseKey) ? result.ptyBaseKey : null,
               version: 3,
             });
           } else if (result?.version === 2 && isCryptoKey(result.contentKey)) {

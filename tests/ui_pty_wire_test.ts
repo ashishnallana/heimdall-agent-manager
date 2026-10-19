@@ -20,9 +20,16 @@ import {
   decryptPtyPayload,
   encodePtyViewerFrame,
   encryptPtyPayload,
+  openPaneReplyOutput,
+  ptyBaseKeyFor,
+  resetPtyInputStream,
+  sealPtyPayload,
+  setPtyBridgeBootId,
 } from '../src/ui/components/shells/ptyWire.ts';
+
+const BOOT = '00112233445566778899aabbccddeeff';
 import { normalizeSnapshotText, repaintCapturedScreenText } from '../src/ui/components/shells/paneDeliveryQueue.ts';
-import { importRawKeyHex } from '../src/ui/utils/vaultCrypto.ts';
+import { importRawKeyHex, setActiveVaultKey } from '../src/ui/utils/vaultCrypto.ts';
 
 const Terminal = (xtermModule as any).Terminal ?? (xtermModule as any).default.Terminal;
 const enc = new TextEncoder();
@@ -91,17 +98,71 @@ test('PtyTextDecoder keeps a multi-byte character split across two frames whole'
   assert.equal(decoder.decode(enc.encode('\x1b[2J\x1b[Hfresh')), '\x1b[2J\x1b[Hfresh');
 });
 
-test('decryptPtyPayload opens a v2 payload (epoch | nonce | tag | ct) bound to session and direction', async () => {
+test('decryptPtyPayload opens a v2 payload (epoch | salt | nonce | tag | ct) bound to session and direction', async () => {
   const kr = await keyringFromHex('0123456789abcdef'.repeat(4));
+  setPtyBridgeBootId('shs_1', BOOT);
   const sealed = await encryptPtyPayload(enc.encode('secret λ'), kr, 'shs_1');
-  assert.equal(sealed.length, 4 + 12 + 16 + enc.encode('secret λ').length);
-  const plain = await decryptPtyPayload(sealed, kr, 'shs_1', 'in');
+  assert.equal(sealed.length, 4 + 16 + 12 + 16 + enc.encode('secret λ').length);
+  const plain = await decryptPtyPayload(sealed, kr, 'shs_1', 'in', BOOT);
   assert.equal(new TextDecoder().decode(plain!), 'secret λ');
   await assert.rejects(decryptPtyPayload(sealed, kr, 'shs_1', 'out'));
-  await assert.rejects(decryptPtyPayload(sealed, kr, 'shs_2', 'in'));
-  await assert.rejects(decryptPtyPayload(sealed.subarray(0, 20), kr, 'shs_1', 'in'));
+  await assert.rejects(decryptPtyPayload(sealed, kr, 'shs_2', 'in', BOOT));
+  // Bound to the bridge's boot id: a restarted bridge (new id) cannot open it.
+  await assert.rejects(decryptPtyPayload(sealed, kr, 'shs_1', 'in', 'ffeeddccbbaa99887766554433221100'));
+  await assert.rejects(decryptPtyPayload(sealed.subarray(0, 20), kr, 'shs_1', 'in', BOOT));
   sealed[sealed.length - 1] ^= 0x01;
-  await assert.rejects(decryptPtyPayload(sealed, kr, 'shs_1', 'in'));
+  await assert.rejects(decryptPtyPayload(sealed, kr, 'shs_1', 'in', BOOT));
+  // No boot id known for a session: input fails closed.
+  await assert.rejects(encryptPtyPayload(enc.encode('x'), kr, 'shs_no_boot'), /boot id/);
+});
+
+test('browser input stream: one salt per stream, strictly increasing counters, new salt on reset', async () => {
+  const kr = await keyringFromHex('0123456789abcdef'.repeat(4));
+  const clock = () => 1_760_000_000_000;
+  setPtyBridgeBootId('shs_ctr', BOOT);
+  resetPtyInputStream('shs_ctr');
+  const a = await encryptPtyPayload(enc.encode('a'), kr, 'shs_ctr', clock);
+  const b = await encryptPtyPayload(enc.encode('b'), kr, 'shs_ctr', clock);
+  const salt = (f: Uint8Array) => Buffer.from(f.subarray(4, 20)).toString('hex');
+  const counter = (f: Uint8Array) => new DataView(f.buffer, f.byteOffset).getBigUint64(4 + 16 + 4);
+  assert.equal(salt(a), salt(b));
+  assert.equal(counter(a), 1_760_000_000_000n * 1000n + 1n);
+  assert.equal(counter(b), counter(a) + 1n);
+  resetPtyInputStream('shs_ctr');
+  // Even with a clock that went backwards, a new stream starts above the old counters.
+  const c = await encryptPtyPayload(enc.encode('c'), kr, 'shs_ctr', () => 1);
+  assert.notEqual(salt(c), salt(a));
+  assert.ok(counter(c) > counter(b));
+  // No PTY base key for the epoch: nothing is sealed.
+  const noPty = Object.freeze({ userId: kr.userId, currentEpoch: kr.currentEpoch, keys: kr.keys });
+  await assert.rejects(encryptPtyPayload(enc.encode('x'), noPty, 'shs_ctr'));
+  assert.equal(await decryptPtyPayload(a, noPty, 'shs_ctr', 'in', BOOT), null);
+  // A new bridge boot id starts a new stream (fresh salt) sealed to the new id.
+  const NEW_BOOT = 'ffeeddccbbaa99887766554433221100';
+  setPtyBridgeBootId('shs_ctr', NEW_BOOT);
+  const d = await encryptPtyPayload(enc.encode('d'), kr, 'shs_ctr', clock);
+  assert.notEqual(salt(d), salt(c));
+  assert.ok(counter(d) > counter(c));
+  assert.equal(new TextDecoder().decode((await decryptPtyPayload(d, kr, 'shs_ctr', 'in', NEW_BOOT))!), 'd');
+  await assert.rejects(decryptPtyPayload(d, kr, 'shs_ctr', 'in', BOOT));
+});
+
+test('openPaneReplyOutput decrypts a sealed pane capture and fails closed without a key', async () => {
+  const kr = await keyringFromHex('0123456789abcdef'.repeat(4));
+  const base = (await ptyBaseKeyFor(kr, 1))!;
+  const frame = await sealPtyPayload(enc.encode('pane text'), base, 1, 'shs_pane', 'out', new Uint8Array(16).fill(7), 1);
+  const armored = `vault:v2:e1:${Buffer.from(frame.subarray(4)).toString('base64')}`;
+  setActiveVaultKey(kr);
+  try {
+    const opened = await openPaneReplyOutput({ ok: true, output: armored, hash: 'h' }, 'shs_pane');
+    assert.equal(opened.output, 'pane text');
+    await assert.rejects(openPaneReplyOutput({ output: armored }, 'shs_other'));
+    const plain = await openPaneReplyOutput({ output: 'plain screen' }, 'shs_pane');
+    assert.equal(plain.output, 'plain screen');
+  } finally {
+    setActiveVaultKey(null);
+  }
+  await assert.rejects(openPaneReplyOutput({ output: armored }, 'shs_pane'), /vault_locked/);
 });
 
 test('snapshot text helpers produce absolute repaints without a byte round-trip', async () => {

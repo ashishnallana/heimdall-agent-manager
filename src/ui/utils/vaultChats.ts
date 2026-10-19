@@ -10,6 +10,7 @@ import {
   decryptEmbeddedVaultTokens,
   getActiveVaultKey,
 } from './vaultContent.ts';
+import { VAULT_LOCKED_MARKER } from './vaultCrypto.ts';
 
 export interface ChatMessagePayload {
   body?: string;
@@ -169,4 +170,21 @@ export async function decryptConversationList<T extends ConversationPayload>(
   const resolvedKey = activeKey || getActiveVaultKey();
   if (!resolvedKey || !Array.isArray(conversations)) return conversations;
   return Promise.all(conversations.map((c) => decryptConversationRecord(c, resolvedKey)));
+}
+
+/**
+ * The text of a chat pane capture. The bridge seals captures as a v2 content envelope
+ * whenever its vault is configured; this decrypts one, and fails closed to the locked
+ * marker (never ciphertext, never a partial screen) when the key is missing or the
+ * envelope does not authenticate. Plain captures (vault never configured) pass through.
+ */
+export async function decryptPaneCaptureBody(body: string, keyring?: VaultKeyring | null): Promise<string> {
+  if (!isVaultArmored(body)) return body;
+  const kr = keyring ?? getActiveVaultKey();
+  if (!kr) return VAULT_LOCKED_MARKER;
+  try {
+    return await decryptVaultText(body, kr);
+  } catch {
+    return VAULT_LOCKED_MARKER;
+  }
 }

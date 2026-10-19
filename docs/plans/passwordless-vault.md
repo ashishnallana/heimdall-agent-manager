@@ -177,7 +177,8 @@ Consequences for the formats below: every signature is a JSON object `{"alg":…
 **PTY payload v2** (revised after the P1 security review, finding H2).
 - Per-stream subkey: `HKDF-SHA256(ikm=epoch_key, salt=salt16, info="heimdall-pty-v2|<session_id>|<out|in>")`; `in` and `out` use separate subkeys.
 - Layout: `u32be epoch | salt16 | nonce12 | tag16 | ct`. A fresh random `salt16` on every stream-worker start and every epoch change; the nonce may be a counter within a subkey and is never reused under it.
-- AAD = `heimdall-pty-v2|e<epoch>|<session_id>|<out|in>`; input frames also carry a monotonic per-session counter in the AAD, and the bridge rejects any counter that does not increase (finding M1). `enc_spec` nonces are cached for their ±60 s window.
+- AAD = `heimdall-pty-v2|e<epoch>|<session_id>|out` for output and `heimdall-pty-v2|e<epoch>|<session_id>|in|<counter>|<bridge_boot_id>` for input. The counter is the nonce counter (u32 0 ‖ u64be counter); the bridge rejects any counter that does not increase for its (session, salt) stream (finding M1). `bridge_boot_id` is the bridge process's unseal boot id (announced to viewers in `ready`/`stream_ready`), so frames captured before a bridge restart, when the in-memory replay state is lost, no longer authenticate. `enc_spec` nonces are cached for their ±60 s window.
+- Pane captures (`get_agent_pane`, `shell_get_pane`) are sealed as `vault:v2:e<N>:b64(salt16‖nonce‖tag‖ct)` PTY `out` frames; chat pane captures (`capture_agent_pane`) as v2 content envelopes. Locked → `vault_locked`, seal failure → `encryption_failed`, never plaintext.
 - The hub snapshot code (`shell_stream_screen_snapshot.odin`) passes these fields through unchanged.
 
 **Search key v2.**

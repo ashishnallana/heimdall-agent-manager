@@ -179,10 +179,19 @@ const WRAP_ALG = 'ecdh-p256-hkdf-sha256-aes256gcm';
 const sigObject = (sig) => `{"alg":"${SIGN_ALG}","sig":"${hex(sig)}"}`;
 const wrapCanonicalJson = (w) => `{"v":1,"alg":${JSON.stringify(w.alg)},"recipient_device_id":${JSON.stringify(w.recipient_device_id)},"directory_version":${w.directory_version},"current_epoch":${w.current_epoch},"ephemeral_public_key":${JSON.stringify(w.ephemeral_public_key)},"iv":${JSON.stringify(w.iv)},"ciphertext":${JSON.stringify(w.ciphertext)},"wrapped_by_device_id":${JSON.stringify(w.wrapped_by_device_id)}}`;
 
-const ptyAad = (epoch, sessionId, dir) => utf8(`heimdall-pty-v2|e${epoch}|${sessionId}|${dir}`);
-const ptyFrame = (epoch, key, nonce, sessionId, dir, plaintext) => {
-  const { ct, tag } = gcmSeal(key, nonce, ptyAad(epoch, sessionId, dir), plaintext);
-  return Buffer.concat([u32be(epoch), nonce, tag, ct]);
+// PTY v2: per-stream subkey HKDF(epoch key, salt16, "heimdall-pty-v2|<sid>|<dir>"),
+// nonce = u32be(0) | u64be(counter), frame = u32be epoch | salt16 | nonce | tag | ct.
+// Input AAD binds the counter and the receiving bridge's unseal boot_id:
+// "heimdall-pty-v2|e<epoch>|<sid>|in|<counter>|<boot_id>".
+const ptyAad = (epoch, sessionId, dir, counter, bootId) => utf8(dir === 'in'
+  ? `heimdall-pty-v2|e${epoch}|${sessionId}|in|${counter}|${bootId}`
+  : `heimdall-pty-v2|e${epoch}|${sessionId}|out`);
+const ptySubkey = (epochKey, salt, sessionId, dir) => hkdf(epochKey, salt, utf8(`heimdall-pty-v2|${sessionId}|${dir}`));
+const ptyNonce = (counter) => { const n = Buffer.alloc(12); n.writeBigUInt64BE(BigInt(counter), 4); return n; };
+const ptyFrame = (epoch, epochKey, salt, counter, sessionId, dir, plaintext, bootId) => {
+  const nonce = ptyNonce(counter);
+  const { ct, tag } = gcmSeal(ptySubkey(epochKey, salt, sessionId, dir), nonce, ptyAad(epoch, sessionId, dir, counter, bootId), plaintext);
+  return Buffer.concat([u32be(epoch), salt, nonce, tag, ct]);
 };
 
 const SEARCH_DOMAIN = 'heimdall/task-chain-search-rpc/v2';
@@ -339,21 +348,25 @@ const wrapCanonical = wrapCanonicalJson(wrapObj);
 
 // PTY v2.
 const ptySession = 'shs_0011223344556677';
-const ptyOutSalt = seeded('pty-salt', 4);
-const ptyOutNonce = Buffer.concat([ptyOutSalt, Buffer.from('0000000000000005', 'hex')]);
-const ptyInNonce = seeded('pty-in-nonce', 12);
+const ptyOutSalt = seeded('pty-out-salt', 16);
+const ptyInSalt = seeded('pty-in-salt', 16);
+const ptyBootId = hex(seeded('pty-boot-id', 16));
 const ptyCases = [
-  { direction: 'out', epoch: 2, key: K2, nonce: ptyOutNonce, plaintext: utf8('\x1b[32mok\x1b[0m\r\n') },
-  { direction: 'in', epoch: 2, key: K2, nonce: ptyInNonce, plaintext: utf8('ls -la\r') },
-  { direction: 'out', epoch: 1, key: K1, nonce: ptyOutNonce, plaintext: utf8('') },
+  { direction: 'out', epoch: 2, key: K2, salt: ptyOutSalt, counter: 5, plaintext: utf8('\x1b[32mok\x1b[0m\r\n') },
+  { direction: 'in', epoch: 2, key: K2, salt: ptyInSalt, counter: 1760000000000001, plaintext: utf8('ls -la\r') },
+  { direction: 'out', epoch: 1, key: K1, salt: ptyOutSalt, counter: 1, plaintext: utf8('') },
 ].map((c) => ({
   direction: c.direction,
   epoch: c.epoch,
   session_id: ptySession,
-  nonce: hex(c.nonce),
+  salt: hex(c.salt),
+  counter: c.counter,
+  subkey: hex(ptySubkey(c.key, c.salt, ptySession, c.direction)),
+  nonce: hex(ptyNonce(c.counter)),
+  ...(c.direction === 'in' ? { boot_id: ptyBootId } : {}),
   plaintext_hex: hex(c.plaintext),
-  aad: ptyAad(c.epoch, ptySession, c.direction).toString('utf8'),
-  frame_hex: hex(ptyFrame(c.epoch, c.key, c.nonce, ptySession, c.direction, c.plaintext)),
+  aad: ptyAad(c.epoch, ptySession, c.direction, c.counter, ptyBootId).toString('utf8'),
+  frame_hex: hex(ptyFrame(c.epoch, c.key, c.salt, c.counter, ptySession, c.direction, c.plaintext, ptyBootId)),
 }));
 
 // Search key v2 + one RPC envelope.

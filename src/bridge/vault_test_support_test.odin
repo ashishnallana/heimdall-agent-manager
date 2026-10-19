@@ -14,6 +14,7 @@ import "core:os"
 import "core:strings"
 import "core:sync"
 import "core:testing"
+import "core:time"
 import cfg_lib "odin_test:lib/config"
 import vault "odin_test:lib/vault"
 
@@ -275,15 +276,34 @@ test_aes_gcm_hkdf_seal :: proc(shared: []byte, info: string, iv: []byte, aad: st
 	return vault.hex_encode_lower(ct, context.temp_allocator), vault.hex_encode_lower(tag[:], context.temp_allocator)
 }
 
-// test_pty_input_payload seals browser keystrokes as a PTY v2 "in" payload with a
-// random nonce, exactly as the UI does. Temp-allocated.
+// test_pty_input_payload seals browser keystrokes as a PTY v2 "in" frame the way the
+// UI does: a fresh random salt (a new stream, hence a new subkey) and a wall-clock
+// seeded counter, so successive calls are always accepted by the replay check.
+// Temp-allocated.
+test_pty_input_counter: u64
+
 test_pty_input_payload :: proc(chunk: string, key_hex: string, epoch: u32, session_id: string) -> ([]byte, bool) {
+	salt: [vault.PTY_V2_SALT_BYTES]byte
+	crypto.rand_bytes(salt[:])
+	// The handlers open input under this process's own unseal boot_id.
+	return test_pty_input_payload_with(chunk, key_hex, epoch, session_id, salt, test_pty_input_next_counter(), bridge_unseal_boot_id())
+}
+
+test_pty_input_next_counter :: proc() -> u64 {
+	seed := u64(time.time_to_unix_nano(time.now()) / 1_000_000) * 1000
+	for {
+		cur := sync.atomic_load(&test_pty_input_counter)
+		next := max(cur + 1, seed)
+		if _, swapped := sync.atomic_compare_exchange_strong(&test_pty_input_counter, cur, next); swapped do return next
+	}
+}
+
+test_pty_input_payload_with :: proc(chunk: string, key_hex: string, epoch: u32, session_id: string, salt: [vault.PTY_V2_SALT_BYTES]byte, counter: u64, boot_id: string) -> ([]byte, bool) {
 	key: [32]byte
 	defer crypto.zero_explicit(&key, size_of(key))
 	_ = vault.hex_decode_into(key[:], key_hex)
-	nonce: [12]byte
-	crypto.rand_bytes(nonce[:])
-	return vault.pty_seal(transmute([]byte)chunk, key[:], epoch, nonce[:], session_id, .In, context.temp_allocator)
+	salt_copy := salt
+	return vault.pty_seal(transmute([]byte)chunk, key[:], epoch, salt_copy[:], counter, session_id, .In, boot_id, context.temp_allocator)
 }
 
 // test_encrypt_hex / test_decrypt_hex: one-epoch (epoch 1) keyring helpers for

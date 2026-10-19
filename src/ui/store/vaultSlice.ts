@@ -8,6 +8,8 @@ import {
   setActiveBridgeVaultKeyMaterial as setActiveBridgeVaultKeyMaterialHandle,
   currentKey,
   setActiveVaultUserId,
+  getActiveVaultPtyBaseKey,
+  setActiveVaultPtyBaseKey,
   type VaultKeyring,
 } from '../utils/vaultCrypto.ts';
 import {
@@ -77,7 +79,7 @@ export function setActiveBridgeVaultKeyMaterial(rawHex: string | null): Promise<
   const activation = beginTaskChainSearchKeyDerivation(clean, ADAPTER_EPOCH).then(async (searchKey) => {
     if (generation !== activeVaultGeneration || getActiveVaultKey() !== keyring) return null;
     if (activeVaultRemembered) {
-      await persistVaultKeys(contentKey, searchKey.key);
+      await persistVaultKeys(contentKey, searchKey.key, await getActiveVaultPtyBaseKey());
     }
     return searchKey;
   });
@@ -220,6 +222,7 @@ export async function initializeVaultPersistence(
     const keys = await restoreVaultKeys();
     if (keys) {
       installActiveVaultKeys(keys.contentKey, keys.taskChainSearchKey, true);
+      if (keys.ptyBaseKey) setActiveVaultPtyBaseKey(keys.ptyBaseKey);
       if (dispatch) {
         dispatch(hydrateVaultFromSession());
       }

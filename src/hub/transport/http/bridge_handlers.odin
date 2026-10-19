@@ -2249,7 +2249,9 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
 			}
 			defer delete(session_id)
 			if session_id != "" {
-				shell_session_svc.shell_session_broadcast_stream_ready(h.shell_sessions, session_id)
+				boot_id := json_string(text, "bridge_boot_id")
+				defer delete(boot_id)
+				shell_session_svc.shell_session_broadcast_stream_ready(h.shell_sessions, session_id, boot_id)
 			}
 		}
 	case "shell_pty_stream_closed":

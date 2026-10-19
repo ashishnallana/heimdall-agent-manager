@@ -368,6 +368,7 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 		experiments         = &graph.experiment_repo,
 		preview_origin      = config.preview_origin,
 		preview_legacy_path = config.preview_legacy_path,
+		bridge_runtime_registry = &graph.bridge_runtime_registry,
 	}
 	// REQ-LSP-RLY-1. The registry is plain in-memory state: an LSP session lives
 	// exactly as long as its browser socket, so there is no table and nothing to

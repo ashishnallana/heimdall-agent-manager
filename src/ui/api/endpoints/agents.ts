@@ -3,6 +3,7 @@ import { applyAgentRuntimeEvent, loadKnownAgents, mapAgent, mergeKnownAndLiveAge
 import { apiErrorText, cookieMutation, cookieJsonFetch, cookieJsonFetchEnvelope, customQueryError } from '../cookieFetch';
 import { announcePaneVaultLocked } from '../../utils/vaultLockedError';
 import { heimdallApi, withSessionQuery } from '../heimdallApi';
+import { openPaneReplyOutput } from '../../components/shells/ptyWire';
 
 export interface GetAgentPaneArgs {
   agentInstanceId: string;
@@ -564,7 +565,7 @@ export const agentsApi = heimdallApi.injectEndpoints({
         try {
           const path = `/agent-instances/${encodeURIComponent(agentInstanceId)}/pane?since_hash=${encodeURIComponent(sinceHash || '')}&width=${width || 80}&line_limit=${lineLimit || 120}`;
           const data = await cookieJsonFetch(path);
-          return { data: data || {} };
+          return { data: await openPaneReplyOutput(data || {}, agentInstanceId) };
         } catch (error: any) {
           return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
         }

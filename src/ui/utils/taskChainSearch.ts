@@ -58,6 +58,8 @@ export function taskChainSearchRequiresReauthentication(error: unknown): boolean
 
 type SearchBridge = { bridge_id?: string; id?: string; status?: string; runtime_status?: string; vault_status?: string; task_chain_search_ready?: boolean };
 
+import { isValidAadId } from './vaultKeyring';
+
 const utf8 = new TextEncoder();
 const text = new TextDecoder();
 
@@ -71,6 +73,12 @@ export { deriveTaskChainSearchKey } from './taskChainSearchKey';
 
 /** AAD for one search RPC direction; the epoch is bound as the trailing `|e<epoch>`. */
 export function taskChainSearchAad(ownerId: string, bridgeId: string, requestId: string, direction: 'request' | 'response', expiresAtMs: number, epoch: number): Uint8Array {
+  // Mirror of lib/vault search_aad: fail closed on any id outside the statement grammar.
+  for (const id of [ownerId, bridgeId, requestId]) {
+    if (!isValidAadId(id)) throw new Error('Invalid task-chain search AAD component');
+  }
+  if (direction !== 'request' && direction !== 'response') throw new Error('Invalid task-chain search direction');
+  if (!Number.isInteger(epoch) || epoch < 1 || epoch > 0xffffffff) throw new Error('Invalid task-chain search epoch');
   return utf8.encode(`${DOMAIN}|${ownerId}|${bridgeId}|${requestId}|${direction}|${expiresAtMs}|e${epoch}`);
 }
 

@@ -1,6 +1,6 @@
 package main
 
-// Passwordless vault P1 — bridge-side security tests (compact by design; the
+// Passwordless vault P1 â€” bridge-side security tests (compact by design; the
 // format-level vectors and negatives live in src/lib/vault/vault_test.odin).
 // None of these spawn a shell, so they run on Windows too:
 //   odin test src/bridge -collection:odin_test=src -define:ODIN_TEST_NAMES=main.test_v2_...
@@ -10,6 +10,7 @@ import "core:strings"
 import "core:sync"
 import "core:testing"
 import "core:time"
+import os_random "odin_test:lib/os_random"
 import vault "odin_test:lib/vault"
 
 @(private = "file")
@@ -233,11 +234,13 @@ test_v2_pty_salt_is_fresh_per_worker_epoch_and_install :: proc(t: ^testing.T) {
 	si, _, _ := _bridge_pty_stream_next_nonce(&w1, 3)
 	testing.expect(t, si != se, "a keyring install re-salts")
 	// Randomness failure: no nonce, nothing sealed.
+	sync.mutex_lock(&test_pty_random_source_mu)
 	prev := bridge_pty_random_source
 	bridge_pty_random_source = "/nonexistent/heimdall-no-random"
-	defer bridge_pty_random_source = prev
 	w3: Bridge_PTY_Stream_Worker
 	_, _, ok_fail := _bridge_pty_stream_next_nonce(&w3, 2)
+	bridge_pty_random_source = prev
+	sync.mutex_unlock(&test_pty_random_source_mu)
 	testing.expect(t, !ok_fail, "CSPRNG failure must fail closed")
 
 	// A sealed frame carries its epoch and only opens for its session/direction.
@@ -247,6 +250,155 @@ test_v2_pty_salt_is_fresh_per_worker_epoch_and_install :: proc(t: ^testing.T) {
 	testing.expect(t, sealed)
 	ep, _ := vault.pty_frame_epoch(frame)
 	testing.expect_value(t, ep, u32(2))
-	_, wrong_dir := vault.pty_open(frame, &kr, "sh_v2", .In, 2, context.temp_allocator)
+	_, _, _, wrong_dir := vault.pty_open(frame, &kr, "sh_v2", .In, 2, "", context.temp_allocator)
 	testing.expect(t, !wrong_dir, "an output frame is not valid input")
+	_, _, _, right := vault.pty_open(frame, &kr, "sh_v2", .Out, 2, "", context.temp_allocator)
+	testing.expect(t, right)
+	// Two workers (restart) never produce the same (subkey, nonce): the frames differ
+	// in their salt and therefore in their key stream even at the same seq.
+	frame2, _ := bridge_pty_stream_seal_v2(transmute([]byte)string("hi"), &kr, 2, s2, 1, "sh_v2", context.temp_allocator)
+	testing.expect(t, string(frame[4:20]) != string(frame2[4:20]) && string(frame[vault.PTY_V2_HEADER_BYTES:]) != string(frame2[vault.PTY_V2_HEADER_BYTES:]))
+}
+
+// test_pty_random_source_mu serializes tests that point bridge_pty_random_source at a
+// failing source (a package global shared by parallel tests).
+test_pty_random_source_mu: sync.Mutex
+
+// Finding M1: a replayed input frame is refused; a new salt (new stream) starts a new
+// counter sequence but cannot replay an evicted stream below the floor.
+@(test)
+test_v2_pty_input_replay_is_rejected :: proc(t: ^testing.T) {
+	kr := test_keyring_two_epochs(TEST_VAULT_KEY_HEX, V2_KEY_2)
+	defer vault.keyring_wipe(&kr)
+	sid := "sh_replay_test"
+	BOOT :: "00112233445566778899aabbccddeeff"
+	salt_a: [vault.PTY_V2_SALT_BYTES]byte
+	salt_a[0] = 0xa1
+	f1, _ := test_pty_input_payload_with("a", V2_KEY_2, 2, sid, salt_a, 1000, BOOT)
+	f2, _ := test_pty_input_payload_with("b", V2_KEY_2, 2, sid, salt_a, 1001, BOOT)
+	p1, ok1 := bridge_pty_open_input(f1, &kr, sid, BOOT)
+	testing.expect(t, ok1 && p1 == "a")
+	_, replay := bridge_pty_open_input(f1, &kr, sid, BOOT)
+	testing.expect(t, !replay, "the same frame twice is a replay")
+	_, ok2 := bridge_pty_open_input(f2, &kr, sid, BOOT)
+	testing.expect(t, ok2)
+	_, stale := bridge_pty_open_input(f1, &kr, sid, BOOT)
+	testing.expect(t, !stale, "an older counter under the same salt is refused")
+	// Another session id: the AAD and subkey differ, so the frame does not authenticate.
+	_, cross := bridge_pty_open_input(f2, &kr, "sh_replay_other", BOOT)
+	testing.expect(t, !cross)
+	// Bridge restart: a new boot_id. A frame sealed for the previous process does not
+	// authenticate, whatever its counter -- the lost replay state cannot be exploited.
+	salt_r: [vault.PTY_V2_SALT_BYTES]byte
+	salt_r[0] = 0xc3
+	fr, _ := test_pty_input_payload_with("r", V2_KEY_2, 2, "sh_replay_restart", salt_r, 9000, BOOT)
+	_, after_restart := bridge_pty_open_input(fr, &kr, "sh_replay_restart", "ffeeddccbbaa99887766554433221100")
+	testing.expect(t, !after_restart, "a frame bound to an old boot_id is refused")
+	_, no_boot := bridge_pty_open_input(fr, &kr, "sh_replay_restart", "")
+	testing.expect(t, !no_boot, "no boot_id, no input")
+	// A new stream (new salt) may start its own sequence.
+	salt_b: [vault.PTY_V2_SALT_BYTES]byte
+	salt_b[0] = 0xb2
+	f3, _ := test_pty_input_payload_with("c", V2_KEY_2, 2, sid, salt_b, 5000, BOOT)
+	_, ok3 := bridge_pty_open_input(f3, &kr, sid, BOOT)
+	testing.expect(t, ok3)
+	// Non-current epoch input is refused (command epoch floor).
+	f4, _ := test_pty_input_payload_with("d", TEST_VAULT_KEY_HEX, 1, sid, salt_b, 5001, BOOT)
+	_, old_epoch := bridge_pty_open_input(f4, &kr, sid, BOOT)
+	testing.expect(t, !old_epoch)
+
+	// The replay table itself: eviction raises the floor so evicted salts stay dead.
+	r: vault.Pty_Input_Replay
+	for i in 0 ..< vault.PTY_REPLAY_SALTS {
+		s: [vault.PTY_V2_SALT_BYTES]byte
+		s[0] = u8(i + 1)
+		testing.expect(t, vault.pty_replay_accept(&r, s, u64(100 + i)))
+	}
+	s_new: [vault.PTY_V2_SALT_BYTES]byte
+	s_new[0] = 0xff
+	testing.expect(t, vault.pty_replay_accept(&r, s_new, 1000), "a new stream evicts the oldest")
+	s_old: [vault.PTY_V2_SALT_BYTES]byte
+	s_old[0] = 1
+	testing.expect(t, !vault.pty_replay_accept(&r, s_old, 100), "an evicted salt cannot be replayed")
+	testing.expect(t, vault.pty_replay_accept(&r, s_old, 101), "a live evicted stream may continue above the floor")
+}
+
+// The pane reply never carries plaintext on a configured vault. Hermetic: the vault
+// state and keyring are passed to the sealing core; no env, no keystore.
+@(test)
+test_v2_pane_capture_is_sealed :: proc(t: ^testing.T) {
+	kr := test_keyring_from_hex(TEST_ENC_VAULT_KEY)
+	defer vault.keyring_wipe(&kr)
+
+	output, res := bridge_pane_output_seal_with(.Unlocked, &kr, "top secret screen", "sh_pane", os_random.DEFAULT_SOURCE)
+	defer delete(output)
+	testing.expect(t, res == .Sealed)
+	reply := bridge_pane_reply_from_seal("cmd_pane_seal", false, "h1", output, res, 1, false)
+	defer delete(reply)
+	testing.expect(t, !strings.contains(reply, "top secret"), "no plaintext in the reply")
+	testing.expect(t, strings.has_prefix(output, "vault:v2:e1:"), output)
+	epoch, body, pres := vault.envelope_parse(output, context.temp_allocator)
+	testing.expect(t, pres == .Ok && epoch == 1)
+	frame := make([]byte, 4 + len(body), context.temp_allocator)
+	frame[3] = 1
+	copy(frame[4:], body)
+	plain, _, _, ok := vault.pty_open(frame, &kr, "sh_pane", .Out, 0, "", context.temp_allocator)
+	testing.expect(t, ok && string(plain) == "top secret screen")
+
+	// Randomness failure and a locked vault: an error, never plaintext.
+	_, fres := bridge_pane_output_seal_with(.Unlocked, &kr, "top secret screen", "sh_pane", "/nonexistent/heimdall-no-random")
+	failed := bridge_pane_reply_from_seal("cmd_pane_seal_fail", false, "h1", "", fres, 1, false)
+	defer delete(failed)
+	testing.expect(t, !strings.contains(failed, "top secret") && strings.contains(failed, "encryption_failed"), failed)
+	_, lres := bridge_pane_output_seal_with(.Locked, nil, "top secret screen", "sh_pane", os_random.DEFAULT_SOURCE)
+	locked := bridge_pane_reply_from_seal("cmd_pane_seal_locked", false, "h1", "", lres, 1, false)
+	defer delete(locked)
+	testing.expect(t, !strings.contains(locked, "top secret") && strings.contains(locked, "vault_locked"), locked)
+	// Never configured: the capture goes out as is.
+	plain_out, dres := bridge_pane_output_seal_with(.Disabled, nil, "plain screen", "sh_pane", os_random.DEFAULT_SOURCE)
+	defer delete(plain_out)
+	testing.expect(t, dres == .Plain && plain_out == "plain screen")
+}
+
+// capture_agent_pane (chat pane capture) is sealed as a v2 content envelope the UI
+// decrypts like any vault chat body; locked / seal failure never leak the screen.
+@(test)
+test_v2_chat_pane_capture_result_is_sealed :: proc(t: ^testing.T) {
+	kr := test_keyring_from_hex(TEST_ENC_VAULT_KEY)
+	defer vault.keyring_wipe(&kr)
+	pending := Bridge_Pane_Capture_Pending{command_id = "cmd_cap", pane_capture_request_id = "pcr_cap", agent_instance_id = "inst_cap", width = 80}
+
+	sealed := bridge_pane_capture_result_sealed_json(pending, .Unlocked, &kr, "secret pane\nline 2", 2, false, os_random.DEFAULT_SOURCE)
+	defer delete(sealed)
+	testing.expect(t, strings.contains(sealed, `"ok":true`) && !strings.contains(sealed, "secret pane"), sealed)
+	token := extract_json_string(sealed, "output", "", context.temp_allocator)
+	plain, opened := vault.open(token, &kr, context.temp_allocator)
+	testing.expect(t, opened == .Ok && plain == "secret pane\nline 2", token)
+
+	locked := bridge_pane_capture_result_sealed_json(pending, .Locked, nil, "secret pane", 1, false, os_random.DEFAULT_SOURCE)
+	defer delete(locked)
+	testing.expect(t, strings.contains(locked, `"cause":"vault_locked"`) && !strings.contains(locked, "secret pane"), locked)
+	failed := bridge_pane_capture_result_sealed_json(pending, .Unlocked, &kr, "secret pane", 1, false, "/nonexistent/heimdall-no-random")
+	defer delete(failed)
+	testing.expect(t, strings.contains(failed, `"cause":"encryption_failed"`) && !strings.contains(failed, "secret pane"), failed)
+	disabled := bridge_pane_capture_result_sealed_json(pending, .Disabled, nil, "plain pane", 1, false, os_random.DEFAULT_SOURCE)
+	defer delete(disabled)
+	testing.expect(t, strings.contains(disabled, `"output":"plain pane"`), disabled)
+
+	// An oversized capture keeps its tail from a line start, fits the hub cap, is marked truncated.
+	big := strings.concatenate({strings.repeat("x", BRIDGE_PANE_CAPTURE_SEAL_MAX_PLAIN, context.temp_allocator), "\nlast line"}, context.temp_allocator)
+	tok, bres, cut := bridge_pane_capture_seal_with(.Unlocked, &kr, big, os_random.DEFAULT_SOURCE)
+	defer delete(tok)
+	testing.expect(t, bres == .Sealed && cut && len(tok) <= 48000)
+	tail, _ := vault.open(tok, &kr, context.temp_allocator)
+	testing.expect_value(t, tail, "last line")
+}
+
+// The viewer learns the bridge's unseal boot id from stream_ready (PTY v2 input AAD).
+@(test)
+test_v2_stream_ready_carries_boot_id :: proc(t: ^testing.T) {
+	with_boot := bridge_pty_stream_format_lifecycle_event("shell_pty_stream_ready", "sh_b", "sh_b", false, 0, context.temp_allocator, "00112233445566778899aabbccddeeff")
+	testing.expect(t, strings.contains(with_boot, `"bridge_boot_id":"00112233445566778899aabbccddeeff"`), with_boot)
+	closed := bridge_pty_stream_format_lifecycle_event("shell_pty_stream_closed", "sh_b", "sh_b", false, 0, context.temp_allocator)
+	testing.expect(t, !strings.contains(closed, "bridge_boot_id"), closed)
 }

@@ -4,6 +4,7 @@ import { announcePaneVaultLocked } from '../../utils/vaultLockedError';
 import { encryptVaultText, getActiveVaultKey } from '../../utils/vaultContent';
 import { selectIsVaultUnlocked } from '../../store/vaultSlice';
 import { encryptShellStreamPayload } from '../../components/shells/useShellStream';
+import { openPaneReplyOutput } from '../../components/shells/ptyWire';
 
 // REQ-SHELL-1 collapsed the model to three kinds: `command` became `run`,
 // `interactive` became `shell`, and `agent` was dropped (agent terminal panes were
@@ -476,7 +477,7 @@ export const shellsApi = heimdallApi.injectEndpoints({
         try {
           const path = `/shells/${encodeURIComponent(sessionId)}/pane?since_hash=${encodeURIComponent(sinceHash || '')}&width=${width || 80}&line_limit=${lineLimit || 120}`;
           const data = await cookieJsonFetch(path);
-          return { data: data || {} };
+          return { data: await openPaneReplyOutput(data || {}, sessionId) };
         } catch (error: any) {
           return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
         }

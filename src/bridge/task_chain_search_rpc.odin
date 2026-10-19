@@ -47,7 +47,8 @@ task_chain_search_open :: proc(envelope: string, kr: ^vault.Vault_Keyring, owner
 	if !parsed || ep != kr.current_epoch do return "", 0, false
 	key, key_ok := vault.keyring_key_for_epoch(kr, ep)
 	if !key_ok do return "", 0, false
-	aad := vault.search_aad(owner_user_id, bridge_id, request_id, direction, expires_at_ms, ep, context.temp_allocator)
+	aad, aad_ok := vault.search_aad(owner_user_id, bridge_id, request_id, direction, expires_at_ms, ep, context.temp_allocator)
+	if !aad_ok do return "", 0, false
 	plain, opened := vault.search_open_payload(payload, key, ep, aad, allocator)
 	if !opened do return "", 0, false
 	if reject_replay && !task_chain_search_nonce_accept(payload[:12]) {
@@ -64,7 +65,8 @@ task_chain_search_seal :: proc(plaintext: string, kr: ^vault.Vault_Keyring, epoc
 	if !key_ok do return "", false
 	nonce: [12]u8
 	if !os_random.fill(nonce[:]) do return "", false
-	aad := vault.search_aad(owner_user_id, bridge_id, request_id, direction, expires_at_ms, epoch, context.temp_allocator)
+	aad, aad_ok := vault.search_aad(owner_user_id, bridge_id, request_id, direction, expires_at_ms, epoch, context.temp_allocator)
+	if !aad_ok do return "", false
 	return vault.search_seal_with_nonce(transmute([]u8)plaintext, key, epoch, aad, nonce[:], allocator)
 }
 

@@ -18,6 +18,9 @@ import {
 } from './helpers/vaultEndpointHarness.ts';
 
 import { decryptShellStreamPayload } from '../src/ui/components/shells/useShellStream.ts';
+import { setPtyBridgeBootId } from '../src/ui/components/shells/ptyWire.ts';
+
+const TEST_BRIDGE_BOOT_ID = '00112233445566778899aabbccddeeff';
 import { decryptVaultText, isVaultArmored } from '../src/ui/utils/vaultContent.ts';
 import { getActiveVaultKey } from '../src/ui/utils/vaultCrypto.ts';
 
@@ -193,13 +196,15 @@ test('REQ-SHELL-ENC-10: sendShellInput puts a PTY v2 enc_b64 and NO plaintext on
   const data = 'ls -la\n';
   const store = await makeVaultStore();
   const key = await unlockVault(store, TEST_VAULT_KEY_RAW);
+  // The stream's ready frame announced the bridge's unseal boot id.
+  setPtyBridgeBootId('sh_test', TEST_BRIDGE_BOOT_ID);
   try {
     const body = await captureSendShellInput(store, data);
 
     assert.ok(body.enc_b64, 'enc_b64 must be attached to the request');
     assert.equal(body.data, '', 'plaintext keystrokes must not travel next to the ciphertext');
     assert.strictEqual(body.data_b64, undefined, 'the v1 armored data_b64 is gone');
-    const decrypted = await decryptShellStreamPayload(body.enc_b64, key, 'sh_test', 'in');
+    const decrypted = await decryptShellStreamPayload(body.enc_b64, key, 'sh_test', 'in', TEST_BRIDGE_BOOT_ID);
     assert.equal(new TextDecoder().decode(decrypted!), data, 'enc_b64 must decrypt to the keystrokes');
   } finally {
     await clearActiveKey();

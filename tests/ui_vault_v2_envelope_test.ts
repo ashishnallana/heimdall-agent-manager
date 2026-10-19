@@ -22,7 +22,7 @@ import {
 } from '../src/ui/utils/vaultCrypto.ts';
 import { importKeyring, keyFor, type VaultKeyring } from '../src/ui/utils/vaultKeyring.ts';
 import { decryptEmbeddedVaultTokens } from '../src/ui/utils/vaultContent.ts';
-import { decryptPtyPayload, sealPtyPayload, ptyAad } from '../src/ui/components/shells/ptyWire.ts';
+import { decryptPtyPayload, derivePtySubkey, ptyAad, ptyBaseKeyFor, ptyNonce, sealPtyPayload } from '../src/ui/components/shells/ptyWire.ts';
 import { deriveTaskChainSearchKey } from '../src/ui/utils/taskChainSearchKey.ts';
 import { openTaskChainSearch, sealTaskChainSearch, taskChainSearchAad } from '../src/ui/utils/taskChainSearch.ts';
 
@@ -86,22 +86,46 @@ test('embedded tokens: decrypted, unknown epoch locked, v1 and bare prefix kept'
   assert.ok(!replaceVaultTokens(emb.text).includes('vault:v2:e'));
 });
 
-test('PTY v2 vectors and AAD binding (session, direction, epoch)', async () => {
+test('PTY v2 vectors: per-stream subkey, counter nonce, AAD binding (session, direction, epoch, salt, counter)', async () => {
   const kr = await vectorKeyring();
   for (const c of V.pty.cases) {
-    assert.equal(new TextDecoder().decode(ptyAad(c.epoch, c.session_id, c.direction)), c.aad);
-    const frame = await sealPtyPayload(hex(c.plaintext_hex), keyFor(kr, c.epoch)!, c.epoch, c.session_id, c.direction, hex(c.nonce));
+    assert.equal(new TextDecoder().decode(ptyAad(c.epoch, c.session_id, c.direction, c.counter, c.boot_id)), c.aad);
+    assert.equal(toHex(ptyNonce(c.counter)), c.nonce);
+    const base = (await ptyBaseKeyFor(kr, c.epoch))!;
+    assert.ok(base);
+    // The subkey itself is non-extractable; pin it by sealing under it with the vector nonce.
+    const subkey = await derivePtySubkey(base, hex(c.salt), c.session_id, c.direction);
+    assert.equal(subkey.extractable, false);
+    const frame = await sealPtyPayload(hex(c.plaintext_hex), base, c.epoch, c.session_id, c.direction, hex(c.salt), c.counter, c.boot_id);
     assert.equal(toHex(frame), c.frame_hex);
-    assert.equal(toHex((await decryptPtyPayload(frame, kr, c.session_id, c.direction))!), c.plaintext_hex);
-    await assert.rejects(decryptPtyPayload(frame, kr, 'shs_other', c.direction));
-    await assert.rejects(decryptPtyPayload(frame, kr, c.session_id, c.direction === 'out' ? 'in' : 'out'));
+    assert.equal(toHex((await decryptPtyPayload(frame, kr, c.session_id, c.direction, c.boot_id))!), c.plaintext_hex);
+    await assert.rejects(decryptPtyPayload(frame, kr, 'shs_other', c.direction, c.boot_id));
+    await assert.rejects(decryptPtyPayload(frame, kr, c.session_id, c.direction === 'out' ? 'in' : 'out', c.boot_id ?? 'b00t'));
     const swapped = Uint8Array.from(frame);
     swapped[3] ^= 0x03; // epoch 1 <-> 2
-    await assert.rejects(decryptPtyPayload(swapped, kr, c.session_id, c.direction));
+    await assert.rejects(decryptPtyPayload(swapped, kr, c.session_id, c.direction, c.boot_id));
+    const resalted = Uint8Array.from(frame);
+    resalted[4] ^= 0x01;
+    await assert.rejects(decryptPtyPayload(resalted, kr, c.session_id, c.direction, c.boot_id));
+    const recounted = Uint8Array.from(frame);
+    recounted[4 + 16 + 11] ^= 0x02;
+    await assert.rejects(decryptPtyPayload(recounted, kr, c.session_id, c.direction, c.boot_id));
+    if (c.direction === 'in') {
+      await assert.rejects(decryptPtyPayload(frame, kr, c.session_id, 'in', 'ffeeddccbbaa99887766554433221100'));
+      await assert.rejects(decryptPtyPayload(frame, kr, c.session_id, 'in'));
+    }
   }
   const unknown = Uint8Array.from(hex(V.pty.cases[0].frame_hex));
   unknown[3] = 9;
   assert.equal(await decryptPtyPayload(unknown, kr, V.pty.cases[0].session_id), null);
+  // L4: AAD components outside the id grammar fail closed.
+  assert.throws(() => ptyAad(1, 'sh|in|9', 'out'));
+  assert.throws(() => ptyAad(1, '', 'out'));
+  assert.throws(() => ptyAad(1, 'sh_ok', 'in'));
+  assert.throws(() => ptyAad(1, 'sh_ok', 'in', 1));
+  assert.throws(() => ptyAad(1, 'sh_ok', 'in', 1, 'b|x'));
+  assert.throws(() => taskChainSearchAad('usr|x', 'brg', 'req', 'request', 1, 1));
+  assert.throws(() => taskChainSearchAad('usr', 'brg', '', 'request', 1, 1));
 });
 
 test('search key v2 vector and epoch-bound RPC envelope', async () => {
@@ -115,4 +139,18 @@ test('search key v2 vector and epoch-bound RPC envelope', async () => {
   const otherEpoch = await deriveTaskChainSearchKey(hex(sv.epoch_key), 1);
   await assert.rejects(openTaskChainSearch(r.envelope, otherEpoch, aad), /Invalid encrypted search response/);
   await assert.rejects(openTaskChainSearch(r.envelope.replace(':e2:', ':e1:'), sk, aad), /Invalid encrypted search response/);
+});
+
+test('chat pane capture: sealed body decrypts, and fails closed to the locked marker', async () => {
+  const { decryptPaneCaptureBody } = await import('../src/ui/utils/vaultChats.ts');
+  const kr = await vectorKeyring();
+  const token = await encryptVaultText('pane line 1\npane line 2', kr);
+  assert.equal(await decryptPaneCaptureBody(token, kr), 'pane line 1\npane line 2');
+  assert.equal(await decryptPaneCaptureBody('plain capture', kr), 'plain capture');
+  const tampered = token.slice(0, -4) + (token.endsWith('AAAA') ? 'BBBB' : 'AAAA');
+  assert.equal(await decryptPaneCaptureBody(tampered, kr), VAULT_LOCKED_MARKER);
+  const other = await importKeyring(hex(V.keyring.single_epoch_hex));
+  const otherToken = await encryptVaultText('x', kr);
+  const lockedOut = await decryptPaneCaptureBody(otherToken, Object.freeze({ userId: other.userId, currentEpoch: 1, keys: new Map() }) as any);
+  assert.equal(lockedOut, VAULT_LOCKED_MARKER);
 });

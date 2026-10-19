@@ -172,10 +172,13 @@ export async function makeVaultStore(): Promise<any> {
  * state is testing a mechanism no production read can reach.
  */
 export async function unlockVault(store: any, keyHex: string): Promise<any> {
-  const { importRawKeyHex, setActiveVaultKey, getActiveVaultKey } = await import(`${REPO_ROOT}/src/ui/utils/vaultCrypto.ts`);
+  const { importRawKeyHex, setActiveVaultKey, getActiveVaultKey, setActiveBridgeVaultKeyMaterial, getActiveVaultPtyBaseKey } = await import(`${REPO_ROOT}/src/ui/utils/vaultCrypto.ts`);
   const { setVaultConfigured, setVaultUnlocked } = await import(`${REPO_ROOT}/src/ui/store/vaultSlice.ts`);
   const key = await importRawKeyHex(keyHex);
   setActiveVaultKey(key);
+  // As a real unlock does: the raw key also yields the PTY v2 HKDF base key.
+  setActiveBridgeVaultKeyMaterial(keyHex);
+  await getActiveVaultPtyBaseKey();
   store.dispatch(setVaultConfigured(true));
   store.dispatch(setVaultUnlocked(keyHex));
   // P1 adapter: the installed password-vault key is the epoch-1 keyring.

@@ -46,7 +46,7 @@ pty_test_decode_output :: proc(frame: string, key_hex := "") -> (session_id: str
 		if key_hex == "" do return sid, "", snapshot, encrypted, true
 		kr := test_keyring_from_hex(key_hex)
 		defer vault.keyring_wipe(&kr)
-		plain, pok := vault.pty_open(body, &kr, sid, .Out, 0, context.temp_allocator)
+		plain, _, _, pok := vault.pty_open(body, &kr, sid, .Out, 0, "", context.temp_allocator)
 		if !pok do return sid, "", snapshot, encrypted, false
 		return sid, string(plain), snapshot, encrypted, true
 	}
@@ -194,7 +194,7 @@ pty_drain_encrypts_once_per_merged_frame_and_round_trips :: proc(t: ^testing.T) 
 	defer { if found { _ = os.set_env("HEIMDALL_VAULT_KEYRING", prev_key); delete(prev_key) } else { os.unset_env("HEIMDALL_VAULT_KEYRING") } }
 	_ = os.set_env("HEIMDALL_VAULT_KEYRING", test_keyring_env_value(TEST_ENC_VAULT_KEY))
 
-	w := Bridge_PTY_Stream_Worker{active = true, fd = -1, salt = {1, 2, 3, 4}}
+	w := Bridge_PTY_Stream_Worker{active = true, fd = -1}
 	bridge_pty_stream_emit_frame(&w, "sh_enc", transmute([]byte)string("hello "))
 	bridge_pty_stream_emit_frame(&w, "sh_enc", transmute([]byte)string("merged "))
 	bridge_pty_stream_emit_frame(&w, "sh_enc", transmute([]byte)string("world\r\n"))
@@ -210,8 +210,9 @@ pty_drain_encrypts_once_per_merged_frame_and_round_trips :: proc(t: ^testing.T) 
 	testing.expect_value(t, plain, "hello merged world\r\n")
 	// The merged frame carries the FIRST record's nonce (seq 1); nothing is reused.
 	_, _, _, body, _ := contracts.pty_wire_decode_session_frame(transmute([]byte)frames[0])
-	testing.expect_value(t, body[11], byte(1))
-	// And the wire frame carries NO base64 and NO JSON: header + 28 B GCM + plaintext length.
+	_, counter, _ := vault.pty_frame_salt_counter(body)
+	testing.expect_value(t, counter, u64(1))
+	// And the wire frame carries NO base64 and NO JSON: header + 48 B PTY v2 header + plaintext length.
 	testing.expect_value(t, len(frames[0]), contracts.PTY_WIRE_SESSION_HEADER_BYTES + len("sh_enc") + vault.PTY_V2_HEADER_BYTES + len(plain))
 }
 

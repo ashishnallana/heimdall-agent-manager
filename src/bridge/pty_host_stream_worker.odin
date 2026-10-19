@@ -8,6 +8,7 @@ import base64 "core:encoding/base64"
 import "core:encoding/hex"
 import "core:fmt"
 import "core:slice"
+import "core:strconv"
 import "core:strings"
 import "core:sync"
 import "core:thread"
@@ -27,10 +28,12 @@ Bridge_PTY_Stream_Worker :: struct {
 	fd:                    local_socket.Socket,
 	active:                bool,
 	conn:                  ^ws.Connection,
-	// PTY v2 nonce = salt[4] || seq (u64be). The salt is fresh CSPRNG output for
-	// every worker start, every epoch change and every keyring install
-	// (salt_generation), and seq never resets under one salt.
-	salt:                  [4]byte,
+	// PTY v2 (passwordless-vault.md §1): frames are sealed under the per-stream subkey
+	// HKDF(epoch key, salt16, "heimdall-pty-v2|<session_id>|out") with nonce
+	// u32be(0) || u64be(seq). The salt is fresh CSPRNG output for every worker start,
+	// every epoch change and every keyring install (salt_generation), and seq never
+	// resets under one salt, so a (subkey, nonce) pair is never reused.
+	salt:                  Bridge_PTY_Salt,
 	seq:                   u64,
 	salt_epoch:            u32,
 	salt_generation:       u64,
@@ -40,11 +43,13 @@ Bridge_PTY_Stream_Worker :: struct {
 }
 
 bridge_pty_stream_fallback_mu: sync.Mutex
-bridge_pty_stream_fallback_salt: [4]byte
+bridge_pty_stream_fallback_salt: Bridge_PTY_Salt
 bridge_pty_stream_fallback_seq: u64
 bridge_pty_stream_fallback_epoch: u32
 bridge_pty_stream_fallback_generation: u64
 bridge_pty_stream_fallback_inited: bool
+
+Bridge_PTY_Salt :: [vault.PTY_V2_SALT_BYTES]byte
 
 // bridge_pty_salt_generation is bumped on every keyring install, so every stream
 // draws a fresh salt before it seals again.
@@ -78,7 +83,7 @@ Bridge_PTY_Stream_Outgoing :: struct {
 	snapshot:   bool,
 	encrypted:  bool,
 	epoch:      u32,
-	salt:       [4]byte,
+	salt:       Bridge_PTY_Salt,
 	seq:        u64,
 }
 
@@ -607,16 +612,14 @@ bridge_pty_stream_reader_worker :: proc(data: rawptr) {
 }
 
 // bridge_pty_stream_seal_v2 seals PTY output as a PTY v2 payload
-// (u32be epoch | nonce | tag | ct, AAD heimdall-pty-v2|e<epoch>|<session_id>|out)
-// with nonce = salt || u64be(seq). Caller owns the result.
-bridge_pty_stream_seal_v2 :: proc(data: []byte, kr: ^vault.Vault_Keyring, epoch: u32, salt: [4]byte, seq: u64, session_id: string, allocator := context.allocator) -> (sealed: []byte, ok: bool) {
+// (u32be epoch | salt16 | nonce | tag | ct, AAD heimdall-pty-v2|e<epoch>|<session_id>|out)
+// under the (salt, session, out) subkey with nonce = u32be(0) || u64be(seq). Caller owns
+// the result.
+bridge_pty_stream_seal_v2 :: proc(data: []byte, kr: ^vault.Vault_Keyring, epoch: u32, salt: Bridge_PTY_Salt, seq: u64, session_id: string, allocator := context.allocator) -> (sealed: []byte, ok: bool) {
 	key, key_ok := vault.keyring_key_for_epoch(kr, epoch)
 	if !key_ok do return nil, false
-	nonce: [vault.NONCE_BYTES]byte
 	salt_copy := salt
-	copy(nonce[:4], salt_copy[:])
-	for i in 0 ..< 8 do nonce[4 + i] = byte(seq >> u64(56 - 8 * i))
-	return vault.pty_seal(data, key, epoch, nonce[:], session_id, .Out, allocator)
+	return vault.pty_seal(data, key, epoch, salt_copy[:], seq, session_id, .Out, "", allocator)
 }
 
 BRIDGE_PANE_QUEUE_BYTES :: 8 * 1024 * 1024
@@ -631,7 +634,7 @@ _bridge_pty_stream_queue_control :: proc(worker: ^Bridge_PTY_Stream_Worker, json
 
 // _bridge_pty_stream_queue_output enqueues one PLAINTEXT output record. `data` is owned by
 // the queue from here on (heap-allocated by the caller).
-_bridge_pty_stream_queue_output :: proc(worker: ^Bridge_PTY_Stream_Worker, data: []byte, heap: runtime.Allocator, session_id: string, encrypted: bool, salt: [4]byte, seq: u64, epoch: u32 = 0) {
+_bridge_pty_stream_queue_output :: proc(worker: ^Bridge_PTY_Stream_Worker, data: []byte, heap: runtime.Allocator, session_id: string, encrypted: bool, salt: Bridge_PTY_Salt, seq: u64, epoch: u32 = 0) {
 	_bridge_pty_stream_deliver_or_queue(worker, Bridge_PTY_Stream_Outgoing{data = data, encrypted = encrypted, epoch = epoch, salt = salt, seq = seq}, heap, session_id)
 }
 
@@ -707,7 +710,7 @@ _bridge_pty_stream_forget_compactions_locked :: proc(session_id: string) {
 // _bridge_pty_stream_compact_session_locked drops the oldest incremental records of
 // `session_id` until at most keep_bytes of plaintext remain, and inserts the clear-screen
 // marker in front of what is kept. Returns the bytes released. Caller holds the lock.
-_bridge_pty_stream_compact_session_locked :: proc(session_id: string, keep_bytes: int, encrypted: bool, epoch: u32, salt: [4]byte, seq: u64, heap: runtime.Allocator) -> (released: int) {
+_bridge_pty_stream_compact_session_locked :: proc(session_id: string, keep_bytes: int, encrypted: bool, epoch: u32, salt: Bridge_PTY_Salt, seq: u64, heap: runtime.Allocator) -> (released: int) {
 	// Walk from the tail: everything past the budget (towards the head) goes.
 	kept := 0
 	cut := -1 // index of the oldest record that is kept
@@ -772,7 +775,7 @@ _bridge_pty_stream_deliver_or_queue :: proc(worker: ^Bridge_PTY_Stream_Worker, i
 		// REQ-PTY-NET-5: compact instead of dropping the session, unless it is storming.
 		now := time.tick_now()
 		if _bridge_pty_stream_note_compaction_locked(session_id, now) < BRIDGE_PTY_STREAM_COMPACT_STORM_LIMIT {
-			marker_salt: [4]byte
+			marker_salt: Bridge_PTY_Salt
 			marker_seq: u64
 			marker_epoch: u32
 			if item.encrypted {
@@ -829,7 +832,7 @@ _bridge_pty_stream_deliver_or_queue :: proc(worker: ^Bridge_PTY_Stream_Worker, i
 // counter. A fresh CSPRNG salt is drawn whenever the stream has none yet, the epoch
 // changed, or a keyring was installed since; seq restarts only under a new salt.
 // ok=false (randomness failure) means the record must not be sealed at all.
-_bridge_pty_stream_next_nonce :: proc(worker: ^Bridge_PTY_Stream_Worker, epoch: u32) -> (salt: [4]byte, seq: u64, ok: bool) {
+_bridge_pty_stream_next_nonce :: proc(worker: ^Bridge_PTY_Stream_Worker, epoch: u32) -> (salt: Bridge_PTY_Salt, seq: u64, ok: bool) {
 	generation := sync.atomic_load(&bridge_pty_salt_generation)
 	if worker != nil {
 		if !worker.salt_set || worker.salt_epoch != epoch || worker.salt_generation != generation {
@@ -921,6 +924,7 @@ bridge_pty_stream_format_lifecycle_event :: proc(
 	has_exit_code := false,
 	exit_code: i32 = 0,
 	allocator := context.allocator,
+	boot_id := "",
 ) -> string {
 	b := strings.builder_make(allocator)
 	strings.write_string(&b, "{\"type\":\"")
@@ -930,6 +934,13 @@ bridge_pty_stream_format_lifecycle_event :: proc(
 	strings.write_string(&b, "\",\"shell_id\":\"")
 	bridge_runtime_write_json_string(&b, shell_id)
 	strings.write_string(&b, "\"")
+	if boot_id != "" {
+		// PTY v2 input frames bind this bridge process's unseal boot_id in their AAD;
+		// the viewer learns it here, on every (re)attach.
+		strings.write_string(&b, ",\"bridge_boot_id\":\"")
+		bridge_runtime_write_json_string(&b, boot_id)
+		strings.write_string(&b, "\"")
+	}
 	if has_exit_code {
 		fmt.sbprintf(&b, ",\"exit_code\":%d", exit_code)
 	}
@@ -947,7 +958,8 @@ bridge_pty_stream_emit_lifecycle_event :: proc(
 	exit_code: i32 = 0,
 ) {
 	heap := runtime.heap_allocator()
-	frame := bridge_pty_stream_format_lifecycle_event(event_type, session_id, shell_id, has_exit_code, exit_code, heap)
+	boot_id := bridge_unseal_boot_id() if event_type == "shell_pty_stream_ready" else ""
+	frame := bridge_pty_stream_format_lifecycle_event(event_type, session_id, shell_id, has_exit_code, exit_code, heap, boot_id)
 	_bridge_pty_stream_queue_control(worker, frame, heap, session_id)
 }
 
@@ -1019,8 +1031,8 @@ _bridge_pty_stream_pop_wire_frame :: proc(heap: runtime.Allocator, coalesce := t
 
 // bridge_pty_stream_encode_output_frame turns one (merged) plaintext payload into the
 // binary pty_wire session frame (REQ-PTY-NET-2), encrypting it when `encrypted`
-// (payload = PTY v2: u32be epoch | nonce | tag | ct). Caller owns the result.
-bridge_pty_stream_encode_output_frame :: proc(session_id: string, data: []byte, snapshot, encrypted: bool, epoch: u32, salt: [4]byte, seq: u64, heap: runtime.Allocator) -> (frame: []byte, ok: bool) {
+// (payload = PTY v2: u32be epoch | salt16 | nonce | tag | ct). Caller owns the result.
+bridge_pty_stream_encode_output_frame :: proc(session_id: string, data: []byte, snapshot, encrypted: bool, epoch: u32, salt: Bridge_PTY_Salt, seq: u64, heap: runtime.Allocator) -> (frame: []byte, ok: bool) {
 	temp := runtime.default_temp_allocator_temp_begin()
 	defer runtime.default_temp_allocator_temp_end(temp)
 	payload := data
@@ -1139,4 +1151,151 @@ bridge_pty_stream_reset :: proc() {
 	for r in bridge_pty_stream_compactions do delete(r.session_id, heap)
 	clear(&bridge_pty_stream_compactions)
 	sync.mutex_unlock(&bridge_pty_stream_outgoing_mu)
+}
+
+// ── PTY input replay defence (passwordless-vault.md §1, finding M1) ─────────
+// Every PTY v2 `in` frame binds its counter in the AAD. After a frame authenticates,
+// the bridge accepts it only if its counter strictly increases for its (session, salt)
+// stream (see vault.pty_replay_accept); a new salt is a new browser stream and a new
+// subkey, the only way the per-stream state starts over. The table is bounded: when a
+// session's state is evicted its highest counter becomes a global floor every fresh
+// session state starts from, so evicting can never re-open a replay window.
+
+BRIDGE_PTY_INPUT_REPLAY_MAX_SESSIONS :: 1024
+
+bridge_pty_input_replay_mu: sync.Mutex
+bridge_pty_input_replay: map[string]vault.Pty_Input_Replay
+bridge_pty_input_replay_global_floor: u64
+
+@(private = "file")
+_bridge_pty_input_replay_high_water :: proc(r: vault.Pty_Input_Replay) -> u64 {
+	high := r.floor
+	for e in r.entries do if e.used do high = max(high, e.last)
+	return high
+}
+
+bridge_pty_input_replay_accept :: proc(session_id: string, salt: [vault.PTY_V2_SALT_BYTES]byte, counter: u64) -> bool {
+	if session_id == "" || counter == 0 do return false
+	heap := runtime.heap_allocator()
+	sync.mutex_lock(&bridge_pty_input_replay_mu)
+	defer sync.mutex_unlock(&bridge_pty_input_replay_mu)
+	if bridge_pty_input_replay == nil do bridge_pty_input_replay = make(map[string]vault.Pty_Input_Replay, allocator = heap)
+	state, found := bridge_pty_input_replay[session_id]
+	if !found {
+		if len(bridge_pty_input_replay) >= BRIDGE_PTY_INPUT_REPLAY_MAX_SESSIONS {
+			victim := ""
+			for k, v in bridge_pty_input_replay {
+				victim = k
+				bridge_pty_input_replay_global_floor = max(bridge_pty_input_replay_global_floor, _bridge_pty_input_replay_high_water(v))
+				break
+			}
+			if victim != "" {
+				delete_key(&bridge_pty_input_replay, victim)
+				delete(victim, heap)
+			}
+		}
+		state = vault.Pty_Input_Replay{floor = bridge_pty_input_replay_global_floor}
+	}
+	if !vault.pty_replay_accept(&state, salt, counter) do return false
+	if found {
+		bridge_pty_input_replay[session_id] = state
+	} else {
+		bridge_pty_input_replay[strings.clone(session_id, heap)] = state
+	}
+	return true
+}
+
+// bridge_pty_open_input authenticates one browser input frame for session_id under the
+// keyring's CURRENT epoch (the command epoch floor) and this bridge process's unseal
+// boot_id (bound in the AAD: a frame captured before a restart, when the replay state
+// was lost, no longer authenticates), then enforces the replay rule. Nothing is
+// returned for a frame that fails any check. Temp-allocated plaintext.
+bridge_pty_open_input :: proc(frame: []byte, kr: ^vault.Vault_Keyring, session_id: string, boot_id: string) -> (plaintext: string, ok: bool) {
+	if kr == nil || boot_id == "" do return "", false
+	plain, salt, counter, opened := vault.pty_open(frame, kr, session_id, .In, kr.current_epoch, boot_id, context.temp_allocator)
+	if !opened do return "", false
+	if !bridge_pty_input_replay_accept(session_id, salt, counter) {
+		crypto.zero_explicit(raw_data(plain), len(plain))
+		return "", false
+	}
+	return string(plain), true
+}
+
+// ── Pane capture sealing (get_agent_pane / shell_get_pane replies) ──────────
+
+Bridge_Pane_Seal :: enum {
+	Plain,  // vault never configured: the output goes out as is
+	Sealed, // armored PTY v2 frame
+	Locked, // configured but locked: send an error, never plaintext
+	Failed, // sealing failed (randomness, bad session id): send an error
+}
+
+// bridge_pane_output_seal seals a pane capture for the hub when the vault is
+// configured. The armor is vault:v2:e<N>:b64(salt16 | nonce | tag | ct): a PTY v2
+// `out` frame for session_id under a fresh CSPRNG salt (its own subkey, counter 1),
+// minus the epoch prefix the token header already carries. The hub re-frames it to the
+// binary PTY v2 layout (domain.vault_pty_v2_payload_from_armor) without decrypting.
+// Caller owns `armored` when res == .Sealed or .Plain.
+bridge_pane_output_seal :: proc(output: string, session_id: string, allocator := context.allocator) -> (armored: string, res: Bridge_Pane_Seal) {
+	status, kr := bridge_vault_status_and_key()
+	defer vault.keyring_wipe(&kr)
+	return bridge_pane_output_seal_with(status, &kr, output, session_id, bridge_pty_random_source, allocator)
+}
+
+// bridge_pane_output_seal_with is the pure core of bridge_pane_output_seal: vault
+// state, keyring and randomness are passed in (tests drive it without the keystore).
+bridge_pane_output_seal_with :: proc(status: Vault_Status, kr: ^vault.Vault_Keyring, output: string, session_id: string, random_source: string, allocator := context.allocator) -> (armored: string, res: Bridge_Pane_Seal) {
+	switch status {
+	case .Disabled:
+		return strings.clone(output, allocator), .Plain
+	case .Locked:
+		return "", .Locked
+	case .Unlocked:
+	}
+	if output == "" do return "", .Sealed
+	if kr == nil do return "", .Failed
+	key, key_ok := vault.keyring_key_for_epoch(kr, kr.current_epoch)
+	if !key_ok do return "", .Failed
+	salt: Bridge_PTY_Salt
+	if !os_random.fill(salt[:], random_source) do return "", .Failed
+	frame, sealed := vault.pty_seal(transmute([]byte)output, key, kr.current_epoch, salt[:], 1, session_id, .Out, "", context.temp_allocator)
+	if !sealed do return "", .Failed
+	b64, err := base64.encode(frame[4:], allocator = context.temp_allocator)
+	if err != nil do return "", .Failed
+	e_buf: [16]byte
+	return strings.concatenate({vault.VAULT_V2_PREFIX, "e", strconv.write_uint(e_buf[:], u64(kr.current_epoch), 10), ":", b64}, allocator), .Sealed
+}
+
+// BRIDGE_PANE_CAPTURE_SEAL_MAX_PLAIN keeps a sealed chat pane capture under the hub's
+// 48000-byte message cap (content_service.pane_capture_limit_output): a token cut by
+// that cap could never be decrypted. 48000 * 3/4 minus the envelope header and prefix.
+BRIDGE_PANE_CAPTURE_SEAL_MAX_PLAIN :: 35_000
+
+// bridge_pane_capture_seal_with seals a chat pane capture (capture_agent_pane) as a
+// standard v2 content envelope: the hub stores it as the chat message body, which the
+// UI already decrypts like any other vault message. A capture over the cap keeps its
+// TAIL (the live end of the screen) from a line start and reports truncated.
+bridge_pane_capture_seal_with :: proc(status: Vault_Status, kr: ^vault.Vault_Keyring, output: string, random_source: string, allocator := context.allocator) -> (armored: string, res: Bridge_Pane_Seal, truncated: bool) {
+	switch status {
+	case .Disabled:
+		return strings.clone(output, allocator), .Plain, false
+	case .Locked:
+		return "", .Locked, false
+	case .Unlocked:
+	}
+	if kr == nil do return "", .Failed, false
+	text := output
+	if len(text) > BRIDGE_PANE_CAPTURE_SEAL_MAX_PLAIN {
+		truncated = true
+		start := len(text) - BRIDGE_PANE_CAPTURE_SEAL_MAX_PLAIN
+		if nl := strings.index_byte(text[start:], '\n'); nl >= 0 {
+			start += nl + 1
+		} else {
+			for start < len(text) && (text[start] & 0xC0) == 0x80 do start += 1
+		}
+		text = text[start:]
+	}
+	token, ok := vault.seal(transmute([]byte)text, kr, allocator, random_source)
+	if !ok do return "", .Failed, false
+	return token, .Sealed, truncated
 }
