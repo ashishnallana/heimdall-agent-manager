@@ -393,3 +393,15 @@ test_v2_nonce_cache_records_only_authenticated_and_never_evicts_live :: proc(t: 
 	again, _ := bridge_unseal_decrypt_and_verify(good, f.id_a, now + 1)
 	testing.expect(t, !again, "and now the nonce is consumed")
 }
+
+@(test)
+test_v2_enc_spec_nonce_replay_rejected :: proc(t: ^testing.T) {
+	// Fake clock; a nonce unique to this test so the shared cache cannot collide.
+	now: i64 = 1_800_000_000_000
+	nonce := "m1_enc_spec_nonce_0123456789abcd"
+	testing.expect_value(t, bridge_enc_spec_check_fresh(now, nonce, now), "")
+	testing.expect(t, bridge_enc_spec_check_fresh(now, nonce, now + 59_000) != "", "replay inside the window rejected")
+	testing.expect(t, bridge_enc_spec_check_fresh(now, "m1_other_nonce_0123456789abcdef", now + 61_000) != "", "stale timestamp rejected")
+	testing.expect(t, bridge_enc_spec_check_fresh(now, "", now) != "", "a missing nonce is rejected")
+	testing.expect(t, bridge_enc_spec_check_fresh(now, "short", now) != "", "a short nonce is rejected")
+}
