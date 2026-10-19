@@ -432,10 +432,198 @@ bridge_taskv2_decrypt_field :: proc(s: string, allocator := context.temp_allocat
 	return bridge_decrypt_embedded_vault_tokens(s, allocator = allocator, locked_marker = VAULT_LOCKED_MARKER)
 }
 
+// The least of a description the size cap keeps when it has to cut one.
+BRIDGE_TASK_MD_DESCRIPTION_MIN_HEAD :: 2_000
+
+// Everything bridge_taskv2_render_task_md has extracted (and decrypted) from a
+// pack. The size cap flips the drop_* / truncation fields and renders again.
+Bridge_Task_Md_Doc :: struct {
+	task_id, title, role_label, lease_id, expires_at, hard_deadline_at:           string,
+	bridge_id, directory_id, provider, model, why, workdir, branch:               string,
+	merge_conflict, gate_feedback:                                                string,
+	attempt_no, max_attempts, review_rounds:                                      int,
+	goal, verify_cmd:                                                             string,
+	acceptance:                                                                   []string,
+	description:                                                                  string,
+	description_truncated:                                                        bool,
+	chain_summary:                                                                string,
+	inputs:                                                                       []Bridge_Task_Md_Input,
+	deps:                                                                         []Bridge_Task_Md_Dependency,
+	vcs_head:                                                                     string,
+	vcs_has_dirty, vcs_dirty:                                                     bool,
+	vcs_files_arr:                                                                string,
+	has_prev:                                                                     bool,
+	prev_attempt_no:                                                              int,
+	prev_outcome, prev_note:                                                      string,
+	handoff_summary:                                                              string,
+	drop_handoff_summary:                                                         bool,
+	handoff_decisions, handoff_dead_ends, handoff_next_steps:                     []string,
+	verify_cmd_prev:                                                              string,
+	has_verify_exit:                                                              bool,
+	verify_exit:                                                                  int,
+	verify_head, verify_tail:                                                     string,
+	drop_verify_summary:                                                          bool,
+	findings_lines:                                                               []string,
+	rules:                                                                        []string,
+}
+
+bridge_taskv2_description_trailer :: proc(task_id: string) -> string {
+	return fmt.tprintf("_(description truncated — run `ham-ctl task show %s` for the full text)_\n", task_id)
+}
+
+// bridge_taskv2_utf8_head returns at most n bytes of s, cut on a rune boundary.
+bridge_taskv2_utf8_head :: proc(s: string, n: int) -> string {
+	if n >= len(s) do return s
+	if n <= 0 do return ""
+	i := n
+	for i > 0 && (s[i] & 0xC0) == 0x80 do i -= 1
+	return s[:i]
+}
+
+bridge_taskv2_build_task_md :: proc(d: ^Bridge_Task_Md_Doc, alloc := context.temp_allocator) -> string {
+	b := strings.builder_make(alloc)
+	fmt.sbprintf(&b, "# Task %s: %s (%s, attempt #%d)\n\n", d.task_id, d.title, d.role_label, d.attempt_no)
+	fmt.sbprintf(&b, "- **Lease**: `%s` (attempt %d/%d, review_rounds: %d)\n", d.lease_id, d.attempt_no, d.max_attempts, d.review_rounds)
+	if d.expires_at != "" || d.hard_deadline_at != "" {
+		fmt.sbprintf(&b, "- **Deadlines**: expires `%s`, hard_deadline `%s`\n", d.expires_at, d.hard_deadline_at)
+	}
+	if d.bridge_id != "" || d.directory_id != "" || d.provider != "" || d.model != "" {
+		fmt.sbprintf(&b, "- **Placement**: bridge=`%s` directory=`%s` provider=`%s` model=`%s`\n", d.bridge_id, d.directory_id, d.provider, d.model)
+	}
+	if d.workdir != "" {
+		fmt.sbprintf(&b, "- **Workdir**: `%s` on branch `%s`. `cd` there and do all work and commits in it; it is your own checkout, merged into the directory when the task is done.\n", d.workdir, d.branch)
+	}
+	// gate_feedback carries ready-made sections (answered block, gate rejection).
+	if d.gate_feedback != "" do strings.write_string(&b, d.gate_feedback)
+	if d.merge_conflict != "" {
+		strings.write_string(&b, "\n## Merge Conflict\n")
+		fmt.sbprintf(&b, "This task was done, but branch `%s` did not merge into its directory: %s\n", d.branch, d.merge_conflict)
+		strings.write_string(&b, "In the Workdir, merge the directory's current branch into yours (`git merge <that branch>`), resolve the conflicts, commit, run `ham-ctl verify`, and submit.\n")
+	}
+	strings.write_string(&b, "\n## Brief\n")
+	if d.goal != "" {
+		fmt.sbprintf(&b, "**Goal**: %s\n", d.goal)
+	}
+	if len(d.acceptance) > 0 {
+		strings.write_string(&b, "**Acceptance**:\n")
+		for a in d.acceptance {
+			fmt.sbprintf(&b, "- %s\n", a)
+		}
+	}
+	if d.verify_cmd != "" {
+		fmt.sbprintf(&b, "**Verify**: `%s`\n", d.verify_cmd)
+	}
+
+	if strings.trim_space(d.description) != "" {
+		strings.write_string(&b, "\n## Description\n")
+		strings.write_string(&b, d.description)
+		if !strings.has_suffix(d.description, "\n") do strings.write_byte(&b, '\n')
+		if d.description_truncated do strings.write_string(&b, bridge_taskv2_description_trailer(d.task_id))
+	}
+
+	strings.write_string(&b, "\n## Chain Summary\n")
+	if strings.trim_space(d.chain_summary) != "" {
+		strings.write_string(&b, d.chain_summary)
+		if !strings.has_suffix(d.chain_summary, "\n") do strings.write_byte(&b, '\n')
+	} else {
+		strings.write_string(&b, "_(none)_\n")
+	}
+
+	bridge_taskv2_write_dependencies(&b, d.deps, d.task_id)
+
+	if len(d.inputs) > 0 {
+		strings.write_string(&b, "\n## Resolved Inputs\n")
+		for inp in d.inputs {
+			if inp.dropped && inp.fetch != "" {
+				fmt.sbprintf(&b, "- `%s`: output omitted; fetch the pinned generation with `%s`\n", inp.ref, inp.fetch)
+			} else if inp.dropped {
+				fmt.sbprintf(&b, "- `%s`: omitted for size — fetch with `ham-ctl task fetch %s %s`\n", inp.ref, d.task_id, inp.ref)
+			} else if inp.resolved {
+				fmt.sbprintf(&b, "- `%s`: %s\n", inp.ref, inp.body)
+			} else {
+				fmt.sbprintf(&b, "- `%s`: _(unresolved — `ham-ctl task fetch %s %s`)_\n", inp.ref, d.task_id, inp.ref)
+			}
+		}
+	}
+
+	strings.write_string(&b, "\n## Where You Are\n")
+	if d.vcs_head != "" {
+		fmt.sbprintf(&b, "- **HEAD**: `%s` (dirty: `%v`)\n", d.vcs_head, d.vcs_dirty if d.vcs_has_dirty else false)
+		if strings.has_prefix(strings.trim_space(d.vcs_files_arr), "[") && strings.trim_space(d.vcs_files_arr) != "[]" {
+			fmt.sbprintf(&b, "- **Changed files**: `%s`\n", strings.trim_space(d.vcs_files_arr))
+		}
+	} else {
+		strings.write_string(&b, "- No prior VCS state recorded.\n")
+	}
+
+	if d.has_prev {
+		fmt.sbprintf(&b, "\n## Previous Attempt (#%d)\n", d.prev_attempt_no)
+		if d.prev_outcome != "" {
+			fmt.sbprintf(&b, "- **Outcome**: `%s`\n", d.prev_outcome)
+		}
+		if d.prev_note != "" {
+			fmt.sbprintf(&b, "- **Last Heartbeat Note**: %s\n", d.prev_note)
+		}
+		if d.drop_handoff_summary {
+			fmt.sbprintf(&b, "- **Handoff Summary**: omitted for size — fetch with `ham-ctl task fetch %s facet:%s:%d:handoff`\n", d.task_id, d.task_id, d.prev_attempt_no)
+		} else if d.handoff_summary != "" {
+			fmt.sbprintf(&b, "- **Handoff Summary**: %s\n", d.handoff_summary)
+		}
+		if len(d.handoff_decisions) > 0 {
+			strings.write_string(&b, "- **Decisions**:\n")
+			for dec in d.handoff_decisions {
+				fmt.sbprintf(&b, "  - %s\n", bridge_taskv2_decrypt_field(dec, context.temp_allocator))
+			}
+		}
+		if len(d.handoff_dead_ends) > 0 {
+			strings.write_string(&b, "- **Dead Ends (DO NOT REPEAT)**:\n")
+			for de in d.handoff_dead_ends {
+				fmt.sbprintf(&b, "  - %s\n", bridge_taskv2_decrypt_field(de, context.temp_allocator))
+			}
+		}
+		if len(d.handoff_next_steps) > 0 {
+			strings.write_string(&b, "- **Next Steps**:\n")
+			for ns in d.handoff_next_steps {
+				fmt.sbprintf(&b, "  - %s\n", bridge_taskv2_decrypt_field(ns, context.temp_allocator))
+			}
+		}
+		if d.has_verify_exit || d.verify_cmd_prev != "" || d.verify_tail != "" || d.drop_verify_summary {
+			fmt.sbprintf(&b, "- **Previous Verify**: cmd=`%s` exit_code=`%d` head=`%s`\n", d.verify_cmd_prev, d.verify_exit, d.verify_head)
+			if d.drop_verify_summary {
+				fmt.sbprintf(&b, "  - Output omitted for size — fetch with `ham-ctl task fetch %s facet:%s:%d:verify`\n", d.task_id, d.task_id, d.prev_attempt_no)
+			} else if d.verify_tail != "" {
+				fmt.sbprintf(&b, "  - Output tail:\n```\n%s\n```\n", d.verify_tail)
+			}
+		}
+	}
+
+	if len(d.findings_lines) > 0 {
+		strings.write_string(&b, "\n## Open Findings\n")
+		for fl in d.findings_lines {
+			strings.write_string(&b, fl)
+			strings.write_byte(&b, '\n')
+		}
+	}
+
+	fmt.sbprintf(&b, "\n## Why You Were Chosen\n`%s`\n", d.why)
+
+	strings.write_string(&b, "\n## Protocol Rules\n")
+	if len(d.rules) > 0 {
+		for r in d.rules {
+			strings.write_string(&b, r)
+			strings.write_byte(&b, '\n')
+		}
+	} else {
+		strings.write_string(&b, "1. Confirm lease with `ham-ctl lease next`.\n2. Run `ham-ctl verify` and `ham-ctl lease submit --summary \"...\"` when done.\n")
+	}
+	return strings.to_string(b)
+}
+
 // bridge_taskv2_render_task_md decrypts all vault:v2 tokens in pack_json,
 // applies the field-safe 8k-token (max_bytes) cap AFTER decryption (never inside a
 // field, dropping in order: 1. resolved input bodies, then dependency outputs -> 2. previous verify summary/tail
-// -> 3. previous handoff summary; preserving brief, dead_ends, and open findings intact),
+// -> 3. previous handoff summary -> 4. task description cut to a head with a trailer;
+// preserving brief, dead_ends, and open findings intact),
 // and renders the Markdown document for <run_dir>/TASK.md.
 bridge_taskv2_render_task_md :: proc(pack_json: string, max_bytes: int = BRIDGE_TASK_MD_MAX_BYTES, allocator := context.allocator) -> string {
 	if !strings.has_prefix(strings.trim_space(pack_json), "{") {
@@ -539,7 +727,7 @@ bridge_taskv2_render_task_md :: proc(pack_json: string, max_bytes: int = BRIDGE_
 
 	// Resolved inputs
 	inputs := make([dynamic]Bridge_Task_Md_Input, context.temp_allocator)
-	if inputs_arr, has_inputs := bridge_provider_json_extract_array(pack_json, "inputs"); has_inputs {
+	if inputs_arr, has_inputs := bridge_provider_json_extract_array(pack_json, "inputs", context.temp_allocator); has_inputs {
 		objs := bridge_provider_json_top_level_objects(inputs_arr)
 		defer bridge_bootstrap_free_object_slice(objs)
 		for obj in objs {
@@ -561,7 +749,7 @@ bridge_taskv2_render_task_md :: proc(pack_json: string, max_bytes: int = BRIDGE_
 
     // The receipt is scoped to a task attempt or parent run execution, so
     // workers never accidentally fetch the newest output of a retried source.
-    if array, present := bridge_provider_json_extract_array(pack_json, "work_inputs"); present {
+    if array, present := bridge_provider_json_extract_array(pack_json, "work_inputs", context.temp_allocator); present {
         objects := bridge_provider_json_top_level_objects(array)
         defer bridge_bootstrap_free_object_slice(objects)
         for object in objects {
@@ -627,7 +815,7 @@ bridge_taskv2_render_task_md :: proc(pack_json: string, max_bytes: int = BRIDGE_
 
 	// Open Findings (never dropped)
 	findings_lines := make([dynamic]string, context.temp_allocator)
-	if findings_arr, has_f := bridge_provider_json_extract_array(pack_json, "findings"); has_f {
+	if findings_arr, has_f := bridge_provider_json_extract_array(pack_json, "findings", context.temp_allocator); has_f {
 		f_objs := bridge_provider_json_top_level_objects(findings_arr)
 		defer bridge_bootstrap_free_object_slice(f_objs)
 		for f_obj in f_objs {
@@ -648,194 +836,38 @@ bridge_taskv2_render_task_md :: proc(pack_json: string, max_bytes: int = BRIDGE_
 	// Protocol Rules
 	rules := jsonx.extract_string_array(proto_obj, "rules", true, context.temp_allocator)
 
-	drop_verify_summary := false
-	drop_handoff_summary := false
+	// When the brief has no goal, the goal line already shows the description;
+	// don't repeat it under its own heading.
+	if goal == description do description = ""
 
-	build_doc :: proc(
-		task_id, title, role_label, lease_id, expires_at, hard_deadline_at, bridge_id, directory_id, provider, model, why, workdir, branch, merge_conflict, gate_feedback: string,
-		attempt_no, max_attempts, review_rounds: int,
-		goal, verify_cmd: string, acceptance: []string,
-		chain_summary: string,
-		inputs: []Bridge_Task_Md_Input,
-		deps: []Bridge_Task_Md_Dependency,
-		vcs_head: string, vcs_has_dirty, vcs_dirty: bool, vcs_files_arr: string,
-		has_prev: bool, prev_attempt_no: int, prev_outcome, prev_note: string,
-		handoff_summary: string, drop_handoff_summary: bool,
-		handoff_decisions, handoff_dead_ends, handoff_next_steps: []string,
-		verify_cmd_prev: string, has_verify_exit: bool, verify_exit: int, verify_head, verify_tail: string, drop_verify_summary: bool,
-		findings_lines: []string,
-		rules: []string,
-		alloc := context.temp_allocator,
-	) -> string {
-		b := strings.builder_make(alloc)
-		fmt.sbprintf(&b, "# Task %s: %s (%s, attempt #%d)\n\n", task_id, title, role_label, attempt_no)
-		fmt.sbprintf(&b, "- **Lease**: `%s` (attempt %d/%d, review_rounds: %d)\n", lease_id, attempt_no, max_attempts, review_rounds)
-		if expires_at != "" || hard_deadline_at != "" {
-			fmt.sbprintf(&b, "- **Deadlines**: expires `%s`, hard_deadline `%s`\n", expires_at, hard_deadline_at)
-		}
-		if bridge_id != "" || directory_id != "" || provider != "" || model != "" {
-			fmt.sbprintf(&b, "- **Placement**: bridge=`%s` directory=`%s` provider=`%s` model=`%s`\n", bridge_id, directory_id, provider, model)
-		}
-		if workdir != "" {
-			fmt.sbprintf(&b, "- **Workdir**: `%s` on branch `%s`. `cd` there and do all work and commits in it; it is your own checkout, merged into the directory when the task is done.\n", workdir, branch)
-		}
-		// gate_feedback carries ready-made sections (answered block, gate rejection).
-		if gate_feedback != "" do strings.write_string(&b, gate_feedback)
-		if merge_conflict != "" {
-			strings.write_string(&b, "\n## Merge Conflict\n")
-			fmt.sbprintf(&b, "This task was done, but branch `%s` did not merge into its directory: %s\n", branch, merge_conflict)
-			strings.write_string(&b, "In the Workdir, merge the directory's current branch into yours (`git merge <that branch>`), resolve the conflicts, commit, run `ham-ctl verify`, and submit.\n")
-		}
-		strings.write_string(&b, "\n## Brief\n")
-		if goal != "" {
-			fmt.sbprintf(&b, "**Goal**: %s\n", goal)
-		}
-		if len(acceptance) > 0 {
-			strings.write_string(&b, "**Acceptance**:\n")
-			for a in acceptance {
-				fmt.sbprintf(&b, "- %s\n", a)
-			}
-		}
-		if verify_cmd != "" {
-			fmt.sbprintf(&b, "**Verify**: `%s`\n", verify_cmd)
-		}
-
-		strings.write_string(&b, "\n## Chain Summary\n")
-		if strings.trim_space(chain_summary) != "" {
-			strings.write_string(&b, chain_summary)
-			if !strings.has_suffix(chain_summary, "\n") do strings.write_byte(&b, '\n')
-		} else {
-			strings.write_string(&b, "_(none)_\n")
-		}
-
-		bridge_taskv2_write_dependencies(&b, deps, task_id)
-
-		if len(inputs) > 0 {
-			strings.write_string(&b, "\n## Resolved Inputs\n")
-			for inp in inputs {
-                if inp.dropped && inp.fetch != "" {
-                    fmt.sbprintf(&b, "- `%s`: output omitted; fetch the pinned generation with `%s`\n", inp.ref, inp.fetch)
-                } else if inp.dropped {
-					fmt.sbprintf(&b, "- `%s`: omitted for size — fetch with `ham-ctl task fetch %s %s`\n", inp.ref, task_id, inp.ref)
-				} else if inp.resolved {
-					fmt.sbprintf(&b, "- `%s`: %s\n", inp.ref, inp.body)
-				} else {
-					fmt.sbprintf(&b, "- `%s`: _(unresolved — `ham-ctl task fetch %s %s`)_\n", inp.ref, task_id, inp.ref)
-				}
-			}
-		}
-
-		strings.write_string(&b, "\n## Where You Are\n")
-		if vcs_head != "" {
-			fmt.sbprintf(&b, "- **HEAD**: `%s` (dirty: `%v`)\n", vcs_head, vcs_dirty if vcs_has_dirty else false)
-			if strings.has_prefix(strings.trim_space(vcs_files_arr), "[") && strings.trim_space(vcs_files_arr) != "[]" {
-				fmt.sbprintf(&b, "- **Changed files**: `%s`\n", strings.trim_space(vcs_files_arr))
-			}
-		} else {
-			strings.write_string(&b, "- No prior VCS state recorded.\n")
-		}
-
-		if has_prev {
-			fmt.sbprintf(&b, "\n## Previous Attempt (#%d)\n", prev_attempt_no)
-			if prev_outcome != "" {
-				fmt.sbprintf(&b, "- **Outcome**: `%s`\n", prev_outcome)
-			}
-			if prev_note != "" {
-				fmt.sbprintf(&b, "- **Last Heartbeat Note**: %s\n", prev_note)
-			}
-			if drop_handoff_summary {
-				fmt.sbprintf(&b, "- **Handoff Summary**: omitted for size — fetch with `ham-ctl task fetch %s facet:%s:%d:handoff`\n", task_id, task_id, prev_attempt_no)
-			} else if handoff_summary != "" {
-				fmt.sbprintf(&b, "- **Handoff Summary**: %s\n", handoff_summary)
-			}
-			if len(handoff_decisions) > 0 {
-				strings.write_string(&b, "- **Decisions**:\n")
-				for d in handoff_decisions {
-					fmt.sbprintf(&b, "  - %s\n", bridge_taskv2_decrypt_field(d, context.temp_allocator))
-				}
-			}
-			if len(handoff_dead_ends) > 0 {
-				strings.write_string(&b, "- **Dead Ends (DO NOT REPEAT)**:\n")
-				for de in handoff_dead_ends {
-					fmt.sbprintf(&b, "  - %s\n", bridge_taskv2_decrypt_field(de, context.temp_allocator))
-				}
-			}
-			if len(handoff_next_steps) > 0 {
-				strings.write_string(&b, "- **Next Steps**:\n")
-				for ns in handoff_next_steps {
-					fmt.sbprintf(&b, "  - %s\n", bridge_taskv2_decrypt_field(ns, context.temp_allocator))
-				}
-			}
-			if has_verify_exit || verify_cmd_prev != "" || verify_tail != "" || drop_verify_summary {
-				fmt.sbprintf(&b, "- **Previous Verify**: cmd=`%s` exit_code=`%d` head=`%s`\n", verify_cmd_prev, verify_exit, verify_head)
-				if drop_verify_summary {
-					fmt.sbprintf(&b, "  - Output omitted for size — fetch with `ham-ctl task fetch %s facet:%s:%d:verify`\n", task_id, task_id, prev_attempt_no)
-				} else if verify_tail != "" {
-					fmt.sbprintf(&b, "  - Output tail:\n```\n%s\n```\n", verify_tail)
-				}
-			}
-		}
-
-		if len(findings_lines) > 0 {
-			strings.write_string(&b, "\n## Open Findings\n")
-			for fl in findings_lines {
-				strings.write_string(&b, fl)
-				strings.write_byte(&b, '\n')
-			}
-		}
-
-		fmt.sbprintf(&b, "\n## Why You Were Chosen\n`%s`\n", why)
-
-		strings.write_string(&b, "\n## Protocol Rules\n")
-		if len(rules) > 0 {
-			for r in rules {
-				strings.write_string(&b, r)
-				strings.write_byte(&b, '\n')
-			}
-		} else {
-			strings.write_string(&b, "1. Confirm lease with `ham-ctl lease next`.\n2. Run `ham-ctl verify` and `ham-ctl lease submit --summary \"...\"` when done.\n")
-		}
-		return strings.to_string(b)
+	doc := Bridge_Task_Md_Doc{
+		task_id = task_id, title = title, role_label = role_label, lease_id = lease_id,
+		expires_at = expires_at, hard_deadline_at = hard_deadline_at,
+		bridge_id = bridge_id, directory_id = directory_id, provider = provider, model = model,
+		why = why, workdir = workdir, branch = branch, merge_conflict = merge_conflict, gate_feedback = gate_feedback,
+		attempt_no = attempt_no, max_attempts = max_attempts, review_rounds = review_rounds,
+		goal = goal, verify_cmd = verify_cmd, acceptance = acceptance[:],
+		description = description,
+		chain_summary = chain_summary,
+		inputs = inputs[:],
+		deps = deps[:],
+		vcs_head = vcs_head, vcs_has_dirty = vcs_has_dirty, vcs_dirty = vcs_dirty, vcs_files_arr = vcs_files_arr,
+		has_prev = has_prev, prev_attempt_no = prev_attempt_no, prev_outcome = prev_outcome, prev_note = prev_note,
+		handoff_summary = handoff_summary,
+		handoff_decisions = handoff_decisions[:], handoff_dead_ends = handoff_dead_ends[:], handoff_next_steps = handoff_next_steps[:],
+		verify_cmd_prev = verify_cmd_prev, has_verify_exit = has_verify_exit, verify_exit = verify_exit, verify_head = verify_head, verify_tail = verify_tail,
+		findings_lines = findings_lines[:],
+		rules = rules[:],
 	}
 
-	rendered := build_doc(
-		task_id, title, role_label, lease_id, expires_at, hard_deadline_at, bridge_id, directory_id, provider, model, why, workdir, branch, merge_conflict, gate_feedback,
-		attempt_no, max_attempts, review_rounds,
-		goal, verify_cmd, acceptance[:],
-		chain_summary,
-		inputs[:],
-		deps[:],
-		vcs_head, vcs_has_dirty, vcs_dirty, vcs_files_arr,
-		has_prev, prev_attempt_no, prev_outcome, prev_note,
-		handoff_summary, drop_handoff_summary,
-		handoff_decisions[:], handoff_dead_ends[:], handoff_next_steps[:],
-		verify_cmd_prev, has_verify_exit, verify_exit, verify_head, verify_tail, drop_verify_summary,
-		findings_lines[:],
-		rules[:],
-		context.temp_allocator,
-	)
+	rendered := bridge_taskv2_build_task_md(&doc)
 
 	// Step 1 of field-safe cap: drop resolved input bodies (from last to first)
 	if max_bytes > 0 && len(rendered) > max_bytes {
 		for i := len(inputs) - 1; i >= 0 && len(rendered) > max_bytes; i -= 1 {
 			if inputs[i].dropped do continue
 			inputs[i].dropped = true
-			rendered = build_doc(
-				task_id, title, role_label, lease_id, expires_at, hard_deadline_at, bridge_id, directory_id, provider, model, why, workdir, branch, merge_conflict, gate_feedback,
-				attempt_no, max_attempts, review_rounds,
-				goal, verify_cmd, acceptance[:],
-				chain_summary,
-				inputs[:],
-				deps[:],
-				vcs_head, vcs_has_dirty, vcs_dirty, vcs_files_arr,
-				has_prev, prev_attempt_no, prev_outcome, prev_note,
-				handoff_summary, drop_handoff_summary,
-				handoff_decisions[:], handoff_dead_ends[:], handoff_next_steps[:],
-				verify_cmd_prev, has_verify_exit, verify_exit, verify_head, verify_tail, drop_verify_summary,
-				findings_lines[:],
-				rules[:],
-				context.temp_allocator,
-			)
+			rendered = bridge_taskv2_build_task_md(&doc)
 		}
 	}
 
@@ -845,65 +877,34 @@ bridge_taskv2_render_task_md :: proc(pack_json: string, max_bytes: int = BRIDGE_
 		for i := len(deps) - 1; i >= 0 && len(rendered) > max_bytes; i -= 1 {
 			if deps[i].dropped || deps[i].output == "" do continue
 			deps[i].dropped = true
-			rendered = build_doc(
-				task_id, title, role_label, lease_id, expires_at, hard_deadline_at, bridge_id, directory_id, provider, model, why, workdir, branch, merge_conflict, gate_feedback,
-				attempt_no, max_attempts, review_rounds,
-				goal, verify_cmd, acceptance[:],
-				chain_summary,
-				inputs[:],
-				deps[:],
-				vcs_head, vcs_has_dirty, vcs_dirty, vcs_files_arr,
-				has_prev, prev_attempt_no, prev_outcome, prev_note,
-				handoff_summary, drop_handoff_summary,
-				handoff_decisions[:], handoff_dead_ends[:], handoff_next_steps[:],
-				verify_cmd_prev, has_verify_exit, verify_exit, verify_head, verify_tail, drop_verify_summary,
-				findings_lines[:],
-				rules[:],
-				context.temp_allocator,
-			)
+			rendered = bridge_taskv2_build_task_md(&doc)
 		}
 	}
 
 	// Step 2 of field-safe cap: drop previous verify summary/tail
 	if max_bytes > 0 && len(rendered) > max_bytes && verify_tail != "" {
-		drop_verify_summary = true
-		rendered = build_doc(
-			task_id, title, role_label, lease_id, expires_at, hard_deadline_at, bridge_id, directory_id, provider, model, why, workdir, branch, merge_conflict, gate_feedback,
-			attempt_no, max_attempts, review_rounds,
-			goal, verify_cmd, acceptance[:],
-			chain_summary,
-			inputs[:],
-			deps[:],
-			vcs_head, vcs_has_dirty, vcs_dirty, vcs_files_arr,
-			has_prev, prev_attempt_no, prev_outcome, prev_note,
-			handoff_summary, drop_handoff_summary,
-			handoff_decisions[:], handoff_dead_ends[:], handoff_next_steps[:],
-			verify_cmd_prev, has_verify_exit, verify_exit, verify_head, verify_tail, drop_verify_summary,
-			findings_lines[:],
-			rules[:],
-			context.temp_allocator,
-		)
+		doc.drop_verify_summary = true
+		rendered = bridge_taskv2_build_task_md(&doc)
 	}
 
 	// Step 3 of field-safe cap: drop previous handoff summary (preserving dead_ends!)
 	if max_bytes > 0 && len(rendered) > max_bytes && handoff_summary != "" {
-		drop_handoff_summary = true
-		rendered = build_doc(
-			task_id, title, role_label, lease_id, expires_at, hard_deadline_at, bridge_id, directory_id, provider, model, why, workdir, branch, merge_conflict, gate_feedback,
-			attempt_no, max_attempts, review_rounds,
-			goal, verify_cmd, acceptance[:],
-			chain_summary,
-			inputs[:],
-			deps[:],
-			vcs_head, vcs_has_dirty, vcs_dirty, vcs_files_arr,
-			has_prev, prev_attempt_no, prev_outcome, prev_note,
-			handoff_summary, drop_handoff_summary,
-			handoff_decisions[:], handoff_dead_ends[:], handoff_next_steps[:],
-			verify_cmd_prev, has_verify_exit, verify_exit, verify_head, verify_tail, drop_verify_summary,
-			findings_lines[:],
-			rules[:],
-			context.temp_allocator,
-		)
+		doc.drop_handoff_summary = true
+		rendered = bridge_taskv2_build_task_md(&doc)
+	}
+
+	// Step 4 of field-safe cap: cut the task description to a head that fits,
+	// keeping at least BRIDGE_TASK_MD_DESCRIPTION_MIN_HEAD bytes, with a trailer
+	// pointing at the full text. The brief's goal and acceptance are never cut.
+	if max_bytes > 0 && len(rendered) > max_bytes && doc.description != "" {
+		trailer_len := len(bridge_taskv2_description_trailer(task_id))
+		head := len(description) - (len(rendered) - max_bytes) - trailer_len
+		head = max(head, min(BRIDGE_TASK_MD_DESCRIPTION_MIN_HEAD, len(description)))
+		if head < len(description) {
+			doc.description = bridge_taskv2_utf8_head(description, head)
+			doc.description_truncated = true
+			rendered = bridge_taskv2_build_task_md(&doc)
+		}
 	}
 
 	return strings.clone(rendered, allocator)
