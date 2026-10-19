@@ -35,7 +35,11 @@ import {
 import { isVaultSupported } from '../utils/vaultCrypto';
 import { pinsFromChain, trustedBridgeById, verifyDirectory, type VaultDirectory, type VerifiedChain } from '../utils/vaultDirectoryVerify';
 import { clearKeyringSession, getKeyringSession, installKeyringFromWrap, withKeyringBytes } from '../utils/vaultKeyringSession';
-import { buildGenesis, buildPairedRegistration, revokeWithRetry, rotateWithRetry, type RevokeOutcome, type RotateOutcome } from '../utils/vaultDeviceFlows';
+import { buildBrowserApproval, buildGenesis, buildPairedRegistration, revokeWithRetry, rotateWithRetry, type RevokeOutcome, type RotateOutcome } from '../utils/vaultDeviceFlows';
+import { asApproverIdentity, buildRecoveryKey, openRecoveryKey, RecoveryKeyError } from '../utils/vaultRecovery';
+import { openVerifiedWrap } from '../utils/vaultKeyringWrap';
+import { serializeKeyringBytes } from '../utils/vaultKeyring';
+import { trustedRecoveryKeys } from '../utils/vaultDirectoryVerify';
 import { derivePairKeys, generatePairCode, pairCodeSymbols, PAIR_CODE_TTL_MS, verifyPairApproveMac } from '../utils/vaultPairing';
 import { kindPolicy } from '../utils/vaultStatements';
 import { deliverKeyringToBridges, type BridgeDeliveryDeps, type BridgeFanoutResult } from '../utils/vaultBridgeDelivery';
@@ -950,4 +954,91 @@ export async function verifiedChainForApproval(): Promise<VerifiedChain> {
 
 export function deviceVaultUserId(): string {
   return ctx?.userId ?? '';
+}
+
+// ── recovery key (plan P4) ───────────────────────────────────────────────────
+
+/**
+ * Create a recovery key from `entropy` (the 12 words the user wrote down and then
+ * re-entered): a `recovery` credential approved by this device, wrapped to like any
+ * device, its private keys sealed under the words. Returns the new credential id.
+ */
+export async function createRecoveryKey(entropy: Uint8Array): Promise<string> {
+  const c = ctx;
+  if (!c?.identity) throw new Error('This device cannot sign');
+  const identity = c.identity;
+  const chain = await verifiedChainForApproval();
+  const { body, deviceId } = await withKeyringBytes((bytes) => buildRecoveryKey(identity, chain, bytes, entropy), chain);
+  await d().api.postRecoveryKey(body, deviceSignerContext()!);
+  await refreshDeviceVault('recovery-created');
+  return deviceId;
+}
+
+/**
+ * Replace the recovery key: create the new one FIRST (so the account is never left
+ * without one), then revoke every older recovery credential (each a signed revoke
+ * with a new epoch; the new recovery key receives the new wraps).
+ */
+export async function replaceRecoveryKey(entropy: Uint8Array): Promise<string> {
+  const before = trustedRecoveryKeys((await fetchVerifiedChain()).chain).map((r) => r.device_id);
+  const created = await createRecoveryKey(entropy);
+  for (const id of before) {
+    if (id === created) continue;
+    const { outcome } = await revokeDevice(id);
+    if (outcome.kind !== 'revoked' && outcome.kind !== 'already-revoked') throw new Error('The new recovery key was created, but the old one could not be revoked; revoke it in the device list');
+  }
+  return created;
+}
+
+export interface RecoveryRestoreResult {
+  /** Approved devices (browsers, bridges) other than this browser: candidates to revoke if lost. */
+  otherDevices: { deviceId: string; kind: string; label: string }[];
+}
+
+/**
+ * Restore on a NEW browser (waiting to be paired) with the 12 recovery words: verify
+ * the directory log from genesis, open the recovery credential the words belong to
+ * (bound to this account's root and to its own approval op), unwrap the keyring with
+ * it, and approve THIS browser as the recovery credential (a signed log op). The
+ * approval carries a pair_mac under this browser's own pairing code, so the normal
+ * install path then verifies it and pins the root. Fails closed: wrong words, another
+ * account's words, a tampered blob or a revoked recovery key install nothing.
+ */
+export async function restoreWithRecoveryKey(words: string[]): Promise<RecoveryRestoreResult> {
+  const c = ctx;
+  if (!c?.identity) throw new RecoveryKeyError('This browser has no device identity yet');
+  const identity = c.identity;
+  const kv = d().kv;
+  const self = await d().api.fetchVaultSelf(deviceSignerContext()!);
+  if (self.status !== 'pending') throw new RecoveryKeyError('Only a browser waiting to be approved can be restored with a recovery key');
+  const pending = await loadPendingCode(c);
+  if (!pending || Date.now() > pending.expiresAt) throw new RecoveryKeyError('This browser\'s pairing request expired; pair again, then use the recovery key');
+  const dir = await d().api.fetchVaultDirectory(deviceSignerContext() ?? undefined);
+  if (!dir) throw new RecoveryKeyError('The vault directory is gone; a recovery key cannot restore it');
+  const chain = await verifyDirectory(dir, c.userId, await loadPins(kv, c.userId));
+  const cred = await openRecoveryKey(words, chain);
+  const credSigner: vaultApi.VaultSignerContext = { userId: c.userId, signer: { deviceId: cred.deviceId, signPrivateKey: cred.signPrivateKey } };
+  const credSelf = await d().api.fetchVaultSelf(credSigner);
+  if (credSelf.status !== 'approved' || !credSelf.wrap) throw new RecoveryKeyError('The recovery key is not approved any more');
+  const parsed = await openVerifiedWrap(credSelf.wrap, { userId: c.userId, recipientDeviceId: cred.deviceId, recipientEcdhPrivate: cred.ecdhPrivateKey, chain });
+  let bytes: Uint8Array | null = null;
+  try {
+    bytes = serializeKeyringBytes(parsed);
+    const label = d().label(identity);
+    const keys = await derivePairKeys(pending.code);
+    const me = {
+      device_id: identity.deviceId, sign_public_key: identity.signPub, ecdh_public_key: identity.ecdhPub,
+      sign_alg: identity.signAlg, wrap_alg: identity.wrapAlg, label, fingerprint: identity.fingerprint, register_statement: '',
+    };
+    const body = await buildBrowserApproval(asApproverIdentity(cred), chain, me, keys, label, bytes);
+    await d().api.postApproveBrowser(identity.deviceId, body, credSigner);
+  } finally {
+    bytes?.fill(0);
+    for (const e of parsed.entries) e.key.fill(0);
+  }
+  await refreshDeviceVault('recovery-restore');
+  const otherDevices = [...chain.trusted.values()]
+    .filter((t) => t.kind !== 'recovery' && t.device_id !== identity.deviceId)
+    .map((t) => ({ deviceId: t.device_id, kind: t.kind, label: t.label || t.device_id }));
+  return { otherDevices };
 }

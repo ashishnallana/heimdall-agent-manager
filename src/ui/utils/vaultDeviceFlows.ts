@@ -211,7 +211,9 @@ export async function buildRevocation(
   if (targetId === approver.deviceId) throw new FlowRefused('This device cannot revoke itself');
   const target = chain.trusted.get(targetId);
   if (!target) throw new FlowRefused('That device is not approved');
-  if (kindPolicy(target.kind).countsAsApprover && remainingApprovers(chain, targetId).length === 0) throw new FlowRefused('Refusing to revoke the last approver');
+  if (kindPolicy(target.kind).countsAsApprover && remainingApprovers(chain, targetId, approver.deviceId).length === 0) {
+    throw new FlowRefused('Refusing to revoke the only other approver: create a recovery key first');
+  }
   const next = nextEpochKeyringBytes(currentKeyringBytes, chain.userId);
   try {
     const epoch = chain.currentEpoch + 1;

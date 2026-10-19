@@ -306,6 +306,19 @@ export function validateRecoveryWords(words: string[]): boolean {
   return checksumBits === expectedChecksumBits;
 }
 
+/**
+ * The 128-bit entropy of a valid 12-word BIP-39 mnemonic (checksum verified). Throws
+ * on anything else. The caller zeroes the result.
+ */
+export function recoveryWordsToEntropy(words: string[]): Uint8Array {
+  if (!validateRecoveryWords(words)) throw new Error('These are not 12 valid recovery words');
+  let bits = '';
+  for (const word of words) bits += (wordToBip39IndexMap.get(word.trim().toLowerCase()) as number).toString(2).padStart(11, '0');
+  const entropy = new Uint8Array(RECOVERY_ENTROPY_BYTES);
+  for (let i = 0; i < RECOVERY_ENTROPY_BYTES; i++) entropy[i] = parseInt(bits.slice(i * 8, (i + 1) * 8), 2);
+  return entropy;
+}
+
 /** Thrown for a token that claims to be v2 but is not exactly canonical. */
 export class VaultEnvelopeFormatError extends Error {
   constructor(reason: string) {

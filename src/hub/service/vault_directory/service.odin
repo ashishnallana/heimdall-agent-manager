@@ -878,12 +878,13 @@ revoke_prepare :: proc(svc: ^Service, in_: Revoke_Input) -> (Revoke_Plan, domain
 	// unreachable; what it protects against is ending with a single approver and no
 	// recovery key (losing that one device would then lock the account out). With a
 	// recovery key the revoke is allowed: the recovery key counts.
+	// Only an approver-capable target can be "the last approver" (a bridge never is).
 	remaining_approvers := 0
 	for d in devices {
 		if d.device_id == target.device_id || d.device_id == in_.signer.device_id || d.status != .Approved do continue
 		if domain.vault_kind_policy(d.kind).counts_as_approver do remaining_approvers += 1
 	}
-	if remaining_approvers == 0 do return {}, domain.vault_reason_error(.Conflict, "last_approver", "revoking this device would leave this device as the only one able to approve; create a recovery key first")
+	if domain.vault_kind_policy(target.kind).counts_as_approver && remaining_approvers == 0 do return {}, domain.vault_reason_error(.Conflict, "last_approver", "revoking this device would leave this device as the only one able to approve; create a recovery key first")
 
 	new_epoch := dir.current_epoch + 1
 	new_epoch_s := i64_str(new_epoch)

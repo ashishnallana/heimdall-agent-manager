@@ -158,6 +158,19 @@ export async function postApproveBrowser(deviceId: string, body: BrowserApproval
   return vaultRequest('POST', `/vault/devices/${encodeURIComponent(deviceId)}/approve`, { body, signed });
 }
 
+/** A recovery credential: its signed approve op, keyring wrap and sealed recovery blob. */
+export interface RecoveryKeyBody {
+  expected_version: number;
+  statement: string;
+  signature: unknown;
+  wrap: SignedKeyringWrap;
+  recovery_blob: string;
+}
+
+export async function postRecoveryKey(body: RecoveryKeyBody, signed: VaultSignerContext): Promise<{ directory_version: number; device_id: string }> {
+  return vaultRequest('POST', '/vault/devices/recovery', { body, signed });
+}
+
 export interface BridgeApprovalBody {
   pair_lookup: string;
   approve: boolean;

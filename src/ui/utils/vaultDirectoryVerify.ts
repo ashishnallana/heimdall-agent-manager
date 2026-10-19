@@ -46,6 +46,8 @@ const utf8 = new TextEncoder();
 export interface DirectoryDevice {
   device_id: string;
   kind: string;
+  /** Recovery credentials only: the sealed recovery blob (opens with the 12 words). */
+  recovery_blob?: string;
   label?: string;
   fingerprint?: string;
   status: 'pending' | 'approved' | 'revoked' | string;
@@ -411,8 +413,20 @@ export function wrapRecipients(chain: VerifiedChain): VerifiedDevice[] {
 }
 
 /** Approver-capable devices that remain after removing `excludeId`. */
-export function remainingApprovers(chain: VerifiedChain, excludeId: string): VerifiedDevice[] {
-  return [...chain.trusted.values()].filter((d) => d.device_id !== excludeId && kindPolicy(d.kind).countsAsApprover);
+/**
+ * Approver-capable devices (browsers, recovery keys) that remain trusted besides
+ * `excludeId` (the revoke target) and `signerId` (the device that would sign the
+ * revoke). The last-approver guard (hub revoke_prepare mirrors it): revoking an
+ * approver is refused when this is empty -- the signer would be the only approver and
+ * no recovery key would remain.
+ */
+export function remainingApprovers(chain: VerifiedChain, excludeId: string, signerId = ''): VerifiedDevice[] {
+  return [...chain.trusted.values()].filter((d) => d.device_id !== excludeId && d.device_id !== signerId && kindPolicy(d.kind).countsAsApprover);
+}
+
+/** Chain-trusted recovery credentials (kind `recovery`). */
+export function trustedRecoveryKeys(chain: VerifiedChain): VerifiedDevice[] {
+  return [...chain.trusted.values()].filter((d) => d.kind === 'recovery');
 }
 
 // ── chain proof for bridges ──────────────────────────────────────────────────
