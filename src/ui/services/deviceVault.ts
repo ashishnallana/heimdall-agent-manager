@@ -73,6 +73,8 @@ interface Ctx {
   pollTimer: ReturnType<typeof setInterval> | null;
   seq: number;
   lastPendingIds: Set<string>;
+  /** M1 freshness guard tripped: automatic bridge key delivery and hint revokes pause. */
+  staleHead: boolean;
 }
 
 let deps: DeviceVaultDeps | null = null;
@@ -177,16 +179,81 @@ async function publishChain(chain: VerifiedChain, dir: VaultDirectory): Promise<
   // later "no directory" can be told apart from a reset this browser saw coming (M2).
   const reset = dir.reset?.due_at ? dir.reset : null;
   await recordObservedReset(d().kv, ctx.userId, reset ? { requested_at: String(reset.requested_at ?? ''), due_at: String(reset.due_at), head_seq: chain.version } : null);
+  const freshness = await noteHeadFreshness(ctx.userId, chain);
+  if (!ctx) return;
+  ctx.staleHead = freshness.stale;
   ctx.dispatch(deviceVaultDirectoryVerified({
     accountFingerprint: await accountFingerprint(chain.rootSignPub),
     currentEpoch: chain.currentEpoch,
     directoryVersion: chain.version,
+    headHash: chain.headHash.slice(0, 12),
+    staleHead: freshness.stale,
     reset: resetFrom(dir),
     pendingDevices: pendingFrom(chain),
   }));
   // Hub retirement hints for trusted bridges: an approved device with its keyring
   // installed signs their real revoke (rate-limited, see scheduleHintRevocation).
-  if (chain.retiredHints.length > 0 && getKeyringSession()) scheduleHintRevocation(chain);
+  if (chain.retiredHints.length > 0 && getKeyringSession() && !ctx.staleHead) scheduleHintRevocation(chain);
+}
+
+// ── M1 freshness guard ──────────────────────────────────────────────────────
+//
+// A device that missed a revocation can be shown the old head by a hostile hub (it
+// still extends the pins). Before AUTOMATIC actions (bridge key delivery, hint
+// revokes) this device wants evidence it is current: when its verified head has not
+// changed for more than STALE_HEAD_MS AND it had no successful directory fetch for
+// more than OFFLINE_GAP_MS before this one, it marks the head stale and pauses the
+// automatic actions until the head advances or the user confirms (after comparing the
+// log head with another approved device). Manual "Send key" stays available.
+
+export const STALE_HEAD_MS = 7 * 24 * 60 * 60 * 1000;
+export const OFFLINE_GAP_MS = 24 * 60 * 60 * 1000;
+
+export interface HeadFreshness {
+  head_seq: number;
+  head_hash: string;
+  /** When this device first saw this head (or the user last confirmed it). */
+  head_changed_at: number;
+  /** Last successful verified directory fetch. */
+  last_fetch_at: number;
+  stale: boolean;
+}
+
+const headFreshnessKey = (userId: string) => `head-freshness:${userId}`;
+
+/** Pure: the freshness record after a verified fetch of `head` at `now`. */
+export function evaluateHeadFreshness(prev: HeadFreshness | null, head: { seq: number; hash: string }, now: number): HeadFreshness {
+  if (!prev || prev.head_seq !== head.seq || prev.head_hash !== head.hash) {
+    return { head_seq: head.seq, head_hash: head.hash, head_changed_at: now, last_fetch_at: now, stale: false };
+  }
+  const stale = prev.stale || (now - prev.head_changed_at > STALE_HEAD_MS && now - prev.last_fetch_at > OFFLINE_GAP_MS);
+  return { ...prev, last_fetch_at: now, stale };
+}
+
+async function loadHeadFreshness(userId: string): Promise<HeadFreshness | null> {
+  const v = await d().kv.get(headFreshnessKey(userId)) as HeadFreshness | undefined;
+  return v && Number.isSafeInteger(v.head_seq) && typeof v.head_hash === 'string' && Number.isFinite(v.head_changed_at) && Number.isFinite(v.last_fetch_at) ? v : null;
+}
+
+async function noteHeadFreshness(userId: string, chain: VerifiedChain, now = Date.now()): Promise<HeadFreshness> {
+  const next = evaluateHeadFreshness(await loadHeadFreshness(userId), { seq: chain.version, hash: chain.headHash }, now);
+  await d().kv.put(headFreshnessKey(userId), next);
+  return next;
+}
+
+/**
+ * The user compared this device's log head with another approved device and they
+ * match: re-confirm the head (resumes automatic actions until it goes stale again).
+ */
+export async function confirmDirectoryHeadCurrent(): Promise<void> {
+  const c = ctx;
+  if (!c) return;
+  const { chain } = await fetchVerifiedChain();
+  const now = Date.now();
+  const rec: HeadFreshness = { head_seq: chain.version, head_hash: chain.headHash, head_changed_at: now, last_fetch_at: now, stale: false };
+  await d().kv.put(headFreshnessKey(c.userId), rec);
+  c.staleHead = false;
+  await fetchVerifiedChain(); // re-publishes with the confirmed head
 }
 
 /** Start (or restart) the device vault for `userId`. Idempotent for the same user while running. */
@@ -194,7 +261,7 @@ export async function bootDeviceVault(userId: string, dispatch: Dispatch): Promi
   if (ctx && ctx.userId === userId && ctx.identity) return refreshDeviceVault('boot');
   stopPolling();
   if (ctx && ctx.userId !== userId) purgeKeys(dispatch);
-  ctx = { userId, dispatch, identity: null, pendingInstall: null, revokedVerified: false, pollTimer: null, seq: 0, lastPendingIds: new Set() };
+  ctx = { userId, dispatch, identity: null, pendingInstall: null, revokedVerified: false, pollTimer: null, seq: 0, lastPendingIds: new Set(), staleHead: false };
   dispatch(deviceVaultStatusChanged({ status: 'initializing', userId }));
   if (!isVaultSupported() || (typeof indexedDB === 'undefined' && !deps?.kv)) {
     dispatch(deviceVaultStatusChanged({ status: 'unsupported', userId }));
@@ -588,14 +655,22 @@ function bridgeDeps(chain: VerifiedChain): BridgeDeliveryDeps | null {
 }
 
 /** Re-unseal every online bridge whose identity the chain approves. */
-export async function unsealApprovedBridges(only?: readonly string[]): Promise<BridgeFanoutResult> {
+export async function unsealApprovedBridges(only?: readonly string[], opts: { automatic?: boolean } = {}): Promise<BridgeFanoutResult> {
   const b = d().bridges;
   if (!b) return { succeeded: [], failed: [] };
   const { chain } = await fetchVerifiedChain();
-  const deps2 = bridgeDeps(chain)!;
   const online = only ? [...only] : await b.listOnlineBridgeIds();
+  if (opts.automatic && ctx?.staleHead) return pausedDelivery(online);
+  const deps2 = bridgeDeps(chain)!;
   const targets = online.filter((id) => trustedBridgeById(chain, id));
   return deliverKeyringToBridges(targets, chain, deps2);
+}
+
+export const STALE_HEAD_PAUSE_MESSAGE = "Automatic key delivery is paused: this device's device log may be out of date (see the banner). Send the key manually or confirm the log head.";
+
+/** M1: automatic delivery skipped; reported as failures so "Send key" is offered. */
+function pausedDelivery(ids: readonly string[]): BridgeFanoutResult {
+  return { succeeded: [], failed: ids.map((bridgeId) => ({ bridgeId, error: STALE_HEAD_PAUSE_MESSAGE })) };
 }
 
 // ── automatic bridge key delivery ───────────────────────────────────────────
@@ -636,13 +711,17 @@ export function autoUnsealLockedBridges(candidateIds: readonly string[]): Promis
     try {
       const b = d().bridges;
       if (!b) return;
+      if (ctx?.staleHead) {
+        ctx.dispatch(bridgeKeyDeliveryReported(pausedDelivery(candidateIds)));
+        return;
+      }
       await sleep(jitter(400, 3000));
       const still = new Set(await b.listOnlineLockedBridgeIds());
       const now = Date.now();
       const targets = candidateIds.filter((id) => still.has(id) && now - (lastAutoAttempt.get(id) ?? 0) >= AUTO_UNSEAL_COOLDOWN_MS && takeLease(id));
       if (targets.length === 0) return;
       for (const id of targets) lastAutoAttempt.set(id, now);
-      const result = await unsealApprovedBridges(targets);
+      const result = await unsealApprovedBridges(targets, { automatic: true });
       ctx?.dispatch(bridgeKeyDeliveryReported(result));
     } catch (err) {
       console.warn('[vault] automatic bridge key delivery failed:', err);
@@ -749,6 +828,7 @@ export async function revokeRetiredHint(): Promise<{ revoked: string | null }> {
   const c = ctx;
   if (!c?.identity) return { revoked: null };
   const { chain } = await fetchVerifiedChain();
+  if (ctx !== c || c.staleHead) return { revoked: null }; // M1: no automatic revokes on a stale head
   const now = Date.now();
   const plan = planHintRevocation(chain.retiredHints, chain.trusted, await loadHintAttempts(c.userId), now);
   const save = () => d().kv.put(hintAttemptsKey(c.userId), plan.attempts);

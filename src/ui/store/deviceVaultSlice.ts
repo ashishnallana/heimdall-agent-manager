@@ -53,6 +53,13 @@ export interface DeviceVaultState {
   accountFingerprint: string;
   currentEpoch: number;
   directoryVersion: number;
+  /** First hex chars of the verified log head hash (compare across devices). */
+  headHash: string;
+  /**
+   * M1 freshness guard: the verified head is old and this device was offline before
+   * the fetch; automatic bridge key delivery and hint revokes are paused.
+   */
+  staleHead: boolean;
   reset: DeviceVaultReset | null;
   /** Pending devices of the account (for the approval toast / attention entry). */
   pendingDevices: PendingDeviceSummary[];
@@ -84,6 +91,8 @@ export const initialDeviceVaultState: DeviceVaultState = {
   accountFingerprint: '',
   currentEpoch: 0,
   directoryVersion: 0,
+  headHash: '',
+  staleHead: false,
   reset: null,
   pendingDevices: [],
   errorCode: '',
@@ -120,7 +129,7 @@ export const deviceVaultSlice = createSlice({
       state.deviceId = action.payload.deviceId;
       state.fingerprint = action.payload.fingerprint;
     },
-    deviceVaultDirectoryVerified(state, action: PayloadAction<{ accountFingerprint: string; currentEpoch: number; directoryVersion: number; reset: DeviceVaultReset | null; pendingDevices: PendingDeviceSummary[] }>) {
+    deviceVaultDirectoryVerified(state, action: PayloadAction<{ accountFingerprint: string; currentEpoch: number; directoryVersion: number; headHash: string; staleHead: boolean; reset: DeviceVaultReset | null; pendingDevices: PendingDeviceSummary[] }>) {
       Object.assign(state, action.payload);
     },
     deviceVaultBusy(state, action: PayloadAction<boolean>) {

@@ -152,3 +152,30 @@ test('L1: an attempted hint is retried after backoff and dropped only once no lo
   const plan = dv.planHintRevocation([], new Set(['b2']), { ...once, b2: { attempts: 2, lastAt: T0 } }, T0);
   assert.deepEqual(Object.keys(plan.attempts), ['b2']);
 });
+
+// ── M1: stale-head freshness guard ──────────────────────────────────────────
+
+test('M1: an old head seen after a long offline gap is stale until it advances', () => {
+  const DAY = 86_400_000;
+  const T0 = 1_700_000_000_000;
+  const h = { seq: 5, hash: 'aa'.repeat(32) };
+  const first = dv.evaluateHeadFreshness(null, h, T0);
+  assert.equal(first.stale, false);
+  // Online daily for 8 days, head unchanged: not stale (no offline gap).
+  let rec = first;
+  for (let i = 1; i <= 8; i++) rec = dv.evaluateHeadFreshness(rec, h, T0 + i * DAY - 1000);
+  assert.equal(rec.stale, false);
+  // Offline for 2 days, head 10 days old: stale...
+  rec = dv.evaluateHeadFreshness(rec, h, T0 + 10 * DAY);
+  assert.equal(rec.stale, true);
+  // ...and it stays stale on later (frequent) fetches of the same head...
+  rec = dv.evaluateHeadFreshness(rec, h, T0 + 10 * DAY + 1000);
+  assert.equal(rec.stale, true);
+  // ...until the head advances.
+  rec = dv.evaluateHeadFreshness(rec, { seq: 6, hash: 'bb'.repeat(32) }, T0 + 10 * DAY + 2000);
+  assert.equal(rec.stale, false);
+  // A long offline gap with a RECENT head is not stale.
+  const recent = dv.evaluateHeadFreshness(null, h, T0);
+  assert.equal(dv.evaluateHeadFreshness(recent, h, T0 + 3 * DAY).stale, false);
+  assert.ok(dv.STALE_HEAD_MS > dv.OFFLINE_GAP_MS);
+});

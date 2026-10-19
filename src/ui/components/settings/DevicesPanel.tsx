@@ -138,6 +138,7 @@ export default function DevicesPanel() {
         <h2 className="text-base font-semibold text-primary">Account fingerprint</h2>
         <p className="text-xs text-muted">A new device shows this before it receives keys. Compare them.</p>
         <code data-debug-id="settings-devices-account-fingerprint" className="mt-1 inline-block rounded bg-neutral-soft px-2 py-1 font-mono tracking-wider text-primary">{state.accountFingerprint || '…'}</code>
+        <p data-debug-id="settings-devices-log-head" className="mt-1 text-xs text-muted">Device log head #{state.directoryVersion} · <code className="font-mono text-primary">{state.headHash || '…'}</code></p>
       </section>
       {state.reset ? (
         <div data-debug-id="settings-devices-reset-alert">
