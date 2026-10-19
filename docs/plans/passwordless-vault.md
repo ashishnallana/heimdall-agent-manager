@@ -8,7 +8,7 @@ Proposal: https://claude.ai/artifact/SkGGa5tdZEnW92UbKxkXVL
 1. **No master password, no vault lock/unlock UI.** Each device generates its own keys; the account keyring is wrapped to every approved device. Remove (do not hide) password setup, unlock, lock and onboarding screens and state.
 2. **One approval surface.** A notification on approved devices plus the page `/device/add?code=…` where a logged-in user on an approved device approves a pending device by its device code. The same flow enrolls **new bridges** and **new browser logins**. Electron is out of scope.
 3. **Device list with revoke.** Settings lists every connected device (browsers, bridges, recovery) with label, kind, fingerprint, approved-by and last-seen. Any device can be revoked **except the current device** (enforced in UI and by the hub). Revoking the last approver-capable device is refused unless a recovery key exists. Revoke rotates to a new epoch and re-unseals the remaining bridges.
-4. **No backward compatibility.** v1 envelopes, PBKDF2, `user_vaults` and password migration are deleted. Dev data may be wiped.
+4. **No backward compatibility.** v1 envelopes, PBKDF2, `user_vaults`, password migration, "vault not configured" plaintext modes and any legacy-format fallbacks are deleted, not shimmed. Dev data may be wiped; old bridges re-enroll.
 5. **Production security bar — no shortcuts.** This ships to real users.
 
 ## Engineering rules for every phase
