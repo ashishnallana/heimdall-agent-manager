@@ -33,8 +33,7 @@ if [[ -z "${HAM_CTL:-}" ]]; then
   for candidate in \
     "$REPO/.heimdall/bin/ham-ctl" \
     /tmp/heimdall-bridge-local/instances/*/.heimdall/bin/ham-ctl \
-    "$HOME/.nix-profile/bin/ham-ctl" \
-    "/usr/local/google/home/tanmayvijay/.nix-profile/bin/ham-ctl"; do
+    "$HOME/.nix-profile/bin/ham-ctl"; do
     if [[ -x "$candidate" ]]; then
       HAM_CTL="$candidate"
       break
@@ -98,9 +97,10 @@ bridges = d.get("data",{}).get("bridges",[])
 match = [b["bridge"]["bridge_id"] for b in bridges if b.get("origin") == "hub" and b.get("bridge",{}).get("status") == "online" and "jetski" in str(b.get("bridge",{}).get("capabilities",[]))]
 if not match:
   match = [b["bridge"]["bridge_id"] for b in bridges if b.get("origin") == "hub" and b.get("bridge",{}).get("status") == "online"]
-print(match[0] if match else "brg_18d03379a7d6d47b")
+print(match[0] if match else "")
 ')"
 fi
+[[ -n "$BRIDGE" ]] || die "no online hub bridge found; set HEIMDALL_BRIDGE_ID"
 ENDPOINT_PORT="$("$HAM_CTL" bridge list --scope configured | json 'print(d["data"]["bridges"][0]["local_endpoint_port"])')"
 
 EXTRA=()
@@ -174,6 +174,14 @@ if (( ! ready )); then
 fi
 
 # --- 4. verify preview response --------------------------------------------
+# The Hub builds preview_url from its own config: <preview_origin>/p/<sid>/ or, in legacy
+# mode, <ui_origin>/api/v1/preview/<sid>/. Never construct it here; read it back.
+PREVIEW_URL="$("$HAM_CTL" shell show "$SID" | json 'print(d.get("data",{}).get("data",{}).get("session",{}).get("preview_url",""))' 2>/dev/null || true)"
+EXPECTED_PREFIX="/api/v1/preview/$SID/"
+if [[ -n "$PREVIEW_URL" ]]; then
+  EXPECTED_PREFIX="$(python3 -c 'import sys,urllib.parse; print(urllib.parse.urlsplit(sys.argv[1]).path)' "$PREVIEW_URL")"
+fi
+
 log "verifying preview HTML and guard"
 html="$(curl -s "$BASE/")"
 
@@ -183,16 +191,20 @@ else
   printf '  FAIL %-28s missing guard script\n' "slash guard"
 fi
 
-if echo "$html" | grep -q "/api/v1/preview/$SID/"; then
-  printf '  ok   %-28s Vite base configured\n' "base prefix"
+if echo "$html" | grep -qF "$EXPECTED_PREFIX"; then
+  printf '  ok   %-28s Vite base %s\n' "base prefix" "$EXPECTED_PREFIX"
 else
-  printf '  WARN %-28s base prefix not seen in initial HTML\n' "base prefix"
+  printf '  WARN %-28s %s not seen in initial HTML\n' "base prefix" "$EXPECTED_PREFIX"
 fi
 
 log "dev preview is ready!"
 echo "  Session ID:      $SID"
 echo "  Bridge Local:    http://127.0.0.1:$ENDPOINT_PORT/proxy/$SID/#/"
-echo "  Remote Preview:  https://heimdall.mundus.in/api/v1/preview/$SID/#/"
+if [[ -n "$PREVIEW_URL" ]]; then
+  echo "  Remote Preview:  ${PREVIEW_URL}#/"
+else
+  echo "  Remote Preview:  (hub returned no preview_url; check: $HAM_CTL shell show $SID)"
+fi
 echo ""
 echo "Stream logs with:"
 echo "  $HAM_CTL shell log $SID"
