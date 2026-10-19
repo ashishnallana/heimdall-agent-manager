@@ -856,6 +856,60 @@ revoke_prepare :: proc(svc: ^Service, in_: Revoke_Input) -> (Revoke_Plan, domain
 	}, domain.Domain_Error{}
 }
 
+// ── Rotate (re-key without a revocation) ────────────────────────────────────
+// An approver advances the account to epoch current+1 and wraps the new keyring to
+// EXACTLY the approved wrap-receiving devices. Used after the hub retired an identity
+// (rotation_recommended): a bridge revoked from bridge settings may still hold the
+// current keyring. Same checks as the rotation half of revoke; CAS on the version.
+
+Rotate_Input :: struct {
+	user_id:          string,
+	expected_version: i64,
+	epoch_statement:  string,
+	epoch_signature:  string,
+	wraps:            []Wrap_Input,
+	signer:           domain.Vault_Device,
+}
+
+rotate :: proc(svc: ^Service, in_: Rotate_Input) -> (i64, domain.Domain_Error) {
+	dir, found, err := iface.vault_get_directory(svc.repo, in_.user_id)
+	if err.code != .None do return 0, err
+	if !found do return 0, not_configured_error()
+	if in_.expected_version != dir.version do return 0, domain.vault_conflict_error(dir.version)
+	devices, derr := iface.vault_list_devices(svc.repo, in_.user_id)
+	if derr.code != .None do return 0, derr
+
+	version := i64_str(dir.version)
+	new_epoch := dir.current_epoch + 1
+	est, eerr := parse_signed_statement(in_.epoch_statement, in_.epoch_signature, "epoch", in_.user_id, version, in_.signer)
+	if eerr.code != .None do return 0, eerr
+	if est.epoch != i64_str(new_epoch) do return 0, invalid("epoch must be current+1")
+	if len(est.epoch_commit) != vault.EPOCH_COMMIT_HEX_CHARS || !vault.is_lower_hex(est.epoch_commit) || !subject_empty(&est) do return 0, invalid("malformed epoch statement")
+
+	now := platform.clock_now(svc.clock)
+	expected := 0
+	for d in devices {
+		if d.status == .Approved && domain.vault_kind_policy(d.kind).receives_wrap do expected += 1
+	}
+	if len(in_.wraps) != expected do return 0, invalid("wraps must cover exactly the approved devices")
+	rows := make([]domain.Vault_Wrap_Row, len(in_.wraps), context.temp_allocator)
+	for w, i in in_.wraps {
+		recipient, r_has := find_device(devices, w.wrap.recipient_device_id)
+		if !r_has || recipient.status != .Approved || !domain.vault_kind_policy(recipient.kind).receives_wrap {
+			return 0, invalid("a wrap is addressed to a device that must not receive one")
+		}
+		for j in 0 ..< i do if rows[j].device_id == recipient.device_id do return 0, invalid("duplicate wrap recipient")
+		row, werr := check_wrap(svc, w, in_.user_id, recipient, dir.version, new_epoch, in_.signer, now)
+		if werr.code != .None do return 0, werr
+		rows[i] = row
+	}
+	return iface.vault_commit(svc.repo, domain.Vault_Directory_Commit{
+		user_id = in_.user_id, expected_version = in_.expected_version, now = now,
+		new_epoch = new_epoch, epoch_statement = in_.epoch_statement, epoch_signature = in_.epoch_signature,
+		wraps = rows, replace_all_wraps = true,
+	})
+}
+
 // ── Owner reset ─────────────────────────────────────────────────────────────
 // The only way to replace a directory's root. It is requested from an interactive
 // browser session (Trusted_Proxy; the handler enforces it), and it is DELAYED: the

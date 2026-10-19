@@ -453,6 +453,37 @@ vault_revoke_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	return respond_success(strings.concatenate({`{"directory_version":`, vd_itoa(res.version), `,"bridge_credentials_revoked":`, "true" if res.target.bridge_id != "" else "false", "}"}, context.temp_allocator), req.request_id, auth_ctx_server_time(req))
 }
 
+// ── POST /api/v1/vault/directory/rotate ──────────────────────────────────────
+// {expected_version, epoch_statement, epoch_signature, wraps:[…]}. Approver-signed.
+// Advances to epoch current+1 without revoking anything (after a hub retirement).
+vault_rotate_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Vault_Directory_Handlers)(ctx)
+	auth, ok, resp := require_vault_user(h, req)
+	if !ok do return resp
+	signer, serr := vd.verify_request(h.vault, auth.user_id, signed_request(req), .Approver)
+	if serr.code != .None do return respond_error(serr, req.request_id)
+	o, parsed := body_object(req)
+	if !parsed do return bad_request(req, "body must be a JSON object")
+	version, v_ok := obj_i64(o, "expected_version")
+	if !v_ok do return bad_request(req, "expected_version is required")
+	arr, is_arr := o["wraps"].(json.Array)
+	if !is_arr do return bad_request(req, "wraps must be an array")
+	wraps := make([]vd.Wrap_Input, len(arr), context.temp_allocator)
+	for v, i in arr {
+		w, sig, w_ok := vault.wrap_from_value(v, context.temp_allocator)
+		if !w_ok do return bad_request(req, "a wrap is malformed")
+		wraps[i] = vd.Wrap_Input{wrap = w, signature = sig}
+	}
+	new_version, err := vd.rotate(h.vault, vd.Rotate_Input{
+		user_id = auth.user_id, expected_version = version,
+		epoch_statement = obj_str(o, "epoch_statement"), epoch_signature = obj_sig(o, "epoch_signature"),
+		wraps = wraps, signer = signer,
+	})
+	if err.code != .None do return respond_error(err, req.request_id)
+	publish(h, auth.user_id, signer.device_id, "rotated")
+	return respond_success(version_json(new_version), req.request_id, auth_ctx_server_time(req))
+}
+
 // vault_revoke_bridge_credentials kills every credential of bridge_id: an enrolled
 // bridge is revoked (all token families, live socket closed), a still-pending
 // enrollment is rolled back. A bridge row that no longer exists has nothing left to
