@@ -484,11 +484,19 @@ create_chain :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, 
 }
 
 update_chain :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, chain_id: domain.Task_Chain_ID, input: Update_Chain_Input) -> (domain.Task_Chain, bool, domain.Domain_Error) {
+ v := verb_begin(service)
+ out, ok, err := update_chain_impl(service, auth, chain_id, input)
+ if cerr := verb_end(&v, ok); cerr.code != .None do return {}, false, cerr
+ return out, ok, err
+}
+
+update_chain_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, chain_id: domain.Task_Chain_ID, input: Update_Chain_Input) -> (domain.Task_Chain, bool, domain.Domain_Error) {
 	chain, ok, err := get_chain(service, auth, chain_id)
 	if !ok do return domain.Task_Chain{}, false, err
 	if auth.kind == .Instance_Token && !is_chain_coordinator(service, chain, auth.agent_instance_id) {
 		return domain.Task_Chain{}, false, domain.domain_error(.Forbidden, "only chain coordinator can perform this action")
 	}
+	if input.status != "" && chain_status_from_string(input.status) == .Completed do return {}, false, domain.domain_error(.Validation_Failed, "use complete with expected_work_revision and final summary")
 	if input.title != "" do chain.title = input.title
 	if input.title_source == "agent" || input.title_source == "user" || input.title_source == "default" do chain.title_source = input.title_source
 	// has_description allows explicit clearing (pass ""); a bare non-empty
@@ -509,6 +517,9 @@ update_chain :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, 
 	closed_status: domain.Task_Chain_Status
 	if input.status != "" {
 		st := chain_status_from_string(input.status)
+        if st == .Cancelled && service.engine != nil {
+         if err := taskv2.work_require_chain_merges_settled(service.engine, chain); err.code != .None do return {}, false, err
+        }
 		if st != chain.status {
 			if !valid_chain_transition(chain.status, st) do return domain.Task_Chain{}, false, domain.domain_error(.Conflict, "invalid chain status transition")
 			chain.status = st
@@ -650,6 +661,9 @@ change_chain_status_impl :: proc(service: ^Taskchain_Service, auth: contracts.Au
 		return domain.Task_Chain{}, false, domain.domain_error(.Forbidden, "only chain coordinator can perform this action")
 	}
 	if chain.publish_state != .Published do return domain.Task_Chain{}, false, domain.domain_error(.Conflict, "draft chain has no execution status")
+ if next == .Cancelled && service.engine != nil {
+  if err := taskv2.work_require_chain_merges_settled(service.engine, chain); err.code != .None do return {}, false, err
+ }
 	if !valid_chain_transition(chain.status, next) do return domain.Task_Chain{}, false, domain.domain_error(.Conflict, "invalid chain status transition")
 	now := platform.clock_now(service.clock)
 	chain.status = next

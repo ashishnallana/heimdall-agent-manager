@@ -288,6 +288,7 @@ workflow_retry_in_uow :: proc(svc: ^Service, u: ^Uow, run_id: domain.Workflow_Ru
 	if strings.trim_space(reason) == "" do return {}, false, domain.domain_error(.Validation_Failed, "retry reason is required")
 	if wf.execution.state != "failed" && wf.execution.state != "cancelled" && wf.execution.state != "succeeded" do return {}, false, domain.domain_error(.Conflict, "only a terminal run can be retried")
 	if err := work_require_unconsumed_in_uow(svc, wf.chain_id, owner, domain.Work_Item_Ref{kind = domain.WORK_ITEM_WORKFLOW_RUN, id = string(run_id)}); err.code != .None do return {}, false, err
+	if err := workflow_require_merges_settled(svc, wf); err.code != .None do return {}, false, err
 	run := wf.run
 	run.current_execution_no += 1; run.revision += 1; run.updated_at = platform.clock_now(svc.clock)
 	_, eok, eerr := iface.taskchain_insert_workflow_execution(svc.repo, domain.Workflow_Run_Execution{
@@ -303,22 +304,30 @@ workflow_retry_in_uow :: proc(svc: ^Service, u: ^Uow, run_id: domain.Workflow_Ru
 	return saved, true, domain.Domain_Error{}
 }
 
-workflow_cancel :: proc(svc: ^Service, run_id: domain.Workflow_Run_ID, owner: domain.User_ID, actor: Actor, reason: string) -> (domain.Workflow_Run, bool, domain.Domain_Error) {
+workflow_cancel :: proc(svc: ^Service, run_id: domain.Workflow_Run_ID, owner: domain.User_ID, actor: Actor, reason: string, execution_no: int) -> (domain.Workflow_Run, bool, domain.Domain_Error) {
 	u, ok, err := begin_uow(svc)
 	if !ok do return {}, false, err
-	run, rok, rerr := workflow_cancel_in_uow(svc, &u, run_id, owner, actor, reason)
-	if rok do rok, rerr = after_chain_change(svc, &u, run.chain_id, owner, .Task_Cancelled)
+	target, _, _ := iface.taskchain_get_workflow_execution(svc.repo, run_id, execution_no, owner)
+	run, rok, rerr := workflow_cancel_in_uow(svc, &u, run_id, owner, actor, reason, execution_no)
+	if rok && target.state != "cancelled" do rok, rerr = after_chain_change(svc, &u, run.chain_id, owner, .Task_Cancelled)
 	_, cerr := end_uow(svc, &u, rok)
 	if !rok do return {}, false, rerr
 	if cerr.code != .None do return {}, false, cerr
 	return run, true, domain.Domain_Error{}
 }
 
-workflow_cancel_in_uow :: proc(svc: ^Service, u: ^Uow, run_id: domain.Workflow_Run_ID, owner: domain.User_ID, actor: Actor, reason: string) -> (domain.Workflow_Run, bool, domain.Domain_Error) {
+workflow_cancel_in_uow :: proc(svc: ^Service, u: ^Uow, run_id: domain.Workflow_Run_ID, owner: domain.User_ID, actor: Actor, reason: string, execution_no: int) -> (domain.Workflow_Run, bool, domain.Domain_Error) {
 	wf, ok, err := workflow_context(svc, run_id, owner)
 	if !ok do return {}, false, err
 	if _, ok, err := work_control_chain(svc, owner, actor, wf.chain_id); !ok do return {}, false, err
-	if wf.execution.state == "cancelled" do return wf.run, true, domain.Domain_Error{}
+    if execution_no <= 0 do return {}, false, domain.domain_error(.Validation_Failed, "execution_no is required")
+    target, exists, target_err := iface.taskchain_get_workflow_execution(svc.repo, run_id, execution_no, owner)
+    if !exists do return {}, false, target_err
+    // Retransmitting a cancellation of an old cancelled execution is harmless.
+    if target.state == "cancelled" do return wf.run, true, domain.Domain_Error{}
+    if execution_no != wf.execution.execution_no do return {}, false, domain.domain_error(.Conflict, "execution changed; refresh before cancelling")
+    if err := workflow_require_merges_settled(svc, wf); err.code != .None do return {}, false, err
+
 	if wf.execution.state == "succeeded" || wf.execution.state == "failed" do return {}, false, domain.domain_error(.Conflict, "run is already terminal; exclude it from final scope if appropriate")
 	if err := workflow_stop_tasks(svc, u, wf, actor, reason); err.code != .None do return {}, false, err
 	if err := workflow_set_state(svc, u, &wf, "cancelled", reason); err.code != .None do return {}, false, err
@@ -465,4 +474,32 @@ workflow_canonical_json :: proc(value: json.Value) -> string {
   if err != nil do return "null"
   return string(encoded)
  }
+}
+
+// Completion is durable before a merge job is queued; the outcome is durable
+// only after its bridge reply. Refuse generation changes throughout that window,
+// including offline/failed delivery. Recovery must settle it before retry.
+workflow_require_merges_settled :: proc(svc: ^Service, wf: Workflow_Context) -> domain.Domain_Error {
+ tasks, err := workflow_execution_tasks(svc, wf)
+ if err.code != .None do return err
+ for task in tasks {
+  if task.state != .Done do continue
+  events, err := iface.taskchain_list_events_by_task(svc.repo, task.task_id, task.owner_user_id)
+  if err.code != .None do return err
+  status := task_merge_status(svc, task)
+  if status.state != "none" && merge_pending(events) do return domain.domain_error(.Conflict, "workflow merges are unsettled; reconnect the bridge and settle merges before cancellation or retry", `{"code":"workflow_merge_pending"}`)
+ }
+ return domain.Domain_Error{}
+}
+
+// The chain-level cancel path uses the same fence before saving its status.
+work_require_chain_merges_settled :: proc(svc: ^Service, chain: domain.Task_Chain) -> domain.Domain_Error {
+ runs, err := iface.taskchain_list_workflow_runs(svc.repo, chain.chain_id, chain.owner_user_id)
+ if err.code != .None do return err
+ for run in runs {
+  wf, ok, err := workflow_context(svc, run.run_id, chain.owner_user_id)
+  if !ok do return err
+  if err := workflow_require_merges_settled(svc, wf); err.code != .None do return err
+ }
+ return domain.Domain_Error{}
 }

@@ -137,11 +137,23 @@ workflow_retry_fields :: proc(body: string) -> domain.Domain_Error {
 	return domain.Domain_Error{}
 }
 
+workflow_cancel_fields :: proc(body: string) -> domain.Domain_Error {
+ value, err := json.parse(body, allocator = context.temp_allocator)
+ if err != nil do return domain.domain_error(.Validation_Failed, "cancel body must be a JSON object")
+ object, valid := value.(json.Object)
+ if !valid do return domain.domain_error(.Validation_Failed, "cancel body must be a JSON object")
+ for key in object {
+  if key != "run_id" && key != "execution_no" && key != "reason" do return domain.domain_error(.Validation_Failed, "cancel accepts only run_id, execution_no and reason")
+ }
+ return domain.Domain_Error{}
+}
+
 workflow_cancel_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Taskchain_Handlers)(ctx)
 	auth, ok, resp := require_auth_any(h.auth, req)
 	if !ok do return resp
-	run, saved, err := taskv2.workflow_cancel(h.task_engine, domain.Workflow_Run_ID(path_part(req.path, 4)), domain.User_ID(auth.user_id), taskv2.actor_from_auth(auth), json_string(req.body, "reason"))
+	if err := workflow_cancel_fields(req.body); err.code != .None do return respond_error(err, req.request_id)
+	run, saved, err := taskv2.workflow_cancel(h.task_engine, domain.Workflow_Run_ID(path_part(req.path, 4)), domain.User_ID(auth.user_id), taskv2.actor_from_auth(auth), json_string(req.body, "reason"), jsonx.extract_int(req.body, "execution_no", 0, true))
 	if !saved do return respond_error(err, req.request_id)
 	body, _, _ := taskv2.workflow_status_json(h.task_engine, run.run_id, run.owner_user_id)
 	return respond_success(body, req.request_id, auth_ctx_server_time(req))
@@ -264,7 +276,8 @@ agent_action_workflow_cancel_handler :: proc(ctx: rawptr, req: Request) -> Respo
 	auth, inst, ok, resp := require_instance_action_auth(h, req)
 	if !ok do return resp
 	params := verbatim_params(req.body)
-	run, saved, err := taskv2.workflow_cancel(h.task_engine, domain.Workflow_Run_ID(json_string(params, "run_id")), inst.owner_user_id, taskv2.actor_from_auth(auth), json_string(params, "reason"))
+	if err := workflow_cancel_fields(params); err.code != .None do return respond_error(err, req.request_id)
+	run, saved, err := taskv2.workflow_cancel(h.task_engine, domain.Workflow_Run_ID(json_string(params, "run_id")), inst.owner_user_id, taskv2.actor_from_auth(auth), json_string(params, "reason"), jsonx.extract_int(params, "execution_no", 0, true))
 	if !saved do return respond_error(err, req.request_id)
 	body, _, _ := taskv2.workflow_status_json(h.task_engine, run.run_id, inst.owner_user_id)
 	return respond_success(body, req.request_id, auth_ctx_server_time(req))

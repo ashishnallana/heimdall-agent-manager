@@ -1035,7 +1035,25 @@ collect_upstream_stage_task_ids :: proc(
 workflow_validate_fleet :: proc(svc: ^Service, chain: domain.Task_Chain, brief: string) -> domain.Domain_Error {
  fleets, err := iface.taskchain_list_fleets_by_chain(svc.repo, chain.chain_id, chain.owner_user_id)
  if err.code != .None do return err
+ if solo, implicit := implicit_solo_worker(svc, chain, fleets); implicit {
+  copy := make([dynamic]domain.Task_Chain_Fleet, context.temp_allocator)
+  append(&copy, ..fleets); append(&copy, solo); fleets = copy[:]
+ }
  assignee := brief_assignee(brief)
+ worker := false
+ coordinator := chain_coordinator_agent_id(svc, chain)
+ for fleet in fleets {
+  if fleet.capacity <= 0 || !fleet_row_has_role(fleet, domain.FLEET_ROLE_WORKER) do continue
+  if fleet.agent_id == coordinator && !chain_is_solo(svc, chain) do continue
+  if assignee == "" || strings.contains(assignee, "{{") || fleet.agent_id == assignee do worker = true
+ }
+ if !worker do return domain.domain_error(.Validation_Failed, "configure an eligible worker fleet row with positive capacity before starting the run")
+ for reviewer in brief_named_reviewers(brief, context.temp_allocator) {
+  if strings.contains(reviewer, "{{") do continue
+  covered := false
+  for fleet in fleets do if fleet.agent_id == reviewer && fleet.agent_id != coordinator && fleet.capacity > 0 do covered = true
+  if !covered do return domain.domain_error(.Validation_Failed, fmt.tprintf("configure eligible fleet row for named workflow reviewer %s before starting the run", reviewer))
+ }
  if assignee != "" && !strings.contains(assignee, "{{") {
   covered := false
   for fleet in fleets do if fleet.agent_id == assignee && fleet_row_has_role(fleet, domain.FLEET_ROLE_WORKER) do covered = true
@@ -1044,7 +1062,7 @@ workflow_validate_fleet :: proc(svc: ^Service, chain: domain.Task_Chain, brief: 
  for role in brief_review_roles(brief, context.temp_allocator) {
   if strings.contains(role, "{{") do continue
   covered := false
-  for fleet in fleets do if fleet_row_has_role(fleet, role) do covered = true
+  for fleet in fleets do if fleet.agent_id != coordinator && fleet.capacity > 0 && fleet_row_has_role(fleet, role) do covered = true
   if !covered do return domain.domain_error(.Validation_Failed, fmt.tprintf("configure fleet review role %s before starting the run", role))
  }
  return domain.Domain_Error{}

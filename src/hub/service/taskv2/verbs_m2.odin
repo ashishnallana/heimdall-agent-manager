@@ -1055,6 +1055,10 @@ chain_proposal_decide :: proc(svc: ^Service, chain_id: domain.Task_Chain_ID, own
 		_, _ = end_uow(svc, &u, false)
 		return {}, nil, false, domain.domain_error(.Conflict, "chain must be active")
 	}
+	if _, authorized, auth_err := work_control_chain(svc, owner_user_id, actor, chain_id); !authorized {
+        _, _ = end_uow(svc, &u, false)
+        return {}, nil, false, auth_err
+    }
 	prop := strings.trim_space(chain_proposal_json(chain))
 	if prop == "" || prop == "null" || prop == "{}" {
 		_, _ = end_uow(svc, &u, false)

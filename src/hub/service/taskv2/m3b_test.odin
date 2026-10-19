@@ -119,6 +119,7 @@ test_workflow_runs_share_chain_but_not_stage_identity :: proc(t: ^testing.T) {
 	defer fixture_close(fx)
 	if !ok do return
 	chain := seed_chain(t,fx,"chain_runs",true)
+    seed_fleet(fx, chain, "agt_w")
 	workflow_example_definition(t,fx,"simple",`{"schema":"workflow.v1","name":"simple","stages":[{"key":"build","brief":{"goal":"Build","verify":"none","output":{"schema":"inline"},"review_roles":[]}}]}`)
 	first,aok,aerr := workflow_run(&fx.svc,"u1",Actor{kind=ACTOR_USER,id="u1"},Workflow_Run_Input{chain_id=string(chain.chain_id),ref="simple",request_id="one",inputs_json="{}"})
 	second,bok,berr := workflow_run(&fx.svc,"u1",Actor{kind=ACTOR_USER,id="u1"},Workflow_Run_Input{chain_id=string(chain.chain_id),ref="simple",request_id="two",inputs_json="{}"})
@@ -139,14 +140,22 @@ test_workflow_retry_creates_fresh_generation_and_preserves_history :: proc(t: ^t
 	defer fixture_close(fx)
 	if !ok do return
 	chain := seed_chain(t,fx,"chain_retry",true)
+    seed_fleet(fx, chain, "agt_w")
 	workflow_example_definition(t,fx,"retryable",`{"schema":"workflow.v1","name":"retryable","stages":[{"key":"build","brief":{"goal":"Build","verify":"none","output":{"schema":"inline"},"review_roles":[]}}]}`)
 	run,rok,rerr := workflow_run(&fx.svc,"u1",Actor{kind=ACTOR_USER,id="u1"},Workflow_Run_Input{chain_id=string(chain.chain_id),ref="retryable",request_id="one",inputs_json="{}"})
 	if !testing.expect(t,rok,rerr.message) do return
-	_,cancelled,cerr := workflow_cancel(&fx.svc,run.run_id,"u1",Actor{kind=ACTOR_USER,id="u1"},"change approach")
+	_,cancelled,cerr := workflow_cancel(&fx.svc,run.run_id,"u1",Actor{kind=ACTOR_USER,id="u1"},"change approach",1)
 	if !testing.expect(t,cancelled,cerr.message) do return
 	retried,ok_retry,retry_err := workflow_retry(&fx.svc,run.run_id,"u1",Actor{kind=ACTOR_USER,id="u1"},"try again",run.revision)
 	testing.expect(t,ok_retry,retry_err.message)
 	testing.expect(t,retried.current_execution_no==2,"full-run retry advances generation")
+    _, duplicate_ok, duplicate_err := workflow_cancel(&fx.svc,run.run_id,"u1",Actor{kind=ACTOR_USER,id="u1"},"late duplicate",1)
+    testing.expect(t,duplicate_ok,duplicate_err.message)
+    current, current_ok, _ := workflow_context(&fx.svc,run.run_id,"u1")
+    testing.expect(t,current_ok && current.execution.execution_no==2 && current.execution.state=="running","late cancellation cannot touch the new generation")
+    _, missing_target, target_err := workflow_cancel(&fx.svc,run.run_id,"u1",Actor{kind=ACTOR_USER,id="u1"},"missing target",0)
+    testing.expect(t,!missing_target && target_err.code==.Validation_Failed,"cancellation requires an execution target")
+
 	executions,_ := iface.taskchain_list_workflow_executions(&fx.repo,run.run_id,"u1")
 	testing.expect(t,len(executions)==2,"old execution remains visible")
 	tasks,_ := iface.taskchain_list_tasks_by_chain(&fx.repo,chain.chain_id,"u1")
@@ -164,6 +173,7 @@ test_workflow_run_creation_request_is_idempotent :: proc(t: ^testing.T) {
 	defer fixture_close(fx)
 	if !ok do return
 	chain := seed_chain(t,fx,"chain_request",true)
+    seed_fleet(fx, chain, "agt_w")
 	workflow_example_definition(t,fx,"once",`{"schema":"workflow.v1","name":"once","stages":[{"key":"build","brief":{"goal":"Build","verify":"none","output":{"schema":"inline"},"review_roles":[]}}]}`)
 	input := Workflow_Run_Input{chain_id=string(chain.chain_id),ref="once",request_id="same",inputs_json="{}"}
 	first,aok,_ := workflow_run(&fx.svc,"u1",Actor{kind=ACTOR_USER,id="u1"},input)
@@ -179,4 +189,66 @@ test_workflow_run_creation_request_is_idempotent :: proc(t: ^testing.T) {
 	input.inputs_json=`{"changed":true}`
 	_,accepted,err := workflow_run(&fx.svc,"u1",Actor{kind=ACTOR_USER,id="u1"},input)
 	testing.expect(t,!accepted && err.code==.Conflict,"same request id with changed body rejected")
+}
+
+// REQ-MW-2/7/9: proposal decisions are orchestration, not worker authority.
+@(test)
+test_proposal_decision_requires_chain_owner_or_coordinator :: proc(t: ^testing.T) {
+ fx, ok := fixture_open(t,"proposal_authority")
+ defer fixture_close(fx)
+ if !ok do return
+ chain := seed_chain(t,fx,"proposal_auth",true)
+ decisions := []string{"approve","reject"}
+ for decision in decisions {
+  _, _, accepted, err := chain_proposal_decide(&fx.svc,chain.chain_id,"u1",Actor{kind=ACTOR_AGENT,id="unrelated_worker"},decision)
+  testing.expect(t,!accepted && err.code==.Forbidden,"unrelated worker cannot decide any proposal")
+ }
+}
+
+// REQ-MW-2/7: missing fleet coverage fails before any run is stored.
+@(test)
+test_workflow_fleet_requires_worker_and_named_reviewer :: proc(t: ^testing.T) {
+ fx, ok := fixture_open(t,"workflow_fleet_validation")
+ defer fixture_close(fx)
+ if !ok do return
+ chain := seed_chain(t,fx,"fleet_validation",true)
+ err := workflow_validate_fleet(&fx.svc,chain,`{"goal":"g"}`)
+ testing.expect(t,err.code==.Validation_Failed,"no worker rejected")
+ seed_fleet(fx,chain,"worker")
+ err = workflow_validate_fleet(&fx.svc,chain,`{"goal":"g","reviewers":["named"]}`)
+ testing.expect(t,err.code==.Validation_Failed,"missing named reviewer rejected")
+ seed_fleet(fx,chain,"named",roles=`["named-reviewer"]`)
+ err = workflow_validate_fleet(&fx.svc,chain,`{"goal":"g","reviewers":["named"]}`)
+ testing.expect(t,err.code==.None,"configured named reviewer accepted")
+}
+
+// REQ-MW-5/9: the generation cannot close or advance while a Done task's
+// bridge merge is queued, in flight, offline, or awaiting recovery.
+@(test)
+test_workflow_cancel_waits_for_pending_merge :: proc(t: ^testing.T) {
+ fx, ok := fixture_open(t,"workflow_merge_fence")
+ defer fixture_close(fx)
+ if !ok do return
+ chain := seed_chain(t,fx,"merge_fence",true)
+ seed_fleet(fx,chain,"worker")
+ seed_directory(fx,chain,"git_dir","br_1","git")
+ workflow_example_definition(t,fx,"mergeable",`{"schema":"workflow.v1","name":"mergeable","stages":[{"key":"build","brief":{"goal":"Build","verify":"none","output":{"schema":"inline"},"review_roles":[]}}]}`)
+ run, created, err := workflow_run(&fx.svc,"u1",Actor{kind=ACTOR_USER,id="u1"},Workflow_Run_Input{chain_id=string(chain.chain_id),ref="mergeable",request_id="one",inputs_json="{}"})
+ if !testing.expect(t,created,err.message) do return
+ wf, _, _ := workflow_context(&fx.svc,run.run_id,"u1")
+ tasks, _ := workflow_execution_tasks(&fx.svc,wf)
+ if !testing.expect(t,len(tasks)==1,"one generated task") do return
+ task := tasks[0]
+ task.state = .Done
+ task, _, _ = iface.taskchain_save_task(&fx.repo,task)
+ _, _, _ = append_event(&fx.repo,&fx.clock,task,hub_actor(),EV_LEASE_GRANTED,`{"kind":"work","bridge_id":"br_1"}`)
+ _, _, _ = append_event(&fx.repo,&fx.clock,task,hub_actor(),EV_SUBMITTED,`{}`)
+ _, cancelled, cancel_err := workflow_cancel(&fx.svc,run.run_id,"u1",Actor{kind=ACTOR_USER,id="u1"},"change approach",1)
+ testing.expect(t,!cancelled && cancel_err.code==.Conflict,"pending merge blocks cancellation")
+ testing.expect(t,workflow_merge_allowed(&fx.svc,task),"current merge may settle")
+ _, _, _ = append_event(&fx.repo,&fx.clock,task,hub_actor(),EV_MERGE_CONFLICT,`{}`)
+ testing.expect(t,workflow_require_merges_settled(&fx.svc,wf).code==.None,"settled conflict releases the generation fence")
+ _, cancelled, cancel_err = workflow_cancel(&fx.svc,run.run_id,"u1",Actor{kind=ACTOR_USER,id="u1"},"change approach",1)
+ testing.expect(t,cancelled,cancel_err.message)
+ testing.expect(t,!workflow_merge_allowed(&fx.svc,task),"cancelled execution is fenced from recovery and jobs")
 }

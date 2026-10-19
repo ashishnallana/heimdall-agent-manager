@@ -205,7 +205,7 @@ keeping the same chain, coordinator, team, and directories. See coordinator-task
 - `workflow output <run-id> <stage-key> [--execution <n>]` reads outputs.
 - `workflow history <run-id>` reads executions and lifecycle events.
 - `workflow retry <run-id> --expected-revision <n> --reason <text>` creates fresh execution/tasks for a terminal run. Consumed outputs block retry. Stage/cascade retry is unsupported.
-- `workflow cancel <run-id> [--reason <text>]` cancels only that run.
+- `workflow cancel <run-id> --execution <number> [--reason <text>]` cancels only that run.
 - Agents may omit `--chain` on create/list to use their own chain; run IDs are explicit.
 - Configure the chain fleet before starting; recipes never create fleet rows.
 

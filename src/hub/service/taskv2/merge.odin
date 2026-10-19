@@ -6,7 +6,6 @@ import "core:strings"
 import "core:thread"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
-import platform "odin_test:hub/platform"
 import project "odin_test:hub/service/project"
 import jsonx "odin_test:lib/jsonx"
 
@@ -37,6 +36,7 @@ Merge_Effect :: struct {
 // No-op unless its work ran on a bridge whose chain directory gets worktrees.
 effect_merge_worktree :: proc(svc: ^Service, u: ^Uow, task: domain.Task, evs: []domain.Task_Event, only_bridge := "") {
 	if u == nil || !PER_LEASE_WORKTREES_ENABLED do return
+    if !workflow_merge_allowed(svc, task) do return
 	bridge_id := ""
 	for i := len(evs) - 1; i >= 0; i -= 1 {
 		ev := evs[i]
@@ -144,7 +144,9 @@ parse_merge_reply :: proc(reply: string) -> (outcome: Merge_Outcome, detail: str
 
 @(private = "file")
 run_merge :: proc(svc: ^Service, m: Merge_Effect) {
-	command_id := platform.generate_id(svc.ids, "cmd_merge_")
+    initial, found, _ := iface.taskchain_get_task(svc.repo, domain.Task_ID(m.task_id))
+    if !found || !workflow_merge_allowed(svc, initial) do return
+	command_id := fmt.tprintf("cmd_merge_%s_%d", initial.task_id, initial.attempt_no)
 	reply, ok, err := project.bridge_command_send_runtime_wait(svc.bridge_command_sink, project.Runtime_Command{
 		bridge_id  = m.bridge_id,
 		command_id = command_id,
@@ -158,6 +160,7 @@ run_merge :: proc(svc: ^Service, m: Merge_Effect) {
 
 	task, tok, _ := iface.taskchain_get_task(svc.repo, domain.Task_ID(m.task_id))
 	if !tok do return
+    if !workflow_merge_allowed(svc, task) do return
 	p := json_begin()
 	json_str(&p, "branch", m.branch)
 	json_str(&p, "workdir", m.workdir)
@@ -263,4 +266,13 @@ task_merge_status :: proc(svc: ^Service, task: domain.Task) -> Merge_Status {
 		}
 	}
 	return st
+}
+
+// Generation changes are refused while merges are pending, so a job authorized
+// here cannot cross a cancel/retry while the bridge is touching the repository.
+// Failed executions may settle existing Done tasks before explicit retry.
+workflow_merge_allowed :: proc(svc: ^Service, task: domain.Task) -> bool {
+ if task.workflow_run_id == "" do return true
+ wf, ok, _ := workflow_context(svc, task.workflow_run_id, task.owner_user_id)
+ return ok && wf.run.current_execution_no == task.workflow_execution_no && wf.execution.state != "cancelled"
 }

@@ -352,3 +352,16 @@ test_m3b_workflow_ctl_params :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(wf_prop, `"inputs":{"target":"auth"}`), "inputs in proposal")
 }
 
+
+// REQ-MW-5/9: cancel always identifies an execution; delayed commands cannot
+// silently retarget whichever generation happens to be current.
+@(test)
+test_workflow_cancel_params_require_execution :: proc(t: ^testing.T) {
+ tokens := []string{"cancel","wrun_1"}
+ missing, _ := ctl_v2_workflow_cancel_params(tokens,nil)
+ testing.expect_value(t,missing,"")
+ id, params := ctl_v2_workflow_cancel_params(tokens,[]string{"--execution","2","--reason","stop"})
+ defer delete(params)
+ testing.expect_value(t,id,"wrun_1")
+ testing.expect(t,strings.contains(params,`"execution_no":2`),"execution is carried through the transport")
+}

@@ -1151,6 +1151,22 @@ bridge_taskv2_handle_command :: proc(conn: ^ws.Connection, type, text: string) -
 		_ = bridge_hub_send(conn, cached)
 		return true
 	}
+    // Hub uses one stable command identity per task attempt. Keep the settled
+    // result on disk as well as in the bounded runtime cache: a delayed replay
+    // must never re-run a previously conflicted branch after the run retries.
+    repo := jsonx.extract_string(text, "repo", "", true, context.temp_allocator)
+    if command_id == "" || strings.contains(command_id, "/") || strings.contains(command_id, "\\") || strings.contains(command_id, "..") {
+     out := bridge_taskv2_merge_result_json(command_id, Bridge_Taskv2_Merge_Result{detail = "invalid merge command identity"})
+     defer delete(out)
+     _ = bridge_hub_send(conn, out)
+     return true
+    }
+    receipt_dir := fmt.tprintf("%s/.heimdall/merge-results", strings.trim_right(repo, "/"))
+    receipt_path := fmt.tprintf("%s/%s.json", receipt_dir, command_id)
+    if stored, err := os.read_entire_file(receipt_path, context.temp_allocator); err == nil {
+     _ = bridge_hub_send(conn, string(stored))
+     return true
+    }
 	r := bridge_taskv2_merge_task_worktree(
 		jsonx.extract_string(text, "repo", "", true, context.temp_allocator),
 		jsonx.extract_string(text, "workdir", "", true, context.temp_allocator),
@@ -1159,6 +1175,14 @@ bridge_taskv2_handle_command :: proc(conn: ^ws.Connection, type, text: string) -
 	)
 	out := bridge_taskv2_merge_result_json(command_id, r)
 	defer delete(out)
+    // Do not acknowledge a settled merge until duplicate suppression is durable.
+    _ = bridge_make_directory_all(receipt_dir)
+    if err := os.write_entire_file(receipt_path, transmute([]byte)out); err != nil {
+     failure := bridge_taskv2_merge_result_json(command_id, Bridge_Taskv2_Merge_Result{detail = "merge outcome could not be persisted; settle before retry"})
+     defer delete(failure)
+     _ = bridge_hub_send(conn, failure)
+     return true
+    }
 	bridge_runtime_cache_command(command_id, out)
 	_ = bridge_hub_send(conn, out)
 	return true

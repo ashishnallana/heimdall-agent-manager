@@ -1224,7 +1224,10 @@ ctl_v2_workflow_retry_params :: proc(tokens, args: []string) -> (run_id, target,
 
 ctl_v2_workflow_cancel_params :: proc(tokens, args: []string) -> (run_id, params: string) {
  id := strings.trim_space(option_value(args, "--run", pos(tokens, 1)))
- return id, json_object(json_kv("run_id", id), json_kv("reason", option_value(args, "--reason", "")))
+ generation := option_value(args, "--execution", "0")
+ n, valid := strconv.parse_int(generation)
+ if !valid || n <= 0 do return "", "{}"
+ return id, json_object(json_kv("run_id", id), json_kv("reason", option_value(args, "--reason", "")), json_kv_raw("execution_no", generation))
 }
 
 ctl_v2_workflow :: proc(endpoint, token: string, tokens, args: []string) {
@@ -1290,7 +1293,8 @@ ctl_v2_workflow :: proc(endpoint, token: string, tokens, args: []string) {
 		defer delete(params)
 		ctl_agent_call_task(endpoint, token, "agent.workflow.retry", params, args)
 	case "cancel":
-		_, params := ctl_v2_workflow_cancel_params(tokens, args)
+		id, params := ctl_v2_workflow_cancel_params(tokens, args)
+        if id == "" { fmt.println(`{"ok":false,"message":"workflow cancel requires <run_id> --execution <number>"}`); os.exit(1) }
 		defer delete(params)
 		ctl_agent_call_task(endpoint, token, "agent.workflow.cancel", params, args)
 	case:
@@ -1384,7 +1388,7 @@ ctl_workflow_user_mode :: proc(cmd, args: []string) {
 		cid, params := ctl_v2_workflow_cancel_params(tokens, args)
 		defer delete(params)
 		if cid == "" {
-			fmt.println(`{"ok":false,"message":"workflow cancel requires <run_id>"}`)
+			fmt.println(`{"ok":false,"message":"workflow cancel requires <run_id> --execution <number>"}`)
 			os.exit(1)
 		}
 		ctl_tasks_request_and_decrypt(transport, "POST", fmt.tprintf("/api/v1/workflow-runs/%s/cancel", safe_path_part(cid)), params, args)
@@ -1402,7 +1406,7 @@ print_help_workflow :: proc() {
  fmt.println("  output <run_id> <stage_key> [--execution <n>]")
  fmt.println("  history <run_id>")
  fmt.println("  retry <run_id> --expected-revision <n> --reason <text>")
- fmt.println("  cancel <run_id> [--reason <text>]")
+ fmt.println("  cancel <run_id> --execution <number> [--reason <text>]")
  fmt.println("A retry creates a fresh execution. Consumed outputs block retry. Stage retry is unsupported.")
  fmt.println("Agent mode may omit --chain when creating/listing runs; run IDs are always explicit.")
 }

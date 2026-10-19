@@ -29,7 +29,7 @@ Configure shared fleet roles before starting a recipe; runs never widen the flee
 ./.heimdall/bin/ham-ctl workflow output <run-id> <stage-key> [--execution <n>]
 ./.heimdall/bin/ham-ctl workflow history <run-id>
 ./.heimdall/bin/ham-ctl workflow retry <run-id> --expected-revision <revision> --reason "<why>"
-./.heimdall/bin/ham-ctl workflow cancel <run-id> --reason "<why>"
+./.heimdall/bin/ham-ctl workflow cancel <run-id> --execution <number> --reason "<why>"
 ./.heimdall/bin/ham-ctl task-chain depend --chain <chain-id> --item task:<validation-id> --on workflow_run:<run-id>
 ```
 

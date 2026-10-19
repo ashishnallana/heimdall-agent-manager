@@ -136,7 +136,7 @@ ham-ctl workflow list --chain <chain>
 ham-ctl workflow status <run-id>
 ham-ctl workflow output <run-id> --stage <key> [--execution <n>]
 ham-ctl workflow retry <run-id> --reason <text>
-ham-ctl workflow cancel <run-id> --reason <text>
+ham-ctl workflow cancel <run-id> --execution <number> --reason <text>
 ham-ctl task-chain depend <chain> --item task:<id> --on workflow_run:<id>
 ham-ctl task-chain exclude <chain> --item workflow_run:<id> --reason <text>
 ham-ctl task-chain complete <chain> --expected-work-revision <n> --summary-file <file>
@@ -389,7 +389,7 @@ Implemented surfaces:
 | Stage outputs | GET /api/v1/workflow-runs/{id}/output?stage_key=KEY&execution_no=N | workflow output RUN STAGE [--execution N] |
 | Execution/event history | GET /api/v1/workflow-runs/{id}/executions | workflow history RUN |
 | Whole-run retry | POST /api/v1/workflow-runs/{id}/retry | workflow retry RUN --expected-revision N --reason TEXT |
-| Cancel run | POST /api/v1/workflow-runs/{id}/cancel | workflow cancel RUN --reason TEXT |
+| Cancel run | POST /api/v1/workflow-runs/{id}/cancel | workflow cancel RUN --execution N --reason TEXT |
 | Graph/scope history | GET /api/v1/task-chains/{id}/work/graph | task-chains graph --chain ID |
 | Add dependency | POST /api/v1/task-chains/{id}/work/depend | task-chains depend --chain ID --item task:ID --on workflow_run:ID |
 | Remove edge | POST /api/v1/task-chains/{id}/work/remove-dependency | task-chains remove-dependency --chain ID --dependency ID --reason TEXT |
@@ -454,3 +454,16 @@ git diff --check
 Build outputs are outside the worktree. Earlier object build artifacts in the
 worktree were removed. Run request hashes canonicalize nested input object keys,
 so duplicate requests remain idempotent across JSON serialization order changes.
+
+
+### Independent review fixes (REQ-MW-2/5/6/7/9)
+
+- Generic chain PATCH rejects `status=completed`, including reopened chains with an old summary. Final acceptance remains exclusively revision checked. Generic updates now run under the same repository UoW wrapper as other lifecycle mutations.
+- Run cancel requires `execution_no`; CLI requires `--execution N`. A repeat cancellation of a previously cancelled execution returns without reconciling or touching a later execution. Unknown cancel fields are rejected.
+- Proposal decisions centrally require the owner or that chain's coordinator before either approve or reject can mutate state.
+- Fleet validation requires eligible positive-capacity worker coverage, named reviewer rows, and role coverage before creation and after stage placeholder expansion. The built-in solo coordinator's implicit worker row remains supported; coordinators remain ineligible to review.
+- Merge policy is **settle before cancel/retry**. Pending Done-task merges (including offline delivery and unacknowledged failures) reject run cancel/retry and chain cancel. Jobs and recovery only send/apply merges for the current, non-cancelled execution. Failed executions may settle already-Done tasks before explicit retry. No repository rollback of already merged work is promised.
+- Merge commands use a stable task/attempt identity. Bridge stores settled results in the repository's ignored `.heimdall/merge-results/` directory before acknowledging them, in addition to its bounded in-memory cache. Delayed duplicate commands replay the result rather than re-running a conflicted historical branch. If writing the receipt fails, the Hub receives a failure and the generation remains fenced until recovery. Receipts must be retained alongside managed worktrees.
+- **Deferred P2:** terminal coordinator delivery still uses transient effects. Terminal execution state and events are durable and readable, but a crash/disconnection can lose its live notice. A proper durable acknowledged notification outbox is a separate follow-up; it is not claimed fixed here.
+
+Regression source covers reopened-chain completion bypass, execution-targeted duplicate cancellation, pending-merge fencing, proposal authority, fleet coverage, and CLI target serialization. No tests, migrations, live Hub, or manual tests were executed during this fix pass. Native checks/builds are recorded in the parent handoff; Nix is unavailable on this Windows host. UI remains deferred.
