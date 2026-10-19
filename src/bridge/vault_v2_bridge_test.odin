@@ -448,10 +448,10 @@ test_v2_identity_is_never_regenerated :: proc(t: ^testing.T) {
 	testing.expect_value(t, bridge_identity_state(f.id_a), Bridge_Identity_State.Lost)
 	_, sig_ok := bridge_unseal_key_signature_json(f.id_a)
 	testing.expect(t, !sig_ok, "no signed unseal key without an identity")
-	b := strings.builder_make(context.temp_allocator)
-	bridge_unseal_write_hello_fields(&b, f.id_a)
-	testing.expect(t, strings.contains(strings.to_string(b), `"identity_state":"lost"`), "hello reports the lost identity")
-	testing.expect(t, !strings.contains(strings.to_string(b), "unseal_key_signature"), "hello advertises no unseal key")
+	hello_fields := bridge_unseal_hello_fields(f.id_a)
+	hello_json, _ := vault.wire_encode(hello_fields, context.temp_allocator)
+	testing.expect(t, strings.contains(hello_json, `"identity_state":"lost"`), "hello reports the lost identity")
+	testing.expect(t, !strings.contains(hello_json, "unseal_key_signature"), "hello advertises no unseal key")
 	rec: Bridge_Identity_Record
 	testing.expect_value(t, keystore_read_identity(f.id_a, &rec), Keystore_Read_Status.Not_Found)
 

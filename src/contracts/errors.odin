@@ -172,6 +172,30 @@ wire_error_from_bridge :: proc(cause: Bridge_Log_Code, class: Bridge_Error_Class
 	return Wire_Error{code = bridge_log_code_error_code(cause), class = class, cause = bridge_log_code_name(cause), message = message, retry_after_ms = retry_after_ms, scope = scope}
 }
 
+// Wire_Error_Json is the marshal-able wire error object (json.marshal), with the same
+// members as write_wire_error: retry_after_ms and scope only when set.
+Wire_Error_Json :: struct {
+	code:           string,
+	class:          string,
+	cause:          string,
+	message:        string,
+	retry_after_ms: Maybe(i64) `json:"retry_after_ms,omitempty"`,
+	scope:          string     `json:"scope,omitempty"`,
+}
+
+// wire_error_json_value is err as a Wire_Error_Json.
+wire_error_json_value :: proc(err: Wire_Error) -> Wire_Error_Json {
+	out := Wire_Error_Json{
+		code    = error_code_string(err.code),
+		class   = bridge_error_class_name(err.class),
+		cause   = err.cause,
+		message = err.message,
+		scope   = err.scope,
+	}
+	if err.retry_after_ms > 0 do out.retry_after_ms = err.retry_after_ms
+	return out
+}
+
 // write_wire_error writes the error object (no key) into b.
 write_wire_error :: proc(b: ^strings.Builder, err: Wire_Error) {
 	strings.write_string(b, "{\"code\":\"")
