@@ -25,6 +25,12 @@ const API = '/api/v1';
  * API base this page talks to. Throws outside an http(s) page.
  */
 export function pairingHubOrigin(): string {
+  // Dev only: the Vite dev server serves the UI on its own port and proxies
+  // /api/v1 to the hub, so the page address is not the hub address a bridge
+  // enrolls against. VITE_PAIRING_HUB_ORIGIN names the real hub in that setup;
+  // production builds leave it unset and bind to the page's own API base.
+  const devHub = String((import.meta as any).env?.VITE_PAIRING_HUB_ORIGIN ?? '').trim();
+  if (devHub) return pairHubOrigin(new URL(`${API}/`, devHub).href);
   const here = (globalThis as { location?: { href?: string } }).location?.href;
   if (!here) throw new Error('No page address to bind the pairing to');
   return pairHubOrigin(new URL(apiUrl(`${API}/`), here).href);
