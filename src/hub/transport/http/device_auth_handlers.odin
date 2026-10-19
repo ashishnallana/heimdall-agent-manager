@@ -20,6 +20,9 @@ import device_auth "odin_test:hub/service/device_auth"
 import push_service "odin_test:hub/service/push"
 import domain "odin_test:hub/domain"
 import jsonx "odin_test:lib/jsonx"
+import vd "odin_test:hub/service/vault_directory"
+import "core:encoding/json"
+import vault "odin_test:lib/vault"
 
 Device_Auth_Handlers :: struct {
 	service: ^device_auth.Device_Auth_Service,
@@ -33,6 +36,9 @@ Device_Auth_Handlers :: struct {
 	// --ui-origin. Prefixes the /api/v1/device/add redirect target; empty means
 	// a relative Location (UI served by the Hub itself).
 	ui_origin:         string,
+	// Passwordless vault: /device/verify also resolves a browser's 12-symbol
+	// pending-device code against the session user's directory.
+	vault:             ^vd.Service,
 }
 
 // device_authorize_handler is the public POST /api/v1/device/authorize endpoint.
@@ -119,6 +125,10 @@ device_add_redirect_handler :: proc(ctx: rawptr, req: Request) -> Response {
 device_add_redirect_location :: proc(ui_origin, raw_code: string, allocator := context.temp_allocator) -> string {
 	base := strings.trim_right(ui_origin, "/")
 	code, ok := device_auth.normalize_user_code(raw_code, context.temp_allocator)
+	if !ok {
+		// A pending browser device's 12-symbol code (passwordless vault).
+		code, ok = domain.normalize_vault_device_code(raw_code, context.temp_allocator)
+	}
 	if !ok do return strings.concatenate({base, DEVICE_ADD_UI_ROUTE}, allocator)
 	return strings.concatenate({base, DEVICE_ADD_UI_ROUTE, "?code=", code}, allocator)
 }
@@ -128,12 +138,19 @@ device_add_redirect_location :: proc(ui_origin, raw_code: string, allocator := c
 // generic 404 "invalid or expired code" (no enumeration); terminal -> 410.
 device_verify_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	handlers := (^Device_Auth_Handlers)(ctx)
-	_, ok, auth_resp := require_auth(handlers.auth, req)
+	auth_ctx, ok, auth_resp := require_auth(handlers.auth, req)
 	if !ok do return auth_resp
 	request_ip := device_auth.resolve_client_ip(
 		req.remote_addr, header_value(req.headers, "X-Forwarded-For"),
 		handlers.service.trusted_cidrs)
-	info, vok, err := device_auth.verify_with_ip(handlers.service, json_string(req.body, "user_code"), request_ip)
+	raw_code := json_string(req.body, "user_code")
+	// The code's LENGTH routes it: 12 symbols is a pending browser device, 8 is a
+	// bridge grant. A code is never tried against the other namespace, so a browser
+	// code cannot resolve as a bridge grant or vice versa.
+	if _, is_vault_code := domain.normalize_vault_device_code(raw_code, context.temp_allocator); is_vault_code {
+		return vault_device_verify(handlers, req, auth_ctx, raw_code, request_ip)
+	}
+	info, vok, err := device_auth.verify_with_ip(handlers.service, raw_code, request_ip)
 	device_auth_record("verify", device_auth_error_result(err) if !vok else "ok")
 	if !vok do return respond_error(err, req.request_id)
 	data := strings.builder_make()
@@ -161,6 +178,14 @@ device_verify_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	// does. `bridge_public_key` sits in BOTH, deliberately and under different
 	// names: the machine asserted it, and the Hub now vouches for having stored
 	// that exact value — which is what makes the fragment cross-check meaningful.
+	strings.write_string(&data, ",\"kind\":\"bridge\"")
+	// The persistent identity key the approver signs into the vault directory, and
+	// its hub-computed fingerprint (compare it with the one `ham-bridge enroll` prints).
+	strings.write_string(&data, ",\"bridge_identity_public_key\":\"")
+	write_handler_json_string(&data, info.bridge_identity_public_key)
+	strings.write_string(&data, "\",\"bridge_identity_fingerprint\":\"")
+	write_handler_json_string(&data, info.bridge_identity_fingerprint)
+	strings.write_string(&data, "\"")
 	strings.write_string(&data, ",\"is_bridge_enrollment\":")
 	strings.write_string(&data, "true" if info.is_bridge_enrollment else "false")
 	strings.write_string(&data, ",\"hub_observed\":{\"bridge_key_fingerprint\":\"")
@@ -215,6 +240,7 @@ device_approve_handler :: proc(ctx: rawptr, req: Request) -> Response {
 		// Optional operator-chosen label for a newly minted bridge. It is ignored
 		// nowhere: the service rejects combining it with target_bridge_id.
 		new_bridge_label = json_string(req.body, "new_bridge_label"),
+		vault_approval = parse_vault_approval(req.body),
 	}
 	// ELDA-6: owner comes from Auth_Context, NEVER from the body. We deliberately
 	// do NOT read owner_user_id/user from req.body.
@@ -364,4 +390,60 @@ json_bool :: proc(body, key: string) -> bool {
 // json_bool_literal requires the field to be present AND be a JSON boolean literal (true or false).
 json_bool_literal :: proc(body, key: string) -> (value: bool, ok: bool) {
 	return jsonx.extract_bool_literal(body, key)
+}
+
+// parse_vault_approval reads the optional `vault_approval:{expected_version,
+// statement, signature}` of POST /device/approve. Required for a bridge grant (the
+// minter refuses without it); ignored for a user-token grant.
+parse_vault_approval :: proc(body: string) -> device_auth.Vault_Approval {
+	v, ok := jsonx.parse_body(body, context.temp_allocator)
+	if !ok do return {}
+	root, is_obj := v.(json.Object)
+	if !is_obj do return {}
+	va, has := root["vault_approval"].(json.Object)
+	if !has do return {}
+	out := device_auth.Vault_Approval{present = true}
+	if n, n_ok := va["expected_version"].(json.Integer); n_ok do out.expected_version = i64(n)
+	if s, s_ok := va["statement"].(json.String); s_ok do out.statement = string(s)
+	if sig_v, sig_has := va["signature"]; sig_has {
+		out.signature, _ = vault.signature_text_from_value(sig_v, context.temp_allocator)
+	}
+	return out
+}
+
+// vault_device_verify answers /device/verify for a pending BROWSER device code.
+// Rate-limited with the same per-IP verify budget as bridge codes, and scoped to
+// the session user's own directory: another account's code is "invalid or expired".
+vault_device_verify :: proc(handlers: ^Device_Auth_Handlers, req: Request, auth_ctx: contracts.Auth_Context, raw_code, request_ip: string) -> Response {
+	if !device_auth.rate_check(handlers.service, "", request_ip) {
+		device_auth_record("verify", "rate_limited")
+		return respond_error(domain.domain_error(.Rate_Limited, "too many device verification attempts from this IP"), req.request_id)
+	}
+	if handlers.vault == nil do return respond_error(vd.GENERIC_CODE_ERROR(), req.request_id)
+	dev, err := vd.resolve_pending_code(handlers.vault, auth_ctx.user_id, raw_code)
+	device_auth_record("verify", device_auth_error_result(err) if err.code != .None else "ok")
+	if err.code != .None do return respond_error(err, req.request_id)
+	data := strings.builder_make()
+	strings.write_string(&data, "{\"kind\":\"browser\",\"device_id\":\"")
+	write_handler_json_string(&data, dev.device_id)
+	strings.write_string(&data, "\",\"device_kind\":\"")
+	write_handler_json_string(&data, dev.kind)
+	strings.write_string(&data, "\",\"fingerprint\":\"")
+	write_handler_json_string(&data, dev.fingerprint)
+	strings.write_string(&data, "\",\"label\":\"")
+	write_handler_json_string(&data, dev.label)
+	strings.write_string(&data, "\",\"sign_public_key\":\"")
+	write_handler_json_string(&data, dev.sign_public_key)
+	strings.write_string(&data, "\",\"ecdh_public_key\":\"")
+	write_handler_json_string(&data, dev.ecdh_public_key)
+	strings.write_string(&data, "\",\"sign_alg\":\"")
+	write_handler_json_string(&data, dev.sign_alg)
+	strings.write_string(&data, "\",\"wrap_alg\":\"")
+	write_handler_json_string(&data, dev.wrap_alg)
+	strings.write_string(&data, "\",\"created_at\":\"")
+	write_handler_json_string(&data, dev.created_at)
+	strings.write_string(&data, "\",\"code_expires_at\":\"")
+	write_handler_json_string(&data, dev.code_expires_at)
+	strings.write_string(&data, "\"}")
+	return respond_success(strings.to_string(data), req.request_id, "", 200)
 }

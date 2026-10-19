@@ -65,3 +65,23 @@ build_enrollment_approval_notification :: proc(key_fingerprint: string) -> Notif
 		category = .Attention,
 	}
 }
+
+// build_vault_device_pending_notification: "a new device is waiting for approval".
+// It deliberately carries NO user code (plan §3: a stolen cookie can register a
+// pending device, but approving it needs the code shown on the NEW screen, so the
+// code must never travel to the other devices) and no host-chosen label — only the
+// hub-computed fingerprint, which the approver compares on the new device's screen.
+build_vault_device_pending_notification :: proc(fingerprint: string) -> Notification_Content {
+	body := strings.concatenate({
+		"A new device asked to join your vault (fingerprint ",
+		fingerprint,
+		"). To approve it, enter the code shown on that device. If this was not you, ignore it.",
+	})
+	return Notification_Content{
+		title    = "New device waiting for approval",
+		body     = body,
+		tag      = strings.clone("heimdall:attention:vault-device"),
+		route    = strings.clone("/device/add"),
+		category = .Attention,
+	}
+}
