@@ -11,7 +11,7 @@
 //   node --import ./tests/helpers/vaultEndpointHarness.ts tests/e2e/vault_devices_api_e2e.mjs
 // Prints PASS/FAIL per step; exits non-zero on any FAIL.
 
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
@@ -99,7 +99,14 @@ async function startHub() {
     }
     console.log(`(could not remove ${dir})`);
   };
-  return { base, port, dir, dbPath, stop };
+  // `ham-hub tokens issue` against the same temp DB: a user API token (hut_…).
+  const issueUserToken = (userId) => {
+    const r = spawnSync(bin, ['tokens', 'issue', '--user', userId, '--label', 'e2e', '--db', dbPath, '--migrations-dir', migrations], { cwd: dir, env, encoding: 'utf8' });
+    const m = /token=\s*(hut_\S+)/.exec(r.stdout || '');
+    if (!m) throw new Error(`tokens issue failed: ${r.stdout} ${r.stderr}`);
+    return m[1];
+  };
+  return { base, port, dir, dbPath, stop, issueUserToken };
 }
 
 // ── HTTP ────────────────────────────────────────────────────────────────────
@@ -338,11 +345,14 @@ class SimBridge {
     b.unlocked = false;
     return b;
   }
-  // POST /device/authorize body. Kept in one place: P2 fixes add an identity-key proof of possession here.
-  authorizeBody() {
+  // POST /device/authorize body, with the identity key's proof of possession over
+  // "heimdall-bridge-enroll/v1\n<bridge_public_key>\n<code_challenge>".
+  async authorizeBody(proofKey = this.identity) {
+    const proof = await proofKey.signText(`heimdall-bridge-enroll/v1\n${this.ecdhPub}\n${this.challenge}`);
     return {
       client: 'ham-bridge', device_label: 'e2e-bridge', os: 'windows', os_user: 'e2e', app_version: 'e2e',
       bridge_public_key: this.ecdhPub, bridge_identity_public_key: this.identity.signPub,
+      bridge_identity_proof: JSON.parse(proof),
       code_challenge: this.challenge, code_challenge_method: 'S256',
     };
   }
@@ -387,23 +397,23 @@ async function newKeyring(userId, entries) {
   return serializeKeyringBytes({ userId, currentEpoch: entries[entries.length - 1].epoch, entries });
 }
 
-async function genesis(dev, user, userId) {
+async function genesis(dev, user, userId, auth = { user }) {
   const kr = await newKeyring(userId, [{ epoch: 1, key: crypto.getRandomValues(new Uint8Array(32)) }]);
   const commit = await commitHex(kr, userId, 1);
   const wrap = await sealWrap(dev, userId, dev, 0, kr);
   const now = String(Date.now());
   const gst = statementCanonical({ type: 'genesis', user_id: userId, directory_version: '0', issuer_device_id: dev.id, issued_at_ms: now, ...dev.subject(), epoch: '1', epoch_commit: commit, wrap_sha256: wrap.sha });
   const est = statementCanonical({ type: 'epoch', user_id: userId, directory_version: '0', issuer_device_id: dev.id, issued_at_ms: now, epoch: '1', epoch_commit: commit });
-  const r = await http('POST', '/api/v1/vault/directory/genesis', { user, body: {
+  const r = await http('POST', '/api/v1/vault/directory/genesis', { ...auth, body: {
     genesis_statement: gst, signature: JSON.parse(await dev.signText(gst)),
     epoch_statement: est, epoch_signature: JSON.parse(await dev.signText(est)), wrap: wrap.json,
   } });
   return { r, kr };
 }
 
-async function register(dev, user, userId) {
+async function register(dev, user, userId, auth = { user }) {
   const st = statementCanonical({ type: 'register', user_id: userId, issuer_device_id: dev.id, issued_at_ms: String(Date.now()), ...dev.subject() });
-  return http('POST', '/api/v1/vault/devices/register', { user, body: { statement: st, proof_signature: JSON.parse(await dev.signText(st)) } });
+  return http('POST', '/api/v1/vault/devices/register', { ...auth, body: { statement: st, proof_signature: JSON.parse(await dev.signText(st)) } });
 }
 
 // Approver `a` approves the pending browser device described by /device/verify output `info`.
@@ -432,6 +442,11 @@ async function main() {
       const none = await http('GET', '/api/v1/vault/directory', { user: ALICE });
       expect(none.status === 404, 'no directory before genesis (404)');
       S.A = await SimDevice.create('e2e device A');
+      S.aliceToken = HUB.issueUserToken(S.uid);
+      const viaToken = await genesis(S.A, ALICE, S.uid, { bearer: S.aliceToken });
+      expect(viaToken.r.status === 403, `a user API token cannot genesis (${viaToken.r.status})`);
+      const stillNone = await http('GET', '/api/v1/vault/directory', { user: ALICE });
+      expect(stillNone.status === 404, 'still no directory after the refused token genesis');
       const { r, kr } = await genesis(S.A, ALICE, S.uid);
       expect(r.status === 201, `genesis -> 201 (${r.status})`);
       const again = await genesis(S.A, ALICE, S.uid);
@@ -460,7 +475,10 @@ async function main() {
       expect(reg.status === 201 && reg.data.status === 'pending' && /^[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(reg.data.user_code), `B registered pending with a code (${reg.status})`);
       expect(reg.data.device_id === S.B.id && reg.data.fingerprint === S.B.fingerprint, 'hub device id + fingerprint match B\'s local derivation');
       S.bCode = reg.data.user_code;
-      const pending = await signedCall(S.B, ALICE, S.uid, 'GET', '/api/v1/vault/devices/self');
+      const again = await register(S.B, ALICE, S.uid);
+      expect(again.status === 200 && again.data.device_id === S.B.id && again.data.user_code === undefined, `repeat register -> ${again.status}, same device, no user_code`);
+      const viaToken = await register(await SimDevice.create('token device'), ALICE, S.uid, { bearer: S.aliceToken });
+      expect(viaToken.status === 403, `a user API token cannot register a device (${viaToken.status})`);      const pending = await signedCall(S.B, ALICE, S.uid, 'GET', '/api/v1/vault/devices/self');
       expect(pending.status === 200 && pending.data.status === 'pending' && !pending.data.wrap, 'B polls self: pending, no wrap');
 
       const ver = await http('POST', '/api/v1/device/verify', { user: ALICE, body: { user_code: S.bCode } });
@@ -492,7 +510,10 @@ async function main() {
     await step('3 bridge: device-flow enrollment approved by A with vault_approval; unseal v2 (bridge side simulated)', async () => {
       const br = await SimBridge.create();
       S.bridge = br;
-      const authz = await http('POST', '/api/v1/device/authorize', { body: br.authorizeBody() });
+      const stranger = await SimDevice.create('not the identity', 'bridge');
+      const noPop = await http('POST', '/api/v1/device/authorize', { body: await br.authorizeBody(stranger) });
+      expect(noPop.status === 400, `authorize with an identity proof by another key -> 400 (${noPop.status})`);
+      const authz = await http('POST', '/api/v1/device/authorize', { body: await br.authorizeBody() });
       expect(authz.status === 200 && authz.data.user_code && authz.data.device_code, `bridge /device/authorize -> 200 (${authz.status} ${authz.status !== 200 ? authz.raw : ''})`);
       const ver = await http('POST', '/api/v1/device/verify', { user: ALICE, body: { user_code: authz.data.user_code } });
       expect(ver.status === 200 && ver.data.kind === 'bridge' && ver.data.bridge_identity_public_key === br.identity.signPub, '/device/verify resolves kind=bridge with its identity key');
@@ -690,6 +711,54 @@ async function main() {
       expect(wraps.every((w) => w.recipient_device_id !== M.id), 'no wrap was made for the injected device');
       const rv = await signedCall(S.A, ALICE, S.uid, 'POST', `/api/v1/vault/devices/${tgt.device_id}/revoke`, { expected_version: inj.chain.version, revoke_statement: rst, signature: JSON.parse(await S.A.signText(rst)), epoch_statement: est, epoch_signature: JSON.parse(await S.A.signText(est)), wraps });
       expect(rv.status === 400, `hub refuses the rotation that skips the injected row (fails closed, ${rv.status})`);
+    });
+
+    await step('6 deny a pending device; owner reset schedule + cancel', async () => {
+      // Deny: an approver removes a pending device; it cannot then use or be approved.
+      const G = await SimDevice.create('e2e device G');
+      const rg = await register(G, ALICE, S.uid);
+      expect(rg.status === 201 && rg.data.user_code, 'G registered pending');
+      const brVerify = await http('POST', '/api/v1/device/verify', { bearer: S.bridge.token, body: { user_code: rg.data.user_code } });
+      expect(brVerify.status === 403, `a bridge credential cannot resolve a browser code (${brVerify.status})`);
+      const pg = `/api/v1/vault/devices/${G.id}/deny`;
+      const unsigned = await http('POST', pg, { user: ALICE, body: '{}' });
+      expect(unsigned.status === 401, `unsigned deny -> 401 (${unsigned.status})`);
+      const bobDeny = await signedCall(S.Bob, BOB, S.bobUid, 'POST', pg, {});
+      expect(bobDeny.status === 404, `bob cannot deny alice's pending device (${bobDeny.status})`);
+      const denied = await signedCall(S.A, ALICE, S.uid, 'POST', pg, {});
+      expect(denied.status === 200, `approver-signed deny -> 200 (${denied.status})`);
+      const dir = await http('GET', '/api/v1/vault/directory', { user: ALICE });
+      expect(!dir.raw.includes(G.id), 'denied device is gone from the directory');
+      const gv = await http('POST', '/api/v1/device/verify', { user: ALICE, body: { user_code: rg.data.user_code } });
+      expect(gv.status === 404, `denied device's code no longer resolves (${gv.status})`);
+      const gSelf = await signedCall(G, ALICE, S.uid, 'GET', '/api/v1/vault/devices/self');
+      expect(gSelf.status === 403, `denied device cannot poll self (${gSelf.status})`);
+      const again = await signedCall(S.A, ALICE, S.uid, 'POST', pg, {});
+      expect(again.status === 404, `deny of a non-pending device -> 404 (${again.status})`);
+      const denyApproved = await signedCall(S.A, ALICE, S.uid, 'POST', `/api/v1/vault/devices/${S.A.id}/deny`, {});
+      expect(denyApproved.status === 404, `deny cannot remove an approved device (${denyApproved.status})`);
+
+      // Reset: the browser session schedules it (delayed); any approver cancels it.
+      const tokReset = await http('POST', '/api/v1/vault/directory/reset', { bearer: S.aliceToken, body: '{}' });
+      expect(tokReset.status === 403, `a user API token cannot schedule a reset (${tokReset.status})`);
+      const r1 = await http('POST', '/api/v1/vault/directory/reset', { user: ALICE, body: '{}' });
+      expect(r1.status === 201 && r1.data.reset?.requested_at && r1.data.reset?.due_at > r1.data.reset.requested_at, `reset scheduled -> 201 with a future due_at (${r1.status})`);
+      const r2 = await http('POST', '/api/v1/vault/directory/reset', { user: ALICE, body: '{}' });
+      expect(r2.status === 200 && r2.data.reset.due_at === r1.data.reset.due_at, 'repeat schedule -> 200, same due_at');
+      const withReset = await http('GET', '/api/v1/vault/directory', { user: ALICE });
+      expect(withReset.data.reset?.due_at === r1.data.reset.due_at, 'GET directory shows the scheduled reset');
+      const bobView = await http('GET', '/api/v1/vault/directory', { user: BOB });
+      expect(bobView.status === 200 && !bobView.data.reset, 'bob\'s directory has no reset');
+      const unsignedCancel = await http('POST', '/api/v1/vault/directory/reset/cancel', { user: ALICE, body: '{}' });
+      expect(unsignedCancel.status === 401, `unsigned cancel -> 401 (${unsignedCancel.status})`);
+      const revokedCancel = await signedCall(S.B, ALICE, S.uid, 'POST', '/api/v1/vault/directory/reset/cancel', {});
+      expect(revokedCancel.status === 403, `revoked B cannot cancel (${revokedCancel.status})`);
+      const c1 = await signedCall(S.A, ALICE, S.uid, 'POST', '/api/v1/vault/directory/reset/cancel', {});
+      expect(c1.status === 200 && c1.data.cancelled === true, 'approver-signed cancel -> cancelled:true');
+      const c2 = await signedCall(S.A, ALICE, S.uid, 'POST', '/api/v1/vault/directory/reset/cancel', {});
+      expect(c2.status === 200 && c2.data.cancelled === false, 'second cancel -> cancelled:false');
+      const after = await http('GET', '/api/v1/vault/directory', { user: ALICE });
+      expect(after.status === 200 && !after.data.reset, 'directory intact, reset null');
     });
   } finally {
     await HUB.stop();
