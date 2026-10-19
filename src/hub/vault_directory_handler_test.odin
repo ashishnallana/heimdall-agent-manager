@@ -88,6 +88,9 @@ test_vault_directory_http_flow :: proc(t: ^testing.T) {
 	testing.expect_value(t, reg.status, 201)
 	code := device_test_json_string(reg.body, "user_code")
 	testing.expect_value(t, len(code), 14)
+	// L5: a repeat registration of the same key is idempotent and returns no code.
+	reg_again := dispatch(&graph, "POST", "/api/v1/vault/devices/register", strings.concatenate({`{"statement":"`, vt_escape(reg_st), `","proof_signature":`, vt_sign(&b, reg_st), "}"}), alice)
+	testing.expect(t, reg_again.status == 200 && !strings.contains(reg_again.body, "user_code"), reg_again.body)
 
 	// /device/verify resolves it as kind=browser; /device/approve never treats it as a grant.
 	ver := dispatch(&graph, "POST", "/api/v1/device/verify", strings.concatenate({`{"user_code":"`, code, `"}`}), alice)

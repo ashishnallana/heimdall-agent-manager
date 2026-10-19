@@ -287,7 +287,7 @@ vault_genesis_handler :: proc(ctx: rawptr, req: Request) -> Response {
 
 // ── POST /api/v1/vault/devices/register ─────────────────────────────────────
 // {statement, proof_signature}: a self-signed `register` statement. Idempotent per
-// key. Rate-limited per IP. The push notification never carries the code. Interactive
+// key; user_code/code_expires_at only in the response that issued the code. Rate-limited per IP. The push notification never carries the code. Interactive
 // browser session only.
 vault_register_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Vault_Directory_Handlers)(ctx)
@@ -316,7 +316,10 @@ vault_register_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	w_str(&b, "device_id", dev.device_id, true)
 	w_str(&b, "fingerprint", dev.fingerprint)
 	w_str(&b, "status", domain.vault_device_status_string(dev.status))
-	if dev.status == .Pending {
+	// The code is returned only by the call that issued it (insert or refresh of an
+	// expired code). A repeat registration of the same key gets no code: whoever
+	// holds a session cannot read back another tab's or device's pending code.
+	if res.newly_pending {
 		w_str(&b, "user_code", dev.user_code)
 		w_str(&b, "code_expires_at", dev.code_expires_at)
 	}
