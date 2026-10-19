@@ -39,8 +39,8 @@ export function taskChainSearchErrorMessage(error: unknown): string {
   const code = String((error as any)?.code || '');
   switch (code) {
     case 'bridge_offline': return 'No search Bridge is online.';
-    case 'vault_locked': return 'Unlock the vault to search task chains.';
-    case 'vault_search_reauthentication_required': return 'Re-enter your vault password once to enable task-chain search.';
+    case 'vault_locked': return "This device's vault keys are not installed; task-chain search is unavailable.";
+    case 'search_key_unavailable': return 'The task-chain search key is not ready on this device yet; try again shortly.';
     case 'search_not_ready': return 'Bridge search is still preparing.';
     case 'search_stale': return 'Bridge search results may be stale.';
     case 'deadline_exceeded':
@@ -50,10 +50,6 @@ export function taskChainSearchErrorMessage(error: unknown): string {
     case 'limit_exceeded': return 'The search result limit is invalid.';
     default: return 'Bridge search unavailable; showing loaded chains.';
   }
-}
-
-export function taskChainSearchRequiresReauthentication(error: unknown): boolean {
-  return String((error as any)?.code || '') === 'vault_search_reauthentication_required';
 }
 
 type SearchBridge = { bridge_id?: string; id?: string; status?: string; runtime_status?: string; vault_status?: string; task_chain_search_ready?: boolean };
@@ -186,12 +182,12 @@ export async function searchTaskChainsEncrypted(
       key = await waitForActiveTaskChainSearchKey();
     } catch {
       if (!getActiveVaultKey()) throw new ApiError('Vault key unavailable', 423, 'vault_locked');
-      throw new ApiError('Task-chain search key unavailable', 423, 'vault_search_reauthentication_required');
+      throw new ApiError('Task-chain search key unavailable', 423, 'search_key_unavailable');
     }
   }
   if (!key) {
     if (!getActiveVaultKey()) throw new ApiError('Vault key unavailable', 423, 'vault_locked');
-    throw new ApiError('Task-chain search key unavailable', 423, 'vault_search_reauthentication_required');
+    throw new ApiError('Task-chain search key unavailable', 423, 'search_key_unavailable');
   }
   const raw = await cookieJsonFetch('/bridges');
   const bridges: SearchBridge[] = raw?.bridges ?? (Array.isArray(raw) ? raw : []);
