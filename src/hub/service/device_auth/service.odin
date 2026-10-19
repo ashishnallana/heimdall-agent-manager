@@ -18,6 +18,7 @@
 package device_auth
 
 import "base:runtime"
+import "core:slice"
 import "core:strings"
 import "core:sync"
 import domain "odin_test:hub/domain"
@@ -213,6 +214,7 @@ Device_Info :: struct {
 	// the MAC with the code the operator typed; the hub cannot.
 	pair_key_mac:           string,
 	code_challenge:         string,
+	pair_salt:              string,
 }
 
 // GENERIC_UNKNOWN_CODE_ERROR is the single error returned for an unknown,
@@ -273,7 +275,35 @@ verify_with_ip :: proc(service: ^Device_Auth_Service, user_code, request_ip: str
 		server_time = now,
 		pair_key_mac = grant.pair_key_mac,
 		code_challenge = grant.code_challenge,
+		pair_salt = grant.pair_salt,
 	}, true, domain.Domain_Error{}
+}
+
+// pending_bridge_pair_salts lists the public pair_salt of up to `limit` live,
+// pending bridge grants, newest first (temp-allocated). An approver needs a request's
+// salt before it can derive the lookup from the code it was given (pairing stretch,
+// plan §1 "Pairing"). Bridge grants have no owner before approval, so the list is not
+// per user; it reveals only random salts.
+pending_bridge_pair_salts :: proc(service: ^Device_Auth_Service, limit: int) -> []string {
+	now := service.clock.now()
+	Entry :: struct {
+		salt: string,
+		at:   i64,
+	}
+	found := make([dynamic]Entry, 0, 8, context.temp_allocator)
+	sync.mutex_lock(&service.store.mutex)
+	for _, g in service.store.grants {
+		if g.status != .Pending || is_expired(g, now) || !is_bridge_grant(g) || g.pair_salt == "" do continue
+		append(&found, Entry{salt = strings.clone(g.pair_salt, context.temp_allocator), at = g.requested_at})
+	}
+	sync.mutex_unlock(&service.store.mutex)
+	slice.sort_by(found[:], proc(a, b: Entry) -> bool { return a.at > b.at })
+	out := make([dynamic]string, 0, min(len(found), max(limit, 0)), context.temp_allocator)
+	for e in found {
+		if len(out) >= limit do break
+		append(&out, e.salt)
+	}
+	return out[:]
 }
 
 // Approve_Input is the approve request body. owner_user_id is INTENTIONALLY

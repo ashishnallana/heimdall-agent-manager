@@ -424,9 +424,13 @@ MIGRATION_093_VAULT_SIGNED_LOG :: #load("migrations/093_vault_signed_log.sql", s
 // upgrade_vault_directory_schema re-creates them from 092 (pair_lookup, no user_code).
 MIGRATION_094_VAULT_HUB_BLIND_PAIRING :: #load("migrations/094_vault_hub_blind_pairing.sql", string)
 
+// 095: pairing stretch (pair_salt on pending devices); drops the vault tables (no
+// backward compatibility) and upgrade_vault_directory_schema re-creates them from 092.
+MIGRATION_095_VAULT_PAIRING_STRETCH :: #load("migrations/095_vault_pairing_stretch.sql", string)
+
 MIGRATION_075_CONVERSATION_LAUNCH_PREFERENCES :: #load("migrations/075_conversation_launch_preferences.sql", string)
 
-migration_order :: [98]string {
+migration_order :: [99]string {
 	"001_foundation.sql",
 	"002_owner_scoped_core.sql",
 	"003_device_tokens.sql",
@@ -525,6 +529,7 @@ migration_order :: [98]string {
 	"092_vault_device_directory.sql",
 	"093_vault_signed_log.sql",
 	"094_vault_hub_blind_pairing.sql",
+	"095_vault_pairing_stretch.sql",
 }
 
 // stop_before is a TEST SEAM: when non-empty, the apply loop stops in front of
@@ -999,6 +1004,7 @@ migration_sql :: proc(name, migrations_dir: string) -> string {
 	if name == "092_vault_device_directory.sql" do return strings.clone(MIGRATION_092_VAULT_DEVICE_DIRECTORY)
 	if name == "093_vault_signed_log.sql" do return strings.clone(MIGRATION_093_VAULT_SIGNED_LOG)
 	if name == "094_vault_hub_blind_pairing.sql" do return strings.clone(MIGRATION_094_VAULT_HUB_BLIND_PAIRING)
+	if name == "095_vault_pairing_stretch.sql" do return strings.clone(MIGRATION_095_VAULT_PAIRING_STRETCH)
 	if name == "081_antigravity_models.sql" do return strings.clone(MIGRATION_081_ANTIGRAVITY_MODELS)
 	if name == "080_copilot_launch_recipe.sql" do return strings.clone(MIGRATION_080_COPILOT_LAUNCH_RECIPE)
 	if name == "079_repair_provider_catalog_etag.sql" do return strings.clone(MIGRATION_079_REPAIR_PROVIDER_CATALOG_ETAG)

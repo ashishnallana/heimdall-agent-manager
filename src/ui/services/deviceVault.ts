@@ -36,7 +36,7 @@ import { isVaultSupported } from '../utils/vaultCrypto';
 import { pinsFromChain, trustedBridgeById, verifyDirectory, type VaultDirectory, type VerifiedChain } from '../utils/vaultDirectoryVerify';
 import { clearKeyringSession, getKeyringSession, installKeyringFromWrap, withKeyringBytes } from '../utils/vaultKeyringSession';
 import { buildGenesis, buildPairedRegistration, revokeWithRetry, rotateWithRetry, type RevokeOutcome, type RotateOutcome } from '../utils/vaultDeviceFlows';
-import { derivePairKeys, generatePairCode, pairCodeSymbols, PAIR_CODE_TTL_MS, verifyPairApproveMac } from '../utils/vaultPairing';
+import { derivePairKeys, generatePairCode, generatePairSalt, isPairHubOrigin, isPairSalt, pairCodeSymbols, PAIR_CODE_TTL_MS, verifyPairApproveMac, type PairContext } from '../utils/vaultPairing';
 import { kindPolicy } from '../utils/vaultStatements';
 import { deliverKeyringToBridges, type BridgeDeliveryDeps, type BridgeFanoutResult } from '../utils/vaultBridgeDelivery';
 import {
@@ -66,6 +66,8 @@ export interface DeviceVaultDeps {
   pollIntervalMs: number;
   /** Default label for this browser (signed into its approval; editable by the approver). */
   label: (identity: DeviceIdentity) => string;
+  /** The hub origin the pairing stretch binds (the API base this page talks to). */
+  hubOrigin: () => string;
 }
 
 interface Ctx {
@@ -96,6 +98,7 @@ function defaultDeps(): DeviceVaultDeps {
     bridges: null,
     pollIntervalMs: 4000,
     label: defaultBrowserLabel,
+    hubOrigin: vaultApi.pairingHubOrigin,
   };
 }
 
@@ -428,7 +431,7 @@ async function runRefresh(_reason: string): Promise<void> {
         dispatch(deviceVaultFailed({ code: 'pairing_unverified', message: PAIRING_LOST_MESSAGE }));
         return;
       }
-      const keys = await derivePairKeys(pending.code);
+      const keys = await derivePairKeys(pending.code, pendingPairContext(c, pending));
       if (stale()) return;
       if (!(await verifyPairApproveMac(keys, mine.approval_statement, chain.rootSignPub, self.pair_mac))) {
         dispatch(deviceVaultFailed({
@@ -536,28 +539,36 @@ const PAIR_GRACE_MS = 60_000;
 const PAIRING_LOST_MESSAGE = 'This device was approved, but it no longer holds a live pairing code to verify the approval with (the code expired or this browser\'s data was cleared). No keys were installed. Pair again: this browser gets a new identity and code; revoke the old entry in Settings → Devices on your other device.';
 
 interface PendingPairing {
-  /** The secret pairing code S ("XXXX-XXXX-XXXX"); never sent anywhere. */
+  /** The secret pairing code S ("XXXX-XXXX-XXXX-XX"); never sent anywhere. */
   code: string;
+  /** Public salt of the pairing stretch, sent with the registration. */
+  pairSalt: string;
+  /** The hub origin the code was bound to. */
+  hubOrigin: string;
   issuedAt: number;
   expiresAt: number;
 }
 
 async function loadPendingCode(c: Ctx): Promise<PendingPairing | null> {
   const v = await d().kv.get(`pending:${c.userId}`) as Partial<PendingPairing> | undefined;
-  if (!v || !pairCodeSymbols(v.code) || !Number.isFinite(v.issuedAt) || !Number.isFinite(v.expiresAt)) return null;
-  return { code: String(v.code), issuedAt: Number(v.issuedAt), expiresAt: Number(v.expiresAt) };
+  if (!v || !pairCodeSymbols(v.code) || !isPairSalt(v.pairSalt) || !isPairHubOrigin(v.hubOrigin) || !Number.isFinite(v.issuedAt) || !Number.isFinite(v.expiresAt)) return null;
+  return { code: String(v.code), pairSalt: v.pairSalt, hubOrigin: v.hubOrigin, issuedAt: Number(v.issuedAt), expiresAt: Number(v.expiresAt) };
+}
+
+function pendingPairContext(c: Ctx, p: Pick<PendingPairing, 'pairSalt' | 'hubOrigin'>): PairContext {
+  return { kind: 'browser', userId: c.userId, hubOrigin: p.hubOrigin, pairSalt: p.pairSalt };
 }
 
 async function register(c: Ctx, dir: VaultDirectory): Promise<void> {
   const identity = c.identity!;
-  // A fresh secret code per registration; kept locally (IndexedDB) until paired.
+  // A fresh secret code and public salt per registration; kept locally (IndexedDB) until paired.
   const code = generatePairCode();
-  const keys = await derivePairKeys(code);
   const issuedAt = Date.now();
-  const pending: PendingPairing = { code, issuedAt, expiresAt: issuedAt + PAIR_CODE_TTL_MS };
+  const pending: PendingPairing = { code, pairSalt: generatePairSalt(), hubOrigin: d().hubOrigin(), issuedAt, expiresAt: issuedAt + PAIR_CODE_TTL_MS };
+  const keys = await derivePairKeys(code, pendingPairContext(c, pending));
   const body = await buildPairedRegistration(identity, d().label(identity), keys, issuedAt);
   await d().kv.put(`pending:${c.userId}`, pending);
-  const res = await d().api.postVaultRegister(body.statement, body.signature, body.pairLookup, body.pairKeyMac);
+  const res = await d().api.postVaultRegister(body.statement, body.signature, body.pairLookup, body.pairKeyMac, pending.pairSalt);
   if (res.device_id !== identity.deviceId || res.fingerprint !== identity.fingerprint) {
     throw new Error('The hub registered a different device id or fingerprint than this device computed');
   }

@@ -214,6 +214,7 @@ for (const which of ['pins', 'identity'] as const) {
     let registered = 0;
     dv.configureDeviceVault({
       kv,
+      hubOrigin: () => 'https://hub.example.test:443',
       api: fakeApi({
         fetchVaultDirectory: async () => ({ version: 4 }),
         fetchVaultSelf: async () => null,

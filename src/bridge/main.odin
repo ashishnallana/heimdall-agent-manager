@@ -252,6 +252,20 @@ bridge_hub_canonical_base :: proc(hub_url: string, allocator := context.allocato
 	return strings.concatenate({"https://" if secure else "http://", host, ":", port, path}, allocator), true
 }
 
+// bridge_hub_pair_origin is the hub origin the pairing stretch binds
+// (vault.Pair_Context.hub_origin): the canonical base without its path prefix,
+// "scheme://host:port". The approving browser computes the same from the API base it
+// talks to (pairHubOrigin in src/ui/utils/vaultPairing.ts).
+bridge_hub_pair_origin :: proc(hub_url: string, allocator := context.allocator) -> (string, bool) {
+	base, ok := bridge_hub_canonical_base(hub_url, context.temp_allocator)
+	if !ok do return "", false
+	scheme_end := strings.index(base, "://") + len("://")
+	origin := base
+	if slash := strings.index_byte(base[scheme_end:], '/'); slash >= 0 do origin = base[:scheme_end + slash]
+	if !vault.valid_pair_hub_origin(origin) do return "", false
+	return strings.clone(origin, allocator), true
+}
+
 bridge_config_line_key :: proc(trimmed_line: string) -> string {
 	eq := strings.index_byte(trimmed_line, '=')
 	if eq <= 0 do return ""

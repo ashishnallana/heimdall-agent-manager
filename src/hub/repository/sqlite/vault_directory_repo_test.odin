@@ -35,7 +35,7 @@ vd_device :: proc(id, key: string, status: domain.Vault_Device_Status, code := "
 		device_id = id, user_id = VD_USER, kind = "browser", label = id,
 		sign_alg = "ecdsa-p256-sha256", wrap_alg = "ecdh-p256-hkdf-sha256-aes256gcm",
 		sign_public_key = key, ecdh_public_key = key, fingerprint = "0000 0000 0000 0000",
-		status = status, pair_lookup = code, pair_key_mac = "m" if code != "" else "", register_statement = "r" if code != "" else "", code_expires_at = VD_LATER if code != "" else "",
+		status = status, pair_lookup = code, pair_key_mac = "m" if code != "" else "", pair_salt = "s" if code != "" else "", register_statement = "r" if code != "" else "", code_expires_at = VD_LATER if code != "" else "",
 		created_at = VD_NOW,
 	}
 }

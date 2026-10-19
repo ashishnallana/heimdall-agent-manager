@@ -117,15 +117,17 @@ test_provision_identity :: proc(bridge_id: string, owner: string = TEST_VAULT_US
 	return bridge_unseal_identity_commit_enrollment(bridge_id, owner)
 }
 
-// The pairing code a test enrollment "printed" (hub-blind pairing).
-TEST_PAIR_CODE :: "K7QX-M2PA-ZD4H"
+// The stretched pairing key of a test enrollment (hub-blind pairing). Tests skip the
+// PBKDF2 stretch itself (pinned by the vault vectors) and start from its output.
+TEST_PAIR_STRETCHED_KEY :: "7e57000000000000000000000000000000000000000000000000000000007e57"
 
 test_pair_keys :: proc() -> vault.Pair_Keys {
-	keys, _ := vault.pair_keys_derive(TEST_PAIR_CODE)
-	return keys
+	k: [32]byte
+	_ = vault.hex_decode_into(k[:], TEST_PAIR_STRETCHED_KEY)
+	return vault.pair_keys_from_stretched(k[:])
 }
 
-// test_pair_mac is the approver's pair_mac for a chain proof (under TEST_PAIR_CODE).
+// test_pair_mac is the approver's pair_mac for a chain proof (under test_pair_keys).
 test_pair_mac :: proc(proof_json: string) -> string {
 	Proof :: struct {
 		root_sign_pub:    string,

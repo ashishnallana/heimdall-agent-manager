@@ -42,8 +42,11 @@ CREATE TABLE IF NOT EXISTS vault_devices (
   -- Hub-blind pairing: the pending request is found by pair_lookup (derived from the
   -- code the new device shows; the hub never sees the code), the approver checks
   -- pair_key_mac over register_statement, and pair_mac is stored at approval for the
-  -- new device to verify. Pending fields are NULL once approved.
+  -- new device to verify. pair_salt is the public per-request salt of the pairing
+  -- stretch (the approver fetches it to derive the lookup). Pending fields are NULL
+  -- once approved.
   pair_lookup           TEXT,
+  pair_salt             TEXT,
   pair_key_mac          TEXT,
   register_statement    TEXT,
   pair_mac              TEXT,

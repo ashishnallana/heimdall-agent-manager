@@ -149,7 +149,7 @@ test_bridge_enrollment_end_to_end :: proc() {
 		"{\"client\":\"ham-bridge\",\"device_label\":\"dawnstar\",\"os\":\"linux\",\"app_version\":\"0.9.1\"",
 		",\"bridge_public_key\":\"", BPK_A, "\"",
 		",\"bridge_identity_public_key\":\"", id_a.sign_pub, "\",\"bridge_identity_proof\":", sm_enroll_proof(&id_a, BPK_A, PKCE_CHALLENGE),
-		",\"os_user\":\"tanmay\",\"pair_lookup\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"pair_key_mac\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"",
+		",\"os_user\":\"tanmay\",\"pair_salt\":\"0123456789abcdef0123456789abcdef\",\"pair_lookup\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"pair_key_mac\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"",
 		",\"code_challenge\":\"", PKCE_CHALLENGE, "\",\"code_challenge_method\":\"S256\"}",
 	})
 	auth_resp := api_http.device_authorize_handler(rawptr(&graph.device_auth_handlers), api_http.Request{
@@ -364,7 +364,7 @@ seed_bridge_grant :: proc(graph: ^app.App_Graph, label, public_key, challenge: s
 		"{\"client\":\"ham-bridge\",\"device_label\":\"", label, "\",\"os\":\"linux\"",
 		",\"bridge_public_key\":\"", public_key, "\"",
 		",\"bridge_identity_public_key\":\"", identity.sign_pub, "\",\"bridge_identity_proof\":", sm_enroll_proof(identity, public_key, challenge),
-		",\"code_challenge\":\"", challenge, "\",\"code_challenge_method\":\"S256\",\"pair_lookup\":\"", vault.log_entry_hash(label, context.temp_allocator), "\",\"pair_key_mac\":\"", vault.log_entry_hash(public_key, context.temp_allocator), "\"}",
+		",\"code_challenge\":\"", challenge, "\",\"code_challenge_method\":\"S256\",\"pair_salt\":\"0123456789abcdef0123456789abcdef\",\"pair_lookup\":\"", vault.log_entry_hash(label, context.temp_allocator), "\",\"pair_key_mac\":\"", vault.log_entry_hash(public_key, context.temp_allocator), "\"}",
 	})
 	resp := api_http.device_authorize_handler(rawptr(&graph.device_auth_handlers), api_http.Request{
 		method = "POST", path = "/api/v1/device/authorize", body = body,
