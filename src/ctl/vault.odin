@@ -322,3 +322,11 @@ ctl_vault_keyring_for_write :: proc(args: []string, transport: Ctl_Transport = {
 ctl_user_transport :: proc(base, token: string) -> Ctl_Transport {
 	return Ctl_Transport{kind = .User, user_base_url = base, user_token = token}
 }
+
+// ctl_seal_if seals value when encrypt is set (and it is not empty or already a
+// valid envelope); with encrypt unset it is returned as is, which
+// ctl_vault_keyring_for_write only allows for a definitely unconfigured vault.
+ctl_seal_if :: proc(value: string, kr: ^vault.Vault_Keyring, encrypt: bool) -> string {
+	if !encrypt || value == "" || is_vault_armored(value) do return value
+	return ctl_seal_or_exit(value, kr)
+}

@@ -137,3 +137,18 @@ test_ctl_vault_write_policy_fails_closed :: proc(t: ^testing.T) {
 	tok, ok := ctl_vault_seal("hello", kr, context.temp_allocator)
 	testing.expect(t, ok && is_vault_armored(tok), "a real token is armored")
 }
+
+@(test)
+test_ctl_seal_if_seals_hub_mode_fields :: proc(t: ^testing.T) {
+	kr := tkr("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	defer vault.keyring_wipe(kr)
+	sealed := ctl_seal_if("chain title", kr, true)
+	testing.expect(t, is_vault_armored(sealed), "sealed when a keyring is in hand")
+	plain, res := ctl_vault_open(sealed, kr, context.temp_allocator)
+	testing.expect(t, res == .Ok && plain == "chain title", "round-trips")
+	testing.expect_value(t, ctl_seal_if(sealed, kr, true), sealed)
+	testing.expect_value(t, ctl_seal_if("", kr, true), "")
+	testing.expect_value(t, ctl_seal_if("plain", nil, false), "plain")
+	// A fake envelope prefix is sealed, not passed through.
+	testing.expect(t, ctl_seal_if("vault:v2:e1:fake", kr, true) != "vault:v2:e1:fake", "a bare prefix is still sealed")
+}
