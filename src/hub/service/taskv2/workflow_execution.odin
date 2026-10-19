@@ -6,6 +6,7 @@ import "core:encoding/json"
 import "core:fmt"
 import "core:strings"
 import "core:slice"
+import "core:strconv"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 import platform "odin_test:hub/platform"
@@ -70,7 +71,9 @@ workflow_run_in_uow :: proc(svc: ^Service, u: ^Uow, owner: domain.User_ID, actor
 	if strings.trim_space(input.request_id) == "" do return {}, false, domain.domain_error(.Validation_Failed, "request_id is required")
     inputs := strings.trim_space(input.inputs_json)
     if inputs == "" do inputs = "{}"
-    value, parse_err := json.parse(inputs, allocator = context.temp_allocator)
+    // parse_integers keeps `3` an integer, so snapshots and {{inputs.*}} /
+    // {{item}} placeholders render "3", not a float.
+    value, parse_err := json.parse(inputs, parse_integers = true, allocator = context.temp_allocator)
     if parse_err != nil do return {}, false, domain.domain_error(.Validation_Failed, "inputs must be a JSON object")
     if _, object := value.(json.Object); !object do return {}, false, domain.domain_error(.Validation_Failed, "inputs must be a JSON object")
     inputs = workflow_canonical_json(value)
@@ -107,6 +110,7 @@ workflow_run_in_uow :: proc(svc: ^Service, u: ^Uow, owner: domain.User_ID, actor
 			return {}, false, domain.domain_error(.Validation_Failed, fmt.tprintf("missing required input: %s", field.name))
 		}
 	}
+	if err := validate_workflow_run_inputs(parsed, inputs); err.code != .None do return {}, false, err
 	now := platform.clock_now(svc.clock)
 	run := domain.Workflow_Run{
 		run_id = domain.Workflow_Run_ID(platform.generate_id(svc.ids, "wrun_")), chain_id = chain.chain_id, owner_user_id = owner,
@@ -469,6 +473,12 @@ workflow_canonical_json :: proc(value: json.Value) -> string {
    strings.write_string(&out, workflow_canonical_json(item))
   }
   strings.write_byte(&out, ']'); return strings.to_string(out)
+ case json.Float:
+  // Shortest round-trip form ("1.5", not "1.5000000000000000").
+  buf := make([]byte, 64, context.temp_allocator)
+  text := strconv.write_float(buf, f64(v), 'g', -1, 64)
+  if strings.has_prefix(text, "+") do text = text[1:] // strconv always signs
+  return strings.clone(text, context.temp_allocator)
  case:
   encoded, err := json.marshal(value, allocator = context.temp_allocator)
   if err != nil do return "null"

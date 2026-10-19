@@ -608,11 +608,11 @@ bridge_pty_host_deliver_shell_resize :: proc{
 
 
 // bridge_pty_host_message_notice renders the agent_message notice text (pure, so
-// it is unit-testable). Mirrors the wrapper's wrapper_bridge_deliver_message_push.
+// it is unit-testable). Names the documented `ham-ctl chat read` verb (no `agent` prefix).
 bridge_pty_host_message_notice :: proc(sender: string, sender_display_name: string = "") -> string {
 	s := sender_display_name if strings.trim_space(sender_display_name) != "" else sender
 	if strings.trim_space(s) == "" do s = "user"
-	return strings.concatenate({"New message from ", s, " \u2014 run './.heimdall/bin/ham-ctl agent chat read' to view."})
+	return strings.concatenate({"New message from ", s, " \u2014 run './.heimdall/bin/ham-ctl chat read' to view."})
 }
 
 // bridge_pty_host_task_nudge_notice renders the task-nudge notice text (pure).

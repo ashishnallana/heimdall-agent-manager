@@ -328,6 +328,10 @@ ctl_v2_task_chain :: proc(endpoint, token: string, tokens, args: []string) {
 			json_kv("body", json_object_from_slice(fields[:])),
 		)
 		ctl_agent_call_task(endpoint, token, "agent.rest.request", params, args)
+	case "graph", "depend", "remove-dependency", "scope", "complete":
+		// Mixed-work graph verbs: same parser as user mode, relayed through the
+		// authenticated agent.work.* Bridge routes (Hub enforces owner/coordinator).
+		ctl_mixed_work_command(Ctl_Transport{kind = .Agent, agent_endpoint = endpoint, agent_token = token}, verb, args, pos(tokens, 1))
 	case:
 		print_agent_help([]string{"task-chain"})
 	}
@@ -444,9 +448,19 @@ ctl_v2_task :: proc(endpoint, token: string, tokens, args: []string) {
 		ctl_agent_call(endpoint, token, "agent.task.comment", params)
 	case "depend":
 		tid := pos(tokens, 1)
-		on := option_value(args, "--on", "")
-		if tid == "" || on == "" { print_agent_help([]string{"task"}); return }
-		ctl_agent_call(endpoint, token, "agent.task.depend", json_object(json_kv("task_id", tid), json_kv("depends_on_task_id", on)))
+		on := option_value(args, "--on", option_value(args, "--depends-on", ""))
+		if tid == "" { print_agent_help([]string{"task"}); return }
+		kind, prereq, msg := ctl_task_depend_target(on)
+		switch kind {
+		case .Invalid:
+			ctl_print_error_exit(msg)
+		case .Task:
+			ctl_agent_call_task(endpoint, token, "agent.task.depend", json_object(json_kv("task_id", tid), json_kv("depends_on_task_id", prereq)), args)
+		case .Workflow_Run:
+			// A whole workflow run is a chain-level graph prerequisite (the canonical
+			// mixed-work edge), not a ticket row: route through agent.work.depend.
+			ctl_agent_call_task(endpoint, token, "agent.work.depend", ctl_task_depend_workflow_params(option_value(args, "--chain", ""), tid, prereq), args)
+		}
 	case "update":
 		// Edit an already-created task: title/description/priority/assignee/
 		// reviewers/dependencies/brief. Relayed as a PATCH to the task; only the
@@ -1372,7 +1386,7 @@ ctl_agentmode_task_create_params :: proc(args: []string) -> string {
 	if a := option_value(args, "--assignee", ""); a != "" do append(&fields, ctl_v2_assignee_field(a))
 	if has_flag(args, "--reviewer") do append(&fields, ctl_v2_reviewers_field(args))
 	if has_flag(args, "--require-user-approval") do append(&fields, `"requires_user_approval":true`)
-	if deps := option_value(args, "--depends-on", ""); deps != "" do append(&fields, ctl_v2_json_string_array("depends_on", deps))
+	if deps, present := ctl_task_depends_on_flag(args, "--depends-on"); present && deps != "" do append(&fields, ctl_v2_json_string_array("depends_on", deps))
 	if b := option_value(args, "--bridge", ""); b != "" do append(&fields, json_kv("bridge_id", b))
 	// Task System v2 brief: --goal/--acceptance/--verify/--input/--review-role/
 	// --auto-submit over an optional --brief-file base (taskv2_cmds.odin).
@@ -1413,7 +1427,7 @@ ctl_agentmode_task_update_params :: proc(tid: string, args: []string) -> string 
 	if has_flag(args, "--reviewer") do append(&fields, ctl_v2_reviewers_field(args))
 	if has_flag(args, "--require-user-approval") do append(&fields, `"requires_user_approval":true`)
 	if has_flag(args, "--no-require-user-approval") do append(&fields, `"requires_user_approval":false`)
-	if has_flag(args, "--depends-on") do append(&fields, ctl_v2_json_string_array("depends_on", option_value(args, "--depends-on", "")))
+	if deps, present := ctl_task_depends_on_flag(args, "--depends-on"); present do append(&fields, ctl_v2_json_string_array("depends_on", deps))
 	if has_flag(args, "--bridge") do append(&fields, json_kv("bridge_id", option_value(args, "--bridge", "")))
 	// brief fields are sent only when given; the hub merges them into the stored brief.
 	if brief, ok := ctl_task_brief_field(args); ok do append(&fields, brief)
@@ -1865,6 +1879,27 @@ print_help_task_chain :: proc() {
 	fmt.println("  directory <add|update|remove|list>  Manage task chain relevant directories.")
 	fmt.println("  fleet <list|set>                    Manage chain fleet capacities, roles, and placement.")
 	fmt.println("")
+	fmt.println("MIXED-WORK GRAPH (every chain is mixed_work: tickets and workflow runs share one graph)")
+	fmt.println("  Refs are typed: task:<task-id> (an ordinary ticket) or workflow_run:<run-id> (a whole run;")
+	fmt.println("  stage tasks are engine-managed and cannot be graph endpoints). [<chain-id>] defaults to")
+	fmt.println("  your chain (or --chain <id>). Mutations need the chain owner or its coordinator.")
+	fmt.println("  graph [<chain-id>]                  Dependencies (with dependency ids), scope decisions,")
+	fmt.println("                                      work_revision and completion summary.")
+	fmt.println("  depend [<chain-id>] --item <ref> --on <ref>")
+	fmt.println("                                      Add a prerequisite edge (idempotent; the dependent must")
+	fmt.println("                                      not have started). The dependent becomes eligible only")
+	fmt.println("                                      after the prerequisite SUCCEEDS (failed/cancelled never do).")
+	fmt.println("  remove-dependency [<chain-id>] --dependency <wdep-id> --reason <text>")
+	fmt.println("                                      Remove an edge (kept in history for audit).")
+	fmt.println("  scope [<chain-id>] --item <ref> --action include|exclude --reason <text>")
+	fmt.println("                                      Record a scope decision (excluded work never satisfies a")
+	fmt.println("                                      prerequisite; it must be terminal before completion).")
+	fmt.println("  complete <chain-id> --expected-work-revision <N> --summary <text>")
+	fmt.println("                                      Complete the chain (explicit id required; N comes from")
+	fmt.println("                                      `graph`; a stale N is a work_changed conflict). Every")
+	fmt.println("                                      included ticket/run must have succeeded. Finishing a")
+	fmt.println("                                      batch never completes the chain.")
+	fmt.println("")
 	fmt.println("EXAMPLES")
 	fmt.println("  ham-ctl task-chain list --mine")
 	fmt.println("  ham-ctl task-chain show chain_abc")
@@ -1874,6 +1909,9 @@ print_help_task_chain :: proc() {
 	fmt.println("  ham-ctl task-chain fleet list chain_abc")
 	fmt.println("  ham-ctl task-chain fleet set chain_abc --agent agt_worker --capacity 4 --roles worker,reviewer --bridge brg_1 --provider claude --model sonnet")
 	fmt.println("  ham-ctl task-chain publish chain_abc")
+	fmt.println("  ham-ctl task-chain graph")
+	fmt.println("  ham-ctl task-chain depend --item task:task_report --on workflow_run:wrun_research")
+	fmt.println("  ham-ctl task-chain complete chain_abc --expected-work-revision 7 --summary 'All work merged; evidence: ...'")
 }
 
 print_help_task_chain_fleet :: proc() {
@@ -1936,8 +1974,13 @@ print_help_task :: proc() {
 	fmt.println("                                          brief_incomplete lists the missing fields per task.")
 	fmt.println("  comment <task-id> --body <t>            Add a comment (the only way to comment).")
 	fmt.println("      [--notify <id,id>]")
-	fmt.println("  depend <task-id> --on <task-id>         Add a single dependency (use `update --depends-on`")
-	fmt.println("                                          to replace the whole dependency list).")
+	fmt.println("  depend <task-id> --on <prerequisite>    Add one prerequisite to a ticket. <prerequisite> is")
+	fmt.println("      [--chain <id>]                      <task-id>, task:<task-id>, or workflow_run:<run-id> (a")
+	fmt.println("                                          chain-level graph edge on the whole run; --chain defaults")
+	fmt.println("                                          to your chain). Other kinds are rejected; use")
+	fmt.println("                                          `task-chain depend` for run-on-ticket or run-on-run edges.")
+	fmt.println("                                          `update --depends-on` replaces the ticket-id list and takes")
+	fmt.println("                                          ticket ids only.")
 	fmt.println("")
 	fmt.println("  --assignee / --reviewer take durable agent ids (agt_...); --reviewer is repeatable or")
 	fmt.println("  comma-separated. Instance pins (inst_...) were removed in Task System v2 and are rejected.")

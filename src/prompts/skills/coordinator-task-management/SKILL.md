@@ -33,16 +33,24 @@ Configure shared fleet roles before starting a recipe; runs never widen the flee
 ./.heimdall/bin/ham-ctl task-chain depend --chain <chain-id> --item task:<validation-id> --on workflow_run:<run-id>
 ```
 
+To fan out over a list you already know, define a stage with
+`"for_each": "inputs.<array-input>"` and pass the list with `--inputs-file`; no
+echo stage is needed. An empty list completes that stage with zero tasks. See
+ham-ctl-reference "Authoring workflow definitions" for item placeholders.
+
 Creation request keys are caller-selected and reused on network retries. A key
 with different inputs fails. Retry creates a new execution with fresh tasks and
 preserves all old attempts. Stage/cascade retry is unsupported. If outputs have
 already been consumed, retry/reopen is refused with consumer references; create
 replacement work and explicitly change the future dependency graph instead.
 
-Use `task-chain graph --chain <id>` to inspect dependencies, scope history, and
+Use `task-chain graph [<chain-id>]` to inspect dependencies, scope history, and
 `work_revision`. Dependencies can join any ticket or whole run in this same chain.
+For a ticket waiting on a run, `task depend <task-id> --on workflow_run:<run-id>`
+is the same graph edge; `--depends-on` on `task create`/`update` takes ticket ids only.
 Cancelled, failed, or excluded items do not satisfy prerequisites. Remove an edge
-explicitly with `task-chain remove-dependency --chain <id> --dependency <id> --reason "<why>"`.
+explicitly with `task-chain remove-dependency --dependency <id> --reason "<why>"`.
+The graph verbs default to your chain; only you (the coordinator) or the owner may change it.
 
 A new proposal can add work to an active chain mid-work. Its `kind` is `task` or
 `workflow_run`, describing the proposed item, never changing the chain type.

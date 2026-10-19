@@ -176,7 +176,7 @@ globally unique — you rarely need `--chain`).
 - `task update <task-id> [--title <t>] [--description <d>] [--priority p0|p1|p2] [--assignee <agt_id>] [--reviewer <agt_id,agt_id,...>] [--depends-on <id,id>] [--bridge <bridge-id>] [--goal <g>] [--acceptance <a>]... [--verify <cmd>] [--input <ref>]... [--review-role <r>]... [--output-schema <task_list.v1|findings.v1>] [--on-output-workflow <name>] [--auto-submit] [--require-independent-verify] [--require-user-approval | --no-require-user-approval] [--brief-file <path.json>]` — edit an existing task.
 - `task publish <task-id>` — validate the task's brief and publish it (`422 brief_incomplete` lists any missing fields).
 - `task comment <task-id> --body <t>` (or `--stdin`) `[--notify <id,id>]` — add a comment.
-- `task depend <task-id> --on <task-id>` — add a single dependency (`update --depends-on` replaces the whole list).
+- `task depend <task-id> --on <task-id>|task:<task-id>|workflow_run:<run-id> [--chain <id>]` — add one prerequisite to a ticket. A `workflow_run:` prerequisite becomes a chain-level graph edge on the whole run (the ticket stays ineligible until that run succeeds). Other typed refs (stage keys, `workflow:` names, issues) are rejected with guidance; use `task-chain depend` for run-on-ticket or run-on-run edges. `--depends-on` on `task create`/`task update` takes ticket ids only (`task:<id>` accepted) and `update --depends-on` replaces the whole list.
 - `task fetch <task-id> <ref>` — fetch one event (`#<event_id>`), output (`output:<task_id>`), facet (`facet:<task_id>:<attempt_no>:<kind>`), or file-at-commit (`dir:<dir_id>:<rev>:<path>`, `<path>@<rev>`, or `<path>`) referenced by `TASK.md`.
 - `lease next` — inspect the lease you hold (status `current`) or claim the next ready task inline (status `granted`), updating `<run_dir>/TASK.md`; returns `none` when idle.
 - `lease heartbeat [--note <text>]` — extend the lease TTL and optionally record a progress note. On `409 lease_lost`, stop immediately without touching the working tree.
@@ -197,7 +197,7 @@ The v1 verbs `task status`, `task vote`, `task nudge` and `task set-current` no 
 All chains have `kind: mixed_work`. Choose tickets or workflow runs per item while
 keeping the same chain, coordinator, team, and directories. See coordinator-task-management.
 
-## workflow ? runs inside a mixed-work task chain
+## workflow — runs inside a mixed-work task chain
 - `workflow templates` lists built-ins and owner definitions; `workflow define --file <definition.json>` saves a version.
 - `workflow run <ref> --chain <id> --request-id <stable-key> [--title <text>] [--input k=v ...] [--inputs-file <json>] [--after task:<id>|workflow_run:<id> ...]` snapshots a recipe into that chain. Reuse the request key on network retries.
 - `workflow list --chain <id>` lists runs and the chain work revision.
@@ -209,12 +209,24 @@ keeping the same chain, coordinator, team, and directories. See coordinator-task
 - Agents may omit `--chain` on create/list to use their own chain; run IDs are explicit.
 - Configure the chain fleet before starting; recipes never create fleet rows.
 
+### Authoring workflow definitions (fan-out)
+- A stage may set `for_each` to fan out one task per array item. Two sources are supported:
+  - Stage output: `"<stage>.outputs[0].<field>"` (also `<stage>.output.<field>`, `stage.<stage>.output.<field>`, or `<stage>.outputs[].<field>` to concatenate every instance's array). The stage must be in `depends_on` and declare an output contract.
+  - Workflow input: `"inputs.<name>"` (alias `workflow.input.<name>`), a top-level input that is a JSON array. No echo stage is needed. If the definition declares `inputs`, the name must be declared with `"type": "array"` (or `list`, `array<...>`, `T[]`); an array `default` is allowed. Nested paths (`inputs.a.b`) are rejected at `workflow define`.
+- Supply array inputs with `--inputs-file <json>` (for example `{"subtopics":[{"key":"auth","title":"Auth"},"billing"]}`); `--input k=v` always passes a string.
+- A missing or `null` input uses the declared array `default`; otherwise `workflow run` rejects it, and also rejects a non-array value or more than 256 items, before anything is created, so a bad input never dispatches part of a run. The value is resolved from the run's immutable input snapshot; `workflow retry` re-expands from that same snapshot.
+- Items expand in array order: item *i* becomes `stage_index` *i*, and re-reconciliation never duplicates a task.
+- An empty array is valid: the stage completes with zero tasks and its downstream stages start as usual.
+- At most 256 items per fan-out stage (input or stage output). A stage output over the limit fails the run at expansion (`workflow_fan_out_too_large`) without creating that stage's tasks.
+- Placeholders per item: `{{item.<field>}}` for object items (`{{item.key}}` falls back to `id`, then `item_<index>`; an item `priority` overrides the stage priority), `{{item}}` for the whole item (a string item renders unquoted, a number as written, an object as JSON), plus `{{stage.index}}` and `{{stage.count}}`. Scalar items have no fields: `{{item.<field>}}` is empty (except `{{item.key}}`, which is `item_<index>`) and item `priority` does not apply. `{{inputs.<name>}}` for an array input renders the JSON array (or its declared default).
+
 ### Mixed-work graph, scope, and completion
-- `task-chain graph --chain <id>` reads dependency/scope history and `work_revision`.
-- `task-chain depend --chain <id> --item task:<id>|workflow_run:<id> --on task:<id>|workflow_run:<id>` adds an acyclic prerequisite before the consumer starts.
-- `task-chain remove-dependency --chain <id> --dependency <id> --reason <text>` explicitly removes an edge without erasing provenance or consumption receipts.
-- `task-chain scope --chain <id> --item task:<id>|workflow_run:<id> --action include|exclude --reason <text>` records a scope decision. Exclusion requires terminal work and does not unblock dependents.
-- `task-chain complete --chain <id> --expected-work-revision <n> --summary <text>` explicitly accepts the final result. Every included item must succeed, with no leases or pending proposal. Read a fresh graph revision first. Finishing a batch never closes the chain automatically.
+Same verbs and flags in agent mode and user mode. The chain is positional (`task-chain graph <chain-id>`) or `--chain <id>`; `graph`, `depend`, `remove-dependency` and `scope` default to your own chain, `complete` always needs an explicit chain id. Mutations require the chain owner or its coordinator; other agents get `403 Forbidden`.
+- `task-chain graph [<chain-id>]` reads dependency (with dependency ids) and scope history plus `work_revision`.
+- `task-chain depend [<chain-id>] --item task:<id>|workflow_run:<id> --on task:<id>|workflow_run:<id>` adds an acyclic prerequisite before the consumer starts (idempotent).
+- `task-chain remove-dependency [<chain-id>] --dependency <id> --reason <text>` explicitly removes an edge without erasing provenance or consumption receipts.
+- `task-chain scope [<chain-id>] --item task:<id>|workflow_run:<id> --action include|exclude --reason <text>` records a scope decision. Exclusion requires terminal work and does not unblock dependents.
+- `task-chain complete <chain-id> --expected-work-revision <n> --summary <text>` explicitly accepts the final result. Every included item must succeed, with no leases or pending proposal. Read a fresh graph revision first (a stale one is a `work_changed` conflict). Finishing a batch never closes the chain automatically.
 - Generated stage tasks cannot be manually created, edited, reopened, or cancelled; use run controls. Historical executions remain readable.
 
 ## issue — track, discuss, and vote on issues and blockers
