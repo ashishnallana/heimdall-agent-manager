@@ -167,6 +167,7 @@ export async function openVerifiedWrap(wrapJson: unknown, exp: OpenWrapExpectati
     throw new WrapRejectedError(`cannot open (${(err as Error).message})`);
   }
   try {
+    if (parsed.vaultId !== exp.chain.vaultId) throw new WrapRejectedError('the keyring belongs to another vault than the verified root');
     const cur = parsed.entries.find((e) => e.epoch === parsed.currentEpoch)!;
     const commit = toLowerHex(await epochCommit(cur.key, exp.userId, parsed.currentEpoch));
     const signed = exp.chain.commits.get(parsed.currentEpoch) ?? '';

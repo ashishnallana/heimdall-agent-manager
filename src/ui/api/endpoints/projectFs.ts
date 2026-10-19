@@ -224,17 +224,34 @@ function bridgeParam(bridgeId?: string): string {
   return bridgeId ? `bridge_id=${encodeURIComponent(bridgeId)}` : '';
 }
 
+type FsScope = { projectId?: string; chainId?: string; directoryId?: string; agentInstanceId?: string };
+
 /**
- * Seal file content for `bridgeId` to write at exactly `path`
- * (heimdall-fs-write-v2 AAD). There is no plaintext write: a missing key or bridge
- * id throws and the request is never sent.
+ * The canonical sandbox root the bridge writes under for `scope` (P4 root binding):
+ * the `root` its fs results report, read with a one-entry listing of the scope root.
+ * A sealed write is bound to it, so the hub cannot replay a write sealed for one
+ * project into another project on the same bridge.
  */
-async function sealFsWrite(content: string, bridgeId: string, path: string): Promise<string> {
+export async function resolveFsWriteRoot(scope: FsScope, bridgeId: string): Promise<string> {
+  const qs = new URLSearchParams({ limit: '1' });
+  if (bridgeId && !scope.agentInstanceId) qs.set('bridge_id', bridgeId);
+  const data = (await cookieJsonFetch(`${base(scope)}?${qs.toString()}`)) as Partial<FsListResult>;
+  const root = typeof data?.root === 'string' ? data.root : '';
+  if (!root) throw new Error('The bridge did not report the project root; the file was not sent');
+  return root;
+}
+
+/**
+ * Seal file content for `bridgeId` to write at exactly `path` under `root`
+ * (heimdall-fs-write-v3 AAD). There is no plaintext write: a missing key, bridge id
+ * or root throws and the request is never sent.
+ */
+async function sealFsWrite(content: string, bridgeId: string, root: string, path: string): Promise<string> {
   if (typeof content !== 'string') throw new Error('file content must be text');
   const activeKey = getActiveVaultKey();
   if (!activeKey) throw new Error('Vault key unavailable: file content cannot be encrypted');
   if (!bridgeId) throw new Error('No bridge selected for this write');
-  return sealFsWriteContent(content, bridgeId, path, activeKey);
+  return sealFsWriteContent(content, bridgeId, root, path, activeKey);
 }
 
 export const projectFsApi = heimdallApi.injectEndpoints({
@@ -382,7 +399,8 @@ export const projectFsApi = heimdallApi.injectEndpoints({
           const bp = bridgeParam(bridgeId);
           // File content is always sealed for the target bridge and this exact path
           // (finding N4); without a key or a bridge id nothing is sent.
-          const outgoingContent = await sealFsWrite(content, bridgeId, path);
+          const root = await resolveFsWriteRoot({ projectId, chainId, directoryId, agentInstanceId }, bridgeId);
+          const outgoingContent = await sealFsWrite(content, bridgeId, root, path);
           const data = await cookieMutation(
             `${base({ projectId, chainId, directoryId, agentInstanceId })}/file${bp ? `?${bp}` : ''}`,
             'PUT',
@@ -404,8 +422,9 @@ export const projectFsApi = heimdallApi.injectEndpoints({
       queryFn: async ({ projectId, chainId, directoryId, agentInstanceId, bridgeId = '', files }) => {
         try {
           const bp = bridgeParam(bridgeId);
+          const root = await resolveFsWriteRoot({ projectId, chainId, directoryId, agentInstanceId }, bridgeId);
           const outgoingFiles = await Promise.all(
-            (files || []).map(async (file) => ({ ...file, content: await sealFsWrite(file.content, bridgeId, file.path) })),
+            (files || []).map(async (file) => ({ ...file, content: await sealFsWrite(file.content, bridgeId, root, file.path) })),
           );
           const data = await cookieMutation(
             `${base({ projectId, chainId, directoryId, agentInstanceId })}/files${bp ? `?${bp}` : ''}`,

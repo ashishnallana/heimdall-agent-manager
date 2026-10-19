@@ -708,6 +708,8 @@ bridge_unseal_decrypt_and_verify :: proc(
 			return false, "stored or delivered keyring is invalid"
 		case .Different_User:
 			return false, "keyring belongs to a different user than the one this bridge holds"
+		case .Different_Vault:
+			return false, "keyring belongs to another vault than the one this bridge holds (the account was reset; re-enroll this bridge)"
 		case .Epoch_Rollback:
 			return false, "keyring rollback rejected: current epoch is older than the stored keyring's"
 		case .Missing_Epoch:

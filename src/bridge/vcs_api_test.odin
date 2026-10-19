@@ -732,7 +732,7 @@ vcs_api_save_writes_file :: proc(t: ^testing.T) {
 	repo := vcs_test_make_marker_repo("save-write", ".git")
 	defer vcs_test_rm(repo)
 	// The editor buffer arrives sealed for this bridge and this path (finding N4).
-	sealed := test_fs_write_seal("hello world", TEST_ENC_VAULT_KEY, "hello.txt")
+	sealed := test_fs_write_seal("hello world", TEST_ENC_VAULT_KEY, repo, "hello.txt")
 	out := bridge_vcs_save_json("s", fmt.tprintf(`{{"command_id":"s","root":"%s","path":"hello.txt","content":"%s"}}`, repo, sealed))
 	defer delete(out)
 	testing.expect(t, strings.contains(out, `"ok":true`), "save writes -> ok:true")

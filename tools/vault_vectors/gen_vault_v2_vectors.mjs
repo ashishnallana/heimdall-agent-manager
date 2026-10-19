@@ -149,18 +149,24 @@ const ecdhShared = (d, peerRaw) => {
 const u16be = (n) => { const b = Buffer.alloc(2); b.writeUInt16BE(n); return b; };
 const u32be = (n) => { const b = Buffer.alloc(4); b.writeUInt32BE(n); return b; };
 
-const keyringBytes = (userId, currentEpoch, entries) => Buffer.concat([
-  Buffer.from('HKR1', 'ascii'),
+const keyringBytes = (userId, currentEpoch, entries, vaultId = VAULT_ID) => Buffer.concat([
+  Buffer.from('HKR2', 'ascii'),
   u16be(utf8(userId).length), utf8(userId),
+  vaultId,
   u32be(currentEpoch),
   u16be(entries.length),
   ...entries.flatMap(([epoch, key]) => [u32be(epoch), key]),
 ]);
 
-const envelopeAad = (epoch) => utf8(`heimdall-vault-v2|e${epoch}`);
-const envelopeToken = (epoch, key, nonce, plaintext) => {
-  const { ct, tag } = gcmSeal(key, nonce, envelopeAad(epoch), plaintext);
-  return `vault:v2:e${epoch}:${b64(Buffer.concat([nonce, tag, ct]))}`;
+// The vault id: SHA-256 of the root's raw signing key, first 8 bytes (the root is
+// the bridge_chain root A below, so every vector keyring belongs to that vault).
+const VAULT_ID = sha256(pubRaw(scalar('chain-root-a-sign'))).subarray(0, 8);
+const VID = hex(VAULT_ID);
+const OTHER_VID = hex(sha256(utf8('another vault')).subarray(0, 8));
+const envelopeAad = (epoch, vid = VID) => utf8(`heimdall-vault-v2|${vid}|e${epoch}`);
+const envelopeToken = (epoch, key, nonce, plaintext, vid = VID) => {
+  const { ct, tag } = gcmSeal(key, nonce, envelopeAad(epoch, vid), plaintext);
+  return `vault:v2:${vid}:e${epoch}:${b64(Buffer.concat([nonce, tag, ct]))}`;
 };
 
 const STATEMENT_FIELDS = [
@@ -205,7 +211,7 @@ const K2 = seeded('epoch-key-2', 32);
 
 const flip = (buf, i) => { const c = Buffer.from(buf); c[i] ^= 0x01; return c; };
 const tokenPayload = (tok) => Buffer.from(tok.slice(tok.lastIndexOf(':') + 1), 'base64');
-const tokenWith = (epochStr, payload) => `vault:v2:e${epochStr}:${b64(payload)}`;
+const tokenWith = (epochStr, payload, vid = VID) => `vault:v2:${vid}:e${epochStr}:${b64(payload)}`;
 
 const envCases = [
   { name: 'epoch1_ascii', epoch: 1, plaintext: 'hello vault v2' },
@@ -214,7 +220,7 @@ const envCases = [
 ].map((c) => {
   const nonce = seeded(`envelope-nonce-${c.name}`, 12);
   const key = c.epoch === 1 ? K1 : K2;
-  return { ...c, nonce: hex(nonce), aad: `heimdall-vault-v2|e${c.epoch}`, token: envelopeToken(c.epoch, key, nonce, utf8(c.plaintext)) };
+  return { ...c, nonce: hex(nonce), aad: `heimdall-vault-v2|${VID}|e${c.epoch}`, token: envelopeToken(c.epoch, key, nonce, utf8(c.plaintext)) };
 });
 
 const base = envCases[0].token;
@@ -234,6 +240,14 @@ const envNegative = [
   { name: 'flipped_ciphertext', kind: 'auth', token: tokenWith('1', flip(basePayload, 28)) },
   { name: 'epoch_header_changed_1_to_2', kind: 'auth', token: tokenWith('2', basePayload) },
   { name: 'aad_epoch_mismatch_key1_header1', kind: 'auth', token: tokenWith('1', k1AsE2) },
+  // The vault id in the header is authenticated too (sealed for vault A, relabelled).
+  { name: 'vault_id_header_changed', kind: 'auth', token: tokenWith('1', (() => {
+    const nonce = seeded('envelope-nonce-other-vault-aad', 12);
+    const { ct, tag } = gcmSeal(K1, nonce, envelopeAad(1, OTHER_VID), utf8('hello vault v2'));
+    return Buffer.concat([nonce, tag, ct]);
+  })()) },
+  // A token of another (reset) vault: "from a previous vault", never tried with these keys.
+  { name: 'other_vault', kind: 'other_vault', token: tokenWith('1', basePayload, OTHER_VID) },
   // Unknown epoch: locked marker, never an exception.
   { name: 'unknown_epoch_3', kind: 'unknown_epoch', token: tokenWith('3', basePayload) },
   { name: 'unknown_epoch_max', kind: 'unknown_epoch', token: tokenWith('4294967295', basePayload) },
@@ -241,12 +255,15 @@ const envNegative = [
   { name: 'epoch_zero', kind: 'malformed', token: tokenWith('0', basePayload) },
   { name: 'epoch_leading_zero', kind: 'malformed', token: tokenWith('01', basePayload) },
   { name: 'epoch_overflow', kind: 'malformed', token: tokenWith('4294967296', basePayload) },
-  { name: 'epoch_missing', kind: 'malformed', token: `vault:v2:e:${b64(basePayload)}` },
+  { name: 'epoch_missing', kind: 'malformed', token: `vault:v2:${VID}:e:${b64(basePayload)}` },
+  { name: 'vault_id_missing_old_format', kind: 'malformed', token: `vault:v2:e1:${b64(basePayload)}` },
+  { name: 'vault_id_uppercase', kind: 'malformed', token: tokenWith('1', basePayload, VID.toUpperCase()) },
+  { name: 'vault_id_short', kind: 'malformed', token: tokenWith('1', basePayload, VID.slice(0, 15)) },
   { name: 'truncated_payload_27_bytes', kind: 'malformed', token: tokenWith('1', basePayload.subarray(0, 27)) },
-  { name: 'bad_base64_char', kind: 'malformed', token: `vault:v2:e1:${b64(basePayload).replace(/^./, '*')}` },
-  { name: 'bad_base64_length', kind: 'malformed', token: `vault:v2:e1:${b64(basePayload).replace(/=+$/, '').slice(0, -1)}` },
-  { name: 'bad_base64_noncanonical_bits', kind: 'malformed', token: `vault:v2:e1:${(() => { const s = b64(Buffer.concat([basePayload, Buffer.from([0xff])])); return s.slice(0, -3) + 'B=='.slice(0, 3); })()}` },
-  { name: 'base64url_alphabet', kind: 'malformed', token: `vault:v2:e1:${b64(basePayload).replace(/\+/g, '-').replace(/\//g, '_')}-_` },
+  { name: 'bad_base64_char', kind: 'malformed', token: `vault:v2:${VID}:e1:${b64(basePayload).replace(/^./, '*')}` },
+  { name: 'bad_base64_length', kind: 'malformed', token: `vault:v2:${VID}:e1:${b64(basePayload).replace(/=+$/, '').slice(0, -1)}` },
+  { name: 'bad_base64_noncanonical_bits', kind: 'malformed', token: `vault:v2:${VID}:e1:${(() => { const s = b64(Buffer.concat([basePayload, Buffer.from([0xff])])); return s.slice(0, -3) + 'B=='.slice(0, 3); })()}` },
+  { name: 'base64url_alphabet', kind: 'malformed', token: `vault:v2:${VID}:e1:${b64(basePayload).replace(/\+/g, '-').replace(/\//g, '_')}-_` },
   { name: 'trailing_garbage', kind: 'malformed', token: `${base} ` },
   { name: 'v1_token', kind: 'not_armored', token: `vault:v1:${b64(basePayload)}` },
   { name: 'enc_v1_token', kind: 'not_armored', token: `ENC:v1:${b64(basePayload)}` },
@@ -257,7 +274,8 @@ const krSingle = keyringBytes(USER_ID, 1, [[1, K1]]);
 const many = (n) => Array.from({ length: n }, (_, i) => [i + 1, seeded(`many-${i + 1}`, 32)]);
 const kr64 = keyringBytes('u'.repeat(64), 64, many(64));
 const keyringNegative = [
-  { name: 'wrong_magic', hex: hex(Buffer.concat([Buffer.from('HKR2'), kr.subarray(4)])) },
+  { name: 'wrong_magic', hex: hex(Buffer.concat([Buffer.from('HKR1'), kr.subarray(4)])) },
+  { name: 'zero_vault_id', hex: hex(keyringBytes(USER_ID, 2, [[1, K1], [2, K2]], Buffer.alloc(8))) },
   { name: 'empty_user_id', hex: hex(keyringBytes('', 1, [[1, K1]])) },
   { name: 'user_id_too_long', hex: hex(keyringBytes('u'.repeat(65), 1, [[1, K1]])) },
   { name: 'user_id_bad_chars', hex: hex(keyringBytes('usr 1', 1, [[1, K1]])) },
@@ -443,12 +461,13 @@ const searchPlain = '{"request_id":"req_1","query":"deploy","project_id":"","sta
 const searchAadStr = searchAad(USER_ID, bridgeId, 'req_1', 'request', 1760000005000, 2).toString('utf8');
 const searchSealed = gcmSeal(sk2, searchNonce, utf8(searchAadStr), utf8(searchPlain));
 
-// File write v2 (finding N4): v2 token format under the epoch key with AAD
-// "heimdall-fs-write-v2|e<epoch>|<bridge_id>|<hex sha256(path)>".
+// File write v3 (finding N4 + P4 root binding): v2 token format under the epoch key with
+// AAD "heimdall-fs-write-v3|<vault_id>|e<epoch>|<bridge_id>|<hex sha256(root)>|<hex sha256(path)>".
 const fsWritePath = 'src/main.ts';
+const fsWriteRoot = '/home/dev/projects/heimdall';
 const fsWriteNonce = seeded('fs-write-nonce', 12);
 const fsWritePlain = 'export const x = 1;';
-const fsWriteAad = `heimdall-fs-write-v2|e2|${bridgeId}|${hex(sha256(utf8(fsWritePath)))}`;
+const fsWriteAad = `heimdall-fs-write-v3|${VID}|e2|${bridgeId}|${hex(sha256(utf8(fsWriteRoot)))}|${hex(sha256(utf8(fsWritePath)))}`;
 const fsWriteSealed = gcmSeal(K2, fsWriteNonce, utf8(fsWriteAad), utf8(fsWritePlain));
 
 // Hub-blind pairing (plan §1 "Pairing"): code S -> lookup / K_mac; key_mac over the
@@ -472,17 +491,22 @@ const vectors = {
   epoch_keys: { 1: hex(K1), 2: hex(K2) },
   envelope: {
     prefix: 'vault:v2:',
-    token_regex: 'vault:v2:e[1-9][0-9]{0,9}:[A-Za-z0-9+/]+={0,2}',
+    vault_id: VID,
+    other_vault_id: OTHER_VID,
+    token_regex: 'vault:v2:[0-9a-f]{16}:e[1-9][0-9]{0,9}:[A-Za-z0-9+/]+={0,2}',
     max_payload_bytes: 64 * 1024 * 1024,
     cases: envCases,
     negative: envNegative,
     embedded: {
-      text: `before ${envCases[0].token} middle ${envCases[1].token}. v1 stays vault:v1:${b64(basePayload)} unknown ${tokenWith('9', basePayload)} bare vault:v2: end`,
-      decrypted_with_locked_marker_LOCKED: `before ${envCases[0].plaintext} middle ${envCases[1].plaintext}. v1 stays vault:v1:${b64(basePayload)} unknown LOCKED bare vault:v2: end`,
+      text: `before ${envCases[0].token} middle ${envCases[1].token}. v1 stays vault:v1:${b64(basePayload)} unknown ${tokenWith('9', basePayload)} reset ${tokenWith('1', basePayload, OTHER_VID)} bare vault:v2: end`,
+      // Markers: locked = "LOCKED", other vault = "OTHER".
+      decrypted_with_locked_marker_LOCKED: `before ${envCases[0].plaintext} middle ${envCases[1].plaintext}. v1 stays vault:v1:${b64(basePayload)} unknown LOCKED reset OTHER bare vault:v2: end`,
     },
   },
   keyring: {
     user_id: USER_ID,
+    vault_id: VID,
+    root_sign_pub: hex(pubRaw(scalar('chain-root-a-sign'))),
     current_epoch: 2,
     entries: [{ epoch: 1, key: hex(K1) }, { epoch: 2, key: hex(K2) }],
     hex: hex(kr),
@@ -593,11 +617,12 @@ const vectors = {
   fs_write: {
     epoch: 2,
     bridge_id: bridgeId,
+    root: fsWriteRoot,
     path: fsWritePath,
     aad: fsWriteAad,
     nonce: hex(fsWriteNonce),
     plaintext: fsWritePlain,
-    token: `vault:v2:e2:${b64(Buffer.concat([fsWriteNonce, fsWriteSealed.tag, fsWriteSealed.ct]))}`,
+    token: `vault:v2:${VID}:e2:${b64(Buffer.concat([fsWriteNonce, fsWriteSealed.tag, fsWriteSealed.ct]))}`,
   },
   search: {
     domain: SEARCH_DOMAIN,

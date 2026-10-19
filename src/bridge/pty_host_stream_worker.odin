@@ -1239,7 +1239,8 @@ Bridge_Pane_Seal :: enum {
 	Failed, // sealing failed (randomness, bad session id): send an error
 }
 
-// bridge_pane_output_seal seals a pane capture for the hub. The armor is vault:v2:e<N>:b64(salt16 | nonce | tag | ct): a PTY v2
+// bridge_pane_output_seal seals a pane capture for the hub. The armor is
+// vault:v2:<vault_id>:e<N>:b64(salt16 | nonce | tag | ct): a PTY v2
 // `out` frame for session_id under a fresh CSPRNG salt (its own subkey, counter 1),
 // minus the epoch prefix the token header already carries. The hub re-frames it to the
 // binary PTY v2 layout (domain.vault_pty_v2_payload_from_armor) without decrypting.
@@ -1264,8 +1265,8 @@ bridge_pane_output_seal_with :: proc(status: Vault_Status, kr: ^vault.Vault_Keyr
 	if !sealed do return "", .Failed
 	b64, err := base64.encode(frame[4:], allocator = context.temp_allocator)
 	if err != nil do return "", .Failed
-	e_buf: [16]byte
-	return strings.concatenate({vault.VAULT_V2_PREFIX, "e", strconv.write_uint(e_buf[:], u64(kr.current_epoch), 10), ":", b64}, allocator), .Sealed
+	prefix_buf: [64]byte
+	return strings.concatenate({vault.token_prefix(kr.vault_id, kr.current_epoch, prefix_buf[:]), b64}, allocator), .Sealed
 }
 
 // BRIDGE_PANE_CAPTURE_SEAL_MAX_PLAIN keeps a sealed chat pane capture under the hub's

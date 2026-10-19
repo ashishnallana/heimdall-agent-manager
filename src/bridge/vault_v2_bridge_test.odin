@@ -349,9 +349,10 @@ test_v2_pane_capture_is_sealed :: proc(t: ^testing.T) {
 	reply := bridge_pane_reply_from_seal("cmd_pane_seal", false, "h1", output, res, 1, false)
 	defer delete(reply)
 	testing.expect(t, !strings.contains(reply, "top secret"), "no plaintext in the reply")
-	testing.expect(t, strings.has_prefix(output, "vault:v2:e1:"), output)
-	epoch, body, pres := vault.envelope_parse(output, context.temp_allocator)
-	testing.expect(t, pres == .Ok && epoch == 1)
+	prefix_buf: [64]byte
+	testing.expect(t, strings.has_prefix(output, vault.token_prefix(kr.vault_id, 1, prefix_buf[:])), output)
+	vid, epoch, body, pres := vault.envelope_parse(output, context.temp_allocator)
+	testing.expect(t, pres == .Ok && epoch == 1 && vid == kr.vault_id)
 	frame := make([]byte, 4 + len(body), context.temp_allocator)
 	frame[3] = 1
 	copy(frame[4:], body)

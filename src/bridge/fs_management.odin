@@ -1031,17 +1031,19 @@ bridge_fs_write_file :: proc(requested: string, content: string, sandbox_root: s
 		}
 	}
 
-	// File content always arrives sealed for THIS bridge and THIS target path
-	// (heimdall-fs-write-v2 AAD, finding N4) under the current epoch; plaintext, a
-	// content envelope, or a token for another path or bridge is refused.
-	decrypted, dec_ok := vault.fs_write_open(content, &vault_kr, bridge_config.daemon_id, requested, vault_kr.current_epoch, context.allocator)
+	// File content always arrives sealed for THIS bridge, THIS sandbox root (the
+	// canonical root resolved above, which fs results report as `root`) and THIS target
+	// path (heimdall-fs-write-v3 AAD, finding N4 + P4 root binding) under the current
+	// epoch; plaintext, a content envelope, or a token for another path, root, bridge
+	// or vault is refused.
+	decrypted, dec_ok := vault.fs_write_open(content, &vault_kr, bridge_config.daemon_id, root, requested, vault_kr.current_epoch, context.allocator)
 	if !dec_ok {
 		return Bridge_Fs_Write_File_Result{
 			ok = false,
 			path = requested,
 			within_root = true,
 			error_code = "invalid_vault_key",
-			message = "File content must be vault-encrypted for this bridge and path",
+			message = "File content must be vault-encrypted for this bridge, project root and path",
 		}
 	}
 	defer {

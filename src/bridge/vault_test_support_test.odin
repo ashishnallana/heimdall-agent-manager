@@ -26,6 +26,8 @@ TEST_ENC_VAULT_KEY :: "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6
 KEYSTORE_SEC_TEST_KEY_1 :: TEST_VAULT_KEY_HEX
 KEYSTORE_SEC_TEST_KEY_2 :: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
 TEST_VAULT_USER_ID :: "usr_bridge_test"
+// TEST_VAULT_ID is the vault id of every test keyring (any non-zero 8 bytes).
+TEST_VAULT_ID :: vault.Vault_Id{0xb7, 0x1d, 0x6e, 0x02, 0x9a, 0x44, 0xc3, 0x18}
 
 keystore_test_mutex: sync.Mutex
 
@@ -62,7 +64,7 @@ test_keyring_from_hex :: proc(key_hex: string, epoch: u32 = 1, user_id: string =
 	key: [32]byte
 	defer crypto.zero_explicit(&key, size_of(key))
 	_ = vault.hex_decode_into(key[:], key_hex)
-	kr, _ := vault.keyring_from_single_key(user_id, epoch, key[:])
+	kr, _ := vault.keyring_from_single_key(user_id, TEST_VAULT_ID, epoch, key[:])
 	return kr
 }
 
@@ -94,7 +96,7 @@ test_vault_seal :: proc(plaintext: string, key_hex: string, epoch: u32 = 1, allo
 	key: [32]byte
 	defer crypto.zero_explicit(&key, size_of(key))
 	_ = vault.hex_decode_into(key[:], key_hex)
-	tok, _ := vault.seal_with_key(transmute([]byte)plaintext, key[:], epoch, allocator)
+	tok, _ := vault.seal_with_key(transmute([]byte)plaintext, key[:], TEST_VAULT_ID, epoch, allocator)
 	return tok
 }
 

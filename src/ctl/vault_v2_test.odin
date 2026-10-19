@@ -12,12 +12,13 @@ import vault "odin_test:lib/vault"
 // the two *_hex wrappers keep those suites' encrypt/decrypt calls readable.
 
 TEST_V2_USER :: "usr_ctl_test"
+TEST_V2_VAULT :: vault.Vault_Id{0x5c, 0x0f, 0x31, 0xa8, 0x77, 0x02, 0xde, 0x90}
 
 tkr :: proc(key_hex: string) -> ^vault.Vault_Keyring {
 	raw: [32]byte
 	if !vault.hex_decode_into(raw[:], key_hex) do return nil
 	kr := new(vault.Vault_Keyring, context.temp_allocator)
-	parsed, ok := vault.keyring_from_single_key(TEST_V2_USER, 1, raw[:])
+	parsed, ok := vault.keyring_from_single_key(TEST_V2_USER, TEST_V2_VAULT, 1, raw[:])
 	if !ok do return nil
 	kr^ = parsed
 	return kr
@@ -37,6 +38,7 @@ two_epoch_keyring :: proc() -> (vault.Vault_Keyring, string) {
 	raw := vault.Vault_Keyring{}
 	copy(raw.user_id_buf[:], TEST_V2_USER)
 	raw.user_id_len = len(TEST_V2_USER)
+	raw.vault_id = TEST_V2_VAULT
 	raw.count = 2
 	raw.current_epoch = 2
 	raw.entries[0].epoch = 1
@@ -78,13 +80,14 @@ test_ctl_round_trip_across_epochs :: proc(t: ^testing.T) {
 	defer vault.keyring_wipe(&kr)
 	tok, ok := ctl_vault_seal("epoch two secret", &kr, context.temp_allocator)
 	testing.expect(t, ok)
-	testing.expect(t, strings.has_prefix(tok, "vault:v2:e2:"), "ctl seals under the current epoch")
+	prefix_buf: [64]byte
+	testing.expect(t, strings.has_prefix(tok, vault.token_prefix(TEST_V2_VAULT, 2, prefix_buf[:])), "ctl seals under the current epoch")
 	plain, res := ctl_vault_open(tok, &kr, context.temp_allocator)
 	testing.expect(t, res == .Ok && plain == "epoch two secret")
 
 	// Content written under epoch 1 still opens with the two-epoch keyring.
 	k1, _ := vault.keyring_key_for_epoch(&kr, 1)
-	old, _ := vault.seal_with_key(transmute([]byte)string("epoch one secret"), k1, 1, context.temp_allocator)
+	old, _ := vault.seal_with_key(transmute([]byte)string("epoch one secret"), k1, TEST_V2_VAULT, 1, context.temp_allocator)
 	plain1, res1 := ctl_vault_open(old, &kr, context.temp_allocator)
 	testing.expect(t, res1 == .Ok && plain1 == "epoch one secret")
 
@@ -95,10 +98,10 @@ test_ctl_round_trip_across_epochs :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_ctl_v1_token_is_opaque :: proc(t: ^testing.T) {
+test_ctl_dead_format_token_is_opaque :: proc(t: ^testing.T) {
 	kr, _ := two_epoch_keyring()
 	defer vault.keyring_wipe(&kr)
-	v1 := "vault:v1:zmr6vo8H4Fyfvf4qAX19d6UOkgq88L2eZGD70GhQ/+A/aq6kBz03tyWp"
+	v1 := "ENC:v1:zmr6vo8H4Fyfvf4qAX19d6UOkgq88L2eZGD70GhQ/+A/aq6kBz03tyWp"
 	testing.expect(t, !is_vault_armored(v1))
 	out := ctl_decrypt_or_fallback_armored(v1, &kr, true, context.temp_allocator)
 	testing.expect_value(t, out, v1)
@@ -106,7 +109,7 @@ test_ctl_v1_token_is_opaque :: proc(t: ^testing.T) {
 	testing.expect(t, res == .Not_Armored && plain == v1)
 }
 
-// tkr_b64 renders tkr(key_hex) as the base64 HKR1 value --vault-keyring takes.
+// tkr_b64 renders tkr(key_hex) as the base64 HKR2 value --vault-keyring takes.
 tkr_b64 :: proc(key_hex: string) -> string {
 	kr := tkr(key_hex)
 	if kr == nil do return ""

@@ -47,10 +47,10 @@ bridge_vault_decrypt_field :: proc(s: string, kr: ^vault.Vault_Keyring, allocato
 // the keyring still holds, is rejected before decryption.
 bridge_open_current_epoch_token :: proc(token: string, kr: ^vault.Vault_Keyring, allocator := context.allocator) -> (plaintext: string, ok: bool) {
 	if kr == nil do return "", false
-	epoch, payload, res := vault.envelope_parse(token, context.temp_allocator)
+	vault_id, epoch, payload, res := vault.envelope_parse(token, context.temp_allocator)
 	if res != .Ok do return "", false
 	crypto.zero_explicit(raw_data(payload), len(payload))
-	if epoch != kr.current_epoch do return "", false
+	if vault_id != kr.vault_id || epoch != kr.current_epoch do return "", false
 	return bridge_decrypt_vault_token(token, kr, allocator)
 }
 

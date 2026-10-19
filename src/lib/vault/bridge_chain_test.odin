@@ -101,9 +101,14 @@ test_bridge_chain_rejects_bad_proofs :: proc(t: ^testing.T) {
 	testing.expect_value(t, check(&f, f.text, nil, "", &old_swapped), Chain_Error.Commit_Mismatch)
 	keyring_wipe(&old_swapped)
 	// A keyring whose current epoch is 1: the proof carries two epochs.
-	single, _ := keyring_from_single_key(f.owner, 1, f.kr.entries[0].key[:])
+	single, _ := keyring_from_single_key(f.owner, f.kr.vault_id, 1, f.kr.entries[0].key[:])
 	testing.expect_value(t, check(&f, f.text, nil, "", &single), Chain_Error.Epoch_Mismatch)
 	keyring_wipe(&single)
+	// The same keys labelled with another vault id (a reset vault): refused.
+	other_vault := f.kr
+	other_vault.vault_id[7] ~= 0x01
+	testing.expect_value(t, check(&f, f.text, nil, "", &other_vault), Chain_Error.Wrong_Vault)
+	keyring_wipe(&other_vault)
 	// The bridge approver's chain is dropped: B is not the root.
 	testing.expect_value(t, check(&f, swap(f.text, strings.concatenate({`"issuer_chain":`, b_arr}, context.temp_allocator), `"issuer_chain":[]`)), Chain_Error.Link_Invalid)
 	// Tampered epoch-2 carrier (the revoke; still canonical): signature fails.

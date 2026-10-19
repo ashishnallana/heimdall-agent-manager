@@ -109,7 +109,7 @@ export function nextEpochKeyringBytes(current: Uint8Array, userId: string): Uint
     const fresh = crypto.getRandomValues(new Uint8Array(KEYRING_KEY_BYTES));
     const next = parsed.currentEpoch + 1;
     try {
-      return serializeKeyringBytes({ userId, currentEpoch: next, entries: [...parsed.entries, { epoch: next, key: fresh }] });
+      return serializeKeyringBytes({ userId, vaultId: parsed.vaultId, currentEpoch: next, entries: [...parsed.entries, { epoch: next, key: fresh }] });
     } finally {
       fresh.fill(0);
     }
@@ -118,11 +118,11 @@ export function nextEpochKeyringBytes(current: Uint8Array, userId: string): Uint
   }
 }
 
-/** A brand-new epoch-1 keyring for genesis. Caller zeroes the result. */
-export function genesisKeyringBytes(userId: string): Uint8Array {
+/** A brand-new epoch-1 keyring of vault `vaultId` for genesis. Caller zeroes the result. */
+export function genesisKeyringBytes(userId: string, vaultId: string): Uint8Array {
   const key = crypto.getRandomValues(new Uint8Array(KEYRING_KEY_BYTES));
   try {
-    return serializeKeyringBytes({ userId, currentEpoch: 1, entries: [{ epoch: 1, key }] });
+    return serializeKeyringBytes({ userId, vaultId, currentEpoch: 1, entries: [{ epoch: 1, key }] });
   } finally {
     key.fill(0);
   }
