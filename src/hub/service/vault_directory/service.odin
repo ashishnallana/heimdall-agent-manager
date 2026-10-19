@@ -351,6 +351,29 @@ Directory_View :: struct {
 	epochs:          []domain.Vault_Epoch,
 	root_sign_public_key: string,
 	root_sign_alg:   string,
+	// rotation_recommended: an identity was retired by the hub (no signed revocation,
+	// so no epoch rotation) at or after the current epoch was created — a bridge
+	// revoked from bridge settings, or the old identity an attach replaced. It may
+	// hold the current keyring, so approvers should rotate (signed revoke flow /
+	// re-key). The hub never rotates itself. Conservative: a rolled-back enrollment
+	// (which never received the key) also counts. retired_device_ids names them.
+	rotation_recommended: bool,
+	retired_device_ids:   []string,
+}
+
+// rotation_check fills rotation_recommended / retired_device_ids.
+@(private)
+rotation_check :: proc(view: ^Directory_View) {
+	epoch_created := ""
+	for e in view.epochs do if e.epoch == view.directory.current_epoch do epoch_created = e.created_at
+	if epoch_created == "" do return
+	ids := make([dynamic]string, 0, 2, context.temp_allocator)
+	for d in view.devices {
+		if d.status != .Revoked || d.revocation_statement != "" || d.revoked_at == "" do continue
+		if d.revoked_at >= epoch_created do append(&ids, d.device_id)
+	}
+	view.retired_device_ids = ids[:]
+	view.rotation_recommended = len(ids) > 0
 }
 
 get_directory :: proc(svc: ^Service, user_id: string) -> (Directory_View, domain.Domain_Error) {
@@ -375,6 +398,7 @@ get_directory :: proc(svc: ^Service, user_id: string) -> (Directory_View, domain
 		view.root_sign_public_key = st.subject_sign_pub
 		view.root_sign_alg = st.subject_sign_alg
 	}
+	rotation_check(&view)
 	return view, domain.Domain_Error{}
 }
 

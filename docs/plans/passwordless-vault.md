@@ -330,6 +330,8 @@ Statement signatures are verified on the hub too, as defense in depth. Clients s
 | `POST /vault/devices/{id}/revoke` | `{expected_version, revoke_statement, signature, epoch_statement, epoch_signature, wraps:[…]}`. Rejected when: the target is the signer (409 `self_revoke`); afterwards no approved browser or recovery device would remain; the wraps do not cover exactly the remaining approved browser and recovery devices at `current_epoch+1`; the epoch is not `current+1`; the version is stale (409). It then revokes the bridge's tokens (existing bridge revoke) and publishes events. |
 | `PATCH /vault/devices/{id}` | Signed label change. |
 
+**Hub-retired identities and rotation.** Revoking a bridge from bridge settings (`POST /bridges/{id}/revoke`) also retires its directory entry (hub-marked revoked, versioned CAS, after its credentials are dead; a failure is reported and a retry finishes it), as does an attach replacing an old identity and a rolled-back enrollment. None of these rotate the epoch, so `GET /vault/directory` returns `rotation_recommended` (true when a hub-retired entry was revoked at or after the current epoch's creation; conservative — a rolled-back enrollment that never got the key also counts) and `retired_device_ids`. The hub never rotates; clients do. Gap: there is no rotate-only endpoint yet (epoch+1 with wraps and no revoke target), so a client can clear the flag only through a signed revoke.
+
 **Bridge enrollment gate.** `wiring.odin:883`: replace `user_vault_get` with "vault directory exists". The grant carries `bridge_identity_public_key`; `bridge_grant.odin` adds validation and a fingerprint for it.
 
 **Wiring.** Add routes after `wiring.odin:524`, plus graph fields alongside :65/:76/:91.

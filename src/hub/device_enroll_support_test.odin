@@ -53,7 +53,8 @@ DEVICE_TEST_CAPABILITIES :: `{"capabilities":[{"provider":"claude","models":["no
 //
 // `ok` is false if any step failed; callers assert on it so a provisioning failure
 // reports as itself rather than as a confusing downstream error.
-device_enroll_test_bridge :: proc(graph: ^app.App_Graph, headers: []contracts.HTTP_Header, label: string) -> (bridge_id: string, bridge_token: string, ok: bool) {
+// commit=false leaves the enrollment PENDING (as before the vault key is delivered).
+device_enroll_test_bridge :: proc(graph: ^app.App_Graph, headers: []contracts.HTTP_Header, label: string, commit := true) -> (bridge_id: string, bridge_token: string, ok: bool) {
 	// Passwordless vault: a bridge enrolls only into an existing directory, with a
 	// vault approval (signed by the root device) naming its persistent identity key.
 	user_id, version, vault_ok := vt_ensure_vault(graph, headers)
@@ -100,6 +101,7 @@ device_enroll_test_bridge :: proc(graph: ^app.App_Graph, headers: []contracts.HT
 	// routes) until the hub observes the bridge acknowledge its vault keyring on the
 	// enroll-only socket (bridge_unseal_handler → bridge_enroll_commit). No bridge
 	// connects here, so commit the pending family the same way that path does.
+	if !commit do return bridge_id, bridge_token, true
 	family_id := ""
 	pending_tokens, list_err := iface.bridge_list_live_tokens_by_scope(graph.bridges.repo, bridge_service.BRIDGE_ENROLL_TOKEN_SCOPE)
 	if list_err.code != .None do return "", "", false

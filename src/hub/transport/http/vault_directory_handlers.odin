@@ -234,6 +234,18 @@ vault_directory_get_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	w_str(&b, "root_device_id", d.root_device_id)
 	w_str(&b, "root_sign_public_key", view.root_sign_public_key)
 	w_str(&b, "root_sign_alg", view.root_sign_alg)
+	// Clients rotate (signed revoke / re-key) when the hub retired an identity
+	// without a rotation; see vd.Directory_View.rotation_recommended.
+	strings.write_string(&b, `,"rotation_recommended":`)
+	strings.write_string(&b, "true" if view.rotation_recommended else "false")
+	strings.write_string(&b, `,"retired_device_ids":[`)
+	for id, i in view.retired_device_ids {
+		if i > 0 do strings.write_byte(&b, ',')
+		strings.write_byte(&b, '"')
+		strings.write_string(&b, id)
+		strings.write_byte(&b, '"')
+	}
+	strings.write_byte(&b, ']')
 	// A scheduled owner reset ({requested_at, due_at}) or null.
 	strings.write_string(&b, `,"reset":`)
 	write_reset_json(&b, reset, has_reset)
