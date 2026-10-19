@@ -64,7 +64,7 @@ export interface DirectoryEpoch {
 /** Reset state reported by the hub (P2 fix: 72 h delayed reset). */
 export interface DirectoryReset {
   requested_at?: string;
-  effective_at?: string;
+  due_at?: string;
   requested_by_device_id?: string;
 }
 
