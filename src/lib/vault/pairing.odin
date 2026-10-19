@@ -37,8 +37,12 @@ import os_random "odin_test:lib/os_random"
 // does not know its account before approval, so it is "" there (a bridge binds the
 // hub origin through K and its PKCE challenge through the key_mac payload).
 // <hub_origin> is the canonical "scheme://host:port" of the hub API (explicit port,
-// no path, valid_pair_hub_origin); the approver uses the origin it talks to, so a
-// code relayed to another hub never verifies.
+// no path, valid_pair_hub_origin) the NEW device enrolled against. The new device
+// DECLARES it publicly next to its pair_salt (pair_hub_origin) and the approver derives
+// with that declared origin (its UI may be served on another origin than the hub API
+// base). A hostile hub altering the declared origin only makes the approver derive a
+// different lookup / key_mac: the pairing is refused, and the secret code is still
+// required either way.
 //
 // key_mac lets the approver prove the hub did not swap the new device's keys;
 // pair_mac lets the new device prove its approval (and, through the approval's

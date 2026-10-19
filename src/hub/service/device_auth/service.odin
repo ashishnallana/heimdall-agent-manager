@@ -215,6 +215,7 @@ Device_Info :: struct {
 	pair_key_mac:           string,
 	code_challenge:         string,
 	pair_salt:              string,
+	pair_hub_origin:        string,
 }
 
 // GENERIC_UNKNOWN_CODE_ERROR is the single error returned for an unknown,
@@ -276,32 +277,40 @@ verify_with_ip :: proc(service: ^Device_Auth_Service, user_code, request_ip: str
 		pair_key_mac = grant.pair_key_mac,
 		code_challenge = grant.code_challenge,
 		pair_salt = grant.pair_salt,
+		pair_hub_origin = grant.pair_hub_origin,
 	}, true, domain.Domain_Error{}
 }
 
-// pending_bridge_pair_salts lists the public pair_salt of up to `limit` live,
-// pending bridge grants, newest first (temp-allocated). An approver needs a request's
-// salt before it can derive the lookup from the code it was given (pairing stretch,
-// plan §1 "Pairing"). Bridge grants have no owner before approval, so the list is not
-// per user; it reveals only random salts.
-pending_bridge_pair_salts :: proc(service: ^Device_Auth_Service, limit: int) -> []string {
+// Pending_Bridge_Pair is one bridge pairing candidate: the public pair_salt and the
+// canonical hub origin the bridge declared it bound into its stretch.
+Pending_Bridge_Pair :: struct {
+	pair_salt:       string,
+	pair_hub_origin: string,
+}
+
+// pending_bridge_pair_salts lists the public pair_salt and declared hub origin of up
+// to `limit` live, pending bridge grants, newest first (temp-allocated). An approver
+// needs both before it can derive the lookup from the code it was given (pairing
+// stretch, plan §1 "Pairing"). Bridge grants have no owner before approval, so the
+// list is not per user; it reveals only random salts and the hub origins bridges used.
+pending_bridge_pair_salts :: proc(service: ^Device_Auth_Service, limit: int) -> []Pending_Bridge_Pair {
 	now := service.clock.now()
 	Entry :: struct {
-		salt: string,
+		pair: Pending_Bridge_Pair,
 		at:   i64,
 	}
 	found := make([dynamic]Entry, 0, 8, context.temp_allocator)
 	sync.mutex_lock(&service.store.mutex)
 	for _, g in service.store.grants {
-		if g.status != .Pending || is_expired(g, now) || !is_bridge_grant(g) || g.pair_salt == "" do continue
-		append(&found, Entry{salt = strings.clone(g.pair_salt, context.temp_allocator), at = g.requested_at})
+		if g.status != .Pending || is_expired(g, now) || !is_bridge_grant(g) || g.pair_salt == "" || g.pair_hub_origin == "" do continue
+		append(&found, Entry{pair = {pair_salt = strings.clone(g.pair_salt, context.temp_allocator), pair_hub_origin = strings.clone(g.pair_hub_origin, context.temp_allocator)}, at = g.requested_at})
 	}
 	sync.mutex_unlock(&service.store.mutex)
 	slice.sort_by(found[:], proc(a, b: Entry) -> bool { return a.at > b.at })
-	out := make([dynamic]string, 0, min(len(found), max(limit, 0)), context.temp_allocator)
+	out := make([dynamic]Pending_Bridge_Pair, 0, min(len(found), max(limit, 0)), context.temp_allocator)
 	for e in found {
 		if len(out) >= limit do break
-		append(&out, e.salt)
+		append(&out, e.pair)
 	}
 	return out[:]
 }

@@ -571,7 +571,7 @@ async function register(c: Ctx, dir: VaultDirectory): Promise<void> {
   const keys = await derivePairKeys(code, pendingPairContext(c, pending));
   const body = await buildPairedRegistration(identity, d().label(identity), keys, issuedAt);
   await d().kv.put(`pending:${c.userId}`, pending);
-  const res = await d().api.postVaultRegister(body.statement, body.signature, body.pairLookup, body.pairKeyMac, pending.pairSalt);
+  const res = await d().api.postVaultRegister(body.statement, body.signature, body.pairLookup, body.pairKeyMac, pending.pairSalt, pending.hubOrigin);
   if (res.device_id !== identity.deviceId || res.fingerprint !== identity.fingerprint) {
     throw new Error('The hub registered a different device id or fingerprint than this device computed');
   }

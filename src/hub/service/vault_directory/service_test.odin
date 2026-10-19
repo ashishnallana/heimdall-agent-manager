@@ -137,10 +137,11 @@ lookup_of :: proc(d: ^Dev) -> string {
 
 PAIR_MAC :: "5555555555555555555555555555555555555555555555555555555555555555"
 PAIR_SALT :: "0123456789abcdef0123456789abcdef"
+PAIR_ORIGIN :: "https://hub.example.test:443"
 
 do_register :: proc(t: ^testing.T, f: ^Fixture, d: ^Dev) -> domain.Vault_Device {
 	s := statement("register", d, d, "", "")
-	res, err := register(&f.svc, USER, s, sign(d, s), lookup_of(d), vault.log_entry_hash(strings.concatenate({"mac|", d.id}, context.temp_allocator), context.temp_allocator), PAIR_SALT)
+	res, err := register(&f.svc, USER, s, sign(d, s), lookup_of(d), vault.log_entry_hash(strings.concatenate({"mac|", d.id}, context.temp_allocator), context.temp_allocator), PAIR_SALT, PAIR_ORIGIN)
 	testing.expect_value(t, err.code, domain.Error_Code.None)
 	return res.device
 }
@@ -243,7 +244,7 @@ test_vault_genesis_register_approve_revoke_flow :: proc(t: ^testing.T) {
 
 	// A replayed (not newer) register body cannot take over the live request.
 	replay := statement("register", &b, &b, "", "")
-	_, rp := register(&f.svc, USER, replay, sign(&b, replay), lookup_of(&a), PAIR_MAC, PAIR_SALT)
+	_, rp := register(&f.svc, USER, replay, sign(&b, replay), lookup_of(&a), PAIR_MAC, PAIR_SALT, PAIR_ORIGIN)
 	testing.expect_value(t, rp.code, domain.Error_Code.Conflict)
 	testing.expect_value(t, dev_row(f, b.id).pair_lookup, lookup_of(&b))
 
@@ -353,9 +354,9 @@ test_vault_register_rejects_mismatched_proof :: proc(t: ^testing.T) {
 	defer fixture_close(f)
 	a, b := make_dev(1), make_dev(2)
 	s := statement("register", &b, &b, "", "")
-	_, err := register(&f.svc, USER, s, sign(&a, s), lookup_of(&a), PAIR_MAC, PAIR_SALT)
+	_, err := register(&f.svc, USER, s, sign(&a, s), lookup_of(&a), PAIR_MAC, PAIR_SALT, PAIR_ORIGIN)
 	testing.expect_value(t, err.code, domain.Error_Code.Unauthenticated)
-	_, cross := register(&f.svc, OTHER, s, sign(&b, s), lookup_of(&b), PAIR_MAC, PAIR_SALT)
+	_, cross := register(&f.svc, OTHER, s, sign(&b, s), lookup_of(&b), PAIR_MAC, PAIR_SALT, PAIR_ORIGIN)
 	testing.expect_value(t, cross.code, domain.Error_Code.Forbidden)
 }
 
@@ -549,7 +550,7 @@ test_vault_pending_cap_purge_and_deny :: proc(t: ^testing.T) {
 	}
 	extra := make_dev(80)
 	s := statement("register", &extra, &extra, "", "")
-	_, capped := register(&f.svc, USER, s, sign(&extra, s), lookup_of(&extra), PAIR_MAC, PAIR_SALT)
+	_, capped := register(&f.svc, USER, s, sign(&extra, s), lookup_of(&extra), PAIR_MAC, PAIR_SALT, PAIR_ORIGIN)
 	testing.expect_value(t, capped.code, domain.Error_Code.Rate_Limited)
 
 	// Deny frees a slot; denying again (or a non-pending device) is 404.
@@ -557,7 +558,7 @@ test_vault_pending_cap_purge_and_deny :: proc(t: ^testing.T) {
 	testing.expect_value(t, deny(&f.svc, USER, first.id).code, domain.Error_Code.None)
 	testing.expect_value(t, deny(&f.svc, USER, first.id).code, domain.Error_Code.Not_Found)
 	testing.expect_value(t, deny(&f.svc, USER, a.id).code, domain.Error_Code.Not_Found)
-	_, ok_err := register(&f.svc, USER, s, sign(&extra, s), lookup_of(&extra), PAIR_MAC, PAIR_SALT)
+	_, ok_err := register(&f.svc, USER, s, sign(&extra, s), lookup_of(&extra), PAIR_MAC, PAIR_SALT, PAIR_ORIGIN)
 	testing.expect_value(t, ok_err.code, domain.Error_Code.None)
 
 	// After the codes expire they are hidden from the listing and purged on the next

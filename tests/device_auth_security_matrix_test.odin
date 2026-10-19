@@ -152,7 +152,7 @@ test_bridge_enrollment_end_to_end :: proc() {
 		bridge_identity_public_key = id_a.sign_pub, bridge_identity_proof = sm_enroll_proof(&id_a, BPK_A, PKCE_CHALLENGE),
 		os_user = "tanmay",
 		pair_lookup = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		pair_salt = "0123456789abcdef0123456789abcdef",
+		pair_salt = "0123456789abcdef0123456789abcdef", pair_hub_origin = "https://hub.example.test:443",
 		pair_key_mac = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
 		code_challenge = PKCE_CHALLENGE, code_challenge_method = "S256",
 	})
@@ -369,7 +369,7 @@ seed_bridge_grant :: proc(graph: ^app.App_Graph, label, public_key, challenge: s
 		bridge_identity_public_key = identity.sign_pub, bridge_identity_proof = sm_enroll_proof(identity, public_key, challenge),
 		code_challenge = challenge, code_challenge_method = "S256",
 		pair_lookup = vault.log_entry_hash(label, context.temp_allocator),
-		pair_salt = "0123456789abcdef0123456789abcdef",
+		pair_salt = "0123456789abcdef0123456789abcdef", pair_hub_origin = "https://hub.example.test:443",
 		pair_key_mac = vault.log_entry_hash(public_key, context.temp_allocator),
 	})
 	resp := api_http.device_authorize_handler(rawptr(&graph.device_auth_handlers), api_http.Request{
@@ -426,6 +426,7 @@ Sm_Authorize_Body :: struct {
 	pair_lookup:                string,
 	pair_key_mac:               string,
 	pair_salt:                  string,
+	pair_hub_origin:            string,
 	code_challenge:             string,
 	code_challenge_method:      string,
 }

@@ -68,9 +68,13 @@ Vault_Device :: struct {
 	// code). pair_key_mac + register_statement let the approver verify the keys;
 	// pair_mac (stored at approval) lets the new device verify its approval. The
 	// pending fields are cleared on approval. pair_salt is the public per-request salt
-	// of the pairing stretch, served to approvers (pending_pair_salts).
+	// of the pairing stretch, served to approvers (pending_pair_salts), with
+	// pair_hub_origin: the canonical hub origin the device bound into that stretch
+	// (vault.valid_pair_hub_origin). The approver derives with the DECLARED origin, so
+	// a UI served on another origin than the hub's API base still pairs.
 	pair_lookup:           string,
 	pair_salt:             string,
+	pair_hub_origin:       string,
 	pair_key_mac:          string,
 	register_statement:    string,
 	pair_mac:              string,

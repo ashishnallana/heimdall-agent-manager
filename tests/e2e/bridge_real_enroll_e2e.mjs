@@ -132,11 +132,12 @@ async function enroll(hub, approver, cfg) {
   }
   expect(!/code=/.test(out), `ham-bridge printed a pairing code and a code-free link (${code.slice(0, 4)}-…)`);
   // As the approval page does: fetch the public pair_salts, run the pairing stretch
-  // (bound to this hub's origin) per candidate, resolve the matching lookup.
+  // per candidate with the hub origin the bridge DECLARED, resolve the matching lookup.
   const salts = await http(hub, 'POST', '/api/v1/device/pair-salts', { body: {} });
   const tried = [];
   for (const c of (salts.data?.candidates ?? []).filter((x) => x.kind === 'bridge')) {
-    tried.push({ salt: c.pair_salt, keys: await derivePairKeys(code, { kind: 'bridge', userId: '', hubOrigin: pairHubOrigin(hub.base), pairSalt: c.pair_salt }) });
+    expect(c.pair_hub_origin === pairHubOrigin(hub.base), `the bridge declares the hub origin it enrolled against (${c.pair_hub_origin})`);
+    tried.push({ salt: c.pair_salt, keys: await derivePairKeys(code, { kind: 'bridge', userId: '', hubOrigin: c.pair_hub_origin, pairSalt: c.pair_salt }) });
   }
   const ver = await http(hub, 'POST', '/api/v1/device/verify', { body: { pair_lookups: tried.map((c) => c.keys.lookup) } });
   const keys = tried.find((c) => c.salt === ver.data?.pair_salt)?.keys;

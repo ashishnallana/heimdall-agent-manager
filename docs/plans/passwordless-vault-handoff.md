@@ -48,8 +48,8 @@ Binaries are built with `odin build src/<pkg> -collection:odin_test=src "-extra-
 ham-hub --listen 127.0.0.1:8081 --db <dir>/hub.db --migrations-dir src/hub/repository/sqlite/migrations \
         --trusted-proxy-cidr 127.0.0.1/32 --ui-origin http://127.0.0.1:5173
 ham-dev-proxy --listen 127.0.0.1:8080 --hub-url http://127.0.0.1:8081 --default-user <user>
-# UI (PowerShell): HEIMDALL_HUB_API_URL, HEIMDALL_DEV_PROXY_URL, and the dev-only
-# VITE_PAIRING_HUB_ORIGIN=http://127.0.0.1:8081 (pairing binds the hub origin; Vite serves on its own port)
+# UI (PowerShell): HEIMDALL_HUB_API_URL, HEIMDALL_DEV_PROXY_URL. Pairing works across
+# origins: each new device declares the hub origin it bound (pair_hub_origin).
 npx vite --host 127.0.0.1 --port 5173
 ham-bridge enroll --hub http://127.0.0.1:8081 --config <dir>/config.toml --bridge-token-file <dir>/bridge-token --headless
 ham-bridge --config <dir>/config.toml --bridge-token-file <dir>/bridge-token

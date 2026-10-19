@@ -87,7 +87,7 @@ test_vault_directory_http_flow :: proc(t: ^testing.T) {
 	b := vt_make_dev(2)
 	reg_st := vt_statement("register", user_id, &b, &b, "", "")
 	code := vt_lookup("b")
-	reg_body := strings.concatenate({`{"statement":"`, vt_escape(reg_st), `","proof_signature":`, vt_sign(&b, reg_st), `,"pair_salt":"0123456789abcdef0123456789abcdef","pair_lookup":"`, code, `","pair_key_mac":"`, vt_lookup("mac-b"), `"}`})
+	reg_body := strings.concatenate({`{"statement":"`, vt_escape(reg_st), `","proof_signature":`, vt_sign(&b, reg_st), `,"pair_salt":"0123456789abcdef0123456789abcdef","pair_hub_origin":"https://hub.example.test:443","pair_lookup":"`, code, `","pair_key_mac":"`, vt_lookup("mac-b"), `"}`})
 	reg := dispatch(&graph, "POST", "/api/v1/vault/devices/register", reg_body, alice)
 	testing.expect_value(t, reg.status, 201)
 	testing.expect(t, !strings.contains(reg.body, "user_code") && !strings.contains(reg.body, code), reg.body)
@@ -111,7 +111,7 @@ test_vault_directory_http_flow :: proc(t: ^testing.T) {
 	// Pairing stretch: the approver fetches the public pair_salt first; only the
 	// session user's own pending browsers are listed.
 	salts := dispatch(&graph, "POST", "/api/v1/device/pair-salts", "{}", alice)
-	testing.expect(t, salts.status == 200 && strings.contains(salts.body, `{"kind":"browser","pair_salt":"0123456789abcdef0123456789abcdef"}`), salts.body)
+	testing.expect(t, salts.status == 200 && strings.contains(salts.body, `{"kind":"browser","pair_salt":"0123456789abcdef0123456789abcdef","pair_hub_origin":"https://hub.example.test:443"}`), salts.body)
 	bob_salts := dispatch(&graph, "POST", "/api/v1/device/pair-salts", "{}", bob)
 	testing.expect(t, bob_salts.status == 200 && !strings.contains(bob_salts.body, `"kind":"browser"`), bob_salts.body)
 
@@ -145,7 +145,7 @@ test_vault_directory_http_flow :: proc(t: ^testing.T) {
 	testing.expect(t, fam_ok && committed)
 	c := vt_make_dev(3)
 	c_st := vt_statement("register", user_id, &c, &c, "", "")
-	c_reg := dispatch(&graph, "POST", "/api/v1/vault/devices/register", strings.concatenate({`{"statement":"`, vt_escape(c_st), `","proof_signature":`, vt_sign(&c, c_st), `,"pair_salt":"0123456789abcdef0123456789abcdef","pair_lookup":"`, vt_lookup("c"), `","pair_key_mac":"`, vt_lookup("mac-c"), `"}`}), alice)
+	c_reg := dispatch(&graph, "POST", "/api/v1/vault/devices/register", strings.concatenate({`{"statement":"`, vt_escape(c_st), `","proof_signature":`, vt_sign(&c, c_st), `,"pair_salt":"0123456789abcdef0123456789abcdef","pair_hub_origin":"https://hub.example.test:443","pair_lookup":"`, vt_lookup("c"), `","pair_key_mac":"`, vt_lookup("mac-c"), `"}`}), alice)
 	testing.expect_value(t, c_reg.status, 201)
 	c_code_body := strings.concatenate({`{"pair_lookup":"`, vt_lookup("c"), `"}`})
 	as_bridge := dispatch(&graph, "POST", "/api/v1/device/verify", c_code_body, []contracts.HTTP_Header{{name = "Authorization", value = strings.concatenate({"Bearer ", bridge_token})}})
@@ -162,7 +162,7 @@ test_vault_directory_http_flow :: proc(t: ^testing.T) {
 		`{"client":"ham-bridge","device_label":"x","os":"linux","bridge_public_key":"`, DEVICE_TEST_PUBLIC_KEY,
 		`","bridge_identity_public_key":"`, other_br.sign_pub, `","bridge_identity_proof":`,
 	})
-	authz_suffix := strings.concatenate({`,"code_challenge":"`, DEVICE_TEST_CODE_CHALLENGE, `","code_challenge_method":"S256","pair_salt":"0123456789abcdef0123456789abcdef","pair_lookup":"`, vt_lookup("grant"), `","pair_key_mac":"`, vt_lookup("mac-grant"), `"}`})
+	authz_suffix := strings.concatenate({`,"code_challenge":"`, DEVICE_TEST_CODE_CHALLENGE, `","code_challenge_method":"S256","pair_salt":"0123456789abcdef0123456789abcdef","pair_hub_origin":"https://hub.example.test:443","pair_lookup":"`, vt_lookup("grant"), `","pair_key_mac":"`, vt_lookup("mac-grant"), `"}`})
 	// L1: a proof by another key (or over another challenge) is refused.
 	forged := dispatch(&graph, "POST", "/api/v1/device/authorize", strings.concatenate({authz_prefix, vt_enroll_proof(&root, DEVICE_TEST_PUBLIC_KEY, DEVICE_TEST_CODE_CHALLENGE), authz_suffix}), nil)
 	testing.expect_value(t, forged.status, 400)
@@ -176,7 +176,7 @@ test_vault_directory_http_flow :: proc(t: ^testing.T) {
 	gver := dispatch(&graph, "POST", "/api/v1/device/verify", strings.concatenate({`{"pair_lookup":"`, grant_code, `"}`}), alice)
 	testing.expect(t, gver.status == 200 && strings.contains(gver.body, `"kind":"bridge"`) && strings.contains(gver.body, vt_lookup("mac-grant")), gver.body)
 	gsalts := dispatch(&graph, "POST", "/api/v1/device/pair-salts", "{}", alice)
-	testing.expect(t, strings.contains(gsalts.body, `{"kind":"bridge","pair_salt":"0123456789abcdef0123456789abcdef"}`), gsalts.body)
+	testing.expect(t, strings.contains(gsalts.body, `{"kind":"bridge","pair_salt":"0123456789abcdef0123456789abcdef","pair_hub_origin":"https://hub.example.test:443"}`), gsalts.body)
 	// The lookup never resolves as an (Electron) user code.
 	as_user_code := dispatch(&graph, "POST", "/api/v1/device/verify", strings.concatenate({`{"user_code":"`, grant_code, `"}`}), alice)
 	testing.expect_value(t, as_user_code.status, 404)

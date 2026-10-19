@@ -337,8 +337,11 @@ Bridge_Authorize_Request :: struct {
 	// Hub-blind pairing: derived from the pairing code this process prints.
 	pair_lookup:                string `json:"pair_lookup,omitempty"`,
 	pair_key_mac:               string `json:"pair_key_mac,omitempty"`,
-	// Public salt of the pairing stretch (vault.Pair_Context), random per enrollment.
+	// Public salt of the pairing stretch (vault.Pair_Context), random per enrollment,
+	// and the canonical hub origin this bridge bound into it (declared so an approver
+	// whose UI is served on another origin derives with the same one).
 	pair_salt:                  string `json:"pair_salt,omitempty"`,
+	pair_hub_origin:            string `json:"pair_hub_origin,omitempty"`,
 }
 
 // bridge_enroll_authorize_body builds the /device/authorize request body.
@@ -350,6 +353,7 @@ bridge_enroll_authorize_body :: proc(
 	pair_lookup: string = "",
 	pair_key_mac: string = "",
 	pair_salt: string = "",
+	pair_hub_origin: string = "",
 	allocator := context.allocator,
 ) -> string {
 	body := Bridge_Authorize_Request{
@@ -357,7 +361,7 @@ bridge_enroll_authorize_body :: proc(
 		app_version = d.bridge_version, os_user = d.os_user, bridge_public_key = public_key_hex,
 		bridge_identity_public_key = identity_public_key_hex,
 		code_challenge = code_challenge, code_challenge_method = "S256",
-		pair_lookup = pair_lookup, pair_key_mac = pair_key_mac, pair_salt = pair_salt,
+		pair_lookup = pair_lookup, pair_key_mac = pair_key_mac, pair_salt = pair_salt, pair_hub_origin = pair_hub_origin,
 	}
 	if identity_proof_json != "" {
 		if sw, ok := vault.signature_wire_from_text(identity_proof_json, context.temp_allocator); ok do body.bridge_identity_proof = sw
@@ -1125,7 +1129,7 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 	defer bridge_pairing_disarm()
 
 	// Step 4 — the anonymous device-authorization request.
-	body := bridge_enroll_authorize_body(descriptor, public_key_hex, code_challenge, identity_hex, identity_proof, vault.pair_lookup_hex(&pair_keys, context.temp_allocator), pair_key_mac, pair_salt, context.temp_allocator)
+	body := bridge_enroll_authorize_body(descriptor, public_key_hex, code_challenge, identity_hex, identity_proof, vault.pair_lookup_hex(&pair_keys, context.temp_allocator), pair_key_mac, pair_salt, pair_origin, context.temp_allocator)
 	if body == "" {
 		fmt.eprintln("ham-bridge enroll: could not encode the authorize request")
 		return false

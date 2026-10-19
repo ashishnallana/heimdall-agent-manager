@@ -67,7 +67,7 @@ device_enroll_test_bridge :: proc(graph: ^app.App_Graph, headers: []contracts.HT
 		`","os":"linux","os_user":"tester","bridge_public_key":"`, DEVICE_TEST_PUBLIC_KEY,
 		`","bridge_identity_public_key":"`, br.sign_pub,
 		`","bridge_identity_proof":`, vt_enroll_proof(&br, DEVICE_TEST_PUBLIC_KEY, DEVICE_TEST_CODE_CHALLENGE),
-		`,"code_challenge":"`, DEVICE_TEST_CODE_CHALLENGE, `","code_challenge_method":"S256","pair_salt":"0123456789abcdef0123456789abcdef","pair_lookup":"`, pair_lookup, `","pair_key_mac":"`, vt_lookup(strings.concatenate({"mac|", br.sign_pub}, context.temp_allocator)), `"}`,
+		`,"code_challenge":"`, DEVICE_TEST_CODE_CHALLENGE, `","code_challenge_method":"S256","pair_salt":"0123456789abcdef0123456789abcdef","pair_hub_origin":"https://hub.example.test:443","pair_lookup":"`, pair_lookup, `","pair_key_mac":"`, vt_lookup(strings.concatenate({"mac|", br.sign_pub}, context.temp_allocator)), `"}`,
 	})
 	authorized := api_http.router_dispatch(&graph.router, api_http.Request{
 		method = "POST", path = "/api/v1/device/authorize", body = authorize_body,

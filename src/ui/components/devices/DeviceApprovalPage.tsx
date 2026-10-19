@@ -17,7 +17,6 @@ import { Alert, Button, Icon, Input } from '@ui';
 import { ApiError } from '../../api/cookieFetch';
 import {
   fetchPairCandidates,
-  pairingHubOrigin,
   postApproveBridge,
   postApproveBrowser,
   postDenyDevice,
@@ -30,7 +29,7 @@ import { fetchBridgeEnrollmentStatus, fetchBridgeUnsealTarget, unsealBridge } fr
 import { enrollmentPendingOutcome, ENROLLMENT_PENDING_FALLBACK_SECONDS } from '../enrollment/bridgeEnrollmentCompletion';
 import { fingerprintFor } from '../../utils/deviceIdentity';
 import { buildBridgeApproval, buildBrowserApproval, checkBridgeCodeInfo, checkBrowserCodeInfo, type PairedBrowser } from '../../utils/vaultDeviceFlows';
-import { derivePairKeys, isPairSalt, normalizePairCode, pairApproveMac, type PairKeys } from '../../utils/vaultPairing';
+import { derivePairKeys, isPairHubOrigin, isPairSalt, normalizePairCode, pairApproveMac, type PairKeys } from '../../utils/vaultPairing';
 import { deliverKeyringToBridge } from '../../utils/vaultBridgeDelivery';
 import { withKeyringBytes } from '../../utils/vaultKeyringSession';
 import {
@@ -81,21 +80,28 @@ export function hostLabelOf(info: DeviceCodeInfo): string {
  * (nothing is approved) unless the request's key_mac verifies under that code.
  *
  * Pairing stretch: the lookup depends on the code AND the request's public pair_salt
- * (plus this account for a browser, and the hub origin), so each candidate salt the
- * hub lists is stretched with the code and all lookups go to /device/verify at once;
- * the answer's pair_salt names the matching candidate.
+ * (plus this account for a browser, and the hub origin), so each candidate the hub
+ * lists is stretched with the code and all lookups go to /device/verify at once; the
+ * answer's pair_salt (and declared origin) names the matching candidate.
+ *
+ * The hub origin is the one each candidate DECLARES it bound into its own stretch
+ * (pair_hub_origin): a bridge enrolled with `-Hub https://hub.example` pairs while
+ * this page is served from, and calls its API on, another origin. There is no
+ * page-origin fallback. A hostile hub that alters a declared origin gains nothing:
+ * the derived lookup / key_mac then simply do not match (refusal), the secret code is
+ * still required, and key_mac / pair_mac bind the declared origin through K.
  */
-export async function lookUpPairing(rawCode: string, userId: string, hubOrigin: string = pairingHubOrigin()): Promise<Review> {
+export async function lookUpPairing(rawCode: string, userId: string): Promise<Review> {
   const code = normalizePairCode(rawCode);
-  const tried: Array<{ kind: 'browser' | 'bridge'; salt: string; keys: PairKeys }> = [];
+  const tried: Array<{ kind: 'browser' | 'bridge'; salt: string; origin: string; keys: PairKeys }> = [];
   for (const cand of (await fetchPairCandidates()).slice(0, MAX_PAIR_CANDIDATES)) {
-    if ((cand?.kind !== 'browser' && cand?.kind !== 'bridge') || !isPairSalt(cand.pair_salt)) continue;
-    const keys = await derivePairKeys(code, { kind: cand.kind, userId: cand.kind === 'browser' ? userId : '', hubOrigin, pairSalt: cand.pair_salt });
-    tried.push({ kind: cand.kind, salt: cand.pair_salt, keys });
+    if ((cand?.kind !== 'browser' && cand?.kind !== 'bridge') || !isPairSalt(cand.pair_salt) || !isPairHubOrigin(cand.pair_hub_origin)) continue;
+    const keys = await derivePairKeys(code, { kind: cand.kind, userId: cand.kind === 'browser' ? userId : '', hubOrigin: cand.pair_hub_origin, pairSalt: cand.pair_salt });
+    tried.push({ kind: cand.kind, salt: cand.pair_salt, origin: cand.pair_hub_origin, keys });
   }
   if (tried.length === 0) throw new Error(NO_MATCH_MESSAGE);
   const info = await verifyPairLookups(tried.map((c) => c.keys.lookup));
-  const match = tried.find((c) => c.kind === info.kind && c.salt === info.pair_salt);
+  const match = tried.find((c) => c.kind === info.kind && c.salt === info.pair_salt && c.origin === info.pair_hub_origin);
   if (!match) throw new Error('The server answered for a different pairing request. Nothing was approved.');
   const { keys } = match;
   if (info.kind === 'browser') {

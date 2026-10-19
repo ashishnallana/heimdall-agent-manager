@@ -35,7 +35,7 @@ vd_device :: proc(id, key: string, status: domain.Vault_Device_Status, code := "
 		device_id = id, user_id = VD_USER, kind = "browser", label = id,
 		sign_alg = "ecdsa-p256-sha256", wrap_alg = "ecdh-p256-hkdf-sha256-aes256gcm",
 		sign_public_key = key, ecdh_public_key = key, fingerprint = "0000 0000 0000 0000",
-		status = status, pair_lookup = code, pair_key_mac = "m" if code != "" else "", pair_salt = "s" if code != "" else "", register_statement = "r" if code != "" else "", code_expires_at = VD_LATER if code != "" else "",
+		status = status, pair_lookup = code, pair_key_mac = "m" if code != "" else "", pair_salt = "s" if code != "" else "", pair_hub_origin = "o" if code != "" else "", register_statement = "r" if code != "" else "", code_expires_at = VD_LATER if code != "" else "",
 		created_at = VD_NOW,
 	}
 }
@@ -182,4 +182,42 @@ test_vault_repo_register_is_idempotent_per_key :: proc(t: ^testing.T) {
 	testing.expect_value(t, refreshed.pair_lookup, "GGGG-HHHH-IIII") // expired request replaced
 	_, collide := iface.vault_register_pending(&f.repo, vd_device("dev_c", "k_c", .Pending, "GGGG-HHHH-IIII"), VD_NOW)
 	testing.expect_value(t, collide.code, domain.Error_Code.Conflict)
+}
+
+@(test)
+test_vault_repo_migration_100_adds_pair_hub_origin_to_existing_db :: proc(t: ^testing.T) {
+	// A production hub already applied 092..099 (vault_devices WITHOUT pair_hub_origin)
+	// and holds vault data: migration 100 must add the column and keep every row.
+	context.allocator = context.temp_allocator
+	f: Vd_Fixture
+	if !vd_open(t, &f) do return
+	defer close(&f.conn)
+	vd_genesis(t, &f)
+	testing.expect(t, exec(&f.conn, "ALTER TABLE vault_devices DROP COLUMN pair_hub_origin;"), "rebuild the pre-100 shape")
+	testing.expect(t, exec(&f.conn, "DELETE FROM schema_migrations WHERE version = '100_vault_pair_hub_origin.sql';"), "forget 100")
+	testing.expect(t, !table_column_exists(&f.conn, "vault_devices", "pair_hub_origin"), "pre-100 shape")
+
+	mig_ok, mig_err := run_migrations(&f.conn)
+	testing.expect(t, mig_ok, mig_err.message)
+	testing.expect(t, table_column_exists(&f.conn, "vault_devices", "pair_hub_origin"), "100 added the column")
+	testing.expect(t, sqlite_object_exists(&f.conn, "vault_devices_pending_lookup"), "indexes intact")
+	devices, _ := iface.vault_list_devices(&f.repo, VD_USER)
+	testing.expect_value(t, len(devices), 1) // the existing approved root survived
+	dir, found, _ := iface.vault_get_directory(&f.repo, VD_USER)
+	testing.expect(t, found && dir.root_device_id == "dev_root", "directory survived")
+
+	// The upgraded table stores and returns the declared origin of a new pending device.
+	d := vd_device("dev_new", "k_new", .Pending, "LOOK-UPLO-OKUP")
+	d.pair_hub_origin = "https://hub.example.test:443"
+	stored, err := iface.vault_register_pending(&f.repo, d, VD_NOW)
+	testing.expect_value(t, err.code, domain.Error_Code.None)
+	testing.expect_value(t, stored.pair_hub_origin, "https://hub.example.test:443")
+	got, _ := iface.vault_list_devices(&f.repo, VD_USER)
+	seen := ""
+	for g in got do if g.device_id == "dev_new" do seen = g.pair_hub_origin
+	testing.expect_value(t, seen, "https://hub.example.test:443")
+
+	// Re-running is a no-op (the column exists; 100 is recorded).
+	again_ok, _ := run_migrations(&f.conn)
+	testing.expect(t, again_ok, "idempotent")
 }

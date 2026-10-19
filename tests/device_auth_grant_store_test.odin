@@ -239,7 +239,7 @@ main :: proc() {
 
 	bres, bok, berr := device_auth.authorize(&bsvc, {
 		client = "ham-bridge", device_label = "dawnstar", os = "linux", app_version = "0.9.1",
-		bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF, pair_salt = "0123456789abcdef0123456789abcdef", pair_lookup = "1111111111111111111111111111111111111111111111111111111111111111", pair_key_mac = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", os_user = "tanmay",
+		bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF, pair_salt = "0123456789abcdef0123456789abcdef", pair_hub_origin = "https://hub.example.test:443", pair_lookup = "1111111111111111111111111111111111111111111111111111111111111111", pair_key_mac = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", os_user = "tanmay",
 		code_challenge = PKCE_CHALLENGE, code_challenge_method = "S256",
 	}, "127.0.0.1:5555", "203.0.113.42")
 	assert_true(bok, "bridge authorize succeeds")
@@ -295,7 +295,7 @@ main :: proc() {
 	// body-supplied one that disagrees is surfaced — never silently preferred in
 	// either direction.
 	_, m1ok, m1err := device_auth.authorize(&bsvc, {
-		client = "ham-bridge", bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF, pair_salt = "0123456789abcdef0123456789abcdef", pair_lookup = "2222222222222222222222222222222222222222222222222222222222222222", pair_key_mac = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+		client = "ham-bridge", bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF, pair_salt = "0123456789abcdef0123456789abcdef", pair_hub_origin = "https://hub.example.test:443", pair_lookup = "2222222222222222222222222222222222222222222222222222222222222222", pair_key_mac = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
 		bridge_key_fingerprint = "0000 0000 0000 0000",
 		code_challenge = PKCE_CHALLENGE, code_challenge_method = "S256",
 	}, "127.0.0.1:1", "203.0.113.56")
@@ -304,7 +304,7 @@ main :: proc() {
 	// An AGREEING body fingerprint is accepted, and the stored value is still the
 	// Hub's own derivation.
 	m2res, m2ok, _ := device_auth.authorize(&bsvc, {
-		client = "ham-bridge", bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF, pair_salt = "0123456789abcdef0123456789abcdef", pair_lookup = "3333333333333333333333333333333333333333333333333333333333333333", pair_key_mac = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", bridge_key_fingerprint = BPK_FP,
+		client = "ham-bridge", bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF, pair_salt = "0123456789abcdef0123456789abcdef", pair_hub_origin = "https://hub.example.test:443", pair_lookup = "3333333333333333333333333333333333333333333333333333333333333333", pair_key_mac = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", bridge_key_fingerprint = BPK_FP,
 		code_challenge = PKCE_CHALLENGE, code_challenge_method = "S256",
 	}, "127.0.0.1:1", "203.0.113.57")
 	assert_true(m2ok, "body fingerprint that agrees is accepted")
@@ -336,7 +336,7 @@ main :: proc() {
 	lsvc := device_auth.new_device_auth_service(&lstore, fake_clock(), TRUSTED)
 	lres, lok, _ := device_auth.authorize(&lsvc, {
 		client = "ham-bridge", device_label = "dawnstar", os = "linux", app_version = "0.9.1",
-		bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF, pair_salt = "0123456789abcdef0123456789abcdef", pair_lookup = "4444444444444444444444444444444444444444444444444444444444444444", pair_key_mac = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", os_user = "tanmay",
+		bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF, pair_salt = "0123456789abcdef0123456789abcdef", pair_hub_origin = "https://hub.example.test:443", pair_lookup = "4444444444444444444444444444444444444444444444444444444444444444", pair_key_mac = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", os_user = "tanmay",
 		code_challenge = PKCE_CHALLENGE, code_challenge_method = "S256",
 	}, "127.0.0.1:1", "203.0.113.70")
 	assert_true(lok, "lifecycle grant created with all new fields")
