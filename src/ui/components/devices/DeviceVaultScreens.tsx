@@ -174,7 +174,34 @@ export function DeviceVaultProblemScreen({ state }: { state: DeviceVaultState })
  */
 export function DeviceVaultGate({ children }: { children: React.ReactNode }) {
   const state = useSelector(selectDeviceVault);
+  syncGateRoute(state.status);
   return <>{renderDeviceVaultGate(state, children)}</>;
+}
+
+/** The route an untrusted device is parked on (it shows the code; no app route renders). */
+export const DEVICE_ENROLL_ROUTE = '/device/enroll';
+const PARKED_STATUSES = new Set(['pending-approval', 'reset-scheduled', 'confirm-account', 'revoked']);
+
+function currentHashPath(): string {
+  const hash = typeof window !== 'undefined' ? window.location.hash || '' : '';
+  const path = hash.replace(/^#/, '').split('?')[0];
+  return path || '/';
+}
+
+/**
+ * Deep links never bypass the gate: an untrusted device is redirected to the enroll
+ * route (which shows its code), whatever URL it opened. Once the device is ready, a
+ * device still on the enroll route is sent Home. Uses replaceState so the parked URL
+ * does not pile up in history; the app's router is not mounted while gated.
+ */
+export function syncGateRoute(status: string): void {
+  if (typeof window === 'undefined' || !window.history?.replaceState) return;
+  const path = currentHashPath();
+  if (PARKED_STATUSES.has(status) && path !== DEVICE_ENROLL_ROUTE) {
+    window.history.replaceState(window.history.state, '', `#${DEVICE_ENROLL_ROUTE}`);
+  } else if (status === 'ready' && path === DEVICE_ENROLL_ROUTE) {
+    window.history.replaceState(window.history.state, '', '#/home');
+  }
 }
 
 export function renderDeviceVaultGate(state: DeviceVaultState, children: React.ReactNode): React.ReactNode {

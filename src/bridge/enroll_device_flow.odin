@@ -1036,11 +1036,23 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 	// Step 6 — print a stable URL plus the short code and independently computed
 	// fingerprint. The URL contains no enrollment-specific material.
 	approval_url := bridge_enroll_approval_url(ui_origin, context.temp_allocator)
+	// The Hub's verification_uri_complete is the UI's own approval route with the
+	// code pre-filled; accept it only when it sits under the same UI origin.
+	direct_url := extract_json_string(resp.body, "verification_uri_complete", "", context.temp_allocator)
+	if direct_url != "" && !strings.has_prefix(direct_url, strings.concatenate({strings.trim_right(ui_origin, "/"), "/#/device/add"}, context.temp_allocator)) {
+		direct_url = ""
+	}
 	fmt.println("")
 	fmt.println("Enroll this machine")
 	fmt.println("  Open this link:")
 	fmt.println("")
-	fmt.printfln("  %s", approval_url)
+	if direct_url != "" {
+		fmt.printfln("  %s", direct_url)
+		fmt.println("")
+		fmt.printfln("  (if you must sign in first and land elsewhere: %s)", approval_url)
+	} else {
+		fmt.printfln("  %s", approval_url)
+	}
 	fmt.println("")
 	fmt.printfln("  Enter device code      %s", user_code)
 	fmt.println("  Confirm this fingerprint matches the approval page:")
@@ -1049,7 +1061,7 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 	fmt.println("  from the Hub using PKCE-protected polling.")
 	fmt.println("")
 	if !has_flag(args, "--headless") {
-		automatic_url := bridge_enroll_automatic_approval_url(
+		automatic_url := direct_url if direct_url != "" else bridge_enroll_automatic_approval_url(
 			ui_origin, user_code, context.temp_allocator)
 		if bridge_enroll_try_open_approval_url(automatic_url) {
 			fmt.println("Opened the approval page in your browser.")

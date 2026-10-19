@@ -224,7 +224,15 @@ export default function DeviceApprovalPage() {
       ) : null}
 
       {phase.kind === 'working' ? <p data-debug-id="device-approval-progress" className="text-sm text-muted">{phase.message}</p> : null}
-      {phase.kind === 'done' ? <div data-debug-id="device-approval-done"><Alert tone="success">{phase.message}</Alert></div> : null}
+      {phase.kind === 'done' ? (
+        <div data-debug-id="device-approval-done" className="flex flex-col gap-3">
+          <Alert tone="success" title={phase.message.startsWith('Denied') ? 'Request denied' : 'Device approved'}>{phase.message}</Alert>
+          <div className="flex flex-wrap gap-2">
+            <Button data-debug-id="device-approval-home-btn" variant="primary" onClick={() => { window.location.hash = '#/home'; }}>Back to Home</Button>
+            <Button data-debug-id="device-approval-another-btn" variant="ghost" onClick={() => { setCode(''); setConfirmed(false); setPhase({ kind: 'enter' }); }}>Add another device</Button>
+          </div>
+        </div>
+      ) : null}
       {phase.kind === 'failed' ? <div data-debug-id="device-approval-error"><Alert tone="danger">{phase.message}</Alert></div> : null}
     </div>
   );

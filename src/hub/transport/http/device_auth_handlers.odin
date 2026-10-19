@@ -76,6 +76,13 @@ device_authorize_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	write_handler_json_string(&data, result.user_code)
 	strings.write_string(&data, "\",\"verification_uri\":\"")
 	write_handler_json_string(&data, result.verification_uri)
+	// RFC 8628 verification_uri_complete: the UI's real approval route with the code
+	// pre-filled (`<ui-origin>/#/device/add?code=XXXX-XXXX`). Built only from the
+	// configured UI origin and the canonical code; omitted when no UI origin is set.
+	if handlers.ui_origin != "" {
+		strings.write_string(&data, "\",\"verification_uri_complete\":\"")
+		write_handler_json_string(&data, device_add_redirect_location(handlers.ui_origin, result.user_code))
+	}
 	strings.write_string(&data, fmt.tprintf("\",\"interval\":%d", result.interval))
 	strings.write_string(&data, fmt.tprintf(",\"expires_in\":%d", result.expires_in))
 	// Advisory echo of the Hub's fingerprint (design §2.2 step 5); omitted
