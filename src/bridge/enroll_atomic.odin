@@ -37,6 +37,7 @@ import "core:strings"
 import "core:sync"
 import "core:time"
 import cfg_lib "odin_test:lib/config"
+import vault "odin_test:lib/vault"
 
 // BRIDGE_ENROLL_ATOMIC_WAIT_SECONDS matches the hub's BRIDGE_ENROLL_PENDING_SECONDS:
 // past it the hub has rolled the enrollment back, so waiting longer is pointless.
@@ -163,8 +164,22 @@ bridge_enroll_stage_write :: proc(st: Bridge_Enroll_Stage, cred: Bridge_Enroll_C
 		defer delete(merged)
 		if os.write_entire_file(staged(st.config_path), transmute([]byte)merged) != nil do return false
 	}
-	marker := fmt.tprintf("{{\"bridge_id\":\"%s\",\"hub\":\"%s\"}}\n", cred.bridge_id, api_base)
+	marker_json, marker_ok := vault.wire_encode(Bridge_Enroll_Stage_Marker{bridge_id = cred.bridge_id, hub = api_base}, context.temp_allocator)
+	if !marker_ok do return false
+	marker := strings.concatenate({marker_json, "\n"}, context.temp_allocator)
 	return os.write_entire_file(st.marker, transmute([]byte)marker, os.Permissions{.Read_User, .Write_User}) == nil
+}
+
+// Bridge_Enroll_Stage_Marker is the staging marker file: which enrollment, against
+// which hub, the staged files belong to.
+Bridge_Enroll_Stage_Marker :: struct {
+	bridge_id: string,
+	hub:       string,
+}
+
+// Bridge_Enrollment_Result is the hub's bridge_enrollment_result frame.
+Bridge_Enrollment_Result :: struct {
+	committed: bool,
 }
 
 // bridge_enroll_stage_promote renames the staging over the live files and removes
@@ -226,7 +241,8 @@ bridge_enroll_atomic_on_unseal :: proc(text: string, now_ms: i64) -> (ok: bool, 
 
 // bridge_enroll_atomic_on_result applies the hub's verdict (step 3 above).
 bridge_enroll_atomic_on_result :: proc(text: string) {
-	committed := extract_json_bool(text, "committed", false)
+	verdict: Bridge_Enrollment_Result
+	committed := vault.wire_decode(text, &verdict) && verdict.committed // malformed: not committed
 	sync.mutex_lock(&g_enroll_atomic.mu)
 	defer sync.mutex_unlock(&g_enroll_atomic.mu)
 	a := &g_enroll_atomic
@@ -272,8 +288,10 @@ bridge_enroll_atomic_recover_paths :: proc(token_file, config_path: string, refr
 	if !has_marker && !has_staging do return .None
 	marker_bridge_id, marker_hub := "", ""
 	if data, err := os.read_entire_file(st.marker, context.temp_allocator); err == nil {
-		marker_bridge_id = extract_json_string(string(data), "bridge_id", "", context.temp_allocator)
-		marker_hub = extract_json_string(string(data), "hub", "", context.temp_allocator)
+		marker: Bridge_Enroll_Stage_Marker
+		if vault.wire_decode(string(data), &marker) {
+			marker_bridge_id, marker_hub = marker.bridge_id, marker.hub
+		}
 	}
 	// Keystore items are scoped to the hub the staged enrollment was made with.
 	if marker_hub != "" do _ = bridge_keystore_set_hub(marker_hub)

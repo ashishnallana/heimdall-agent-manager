@@ -31,6 +31,7 @@ import taskv2 "odin_test:hub/service/taskv2"
 import ws "odin_test:lib/ws"
 import shell_session_svc "odin_test:hub/service/shell_session"
 import jsonx "odin_test:lib/jsonx"
+import vault "odin_test:lib/vault"
 import metrics "odin_test:lib/metrics"
 
 Bridge_Handlers :: struct {
@@ -313,8 +314,16 @@ bridge_unseal_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	if !bridge_ok do return respond_error(bridge_err, req.request_id)
 	if bridge.status == .Revoked do return respond_error(domain.domain_error(.Bridge_Revoked, "bridge is revoked"), req.request_id)
 
+	// The body is the browser's sealed payload; the hub reads only these members and
+	// relays the rest untouched (bridge_unseal_command_body).
+	body_root, body_ok := jsonx.parse_body(req.body, context.temp_allocator)
+	body_obj, body_is_obj := body_root.(json.Object)
+	if !body_ok || !body_is_obj do return respond_error(domain.domain_error(.Validation_Failed, "unseal body must be a JSON object"), req.request_id)
+	relay: Bridge_Unseal_Relay_Fields
+	if !vault.wire_decode(req.body, &relay) do return respond_error(domain.domain_error(.Validation_Failed, "malformed unseal body"), req.request_id)
+
 	pending := domain.bridge_is_pending(bridge)
-	enroll_target := pending || json_bool_value(req.body, "enrollment")
+	enroll_target := pending || relay.enrollment
 	target_key := bridge.bridge_id
 	enroll_key := ""
 	defer if enroll_key != "" do delete(enroll_key)
@@ -326,9 +335,7 @@ bridge_unseal_handler :: proc(ctx: rawptr, req: Request) -> Response {
 		// REQ-EA-7: refuse a seal addressed to a key the enrolling process does not
 		// hold, with a reason, instead of relaying it into a bridge-side AEAD failure
 		// that reads like tampering. Advisory only — the crypto is the real check.
-		expected_raw := json_string(req.body, "expected_public_key")
-		defer delete(expected_raw)
-		expected := strings.to_lower(strings.trim_space(expected_raw), context.temp_allocator)
+		expected := strings.to_lower(strings.trim_space(relay.expected_public_key), context.temp_allocator)
 		if expected != "" {
 			live := project_service.bridge_runtime_registry_public_key(h.bridge_runtime_registry, enroll_key)
 			defer delete(live)
@@ -341,36 +348,10 @@ bridge_unseal_handler :: proc(ctx: rawptr, req: Request) -> Response {
 		return respond_error(domain.domain_error(.Bridge_Offline, fmt.tprintf("Bridge %s is not connected", bridge.bridge_id)), req.request_id)
 	}
 
-	command_id := json_string(req.body, "command_id")
-	defer delete(command_id)
-	cmd_id := command_id
-	allocated_cmd_id := false
-	if cmd_id == "" {
-		cmd_id = fmt.aprintf("cmd_unseal_%d", time.to_unix_nanoseconds(time.now()))
-		allocated_cmd_id = true
-	}
-	defer if allocated_cmd_id do delete(cmd_id)
-
-	cmd_body: string
-	allocated_body := false
-	trimmed := strings.trim_space(req.body)
-	if strings.contains(trimmed, "\"type\"") && strings.contains(trimmed, "\"command_id\"") {
-		cmd_body = trimmed
-	} else {
-		b := strings.builder_make()
-		strings.write_string(&b, "{\"type\":\"bridge_unseal\",\"command_id\":\"")
-		write_handler_json_string(&b, cmd_id)
-		strings.write_string(&b, "\"")
-		if strings.has_prefix(trimmed, "{") {
-			strings.write_string(&b, ",")
-			strings.write_string(&b, trimmed[1:])
-		} else {
-			strings.write_string(&b, "}")
-		}
-		cmd_body = strings.to_string(b)
-		allocated_body = true
-	}
-	defer if allocated_body do delete(cmd_body)
+	cmd_id := relay.command_id
+	if cmd_id == "" do cmd_id = fmt.tprintf("cmd_unseal_%d", time.to_unix_nanoseconds(time.now()))
+	cmd_body, cmd_ok := bridge_unseal_command_body(body_obj, cmd_id)
+	if !cmd_ok do return respond_error(domain.domain_error(.Internal_Error, "could not encode the unseal command"), req.request_id)
 
 	reply, reply_ok, reply_err := bridge_runtime_service.send_runtime_command_wait(
 		h.bridge_runtime_registry,
@@ -378,7 +359,7 @@ bridge_unseal_handler :: proc(ctx: rawptr, req: Request) -> Response {
 		10000,
 	)
 	if !reply_ok do return respond_error(reply_err, req.request_id)
-	if enroll_target && json_bool_value(reply, "ok") {
+	if enroll_target && bridge_vault_reply_ok(reply) {
 		commit_err, committed := bridge_enroll_commit(h, bridge)
 		// Tell the enrolling process the verdict: it has already persisted its key
 		// and credential, and undoes them on committed:false (REQ-EA-4).
@@ -386,6 +367,34 @@ bridge_unseal_handler :: proc(ctx: rawptr, req: Request) -> Response {
 		if !committed do return respond_error(commit_err, req.request_id)
 	}
 	return respond_success(reply, req.request_id, auth_ctx_server_time(req))
+}
+
+// Bridge_Unseal_Relay_Fields are the members of an unseal request the hub itself
+// reads (typed decode); everything else is the browser's payload for the bridge.
+Bridge_Unseal_Relay_Fields :: struct {
+	command_id:          string,
+	enrollment:          bool,
+	expected_public_key: string,
+}
+
+// bridge_unseal_command_body is the bridge_unseal command relayed to the bridge: the
+// request object with its type forced to bridge_unseal and command_id set, re-encoded
+// with json.marshal. The hub cannot read the sealed members and does not change them.
+bridge_unseal_command_body :: proc(body: json.Object, command_id: string) -> (string, bool) {
+	body := body
+	body["type"] = json.String("bridge_unseal")
+	body["command_id"] = json.String(command_id)
+	data, err := json.marshal(json.Value(body), allocator = context.temp_allocator)
+	if err != nil do return "", false
+	return string(data), true
+}
+
+// bridge_vault_reply_ok reads a bridge vault command reply's top-level ok literal.
+bridge_vault_reply_ok :: proc(reply: string) -> bool {
+	r: struct {
+		ok: bool,
+	}
+	return vault.wire_decode(reply, &r) && r.ok
 }
 
 // bridge_enroll_commit turns an observed successful delivery into an enrollment
@@ -485,17 +494,48 @@ bridge_enrollment_status_handler :: proc(ctx: rawptr, req: Request) -> Response 
 	if family_err.code != .None do return respond_error(family_err, req.request_id)
 	// An attach has no pending row; its pending-ness is a live enroll-scoped family.
 	pending := domain.bridge_is_pending(bridge) || has_family
-	b := strings.builder_make()
-	strings.write_string(&b, "{\"bridge_id\":\""); write_handler_json_string(&b, bridge.bridge_id)
-	strings.write_string(&b, "\",\"enrollment_state\":\""); strings.write_string(&b, "pending" if pending else "enrolled")
-	strings.write_string(&b, "\",\"enrollment_pending_until\":\""); write_handler_json_string(&b, bridge.enrollment_pending_until)
-	strings.write_string(&b, "\",\"enroll_connected\":"); strings.write_string(&b, "true" if connected else "false")
-	strings.write_string(&b, ",\"enroll_public_key\":\""); write_handler_json_string(&b, live_key)
-	strings.write_string(&b, "\",\"vault_status\":\""); write_handler_json_string(&b, bridge.vault_status)
-	strings.write_string(&b, "\"")
-	write_bridge_unseal_identity_fields(&b, unseal)
-	strings.write_string(&b, "}")
-	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req))
+	out := Bridge_Enrollment_Status_Wire{
+		bridge_id = bridge.bridge_id,
+		enrollment_state = "pending" if pending else "enrolled",
+		enrollment_pending_until = bridge.enrollment_pending_until,
+		enroll_connected = connected,
+		enroll_public_key = live_key,
+		vault_status = bridge.vault_status,
+	}
+	bridge_unseal_identity_fill(&out, unseal)
+	return vault_respond(out, req)
+}
+
+Bridge_Enrollment_Status_Wire :: struct {
+	bridge_id:                string,
+	enrollment_state:         string,
+	enrollment_pending_until: string,
+	enroll_connected:         bool,
+	enroll_public_key:        string,
+	vault_status:             string,
+	// The unseal-key advertisement (bridge_unseal_identity_fill).
+	unseal_boot_id:             string,
+	unseal_key_signature:       Maybe(vault.Signature_Wire),
+	bridge_identity_public_key: string,
+	bridge_identity_sign_alg:   string,
+}
+
+Bridge_Enrollment_Cancel_Wire :: struct {
+	bridge_id:   string,
+	rolled_back: bool,
+	committed:   bool,
+	row_deleted: bool,
+}
+
+Bridge_Public_Key_Wire :: struct {
+	bridge_id:         string,
+	public_key:        string,
+	bridge_public_key: string,
+	// The unseal-key advertisement (bridge_unseal_identity_fill).
+	unseal_boot_id:             string,
+	unseal_key_signature:       Maybe(vault.Signature_Wire),
+	bridge_identity_public_key: string,
+	bridge_identity_sign_alg:   string,
 }
 
 // bridge_enrollment_cancel_handler serves POST /api/v1/bridges/<id>/enrollment/cancel:
@@ -532,7 +572,7 @@ bridge_enrollment_cancel_handler :: proc(ctx: rawptr, req: Request) -> Response 
 		}
 	}
 	publish_bridge_enrollment_changed(h, string(bridge.owner_user_id), bridge.bridge_id)
-	return respond_success(fmt.tprintf("{{\"bridge_id\":\"%s\",\"rolled_back\":%v,\"committed\":%v,\"row_deleted\":%v}}", bridge.bridge_id, rolled_back, !rolled_back, removed), req.request_id, auth_ctx_server_time(req))
+	return vault_respond(Bridge_Enrollment_Cancel_Wire{bridge_id = bridge.bridge_id, rolled_back = rolled_back, committed = !rolled_back, row_deleted = removed}, req)
 }
 
 bridge_public_key_handler :: proc(ctx: rawptr, req: Request) -> Response {
@@ -572,17 +612,9 @@ bridge_public_key_handler :: proc(ctx: rawptr, req: Request) -> Response {
 		pub_key = json_string(bridge.capabilities_json, "public_key", context.temp_allocator)
 	}
 
-	b := strings.builder_make()
-	strings.write_string(&b, "{\"bridge_id\":\"")
-	write_handler_json_string(&b, bridge.bridge_id)
-	strings.write_string(&b, "\",\"public_key\":\"")
-	write_handler_json_string(&b, pub_key)
-	strings.write_string(&b, "\",\"bridge_public_key\":\"")
-	write_handler_json_string(&b, pub_key)
-	strings.write_string(&b, "\"")
-	write_bridge_unseal_identity_fields(&b, unseal)
-	strings.write_string(&b, "}")
-	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req))
+	out := Bridge_Public_Key_Wire{bridge_id = bridge.bridge_id, public_key = pub_key, bridge_public_key = pub_key}
+	bridge_unseal_identity_fill(&out, unseal)
+	return vault_respond(out, req)
 }
 
 // --- Project-scoped filesystem browser (browse/read/CRUD) -----------------
@@ -2866,8 +2898,11 @@ agent_instance_status_summary_json :: proc(runtime_status, startup_status, activ
 // instead of freed would leak on every heartbeat of every bridge, forever.
 bridge_apply_vault_status_report :: proc(h: ^Bridge_Handlers, bridge_id, text: string) {
 	if h == nil || h.bridges == nil do return
-	value := json_string(text, "vault_status")
-	defer delete(value)
+	report: struct {
+		vault_status: string,
+	}
+	if !vault.wire_decode(text, &report) do return
+	value := report.vault_status
 	if value == "" do return
 	bridge, changed, _ := bridge_service.update_vault_status(h.bridges, bridge_id, value)
 	defer { b := bridge; domain.bridge_destroy(&b) }
@@ -2878,10 +2913,10 @@ bridge_apply_vault_status_report :: proc(h: ^Bridge_Handlers, bridge_id, text: s
 }
 
 bridge_vault_status_summary_json :: proc(vault_status: string) -> string {
-	b := strings.builder_make()
-	strings.write_string(&b, "{\"vault_status\":\""); write_handler_json_string(&b, vault_status)
-	strings.write_string(&b, "\"}")
-	return strings.to_string(b)
+	out, _ := vault.wire_encode(struct {
+		vault_status: string,
+	}{vault_status = vault_status})
+	return out
 }
 
 bridge_status_summary_json :: proc(status: string) -> string {

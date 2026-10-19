@@ -297,16 +297,17 @@ keystore_android_alias_listed :: proc(alias: string) -> (present: bool, known: b
 	return keystore_android_alias_in_list(out[:], alias)
 }
 
+// Keystore_Android_List_Entry is one element of `termux-keystore list` output.
+Keystore_Android_List_Entry :: struct {
+	alias: Maybe(string),
+}
+
 keystore_android_alias_in_list :: proc(list_json: []u8, alias: string) -> (present: bool, known: bool) {
-	value, err := json.parse(list_json, allocator = context.temp_allocator)
-	if err != nil do return false, false
-	entries, is_array := value.(json.Array)
-	if !is_array do return false, false
+	entries: []Keystore_Android_List_Entry
+	if json.unmarshal(list_json, &entries, json.Specification.JSON, context.temp_allocator) != nil do return false, false
 	for entry in entries {
-		obj, is_obj := entry.(json.Object)
-		if !is_obj do return false, false
-		name, is_str := obj["alias"].(json.String)
-		if !is_str do return false, false
+		name, has := entry.alias.?
+		if !has do return false, false
 		if name == alias do return true, true
 	}
 	return false, true

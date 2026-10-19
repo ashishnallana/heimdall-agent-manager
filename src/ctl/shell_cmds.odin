@@ -116,7 +116,36 @@ ctl_shell_bridge_boot_id :: proc(endpoint, token, bridge_id: string, args: []str
 	))
 	if !ok do return ""
 	defer delete(response)
-	return jsonx.extract_string(response, "unseal_boot_id", "", false, context.temp_allocator)
+	// The local reply wraps the hub's answer: {"data":{"data":{...,"unseal_boot_id"}}}.
+	// One or both envelope levels may be absent.
+	Boot_Id :: struct {
+		unseal_boot_id: string,
+	}
+	envelope: struct {
+		unseal_boot_id: string,
+		data:           struct {
+			unseal_boot_id: string,
+			data:           Boot_Id,
+		},
+	}
+	if !vault.wire_decode(response, &envelope) do return ""
+	boot := envelope.data.data.unseal_boot_id
+	if boot == "" do boot = envelope.data.unseal_boot_id
+	if boot == "" do boot = envelope.unseal_boot_id
+	return strings.clone(boot, context.temp_allocator)
+}
+
+// Ctl_Shell_Enc_Spec is the sealed shell start spec (the bridge decodes it into
+// Bridge_Shell_Enc_Spec_Wire): cmd/cwd bound to bridge, session, kind and boot id.
+Ctl_Shell_Enc_Spec :: struct {
+	cmd:        string,
+	cwd:        string,
+	timestamp:  i64,
+	nonce:      string,
+	bridge_id:  string,
+	session_id: string,
+	kind:       string,
+	boot_id:    string,
 }
 
 ctl_shell_boot_id_valid :: proc(boot_id: string) -> bool {
@@ -150,17 +179,14 @@ ctl_shell_attach_enc_spec :: proc(endpoint, token, bridge_id, kind: string, args
 	nonce_hex := vault.hex_encode_lower(random_bytes[:16], context.temp_allocator)
 	session_id := strings.concatenate({"sh_", vault.hex_encode_lower(random_bytes[16:], context.temp_allocator)}, context.temp_allocator)
 	now_ms := time.to_unix_nanoseconds(time.now()) / 1_000_000
-	spec_json := json_object(
-		json_kv("cmd", cmd_str),
-		json_kv("cwd", cwd_str),
-		json_kv_raw("timestamp", fmt.tprintf("%d", now_ms)),
-		json_kv("nonce", nonce_hex),
-		json_kv("bridge_id", bridge_id),
-		json_kv("session_id", session_id),
-		json_kv("kind", kind),
-		json_kv("boot_id", boot_id),
-	)
-	defer delete(spec_json)
+	spec_json, spec_ok := vault.wire_encode(Ctl_Shell_Enc_Spec{
+		cmd = cmd_str, cwd = cwd_str, timestamp = now_ms, nonce = nonce_hex,
+		bridge_id = bridge_id, session_id = session_id, kind = kind, boot_id = boot_id,
+	}, context.temp_allocator)
+	if !spec_ok {
+		fmt.println(`{"ok":false,"message":"could not encode enc_spec"}`)
+		os.exit(1)
+	}
 	append(fields, json_kv("session_id", session_id))
 	// The bridge rejects enc_spec under any epoch but its current one (command
 	// epoch floor); ctl_seal_or_exit always seals under the current epoch.

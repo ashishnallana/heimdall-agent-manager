@@ -438,20 +438,12 @@ bridge_local_handle_agent_local_op :: proc(request_id, op, params: string, rec: 
 	if op == "vault.status" {
 		status := bridge_vault_status()
 		status_str := bridge_vault_status_string(status)
-		configured, permissions_valid, key_length := bridge_vault_key_status()
-		b := strings.builder_make()
-		strings.write_string(&b, "{\"status\":\"")
-		strings.write_string(&b, status_str)
-		strings.write_string(&b, "\",\"vault_status\":\"")
-		strings.write_string(&b, status_str)
-		strings.write_string(&b, "\",\"configured\":")
-		strings.write_string(&b, "true" if status != .Not_Enrolled else "false")
-		strings.write_string(&b, ",\"permissions_valid\":")
-		strings.write_string(&b, "true" if permissions_valid else "false")
-		strings.write_string(&b, ",\"key_length\":")
-		bridge_agent_write_int(&b, key_length)
-		strings.write_byte(&b, '}')
-		return bridge_local_response_data(request_id, strings.to_string(b))
+		_, permissions_valid, key_length := bridge_vault_key_status()
+		data, _ := vault.wire_encode(Bridge_Agent_Vault_Status{
+			status = status_str, vault_status = status_str, configured = status != .Not_Enrolled,
+			permissions_valid = permissions_valid, key_length = key_length,
+		}, context.temp_allocator)
+		return bridge_local_response_data(request_id, data)
 	}
 	if op == "vault.reset" do return bridge_vault_reset_response(request_id)
 	if op == "vault.get" {
@@ -470,13 +462,10 @@ bridge_local_handle_agent_local_op :: proc(request_id, op, params: string, rec: 
 		encoded, enc_err := base64.encode(used, allocator = context.temp_allocator)
 		if enc_err != nil do return bridge_local_response_error(request_id, "internal", "could not encode keyring")
 		defer crypto.zero_explicit(raw_data(encoded), len(encoded))
-		b := strings.builder_make()
-		strings.write_string(&b, "{\"keyring_b64\":\"")
-		strings.write_string(&b, encoded)
-		strings.write_string(&b, "\",\"current_epoch\":")
-		bridge_agent_write_int(&b, int(kr.current_epoch))
-		strings.write_byte(&b, '}')
-		return bridge_local_response_data(request_id, strings.to_string(b))
+		data, data_ok := vault.wire_encode(Bridge_Agent_Vault_Keyring{keyring_b64 = string(encoded), current_epoch = kr.current_epoch}, context.temp_allocator)
+		if !data_ok do return bridge_local_response_error(request_id, "internal", "could not encode keyring")
+		defer crypto.zero_explicit(raw_data(data), len(data))
+		return bridge_local_response_data(request_id, data)
 	}
 	if op == "telemetry.agents_count" {
 		json := bridge_telemetry_agents_count_json()
@@ -566,10 +555,26 @@ bridge_agent_json_array_objects :: proc(array: string) -> []string {
 // this path.
 bridge_vault_reset_response :: proc(request_id: string) -> string {
 	bridge_vault_reset()
-	b := strings.builder_make()
-	defer strings.builder_destroy(&b)
-	strings.write_string(&b, "{\"ok\":true,\"status\":\"")
-	strings.write_string(&b, bridge_vault_status_string())
-	strings.write_string(&b, "\"}")
-	return bridge_local_response_data(request_id, strings.to_string(b))
+	data, _ := vault.wire_encode(Bridge_Agent_Vault_Op_Result{ok = true, status = bridge_vault_status_string()}, context.temp_allocator)
+	return bridge_local_response_data(request_id, data)
+}
+
+// Typed agent.vault.* answers (json.marshal).
+Bridge_Agent_Vault_Status :: struct {
+	status:            string,
+	vault_status:      string,
+	configured:        bool,
+	permissions_valid: bool,
+	key_length:        int,
+}
+
+Bridge_Agent_Vault_Op_Result :: struct {
+	ok:     bool,
+	status: string,
+}
+
+// keyring_b64 is the whole keyring (HKR1, every epoch); see agent.vault.get.
+Bridge_Agent_Vault_Keyring :: struct {
+	keyring_b64:   string,
+	current_epoch: u32,
 }

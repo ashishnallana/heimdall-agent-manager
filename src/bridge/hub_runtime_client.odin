@@ -17,7 +17,6 @@ import "core:time"
 import contracts "odin_test:contracts"
 import cfg_lib "odin_test:lib/config"
 import ws "odin_test:lib/ws"
-import jsonx "odin_test:lib/jsonx"
 import vault "odin_test:lib/vault"
 
 PROVIDER_TEST_TIMEOUT_SECONDS :: 120
@@ -1189,8 +1188,7 @@ bridge_hub_handle_command :: proc(conn: ^ws.Connection, text: string) {
 		return
 	}
 	if type == "bridge_unseal" {
-		command_id := extract_json_string(text, "command_id", "")
-		defer delete(command_id)
+		command_id := bridge_vault_command_id(text)
 		now_ms := time.to_unix_nanoseconds(time.now()) / 1_000_000
 		ok: bool
 		err_msg: string
@@ -1203,17 +1201,12 @@ bridge_hub_handle_command :: proc(conn: ^ws.Connection, text: string) {
 			ok, err_msg = bridge_unseal_decrypt_and_verify(text, bridge_config.daemon_id, now_ms)
 		}
 
-		b := strings.builder_make()
-		strings.write_string(&b, "{\"type\":\"bridge_unseal_result\",\"command_id\":\"")
-		bridge_runtime_write_json_string(&b, command_id)
-		if ok {
-			strings.write_string(&b, "\",\"ok\":true,\"status\":\"unlocked\"}")
-		} else {
-			strings.write_string(&b, "\",\"status\":\"error\",")
-			bridge_write_failure(&b, bridge_cause_wire_error("vault_unseal_failed", err_msg))
-			strings.write_string(&b, "}")
+		reply := Bridge_Vault_Command_Result{type = "bridge_unseal_result", command_id = command_id, ok = ok, status = "unlocked"}
+		if !ok {
+			reply.status = "error"
+			reply.error = bridge_result_error("vault_unseal_failed", err_msg)
 		}
-		res := strings.to_string(b)
+		res, _ := vault.wire_encode(reply)
 		defer delete(res)
 		bridge_runtime_cache_command(command_id, res)
 		if conn != nil {
@@ -1680,14 +1673,13 @@ bridge_runtime_apply_update :: proc(
 bridge_hub_handle_agent_pty_input :: proc(conn: ^ws.Connection, text: string) {
 	temp := runtime.default_temp_allocator_temp_begin()
 	defer runtime.default_temp_allocator_temp_end(temp)
-	command_id := extract_json_string(text, "command_id", "", context.temp_allocator)
+	cmd := bridge_pty_command_decode(text)
+	command_id := cmd.command_id
 	if cached, ok := bridge_runtime_cached_command(command_id); ok {
 		if conn != nil do _ = bridge_hub_send(conn, cached)
 		return
 	}
-	payload, has_payload := bridge_provider_json_extract_object(text, "payload", context.temp_allocator)
-	instance_id := extract_json_string(text, "agent_instance_id", "", context.temp_allocator)
-	if instance_id == "" && has_payload do instance_id = extract_json_string(payload, "agent_instance_id", "", context.temp_allocator)
+	instance_id := cmd.agent_instance_id
 
 	// This legacy type carries PLAINTEXT `data` only and has no encrypted form; the hub
 	// sends agent-pane keystrokes as encrypted `shell_pty_input`. There is no plaintext
@@ -1709,39 +1701,15 @@ bridge_hub_handle_agent_pty_input :: proc(conn: ^ws.Connection, text: string) {
 }
 
 bridge_hub_handle_agent_pty_resize :: proc(conn: ^ws.Connection, text: string) {
-	command_id := extract_json_string(text, "command_id", "")
+	cmd := bridge_pty_command_decode(text)
+	command_id := cmd.command_id
 	if cached, ok := bridge_runtime_cached_command(command_id); ok {
 		if conn != nil do _ = bridge_hub_send(conn, cached)
 		return
 	}
-	payload, has_payload := bridge_provider_json_extract_object(text, "payload")
-	instance_id := extract_json_string(text, "agent_instance_id", "")
-	if instance_id == "" && has_payload do instance_id = extract_json_string(payload, "agent_instance_id", "")
-
-	rows_val := extract_json_int(text, "rows", 0)
-	if rows_val <= 0 && has_payload do rows_val = extract_json_int(payload, "rows", 0)
-	if rows_val <= 0 {
-		str_val := extract_json_string(text, "rows", "")
-		if str_val == "" && has_payload do str_val = extract_json_string(payload, "rows", "")
-		if str_val != "" {
-			if parsed, ok := strconv.parse_int(str_val); ok do rows_val = int(parsed)
-		}
-	}
-
-	cols_val := extract_json_int(text, "cols", 0)
-	if cols_val <= 0 && has_payload do cols_val = extract_json_int(payload, "cols", 0)
-	if cols_val <= 0 {
-		str_val := extract_json_string(text, "cols", "")
-		if str_val == "" && has_payload do str_val = extract_json_string(payload, "cols", "")
-		if str_val != "" {
-			if parsed, ok := strconv.parse_int(str_val); ok do cols_val = int(parsed)
-		}
-	}
-
-	rows: u16 = 0
-	if rows_val > 0 && rows_val <= 65535 do rows = u16(rows_val)
-	cols: u16 = 0
-	if cols_val > 0 && cols_val <= 65535 do cols = u16(cols_val)
+	instance_id := cmd.agent_instance_id
+	rows := bridge_pty_dimension(cmd.rows)
+	cols := bridge_pty_dimension(cmd.cols)
 
 	ok := bridge_pty_host_deliver_resize(instance_id, rows, cols)
 	if !ok do fmt.println("bridge agent_pty_resize delivery failed for instance", instance_id)
@@ -1805,21 +1773,15 @@ bridge_hub_handle_binary_frame :: proc(conn: ^ws.Connection, frame: []byte) {
 bridge_hub_handle_shell_pty_input :: proc(conn: ^ws.Connection, text: string) {
 	temp := runtime.default_temp_allocator_temp_begin()
 	defer runtime.default_temp_allocator_temp_end(temp)
-	command_id := extract_json_string(text, "command_id", "", context.temp_allocator)
+	cmd := bridge_pty_command_decode(text)
+	command_id := cmd.command_id
 	if cached, ok := bridge_runtime_cached_command(command_id); ok {
 		if conn != nil do _ = bridge_hub_send(conn, cached)
 		return
 	}
-	payload, has_payload := bridge_provider_json_extract_object(text, "payload", context.temp_allocator)
-	shell_id := extract_json_string(text, "shell_id", "", context.temp_allocator)
-	if shell_id == "" && has_payload do shell_id = extract_json_string(payload, "shell_id", "", context.temp_allocator)
-	if shell_id == "" do shell_id = extract_json_string(text, "agent_instance_id", "", context.temp_allocator)
-	if shell_id == "" && has_payload do shell_id = extract_json_string(payload, "agent_instance_id", "", context.temp_allocator)
-
-	data_b64 := extract_json_string(text, "data_b64", "", context.temp_allocator)
-	if data_b64 == "" && has_payload do data_b64 = extract_json_string(payload, "data_b64", "", context.temp_allocator)
-	encrypted, flag_ok := jsonx.extract_bool_literal(text, "is_encrypted")
-	if !flag_ok && has_payload { encrypted, flag_ok = jsonx.extract_bool_literal(payload, "is_encrypted") }
+	shell_id := cmd.shell_id if cmd.shell_id != "" else cmd.agent_instance_id
+	data_b64 := cmd.data_b64
+	encrypted, flag_ok := cmd.is_encrypted.?
 	// T9 (REQ-T9-1): same tri-state gate as shell_start. Keystrokes are execution
 	// too, so a Locked bridge drops them whatever the payload claims to be.
 	vault_status, kr := bridge_vault_status_and_key()
@@ -1864,41 +1826,15 @@ bridge_hub_handle_shell_pty_input :: proc(conn: ^ws.Connection, text: string) {
 }
 
 bridge_hub_handle_shell_pty_resize :: proc(conn: ^ws.Connection, text: string) {
-	command_id := extract_json_string(text, "command_id", "")
+	cmd := bridge_pty_command_decode(text)
+	command_id := cmd.command_id
 	if cached, ok := bridge_runtime_cached_command(command_id); ok {
 		if conn != nil do _ = bridge_hub_send(conn, cached)
 		return
 	}
-	payload, has_payload := bridge_provider_json_extract_object(text, "payload")
-	shell_id := extract_json_string(text, "shell_id", "")
-	if shell_id == "" && has_payload do shell_id = extract_json_string(payload, "shell_id", "")
-	if shell_id == "" do shell_id = extract_json_string(text, "agent_instance_id", "")
-	if shell_id == "" && has_payload do shell_id = extract_json_string(payload, "agent_instance_id", "")
-
-	rows_val := extract_json_int(text, "rows", 0)
-	if rows_val <= 0 && has_payload do rows_val = extract_json_int(payload, "rows", 0)
-	if rows_val <= 0 {
-		str_val := extract_json_string(text, "rows", "")
-		if str_val == "" && has_payload do str_val = extract_json_string(payload, "rows", "")
-		if str_val != "" {
-			if parsed, ok := strconv.parse_int(str_val); ok do rows_val = int(parsed)
-		}
-	}
-
-	cols_val := extract_json_int(text, "cols", 0)
-	if cols_val <= 0 && has_payload do cols_val = extract_json_int(payload, "cols", 0)
-	if cols_val <= 0 {
-		str_val := extract_json_string(text, "cols", "")
-		if str_val == "" && has_payload do str_val = extract_json_string(payload, "cols", "")
-		if str_val != "" {
-			if parsed, ok := strconv.parse_int(str_val); ok do cols_val = int(parsed)
-		}
-	}
-
-	rows: u16 = 0
-	if rows_val > 0 && rows_val <= 65535 do rows = u16(rows_val)
-	cols: u16 = 0
-	if cols_val > 0 && cols_val <= 65535 do cols = u16(cols_val)
+	shell_id := cmd.shell_id if cmd.shell_id != "" else cmd.agent_instance_id
+	rows := bridge_pty_dimension(cmd.rows)
+	cols := bridge_pty_dimension(cmd.cols)
 
 	ok := bridge_pty_host_deliver_shell_resize(shell_id, rows, cols)
 	if !ok do fmt.println("bridge shell_pty_resize delivery failed for shell", shell_id)
@@ -1912,18 +1848,15 @@ bridge_hub_handle_shell_pty_resize :: proc(conn: ^ws.Connection, text: string) {
 }
 
 bridge_hub_handle_shell_stream_attach :: proc(conn: ^ws.Connection, text: string) {
-	command_id := extract_json_string(text, "command_id", "")
+	cmd := bridge_pty_command_decode(text)
+	command_id := cmd.command_id
 	if cached, ok := bridge_runtime_cached_command(command_id); ok {
 		if conn != nil do _ = bridge_hub_send(conn, cached)
 		return
 	}
-	payload, has_payload := bridge_provider_json_extract_object(text, "payload")
-	session_id := extract_json_string(text, "session_id", "")
-	if session_id == "" && has_payload do session_id = extract_json_string(payload, "session_id", "")
-	if session_id == "" do session_id = extract_json_string(text, "shell_id", "")
-	if session_id == "" && has_payload do session_id = extract_json_string(payload, "shell_id", "")
-	if session_id == "" do session_id = extract_json_string(text, "agent_instance_id", "")
-	if session_id == "" && has_payload do session_id = extract_json_string(payload, "agent_instance_id", "")
+	session_id := cmd.session_id
+	if session_id == "" do session_id = cmd.shell_id
+	if session_id == "" do session_id = cmd.agent_instance_id
 
 	send_result :: proc(conn: ^ws.Connection, command_id: string, ok: bool, cause: string = "", err_msg: string = "") {
 		if command_id == "" do return
@@ -1955,18 +1888,15 @@ bridge_hub_handle_shell_stream_attach :: proc(conn: ^ws.Connection, text: string
 }
 
 bridge_hub_handle_shell_stream_detach :: proc(conn: ^ws.Connection, text: string) {
-	command_id := extract_json_string(text, "command_id", "")
+	cmd := bridge_pty_command_decode(text)
+	command_id := cmd.command_id
 	if cached, ok := bridge_runtime_cached_command(command_id); ok {
 		if conn != nil do _ = bridge_hub_send(conn, cached)
 		return
 	}
-	payload, has_payload := bridge_provider_json_extract_object(text, "payload")
-	session_id := extract_json_string(text, "session_id", "")
-	if session_id == "" && has_payload do session_id = extract_json_string(payload, "session_id", "")
-	if session_id == "" do session_id = extract_json_string(text, "shell_id", "")
-	if session_id == "" && has_payload do session_id = extract_json_string(payload, "shell_id", "")
-	if session_id == "" do session_id = extract_json_string(text, "agent_instance_id", "")
-	if session_id == "" && has_payload do session_id = extract_json_string(payload, "agent_instance_id", "")
+	session_id := cmd.session_id
+	if session_id == "" do session_id = cmd.shell_id
+	if session_id == "" do session_id = cmd.agent_instance_id
 
 	send_result :: proc(conn: ^ws.Connection, command_id: string, ok: bool, cause: string = "", err_msg: string = "") {
 		if command_id == "" do return
@@ -1986,22 +1916,16 @@ bridge_hub_handle_shell_stream_detach :: proc(conn: ^ws.Connection, text: string
 }
 
 bridge_hub_handle_get_agent_pane :: proc(conn: ^ws.Connection, text: string) {
-	command_id := extract_json_string(text, "command_id", "")
+	cmd := bridge_pty_command_decode(text)
+	command_id := cmd.command_id
 	if cached, ok := bridge_runtime_cached_command(command_id); ok {
 		_ = bridge_hub_send(conn, cached)
 		return
 	}
-	payload, has_payload := bridge_provider_json_extract_object(text, "payload")
-	instance_id := extract_json_string(text, "agent_instance_id", "")
-	if instance_id == "" && has_payload do instance_id = extract_json_string(payload, "agent_instance_id", "")
-	since_hash := extract_json_string(text, "since_hash", "")
-	if since_hash == "" && has_payload do since_hash = extract_json_string(payload, "since_hash", "")
-	width := extract_json_int(text, "width", 0)
-	if width <= 0 && has_payload do width = extract_json_int(payload, "width", 0)
-	if width <= 0 do width = 80
-	line_limit := extract_json_int(text, "line_limit", 0)
-	if line_limit <= 0 && has_payload do line_limit = extract_json_int(payload, "line_limit", 0)
-	if line_limit <= 0 do line_limit = 120
+	instance_id := cmd.agent_instance_id
+	since_hash := cmd.since_hash
+	width := bridge_json_positive_int(cmd.width, 80)
+	line_limit := bridge_json_positive_int(cmd.line_limit, 120)
 
 	ok, unchanged, h, output, line_count, truncated, cursor_row, cursor_col, err_msg := bridge_pty_host_get_pane(instance_id, since_hash, line_limit, width)
 	defer if h != "" do delete(h)
@@ -2013,17 +1937,41 @@ bridge_hub_handle_get_agent_pane :: proc(conn: ^ws.Connection, text: string) {
 	_ = bridge_hub_send(conn, result)
 }
 
+// Bridge_Pane_Capture_Command is the capture_agent_pane command (top-level members).
+Bridge_Pane_Capture_Command :: struct {
+	command_id:              string,
+	protocol_version:        int,
+	agent_instance_id:       string,
+	pane_capture_request_id: string,
+	conversation_id:         string,
+	message_id:              string,
+	width:                   json.Value,
+	line_limit:              json.Value,
+	settle_ms:               json.Value,
+}
+
 bridge_hub_handle_pane_capture_command :: proc(conn: ^ws.Connection, text: string) {
-	command_id := extract_json_string(text, "command_id", "")
+	cmd: Bridge_Pane_Capture_Command
+	_ = vault.wire_decode(text, &cmd) // malformed: no command_id, protocol_version 0 -> refused below
+	command_id := cmd.command_id
 	if cached, ok := bridge_runtime_cached_command(command_id); ok { _ = bridge_hub_send(conn, cached); return }
-	if extract_json_int(text, "protocol_version", 0) != 1 {
+	if cmd.protocol_version != 1 {
 		failed := bridge_command_failed_json(command_id, bridge_cause_wire_error("unsupported_command", "capture_agent_pane protocol_version must be 1"))
 		bridge_runtime_cache_command(command_id, failed)
 		_ = bridge_hub_send(conn, failed)
 		return
 	}
-	instance_id := extract_json_string(text, "agent_instance_id", "")
-	pending := Bridge_Pane_Capture_Pending{command_id=strings.clone(command_id),pane_capture_request_id=strings.clone(extract_json_string(text,"pane_capture_request_id","")),conversation_id=strings.clone(extract_json_string(text,"conversation_id","")),message_id=strings.clone(extract_json_string(text,"message_id","")),agent_instance_id=strings.clone(instance_id),width=bridge_runtime_provider_test_int(text,"width",80,40,200),line_limit=bridge_runtime_provider_test_int(text,"line_limit",120,20,300),deadline_unix_ms=bridge_runtime_now_ms()+i64(bridge_runtime_provider_test_int(text,"settle_ms",3000,500,10000)+30000)}
+	instance_id := cmd.agent_instance_id
+	pending := Bridge_Pane_Capture_Pending{
+		command_id = strings.clone(command_id),
+		pane_capture_request_id = strings.clone(cmd.pane_capture_request_id),
+		conversation_id = strings.clone(cmd.conversation_id),
+		message_id = strings.clone(cmd.message_id),
+		agent_instance_id = strings.clone(instance_id),
+		width = clamp(bridge_json_int(cmd.width, 80), 40, 200),
+		line_limit = clamp(bridge_json_int(cmd.line_limit, 120), 20, 300),
+		deadline_unix_ms = bridge_runtime_now_ms() + i64(clamp(bridge_json_int(cmd.settle_ms, 3000), 500, 10000) + 30000),
+	}
 	// Serve the capture by proxying host.capture synchronously against the daemon,
 	// which returns the rendered VT screen joined into the pane-text result shape
 	// the UI expects.
@@ -3026,12 +2974,39 @@ bridge_vault_status_reported :: proc(enroll_only: bool) -> Vault_Status {
 // decisions whose wrong answer reaps live instances. This frame reports exactly the
 // one thing that changed; the hub stores it through the same service proc the
 // heartbeat uses, so there is still a single store-and-publish path.
+Bridge_Vault_Status_Report :: struct {
+	type:             string,
+	protocol_version: int,
+	vault_status:     string,
+}
+
 bridge_vault_status_report_json :: proc() -> string {
-	b := strings.builder_make()
-	strings.write_string(&b, "{\"type\":\"bridge_vault_status\",\"protocol_version\":1,\"vault_status\":\"")
-	bridge_runtime_write_json_string(&b, bridge_hub_vault_status_for_report())
-	strings.write_string(&b, "\"}")
-	return strings.to_string(b)
+	out, _ := vault.wire_encode(Bridge_Vault_Status_Report{type = "bridge_vault_status", protocol_version = 1, vault_status = bridge_hub_vault_status_for_report()})
+	return out
+}
+
+// Bridge_Vault_Command is the part of a bridge_unseal command the
+// dispatcher reads (the unseal payload itself is decoded by unseal_protocol.odin).
+Bridge_Vault_Command :: struct {
+	command_id: string,
+}
+
+// bridge_vault_command_id decodes a vault command's command_id ("" when absent or
+// malformed; temp-allocated).
+bridge_vault_command_id :: proc(text: string) -> string {
+	cmd: Bridge_Vault_Command
+	if !vault.wire_decode(text, &cmd) do return ""
+	return cmd.command_id
+}
+
+// Bridge_Vault_Command_Result is the reply to bridge_unseal: ok:true
+// with the new status, or ok:false, status "error" and the typed wire error.
+Bridge_Vault_Command_Result :: struct {
+	type:       string,
+	command_id: string,
+	ok:         bool,
+	status:     string,
+	error:      Maybe(Bridge_Result_Error) `json:"error,omitempty"`,
 }
 
 // bridge_hub_send_vault_status pushes the immediate vault report (REQ-BVS-1).
@@ -3371,7 +3346,27 @@ bridge_pane_capture_expire_pending :: proc() {
 	for pending in expired { bridge_pane_capture_enqueue_result(bridge_pane_capture_result_wire_json(pending,false,"capture_timeout","The pane capture request timed out.","",0,false), pending.command_id) }
 }
 
-bridge_pane_capture_push_json :: proc(pending: Bridge_Pane_Capture_Pending, settle_ms:int)->string{ b:=strings.builder_make(); strings.write_string(&b,"{\"push\":\"pane_capture_request\",\"payload\":{\"protocol_version\":1,\"command_id\":\""); bridge_runtime_write_json_string(&b,pending.command_id); strings.write_string(&b,"\",\"pane_capture_request_id\":\""); bridge_runtime_write_json_string(&b,pending.pane_capture_request_id); strings.write_string(&b,"\",\"message_id\":\""); bridge_runtime_write_json_string(&b,pending.message_id); strings.write_string(&b,"\",\"width\":"); strings.write_string(&b,fmt.tprintf("%d",pending.width)); strings.write_string(&b,",\"settle_ms\":"); strings.write_string(&b,fmt.tprintf("%d",settle_ms)); strings.write_string(&b,",\"line_limit\":"); strings.write_string(&b,fmt.tprintf("%d",pending.line_limit)); strings.write_string(&b,"}}\n"); return strings.to_string(b) }
+Bridge_Pane_Capture_Push :: struct {
+	push:    string,
+	payload: struct {
+		protocol_version:        int,
+		command_id:              string,
+		pane_capture_request_id: string,
+		message_id:              string,
+		width:                   int,
+		settle_ms:               int,
+		line_limit:              int,
+	},
+}
+
+// bridge_pane_capture_push_json is the pane_capture_request push (newline-terminated).
+bridge_pane_capture_push_json :: proc(pending: Bridge_Pane_Capture_Pending, settle_ms: int) -> string {
+	push: Bridge_Pane_Capture_Push
+	push.push = "pane_capture_request"
+	push.payload = {protocol_version = 1, command_id = pending.command_id, pane_capture_request_id = pending.pane_capture_request_id, message_id = pending.message_id, width = pending.width, settle_ms = settle_ms, line_limit = pending.line_limit}
+	body, _ := vault.wire_encode(push, context.temp_allocator)
+	return strings.concatenate({body, "\n"})
+}
 
 // bridge_pane_capture_result_json is the pane_capture_result every capture path sends.
 // A successful capture is sealed when the vault is configured
@@ -3399,7 +3394,37 @@ bridge_pane_capture_result_sealed_json :: proc(pending: Bridge_Pane_Capture_Pend
 	return bridge_pane_capture_result_wire_json(pending, true, "", "", sealed, line_count, truncated || cut)
 }
 
-bridge_pane_capture_result_wire_json :: proc(pending: Bridge_Pane_Capture_Pending, ok:bool, error_code,message,output:string,line_count:int,truncated:bool)->string{ b:=strings.builder_make(); strings.write_string(&b,"{\"type\":\"pane_capture_result\",\"protocol_version\":1,\"command_id\":\""); bridge_runtime_write_json_string(&b,pending.command_id); strings.write_string(&b,"\",\"pane_capture_request_id\":\""); bridge_runtime_write_json_string(&b,pending.pane_capture_request_id); strings.write_string(&b,"\",\"conversation_id\":\""); bridge_runtime_write_json_string(&b,pending.conversation_id); strings.write_string(&b,"\",\"message_id\":\""); bridge_runtime_write_json_string(&b,pending.message_id); strings.write_string(&b,"\",\"agent_instance_id\":\""); bridge_runtime_write_json_string(&b,pending.agent_instance_id); strings.write_string(&b,"\""); if ok do strings.write_string(&b,",\"ok\":true"); strings.write_string(&b,",\"width\":"); strings.write_string(&b,fmt.tprintf("%d",pending.width)); strings.write_string(&b,",\"line_count\":"); strings.write_string(&b,fmt.tprintf("%d",line_count)); strings.write_string(&b,",\"truncated\":"); strings.write_string(&b,"true" if truncated else "false"); if ok { strings.write_string(&b,",\"output\":\""); bridge_runtime_write_json_string(&b,output); strings.write_string(&b,"\"") } else { strings.write_string(&b,","); bridge_write_failure(&b, bridge_cause_wire_error(error_code, message)) }; strings.write_string(&b,"}"); return strings.to_string(b) }
+// Bridge_Pane_Capture_Result_Wire is the pane_capture_result frame: ok and output only
+// on success, the typed error only on failure.
+Bridge_Pane_Capture_Result_Wire :: struct {
+	type:                    string,
+	protocol_version:        int,
+	command_id:              string,
+	pane_capture_request_id: string,
+	conversation_id:         string,
+	message_id:              string,
+	agent_instance_id:       string,
+	ok:                      bool,
+	width:                   int,
+	line_count:              int,
+	truncated:               bool,
+	output:                  Maybe(string) `json:"output,omitempty"`,
+	error:                   Maybe(contracts.Wire_Error_Json) `json:"error,omitempty"`,
+}
+
+bridge_pane_capture_result_wire_json :: proc(pending: Bridge_Pane_Capture_Pending, ok: bool, error_code, message, output: string, line_count: int, truncated: bool) -> string {
+	res := Bridge_Pane_Capture_Result_Wire{
+		type = "pane_capture_result", protocol_version = 1, command_id = pending.command_id,
+		pane_capture_request_id = pending.pane_capture_request_id, conversation_id = pending.conversation_id,
+		message_id = pending.message_id, agent_instance_id = pending.agent_instance_id,
+		ok = ok, width = pending.width, line_count = line_count, truncated = truncated,
+	}
+	if ok do res.output = output
+	else do res.error = contracts.wire_error_json_value(bridge_cause_wire_error(error_code, message))
+	out, _ := vault.wire_encode(res)
+	return out
+}
+
 
 // bridge_get_pane_reply_json is the get_agent_pane / shell_get_pane reply with the
 // capture sealed for the viewer (bridge_pane_output_seal) whenever the vault is
@@ -3425,54 +3450,76 @@ bridge_pane_reply_from_seal :: proc(command_id: string, unchanged: bool, hash_va
 	return bridge_get_agent_pane_result_json(command_id, true, unchanged, hash_val, sealed, line_count, truncated, cursor_row, cursor_col)
 }
 
+// Bridge_Pane_Result_Wire is the get_agent_pane / shell_get_pane command_result. hash
+// only on success; the capture members only when it changed; error only on failure.
+Bridge_Pane_Result_Wire :: struct {
+	type:             string,
+	protocol_version: int,
+	command_id:       string,
+	ok:               bool,
+	unchanged:        bool,
+	hash:             Maybe(string) `json:"hash,omitempty"`,
+	output:           Maybe(string) `json:"output,omitempty"`,
+	line_count:       Maybe(int)    `json:"line_count,omitempty"`,
+	truncated:        Maybe(bool)   `json:"truncated,omitempty"`,
+	cursor_row:       Maybe(int)    `json:"cursor_row,omitempty"`,
+	cursor_col:       Maybe(int)    `json:"cursor_col,omitempty"`,
+	error:            Maybe(contracts.Wire_Error_Json) `json:"error,omitempty"`,
+}
+
 bridge_get_agent_pane_result_json :: proc(command_id: string, ok: bool, unchanged: bool, hash_val: string, output: string, line_count: int, truncated: bool, cursor_row: int = 0, cursor_col: int = 0, err_msg: string = "", err_cause: string = "") -> string {
-	b := strings.builder_make()
-	strings.write_string(&b, "{\"type\":\"command_result\",\"protocol_version\":1,\"command_id\":\"")
-	bridge_runtime_write_json_string(&b, command_id)
-	strings.write_string(&b, "\"")
+	res := Bridge_Pane_Result_Wire{type = "command_result", protocol_version = 1, command_id = command_id, ok = ok}
 	if ok {
-		strings.write_string(&b, ",\"ok\":true,\"unchanged\":")
-		strings.write_string(&b, "true" if unchanged else "false")
-		strings.write_string(&b, ",\"hash\":\"")
-		bridge_runtime_write_json_string(&b, hash_val)
-		strings.write_string(&b, "\"")
+		res.unchanged = unchanged
+		res.hash = hash_val
 		if !unchanged {
-			strings.write_string(&b, ",\"output\":\"")
-			bridge_runtime_write_json_string(&b, output)
-			strings.write_string(&b, "\",\"line_count\":")
-			strings.write_string(&b, fmt.tprintf("%d", line_count))
-			strings.write_string(&b, ",\"truncated\":")
-			strings.write_string(&b, "true" if truncated else "false")
-			strings.write_string(&b, ",\"cursor_row\":")
-			strings.write_string(&b, fmt.tprintf("%d", cursor_row))
-			strings.write_string(&b, ",\"cursor_col\":")
-			strings.write_string(&b, fmt.tprintf("%d", cursor_col))
+			res.output = output
+			res.line_count = line_count
+			res.truncated = truncated
+			res.cursor_row = cursor_row
+			res.cursor_col = cursor_col
 		}
 	} else {
-		strings.write_string(&b, ",\"unchanged\":false,")
-		bridge_write_failure(&b, bridge_cause_wire_error(err_cause if err_cause != "" else "capture_failed", err_msg))
+		res.error = contracts.wire_error_json_value(bridge_cause_wire_error(err_cause if err_cause != "" else "capture_failed", err_msg))
 	}
-	strings.write_string(&b, "}")
-	return strings.to_string(b)
+	out, _ := vault.wire_encode(res)
+	return out
 }
 
 // bridge_command_result_json is a non-failed command_result (accepted / succeeded);
 // failures go through bridge_command_failed_json so they always carry a typed error.
+Bridge_Command_Runtime_Status :: struct {
+	runtime_status: string,
+}
+
+// Bridge_Command_Result_Wire is a command_result frame: ok:true with payload.status,
+// or ok:false with the typed wire error and payload.status "failed".
+Bridge_Command_Result_Wire :: struct {
+	type:             string,
+	protocol_version: int,
+	command_id:       string,
+	ok:               bool,
+	error:            Maybe(contracts.Wire_Error_Json) `json:"error,omitempty"`,
+	payload:          struct {
+		status: string,
+		result: Maybe(Bridge_Command_Runtime_Status) `json:"result,omitempty"`,
+	},
+}
+
+@(private = "file")
+bridge_command_result_wire :: proc(command_id, status, runtime_status: string) -> Bridge_Command_Result_Wire {
+	res := Bridge_Command_Result_Wire{type = "command_result", protocol_version = 1, command_id = command_id}
+	res.payload.status = status
+	if runtime_status != "" do res.payload.result = Bridge_Command_Runtime_Status{runtime_status = runtime_status}
+	return res
+}
+
 bridge_command_result_json :: proc(command_id, status, runtime_status: string) -> string {
 	assert(status != "failed", "use bridge_command_failed_json for failures")
-	b := strings.builder_make()
-	strings.write_string(&b, "{\"type\":\"command_result\",\"protocol_version\":1,\"command_id\":\"")
-	bridge_runtime_write_json_string(&b, command_id)
-	strings.write_string(&b, "\",\"ok\":true,\"payload\":{\"status\":\"")
-	bridge_runtime_write_json_string(&b, status)
-	strings.write_string(&b, "\"")
-	if runtime_status != "" {
-		strings.write_string(&b, ",\"result\":{\"runtime_status\":\"")
-		bridge_runtime_write_json_string(&b, runtime_status)
-		strings.write_string(&b, "\"}")
-	}
-	strings.write_string(&b, "}}")
-	return strings.to_string(b)
+	res := bridge_command_result_wire(command_id, status, runtime_status)
+	res.ok = true
+	out, _ := vault.wire_encode(res)
+	return out
 }
 
 // bridge_command_failed_json is a FAILED command_result (REQ-ERR-PROTO-A): top-level
@@ -3481,33 +3528,101 @@ bridge_command_result_json :: proc(command_id, status, runtime_status: string) -
 // runtime_status (launch/stop) rides in payload.result as on success. Caller owns
 // the result.
 bridge_command_failed_json :: proc(command_id: string, err: contracts.Wire_Error, runtime_status := "") -> string {
-	b := strings.builder_make()
-	strings.write_string(&b, "{\"type\":\"command_result\",\"protocol_version\":1,\"command_id\":\"")
-	bridge_runtime_write_json_string(&b, command_id)
-	strings.write_string(&b, "\",")
-	bridge_write_failure(&b, err)
-	strings.write_string(&b, ",\"payload\":{\"status\":\"failed\"")
-	if runtime_status != "" {
-		strings.write_string(&b, ",\"result\":{\"runtime_status\":\"")
-		bridge_runtime_write_json_string(&b, runtime_status)
-		strings.write_string(&b, "\"}")
-	}
-	strings.write_string(&b, "}}")
-	return strings.to_string(b)
+	res := bridge_command_result_wire(command_id, "failed", runtime_status)
+	res.error = contracts.wire_error_json_value(err)
+	out, _ := vault.wire_encode(res)
+	return out
 }
 
 // bridge_pty_vault_locked_frame_json is the typed in-stream signal (T10, REQ-T10-3) that
 // a pane's input or output was refused because this bridge's vault is locked. The hub
 // relays it to the pane's viewers as an `error` frame with code `vault_locked`, so the
 // UI never has to parse the human-readable banner. Caller owns the result.
+Bridge_Pty_Vault_Locked_Frame :: struct {
+	type:       string,
+	session_id: string,
+	error:      contracts.Wire_Error_Json,
+}
+
 bridge_pty_vault_locked_frame_json :: proc(session_id: string, allocator := context.allocator) -> string {
-	b := strings.builder_make(allocator)
-	strings.write_string(&b, "{\"type\":\"shell_pty_vault_locked\",\"session_id\":\"")
-	bridge_runtime_write_json_string(&b, session_id)
-	strings.write_string(&b, "\",\"error\":")
-	contracts.write_wire_error(&b, bridge_cause_wire_error("vault_locked", "this bridge's vault is locked"))
-	strings.write_string(&b, "}")
-	return strings.to_string(b)
+	out, _ := vault.wire_encode(Bridge_Pty_Vault_Locked_Frame{
+		type = "shell_pty_vault_locked", session_id = session_id,
+		error = contracts.wire_error_json_value(bridge_cause_wire_error("vault_locked", "this bridge's vault is locked")),
+	}, allocator)
+	return out
+}
+
+// ---- typed decode of the pty / pane commands ---------------------------------
+
+// Bridge_Pty_Command_Fields are the members the pty input/resize, stream
+// attach/detach and pane commands read. The hub may put them at the top level or
+// under "payload" (bridge_pty_command_decode merges, top level first). Dimensions
+// are json.Value because older hubs send them as decimal strings.
+Bridge_Pty_Command_Fields :: struct {
+	command_id:        string,
+	session_id:        string,
+	shell_id:          string,
+	agent_instance_id: string,
+	data_b64:          string,
+	is_encrypted:      Maybe(bool),
+	since_hash:        string,
+	rows:              json.Value,
+	cols:              json.Value,
+	width:             json.Value,
+	line_limit:        json.Value,
+}
+
+// bridge_pty_command_decode decodes a pty/pane command (temp-allocated). A command
+// that does not decode yields empty fields, which every caller refuses.
+bridge_pty_command_decode :: proc(text: string) -> Bridge_Pty_Command_Fields {
+	top: Bridge_Pty_Command_Fields
+	_ = vault.wire_decode(text, &top)
+	wrapped: struct {
+		payload: Bridge_Pty_Command_Fields,
+	}
+	if !vault.wire_decode(text, &wrapped) do return top
+	p := wrapped.payload
+	pick :: proc(a, b: string) -> string { return a if a != "" else b }
+	pick_num :: proc(a, b: json.Value) -> json.Value { return a if bridge_json_int(a, 0) > 0 else b }
+	top.command_id = pick(top.command_id, p.command_id)
+	top.session_id = pick(top.session_id, p.session_id)
+	top.shell_id = pick(top.shell_id, p.shell_id)
+	top.agent_instance_id = pick(top.agent_instance_id, p.agent_instance_id)
+	top.data_b64 = pick(top.data_b64, p.data_b64)
+	top.since_hash = pick(top.since_hash, p.since_hash)
+	if _, has := top.is_encrypted.?; !has do top.is_encrypted = p.is_encrypted
+	top.rows = pick_num(top.rows, p.rows)
+	top.cols = pick_num(top.cols, p.cols)
+	top.width = pick_num(top.width, p.width)
+	top.line_limit = pick_num(top.line_limit, p.line_limit)
+	return top
+}
+
+// bridge_json_int reads an integer member given as a JSON number or a decimal
+// string; anything else is fallback.
+bridge_json_int :: proc(v: json.Value, fallback: int) -> int {
+	#partial switch n in v {
+	case json.Integer:
+		return int(n)
+	case json.Float:
+		return int(n)
+	case json.String:
+		if parsed, ok := strconv.parse_int(string(n)); ok do return parsed
+	}
+	return fallback
+}
+
+// bridge_json_positive_int is bridge_json_int with any value <= 0 as fallback.
+bridge_json_positive_int :: proc(v: json.Value, fallback: int) -> int {
+	n := bridge_json_int(v, fallback)
+	return n if n > 0 else fallback
+}
+
+// bridge_pty_dimension is a terminal row/column count: 1..65535, else 0 (unchanged).
+bridge_pty_dimension :: proc(v: json.Value) -> u16 {
+	n := bridge_json_int(v, 0)
+	if n > 0 && n <= 65535 do return u16(n)
+	return 0
 }
 
 // bridge_pty_input_reply_vault_locked answers a keystroke refused by a Locked vault:
@@ -3560,13 +3675,6 @@ bridge_runtime_json_escaped :: proc(value: string) -> string {
 	return strings.to_string(b)
 }
 
-bridge_runtime_provider_test_int :: proc(json, key: string, fallback, min, max: int) -> int {
-	value := extract_json_int(json, key, fallback)
-	if value < min do return min
-	if value > max do return max
-	return value
-}
-
 bridge_os_string :: proc() -> string {
 	when ODIN_OS == .Linux {
 		return "linux"
@@ -3605,23 +3713,17 @@ bridge_release_target :: proc() -> (target: string, update_blocked: bool) {
 	return contracts.release_target_resolve(contracts.RELEASE_TARGET, native, keystore_android_selected())
 }
 
-bridge_hub_hello_json :: proc() -> string {
-	caps := "[]"
-	features := bridge_runtime_features_json()
-	b := strings.builder_make()
-	// protocol_version is the bridge-ws frame version (contracts.BRIDGE_WS_FRAME_VERSION);
-	// the hub refuses a mismatch at hello, which is how a wire-format change fails loudly.
-	strings.write_string(&b, "{\"type\":\"bridge_hello\",\"protocol_version\":")
-	strings.write_int(&b, contracts.BRIDGE_WS_FRAME_VERSION)
-	strings.write_string(&b, ",\"version\":\"")
-	bridge_runtime_write_json_string(&b, contracts.APP_VERSION)
-	strings.write_string(&b, "\",\"commit_sha\":\"")
-	bridge_runtime_write_json_string(&b, contracts.GIT_COMMIT)
-	strings.write_string(&b, "\",\"built_at\":\"")
-	bridge_runtime_write_json_string(&b, contracts.BUILD_TIMESTAMP)
-	strings.write_string(&b, "\",\"target\":\"")
-	bridge_runtime_write_json_string(&b, bridge_target_string())
-	strings.write_string(&b, "\",\"bootstrap_fragment_cache\":true,\"hostname\":\"")
+// Bridge_Hello_Wire is the bridge_hello frame (typed; json.marshal).
+// protocol_version is the bridge-ws frame version (contracts.BRIDGE_WS_FRAME_VERSION);
+// the hub refuses a mismatch at hello, which is how a wire-format change fails loudly.
+Bridge_Hello_Wire :: struct {
+	type:                     string,
+	protocol_version:         int,
+	version:                  string,
+	commit_sha:               string,
+	built_at:                 string,
+	target:                   string,
+	bootstrap_fragment_cache: bool,
 	// REQ-IMPL-4: the REAL hostname, not bridge_config.daemon_id.
 	//
 	// WHY THIS IS NOT COSMETIC. The hub treats this field as the machine's hostname:
@@ -3630,39 +3732,47 @@ bridge_hub_hello_json :: proc() -> string {
 	// the real hostname captured at enrollment with the bridge's own `brg_` id --
 	// and daemon_id is set to exactly that id when the hub's ready frame arrives, so
 	// every bridge renamed itself after its own identifier within seconds of
-	// starting. That is the `machine_hostname = brg_...` row observed during
-	// REQ-IMPL-1's run; it is a real defect, not an artefact of running without
-	// --config, and it silently undid this task's descriptor fix on the very next
-	// connect, leaving REQ-IMPL-5's approval screen with nothing identifying to show.
-	//
-	// An unresolvable hostname sends "", which the hub's `if hostname != ""` guard
-	// leaves alone -- keeping the enrolled value is strictly better than replacing it
-	// with an id.
-	bridge_runtime_write_json_string(&b, bridge_hello_hostname())
-	pub_key := bridge_get_public_key_hex()
-	strings.write_string(&b, "\",\"public_key\":\"")
-	bridge_runtime_write_json_string(&b, pub_key)
-	strings.write_string(&b, "\"")
+	// starting. An unresolvable hostname sends "", which the hub's
+	// `if hostname != ""` guard leaves alone.
+	hostname:                 string,
+	public_key:               string,
 	// Unseal v2: the boot id, the identity-signed ephemeral key and the identity key.
 	// Omitted (so no browser will unseal) when the key cannot be signed.
-	bridge_unseal_write_hello_fields(&b, bridge_config.daemon_id)
-	strings.write_string(&b, ",\"capabilities\":")
-	strings.write_string(&b, caps)
-	strings.write_string(&b, ",\"features\":")
-	strings.write_string(&b, features)
-	strings.write_string(&b, ",\"active_instance_ids\":[")
-	sync.mutex_lock(&bridge_runtime_mutex)
-	first := true
-	for launch in bridge_runtime_launches {
-		if !first do strings.write_byte(&b, ',')
-		first = false
-		strings.write_byte(&b, '"')
-		bridge_runtime_write_json_string(&b, launch.agent_instance_id)
-		strings.write_byte(&b, '"')
+	using _:                  Bridge_Unseal_Hello_Fields,
+	capabilities:             []string,
+	features:                 []string,
+	active_instance_ids:      []string,
+}
+
+BRIDGE_RUNTIME_FEATURES := [?]string{"capture_agent_pane", "get_agent_pane", "instance_reconfiguration_v1"}
+
+bridge_hub_hello_json :: proc() -> string {
+	hello := Bridge_Hello_Wire{
+		type = "bridge_hello",
+		protocol_version = contracts.BRIDGE_WS_FRAME_VERSION,
+		version = contracts.APP_VERSION,
+		commit_sha = contracts.GIT_COMMIT,
+		built_at = contracts.BUILD_TIMESTAMP,
+		target = bridge_target_string(),
+		bootstrap_fragment_cache = true,
+		hostname = bridge_hello_hostname(),
+		public_key = bridge_get_public_key_hex(),
+		capabilities = []string{},
+		features = BRIDGE_RUNTIME_FEATURES[:],
 	}
+	unseal := bridge_unseal_hello_fields(bridge_config.daemon_id)
+	hello.identity_state = unseal.identity_state
+	hello.unseal_boot_id = unseal.unseal_boot_id
+	hello.unseal_key_signature = unseal.unseal_key_signature
+	hello.identity_public_key = unseal.identity_public_key
+	hello.identity_sign_alg = unseal.identity_sign_alg
+	ids := make([dynamic]string, context.temp_allocator)
+	sync.mutex_lock(&bridge_runtime_mutex)
+	for launch in bridge_runtime_launches do append(&ids, strings.clone(launch.agent_instance_id, context.temp_allocator))
 	sync.mutex_unlock(&bridge_runtime_mutex)
-	strings.write_string(&b, "]}")
-	return strings.to_string(b)
+	hello.active_instance_ids = ids[:]
+	out, _ := vault.wire_encode(hello)
+	return out
 }
 
 bridge_runtime_features_json :: proc() -> string { return "[\"capture_agent_pane\",\"get_agent_pane\",\"instance_reconfiguration_v1\"]" }
@@ -3856,84 +3966,54 @@ bridge_enc_spec_check_fresh :: proc(timestamp: i64, nonce: string, now_ms: i64) 
 	return "unauthorized: missing or invalid execution nonce"
 }
 
+// Bridge_Shell_Enc_Spec_Wire is the decrypted enc_spec document (typed decode). env
+// stays a json.Value: it may be [[k,v],...], ["K=V",...] or {"K":"V",...}.
+Bridge_Shell_Enc_Spec_Wire :: struct {
+	cmd:        string,
+	cwd:        string,
+	env:        json.Value,
+	timestamp:  i64,
+	nonce:      string,
+	bridge_id:  string,
+	session_id: string,
+	kind:       string,
+	boot_id:    string,
+}
+
+// bridge_shell_parse_enc_spec decodes a decrypted enc_spec. A member of the wrong
+// type (or a document that is not a JSON object) fails the whole spec.
 bridge_shell_parse_enc_spec :: proc(json_text: string, allocator := context.temp_allocator) -> (spec: Bridge_Shell_Enc_Spec, ok: bool) {
-	val, err := json.parse_string(json_text, json.DEFAULT_SPECIFICATION, false, allocator)
-	if err != nil do return {}, false
-
-	obj, is_obj := val.(json.Object)
-	if !is_obj do return {}, false
-
-	if v, exists := obj["cmd"]; exists {
-		if s, is_str := v.(json.String); is_str {
-			spec.cmd = s
-		}
+	wire: Bridge_Shell_Enc_Spec_Wire
+	if !vault.wire_decode(json_text, &wire, allocator) do return {}, false
+	spec = Bridge_Shell_Enc_Spec{
+		cmd = wire.cmd, cwd = wire.cwd, timestamp = wire.timestamp, nonce = wire.nonce,
+		bridge_id = wire.bridge_id, session_id = wire.session_id, kind = wire.kind, boot_id = wire.boot_id,
 	}
-	if v, exists := obj["cwd"]; exists {
-		if s, is_str := v.(json.String); is_str {
-			spec.cwd = s
-		}
-	}
-	if v, exists := obj["nonce"]; exists {
-		if s, is_str := v.(json.String); is_str {
-			spec.nonce = s
-		}
-	}
-	for key in ([]string{"bridge_id", "session_id", "kind", "boot_id"}) {
-		v, exists := obj[key]
-		if !exists do continue
-		str, is_str := v.(json.String)
-		if !is_str do continue
-		switch key {
-		case "bridge_id":  spec.bridge_id = str
-		case "session_id": spec.session_id = str
-		case "kind":       spec.kind = str
-		case "boot_id":    spec.boot_id = str
-		}
-	}
-	if v, exists := obj["timestamp"]; exists {
-		#partial switch t in v {
-		case json.Integer:
-			spec.timestamp = i64(t)
-		case json.Float:
-			spec.timestamp = i64(t)
-		case json.String:
-			if n, n_ok := strconv.parse_i64(t); n_ok {
-				spec.timestamp = n
-			}
-		}
-	}
-
-	if v, exists := obj["env"]; exists {
-		spec.has_env = true
-		env_list := make([dynamic][2]string, allocator)
-		#partial switch e in v {
-		case json.Array:
-			for item in e {
-				#partial switch it in item {
-				case json.Array:
-					if len(it) >= 2 {
-						k, kok := it[0].(json.String)
-						val_str, vok := it[1].(json.String)
-						if kok && vok {
-							append(&env_list, [2]string{k, val_str})
-						}
-					}
-				case json.String:
-					if eq := strings.index_byte(it, '='); eq > 0 {
-						append(&env_list, [2]string{it[:eq], it[eq+1:]})
-					}
+	if wire.env == nil do return spec, true
+	spec.has_env = true
+	env_list := make([dynamic][2]string, allocator)
+	#partial switch e in wire.env {
+	case json.Array:
+		for item in e {
+			#partial switch it in item {
+			case json.Array:
+				if len(it) >= 2 {
+					k, kok := it[0].(json.String)
+					val_str, vok := it[1].(json.String)
+					if kok && vok do append(&env_list, [2]string{string(k), string(val_str)})
 				}
-			}
-		case json.Object:
-			for k, item in e {
-				if val_str, vok := item.(json.String); vok {
-					append(&env_list, [2]string{k, val_str})
+			case json.String:
+				if eq := strings.index_byte(string(it), '='); eq > 0 {
+					append(&env_list, [2]string{string(it[:eq]), string(it[eq + 1:])})
 				}
 			}
 		}
-		spec.env = env_list[:]
+	case json.Object:
+		for k, item in e {
+			if val_str, vok := item.(json.String); vok do append(&env_list, [2]string{k, string(val_str)})
+		}
 	}
-
+	spec.env = env_list[:]
 	return spec, true
 }
 
@@ -5219,23 +5299,17 @@ bridge_hub_handle_shell_logs :: proc(conn: ^ws.Connection, text: string) {
 // shipped contract consumed by ham-ctl and GET /shells/*/capture, and it runs on a 30s hub
 // timeout. This one is polled twice a second, so it carries the pane shape instead.
 bridge_hub_handle_shell_get_pane :: proc(conn: ^ws.Connection, text: string) {
-	command_id := extract_json_string(text, "command_id", "")
+	cmd := bridge_pty_command_decode(text)
+	command_id := cmd.command_id
 	if cached, ok := bridge_runtime_cached_command(command_id); ok {
 		_ = bridge_hub_send(conn, cached)
 		return
 	}
 
-	payload, has_payload := bridge_provider_json_extract_object(text, "payload")
-	session_id := extract_json_string(text, "session_id", "")
-	if session_id == "" && has_payload do session_id = extract_json_string(payload, "session_id", "")
-	since_hash := extract_json_string(text, "since_hash", "")
-	if since_hash == "" && has_payload do since_hash = extract_json_string(payload, "since_hash", "")
-	width := extract_json_int(text, "width", 0)
-	if width <= 0 && has_payload do width = extract_json_int(payload, "width", 0)
-	if width <= 0 do width = 80
-	line_limit := extract_json_int(text, "line_limit", 0)
-	if line_limit <= 0 && has_payload do line_limit = extract_json_int(payload, "line_limit", 0)
-	if line_limit <= 0 do line_limit = 120
+	session_id := cmd.session_id
+	since_hash := cmd.since_hash
+	width := bridge_json_positive_int(cmd.width, 80)
+	line_limit := bridge_json_positive_int(cmd.line_limit, 120)
 
 	send_failure :: proc(conn: ^ws.Connection, command_id, msg: string) {
 		result := bridge_get_agent_pane_result_json(command_id, false, false, "", "", 0, false, 0, 0, msg)

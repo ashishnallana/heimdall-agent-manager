@@ -185,9 +185,7 @@ signature_text_from_value :: proc(v: json.Value, allocator := context.allocator)
 			if len(s) != 2 do return "", false
 			sig_hex, sig_ok := s["sig"].(json.String)
 			if !sig_ok do return "", false
-			text := strings.concatenate({`{"alg":"`, string(alg), `","sig":"`, string(sig_hex), `"}`}, context.temp_allocator)
-			if _, ok := signature_parse(text); !ok do return "", false
-			return strings.clone(text, allocator), true
+			return signature_text_from_parts(string(alg), string(sig_hex), allocator)
 		case .Unknown:
 			return "", false
 		}
@@ -271,13 +269,19 @@ wrap_statement :: proc(w: ^Keyring_Wrap, user_id: string, allocator := context.a
 	return statement_canonical(&st, allocator)
 }
 
-// wrap_signed_json renders the stored form: the canonical wrap JSON with the
-// signature object appended as the last member.
+// wrap_signed_json renders the stored form: the wrap's members in canonical order
+// with the signature object as the last member, as a typed Wrap_Wire. It is not
+// itself hashed or signed; wrap_from_value re-validates it on every read.
 wrap_signed_json :: proc(w: ^Keyring_Wrap, signature: string, allocator := context.allocator) -> (string, bool) {
-	canonical, ok := wrap_canonical_json(w, context.temp_allocator)
-	if !ok do return "", false
-	if _, s_ok := signature_parse(signature); !s_ok do return "", false
-	return strings.concatenate({canonical[:len(canonical) - 1], `,"signature":`, signature, "}"}, allocator), true
+	if _, ok := wrap_canonical_json(w, context.temp_allocator); !ok do return "", false
+	sw, s_ok := signature_wire_from_text(signature, context.temp_allocator)
+	if !s_ok do return "", false
+	return wire_encode(Wrap_Wire{
+		v = 1, alg = w.alg, recipient_device_id = w.recipient_device_id,
+		directory_version = w.directory_version, current_epoch = w.current_epoch,
+		ephemeral_public_key = w.ephemeral_public_key, iv = w.iv, ciphertext = w.ciphertext,
+		wrapped_by_device_id = w.wrapped_by_device_id, signature = sw,
+	}, allocator)
 }
 
 // ── Signed directory log (plan §1 "Directory log") ──────────────────────────

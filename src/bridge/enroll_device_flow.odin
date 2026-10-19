@@ -410,14 +410,10 @@ bridge_enroll_poll_once :: proc(
 	api_base, device_code, code_verifier: string,
 	allocator := context.allocator,
 ) -> (Bridge_Enroll_Poll_Status, Bridge_Enroll_Credential, int) {
-	b := strings.builder_make(context.temp_allocator)
-	strings.write_string(&b, "{\"device_code\":\"")
-	json_write_string(&b, device_code)
-	strings.write_string(&b, "\",\"code_verifier\":\"")
-	json_write_string(&b, code_verifier)
-	strings.write_string(&b, "\"}")
+	body, body_ok := vault.wire_encode(Bridge_Token_Request{device_code = device_code, code_verifier = code_verifier}, context.temp_allocator)
+	if !body_ok do return .Fatal, Bridge_Enroll_Credential{}, 0
 	resp, ok := http.request_with_headers_timeout(
-		"POST", api_base, BRIDGE_ENROLL_TOKEN_PATH, strings.to_string(b), nil, http.DEFAULT_TIMEOUT_MS)
+		"POST", api_base, BRIDGE_ENROLL_TOKEN_PATH, body, nil, http.DEFAULT_TIMEOUT_MS)
 	if !ok {
 		// Transport failure is NOT fatal and NOT pending-forever: the caller treats
 		// it as a retryable tick, because a flapping tunnel during a 15-minute
@@ -425,7 +421,7 @@ bridge_enroll_poll_once :: proc(
 		return .Pending, Bridge_Enroll_Credential{}, 0
 	}
 	if resp.status == 429 {
-		return .Slow_Down, Bridge_Enroll_Credential{}, extract_json_int(resp.body, "interval", 0)
+		return .Slow_Down, Bridge_Enroll_Credential{}, bridge_token_response_decode(resp.body).interval
 	}
 	if resp.status == 401 {
 		fmt.eprintln("enroll FAILED: the Hub rejected this bridge's PKCE proof (401). The device code cannot be redeemed by this process.")
@@ -437,7 +433,7 @@ bridge_enroll_poll_once :: proc(
 		blog_error(.enroll_failed, blog_sym(.stage, .token), blog_int(.hub_status, i64(resp.status)))
 		return .Fatal, Bridge_Enroll_Credential{}, 0
 	}
-	switch extract_json_string(resp.body, "status", "", context.temp_allocator) {
+	switch bridge_token_response_decode(resp.body).status {
 	case "approved":
 		return .Approved, bridge_enroll_credential_from_json(resp.body, allocator), 0
 	case "denied":
@@ -453,17 +449,55 @@ bridge_enroll_poll_once :: proc(
 	return .Fatal, Bridge_Enroll_Credential{}, 0
 }
 
+// Bridge_Token_Request is the /device/token body (typed; json.marshal).
+Bridge_Token_Request :: struct {
+	device_code:   string,
+	code_verifier: string,
+}
+
+// Bridge_Token_Data is a /device/token or /device/refresh answer: the poll status
+// and, once approved, the credential. Absent members decode as zero values.
+Bridge_Token_Data :: struct {
+	status:                  string,
+	interval:                int,
+	approver_username:       string,
+	owner_user_id:           string,
+	bridge_id:               string,
+	access_token:            string,
+	refresh_token:           string,
+	expires_in:              int,
+	refresh_expires_in:      int,
+	vault_delivery_expected: bool,
+	enrollment_pending:      bool,
+}
+
+// bridge_token_response_decode reads a token answer inside the API envelope
+// ({"data":{...}}) or bare. Anything that does not decode is the zero value, which
+// callers treat as unrecognised / unusable. Temp-allocated.
+bridge_token_response_decode :: proc(body: string) -> Bridge_Token_Data {
+	envelope: struct {
+		data: Maybe(Bridge_Token_Data),
+	}
+	if vault.wire_decode(body, &envelope) {
+		if data, has := envelope.data.?; has do return data
+	}
+	flat: Bridge_Token_Data
+	if !vault.wire_decode(body, &flat) do return {}
+	return flat
+}
+
 bridge_enroll_credential_from_json :: proc(body: string, allocator := context.allocator) -> Bridge_Enroll_Credential {
+	d := bridge_token_response_decode(body)
 	return Bridge_Enroll_Credential{
-		approver_username = extract_json_string(body, "approver_username", "", allocator),
-		owner_user_id      = extract_json_string(body, "owner_user_id", "", allocator),
-		bridge_id          = extract_json_string(body, "bridge_id", "", allocator),
-		access_token       = extract_json_string(body, "access_token", "", allocator),
-		refresh_token      = extract_json_string(body, "refresh_token", "", allocator),
-		expires_in         = extract_json_int(body, "expires_in", 0),
-		refresh_expires_in = extract_json_int(body, "refresh_expires_in", 0),
-		vault_delivery_expected = extract_json_bool(body, "vault_delivery_expected", false),
-		enrollment_pending = extract_json_bool(body, "enrollment_pending", false),
+		approver_username = strings.clone(d.approver_username, allocator),
+		owner_user_id      = strings.clone(d.owner_user_id, allocator),
+		bridge_id          = strings.clone(d.bridge_id, allocator),
+		access_token       = strings.clone(d.access_token, allocator),
+		refresh_token      = strings.clone(d.refresh_token, allocator),
+		expires_in         = d.expires_in,
+		refresh_expires_in = d.refresh_expires_in,
+		vault_delivery_expected = d.vault_delivery_expected,
+		enrollment_pending = d.enrollment_pending,
 	}
 }
 
@@ -837,14 +871,39 @@ bridge_enroll_restart_argv :: proc(runit_dir: string) -> []string {
 	}
 }
 
+// bridge_enroll_start_command is the command line that starts this bridge with the
+// credential enrollment just wrote: this executable plus the --config and
+// --bridge-token-file the enroll was given (temp-allocated).
+bridge_enroll_start_command :: proc(args: []string) -> string {
+	exe := os.args[0] if len(os.args) > 0 else "ham-bridge"
+	parts := make([dynamic]string, context.temp_allocator)
+	append(&parts, bridge_enroll_shell_quote(exe))
+	for flag in ([?]string{"--config", "--bridge-token-file"}) {
+		if v := strings.trim_space(option_value(args, flag, "")); v != "" {
+			append(&parts, flag, bridge_enroll_shell_quote(v))
+		}
+	}
+	return strings.join(parts[:], " ", context.temp_allocator)
+}
+
+// bridge_enroll_shell_quote double-quotes a printed argument that contains a space
+// (display only; nothing is executed from it).
+bridge_enroll_shell_quote :: proc(s: string) -> string {
+	if !strings.contains_any(s, " \t") do return s
+	return strings.concatenate({"\"", s, "\""}, context.temp_allocator)
+}
+
 // bridge_enroll_restart_service hands the persisted credential to the already
-// registered service. It invokes no shell.
-bridge_enroll_restart_service :: proc() -> bool {
+// registered service. It invokes no shell. Where no service manager is supported
+// (Windows) enrollment is still complete: it prints the command that starts the
+// bridge and reports ok with restarted=false.
+bridge_enroll_restart_service :: proc(args: []string) -> (ok: bool, restarted: bool) {
 	runit_dir, _ := bridge_enroll_runit_service_dir() // "" unless the service dir exists
 	argv := bridge_enroll_restart_argv(runit_dir)
 	if argv == nil {
-		fmt.eprintln("bridge enroll: automatic service restart is supported only on Linux (systemd or Termux runit) and macOS")
-		return false
+		fmt.println("  no registered bridge service is restarted automatically on this platform; start the bridge with:")
+		fmt.printfln("    %s", bridge_enroll_start_command(args))
+		return true, false
 	}
 	state, stdout, stderr, err := os.process_exec(os.Process_Desc{command = argv}, context.allocator)
 	defer if len(stdout) > 0 do delete(stdout)
@@ -856,9 +915,9 @@ bridge_enroll_restart_service :: proc() -> bool {
 		if se := strings.trim_space(string(stderr)); se != "" do fmt.eprintfln("  stderr: %s", se)
 		fmt.eprintfln("  Start it manually with: %s — then check its log; the vault key stays persisted, no re-enrollment needed.", strings.join(argv, " ", context.temp_allocator))
 		bridge_enroll_service_start_failed = true
-		return false
+		return false, false
 	}
-	return true
+	return true, true
 }
 
 // Set when enrollment itself completed (credential and, if delivered, the
@@ -1140,8 +1199,9 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 				// REQ-EA-4: write nothing until the vault key is delivered and the hub
 				// commits; enroll_atomic.odin owns the whole sequence.
 				if !bridge_enroll_atomic_run(args, cred, token_file, config_path, api_base) do return false
-				if !bridge_enroll_restart_service() do return false
-				fmt.println("  registered bridge service restarted with the new credential")
+				restart_ok, restarted := bridge_enroll_restart_service(args)
+				if !restart_ok do return false
+				if restarted do fmt.println("  registered bridge service restarted with the new credential")
 				return true
 			}
 			if !bridge_enroll_persist(cred, token_file, config_path, api_base) {
@@ -1169,12 +1229,13 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 				}
 				bridge_enroll_print_account_fingerprint(cred.bridge_id)
 			}
-			if !bridge_enroll_restart_service() {
+			restart_ok, restarted := bridge_enroll_restart_service(args)
+			if !restart_ok {
 				// The key (when delivered) was verified persisted above; a restart
 				// failure is an operational problem, not a reason to destroy it.
 				return false
 			}
-			fmt.println("  registered bridge service restarted with the new credential")
+			if restarted do fmt.println("  registered bridge service restarted with the new credential")
 			return true
 		case .Denied:
 			fmt.eprintln("bridge enroll FAILED: the request was denied in the browser. Nothing was written.")

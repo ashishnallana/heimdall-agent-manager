@@ -21,7 +21,6 @@ import "core:c/libc"
 import base64 "core:encoding/base64"
 import json "core:encoding/json"
 import ws "odin_test:lib/ws"
-import jsonx "odin_test:lib/jsonx"
 import cfg_lib "odin_test:lib/config"
 import vault "odin_test:lib/vault"
 
@@ -1826,12 +1825,6 @@ bridge_fs_handle_command :: proc(conn: ^ws.Connection, type, text: string) -> bo
 		return true
 	}
 	return false
-}
-
-// bridge_fs_extract_json_bool reads a top-level JSON boolean by key. Returns the
-// fallback when the key is missing or the value is not a clean true/false literal.
-bridge_fs_extract_json_bool :: proc(body, key: string, fallback: bool) -> bool {
-	return jsonx.extract_bool(body, key, fallback)
 }
 
 bridge_fs_list_result_json :: proc(command_id: string, r: Bridge_Fs_List_Result, allocator := context.allocator) -> string {

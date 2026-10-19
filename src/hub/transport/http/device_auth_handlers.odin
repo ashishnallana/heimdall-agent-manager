@@ -495,13 +495,3 @@ json_bool :: proc(body, key: string) -> bool {
 json_bool_literal :: proc(body, key: string) -> (value: bool, ok: bool) {
 	return jsonx.extract_bool_literal(body, key)
 }
-
-// json_signature reads a top-level signature (object or its canonical text) as
-// canonical text; "" when absent or malformed (the validator then rejects it).
-json_signature :: proc(body, key: string) -> string {
-	v, ok := jsonx.parse_body(body, context.temp_allocator)
-	if !ok do return ""
-	root, is_obj := v.(json.Object)
-	if !is_obj do return ""
-	return vault_sig_text(root[key])
-}
