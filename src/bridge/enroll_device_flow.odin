@@ -983,7 +983,9 @@ bridge_enroll_wait_for_vault_delivery :: proc(args: []string, bridge_id: string)
 		time.sleep(100 * time.Millisecond)
 	}
 	fmt.eprintln("bridge enroll FAILED: enrolled, but the vault key was not delivered before the handoff deadline.")
-	fmt.eprintln("  Unlock the bridge later from Settings → User Vault, then start the registered service.")
+	fmt.eprintln("  This bridge can only pin your account with the key delivery its pairing code allowed, so it can")
+	fmt.eprintln("  never be unlocked later. Run `ham-bridge enroll --hub <url>` again (new code), and revoke this")
+	fmt.eprintln("  bridge in Settings → Devices: it reports itself there as \"never received keys\".")
 	return false
 }
 
@@ -1254,8 +1256,9 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 			fmt.println("  nothing secret was written to config.toml (audit F2)")
 			if cred.vault_delivery_expected {
 				if !bridge_enroll_wait_for_vault_delivery(args, cred.bridge_id) {
+					// The identity is kept: the started service reports itself "unpaired"
+					// (bridge_hub_vault_status_for_report) so the UI can show and revoke it.
 					keystore_lock_and_purge(cred.bridge_id)
-					_ = keystore_delete_identity_key(cred.bridge_id)
 					return false
 				}
 				bridge_enroll_print_account_fingerprint(cred.bridge_id)

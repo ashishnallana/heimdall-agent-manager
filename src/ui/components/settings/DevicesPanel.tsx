@@ -17,6 +17,7 @@ import {
   sendKeyToBridge,
 } from '../../services/deviceVault';
 import { buildRouteHash } from '../../utils/appLocation';
+import { listUnpairedBridgeIds } from '../../api/endpoints/bridges';
 
 const KIND_LABEL: Record<string, string> = { browser: 'Browser', bridge: 'Bridge', recovery: 'Recovery key' };
 const STATUS_TONE = { approved: 'success', pending: 'warning', revoked: 'neutral', untrusted: 'danger' } as const;
@@ -31,6 +32,8 @@ export interface DevicesListProps {
   busyId?: string;
   /** Bridge id -> error of the last failed automatic/manual key delivery. "Send key" shows only then. */
   keyFailures?: Record<string, string>;
+  /** Bridges reporting `unpaired` (never received keys, cannot any more): revoke and re-enroll. */
+  unpairedBridgeIds?: readonly string[];
   confirmRevokeId?: string;
   onRevoke?: (id: string) => void;
   onConfirmRevoke?: (id: string) => void;
@@ -40,7 +43,7 @@ export interface DevicesListProps {
 }
 
 /** Presentational list. The current device never gets a revoke button. */
-export function DevicesList({ rows, busyId, keyFailures = {}, confirmRevokeId, onRevoke, onConfirmRevoke, onCancelRevoke, onDeny, onSendKey }: DevicesListProps) {
+export function DevicesList({ rows, busyId, keyFailures = {}, unpairedBridgeIds = [], confirmRevokeId, onRevoke, onConfirmRevoke, onCancelRevoke, onDeny, onSendKey }: DevicesListProps) {
   if (rows.length === 0) return <p data-debug-id="settings-devices-empty" className="text-sm text-muted">No devices.</p>;
   return (
     <ul data-debug-id="settings-devices-list" className="divide-y divide-subtle rounded-2xl border border-subtle bg-surface">
@@ -53,6 +56,7 @@ export function DevicesList({ rows, busyId, keyFailures = {}, confirmRevokeId, o
               <StatusPill tone={STATUS_TONE[r.status]}>{r.status === 'untrusted' ? 'unverified — never given keys' : r.status}</StatusPill>
               {r.isCurrent ? <StatusPill tone="info" data-debug-id="settings-device-current-badge">This device (the one you are using)</StatusPill> : null}
               {r.retiredHint ? <StatusPill tone="warning" data-debug-id={`settings-device-retired-hint-${r.deviceId}`}>retired — being revoked</StatusPill> : null}
+              {r.bridgeId && unpairedBridgeIds.includes(r.bridgeId) ? <StatusPill tone="danger" data-debug-id={`settings-device-unpaired-hint-${r.deviceId}`}>never received keys — revoke and re-enroll</StatusPill> : null}
             </div>
             <div className="mt-1 grid gap-x-4 text-xs text-muted sm:grid-cols-2">
               <span>Fingerprint <code className="font-mono text-primary">{r.fingerprint}</code></span>
@@ -108,12 +112,14 @@ export default function DevicesPanel() {
   const [notice, setNotice] = useState('');
   const [busyId, setBusyId] = useState('');
   const [confirmRevokeId, setConfirmRevokeId] = useState('');
+  const [unpaired, setUnpaired] = useState<string[]>([]);
 
   const reload = useCallback(async () => {
     try {
       const { chain } = await fetchVerifiedChain();
       setRows(await buildDeviceRows(chain, state.deviceId));
       setError('');
+      setUnpaired(await listUnpairedBridgeIds().catch(() => []));
     } catch (err) {
       setRows([]);
       setError(`The device directory does not verify: ${String((err as Error)?.message || err)}`);
@@ -161,6 +167,7 @@ export default function DevicesPanel() {
         <DevicesList
           rows={rows}
           keyFailures={state.bridgeKeyFailures}
+          unpairedBridgeIds={unpaired}
           busyId={busyId}
           confirmRevokeId={confirmRevokeId}
           onRevoke={(id) => setConfirmRevokeId(id)}

@@ -142,6 +142,17 @@ export async function listOnlineLockedBridgeIds(): Promise<string[]> {
   return selectOnlineLockedBridgeIds(await listBridgeRows() as BridgeVaultStatusRecord[]);
 }
 
+/**
+ * Bridges that report `unpaired`: enrolled but never given keys, and unable to accept
+ * them any more (they missed their enrollment's first unseal). Revoke + re-enroll.
+ */
+export async function listUnpairedBridgeIds(): Promise<string[]> {
+  return (await listBridgeRows())
+    .filter((b) => String(b?.vault_status ?? '').toLowerCase() === 'unpaired')
+    .map((b) => String(b?.bridge_id || b?.bridgeId || b?.id || ''))
+    .filter(Boolean);
+}
+
 /** Every online, non-revoked bridge id (re-unseal after a rotation). */
 export async function listOnlineBridgeIds(): Promise<string[]> {
   return (await listBridgeRows())

@@ -264,7 +264,9 @@ update_runtime_capabilities :: proc(service: ^Bridge_Service, bridge_id, capabil
 // matching bridge_vault_status_string on the bridge side. Anything else is dropped
 // rather than stored: the field is rendered straight into the UI, and a bridge is
 // free to send whatever it likes down the WS, so the hub pins the vocabulary here.
-BRIDGE_VAULT_STATUS_VALUES :: [3]string{"unlocked", "locked", "disabled"}
+// "unpaired": enrolled, but it never pinned an account root and can no longer (it
+// missed its enrollment's first unseal); the UI offers revoke + re-enroll.
+BRIDGE_VAULT_STATUS_VALUES :: [4]string{"unlocked", "locked", "disabled", "unpaired"}
 
 bridge_vault_status_valid :: proc(value: string) -> bool {
 	for allowed in BRIDGE_VAULT_STATUS_VALUES {

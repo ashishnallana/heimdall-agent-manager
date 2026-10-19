@@ -186,6 +186,13 @@ bridge_pairing_disarm :: proc() {
 	g_bridge_pair_deadline_ms = 0
 }
 
+// bridge_pairing_is_armed: this process holds live pairing keys (an enrollment in progress).
+bridge_pairing_is_armed :: proc() -> bool {
+	sync.mutex_lock(&g_bridge_pair_mu)
+	defer sync.mutex_unlock(&g_bridge_pair_mu)
+	return g_bridge_pair_armed && bridge_now_unix_ms() <= g_bridge_pair_deadline_ms
+}
+
 // bridge_pairing_first_pin_ok verifies a first unseal's pair_mac (after the chain proof verified).
 @(private = "file")
 bridge_pairing_first_pin_ok :: proc(proof_value: json.Value, pair_mac: string) -> bool {
