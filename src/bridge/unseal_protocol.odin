@@ -512,14 +512,29 @@ bridge_unseal_signature_echo :: proc(payload_json: string) -> string {
 	return strings.concatenate({`{"alg":"`, string(alg), `","sig":"`, string(sig), `"}`}, context.temp_allocator)
 }
 
+// bridge_unseal_chain_proof returns the payload's `chain_proof` member (temp-allocated).
+@(private = "file")
+bridge_unseal_chain_proof :: proc(payload_json: string) -> (json.Value, bool) {
+	parsed, ok := jsonx.parse_body(payload_json, context.temp_allocator)
+	if !ok do return nil, false
+	root, is_obj := parsed.(json.Object)
+	if !is_obj do return nil, false
+	v, has := root["chain_proof"]
+	if !has do return nil, false
+	_, proof_is_obj := v.(json.Object)
+	return v, proof_is_obj
+}
+
 // bridge_unseal_decrypt_and_verify checks an unseal v2 payload end to end and, only
 // when every check passes, stores the keyring. Checks, in order: required fields,
 // format, clock skew (±30 s), target bridge id, nonce replay, epoch range, the
 // identity-key echo, the signature echo (must equal this boot's signature and
 // verify under this bridge's identity key), the AEAD (v2 AAD only), the keyring's
-// validity and current epoch, that it belongs to this bridge's enrolled owner, and
-// that it is a superset of any keyring already stored (no substitution, no
-// rollback). v1 payloads (old AAD forms, 32/64-byte plaintexts) cannot pass.
+// validity and current epoch, that it belongs to this bridge's enrolled owner, that
+// it is a superset of any keyring already stored and passes the persistent epoch
+// floor (no substitution, no rollback), and the payload's signed `chain_proof` to the
+// pinned account root (vault.bridge_chain_verify). v1 payloads (old AAD forms,
+// 32/64-byte plaintexts) and payloads without a valid proof cannot pass.
 // g_unseal_install_mu serializes the keyring check → floor store → keyring store of
 // bridge_unseal_decrypt_and_verify.
 g_unseal_install_mu: sync.Mutex
@@ -670,13 +685,25 @@ bridge_unseal_decrypt_and_verify :: proc(
 	case .Missing_Epoch:
 		return false, "keyring rejected: it lacks the newest epoch this bridge accepted before"
 	}
-	//  (c) P2/P3 HOOK — signed epoch statement chain (plan §1, required before P3).
-	//      This is where the bridge must verify, BEFORE installing anything below:
-	//      the `epoch` statement for kr.current_epoch carried in the payload, the
-	//      approval chain of its issuer back to the account root_sign_pub pinned at
-	//      enrollment, that the issuer is an approved non-bridge device, and that
-	//      epoch_commit matches the unwrapped current key. Missing or invalid proof
-	//      must return false here. Until then (a) and (b) are the only gates.
+	//  (c) Signed chain to the account root (plan §1 "Bridge keyring
+	//      authentication"; format and rules in lib/vault/bridge_chain.odin). The
+	//      payload's `chain_proof` must show: the account genesis — equal to the root pinned in
+	//      the floor record, or, on the FIRST unseal after enrollment, the root to
+	//      pin now; the signed `epoch` statement for kr.current_epoch whose
+	//      epoch_commit matches the delivered key, issued by an approved,
+	//      approver-capable (never a bridge) device chained to that root; and this
+	//      bridge's own approval by such a device. Statement user_ids prove the owner;
+	//      the hub-reported owner pinned at enrollment (a) is only a consistency check
+	//      against them. Missing or invalid proof → refuse, nothing installed.
+	//      Residual: the first unseal is trusted to whoever sealed it (the approving
+	//      device in the normal flow); the root's fingerprint is printed at enrollment
+	//      for the owner to compare with an approved browser.
+	proof_value, proof_ok := bridge_unseal_chain_proof(payload_json)
+	if !proof_ok do return false, vault.chain_error_message(.Malformed)
+	root, chain_err := vault.bridge_chain_verify(proof_value, owner, our_identity, &kr, &floor.root)
+	if chain_err != .None do return false, vault.chain_error_message(chain_err)
+	first_pin := !floor.root.set
+	if first_pin do floor.root = root
 
 	raw: [vault.KEYRING_MAX_BYTES]byte
 	defer crypto.zero_explicit(&raw, size_of(raw))
@@ -685,6 +712,11 @@ bridge_unseal_decrypt_and_verify :: proc(
 	// Raise the floor BEFORE installing: a keyring is never live without its floor.
 	epoch_floor_merge(&floor, local_bridge_id, &kr)
 	if !keystore_store_epoch_floor(local_bridge_id, &floor) do return false, "failed to persist the epoch floor; unseal refused"
+	if first_pin {
+		if fp, fp_ok := vault.account_fingerprint(&floor.root, context.temp_allocator); fp_ok {
+			fmt.printfln("vault: pinned account root %s (fingerprint %s)", vault.root_pin_device_id(&floor.root), fp)
+		}
+	}
 	store_ok, _ := keystore_store_vault_keyring(local_bridge_id, bytes)
 	if !store_ok do return false, "failed to store unsealed vault keyring in secure keystore"
 

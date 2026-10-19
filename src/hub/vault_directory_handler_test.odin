@@ -122,7 +122,7 @@ test_vault_directory_http_flow :: proc(t: ^testing.T) {
 
 	// A bridge without a vault approval is refused; with one it enrolls, and its
 	// 8-symbol grant code resolves as kind=bridge only.
-	bridge_id, bridge_token, enrolled := device_enroll_test_bridge(&graph, alice, "box")
+	bridge_id, bridge_token, enrolled := device_enroll_test_bridge(&graph, alice, "box", commit = false)
 	testing.expect(t, enrolled && bridge_id != "", "bridge enrolls with a vault approval")
 
 	// L4: an (enrolled) bridge credential of the same account cannot resolve a
@@ -165,7 +165,7 @@ test_vault_directory_http_flow :: proc(t: ^testing.T) {
 	// M3(a): the operator cancels the still-pending enrollment after its directory
 	// commit: the bridge identity's entry is retired, not left approved.
 	testing.expect(t, !strings.contains(dir.body, `"status":"revoked"`))
-	pending_id, _, pending_ok := device_enroll_test_bridge(&graph, alice, "box2")
+	pending_id, _, pending_ok := device_enroll_test_bridge(&graph, alice, "box2", commit = false)
 	testing.expect(t, pending_ok)
 	cancel := dispatch(&graph, "POST", strings.concatenate({"/api/v1/bridges/", pending_id, "/enrollment/cancel"}), "{}", alice)
 	testing.expect(t, cancel.status == 200 && strings.contains(cancel.body, `"rolled_back":true`), cancel.body)
@@ -222,7 +222,7 @@ test_vault_directory_reset_and_session_kinds :: proc(t: ^testing.T) {
 
 	// Schedule again with a bridge enrolled; before the delay nothing happens, after
 	// it the directory is gone and the bridge's credential is revoked.
-	bridge_id, bridge_token, enrolled := device_enroll_test_bridge(&graph, alice, "box")
+	bridge_id, bridge_token, enrolled := device_enroll_test_bridge(&graph, alice, "box", commit = false)
 	testing.expect(t, enrolled)
 	_, before_found, _ := iface.bridge_get_bridge(graph.bridges.repo, bridge_id)
 	testing.expect(t, before_found)

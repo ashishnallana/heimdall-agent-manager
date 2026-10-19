@@ -734,3 +734,45 @@ test_v2_epoch_floor_merge_keeps_newest :: proc(t: ^testing.T) {
 	kr.entries[5].key[0] ~= 1
 	testing.expect_value(t, epoch_floor_check(&f, "brg_x", &kr), Epoch_Floor_Error.Key_Mismatch)
 }
+
+@(test)
+test_v2_unseal_requires_chain_to_pinned_root :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
+	f := v2_open()
+	defer v2_close(&f)
+	now := v2_now()
+	unseal :: proc(id: string, kr: ^vault.Vault_Keyring, now: i64, nonce: string, opts: Test_Unseal_Options = {}) -> (bool, string) {
+		payload := test_create_unseal_v2_payload(id, kr, now, nonce, opts)
+		defer delete(payload)
+		return bridge_unseal_decrypt_and_verify(payload, id, now)
+	}
+	one := test_keyring_from_hex(TEST_VAULT_KEY_HEX, 1)
+	defer vault.keyring_wipe(&one)
+
+	// No proof, or a proof that does not chain: refused, nothing pinned.
+	ok, _ := unseal(f.id_a, &one, now, "n_chain_none", {proof_override = `{"v":1}`})
+	testing.expect(t, !ok, "a keyring without a chain proof is refused")
+	floor0, _ := keystore_read_epoch_floor(f.id_a)
+	testing.expect(t, !floor0.root.set, "nothing pinned by a refused unseal")
+
+	// First verified unseal pins the root.
+	ok, _ = unseal(f.id_a, &one, now, "n_chain_first")
+	testing.expect(t, ok, "first unseal with a valid proof accepted")
+	testing.expect(t, bridge_account_fingerprint(f.id_a) != "", "account root pinned")
+
+	// A different account root (a hostile hub's own genesis) is refused from now on,
+	// also after a lock purged the keyring.
+	msg: string
+	ok, msg = unseal(f.id_a, &one, now, "n_chain_other", {root_scalar = TEST_ACCOUNT_ROOT_OTHER})
+	testing.expectf(t, !ok && strings.contains(msg, "root"), "other root refused: %s", msg)
+	keystore_lock_and_purge(f.id_a)
+	ok, _ = unseal(f.id_a, &one, now, "n_chain_other_locked", {root_scalar = TEST_ACCOUNT_ROOT_OTHER})
+	testing.expect(t, !ok, "pin survives a lock")
+	two := test_keyring_two_epochs(TEST_VAULT_KEY_HEX, V2_KEY_2)
+	defer vault.keyring_wipe(&two)
+	ok, msg = unseal(f.id_a, &two, now, "n_chain_two")
+	testing.expectf(t, ok, "rotation under the pinned root accepted: %s", msg)
+}

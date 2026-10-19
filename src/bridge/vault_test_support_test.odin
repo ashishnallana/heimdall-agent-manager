@@ -7,10 +7,12 @@ package main
 import "core:crypto"
 import "core:crypto/aes"
 import "core:crypto/ecdh"
+import "core:crypto/ecdsa"
 import "core:crypto/hkdf"
 import "core:encoding/base64"
 import "core:fmt"
 import "core:os"
+import "core:strconv"
 import "core:strings"
 import "core:sync"
 import "core:testing"
@@ -119,6 +121,77 @@ Test_Unseal_Options :: struct {
 	signature_override:  string, // echo this signature object instead of the bridge's
 	identity_override:   string, // echo this identity key instead of the bridge's
 	format_override:     string,
+	proof_override:      string, // send this chain_proof JSON instead of a valid one
+	root_scalar:         string, // sign the default proof under this account root (hex scalar)
+}
+
+// ── chain proof builder (the approving device's side) ───────────────────────
+
+// The test account root: a fixed P-256 scalar, so a proof built in one call chains to
+// the root pinned by an earlier one. TEST_ACCOUNT_ROOT_OTHER is a different account root.
+TEST_ACCOUNT_ROOT_SCALAR :: "0707070707070707070707070707070707070707070707070707070707070707"
+TEST_ACCOUNT_ROOT_OTHER  :: "0808080808080808080808080808080808080808080808080808080808080808"
+
+@(private = "file")
+test_sign_statement :: proc(priv: ^ecdsa.Private_Key, st: ^vault.Statement) -> (text: string, sig_json: string) {
+	text, _ = vault.statement_canonical(st, context.temp_allocator)
+	sig, _ := vault.sign_p256(priv, transmute([]byte)text)
+	sig_json, _ = vault.signature_object(&sig, context.temp_allocator)
+	return
+}
+
+@(private = "file")
+test_json_str :: proc(s: string) -> string {
+	q, _ := strings.replace_all(s, "\n", "\\n", context.temp_allocator)
+	q2, _ := strings.replace_all(q, `"`, `\"`, context.temp_allocator)
+	return strings.concatenate({`"`, q2, `"`}, context.temp_allocator)
+}
+
+// test_chain_proof builds a valid minimal `chain_proof` (the UI's
+// buildBridgeChainProof shape) for bridge_id's identity and kr: the root's genesis,
+// the root's epoch statement for kr.current_epoch and the root's approval of the
+// bridge, both issuer chains empty. Temp-allocated.
+test_chain_proof :: proc(bridge_id: string, kr: ^vault.Vault_Keyring, root_scalar_hex: string = TEST_ACCOUNT_ROOT_SCALAR) -> string {
+	scalar: [32]byte
+	_ = vault.hex_decode_into(scalar[:], root_scalar_hex)
+	root: ecdsa.Private_Key
+	defer ecdsa.private_key_clear(&root)
+	_ = ecdsa.private_key_set_bytes(&root, .SECP256R1, scalar[:])
+	pub: [65]byte
+	ecdsa.private_key_public_bytes(&root, pub[:])
+	root_pub := vault.hex_encode_lower(pub[:], context.temp_allocator)
+	root_id, _ := vault.device_id_from_sign_pub(root_pub, context.temp_allocator)
+	owner := vault.keyring_user_id(kr)
+	commit: [32]byte
+	if key, ok := vault.keyring_current_key(kr); ok do _ = vault.epoch_commit(key, owner, kr.current_epoch, commit[:])
+	ep_buf: [24]byte
+	epoch_s := strconv.write_uint(ep_buf[:], u64(kr.current_epoch), 10)
+	genesis := vault.Statement{
+		type = "genesis", user_id = owner, directory_version = "0", issuer_device_id = root_id, issued_at_ms = "1",
+		subject_device_id = root_id, subject_kind = "browser", subject_sign_pub = root_pub, subject_ecdh_pub = root_pub,
+		subject_sign_alg = vault.SIGN_ALG_ECDSA_P256_SHA256, subject_wrap_alg = vault.WRAP_ALG_ECDH_P256_HKDF_AES,
+		subject_label_b64 = "cm9vdA", epoch = "1",
+	}
+	epoch_st := vault.Statement{
+		type = "epoch", user_id = owner, directory_version = "0", issuer_device_id = root_id, issued_at_ms = "2",
+		epoch = epoch_s, epoch_commit = vault.hex_encode_lower(commit[:], context.temp_allocator),
+	}
+	identity := bridge_identity_public_key_hex(bridge_id)
+	bridge_dev, _ := vault.device_id_from_sign_pub(identity, context.temp_allocator)
+	approval := vault.Statement{
+		type = "approve", user_id = owner, directory_version = "1", issuer_device_id = root_id, issued_at_ms = "3",
+		subject_device_id = bridge_dev, subject_kind = "bridge", subject_sign_pub = identity,
+		subject_sign_alg = vault.SIGN_ALG_ECDSA_P256_SHA256, subject_label_b64 = "YnJpZGdl", epoch = "1",
+	}
+	g_text, g_sig := test_sign_statement(&root, &genesis)
+	e_text, e_sig := test_sign_statement(&root, &epoch_st)
+	a_text, a_sig := test_sign_statement(&root, &approval)
+	return strings.concatenate({
+		`{"v":1,"user_id":"`, owner, `","root_device_id":"`, root_id, `","root_sign_alg":"ecdsa-p256-sha256","root_sign_pub":"`, root_pub,
+		`","genesis":{"statement":`, test_json_str(g_text), `,"signature":`, test_json_str(g_sig),
+		`},"epoch":{"epoch":`, epoch_s, `,"statement":`, test_json_str(e_text), `,"signature":`, test_json_str(e_sig),
+		`},"issuer_chain":[],"subject_approval":{"statement":`, test_json_str(a_text), `,"signature":`, test_json_str(a_sig), `,"issuer_chain":[]}}`,
+	}, context.temp_allocator)
 }
 
 // test_create_unseal_v2_payload builds a bridge_unseal v2 payload for this
@@ -148,10 +221,15 @@ test_create_unseal_v2_payload :: proc(bridge_id: string, kr: ^vault.Vault_Keyrin
 	identity := opts.identity_override
 	if identity == "" do identity = bridge_identity_public_key_hex(bridge_id)
 	format := opts.format_override if opts.format_override != "" else vault.UNSEAL_V2_FORMAT
+	proof := opts.proof_override
+	if proof == "" && bridge_identity_public_key_hex(bridge_id) != "" {
+		proof = test_chain_proof(bridge_id, kr, opts.root_scalar if opts.root_scalar != "" else TEST_ACCOUNT_ROOT_SCALAR)
+	}
+	if proof == "" do proof = "null"
 	return fmt.aprintf(
-		`{{"type":"bridge_unseal","command_id":"cmd_test","bridge_id":"%s","timestamp":%d,"nonce":"%s","client_public_key":"%s","iv":"%s","tag":"%s","ciphertext":"%s","format":"%s","current_epoch":%d,"unseal_key_signature":%s,"bridge_identity_public_key":"%s"}}`,
+		`{{"type":"bridge_unseal","command_id":"cmd_test","bridge_id":"%s","timestamp":%d,"nonce":"%s","client_public_key":"%s","iv":"%s","tag":"%s","ciphertext":"%s","format":"%s","current_epoch":%d,"unseal_key_signature":%s,"bridge_identity_public_key":"%s","chain_proof":%s}}`,
 		bridge_id, timestamp, nonce, vault.hex_encode_lower(client_pub[:], context.temp_allocator), vault.hex_encode_lower(iv[:], context.temp_allocator),
-		tag_hex, ct_hex, format, kr.current_epoch, sig if sig != "" else "null", identity,
+		tag_hex, ct_hex, format, kr.current_epoch, sig if sig != "" else "null", identity, proof,
 	)
 }
 

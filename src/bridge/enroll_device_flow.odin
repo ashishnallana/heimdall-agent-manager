@@ -921,6 +921,21 @@ bridge_enroll_wait_for_vault_delivery :: proc(args: []string, bridge_id: string)
 	return false
 }
 
+// bridge_enroll_print_account_fingerprint shows the account root this bridge pinned at
+// its first unseal (plan §1 "Bridge keyring authentication"). The first unseal is
+// trusted to whoever sealed it, so the owner compares this with the account
+// fingerprint an approved browser shows in Settings → Devices.
+bridge_enroll_print_account_fingerprint :: proc(bridge_id: string) {
+	fp := bridge_account_fingerprint(bridge_id)
+	if fp == "" {
+		fmt.println("  account         (no account root pinned yet)")
+		return
+	}
+	fmt.printfln("  account         fingerprint %s", fp)
+	fmt.println("                  Check it matches Settings → Devices on one of your approved browsers;")
+	fmt.println("                  if it does not, revoke this bridge and run `ham-bridge enroll` again.")
+}
+
 // ===== The command: `ham-bridge enroll --hub <origin>` =====
 
 // bridge_enroll_device_command runs the whole ceremony. Steps are numbered to the
@@ -1117,6 +1132,7 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 					_ = keystore_delete_identity_key(cred.bridge_id)
 					return false
 				}
+				bridge_enroll_print_account_fingerprint(cred.bridge_id)
 			}
 			if !bridge_enroll_restart_service() {
 				// The key (when delivered) was verified persisted above; a restart
