@@ -16,6 +16,7 @@ import {
   archiveDeviceState,
   createDeviceIdentity,
   forgetDeviceIdentity,
+  MalformedDeviceStateError,
   loadObservedReset,
   observedResetElapsed,
   recordObservedReset,
@@ -439,8 +440,46 @@ async function runRefresh(_reason: string): Promise<void> {
     }
     purgeKeys(dispatch);
     stopPolling();
+    if (err instanceof MalformedDeviceStateError) {
+      dispatch(deviceVaultFailed({
+        code: 'device_state_malformed',
+        message: `${message(err)}. Nothing was used. You can reset this browser's device data: the old identity and pins are archived (not deleted) and this browser asks to be approved again as a new device.`,
+        startOverPhrase: RESET_DEVICE_DATA_PHRASE,
+      }));
+      return;
+    }
     dispatch(deviceVaultFailed({ code: 'verification_failed', message: message(err) }));
   }
+}
+
+export const RESET_DEVICE_DATA_PHRASE = 'RESET THIS BROWSER';
+
+/**
+ * Recovery for unreadable local device data (malformed / older-format identity or
+ * pins): only while it IS unreadable, and only with the typed phrase. Archives (never
+ * deletes) identity, pins and the observed reset, then restarts as a fresh device
+ * (register -> waiting screen; a later approval asks for the account fingerprint).
+ */
+export async function resetBrowserDeviceData(typedPhrase: string): Promise<void> {
+  const c = ctx;
+  if (!c) return;
+  if (normalizePhrase(typedPhrase) !== RESET_DEVICE_DATA_PHRASE) throw new Error(`Type "${RESET_DEVICE_DATA_PHRASE}" exactly to reset this browser's device data.`);
+  const kv = d().kv;
+  let unreadable = false;
+  try {
+    await loadDeviceIdentity(kv, c.userId);
+    await loadPins(kv, c.userId);
+  } catch (err) {
+    if (!(err instanceof MalformedDeviceStateError)) throw err;
+    unreadable = true;
+  }
+  if (!unreadable) throw new Error("This browser's device data is readable; nothing was reset. Retry instead.");
+  await archiveDeviceState(kv, c.userId);
+  await kv.delete(`pending:${c.userId}`);
+  c.identity = null;
+  c.pendingInstall = null;
+  c.revokedVerified = false;
+  await refreshDeviceVault('device-data-reset');
 }
 
 function noticePending(c: Ctx, chain: VerifiedChain): void {

@@ -16,6 +16,7 @@ import {
   rejectAccountFingerprint,
   requestNewDeviceCode,
   requestVaultReset,
+  resetBrowserDeviceData,
   startOverAfterReset,
 } from '../../services/deviceVault';
 
@@ -214,7 +215,7 @@ export function DeviceVaultProblemScreen({ state }: { state: DeviceVaultState })
     );
   }
   return (
-    <Shell debugId="device-vault-error" title={state.errorCode === 'vault_missing' ? 'Vault missing' : state.errorCode === 'vault_reset' ? 'Vault was reset' : 'Vault check failed'}>
+    <Shell debugId="device-vault-error" title={state.errorCode === 'vault_missing' ? 'Vault missing' : state.errorCode === 'vault_reset' ? 'Vault was reset' : state.errorCode === 'device_state_malformed' ? "This browser's device data is unreadable" : 'Vault check failed'}>
       <div data-debug-id="device-vault-error-message"><Alert tone="danger">{state.errorMessage || "Unknown error"}</Alert></div>
       <p className="mt-2 text-xs text-muted">Nothing was decrypted and no key was installed on this device.</p>
       {state.errorCode === 'vault_missing' && state.startOverPhrase ? (
@@ -226,10 +227,30 @@ export function DeviceVaultProblemScreen({ state }: { state: DeviceVaultState })
           <Input id="device-vault-start-over-phrase" data-debug-id="device-vault-start-over-phrase-input" value={phrase} onChange={setPhrase} placeholder={state.startOverPhrase} />
         </div>
       ) : null}
+      {state.errorCode === 'device_state_malformed' && state.startOverPhrase ? (
+        <div className="mt-3 text-xs text-muted">
+          <label htmlFor="device-vault-reset-device-data-phrase" className="mb-1 block">
+            Type <code className="font-mono text-primary">{state.startOverPhrase}</code> to reset this browser's device data. Its old identity and pins are archived, not deleted;
+            afterwards approve this browser again from a device you already use.
+          </label>
+          <Input id="device-vault-reset-device-data-phrase" data-debug-id="device-vault-reset-device-data-phrase-input" value={phrase} onChange={setPhrase} placeholder={state.startOverPhrase} />
+        </div>
+      ) : null}
       <div className="mt-4 flex flex-wrap gap-2">
         <Button data-debug-id="device-vault-retry-btn" loading={busy} onClick={() => run(() => refreshDeviceVault('retry'))}>Retry</Button>
         {state.errorCode === 'vault_reset' ? (
           <Button data-debug-id="device-vault-start-over-btn" variant="danger" loading={busy} onClick={() => run(() => startOverAfterReset())}>Start a new vault on this device</Button>
+        ) : null}
+        {state.errorCode === 'device_state_malformed' && state.startOverPhrase ? (
+          <Button
+            data-debug-id="device-vault-reset-device-data-btn"
+            variant="danger"
+            loading={busy}
+            disabled={phrase.trim().replace(/\s+/g, ' ').toUpperCase() !== state.startOverPhrase.toUpperCase()}
+            onClick={() => run(() => resetBrowserDeviceData(phrase))}
+          >
+            Reset this browser's device data
+          </Button>
         ) : null}
         {state.errorCode === 'vault_missing' && state.startOverPhrase ? (
           <Button

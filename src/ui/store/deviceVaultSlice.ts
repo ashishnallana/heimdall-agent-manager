@@ -76,7 +76,8 @@ export interface DeviceVaultState {
   otherAccounts: string[];
   /**
    * error 'vault_missing': the phrase the user must type to start a new vault anyway
-   * (the account fingerprint's first group + " RESET"). Empty otherwise.
+   * (the account fingerprint's first group + " RESET"); error 'device_state_malformed':
+   * the phrase to reset this browser's device data. Empty otherwise.
    */
   startOverPhrase: string;
 }

@@ -199,3 +199,51 @@ test('revoke confirm lists devices the target approved (revocations do not casca
   const none = renderToStaticMarkup(React.createElement(DevicesList, { rows: [{ ...row, approvedDeviceLabels: [] }], confirmRevokeId: 'dev_lap' }));
   assert.doesNotMatch(none, /settings-device-revoke-approved-/);
 });
+
+// ── unreadable (malformed / older-format) local device data ────────────────
+
+for (const which of ['pins', 'identity'] as const) {
+  test(`malformed ${which}: fail closed with a typed-confirmation reset that archives and re-registers`, async () => {
+    const kv = trackingStore();
+    if (which === 'pins') {
+      await kv.put(`identity:${USER}`, { v: 0, legacy: true });
+      await kv.put(`pins:${USER}`, { version: 7, root: 'old-format' });
+    } else {
+      await kv.put(`identity:${USER}`, { v: 0, legacy: true });
+    }
+    let registered = 0;
+    dv.configureDeviceVault({
+      kv,
+      api: fakeApi({
+        fetchVaultDirectory: async () => ({ version: 4 }),
+        fetchVaultSelf: async () => null,
+        postVaultRegister: async () => {
+          registered += 1;
+          const id = await ident.loadDeviceIdentity(kv, USER);
+          return { device_id: id!.deviceId, fingerprint: id!.fingerprint, user_code: 'ABCD-EFGH', code_expires_at: new Date(Date.now() + 600_000).toISOString() };
+        },
+      }),
+    });
+    const rec = recorder();
+    dv.stopDeviceVault();
+    await dv.bootDeviceVault(USER, rec.dispatch);
+    const failed = rec.last('deviceVault/deviceVaultFailed');
+    assert.equal(failed.code, 'device_state_malformed');
+    assert.equal(failed.startOverPhrase, dv.RESET_DEVICE_DATA_PHRASE);
+    assert.equal(registered, 0, 'nothing used while unreadable');
+
+    await assert.rejects(dv.resetBrowserDeviceData('reset'), /exactly/);
+    assert.ok(!kv.puts.some((k) => k.startsWith('archived:')));
+
+    await dv.resetBrowserDeviceData(' reset  this browser ');
+    const archiveKey = kv.puts.find((k) => k.startsWith(`archived:${USER}:`));
+    const archived = await kv.get(archiveKey!) as any;
+    assert.deepEqual(archived.identity, { v: 0, legacy: true });
+    if (which === 'pins') assert.deepEqual(archived.pins, { version: 7, root: 'old-format' });
+    assert.equal(registered, 1, 'registered as a fresh device');
+    assert.equal(rec.last('deviceVault/deviceVaultStatusChanged').status, 'pending-approval');
+    // Readable data is never reset through this path.
+    await assert.rejects(dv.resetBrowserDeviceData(dv.RESET_DEVICE_DATA_PHRASE), /readable/);
+    dv.stopDeviceVault();
+  });
+}

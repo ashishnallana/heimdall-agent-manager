@@ -177,12 +177,28 @@ function isStoredIdentity(v: unknown, userId: string): v is StoredIdentity {
     && isLowerHex(s.signPub, 65) && isLowerHex(s.ecdhPub, 65);
 }
 
+/**
+ * This browser's stored identity or pins for the user cannot be read (malformed, or
+ * an older format). Fail closed: nothing is used; the user may archive them and
+ * start this browser over as a fresh device (`archiveDeviceState`).
+ */
+export class MalformedDeviceStateError extends Error {
+  constructor(what: string) {
+    super(`This browser's stored ${what} cannot be read (malformed or an older format)`);
+    this.name = 'MalformedDeviceStateError';
+  }
+}
+
 /** The stored identity for `userId`, or null when this browser has none. */
 export async function loadDeviceIdentity(store: DeviceKeyValueStore, userId: string): Promise<DeviceIdentity | null> {
   const stored = await store.get(identityKey(requireUserId(userId)));
   if (stored === undefined || stored === null) return null;
-  if (!isStoredIdentity(stored, userId)) throw new Error('stored device identity is malformed');
-  return hydrate(stored);
+  if (!isStoredIdentity(stored, userId)) throw new MalformedDeviceStateError('device identity');
+  try {
+    return await hydrate(stored);
+  } catch {
+    throw new MalformedDeviceStateError('device identity');
+  }
 }
 
 /** Generate and persist a fresh identity (two non-extractable P-256 key pairs). */
@@ -341,7 +357,7 @@ function isPins(v: unknown): v is DevicePins {
 export async function loadPins(store: DeviceKeyValueStore, userId: string): Promise<DevicePins | null> {
   const v = await store.get(pinsKey(requireUserId(userId)));
   if (v === undefined || v === null) return null;
-  if (!isPins(v)) throw new PinViolationError('stored pins are malformed');
+  if (!isPins(v)) throw new MalformedDeviceStateError('directory pins');
   return v;
 }
 
