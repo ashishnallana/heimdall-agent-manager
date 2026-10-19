@@ -37,7 +37,7 @@ import { verifyDirectory, wrapRecipients, buildBridgeChainProof, verifyBridgeCha
 import { openVerifiedWrap } from '../../src/ui/utils/vaultKeyringWrap.ts';
 import { deliverKeyringToBridge } from '../../src/ui/utils/vaultBridgeDelivery.ts';
 import { buildBridgeApproval, buildBrowserApproval, buildGenesis, buildPairedRegistration, buildRevocation, buildRotation, checkBridgeCodeInfo, checkBrowserCodeInfo } from '../../src/ui/utils/vaultDeviceFlows.ts';
-import { derivePairKeys, generatePairCode, pairApproveMac, pairBridgePayload, pairKeyMac, verifyPairApproveMac } from '../../src/ui/utils/vaultPairing.ts';
+import { derivePairKeys, generatePairCode, generatePairSalt, pairApproveMac, pairBridgePayload, pairHubOrigin, pairKeyMac, verifyPairApproveMac } from '../../src/ui/utils/vaultPairing.ts';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const USER_HEADER = 'X-authentik-username';
@@ -243,7 +243,8 @@ class SimBridge {
     b.pinnedRoot = null; // pinned from the chain proof of the FIRST (enrollment) unseal
     // Hub-blind pairing: the code `ham-bridge enroll` prints; only derived values go to the hub.
     b.pairCode = generatePairCode();
-    b.pairKeys = await derivePairKeys(b.pairCode);
+    b.pairSalt = generatePairSalt();
+    b.pairKeys = await derivePairKeys(b.pairCode, { kind: 'bridge', userId: '', hubOrigin: pairHubOrigin(HUB.base), pairSalt: b.pairSalt });
     return b;
   }
   // POST /device/authorize body, with the identity-key proof of possession over the ECDH key + PKCE challenge.
@@ -255,6 +256,7 @@ class SimBridge {
       code_challenge: this.challenge, code_challenge_method: 'S256',
       bridge_identity_proof: proof,
       pair_lookup: this.pairKeys.lookup,
+      pair_salt: this.pairSalt,
       pair_key_mac: await pairKeyMac(this.pairKeys, 'bridge', pairBridgePayload(this.identity.signPub, this.ecdhPub, this.challenge)),
     };
   }
@@ -317,19 +319,35 @@ async function genesis(dev, user, auth = { user }) {
 }
 
 // Hub-blind pairing: the device draws a secret code and sends only derived values.
+// The pairing stretch binds the account (browsers), the hub origin and a fresh public salt.
+const browserPairCtx = (dev) => ({ kind: 'browser', userId: dev.identity.userId, hubOrigin: pairHubOrigin(HUB.base), pairSalt: dev.pairSalt });
 async function register(dev, user, auth = { user }, now = Date.now()) {
   dev.pairCode = generatePairCode();
-  dev.pairKeys = await derivePairKeys(dev.pairCode);
+  dev.pairSalt = generatePairSalt();
+  dev.pairKeys = await derivePairKeys(dev.pairCode, browserPairCtx(dev));
   const r = await buildPairedRegistration(dev.identity, dev.label, dev.pairKeys, now);
-  dev.lastRegisterBody = { statement: r.statement, proof_signature: r.signature, pair_lookup: r.pairLookup, pair_key_mac: r.pairKeyMac };
+  dev.lastRegisterBody = { statement: r.statement, proof_signature: r.signature, pair_lookup: r.pairLookup, pair_key_mac: r.pairKeyMac, pair_salt: dev.pairSalt };
   return http('POST', '/api/v1/vault/devices/register', { ...auth, body: dev.lastRegisterBody });
+}
+
+// What the approval page does with a typed code (lookUpPairing): fetch the public
+// salts of the pending requests, run the stretch per candidate, resolve the lookup.
+async function approverLookup(code, user, uid) {
+  const salts = await http('POST', '/api/v1/device/pair-salts', { user, body: {} });
+  if (salts.status !== 200) throw new CheckFailed(`pair-salts -> ${salts.status} ${salts.raw}`);
+  const tried = [];
+  for (const c of salts.data.candidates) {
+    tried.push({ ...c, keys: await derivePairKeys(code, { kind: c.kind, userId: c.kind === 'browser' ? uid : '', hubOrigin: pairHubOrigin(HUB.base), pairSalt: c.pair_salt }) });
+  }
+  const ver = await http('POST', '/api/v1/device/verify', { user, body: { pair_lookups: tried.map((c) => c.keys.lookup) } });
+  const match = tried.find((c) => ver.status === 200 && c.kind === ver.data.kind && c.pair_salt === ver.data.pair_salt);
+  if (!match) throw new CheckFailed(`verify(lookups) -> ${ver.status} ${ver.raw}`);
+  return { keys: match.keys, ver };
 }
 
 // The approver side: the user typed dev.pairCode; resolve, check key_mac, build the approval.
 async function approvalFor(dev, chain, approver = S.A) {
-  const keys = await derivePairKeys(dev.pairCode);
-  const ver = await http('POST', '/api/v1/device/verify', { user: ALICE, body: { pair_lookup: keys.lookup } });
-  if (ver.status !== 200) throw new CheckFailed(`verify(lookup) -> ${ver.status} ${ver.raw}`);
+  const { keys, ver } = await approverLookup(dev.pairCode, ALICE, S.uid);
   const paired = await checkBrowserCodeInfo(ver.data, keys, S.uid);
   return { ver, body: await buildBrowserApproval(approver.identity, chain, paired, keys, paired.label, approver.keyringBytes) };
 }
@@ -410,7 +428,7 @@ async function main() {
       expect(vb.chain.trusted.has(S.B.id) && vb.chain.trusted.get(S.B.id).label === 'e2e device B', 'B verifies the chain and finds its own signed approval + label');
       const mine = vb.chain.trusted.get(S.B.id).approval_statement;
       expect(await verifyPairApproveMac(S.B.pairKeys, mine, vb.chain.rootSignPub, self.data.pair_mac), 'B verifies the approver\'s pair_mac with its own code: the root is authentic, pinned without fingerprint typing');
-      const other = await derivePairKeys(generatePairCode());
+      const other = await derivePairKeys(generatePairCode(), browserPairCtx(S.B));
       expect(!(await verifyPairApproveMac(other, mine, vb.chain.rootSignPub, self.data.pair_mac)), 'the pair_mac does not verify under another code');
       const bytes = await openWrap(S.B, self.data.wrap, vb.chain);
       await openVerifiedWrap(self.data.wrap, { userId: S.uid, recipientDeviceId: S.A.id, recipientEcdhPrivate: S.A.identity.ecdhPrivateKey, chain: vb.chain })
@@ -481,8 +499,7 @@ async function main() {
       const authz = await http('POST', '/api/v1/device/authorize', { body: await br.authorizeBody() });
       expect(authz.status === 200 && authz.data.device_code && authz.data.user_code === undefined && !String(authz.data.verification_uri_complete ?? '').includes('code='), `bridge /device/authorize -> 200, no hub code, code-less link (${authz.status} ${authz.status !== 200 ? authz.raw : ''})`);
       // The operator types the code the bridge printed, once.
-      const typedKeys = await derivePairKeys(br.pairCode.toLowerCase());
-      const ver = await http('POST', '/api/v1/device/verify', { user: ALICE, body: { pair_lookup: typedKeys.lookup } });
+      const { keys: typedKeys, ver } = await approverLookup(br.pairCode.toLowerCase(), ALICE, S.uid);
       expect(ver.status === 200 && ver.data.kind === 'bridge' && ver.data.bridge_identity_public_key === br.identity.signPub, '/device/verify resolves the lookup as kind=bridge with its identity key');
       await checkBridgeCodeInfo(ver.data, typedKeys);
       expect(true, 'the bridge key_mac verifies under the typed code');

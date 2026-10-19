@@ -8,12 +8,12 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { FakeHub, USER, hubApi, newBrowser, recorder } from './helpers/vaultDirectoryFixture.ts';
+import { FakeHub, USER, browserPairCtx, hubApi, newBrowser, recorder } from './helpers/vaultDirectoryFixture.ts';
 
 const dv = await import('../src/ui/services/deviceVault.ts');
 const ident = await import('../src/ui/utils/deviceIdentity.ts');
 const { checkBrowserCodeInfo, checkBridgeCodeInfo, buildPairedRegistration, FlowRefused } = await import('../src/ui/utils/vaultDeviceFlows.ts');
-const { derivePairKeys, generatePairCode, pairKeyMac, pairBridgePayload, pairApproveMac, PAIR_CODE_TTL_MS } = await import('../src/ui/utils/vaultPairing.ts');
+const { derivePairKeys, generatePairCode, generatePairSalt, pairKeyMac, pairBridgePayload, pairApproveMac, PAIR_CODE_TTL_MS } = await import('../src/ui/utils/vaultPairing.ts');
 const { getActiveVaultKey } = await import('../src/ui/utils/vaultCrypto.ts');
 
 const flowRefused = (re: RegExp) => (err: unknown) => {
@@ -30,9 +30,10 @@ async function pendingBrowser() {
   await hub.genesis(a);
   const b = await newBrowser();
   const code = generatePairCode();
-  const keys = await derivePairKeys(code);
+  const salt = generatePairSalt();
+  const keys = await derivePairKeys(code, browserPairCtx(salt));
   const reg = await buildPairedRegistration(b, 'Phone', keys);
-  await hub.register(reg.statement, reg.pairLookup, reg.pairKeyMac);
+  await hub.register(reg.statement, reg.pairLookup, reg.pairKeyMac, salt);
   return { hub, a, b, code, keys };
 }
 
@@ -45,7 +46,7 @@ test('approver: the right code verifies the request (control)', async () => {
 
 test('approver: a wrong code is refused even if the hub serves the real request for it', async () => {
   const { hub, keys } = await pendingBrowser();
-  const wrong = await derivePairKeys(generatePairCode());
+  const wrong = await derivePairKeys(generatePairCode(), browserPairCtx(generatePairSalt()));
   await assert.rejects(checkBrowserCodeInfo(hub.codeInfo(keys.lookup), wrong, USER), flowRefused(/pairing check failed/));
 });
 
@@ -54,7 +55,7 @@ test('approver: a hub that swaps the device keys is refused', async () => {
   const info = hub.codeInfo(keys.lookup);
   // (1) Its own device's register statement under the victim's key_mac.
   const evil = await newBrowser();
-  const evilReg = await buildPairedRegistration(evil, 'Phone', await derivePairKeys(generatePairCode()));
+  const evilReg = await buildPairedRegistration(evil, 'Phone', await derivePairKeys(generatePairCode(), browserPairCtx(generatePairSalt())));
   await assert.rejects(
     checkBrowserCodeInfo({ ...info, register_statement: evilReg.statement, device_id: evil.deviceId, sign_public_key: evil.signPub, ecdh_public_key: evil.ecdhPub }, keys, USER),
     flowRefused(/pairing check failed/),
@@ -64,7 +65,7 @@ test('approver: a hub that swaps the device keys is refused', async () => {
 });
 
 test('approver: a bridge request whose identity key the hub swapped is refused', async () => {
-  const keys = await derivePairKeys(generatePairCode());
+  const keys = await derivePairKeys(generatePairCode(), { kind: 'bridge', userId: '', hubOrigin: 'https://hub.example.test:443', pairSalt: generatePairSalt() });
   const hexKey = async (name: 'ECDSA' | 'ECDH') => {
     const kp = await crypto.subtle.generateKey({ name, namedCurve: 'P-256' }, true, name === 'ECDSA' ? ['sign', 'verify'] : ['deriveBits']) as CryptoKeyPair;
     return Buffer.from(await crypto.subtle.exportKey('raw', kp.publicKey)).toString('hex');
@@ -111,7 +112,7 @@ async function pairNewDevice(selfOverride?: (self: any) => any) {
   const pending = rec.last('deviceVault/deviceVaultStatusChanged');
   assert.equal(pending.status, 'pending-approval');
   const code = pending.userCode as string;
-  assert.match(code, /^[A-Z2-7]{4}-[A-Z2-7]{4}-[A-Z2-7]{4}$/);
+  assert.match(code, /^[A-Z2-7]{4}-[A-Z2-7]{4}-[A-Z2-7]{4}-[A-Z2-7]{2}$/);
   const { deviceId } = await hub.approveByCode(a, code);
   return { hub, a, kv, rec, code, deviceId };
 }
@@ -151,7 +152,7 @@ test('new device: a pair_mac forged under another code (or for another root) is 
   const { hub, kv, rec, deviceId } = await pairNewDevice((self) => ({ ...self, pair_mac: forged }));
   const approval = (await hub.chain()).trusted.get(deviceId)!.approval_statement;
   // A hub without the code can only MAC under a code it chose.
-  forged = await pairApproveMac(await derivePairKeys(generatePairCode()), approval, (await hub.chain()).rootSignPub);
+  forged = await pairApproveMac(await derivePairKeys(generatePairCode(), browserPairCtx(generatePairSalt())), approval, (await hub.chain()).rootSignPub);
   await dv.refreshDeviceVault('approved');
   assert.equal(rec.last('deviceVault/deviceVaultFailed').code, 'pairing_mismatch');
   await assertNothingInstalled(kv, rec);

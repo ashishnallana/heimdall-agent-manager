@@ -77,3 +77,13 @@ test('the last approver cannot be revoked; a device the log revoked has no revok
   assert.equal(rowB.status, 'revoked');
   assert.doesNotMatch(html(rows), new RegExp(`settings-device-revoke-btn-${b.deviceId}`));
 });
+
+test('a bridge that reports "unpaired" (never received keys) is flagged for revoke + re-enroll', async () => {
+  const { a, chain } = await account();
+  const rows = await buildDeviceRows(chain, a.deviceId);
+  const br = rows.find((r) => r.bridgeId === 'brg_1')!;
+  assert.doesNotMatch(html(rows), /settings-device-unpaired-hint-/);
+  const out = renderToStaticMarkup(React.createElement(DevicesList, { rows, unpairedBridgeIds: ['brg_1'] }));
+  assert.match(out, new RegExp(`settings-device-unpaired-hint-${br.deviceId}`));
+  assert.match(out, new RegExp(`settings-device-revoke-btn-${br.deviceId}`));
+});

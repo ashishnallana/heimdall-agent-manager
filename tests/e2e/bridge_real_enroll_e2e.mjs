@@ -31,7 +31,7 @@ import { serializeKeyringBytes } from '../../src/ui/utils/vaultKeyring.ts';
 import { deliverKeyringToBridge } from '../../src/ui/utils/vaultBridgeDelivery.ts';
 import { bridgeUnsealTargetFromRecord } from '../../src/ui/utils/vaultBridgeUnseal.ts';
 import { buildBridgeApproval, buildGenesis, checkBridgeCodeInfo } from '../../src/ui/utils/vaultDeviceFlows.ts';
-import { derivePairKeys, pairApproveMac } from '../../src/ui/utils/vaultPairing.ts';
+import { derivePairKeys, pairApproveMac, pairHubOrigin } from '../../src/ui/utils/vaultPairing.ts';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const USER = 'e2e-real-enroll';
@@ -127,13 +127,20 @@ async function enroll(hub, approver, cfg) {
   const exited = new Promise((r) => child.once('exit', (code) => r(code)));
   let code = null;
   for (const deadline = Date.now() + 30_000; !code; await sleep(100)) {
-    code = (/^\s+([A-Z2-7]{4}-[A-Z2-7]{4}-[A-Z2-7]{4})\s*$/m.exec(out) || [])[1] ?? null;
+    code = (/^\s+([A-Z2-7]{4}-[A-Z2-7]{4}-[A-Z2-7]{4}-[A-Z2-7]{2})\s*$/m.exec(out) || [])[1] ?? null;
     if (Date.now() > deadline) throw new CheckFailed(`no pairing code printed:\n${out}`);
   }
   expect(!/code=/.test(out), `ham-bridge printed a pairing code and a code-free link (${code.slice(0, 4)}-…)`);
-  const keys = await derivePairKeys(code);
-  const ver = await http(hub, 'POST', '/api/v1/device/verify', { body: { pair_lookup: keys.lookup } });
-  expect(ver.status === 200 && ver.data.kind === 'bridge', `the typed code resolves the bridge (${ver.status})`);
+  // As the approval page does: fetch the public pair_salts, run the pairing stretch
+  // (bound to this hub's origin) per candidate, resolve the matching lookup.
+  const salts = await http(hub, 'POST', '/api/v1/device/pair-salts', { body: {} });
+  const tried = [];
+  for (const c of (salts.data?.candidates ?? []).filter((x) => x.kind === 'bridge')) {
+    tried.push({ salt: c.pair_salt, keys: await derivePairKeys(code, { kind: 'bridge', userId: '', hubOrigin: pairHubOrigin(hub.base), pairSalt: c.pair_salt }) });
+  }
+  const ver = await http(hub, 'POST', '/api/v1/device/verify', { body: { pair_lookups: tried.map((c) => c.keys.lookup) } });
+  const keys = tried.find((c) => c.salt === ver.data?.pair_salt)?.keys;
+  expect(ver.status === 200 && ver.data.kind === 'bridge' && keys, `the typed code resolves the bridge (${ver.status})`);
   await checkBridgeCodeInfo(ver.data, keys);
   const chain = await approver.chain();
   const { vault_approval, statement } = await buildBridgeApproval(approver.identity, chain, ver.data, cfg.dir.split(/[\\/]/).pop());

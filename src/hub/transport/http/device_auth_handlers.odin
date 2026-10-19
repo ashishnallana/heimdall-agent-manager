@@ -69,6 +69,8 @@ Authorize_Request :: struct {
 	// Hub-blind pairing (bridge grants): derived by the bridge from a code the hub never sees.
 	pair_lookup:                string,
 	pair_key_mac:               string,
+	// The public, per-request salt of the pairing stretch (vault.Pair_Context).
+	pair_salt:                  string,
 }
 
 Device_Authorize_Wire :: struct {
@@ -97,7 +99,7 @@ device_authorize_handler :: proc(ctx: rawptr, req: Request) -> Response {
 		os_user = body.os_user, code_challenge = body.code_challenge, code_challenge_method = body.code_challenge_method,
 		bridge_identity_public_key = body.bridge_identity_public_key,
 		bridge_identity_proof = vault_sig_text(body.bridge_identity_proof),
-		pair_lookup = body.pair_lookup, pair_key_mac = body.pair_key_mac,
+		pair_lookup = body.pair_lookup, pair_key_mac = body.pair_key_mac, pair_salt = body.pair_salt,
 	}
 	xff := header_value(req.headers, "X-Forwarded-For")
 	result, ok, err := device_auth.authorize(handlers.service, input, req.remote_addr, xff)
@@ -158,8 +160,12 @@ device_add_redirect_location :: proc(ui_origin: string, allocator := context.tem
 
 @(private = "file")
 Verify_Request :: struct {
-	pair_lookup: string,
-	user_code:   string,
+	pair_lookup:  string,
+	// Pairing stretch: the approver derives one lookup per candidate pair_salt
+	// (/device/pair-salts) and may send them together (at most PAIR_CANDIDATES_MAX);
+	// the first that resolves answers, and its pair_salt tells the approver which.
+	pair_lookups: []string,
+	user_code:    string,
 }
 
 Device_Verify_Hub_Observed :: struct {
@@ -200,6 +206,8 @@ Device_Verify_Grant_Wire :: struct {
 	// served the bridge's real keys.
 	pair_key_mac:                string,
 	code_challenge:              string,
+	// The pairing-stretch salt the approver derived the lookup with (it re-checks it).
+	pair_salt:                   string,
 	is_bridge_enrollment:        bool,
 	hub_observed:                Device_Verify_Hub_Observed,
 	host_asserted:               Device_Verify_Host_Asserted,
@@ -225,6 +233,7 @@ Device_Verify_Browser_Wire :: struct {
 	code_expires_at:    string,
 	register_statement: string,
 	pair_key_mac:       string,
+	pair_salt:          string,
 }
 
 device_verify_handler :: proc(ctx: rawptr, req: Request) -> Response {
@@ -237,7 +246,9 @@ device_verify_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	body: Verify_Request
 	if !vault_decode(req, &body) do return respond_error(device_auth.GENERIC_UNKNOWN_CODE_ERROR(), req.request_id)
 	info: device_auth.Device_Info
-	if body.pair_lookup != "" {
+	lookups := body.pair_lookups
+	if len(lookups) == 0 && body.pair_lookup != "" do lookups = []string{body.pair_lookup}
+	if len(lookups) > 0 {
 		// A user principal only: a bridge, enrollment or instance credential carries a
 		// user id too, but must never resolve (and so learn the keys of) a pending device.
 		if auth_ctx.kind != .Trusted_Proxy && auth_ctx.kind != .User_Token {
@@ -247,27 +258,39 @@ device_verify_handler :: proc(ctx: rawptr, req: Request) -> Response {
 			device_auth_record("verify", "rate_limited")
 			return respond_error(domain.domain_error(.Rate_Limited, "too many device verification attempts from this IP"), req.request_id)
 		}
-		if !vault.valid_pair_hex(body.pair_lookup) do return respond_error(device_auth.GENERIC_UNKNOWN_CODE_ERROR(), req.request_id)
-		if handlers.vault != nil {
-			if dev, derr := vd.resolve_pending_lookup(handlers.vault, auth_ctx.user_id, body.pair_lookup); derr.code == .None {
-				device_auth_record("verify", "ok")
-				return vault_respond(Device_Verify_Browser_Wire{
-					kind = "browser", device_id = dev.device_id, device_kind = dev.kind,
-					fingerprint = dev.fingerprint, label = dev.label,
-					sign_public_key = dev.sign_public_key, ecdh_public_key = dev.ecdh_public_key,
-					sign_alg = dev.sign_alg, wrap_alg = dev.wrap_alg,
-					created_at = dev.created_at, code_expires_at = dev.code_expires_at,
-					register_statement = dev.register_statement, pair_key_mac = dev.pair_key_mac,
-				}, req)
-			} else if derr.code != .Not_Found {
-				return respond_error(derr, req.request_id)
+		if len(lookups) > PAIR_CANDIDATES_MAX do return respond_error(device_auth.GENERIC_UNKNOWN_CODE_ERROR(), req.request_id)
+		for lookup in lookups do if !vault.valid_pair_hex(lookup) do return respond_error(device_auth.GENERIC_UNKNOWN_CODE_ERROR(), req.request_id)
+		err := device_auth.GENERIC_UNKNOWN_CODE_ERROR()
+		found := false
+		for lookup in lookups {
+			if handlers.vault != nil {
+				if dev, derr := vd.resolve_pending_lookup(handlers.vault, auth_ctx.user_id, lookup); derr.code == .None {
+					device_auth_record("verify", "ok")
+					return vault_respond(Device_Verify_Browser_Wire{
+						kind = "browser", device_id = dev.device_id, device_kind = dev.kind,
+						fingerprint = dev.fingerprint, label = dev.label,
+						sign_public_key = dev.sign_public_key, ecdh_public_key = dev.ecdh_public_key,
+						sign_alg = dev.sign_alg, wrap_alg = dev.wrap_alg,
+						created_at = dev.created_at, code_expires_at = dev.code_expires_at,
+						register_statement = dev.register_statement, pair_key_mac = dev.pair_key_mac, pair_salt = dev.pair_salt,
+					}, req)
+				} else if derr.code != .Not_Found {
+					return respond_error(derr, req.request_id)
+				}
+			}
+			vinfo, vok, verr := device_auth.verify(handlers.service, lookup)
+			if vok && !vinfo.is_bridge_enrollment do vok, verr = false, device_auth.GENERIC_UNKNOWN_CODE_ERROR()
+			if vok {
+				info, found = vinfo, true
+				break
+			}
+			if verr.code != .Not_Found {
+				err = verr
+				break
 			}
 		}
-		vinfo, vok, err := device_auth.verify(handlers.service, body.pair_lookup)
-		if vok && !vinfo.is_bridge_enrollment do vok, err = false, device_auth.GENERIC_UNKNOWN_CODE_ERROR()
-		device_auth_record("verify", device_auth_error_result(err) if !vok else "ok")
-		if !vok do return respond_error(err, req.request_id)
-		info = vinfo
+		device_auth_record("verify", device_auth_error_result(err) if !found else "ok")
+		if !found do return respond_error(err, req.request_id)
 	} else {
 		vinfo, vok, err := device_auth.verify_with_ip(handlers.service, body.user_code, request_ip)
 		// A bridge grant resolves only by its pairing lookup, never as a user code.
@@ -282,7 +305,7 @@ device_verify_handler :: proc(ctx: rawptr, req: Request) -> Response {
 		kind = "bridge",
 		bridge_identity_public_key = info.bridge_identity_public_key,
 		bridge_identity_fingerprint = info.bridge_identity_fingerprint,
-		pair_key_mac = info.pair_key_mac, code_challenge = info.code_challenge,
+		pair_key_mac = info.pair_key_mac, code_challenge = info.code_challenge, pair_salt = info.pair_salt,
 		is_bridge_enrollment = info.is_bridge_enrollment,
 		hub_observed = {
 			bridge_key_fingerprint = info.bridge_key_fingerprint,
@@ -299,6 +322,49 @@ device_verify_handler :: proc(ctx: rawptr, req: Request) -> Response {
 		bridge_key_fingerprint = info.bridge_key_fingerprint,
 		os_user = info.os_user,
 	}, req)
+}
+
+// ── POST /api/v1/device/pair-salts ──────────────────────────────────────────
+// Pairing stretch (plan §1 "Pairing"): the lookup is derived from the typed code AND
+// the request's public pair_salt, so an approver first fetches the salts of the
+// requests it could be approving: the session user's live pending browsers, then live
+// pending bridge grants (no owner before approval), newest first, at most
+// PAIR_CANDIDATES_MAX in all. It tries each with the code and resolves the matching
+// one through /device/verify. User session only; rate-limited per IP.
+
+PAIR_CANDIDATES_MAX :: 8
+
+Device_Pair_Candidate_Wire :: struct {
+	kind:      string, // "browser" | "bridge"
+	pair_salt: string,
+}
+
+Device_Pair_Salts_Wire :: struct {
+	candidates: []Device_Pair_Candidate_Wire,
+}
+
+device_pair_salts_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	handlers := (^Device_Auth_Handlers)(ctx)
+	auth_ctx, ok, auth_resp := require_auth(handlers.auth, req)
+	if !ok do return auth_resp
+	// Like a lookup: a bridge, enrollment or instance credential never lists pending requests.
+	if auth_ctx.kind != .Trusted_Proxy && auth_ctx.kind != .User_Token {
+		return respond_error(domain.domain_error(.Forbidden, "listing pairing requests requires a user session"), req.request_id)
+	}
+	request_ip := device_auth.resolve_client_ip(req.remote_addr, header_value(req.headers, "X-Forwarded-For"), handlers.service.trusted_cidrs)
+	if !device_auth.rate_check(handlers.service, "pair-salts:", request_ip) {
+		return respond_error(domain.domain_error(.Rate_Limited, "too many pairing lookups from this IP"), req.request_id)
+	}
+	out := make([dynamic]Device_Pair_Candidate_Wire, 0, PAIR_CANDIDATES_MAX, context.temp_allocator)
+	if handlers.vault != nil {
+		salts, err := vd.pending_pair_salts(handlers.vault, auth_ctx.user_id, PAIR_CANDIDATES_MAX)
+		if err.code != .None do return respond_error(err, req.request_id)
+		for s in salts do append(&out, Device_Pair_Candidate_Wire{kind = "browser", pair_salt = s})
+	}
+	for s in device_auth.pending_bridge_pair_salts(handlers.service, PAIR_CANDIDATES_MAX - len(out)) {
+		append(&out, Device_Pair_Candidate_Wire{kind = "bridge", pair_salt = s})
+	}
+	return vault_respond(Device_Pair_Salts_Wire{candidates = out[:]}, req)
 }
 
 // ── POST /api/v1/device/approve ─────────────────────────────────────────────

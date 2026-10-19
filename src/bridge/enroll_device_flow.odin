@@ -337,6 +337,8 @@ Bridge_Authorize_Request :: struct {
 	// Hub-blind pairing: derived from the pairing code this process prints.
 	pair_lookup:                string `json:"pair_lookup,omitempty"`,
 	pair_key_mac:               string `json:"pair_key_mac,omitempty"`,
+	// Public salt of the pairing stretch (vault.Pair_Context), random per enrollment.
+	pair_salt:                  string `json:"pair_salt,omitempty"`,
 }
 
 // bridge_enroll_authorize_body builds the /device/authorize request body.
@@ -347,6 +349,7 @@ bridge_enroll_authorize_body :: proc(
 	identity_proof_json: string = "",
 	pair_lookup: string = "",
 	pair_key_mac: string = "",
+	pair_salt: string = "",
 	allocator := context.allocator,
 ) -> string {
 	body := Bridge_Authorize_Request{
@@ -354,7 +357,7 @@ bridge_enroll_authorize_body :: proc(
 		app_version = d.bridge_version, os_user = d.os_user, bridge_public_key = public_key_hex,
 		bridge_identity_public_key = identity_public_key_hex,
 		code_challenge = code_challenge, code_challenge_method = "S256",
-		pair_lookup = pair_lookup, pair_key_mac = pair_key_mac,
+		pair_lookup = pair_lookup, pair_key_mac = pair_key_mac, pair_salt = pair_salt,
 	}
 	if identity_proof_json != "" {
 		if sw, ok := vault.signature_wire_from_text(identity_proof_json, context.temp_allocator); ok do body.bridge_identity_proof = sw
@@ -611,7 +614,7 @@ bridge_enroll_persist :: proc(cred: Bridge_Enroll_Credential, access_path, confi
 		fmt.eprintln("enroll FAILED: the Hub returned an access token this bridge will not accept (empty, unprefixed, or missing its secret half); nothing was written")
 		return false
 	}
-	if !bridge_write_secret_file(access_path, cred.access_token) do return false
+	if !bridge_write_credential_file(access_path, hub_url, cred.bridge_id, cred.access_token) do return false
 	if strings.trim_space(cred.refresh_token) != "" {
 		if !bridge_enroll_credential_usable(cred.refresh_token) {
 			fmt.eprintln("enroll FAILED: the Hub returned a malformed refresh token; nothing further was written")
@@ -757,7 +760,7 @@ bridge_credential_refresh_worker :: proc() {
 					continue
 				}
 			}
-			if !bridge_write_secret_file(g_bridge_credential_file, cred.access_token) {
+			if !bridge_write_credential_file(g_bridge_credential_file, api_base, strings.trim_space(bridge_config.daemon_id), cred.access_token) {
 				fmt.println("bridge credential refresh: could not persist the rotated access token; retrying")
 				failures += 1
 				delay = bridge_refresh_backoff_seconds(failures)
@@ -980,7 +983,9 @@ bridge_enroll_wait_for_vault_delivery :: proc(args: []string, bridge_id: string)
 		time.sleep(100 * time.Millisecond)
 	}
 	fmt.eprintln("bridge enroll FAILED: enrolled, but the vault key was not delivered before the handoff deadline.")
-	fmt.eprintln("  Unlock the bridge later from Settings → User Vault, then start the registered service.")
+	fmt.eprintln("  This bridge can only pin your account with the key delivery its pairing code allowed, so it can")
+	fmt.eprintln("  never be unlocked later. Run `ham-bridge enroll --hub <url>` again (new code), and revoke this")
+	fmt.eprintln("  bridge in Settings → Devices: it reports itself there as \"never received keys\".")
 	return false
 }
 
@@ -1025,6 +1030,26 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 		fmt.eprintfln("ham-bridge enroll REFUSED: config %s belongs to a bridge enrolled with %s.", cfg_lib.config_path_from_args(args), other)
 		fmt.eprintln("  To run a second bridge for another hub on this machine, give it its own --config and --bridge-token-file.")
 		return false
+	}
+	// Nor is a credential file of another hub or bridge overwritten: the other bridge
+	// would then present this bridge's token to its own hub. The default path is per
+	// bridge; only an explicit --bridge-token-file / HAM_BRIDGE_TOKEN_FILE can collide.
+	// One enrollment or running bridge per config: the config is locked for the whole
+	// ceremony and released only to restart the registered service.
+	enroll_config_lock, config_locked := bridge_config_lock(cfg_lib.config_path_from_args(args))
+	if !config_locked {
+		fmt.eprintfln("ham-bridge enroll REFUSED: another ham-bridge instance (a running bridge or enrollment) uses config %s.", cfg_lib.config_path_from_args(args))
+		fmt.eprintln("  Stop it first (the enrollment restarts the registered service when it is done), or use another --config.")
+		return false
+	}
+	defer bridge_instance_unlock(enroll_config_lock)
+	replacing_bridge_id := bridge_enroll_config_bridge_id(cfg_lib.config_path_from_args(args))
+	if explicit_token_file := bridge_enroll_token_file_from_args(args, "", "", context.temp_allocator); explicit_token_file != "" {
+		if reason, conflict := bridge_enroll_token_file_conflict(explicit_token_file, api_base, replacing_bridge_id); conflict {
+			fmt.eprintfln("ham-bridge enroll REFUSED: credential file %s is not this bridge's: %s.", explicit_token_file, reason)
+			fmt.eprintln("  Give this bridge its own --bridge-token-file, or omit it (the default credential path is per bridge).")
+			return false
+		}
 	}
 
 	// Step 2a — the machine descriptor. Gathered BEFORE anything is sent, because
@@ -1072,12 +1097,23 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 	// values derived from it leave this process; its MAC keys stay in memory until the
 	// first unseal pins the account root (or this command ends).
 	pair_code, code_ok := vault.pair_code_generate(context.temp_allocator)
+	// The code (and so the armed pairing keys and this whole wait) lives at most
+	// PAIR_CODE_TTL_SECONDS from now, whatever expires_in the hub reports.
+	pair_deadline_ms := bridge_now_unix_ms() + i64(vault.PAIR_CODE_TTL_SECONDS) * 1000
 	if !code_ok {
 		fmt.eprintln("ham-bridge enroll: the OS random source failed; cannot create a pairing code")
 		return false
 	}
 	defer mem.zero_explicit(raw_data(pair_code), len(pair_code))
-	pair_keys, keys_ok := vault.pair_keys_derive(pair_code)
+	// The pairing stretch binds the code to this hub origin and a fresh public salt (a
+	// bridge does not know its account before approval, so no user id).
+	pair_salt, salt_ok := vault.pair_salt_generate(context.temp_allocator)
+	pair_origin, pair_origin_ok := bridge_hub_pair_origin(api_base, context.temp_allocator)
+	if !salt_ok || !pair_origin_ok {
+		fmt.eprintln("ham-bridge enroll: could not create the pairing salt for this hub (OS random source or hub URL); cannot continue")
+		return false
+	}
+	pair_keys, keys_ok := vault.pair_keys_derive(pair_code, vault.Pair_Context{kind = "bridge", hub_origin = pair_origin, pair_salt = pair_salt})
 	defer vault.pair_keys_wipe(&pair_keys)
 	pair_payload, payload_ok := vault.pair_bridge_payload(identity_hex, public_key_hex, code_challenge, context.temp_allocator)
 	pair_key_mac, mac_ok := vault.pair_key_mac_hex(&pair_keys, "bridge", pair_payload, context.temp_allocator)
@@ -1085,11 +1121,11 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 		fmt.eprintln("ham-bridge enroll: could not derive the pairing values; cannot continue")
 		return false
 	}
-	bridge_pairing_arm(&pair_keys)
+	bridge_pairing_arm(&pair_keys, pair_deadline_ms)
 	defer bridge_pairing_disarm()
 
 	// Step 4 — the anonymous device-authorization request.
-	body := bridge_enroll_authorize_body(descriptor, public_key_hex, code_challenge, identity_hex, identity_proof, vault.pair_lookup_hex(&pair_keys, context.temp_allocator), pair_key_mac, context.temp_allocator)
+	body := bridge_enroll_authorize_body(descriptor, public_key_hex, code_challenge, identity_hex, identity_proof, vault.pair_lookup_hex(&pair_keys, context.temp_allocator), pair_key_mac, pair_salt, context.temp_allocator)
 	if body == "" {
 		fmt.eprintln("ham-bridge enroll: could not encode the authorize request")
 		return false
@@ -1120,6 +1156,7 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 	expires_in := authorized.data.expires_in
 	if interval <= 0 do interval = BRIDGE_ENROLL_DEFAULT_INTERVAL_SECONDS
 	if expires_in <= 0 || expires_in > BRIDGE_ENROLL_MAX_WAIT_SECONDS do expires_in = BRIDGE_ENROLL_MAX_WAIT_SECONDS
+	if code_left := int((pair_deadline_ms - bridge_now_unix_ms()) / 1000); expires_in > code_left do expires_in = max(code_left, 0)
 	// Captured for diagnostics only (REQ-DIAG-1): an "expired" report with no
 	// times attached is unfalsifiable, so every time-related failure below states
 	// the wall clock, how long this process waited, and the deadline it expected.
@@ -1157,6 +1194,7 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 	fmt.printfln("      %s", pair_code)
 	fmt.println("")
 	fmt.println("  The code is a secret: type it only on your own device. It expires shortly.")
+	fmt.printfln("  It is bound to the hub %s: approve from a browser using that hub address.", pair_origin)
 	fmt.printfln("  (bridge identity fingerprint, shown on the approval page: %s)", identity_fp)
 	fmt.println("  This process retrieves its credential directly from the Hub using PKCE-protected polling.")
 	fmt.println("")
@@ -1178,7 +1216,11 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 		status, cred, retry_after := bridge_enroll_poll_once(api_base, device_code, code_verifier)
 		switch status {
 		case .Approved:
-			token_file := bridge_enroll_token_file_from_args(args)
+			token_file := bridge_enroll_token_file_from_args(args, api_base, cred.bridge_id)
+			if reason, conflict := bridge_enroll_token_file_conflict(token_file, api_base, replacing_bridge_id); conflict {
+				fmt.eprintfln("bridge enroll FAILED: credential file %s is not this bridge's: %s. Nothing was written; enroll again with its own --bridge-token-file.", token_file, reason)
+				return false
+			}
 			if strings.trim_space(token_file) == "" {
 				fmt.eprintln("bridge enroll FAILED: nowhere to store the credential — pass --bridge-token-file <path> (HOME is unset, so there is no default).")
 				fmt.eprintln("  The approval succeeded; re-run with --bridge-token-file and approve again.")
@@ -1199,7 +1241,8 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 				// REQ-EA-4: write nothing until the vault key is delivered and the hub
 				// commits; enroll_atomic.odin owns the whole sequence.
 				if !bridge_enroll_atomic_run(args, cred, token_file, config_path, api_base) do return false
-				restart_ok, restarted := bridge_enroll_restart_service(args)
+				bridge_instance_unlock(enroll_config_lock) // the restarted service takes it
+			restart_ok, restarted := bridge_enroll_restart_service(args)
 				if !restart_ok do return false
 				if restarted do fmt.println("  registered bridge service restarted with the new credential")
 				return true
@@ -1223,12 +1266,14 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 			fmt.println("  nothing secret was written to config.toml (audit F2)")
 			if cred.vault_delivery_expected {
 				if !bridge_enroll_wait_for_vault_delivery(args, cred.bridge_id) {
+					// The identity is kept: the started service reports itself "unpaired"
+					// (bridge_hub_vault_status_for_report) so the UI can show and revoke it.
 					keystore_lock_and_purge(cred.bridge_id)
-					_ = keystore_delete_identity_key(cred.bridge_id)
 					return false
 				}
 				bridge_enroll_print_account_fingerprint(cred.bridge_id)
 			}
+			bridge_instance_unlock(enroll_config_lock) // the restarted service takes it
 			restart_ok, restarted := bridge_enroll_restart_service(args)
 			if !restart_ok {
 				// The key (when delivered) was verified persisted above; a restart
@@ -1270,11 +1315,12 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 }
 
 // bridge_enroll_token_file_from_args resolves where the credential goes, in the
-// same order the running bridge resolves it (flag, then environment), so enroll
-// and start agree without the operator repeating themselves. Returns "" when
-// there is no default to fall back on, and the caller then refuses to enroll
+// same order the running bridge resolves it (flag, then environment, then the
+// per-(hub, bridge) default), so enroll and start agree without the operator
+// repeating themselves. Returns "" when there is no default to fall back on (no
+// HOME, or hub_url / bridge_id unknown yet), and the caller then refuses to enroll
 // rather than guessing a path the bridge will not read at startup.
-bridge_enroll_token_file_from_args :: proc(args: []string, allocator := context.allocator) -> string {
+bridge_enroll_token_file_from_args :: proc(args: []string, hub_url, bridge_id: string, allocator := context.allocator) -> string {
 	if explicit := option_value(args, "--bridge-token-file", ""); strings.trim_space(explicit) != "" {
 		return strings.clone(strings.trim_space(explicit), allocator)
 	}
@@ -1285,7 +1331,8 @@ bridge_enroll_token_file_from_args :: proc(args: []string, allocator := context.
 	// no second flag. Deliberately NOT a system path like /var/lib: enrollment is
 	// run by a person, and a default only root can write would make the common case
 	// fail at the last step, after the human has already approved in the browser.
-	return bridge_enroll_default_credential_path(allocator)
+	if hub_url == "" || bridge_id == "" do return ""
+	return bridge_enroll_default_credential_path(hub_url, bridge_id, allocator)
 }
 
 // bridge_hello_hostname is the hostname the runtime WS hello reports, resolved
@@ -1329,25 +1376,6 @@ bridge_hello_hostname :: proc() -> string {
 	return string(g_bridge_hello_hostname_buf[:g_bridge_hello_hostname_len])
 }
 
-// bridge_enroll_default_credential_path is the one place that knows where a
-// credential goes when the operator named no path — shared by `enroll` (which
-// writes it) and by startup (which reads it), so the two cannot drift apart and
-// leave an enrolled bridge unable to find its own credential.
-//
-// This is also the path rendered into installer-managed systemd/launchd units.
-// Keeping one default removes the previous split where enrollment wrote under
-// ~/.local/share while the service read under ~/.config.
-bridge_enroll_default_credential_path :: proc(allocator := context.allocator) -> string {
-	expanded := cfg_lib.expand_home("~/.config/heimdall/bridge-token")
-	if strings.has_prefix(expanded, "~") {
-		delete(expanded)
-		return ""
-	}
-	if allocator == context.allocator do return expanded
-	defer delete(expanded)
-	return strings.clone(expanded, allocator)
-}
-
 // bridge_enrolled_but_tokenless reports the one startup state audit finding F4
 // makes dangerous: a bridge that HAS been enrolled but holds no credential.
 //
@@ -1379,7 +1407,7 @@ bridge_refuse_tokenless_start :: proc(cfg: Bridge_Config) -> bool {
 	fmt.eprintln("  WITHOUT AUTHENTICATION while doing so (audit F4), so it exits instead of starting.")
 	fmt.eprintln("  Fix one of these:")
 	fmt.eprintln("    - pass --bridge-token-file <path> (or set HAM_BRIDGE_TOKEN_FILE) if the credential is elsewhere")
-	if path := bridge_enroll_default_credential_path(context.temp_allocator); path != "" {
+	if path := bridge_enroll_default_credential_path(cfg.daemon_url, strings.trim_space(cfg.daemon_id), context.temp_allocator); path != "" {
 		fmt.eprintfln("    - check the default location: %s", path)
 	}
 	fmt.eprintln("    - re-enroll: ham-bridge enroll --hub <url>")
@@ -1401,7 +1429,7 @@ bridge_bind_runtime_hub :: proc(cfg: Bridge_Config, config_path: string) -> bool
 		fmt.eprintfln("ham-bridge REFUSING TO START: the configured hub %q is not a usable http(s) URL.", cfg.daemon_url)
 		return false
 	}
-	if config_path != "" && os.exists(config_path) && !bridge_instance_lock(strings.concatenate({config_path, ".lock"}, context.temp_allocator)) {
+	if _, locked := bridge_config_lock(config_path); config_path != "" && !locked {
 		fmt.eprintfln("ham-bridge REFUSING TO START: another ham-bridge instance is running with config %s. Each bridge needs its own --config/--bridge-token-file.", config_path)
 		return false
 	}
@@ -1417,14 +1445,21 @@ bridge_bind_runtime_hub :: proc(cfg: Bridge_Config, config_path: string) -> bool
 		fmt.eprintln("  Fix the hub in the config / --hub, or re-enroll: ham-bridge enroll --hub <url>")
 		return false
 	}
-	if name, scoped := keystore_scope_name(bridge_id); scoped {
-		if dir, dir_ok := bridge_vault_bridge_dir(name, context.temp_allocator); dir_ok {
-			_ = bridge_make_directory_all(dir)
-			if !bridge_instance_lock(strings.concatenate({dir, "instance.lock"}, context.temp_allocator)) {
-				fmt.eprintfln("ham-bridge REFUSING TO START: another ham-bridge instance already runs as %s for this hub.", bridge_id)
-				return false
-			}
+	// The credential file must be this bridge's (owner header): a file shared with, or
+	// overwritten by, another bridge would send another hub's token here.
+	if cfg.credential_file != "" && !bridge_credential_file_belongs_to(cfg.credential_file, bridge_keystore_hub(), bridge_id) {
+		hub, id, owner := bridge_credential_file_owner(cfg.credential_file)
+		if owner == .Owned {
+			fmt.eprintfln("ham-bridge REFUSING TO START: credential file %s belongs to bridge %s of hub %s, not to %s of %s.", cfg.credential_file, id, hub, bridge_id, bridge_keystore_hub())
+		} else {
+			fmt.eprintfln("ham-bridge REFUSING TO START: credential file %s does not record which bridge and hub it belongs to.", cfg.credential_file)
 		}
+		fmt.eprintln("  Each bridge needs its own credential file; re-enroll: ham-bridge enroll --hub <url>")
+		return false
+	}
+	if name, scoped := keystore_scope_name(bridge_id); scoped && !bridge_scope_lock(name) {
+		fmt.eprintfln("ham-bridge REFUSING TO START: another ham-bridge instance already runs as %s for this hub.", bridge_id)
+		return false
 	}
 	return true
 }

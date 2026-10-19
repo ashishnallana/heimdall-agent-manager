@@ -151,7 +151,7 @@ bridge_enroll_stage_discard :: proc(st: Bridge_Enroll_Stage) {
 @(private = "file")
 bridge_enroll_stage_write :: proc(st: Bridge_Enroll_Stage, cred: Bridge_Enroll_Credential, api_base: string) -> bool {
 	if !bridge_enroll_credential_usable(cred.access_token) do return false
-	if !bridge_write_secret_file(staged(st.token_file), cred.access_token) do return false
+	if !bridge_write_credential_file(staged(st.token_file), api_base, cred.bridge_id, cred.access_token) do return false
 	if strings.trim_space(cred.refresh_token) != "" {
 		if !bridge_enroll_credential_usable(cred.refresh_token) do return false
 		if !bridge_write_secret_file(staged(st.refresh_file), cred.refresh_token) do return false
@@ -319,7 +319,7 @@ bridge_enroll_atomic_recover_paths :: proc(token_file, config_path: string, refr
 	case .Rotated:
 		// Committed at the hub. The staged pair is now spent: stage the rotated one.
 		_ = bridge_write_secret_file(staged(st.refresh_file), rotated.refresh_token)
-		_ = bridge_write_secret_file(staged(st.token_file), rotated.access_token)
+		_ = bridge_write_credential_file(staged(st.token_file), marker_hub, marker_bridge_id, rotated.access_token)
 		if bridge_enroll_stage_promote(st) {
 			fmt.printfln("bridge enroll recovery: enrollment of %s was committed; credential moved into place", marker_bridge_id)
 			return .Promoted
@@ -338,9 +338,18 @@ bridge_enroll_atomic_recover_paths :: proc(token_file, config_path: string, refr
 }
 
 // bridge_enroll_atomic_recover runs recovery for the paths the command line names.
+// With no explicit credential file the credential path is per (hub, bridge id); the
+// staged config (written before the marker) names both.
 bridge_enroll_atomic_recover :: proc(args: []string) -> Bridge_Enroll_Recovery {
-	token_file := bridge_enroll_token_file_from_args(args, context.temp_allocator)
-	return bridge_enroll_atomic_recover_paths(token_file, cfg_lib.config_path_from_args(args))
+	config_path := cfg_lib.config_path_from_args(args)
+	token_file := bridge_enroll_token_file_from_args(args, "", "", context.temp_allocator)
+	if token_file == "" && config_path != "" && file_exists(staged(config_path)) {
+		if loaded, ok := cfg_lib.load(staged(config_path)); ok {
+			token_file = bridge_enroll_token_file_from_args(args, loaded.config.wrapper.daemon_url, strings.trim_space(loaded.config.daemon.daemon_id), context.temp_allocator)
+		}
+	}
+	if token_file == "" do return .None
+	return bridge_enroll_atomic_recover_paths(token_file, config_path)
 }
 
 // bridge_enroll_atomic_seed_config builds the enroll-only runtime's config from the

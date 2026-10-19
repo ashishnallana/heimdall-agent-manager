@@ -12,6 +12,7 @@ package vault_directory
 import "base:runtime"
 import "core:crypto"
 import "core:crypto/sha2"
+import "core:slice"
 import "core:strconv"
 import "core:strings"
 import "core:sync"
@@ -446,6 +447,26 @@ resolve_pending_lookup :: proc(svc: ^Service, user_id, pair_lookup: string) -> (
 	return dev, domain.Domain_Error{}
 }
 
+// pending_pair_salts lists the public pair_salt of up to `limit` live pending devices
+// of the SESSION USER, newest first (temp-allocated): an approver needs it to derive
+// the lookup from the code it was given (pairing stretch).
+pending_pair_salts :: proc(svc: ^Service, user_id: string, limit: int) -> ([]string, domain.Domain_Error) {
+	devices, err := iface.vault_list_devices(svc.repo, user_id)
+	if err.code != .None do return nil, err
+	now := platform.clock_now(svc.clock)
+	live := make([dynamic]domain.Vault_Device, 0, len(devices), context.temp_allocator)
+	for d in devices {
+		if d.status == .Pending && d.code_expires_at > now && vault.valid_pair_salt_hex(d.pair_salt) do append(&live, d)
+	}
+	slice.sort_by(live[:], proc(a, b: domain.Vault_Device) -> bool { return a.created_at > b.created_at })
+	out := make([dynamic]string, 0, len(live), context.temp_allocator)
+	for d in live {
+		if len(out) >= limit do break
+		append(&out, strings.clone(d.pair_salt, context.temp_allocator))
+	}
+	return out[:], domain.Domain_Error{}
+}
+
 // ── Genesis ─────────────────────────────────────────────────────────────────
 
 Genesis_Input :: struct {
@@ -539,10 +560,10 @@ Register_Result :: struct {
 	newly_pending: bool,
 }
 
-// register records a pending device under the pairing lookup and key_mac the device
-// derived from its own code (plan §1 "Pairing"). The hub cannot check key_mac (it
-// lacks the code); the approver does.
-register :: proc(svc: ^Service, user_id, statement, signature, pair_lookup, pair_key_mac: string) -> (Register_Result, domain.Domain_Error) {
+// register records a pending device under the pairing lookup, key_mac and public
+// pair_salt the device derived / drew for its own code (plan §1 "Pairing"). The hub
+// cannot check key_mac (it lacks the code); the approver does.
+register :: proc(svc: ^Service, user_id, statement, signature, pair_lookup, pair_key_mac, pair_salt: string) -> (Register_Result, domain.Domain_Error) {
 	if user_id == "" do return {}, unauth("user is required")
 	if !vault.valid_id_value(user_id) do return {}, invalid("user id cannot be used in vault statements")
 	st, ok := vault.statement_parse(statement)
@@ -558,6 +579,7 @@ register :: proc(svc: ^Service, user_id, statement, signature, pair_lookup, pair
 	if st.issuer_device_id != dev.device_id do return {}, invalid("register statements are self-signed")
 	if !vault.verify(dev.sign_alg, dev.sign_public_key, transmute([]byte)statement, signature) do return {}, unauth("proof_signature does not verify")
 	if !vault.valid_pair_hex(pair_lookup) || !vault.valid_pair_hex(pair_key_mac) do return {}, invalid("pair_lookup and pair_key_mac must be 64 lowercase hex")
+	if !vault.valid_pair_salt_hex(pair_salt) do return {}, invalid("pair_salt must be 32 lowercase hex")
 
 	now := platform.clock_now(svc.clock)
 	expires, exp_ok := platform.expires_at_after_seconds_from(now, domain.VAULT_CODE_TTL_SECONDS)
@@ -567,6 +589,7 @@ register :: proc(svc: ^Service, user_id, statement, signature, pair_lookup, pair
 	dev.code_expires_at = expires
 	dev.pair_lookup = pair_lookup
 	dev.pair_key_mac = pair_key_mac
+	dev.pair_salt = pair_salt
 	dev.register_statement = statement
 	stored, err := iface.vault_register_pending(svc.repo, dev, now)
 	if err.code != .None do return {}, err

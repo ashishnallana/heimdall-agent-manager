@@ -16,10 +16,12 @@ import React, { useCallback, useState } from 'react';
 import { Alert, Button, Icon, Input } from '@ui';
 import { ApiError } from '../../api/cookieFetch';
 import {
+  fetchPairCandidates,
+  pairingHubOrigin,
   postApproveBridge,
   postApproveBrowser,
   postDenyDevice,
-  verifyPairLookup,
+  verifyPairLookups,
   type BridgeCodeInfo,
   type BrowserCodeInfo,
   type DeviceCodeInfo,
@@ -28,7 +30,7 @@ import { fetchBridgeEnrollmentStatus, fetchBridgeUnsealTarget, unsealBridge } fr
 import { enrollmentPendingOutcome, ENROLLMENT_PENDING_FALLBACK_SECONDS } from '../enrollment/bridgeEnrollmentCompletion';
 import { fingerprintFor } from '../../utils/deviceIdentity';
 import { buildBridgeApproval, buildBrowserApproval, checkBridgeCodeInfo, checkBrowserCodeInfo, type PairedBrowser } from '../../utils/vaultDeviceFlows';
-import { derivePairKeys, normalizePairCode, pairApproveMac, type PairKeys } from '../../utils/vaultPairing';
+import { derivePairKeys, isPairSalt, normalizePairCode, pairApproveMac, type PairKeys } from '../../utils/vaultPairing';
 import { deliverKeyringToBridge } from '../../utils/vaultBridgeDelivery';
 import { withKeyringBytes } from '../../utils/vaultKeyringSession';
 import {
@@ -41,6 +43,9 @@ import {
 } from '../../services/deviceVault';
 
 const POLL_MS = 2000;
+/** At most this many pending requests are tried per typed code (one stretch each). */
+const MAX_PAIR_CANDIDATES = 8;
+const NO_MATCH_MESSAGE = 'No device is waiting with that code. Check the code on the new device (it expires after a few minutes), and that it was started against this hub address.';
 
 interface Review {
   info: DeviceCodeInfo;
@@ -61,7 +66,7 @@ type Phase =
 
 function errText(err: unknown): string {
   if (err instanceof ApiError && err.status === 409) return `The directory changed while approving (${err.message}). Type the code again.`;
-  if (err instanceof ApiError && err.status === 404) return 'No device is waiting with that code. Check the code on the new device (it expires after a few minutes).';
+  if (err instanceof ApiError && err.status === 404) return NO_MATCH_MESSAGE;
   return String((err as Error)?.message || err);
 }
 
@@ -74,10 +79,25 @@ export function hostLabelOf(info: DeviceCodeInfo): string {
 /**
  * Resolve and authenticate a pairing request from the code the user typed. Throws
  * (nothing is approved) unless the request's key_mac verifies under that code.
+ *
+ * Pairing stretch: the lookup depends on the code AND the request's public pair_salt
+ * (plus this account for a browser, and the hub origin), so each candidate salt the
+ * hub lists is stretched with the code and all lookups go to /device/verify at once;
+ * the answer's pair_salt names the matching candidate.
  */
-export async function lookUpPairing(rawCode: string, userId: string): Promise<Review> {
-  const keys = await derivePairKeys(normalizePairCode(rawCode));
-  const info = await verifyPairLookup(keys.lookup);
+export async function lookUpPairing(rawCode: string, userId: string, hubOrigin: string = pairingHubOrigin()): Promise<Review> {
+  const code = normalizePairCode(rawCode);
+  const tried: Array<{ kind: 'browser' | 'bridge'; salt: string; keys: PairKeys }> = [];
+  for (const cand of (await fetchPairCandidates()).slice(0, MAX_PAIR_CANDIDATES)) {
+    if ((cand?.kind !== 'browser' && cand?.kind !== 'bridge') || !isPairSalt(cand.pair_salt)) continue;
+    const keys = await derivePairKeys(code, { kind: cand.kind, userId: cand.kind === 'browser' ? userId : '', hubOrigin, pairSalt: cand.pair_salt });
+    tried.push({ kind: cand.kind, salt: cand.pair_salt, keys });
+  }
+  if (tried.length === 0) throw new Error(NO_MATCH_MESSAGE);
+  const info = await verifyPairLookups(tried.map((c) => c.keys.lookup));
+  const match = tried.find((c) => c.kind === info.kind && c.salt === info.pair_salt);
+  if (!match) throw new Error('The server answered for a different pairing request. Nothing was approved.');
+  const { keys } = match;
   if (info.kind === 'browser') {
     const browser = await checkBrowserCodeInfo(info as BrowserCodeInfo, keys, userId);
     return { info, keys, browser, fingerprint: browser.fingerprint, label: browser.label || 'Browser' };
@@ -199,7 +219,7 @@ export default function DeviceApprovalPage() {
         className="mb-4 flex gap-2"
         onSubmit={(e) => { e.preventDefault(); if (!codeLocked) void lookUp(code); }}
       >
-        <Input data-debug-id="device-approval-code-input" value={code} onChange={setCode} placeholder="XXXX-XXXX-XXXX" className="flex-1" autoFocus autoComplete="off" disabled={codeLocked} />
+        <Input data-debug-id="device-approval-code-input" value={code} onChange={setCode} placeholder="XXXX-XXXX-XXXX-XX" className="flex-1" autoFocus autoComplete="off" disabled={codeLocked} />
         {codeLocked && phase.kind === 'review' ? (
           <Button data-debug-id="device-approval-change-code-btn" variant="ghost" onClick={reset}>Change</Button>
         ) : (

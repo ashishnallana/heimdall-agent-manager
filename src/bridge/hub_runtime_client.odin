@@ -2964,9 +2964,22 @@ bridge_hub_is_enroll_only_runtime :: proc() -> bool {
 // The hub's vocabulary is unlocked/locked: a bridge with no usable identity reports
 // "locked" there too (it holds no key and refuses everything); the distinction is
 // only visible bridge-locally through agent.vault.status.
+//
+// "unpaired": an enrolled bridge (identity ready) that never pinned an account root and
+// holds no pairing keys can never accept a first unseal (it missed the one its
+// enrollment allowed). It says so, so the UI can show it and offer revoke + re-enroll,
+// instead of looking like an ordinary locked bridge that a key delivery would fix.
 bridge_hub_vault_status_for_report :: proc() -> string {
-	if bridge_vault_status_reported(bridge_hub_is_enroll_only_runtime()) == .Unlocked do return "unlocked"
+	enroll_only := bridge_hub_is_enroll_only_runtime()
+	status := bridge_vault_status_reported(enroll_only)
+	if status == .Unlocked do return "unlocked"
+	if !enroll_only && status == .Locked && bridge_vault_unpaired(strings.trim_space(bridge_config.daemon_id)) do return "unpaired"
 	return "locked"
+}
+
+// bridge_vault_unpaired: no account root pinned and no armed pairing keys.
+bridge_vault_unpaired :: proc(bridge_id: string) -> bool {
+	return bridge_account_fingerprint(bridge_id) == "" && !bridge_pairing_is_armed()
 }
 
 // bridge_vault_status_reported is the decision above, with the process-wide flag

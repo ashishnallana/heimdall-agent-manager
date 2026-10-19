@@ -8,6 +8,7 @@
 // vaultDirectoryVerify / vaultKeyringWrap before acting on it.
 
 import { ApiError, apiUrl, errorFromResponse } from '../cookieFetch';
+import { pairHubOrigin } from '../../utils/vaultPairing';
 import { signedRequestHeaders, type RequestSigner } from '../../utils/vaultRequestSigner';
 import type { VaultDirectory } from '../../utils/vaultDirectoryVerify';
 import type { SignedKeyringWrap } from '../../utils/vaultKeyringWrap';
@@ -18,6 +19,16 @@ export interface VaultSignerContext {
 }
 
 const API = '/api/v1';
+
+/**
+ * The hub origin pairing binds (pairing stretch, plan §1 "Pairing"): the origin of the
+ * API base this page talks to. Throws outside an http(s) page.
+ */
+export function pairingHubOrigin(): string {
+  const here = (globalThis as { location?: { href?: string } }).location?.href;
+  if (!here) throw new Error('No page address to bind the pairing to');
+  return pairHubOrigin(new URL(apiUrl(`${API}/`), here).href);
+}
 
 /** fetch is injectable for hermetic tests. */
 let fetchImpl: typeof fetch = (input, init) => fetch(input, init);
@@ -94,10 +105,11 @@ export interface RegisterResult {
 
 /**
  * Register this device as pending. `pairLookup` / `pairKeyMac` are derived from the
- * secret pairing code this device shows; the code itself never leaves the device.
+ * secret pairing code this device shows (the code never leaves the device);
+ * `pairSalt` is the public salt of the pairing stretch.
  */
-export async function postVaultRegister(statement: string, proofSignature: unknown, pairLookup: string, pairKeyMac: string): Promise<RegisterResult> {
-  return vaultRequest('POST', '/vault/devices/register', { body: { statement, proof_signature: proofSignature, pair_lookup: pairLookup, pair_key_mac: pairKeyMac } });
+export async function postVaultRegister(statement: string, proofSignature: unknown, pairLookup: string, pairKeyMac: string, pairSalt: string): Promise<RegisterResult> {
+  return vaultRequest('POST', '/vault/devices/register', { body: { statement, proof_signature: proofSignature, pair_lookup: pairLookup, pair_key_mac: pairKeyMac, pair_salt: pairSalt } });
 }
 
 // ── approval surface (/device/add) ──────────────────────────────────────────
@@ -117,6 +129,7 @@ export interface BrowserCodeInfo {
   /** The self-signed register statement the device made; pair_key_mac covers it. */
   register_statement: string;
   pair_key_mac: string;
+  pair_salt: string;
 }
 
 export interface BridgeCodeInfo {
@@ -134,14 +147,32 @@ export interface BridgeCodeInfo {
   /** MAC over identity|ecdh|code_challenge under the bridge's pairing code. */
   pair_key_mac: string;
   code_challenge: string;
+  pair_salt: string;
   [k: string]: unknown;
 }
 
 export type DeviceCodeInfo = BrowserCodeInfo | BridgeCodeInfo;
 
-/** Resolve a pending device by the lookup the APPROVER derived from the typed code. */
-export async function verifyPairLookup(pairLookup: string): Promise<DeviceCodeInfo> {
-  return vaultRequest('POST', '/device/verify', { body: { pair_lookup: pairLookup } });
+export interface PairCandidate {
+  kind: 'browser' | 'bridge';
+  pair_salt: string;
+}
+
+/**
+ * Public salts of the requests this user could approve (own pending browsers, then
+ * pending bridges): the lookup is derived from the typed code AND a request's salt.
+ */
+export async function fetchPairCandidates(): Promise<PairCandidate[]> {
+  const res = await vaultRequest('POST', '/device/pair-salts', { body: {} });
+  return Array.isArray(res?.candidates) ? res.candidates : [];
+}
+
+/**
+ * Resolve a pending device by the lookups the APPROVER derived from the typed code,
+ * one per candidate pair_salt (at most 8); the answer's pair_salt names the match.
+ */
+export async function verifyPairLookups(pairLookups: string[]): Promise<DeviceCodeInfo> {
+  return vaultRequest('POST', '/device/verify', { body: { pair_lookups: pairLookups } });
 }
 
 export interface BrowserApprovalBody {

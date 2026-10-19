@@ -514,6 +514,7 @@ register_routes :: proc(graph: ^App_Graph) {
 	http.router_add(&graph.router, "GET", "/api/v1/device", rawptr(&graph.device_auth_handlers), http.device_page_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/device/add", rawptr(&graph.device_auth_handlers), http.device_add_redirect_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/device/verify", rawptr(&graph.device_auth_handlers), http.device_verify_handler)
+	http.router_add(&graph.router, "POST", "/api/v1/device/pair-salts", rawptr(&graph.device_auth_handlers), http.device_pair_salts_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/device/approve", rawptr(&graph.device_auth_handlers), http.device_approve_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/device/token", rawptr(&graph.device_auth_handlers), http.device_token_handler)
 	// REQ-IMPL-3: credential rotation. Authenticated by the `hbf_` refresh token

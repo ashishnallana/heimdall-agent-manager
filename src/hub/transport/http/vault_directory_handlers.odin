@@ -303,7 +303,7 @@ vault_genesis_handler :: proc(ctx: rawptr, req: Request) -> Response {
 }
 
 // ── POST /api/v1/vault/devices/register ─────────────────────────────────────
-// {statement, proof_signature, pair_lookup, pair_key_mac}: a self-signed `register`
+// {statement, proof_signature, pair_lookup, pair_key_mac, pair_salt}: a self-signed `register`
 // statement plus the pairing values the device derived from its own code (plan §1
 // "Pairing"; the code never reaches the hub). Idempotent per key; a live request is
 // re-paired only by a newer register statement. Rate-limited per IP. Interactive
@@ -315,6 +315,7 @@ Register_Request :: struct {
 	proof_signature: json.Value,
 	pair_lookup:     string,
 	pair_key_mac:    string,
+	pair_salt:       string,
 }
 
 Vault_Register_Wire :: struct {
@@ -334,7 +335,7 @@ vault_register_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	}
 	body: Register_Request
 	if !vault_decode(req, &body) do return bad_request(req, "body must be a JSON object")
-	res, err := vd.register(h.vault, auth.user_id, body.statement, vault_sig_text(body.proof_signature), body.pair_lookup, body.pair_key_mac)
+	res, err := vd.register(h.vault, auth.user_id, body.statement, vault_sig_text(body.proof_signature), body.pair_lookup, body.pair_key_mac, body.pair_salt)
 	if err.code != .None do return respond_error(err, req.request_id)
 	dev := res.device
 	if res.newly_pending {

@@ -114,7 +114,7 @@ main :: proc() {
 	// rolled-back one must not leave its staging behind.
 	_ = bridge_enroll_atomic_recover(os.args)
 	bridge_config = bridge_config_from_args(os.args)
-	default_credential_path := bridge_enroll_default_credential_path()
+	default_credential_path := bridge_enroll_default_credential_path(bridge_config.daemon_url, strings.trim_space(bridge_config.daemon_id))
 	bridge_adopt_default_credential_if_needed(&bridge_config, default_credential_path)
 	delete(default_credential_path)
 	// REQ-IMPL-4 / audit F4: an enrolled bridge holding no credential must not run.
@@ -240,16 +240,67 @@ bridge_hub_canonical_base :: proc(hub_url: string, allocator := context.allocato
 		rest = rest[:slash]
 	}
 	host := strings.to_lower(rest, context.temp_allocator)
-	port := "443" if secure else "80"
+	port := 443 if secure else 80
 	// A bracketed IPv6 literal keeps its colons; the port follows the bracket.
 	if colon := strings.last_index_byte(host, ':'); colon >= 0 && colon > strings.last_index_byte(host, ']') {
-		port = host[colon + 1:]
+		digits := host[colon + 1:]
 		host = host[:colon]
-		if port == "" do return "", false
-		for ch in transmute([]u8)port do if ch < '0' || ch > '9' do return "", false
+		// A decimal integer 1..65535; leading zeros are normalized away ("08080" -> 8080).
+		if digits == "" || len(digits) > 10 do return "", false
+		port = 0
+		for ch in transmute([]u8)digits {
+			if ch < '0' || ch > '9' do return "", false
+			port = port * 10 + int(ch - '0')
+		}
+		if port < 1 || port > 65535 do return "", false
 	}
-	if host == "" do return "", false
-	return strings.concatenate({"https://" if secure else "http://", host, ":", port, path}, allocator), true
+	// "hub.example.com." and "hub.example.com" are the same host.
+	if strings.has_suffix(host, ".") && !strings.has_prefix(host, "[") do host = host[:len(host) - 1]
+	if host == "" || !bridge_hub_host_canonical(host) do return "", false
+	return strings.concatenate({"https://" if secure else "http://", host, ":", fmt.tprintf("%d", port), path}, allocator), true
+}
+
+// bridge_hub_host_canonical refuses hosts that name the same machine in more than
+// one spelling: a numeric host (one whose last label is all digits or 0x-hex, which
+// URL parsers read as IPv4) must be a dotted quad of four 0..255 decimals without
+// leading zeros, so "127.1", "2130706433", "0x7f.0.0.1" and "127.000.0.1" are refused
+// rather than becoming a second identity for 127.0.0.1. Empty labels are refused.
+bridge_hub_host_canonical :: proc(host: string) -> bool {
+	if strings.has_prefix(host, "[") do return strings.has_suffix(host, "]") && len(host) > 2
+	labels := strings.split(host, ".", context.temp_allocator)
+	for l in labels do if l == "" do return false
+	last := labels[len(labels) - 1]
+	numeric := strings.has_prefix(last, "0x")
+	if !numeric {
+		numeric = true
+		for ch in transmute([]u8)last do if ch < '0' || ch > '9' do numeric = false
+	}
+	if !numeric do return true
+	if len(labels) != 4 do return false
+	for l in labels {
+		if len(l) > 3 || (len(l) > 1 && l[0] == '0') do return false
+		n := 0
+		for ch in transmute([]u8)l {
+			if ch < '0' || ch > '9' do return false
+			n = n * 10 + int(ch - '0')
+		}
+		if n > 255 do return false
+	}
+	return true
+}
+
+// bridge_hub_pair_origin is the hub origin the pairing stretch binds
+// (vault.Pair_Context.hub_origin): the canonical base without its path prefix,
+// "scheme://host:port". The approving browser computes the same from the API base it
+// talks to (pairHubOrigin in src/ui/utils/vaultPairing.ts).
+bridge_hub_pair_origin :: proc(hub_url: string, allocator := context.allocator) -> (string, bool) {
+	base, ok := bridge_hub_canonical_base(hub_url, context.temp_allocator)
+	if !ok do return "", false
+	scheme_end := strings.index(base, "://") + len("://")
+	origin := base
+	if slash := strings.index_byte(base[scheme_end:], '/'); slash >= 0 do origin = base[:scheme_end + slash]
+	if !vault.valid_pair_hub_origin(origin) do return "", false
+	return strings.clone(origin, allocator), true
 }
 
 bridge_config_line_key :: proc(trimmed_line: string) -> string {
@@ -397,7 +448,9 @@ bridge_read_token_file :: proc(path: string) -> (string, bool) {
 	// previously leaked on every call, which the refresh worker turns from a
 	// one-off into a per-rotation leak for the life of the process.
 	defer delete(data)
-	text := strings.trim_space(string(data))
+	// An access-token file carries an owner header (credential_owner.odin); the
+	// token is what follows it. Refresh files and hand-given tokens have none.
+	text, _, _, _ := bridge_credential_split(string(data))
 	if text == "" do return "", false
 	return strings.clone(text), true
 }

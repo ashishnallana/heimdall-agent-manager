@@ -163,11 +163,18 @@ g_bridge_pair_mu: sync.Mutex
 g_bridge_pair_keys: vault.Pair_Keys
 @(private = "file")
 g_bridge_pair_armed: bool
+// Unix ms after which the armed keys are useless: the pairing code's own lifetime
+// (vault.PAIR_CODE_TTL_SECONDS from when it was drawn), whatever the hub says.
+@(private = "file")
+g_bridge_pair_deadline_ms: i64
 
-bridge_pairing_arm :: proc(keys: ^vault.Pair_Keys) {
+// bridge_pairing_arm keeps the pairing keys until deadline_ms (unix ms), the end of
+// the pairing code's lifetime; after it they are wiped and never used.
+bridge_pairing_arm :: proc(keys: ^vault.Pair_Keys, deadline_ms: i64) {
 	sync.mutex_lock(&g_bridge_pair_mu)
 	defer sync.mutex_unlock(&g_bridge_pair_mu)
 	g_bridge_pair_keys = keys^
+	g_bridge_pair_deadline_ms = deadline_ms
 	g_bridge_pair_armed = true
 }
 
@@ -176,6 +183,14 @@ bridge_pairing_disarm :: proc() {
 	defer sync.mutex_unlock(&g_bridge_pair_mu)
 	vault.pair_keys_wipe(&g_bridge_pair_keys)
 	g_bridge_pair_armed = false
+	g_bridge_pair_deadline_ms = 0
+}
+
+// bridge_pairing_is_armed: this process holds live pairing keys (an enrollment in progress).
+bridge_pairing_is_armed :: proc() -> bool {
+	sync.mutex_lock(&g_bridge_pair_mu)
+	defer sync.mutex_unlock(&g_bridge_pair_mu)
+	return g_bridge_pair_armed && bridge_now_unix_ms() <= g_bridge_pair_deadline_ms
 }
 
 // bridge_pairing_first_pin_ok verifies a first unseal's pair_mac (after the chain proof verified).
@@ -184,6 +199,12 @@ bridge_pairing_first_pin_ok :: proc(proof_value: json.Value, pair_mac: string) -
 	sync.mutex_lock(&g_bridge_pair_mu)
 	defer sync.mutex_unlock(&g_bridge_pair_mu)
 	if !g_bridge_pair_armed do return false
+	if bridge_now_unix_ms() > g_bridge_pair_deadline_ms {
+		// Past the code's lifetime: disarm (the approver refuses an expired code too).
+		vault.pair_keys_wipe(&g_bridge_pair_keys)
+		g_bridge_pair_armed = false
+		return false
+	}
 	return vault.pair_verify_bridge_first_pin(&g_bridge_pair_keys, proof_value, pair_mac)
 }
 

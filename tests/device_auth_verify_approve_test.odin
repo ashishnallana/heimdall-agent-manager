@@ -204,7 +204,7 @@ main :: proc() {
 
 	bres, bok2, _ := device_auth.authorize(&svc, {
 		client = "ham-bridge", device_label = "dawnstar", os = "linux", app_version = "0.9.1",
-		bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF, pair_lookup = "1111111111111111111111111111111111111111111111111111111111111111", pair_key_mac = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", os_user = "tanmay",
+		bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF, pair_salt = "0123456789abcdef0123456789abcdef", pair_lookup = "1111111111111111111111111111111111111111111111111111111111111111", pair_key_mac = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", os_user = "tanmay",
 		code_challenge = PKCE_CHALLENGE, code_challenge_method = "S256",
 	}, "127.0.0.1:1", "")
 	assert_true(bok2, "bridge authorize succeeds")
@@ -278,7 +278,7 @@ main :: proc() {
 	// The two identity choices are mutually exclusive. Reject the request before
 	// the minter can rotate an existing bridge while also accepting a new label.
 	conflict_res, conflict_ok, _ := device_auth.authorize(&svc, {
-		client = "ham-bridge", bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF, pair_lookup = "2222222222222222222222222222222222222222222222222222222222222222", pair_key_mac = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+		client = "ham-bridge", bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF, pair_salt = "0123456789abcdef0123456789abcdef", pair_lookup = "2222222222222222222222222222222222222222222222222222222222222222", pair_key_mac = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
 		code_challenge = PKCE_CHALLENGE, code_challenge_method = "S256",
 	}, "127.0.0.1:1", "")
 	assert_true(conflict_ok, "authorize bridge grant for conflicting identity choices")
@@ -318,7 +318,7 @@ main :: proc() {
 	nsvc := device_auth.new_device_auth_service(nstore, fake_clock(), []string{"127.0.0.1/32"})
 	device_auth.with_token_minter(&nsvc, fake_minter) // user minter wired, bridge minter NOT
 	nres, nok, _ := device_auth.authorize(&nsvc, {
-		client = "ham-bridge", bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF, pair_lookup = "3333333333333333333333333333333333333333333333333333333333333333", pair_key_mac = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+		client = "ham-bridge", bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF, pair_salt = "0123456789abcdef0123456789abcdef", pair_lookup = "3333333333333333333333333333333333333333333333333333333333333333", pair_key_mac = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
 		code_challenge = PKCE_CHALLENGE, code_challenge_method = "S256",
 	}, "127.0.0.1:1", "")
 	assert_true(nok, "bridge authorize succeeds without a wired bridge minter")
@@ -335,7 +335,7 @@ main :: proc() {
 	// unattributable credential defeats the point of per-machine scoping. ---
 	BRIDGE_MINT_ID = ""
 	ires, iok, _ := device_auth.authorize(&svc, {
-		client = "ham-bridge", bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF, pair_lookup = "4444444444444444444444444444444444444444444444444444444444444444", pair_key_mac = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+		client = "ham-bridge", bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF, pair_salt = "0123456789abcdef0123456789abcdef", pair_lookup = "4444444444444444444444444444444444444444444444444444444444444444", pair_key_mac = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
 		code_challenge = PKCE_CHALLENGE, code_challenge_method = "S256",
 	}, "127.0.0.1:1", "")
 	assert_true(iok, "authorize for the no-id case succeeds")
@@ -366,7 +366,7 @@ main :: proc() {
 	// A PENDING bridge grant has no credential yet, so there is nothing to
 	// address and nothing may be returned.
 	pres, pok3, _ := device_auth.authorize(&svc, {
-		client = "ham-bridge", bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF, pair_lookup = "5555555555555555555555555555555555555555555555555555555555555555", pair_key_mac = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+		client = "ham-bridge", bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF, pair_salt = "0123456789abcdef0123456789abcdef", pair_lookup = "5555555555555555555555555555555555555555555555555555555555555555", pair_key_mac = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
 		code_challenge = PKCE_CHALLENGE, code_challenge_method = "S256",
 	}, "127.0.0.1:1", "")
 	assert_true(pok3, "authorize a second bridge grant for the pending case")
@@ -375,7 +375,7 @@ main :: proc() {
 
 	// A DENIED bridge grant must not expose one either: the operator said no.
 	dres, dok3, _ := device_auth.authorize(&svc, {
-		client = "ham-bridge", bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF, pair_lookup = "6666666666666666666666666666666666666666666666666666666666666666", pair_key_mac = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+		client = "ham-bridge", bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF, pair_salt = "0123456789abcdef0123456789abcdef", pair_lookup = "6666666666666666666666666666666666666666666666666666666666666666", pair_key_mac = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
 		code_challenge = PKCE_CHALLENGE, code_challenge_method = "S256",
 	}, "127.0.0.1:1", "")
 	assert_true(dok3, "authorize a bridge grant for the denied case")
