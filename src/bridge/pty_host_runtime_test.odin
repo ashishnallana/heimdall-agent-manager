@@ -84,11 +84,11 @@ pty_host_env_pairs_splits_on_first_eq :: proc(t: ^testing.T) {
 pty_host_message_notice_rendering :: proc(t: ^testing.T) {
 	m := bridge_pty_host_message_notice("inst_sender")
 	defer delete(m)
-	testing.expect_value(t, m, "New message from inst_sender \u2014 run './.heimdall/bin/ham-ctl agent chat read' to view.")
+	testing.expect_value(t, m, "New message from inst_sender \u2014 run './.heimdall/bin/ham-ctl chat read' to view.")
 	// sender_display_name preferred when provided
 	m_dn := bridge_pty_host_message_notice("inst_sender", "Alice")
 	defer delete(m_dn)
-	testing.expect_value(t, m_dn, "New message from Alice \u2014 run './.heimdall/bin/ham-ctl agent chat read' to view.")
+	testing.expect_value(t, m_dn, "New message from Alice \u2014 run './.heimdall/bin/ham-ctl chat read' to view.")
 	// blank sender defaults to "user"
 	m2 := bridge_pty_host_message_notice("  ")
 	defer delete(m2)
