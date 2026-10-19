@@ -1,5 +1,5 @@
-// T10 (REQ-T10-3/4): a pane on a LOCKED bridge shows one shared overlay with an
-// "Unlock vault" button, refuses input, and resumes after the unseal. The pure state
+// T10 (REQ-T10-3/4): a pane on a bridge awaiting the vault key shows one shared
+// overlay (text only: no unlock action), refuses input, and resumes after the unseal. The pure state
 // lives in src/ui/utils/vaultLockedError.ts; the React wiring is pinned as source text
 // (a .tsx component cannot be rendered under node --test in this repo).
 //
@@ -13,7 +13,6 @@ import {
   VAULT_LOCKED_OVERLAY_MESSAGE,
   VAULT_LOCKED_SETTINGS_DESCRIPTION,
   VAULT_LOCKED_SHELL_START_MESSAGE,
-  VAULT_LOCKED_UNLOCK_LABEL,
   isPaneVaultLocked,
   isVaultLockedError,
   paneVaultLockedDetail,
@@ -119,7 +118,7 @@ test('a signal with no known row yet behaves like the stale-open race', () => {
   assert.equal(isPaneVaultLocked(st, 'Unlocked'), true);
 });
 
-test('completing the unseal from the overlay clears the signal', () => {
+test('a completed key delivery clears the signal', () => {
   const st = after({ type: 'signal', bridgeStatus: 'Unlocked' }, { type: 'unsealed' });
   assert.equal(isPaneVaultLocked(st, 'Unlocked'), false);
   assert.equal(isPaneVaultLocked(st, 'Locked'), true, 'the row still wins until the bridge reports');
@@ -136,9 +135,8 @@ test('resume fires only on the locked -> unlocked edge', () => {
 // REQ-T10-4: one wording.
 // ---------------------------------------------------------------------------
 
-test('every locked surface opens with the same headline, including the hub 423 message', () => {
-  assert.equal(VAULT_LOCKED_OVERLAY_MESSAGE, "This bridge's vault is locked. Input is disabled until it is unsealed.");
-  assert.equal(VAULT_LOCKED_UNLOCK_LABEL, 'Unlock vault');
+test('every awaiting-key surface opens with the same headline', () => {
+  assert.equal(VAULT_LOCKED_OVERLAY_MESSAGE, 'This bridge is awaiting the vault key. Input is disabled until an approved device delivers it (Settings → Devices).');
   for (const m of [VAULT_LOCKED_OVERLAY_MESSAGE, VAULT_LOCKED_SHELL_START_MESSAGE, VAULT_LOCKED_SETTINGS_DESCRIPTION]) {
     assert.ok(m.startsWith(VAULT_LOCKED_HEADLINE), m);
   }

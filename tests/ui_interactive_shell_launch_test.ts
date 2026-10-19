@@ -10,7 +10,18 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import React from 'react';
-import { makeVaultStore } from './helpers/vaultEndpointHarness.ts';
+import { makeVaultStore, unlockVault } from './helpers/vaultEndpointHarness.ts';
+
+const SHELL_TEST_KEY = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+const BOOT_ID = 'b0'.repeat(16);
+/** The bridge's unseal record: createShell binds enc_spec to its announced boot id. */
+const publicKeyBody = { data: { unseal_boot_id: BOOT_ID } };
+
+/** Sealing the spec is async WebCrypto work: poll for the effect instead of a fixed sleep. */
+async function until(pred: () => boolean, ms = 5000): Promise<void> {
+  const end = Date.now() + ms;
+  while (!pred() && Date.now() < end) await new Promise((resolve) => setTimeout(resolve, 10));
+}
 import {
   buildInteractiveShellRequest,
   resolveProjectBridgeShellCwd,
@@ -131,7 +142,7 @@ test('successful auto-start creates once and reports the real session for tab re
         json: async () => body,
       } as any;
     }
-    const body = { data: { sessions: [] } };
+    const body = url.includes('/bridges/bridge-a/public-key') ? publicKeyBody : { data: { sessions: [] } };
     return {
       ok: true,
       status: 200,
@@ -143,6 +154,7 @@ test('successful auto-start creates once and reports the real session for tab re
 
   const rekeys: Array<{ tabId: string; content: Record<string, unknown> }> = [];
   const store = await makeVaultStore();
+  await unlockVault(store, SHELL_TEST_KEY);
   const root = createRoot(dom.window.document.getElementById('root')!);
   const ctx = {
     agentInstanceId: 'agent-a', conversationId: '', title: 'A', chainId: 'chain-a', projectId: 'project-a',
@@ -168,6 +180,9 @@ test('successful auto-start creates once and reports the real session for tab re
       );
       await new Promise((resolve) => setTimeout(resolve, 50));
     });
+    // React flushes the effect's async work once act returns; wait for it, then flush.
+    await until(() => rekeys.length > 0);
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
 
     assert.equal(postCount, 1, 'auto-start must issue exactly one shell creation request');
     assert.deepEqual(rekeys, [{
@@ -177,6 +192,7 @@ test('successful auto-start creates once and reports the real session for tab re
   } finally {
     await act(async () => root.unmount());
     store.dispatch(heimdallApi.util.resetApiState());
+    (await import('../src/ui/utils/vaultCrypto.ts')).setActiveVaultKey(null);
     dom.window.close();
     (globalThis as any).window = previousWindow;
     (globalThis as any).document = previousDocument;
@@ -226,7 +242,7 @@ test('auto-start attempts once and exposes an explicit retry after failure', asy
         json: async () => body,
       } as any;
     }
-    const body = { data: { sessions: [] } };
+    const body = url.includes('/bridges/bridge-a/public-key') ? publicKeyBody : { data: { sessions: [] } };
     return {
       ok: true,
       status: 200,
@@ -237,6 +253,7 @@ test('auto-start attempts once and exposes an explicit retry after failure', asy
   };
 
   const store = await makeVaultStore();
+  await unlockVault(store, SHELL_TEST_KEY);
   const root = createRoot(dom.window.document.getElementById('root')!);
   const renderPane = (cwdReady: boolean) => React.createElement(
     Provider,
@@ -261,14 +278,23 @@ test('auto-start attempts once and exposes an explicit retry after failure', asy
       root.render(renderPane(true));
       await new Promise((resolve) => setTimeout(resolve, 50));
     });
+    // React flushes the effect's async work once act returns; wait for it, then flush.
+    await until(() => Boolean(dom.window.document.querySelector('[data-debug-id="workbench-shell-auto-retry-btn"]')));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
 
     assert.equal(posts.length, 1, 'initial render must issue exactly one shell start');
-    assert.deepEqual(posts[0], {
+    const { enc_spec, session_id, ...plain } = posts[0] as Record<string, any>;
+    assert.deepEqual(plain, {
       kind: 'shell',
       cwd: '/srv/project-a',
       chain_id: 'chain-a',
       project_id: 'project-a',
     });
+    const { decryptVaultText } = await import('../src/ui/utils/vaultCrypto.ts');
+    const spec = JSON.parse(await decryptVaultText(String(enc_spec)));
+    assert.equal(spec.cwd, '/srv/project-a', 'the bridge takes cwd from the sealed spec');
+    assert.equal(spec.cmd, '', 'no command: the login shell');
+    assert.deepEqual([spec.bridge_id, spec.session_id, spec.kind, spec.boot_id], ['bridge-a', session_id, 'shell', BOOT_ID]);
     const retry = dom.window.document.querySelector(
       '[data-debug-id="workbench-shell-auto-retry-btn"]',
     ) as HTMLButtonElement | null;
@@ -278,10 +304,14 @@ test('auto-start attempts once and exposes an explicit retry after failure', asy
       retry.click();
       await new Promise((resolve) => setTimeout(resolve, 50));
     });
+    // React flushes the effect's async work once act returns; wait for it, then flush.
+    await until(() => posts.length >= 2);
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
     assert.equal(posts.length, 2, 'retry must make one additional shell start request');
   } finally {
     await act(async () => root.unmount());
     store.dispatch(heimdallApi.util.resetApiState());
+    (await import('../src/ui/utils/vaultCrypto.ts')).setActiveVaultKey(null);
     dom.window.close();
     (globalThis as any).window = previousWindow;
     (globalThis as any).document = previousDocument;
