@@ -76,10 +76,10 @@ const q = { subscribe: false, forceRefetch: true };
 
 // ---- Section 2: readProjectFile decryption ----------------------------------
 
-test('readProjectFile: transparently decrypts vault:v2:e1: content when the vault is unlocked', async () => {
+test('readProjectFile: transparently decrypts vault:v2:7e57000000000001:e1: content when the vault is unlocked', async () => {
   const secretFileText = 'DATABASE_URL="postgres://admin:supersecret@db:5432/main"\nJWT_SECRET="xyz-token"';
   const armoredCiphertext = await encryptVaultText(secretFileText, TEST_KEY_HEX);
-  assert.ok(isVaultArmored(armoredCiphertext), 'fixture ciphertext must start with vault:v2:e1:');
+  assert.ok(isVaultArmored(armoredCiphertext), 'fixture ciphertext must start with vault:v2:7e57000000000001:e1:');
 
   const store = await freshStore();
   await unlockVault(store, TEST_KEY_HEX_RAW);
@@ -158,7 +158,7 @@ test('writeProjectFile: seals content for the target bridge and exact path', asy
   const store = await freshStore();
   await unlockVault(store, TEST_KEY_HEX_RAW);
   cap.reset();
-  cap.setNextResponse({ ok: true });
+  cap.setNextResponse({ ok: true, root: '/srv/proj_test' });
 
   const res = await store.dispatch(
     endpoints.writeProjectFile.initiate({ projectId: 'proj_test', bridgeId: 'brg_test', path: 'secrets/prod.env', content: plainContent }),
@@ -169,9 +169,9 @@ test('writeProjectFile: seals content for the target bridge and exact path', asy
   assert.ok(isVaultArmored(wire.body.content), 'wire content must be armored');
   assert.ok(!String(wire.body.content).includes('wJalrXUtnFEMI'), 'plaintext secret must NOT appear on the wire');
   assert.equal(wire.body.path, 'secrets/prod.env', 'the path is metadata and stays plaintext');
-  assert.equal(await openFsWriteContent(wire.body.content, 'brg_test', 'secrets/prod.env', TEST_KEY_HEX), plainContent);
-  await assert.rejects(openFsWriteContent(wire.body.content, 'brg_test', 'secrets/other.env', TEST_KEY_HEX), 'bound to the path');
-  await assert.rejects(openFsWriteContent(wire.body.content, 'brg_other', 'secrets/prod.env', TEST_KEY_HEX), 'bound to the bridge');
+  assert.equal(await openFsWriteContent(wire.body.content, 'brg_test', '/srv/proj_test', 'secrets/prod.env', TEST_KEY_HEX), plainContent);
+  await assert.rejects(openFsWriteContent(wire.body.content, 'brg_test', '/srv/proj_test', 'secrets/other.env', TEST_KEY_HEX), 'bound to the path');
+  await assert.rejects(openFsWriteContent(wire.body.content, 'brg_other', '/srv/proj_test', 'secrets/prod.env', TEST_KEY_HEX), 'bound to the bridge');
   await assert.rejects(decryptVaultText(wire.body.content, TEST_KEY_HEX), 'not a content envelope');
   await lockVaultFully(store);
 });
@@ -201,7 +201,7 @@ test('batchWriteProjectFiles: seals every file for its own path', async () => {
   const store = await freshStore();
   await unlockVault(store, TEST_KEY_HEX_RAW);
   cap.reset();
-  cap.setNextResponse({ ok: true });
+  cap.setNextResponse({ ok: true, root: '/srv/proj_test' });
 
   const res = await store.dispatch(endpoints.batchWriteProjectFiles.initiate({ projectId: 'proj_test', bridgeId: 'brg_test', files }));
   assert.ok(!res?.error, `batchWriteProjectFiles errored: ${JSON.stringify(res?.error)}`);
@@ -211,7 +211,7 @@ test('batchWriteProjectFiles: seals every file for its own path', async () => {
   for (let i = 0; i < files.length; i++) {
     const sent = wire.body.files[i];
     assert.equal(sent.path, files[i].path);
-    assert.equal(await openFsWriteContent(sent.content, 'brg_test', files[i].path, TEST_KEY_HEX), files[i].content);
+    assert.equal(await openFsWriteContent(sent.content, 'brg_test', '/srv/proj_test', files[i].path, TEST_KEY_HEX), files[i].content);
   }
   await lockVaultFully(store);
 });

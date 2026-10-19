@@ -18,7 +18,7 @@ const OTHER_KEY_HEX = await keyringFromHex(OTHER_KEY_HEX_RAW);
 test('armored body copies as plaintext when the vault is unlocked', async () => {
   const key = await keyringFromHex(TEST_KEY_HEX_RAW);
   const body = await encryptVaultText('hello **world**', key);
-  assert.ok(body.startsWith('vault:v2:e1:'));
+  assert.ok(body.startsWith('vault:v2:7e57000000000001:e1:'));
   assert.equal(await resolveCopyableVaultText(body, key), 'hello **world**');
 });
 
@@ -35,7 +35,7 @@ test('locked vault copies placeholders, never ciphertext', async () => {
   const embedded = `see ${armored} here`;
   for (const body of [armored, embedded]) {
     const out = await resolveCopyableVaultText(body, null);
-    assert.ok(!out.includes('vault:v2:e1:'), `ciphertext leaked: ${out}`);
+    assert.ok(!out.includes('vault:v2:7e57000000000001:e1:'), `ciphertext leaked: ${out}`);
     assert.ok(out.includes(VAULT_MASK_PLACEHOLDER));
   }
 });
@@ -46,7 +46,7 @@ test('wrong key copies placeholders, never ciphertext', async () => {
   const armored = await encryptVaultText('top secret', key);
   for (const body of [armored, `x ${armored} y`]) {
     const out = await resolveCopyableVaultText(body, other);
-    assert.ok(!out.includes('vault:v2:e1:'), `ciphertext leaked: ${out}`);
+    assert.ok(!out.includes('vault:v2:7e57000000000001:e1:'), `ciphertext leaked: ${out}`);
     assert.ok(out.includes(VAULT_MASK_PLACEHOLDER));
   }
 });

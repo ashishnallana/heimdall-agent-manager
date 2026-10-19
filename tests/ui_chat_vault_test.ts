@@ -41,7 +41,7 @@ test('encryptChatFields encrypts message body when key is provided', async () =>
 
   assert.equal(encrypted.author, 'user', 'author metadata must remain unaltered');
   assert.ok(encrypted.body !== origBody, 'body must not leak plaintext');
-  assert.ok(isVaultArmored(encrypted.body), 'body must start with vault:v2:e1:');
+  assert.ok(isVaultArmored(encrypted.body), 'body must start with vault:v2:7e57000000000001:e1:');
 
   // Round-trip decrypt
   const decrypted = await decryptChatMessage(encrypted, TEST_KEY_HEX);
@@ -214,7 +214,7 @@ test('embedded ciphertext tokens in message bodies and sender-prefixed previews 
   const decryptedMsg = await decryptChatMessage(embeddedMsg, TEST_KEY_HEX);
   assert.equal(decryptedMsg.body, `Execution report: ${secretBody} (verified).`);
 
-  // Sender-prefixed preview: "You: vault:v2:e1:..."
+  // Sender-prefixed preview: "You: vault:v2:7e57000000000001:e1:..."
   const convWithPrefix = {
     conversationId: 'chat_prefix',
     title: 'Deployment Chat',

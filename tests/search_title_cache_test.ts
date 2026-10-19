@@ -99,7 +99,7 @@ test('upsertChainTitle adds new entry and updates existing without losing proper
     state,
     upsertChainTitle({
       id: 'chain_1',
-      rawTitle: 'vault:v2:e1:abc',
+      rawTitle: 'vault:v2:7e57000000000001:e1:abc',
       decryptedTitle: 'Decrypted Chain 1',
       projectId: 'proj_1',
       status: 'in_progress',
@@ -110,7 +110,7 @@ test('upsertChainTitle adds new entry and updates existing without losing proper
   assert.ok(state.chains['chain_1']);
   assert.equal(state.chains['chain_1'].id, 'chain_1');
   assert.equal(state.chains['chain_1'].type, 'chain');
-  assert.equal(state.chains['chain_1'].rawTitle, 'vault:v2:e1:abc');
+  assert.equal(state.chains['chain_1'].rawTitle, 'vault:v2:7e57000000000001:e1:abc');
   assert.equal(state.chains['chain_1'].decryptedTitle, 'Decrypted Chain 1');
   assert.equal(state.chains['chain_1'].projectId, 'proj_1');
   assert.equal(state.chains['chain_1'].status, 'in_progress');
@@ -120,7 +120,7 @@ test('upsertChainTitle adds new entry and updates existing without losing proper
     state,
     upsertChainTitle({
       id: 'chain_1',
-      rawTitle: 'vault:v2:e1:abc',
+      rawTitle: 'vault:v2:7e57000000000001:e1:abc',
       status: 'completed',
     }),
   );
@@ -150,7 +150,7 @@ test('upsertConversationTitle adds and updates conversation search entries', () 
     state,
     upsertConversationTitle({
       id: 'chat_1',
-      rawTitle: 'vault:v2:e1:xyz',
+      rawTitle: 'vault:v2:7e57000000000001:e1:xyz',
       decryptedTitle: 'Direct Agent Chat',
       projectId: 'proj_1',
       updatedAt: '2026-09-26T12:05:00Z',
@@ -427,7 +427,7 @@ test('Full Store: encrypted resource_changed decrypts via the active CryptoKey a
   // Install the key the PRODUCTION way so the background decryption in
   // wsInvalidation.ts:380 can resolve it. This used to call writeSessionVaultKey(hex),
   // which is now a hardened no-op -- the test therefore asserted a decrypted title while
-  // the store legitimately held `vault:v2:e1:...`, i.e. it was failing for the mechanism and
+  // the store legitimately held `vault:v2:7e57000000000001:e1:...`, i.e. it was failing for the mechanism and
   // not for the behaviour under test (REQ-VAULT-HARDEN-1, REQ-RAWKEY-A8).
   setActiveVaultKey(await keyringFromHex(TEST_KEY_HEX_RAW), null);
 

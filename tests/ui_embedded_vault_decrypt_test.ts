@@ -27,7 +27,7 @@ import {
   VAULT_ARMOR_PREFIX,
 } from '../src/ui/utils/vaultContent.ts';
 
-test('containsVaultArmored accurately detects embedded and standalone vault:v2:e1:... tokens', async () => {
+test('containsVaultArmored accurately detects embedded and standalone vault:v2:7e57000000000001:e1:... tokens', async () => {
   const secret = 'Confidential Token Data';
   const armored = await encryptVaultText(secret, TEST_KEY_HEX);
 
@@ -48,7 +48,7 @@ test('containsVaultArmored accurately detects embedded and standalone vault:v2:e
   assert.equal(containsVaultArmored('Completely plain text without armor'), false);
   assert.equal(containsVaultArmored('vault:v2:unsupported-version-data'), false);
   assert.equal(containsVaultArmored('vault:'), false);
-  assert.equal(containsVaultArmored('vault:v2:e1:'), false);
+  assert.equal(containsVaultArmored('vault:v2:7e57000000000001:e1:'), false);
   assert.equal(containsVaultArmored(''), false);
   assert.equal(containsVaultArmored(null), false);
   assert.equal(containsVaultArmored(undefined), false);
@@ -506,7 +506,7 @@ test('embedded vault decryption is a no-op without an active key, touching no Su
     '../src/ui/utils/vaultContent.ts'
   );
 
-  const armored = 'Task note: vault:v2:e1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA= end.';
+  const armored = 'Task note: vault:v2:7e57000000000001:e1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA= end.';
   assert.equal(containsVaultArmored(armored), true, 'fixture must contain an armored token');
 
   // Simulate the unsupported context: crypto present, subtle absent, no unlocked key.

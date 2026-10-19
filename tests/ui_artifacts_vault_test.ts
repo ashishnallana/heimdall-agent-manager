@@ -81,10 +81,10 @@ test('Locked vault preserves armored strings without errors', async () => {
 });
 
 // -----------------------------------------------------------------------------
-// Test 4: encryptArtifactFields encrypts name, description, and content into vault:v2:e1:...
+// Test 4: encryptArtifactFields encrypts name, description, and content into vault:v2:7e57000000000001:e1:...
 // -----------------------------------------------------------------------------
 
-test('encryptArtifactFields encrypts name, description, and content into vault:v2:e1:<base64> when unlocked', async () => {
+test('encryptArtifactFields encrypts name, description, and content into vault:v2:7e57000000000001:e1:<base64> when unlocked', async () => {
   const payload = {
     name: 'security-audit-report.md',
     description: 'Comprehensive pen-test report for authentication gateway',

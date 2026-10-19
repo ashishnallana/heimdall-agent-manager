@@ -333,9 +333,9 @@ test('deck: task card, tab switch, keyboard approve is deferred and undoable', a
 });
 
 test('deck: locked vault shows the lock placeholder instead of ciphertext', async () => {
-  const cipherTitle = 'vault:v2:e1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+  const cipherTitle = 'vault:v2:7e57000000000001:e1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
   await withDeck([taskItem('c', { title: cipherTitle })], async ({ text, q }) => {
-    assert.doesNotMatch(text(), /vault:v2:e1:/, 'ciphertext is never painted');
+    assert.doesNotMatch(text(), /vault:v2:7e57000000000001:e1:/, 'ciphertext is never painted');
     assert.ok(q('[data-debug-id="vault-locked-placeholder"]'), 'lock placeholder shown');
   });
 });
@@ -350,7 +350,7 @@ test('deck: unlocked vault decrypts the card title and excerpt', async () => {
     await act(async () => { await new Promise((r) => setTimeout(r, 80)); });
     assert.match(text(), /Secret review title/);
     assert.match(text(), /Secret excerpt body/);
-    assert.doesNotMatch(text(), /vault:v2:e1:/);
+    assert.doesNotMatch(text(), /vault:v2:7e57000000000001:e1:/);
   }, { unlocked: true });
 });
 

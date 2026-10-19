@@ -280,7 +280,7 @@ class SimBridge {
       for (const e of parsed.entries) e.key.fill(0);
       if (parsed.currentEpoch !== payload.current_epoch) throw new Error('epoch mismatch');
       const root = await verifyBridgeChainProof(payload.chain_proof, await keyringCommits(plain, ownerUserId), {
-        ownerUserId, bridgeIdentityPub: this.identity.signPub, pinnedRootSignPub: this.pinnedRoot,
+        ownerUserId, bridgeIdentityPub: this.identity.signPub, pinnedRootSignPub: this.pinnedRoot, keyringVaultId: parsed.vaultId,
       });
       // First unseal (no pinned root): only with a pair_mac under this bridge's pairing
       // code over its approval + the root (mirror of the Odin bridge's first-pin check).
@@ -419,7 +419,7 @@ async function main() {
       await S.B.setKeyring(bytes);
       S.e1FromA = await encryptVaultText('secret from A @e1', S.A.keyring);
       S.e1FromB = await encryptVaultText('secret from B @e1', S.B.keyring);
-      expect(S.e1FromA.startsWith('vault:v2:e1:') && S.e1FromB.startsWith('vault:v2:e1:'), 'both seal v2 content under e1');
+      expect(S.e1FromA.startsWith(`vault:v2:${vb.chain.vaultId}:e1:`) && S.e1FromB.startsWith(`vault:v2:${vb.chain.vaultId}:e1:`), 'both seal v2 content under e1, naming the vault');
       expect(await decryptVaultText(S.e1FromA, S.B.keyring) === 'secret from A @e1', 'B decrypts A\'s content');
       expect(await decryptVaultText(S.e1FromB, S.A.keyring) === 'secret from B @e1', 'A decrypts B\'s content');
     });
@@ -552,7 +552,7 @@ async function main() {
       const bMut = await signedCall(S.B, ALICE, S.uid, 'POST', `/api/v1/vault/devices/${S.A.id}/revoke`, { expected_version: after.chain.version, wraps: [] });
       expect(bMut.status === 403, `revoked B cannot sign a mutation (${bMut.status})`);
       const e2 = await encryptVaultText('secret from A @e2', S.A.keyring);
-      expect(e2.startsWith('vault:v2:e2:'), 'new content is sealed under e2');
+      expect(e2.startsWith(`vault:v2:${after.chain.vaultId}:e2:`), 'new content is sealed under e2');
       expect(await decryptVaultText(e2, S.A.keyring) === 'secret from A @e2' && await decryptVaultText(S.e1FromB, S.A.keyring) === 'secret from B @e1', 'A reads e1 and e2');
       expect(await decryptVaultText(e2, S.B.keyring) === VAULT_LOCKED_MARKER, 'B (old keyring) sees e2 as locked');
       // Re-unseal the bridge with the e2 keyring (what the P3 revoke flow does).

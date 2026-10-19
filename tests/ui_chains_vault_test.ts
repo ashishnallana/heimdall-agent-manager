@@ -42,8 +42,8 @@ test('encryptChainFields encrypts title and description when vault key is provid
 
   const encrypted = await encryptChainFields(plainChain, TEST_KEY_HEX);
 
-  assert.ok(isVaultArmored(encrypted.title), 'Chain title must have vault:v2:e1: armor');
-  assert.ok(isVaultArmored(encrypted.description), 'Chain description must have vault:v2:e1: armor');
+  assert.ok(isVaultArmored(encrypted.title), 'Chain title must have vault:v2:7e57000000000001:e1: armor');
+  assert.ok(isVaultArmored(encrypted.description), 'Chain description must have vault:v2:7e57000000000001:e1: armor');
   assert.notEqual(encrypted.title, plainChain.title);
   assert.notEqual(encrypted.description, plainChain.description);
   assert.equal(encrypted.kind, 'team_work');

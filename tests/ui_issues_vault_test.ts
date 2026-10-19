@@ -110,10 +110,10 @@ test('<VaultText /> decrypts and renders plaintext when vault is unlocked', asyn
 });
 
 // -----------------------------------------------------------------------------
-// Test 5: Issue creation encrypts title and description into 'vault:v2:e1:<base64>' when vault is unlocked
+// Test 5: Issue creation encrypts title and description into 'vault:v2:7e57000000000001:e1:<base64>' when vault is unlocked
 // -----------------------------------------------------------------------------
 
-test('Issue creation encrypts title and description into "vault:v2:e1:<base64>" when vault is unlocked', async () => {
+test('Issue creation encrypts title and description into "vault:v2:7e57000000000001:e1:<base64>" when vault is unlocked', async () => {
   const rawIssuePayload = {
     title: 'Kernel deadlock on sqlite busy timeout',
     description: 'Stack trace details with sensitive environment variables:\nAPI_KEY=secret_123',
@@ -128,19 +128,19 @@ test('Issue creation encrypts title and description into "vault:v2:e1:<base64>" 
   // Title and description must be armored
   assert.ok(
     isVaultArmored(encryptedPayload.title),
-    'Title must be armored with vault:v2:e1: prefix',
+    'Title must be armored with vault:v2:7e57000000000001:e1: prefix',
   );
   assert.ok(
     isVaultArmored(encryptedPayload.description),
-    'Description must be armored with vault:v2:e1: prefix',
+    'Description must be armored with vault:v2:7e57000000000001:e1: prefix',
   );
   assert.ok(
     encryptedPayload.title.startsWith(VAULT_ARMOR_PREFIX),
-    'Title must start with vault:v2:e1:',
+    'Title must start with vault:v2:7e57000000000001:e1:',
   );
   assert.ok(
     encryptedPayload.description.startsWith(VAULT_ARMOR_PREFIX),
-    'Description must start with vault:v2:e1:',
+    'Description must start with vault:v2:7e57000000000001:e1:',
   );
 
   // Plaintext must not leak into armored payload
@@ -164,10 +164,10 @@ test('Issue creation encrypts title and description into "vault:v2:e1:<base64>" 
 });
 
 // -----------------------------------------------------------------------------
-// Test 6: Issue comment creation encrypts comment body into 'vault:v2:e1:<base64>' when vault is unlocked
+// Test 6: Issue comment creation encrypts comment body into 'vault:v2:7e57000000000001:e1:<base64>' when vault is unlocked
 // -----------------------------------------------------------------------------
 
-test('Issue comment creation encrypts comment body into "vault:v2:e1:<base64>" when vault is unlocked', async () => {
+test('Issue comment creation encrypts comment body into "vault:v2:7e57000000000001:e1:<base64>" when vault is unlocked', async () => {
   const commentPayload = {
     issueId: 'iss_123',
     body: 'Investigated: reproduction confirmed with gdb stack trace attached.',
@@ -179,11 +179,11 @@ test('Issue comment creation encrypts comment body into "vault:v2:e1:<base64>" w
   const encryptedComment = await encryptCommentFields(commentPayload, TEST_KEY_HEX);
   assert.ok(
     isVaultArmored(encryptedComment.body),
-    'Comment body must be armored with vault:v2:e1: prefix',
+    'Comment body must be armored with vault:v2:7e57000000000001:e1: prefix',
   );
   assert.ok(
     encryptedComment.body.startsWith(VAULT_ARMOR_PREFIX),
-    'Comment body must start with vault:v2:e1:',
+    'Comment body must start with vault:v2:7e57000000000001:e1:',
   );
   assert.ok(!encryptedComment.body.includes('Investigated'));
 
