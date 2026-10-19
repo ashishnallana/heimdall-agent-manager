@@ -203,9 +203,15 @@ agent_action_work_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	auth, inst, ok, resp := require_instance_action_auth(h, req)
 	if !ok do return resp
 	params := verbatim_params(req.body)
+	action := path_part(req.path, 5)
 	cid := json_string(params, "chain_id")
-	if cid == "" do cid = inst.chain_id
-	body, saved, err := mixed_work_dispatch(h.task_engine, h.taskchains, auth, domain.Task_Chain_ID(cid), path_part(req.path, 5), params)
+	if cid == "" {
+		// Completing a chain is destructive: require an explicit chain id rather
+		// than defaulting to the calling instance's chain.
+		if action == "complete" do return respond_error(domain.domain_error(.Validation_Failed, "chain_id is required to complete a chain"), req.request_id)
+		cid = inst.chain_id
+	}
+	body, saved, err := mixed_work_dispatch(h.task_engine, h.taskchains, auth, domain.Task_Chain_ID(cid), action, params)
 	if !saved do return respond_error(err, req.request_id)
 	return respond_success(body, req.request_id, auth_ctx_server_time(req))
 }

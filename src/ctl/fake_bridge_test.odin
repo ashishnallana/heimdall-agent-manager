@@ -39,9 +39,12 @@ fake_bridge_thread :: proc(data: rawptr) {
 			total += n
 			if strings.index_byte(string(buf[:total]), '\n') >= 0 do break
 		}
-		fb.req_len[fb.served] = total
-		_, _ = net.send_tcp(client, transmute([]byte)fb.responses[fb.served])
-		fb.served += 1
+		idx := fb.served
+		fb.req_len[idx] = total
+		// Count the request before replying: the client returns as soon as it
+		// reads the response, so incrementing afterwards races the test's check.
+		fb.served = idx + 1
+		_, _ = net.send_tcp(client, transmute([]byte)fb.responses[idx])
 		net.close(client)
 	}
 }
