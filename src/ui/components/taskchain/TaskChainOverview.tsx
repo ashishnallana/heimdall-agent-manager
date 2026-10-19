@@ -4,7 +4,8 @@ import { useFetchTaskChainDetailQuery, usePublishTaskChainMutation } from '../..
 import { useGetTaskChainFleetsQuery } from '../../api/endpoints/taskChains';
 import { useListBridgesQuery } from '../../api/endpoints/bridgeSupport';
 import { TicketBoardView } from '../tasks/TicketBoardView';
-import { WorkflowRunsReadOnly } from '../tasks/WorkflowRunsReadOnly';
+import { VaultText } from '../vault/VaultText';
+import { WorkflowPipelineView } from '../tasks/WorkflowPipelineView';
 import { useFetchChainWorkflowRunsQuery } from '../../api/endpoints/workflowRuns';
 import { CreateTaskModal } from '../tasks/CreateTaskModal';
 import { TaskBoardSkeleton } from '../tasks/TaskBoardSkeleton';
@@ -191,9 +192,6 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
       setPublishError(actionErrorMessage(err));
     }
   };
-  /* REQ-SHELL-6 §4: this chain's ACTIVE SERVERS, whoever started them. It sits in the chain
-     summary because `server` is CHAIN + BRIDGE scoped, and chain is in no other kind's scope
-     key (shell_session.odin:87-91). */
 
   return (
     <div
@@ -238,7 +236,24 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
             publishError={publishError}
             summaryText={chain.summary}
             hasWorkflowRuns={workflowRuns.length > 0}
-            workSlot={<WorkflowRunsReadOnly runs={workflowRuns} loading={workflowRunsQuery.isLoading || workflowRunsQuery.isFetching && !workflowRunsQuery.currentData} error={workflowRunsQuery.error} refresh={() => { void workflowRunsQuery.refetch(); }} focusTaskId={focusTaskId} />}
+            workSlot={
+              <div className="flex flex-col gap-4">
+                {workflowRunsQuery.error && <Text role="caption" tone="danger">Could not refresh workflows.</Text>}
+                {workflowRuns.map((run) => (
+                  <section key={run.run_id} data-debug-id={`workflow-run-card-${run.run_id}`} className="rounded-xl border border-subtle bg-surface">
+                    <div className="px-4 pt-4"><VaultText value={run.title || run.workflow_name} fallback="Untitled workflow" className="text-sm font-semibold text-primary" /><Badge tone="neutral">{run.status} ? Execution {run.execution_no}</Badge></div>
+                    <WorkflowPipelineView
+                      chainId={chainId} chain={chain} run={run}
+                      tasks={tasks.filter((task) => task.workflow_run_id === run.run_id && task.workflow_execution_no === run.execution_no)}
+                      names={names} chainFleets={fleets}
+                      expandedTaskId={openTaskId} onToggleTask={toggleTask} onSelectTask={expandTask}
+                      scrollTaskId={scrollTaskId} onScrolled={clearScroll}
+                    />
+                  </section>
+                ))}
+              </div>
+            }
+
           />
       </div>
 

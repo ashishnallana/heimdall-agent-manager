@@ -5,6 +5,7 @@ import { TaskSummaryBar } from './TaskSummaryBar';
 import { TaskCard } from './TaskCard';
 import { TaskBoardSkeleton } from './TaskBoardSkeleton';
 import { useCancelWorkflowMutation, useFetchWorkflowStatusQuery, useRetryWorkflowMutation } from '../../api/endpoints/tasks';
+import type { WorkflowRunView } from '../../api/endpoints/workflowRuns';
 import { normalizeTaskState } from './taskV2Types';
 import { EMPTY_TASK_NAMES, type TaskNames } from './taskNames';
 import { taskNeedsYou } from './taskActions';
@@ -13,6 +14,7 @@ import { actionErrorMessage } from './useTaskActions';
 export interface WorkflowPipelineViewProps {
   chainId: string;
   chain: any;
+  run?: WorkflowRunView;
   tasks: TaskWire[];
   chainFleets?: any[];
   /** The card expanded inline (plan REQ-UI-8). */
@@ -97,6 +99,7 @@ function StageNode({ status, gate, awaitingDecision }: { status: StageStatus; ga
 export const WorkflowPipelineView: React.FC<WorkflowPipelineViewProps> = ({
   chainId,
   chain,
+  run,
   tasks = [],
   chainFleets = [],
   expandedTaskId,
@@ -110,7 +113,8 @@ export const WorkflowPipelineView: React.FC<WorkflowPipelineViewProps> = ({
   names = EMPTY_TASK_NAMES,
   className = '',
 }) => {
-  const { data: workflowStatus, isLoading: loadingStatus } = useFetchWorkflowStatusQuery({ chainId });
+  const { data: legacyStatus, isLoading: loadingStatus } = useFetchWorkflowStatusQuery({ chainId }, { skip: Boolean(run) });
+  const workflowStatus = run || legacyStatus;
   const [retryWorkflow, retryState] = useRetryWorkflowMutation();
   const [cancelWorkflow, cancelState] = useCancelWorkflowMutation();
 
@@ -156,7 +160,7 @@ export const WorkflowPipelineView: React.FC<WorkflowPipelineViewProps> = ({
         menuItems={[
           ...(onOpenFleetDrawer ? [{ label: 'Fleet', onClick: onOpenFleetDrawer }] : []),
           ...(onOpenReviewRoles ? [{ label: 'Review roles', onClick: onOpenReviewRoles }] : []),
-          {
+          ...(!run ? [{
             label: 'Retry a stage…',
             debugId: 'workflow-retry-btn',
             disabled: stages.length === 0,
@@ -164,8 +168,8 @@ export const WorkflowPipelineView: React.FC<WorkflowPipelineViewProps> = ({
               setRetryStageKey(stages.find((st) => st.failed)?.key || stages[0]?.key || '');
               setRetryOpen(true);
             },
-          },
-          ...(running ? [{ label: 'Cancel run', danger: true, debugId: 'workflow-cancel-btn', disabled: cancelState.isLoading, onClick: () => void handleCancelRun() }] : []),
+          }] : []),
+          ...(!run && running ? [{ label: 'Cancel run', danger: true, debugId: 'workflow-cancel-btn', disabled: cancelState.isLoading, onClick: () => void handleCancelRun() }] : []),
         ]}
       />
       {error && (
@@ -194,7 +198,7 @@ export const WorkflowPipelineView: React.FC<WorkflowPipelineViewProps> = ({
           const awaitingDecision = isGate && inst.some(taskNeedsYou);
           const isOpen = !collapsed[st.key];
           const isLast = idx === stages.length - 1;
-          const title = renderStageTitle(st.title || st.key, workflowStatus?.inputs || {});
+          const title = renderStageTitle(st.title || st.key, (workflowStatus as any)?.inputs || {});
           // One task per stage: the card carries the title, so the stage row only
           // names the step instead of repeating it.
           const single = inst.length === 1;
@@ -221,6 +225,7 @@ export const WorkflowPipelineView: React.FC<WorkflowPipelineViewProps> = ({
               <div className="min-w-0 flex-1 space-y-2">
                 <button
                   type="button"
+                  data-debug-id={`workflow-stage-toggle-${run?.run_id || chainId}-${st.key}`}
                   aria-expanded={isOpen}
                   onClick={() => setCollapsed((prev) => ({ ...prev, [st.key]: isOpen }))}
                   className="flex min-h-6 w-full min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 rounded-sm text-left focus-visible:outline-none focus-visible:shadow-focus"
@@ -275,7 +280,7 @@ export const WorkflowPipelineView: React.FC<WorkflowPipelineViewProps> = ({
           <Select
             value={retryStageKey}
             onChange={setRetryStageKey}
-            options={stages.map((st) => ({ value: st.key, text: renderStageTitle(st.title || st.key, workflowStatus?.inputs || {}) }))}
+            options={stages.map((st) => ({ value: st.key, text: renderStageTitle(st.title || st.key, (workflowStatus as any)?.inputs || {}) }))}
             aria-label="Stage to retry"
             width="full"
           />
