@@ -9,7 +9,8 @@ import { legacyPathRouteHash } from './utils/appLocation';
 import { registerNotificationServiceWorker } from './services/notificationService';
 import { resubscribeOnLoad } from './services/pushSubscriptionService';
 import { selectNotificationsState } from './store/notificationsSlice';
-import { initializeVaultPersistence } from './store/vaultSlice';
+import { configureDeviceVault } from './services/deviceVault';
+import { bridgeUnsealTransport } from './api/endpoints/bridges';
 import { installAppViewportHeightSync } from './utils/appViewportHeight';
 import { ShortcutProvider } from './services/shortcuts/ShortcutContext';
 import { ChordHud } from './components/shortcuts/ChordHud';
@@ -63,31 +64,17 @@ void registerNotificationServiceWorker();
   void resubscribeOnLoad(settings.enabled, settings.permission === 'granted');
 }
 
-// Vault key rehydration (REQ-VAULT-HARDEN-2, wired for REQ-BVS-5).
-// THIS CALL IS LOAD-BEARING — DO NOT REMOVE IT AS "UNUSED".
-// `initializeVaultPersistence` is the ONLY code that restores the non-extractable
-// CryptoKey from IndexedDB back into the module-level `activeVaultCryptoKey` in
-// utils/vaultCrypto.ts. It shipped with ZERO production callers, so after any page
-// reload `getActiveVaultKey()` returned null even though the key was still sitting in
-// IndexedDB. The visible consequence: `createShell` (api/endpoints/shells.ts) omits
-// `enc_spec` entirely when there is no active key, and every vault-active bridge then
-// rejects shell creation with "unauthorized: missing or invalid vault enc_spec".
-//
-// It lives at module scope rather than in a component effect so it runs exactly once:
-// React StrictMode double-mounts components in dev, while this module is evaluated a
-// single time. The flag is parked on `globalThis` rather than in a module-local `let`
-// precisely because a module-local one would be re-initialised along with the module —
-// it guards the case a module-local cannot, namely a Vite HMR re-evaluation or a second
-// copy of this module being pulled in by a different import path.
-//
-// It must NEVER fabricate an unlocked state: when IndexedDB holds no key the function
-// dispatches nothing and resolves to null, leaving the app in exactly the state it is
-// in today. Failures are swallowed inside the function and logged; startup is never
-// blocked, hence `void`.
-const VAULT_REHYDRATION_FLAG = '__heimdallVaultRehydrationStarted';
-if (!(globalThis as any)[VAULT_REHYDRATION_FLAG]) {
-  (globalThis as any)[VAULT_REHYDRATION_FLAG] = true;
-  void initializeVaultPersistence(store.dispatch);
+// Passwordless vault device boot (docs/plans/passwordless-vault.md §2 P3). Replaces the
+// old password-key rehydration. Configured once at module scope (the flag survives a
+// Vite HMR re-evaluation): the device vault uses this browser's IndexedDB identity and
+// the real bridge transport. The boot itself needs the signed-in user, so AuthGate
+// calls bootDeviceVault(user) as soon as /api/v1/me answers; until then — and until
+// this device's keyring is verified and installed — DeviceVaultGate shows a gate
+// screen instead of any decrypted surface.
+const DEVICE_VAULT_FLAG = '__heimdallDeviceVaultConfigured';
+if (!(globalThis as any)[DEVICE_VAULT_FLAG]) {
+  (globalThis as any)[DEVICE_VAULT_FLAG] = true;
+  configureDeviceVault({ bridges: bridgeUnsealTransport });
 }
 
 ReactDOM.createRoot(document.getElementById('root')).render(

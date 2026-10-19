@@ -14,13 +14,9 @@ import {
   VAULT_ARMOR_PREFIX,
 } from '../src/ui/utils/vaultContent.ts';
 import vaultReducer, {
-  setVaultUnlocked,
-  lockVault,
-  openUnlockModal,
-  closeUnlockModal,
-  setUnlockModalOpen,
+  keyringInstalled,
+  keyringCleared,
   selectIsVaultUnlocked,
-  selectIsUnlockModalOpen,
 } from '../src/ui/store/vaultSlice.ts';
 import {
   resolveVaultText,
@@ -73,12 +69,6 @@ test('<VaultText /> renders interactive placeholder when vault is locked with da
   assert.equal(resolvedLocked.isLocked, true);
   assert.equal(resolvedLocked.dataDebugId, 'vault-locked-placeholder');
   assert.equal(resolvedLocked.displayText, 'Encrypted content');
-
-  // Redux state verification for openUnlockModal
-  let state = vaultReducer(undefined, { type: '@@INIT' });
-  assert.equal(selectIsUnlockModalOpen({ vault: state }), false);
-  state = vaultReducer(state, openUnlockModal());
-  assert.equal(selectIsUnlockModalOpen({ vault: state }), true);
 });
 
 // -----------------------------------------------------------------------------
@@ -308,36 +298,14 @@ test('Full round-trip encryption, decryption, and transformation of Issue record
 });
 
 // -----------------------------------------------------------------------------
-// Test 8: Redux state transitions for Vault Unlock Modal management
+// Test 8: Redux keyring state transitions (no unlock modal exists)
 // -----------------------------------------------------------------------------
 
-test('vaultSlice manages isUnlockModalOpen state and auto-resets on unlock and lock', () => {
+test('vaultSlice tracks only keyring installed / purged', () => {
   let state = vaultReducer(undefined, { type: '@@INIT' });
-  assert.equal(selectIsUnlockModalOpen({ vault: state }), false);
-
-  // openUnlockModal
-  state = vaultReducer(state, openUnlockModal());
-  assert.equal(selectIsUnlockModalOpen({ vault: state }), true);
-
-  // closeUnlockModal
-  state = vaultReducer(state, closeUnlockModal());
-  assert.equal(selectIsUnlockModalOpen({ vault: state }), false);
-
-  // setUnlockModalOpen(true / false)
-  state = vaultReducer(state, setUnlockModalOpen(true));
-  assert.equal(selectIsUnlockModalOpen({ vault: state }), true);
-  state = vaultReducer(state, setUnlockModalOpen(false));
-  assert.equal(selectIsUnlockModalOpen({ vault: state }), false);
-
-  // Opening modal then unlocking vault automatically closes unlock modal
-  state = vaultReducer(state, openUnlockModal());
-  assert.equal(selectIsUnlockModalOpen({ vault: state }), true);
-  state = vaultReducer(state, setVaultUnlocked(TEST_KEY_HEX_RAW));
-  assert.equal(selectIsVaultUnlocked({ vault: state }), true);
-  assert.equal(selectIsUnlockModalOpen({ vault: state }), false, 'Unlock must close unlock modal');
-
-  // Locking vault also ensures unlock modal is closed
-  state = vaultReducer(state, lockVault());
   assert.equal(selectIsVaultUnlocked({ vault: state }), false);
-  assert.equal(selectIsUnlockModalOpen({ vault: state }), false);
+  state = vaultReducer(state, keyringInstalled({ currentEpoch: 2 }));
+  assert.equal(selectIsVaultUnlocked({ vault: state }), true);
+  state = vaultReducer(state, keyringCleared());
+  assert.equal(selectIsVaultUnlocked({ vault: state }), false);
 });

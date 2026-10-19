@@ -7,12 +7,9 @@
 // anything is encrypted, the bridge's ephemeral ECDH key must carry a valid signature by
 // its identity key; otherwise nothing is sent.
 
-import {
-  bytesToHex,
-  generateNonceHex,
-  adapterKeyringBytesFromRawHex,
-} from './vaultCrypto.ts';
-import { parseKeyringBytes, isVaultKeyring, type VaultKeyring } from './vaultKeyring.ts';
+import { bytesToHex, generateNonceHex } from './vaultCrypto.ts';
+import { parseKeyringBytes } from './vaultKeyring.ts';
+import type { BridgeChainProof } from './vaultDirectoryVerify.ts';
 import {
   SIGN_ALG_ECDSA_P256_SHA256,
   bridgeUnsealKeyCanonical,
@@ -42,12 +39,19 @@ export interface BridgeUnsealPayload {
   /** Echo of the bridge's signature object over its ephemeral key. */
   unseal_key_signature: { alg: string; sig: string };
   bridge_identity_public_key: string;
+  /**
+   * Signed proof that the keyring comes from the account (plan §1 "Bridge keyring
+   * authentication"): root to pin (first unseal) / to match (later), the signed
+   * epoch statement for current_epoch, and its issuer's approval chain.
+   */
+  chain_proof: BridgeChainProof;
   [extra: string]: unknown;
 }
 
 /**
- * What the hub reports about a bridge's unseal key. P1 trusts the identity key as
- * served by the hub; P3 pins it through the signed approval chain.
+ * A bridge's current unseal key. `identityPublicKey` must be the identity key the
+ * signed directory chain approved for this bridge, never the hub's copy alone
+ * (see vaultBridgeDelivery.ts).
  */
 export interface BridgeUnsealTarget {
   bridgeId: string;
@@ -77,98 +81,6 @@ export interface UnsealOptions {
   /** Test vectors only: fixed IV and client key pair. */
   iv?: Uint8Array;
   clientKeyPair?: CryptoKeyPair;
-}
-
-/** Discriminator for `VaultKeyNotExportableError`, stable across module instances. */
-export const VAULT_KEY_NOT_EXPORTABLE = 'vault_key_not_exportable';
-
-/**
- * A bridge unseal was asked to wrap a `CryptoKey` whose raw bytes cannot be read.
- *
- * This is the EXPECTED outcome for a hardened key (REQ-VAULT-HARDEN-1) and for any
- * key restored from IndexedDB, not a malfunction -- the unseal protocol has to
- * transmit the master key itself, so a handle that cannot yield its bytes is simply
- * not usable key material. The caller's job is to obtain the key from the operator
- * and pass it in; it must never degrade to a weaker payload (REQ-UNSEAL-4).
- *
- * `code` is checked rather than `instanceof` because callers reach this module
- * through a dynamic `import()` and must not depend on sharing one class identity.
- */
-export class VaultKeyNotExportableError extends Error {
-  readonly code = VAULT_KEY_NOT_EXPORTABLE;
-
-  constructor() {
-    super(
-      'This browser holds the vault key as a non-extractable handle, which cannot be wrapped for a bridge. ' +
-        'Re-enter your master password to unseal this bridge.',
-    );
-    this.name = 'VaultKeyNotExportableError';
-  }
-}
-
-/** True when `err` is the not-exportable signal, across module instances. */
-export function isVaultKeyNotExportableError(err: unknown): boolean {
-  return Boolean(err) && (err as { code?: string }).code === VAULT_KEY_NOT_EXPORTABLE;
-}
-
-/**
- * What a completed unseal attempt actually did, as opposed to what the operator was
- * about to be told it did.
- *
- * REQ-UNSEAL-4/5: the UI must never report an unseal that did not happen. The case
- * that makes this worth a function rather than a chain of ternaries inline in the
- * panel is `targeted-bridge-missing`: the operator answers the password prompt raised
- * by ONE bridge row, and in the time they were typing that bridge left the list (the
- * poll refreshes it). Nothing is then attempted and nothing fails, so a "did anything
- * fail?" test sees a clean run and reports success for an unseal that was never built
- * or sent. That is a silent skip, which REQ-UNSEAL-4 forbids, so it is its own outcome
- * and the caller must say so explicitly.
- *
- * Lives here, not in the panel, for two reasons: it is unseal semantics rather than
- * presentation, and `node --test` cannot load `.tsx`, so a decision kept inline in the
- * component is a decision that cannot be tested at all.
- */
-export type UnsealOutcome =
-  /** The row the prompt was raised for is gone; nothing was attempted. */
-  | { kind: 'targeted-bridge-missing' }
-  /** At least one bridge took the payload. `count` is how many. */
-  | { kind: 'unsealed'; count: number }
-  /** Nothing succeeded and at least one bridge failed; the failures are reported. */
-  | { kind: 'failed' }
-  /** Nothing was targeted and nothing failed -- the vault is unlocked, nothing was sent. */
-  | { kind: 'dispatched' };
-
-export function resolveUnsealOutcome(args: {
-  /** The bridge row that raised the prompt, or null when it came from the bulk control. */
-  pendingUnsealBridgeId: string | null;
-  /** Whether that bridge is still present in the list at submit time. */
-  pendingBridgeFound: boolean;
-  unsealedCount: number;
-  failedCount: number;
-}): UnsealOutcome {
-  if (args.pendingUnsealBridgeId && !args.pendingBridgeFound) {
-    return { kind: 'targeted-bridge-missing' };
-  }
-  if (args.unsealedCount > 0) return { kind: 'unsealed', count: args.unsealedCount };
-  if (args.failedCount > 0) return { kind: 'failed' };
-  return { kind: 'dispatched' };
-}
-
-/**
- * Whether `vaultKey` can actually produce the bytes an unseal payload needs.
- *
- * Callers use this to decide whether to prompt the operator BEFORE starting any
- * network work, so the rule lives here next to the code that enforces it rather
- * than being re-derived (and drifting) in each UI surface.
- */
-export type UnsealKeyMaterial = string | CryptoKey | Uint8Array | VaultKeyring;
-
-export function canUnsealWithKey(vaultKey: UnsealKeyMaterial | null | undefined): boolean {
-  if (!vaultKey) return false;
-  if (typeof vaultKey === 'string') return vaultKey.trim().length > 0;
-  if (vaultKey instanceof Uint8Array) return vaultKey.length > 0;
-  if (isVaultKeyring(vaultKey)) return false; // holds only non-extractable keys
-  return vaultKey.extractable === true;
 }
 
 /** `heimdall-bridge-unseal-v2|<bridge_id>|<timestamp>|<nonce>|<current_epoch>` */
@@ -205,25 +117,6 @@ export async function verifyBridgeUnsealKey(target: BridgeUnsealTarget): Promise
 }
 
 /**
- * P1-TEMPORARY ADAPTER (deleted in P3): turn whatever key material a caller holds into
- * HKR1 keyring bytes. Hex and extractable keys come from the password vault and
- * become `{session user, epoch 1}`; a Uint8Array is taken to already be HKR1. A
- * non-extractable key or keyring cannot be wrapped and raises
- * VaultKeyNotExportableError, never a weaker payload.
- */
-export async function keyringBytesForUnseal(vaultKey: UnsealKeyMaterial): Promise<Uint8Array> {
-  if (typeof vaultKey === 'string') return adapterKeyringBytesFromRawHex(vaultKey);
-  if (vaultKey instanceof Uint8Array) return Uint8Array.from(vaultKey);
-  if (isVaultKeyring(vaultKey) || !vaultKey.extractable) throw new VaultKeyNotExportableError();
-  const raw = new Uint8Array(await crypto.subtle.exportKey('raw', vaultKey));
-  try {
-    return adapterKeyringBytesFromRawHex(bytesToHex(raw));
-  } finally {
-    raw.fill(0);
-  }
-}
-
-/**
  * Wrap a keyring for one bridge (Hub-blind E2EE): verify its signed ephemeral key,
  * then ECDH (fresh client key) -> HKDF-SHA256 -> AES-256-GCM over the HKR1 bytes with
  * the v2 AAD. `keyringBytes` is zeroed before this returns.
@@ -231,13 +124,16 @@ export async function keyringBytesForUnseal(vaultKey: UnsealKeyMaterial): Promis
 export async function prepareUnsealPayload(
   target: BridgeUnsealTarget,
   keyringBytes: Uint8Array,
+  chainProof: BridgeChainProof,
   options?: UnsealOptions,
 ): Promise<BridgeUnsealPayload> {
   try {
     await verifyBridgeUnsealKey(target);
-    const parsed = parseKeyringBytes(keyringBytes);
+    if (!chainProof || chainProof.v !== 1) throw new Error('Missing keyring chain proof; unseal refused');
+    const parsed = parseKeyringBytes(keyringBytes, chainProof.user_id);
     for (const e of parsed.entries) e.key.fill(0);
     const currentEpoch = parsed.currentEpoch;
+    if (chainProof.epoch.epoch !== currentEpoch) throw new Error('Chain proof is for a different epoch than the keyring; unseal refused');
 
     const publicKey = target.publicKey.trim().toLowerCase();
     const clientKeyPair = options?.clientKeyPair ?? await crypto.subtle.generateKey(
@@ -283,6 +179,7 @@ export async function prepareUnsealPayload(
       current_epoch: currentEpoch,
       unseal_key_signature: { alg: sig.alg, sig: sig.sig },
       bridge_identity_public_key: target.identityPublicKey.trim().toLowerCase(),
+      chain_proof: chainProof,
     };
   } finally {
     keyringBytes.fill(0);
@@ -299,17 +196,4 @@ export function bridgeUnsealTargetFromRecord(bridgeId: string, record: any): Bri
     identityPublicKey: String(record?.bridge_identity_public_key || ''),
     identitySignAlg: record?.bridge_identity_sign_alg ? String(record.bridge_identity_sign_alg) : undefined,
   };
-}
-
-/**
- * Executes the full E2EE bridge unseal workflow from the Web UI (REQ-VAULT-HARDEN-3).
- */
-export async function unsealBridgeE2EE(
-  target: BridgeUnsealTarget,
-  vaultKey: UnsealKeyMaterial,
-  dispatchFn: (bridgeId: string, payload: BridgeUnsealPayload) => Promise<BridgeUnsealResult>,
-  options?: UnsealOptions,
-): Promise<BridgeUnsealResult> {
-  const payload = await prepareUnsealPayload(target, await keyringBytesForUnseal(vaultKey), options);
-  return await dispatchFn(target.bridgeId, payload);
 }

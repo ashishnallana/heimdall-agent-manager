@@ -1,3 +1,4 @@
+import { importRawKeyHex } from './helpers/vaultTestKeyring.ts';
 import './helpers/vaultEndpointHarness.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -7,7 +8,6 @@ import * as xtermModule from '@xterm/xterm';
 import { PaneDeliveryQueue, normalizeSnapshotText, repaintCapturedScreenText } from '../src/ui/components/shells/paneDeliveryQueue.ts';
 import { encryptShellStreamPayload } from '../src/ui/components/shells/useShellStream.ts';
 import { PTY_WIRE_KIND_SCREEN, PtyTextDecoder, decodePtyViewerFrame, decryptPtyPayload } from '../src/ui/components/shells/ptyWire.ts';
-import { importRawKeyHex } from '../src/ui/utils/vaultCrypto.ts';
 
 // Run through scripts/test-pane-transport.sh, which builds the production fixture.
 const fixture = process.env.HEIMDALL_PANE_TEST_SERVER;

@@ -19,6 +19,7 @@ if (typeof (globalThis as any).window === 'undefined') {
   (globalThis as any).window.sessionStorage = fakeSessionStorage;
 }
 
+import { importRawKeyHex } from './helpers/vaultTestKeyring.ts';
 import { keyringFromHex } from './helpers/vaultTestKeyring.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -59,7 +60,6 @@ import {
 // sessionStorage route (writeSessionVaultKey / readSessionVaultKey) is hardened to a no-op,
 // so a fixture that writes the hex there installs nothing -- see the test at section 8.
 import {
-  importRawKeyHex,
   setActiveVaultKey,
 } from '../src/ui/utils/vaultCrypto.ts';
 

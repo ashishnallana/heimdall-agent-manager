@@ -1,18 +1,17 @@
 // Zero-Knowledge WebCrypto Vault Client Library
 // v2 content envelope (docs/plans/passwordless-vault.md §1), keyring-aware encrypt /
-// decrypt, BIP-39 recovery words, and the P1-temporary password-vault adapter.
+// decrypt, and BIP-39 recovery words (for the P4 recovery key).
 // The Odin twin of the envelope is src/lib/vault/envelope.odin; both are pinned by
 // tests/fixtures/vault_v2_vectors.json.
 // REQ-VAULT-HARDEN-1, REQ-VAULT-HARDEN-2
 
 import { BIP39_WORDS } from './bip39Words.ts';
 import { clearActiveTaskChainSearchKey } from './taskChainSearchKey.ts';
-import { ID_VALUE_RE, importPtyBaseKey, isVaultKeyring, serializeKeyringBytes, keyFor, currentKey, type PtyBaseKey, type VaultKeyring } from './vaultKeyring.ts';
+import { ID_VALUE_RE, isVaultKeyring, keyFor, currentKey, type VaultKeyring } from './vaultKeyring.ts';
 
 export type { VaultKeyring } from './vaultKeyring.ts';
 export { currentKey, keyFor } from './vaultKeyring.ts';
 
-export const DEFAULT_KDF_ITERATIONS = 100_000;
 export const AES_GCM_KEY_LENGTH = 256;
 export const AES_GCM_NONCE_BYTES = 12;
 export const AES_GCM_TAG_BYTES = 16;
@@ -47,150 +46,29 @@ export function findVaultTokens(text: string): string[] {
   return text.match(VAULT_TOKEN_RE) ?? [];
 }
 
-// ── Active keyring ──────────────────────────────────────────────────────────
+// -- Active keyring ----------------------------------------------------------
 //
-// P1-TEMPORARY ADAPTER (deleted in P3): the password vault still supplies a single
-// 256-bit key, presented to the rest of the app as the single-epoch keyring
-// {epoch 1}. The user id is the authenticated session's (`/api/v1/me`, recorded by
-// AppShell's AuthGate via setActiveVaultUserId). It is only needed to serialize the
-// HKR1 bytes a bridge receives; content encryption does not depend on it.
-let activePasswordVaultKey: CryptoKey | null = null;
+// Installed by vaultKeyringSession after this device's wrap was verified against the
+// signed directory chain and opened. Holds only non-extractable keys.
 let activeVaultKeyring: VaultKeyring | null = null;
-let activeVaultUserId = '';
-let activeBridgeVaultKeyHex: string | null = null;
-// P1 adapter: the PTY v2 HKDF base key for epoch 1 (or its pending import). It can only
-// be created while raw key material is in hand (unlock), or restored from IndexedDB.
-let activeAdapterPtyBaseKey: PtyBaseKey | null = null;
-// The adapter keyring's PTY base-key map. Mutable on purpose: a base key that arrives
-// after the keyring was built is added WITHOUT replacing the keyring object, so
-// identity-based checks elsewhere (`getActiveVaultKey() === keyring`) stay valid.
-let activeAdapterPtyBaseKeys: Map<number, PtyBaseKey> | null = null;
 
-function rebuildAdapterKeyring(): void {
-  if (!activePasswordVaultKey) return;
-  activeAdapterPtyBaseKeys = new Map();
-  if (activeAdapterPtyBaseKey) activeAdapterPtyBaseKeys.set(1, activeAdapterPtyBaseKey);
-  activeVaultKeyring = Object.freeze({
-    userId: activeVaultUserId,
-    currentEpoch: 1,
-    keys: new Map([[1, activePasswordVaultKey]]),
-    ptyBaseKeys: activeAdapterPtyBaseKeys,
-  });
-}
-
-function installAdapterPtyBaseKey(key: PtyBaseKey | null): void {
-  activeAdapterPtyBaseKey = key;
-  if (!activeAdapterPtyBaseKeys) return;
-  if (key) activeAdapterPtyBaseKeys.set(1, key);
-  else activeAdapterPtyBaseKeys.delete(1);
-}
-
-/**
- * P1 adapter: install the epoch-1 PTY v2 HKDF base key (e.g. restored from IndexedDB).
- * Ignored when a real keyring (which carries its own base keys) is active.
- */
-export function setActiveVaultPtyBaseKey(key: CryptoKey | null): void {
-  if (!activePasswordVaultKey) return;
-  installAdapterPtyBaseKey(key);
-}
-
-/** P1 adapter: the epoch-1 PTY base key, once its import (if any) has finished. */
-export async function getActiveVaultPtyBaseKey(): Promise<CryptoKey | null> {
-  const key = activeAdapterPtyBaseKey;
-  if (!key) return null;
-  try {
-    return await key;
-  } catch {
-    return null;
-  }
-}
-
-/** The active keyring, or null when the vault is locked. */
+/** The active keyring, or null until this device's keyring is installed. */
 export function getActiveVaultKey(): VaultKeyring | null {
   return activeVaultKeyring;
 }
 
-/** The authenticated user id the active keyring belongs to ('' until known). */
+/** The user id the active keyring belongs to ('' when none is installed). */
 export function getActiveVaultUserId(): string {
-  return activeVaultUserId;
+  return activeVaultKeyring?.userId ?? '';
 }
 
 /**
- * Record the authenticated user. A change of user purges every key held for the
- * previous one, so keys are never paired with another account's id.
+ * Install (or, with `null`, purge) the active vault keyring. Every replacement
+ * invalidates the derived search key of the previous keyring.
  */
-export function setActiveVaultUserId(userId: string | null | undefined): void {
-  const raw = String(userId || '').trim();
-  const clean = raw.length <= 64 && ID_VALUE_RE.test(raw) ? raw : '';
-  if (clean === activeVaultUserId) return;
-  if (activeVaultUserId) setActiveVaultKey(null);
-  activeVaultUserId = clean;
-  rebuildAdapterKeyring();
-}
-
-/**
- * P1 adapter material for bridge delivery: the raw password-vault key, retained in
- * memory only for an explicitly unlocked session. Never written to Redux or storage.
- */
-export function getActiveBridgeVaultKeyMaterial(): string | null {
-  return activeBridgeVaultKeyHex;
-}
-
-export function setActiveBridgeVaultKeyMaterial(rawHex: string | null): void {
-  const clean = String(rawHex || '').trim().toLowerCase();
-  activeBridgeVaultKeyHex = /^[0-9a-f]{64}$/.test(clean) ? clean : null;
-  // The raw key is in hand: derive the PTY v2 HKDF base key for the adapter's epoch 1.
-  if (activeBridgeVaultKeyHex && activePasswordVaultKey) {
-    const raw = hexToBytes(activeBridgeVaultKeyHex);
-    const pending: Promise<CryptoKey | null> = importPtyBaseKey(raw)
-      .catch(() => null)
-      .finally(() => raw.fill(0));
-    installAdapterPtyBaseKey(pending);
-    void pending.then((key) => {
-      if (activeAdapterPtyBaseKey === pending) installAdapterPtyBaseKey(key);
-    });
-  }
-}
-
-/**
- * P1 adapter: HKR1 bytes `{session user, epoch 1: raw key}` for a bridge unseal.
- * Throws when the session user is unknown -- a keyring is never built for a guessed
- * user. The caller owns (and must zero) the result.
- */
-export function adapterKeyringBytesFromRawHex(rawHex: string, userId: string = activeVaultUserId): Uint8Array {
-  const clean = String(rawHex || '').trim().toLowerCase();
-  if (!/^[0-9a-f]{64}$/.test(clean)) throw new Error('Invalid vault key material for bridge delivery');
-  if (!userId) throw new Error('Vault keyring unavailable: the signed-in user is not known yet');
-  const key = hexToBytes(clean);
-  try {
-    return serializeKeyringBytes({ userId, currentEpoch: 1, entries: [{ epoch: 1, key }] });
-  } finally {
-    key.fill(0);
-  }
-}
-
-/**
- * Install (or, with `null`, purge) the active vault keyring.
- *
- * P1 adapter: a bare CryptoKey is the password-vault key and becomes epoch 1. A
- * VaultKeyring is installed as-is. Every replacement invalidates bridge-delivery
- * material and the derived search key of the previous key.
- */
-export function setActiveVaultKey(key: CryptoKey | VaultKeyring | null): void {
-  if (key && isVaultKeyring(key)) {
-    activePasswordVaultKey = null;
-    activeVaultKeyring = key;
-  } else {
-    activePasswordVaultKey = (key as CryptoKey | null) ?? null;
-    activeVaultKeyring = null;
-    activeAdapterPtyBaseKey = null;
-    rebuildAdapterKeyring();
-  }
-  if (key && isVaultKeyring(key)) {
-    activeAdapterPtyBaseKey = null;
-    activeAdapterPtyBaseKeys = null;
-  }
-  activeBridgeVaultKeyHex = null;
+export function setActiveVaultKey(keyring: VaultKeyring | null): void {
+  if (keyring !== null && !isVaultKeyring(keyring)) throw new Error('setActiveVaultKey expects a VaultKeyring');
+  activeVaultKeyring = keyring;
   clearActiveTaskChainSearchKey();
 }
 
@@ -362,96 +240,6 @@ export function isVaultSupported(): boolean {
 }
 
 /**
- * Generate a new 256-bit symmetric AES-GCM Vault Key (KV).
- * Kept extractable during setup wizard so it can be wrapped into envelopes.
- */
-export async function generateVaultKey(): Promise<CryptoKey> {
-  return await crypto.subtle.generateKey(
-    { name: 'AES-GCM', length: AES_GCM_KEY_LENGTH },
-    true,
-    ['encrypt', 'decrypt'],
-  );
-}
-
-/**
- * Export raw key bytes as a 64-character lowercase hex string.
- * Calling this on a non-extractable key throws InvalidAccessError.
- */
-export async function exportRawKeyHex(key: CryptoKey): Promise<string> {
-  const raw = await crypto.subtle.exportKey('raw', key);
-  return bytesToHex(new Uint8Array(raw));
-}
-
-/**
- * Import a 256-bit AES-GCM key from a 64-character hex string.
- * By default imports with extractable: false (non-extractable) to prevent JS exfiltration (REQ-VAULT-HARDEN-1).
- * Immediately and securely wipes the transient byte buffer with .fill(0).
- */
-export async function importRawKeyHex(hex: string, extractable = false): Promise<CryptoKey> {
-  const bytes = hexToBytes(hex);
-  if (bytes.length !== VAULT_KEY_BYTES) {
-    bytes.fill(0);
-    throw new Error(
-      `Invalid vault key length: expected ${VAULT_KEY_BYTES} bytes (64 hex characters), got ${bytes.length} bytes`,
-    );
-  }
-  try {
-    return await crypto.subtle.importKey(
-      'raw',
-      bytes as unknown as BufferSource,
-      { name: 'AES-GCM', length: AES_GCM_KEY_LENGTH },
-      extractable,
-      ['encrypt', 'decrypt'],
-    );
-  } finally {
-    // Securely wipe transient Uint8Array buffers using .fill(0) immediately after import
-    bytes.fill(0);
-  }
-}
-
-/**
- * Derive a 256-bit AES-GCM key from a master password using PBKDF2-SHA256.
- * Generates key with extractable: false by default (REQ-VAULT-HARDEN-1).
- * Securely wipes transient passwordBytes and saltBytes with .fill(0).
- */
-export async function deriveKeyFromPassword(
-  password: string,
-  saltHex: string,
-  iterations: number = DEFAULT_KDF_ITERATIONS,
-  extractable = false,
-): Promise<CryptoKey> {
-  const enc = new TextEncoder();
-  const passwordBytes = enc.encode(password);
-  const saltBytes = hexToBytes(saltHex);
-
-  try {
-    const baseKey = await crypto.subtle.importKey(
-      'raw',
-      passwordBytes as unknown as BufferSource,
-      { name: 'PBKDF2' },
-      false,
-      ['deriveKey', 'deriveBits'],
-    );
-
-    return await crypto.subtle.deriveKey(
-      {
-        name: 'PBKDF2',
-        salt: saltBytes as unknown as BufferSource,
-        iterations,
-        hash: 'SHA-256',
-      },
-      baseKey,
-      { name: 'AES-GCM', length: AES_GCM_KEY_LENGTH },
-      extractable,
-      ['encrypt', 'decrypt'],
-    );
-  } finally {
-    passwordBytes.fill(0);
-    saltBytes.fill(0);
-  }
-}
-
-/**
  * Generate 12 BIP-39 mnemonic recovery words from 128-bit cryptographically secure entropy.
  */
 export function generate12RecoveryWords(entropyBytes?: Uint8Array): {
@@ -513,130 +301,6 @@ export function validateRecoveryWords(words: string[]): boolean {
   const hash = sha256Sync(entropyBytes);
   const expectedChecksumBits = (hash[0] >> 4).toString(2).padStart(4, '0');
   return checksumBits === expectedChecksumBits;
-}
-
-/**
- * Derive a 256-bit AES-GCM recovery key (KR) from 12 recovery words and a recovery salt.
- */
-export async function deriveKeyFromRecoveryWords(
-  words: string[],
-  saltHex: string,
-  iterations: number = DEFAULT_KDF_ITERATIONS,
-  extractable = false,
-): Promise<CryptoKey> {
-  const normalizedPhrase = words.map((w) => w.trim().toLowerCase()).join(' ');
-  return await deriveKeyFromPassword(normalizedPhrase, saltHex, iterations, extractable);
-}
-
-/**
- * Encrypt the raw 256-bit vaultKey using wrappingKey (AES-GCM).
- */
-export async function encryptVaultKeyEnvelope(
-  wrappingKey: CryptoKey,
-  vaultKey: CryptoKey,
-): Promise<{ ciphertextHex: string; nonceHex: string; tagHex: string }> {
-  const rawVaultKey = await crypto.subtle.exportKey('raw', vaultKey);
-  const nonce = crypto.getRandomValues(new Uint8Array(AES_GCM_NONCE_BYTES));
-
-  const encrypted = await crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv: nonce as unknown as BufferSource, tagLength: 128 },
-    wrappingKey,
-    rawVaultKey,
-  );
-
-  const encryptedBytes = new Uint8Array(encrypted);
-  const ciphertextBytes = encryptedBytes.slice(0, encryptedBytes.length - AES_GCM_TAG_BYTES);
-  const tagBytes = encryptedBytes.slice(encryptedBytes.length - AES_GCM_TAG_BYTES);
-
-  return {
-    ciphertextHex: bytesToHex(ciphertextBytes),
-    nonceHex: bytesToHex(nonce),
-    tagHex: bytesToHex(tagBytes),
-  };
-}
-
-/**
- * Decrypt a vault key envelope using wrappingKey (AES-GCM) and reconstruct the Vault Key (KV).
- * By default imports with extractable: false to ensure the decrypted key cannot be exfiltrated.
- * Securely wipes transient decrypted raw buffers.
- */
-export async function decryptVaultKeyEnvelope(
-  wrappingKey: CryptoKey,
-  ciphertextHex: string,
-  nonceHex: string,
-  tagHex: string,
-  extractable = false,
-): Promise<CryptoKey> {
-  const ciphertextBytes = hexToBytes(ciphertextHex);
-  const nonceBytes = hexToBytes(nonceHex);
-  const tagBytes = hexToBytes(tagHex);
-
-  const combined = new Uint8Array(ciphertextBytes.length + tagBytes.length);
-  combined.set(ciphertextBytes, 0);
-  combined.set(tagBytes, ciphertextBytes.length);
-
-  try {
-    const decryptedRaw = await crypto.subtle.decrypt(
-      { name: 'AES-GCM', iv: nonceBytes as unknown as BufferSource, tagLength: 128 },
-      wrappingKey,
-      combined as unknown as BufferSource,
-    );
-
-    const decryptedBytes = new Uint8Array(decryptedRaw);
-    try {
-      return await crypto.subtle.importKey(
-        'raw',
-        decryptedBytes as unknown as BufferSource,
-        { name: 'AES-GCM', length: AES_GCM_KEY_LENGTH },
-        extractable,
-        ['encrypt', 'decrypt'],
-      );
-    } finally {
-      decryptedBytes.fill(0);
-    }
-  } finally {
-    ciphertextBytes.fill(0);
-    nonceBytes.fill(0);
-    tagBytes.fill(0);
-    combined.fill(0);
-  }
-}
-
-/**
- * Decrypts vault key envelope and returns raw 64-character hex string.
- * Used to unseal bridges and populate Redux vault key safely.
- */
-export async function decryptVaultKeyEnvelopeHex(
-  wrappingKey: CryptoKey,
-  ciphertextHex: string,
-  nonceHex: string,
-  tagHex: string,
-): Promise<string> {
-  const ciphertextBytes = hexToBytes(ciphertextHex);
-  const nonceBytes = hexToBytes(nonceHex);
-  const tagBytes = hexToBytes(tagHex);
-
-  const combined = new Uint8Array(ciphertextBytes.length + tagBytes.length);
-  combined.set(ciphertextBytes, 0);
-  combined.set(tagBytes, ciphertextBytes.length);
-
-  try {
-    const decryptedRaw = await crypto.subtle.decrypt(
-      { name: 'AES-GCM', iv: nonceBytes as unknown as BufferSource, tagLength: 128 },
-      wrappingKey,
-      combined as unknown as BufferSource,
-    );
-
-    const decryptedBytes = new Uint8Array(decryptedRaw);
-    const hex = bytesToHex(decryptedBytes);
-    decryptedBytes.fill(0);
-    return hex;
-  } finally {
-    ciphertextBytes.fill(0);
-    nonceBytes.fill(0);
-    tagBytes.fill(0);
-    combined.fill(0);
-  }
 }
 
 /** Thrown for a token that claims to be v2 but is not exactly canonical. */

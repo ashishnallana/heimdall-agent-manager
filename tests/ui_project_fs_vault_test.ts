@@ -26,11 +26,9 @@ import {
 } from '../src/ui/utils/vaultContent.ts';
 import { openFsWriteContent } from '../src/ui/utils/vaultCrypto.ts';
 import vaultReducer, {
-  setVaultConfigured,
-  setVaultUnlocked,
-  lockVault,
+  keyringInstalled,
+  keyringCleared,
   selectIsVaultUnlocked,
-  selectRawVaultKeyHex,
 } from '../src/ui/store/vaultSlice.ts';
 
 const TEST_KEY_HEX_RAW = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
@@ -278,18 +276,12 @@ test('searchProjectFiles: leaves grep matches armored when the vault is locked',
 // Section 6: Redux vaultSlice state integration
 // -----------------------------------------------------------------------------
 
-test('vaultSlice transitions correctly control unlocked and keyHex states', () => {
+test('vaultSlice tracks keyring installed / purged and holds no key material', () => {
   let state = vaultReducer(undefined, { type: '@@INIT' });
   assert.strictEqual(selectIsVaultUnlocked({ vault: state }), false);
-  assert.strictEqual(selectRawVaultKeyHex({ vault: state }), null);
-
-  state = vaultReducer(state, setVaultConfigured(true));
-  state = vaultReducer(state, setVaultUnlocked());
+  state = vaultReducer(state, keyringInstalled({ currentEpoch: 1 }));
   assert.strictEqual(selectIsVaultUnlocked({ vault: state }), true);
-  assert.strictEqual((state as any).rawVaultKeyHex, undefined);
-  assert.strictEqual(selectRawVaultKeyHex({ vault: state }), null);
-
-  state = vaultReducer(state, lockVault());
+  assert.deepStrictEqual(Object.keys(state).sort(), ['currentEpoch', 'isUnlocked']);
+  state = vaultReducer(state, keyringCleared());
   assert.strictEqual(selectIsVaultUnlocked({ vault: state }), false);
-  assert.strictEqual(selectRawVaultKeyHex({ vault: state }), null);
 });

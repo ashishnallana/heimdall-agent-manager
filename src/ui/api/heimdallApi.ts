@@ -54,7 +54,6 @@ export const HEIMDALL_TAG_TYPES = [
   'Issue',
   'IssueComments',
   'TaskChainFleets',
-  'UserVault',
 ] as const;
 
 export type HeimdallTagType = (typeof HEIMDALL_TAG_TYPES)[number];

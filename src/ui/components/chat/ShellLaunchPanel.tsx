@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { Combobox, Icon, Modal } from '@ui';
 import { useCreateShellMutation, useKillShellMutation, useListShellsQuery, type ShellSession } from '../../api/endpoints/shells';
-import { selectIsVaultConfigured, selectIsVaultUnlocked, setUnlockModalOpen } from '../../store/vaultSlice';
+import { selectIsVaultUnlocked } from '../../store/vaultSlice';
 import { bridgeLabel } from '../../utils/bridgeLaunchOptions';
 import { composerBridgeIsArchived, composerBridgeIsOnline } from '../../utils/composerBridgeOptions';
 import { describeApiError } from '../../utils/bridgeVaultStatus';
@@ -35,7 +35,6 @@ export interface ShellLaunchPanelProps {
  */
 export function ShellLaunchPanel({ projects, bridges, projectId, onProjectChange, initialBridgeId, openIds = [], isMobile, disabled, autoFocusStart = false, onOpenShell }: ShellLaunchPanelProps) {
   const dispatch = useDispatch();
-  const vaultConfigured = useSelector(selectIsVaultConfigured);
   const vaultUnlocked = useSelector(selectIsVaultUnlocked);
   const usableBridges = useMemo(
     () => bridges.filter((b) => !composerBridgeIsArchived(b)).sort((a, b) => Number(composerBridgeIsOnline(b)) - Number(composerBridgeIsOnline(a))),
@@ -64,7 +63,7 @@ export function ShellLaunchPanel({ projects, bridges, projectId, onProjectChange
   const [browsing, setBrowsing] = useState(false);
 
   const [createShell, createState] = useCreateShellMutation();
-  const blocked = vaultConfigured && !vaultUnlocked ? 'vault' : !bridge || !composerBridgeIsOnline(bridge) ? 'bridge' : '';
+  const blocked = !vaultUnlocked ? 'vault' : !bridge || !composerBridgeIsOnline(bridge) ? 'bridge' : '';
   const startRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     if (!autoFocusStart || disabled || blocked || createState.isLoading) return;
@@ -143,8 +142,7 @@ export function ShellLaunchPanel({ projects, bridges, projectId, onProjectChange
         </div>
         {blocked === 'vault' ? (
           <p data-debug-id="new-convo-shell-vault-locked" className="mt-3 flex flex-wrap items-center gap-2 rounded-xl border border-warning/30 bg-warning-soft px-3 py-2 text-sm text-warning">
-            <Icon name="lock" size={14} />The vault is locked; shell commands are encrypted.
-            <button type="button" data-debug-id="new-convo-shell-unlock-btn" onClick={() => dispatch(setUnlockModalOpen(true))} className="font-semibold underline">Unlock vault</button>
+            <Icon name="lock" size={14} />This device's vault keys are not installed yet; shell commands are encrypted.
           </p>
         ) : blocked === 'bridge' && onlineBridges.length === 0 ? (
           <p data-debug-id="new-convo-shell-no-bridge" className="mt-3 flex items-center gap-2 rounded-xl bg-neutral-soft px-3 py-2 text-sm text-muted">

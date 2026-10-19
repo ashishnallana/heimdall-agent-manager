@@ -4,6 +4,7 @@
 //
 // RUN: node --test tests/ui_embedded_vault_decrypt_test.ts
 
+import { importRawKeyHex } from './helpers/vaultTestKeyring.ts';
 import { keyringFromHex } from './helpers/vaultTestKeyring.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -275,7 +276,7 @@ const { fireNotificationForWsEvent } = await import('../src/ui/services/notifica
 // from Redux state. Supply it the production way -- a real non-extractable CryptoKey
 // in the module-level active-key slot -- rather than injecting fake hex into a mock
 // state, which no longer reaches any production read.
-const { importRawKeyHex, setActiveVaultKey } = await import('../src/ui/utils/vaultCrypto.ts');
+const { setActiveVaultKey } = await import('../src/ui/utils/vaultCrypto.ts');
 
 test('fireNotificationForWsEvent sanitizes notifications when vault is locked', async () => {
   mockCreatedNotifications.length = 0;

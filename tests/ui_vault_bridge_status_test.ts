@@ -11,6 +11,7 @@
 // (matched by the `tests/ui_vault_*.ts` glob in package.json's `test` script, so it
 //  also runs under a plain `npm test`.)
 
+import { importRawKeyHex } from './helpers/vaultTestKeyring.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -256,7 +257,7 @@ test('REQ-BVS-5: a successful bridge lock leaves this client’s CryptoKey in pl
   const realFetch = globalThis.fetch;
   try {
     const { lockBridge } = await import('../src/ui/api/endpoints/bridges.ts');
-    const { importRawKeyHex, setActiveVaultKey, getActiveVaultKey } = await import(
+    const { setActiveVaultKey, getActiveVaultKey } = await import(
       '../src/ui/utils/vaultCrypto.ts'
     );
 

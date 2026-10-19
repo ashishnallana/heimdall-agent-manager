@@ -3,6 +3,7 @@
 //
 // RUN: node --import ./tests/helpers/vaultEndpointHarness.ts --test tests/ui_attention_deck_test.ts
 
+import { importRawKeyHex } from './helpers/vaultTestKeyring.ts';
 import { asKeyring } from './helpers/vaultTestKeyring.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -340,7 +341,7 @@ test('deck: locked vault shows the lock placeholder instead of ciphertext', asyn
 });
 
 test('deck: unlocked vault decrypts the card title and excerpt', async () => {
-  const { encryptVaultText, importRawKeyHex } = await import('../src/ui/utils/vaultCrypto.ts');
+  const { encryptVaultText } = await import('../src/ui/utils/vaultCrypto.ts');
   const key = await importRawKeyHex('00'.repeat(32));
   const title = await encryptVaultText('Secret review title', asKeyring(key));
   const body = await encryptVaultText('Secret excerpt body', asKeyring(key));
