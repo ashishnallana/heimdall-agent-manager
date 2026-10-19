@@ -29,7 +29,7 @@ import {
 import { useListProjectsQuery, Project } from '../../api/endpoints/projects';
 import Markdown from '../Markdown';
 import { isVaultArmored, getActiveVaultKey } from '../../utils/vaultContent';
-import { resolveCardTitle } from '../../utils/vaultCardOps';
+import { resolveCardTitle, UNTITLED_CARD } from '../../utils/vaultCardOps';
 import { useSelector } from 'react-redux';
 import { selectIsVaultUnlocked } from '../../store/vaultSlice';
 import { decryptProjectList } from '../../utils/vaultProjects';
@@ -209,7 +209,7 @@ export function ActionItemsTab() {
       await acceptCard({ id: card.card_id }).unwrap();
       setFeedback({
         type: 'success',
-        message: `Action accepted: "${await resolveCardTitle(card.title, 'Untitled card')}". Operations executed atomically.`,
+        message: `Action accepted: "${await resolveCardTitle(card.title)}". Operations executed atomically.`,
       });
       setTimeout(() => setFeedback(null), 5000);
     } catch (err: any) {
@@ -230,7 +230,7 @@ export function ActionItemsTab() {
       await rejectCard({ id: card.card_id }).unwrap();
       setFeedback({
         type: 'success',
-        message: `Action rejected: "${await resolveCardTitle(card.title, 'Untitled card')}".`,
+        message: `Action rejected: "${await resolveCardTitle(card.title)}".`,
       });
       setTimeout(() => setFeedback(null), 5000);
     } catch (err: any) {
@@ -250,7 +250,7 @@ export function ActionItemsTab() {
       await discardCard({ id: card.card_id }).unwrap();
       setFeedback({
         type: 'success',
-        message: `Action discarded: "${await resolveCardTitle(card.title, 'Untitled card')}".`,
+        message: `Action discarded: "${await resolveCardTitle(card.title)}".`,
       });
       setTimeout(() => setFeedback(null), 5000);
     } catch (err: any) {
@@ -271,7 +271,7 @@ export function ActionItemsTab() {
       await snoozeCard({ id: card.card_id, snoozeUntil }).unwrap();
       setFeedback({
         type: 'success',
-        message: `Action snoozed for 24h: "${await resolveCardTitle(card.title, 'Untitled card')}".`,
+        message: `Action snoozed for 24h: "${await resolveCardTitle(card.title)}".`,
       });
       setTimeout(() => setFeedback(null), 5000);
     } catch (err: any) {
@@ -396,7 +396,7 @@ export function ActionItemsTab() {
               >
                 <div className="flex items-start justify-between gap-2">
                   <h4 className="text-sm font-semibold text-primary line-clamp-1 flex-1">
-                    <VaultText value={card.title} fallback="Untitled card" as="span" />
+                    <VaultText value={card.title} fallback={UNTITLED_CARD} as="span" />
                   </h4>
                   <StatusPill tone={tone} className="shrink-0 text-[10px]">
                     {card.status}
@@ -482,7 +482,7 @@ export function ActionItemsTab() {
             data-debug-id="action-item-detail-title"
             className="text-xl sm:text-2xl font-bold tracking-tight text-primary break-words"
           >
-            <VaultText value={selectedCard.title} fallback="Untitled card" as="span" />
+            <VaultText value={selectedCard.title} fallback={UNTITLED_CARD} as="span" />
           </h2>
           <p className="text-caption font-mono text-muted">{selectedCard.card_id}</p>
         </div>

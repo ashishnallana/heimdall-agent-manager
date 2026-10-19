@@ -62,6 +62,9 @@ export async function openCardOperations<T extends Op>(ops: readonly T[] | undef
   }) as Promise<T>));
 }
 
+/** Display name for a card whose title is missing or cannot be decrypted. */
+export const UNTITLED_CARD = 'Untitled card';
+
 /**
  * Plaintext card title for text that leaves the render tree: feedback messages sent to
  * agents and toasts. The title is sealed like any other vault field, so
@@ -73,7 +76,7 @@ export async function openCardOperations<T extends Op>(ops: readonly T[] | undef
  */
 export async function resolveCardTitle(
   title: string | null | undefined,
-  fallback: string,
+  fallback: string = UNTITLED_CARD,
   keyring: VaultKeyring | null = getActiveVaultKey(),
 ): Promise<string> {
   if (!title) return fallback;

@@ -8,7 +8,7 @@ import {
 } from '../../api/endpoints/cards';
 import type { Card } from '../../api/endpoints/cards';
 import { useSendConversationMessageMutation } from '../../api/endpoints/chats';
-import { resolveCardTitle } from '../../utils/vaultCardOps';
+import { resolveCardTitle, UNTITLED_CARD } from '../../utils/vaultCardOps';
 import { VaultText } from '../vault/VaultText';
 import { extractMessageActionIds } from './types';
 import { buildActionFeedback } from './actionFeedback';
@@ -79,7 +79,7 @@ export const SingleActionCard: React.FC<SingleActionCardProps> = ({
     try {
       await acceptCardMutation({ cardId: actionId, id: actionId }).unwrap();
       setLocalStatus('accepted');
-      const title = await resolveCardTitle(card?.title, 'untitled');
+      const title = await resolveCardTitle(card?.title);
       await sendFeedback(buildActionFeedback('approved', actionId, title));
     } catch (err: any) {
       setActionError(cardErrorText(err, 'Failed to approve action'));
@@ -92,7 +92,7 @@ export const SingleActionCard: React.FC<SingleActionCardProps> = ({
     try {
       await discardCardMutation({ cardId: actionId, id: actionId }).unwrap();
       setLocalStatus('rejected');
-      const title = await resolveCardTitle(card?.title, 'untitled');
+      const title = await resolveCardTitle(card?.title);
       await sendFeedback(buildActionFeedback('rejected', actionId, title, comment));
     } catch (err: any) {
       setActionError(cardErrorText(err, 'Failed to reject action'));
@@ -106,7 +106,7 @@ export const SingleActionCard: React.FC<SingleActionCardProps> = ({
     >
       <div className="flex items-center justify-between gap-2">
         <h4 data-debug-id={`action-card-title-${actionId}`} className="min-w-0 font-semibold text-primary break-words text-sm">
-          <VaultText value={card?.title} fallback="Action card" as="span" />
+          <VaultText value={card?.title} fallback={UNTITLED_CARD} as="span" />
         </h4>
         <span
           data-debug-id={`action-card-status-${actionId}`}

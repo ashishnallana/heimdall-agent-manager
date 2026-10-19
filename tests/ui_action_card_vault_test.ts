@@ -9,7 +9,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { encryptVaultText } from '../src/ui/utils/vaultCrypto.ts';
-import { resolveCardTitle } from '../src/ui/utils/vaultCardOps.ts';
+import { resolveCardTitle, UNTITLED_CARD } from '../src/ui/utils/vaultCardOps.ts';
 import { buildActionFeedback } from '../src/ui/components/chat/actionFeedback.ts';
 import { formatOpLabel } from '../src/ui/api/endpoints/cards.ts';
 
@@ -33,6 +33,7 @@ test('locked or wrong-key vault falls back, never returns ciphertext', async () 
 });
 
 test('plain and missing titles', async () => {
+  assert.equal(await resolveCardTitle(undefined, undefined, null), UNTITLED_CARD);
   assert.equal(await resolveCardTitle('Plain title', 'untitled', null), 'Plain title');
   assert.equal(await resolveCardTitle('', 'untitled', null), 'untitled');
   assert.equal(await resolveCardTitle(undefined, 'untitled', null), 'untitled');
@@ -43,8 +44,8 @@ test('approve/reject feedback carries the card id and decrypted title, no cipher
   const sealed = await encryptVaultText('Apply project description', key);
   const approved = buildActionFeedback('approved', 'crd_1', await resolveCardTitle(sealed, 'untitled', key));
   assert.equal(approved, '[Action Approved] Action crd_1 (Apply project description) was approved by user');
-  const rejected = buildActionFeedback('rejected', 'crd_1', await resolveCardTitle(sealed, 'untitled', null), '  too broad ');
-  assert.equal(rejected, '[Action Rejected] Action crd_1 (untitled) was rejected by user: too broad');
+  const rejected = buildActionFeedback('rejected', 'crd_1', await resolveCardTitle(sealed, undefined, null), '  too broad ');
+  assert.equal(rejected, '[Action Rejected] Action crd_1 (Untitled card) was rejected by user: too broad');
   for (const body of [approved, rejected]) assert.ok(!body.includes(ARMOR), body);
 });
 

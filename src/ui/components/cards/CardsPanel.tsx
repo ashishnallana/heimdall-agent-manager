@@ -16,7 +16,7 @@ import {
 import { useListProjectsQuery, Project } from '../../api/endpoints/projects';
 import Markdown from '../Markdown';
 import { isVaultArmored, maskVaultArmored } from '../../utils/vaultContent';
-import { resolveCardTitle } from '../../utils/vaultCardOps';
+import { resolveCardTitle, UNTITLED_CARD } from '../../utils/vaultCardOps';
 import { VaultText, DecryptedMarkdown } from '../vault/VaultText';
 
 export function isCardExpired(c: { ttl_at?: string } | null | undefined): boolean {
@@ -200,7 +200,7 @@ export default function CardsPanel() {
       await acceptCard({ id: card.card_id }).unwrap();
       setFeedback({
         type: 'success',
-        message: `Card accepted: "${await resolveCardTitle(card.title, 'Untitled card')}". Operations executed atomically.`,
+        message: `Card accepted: "${await resolveCardTitle(card.title)}". Operations executed atomically.`,
       });
       setSelectedCardIds((prev) => prev.filter((id) => id !== card.card_id));
       setTimeout(() => setFeedback(null), 6000);
@@ -225,7 +225,7 @@ export default function CardsPanel() {
       await rejectCard({ id: card.card_id }).unwrap();
       setFeedback({
         type: 'success',
-        message: `Card rejected: "${await resolveCardTitle(card.title, 'Untitled card')}".`,
+        message: `Card rejected: "${await resolveCardTitle(card.title)}".`,
       });
       setSelectedCardIds((prev) => prev.filter((id) => id !== card.card_id));
       setTimeout(() => setFeedback(null), 5000);
@@ -246,7 +246,7 @@ export default function CardsPanel() {
       await discardCard({ id: card.card_id }).unwrap();
       setFeedback({
         type: 'success',
-        message: `Card discarded: "${await resolveCardTitle(card.title, 'Untitled card')}".`,
+        message: `Card discarded: "${await resolveCardTitle(card.title)}".`,
       });
       setSelectedCardIds((prev) => prev.filter((id) => id !== card.card_id));
       setTimeout(() => setFeedback(null), 5000);
@@ -269,7 +269,7 @@ export default function CardsPanel() {
       await snoozeCard({ id: card.card_id, snoozeUntil }).unwrap();
       setFeedback({
         type: 'success',
-        message: `Card snoozed for 24h: "${await resolveCardTitle(card.title, 'Untitled card')}".`,
+        message: `Card snoozed for 24h: "${await resolveCardTitle(card.title)}".`,
       });
       setSelectedCardIds((prev) => prev.filter((id) => id !== card.card_id));
       setTimeout(() => setFeedback(null), 5000);
@@ -713,7 +713,7 @@ function CardRow({
                 onClick={onToggleExpand}
                 className="text-sm font-semibold text-primary cursor-pointer hover:text-accent transition-colors"
               >
-                <VaultText value={card.title} fallback="Untitled card" as="span" />
+                <VaultText value={card.title} fallback={UNTITLED_CARD} as="span" />
               </h4>
 
               {/* Status Pill */}
