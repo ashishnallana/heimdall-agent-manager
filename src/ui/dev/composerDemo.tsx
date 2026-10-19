@@ -10,17 +10,22 @@
  *
  * What is real and what is stubbed:
  * - REAL: `ChatMessageList` (bottom inset, auto-scroll, jump-to-latest),
- *   `MessageComposerInput`, `MessageComposerActions`, and the `ui-float-dock` /
- *   `ui-frost-*` classes from styles.css.
+ *   `MessageComposerInput`, `MessageComposerActions` (+ upload, model switcher, send),
+ *   the `Spinner` / `StatusDot` runtime indicator, `Menu`, and the `ui-float-dock` /
+ *   `ui-frost-*` / `ui-liquid-glass` classes from styles.css.
  * - MIRRORED: the dock + card markup from the mobile branch of
  *   `AgentChatPane.renderComposer` (AgentChatPane itself needs the API and vault).
  *   Keep the two in sync when the mobile composer markup changes.
- * - STUBBED: composer callbacks; "sending" appends locally and fakes an agent reply.
+ * - MIRRORED: the floating header (menu, title, runtime indicator, "…") from the
+ *   reference screenshots.
+ * - STUBBED: composer callbacks; "sending" appends locally and fakes an agent reply;
+ *   the runtime status is local state (tap the indicator to toggle it).
  *
  * URL presets, so a state can be linked or screenshotted without interaction:
  *   ?theme=light|dark   start in that appearance
  *   ?draft=<text>       prefill the composer (use %0A for extra lines)
  *   ?scroll=top         start scrolled to the top, which shows jump-to-latest
+ *   ?status=running|stopped  runtime indicator state (default running)
  *
  * Not shipped: vite.config.js has no `rollupOptions.input`, so `vite build` emits only
  * index.html (REQ-DEMO-5).
@@ -29,7 +34,7 @@ import { StrictMode, useCallback, useEffect, useMemo, useRef, useState, type For
 import ReactDOM from 'react-dom/client';
 import { Provider } from 'react-redux';
 import { combineReducers, configureStore } from '@reduxjs/toolkit';
-import { Icon } from '@ui';
+import { Icon, Menu, Spinner, StatusDot, runtimeStatusToTone } from '@ui';
 import ChatMessageList from '../components/chat/ChatMessageList';
 import { MessageComposerActions, MessageComposerInput } from '../components/chat/MessageComposer';
 import type { ChatMessage, ChatTimestamp } from '../components/chat/types';
@@ -143,25 +148,96 @@ function currentAppearance(): 'dark' | 'light' {
   return getTheme(document.documentElement.dataset.theme).appearance;
 }
 
-function ThemeToggle() {
+type DemoRuntimeStatus = 'running' | 'stopped';
+
+// Same recipe as `.ui-frost-tail`: canvas tint + backdrop blur, masked to fade out.
+// Inline because Tailwind's `from-canvas/90` emits no gradient for the var-based token.
+const HEADER_WASH_STYLE = {
+  background: 'color-mix(in oklab, var(--color-canvas), transparent 18%)',
+  WebkitBackdropFilter: 'blur(14px)',
+  backdropFilter: 'blur(14px)',
+  WebkitMaskImage: 'linear-gradient(to bottom, #000 55%, transparent)',
+  maskImage: 'linear-gradient(to bottom, #000 55%, transparent)',
+} as const;
+
+/**
+ * Mirrors the floating mobile header from the reference screenshots: round menu button,
+ * centered title/subtitle, and at top right the runtime indicator next to a round "…"
+ * button, all floating over the transcript. The indicator uses the app's real primitives
+ * (`Spinner` while running, `StatusDot` with the canonical runtime tone when stopped);
+ * tapping it toggles the stubbed state. The "…" menu holds the light/dark switch.
+ */
+function DemoHeader({ status, onToggleStatus }: { status: DemoRuntimeStatus; onToggleStatus: () => void }) {
   const [appearance, setAppearance] = useState(currentAppearance);
-  const next = appearance === 'dark' ? 'light' : 'dark';
+  const [menuOpen, setMenuOpen] = useState(false);
+  const nextAppearance = appearance === 'dark' ? 'light' : 'dark';
+  const running = status === 'running';
+  const roundButton =
+    'ui-liquid-glass pointer-events-auto grid h-12 w-12 shrink-0 place-items-center rounded-full text-primary';
   return (
-    <button
-      type="button"
-      data-debug-id="composer-demo-theme-toggle"
-      aria-label={`Switch to ${next} theme`}
-      title={`Switch to ${next} theme`}
-      onClick={() => {
-        // Not persisted: this page must not change the app's saved theme.
-        applyThemeToDocument(next === 'dark' ? DARK_THEME_ID : LIGHT_THEME_ID);
-        setAppearance(next);
-      }}
-      className="ui-liquid-glass fixed right-3 top-[max(env(safe-area-inset-top),0.75rem)] z-50 inline-flex h-11 items-center gap-2 rounded-full px-4 text-sm font-semibold text-primary"
+    <header
+      data-debug-id="composer-demo-header"
+      className="pointer-events-none absolute inset-x-0 top-0 z-30 flex items-center gap-2 px-3 pb-2 pt-[max(env(safe-area-inset-top),0.75rem)]"
     >
-      <Icon name="sparkle" size={16} />
-      {next === 'dark' ? 'Dark' : 'Light'}
-    </button>
+      {/* Blurred wash behind the floating controls so the title stays legible over the
+          transcript; fades out below the header like the reference. */}
+      <div
+        aria-hidden="true"
+        className="absolute inset-x-0 top-0 -z-10 h-[calc(100%+1.5rem)]"
+        style={HEADER_WASH_STYLE}
+      />
+      <button type="button" data-debug-id="composer-demo-header-menu-btn" aria-label="Open navigation" className={roundButton}>
+        <Icon name="menu" size={22} />
+      </button>
+      <div data-debug-id="composer-demo-header-title" className="min-w-0 flex-1 text-center">
+        <div className="truncate text-[15px] font-semibold text-primary">Reconnect loop after sleep</div>
+        <div className="truncate text-xs text-muted">worker · Opus 5.5</div>
+      </div>
+      <button
+        type="button"
+        data-debug-id="composer-demo-runtime-status-btn"
+        data-status={status}
+        aria-label={running ? 'Agent running, tap to stop (demo)' : 'Agent stopped, tap to start (demo)'}
+        title={running ? 'Running' : 'Stopped'}
+        onClick={onToggleStatus}
+        className={roundButton}
+      >
+        {running ? (
+          <Spinner size="lg" label="Running" className="text-warning" />
+        ) : (
+          <StatusDot tone={runtimeStatusToTone('stopped')} label="Stopped" className="scale-150" />
+        )}
+      </button>
+      <Menu
+        side="bottom"
+        align="end"
+        label="Conversation options"
+        open={menuOpen}
+        onOpenChange={setMenuOpen}
+        trigger={
+          <button type="button" data-debug-id="composer-demo-header-more-btn" aria-label="Conversation options" className={roundButton}>
+            <Icon name="more-horizontal" size={22} />
+          </button>
+        }
+      >
+        <Menu.Item
+          data-debug-id="composer-demo-theme-toggle"
+          onClick={() => {
+            setMenuOpen(false);
+            // Not persisted: this page must not change the app's saved theme.
+            applyThemeToDocument(nextAppearance === 'dark' ? DARK_THEME_ID : LIGHT_THEME_ID);
+            setAppearance(nextAppearance);
+          }}
+        >
+          <Icon name="sparkle" size={16} />
+          <span>Switch to {nextAppearance} theme</span>
+        </Menu.Item>
+        <Menu.Item data-debug-id="composer-demo-status-toggle" onClick={() => { setMenuOpen(false); onToggleStatus(); }}>
+          <Icon name={running ? 'stop' : 'play'} size={16} />
+          <span>{running ? 'Stop agent (demo)' : 'Start agent (demo)'}</span>
+        </Menu.Item>
+      </Menu>
+    </header>
   );
 }
 
@@ -173,6 +249,9 @@ function ComposerDemo() {
   const composerDockRef = useRef<HTMLDivElement | null>(null);
   const [composerDockHeight, setComposerDockHeight] = useState(0);
   const replyTimerRef = useRef(0);
+  const [runtimeStatus, setRuntimeStatus] = useState<DemoRuntimeStatus>(() =>
+    PRESETS.get('status') === 'stopped' ? 'stopped' : 'running',
+  );
 
   // Same measurement as AgentChatPane (REQ-FROST-1): the dock's height is the list's inset.
   useEffect(() => {
@@ -218,26 +297,31 @@ function ComposerDemo() {
   const composerActions = useMemo(
     () => ({
       debugPrefix: 'composer-demo',
-      mobile: true,
-      provider: 'claude',
-      model: 'claude-opus-5-5',
+      // The non-mobile toolbar is the variant that shows upload and the model switcher
+      // directly; the mobile variant folds both into a "…" menu.
+      mobile: false,
+      // Empty on purpose: ProviderIcon fetches /api/v1/providers/<id>/icon for a named
+      // provider, and this page must issue no API requests. It shows its fallback glyph.
+      provider: '',
+      model: 'Opus 5.5 Medium',
       onSettings: () => undefined,
       onUpload: () => undefined,
-      onPaneToggle: () => undefined,
-      paneExpanded: false,
     }),
     [],
   );
 
   return (
     <div data-debug-id="composer-demo-root" className="flex h-full w-full justify-center bg-canvas text-primary">
-      <ThemeToggle />
       {/* Phone-width column so the demo reads the same on a desktop preview. */}
       <div className="flex h-full w-full max-w-[440px] flex-col sm:border-x sm:border-subtle">
         <div
           data-debug-id="composer-demo-transcript"
           className="relative flex w-full min-h-0 min-w-0 max-w-full flex-1 flex-col overflow-x-hidden p-0"
         >
+          <DemoHeader
+            status={runtimeStatus}
+            onToggleStatus={() => setRuntimeStatus((prev) => (prev === 'running' ? 'stopped' : 'running'))}
+          />
           <ChatMessageList
             conversationKey="composer-demo"
             messages={messages}
@@ -272,27 +356,25 @@ function ComposerDemo() {
                     <span />
                     <span />
                   </div>
-                  <div className="relative">
-                    <div className="flex items-end gap-2">
-                      <div className="min-w-0 flex-1 py-2.5">
-                        <MessageComposerInput
-                          mobile
-                          debugId="composer-demo-composer-input"
-                          ref={textareaRef}
-                          value={draft}
-                          onChange={(e) => setDraft(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-                              e.preventDefault();
-                              send(draft);
-                            }
-                          }}
-                          placeholder="Message the agent…"
-                        />
-                      </div>
-                      <MessageComposerActions {...composerActions} sendDisabled={!draft.trim()} inline />
-                    </div>
+                  {/* Two rows like the reference: the input on top, the REAL toolbar below
+                      (+ upload, model switcher, send). */}
+                  <div className="px-1 pt-1">
+                    <MessageComposerInput
+                      mobile
+                      debugId="composer-demo-composer-input"
+                      ref={textareaRef}
+                      value={draft}
+                      onChange={(e) => setDraft(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                          e.preventDefault();
+                          send(draft);
+                        }
+                      }}
+                      placeholder="Type / for commands"
+                    />
                   </div>
+                  <MessageComposerActions {...composerActions} sendDisabled={!draft.trim()} />
                 </div>
               </div>
             </form>
