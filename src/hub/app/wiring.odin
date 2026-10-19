@@ -406,7 +406,7 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 		// state the serializer reports.
 		bridge_runtime_registry = &graph.bridge_runtime_registry,
 	}
-	graph.bridge_handlers = http.Bridge_Handlers{auth = &graph.auth, bridges = &graph.bridges, agents = &graph.agents, content = &graph.content, taskchains = &graph.taskchains, projects = &graph.projects, event_bus = &graph.event_bus, bridge_runtime_registry = &graph.bridge_runtime_registry, shell_sessions = &graph.shell_session_service, lsp_sessions = &graph.lsp_session_registry, providers = &graph.providers, bridge_logs = &graph.bridge_logs, task_engine = &graph.task_engine}
+	graph.bridge_handlers = http.Bridge_Handlers{auth = &graph.auth, bridges = &graph.bridges, agents = &graph.agents, content = &graph.content, taskchains = &graph.taskchains, projects = &graph.projects, event_bus = &graph.event_bus, bridge_runtime_registry = &graph.bridge_runtime_registry, shell_sessions = &graph.shell_session_service, lsp_sessions = &graph.lsp_session_registry, providers = &graph.providers, bridge_logs = &graph.bridge_logs, task_engine = &graph.task_engine, vault = &graph.vault_directory}
 	graph.task_engine.vcs_show_file = http.bridge_vcs_show_file_callback
 	graph.task_engine.vcs_show_file_ctx = rawptr(&graph.bridge_handlers)
 	bridge_log_service.start(&graph.bridge_logs)
@@ -933,7 +933,6 @@ device_bridge_minter :: proc(graph_ptr: rawptr, req: device_auth_service.Bridge_
 		machine_hostname = req.device_label,
 		machine_os = req.os,
 		bridge_version = req.app_version,
-		target_bridge_id = req.target_bridge_id,
 		new_bridge_label = req.new_bridge_label,
 		// REQ-EA-1: the enrollment stays pending until the vault key is delivered.
 		pending = true,

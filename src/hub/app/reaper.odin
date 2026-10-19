@@ -249,6 +249,8 @@ reaper_sweep_pending_enrollments :: proc(graph: ^App_Graph) -> int {
 		delete(key)
 		fmt.eprintfln("hub: bridge %s enrollment rolled back (vault key not delivered in time; row deleted: %v)", r.bridge_id, r.row_deleted)
 		events.publish_resource_changed(&graph.event_bus, r.owner_user_id, "bridge", r.bridge_id, "bridge_enrollment_changed", "{}")
+		// The identity approved with it never got the vault key: retire its entry.
+		reaper_retire_bridge_entry(graph, r.owner_user_id, r.bridge_id)
 	}
 	return len(rolled)
 }
@@ -383,6 +385,24 @@ reaper_sweep_aged_servers :: proc(graph: ^App_Graph) -> int {
 	now_ms, ok := platform.rfc3339_to_unix_ms(now_str)
 	if !ok do return 0
 	return shell_session_svc.shell_session_reap_aged_servers(&graph.shell_session_service, now_ms, REAPER_SERVER_MAX_AGE_MS)
+}
+
+// reaper_retire_bridge_entry retires a rolled-back enrollment's vault directory
+// entry (in a local arena: reaper thread). A failure is logged; the entry then stays
+// approved for a bridge that has no credential, which is inert.
+@(private = "file")
+reaper_retire_bridge_entry :: proc(graph: ^App_Graph, owner_user_id, bridge_id: string) {
+	arena: virtual.Arena
+	if virtual.arena_init_growing(&arena) != nil do return
+	defer virtual.arena_destroy(&arena)
+	context.allocator = virtual.arena_allocator(&arena)
+	context.temp_allocator = context.allocator
+	retired, err := vault_directory_service.retire_bridge_entry(&graph.vault_directory, owner_user_id, bridge_id)
+	if err.code != .None {
+		fmt.eprintfln("hub: bridge %s vault directory entry could not be retired: %s", bridge_id, err.message)
+		return
+	}
+	if retired != "" do events.publish_resource_changed(&graph.event_bus, owner_user_id, http.VAULT_DEVICES_RESOURCE, retired, "revoked", "{}")
 }
 
 // reaper_sweep_vault_resets executes every owner vault reset whose delay has passed

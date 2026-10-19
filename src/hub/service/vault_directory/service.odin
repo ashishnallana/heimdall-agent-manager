@@ -629,13 +629,61 @@ check_bridge_approval :: proc(svc: ^Service, in_: Bridge_Approval_Input) -> (dom
 	return dev, domain.Domain_Error{}
 }
 
+// commit_bridge_approval inserts the approved bridge identity. If another approved
+// identity already maps to bridge_id (an attach), it is retired in the SAME CAS, so
+// at most one approved identity ever maps to a bridge_id.
 commit_bridge_approval :: proc(svc: ^Service, in_: Bridge_Approval_Input, dev: domain.Vault_Device, bridge_id: string) -> (i64, domain.Domain_Error) {
+	if bridge_id == "" do return 0, invalid("bridge_id is required")
 	d := dev
 	d.bridge_id = bridge_id
-	return iface.vault_commit(svc.repo, domain.Vault_Directory_Commit{
+	cm := domain.Vault_Directory_Commit{
 		user_id = in_.user_id, expected_version = in_.expected_version, now = platform.clock_now(svc.clock),
 		insert_device = d,
-	})
+	}
+	devices, err := iface.vault_list_devices(svc.repo, in_.user_id)
+	if err.code != .None do return 0, err
+	// Read at (at most) expected_version: if anything changed since, the CAS refuses.
+	for other in devices {
+		if other.status != .Approved || other.bridge_id != bridge_id do continue
+		if cm.retire_device_id != "" do return 0, domain.domain_error(.Internal_Error, "more than one approved identity maps to this bridge")
+		cm.retire_device_id, cm.retire_bridge_id = other.device_id, bridge_id
+	}
+	return iface.vault_commit(svc.repo, cm)
+}
+
+// retire_bridge_entry marks the approved directory entry of bridge_id revoked
+// (hub-retired, no statement) after its enrollment was rolled back — the vault key
+// never reached that identity, so no epoch rotation is needed. Retries on a version
+// race. Returns the retired device id, or "" when there was nothing to retire.
+retire_bridge_entry :: proc(svc: ^Service, user_id, bridge_id: string) -> (string, domain.Domain_Error) {
+	if user_id == "" || bridge_id == "" do return "", domain.Domain_Error{}
+	for _ in 0 ..< 4 {
+		dir, found, err := iface.vault_get_directory(svc.repo, user_id)
+		if err.code != .None do return "", err
+		if !found do return "", domain.Domain_Error{}
+		devices, derr := iface.vault_list_devices(svc.repo, user_id)
+		if derr.code != .None do return "", derr
+		target := ""
+		for d in devices do if d.status == .Approved && d.bridge_id == bridge_id do target = d.device_id
+		if target == "" do return "", domain.Domain_Error{}
+		_, cerr := iface.vault_commit(svc.repo, domain.Vault_Directory_Commit{
+			user_id = user_id, expected_version = dir.version, now = platform.clock_now(svc.clock),
+			retire_device_id = target, retire_bridge_id = bridge_id,
+		})
+		if cerr.code == .Conflict do continue
+		if cerr.code != .None do return "", cerr
+		return target, domain.Domain_Error{}
+	}
+	return "", domain.domain_error(.Conflict, "vault directory kept changing; bridge entry not retired")
+}
+
+// other_approved_for_bridge reports whether an approved identity other than
+// device_id maps to bridge_id (then the bridge's credentials must stay).
+other_approved_for_bridge :: proc(svc: ^Service, user_id, bridge_id, device_id: string) -> (bool, domain.Domain_Error) {
+	devices, err := iface.vault_list_devices(svc.repo, user_id)
+	if err.code != .None do return false, err
+	for d in devices do if d.device_id != device_id && d.status == .Approved && d.bridge_id == bridge_id do return true, domain.Domain_Error{}
+	return false, domain.Domain_Error{}
 }
 
 // ── Revoke ──────────────────────────────────────────────────────────────────
@@ -657,7 +705,28 @@ Revoke_Result :: struct {
 	target:  domain.Vault_Device,
 }
 
+// Revoke_Plan is a fully validated revocation that has not been written yet. The
+// HTTP handler revokes a bridge target's credentials BETWEEN revoke_prepare and
+// revoke_commit, so a failure there leaves the safe state (credentials dead or the
+// request failed) rather than "revoked in the directory, credential still live".
+Revoke_Plan :: struct {
+	commit: domain.Vault_Directory_Commit,
+	target: domain.Vault_Device,
+}
+
 revoke :: proc(svc: ^Service, in_: Revoke_Input) -> (Revoke_Result, domain.Domain_Error) {
+	plan, err := revoke_prepare(svc, in_)
+	if err.code != .None do return {}, err
+	return revoke_commit(svc, plan)
+}
+
+revoke_commit :: proc(svc: ^Service, plan: Revoke_Plan) -> (Revoke_Result, domain.Domain_Error) {
+	v, err := iface.vault_commit(svc.repo, plan.commit)
+	if err.code != .None do return {}, err
+	return Revoke_Result{version = v, target = plan.target}, domain.Domain_Error{}
+}
+
+revoke_prepare :: proc(svc: ^Service, in_: Revoke_Input) -> (Revoke_Plan, domain.Domain_Error) {
 	// Enforced before anything else, whatever the rest of the request says.
 	if in_.device_id == in_.signer.device_id do return {}, domain.vault_reason_error(.Conflict, "self_revoke", "a device cannot revoke itself")
 	dir, found, err := iface.vault_get_directory(svc.repo, in_.user_id)
@@ -708,15 +777,16 @@ revoke :: proc(svc: ^Service, in_: Revoke_Input) -> (Revoke_Result, domain.Domai
 		if werr.code != .None do return {}, werr
 		rows[i] = row
 	}
-	v, cerr := iface.vault_commit(svc.repo, domain.Vault_Directory_Commit{
-		user_id = in_.user_id, expected_version = in_.expected_version, now = now,
-		revoke_device_id = target.device_id, revocation_statement = in_.revoke_statement,
-		revocation_signature = in_.signature, revoked_by_device_id = in_.signer.device_id,
-		new_epoch = new_epoch, epoch_statement = in_.epoch_statement, epoch_signature = in_.epoch_signature,
-		wraps = rows, replace_all_wraps = true,
-	})
-	if cerr.code != .None do return {}, cerr
-	return Revoke_Result{version = v, target = target}, domain.Domain_Error{}
+	return Revoke_Plan{
+		target = target,
+		commit = domain.Vault_Directory_Commit{
+			user_id = in_.user_id, expected_version = in_.expected_version, now = now,
+			revoke_device_id = target.device_id, revocation_statement = in_.revoke_statement,
+			revocation_signature = in_.signature, revoked_by_device_id = in_.signer.device_id,
+			new_epoch = new_epoch, epoch_statement = in_.epoch_statement, epoch_signature = in_.epoch_signature,
+			wraps = rows, replace_all_wraps = true,
+		},
+	}, domain.Domain_Error{}
 }
 
 // ── Relabel ─────────────────────────────────────────────────────────────────

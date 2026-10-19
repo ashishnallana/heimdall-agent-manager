@@ -337,3 +337,39 @@ test_vault_reads_do_not_consume_nonces :: proc(t: ^testing.T) {
 	_, err := verify_request(&f.svc, USER, signed_req(&a, "POST", "/api/v1/vault/devices/x/deny", "{}"), .Approver)
 	testing.expect_value(t, err.code, domain.Error_Code.None)
 }
+
+bridge_commit :: proc(t: ^testing.T, f: ^Fixture, a, br: ^Dev, version: i64, bridge_id: string) -> domain.Domain_Error {
+	st := statement("approve", a, br, itoa(version), "1")
+	bin := Bridge_Approval_Input{user_id = USER, expected_version = version, statement = st, signature = sign(a, st), bridge_identity_public_key = br.sign_pub}
+	row, cerr := check_bridge_approval(&f.svc, bin)
+	if cerr.code != .None do return cerr
+	_, err := commit_bridge_approval(&f.svc, bin, row, bridge_id)
+	return err
+}
+
+// M3: an attach supersedes the bridge's old identity in the same CAS; a rolled-back
+// enrollment's entry is retired.
+@(test)
+test_vault_bridge_entry_lifecycle :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	f := fixture(t)
+	defer fixture_close(f)
+	a := make_dev(1)
+	do_genesis(t, f, &a)
+	old_id, new_id := make_dev(20, "bridge"), make_dev(21, "bridge")
+	testing.expect_value(t, bridge_commit(t, f, &a, &old_id, 1, "brg_1").code, domain.Error_Code.None)
+	testing.expect_value(t, bridge_commit(t, f, &a, &new_id, 2, "brg_1").code, domain.Error_Code.None)
+	testing.expect_value(t, dev_row(f, old_id.id).status, domain.Vault_Device_Status.Revoked)
+	testing.expect_value(t, dev_row(f, new_id.id).status, domain.Vault_Device_Status.Approved)
+	other, _ := other_approved_for_bridge(&f.svc, USER, "brg_1", new_id.id)
+	testing.expect(t, !other, "exactly one approved identity per bridge")
+
+	// Rollback after the directory commit: the approved entry is retired, once.
+	retired, err := retire_bridge_entry(&f.svc, USER, "brg_1")
+	testing.expect(t, err.code == .None && retired == new_id.id)
+	testing.expect_value(t, dev_row(f, new_id.id).status, domain.Vault_Device_Status.Revoked)
+	again, _ := retire_bridge_entry(&f.svc, USER, "brg_1")
+	testing.expect_value(t, again, "")
+	dir, _, _ := iface.vault_get_directory(&f.repo, USER)
+	testing.expect_value(t, dir.version, i64(4))
+}

@@ -139,6 +139,14 @@ test_vault_directory_http_flow :: proc(t: ^testing.T) {
 	// The bridge's code as a pending-device code: never found.
 	as_device := dispatch(&graph, "POST", approve_path, strings.concatenate({`{"user_code":"`, grant_code, `","expected_version":3}`}), vt_signed_headers(alice, &root, user_id, "POST", approve_path, strings.concatenate({`{"user_code":"`, grant_code, `","expected_version":3}`}), "nonce-vt-000000000003", VT_NOW_MS))
 	testing.expect(t, as_device.status == 404 || as_device.status == 409, as_device.body)
+
+	// M3(a): the operator cancels the still-pending enrollment after its directory
+	// commit: the bridge identity's entry is retired, not left approved.
+	testing.expect(t, !strings.contains(dir.body, `"status":"revoked"`))
+	cancel := dispatch(&graph, "POST", strings.concatenate({"/api/v1/bridges/", bridge_id, "/enrollment/cancel"}), "{}", alice)
+	testing.expect(t, cancel.status == 200 && strings.contains(cancel.body, `"rolled_back":true`), cancel.body)
+	after := dispatch(&graph, "GET", "/api/v1/vault/directory", "", alice)
+	testing.expect(t, strings.contains(after.body, `"status":"revoked","sign_alg"`), after.body)
 }
 
 // M2: the unsigned entry points (genesis, register, reset) take only an interactive

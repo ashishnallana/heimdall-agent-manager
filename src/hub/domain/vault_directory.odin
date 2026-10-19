@@ -121,6 +121,17 @@ Vault_Directory_Commit :: struct {
 	// Insert an already-approved device (bridge path: approved together with its grant).
 	insert_device: Maybe(Vault_Device),
 
+	// Hub-side retirement of an approved BRIDGE entry, guarded on status='approved'
+	// AND bridge_id = retire_bridge_id. No signed revocation statement exists for it:
+	//   - an enrollment rolled back after its directory commit (sweep or operator
+	//     cancel): the vault key was never delivered to that identity;
+	//   - an attach approving a new identity for the same bridge_id: the old identity
+	//     is superseded in the same CAS, so at most one approved identity maps to a
+	//     bridge_id at any time.
+	// Status 'revoked' with an empty revoked_by_device_id marks it hub-retired.
+	retire_device_id: string,
+	retire_bridge_id: string,
+
 	// Revoke an approved device. Guarded on status='approved'.
 	revoke_device_id:     string,
 	revocation_statement: string,

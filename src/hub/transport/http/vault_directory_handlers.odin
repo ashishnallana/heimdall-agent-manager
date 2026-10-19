@@ -399,21 +399,49 @@ vault_revoke_handler :: proc(ctx: rawptr, req: Request) -> Response {
 		if !w_ok do return bad_request(req, "a wrap is malformed")
 		wraps[i] = vd.Wrap_Input{wrap = w, signature = sig}
 	}
-	res, err := vd.revoke(h.vault, vd.Revoke_Input{
+	plan, err := vd.revoke_prepare(h.vault, vd.Revoke_Input{
 		user_id = auth.user_id, device_id = device_id_from_path(req), expected_version = version,
 		revoke_statement = obj_str(o, "revoke_statement"), signature = obj_sig(o, "signature"),
 		epoch_statement = obj_str(o, "epoch_statement"), epoch_signature = obj_sig(o, "epoch_signature"),
 		wraps = wraps, signer = signer,
 	})
 	if err.code != .None do return respond_error(err, req.request_id)
-	// A revoked bridge loses its credentials too (existing bridge revoke: tokens + live socket).
-	// The directory change is already committed; a failure here is reported, not hidden.
-	bridge_revoked := true
-	if res.target.kind == "bridge" && res.target.bridge_id != "" && h.bridges != nil {
-		_, bridge_revoked, _ = bridge_service.revoke_bridge(h.bridges, auth, res.target.bridge_id)
+	// A revoked bridge loses its credentials too, and FIRST: the tokens are revoked
+	// (idempotent) before the directory revoke is committed, so any failure leaves the
+	// safe state and fails the request. Skipped only when another approved identity
+	// still maps to the same bridge (the hub never lets that happen; defense in depth).
+	if target := plan.target; target.bridge_id != "" {
+		other, oerr := vd.other_approved_for_bridge(h.vault, auth.user_id, target.bridge_id, target.device_id)
+		if oerr.code != .None do return respond_error(oerr, req.request_id)
+		if !other {
+			if rerr := vault_revoke_bridge_credentials(h.bridges, auth, target.bridge_id); rerr.code != .None do return respond_error(rerr, req.request_id)
+		}
 	}
+	res, cerr := vd.revoke_commit(h.vault, plan)
+	if cerr.code != .None do return respond_error(cerr, req.request_id)
 	publish(h, auth.user_id, res.target.device_id, "revoked")
-	return respond_success(strings.concatenate({`{"directory_version":`, vd_itoa(res.version), `,"bridge_credentials_revoked":`, "true" if bridge_revoked else "false", "}"}, context.temp_allocator), req.request_id, auth_ctx_server_time(req))
+	return respond_success(strings.concatenate({`{"directory_version":`, vd_itoa(res.version), `,"bridge_credentials_revoked":`, "true" if res.target.bridge_id != "" else "false", "}"}, context.temp_allocator), req.request_id, auth_ctx_server_time(req))
+}
+
+// vault_revoke_bridge_credentials kills every credential of bridge_id: an enrolled
+// bridge is revoked (all token families, live socket closed), a still-pending
+// enrollment is rolled back. A bridge row that no longer exists has nothing left to
+// revoke. Any other failure is returned so the caller fails closed.
+vault_revoke_bridge_credentials :: proc(bridges: ^bridge_service.Bridge_Service, auth: contracts.Auth_Context, bridge_id: string) -> domain.Domain_Error {
+	if bridges == nil do return domain.domain_error(.Internal_Error, "bridge service is not configured")
+	b, found, err := bridge_service.get_bridge_for_enrollment(bridges, auth, bridge_id)
+	if !found {
+		if err.code == .Not_Found do return domain.Domain_Error{}
+		return err
+	}
+	if domain.bridge_is_pending(b) {
+		_, _, cerr := bridge_service.cancel_pending_enrollment(bridges, bridge_id)
+		return cerr
+	}
+	if b.status == .Revoked do return domain.Domain_Error{}
+	_, ok, rerr := bridge_service.revoke_bridge(bridges, auth, bridge_id)
+	if !ok do return rerr if rerr.code != .None else domain.domain_error(.Internal_Error, "bridge credentials could not be revoked")
+	return domain.Domain_Error{}
 }
 
 // ── PATCH /api/v1/vault/devices/{id} ────────────────────────────────────────

@@ -478,6 +478,18 @@ vault_commit_sqlite :: proc(ctx: rawptr, cm: domain.Vault_Directory_Commit) -> (
 		if rc != SQLITE_DONE do return 0, repo_err("the approval failed")
 		if changes != 1 do return conflict(conn, cm.user_id)
 	}
+	if cm.retire_device_id != "" {
+		stmt, ok := prepare(conn, "UPDATE vault_devices SET status = 'revoked', revoked_at = ?, revoked_by_device_id = NULL WHERE device_id = ? AND user_id = ? AND status = 'approved' AND bridge_id = ? AND bridge_id != '';")
+		if !ok do return 0, repo_err("failed to prepare the bridge retirement")
+		defer sqlite3_finalize(stmt)
+		bind_text(stmt, 1, cm.now)
+		bind_text(stmt, 2, cm.retire_device_id)
+		bind_text(stmt, 3, cm.user_id)
+		bind_text(stmt, 4, cm.retire_bridge_id)
+		rc, changes := step_changes(conn.db, stmt)
+		if rc != SQLITE_DONE do return 0, repo_err("the bridge retirement failed")
+		if changes != 1 do return conflict(conn, cm.user_id)
+	}
 	if d, has := cm.insert_device.?; has {
 		if d.user_id != cm.user_id || d.status != .Approved do return 0, domain.domain_error(.Validation_Failed, "an inserted device must be approved and belong to the directory owner")
 		if !insert_device_on(conn, d) do return 0, domain.vault_reason_error(.Conflict, "device_exists", "this device key is already registered")
