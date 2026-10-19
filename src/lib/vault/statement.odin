@@ -255,7 +255,7 @@ Statement :: struct {
 
 valid_statement_type :: proc(t: string) -> bool {
 	switch t {
-	case "genesis", "approve", "revoke", "epoch", "wrap", "recovery":
+	case "genesis", "approve", "revoke", "epoch", "wrap", "recovery", "register":
 		return true
 	}
 	return false

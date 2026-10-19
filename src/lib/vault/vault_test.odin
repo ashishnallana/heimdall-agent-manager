@@ -515,3 +515,58 @@ test_keyring_check_update_superset_only :: proc(t: ^testing.T) {
 	defer keyring_wipe(&other)
 	testing.expect_value(t, keyring_check_update(&stored, &other), Keyring_Update_Error.Different_User)
 }
+
+// P2 directory helpers: strict statement parsing, wrap signing/parsing, labels, ids.
+@(test)
+test_directory_helpers :: proc(t: ^testing.T) {
+	root := load_vectors(t)
+	so := obj(root, "statement")
+	canonical := str(so, "canonical")
+	st, ok := statement_parse(canonical)
+	testing.expect(t, ok, "canonical statement parses")
+	testing.expect_value(t, st.type, "approve")
+	testing.expect_value(t, st.subject_label_b64, "TGFwdG9wIOKAkyBGaXJlZm94")
+	_, bad1 := statement_parse(strings.concatenate({canonical, "\n"}, context.temp_allocator))
+	_, bad2 := statement_parse(strings.concatenate({"x", canonical}, context.temp_allocator))
+	bad3, _ := strings.replace(canonical, "type=approve", "type=promote", 1, context.temp_allocator)
+	_, bad3_ok := statement_parse(bad3)
+	testing.expect(t, !bad1 && !bad2 && !bad3_ok, "non-canonical statements rejected")
+
+	label, l_ok := label_from_b64(st.subject_label_b64, context.temp_allocator)
+	testing.expect(t, l_ok)
+	testing.expect_value(t, label, "Laptop – Firefox")
+	_, l_bad := label_from_b64("TGFwdG9w==", context.temp_allocator)
+	_, l_ctrl := label_from_b64("AQ", context.temp_allocator) // 0x01
+	testing.expect(t, !l_bad && !l_ctrl, "padded or control-character labels rejected")
+
+	id, id_ok := device_id_from_sign_pub(str(so, "issuer_public_key"), context.temp_allocator)
+	testing.expect(t, id_ok && valid_device_id(id))
+	fp, fp_ok := device_fingerprint(str(so, "issuer_public_key"), "", context.temp_allocator)
+	testing.expect(t, fp_ok && len(fp) == 19)
+
+	// A wrap signed by its wrapper verifies against wrap_statement; re-addressing it fails.
+	priv: ecdsa.Private_Key
+	testing.expect(t, ecdsa.private_key_set_bytes(&priv, .SECP256R1, unhex(str(so, "issuer_private_key"))))
+	w := Keyring_Wrap{
+		alg = WRAP_ALG_ECDH_P256_HKDF_AES, recipient_device_id = "dev_4c1f4ac594a116010b8166b9daccc3e8",
+		directory_version = 7, current_epoch = 2, ephemeral_public_key = str(so, "issuer_public_key"),
+		iv = "bc20a2fb46127e3a719bdb68", ciphertext = "00112233445566778899aabbccddeeff0011",
+		wrapped_by_device_id = id,
+	}
+	stmt, s_ok := wrap_statement(&w, "usr_0123456789abcdef", context.temp_allocator)
+	testing.expect(t, s_ok)
+	sig, sig_ok := sign_p256(&priv, transmute([]byte)stmt)
+	testing.expect(t, sig_ok)
+	sig_text, _ := signature_object(&sig, context.temp_allocator)
+	signed, j_ok := wrap_signed_json(&w, sig_text, context.temp_allocator)
+	testing.expect(t, j_ok)
+	parsed_v, p_ok := json.parse_string(signed, json.DEFAULT_SPECIFICATION, true, context.temp_allocator)
+	testing.expect(t, p_ok == nil)
+	w2, sig2, w_ok := wrap_from_value(parsed_v, context.temp_allocator)
+	testing.expect(t, w_ok, "signed wrap parses")
+	stmt2, _ := wrap_statement(&w2, "usr_0123456789abcdef", context.temp_allocator)
+	testing.expect(t, verify(SIGN_ALG_ECDSA_P256_SHA256, str(so, "issuer_public_key"), transmute([]byte)stmt2, sig2))
+	w2.recipient_device_id = "dev_00000000000000000000000000000000"
+	stmt3, _ := wrap_statement(&w2, "usr_0123456789abcdef", context.temp_allocator)
+	testing.expect(t, !verify(SIGN_ALG_ECDSA_P256_SHA256, str(so, "issuer_public_key"), transmute([]byte)stmt3, sig2))
+}

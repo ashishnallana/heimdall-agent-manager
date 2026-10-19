@@ -149,7 +149,7 @@ export async function signP256(privateKey: CryptoKey, msg: Uint8Array): Promise<
 // ── canonical statements ─────────────────────────────────────────────────────
 
 export const STATEMENT_HEADER = 'heimdall-vault-statement/v1';
-export const STATEMENT_TYPES = ['genesis', 'approve', 'revoke', 'epoch', 'wrap', 'recovery'] as const;
+export const STATEMENT_TYPES = ['genesis', 'approve', 'revoke', 'epoch', 'wrap', 'recovery', 'register'] as const;
 export type StatementType = (typeof STATEMENT_TYPES)[number];
 
 export const STATEMENT_FIELDS = [
