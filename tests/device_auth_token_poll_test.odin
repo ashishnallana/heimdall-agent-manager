@@ -12,6 +12,8 @@
 package device_auth_token_poll_test
 
 import "core:fmt"
+import "core:crypto/ecdsa"
+import vault "odin_test:lib/vault"
 import "core:testing"
 import "core:os"
 import "core:strings"
@@ -175,6 +177,7 @@ main :: proc() {
 	// started the flow.
 	// =====================================================================
 	BPK :: "04030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bc"
+	IDP, IDPROOF := test_bridge_identity(BPK, PKCE_CHALLENGE)
 	PKCE_VERIFIER :: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	PKCE_CHALLENGE :: "ZtNPunH49FD35FWYhT5Tv8I7vRKQJ8uxMaL0_9eHjNA"
 	// A different, well-formed verifier whose SHA-256 is NOT the challenge above.
@@ -187,7 +190,7 @@ main :: proc() {
 
 	bres, bok, _ := device_auth.authorize(&psvc, {
 		client = "ham-bridge", device_label = "dawnstar", os = "linux",
-		bridge_public_key = BPK, os_user = "tanmay",
+		bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF, os_user = "tanmay",
 		code_challenge = PKCE_CHALLENGE, code_challenge_method = "S256",
 	}, "127.0.0.1:1", "")
 	assert_true(bok, "bridge authorize for PKCE poll succeeds")
@@ -263,7 +266,7 @@ main :: proc() {
 	//    status field, so a bridge with the wrong verifier cannot mistake it for
 	//    "keep polling".
 	hres, hok, _ := device_auth.authorize(&psvc, {
-		client = "ham-bridge", bridge_public_key = BPK,
+		client = "ham-bridge", bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF,
 		code_challenge = PKCE_CHALLENGE, code_challenge_method = "S256",
 	}, "127.0.0.1:1", "")
 	assert_true(hok, "bridge authorize for handler test succeeds")
@@ -450,4 +453,21 @@ main :: proc() {
 	assert_eq(race_poll.status, device_auth.Poll_Status.Approved, "REGRESSION: a grant approved in time must poll Approved, never Expired, even after the original deadline has since passed")
 	assert_eq(race_poll.access_token, "hut_fake_poll_token", "regression: the approved-late grant still hands out its token")
 	fmt.println("REGRESSION OK: approval just inside the deadline is not reported Expired by a poll that lands just after it")
+}
+
+// Passwordless vault: every bridge grant carries a persistent identity key and its
+// proof of possession over (bridge_public_key, code_challenge). Fixed scalar.
+test_bridge_identity :: proc(ecdh_pub, challenge: string) -> (pub_hex: string, proof: string) {
+	priv: ecdsa.Private_Key
+	scalar: [32]byte
+	scalar[0] = 0x42
+	scalar[31] = 0x07
+	_ = ecdsa.private_key_set_bytes(&priv, .SECP256R1, scalar[:])
+	pub: [65]byte
+	ecdsa.private_key_public_bytes(&priv, pub[:])
+	pub_hex = vault.hex_encode_lower(pub[:])
+	msg, _ := vault.bridge_enroll_proof_canonical(ecdh_pub, challenge)
+	sig, _ := vault.sign_p256(&priv, transmute([]byte)msg)
+	proof, _ = vault.signature_object(&sig)
+	return
 }

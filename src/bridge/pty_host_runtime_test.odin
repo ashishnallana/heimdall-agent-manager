@@ -693,67 +693,6 @@ shell_stream_detach_command_handles_payload_and_caching :: proc(t: ^testing.T) {
 }
 
 @(test)
-pty_stream_worker_emit_frame_encodes_base64_and_queues :: proc(t: ^testing.T) {
-	sync.mutex_lock(&bridge_test_config_mutex)
-	defer sync.mutex_unlock(&bridge_test_config_mutex)
-	sync.mutex_lock(&keystore_test_mutex)
-	defer sync.mutex_unlock(&keystore_test_mutex)
-
-	bridge_pty_stream_reset()
-	defer bridge_pty_stream_reset()
-
-	prev_key, had_key := os.lookup_env("HEIMDALL_VAULT_KEYRING", context.allocator)
-	defer {
-		if had_key {
-			_ = os.set_env("HEIMDALL_VAULT_KEYRING", prev_key)
-			delete(prev_key)
-		} else {
-			os.unset_env("HEIMDALL_VAULT_KEYRING")
-		}
-	}
-	_ = os.set_env("HEIMDALL_VAULT_KEYRING", "unconfigured_key")
-
-	prev_configured, had_configured := os.lookup_env("HEIMDALL_VAULT_CONFIGURED", context.allocator)
-	saved_workspace := bridge_workspace_vault_configured
-	bridge_workspace_vault_configured = false
-	_ = os.set_env("HEIMDALL_VAULT_CONFIGURED", "false")
-	defer {
-		bridge_workspace_vault_configured = saved_workspace
-		if had_configured {
-			_ = os.set_env("HEIMDALL_VAULT_CONFIGURED", prev_configured)
-			delete(prev_configured)
-		} else {
-			os.unset_env("HEIMDALL_VAULT_CONFIGURED")
-		}
-	}
-
-	test_data := "echo streaming test\n"
-	bridge_pty_stream_emit_frame(nil, "sh_stream_1", transmute([]byte)test_data)
-
-	frames := bridge_pty_stream_take_outgoing()
-	defer {
-		// EACH STRING IS HEAP-OWNED AND MUST SAY SO. bridge_pty_stream_emit_frame builds these
-		// with runtime.heap_allocator() and bridge_pty_stream_take_outgoing transfers them
-		// unchanged, so a bare delete(f) frees heap memory through the test's tracking
-		// allocator. That is a genuine mismatched free — it showed up as
-		// "+++ bad free" under the memory tracker and was the first corruption in the chain
-		// that ended in the REQ-SHELL-40 segfault. `frames` itself carries its own allocator,
-		// so deleting the array needs no argument.
-		for f in frames do delete(f, runtime.heap_allocator())
-		delete(frames)
-	}
-
-	testing.expect_value(t, len(frames), 1)
-	if len(frames) == 1 {
-		sid, payload, snapshot, encrypted, ok := pty_test_decode_output(frames[0])
-		testing.expect(t, ok, "frame is a binary pty_wire output frame")
-		testing.expect_value(t, sid, "sh_stream_1")
-		testing.expect_value(t, payload, test_data)
-		testing.expect(t, !snapshot && !encrypted, "plain incremental output")
-	}
-}
-
-@(test)
 pty_stream_worker_detach_deregisters_immediately :: proc(t: ^testing.T) {
 	sync.mutex_lock(&bridge_test_config_mutex)
 	defer sync.mutex_unlock(&bridge_test_config_mutex)

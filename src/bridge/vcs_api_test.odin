@@ -724,31 +724,27 @@ vcs_api_save_missing_file :: proc(t: ^testing.T) {
 vcs_api_save_writes_file :: proc(t: ^testing.T) {
 	sync.mutex_lock(&bridge_test_config_mutex)
 	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
+	env := test_env_set("HEIMDALL_VAULT_KEYRING", test_keyring_env_value(TEST_ENC_VAULT_KEY))
+	defer test_env_restore(&env)
 	vcs_save_test_pin_tmp_root()
 	repo := vcs_test_make_marker_repo("save-write", ".git")
 	defer vcs_test_rm(repo)
-	out := bridge_vcs_save_json("s", fmt.tprintf(`{{"command_id":"s","root":"%s","path":"hello.txt","content":"hello world"}}`, repo))
+	// The editor buffer arrives sealed for this bridge and this path (finding N4).
+	sealed := test_fs_write_seal("hello world", TEST_ENC_VAULT_KEY, "hello.txt")
+	out := bridge_vcs_save_json("s", fmt.tprintf(`{{"command_id":"s","root":"%s","path":"hello.txt","content":"%s"}}`, repo, sealed))
 	defer delete(out)
 	testing.expect(t, strings.contains(out, `"ok":true`), "save writes -> ok:true")
 	testing.expect(t, strings.contains(out, `"provider":"git"`), "provider resolves to git")
 	data, rerr := os.read_entire_file_from_path(fmt.tprintf("%s/hello.txt", repo), context.allocator)
 	testing.expect(t, rerr == nil, "saved file exists on disk")
 	testing.expect(t, string(data) == "hello world", "file content matches the saved buffer")
-}
-
-@(test)
-vcs_api_save_unescapes_content :: proc(t: ^testing.T) {
-	sync.mutex_lock(&bridge_test_config_mutex)
-	defer sync.mutex_unlock(&bridge_test_config_mutex)
-	vcs_save_test_pin_tmp_root()
-	repo := vcs_test_make_marker_repo("save-nl", ".git")
-	defer vcs_test_rm(repo)
-	out := bridge_vcs_save_json("s", fmt.tprintf("{{\"command_id\":\"s\",\"root\":\"%s\",\"path\":\"nl.txt\",\"content\":\"a\\nb\"}}", repo))
-	defer delete(out)
-	testing.expect(t, strings.contains(out, `"ok":true`), "save (escaped content) -> ok:true")
-	data, rerr := os.read_entire_file_from_path(fmt.tprintf("%s/nl.txt", repo), context.allocator)
-	testing.expect(t, rerr == nil, "saved file exists on disk")
-	testing.expect(t, string(data) == "a\nb", "escaped newline decoded to a real newline")
+	// A plaintext buffer is refused.
+	plain := bridge_vcs_save_json("s", fmt.tprintf(`{{"command_id":"s","root":"%s","path":"plain.txt","content":"hello"}}`, repo))
+	defer delete(plain)
+	testing.expect(t, strings.contains(plain, `"ok":false`), "plaintext save refused")
+	testing.expect(t, !os.exists(fmt.tprintf("%s/plain.txt", repo)), "plaintext never reaches disk")
 }
 
 @(test)

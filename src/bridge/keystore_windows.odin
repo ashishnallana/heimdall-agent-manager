@@ -81,15 +81,6 @@ keystore_os_read_secret_status :: proc(slot: Keystore_Slot, bridge_id: string, d
 	return size, .Found
 }
 
-keystore_os_secret_present :: proc(slot: Keystore_Slot, bridge_id: string) -> bool {
-	if _keystore_mock_syscall_errno != 0 do return false
-	cred: ^Credential_W
-	if !CredReadW(credential_target(slot, bridge_id), CRED_TYPE_GENERIC, 0, &cred) || cred == nil do return false
-	if cred.CredentialBlob != nil do mem.zero_explicit(rawptr(cred.CredentialBlob), int(cred.CredentialBlobSize))
-	CredFree(cred)
-	return true
-}
-
 // keystore_os_delete_secret returns true when no credential remains for the slot.
 keystore_os_delete_secret :: proc(slot: Keystore_Slot, bridge_id: string) -> bool {
 	if _keystore_mock_syscall_errno != 0 do return false

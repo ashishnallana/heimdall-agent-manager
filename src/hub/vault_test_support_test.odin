@@ -59,8 +59,8 @@ vt_sign :: proc(d: ^Vt_Dev, msg: string) -> string {
 	return text
 }
 
-vt_statement :: proc(type, user_id: string, issuer, subject: ^Vt_Dev, version, epoch: string) -> string {
-	st := vault.Statement{type = type, user_id = user_id, directory_version = version, issuer_device_id = issuer.id, issued_at_ms = "1792404000000", epoch = epoch}
+vt_statement :: proc(type, user_id: string, issuer, subject: ^Vt_Dev, version, epoch: string, wrap_sha := "") -> string {
+	st := vault.Statement{type = type, user_id = user_id, directory_version = version, issuer_device_id = issuer.id, issued_at_ms = "1792404000000", epoch = epoch, wrap_sha256 = wrap_sha}
 	if subject != nil {
 		st.subject_device_id = subject.id
 		st.subject_kind = subject.kind
@@ -70,22 +70,35 @@ vt_statement :: proc(type, user_id: string, issuer, subject: ^Vt_Dev, version, e
 		st.subject_wrap_alg = "" if subject.kind == "bridge" else vault.WRAP_ALG_ECDH_P256_HKDF_AES
 		st.subject_label_b64 = VT_LABEL_B64
 	}
-	if type == "epoch" do st.epoch_commit = VT_COMMIT
+	if type == "epoch" || type == "approve" do st.epoch_commit = VT_COMMIT
 	text, _ := vault.statement_canonical(&st)
 	return text
 }
 
-// vt_wrap_json renders a signed wrap (dummy ciphertext: the hub never opens wraps).
-vt_wrap_json :: proc(user_id: string, signer, recipient: ^Vt_Dev, version, epoch: u64) -> string {
-	w := vault.Keyring_Wrap{
+@(private = "file")
+vt_wrap :: proc(signer, recipient: ^Vt_Dev, version, epoch: u64) -> vault.Keyring_Wrap {
+	return vault.Keyring_Wrap{
 		alg = vault.WRAP_ALG_ECDH_P256_HKDF_AES, recipient_device_id = recipient.id,
 		directory_version = version, current_epoch = u32(epoch),
 		ephemeral_public_key = recipient.ecdh_pub, iv = "bc20a2fb46127e3a719bdb68",
 		ciphertext = "00112233445566778899aabbccddeeff00112233", wrapped_by_device_id = signer.id,
 	}
+}
+
+// vt_wrap_json renders a signed wrap (dummy ciphertext: the hub never opens wraps).
+vt_wrap_json :: proc(user_id: string, signer, recipient: ^Vt_Dev, version, epoch: u64) -> string {
+	w := vt_wrap(signer, recipient, version, epoch)
 	stmt, _ := vault.wrap_statement(&w, user_id)
 	text, _ := vault.wrap_signed_json(&w, vt_sign(signer, stmt))
 	return text
+}
+
+// vt_wrap_sha is the wrap_sha256 an approval statement names for vt_wrap_json's wrap.
+vt_wrap_sha :: proc(signer, recipient: ^Vt_Dev, version, epoch: u64) -> string {
+	w := vt_wrap(signer, recipient, version, epoch)
+	digest: [32]byte
+	_ = vault.wrap_sha256(&w, digest[:])
+	return vault.hex_encode_lower(digest[:])
 }
 
 vt_user_id :: proc(graph: ^app.App_Graph, headers: []contracts.HTTP_Header) -> string {
@@ -139,12 +152,18 @@ vt_ensure_vault :: proc(graph: ^app.App_Graph, headers: []contracts.HTTP_Header)
 	return user_id, 1, true
 }
 
-// vt_bridge_approval returns a fresh bridge identity key and the `vault_approval`
-// JSON object the root signs for it.
-vt_bridge_approval :: proc(user_id: string, version: i64) -> (identity_pub: string, approval_json: string) {
+// vt_enroll_proof is the bridge identity's proof of possession for /device/authorize.
+vt_enroll_proof :: proc(br: ^Vt_Dev, ecdh_pub, code_challenge: string) -> string {
+	msg, _ := vault.bridge_enroll_proof_canonical(ecdh_pub, code_challenge)
+	return vt_sign(br, msg)
+}
+
+// vt_bridge_approval returns a fresh bridge identity and the `vault_approval` JSON
+// object the root signs for it.
+vt_bridge_approval :: proc(user_id: string, version: i64) -> (br: Vt_Dev, approval_json: string) {
 	seed := sync.atomic_add(&vt_bridge_seed, 1)
-	br := vt_make_dev(u16(seed), "bridge")
+	br = vt_make_dev(u16(seed), "bridge")
 	root := vt_make_dev(VT_ROOT_SEED)
 	st := vt_statement("approve", user_id, &root, &br, fmt.tprintf("%d", version), "1")
-	return br.sign_pub, strings.concatenate({`{"expected_version":`, fmt.tprintf("%d", version), `,"statement":"`, vt_escape(st), `","signature":`, vt_sign(&root, st), "}"})
+	return br, strings.concatenate({`{"expected_version":`, fmt.tprintf("%d", version), `,"statement":"`, vt_escape(st), `","signature":`, vt_sign(&root, st), "}"})
 }

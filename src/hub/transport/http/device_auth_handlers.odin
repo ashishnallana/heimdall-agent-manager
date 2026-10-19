@@ -62,6 +62,8 @@ device_authorize_handler :: proc(ctx: rawptr, req: Request) -> Response {
 		code_challenge_method = json_string(req.body, "code_challenge_method"),
 		// Passwordless vault: the bridge's persistent identity key (required for a bridge grant).
 		bridge_identity_public_key = json_string(req.body, "bridge_identity_public_key"),
+		// ...and its proof of possession (signature object; see vault.bridge_enroll_proof_canonical).
+		bridge_identity_proof = json_signature(req.body, "bridge_identity_proof"),
 	}
 	xff := header_value(req.headers, "X-Forwarded-For")
 	result, ok, err := device_auth.authorize(handlers.service, input, req.remote_addr, xff)
@@ -291,8 +293,15 @@ device_approve_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	// "decision recorded, nothing to address".
 	if input.approve {
 		if bridge_id, has_bridge := device_auth.approved_bridge_id(handlers.service, input.user_code); has_bridge {
-			// The bridge's vault directory entry was committed with the approval.
-			if handlers.event_bus != nil do events.publish_resource_changed(handlers.event_bus, auth_ctx.user_id, VAULT_DEVICES_RESOURCE, bridge_id, "approved", "{}")
+			// The bridge's vault directory entry was committed with the approval; the
+			// event names the directory DEVICE id, like every other vault_devices event.
+			if handlers.event_bus != nil {
+				if identity_key, has_key := device_auth.approved_bridge_identity_key(handlers.service, input.user_code); has_key {
+					if device_id, id_ok := vault.device_id_from_sign_pub(identity_key, context.temp_allocator); id_ok {
+						events.publish_resource_changed(handlers.event_bus, auth_ctx.user_id, VAULT_DEVICES_RESOURCE, device_id, "approved", "{}")
+					}
+				}
+			}
 			data := strings.builder_make()
 			strings.write_string(&data, "{\"hub_observed\":{\"bridge_id\":\"")
 			write_handler_json_string(&data, bridge_id)
@@ -398,6 +407,19 @@ json_bool_literal :: proc(body, key: string) -> (value: bool, ok: bool) {
 	return jsonx.extract_bool_literal(body, key)
 }
 
+// json_signature reads a top-level signature (object or its canonical text) as
+// canonical text; "" when absent or malformed (the validator then rejects it).
+json_signature :: proc(body, key: string) -> string {
+	v, ok := jsonx.parse_body(body, context.temp_allocator)
+	if !ok do return ""
+	root, is_obj := v.(json.Object)
+	if !is_obj do return ""
+	sig_v, has := root[key]
+	if !has do return ""
+	text, _ := vault.signature_text_from_value(sig_v, context.temp_allocator)
+	return text
+}
+
 // parse_vault_approval reads the optional `vault_approval:{expected_version,
 // statement, signature}` of POST /device/approve. Required for a bridge grant (the
 // minter refuses without it); ignored for a user-token grant.
@@ -421,6 +443,11 @@ parse_vault_approval :: proc(body: string) -> device_auth.Vault_Approval {
 // Rate-limited with the same per-IP verify budget as bridge codes, and scoped to
 // the session user's own directory: another account's code is "invalid or expired".
 vault_device_verify :: proc(handlers: ^Device_Auth_Handlers, req: Request, auth_ctx: contracts.Auth_Context, raw_code, request_ip: string) -> Response {
+	// A user principal only: a bridge, enrollment or instance credential carries a
+	// user id too, but must never resolve (and so learn the keys of) a pending device.
+	if auth_ctx.kind != .Trusted_Proxy && auth_ctx.kind != .User_Token {
+		return respond_error(domain.domain_error(.Forbidden, "resolving a device code requires a user session"), req.request_id)
+	}
 	if !device_auth.rate_check(handlers.service, "", request_ip) {
 		device_auth_record("verify", "rate_limited")
 		return respond_error(domain.domain_error(.Rate_Limited, "too many device verification attempts from this IP"), req.request_id)

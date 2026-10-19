@@ -409,6 +409,15 @@ approved_bridge_id :: proc(service: ^Device_Auth_Service, user_code: string) -> 
 	return grant.minted_bridge_id, true
 }
 
+// approved_bridge_identity_key returns the identity public key of an APPROVED bridge
+// grant (what its vault directory entry was created from). Temp-allocated.
+approved_bridge_identity_key :: proc(service: ^Device_Auth_Service, user_code: string) -> (string, bool) {
+	if user_code == "" do return "", false
+	_, grant, ok := grant_by_user_code(service.store, user_code)
+	if !ok || grant.status != .Approved || !is_bridge_grant(grant) || grant.bridge_identity_public_key == "" do return "", false
+	return strings.clone(grant.bridge_identity_public_key, context.temp_allocator), true
+}
+
 // Poll_Status is the device-poll response status (ELDA-3).
 Poll_Status :: enum {
 	Pending,

@@ -1,12 +1,13 @@
 package main
 
-import "core:crypto"
 import json "core:encoding/json"
 import "core:fmt"
 import "core:os"
 import "core:strings"
 import "core:time"
+import jsonx "odin_test:lib/jsonx"
 import os_random "odin_test:lib/os_random"
+import vault "odin_test:lib/vault"
 
 // ── shell verb group ─────────────────────────────────────────────────────────
 // Subcommands managing the three session kinds on the Bridge host. All calls
@@ -102,26 +103,68 @@ ctl_shell_rest_with_preview :: proc(endpoint, token, method, path, body: string)
 	if preview_url != "" do fmt.println("Preview:", preview_url)
 }
 
-ctl_shell_attach_enc_spec :: proc(args: []string, cmd_str, cwd_str: string, fields: ^[dynamic]string) {
-	if keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator); key_ok {
-		now_ms := time.to_unix_nanoseconds(time.now()) / 1_000_000
-		nonce_bytes: [16]byte
-		if !os_random.fill(nonce_bytes[:]) {
-			fmt.println(`{"ok":false,"message":"system randomness unavailable; refusing to build enc_spec"}`)
-			os.exit(1)
-		}
-		nonce_hex := fmt.tprintf("%x", nonce_bytes)
-		spec_json := json_object(
-			json_kv("cmd", cmd_str),
-			json_kv("cwd", cwd_str),
-			json_kv_raw("timestamp", fmt.tprintf("%d", now_ms)),
-			json_kv("nonce", nonce_hex),
-		)
-		defer delete(spec_json)
-		// The bridge rejects enc_spec under any epoch but its current one (command
-		// epoch floor); ctl_seal_or_exit always seals under the current epoch.
-		append(fields, json_kv("enc_spec", ctl_seal_or_exit(spec_json, keyring)))
+// ctl_shell_bridge_boot_id returns the target bridge's current unseal boot id, read
+// from the hub (GET /api/v1/bridges/<id>/public-key). An enc_spec is bound to it, so
+// an unknown boot id aborts. Test builds take --bridge-boot-id instead of the network.
+ctl_shell_bridge_boot_id :: proc(endpoint, token, bridge_id: string, args: []string) -> string {
+	when ODIN_TEST {
+		if has_flag(args, "--bridge-boot-id") do return option_value(args, "--bridge-boot-id", "")
 	}
+	response, ok := ctl_agent_local_call(endpoint, token, "agent.rest.request", json_object(
+		json_kv("http_method", "GET"),
+		json_kv("path", fmt.tprintf("/api/v1/bridges/%s/public-key", safe_path_part(bridge_id))),
+	))
+	if !ok do return ""
+	defer delete(response)
+	return jsonx.extract_string(response, "unseal_boot_id", "", false, context.temp_allocator)
+}
+
+ctl_shell_boot_id_valid :: proc(boot_id: string) -> bool {
+	if boot_id == "" || len(boot_id) > 64 do return false
+	for c in transmute([]u8)boot_id {
+		switch c {
+		case '0' ..= '9', 'a' ..= 'f':
+		case:
+			return false
+		}
+	}
+	return true
+}
+
+// ctl_shell_attach_enc_spec appends a client-chosen session_id and the enc_spec that
+// authorizes exactly that start: the sealed spec binds cmd/cwd to the bridge id, the
+// session id, the kind and the bridge's current boot id (finding N1). There is no
+// plaintext shell start: without a keyring, randomness or the boot id this exits.
+ctl_shell_attach_enc_spec :: proc(endpoint, token, bridge_id, kind: string, args: []string, cmd_str, cwd_str: string, fields: ^[dynamic]string) {
+	keyring := ctl_vault_keyring_for_write(args)
+	boot_id := ctl_shell_bridge_boot_id(endpoint, token, bridge_id, args)
+	if !ctl_shell_boot_id_valid(boot_id) {
+		fmt.println(`{"ok":false,"message":"the bridge has not announced a boot id; refusing to build enc_spec"}`)
+		os.exit(1)
+	}
+	random_bytes: [32]byte
+	if !os_random.fill(random_bytes[:]) {
+		fmt.println(`{"ok":false,"message":"system randomness unavailable; refusing to build enc_spec"}`)
+		os.exit(1)
+	}
+	nonce_hex := vault.hex_encode_lower(random_bytes[:16], context.temp_allocator)
+	session_id := strings.concatenate({"sh_", vault.hex_encode_lower(random_bytes[16:], context.temp_allocator)}, context.temp_allocator)
+	now_ms := time.to_unix_nanoseconds(time.now()) / 1_000_000
+	spec_json := json_object(
+		json_kv("cmd", cmd_str),
+		json_kv("cwd", cwd_str),
+		json_kv_raw("timestamp", fmt.tprintf("%d", now_ms)),
+		json_kv("nonce", nonce_hex),
+		json_kv("bridge_id", bridge_id),
+		json_kv("session_id", session_id),
+		json_kv("kind", kind),
+		json_kv("boot_id", boot_id),
+	)
+	defer delete(spec_json)
+	append(fields, json_kv("session_id", session_id))
+	// The bridge rejects enc_spec under any epoch but its current one (command
+	// epoch floor); ctl_seal_or_exit always seals under the current epoch.
+	append(fields, json_kv("enc_spec", ctl_seal_or_exit(spec_json, keyring)))
 }
 
 // start — POST /api/v1/bridges/{bridge_id}/shells
@@ -148,7 +191,7 @@ ctl_shell_start :: proc(endpoint, token: string, tokens, args: []string) {
 	if v := option_value(args, "--project", ""); v != "" do append(&fields, json_kv("project_id", v))
 	if v := option_value(args, "--chain", ""); v != "" do append(&fields, json_kv("chain_id", v))
 	if v := option_value(args, "--agent", ""); v != "" do append(&fields, json_kv("agent_instance_id", v))
-	ctl_shell_attach_enc_spec(args, cmd_val, cwd_val, &fields)
+	ctl_shell_attach_enc_spec(endpoint, token, bridge_id, kind, args, cmd_val, cwd_val, &fields)
 	ctl_shell_rest_with_preview(endpoint, token, "POST",
 		fmt.tprintf("/api/v1/bridges/%s/shells", safe_path_part(bridge_id)),
 		json_object_from_slice(fields[:]))
@@ -303,7 +346,7 @@ ctl_shell_run :: proc(endpoint, token: string, tokens, args: []string) {
 	if cwd_val != "" do append(&fields, json_kv("cwd", cwd_val))
 	if v := option_value(args, "--label", ""); v != "" do append(&fields, json_kv("label", v))
 	if background do append(&fields, json_kv_raw("background", "true"))
-	ctl_shell_attach_enc_spec(args, cmd, cwd_val, &fields)
+	ctl_shell_attach_enc_spec(endpoint, token, bridge_id, "run", args, cmd, cwd_val, &fields)
 
 	response, ok := ctl_agent_local_call(endpoint, token, "agent.rest.request", json_object(
 		json_kv("http_method", "POST"),
@@ -382,7 +425,7 @@ ctl_shell_serve :: proc(endpoint, token: string, tokens, args: []string) {
 	if cwd_val != "" do append(&fields, json_kv("cwd", cwd_val))
 	if v := option_value(args, "--label", ""); v != "" do append(&fields, json_kv("label", v))
 	if v := ctl_shell_uint_flag(args, "--port", ""); v != "" do append(&fields, json_kv_raw("server_port", v))
-	ctl_shell_attach_enc_spec(args, cmd, cwd_val, &fields)
+	ctl_shell_attach_enc_spec(endpoint, token, bridge_id, "server", args, cmd, cwd_val, &fields)
 
 	ctl_shell_rest_with_preview(endpoint, token, "POST",
 		fmt.tprintf("/api/v1/bridges/%s/shells", safe_path_part(bridge_id)),

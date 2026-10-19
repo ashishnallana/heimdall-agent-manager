@@ -37,23 +37,6 @@ test_chat_send_encryption_with_vault_key :: proc(t: ^testing.T) {
 	testing.expect_value(t, dec_body, orig_body)
 }
 
-@(test)
-test_chat_send_without_vault_key_leaves_plaintext :: proc(t: ^testing.T) {
-	sync.mutex_lock(&vault_test_mutex)
-	defer sync.mutex_unlock(&vault_test_mutex)
-	sb := ctl_vault_test_sandbox_open("chat-send-without-vault-key-leaves-plaintext")
-	defer ctl_vault_test_sandbox_close(&sb)
-	orig_to := "user"
-	orig_body := "Standard unencrypted status update."
-
-	args := []string{}
-
-	out := ctl_agentmode_chat_send_params(orig_to, orig_body, args)
-
-	testing.expect(t, strings.contains(out, `"to":"user"`), "to must be preserved in plaintext")
-	testing.expect(t, strings.contains(out, `"body":"Standard unencrypted status update."`), "chat body must remain plaintext")
-	testing.expect(t, !strings.contains(out, "vault:v2:"), "output must not contain vault armor")
-}
 
 @(test)
 test_chat_set_title_encryption_with_vault_key :: proc(t: ^testing.T) {
@@ -78,21 +61,6 @@ test_chat_set_title_encryption_with_vault_key :: proc(t: ^testing.T) {
 	testing.expect_value(t, dec_title, orig_title)
 }
 
-@(test)
-test_chat_set_title_without_vault_key_leaves_plaintext :: proc(t: ^testing.T) {
-	sync.mutex_lock(&vault_test_mutex)
-	defer sync.mutex_unlock(&vault_test_mutex)
-	sb := ctl_vault_test_sandbox_open("chat-set-title-without-vault-key-leaves-plaintext")
-	defer ctl_vault_test_sandbox_close(&sb)
-	orig_title := "Standard Conversation Title"
-
-	args := []string{}
-
-	out := ctl_agentmode_chat_set_title_params(orig_title, args)
-
-	testing.expect(t, strings.contains(out, `"title":"Standard Conversation Title"`), "title must remain plaintext")
-	testing.expect(t, !strings.contains(out, "vault:v2:"), "output must not contain vault armor")
-}
 
 @(test)
 test_chat_read_transparent_decryption :: proc(t: ^testing.T) {
@@ -178,7 +146,7 @@ test_chat_send_with_comma_separated_options :: proc(t: ^testing.T) {
 		"--options", "Staging,Production,Canary",
 	}
 
-	out := ctl_agentmode_chat_send_params(orig_to, orig_body, args)
+	out := unseal_out(ctl_agentmode_chat_send_params(orig_to, orig_body, with_kr(args)))
 
 	testing.expect(t, strings.contains(out, `"to":"user"`), "to must be user")
 	testing.expect(t, strings.contains(out, orig_body), "body must be preserved")
@@ -208,7 +176,7 @@ test_chat_send_with_repeated_option_flags :: proc(t: ^testing.T) {
 		"--option", "Reject",
 	}
 
-	out := ctl_agentmode_chat_send_params(orig_to, orig_body, args)
+	out := unseal_out(ctl_agentmode_chat_send_params(orig_to, orig_body, with_kr(args)))
 
 	testing.expect(t, strings.contains(out, `"options":["Approve","Reject"]`), "options array must collect repeated --option flags")
 
@@ -235,7 +203,7 @@ test_chat_send_with_expected_answers_and_choices_aliases :: proc(t: ^testing.T) 
 		"--choices", "Postpone",
 	}
 
-	out := ctl_agentmode_chat_send_params(orig_to, orig_body, args)
+	out := unseal_out(ctl_agentmode_chat_send_params(orig_to, orig_body, with_kr(args)))
 
 	testing.expect(t, strings.contains(out, `"options":["Yes","No","Postpone"]`), "options array must include aliases")
 
@@ -257,7 +225,7 @@ test_chat_send_without_options_omits_options_key :: proc(t: ^testing.T) {
 	orig_body := "Plain text question with no suggested options."
 	args := []string{}
 
-	out := ctl_agentmode_chat_send_params(orig_to, orig_body, args)
+	out := unseal_out(ctl_agentmode_chat_send_params(orig_to, orig_body, with_kr(args)))
 
 	testing.expect(t, strings.contains(out, `"to":"user"`), "to must be user")
 	testing.expect(t, strings.contains(out, orig_body), "body must be preserved")
@@ -277,7 +245,7 @@ test_chat_send_with_comma_separated_actions :: proc(t: ^testing.T) {
 		"--actions", "crd_act_1,crd_act_2",
 	}
 
-	out := ctl_agentmode_chat_send_params(orig_to, orig_body, args)
+	out := unseal_out(ctl_agentmode_chat_send_params(orig_to, orig_body, with_kr(args)))
 
 	testing.expect(t, strings.contains(out, `"to":"user"`), "to must be user")
 	testing.expect(t, strings.contains(out, orig_body), "body must be preserved")
@@ -306,7 +274,7 @@ test_chat_send_with_repeated_action_flags :: proc(t: ^testing.T) {
 		"--action", "crd_act_beta",
 	}
 
-	out := ctl_agentmode_chat_send_params(orig_to, orig_body, args)
+	out := unseal_out(ctl_agentmode_chat_send_params(orig_to, orig_body, with_kr(args)))
 
 	testing.expect(t, strings.contains(out, `"action_ids":["crd_act_alpha","crd_act_beta"]`), "action_ids array must collect repeated --action flags")
 
@@ -332,7 +300,8 @@ test_action_create_params_memory_approve :: proc(t: ^testing.T) {
 		"--title", "Approve memory proposal 42",
 	}
 
-	params, ok := ctl_agentmode_action_create_params(args)
+	params, ok := ctl_agentmode_action_create_params(with_kr(args))
+	if ok do params = unseal_out(params)
 	testing.expect(t, ok, "action create params should succeed")
 
 	val, err := json.parse_string(params, allocator = context.temp_allocator)
@@ -361,7 +330,8 @@ test_action_create_params_issue_create :: proc(t: ^testing.T) {
 		"--scope", "project",
 	}
 
-	params, ok := ctl_agentmode_action_create_params(args)
+	params, ok := ctl_agentmode_action_create_params(with_kr(args))
+	if ok do params = unseal_out(params)
 	testing.expect(t, ok, "action create params should succeed")
 
 	val, err := json.parse_string(params, allocator = context.temp_allocator)
@@ -390,7 +360,8 @@ test_action_create_params_custom_operations :: proc(t: ^testing.T) {
 		"--operations", `[{"op":"task.vote","task_id":"task_123","result":"lgtm"}]`,
 	}
 
-	params, ok := ctl_agentmode_action_create_params(args)
+	params, ok := ctl_agentmode_action_create_params(with_kr(args))
+	if ok do params = unseal_out(params)
 	testing.expect(t, ok, "action create params with custom operations should succeed")
 
 	val, err := json.parse_string(params, allocator = context.temp_allocator)

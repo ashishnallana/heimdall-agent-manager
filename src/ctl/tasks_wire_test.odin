@@ -225,12 +225,12 @@ test_v2_reviewers_field_repeatable_and_csv :: proc(t: ^testing.T) {
 
 @(test)
 test_agentmode_task_params_use_v2_actor_keys :: proc(t: ^testing.T) {
-	create := ctl_agentmode_task_create_params([]string{"--title", "t", "--assignee", "agt_w", "--reviewer", "agt_r1", "--reviewer", "agt_r2"})
+	create := unseal_out(ctl_agentmode_task_create_params(with_kr([]string{"--title", "t", "--assignee", "agt_w", "--reviewer", "agt_r1", "--reviewer", "agt_r2"})))
 	testing.expect(t, strings.contains(create, `"assignee":"agt_w"`), "create sends assignee as a plain agent_id")
 	testing.expect(t, strings.contains(create, `"reviewers":["agt_r1","agt_r2"]`), "create sends reviewers as an agent_id array")
 	testing.expect(t, !strings.contains(create, "assignee_ref") && !strings.contains(create, "reviewer_refs"), "legacy ref shapes are gone")
 
-	update := ctl_agentmode_task_update_params("task_1", []string{"--assignee", "agt_w2", "--reviewer", ""})
+	update := unseal_out(ctl_agentmode_task_update_params("task_1", with_kr([]string{"--assignee", "agt_w2", "--reviewer", ""})))
 	testing.expect(t, strings.contains(update, `"assignee":"agt_w2"`), "update sends assignee as a plain agent_id")
 	testing.expect(t, strings.contains(update, `"reviewers":[]`), "update --reviewer \"\" clears the list")
 }

@@ -41,9 +41,12 @@ const TEST_VAULT_KEY_RAW = '0123456789abcdef0123456789abcdef0123456789abcdef0123
 
 installWindowShim();
 const shellFetch = installFetchCapture();
-const { shellsApi } = await import('../src/ui/api/endpoints/shells.ts');
+const shellsModule = await import('../src/ui/api/endpoints/shells.ts');
+const { shellsApi } = shellsModule;
 
-const CREATE_SHELL_OK = { data: { session: { session_id: 'sh_test', kind: 'shell' } } };
+// One stub answers both requests createShell makes: the bridge public-key record
+// (unseal_boot_id) and the create itself (session).
+const CREATE_SHELL_OK = { data: { session: { session_id: 'sh_test', kind: 'shell' }, unseal_boot_id: TEST_BRIDGE_BOOT_ID } };
 
 /** Dispatch the real createShell mutation and return the body that hit the wire. */
 async function captureCreateShell(store: any, args: Record<string, any>) {
@@ -59,7 +62,8 @@ async function captureCreateShell(store: any, args: Record<string, any>) {
 test('REQ-SHELL-ENC-8: createShell puts an armored enc_spec with cmd, cwd, timestamp and nonce on the wire when unlocked', async () => {
   const cmd = 'npm run dev';
   const cwd = '/home/user/project';
-  const startTime = Date.now();
+  const FIXED_NOW = 1_760_000_000_000;
+  shellsModule.setShellSpecClock(() => FIXED_NOW);
 
   const store = await makeVaultStore();
   const key = await unlockVault(store, TEST_VAULT_KEY_RAW);
@@ -84,12 +88,19 @@ test('REQ-SHELL-ENC-8: createShell puts an armored enc_spec with cmd, cwd, times
     assert.equal(parsedSpec.cmd, cmd, 'decrypted spec cmd must match input cmd');
     assert.equal(parsedSpec.cwd, cwd, 'decrypted spec cwd must match input cwd');
     assert.ok(typeof parsedSpec.timestamp === 'number', 'timestamp must be a number');
-    assert.ok(parsedSpec.timestamp >= startTime && parsedSpec.timestamp <= Date.now(), 'timestamp must be current');
+    assert.equal(parsedSpec.timestamp, FIXED_NOW, 'timestamp comes from the injected clock');
     assert.ok(
       /^[0-9a-f]{32}$/.test(parsedSpec.nonce),
       `nonce must be 16 CSPRNG bytes as hex, got: ${parsedSpec.nonce}`,
     );
+    // N1: bound to the bridge, the client-chosen session id, the kind and the boot id.
+    assert.equal(parsedSpec.bridge_id, 'brg_test');
+    assert.match(body.session_id, /^sh_[0-9a-f]{32}$/);
+    assert.equal(parsedSpec.session_id, body.session_id);
+    assert.equal(parsedSpec.kind, 'shell');
+    assert.equal(parsedSpec.boot_id, TEST_BRIDGE_BOOT_ID);
   } finally {
+    shellsModule.setShellSpecClock();
     await clearActiveKey();
   }
 });
@@ -114,33 +125,34 @@ test('REQ-FIX-ENC-1: createShell encrypts enc_spec with the CryptoKey from getAc
   }
 });
 
-test('REQ-SHELL-ENC-8: createShell omits enc_spec and sends plaintext when the vault is locked', async () => {
+test('N2: createShell refuses without an active key and sends nothing', async () => {
   const store = await makeVaultStore();
   await unlockVault(store, TEST_VAULT_KEY_RAW);
   await lockVaultFully(store);
   try {
     assert.equal(getActiveVaultKey(), null, 'precondition: locking clears the active key');
-    const body = await captureCreateShell(store, { cmd: 'ls -la', cwd: '/tmp', kind: 'run' });
-
-    assert.strictEqual(body.enc_spec, undefined, 'enc_spec must be omitted when the vault is locked');
-    assert.equal(body.cmd, 'ls -la', 'cmd must pass through in plaintext');
-    assert.equal(body.cwd, '/tmp', 'cwd must pass through in plaintext');
+    shellFetch.reset();
+    const res: any = await store.dispatch(
+      shellsApi.endpoints.createShell.initiate({ bridgeId: 'brg_test', cmd: 'ls -la', cwd: '/tmp', kind: 'run' } as any),
+    );
+    assert.ok(res?.error, 'createShell must fail without a key');
+    assert.equal(shellFetch.requests.length, 0, 'no request may reach the hub');
   } finally {
     await clearActiveKey();
   }
 });
 
-test('REQ-SHELL-ENC-8: createShell omits enc_spec when no key is active even though state says unlocked', async () => {
+test('N1: createShell refuses when the bridge has not announced a boot id', async () => {
   const store = await makeVaultStore();
   await unlockVault(store, TEST_VAULT_KEY_RAW);
-  // The failure mode this guards: Redux still flags unlocked, but the key is gone (a
-  // reload, or a lock that did not propagate). Encryption must be skipped, not attempted.
-  await clearActiveKey();
   try {
-    assert.equal(getActiveVaultKey(), null, 'precondition: no active key');
-    const body = await captureCreateShell(store, { cmd: 'cat /etc/hosts', cwd: '/', kind: 'run' });
-    assert.strictEqual(body.enc_spec, undefined, 'enc_spec must be omitted when no key is active');
-    assert.equal(body.cmd, 'cat /etc/hosts');
+    shellFetch.reset();
+    shellFetch.setNextResponse({ data: { public_key: '04ab' } });
+    const res: any = await store.dispatch(
+      shellsApi.endpoints.createShell.initiate({ bridgeId: 'brg_test', cmd: 'ls', kind: 'run' } as any),
+    );
+    assert.ok(res?.error, 'createShell must fail without a boot id');
+    assert.equal(shellFetch.requests.filter((r) => r.method === 'POST').length, 0, 'no create may reach the hub');
   } finally {
     await clearActiveKey();
   }
@@ -211,16 +223,17 @@ test('REQ-SHELL-ENC-10: sendShellInput puts a PTY v2 enc_b64 and NO plaintext on
   }
 });
 
-test('REQ-SHELL-ENC-10: sendShellInput omits enc_b64 and data_b64 when the vault is locked', async () => {
-  const data = 'ls -la\n';
+test('N2: sendShellInput refuses without an active key and sends nothing', async () => {
   const store = await makeVaultStore();
   await unlockVault(store, TEST_VAULT_KEY_RAW);
   await lockVaultFully(store);
   try {
-    const body = await captureSendShellInput(store, data);
-    assert.strictEqual(body.enc_b64, undefined, 'enc_b64 must not be set when the vault is locked');
-    assert.strictEqual(body.data_b64, undefined, 'data_b64 must not be set when the vault is locked');
-    assert.equal(body.data, data, 'the plaintext input still has to reach the bridge');
+    shellFetch.reset();
+    const res: any = await store.dispatch(
+      shellsApi.endpoints.sendShellInput.initiate({ sessionId: 'sh_test', data: 'ls -la' } as any),
+    );
+    assert.ok(res?.error, 'sendShellInput must fail without a key');
+    assert.equal(shellFetch.requests.length, 0, 'no plaintext input may reach the hub');
   } finally {
     await clearActiveKey();
   }

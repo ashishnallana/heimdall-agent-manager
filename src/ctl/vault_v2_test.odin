@@ -3,6 +3,7 @@ package main
 import "core:encoding/base64"
 import "core:strings"
 import "core:testing"
+import jsonx "odin_test:lib/jsonx"
 import vault "odin_test:lib/vault"
 
 // ── Test shims ────────────────────────────────────────────────────────────────
@@ -116,20 +117,7 @@ tkr_b64 :: proc(key_hex: string) -> string {
 }
 
 @(test)
-test_ctl_vault_write_policy_fails_closed :: proc(t: ^testing.T) {
-	// No keyring: plaintext only on a definite "not configured".
-	testing.expect_value(t, ctl_vault_write_decision(true, false, .Unknown), Ctl_Vault_Write.Seal)
-	testing.expect_value(t, ctl_vault_write_decision(false, false, .Not_Configured), Ctl_Vault_Write.Plaintext)
-	testing.expect_value(t, ctl_vault_write_decision(false, false, .Configured), Ctl_Vault_Write.Abort)
-	testing.expect_value(t, ctl_vault_write_decision(false, false, .Unknown), Ctl_Vault_Write.Abort)
-	testing.expect_value(t, ctl_vault_write_decision(false, true, .Not_Configured), Ctl_Vault_Write.Abort)
-
-	// agent.vault.status: only disabled + configured:false is "not configured".
-	testing.expect_value(t, ctl_vault_config_from_agent_status(`{"ok":true,"data":{"status":"disabled","configured":false}}`), Ctl_Vault_Config.Not_Configured)
-	testing.expect_value(t, ctl_vault_config_from_agent_status(`{"ok":true,"data":{"status":"locked","configured":true}}`), Ctl_Vault_Config.Configured)
-	testing.expect_value(t, ctl_vault_config_from_agent_status(`{"ok":false,"error":"x"}`), Ctl_Vault_Config.Unknown)
-	testing.expect_value(t, ctl_vault_config_from_agent_status(`{"ok":true,"data":{"status":"disabled"}}`), Ctl_Vault_Config.Unknown)
-
+test_ctl_armored_means_parseable_envelope :: proc(t: ^testing.T) {
 	// "Already armored" means a parseable envelope, not a prefix.
 	testing.expect(t, !is_vault_armored("vault:v2:e1:not-really-a-token"), "a bare prefix is not armored")
 	kr := tkr("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
@@ -142,13 +130,67 @@ test_ctl_vault_write_policy_fails_closed :: proc(t: ^testing.T) {
 test_ctl_seal_if_seals_hub_mode_fields :: proc(t: ^testing.T) {
 	kr := tkr("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
 	defer vault.keyring_wipe(kr)
-	sealed := ctl_seal_if("chain title", kr, true)
+	sealed := ctl_seal_if("chain title", kr)
 	testing.expect(t, is_vault_armored(sealed), "sealed when a keyring is in hand")
 	plain, res := ctl_vault_open(sealed, kr, context.temp_allocator)
 	testing.expect(t, res == .Ok && plain == "chain title", "round-trips")
-	testing.expect_value(t, ctl_seal_if(sealed, kr, true), sealed)
-	testing.expect_value(t, ctl_seal_if("", kr, true), "")
-	testing.expect_value(t, ctl_seal_if("plain", nil, false), "plain")
+	testing.expect_value(t, ctl_seal_if(sealed, kr), sealed)
+	testing.expect_value(t, ctl_seal_if("", kr), "")
 	// A fake envelope prefix is sealed, not passed through.
-	testing.expect(t, ctl_seal_if("vault:v2:e1:fake", kr, true) != "vault:v2:e1:fake", "a bare prefix is still sealed")
+	testing.expect(t, ctl_seal_if("vault:v2:e1:fake", kr) != "vault:v2:e1:fake", "a bare prefix is still sealed")
+}
+
+// ── Write builders always seal (finding N2) ─────────────────────────────────
+// Shape tests for the param builders inject a keyring and read the output back
+// decrypted, so they assert on the same JSON they did before sealing was mandatory.
+
+CTL_TEST_WRITE_KEY :: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+// with_kr appends the test-only --vault-keyring flag. Temp-allocated.
+with_kr :: proc(args: []string) -> []string {
+	out := make([dynamic]string, 0, len(args) + 2, context.temp_allocator)
+	append(&out, ..args)
+	append(&out, "--vault-keyring", tkr_b64(CTL_TEST_WRITE_KEY))
+	return out[:]
+}
+
+// unseal_out takes ownership of a builder's output and returns it with every vault
+// token decrypted under CTL_TEST_WRITE_KEY.
+unseal_out :: proc(s: string) -> string {
+	defer delete(s)
+	kr := tkr(CTL_TEST_WRITE_KEY)
+	defer vault.keyring_wipe(kr)
+	return ctl_decrypt_json_string(s, kr, true)
+}
+
+@(test)
+test_ctl_shell_enc_spec_is_bound_to_bridge_session_kind_boot :: proc(t: ^testing.T) {
+	fields := make([dynamic]string, context.temp_allocator)
+	args := with_kr([]string{"--bridge-boot-id", "00112233aabbccdd"})
+	ctl_shell_attach_enc_spec("", "", "brg_n1", "server", args, "npm start", "/w", &fields)
+	body := json_object_from_slice(fields[:])
+	defer delete(body)
+	session_id := jsonx.extract_string(body, "session_id", "", true, context.temp_allocator)
+	testing.expect(t, len(session_id) == 35 && strings.has_prefix(session_id, "sh_"), session_id)
+	kr := tkr(CTL_TEST_WRITE_KEY)
+	defer vault.keyring_wipe(kr)
+	spec, res := ctl_vault_open(jsonx.extract_string(body, "enc_spec", "", true, context.temp_allocator), kr, context.temp_allocator)
+	testing.expect(t, res == .Ok, "enc_spec opens under the current epoch")
+	testing.expect(t, strings.contains(spec, `"bridge_id":"brg_n1"`), spec)
+	testing.expect(t, strings.contains(spec, `"kind":"server"`), spec)
+	testing.expect(t, strings.contains(spec, `"boot_id":"00112233aabbccdd"`), spec)
+	testing.expect(t, strings.contains(spec, session_id), spec)
+	testing.expect(t, strings.contains(spec, `"cmd":"npm start"`), spec)
+}
+
+@(test)
+test_ctl_card_title_and_rationale_are_sealed :: proc(t: ^testing.T) {
+	out, ok := ctl_agentmode_action_create_params(with_kr([]string{"--title", "Secret card", "--rationale", "because secret", "--operations", `[{"op":"task.vote","task_id":"task_1","result":"lgtm"}]`}))
+	testing.expect(t, ok, "params built")
+	defer delete(out)
+	testing.expect(t, !strings.contains(out, "Secret card") && !strings.contains(out, "because secret"), out)
+	testing.expect(t, strings.contains(out, `"title":"vault:v2:`) && strings.contains(out, `"rationale":"vault:v2:`), out)
+	cards := ctl_agentmode_cards_create_params("Secret card", with_kr([]string{"--rationale", "because secret"}))
+	defer delete(cards)
+	testing.expect(t, !strings.contains(cards, "Secret card") && !strings.contains(cards, "because secret"), cards)
 }

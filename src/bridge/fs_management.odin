@@ -10,6 +10,7 @@ package main
 // v1 capabilities: list a directory, stat a path, mkdir -p. No file contents, no
 // delete/rename, no browsing outside the root.
 
+import "core:crypto"
 import "core:fmt"
 import "core:os"
 import "core:slice"
@@ -854,8 +855,20 @@ bridge_fs_list_dir :: proc(requested: string, include_hidden: bool = true, curso
 // whole, still under the 1MB cap). The whole file (up to the cap) is still capped
 // by BRIDGE_FS_MAX_VIEW_BYTES on total size.
 // bridge_fs_vault_snapshot is the single status+keyring read each fs command takes
-// (finding L2). A variable so a test can lock the vault right after the snapshot.
-bridge_fs_vault_snapshot := bridge_vault_status_and_key
+// (finding L2).
+bridge_fs_vault_snapshot :: proc() -> (Vault_Status, vault.Vault_Keyring) {
+	when ODIN_TEST {
+		if bridge_fs_test_vault_hook != nil do return bridge_fs_test_vault_hook()
+	}
+	return bridge_vault_status_and_key()
+}
+
+// Test builds only (consulted under `when ODIN_TEST` above; always nil otherwise):
+// per test thread (Odin runs each test on its own thread), the vault state the fs
+// commands of THAT test see, injected explicitly instead of read from the process
+// environment or the keystore.
+@(thread_local)
+bridge_fs_test_vault_hook: proc() -> (Vault_Status, vault.Vault_Keyring)
 
 bridge_fs_read_file :: proc(requested: string, sandbox_root: string = "", offset: i64 = 0, limit: i64 = 0, root_prevalidated := false) -> Bridge_Fs_Read_File_Result {
 	root, root_ok := bridge_fs_resolve_command_root(sandbox_root, root_prevalidated)
@@ -870,7 +883,7 @@ bridge_fs_read_file :: proc(requested: string, sandbox_root: string = "", offset
 	// and a later key read must not let the content leave in plaintext.
 	vault_status, vault_kr := bridge_fs_vault_snapshot()
 	defer vault.keyring_wipe(&vault_kr)
-	if vault_status == .Locked {
+	if vault_status != .Unlocked {
 		delete(canonical)
 		return Bridge_Fs_Read_File_Result{
 			ok = false,
@@ -939,20 +952,18 @@ bridge_fs_read_file :: proc(requested: string, sandbox_root: string = "", offset
 		}
 	}
 
-	if vault_status == .Unlocked {
-		encrypted, enc_ok := bridge_encrypt_vault_text(result.content, &vault_kr)
-		delete(result.content)
-		if !enc_ok {
-			// Fail closed: a keyring is held, so the content must not leave in plaintext.
-			result.content = ""
-			result.ok = false
-			result.viewable = false
-			result.error_code = "encryption_failed"
-			result.message = "Could not encrypt file content"
-			return result
-		}
-		result.content = encrypted
+	encrypted, enc_ok := bridge_encrypt_vault_text(result.content, &vault_kr)
+	delete(result.content)
+	if !enc_ok {
+		// Fail closed: the content never leaves in plaintext.
+		result.content = ""
+		result.ok = false
+		result.viewable = false
+		result.error_code = "encryption_failed"
+		result.message = "Could not encrypt file content"
+		return result
 	}
+	result.content = encrypted
 
 	return result
 }
@@ -984,7 +995,8 @@ bridge_fs_create_file :: proc(requested: string, sandbox_root: string = "") -> B
 	return Bridge_Fs_Create_File_Result{ok = true, path = canonical, created = true, within_root = true}
 }
 
-// bridge_fs_write_file writes `content` to `requested` atomically.
+// bridge_fs_write_file writes `content` (sealed for this bridge and `requested`,
+// see below) to `requested` atomically.
 // The parent directory must exist within the sandbox root.
 // Target cannot be a directory. Outside root => path_outside_root.
 bridge_fs_write_file :: proc(requested: string, content: string, sandbox_root: string = "") -> Bridge_Fs_Write_File_Result {
@@ -1009,7 +1021,7 @@ bridge_fs_write_file :: proc(requested: string, content: string, sandbox_root: s
 
 	vault_status, vault_kr := bridge_fs_vault_snapshot()
 	defer vault.keyring_wipe(&vault_kr)
-	if vault_status == .Locked {
+	if vault_status != .Unlocked {
 		return Bridge_Fs_Write_File_Result{
 			ok = false,
 			path = requested,
@@ -1019,35 +1031,24 @@ bridge_fs_write_file :: proc(requested: string, content: string, sandbox_root: s
 		}
 	}
 
-	payload_to_write := content
-	decrypted_payload: string
-	has_decrypted := false
-	defer if has_decrypted do delete(decrypted_payload)
-
-	if vault.is_armored(content) {
-		if vault_status != .Unlocked {
-			return Bridge_Fs_Write_File_Result{
-				ok = false,
-				path = requested,
-				within_root = true,
-				error_code = "invalid_vault_key",
-				message = "Vault decryption failed for file write",
-			}
+	// File content always arrives sealed for THIS bridge and THIS target path
+	// (heimdall-fs-write-v2 AAD, finding N4) under the current epoch; plaintext, a
+	// content envelope, or a token for another path or bridge is refused.
+	decrypted, dec_ok := vault.fs_write_open(content, &vault_kr, bridge_config.daemon_id, requested, vault_kr.current_epoch, context.allocator)
+	if !dec_ok {
+		return Bridge_Fs_Write_File_Result{
+			ok = false,
+			path = requested,
+			within_root = true,
+			error_code = "invalid_vault_key",
+			message = "File content must be vault-encrypted for this bridge and path",
 		}
-		decrypted, dec_ok := bridge_decrypt_vault_token(content, &vault_kr)
-		if !dec_ok {
-			return Bridge_Fs_Write_File_Result{
-				ok = false,
-				path = requested,
-				within_root = true,
-				error_code = "invalid_vault_key",
-				message = "Vault decryption failed for file write",
-			}
-		}
-		decrypted_payload = decrypted
-		has_decrypted = true
-		payload_to_write = decrypted
 	}
+	defer {
+		crypto.zero_explicit(raw_data(decrypted), len(decrypted))
+		delete(decrypted)
+	}
+	payload_to_write := string(decrypted)
 
 	temp_name := fmt.tprintf(".tmp_write_%d_%s", time.to_unix_nanoseconds(time.now()), filepath.base(canonical))
 	temp_path, jerr := filepath.join([]string{parent, temp_name}, context.allocator)
@@ -1455,7 +1456,7 @@ bridge_fs_grep :: proc(query: string, case_sensitive: bool, max_results: int, sa
 	}
 	vault_status, vault_kr := bridge_fs_vault_snapshot()
 	defer vault.keyring_wipe(&vault_kr)
-	if vault_status == .Locked {
+	if vault_status != .Unlocked {
 		delete(canonical)
 		return Bridge_Fs_Grep_Result{ok = false, root = root, error_code = "vault_locked", message = "Bridge vault is locked. Unseal required."}
 	}
@@ -1612,13 +1613,11 @@ bridge_fs_grep :: proc(query: string, case_sensitive: bool, max_results: int, sa
 		return Bridge_Fs_Grep_Result{ok = false, root = root, matches = matches[:], truncated = true, error_code = "deadline_exceeded", message = "Filesystem command deadline exceeded"}
 	}
 
-	if vault_status == .Unlocked {
-		for &m in matches {
-			encrypted, enc_ok := bridge_encrypt_vault_text(m.line, &vault_kr, context.allocator)
-			delete(m.line)
-			// Fail closed: never return a matched line in plaintext while a keyring is held.
-			m.line = encrypted if enc_ok else strings.clone(vault.FAILED_MARKER)
-		}
+	for &m in matches {
+		encrypted, enc_ok := bridge_encrypt_vault_text(m.line, &vault_kr, context.allocator)
+		delete(m.line)
+		// Fail closed: never return a matched line in plaintext.
+		m.line = encrypted if enc_ok else strings.clone(vault.FAILED_MARKER)
 	}
 
 	return Bridge_Fs_Grep_Result{

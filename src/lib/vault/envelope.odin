@@ -192,13 +192,19 @@ envelope_parse :: proc(token: string, allocator := context.allocator) -> (epoch:
 // seal_with_nonce is the deterministic core of seal. Production callers use seal or
 // seal_with_key, which draw the nonce from the OS CSPRNG; this exists for vectors.
 seal_with_nonce :: proc(plaintext: []byte, key: []byte, epoch: u32, nonce: []byte, allocator := context.allocator) -> (token: string, ok: bool) {
+	aad_buf: [64]byte
+	return seal_with_nonce_aad(plaintext, key, epoch, nonce, envelope_aad(epoch, aad_buf[:]), allocator)
+}
+
+// seal_with_nonce_aad produces the v2 token format under an explicit AAD. Channels
+// that reuse the token format with their own AAD (fs writes) go through this, so a
+// token sealed for one channel never opens in another.
+seal_with_nonce_aad :: proc(plaintext: []byte, key: []byte, epoch: u32, nonce: []byte, aad: []byte, allocator := context.allocator) -> (token: string, ok: bool) {
 	if len(key) != KEY_BYTES || len(nonce) != NONCE_BYTES || epoch == 0 do return "", false
 	if len(plaintext) > MAX_PAYLOAD_BYTES - HEADER_BYTES do return "", false
 	payload := make([]byte, HEADER_BYTES + len(plaintext), context.temp_allocator)
 	defer crypto.zero_explicit(raw_data(payload), len(payload))
 	copy(payload[:NONCE_BYTES], nonce)
-	aad_buf: [64]byte
-	aad := envelope_aad(epoch, aad_buf[:])
 	gcm: aes.Context_GCM
 	aes.init_gcm(&gcm, key)
 	defer aes.reset_gcm(&gcm)
@@ -232,9 +238,13 @@ seal_string :: proc(plaintext: string, kr: ^Vault_Keyring, allocator := context.
 
 // open_with_key authenticates payload (nonce|tag|ct) for epoch under key.
 open_payload_with_key :: proc(payload: []byte, key: []byte, epoch: u32, allocator := context.allocator) -> (plaintext: []byte, ok: bool) {
-	if len(key) != KEY_BYTES || len(payload) < HEADER_BYTES do return nil, false
 	aad_buf: [64]byte
-	aad := envelope_aad(epoch, aad_buf[:])
+	return open_payload_with_key_aad(payload, key, envelope_aad(epoch, aad_buf[:]), allocator)
+}
+
+// open_payload_with_key_aad authenticates nonce|tag|ct under key and an explicit AAD.
+open_payload_with_key_aad :: proc(payload: []byte, key: []byte, aad: []byte, allocator := context.allocator) -> (plaintext: []byte, ok: bool) {
+	if len(key) != KEY_BYTES || len(payload) < HEADER_BYTES do return nil, false
 	ct := payload[HEADER_BYTES:]
 	dst := make([]byte, len(ct), allocator)
 	gcm: aes.Context_GCM

@@ -14,10 +14,10 @@ ALT_TASK_VAULT_KEY  :: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba98
 
 @(test)
 test_task_user_approval_flags_serialize :: proc(t: ^testing.T) {
-	created := ctl_agentmode_task_create_params([]string{"--title", "Review me", "--require-user-approval"})
+	created := unseal_out(ctl_agentmode_task_create_params(with_kr([]string{"--title", "Review me", "--require-user-approval"})))
 	defer delete(created)
 	testing.expect(t, strings.contains(created, `"requires_user_approval":true`), "create must serialize the positive flag")
-	updated := ctl_agentmode_task_update_params("task_1", []string{"--no-require-user-approval"})
+	updated := unseal_out(ctl_agentmode_task_update_params("task_1", with_kr([]string{"--no-require-user-approval"})))
 	defer delete(updated)
 	testing.expect(t, strings.contains(updated, `"requires_user_approval":false`), "update must serialize the negative flag")
 	testing.expect(t, !ctl_task_reviewer_flags_valid([]string{"--require-user-approval", "--no-require-user-approval"}, true), "conflicting flags must fail")
@@ -74,27 +74,6 @@ test_task_create_encryption_with_vault_key :: proc(t: ^testing.T) {
 	testing.expect_value(t, dec_desc, orig_desc)
 }
 
-@(test)
-test_task_create_without_vault_key_leaves_plaintext :: proc(t: ^testing.T) {
-	sync.mutex_lock(&vault_test_mutex)
-	defer sync.mutex_unlock(&vault_test_mutex)
-	sb := ctl_vault_test_sandbox_open("task-create-without-vault-key-leaves-plaintext")
-	defer ctl_vault_test_sandbox_close(&sb)
-	orig_title := "Plaintext Task Title"
-	orig_desc := "Plaintext Task Description"
-
-	args := []string{
-		"--title", orig_title,
-		"--description", orig_desc,
-		"--chain", "chain_123",
-		"--priority", "p2",
-	}
-
-	out := ctl_agentmode_task_create_params(args)
-	testing.expect(t, strings.contains(out, `"title":"Plaintext Task Title"`), "title must remain plaintext")
-	testing.expect(t, strings.contains(out, `"description":"Plaintext Task Description"`), "description must remain plaintext")
-	testing.expect(t, !strings.contains(out, "vault:v2:"), "must not contain vault armor")
-}
 
 @(test)
 test_task_comment_encryption_with_vault_key :: proc(t: ^testing.T) {
@@ -123,19 +102,6 @@ test_task_comment_encryption_with_vault_key :: proc(t: ^testing.T) {
 	testing.expect_value(t, dec_body, orig_body)
 }
 
-@(test)
-test_task_comment_without_vault_key_leaves_plaintext :: proc(t: ^testing.T) {
-	sync.mutex_lock(&vault_test_mutex)
-	defer sync.mutex_unlock(&vault_test_mutex)
-	sb := ctl_vault_test_sandbox_open("task-comment-without-vault-key-leaves-plaintext")
-	defer ctl_vault_test_sandbox_close(&sb)
-	orig_body := "Regular plaintext comment body with no vault key."
-	args := []string{}
-
-	out := ctl_agentmode_task_comment_params("task_xyz_2", orig_body, args)
-	testing.expect(t, strings.contains(out, `"body":"Regular plaintext comment body with no vault key."`), "body must remain plaintext")
-	testing.expect(t, !strings.contains(out, "vault:v2:"), "must not contain vault armor")
-}
 
 @(test)
 test_task_update_encryption_with_vault_key :: proc(t: ^testing.T) {
@@ -266,34 +232,34 @@ test_task_create_and_update_bridge_pinning_params :: proc(t: ^testing.T) {
 		"--title", "Pinned task",
 		"--bridge", "brg_18d03379a7d6d47b",
 	}
-	out_create := ctl_agentmode_task_create_params(create_args_with_bridge)
+	out_create := unseal_out(ctl_agentmode_task_create_params(with_kr(create_args_with_bridge)))
 	testing.expect(t, strings.contains(out_create, `"bridge_id":"brg_18d03379a7d6d47b"`), "create params must serialize bridge_id when --bridge provided")
 
 	// 2. Task create without --bridge
 	create_args_no_bridge := []string{
 		"--title", "Unpinned task",
 	}
-	out_create_no_bridge := ctl_agentmode_task_create_params(create_args_no_bridge)
+	out_create_no_bridge := unseal_out(ctl_agentmode_task_create_params(with_kr(create_args_no_bridge)))
 	testing.expect(t, !strings.contains(out_create_no_bridge, `"bridge_id"`), "create params must omit bridge_id when --bridge absent")
 
 	// 3. Task update with --bridge
 	update_args_with_bridge := []string{
 		"--bridge", "brg_18c67a924477af3b",
 	}
-	out_update_bridge := ctl_agentmode_task_update_params("task_123", update_args_with_bridge)
+	out_update_bridge := unseal_out(ctl_agentmode_task_update_params("task_123", with_kr(update_args_with_bridge)))
 	testing.expect(t, strings.contains(out_update_bridge, `"bridge_id":"brg_18c67a924477af3b"`), "update params must serialize bridge_id when --bridge provided")
 
 	// 4. Task update clearing bridge with ""
 	update_args_clear_bridge := []string{
 		"--bridge", "",
 	}
-	out_update_clear := ctl_agentmode_task_update_params("task_123", update_args_clear_bridge)
+	out_update_clear := unseal_out(ctl_agentmode_task_update_params("task_123", with_kr(update_args_clear_bridge)))
 	testing.expect(t, strings.contains(out_update_clear, `"bridge_id":""`), "update params must serialize bridge_id=\"\" when --bridge \"\" provided")
 
 	// 5. Task update without --bridge
 	update_args_no_bridge := []string{
 		"--title", "Updated title only",
 	}
-	out_update_no_bridge := ctl_agentmode_task_update_params("task_123", update_args_no_bridge)
+	out_update_no_bridge := unseal_out(ctl_agentmode_task_update_params("task_123", with_kr(update_args_no_bridge)))
 	testing.expect(t, !strings.contains(out_update_no_bridge, `"bridge_id"`), "update params must omit bridge_id when --bridge absent")
 }

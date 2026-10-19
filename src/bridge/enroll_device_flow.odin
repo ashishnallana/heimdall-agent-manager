@@ -339,6 +339,7 @@ bridge_enroll_authorize_body :: proc(
 	d: Bridge_Machine_Descriptor,
 	public_key_hex, code_challenge: string,
 	identity_public_key_hex: string = "",
+	identity_proof_json: string = "",
 	allocator := context.allocator,
 ) -> string {
 	b := strings.builder_make(allocator)
@@ -356,7 +357,14 @@ bridge_enroll_authorize_body :: proc(
 		strings.write_string(&b, "\",\"bridge_identity_public_key\":\"")
 		json_write_string(&b, identity_public_key_hex)
 	}
-	strings.write_string(&b, "\",\"code_challenge\":\"")
+	if identity_proof_json != "" {
+		// A canonical signature object (vault.signature_object): embedded as JSON.
+		strings.write_string(&b, "\",\"bridge_identity_proof\":")
+		strings.write_string(&b, identity_proof_json)
+		strings.write_string(&b, ",\"code_challenge\":\"")
+	} else {
+		strings.write_string(&b, "\",\"code_challenge\":\"")
+	}
 	json_write_string(&b, code_challenge)
 	strings.write_string(&b, "\",\"code_challenge_method\":\"S256\"}")
 	return strings.to_string(b)
@@ -962,9 +970,15 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 	code_verifier, verifier_ok := bridge_enroll_random_token()
 	if !verifier_ok do return false
 	code_challenge := bridge_pkce_challenge(code_verifier)
+	// Proof that this host holds the identity key, bound to this ECDH key and challenge.
+	identity_proof, proof_ok := bridge_unseal_identity_enrollment_proof(public_key_hex, code_challenge)
+	if !proof_ok {
+		fmt.eprintln("ham-bridge enroll: could not sign the identity proof of possession; cannot continue")
+		return false
+	}
 
 	// Step 4 — the anonymous device-authorization request.
-	body := bridge_enroll_authorize_body(descriptor, public_key_hex, code_challenge, identity_hex, context.temp_allocator)
+	body := bridge_enroll_authorize_body(descriptor, public_key_hex, code_challenge, identity_hex, identity_proof, context.temp_allocator)
 	fmt.printfln("bridge enroll: POST %s%s (no token — host=%s user=%s)",
 		api_base, BRIDGE_ENROLL_AUTHORIZE_PATH, descriptor.hostname, descriptor.os_user)
 	resp, sent := http.request_with_headers_timeout(

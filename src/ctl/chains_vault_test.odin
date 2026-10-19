@@ -97,7 +97,7 @@ test_task_chain_create_params_plaintext :: proc(t: ^testing.T) {
 		"--model", "smart",
 	}
 
-	params := ctl_agentmode_task_chain_create_params(args)
+	params := unseal_out(ctl_agentmode_task_chain_create_params(with_kr(args)))
 	defer delete(params)
 
 	testing.expect(t, strings.contains(params, `"title":"Alpha Task Chain"`), "title should remain plaintext")
@@ -124,7 +124,7 @@ test_task_chain_create_params_aliases :: proc(t: ^testing.T) {
 		"--project-id", "proj_2",
 	}
 
-	params := ctl_agentmode_task_chain_create_params(args)
+	params := unseal_out(ctl_agentmode_task_chain_create_params(with_kr(args)))
 	defer delete(params)
 
 	testing.expect(t, strings.contains(params, `"title":"Beta Chain"`), "title should match")
@@ -144,7 +144,7 @@ test_task_chain_create_params_positional_title :: proc(t: ^testing.T) {
 		"--coordinator", "agt_coord_3",
 	}
 
-	params := ctl_agentmode_task_chain_create_params(args, "Positional Title Chain")
+	params := unseal_out(ctl_agentmode_task_chain_create_params(with_kr(args), "Positional Title Chain"))
 	defer delete(params)
 
 	testing.expect(t, strings.contains(params, `"title":"Positional Title Chain"`), "positional title should be used if --title is omitted")

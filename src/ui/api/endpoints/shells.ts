@@ -2,7 +2,6 @@ import { heimdallApi } from '../heimdallApi';
 import { ApiError, cookieJsonFetch, cookieJsonFetchEnvelope, cookieMutation, customQueryError } from '../cookieFetch';
 import { announcePaneVaultLocked } from '../../utils/vaultLockedError';
 import { encryptVaultText, getActiveVaultKey } from '../../utils/vaultContent';
-import { selectIsVaultUnlocked } from '../../store/vaultSlice';
 import { encryptShellStreamPayload } from '../../components/shells/useShellStream';
 import { openPaneReplyOutput } from '../../components/shells/ptyWire';
 
@@ -168,9 +167,6 @@ export interface CreateShellArgs {
   server_port?: number;
   chain_id?: string;
   project_id?: string;
-  // REQ-SHELL-ENC-8: Encrypted shell spawn authorization envelope (vault:v2:...)
-  // containing { cmd, cwd, timestamp, nonce } for zero-trust bridge verification.
-  enc_spec?: string;
 }
 
 export interface GetShellPaneArgs {
@@ -264,6 +260,27 @@ export async function fetchShellPage(args: FetchShellPageArgs = {}): Promise<She
   };
 }
 
+// Clock for the enc_spec timestamp; tests inject a fixed one (hermetic assertions).
+let specClock: () => number = () => Date.now();
+export function setShellSpecClock(now?: () => number): void {
+  specClock = now ?? (() => Date.now());
+}
+
+function randomHex(bytes: number): string {
+  return Array.from(crypto.getRandomValues(new Uint8Array(bytes)), (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/**
+ * The bridge's current unseal boot id (relayed by the hub from its hello). A shell
+ * enc_spec is bound to it, so the request is refused when it is unknown.
+ */
+async function fetchBridgeBootId(bridgeId: string): Promise<string> {
+  const rec: any = await cookieJsonFetch(`/bridges/${encodeURIComponent(bridgeId)}/public-key`);
+  const bootId = String(rec?.unseal_boot_id || '');
+  if (!/^[0-9a-f]{1,64}$/.test(bootId)) throw new Error(`Bridge ${bridgeId} has not announced a boot id; cannot start a shell`);
+  return bootId;
+}
+
 export const shellsApi = heimdallApi.injectEndpoints({
   endpoints: (build) => ({
     listShells: build.query<ShellSessionPage, ListShellsArgs>({
@@ -322,29 +339,33 @@ export const shellsApi = heimdallApi.injectEndpoints({
       ],
     }),
 
-    // REQ-SHELL-ENC-8: attach the armored enc_spec (vault:v2:e<current epoch>:...) when the
-    // vault is unlocked so the host bridge can authorize the spawn; the bridge rejects any
-    // epoch but its current one. Encryption failure aborts the request.
+    // REQ-SHELL-ENC-8: every shell start carries an armored enc_spec
+    // (vault:v2:e<current epoch>:...); the bridge never executes the plaintext cmd.
+    // There is no plaintext mode: without a vault key the request is refused here.
+    // Encryption failure aborts the request.
     createShell: build.mutation<ShellSession, CreateShellArgs>({
-      queryFn: async ({ bridgeId, ...body }, api) => {
+      queryFn: async ({ bridgeId, ...body }) => {
         try {
-          const state: any = api?.getState?.();
           const activeKey = getActiveVaultKey();
-          const isUnlocked = state?.vault != null
-            ? Boolean(state.vault.isUnlocked || state.vault.unlocked || activeKey)
-            : Boolean(activeKey);
-
-          let requestBody: Record<string, any> = { ...body };
-          if (isUnlocked && activeKey) {
-            const spec = {
-              cmd: body.cmd || '',
-              cwd: body.cwd || '',
-              timestamp: Date.now(),
-              nonce: Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join(''),
-            };
-            const enc_spec = body.enc_spec || await encryptVaultText(JSON.stringify(spec), activeKey);
-            requestBody = { ...body, enc_spec };
-          }
+          if (!activeKey) throw new Error('Vault key unavailable: cannot start a shell without an encrypted spec');
+          // The spec is bound to this bridge process, session and kind (finding N1): the
+          // bridge refuses it for any other bridge id, session id, kind or boot id.
+          const bootId = await fetchBridgeBootId(bridgeId);
+          const session_id = `sh_${randomHex(16)}`;
+          const kind = body.kind;
+          if (!kind) throw new Error('Shell kind is required');
+          const spec = {
+            cmd: body.cmd || '',
+            cwd: body.cwd || '',
+            timestamp: specClock(),
+            nonce: randomHex(16),
+            bridge_id: bridgeId,
+            session_id,
+            kind,
+            boot_id: bootId,
+          };
+          const enc_spec = await encryptVaultText(JSON.stringify(spec), activeKey);
+          const requestBody: Record<string, any> = { ...body, session_id, enc_spec };
 
           const data = await cookieMutation(
             `/bridges/${encodeURIComponent(bridgeId)}/shells`,
@@ -505,28 +526,21 @@ export const shellsApi = heimdallApi.injectEndpoints({
     }),
 
     sendShellInput: build.mutation<{ ok?: boolean; [key: string]: any }, { sessionId: string; data: string; enc_b64?: string }>({
-      queryFn: async ({ sessionId, data, enc_b64 }, api) => {
+      queryFn: async ({ sessionId, data, enc_b64 }) => {
         if (!sessionId) {
           return { error: { status: 'CUSTOM_ERROR', error: 'Missing sessionId' } as any };
         }
         try {
-          const state: any = api?.getState?.();
-          const activeKey = getActiveVaultKey();
-          const isUnlocked = state?.vault != null
-            ? Boolean(selectIsVaultUnlocked(state) || activeKey)
-            : Boolean(activeKey);
-
-          // An unlocked vault means input is encrypted (PTY v2, `in` direction, current
-          // epoch) and the plaintext is NOT sent alongside it. Encryption failure aborts
-          // the send; there is no plaintext fallback.
+          // Input is always encrypted (PTY v2, `in` direction, current epoch) and the
+          // plaintext is NOT sent alongside it. There is no plaintext mode: without a key,
+          // or on an encryption failure, the send is refused.
           let resolvedEncB64 = enc_b64;
-          if (!resolvedEncB64 && isUnlocked && activeKey) {
+          if (!resolvedEncB64) {
+            const activeKey = getActiveVaultKey();
+            if (!activeKey) throw new Error('Vault key unavailable: terminal input cannot be encrypted');
             resolvedEncB64 = await encryptShellStreamPayload(data, activeKey, sessionId);
           }
-
-          const payload: { data: string; enc_b64?: string } = resolvedEncB64
-            ? { data: '', enc_b64: resolvedEncB64 }
-            : { data };
+          const payload = { data: '', enc_b64: resolvedEncB64 };
 
           const res = await cookieMutation(`/shells/${encodeURIComponent(sessionId)}/input`, 'POST', payload);
           return { data: res || { ok: true } };

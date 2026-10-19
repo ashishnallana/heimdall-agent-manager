@@ -216,6 +216,20 @@ bridge_unseal_identity_generate_for_enrollment :: proc() -> (public_key_hex: str
 	return strings.clone(string(g_bridge_identity_pub_hex_buf[:]), context.temp_allocator), true
 }
 
+// bridge_unseal_identity_enrollment_proof signs the /device/authorize proof of
+// possession (vault.bridge_enroll_proof_canonical) with the enrollment's in-memory
+// identity. Only for a generated-but-uncommitted identity. Temp-allocated.
+bridge_unseal_identity_enrollment_proof :: proc(ecdh_pub_hex, code_challenge: string) -> (sig_json: string, ok: bool) {
+	sync.mutex_lock(&g_bridge_identity_mu)
+	defer sync.mutex_unlock(&g_bridge_identity_mu)
+	if !g_bridge_identity_loaded || g_bridge_identity_owner_len != 0 do return "", false
+	msg, m_ok := vault.bridge_enroll_proof_canonical(ecdh_pub_hex, code_challenge, context.temp_allocator)
+	if !m_ok do return "", false
+	sig, s_ok := vault.sign_p256(&g_bridge_identity_priv, transmute([]byte)msg)
+	if !s_ok do return "", false
+	return vault.signature_object(&sig, context.temp_allocator)
+}
+
 // bridge_unseal_identity_commit_enrollment persists the enrollment's in-memory
 // identity under the hub-assigned bridge id together with the approving account
 // (the enrolled owner). Called once, right after approval and before any unseal.
@@ -506,6 +520,10 @@ bridge_unseal_signature_echo :: proc(payload_json: string) -> string {
 // validity and current epoch, that it belongs to this bridge's enrolled owner, and
 // that it is a superset of any keyring already stored (no substitution, no
 // rollback). v1 payloads (old AAD forms, 32/64-byte plaintexts) cannot pass.
+// g_unseal_install_mu serializes the keyring check → floor store → keyring store of
+// bridge_unseal_decrypt_and_verify.
+g_unseal_install_mu: sync.Mutex
+
 bridge_unseal_decrypt_and_verify :: proc(
 	payload_json: string,
 	local_bridge_id: string,
@@ -594,6 +612,13 @@ bridge_unseal_decrypt_and_verify :: proc(
 		return false, "invalid nonce"
 	}
 
+	// Check-then-store is one critical section: two concurrent unseals must not both
+	// pass the superset/floor checks against the same stored state and then install
+	// in either order (a lower keyring could land last). Held through the floor and
+	// keyring stores below.
+	sync.mutex_lock(&g_unseal_install_mu)
+	defer sync.mutex_unlock(&g_unseal_install_mu)
+
 	// ── Keyring authentication (plan §1, finding C1) ──────────────────────
 	// The ECDH unseal proves only that the sender saw this boot's signed key, not
 	// who the sender is: a hostile hub can seal its own keyring to it. So:
@@ -642,6 +667,8 @@ bridge_unseal_decrypt_and_verify :: proc(
 		return false, "keyring rollback rejected: current epoch is below this bridge's epoch floor"
 	case .Key_Mismatch:
 		return false, "keyring rejected: an epoch's key differs from the one this bridge accepted before"
+	case .Missing_Epoch:
+		return false, "keyring rejected: it lacks the newest epoch this bridge accepted before"
 	}
 	//  (c) P2/P3 HOOK — signed epoch statement chain (plan §1, required before P3).
 	//      This is where the bridge must verify, BEFORE installing anything below:

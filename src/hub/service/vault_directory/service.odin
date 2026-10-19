@@ -26,7 +26,10 @@ REQUEST_SKEW_MS      :: 60_000
 // A nonce stays recorded until its timestamp can no longer pass the skew check:
 // ts may be up to 60 s ahead of the hub clock, and stays acceptable for 60 s after.
 NONCE_TTL_MS         :: 2 * REQUEST_SKEW_MS + 5_000
-NONCE_CACHE_CAPACITY :: 8192
+// Per-device budget of live nonces. Nonces are recorded only for MUTATIONS, which
+// only approved approver-capable devices may sign, so the budget is per signing
+// device and one device (or one account) can never exhaust anyone else's.
+NONCE_DEVICE_QUOTA   :: 64
 
 Service :: struct {
 	repo:  ^iface.Vault_Directory_Repository,
@@ -35,10 +38,13 @@ Service :: struct {
 	// random_source is the CSPRNG path for pending codes (tests point it at a missing
 	// path to prove the fail-closed contract).
 	random_source: string,
+	// reset_delay_seconds is how long an owner reset waits before it executes
+	// (RESET_DELAY_SECONDS). Tests drive the delay with the injected clock.
+	reset_delay_seconds: int,
 }
 
 new_service :: proc(repo: ^iface.Vault_Directory_Repository, clock: ^platform.Clock) -> Service {
-	return Service{repo = repo, clock = clock, nonces = nonce_cache_make(NONCE_CACHE_CAPACITY), random_source = os_random.DEFAULT_SOURCE}
+	return Service{repo = repo, clock = clock, nonces = nonce_cache_make(NONCE_DEVICE_QUOTA), random_source = os_random.DEFAULT_SOURCE, reset_delay_seconds = RESET_DELAY_SECONDS}
 }
 
 service_free :: proc(svc: ^Service) {
@@ -46,14 +52,26 @@ service_free :: proc(svc: ^Service) {
 }
 
 // ── Nonce replay cache ──────────────────────────────────────────────────────
-// Expiry-based. A nonce is recorded only after its request authenticated, so garbage
-// cannot fill it; when every slot holds a live nonce the request is REFUSED rather
-// than evicting one (an evicted nonce could be replayed inside its window).
+// Expiry-based and PARTITIONED: one bucket per (user, device), each with its own
+// quota. A nonce is recorded only after its request authenticated, so garbage cannot
+// fill a bucket; when a device's bucket holds `quota` live nonces that device's next
+// mutation is REFUSED rather than evicting one (an evicted nonce could be replayed
+// inside its window). Other devices and other accounts are unaffected.
+//
+// Reads (GET /vault/devices/self, GET /vault/directory) are NOT recorded: they need a
+// fresh, valid signature but change nothing, so a replayed read only re-reads.
+//
+// RESTART: the cache is in memory only. A hub restart forgets the nonces of the last
+// ~2 minutes, so a captured mutation could be replayed once inside its remaining
+// ±60 s window after a restart. That replay still has to pass the directory CAS:
+// every mutation's statements are bound to `directory_version`, which the original
+// request already advanced, so it fails with 409. Deny/reset-cancel carry no
+// version; replaying them re-applies the same idempotent outcome.
 
 Nonce_Cache :: struct {
-	mutex:    sync.Mutex,
-	entries:  map[string]i64, // key -> expires_ms
-	capacity: int,
+	mutex:   sync.Mutex,
+	buckets: map[string]map[string]i64, // "user|device" -> nonce -> expires_ms
+	quota:   int,
 }
 
 Nonce_Result :: enum {
@@ -62,37 +80,71 @@ Nonce_Result :: enum {
 	Full,
 }
 
-nonce_cache_make :: proc(capacity: int) -> Nonce_Cache {
-	return Nonce_Cache{entries = make(map[string]i64, 64, runtime.heap_allocator()), capacity = capacity}
+nonce_cache_make :: proc(quota: int) -> Nonce_Cache {
+	return Nonce_Cache{buckets = make(map[string]map[string]i64, 16, runtime.heap_allocator()), quota = quota}
+}
+
+@(private)
+nonce_bucket_free :: proc(b: ^map[string]i64) {
+	for k in b^ do delete(k, runtime.heap_allocator())
+	delete(b^)
 }
 
 nonce_cache_free :: proc(c: ^Nonce_Cache) {
 	sync.mutex_lock(&c.mutex)
 	defer sync.mutex_unlock(&c.mutex)
-	for k in c.entries do delete(k, runtime.heap_allocator())
-	delete(c.entries)
+	for k, &b in c.buckets {
+		nonce_bucket_free(&b)
+		delete(k, runtime.heap_allocator())
+	}
+	delete(c.buckets)
 }
 
-nonce_cache_insert :: proc(c: ^Nonce_Cache, key: string, now_ms, ttl_ms: i64) -> Nonce_Result {
+// nonce_cache_insert records `nonce` in the bucket `bucket_key`. Expired nonces of
+// that bucket are purged first; an emptied bucket is dropped, so memory follows the
+// number of devices that signed a mutation in the last NONCE_TTL_MS.
+nonce_cache_insert :: proc(c: ^Nonce_Cache, bucket_key, nonce: string, now_ms, ttl_ms: i64) -> Nonce_Result {
 	sync.mutex_lock(&c.mutex)
 	defer sync.mutex_unlock(&c.mutex)
-	if exp, has := c.entries[key]; has {
-		if now_ms <= exp do return .Replay
-		// Expired: the slot is reused for the same key below.
-		c.entries[key] = now_ms + ttl_ms
-		return .Inserted
+	heap := runtime.heap_allocator()
+	b, has_bucket := &c.buckets[bucket_key]
+	if !has_bucket {
+		c.buckets[strings.clone(bucket_key, heap)] = make(map[string]i64, 8, heap)
+		b = &c.buckets[bucket_key]
 	}
-	if len(c.entries) >= c.capacity {
-		expired := make([dynamic]string, context.temp_allocator)
-		for k, exp in c.entries do if now_ms > exp do append(&expired, k)
-		for k in expired {
-			delete_key(&c.entries, k)
-			delete(k, runtime.heap_allocator())
-		}
-		if len(c.entries) >= c.capacity do return .Full
+	if exp, has := b[nonce]; has && now_ms <= exp do return .Replay
+	expired := make([dynamic]string, context.temp_allocator)
+	for k, exp in b do if now_ms > exp do append(&expired, k)
+	for k in expired {
+		key_ptr, _ := delete_key(b, k)
+		delete(key_ptr, heap)
 	}
-	c.entries[strings.clone(key, runtime.heap_allocator())] = now_ms + ttl_ms
+	if len(b) >= c.quota do return .Full
+	b[strings.clone(nonce, heap)] = now_ms + ttl_ms
 	return .Inserted
+}
+
+// nonce_cache_sweep drops every expired nonce and every emptied bucket.
+nonce_cache_sweep :: proc(c: ^Nonce_Cache, now_ms: i64) {
+	sync.mutex_lock(&c.mutex)
+	defer sync.mutex_unlock(&c.mutex)
+	heap := runtime.heap_allocator()
+	empty := make([dynamic]string, context.temp_allocator)
+	for bk, &b in c.buckets {
+		expired := make([dynamic]string, context.temp_allocator)
+		for k, exp in b do if now_ms > exp do append(&expired, k)
+		for k in expired {
+			key_ptr, _ := delete_key(&b, k)
+			delete(key_ptr, heap)
+		}
+		if len(b) == 0 do append(&empty, bk)
+	}
+	for bk in empty {
+		key_ptr, b := delete_key(&c.buckets, bk)
+		bb := b
+		nonce_bucket_free(&bb)
+		delete(key_ptr, heap)
+	}
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -171,6 +223,21 @@ parse_signed_statement :: proc(text, signature, type, user_id, version: string, 
 	return st, domain.Domain_Error{}
 }
 
+// current_epoch_commit is the epoch_commit of the directory's current epoch, taken
+// from its stored (signed) epoch statement. An approval must name exactly this.
+@(private)
+current_epoch_commit :: proc(svc: ^Service, user_id: string, current_epoch: i64) -> (string, domain.Domain_Error) {
+	epochs, err := iface.vault_list_epochs(svc.repo, user_id)
+	if err.code != .None do return "", err
+	for e in epochs {
+		if e.epoch != current_epoch do continue
+		st, ok := vault.statement_parse(e.statement)
+		if !ok || len(st.epoch_commit) != vault.EPOCH_COMMIT_HEX_CHARS do break
+		return st.epoch_commit, domain.Domain_Error{}
+	}
+	return "", domain.domain_error(.Internal_Error, "the current epoch statement is missing or malformed")
+}
+
 Wrap_Input :: struct {
 	wrap:      vault.Keyring_Wrap,
 	signature: string,
@@ -205,8 +272,9 @@ Signed_Request :: struct {
 Signer_Requirement :: enum {
 	// An approved device whose kind may approve (never a bridge). Every mutation.
 	Approver,
-	// The device itself in any status (pending, approved or revoked) — GET self only.
-	// Bridges are never accepted.
+	// The device itself in any status (pending, approved or revoked). READ-ONLY
+	// endpoints only (GET self, GET directory): no nonce is recorded. Bridges are
+	// never accepted.
 	Self,
 }
 
@@ -237,7 +305,8 @@ valid_nonce :: proc(s: string) -> bool {
 
 // verify_request authenticates a device-signed request for `user_id` and returns
 // the signing device. Order: shape, freshness, signer lookup + policy, signature,
-// THEN the nonce is recorded (an unauthenticated request never consumes a slot).
+// THEN — for a mutation (.Approver) only — the nonce is recorded in the signer's own
+// bucket (an unauthenticated request never consumes a slot).
 verify_request :: proc(svc: ^Service, user_id: string, r: Signed_Request, need: Signer_Requirement) -> (domain.Vault_Device, domain.Domain_Error) {
 	if r.device_id == "" || r.ts == "" || r.nonce == "" || r.signature == "" do return {}, unauth("device request signature required")
 	if !vault.valid_device_id(r.device_id) || !valid_nonce(r.nonce) do return {}, unauth("malformed device signature headers")
@@ -261,13 +330,15 @@ verify_request :: proc(svc: ^Service, user_id: string, r: Signed_Request, need: 
 	}
 	msg := request_canonical(r.method, r.path, user_id, r.ts, r.nonce, r.body, context.temp_allocator)
 	if !vault.verify(dev.sign_alg, dev.sign_public_key, transmute([]byte)msg, r.signature) do return {}, unauth("device request signature does not verify")
-	key := strings.concatenate({dev.device_id, "|", r.nonce}, context.temp_allocator)
-	switch nonce_cache_insert(&svc.nonces, key, now, NONCE_TTL_MS) {
+	// Only mutations consume a nonce (see the cache comment): .Self is read-only.
+	if need == .Self do return dev, domain.Domain_Error{}
+	bucket := strings.concatenate({user_id, "|", dev.device_id}, context.temp_allocator)
+	switch nonce_cache_insert(&svc.nonces, bucket, r.nonce, now, NONCE_TTL_MS) {
 	case .Inserted:
 	case .Replay:
 		return {}, unauth("device request nonce was already used")
 	case .Full:
-		return {}, domain.domain_error(.Rate_Limited, "too many signed requests; retry shortly")
+		return {}, domain.domain_error(.Rate_Limited, "too many signed requests from this device; retry shortly")
 	}
 	return dev, domain.Domain_Error{}
 }
@@ -290,7 +361,14 @@ get_directory :: proc(svc: ^Service, user_id: string) -> (Directory_View, domain
 	if derr.code != .None do return {}, derr
 	epochs, eerr := iface.vault_list_epochs(svc.repo, user_id)
 	if eerr.code != .None do return {}, eerr
-	view := Directory_View{directory = dir, devices = devices, epochs = epochs}
+	// Expired pending devices are not listed (they can no longer be approved).
+	now := platform.clock_now(svc.clock)
+	listed := make([dynamic]domain.Vault_Device, 0, len(devices), context.temp_allocator)
+	for d in devices {
+		if d.status == .Pending && d.code_expires_at <= now do continue
+		append(&listed, d)
+	}
+	view := Directory_View{directory = dir, devices = listed[:], epochs = epochs}
 	// The root's key comes from the self-signed genesis statement (what a client
 	// pins), not from the device row.
 	if st, ok := vault.statement_parse(dir.genesis_statement); ok {
@@ -397,7 +475,9 @@ genesis :: proc(svc: ^Service, in_: Genesis_Input) -> (domain.Vault_Device, doma
 	root, derr := subject_device_from_statement(&st, in_.user_id)
 	if derr.code != .None do return {}, derr
 	policy := domain.vault_kind_policy(root.kind)
-	if !policy.can_approve || !policy.receives_wrap do return {}, invalid("the root device must be approver-capable")
+	// The root must be an interactive approver (a browser now): a recovery key is
+	// offline by design and must never become the pinned root.
+	if !policy.can_be_root || !policy.can_approve || !policy.receives_wrap do return {}, invalid("the root device must be an interactive approver-capable device")
 	if st.issuer_device_id != root.device_id do return {}, invalid("genesis is self-signed by the root")
 	if !is_hex64_or_empty(st.epoch_commit) || !is_hex64_or_empty(st.wrap_sha256) do return {}, invalid("malformed genesis commitment")
 	if !vault.verify(root.sign_alg, root.sign_public_key, transmute([]byte)in_.genesis_statement, in_.genesis_signature) do return {}, unauth("genesis signature does not verify")
@@ -509,7 +589,9 @@ approve :: proc(svc: ^Service, in_: Approve_Input) -> (i64, domain.Domain_Error)
 	if !subject_matches(&st, target) do return 0, invalid("approval statement does not describe the pending device")
 	label, l_ok := vault.label_from_b64(st.subject_label_b64, context.temp_allocator)
 	if !l_ok do return 0, invalid("subject_label_b64 is not a valid label")
-	if st.epoch != i64_str(dir.current_epoch) || !is_hex64_or_empty(st.epoch_commit) do return 0, invalid("approval must name the current epoch")
+	commit, cerr := current_epoch_commit(svc, in_.user_id, dir.current_epoch)
+	if cerr.code != .None do return 0, cerr
+	if st.epoch != i64_str(dir.current_epoch) || st.epoch_commit != commit do return 0, invalid("approval must name the current epoch and its epoch_commit")
 
 	cm := domain.Vault_Directory_Commit{
 		user_id = in_.user_id, expected_version = in_.expected_version, now = now,
@@ -520,15 +602,30 @@ approve :: proc(svc: ^Service, in_: Approve_Input) -> (i64, domain.Domain_Error)
 	if domain.vault_kind_policy(target.kind).receives_wrap {
 		row, werr := check_wrap(svc, in_.wrap, in_.user_id, target, dir.version, dir.current_epoch, in_.signer, now)
 		if werr.code != .None do return 0, werr
-		if st.wrap_sha256 != "" {
-			digest: [32]byte
-			w := in_.wrap.wrap
-			_ = vault.wrap_sha256(&w, digest[:])
-			if st.wrap_sha256 != vault.hex_encode_lower(digest[:], context.temp_allocator) do return 0, invalid("approval statement names a different wrap")
-		}
+		// The signed approval must commit to exactly this wrap.
+		digest: [32]byte
+		w := in_.wrap.wrap
+		if !vault.wrap_sha256(&w, digest[:]) do return 0, invalid("wrap is malformed")
+		if st.wrap_sha256 == "" || st.wrap_sha256 != vault.hex_encode_lower(digest[:], context.temp_allocator) do return 0, invalid("approval statement must name this wrap in wrap_sha256")
 		cm.wraps = []domain.Vault_Wrap_Row{row}
+	} else if st.wrap_sha256 != "" {
+		return 0, invalid("this device kind receives no wrap")
 	}
 	return iface.vault_commit(svc.repo, cm)
+}
+
+// ── Deny ────────────────────────────────────────────────────────────────────
+
+// deny removes a pending device. Called after verify_request(.Approver), so only an
+// approved approver device of the account can deny. Not a directory mutation (pending
+// rows are not part of the signed chain), so there is no version. Unknown or
+// non-pending devices are 404.
+deny :: proc(svc: ^Service, user_id, device_id: string) -> domain.Domain_Error {
+	if !vault.valid_device_id(device_id) do return domain.domain_error(.Not_Found, "no pending device with that id")
+	removed, err := iface.vault_delete_pending(svc.repo, user_id, device_id)
+	if err.code != .None do return err
+	if !removed do return domain.domain_error(.Not_Found, "no pending device with that id")
+	return domain.Domain_Error{}
 }
 
 // ── Bridge approval (via /device/approve) ───────────────────────────────────
@@ -561,7 +658,9 @@ check_bridge_approval :: proc(svc: ^Service, in_: Bridge_Approval_Input) -> (dom
 	if st.subject_kind != "bridge" || st.subject_sign_pub != in_.bridge_identity_public_key do return {}, invalid("vault_approval does not describe this bridge's identity key")
 	dev, sderr := subject_device_from_statement(&st, in_.user_id)
 	if sderr.code != .None do return {}, sderr
-	if st.epoch != i64_str(dir.current_epoch) || !is_hex64_or_empty(st.epoch_commit) || st.wrap_sha256 != "" do return {}, invalid("vault_approval must name the current epoch and no wrap")
+	commit, cerr := current_epoch_commit(svc, in_.user_id, dir.current_epoch)
+	if cerr.code != .None do return {}, cerr
+	if st.epoch != i64_str(dir.current_epoch) || st.epoch_commit != commit || st.wrap_sha256 != "" do return {}, invalid("vault_approval must name the current epoch, its epoch_commit, and no wrap")
 	if _, exists := find_device(devices, dev.device_id); exists do return {}, domain.vault_reason_error(.Conflict, "device_exists", "this bridge identity is already in the directory")
 	now := platform.clock_now(svc.clock)
 	dev.status = .Approved
@@ -573,13 +672,61 @@ check_bridge_approval :: proc(svc: ^Service, in_: Bridge_Approval_Input) -> (dom
 	return dev, domain.Domain_Error{}
 }
 
+// commit_bridge_approval inserts the approved bridge identity. If another approved
+// identity already maps to bridge_id (an attach), it is retired in the SAME CAS, so
+// at most one approved identity ever maps to a bridge_id.
 commit_bridge_approval :: proc(svc: ^Service, in_: Bridge_Approval_Input, dev: domain.Vault_Device, bridge_id: string) -> (i64, domain.Domain_Error) {
+	if bridge_id == "" do return 0, invalid("bridge_id is required")
 	d := dev
 	d.bridge_id = bridge_id
-	return iface.vault_commit(svc.repo, domain.Vault_Directory_Commit{
+	cm := domain.Vault_Directory_Commit{
 		user_id = in_.user_id, expected_version = in_.expected_version, now = platform.clock_now(svc.clock),
 		insert_device = d,
-	})
+	}
+	devices, err := iface.vault_list_devices(svc.repo, in_.user_id)
+	if err.code != .None do return 0, err
+	// Read at (at most) expected_version: if anything changed since, the CAS refuses.
+	for other in devices {
+		if other.status != .Approved || other.bridge_id != bridge_id do continue
+		if cm.retire_device_id != "" do return 0, domain.domain_error(.Internal_Error, "more than one approved identity maps to this bridge")
+		cm.retire_device_id, cm.retire_bridge_id = other.device_id, bridge_id
+	}
+	return iface.vault_commit(svc.repo, cm)
+}
+
+// retire_bridge_entry marks the approved directory entry of bridge_id revoked
+// (hub-retired, no statement) after its enrollment was rolled back — the vault key
+// never reached that identity, so no epoch rotation is needed. Retries on a version
+// race. Returns the retired device id, or "" when there was nothing to retire.
+retire_bridge_entry :: proc(svc: ^Service, user_id, bridge_id: string) -> (string, domain.Domain_Error) {
+	if user_id == "" || bridge_id == "" do return "", domain.Domain_Error{}
+	for _ in 0 ..< 4 {
+		dir, found, err := iface.vault_get_directory(svc.repo, user_id)
+		if err.code != .None do return "", err
+		if !found do return "", domain.Domain_Error{}
+		devices, derr := iface.vault_list_devices(svc.repo, user_id)
+		if derr.code != .None do return "", derr
+		target := ""
+		for d in devices do if d.status == .Approved && d.bridge_id == bridge_id do target = d.device_id
+		if target == "" do return "", domain.Domain_Error{}
+		_, cerr := iface.vault_commit(svc.repo, domain.Vault_Directory_Commit{
+			user_id = user_id, expected_version = dir.version, now = platform.clock_now(svc.clock),
+			retire_device_id = target, retire_bridge_id = bridge_id,
+		})
+		if cerr.code == .Conflict do continue
+		if cerr.code != .None do return "", cerr
+		return target, domain.Domain_Error{}
+	}
+	return "", domain.domain_error(.Conflict, "vault directory kept changing; bridge entry not retired")
+}
+
+// other_approved_for_bridge reports whether an approved identity other than
+// device_id maps to bridge_id (then the bridge's credentials must stay).
+other_approved_for_bridge :: proc(svc: ^Service, user_id, bridge_id, device_id: string) -> (bool, domain.Domain_Error) {
+	devices, err := iface.vault_list_devices(svc.repo, user_id)
+	if err.code != .None do return false, err
+	for d in devices do if d.device_id != device_id && d.status == .Approved && d.bridge_id == bridge_id do return true, domain.Domain_Error{}
+	return false, domain.Domain_Error{}
 }
 
 // ── Revoke ──────────────────────────────────────────────────────────────────
@@ -601,7 +748,28 @@ Revoke_Result :: struct {
 	target:  domain.Vault_Device,
 }
 
+// Revoke_Plan is a fully validated revocation that has not been written yet. The
+// HTTP handler revokes a bridge target's credentials BETWEEN revoke_prepare and
+// revoke_commit, so a failure there leaves the safe state (credentials dead or the
+// request failed) rather than "revoked in the directory, credential still live".
+Revoke_Plan :: struct {
+	commit: domain.Vault_Directory_Commit,
+	target: domain.Vault_Device,
+}
+
 revoke :: proc(svc: ^Service, in_: Revoke_Input) -> (Revoke_Result, domain.Domain_Error) {
+	plan, err := revoke_prepare(svc, in_)
+	if err.code != .None do return {}, err
+	return revoke_commit(svc, plan)
+}
+
+revoke_commit :: proc(svc: ^Service, plan: Revoke_Plan) -> (Revoke_Result, domain.Domain_Error) {
+	v, err := iface.vault_commit(svc.repo, plan.commit)
+	if err.code != .None do return {}, err
+	return Revoke_Result{version = v, target = plan.target}, domain.Domain_Error{}
+}
+
+revoke_prepare :: proc(svc: ^Service, in_: Revoke_Input) -> (Revoke_Plan, domain.Domain_Error) {
 	// Enforced before anything else, whatever the rest of the request says.
 	if in_.device_id == in_.signer.device_id do return {}, domain.vault_reason_error(.Conflict, "self_revoke", "a device cannot revoke itself")
 	dir, found, err := iface.vault_get_directory(svc.repo, in_.user_id)
@@ -652,27 +820,59 @@ revoke :: proc(svc: ^Service, in_: Revoke_Input) -> (Revoke_Result, domain.Domai
 		if werr.code != .None do return {}, werr
 		rows[i] = row
 	}
-	v, cerr := iface.vault_commit(svc.repo, domain.Vault_Directory_Commit{
-		user_id = in_.user_id, expected_version = in_.expected_version, now = now,
-		revoke_device_id = target.device_id, revocation_statement = in_.revoke_statement,
-		revocation_signature = in_.signature, revoked_by_device_id = in_.signer.device_id,
-		new_epoch = new_epoch, epoch_statement = in_.epoch_statement, epoch_signature = in_.epoch_signature,
-		wraps = rows, replace_all_wraps = true,
-	})
-	if cerr.code != .None do return {}, cerr
-	return Revoke_Result{version = v, target = target}, domain.Domain_Error{}
+	return Revoke_Plan{
+		target = target,
+		commit = domain.Vault_Directory_Commit{
+			user_id = in_.user_id, expected_version = in_.expected_version, now = now,
+			revoke_device_id = target.device_id, revocation_statement = in_.revoke_statement,
+			revocation_signature = in_.signature, revoked_by_device_id = in_.signer.device_id,
+			new_epoch = new_epoch, epoch_statement = in_.epoch_statement, epoch_signature = in_.epoch_signature,
+			wraps = rows, replace_all_wraps = true,
+		},
+	}, domain.Domain_Error{}
 }
 
-// ── Relabel ─────────────────────────────────────────────────────────────────
+// ── Owner reset ─────────────────────────────────────────────────────────────
+// The only way to replace a directory's root. It is requested from an interactive
+// browser session (Trusted_Proxy; the handler enforces it), and it is DELAYED: the
+// directory is destroyed RESET_DELAY_SECONDS (72 h) later, never at once. The request
+// is announced to every session and device of the account (WS + push), and any
+// approved device may cancel it with a signed request during the delay. So a stolen
+// session cannot quietly swap the root: the owner's devices see the notice and cancel.
+// An owner who really lost every approver waits out the delay, then runs genesis
+// again. The delay is always 72 h (no "no device seen recently" shortcut).
+//
+// Execution (app reaper, reaper_sweep_vault_resets) first revokes the credentials of
+// every bridge the account owns — and fails closed, keeping the directory and
+// retrying on the next sweep, if any revoke fails — then deletes the directory, its
+// devices, epochs and wraps in one transaction.
 
-relabel :: proc(svc: ^Service, user_id, device_id: string, expected_version: i64, label: string) -> (i64, domain.Domain_Error) {
-	if !vault.label_valid(label) do return 0, invalid("label must be 1..128 bytes of printable UTF-8")
-	dir, found, err := iface.vault_get_directory(svc.repo, user_id)
-	if err.code != .None do return 0, err
-	if !found do return 0, not_configured_error()
-	if expected_version != dir.version do return 0, domain.vault_conflict_error(dir.version)
-	return iface.vault_commit(svc.repo, domain.Vault_Directory_Commit{
-		user_id = user_id, expected_version = expected_version, now = platform.clock_now(svc.clock),
-		label_device_id = device_id, label = label,
-	})
+RESET_DELAY_SECONDS :: 72 * 60 * 60
+
+schedule_reset :: proc(svc: ^Service, user_id: string) -> (reset: domain.Vault_Reset, newly: bool, err: domain.Domain_Error) {
+	if user_id == "" do return {}, false, unauth("user is required")
+	now := platform.clock_now(svc.clock)
+	due, ok := platform.expires_at_after_seconds_from(now, svc.reset_delay_seconds)
+	if !ok do return {}, false, domain.domain_error(.Internal_Error, "clock unavailable")
+	return iface.vault_schedule_reset(svc.repo, domain.Vault_Reset{user_id = user_id, requested_at = now, due_at = due})
+}
+
+get_reset :: proc(svc: ^Service, user_id: string) -> (domain.Vault_Reset, bool, domain.Domain_Error) {
+	return iface.vault_get_reset(svc.repo, user_id)
+}
+
+// cancel_reset is called only after verify_request(.Approver) authenticated the
+// cancelling device. Idempotent: false when nothing was scheduled.
+cancel_reset :: proc(svc: ^Service, user_id: string) -> (bool, domain.Domain_Error) {
+	return iface.vault_cancel_reset(svc.repo, user_id)
+}
+
+due_resets :: proc(svc: ^Service) -> ([]string, domain.Domain_Error) {
+	return iface.vault_list_due_resets(svc.repo, platform.clock_now(svc.clock))
+}
+
+// execute_reset destroys the directory if its reset is (still) due. The caller must
+// already have revoked the account's bridge credentials.
+execute_reset :: proc(svc: ^Service, user_id: string) -> (bool, domain.Domain_Error) {
+	return iface.vault_execute_reset(svc.repo, user_id, platform.clock_now(svc.clock))
 }

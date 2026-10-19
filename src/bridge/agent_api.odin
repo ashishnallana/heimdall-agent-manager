@@ -447,7 +447,7 @@ bridge_local_handle_agent_local_op :: proc(request_id, op, params: string, rec: 
 		strings.write_string(&b, "\",\"vault_status\":\"")
 		strings.write_string(&b, status_str)
 		strings.write_string(&b, "\",\"configured\":")
-		strings.write_string(&b, "true" if status != .Disabled else "false")
+		strings.write_string(&b, "true" if status != .Not_Enrolled else "false")
 		strings.write_string(&b, ",\"permissions_valid\":")
 		strings.write_string(&b, "true" if permissions_valid else "false")
 		strings.write_string(&b, ",\"key_length\":")
@@ -565,18 +565,17 @@ bridge_agent_json_array_objects :: proc(array: string) -> []string {
 	return out[:]
 }
 
-// bridge_vault_reset_response serves the bridge-local vault.reset op (REQ-T3-2):
-// the one way to make an encrypted bridge report "disabled" again. Unlike
-// vault.lock it also removes the vault_configured marker. The hub learns the new
-// state from the next heartbeat; it has no command that reaches this path.
+// bridge_vault_reset_response serves the bridge-local vault.reset op: it purges the
+// keyring and deletes the identity key, so the bridge reports not_enrolled and must
+// be enrolled (approved by a human) again before it is trusted with a keyring. The
+// hub learns the new state from the next heartbeat; it has no command that reaches
+// this path.
 bridge_vault_reset_response :: proc(request_id: string) -> string {
-	if !bridge_vault_reset() {
-		return bridge_local_response_error(request_id, "internal", "vault key purged, but this bridge's vault_configured marker (~/.config/heimdall/bridges/<bridge_id>/vault_configured) could not be removed; the bridge still reports locked")
-	}
+	bridge_vault_reset()
 	b := strings.builder_make()
 	defer strings.builder_destroy(&b)
 	strings.write_string(&b, "{\"ok\":true,\"status\":\"")
 	strings.write_string(&b, bridge_vault_status_string())
-	strings.write_string(&b, "\",\"marker_removed\":true,\"note\":\"vault.reset purged the vault key and removed this bridge's ~/.config/heimdall/bridges/<bridge_id>/vault_configured marker: it reports the vault as disabled (no encryption) until it is unsealed again. HEIMDALL_VAULT_CONFIGURED still takes precedence. To only drop the key and keep reporting locked, use vault.lock.\"}")
+	strings.write_string(&b, "\"}")
 	return bridge_local_response_data(request_id, strings.to_string(b))
 }

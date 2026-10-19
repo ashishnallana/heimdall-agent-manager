@@ -79,26 +79,6 @@ test_memory_propose_encryption_with_vault_key :: proc(t: ^testing.T) {
 	testing.expect_value(t, dec_ev, orig_evidence)
 }
 
-@(test)
-test_memory_propose_without_vault_key_leaves_plaintext :: proc(t: ^testing.T) {
-	sync.mutex_lock(&vault_test_mutex)
-	defer sync.mutex_unlock(&vault_test_mutex)
-	sb := ctl_vault_test_sandbox_open("memory-propose-without-vault-key-leaves-plaintext")
-	defer ctl_vault_test_sandbox_close(&sb)
-	orig_title := "Plaintext Memory Title"
-	orig_body := "Plaintext Memory Body"
-
-	args := []string{
-		"--type", "fact",
-		"--title", orig_title,
-		"--body", orig_body,
-	}
-
-	out := ctl_agentmode_memory_propose_params(args)
-	testing.expect(t, strings.contains(out, `"title":"Plaintext Memory Title"`), "title must remain plaintext")
-	testing.expect(t, strings.contains(out, `"body":"Plaintext Memory Body"`), "body must remain plaintext")
-	testing.expect(t, !strings.contains(out, "vault:v2:"), "must not contain vault armor")
-}
 
 @(test)
 test_memory_show_and_list_transparent_decryption :: proc(t: ^testing.T) {
@@ -220,7 +200,7 @@ test_memory_params_zero_ids_omits_target_arrays :: proc(t: ^testing.T) {
 	sb := ctl_vault_test_sandbox_open("memory-params-zero-ids-omits-target-arrays")
 	defer ctl_vault_test_sandbox_close(&sb)
 	args := []string{"--type", "fact", "--title", "T", "--body", "B"}
-	out := ctl_agentmode_memory_propose_params(args)
+	out := unseal_out(ctl_agentmode_memory_propose_params(with_kr(args)))
 	testing.expect(t, strings.contains(out, `"type":"fact"`), "type present")
 	testing.expect(t, strings.contains(out, `"title":"T"`), "title present")
 	testing.expect(t, strings.contains(out, `"body":"B"`), "body present")
@@ -242,7 +222,7 @@ test_memory_params_single_id_per_dimension :: proc(t: ^testing.T) {
 		"--agent-id", "agt_a", "--project-id", "proj_1",
 		"--bridge-id", "brg_1", "--template-id", "tmpl_1",
 	}
-	out := ctl_agentmode_memory_propose_params(args)
+	out := unseal_out(ctl_agentmode_memory_propose_params(with_kr(args)))
 	testing.expect(t, strings.contains(out, `"agent_ids":["agt_a"]`), out)
 	testing.expect(t, strings.contains(out, `"project_ids":["proj_1"]`), out)
 	testing.expect(t, strings.contains(out, `"bridge_ids":["brg_1"]`), out)
@@ -256,7 +236,7 @@ test_memory_params_two_ids_via_csv :: proc(t: ^testing.T) {
 	sb := ctl_vault_test_sandbox_open("memory-params-two-ids-via-csv")
 	defer ctl_vault_test_sandbox_close(&sb)
 	args := []string{"--type", "fact", "--title", "T", "--body", "B", "--agent-ids", "agt_a,agt_b"}
-	out := ctl_agentmode_memory_propose_params(args)
+	out := unseal_out(ctl_agentmode_memory_propose_params(with_kr(args)))
 	testing.expect(t, strings.contains(out, `"agent_ids":["agt_a","agt_b"]`), out)
 }
 
@@ -267,7 +247,7 @@ test_memory_params_two_ids_via_repeated_flags :: proc(t: ^testing.T) {
 	sb := ctl_vault_test_sandbox_open("memory-params-two-ids-via-repeated-flags")
 	defer ctl_vault_test_sandbox_close(&sb)
 	args := []string{"--type", "fact", "--title", "T", "--body", "B", "--agent", "agt_a", "--agent", "agt_b"}
-	out := ctl_agentmode_memory_propose_params(args)
+	out := unseal_out(ctl_agentmode_memory_propose_params(with_kr(args)))
 	testing.expect(t, strings.contains(out, `"agent_ids":["agt_a","agt_b"]`), out)
 }
 
@@ -278,7 +258,7 @@ test_memory_params_csv_and_repeated_combine_and_trim :: proc(t: ^testing.T) {
 	sb := ctl_vault_test_sandbox_open("memory-params-csv-and-repeated-combine-and-trim")
 	defer ctl_vault_test_sandbox_close(&sb)
 	args := []string{"--type", "fact", "--title", "T", "--body", "B", "--project-ids", "proj_1, proj_2", "--project", "proj_3", "--project-ids", ""}
-	out := ctl_agentmode_memory_propose_params(args)
+	out := unseal_out(ctl_agentmode_memory_propose_params(with_kr(args)))
 	testing.expect(t, strings.contains(out, `"project_ids":["proj_1","proj_2","proj_3"]`), out)
 }
 
@@ -298,11 +278,11 @@ test_memory_params_description_handling :: proc(t: ^testing.T) {
 	sb := ctl_vault_test_sandbox_open("memory-params-description-handling")
 	defer ctl_vault_test_sandbox_close(&sb)
 	args_with := []string{"--type", "fact", "--title", "T", "--description", "Desc text", "--body", "B"}
-	out_with := ctl_agentmode_memory_propose_params(args_with)
+	out_with := unseal_out(ctl_agentmode_memory_propose_params(with_kr(args_with)))
 	testing.expect(t, strings.contains(out_with, `"description":"Desc text"`), out_with)
 
 	args_without := []string{"--type", "fact", "--title", "T", "--body", "B"}
-	out_without := ctl_agentmode_memory_propose_params(args_without)
+	out_without := unseal_out(ctl_agentmode_memory_propose_params(with_kr(args_without)))
 	testing.expect(t, !strings.contains(out_without, `"description"`), out_without)
 }
 
