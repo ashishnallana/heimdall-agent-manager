@@ -41,7 +41,7 @@ const POLL_MS = 2000;
 type Phase =
   | { kind: 'enter' }
   | { kind: 'loading' }
-  | { kind: 'review'; info: DeviceCodeInfo; fingerprint: string; label: string }
+  | { kind: 'review'; info: DeviceCodeInfo; fingerprint: string; label: string; userCode: string; fromLink: boolean }
   | { kind: 'working'; message: string }
   | { kind: 'done'; message: string }
   | { kind: 'failed'; message: string };
@@ -91,6 +91,20 @@ export async function codeInfoFingerprint(info: DeviceCodeInfo): Promise<string>
   return local;
 }
 
+/**
+ * M3: a code that arrived in a link must be confirmed by the user typing the code
+ * shown on the new device; one typed by hand is its own confirmation. Compared on
+ * the canonical form of the LOOKED-UP code.
+ */
+export function codeConfirmed(phase: { userCode: string; fromLink: boolean }, typed: string): boolean {
+  if (!phase.fromLink) return true;
+  try {
+    return normalizeDeviceCode(typed) === phase.userCode;
+  } catch {
+    return false;
+  }
+}
+
 export function hostLabelOf(info: DeviceCodeInfo): string {
   if (info.kind === 'browser') return info.label || 'Browser';
   const asserted = (info.host_asserted ?? {}) as Record<string, unknown>;
@@ -118,12 +132,19 @@ async function waitForEnrollingBridge(bridgeId: string, onTick: (s: string) => v
 }
 
 export default function DeviceApprovalPage() {
-  const [code, setCode] = useState(initialCode());
+  const [linkCode] = useState(initialCode);
+  const [code, setCode] = useState(linkCode);
+  // M3: a code that arrived in a link is only looked up; the user must still type the
+  // code shown on the new device before approving.
+  const [typedConfirm, setTypedConfirm] = useState('');
   const [phase, setPhase] = useState<Phase>({ kind: 'enter' });
+  // The code input is locked once a lookup is in flight or succeeded: approve/deny always
+  // act on the looked-up code, never on a later edit.
+  const codeLocked = phase.kind === 'loading' || phase.kind === 'review' || phase.kind === 'working';
   const [confirmed, setConfirmed] = useState(false);
   const [label, setLabel] = useState('');
 
-  const lookUp = useCallback(async (raw: string) => {
+  const lookUp = useCallback(async (raw: string, fromLink = false) => {
     if (!raw.trim()) return;
     let userCode: string;
     try {
@@ -132,28 +153,30 @@ export default function DeviceApprovalPage() {
       setPhase({ kind: 'failed', message: String((err as Error).message) });
       return;
     }
-    setCode(userCode);
+    // A code from a link is not echoed back: the user must type it from the new device.
+    setCode(fromLink ? '' : userCode);
     setPhase({ kind: 'loading' });
     setConfirmed(false);
+    setTypedConfirm('');
     try {
       const info = await verifyDeviceCode(userCode);
       const fingerprint = await codeInfoFingerprint(info);
       const host = hostLabelOf(info);
       setLabel(host);
-      setPhase({ kind: 'review', info, fingerprint, label: host });
+      setPhase({ kind: 'review', info, fingerprint, label: host, userCode, fromLink });
     } catch (err) {
       setPhase({ kind: 'failed', message: errText(err) });
     }
   }, []);
 
   useEffect(() => {
-    if (code) void lookUp(code);
+    if (linkCode) void lookUp(linkCode, true);
     // Only the code from the link is looked up automatically.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const approve = useCallback(async () => {
-    if (phase.kind !== 'review' || !confirmed) return;
+    if (phase.kind !== 'review' || !confirmed || !codeConfirmed(phase, typedConfirm)) return;
     const identity = currentDeviceIdentity();
     const signed = deviceSignerContext();
     if (!identity || !signed) {
@@ -163,7 +186,8 @@ export default function DeviceApprovalPage() {
     const info = phase.info;
     const finalLabel = label.trim() || phase.label;
     try {
-      const userCode = normalizeDeviceCode(code);
+      // Always the code that was LOOKED UP (the input is locked during review).
+      const userCode = phase.userCode;
       setPhase({ kind: 'working', message: 'Verifying your device directory…' });
       const chain = await verifiedChainForApproval();
       if (info.kind === 'browser') {
@@ -192,7 +216,7 @@ export default function DeviceApprovalPage() {
     } catch (err) {
       setPhase({ kind: 'failed', message: errText(err) });
     }
-  }, [phase, confirmed, code, label]);
+  }, [phase, confirmed, typedConfirm, label]);
 
   const deny = useCallback(async () => {
     if (phase.kind !== 'review') return;
@@ -204,13 +228,13 @@ export default function DeviceApprovalPage() {
         const { chain } = await fetchVerifiedChain();
         await postDenyDevice(phase.info.device_id, chain.version, signed);
       } else {
-        await postApproveBridge({ user_code: normalizeDeviceCode(code), approve: false });
+        await postApproveBridge({ user_code: phase.userCode, approve: false });
       }
       setPhase({ kind: 'done', message: 'Denied. The device was not added.' });
     } catch (err) {
       setPhase({ kind: 'failed', message: errText(err) });
     }
-  }, [phase, code]);
+  }, [phase]);
 
   return (
     <div data-debug-id="device-approval-page" className="mx-auto w-full max-w-xl p-4">
@@ -219,10 +243,14 @@ export default function DeviceApprovalPage() {
 
       <form
         className="mb-4 flex gap-2"
-        onSubmit={(e) => { e.preventDefault(); void lookUp(code); }}
+        onSubmit={(e) => { e.preventDefault(); if (!codeLocked) void lookUp(code); }}
       >
-        <Input data-debug-id="device-approval-code-input" value={code} onChange={setCode} placeholder="XXXX-XXXX-XXXX" className="flex-1" autoFocus={!code} />
-        <Button data-debug-id="device-approval-lookup-btn" type="submit" loading={phase.kind === 'loading'} disabled={!code.trim()}>Look up</Button>
+        <Input data-debug-id="device-approval-code-input" value={code} onChange={setCode} placeholder={codeLocked && !code ? '(code from the link)' : 'XXXX-XXXX-XXXX'} className="flex-1" autoFocus={!code} disabled={codeLocked} />
+        {codeLocked && phase.kind === 'review' ? (
+          <Button data-debug-id="device-approval-change-code-btn" variant="ghost" onClick={() => { setConfirmed(false); setTypedConfirm(''); setPhase({ kind: 'enter' }); }}>Change</Button>
+        ) : (
+          <Button data-debug-id="device-approval-lookup-btn" type="submit" loading={phase.kind === 'loading'} disabled={!code.trim() || codeLocked}>Look up</Button>
+        )}
       </form>
 
       {phase.kind === 'review' ? (
@@ -234,15 +262,32 @@ export default function DeviceApprovalPage() {
             <dd data-debug-id="device-approval-host-label" className="truncate text-primary">{phase.label}</dd>
             <dt className="text-muted">Fingerprint</dt>
             <dd><code data-debug-id="device-approval-fingerprint" className="font-mono tracking-wider text-primary">{phase.fingerprint}</code></dd>
+            {phase.fromLink ? null : (<>
+              <dt className="text-muted">Code</dt>
+              <dd><code data-debug-id="device-approval-looked-up-code" className="font-mono tracking-wider text-primary">{phase.userCode}</code></dd>
+            </>)}
+            {phase.info.kind === 'browser' && (phase.info as BrowserCodeInfo).created_at ? (<>
+              <dt className="text-muted">Requested</dt>
+              <dd data-debug-id="device-approval-requested-at" className="text-primary">{new Date(String((phase.info as BrowserCodeInfo).created_at)).toLocaleString()}</dd>
+            </>) : null}
           </dl>
           <label className="mb-1 block text-xs font-medium text-muted" htmlFor="device-approval-label">Name it (signed into the approval)</label>
           <Input id="device-approval-label" data-debug-id="device-approval-label-input" value={label} onChange={setLabel} className="mb-3" />
+          {phase.fromLink ? (
+            <div className="mb-3">
+              <label className="mb-1 block text-xs font-medium text-muted" htmlFor="device-approval-code-confirm">
+                This code came from a link. Type the code shown on the {phase.info.kind === 'browser' ? 'new browser' : 'bridge machine'} to confirm it is the same one
+              </label>
+              <Input id="device-approval-code-confirm" data-debug-id="device-approval-code-confirm-input" value={typedConfirm} onChange={setTypedConfirm} placeholder="XXXX-XXXX-XXXX" autoFocus />
+              {typedConfirm && !codeConfirmed(phase, typedConfirm) ? <p data-debug-id="device-approval-code-mismatch" className="mt-1 text-xs text-danger">That is not the code that was looked up.</p> : null}
+            </div>
+          ) : null}
           <label data-debug-id="device-approval-confirm-label" className="mb-3 flex items-start gap-2 text-sm text-primary">
             <input type="checkbox" data-debug-id="device-approval-confirm-checkbox" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} className="mt-1" />
             <span>The fingerprint above matches the one shown on the {phase.info.kind === 'browser' ? 'new browser' : 'bridge machine'}, and I started this request.</span>
           </label>
           <div className="flex flex-wrap gap-2">
-            <Button data-debug-id="device-approval-approve-btn" variant="primary" disabled={!confirmed} onClick={() => void approve()}>Approve</Button>
+            <Button data-debug-id="device-approval-approve-btn" variant="primary" disabled={!confirmed || !codeConfirmed(phase, typedConfirm)} onClick={() => void approve()}>Approve</Button>
             <Button data-debug-id="device-approval-deny-btn" variant="danger" onClick={() => void deny()}>Deny</Button>
           </div>
         </div>
@@ -254,7 +299,7 @@ export default function DeviceApprovalPage() {
           <Alert tone="success" title={phase.message.startsWith('Denied') ? 'Request denied' : 'Device approved'}>{phase.message}</Alert>
           <div className="flex flex-wrap gap-2">
             <Button data-debug-id="device-approval-home-btn" variant="primary" onClick={() => { window.location.hash = '#/home'; }}>Back to Home</Button>
-            <Button data-debug-id="device-approval-another-btn" variant="ghost" onClick={() => { setCode(''); setConfirmed(false); setPhase({ kind: 'enter' }); }}>Add another device</Button>
+            <Button data-debug-id="device-approval-another-btn" variant="ghost" onClick={() => { setCode(''); setConfirmed(false); setTypedConfirm(''); setPhase({ kind: 'enter' }); }}>Add another device</Button>
           </div>
         </div>
       ) : null}
