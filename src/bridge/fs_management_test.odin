@@ -226,6 +226,8 @@ fs_read_rejects_path_outside_root :: proc(t: ^testing.T) {
 
 @(test)
 fs_read_reports_not_a_file_for_dir :: proc(t: ^testing.T) {
+	bridge_fs_test_vault_hook = fs_test_unlocked_vault
+	defer bridge_fs_test_vault_hook = nil
 	root := fs_test_make_root(t, "read_dir")
 	defer fs_test_cleanup(root)
 	fs_test_seed_dir(t, root, "adir")
@@ -236,6 +238,8 @@ fs_read_reports_not_a_file_for_dir :: proc(t: ^testing.T) {
 
 @(test)
 fs_read_gates_unsupported_type :: proc(t: ^testing.T) {
+	bridge_fs_test_vault_hook = fs_test_unlocked_vault
+	defer bridge_fs_test_vault_hook = nil
 	root := fs_test_make_root(t, "read_bin")
 	defer fs_test_cleanup(root)
 	fs_test_seed_file(t, root, "blob.bin", "\x00\x01\x02")
@@ -245,8 +249,27 @@ fs_read_gates_unsupported_type :: proc(t: ^testing.T) {
 	testing.expect_value(t, res.error_code, "unsupported_type")
 }
 
+FS_TEST_VAULT_KEY :: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+// fs_test_unlocked_vault is the explicit vault state injected through
+// bridge_fs_test_vault_hook: unlocked with FS_TEST_VAULT_KEY, never the ambient keyring.
+fs_test_unlocked_vault :: proc() -> (Vault_Status, vault.Vault_Keyring) {
+	return .Unlocked, test_keyring_from_hex(FS_TEST_VAULT_KEY)
+}
+
+// fs_test_expect_sealed: read content always leaves sealed; it opens to want.
+fs_test_expect_sealed :: proc(t: ^testing.T, content, want: string) {
+	testing.expect(t, strings.has_prefix(content, vault.VAULT_V2_PREFIX), "content is sealed")
+	decrypted, dec_ok := test_decrypt_hex(content, FS_TEST_VAULT_KEY)
+	testing.expect(t, dec_ok, "decryption ok")
+	defer delete(decrypted)
+	testing.expect_value(t, decrypted, want)
+}
+
 @(test)
 fs_read_returns_utf8_text :: proc(t: ^testing.T) {
+	bridge_fs_test_vault_hook = fs_test_unlocked_vault
+	defer bridge_fs_test_vault_hook = nil
 	root := fs_test_make_root(t, "read_txt")
 	defer fs_test_cleanup(root)
 	fs_test_seed_file(t, root, "hello.md", "# hi")
@@ -254,20 +277,13 @@ fs_read_returns_utf8_text :: proc(t: ^testing.T) {
 	defer delete(res.content)
 	testing.expect(t, res.ok && res.viewable, "viewable")
 	testing.expect_value(t, res.encoding, "utf8")
-	if key, has_key := bridge_read_vault_keyring(); has_key {
-		defer vault.keyring_wipe(&key)
-		testing.expect(t, strings.has_prefix(res.content, "vault:v2:"), "encrypted with vault key")
-		decrypted, dec_ok := bridge_decrypt_vault_token(res.content, &key)
-		testing.expect(t, dec_ok, "decryption ok")
-		defer delete(decrypted)
-		testing.expect_value(t, decrypted, "# hi")
-	} else {
-		testing.expect_value(t, res.content, "# hi")
-	}
+	fs_test_expect_sealed(t, res.content, "# hi")
 }
 
 @(test)
 fs_read_honors_configured_chunk_size :: proc(t: ^testing.T) {
+	bridge_fs_test_vault_hook = fs_test_unlocked_vault
+	defer bridge_fs_test_vault_hook = nil
 	root := fs_test_make_root(t, "read_chunk")
 	defer fs_test_cleanup(root)
 	// Seed a 30-byte file
@@ -283,16 +299,7 @@ fs_read_honors_configured_chunk_size :: proc(t: ^testing.T) {
 	defer delete(res.content)
 	testing.expect(t, res.ok && res.viewable, "viewable")
 	testing.expect_value(t, res.bytes_returned, i64(10))
-	if key, has_key := bridge_read_vault_keyring(); has_key {
-		defer vault.keyring_wipe(&key)
-		testing.expect(t, strings.has_prefix(res.content, "vault:v2:"), "encrypted with vault key")
-		decrypted, dec_ok := bridge_decrypt_vault_token(res.content, &key)
-		testing.expect(t, dec_ok, "decryption ok")
-		defer delete(decrypted)
-		testing.expect_value(t, decrypted, "0123456789")
-	} else {
-		testing.expect_value(t, res.content, "0123456789")
-	}
+	fs_test_expect_sealed(t, res.content, "0123456789")
 	testing.expect(t, !res.eof, "not eof yet")
 }
 
@@ -556,6 +563,8 @@ fs_run_dir_prevalidated_list_and_blocks_escape :: proc(t: ^testing.T) {
 
 @(test)
 fs_run_dir_prevalidated_read_and_blocks_escape :: proc(t: ^testing.T) {
+	bridge_fs_test_vault_hook = fs_test_unlocked_vault
+	defer bridge_fs_test_vault_hook = nil
 	run_dir := fs_test_make_root(t, "rundir_read")
 	defer fs_test_cleanup(run_dir)
 	fs_test_seed_file(t, run_dir, "CLAUDE.md", "# context")
@@ -567,16 +576,7 @@ fs_run_dir_prevalidated_read_and_blocks_escape :: proc(t: ^testing.T) {
 	defer delete(ok_read.content)
 	testing.expect(t, ok_read.ok, "prevalidated read ok")
 	testing.expect(t, ok_read.viewable, "file viewable")
-	if key, has_key := bridge_read_vault_keyring(); has_key {
-		defer vault.keyring_wipe(&key)
-		testing.expect(t, strings.has_prefix(ok_read.content, "vault:v2:"), "encrypted with vault key")
-		decrypted, dec_ok := bridge_decrypt_vault_token(ok_read.content, &key)
-		testing.expect(t, dec_ok, "decryption ok")
-		defer delete(decrypted)
-		testing.expect_value(t, decrypted, "# context")
-	} else {
-		testing.expect_value(t, ok_read.content, "# context")
-	}
+	fs_test_expect_sealed(t, ok_read.content, "# context")
 
 	escape := bridge_fs_read_file("../rundir_read_secret.txt", run_dir, 0, 0, true)
 	testing.expect(t, !escape.ok, "read escape above run dir rejected")

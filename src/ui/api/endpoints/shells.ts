@@ -260,6 +260,12 @@ export async function fetchShellPage(args: FetchShellPageArgs = {}): Promise<She
   };
 }
 
+// Clock for the enc_spec timestamp; tests inject a fixed one (hermetic assertions).
+let specClock: () => number = () => Date.now();
+export function setShellSpecClock(now?: () => number): void {
+  specClock = now ?? (() => Date.now());
+}
+
 function randomHex(bytes: number): string {
   return Array.from(crypto.getRandomValues(new Uint8Array(bytes)), (b) => b.toString(16).padStart(2, '0')).join('');
 }
@@ -351,7 +357,7 @@ export const shellsApi = heimdallApi.injectEndpoints({
           const spec = {
             cmd: body.cmd || '',
             cwd: body.cwd || '',
-            timestamp: Date.now(),
+            timestamp: specClock(),
             nonce: randomHex(16),
             bridge_id: bridgeId,
             session_id,

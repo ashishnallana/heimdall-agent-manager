@@ -855,8 +855,20 @@ bridge_fs_list_dir :: proc(requested: string, include_hidden: bool = true, curso
 // whole, still under the 1MB cap). The whole file (up to the cap) is still capped
 // by BRIDGE_FS_MAX_VIEW_BYTES on total size.
 // bridge_fs_vault_snapshot is the single status+keyring read each fs command takes
-// (finding L2). A variable so a test can lock the vault right after the snapshot.
-bridge_fs_vault_snapshot := bridge_vault_status_and_key
+// (finding L2).
+bridge_fs_vault_snapshot :: proc() -> (Vault_Status, vault.Vault_Keyring) {
+	when ODIN_TEST {
+		if bridge_fs_test_vault_hook != nil do return bridge_fs_test_vault_hook()
+	}
+	return bridge_vault_status_and_key()
+}
+
+// Test builds only (consulted under `when ODIN_TEST` above; always nil otherwise):
+// per test thread (Odin runs each test on its own thread), the vault state the fs
+// commands of THAT test see, injected explicitly instead of read from the process
+// environment or the keystore.
+@(thread_local)
+bridge_fs_test_vault_hook: proc() -> (Vault_Status, vault.Vault_Keyring)
 
 bridge_fs_read_file :: proc(requested: string, sandbox_root: string = "", offset: i64 = 0, limit: i64 = 0, root_prevalidated := false) -> Bridge_Fs_Read_File_Result {
 	root, root_ok := bridge_fs_resolve_command_root(sandbox_root, root_prevalidated)

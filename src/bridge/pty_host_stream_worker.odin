@@ -1117,6 +1117,7 @@ bridge_pty_stream_worker_get_active_conn :: proc(session_id: string) -> (conn: ^
 
 // bridge_pty_stream_reset clears all streaming workers and outgoing queue (for tests).
 bridge_pty_stream_reset :: proc() {
+	bridge_pty_input_replay_reset()
 	sync.mutex_lock(&bridge_pty_stream_map.mu)
 	heap := runtime.heap_allocator()
 	for k, w in bridge_pty_stream_map.workers {
@@ -1201,6 +1202,17 @@ bridge_pty_input_replay_accept :: proc(session_id: string, salt: [vault.PTY_V2_S
 		bridge_pty_input_replay[strings.clone(session_id, heap)] = state
 	}
 	return true
+}
+
+// bridge_pty_input_replay_reset forgets every session's replay state and the global
+// floor. Test isolation only (bridge_pty_stream_reset); production never forgets.
+bridge_pty_input_replay_reset :: proc() {
+	heap := runtime.heap_allocator()
+	sync.mutex_lock(&bridge_pty_input_replay_mu)
+	defer sync.mutex_unlock(&bridge_pty_input_replay_mu)
+	for k in bridge_pty_input_replay do delete(k, heap)
+	clear(&bridge_pty_input_replay)
+	bridge_pty_input_replay_global_floor = 0
 }
 
 // bridge_pty_open_input authenticates one browser input frame for session_id under the

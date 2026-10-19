@@ -41,7 +41,8 @@ const TEST_VAULT_KEY_RAW = '0123456789abcdef0123456789abcdef0123456789abcdef0123
 
 installWindowShim();
 const shellFetch = installFetchCapture();
-const { shellsApi } = await import('../src/ui/api/endpoints/shells.ts');
+const shellsModule = await import('../src/ui/api/endpoints/shells.ts');
+const { shellsApi } = shellsModule;
 
 // One stub answers both requests createShell makes: the bridge public-key record
 // (unseal_boot_id) and the create itself (session).
@@ -61,7 +62,8 @@ async function captureCreateShell(store: any, args: Record<string, any>) {
 test('REQ-SHELL-ENC-8: createShell puts an armored enc_spec with cmd, cwd, timestamp and nonce on the wire when unlocked', async () => {
   const cmd = 'npm run dev';
   const cwd = '/home/user/project';
-  const startTime = Date.now();
+  const FIXED_NOW = 1_760_000_000_000;
+  shellsModule.setShellSpecClock(() => FIXED_NOW);
 
   const store = await makeVaultStore();
   const key = await unlockVault(store, TEST_VAULT_KEY_RAW);
@@ -86,7 +88,7 @@ test('REQ-SHELL-ENC-8: createShell puts an armored enc_spec with cmd, cwd, times
     assert.equal(parsedSpec.cmd, cmd, 'decrypted spec cmd must match input cmd');
     assert.equal(parsedSpec.cwd, cwd, 'decrypted spec cwd must match input cwd');
     assert.ok(typeof parsedSpec.timestamp === 'number', 'timestamp must be a number');
-    assert.ok(parsedSpec.timestamp >= startTime && parsedSpec.timestamp <= Date.now(), 'timestamp must be current');
+    assert.equal(parsedSpec.timestamp, FIXED_NOW, 'timestamp comes from the injected clock');
     assert.ok(
       /^[0-9a-f]{32}$/.test(parsedSpec.nonce),
       `nonce must be 16 CSPRNG bytes as hex, got: ${parsedSpec.nonce}`,
@@ -98,6 +100,7 @@ test('REQ-SHELL-ENC-8: createShell puts an armored enc_spec with cmd, cwd, times
     assert.equal(parsedSpec.kind, 'shell');
     assert.equal(parsedSpec.boot_id, TEST_BRIDGE_BOOT_ID);
   } finally {
+    shellsModule.setShellSpecClock();
     await clearActiveKey();
   }
 });

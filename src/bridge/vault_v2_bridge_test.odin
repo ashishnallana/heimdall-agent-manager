@@ -275,6 +275,12 @@ test_pty_random_source_mu: sync.Mutex
 // counter sequence but cannot replay an evicted stream below the floor.
 @(test)
 test_v2_pty_input_replay_is_rejected :: proc(t: ^testing.T) {
+	// Fixed counters: start from (and leave) an empty replay table, under the lock the
+	// other PTY tests hold, so no other test's state or floor can leak in.
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	bridge_pty_input_replay_reset()
+	defer bridge_pty_input_replay_reset()
 	kr := test_keyring_two_epochs(TEST_VAULT_KEY_HEX, V2_KEY_2)
 	defer vault.keyring_wipe(&kr)
 	sid := "sh_replay_test"
@@ -592,13 +598,13 @@ test_v2_fs_read_uses_one_vault_snapshot :: proc(t: ^testing.T) {
 
 	// The vault locks right after the command's snapshot: the content must still
 	// leave encrypted under the snapshot's keyring, never in plaintext.
-	prev := bridge_fs_vault_snapshot
-	defer bridge_fs_vault_snapshot = prev
-	bridge_fs_vault_snapshot = proc() -> (Vault_Status, vault.Vault_Keyring) {
+	// Injected per test thread (bridge_fs_test_vault_hook), not a global swap.
+	bridge_fs_test_vault_hook = proc() -> (Vault_Status, vault.Vault_Keyring) {
 		status, kr := bridge_vault_status_and_key()
 		keystore_lock_and_purge(bridge_config.daemon_id)
 		return status, kr
 	}
+	defer bridge_fs_test_vault_hook = nil
 	// read_file's per-file path check rejects Windows temp paths (pre-existing,
 	// unrelated to L2), so its half runs on unix; grep covers the same snapshot.
 	when ODIN_OS != .Windows {
