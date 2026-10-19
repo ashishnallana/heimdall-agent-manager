@@ -8,7 +8,6 @@ import "core:fmt"
 import "core:mem"
 import "core:strings"
 import "core:sync"
-import jsonx "odin_test:lib/jsonx"
 import os_random "odin_test:lib/os_random"
 import vault "odin_test:lib/vault"
 
@@ -422,10 +421,20 @@ bridge_unseal_key_signature_json :: proc(bridge_id: string) -> (sig_json: string
 	return obj, true
 }
 
-// bridge_unseal_write_hello_fields appends the unseal-key advertisement to a hello
-// JSON object under construction (leading comma included). Nothing is written when
-// there is no signed key: an unsigned key is never advertised as unsealable.
-bridge_unseal_write_hello_fields :: proc(b: ^strings.Builder, bridge_id: string) {
+// Bridge_Unseal_Hello_Fields is the unseal-key advertisement carried in a
+// bridge_hello (flattened into it). Every member is omitted when empty: with no
+// signed key nothing is advertised, since an unsigned key is never unsealable, and
+// identity_state then says why ("lost" / "unreadable") when it is known.
+Bridge_Unseal_Hello_Fields :: struct {
+	identity_state:       string `json:"identity_state,omitempty"`,
+	unseal_boot_id:       string `json:"unseal_boot_id,omitempty"`,
+	unseal_key_signature: Maybe(vault.Signature_Wire) `json:"unseal_key_signature,omitempty"`,
+	identity_public_key:  string `json:"identity_public_key,omitempty"`,
+	identity_sign_alg:    string `json:"identity_sign_alg,omitempty"`,
+}
+
+// bridge_unseal_hello_fields builds the advertisement for bridge_id (temp-allocated).
+bridge_unseal_hello_fields :: proc(bridge_id: string) -> (f: Bridge_Unseal_Hello_Fields) {
 	// An unenrolled bridge (no `brg_` id) has nowhere to keep an identity.
 	if !keystore_bridge_id_ok(bridge_id) do return
 	sig_json, ok := bridge_unseal_key_signature_json(bridge_id)
@@ -433,23 +442,21 @@ bridge_unseal_write_hello_fields :: proc(b: ^strings.Builder, bridge_id: string)
 		// Tell the hub (and so the UI) why this bridge cannot be unsealed.
 		#partial switch bridge_identity_state(bridge_id) {
 		case .Lost:
-			strings.write_string(b, ",\"identity_state\":\"lost\"")
+			f.identity_state = "lost"
 		case .Unreadable:
-			strings.write_string(b, ",\"identity_state\":\"unreadable\"")
+			f.identity_state = "unreadable"
 		}
 		return
 	}
 	identity := bridge_identity_public_key_hex(bridge_id)
 	if identity == "" do return
-	strings.write_string(b, ",\"unseal_boot_id\":\"")
-	strings.write_string(b, bridge_unseal_boot_id())
-	strings.write_string(b, "\",\"unseal_key_signature\":")
-	strings.write_string(b, sig_json)
-	strings.write_string(b, ",\"identity_public_key\":\"")
-	strings.write_string(b, identity)
-	strings.write_string(b, "\",\"identity_sign_alg\":\"")
-	strings.write_string(b, vault.SIGN_ALG_ECDSA_P256_SHA256)
-	strings.write_string(b, "\"")
+	sig, sig_ok := vault.signature_wire_from_text(sig_json, context.temp_allocator)
+	if !sig_ok do return
+	f.unseal_boot_id = bridge_unseal_boot_id()
+	f.unseal_key_signature = sig
+	f.identity_public_key = identity
+	f.identity_sign_alg = vault.SIGN_ALG_ECDSA_P256_SHA256
+	return
 }
 
 // ── Nonce replay cache ──────────────────────────────────────────────────────
@@ -545,35 +552,26 @@ unseal_nonce_cache_clear :: proc(cache: ^Unseal_Nonce_Cache) {
 	for &e in cache.entries do e = {}
 }
 
-// bridge_unseal_signature_echo reads the payload's unseal_key_signature object and
-// renders it canonically. A missing, non-object or oddly typed member is "" (no echo).
-@(private = "file")
-bridge_unseal_signature_echo :: proc(payload_json: string) -> string {
-	parsed, ok := jsonx.parse_body(payload_json, context.temp_allocator)
-	if !ok do return ""
-	root, is_obj := parsed.(json.Object)
-	if !is_obj do return ""
-	sig_v, has := root["unseal_key_signature"]
-	if !has do return ""
-	sig_obj, sig_is_obj := sig_v.(json.Object)
-	if !sig_is_obj || len(sig_obj) != 2 do return ""
-	alg, alg_ok := sig_obj["alg"].(json.String)
-	sig, sig_ok := sig_obj["sig"].(json.String)
-	if !alg_ok || !sig_ok do return ""
-	return strings.concatenate({`{"alg":"`, string(alg), `","sig":"`, string(sig), `"}`}, context.temp_allocator)
-}
-
-// bridge_unseal_chain_proof returns the payload's `chain_proof` member (temp-allocated).
-@(private = "file")
-bridge_unseal_chain_proof :: proc(payload_json: string) -> (json.Value, bool) {
-	parsed, ok := jsonx.parse_body(payload_json, context.temp_allocator)
-	if !ok do return nil, false
-	root, is_obj := parsed.(json.Object)
-	if !is_obj do return nil, false
-	v, has := root["chain_proof"]
-	if !has do return nil, false
-	_, proof_is_obj := v.(json.Object)
-	return v, proof_is_obj
+// Bridge_Unseal_Payload is the bridge_unseal command (the browser's payload, relayed
+// verbatim by the hub with its type and command_id). Integers are Maybe so absence is
+// told apart from zero; a member of the wrong type fails the whole decode.
+Bridge_Unseal_Payload :: struct {
+	bridge_id:                  string,
+	timestamp:                  Maybe(i64),
+	nonce:                      string,
+	client_public_key:          string,
+	iv:                         string,
+	tag:                        string,
+	ciphertext:                 string,
+	format:                     string,
+	current_epoch:              Maybe(i64),
+	// Echo of this boot's signature object over its ephemeral key.
+	unseal_key_signature:       Maybe(vault.Signature_Wire),
+	bridge_identity_public_key: string,
+	// Signed proof to the account root; verified by vault.bridge_chain_verify.
+	chain_proof:                json.Value,
+	// First unseal only: the approver's MAC under this bridge's pairing code.
+	pair_mac:                   string,
 }
 
 // bridge_unseal_decrypt_and_verify checks an unseal v2 payload end to end and, only
@@ -597,16 +595,18 @@ bridge_unseal_decrypt_and_verify :: proc(
 ) -> (ok: bool, err_msg: string) {
 	bridge_unseal_init()
 
-	bridge_id := jsonx.extract_string(payload_json, "bridge_id", "", true, context.temp_allocator)
-	nonce := jsonx.extract_string(payload_json, "nonce", "", true, context.temp_allocator)
-	client_pub := jsonx.extract_string(payload_json, "client_public_key", "", true, context.temp_allocator)
-	iv := jsonx.extract_string(payload_json, "iv", "", true, context.temp_allocator)
-	tag := jsonx.extract_string(payload_json, "tag", "", true, context.temp_allocator)
-	ciphertext := jsonx.extract_string(payload_json, "ciphertext", "", true, context.temp_allocator)
-	format := jsonx.extract_string(payload_json, "format", "", true, context.temp_allocator)
-	identity_echo := jsonx.extract_string(payload_json, "bridge_identity_public_key", "", true, context.temp_allocator)
-	timestamp_int, ts_ok := jsonx.extract_int_found(payload_json, "timestamp", true)
-	epoch_int, epoch_ok := jsonx.extract_int_found(payload_json, "current_epoch", true)
+	payload: Bridge_Unseal_Payload
+	if !vault.wire_decode(payload_json, &payload) do return false, "malformed unseal payload"
+	bridge_id := payload.bridge_id
+	nonce := payload.nonce
+	client_pub := payload.client_public_key
+	iv := payload.iv
+	tag := payload.tag
+	ciphertext := payload.ciphertext
+	format := payload.format
+	identity_echo := payload.bridge_identity_public_key
+	timestamp_int, ts_ok := payload.timestamp.?
+	epoch_int, epoch_ok := payload.current_epoch.?
 
 	if !ts_ok do return false, "missing timestamp in unseal payload"
 	if bridge_id == "" || nonce == "" || client_pub == "" || iv == "" || tag == "" || ciphertext == "" || identity_echo == "" || !epoch_ok {
@@ -639,7 +639,12 @@ bridge_unseal_decrypt_and_verify :: proc(
 	}
 	our_sig, sig_ok := bridge_unseal_key_signature_json(local_bridge_id)
 	if !sig_ok do return false, "this bridge has no signed unseal key; unseal unavailable"
-	echo := bridge_unseal_signature_echo(payload_json)
+	// The echo is re-rendered canonically (one encoder: vault.signature_object), so
+	// the byte comparison below cannot be dodged by an equivalent spelling.
+	echo := ""
+	if echo_wire, has_echo := payload.unseal_key_signature.?; has_echo {
+		echo, _ = vault.signature_text_from_wire(echo_wire, context.temp_allocator)
+	}
 	canonical, c_ok := vault.bridge_unseal_key_canonical(local_bridge_id, bridge_get_public_key_hex(), bridge_unseal_boot_id(), context.temp_allocator)
 	if !c_ok || echo == "" || !vault.verify(vault.SIGN_ALG_ECDSA_P256_SHA256, our_identity, transmute([]byte)canonical, echo) {
 		return false, "unseal key signature does not verify under this bridge's identity"
@@ -750,14 +755,13 @@ bridge_unseal_decrypt_and_verify :: proc(
 	//      under this bridge's pairing code (bridge_pairing_first_pin_ok): only the
 	//      device the operator typed the code into can have made it, so a hub racing
 	//      the approver with its own root and keyring is refused.
-	proof_value, proof_ok := bridge_unseal_chain_proof(payload_json)
-	if !proof_ok do return false, vault.chain_error_message(.Malformed)
+	proof_value := payload.chain_proof
+	if _, proof_ok := proof_value.(json.Object); !proof_ok do return false, vault.chain_error_message(.Malformed)
 	root, chain_err := vault.bridge_chain_verify(proof_value, owner, our_identity, &kr, &floor.root)
 	if chain_err != .None do return false, vault.chain_error_message(chain_err)
 	first_pin := !floor.root.set
 	if first_pin {
-		pair_mac := jsonx.extract_string(payload_json, "pair_mac", "", true, context.temp_allocator)
-		if !bridge_pairing_first_pin_ok(proof_value, pair_mac) {
+		if !bridge_pairing_first_pin_ok(proof_value, payload.pair_mac) {
 			return false, "first unseal refused: it carries no valid pairing proof from the device this bridge's pairing code was typed into"
 		}
 	}
