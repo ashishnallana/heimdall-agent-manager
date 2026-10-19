@@ -25,6 +25,7 @@ import taskv2 "odin_test:hub/service/taskv2"
 import user_service "odin_test:hub/service/user"
 import billing_service "odin_test:hub/service/billing"
 import user_vault_service "odin_test:hub/service/user_vault"
+import vault_directory_service "odin_test:hub/service/vault_directory"
 import card_service "odin_test:hub/service/card"
 import issue_service "odin_test:hub/service/issue"
 import http "odin_test:hub/transport/http"
@@ -63,6 +64,9 @@ App_Graph :: struct {
 	sqlite_lsp_server_configs: sqlite.Lsp_Server_Config_Repo_SQLite,
 	sqlite_providers: sqlite.Provider_Repo_SQLite,
 	sqlite_user_vaults: sqlite.User_Vault_Repo_SQLite,
+	sqlite_vault_directory: sqlite.Vault_Directory_Repo_SQLite,
+	sqlite_vault_directory_write: sqlite.Vault_Directory_Write_Conn,
+	vault_directory_repo: iface.Vault_Directory_Repository,
 	sqlite_bridge_logs: sqlite.Bridge_Log_Repo_SQLite,
 	bridge_log_repo: iface.Bridge_Log_Repository,
 	// bridge_log relay: queue + the one writer thread (started in build_graph,
@@ -74,6 +78,7 @@ App_Graph :: struct {
 	uow_factory: iface.Unit_Of_Work_Factory,
 	users: user_service.User_Service,
 	user_vaults: user_vault_service.User_Vault_Service,
+	vault_directory: vault_directory_service.Service,
 	bridge_update_catalog: bridge_service.Bridge_Update_Catalog,
 	bridges: bridge_service.Bridge_Service,
 	agents: agent_service.Agent_Service,
@@ -89,6 +94,7 @@ App_Graph :: struct {
 	device_auth_handlers: http.Device_Auth_Handlers,
 	user_handlers: http.User_Handlers,
 	user_vault_handlers: http.User_Vault_Handlers,
+	vault_directory_handlers: http.Vault_Directory_Handlers,
 	bridge_handlers: http.Bridge_Handlers,
 	agent_handlers: http.Agent_Handlers,
 	project_handlers: http.Project_Handlers,
@@ -253,6 +259,15 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 	}
 	graph.provider_repo = sqlite.new_provider_repository(&graph.sqlite_providers, &graph.db)
 	graph.repos.user_vaults = sqlite.new_user_vault_repository(&graph.sqlite_user_vaults, &graph.db)
+	// Passwordless vault directory: writes on their own connection (see
+	// Vault_Directory_Write_Conn); an in-memory database has no second connection.
+	if config.database_path != ":memory:" {
+		if ok, err := sqlite.open_vault_directory_write_conn(&graph.sqlite_vault_directory_write, config.database_path); !ok do return false, err.message
+		graph.vault_directory_repo = sqlite.new_vault_directory_repository(&graph.sqlite_vault_directory, &graph.db, &graph.sqlite_vault_directory_write)
+	} else {
+		graph.vault_directory_repo = sqlite.new_vault_directory_repository(&graph.sqlite_vault_directory, &graph.db)
+	}
+	graph.vault_directory = vault_directory_service.new_service(&graph.vault_directory_repo, &graph.clock)
 	graph.uow_factory = sqlite.new_unit_of_work_factory(&graph.sqlite_uow_factory, &graph.db, &graph.repos)
 	graph.users = user_service.new_user_service(&graph.repos.users, &graph.repos.agents, &graph.repos.projects, &graph.clock, &graph.ids)
 	graph.user_vaults = user_vault_service.new_user_vault_service(&graph.repos.user_vaults, &graph.clock)
@@ -410,7 +425,8 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 	graph.search_handlers = http.Search_Handlers{auth = &graph.auth, search = &graph.search}
 	graph.skills_handlers = http.Skills_Handlers{auth = &graph.auth}
 	graph.push_handlers = http.Push_Handlers{auth = &graph.auth, push = &graph.push, vapid_public_key = config.vapid_public_key}
-	graph.device_auth_handlers = http.Device_Auth_Handlers{service = &graph.device_auth, auth = &graph.auth, push = &graph.push, public_app_origin = config.public_app_origin, ui_origin = config.ui_origin}
+	graph.device_auth_handlers = http.Device_Auth_Handlers{service = &graph.device_auth, auth = &graph.auth, push = &graph.push, public_app_origin = config.public_app_origin, ui_origin = config.ui_origin, vault = &graph.vault_directory, event_bus = &graph.event_bus}
+	graph.vault_directory_handlers = http.Vault_Directory_Handlers{auth = &graph.auth, vault = &graph.vault_directory, device_auth = &graph.device_auth, bridges = &graph.bridges, event_bus = &graph.event_bus, push = &graph.push, public_app_origin = config.public_app_origin}
 	graph.agent_action_handlers = http.Agent_Action_Handlers{auth = &graph.auth, agents = &graph.agents, bridges = &graph.bridges, content = &graph.content, taskchains = &graph.taskchains, search = &graph.search, event_bus = &graph.event_bus, push = &graph.push, public_app_origin = config.public_app_origin, task_engine = &graph.task_engine}
 	graph.action_bridge_versions = make(map[string]int)
 	graph.action_handlers = http.Action_Handlers{
@@ -483,6 +499,8 @@ shutdown_graph :: proc(graph: ^App_Graph) {
 	delete(graph.action_bridge_versions)
 	sqlite.close(&graph.sqlite_billing.conn)
 	sqlite.close(&graph.sqlite_bridge_commit.conn)
+	vault_directory_service.service_free(&graph.vault_directory)
+	sqlite.close(&graph.sqlite_vault_directory_write.conn)
 	sqlite.close(&graph.db)
 }
 
@@ -523,6 +541,14 @@ register_routes :: proc(graph: ^App_Graph) {
 	http.router_add(&graph.router, "DELETE", "/api/v1/provider-tests/*", rawptr(&graph.provider_handlers), http.provider_test_cancel_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/user/vault", rawptr(&graph.user_vault_handlers), http.get_user_vault_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/user/vault", rawptr(&graph.user_vault_handlers), http.set_user_vault_handler)
+	// Passwordless vault device directory (plan §2 P2). Literal paths before wildcards.
+	http.router_add(&graph.router, "GET", "/api/v1/vault/directory", rawptr(&graph.vault_directory_handlers), http.vault_directory_get_handler)
+	http.router_add(&graph.router, "POST", "/api/v1/vault/directory/genesis", rawptr(&graph.vault_directory_handlers), http.vault_genesis_handler)
+	http.router_add(&graph.router, "POST", "/api/v1/vault/devices/register", rawptr(&graph.vault_directory_handlers), http.vault_register_handler)
+	http.router_add(&graph.router, "GET", "/api/v1/vault/devices/self", rawptr(&graph.vault_directory_handlers), http.vault_self_handler)
+	http.router_add(&graph.router, "POST", "/api/v1/vault/devices/*/approve", rawptr(&graph.vault_directory_handlers), http.vault_approve_handler)
+	http.router_add(&graph.router, "POST", "/api/v1/vault/devices/*/revoke", rawptr(&graph.vault_directory_handlers), http.vault_revoke_handler)
+	http.router_add(&graph.router, "PATCH", "/api/v1/vault/devices/*", rawptr(&graph.vault_directory_handlers), http.vault_patch_device_handler)
 	// LSP server config CRUD (REQ-LSP-CFG-1). The /resolve literal route must be
 	// registered before the /* wildcard so first-match-wins selects it correctly.
 	http.router_add(&graph.router, "POST", "/api/v1/bridges/*/lsp-servers", rawptr(&graph.lsp_server_config_handlers), http.lsp_server_config_create_handler)
@@ -878,18 +904,25 @@ device_minter :: proc(graph_ptr: rawptr, user_id, client, device_label: string) 
 // Returns (plaintext_token, bridge_id, ok).
 device_bridge_minter :: proc(graph_ptr: rawptr, req: device_auth_service.Bridge_Mint_Request) -> (device_auth_service.Bridge_Mint_Result, bool) {
 	graph := (^App_Graph)(graph_ptr)
-	// The Hub, not the bridge, knows whether approval should also deliver a vault
-	// key: a stored envelope means the browser has key material to relay after the
-	// bridge connects.
-	_, vault_found, _ := iface.user_vault_get(&graph.repos.user_vaults, domain.User_ID(req.owner_user_id))
-	// REQ-EA decision A: a bridge is enrolled only once its vault is unlocked, so an
-	// owner with no vault cannot enroll one yet. Refused HERE, server-side, so a
-	// client that skips the approval page's vault step gets the same answer.
-	if !vault_found {
+	// Passwordless vault gate (plan §2 P2): a bridge enrolls only into an existing
+	// vault directory, and only with an approving device's signed `approve`
+	// statement naming the bridge's persistent identity key. Validated BEFORE the
+	// credential is minted; committed (versioned CAS) right after, and a failed
+	// commit cancels the still-pending enrollment so no unattested bridge remains.
+	if !req.vault_approval.present {
 		return device_auth_service.Bridge_Mint_Result{
-			error = domain.domain_error(.Validation_Failed, "set up your vault before enrolling a bridge; a bridge is enrolled only once its vault is unlocked"),
+			error = domain.domain_error(.Validation_Failed, "approving a bridge requires a signed vault_approval from an approved device"),
 		}, false
 	}
+	approval_in := vault_directory_service.Bridge_Approval_Input{
+		user_id = req.owner_user_id,
+		expected_version = req.vault_approval.expected_version,
+		statement = req.vault_approval.statement,
+		signature = req.vault_approval.signature,
+		bridge_identity_public_key = req.bridge_identity_public_key,
+	}
+	vault_device, check_err := vault_directory_service.check_bridge_approval(&graph.vault_directory, approval_in)
+	if check_err.code != .None do return device_auth_service.Bridge_Mint_Result{error = check_err}, false
 	result, ok, mint_err := bridge_service.enroll_bridge_from_device_grant(&graph.bridges, bridge_service.Device_Enroll_Input{
 		owner_user_id = req.owner_user_id, // bound from Auth_Context by approve()
 		bridge_public_key = req.bridge_public_key,
@@ -910,6 +943,10 @@ device_bridge_minter :: proc(graph_ptr: rawptr, req: device_auth_service.Bridge_
 			return device_auth_service.Bridge_Mint_Result{error = mint_err}, false
 		}
 		return device_auth_service.Bridge_Mint_Result{}, false
+	}
+	if _, commit_err := vault_directory_service.commit_bridge_approval(&graph.vault_directory, approval_in, vault_device, result.bridge.bridge_id); commit_err.code != .None {
+		_, _, _ = bridge_service.cancel_pending_enrollment(&graph.bridges, result.bridge.bridge_id)
+		return device_auth_service.Bridge_Mint_Result{error = commit_err}, false
 	}
 	// REQ-IMPL-3: enroll_bridge_from_device_grant returns an EXPIRING PAIR
 	// (`hba_` + `hbf_`), so the approval hands both halves to the grant and the

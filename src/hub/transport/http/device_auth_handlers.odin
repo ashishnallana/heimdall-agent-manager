@@ -21,6 +21,7 @@ import push_service "odin_test:hub/service/push"
 import domain "odin_test:hub/domain"
 import jsonx "odin_test:lib/jsonx"
 import vd "odin_test:hub/service/vault_directory"
+import events "odin_test:hub/service/events"
 import "core:encoding/json"
 import vault "odin_test:lib/vault"
 
@@ -39,6 +40,7 @@ Device_Auth_Handlers :: struct {
 	// Passwordless vault: /device/verify also resolves a browser's 12-symbol
 	// pending-device code against the session user's directory.
 	vault:             ^vd.Service,
+	event_bus:         ^events.User_Event_Bus,
 }
 
 // device_authorize_handler is the public POST /api/v1/device/authorize endpoint.
@@ -287,6 +289,8 @@ device_approve_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	// "decision recorded, nothing to address".
 	if input.approve {
 		if bridge_id, has_bridge := device_auth.approved_bridge_id(handlers.service, input.user_code); has_bridge {
+			// The bridge's vault directory entry was committed with the approval.
+			if handlers.event_bus != nil do events.publish_resource_changed(handlers.event_bus, auth_ctx.user_id, VAULT_DEVICES_RESOURCE, bridge_id, "approved", "{}")
 			data := strings.builder_make()
 			strings.write_string(&data, "{\"hub_observed\":{\"bridge_id\":\"")
 			write_handler_json_string(&data, bridge_id)
