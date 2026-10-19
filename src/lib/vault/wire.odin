@@ -10,6 +10,20 @@ import "core:encoding/json"
 // (statement_canonical, wrap_canonical_json, signature_object), pinned by the shared
 // TS/Odin vectors. These structs only carry them.
 
+// wire_decode decodes a JSON document into a typed struct (strict JSON, not JSON5).
+// Unknown members are ignored; a member of the wrong type, invalid UTF-8 or a
+// non-object document is an error. Strings are allocated with `allocator`.
+wire_decode :: proc(text: string, out: ^$T, allocator := context.temp_allocator) -> bool {
+	return json.unmarshal_string(text, out, json.Specification.JSON, allocator) == nil
+}
+
+// wire_encode encodes a typed value with json.marshal.
+wire_encode :: proc(value: $T, allocator := context.allocator) -> (string, bool) {
+	data, err := json.marshal(value, allocator = allocator)
+	if err != nil do return "", false
+	return string(data), true
+}
+
 // Signature_Wire is a signature object {"alg","sig"} as a JSON value.
 Signature_Wire :: struct {
 	alg: string,
@@ -20,22 +34,13 @@ Signature_Wire :: struct {
 // signature_parse rejects is rejected.
 signature_wire_from_text :: proc(text: string, allocator := context.allocator) -> (w: Signature_Wire, ok: bool) {
 	if _, parsed := signature_parse(text); !parsed do return {}, false
-	if json.unmarshal_string(text, &w, json.DEFAULT_SPECIFICATION, allocator) != nil do return {}, false
+	if !wire_decode(text, &w, allocator) do return {}, false
 	return w, true
 }
 
 // signature_text_from_wire re-renders a decoded signature object canonically.
 signature_text_from_wire :: proc(w: Signature_Wire, allocator := context.allocator) -> (string, bool) {
-	sig_json, err := json.marshal(w, allocator = context.temp_allocator)
-	if err != nil do return "", false
-	return signature_text_from_value_text(string(sig_json), allocator)
-}
-
-@(private = "file")
-signature_text_from_value_text :: proc(text: string, allocator := context.allocator) -> (string, bool) {
-	v, err := json.parse_string(text, json.DEFAULT_SPECIFICATION, true, context.temp_allocator)
-	if err != nil do return "", false
-	return signature_text_from_value(v, allocator)
+	return signature_text_from_parts(w.alg, w.sig, allocator)
 }
 
 // Wrap_Wire is a stored/served keyring wrap with its signature object.
@@ -55,8 +60,8 @@ Wrap_Wire :: struct {
 // wrap_wire_from_signed_json decodes the stored form (wrap_signed_json) and
 // re-validates it through wrap_from_value.
 wrap_wire_from_signed_json :: proc(text: string, allocator := context.allocator) -> (w: Wrap_Wire, ok: bool) {
-	v, err := json.parse_string(text, json.DEFAULT_SPECIFICATION, true, context.temp_allocator)
-	if err != nil do return {}, false
+	v: json.Value
+	if !wire_decode(text, &v) do return {}, false
 	kw, sig_text, valid := wrap_from_value(v, allocator)
 	if !valid do return {}, false
 	sw, s_ok := signature_wire_from_text(sig_text, allocator)

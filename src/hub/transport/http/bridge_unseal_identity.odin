@@ -1,7 +1,6 @@
 package http
 
 import "core:strings"
-import jsonx "odin_test:lib/jsonx"
 import vault "odin_test:lib/vault"
 import project_service "odin_test:hub/service/project"
 
@@ -19,22 +18,28 @@ import project_service "odin_test:hub/service/project"
 // served beside a different key. Anything malformed drops the signed fields — a
 // client then sees no signature and refuses to unseal (fail closed).
 
+// Bridge_Hello_Unseal_Wire is the part of a bridge_hello this file reads (typed decode).
+Bridge_Hello_Unseal_Wire :: struct {
+	public_key:           string,
+	unseal_boot_id:       string,
+	unseal_key_signature: Maybe(vault.Signature_Wire),
+	identity_public_key:  string,
+	identity_sign_alg:    string,
+}
+
 bridge_hello_unseal_identity :: proc(hello_text: string, allocator := context.allocator) -> project_service.Bridge_Unseal_Identity {
 	u: project_service.Bridge_Unseal_Identity
-	u.public_key = jsonx.extract_string(hello_text, "public_key", "", true, allocator)
-	boot := jsonx.extract_string(hello_text, "unseal_boot_id", "", true, context.temp_allocator)
-	// The object is rebuilt in canonical member order from its two members (a JSON
-	// round-trip does not preserve order), then strictly re-parsed below.
-	sig_obj, has_sig := jsonx.extract_raw_object(hello_text, "unseal_key_signature", true, context.temp_allocator)
+	hello: Bridge_Hello_Unseal_Wire
+	if !vault.wire_decode(hello_text, &hello) do return u
+	u.public_key = strings.clone(hello.public_key, allocator)
+	boot := hello.unseal_boot_id
+	identity := hello.identity_public_key
+	alg := hello.identity_sign_alg
+	// The signature object is re-rendered by the one canonical encoder (and so strictly
+	// validated) before it is stored or served.
 	sig := ""
-	if has_sig {
-		sig = strings.concatenate({
-			`{"alg":"`, jsonx.extract_string(sig_obj, "alg", "", true, context.temp_allocator),
-			`","sig":"`, jsonx.extract_string(sig_obj, "sig", "", true, context.temp_allocator), `"}`,
-		}, context.temp_allocator)
-	}
-	identity := jsonx.extract_string(hello_text, "identity_public_key", "", true, context.temp_allocator)
-	alg := jsonx.extract_string(hello_text, "identity_sign_alg", "", true, context.temp_allocator)
+	sig_wire, has_sig := hello.unseal_key_signature.?
+	if has_sig do sig, has_sig = vault.signature_text_from_wire(sig_wire, context.temp_allocator)
 
 	valid := has_sig && boot != "" && len(boot) <= 64 && vault.is_lower_hex(boot) &&
 		len(identity) == vault.P256_PUBLIC_KEY_BYTES * 2 && vault.is_lower_hex(identity) &&
@@ -50,6 +55,19 @@ bridge_hello_unseal_identity :: proc(hello_text: string, allocator := context.al
 		u.identity_sign_alg = strings.clone(alg, allocator)
 	}
 	return u
+}
+
+// bridge_unseal_identity_fill sets the unseal-key advertisement members of a typed
+// response (unseal_boot_id, unseal_key_signature, bridge_identity_public_key,
+// bridge_identity_sign_alg). unseal_key_signature stays nil (JSON null) when there
+// is none. Temp-allocated.
+bridge_unseal_identity_fill :: proc(w: ^$T, u: project_service.Bridge_Unseal_Identity) {
+	w.unseal_boot_id = u.unseal_boot_id
+	w.bridge_identity_public_key = u.identity_public_key
+	w.bridge_identity_sign_alg = u.identity_sign_alg
+	if u.unseal_key_signature != "" {
+		if sw, ok := vault.signature_wire_from_text(u.unseal_key_signature, context.temp_allocator); ok do w.unseal_key_signature = sw
+	}
 }
 
 // write_bridge_unseal_identity_fields appends

@@ -12,6 +12,7 @@
 // Run: odin run tests/device_auth_security_matrix_test.odin -collection:odin_test=src -file
 package device_auth_security_matrix_test
 
+import "core:encoding/json"
 import "core:fmt"
 import "core:crypto/ecdsa"
 import vd "odin_test:hub/service/vault_directory"
@@ -145,12 +146,15 @@ test_bridge_enrollment_end_to_end :: proc() {
 	// --- authorize over HTTP, as an unauthenticated bridge would ---
 	// Passwordless vault: the grant carries the bridge's identity key and its proof.
 	id_a := sm_dev(101, "bridge")
-	auth_body := strings.concatenate({
-		"{\"client\":\"ham-bridge\",\"device_label\":\"dawnstar\",\"os\":\"linux\",\"app_version\":\"0.9.1\"",
-		",\"bridge_public_key\":\"", BPK_A, "\"",
-		",\"bridge_identity_public_key\":\"", id_a.sign_pub, "\",\"bridge_identity_proof\":", sm_enroll_proof(&id_a, BPK_A, PKCE_CHALLENGE),
-		",\"os_user\":\"tanmay\",\"pair_salt\":\"0123456789abcdef0123456789abcdef\",\"pair_lookup\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"pair_key_mac\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"",
-		",\"code_challenge\":\"", PKCE_CHALLENGE, "\",\"code_challenge_method\":\"S256\"}",
+	auth_body := sm_json(Sm_Authorize_Body{
+		client = "ham-bridge", device_label = "dawnstar", os = "linux", app_version = "0.9.1",
+		bridge_public_key = BPK_A,
+		bridge_identity_public_key = id_a.sign_pub, bridge_identity_proof = sm_enroll_proof(&id_a, BPK_A, PKCE_CHALLENGE),
+		os_user = "tanmay",
+		pair_lookup = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		pair_salt = "0123456789abcdef0123456789abcdef",
+		pair_key_mac = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+		code_challenge = PKCE_CHALLENGE, code_challenge_method = "S256",
 	})
 	auth_resp := api_http.device_authorize_handler(rawptr(&graph.device_auth_handlers), api_http.Request{
 		method = "POST", path = "/api/v1/device/authorize", body = auth_body,
@@ -165,7 +169,7 @@ test_bridge_enrollment_end_to_end :: proc() {
 	assert_eq(res_a.bridge_key_fingerprint, BPK_A_FP, "fingerprint on the grant is hub-computed")
 
 	// --- the approval page sees BOTH provenance groups (REQ-ENROLL-14) ---
-	verify_body := strings.concatenate({"{\"pair_lookup\":\"", res_a.user_code, "\"}"})
+	verify_body := sm_json(Sm_Approve_Body{pair_lookup = res_a.user_code})
 	verify_resp := api_http.device_verify_handler(rawptr(&graph.device_auth_handlers), api_http.Request{
 		method = "POST", path = "/api/v1/device/verify", body = verify_body,
 		request_id = "req_bridge_verify", remote_addr = "127.0.0.1:4444", headers = trusted_headers[:],
@@ -185,10 +189,9 @@ test_bridge_enrollment_end_to_end :: proc() {
 	assert_true(sm_genesis(&graph, "approving-human", &root), "vault directory genesis")
 
 	// --- approve: the body tries to name a different owner; it must be ignored ---
-	approve_body := strings.concatenate({
-		"{\"pair_lookup\":\"", res_a.user_code,
-		"\",\"approve\":true,\"owner_user_id\":\"spoof-owner\",\"user\":\"spoof-user\"",
-		",\"vault_approval\":", sm_vault_approval(&graph, "approving-human", &root, &id_a, 1), "}",
+	approve_body := sm_json(Sm_Approve_Body{
+		pair_lookup = res_a.user_code, approve = true, owner_user_id = "spoof-owner", user = "spoof-user",
+		vault_approval = sm_vault_approval(&graph, "approving-human", &root, &id_a, 1),
 	})
 	approve_resp := api_http.device_approve_handler(rawptr(&graph.device_auth_handlers), api_http.Request{
 		method = "POST", path = "/api/v1/device/approve", body = approve_body,
@@ -213,7 +216,7 @@ test_bridge_enrollment_end_to_end :: proc() {
 	id_bad := sm_dev(102, "bridge")
 	bad_grant, bad_found := seed_bridge_grant(&graph, "wrong-verifier-host", BPK_A, PKCE_CHALLENGE, trusted_headers[:], &id_bad, sm_vault_approval(&graph, "approving-human", &root, &id_bad, 2))
 	assert_true(bad_found, "seeded a second bridge grant for the wrong-verifier case")
-	bad_poll := strings.concatenate({"{\"device_code\":\"", bad_grant.device_code, "\",\"code_verifier\":\"", WRONG_VERIFIER, "\"}"})
+	bad_poll := sm_json(Sm_Poll_Body{device_code = bad_grant.device_code, code_verifier = WRONG_VERIFIER})
 	bad_resp := api_http.device_token_handler(rawptr(&graph.device_auth_handlers), api_http.Request{
 		method = "POST", path = "/api/v1/device/token", body = bad_poll,
 		request_id = "req_bridge_poll_bad", remote_addr = "198.51.100.31:5555",
@@ -223,14 +226,14 @@ test_bridge_enrollment_end_to_end :: proc() {
 	bad_after, bad_after_ok := device_auth.get_grant(&graph.device_auth_store, bad_grant.device_code)
 	assert_true(bad_after_ok, "the grant survives a wrong verifier")
 	assert_eq(bad_after.status, device_auth.Grant_Status.Approved, "a wrong verifier does not burn the grant")
-	good_poll := strings.concatenate({"{\"device_code\":\"", res_a.device_code, "\",\"code_verifier\":\"", PKCE_VERIFIER, "\"}"})
+	good_poll := sm_json(Sm_Poll_Body{device_code = res_a.device_code, code_verifier = PKCE_VERIFIER})
 	good_resp := api_http.device_token_handler(rawptr(&graph.device_auth_handlers), api_http.Request{
 		method = "POST", path = "/api/v1/device/token", body = good_poll,
 		request_id = "req_bridge_poll_good", remote_addr = "198.51.100.30:5555",
 	})
 	assert_eq(good_resp.status, 200, "redemption with the correct PKCE verifier -> 200")
 	assert_true(strings.contains(good_resp.body, bridge_id_a), "redemption returns the brg_ the credential is scoped to")
-	token_a := json_field(good_resp.body, "access_token")
+	token_a := sm_token_access_token(good_resp.body)
 	assert_true(token_a != "", "redemption returns a plaintext credential")
 
 	// --- REQ-EA-1: until the vault key is delivered the credential is PENDING ---
@@ -328,7 +331,7 @@ test_bridge_enrollment_end_to_end :: proc() {
 	assert_eq(inst_b.bridge_id, e2.bridge.bridge_id, "instance belongs to bridge B")
 	assert_eq(inst_a.bridge_id, e1.bridge.bridge_id, "instance belongs to bridge A")
 	own_headers := [?]contracts.HTTP_Header{{name = "Authorization", value = strings.concatenate({"Bearer ", e1.bridge_token})}}
-	own_body := strings.concatenate({"{\"agent_instance_id\":\"", inst_a.agent_instance_id, "\"}"})
+	own_body := sm_json(Sm_Instance_Body{agent_instance_id = inst_a.agent_instance_id})
 	own_ctx, own_ok, own_err := auth_service.resolve_bridge_instance_auth(&graph.auth, auth_service.Auth_Request{
 		headers = own_headers[:], body = own_body,
 	})
@@ -336,7 +339,7 @@ test_bridge_enrollment_end_to_end :: proc() {
 	assert_eq(own_ctx.bridge_id, e1.bridge.bridge_id, "bridge A may act for its OWN instance")
 
 	// The attack: bridge A's credential asserting bridge B's instance.
-	cross_body := strings.concatenate({"{\"agent_instance_id\":\"", inst_b.agent_instance_id, "\"}"})
+	cross_body := sm_json(Sm_Instance_Body{agent_instance_id = inst_b.agent_instance_id})
 	_, cross_ok, cross_err := auth_service.resolve_bridge_instance_auth(&graph.auth, auth_service.Auth_Request{
 		headers = own_headers[:], body = cross_body,
 	})
@@ -359,12 +362,15 @@ test_bridge_enrollment_end_to_end :: proc() {
 // seed_bridge_grant drives authorize + approve over HTTP for one more bridge
 // grant and returns it, so a test needing a second independent grant does not
 // have to repeat the whole body construction.
-seed_bridge_grant :: proc(graph: ^app.App_Graph, label, public_key, challenge: string, headers: []contracts.HTTP_Header, identity: ^Sm_Dev, vault_approval: string) -> (device_auth.Grant, bool) {
-	body := strings.concatenate({
-		"{\"client\":\"ham-bridge\",\"device_label\":\"", label, "\",\"os\":\"linux\"",
-		",\"bridge_public_key\":\"", public_key, "\"",
-		",\"bridge_identity_public_key\":\"", identity.sign_pub, "\",\"bridge_identity_proof\":", sm_enroll_proof(identity, public_key, challenge),
-		",\"code_challenge\":\"", challenge, "\",\"code_challenge_method\":\"S256\",\"pair_salt\":\"0123456789abcdef0123456789abcdef\",\"pair_lookup\":\"", vault.log_entry_hash(label, context.temp_allocator), "\",\"pair_key_mac\":\"", vault.log_entry_hash(public_key, context.temp_allocator), "\"}",
+seed_bridge_grant :: proc(graph: ^app.App_Graph, label, public_key, challenge: string, headers: []contracts.HTTP_Header, identity: ^Sm_Dev, vault_approval: Sm_Vault_Approval) -> (device_auth.Grant, bool) {
+	body := sm_json(Sm_Authorize_Body{
+		client = "ham-bridge", device_label = label, os = "linux",
+		bridge_public_key = public_key,
+		bridge_identity_public_key = identity.sign_pub, bridge_identity_proof = sm_enroll_proof(identity, public_key, challenge),
+		code_challenge = challenge, code_challenge_method = "S256",
+		pair_lookup = vault.log_entry_hash(label, context.temp_allocator),
+		pair_salt = "0123456789abcdef0123456789abcdef",
+		pair_key_mac = vault.log_entry_hash(public_key, context.temp_allocator),
 	})
 	resp := api_http.device_authorize_handler(rawptr(&graph.device_auth_handlers), api_http.Request{
 		method = "POST", path = "/api/v1/device/authorize", body = body,
@@ -373,7 +379,7 @@ seed_bridge_grant :: proc(graph: ^app.App_Graph, label, public_key, challenge: s
 	if resp.status != 200 do return device_auth.Grant{}, false
 	grant, found := grant_for_label(&graph.device_auth_store, label)
 	if !found do return device_auth.Grant{}, false
-	approve_body := strings.concatenate({"{\"pair_lookup\":\"", grant.user_code, "\",\"approve\":true,\"vault_approval\":", vault_approval, "}"})
+	approve_body := sm_json(Sm_Approve_Body{pair_lookup = grant.user_code, approve = true, vault_approval = vault_approval})
 	aresp := api_http.device_approve_handler(rawptr(&graph.device_auth_handlers), api_http.Request{
 		method = "POST", path = "/api/v1/device/approve", body = approve_body,
 		request_id = "req_seed_approve", remote_addr = "127.0.0.1:4444", headers = headers,
@@ -406,17 +412,65 @@ grant_for_label :: proc(store: ^device_auth.Grant_Store, label: string) -> (devi
 	return device_auth.Grant{}, false
 }
 
-// json_field pulls a string field out of a response body. Deliberately crude —
-// it only has to read back values this test wrote.
-json_field :: proc(body, key: string) -> string {
-	needle := strings.concatenate({"\"", key, "\":\""})
-	defer delete(needle)
-	idx := strings.index(body, needle)
-	if idx < 0 do return ""
-	rest := body[idx + len(needle):]
-	end := strings.index(rest, "\"")
-	if end < 0 do return ""
-    return rest[:end]
+// ── typed request bodies (json.marshal) ────────────────────────────────────
+
+Sm_Authorize_Body :: struct {
+	client:                     string,
+	device_label:               string,
+	os:                         string,
+	app_version:                string `json:"app_version,omitempty"`,
+	bridge_public_key:          string,
+	bridge_identity_public_key: string,
+	bridge_identity_proof:      vault.Signature_Wire,
+	os_user:                    string `json:"os_user,omitempty"`,
+	pair_lookup:                string,
+	pair_key_mac:               string,
+	pair_salt:                  string,
+	code_challenge:             string,
+	code_challenge_method:      string,
+}
+
+Sm_Vault_Approval :: struct {
+	expected_version: i64,
+	statement:        string,
+	signature:        vault.Signature_Wire,
+}
+
+// One shape for /device/verify and /device/approve; spoof fields are what an
+// attacker would add and the handler must ignore.
+Sm_Approve_Body :: struct {
+	pair_lookup:    string `json:"pair_lookup,omitempty"`,
+	user_code:      string `json:"user_code,omitempty"`,
+	approve:        Maybe(bool) `json:"approve,omitempty"`,
+	owner_user_id:  string `json:"owner_user_id,omitempty"`,
+	user:           string `json:"user,omitempty"`,
+	vault_approval: Maybe(Sm_Vault_Approval) `json:"vault_approval,omitempty"`,
+}
+
+Sm_Poll_Body :: struct {
+	device_code:   string,
+	code_verifier: string,
+}
+
+Sm_Instance_Body :: struct {
+	agent_instance_id: string,
+}
+
+sm_json :: proc(v: $T) -> string {
+	data, err := json.marshal(v, allocator = context.temp_allocator)
+	assert(err == nil, "test body encodes")
+	return string(data)
+}
+
+// sm_token_access_token reads data.access_token from a /device/token answer.
+sm_token_access_token :: proc(body: string) -> string {
+	resp: struct {
+		data: struct {
+			access_token: string,
+		},
+	}
+	if json.unmarshal_string(body, &resp, json.Specification.JSON, context.temp_allocator) != nil do return ""
+	return resp.data.access_token
 }
 
 test_unlinkability_smoke :: proc() {
@@ -523,7 +577,7 @@ test_http_owner_spoof_and_audit_queryability :: proc() {
 		{name = "X-Forwarded-For", value = "203.0.113.88, 10.0.0.1"},
 		{name = "User-Agent", value = "SecurityMatrix/1.0"},
 	}
-	body := strings.concatenate({"{\"user_code\":\"", res.user_code, "\",\"approve\":true,\"owner_user_id\":\"spoof-owner\",\"user\":\"spoof-user\"}"})
+	body := sm_json(Sm_Approve_Body{user_code = res.user_code, approve = true, owner_user_id = "spoof-owner", user = "spoof-user"})
 	approve_resp := api_http.device_approve_handler(rawptr(&graph.device_auth_handlers), api_http.Request{method = "POST", path = "/api/v1/device/approve", body = body, request_id = "req_security_approve", remote_addr = "127.0.0.1:4444", headers = trusted_headers[:]})
 	assert_eq(approve_resp.status, 200, "HTTP approve succeeds through trusted proxy")
 	grant, grant_ok := device_auth.get_grant(&graph.device_auth_store, res.device_code)
@@ -549,7 +603,7 @@ test_http_owner_spoof_and_audit_queryability :: proc() {
 
 	deny_res, deny_auth_ok, _ := device_auth.authorize(&graph.device_auth, {client = "heimdall-electron", device_label = "Denied Laptop"}, "198.51.100.21:5555", "")
 	assert_true(deny_auth_ok, "authorize deny audit grant succeeds")
-	deny_body := strings.concatenate({"{\"user_code\":\"", deny_res.user_code, "\",\"approve\":false,\"owner_user_id\":\"spoof-deny\"}"})
+	deny_body := sm_json(Sm_Approve_Body{user_code = deny_res.user_code, approve = false, owner_user_id = "spoof-deny"})
 	deny_resp := api_http.device_approve_handler(rawptr(&graph.device_auth_handlers), api_http.Request{method = "POST", path = "/api/v1/device/approve", body = deny_body, request_id = "req_security_deny", remote_addr = "127.0.0.1:4444", headers = trusted_headers[:]})
 	assert_eq(deny_resp.status, 200, "HTTP deny succeeds through trusted proxy")
 	deny_grant, deny_grant_ok := device_auth.get_grant(&graph.device_auth_store, deny_res.device_code)
@@ -611,9 +665,14 @@ sm_sign :: proc(d: ^Sm_Dev, msg: string) -> string {
 	return text
 }
 
-sm_enroll_proof :: proc(d: ^Sm_Dev, ecdh_pub, challenge: string) -> string {
+sm_enroll_proof :: proc(d: ^Sm_Dev, ecdh_pub, challenge: string) -> vault.Signature_Wire {
 	msg, _ := vault.bridge_enroll_proof_canonical(ecdh_pub, challenge)
-	return sm_sign(d, msg)
+	return sm_sig_wire(d, msg)
+}
+
+sm_sig_wire :: proc(d: ^Sm_Dev, msg: string) -> vault.Signature_Wire {
+	w, _ := vault.signature_wire_from_text(sm_sign(d, msg), context.temp_allocator)
+	return w
 }
 
 sm_statement :: proc(type, user_id: string, issuer, subject: ^Sm_Dev, seq, epoch: string, prev := "") -> string {
@@ -647,14 +706,9 @@ sm_genesis :: proc(graph: ^app.App_Graph, user_id: string, root: ^Sm_Dev) -> boo
 	return err.code == .None
 }
 
-sm_json_escape :: proc(s: string) -> string {
-	out, _ := strings.replace_all(s, "\n", `\n`)
-	return out
-}
-
 // sm_vault_approval is the `vault_approval` object the root signs for a bridge identity.
-sm_vault_approval :: proc(graph: ^app.App_Graph, user_id: string, root, bridge: ^Sm_Dev, version: i64) -> string {
+sm_vault_approval :: proc(graph: ^app.App_Graph, user_id: string, root, bridge: ^Sm_Dev, version: i64) -> Sm_Vault_Approval {
 	view, _ := vd.get_directory(&graph.vault_directory, user_id)
 	st := sm_statement("approve", user_id, root, bridge, fmt.tprintf("%d", version + 1), "1", view.directory.head_hash)
-	return strings.concatenate({`{"expected_version":`, fmt.tprintf("%d", version), `,"statement":"`, sm_json_escape(st), `","signature":`, sm_sign(root, st), "}"})
+	return Sm_Vault_Approval{expected_version = version, statement = st, signature = sm_sig_wire(root, st)}
 }

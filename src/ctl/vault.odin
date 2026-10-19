@@ -1,6 +1,7 @@
 package main
 
 import "core:crypto"
+import "core:encoding/json"
 import "core:fmt"
 import "core:os"
 import "core:strings"
@@ -120,12 +121,35 @@ ctl_vault_keyring_from_bridge :: proc() -> (kr: vault.Vault_Keyring, ok: bool) {
 // ctl_vault_keyring_from_response validates an agent.vault.get response:
 // {"keyring_b64":"<base64 HKR1>","current_epoch":N}. The keyring must decode
 // strictly, parse, and its current epoch must equal current_epoch.
+// Ctl_Vault_Get_Data is the agent.vault.get answer (bare or under "data").
+Ctl_Vault_Get_Data :: struct {
+	keyring_b64:   string,
+	current_epoch: Maybe(i64),
+}
+
 ctl_vault_keyring_from_response :: proc(response: string) -> (kr: vault.Vault_Keyring, ok: bool) {
-	b64 := jsonx.extract_string(response, "keyring_b64", "", false, context.temp_allocator)
+	envelope: struct {
+		data: Maybe(Ctl_Vault_Get_Data),
+	}
+	got: Ctl_Vault_Get_Data
+	if vault.wire_decode(response, &envelope) {
+		if d, has := envelope.data.?; has do got = d
+	}
+	if got.keyring_b64 == "" {
+		flat: Ctl_Vault_Get_Data
+		if vault.wire_decode(response, &flat) do got = flat
+	}
+	b64 := got.keyring_b64
 	defer crypto.zero_explicit(raw_data(b64), len(b64))
-	epoch, epoch_ok := jsonx.extract_int_found(response, "current_epoch")
-	if b64 == "" || !epoch_ok || epoch < 1 || i64(epoch) > i64(vault.MAX_EPOCH) do return {}, false
+	epoch, epoch_ok := got.current_epoch.?
+	if b64 == "" || !epoch_ok || epoch < 1 || epoch > i64(vault.MAX_EPOCH) do return {}, false
 	return ctl_keyring_from_b64(b64, u32(epoch))
+}
+
+// Ctl_Message is a {"ok":false,"message":...} line.
+Ctl_Message :: struct {
+	ok:      bool,
+	message: string,
 }
 
 ctl_vault_command :: proc(cmd: []string, args: []string) {
@@ -143,8 +167,7 @@ ctl_vault_command :: proc(cmd: []string, args: []string) {
 	case "status":
 		ctl_vault_status(args)
 	case:
-		msg := strings.concatenate({"{\"ok\":false,\"message\":\"unknown vault command: ", action, ". Run 'ham-ctl vault --help' for usage.\"}"})
-		defer delete(msg)
+		msg, _ := vault.wire_encode(Ctl_Message{message = fmt.tprintf("unknown vault command: %s. Run 'ham-ctl vault --help' for usage.", action)}, context.temp_allocator)
 		fmt.println(msg)
 	}
 }
@@ -160,26 +183,31 @@ ctl_vault_command :: proc(cmd: []string, args: []string) {
 ctl_vault_status :: proc(args: []string) {
 	_ = args
 	env_present, env_valid := ctl_vault_env_override()
-	bridge_json := ctl_vault_status_bridge_json()
-	defer delete(bridge_json)
+	fields := Ctl_Vault_Status_Fields{env_override = env_present, env_override_valid = env_valid, bridge = ctl_vault_status_bridge()}
+	out, _ := vault.wire_encode(Ctl_Vault_Status_Output{ok = true, env_override = fields.env_override, env_override_valid = fields.env_override_valid, bridge = fields.bridge, data = fields}, context.temp_allocator)
+	fmt.println(out)
+}
 
-	b := strings.builder_make()
-	defer strings.builder_destroy(&b)
-	fields := strings.builder_make()
-	defer strings.builder_destroy(&fields)
-	strings.write_string(&fields, "\"env_override\":")
-	strings.write_string(&fields, "true" if env_present else "false")
-	strings.write_string(&fields, ",\"env_override_valid\":")
-	strings.write_string(&fields, "true" if env_valid else "false")
-	strings.write_string(&fields, ",\"bridge\":")
-	strings.write_string(&fields, bridge_json)
+// Ctl_Vault_Status_Bridge is the "bridge" object: available, and the bridge's own
+// agent.vault.status data forwarded as-is (nil -> omitted when unavailable).
+Ctl_Vault_Status_Bridge :: struct {
+	available: bool,
+	status:    json.Value `json:"status,omitempty"`,
+}
 
-	strings.write_string(&b, "{\"ok\":true,")
-	strings.write_string(&b, strings.to_string(fields))
-	strings.write_string(&b, ",\"data\":{")
-	strings.write_string(&b, strings.to_string(fields))
-	strings.write_string(&b, "}}")
-	fmt.println(strings.to_string(b))
+Ctl_Vault_Status_Fields :: struct {
+	env_override:       bool,
+	env_override_valid: bool,
+	bridge:             Ctl_Vault_Status_Bridge,
+}
+
+// The fields appear both at the top level (older consumers) and under "data".
+Ctl_Vault_Status_Output :: struct {
+	ok:                 bool,
+	env_override:       bool,
+	env_override_valid: bool,
+	bridge:             Ctl_Vault_Status_Bridge,
+	data:               Ctl_Vault_Status_Fields,
 }
 
 // ctl_vault_env_override reports whether $HEIMDALL_VAULT_KEYRING is set (non-blank)
@@ -194,27 +222,29 @@ ctl_vault_env_override :: proc() -> (present: bool, valid: bool) {
 	return true, ok
 }
 
-// ctl_vault_status_bridge_json renders the "bridge" object of the status payload:
+// ctl_vault_status_bridge is the "bridge" object of the status payload:
 // {"available":false} when no bridge can be asked, otherwise
-// {"available":true,"status":<agent.vault.status data>}. The caller owns the result.
-ctl_vault_status_bridge_json :: proc() -> string {
+// {"available":true,"status":<agent.vault.status data>} (temp-allocated).
+ctl_vault_status_bridge :: proc() -> Ctl_Vault_Status_Bridge {
 	endpoint, has_endpoint := os.lookup_env("HEIMDALL_BRIDGE_ENDPOINT", context.temp_allocator)
 	token, has_token := os.lookup_env("HEIMDALL_AGENT_TOKEN", context.temp_allocator)
 	if !has_endpoint || strings.trim_space(endpoint) == "" || !has_token || strings.trim_space(token) == "" {
-		return strings.clone("{\"available\":false}")
+		return {}
 	}
 
 	response, call_ok := ctl_agent_local_call(endpoint, token, "agent.vault.status", "{}")
-	if !call_ok do return strings.clone("{\"available\":false}")
+	if !call_ok do return {}
 	defer delete(response)
 
 	// The bridge's vault.status data is {status, vault_status, configured,
 	// permissions_valid, key_length}; forward it rather than re-deriving it.
-	data_raw, data_ok := extract_json_object_raw(response, "data")
-	if !data_ok do return strings.clone("{\"available\":false}")
-	defer delete(data_raw)
-
-	return strings.concatenate({"{\"available\":true,\"status\":", data_raw, "}"})
+	root, parsed := jsonx.parse_body(response, context.temp_allocator)
+	if !parsed do return {}
+	obj, is_obj := root.(json.Object)
+	if !is_obj do return {}
+	data, data_is_obj := obj["data"].(json.Object)
+	if !data_is_obj do return {}
+	return Ctl_Vault_Status_Bridge{available = true, status = data}
 }
 
 // ── Write-side policy (findings M2, N2) ─────────────────────────────────────

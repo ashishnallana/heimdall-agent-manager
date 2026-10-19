@@ -205,6 +205,23 @@ signature_object :: proc(sig: ^Signature, allocator := context.allocator) -> (st
 	return "", false
 }
 
+// signature_text_from_parts renders the canonical signature object for an alg id and
+// a signature hex string (as decoded from a typed JSON value), rejecting anything
+// signature_parse would reject. The text always comes from signature_object, the one
+// encoder of the canonical form.
+signature_text_from_parts :: proc(alg_id, sig_hex: string, allocator := context.allocator) -> (string, bool) {
+	sig: Signature
+	switch sign_alg_from_id(alg_id) {
+	case .Ecdsa_P256_Sha256:
+		if len(sig_hex) != P256_SIGNATURE_BYTES * 2 || !is_lower_hex(sig_hex) do return "", false
+		if !hex_decode_into(sig.sig[:], sig_hex) do return "", false
+		sig.alg = .Ecdsa_P256_Sha256
+	case .Unknown:
+		return "", false
+	}
+	return signature_object(&sig, allocator)
+}
+
 // verify checks a signature object over msg by a public key of the given sign alg.
 // The key's alg and the signature's alg must agree; both go through the allowlist.
 verify :: proc(key_alg_id: string, public_key_hex: string, msg: []byte, signature_json: string) -> bool {

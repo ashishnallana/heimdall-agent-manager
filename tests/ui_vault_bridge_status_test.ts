@@ -1,4 +1,4 @@
-// REQ-BVS-3, REQ-BVS-4, REQ-BVS-5 and the folded-in vault key rehydration defect.
+// REQ-BVS-3: per-bridge vault status. (Bridge lock, REQ-BVS-4/5, no longer exists.)
 //
 // The badge in bridge settings used to be derived from the UI CLIENT's own vault state,
 // so it was one global value rendered identically next to every bridge — it reported
@@ -11,38 +11,8 @@
 // (matched by the `tests/ui_vault_*.ts` glob in package.json's `test` script, so it
 //  also runs under a plain `npm test`.)
 
-import { importRawKeyHex } from './helpers/vaultTestKeyring.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import { registerHooks } from 'node:module';
-import { fileURLToPath } from 'node:url';
-
-// `src/ui/api/endpoints/bridges.ts` and its transitive imports use EXTENSIONLESS
-// relative specifiers (`'../cookieFetch'`), which Vite resolves but Node's ESM loader
-// does not — so importing it for real fails with ERR_MODULE_NOT_FOUND. This resolve
-// hook appends the extension only as a fallback, after Node's own resolution has
-// already failed, and marks the result `module-typescript` so Node still strips the
-// types. It exists so REQ-BVS-4 can be verified by CALLING the shipped `lockBridge`
-// through a stubbed fetch rather than by pattern-matching its source text — an
-// error-handling contract asserted by grep is not asserted at all.
-registerHooks({
-  resolve(specifier, context, nextResolve) {
-    try {
-      return nextResolve(specifier, context);
-    } catch (err) {
-      if (specifier.startsWith('.') && context.parentURL) {
-        const base = new URL(specifier, context.parentURL).href;
-        for (const candidate of [`${base}.ts`, `${base}.tsx`, `${base}/index.ts`]) {
-          if (fs.existsSync(fileURLToPath(candidate))) {
-            return { url: candidate, shortCircuit: true, format: 'module-typescript' };
-          }
-        }
-      }
-      throw err;
-    }
-  },
-});
 
 import {
   resolveBridgeVaultStatus,
@@ -191,96 +161,3 @@ test('REQ-T4-1: canConfigureBridgeVault — all five states x ownerHasVault', ()
   assert.equal(canUnlockBridgeVault('NotConfigured'), false, 'NotConfigured still offers no plain Unlock');
   assert.equal(canLockBridgeVault('NotConfigured'), false, 'Lock stays disabled for NotConfigured');
 });
-
-// --------------------------------------------------------------------------------
-// 3. REQ-BVS-4: lockBridge must propagate failure instead of returning { ok: true }.
-//
-// `bridges.ts` is imported for real and driven through a stubbed global fetch, so this
-// asserts the actual behaviour of the shipped function, not the shape of its source.
-// --------------------------------------------------------------------------------
-
-test('REQ-BVS-4: lockBridge propagates a failed lock instead of reporting success', async () => {
-  const realFetch = globalThis.fetch;
-  const calls: string[] = [];
-  try {
-    const { lockBridge } = await import('../src/ui/api/endpoints/bridges.ts');
-
-    // (a) The hub answers 500 — this previously resolved to { ok: true }.
-    globalThis.fetch = (async (url: any) => {
-      calls.push(String(url));
-      return new Response(JSON.stringify({ error: { message: 'bridge offline', code: 'bridge_offline' } }), {
-        status: 500,
-        headers: { 'content-type': 'application/json' },
-      });
-    }) as any;
-    await assert.rejects(
-      () => lockBridge('brg_dead'),
-      (err: any) => {
-        assert.ok(err instanceof Error, 'a real Error reaches the caller');
-        assert.match(String(err.message), /bridge offline/i, 'the hub sentence survives');
-        return true;
-      },
-      'a 500 from the hub must NOT resolve as a successful lock',
-    );
-    assert.equal(calls.length, 1, 'the lock endpoint was actually called');
-    assert.match(calls[0], /\/bridges\/brg_dead\/lock$/, 'it posts to the per-bridge lock endpoint');
-
-    // (b) The network itself fails — no fabricated success either.
-    globalThis.fetch = (async () => {
-      throw new TypeError('Failed to fetch');
-    }) as any;
-    await assert.rejects(() => lockBridge('brg_unreachable'), /Failed to fetch/);
-
-    // (c) A 2xx carrying an explicit ok:false is still a failed lock.
-    globalThis.fetch = (async () => new Response(JSON.stringify({ ok: false, message: 'vault not enabled' }), {
-      status: 200,
-      headers: { 'content-type': 'application/json' },
-    })) as any;
-    await assert.rejects(() => lockBridge('brg_refusing'), /vault not enabled/);
-
-    // (d) The happy path still resolves to ok: true.
-    globalThis.fetch = (async () => new Response(JSON.stringify({ ok: true }), {
-      status: 200,
-      headers: { 'content-type': 'application/json' },
-    })) as any;
-    assert.deepEqual(await lockBridge('brg_good'), { ok: true });
-  } finally {
-    globalThis.fetch = realFetch;
-  }
-});
-
-test('REQ-BVS-5: a successful bridge lock leaves this client’s CryptoKey in place', async () => {
-  // The per-bridge Lock handler is JSX and cannot be imported here, so the part of
-  // REQ-BVS-5 that IS executable is asserted executably: the network call the handler
-  // makes must not disturb the client's active key. The handler's own freedom from
-  // `lockVault()` is pinned by the source-scoped test below.
-  const realFetch = globalThis.fetch;
-  try {
-    const { lockBridge } = await import('../src/ui/api/endpoints/bridges.ts');
-    const { setActiveVaultKey, getActiveVaultKey } = await import(
-      '../src/ui/utils/vaultCrypto.ts'
-    );
-
-    const key = await importRawKeyHex('0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef');
-    setActiveVaultKey(key);
-    assert.ok(getActiveVaultKey(), 'precondition: the client holds a key');
-
-    globalThis.fetch = (async () => new Response(JSON.stringify({ ok: true }), {
-      status: 200,
-      headers: { 'content-type': 'application/json' },
-    })) as any;
-    await lockBridge('brg_one');
-
-    assert.equal(getActiveVaultKey()?.keys.get(1), key, 'locking a bridge must not clear the client key');
-
-    // And a FAILED lock must not clear it either.
-    globalThis.fetch = (async () => new Response('nope', { status: 503 })) as any;
-    await assert.rejects(() => lockBridge('brg_one'));
-    assert.equal(getActiveVaultKey()?.keys.get(1), key, 'a failed lock must not clear the client key');
-
-    setActiveVaultKey(null);
-  } finally {
-    globalThis.fetch = realFetch;
-  }
-});
-

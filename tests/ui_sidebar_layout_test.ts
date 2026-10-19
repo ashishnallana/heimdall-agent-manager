@@ -111,19 +111,17 @@ test('mobile aux hides the fixed Heimdall and sidebar controls', () => {
   assert.match(source, /\{!hideTopLeftCluster \? \(\s*<div\s+data-debug-id="shell-top-left-cluster"/);
 });
 
-test('REQ-BAR-3: vault status toggle lives in the bottom status bar and cannot fake unlock', () => {
+test('REQ-BAR-3: vault status module lives in the bottom status bar; no lock/unlock, only key delivery', () => {
   assert.match(source, /renderVaultToggle: renderVaultStatusButton/);
   assert.match(source, /data-debug-id="shell-vault-status-toggle"/);
-  assert.match(source, /Icon name=\{isVaultUnlocked && !hasOnlineLockedBridge \? 'lock-open' : 'lock'\}/);
+  assert.match(source, /Icon name=\{hasOnlineLockedBridge \? 'lock' : 'lock-open'\}/);
   // REQ-SB-2: plain colored text, no background pill.
-  assert.match(source, /hasOnlineLockedBridge \? 'text-warning' : isVaultUnlocked \? 'text-success' : 'text-danger'/);
+  assert.match(source, /hasOnlineLockedBridge \? 'text-warning' : 'text-success'/);
   assert.doesNotMatch(source, /bg-(warning|success|danger)-soft text-(warning|success|danger) hover:bg-/);
-  assert.match(source, /if \(!vaultSupported \|\| isVaultLocking \|\| isVaultReconciling\) return/);
-  assert.match(source, /dispatch\(setUnlockModalOpen\(true\)\)/);
-  assert.match(source, /if \(hasOnlineLockedBridge\)[\s\S]*reconcileOnlineLockedBridges\(\)/);
+  // A click delivers the key to waiting bridges, otherwise opens Settings -> Devices.
+  assert.match(source, /if \(hasOnlineLockedBridge\) \{\s*void reconcileOnlineLockedBridges\(\);/);
+  assert.match(source, /window\.location\.hash = buildRouteHash\('\/settings\/devices', ''\)/);
   assert.match(source, /if \(bridgeReconciliationRef\.current\) return bridgeReconciliationRef\.current/);
-  assert.match(source, /bridgeReconciliationRef\.current = run/);
-  assert.match(source, /await refetchBridges\(\)/);
-  assert.match(source, /bridgeReconciliationRef\.current = null/);
-  assert.match(source, /lockAllConnectedBridges\(\)[\s\S]*dispatch\(lockVault\(\)\)/);
+  // The password-era lock surfaces are gone.
+  assert.doesNotMatch(source, /setUnlockModalOpen|lockAllConnectedBridges|lockVault\(/);
 });

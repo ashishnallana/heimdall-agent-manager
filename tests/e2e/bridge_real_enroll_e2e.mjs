@@ -167,7 +167,8 @@ async function enroll(hub, approver, cfg) {
     withKeyringBytes: async (fn) => { const b = Uint8Array.from(approver.keyringBytes); try { return await fn(b); } finally { b.fill(0); } },
   }, { enrollment: true, expectedPublicKey: target.publicKey, extra: { enrollment: true, expected_public_key: target.publicKey, pair_mac: pairMac } });
   const exitCode = await Promise.race([exited, sleep(30_000).then(() => 'timeout')]);
-  expect(/bridge enroll SUCCESS/.test(out), `ham-bridge enroll reports SUCCESS (exit ${exitCode}; the Windows service restart is not supported, so 1/3 is expected after success)`);
+  expect(/bridge enroll SUCCESS/.test(out) && exitCode === 0, `ham-bridge enroll reports SUCCESS and exits 0 (exit ${exitCode})`);
+  if (process.platform === 'win32') expect(/start the bridge with:/.test(out), 'with no service to restart (Windows) enroll prints the command that starts the bridge');
   expect(fs.existsSync(cfg.config) && fs.readFileSync(cfg.config, 'utf8').includes(hub.base), 'the written config points the runtime at exactly that hub');
   return { bridgeId, out };
 }

@@ -11,6 +11,7 @@
 // Run: odin run tests/device_auth_token_poll_test.odin -collection:odin_test=src -file
 package device_auth_token_poll_test
 
+import "core:encoding/json"
 import "core:fmt"
 import "core:crypto/ecdsa"
 import vault "odin_test:lib/vault"
@@ -276,9 +277,7 @@ main :: proc() {
 	FAKE_NOW += 5
 	bad_resp := api_http.device_token_handler(rawptr(&phandlers), api_http.Request{
 		method = "POST", path = "/api/v1/device/token",
-		// NOTE: this project's Odin `fmt` uses `{}` verbs, so a literal `{` cannot
-		// pass through tprintf — build JSON bodies by concatenation.
-		body = strings.concatenate({"{\"device_code\":\"", hres.device_code, "\",\"code_verifier\":\"", WRONG_VERIFIER, "\"}"}),
+		body = tp_poll_body(hres.device_code, WRONG_VERIFIER),
 		request_id = "req_pkce_bad", remote_addr = "127.0.0.1:4444",
 	})
 	assert_eq(bad_resp.status, 401, "handler: wrong verifier -> HTTP 401")
@@ -286,7 +285,7 @@ main :: proc() {
 	FAKE_NOW += 5
 	good_resp := api_http.device_token_handler(rawptr(&phandlers), api_http.Request{
 		method = "POST", path = "/api/v1/device/token",
-		body = strings.concatenate({"{\"device_code\":\"", hres.device_code, "\",\"code_verifier\":\"", PKCE_VERIFIER, "\"}"}),
+		body = tp_poll_body(hres.device_code, PKCE_VERIFIER),
 		request_id = "req_pkce_good", remote_addr = "127.0.0.1:4444",
 	})
 	assert_eq(good_resp.status, 200, "handler: correct verifier -> HTTP 200")
@@ -366,7 +365,7 @@ main :: proc() {
 	// completes, which is the real order of events in RFC 8628.
 	FAKE_NOW += 10
 	rhandlers := api_http.Device_Auth_Handlers{service = &rsvc}
-	rbody := strings.concatenate({"{\"device_code\":\"", rres.device_code, "\"}"})
+	rbody := tp_poll_body(rres.device_code)
 	rresp := api_http.device_token_handler(rawptr(&rhandlers), api_http.Request{
 		method = "POST", path = "/api/v1/device/token", body = rbody,
 		request_id = "req_index_regression", remote_addr = "127.0.0.1:4444",
@@ -470,4 +469,16 @@ test_bridge_identity :: proc(ecdh_pub, challenge: string) -> (pub_hex: string, p
 	sig, _ := vault.sign_p256(&priv, transmute([]byte)msg)
 	proof, _ = vault.signature_object(&sig)
 	return
+}
+
+// Tp_Poll_Body is the /device/token request body (typed; json.marshal).
+Tp_Poll_Body :: struct {
+	device_code:   string,
+	code_verifier: string `json:"code_verifier,omitempty"`,
+}
+
+tp_poll_body :: proc(device_code: string, code_verifier := "") -> string {
+	data, err := json.marshal(Tp_Poll_Body{device_code = device_code, code_verifier = code_verifier}, allocator = context.temp_allocator)
+	assert(err == nil, "poll body encodes")
+	return string(data)
 }

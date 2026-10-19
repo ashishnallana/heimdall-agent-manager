@@ -1,60 +1,27 @@
-// REQ-VAULT-CRYPTO-LIB-1: Tests for WebCrypto User Vault Client Library,
-// BIP-39 mnemonic phrase generation, envelope wrapping/unwrapping, and Redux vaultSlice.
+// REQ-VAULT-CRYPTO-LIB-1: vault byte helpers, BIP-39 recovery words and the
+// keyring-accessor vaultSlice. (Password/PBKDF2 key envelopes no longer exist.)
 //
 // RUN: node --test tests/ui_vault_crypto_test.ts
 
-import { asKeyring } from './helpers/vaultTestKeyring.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { BIP39_WORDS } from '../src/ui/utils/bip39Words.ts';
 import {
-  generateVaultKey,
-  exportRawKeyHex,
-  importRawKeyHex,
-  deriveKeyFromPassword,
   generate12RecoveryWords,
   validateRecoveryWords,
-  deriveKeyFromRecoveryWords,
-  encryptVaultKeyEnvelope,
-  decryptVaultKeyEnvelope,
-  encryptVaultText,
-  decryptVaultText,
   generateSaltHex,
   generateNonceHex,
   bytesToHex,
   hexToBytes,
-  DEFAULT_KDF_ITERATIONS,
-  VAULT_KEY_BYTES,
-  AES_GCM_NONCE_BYTES,
-  AES_GCM_TAG_BYTES,
 } from '../src/ui/utils/vaultCrypto.ts';
 import { configureStore } from '@reduxjs/toolkit';
 import vaultReducer, {
-  setVaultConfigured,
-  setVaultUnlocked,
-  lockVault,
-  selectVaultState,
-  selectIsVaultConfigured,
+  keyringInstalled,
+  keyringCleared,
   selectIsVaultUnlocked,
-  selectRawVaultKeyHex,
+  selectVaultEpoch,
 } from '../src/ui/store/vaultSlice.ts';
-
-/**
- * Flip every bit of the first byte of a hex string, for tamper-detection assertions.
- *
- * Do NOT tamper by assigning a fixed byte (e.g. `'00' + hex.slice(2)`): that is the
- * identity function whenever the first byte already equals the value assigned, so on
- * 1 run in 256 nothing is actually tampered, decryption legitimately succeeds, and the
- * assertion either fails spuriously or — worse — passes without testing tamper
- * detection at all. XOR with 0xff always changes the byte.
- *
- * Matches the byte-flip convention already used in tests/ui_vault_content_test.ts.
- */
-function flipFirstByteHex(hex: string): string {
-  const flipped = (parseInt(hex.slice(0, 2), 16) ^ 0xff).toString(16).padStart(2, '0');
-  return flipped + hex.slice(2);
-}
 
 // -----------------------------------------------------------------------------
 // 1. BIP-39 Word List
@@ -100,83 +67,7 @@ test('generateSaltHex and generateNonceHex return correct lengths', () => {
 });
 
 // -----------------------------------------------------------------------------
-// 3. Vault Key Generation, Hex Export, and Import
-// -----------------------------------------------------------------------------
-
-test('generateVaultKey creates an extractable 256-bit AES-GCM key', async () => {
-  const key = await generateVaultKey();
-  assert.equal(key.type, 'secret');
-  assert.equal(key.algorithm.name, 'AES-GCM');
-  assert.equal((key.algorithm as any).length, 256);
-  assert.equal(key.extractable, true);
-});
-
-test('importRawKeyHex imports non-extractable 256-bit AES-GCM key (REQ-VAULT-HARDEN-1)', async () => {
-  const originalKey = await generateVaultKey();
-  const hex = await exportRawKeyHex(originalKey);
-
-  assert.equal(hex.length, VAULT_KEY_BYTES * 2, 'Raw key hex must be 64 characters');
-  assert.ok(/^[0-9a-f]{64}$/.test(hex), 'Raw key hex must be lowercase hex characters');
-
-  const importedKey = await importRawKeyHex(hex);
-  assert.equal(importedKey.extractable, false);
-
-  // Calling crypto.subtle.exportKey('raw', key) throws InvalidAccessError (REQ-VAULT-HARDEN-1)
-  await assert.rejects(async () => {
-    await crypto.subtle.exportKey('raw', importedKey);
-  }, (err: any) => err.name === 'InvalidAccessError' || String(err).includes('not extractable'));
-
-  // Round-trip encryption and decryption functions correctly with non-extractable key
-  const testCipher = await encryptVaultText('roundtrip test', asKeyring(importedKey));
-  const testPlain = await decryptVaultText(testCipher, asKeyring(importedKey));
-  assert.equal(testPlain, 'roundtrip test');
-
-  // Input validation
-  await assert.rejects(async () => {
-    await importRawKeyHex('abcd');
-  }, /expected 32 bytes/);
-});
-
-// -----------------------------------------------------------------------------
-// 4. PBKDF2 Password Derivation
-// -----------------------------------------------------------------------------
-
-test('deriveKeyFromPassword deterministically derives non-extractable 256-bit AES-GCM key', async () => {
-  const password = 'SuperSecretMasterPassword!2026';
-  const saltHex = generateSaltHex(16);
-
-  const key1 = await deriveKeyFromPassword(password, saltHex, 10_000);
-  const key2 = await deriveKeyFromPassword(password, saltHex, 10_000);
-
-  assert.equal(key1.extractable, false);
-  assert.equal(key2.extractable, false);
-
-  // Calling crypto.subtle.exportKey('raw', key) throws InvalidAccessError
-  await assert.rejects(async () => {
-    await crypto.subtle.exportKey('raw', key1);
-  }, (err: any) => err.name === 'InvalidAccessError' || String(err).includes('not extractable'));
-
-  // Verify key1 and key2 are functionally identical: encrypt with key1, decrypt with key2
-  const cipher1 = await encryptVaultText('deterministic check', asKeyring(key1));
-  const plain2 = await decryptVaultText(cipher1, asKeyring(key2));
-  assert.equal(plain2, 'deterministic check');
-
-  // Different password produces different key (decryption fails)
-  const keyDiffPass = await deriveKeyFromPassword('DifferentPassword!2026', saltHex, 10_000);
-  await assert.rejects(async () => {
-    await decryptVaultText(cipher1, asKeyring(keyDiffPass));
-  });
-
-  // Different salt produces different key (decryption fails)
-  const saltHex2 = generateSaltHex(16);
-  const keyDiffSalt = await deriveKeyFromPassword(password, saltHex2, 10_000);
-  await assert.rejects(async () => {
-    await decryptVaultText(cipher1, asKeyring(keyDiffSalt));
-  });
-});
-
-// -----------------------------------------------------------------------------
-// 5. 12-Word Mnemonic Generation and BIP-39 Checksum Validation
+// 3. 12-Word Mnemonic Generation and BIP-39 Checksum Validation
 // -----------------------------------------------------------------------------
 
 test('generate12RecoveryWords generates valid 12 BIP-39 words with valid checksum', () => {
@@ -219,187 +110,21 @@ test('validateRecoveryWords matches official BIP-39 test vector', () => {
 });
 
 // -----------------------------------------------------------------------------
-// 6. Envelope Wrapping and Unwrapping (Master Password)
+// 4. vaultSlice: keyring accessors only (no configured/lock state, no key bytes)
 // -----------------------------------------------------------------------------
 
-test('encryptVaultKeyEnvelope and decryptVaultKeyEnvelope round-trip with password', async () => {
-  const vaultKey = await generateVaultKey();
-  const originalVaultHex = await exportRawKeyHex(vaultKey);
+test('vaultSlice mirrors keyring install/clear and stays serializable', () => {
+  const store = configureStore({ reducer: { vault: vaultReducer } });
+  assert.equal(selectIsVaultUnlocked(store.getState()), false);
+  assert.equal(selectVaultEpoch(store.getState()), 0);
 
-  const saltHex = generateSaltHex(16);
-  const password = 'CorrectHorseBatteryStaple#42';
-  const masterKey = await deriveKeyFromPassword(password, saltHex, 50_000);
+  store.dispatch(keyringInstalled({ currentEpoch: 3 }));
+  assert.equal(selectIsVaultUnlocked(store.getState()), true);
+  assert.equal(selectVaultEpoch(store.getState()), 3);
+  assert.deepEqual(Object.keys(store.getState().vault).sort(), ['currentEpoch', 'isUnlocked']);
+  assert.doesNotThrow(() => JSON.stringify(store.getState()));
 
-  const envelope = await encryptVaultKeyEnvelope(masterKey, vaultKey);
-  assert.equal(envelope.ciphertextHex.length, VAULT_KEY_BYTES * 2, 'Ciphertext must be 32 bytes hex');
-  assert.equal(envelope.nonceHex.length, AES_GCM_NONCE_BYTES * 2, 'Nonce must be 12 bytes hex');
-  assert.equal(envelope.tagHex.length, AES_GCM_TAG_BYTES * 2, 'Tag must be 16 bytes hex');
-
-  // Successful decryption
-  const decryptedVaultKey = await decryptVaultKeyEnvelope(
-    masterKey,
-    envelope.ciphertextHex,
-    envelope.nonceHex,
-    envelope.tagHex,
-  );
-  assert.equal(decryptedVaultKey.extractable, false);
-  const testCipher = await encryptVaultText('envelope test', asKeyring(vaultKey));
-  const testDecrypted = await decryptVaultText(testCipher, asKeyring(decryptedVaultKey));
-  assert.equal(testDecrypted, 'envelope test');
-
-  // Wrong password fails
-  const wrongKey = await deriveKeyFromPassword('WrongPassword', saltHex, 50_000);
-  await assert.rejects(async () => {
-    await decryptVaultKeyEnvelope(
-      wrongKey,
-      envelope.ciphertextHex,
-      envelope.nonceHex,
-      envelope.tagHex,
-    );
-  });
-
-  // Tampered tag fails
-  const tamperedTag = flipFirstByteHex(envelope.tagHex);
-  await assert.rejects(
-    async () => {
-      await decryptVaultKeyEnvelope(
-        masterKey,
-        envelope.ciphertextHex,
-        envelope.nonceHex,
-        tamperedTag,
-      );
-    },
-    /operation|mac|tag|decrypt/i,
-    'Tampered auth tag must fail AES-GCM authentication, not merely fail to parse',
-  );
-
-  // Tampered ciphertext fails
-  const tamperedCiphertext = flipFirstByteHex(envelope.ciphertextHex);
-  await assert.rejects(
-    async () => {
-      await decryptVaultKeyEnvelope(
-        masterKey,
-        tamperedCiphertext,
-        envelope.nonceHex,
-        envelope.tagHex,
-      );
-    },
-    /operation|mac|tag|decrypt/i,
-    'Tampered ciphertext must fail AES-GCM authentication, not merely fail to parse',
-  );
+  store.dispatch(keyringCleared());
+  assert.equal(selectIsVaultUnlocked(store.getState()), false);
+  assert.equal(selectVaultEpoch(store.getState()), 0);
 });
-
-// -----------------------------------------------------------------------------
-// 7. Envelope Wrapping and Unwrapping (12 Recovery Words)
-// -----------------------------------------------------------------------------
-
-test('deriveKeyFromRecoveryWords enables full recovery envelope round-trip', async () => {
-  const vaultKey = await generateVaultKey();
-  const originalVaultHex = await exportRawKeyHex(vaultKey);
-
-  const { words } = generate12RecoveryWords();
-  const recoverySaltHex = generateSaltHex(16);
-
-  const recoveryKey = await deriveKeyFromRecoveryWords(words, recoverySaltHex, 50_000);
-  const recoveryEnvelope = await encryptVaultKeyEnvelope(recoveryKey, vaultKey);
-
-  // Recover vault key using recovery words
-  const recoveryKey2 = await deriveKeyFromRecoveryWords(words, recoverySaltHex, 50_000);
-  const recoveredVaultKey = await decryptVaultKeyEnvelope(
-    recoveryKey2,
-    recoveryEnvelope.ciphertextHex,
-    recoveryEnvelope.nonceHex,
-    recoveryEnvelope.tagHex,
-  );
-
-  assert.equal(recoveredVaultKey.extractable, false);
-  const recCipher = await encryptVaultText('recovery test', asKeyring(vaultKey));
-  const recDecrypted = await decryptVaultText(recCipher, asKeyring(recoveredVaultKey));
-  assert.equal(recDecrypted, 'recovery test');
-
-  // Wrong recovery phrase fails
-  const otherWords = [...words];
-  otherWords[0] = otherWords[0] === 'abandon' ? 'ability' : 'abandon';
-  const wrongRecoveryKey = await deriveKeyFromRecoveryWords(otherWords, recoverySaltHex, 50_000);
-  await assert.rejects(async () => {
-    await decryptVaultKeyEnvelope(
-      wrongRecoveryKey,
-      recoveryEnvelope.ciphertextHex,
-      recoveryEnvelope.nonceHex,
-      recoveryEnvelope.tagHex,
-    );
-  });
-});
-
-// -----------------------------------------------------------------------------
-// 8. Redux vaultSlice State Management
-// -----------------------------------------------------------------------------
-
-test('vaultSlice transitions between unconfigured, configured, unlocked, and locked', () => {
-  let state = vaultReducer(undefined, { type: '@@init' });
-  assert.equal(state.isConfigured, false);
-  assert.equal(state.isUnlocked, false);
-  assert.equal((state as any).rawVaultKeyHex, undefined);
-
-  // Configure vault
-  state = vaultReducer(state, setVaultConfigured(true));
-  assert.equal(state.isConfigured, true);
-  assert.equal(state.isUnlocked, false);
-  assert.equal((state as any).rawVaultKeyHex, undefined);
-
-  // Unlock vault
-  const sampleKeyHex = 'a'.repeat(64);
-  state = vaultReducer(state, setVaultUnlocked(sampleKeyHex));
-  assert.equal(state.isConfigured, true);
-  assert.equal(state.isUnlocked, true);
-  // Redux state must be serializable and NOT store raw key strings (REQ-VAULT-HARDEN-1)
-  assert.equal((state as any).rawVaultKeyHex, undefined);
-
-  // Lock vault
-  state = vaultReducer(state, lockVault());
-  assert.equal(state.isConfigured, true);
-  assert.equal(state.isUnlocked, false);
-  assert.equal((state as any).rawVaultKeyHex, undefined);
-
-  // Reset configured state to false resets unlocked state and key
-  state = vaultReducer(state, setVaultUnlocked(sampleKeyHex));
-  assert.equal(state.isUnlocked, true);
-  state = vaultReducer(state, setVaultConfigured(false));
-  assert.equal(state.isConfigured, false);
-  assert.equal(state.isUnlocked, false);
-  assert.equal((state as any).rawVaultKeyHex, undefined);
-});
-
-test('store mounts vaultSlice and selectors work correctly', () => {
-  const testStore = configureStore({
-    reducer: {
-      vault: vaultReducer,
-    },
-  });
-
-  const rootState = testStore.getState();
-  assert.ok('vault' in rootState, 'vault slice must be mounted in root store');
-
-  const vault = selectVaultState(rootState);
-  assert.equal(selectIsVaultConfigured(rootState), vault.isConfigured);
-  assert.equal(selectIsVaultUnlocked(rootState), vault.isUnlocked);
-  assert.equal(selectRawVaultKeyHex(rootState), null);
-
-  // Dispatch actions to store
-  const sampleKey = 'f'.repeat(64);
-  testStore.dispatch(setVaultConfigured(true));
-  testStore.dispatch(setVaultUnlocked(sampleKey));
-
-  const updatedState = testStore.getState();
-  assert.equal(selectIsVaultConfigured(updatedState), true);
-  assert.equal(selectIsVaultUnlocked(updatedState), true);
-  // Redux state must be serializable and NOT contain raw key
-  assert.equal((updatedState.vault as any).rawVaultKeyHex, undefined);
-  assert.equal(selectRawVaultKeyHex(updatedState), null);
-
-  testStore.dispatch(lockVault());
-  const lockedState = testStore.getState();
-  assert.equal(selectIsVaultUnlocked(lockedState), false);
-  assert.equal(selectRawVaultKeyHex(lockedState), null);
-});
-

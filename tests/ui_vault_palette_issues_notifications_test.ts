@@ -146,7 +146,7 @@ test('decryptIssueRecord is a no-op when no active key is supplied', async () =>
 // -----------------------------------------------------------------------------
 
 import { notificationForWsEvent } from '../src/ui/api/notificationMapper.ts';
-import { clearSessionVaultKey, importAndValidateCryptoKey } from '../src/ui/store/vaultSlice.ts';
+import { setActiveVaultKey } from '../src/ui/utils/vaultCrypto.ts';
 
 // Browser global mocks for Notification & Session Storage
 const mockCreatedNotifications: Array<{ title: string; options: any }> = [];
@@ -212,16 +212,10 @@ test('notificationMapper.ts: truncate does NOT truncate vault armored tokens bef
   assert.ok(!plan!.body.endsWith('…'), 'Body must not have trailing ellipsis indicating premature truncation');
 });
 
-test('notificationService.ts: decrypts from the active CryptoKey even when Redux state carries no key', async () => {
-  // REQ-RAWKEY-A8: this test used to be titled "checks readSessionVaultKey()" and
-  // called writeSessionVaultKey() first. It never exercised that path: that writer is
-  // a hardened no-op and readSessionVaultKey() always returns null. What actually made
-  // it pass was importAndValidateCryptoKey(), which calls setActiveVaultKey() -- i.e.
-  // the production mechanism. Retitled and stripped of the misleading setup so the
-  // assertion names the mechanism it really covers.
+test('notificationService.ts: decrypts from the installed keyring; Redux carries only the flag', async () => {
   mockCreatedNotifications.length = 0;
-  clearSessionVaultKey();
-  await importAndValidateCryptoKey(TEST_KEY_HEX_RAW);
+  setActiveVaultKey(null);
+  setActiveVaultKey(TEST_KEY_HEX);
 
   const secretBody = 'Agent completed deployment without errors.';
   const armoredBody = await encryptVaultText(secretBody, TEST_KEY_HEX);
@@ -234,8 +228,8 @@ test('notificationService.ts: decrypts from the active CryptoKey even when Redux
       categories: { chat: true, attention: true },
     },
     vault: {
-      isConfigured: true,
       isUnlocked: true,
+      currentEpoch: 1,
     },
   });
 
@@ -256,18 +250,18 @@ test('notificationService.ts: decrypts from the active CryptoKey even when Redux
 
   assert.ok(mockCreatedNotifications.length >= 1, 'Native notification must be fired');
   const lastNotification = mockCreatedNotifications[mockCreatedNotifications.length - 1];
-  assert.equal(lastNotification.options.body, secretBody, 'Body must be decrypted via the active CryptoKey');
+  assert.equal(lastNotification.options.body, secretBody, 'Body must be decrypted via the installed keyring');
 
-  clearSessionVaultKey();
+  setActiveVaultKey(null);
 });
 
 test('notificationService.ts: truncates title/body AFTER successful decryption', async () => {
   mockCreatedNotifications.length = 0;
-  clearSessionVaultKey();
+  setActiveVaultKey(null);
 
   const extraLongSecret = 'A'.repeat(250);
   const armoredBody = await encryptVaultText(extraLongSecret, TEST_KEY_HEX);
-  await importAndValidateCryptoKey(TEST_KEY_HEX_RAW);
+  setActiveVaultKey(TEST_KEY_HEX);
 
   const unlockedState = () => ({
     notifications: {
@@ -276,8 +270,8 @@ test('notificationService.ts: truncates title/body AFTER successful decryption',
       categories: { chat: true, attention: true },
     },
     vault: {
-      isConfigured: true,
       isUnlocked: true,
+      currentEpoch: 1,
     },
   });
 

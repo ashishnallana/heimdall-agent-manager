@@ -66,8 +66,6 @@ export interface DeviceVaultDeps {
   pollIntervalMs: number;
   /** Default label for this browser (signed into its approval; editable by the approver). */
   label: (identity: DeviceIdentity) => string;
-  /** The hub origin the pairing stretch binds (the API base this page talks to). */
-  hubOrigin: () => string;
 }
 
 interface Ctx {
@@ -98,7 +96,6 @@ function defaultDeps(): DeviceVaultDeps {
     bridges: null,
     pollIntervalMs: 4000,
     label: defaultBrowserLabel,
-    hubOrigin: vaultApi.pairingHubOrigin,
   };
 }
 
@@ -564,7 +561,7 @@ async function register(c: Ctx, dir: VaultDirectory): Promise<void> {
   // A fresh secret code and public salt per registration; kept locally (IndexedDB) until paired.
   const code = generatePairCode();
   const issuedAt = Date.now();
-  const pending: PendingPairing = { code, pairSalt: generatePairSalt(), hubOrigin: d().hubOrigin(), issuedAt, expiresAt: issuedAt + PAIR_CODE_TTL_MS };
+  const pending: PendingPairing = { code, pairSalt: generatePairSalt(), hubOrigin: d().api.pairingHubOrigin(), issuedAt, expiresAt: issuedAt + PAIR_CODE_TTL_MS };
   const keys = await derivePairKeys(code, pendingPairContext(c, pending));
   const body = await buildPairedRegistration(identity, d().label(identity), keys, issuedAt);
   await d().kv.put(`pending:${c.userId}`, pending);
