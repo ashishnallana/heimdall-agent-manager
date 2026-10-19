@@ -45,7 +45,9 @@ domain_error :: proc(code: Error_Code, message: string, details_json := "") -> D
 // VAULT_LOCKED_ERROR_CODE is the stable wire code a bridge sends (`error_code`) when it
 // refuses work because its vault is locked, and the code the hub answers with.
 VAULT_LOCKED_ERROR_CODE :: "vault_locked"
-VAULT_LOCKED_MESSAGE :: "This bridge's vault is locked. Unseal it to continue."
+// It matches the UI headline (vaultLockedError.ts VAULT_LOCKED_HEADLINE): approved
+// devices deliver the key automatically; the user does not "unseal" anything.
+VAULT_LOCKED_MESSAGE :: "This bridge is awaiting the vault key."
 
 // vault_locked_error builds the typed refusal for a bridge whose vault is locked
 // (REQ-T10-2): code `vault_locked`, details {"bridge_id": ...} so a client can open

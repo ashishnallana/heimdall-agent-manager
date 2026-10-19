@@ -182,10 +182,9 @@ ctl_shell_start :: proc(endpoint, token: string, tokens, args: []string) {
 	fields := make([dynamic]string)
 	defer delete(fields)
 	append(&fields, json_kv("kind", kind))
+	// cmd and cwd go only inside the sealed enc_spec (never in clear to the hub).
 	cmd_val := option_value(args, "--cmd", "")
 	cwd_val := option_value(args, "--cwd", "")
-	if cmd_val != "" do append(&fields, json_kv("cmd", cmd_val))
-	if cwd_val != "" do append(&fields, json_kv("cwd", cwd_val))
 	if v := option_value(args, "--label", ""); v != "" do append(&fields, json_kv("label", v))
 	if v := ctl_shell_uint_flag(args, "--port", ""); v != "" do append(&fields, json_kv_raw("server_port", v))
 	if v := option_value(args, "--project", ""); v != "" do append(&fields, json_kv("project_id", v))
@@ -323,7 +322,7 @@ ctl_shell_run :: proc(endpoint, token: string, tokens, args: []string) {
 	fields := make([dynamic]string)
 	defer delete(fields)
 	append(&fields, json_kv("kind", "run"))
-	append(&fields, json_kv("cmd", cmd))
+	// cmd and cwd go only inside the sealed enc_spec (never in clear to the hub).
 	// agent_instance_id is a run's SCOPE KEY. The hub also fills it from the
 	// caller's token, so this is belt-and-braces rather than the only source —
 	// which is why an explicit --agent cannot be used to attribute a run elsewhere.
@@ -343,7 +342,6 @@ ctl_shell_run :: proc(endpoint, token: string, tokens, args: []string) {
 	// chain_id is deliberately NOT sent: a run is agent-scoped and the hub refuses
 	// one that carries a chain rather than storing a column that describes nothing.
 	cwd_val := option_value(args, "--cwd", "")
-	if cwd_val != "" do append(&fields, json_kv("cwd", cwd_val))
 	if v := option_value(args, "--label", ""); v != "" do append(&fields, json_kv("label", v))
 	if background do append(&fields, json_kv_raw("background", "true"))
 	ctl_shell_attach_enc_spec(endpoint, token, bridge_id, "run", args, cmd, cwd_val, &fields)
@@ -410,7 +408,7 @@ ctl_shell_serve :: proc(endpoint, token: string, tokens, args: []string) {
 	fields := make([dynamic]string)
 	defer delete(fields)
 	append(&fields, json_kv("kind", "server"))
-	append(&fields, json_kv("cmd", cmd))
+	// cmd and cwd go only inside the sealed enc_spec (never in clear to the hub).
 	// chain_id + bridge_id are a server's SCOPE KEY: the chain summary lists every
 	// server started for that chain, whoever started it.
 	append(&fields, json_kv("chain_id", chain_id))
@@ -422,7 +420,6 @@ ctl_shell_serve :: proc(endpoint, token: string, tokens, args: []string) {
 	// agent_instance_id is deliberately NOT sent: a server is chain-scoped, and the
 	// hub refuses one that names an agent instance.
 	cwd_val := option_value(args, "--cwd", "")
-	if cwd_val != "" do append(&fields, json_kv("cwd", cwd_val))
 	if v := option_value(args, "--label", ""); v != "" do append(&fields, json_kv("label", v))
 	if v := ctl_shell_uint_flag(args, "--port", ""); v != "" do append(&fields, json_kv_raw("server_port", v))
 	ctl_shell_attach_enc_spec(endpoint, token, bridge_id, "server", args, cmd, cwd_val, &fields)

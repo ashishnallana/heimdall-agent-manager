@@ -340,7 +340,8 @@ export const shellsApi = heimdallApi.injectEndpoints({
     }),
 
     // REQ-SHELL-ENC-8: every shell start carries an armored enc_spec
-    // (vault:v2:e<current epoch>:...); the bridge never executes the plaintext cmd.
+    // (vault:v2:<vault_id>:e<current epoch>:...) carrying cmd and cwd; neither is sent
+    // in clear.
     // There is no plaintext mode: without a vault key the request is refused here.
     // Encryption failure aborts the request.
     createShell: build.mutation<ShellSession, CreateShellArgs>({
@@ -365,7 +366,10 @@ export const shellsApi = heimdallApi.injectEndpoints({
             boot_id: bootId,
           };
           const enc_spec = await encryptVaultText(JSON.stringify(spec), activeKey);
-          const requestBody: Record<string, any> = { ...body, session_id, enc_spec };
+          // cmd and cwd travel ONLY inside the sealed spec: the bridge reads them from
+          // there and the hub never needs (or stores) them in clear.
+          const { cmd: _cmd, cwd: _cwd, ...clearFields } = body;
+          const requestBody: Record<string, any> = { ...clearFields, session_id, enc_spec };
 
           const data = await cookieMutation(
             `/bridges/${encodeURIComponent(bridgeId)}/shells`,

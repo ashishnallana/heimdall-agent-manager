@@ -28,14 +28,14 @@ import { isBridgeVaultLockedError } from '../src/ui/utils/bridgeVaultStatus.ts';
 // ---------------------------------------------------------------------------
 
 test('REST: the hub 423 body is vault_locked and names the bridge', () => {
-  const rtk = { status: 423, data: { error: { code: 'vault_locked', message: "This bridge's vault is locked. Unseal it to continue.", details: { bridge_id: 'brg_1' } } } };
+  const rtk = { status: 423, data: { error: { code: 'vault_locked', message: "This bridge is awaiting the vault key.", details: { bridge_id: 'brg_1' } } } };
   assert.equal(isVaultLockedError(rtk), true);
   assert.equal(vaultLockedBridgeId(rtk), 'brg_1');
   assert.equal(isBridgeVaultLockedError(rtk), true, 'T9 dialog helper also recognises the typed 423');
 });
 
 test('REST: a queryFn CUSTOM_ERROR that kept code/originalStatus is vault_locked', () => {
-  const custom = { status: 'CUSTOM_ERROR', error: "This bridge's vault is locked. Unseal it to continue.", code: 'vault_locked', originalStatus: 423 };
+  const custom = { status: 'CUSTOM_ERROR', error: "This bridge is awaiting the vault key.", code: 'vault_locked', originalStatus: 423 };
   assert.equal(isVaultLockedError(custom), true);
   assert.equal(isBridgeVaultLockedError(custom), true, 'NewShellDialog keeps working against the new hub message');
   assert.equal(isVaultLockedError({ status: 'CUSTOM_ERROR', error: 'x', originalStatus: 423 }), true);

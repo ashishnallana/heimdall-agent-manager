@@ -665,9 +665,11 @@ shell_session_create :: proc(svc: ^Shell_Session_Service, auth: contracts.Auth_C
 			}
 		}
 	}
-	// A `shell` may omit cmd; the bridge falls back to $SHELL. Every other kind
-	// needs an explicit command.
-	if input.cmd == "" && kind != domain.Shell_Session_Kind_Shell do return {}, false, domain.domain_error(.Validation_Failed, "cmd is required")
+	// A `shell` may omit cmd; the bridge falls back to $SHELL. Every other kind needs an
+	// explicit command. A client start carries cmd and cwd ONLY inside the sealed
+	// enc_spec (the hub never sees them in clear; the bridge enforces "missing cmd");
+	// a hub-built start without an enc_spec still needs its plaintext cmd here.
+	if input.cmd == "" && input.enc_spec == "" && kind != domain.Shell_Session_Kind_Shell do return {}, false, domain.domain_error(.Validation_Failed, "cmd is required")
 
 	// THE HUB CLOCK IS AUTHORITATIVE (REQ-SHELL-1 §8). This `now` is the one
 	// started_at for this session: it is what the row stores, and it is sent to the
