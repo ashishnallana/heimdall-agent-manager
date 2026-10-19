@@ -171,11 +171,38 @@ test_sign_statement :: proc(priv: ^ecdsa.Private_Key, st: ^vault.Statement) -> (
 	return
 }
 
+// Typed chain_proof v2 (json.marshal); signatures travel as their canonical text.
 @(private = "file")
-test_json_str :: proc(s: string) -> string {
-	q, _ := strings.replace_all(s, "\n", "\\n", context.temp_allocator)
-	q2, _ := strings.replace_all(q, `"`, `\"`, context.temp_allocator)
-	return strings.concatenate({`"`, q2, `"`}, context.temp_allocator)
+Test_Proof_Signed :: struct {
+	statement: string,
+	signature: string,
+}
+
+@(private = "file")
+Test_Proof_Chained :: struct {
+	statement:    string,
+	signature:    string,
+	issuer_chain: []Test_Proof_Signed,
+}
+
+@(private = "file")
+Test_Proof_Epoch :: struct {
+	epoch:        u32,
+	statement:    string,
+	signature:    string,
+	issuer_chain: []Test_Proof_Signed,
+}
+
+@(private = "file")
+Test_Chain_Proof :: struct {
+	v:                int,
+	user_id:          string,
+	root_device_id:   string,
+	root_sign_alg:    string,
+	root_sign_pub:    string,
+	genesis:          Test_Proof_Signed,
+	epochs:           []Test_Proof_Epoch,
+	subject_approval: Test_Proof_Chained,
 }
 
 // test_chain_proof builds a valid minimal `chain_proof` v2 (the UI's
@@ -215,9 +242,8 @@ test_chain_proof :: proc(bridge_id: string, kr: ^vault.Vault_Keyring, root_scala
 	}
 	g_text, g_sig := test_sign_statement(&root, &genesis)
 	prev = vault.log_entry_hash(g_text, context.temp_allocator)
-	carriers := strings.builder_make(context.temp_allocator)
+	carriers := make([dynamic]Test_Proof_Epoch, context.temp_allocator)
 	for i in 0 ..< kr.count {
-		if i > 0 do strings.write_byte(&carriers, ',')
 		e := kr.entries[i].epoch
 		text, sig := g_text, g_sig
 		if e != 1 {
@@ -228,7 +254,7 @@ test_chain_proof :: proc(bridge_id: string, kr: ^vault.Vault_Keyring, root_scala
 			text, sig = test_sign_statement(&root, &st)
 			prev = vault.log_entry_hash(text, context.temp_allocator)
 		}
-		strings.write_string(&carriers, fmt.tprintf(`{{"epoch":%d,"statement":%s,"signature":%s,"issuer_chain":[]}}`, e, test_json_str(text), test_json_str(sig)))
+		append(&carriers, Test_Proof_Epoch{epoch = e, statement = text, signature = sig, issuer_chain = []Test_Proof_Signed{}})
 	}
 	identity := bridge_identity_public_key_hex(bridge_id)
 	bridge_dev, _ := vault.device_id_from_sign_pub(identity, context.temp_allocator)
@@ -238,12 +264,13 @@ test_chain_proof :: proc(bridge_id: string, kr: ^vault.Vault_Keyring, root_scala
 		subject_sign_alg = vault.SIGN_ALG_ECDSA_P256_SHA256, subject_label_b64 = "YnJpZGdl", epoch = "1",
 	}
 	a_text, a_sig := test_sign_statement(&root, &approval)
-	return strings.concatenate({
-		`{"v":2,"user_id":"`, owner, `","root_device_id":"`, root_id, `","root_sign_alg":"ecdsa-p256-sha256","root_sign_pub":"`, root_pub,
-		`","genesis":{"statement":`, test_json_str(g_text), `,"signature":`, test_json_str(g_sig),
-		`},"epochs":[`, strings.to_string(carriers),
-		`],"subject_approval":{"statement":`, test_json_str(a_text), `,"signature":`, test_json_str(a_sig), `,"issuer_chain":[]}}`,
+	proof, _ := vault.wire_encode(Test_Chain_Proof{
+		v = 2, user_id = owner, root_device_id = root_id, root_sign_alg = vault.SIGN_ALG_ECDSA_P256_SHA256, root_sign_pub = root_pub,
+		genesis = {statement = g_text, signature = g_sig},
+		epochs = carriers[:],
+		subject_approval = {statement = a_text, signature = a_sig, issuer_chain = []Test_Proof_Signed{}},
 	}, context.temp_allocator)
+	return proof
 }
 
 // test_create_unseal_v2_payload builds a bridge_unseal v2 payload for this
