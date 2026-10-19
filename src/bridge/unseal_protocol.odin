@@ -506,6 +506,10 @@ bridge_unseal_signature_echo :: proc(payload_json: string) -> string {
 // validity and current epoch, that it belongs to this bridge's enrolled owner, and
 // that it is a superset of any keyring already stored (no substitution, no
 // rollback). v1 payloads (old AAD forms, 32/64-byte plaintexts) cannot pass.
+// g_unseal_install_mu serializes the keyring check → floor store → keyring store of
+// bridge_unseal_decrypt_and_verify.
+g_unseal_install_mu: sync.Mutex
+
 bridge_unseal_decrypt_and_verify :: proc(
 	payload_json: string,
 	local_bridge_id: string,
@@ -593,6 +597,13 @@ bridge_unseal_decrypt_and_verify :: proc(
 	case .Invalid:
 		return false, "invalid nonce"
 	}
+
+	// Check-then-store is one critical section: two concurrent unseals must not both
+	// pass the superset/floor checks against the same stored state and then install
+	// in either order (a lower keyring could land last). Held through the floor and
+	// keyring stores below.
+	sync.mutex_lock(&g_unseal_install_mu)
+	defer sync.mutex_unlock(&g_unseal_install_mu)
 
 	// ── Keyring authentication (plan §1, finding C1) ──────────────────────
 	// The ECDH unseal proves only that the sender saw this boot's signed key, not
