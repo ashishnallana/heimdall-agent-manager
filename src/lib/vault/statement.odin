@@ -68,13 +68,14 @@ Kind_Policy :: struct {
 	can_approve:       bool, // may sign approve/revoke/epoch/wrap statements
 	counts_as_approver: bool, // counts toward the last-approver guard
 	receives_wrap:     bool, // gets a hub-stored keyring wrap
+	can_be_root:       bool, // may self-sign a genesis: an interactive, approver-capable credential
 }
 
 // kind_policy is the ONE place that decides what a device kind may do. Bridges never
 // approve anything; an unknown kind may do nothing.
 kind_policy :: proc(kind: Device_Kind) -> Kind_Policy {
 	switch kind {
-	case .Browser:  return {can_approve = true, counts_as_approver = true, receives_wrap = true}
+	case .Browser:  return {can_approve = true, counts_as_approver = true, receives_wrap = true, can_be_root = true}
 	case .Recovery: return {can_approve = true, counts_as_approver = true, receives_wrap = true}
 	case .Bridge:   return {}
 	case .Unknown:  return {}

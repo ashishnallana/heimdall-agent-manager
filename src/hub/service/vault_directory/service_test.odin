@@ -445,3 +445,18 @@ test_vault_pending_cap_purge_and_deny :: proc(t: ^testing.T) {
 	all, _ := iface.vault_list_devices(&f.repo, USER)
 	testing.expect_value(t, len(all), 2)
 }
+
+// L8: a recovery key can never be the root.
+@(test)
+test_vault_genesis_rejects_recovery_root :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	f := fixture(t)
+	defer fixture_close(f)
+	r := make_dev(5, "recovery")
+	g := statement("genesis", &r, &r, "0", "1")
+	e := statement("epoch", &r, nil, "0", "1")
+	_, err := genesis(&f.svc, Genesis_Input{user_id = USER, genesis_statement = g, genesis_signature = sign(&r, g), epoch_statement = e, epoch_signature = sign(&r, e), wrap = wrap_for(&r, &r, 0, 1)})
+	testing.expect_value(t, err.code, domain.Error_Code.Validation_Failed)
+	exists, _ := directory_exists(&f.svc, USER)
+	testing.expect(t, !exists)
+}

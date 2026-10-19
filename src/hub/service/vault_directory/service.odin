@@ -475,7 +475,9 @@ genesis :: proc(svc: ^Service, in_: Genesis_Input) -> (domain.Vault_Device, doma
 	root, derr := subject_device_from_statement(&st, in_.user_id)
 	if derr.code != .None do return {}, derr
 	policy := domain.vault_kind_policy(root.kind)
-	if !policy.can_approve || !policy.receives_wrap do return {}, invalid("the root device must be approver-capable")
+	// The root must be an interactive approver (a browser now): a recovery key is
+	// offline by design and must never become the pinned root.
+	if !policy.can_be_root || !policy.can_approve || !policy.receives_wrap do return {}, invalid("the root device must be an interactive approver-capable device")
 	if st.issuer_device_id != root.device_id do return {}, invalid("genesis is self-signed by the root")
 	if !is_hex64_or_empty(st.epoch_commit) || !is_hex64_or_empty(st.wrap_sha256) do return {}, invalid("malformed genesis commitment")
 	if !vault.verify(root.sign_alg, root.sign_public_key, transmute([]byte)in_.genesis_statement, in_.genesis_signature) do return {}, unauth("genesis signature does not verify")
