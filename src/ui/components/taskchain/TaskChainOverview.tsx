@@ -4,7 +4,8 @@ import { useFetchTaskChainDetailQuery, usePublishTaskChainMutation } from '../..
 import { useGetTaskChainFleetsQuery } from '../../api/endpoints/taskChains';
 import { useListBridgesQuery } from '../../api/endpoints/bridgeSupport';
 import { TicketBoardView } from '../tasks/TicketBoardView';
-import { WorkflowPipelineView } from '../tasks/WorkflowPipelineView';
+import { WorkflowRunsReadOnly } from '../tasks/WorkflowRunsReadOnly';
+import { useFetchChainWorkflowRunsQuery } from '../../api/endpoints/workflowRuns';
 import { CreateTaskModal } from '../tasks/CreateTaskModal';
 import { TaskBoardSkeleton } from '../tasks/TaskBoardSkeleton';
 import { FleetManagementDrawer } from '../tasks/FleetManagementDrawer';
@@ -120,6 +121,14 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
   const { data: chainDetailData, isLoading: isLoadingChain, error: chainError } =
     useFetchTaskChainDetailQuery({ chainId }, { skip: !chainId });
 
+  const workflowRunsQuery = useFetchChainWorkflowRunsQuery({ chainId }, {
+    skip: !chainId,
+    pollingInterval: 5000,
+    skipPollingIfUnfocused: true,
+    refetchOnReconnect: true,
+  });
+  const workflowRuns = workflowRunsQuery.currentData?.runs || [];
+
   const { data: fleetsData } = useGetTaskChainFleetsQuery({ chainId }, { skip: !chainId });
   const { data: bridgesData } = useListBridgesQuery();
 
@@ -171,7 +180,8 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
     );
   }
 
-  const isWorkflow = chain.kind === 'workflow';
+  const tickets = tasks.filter((task) => !task.workflow_run_id);
+  const currentTasks = tasks.filter((task) => !task.workflow_run_id || workflowRuns.some((run) => run.run_id === task.workflow_run_id && run.execution_no === task.workflow_execution_no));
   const openTaskId = resolveSelectedTaskId(expandedTaskId, tasks, Boolean(chain));
   const chainIsDraft = String(chain.publishState || chain.publish_state || '').toLowerCase() === 'draft';
   const handlePublishChain = async () => {
@@ -198,7 +208,7 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
             <Text as="h2" role="title" truncate>
               {chain.title || 'Untitled chain'}
             </Text>
-            <Badge tone={isWorkflow ? 'info' : 'neutral'}>{isWorkflow ? 'Workflow' : 'Tickets'}</Badge>
+            <Badge tone="neutral">Mixed work</Badge>
             {chainIsDraft && <Badge tone="neutral">Draft</Badge>}
             {isSolo && (
               <span title="Solo mode: the coordinator works the tasks itself (pulling them one at a time) and you review each one.">
@@ -206,31 +216,15 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
               </span>
             )}
           </div>
-          {onClose && <IconButton icon="close" label="Close task chain" variant="ghost" size="sm" onClick={onClose} />}
+          {onClose && <IconButton icon="close" label="Close task chain" data-debug-id="taskchain-close-btn" variant="ghost" size="sm" onClick={onClose} />}
         </header>
       )}
 
       <div className="min-h-0 flex-1 overflow-y-auto">
-        {isWorkflow ? (
-          <WorkflowPipelineView
-            chainId={chainId}
-            chain={chain}
-            tasks={tasks}
-            names={names}
-            chainFleets={fleets}
-            expandedTaskId={openTaskId}
-            onToggleTask={toggleTask}
-            onSelectTask={expandTask}
-            scrollTaskId={scrollTaskId}
-            onScrolled={clearScroll}
-            onOpenFleetDrawer={() => setShowFleetDrawer(true)}
-            onOpenReviewRoles={() => setShowReviewRoles(true)}
-            summarySlot={activeServers}
-          />
-        ) : (
           <TicketBoardView
             chainId={chainId}
-            tasks={tasks}
+            tasks={tickets}
+            summaryTasks={currentTasks}
             names={names}
             chainFleets={fleets}
             expandedTaskId={openTaskId}
@@ -246,8 +240,9 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
             publishError={publishError}
             summaryText={chain.summary}
             summarySlot={activeServers}
+            hasWorkflowRuns={workflowRuns.length > 0}
+            workSlot={<WorkflowRunsReadOnly runs={workflowRuns} loading={workflowRunsQuery.isLoading || workflowRunsQuery.isFetching && !workflowRunsQuery.currentData} error={workflowRunsQuery.error} refresh={() => { void workflowRunsQuery.refetch(); }} focusTaskId={focusTaskId} />}
           />
-        )}
       </div>
 
       {/* Create Task Modal */}
@@ -255,7 +250,7 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
         <CreateTaskModal
           isOpen={showNewTaskModal}
           chainId={chainId}
-          existingTasks={tasks}
+          existingTasks={tickets}
           onClose={() => setShowNewTaskModal(false)}
           onSuccess={() => setShowNewTaskModal(false)}
         />

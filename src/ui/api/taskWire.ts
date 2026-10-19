@@ -64,6 +64,8 @@ export interface TaskWire {
   blocked_on: TaskBlockedOnWire | null;
   requires_user_approval: boolean;
   ready_since: string;
+  workflow_run_id?: string;
+  workflow_execution_no?: number;
   stage_key?: string;
   stage_index?: number;
   blocked?: boolean;

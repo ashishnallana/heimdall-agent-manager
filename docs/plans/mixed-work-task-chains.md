@@ -2,7 +2,7 @@
 
 Implementation plan and infrastructure handoff, 2026-10-19.
 
-Current scope: backend, persistence, REST/agent actions, Bridge, CLI and bootstrap/context. UI implementation is explicitly deferred by the user. Independent review, automated tests, migration execution and manual testing have not been performed for the final cutover. Earlier foundation pass counts below describe an older implementation state only.
+Current scope: backend, persistence, REST/agent actions, Bridge, CLI, bootstrap/context, and the subsequently authorized minimal read-only task-pane integration. Workflow authoring UI remains deferred. Independent review, automated tests, migration execution and manual testing have not been performed for the final cutover. Earlier foundation pass counts below describe an older implementation state only.
 
 ## Product decision
 
@@ -467,3 +467,34 @@ so duplicate requests remain idempotent across JSON serialization order changes.
 - **Deferred P2:** terminal coordinator delivery still uses transient effects. Terminal execution state and events are durable and readable, but a crash/disconnection can lose its live notice. A proper durable acknowledged notification outbox is a separate follow-up; it is not claimed fixed here.
 
 Regression source covers reopened-chain completion bypass, execution-targeted duplicate cancellation, pending-merge fencing, proposal authority, fleet coverage, and CLI target serialization. No tests, migrations, live Hub, or manual tests were executed during this fix pass. Native checks/builds are recorded in the parent handoff; Nix is unavailable on this Windows host. UI remains deferred.
+
+
+### Minimal task-pane integration (REQ-MW-7/8)
+
+The user subsequently requested minimal UI changes matching the existing task
+pane. The coordinator conversation stays on the left. On the right, the existing
+ticket board now also contains vertically stacked, expandable workflow run cards
+using the same theme tokens, surfaces, badges, spacing and debug-id conventions.
+There is no horizontal pipeline or new workflow creation/retry/cancel UI.
+
+- GET task-chains/{id}/workflow-runs supplies the run list through a typed RTK
+  Query endpoint. Chain invalidations and five-second visible-pane polling refresh it.
+- Workflow cards show status, execution number, stage completion counts, stage
+  tasks/states and failure detail. Workflow controls are read-only except expanding
+  the display and retrying a failed fetch. VaultText decrypts or masks display content.
+- Generated tasks are excluded from ordinary ticket cards and task-creation
+  dependency choices. Current execution tasks remain in chain-wide progress and
+  attention calculations; previous executions do not inflate those counts.
+- Ticket actions and the shared active-server section retain their existing behavior.
+  A workflow-only chain does not show a misleading empty-work message.
+- Loading and failed-refresh states are explicit; cached workflow rows remain visible
+  on refresh failure. The existing workflow authoring/library UI still uses old
+  contracts and is not part of this minimal integration.
+
+Validation: `npm run typecheck` and `npm run build` both exited 0 (TypeScript,
+Vite renderer and Electron compilation). The production build emitted existing
+login/logout environment placeholder and bundle-size warnings. No automated UI
+tests or manual/browser verification were run, per the user's testing hold.
+Backend fix builds were performed by the delegated implementation agent and the
+parent inspected the changes before committing. The fixes have not received a
+second independent approval; the notification-outbox limitation remains open.
