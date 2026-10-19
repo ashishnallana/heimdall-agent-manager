@@ -316,3 +316,13 @@ download_to_file_non_200_leaves_no_file :: proc(t: ^testing.T) {
 	_, part_err := os.stat(fmt.tprintf("%s.part", dest), context.allocator)
 	testing.expect(t, part_err != nil, "no .part file left behind on non-200")
 }
+
+@(test)
+test_base_url_path_prefix_is_honoured :: proc(t: ^testing.T) {
+	testing.expect_value(t, request_target("https://hub.example.com", "/api/v1/health"), "/api/v1/health")
+	testing.expect_value(t, request_target("https://hub.example.com/", "/api/v1/health"), "/api/v1/health")
+	testing.expect_value(t, request_target("http://127.0.0.1:8080/heimdall", "/api/v1/health"), "/heimdall/api/v1/health")
+	testing.expect_value(t, request_target("https://h.example:8443/a/b/", "/api/v1/x"), "/a/b/api/v1/x")
+	host, port, secure, ok := parse_base_url("https://h.example:8443/a/b")
+	testing.expect(t, ok && host == "h.example" && port == 8443 && secure, "host/port parsed past the prefix")
+}

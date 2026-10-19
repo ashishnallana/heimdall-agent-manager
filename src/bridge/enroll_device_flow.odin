@@ -34,6 +34,7 @@
 package main
 
 import os_random "odin_test:lib/os_random"
+import "core:crypto"
 import "core:crypto/hash"
 import base64 "core:encoding/base64"
 import "core:encoding/hex"
@@ -236,14 +237,12 @@ bridge_enroll_fingerprint :: proc(public_key_hex: string, allocator := context.a
 	return strings.to_string(out), true
 }
 
-// bridge_enroll_hub_url normalises and validates the single `--hub` input. It
-// accepts an origin only: scheme + authority, no path, query or fragment, and no
-// trailing slash in the result. Reusing bridge_hub_url_supported's rules keeps one
-// definition of "a base URL this bridge will talk to".
-//
-// A path is REJECTED rather than trimmed: `--hub https://host/enroll` most likely
-// means the operator pasted the approval page instead of the origin, and silently
-// deriving `https://host` from it would make a typo'd host look like it worked.
+// bridge_enroll_hub_url normalises and validates the single `--hub` input: an
+// http:// or https:// base URL, any host and port, with an optional path prefix (a
+// hub behind a reverse proxy), never a query or fragment, no trailing slash in the
+// result. Reusing bridge_hub_url_supported's rules keeps one definition of "a base
+// URL this bridge will talk to"; the http client resolves every API path under the
+// prefix.
 bridge_enroll_hub_url :: proc(raw: string, allocator := context.allocator) -> (string, bool) {
 	trimmed := strings.trim_right(strings.trim_space(raw), "/")
 	if !bridge_hub_url_supported(trimmed) do return "", false
@@ -947,10 +946,25 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 	// REQ-EA-4: resolve a previous enrollment a crash left staged before starting anew.
 	_ = bridge_enroll_atomic_recover(args)
 	// Step 0 — the single input.
-	hub_raw := option_value(args, "--hub", os.get_env("HAM_BRIDGE_HUB_URL", context.allocator))
+	// Exactly the hub given on the command line: never a default, an environment
+	// value or an existing config's hub.
+	hub_raw := option_value(args, "--hub", "")
 	api_base, origin_ok := bridge_enroll_hub_url(hub_raw)
 	if !origin_ok {
-		fmt.eprintln("ham-bridge enroll --hub requires the Hub API origin only, e.g. --hub https://hub.mundus.in (scheme + host, no path)")
+		fmt.eprintln("ham-bridge enroll --hub requires the Hub API base URL, e.g. --hub https://hub.mundus.in or --hub http://10.0.0.5:8080/heimdall (no query or fragment)")
+		return false
+	}
+	// Bind this process's vault state to that hub (multi-bridge isolation): every
+	// keystore item it writes is scoped to (hub, bridge id).
+	if !bridge_keystore_set_hub(api_base) {
+		fmt.eprintfln("ham-bridge enroll: %s is not a usable hub URL", api_base)
+		return false
+	}
+	// A config that already belongs to an enrolled bridge of another hub is never
+	// repointed: that would break the other bridge.
+	if other, conflict := bridge_enroll_config_conflict(cfg_lib.config_path_from_args(args), api_base); conflict {
+		fmt.eprintfln("ham-bridge enroll REFUSED: config %s belongs to a bridge enrolled with %s.", cfg_lib.config_path_from_args(args), other)
+		fmt.eprintln("  To run a second bridge for another hub on this machine, give it its own --config and --bridge-token-file.")
 		return false
 	}
 
@@ -1309,4 +1323,61 @@ bridge_refuse_tokenless_start :: proc(cfg: Bridge_Config) -> bool {
 	}
 	fmt.eprintln("    - re-enroll: ham-bridge enroll --hub <url>")
 	return true
+}
+
+// ===== Hub binding at runtime (multi-bridge isolation) =====
+
+// bridge_bind_runtime_hub binds this process's vault state to the hub its config
+// (or --hub/--daemon-url) names, takes the instance locks, and refuses to start an
+// ENROLLED bridge whose identity record is not stored for exactly that hub: the
+// configured hub differs from the one it was enrolled with, the identity was lost,
+// or another instance already runs on the same config or scope. Returns false when
+// the process must exit.
+bridge_bind_runtime_hub :: proc(cfg: Bridge_Config, config_path: string) -> bool {
+	enrolled := keystore_bridge_id_is_enrolled(strings.trim_space(cfg.daemon_id))
+	if !bridge_keystore_set_hub(cfg.daemon_url) {
+		if !enrolled do return true // nothing persisted to protect
+		fmt.eprintfln("ham-bridge REFUSING TO START: the configured hub %q is not a usable http(s) URL.", cfg.daemon_url)
+		return false
+	}
+	if config_path != "" && os.exists(config_path) && !bridge_instance_lock(strings.concatenate({config_path, ".lock"}, context.temp_allocator)) {
+		fmt.eprintfln("ham-bridge REFUSING TO START: another ham-bridge instance is running with config %s. Each bridge needs its own --config/--bridge-token-file.", config_path)
+		return false
+	}
+	if !enrolled do return true
+	bridge_id := strings.trim_space(cfg.daemon_id)
+	rec: Bridge_Identity_Record
+	status := keystore_read_identity(bridge_id, &rec)
+	crypto.zero_explicit(&rec, size_of(rec))
+	if status != .Found {
+		fmt.eprintfln("ham-bridge REFUSING TO START: this machine holds no readable enrollment of %s for hub %s.", bridge_id, bridge_keystore_hub())
+		fmt.eprintln("  Either the configured hub differs from the hub this bridge was enrolled with (a bridge is bound to")
+		fmt.eprintln("  exactly one hub), or its identity record is missing or unreadable.")
+		fmt.eprintln("  Fix the hub in the config / --hub, or re-enroll: ham-bridge enroll --hub <url>")
+		return false
+	}
+	if name, scoped := keystore_scope_name(bridge_id); scoped {
+		if dir, dir_ok := bridge_vault_bridge_dir(name, context.temp_allocator); dir_ok {
+			_ = bridge_make_directory_all(dir)
+			if !bridge_instance_lock(strings.concatenate({dir, "instance.lock"}, context.temp_allocator)) {
+				fmt.eprintfln("ham-bridge REFUSING TO START: another ham-bridge instance already runs as %s for this hub.", bridge_id)
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// bridge_enroll_config_conflict reports a config that already belongs to an
+// enrolled bridge of ANOTHER hub: enrolling into it would repoint (and break) that
+// bridge, so `ham-bridge enroll` refuses and asks for a separate config.
+bridge_enroll_config_conflict :: proc(config_path, api_base: string) -> (other_hub: string, conflict: bool) {
+	if strings.trim_space(config_path) == "" do return "", false
+	loaded, ok := cfg_lib.load(config_path)
+	if !ok do return "", false
+	if !keystore_bridge_id_is_enrolled(strings.trim_space(loaded.config.daemon.daemon_id)) do return "", false
+	existing, e_ok := bridge_hub_canonical_base(loaded.config.wrapper.daemon_url, context.temp_allocator)
+	wanted, w_ok := bridge_hub_canonical_base(api_base, context.temp_allocator)
+	if !e_ok || !w_ok do return loaded.config.wrapper.daemon_url, true
+	return existing, existing != wanted
 }

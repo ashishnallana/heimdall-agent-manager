@@ -92,8 +92,8 @@ main :: proc() {
 	}
 
 	if len(os.args) > 1 && os.args[1] == "enroll" {
-		if strings.trim_space(option_value(os.args, "--hub", os.get_env("HAM_BRIDGE_HUB_URL", context.allocator))) == "" {
-			fmt.eprintln("ham-bridge enroll requires --hub <https://your-hub-url> (or HAM_BRIDGE_HUB_URL)")
+		if strings.trim_space(option_value(os.args, "--hub", "")) == "" {
+			fmt.eprintln("ham-bridge enroll requires --hub <http(s)://your-hub-url[/prefix]>: the bridge is bound to exactly that hub")
 			fmt.eprintln("")
 			fmt.eprintln("  There is no enrollment token: approval happens in the browser.")
 			fmt.eprintln("  Enrollment is approved in the browser, so no secret is copied to this machine.")
@@ -124,6 +124,9 @@ main :: proc() {
 	// Enrollment returns from main after restarting the registered service; this
 	// guard applies only to ordinary runtime starts.
 	if bridge_refuse_tokenless_start(bridge_config) do os.exit(1)
+	// Multi-bridge isolation: bind vault state to the configured hub and refuse a hub
+	// mismatch or a second instance on the same config/scope.
+	if !bridge_bind_runtime_hub(bridge_config, cfg_lib.config_path_from_args(os.args)) do os.exit(1)
 	bridge_fs_init(bridge_config.fs_root, bridge_config.fs_read_page_bytes)
 	vcs_init()
 	bridge_provider_store_init()
@@ -199,9 +202,54 @@ bridge_hub_url_supported :: proc(hub_url: string) -> bool {
 	} else {
 		return false
 	}
+	// An optional path prefix (a hub behind a reverse proxy) is allowed; a query or
+	// fragment is not, and every byte must be a plain URL character.
+	if strings.contains(authority, "?") || strings.contains(authority, "#") do return false
+	path := ""
+	if slash := strings.index_byte(authority, '/'); slash >= 0 {
+		path = authority[slash:]
+		authority = authority[:slash]
+	}
 	if strings.trim_space(authority) == "" do return false
-	if strings.contains(authority, "/") || strings.contains(authority, "?") || strings.contains(authority, "#") do return false
-	return true
+	for ch in transmute([]u8)authority {
+		switch ch {
+		case 'a' ..= 'z', 'A' ..= 'Z', '0' ..= '9', '.', '-', ':', '[', ']':
+		case: return false
+		}
+	}
+	for ch in transmute([]u8)path {
+		switch ch {
+		case 'a' ..= 'z', 'A' ..= 'Z', '0' ..= '9', '.', '-', '_', '~', '/':
+		case: return false
+		}
+	}
+	return !strings.contains(path, "//") && !strings.contains(path, "/../") && !strings.has_suffix(path, "/..")
+}
+
+// bridge_hub_canonical_base is the identity of a hub for this bridge's local state:
+// lowercase scheme and host, an explicit port, and the path prefix (no trailing
+// slash). Two different hubs (host, port or prefix) never share a canonical base.
+bridge_hub_canonical_base :: proc(hub_url: string, allocator := context.allocator) -> (string, bool) {
+	trimmed := strings.trim_right(strings.trim_space(hub_url), "/")
+	if !bridge_hub_url_supported(trimmed) do return "", false
+	secure := strings.has_prefix(trimmed, "https://")
+	rest := trimmed[len("https://") if secure else len("http://"):]
+	path := ""
+	if slash := strings.index_byte(rest, '/'); slash >= 0 {
+		path = rest[slash:]
+		rest = rest[:slash]
+	}
+	host := strings.to_lower(rest, context.temp_allocator)
+	port := "443" if secure else "80"
+	// A bracketed IPv6 literal keeps its colons; the port follows the bracket.
+	if colon := strings.last_index_byte(host, ':'); colon >= 0 && colon > strings.last_index_byte(host, ']') {
+		port = host[colon + 1:]
+		host = host[:colon]
+		if port == "" do return "", false
+		for ch in transmute([]u8)port do if ch < '0' || ch > '9' do return "", false
+	}
+	if host == "" do return "", false
+	return strings.concatenate({"https://" if secure else "http://", host, ":", port, path}, allocator), true
 }
 
 bridge_config_line_key :: proc(trimmed_line: string) -> string {

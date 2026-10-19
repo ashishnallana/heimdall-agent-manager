@@ -52,9 +52,12 @@ request_blocking :: proc(method, base_url, path, body: string, timeout_ms := 0) 
 	return request_blocking_with_headers(method, base_url, path, body, nil, timeout_ms)
 }
 
-request_blocking_with_headers :: proc(method, base_url, path, body: string, extra_headers: []Header, timeout_ms := 0, omit_default_port := false) -> (Response, bool) {
+request_blocking_with_headers :: proc(method, base_url, request_path, body: string, extra_headers: []Header, timeout_ms := 0, omit_default_port := false) -> (Response, bool) {
 	host, port, secure, ok := parse_base_url(base_url)
 	if !ok do return {}, false
+	// A base URL may carry a path prefix (a hub behind a reverse proxy under
+	// /heimdall, say): every request path is resolved under it.
+	path := request_target(base_url, request_path)
 	// Drop the port from the Host header only when the caller opted in AND it is the
 	// scheme default (443 https / 80 http); a non-default port is always kept.
 	include_port_in_host := !(omit_default_port && ((secure && port == 443) || (!secure && port == 80)))
@@ -779,6 +782,26 @@ os_error_is_timeout :: proc(err: os.Error) -> bool {
 	general, ok := err.(os.General_Error)
 	if !ok do return false
 	return general == .Timeout
+}
+
+// base_url_path_prefix is the path part of a base URL without its trailing slash
+// ("" for an origin-only base). Query and fragment are not part of a base URL.
+base_url_path_prefix :: proc(base_url: string) -> string {
+	url := strings.trim_space(base_url)
+	if strings.has_prefix(url, "https://") do url = url[len("https://"):]
+	else if strings.has_prefix(url, "http://") do url = url[len("http://"):]
+	if cut := strings.index_any(url, "?#"); cut >= 0 do url = url[:cut]
+	slash := strings.index_byte(url, '/')
+	if slash < 0 do return ""
+	return strings.trim_right(url[slash:], "/")
+}
+
+// request_target joins a base URL's path prefix and a request path (which starts
+// with '/'). Temp-allocated when a prefix applies.
+request_target :: proc(base_url, path: string) -> string {
+	prefix := base_url_path_prefix(base_url)
+	if prefix == "" do return path
+	return strings.concatenate({prefix, path}, context.temp_allocator)
 }
 
 parse_base_url :: proc(base_url: string) -> (host: string, port: u16, secure: bool, ok: bool) {

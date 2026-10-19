@@ -157,20 +157,28 @@ keystore_lock_and_purge :: proc(bridge_id: string) {
 // The .Identity slot holds this bridge's enrollment record, written once at
 // enrollment (bridge_unseal_identity_commit_enrollment) and never regenerated:
 //
-//   "HBI1" | u8 owner_len | owner_user_id | scalar[32]
+//   "HBI2" | u8 owner_len | owner_user_id | u8 hub_len | hub_base | scalar[32]
 //
 // owner_user_id is the account that approved the enrollment; an unseal is only
-// accepted for a keyring of that user (plan §1, finding C1). Every backend keeps
+// accepted for a keyring of that user (plan §1, finding C1). hub_base is the
+// canonical base of the hub it was enrolled with: a record whose hub differs from the
+// hub this process is bound to is .Error (fail closed), never used. Every backend keeps
 // it across a reboot (finding H1): Credential Manager, the login Keychain, a 0600
 // file in the bridge's private directory on Linux, the sealed file under Termux.
 
-BRIDGE_IDENTITY_RECORD_MAGIC :: "HBI1"
-BRIDGE_IDENTITY_RECORD_MAX_BYTES :: 4 + 1 + vault.KEYRING_MAX_USER_ID + KEYSTORE_IDENTITY_KEY_BYTES
+BRIDGE_IDENTITY_RECORD_MAGIC :: "HBI2"
+BRIDGE_IDENTITY_RECORD_MAX_BYTES :: 4 + 1 + vault.KEYRING_MAX_USER_ID + 1 + BRIDGE_HUB_BASE_MAX + KEYSTORE_IDENTITY_KEY_BYTES
 
 Bridge_Identity_Record :: struct {
 	scalar:    [KEYSTORE_IDENTITY_KEY_BYTES]byte,
 	owner_buf: [vault.KEYRING_MAX_USER_ID]byte,
 	owner_len: int,
+	hub_buf:   [BRIDGE_HUB_BASE_MAX]byte,
+	hub_len:   int,
+}
+
+bridge_identity_record_hub :: proc(rec: ^Bridge_Identity_Record) -> string {
+	return string(rec.hub_buf[:rec.hub_len])
 }
 
 bridge_identity_record_owner :: proc(rec: ^Bridge_Identity_Record) -> string {
@@ -192,15 +200,21 @@ keystore_backend_read_ok :: proc(slot: Keystore_Slot, bridge_id: string, dst: []
 	return got, true
 }
 
+// keystore_store_identity writes the record for the hub this process is bound to.
 keystore_store_identity :: proc(bridge_id: string, scalar: []byte, owner_user_id: string) -> bool {
 	if len(scalar) != KEYSTORE_IDENTITY_KEY_BYTES || !keystore_bridge_id_ok(bridge_id) do return false
 	if len(owner_user_id) < 1 || len(owner_user_id) > vault.KEYRING_MAX_USER_ID || !vault.valid_id_value(owner_user_id) do return false
+	hub := bridge_keystore_hub()
+	if hub == "" || len(hub) > BRIDGE_HUB_BASE_MAX do return false
 	buf: [BRIDGE_IDENTITY_RECORD_MAX_BYTES]byte
 	defer crypto.zero_explicit(&buf, size_of(buf))
 	copy(buf[:4], BRIDGE_IDENTITY_RECORD_MAGIC)
 	buf[4] = u8(len(owner_user_id))
 	copy(buf[5:], owner_user_id)
 	off := 5 + len(owner_user_id)
+	buf[off] = u8(len(hub))
+	copy(buf[off + 1:], hub)
+	off += 1 + len(hub)
 	copy(buf[off:], scalar)
 	return keystore_backend_write(.Identity, bridge_id, buf[:off + KEYSTORE_IDENTITY_KEY_BYTES]) == 0
 }
@@ -215,14 +229,22 @@ keystore_read_identity :: proc(bridge_id: string, rec: ^Bridge_Identity_Record) 
 	defer crypto.zero_explicit(&buf, size_of(buf))
 	n, status := keystore_backend_read(.Identity, bridge_id, buf[:])
 	if status != .Found do return status
-	if n < 5 || n > BRIDGE_IDENTITY_RECORD_MAX_BYTES || string(buf[:4]) != BRIDGE_IDENTITY_RECORD_MAGIC do return .Error
+	if n < 6 || n > BRIDGE_IDENTITY_RECORD_MAX_BYTES || string(buf[:4]) != BRIDGE_IDENTITY_RECORD_MAGIC do return .Error
 	owner_len := int(buf[4])
-	if owner_len < 1 || owner_len > vault.KEYRING_MAX_USER_ID || n != 5 + owner_len + KEYSTORE_IDENTITY_KEY_BYTES do return .Error
+	if owner_len < 1 || owner_len > vault.KEYRING_MAX_USER_ID || n < 5 + owner_len + 1 do return .Error
 	owner := string(buf[5:5 + owner_len])
 	if !vault.valid_id_value(owner) do return .Error
+	hub_off := 5 + owner_len
+	hub_len := int(buf[hub_off])
+	if hub_len < 1 || n != hub_off + 1 + hub_len + KEYSTORE_IDENTITY_KEY_BYTES do return .Error
+	hub := string(buf[hub_off + 1:hub_off + 1 + hub_len])
+	// Bound to the hub it was enrolled with: any other hub -> refuse (fail closed).
+	if hub != bridge_keystore_hub() do return .Error
 	copy(rec.owner_buf[:], owner)
 	rec.owner_len = owner_len
-	copy(rec.scalar[:], buf[5 + owner_len:n])
+	copy(rec.hub_buf[:], hub)
+	rec.hub_len = hub_len
+	copy(rec.scalar[:], buf[hub_off + 1 + hub_len:n])
 	return .Found
 }
 
@@ -241,25 +263,34 @@ keystore_delete_identity_key :: proc(bridge_id: string) -> bool {
 // Credential Manager / Keychain / kernel keyring / data directory. The fake honors
 // keystore_set_mock_syscall_error the way the OS backends do.
 
+// Every backend call names the item by its SCOPE (keystore_scope.odin): bridge id +
+// the hub this process is bound to. No scope -> nothing is written, read or deleted.
+
 keystore_backend_write :: proc(slot: Keystore_Slot, bridge_id: string, data: []byte) -> int {
+	name, scoped := keystore_scope_name(bridge_id)
+	if !scoped do return KEYSTORE_ERR_BAD_BRIDGE_ID
 	when ODIN_TEST {
-		if g_keystore_use_fake do return keystore_fake_write(slot, bridge_id, data)
+		if g_keystore_use_fake do return keystore_fake_write(slot, name, data)
 	}
-	return keystore_os_write_secret(slot, bridge_id, data)
+	return keystore_os_write_secret(slot, name, data)
 }
 
 keystore_backend_read :: proc(slot: Keystore_Slot, bridge_id: string, dst: []byte) -> (n: int, status: Keystore_Read_Status) {
+	name, scoped := keystore_scope_name(bridge_id)
+	if !scoped do return 0, .Error
 	when ODIN_TEST {
-		if g_keystore_use_fake do return keystore_fake_read(slot, bridge_id, dst)
+		if g_keystore_use_fake do return keystore_fake_read(slot, name, dst)
 	}
-	return keystore_os_read_secret_status(slot, bridge_id, dst)
+	return keystore_os_read_secret_status(slot, name, dst)
 }
 
 keystore_backend_delete :: proc(slot: Keystore_Slot, bridge_id: string) -> bool {
+	name, scoped := keystore_scope_name(bridge_id)
+	if !scoped do return false
 	when ODIN_TEST {
-		if g_keystore_use_fake do return keystore_fake_delete(slot, bridge_id)
+		if g_keystore_use_fake do return keystore_fake_delete(slot, name)
 	}
-	return keystore_os_delete_secret(slot, bridge_id)
+	return keystore_os_delete_secret(slot, name)
 }
 
 when ODIN_TEST {

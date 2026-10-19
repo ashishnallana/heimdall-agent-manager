@@ -282,6 +282,19 @@ bridge_unseal_identity_commit_enrollment :: proc(bridge_id: string, owner_user_i
 		bridge_unseal_forget_identity_locked()
 		return false
 	}
+	// Never overwrite: an enrollment record for this (hub, bridge id) scope that
+	// already exists belongs to a bridge enrolled earlier (or a hub re-issuing an id).
+	// Refuse rather than replace its identity, keyring or floor.
+	{
+		existing: Bridge_Identity_Record
+		status := keystore_read_identity(bridge_id, &existing)
+		crypto.zero_explicit(&existing, size_of(existing))
+		if status != .Not_Found {
+			fmt.eprintfln("ERROR: this machine already holds an enrollment of %s for this hub (or its record is unreadable); refusing to overwrite it. Remove that enrollment first, or enroll with a separate --config/--bridge-token-file.", bridge_id)
+			bridge_unseal_forget_identity_locked()
+			return false
+		}
+	}
 	scalar: [vault.P256_PRIVATE_KEY_BYTES]byte
 	defer crypto.zero_explicit(&scalar, size_of(scalar))
 	ecdsa.private_key_bytes(&g_bridge_identity_priv, scalar[:])

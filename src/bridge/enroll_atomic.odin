@@ -275,6 +275,8 @@ bridge_enroll_atomic_recover_paths :: proc(token_file, config_path: string, refr
 		marker_bridge_id = extract_json_string(string(data), "bridge_id", "", context.temp_allocator)
 		marker_hub = extract_json_string(string(data), "hub", "", context.temp_allocator)
 	}
+	// Keystore items are scoped to the hub the staged enrollment was made with.
+	if marker_hub != "" do _ = bridge_keystore_set_hub(marker_hub)
 	if !has_marker || marker_bridge_id == "" {
 		// Incomplete staging never reached the ack, so the hub never committed it.
 		bridge_enroll_stage_discard(st)
