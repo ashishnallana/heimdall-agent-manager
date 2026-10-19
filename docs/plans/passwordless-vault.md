@@ -479,3 +479,10 @@ $out="$env:USERPROFILE\.cache\heimdall-tests"
 - C:\Users\Tanmay\heimdall-agent-manager\src\bridge\vault_decrypt.odin (plus keystore_*.odin and main.odin:879)
 - C:\Users\Tanmay\heimdall-agent-manager\src\hub\repository\sqlite\migrations.odin (plus app\wiring.odin)
 - C:\Users\Tanmay\heimdall-agent-manager\src\ui\components\enrollment\BridgeEnrollmentApprovalPage.tsx (to be replaced by DeviceApprovalPage.tsx)
+## Backlog carried into P4 (from P1 fix round 2)
+
+- fs-write channel binds bridge + path but not the project root; include the resolved absolute path (or root id) in the AAD.
+- Card `operations` (e.g. `issue.create` title/description) stay plaintext because the hub executes them; seal the content fields the hub only stores.
+- Remove the hub's `'disabled'` vault-status vocabulary and the UI NotConfigured badge (no plaintext mode exists).
+- Hub test for client-chosen shell session ids; fs read tests still swap the global `bridge_fs_read_page_bytes`.
+- Bridge fs / vcs-save / shell-gate integration tests need a Linux run (they fail on Windows temp paths or are `!windows`).
