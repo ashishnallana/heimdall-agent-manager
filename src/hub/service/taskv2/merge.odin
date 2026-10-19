@@ -184,7 +184,7 @@ run_merge :: proc(svc: ^Service, m: Merge_Effect) {
 			"conflict" if outcome == .Conflict else "failed", saved.task_id, saved.title, m.branch, m.repo, first_line_trimmed(detail))
 		effect_notify_coordinator(svc, &u, saved.chain_id, saved.owner_user_id, "merge_conflict" if outcome == .Conflict else "merge_failed", line)
 	}
-	if rok && outcome == .Conflict {
+	if rok {
 		rok, _ = after_chain_change(svc, &u, saved.chain_id, saved.owner_user_id, .Task_Updated)
 	}
 	_, _ = end_uow(svc, &u, rok)

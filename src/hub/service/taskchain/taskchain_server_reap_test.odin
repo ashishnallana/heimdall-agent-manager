@@ -73,7 +73,7 @@ fx9_chain :: proc(fx: ^Fx9, chain_id: string, status := domain.Task_Chain_Status
 		title         = "REQ-SHELL-9 chain",
 		publish_state = .Published,
 		status        = status,
-		kind          = domain.CHAIN_KIND_TICKET,
+		kind          = domain.CHAIN_KIND_MIXED_WORK,
 		created_at    = "2026-09-29T10:00:00Z",
 		updated_at    = "2026-09-29T10:00:00Z",
 	})

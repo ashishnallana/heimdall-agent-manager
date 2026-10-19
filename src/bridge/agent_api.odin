@@ -193,8 +193,22 @@ bridge_agent_route :: proc(method, params: string) -> Bridge_Agent_Route {
 		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/task/fetch"}
 
 	// ---- workflow (M3b) ---------------------------------------------------
-	case "agent.workflow.templates", "agent.workflow.list":
+	case "agent.workflow.templates":
 		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/workflow/templates"}
+	case "agent.workflow.runs":
+		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/workflow/runs"}
+	case "agent.workflow.history":
+		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/workflow/history"}
+	case "agent.work.graph":
+		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/work/graph"}
+	case "agent.work.depend":
+		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/work/depend"}
+	case "agent.work.remove_dependency":
+		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/work/remove-dependency"}
+	case "agent.work.scope":
+		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/work/scope"}
+	case "agent.work.complete":
+		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/work/complete"}
 	case "agent.workflow.define":
 		return Bridge_Agent_Route{kind = .Envelope, path = "/api/v1/agent-actions/workflow/define"}
 	case "agent.workflow.run":
@@ -316,9 +330,11 @@ bridge_agent_method_allowed :: proc(method: string) -> bool {
 	     "agent.task.update", "agent.task.depend", "agent.task.comment", "agent.task.fetch",
 	     "agent.lease.next", "agent.lease.heartbeat", "agent.lease.submit", "agent.lease.handoff",
 	     "agent.lease.block", "agent.lease.switch", "agent.review.post",
-	     "agent.workflow.templates", "agent.workflow.list", "agent.workflow.define",
+	     "agent.workflow.templates", "agent.workflow.define",
 	     "agent.workflow.run", "agent.workflow.status", "agent.workflow.output",
 	     "agent.workflow.retry", "agent.workflow.cancel",
+	     "agent.workflow.runs", "agent.workflow.history", "agent.work.graph", "agent.work.depend",
+	     "agent.work.remove_dependency", "agent.work.scope", "agent.work.complete",
 	     // chat + self/misc
 	     "agent.chat.send", "agent.chat.read",
 	     "agent.context.get", "agent.conversation.set_title",

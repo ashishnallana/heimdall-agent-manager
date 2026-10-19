@@ -271,7 +271,7 @@ test_m3_ctl_params_and_verify_helpers :: proc(t: ^testing.T) {
 @(test)
 test_m3b_workflow_ctl_params :: proc(t: ^testing.T) {
 	// 1. command_tokens skips --inputs-file, --stage, --workflow, --on-output-workflow, --output-schema
-	toks := command_tokens([]string{"ham-ctl", "workflow", "run", "fix_flaky_tests", "--chain", "ch_1", "--inputs-file", "in.json", "--input", "target=auth", "--cascade"})
+	toks := command_tokens([]string{"ham-ctl", "workflow", "run", "fix_flaky_tests", "--chain", "ch_1", "--inputs-file", "in.json", "--input", "target=auth", "--request-id", "stable-key", "--after", "task:t_1"})
 	defer delete(toks)
 	testing.expect_value(t, len(toks), 3)
 	if len(toks) == 3 {
@@ -293,12 +293,12 @@ test_m3b_workflow_ctl_params :: proc(t: ^testing.T) {
 	// 3. workflow run params (merges --inputs-file with repeated --input k=v)
 	run_p, run_ok := ctl_v2_workflow_run_params(
 		[]string{"run", "explore_plan_build"},
-		[]string{"ham-ctl", "workflow", "run", "explore_plan_build", "--chain", "ch_wf", "--input", "goal=Add auth", "--input", "verify_cmd=make test"},
+		[]string{"ham-ctl", "workflow", "run", "explore_plan_build", "--chain", "ch_wf", "--request-id", "stable-key", "--input", "goal=Add auth", "--input", "verify_cmd=make test"},
 		`{"goal":"from_file","extra":"kept"}`,
 	)
 	defer delete(run_p)
 	testing.expect(t, run_ok, "workflow run params ok")
-	testing.expect(t, strings.contains(run_p, `"name":"explore_plan_build"`), "workflow name included")
+	testing.expect(t, strings.contains(run_p, `"ref":"explore_plan_build"`), "workflow name included")
 	testing.expect(t, strings.contains(run_p, `"chain_id":"ch_wf"`), "chain_id included")
 	testing.expect(t, strings.contains(run_p, `"goal":"Add auth"`), "--input overrides --inputs-file key")
 	testing.expect(t, strings.contains(run_p, `"extra":"kept"`), "untouched --inputs-file key preserved")
@@ -311,24 +311,26 @@ test_m3b_workflow_ctl_params :: proc(t: ^testing.T) {
 	)
 	defer delete(out1)
 	testing.expect(t, ok1 && cid1 == "ch_1" && stg1 == "plan", "2-positional workflow output")
-	testing.expect_value(t, out1, `{"chain_id":"ch_1","stage_key":"plan"}`)
+	testing.expect_value(t, out1, `{"run_id":"ch_1","stage_key":"plan"}`)
 
 	cid2, stg2, out2, ok2 := ctl_v2_workflow_output_params(
 		[]string{"output", "plan"},
 		[]string{"ham-ctl", "workflow", "output", "plan"},
 	)
 	defer delete(out2)
-	testing.expect(t, ok2 && cid2 == "" && stg2 == "plan", "1-positional workflow output")
-	testing.expect_value(t, out2, `{"stage_key":"plan"}`)
+	testing.expect(t, !ok2 && cid2 == "" && stg2 == "", "stage output requires an explicit run and stage")
+	testing.expect_value(t, out2, "")
 
-	// 5. workflow retry params with --cascade
-	rcid, rtgt, retry_p, rok := ctl_v2_workflow_retry_params(
-		[]string{"retry", "ch_1", "plan"},
-		[]string{"ham-ctl", "workflow", "retry", "ch_1", "plan", "--cascade"},
-	)
-	defer delete(retry_p)
-	testing.expect(t, rok && rcid == "ch_1" && rtgt == "plan", "workflow retry params ok")
-	testing.expect_value(t, retry_p, `{"chain_id":"ch_1","stage_key":"plan","cascade":true}`)
+    // Whole-run retry requires a concurrency token and a reason.
+    rcid, rtgt, retry_p, rok := ctl_v2_workflow_retry_params(
+        []string{"retry", "run_1"},
+        []string{"ham-ctl", "workflow", "retry", "run_1", "--expected-revision", "2", "--reason", "correct inputs"},
+    )
+    defer delete(retry_p)
+    testing.expect(t, rok && rcid == "run_1" && rtgt == "", "whole-run retry")
+    testing.expect_value(t, retry_p, `{"run_id":"run_1","reason":"correct inputs","expected_revision":2}`)
+    _, _, _, stage_retry := ctl_v2_workflow_retry_params([]string{"retry", "run_1", "plan"}, []string{"--cascade"})
+    testing.expect(t, !stage_retry, "obsolete stage/cascade retry rejected")
 
 	// 6. brief string output + on_output and workflow proposal
 	brief_wf, bok := ctl_task_brief_json(
@@ -342,7 +344,7 @@ test_m3b_workflow_ctl_params :: proc(t: ^testing.T) {
 
 	wf_prop, wpok := ctl_v2_task_chain_propose_params(
 		[]string{"ham-ctl", "task-chain", "propose", "--file", "wf_prop.json", "--auto-approve"},
-		`{"kind":"workflow","workflow":"fix_flaky_tests","inputs":{"target":"auth"}}`,
+		`{"kind":"workflow_run","workflow":"fix_flaky_tests","inputs":{"target":"auth"}}`,
 	)
 	defer delete(wf_prop)
 	testing.expect(t, wpok, "workflow proposal params ok")

@@ -426,7 +426,13 @@ MIGRATION_094_VAULT_HUB_BLIND_PAIRING :: #load("migrations/094_vault_hub_blind_p
 
 MIGRATION_075_CONVERSATION_LAUNCH_PREFERENCES :: #load("migrations/075_conversation_launch_preferences.sql", string)
 
-migration_order :: [98]string {
+MIGRATION_095_WORKFLOW_RUNS :: #load("migrations/095_workflow_runs.sql", string)
+
+MIGRATION_096_MIXED_WORK_GRAPH :: #load("migrations/096_mixed_work_graph.sql", string)
+
+MIGRATION_097_MIXED_WORK_EXECUTION :: #load("migrations/097_mixed_work_execution.sql", string)
+
+migration_order :: [101]string {
 	"001_foundation.sql",
 	"002_owner_scoped_core.sql",
 	"003_device_tokens.sql",
@@ -525,6 +531,9 @@ migration_order :: [98]string {
 	"092_vault_device_directory.sql",
 	"093_vault_signed_log.sql",
 	"094_vault_hub_blind_pairing.sql",
+	"095_workflow_runs.sql",
+	"096_mixed_work_graph.sql",
+	"097_mixed_work_execution.sql",
 }
 
 // stop_before is a TEST SEAM: when non-empty, the apply loop stops in front of
@@ -857,6 +866,23 @@ run_migrations :: proc(
 			mark_migration_applied(conn, name)
 			continue
 		}
+		// 095 commits atomically before its ledger row is written. If the
+		// process exits between those writes, its LAST trigger proves that
+		// the whole schema exists; preserve any runs already written there.
+		if name == "095_workflow_runs.sql" &&
+		   sqlite_object_exists(conn, "workflow_runs_no_delete") {
+			mark_migration_applied(conn, name)
+			continue
+		}
+		if name == "096_mixed_work_graph.sql" &&
+		   sqlite_object_exists(conn, "work_scope_decisions_no_delete") {
+			mark_migration_applied(conn, name)
+			continue
+		}
+		if name == "097_mixed_work_execution.sql" && sqlite_object_exists(conn, "mixed_work_engine_epoch") {
+			mark_migration_applied(conn, name)
+			continue
+		}
 		sql := migration_sql(name, migrations_dir)
 		if sql == "" {
 			return false, domain.domain_error(
@@ -999,6 +1025,9 @@ migration_sql :: proc(name, migrations_dir: string) -> string {
 	if name == "092_vault_device_directory.sql" do return strings.clone(MIGRATION_092_VAULT_DEVICE_DIRECTORY)
 	if name == "093_vault_signed_log.sql" do return strings.clone(MIGRATION_093_VAULT_SIGNED_LOG)
 	if name == "094_vault_hub_blind_pairing.sql" do return strings.clone(MIGRATION_094_VAULT_HUB_BLIND_PAIRING)
+	if name == "095_workflow_runs.sql" do return strings.clone(MIGRATION_095_WORKFLOW_RUNS)
+	if name == "096_mixed_work_graph.sql" do return strings.clone(MIGRATION_096_MIXED_WORK_GRAPH)
+	if name == "097_mixed_work_execution.sql" do return strings.clone(MIGRATION_097_MIXED_WORK_EXECUTION)
 	if name == "081_antigravity_models.sql" do return strings.clone(MIGRATION_081_ANTIGRAVITY_MODELS)
 	if name == "080_copilot_launch_recipe.sql" do return strings.clone(MIGRATION_080_COPILOT_LAUNCH_RECIPE)
 	if name == "079_repair_provider_catalog_etag.sql" do return strings.clone(MIGRATION_079_REPAIR_PROVIDER_CATALOG_ETAG)
@@ -1454,12 +1483,12 @@ upgrade_task_v2_schema :: proc(conn: ^Conn) -> bool {
 	if !table_column_exists(conn, "tasks", "stage_key") && !exec(conn, "ALTER TABLE tasks ADD COLUMN stage_key TEXT NOT NULL DEFAULT '';") do return false
 	if !table_column_exists(conn, "tasks", "stage_index") && !exec(conn, "ALTER TABLE tasks ADD COLUMN stage_index INTEGER NOT NULL DEFAULT 0;") do return false
 	if !table_column_exists(conn, "tasks", "generated_by_json") && !exec(conn, "ALTER TABLE tasks ADD COLUMN generated_by_json TEXT NOT NULL DEFAULT '';") do return false
-	if !table_column_exists(conn, "task_chains", "workflow_def_ref") && !exec(conn, "ALTER TABLE task_chains ADD COLUMN workflow_def_ref TEXT NOT NULL DEFAULT '';") do return false
-	if !table_column_exists(conn, "task_chains", "workflow_snapshot_json") && !exec(conn, "ALTER TABLE task_chains ADD COLUMN workflow_snapshot_json TEXT NOT NULL DEFAULT '';") do return false
+	if !sqlite_object_exists(conn, "mixed_work_engine_epoch") && !table_column_exists(conn, "task_chains", "workflow_def_ref") && !exec(conn, "ALTER TABLE task_chains ADD COLUMN workflow_def_ref TEXT NOT NULL DEFAULT '';") do return false
+	if !sqlite_object_exists(conn, "mixed_work_engine_epoch") && !table_column_exists(conn, "task_chains", "workflow_snapshot_json") && !exec(conn, "ALTER TABLE task_chains ADD COLUMN workflow_snapshot_json TEXT NOT NULL DEFAULT '';") do return false
 	if !table_column_exists(conn, "task_chains", "defaults_json") && !exec(conn, "ALTER TABLE task_chains ADD COLUMN defaults_json TEXT NOT NULL DEFAULT '{}';") do return false
 	if !table_column_exists(conn, "task_chain_fleets", "roles_json") && !exec(conn, "ALTER TABLE task_chain_fleets ADD COLUMN roles_json TEXT NOT NULL DEFAULT '[\"worker\"]';") do return false
 	if !table_column_exists(conn, "task_chain_fleets", "bridge_id") && !exec(conn, "ALTER TABLE task_chain_fleets ADD COLUMN bridge_id TEXT NOT NULL DEFAULT '';") do return false
-	if !exec(conn, "CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_chain_stage ON tasks(chain_id, stage_key, stage_index) WHERE stage_key <> '';") do return false
+	if !sqlite_object_exists(conn, "mixed_work_engine_epoch") && !exec(conn, "CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_chain_stage ON tasks(chain_id, stage_key, stage_index) WHERE stage_key <> '';") do return false
 	if !exec(conn, "CREATE INDEX IF NOT EXISTS idx_tasks_chain_state ON tasks(chain_id, state);") do return false
 	// M1 review follow-ups (additive, idempotent): idle_since lets the Idle_TTL
 	// timer detect a moved deadline and be rebuilt on boot (S4); extended_at

@@ -50,7 +50,7 @@ test_chain_status_from_string_archived :: proc(t: ^testing.T) {
 // default "team_work" is accepted as an alias for ticket at create time only;
 // "" means ticket; anything else is a validation failure.
 @(test)
-test_team_work_alias_accepted :: proc(t: ^testing.T) {
+test_all_chain_creations_use_mixed_work :: proc(t: ^testing.T) {
 	db_path := fmt.tprintf("/tmp/test_chain_kind_alias_%d.db", os.get_pid())
 	os.remove(db_path)
 	defer os.remove(db_path)
@@ -73,10 +73,8 @@ test_team_work_alias_accepted :: proc(t: ^testing.T) {
 
 	Case :: struct { input, want: string }
 	cases := [?]Case{
-		{"team_work", domain.CHAIN_KIND_TICKET},
-		{"", domain.CHAIN_KIND_TICKET},
-		{"ticket", domain.CHAIN_KIND_TICKET},
-		{"workflow", domain.CHAIN_KIND_WORKFLOW},
+		{"mixed_work", domain.CHAIN_KIND_MIXED_WORK},
+		{"", domain.CHAIN_KIND_MIXED_WORK},
 	}
 	for c in cases {
 		chain, ok, err := create_chain(&svc, auth, Create_Chain_Input{title = "kind alias", kind = c.input})

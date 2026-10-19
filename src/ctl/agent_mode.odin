@@ -1852,7 +1852,7 @@ print_help_task_chain :: proc() {
 	fmt.println("                                      --auto-approve publishes immediately when the user said 'go ahead').")
 	fmt.println("  decide [<chain-id>] --decision approve|reject [--reason <text>]")
 	fmt.println("                                      Approve or reject a pending proposal on the chain.")
-	fmt.println("  set-status <active|completed|archived> [--chain <id>] Change chain status (coordinator only).")
+	fmt.println("  set-status <active|cancelled|archived> [--chain <id>] Change chain status (coordinator only).")
 	fmt.println("  archive [<chain-id>]                Archive a task chain (coordinator only).")
 	fmt.println("  unarchive [<chain-id>]              Restore an archived task chain to active (coordinator only).")
 	fmt.println("  publish <chain-id>                  Publish a DRAFT chain (coordinator only). Cascades")

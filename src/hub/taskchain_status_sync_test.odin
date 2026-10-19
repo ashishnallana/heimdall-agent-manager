@@ -41,7 +41,7 @@ create_sync_test_chain :: proc(graph: ^app.App_Graph, owner: string, chain_id: d
 		title         = "sync test chain",
 		publish_state = .Published,
 		status        = initial_status,
-		kind          = domain.CHAIN_KIND_TICKET,
+		kind          = domain.CHAIN_KIND_MIXED_WORK,
 		defaults_json = "{}",
 		created_at    = now,
 		updated_at    = now,
@@ -54,7 +54,7 @@ create_sync_test_chain :: proc(graph: ^app.App_Graph, owner: string, chain_id: d
 
 // Task System v2: the task row's `state` is a cached fold projection; these
 // tests seed rows directly with the state they want and exercise the chain
-// auto-status rule (sync_chain_status_from_tasks) on top of them.
+// explicit acceptance boundary (sync never changes chain status).
 @(private = "file")
 create_sync_test_task :: proc(graph: ^app.App_Graph, owner: string, chain_id: domain.Task_Chain_ID, task_id: domain.Task_ID, state: domain.Task_State) -> domain.Task {
 	now := "2026-09-26T00:00:00Z"
@@ -87,9 +87,9 @@ set_sync_test_task_state :: proc(graph: ^app.App_Graph, task_id: domain.Task_ID,
 	_, _, _ = iface.taskchain_save_task(graph.taskchains.repo, task)
 }
 
-// 1. Creating a task in a completed chain reactivates the chain to .Active
+// REQ-MW-6: completed chains require explicit reopen before adding work.
 @(test)
-test_chain_status_sync_create_task_reactivates_completed_chain :: proc(t: ^testing.T) {
+test_chain_status_sync_create_task_requires_explicit_reopen :: proc(t: ^testing.T) {
 	graph: app.App_Graph
 	db_path := open_sync_test_graph(t, &graph, "create_reactivates")
 	defer { app.shutdown_graph(&graph); _ = os.remove(db_path) }
@@ -107,17 +107,17 @@ test_chain_status_sync_create_task_reactivates_completed_chain :: proc(t: ^testi
 		// a task created on a LIVE chain is published at once → needs a full brief (M2)
 		brief_json = `{"goal":"reactivate","acceptance":["chain active again"],"verify":"true","review_roles":[]}`,
 	})
-	testing.expect(t, created, "create_task should succeed")
+	testing.expect(t, !created, "completed chain rejects new work until reopened")
 
 	updated_chain, got, _ := iface.taskchain_get_chain(graph.taskchains.repo, chain_id)
 	testing.expect(t, got, "chain should exist")
-	testing.expect_value(t, updated_chain.status, domain.Task_Chain_Status.Active)
-	testing.expect_value(t, updated_chain.completed_at, "")
+	testing.expect_value(t, updated_chain.status, domain.Task_Chain_Status.Completed)
+	testing.expect(t, updated_chain.completed_at != "", "acceptance date preserved")
 }
 
 // 2. The final remaining open task reaching `done` sets the chain to .Completed
 @(test)
-test_chain_status_sync_complete_final_task_completes_chain :: proc(t: ^testing.T) {
+test_chain_status_sync_complete_final_task_keeps_chain_open :: proc(t: ^testing.T) {
 	graph: app.App_Graph
 	db_path := open_sync_test_graph(t, &graph, "complete_final")
 	defer { app.shutdown_graph(&graph); _ = os.remove(db_path) }
@@ -141,13 +141,13 @@ test_chain_status_sync_complete_final_task_completes_chain :: proc(t: ^testing.T
 	_, ok2, _ := taskchain_service.sync_chain_status_from_tasks(&graph.taskchains, chain_id, domain.User_ID(owner))
 	testing.expect(t, ok2, "sync after t2 done should succeed")
 	c2, _, _ := iface.taskchain_get_chain(graph.taskchains.repo, chain_id)
-	testing.expect_value(t, c2.status, domain.Task_Chain_Status.Completed)
-	testing.expect(t, c2.completed_at != "", "completed_at must be populated on chain")
+	testing.expect_value(t, c2.status, domain.Task_Chain_Status.Active)
+	testing.expect_value(t, c2.completed_at, "")
 }
 
 // 3. Cancelling all remaining open tasks in an active chain with >=1 done task sets the chain to .Completed
 @(test)
-test_chain_status_sync_cancel_remaining_tasks_completes_chain :: proc(t: ^testing.T) {
+test_chain_status_sync_cancel_remaining_tasks_keeps_chain_open :: proc(t: ^testing.T) {
 	graph: app.App_Graph
 	db_path := open_sync_test_graph(t, &graph, "cancel_remaining")
 	defer { app.shutdown_graph(&graph); _ = os.remove(db_path) }
@@ -171,8 +171,8 @@ test_chain_status_sync_cancel_remaining_tasks_completes_chain :: proc(t: ^testin
 
 	// non_terminal == 0 and completed == 1 → Completed
 	c, _, _ := iface.taskchain_get_chain(graph.taskchains.repo, chain_id)
-	testing.expect_value(t, c.status, domain.Task_Chain_Status.Completed)
-	testing.expect(t, c.completed_at != "", "completed_at must be populated on chain")
+	testing.expect_value(t, c.status, domain.Task_Chain_Status.Active)
+	testing.expect_value(t, c.completed_at, "")
 }
 
 // 3b. All tasks cancelled and none done → chain stays Active (nothing was accomplished)
@@ -195,7 +195,7 @@ test_chain_status_sync_all_cancelled_without_done_keeps_active :: proc(t: ^testi
 
 // 4. A non-terminal task on a completed chain sets the chain back to .Active
 @(test)
-test_chain_status_sync_uncancel_task_reactivates_completed_chain :: proc(t: ^testing.T) {
+test_chain_status_sync_projection_does_not_revoke_final_acceptance :: proc(t: ^testing.T) {
 	graph: app.App_Graph
 	db_path := open_sync_test_graph(t, &graph, "uncancel_reactivates")
 	defer { app.shutdown_graph(&graph); _ = os.remove(db_path) }
@@ -218,8 +218,8 @@ test_chain_status_sync_uncancel_task_reactivates_completed_chain :: proc(t: ^tes
 	testing.expect(t, ok, "sync after un-cancel should succeed")
 
 	c, _, _ := iface.taskchain_get_chain(graph.taskchains.repo, chain_id)
-	testing.expect_value(t, c.status, domain.Task_Chain_Status.Active)
-	testing.expect_value(t, c.completed_at, "")
+	testing.expect_value(t, c.status, domain.Task_Chain_Status.Completed)
+	testing.expect(t, c.completed_at != "", "acceptance is explicit and preserved")
 }
 
 // 5. Every non-terminal state (backlog/ready/in_progress/in_review) keeps a chain open
@@ -261,7 +261,12 @@ test_chain_status_sync_publishes_websocket_resource_changed :: proc(t: ^testing.
 	_, ok, _ := taskchain_service.sync_chain_status_from_tasks(&graph.taskchains, chain_id, domain.User_ID(owner))
 	testing.expect(t, ok, "sync should succeed")
 
-	testing.expect(t, graph.event_bus.event_seq > seq_before, "event bus seq must increment on chain status change")
+    testing.expect_value(t, graph.event_bus.event_seq, seq_before)
+    current, _, _ := iface.taskchain_get_chain(graph.taskchains.repo, chain_id)
+    accepted, complete, err := taskchain_service.complete_chain(&graph.taskchains, contracts.Auth_Context{kind = .User_Token, user_id = owner}, chain_id, current.work_revision, "All included work accepted")
+    testing.expect(t, complete, err.message)
+    testing.expect_value(t, accepted.status, domain.Task_Chain_Status.Completed)
+    testing.expect(t, graph.event_bus.event_seq > seq_before, "explicit acceptance publishes a chain update")
 }
 
 // --- Archived Chain Transitions and Status Mappings ---

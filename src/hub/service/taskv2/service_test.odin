@@ -45,6 +45,12 @@ fixture_advance :: proc(fx: ^Fixture, seconds: i64) {
 }
 
 test_db_path :: proc(tag: string) -> string {
+	// Windows does not normally define HOME. Use its existing temporary
+	// directory so the engine's file-backed fixtures can run there too.
+	when ODIN_OS == .Windows {
+		temp_dir := os.get_env("TEMP", context.temp_allocator)
+		return fmt.aprintf("%s/taskv2_%s_%d.db", temp_dir, tag, os.get_pid())
+	}
 	home := os.get_env("HOME", context.temp_allocator)
 	dir := fmt.tprintf("%s/.cache/heimdall-tests", home)
 	os.make_directory(dir)
@@ -121,7 +127,13 @@ assert_projection_matches_fold :: proc(t: ^testing.T, fx: ^Fixture, chain_id: do
 	for task in tasks {
 		evs, eerr := iface.taskchain_list_events_by_task(&fx.repo, task.task_id, owner)
 		testing.expect(t, eerr.code == .None, "list events")
-		view := fold_task(evs, fold_input_for_task(task, deps_done_for(task.task_id, tasks, deps)))
+        ready := deps_done_for(task.task_id, tasks, deps)
+        if task.workflow_run_id == "" {
+            external_ready, err := work_dependencies_ready_in_uow(&fx.svc, chain_id, owner, domain.Work_Item_Ref{kind = domain.WORK_ITEM_TASK, id = string(task.task_id)})
+            testing.expect(t, err.code == .None, "read mixed-work dependencies")
+            ready = ready && external_ready
+        }
+        view := fold_task(evs, fold_input_for_task(task, ready))
 		testing.expect(t, view.state == task.state, fmt.tprintf("%s: task %s cached state %v != fold %v", where_tag, task.task_id, task.state, view.state))
 		testing.expect(t, view.attempt_no == task.attempt_no, fmt.tprintf("%s: task %s cached attempt %d != fold %d", where_tag, task.task_id, task.attempt_no, view.attempt_no))
 		testing.expect(t, view.blocked_on_json == task.blocked_on_json, fmt.tprintf("%s: task %s blocked_on mismatch", where_tag, task.task_id))
@@ -163,72 +175,15 @@ INSERT INTO task_votes(task_id, reviewer_agent_instance_id, chain_id, owner_user
 // are gone, and every task's cached state equals the fold of its events.
 @(test)
 test_migration_round_trip :: proc(t: ^testing.T) {
-	fx, ok := fixture_open(t, "mig", stop_before = "090_task_v2.sql")
-	defer fixture_close(fx)
-	if !ok do return
-	if !exec_ok(t, fx, LEGACY_SEED) do return
-	mig_ok, mig_err := sqlite.run_migrations(&fx.conn)
-	if !testing.expect(t, mig_ok, fmt.tprintf("087 apply: %s", mig_err.message)) do return
+ fx, ok := fixture_open(t, "legacy_cutover", stop_before = "090_task_v2.sql")
+ defer fixture_close(fx)
+ if !ok do return
+ if !exec_ok(t, fx, LEGACY_SEED) do return
+ migrated, err := sqlite.run_migrations(&fx.conn)
+ testing.expect(t, !migrated && err.code != .None, "legacy dependency data requires an explicit reset; never reinterpret it")
+ _ = sqlite.exec(&fx.conn, "ROLLBACK;")
+ testing.expect(t, !sqlite.table_column_exists(&fx.conn, "tasks", "workflow_run_id"), "cutover did not partly install generated task identity")
 
-	expect_state := proc(t: ^testing.T, fx: ^Fixture, id, want: string) {
-		got := scalar_text(fx, fmt.tprintf("SELECT state FROM tasks WHERE task_id = '%s';", id))
-		testing.expect(t, got == want, fmt.tprintf("%s: want %s got %s", id, want, got))
-	}
-	expect_state(t, fx, "t_assigned", "ready")
-	expect_state(t, fx, "t_queued", "ready")
-	expect_state(t, fx, "t_inprog", "in_progress")
-	expect_state(t, fx, "t_inval", "in_review")
-	expect_state(t, fx, "t_fin", "in_progress")
-	expect_state(t, fx, "t_pausing", "in_progress")
-	expect_state(t, fx, "t_vg", "in_review")
-	expect_state(t, fx, "t_vng", "in_progress")
-	expect_state(t, fx, "t_paused", "backlog")
-	expect_state(t, fx, "t_done", "done")
-	expect_state(t, fx, "t_canc", "cancelled")
-	expect_state(t, fx, "t_draft", "backlog")
-	expect_state(t, fx, "t_blocked", "backlog") // dep on an in_progress task
-
-	// paused → backlog + blocked_on human
-	testing.expect(t, strings.contains(scalar_text(fx, "SELECT blocked_on_json FROM tasks WHERE task_id = 't_paused';"), `"kind":"human"`), "paused carries blocked_on human")
-	// user reviewer ref → requires_user_approval
-	testing.expect_value(t, scalar_int(fx, "SELECT requires_user_approval FROM tasks WHERE task_id = 't_assigned';"), 1)
-	testing.expect_value(t, scalar_int(fx, "SELECT requires_user_approval FROM tasks WHERE task_id = 't_queued';"), 0)
-	// brief: goal keeps the armored description verbatim; assignee template resolved from agent_id and from an instance ref
-	brief_a := scalar_text(fx, "SELECT brief_json FROM tasks WHERE task_id = 't_assigned';")
-	testing.expect(t, jsonx.extract_string(brief_a, "goal", "", true, context.temp_allocator) == "vault:v2:e1:ZGVzY3JpcHRpb24=", "armored goal preserved")
-	testing.expect(t, jsonx.extract_string(brief_a, "assignee", "", true, context.temp_allocator) == "agt_w", "assignee from agent_id ref")
-	brief_p := scalar_text(fx, "SELECT brief_json FROM tasks WHERE task_id = 't_inprog';")
-	testing.expect(t, jsonx.extract_string(brief_p, "assignee", "", true, context.temp_allocator) == "agt_w", "assignee from instance ref resolved to its template")
-	roles := jsonx.extract_string_array(brief_p, "review_roles", true, context.temp_allocator)
-	testing.expect(t, len(roles) == 1 && roles[0] == "reviewer", "agent reviewer ref → review_roles [reviewer]")
-	// chain default reviewer (instance ref) → every task has the reviewer role
-	roles_q := jsonx.extract_string_array(scalar_text(fx, "SELECT brief_json FROM tasks WHERE task_id = 't_queued';"), "review_roles", true, context.temp_allocator)
-	testing.expect(t, len(roles_q) == 1 && roles_q[0] == "reviewer", "chain default reviewer applies to every task")
-	// fleet rows: agt_r gained a reviewer row; agt_w keeps worker; both placed on the chain's effective bridge
-	testing.expect(t, scalar_text(fx, "SELECT roles_json FROM task_chain_fleets WHERE agent_id = 'agt_r';") == `["reviewer"]`, "reviewer fleet row")
-	testing.expect(t, scalar_text(fx, "SELECT roles_json FROM task_chain_fleets WHERE agent_id = 'agt_w';") == `["worker"]`, "worker fleet row untouched")
-	testing.expect(t, scalar_text(fx, "SELECT bridge_id FROM task_chain_fleets WHERE agent_id = 'agt_w';") == "br_1", "fleet row defaults to the chain's effective bridge")
-	// chain kind + armored title untouched
-	testing.expect(t, scalar_text(fx, "SELECT kind FROM task_chains WHERE chain_id = 'chain_1';") == "ticket", "team_work → ticket")
-	testing.expect(t, scalar_text(fx, "SELECT title FROM task_chains WHERE chain_id = 'chain_1';") == "vault:v2:e1:dGl0bGU=", "armored title untouched")
-	// attempts: tasks that had run start at attempt 1
-	testing.expect_value(t, scalar_int(fx, "SELECT attempt_no FROM tasks WHERE task_id = 't_inprog';"), 1)
-	testing.expect_value(t, scalar_int(fx, "SELECT attempt_no FROM tasks WHERE task_id = 't_queued';"), 0)
-	// legacy columns + tables are gone; votes dropped
-	testing.expect(t, !sqlite.table_column_exists(&fx.conn, "tasks", "status"), "tasks.status dropped")
-	testing.expect(t, !sqlite.table_column_exists(&fx.conn, "tasks", "assignee_ref_json"), "assignee_ref_json dropped")
-	testing.expect(t, !sqlite.table_column_exists(&fx.conn, "tasks", "reviewer_refs_json"), "reviewer_refs_json dropped")
-	testing.expect(t, !sqlite.table_column_exists(&fx.conn, "task_chains", "default_reviewer_refs_json"), "default_reviewer_refs_json dropped")
-	testing.expect(t, !sqlite.sqlite_object_exists(&fx.conn, "task_votes"), "task_votes dropped")
-	testing.expect(t, !sqlite.sqlite_object_exists(&fx.conn, "task_subscriptions"), "task_subscriptions dropped")
-	// one migrated event per task
-	testing.expect_value(t, scalar_int(fx, "SELECT COUNT(*) FROM task_events WHERE kind = 'migrated';"), 13)
-	// the fold agrees with the cached projection for every task
-	assert_projection_matches_fold(t, fx, "chain_1", "u1", "after migration")
-	// and the migration is idempotent on re-run (ledger)
-	again_ok, _ := sqlite.run_migrations(&fx.conn)
-	testing.expect(t, again_ok, "re-running migrations is a no-op")
-	testing.expect_value(t, scalar_int(fx, "SELECT COUNT(*) FROM task_events WHERE kind = 'migrated';"), 13)
 }
 
 // test_owner_immutable_on_v2_tables: every new table refuses an owner change.
@@ -261,7 +216,7 @@ test_owner_immutable_on_v2_tables :: proc(t: ^testing.T) {
 
 seed_chain :: proc(t: ^testing.T, fx: ^Fixture, chain_id: string, published: bool) -> domain.Task_Chain {
 	now := platform.clock_now(&fx.clock)
-	chain := domain.Task_Chain{chain_id = domain.Task_Chain_ID(chain_id), owner_user_id = "u1", title = "c", publish_state = .Published if published else .Draft, status = .Active, kind = domain.CHAIN_KIND_TICKET, defaults_json = "{}", created_at = now, updated_at = now, published_at = now if published else ""}
+	chain := domain.Task_Chain{chain_id = domain.Task_Chain_ID(chain_id), owner_user_id = "u1", title = "c", publish_state = .Published if published else .Draft, status = .Active, kind = domain.CHAIN_KIND_MIXED_WORK, defaults_json = "{}", created_at = now, updated_at = now, published_at = now if published else ""}
 	_, ok, err := iface.taskchain_save_chain(&fx.repo, chain)
 	testing.expect(t, ok, fmt.tprintf("save chain: %s", err.message))
 	return chain
@@ -288,7 +243,7 @@ test_projection_matches_fold_through_engine :: proc(t: ^testing.T) {
 	testing.expect(t, task_created(&fx.svc, b, actor).code == .None, "created b")
 	assert_projection_matches_fold(t, fx, chain.chain_id, "u1", "draft")
 	// b depends on a
-	_, dok, _ := iface.taskchain_save_dependency(&fx.repo, domain.Task_Dependency{task_id = b.task_id, depends_on_task_id = a.task_id, chain_id = chain.chain_id, owner_user_id = "u1", created_at = platform.clock_now(&fx.clock)})
+	_, dok, _ := work_dependency_add(&fx.svc, "u1", actor, chain.chain_id, domain.Work_Item_Ref{kind = domain.WORK_ITEM_TASK, id = string(b.task_id)}, domain.Work_Item_Ref{kind = domain.WORK_ITEM_TASK, id = string(a.task_id)}, reconcile = false)
 	testing.expect(t, dok, "dep saved")
 	testing.expect(t, dep_added(&fx.svc, b, a.task_id, actor).code == .None, "dep_added")
 	// publish the chain → a ready, b backlog (dep)
@@ -313,7 +268,7 @@ test_projection_matches_fold_through_engine :: proc(t: ^testing.T) {
 	rb, _, _ = iface.taskchain_get_task(&fx.repo, b.task_id)
 	testing.expect_value(t, ra.state, domain.Task_State.Cancelled)
 	testing.expect(t, ra.completed_at != "", "completed_at stamped on cancel")
-	testing.expect_value(t, rb.state, domain.Task_State.Ready)
+	testing.expect_value(t, rb.state, domain.Task_State.Backlog)
 	assert_projection_matches_fold(t, fx, chain.chain_id, "u1", "after cancel")
 	// chain cancelled → open tasks cancelled
 	testing.expect(t, chain_closed(&fx.svc, chain, actor, true).code == .None, "chain_closed")

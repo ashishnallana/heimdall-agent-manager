@@ -504,9 +504,25 @@ user_review :: proc(svc: ^Service, auth: contracts.Auth_Context, task_id: domain
 
 // task_reopen: done|cancelled → a new attempt (non-counting grant next).
 task_reopen :: proc(svc: ^Service, task: domain.Task, actor: Actor) -> (domain.Task, bool, domain.Domain_Error) {
+	if task.workflow_run_id != "" do return {}, false, domain.domain_error(.Conflict, "retry the whole workflow run rather than reopening a generated task", `{"code":"workflow_task_managed"}`)
 	if !domain.task_state_is_terminal(task.state) do return {}, false, domain.domain_error(.Conflict, "only a done or cancelled task can be reopened")
 	u, uok, uerr := begin_uow(svc)
 	if !uok do return {}, false, uerr
+    if _, allowed, err := work_control_chain(svc, task.owner_user_id, actor, task.chain_id); !allowed {
+        _, _ = end_uow(svc, &u, false)
+        return {}, false, err
+    }
+    if err := workflow_require_current_task(svc, task); err.code != .None {
+        _, _ = end_uow(svc, &u, false)
+        return {}, false, err
+    }
+	if task.stage_key == "" && task.kind == .Task {
+		guard := work_require_unconsumed_in_uow(svc, task.chain_id, task.owner_user_id, domain.Work_Item_Ref{kind = domain.WORK_ITEM_TASK, id = string(task.task_id)})
+		if guard.code != .None {
+			_, _ = end_uow(svc, &u, false)
+			return {}, false, guard
+		}
+	}
 	_, _, rok, rerr := record_event(svc, &u, task, actor, EV_REOPENED, "{}")
 	if rok do rok, rerr = after_chain_change(svc, &u, task.chain_id, task.owner_user_id, .Task_Reopened)
 	_, cerr := end_uow(svc, &u, rok)
@@ -521,6 +537,14 @@ task_answer :: proc(svc: ^Service, task: domain.Task, actor: Actor, note: string
 	if strings.trim_space(task.blocked_on_json) == "" do return {}, false, domain.domain_error(.Conflict, "task is not blocked")
 	u, uok, uerr := begin_uow(svc)
 	if !uok do return {}, false, uerr
+    if _, allowed, err := work_control_chain(svc, task.owner_user_id, actor, task.chain_id); !allowed {
+        _, _ = end_uow(svc, &u, false)
+        return {}, false, err
+    }
+    if err := workflow_require_current_task(svc, task); err.code != .None {
+        _, _ = end_uow(svc, &u, false)
+        return {}, false, err
+    }
 	p := json_begin()
 	if strings.trim_space(note) != "" do json_str(&p, "note", note)
 	_, _, rok, rerr := record_event(svc, &u, task, actor, EV_ANSWERED, json_end(&p))
@@ -662,12 +686,12 @@ BRIEF_ACCEPTANCE_ITEM :: 200
 Propose_Input :: struct {
 	chain_id:             string, // optional for agents
 	tasks_json:           string, // optional JSON array of task specs [{id?, title, brief, depends_on?}]
-	kind:                 string, // optional chain kind (e.g. "ticket", "workflow")
+	kind:                 string, // proposal item mode: task or workflow_run; never a chain type
 	rationale:            string, // optional explanation
 	alternative:          string, // optional alternative plan considered
 	auto_approve:         bool,   // when true, immediately approves & publishes in the same UoW
-	workflow_ref:         string, // optional workflow template/def name or id when kind == "workflow"
-	workflow_inputs_json: string, // optional JSON object of workflow inputs when kind == "workflow"
+	workflow_ref:         string, // optional workflow template/def name or id for a workflow_run proposal
+	workflow_inputs_json: string, // optional JSON object of workflow inputs for a workflow_run proposal
 }
 
 // chain_proposal_json extracts the pending proposal JSON object from `chain.defaults_json`
@@ -679,7 +703,6 @@ chain_proposal_json :: proc(chain: domain.Task_Chain, allocator := context.temp_
 	return prop
 }
 
-@(private = "file")
 set_chain_proposal_json :: proc(defaults_json: string, proposal_obj_json: string, allocator := context.temp_allocator) -> string {
 	o := json_begin(allocator)
 	if strings.has_prefix(strings.trim_space(defaults_json), "{") {
@@ -727,6 +750,7 @@ validate_brief_for_publish :: proc(svc: ^Service, chain: domain.Task_Chain, exis
 	first := true
 	has_problem := false
 	for t in existing_tasks {
+		if t.publish_state == .Published || t.workflow_run_id != "" do continue
 		missing := brief_missing_fields_for_publish(svc, chain, t.kind, t.brief_json)
 		if len(missing) > 0 {
 			has_problem = true
@@ -854,15 +878,12 @@ approve_and_publish_chain_in_uow :: proc(svc: ^Service, u: ^Uow, chain_in: domai
 		for raw_dep in spec.depends_on {
 			dep_id := raw_dep
 			if mapped, ok := id_map[string(raw_dep)]; ok do dep_id = mapped
-			if _, dok, derr := iface.taskchain_save_dependency(svc.repo, domain.Task_Dependency{
-				task_id            = created[idx].task_id,
-				depends_on_task_id = dep_id,
-				chain_id           = chain.chain_id,
-				owner_user_id      = chain.owner_user_id,
-				created_at         = now,
-			}); !dok {
-				return {}, nil, false, derr
-			}
+            if _, dok, derr := work_dependency_add_in_uow(svc, u, chain.owner_user_id, actor, chain.chain_id,
+                domain.Work_Item_Ref{kind = domain.WORK_ITEM_TASK, id = string(created[idx].task_id)},
+                domain.Work_Item_Ref{kind = domain.WORK_ITEM_TASK, id = string(dep_id)}); !dok {
+                return {}, nil, false, derr
+            }
+
 			dp := json_begin()
 			json_str(&dp, "depends_on", string(dep_id))
 			if _, eok, eerr := append_event(svc.repo, svc.clock, created[idx], actor, EV_DEP_ADDED, json_end(&dp)); !eok {
@@ -915,22 +936,29 @@ chain_propose :: proc(svc: ^Service, chain_id: domain.Task_Chain_ID, owner_user_
 		_, _ = end_uow(svc, &u, false)
 		return {}, false, domain.domain_error(.Forbidden, "only the chain coordinator may propose a chain plan", `{"code":"not_coordinator"}`)
 	}
-	if chain.publish_state == .Published {
+	if chain.status != .Active {
 		_, _ = end_uow(svc, &u, false)
-		return {}, false, domain.domain_error(.Conflict, "chain is already published", `{"code":"already_published"}`)
+		return {}, false, domain.domain_error(.Conflict, "chain must be active")
 	}
-	if strings.trim_space(input.kind) != "" {
-		if norm_k, kok := domain.normalize_chain_kind(strings.trim_space(input.kind)); kok {
-			chain.kind = norm_k
-		}
-	}
-	is_wf_proposal := strings.trim_space(input.kind) == domain.CHAIN_KIND_WORKFLOW || strings.trim_space(input.workflow_ref) != ""
+ if input.kind != "" && input.kind != "task" && input.kind != "workflow_run" {
+  _, _ = end_uow(svc, &u, false)
+  return {}, false, domain.domain_error(.Validation_Failed, "proposal kind must be task or workflow_run; chain type cannot change")
+ }
+ if pending := strings.trim_space(chain_proposal_json(chain)); pending != "" && pending != "{}" && pending != "null" {
+  _, _ = end_uow(svc, &u, false)
+  return {}, false, domain.domain_error(.Conflict, "decide the pending proposal before proposing more work")
+ }
+ is_wf_proposal := input.kind == "workflow_run" || strings.trim_space(input.workflow_ref) != ""
+ if is_wf_proposal && strings.trim_space(input.workflow_ref) == "" {
+  _, _ = end_uow(svc, &u, false)
+  return {}, false, domain.domain_error(.Validation_Failed, "workflow_run proposal requires workflow reference")
+ }
 	if is_wf_proposal && strings.trim_space(input.workflow_ref) != "" {
 		wf_ref := strings.trim_space(input.workflow_ref)
 		wf_inputs := strings.trim_space(input.workflow_inputs_json)
 		if wf_inputs == "" do wf_inputs = "{}"
 		if input.auto_approve {
-			updated, ap_ok, ap_err := activate_workflow_on_existing_chain_in_uow(svc, &u, chain, actor, wf_ref, wf_inputs)
+			updated, ap_ok, ap_err := workflow_proposal_run_in_uow(svc, &u, chain, actor, wf_ref, wf_inputs)
 			_, cerr2 := end_uow(svc, &u, ap_ok)
 			if !ap_ok do return {}, false, ap_err
 			if cerr2.code != .None do return {}, false, cerr2
@@ -939,7 +967,7 @@ chain_propose :: proc(svc: ^Service, chain_id: domain.Task_Chain_ID, owner_user_
 		now := platform.clock_now(svc.clock)
 		p := json_begin()
 		json_str(&p, "status", "pending")
-		json_str(&p, "kind", domain.CHAIN_KIND_WORKFLOW)
+		json_str(&p, "kind", "workflow_run")
 		json_str(&p, "workflow", wf_ref)
 		json_raw(&p, "inputs", wf_inputs)
 		json_str(&p, "proposed_by_kind", actor.kind)
@@ -1023,9 +1051,9 @@ chain_proposal_decide :: proc(svc: ^Service, chain_id: domain.Task_Chain_ID, own
 		_, _ = end_uow(svc, &u, false)
 		return {}, nil, false, domain.domain_error(.Not_Found, "chain not found")
 	}
-	if chain.publish_state == .Published {
+	if chain.status != .Active {
 		_, _ = end_uow(svc, &u, false)
-		return {}, nil, false, domain.domain_error(.Conflict, "chain is already published", `{"code":"already_published"}`)
+		return {}, nil, false, domain.domain_error(.Conflict, "chain must be active")
 	}
 	prop := strings.trim_space(chain_proposal_json(chain))
 	if prop == "" || prop == "null" || prop == "{}" {
@@ -1051,10 +1079,10 @@ chain_proposal_decide :: proc(svc: ^Service, chain_id: domain.Task_Chain_ID, own
 	prop_kind := strings.trim_space(jsonx.extract_string(prop, "kind", "", true, context.temp_allocator))
 	prop_wf := strings.trim_space(jsonx.extract_string(prop, "workflow", "", true, context.temp_allocator))
 	if prop_wf == "" do prop_wf = strings.trim_space(jsonx.extract_string(prop, "template", "", true, context.temp_allocator))
-	if prop_kind == domain.CHAIN_KIND_WORKFLOW && prop_wf != "" {
+	if prop_kind == "workflow_run" && prop_wf != "" {
 		prop_inputs, has_in := jsonx.extract_raw_object(prop, "inputs", true, context.temp_allocator)
 		if !has_in || strings.trim_space(prop_inputs) == "" do prop_inputs = "{}"
-		updated, ap_ok, ap_err := activate_workflow_on_existing_chain_in_uow(svc, &u, chain, actor, prop_wf, prop_inputs)
+		updated, ap_ok, ap_err := workflow_proposal_run_in_uow(svc, &u, chain, actor, prop_wf, prop_inputs)
 		_, cerr2 := end_uow(svc, &u, ap_ok)
 		if !ap_ok do return {}, nil, false, ap_err
 		if cerr2.code != .None do return {}, nil, false, cerr2

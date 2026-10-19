@@ -233,7 +233,7 @@ wire_setup :: proc(t: ^testing.T, tag: string) -> ^wire_fixture {
 		title         = "TB-2 Wire Chain",
 		publish_state = .Draft,
 		status        = .Active,
-		kind          = domain.CHAIN_KIND_TICKET,
+		kind          = domain.CHAIN_KIND_MIXED_WORK,
 		created_at    = "2026-09-25T10:00:00Z",
 		updated_at    = "2026-09-25T10:00:00Z",
 	})

@@ -227,7 +227,7 @@ ctl_hub_task_chains :: proc(base, token, action: string, args: []string) {
 	if action == "complete" { ctl_hub_request(base, token, "POST", fmt.tprintf("/api/v1/task-chains/%s/complete", safe_path_part(chain_id)), "{}"); return }
 	if action == "set-status" || action == "status" {
 		status := option_value(args, "--status", "")
-		if status == "" || chain_id == "" { fmt.println("usage: ham-ctl hub task-chains set-status --chain-id <id> --status <active|completed|archived>"); return }
+		if status == "" || chain_id == "" { fmt.println("usage: ham-ctl hub task-chains set-status --chain-id <id> --status <active|cancelled|archived>"); return }
 		ctl_hub_request(base, token, "PATCH", fmt.tprintf("/api/v1/task-chains/%s", safe_path_part(chain_id)), json_object(json_kv("status", status)))
 		return
 	}

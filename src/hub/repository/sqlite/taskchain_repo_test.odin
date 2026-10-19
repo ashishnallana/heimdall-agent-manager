@@ -33,13 +33,13 @@ test_task_chain_search_change_feed_is_monotonic_and_owner_scoped :: proc(t: ^tes
 	chain_a := domain.Task_Chain{
 		chain_id = "chain_search_a", owner_user_id = owner_a,
 		title = "vault:v1:cipher-a", description = "vault:v1:description-a",
-		publish_state = .Published, status = .Active, kind = domain.CHAIN_KIND_TICKET,
+		publish_state = .Published, status = .Active, kind = domain.CHAIN_KIND_MIXED_WORK,
 		created_at = "2026-10-14T00:00:00Z", updated_at = "2026-10-14T00:00:00Z",
 	}
 	chain_b := domain.Task_Chain{
 		chain_id = "chain_search_b", owner_user_id = owner_b,
 		title = "vault:v1:cipher-b", publish_state = .Published, status = .Active,
-		kind = "team_work", created_at = "2026-10-14T00:00:00Z", updated_at = "2026-10-14T00:00:00Z",
+		kind = domain.CHAIN_KIND_MIXED_WORK, created_at = "2026-10-14T00:00:00Z", updated_at = "2026-10-14T00:00:00Z",
 	}
 	_, saved_a, _ := iface.taskchain_save_chain(&repo, chain_a)
 	_, saved_b, _ := iface.taskchain_save_chain(&repo, chain_b)
@@ -458,7 +458,7 @@ test_taskchain_pinned_sqlite_lifecycle :: proc(t: ^testing.T) {
 			description                   = "desc",
 			publish_state                 = .Published,
 			status                        = .Active,
-			kind                          = "team_work",
+			kind                          = domain.CHAIN_KIND_MIXED_WORK,
 			coordinator_agent_instance_id = "inst_c",
 				created_at                    = fmt.tprintf("2026-09-21T10:%02d:00Z", i),
 			updated_at                    = fmt.tprintf("2026-09-21T10:%02d:00Z", i),
@@ -541,7 +541,7 @@ test_taskchain_rollup_counts :: proc(t: ^testing.T) {
 		title         = "Chain 1",
 		publish_state = .Published,
 		status        = .Active,
-		kind          = domain.CHAIN_KIND_TICKET,
+		kind          = domain.CHAIN_KIND_MIXED_WORK,
 		created_at    = "2026-09-25T10:00:00Z",
 		updated_at    = "2026-09-25T10:00:00Z",
 	}
@@ -613,7 +613,6 @@ test_task_v2_fields_sqlite_roundtrip :: proc(t: ^testing.T) {
 	}
 	testing.expect(t, table_column_exists(&conn, "task_chain_fleets", "roles_json"), "task_chain_fleets.roles_json column exists")
 	testing.expect(t, table_column_exists(&conn, "task_chain_fleets", "bridge_id"), "task_chain_fleets.bridge_id column exists")
-	testing.expect(t, table_column_exists(&conn, "task_chains", "workflow_def_ref"), "task_chains.workflow_def_ref column exists")
 	testing.expect(t, table_column_exists(&conn, "task_chains", "defaults_json"), "task_chains.defaults_json column exists")
 
 	repo_impl := Taskchain_Repo_SQLite{conn = &conn}
@@ -628,9 +627,7 @@ test_task_v2_fields_sqlite_roundtrip :: proc(t: ^testing.T) {
 		title                  = "V2 Fields Chain",
 		publish_state          = .Published,
 		status                 = .Active,
-		kind                   = domain.CHAIN_KIND_WORKFLOW,
-		workflow_def_ref       = "wf_def_1@3",
-		workflow_snapshot_json = `{"def_id":"wf_def_1","version":3,"inputs":{"repo":"x"}}`,
+		kind                   = domain.CHAIN_KIND_MIXED_WORK,
 		defaults_json          = `{"auto_submit":true}`,
 		created_at             = "2026-10-01T10:00:00Z",
 		updated_at             = "2026-10-01T10:00:00Z",
@@ -641,9 +638,7 @@ test_task_v2_fields_sqlite_roundtrip :: proc(t: ^testing.T) {
 	testing.expect_value(t, sc_err.code, domain.Error_Code.None)
 	got_chain, gc_ok, _ := iface.taskchain_get_chain(&repo, cid)
 	testing.expect(t, gc_ok, "get chain ok")
-	testing.expect_value(t, got_chain.kind, domain.CHAIN_KIND_WORKFLOW)
-	testing.expect_value(t, got_chain.workflow_def_ref, "wf_def_1@3")
-	testing.expect_value(t, got_chain.workflow_snapshot_json, `{"def_id":"wf_def_1","version":3,"inputs":{"repo":"x"}}`)
+	testing.expect_value(t, got_chain.kind, domain.CHAIN_KIND_MIXED_WORK)
 	testing.expect_value(t, got_chain.defaults_json, `{"auto_submit":true}`)
 
 	// Every Task_State / Task_Kind value survives the string mapping.
@@ -652,6 +647,12 @@ test_task_v2_fields_sqlite_roundtrip :: proc(t: ^testing.T) {
 		testing.expectf(t, ok && back == state, "task state %v must round-trip through its string", state)
 	}
 
+    testing.expect(t, exec(&conn, `BEGIN;
+INSERT INTO workflow_runs(run_id,chain_id,owner_user_id,title,definition_ref,spec_json,inputs_json,current_execution_no,request_id,request_hash,created_by_kind,created_by_id,created_at,updated_at,revision)
+VALUES ('run_v2','chain_v2_fields','user_v2_fields','Run','recipe@1','{}','{}',1,'v2','hash','hub','test','now','now',1);
+INSERT INTO workflow_run_executions(run_id,execution_no,chain_id,owner_user_id,state,resolved_inputs_json,output_manifest_json,revision)
+VALUES ('run_v2',1,'chain_v2_fields','user_v2_fields','running','{}','{}',1);
+COMMIT;`), "seed current workflow execution for generated gate")
 	task := domain.Task{
 		task_id                = "task_v2_fields",
 		chain_id               = cid,
@@ -669,6 +670,8 @@ test_task_v2_fields_sqlite_roundtrip :: proc(t: ^testing.T) {
 		ready_since            = "2026-10-01T10:02:00Z",
 		bridge_id              = "brg_v2",
 		stage_key              = "stage.review",
+		workflow_run_id = "run_v2",
+		workflow_execution_no = 1,
 		stage_index            = 4,
 		generated_by_json      = `{"kind":"workflow","stage":"review"}`,
 		created_at             = "2026-10-01T10:01:00Z",
@@ -706,27 +709,29 @@ test_task_v2_fields_sqlite_roundtrip :: proc(t: ^testing.T) {
 
 	// UPSERT path: every v2 column is updated, not just inserted.
 	got.state = .Done
-	got.kind = .Task
 	got.attempt_no = 4
 	got.blocked_on_json = ""
 	got.requires_user_approval = false
 	got.ready_since = ""
-	got.stage_key = "stage.done"
-	got.stage_index = 5
 	got.completed_at = "2026-10-01T11:00:00Z"
 	_, u_ok, _ := iface.taskchain_save_task(&repo, got)
 	testing.expect(t, u_ok, "re-save task ok")
 	again, a_ok, _ := iface.taskchain_get_task(&repo, "task_v2_fields")
 	testing.expect(t, a_ok, "get task after upsert ok")
 	testing.expect_value(t, again.state, domain.Task_State.Done)
-	testing.expect_value(t, again.kind, domain.Task_Kind.Task)
+	testing.expect_value(t, again.kind, domain.Task_Kind.Gate)
 	testing.expect_value(t, again.attempt_no, 4)
 	testing.expect_value(t, again.blocked_on_json, "")
 	testing.expect(t, !again.requires_user_approval, "requires_user_approval cleared")
 	testing.expect_value(t, again.ready_since, "")
-	testing.expect_value(t, again.stage_key, "stage.done")
-	testing.expect_value(t, again.stage_index, 5)
+	testing.expect_value(t, again.stage_key, "stage.review")
+	testing.expect_value(t, again.stage_index, 4)
 	testing.expect_value(t, again.completed_at, "2026-10-01T11:00:00Z")
+
+    illegal := again
+    illegal.stage_key = "rewritten"
+    _, accepted_identity, _ := iface.taskchain_save_task(&repo, illegal)
+    testing.expect(t, !accepted_identity, "generated stage identity cannot be rewritten")
 
 	// Fleet: roles_json + bridge_id round-trip through upsert, ensure and list.
 	_, f_err := iface.taskchain_upsert_fleet(&repo, domain.Task_Chain_Fleet{

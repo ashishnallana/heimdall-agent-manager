@@ -1,6 +1,6 @@
 ---
 name: coordinator-task-management
-description: How a task-chain COORDINATOR runs a Task System v2 chain with ham-ctl — triage ticket vs workflow, propose and publish tasks with complete briefs (`task-chain propose|decide|publish`, `task create`), run workflows (`ham-ctl workflow …`), set up the fleet and review roles (`task-chain fleet set`), curate the chain summary so learnings reach every agent, react to `[taskv2]` notifications (blocked_on human, budget_exhausted, oscillation, ready_unclaimed, review_requested_from_user, merge_conflict, gate_rejected, chain_complete, …), record user verdicts (`review post --on-behalf-of user`), and close the chain. Covers Solo mode, where the coordinator also does the work. Load whenever you coordinate a chain.
+description: How a task-chain COORDINATOR runs a Task System v2 chain with ham-ctl — choose tickets or workflow runs within one mixed-work chain, propose and publish tasks with complete briefs (`task-chain propose|decide|publish`, `task create`), run workflows (`ham-ctl workflow …`), set up the fleet and review roles (`task-chain fleet set`), curate the chain summary so learnings reach every agent, react to `[taskv2]` notifications (blocked_on human, budget_exhausted, oscillation, ready_unclaimed, review_requested_from_user, merge_conflict, gate_rejected, work_batch_finished, workflow_complete, …), record user verdicts (`review post --on-behalf-of user`), and close the chain. Covers Solo mode, where the coordinator also does the work. Load whenever you coordinate a chain.
 ---
 
 # Coordinator task management (Task System v2)
@@ -9,51 +9,50 @@ You plan, triage, publish and steer. Leased **workers** and **reviewers** do the
 
 The Hub owns task state: leases make tasks `in_progress`, submits make them `in_review`, passing reviews make them `done`. There is no status verb for tasks. Commands use `./.heimdall/bin/ham-ctl`; exact flags are in `ham-ctl-reference` or `ham-ctl <group> --help`.
 
-## 1. Triage: ticket or workflow
-**Default to a ticket chain.** Use a workflow only when the work matches a repeatable shape whose steps you cannot list up front.
+## 1. Choose the next work item, not a chain type
+Every task chain is `mixed_work`. You remain coordinator of the same chain, team,
+and directories throughout. Add ordinary tickets when their briefs are known;
+add workflow runs for recurring recipes or discovery followed by fan-out. Reassess
+this choice as work evolves. Neither choice creates a second chain.
 
-| Use a **ticket chain** when… | Use a **workflow** when… |
-|---|---|
-| you can write every task's brief now | the task list is only known after an exploration or scan step |
-| a handful of changes, possibly with `depends_on` | many similar items run in parallel (`for_each` fan-out over a plan or findings) |
-| the shape is one-off | the same recipe recurs (explore → plan → approve → build; scan → fix each; audit) |
-| you want to edit tasks freely as you learn | you want a built-in approval `gate` between stages and the Hub to own the task graph |
-
-Rule of thumb: 1-5 known tasks → ticket. "Find the N things, then do each" → workflow (`explore_plan_build`, `fix_flaky_tests`, `security_audit`, or one you define). A ticket can still hand off to a workflow when it finishes (`brief.on_output.start_workflow`).
-
-On a workflow chain, manual `task create|update|depend` return `403 workflow_immutable`; change the run with `workflow retry` / `cancel`.
+Ordinary tickets remain editable. Workflow-generated stage tasks are engine-managed;
+inspect their run and use whole-run retry/cancel rather than editing stage identities.
+Configure shared fleet roles before starting a recipe; runs never widen the fleet.
 
 ```bash
 ./.heimdall/bin/ham-ctl workflow templates
-./.heimdall/bin/ham-ctl workflow run fix_flaky_tests --chain <chain-id> \
-  --input suite=src/auth --input test_command="make test-auth" --input verify_cmd="make test"
-./.heimdall/bin/ham-ctl workflow status [<chain-id>]
-./.heimdall/bin/ham-ctl workflow output [<chain-id>] <stage_key>
-./.heimdall/bin/ham-ctl workflow retry [<chain-id>] <stage_key|task_id> [--cascade] [--reason <text>]
-./.heimdall/bin/ham-ctl workflow cancel [<chain-id>]
+./.heimdall/bin/ham-ctl workflow run fix_flaky_tests --chain <chain-id> --request-id <stable-key> \
+  --input suite=src/auth --input test_command="make test-auth" --input verify_cmd="make test" \
+  --after task:<investigation-id>
+./.heimdall/bin/ham-ctl workflow list --chain <chain-id>
+./.heimdall/bin/ham-ctl workflow status <run-id>
+./.heimdall/bin/ham-ctl workflow output <run-id> <stage-key> [--execution <n>]
+./.heimdall/bin/ham-ctl workflow history <run-id>
+./.heimdall/bin/ham-ctl workflow retry <run-id> --expected-revision <revision> --reason "<why>"
+./.heimdall/bin/ham-ctl workflow cancel <run-id> --reason "<why>"
+./.heimdall/bin/ham-ctl task-chain depend --chain <chain-id> --item task:<validation-id> --on workflow_run:<run-id>
 ```
 
-### Decision table: which command, when
-| Situation | Command |
-|---|---|
-| New request, tasks known | `task-chain propose --file proposal.json` (ticket) |
-| New request matching a recurring recipe | `workflow run <template> --chain <id> --input k=v` (or propose `kind: workflow`) |
-| User already approved the plan | add `--auto-approve`, or `task-chain decide <chain-id> --decision approve` |
-| One more task in a ticket chain | `task create …` then `task publish <task-id>` |
-| Brief unclear or failing repeatedly | `task update <task-id> --goal … --acceptance …` |
-| Ordering between tasks | `task depend <task-id> --on <other>` |
-| Convention every agent must know | `task-chain summary set` |
-| No worker picks up ready tasks | `task-chain fleet list`, then `task-chain fleet set …` |
-| A task needs a specialist review | fleet row with that role + `brief.review_roles`, or `--reviewer agt_…` |
-| User decided a review in chat | `review post <task-id> --verdict … --on-behalf-of user` |
-| Workflow stage failed or gate rejected | `workflow status`, then `workflow retry <stage> [--cascade]` |
-| Everything done | `task-chain summary set` (final), `task-chain set-status --status completed`, tell the user |
+Creation request keys are caller-selected and reused on network retries. A key
+with different inputs fails. Retry creates a new execution with fresh tasks and
+preserves all old attempts. Stage/cascade retry is unsupported. If outputs have
+already been consumed, retry/reopen is refused with consumer references; create
+replacement work and explicitly change the future dependency graph instead.
+
+Use `task-chain graph --chain <id>` to inspect dependencies, scope history, and
+`work_revision`. Dependencies can join any ticket or whole run in this same chain.
+Cancelled, failed, or excluded items do not satisfy prerequisites. Remove an edge
+explicitly with `task-chain remove-dependency --chain <id> --dependency <id> --reason "<why>"`.
+
+A new proposal can add work to an active chain mid-work. Its `kind` is `task` or
+`workflow_run`, describing the proposed item, never changing the chain type.
+Decide a pending proposal before proposing another.
 
 ## 2. Propose, approve, publish
 ```bash
 cat > proposal.json <<'EOF'
 {
-  "kind": "ticket",
+  "kind": "task",
   "rationale": "Backend first so the UI verifies against a real endpoint.",
   "tasks": [
     {"id": "t_api", "title": "Commit-diff endpoint", "priority": "p1",
@@ -71,7 +70,7 @@ EOF
 ./.heimdall/bin/ham-ctl task-chain decide <chain-id> --decision approve|reject [--reason <text>]
 ```
 - Per-task fields: `id`, `title`, `description`, `priority`, `depends_on`, `brief`. **Put `assignee`, `reviewers` and `requires_user_approval` inside `brief`**; top-level copies are ignored.
-- Without `--auto-approve` the proposal waits in `draft` for the user (UI or `decide`).
+- Without `--auto-approve` the proposal waits for an explicit decision. Existing work continues.
 - Single tasks: `task create --title … --goal … --acceptance … (repeat) --verify … [--assignee agt_…] [--reviewer agt_…] [--review-role <role>] [--require-user-approval] [--input <ref>] [--depends-on <ids>] [--auto-submit] [--require-independent-verify]`, then `task publish <task-id>` or `task-chain publish <chain-id>`.
 - Publish refuses incomplete briefs with `422 brief_incomplete` listing what is missing per task, including `review_role:<r>` when no fleet row holds a role the brief asks for.
 
@@ -119,9 +118,9 @@ Routine events stay quiet. You get one line, `[taskv2] <trigger>: …`, only whe
 | `ready_unclaimed` | no eligible worker: check `task-chain fleet list` and `bridge list`, fix capacity, roles or bridge |
 | `review_requested_from_user` | summarise the evidence for the user (`chat send --options "Approve,Request changes"`), then record their verdict (§6) |
 | `merge_conflict` / `merge_failed` | a done task's branch did not merge; the task returns to its worker with a Merge Conflict section. For `merge_failed` (merge never ran, e.g. bridge offline) check the bridge |
-| `gate_rejected` | a workflow gate was rejected `max_replans` times: talk to the user, then `workflow retry <stage>` |
+| `gate_rejected` | a workflow gate was rejected: inspect the feedback, talk to the user, and retry the whole run if appropriate |
 | `summary_overflow` | compact the chain summary (`task-chain summary set`) |
-| `chain_complete` | write the final summary, `task-chain set-status --status completed`, send the user the deliverables |
+| `work_batch_finished` / `workflow_complete` | assess the goal; add more work or explicitly complete the chain |
 
 ## 6. Recording the user's verdict
 - Workflow gates with approver `user_or_coordinator`: your own `review post --verdict approve|request_changes` decides.
@@ -134,7 +133,14 @@ Routine events stay quiet. You get one line, `[taskv2] <trigger>: …`, only whe
   The user can also approve directly from their attention deck.
 
 ## 7. Closing and out-of-scope defects
-- Close: `task-chain set-status --status completed` once every task is `done` or `cancelled`.
+- Completion is explicit. Read `task-chain graph --chain <id>`, then run
+  `task-chain complete --chain <id> --expected-work-revision <n> --summary "<final acceptance>"`.
+  Every included ticket must be published and done; every included run must have
+  succeeded; no live leases or pending proposal may remain. At least one success
+  is required. A changed revision requires a fresh inspection, not a blind retry.
+- Cancel terminally abandoned work, then exclude it with
+  `task-chain scope --chain <id> --item task:<id>|workflow_run:<id> --action exclude --reason "<why>"`.
+  Exclusion is auditable and never makes a failed prerequisite successful.
 - Unrelated bugs: search `issue list --query …`, vote `issue vote <id>`, or file `issue create --title … --description …`.
 
 ## 8. Solo mode

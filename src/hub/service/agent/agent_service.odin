@@ -1436,7 +1436,7 @@ resolve_instance_chain :: proc(service: ^Agent_Service, owner: domain.User_ID, c
 	}
 	now := platform.clock_now(service.clock)
 	title := strings.trim_space(default_title); if title == "" do title = "Private conversation"
-	chain := domain.Task_Chain{chain_id = domain.Task_Chain_ID(platform.generate_id(service.ids, "chain_")), owner_user_id = owner, title = title, publish_state = .Published, status = .Active, kind = "private_conversation", last_activity_at = now, title_source = "default", created_at = now, updated_at = now, published_at = now}
+	chain := domain.Task_Chain{chain_id = domain.Task_Chain_ID(platform.generate_id(service.ids, "chain_")), owner_user_id = owner, title = title, publish_state = .Published, status = .Active, kind = domain.CHAIN_KIND_MIXED_WORK, last_activity_at = now, title_source = "default", created_at = now, updated_at = now, published_at = now}
 	created, saved, save_err := iface.taskchain_save_chain(service.taskchains, chain)
 	if !saved do return "", false, save_err
 	return string(created.chain_id), true, domain.Domain_Error{}

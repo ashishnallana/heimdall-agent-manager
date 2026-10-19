@@ -38,6 +38,7 @@ gate_approver_policy :: proc(task: domain.Task) -> string {
 evaluate_gate_in_uow :: proc(svc: ^Service, u: ^Uow, chain: domain.Task_Chain, task_in: domain.Task, actor: Actor) -> (Gate_Result, bool, domain.Domain_Error) {
 	task := task_in
 	if task.state != .In_Review do return .Waiting, true, domain.Domain_Error{}
+	if err := workflow_require_current_task(svc, task); err.code != .None do return .Waiting, false, err
 	reviews, rerr := iface.taskchain_list_reviews_by_task(svc.repo, task.task_id, task.owner_user_id)
 	if rerr.code != .None do return .Waiting, false, rerr
 	// 1. any request_changes on this attempt wins

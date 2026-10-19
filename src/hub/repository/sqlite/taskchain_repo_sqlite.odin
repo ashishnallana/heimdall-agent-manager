@@ -68,6 +68,28 @@ new_taskchain_repository :: proc(impl: ^Taskchain_Repo_SQLite, conn: ^Conn) -> i
 		save_workflow_definition = workflow_definition_save_sqlite,
 		get_workflow_definition = workflow_definition_get_sqlite,
 		list_workflow_definitions_by_owner = workflow_definition_list_by_owner_sqlite,
+		insert_workflow_run = insert_workflow_run_sqlite,
+		update_workflow_run = update_workflow_run_sqlite,
+		get_workflow_run = get_workflow_run_sqlite,
+		get_workflow_run_by_request = get_workflow_run_by_request_sqlite,
+		list_workflow_runs = list_workflow_runs_sqlite,
+		insert_workflow_execution = insert_workflow_execution_sqlite,
+		update_workflow_execution = update_workflow_execution_sqlite,
+		get_workflow_execution = get_workflow_execution_sqlite,
+		list_workflow_executions = list_workflow_executions_sqlite,
+		insert_workflow_stage_execution = insert_workflow_stage_execution_sqlite,
+		list_workflow_stage_executions = list_workflow_stage_executions_sqlite,
+		append_workflow_run_event = append_workflow_run_event_sqlite,
+		list_workflow_run_events = list_workflow_run_events_sqlite,
+		complete_work_chain = complete_work_chain_sqlite,
+		insert_work_dependency = insert_work_dependency_sqlite,
+		list_work_dependencies = list_work_dependencies_sqlite,
+		insert_work_input_receipt = insert_work_input_receipt_sqlite,
+		list_work_receipts_by_prerequisite = list_work_receipts_by_prerequisite_sqlite,
+		list_work_receipts_by_dependent = list_work_receipts_by_dependent_sqlite,
+		append_work_scope_decision = append_work_scope_decision_sqlite,
+		list_work_scope_decisions = list_work_scope_decisions_sqlite,
+		remove_work_dependency = remove_work_dependency_sqlite,
 	}
 }
 
@@ -112,7 +134,7 @@ taskchain_search_list_changes_sqlite :: proc(ctx: rawptr, owner_user_id: domain.
 taskchain_get_chain_sqlite :: proc(ctx: rawptr, chain_id: domain.Task_Chain_ID) -> (domain.Task_Chain, bool, domain.Domain_Error) {
 	impl := (^Taskchain_Repo_SQLite)(ctx)
 	stmt: sqlite3_stmt = nil
-	query := "SELECT chain_id, owner_user_id, title, description, publish_state, status, kind, coordinator_agent_instance_id, workflow_def_ref, workflow_snapshot_json, defaults_json, created_at, updated_at, published_at, completed_at, last_activity_at, last_title_nudge_at, title_source, is_pinned, pinned_at FROM task_chains WHERE chain_id = ?;"
+	query := "SELECT chain_id, owner_user_id, title, description, publish_state, status, kind, coordinator_agent_instance_id, defaults_json, created_at, updated_at, published_at, completed_at, last_activity_at, last_title_nudge_at, title_source, is_pinned, pinned_at, work_revision, completion_summary FROM task_chains WHERE chain_id = ?;"
 	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return domain.Task_Chain{}, false, domain.domain_error(.Internal_Error, "failed to prepare chain lookup")
 	defer sqlite3_finalize(stmt)
 	bind_text(stmt, 1, string(chain_id))
@@ -123,7 +145,7 @@ taskchain_get_chain_sqlite :: proc(ctx: rawptr, chain_id: domain.Task_Chain_ID) 
 taskchain_list_chains_by_owner_sqlite :: proc(ctx: rawptr, owner_user_id: domain.User_ID) -> ([]domain.Task_Chain, domain.Domain_Error) {
 	impl := (^Taskchain_Repo_SQLite)(ctx)
 	stmt: sqlite3_stmt = nil
-	query := "SELECT chain_id, owner_user_id, title, description, publish_state, status, kind, coordinator_agent_instance_id, workflow_def_ref, workflow_snapshot_json, defaults_json, created_at, updated_at, published_at, completed_at, last_activity_at, last_title_nudge_at, title_source, is_pinned, pinned_at FROM task_chains WHERE owner_user_id = ? ORDER BY updated_at DESC;"
+	query := "SELECT chain_id, owner_user_id, title, description, publish_state, status, kind, coordinator_agent_instance_id, defaults_json, created_at, updated_at, published_at, completed_at, last_activity_at, last_title_nudge_at, title_source, is_pinned, pinned_at, work_revision, completion_summary FROM task_chains WHERE owner_user_id = ? ORDER BY updated_at DESC;"
 	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return nil, domain.domain_error(.Internal_Error, "failed to prepare chain list")
 	defer sqlite3_finalize(stmt)
 	bind_text(stmt, 1, string(owner_user_id))
@@ -134,24 +156,11 @@ taskchain_list_chains_by_owner_sqlite :: proc(ctx: rawptr, owner_user_id: domain
 
 taskchain_save_chain_sqlite :: proc(ctx: rawptr, chain: domain.Task_Chain) -> (domain.Task_Chain, bool, domain.Domain_Error) {
 	impl := (^Taskchain_Repo_SQLite)(ctx)
-	existing, exists, _ := taskchain_get_chain_sqlite(ctx, chain.chain_id)
-	if exists && existing.workflow_snapshot_json != "" {
-		if chain.workflow_snapshot_json != existing.workflow_snapshot_json {
-			return domain.Task_Chain{}, false, domain.domain_error(.Conflict, "workflow_snapshot_json is immutable", `{"code":"workflow_snapshot_immutable"}`)
-		}
-		stmt: sqlite3_stmt = nil
-		query := "UPDATE task_chains SET title=?, description=?, publish_state=?, status=?, kind=?, coordinator_agent_instance_id=?, workflow_def_ref=?, defaults_json=?, updated_at=?, published_at=?, completed_at=?, last_activity_at=?, last_title_nudge_at=?, title_source=?, is_pinned=?, pinned_at=? WHERE chain_id=?;"
-		if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return domain.Task_Chain{}, false, domain.domain_error(.Internal_Error, "failed to prepare chain update")
-		defer sqlite3_finalize(stmt)
-		bind_text(stmt, 1, chain.title); bind_text(stmt, 2, chain.description); bind_text(stmt, 3, publish_state_string(chain.publish_state)); bind_text(stmt, 4, chain_status_string(chain.status)); bind_text(stmt, 5, chain.kind); bind_text(stmt, 6, chain.coordinator_agent_instance_id); bind_text(stmt, 7, chain.workflow_def_ref); bind_text(stmt, 8, json_or_empty_object(chain.defaults_json)); bind_text(stmt, 9, chain.updated_at); bind_text(stmt, 10, chain.published_at); bind_text(stmt, 11, chain.completed_at); bind_text(stmt, 12, chain.last_activity_at); bind_text(stmt, 13, chain.last_title_nudge_at); bind_text(stmt, 14, normalize_title_source(chain.title_source)); sqlite3_bind_int(stmt, 15, 1 if chain.is_pinned else 0); bind_text(stmt, 16, chain.pinned_at); bind_text(stmt, 17, string(chain.chain_id))
-		if sqlite3_step(stmt) != SQLITE_DONE do return domain.Task_Chain{}, false, domain.domain_error(.Conflict, "task chain could not be saved")
-		return chain, true, domain.Domain_Error{}
-	}
 	stmt: sqlite3_stmt = nil
-	query := "INSERT INTO task_chains (chain_id, owner_user_id, title, description, publish_state, status, kind, coordinator_agent_instance_id, workflow_def_ref, workflow_snapshot_json, defaults_json, created_at, updated_at, published_at, completed_at, last_activity_at, last_title_nudge_at, title_source, is_pinned, pinned_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(chain_id) DO UPDATE SET title=excluded.title, description=excluded.description, publish_state=excluded.publish_state, status=excluded.status, kind=excluded.kind, coordinator_agent_instance_id=excluded.coordinator_agent_instance_id, workflow_def_ref=excluded.workflow_def_ref, workflow_snapshot_json=excluded.workflow_snapshot_json, defaults_json=excluded.defaults_json, updated_at=excluded.updated_at, published_at=excluded.published_at, completed_at=excluded.completed_at, last_activity_at=excluded.last_activity_at, last_title_nudge_at=excluded.last_title_nudge_at, title_source=excluded.title_source, is_pinned=excluded.is_pinned, pinned_at=excluded.pinned_at;"
+	query := "INSERT INTO task_chains (chain_id, owner_user_id, title, description, publish_state, status, kind, coordinator_agent_instance_id, defaults_json, created_at, updated_at, published_at, completed_at, last_activity_at, last_title_nudge_at, title_source, is_pinned, pinned_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(chain_id) DO UPDATE SET title=excluded.title, description=excluded.description, publish_state=excluded.publish_state, status=excluded.status, kind=excluded.kind, coordinator_agent_instance_id=excluded.coordinator_agent_instance_id, defaults_json=excluded.defaults_json, updated_at=excluded.updated_at, published_at=excluded.published_at, completed_at=excluded.completed_at, last_activity_at=excluded.last_activity_at, last_title_nudge_at=excluded.last_title_nudge_at, title_source=excluded.title_source, is_pinned=excluded.is_pinned, pinned_at=excluded.pinned_at;"
 	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return domain.Task_Chain{}, false, domain.domain_error(.Internal_Error, "failed to prepare chain save")
 	defer sqlite3_finalize(stmt)
-	bind_text(stmt, 1, string(chain.chain_id)); bind_text(stmt, 2, string(chain.owner_user_id)); bind_text(stmt, 3, chain.title); bind_text(stmt, 4, chain.description); bind_text(stmt, 5, publish_state_string(chain.publish_state)); bind_text(stmt, 6, chain_status_string(chain.status)); bind_text(stmt, 7, chain.kind); bind_text(stmt, 8, chain.coordinator_agent_instance_id); bind_text(stmt, 9, chain.workflow_def_ref); bind_text(stmt, 10, chain.workflow_snapshot_json); bind_text(stmt, 11, json_or_empty_object(chain.defaults_json)); bind_text(stmt, 12, chain.created_at); bind_text(stmt, 13, chain.updated_at); bind_text(stmt, 14, chain.published_at); bind_text(stmt, 15, chain.completed_at); bind_text(stmt, 16, chain.last_activity_at); bind_text(stmt, 17, chain.last_title_nudge_at); bind_text(stmt, 18, normalize_title_source(chain.title_source)); sqlite3_bind_int(stmt, 19, 1 if chain.is_pinned else 0); bind_text(stmt, 20, chain.pinned_at)
+	bind_text(stmt, 1, string(chain.chain_id)); bind_text(stmt, 2, string(chain.owner_user_id)); bind_text(stmt, 3, chain.title); bind_text(stmt, 4, chain.description); bind_text(stmt, 5, publish_state_string(chain.publish_state)); bind_text(stmt, 6, chain_status_string(chain.status)); bind_text(stmt, 7, chain.kind); bind_text(stmt, 8, chain.coordinator_agent_instance_id); bind_text(stmt, 9, json_or_empty_object(chain.defaults_json)); bind_text(stmt, 10, chain.created_at); bind_text(stmt, 11, chain.updated_at); bind_text(stmt, 12, chain.published_at); bind_text(stmt, 13, chain.completed_at); bind_text(stmt, 14, chain.last_activity_at); bind_text(stmt, 15, chain.last_title_nudge_at); bind_text(stmt, 16, normalize_title_source(chain.title_source)); sqlite3_bind_int(stmt, 17, 1 if chain.is_pinned else 0); bind_text(stmt, 18, chain.pinned_at)
 	if sqlite3_step(stmt) != SQLITE_DONE do return domain.Task_Chain{}, false, domain.domain_error(.Conflict, "task chain could not be saved")
 	return chain, true, domain.Domain_Error{}
 }
@@ -159,7 +168,7 @@ taskchain_save_chain_sqlite :: proc(ctx: rawptr, chain: domain.Task_Chain) -> (d
 task_save_sqlite :: proc(ctx: rawptr, task: domain.Task) -> (domain.Task, bool, domain.Domain_Error) {
 	impl := (^Taskchain_Repo_SQLite)(ctx)
 	stmt: sqlite3_stmt = nil
-	query := "INSERT INTO tasks (task_id, chain_id, owner_user_id, title, description, publish_state, state, kind, priority, attempt_no, brief_json, blocked_on_json, requires_user_approval, ready_since, bridge_id, stage_key, stage_index, generated_by_json, created_at, updated_at, published_at, started_at, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(task_id) DO UPDATE SET title=excluded.title, description=excluded.description, publish_state=excluded.publish_state, state=excluded.state, kind=excluded.kind, priority=excluded.priority, attempt_no=excluded.attempt_no, brief_json=excluded.brief_json, blocked_on_json=excluded.blocked_on_json, requires_user_approval=excluded.requires_user_approval, ready_since=excluded.ready_since, bridge_id=excluded.bridge_id, stage_key=excluded.stage_key, stage_index=excluded.stage_index, generated_by_json=excluded.generated_by_json, updated_at=excluded.updated_at, published_at=excluded.published_at, started_at=excluded.started_at, completed_at=excluded.completed_at;"
+	query := "INSERT INTO tasks (task_id, chain_id, owner_user_id, title, description, publish_state, state, kind, priority, attempt_no, brief_json, blocked_on_json, requires_user_approval, ready_since, bridge_id, stage_key, stage_index, generated_by_json, created_at, updated_at, published_at, started_at, completed_at, workflow_run_id, workflow_execution_no) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(task_id) DO UPDATE SET title=excluded.title, description=excluded.description, publish_state=excluded.publish_state, state=excluded.state, kind=excluded.kind, priority=excluded.priority, attempt_no=excluded.attempt_no, brief_json=excluded.brief_json, blocked_on_json=excluded.blocked_on_json, requires_user_approval=excluded.requires_user_approval, ready_since=excluded.ready_since, bridge_id=excluded.bridge_id, stage_key=excluded.stage_key, stage_index=excluded.stage_index, generated_by_json=excluded.generated_by_json, workflow_run_id=excluded.workflow_run_id, workflow_execution_no=excluded.workflow_execution_no, updated_at=excluded.updated_at, published_at=excluded.published_at, started_at=excluded.started_at, completed_at=excluded.completed_at;"
 	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return domain.Task{}, false, domain.domain_error(.Internal_Error, "failed to prepare task save")
 	defer sqlite3_finalize(stmt)
 	bind_task(stmt, task)
@@ -178,7 +187,7 @@ task_save_sqlite :: proc(ctx: rawptr, task: domain.Task) -> (domain.Task, bool, 
 task_get_sqlite :: proc(ctx: rawptr, task_id: domain.Task_ID) -> (domain.Task, bool, domain.Domain_Error) {
 	impl := (^Taskchain_Repo_SQLite)(ctx)
 	stmt: sqlite3_stmt = nil
-	query := "SELECT task_id, chain_id, owner_user_id, title, description, publish_state, state, kind, priority, attempt_no, brief_json, blocked_on_json, requires_user_approval, ready_since, bridge_id, stage_key, stage_index, generated_by_json, created_at, updated_at, published_at, started_at, completed_at FROM tasks WHERE task_id = ?;"
+	query := "SELECT task_id, chain_id, owner_user_id, title, description, publish_state, state, kind, priority, attempt_no, brief_json, blocked_on_json, requires_user_approval, ready_since, bridge_id, stage_key, stage_index, generated_by_json, created_at, updated_at, published_at, started_at, completed_at, workflow_run_id, workflow_execution_no FROM tasks WHERE task_id = ?;"
 	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return domain.Task{}, false, domain.domain_error(.Internal_Error, "failed to prepare task lookup")
 	defer sqlite3_finalize(stmt)
 	bind_text(stmt, 1, string(task_id))
@@ -189,7 +198,7 @@ task_get_sqlite :: proc(ctx: rawptr, task_id: domain.Task_ID) -> (domain.Task, b
 task_list_by_chain_sqlite :: proc(ctx: rawptr, chain_id: domain.Task_Chain_ID, owner_user_id: domain.User_ID) -> ([]domain.Task, domain.Domain_Error) {
 	impl := (^Taskchain_Repo_SQLite)(ctx)
 	stmt: sqlite3_stmt = nil
-	query := "SELECT task_id, chain_id, owner_user_id, title, description, publish_state, state, kind, priority, attempt_no, brief_json, blocked_on_json, requires_user_approval, ready_since, bridge_id, stage_key, stage_index, generated_by_json, created_at, updated_at, published_at, started_at, completed_at FROM tasks WHERE chain_id = ? AND owner_user_id = ? ORDER BY created_at ASC;"
+	query := "SELECT task_id, chain_id, owner_user_id, title, description, publish_state, state, kind, priority, attempt_no, brief_json, blocked_on_json, requires_user_approval, ready_since, bridge_id, stage_key, stage_index, generated_by_json, created_at, updated_at, published_at, started_at, completed_at, workflow_run_id, workflow_execution_no FROM tasks WHERE chain_id = ? AND owner_user_id = ? ORDER BY created_at ASC;"
 	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return nil, domain.domain_error(.Internal_Error, "failed to prepare task list")
 	defer sqlite3_finalize(stmt)
 	bind_text(stmt, 1, string(chain_id)); bind_text(stmt, 2, string(owner_user_id))
@@ -357,7 +366,7 @@ taskchain_list_members_by_chain_sqlite :: proc(ctx: rawptr, chain_id: domain.Tas
 taskchain_list_chains_by_coordinator_sqlite :: proc(ctx: rawptr, agent_instance_id: string, owner_user_id: domain.User_ID) -> ([]domain.Task_Chain, domain.Domain_Error) {
 	impl := (^Taskchain_Repo_SQLite)(ctx)
 	stmt: sqlite3_stmt = nil
-	query := "SELECT c.chain_id, c.owner_user_id, c.title, c.description, c.publish_state, c.status, c.kind, c.coordinator_agent_instance_id, c.workflow_def_ref, c.workflow_snapshot_json, c.defaults_json, c.created_at, c.updated_at, c.published_at, c.completed_at, c.last_activity_at, c.last_title_nudge_at, c.title_source, c.is_pinned, c.pinned_at FROM task_chains c JOIN task_chain_members m ON m.chain_id = c.chain_id AND m.owner_user_id = c.owner_user_id WHERE m.role = 'coordinator' AND m.agent_instance_id = ? AND c.owner_user_id = ? ORDER BY c.updated_at DESC;"
+	query := "SELECT c.chain_id, c.owner_user_id, c.title, c.description, c.publish_state, c.status, c.kind, c.coordinator_agent_instance_id, c.defaults_json, c.created_at, c.updated_at, c.published_at, c.completed_at, c.last_activity_at, c.last_title_nudge_at, c.title_source, c.is_pinned, c.pinned_at, c.work_revision, c.completion_summary FROM task_chains c JOIN task_chain_members m ON m.chain_id = c.chain_id AND m.owner_user_id = c.owner_user_id WHERE m.role = 'coordinator' AND m.agent_instance_id = ? AND c.owner_user_id = ? ORDER BY c.updated_at DESC;"
 	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return nil, domain.domain_error(.Internal_Error, "failed to prepare chains-by-coordinator list")
 	defer sqlite3_finalize(stmt)
 	bind_text(stmt, 1, agent_instance_id); bind_text(stmt, 2, string(owner_user_id))
@@ -577,6 +586,7 @@ bind_task :: proc(stmt: sqlite3_stmt, task: domain.Task) {
 	sqlite3_bind_int(stmt, 10, c.int(task.attempt_no)); bind_text(stmt, 11, json_or_empty_object(task.brief_json)); bind_text(stmt, 12, task.blocked_on_json); sqlite3_bind_int(stmt, 13, 1 if task.requires_user_approval else 0); bind_text(stmt, 14, task.ready_since)
 	bind_text(stmt, 15, task.bridge_id); bind_text(stmt, 16, task.stage_key); sqlite3_bind_int(stmt, 17, c.int(task.stage_index)); bind_text(stmt, 18, task.generated_by_json)
 	bind_text(stmt, 19, task.created_at); bind_text(stmt, 20, task.updated_at); bind_text(stmt, 21, task.published_at); bind_text(stmt, 22, task.started_at); bind_text(stmt, 23, task.completed_at)
+	bind_text(stmt, 24, string(task.workflow_run_id)); sqlite3_bind_int(stmt, 25, c.int(task.workflow_execution_no))
 }
 
 bind_comment :: proc(stmt: sqlite3_stmt, comment: domain.Task_Comment) {
@@ -584,7 +594,7 @@ bind_comment :: proc(stmt: sqlite3_stmt, comment: domain.Task_Comment) {
 }
 
 chain_from_stmt :: proc(stmt: sqlite3_stmt) -> domain.Task_Chain {
-	return domain.Task_Chain{chain_id = domain.Task_Chain_ID(column_text(stmt, 0)), owner_user_id = domain.User_ID(column_text(stmt, 1)), title = column_text(stmt, 2), description = column_text(stmt, 3), publish_state = publish_state_from_string(column_text(stmt, 4)), status = chain_status_from_string(column_text(stmt, 5)), kind = column_text(stmt, 6), coordinator_agent_instance_id = column_text(stmt, 7), workflow_def_ref = column_text(stmt, 8), workflow_snapshot_json = column_text(stmt, 9), defaults_json = column_text(stmt, 10), created_at = column_text(stmt, 11), updated_at = column_text(stmt, 12), published_at = column_text(stmt, 13), completed_at = column_text(stmt, 14), last_activity_at = column_text(stmt, 15), last_title_nudge_at = column_text(stmt, 16), title_source = normalize_title_source(column_text(stmt, 17)), is_pinned = column_text_unowned(stmt, 18) == "1", pinned_at = column_text(stmt, 19)}
+	return domain.Task_Chain{chain_id = domain.Task_Chain_ID(column_text(stmt, 0)), owner_user_id = domain.User_ID(column_text(stmt, 1)), title = column_text(stmt, 2), description = column_text(stmt, 3), publish_state = publish_state_from_string(column_text(stmt, 4)), status = chain_status_from_string(column_text(stmt, 5)), kind = column_text(stmt, 6), coordinator_agent_instance_id = column_text(stmt, 7), defaults_json = column_text(stmt, 8), created_at = column_text(stmt, 9), updated_at = column_text(stmt, 10), published_at = column_text(stmt, 11), completed_at = column_text(stmt, 12), last_activity_at = column_text(stmt, 13), last_title_nudge_at = column_text(stmt, 14), title_source = normalize_title_source(column_text(stmt, 15)), is_pinned = column_text_unowned(stmt, 16) == "1", pinned_at = column_text(stmt, 17), work_revision = sqlite3_column_int64(stmt, 18), completion_summary = column_text(stmt, 19)}
 }
 
 taskchain_count_pinned_chains_sqlite :: proc(ctx: rawptr, owner_user_id: domain.User_ID) -> (int, domain.Domain_Error) {
@@ -601,7 +611,7 @@ taskchain_count_pinned_chains_sqlite :: proc(ctx: rawptr, owner_user_id: domain.
 taskchain_list_pinned_chains_sqlite :: proc(ctx: rawptr, owner_user_id: domain.User_ID) -> ([]domain.Task_Chain, domain.Domain_Error) {
 	impl := (^Taskchain_Repo_SQLite)(ctx)
 	stmt: sqlite3_stmt = nil
-	query := "SELECT chain_id, owner_user_id, title, description, publish_state, status, kind, coordinator_agent_instance_id, workflow_def_ref, workflow_snapshot_json, defaults_json, created_at, updated_at, published_at, completed_at, last_activity_at, last_title_nudge_at, title_source, is_pinned, pinned_at FROM task_chains WHERE owner_user_id = ? AND is_pinned != 0 ORDER BY pinned_at DESC LIMIT 10;"
+	query := "SELECT chain_id, owner_user_id, title, description, publish_state, status, kind, coordinator_agent_instance_id, defaults_json, created_at, updated_at, published_at, completed_at, last_activity_at, last_title_nudge_at, title_source, is_pinned, pinned_at, work_revision, completion_summary FROM task_chains WHERE owner_user_id = ? AND is_pinned != 0 ORDER BY pinned_at DESC LIMIT 10;"
 	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return nil, domain.domain_error(.Internal_Error, "failed to prepare pinned chain list")
 	defer sqlite3_finalize(stmt)
 	bind_text(stmt, 1, string(owner_user_id))
@@ -619,6 +629,7 @@ task_from_stmt :: proc(stmt: sqlite3_stmt) -> domain.Task {
 		attempt_no = int(sqlite3_column_int64(stmt, 9)), brief_json = column_text(stmt, 10), blocked_on_json = column_text(stmt, 11), requires_user_approval = sqlite3_column_int64(stmt, 12) != 0, ready_since = column_text(stmt, 13),
 		bridge_id = column_text(stmt, 14), stage_key = column_text(stmt, 15), stage_index = int(sqlite3_column_int64(stmt, 16)), generated_by_json = column_text(stmt, 17),
 		created_at = column_text(stmt, 18), updated_at = column_text(stmt, 19), published_at = column_text(stmt, 20), started_at = column_text(stmt, 21), completed_at = column_text(stmt, 22),
+		workflow_run_id = domain.Workflow_Run_ID(column_text(stmt, 23)), workflow_execution_no = int(sqlite3_column_int64(stmt, 24)),
 	}
 }
 
