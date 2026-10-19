@@ -1086,6 +1086,9 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 	// values derived from it leave this process; its MAC keys stay in memory until the
 	// first unseal pins the account root (or this command ends).
 	pair_code, code_ok := vault.pair_code_generate(context.temp_allocator)
+	// The code (and so the armed pairing keys and this whole wait) lives at most
+	// PAIR_CODE_TTL_SECONDS from now, whatever expires_in the hub reports.
+	pair_deadline_ms := bridge_now_unix_ms() + i64(vault.PAIR_CODE_TTL_SECONDS) * 1000
 	if !code_ok {
 		fmt.eprintln("ham-bridge enroll: the OS random source failed; cannot create a pairing code")
 		return false
@@ -1107,7 +1110,7 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 		fmt.eprintln("ham-bridge enroll: could not derive the pairing values; cannot continue")
 		return false
 	}
-	bridge_pairing_arm(&pair_keys)
+	bridge_pairing_arm(&pair_keys, pair_deadline_ms)
 	defer bridge_pairing_disarm()
 
 	// Step 4 — the anonymous device-authorization request.
@@ -1142,6 +1145,7 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 	expires_in := authorized.data.expires_in
 	if interval <= 0 do interval = BRIDGE_ENROLL_DEFAULT_INTERVAL_SECONDS
 	if expires_in <= 0 || expires_in > BRIDGE_ENROLL_MAX_WAIT_SECONDS do expires_in = BRIDGE_ENROLL_MAX_WAIT_SECONDS
+	if code_left := int((pair_deadline_ms - bridge_now_unix_ms()) / 1000); expires_in > code_left do expires_in = max(code_left, 0)
 	// Captured for diagnostics only (REQ-DIAG-1): an "expired" report with no
 	// times attached is unfalsifiable, so every time-related failure below states
 	// the wall clock, how long this process waited, and the deadline it expected.

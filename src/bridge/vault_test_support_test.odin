@@ -112,7 +112,7 @@ test_provision_identity :: proc(bridge_id: string, owner: string = TEST_VAULT_US
 	if _, ok := bridge_unseal_identity_generate_for_enrollment(); !ok do return false
 	// An enrollment arms its pairing keys (ham-bridge enroll does the same).
 	keys := test_pair_keys()
-	bridge_pairing_arm(&keys)
+	bridge_pairing_arm(&keys, bridge_now_unix_ms() + i64(vault.PAIR_CODE_TTL_SECONDS) * 1000)
 	vault.pair_keys_wipe(&keys)
 	return bridge_unseal_identity_commit_enrollment(bridge_id, owner)
 }

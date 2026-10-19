@@ -770,6 +770,16 @@ test_v2_unseal_requires_chain_to_pinned_root :: proc(t: ^testing.T) {
 	testing.expect(t, !ok, "a pair_mac for the real root does not let a hub-substituted root pin")
 	floor1, _ := keystore_read_epoch_floor(f.id_a)
 	testing.expect(t, !floor1.root.set, "nothing pinned without a valid pair_mac")
+	// The pairing keys die with the code: past PAIR_CODE_TTL_SECONDS even the
+	// approver's valid pair_mac is refused, and the keys are wiped.
+	expired := test_pair_keys()
+	bridge_pairing_arm(&expired, bridge_now_unix_ms() - 1)
+	vault.pair_keys_wipe(&expired)
+	ok, _ = unseal(f.id_a, &one, now, "n_pair_expired")
+	testing.expect(t, !ok, "a first unseal after the code's lifetime is refused")
+	live := test_pair_keys()
+	bridge_pairing_arm(&live, bridge_now_unix_ms() + 60_000)
+	vault.pair_keys_wipe(&live)
 
 	// First verified unseal (with the approver's pair_mac) pins the root.
 	ok, _ = unseal(f.id_a, &one, now, "n_chain_first")
