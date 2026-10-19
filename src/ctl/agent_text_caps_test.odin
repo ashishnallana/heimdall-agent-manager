@@ -41,7 +41,7 @@ test_ctl_plaintext_cap_boundary :: proc(t: ^testing.T) {
 }
 
 // An at-cap plaintext, once really encrypted, must fit the armored budget the
-// Hub enforces (len("vault:v2:e") + 10 epoch digits + 1 + 4*ceil((n+28)/3)). This is the contract that
+// Hub enforces (len("vault:v2:") + 16 vault-id hex + len(":e") + 10 epoch digits + 1 + 4*ceil((n+28)/3)). This is the contract that
 // keeps the two sides from disagreeing.
 @(test)
 test_ctl_at_cap_plaintext_fits_hub_armored_budget :: proc(t: ^testing.T) {
@@ -53,7 +53,7 @@ test_ctl_at_cap_plaintext_fits_hub_armored_budget :: proc(t: ^testing.T) {
 		testing.expect(t, ok, "encryption of an at-cap plaintext must succeed")
 		testing.expect(t, is_vault_armored(armored), "value must be armored")
 
-		budget := len(VAULT_ARMOR_PREFIX) + 1 + 10 + 1 + 4 * ((n + vault.HEADER_BYTES + 2) / 3)
+		budget := len(VAULT_ARMOR_PREFIX) + vault.VAULT_ID_HEX_CHARS + 2 + 10 + 1 + 4 * ((n + vault.HEADER_BYTES + 2) / 3)
 		testing.expectf(
 			t,
 			len(armored) <= budget,
