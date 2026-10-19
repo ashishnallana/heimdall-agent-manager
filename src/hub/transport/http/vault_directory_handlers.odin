@@ -5,7 +5,7 @@
 package http
 
 import "core:encoding/json"
-import "core:fmt"
+import "core:strconv"
 import "core:strings"
 import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
@@ -146,9 +146,16 @@ write_vault_device_json :: proc(b: ^strings.Builder, d: domain.Vault_Device) {
 	strings.write_byte(b, '}')
 }
 
+// Odin's fmt treats '{' specially, so JSON is assembled by concatenation.
+@(private = "file")
+vd_itoa :: proc(v: i64) -> string {
+	buf: [24]byte
+	return strings.clone(strconv.write_int(buf[:], v, 10), context.temp_allocator)
+}
+
 @(private = "file")
 version_json :: proc(version: i64) -> string {
-	return fmt.tprintf(`{"directory_version":%d}`, version)
+	return strings.concatenate({`{"directory_version":`, vd_itoa(version), "}"}, context.temp_allocator)
 }
 
 @(private = "file")
@@ -176,7 +183,10 @@ vault_directory_get_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	if err.code != .None do return respond_error(err, req.request_id)
 	b := strings.builder_make(context.temp_allocator)
 	d := view.directory
-	strings.write_string(&b, fmt.tprintf(`{"configured":true,"version":%d,"current_epoch":%d`, d.version, d.current_epoch))
+	strings.write_string(&b, `{"configured":true,"version":`)
+	strings.write_string(&b, vd_itoa(d.version))
+	strings.write_string(&b, `,"current_epoch":`)
+	strings.write_string(&b, vd_itoa(d.current_epoch))
 	w_str(&b, "root_device_id", d.root_device_id)
 	w_str(&b, "root_sign_public_key", view.root_sign_public_key)
 	w_str(&b, "root_sign_alg", view.root_sign_alg)
@@ -191,7 +201,8 @@ vault_directory_get_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	strings.write_string(&b, `],"epochs":[`)
 	for e, i in view.epochs {
 		if i > 0 do strings.write_byte(&b, ',')
-		strings.write_string(&b, fmt.tprintf(`{"epoch":%d`, e.epoch))
+		strings.write_string(&b, `{"epoch":`)
+		strings.write_string(&b, vd_itoa(e.epoch))
 		w_str(&b, "statement", e.statement)
 		w_raw(&b, "signature", e.signature)
 		strings.write_byte(&b, '}')
@@ -278,7 +289,8 @@ vault_self_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	strings.write_byte(&b, '{')
 	w_str(&b, "device_id", signer.device_id, true)
 	w_str(&b, "status", domain.vault_device_status_string(signer.status))
-	strings.write_string(&b, fmt.tprintf(`,"directory_version":%d`, view.directory_version))
+	strings.write_string(&b, `,"directory_version":`)
+	strings.write_string(&b, vd_itoa(view.directory_version))
 	if view.has_wrap {
 		strings.write_string(&b, `,"wrap":`)
 		strings.write_string(&b, view.wrap.wrap_json)
@@ -351,7 +363,7 @@ vault_revoke_handler :: proc(ctx: rawptr, req: Request) -> Response {
 		_, bridge_revoked, _ = bridge_service.revoke_bridge(h.bridges, auth, res.target.bridge_id)
 	}
 	publish(h, auth.user_id, res.target.device_id, "revoked")
-	return respond_success(fmt.tprintf(`{"directory_version":%d,"bridge_credentials_revoked":%s}`, res.version, "true" if bridge_revoked else "false"), req.request_id, auth_ctx_server_time(req))
+	return respond_success(strings.concatenate({`{"directory_version":`, vd_itoa(res.version), `,"bridge_credentials_revoked":`, "true" if bridge_revoked else "false", "}"}, context.temp_allocator), req.request_id, auth_ctx_server_time(req))
 }
 
 // ── PATCH /api/v1/vault/devices/{id} ────────────────────────────────────────

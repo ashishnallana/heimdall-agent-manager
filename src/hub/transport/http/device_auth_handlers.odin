@@ -60,6 +60,8 @@ device_authorize_handler :: proc(ctx: rawptr, req: Request) -> Response {
 		os_user = json_string(req.body, "os_user"),
 		code_challenge = json_string(req.body, "code_challenge"),
 		code_challenge_method = json_string(req.body, "code_challenge_method"),
+		// Passwordless vault: the bridge's persistent identity key (required for a bridge grant).
+		bridge_identity_public_key = json_string(req.body, "bridge_identity_public_key"),
 	}
 	xff := header_value(req.headers, "X-Forwarded-For")
 	result, ok, err := device_auth.authorize(handlers.service, input, req.remote_addr, xff)

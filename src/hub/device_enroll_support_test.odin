@@ -52,9 +52,15 @@ DEVICE_TEST_CAPABILITIES :: `{"capabilities":[{"provider":"claude","models":["no
 // `ok` is false if any step failed; callers assert on it so a provisioning failure
 // reports as itself rather than as a confusing downstream error.
 device_enroll_test_bridge :: proc(graph: ^app.App_Graph, headers: []contracts.HTTP_Header, label: string) -> (bridge_id: string, bridge_token: string, ok: bool) {
+	// Passwordless vault: a bridge enrolls only into an existing directory, with a
+	// vault approval (signed by the root device) naming its persistent identity key.
+	user_id, version, vault_ok := vt_ensure_vault(graph, headers)
+	if !vault_ok do return "", "", false
+	identity_pub, approval := vt_bridge_approval(user_id, version)
 	authorize_body := strings.concatenate({
 		`{"client":"ham-bridge","device_label":"`, label,
 		`","os":"linux","os_user":"tester","bridge_public_key":"`, DEVICE_TEST_PUBLIC_KEY,
+		`","bridge_identity_public_key":"`, identity_pub,
 		`","code_challenge":"`, DEVICE_TEST_CODE_CHALLENGE, `","code_challenge_method":"S256"}`,
 	})
 	authorized := api_http.router_dispatch(&graph.router, api_http.Request{
@@ -69,7 +75,7 @@ device_enroll_test_bridge :: proc(graph: ^app.App_Graph, headers: []contracts.HT
 	// The human approves. Ownership comes from this Auth_Context, never the body.
 	approved := api_http.router_dispatch(&graph.router, api_http.Request{
 		method = "POST", path = "/api/v1/device/approve",
-		body = strings.concatenate({`{"user_code":"`, user_code, `","approve":true}`}),
+		body = strings.concatenate({`{"user_code":"`, user_code, `","approve":true,"vault_approval":`, approval, `}`}),
 		request_id = "req_device_approve", remote_addr = "127.0.0.1", headers = headers,
 	})
 	if approved.status != 200 do return "", "", false
