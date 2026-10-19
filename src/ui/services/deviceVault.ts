@@ -215,10 +215,14 @@ export function refreshDeviceVault(reason = 'refresh'): Promise<void> {
   if (!ctx) return Promise.resolve();
   if (refreshing) {
     if (!followUp) {
-      followUp = refreshing.then(() => {
-        followUp = null;
+      // Runs after the current refresh whatever its outcome, and is cleared on BOTH
+      // outcomes: a rejected refresh must not leave a settled follow-up that every
+      // later burst would share without ever scheduling another run.
+      const next: Promise<void> = refreshing.catch(() => undefined).then(() => {
+        if (followUp === next) followUp = null;
         return ctx ? refreshDeviceVault(reason) : undefined;
       });
+      followUp = next;
     }
     return followUp;
   }
