@@ -455,3 +455,46 @@ search_open_payload :: proc(payload: []byte, epoch_key: []byte, epoch: u32, aad:
 	}
 	return dst, true
 }
+
+// ── File write v2 (finding N4) ──────────────────────────────────────────────
+// File content the browser sends for a bridge to write uses the v2 token format
+// (vault:v2:e<epoch>:b64(nonce12|tag16|ct)) under the epoch key, but with its own AAD
+//   "heimdall-fs-write-v2|e<epoch>|<bridge_id>|<hex sha256(path)>"
+// so a write is bound to one bridge and one target path (the path string exactly as
+// the request names it). A content envelope never opens here and vice versa.
+
+FS_WRITE_V2_INFO :: "heimdall-fs-write-v2"
+
+fs_write_aad :: proc(epoch: u32, bridge_id: string, path: string, allocator := context.allocator) -> (aad: string, ok: bool) {
+	if epoch == 0 || bridge_id == "" || len(bridge_id) > 256 || !valid_id_value(bridge_id) || path == "" do return "", false
+	digest: [32]byte
+	ctx: sha2.Context_256
+	sha2.init_256(&ctx)
+	sha2.update(&ctx, transmute([]byte)path)
+	sha2.final(&ctx, digest[:])
+	e_buf: [16]byte
+	return strings.concatenate({FS_WRITE_V2_INFO, "|e", strconv.write_uint(e_buf[:], u64(epoch), 10), "|", bridge_id, "|", hex_encode_lower(digest[:], context.temp_allocator)}, allocator), true
+}
+
+// fs_write_seal_with_nonce is the deterministic core (vectors); production sealing
+// happens in the browser.
+fs_write_seal_with_nonce :: proc(plaintext: []byte, key: []byte, epoch: u32, bridge_id, path: string, nonce: []byte, allocator := context.allocator) -> (token: string, ok: bool) {
+	aad, aad_ok := fs_write_aad(epoch, bridge_id, path, context.temp_allocator)
+	if !aad_ok do return "", false
+	return seal_with_nonce_aad(plaintext, key, epoch, nonce, transmute([]byte)aad, allocator)
+}
+
+// fs_write_open authenticates a file-write token for (bridge_id, path). With
+// require_epoch non-zero (the bridge's command floor) any other epoch is refused.
+fs_write_open :: proc(token: string, kr: ^Vault_Keyring, bridge_id, path: string, require_epoch: u32 = 0, allocator := context.allocator) -> (plaintext: []byte, ok: bool) {
+	if kr == nil do return nil, false
+	epoch, payload, res := envelope_parse(token, context.temp_allocator)
+	if res != .Ok do return nil, false
+	defer crypto.zero_explicit(raw_data(payload), len(payload))
+	if require_epoch != 0 && epoch != require_epoch do return nil, false
+	key, key_ok := keyring_key_for_epoch(kr, epoch)
+	if !key_ok do return nil, false
+	aad, aad_ok := fs_write_aad(epoch, bridge_id, path, context.temp_allocator)
+	if !aad_ok do return nil, false
+	return open_payload_with_key_aad(payload, key, transmute([]byte)aad, allocator)
+}

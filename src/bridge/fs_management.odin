@@ -10,6 +10,7 @@ package main
 // v1 capabilities: list a directory, stat a path, mkdir -p. No file contents, no
 // delete/rename, no browsing outside the root.
 
+import "core:crypto"
 import "core:fmt"
 import "core:os"
 import "core:slice"
@@ -982,7 +983,8 @@ bridge_fs_create_file :: proc(requested: string, sandbox_root: string = "") -> B
 	return Bridge_Fs_Create_File_Result{ok = true, path = canonical, created = true, within_root = true}
 }
 
-// bridge_fs_write_file writes `content` to `requested` atomically.
+// bridge_fs_write_file writes `content` (sealed for this bridge and `requested`,
+// see below) to `requested` atomically.
 // The parent directory must exist within the sandbox root.
 // Target cannot be a directory. Outside root => path_outside_root.
 bridge_fs_write_file :: proc(requested: string, content: string, sandbox_root: string = "") -> Bridge_Fs_Write_File_Result {
@@ -1017,35 +1019,24 @@ bridge_fs_write_file :: proc(requested: string, content: string, sandbox_root: s
 		}
 	}
 
-	payload_to_write := content
-	decrypted_payload: string
-	has_decrypted := false
-	defer if has_decrypted do delete(decrypted_payload)
-
-	if vault.is_armored(content) {
-		if vault_status != .Unlocked {
-			return Bridge_Fs_Write_File_Result{
-				ok = false,
-				path = requested,
-				within_root = true,
-				error_code = "invalid_vault_key",
-				message = "Vault decryption failed for file write",
-			}
+	// File content always arrives sealed for THIS bridge and THIS target path
+	// (heimdall-fs-write-v2 AAD, finding N4) under the current epoch; plaintext, a
+	// content envelope, or a token for another path or bridge is refused.
+	decrypted, dec_ok := vault.fs_write_open(content, &vault_kr, bridge_config.daemon_id, requested, vault_kr.current_epoch, context.allocator)
+	if !dec_ok {
+		return Bridge_Fs_Write_File_Result{
+			ok = false,
+			path = requested,
+			within_root = true,
+			error_code = "invalid_vault_key",
+			message = "File content must be vault-encrypted for this bridge and path",
 		}
-		decrypted, dec_ok := bridge_decrypt_vault_token(content, &vault_kr)
-		if !dec_ok {
-			return Bridge_Fs_Write_File_Result{
-				ok = false,
-				path = requested,
-				within_root = true,
-				error_code = "invalid_vault_key",
-				message = "Vault decryption failed for file write",
-			}
-		}
-		decrypted_payload = decrypted
-		has_decrypted = true
-		payload_to_write = decrypted
 	}
+	defer {
+		crypto.zero_explicit(raw_data(decrypted), len(decrypted))
+		delete(decrypted)
+	}
+	payload_to_write := string(decrypted)
 
 	temp_name := fmt.tprintf(".tmp_write_%d_%s", time.to_unix_nanoseconds(time.now()), filepath.base(canonical))
 	temp_path, jerr := filepath.join([]string{parent, temp_name}, context.allocator)

@@ -19,6 +19,9 @@ import {
   containsVaultArmored,
   VAULT_LOCKED_MARKER,
   VAULT_TOKEN_RE,
+  fsWriteAad,
+  sealFsWriteContent,
+  openFsWriteContent,
 } from '../src/ui/utils/vaultCrypto.ts';
 import { importKeyring, keyFor, type VaultKeyring } from '../src/ui/utils/vaultKeyring.ts';
 import { decryptEmbeddedVaultTokens } from '../src/ui/utils/vaultContent.ts';
@@ -126,6 +129,16 @@ test('PTY v2 vectors: per-stream subkey, counter nonce, AAD binding (session, di
   assert.throws(() => ptyAad(1, 'sh_ok', 'in', 1, 'b|x'));
   assert.throws(() => taskChainSearchAad('usr|x', 'brg', 'req', 'request', 1, 1));
   assert.throws(() => taskChainSearchAad('usr', 'brg', '', 'request', 1, 1));
+});
+
+test('fs write v2 vector: path- and bridge-bound AAD', async () => {
+  const f = V.fs_write;
+  const kr = await vectorKeyring();
+  assert.equal(new TextDecoder().decode(await fsWriteAad(f.epoch, f.bridge_id, f.path)), f.aad);
+  assert.equal(await sealFsWriteContent(f.plaintext, f.bridge_id, f.path, kr, hex(f.nonce)), f.token);
+  assert.equal(await openFsWriteContent(f.token, f.bridge_id, f.path, kr), f.plaintext);
+  await assert.rejects(openFsWriteContent(f.token, f.bridge_id, 'src/other.ts', kr));
+  await assert.rejects(decryptVaultText(f.token, kr));
 });
 
 test('search key v2 vector and epoch-bound RPC envelope', async () => {

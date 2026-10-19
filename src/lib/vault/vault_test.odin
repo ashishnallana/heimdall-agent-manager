@@ -488,6 +488,36 @@ test_search_v2_vector :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_fs_write_v2_vector_and_binding :: proc(t: ^testing.T) {
+	root := load_vectors(t)
+	fv := obj(root, "fs_write")
+	kr := vector_keyring(t, root)
+	defer keyring_wipe(&kr)
+	bridge_id, path := str(fv, "bridge_id"), str(fv, "path")
+	aad, aad_ok := fs_write_aad(2, bridge_id, path, context.temp_allocator)
+	testing.expect(t, aad_ok)
+	testing.expect_value(t, aad, str(fv, "aad"))
+	key, _ := keyring_key_for_epoch(&kr, 2)
+	tok, ok := fs_write_seal_with_nonce(transmute([]byte)str(fv, "plaintext"), key, 2, bridge_id, path, unhex(str(fv, "nonce")), context.temp_allocator)
+	testing.expect(t, ok)
+	testing.expect_value(t, tok, str(fv, "token"))
+	plain, pok := fs_write_open(tok, &kr, bridge_id, path, 2, context.temp_allocator)
+	testing.expect(t, pok && string(plain) == str(fv, "plaintext"))
+	// Bound to the path, the bridge and the channel; the epoch floor applies.
+	_, other_path := fs_write_open(tok, &kr, bridge_id, "src/other.ts", 2, context.temp_allocator)
+	testing.expect(t, !other_path, "a different path is rejected")
+	_, other_bridge := fs_write_open(tok, &kr, "brg_other", path, 2, context.temp_allocator)
+	testing.expect(t, !other_bridge, "a different bridge is rejected")
+	_, old_epoch := fs_write_open(tok, &kr, bridge_id, path, 3, context.temp_allocator)
+	testing.expect(t, !old_epoch, "a non-current epoch is rejected")
+	_, as_content := open(tok, &kr, context.temp_allocator)
+	testing.expect(t, as_content != .Ok, "an fs-write token is not a content envelope")
+	content, _ := seal_with_nonce(transmute([]byte)str(fv, "plaintext"), key, 2, unhex(str(fv, "nonce")), context.temp_allocator)
+	_, as_write := fs_write_open(content, &kr, bridge_id, path, 2, context.temp_allocator)
+	testing.expect(t, !as_write, "a content envelope is not an fs-write token")
+}
+
+@(test)
 test_keyring_check_update_superset_only :: proc(t: ^testing.T) {
 	k1, k2, kx: [KEY_BYTES]byte
 	k1[0], k2[0], kx[0] = 1, 2, 9
