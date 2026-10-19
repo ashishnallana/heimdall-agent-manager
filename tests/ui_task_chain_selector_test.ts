@@ -495,3 +495,12 @@ test('selection keys map arrows and Ctrl-N/Ctrl-P without Meta or Alt', () => {
   assert.equal(selectionDirectionForEvent(event('p', true, false, true)), null);
   assert.equal(navigateIndex(0, 0, 'down'), 0, 'empty lists remain stable');
 });
+
+test('search errors without an installed key name no password, unlock or re-entry step', async () => {
+  const { taskChainSearchErrorMessage } = await import('../src/ui/utils/taskChainSearch.ts');
+  for (const code of ['vault_locked', 'search_key_unavailable']) {
+    const msg = taskChainSearchErrorMessage({ code });
+    assert.doesNotMatch(msg, /password|unlock|re-enter/i, code);
+    assert.notEqual(msg, taskChainSearchErrorMessage({ code: 'unknown_code' }), `${code} has its own message`);
+  }
+});
