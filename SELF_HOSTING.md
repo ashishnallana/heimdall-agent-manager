@@ -688,6 +688,77 @@ heimdall update           # verify checksums, swap binaries, restart the service
 diagnostics (ports, permissions, harnesses, service unit). Run
 `heimdall --help` for the full command list.
 
+### 2.1.1 Windows quick install
+
+On Windows 10 (1809+) or 11, x64 (Windows on Arm runs the x64 bundle under
+emulation), run from a **normal, non-elevated** PowerShell — Windows PowerShell 5.1
+or PowerShell 7. No administrator rights, no execution-policy change (nothing runs
+from a `.ps1` file), and no `socat`: the Windows bridge uses the system TLS stack.
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/tanmayv/heimdall-agent-manager/main/scripts/install.ps1))) -Hub https://hub.example.com
+```
+
+Once your Hub serves the script at `/public/install.ps1`, the same form works with
+`irm https://hub.example.com/public/install.ps1`. Do not use `irm ... | iex` with
+arguments: `iex` cannot pass `-Hub`. From a checkout:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install.ps1 -Hub https://hub.example.com
+```
+
+`scripts/install.ps1` follows the same six steps as `install.sh` and takes the same
+options: `-Hub URL` (asked for when omitted), `-Version TAG`, `-DryRun`,
+`-Uninstall`, `-ReEnroll` / `-KeepEnrollment`, `-NonInteractive`, `-Help`, plus
+`-FromDir DIR` to install locally built `ham-bridge.exe`, `ham-pty-host.exe` and
+`ham-ctl.exe` (from `DIR` or `DIR\bin`; no download or checksum — for testing
+before a release exists; `scripts/windows/build.ps1` builds them).
+
+1. **Hub and platform.** The Hub URL is canonicalized exactly as `install.sh`
+   does it (HTTP(S) origin only; credentials, paths, queries and fragments are
+   rejected; explicit port only when non-default; IDN and IPv6 handled), giving the
+   per-Hub service name, e.g. `heimdall-bridge-hub-example-com`.
+2. **Preflight and verified release.** The Hub is checked first (20 s budget, exact
+   failure reason). Without `-Version` the newest *promoted* GitHub release carrying
+   `heimdall-local-windows-amd64-<tag>.zip` and `SHA256SUMS` is used; the zip's
+   SHA-256 is verified, verified bundles are cached in
+   `%LOCALAPPDATA%\heimdall\cache\releases`, and only the expected regular files
+   are extracted (`bin\ham-bridge.exe`, `bin\ham-pty-host.exe`, `bin\ham-ctl.exe`,
+   `bin\heimdall.exe` and `scripts\apply-bridge-update.ps1` when shipped). The new
+   `ham-bridge.exe --probe-hub` must reach the Hub before anything is replaced.
+3. **Replace this Hub's service.** The previous task for this Hub is stopped and
+   its binaries replaced; other Hubs' installs are untouched.
+4. **Ports and ham-ctl routing.** A free loopback port pair per Hub (`ports.json`),
+   `config.toml`, and a per-Hub CLI wrapper `ham-ctl-<service>.cmd` that sets
+   `HEIMDALL_BRIDGE_ENDPOINT` and `--config`.
+5. **Register the service and enroll.** A per-user Scheduled Task named after the
+   service starts at logon, runs without elevation and without any console window
+   (`wscript.exe` runs a small hidden service loop, `bin\bridge-service.js`, that
+   restarts the bridge 5 s after a failure, like systemd `Restart=on-failure`), and
+   carries the same environment as the Linux unit. The task stays stopped while
+   `ham-bridge enroll` runs: it prints a pairing code that you type at
+   `<hub>/device/add` in a browser that is already approved. `-NonInteractive`
+   prints the enrollment command instead.
+6. **Ready.** The task is started and the bridge must be listening on its port.
+
+| What | Where |
+| --- | --- |
+| Config, token (`bridge-token`), `hub-url`, `ports.json`, `enroll.ps1` | `%APPDATA%\heimdall\bridges\<service>` |
+| Binaries, service loop, `ham-ctl-<service>.cmd` | `%LOCALAPPDATA%\heimdall\bridges\<service>\bin` |
+| Logs (`bridge.out.log`, `bridge.err.log`, rotated at 10 MB) | `%LOCALAPPDATA%\heimdall\bridges\<service>\logs` |
+
+Both directories are restricted to your account (inheritance removed, a single
+full-control entry for your SID) — the Windows form of the `0700`/`0600` modes
+`install.sh` sets. Re-enroll later with
+`powershell -NoProfile -ExecutionPolicy Bypass -File "%APPDATA%\heimdall\bridges\<service>\enroll.ps1"`,
+which stops the task, enrolls and starts it again. Manage the task with
+`Get-ScheduledTask <service>`, `Stop-ScheduledTask <service>` and
+`Start-ScheduledTask <service>`.
+
+`-Uninstall` (with the same `-Hub`) removes the task and the binaries and keeps
+the credential, config and agent data. A second concurrent installer run is
+refused by a lock in `%APPDATA%\heimdall\bridges\.install-lock`.
+
 ### 2.2 What the bridge needs
 
 | Component | Purpose |

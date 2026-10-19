@@ -357,3 +357,12 @@ The installer downloads and verifies the binaries, registers the system service,
 opens browser-based enrollment when needed, saves the approved credential, and starts
 the bridge. Install `socat` first (`apt install socat` or `brew install socat`). See
 [`SELF_HOSTING.md`](SELF_HOSTING.md) for deployment, headless, and troubleshooting details.
+
+On Windows 10/11 (x64), from a normal (non-admin) PowerShell:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/tanmayv/heimdall-agent-manager/main/scripts/install.ps1))) -Hub https://hub.mundus.in
+```
+
+It installs the bridge as a per-user Scheduled Task (no window, starts at logon) and
+needs no `socat`; see [Windows quick install](SELF_HOSTING.md#211-windows-quick-install).

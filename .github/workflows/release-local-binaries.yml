@@ -340,6 +340,100 @@ jobs:
           "$work/bin/heimdall" --version
           "$work/bin/ham-pty-host" --help >/dev/null
 
+  # windows-amd64: hub-less Odin ham-bridge/ham-ctl (static sqlite3.lib from the
+  # pinned amalgamation, FTS5) and a static-CRT Rust ham-pty-host, packaged as
+  # heimdall-local-windows-amd64.zip for scripts/install.ps1. A zip, not a
+  # tarball: install.ps1 reads it with .NET (exact entry names and types, no
+  # extraction by name) and the bridge's self-update `tar -xzf` (Windows bsdtar)
+  # reads zip too. No heimdall.exe (the manager is systemd/launchd-only).
+  build-windows:
+    name: Build windows-amd64
+    needs: prepare
+    runs-on: windows-2022
+    env:
+      ODIN_TAG: dev-2026-09
+      ODIN_ZIP_SHA256: 8ed8abd95b82e0af1eb7e86cb75f380fd8bde104947721817b35929f5fc19388
+    steps:
+      - name: Checkout clean source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.commit_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: MSVC developer environment (cl, lib, link, dumpbin)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Stamp release version into source and flake
+        shell: bash
+        run: |
+          set -euo pipefail
+          commit_sha="${{ needs.prepare.outputs.commit_sha }}"
+          scripts/release/bump-version.sh "${{ needs.prepare.outputs.version }}" "${commit_sha:0:8}"
+
+      - name: Install Odin (pinned, SHA-256 verified)
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP 'odin.zip'
+          Invoke-WebRequest "https://github.com/odin-lang/Odin/releases/download/$env:ODIN_TAG/odin-windows-amd64-$env:ODIN_TAG.zip" -OutFile $zip
+          $got = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLowerInvariant()
+          if ($got -ne $env:ODIN_ZIP_SHA256) { throw "Odin zip SHA-256 mismatch: $got" }
+          Expand-Archive $zip -DestinationPath (Join-Path $env:RUNNER_TEMP 'odin')
+          $odin = Join-Path $env:RUNNER_TEMP 'odin\dist\odin.exe'
+          & $odin version
+          "ODIN=$odin" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - name: Build Windows binaries
+        shell: pwsh
+        run: |
+          rustup default stable
+          scripts/windows/build.ps1 -OutDir dist/windows-bin -Odin $env:ODIN -Version "${{ needs.prepare.outputs.version }}"
+
+      - name: Verify Windows binaries are self-contained and run
+        shell: pwsh
+        run: |
+          foreach ($exe in Get-ChildItem dist/windows-bin -Filter *.exe) {
+            $deps = (& dumpbin /nologo /dependents $exe.FullName) -join "`n"
+            if ($deps -match '(?i)(vcruntime|msvcp)[0-9]*\.dll|sqlite3\.dll') { throw "$($exe.Name) needs a non-system DLL:`n$deps" }
+          }
+          & dist/windows-bin/ham-bridge.exe --version; if ($LASTEXITCODE) { throw 'ham-bridge --version failed' }
+          & dist/windows-bin/ham-bridge.exe --help; if ($LASTEXITCODE) { throw 'ham-bridge --help failed' }
+          & dist/windows-bin/ham-ctl.exe --version; if ($LASTEXITCODE) { throw 'ham-ctl --version failed' }
+          & dist/windows-bin/ham-pty-host.exe --help | Select-Object -First 3; if ($LASTEXITCODE) { throw 'ham-pty-host --help failed' }
+
+      - name: Package heimdall-local zip
+        shell: pwsh
+        run: |
+          scripts/release/package-windows-bundle.ps1 -BinDir dist/windows-bin -Version "${{ needs.prepare.outputs.version }}" -OutDir dist
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $z = [IO.Compression.ZipFile]::OpenRead((Resolve-Path dist/heimdall-local-windows-amd64.zip))
+          ($z.Entries | ForEach-Object FullName | Sort-Object) | Set-Content -Encoding ascii dist/heimdall-local-windows-amd64.contents.txt
+          $z.Dispose()
+          Get-Content dist/heimdall-local-windows-amd64.contents.txt
+          $h = (Get-FileHash -Algorithm SHA256 dist/heimdall-local-windows-amd64.zip).Hash.ToLowerInvariant()
+          "$h  dist/heimdall-local-windows-amd64.zip" | Set-Content -Encoding ascii dist/SHA256SUMS-windows-amd64.txt
+
+      - name: Smoke-test the packaged bundle
+        shell: pwsh
+        run: |
+          $work = Join-Path $env:RUNNER_TEMP 'win-verify'
+          Expand-Archive dist/heimdall-local-windows-amd64.zip -DestinationPath $work
+          & "$work/bin/ham-bridge.exe" --version; if ($LASTEXITCODE) { throw 'packaged ham-bridge --version failed' }
+          & "$work/bin/ham-bridge.exe" --help | Out-Null; if ($LASTEXITCODE) { throw 'packaged ham-bridge --help failed' }
+
+      - name: Upload target artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: heimdall-local-windows-amd64-${{ needs.prepare.outputs.version }}
+          path: |
+            dist/heimdall-local-windows-amd64.zip
+            dist/heimdall-local-windows-amd64.contents.txt
+            dist/SHA256SUMS-windows-amd64.txt
+          if-no-files-found: error
+          retention-days: 30
+
   verify-storeless:
     name: Execute release binaries without Nix (${{ matrix.target }})
     needs: build
@@ -383,7 +477,7 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    needs: [prepare, build, verify-storeless]
+    needs: [prepare, build, build-windows, verify-storeless]
     runs-on: ubuntu-24.04
     if: ${{ github.ref_type == 'tag' || inputs.publish_release == true }}
     permissions:
@@ -435,6 +529,19 @@ jobs:
             cp "$tarball" "$asset"
             versioned+=("$asset")
           done
+          # windows-amd64 ships a zip (scripts/install.ps1); no heimdall.exe.
+          zip=heimdall-local-windows-amd64.zip
+          test -f "$zip"
+          unzip -Z1 "$zip" > "$RUNNER_TEMP/$zip.entries"
+          for entry in bin/ham-bridge.exe bin/ham-ctl.exe bin/ham-pty-host.exe README.md LICENSE METADATA.json; do
+            grep -Fxq "$entry" "$RUNNER_TEMP/$zip.entries"
+          done
+          # install.ps1 refuses absolute, drive-qualified, ".." and backslash names.
+          if grep -Eq '(^/|^[A-Za-z]:|(^|/)\.\.(/|$)|\\)' "$RUNNER_TEMP/$zip.entries"; then
+            echo "unsafe entry name in $zip" >&2; exit 1
+          fi
+          cp "$zip" "heimdall-local-windows-amd64-${version}.zip"
+          versioned+=("heimdall-local-windows-amd64-${version}.zip")
           sha256sum "${versioned[@]}" > SHA256SUMS
 
       - name: Create or update GitHub Release
@@ -465,6 +572,7 @@ jobs:
           - heimdall-local-darwin-amd64-$VERSION.tar.gz
           - heimdall-local-linux-amd64-$VERSION.tar.gz
           - heimdall-local-linux-arm64-$VERSION.tar.gz
+          - heimdall-local-windows-amd64-$VERSION.zip (scripts/install.ps1)
           - SHA256SUMS
           NOTES
           release_flags=()
@@ -474,10 +582,10 @@ jobs:
             release_flags+=(--prerelease)
           fi
           if gh release view "$VERSION" >/dev/null 2>&1; then
-            gh release upload "$VERSION" dist/heimdall-local-*-"$VERSION".tar.gz dist/SHA256SUMS --clobber
+            gh release upload "$VERSION" dist/heimdall-local-*-"$VERSION".tar.gz dist/heimdall-local-*-"$VERSION".zip dist/SHA256SUMS --clobber
             gh release edit "$VERSION" --notes-file "$notes_file"
           else
-            gh release create "$VERSION" dist/heimdall-local-*-"$VERSION".tar.gz dist/SHA256SUMS \
+            gh release create "$VERSION" dist/heimdall-local-*-"$VERSION".tar.gz dist/heimdall-local-*-"$VERSION".zip dist/SHA256SUMS \
               --title "$VERSION" \
               --target "$RELEASE_COMMIT" \
               --notes-file "$notes_file" \

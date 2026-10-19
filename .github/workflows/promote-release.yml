@@ -52,6 +52,10 @@ jobs:
             jq -e --arg n "$name" '.assets | any(.name == $n)' release.json >/dev/null || {
               echo "missing asset: $name" >&2; missing=1; }
           done
+          # windows-amd64 ships a zip for scripts/install.ps1.
+          name="heimdall-local-windows-amd64-$VERSION.zip"
+          jq -e --arg n "$name" '.assets | any(.name == $n)' release.json >/dev/null || {
+            echo "missing asset: $name" >&2; missing=1; }
           jq -e '.assets | any(.name == "SHA256SUMS")' release.json >/dev/null || {
             echo "missing asset: SHA256SUMS" >&2; missing=1; }
           [ "$missing" = 0 ]
