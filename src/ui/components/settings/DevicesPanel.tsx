@@ -79,6 +79,11 @@ export function DevicesList({ rows, busyId, keyFailures = {}, confirmRevokeId, o
               confirmRevokeId === r.deviceId ? (
                 <div data-debug-id={`settings-device-revoke-confirm-${r.deviceId}`} className="flex w-full flex-col gap-2 rounded-lg border border-danger p-2 text-xs text-primary">
                   <span>Revoke <strong>{r.label}</strong> — fingerprint <code className="font-mono">{r.fingerprint}</code>, added {when(r.addedAt)}, last seen {when(r.lastSeenAt)}. Check this is NOT the device you are using.</span>
+                  {r.approvedDeviceLabels.length > 0 ? (
+                    <span data-debug-id={`settings-device-revoke-approved-${r.deviceId}`}>
+                      It approved: <strong>{r.approvedDeviceLabels.join(', ')}</strong>. Revoking it does NOT revoke them; if this device may be compromised, review and revoke those too.
+                    </span>
+                  ) : null}
                   {r.leavesSingleApprover ? <span data-debug-id={`settings-device-revoke-single-approver-${r.deviceId}`} className="font-medium text-danger">This is your only other device that can approve. After revoking it, this device is the only one left that can add devices.</span> : null}
                   <div className="flex flex-wrap gap-2">
                   <Button size="sm" variant="danger" data-debug-id={`settings-device-revoke-confirm-btn-${r.deviceId}`} loading={busyId === r.deviceId} onClick={() => onConfirmRevoke?.(r.deviceId)}>Revoke and rotate keys</Button>

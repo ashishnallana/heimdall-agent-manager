@@ -179,3 +179,23 @@ test('M1: an old head seen after a long offline gap is stale until it advances',
   assert.equal(dv.evaluateHeadFreshness(recent, h, T0 + 3 * DAY).stale, false);
   assert.ok(dv.STALE_HEAD_MS > dv.OFFLINE_GAP_MS);
 });
+
+// ── revoke confirmation lists the devices the target approved ───────────────
+
+test('revoke confirm lists devices the target approved (revocations do not cascade)', async () => {
+  const React = (await import('react')).default;
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  const { DevicesList } = await import('../src/ui/components/settings/DevicesPanel.tsx');
+  const row = {
+    deviceId: 'dev_lap', kind: 'browser', label: 'Laptop', fingerprint: 'f00d', status: 'approved' as const,
+    approvedByLabel: '(account root)', lastSeenAt: '', addedAt: '', approvedDeviceLabels: ['Phone', 'build-box'],
+    leavesSingleApprover: false, retiredHint: false, bridgeId: '', isCurrent: false, canRevoke: true,
+    revokeBlockedReason: '', canDeny: false, canSendKey: false,
+  };
+  const html = renderToStaticMarkup(React.createElement(DevicesList, { rows: [row], confirmRevokeId: 'dev_lap' }));
+  assert.match(html, /settings-device-revoke-approved-dev_lap/);
+  assert.match(html, /Phone, build-box/);
+  assert.match(html, /does NOT revoke them/);
+  const none = renderToStaticMarkup(React.createElement(DevicesList, { rows: [{ ...row, approvedDeviceLabels: [] }], confirmRevokeId: 'dev_lap' }));
+  assert.doesNotMatch(none, /settings-device-revoke-approved-/);
+});

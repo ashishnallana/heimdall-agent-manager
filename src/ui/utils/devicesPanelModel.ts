@@ -17,6 +17,11 @@ export interface DeviceRow {
   lastSeenAt: string;
   /** When the device was approved (or registered), for telling same-named devices apart. */
   addedAt: string;
+  /**
+   * Labels of the currently approved devices this one approved. Revocation does not
+   * cascade, so the revoke confirmation lists them as candidates to revoke too.
+   */
+  approvedDeviceLabels: string[];
   /** Revoking it leaves exactly one approver (this device): warned on confirm. */
   leavesSingleApprover: boolean;
   /** The hub retired this bridge identity; this browser revokes it (signed). */
@@ -55,6 +60,9 @@ export async function buildDeviceRows(chain: VerifiedChain, currentDeviceId: str
       approvedByLabel: d.approved_by_device_id === d.device_id ? '(account root)' : labelOf(d.approved_by_device_id),
       lastSeenAt: String(d.row.last_seen_at ?? ''),
       addedAt: String(d.row.approved_at || d.row.created_at || ''),
+      approvedDeviceLabels: [...chain.trusted.values()]
+        .filter((t) => t.approved_by_device_id === d.device_id && t.device_id !== d.device_id)
+        .map((t) => t.label || t.device_id),
       leavesSingleApprover: kindPolicy(d.kind).countsAsApprover && remainingApprovers(chain, d.device_id).length === 1,
       retiredHint: chain.retiredHints.includes(d.device_id),
       bridgeId: String(d.row.bridge_id ?? ''),
@@ -73,6 +81,7 @@ export async function buildDeviceRows(chain: VerifiedChain, currentDeviceId: str
     approvedByLabel: status === 'revoked' && chain.everApproved.get(d.device_id) ? labelOf(chain.everApproved.get(d.device_id)!.approved_by_device_id) : '',
     lastSeenAt: String(d.last_seen_at ?? ''),
     addedAt: String(d.approved_at || d.created_at || ''),
+    approvedDeviceLabels: [] as string[],
     leavesSingleApprover: false,
     retiredHint: false,
     bridgeId: String(d.bridge_id ?? ''),
