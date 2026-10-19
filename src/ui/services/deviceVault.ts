@@ -410,6 +410,8 @@ async function runRefresh(_reason: string): Promise<void> {
     noticePending(c, chain);
 
     // The device that created the vault IS the root: its own key needs no pairing proof.
+    // (A browser restored with the recovery key takes the pairing path below: it made
+    // the approval's pair_mac itself, under its own code, after verifying the log.)
     if (!pins && chain.rootDeviceId === identity.deviceId && chain.rootSignPub === identity.signPub) {
       await kv.delete(`pending:${c.userId}`);
       await advancePins(kv, c.userId, pinsFromChain(chain));

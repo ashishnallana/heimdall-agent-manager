@@ -145,3 +145,14 @@ test('last-approver guard: the only other approver cannot be revoked until a rec
   await hub.revoke(a, b.deviceId);
   assert.ok((await hub.chain()).revokedIds.has(b.deviceId));
 });
+
+test('create flow: three distinct positions must be re-entered correctly', async () => {
+  const { pickConfirmPositions, confirmationMatches } = await import('../src/ui/components/settings/RecoveryKeySection.tsx');
+  const { words } = generate12RecoveryWords();
+  let n = 0;
+  const seq = [0.05, 0.05, 0.5, 0.99];
+  const positions = pickConfirmPositions(() => seq[n++ % seq.length]);
+  assert.deepEqual(positions, [0, 6, 11]);
+  assert.ok(confirmationMatches(words, positions, positions.map((p) => ` ${words[p].toUpperCase()} `)));
+  assert.ok(!confirmationMatches(words, positions, [words[0], words[6], words[10]]));
+});

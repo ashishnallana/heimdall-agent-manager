@@ -17,6 +17,7 @@ import {
   sendKeyToBridge,
 } from '../../services/deviceVault';
 import { buildRouteHash } from '../../utils/appLocation';
+import { RecoveryKeySection } from './RecoveryKeySection';
 
 const KIND_LABEL: Record<string, string> = { browser: 'Browser', bridge: 'Bridge', recovery: 'Recovery key' };
 const STATUS_TONE = { approved: 'success', pending: 'warning', revoked: 'neutral', untrusted: 'danger' } as const;
@@ -182,6 +183,7 @@ export default function DevicesPanel() {
           }}
         />
       </section>
+      <RecoveryKeySection hasRecoveryKey={rows.some((r) => r.kind === 'recovery' && r.status === 'approved')} onChanged={() => void reload()} />
       {notice ? <div data-debug-id="settings-devices-notice"><Alert tone="success">{notice}</Alert></div> : null}
       {error ? <div data-debug-id="settings-devices-error"><Alert tone="danger">{error}</Alert></div> : null}
     </div>

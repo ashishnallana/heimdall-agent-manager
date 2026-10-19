@@ -6,6 +6,7 @@ import React, { useState } from 'react';
 import { useSelector } from 'react-redux';
 import { Alert, Button, Icon, Input } from '@ui';
 import { selectDeviceVault, type DeviceVaultState } from '../../store/deviceVaultSlice';
+import { RecoveryRestoreForm } from './RecoveryRestoreForm';
 import {
   acceptOtherAccount,
   requestNewApproval,
@@ -109,6 +110,9 @@ export function DeviceWaitingScreen({ state }: { state: DeviceVaultState }) {
           )}
         </div>
       )}
+      <div className="mt-3 border-t border-subtle pt-3">
+        <RecoveryRestoreForm />
+      </div>
       {error ? <p data-debug-id="device-waiting-error" className="mt-2 text-xs text-danger">{error}</p> : null}
     </Shell>
   );
