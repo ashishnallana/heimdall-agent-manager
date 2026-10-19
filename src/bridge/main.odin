@@ -114,7 +114,7 @@ main :: proc() {
 	// rolled-back one must not leave its staging behind.
 	_ = bridge_enroll_atomic_recover(os.args)
 	bridge_config = bridge_config_from_args(os.args)
-	default_credential_path := bridge_enroll_default_credential_path()
+	default_credential_path := bridge_enroll_default_credential_path(bridge_config.daemon_url, strings.trim_space(bridge_config.daemon_id))
 	bridge_adopt_default_credential_if_needed(&bridge_config, default_credential_path)
 	delete(default_credential_path)
 	// REQ-IMPL-4 / audit F4: an enrolled bridge holding no credential must not run.
@@ -411,7 +411,9 @@ bridge_read_token_file :: proc(path: string) -> (string, bool) {
 	// previously leaked on every call, which the refresh worker turns from a
 	// one-off into a per-rotation leak for the life of the process.
 	defer delete(data)
-	text := strings.trim_space(string(data))
+	// An access-token file carries an owner header (credential_owner.odin); the
+	// token is what follows it. Refresh files and hand-given tokens have none.
+	text, _, _, _ := bridge_credential_split(string(data))
 	if text == "" do return "", false
 	return strings.clone(text), true
 }

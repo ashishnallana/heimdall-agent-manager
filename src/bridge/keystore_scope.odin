@@ -95,9 +95,18 @@ bridge_keystore_hub :: proc() -> string {
 // keystore_scope_name is the OS item name for bridge_id under the bound hub.
 // Temp-allocated; ok=false (persist/find nothing) without a hub or a valid id.
 keystore_scope_name :: proc(bridge_id: string) -> (string, bool) {
-	if !keystore_bridge_id_ok(bridge_id) do return "", false
 	hub := bridge_keystore_hub()
 	if hub == "" do return "", false
+	return keystore_scope_name_for_hub(hub, bridge_id)
+}
+
+// keystore_scope_name_for_hub is keystore_scope_name for an explicit hub URL (not the
+// one bound to this process), e.g. to name a config's default credential path before
+// the hub is bound. Temp-allocated.
+keystore_scope_name_for_hub :: proc(hub_url, bridge_id: string) -> (string, bool) {
+	if !keystore_bridge_id_ok(bridge_id) do return "", false
+	hub, hub_ok := bridge_hub_canonical_base(hub_url, context.temp_allocator)
+	if !hub_ok || len(hub) > BRIDGE_HUB_BASE_MAX do return "", false
 	digest: [32]byte
 	hash.hash_string_to_buffer(.SHA256, strings.concatenate({BRIDGE_SCOPE_HEADER, hub, "|", bridge_id}, context.temp_allocator), digest[:])
 	scope := vault.hex_encode_lower(digest[:], context.temp_allocator)[:BRIDGE_SCOPE_HEX_CHARS]

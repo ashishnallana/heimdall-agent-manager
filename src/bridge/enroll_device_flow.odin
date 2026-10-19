@@ -580,7 +580,7 @@ bridge_enroll_persist :: proc(cred: Bridge_Enroll_Credential, access_path, confi
 		fmt.eprintln("enroll FAILED: the Hub returned an access token this bridge will not accept (empty, unprefixed, or missing its secret half); nothing was written")
 		return false
 	}
-	if !bridge_write_secret_file(access_path, cred.access_token) do return false
+	if !bridge_write_credential_file(access_path, hub_url, cred.bridge_id, cred.access_token) do return false
 	if strings.trim_space(cred.refresh_token) != "" {
 		if !bridge_enroll_credential_usable(cred.refresh_token) {
 			fmt.eprintln("enroll FAILED: the Hub returned a malformed refresh token; nothing further was written")
@@ -726,7 +726,7 @@ bridge_credential_refresh_worker :: proc() {
 					continue
 				}
 			}
-			if !bridge_write_secret_file(g_bridge_credential_file, cred.access_token) {
+			if !bridge_write_credential_file(g_bridge_credential_file, api_base, strings.trim_space(bridge_config.daemon_id), cred.access_token) {
 				fmt.println("bridge credential refresh: could not persist the rotated access token; retrying")
 				failures += 1
 				delay = bridge_refresh_backoff_seconds(failures)
@@ -970,6 +970,17 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 		fmt.eprintln("  To run a second bridge for another hub on this machine, give it its own --config and --bridge-token-file.")
 		return false
 	}
+	// Nor is a credential file of another hub or bridge overwritten: the other bridge
+	// would then present this bridge's token to its own hub. The default path is per
+	// bridge; only an explicit --bridge-token-file / HAM_BRIDGE_TOKEN_FILE can collide.
+	replacing_bridge_id := bridge_enroll_config_bridge_id(cfg_lib.config_path_from_args(args))
+	if explicit_token_file := bridge_enroll_token_file_from_args(args, "", "", context.temp_allocator); explicit_token_file != "" {
+		if reason, conflict := bridge_enroll_token_file_conflict(explicit_token_file, api_base, replacing_bridge_id); conflict {
+			fmt.eprintfln("ham-bridge enroll REFUSED: credential file %s is not this bridge's: %s.", explicit_token_file, reason)
+			fmt.eprintln("  Give this bridge its own --bridge-token-file, or omit it (the default credential path is per bridge).")
+			return false
+		}
+	}
 
 	// Step 2a — the machine descriptor. Gathered BEFORE anything is sent, because
 	// an unusable one aborts the ceremony rather than enrolling a machine the
@@ -1131,7 +1142,11 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 		status, cred, retry_after := bridge_enroll_poll_once(api_base, device_code, code_verifier)
 		switch status {
 		case .Approved:
-			token_file := bridge_enroll_token_file_from_args(args)
+			token_file := bridge_enroll_token_file_from_args(args, api_base, cred.bridge_id)
+			if reason, conflict := bridge_enroll_token_file_conflict(token_file, api_base, replacing_bridge_id); conflict {
+				fmt.eprintfln("bridge enroll FAILED: credential file %s is not this bridge's: %s. Nothing was written; enroll again with its own --bridge-token-file.", token_file, reason)
+				return false
+			}
 			if strings.trim_space(token_file) == "" {
 				fmt.eprintln("bridge enroll FAILED: nowhere to store the credential — pass --bridge-token-file <path> (HOME is unset, so there is no default).")
 				fmt.eprintln("  The approval succeeded; re-run with --bridge-token-file and approve again.")
@@ -1221,11 +1236,12 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 }
 
 // bridge_enroll_token_file_from_args resolves where the credential goes, in the
-// same order the running bridge resolves it (flag, then environment), so enroll
-// and start agree without the operator repeating themselves. Returns "" when
-// there is no default to fall back on, and the caller then refuses to enroll
+// same order the running bridge resolves it (flag, then environment, then the
+// per-(hub, bridge) default), so enroll and start agree without the operator
+// repeating themselves. Returns "" when there is no default to fall back on (no
+// HOME, or hub_url / bridge_id unknown yet), and the caller then refuses to enroll
 // rather than guessing a path the bridge will not read at startup.
-bridge_enroll_token_file_from_args :: proc(args: []string, allocator := context.allocator) -> string {
+bridge_enroll_token_file_from_args :: proc(args: []string, hub_url, bridge_id: string, allocator := context.allocator) -> string {
 	if explicit := option_value(args, "--bridge-token-file", ""); strings.trim_space(explicit) != "" {
 		return strings.clone(strings.trim_space(explicit), allocator)
 	}
@@ -1236,7 +1252,8 @@ bridge_enroll_token_file_from_args :: proc(args: []string, allocator := context.
 	// no second flag. Deliberately NOT a system path like /var/lib: enrollment is
 	// run by a person, and a default only root can write would make the common case
 	// fail at the last step, after the human has already approved in the browser.
-	return bridge_enroll_default_credential_path(allocator)
+	if hub_url == "" || bridge_id == "" do return ""
+	return bridge_enroll_default_credential_path(hub_url, bridge_id, allocator)
 }
 
 // bridge_hello_hostname is the hostname the runtime WS hello reports, resolved
@@ -1280,25 +1297,6 @@ bridge_hello_hostname :: proc() -> string {
 	return string(g_bridge_hello_hostname_buf[:g_bridge_hello_hostname_len])
 }
 
-// bridge_enroll_default_credential_path is the one place that knows where a
-// credential goes when the operator named no path — shared by `enroll` (which
-// writes it) and by startup (which reads it), so the two cannot drift apart and
-// leave an enrolled bridge unable to find its own credential.
-//
-// This is also the path rendered into installer-managed systemd/launchd units.
-// Keeping one default removes the previous split where enrollment wrote under
-// ~/.local/share while the service read under ~/.config.
-bridge_enroll_default_credential_path :: proc(allocator := context.allocator) -> string {
-	expanded := cfg_lib.expand_home("~/.config/heimdall/bridge-token")
-	if strings.has_prefix(expanded, "~") {
-		delete(expanded)
-		return ""
-	}
-	if allocator == context.allocator do return expanded
-	defer delete(expanded)
-	return strings.clone(expanded, allocator)
-}
-
 // bridge_enrolled_but_tokenless reports the one startup state audit finding F4
 // makes dangerous: a bridge that HAS been enrolled but holds no credential.
 //
@@ -1330,7 +1328,7 @@ bridge_refuse_tokenless_start :: proc(cfg: Bridge_Config) -> bool {
 	fmt.eprintln("  WITHOUT AUTHENTICATION while doing so (audit F4), so it exits instead of starting.")
 	fmt.eprintln("  Fix one of these:")
 	fmt.eprintln("    - pass --bridge-token-file <path> (or set HAM_BRIDGE_TOKEN_FILE) if the credential is elsewhere")
-	if path := bridge_enroll_default_credential_path(context.temp_allocator); path != "" {
+	if path := bridge_enroll_default_credential_path(cfg.daemon_url, strings.trim_space(cfg.daemon_id), context.temp_allocator); path != "" {
 		fmt.eprintfln("    - check the default location: %s", path)
 	}
 	fmt.eprintln("    - re-enroll: ham-bridge enroll --hub <url>")
@@ -1366,6 +1364,18 @@ bridge_bind_runtime_hub :: proc(cfg: Bridge_Config, config_path: string) -> bool
 		fmt.eprintln("  Either the configured hub differs from the hub this bridge was enrolled with (a bridge is bound to")
 		fmt.eprintln("  exactly one hub), or its identity record is missing or unreadable.")
 		fmt.eprintln("  Fix the hub in the config / --hub, or re-enroll: ham-bridge enroll --hub <url>")
+		return false
+	}
+	// The credential file must be this bridge's (owner header): a file shared with, or
+	// overwritten by, another bridge would send another hub's token here.
+	if cfg.credential_file != "" && !bridge_credential_file_belongs_to(cfg.credential_file, bridge_keystore_hub(), bridge_id) {
+		hub, id, owner := bridge_credential_file_owner(cfg.credential_file)
+		if owner == .Owned {
+			fmt.eprintfln("ham-bridge REFUSING TO START: credential file %s belongs to bridge %s of hub %s, not to %s of %s.", cfg.credential_file, id, hub, bridge_id, bridge_keystore_hub())
+		} else {
+			fmt.eprintfln("ham-bridge REFUSING TO START: credential file %s does not record which bridge and hub it belongs to.", cfg.credential_file)
+		}
+		fmt.eprintln("  Each bridge needs its own credential file; re-enroll: ham-bridge enroll --hub <url>")
 		return false
 	}
 	if name, scoped := keystore_scope_name(bridge_id); scoped {

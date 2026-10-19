@@ -398,8 +398,9 @@ enroll_and_startup_agree_on_the_default_credential_path :: proc(t: ^testing.T) {
     // ever disagreed, an enrolled bridge would come up unable to find its own
     // credential — and because the device flow no longer writes the token into
     // config.toml (F2), there would be no second source to fall back on.
-    written := bridge_enroll_token_file_from_args([]string{"ham-bridge", "enroll", "--hub", "https://hub.example.com"}, context.temp_allocator)
-    read := bridge_enroll_default_credential_path(context.temp_allocator)
+    bridge_id, _ := keystore_test_bridge_ids()
+    written := bridge_enroll_token_file_from_args([]string{"ham-bridge", "enroll", "--hub", "https://hub.example.com"}, "https://hub.example.com", bridge_id, context.temp_allocator)
+    read := bridge_enroll_default_credential_path("https://hub.example.com", bridge_id, context.temp_allocator)
     testing.expectf(t, written == read, "enroll writes %q but startup reads %q", written, read)
     if read != "" {
         testing.expect(t, !strings.has_prefix(read, "~"), "the path must be expanded, not a literal tilde")
@@ -409,7 +410,7 @@ enroll_and_startup_agree_on_the_default_credential_path :: proc(t: ^testing.T) {
         testing.expect(t, !strings.has_prefix(read, "/var/lib/"), "the default must not require root")
     }
     // An explicit flag always wins over the default.
-    explicit := bridge_enroll_token_file_from_args([]string{"ham-bridge", "enroll", "--bridge-token-file", "/tmp/explicit-cred"}, context.temp_allocator)
+    explicit := bridge_enroll_token_file_from_args([]string{"ham-bridge", "enroll", "--bridge-token-file", "/tmp/explicit-cred"}, "https://hub.example.com", bridge_id, context.temp_allocator)
     testing.expect(t, explicit == "/tmp/explicit-cred", "an explicit --bridge-token-file must win")
 }
 
