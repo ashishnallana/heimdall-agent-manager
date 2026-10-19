@@ -13,15 +13,19 @@ import {
   accountFingerprint,
   acknowledgeOtherAccount,
   advancePins,
+  archiveDeviceState,
   createDeviceIdentity,
   forgetDeviceIdentity,
-  forgetDeviceState,
+  loadObservedReset,
+  observedResetElapsed,
+  recordObservedReset,
   otherPinnedAccounts,
   indexedDbDeviceStore,
   loadDeviceIdentity,
   loadPins,
   type DeviceIdentity,
   type DeviceKeyValueStore,
+  type DevicePins,
 } from '../utils/deviceIdentity';
 import { isVaultSupported } from '../utils/vaultCrypto';
 import { pinsFromChain, trustedBridgeById, verifyDirectory, type VaultDirectory, type VerifiedChain } from '../utils/vaultDirectoryVerify';
@@ -169,6 +173,10 @@ export async function fetchVerifiedChain(): Promise<{ chain: VerifiedChain; dir:
 
 async function publishChain(chain: VerifiedChain, dir: VaultDirectory): Promise<void> {
   if (!ctx) return;
+  // Remember the reset this VERIFIED directory announces (or that none is pending), so a
+  // later "no directory" can be told apart from a reset this browser saw coming (M2).
+  const reset = dir.reset?.due_at ? dir.reset : null;
+  await recordObservedReset(d().kv, ctx.userId, reset ? { requested_at: String(reset.requested_at ?? ''), due_at: String(reset.due_at), head_seq: chain.version } : null);
   ctx.dispatch(deviceVaultDirectoryVerified({
     accountFingerprint: await accountFingerprint(chain.rootSignPub),
     currentEpoch: chain.currentEpoch,
@@ -246,11 +254,23 @@ async function runRefresh(_reason: string): Promise<void> {
       purgeKeys(dispatch);
       stopPolling();
       if (await refuseUnacknowledgedAccount(c)) return;
-      if (await loadPins(kv, c.userId)) {
-        dispatch(deviceVaultFailed({
-          code: 'vault_missing',
-          message: 'This account no longer has a vault. It was reset, or the server is misbehaving. If you did not expect a reset, do not continue.',
-        }));
+      const pins = await loadPins(kv, c.userId);
+      if (pins) {
+        // M2: a missing directory is a reset ONLY when this browser recorded a verified
+        // reset whose due time has passed. Otherwise fail closed: the hub may be lying.
+        const observed = await loadObservedReset(kv, c.userId);
+        if (observedResetElapsed(observed)) {
+          dispatch(deviceVaultFailed({
+            code: 'vault_reset',
+            message: `This account's vault was reset as scheduled (due ${observed!.due_at}). The old keys are gone; encrypted history is unreadable.`,
+          }));
+        } else {
+          dispatch(deviceVaultFailed({
+            code: 'vault_missing',
+            message: 'Vault missing — the server may be misbehaving. This browser never saw a reset of this vault come due. Contact your admin before continuing.',
+            startOverPhrase: await startOverPhraseFor(pins),
+          }));
+        }
         return;
       }
       await runGenesis(c);
@@ -505,12 +525,35 @@ export async function requestNewApproval(): Promise<void> {
   await refreshDeviceVault('re-enroll');
 }
 
-/** After a reset (directory gone): forget this device's identity and pins, then start fresh. */
-export async function startOverAfterReset(): Promise<void> {
+/** What the user types to start over on a vault that vanished without a recorded reset. */
+export async function startOverPhraseFor(pins: DevicePins): Promise<string> {
+  return `${(await accountFingerprint(pins.root_sign_pub)).split(' ')[0]} RESET`;
+}
+
+const normalizePhrase = (s: string) => String(s ?? '').trim().replace(/\s+/g, ' ').toUpperCase();
+
+/**
+ * The directory is gone: archive (never delete) this device's identity, pins and
+ * observed reset, then start a new vault. Without a recorded verified reset whose due
+ * time has passed, the user must type the confirmation phrase (`startOverPhraseFor`).
+ * Refuses when the directory is back.
+ */
+export async function startOverAfterReset(typedPhrase = ''): Promise<void> {
   const c = ctx;
   if (!c) return;
-  await forgetDeviceState(d().kv, c.userId);
-  await d().kv.delete(`pending:${c.userId}`);
+  const kv = d().kv;
+  const pins = await loadPins(kv, c.userId);
+  if (pins) {
+    if (await d().api.fetchVaultDirectory(deviceSignerContext() ?? undefined)) {
+      throw new Error('The vault directory is back; nothing was changed. Retry instead.');
+    }
+    if (!observedResetElapsed(await loadObservedReset(kv, c.userId))) {
+      const want = await startOverPhraseFor(pins);
+      if (normalizePhrase(typedPhrase) !== normalizePhrase(want)) throw new Error(`Type "${want}" exactly to start a new vault.`);
+    }
+  }
+  await archiveDeviceState(kv, c.userId);
+  await kv.delete(`pending:${c.userId}`);
   c.identity = null;
   await refreshDeviceVault('start-over');
 }

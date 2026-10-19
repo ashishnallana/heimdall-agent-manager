@@ -67,6 +67,11 @@ export interface DeviceVaultState {
   confirmToken: number;
   /** other-account: account ids this browser already holds pins for. */
   otherAccounts: string[];
+  /**
+   * error 'vault_missing': the phrase the user must type to start a new vault anyway
+   * (the account fingerprint's first group + " RESET"). Empty otherwise.
+   */
+  startOverPhrase: string;
 }
 
 export const initialDeviceVaultState: DeviceVaultState = {
@@ -88,6 +93,7 @@ export const initialDeviceVaultState: DeviceVaultState = {
   confirmFingerprint: '',
   confirmToken: 0,
   otherAccounts: [],
+  startOverPhrase: '',
 };
 
 export const deviceVaultSlice = createSlice({
@@ -101,6 +107,7 @@ export const deviceVaultSlice = createSlice({
       if (status !== 'error') {
         state.errorCode = rest.errorCode ?? '';
         state.errorMessage = rest.errorMessage ?? '';
+        state.startOverPhrase = '';
       }
       if (status !== 'pending-approval' && status !== 'reset-scheduled') {
         state.userCode = '';
@@ -119,10 +126,11 @@ export const deviceVaultSlice = createSlice({
     deviceVaultBusy(state, action: PayloadAction<boolean>) {
       state.busy = action.payload;
     },
-    deviceVaultFailed(state, action: PayloadAction<{ code: string; message: string }>) {
+    deviceVaultFailed(state, action: PayloadAction<{ code: string; message: string; startOverPhrase?: string }>) {
       state.status = 'error';
       state.errorCode = action.payload.code;
       state.errorMessage = action.payload.message;
+      state.startOverPhrase = action.payload.startOverPhrase ?? '';
       state.busy = false;
     },
     bridgeKeyDeliveryReported(state, action: PayloadAction<{ succeeded: string[]; failed: Array<{ bridgeId: string; error: string }> }>) {

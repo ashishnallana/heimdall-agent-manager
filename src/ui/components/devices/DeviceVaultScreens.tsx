@@ -186,6 +186,7 @@ export function OtherAccountWarning({ state }: { state: DeviceVaultState }) {
 
 export function DeviceVaultProblemScreen({ state }: { state: DeviceVaultState }) {
   const [busy, error, run] = useAsyncAction();
+  const [phrase, setPhrase] = useState('');
   if (state.status === 'unsupported') {
     return (
       <Shell debugId="device-vault-unsupported" title="This browser cannot hold your keys">
@@ -213,13 +214,33 @@ export function DeviceVaultProblemScreen({ state }: { state: DeviceVaultState })
     );
   }
   return (
-    <Shell debugId="device-vault-error" title={state.errorCode === 'vault_missing' ? 'Vault not found' : 'Vault check failed'}>
+    <Shell debugId="device-vault-error" title={state.errorCode === 'vault_missing' ? 'Vault missing' : state.errorCode === 'vault_reset' ? 'Vault was reset' : 'Vault check failed'}>
       <div data-debug-id="device-vault-error-message"><Alert tone="danger">{state.errorMessage || "Unknown error"}</Alert></div>
       <p className="mt-2 text-xs text-muted">Nothing was decrypted and no key was installed on this device.</p>
+      {state.errorCode === 'vault_missing' && state.startOverPhrase ? (
+        <div className="mt-3 text-xs text-muted">
+          <label htmlFor="device-vault-start-over-phrase" className="mb-1 block">
+            Only if your admin confirms the vault is really gone: type <code className="font-mono text-primary">{state.startOverPhrase}</code> to start a new vault.
+            This browser's old identity and pins are archived, not deleted.
+          </label>
+          <Input id="device-vault-start-over-phrase" data-debug-id="device-vault-start-over-phrase-input" value={phrase} onChange={setPhrase} placeholder={state.startOverPhrase} />
+        </div>
+      ) : null}
       <div className="mt-4 flex flex-wrap gap-2">
         <Button data-debug-id="device-vault-retry-btn" loading={busy} onClick={() => run(() => refreshDeviceVault('retry'))}>Retry</Button>
-        {state.errorCode === 'vault_missing' ? (
-          <Button data-debug-id="device-vault-start-over-btn" variant="danger" loading={busy} onClick={() => run(startOverAfterReset)}>Start a new vault on this device</Button>
+        {state.errorCode === 'vault_reset' ? (
+          <Button data-debug-id="device-vault-start-over-btn" variant="danger" loading={busy} onClick={() => run(() => startOverAfterReset())}>Start a new vault on this device</Button>
+        ) : null}
+        {state.errorCode === 'vault_missing' && state.startOverPhrase ? (
+          <Button
+            data-debug-id="device-vault-start-over-btn"
+            variant="danger"
+            loading={busy}
+            disabled={phrase.trim().replace(/\s+/g, ' ').toUpperCase() !== state.startOverPhrase.toUpperCase()}
+            onClick={() => run(() => startOverAfterReset(phrase))}
+          >
+            Start a new vault anyway
+          </Button>
         ) : null}
       </div>
       {error ? <p data-debug-id="device-vault-error-detail" className="mt-2 text-xs text-danger">{error}</p> : null}

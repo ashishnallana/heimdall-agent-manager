@@ -207,10 +207,60 @@ export async function loadOrCreateDeviceIdentity(store: DeviceKeyValueStore, use
   return (await loadDeviceIdentity(store, userId)) ?? createDeviceIdentity(store, userId);
 }
 
-/** Forget this browser's identity and pins for `userId` (after a vault reset). */
-export async function forgetDeviceState(store: DeviceKeyValueStore, userId: string): Promise<void> {
-  await store.delete(identityKey(requireUserId(userId)));
+// ── observed vault reset ─────────────────────────────────────────────────────
+//
+// A reset the hub announced in a directory this device VERIFIED (requested_at,
+// due_at, and the head seq it was seen at). Only a recorded reset whose due_at has
+// passed lets a "no directory" answer be treated as that reset; anything else is a
+// missing vault (fail closed: typed confirmation). Cleared when a verified directory
+// no longer carries a reset (cancelled).
+
+export interface ObservedReset {
+  readonly requested_at: string;
+  readonly due_at: string;
+  readonly head_seq: number;
+}
+
+const observedResetKey = (userId: string) => `observed-reset:${userId}`;
+
+export async function loadObservedReset(store: DeviceKeyValueStore, userId: string): Promise<ObservedReset | null> {
+  const v = await store.get(observedResetKey(requireUserId(userId))) as ObservedReset | undefined;
+  if (!v || typeof v.due_at !== 'string' || typeof v.requested_at !== 'string' || !Number.isSafeInteger(v.head_seq)) return null;
+  return v;
+}
+
+export async function recordObservedReset(store: DeviceKeyValueStore, userId: string, reset: ObservedReset | null): Promise<void> {
+  if (reset) await store.put(observedResetKey(requireUserId(userId)), { requested_at: reset.requested_at, due_at: reset.due_at, head_seq: reset.head_seq });
+  else await store.delete(observedResetKey(requireUserId(userId)));
+}
+
+/** True when `r` is a recorded reset whose due time has passed. */
+export function observedResetElapsed(r: ObservedReset | null, now: number = Date.now()): boolean {
+  if (!r) return false;
+  const due = Date.parse(r.due_at);
+  return Number.isFinite(due) && due <= now;
+}
+
+const archivedKey = (userId: string, at: number) => `archived:${userId}:${at}`;
+
+/**
+ * Start over after a reset: MOVE this browser's identity, pins and observed reset for
+ * `userId` under an archived key (never deleted, so a mistaken start-over loses
+ * nothing), then clear the live entries. Returns the archive key.
+ */
+export async function archiveDeviceState(store: DeviceKeyValueStore, userId: string, now: number = Date.now()): Promise<string> {
+  requireUserId(userId);
+  const key = archivedKey(userId, now);
+  await store.put(key, {
+    archivedAt: now,
+    identity: (await store.get(identityKey(userId))) ?? null,
+    pins: (await store.get(pinsKey(userId))) ?? null,
+    observedReset: (await store.get(observedResetKey(userId))) ?? null,
+  });
+  await store.delete(identityKey(userId));
   await store.delete(pinsKey(userId));
+  await store.delete(observedResetKey(userId));
+  return key;
 }
 
 /**
