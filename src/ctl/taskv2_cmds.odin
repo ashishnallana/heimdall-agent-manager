@@ -1403,6 +1403,8 @@ print_help_workflow :: proc() {
  fmt.println("  history <run_id>")
  fmt.println("  retry <run_id> --expected-revision <n> --reason <text>")
  fmt.println("  cancel <run_id> --execution <number> [--reason <text>]")
+ fmt.println("Fan-out: a stage may set \"for_each\": \"inputs.<array-input>\" (pass the list via --inputs-file; --input k=v is always a string)")
+ fmt.println("  or \"<stage>.outputs[0].<field>\". Invalid inputs fail before anything is created; an empty array completes the stage with zero tasks.")
  fmt.println("A retry creates a fresh execution. Consumed outputs block retry. Stage retry is unsupported.")
  fmt.println("Agent mode may omit --chain when creating/listing runs; run IDs are always explicit.")
 }
