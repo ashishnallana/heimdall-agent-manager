@@ -10,6 +10,7 @@ import "core:crypto/ecdh"
 import "core:crypto/ecdsa"
 import "core:crypto/hkdf"
 import "core:encoding/base64"
+import "core:encoding/json"
 import "core:fmt"
 import "core:os"
 import "core:strconv"
@@ -109,7 +110,35 @@ test_store_keyring :: proc(bridge_id: string, key_hex: string, epoch: u32 = 1) -
 // bridge_id: generate in memory, then commit with owner as the enrolled owner.
 test_provision_identity :: proc(bridge_id: string, owner: string = TEST_VAULT_USER_ID) -> bool {
 	if _, ok := bridge_unseal_identity_generate_for_enrollment(); !ok do return false
+	// An enrollment arms its pairing keys (ham-bridge enroll does the same).
+	keys := test_pair_keys()
+	bridge_pairing_arm(&keys)
+	vault.pair_keys_wipe(&keys)
 	return bridge_unseal_identity_commit_enrollment(bridge_id, owner)
+}
+
+// The pairing code a test enrollment "printed" (hub-blind pairing).
+TEST_PAIR_CODE :: "K7QX-M2PA-ZD4H"
+
+test_pair_keys :: proc() -> vault.Pair_Keys {
+	keys, _ := vault.pair_keys_derive(TEST_PAIR_CODE)
+	return keys
+}
+
+// test_pair_mac is the approver's pair_mac for a chain proof (under TEST_PAIR_CODE).
+test_pair_mac :: proc(proof_json: string) -> string {
+	Proof :: struct {
+		root_sign_pub:    string,
+		subject_approval: struct {
+			statement: string,
+		},
+	}
+	p: Proof
+	if json.unmarshal_string(proof_json, &p, json.Specification.JSON, context.temp_allocator) != nil do return ""
+	keys := test_pair_keys()
+	defer vault.pair_keys_wipe(&keys)
+	mac, _ := vault.pair_approve_mac_hex(&keys, p.subject_approval.statement, p.root_sign_pub, context.temp_allocator)
+	return mac
 }
 
 // ── unseal v2 payload builder (the browser side) ────────────────────────────
@@ -122,6 +151,8 @@ Test_Unseal_Options :: struct {
 	identity_override:   string, // echo this identity key instead of the bridge's
 	format_override:     string,
 	proof_override:      string, // send this chain_proof JSON instead of a valid one
+	pair_mac_override:   string, // send this pair_mac instead of the approver's
+	no_pair_mac:         bool,   // send no pair_mac (a first unseal not from the approver)
 	root_scalar:         string, // sign the default proof under this account root (hex scalar)
 }
 
@@ -246,14 +277,39 @@ test_create_unseal_v2_payload :: proc(bridge_id: string, kr: ^vault.Vault_Keyrin
 	if proof == "" && bridge_identity_public_key_hex(bridge_id) != "" {
 		proof = test_chain_proof(bridge_id, kr, opts.root_scalar if opts.root_scalar != "" else TEST_ACCOUNT_ROOT_SCALAR)
 	}
-	if proof == "" do proof = "null"
-	return fmt.aprintf(
-		`{{"type":"bridge_unseal","command_id":"cmd_test","bridge_id":"%s","timestamp":%d,"nonce":"%s","client_public_key":"%s","iv":"%s","tag":"%s","ciphertext":"%s","format":"%s","current_epoch":%d,"unseal_key_signature":%s,"bridge_identity_public_key":"%s","chain_proof":%s}}`,
-		bridge_id, timestamp, nonce, vault.hex_encode_lower(client_pub[:], context.temp_allocator), vault.hex_encode_lower(iv[:], context.temp_allocator),
-		tag_hex, ct_hex, format, kr.current_epoch, sig if sig != "" else "null", identity, proof,
-	)
+	pair_mac := opts.pair_mac_override
+	if pair_mac == "" && !opts.no_pair_mac && proof != "" do pair_mac = test_pair_mac(proof)
+	as_value :: proc(text: string) -> json.Value {
+		if text == "" do return nil
+		v, err := json.parse_string(text, json.DEFAULT_SPECIFICATION, true, context.temp_allocator)
+		return v if err == nil else json.String(text)
+	}
+	Payload :: struct {
+		type:                       string,
+		command_id:                 string,
+		bridge_id:                  string,
+		timestamp:                  i64,
+		nonce:                      string,
+		client_public_key:          string,
+		iv:                         string,
+		tag:                        string,
+		ciphertext:                 string,
+		format:                     string,
+		current_epoch:              u32,
+		unseal_key_signature:       json.Value,
+		bridge_identity_public_key: string,
+		chain_proof:                json.Value,
+		pair_mac:                   string `json:"pair_mac,omitempty"`,
+	}
+	data, _ := json.marshal(Payload{
+		type = "bridge_unseal", command_id = "cmd_test", bridge_id = bridge_id, timestamp = timestamp, nonce = nonce,
+		client_public_key = vault.hex_encode_lower(client_pub[:], context.temp_allocator), iv = vault.hex_encode_lower(iv[:], context.temp_allocator),
+		tag = tag_hex, ciphertext = ct_hex, format = format, current_epoch = kr.current_epoch,
+		unseal_key_signature = as_value(sig), bridge_identity_public_key = identity, chain_proof = as_value(proof),
+		pair_mac = pair_mac,
+	})
+	return string(data)
 }
-
 @(private = "file")
 test_unseal_seal_raw :: proc(client: ^ecdh.Private_Key, bridge_pub_hex: string, iv: []byte, aad: string, plain: []byte) -> (ct_hex: string, tag_hex: string) {
 	// Reuse lib/vault's sealer by building a throwaway keyring is not possible for

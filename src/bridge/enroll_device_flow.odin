@@ -12,10 +12,12 @@
 // ===== THE THREE PROPERTIES THIS FILE EXISTS TO HOLD =====
 //
 //  1. THE APPROVAL URL CARRIES NO PER-REQUEST DATA. It is safe to type, bookmark,
-//     or open on another device. The operator enters the short code and compares
-//     the fingerprint printed here with the Hub-computed fingerprint on the
-//     approval page. That human comparison is the independent check that prevents
-//     a substituting Hub from silently replacing the bridge encryption key.
+//     or open on another device. The operator types the secret PAIRING CODE printed
+//     here (hub-blind pairing, plan §1 "Pairing"): the hub only ever sees a lookup and
+//     a MAC derived from it. The approving browser checks that MAC over this
+//     process's identity + ECDH keys (so a substituting Hub is caught without any
+//     fingerprint comparison), and the first unseal must carry the approver's
+//     pair_mac under the same code before this bridge pins the account root.
 //
 //  2. POLLING IS THE ONLY COMPLETION CHANNEL. The bridge redeems approval over
 //     its server-authenticated Hub connection with the device_code and PKCE
@@ -42,6 +44,7 @@ import "core:strings"
 import "core:sync"
 import "core:thread"
 import "core:time"
+import "core:encoding/json"
 import contracts "odin_test:contracts"
 import cfg_lib "odin_test:lib/config"
 import http "odin_test:lib/http_client"
@@ -254,20 +257,6 @@ bridge_enroll_approval_url :: proc(ui_origin: string, allocator := context.alloc
 	return strings.concatenate({ui_origin, BRIDGE_ENROLL_PAGE_PATH}, allocator)
 }
 
-// The automatic same-machine convenience carries the short code in the query so
-// it survives a forward-auth login round trip (a fragment would be dropped). The
-// short code is not a credential on its own — approval still needs a signed-in
-// user and the fingerprint confirmation — and the Hub's redirect only forwards a
-// canonicalised code. The SPA consumes and removes the code query while retaining
-// the route fragment. The terminal prints the stable URL for phone/manual
-// enrollment.
-bridge_enroll_automatic_approval_url :: proc(
-	ui_origin, user_code: string,
-	allocator := context.allocator,
-) -> string {
-	return strings.concatenate({ui_origin, BRIDGE_ENROLL_PAGE_PATH, "?code=", user_code}, allocator)
-}
-
 // ===== The machine descriptor =====
 
 // bridge_enroll_hostname resolves the real hostname, in order: gethostname(2),
@@ -328,48 +317,64 @@ bridge_enroll_descriptor_usable :: proc(d: Bridge_Machine_Descriptor) -> bool {
 	return true
 }
 
-// bridge_enroll_authorize_body builds the /device/authorize request.
+// Bridge_Authorize_Request is the /device/authorize body (typed; json.marshal).
 //
 // `device_label` IS the hostname: the Hub maps the grant's device_label straight
 // into the bridge row's `machine_hostname` and initial label, so this field is
 // where the real hostname has to land. `bridge_key_fingerprint` is deliberately
 // NOT sent — the Hub computes its own from the key and rejects a disagreeing body
 // value (settled 9), so sending one buys nothing and invites a 400.
+Bridge_Authorize_Request :: struct {
+	client:                     string,
+	device_label:               string,
+	os:                         string,
+	app_version:                string,
+	os_user:                    string,
+	bridge_public_key:          string,
+	bridge_identity_public_key: string `json:"bridge_identity_public_key,omitempty"`,
+	bridge_identity_proof:      Maybe(vault.Signature_Wire) `json:"bridge_identity_proof,omitempty"`,
+	code_challenge:             string,
+	code_challenge_method:      string,
+	// Hub-blind pairing: derived from the pairing code this process prints.
+	pair_lookup:                string `json:"pair_lookup,omitempty"`,
+	pair_key_mac:               string `json:"pair_key_mac,omitempty"`,
+}
+
+// bridge_enroll_authorize_body builds the /device/authorize request body.
 bridge_enroll_authorize_body :: proc(
 	d: Bridge_Machine_Descriptor,
 	public_key_hex, code_challenge: string,
 	identity_public_key_hex: string = "",
 	identity_proof_json: string = "",
+	pair_lookup: string = "",
+	pair_key_mac: string = "",
 	allocator := context.allocator,
 ) -> string {
-	b := strings.builder_make(allocator)
-	strings.write_string(&b, "{\"client\":\"ham-bridge\",\"device_label\":\"")
-	json_write_string(&b, d.hostname)
-	strings.write_string(&b, "\",\"os\":\"")
-	json_write_string(&b, bridge_enroll_os_display(d))
-	strings.write_string(&b, "\",\"app_version\":\"")
-	json_write_string(&b, d.bridge_version)
-	strings.write_string(&b, "\",\"os_user\":\"")
-	json_write_string(&b, d.os_user)
-	strings.write_string(&b, "\",\"bridge_public_key\":\"")
-	json_write_string(&b, public_key_hex)
-	if identity_public_key_hex != "" {
-		strings.write_string(&b, "\",\"bridge_identity_public_key\":\"")
-		json_write_string(&b, identity_public_key_hex)
+	body := Bridge_Authorize_Request{
+		client = "ham-bridge", device_label = d.hostname, os = bridge_enroll_os_display(d),
+		app_version = d.bridge_version, os_user = d.os_user, bridge_public_key = public_key_hex,
+		bridge_identity_public_key = identity_public_key_hex,
+		code_challenge = code_challenge, code_challenge_method = "S256",
+		pair_lookup = pair_lookup, pair_key_mac = pair_key_mac,
 	}
 	if identity_proof_json != "" {
-		// A canonical signature object (vault.signature_object): embedded as JSON.
-		strings.write_string(&b, "\",\"bridge_identity_proof\":")
-		strings.write_string(&b, identity_proof_json)
-		strings.write_string(&b, ",\"code_challenge\":\"")
-	} else {
-		strings.write_string(&b, "\",\"code_challenge\":\"")
+		if sw, ok := vault.signature_wire_from_text(identity_proof_json, context.temp_allocator); ok do body.bridge_identity_proof = sw
 	}
-	json_write_string(&b, code_challenge)
-	strings.write_string(&b, "\",\"code_challenge_method\":\"S256\"}")
-	return strings.to_string(b)
+	data, err := json.marshal(body, allocator = allocator)
+	if err != nil do return ""
+	return string(data)
 }
 
+// Bridge_Authorize_Response is the API envelope of a /device/authorize answer.
+Bridge_Authorize_Response :: struct {
+	data: struct {
+		device_code:            string,
+		verification_uri:       string,
+		interval:               int,
+		expires_in:             int,
+		bridge_key_fingerprint: string,
+	},
+}
 // bridge_enroll_os_display renders "linux 6.18.49 amd64" for the approval screen,
 // omitting whichever parts are unknown rather than printing empty separators.
 bridge_enroll_os_display :: proc(d: Bridge_Machine_Descriptor, allocator := context.temp_allocator) -> string {
@@ -922,9 +927,8 @@ bridge_enroll_wait_for_vault_delivery :: proc(args: []string, bridge_id: string)
 }
 
 // bridge_enroll_print_account_fingerprint shows the account root this bridge pinned at
-// its first unseal (plan §1 "Bridge keyring authentication"). The first unseal is
-// trusted to whoever sealed it, so the owner compares this with the account
-// fingerprint an approved browser shows in Settings → Devices.
+// its first unseal (plan §1 "Bridge keyring authentication"). The pin was verified with
+// the pairing code (the approver's pair_mac); the fingerprint is printed for reference.
 bridge_enroll_print_account_fingerprint :: proc(bridge_id: string) {
 	fp := bridge_account_fingerprint(bridge_id)
 	if fp == "" {
@@ -932,8 +936,7 @@ bridge_enroll_print_account_fingerprint :: proc(bridge_id: string) {
 		return
 	}
 	fmt.printfln("  account         fingerprint %s", fp)
-	fmt.println("                  Check it matches Settings → Devices on one of your approved browsers;")
-	fmt.println("                  if it does not, revoke this bridge and run `ham-bridge enroll` again.")
+	fmt.println("                  (verified with the pairing code; Settings → Devices shows the same value)")
 }
 
 // ===== The command: `ham-bridge enroll --hub <origin>` =====
@@ -992,8 +995,32 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 		return false
 	}
 
+	// Step 3 — the secret pairing code (hub-blind pairing, plan §1 "Pairing"). Only
+	// values derived from it leave this process; its MAC keys stay in memory until the
+	// first unseal pins the account root (or this command ends).
+	pair_code, code_ok := vault.pair_code_generate(context.temp_allocator)
+	if !code_ok {
+		fmt.eprintln("ham-bridge enroll: the OS random source failed; cannot create a pairing code")
+		return false
+	}
+	defer mem.zero_explicit(raw_data(pair_code), len(pair_code))
+	pair_keys, keys_ok := vault.pair_keys_derive(pair_code)
+	defer vault.pair_keys_wipe(&pair_keys)
+	pair_payload, payload_ok := vault.pair_bridge_payload(identity_hex, public_key_hex, code_challenge, context.temp_allocator)
+	pair_key_mac, mac_ok := vault.pair_key_mac_hex(&pair_keys, "bridge", pair_payload, context.temp_allocator)
+	if !keys_ok || !payload_ok || !mac_ok {
+		fmt.eprintln("ham-bridge enroll: could not derive the pairing values; cannot continue")
+		return false
+	}
+	bridge_pairing_arm(&pair_keys)
+	defer bridge_pairing_disarm()
+
 	// Step 4 — the anonymous device-authorization request.
-	body := bridge_enroll_authorize_body(descriptor, public_key_hex, code_challenge, identity_hex, identity_proof, context.temp_allocator)
+	body := bridge_enroll_authorize_body(descriptor, public_key_hex, code_challenge, identity_hex, identity_proof, vault.pair_lookup_hex(&pair_keys, context.temp_allocator), pair_key_mac, context.temp_allocator)
+	if body == "" {
+		fmt.eprintln("ham-bridge enroll: could not encode the authorize request")
+		return false
+	}
 	fmt.printfln("bridge enroll: POST %s%s (no token — host=%s user=%s)",
 		api_base, BRIDGE_ENROLL_AUTHORIZE_PATH, descriptor.hostname, descriptor.os_user)
 	resp, sent := http.request_with_headers_timeout(
@@ -1009,25 +1036,20 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 		if resp.status == 404 do fmt.eprintln("  hint: --hub must point at the Hub API origin.")
 		return false
 	}
-	device_code := extract_json_string(resp.body, "device_code", "")
-	user_code := extract_json_string(resp.body, "user_code", "")
-	hub_fingerprint := extract_json_string(resp.body, "bridge_key_fingerprint", "", context.temp_allocator)
-	interval := extract_json_int(resp.body, "interval", BRIDGE_ENROLL_DEFAULT_INTERVAL_SECONDS)
-	expires_in := extract_json_int(resp.body, "expires_in", BRIDGE_ENROLL_MAX_WAIT_SECONDS)
-	if device_code == "" || user_code == "" {
-		fmt.eprintfln("bridge enroll FAILED: the hub's authorize response carried no device_code/user_code — %s", resp.body)
+	authorized: Bridge_Authorize_Response
+	if json.unmarshal_string(resp.body, &authorized, json.Specification.JSON, context.temp_allocator) != nil || authorized.data.device_code == "" {
+		fmt.eprintfln("bridge enroll FAILED: the hub's authorize response carried no device_code — %s", resp.body)
 		return false
 	}
+	device_code := authorized.data.device_code
+	hub_fingerprint := authorized.data.bridge_key_fingerprint
+	interval := authorized.data.interval
+	expires_in := authorized.data.expires_in
 	if interval <= 0 do interval = BRIDGE_ENROLL_DEFAULT_INTERVAL_SECONDS
 	if expires_in <= 0 || expires_in > BRIDGE_ENROLL_MAX_WAIT_SECONDS do expires_in = BRIDGE_ENROLL_MAX_WAIT_SECONDS
 	// Captured for diagnostics only (REQ-DIAG-1): an "expired" report with no
-	// times attached is unfalsifiable -- the operator cannot tell a genuine
-	// 10-minute timeout from a Hub-side bug reporting Expired early, and
-	// neither can whoever they ask for help. Every print below that reports a
-	// time-related failure states the wall clock AT THAT MOMENT, how long this
-	// process actually waited, and the deadline it was told to expect, so a
-	// report of this message can be judged against the numbers instead of a
-	// guess at how much time "felt like" it had passed.
+	// times attached is unfalsifiable, so every time-related failure below states
+	// the wall clock, how long this process waited, and the deadline it expected.
 	authorized_at_ms := time.to_unix_nanoseconds(time.now()) / 1_000_000
 	deadline_ms := authorized_at_ms + i64(expires_in) * 1000
 
@@ -1039,52 +1061,39 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 		fmt.eprintln("bridge enroll WARNING: the hub reports a DIFFERENT key fingerprint than this machine computed.")
 		fmt.eprintfln("  this machine: %s", fingerprint)
 		fmt.eprintfln("  hub says:     %s", hub_fingerprint)
-		fmt.eprintln("  Do NOT approve unless the page shows this machine's value. A mismatch is what a key substitution looks like.")
+		fmt.eprintln("  A mismatch is what a key substitution looks like; the approving browser will refuse it.")
 	}
-	verification_raw := extract_json_string(resp.body, "verification_uri", "", context.temp_allocator)
-	ui_origin, ui_ok := bridge_enroll_hub_url(verification_raw, context.temp_allocator)
+	ui_origin, ui_ok := bridge_enroll_hub_url(authorized.data.verification_uri, context.temp_allocator)
 	if !ui_ok {
 		fmt.eprintln("bridge enroll FAILED: Hub is not configured with --ui-origin; cannot build an approval link")
 		return false
 	}
 
-	// Step 6 — print a stable URL plus the short code and independently computed
-	// fingerprint. The URL contains no enrollment-specific material.
+	// Step 6 — print a stable, code-free URL and the pairing code. The code is typed
+	// once on an approved device; a link never carries it.
 	approval_url := bridge_enroll_approval_url(ui_origin, context.temp_allocator)
-	// The Hub's verification_uri_complete is the UI's own approval route with the
-	// code pre-filled; accept it only when it sits under the same UI origin.
-	direct_url := extract_json_string(resp.body, "verification_uri_complete", "", context.temp_allocator)
-	if direct_url != "" && !strings.has_prefix(direct_url, strings.concatenate({strings.trim_right(ui_origin, "/"), "/#/device/add"}, context.temp_allocator)) {
-		direct_url = ""
-	}
+	identity_fp, _ := bridge_enroll_fingerprint(identity_hex, context.temp_allocator)
 	fmt.println("")
 	fmt.println("Enroll this machine")
-	fmt.println("  Open this link:")
+	fmt.println("  On a device that already uses Heimdall, open:")
 	fmt.println("")
-	if direct_url != "" {
-		fmt.printfln("  %s", direct_url)
-		fmt.println("")
-		fmt.printfln("  (if you must sign in first and land elsewhere: %s)", approval_url)
-	} else {
-		fmt.printfln("  %s", approval_url)
-	}
+	fmt.printfln("  %s", approval_url)
 	fmt.println("")
-	fmt.printfln("  Enter device code      %s", user_code)
-	fmt.println("  Confirm this fingerprint matches the approval page:")
-	fmt.printfln("                         %s", fingerprint)
-	fmt.println("  The code expires shortly. This process retrieves its credential directly")
-	fmt.println("  from the Hub using PKCE-protected polling.")
+	fmt.println("  and type this pairing code once:")
+	fmt.println("")
+	fmt.printfln("      %s", pair_code)
+	fmt.println("")
+	fmt.println("  The code is a secret: type it only on your own device. It expires shortly.")
+	fmt.printfln("  (bridge identity fingerprint, shown on the approval page: %s)", identity_fp)
+	fmt.println("  This process retrieves its credential directly from the Hub using PKCE-protected polling.")
 	fmt.println("")
 	if !has_flag(args, "--headless") {
-		automatic_url := direct_url if direct_url != "" else bridge_enroll_automatic_approval_url(
-			ui_origin, user_code, context.temp_allocator)
-		if bridge_enroll_try_open_approval_url(automatic_url) {
+		if bridge_enroll_try_open_approval_url(approval_url) {
 			fmt.println("Opened the approval page in your browser.")
 		} else {
 			fmt.println("Could not open a browser automatically; use the link shown above.")
 		}
-	}
-	fmt.printfln("Waiting for approval (expires in %dm%02ds)…", expires_in / 60, expires_in % 60)
+	}	fmt.printfln("Waiting for approval (expires in %dm%02ds)…", expires_in / 60, expires_in % 60)
 
 	// Steps 7-11 — poll until a terminal answer. Polling is the only completion
 	// channel; credentials never pass through the approving browser.

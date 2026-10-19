@@ -758,7 +758,20 @@ test_v2_unseal_requires_chain_to_pinned_root :: proc(t: ^testing.T) {
 	floor0, _ := keystore_read_epoch_floor(f.id_a)
 	testing.expect(t, !floor0.root.set, "nothing pinned by a refused unseal")
 
-	// First verified unseal pins the root.
+	// Hub-blind pairing: a valid proof is not enough for the FIRST unseal — it also
+	// needs the approver's pair_mac under this bridge's pairing code. A hub racing the
+	// approver (no code) gets nothing pinned.
+	msg0: string
+	ok, msg0 = unseal(f.id_a, &one, now, "n_pair_none", {no_pair_mac = true})
+	testing.expectf(t, !ok && strings.contains(msg0, "pairing"), "first unseal without a pair_mac refused: %s", msg0)
+	ok, _ = unseal(f.id_a, &one, now, "n_pair_forged", {pair_mac_override = strings.repeat("ab", 32, context.temp_allocator)})
+	testing.expect(t, !ok, "first unseal with a forged pair_mac refused")
+	ok, _ = unseal(f.id_a, &one, now, "n_pair_other_root", {root_scalar = TEST_ACCOUNT_ROOT_OTHER, pair_mac_override = test_pair_mac(test_chain_proof(f.id_a, &one))})
+	testing.expect(t, !ok, "a pair_mac for the real root does not let a hub-substituted root pin")
+	floor1, _ := keystore_read_epoch_floor(f.id_a)
+	testing.expect(t, !floor1.root.set, "nothing pinned without a valid pair_mac")
+
+	// First verified unseal (with the approver's pair_mac) pins the root.
 	ok, _ = unseal(f.id_a, &one, now, "n_chain_first")
 	testing.expect(t, ok, "first unseal with a valid proof accepted")
 	testing.expect(t, bridge_account_fingerprint(f.id_a) != "", "account root pinned")

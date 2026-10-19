@@ -19,7 +19,9 @@ import "core:os"
 import "core:sys/posix"
 import "core:strings"
 import "core:sync"
+import "core:encoding/json"
 import "core:testing"
+import vault "odin_test:lib/vault"
 
 // A fixed, well-formed uncompressed P-256 point: 0x04 then bytes 1..64. Its
 // fingerprint and base64url encoding below were computed INDEPENDENTLY in python
@@ -69,18 +71,23 @@ enroll_approval_url_is_stable_and_code_free :: proc(t: ^testing.T) {
 }
 
 @(test)
-enroll_automatic_approval_url_survives_a_login_redirect :: proc(t: ^testing.T) {
-	automatic := bridge_enroll_automatic_approval_url("https://heimdall.example.com", "ABCD-2345")
-	defer delete(automatic)
-	testing.expect_value(t, automatic, "https://heimdall.example.com/api/v1/device/add?code=ABCD-2345")
-	// Only path + query survive a forward-auth `rd=` round trip; a fragment would
-	// strand the operator on Home after login.
-	testing.expect(t, !strings.contains(automatic, "#"), "the code must not ride in a fragment")
-	for forbidden in ([?]string{"device_code", "bpk", "state", "callback", "access_token"}) {
-		testing.expectf(t, !strings.contains(automatic, forbidden), "automatic URL leaked %s", forbidden)
-	}
+enroll_authorize_body_carries_pairing_values_never_the_code :: proc(t: ^testing.T) {
+	// Hub-blind pairing: the body carries the lookup and key_mac derived from the
+	// pairing code; the code itself never leaves the bridge.
+	code, ok := vault.pair_code_generate(context.temp_allocator)
+	testing.expect(t, ok, "pairing code generated")
+	keys, _ := vault.pair_keys_derive(code)
+	defer vault.pair_keys_wipe(&keys)
+	lookup := vault.pair_lookup_hex(&keys, context.temp_allocator)
+	d := Bridge_Machine_Descriptor{hostname = "dawnstar", os = "Linux", os_user = "tanmay", bridge_version = "1.2.3"}
+	body := bridge_enroll_authorize_body(d, TEST_PUBKEY_HEX, "challenge-value", pair_lookup = lookup, pair_key_mac = lookup, allocator = context.temp_allocator)
+	decoded: Bridge_Authorize_Request
+	testing.expect(t, json.unmarshal_string(body, &decoded, json.Specification.JSON, context.temp_allocator) == nil, "the body is valid JSON")
+	testing.expect_value(t, decoded.pair_lookup, lookup)
+	testing.expect_value(t, decoded.device_label, "dawnstar")
+	symbols, _ := vault.pair_code_symbols(code)
+	testing.expect(t, !strings.contains(body, string(symbols[:])) && !strings.contains(body, code), "the pairing code is never sent")
 }
-
 @(test)
 enroll_pkce_challenge_matches_rfc7636_vector :: proc(t: ^testing.T) {
 	// RFC 7636 Appendix B's verifier and its expected S256 challenge, verbatim.

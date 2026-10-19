@@ -150,6 +150,44 @@ bridge_unseal_boot_id :: proc() -> string {
 	return string(g_bridge_boot_id_buf[:])
 }
 
+// ── Hub-blind pairing (plan §1 "Pairing") ──────────────────────────────────
+// `ham-bridge enroll` draws a secret pairing code, prints it for the operator and
+// keeps only the derived keys, in memory, for the life of the enrollment. The FIRST
+// unseal (no root pinned yet) is accepted only with a pair_mac under that code over
+// this bridge's approval and the account root: the hub never sees the code, so it
+// cannot race the approver with its own root. Wiped after the first pin and when the
+// enrollment ends; a process without armed pairing keys never pins a root.
+
+@(private = "file")
+g_bridge_pair_mu: sync.Mutex
+@(private = "file")
+g_bridge_pair_keys: vault.Pair_Keys
+@(private = "file")
+g_bridge_pair_armed: bool
+
+bridge_pairing_arm :: proc(keys: ^vault.Pair_Keys) {
+	sync.mutex_lock(&g_bridge_pair_mu)
+	defer sync.mutex_unlock(&g_bridge_pair_mu)
+	g_bridge_pair_keys = keys^
+	g_bridge_pair_armed = true
+}
+
+bridge_pairing_disarm :: proc() {
+	sync.mutex_lock(&g_bridge_pair_mu)
+	defer sync.mutex_unlock(&g_bridge_pair_mu)
+	vault.pair_keys_wipe(&g_bridge_pair_keys)
+	g_bridge_pair_armed = false
+}
+
+// bridge_pairing_first_pin_ok verifies a first unseal's pair_mac (after the chain proof verified).
+@(private = "file")
+bridge_pairing_first_pin_ok :: proc(proof_value: json.Value, pair_mac: string) -> bool {
+	sync.mutex_lock(&g_bridge_pair_mu)
+	defer sync.mutex_unlock(&g_bridge_pair_mu)
+	if !g_bridge_pair_armed do return false
+	return vault.pair_verify_bridge_first_pin(&g_bridge_pair_keys, proof_value, pair_mac)
+}
+
 // Resets the ephemeral key and identity state (test isolation only).
 bridge_unseal_reset_for_test :: proc() {
 	sync.mutex_lock(&g_bridge_ecdh_mu)
@@ -695,14 +733,21 @@ bridge_unseal_decrypt_and_verify :: proc(
 	//      bridge's own approval by such a device. Statement user_ids prove the owner;
 	//      the hub-reported owner pinned at enrollment (a) is only a consistency check
 	//      against them. Missing or invalid proof → refuse, nothing installed.
-	//      Residual: the first unseal is trusted to whoever sealed it (the approving
-	//      device in the normal flow); the root's fingerprint is printed at enrollment
-	//      for the owner to compare with an approved browser.
+	//  (d) The FIRST unseal (no root pinned yet) also needs the approver's pair_mac
+	//      under this bridge's pairing code (bridge_pairing_first_pin_ok): only the
+	//      device the operator typed the code into can have made it, so a hub racing
+	//      the approver with its own root and keyring is refused.
 	proof_value, proof_ok := bridge_unseal_chain_proof(payload_json)
 	if !proof_ok do return false, vault.chain_error_message(.Malformed)
 	root, chain_err := vault.bridge_chain_verify(proof_value, owner, our_identity, &kr, &floor.root)
 	if chain_err != .None do return false, vault.chain_error_message(chain_err)
 	first_pin := !floor.root.set
+	if first_pin {
+		pair_mac := jsonx.extract_string(payload_json, "pair_mac", "", true, context.temp_allocator)
+		if !bridge_pairing_first_pin_ok(proof_value, pair_mac) {
+			return false, "first unseal refused: it carries no valid pairing proof from the device this bridge's pairing code was typed into"
+		}
+	}
 	if first_pin do floor.root = root
 
 	raw: [vault.KEYRING_MAX_BYTES]byte
@@ -713,6 +758,8 @@ bridge_unseal_decrypt_and_verify :: proc(
 	epoch_floor_merge(&floor, local_bridge_id, &kr)
 	if !keystore_store_epoch_floor(local_bridge_id, &floor) do return false, "failed to persist the epoch floor; unseal refused"
 	if first_pin {
+		// The pairing code has done its job; nothing may pin again in this process.
+		bridge_pairing_disarm()
 		if fp, fp_ok := vault.account_fingerprint(&floor.root, context.temp_allocator); fp_ok {
 			fmt.printfln("vault: pinned account root %s (fingerprint %s)", vault.root_pin_device_id(&floor.root), fp)
 		}

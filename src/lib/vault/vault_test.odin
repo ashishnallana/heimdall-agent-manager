@@ -660,3 +660,16 @@ test_pairing_vectors :: proc(t: ^testing.T) {
 	_, fail := pair_code_generate(context.temp_allocator, "/nonexistent/heimdall-random")
 	testing.expect(t, !fail, "randomness failure fails closed")
 }
+@(test)
+test_pairing_bridge_first_pin :: proc(t: ^testing.T) {
+	root := load_vectors(t)
+	p := obj(root, "pairing")
+	keys, _ := pair_keys_derive(str(p, "code"))
+	defer pair_keys_wipe(&keys)
+	proof := obj(root, "bridge_chain")["proof"]
+	testing.expect(t, pair_verify_bridge_first_pin(&keys, proof, str(p, "approve_mac")), "valid pair_mac pins")
+	testing.expect(t, !pair_verify_bridge_first_pin(&keys, proof, ""), "missing pair_mac refused")
+	testing.expect(t, !pair_verify_bridge_first_pin(&keys, proof, str(p, "browser_key_mac")), "wrong mac refused")
+	other, _ := pair_keys_derive("AAAA-AAAA-AAAA")
+	testing.expect(t, !pair_verify_bridge_first_pin(&other, proof, str(p, "approve_mac")), "another code refused")
+}

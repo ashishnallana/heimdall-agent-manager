@@ -3,6 +3,7 @@ package vault
 import "core:crypto"
 import "core:crypto/hkdf"
 import "core:crypto/hmac"
+import "core:encoding/json"
 import "core:strings"
 import os_random "odin_test:lib/os_random"
 
@@ -145,4 +146,22 @@ pair_approve_mac_hex :: proc(keys: ^Pair_Keys, approval_statement, root_sign_pub
 pair_mac_equal :: proc(a, b: string) -> bool {
 	if !valid_pair_hex(a) || !valid_pair_hex(b) do return false
 	return crypto.compare_constant_time(transmute([]byte)a, transmute([]byte)b) == 1
+}
+
+// pair_verify_bridge_first_pin checks the pair_mac of a bridge's FIRST unseal (no
+// pinned root yet): HMAC under the bridge's pairing code over its own approval
+// statement (proof.subject_approval) and the proof's root key. Call it only after
+// bridge_chain_verify accepted `proof_value` (which checked the approval names this
+// bridge and chains to that root). The hub lacks the code, so it cannot race the
+// approver with its own root.
+pair_verify_bridge_first_pin :: proc(keys: ^Pair_Keys, proof_value: json.Value, pair_mac: string) -> bool {
+	p, p_ok := proof_value.(json.Object)
+	if !p_ok do return false
+	sa, sa_ok := p["subject_approval"].(json.Object)
+	if !sa_ok do return false
+	statement, st_ok := sa["statement"].(json.String)
+	root, r_ok := p["root_sign_pub"].(json.String)
+	if !st_ok || !r_ok do return false
+	want, ok := pair_approve_mac_hex(keys, string(statement), string(root), context.temp_allocator)
+	return ok && pair_mac_equal(want, pair_mac)
 }
