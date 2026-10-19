@@ -14,6 +14,9 @@ Agent_Get_Instance_Proc :: proc(ctx: rawptr, instance_id: string) -> (domain.Age
 Agent_Delete_Instance_Proc :: proc(ctx: rawptr, instance_id: string) -> (bool, domain.Domain_Error)
 Agent_List_Instances_By_Owner_Proc :: proc(ctx: rawptr, owner_user_id: domain.User_ID, limit: int, cursor: string) -> ([]domain.Agent_Instance, domain.Domain_Error)
 Agent_List_Instances_By_Bridge_Proc :: proc(ctx: rawptr, bridge_id: string) -> ([]domain.Agent_Instance, domain.Domain_Error)
+// Lists the owner's instances bound to one chain (agent_instances.chain_id) — the
+// matcher's chain-scoped read, so it never loads the owner's whole instance history.
+Agent_List_Instances_By_Chain_Proc :: proc(ctx: rawptr, owner_user_id: domain.User_ID, chain_id: string) -> ([]domain.Agent_Instance, domain.Domain_Error)
 // Lists instances still in an active runtime state (running/idle/busy/launching/
 // starting/stopping) across all owners — used by the staleness reaper.
 Agent_List_Active_Runtime_Instances_Proc :: proc(ctx: rawptr) -> ([]domain.Agent_Instance, domain.Domain_Error)
@@ -40,6 +43,7 @@ Agent_Repository :: struct {
 	delete_instance: Agent_Delete_Instance_Proc,
 	list_instances_by_owner: Agent_List_Instances_By_Owner_Proc,
 	list_instances_by_bridge: Agent_List_Instances_By_Bridge_Proc,
+	list_instances_by_chain: Agent_List_Instances_By_Chain_Proc,
 	list_active_runtime_instances: Agent_List_Active_Runtime_Instances_Proc,
 	next_title_counter: Agent_Next_Title_Counter_Proc,
 }
@@ -112,4 +116,9 @@ agent_list_active_runtime_instances :: proc(repo: ^Agent_Repository) -> ([]domai
 agent_list_instances_by_bridge :: proc(repo: ^Agent_Repository, bridge_id: string) -> ([]domain.Agent_Instance, domain.Domain_Error) {
 	if repo == nil || repo.list_instances_by_bridge == nil do return nil, domain.domain_error(.Internal_Error, "agent repository is not configured")
 	return repo.list_instances_by_bridge(repo.ctx, bridge_id)
+}
+
+agent_list_instances_by_chain :: proc(repo: ^Agent_Repository, owner_user_id: domain.User_ID, chain_id: string) -> ([]domain.Agent_Instance, domain.Domain_Error) {
+	if repo == nil || repo.list_instances_by_chain == nil do return nil, domain.domain_error(.Internal_Error, "agent repository is not configured")
+	return repo.list_instances_by_chain(repo.ctx, owner_user_id, chain_id)
 }

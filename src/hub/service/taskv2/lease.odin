@@ -2,6 +2,7 @@ package taskv2
 
 import "base:runtime"
 import "core:fmt"
+import "core:mem/virtual"
 import "core:strings"
 import "core:sync"
 import domain "odin_test:hub/domain"
@@ -462,6 +463,19 @@ grant_boot_lease_grace :: proc(svc: ^Service) {
 // while the bridge was away); re-plan every chain with a held task.
 on_bridge_hello :: proc(svc: ^Service, bridge_id: string, active_instance_ids: []string) {
 	if svc == nil || svc.repo == nil || bridge_id == "" do return
+	// Everything this pass allocates (lease/task/chain rows, a match context per
+	// held chain, effects) is scratch. It runs on the bridge WS upgrade thread,
+	// which is on the persistent heap with no per-request arena, so without this
+	// scope every bridge (re)connect leaked a full matcher pass over every held
+	// chain. Heap-lived state (timers, recent_expiries, registry, merge jobs)
+	// already clones onto runtime.heap_allocator explicitly, as for the timer
+	// thread. Assign at proc-body scope: a nested-scope assignment would revert.
+	scratch: virtual.Arena
+	scratch_ok := virtual.arena_init_growing(&scratch) == nil
+	defer if scratch_ok do virtual.arena_destroy(&scratch)
+	scratch_allocator := context.allocator
+	if scratch_ok do scratch_allocator = virtual.arena_allocator(&scratch)
+	context.allocator = scratch_allocator
 	u, ok, _ := begin_uow(svc)
 	if !ok do return
 	leases, lerr := iface.taskchain_list_all_leases(svc.repo)

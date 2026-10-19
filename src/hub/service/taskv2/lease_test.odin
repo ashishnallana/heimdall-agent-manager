@@ -22,19 +22,25 @@ import lockorder "odin_test:lib/lockorder"
 
 Wake_Log :: struct {
 	cmds: [dynamic]Wake_Command,
+	// The log outlives the engine's scratch scopes (on_bridge_hello runs on a
+	// per-call arena), so it owns its copies on the allocator it was created with.
+	allocator: runtime.Allocator,
 }
 
 wake_log_observe :: proc(ctx: rawptr, cmd: Wake_Command) {
 	log := (^Wake_Log)(ctx)
+	context.allocator = log.allocator
 	append(&log.cmds, Wake_Command{bridge_id = strings.clone(cmd.bridge_id), chain_id = strings.clone(cmd.chain_id), body_json = strings.clone(cmd.body_json)})
 }
 
 wake_log_destroy :: proc(log: ^Wake_Log) {
+	context.allocator = log.allocator
 	for c in log.cmds { delete(c.bridge_id); delete(c.chain_id); delete(c.body_json) }
 	delete(log.cmds)
 }
 
 wake_log_reset :: proc(log: ^Wake_Log) {
+	context.allocator = log.allocator
 	for c in log.cmds { delete(c.bridge_id); delete(c.chain_id); delete(c.body_json) }
 	clear(&log.cmds)
 }
@@ -57,6 +63,8 @@ wake_log_has_stop :: proc(log: ^Wake_Log, inst: string) -> bool {
 lease_fixture :: proc(t: ^testing.T, tag: string) -> (^Fixture, ^Wake_Log, bool) {
 	fx, ok := fixture_open(t, tag)
 	log := new(Wake_Log)
+	log.allocator = context.allocator
+	log.cmds = make([dynamic]Wake_Command)
 	fx.svc.wake_observer = wake_log_observe
 	fx.svc.wake_observer_ctx = rawptr(log)
 	init_task_metrics()

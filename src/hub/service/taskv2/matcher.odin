@@ -120,8 +120,8 @@ load_match_context :: proc(svc: ^Service, chain: domain.Task_Chain) -> (Match_Co
 			if inst, iok, _ := iface.agent_get_instance(svc.agents, m.agent_instance_id); iok do add(&ctx, &seen, inst)
 		}
 	}
-	if insts, ierr := iface.agent_list_instances_by_owner(svc.agents, chain.owner_user_id, 1000, ""); ierr.code == .None {
-		for inst in insts do if inst.chain_id == string(chain.chain_id) do add(&ctx, &seen, inst)
+	if insts, ierr := iface.agent_list_instances_by_chain(svc.agents, chain.owner_user_id, string(chain.chain_id)); ierr.code == .None {
+		for inst in insts do add(&ctx, &seen, inst)
 	}
 	if chain.coordinator_agent_instance_id != "" {
 		if coord, cok, _ := iface.agent_get_instance(svc.agents, chain.coordinator_agent_instance_id); cok {
