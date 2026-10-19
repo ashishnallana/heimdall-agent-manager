@@ -31,9 +31,9 @@ import {
 } from '../../src/ui/utils/vaultStatements.ts';
 import { decryptVaultText, encryptVaultText, VAULT_LOCKED_MARKER } from '../../src/ui/utils/vaultCrypto.ts';
 import { UNSEAL_V2_FORMAT, UNSEAL_V2_INFO, buildUnsealAad, prepareUnsealPayload } from '../../src/ui/utils/vaultBridgeUnseal.ts';
-import { createDeviceIdentity, deviceIdFor, fingerprintFor, memoryDeviceStore, labelB64 } from '../../src/ui/utils/deviceIdentity.ts';
+import { advancePins, createDeviceIdentity, deviceIdFor, fingerprintFor, memoryDeviceStore, labelB64, otherPinnedAccounts, acknowledgeOtherAccount } from '../../src/ui/utils/deviceIdentity.ts';
 import { signedRequestHeaders, newRequestNonce } from '../../src/ui/utils/vaultRequestSigner.ts';
-import { verifyDirectory, wrapRecipients, buildBridgeChainProof, verifyBridgeChainProof } from '../../src/ui/utils/vaultDirectoryVerify.ts';
+import { verifyDirectory, wrapRecipients, buildBridgeChainProof, verifyBridgeChainProof, pinsFromChain } from '../../src/ui/utils/vaultDirectoryVerify.ts';
 import { openVerifiedWrap } from '../../src/ui/utils/vaultKeyringWrap.ts';
 import { deliverKeyringToBridge } from '../../src/ui/utils/vaultBridgeDelivery.ts';
 import { buildBridgeApproval, buildBrowserApproval, buildGenesis, buildRegistration, buildRevocation, buildRotation } from '../../src/ui/utils/vaultDeviceFlows.ts';
@@ -149,7 +149,17 @@ async function commitHex(bytes, userId, epoch) {
   } finally { for (const x of parsed.entries) x.key.fill(0); }
 }
 
-const pinsFor = async (rootPub, v = 0, e = 0) => ({ root_device_id: await deviceIdFor(rootPub), root_sign_pub: rootPub, max_directory_version: v, max_epoch: e });
+// Pins naming another root (for the root-swap negative).
+const pinsFor = async (rootPub, headHash) => ({ root_device_id: await deviceIdFor(rootPub), root_sign_pub: rootPub, head_seq: 1, head_hash: headHash, max_epoch: 0 });
+
+async function keyringCommits(bytes, userId) {
+  const parsed = parseKeyringBytes(Uint8Array.from(bytes));
+  try {
+    const out = [];
+    for (const e of parsed.entries) out.push({ epoch: e.epoch, commit: toLowerHex(await epochCommit(e.key, userId, e.epoch)) });
+    return out;
+  } finally { for (const x of parsed.entries) x.key.fill(0); }
+}
 
 // ── simulated devices ───────────────────────────────────────────────────────
 
@@ -263,7 +273,7 @@ class SimBridge {
       const parsed = parseKeyringBytes(plain, ownerUserId);
       for (const e of parsed.entries) e.key.fill(0);
       if (parsed.currentEpoch !== payload.current_epoch) throw new Error('epoch mismatch');
-      const root = await verifyBridgeChainProof(payload.chain_proof, parsed.currentEpoch, await commitHex(plain, ownerUserId, parsed.currentEpoch), {
+      const root = await verifyBridgeChainProof(payload.chain_proof, await keyringCommits(plain, ownerUserId), {
         ownerUserId, bridgeIdentityPub: this.identity.signPub, pinnedRootSignPub: this.pinnedRoot,
       });
       this.seenNonces.add(payload.nonce);
@@ -327,15 +337,16 @@ async function main() {
       expect(self.status === 200 && self.data.status === 'approved' && self.data.wrap, 'A fetches its own wrap via /vault/devices/self');
       const { dir, chain } = await fetchVerified(ALICE, S.uid, null);
       S.root = chain.rootSignPub;
-      S.pins = await pinsFor(S.root);
+      S.pins = pinsFromChain(chain);
       expect(S.root === S.A.signPub, 'chain verifies; root pinned to A');
       // Negative controls: the verifier is not vacuous.
       const notRoot = await SimDevice.create(S.uid, 'not the root');
-      await verifyDirectory(dir, S.uid, await pinsFor(notRoot.signPub)).then(() => expect(false, 'pin mismatch accepted'), () => expect(true, 'verifier refuses a directory whose root differs from the pin'));
-      await verifyDirectory(dir, S.uid, { ...S.pins, max_directory_version: dir.version + 1 }).then(() => expect(false, 'rollback accepted'), () => expect(true, 'verifier refuses a directory older than the pinned version'));
+      await verifyDirectory(dir, S.uid, await pinsFor(notRoot.signPub, chain.headHash)).then(() => expect(false, 'pin mismatch accepted'), () => expect(true, 'verifier refuses a directory whose root differs from the pin'));
+      await verifyDirectory(dir, S.uid, { ...S.pins, head_seq: dir.version + 1 }).then(() => expect(false, 'rollback accepted'), () => expect(true, 'verifier refuses a log shorter than the pinned head'));
+      await verifyDirectory(dir, S.uid, { ...S.pins, head_hash: '0'.repeat(64) }).then(() => expect(false, 'fork accepted'), () => expect(true, 'verifier refuses a log that does not contain the pinned head (fork)'));
       const flip = (s) => s.replace(/epoch_commit=[0-9a-f]/, (m) => m.slice(0, -1) + (m.endsWith('0') ? '1' : '0'));
-      const tampered = { ...dir, epochs: dir.epochs.map((e) => ({ ...e, statement: flip(e.statement) })) };
-      await verifyDirectory(tampered, S.uid, S.pins).then(() => expect(false, 'tampered epoch accepted'), () => expect(true, 'verifier refuses a tampered epoch statement'));
+      const tampered = { ...dir, log: dir.log.map((e) => ({ ...e, statement: flip(e.statement) })) };
+      await verifyDirectory(tampered, S.uid, null).then(() => expect(false, 'tampered genesis accepted'), () => expect(true, 'verifier refuses a tampered genesis epoch_commit'));
       const bytes = await openWrap(S.A, self.data.wrap, chain);
       expect(await commitHex(bytes, S.uid, 1) === chain.commits.get(1), 'hub-stored self-wrap opens; epoch_commit(e1) matches the signed epoch statement');
       await S.A.setKeyring(bytes);
@@ -459,11 +470,51 @@ async function main() {
       expect(br.currentEpoch === 2, 'simulated bridge re-unsealed at e2 (chain proof: revoke-issued epoch statement)');
       // A stale proof (e1 statement) with the e2 keyring is refused by the bridge.
       const proof = buildBridgeChainProof(after.chain, br.identity.id);
-      const staleProof = { ...proof, epoch: { ...buildBridgeChainProof(chain, br.identity.id).epoch } };
+      const staleProof = { ...proof, epochs: buildBridgeChainProof(chain, br.identity.id).epochs };
       br.bootId = randHex(16);
       await br.signUnsealKey();
       const p2 = await prepareUnsealPayload(br.target(), Uint8Array.from(S.A.keyringBytes), proof);
       await br.receiveUnseal({ ...p2, chain_proof: staleProof }, S.uid).then(() => expect(false, 'stale epoch proof accepted'), () => expect(true, 'bridge refuses an epoch statement that is not for the keyring\'s current epoch'));
+    });
+
+    await step('4b hostile hub vs the signed log: deleted revocation, backdated approval by the revoked device, fork', async () => {
+      const { dir, chain } = await fetchVerified(ALICE, S.uid, S.pins);
+      S.pins = pinsFromChain(chain);
+      const revokeSeq = chain.epochs.get(2).seq;
+      expect(chain.revokedIds.has(S.B.id) && chain.epochs.get(2).type === 'revoke', `B's revocation is log op ${revokeSeq} and introduces epoch 2`);
+      const { statementCanonical, logEntryHash } = await import('../../src/ui/utils/vaultStatements.ts');
+      const refuse = async (d, pins, msg) => verifyDirectory(d, S.uid, pins).then(() => expect(false, `${msg} — accepted`), (e) => expect(true, `${msg} (${e.message})`));
+      // C1: the hub drops the revocation (row) and serves the rest; with or without pins.
+      const without = { ...dir, log: dir.log.filter((e) => e.seq !== revokeSeq) };
+      await refuse(without, null, 'a log with the revocation deleted is refused (gap)');
+      // ... and renumbers the later ops to close the gap: the hash links break.
+      const renumbered = { ...without, version: dir.version - 1, log: without.log.map((e, i) => ({ ...e, seq: i + 1 })) };
+      await refuse(renumbered, null, 'a renumbered log without the revocation is refused (prev_hash chain)');
+      // The log truncated before the revocation (B never revoked) is a rollback for any pinned device.
+      const truncated = { ...dir, version: revokeSeq - 1, current_epoch: 1, head_hash: chain.logHashes[revokeSeq - 2], log: dir.log.slice(0, revokeSeq - 1) };
+      await refuse(truncated, S.pins, 'a pinned device refuses the log rolled back to before the revocation');
+      // C2: the revoked B signs an approval of an attacker device in the next slot.
+      const X = await SimDevice.create(S.uid, 'attacker');
+      const xst = statementCanonical({ type: 'approve', user_id: S.uid, seq: String(dir.version + 1), prev_hash: chain.headHash, issuer_device_id: S.B.id, issued_at_ms: String(Date.now()), ...X.subject(), epoch: String(chain.currentEpoch), epoch_commit: chain.commits.get(chain.currentEpoch) });
+      const appended = { ...dir, version: dir.version + 1, head_hash: await logEntryHash(xst), log: [...dir.log, { seq: dir.version + 1, statement: xst, signature: JSON.parse(await S.B.signText(xst)) }],
+        devices: [...dir.devices, { device_id: X.id, kind: 'browser', status: 'approved', sign_alg: SIGN_ALG_ECDSA_P256_SHA256, wrap_alg: WRAP_ALG_ECDH_P256_HKDF_AES, sign_public_key: X.signPub, ecdh_public_key: X.ecdhPub }] };
+      await refuse(appended, null, 'an approval signed by the revoked B is refused');
+      // ... backdated into the revocation's slot (a fork of the log).
+      const bst = statementCanonical({ type: 'approve', user_id: S.uid, seq: String(revokeSeq), prev_hash: chain.logHashes[revokeSeq - 2], issuer_device_id: S.B.id, issued_at_ms: '1', ...X.subject(), epoch: '1', epoch_commit: chain.commits.get(1) });
+      const forked = { ...appended, version: revokeSeq, current_epoch: 1, head_hash: await logEntryHash(bst), log: [...dir.log.slice(0, revokeSeq - 1), { seq: revokeSeq, statement: bst, signature: JSON.parse(await S.B.signText(bst)) }] };
+      await refuse(forked, S.pins, 'a backdated approval forking the log at the revocation slot is refused by a pinned device');
+      // The same attacks against the REAL hub (direct DB writes), then restored.
+      const db = new DatabaseSync(HUB.dbPath);
+      try {
+        db.exec('PRAGMA busy_timeout = 5000');
+        const saved = db.prepare('SELECT * FROM vault_log WHERE user_id = ? AND seq = ?').get(S.uid, revokeSeq);
+        db.prepare('DELETE FROM vault_log WHERE user_id = ? AND seq = ?').run(S.uid, revokeSeq);
+        await fetchVerified(ALICE, S.uid, S.pins).then(() => expect(false, 'hub-deleted revocation accepted'), () => expect(true, 'clients refuse the hub directory after it deleted the revocation op'));
+        db.prepare('INSERT INTO vault_log (user_id, seq, statement, signature, entry_hash, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+          .run(saved.user_id, saved.seq, saved.statement, saved.signature, saved.entry_hash, saved.created_at);
+      } finally { db.close(); }
+      const back = await fetchVerified(ALICE, S.uid, S.pins);
+      expect(back.chain.headHash === chain.headHash, 'restored log verifies again');
     });
 
     await step('5 attacks over raw HTTP', async () => {
@@ -551,7 +602,7 @@ async function main() {
       // Hub-injected device row: a hostile hub (direct DB write) adds an "approved" browser.
       const M = await SimDevice.create(S.uid, 'injected');
       const { statementCanonical } = await import('../../src/ui/utils/vaultStatements.ts');
-      const mst = statementCanonical({ type: 'approve', user_id: S.uid, directory_version: String(afterV - 1), issuer_device_id: S.A.id, issued_at_ms: String(Date.now()), ...M.subject(), epoch: '2', epoch_commit: cur.commits.get(2) });
+      const mst = statementCanonical({ type: 'approve', user_id: S.uid, seq: String(afterV), prev_hash: cur.headHash, issuer_device_id: S.A.id, issued_at_ms: String(Date.now()), ...M.subject(), epoch: '2', epoch_commit: cur.commits.get(2) });
       const db = new DatabaseSync(HUB.dbPath);
       try {
         db.exec('PRAGMA busy_timeout = 5000');
@@ -622,40 +673,73 @@ async function main() {
       expect(after.status === 200 && !after.data.reset, 'directory intact, reset null');
     });
 
-    await step('7 bridge enrollment rolled back -> hub-retired, rotation_recommended; signed rotate', async () => {
+    await step('7 junk retirement hints change nothing; a real hint becomes a signed revoke; explicit rotate', async () => {
       // Clean up step 5's injected row (a hostile-hub artefact) so the hub's wrap
       // coverage check matches the chain-trusted set again.
       const db = new DatabaseSync(HUB.dbPath);
       try { db.exec('PRAGMA busy_timeout = 5000'); db.prepare("DELETE FROM vault_devices WHERE label = 'injected'").run(); } finally { db.close(); }
+      const before = await fetchVerified(ALICE, S.uid, S.pins);
+      // Junk hints: the hub marks a BROWSER (A itself) retired, and an unknown id.
+      const db2 = new DatabaseSync(HUB.dbPath);
+      try {
+        db2.exec('PRAGMA busy_timeout = 5000');
+        db2.prepare('UPDATE vault_devices SET retired_at = ? WHERE device_id = ?').run(new Date().toISOString(), S.A.id);
+      } finally { db2.close(); }
+      const junk = await fetchVerified(ALICE, S.uid, S.pins);
+      expect(junk.dir.retired_hints.includes(S.A.id), 'hub serves a retirement hint for a browser');
+      const withUnknown = await verifyDirectory({ ...junk.dir, retired_hints: [...junk.dir.retired_hints, 'dev_' + '0'.repeat(32)] }, S.uid, S.pins);
+      expect(withUnknown.retiredHints.length === 0 && junk.chain.retiredHints.length === 0, 'the verifier keeps no hint that is not a trusted bridge: nothing to revoke or rotate');
+      expect(junk.chain.version === before.chain.version && junk.chain.currentEpoch === before.chain.currentEpoch, 'hints never change the version or the epoch');
+      const db3 = new DatabaseSync(HUB.dbPath);
+      try { db3.exec('PRAGMA busy_timeout = 5000'); db3.prepare('UPDATE vault_devices SET retired_at = NULL WHERE device_id = ?').run(S.A.id); } finally { db3.close(); }
+
+      // A real hint: the simulated bridge's pending enrollment is rolled back.
       const br = S.bridge;
-      // The simulated bridge never opened its enroll connection, so its enrollment is
-      // still pending: cancelling it rolls it back and hub-retires its identity (the
-      // same retirement a bridge revoke from bridge settings performs).
       const rv = await http('POST', `/api/v1/bridges/${br.bridgeId}/enrollment/cancel`, { user: ALICE, body: '{}' });
       expect(rv.status === 200 && rv.data.rolled_back === true, `pending enrollment cancelled (rolled back) -> 200 (${rv.status} ${rv.status !== 200 ? rv.raw : ''})`);
       const { dir, chain } = await fetchVerified(ALICE, S.uid, S.pins);
-      expect(dir.rotation_recommended === true && (dir.retired_device_ids || []).includes(br.identity.id), 'hub flags rotation_recommended and names the retired identity');
-      expect(!chain.trusted.has(br.identity.id) && chain.retired.includes(br.identity.id) && chain.rotationRecommended, 'client chain verifies: retired bridge untrusted, rotation recommended');
-      // The hub's retire/epoch timestamps have 1 s resolution: an epoch created in the
-      // same second as the retirement would still look 'before' it (the UI waits >= 1 s).
-      await new Promise((r) => setTimeout(r, 1100));
+      expect(dir.version === before.chain.version && (dir.retired_hints || []).includes(br.identity.id), 'the hub only HINTS the retirement (no version consumed)');
+      expect(chain.trusted.has(br.identity.id) && chain.retiredHints.includes(br.identity.id), 'client: the identity is still trusted by the log and hinted');
+      await deliverKeyringToBridge(br.bridgeId, chain, br.deps(S.A.keyringBytes)).then(() => expect(false, 'key delivered to a retired identity'), () => expect(true, 'no key delivery to a hinted (retired) bridge identity'));
+      // An approved browser turns the hint into a signed revoke (what deviceVault's auto flow does).
+      const { body: rb, nextKeyring: nk } = await buildRevocation(S.A.identity, chain, br.identity.id, S.A.keyringBytes);
+      nk.fill(0);
+      const rr = await signedCall(S.A, ALICE, S.uid, 'POST', `/api/v1/vault/devices/${br.identity.id}/revoke`, rb);
+      expect(rr.status === 200 && rr.data.directory_version === chain.version + 1, `signed revoke of the retired bridge identity -> 200 (${rr.status} ${rr.status !== 200 ? rr.raw : ''})`);
+      const revoked = await fetchVerified(ALICE, S.uid, S.pins);
+      expect(revoked.chain.revokedIds.has(br.identity.id) && revoked.chain.retiredHints.length === 0 && revoked.chain.currentEpoch === chain.currentEpoch + 1, 'the log now revokes it with a new epoch; no hint left');
+      const selfA0 = await signedCall(S.A, ALICE, S.uid, 'GET', '/api/v1/vault/devices/self');
+      await S.A.setKeyring(await openWrap(S.A, selfA0.data.wrap, revoked.chain));
+
+      // Explicit user rotation (signed `rotate`).
       const unsigned = await http('POST', '/api/v1/vault/directory/rotate', { user: ALICE, body: '{}' });
       expect(unsigned.status === 401, `unsigned rotate -> 401 (${unsigned.status})`);
-      const { body, nextKeyring } = await buildRotation(S.A.identity, chain, S.A.keyringBytes);
+      const { body, nextKeyring } = await buildRotation(S.A.identity, revoked.chain, S.A.keyringBytes);
       nextKeyring.fill(0);
-      const missing = await signedCall(S.A, ALICE, S.uid, 'POST', '/api/v1/vault/directory/rotate', { ...body, wraps: body.wraps.slice(1) });
-      expect(missing.status === 400, `rotate missing a wrap -> 400 (${missing.status})`);
-      const stale = await signedCall(S.A, ALICE, S.uid, 'POST', '/api/v1/vault/directory/rotate', { ...body, expected_version: chain.version - 1 });
+      const stale = await signedCall(S.A, ALICE, S.uid, 'POST', '/api/v1/vault/directory/rotate', { ...body, expected_version: revoked.chain.version - 1 });
       expect(stale.status === 409, `rotate at a stale version -> 409 (${stale.status})`);
       const ok = await signedCall(S.A, ALICE, S.uid, 'POST', '/api/v1/vault/directory/rotate', body);
-      expect(ok.status === 200 && ok.data.directory_version === chain.version + 1, `signed rotate -> 200, version ${chain.version + 1} (${ok.status} ${ok.status !== 200 ? ok.raw : ''})`);
+      expect(ok.status === 200 && ok.data.directory_version === revoked.chain.version + 1, `signed rotate -> 200 (${ok.status} ${ok.status !== 200 ? ok.raw : ''})`);
       const after = await fetchVerified(ALICE, S.uid, S.pins);
-      expect(after.chain.currentEpoch === chain.currentEpoch + 1 && !after.chain.rotationRecommended, `chain verifies a standalone epoch ${chain.currentEpoch + 1}; rotation no longer recommended`);
+      expect(after.chain.currentEpoch === revoked.chain.currentEpoch + 1 && after.chain.epochs.get(after.chain.currentEpoch).type === 'rotate', 'chain verifies a standalone `rotate` epoch, distinguishable from a revoke');
       const selfA = await signedCall(S.A, ALICE, S.uid, 'GET', '/api/v1/vault/devices/self');
       const bytes = await openWrap(S.A, selfA.data.wrap, after.chain);
       expect(await commitHex(bytes, S.uid, after.chain.currentEpoch) === after.chain.commits.get(after.chain.currentEpoch), 'A opens its new wrap; epoch_commit checks');
+      // A wrap from an older epoch segment is refused even if its signature is valid.
+      await openWrap(S.A, selfA0.data.wrap, after.chain).then(() => expect(false, 'old wrap accepted'), () => expect(true, 'a wrap outside the current epoch segment of the log is refused'));
       const again = await signedCall(S.A, ALICE, S.uid, 'POST', '/api/v1/vault/directory/rotate', body);
       expect(again.status === 409, `replaying the old rotation -> 409 (${again.status})`);
+    });
+
+    await step('8 changed user id: an established browser is warned, never auto-trusts another account (M2)', async () => {
+      const store = memoryDeviceStore();
+      const { chain } = await fetchVerified(ALICE, S.uid, S.pins);
+      await advancePins(store, S.uid, pinsFromChain(chain));
+      expect((await otherPinnedAccounts(store, S.uid)).length === 0, 'the pinned account itself needs no warning');
+      const others = await otherPinnedAccounts(store, S.bobUid);
+      expect(others.length === 1 && others[0] === S.uid, 'a different user id on this browser is flagged (no automatic genesis/confirm)');
+      await acknowledgeOtherAccount(store, S.bobUid);
+      expect((await otherPinnedAccounts(store, S.bobUid)).length === 0, 'only an explicit acknowledgement clears it');
     });
   } finally {
     await HUB.stop();
