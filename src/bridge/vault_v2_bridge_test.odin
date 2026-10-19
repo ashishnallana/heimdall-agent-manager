@@ -790,3 +790,20 @@ test_v2_unseal_requires_chain_to_pinned_root :: proc(t: ^testing.T) {
 	ok, msg = unseal(f.id_a, &two, now, "n_chain_two")
 	testing.expectf(t, ok, "rotation under the pinned root accepted: %s", msg)
 }
+
+// shell_capture seals the screen like the pane paths: a content envelope under the
+// current epoch; a locked vault or a failed seal is an error, never plaintext.
+@(test)
+test_v2_shell_capture_is_sealed :: proc(t: ^testing.T) {
+	kr := test_keyring_from_hex("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	defer vault.keyring_wipe(&kr)
+	armored, res := bridge_shell_capture_seal_with(.Unlocked, &kr, "secret screen")
+	defer delete(armored)
+	testing.expect(t, res == .Sealed && vault.is_armored(armored) && !strings.contains(armored, "secret"), armored)
+	plain, ores := vault.open(armored, &kr, context.temp_allocator)
+	testing.expect(t, ores == .Ok && plain == "secret screen")
+	_, locked := bridge_shell_capture_seal_with(.Locked, &kr, "secret screen")
+	testing.expect(t, locked == .Locked)
+	_, failed := bridge_shell_capture_seal_with(.Unlocked, nil, "secret screen")
+	testing.expect(t, failed == .Failed)
+}

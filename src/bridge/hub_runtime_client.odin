@@ -1,6 +1,7 @@
 package main
 
 import "base:runtime"
+import "core:crypto"
 import "core:crypto/hash"
 import base64 "core:encoding/base64"
 import "core:encoding/hex"
@@ -5340,6 +5341,22 @@ bridge_hub_handle_shell_get_pane :: proc(conn: ^ws.Connection, text: string) {
 	_ = bridge_hub_send(conn, result)
 }
 
+// bridge_shell_capture_seal seals a shell screen capture (empty stays empty).
+bridge_shell_capture_seal :: proc(plain: string) -> (armored: string, res: Bridge_Pane_Seal) {
+	status, kr := bridge_vault_status_and_key()
+	defer vault.keyring_wipe(&kr)
+	return bridge_shell_capture_seal_with(status, &kr, plain)
+}
+
+// bridge_shell_capture_seal_with is the pure core (tests pass the state in).
+bridge_shell_capture_seal_with :: proc(status: Vault_Status, kr: ^vault.Vault_Keyring, plain: string, allocator := context.allocator) -> (armored: string, res: Bridge_Pane_Seal) {
+	if status != .Unlocked do return "", .Locked
+	if plain == "" do return strings.clone("", allocator), .Sealed
+	tok, ok := vault.seal_string(plain, kr, allocator)
+	if !ok do return "", .Failed
+	return tok, .Sealed
+}
+
 // bridge_hub_handle_shell_capture handles the "shell_capture" command.
 // REQUEST/REPLY: returns a pty screen snapshot for the session.
 bridge_hub_handle_shell_capture :: proc(conn: ^ws.Connection, text: string) {
@@ -5378,7 +5395,23 @@ bridge_hub_handle_shell_capture :: proc(conn: ^ws.Connection, text: string) {
 	}
 	defer pty_host_reply_delete(reply)
 
-	content, _, _ := bridge_pty_host_screen_to_output(reply.screen.lines, 0)
+	plain, _, _ := bridge_pty_host_screen_to_output(reply.screen.lines, 0)
+	defer {
+		crypto.zero_explicit(raw_data(plain), len(plain))
+		delete(plain)
+	}
+	// The screen is sealed as a v2 content envelope under the current epoch, like the
+	// pane captures: a locked vault or a seal failure is an error, never plaintext.
+	content, cres := bridge_shell_capture_seal(plain)
+	switch cres {
+	case .Locked:
+		send_error(conn, session_id, command_id, "vault_locked", "bridge vault is locked; the screen cannot be sent")
+		return
+	case .Failed:
+		send_error(conn, session_id, command_id, "encryption_failed", "could not seal the screen capture")
+		return
+	case .Sealed:
+	}
 	defer delete(content)
 
 	b := strings.builder_make()

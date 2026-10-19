@@ -630,8 +630,12 @@ ctl_shell_capture :: proc(endpoint, token: string, tokens, args: []string) {
 		fmt.println(`{"ok":false,"message":"shell capture requires <session_id>"}`)
 		return
 	}
-	ctl_shell_rest(endpoint, token, "GET",
-		fmt.tprintf("/api/v1/shells/%s/capture", safe_path_part(sid)), "")
+	// The bridge seals the screen (a v2 content envelope); decrypt it locally.
+	ctl_agent_call_and_decrypt(endpoint, token, "agent.rest.request", json_object(
+		json_kv("http_method", "GET"),
+		json_kv("path", fmt.tprintf("/api/v1/shells/%s/capture", safe_path_part(sid))),
+		json_kv("body", ""),
+	), args)
 }
 
 print_help_shell :: proc() {
