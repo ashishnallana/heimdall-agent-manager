@@ -1,6 +1,7 @@
 import { heimdallApi } from '../heimdallApi';
 import { cookieJsonFetch, cookieMutation } from '../cookieFetch';
 import { openCardOperations, sealCardOperations } from '../../utils/vaultCardOps';
+import { maskVaultArmored } from '../../utils/vaultContent';
 export { isCardExpired } from '../../components/cards/CardsPanel';
 
 export type CardStatus = 'pending' | 'accepted' | 'rejected' | 'snoozed' | 'discarded';
@@ -88,17 +89,26 @@ export function cardErrorText(err: unknown, fallback = 'Something went wrong'): 
   return fallback;
 }
 
+// Arg keys that only carry record ids; `formatOpLabel(op, { withIds: false })` omits them.
+const OP_ID_ARGS = new Set(['id', 'memory_id', 'task_id', 'chain_id', 'project_id', 'agent_id', 'instance_id', 'agent_instance_id']);
+
 /**
  * REQ-UX-1: Format human-friendly operation summary.
  * Uses the op's plain-language `label` property if available,
  * or defensively derives a clear human-readable description instead of exposing raw JSON.
+ * Vault tokens are masked, never shown; `withIds: false` drops record ids for compact surfaces.
  */
-export function formatOpLabel(op: CardOperation): string {
+export function formatOpLabel(op: CardOperation, opts: { withIds?: boolean } = {}): string {
   if (op.label && typeof op.label === 'string' && op.label.trim()) {
-    return op.label.trim();
+    return maskVaultArmored(op.label.trim());
   }
   const opName = op.op || 'operation';
-  const getArg = (k: string) => op.args?.[k] ?? op[k] ?? '';
+  const withIds = opts.withIds ?? true;
+  const getArg = (k: string) => {
+    if (!withIds && OP_ID_ARGS.has(k)) return '';
+    const v = op.args?.[k] ?? op[k] ?? '';
+    return typeof v === 'string' ? maskVaultArmored(v) : v;
+  };
   switch (opName) {
     case 'memory.delete':
     case 'memory.archive': {
@@ -113,7 +123,8 @@ export function formatOpLabel(op: CardOperation): string {
     case 'memory.update': {
       const mid = getArg('memory_id') || getArg('id');
       const title = getArg('title');
-      return title ? `Update memory ${mid}: "${title}"` : `Update memory ${mid}`;
+      const target = mid ? `Update memory ${mid}` : 'Update memory';
+      return title ? `${target}: "${title}"` : target;
     }
     case 'memory.approve': {
       const mid = getArg('memory_id') || getArg('id');

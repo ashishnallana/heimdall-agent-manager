@@ -3,7 +3,17 @@
 // the content fields it only STORES are sealed. Mirrors ham-ctl CARD_OP_SEALED_FIELDS
 // (src/ctl/vault.odin).
 
-import { decryptVaultText, encryptVaultText, getActiveVaultKey, isVaultArmored, VAULT_LOCKED_MARKER } from './vaultCrypto.ts';
+import {
+  containsVaultArmored,
+  decryptVaultText,
+  encryptVaultText,
+  getActiveVaultKey,
+  isVaultArmored,
+  VAULT_LOCKED_MARKER,
+  VAULT_OTHER_VAULT_MARKER,
+  type VaultKeyring,
+} from './vaultCrypto.ts';
+import { resolveCopyableVaultText } from './vaultContent.ts';
 
 export const CARD_OP_SEALED_FIELDS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   'issue.create': ['title', 'description'],
@@ -50,4 +60,26 @@ export async function openCardOperations<T extends Op>(ops: readonly T[] | undef
       return VAULT_LOCKED_MARKER;
     }
   }) as Promise<T>));
+}
+
+/**
+ * Plaintext card title for text that leaves the render tree: feedback messages sent to
+ * agents and toasts. The title is sealed like any other vault field, so
+ * interpolating `card.title` directly leaks its ciphertext (and a chat message built from
+ * it is re-encrypted on send, persisting the token as the message's "plaintext").
+ *
+ * Returns the decrypted title, or `fallback` when the title is missing or does not open
+ * with `keyring` (locked, wrong or previous vault, corrupt). Never returns a vault token.
+ */
+export async function resolveCardTitle(
+  title: string | null | undefined,
+  fallback: string,
+  keyring: VaultKeyring | null = getActiveVaultKey(),
+): Promise<string> {
+  if (!title) return fallback;
+  if (!containsVaultArmored(title)) return title;
+  if (!keyring) return fallback;
+  const plain = await resolveCopyableVaultText(title, keyring);
+  if (plain.includes(VAULT_LOCKED_MARKER) || plain.includes(VAULT_OTHER_VAULT_MARKER)) return fallback;
+  return plain;
 }

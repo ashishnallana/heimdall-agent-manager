@@ -29,6 +29,7 @@ import {
 import { useListProjectsQuery, Project } from '../../api/endpoints/projects';
 import Markdown from '../Markdown';
 import { isVaultArmored, getActiveVaultKey } from '../../utils/vaultContent';
+import { resolveCardTitle } from '../../utils/vaultCardOps';
 import { useSelector } from 'react-redux';
 import { selectIsVaultUnlocked } from '../../store/vaultSlice';
 import { decryptProjectList } from '../../utils/vaultProjects';
@@ -208,7 +209,7 @@ export function ActionItemsTab() {
       await acceptCard({ id: card.card_id }).unwrap();
       setFeedback({
         type: 'success',
-        message: `Action accepted: "${card.title}". Operations executed atomically.`,
+        message: `Action accepted: "${await resolveCardTitle(card.title, 'Untitled card')}". Operations executed atomically.`,
       });
       setTimeout(() => setFeedback(null), 5000);
     } catch (err: any) {
@@ -229,7 +230,7 @@ export function ActionItemsTab() {
       await rejectCard({ id: card.card_id }).unwrap();
       setFeedback({
         type: 'success',
-        message: `Action rejected: "${card.title}".`,
+        message: `Action rejected: "${await resolveCardTitle(card.title, 'Untitled card')}".`,
       });
       setTimeout(() => setFeedback(null), 5000);
     } catch (err: any) {
@@ -249,7 +250,7 @@ export function ActionItemsTab() {
       await discardCard({ id: card.card_id }).unwrap();
       setFeedback({
         type: 'success',
-        message: `Action discarded: "${card.title}".`,
+        message: `Action discarded: "${await resolveCardTitle(card.title, 'Untitled card')}".`,
       });
       setTimeout(() => setFeedback(null), 5000);
     } catch (err: any) {
@@ -270,7 +271,7 @@ export function ActionItemsTab() {
       await snoozeCard({ id: card.card_id, snoozeUntil }).unwrap();
       setFeedback({
         type: 'success',
-        message: `Action snoozed for 24h: "${card.title}".`,
+        message: `Action snoozed for 24h: "${await resolveCardTitle(card.title, 'Untitled card')}".`,
       });
       setTimeout(() => setFeedback(null), 5000);
     } catch (err: any) {

@@ -15,7 +15,8 @@ import {
 } from '../../api/endpoints/cards';
 import { useListProjectsQuery, Project } from '../../api/endpoints/projects';
 import Markdown from '../Markdown';
-import { isVaultArmored } from '../../utils/vaultContent';
+import { isVaultArmored, maskVaultArmored } from '../../utils/vaultContent';
+import { resolveCardTitle } from '../../utils/vaultCardOps';
 import { VaultText, DecryptedMarkdown } from '../vault/VaultText';
 
 export function isCardExpired(c: { ttl_at?: string } | null | undefined): boolean {
@@ -199,7 +200,7 @@ export default function CardsPanel() {
       await acceptCard({ id: card.card_id }).unwrap();
       setFeedback({
         type: 'success',
-        message: `Card accepted: "${card.title}". Operations executed atomically.`,
+        message: `Card accepted: "${await resolveCardTitle(card.title, 'Untitled card')}". Operations executed atomically.`,
       });
       setSelectedCardIds((prev) => prev.filter((id) => id !== card.card_id));
       setTimeout(() => setFeedback(null), 6000);
@@ -224,7 +225,7 @@ export default function CardsPanel() {
       await rejectCard({ id: card.card_id }).unwrap();
       setFeedback({
         type: 'success',
-        message: `Card rejected: "${card.title}".`,
+        message: `Card rejected: "${await resolveCardTitle(card.title, 'Untitled card')}".`,
       });
       setSelectedCardIds((prev) => prev.filter((id) => id !== card.card_id));
       setTimeout(() => setFeedback(null), 5000);
@@ -245,7 +246,7 @@ export default function CardsPanel() {
       await discardCard({ id: card.card_id }).unwrap();
       setFeedback({
         type: 'success',
-        message: `Card discarded: "${card.title}".`,
+        message: `Card discarded: "${await resolveCardTitle(card.title, 'Untitled card')}".`,
       });
       setSelectedCardIds((prev) => prev.filter((id) => id !== card.card_id));
       setTimeout(() => setFeedback(null), 5000);
@@ -268,7 +269,7 @@ export default function CardsPanel() {
       await snoozeCard({ id: card.card_id, snoozeUntil }).unwrap();
       setFeedback({
         type: 'success',
-        message: `Card snoozed for 24h: "${card.title}".`,
+        message: `Card snoozed for 24h: "${await resolveCardTitle(card.title, 'Untitled card')}".`,
       });
       setSelectedCardIds((prev) => prev.filter((id) => id !== card.card_id));
       setTimeout(() => setFeedback(null), 5000);
@@ -691,7 +692,7 @@ function CardRow({
             <Checkbox
               checked={isSelected}
               onChange={onToggleSelect}
-              aria-label={`Select card ${card.title}`}
+              aria-label={`Select card ${maskVaultArmored(card.title ?? '')}`}
             />
           </div>
 
