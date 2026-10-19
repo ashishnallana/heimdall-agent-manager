@@ -3821,6 +3821,23 @@ Bridge_Shell_Enc_Spec :: struct {
 	has_env:   bool,
 	timestamp: i64,
 	nonce:     string,
+	// Binding (finding N1): the spec authorizes exactly one start of one session on
+	// one bridge process. boot_id is this bridge's unseal boot id, so a spec captured
+	// before a restart (whose nonce cache is gone) no longer authenticates.
+	bridge_id:  string,
+	session_id: string,
+	kind:       string,
+	boot_id:    string,
+}
+
+// bridge_enc_spec_check_binding verifies the sealed binding against what this bridge
+// is and what the request asks for. Every field is required. Returns "" or the error.
+bridge_enc_spec_check_binding :: proc(spec: Bridge_Shell_Enc_Spec, bridge_id, session_id, kind, boot_id: string) -> string {
+	if spec.bridge_id == "" || spec.bridge_id != bridge_id do return "unauthorized: execution spec is for a different bridge"
+	if spec.session_id == "" || spec.session_id != session_id do return "unauthorized: execution spec is for a different session"
+	if spec.kind == "" || spec.kind != kind do return "unauthorized: execution spec is for a different session kind"
+	if spec.boot_id == "" || boot_id == "" || spec.boot_id != boot_id do return "unauthorized: execution spec is for a previous bridge process"
+	return ""
 }
 
 // enc_spec freshness (finding M1): the timestamp must be within ±60 s and the
@@ -3879,6 +3896,18 @@ bridge_shell_parse_enc_spec :: proc(json_text: string, allocator := context.temp
 	if v, exists := obj["nonce"]; exists {
 		if s, is_str := v.(json.String); is_str {
 			spec.nonce = s
+		}
+	}
+	for key in ([]string{"bridge_id", "session_id", "kind", "boot_id"}) {
+		v, exists := obj[key]
+		if !exists do continue
+		str, is_str := v.(json.String)
+		if !is_str do continue
+		switch key {
+		case "bridge_id":  spec.bridge_id = str
+		case "session_id": spec.session_id = str
+		case "kind":       spec.kind = str
+		case "boot_id":    spec.boot_id = str
 		}
 	}
 	if v, exists := obj["timestamp"]; exists {
@@ -4243,6 +4272,13 @@ bridge_hub_handle_shell_start :: proc(conn: ^ws.Connection, text: string) {
 	spec, parse_ok := bridge_shell_parse_enc_spec(plaintext, context.temp_allocator)
 	if !parse_ok {
 		send_error(conn, session_id, command_id, "invalid_vault_key", "unauthorized: invalid vault encryption")
+		return
+	}
+
+	// Binding before freshness: a spec for another bridge, session, kind or bridge
+	// process must not consume a nonce slot here.
+	if bind_err := bridge_enc_spec_check_binding(spec, bridge_config.daemon_id, session_id, cmd_wire.kind, bridge_unseal_boot_id()); bind_err != "" {
+		send_error(conn, session_id, command_id, "invalid_vault_key", bind_err)
 		return
 	}
 

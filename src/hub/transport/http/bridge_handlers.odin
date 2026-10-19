@@ -525,8 +525,14 @@ bridge_enrollment_cancel_handler :: proc(ctx: rawptr, req: Request) -> Response 
 
 bridge_public_key_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Bridge_Handlers)(ctx)
-	auth_ctx, auth_ok, auth_resp := require_auth(h.auth, req)
+	// Agents (ham-ctl via its bridge) read the target bridge's unseal boot id here to
+	// bind a shell enc_spec to it (finding N1), so instance tokens are accepted; a bare
+	// bridge token is not.
+	auth_ctx, auth_ok, auth_resp := require_auth_any(h.auth, req)
 	if !auth_ok do return auth_resp
+	if auth_ctx.kind == .Bridge_Token {
+		return respond_error(domain.domain_error(.Forbidden, "bridge token cannot read bridge unseal keys"), req.request_id)
+	}
 
 	bridge_id := path_part(req.path, 4)
 	bridge, bridge_ok, bridge_err := bridge_service.get_bridge_for_enrollment(h.bridges, auth_ctx, bridge_id)

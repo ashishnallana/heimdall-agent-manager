@@ -260,6 +260,21 @@ export async function fetchShellPage(args: FetchShellPageArgs = {}): Promise<She
   };
 }
 
+function randomHex(bytes: number): string {
+  return Array.from(crypto.getRandomValues(new Uint8Array(bytes)), (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/**
+ * The bridge's current unseal boot id (relayed by the hub from its hello). A shell
+ * enc_spec is bound to it, so the request is refused when it is unknown.
+ */
+async function fetchBridgeBootId(bridgeId: string): Promise<string> {
+  const rec: any = await cookieJsonFetch(`/bridges/${encodeURIComponent(bridgeId)}/public-key`);
+  const bootId = String(rec?.unseal_boot_id || '');
+  if (!/^[0-9a-f]{1,64}$/.test(bootId)) throw new Error(`Bridge ${bridgeId} has not announced a boot id; cannot start a shell`);
+  return bootId;
+}
+
 export const shellsApi = heimdallApi.injectEndpoints({
   endpoints: (build) => ({
     listShells: build.query<ShellSessionPage, ListShellsArgs>({
@@ -327,14 +342,24 @@ export const shellsApi = heimdallApi.injectEndpoints({
         try {
           const activeKey = getActiveVaultKey();
           if (!activeKey) throw new Error('Vault key unavailable: cannot start a shell without an encrypted spec');
+          // The spec is bound to this bridge process, session and kind (finding N1): the
+          // bridge refuses it for any other bridge id, session id, kind or boot id.
+          const bootId = await fetchBridgeBootId(bridgeId);
+          const session_id = `sh_${randomHex(16)}`;
+          const kind = body.kind;
+          if (!kind) throw new Error('Shell kind is required');
           const spec = {
             cmd: body.cmd || '',
             cwd: body.cwd || '',
             timestamp: Date.now(),
-            nonce: Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join(''),
+            nonce: randomHex(16),
+            bridge_id: bridgeId,
+            session_id,
+            kind,
+            boot_id: bootId,
           };
           const enc_spec = await encryptVaultText(JSON.stringify(spec), activeKey);
-          const requestBody: Record<string, any> = { ...body, enc_spec };
+          const requestBody: Record<string, any> = { ...body, session_id, enc_spec };
 
           const data = await cookieMutation(
             `/bridges/${encodeURIComponent(bridgeId)}/shells`,

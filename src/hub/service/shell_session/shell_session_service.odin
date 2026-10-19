@@ -542,6 +542,28 @@ Shell_Session_Create_Input :: struct {
 	// somebody asking.
 	background:        bool,
 	enc_spec:          string,
+	// session_id — optional, chosen by the caller (finding N1): the browser / ham-ctl
+	// seals it into enc_spec so the bridge can bind the spec to this one session. It
+	// must be "sh_" + 32 lowercase hex (128 random bits) and must not exist yet;
+	// empty means the hub assigns one (such a start carries no bindable enc_spec and
+	// a bridge refuses it).
+	session_id:        string,
+}
+
+SHELL_SESSION_CLIENT_ID_HEX :: 32
+
+// shell_session_client_id_valid: "sh_" + 32 lowercase hex. The length keeps a
+// client-chosen id disjoint from hub-generated ones ("sh_" + hex nanoseconds).
+shell_session_client_id_valid :: proc(id: string) -> bool {
+	if len(id) != 3 + SHELL_SESSION_CLIENT_ID_HEX || !strings.has_prefix(id, "sh_") do return false
+	for c in transmute([]u8)id[3:] {
+		switch c {
+		case '0' ..= '9', 'a' ..= 'f':
+		case:
+			return false
+		}
+	}
+	return true
 }
 
 // _shell_session_starter_from_auth derives WHO is asking to start a process, for
@@ -657,7 +679,22 @@ shell_session_create :: proc(svc: ^Shell_Session_Service, auth: contracts.Auth_C
 	// timestamps still exist (Bridge_Shell_Session.started_unix_ms) but are
 	// diagnostic only and must never drive a lifecycle decision.
 	now := platform.clock_now(svc.clock)
-	session_id := platform.generate_id(svc.ids, "sh_")
+	session_id := input.session_id
+	if session_id != "" {
+		if !shell_session_client_id_valid(session_id) {
+			return {}, false, domain.domain_error(.Validation_Failed, "session_id must be sh_ followed by 32 lowercase hex characters")
+		}
+		// Never adopt an id that already names a session: neither a stored row on this
+		// bridge nor a live one tracked in memory (which is keyed by session_id alone).
+		_, exists, get_err := iface.shell_session_get_by_id(svc.repo, input.bridge_id, session_id)
+		if get_err.code != .None do return {}, false, get_err
+		sync.mutex_lock(&svc.mu)
+		_, tracked := svc.session_owners[session_id]
+		sync.mutex_unlock(&svc.mu)
+		if exists || tracked do return {}, false, domain.domain_error(.Conflict, "session_id is already in use")
+	} else {
+		session_id = platform.generate_id(svc.ids, "sh_")
+	}
 
 	session := domain.Shell_Session{
 		session_id        = session_id,

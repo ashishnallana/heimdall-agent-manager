@@ -43,7 +43,9 @@ installWindowShim();
 const shellFetch = installFetchCapture();
 const { shellsApi } = await import('../src/ui/api/endpoints/shells.ts');
 
-const CREATE_SHELL_OK = { data: { session: { session_id: 'sh_test', kind: 'shell' } } };
+// One stub answers both requests createShell makes: the bridge public-key record
+// (unseal_boot_id) and the create itself (session).
+const CREATE_SHELL_OK = { data: { session: { session_id: 'sh_test', kind: 'shell' }, unseal_boot_id: TEST_BRIDGE_BOOT_ID } };
 
 /** Dispatch the real createShell mutation and return the body that hit the wire. */
 async function captureCreateShell(store: any, args: Record<string, any>) {
@@ -89,6 +91,12 @@ test('REQ-SHELL-ENC-8: createShell puts an armored enc_spec with cmd, cwd, times
       /^[0-9a-f]{32}$/.test(parsedSpec.nonce),
       `nonce must be 16 CSPRNG bytes as hex, got: ${parsedSpec.nonce}`,
     );
+    // N1: bound to the bridge, the client-chosen session id, the kind and the boot id.
+    assert.equal(parsedSpec.bridge_id, 'brg_test');
+    assert.match(body.session_id, /^sh_[0-9a-f]{32}$/);
+    assert.equal(parsedSpec.session_id, body.session_id);
+    assert.equal(parsedSpec.kind, 'shell');
+    assert.equal(parsedSpec.boot_id, TEST_BRIDGE_BOOT_ID);
   } finally {
     await clearActiveKey();
   }
@@ -126,6 +134,22 @@ test('N2: createShell refuses without an active key and sends nothing', async ()
     );
     assert.ok(res?.error, 'createShell must fail without a key');
     assert.equal(shellFetch.requests.length, 0, 'no request may reach the hub');
+  } finally {
+    await clearActiveKey();
+  }
+});
+
+test('N1: createShell refuses when the bridge has not announced a boot id', async () => {
+  const store = await makeVaultStore();
+  await unlockVault(store, TEST_VAULT_KEY_RAW);
+  try {
+    shellFetch.reset();
+    shellFetch.setNextResponse({ data: { public_key: '04ab' } });
+    const res: any = await store.dispatch(
+      shellsApi.endpoints.createShell.initiate({ bridgeId: 'brg_test', cmd: 'ls', kind: 'run' } as any),
+    );
+    assert.ok(res?.error, 'createShell must fail without a boot id');
+    assert.equal(shellFetch.requests.filter((r) => r.method === 'POST').length, 0, 'no create may reach the hub');
   } finally {
     await clearActiveKey();
   }

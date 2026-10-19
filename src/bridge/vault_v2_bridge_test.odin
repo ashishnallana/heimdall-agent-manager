@@ -559,6 +559,19 @@ test_v2_enc_spec_nonce_replay_rejected :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_v2_enc_spec_binding_rejects_mismatch :: proc(t: ^testing.T) {
+	spec, ok := bridge_shell_parse_enc_spec(`{"cmd":"true","cwd":"","timestamp":1,"nonce":"n","bridge_id":"brg_a","session_id":"sh_1","kind":"run","boot_id":"b00t"}`)
+	testing.expect(t, ok, "spec parses")
+	testing.expect_value(t, bridge_enc_spec_check_binding(spec, "brg_a", "sh_1", "run", "b00t"), "")
+	testing.expect(t, bridge_enc_spec_check_binding(spec, "brg_b", "sh_1", "run", "b00t") != "", "other bridge rejected")
+	testing.expect(t, bridge_enc_spec_check_binding(spec, "brg_a", "sh_2", "run", "b00t") != "", "other session rejected")
+	testing.expect(t, bridge_enc_spec_check_binding(spec, "brg_a", "sh_1", "shell", "b00t") != "", "other kind rejected")
+	testing.expect(t, bridge_enc_spec_check_binding(spec, "brg_a", "sh_1", "run", "0ther") != "", "spec from before a restart rejected")
+	unbound, _ := bridge_shell_parse_enc_spec(`{"cmd":"true","timestamp":1,"nonce":"n"}`)
+	testing.expect(t, bridge_enc_spec_check_binding(unbound, "", "", "", "") != "", "an unbound spec is rejected even against empty values")
+}
+
+@(test)
 test_v2_fs_read_uses_one_vault_snapshot :: proc(t: ^testing.T) {
 	sync.mutex_lock(&bridge_test_config_mutex)
 	defer sync.mutex_unlock(&bridge_test_config_mutex)

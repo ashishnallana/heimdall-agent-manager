@@ -3,6 +3,7 @@ package main
 import "core:encoding/base64"
 import "core:strings"
 import "core:testing"
+import jsonx "odin_test:lib/jsonx"
 import vault "odin_test:lib/vault"
 
 // ── Test shims ────────────────────────────────────────────────────────────────
@@ -160,4 +161,24 @@ unseal_out :: proc(s: string) -> string {
 	kr := tkr(CTL_TEST_WRITE_KEY)
 	defer vault.keyring_wipe(kr)
 	return ctl_decrypt_json_string(s, kr, true)
+}
+
+@(test)
+test_ctl_shell_enc_spec_is_bound_to_bridge_session_kind_boot :: proc(t: ^testing.T) {
+	fields := make([dynamic]string, context.temp_allocator)
+	args := with_kr([]string{"--bridge-boot-id", "00112233aabbccdd"})
+	ctl_shell_attach_enc_spec("", "", "brg_n1", "server", args, "npm start", "/w", &fields)
+	body := json_object_from_slice(fields[:])
+	defer delete(body)
+	session_id := jsonx.extract_string(body, "session_id", "", true, context.temp_allocator)
+	testing.expect(t, len(session_id) == 35 && strings.has_prefix(session_id, "sh_"), session_id)
+	kr := tkr(CTL_TEST_WRITE_KEY)
+	defer vault.keyring_wipe(kr)
+	spec, res := ctl_vault_open(jsonx.extract_string(body, "enc_spec", "", true, context.temp_allocator), kr, context.temp_allocator)
+	testing.expect(t, res == .Ok, "enc_spec opens under the current epoch")
+	testing.expect(t, strings.contains(spec, `"bridge_id":"brg_n1"`), spec)
+	testing.expect(t, strings.contains(spec, `"kind":"server"`), spec)
+	testing.expect(t, strings.contains(spec, `"boot_id":"00112233aabbccdd"`), spec)
+	testing.expect(t, strings.contains(spec, session_id), spec)
+	testing.expect(t, strings.contains(spec, `"cmd":"npm start"`), spec)
 }

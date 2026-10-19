@@ -951,7 +951,7 @@ ctl_v2_verify :: proc(endpoint, token: string, tokens, args: []string) {
 	if v := option_value(args, "--project", ctx.project_id); v != "" do append(&fields, json_kv("project_id", v))
 	append(&fields, json_kv("cwd", run_cwd))
 	append(&fields, json_kv("label", label))
-	ctl_shell_attach_enc_spec(args, verify_cmd, run_cwd, &fields)
+	ctl_shell_attach_enc_spec(endpoint, token, bridge_id, "run", args, verify_cmd, run_cwd, &fields)
 	create_resp, cok := ctl_agent_local_call(endpoint, token, "agent.rest.request", json_object(
 		json_kv("http_method", "POST"),
 		json_kv("path", fmt.tprintf("/api/v1/bridges/%s/shells", safe_path_part(bridge_id))),
