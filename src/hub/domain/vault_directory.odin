@@ -44,6 +44,8 @@ Vault_Directory :: struct {
 	version:           i64,
 	current_epoch:     i64,
 	root_device_id:    string,
+	// head_hash: entry hash of the log op at seq = version (vault.log_entry_hash).
+	head_hash:         string,
 	genesis_statement: string,
 	genesis_signature: string,
 	created_at:        string,
@@ -75,8 +77,22 @@ Vault_Device :: struct {
 	approved_at:           string,
 	revoked_at:            string,
 	last_seen_at:          string,
+	// retired_at: a hub retirement HINT (see migration 092). The identity stays
+	// approved in the signed log until an approved browser signs its revoke.
+	retired_at:            string,
 }
 
+// Vault_Log_Entry is one signed directory op (plan §1 "Directory log").
+Vault_Log_Entry :: struct {
+	user_id:    string,
+	seq:        i64,
+	statement:  string,
+	signature:  string,
+	entry_hash: string,
+	created_at: string,
+}
+
+// Vault_Epoch is the log op that introduced an epoch (genesis, revoke or rotate).
 Vault_Epoch :: struct {
 	user_id:    string,
 	epoch:      i64,
@@ -103,14 +119,23 @@ Vault_Reset :: struct {
 	due_at:       string,
 }
 
-// Vault_Directory_Commit is ONE versioned directory mutation. The repository applies
-// every populated part inside a single transaction that starts with
-//   UPDATE vault_directories SET version = version + 1 ... WHERE user_id = ? AND version = ?
-// and rolls everything back if any guarded write changes no row.
+// Vault_Directory_Commit is ONE versioned directory mutation: exactly one signed log op
+// (log_statement, at seq = expected_version + 1, linked to expected_head_hash) plus the
+// row changes it implies. The repository applies every populated part inside a single
+// transaction that starts with
+//   UPDATE vault_directories SET version = version + 1, head_hash = ? ... WHERE user_id = ? AND version = ? AND head_hash = ?
+// and rolls everything back if any guarded write changes no row. There is no commit
+// without a signed log op: the hub never bumps the version on its own.
 Vault_Directory_Commit :: struct {
-	user_id:          string,
-	expected_version: i64,
-	now:              string,
+	user_id:            string,
+	expected_version:   i64,
+	expected_head_hash: string,
+	now:                string,
+
+	// The signed log op this commit appends (required) and its entry hash.
+	log_statement:  string,
+	log_signature:  string,
+	log_entry_hash: string,
 
 	// Approve a pending device (browser path). Guarded on status='pending'.
 	approve_device_id:     string,
@@ -121,16 +146,11 @@ Vault_Directory_Commit :: struct {
 	// Insert an already-approved device (bridge path: approved together with its grant).
 	insert_device: Maybe(Vault_Device),
 
-	// Hub-side retirement of an approved BRIDGE entry, guarded on status='approved'
-	// AND bridge_id = retire_bridge_id. No signed revocation statement exists for it:
-	//   - an enrollment rolled back after its directory commit (sweep or operator
-	//     cancel): the vault key was never delivered to that identity;
-	//   - an attach approving a new identity for the same bridge_id: the old identity
-	//     is superseded in the same CAS, so at most one approved identity maps to a
-	//     bridge_id at any time.
-	// Status 'revoked' with an empty revoked_by_device_id marks it hub-retired.
-	retire_device_id: string,
-	retire_bridge_id: string,
+	// An attach approving a new identity for a bridge_id marks the previous approved
+	// identity of that bridge_id retired (a HINT: retired_at only, still approved in
+	// the log) in the same transaction. Guarded on status='approved' AND bridge_id.
+	hint_retire_device_id: string,
+	hint_retire_bridge_id: string,
 
 	// Revoke an approved device. Guarded on status='approved'.
 	revoke_device_id:     string,
@@ -138,10 +158,9 @@ Vault_Directory_Commit :: struct {
 	revocation_signature: string,
 	revoked_by_device_id: string,
 
-	// Advance the epoch (revoke). new_epoch must be the current epoch + 1; guarded.
-	new_epoch:       i64,
-	epoch_statement: string,
-	epoch_signature: string,
+	// Advance the epoch (revoke or rotate: the log op itself introduces it).
+	// new_epoch must be the current epoch + 1; guarded.
+	new_epoch: i64,
 
 	// Set an approved device's label. Only from a signed approval statement (the
 	// browser approve path): there is no unsigned relabel endpoint.
@@ -154,13 +173,14 @@ Vault_Directory_Commit :: struct {
 	replace_all_wraps: bool,
 }
 
-// Vault_Genesis is the first write of a directory: version 1, epoch 1, the root device
-// approved by itself, its epoch statement and its own wrap.
+// Vault_Genesis is the first write of a directory: version 1 (log seq 1), epoch 1, the
+// root device approved by itself, the genesis log entry and its own wrap.
 Vault_Genesis :: struct {
 	directory: Vault_Directory,
 	device:    Vault_Device,
 	epoch:     Vault_Epoch,
 	wrap:      Vault_Wrap_Row,
+	log:       Vault_Log_Entry,
 }
 
 // vault_conflict_error is the 409 for a stale expected_version: it names the current

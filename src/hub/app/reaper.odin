@@ -402,7 +402,7 @@ reaper_retire_bridge_entry :: proc(graph: ^App_Graph, owner_user_id, bridge_id: 
 		fmt.eprintfln("hub: bridge %s vault directory entry could not be retired: %s", bridge_id, err.message)
 		return
 	}
-	if retired != "" do events.publish_resource_changed(&graph.event_bus, owner_user_id, http.VAULT_DEVICES_RESOURCE, retired, "revoked", "{}")
+	if retired != "" do events.publish_resource_changed(&graph.event_bus, owner_user_id, http.VAULT_DEVICES_RESOURCE, retired, "retired", "{}")
 }
 
 // reaper_sweep_vault_resets executes every owner vault reset whose delay has passed

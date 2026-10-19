@@ -59,8 +59,10 @@ vt_sign :: proc(d: ^Vt_Dev, msg: string) -> string {
 	return text
 }
 
-vt_statement :: proc(type, user_id: string, issuer, subject: ^Vt_Dev, version, epoch: string, wrap_sha := "") -> string {
-	st := vault.Statement{type = type, user_id = user_id, directory_version = version, issuer_device_id = issuer.id, issued_at_ms = "1792404000000", epoch = epoch, wrap_sha256 = wrap_sha}
+// seq is the log slot the op takes (version + 1; "1" for genesis; "" for register),
+// prev the current head hash.
+vt_statement :: proc(type, user_id: string, issuer, subject: ^Vt_Dev, seq, epoch: string, wrap_sha := "", prev := "") -> string {
+	st := vault.Statement{type = type, user_id = user_id, seq = seq, prev_hash = prev, issuer_device_id = issuer.id, issued_at_ms = "1792404000000", epoch = epoch, wrap_sha256 = wrap_sha}
 	if subject != nil {
 		st.subject_device_id = subject.id
 		st.subject_kind = subject.kind
@@ -70,7 +72,7 @@ vt_statement :: proc(type, user_id: string, issuer, subject: ^Vt_Dev, version, e
 		st.subject_wrap_alg = "" if subject.kind == "bridge" else vault.WRAP_ALG_ECDH_P256_HKDF_AES
 		st.subject_label_b64 = VT_LABEL_B64
 	}
-	if type == "epoch" || type == "approve" do st.epoch_commit = VT_COMMIT
+	if type != "register" do st.epoch_commit = VT_COMMIT
 	text, _ := vault.statement_canonical(&st)
 	return text
 }
@@ -107,10 +109,8 @@ vt_user_id :: proc(graph: ^app.App_Graph, headers: []contracts.HTTP_Header) -> s
 }
 
 vt_genesis_body :: proc(user_id: string, root: ^Vt_Dev) -> string {
-	g := vt_statement("genesis", user_id, root, root, "0", "1")
-	e := vt_statement("epoch", user_id, root, nil, "0", "1")
-	return strings.concatenate({`{"genesis_statement":"`, vt_escape(g), `","signature":`, vt_sign(root, g),
-		`,"epoch_statement":"`, vt_escape(e), `","epoch_signature":`, vt_sign(root, e), `,"wrap":`, vt_wrap_json(user_id, root, root, 0, 1), "}"})
+	g := vt_statement("genesis", user_id, root, root, "1", "1")
+	return strings.concatenate({`{"genesis_statement":"`, vt_escape(g), `","signature":`, vt_sign(root, g), `,"wrap":`, vt_wrap_json(user_id, root, root, 1, 1), "}"})
 }
 
 // vt_escape turns the statement's newlines into JSON escapes.
@@ -160,10 +160,11 @@ vt_enroll_proof :: proc(br: ^Vt_Dev, ecdh_pub, code_challenge: string) -> string
 
 // vt_bridge_approval returns a fresh bridge identity and the `vault_approval` JSON
 // object the root signs for it.
-vt_bridge_approval :: proc(user_id: string, version: i64) -> (br: Vt_Dev, approval_json: string) {
+vt_bridge_approval :: proc(graph: ^app.App_Graph, user_id: string, version: i64) -> (br: Vt_Dev, approval_json: string) {
 	seed := sync.atomic_add(&vt_bridge_seed, 1)
 	br = vt_make_dev(u16(seed), "bridge")
 	root := vt_make_dev(VT_ROOT_SEED)
-	st := vt_statement("approve", user_id, &root, &br, fmt.tprintf("%d", version), "1")
+	view, _ := vd.get_directory(&graph.vault_directory, user_id)
+	st := vt_statement("approve", user_id, &root, &br, fmt.tprintf("%d", version + 1), "1", prev = view.directory.head_hash)
 	return br, strings.concatenate({`{"expected_version":`, fmt.tprintf("%d", version), `,"statement":"`, vt_escape(st), `","signature":`, vt_sign(&root, st), "}"})
 }

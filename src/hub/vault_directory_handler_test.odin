@@ -14,6 +14,7 @@ import platform "odin_test:hub/platform"
 import iface "odin_test:hub/repository/iface"
 import api_http "odin_test:hub/transport/http"
 import bridge_service "odin_test:hub/service/bridge"
+import vd "odin_test:hub/service/vault_directory"
 
 VT_NOW    :: "2026-10-19T10:00:00Z"
 VT_NOW_MS :: i64(1_792_404_000_000)
@@ -105,8 +106,9 @@ test_vault_directory_http_flow :: proc(t: ^testing.T) {
 
 	// Approve B: unsigned -> 401; signed by the root -> 200, version 2.
 	approve_path := strings.concatenate({"/api/v1/vault/devices/", b.id, "/approve"})
-	st := vt_statement("approve", user_id, &root, &b, "1", "1", vt_wrap_sha(&root, &b, 1, 1))
-	body := strings.concatenate({`{"user_code":"`, code, `","expected_version":1,"statement":"`, vt_escape(st), `","signature":`, vt_sign(&root, st), `,"wrap":`, vt_wrap_json(user_id, &root, &b, 1, 1), "}"})
+	head_view, _ := vd.get_directory(&graph.vault_directory, user_id)
+	st := vt_statement("approve", user_id, &root, &b, "2", "1", vt_wrap_sha(&root, &b, 2, 1), prev = head_view.directory.head_hash)
+	body := strings.concatenate({`{"user_code":"`, code, `","expected_version":1,"statement":"`, vt_escape(st), `","signature":`, vt_sign(&root, st), `,"wrap":`, vt_wrap_json(user_id, &root, &b, 2, 1), "}"})
 	unsigned := dispatch(&graph, "POST", approve_path, body, alice)
 	testing.expect_value(t, unsigned.status, 401)
 	signed := dispatch(&graph, "POST", approve_path, body, vt_signed_headers(alice, &root, user_id, "POST", approve_path, body, "nonce-vt-000000000001", VT_NOW_MS))
@@ -140,7 +142,7 @@ test_vault_directory_http_flow :: proc(t: ^testing.T) {
 	dir := dispatch(&graph, "GET", "/api/v1/vault/directory", "", alice)
 	testing.expect_value(t, dir.status, 200)
 	testing.expect(t, strings.contains(dir.body, `"kind":"bridge"`) && strings.contains(dir.body, bridge_id), "bridge listed in the directory")
-	testing.expect(t, strings.contains(dir.body, `"root_sign_public_key":"`) && strings.contains(dir.body, `"epochs":[{"epoch":1`), "chain material exposed")
+	testing.expect(t, strings.contains(dir.body, `"root_sign_public_key":"`) && strings.contains(dir.body, `"log":[{"seq":1`) && strings.contains(dir.body, `"head_hash":"`), "the signed log is exposed")
 
 	other_br := vt_make_dev(4000, "bridge")
 	authz_prefix := strings.concatenate({
@@ -163,14 +165,15 @@ test_vault_directory_http_flow :: proc(t: ^testing.T) {
 	testing.expect(t, as_device.status == 404 || as_device.status == 409, as_device.body)
 
 	// M3(a): the operator cancels the still-pending enrollment after its directory
-	// commit: the bridge identity's entry is retired, not left approved.
+	// commit: the bridge identity gets a retirement HINT (no version, no log op).
 	testing.expect(t, !strings.contains(dir.body, `"status":"revoked"`))
 	pending_id, _, pending_ok := device_enroll_test_bridge(&graph, alice, "box2", commit = false)
 	testing.expect(t, pending_ok)
 	cancel := dispatch(&graph, "POST", strings.concatenate({"/api/v1/bridges/", pending_id, "/enrollment/cancel"}), "{}", alice)
 	testing.expect(t, cancel.status == 200 && strings.contains(cancel.body, `"rolled_back":true`), cancel.body)
 	after := dispatch(&graph, "GET", "/api/v1/vault/directory", "", alice)
-	testing.expect(t, strings.contains(after.body, `"status":"revoked","sign_alg"`), "the rolled-back bridge entry is retired")
+	testing.expect(t, strings.contains(after.body, `"retired_hints":["`), after.body)
+	testing.expect(t, !strings.contains(after.body, `"status":"revoked"`), "a hint never revokes")
 }
 
 // M2: the unsigned entry points (genesis, register, reset) take only an interactive

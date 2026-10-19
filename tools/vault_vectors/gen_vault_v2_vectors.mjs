@@ -164,11 +164,11 @@ const envelopeToken = (epoch, key, nonce, plaintext) => {
 };
 
 const STATEMENT_FIELDS = [
-  'type', 'user_id', 'directory_version', 'issuer_device_id', 'issued_at_ms',
+  'type', 'user_id', 'seq', 'prev_hash', 'issuer_device_id', 'issued_at_ms',
   'subject_device_id', 'subject_kind', 'subject_sign_pub', 'subject_ecdh_pub',
   'subject_sign_alg', 'subject_wrap_alg', 'subject_label_b64', 'epoch', 'epoch_commit', 'wrap_sha256',
 ];
-const statementCanonical = (fields) => ['heimdall-vault-statement/v1',
+const statementCanonical = (fields) => ['heimdall-vault-statement/v2',
   ...STATEMENT_FIELDS.map((k) => `${k}=${fields[k] ?? ''}`)].join('\n');
 
 const epochCommit = (key, userId, epoch) => hmac256(key, utf8(`heimdall-epoch-commit|${userId}|${epoch}`));
@@ -280,7 +280,8 @@ const subjectEcdhD = scalar('statement-subject-ecdh');
 const stFields = {
   type: 'approve',
   user_id: USER_ID,
-  directory_version: '7',
+  seq: '7',
+  prev_hash: hex(sha256(utf8('statement-prev'))),
   issuer_device_id: `dev_${hex(sha256(pubRaw(issuerD))).slice(0, 32)}`,
   issued_at_ms: '1760000000000',
   subject_device_id: `dev_${hex(sha256(pubRaw(subjectSignD))).slice(0, 32)}`,
@@ -301,6 +302,7 @@ const stInvalid = [
   { name: 'value_with_newline', field: 'issuer_device_id', value: 'dev_a\ntype=revoke' },
   { name: 'value_with_equals', field: 'subject_label_b64', value: 'TGFwdG9w==' },
   { name: 'unknown_type', field: 'type', value: 'promote' },
+  { name: 'removed_epoch_type', field: 'type', value: 'epoch' },
   { name: 'unknown_kind', field: 'subject_kind', value: 'phone' },
   { name: 'unknown_sign_alg', field: 'subject_sign_alg', value: 'webauthn-es256' },
   { name: 'unknown_wrap_alg', field: 'subject_wrap_alg', value: 'webauthn-prf-hkdf-sha256-aes256gcm' },
@@ -317,10 +319,10 @@ const otherIdentityD = scalar('bridge-identity-other');
 
 // Bridge chain proof (plan §1 "Bridge keyring authentication"; the unseal payload's
 // `chain_proof`, built by src/ui/utils/vaultDirectoryVerify.ts buildBridgeChainProof).
-// Directory history: v0 genesis root A (epoch 1); v1 A approves browser B; v2 B approves
-// the bridge (identity = the bridge_unseal_key vector's key); v3 A approves C; v4 A
-// revokes C -> epoch 2, epoch-2 statement by A. Epoch issuer = root (issuer_chain []),
-// bridge approver = B (subject_approval.issuer_chain [B]).
+// Directory log: seq 1 genesis root A (epoch 1); 2 A approves browser B; 3 B approves
+// the bridge (identity = the bridge_unseal_key vector's key); 4 A approves C; 5 A
+// revokes C -> epoch 2. Both epoch carriers are by the root (issuer_chain []), the
+// bridge approver is B (subject_approval.issuer_chain [B]).
 const deviceIdOf = (signRaw) => `dev_${hex(sha256(signRaw)).slice(0, 32)}`;
 const chainDevice = (name, kind, label) => {
   const signD = scalar(`chain-${name}-sign`);
@@ -342,26 +344,40 @@ const signedStatement = (issuer, fields) => {
 };
 const commit1 = hex(epochCommit(K1, USER_ID, 1));
 const commit2 = hex(epochCommit(K2, USER_ID, 2));
-const chGenesis = signedStatement(chainA, { type: 'genesis', directory_version: '0', issued_at_ms: '1760000000000', ...subjectFields(chainA), epoch: '1', epoch_commit: commit1 });
-const chApproveB = signedStatement(chainA, { type: 'approve', directory_version: '1', issued_at_ms: '1760000001000', ...subjectFields(chainB), epoch: '1', epoch_commit: commit1, wrap_sha256: hex(seeded('chain-wrap-b', 32)) });
-const chApproveBridge = signedStatement(chainB, { type: 'approve', directory_version: '2', issued_at_ms: '1760000002000', ...subjectFields(chainBridge), epoch: '1', epoch_commit: commit1 });
-const chEpoch2 = signedStatement(chainA, { type: 'epoch', directory_version: '4', issued_at_ms: '1760000004001', epoch: '2', epoch_commit: commit2 });
-// Negative-test material: epoch 2 committed to a key that is not K2, by B.
-const chEpoch2ByB = signedStatement(chainB, { type: 'epoch', directory_version: '5', issued_at_ms: '1760000005000', epoch: '2', epoch_commit: commit2 });
+// The signed directory log: seq = the version each op creates, prev_hash = SHA-256 of
+// the previous op's canonical statement bytes (genesis: empty).
+const logEntryHash = (statement) => hex(sha256(utf8(statement)));
+const chainLog = [];
+const logOp = (issuer, fields) => {
+  const prev = chainLog.length ? chainLog[chainLog.length - 1].hash : '';
+  const s = signedStatement(issuer, { seq: String(chainLog.length + 1), prev_hash: prev, ...fields });
+  chainLog.push({ seq: chainLog.length + 1, statement: s.statement, signature: s.signature, hash: logEntryHash(s.statement) });
+  return s;
+};
+const chGenesis = logOp(chainA, { type: 'genesis', issued_at_ms: '1760000000000', ...subjectFields(chainA), epoch: '1', epoch_commit: commit1 });
+const chApproveB = logOp(chainA, { type: 'approve', issued_at_ms: '1760000001000', ...subjectFields(chainB), epoch: '1', epoch_commit: commit1, wrap_sha256: hex(seeded('chain-wrap-b', 32)) });
+const chApproveBridge = logOp(chainB, { type: 'approve', issued_at_ms: '1760000002000', ...subjectFields(chainBridge), epoch: '1', epoch_commit: commit1 });
+const chApproveC = logOp(chainA, { type: 'approve', issued_at_ms: '1760000003000', ...subjectFields(chainC), epoch: '1', epoch_commit: commit1, wrap_sha256: hex(seeded('chain-wrap-c', 32)) });
+// Revoke C: one statement names the revoked subject AND introduces epoch 2.
+const chRevokeC = logOp(chainA, { type: 'revoke', issued_at_ms: '1760000004000', ...subjectFields(chainC), epoch: '2', epoch_commit: commit2 });
+// Negative-test material (NOT in the log): a standalone rotate to epoch 2 signed by B.
+const chEpoch2ByB = signedStatement(chainB, { type: 'rotate', seq: '6', prev_hash: chainLog[4].hash, issued_at_ms: '1760000005000', epoch: '2', epoch_commit: commit2 });
 const chainLink = (d, approval) => ({
   device_id: d.device_id, kind: d.kind, sign_alg: SIGN_ALG, sign_public_key: d.sign_pub,
   approval_statement: approval.statement, approval_signature: approval.signature,
 });
 // Member order matches buildBridgeChainProof; signatures are signature-object JSON text.
 const chainProof = {
-  v: 1,
+  v: 2,
   user_id: USER_ID,
   root_device_id: chainA.device_id,
   root_sign_alg: SIGN_ALG,
   root_sign_pub: chainA.sign_pub,
   genesis: { statement: chGenesis.statement, signature: chGenesis.signature },
-  epoch: { epoch: 2, statement: chEpoch2.statement, signature: chEpoch2.signature },
-  issuer_chain: [],
+  epochs: [
+    { epoch: 1, statement: chGenesis.statement, signature: chGenesis.signature, issuer_chain: [] },
+    { epoch: 2, statement: chRevokeC.statement, signature: chRevokeC.signature, issuer_chain: [] },
+  ],
   subject_approval: { statement: chApproveBridge.statement, signature: chApproveBridge.signature, issuer_chain: [chainLink(chainB, chApproveB)] },
 };
 const accountFingerprint = (() => { const h = hex(sha256(pubRaw(chainA.signD)).subarray(0, 8)); return `${h.slice(0, 4)} ${h.slice(4, 8)} ${h.slice(8, 12)} ${h.slice(12, 16)}`; })();
@@ -523,7 +539,10 @@ const vectors = {
     proof_json: JSON.stringify(chainProof),
     // Validly signed but wrong for this proof (negative tests).
     epoch2_by_b: chEpoch2ByB,
-    approve_c_link: chainLink(chainC, signedStatement(chainA, { type: 'approve', directory_version: '3', issued_at_ms: '1760000003000', ...subjectFields(chainC), epoch: '1', epoch_commit: commit1 })),
+    approve_c_link: chainLink(chainC, chApproveC),
+    // The full directory log the proof was cut from (TS/Odin log verification vectors).
+    log: chainLog,
+    head_hash: chainLog[chainLog.length - 1].hash,
     // Test-only keys, so the Odin suite can sign extra negative statements.
     private_keys: { root_a: hex(fromBig(chainA.signD)), browser_b: hex(fromBig(chainB.signD)) },
   },

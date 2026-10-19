@@ -50,6 +50,8 @@ new_vault_directory_repository :: proc(impl: ^Vault_Directory_Repo_SQLite, conn:
 		get_directory        = vault_get_directory_sqlite,
 		list_devices         = vault_list_devices_sqlite,
 		list_epochs          = vault_list_epochs_sqlite,
+		list_log             = vault_list_log_sqlite,
+		mark_retired         = vault_mark_retired_sqlite,
 		get_wrap             = vault_get_wrap_sqlite,
 		find_pending_by_code = vault_find_pending_by_code_sqlite,
 		register_pending     = vault_register_pending_sqlite,
@@ -94,7 +96,7 @@ bind_opt :: proc(stmt: sqlite3_stmt, index: int, value: string) {
 	bind_text(stmt, index, value)
 }
 
-DEVICE_COLUMNS :: "device_id, user_id, kind, label, sign_alg, wrap_alg, sign_public_key, ecdh_public_key, fingerprint, bridge_id, status, user_code, code_expires_at, approval_statement, approval_signature, approved_by_device_id, revocation_statement, revocation_signature, revoked_by_device_id, recovery_blob, created_at, approved_at, revoked_at, last_seen_at"
+DEVICE_COLUMNS :: "device_id, user_id, kind, label, sign_alg, wrap_alg, sign_public_key, ecdh_public_key, fingerprint, bridge_id, status, user_code, code_expires_at, approval_statement, approval_signature, approved_by_device_id, revocation_statement, revocation_signature, revoked_by_device_id, recovery_blob, created_at, approved_at, revoked_at, last_seen_at, retired_at"
 
 @(private = "file")
 device_from_stmt :: proc(stmt: sqlite3_stmt) -> domain.Vault_Device {
@@ -124,6 +126,7 @@ device_from_stmt :: proc(stmt: sqlite3_stmt) -> domain.Vault_Device {
 		approved_at = column_text(stmt, 21),
 		revoked_at = column_text(stmt, 22),
 		last_seen_at = column_text(stmt, 23),
+		retired_at = column_text(stmt, 24),
 	}
 }
 
@@ -153,11 +156,12 @@ bind_device_insert :: proc(stmt: sqlite3_stmt, d: domain.Vault_Device) {
 	bind_opt(stmt, 22, d.approved_at)
 	bind_opt(stmt, 23, d.revoked_at)
 	bind_opt(stmt, 24, d.last_seen_at)
+	bind_opt(stmt, 25, d.retired_at)
 }
 
 @(private = "file")
 insert_device_on :: proc(conn: ^Conn, d: domain.Vault_Device) -> bool {
-	stmt, ok := prepare(conn, "INSERT INTO vault_devices (" + DEVICE_COLUMNS + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);")
+	stmt, ok := prepare(conn, "INSERT INTO vault_devices (" + DEVICE_COLUMNS + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);")
 	if !ok do return false
 	defer sqlite3_finalize(stmt)
 	bind_device_insert(stmt, d)
@@ -173,7 +177,7 @@ vault_get_directory_sqlite :: proc(ctx: rawptr, user_id: string) -> (domain.Vaul
 
 @(private = "file")
 get_directory_on :: proc(conn: ^Conn, user_id: string) -> (domain.Vault_Directory, bool, domain.Domain_Error) {
-	stmt, ok := prepare(conn, "SELECT user_id, version, current_epoch, root_device_id, genesis_statement, genesis_signature, created_at, updated_at FROM vault_directories WHERE user_id = ?;")
+	stmt, ok := prepare(conn, "SELECT user_id, version, current_epoch, root_device_id, genesis_statement, genesis_signature, created_at, updated_at, head_hash FROM vault_directories WHERE user_id = ?;")
 	if !ok do return {}, false, repo_err("failed to prepare vault directory read")
 	defer sqlite3_finalize(stmt)
 	bind_text(stmt, 1, user_id)
@@ -189,6 +193,7 @@ get_directory_on :: proc(conn: ^Conn, user_id: string) -> (domain.Vault_Director
 		genesis_signature = column_text(stmt, 5),
 		created_at = column_text(stmt, 6),
 		updated_at = column_text(stmt, 7),
+		head_hash = column_text(stmt, 8),
 	}, true, domain.Domain_Error{}
 }
 
@@ -228,6 +233,62 @@ vault_list_epochs_sqlite :: proc(ctx: rawptr, user_id: string) -> ([]domain.Vaul
 		})
 	}
 	return out[:], domain.Domain_Error{}
+}
+
+vault_list_log_sqlite :: proc(ctx: rawptr, user_id: string) -> ([]domain.Vault_Log_Entry, domain.Domain_Error) {
+	impl := (^Vault_Directory_Repo_SQLite)(ctx)
+	stmt, ok := prepare(impl.conn, "SELECT user_id, seq, statement, signature, entry_hash, created_at FROM vault_log WHERE user_id = ? ORDER BY seq;")
+	if !ok do return nil, repo_err("failed to prepare vault log list")
+	defer sqlite3_finalize(stmt)
+	bind_text(stmt, 1, user_id)
+	out := make([dynamic]domain.Vault_Log_Entry)
+	for {
+		rc := sqlite3_step(stmt)
+		if rc == SQLITE_DONE do break
+		if rc != SQLITE_ROW do return nil, repo_err("failed to list the vault log")
+		append(&out, domain.Vault_Log_Entry{
+			user_id = column_text(stmt, 0),
+			seq = sqlite3_column_int64(stmt, 1),
+			statement = column_text(stmt, 2),
+			signature = column_text(stmt, 3),
+			entry_hash = column_text(stmt, 4),
+			created_at = column_text(stmt, 5),
+		})
+	}
+	return out[:], domain.Domain_Error{}
+}
+
+@(private = "file")
+insert_log_on :: proc(conn: ^Conn, e: domain.Vault_Log_Entry) -> bool {
+	stmt, ok := prepare(conn, "INSERT INTO vault_log (user_id, seq, statement, signature, entry_hash, created_at) VALUES (?, ?, ?, ?, ?, ?);")
+	if !ok do return false
+	defer sqlite3_finalize(stmt)
+	bind_text(stmt, 1, e.user_id)
+	sqlite3_bind_int64(stmt, 2, e.seq)
+	bind_text(stmt, 3, e.statement)
+	bind_text(stmt, 4, e.signature)
+	bind_text(stmt, 5, e.entry_hash)
+	bind_text(stmt, 6, e.created_at)
+	return sqlite3_step(stmt) == SQLITE_DONE
+}
+
+// vault_mark_retired_sqlite sets the retirement hint. It never touches the version,
+// the log or the device status (see iface.Vault_Mark_Retired_Proc).
+vault_mark_retired_sqlite :: proc(ctx: rawptr, user_id, device_id, bridge_id, now: string) -> (bool, domain.Domain_Error) {
+	impl := (^Vault_Directory_Repo_SQLite)(ctx)
+	sync.mutex_lock(&impl.mutex)
+	defer sync.mutex_unlock(&impl.mutex)
+	conn := write_conn(impl)
+	stmt, ok := prepare(conn, "UPDATE vault_devices SET retired_at = ? WHERE device_id = ? AND user_id = ? AND status = 'approved' AND bridge_id = ? AND bridge_id != '' AND retired_at IS NULL;")
+	if !ok do return false, repo_err("failed to prepare the retirement hint")
+	defer sqlite3_finalize(stmt)
+	bind_text(stmt, 1, now)
+	bind_text(stmt, 2, device_id)
+	bind_text(stmt, 3, user_id)
+	bind_text(stmt, 4, bridge_id)
+	rc, changes := step_changes(conn.db, stmt)
+	if rc != SQLITE_DONE do return false, repo_err("the retirement hint failed")
+	return changes == 1, domain.Domain_Error{}
 }
 
 vault_get_wrap_sqlite :: proc(ctx: rawptr, user_id, device_id: string) -> (domain.Vault_Wrap_Row, bool, domain.Domain_Error) {
@@ -424,7 +485,10 @@ vault_create_genesis_sqlite :: proc(ctx: rawptr, g: domain.Vault_Genesis) -> dom
 		return domain.vault_reason_error(.Conflict, "directory_exists", "a vault directory already exists for this account")
 	}
 	{
-		stmt, ok := prepare(conn, "INSERT INTO vault_directories (user_id, version, current_epoch, root_device_id, genesis_statement, genesis_signature, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?);")
+		if g.directory.version != 1 || g.log.seq != 1 || g.log.entry_hash == "" || g.directory.head_hash != g.log.entry_hash || g.log.user_id != g.directory.user_id {
+			return domain.domain_error(.Validation_Failed, "genesis must be log seq 1 and the directory head")
+		}
+		stmt, ok := prepare(conn, "INSERT INTO vault_directories (user_id, version, current_epoch, root_device_id, genesis_statement, genesis_signature, created_at, updated_at, head_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);")
 		if !ok do return repo_err("failed to prepare vault genesis")
 		defer sqlite3_finalize(stmt)
 		d := g.directory
@@ -436,6 +500,7 @@ vault_create_genesis_sqlite :: proc(ctx: rawptr, g: domain.Vault_Genesis) -> dom
 		bind_text(stmt, 6, d.genesis_signature)
 		bind_text(stmt, 7, d.created_at)
 		bind_text(stmt, 8, d.updated_at)
+		bind_text(stmt, 9, d.head_hash)
 		if sqlite3_step(stmt) != SQLITE_DONE do return domain.vault_reason_error(.Conflict, "directory_exists", "a vault directory already exists for this account")
 	}
 	// The root may already be registered as pending (register-then-genesis); it is
@@ -452,6 +517,7 @@ vault_create_genesis_sqlite :: proc(ctx: rawptr, g: domain.Vault_Genesis) -> dom
 		if sqlite3_step(stmt) != SQLITE_DONE do return repo_err("failed to clear the pending root")
 	}
 	if !insert_device_on(conn, g.device) do return domain.vault_reason_error(.Conflict, "device_exists", "this device key is already registered")
+	if !insert_log_on(conn, g.log) do return repo_err("failed to write the genesis log entry")
 	if !insert_epoch_on(conn, g.epoch.user_id, g.epoch.epoch, g.epoch.statement, g.epoch.signature, g.epoch.created_at) do return repo_err("failed to write the genesis epoch")
 	if !upsert_wrap_on(conn, g.wrap) do return repo_err("failed to write the genesis wrap")
 	if !exec(conn, "COMMIT;") do return repo_err("failed to commit vault genesis")
@@ -465,6 +531,10 @@ vault_commit_test_hook: proc(user_id: string)
 vault_commit_sqlite :: proc(ctx: rawptr, cm: domain.Vault_Directory_Commit) -> (i64, domain.Domain_Error) {
 	impl := (^Vault_Directory_Repo_SQLite)(ctx)
 	if cm.user_id == "" || cm.now == "" || cm.expected_version < 1 do return 0, domain.domain_error(.Validation_Failed, "user_id, now and expected_version are required")
+	// The hub never advances the directory without a signed log op.
+	if cm.log_statement == "" || cm.log_signature == "" || cm.log_entry_hash == "" || cm.expected_head_hash == "" {
+		return 0, domain.domain_error(.Validation_Failed, "a directory commit must append exactly one signed log op")
+	}
 	sync.mutex_lock(&impl.mutex)
 	defer sync.mutex_unlock(&impl.mutex)
 	conn := write_conn(impl)
@@ -477,24 +547,31 @@ vault_commit_sqlite :: proc(ctx: rawptr, cm: domain.Vault_Directory_Commit) -> (
 	}
 	// 1. The CAS. The epoch guard rides on it: a new epoch must be current + 1.
 	{
-		query := "UPDATE vault_directories SET version = version + 1, updated_at = ? WHERE user_id = ? AND version = ?;"
-		if cm.new_epoch > 0 do query = "UPDATE vault_directories SET version = version + 1, updated_at = ?, current_epoch = ? WHERE user_id = ? AND version = ? AND current_epoch = ?;"
+		query := "UPDATE vault_directories SET version = version + 1, head_hash = ?, updated_at = ? WHERE user_id = ? AND version = ? AND head_hash = ?;"
+		if cm.new_epoch > 0 do query = "UPDATE vault_directories SET version = version + 1, head_hash = ?, updated_at = ?, current_epoch = ? WHERE user_id = ? AND version = ? AND head_hash = ? AND current_epoch = ?;"
 		stmt, ok := prepare(conn, query)
 		if !ok do return 0, repo_err("failed to prepare the directory CAS")
 		defer sqlite3_finalize(stmt)
-		bind_text(stmt, 1, cm.now)
+		bind_text(stmt, 1, cm.log_entry_hash)
+		bind_text(stmt, 2, cm.now)
 		if cm.new_epoch > 0 {
-			sqlite3_bind_int64(stmt, 2, cm.new_epoch)
+			sqlite3_bind_int64(stmt, 3, cm.new_epoch)
+			bind_text(stmt, 4, cm.user_id)
+			sqlite3_bind_int64(stmt, 5, cm.expected_version)
+			bind_text(stmt, 6, cm.expected_head_hash)
+			sqlite3_bind_int64(stmt, 7, cm.new_epoch - 1)
+		} else {
 			bind_text(stmt, 3, cm.user_id)
 			sqlite3_bind_int64(stmt, 4, cm.expected_version)
-			sqlite3_bind_int64(stmt, 5, cm.new_epoch - 1)
-		} else {
-			bind_text(stmt, 2, cm.user_id)
-			sqlite3_bind_int64(stmt, 3, cm.expected_version)
+			bind_text(stmt, 5, cm.expected_head_hash)
 		}
 		rc, changes := step_changes(conn.db, stmt)
 		if rc != SQLITE_DONE do return 0, repo_err("the directory CAS failed")
 		if changes != 1 do return conflict(conn, cm.user_id)
+	}
+	// The log op occupies seq = expected_version + 1 (primary key: one op per slot).
+	if !insert_log_on(conn, domain.Vault_Log_Entry{user_id = cm.user_id, seq = cm.expected_version + 1, statement = cm.log_statement, signature = cm.log_signature, entry_hash = cm.log_entry_hash, created_at = cm.now}) {
+		return conflict(conn, cm.user_id)
 	}
 	when ODIN_TEST {
 		if vault_commit_test_hook != nil do vault_commit_test_hook(cm.user_id)
@@ -514,14 +591,14 @@ vault_commit_sqlite :: proc(ctx: rawptr, cm: domain.Vault_Directory_Commit) -> (
 		if rc != SQLITE_DONE do return 0, repo_err("the approval failed")
 		if changes != 1 do return conflict(conn, cm.user_id)
 	}
-	if cm.retire_device_id != "" {
-		stmt, ok := prepare(conn, "UPDATE vault_devices SET status = 'revoked', revoked_at = ?, revoked_by_device_id = NULL WHERE device_id = ? AND user_id = ? AND status = 'approved' AND bridge_id = ? AND bridge_id != '';")
+	if cm.hint_retire_device_id != "" {
+		stmt, ok := prepare(conn, "UPDATE vault_devices SET retired_at = COALESCE(retired_at, ?) WHERE device_id = ? AND user_id = ? AND status = 'approved' AND bridge_id = ? AND bridge_id != '';")
 		if !ok do return 0, repo_err("failed to prepare the bridge retirement")
 		defer sqlite3_finalize(stmt)
 		bind_text(stmt, 1, cm.now)
-		bind_text(stmt, 2, cm.retire_device_id)
+		bind_text(stmt, 2, cm.hint_retire_device_id)
 		bind_text(stmt, 3, cm.user_id)
-		bind_text(stmt, 4, cm.retire_bridge_id)
+		bind_text(stmt, 4, cm.hint_retire_bridge_id)
 		rc, changes := step_changes(conn.db, stmt)
 		if rc != SQLITE_DONE do return 0, repo_err("the bridge retirement failed")
 		if changes != 1 do return conflict(conn, cm.user_id)
@@ -545,7 +622,7 @@ vault_commit_sqlite :: proc(ctx: rawptr, cm: domain.Vault_Directory_Commit) -> (
 		if changes != 1 do return conflict(conn, cm.user_id)
 	}
 	if cm.new_epoch > 0 {
-		if !insert_epoch_on(conn, cm.user_id, cm.new_epoch, cm.epoch_statement, cm.epoch_signature, cm.now) do return conflict(conn, cm.user_id)
+		if !insert_epoch_on(conn, cm.user_id, cm.new_epoch, cm.log_statement, cm.log_signature, cm.now) do return conflict(conn, cm.user_id)
 	}
 	if cm.label_device_id != "" {
 		stmt, ok := prepare(conn, "UPDATE vault_devices SET label = ? WHERE device_id = ? AND user_id = ? AND status = 'approved';")
@@ -656,7 +733,8 @@ vault_list_due_resets_sqlite :: proc(ctx: rawptr, now: string) -> ([]string, dom
 	return out[:], domain.Domain_Error{}
 }
 
-VAULT_RESET_DELETES :: [5]string{
+VAULT_RESET_DELETES :: [6]string{
+	"DELETE FROM vault_log WHERE user_id = ?;",
 	"DELETE FROM vault_wrapped_keyrings WHERE user_id = ?;",
 	"DELETE FROM vault_epochs WHERE user_id = ?;",
 	"DELETE FROM vault_devices WHERE user_id = ?;",

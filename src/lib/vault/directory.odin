@@ -123,7 +123,7 @@ decimal_u64 :: proc(s: string) -> (u64, bool) {
 // the value grammar apply too. Returned strings alias `text`.
 statement_parse :: proc(text: string) -> (st: Statement, ok: bool) {
 	FIELD_NAMES :: [?]string{
-		"type", "user_id", "directory_version", "issuer_device_id", "issued_at_ms",
+		"type", "user_id", "seq", "prev_hash", "issuer_device_id", "issued_at_ms",
 		"subject_device_id", "subject_kind", "subject_sign_pub", "subject_ecdh_pub",
 		"subject_sign_alg", "subject_wrap_alg", "subject_label_b64", "epoch",
 		"epoch_commit", "wrap_sha256",
@@ -158,11 +158,11 @@ statement_parse :: proc(text: string) -> (st: Statement, ok: bool) {
 	}
 	if rest != "" do return {}, false
 	st = Statement{
-		type = values[0], user_id = values[1], directory_version = values[2],
-		issuer_device_id = values[3], issued_at_ms = values[4], subject_device_id = values[5],
-		subject_kind = values[6], subject_sign_pub = values[7], subject_ecdh_pub = values[8],
-		subject_sign_alg = values[9], subject_wrap_alg = values[10], subject_label_b64 = values[11],
-		epoch = values[12], epoch_commit = values[13], wrap_sha256 = values[14],
+		type = values[0], user_id = values[1], seq = values[2], prev_hash = values[3],
+		issuer_device_id = values[4], issued_at_ms = values[5], subject_device_id = values[6],
+		subject_kind = values[7], subject_sign_pub = values[8], subject_ecdh_pub = values[9],
+		subject_sign_alg = values[10], subject_wrap_alg = values[11], subject_label_b64 = values[12],
+		epoch = values[13], epoch_commit = values[14], wrap_sha256 = values[15],
 	}
 	canonical, c_ok := statement_canonical(&st, context.temp_allocator)
 	if !c_ok || canonical != text do return {}, false
@@ -252,7 +252,7 @@ valid_device_id :: proc(s: string) -> bool {
 
 // wrap_statement is the statement a wrap's signature covers. It is reconstructible
 // from the wrap alone: type=wrap, issuer = wrapped_by_device_id, subject = recipient,
-// directory_version and epoch from the wrap, wrap_sha256 over the canonical wrap JSON,
+// seq = the wrap's directory_version, epoch from the wrap, wrap_sha256 over the canonical wrap JSON,
 // every other field empty (issued_at_ms included, so nothing outside the wrap is needed).
 wrap_statement :: proc(w: ^Keyring_Wrap, user_id: string, allocator := context.allocator) -> (string, bool) {
 	digest: [32]byte
@@ -261,7 +261,7 @@ wrap_statement :: proc(w: ^Keyring_Wrap, user_id: string, allocator := context.a
 	st := Statement{
 		type = "wrap",
 		user_id = user_id,
-		directory_version = strconv.write_uint(v_buf[:], w.directory_version, 10),
+		seq = strconv.write_uint(v_buf[:], w.directory_version, 10),
 		issuer_device_id = w.wrapped_by_device_id,
 		subject_device_id = w.recipient_device_id,
 		epoch = strconv.write_uint(e_buf[:], u64(w.current_epoch), 10),
@@ -278,4 +278,56 @@ wrap_signed_json :: proc(w: ^Keyring_Wrap, signature: string, allocator := conte
 	if !ok do return "", false
 	if _, s_ok := signature_parse(signature); !s_ok do return "", false
 	return strings.concatenate({canonical[:len(canonical) - 1], `,"signature":`, signature, "}"}, allocator), true
+}
+
+// ── Signed directory log (plan §1 "Directory log") ──────────────────────────
+// Every directory mutation is ONE signed log op: genesis (seq 1), approve, revoke
+// (which also introduces epoch current+1 and names the revoked subject) or rotate
+// (a standalone epoch advance with no subject). seq is the directory version the op
+// creates, contiguous from 1; prev_hash is the hex SHA-256 of the previous op's
+// canonical statement bytes (empty for genesis). The hash covers the statement only,
+// not its signature: an ECDSA signature is malleable ((r,s) and (r,n-s) both verify),
+// so hashing it would let anyone holding the log change the chain head without
+// changing what was signed.
+
+LOG_HASH_HEX_CHARS :: 64
+
+// is_log_op reports a statement type that occupies a log slot.
+is_log_op :: proc(t: string) -> bool {
+	switch t {
+	case "genesis", "approve", "revoke", "rotate":
+		return true
+	}
+	return false
+}
+
+// introduces_epoch reports a log op that sets a new current epoch (its epoch and
+// epoch_commit fields): genesis (epoch 1), revoke and rotate (current + 1).
+introduces_epoch :: proc(t: string) -> bool {
+	switch t {
+	case "genesis", "revoke", "rotate":
+		return true
+	}
+	return false
+}
+
+// log_entry_hash = lowercase hex SHA-256 of the canonical statement bytes.
+log_entry_hash :: proc(statement: string, allocator := context.allocator) -> string {
+	digest: [32]byte
+	ctx: sha2.Context_256
+	sha2.init_256(&ctx)
+	sha2.update(&ctx, transmute([]byte)statement)
+	sha2.final(&ctx, digest[:])
+	return hex_encode_lower(digest[:], allocator)
+}
+
+// log_link_ok checks that st occupies log slot `seq` right after an op whose entry
+// hash is prev_hash (seq 1: genesis, prev_hash empty).
+log_link_ok :: proc(st: ^Statement, seq: u64, prev_hash: string) -> bool {
+	if seq == 0 do return false
+	buf: [24]byte
+	if st.seq != strconv.write_uint(buf[:], seq, 10) do return false
+	if seq == 1 do return st.prev_hash == "" && st.type == "genesis"
+	if st.type == "genesis" || !is_log_op(st.type) do return false
+	return len(st.prev_hash) == LOG_HASH_HEX_CHARS && is_lower_hex(st.prev_hash) && st.prev_hash == prev_hash
 }

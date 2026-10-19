@@ -84,7 +84,7 @@ test_bridge_chain_rejects_bad_proofs :: proc(t: ^testing.T) {
 	start := strings.index(f.text, sa_key) + len(`"issuer_chain":`)
 	b_arr := f.text[start:start + strings.index(f.text[start:], "]") + 1]
 
-	testing.expect_value(t, check(&f, swap(f.text, `"v":1`, `"v":2`)), Chain_Error.Malformed)
+	testing.expect_value(t, check(&f, swap(f.text, `"v":2`, `"v":1`)), Chain_Error.Malformed)
 	testing.expect_value(t, check(&f, "{}"), Chain_Error.Malformed)
 	// Another account, another bridge, a substituted current key.
 	testing.expect_value(t, check(&f, swap(f.text, `"user_id":"usr_0123456789abcdef"`, `"user_id":"usr_other"`)), Chain_Error.Wrong_Account)
@@ -95,22 +95,29 @@ test_bridge_chain_rejects_bad_proofs :: proc(t: ^testing.T) {
 	swapped.entries[swapped.count - 1].key[0] ~= 0xff
 	testing.expect_value(t, check(&f, f.text, nil, "", &swapped), Chain_Error.Commit_Mismatch)
 	keyring_wipe(&swapped)
-	// A keyring whose current epoch is 1: the epoch statement is for 2.
+	// An OLDER epoch key is attested too: a substituted epoch-1 key is refused.
+	old_swapped := f.kr
+	old_swapped.entries[0].key[0] ~= 0xff
+	testing.expect_value(t, check(&f, f.text, nil, "", &old_swapped), Chain_Error.Commit_Mismatch)
+	keyring_wipe(&old_swapped)
+	// A keyring whose current epoch is 1: the proof carries two epochs.
 	single, _ := keyring_from_single_key(f.owner, 1, f.kr.entries[0].key[:])
 	testing.expect_value(t, check(&f, f.text, nil, "", &single), Chain_Error.Epoch_Mismatch)
 	keyring_wipe(&single)
 	// The bridge approver's chain is dropped: B is not the root.
 	testing.expect_value(t, check(&f, swap(f.text, strings.concatenate({`"issuer_chain":`, b_arr}, context.temp_allocator), `"issuer_chain":[]`)), Chain_Error.Link_Invalid)
-	// Tampered epoch statement (still canonical): signature fails.
-	testing.expect_value(t, check(&f, swap(f.text, "issued_at_ms=1760000004001", "issued_at_ms=1760000004002")), Chain_Error.Bad_Signature)
-	// Epoch statement by B with no issuer chain for it.
+	// Tampered epoch-2 carrier (the revoke; still canonical): signature fails.
+	testing.expect_value(t, check(&f, swap(f.text, "issued_at_ms=1760000004000", "issued_at_ms=1760000004002")), Chain_Error.Bad_Signature)
+	// Epoch 2 carried by a rotate signed by B, with no issuer chain for B.
 	e2b := f.bc["epoch2_by_b"].(json.Object)
-	ep := p["epoch"].(json.Object)
+	carriers := p["epochs"].(json.Array)
+	ep := carriers[1].(json.Object)
 	by_b := swap(f.text, json_quote(cstr(ep, "statement")), json_quote(cstr(e2b, "statement")))
 	by_b = swap(by_b, json_quote(cstr(ep, "signature")), json_quote(cstr(e2b, "signature")))
 	testing.expect_value(t, check(&f, by_b), Chain_Error.Link_Invalid)
 	// …and with B's chain it is accepted (B is an approver).
-	with_chain := swap(by_b, `"issuer_chain":[],`, strings.concatenate({`"issuer_chain":`, b_arr, ","}, context.temp_allocator))
+	e2b_tail := strings.concatenate({json_quote(cstr(e2b, "signature")), `","issuer_chain":[]`}, context.temp_allocator)
+	with_chain := swap(by_b, e2b_tail, strings.concatenate({json_quote(cstr(e2b, "signature")), `","issuer_chain":`, b_arr}, context.temp_allocator))
 	testing.expect_value(t, check(&f, with_chain), Chain_Error.None)
 
 	// A bridge in the issuer chain may not approve: A approves bridge2, bridge2 signs epoch 2.
@@ -133,7 +140,7 @@ test_bridge_chain_rejects_bad_proofs :: proc(t: ^testing.T) {
 	b2_pub := hex_encode_lower(raw[:], context.temp_allocator)
 	b2_id, _ := device_id_from_sign_pub(b2_pub, context.temp_allocator)
 	root_id := cstr(p, "root_device_id")
-	ap := Statement{type = "approve", user_id = f.owner, directory_version = "3", issuer_device_id = root_id, issued_at_ms = "1",
+	ap := Statement{type = "approve", user_id = f.owner, seq = "4", prev_hash = strings.repeat("a", 64, context.temp_allocator), issuer_device_id = root_id, issued_at_ms = "1",
 		subject_device_id = b2_id, subject_kind = "bridge", subject_sign_pub = b2_pub, subject_sign_alg = SIGN_ALG_ECDSA_P256_SHA256, subject_label_b64 = "Yg", epoch = "1"}
 	ap_text, ap_sig := sign(t, cstr(keys, "root_a"), &ap)
 	est, _ := statement_parse(cstr(e2b, "statement"))
@@ -143,6 +150,29 @@ test_bridge_chain_rejects_bad_proofs :: proc(t: ^testing.T) {
 		`","approval_statement":"`, json_quote(ap_text), `","approval_signature":"`, json_quote(ap_sig), `"}]`}, context.temp_allocator)
 	by_bridge := swap(f.text, json_quote(cstr(ep, "statement")), json_quote(e_text))
 	by_bridge = swap(by_bridge, json_quote(cstr(ep, "signature")), json_quote(e_sig))
-	by_bridge = swap(by_bridge, `"issuer_chain":[],`, strings.concatenate({`"issuer_chain":`, bridge_link, ","}, context.temp_allocator))
+	by_bridge = swap(by_bridge, strings.concatenate({json_quote(e_sig), `","issuer_chain":[]`}, context.temp_allocator), strings.concatenate({json_quote(e_sig), `","issuer_chain":`, bridge_link}, context.temp_allocator))
 	testing.expect_value(t, check(&f, by_bridge), Chain_Error.Link_Invalid)
+}
+
+// The directory log vector: contiguous seq from 1, each prev_hash = SHA-256 of the
+// previous op's canonical statement, and the head hash.
+@(test)
+test_directory_log_vector_links :: proc(t: ^testing.T) {
+	f := load_chain(t)
+	defer keyring_wipe(&f.kr)
+	log := f.bc["log"].(json.Array)
+	prev := ""
+	for e, i in log {
+		eo := e.(json.Object)
+		text := cstr(eo, "statement")
+		st, ok := statement_parse(text)
+		testing.expect(t, ok)
+		testing.expectf(t, log_link_ok(&st, u64(i + 1), prev), "log entry %d links", i + 1)
+		h := log_entry_hash(text, context.temp_allocator)
+		testing.expect_value(t, h, cstr(eo, "hash"))
+		// The same statement does not fit any other slot.
+		testing.expect(t, !log_link_ok(&st, u64(i + 2), prev))
+		prev = h
+	}
+	testing.expect_value(t, prev, cstr(f.bc, "head_hash"))
 }

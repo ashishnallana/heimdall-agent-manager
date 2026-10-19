@@ -234,12 +234,17 @@ sign_p256 :: proc(priv: ^ecdsa.Private_Key, msg: []byte) -> (sig: Signature, ok:
 
 // ── Canonical statements ────────────────────────────────────────────────────
 
-STATEMENT_HEADER :: "heimdall-vault-statement/v1"
+STATEMENT_HEADER :: "heimdall-vault-statement/v2"
 
 Statement :: struct {
-	type:              string, // genesis|approve|revoke|epoch|wrap|recovery
+	type:              string, // genesis|approve|revoke|rotate (log ops) | wrap|register
 	user_id:           string,
-	directory_version: string,
+	// seq: for a log op, the directory version it creates (genesis = 1, contiguous);
+	// for a wrap, the wrap's directory_version; empty for register.
+	seq:               string,
+	// prev_hash: hex SHA-256 of the previous log op's canonical bytes (empty for
+	// genesis and for non-log statements). See the log section of directory.odin.
+	prev_hash:         string,
 	issuer_device_id:  string,
 	issued_at_ms:      string,
 	subject_device_id: string,
@@ -256,7 +261,7 @@ Statement :: struct {
 
 valid_statement_type :: proc(t: string) -> bool {
 	switch t {
-	case "genesis", "approve", "revoke", "epoch", "wrap", "recovery", "register":
+	case "genesis", "approve", "revoke", "rotate", "wrap", "register":
 		return true
 	}
 	return false
@@ -273,7 +278,8 @@ statement_canonical :: proc(st: ^Statement, allocator := context.allocator) -> (
 	fields := [?][2]string{
 		{"type", st.type},
 		{"user_id", st.user_id},
-		{"directory_version", st.directory_version},
+		{"seq", st.seq},
+		{"prev_hash", st.prev_hash},
 		{"issuer_device_id", st.issuer_device_id},
 		{"issued_at_ms", st.issued_at_ms},
 		{"subject_device_id", st.subject_device_id},

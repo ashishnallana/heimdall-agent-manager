@@ -416,9 +416,13 @@ MIGRATION_091_AGENT_INSTANCE_STOPPED_BY :: #load("migrations/091_agent_instance_
 // vault_epochs, vault_wrapped_keyrings). Idempotent; re-run by upgrade_vault_directory_schema.
 MIGRATION_092_VAULT_DEVICE_DIRECTORY :: #load("migrations/092_vault_device_directory.sql", string)
 
+// 093: drops the pre-log vault tables (no backward compatibility; dev data wiped).
+// upgrade_vault_directory_schema re-creates them from 092 (signed-log shape).
+MIGRATION_093_VAULT_SIGNED_LOG :: #load("migrations/093_vault_signed_log.sql", string)
+
 MIGRATION_075_CONVERSATION_LAUNCH_PREFERENCES :: #load("migrations/075_conversation_launch_preferences.sql", string)
 
-migration_order :: [96]string {
+migration_order :: [97]string {
 	"001_foundation.sql",
 	"002_owner_scoped_core.sql",
 	"003_device_tokens.sql",
@@ -515,6 +519,7 @@ migration_order :: [96]string {
 	"090_task_v2.sql",
 	"091_agent_instance_stopped_by.sql",
 	"092_vault_device_directory.sql",
+	"093_vault_signed_log.sql",
 }
 
 // stop_before is a TEST SEAM: when non-empty, the apply loop stops in front of
@@ -987,6 +992,7 @@ migration_sql :: proc(name, migrations_dir: string) -> string {
 	if name == "090_task_v2.sql" do return strings.clone(MIGRATION_090_TASK_V2)
 	if name == "091_agent_instance_stopped_by.sql" do return strings.clone(MIGRATION_091_AGENT_INSTANCE_STOPPED_BY)
 	if name == "092_vault_device_directory.sql" do return strings.clone(MIGRATION_092_VAULT_DEVICE_DIRECTORY)
+	if name == "093_vault_signed_log.sql" do return strings.clone(MIGRATION_093_VAULT_SIGNED_LOG)
 	if name == "081_antigravity_models.sql" do return strings.clone(MIGRATION_081_ANTIGRAVITY_MODELS)
 	if name == "080_copilot_launch_recipe.sql" do return strings.clone(MIGRATION_080_COPILOT_LAUNCH_RECIPE)
 	if name == "079_repair_provider_catalog_etag.sql" do return strings.clone(MIGRATION_079_REPAIR_PROVIDER_CATALOG_ETAG)

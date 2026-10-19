@@ -59,7 +59,7 @@ device_enroll_test_bridge :: proc(graph: ^app.App_Graph, headers: []contracts.HT
 	// vault approval (signed by the root device) naming its persistent identity key.
 	user_id, version, vault_ok := vt_ensure_vault(graph, headers)
 	if !vault_ok do return "", "", false
-	br, approval := vt_bridge_approval(user_id, version)
+	br, approval := vt_bridge_approval(graph, user_id, version)
 	authorize_body := strings.concatenate({
 		`{"client":"ham-bridge","device_label":"`, label,
 		`","os":"linux","os_user":"tester","bridge_public_key":"`, DEVICE_TEST_PUBLIC_KEY,

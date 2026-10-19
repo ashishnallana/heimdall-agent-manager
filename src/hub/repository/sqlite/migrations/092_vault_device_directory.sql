@@ -1,16 +1,31 @@
--- Passwordless vault device directory (docs/plans/passwordless-vault.md §2 P2).
--- Idempotent (IF NOT EXISTS throughout) so upgrade_vault_directory_schema can re-run it.
+-- Passwordless vault device directory (docs/plans/passwordless-vault.md §2 P2, §1
+-- "Directory log"). Idempotent (IF NOT EXISTS throughout) so
+-- upgrade_vault_directory_schema can re-run it; 093 dropped the pre-log schema.
 -- `kind` is validated in domain code, not by a CHECK, so a new credential kind
 -- (passkey, security_key) needs no table rebuild.
+--
+-- vault_log is the source of truth clients verify: one signed op per directory
+-- version, seq 1..version, each naming the previous op's hash. version and
+-- head_hash on vault_directories always describe its last entry.
 CREATE TABLE IF NOT EXISTS vault_directories (
   user_id           TEXT PRIMARY KEY,
   version           INTEGER NOT NULL,
   current_epoch     INTEGER NOT NULL,
   root_device_id    TEXT NOT NULL,
+  head_hash         TEXT NOT NULL,
   genesis_statement TEXT NOT NULL,
   genesis_signature TEXT NOT NULL,
   created_at        TEXT NOT NULL,
   updated_at        TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS vault_log (
+  user_id    TEXT NOT NULL,
+  seq        INTEGER NOT NULL,
+  statement  TEXT NOT NULL,
+  signature  TEXT NOT NULL,
+  entry_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (user_id, seq)
 );
 CREATE TABLE IF NOT EXISTS vault_devices (
   device_id             TEXT PRIMARY KEY,
@@ -37,10 +52,15 @@ CREATE TABLE IF NOT EXISTS vault_devices (
   approved_at           TEXT,
   revoked_at            TEXT,
   last_seen_at          TEXT,
+  -- Hub retirement HINT (bridge revoked in settings, identity replaced by an attach,
+  -- rolled-back enrollment): the identity stays approved in the signed log until an
+  -- approved browser signs a real revoke for it. Never consumes a directory version.
+  retired_at            TEXT,
   UNIQUE (user_id, sign_public_key)
 );
 CREATE INDEX IF NOT EXISTS vault_devices_user ON vault_devices(user_id);
 CREATE UNIQUE INDEX IF NOT EXISTS vault_devices_pending_code ON vault_devices(user_code) WHERE status = 'pending';
+-- The log op that introduced each epoch (genesis, revoke or rotate).
 CREATE TABLE IF NOT EXISTS vault_epochs (
   user_id    TEXT NOT NULL,
   epoch      INTEGER NOT NULL,

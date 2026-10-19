@@ -159,6 +159,7 @@ write_vault_device_json :: proc(b: ^strings.Builder, d: domain.Vault_Device) {
 	w_str(b, "approved_at", d.approved_at)
 	w_str(b, "revoked_at", d.revoked_at)
 	w_str(b, "last_seen_at", d.last_seen_at)
+	w_str(b, "retired_at", d.retired_at)
 	strings.write_byte(b, '}')
 }
 
@@ -234,44 +235,41 @@ vault_directory_get_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	w_str(&b, "root_device_id", d.root_device_id)
 	w_str(&b, "root_sign_public_key", view.root_sign_public_key)
 	w_str(&b, "root_sign_alg", view.root_sign_alg)
-	// Clients rotate (signed revoke / re-key) when the hub retired an identity
-	// without a rotation; see vd.Directory_View.rotation_recommended.
-	strings.write_string(&b, `,"rotation_recommended":`)
-	strings.write_string(&b, "true" if view.rotation_recommended else "false")
-	strings.write_string(&b, `,"retired_device_ids":[`)
-	for id, i in view.retired_device_ids {
+	w_str(&b, "head_hash", d.head_hash)
+	// Hub retirement hints: clients verify and sign a real revoke (vd.Directory_View).
+	strings.write_string(&b, `,"retired_hints":[`)
+	for id, i in view.retired_hints {
 		if i > 0 do strings.write_byte(&b, ',')
 		strings.write_byte(&b, '"')
-		strings.write_string(&b, id)
+		write_handler_json_string(&b, id)
 		strings.write_byte(&b, '"')
 	}
 	strings.write_byte(&b, ']')
 	// A scheduled owner reset ({requested_at, due_at}) or null.
 	strings.write_string(&b, `,"reset":`)
 	write_reset_json(&b, reset, has_reset)
-	strings.write_string(&b, `,"genesis":{`)
-	w_str(&b, "statement", d.genesis_statement, true)
-	w_raw(&b, "signature", d.genesis_signature)
-	strings.write_string(&b, `},"devices":[`)
-	for dev, i in view.devices {
+	// The signed directory log, seq 1..version: the only thing clients trust.
+	strings.write_string(&b, `,"log":[`)
+	for e, i in view.log {
 		if i > 0 do strings.write_byte(&b, ',')
-		write_vault_device_json(&b, dev)
-	}
-	strings.write_string(&b, `],"epochs":[`)
-	for e, i in view.epochs {
-		if i > 0 do strings.write_byte(&b, ',')
-		strings.write_string(&b, `{"epoch":`)
-		strings.write_string(&b, vd_itoa(e.epoch))
+		strings.write_string(&b, `{"seq":`)
+		strings.write_string(&b, vd_itoa(e.seq))
 		w_str(&b, "statement", e.statement)
 		w_raw(&b, "signature", e.signature)
 		strings.write_byte(&b, '}')
+	}
+	// Device rows: display metadata (labels, bridge ids, last seen) and pending devices.
+	strings.write_string(&b, `],"devices":[`)
+	for dev, i in view.devices {
+		if i > 0 do strings.write_byte(&b, ',')
+		write_vault_device_json(&b, dev)
 	}
 	strings.write_string(&b, "]}")
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req))
 }
 
 // ── POST /api/v1/vault/directory/genesis ────────────────────────────────────
-// {genesis_statement, signature, epoch_statement, epoch_signature, wrap}. Interactive
+// {genesis_statement (log seq 1, introduces epoch 1), signature, wrap}. Interactive
 // browser session only; announced to every session and device of the account.
 vault_genesis_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Vault_Directory_Handlers)(ctx)
@@ -284,7 +282,6 @@ vault_genesis_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	dev, err := vd.genesis(h.vault, vd.Genesis_Input{
 		user_id = auth.user_id,
 		genesis_statement = obj_str(o, "genesis_statement"), genesis_signature = obj_sig(o, "signature"),
-		epoch_statement = obj_str(o, "epoch_statement"), epoch_signature = obj_sig(o, "epoch_signature"),
 		wrap = wrap,
 	})
 	if err.code != .None do return respond_error(err, req.request_id)
@@ -410,7 +407,7 @@ vault_deny_handler :: proc(ctx: rawptr, req: Request) -> Response {
 }
 
 // ── POST /api/v1/vault/devices/{id}/revoke ──────────────────────────────────
-// {expected_version, revoke_statement, signature, epoch_statement, epoch_signature, wraps:[…]}
+// {expected_version, revoke_statement (one log op: revokes + introduces epoch current+1), signature, wraps:[…]}
 vault_revoke_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Vault_Directory_Handlers)(ctx)
 	auth, ok, resp := require_vault_user(h, req)
@@ -432,7 +429,6 @@ vault_revoke_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	plan, err := vd.revoke_prepare(h.vault, vd.Revoke_Input{
 		user_id = auth.user_id, device_id = device_id_from_path(req), expected_version = version,
 		revoke_statement = obj_str(o, "revoke_statement"), signature = obj_sig(o, "signature"),
-		epoch_statement = obj_str(o, "epoch_statement"), epoch_signature = obj_sig(o, "epoch_signature"),
 		wraps = wraps, signer = signer,
 	})
 	if err.code != .None do return respond_error(err, req.request_id)
@@ -454,8 +450,8 @@ vault_revoke_handler :: proc(ctx: rawptr, req: Request) -> Response {
 }
 
 // ── POST /api/v1/vault/directory/rotate ──────────────────────────────────────
-// {expected_version, epoch_statement, epoch_signature, wraps:[…]}. Approver-signed.
-// Advances to epoch current+1 without revoking anything (after a hub retirement).
+// {expected_version, statement (a `rotate` log op), signature, wraps:[…]}. Approver-signed.
+// Advances to epoch current+1 without revoking anything (explicit user rotation).
 vault_rotate_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Vault_Directory_Handlers)(ctx)
 	auth, ok, resp := require_vault_user(h, req)
@@ -476,7 +472,7 @@ vault_rotate_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	}
 	new_version, err := vd.rotate(h.vault, vd.Rotate_Input{
 		user_id = auth.user_id, expected_version = version,
-		epoch_statement = obj_str(o, "epoch_statement"), epoch_signature = obj_sig(o, "epoch_signature"),
+		statement = obj_str(o, "statement"), signature = obj_sig(o, "signature"),
 		wraps = wraps, signer = signer,
 	})
 	if err.code != .None do return respond_error(err, req.request_id)

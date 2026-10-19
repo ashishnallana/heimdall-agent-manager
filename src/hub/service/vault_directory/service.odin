@@ -208,15 +208,27 @@ subject_empty :: proc(st: ^vault.Statement) -> bool {
 		st.subject_ecdh_pub == "" && st.subject_sign_alg == "" && st.subject_wrap_alg == "" && st.subject_label_b64 == ""
 }
 
-// parse_signed_statement parses the canonical text, checks type/user/version/issuer and
-// verifies the signature under the issuer's key.
+// Log_Slot is where the next signed log op goes: seq = version + 1, linked to the
+// current head (plan §1 "Directory log").
+Log_Slot :: struct {
+	seq:       string,
+	prev_hash: string,
+}
+
 @(private)
-parse_signed_statement :: proc(text, signature, type, user_id, version: string, issuer: domain.Vault_Device) -> (vault.Statement, domain.Domain_Error) {
+next_slot :: proc(dir: domain.Vault_Directory) -> Log_Slot {
+	return Log_Slot{seq = i64_str(dir.version + 1), prev_hash = dir.head_hash}
+}
+
+// parse_signed_statement parses the canonical text, checks type/user/log slot/issuer
+// and verifies the signature under the issuer's key.
+@(private)
+parse_signed_statement :: proc(text, signature, type, user_id: string, slot: Log_Slot, issuer: domain.Vault_Device) -> (vault.Statement, domain.Domain_Error) {
 	st, ok := vault.statement_parse(text)
 	if !ok do return {}, invalid("statement is not canonical")
 	if st.type != type do return {}, invalid(strings.concatenate({"statement type must be ", type}, context.temp_allocator))
 	if st.user_id != user_id do return {}, forbidden("statement is for another account")
-	if st.directory_version != version do return {}, domain.vault_reason_error(.Conflict, "statement_version", "statement is bound to a different directory version")
+	if st.seq != slot.seq || st.prev_hash != slot.prev_hash do return {}, domain.vault_reason_error(.Conflict, "statement_version", "statement is not linked to the current directory log head")
 	if st.issuer_device_id != issuer.device_id do return {}, forbidden("statement issuer is not the signing device")
 	if !vault.valid_decimal(st.issued_at_ms) do return {}, invalid("issued_at_ms is required")
 	if !vault.verify(issuer.sign_alg, issuer.sign_public_key, transmute([]byte)text, signature) do return {}, unauth("statement signature does not verify")
@@ -348,32 +360,23 @@ verify_request :: proc(svc: ^Service, user_id: string, r: Signed_Request, need: 
 Directory_View :: struct {
 	directory:       domain.Vault_Directory,
 	devices:         []domain.Vault_Device,
-	epochs:          []domain.Vault_Epoch,
+	// The signed directory log, seq 1..version: what clients verify.
+	log:             []domain.Vault_Log_Entry,
 	root_sign_public_key: string,
 	root_sign_alg:   string,
-	// rotation_recommended: an identity was retired by the hub (no signed revocation,
-	// so no epoch rotation) at or after the current epoch was created — a bridge
-	// revoked from bridge settings, or the old identity an attach replaced. It may
-	// hold the current keyring, so approvers should rotate (signed revoke flow /
-	// re-key). The hub never rotates itself. Conservative: a rolled-back enrollment
-	// (which never received the key) also counts. retired_device_ids names them.
-	rotation_recommended: bool,
-	retired_device_ids:   []string,
+	// retired_hints: approved identities the hub retired without a signed revocation
+	// (a bridge revoked from bridge settings, the old identity an attach replaced, a
+	// rolled-back enrollment). A hint only: an approved browser that verifies the id is
+	// a trusted bridge in the log signs a real revoke for it (new epoch + wraps). The
+	// hub never changes the log or the version itself.
+	retired_hints: []string,
 }
 
-// rotation_check fills rotation_recommended / retired_device_ids.
 @(private)
-rotation_check :: proc(view: ^Directory_View) {
-	epoch_created := ""
-	for e in view.epochs do if e.epoch == view.directory.current_epoch do epoch_created = e.created_at
-	if epoch_created == "" do return
+collect_retired_hints :: proc(view: ^Directory_View) {
 	ids := make([dynamic]string, 0, 2, context.temp_allocator)
-	for d in view.devices {
-		if d.status != .Revoked || d.revocation_statement != "" || d.revoked_at == "" do continue
-		if d.revoked_at >= epoch_created do append(&ids, d.device_id)
-	}
-	view.retired_device_ids = ids[:]
-	view.rotation_recommended = len(ids) > 0
+	for d in view.devices do if d.status == .Approved && d.retired_at != "" do append(&ids, d.device_id)
+	view.retired_hints = ids[:]
 }
 
 get_directory :: proc(svc: ^Service, user_id: string) -> (Directory_View, domain.Domain_Error) {
@@ -382,8 +385,8 @@ get_directory :: proc(svc: ^Service, user_id: string) -> (Directory_View, domain
 	if !found do return {}, not_configured_error()
 	devices, derr := iface.vault_list_devices(svc.repo, user_id)
 	if derr.code != .None do return {}, derr
-	epochs, eerr := iface.vault_list_epochs(svc.repo, user_id)
-	if eerr.code != .None do return {}, eerr
+	log, lerr := iface.vault_list_log(svc.repo, user_id)
+	if lerr.code != .None do return {}, lerr
 	// Expired pending devices are not listed (they can no longer be approved).
 	now := platform.clock_now(svc.clock)
 	listed := make([dynamic]domain.Vault_Device, 0, len(devices), context.temp_allocator)
@@ -391,14 +394,14 @@ get_directory :: proc(svc: ^Service, user_id: string) -> (Directory_View, domain
 		if d.status == .Pending && d.code_expires_at <= now do continue
 		append(&listed, d)
 	}
-	view := Directory_View{directory = dir, devices = listed[:], epochs = epochs}
+	view := Directory_View{directory = dir, devices = listed[:], log = log}
 	// The root's key comes from the self-signed genesis statement (what a client
 	// pins), not from the device row.
 	if st, ok := vault.statement_parse(dir.genesis_statement); ok {
 		view.root_sign_public_key = st.subject_sign_pub
 		view.root_sign_alg = st.subject_sign_alg
 	}
-	rotation_check(&view)
+	collect_retired_hints(&view)
 	return view, domain.Domain_Error{}
 }
 
@@ -450,8 +453,6 @@ Genesis_Input :: struct {
 	user_id:           string,
 	genesis_statement: string,
 	genesis_signature: string,
-	epoch_statement:   string,
-	epoch_signature:   string,
 	wrap:              Wrap_Input,
 }
 
@@ -494,7 +495,7 @@ genesis :: proc(svc: ^Service, in_: Genesis_Input) -> (domain.Vault_Device, doma
 	st, ok := vault.statement_parse(in_.genesis_statement)
 	if !ok || st.type != "genesis" do return {}, invalid("genesis_statement is not a canonical genesis statement")
 	if st.user_id != in_.user_id do return {}, forbidden("statement is for another account")
-	if st.directory_version != "0" || st.epoch != "1" do return {}, invalid("genesis is directory_version 0, epoch 1")
+	if st.seq != "1" || st.prev_hash != "" || st.epoch != "1" do return {}, invalid("genesis is log seq 1 with no prev_hash, epoch 1")
 	if !vault.valid_decimal(st.issued_at_ms) do return {}, invalid("issued_at_ms is required")
 	root, derr := subject_device_from_statement(&st, in_.user_id)
 	if derr.code != .None do return {}, derr
@@ -503,16 +504,13 @@ genesis :: proc(svc: ^Service, in_: Genesis_Input) -> (domain.Vault_Device, doma
 	// offline by design and must never become the pinned root.
 	if !policy.can_be_root || !policy.can_approve || !policy.receives_wrap do return {}, invalid("the root device must be an interactive approver-capable device")
 	if st.issuer_device_id != root.device_id do return {}, invalid("genesis is self-signed by the root")
-	if !is_hex64_or_empty(st.epoch_commit) || !is_hex64_or_empty(st.wrap_sha256) do return {}, invalid("malformed genesis commitment")
+	if len(st.epoch_commit) != vault.EPOCH_COMMIT_HEX_CHARS || !vault.is_lower_hex(st.epoch_commit) || !is_hex64_or_empty(st.wrap_sha256) do return {}, invalid("malformed genesis commitment")
 	if !vault.verify(root.sign_alg, root.sign_public_key, transmute([]byte)in_.genesis_statement, in_.genesis_signature) do return {}, unauth("genesis signature does not verify")
 
-	est, eerr := parse_signed_statement(in_.epoch_statement, in_.epoch_signature, "epoch", in_.user_id, "0", root)
-	if eerr.code != .None do return {}, eerr
-	if est.epoch != "1" || len(est.epoch_commit) != vault.EPOCH_COMMIT_HEX_CHARS || !subject_empty(&est) do return {}, invalid("epoch statement must commit epoch 1")
-
 	now := platform.clock_now(svc.clock)
-	wrap_row, werr := check_wrap(svc, in_.wrap, in_.user_id, root, 0, 1, root, now)
+	wrap_row, werr := check_wrap(svc, in_.wrap, in_.user_id, root, 1, 1, root, now)
 	if werr.code != .None do return {}, werr
+	head := vault.log_entry_hash(in_.genesis_statement, context.temp_allocator)
 
 	root.status = .Approved
 	root.approval_statement = in_.genesis_statement
@@ -522,10 +520,11 @@ genesis :: proc(svc: ^Service, in_: Genesis_Input) -> (domain.Vault_Device, doma
 	root.approved_at = now
 	root.last_seen_at = now
 	gerr := iface.vault_create_genesis(svc.repo, domain.Vault_Genesis{
-		directory = {user_id = in_.user_id, version = 1, current_epoch = 1, root_device_id = root.device_id, genesis_statement = in_.genesis_statement, genesis_signature = in_.genesis_signature, created_at = now, updated_at = now},
+		directory = {user_id = in_.user_id, version = 1, current_epoch = 1, root_device_id = root.device_id, head_hash = head, genesis_statement = in_.genesis_statement, genesis_signature = in_.genesis_signature, created_at = now, updated_at = now},
 		device = root,
-		epoch = {user_id = in_.user_id, epoch = 1, statement = in_.epoch_statement, signature = in_.epoch_signature, created_at = now},
+		epoch = {user_id = in_.user_id, epoch = 1, statement = in_.genesis_statement, signature = in_.genesis_signature, created_at = now},
 		wrap = wrap_row,
+		log = {user_id = in_.user_id, seq = 1, statement = in_.genesis_statement, signature = in_.genesis_signature, entry_hash = head, created_at = now},
 	})
 	if gerr.code != .None do return {}, gerr
 	return root, domain.Domain_Error{}
@@ -546,7 +545,7 @@ register :: proc(svc: ^Service, user_id, statement, signature: string) -> (Regis
 	st, ok := vault.statement_parse(statement)
 	if !ok || st.type != "register" do return {}, invalid("statement is not a canonical register statement")
 	if st.user_id != user_id do return {}, forbidden("statement is for another account")
-	if st.directory_version != "" || st.epoch != "" || st.epoch_commit != "" || st.wrap_sha256 != "" do return {}, invalid("register statements carry no directory binding")
+	if st.seq != "" || st.prev_hash != "" || st.epoch != "" || st.epoch_commit != "" || st.wrap_sha256 != "" do return {}, invalid("register statements carry no directory binding")
 	if !vault.valid_decimal(st.issued_at_ms) do return {}, invalid("issued_at_ms is required")
 	dev, derr := subject_device_from_statement(&st, user_id)
 	if derr.code != .None do return {}, derr
@@ -607,8 +606,8 @@ approve :: proc(svc: ^Service, in_: Approve_Input) -> (i64, domain.Domain_Error)
 	if target.code_expires_at <= now do return 0, GENERIC_CODE_ERROR()
 	if target.kind == "bridge" || !domain.vault_kind_valid(target.kind) do return 0, invalid("this device kind is not approved here")
 
-	version := i64_str(dir.version)
-	st, serr := parse_signed_statement(in_.statement, in_.signature, "approve", in_.user_id, version, in_.signer)
+	slot := next_slot(dir)
+	st, serr := parse_signed_statement(in_.statement, in_.signature, "approve", in_.user_id, slot, in_.signer)
 	if serr.code != .None do return 0, serr
 	if !subject_matches(&st, target) do return 0, invalid("approval statement does not describe the pending device")
 	label, l_ok := vault.label_from_b64(st.subject_label_b64, context.temp_allocator)
@@ -617,14 +616,16 @@ approve :: proc(svc: ^Service, in_: Approve_Input) -> (i64, domain.Domain_Error)
 	if cerr.code != .None do return 0, cerr
 	if st.epoch != i64_str(dir.current_epoch) || st.epoch_commit != commit do return 0, invalid("approval must name the current epoch and its epoch_commit")
 
-	cm := domain.Vault_Directory_Commit{
+	cm :=domain.Vault_Directory_Commit{
 		user_id = in_.user_id, expected_version = in_.expected_version, now = now,
+		expected_head_hash = dir.head_hash,
+		log_statement = in_.statement, log_signature = in_.signature, log_entry_hash = vault.log_entry_hash(in_.statement, context.temp_allocator),
 		approve_device_id = target.device_id, approval_statement = in_.statement,
 		approval_signature = in_.signature, approved_by_device_id = in_.signer.device_id,
 		label_device_id = target.device_id, label = label,
 	}
 	if domain.vault_kind_policy(target.kind).receives_wrap {
-		row, werr := check_wrap(svc, in_.wrap, in_.user_id, target, dir.version, dir.current_epoch, in_.signer, now)
+		row, werr := check_wrap(svc, in_.wrap, in_.user_id, target, dir.version + 1, dir.current_epoch, in_.signer, now)
 		if werr.code != .None do return 0, werr
 		// The signed approval must commit to exactly this wrap.
 		digest: [32]byte
@@ -677,7 +678,7 @@ check_bridge_approval :: proc(svc: ^Service, in_: Bridge_Approval_Input) -> (dom
 	if derr.code != .None do return {}, derr
 	issuer, has := find_device(devices, st0.issuer_device_id)
 	if !has || issuer.status != .Approved || !domain.vault_kind_policy(issuer.kind).can_approve do return {}, forbidden("vault_approval issuer is not an approved approver device")
-	st, serr := parse_signed_statement(in_.statement, in_.signature, "approve", in_.user_id, i64_str(dir.version), issuer)
+	st, serr := parse_signed_statement(in_.statement, in_.signature, "approve", in_.user_id, next_slot(dir), issuer)
 	if serr.code != .None do return {}, serr
 	if st.subject_kind != "bridge" || st.subject_sign_pub != in_.bridge_identity_public_key do return {}, invalid("vault_approval does not describe this bridge's identity key")
 	dev, sderr := subject_device_from_statement(&st, in_.user_id)
@@ -696,60 +697,59 @@ check_bridge_approval :: proc(svc: ^Service, in_: Bridge_Approval_Input) -> (dom
 	return dev, domain.Domain_Error{}
 }
 
-// commit_bridge_approval inserts the approved bridge identity. If another approved
-// identity already maps to bridge_id (an attach), it is retired in the SAME CAS, so
-// at most one approved identity ever maps to a bridge_id.
+// commit_bridge_approval appends the bridge's signed approval to the log and inserts
+// the approved identity. If another live (approved, not retired) identity already
+// maps to bridge_id (an attach), it is marked retired — a HINT — in the same
+// transaction, so at most one live identity maps to a bridge_id; an approved browser
+// then signs the old identity's real revoke.
 commit_bridge_approval :: proc(svc: ^Service, in_: Bridge_Approval_Input, dev: domain.Vault_Device, bridge_id: string) -> (i64, domain.Domain_Error) {
 	if bridge_id == "" do return 0, invalid("bridge_id is required")
+	st, ok := vault.statement_parse(in_.statement)
+	if !ok do return 0, invalid("vault_approval statement is not canonical")
 	d := dev
 	d.bridge_id = bridge_id
 	cm := domain.Vault_Directory_Commit{
 		user_id = in_.user_id, expected_version = in_.expected_version, now = platform.clock_now(svc.clock),
+		// The statement was checked against (version, head) by check_bridge_approval; the
+		// CAS on both refuses if the log moved since.
+		expected_head_hash = st.prev_hash,
+		log_statement = in_.statement, log_signature = in_.signature, log_entry_hash = vault.log_entry_hash(in_.statement, context.temp_allocator),
 		insert_device = d,
 	}
 	devices, err := iface.vault_list_devices(svc.repo, in_.user_id)
 	if err.code != .None do return 0, err
-	// Read at (at most) expected_version: if anything changed since, the CAS refuses.
 	for other in devices {
-		if other.status != .Approved || other.bridge_id != bridge_id do continue
-		if cm.retire_device_id != "" do return 0, domain.domain_error(.Internal_Error, "more than one approved identity maps to this bridge")
-		cm.retire_device_id, cm.retire_bridge_id = other.device_id, bridge_id
+		if other.status != .Approved || other.bridge_id != bridge_id || other.retired_at != "" do continue
+		if cm.hint_retire_device_id != "" do return 0, domain.domain_error(.Internal_Error, "more than one live identity maps to this bridge")
+		cm.hint_retire_device_id, cm.hint_retire_bridge_id = other.device_id, bridge_id
 	}
 	return iface.vault_commit(svc.repo, cm)
 }
 
-// retire_bridge_entry marks the approved directory entry of bridge_id revoked
-// (hub-retired, no statement) after its enrollment was rolled back — the vault key
-// never reached that identity, so no epoch rotation is needed. Retries on a version
-// race. Returns the retired device id, or "" when there was nothing to retire.
+// retire_bridge_entry marks the live directory identity of bridge_id retired (a
+// HINT: retired_at only) after the bridge was revoked from bridge settings or its
+// enrollment was rolled back. It consumes no directory version and appends nothing
+// to the log: the identity stays approved in the signed log until an approved
+// browser verifies it and signs a real revoke. Returns the hinted device id, or ""
+// when there was nothing to hint.
 retire_bridge_entry :: proc(svc: ^Service, user_id, bridge_id: string) -> (string, domain.Domain_Error) {
 	if user_id == "" || bridge_id == "" do return "", domain.Domain_Error{}
-	for _ in 0 ..< 4 {
-		dir, found, err := iface.vault_get_directory(svc.repo, user_id)
-		if err.code != .None do return "", err
-		if !found do return "", domain.Domain_Error{}
-		devices, derr := iface.vault_list_devices(svc.repo, user_id)
-		if derr.code != .None do return "", derr
-		target := ""
-		for d in devices do if d.status == .Approved && d.bridge_id == bridge_id do target = d.device_id
-		if target == "" do return "", domain.Domain_Error{}
-		_, cerr := iface.vault_commit(svc.repo, domain.Vault_Directory_Commit{
-			user_id = user_id, expected_version = dir.version, now = platform.clock_now(svc.clock),
-			retire_device_id = target, retire_bridge_id = bridge_id,
-		})
-		if cerr.code == .Conflict do continue
-		if cerr.code != .None do return "", cerr
-		return target, domain.Domain_Error{}
-	}
-	return "", domain.domain_error(.Conflict, "vault directory kept changing; bridge entry not retired")
+	devices, derr := iface.vault_list_devices(svc.repo, user_id)
+	if derr.code != .None do return "", derr
+	target := ""
+	for d in devices do if d.status == .Approved && d.bridge_id == bridge_id && d.retired_at == "" do target = d.device_id
+	if target == "" do return "", domain.Domain_Error{}
+	changed, err := iface.vault_mark_retired(svc.repo, user_id, target, bridge_id, platform.clock_now(svc.clock))
+	if err.code != .None do return "", err
+	return target if changed else "", domain.Domain_Error{}
 }
 
-// other_approved_for_bridge reports whether an approved identity other than
-// device_id maps to bridge_id (then the bridge's credentials must stay).
+// other_approved_for_bridge reports whether a live (approved, not retired) identity
+// other than device_id maps to bridge_id (then the bridge's credentials must stay).
 other_approved_for_bridge :: proc(svc: ^Service, user_id, bridge_id, device_id: string) -> (bool, domain.Domain_Error) {
 	devices, err := iface.vault_list_devices(svc.repo, user_id)
 	if err.code != .None do return false, err
-	for d in devices do if d.device_id != device_id && d.status == .Approved && d.bridge_id == bridge_id do return true, domain.Domain_Error{}
+	for d in devices do if d.device_id != device_id && d.status == .Approved && d.retired_at == "" && d.bridge_id == bridge_id do return true, domain.Domain_Error{}
 	return false, domain.Domain_Error{}
 }
 
@@ -759,10 +759,10 @@ Revoke_Input :: struct {
 	user_id:          string,
 	device_id:        string,
 	expected_version: i64,
+	// The revoke log op: names the revoked subject AND introduces epoch current+1
+	// (epoch, epoch_commit), so a revocation and its rotation are one signed op.
 	revoke_statement: string,
 	signature:        string,
-	epoch_statement:  string,
-	epoch_signature:  string,
 	wraps:            []Wrap_Input,
 	signer:           domain.Vault_Device,
 }
@@ -814,17 +814,13 @@ revoke_prepare :: proc(svc: ^Service, in_: Revoke_Input) -> (Revoke_Plan, domain
 	}
 	if remaining_approvers == 0 do return {}, domain.vault_reason_error(.Conflict, "last_approver", "revoking this device would leave no device able to approve; add a recovery key first")
 
-	version := i64_str(dir.version)
 	new_epoch := dir.current_epoch + 1
 	new_epoch_s := i64_str(new_epoch)
-	rst, rerr := parse_signed_statement(in_.revoke_statement, in_.signature, "revoke", in_.user_id, version, in_.signer)
+	rst, rerr := parse_signed_statement(in_.revoke_statement, in_.signature, "revoke", in_.user_id, next_slot(dir), in_.signer)
 	if rerr.code != .None do return {}, rerr
 	if !subject_matches(&rst, target) do return {}, invalid("revoke statement does not describe the target device")
 	if rst.epoch != new_epoch_s do return {}, invalid("revoke must advance to epoch current+1")
-	est, eerr := parse_signed_statement(in_.epoch_statement, in_.epoch_signature, "epoch", in_.user_id, version, in_.signer)
-	if eerr.code != .None do return {}, eerr
-	if est.epoch != new_epoch_s do return {}, invalid("epoch must be current+1")
-	if len(est.epoch_commit) != vault.EPOCH_COMMIT_HEX_CHARS || !vault.is_lower_hex(est.epoch_commit) || !subject_empty(&est) do return {}, invalid("malformed epoch statement")
+	if len(rst.epoch_commit) != vault.EPOCH_COMMIT_HEX_CHARS || !vault.is_lower_hex(rst.epoch_commit) || rst.wrap_sha256 != "" do return {}, invalid("malformed revoke epoch commitment")
 
 	// The wraps must cover EXACTLY the remaining approved wrap-receiving devices.
 	now := platform.clock_now(svc.clock)
@@ -840,7 +836,7 @@ revoke_prepare :: proc(svc: ^Service, in_: Revoke_Input) -> (Revoke_Plan, domain
 			return {}, invalid("a wrap is addressed to a device that must not receive one")
 		}
 		for j in 0 ..< i do if rows[j].device_id == recipient.device_id do return {}, invalid("duplicate wrap recipient")
-		row, werr := check_wrap(svc, w, in_.user_id, recipient, dir.version, new_epoch, in_.signer, now)
+		row, werr := check_wrap(svc, w, in_.user_id, recipient, dir.version + 1, new_epoch, in_.signer, now)
 		if werr.code != .None do return {}, werr
 		rows[i] = row
 	}
@@ -848,9 +844,11 @@ revoke_prepare :: proc(svc: ^Service, in_: Revoke_Input) -> (Revoke_Plan, domain
 		target = target,
 		commit = domain.Vault_Directory_Commit{
 			user_id = in_.user_id, expected_version = in_.expected_version, now = now,
+			expected_head_hash = dir.head_hash,
+			log_statement = in_.revoke_statement, log_signature = in_.signature, log_entry_hash = vault.log_entry_hash(in_.revoke_statement, context.temp_allocator),
 			revoke_device_id = target.device_id, revocation_statement = in_.revoke_statement,
 			revocation_signature = in_.signature, revoked_by_device_id = in_.signer.device_id,
-			new_epoch = new_epoch, epoch_statement = in_.epoch_statement, epoch_signature = in_.epoch_signature,
+			new_epoch = new_epoch,
 			wraps = rows, replace_all_wraps = true,
 		},
 	}, domain.Domain_Error{}
@@ -865,8 +863,9 @@ revoke_prepare :: proc(svc: ^Service, in_: Revoke_Input) -> (Revoke_Plan, domain
 Rotate_Input :: struct {
 	user_id:          string,
 	expected_version: i64,
-	epoch_statement:  string,
-	epoch_signature:  string,
+	// A `rotate` log op: no subject, introduces epoch current+1.
+	statement:        string,
+	signature:        string,
 	wraps:            []Wrap_Input,
 	signer:           domain.Vault_Device,
 }
@@ -879,12 +878,11 @@ rotate :: proc(svc: ^Service, in_: Rotate_Input) -> (i64, domain.Domain_Error) {
 	devices, derr := iface.vault_list_devices(svc.repo, in_.user_id)
 	if derr.code != .None do return 0, derr
 
-	version := i64_str(dir.version)
 	new_epoch := dir.current_epoch + 1
-	est, eerr := parse_signed_statement(in_.epoch_statement, in_.epoch_signature, "epoch", in_.user_id, version, in_.signer)
+	est, eerr := parse_signed_statement(in_.statement, in_.signature, "rotate", in_.user_id, next_slot(dir), in_.signer)
 	if eerr.code != .None do return 0, eerr
 	if est.epoch != i64_str(new_epoch) do return 0, invalid("epoch must be current+1")
-	if len(est.epoch_commit) != vault.EPOCH_COMMIT_HEX_CHARS || !vault.is_lower_hex(est.epoch_commit) || !subject_empty(&est) do return 0, invalid("malformed epoch statement")
+	if len(est.epoch_commit) != vault.EPOCH_COMMIT_HEX_CHARS || !vault.is_lower_hex(est.epoch_commit) || !subject_empty(&est) || est.wrap_sha256 != "" do return 0, invalid("malformed rotate statement")
 
 	now := platform.clock_now(svc.clock)
 	expected := 0
@@ -899,13 +897,15 @@ rotate :: proc(svc: ^Service, in_: Rotate_Input) -> (i64, domain.Domain_Error) {
 			return 0, invalid("a wrap is addressed to a device that must not receive one")
 		}
 		for j in 0 ..< i do if rows[j].device_id == recipient.device_id do return 0, invalid("duplicate wrap recipient")
-		row, werr := check_wrap(svc, w, in_.user_id, recipient, dir.version, new_epoch, in_.signer, now)
+		row, werr := check_wrap(svc, w, in_.user_id, recipient, dir.version + 1, new_epoch, in_.signer, now)
 		if werr.code != .None do return 0, werr
 		rows[i] = row
 	}
 	return iface.vault_commit(svc.repo, domain.Vault_Directory_Commit{
 		user_id = in_.user_id, expected_version = in_.expected_version, now = now,
-		new_epoch = new_epoch, epoch_statement = in_.epoch_statement, epoch_signature = in_.epoch_signature,
+		expected_head_hash = dir.head_hash,
+		log_statement = in_.statement, log_signature = in_.signature, log_entry_hash = vault.log_entry_hash(in_.statement, context.temp_allocator),
+		new_epoch = new_epoch,
 		wraps = rows, replace_all_wraps = true,
 	})
 }

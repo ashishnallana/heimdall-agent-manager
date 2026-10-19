@@ -95,8 +95,9 @@ itoa :: proc(v: i64) -> string {
 	return strings.clone(strconv.write_int(buf[:], v, 10), context.temp_allocator)
 }
 
-statement :: proc(type: string, issuer: ^Dev, subject: ^Dev, version, epoch: string, user := USER, wrap_sha := "") -> string {
-	st := vault.Statement{type = type, user_id = user, directory_version = version, issuer_device_id = issuer.id, issued_at_ms = "1760868000000", epoch = epoch, wrap_sha256 = wrap_sha}
+// seq is the log slot (version + 1 for a mutation, "1" for genesis, "" for register).
+statement :: proc(type: string, issuer: ^Dev, subject: ^Dev, seq, epoch: string, user := USER, wrap_sha := "", prev := "") -> string {
+	st := vault.Statement{type = type, user_id = user, seq = seq, prev_hash = prev, issuer_device_id = issuer.id, issued_at_ms = "1760868000000", epoch = epoch, wrap_sha256 = wrap_sha}
 	if subject != nil {
 		st.subject_device_id = subject.id
 		st.subject_kind = subject.kind
@@ -106,7 +107,7 @@ statement :: proc(type: string, issuer: ^Dev, subject: ^Dev, version, epoch: str
 		st.subject_wrap_alg = "" if subject.kind == "bridge" else vault.WRAP_ALG_ECDH_P256_HKDF_AES
 		st.subject_label_b64 = LABEL_B64
 	}
-	if type == "epoch" || type == "approve" do st.epoch_commit = COMMIT
+	if type != "register" do st.epoch_commit = COMMIT
 	text, ok := vault.statement_canonical(&st, context.temp_allocator)
 	assert(ok)
 	return text
@@ -124,9 +125,8 @@ wrap_for :: proc(signer, recipient: ^Dev, version, epoch: i64, user := USER) -> 
 }
 
 do_genesis :: proc(t: ^testing.T, f: ^Fixture, root: ^Dev) {
-	g := statement("genesis", root, root, "0", "1")
-	e := statement("epoch", root, nil, "0", "1")
-	_, err := genesis(&f.svc, Genesis_Input{user_id = USER, genesis_statement = g, genesis_signature = sign(root, g), epoch_statement = e, epoch_signature = sign(root, e), wrap = wrap_for(root, root, 0, 1)})
+	g := statement("genesis", root, root, "1", "1")
+	_, err := genesis(&f.svc, Genesis_Input{user_id = USER, genesis_statement = g, genesis_signature = sign(root, g), wrap = wrap_for(root, root, 1, 1)})
 	testing.expect_value(t, err.code, domain.Error_Code.None)
 }
 
@@ -141,6 +141,11 @@ signed_req :: proc(d: ^Dev, method, path, body: string, nonce := "nonce-00000000
 	ts_s := itoa(ts)
 	msg := request_canonical(method, path, user, ts_s, nonce, body, context.temp_allocator)
 	return Signed_Request{method = method, path = path, body = body, device_id = d.id, ts = ts_s, nonce = nonce, signature = sign(d, msg)}
+}
+
+head :: proc(f: ^Fixture) -> string {
+	dir, _, _ := iface.vault_get_directory(&f.repo, USER)
+	return dir.head_hash
 }
 
 dev_row :: proc(f: ^Fixture, id: string) -> domain.Vault_Device {
@@ -158,8 +163,8 @@ wrap_sha :: proc(w: Wrap_Input) -> string {
 
 approve_b :: proc(t: ^testing.T, f: ^Fixture, a, b: ^Dev, version: i64) -> (i64, domain.Domain_Error) {
 	row := dev_row(f, b.id)
-	w := wrap_for(a, b, version, 1)
-	st := statement("approve", a, b, itoa(version), "1", wrap_sha = wrap_sha(w))
+	w := wrap_for(a, b, version + 1, 1)
+	st := statement("approve", a, b, itoa(version + 1), "1", wrap_sha = wrap_sha(w), prev = head(f))
 	return approve(&f.svc, Approve_Input{
 		user_id = USER, device_id = b.id, user_code = row.user_code, expected_version = version,
 		statement = st, signature = sign(a, st), wrap = w, signer = dev_row(f, a.id),
@@ -176,22 +181,25 @@ test_vault_approve_binds_wrap_and_epoch_commit :: proc(t: ^testing.T) {
 	do_genesis(t, f, &a)
 	do_register(t, f, &b)
 	row := dev_row(f, b.id)
-	w := wrap_for(&a, &b, 1, 1)
+	w := wrap_for(&a, &b, 2, 1)
+	h := head(f)
 	try :: proc(f: ^Fixture, a, b: ^Dev, code: string, w: Wrap_Input, st: string) -> domain.Error_Code {
 		_, err := approve(&f.svc, Approve_Input{user_id = USER, device_id = b.id, user_code = code, expected_version = 1, statement = st, signature = sign(a, st), wrap = w, signer = dev_row(f, a.id)})
 		return err.code
 	}
-	no_sha := statement("approve", &a, &b, "1", "1")
-	other_sha := statement("approve", &a, &b, "1", "1", wrap_sha = wrap_sha(wrap_for(&a, &a, 1, 1)))
+	no_sha := statement("approve", &a, &b, "2", "1", prev = h)
+	other_sha := statement("approve", &a, &b, "2", "1", wrap_sha = wrap_sha(wrap_for(&a, &a, 2, 1)), prev = h)
+	unlinked := statement("approve", &a, &b, "2", "1", wrap_sha = wrap_sha(w), prev = strings.repeat("0", 64, context.temp_allocator))
+	testing.expect_value(t, try(f, &a, &b, row.user_code, w, unlinked), domain.Error_Code.Conflict)
 	testing.expect_value(t, try(f, &a, &b, row.user_code, w, no_sha), domain.Error_Code.Validation_Failed)
 	testing.expect_value(t, try(f, &a, &b, row.user_code, w, other_sha), domain.Error_Code.Validation_Failed)
-	bad_commit := vault.Statement{type = "approve", user_id = USER, directory_version = "1", issuer_device_id = a.id, issued_at_ms = "1760868000000", epoch = "1",
+	bad_commit := vault.Statement{type = "approve", user_id = USER, seq = "2", prev_hash = h, issuer_device_id = a.id, issued_at_ms = "1760868000000", epoch = "1",
 		subject_device_id = b.id, subject_kind = "browser", subject_sign_pub = b.sign_pub, subject_ecdh_pub = b.ecdh_pub,
 		subject_sign_alg = vault.SIGN_ALG_ECDSA_P256_SHA256, subject_wrap_alg = vault.WRAP_ALG_ECDH_P256_HKDF_AES, subject_label_b64 = LABEL_B64,
 		epoch_commit = strings.repeat("0", 64, context.temp_allocator), wrap_sha256 = wrap_sha(w)}
 	bad_text, _ := vault.statement_canonical(&bad_commit, context.temp_allocator)
 	testing.expect_value(t, try(f, &a, &b, row.user_code, w, bad_text), domain.Error_Code.Validation_Failed)
-	testing.expect_value(t, try(f, &a, &b, row.user_code, w, statement("approve", &a, &b, "1", "1", wrap_sha = wrap_sha(w))), domain.Error_Code.None)
+	testing.expect_value(t, try(f, &a, &b, row.user_code, w, statement("approve", &a, &b, "2", "1", wrap_sha = wrap_sha(w), prev = h)), domain.Error_Code.None)
 }
 
 @(test)
@@ -213,9 +221,8 @@ test_vault_genesis_register_approve_revoke_flow :: proc(t: ^testing.T) {
 	testing.expect(t, other_user.code == .Not_Found && short.code == .Not_Found)
 
 	// Second genesis is rejected.
-	g := statement("genesis", &b, &b, "0", "1")
-	e := statement("epoch", &b, nil, "0", "1")
-	_, gerr := genesis(&f.svc, Genesis_Input{user_id = USER, genesis_statement = g, genesis_signature = sign(&b, g), epoch_statement = e, epoch_signature = sign(&b, e), wrap = wrap_for(&b, &b, 0, 1)})
+	g := statement("genesis", &b, &b, "1", "1")
+	_, gerr := genesis(&f.svc, Genesis_Input{user_id = USER, genesis_statement = g, genesis_signature = sign(&b, g), wrap = wrap_for(&b, &b, 1, 1)})
 	testing.expect_value(t, gerr.code, domain.Error_Code.Conflict)
 
 	// Stale expected_version -> 409 naming the current version; nothing changes.
@@ -232,19 +239,19 @@ test_vault_genesis_register_approve_revoke_flow :: proc(t: ^testing.T) {
 
 	// Revoke rules.
 	signer := dev_row(f, a.id)
-	revoke_in :: proc(a, target: ^Dev, signer: domain.Vault_Device, version, epoch: i64, wraps: []Wrap_Input) -> Revoke_Input {
-		r := statement("revoke", a, target, itoa(version), itoa(epoch))
-		e := statement("epoch", a, nil, itoa(version), itoa(epoch))
-		return Revoke_Input{user_id = USER, device_id = target.id, expected_version = version, revoke_statement = r, signature = sign(a, r), epoch_statement = e, epoch_signature = sign(a, e), wraps = wraps, signer = signer}
+	h2 := head(f)
+	revoke_in :: proc(a, target: ^Dev, signer: domain.Vault_Device, version, epoch: i64, wraps: []Wrap_Input, prev: string) -> Revoke_Input {
+		r := statement("revoke", a, target, itoa(version + 1), itoa(epoch), prev = prev)
+		return Revoke_Input{user_id = USER, device_id = target.id, expected_version = version, revoke_statement = r, signature = sign(a, r), wraps = wraps, signer = signer}
 	}
-	_, self := revoke(&f.svc, revoke_in(&a, &a, signer, 2, 2, {wrap_for(&a, &b, 2, 2)}))
+	_, self := revoke(&f.svc, revoke_in(&a, &a, signer, 2, 2, {wrap_for(&a, &b, 3, 2)}, h2))
 	testing.expect_value(t, self.code, domain.Error_Code.Conflict)
 	testing.expect_value(t, self.details_json, `{"reason":"self_revoke"}`)
-	_, missing := revoke(&f.svc, revoke_in(&a, &b, signer, 2, 2, {}))
-	_, extra := revoke(&f.svc, revoke_in(&a, &b, signer, 2, 2, {wrap_for(&a, &a, 2, 2), wrap_for(&a, &b, 2, 2)}))
-	_, bad_epoch := revoke(&f.svc, revoke_in(&a, &b, signer, 2, 3, {wrap_for(&a, &a, 2, 3)}))
+	_, missing := revoke(&f.svc, revoke_in(&a, &b, signer, 2, 2, {}, h2))
+	_, extra := revoke(&f.svc, revoke_in(&a, &b, signer, 2, 2, {wrap_for(&a, &a, 3, 2), wrap_for(&a, &b, 3, 2)}, h2))
+	_, bad_epoch := revoke(&f.svc, revoke_in(&a, &b, signer, 2, 3, {wrap_for(&a, &a, 3, 3)}, h2))
 	testing.expect(t, missing.code == .Validation_Failed && extra.code == .Validation_Failed && bad_epoch.code == .Validation_Failed)
-	res, ok_err := revoke(&f.svc, revoke_in(&a, &b, signer, 2, 2, {wrap_for(&a, &a, 2, 2)}))
+	res, ok_err := revoke(&f.svc, revoke_in(&a, &b, signer, 2, 2, {wrap_for(&a, &a, 3, 2)}, h2))
 	testing.expect_value(t, ok_err.code, domain.Error_Code.None)
 	testing.expect_value(t, res.version, i64(3))
 	dir, _, _ := iface.vault_get_directory(&f.repo, USER)
@@ -252,7 +259,7 @@ test_vault_genesis_register_approve_revoke_flow :: proc(t: ^testing.T) {
 	_, b_wrap, _ := iface.vault_get_wrap(&f.repo, USER, b.id)
 	testing.expect(t, !b_wrap, "the revoked device's wrap is gone")
 	// The only approver left cannot revoke itself (the last-approver path).
-	_, last := revoke(&f.svc, revoke_in(&a, &a, signer, 3, 3, {}))
+	_, last := revoke(&f.svc, revoke_in(&a, &a, signer, 3, 3, {}, head(f)))
 	testing.expect_value(t, last.code, domain.Error_Code.Conflict)
 }
 
@@ -313,7 +320,7 @@ test_vault_request_signature_rejections :: proc(t: ^testing.T) {
 
 	// Bridge signer: insert an approved bridge via the bridge approval path.
 	br := make_dev(9, "bridge")
-	st := statement("approve", &a, &br, "1", "1")
+	st := statement("approve", &a, &br, "2", "1", prev = head(f))
 	bin := Bridge_Approval_Input{user_id = USER, expected_version = 1, statement = st, signature = sign(&a, st), bridge_identity_public_key = br.sign_pub}
 	row, cerr := check_bridge_approval(&f.svc, bin)
 	testing.expect_value(t, cerr.code, domain.Error_Code.None)
@@ -327,9 +334,8 @@ test_vault_request_signature_rejections :: proc(t: ^testing.T) {
 	// Revoked signer: approve B, revoke B (A signs), then B is refused.
 	_, aerr := approve_b(t, f, &a, &b, 2)
 	testing.expect_value(t, aerr.code, domain.Error_Code.None)
-	r := statement("revoke", &a, &b, "3", "2")
-	e := statement("epoch", &a, nil, "3", "2")
-	_, rerr := revoke(&f.svc, Revoke_Input{user_id = USER, device_id = b.id, expected_version = 3, revoke_statement = r, signature = sign(&a, r), epoch_statement = e, epoch_signature = sign(&a, e), wraps = {wrap_for(&a, &a, 3, 2)}, signer = dev_row(f, a.id)})
+	r := statement("revoke", &a, &b, "4", "2", prev = head(f))
+	_, rerr := revoke(&f.svc, Revoke_Input{user_id = USER, device_id = b.id, expected_version = 3, revoke_statement = r, signature = sign(&a, r), wraps = {wrap_for(&a, &a, 4, 2)}, signer = dev_row(f, a.id)})
 	testing.expect_value(t, rerr.code, domain.Error_Code.None)
 	_, revoked := verify_request(&f.svc, USER, signed_req(&b, "POST", PATH, BODY, "nonce-0000000000000011"), .Approver)
 	testing.expect_value(t, revoked.code, domain.Error_Code.Forbidden)
@@ -375,7 +381,7 @@ test_vault_reads_do_not_consume_nonces :: proc(t: ^testing.T) {
 }
 
 bridge_commit :: proc(t: ^testing.T, f: ^Fixture, a, br: ^Dev, version: i64, bridge_id: string) -> domain.Domain_Error {
-	st := statement("approve", a, br, itoa(version), "1")
+	st := statement("approve", a, br, itoa(version + 1), "1", prev = head(f))
 	bin := Bridge_Approval_Input{user_id = USER, expected_version = version, statement = st, signature = sign(a, st), bridge_identity_public_key = br.sign_pub}
 	row, cerr := check_bridge_approval(&f.svc, bin)
 	if cerr.code != .None do return cerr
@@ -395,19 +401,51 @@ test_vault_bridge_entry_lifecycle :: proc(t: ^testing.T) {
 	old_id, new_id := make_dev(20, "bridge"), make_dev(21, "bridge")
 	testing.expect_value(t, bridge_commit(t, f, &a, &old_id, 1, "brg_1").code, domain.Error_Code.None)
 	testing.expect_value(t, bridge_commit(t, f, &a, &new_id, 2, "brg_1").code, domain.Error_Code.None)
-	testing.expect_value(t, dev_row(f, old_id.id).status, domain.Vault_Device_Status.Revoked)
+	// The superseded identity is only HINTED retired: still approved (the signed log
+	// still trusts it until a browser signs its revoke).
+	testing.expect_value(t, dev_row(f, old_id.id).status, domain.Vault_Device_Status.Approved)
+	testing.expect(t, dev_row(f, old_id.id).retired_at != "")
 	testing.expect_value(t, dev_row(f, new_id.id).status, domain.Vault_Device_Status.Approved)
 	other, _ := other_approved_for_bridge(&f.svc, USER, "brg_1", new_id.id)
-	testing.expect(t, !other, "exactly one approved identity per bridge")
+	testing.expect(t, !other, "exactly one live identity per bridge")
 
-	// Rollback after the directory commit: the approved entry is retired, once.
+	// Rollback / settings revoke: a hint, once, and it never consumes a version.
 	retired, err := retire_bridge_entry(&f.svc, USER, "brg_1")
 	testing.expect(t, err.code == .None && retired == new_id.id)
-	testing.expect_value(t, dev_row(f, new_id.id).status, domain.Vault_Device_Status.Revoked)
+	testing.expect_value(t, dev_row(f, new_id.id).status, domain.Vault_Device_Status.Approved)
 	again, _ := retire_bridge_entry(&f.svc, USER, "brg_1")
 	testing.expect_value(t, again, "")
 	dir, _, _ := iface.vault_get_directory(&f.repo, USER)
-	testing.expect_value(t, dir.version, i64(4))
+	testing.expect_value(t, dir.version, i64(3))
+	view, _ := get_directory(&f.svc, USER)
+	testing.expect_value(t, len(view.retired_hints), 2)
+	testing.expect_value(t, len(view.log), 3)
+}
+
+// The hub's log is contiguous and hash-linked, and a commit without a signed op is refused.
+@(test)
+test_vault_log_is_contiguous_and_linked :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	f := fixture(t)
+	defer fixture_close(f)
+	a, b := make_dev(1), make_dev(2)
+	do_genesis(t, f, &a)
+	do_register(t, f, &b)
+	_, aerr := approve_b(t, f, &a, &b, 1)
+	testing.expect_value(t, aerr.code, domain.Error_Code.None)
+	view, _ := get_directory(&f.svc, USER)
+	testing.expect_value(t, len(view.log), 2)
+	prev := ""
+	for e, i in view.log {
+		st, ok := vault.statement_parse(e.statement)
+		testing.expect(t, ok && vault.log_link_ok(&st, u64(i + 1), prev))
+		prev = vault.log_entry_hash(e.statement, context.temp_allocator)
+		testing.expect_value(t, e.entry_hash, prev)
+	}
+	testing.expect_value(t, view.directory.head_hash, prev)
+	// No signed op, no version bump.
+	_, err := iface.vault_commit(&f.repo, domain.Vault_Directory_Commit{user_id = USER, expected_version = 2, now = T0, expected_head_hash = prev})
+	testing.expect_value(t, err.code, domain.Error_Code.Validation_Failed)
 }
 
 // L2: per-user pending cap, purge of expired pending rows, deny, listing.
@@ -453,9 +491,8 @@ test_vault_genesis_rejects_recovery_root :: proc(t: ^testing.T) {
 	f := fixture(t)
 	defer fixture_close(f)
 	r := make_dev(5, "recovery")
-	g := statement("genesis", &r, &r, "0", "1")
-	e := statement("epoch", &r, nil, "0", "1")
-	_, err := genesis(&f.svc, Genesis_Input{user_id = USER, genesis_statement = g, genesis_signature = sign(&r, g), epoch_statement = e, epoch_signature = sign(&r, e), wrap = wrap_for(&r, &r, 0, 1)})
+	g := statement("genesis", &r, &r, "1", "1")
+	_, err := genesis(&f.svc, Genesis_Input{user_id = USER, genesis_statement = g, genesis_signature = sign(&r, g), wrap = wrap_for(&r, &r, 1, 1)})
 	testing.expect_value(t, err.code, domain.Error_Code.Validation_Failed)
 	exists, _ := directory_exists(&f.svc, USER)
 	testing.expect(t, !exists)

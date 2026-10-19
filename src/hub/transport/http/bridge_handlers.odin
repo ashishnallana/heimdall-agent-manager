@@ -527,7 +527,7 @@ bridge_enrollment_cancel_handler :: proc(ctx: rawptr, req: Request) -> Response 
 			if retired, rerr := vd.retire_bridge_entry(h.vault, string(bridge.owner_user_id), bridge.bridge_id); rerr.code != .None {
 				return respond_error(rerr, req.request_id)
 			} else if retired != "" && h.event_bus != nil {
-				events.publish_resource_changed(h.event_bus, string(bridge.owner_user_id), VAULT_DEVICES_RESOURCE, retired, "revoked", "{}")
+				events.publish_resource_changed(h.event_bus, string(bridge.owner_user_id), VAULT_DEVICES_RESOURCE, retired, "retired", "{}")
 			}
 		}
 	}
@@ -2592,12 +2592,11 @@ revoke_bridge_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	bridge_id := strings.trim_suffix(suffix_after(req.path, "/api/v1/bridges/"), "/revoke")
 	bridge, revoke_ok, err := bridge_service.revoke_bridge(h.bridges, auth_ctx, bridge_id)
 	if !revoke_ok do return respond_error(err, req.request_id)
-	// Passwordless vault: the revoked machine's approved directory identity is
-	// retired too (hub-marked revoked, versioned CAS), so no client keeps treating it
-	// as an approved device or re-unseals it. Credentials are already dead at this
-	// point, so a failure here leaves the safe state; it is reported and a retry
-	// (revoke is idempotent) finishes it. The bridge held the keyring, so GET
-	// /vault/directory now flags rotation_recommended until an approver rotates.
+	// Passwordless vault: the revoked machine's directory identity gets a retirement
+	// HINT (no version, no log op). An approved browser that verifies the identity in
+	// the signed log then signs its real revoke (new epoch + wraps). Credentials are
+	// already dead here, so a failure leaves the safe state; it is reported and a retry
+	// (revoke is idempotent) finishes it.
 	if h.vault != nil {
 		retired, rerr := vd.retire_bridge_entry(h.vault, string(bridge.owner_user_id), bridge.bridge_id)
 		if rerr.code != .None {
@@ -2605,7 +2604,7 @@ revoke_bridge_handler :: proc(ctx: rawptr, req: Request) -> Response {
 			return respond_error(domain.Domain_Error{code = rerr.code, cause = "vault_entry_not_retired", message = "the bridge was revoked, but its vault directory entry could not be retired; retry the revoke"}, req.request_id)
 		}
 		if retired != "" && h.event_bus != nil {
-			events.publish_resource_changed(h.event_bus, string(bridge.owner_user_id), VAULT_DEVICES_RESOURCE, retired, "revoked", "{}")
+			events.publish_resource_changed(h.event_bus, string(bridge.owner_user_id), VAULT_DEVICES_RESOURCE, retired, "retired", "{}")
 		}
 	}
 	// The live connection (if any) is being shut down and will tombstone on its

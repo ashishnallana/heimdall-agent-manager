@@ -170,7 +170,7 @@ test_statement_vectors_and_signature :: proc(t: ^testing.T) {
 	so := obj(root, "statement")
 	f := obj(so, "fields")
 	st := Statement{
-		type = str(f, "type"), user_id = str(f, "user_id"), directory_version = str(f, "directory_version"),
+		type = str(f, "type"), user_id = str(f, "user_id"), seq = str(f, "seq"), prev_hash = str(f, "prev_hash"),
 		issuer_device_id = str(f, "issuer_device_id"), issued_at_ms = str(f, "issued_at_ms"),
 		subject_device_id = str(f, "subject_device_id"), subject_kind = str(f, "subject_kind"),
 		subject_sign_pub = str(f, "subject_sign_pub"), subject_ecdh_pub = str(f, "subject_ecdh_pub"),

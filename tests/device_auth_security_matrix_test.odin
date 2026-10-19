@@ -188,7 +188,7 @@ test_bridge_enrollment_end_to_end :: proc() {
 	approve_body := strings.concatenate({
 		"{\"user_code\":\"", res_a.user_code,
 		"\",\"approve\":true,\"owner_user_id\":\"spoof-owner\",\"user\":\"spoof-user\"",
-		",\"vault_approval\":", sm_vault_approval("approving-human", &root, &id_a, 1), "}",
+		",\"vault_approval\":", sm_vault_approval(&graph, "approving-human", &root, &id_a, 1), "}",
 	})
 	approve_resp := api_http.device_approve_handler(rawptr(&graph.device_auth_handlers), api_http.Request{
 		method = "POST", path = "/api/v1/device/approve", body = approve_body,
@@ -211,7 +211,7 @@ test_bridge_enrollment_end_to_end :: proc() {
 	// result. The interval gate itself is covered in the token-poll test with a
 	// fake clock; here each grant is polled once.
 	id_bad := sm_dev(102, "bridge")
-	bad_grant, bad_found := seed_bridge_grant(&graph, "wrong-verifier-host", BPK_A, PKCE_CHALLENGE, trusted_headers[:], &id_bad, sm_vault_approval("approving-human", &root, &id_bad, 2))
+	bad_grant, bad_found := seed_bridge_grant(&graph, "wrong-verifier-host", BPK_A, PKCE_CHALLENGE, trusted_headers[:], &id_bad, sm_vault_approval(&graph, "approving-human", &root, &id_bad, 2))
 	assert_true(bad_found, "seeded a second bridge grant for the wrong-verifier case")
 	bad_poll := strings.concatenate({"{\"device_code\":\"", bad_grant.device_code, "\",\"code_verifier\":\"", WRONG_VERIFIER, "\"}"})
 	bad_resp := api_http.device_token_handler(rawptr(&graph.device_auth_handlers), api_http.Request{
@@ -616,8 +616,8 @@ sm_enroll_proof :: proc(d: ^Sm_Dev, ecdh_pub, challenge: string) -> string {
 	return sm_sign(d, msg)
 }
 
-sm_statement :: proc(type, user_id: string, issuer, subject: ^Sm_Dev, version, epoch: string) -> string {
-	st := vault.Statement{type = type, user_id = user_id, directory_version = version, issuer_device_id = issuer.id, issued_at_ms = "1792404000000", epoch = epoch, epoch_commit = SM_COMMIT}
+sm_statement :: proc(type, user_id: string, issuer, subject: ^Sm_Dev, seq, epoch: string, prev := "") -> string {
+	st := vault.Statement{type = type, user_id = user_id, seq = seq, prev_hash = prev, issuer_device_id = issuer.id, issued_at_ms = "1792404000000", epoch = epoch, epoch_commit = SM_COMMIT}
 	if subject != nil {
 		st.subject_device_id = subject.id
 		st.subject_kind = subject.kind
@@ -632,18 +632,17 @@ sm_statement :: proc(type, user_id: string, issuer, subject: ^Sm_Dev, version, e
 }
 
 sm_genesis :: proc(graph: ^app.App_Graph, user_id: string, root: ^Sm_Dev) -> bool {
-	g := sm_statement("genesis", user_id, root, root, "0", "1")
-	e := sm_statement("epoch", user_id, root, nil, "0", "1")
+	g := sm_statement("genesis", user_id, root, root, "1", "1")
 	w := vault.Keyring_Wrap{
 		alg = vault.WRAP_ALG_ECDH_P256_HKDF_AES, recipient_device_id = root.id,
-		directory_version = 0, current_epoch = 1,
+		directory_version = 1, current_epoch = 1,
 		ephemeral_public_key = root.ecdh_pub, iv = "bc20a2fb46127e3a719bdb68",
 		ciphertext = "00112233445566778899aabbccddeeff00112233", wrapped_by_device_id = root.id,
 	}
 	ws, _ := vault.wrap_statement(&w, user_id)
 	_, err := vd.genesis(&graph.vault_directory, vd.Genesis_Input{
 		user_id = user_id, genesis_statement = g, genesis_signature = sm_sign(root, g),
-		epoch_statement = e, epoch_signature = sm_sign(root, e), wrap = {wrap = w, signature = sm_sign(root, ws)},
+		wrap = {wrap = w, signature = sm_sign(root, ws)},
 	})
 	return err.code == .None
 }
@@ -654,7 +653,8 @@ sm_json_escape :: proc(s: string) -> string {
 }
 
 // sm_vault_approval is the `vault_approval` object the root signs for a bridge identity.
-sm_vault_approval :: proc(user_id: string, root, bridge: ^Sm_Dev, version: i64) -> string {
-	st := sm_statement("approve", user_id, root, bridge, fmt.tprintf("%d", version), "1")
+sm_vault_approval :: proc(graph: ^app.App_Graph, user_id: string, root, bridge: ^Sm_Dev, version: i64) -> string {
+	view, _ := vd.get_directory(&graph.vault_directory, user_id)
+	st := sm_statement("approve", user_id, root, bridge, fmt.tprintf("%d", version + 1), "1", view.directory.head_hash)
 	return strings.concatenate({`{"expected_version":`, fmt.tprintf("%d", version), `,"statement":"`, sm_json_escape(st), `","signature":`, sm_sign(root, st), "}"})
 }

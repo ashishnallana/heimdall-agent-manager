@@ -147,10 +147,11 @@ test_json_str :: proc(s: string) -> string {
 	return strings.concatenate({`"`, q2, `"`}, context.temp_allocator)
 }
 
-// test_chain_proof builds a valid minimal `chain_proof` (the UI's
-// buildBridgeChainProof shape) for bridge_id's identity and kr: the root's genesis,
-// the root's epoch statement for kr.current_epoch and the root's approval of the
-// bridge, both issuer chains empty. Temp-allocated.
+// test_chain_proof builds a valid minimal `chain_proof` v2 (the UI's
+// buildBridgeChainProof shape) for bridge_id's identity and kr: the root's genesis
+// (log seq 1, introducing epoch 1), one root-signed carrier per keyring epoch (the
+// genesis for epoch 1, a `rotate` op otherwise) and the root's approval of the bridge;
+// every issuer chain is empty. Temp-allocated.
 test_chain_proof :: proc(bridge_id: string, kr: ^vault.Vault_Keyring, root_scalar_hex: string = TEST_ACCOUNT_ROOT_SCALAR) -> string {
 	scalar: [32]byte
 	_ = vault.hex_decode_into(scalar[:], root_scalar_hex)
@@ -162,35 +163,55 @@ test_chain_proof :: proc(bridge_id: string, kr: ^vault.Vault_Keyring, root_scala
 	root_pub := vault.hex_encode_lower(pub[:], context.temp_allocator)
 	root_id, _ := vault.device_id_from_sign_pub(root_pub, context.temp_allocator)
 	owner := vault.keyring_user_id(kr)
-	commit: [32]byte
-	if key, ok := vault.keyring_current_key(kr); ok do _ = vault.epoch_commit(key, owner, kr.current_epoch, commit[:])
-	ep_buf: [24]byte
-	epoch_s := strconv.write_uint(ep_buf[:], u64(kr.current_epoch), 10)
+	commit_hex :: proc(kr: ^vault.Vault_Keyring, i: int) -> string {
+		c: [32]byte
+		_ = vault.epoch_commit(kr.entries[i].key[:], vault.keyring_user_id(kr), kr.entries[i].epoch, c[:])
+		return vault.hex_encode_lower(c[:], context.temp_allocator)
+	}
+	seq := 1
+	prev := ""
+	next_seq :: proc(seq: ^int) -> string {
+		s := fmt.tprintf("%d", seq^)
+		seq^ += 1
+		return s
+	}
 	genesis := vault.Statement{
-		type = "genesis", user_id = owner, directory_version = "0", issuer_device_id = root_id, issued_at_ms = "1",
+		type = "genesis", user_id = owner, seq = next_seq(&seq), prev_hash = prev, issuer_device_id = root_id, issued_at_ms = "1",
 		subject_device_id = root_id, subject_kind = "browser", subject_sign_pub = root_pub, subject_ecdh_pub = root_pub,
 		subject_sign_alg = vault.SIGN_ALG_ECDSA_P256_SHA256, subject_wrap_alg = vault.WRAP_ALG_ECDH_P256_HKDF_AES,
 		subject_label_b64 = "cm9vdA", epoch = "1",
+		epoch_commit = commit_hex(kr, 0) if kr.entries[0].epoch == 1 else strings.repeat("0", 64, context.temp_allocator),
 	}
-	epoch_st := vault.Statement{
-		type = "epoch", user_id = owner, directory_version = "0", issuer_device_id = root_id, issued_at_ms = "2",
-		epoch = epoch_s, epoch_commit = vault.hex_encode_lower(commit[:], context.temp_allocator),
+	g_text, g_sig := test_sign_statement(&root, &genesis)
+	prev = vault.log_entry_hash(g_text, context.temp_allocator)
+	carriers := strings.builder_make(context.temp_allocator)
+	for i in 0 ..< kr.count {
+		if i > 0 do strings.write_byte(&carriers, ',')
+		e := kr.entries[i].epoch
+		text, sig := g_text, g_sig
+		if e != 1 {
+			st := vault.Statement{
+				type = "rotate", user_id = owner, seq = next_seq(&seq), prev_hash = prev, issuer_device_id = root_id, issued_at_ms = "2",
+				epoch = fmt.tprintf("%d", e), epoch_commit = commit_hex(kr, i),
+			}
+			text, sig = test_sign_statement(&root, &st)
+			prev = vault.log_entry_hash(text, context.temp_allocator)
+		}
+		strings.write_string(&carriers, fmt.tprintf(`{{"epoch":%d,"statement":%s,"signature":%s,"issuer_chain":[]}}`, e, test_json_str(text), test_json_str(sig)))
 	}
 	identity := bridge_identity_public_key_hex(bridge_id)
 	bridge_dev, _ := vault.device_id_from_sign_pub(identity, context.temp_allocator)
 	approval := vault.Statement{
-		type = "approve", user_id = owner, directory_version = "1", issuer_device_id = root_id, issued_at_ms = "3",
+		type = "approve", user_id = owner, seq = next_seq(&seq), prev_hash = prev, issuer_device_id = root_id, issued_at_ms = "3",
 		subject_device_id = bridge_dev, subject_kind = "bridge", subject_sign_pub = identity,
 		subject_sign_alg = vault.SIGN_ALG_ECDSA_P256_SHA256, subject_label_b64 = "YnJpZGdl", epoch = "1",
 	}
-	g_text, g_sig := test_sign_statement(&root, &genesis)
-	e_text, e_sig := test_sign_statement(&root, &epoch_st)
 	a_text, a_sig := test_sign_statement(&root, &approval)
 	return strings.concatenate({
-		`{"v":1,"user_id":"`, owner, `","root_device_id":"`, root_id, `","root_sign_alg":"ecdsa-p256-sha256","root_sign_pub":"`, root_pub,
+		`{"v":2,"user_id":"`, owner, `","root_device_id":"`, root_id, `","root_sign_alg":"ecdsa-p256-sha256","root_sign_pub":"`, root_pub,
 		`","genesis":{"statement":`, test_json_str(g_text), `,"signature":`, test_json_str(g_sig),
-		`},"epoch":{"epoch":`, epoch_s, `,"statement":`, test_json_str(e_text), `,"signature":`, test_json_str(e_sig),
-		`},"issuer_chain":[],"subject_approval":{"statement":`, test_json_str(a_text), `,"signature":`, test_json_str(a_sig), `,"issuer_chain":[]}}`,
+		`},"epochs":[`, strings.to_string(carriers),
+		`],"subject_approval":{"statement":`, test_json_str(a_text), `,"signature":`, test_json_str(a_sig), `,"issuer_chain":[]}}`,
 	}, context.temp_allocator)
 }
 

@@ -42,7 +42,8 @@ vd_device :: proc(id, key: string, status: domain.Vault_Device_Status, code := "
 
 vd_genesis :: proc(t: ^testing.T, f: ^Vd_Fixture) {
 	err := iface.vault_create_genesis(&f.repo, domain.Vault_Genesis{
-		directory = {user_id = VD_USER, version = 1, current_epoch = 1, root_device_id = "dev_root", genesis_statement = "g", genesis_signature = "s", created_at = VD_NOW, updated_at = VD_NOW},
+		directory = {user_id = VD_USER, version = 1, current_epoch = 1, root_device_id = "dev_root", head_hash = "h1", genesis_statement = "g", genesis_signature = "s", created_at = VD_NOW, updated_at = VD_NOW},
+		log = {user_id = VD_USER, seq = 1, statement = "g", signature = "s", entry_hash = "h1", created_at = VD_NOW},
 		device = vd_device("dev_root", "k_root", .Approved),
 		epoch = {user_id = VD_USER, epoch = 1, statement = "e1", signature = "s1", created_at = VD_NOW},
 		wrap = {user_id = VD_USER, device_id = "dev_root", directory_version = 0, current_epoch = 1, wrap_json = "{}", updated_at = VD_NOW},
@@ -58,7 +59,8 @@ test_vault_repo_second_genesis_rejected :: proc(t: ^testing.T) {
 	defer close(&f.conn)
 	vd_genesis(t, &f)
 	err := iface.vault_create_genesis(&f.repo, domain.Vault_Genesis{
-		directory = {user_id = VD_USER, version = 1, current_epoch = 1, root_device_id = "dev_other", genesis_statement = "g2", genesis_signature = "s2", created_at = VD_NOW, updated_at = VD_NOW},
+		directory = {user_id = VD_USER, version = 1, current_epoch = 1, root_device_id = "dev_other", head_hash = "h9", genesis_statement = "g2", genesis_signature = "s2", created_at = VD_NOW, updated_at = VD_NOW},
+		log = {user_id = VD_USER, seq = 1, statement = "g2", signature = "s2", entry_hash = "h9", created_at = VD_NOW},
 		device = vd_device("dev_other", "k_other", .Approved),
 		epoch = {user_id = VD_USER, epoch = 1, statement = "x", signature = "x", created_at = VD_NOW},
 		wrap = {user_id = VD_USER, device_id = "dev_other", wrap_json = "{}", updated_at = VD_NOW},
@@ -82,7 +84,7 @@ test_vault_repo_stale_version_conflicts_and_writes_nothing :: proc(t: ^testing.T
 
 	// Stale: the directory is at version 1.
 	_, err := iface.vault_commit(&f.repo, domain.Vault_Directory_Commit{
-		user_id = VD_USER, expected_version = 7, now = VD_NOW,
+		user_id = VD_USER, expected_version = 7, now = VD_NOW, expected_head_hash = "h1", log_statement = "op", log_signature = "s", log_entry_hash = "h2",
 		approve_device_id = "dev_b", approval_statement = "a", approval_signature = "s", approved_by_device_id = "dev_root",
 		wraps = {{user_id = VD_USER, device_id = "dev_b", directory_version = 7, current_epoch = 1, wrap_json = "{}", updated_at = VD_NOW}},
 	})
@@ -95,22 +97,27 @@ test_vault_repo_stale_version_conflicts_and_writes_nothing :: proc(t: ^testing.T
 
 	// A guarded row that does not match rolls the CAS back too.
 	_, err2 := iface.vault_commit(&f.repo, domain.Vault_Directory_Commit{
-		user_id = VD_USER, expected_version = 1, now = VD_NOW, revoke_device_id = "dev_b", revocation_statement = "r", revocation_signature = "s", revoked_by_device_id = "dev_root",
+		user_id = VD_USER, expected_version = 1, now = VD_NOW, expected_head_hash = "h1", log_statement = "op", log_signature = "s", log_entry_hash = "h2", revoke_device_id = "dev_b", revocation_statement = "r", revocation_signature = "s", revoked_by_device_id = "dev_root",
 	})
 	testing.expect_value(t, err2.code, domain.Error_Code.Conflict)
 	dir, _, _ := iface.vault_get_directory(&f.repo, VD_USER)
 	testing.expect_value(t, dir.version, i64(1))
 
 	// Epoch must be current + 1.
-	_, err3 := iface.vault_commit(&f.repo, domain.Vault_Directory_Commit{user_id = VD_USER, expected_version = 1, now = VD_NOW, new_epoch = 3, epoch_statement = "e", epoch_signature = "s"})
+	_, err3 := iface.vault_commit(&f.repo, domain.Vault_Directory_Commit{user_id = VD_USER, expected_version = 1, now = VD_NOW, new_epoch = 3, expected_head_hash = "h1", log_statement = "op", log_signature = "s", log_entry_hash = "h2"})
 	testing.expect_value(t, err3.code, domain.Error_Code.Conflict)
 
 	v, ok_err := iface.vault_commit(&f.repo, domain.Vault_Directory_Commit{
-		user_id = VD_USER, expected_version = 1, now = VD_NOW,
+		user_id = VD_USER, expected_version = 1, now = VD_NOW, expected_head_hash = "h1", log_statement = "op", log_signature = "s", log_entry_hash = "h2",
 		approve_device_id = "dev_b", approval_statement = "a", approval_signature = "s", approved_by_device_id = "dev_root",
 	})
 	testing.expect_value(t, ok_err.code, domain.Error_Code.None)
 	testing.expect_value(t, v, i64(2))
+	// A stale head hash conflicts even at the right version.
+	_, err4 := iface.vault_commit(&f.repo, domain.Vault_Directory_Commit{user_id = VD_USER, expected_version = 2, now = VD_NOW, expected_head_hash = "h1", log_statement = "op2", log_signature = "s", log_entry_hash = "h3"})
+	testing.expect_value(t, err4.code, domain.Error_Code.Conflict)
+	log, _ := iface.vault_list_log(&f.repo, VD_USER)
+	testing.expect_value(t, len(log), 2)
 }
 
 Race_Ctx :: struct {
@@ -124,7 +131,7 @@ race_approve :: proc(data: rawptr) {
 	ctx := (^Race_Ctx)(data)
 	sync.barrier_wait(ctx.start)
 	_, ctx.err = iface.vault_commit(&ctx.f.repo, domain.Vault_Directory_Commit{
-		user_id = VD_USER, expected_version = 1, now = VD_NOW,
+		user_id = VD_USER, expected_version = 1, now = VD_NOW, expected_head_hash = "h1", log_statement = ctx.device, log_signature = "s", log_entry_hash = ctx.device,
 		approve_device_id = ctx.device, approval_statement = "a", approval_signature = "s", approved_by_device_id = "dev_root",
 	})
 }
