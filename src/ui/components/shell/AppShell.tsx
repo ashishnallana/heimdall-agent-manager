@@ -462,6 +462,15 @@ function isApiV1Url(input: RequestInfo | URL): boolean {
   }
 }
 
+function isApiV1Path(input: RequestInfo | URL, prefix: string): boolean {
+  const value = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+  try {
+    return new URL(value, window.location.href).pathname.startsWith(prefix);
+  } catch (_err) {
+    return String(value).startsWith(prefix);
+  }
+}
+
 function installApiAuthObserver() {
   if (typeof window === 'undefined' || !(window as any).fetch || (window as any).__heimdallApiAuthObserverInstalled) return;
   const originalFetch = window.fetch.bind(window);
@@ -469,8 +478,13 @@ function installApiAuthObserver() {
   window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     const response = await originalFetch(input, init);
     if (isApiV1Url(input)) {
-      if (response.status === 401) window.dispatchEvent(new CustomEvent('heimdall:api-unauthenticated'));
-      if (response.status === 403) window.dispatchEvent(new CustomEvent('heimdall:api-forbidden'));
+      // Vault/device endpoints answer 401/403 for device-level reasons (bad or
+      // replayed signature, pending or revoked device); those are handled by the
+      // device vault flow and must not flip the whole session to login/denied.
+      const deviceScoped = isApiV1Path(input, '/api/v1/vault/') || isApiV1Path(input, '/api/v1/device/');
+      if (response.status === 401 && !deviceScoped) window.dispatchEvent(new CustomEvent('heimdall:api-unauthenticated'));
+      // Only the identity endpoint decides that the account itself is denied.
+      if (response.status === 403 && isApiV1Path(input, '/api/v1/me')) window.dispatchEvent(new CustomEvent('heimdall:api-forbidden'));
     }
     return response;
   };
