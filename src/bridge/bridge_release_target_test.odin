@@ -51,6 +51,9 @@ test_release_asset_names_other_target :: proc(t: ^testing.T) {
 	testing.expect(t, !other("https://mirror.example/heimdall-local-termux-arm64.tar.gz", "termux-arm64"), "matching unversioned asset")
 	testing.expect(t, !other("/api/v1/updates/bundle/abc.tar.gz", "termux-arm64"), "non-convention URL defers to the hub catalog")
 	testing.expect(t, !other("/tmp/stage/bundle.tar.gz", "linux-amd64"), "local fixture path defers to the hub catalog")
+	testing.expect(t, !other("https://github.com/o/r/releases/download/v0.4.9/heimdall-local-windows-amd64-v0.4.9.zip", "windows-amd64"), "matching windows zip asset")
+	testing.expect(t, other("https://github.com/o/r/releases/download/v0.4.9/heimdall-local-linux-amd64-v0.4.9.tar.gz", "windows-amd64"), "linux asset for windows bridge")
+	testing.expect(t, other("https://github.com/o/r/releases/download/v0.4.9/heimdall-local-windows-amd64-v0.4.9.zip", "linux-amd64"), "windows zip for linux bridge")
 }
 
 @(test)

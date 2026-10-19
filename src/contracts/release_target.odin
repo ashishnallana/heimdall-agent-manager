@@ -41,7 +41,8 @@ release_target_resolve :: proc(compiled, native: string, on_termux: bool) -> (ta
 }
 
 // release_asset_names_other_target is true when url's file name follows the
-// release convention heimdall-local-<target>[-<tag>].tar.gz for a target other
+// release convention heimdall-local-<target>[-<tag>].tar.gz (.zip for the
+// windows-* bundles, which scripts/install.ps1 installs) for a target other
 // than target. URLs outside the convention (hub-hosted paths, test fixtures)
 // return false: the hub's catalog lookup is authoritative for those, and this
 // check only exists to stop a mis-resolved catalog from bricking a bridge.
@@ -50,7 +51,7 @@ release_asset_names_other_target :: proc(url, target: string) -> bool {
 	if q := strings.index_any(name, "?#"); q >= 0 do name = name[:q]
 	if slash := strings.last_index_byte(name, '/'); slash >= 0 do name = name[slash + 1:]
 	PREFIX :: "heimdall-local-"
-	if !strings.has_prefix(name, PREFIX) || !strings.has_suffix(name, ".tar.gz") do return false
+	if !strings.has_prefix(name, PREFIX) || !(strings.has_suffix(name, ".tar.gz") || strings.has_suffix(name, ".zip")) do return false
 	rest := name[len(PREFIX):]
 	if !strings.has_prefix(rest, target) do return true
 	tail := rest[len(target):]
