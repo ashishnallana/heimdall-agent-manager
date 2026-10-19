@@ -233,6 +233,44 @@ function DemoHeader({
   );
 }
 
+/**
+ * `?kbd=1`: live viewport readout for measuring the software keyboard on a real device
+ * (REQ-KBD-1 style). Shows the numbers `appViewportHeight.ts` reads and the composer card's
+ * position, so a screenshot with the keyboard up says which box ends where.
+ */
+function KeyboardReadout() {
+  const [text, setText] = useState('');
+  useEffect(() => {
+    const read = () => {
+      const vv = window.visualViewport;
+      const card = document.querySelector('[data-debug-id="composer-demo-composer-card"]')?.getBoundingClientRect();
+      const root = document.getElementById('root')?.getBoundingClientRect();
+      const css = getComputedStyle(document.documentElement);
+      const r = (n: number | undefined) => (n === undefined ? '-' : Math.round(n));
+      setText(
+        [
+          `inner ${window.innerHeight} scrollY ${r(window.scrollY)}`,
+          `vv h ${r(vv?.height)} top ${r(vv?.offsetTop)} pageTop ${r(vv?.pageTop)} s ${vv?.scale?.toFixed(2) ?? '-'}`,
+          `var h ${css.getPropertyValue('--app-viewport-height').trim()} off ${css.getPropertyValue('--app-viewport-bottom-offset').trim()}`,
+          `root ${r(root?.top)}..${r(root?.bottom)} card ${r(card?.top)}..${r(card?.bottom)}`,
+          `focus ${document.activeElement?.tagName ?? '-'}`,
+        ].join('\n'),
+      );
+    };
+    read();
+    const id = window.setInterval(read, 200);
+    return () => window.clearInterval(id);
+  }, []);
+  return (
+    <pre
+      data-debug-id="composer-demo-kbd-readout"
+      className="pointer-events-none fixed left-2 top-20 z-50 m-0 rounded-md bg-black/80 p-2 font-mono text-[11px] leading-4 text-white"
+    >
+      {text}
+    </pre>
+  );
+}
+
 function ComposerDemo() {
   const [messages, setMessages] = useState<ChatMessage[]>(SAMPLE_MESSAGES);
   const [draft, setDraft] = useState(() => PRESETS.get('draft') ?? '');
@@ -342,6 +380,7 @@ function ComposerDemo() {
 
   return (
     <div data-debug-id="composer-demo-root" className="flex h-full w-full justify-center bg-canvas text-primary">
+      {PRESETS.get('kbd') === '1' ? <KeyboardReadout /> : null}
       {/* Phone-width column so the demo reads the same on a desktop preview. */}
       <div className="flex h-full w-full max-w-[440px] flex-col sm:border-x sm:border-subtle">
         <div
