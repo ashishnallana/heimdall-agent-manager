@@ -9,7 +9,7 @@ import vault "odin_test:lib/vault"
 
 // ── vault verb group (REQ-VAULT-BRIDGE-CLI-1, passwordless vault P1) ─────────
 // Reports where ham-ctl gets its vault KEYRING from. ham-ctl stores no key material
-// of its own: it uses --vault-keyring / $HEIMDALL_VAULT_KEYRING when set, otherwise
+// of its own: it uses $HEIMDALL_VAULT_KEYRING when set, otherwise
 // the keyring the local bridge holds.
 //
 // TRUST NOTE: agent.vault.get hands every local agent process the bridge's WHOLE
@@ -24,7 +24,7 @@ print_vault_help :: proc() {
 	fmt.println("USAGE:")
 	fmt.println("  ham-ctl vault status")
 	fmt.println("")
-	fmt.println("The keyring comes from --vault-keyring / $HEIMDALL_VAULT_KEYRING (base64 HKR1,")
+	fmt.println("The keyring comes from $HEIMDALL_VAULT_KEYRING (base64 HKR1,")
 	fmt.println("a single-bridge dev override) or, otherwise, the local bridge.")
 }
 
@@ -55,11 +55,12 @@ ctl_keyring_from_b64 :: proc(b64: string, want_epoch: u32 = 0) -> (kr: vault.Vau
 }
 
 // ctl_read_vault_keyring resolves the vault keyring from, in order:
-//   1. --vault-keyring <base64 HKR1>
-//   2. $HEIMDALL_VAULT_KEYRING (a single-bridge dev override)
-//   3. the local bridge, via agent.vault.get (agent mode only)
+//   1. $HEIMDALL_VAULT_KEYRING (a single-bridge dev override; a bridge never passes
+//      it to the agents it spawns)
+//   2. the local bridge, via agent.vault.get (agent mode only)
+// (Test builds also accept --vault-keyring <base64 HKR1> first; see below.)
 //
-// Sources 1 and 2 are EXPLICIT: if either is present but invalid it is rejected and
+// Source 1 is EXPLICIT: if it is present but invalid it is rejected and
 // the bridge is NOT consulted, so a typo surfaces as an error instead of silently
 // resolving to a different keyring. Only genuine ABSENCE falls through.
 //
@@ -70,11 +71,16 @@ ctl_keyring_from_b64 :: proc(b64: string, want_epoch: u32 = 0) -> (kr: vault.Vau
 ctl_read_vault_keyring :: proc(args: []string = nil, allocator := context.allocator) -> (kr: ^vault.Vault_Keyring, ok: bool) {
 	_ = allocator
 	vault.keyring_wipe(&g_ctl_keyring)
-	if args != nil && has_flag(args, "--vault-keyring") {
-		parsed, p_ok := ctl_keyring_from_b64(strings.trim_space(option_value(args, "--vault-keyring", "")))
-		if !p_ok do return nil, false
-		g_ctl_keyring = parsed
-		return &g_ctl_keyring, true
+	// --vault-keyring exists ONLY in test builds, as a per-call injection point.
+	// A production ham-ctl never takes key material on argv, where `ps` and shell
+	// history can read it (finding L3).
+	when ODIN_TEST {
+		if args != nil && has_flag(args, "--vault-keyring") {
+			parsed, p_ok := ctl_keyring_from_b64(strings.trim_space(option_value(args, "--vault-keyring", "")))
+			if !p_ok do return nil, false
+			g_ctl_keyring = parsed
+			return &g_ctl_keyring, true
+		}
 	}
 	if env_val, found := os.lookup_env("HEIMDALL_VAULT_KEYRING", context.temp_allocator); found {
 		trimmed := strings.trim_space(env_val)

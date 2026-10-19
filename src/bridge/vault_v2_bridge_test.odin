@@ -450,3 +450,25 @@ test_v2_fs_read_uses_one_vault_snapshot :: proc(t: ^testing.T) {
 	if len(g.matches) == 1 do testing.expect(t, strings.has_prefix(g.matches[0].line, vault.VAULT_V2_PREFIX), "grep line encrypted")
 	bridge_fs_grep_result_delete(&g)
 }
+
+@(test)
+test_v2_keyring_env_override_is_scrubbed_from_children :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
+	f := v2_open()
+	defer v2_close(&f)
+	env := test_env_set("HEIMDALL_VAULT_KEYRING", test_keyring_env_value(TEST_VAULT_KEY_HEX))
+	defer test_env_restore(&env)
+	defer bridge_forget_captured_env_keyring()
+
+	testing.expect(t, bridge_capture_keyring_env_override(), "override captured")
+	_, still_set := os.lookup_env("HEIMDALL_VAULT_KEYRING", context.temp_allocator)
+	testing.expect(t, !still_set, "no child can inherit HEIMDALL_VAULT_KEYRING")
+	kr, ok := bridge_read_vault_keyring()
+	defer vault.keyring_wipe(&kr)
+	want := test_keyring_from_hex(TEST_VAULT_KEY_HEX)
+	defer vault.keyring_wipe(&want)
+	testing.expect(t, ok && vault.keyring_equal(&kr, &want), "the bridge still uses the captured keyring")
+}
