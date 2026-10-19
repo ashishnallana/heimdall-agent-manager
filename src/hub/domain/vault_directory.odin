@@ -1,7 +1,6 @@
 package domain
 
-import "core:strconv"
-import "core:strings"
+import "core:encoding/json"
 import vault "odin_test:lib/vault"
 
 // Passwordless vault device directory (docs/plans/passwordless-vault.md §2 P2).
@@ -195,13 +194,23 @@ Vault_Genesis :: struct {
 
 // vault_conflict_error is the 409 for a stale expected_version: it names the current
 // version so the client can re-fetch, re-verify and retry.
+Vault_Conflict_Details :: struct {
+	reason:          string,
+	current_version: i64,
+}
+
+Vault_Reason_Details :: struct {
+	reason: string,
+}
+
 vault_conflict_error :: proc(current_version: i64) -> Domain_Error {
-	buf: [24]byte
-	return domain_error(.Conflict, "vault directory version conflict", strings.concatenate({`{"reason":"version_conflict","current_version":`, strconv.write_int(buf[:], current_version, 10), "}"}, context.temp_allocator))
+	details, _ := json.marshal(Vault_Conflict_Details{reason = "version_conflict", current_version = current_version}, allocator = context.temp_allocator)
+	return domain_error(.Conflict, "vault directory version conflict", string(details))
 }
 
 vault_reason_error :: proc(code: Error_Code, reason, message: string) -> Domain_Error {
-	return domain_error(code, message, strings.concatenate({`{"reason":"`, reason, `"}`}, context.temp_allocator))
+	details, _ := json.marshal(Vault_Reason_Details{reason = reason}, allocator = context.temp_allocator)
+	return domain_error(code, message, string(details))
 }
 
 // ── Kind validation (credential agility) ────────────────────────────────────

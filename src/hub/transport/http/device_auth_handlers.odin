@@ -9,11 +9,13 @@
 // Trusted-proxy-authenticated (ELDA-2/HBR-5): GET /api/v1/device (HTML page),
 // POST /api/v1/device/verify, POST /api/v1/device/approve. These refuse with
 // 401 when the request did not arrive through the trusted proxy.
+//
+// JSON: requests are decoded into typed structs and responses are typed structs
+// encoded with json.marshal (vault_decode / vault_respond).
 
 package http
 
-import "core:fmt"
-import "core:strings"
+import "core:encoding/json"
 import contracts "odin_test:contracts"
 import auth_service "odin_test:hub/service/auth"
 import device_auth "odin_test:hub/service/device_auth"
@@ -22,8 +24,9 @@ import domain "odin_test:hub/domain"
 import jsonx "odin_test:lib/jsonx"
 import vd "odin_test:hub/service/vault_directory"
 import events "odin_test:hub/service/events"
-import "core:encoding/json"
 import vault "odin_test:lib/vault"
+import "core:fmt"
+import "core:strings"
 
 Device_Auth_Handlers :: struct {
 	service: ^device_auth.Device_Auth_Service,
@@ -37,69 +40,77 @@ Device_Auth_Handlers :: struct {
 	// --ui-origin. Prefixes the /api/v1/device/add redirect target; empty means
 	// a relative Location (UI served by the Hub itself).
 	ui_origin:         string,
-	// Passwordless vault: /device/verify also resolves a browser's 12-symbol
-	// pending-device code against the session user's directory.
+	// Passwordless vault: /device/verify also resolves a pending browser of the
+	// session user by its pairing lookup.
 	vault:             ^vd.Service,
 	event_bus:         ^events.User_Event_Bus,
 }
 
-// device_authorize_handler is the public POST /api/v1/device/authorize endpoint.
+// ── POST /api/v1/device/authorize ───────────────────────────────────────────
+
+@(private = "file")
+Authorize_Request :: struct {
+	client:                     string,
+	device_label:               string,
+	os:                         string,
+	app_version:                string,
+	// REQ-IMPL-2 bridge-enrollment extensions. bridge_key_fingerprint is read only so
+	// the service can CROSS-CHECK it against its own derivation; the stored
+	// fingerprint is always the Hub's own (device_auth/bridge_grant.odin).
+	bridge_public_key:          string,
+	bridge_key_fingerprint:     string,
+	os_user:                    string,
+	code_challenge:             string,
+	code_challenge_method:      string,
+	// Passwordless vault: the bridge's persistent identity key and its proof of
+	// possession (signature object; see vault.bridge_enroll_proof_canonical).
+	bridge_identity_public_key: string,
+	bridge_identity_proof:      json.Value,
+	// Hub-blind pairing (bridge grants): derived by the bridge from a code the hub never sees.
+	pair_lookup:                string,
+	pair_key_mac:               string,
+}
+
+Device_Authorize_Wire :: struct {
+	device_code:               string,
+	// A bridge grant has no hub-known code (its operator types the bridge's own
+	// secret pairing code): user_code is present only for a user-token grant.
+	user_code:                 string `json:"user_code,omitempty"`,
+	verification_uri:          string,
+	// The UI's approval route. Links NEVER carry a code: whoever opens a link with
+	// the pairing code would approve on the code's strength alone.
+	verification_uri_complete: string `json:"verification_uri_complete,omitempty"`,
+	interval:                  int,
+	expires_in:                int,
+	// Advisory echo of the Hub's fingerprint (design §2.2 step 5); omitted for a
+	// non-bridge grant so the ELDA response shape is unchanged.
+	bridge_key_fingerprint:    string `json:"bridge_key_fingerprint,omitempty"`,
+}
+
 device_authorize_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	handlers := (^Device_Auth_Handlers)(ctx)
+	body: Authorize_Request
+	if !vault_decode(req, &body) do return respond_error(domain.domain_error(.Validation_Failed, "body must be a JSON object"), req.request_id)
 	input := device_auth.Authorize_Input{
-		client = json_string(req.body, "client"),
-		device_label = json_string(req.body, "device_label"),
-		os = json_string(req.body, "os"),
-		app_version = json_string(req.body, "app_version"),
-		// REQ-IMPL-2 bridge-enrollment extensions. bridge_key_fingerprint is read
-		// only so the service can CROSS-CHECK it against its own derivation and
-		// surface a mismatch; the stored fingerprint is always the Hub's own
-		// (device_auth/bridge_grant.odin).
-		bridge_public_key = json_string(req.body, "bridge_public_key"),
-		bridge_key_fingerprint = json_string(req.body, "bridge_key_fingerprint"),
-		os_user = json_string(req.body, "os_user"),
-		code_challenge = json_string(req.body, "code_challenge"),
-		code_challenge_method = json_string(req.body, "code_challenge_method"),
-		// Passwordless vault: the bridge's persistent identity key (required for a bridge grant).
-		bridge_identity_public_key = json_string(req.body, "bridge_identity_public_key"),
-		// ...and its proof of possession (signature object; see vault.bridge_enroll_proof_canonical).
-		bridge_identity_proof = json_signature(req.body, "bridge_identity_proof"),
-		// Hub-blind pairing (bridge grants): derived by the bridge from a code the hub never sees.
-		pair_lookup = json_string(req.body, "pair_lookup"),
-		pair_key_mac = json_string(req.body, "pair_key_mac"),
+		client = body.client, device_label = body.device_label, os = body.os, app_version = body.app_version,
+		bridge_public_key = body.bridge_public_key, bridge_key_fingerprint = body.bridge_key_fingerprint,
+		os_user = body.os_user, code_challenge = body.code_challenge, code_challenge_method = body.code_challenge_method,
+		bridge_identity_public_key = body.bridge_identity_public_key,
+		bridge_identity_proof = vault_sig_text(body.bridge_identity_proof),
+		pair_lookup = body.pair_lookup, pair_key_mac = body.pair_key_mac,
 	}
 	xff := header_value(req.headers, "X-Forwarded-For")
 	result, ok, err := device_auth.authorize(handlers.service, input, req.remote_addr, xff)
 	device_auth_record("authorize", device_auth_error_result(err) if !ok else "ok")
 	if !ok do return respond_error(err, req.request_id)
-	data := strings.builder_make()
-	strings.write_string(&data, "{\"device_code\":\"")
-	write_handler_json_string(&data, result.device_code)
-	// A bridge grant has no hub-known code (its operator types the bridge's own
-	// secret pairing code): user_code is present only for a user-token grant.
-	if result.user_code != "" {
-		strings.write_string(&data, "\",\"user_code\":\"")
-		write_handler_json_string(&data, result.user_code)
+	out := Device_Authorize_Wire{
+		device_code = result.device_code, user_code = result.user_code,
+		verification_uri = result.verification_uri,
+		interval = result.interval, expires_in = result.expires_in,
+		bridge_key_fingerprint = result.bridge_key_fingerprint,
 	}
-	strings.write_string(&data, "\",\"verification_uri\":\"")
-	write_handler_json_string(&data, result.verification_uri)
-	// The UI's approval route. Links NEVER carry a code: whoever opens a link with
-	// the pairing code would approve on the code's strength alone.
-	if handlers.ui_origin != "" {
-		strings.write_string(&data, "\",\"verification_uri_complete\":\"")
-		write_handler_json_string(&data, device_add_redirect_location(handlers.ui_origin))
-	}
-	strings.write_string(&data, fmt.tprintf("\",\"interval\":%d", result.interval))
-	strings.write_string(&data, fmt.tprintf(",\"expires_in\":%d", result.expires_in))
-	// Advisory echo of the Hub's fingerprint (design §2.2 step 5); omitted
-	// entirely for a non-bridge grant so the ELDA response shape is unchanged.
-	if result.bridge_key_fingerprint != "" {
-		strings.write_string(&data, ",\"bridge_key_fingerprint\":\"")
-		write_handler_json_string(&data, result.bridge_key_fingerprint)
-		strings.write_string(&data, "\"")
-	}
-	strings.write_string(&data, "}")
-	return respond_success(strings.to_string(data), req.request_id, "", 200)
+	if handlers.ui_origin != "" do out.verification_uri_complete = device_add_redirect_location(handlers.ui_origin)
+	return vault_respond(out, req)
 }
 
 // device_page_handler serves the self-contained HTML confirm page (ELDA-2/AC1).
@@ -112,15 +123,15 @@ device_page_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	return Response{status = 200, content_type = "text/html; charset=utf-8", body = device_auth.DEVICE_PAGE_HTML}
 }
 
-// DEVICE_ADD_UI_ROUTE is the UI hash route of the bridge-enrollment approval page.
+// DEVICE_ADD_UI_ROUTE is the UI hash route of the device approval page.
 DEVICE_ADD_UI_ROUTE :: "/#/device/add"
 
 // device_add_redirect_handler is GET /api/v1/device/add, the URL `ham-bridge
 // enroll` prints and opens. It exists because the approval page lives behind a
 // hash route: a forward-auth login round trip (`rd=<scheme://host/path?query>`)
 // preserves path and query but the browser never sends the `#` fragment, so a
-// `/#/device/add?code=…` link landed on Home after login. The path form
-// survives the round trip and this 302 restores the hash route.
+// `/#/device/add` link landed on Home after login. The path form survives the
+// round trip and this 302 restores the hash route.
 //
 // No auth here: it only redirects, and the page it targets authenticates
 // itself. The query is ignored entirely: an approval link never carries a code
@@ -138,9 +149,84 @@ device_add_redirect_location :: proc(ui_origin: string, allocator := context.tem
 	return strings.concatenate({strings.trim_right(ui_origin, "/"), DEVICE_ADD_UI_ROUTE}, allocator)
 }
 
-// device_verify_handler shows the requesting device's info for the given
-// user_code (ELDA-2/AC3). Trusted-proxy-authenticated. Unknown/expired code ->
-// generic 404 "invalid or expired code" (no enumeration); terminal -> 410.
+// ── POST /api/v1/device/verify ──────────────────────────────────────────────
+// Hub-blind pairing (plan §1 "Pairing"): browsers and bridges are resolved by the
+// pair_lookup the APPROVER derived from the code it was given; the hub never sees
+// the code. A pending browser of the session user is tried first, then a bridge
+// grant. `user_code` is only the Electron (user-token grant) code. Unknown/expired
+// -> generic 404 "invalid or expired code" (no enumeration); terminal -> 410.
+
+@(private = "file")
+Verify_Request :: struct {
+	pair_lookup: string,
+	user_code:   string,
+}
+
+Device_Verify_Hub_Observed :: struct {
+	bridge_key_fingerprint:      string,
+	bridge_public_key_on_record: string,
+	fingerprint_algorithm:       string,
+	request_ip:                  string,
+	// The Hub MEASURED it, with the same clock reading that decided this grant had
+	// not expired. Same units as requested_at.
+	server_time:                 i64,
+}
+
+Device_Verify_Host_Asserted :: struct {
+	bridge_public_key: string,
+	os_user:           string,
+	device_label:      string,
+	os:                string,
+	app_version:       string,
+}
+
+// Device_Verify_Grant_Wire: the requesting machine's info. PROVENANCE IS PART OF THE
+// WIRE FORMAT (REQ-ENROLL-14): `hub_observed` is derived by the Hub, `host_asserted`
+// is supplied by the machine being enrolled and must be rendered as a claim.
+Device_Verify_Grant_Wire :: struct {
+	device_label:                string,
+	os:                          string,
+	app_version:                 string,
+	client:                      string,
+	request_ip:                  string,
+	requested_at:                i64,
+	kind:                        string,
+	// The persistent identity key the approver signs into the vault directory, and
+	// its hub-computed fingerprint.
+	bridge_identity_public_key:  string,
+	bridge_identity_fingerprint: string,
+	// Hub-blind pairing: the approver recomputes pair_key_mac over
+	// identity|ecdh|challenge with the code the operator typed, proving the hub
+	// served the bridge's real keys.
+	pair_key_mac:                string,
+	code_challenge:              string,
+	is_bridge_enrollment:        bool,
+	hub_observed:                Device_Verify_Hub_Observed,
+	host_asserted:               Device_Verify_Host_Asserted,
+	bridge_public_key:           string,
+	bridge_key_fingerprint:      string,
+	os_user:                     string,
+}
+
+// Device_Verify_Browser_Wire: a pending BROWSER of the session user. It carries the
+// self-signed register statement and pair_key_mac: the approver verifies the MAC with
+// the code it was given before trusting any key here.
+Device_Verify_Browser_Wire :: struct {
+	kind:               string,
+	device_id:          string,
+	device_kind:        string,
+	fingerprint:        string,
+	label:              string,
+	sign_public_key:    string,
+	ecdh_public_key:    string,
+	sign_alg:           string,
+	wrap_alg:           string,
+	created_at:         string,
+	code_expires_at:    string,
+	register_statement: string,
+	pair_key_mac:       string,
+}
+
 device_verify_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	handlers := (^Device_Auth_Handlers)(ctx)
 	auth_ctx, ok, auth_resp := require_auth(handlers.auth, req)
@@ -148,13 +234,10 @@ device_verify_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	request_ip := device_auth.resolve_client_ip(
 		req.remote_addr, header_value(req.headers, "X-Forwarded-For"),
 		handlers.service.trusted_cidrs)
-	// Hub-blind pairing (plan §1 "Pairing"): browsers and bridges are resolved by the
-	// pair_lookup the APPROVER derived from the code it was given; the hub never sees
-	// the code. A pending browser of the session user is tried first, then a bridge
-	// grant. `user_code` is only the Electron (user-token grant) code.
-	pair_lookup := json_string(req.body, "pair_lookup")
+	body: Verify_Request
+	if !vault_decode(req, &body) do return respond_error(device_auth.GENERIC_UNKNOWN_CODE_ERROR(), req.request_id)
 	info: device_auth.Device_Info
-	if pair_lookup != "" {
+	if body.pair_lookup != "" {
 		// A user principal only: a bridge, enrollment or instance credential carries a
 		// user id too, but must never resolve (and so learn the keys of) a pending device.
 		if auth_ctx.kind != .Trusted_Proxy && auth_ctx.kind != .User_Token {
@@ -164,152 +247,129 @@ device_verify_handler :: proc(ctx: rawptr, req: Request) -> Response {
 			device_auth_record("verify", "rate_limited")
 			return respond_error(domain.domain_error(.Rate_Limited, "too many device verification attempts from this IP"), req.request_id)
 		}
-		if !vault.valid_pair_hex(pair_lookup) do return respond_error(device_auth.GENERIC_UNKNOWN_CODE_ERROR(), req.request_id)
+		if !vault.valid_pair_hex(body.pair_lookup) do return respond_error(device_auth.GENERIC_UNKNOWN_CODE_ERROR(), req.request_id)
 		if handlers.vault != nil {
-			if dev, derr := vd.resolve_pending_lookup(handlers.vault, auth_ctx.user_id, pair_lookup); derr.code == .None {
+			if dev, derr := vd.resolve_pending_lookup(handlers.vault, auth_ctx.user_id, body.pair_lookup); derr.code == .None {
 				device_auth_record("verify", "ok")
-				return vault_device_verify_response(req, dev)
+				return vault_respond(Device_Verify_Browser_Wire{
+					kind = "browser", device_id = dev.device_id, device_kind = dev.kind,
+					fingerprint = dev.fingerprint, label = dev.label,
+					sign_public_key = dev.sign_public_key, ecdh_public_key = dev.ecdh_public_key,
+					sign_alg = dev.sign_alg, wrap_alg = dev.wrap_alg,
+					created_at = dev.created_at, code_expires_at = dev.code_expires_at,
+					register_statement = dev.register_statement, pair_key_mac = dev.pair_key_mac,
+				}, req)
 			} else if derr.code != .Not_Found {
 				return respond_error(derr, req.request_id)
 			}
 		}
-		vinfo, vok, err := device_auth.verify(handlers.service, pair_lookup)
+		vinfo, vok, err := device_auth.verify(handlers.service, body.pair_lookup)
 		if vok && !vinfo.is_bridge_enrollment do vok, err = false, device_auth.GENERIC_UNKNOWN_CODE_ERROR()
 		device_auth_record("verify", device_auth_error_result(err) if !vok else "ok")
 		if !vok do return respond_error(err, req.request_id)
 		info = vinfo
 	} else {
-		vinfo, vok, err := device_auth.verify_with_ip(handlers.service, json_string(req.body, "user_code"), request_ip)
+		vinfo, vok, err := device_auth.verify_with_ip(handlers.service, body.user_code, request_ip)
 		// A bridge grant resolves only by its pairing lookup, never as a user code.
 		if vok && vinfo.is_bridge_enrollment do vok, err = false, device_auth.GENERIC_UNKNOWN_CODE_ERROR()
 		device_auth_record("verify", device_auth_error_result(err) if !vok else "ok")
 		if !vok do return respond_error(err, req.request_id)
 		info = vinfo
 	}
-	data := strings.builder_make()
-	strings.write_string(&data, "{\"device_label\":\"")
-	write_handler_json_string(&data, info.device_label)
-	strings.write_string(&data, "\",\"os\":\"")
-	write_handler_json_string(&data, info.os)
-	strings.write_string(&data, "\",\"app_version\":\"")
-	write_handler_json_string(&data, info.app_version)
-	strings.write_string(&data, "\",\"client\":\"")
-	write_handler_json_string(&data, info.client)
-	strings.write_string(&data, "\",\"request_ip\":\"")
-	write_handler_json_string(&data, info.request_ip)
-	strings.write_string(&data, fmt.tprintf("\",\"requested_at\":%d", info.requested_at))
-	// REQ-IMPL-2 / design §5.4.4: hand the browser the Hub's copy of the bridge
-	// key and the hub-computed fingerprint so the approval page can compare them
-	// against the key it read from the link fragment. Both are public values.
-	//
-	// PROVENANCE IS PART OF THE WIRE FORMAT, not a convention the UI has to look
-	// up (REQ-ENROLL-14). Every field here is nested under either
-	// `hub_observed` — derived by the Hub, safe to present as fact — or
-	// `host_asserted` — supplied by the machine being enrolled, attacker-
-	// controlled, and to be rendered as a claim. REQ-IMPL-5's approval screen
-	// must visually separate the two, and it can only do that if the payload
-	// does. `bridge_public_key` sits in BOTH, deliberately and under different
-	// names: the machine asserted it, and the Hub now vouches for having stored
-	// that exact value — which is what makes the fragment cross-check meaningful.
-	strings.write_string(&data, ",\"kind\":\"bridge\"")
-	// The persistent identity key the approver signs into the vault directory, and
-	// its hub-computed fingerprint (compare it with the one `ham-bridge enroll` prints).
-	strings.write_string(&data, ",\"bridge_identity_public_key\":\"")
-	write_handler_json_string(&data, info.bridge_identity_public_key)
-	strings.write_string(&data, "\",\"bridge_identity_fingerprint\":\"")
-	write_handler_json_string(&data, info.bridge_identity_fingerprint)
-	// Hub-blind pairing: the approver recomputes pair_key_mac over identity|ecdh|challenge
-	// with the code the operator typed, proving the hub served the bridge's real keys.
-	strings.write_string(&data, "\",\"pair_key_mac\":\"")
-	write_handler_json_string(&data, info.pair_key_mac)
-	strings.write_string(&data, "\",\"code_challenge\":\"")
-	write_handler_json_string(&data, info.code_challenge)
-	strings.write_string(&data, "\"")
-	strings.write_string(&data, ",\"is_bridge_enrollment\":")
-	strings.write_string(&data, "true" if info.is_bridge_enrollment else "false")
-	strings.write_string(&data, ",\"hub_observed\":{\"bridge_key_fingerprint\":\"")
-	write_handler_json_string(&data, info.bridge_key_fingerprint)
-	strings.write_string(&data, "\",\"bridge_public_key_on_record\":\"")
-	write_handler_json_string(&data, info.bridge_public_key)
-	strings.write_string(&data, "\",\"fingerprint_algorithm\":\"sha256-64/hex-quads\",\"request_ip\":\"")
-	write_handler_json_string(&data, info.request_ip)
-	// server_time belongs in hub_observed because the Hub MEASURED it, with the
-	// same clock reading that decided this grant had not expired. The approval
-	// screen previously showed the browser's own `Date.now()` under the
-	// "verified by Heimdall" heading, which made a false provenance claim and
-	// left the request-staleness check dependent on operator clock skew. Same
-	// units as requested_at, so the screen can subtract them.
-	strings.write_string(&data, fmt.tprintf("\",\"server_time\":%d", info.server_time))
-	strings.write_string(&data, "},\"host_asserted\":{\"bridge_public_key\":\"")
-	write_handler_json_string(&data, info.bridge_public_key)
-	strings.write_string(&data, "\",\"os_user\":\"")
-	write_handler_json_string(&data, info.os_user)
-	strings.write_string(&data, "\",\"device_label\":\"")
-	write_handler_json_string(&data, info.device_label)
-	strings.write_string(&data, "\",\"os\":\"")
-	write_handler_json_string(&data, info.os)
-	strings.write_string(&data, "\",\"app_version\":\"")
-	write_handler_json_string(&data, info.app_version)
-	strings.write_string(&data, "\"},\"bridge_public_key\":\"")
-	write_handler_json_string(&data, info.bridge_public_key)
-	strings.write_string(&data, "\",\"bridge_key_fingerprint\":\"")
-	write_handler_json_string(&data, info.bridge_key_fingerprint)
-	strings.write_string(&data, "\",\"os_user\":\"")
-	write_handler_json_string(&data, info.os_user)
-	strings.write_string(&data, "\"}")
-	return respond_success(strings.to_string(data), req.request_id, "", 200)
+	return vault_respond(Device_Verify_Grant_Wire{
+		device_label = info.device_label, os = info.os, app_version = info.app_version,
+		client = info.client, request_ip = info.request_ip, requested_at = info.requested_at,
+		kind = "bridge",
+		bridge_identity_public_key = info.bridge_identity_public_key,
+		bridge_identity_fingerprint = info.bridge_identity_fingerprint,
+		pair_key_mac = info.pair_key_mac, code_challenge = info.code_challenge,
+		is_bridge_enrollment = info.is_bridge_enrollment,
+		hub_observed = {
+			bridge_key_fingerprint = info.bridge_key_fingerprint,
+			bridge_public_key_on_record = info.bridge_public_key,
+			fingerprint_algorithm = "sha256-64/hex-quads",
+			request_ip = info.request_ip,
+			server_time = info.server_time,
+		},
+		host_asserted = {
+			bridge_public_key = info.bridge_public_key, os_user = info.os_user,
+			device_label = info.device_label, os = info.os, app_version = info.app_version,
+		},
+		bridge_public_key = info.bridge_public_key,
+		bridge_key_fingerprint = info.bridge_key_fingerprint,
+		os_user = info.os_user,
+	}, req)
 }
 
-// device_approve_handler records the user's terminal decision (ELDA-2/AC4/AC5/
-// AC6). Trusted-proxy-authenticated. owner_user_id is bound from Auth_Context
-// ONLY — any client-supplied owner field in the body is ignored (ELDA-6).
+// ── POST /api/v1/device/approve ─────────────────────────────────────────────
+// Records the user's terminal decision (ELDA-2/AC4/AC5/AC6). Trusted-proxy-
+// authenticated. owner_user_id is bound from Auth_Context ONLY — any client-supplied
+// owner field in the body is ignored (ELDA-6).
+
+@(private = "file")
+Vault_Approval_Request :: struct {
+	expected_version: json.Value,
+	statement:        string,
+	signature:        json.Value,
+}
+
+@(private = "file")
+Approve_Grant_Request :: struct {
+	// A bridge grant is addressed by its pairing lookup (plan §1 "Pairing"); only a
+	// user-token grant still has a hub-issued user_code.
+	pair_lookup:      string,
+	user_code:        string,
+	// Defaults to false; the body must explicitly send true to approve.
+	approve:          bool,
+	// Optional "attach to an existing bridge" choice; ownership is re-checked
+	// downstream against the Auth_Context owner.
+	target_bridge_id: string,
+	new_bridge_label: string,
+	// Required for a bridge grant (the minter refuses without it).
+	vault_approval:   Maybe(Vault_Approval_Request),
+}
+
+Device_Approve_Hub_Observed :: struct {
+	bridge_id:          string,
+	// REQ-EA-6: the bridge is not enrolled until its vault key is delivered.
+	enrollment_pending: bool,
+}
+
+Device_Approve_Wire :: struct {
+	hub_observed: Maybe(Device_Approve_Hub_Observed) `json:"hub_observed,omitempty"`,
+}
+
 device_approve_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	handlers := (^Device_Auth_Handlers)(ctx)
 	auth_ctx, ok, auth_resp := require_auth(handlers.auth, req)
 	if !ok do return auth_resp
-	// A bridge grant is addressed by its pairing lookup (plan §1 "Pairing"); only a
-	// user-token grant still has a hub-issued user_code.
-	grant_key := json_string(req.body, "pair_lookup")
-	if grant_key == "" do grant_key = json_string(req.body, "user_code")
+	body: Approve_Grant_Request
+	if !vault_decode(req, &body) do return respond_error(domain.domain_error(.Validation_Failed, "body must be a JSON object"), req.request_id)
+	grant_key := body.pair_lookup if body.pair_lookup != "" else body.user_code
 	input := device_auth.Approve_Input{
-		user_code = grant_key,
-		// approve defaults to false; body must explicitly send true to approve.
-		approve = json_bool(req.body, "approve"),
-		// Optional "attach to an existing bridge" choice from the approval page.
-		// Empty means mint a new bridge (unchanged default). Ownership of
-		// target_bridge_id is re-checked downstream against the Auth_Context
-		// owner, never trusted from this body alone.
-		target_bridge_id = json_string(req.body, "target_bridge_id"),
-		// Optional operator-chosen label for a newly minted bridge. It is ignored
-		// nowhere: the service rejects combining it with target_bridge_id.
-		new_bridge_label = json_string(req.body, "new_bridge_label"),
-		vault_approval = parse_vault_approval(req.body),
+		user_code = grant_key, approve = body.approve,
+		target_bridge_id = body.target_bridge_id, new_bridge_label = body.new_bridge_label,
 	}
-	// ELDA-6: owner comes from Auth_Context, NEVER from the body. We deliberately
-	// do NOT read owner_user_id/user from req.body.
+	if va, has := body.vault_approval.?; has {
+		input.vault_approval = device_auth.Vault_Approval{present = true, statement = va.statement, signature = vault_sig_text(va.signature)}
+		if n, n_ok := va.expected_version.(json.Integer); n_ok do input.vault_approval.expected_version = i64(n)
+	}
 	approver_ip := device_auth.resolve_client_ip(
 		req.remote_addr, header_value(req.headers, "X-Forwarded-For"),
 		handlers.service.trusted_cidrs)
 	approver_ua := header_value(req.headers, "User-Agent")
-	// REQ-IMPL-5 (Part A item 6): read the grant BEFORE deciding, because
-	// approve() makes it terminal and the notification needs to know whether
-	// this was a bridge enrollment and what fingerprint the Hub derived. This
-	// is the Hub's own verify path, so it reveals nothing the approver cannot
-	// already see, and a failure here must not block the decision.
+	// REQ-IMPL-5 (Part A item 6): read the grant BEFORE deciding, because approve()
+	// makes it terminal and the notification needs to know whether this was a bridge
+	// enrollment and what fingerprint the Hub derived.
 	pre_info, pre_ok, _ := device_auth.verify(handlers.service, input.user_code)
 	aok, err := device_auth.approve(
 		handlers.service, input, auth_ctx.user_id, approver_ip, approver_ua, auth_ctx.name)
 	// A recorded rejection is a successful call whose outcome is "denied".
 	device_auth_record("approve", device_auth_error_result(err) if !aok else ("ok" if input.approve else "denied"))
 	if !aok do return respond_error(err, req.request_id)
-	// Enrolling a machine is the most consequential approval an owner can give,
-	// and it happens in one tab that may then be closed. Tell their other
-	// devices, so an approval obtained by phishing is discoverable rather than
-	// silent. Approval only: a REJECTION leaves nothing to discover.
-	//
-	// The payload deliberately carries NO host-asserted text — see
-	// build_enrollment_approval_notification for why a hostname must not reach
-	// an OS-rendered notification.
+	// Enrolling a machine is the most consequential approval an owner can give: tell
+	// their other devices, so an approval obtained by phishing is discoverable. The
+	// payload carries NO host-asserted text.
 	if input.approve && pre_ok && pre_info.is_bridge_enrollment && handlers.push != nil {
 		content := push_service.build_enrollment_approval_notification(pre_info.bridge_key_fingerprint)
 		defer push_service.free_notification_content(content)
@@ -317,17 +377,10 @@ device_approve_handler :: proc(ctx: rawptr, req: Request) -> Response {
 		defer delete(payload)
 		push_service.send_to_user_async(handlers.push, domain.User_ID(auth_ctx.user_id), payload)
 	}
-	// REQ-IMPL-5: hand the approving browser the `brg_` this grant was minted
-	// against, so it can deliver the vault key to that specific bridge over the
-	// bridge_unseal relay. Until this moment there is no bridge to address — the
-	// minter creates the id during approve(), and the poll path hands it to the
-	// BRIDGE, not to the browser.
-	//
-	// It is nested under `hub_observed` because the Hub minted it and the machine
-	// did not assert it (REQ-ENROLL-14's provenance split is part of the wire
-	// format, not a UI convention). Absent for a non-bridge grant and for a
-	// rejection, so the ELDA response shape is unchanged and `{}` still means
-	// "decision recorded, nothing to address".
+	// REQ-IMPL-5: hand the approving browser the HUB-MINTED `brg_` this grant was
+	// approved into, so it can deliver the vault key to that bridge. Absent for a
+	// non-bridge grant and for a rejection (`{}`).
+	out: Device_Approve_Wire
 	if input.approve {
 		if bridge_id, has_bridge := device_auth.approved_bridge_id(handlers.service, input.user_code); has_bridge {
 			// The bridge's vault directory entry was committed with the approval; the
@@ -339,33 +392,53 @@ device_approve_handler :: proc(ctx: rawptr, req: Request) -> Response {
 					}
 				}
 			}
-			data := strings.builder_make()
-			strings.write_string(&data, "{\"hub_observed\":{\"bridge_id\":\"")
-			write_handler_json_string(&data, bridge_id)
-			// REQ-EA-6: the bridge is not enrolled until its vault key is delivered.
-			// Every bridge grant is minted pending (wiring.odin), so this is constant;
-			// it is on the wire so the page need not infer it from the hub version.
-			strings.write_string(&data, "\",\"enrollment_pending\":true}}")
-			return respond_success(strings.to_string(data), req.request_id, "", 200)
+			// Every bridge grant is minted pending (wiring.odin), so this is constant.
+			out.hub_observed = Device_Approve_Hub_Observed{bridge_id = bridge_id, enrollment_pending = true}
 		}
 	}
-	return respond_success("{}", req.request_id, "", 200)
+	return vault_respond(out, req)
 }
 
-// device_token_handler is the public POST /api/v1/device/token poll endpoint
-// (ELDA-3). No auth. Returns the device-poll lifecycle: pending (incl. unknown
-// device_code, anti-enumeration), approved (+access_token, single-use), denied,
-// expired, or slow_down (429 + Retry-After). Per-IP rate-limited.
-device_token_handler :: proc(ctx: rawptr, req: Request) -> Response {
-	handlers := (^Device_Auth_Handlers)(ctx)
-	device_code := json_string(req.body, "device_code")
+// ── POST /api/v1/device/token ───────────────────────────────────────────────
+// The public poll endpoint (ELDA-3). No auth. Returns the device-poll lifecycle:
+// pending (incl. unknown device_code, anti-enumeration), approved (+access_token,
+// single-use), denied, expired, or slow_down (429 + Retry-After). Per-IP rate-limited.
+
+@(private = "file")
+Token_Request :: struct {
+	device_code:   string,
 	// REQ-IMPL-2: the PKCE proof (RFC 7636 §4.5). Absent for the ELDA poll,
 	// required for any grant that carries a challenge.
-	code_verifier := json_string(req.body, "code_verifier")
+	code_verifier: string,
+}
+
+Device_Token_Wire :: struct {
+	status:                  string,
+	interval:                Maybe(int) `json:"interval,omitempty"`,
+	access_token:            string `json:"access_token,omitempty"`,
+	token_id:                string `json:"token_id,omitempty"`,
+	// Bridge grants only.
+	bridge_id:               string `json:"bridge_id,omitempty"`,
+	approver_username:       Maybe(string) `json:"approver_username,omitempty"`,
+	owner_user_id:           Maybe(string) `json:"owner_user_id,omitempty"`,
+	// REQ-IMPL-3: the refresh half, present only for an expiring credential.
+	refresh_token:           string `json:"refresh_token,omitempty"`,
+	refresh_expires_in:      Maybe(int) `json:"refresh_expires_in,omitempty"`,
+	expires_in:              Maybe(int) `json:"expires_in,omitempty"`,
+	vault_delivery_expected: Maybe(bool) `json:"vault_delivery_expected,omitempty"`,
+	// REQ-EA: every vault-delivery grant is minted PENDING; a bridge that sees this
+	// writes nothing until the key is delivered and the hub commits.
+	enrollment_pending:      Maybe(bool) `json:"enrollment_pending,omitempty"`,
+}
+
+device_token_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	handlers := (^Device_Auth_Handlers)(ctx)
+	body: Token_Request
+	_ = vault_decode(req, &body) // a malformed body polls as an unknown device_code (pending)
 	request_ip := device_auth.resolve_client_ip(
 		req.remote_addr, header_value(req.headers, "X-Forwarded-For"),
 		handlers.service.trusted_cidrs)
-	result, err := device_auth.poll(handlers.service, device_code, request_ip, code_verifier)
+	result, err := device_auth.poll(handlers.service, body.device_code, request_ip, body.code_verifier)
 	device_auth_record("poll", device_auth_poll_result(result.status, err))
 	if err.code == .Rate_Limited {
 		// slow_down: 429. The body carries status=slow_down so the device backs off.
@@ -373,10 +446,12 @@ device_token_handler :: proc(ctx: rawptr, req: Request) -> Response {
 		if retry_after <= 0 do retry_after = 5
 		headers := make([]contracts.HTTP_Header, 1)
 		headers[0] = contracts.HTTP_Header{name = "Retry-After", value = fmt.tprintf("%d", retry_after)}
+		data, merr := json.marshal(Device_Token_Wire{status = "slow_down", interval = retry_after}, allocator = context.temp_allocator)
+		if merr != nil do return respond_error(domain.domain_error(.Internal_Error, "could not encode the response"), req.request_id)
 		return Response{
 			status = 429,
 			content_type = "application/json",
-			body = contracts.api_success_json(strings.concatenate({"{\"status\":\"slow_down\",\"interval\":", fmt.tprintf("%d", retry_after), "}"}), contracts.api_meta(req.request_id, "")),
+			body = contracts.api_success_json(string(data), contracts.api_meta(req.request_id, "")),
 			headers = headers,
 		}
 	}
@@ -384,56 +459,33 @@ device_token_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	// domain error (401) rather than a 200 with a status field, so a bridge with
 	// the wrong verifier cannot mistake it for "keep polling".
 	if result.status == .Invalid_Grant do return respond_error(err, req.request_id)
-	data := strings.builder_make()
+	out: Device_Token_Wire
 	#partial switch result.status {
 	case .Approved:
-		strings.write_string(&data, "{\"status\":\"approved\",\"access_token\":\"")
-		write_handler_json_string(&data, result.access_token)
-		strings.write_string(&data, "\",\"token_id\":\"")
-		write_handler_json_string(&data, result.token_id)
-		// bridge_id is present only for a bridge grant; the ELDA response shape
-		// is unchanged.
+		out = Device_Token_Wire{status = "approved", access_token = result.access_token, token_id = result.token_id, expires_in = result.expires_in}
 		if result.bridge_id != "" {
-			strings.write_string(&data, "\",\"bridge_id\":\"")
-			write_handler_json_string(&data, result.bridge_id)
-			strings.write_string(&data, "\",\"approver_username\":\"")
-			write_handler_json_string(&data, result.approver_username)
-			strings.write_string(&data, "\",\"owner_user_id\":\"")
-			write_handler_json_string(&data, result.owner_user_id)
+			out.bridge_id = result.bridge_id
+			out.approver_username = result.approver_username
+			out.owner_user_id = result.owner_user_id
+			out.vault_delivery_expected = result.vault_delivery_expected
+			out.enrollment_pending = result.vault_delivery_expected
 		}
-		// REQ-IMPL-3: the refresh half, present only for a bridge grant whose
-		// credential expires. Omitted entirely otherwise, so the ELDA response
-		// shape is unchanged and a client that sees no refresh_token knows not to
-		// schedule a refresh rather than having to interpret an empty string.
 		if result.refresh_token != "" {
-			strings.write_string(&data, "\",\"refresh_token\":\"")
-			write_handler_json_string(&data, result.refresh_token)
-			strings.write_string(&data, fmt.tprintf("\",\"refresh_expires_in\":%d", result.refresh_expires_in))
-			strings.write_string(&data, fmt.tprintf(",\"expires_in\":%d", result.expires_in))
-		} else {
-			strings.write_string(&data, fmt.tprintf("\",\"expires_in\":%d", result.expires_in))
+			out.refresh_token = result.refresh_token
+			out.refresh_expires_in = result.refresh_expires_in
 		}
-		if result.bridge_id != "" {
-			strings.write_string(&data, ",\"vault_delivery_expected\":")
-			strings.write_string(&data, "true" if result.vault_delivery_expected else "false")
-			// REQ-EA: every vault-delivery grant is minted PENDING (wiring.odin's minter
-			// refuses an owner without a vault), so the two flags coincide. A bridge that
-			// sees this writes nothing until the key is delivered and the hub commits.
-			strings.write_string(&data, ",\"enrollment_pending\":")
-			strings.write_string(&data, "true" if result.vault_delivery_expected else "false")
-		}
-		strings.write_string(&data, "}")
 	case .Denied:
-		strings.write_string(&data, "{\"status\":\"denied\"}")
+		out.status = "denied"
 	case .Expired:
-		strings.write_string(&data, "{\"status\":\"expired\"}")
+		out.status = "expired"
 	case .Slow_Down:
-		strings.write_string(&data, "{\"status\":\"slow_down\"}")
+		out.status = "slow_down"
 	case: // .Pending (covers unknown device_code too — anti-enumeration)
-		strings.write_string(&data, "{\"status\":\"pending\"}")
+		out.status = "pending"
 	}
-	return respond_success(strings.to_string(data), req.request_id, "", 200)
+	return vault_respond(out, req)
 }
+
 // json_bool extracts a boolean field from a JSON body (default false).
 json_bool :: proc(body, key: string) -> bool {
 	return jsonx.extract_bool(body, key, fallback = false)
@@ -451,61 +503,5 @@ json_signature :: proc(body, key: string) -> string {
 	if !ok do return ""
 	root, is_obj := v.(json.Object)
 	if !is_obj do return ""
-	sig_v, has := root[key]
-	if !has do return ""
-	text, _ := vault.signature_text_from_value(sig_v, context.temp_allocator)
-	return text
-}
-
-// parse_vault_approval reads the optional `vault_approval:{expected_version,
-// statement, signature}` of POST /device/approve. Required for a bridge grant (the
-// minter refuses without it); ignored for a user-token grant.
-parse_vault_approval :: proc(body: string) -> device_auth.Vault_Approval {
-	v, ok := jsonx.parse_body(body, context.temp_allocator)
-	if !ok do return {}
-	root, is_obj := v.(json.Object)
-	if !is_obj do return {}
-	va, has := root["vault_approval"].(json.Object)
-	if !has do return {}
-	out := device_auth.Vault_Approval{present = true}
-	if n, n_ok := va["expected_version"].(json.Integer); n_ok do out.expected_version = i64(n)
-	if s, s_ok := va["statement"].(json.String); s_ok do out.statement = string(s)
-	if sig_v, sig_has := va["signature"]; sig_has {
-		out.signature, _ = vault.signature_text_from_value(sig_v, context.temp_allocator)
-	}
-	return out
-}
-
-// vault_device_verify_response answers /device/verify for a pending BROWSER device of
-// the session user resolved by its pairing lookup. It carries the self-signed
-// register statement and pair_key_mac: the approver verifies the MAC with the code it
-// was given before trusting any key here.
-vault_device_verify_response :: proc(req: Request, dev: domain.Vault_Device) -> Response {
-	data := strings.builder_make()
-	strings.write_string(&data, "{\"kind\":\"browser\",\"device_id\":\"")
-	write_handler_json_string(&data, dev.device_id)
-	strings.write_string(&data, "\",\"device_kind\":\"")
-	write_handler_json_string(&data, dev.kind)
-	strings.write_string(&data, "\",\"fingerprint\":\"")
-	write_handler_json_string(&data, dev.fingerprint)
-	strings.write_string(&data, "\",\"label\":\"")
-	write_handler_json_string(&data, dev.label)
-	strings.write_string(&data, "\",\"sign_public_key\":\"")
-	write_handler_json_string(&data, dev.sign_public_key)
-	strings.write_string(&data, "\",\"ecdh_public_key\":\"")
-	write_handler_json_string(&data, dev.ecdh_public_key)
-	strings.write_string(&data, "\",\"sign_alg\":\"")
-	write_handler_json_string(&data, dev.sign_alg)
-	strings.write_string(&data, "\",\"wrap_alg\":\"")
-	write_handler_json_string(&data, dev.wrap_alg)
-	strings.write_string(&data, "\",\"created_at\":\"")
-	write_handler_json_string(&data, dev.created_at)
-	strings.write_string(&data, "\",\"code_expires_at\":\"")
-	write_handler_json_string(&data, dev.code_expires_at)
-	strings.write_string(&data, "\",\"register_statement\":\"")
-	write_handler_json_string(&data, dev.register_statement)
-	strings.write_string(&data, "\",\"pair_key_mac\":\"")
-	write_handler_json_string(&data, dev.pair_key_mac)
-	strings.write_string(&data, "\"}")
-	return respond_success(strings.to_string(data), req.request_id, "", 200)
+	return vault_sig_text(root[key])
 }

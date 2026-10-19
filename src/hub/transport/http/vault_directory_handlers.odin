@@ -5,11 +5,14 @@
 // register, genesis and reset are the unsigned entry points, so they accept ONLY an
 // interactive browser session (Trusted_Proxy) — never a user token, which a script or
 // a stolen ham-ctl credential could hold.
+//
+// JSON: requests are decoded into typed structs (json.unmarshal) and responses are
+// typed structs encoded with json.marshal. The signed/hashed canonical forms
+// (statements, wrap canonical JSON, signature objects) are carried as values, never
+// rebuilt here (lib/vault owns their encoders).
 package http
 
 import "core:encoding/json"
-import "core:strconv"
-import "core:strings"
 import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
 import bridge_service "odin_test:hub/service/bridge"
@@ -18,7 +21,6 @@ import device_auth "odin_test:hub/service/device_auth"
 import events "odin_test:hub/service/events"
 import push_service "odin_test:hub/service/push"
 import vd "odin_test:hub/service/vault_directory"
-import jsonx "odin_test:lib/jsonx"
 import vault "odin_test:lib/vault"
 
 Vault_Directory_Handlers :: struct {
@@ -76,40 +78,49 @@ client_ip :: proc(h: ^Vault_Directory_Handlers, req: Request) -> string {
 	return device_auth.resolve_client_ip(req.remote_addr, header_value(req.headers, "X-Forwarded-For"), h.device_auth.trusted_cidrs)
 }
 
-@(private = "file")
-body_object :: proc(req: Request) -> (json.Object, bool) {
-	v, ok := jsonx.parse_body(req.body, context.temp_allocator)
-	if !ok do return nil, false
-	o, is_obj := v.(json.Object)
-	return o, is_obj
+// vault_decode unmarshals the request body (strict JSON) into a typed request.
+vault_decode :: proc(req: Request, out: ^$T) -> bool {
+	return json.unmarshal_string(req.body, out, json.Specification.JSON, context.temp_allocator) == nil
 }
 
-@(private = "file")
-obj_str :: proc(o: json.Object, key: string) -> string {
-	s, _ := o[key].(json.String)
-	return string(s)
+// vault_respond marshals a typed response into the API success envelope.
+vault_respond :: proc(value: any, req: Request, status := 200) -> Response {
+	data, err := json.marshal(value, allocator = context.temp_allocator)
+	if err != nil do return respond_error(domain.domain_error(.Internal_Error, "could not encode the response"), req.request_id)
+	return respond_success(string(data), req.request_id, auth_ctx_server_time(req), status)
 }
 
-@(private = "file")
-obj_i64 :: proc(o: json.Object, key: string) -> (i64, bool) {
-	n, ok := o[key].(json.Integer)
-	return i64(n), ok
-}
-
-@(private = "file")
-obj_sig :: proc(o: json.Object, key: string) -> string {
-	v, has := o[key]
-	if !has do return ""
+// sig_text turns a signature (object or its canonical text) into canonical text; ""
+// when malformed (the service then rejects it).
+vault_sig_text :: proc(v: json.Value) -> string {
+	if v == nil do return ""
 	s, _ := vault.signature_text_from_value(v, context.temp_allocator)
 	return s
 }
 
 @(private = "file")
-obj_wrap :: proc(o: json.Object, key: string) -> (vd.Wrap_Input, bool) {
-	v, has := o[key]
-	if !has do return {}, false
+wrap_input :: proc(v: json.Value) -> (vd.Wrap_Input, bool) {
+	if v == nil do return {}, false
 	w, sig, ok := vault.wrap_from_value(v, context.temp_allocator)
 	return vd.Wrap_Input{wrap = w, signature = sig}, ok
+}
+
+@(private = "file")
+wrap_inputs :: proc(vs: []json.Value) -> ([]vd.Wrap_Input, bool) {
+	out := make([]vd.Wrap_Input, len(vs), context.temp_allocator)
+	for v, i in vs {
+		w, ok := wrap_input(v)
+		if !ok do return nil, false
+		out[i] = w
+	}
+	return out, true
+}
+
+// version_of reads a JSON integer (expected_version must be one).
+@(private = "file")
+version_of :: proc(v: json.Value) -> (i64, bool) {
+	n, ok := v.(json.Integer)
+	return i64(n), ok
 }
 
 @(private = "file")
@@ -117,62 +128,86 @@ bad_request :: proc(req: Request, msg: string) -> Response {
 	return respond_error(domain.domain_error(.Validation_Failed, msg), req.request_id)
 }
 
-// ── JSON ────────────────────────────────────────────────────────────────────
+// ── Wire types ──────────────────────────────────────────────────────────────
 
-@(private = "file")
-w_str :: proc(b: ^strings.Builder, key, value: string, first := false) {
-	if !first do strings.write_byte(b, ',')
-	strings.write_byte(b, '"')
-	strings.write_string(b, key)
-	strings.write_string(b, `":"`)
-	write_handler_json_string(b, value)
-	strings.write_byte(b, '"')
+Vault_Device_Wire :: struct {
+	device_id:             string,
+	kind:                  string,
+	label:                 string,
+	fingerprint:           string,
+	status:                string,
+	sign_alg:              string,
+	wrap_alg:              string,
+	sign_public_key:       string,
+	ecdh_public_key:       string,
+	bridge_id:             string,
+	approved_by_device_id: string,
+	approval_statement:    string,
+	approval_signature:    Maybe(vault.Signature_Wire),
+	revoked_by_device_id:  string,
+	revocation_statement:  string,
+	revocation_signature:  Maybe(vault.Signature_Wire),
+	created_at:            string,
+	approved_at:           string,
+	revoked_at:            string,
+	last_seen_at:          string,
+	retired_at:            string,
 }
 
 @(private = "file")
-w_raw :: proc(b: ^strings.Builder, key, raw: string) {
-	strings.write_string(b, `,"`)
-	strings.write_string(b, key)
-	strings.write_string(b, `":`)
-	strings.write_string(b, raw if raw != "" else "null")
+sig_wire :: proc(text: string) -> Maybe(vault.Signature_Wire) {
+	if text == "" do return nil
+	w, ok := vault.signature_wire_from_text(text, context.temp_allocator)
+	if !ok do return nil
+	return w
 }
 
-write_vault_device_json :: proc(b: ^strings.Builder, d: domain.Vault_Device) {
-	strings.write_byte(b, '{')
-	w_str(b, "device_id", d.device_id, true)
-	w_str(b, "kind", d.kind)
-	w_str(b, "label", d.label)
-	w_str(b, "fingerprint", d.fingerprint)
-	w_str(b, "status", domain.vault_device_status_string(d.status))
-	w_str(b, "sign_alg", d.sign_alg)
-	w_str(b, "wrap_alg", d.wrap_alg)
-	w_str(b, "sign_public_key", d.sign_public_key)
-	w_str(b, "ecdh_public_key", d.ecdh_public_key)
-	w_str(b, "bridge_id", d.bridge_id)
-	w_str(b, "approved_by_device_id", d.approved_by_device_id)
-	w_str(b, "approval_statement", d.approval_statement)
-	w_raw(b, "approval_signature", d.approval_signature)
-	w_str(b, "revoked_by_device_id", d.revoked_by_device_id)
-	w_str(b, "revocation_statement", d.revocation_statement)
-	w_raw(b, "revocation_signature", d.revocation_signature)
-	w_str(b, "created_at", d.created_at)
-	w_str(b, "approved_at", d.approved_at)
-	w_str(b, "revoked_at", d.revoked_at)
-	w_str(b, "last_seen_at", d.last_seen_at)
-	w_str(b, "retired_at", d.retired_at)
-	strings.write_byte(b, '}')
+vault_device_wire :: proc(d: domain.Vault_Device) -> Vault_Device_Wire {
+	return Vault_Device_Wire{
+		device_id = d.device_id, kind = d.kind, label = d.label, fingerprint = d.fingerprint,
+		status = domain.vault_device_status_string(d.status),
+		sign_alg = d.sign_alg, wrap_alg = d.wrap_alg,
+		sign_public_key = d.sign_public_key, ecdh_public_key = d.ecdh_public_key,
+		bridge_id = d.bridge_id, approved_by_device_id = d.approved_by_device_id,
+		approval_statement = d.approval_statement, approval_signature = sig_wire(d.approval_signature),
+		revoked_by_device_id = d.revoked_by_device_id, revocation_statement = d.revocation_statement,
+		revocation_signature = sig_wire(d.revocation_signature),
+		created_at = d.created_at, approved_at = d.approved_at, revoked_at = d.revoked_at,
+		last_seen_at = d.last_seen_at, retired_at = d.retired_at,
+	}
 }
 
-// Odin's fmt treats '{' specially, so JSON is assembled by concatenation.
-@(private = "file")
-vd_itoa :: proc(v: i64) -> string {
-	buf: [24]byte
-	return strings.clone(strconv.write_int(buf[:], v, 10), context.temp_allocator)
+Vault_Reset_Wire :: struct {
+	requested_at: string,
+	due_at:       string,
 }
 
-@(private = "file")
-version_json :: proc(version: i64) -> string {
-	return strings.concatenate({`{"directory_version":`, vd_itoa(version), "}"}, context.temp_allocator)
+Vault_Log_Wire :: struct {
+	seq:       i64,
+	statement: string,
+	signature: Maybe(vault.Signature_Wire),
+}
+
+Vault_Directory_Wire :: struct {
+	configured:           bool,
+	version:              i64,
+	current_epoch:        i64,
+	root_device_id:       string,
+	root_sign_public_key: string,
+	root_sign_alg:        string,
+	head_hash:            string,
+	// Hub retirement hints: clients verify and sign a real revoke (vd.Directory_View).
+	retired_hints:        []string,
+	// A scheduled owner reset or null.
+	reset:                Maybe(Vault_Reset_Wire),
+	// The signed directory log, seq 1..version: the only thing clients trust.
+	log:                  []Vault_Log_Wire,
+	// Device rows: display metadata (labels, bridge ids, last seen) and pending devices.
+	devices:              []Vault_Device_Wire,
+}
+
+Vault_Version_Wire :: struct {
+	directory_version: i64,
 }
 
 @(private = "file")
@@ -195,23 +230,9 @@ vault_announce_directory :: proc(event_bus: ^events.User_Event_Bus, push: ^push_
 	push_service.send_to_user_async(push, domain.User_ID(user_id), payload)
 }
 
-@(private = "file")
-write_reset_json :: proc(b: ^strings.Builder, r: domain.Vault_Reset, has: bool) {
-	if !has {
-		strings.write_string(b, "null")
-		return
-	}
-	strings.write_byte(b, '{')
-	w_str(b, "requested_at", r.requested_at, true)
-	w_str(b, "due_at", r.due_at)
-	strings.write_byte(b, '}')
-}
-
 // ── GET /api/v1/vault/directory ─────────────────────────────────────────────
 // Everything a client (and, relayed by its approver, a bridge) needs to verify the
-// chain: the pinned root key, the self-signed genesis, every device with its
-// approval/revocation statements, and every epoch statement. Updates last_seen_at
-// when a (valid) device signature is attached; an invalid one is refused.
+// chain. Updates last_seen_at when a (valid) device signature is attached.
 vault_directory_get_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Vault_Directory_Handlers)(ctx)
 	auth, ok, resp := require_vault_user(h, req)
@@ -230,72 +251,55 @@ vault_directory_get_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	if err.code != .None do return respond_error(err, req.request_id)
 	reset, has_reset, rerr := vd.get_reset(h.vault, auth.user_id)
 	if rerr.code != .None do return respond_error(rerr, req.request_id)
-	b := strings.builder_make(context.temp_allocator)
 	d := view.directory
-	strings.write_string(&b, `{"configured":true,"version":`)
-	strings.write_string(&b, vd_itoa(d.version))
-	strings.write_string(&b, `,"current_epoch":`)
-	strings.write_string(&b, vd_itoa(d.current_epoch))
-	w_str(&b, "root_device_id", d.root_device_id)
-	w_str(&b, "root_sign_public_key", view.root_sign_public_key)
-	w_str(&b, "root_sign_alg", view.root_sign_alg)
-	w_str(&b, "head_hash", d.head_hash)
-	// Hub retirement hints: clients verify and sign a real revoke (vd.Directory_View).
-	strings.write_string(&b, `,"retired_hints":[`)
-	for id, i in view.retired_hints {
-		if i > 0 do strings.write_byte(&b, ',')
-		strings.write_byte(&b, '"')
-		write_handler_json_string(&b, id)
-		strings.write_byte(&b, '"')
+	out := Vault_Directory_Wire{
+		configured = true, version = d.version, current_epoch = d.current_epoch,
+		root_device_id = d.root_device_id, root_sign_public_key = view.root_sign_public_key,
+		root_sign_alg = view.root_sign_alg, head_hash = d.head_hash,
+		retired_hints = view.retired_hints if view.retired_hints != nil else []string{},
+		log = make([]Vault_Log_Wire, len(view.log), context.temp_allocator),
+		devices = make([]Vault_Device_Wire, len(view.devices), context.temp_allocator),
 	}
-	strings.write_byte(&b, ']')
-	// A scheduled owner reset ({requested_at, due_at}) or null.
-	strings.write_string(&b, `,"reset":`)
-	write_reset_json(&b, reset, has_reset)
-	// The signed directory log, seq 1..version: the only thing clients trust.
-	strings.write_string(&b, `,"log":[`)
-	for e, i in view.log {
-		if i > 0 do strings.write_byte(&b, ',')
-		strings.write_string(&b, `{"seq":`)
-		strings.write_string(&b, vd_itoa(e.seq))
-		w_str(&b, "statement", e.statement)
-		w_raw(&b, "signature", e.signature)
-		strings.write_byte(&b, '}')
-	}
-	// Device rows: display metadata (labels, bridge ids, last seen) and pending devices.
-	strings.write_string(&b, `],"devices":[`)
-	for dev, i in view.devices {
-		if i > 0 do strings.write_byte(&b, ',')
-		write_vault_device_json(&b, dev)
-	}
-	strings.write_string(&b, "]}")
-	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req))
+	if has_reset do out.reset = Vault_Reset_Wire{requested_at = reset.requested_at, due_at = reset.due_at}
+	for e, i in view.log do out.log[i] = Vault_Log_Wire{seq = e.seq, statement = e.statement, signature = sig_wire(e.signature)}
+	for dev, i in view.devices do out.devices[i] = vault_device_wire(dev)
+	return vault_respond(out, req)
 }
 
 // ── POST /api/v1/vault/directory/genesis ────────────────────────────────────
 // {genesis_statement (log seq 1, introduces epoch 1), signature, wrap}. Interactive
 // browser session only; announced to every session and device of the account.
+
+@(private = "file")
+Genesis_Request :: struct {
+	genesis_statement: string,
+	signature:         json.Value,
+	wrap:              json.Value,
+}
+
+Vault_Genesis_Wire :: struct {
+	directory_version: i64,
+	current_epoch:     i64,
+	device:            Vault_Device_Wire,
+}
+
 vault_genesis_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Vault_Directory_Handlers)(ctx)
 	auth, ok, resp := require_interactive_user(h, req)
 	if !ok do return resp
-	o, parsed := body_object(req)
-	if !parsed do return bad_request(req, "body must be a JSON object")
-	wrap, w_ok := obj_wrap(o, "wrap")
+	body: Genesis_Request
+	if !vault_decode(req, &body) do return bad_request(req, "body must be a JSON object")
+	wrap, w_ok := wrap_input(body.wrap)
 	if !w_ok do return bad_request(req, "wrap is missing or malformed")
 	dev, err := vd.genesis(h.vault, vd.Genesis_Input{
 		user_id = auth.user_id,
-		genesis_statement = obj_str(o, "genesis_statement"), genesis_signature = obj_sig(o, "signature"),
+		genesis_statement = body.genesis_statement, genesis_signature = vault_sig_text(body.signature),
 		wrap = wrap,
 	})
 	if err.code != .None do return respond_error(err, req.request_id)
 	publish(h, auth.user_id, dev.device_id, "approved")
 	vault_announce_directory(h.event_bus, h.push, h.public_app_origin, auth.user_id, "genesis", "")
-	b := strings.builder_make(context.temp_allocator)
-	strings.write_string(&b, `{"directory_version":1,"current_epoch":1,"device":`)
-	write_vault_device_json(&b, dev)
-	strings.write_byte(&b, '}')
-	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 201)
+	return vault_respond(Vault_Genesis_Wire{directory_version = 1, current_epoch = 1, device = vault_device_wire(dev)}, req, 201)
 }
 
 // ── POST /api/v1/vault/devices/register ─────────────────────────────────────
@@ -304,6 +308,23 @@ vault_genesis_handler :: proc(ctx: rawptr, req: Request) -> Response {
 // "Pairing"; the code never reaches the hub). Idempotent per key; a live request is
 // re-paired only by a newer register statement. Rate-limited per IP. Interactive
 // browser session only.
+
+@(private = "file")
+Register_Request :: struct {
+	statement:       string,
+	proof_signature: json.Value,
+	pair_lookup:     string,
+	pair_key_mac:    string,
+}
+
+Vault_Register_Wire :: struct {
+	device_id:       string,
+	fingerprint:     string,
+	status:          string,
+	// How long the pending request lives (the hub never knows the code).
+	code_expires_at: string `json:"code_expires_at,omitempty"`,
+}
+
 vault_register_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Vault_Directory_Handlers)(ctx)
 	auth, ok, resp := require_interactive_user(h, req)
@@ -311,9 +332,9 @@ vault_register_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	if h.device_auth != nil && !device_auth.rate_check(h.device_auth, "vault-register:", client_ip(h, req)) {
 		return respond_error(domain.domain_error(.Rate_Limited, "too many device registrations from this IP"), req.request_id)
 	}
-	o, parsed := body_object(req)
-	if !parsed do return bad_request(req, "body must be a JSON object")
-	res, err := vd.register(h.vault, auth.user_id, obj_str(o, "statement"), obj_sig(o, "proof_signature"), obj_str(o, "pair_lookup"), obj_str(o, "pair_key_mac"))
+	body: Register_Request
+	if !vault_decode(req, &body) do return bad_request(req, "body must be a JSON object")
+	res, err := vd.register(h.vault, auth.user_id, body.statement, vault_sig_text(body.proof_signature), body.pair_lookup, body.pair_key_mac)
 	if err.code != .None do return respond_error(err, req.request_id)
 	dev := res.device
 	if res.newly_pending {
@@ -326,21 +347,25 @@ vault_register_handler :: proc(ctx: rawptr, req: Request) -> Response {
 			push_service.send_to_user_async(h.push, domain.User_ID(auth.user_id), payload)
 		}
 	}
-	b := strings.builder_make(context.temp_allocator)
-	strings.write_byte(&b, '{')
-	w_str(&b, "device_id", dev.device_id, true)
-	w_str(&b, "fingerprint", dev.fingerprint)
-	w_str(&b, "status", domain.vault_device_status_string(dev.status))
-	// The hub never knows the pairing code (the device derived pair_lookup from it);
-	// it only reports how long the pending request lives.
-	if dev.status == .Pending do w_str(&b, "code_expires_at", dev.code_expires_at)
-	strings.write_byte(&b, '}')
-	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 201 if res.newly_pending else 200)
+	out := Vault_Register_Wire{device_id = dev.device_id, fingerprint = dev.fingerprint, status = domain.vault_device_status_string(dev.status)}
+	if dev.status == .Pending do out.code_expires_at = dev.code_expires_at
+	return vault_respond(out, req, 201 if res.newly_pending else 200)
 }
 
 // ── GET /api/v1/vault/devices/self ──────────────────────────────────────────
 // Signed by the device itself (pending, approved or revoked). {status,
-// directory_version, wrap?}. The resource_changed "approved" event is the nudge.
+// directory_version, wrap?, pair_mac?}. The resource_changed "approved" event is the nudge.
+
+Vault_Self_Wire :: struct {
+	device_id:         string,
+	status:            string,
+	directory_version: i64,
+	wrap:              Maybe(vault.Wrap_Wire) `json:"wrap,omitempty"`,
+	// The approver's pair_mac over this device's approval (plan §1 "Pairing"): the
+	// new device verifies it with its own code before pinning the account root.
+	pair_mac:          string `json:"pair_mac,omitempty"`,
+}
+
 vault_self_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Vault_Directory_Handlers)(ctx)
 	auth, ok, resp := require_vault_user(h, req)
@@ -349,21 +374,14 @@ vault_self_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	if err.code != .None do return respond_error(err, req.request_id)
 	view, verr := vd.get_self(h.vault, auth.user_id, signer)
 	if verr.code != .None do return respond_error(verr, req.request_id)
-	b := strings.builder_make(context.temp_allocator)
-	strings.write_byte(&b, '{')
-	w_str(&b, "device_id", signer.device_id, true)
-	w_str(&b, "status", domain.vault_device_status_string(signer.status))
-	strings.write_string(&b, `,"directory_version":`)
-	strings.write_string(&b, vd_itoa(view.directory_version))
+	out := Vault_Self_Wire{device_id = signer.device_id, status = domain.vault_device_status_string(signer.status), directory_version = view.directory_version}
 	if view.has_wrap {
-		strings.write_string(&b, `,"wrap":`)
-		strings.write_string(&b, view.wrap.wrap_json)
+		w, w_ok := vault.wrap_wire_from_signed_json(view.wrap.wrap_json, context.temp_allocator)
+		if !w_ok do return respond_error(domain.domain_error(.Internal_Error, "the stored wrap is malformed"), req.request_id)
+		out.wrap = w
 	}
-	// The approver's pair_mac over this device's approval (plan §1 "Pairing"): the new
-	// device verifies it with its own code before pinning the account root.
-	if signer.status == .Approved && signer.pair_mac != "" do w_str(&b, "pair_mac", signer.pair_mac)
-	strings.write_byte(&b, '}')
-	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req))
+	if signer.status == .Approved do out.pair_mac = signer.pair_mac
+	return vault_respond(out, req)
 }
 
 // device id is segment 5 of /api/v1/vault/devices/{id}[/action].
@@ -373,32 +391,46 @@ device_id_from_path :: proc(req: Request) -> string {
 }
 
 // ── POST /api/v1/vault/devices/{id}/approve ─────────────────────────────────
-// {pair_lookup, pair_mac, expected_version, statement, signature, wrap}
+
+@(private = "file")
+Approve_Request :: struct {
+	pair_lookup:      string,
+	pair_mac:         string,
+	expected_version: json.Value,
+	statement:        string,
+	signature:        json.Value,
+	wrap:             json.Value,
+}
+
 vault_approve_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Vault_Directory_Handlers)(ctx)
 	auth, ok, resp := require_vault_user(h, req)
 	if !ok do return resp
 	signer, serr := vd.verify_request(h.vault, auth.user_id, signed_request(req), .Approver)
 	if serr.code != .None do return respond_error(serr, req.request_id)
-	o, parsed := body_object(req)
-	if !parsed do return bad_request(req, "body must be a JSON object")
-	version, v_ok := obj_i64(o, "expected_version")
+	body: Approve_Request
+	if !vault_decode(req, &body) do return bad_request(req, "body must be a JSON object")
+	version, v_ok := version_of(body.expected_version)
 	if !v_ok do return bad_request(req, "expected_version is required")
-	wrap, _ := obj_wrap(o, "wrap") // required for wrap-receiving kinds; checked by the service
+	wrap, _ := wrap_input(body.wrap) // required for wrap-receiving kinds; checked by the service
 	device_id := device_id_from_path(req)
 	new_version, err := vd.approve(h.vault, vd.Approve_Input{
-		user_id = auth.user_id, device_id = device_id, pair_lookup = obj_str(o, "pair_lookup"), pair_mac = obj_str(o, "pair_mac"),
-		expected_version = version, statement = obj_str(o, "statement"), signature = obj_sig(o, "signature"),
+		user_id = auth.user_id, device_id = device_id, pair_lookup = body.pair_lookup, pair_mac = body.pair_mac,
+		expected_version = version, statement = body.statement, signature = vault_sig_text(body.signature),
 		wrap = wrap, signer = signer,
 	})
 	if err.code != .None do return respond_error(err, req.request_id)
 	publish(h, auth.user_id, device_id, "approved")
-	return respond_success(version_json(new_version), req.request_id, auth_ctx_server_time(req))
+	return vault_respond(Vault_Version_Wire{directory_version = new_version}, req)
 }
 
 // ── POST /api/v1/vault/devices/{id}/deny ────────────────────────────────────
 // Signed by an approved approver device; removes a pending device. Body ignored
 // (but signed). {} on success; 404 when there is no such pending device.
+
+@(private = "file")
+Empty_Wire :: struct {}
+
 vault_deny_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Vault_Directory_Handlers)(ctx)
 	auth, ok, resp := require_vault_user(h, req)
@@ -408,32 +440,42 @@ vault_deny_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	device_id := device_id_from_path(req)
 	if err := vd.deny(h.vault, auth.user_id, device_id); err.code != .None do return respond_error(err, req.request_id)
 	publish(h, auth.user_id, device_id, "denied")
-	return respond_success(`{}`, req.request_id, auth_ctx_server_time(req))
+	return vault_respond(Empty_Wire{}, req)
 }
 
 // ── POST /api/v1/vault/devices/{id}/revoke ──────────────────────────────────
 // {expected_version, revoke_statement (one log op: revokes + introduces epoch current+1), signature, wraps:[…]}
+
+@(private = "file")
+Revoke_Request :: struct {
+	expected_version: json.Value,
+	revoke_statement: string,
+	signature:        json.Value,
+	wraps:            json.Value,
+}
+
+Vault_Revoke_Wire :: struct {
+	directory_version:          i64,
+	bridge_credentials_revoked: bool,
+}
+
 vault_revoke_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Vault_Directory_Handlers)(ctx)
 	auth, ok, resp := require_vault_user(h, req)
 	if !ok do return resp
 	signer, serr := vd.verify_request(h.vault, auth.user_id, signed_request(req), .Approver)
 	if serr.code != .None do return respond_error(serr, req.request_id)
-	o, parsed := body_object(req)
-	if !parsed do return bad_request(req, "body must be a JSON object")
-	version, v_ok := obj_i64(o, "expected_version")
+	body: Revoke_Request
+	if !vault_decode(req, &body) do return bad_request(req, "body must be a JSON object")
+	version, v_ok := version_of(body.expected_version)
 	if !v_ok do return bad_request(req, "expected_version is required")
-	arr, is_arr := o["wraps"].(json.Array)
+	arr, is_arr := body.wraps.(json.Array)
 	if !is_arr do return bad_request(req, "wraps must be an array")
-	wraps := make([]vd.Wrap_Input, len(arr), context.temp_allocator)
-	for v, i in arr {
-		w, sig, w_ok := vault.wrap_from_value(v, context.temp_allocator)
-		if !w_ok do return bad_request(req, "a wrap is malformed")
-		wraps[i] = vd.Wrap_Input{wrap = w, signature = sig}
-	}
+	wraps, w_ok := wrap_inputs(arr[:])
+	if !w_ok do return bad_request(req, "a wrap is malformed")
 	plan, err := vd.revoke_prepare(h.vault, vd.Revoke_Input{
 		user_id = auth.user_id, device_id = device_id_from_path(req), expected_version = version,
-		revoke_statement = obj_str(o, "revoke_statement"), signature = obj_sig(o, "signature"),
+		revoke_statement = body.revoke_statement, signature = vault_sig_text(body.signature),
 		wraps = wraps, signer = signer,
 	})
 	if err.code != .None do return respond_error(err, req.request_id)
@@ -451,38 +493,43 @@ vault_revoke_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	res, cerr := vd.revoke_commit(h.vault, plan)
 	if cerr.code != .None do return respond_error(cerr, req.request_id)
 	publish(h, auth.user_id, res.target.device_id, "revoked")
-	return respond_success(strings.concatenate({`{"directory_version":`, vd_itoa(res.version), `,"bridge_credentials_revoked":`, "true" if res.target.bridge_id != "" else "false", "}"}, context.temp_allocator), req.request_id, auth_ctx_server_time(req))
+	return vault_respond(Vault_Revoke_Wire{directory_version = res.version, bridge_credentials_revoked = res.target.bridge_id != ""}, req)
 }
 
 // ── POST /api/v1/vault/directory/rotate ──────────────────────────────────────
 // {expected_version, statement (a `rotate` log op), signature, wraps:[…]}. Approver-signed.
 // Advances to epoch current+1 without revoking anything (explicit user rotation).
+
+@(private = "file")
+Rotate_Request :: struct {
+	expected_version: json.Value,
+	statement:        string,
+	signature:        json.Value,
+	wraps:            json.Value,
+}
+
 vault_rotate_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Vault_Directory_Handlers)(ctx)
 	auth, ok, resp := require_vault_user(h, req)
 	if !ok do return resp
 	signer, serr := vd.verify_request(h.vault, auth.user_id, signed_request(req), .Approver)
 	if serr.code != .None do return respond_error(serr, req.request_id)
-	o, parsed := body_object(req)
-	if !parsed do return bad_request(req, "body must be a JSON object")
-	version, v_ok := obj_i64(o, "expected_version")
+	body: Rotate_Request
+	if !vault_decode(req, &body) do return bad_request(req, "body must be a JSON object")
+	version, v_ok := version_of(body.expected_version)
 	if !v_ok do return bad_request(req, "expected_version is required")
-	arr, is_arr := o["wraps"].(json.Array)
+	arr, is_arr := body.wraps.(json.Array)
 	if !is_arr do return bad_request(req, "wraps must be an array")
-	wraps := make([]vd.Wrap_Input, len(arr), context.temp_allocator)
-	for v, i in arr {
-		w, sig, w_ok := vault.wrap_from_value(v, context.temp_allocator)
-		if !w_ok do return bad_request(req, "a wrap is malformed")
-		wraps[i] = vd.Wrap_Input{wrap = w, signature = sig}
-	}
+	wraps, w_ok := wrap_inputs(arr[:])
+	if !w_ok do return bad_request(req, "a wrap is malformed")
 	new_version, err := vd.rotate(h.vault, vd.Rotate_Input{
 		user_id = auth.user_id, expected_version = version,
-		statement = obj_str(o, "statement"), signature = obj_sig(o, "signature"),
+		statement = body.statement, signature = vault_sig_text(body.signature),
 		wraps = wraps, signer = signer,
 	})
 	if err.code != .None do return respond_error(err, req.request_id)
 	publish(h, auth.user_id, signer.device_id, "rotated")
-	return respond_success(version_json(new_version), req.request_id, auth_ctx_server_time(req))
+	return vault_respond(Vault_Version_Wire{directory_version = new_version}, req)
 }
 
 // vault_revoke_bridge_credentials kills every credential of bridge_id: an enrolled
@@ -511,6 +558,11 @@ vault_revoke_bridge_credentials :: proc(bridges: ^bridge_service.Bridge_Service,
 // (see vd.schedule_reset). Interactive browser session only; body ignored. Returns
 // {reset:{requested_at,due_at}} — 201 when this call scheduled it, 200 when one was
 // already scheduled (the due time never moves). Announced (WS + push) on scheduling.
+
+Vault_Reset_Response_Wire :: struct {
+	reset: Vault_Reset_Wire,
+}
+
 vault_reset_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Vault_Directory_Handlers)(ctx)
 	auth, ok, resp := require_interactive_user(h, req)
@@ -518,15 +570,16 @@ vault_reset_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	reset, newly, err := vd.schedule_reset(h.vault, auth.user_id)
 	if err.code != .None do return respond_error(err, req.request_id)
 	if newly do vault_announce_directory(h.event_bus, h.push, h.public_app_origin, auth.user_id, "reset_scheduled", reset.due_at)
-	b := strings.builder_make(context.temp_allocator)
-	strings.write_string(&b, `{"reset":`)
-	write_reset_json(&b, reset, true)
-	strings.write_byte(&b, '}')
-	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 201 if newly else 200)
+	return vault_respond(Vault_Reset_Response_Wire{reset = {requested_at = reset.requested_at, due_at = reset.due_at}}, req, 201 if newly else 200)
 }
 
 // ── POST /api/v1/vault/directory/reset/cancel ───────────────────────────────
 // Signed by an approved approver device. {cancelled:bool}; idempotent.
+
+Vault_Reset_Cancel_Wire :: struct {
+	cancelled: bool,
+}
+
 vault_reset_cancel_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Vault_Directory_Handlers)(ctx)
 	auth, ok, resp := require_vault_user(h, req)
@@ -536,5 +589,5 @@ vault_reset_cancel_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	cancelled, err := vd.cancel_reset(h.vault, auth.user_id)
 	if err.code != .None do return respond_error(err, req.request_id)
 	if cancelled do vault_announce_directory(h.event_bus, h.push, h.public_app_origin, auth.user_id, "reset_cancelled", "")
-	return respond_success(`{"cancelled":true}` if cancelled else `{"cancelled":false}`, req.request_id, auth_ctx_server_time(req))
+	return vault_respond(Vault_Reset_Cancel_Wire{cancelled = cancelled}, req)
 }

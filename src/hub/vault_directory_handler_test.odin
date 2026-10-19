@@ -146,6 +146,7 @@ test_vault_directory_http_flow :: proc(t: ^testing.T) {
 	testing.expect_value(t, dir.status, 200)
 	testing.expect(t, strings.contains(dir.body, `"kind":"bridge"`) && strings.contains(dir.body, bridge_id), "bridge listed in the directory")
 	testing.expect(t, strings.contains(dir.body, `"root_sign_public_key":"`) && strings.contains(dir.body, `"log":[{"seq":1`) && strings.contains(dir.body, `"head_hash":"`), "the signed log is exposed")
+	testing.expect(t, strings.contains(dir.body, `"signature":{"alg":"ecdsa-p256-sha256","sig":"`) && strings.contains(dir.body, `"revocation_signature":null`), "signatures are typed objects (null when absent)")
 
 	other_br := vt_make_dev(4000, "bridge")
 	authz_prefix := strings.concatenate({
