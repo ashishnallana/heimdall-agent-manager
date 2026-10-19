@@ -276,14 +276,24 @@
 
       mkOdin = pkgs:
         let
-          fArgs = pkgs.odin.override.__functionArgs or {};
+          # x86_64-darwin builds from nixpkgs-26.05-darwin (26.11 dropped it), whose
+          # Odin (dev-2026-05) predates the core:crypto ecdsa/ecdh API the vault uses
+          # (`private_key_public_bytes`, `curve`). Build that target's Odin from the
+          # main nixpkgs recipe so every release target compiles with one compiler;
+          # callPackage on the recipe keeps its patches matched to its source.
+          baseOdin =
+            if pkgs.stdenv.hostPlatform.system == "x86_64-darwin" then
+              pkgs.callPackage "${nixpkgs}/pkgs/by-name/od/odin/package.nix" { }
+            else
+              pkgs.odin;
+          fArgs = baseOdin.override.__functionArgs or {};
         in
         if fArgs ? llvmPackages then
-          pkgs.odin.override { llvmPackages = pkgs.llvmPackages_21; }
+          baseOdin.override { llvmPackages = pkgs.llvmPackages_21; }
         else if fArgs ? llvmPackages_18 then
-          pkgs.odin.override { llvmPackages_18 = pkgs.llvmPackages_21; }
+          baseOdin.override { llvmPackages_18 = pkgs.llvmPackages_21; }
         else
-          pkgs.odin;
+          baseOdin;
 
       homeManagerModule = import ./nix/home-manager.nix { inherit self; };
     in
