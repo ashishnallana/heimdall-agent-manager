@@ -12,12 +12,14 @@ import vault "odin_test:lib/vault"
 relay_test_token :: proc(epoch: u32) -> (token: string, body: []byte) {
 	key: [32]byte
 	key[0] = 7
-	nonce: [12]byte
-	nonce[11] = 1
-	tok, ok := vault.seal_with_nonce(transmute([]byte)string("screen bytes"), key[:], epoch, nonce[:], context.temp_allocator)
+	salt: [vault.PTY_V2_SALT_BYTES]byte
+	salt[0] = 9
+	frame, ok := vault.pty_seal(transmute([]byte)string("screen bytes"), key[:], epoch, salt[:], 1, "sh_relay", .Out, context.temp_allocator)
 	assert(ok)
-	b, _ := base64.decode(tok[strings.last_index_byte(tok, ':') + 1:], allocator = context.temp_allocator)
-	return tok, b
+	// Armored PTY frame: vault:v2:e<N>:b64(salt|nonce|tag|ct) -- everything past the epoch.
+	b64, _ := base64.encode(frame[4:], allocator = context.temp_allocator)
+	tok := strings.concatenate({"vault:v2:e", "258" if epoch == 258 else "3", ":", b64}, context.temp_allocator)
+	return tok, frame[4:]
 }
 
 // The snapshot path re-frames vault:v2:e<N>:<b64> as u32be(N) | nonce | tag | ct.
@@ -37,6 +39,14 @@ test_screen_snapshot_passes_epoch_through :: proc(t: ^testing.T) {
 	bad, bad_ok := _shell_stream_screen_frames(`{"output":"vault:v2:e0:AAAA"}`)
 	defer delete(bad)
 	testing.expect(t, !bad_ok)
+	// A v2 content token too short to carry salt16|nonce|tag is not a PTY frame.
+	key: [32]byte
+	nonce: [12]byte
+	short, _ := vault.seal_with_nonce(transmute([]byte)string("x"), key[:], 3, nonce[:], context.temp_allocator)
+	short_reply := strings.concatenate({`{"output":"`, short, `"}`}, context.temp_allocator)
+	short_frames, short_ok := _shell_stream_screen_frames(short_reply)
+	defer delete(short_frames)
+	testing.expect(t, !short_ok)
 }
 
 @(test)

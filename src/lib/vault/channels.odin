@@ -200,32 +200,83 @@ wrap_open :: proc(w: ^Keyring_Wrap, user_id: string, recipient_ecdh_priv: ^ecdh.
 }
 
 // ── PTY payload v2 ──────────────────────────────────────────────────────────
-// u32be epoch | nonce12 | tag16 | ct, AAD "heimdall-pty-v2|e<epoch>|<session_id>|<out|in>".
+// Frame: u32be epoch | salt16 | nonce12 | tag16 | ct.
+// Per-stream, per-direction subkey:
+//   HKDF-SHA256(ikm = epoch key, salt = salt16, info = "heimdall-pty-v2|<session_id>|<out|in>").
+// The nonce is u32be(0) | u64be(counter) under that subkey; the counter starts at 1
+// and never repeats under one salt, and every stream (or epoch change) draws a fresh
+// CSPRNG salt, so a (subkey, nonce) pair is never reused.
+// AAD: "heimdall-pty-v2|e<epoch>|<session_id>|out" for output, and
+//      "heimdall-pty-v2|e<epoch>|<session_id>|in|<counter>" for input, so the receiver
+// can enforce a strictly increasing per-session input counter (replay defence).
 
-PTY_V2_HEADER_BYTES :: 4 + HEADER_BYTES
+PTY_V2_INFO         :: "heimdall-pty-v2"
+PTY_V2_SALT_BYTES   :: 16
+PTY_V2_HEADER_BYTES :: 4 + PTY_V2_SALT_BYTES + HEADER_BYTES // 48
 
 Pty_Direction :: enum {
 	Out,
 	In,
 }
 
-pty_aad :: proc(epoch: u32, session_id: string, dir: Pty_Direction, allocator := context.allocator) -> string {
-	e_buf: [16]byte
-	return strings.concatenate({"heimdall-pty-v2|e", strconv.write_uint(e_buf[:], u64(epoch), 10), "|", session_id, "|", "out" if dir == .Out else "in"}, allocator)
+@(private)
+pty_dir_name :: proc(dir: Pty_Direction) -> string {
+	return "out" if dir == .Out else "in"
 }
 
-// pty_seal writes a v2 frame. nonce is caller-supplied because the bridge builds it
-// from a per-worker CSPRNG salt and a monotonic counter.
-pty_seal :: proc(plaintext: []byte, key: []byte, epoch: u32, nonce: []byte, session_id: string, dir: Pty_Direction, allocator := context.allocator) -> (frame: []byte, ok: bool) {
-	if len(key) != KEY_BYTES || len(nonce) != NONCE_BYTES || epoch == 0 || session_id == "" do return nil, false
+// pty_session_id_valid: a PTY session id is a non-empty statement-grammar value, so it
+// can never smuggle a '|' into the AAD or HKDF info.
+pty_session_id_valid :: proc(session_id: string) -> bool {
+	return session_id != "" && len(session_id) <= 256 && valid_id_value(session_id)
+}
+
+// pty_aad builds the frame AAD. Input frames require counter >= 1 and bind it; the
+// counter is ignored for output frames.
+pty_aad :: proc(epoch: u32, session_id: string, dir: Pty_Direction, counter: u64 = 0, allocator := context.allocator) -> (aad: string, ok: bool) {
+	if epoch == 0 || !pty_session_id_valid(session_id) do return "", false
+	e_buf, c_buf: [24]byte
+	if dir == .In {
+		if counter == 0 do return "", false
+		return strings.concatenate({PTY_V2_INFO, "|e", strconv.write_uint(e_buf[:], u64(epoch), 10), "|", session_id, "|in|", strconv.write_uint(c_buf[:], counter, 10)}, allocator), true
+	}
+	return strings.concatenate({PTY_V2_INFO, "|e", strconv.write_uint(e_buf[:], u64(epoch), 10), "|", session_id, "|out"}, allocator), true
+}
+
+// pty_subkey_derive writes the per-stream subkey for (epoch key, salt, session, dir).
+pty_subkey_derive :: proc(epoch_key: []byte, salt: []byte, session_id: string, dir: Pty_Direction, dst: []byte) -> bool {
+	if len(epoch_key) != KEY_BYTES || len(salt) != PTY_V2_SALT_BYTES || len(dst) != KEY_BYTES do return false
+	if !pty_session_id_valid(session_id) do return false
+	info := strings.concatenate({PTY_V2_INFO, "|", session_id, "|", pty_dir_name(dir)}, context.temp_allocator)
+	hkdf.extract_and_expand(.SHA256, salt, epoch_key, transmute([]byte)info, dst)
+	return true
+}
+
+// pty_nonce_from_counter renders the 12-byte nonce u32be(0) | u64be(counter).
+pty_nonce_from_counter :: proc(counter: u64) -> (nonce: [NONCE_BYTES]byte) {
+	endian.unchecked_put_u64be(nonce[4:], counter)
+	return
+}
+
+PTY_V2_NONCE_OFFSET :: 4 + PTY_V2_SALT_BYTES
+
+// pty_seal writes a v2 frame under the subkey derived from epoch_key and salt. The
+// caller owns counter uniqueness: one salt, strictly increasing counters from 1.
+pty_seal :: proc(plaintext: []byte, epoch_key: []byte, epoch: u32, salt: []byte, counter: u64, session_id: string, dir: Pty_Direction, allocator := context.allocator) -> (frame: []byte, ok: bool) {
+	if counter == 0 || len(salt) != PTY_V2_SALT_BYTES do return nil, false
+	aad, aad_ok := pty_aad(epoch, session_id, dir, counter, context.temp_allocator)
+	if !aad_ok do return nil, false
+	subkey: [KEY_BYTES]byte
+	defer crypto.zero_explicit(&subkey, size_of(subkey))
+	if !pty_subkey_derive(epoch_key, salt, session_id, dir, subkey[:]) do return nil, false
+	nonce := pty_nonce_from_counter(counter)
 	frame = make([]byte, PTY_V2_HEADER_BYTES + len(plaintext), allocator)
 	endian.unchecked_put_u32be(frame[:4], epoch)
-	copy(frame[4:4 + NONCE_BYTES], nonce)
-	aad := pty_aad(epoch, session_id, dir, context.temp_allocator)
+	copy(frame[4:PTY_V2_NONCE_OFFSET], salt)
+	copy(frame[PTY_V2_NONCE_OFFSET:PTY_V2_NONCE_OFFSET + NONCE_BYTES], nonce[:])
 	gcm: aes.Context_GCM
-	aes.init_gcm(&gcm, key)
+	aes.init_gcm(&gcm, subkey[:])
 	defer aes.reset_gcm(&gcm)
-	aes.seal_gcm(&gcm, frame[PTY_V2_HEADER_BYTES:], frame[4 + NONCE_BYTES:PTY_V2_HEADER_BYTES], nonce, transmute([]byte)aad, plaintext)
+	aes.seal_gcm(&gcm, frame[PTY_V2_HEADER_BYTES:], frame[PTY_V2_NONCE_OFFSET + NONCE_BYTES:PTY_V2_HEADER_BYTES], nonce[:], transmute([]byte)aad, plaintext)
 	return frame, true
 }
 
@@ -235,26 +286,92 @@ pty_frame_epoch :: proc(frame: []byte) -> (epoch: u32, ok: bool) {
 	return epoch, epoch != 0
 }
 
+// pty_frame_salt_counter reads the salt and the nonce counter of a frame. A nonce whose
+// leading four bytes are not zero, or whose counter is 0, is not a v2 nonce.
+pty_frame_salt_counter :: proc(frame: []byte) -> (salt: [PTY_V2_SALT_BYTES]byte, counter: u64, ok: bool) {
+	if len(frame) < PTY_V2_HEADER_BYTES do return
+	copy(salt[:], frame[4:PTY_V2_NONCE_OFFSET])
+	n := frame[PTY_V2_NONCE_OFFSET:PTY_V2_NONCE_OFFSET + NONCE_BYTES]
+	if n[0] != 0 || n[1] != 0 || n[2] != 0 || n[3] != 0 do return
+	counter = endian.unchecked_get_u64be(n[4:])
+	return salt, counter, counter != 0
+}
+
 // pty_open authenticates a v2 frame with the key for the epoch in its header. With
 // require_epoch non-zero (the bridge's command floor) any other epoch is rejected
-// before decryption.
-pty_open :: proc(frame: []byte, kr: ^Vault_Keyring, session_id: string, dir: Pty_Direction, require_epoch: u32 = 0, allocator := context.allocator) -> (plaintext: []byte, ok: bool) {
+// before decryption. On success it also returns the frame's salt and counter, which
+// an input receiver feeds to pty_replay_accept.
+pty_open :: proc(frame: []byte, kr: ^Vault_Keyring, session_id: string, dir: Pty_Direction, require_epoch: u32 = 0, allocator := context.allocator) -> (plaintext: []byte, salt: [PTY_V2_SALT_BYTES]byte, counter: u64, ok: bool) {
 	epoch, e_ok := pty_frame_epoch(frame)
-	if !e_ok || session_id == "" do return nil, false
-	if require_epoch != 0 && epoch != require_epoch do return nil, false
+	if !e_ok || kr == nil do return
+	if require_epoch != 0 && epoch != require_epoch do return
+	s, c, sc_ok := pty_frame_salt_counter(frame)
+	if !sc_ok do return
 	key, k_ok := keyring_key_for_epoch(kr, epoch)
-	if !k_ok do return nil, false
-	aad := pty_aad(epoch, session_id, dir, context.temp_allocator)
+	if !k_ok do return
+	aad, aad_ok := pty_aad(epoch, session_id, dir, c, context.temp_allocator)
+	if !aad_ok do return
+	subkey: [KEY_BYTES]byte
+	defer crypto.zero_explicit(&subkey, size_of(subkey))
+	if !pty_subkey_derive(key, s[:], session_id, dir, subkey[:]) do return
 	ct := frame[PTY_V2_HEADER_BYTES:]
 	dst := make([]byte, len(ct), allocator)
 	gcm: aes.Context_GCM
-	aes.init_gcm(&gcm, key)
+	aes.init_gcm(&gcm, subkey[:])
 	defer aes.reset_gcm(&gcm)
-	if !aes.open_gcm(&gcm, dst, frame[4:4 + NONCE_BYTES], transmute([]byte)aad, ct, frame[4 + NONCE_BYTES:PTY_V2_HEADER_BYTES]) {
+	if !aes.open_gcm(&gcm, dst, frame[PTY_V2_NONCE_OFFSET:PTY_V2_NONCE_OFFSET + NONCE_BYTES], transmute([]byte)aad, ct, frame[PTY_V2_NONCE_OFFSET + NONCE_BYTES:PTY_V2_HEADER_BYTES]) {
 		delete(dst, allocator)
-		return nil, false
+		return
 	}
-	return dst, true
+	return dst, s, c, true
+}
+
+// ── PTY input replay window (finding M1) ────────────────────────────────────
+// Per session, the receiver remembers the last accepted counter for up to
+// PTY_REPLAY_SALTS recent salts. A known salt accepts only a strictly larger counter.
+// A new salt (a new sender stream, hence a new subkey) starts fresh, but its counter
+// must exceed `floor`, the highest counter of any salt evicted from the table, so an
+// evicted stream's frames can never be replayed. Senders seed their counter from the
+// wall clock (milliseconds x 1000) so a later stream starts above earlier ones.
+// Call only AFTER the frame authenticated, so forged frames cannot move the state.
+
+PTY_REPLAY_SALTS :: 8
+
+Pty_Replay_Entry :: struct {
+	salt: [PTY_V2_SALT_BYTES]byte,
+	last: u64,
+	used: bool,
+}
+
+Pty_Input_Replay :: struct {
+	entries: [PTY_REPLAY_SALTS]Pty_Replay_Entry,
+	floor:   u64,
+}
+
+pty_replay_accept :: proc(r: ^Pty_Input_Replay, salt: [PTY_V2_SALT_BYTES]byte, counter: u64) -> bool {
+	if r == nil || counter == 0 do return false
+	free_slot, oldest := -1, -1
+	for i in 0 ..< PTY_REPLAY_SALTS {
+		e := &r.entries[i]
+		if !e.used {
+			if free_slot < 0 do free_slot = i
+			continue
+		}
+		if e.salt == salt {
+			if counter <= e.last do return false
+			e.last = counter
+			return true
+		}
+		if oldest < 0 || e.last < r.entries[oldest].last do oldest = i
+	}
+	if counter <= r.floor do return false
+	slot := free_slot
+	if slot < 0 {
+		slot = oldest
+		r.floor = max(r.floor, r.entries[oldest].last)
+	}
+	r.entries[slot] = Pty_Replay_Entry{salt = salt, last = counter, used = true}
+	return true
 }
 
 // ── Search key v2 ───────────────────────────────────────────────────────────
@@ -271,9 +388,16 @@ search_key_derive :: proc(epoch_key: []byte, epoch: u32, dst: []byte) -> bool {
 	return true
 }
 
-search_aad :: proc(owner_user_id, bridge_id, request_id, direction: string, expires_at_ms: i64, epoch: u32, allocator := context.allocator) -> string {
+// search_aad fails closed unless every identifier is a non-empty statement-grammar
+// value (so no '|' can shift fields) and direction is request or response.
+search_aad :: proc(owner_user_id, bridge_id, request_id, direction: string, expires_at_ms: i64, epoch: u32, allocator := context.allocator) -> (aad: string, ok: bool) {
+	for s in ([]string{owner_user_id, bridge_id, request_id}) {
+		if s == "" || len(s) > 256 || !valid_id_value(s) do return "", false
+	}
+	if direction != "request" && direction != "response" do return "", false
+	if epoch == 0 do return "", false
 	x_buf, e_buf: [24]byte
-	return strings.concatenate({SEARCH_V2_DOMAIN, "|", owner_user_id, "|", bridge_id, "|", request_id, "|", direction, "|", strconv.write_int(x_buf[:], expires_at_ms, 10), "|e", strconv.write_uint(e_buf[:], u64(epoch), 10)}, allocator)
+	return strings.concatenate({SEARCH_V2_DOMAIN, "|", owner_user_id, "|", bridge_id, "|", request_id, "|", direction, "|", strconv.write_int(x_buf[:], expires_at_ms, 10), "|e", strconv.write_uint(e_buf[:], u64(epoch), 10)}, allocator), true
 }
 
 // search_envelope_parse splits "search:v2:e<epoch>:<b64(nonce|tag|ct)>".

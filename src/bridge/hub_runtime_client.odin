@@ -1906,9 +1906,9 @@ bridge_hub_handle_binary_frame :: proc(conn: ^ws.Connection, frame: []byte) {
 	case .Unlocked:
 		if encrypted {
 			// Command epoch floor: input sealed under any epoch but the current one is
-			// refused, even when this keyring still holds that older key.
-			plain, pok := vault.pty_open(payload, &kr, shell_id, .In, kr.current_epoch, context.temp_allocator)
-			if pok { data = string(plain); decoded_ok = true }
+			// refused, even when this keyring still holds that older key. A replayed
+			// (non-increasing) input counter is refused too (finding M1).
+			if plain, pok := bridge_pty_open_input(payload, &kr, shell_id); pok { data = plain; decoded_ok = true }
 		}
 	case .Disabled:
 		if !encrypted { data = string(payload); decoded_ok = true }
@@ -1960,10 +1960,10 @@ bridge_hub_handle_shell_pty_input :: proc(conn: ^ws.Connection, text: string) {
 		reject_reason = "vault_locked"
 	case .Unlocked:
 		if flag_ok && encrypted {
-			// data_b64 is base64 of a PTY v2 "in" frame; current epoch only.
+			// data_b64 is base64 of a PTY v2 "in" frame; current epoch only, and its
+			// input counter must increase (replay defence, finding M1).
 			if frame, frame_ok := vault.b64_decode_strict(data_b64, context.temp_allocator); frame_ok {
-				plain, pok := vault.pty_open(frame, &kr, shell_id, .In, kr.current_epoch, context.temp_allocator)
-				if pok { data = string(plain); decoded_ok = true }
+				if plain, pok := bridge_pty_open_input(frame, &kr, shell_id); pok { data = plain; decoded_ok = true }
 			}
 		}
 	case .Disabled:
@@ -2144,7 +2144,7 @@ bridge_hub_handle_get_agent_pane :: proc(conn: ^ws.Connection, text: string) {
 	defer if h != "" do delete(h)
 	defer if output != "" do delete(output)
 
-	result := bridge_get_agent_pane_result_json(command_id, ok, unchanged, h, output, line_count, truncated, cursor_row, cursor_col, err_msg)
+	result := bridge_get_pane_reply_json(command_id, instance_id, ok, unchanged, h, output, line_count, truncated, cursor_row, cursor_col, err_msg)
 	defer delete(result)
 	bridge_runtime_cache_command(command_id, result)
 	_ = bridge_hub_send(conn, result)
@@ -3506,6 +3506,25 @@ bridge_pane_capture_expire_pending :: proc() {
 bridge_pane_capture_push_json :: proc(pending: Bridge_Pane_Capture_Pending, settle_ms:int)->string{ b:=strings.builder_make(); strings.write_string(&b,"{\"push\":\"pane_capture_request\",\"payload\":{\"protocol_version\":1,\"command_id\":\""); bridge_runtime_write_json_string(&b,pending.command_id); strings.write_string(&b,"\",\"pane_capture_request_id\":\""); bridge_runtime_write_json_string(&b,pending.pane_capture_request_id); strings.write_string(&b,"\",\"message_id\":\""); bridge_runtime_write_json_string(&b,pending.message_id); strings.write_string(&b,"\",\"width\":"); strings.write_string(&b,fmt.tprintf("%d",pending.width)); strings.write_string(&b,",\"settle_ms\":"); strings.write_string(&b,fmt.tprintf("%d",settle_ms)); strings.write_string(&b,",\"line_limit\":"); strings.write_string(&b,fmt.tprintf("%d",pending.line_limit)); strings.write_string(&b,"}}\n"); return strings.to_string(b) }
 
 bridge_pane_capture_result_json :: proc(pending: Bridge_Pane_Capture_Pending, ok:bool, error_code,message,output:string,line_count:int,truncated:bool)->string{ b:=strings.builder_make(); strings.write_string(&b,"{\"type\":\"pane_capture_result\",\"protocol_version\":1,\"command_id\":\""); bridge_runtime_write_json_string(&b,pending.command_id); strings.write_string(&b,"\",\"pane_capture_request_id\":\""); bridge_runtime_write_json_string(&b,pending.pane_capture_request_id); strings.write_string(&b,"\",\"conversation_id\":\""); bridge_runtime_write_json_string(&b,pending.conversation_id); strings.write_string(&b,"\",\"message_id\":\""); bridge_runtime_write_json_string(&b,pending.message_id); strings.write_string(&b,"\",\"agent_instance_id\":\""); bridge_runtime_write_json_string(&b,pending.agent_instance_id); strings.write_string(&b,"\""); if ok do strings.write_string(&b,",\"ok\":true"); strings.write_string(&b,",\"width\":"); strings.write_string(&b,fmt.tprintf("%d",pending.width)); strings.write_string(&b,",\"line_count\":"); strings.write_string(&b,fmt.tprintf("%d",line_count)); strings.write_string(&b,",\"truncated\":"); strings.write_string(&b,"true" if truncated else "false"); if ok { strings.write_string(&b,",\"output\":\""); bridge_runtime_write_json_string(&b,output); strings.write_string(&b,"\"") } else { strings.write_string(&b,","); bridge_write_failure(&b, bridge_cause_wire_error(error_code, message)) }; strings.write_string(&b,"}"); return strings.to_string(b) }
+
+// bridge_get_pane_reply_json is the get_agent_pane / shell_get_pane reply with the
+// capture sealed for the viewer (bridge_pane_output_seal) whenever the vault is
+// configured. session_id is the id the viewer decrypts under (the shell session id or
+// agent instance id the hub asked for). A locked vault or a sealing failure answers
+// with an error and never with the plaintext capture.
+bridge_get_pane_reply_json :: proc(command_id, session_id: string, ok: bool, unchanged: bool, hash_val: string, output: string, line_count: int, truncated: bool, cursor_row: int = 0, cursor_col: int = 0, err_msg: string = "") -> string {
+	if !ok do return bridge_get_agent_pane_result_json(command_id, false, false, "", "", 0, false, 0, 0, err_msg)
+	sealed, res := bridge_pane_output_seal("" if unchanged else output, session_id)
+	defer if sealed != "" do delete(sealed)
+	switch res {
+	case .Locked:
+		return bridge_get_agent_pane_result_json(command_id, false, false, "", "", 0, false, 0, 0, "the bridge vault is locked", "vault_locked")
+	case .Failed:
+		return bridge_get_agent_pane_result_json(command_id, false, false, "", "", 0, false, 0, 0, "the pane capture could not be encrypted", "encryption_failed")
+	case .Plain, .Sealed:
+	}
+	return bridge_get_agent_pane_result_json(command_id, true, unchanged, hash_val, sealed, line_count, truncated, cursor_row, cursor_col)
+}
 
 bridge_get_agent_pane_result_json :: proc(command_id: string, ok: bool, unchanged: bool, hash_val: string, output: string, line_count: int, truncated: bool, cursor_row: int = 0, cursor_col: int = 0, err_msg: string = "", err_cause: string = "") -> string {
 	b := strings.builder_make()
@@ -5290,7 +5309,7 @@ bridge_hub_handle_shell_get_pane :: proc(conn: ^ws.Connection, text: string) {
 	defer if h != "" do delete(h)
 	defer if output != "" do delete(output)
 
-	result := bridge_get_agent_pane_result_json(command_id, pane_ok, unchanged, h, output, line_count, truncated, cursor_row, cursor_col, err_msg)
+	result := bridge_get_pane_reply_json(command_id, session_id, pane_ok, unchanged, h, output, line_count, truncated, cursor_row, cursor_col, err_msg)
 	defer delete(result)
 	bridge_runtime_cache_command(command_id, result)
 	_ = bridge_hub_send(conn, result)

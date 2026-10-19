@@ -367,28 +367,37 @@
         "direction": "out",
         "epoch": 2,
         "session_id": "shs_0011223344556677",
-        "nonce": "835cff450000000000000005",
+        "salt": "5574ad2698919a671e14846a8220b941",
+        "counter": 5,
+        "subkey": "50ec139494a0b7c3598132e0bd551af65c4bb596cdac45a6eb1d2a017018ae65",
+        "nonce": "000000000000000000000005",
         "plaintext_hex": "1b5b33326d6f6b1b5b306d0d0a",
         "aad": "heimdall-pty-v2|e2|shs_0011223344556677|out",
-        "frame_hex": "00000002835cff4500000000000000054b04b482764292c08ea361982ce7daa18c14479fb56028a0445997285b"
+        "frame_hex": "000000025574ad2698919a671e14846a8220b94100000000000000000000000590b03ad3118b1a4bc2a9989fe159e804d1dad576342cb2a33565a914f0"
       },
       {
         "direction": "in",
         "epoch": 2,
         "session_id": "shs_0011223344556677",
-        "nonce": "1aec3531ac7d1e78bd093fb0",
+        "salt": "a98a7cacf6e9a3d42f36fb54ef4ad720",
+        "counter": 1760000000000001,
+        "subkey": "23dbc35c9fba4352fea4f76853dfdd491ce6664b67412a195c2a3aeb8689f3a4",
+        "nonce": "00000000000640b5eece0001",
         "plaintext_hex": "6c73202d6c610d",
-        "aad": "heimdall-pty-v2|e2|shs_0011223344556677|in",
-        "frame_hex": "000000021aec3531ac7d1e78bd093fb08f4e4dd322484ac5e0c2c1d3060efe2bf8f7b6aead47fc"
+        "aad": "heimdall-pty-v2|e2|shs_0011223344556677|in|1760000000000001",
+        "frame_hex": "00000002a98a7cacf6e9a3d42f36fb54ef4ad72000000000000640b5eece0001fe1286bf5d1b186c722c06009d4589fcd0ee9b01147b83"
       },
       {
         "direction": "out",
         "epoch": 1,
         "session_id": "shs_0011223344556677",
-        "nonce": "835cff450000000000000005",
+        "salt": "5574ad2698919a671e14846a8220b941",
+        "counter": 1,
+        "subkey": "0c46e058eacd08ed2fb280848ca252e10e6f3ec57b343d238ffde6ac8b984657",
+        "nonce": "000000000000000000000001",
         "plaintext_hex": "",
         "aad": "heimdall-pty-v2|e1|shs_0011223344556677|out",
-        "frame_hex": "00000001835cff4500000000000000058a416932c687a97d51a1107015b62638"
+        "frame_hex": "000000015574ad2698919a671e14846a8220b94100000000000000000000000161597800b27df81474ffb73153bbb541"
       }
     ]
   },

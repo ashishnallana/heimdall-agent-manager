@@ -184,7 +184,7 @@ _shell_screen_chunk_end :: proc(s: string, start: int) -> int {
 // shell_stream_screen_frame builds one binary SCREEN viewer frame (REQ-PTY-NET-2):
 // kind=SCREEN, flags=SNAPSHOT [|ENCRYPTED], an optional cursor block, then the payload.
 // For a plaintext repaint the payload already ends with the CUP escape, so the cursor
-// block is informational; for an ENCRYPTED capture (payload = nonce|tag|ciphertext the
+// block is informational; for an ENCRYPTED capture (payload = epoch|salt|nonce|tag|ciphertext the
 // hub cannot read) it is the ONLY way the browser learns where to put the cursor.
 // Caller owns the result.
 shell_stream_screen_frame :: proc(payload: []byte, cursor_row: int = -1, cursor_col: int = -1, is_encrypted: bool = false) -> []byte {
@@ -277,7 +277,7 @@ _shell_stream_screen_frames :: proc(pane_reply: string) -> (frames: [dynamic][]b
 	defer delete(output)
 	if output == "" do return nil, false
 	encrypted_capture := domain.is_vault_armored(output)
-	max_bytes := ((1024 * 1024 + domain.VAULT_HEADER_BYTES + 2) / 3) * 4 + domain.VAULT_MAX_TOKEN_HEADER_LEN if encrypted_capture else 1024 * 1024
+	max_bytes := ((1024 * 1024 + domain.VAULT_PTY_V2_ARMOR_MIN_BYTES + 2) / 3) * 4 + domain.VAULT_MAX_TOKEN_HEADER_LEN if encrypted_capture else 1024 * 1024
 	if len(output) > max_bytes do return nil, false
 
 	cursor_row := json_int(pane_reply, "cursor_row", -1)
@@ -285,9 +285,11 @@ _shell_stream_screen_frames :: proc(pane_reply: string) -> (frames: [dynamic][]b
 	frames = make([dynamic][]byte)
 
 	if encrypted_capture {
-		// The bridge armors an encrypted capture as vault:v2:e<N>:base64(nonce|tag|ct)
-		// on the command/reply channel; the viewer gets the PTY v2 payload
-		// u32be(N) | nonce | tag | ct, so it can pick the key and bind the AAD epoch.
+		// The bridge armors an encrypted capture as vault:v2:e<N>:base64(salt16|nonce|tag|ct)
+		// (a PTY v2 `out` frame under its own fresh salt) on the command/reply channel;
+		// the viewer gets the PTY v2 payload u32be(N) | salt16 | nonce | tag | ct, the
+		// salt and nonce passed through unchanged, so it can derive the subkey and bind
+		// the AAD epoch.
 		// A malformed token paints nothing: never fall through to the text path.
 		sealed, ok_framed := domain.vault_pty_v2_payload_from_armor(output, context.temp_allocator)
 		if !ok_framed { delete(frames); return nil, false }

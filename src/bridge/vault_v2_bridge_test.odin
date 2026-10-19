@@ -6,6 +6,7 @@ package main
 //   odin test src/bridge -collection:odin_test=src -define:ODIN_TEST_NAMES=main.test_v2_...
 
 import "core:crypto/ecdsa"
+import "core:os"
 import "core:strings"
 import "core:sync"
 import "core:testing"
@@ -233,11 +234,13 @@ test_v2_pty_salt_is_fresh_per_worker_epoch_and_install :: proc(t: ^testing.T) {
 	si, _, _ := _bridge_pty_stream_next_nonce(&w1, 3)
 	testing.expect(t, si != se, "a keyring install re-salts")
 	// Randomness failure: no nonce, nothing sealed.
+	sync.mutex_lock(&test_pty_random_source_mu)
 	prev := bridge_pty_random_source
 	bridge_pty_random_source = "/nonexistent/heimdall-no-random"
-	defer bridge_pty_random_source = prev
 	w3: Bridge_PTY_Stream_Worker
 	_, _, ok_fail := _bridge_pty_stream_next_nonce(&w3, 2)
+	bridge_pty_random_source = prev
+	sync.mutex_unlock(&test_pty_random_source_mu)
 	testing.expect(t, !ok_fail, "CSPRNG failure must fail closed")
 
 	// A sealed frame carries its epoch and only opens for its session/direction.
@@ -247,6 +250,102 @@ test_v2_pty_salt_is_fresh_per_worker_epoch_and_install :: proc(t: ^testing.T) {
 	testing.expect(t, sealed)
 	ep, _ := vault.pty_frame_epoch(frame)
 	testing.expect_value(t, ep, u32(2))
-	_, wrong_dir := vault.pty_open(frame, &kr, "sh_v2", .In, 2, context.temp_allocator)
+	_, _, _, wrong_dir := vault.pty_open(frame, &kr, "sh_v2", .In, 2, context.temp_allocator)
 	testing.expect(t, !wrong_dir, "an output frame is not valid input")
+	_, _, _, right := vault.pty_open(frame, &kr, "sh_v2", .Out, 2, context.temp_allocator)
+	testing.expect(t, right)
+	// Two workers (restart) never produce the same (subkey, nonce): the frames differ
+	// in their salt and therefore in their key stream even at the same seq.
+	frame2, _ := bridge_pty_stream_seal_v2(transmute([]byte)string("hi"), &kr, 2, s2, 1, "sh_v2", context.temp_allocator)
+	testing.expect(t, string(frame[4:20]) != string(frame2[4:20]) && string(frame[vault.PTY_V2_HEADER_BYTES:]) != string(frame2[vault.PTY_V2_HEADER_BYTES:]))
+}
+
+// test_pty_random_source_mu serializes tests that point bridge_pty_random_source at a
+// failing source (a package global shared by parallel tests).
+test_pty_random_source_mu: sync.Mutex
+
+// Finding M1: a replayed input frame is refused; a new salt (new stream) starts a new
+// counter sequence but cannot replay an evicted stream below the floor.
+@(test)
+test_v2_pty_input_replay_is_rejected :: proc(t: ^testing.T) {
+	kr := test_keyring_two_epochs(TEST_VAULT_KEY_HEX, V2_KEY_2)
+	defer vault.keyring_wipe(&kr)
+	sid := "sh_replay_test"
+	salt_a: [vault.PTY_V2_SALT_BYTES]byte
+	salt_a[0] = 0xa1
+	f1, _ := test_pty_input_payload_with("a", V2_KEY_2, 2, sid, salt_a, 1000)
+	f2, _ := test_pty_input_payload_with("b", V2_KEY_2, 2, sid, salt_a, 1001)
+	p1, ok1 := bridge_pty_open_input(f1, &kr, sid)
+	testing.expect(t, ok1 && p1 == "a")
+	_, replay := bridge_pty_open_input(f1, &kr, sid)
+	testing.expect(t, !replay, "the same frame twice is a replay")
+	_, ok2 := bridge_pty_open_input(f2, &kr, sid)
+	testing.expect(t, ok2)
+	_, stale := bridge_pty_open_input(f1, &kr, sid)
+	testing.expect(t, !stale, "an older counter under the same salt is refused")
+	// Another session id: the AAD and subkey differ, so the frame does not authenticate.
+	_, cross := bridge_pty_open_input(f2, &kr, "sh_replay_other")
+	testing.expect(t, !cross)
+	// A new stream (new salt) may start its own sequence.
+	salt_b: [vault.PTY_V2_SALT_BYTES]byte
+	salt_b[0] = 0xb2
+	f3, _ := test_pty_input_payload_with("c", V2_KEY_2, 2, sid, salt_b, 5000)
+	_, ok3 := bridge_pty_open_input(f3, &kr, sid)
+	testing.expect(t, ok3)
+	// Non-current epoch input is refused (command epoch floor).
+	f4, _ := test_pty_input_payload_with("d", TEST_VAULT_KEY_HEX, 1, sid, salt_b, 5001)
+	_, old_epoch := bridge_pty_open_input(f4, &kr, sid)
+	testing.expect(t, !old_epoch)
+
+	// The replay table itself: eviction raises the floor so evicted salts stay dead.
+	r: vault.Pty_Input_Replay
+	for i in 0 ..< vault.PTY_REPLAY_SALTS {
+		s: [vault.PTY_V2_SALT_BYTES]byte
+		s[0] = u8(i + 1)
+		testing.expect(t, vault.pty_replay_accept(&r, s, u64(100 + i)))
+	}
+	s_new: [vault.PTY_V2_SALT_BYTES]byte
+	s_new[0] = 0xff
+	testing.expect(t, vault.pty_replay_accept(&r, s_new, 1000), "a new stream evicts the oldest")
+	s_old: [vault.PTY_V2_SALT_BYTES]byte
+	s_old[0] = 1
+	testing.expect(t, !vault.pty_replay_accept(&r, s_old, 100), "an evicted salt cannot be replayed")
+	testing.expect(t, vault.pty_replay_accept(&r, s_old, 101), "a live evicted stream may continue above the floor")
+}
+
+// The pane capture reply never carries plaintext on a configured vault.
+@(test)
+test_v2_pane_capture_is_sealed :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
+	prev_key, found := os.lookup_env("HEIMDALL_VAULT_KEYRING", context.allocator)
+	defer { if found { _ = os.set_env("HEIMDALL_VAULT_KEYRING", prev_key); delete(prev_key) } else { os.unset_env("HEIMDALL_VAULT_KEYRING") } }
+	_ = os.set_env("HEIMDALL_VAULT_KEYRING", test_keyring_env_value(TEST_ENC_VAULT_KEY))
+
+	reply := bridge_get_pane_reply_json("cmd_pane_seal", "sh_pane", true, false, "h1", "top secret screen", 1, false, 0, 0)
+	defer delete(reply)
+	testing.expect(t, !strings.contains(reply, "top secret"), "no plaintext in the reply")
+	output := extract_json_string(reply, "output", "", context.temp_allocator)
+	testing.expect(t, strings.has_prefix(output, "vault:v2:e1:"), output)
+	epoch, body, res := vault.envelope_parse(output, context.temp_allocator)
+	testing.expect(t, res == .Ok && epoch == 1)
+	frame := make([]byte, 4 + len(body), context.temp_allocator)
+	frame[3] = 1
+	copy(frame[4:], body)
+	kr := test_keyring_from_hex(TEST_ENC_VAULT_KEY)
+	defer vault.keyring_wipe(&kr)
+	plain, _, _, ok := vault.pty_open(frame, &kr, "sh_pane", .Out, 0, context.temp_allocator)
+	testing.expect(t, ok && string(plain) == "top secret screen")
+
+	// Randomness failure: an error, never plaintext.
+	sync.mutex_lock(&test_pty_random_source_mu)
+	prev := bridge_pty_random_source
+	bridge_pty_random_source = "/nonexistent/heimdall-no-random"
+	failed := bridge_get_pane_reply_json("cmd_pane_seal_fail", "sh_pane", true, false, "h1", "top secret screen", 1, false, 0, 0)
+	bridge_pty_random_source = prev
+	sync.mutex_unlock(&test_pty_random_source_mu)
+	defer delete(failed)
+	testing.expect(t, !strings.contains(failed, "top secret") && strings.contains(failed, "encryption_failed"), failed)
 }

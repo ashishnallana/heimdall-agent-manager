@@ -890,7 +890,7 @@ agent_pty_input_command_json :: proc(command_id, instance_id, data: string, enc_
 	payload := enc_b64
 	if payload == "" { payload = string(base64.encode(transmute([]byte)data, allocator = context.temp_allocator)) }
 	// An armored v2 token is re-framed to the PTY v2 binary layout (u32be epoch |
-	// nonce | tag | ct) so the bridge sees the epoch it must check; a non-armored
+	// salt16 | nonce | tag | ct) so the bridge sees the epoch it must check; a non-armored
 	// enc_b64 is already base64 of that layout and passes through untouched.
 	if domain.is_vault_armored(payload) {
 		if framed, ok := domain.vault_pty_v2_payload_from_armor(payload, context.temp_allocator); ok {
