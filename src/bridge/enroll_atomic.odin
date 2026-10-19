@@ -373,6 +373,7 @@ bridge_enroll_atomic_run :: proc(args: []string, cred: Bridge_Enroll_Credential,
 			if cred.approver_username != "" do fmt.printfln("  approved by     %s", cred.approver_username)
 			fmt.printfln("  credential      %s (0600)", token_file)
 			fmt.println("  nothing secret was written to config.toml (audit F2)")
+			bridge_enroll_print_account_fingerprint(cred.bridge_id)
 			return true
 		case .Rolled_Back:
 			bridge_enroll_atomic_rolled_back("the hub cancelled the enrollment before it was committed")

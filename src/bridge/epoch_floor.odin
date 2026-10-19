@@ -14,23 +14,36 @@ package main
 // key. The record is created (empty) at enrollment; afterwards "not found" is an
 // error, exactly like "unreadable": both refuse every unseal.
 //
+// The same record pins the ACCOUNT ROOT (plan §1 "Bridge keyring authentication"):
+// the first unseal after enrollment carries a chain proof whose genesis names the
+// root (root_device_id, sign alg, root_sign_pub); once verified it is pinned here and
+// every later proof must chain to exactly that root. It lives with the floor because
+// it has the same lifecycle (created at enrollment, kept across a lock, deleted with
+// the identity) and the same fail-closed rules.
+//
 // Record (keystore slot .Epoch_Floor):
-//   "HEF1" | u32be floor_epoch | u16be count | count × (u32be epoch | commit[32])
+//   "HEF2" | u32be floor_epoch
+//          | u8 root_set (0|1) | u8 root_sign_alg (1 = ecdsa-p256-sha256)
+//          | root_sign_pub[65] | root_device_id[36]       (all zero when root_set = 0)
+//          | u16be count | count × (u32be epoch | commit[32])
 // entries strictly ascending; at most EPOCH_FLOOR_MAX_ENTRIES (the newest kept).
 
 import "core:crypto"
 import "core:crypto/hmac"
+import "core:mem"
 import "core:encoding/endian"
 import "core:strconv"
 import "core:strings"
 import vault "odin_test:lib/vault"
 
-EPOCH_FLOOR_MAGIC       :: "HEF1"
+EPOCH_FLOOR_MAGIC       :: "HEF2"
 EPOCH_FLOOR_INFO        :: "heimdall-bridge-epoch-commit-v1"
 EPOCH_FLOOR_COMMIT_BYTES :: 32
 EPOCH_FLOOR_MAX_ENTRIES :: vault.KEYRING_MAX_EPOCHS
 EPOCH_FLOOR_ENTRY_BYTES :: 4 + EPOCH_FLOOR_COMMIT_BYTES
-EPOCH_FLOOR_MAX_BYTES   :: 4 + 4 + 2 + EPOCH_FLOOR_MAX_ENTRIES * EPOCH_FLOOR_ENTRY_BYTES // 2314
+EPOCH_FLOOR_ROOT_BYTES  :: 1 + 1 + vault.P256_PUBLIC_KEY_BYTES + vault.DEVICE_ID_BYTES
+EPOCH_FLOOR_HEADER_BYTES :: 4 + 4 + EPOCH_FLOOR_ROOT_BYTES + 2
+EPOCH_FLOOR_MAX_BYTES   :: EPOCH_FLOOR_HEADER_BYTES + EPOCH_FLOOR_MAX_ENTRIES * EPOCH_FLOOR_ENTRY_BYTES // 2417
 
 Epoch_Floor_Entry :: struct {
 	epoch:  u32,
@@ -39,6 +52,7 @@ Epoch_Floor_Entry :: struct {
 
 Epoch_Floor :: struct {
 	floor_epoch: u32,
+	root:        vault.Root_Pin, // unset until the first verified unseal
 	entries:     [EPOCH_FLOOR_MAX_ENTRIES]Epoch_Floor_Entry,
 	count:       int,
 }
@@ -57,12 +71,20 @@ epoch_floor_commit :: proc(bridge_id: string, epoch: u32, key: []byte, dst: ^[EP
 }
 
 epoch_floor_serialize :: proc(f: ^Epoch_Floor, dst: []byte) -> (out: []byte, ok: bool) {
-	need := 4 + 4 + 2 + f.count * EPOCH_FLOOR_ENTRY_BYTES
+	need := EPOCH_FLOOR_HEADER_BYTES + f.count * EPOCH_FLOOR_ENTRY_BYTES
 	if f.count < 0 || f.count > EPOCH_FLOOR_MAX_ENTRIES || len(dst) < need do return nil, false
+	mem.zero_slice(dst[:need])
 	copy(dst[:4], EPOCH_FLOOR_MAGIC)
 	endian.unchecked_put_u32be(dst[4:8], f.floor_epoch)
-	endian.unchecked_put_u16be(dst[8:10], u16(f.count))
-	off := 10
+	if f.root.set {
+		if f.root.sign_alg != .Ecdsa_P256_Sha256 do return nil, false
+		dst[8] = 1
+		dst[9] = 1
+		copy(dst[10:10 + vault.P256_PUBLIC_KEY_BYTES], f.root.sign_pub[:])
+		copy(dst[10 + vault.P256_PUBLIC_KEY_BYTES:8 + EPOCH_FLOOR_ROOT_BYTES], f.root.device_id[:])
+	}
+	endian.unchecked_put_u16be(dst[8 + EPOCH_FLOOR_ROOT_BYTES:EPOCH_FLOOR_HEADER_BYTES], u16(f.count))
+	off := EPOCH_FLOOR_HEADER_BYTES
 	for i in 0 ..< f.count {
 		endian.unchecked_put_u32be(dst[off:off + 4], f.entries[i].epoch)
 		copy(dst[off + 4:off + EPOCH_FLOOR_ENTRY_BYTES], f.entries[i].commit[:])
@@ -72,11 +94,28 @@ epoch_floor_serialize :: proc(f: ^Epoch_Floor, dst: []byte) -> (out: []byte, ok:
 }
 
 epoch_floor_parse :: proc(data: []byte) -> (f: Epoch_Floor, ok: bool) {
-	if len(data) < 10 || string(data[:4]) != EPOCH_FLOOR_MAGIC do return {}, false
+	if len(data) < EPOCH_FLOOR_HEADER_BYTES || string(data[:4]) != EPOCH_FLOOR_MAGIC do return {}, false
 	f.floor_epoch = endian.unchecked_get_u32be(data[4:8])
-	count := int(endian.unchecked_get_u16be(data[8:10]))
-	if count > EPOCH_FLOOR_MAX_ENTRIES || len(data) != 10 + count * EPOCH_FLOOR_ENTRY_BYTES do return {}, false
-	off := 10
+	root_block := data[8:8 + EPOCH_FLOOR_ROOT_BYTES]
+	switch root_block[0] {
+	case 0:
+		for b in root_block do if b != 0 do return {}, false
+	case 1:
+		// Only ecdsa-p256-sha256 roots exist; the device id must be the key's own.
+		if root_block[1] != 1 do return {}, false
+		pub_hex := vault.hex_encode_lower(root_block[2:2 + vault.P256_PUBLIC_KEY_BYTES], context.temp_allocator)
+		id := string(root_block[2 + vault.P256_PUBLIC_KEY_BYTES:])
+		want, ok := vault.device_id_from_sign_pub(pub_hex, context.temp_allocator)
+		if !ok || id != want || !vault.valid_p256_public_key(pub_hex) do return {}, false
+		root, r_ok := vault.root_pin_from_hex(id, vault.SIGN_ALG_ECDSA_P256_SHA256, pub_hex)
+		if !r_ok do return {}, false
+		f.root = root
+	case:
+		return {}, false
+	}
+	count := int(endian.unchecked_get_u16be(data[8 + EPOCH_FLOOR_ROOT_BYTES:EPOCH_FLOOR_HEADER_BYTES]))
+	if count > EPOCH_FLOOR_MAX_ENTRIES || len(data) != EPOCH_FLOOR_HEADER_BYTES + count * EPOCH_FLOOR_ENTRY_BYTES do return {}, false
+	off := EPOCH_FLOOR_HEADER_BYTES
 	prev: u32 = 0
 	for i in 0 ..< count {
 		e := endian.unchecked_get_u32be(data[off:off + 4])
@@ -161,4 +200,15 @@ keystore_read_epoch_floor :: proc(bridge_id: string) -> (f: Epoch_Floor, status:
 keystore_delete_epoch_floor :: proc(bridge_id: string) -> bool {
 	if !keystore_bridge_id_ok(bridge_id) do return true
 	return keystore_backend_delete(.Epoch_Floor, bridge_id)
+}
+
+// bridge_account_fingerprint is the pinned account root's fingerprint (the string a
+// human compares with Settings → Devices on an approved browser), or "" while no root
+// is pinned. Temp-allocated.
+bridge_account_fingerprint :: proc(bridge_id: string) -> string {
+	f, st := keystore_read_epoch_floor(bridge_id)
+	if st != .Found do return ""
+	fp, ok := vault.account_fingerprint(&f.root, context.temp_allocator)
+	if !ok do return ""
+	return fp
 }

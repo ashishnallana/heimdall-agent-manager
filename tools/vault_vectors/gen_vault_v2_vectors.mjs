@@ -315,6 +315,57 @@ const unsealKeyCanonical = `heimdall-bridge-unseal-key/v1\n${bridgeId}\n${hex(pu
 const unsealKeySig = signChecked(bridgeIdentityD, utf8(unsealKeyCanonical));
 const otherIdentityD = scalar('bridge-identity-other');
 
+// Bridge chain proof (plan §1 "Bridge keyring authentication"; the unseal payload's
+// `chain_proof`, built by src/ui/utils/vaultDirectoryVerify.ts buildBridgeChainProof).
+// Directory history: v0 genesis root A (epoch 1); v1 A approves browser B; v2 B approves
+// the bridge (identity = the bridge_unseal_key vector's key); v3 A approves C; v4 A
+// revokes C -> epoch 2, epoch-2 statement by A. Epoch issuer = root (issuer_chain []),
+// bridge approver = B (subject_approval.issuer_chain [B]).
+const deviceIdOf = (signRaw) => `dev_${hex(sha256(signRaw)).slice(0, 32)}`;
+const chainDevice = (name, kind, label) => {
+  const signD = scalar(`chain-${name}-sign`);
+  const ecdhD = kind === 'bridge' ? null : scalar(`chain-${name}-ecdh`);
+  return { kind, label, signD, sign_pub: hex(pubRaw(signD)), ecdh_pub: ecdhD ? hex(pubRaw(ecdhD)) : '', device_id: deviceIdOf(pubRaw(signD)) };
+};
+const chainA = chainDevice('root-a', 'browser', 'Desk Firefox');
+const chainB = chainDevice('browser-b', 'browser', 'Laptop Chrome');
+const chainC = chainDevice('browser-c', 'browser', 'Old phone');
+const chainBridge = { kind: 'bridge', label: 'build-box', signD: bridgeIdentityD, sign_pub: hex(pubRaw(bridgeIdentityD)), ecdh_pub: '', device_id: deviceIdOf(pubRaw(bridgeIdentityD)) };
+const subjectFields = (d) => ({
+  subject_device_id: d.device_id, subject_kind: d.kind, subject_sign_pub: d.sign_pub, subject_ecdh_pub: d.ecdh_pub,
+  subject_sign_alg: SIGN_ALG, subject_wrap_alg: d.kind === 'bridge' ? '' : WRAP_ALG,
+  subject_label_b64: Buffer.from(d.label, 'utf8').toString('base64url'),
+});
+const signedStatement = (issuer, fields) => {
+  const statement = statementCanonical({ user_id: USER_ID, issuer_device_id: issuer.device_id, ...fields });
+  return { statement, signature: sigObject(signChecked(issuer.signD, utf8(statement))) };
+};
+const commit1 = hex(epochCommit(K1, USER_ID, 1));
+const commit2 = hex(epochCommit(K2, USER_ID, 2));
+const chGenesis = signedStatement(chainA, { type: 'genesis', directory_version: '0', issued_at_ms: '1760000000000', ...subjectFields(chainA), epoch: '1', epoch_commit: commit1 });
+const chApproveB = signedStatement(chainA, { type: 'approve', directory_version: '1', issued_at_ms: '1760000001000', ...subjectFields(chainB), epoch: '1', epoch_commit: commit1, wrap_sha256: hex(seeded('chain-wrap-b', 32)) });
+const chApproveBridge = signedStatement(chainB, { type: 'approve', directory_version: '2', issued_at_ms: '1760000002000', ...subjectFields(chainBridge), epoch: '1', epoch_commit: commit1 });
+const chEpoch2 = signedStatement(chainA, { type: 'epoch', directory_version: '4', issued_at_ms: '1760000004001', epoch: '2', epoch_commit: commit2 });
+// Negative-test material: epoch 2 committed to a key that is not K2, by B.
+const chEpoch2ByB = signedStatement(chainB, { type: 'epoch', directory_version: '5', issued_at_ms: '1760000005000', epoch: '2', epoch_commit: commit2 });
+const chainLink = (d, approval) => ({
+  device_id: d.device_id, kind: d.kind, sign_alg: SIGN_ALG, sign_public_key: d.sign_pub,
+  approval_statement: approval.statement, approval_signature: approval.signature,
+});
+// Member order matches buildBridgeChainProof; signatures are signature-object JSON text.
+const chainProof = {
+  v: 1,
+  user_id: USER_ID,
+  root_device_id: chainA.device_id,
+  root_sign_alg: SIGN_ALG,
+  root_sign_pub: chainA.sign_pub,
+  genesis: { statement: chGenesis.statement, signature: chGenesis.signature },
+  epoch: { epoch: 2, statement: chEpoch2.statement, signature: chEpoch2.signature },
+  issuer_chain: [],
+  subject_approval: { statement: chApproveBridge.statement, signature: chApproveBridge.signature, issuer_chain: [chainLink(chainB, chApproveB)] },
+};
+const accountFingerprint = (() => { const h = hex(sha256(pubRaw(chainA.signD)).subarray(0, 8)); return `${h.slice(0, 4)} ${h.slice(4, 8)} ${h.slice(8, 12)} ${h.slice(12, 16)}`; })();
+
 // Unseal v2.
 const clientD = scalar('unseal-client-ephemeral');
 const unsealShared = ecdhShared(clientD, pubRaw(bridgeEcdhD));
@@ -460,6 +511,21 @@ const vectors = {
     keyring_hex: hex(kr),
     tag: hex(unsealSealed.tag),
     ciphertext: hex(unsealSealed.ct),
+  },
+  bridge_chain: {
+    user_id: USER_ID,
+    current_epoch: 2,
+    keyring_hex: hex(kr),
+    bridge_identity_public_key: chainBridge.sign_pub,
+    bridge_device_id: chainBridge.device_id,
+    account_fingerprint: accountFingerprint,
+    proof: chainProof,
+    proof_json: JSON.stringify(chainProof),
+    // Validly signed but wrong for this proof (negative tests).
+    epoch2_by_b: chEpoch2ByB,
+    approve_c_link: chainLink(chainC, signedStatement(chainA, { type: 'approve', directory_version: '3', issued_at_ms: '1760000003000', ...subjectFields(chainC), epoch: '1', epoch_commit: commit1 })),
+    // Test-only keys, so the Odin suite can sign extra negative statements.
+    private_keys: { root_a: hex(fromBig(chainA.signD)), browser_b: hex(fromBig(chainB.signD)) },
   },
   wrap: {
     user_id: USER_ID,

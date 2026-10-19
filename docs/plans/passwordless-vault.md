@@ -189,7 +189,20 @@ Consequences for the formats below: every signature is a JSON object `{"alg":…
 
 **Bridge keyring authentication** (added after the P1 security review, finding C1). The ECDH unseal alone does not say who sent the keyring, so a hostile hub could seal its own keyring to a bridge.
 - P1 (in place): the keyring's `user_id` must equal the bridge's enrolled owner, and once a keyring is stored a new one is accepted only as a strict superset (identical keys for every shared epoch, `current_epoch` not lower). No rollback.
-- P2/P3 (required): at enrollment approval the approving device gives the bridge, inside the sealed unseal payload, the account `root_sign_pub` to pin. Every later unseal carries the signed `epoch` statement for `current_epoch` plus the approval chain of its issuer; the bridge verifies the chain to the pinned root, checks that the issuer is an approved, non-bridge device, and checks `epoch_commit` against the unwrapped key before installing anything. Missing or invalid proof → refuse.
+- P2/P3 (implemented: `src/lib/vault/bridge_chain.odin`, called from `bridge_unseal_decrypt_and_verify`; sender `buildBridgeChainProof` in `src/ui/utils/vaultDirectoryVerify.ts`, TS reference verifier `verifyBridgeChainProof`; shared vector `bridge_chain` in `tests/fixtures/vault_v2_vectors.json`). Every unseal v2 payload carries a `chain_proof` member (public signed data, so it is not inside the AEAD; the sealed plaintext stays the HKR1 keyring and `format` stays `keyring-v1`):
+
+  ```json
+  {"v":1, "user_id", "root_device_id", "root_sign_alg", "root_sign_pub",
+   "genesis":{"statement","signature"},
+   "epoch":{"epoch":<current_epoch>,"statement","signature"},
+   "issuer_chain":[link…],                       // epoch issuer's approvals, root-first, root excluded
+   "subject_approval":{"statement","signature","issuer_chain":[link…]}}
+  // link = {"device_id","kind","sign_alg","sign_public_key","approval_statement","approval_signature"}
+  // signatures: the signature-object JSON text (or the object)
+  ```
+
+  The bridge refuses unless: `user_id` = its enrolled owner = the keyring's user; the root key/alg are valid and `root_device_id` is derived from `root_sign_pub`; the root equals the pinned root (the FIRST unseal after enrollment pins it, in the epoch-floor record `HEF2`, same persistence and fail-closed rules as the floor; kept across a lock, deleted with the identity); genesis is canonical, self-signed by the root and describes it, and the root's kind may approve; each link is a canonical `approve` by the previous link (root first) describing the link, whose id is derived from its key and whose kind may approve (never a bridge); the `epoch` statement is for exactly the keyring's `current_epoch`, issued and signed by the last `issuer_chain` link (or the root), with `epoch_commit` equal (constant time) to the HMAC of the delivered current key; `subject_approval` is a canonical `approve` by the last link of its own chain (or the root) whose subject is this bridge (`subject_kind=bridge`, `subject_sign_pub` = its identity key, id derived from it). Statement user_ids prove the owner; the hub-reported owner pinned at enrollment is only a consistency check.
+- Residual risks: (1) the first unseal is trusted to whoever sealed it — the approving device in the normal flow, but a hostile hub racing it could substitute its own root and keyring; `ham-bridge enroll` prints the pinned account fingerprint (first 8 bytes of SHA256(root_sign_pub), quads, as in Settings → Devices) for the owner to compare. (2) The proof carries no revocations, so a compromised approver keeps producing valid proofs after it is revoked; only the epoch floor stops it (it never learns the post-revocation epoch key), and only once the bridge has accepted that newer epoch — a bridge offline across the revocation can still be fed a fake newer epoch by it.
 - The bridge identity key lives in persistent storage on every OS and is created only at enrollment. If it is lost, the bridge enters "identity lost; re-enroll" and never regenerates on its own (finding H1).
 
 **Command epoch floor.** `enc_spec`, PTY input frames and search RPCs are rejected by the bridge unless epoch == current epoch.
