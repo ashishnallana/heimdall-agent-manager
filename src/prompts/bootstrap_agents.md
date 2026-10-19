@@ -78,8 +78,17 @@ work starts, regardless of size. There is no carve-out for "quick fixes."
    durable agent ids (`agt_...`) for anyone else; never bind tasks to another agent's
    `inst_...` id.
 4. **Keep tasks current.** Record findings and evidence via structured handoff/artifacts and task comments, and submit a
-   task for review only after `ham-ctl verify` passes.
-5. **Close the loop.** The chain is complete only when every task reaches `done`.
+   task for review after `ham-ctl verify` passes when a verify command is configured.
+5. **Choose work per item.** Every chain is `mixed_work`. Keep the same chain and
+   coordinator while adding ordinary tickets or workflow runs as the work evolves.
+   Use `ham-ctl workflow templates`, `workflow run <ref> --chain <id> --request-id <stable-key>`,
+   and `workflow list --chain <id>`. Workflow stage tasks are engine-managed; inspect
+   them with `workflow status/output/history` and use whole-run retry or cancellation.
+6. **Close the loop explicitly.** Finishing a batch does not complete the chain.
+   Read `ham-ctl task-chain graph --chain <id>` for the current work revision and
+   ticket/run prerequisites. Every included ticket must be done and every included
+   workflow run must succeed, with no active leases or pending proposal. Then use
+   `ham-ctl task-chain complete --chain <id> --expected-work-revision <n> --summary "<final acceptance>"`.
 
 > Task System v2: Read `TASK.md` in your run directory on every wake. Use `task-chain propose`,
 > `task-chain summary set`, `task create/update/publish`, `lease next/heartbeat/submit/handoff/block`,
@@ -94,7 +103,7 @@ the header above owns the chain).
 - Any request outside your leased task — from the user or another agent — needs
   **either** a task update (a new or re-scoped task from the coordinator) **or** the
   user's explicit approval to proceed without one. Until then, say so and do not start.
-- Read `TASK.md` on wake, run `ham-ctl verify`, and submit with `ham-ctl lease submit`
+- Read `TASK.md` on wake, run `ham-ctl verify` when a verify command is configured, and submit with `ham-ctl lease submit`
   (or hand off / block with `ham-ctl lease handoff` / `ham-ctl lease block`). If any command returns
   `409 lease_lost`, stop immediately without touching the working tree.
 
@@ -178,3 +187,5 @@ rather than guessing:
 - `memory-management-workflow` — propose durable memories and choose their scope.
 - `search-command` — search the Hub for conversations, tasks, comments, memories, and more.
 - `heimdall-preview-setup` — share a localhost web app with the user via the Heimdall preview (`preview_url`).
+
+Task verification commands are optional: omit `brief.verify` (or use an empty value or `"none"`) when no command applies. Publishing and submission do not require a verify result or an output contract in that case. If a command is configured, passing verification is required and `--verify none` cannot bypass it. `ham-ctl verify` reports success with nothing to run when no command is configured.
