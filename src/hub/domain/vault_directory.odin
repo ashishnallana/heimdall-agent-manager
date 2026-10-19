@@ -191,6 +191,9 @@ vault_kind_policy :: proc(kind: string) -> vault.Kind_Policy {
 VAULT_CODE_ALPHABET :: "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
 VAULT_CODE_SYMBOLS  :: 12
 VAULT_CODE_TTL_SECONDS :: 600
+// At most this many live (unexpired) pending devices per account; expired ones are
+// purged on every registration and hidden from the directory listing.
+VAULT_PENDING_PER_USER_MAX :: 10
 
 // normalize_vault_device_code folds case and ignores spaces/dashes; anything else, or
 // a symbol count other than 12, is rejected. The result is rebuilt from validated

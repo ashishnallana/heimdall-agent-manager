@@ -373,3 +373,39 @@ test_vault_bridge_entry_lifecycle :: proc(t: ^testing.T) {
 	dir, _, _ := iface.vault_get_directory(&f.repo, USER)
 	testing.expect_value(t, dir.version, i64(4))
 }
+
+// L2: per-user pending cap, purge of expired pending rows, deny, listing.
+@(test)
+test_vault_pending_cap_purge_and_deny :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	f := fixture(t)
+	defer fixture_close(f)
+	a := make_dev(1)
+	do_genesis(t, f, &a)
+	for i in 0 ..< domain.VAULT_PENDING_PER_USER_MAX {
+		d := make_dev(byte(40 + i))
+		do_register(t, f, &d)
+	}
+	extra := make_dev(80)
+	s := statement("register", &extra, &extra, "", "")
+	_, capped := register(&f.svc, USER, s, sign(&extra, s))
+	testing.expect_value(t, capped.code, domain.Error_Code.Rate_Limited)
+
+	// Deny frees a slot; denying again (or a non-pending device) is 404.
+	first := make_dev(40)
+	testing.expect_value(t, deny(&f.svc, USER, first.id).code, domain.Error_Code.None)
+	testing.expect_value(t, deny(&f.svc, USER, first.id).code, domain.Error_Code.Not_Found)
+	testing.expect_value(t, deny(&f.svc, USER, a.id).code, domain.Error_Code.Not_Found)
+	_, ok_err := register(&f.svc, USER, s, sign(&extra, s))
+	testing.expect_value(t, ok_err.code, domain.Error_Code.None)
+
+	// After the codes expire they are hidden from the listing and purged on the next
+	// registration, so the cap no longer blocks.
+	f.now = "2026-10-19T10:11:00Z"
+	view, _ := get_directory(&f.svc, USER)
+	testing.expect_value(t, len(view.devices), 1) // only the root
+	late := make_dev(81)
+	do_register(t, f, &late)
+	all, _ := iface.vault_list_devices(&f.repo, USER)
+	testing.expect_value(t, len(all), 2)
+}

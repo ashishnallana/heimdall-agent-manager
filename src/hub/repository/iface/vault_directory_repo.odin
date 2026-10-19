@@ -11,11 +11,14 @@ Vault_List_Devices_Proc :: proc(ctx: rawptr, user_id: string) -> ([]domain.Vault
 Vault_List_Epochs_Proc :: proc(ctx: rawptr, user_id: string) -> ([]domain.Vault_Epoch, domain.Domain_Error)
 Vault_Get_Wrap_Proc :: proc(ctx: rawptr, user_id, device_id: string) -> (domain.Vault_Wrap_Row, bool, domain.Domain_Error)
 Vault_Find_Pending_By_Code_Proc :: proc(ctx: rawptr, user_id, user_code: string) -> (domain.Vault_Device, bool, domain.Domain_Error)
-// register_pending inserts a pending device, or returns the existing row for the same
-// (user_id, sign_public_key). An existing PENDING row whose code has expired at `now`
-// gets `device.user_code` / `device.code_expires_at`. A code collision returns
-// Conflict with details reason "code_collision" (the caller retries with a fresh code).
+// register_pending first purges the user's expired pending rows, then inserts a
+// pending device, or returns the existing row for the same (user_id,
+// sign_public_key). A NEW row is refused with Rate_Limited (reason "pending_cap")
+// when the user already has VAULT_PENDING_PER_USER_MAX live pending devices. A code
+// collision returns Conflict with reason "code_collision" (the caller retries).
 Vault_Register_Pending_Proc :: proc(ctx: rawptr, device: domain.Vault_Device, now: string) -> (domain.Vault_Device, domain.Domain_Error)
+// delete_pending removes a PENDING device (deny). False when no such pending row.
+Vault_Delete_Pending_Proc :: proc(ctx: rawptr, user_id, device_id: string) -> (bool, domain.Domain_Error)
 Vault_Touch_Last_Seen_Proc :: proc(ctx: rawptr, user_id, device_id, now: string) -> domain.Domain_Error
 // create_genesis writes the first directory version; Conflict if one exists.
 Vault_Create_Genesis_Proc :: proc(ctx: rawptr, genesis: domain.Vault_Genesis) -> domain.Domain_Error
@@ -44,6 +47,7 @@ Vault_Directory_Repository :: struct {
 	find_pending_by_code: Vault_Find_Pending_By_Code_Proc,
 	register_pending:     Vault_Register_Pending_Proc,
 	touch_last_seen:      Vault_Touch_Last_Seen_Proc,
+	delete_pending:       Vault_Delete_Pending_Proc,
 	create_genesis:       Vault_Create_Genesis_Proc,
 	commit:               Vault_Commit_Proc,
 	get_reset:            Vault_Get_Reset_Proc,
@@ -126,4 +130,9 @@ vault_list_due_resets :: proc(repo: ^Vault_Directory_Repository, now: string) ->
 vault_execute_reset :: proc(repo: ^Vault_Directory_Repository, user_id, now: string) -> (bool, domain.Domain_Error) {
 	if repo == nil || repo.execute_reset == nil do return false, vault_repo_missing()
 	return repo.execute_reset(repo.ctx, user_id, now)
+}
+
+vault_delete_pending :: proc(repo: ^Vault_Directory_Repository, user_id, device_id: string) -> (bool, domain.Domain_Error) {
+	if repo == nil || repo.delete_pending == nil do return false, vault_repo_missing()
+	return repo.delete_pending(repo.ctx, user_id, device_id)
 }

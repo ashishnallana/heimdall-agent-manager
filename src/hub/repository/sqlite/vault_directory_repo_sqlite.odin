@@ -54,6 +54,7 @@ new_vault_directory_repository :: proc(impl: ^Vault_Directory_Repo_SQLite, conn:
 		find_pending_by_code = vault_find_pending_by_code_sqlite,
 		register_pending     = vault_register_pending_sqlite,
 		touch_last_seen      = vault_touch_last_seen_sqlite,
+		delete_pending       = vault_delete_pending_sqlite,
 		create_genesis       = vault_create_genesis_sqlite,
 		commit               = vault_commit_sqlite,
 		get_reset            = vault_get_reset_sqlite,
@@ -296,6 +297,16 @@ vault_register_pending_sqlite :: proc(ctx: rawptr, device: domain.Vault_Device, 
 	committed := false
 	defer if !committed do _ = exec(conn, "ROLLBACK;")
 
+	// Expired pending rows are purged first (an expired same-key row is then simply
+	// registered again with a fresh code).
+	{
+		stmt, ok := prepare(conn, "DELETE FROM vault_devices WHERE user_id = ? AND status = 'pending' AND code_expires_at <= ?;")
+		if !ok do return {}, repo_err("failed to prepare pending purge")
+		defer sqlite3_finalize(stmt)
+		bind_text(stmt, 1, device.user_id)
+		bind_text(stmt, 2, now)
+		if sqlite3_step(stmt) != SQLITE_DONE do return {}, repo_err("failed to purge expired pending devices")
+	}
 	existing, found, read_ok := find_by_key_on(conn, device.user_id, device.sign_public_key)
 	if !read_ok do return {}, repo_err("failed to read vault device")
 	if found {
@@ -321,6 +332,16 @@ vault_register_pending_sqlite :: proc(ctx: rawptr, device: domain.Vault_Device, 
 		committed = true
 		return existing, domain.Domain_Error{}
 	}
+	{
+		stmt, ok := prepare(conn, "SELECT COUNT(*) FROM vault_devices WHERE user_id = ? AND status = 'pending';")
+		if !ok do return {}, repo_err("failed to prepare pending count")
+		defer sqlite3_finalize(stmt)
+		bind_text(stmt, 1, device.user_id)
+		if sqlite3_step(stmt) != SQLITE_ROW do return {}, repo_err("failed to count pending devices")
+		if sqlite3_column_int64(stmt, 0) >= domain.VAULT_PENDING_PER_USER_MAX {
+			return {}, domain.vault_reason_error(.Rate_Limited, "pending_cap", "too many devices are waiting for approval; approve or deny one, or wait for a code to expire")
+		}
+	}
 	if !insert_device_on(conn, device) {
 		// UNIQUE(user_code) for a collision, or the global device_id primary key when
 		// another account registered this exact key: both refuse without writing.
@@ -329,6 +350,21 @@ vault_register_pending_sqlite :: proc(ctx: rawptr, device: domain.Vault_Device, 
 	if !exec(conn, "COMMIT;") do return {}, repo_err("failed to commit vault registration")
 	committed = true
 	return device, domain.Domain_Error{}
+}
+
+vault_delete_pending_sqlite :: proc(ctx: rawptr, user_id, device_id: string) -> (bool, domain.Domain_Error) {
+	impl := (^Vault_Directory_Repo_SQLite)(ctx)
+	sync.mutex_lock(&impl.mutex)
+	defer sync.mutex_unlock(&impl.mutex)
+	conn := write_conn(impl)
+	stmt, ok := prepare(conn, "DELETE FROM vault_devices WHERE device_id = ? AND user_id = ? AND status = 'pending';")
+	if !ok do return false, repo_err("failed to prepare pending delete")
+	defer sqlite3_finalize(stmt)
+	bind_text(stmt, 1, device_id)
+	bind_text(stmt, 2, user_id)
+	rc, changes := step_changes(conn.db, stmt)
+	if rc != SQLITE_DONE do return false, repo_err("failed to delete pending device")
+	return changes == 1, domain.Domain_Error{}
 }
 
 vault_touch_last_seen_sqlite :: proc(ctx: rawptr, user_id, device_id, now: string) -> domain.Domain_Error {

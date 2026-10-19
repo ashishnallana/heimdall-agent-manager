@@ -346,7 +346,14 @@ get_directory :: proc(svc: ^Service, user_id: string) -> (Directory_View, domain
 	if derr.code != .None do return {}, derr
 	epochs, eerr := iface.vault_list_epochs(svc.repo, user_id)
 	if eerr.code != .None do return {}, eerr
-	view := Directory_View{directory = dir, devices = devices, epochs = epochs}
+	// Expired pending devices are not listed (they can no longer be approved).
+	now := platform.clock_now(svc.clock)
+	listed := make([dynamic]domain.Vault_Device, 0, len(devices), context.temp_allocator)
+	for d in devices {
+		if d.status == .Pending && d.code_expires_at <= now do continue
+		append(&listed, d)
+	}
+	view := Directory_View{directory = dir, devices = listed[:], epochs = epochs}
 	// The root's key comes from the self-signed genesis statement (what a client
 	// pins), not from the device row.
 	if st, ok := vault.statement_parse(dir.genesis_statement); ok {
@@ -585,6 +592,20 @@ approve :: proc(svc: ^Service, in_: Approve_Input) -> (i64, domain.Domain_Error)
 		cm.wraps = []domain.Vault_Wrap_Row{row}
 	}
 	return iface.vault_commit(svc.repo, cm)
+}
+
+// ── Deny ────────────────────────────────────────────────────────────────────
+
+// deny removes a pending device. Called after verify_request(.Approver), so only an
+// approved approver device of the account can deny. Not a directory mutation (pending
+// rows are not part of the signed chain), so there is no version. Unknown or
+// non-pending devices are 404.
+deny :: proc(svc: ^Service, user_id, device_id: string) -> domain.Domain_Error {
+	if !vault.valid_device_id(device_id) do return domain.domain_error(.Not_Found, "no pending device with that id")
+	removed, err := iface.vault_delete_pending(svc.repo, user_id, device_id)
+	if err.code != .None do return err
+	if !removed do return domain.domain_error(.Not_Found, "no pending device with that id")
+	return domain.Domain_Error{}
 }
 
 // ── Bridge approval (via /device/approve) ───────────────────────────────────

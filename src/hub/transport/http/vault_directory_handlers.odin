@@ -379,6 +379,21 @@ vault_approve_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	return respond_success(version_json(new_version), req.request_id, auth_ctx_server_time(req))
 }
 
+// ── POST /api/v1/vault/devices/{id}/deny ────────────────────────────────────
+// Signed by an approved approver device; removes a pending device. Body ignored
+// (but signed). {} on success; 404 when there is no such pending device.
+vault_deny_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Vault_Directory_Handlers)(ctx)
+	auth, ok, resp := require_vault_user(h, req)
+	if !ok do return resp
+	_, serr := vd.verify_request(h.vault, auth.user_id, signed_request(req), .Approver)
+	if serr.code != .None do return respond_error(serr, req.request_id)
+	device_id := device_id_from_path(req)
+	if err := vd.deny(h.vault, auth.user_id, device_id); err.code != .None do return respond_error(err, req.request_id)
+	publish(h, auth.user_id, device_id, "denied")
+	return respond_success(`{}`, req.request_id, auth_ctx_server_time(req))
+}
+
 // ── POST /api/v1/vault/devices/{id}/revoke ──────────────────────────────────
 // {expected_version, revoke_statement, signature, epoch_statement, epoch_signature, wraps:[…]}
 vault_revoke_handler :: proc(ctx: rawptr, req: Request) -> Response {
