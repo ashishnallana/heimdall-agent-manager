@@ -91,11 +91,17 @@ label_from_b64 :: proc(b64: string, allocator := context.allocator) -> (string, 
 	// Leftover bits must be zero padding and fewer than a byte (a length of 4n+1 is impossible).
 	if bits >= 6 || acc != 0 do return "", false
 	label := string(out[:])
-	if len(label) == 0 || len(label) > LABEL_MAX_BYTES || !utf8.valid_string(label) do return "", false
-	for r in label {
-		if r < 0x20 || (r >= 0x7f && r < 0xa0) || r == 0x2028 || r == 0x2029 do return "", false
-	}
+	if !label_valid(label) do return "", false
 	return strings.clone(label, allocator), true
+}
+
+// label_valid: 1..128 bytes of valid UTF-8 with no control or line-separator characters.
+label_valid :: proc(label: string) -> bool {
+	if len(label) == 0 || len(label) > LABEL_MAX_BYTES || !utf8.valid_string(label) do return false
+	for r in label {
+		if r < 0x20 || (r >= 0x7f && r < 0xa0) || r == 0x2028 || r == 0x2029 do return false
+	}
+	return true
 }
 
 // valid_decimal reports a non-empty base-10 number with no sign and no leading zero.
