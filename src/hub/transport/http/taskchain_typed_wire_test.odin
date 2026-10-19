@@ -491,9 +491,8 @@ test_write_chain_json_pinned :: proc(t: ^testing.T) {
 		description                   = "Description",
 		publish_state                 = .Published,
 		status                        = .Active,
-		kind                          = domain.CHAIN_KIND_TICKET,
+		kind                          = domain.CHAIN_KIND_MIXED_WORK,
 		coordinator_agent_instance_id = "inst_coord",
-		workflow_def_ref              = "",
 		defaults_json                 = `{"auto_submit":false}`,
 		created_at                    = "2026-09-21T09:00:00Z",
 		updated_at                    = "2026-09-21T09:10:00Z",
@@ -507,7 +506,6 @@ test_write_chain_json_pinned :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(out, `"is_pinned":true`), "must serialize is_pinned true")
 	testing.expect(t, strings.contains(out, `"pinned_at":"2026-09-21T09:10:00Z"`), "must serialize pinned_at")
 	testing.expect(t, strings.contains(out, `"kind":"ticket"`), "must serialize kind")
-	testing.expect(t, strings.contains(out, `"workflow_def_ref":""`), "must serialize workflow_def_ref")
 	testing.expect(t, strings.contains(out, `"defaults":{"auto_submit":false}`), "must splice defaults as an object")
 	testing.expect(t, !strings.contains(out, `default_reviewer_refs`), "v2 chain wire must not carry default_reviewer_refs")
 }

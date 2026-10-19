@@ -232,9 +232,15 @@ resolve_task_id :: proc(transport: Ctl_Transport, args: []string) -> string {
 
 print_task_chains_help :: proc(action: string) {
 	_ = action
-	fmt.println("usage: ham-ctl task-chains <list|coordinated|create|show|update|members|fleet|directory|add-agent|publish|complete|reopen|archive|unarchive|pin|unpin>")
+	fmt.println("usage: ham-ctl task-chains <list|coordinated|create|show|update|members|fleet|directory|add-agent|publish|graph|depend|remove-dependency|scope|complete|reopen|archive|unarchive|pin|unpin>")
 	fmt.println("  coordinated [--agent-id <instance_id>]  list chains an agent coordinates (default: your own instance)")
 	fmt.println("  fleet <list|set>                        manage chain fleet capacities")
+    fmt.println("  graph --chain ID                       read dependencies, scope and current work_revision")
+    fmt.println("  depend --chain ID --item task:ID|workflow_run:ID --on task:ID|workflow_run:ID")
+    fmt.println("  remove-dependency --chain ID --dependency ID --reason TEXT")
+    fmt.println("  scope --chain ID --item REF --action include|exclude --reason TEXT")
+    fmt.println("  complete --chain ID --expected-work-revision N --summary TEXT")
+    fmt.println("All chains are mixed_work. Completing a batch does not complete the chain.")
 }
 
 ctl_task_chains_fleet_command :: proc(transport: Ctl_Transport, tokens: []string, args: []string) {
@@ -320,6 +326,11 @@ ctl_task_chains_command :: proc(cmd: []string, args: []string) {
 
 	transport, ok := resolve_ctl_transport(args)
 	if !ok do return
+
+	if action == "graph" || action == "depend" || action == "remove-dependency" || action == "scope" || action == "complete" {
+		ctl_mixed_work_command(transport, action, args)
+		return
+	}
 
 	if action == "fleet" || action == "fleets" {
 		ctl_task_chains_fleet_command(transport, cmd[idx + 1:], args)
@@ -418,7 +429,7 @@ ctl_task_chains_command :: proc(cmd: []string, args: []string) {
 		defer delete(fields)
 		append(&fields, json_kv("title", title))
 		append(&fields, json_kv("description", desc))
-		append(&fields, json_kv("kind", option_value(args, "--kind", "team_work")))
+		append(&fields, json_kv("kind", option_value(args, "--kind", "mixed_work")))
 		append(&fields, json_kv("coordinator_agent_id", option_value(args, "--coordinator-agent-id", option_value(args, "--coordinator", ""))))
 		append(&fields, json_kv("bridge_id", option_value(args, "--bridge-id", option_value(args, "--bridge", ""))))
 		append(&fields, json_kv("project_id", option_value(args, "--project-id", option_value(args, "--project", ""))))
@@ -596,10 +607,7 @@ ctl_task_chains_command :: proc(cmd: []string, args: []string) {
 		return
 	}
 
-	if action == "complete" {
-		ctl_tasks_request(transport, "POST", fmt.tprintf("/api/v1/task-chains/%s/complete", safe_path_part(chain_id)), "{}")
-		return
-	}
+
 
 	if action == "pin" {
 		ctl_tasks_request(transport, "POST", fmt.tprintf("/api/v1/task-chains/%s/pin", safe_path_part(chain_id)), "{\"pinned\":true}")

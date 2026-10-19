@@ -11,6 +11,8 @@ import { EMPTY_TASK_NAMES, type TaskNames } from './taskNames';
 export interface TicketBoardViewProps {
   chainId: string;
   tasks: TaskWire[];
+  /** Includes current run tasks for truthful chain-wide progress and attention. */
+  summaryTasks?: TaskWire[];
   chainFleets?: TaskChainFleet[];
   /** The card expanded inline (plan REQ-UI-8). */
   expandedTaskId?: string | null;
@@ -30,6 +32,9 @@ export interface TicketBoardViewProps {
   summaryText?: string;
   /** Rendered directly under the summary bar (the chain overview mounts its Active servers panel here). */
   summarySlot?: React.ReactNode;
+  /** Whole workflow runs in the same chain, rendered vertically before tickets. */
+  workSlot?: React.ReactNode;
+  hasWorkflowRuns?: boolean;
   names?: TaskNames;
   className?: string;
 }
@@ -92,6 +97,7 @@ function isFinished(t: TaskWire): boolean {
 export const TicketBoardView: React.FC<TicketBoardViewProps> = ({
   chainId,
   tasks = [],
+  summaryTasks = tasks,
   chainFleets = [],
   expandedTaskId,
   onToggleTask,
@@ -106,6 +112,8 @@ export const TicketBoardView: React.FC<TicketBoardViewProps> = ({
   publishError,
   summaryText,
   summarySlot,
+  workSlot,
+  hasWorkflowRuns = false,
   names = EMPTY_TASK_NAMES,
   className = '',
 }) => {
@@ -115,7 +123,7 @@ export const TicketBoardView: React.FC<TicketBoardViewProps> = ({
   const sorted = useMemo(() => sortTasksForBoard(tasks), [tasks]);
   // The needs-you filter turns itself off once nothing needs you, so it can
   // never strand the board empty with no way back (audit finding).
-  const filtering = needsYouOnly && sorted.some(taskNeedsYou);
+  const filtering = !hasWorkflowRuns && needsYouOnly && sorted.some(taskNeedsYou);
   const visible = filtering ? sorted.filter(taskNeedsYou) : sorted;
   const sections = useMemo(() => groupForBoard(visible, expandedTaskId), [visible, expandedTaskId]);
   const finished = visible.filter((t) => isFinished(t) && t.task_id !== expandedTaskId);
@@ -140,12 +148,12 @@ export const TicketBoardView: React.FC<TicketBoardViewProps> = ({
   return (
     <div data-debug-id="ticket-board-view" className={`flex flex-col gap-5 p-4 text-left sm:p-5 ${className}`}>
       <TaskSummaryBar
-        tasks={tasks}
+        tasks={summaryTasks}
         chainFleets={chainFleets}
         kind="ticket"
         summaryText={summaryText}
         needsYouActive={filtering}
-        onToggleNeedsYou={() => setNeedsYouOnly((v) => !v)}
+        onToggleNeedsYou={hasWorkflowRuns ? undefined : () => setNeedsYouOnly((v) => !v)}
         menuItems={[
           ...(onOpenFleetDrawer ? [{ label: 'Fleet', onClick: onOpenFleetDrawer, debugId: 'task-board-fleet-btn' }] : []),
           ...(onOpenReviewRoles ? [{ label: 'Review roles', onClick: onOpenReviewRoles, debugId: 'task-board-review-roles-btn' }] : []),
@@ -169,15 +177,17 @@ export const TicketBoardView: React.FC<TicketBoardViewProps> = ({
         </Text>
       )}
       {summarySlot}
+      {workSlot}
+      {hasWorkflowRuns && tasks.length > 0 && <Text role="overline" tone="faint" className="uppercase">Tickets {tasks.length}</Text>}
 
-      {tasks.length === 0 ? (
+      {tasks.length === 0 ? hasWorkflowRuns ? null : (
         <EmptyState
           icon="tasks"
           title="No tasks yet"
           description="Add a task with a goal, acceptance checks and a verify command."
           action={
             onNewTask ? (
-              <Button size="sm" variant="primary" onClick={onNewTask}>
+              <Button size="sm" variant="primary" data-debug-id="task-board-empty-new-task-btn" onClick={onNewTask}>
                 New task
               </Button>
             ) : undefined

@@ -741,7 +741,7 @@ test_chain_cancel_reclaims_leases :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_dep_added_to_leased_task_expires_noncounting :: proc(t: ^testing.T) {
+test_dep_added_to_started_work_is_rejected_without_releasing_lease :: proc(t: ^testing.T) {
 	fx, log, ok := lease_fixture(t, "c_dep")
 	defer lease_fixture_close(fx, log)
 	if !ok do return
@@ -751,18 +751,16 @@ test_dep_added_to_leased_task_expires_noncounting :: proc(t: ^testing.T) {
 	a := publish_task(t, fx, chain, "task_a")
 	testing.expect_value(t, a.state, domain.Task_State.In_Progress)
 	b := publish_task(t, fx, chain, "task_b")
-	// a now depends on b (unfinished) → a's lease expires (dep_added), a goes to backlog; b gets the worker
-	_, _, _ = iface.taskchain_save_dependency(&fx.repo, domain.Task_Dependency{task_id = a.task_id, depends_on_task_id = b.task_id, chain_id = chain.chain_id, owner_user_id = "u1", created_at = platform.clock_now(&fx.clock)})
-	testing.expect(t, dep_added(&fx.svc, get_task(fx, "task_a"), b.task_id, Actor{kind = ACTOR_USER, id = "u1"}).code == .None, "dep_added")
-	ra := get_task(fx, "task_a")
-	testing.expect_value(t, ra.state, domain.Task_State.Backlog)
-	testing.expect(t, strings.contains(last_event_payload(fx, "task_a", EV_LEASE_EXPIRED), `"reason":"dep_added"`), "dep_added expiry")
-	l, held := lease_of(fx, "inst_w1")
-	testing.expect(t, held && l.task_id == "task_b", "worker moved to b")
-	// attempt rows: a's attempt 1 closed, non-counting
-	attempts, _ := iface.taskchain_list_attempts_by_task(&fx.repo, a.task_id, "u1")
-	testing.expect(t, len(attempts) == 1 && attempts[0].ended_at != "" && strings.has_prefix(attempts[0].outcome, "expired:dep_added"), "attempt closed")
-	assert_projection_matches_fold(t, fx, chain.chain_id, "u1", "dep")
+    _, accepted, err := work_dependency_add(&fx.svc, "u1", Actor{kind = ACTOR_USER, id = "u1"}, chain.chain_id,
+        domain.Work_Item_Ref{kind = domain.WORK_ITEM_TASK, id = string(a.task_id)},
+        domain.Work_Item_Ref{kind = domain.WORK_ITEM_TASK, id = string(b.task_id)})
+    testing.expect(t, !accepted && err.code == .Conflict, "started work input contract is immutable")
+    lease, held := lease_of(fx, "inst_w1")
+    testing.expect(t, held && lease.task_id == a.task_id, "original lease retained")
+    testing.expect_value(t, get_task(fx, "task_a").state, domain.Task_State.In_Progress)
+    edges, _ := iface.taskchain_list_work_dependencies(&fx.repo, chain.chain_id, "u1")
+    testing.expect(t, len(edges) == 0, "rejection leaves no edge")
+    assert_projection_matches_fold(t, fx, chain.chain_id, "u1", "rejected dependency")
 }
 
 // ---- reviews ------------------------------------------------------------------------------

@@ -264,6 +264,52 @@ Deferred_Effects :: struct {
 	effects: Effects,
 }
 
+// Move a successfully released savepoint's effects into its parent. Payloads
+// and owned map keys transfer with the arrays; only source containers are freed.
+move_effects :: proc(dst, src: ^Effects) {
+	for key, entries in src.runs {
+		current := dst.runs[key]
+		for entry in entries {
+			replaced := false
+			for &existing in current {
+				if existing.agent_instance_id == entry.agent_instance_id { existing = entry; replaced = true }
+			}
+			if !replaced do append(&current, entry)
+			// Preserve effect_wake_lease's restart-wins rule across the
+			// savepoint boundary: a released old lease may have queued a stop.
+			stops := dst.stops[key]
+			for i := len(stops) - 1; i >= 0; i -= 1 {
+				if stops[i] == entry.agent_instance_id do ordered_remove(&stops, i)
+			}
+			dst.stops[key] = stops
+		}
+		dst.runs[key] = current
+		delete(entries)
+	}
+	for key, entries in src.stops {
+		current := dst.stops[key]
+		for entry in entries {
+			already_present := false
+			for run in dst.runs[key] do if run.agent_instance_id == entry { already_present = true; break }
+			for stop in current do if stop == entry { already_present = true; break }
+			if !already_present do append(&current, entry)
+		}
+		dst.stops[key] = current
+		delete(entries)
+	}
+	delete(src.runs)
+	delete(src.stops)
+	append(&dst.publishes, ..src.publishes[:]); delete(src.publishes)
+	append(&dst.changed_chains, ..src.changed_chains[:]); delete(src.changed_chains)
+	append(&dst.reservations, ..src.reservations[:]); delete(src.reservations)
+	append(&dst.notifications, ..src.notifications[:]); delete(src.notifications)
+	append(&dst.merges, ..src.merges[:]); delete(src.merges)
+	append(&dst.nudges, ..src.nudges[:]); delete(src.nudges)
+	append(&dst.attention_tasks, ..src.attention_tasks[:]); delete(src.attention_tasks)
+	append(&dst.keys, ..src.keys[:]); delete(src.keys)
+	src^ = Effects{}
+}
+
 @(private = "file")
 deferred_effects_run :: proc(ctx: rawptr) {
 	d := (^Deferred_Effects)(ctx)
@@ -273,7 +319,7 @@ deferred_effects_run :: proc(ctx: rawptr) {
 	free(d)
 }
 
-@(private = "file")
+@(private = "package")
 cancel_reservations :: proc(svc: ^Service, e: ^Effects) {
 	if svc.agent_service == nil do return
 	for r in e.reservations {
@@ -281,7 +327,7 @@ cancel_reservations :: proc(svc: ^Service, e: ^Effects) {
 	}
 }
 
-@(private = "file")
+@(private = "package")
 destroy_effects :: proc(e: ^Effects) {
 	for _, entries in e.runs do delete(entries)
 	delete(e.runs)
@@ -483,7 +529,13 @@ refold_task :: proc(svc: ^Service, u: ^Uow, task: domain.Task, tasks: []domain.T
 	}
 	evs, ev_err := iface.taskchain_list_events_by_task(svc.repo, task.task_id, task.owner_user_id)
 	if ev_err.code != .None do return task, Task_View{}, false, ev_err
-	view := fold_task(evs, fold_input_for_task(task, deps_done_for(task.task_id, all_tasks, all_deps)))
+	deps_done := deps_done_for(task.task_id, all_tasks, all_deps)
+	if deps_done && task.stage_key == "" && task.kind == .Task {
+		ready, err := work_dependencies_ready_in_uow(svc, task.chain_id, task.owner_user_id, domain.Work_Item_Ref{kind = domain.WORK_ITEM_TASK, id = string(task.task_id)})
+		if err.code != .None do return task, Task_View{}, false, err
+		deps_done = ready
+	}
+	view := fold_task(evs, fold_input_for_task(task, deps_done))
 	now := platform.clock_now(svc.clock)
 	next := apply_view_to_task(task, view, now)
 	if projection_equal(task, next) do return task, view, true, domain.Domain_Error{}
@@ -554,8 +606,14 @@ check_coordinator_attention_on_refold :: proc(svc: ^Service, u: ^Uow, before, af
 		}
 		if all_done {
 			chain, cok, _ := iface.taskchain_get_chain(svc.repo, after.chain_id)
-			if !cok || chain.kind != domain.CHAIN_KIND_WORKFLOW || workflow_all_stages_complete(svc, chain, all_tasks) {
-				effect_notify_coordinator(svc, u, after.chain_id, after.owner_user_id, "chain_complete", fmt.tprintf("[taskv2] chain_complete: chain %s has all %d tasks in terminal state", after.chain_id, len(all_tasks)))
+			if cok {
+				runs, _ := iface.taskchain_list_workflow_runs(svc.repo, chain.chain_id, chain.owner_user_id)
+				idle := true
+				for run in runs {
+					execution, ok, _ := iface.taskchain_get_workflow_execution(svc.repo, run.run_id, run.current_execution_no, chain.owner_user_id)
+					if !ok || execution.state == "draft" || execution.state == "pending" || execution.state == "running" do idle = false
+				}
+				if idle do effect_notify_coordinator(svc, u, after.chain_id, after.owner_user_id, "work_batch_finished", "[taskv2] current batch finished; assess the goal, add work, or explicitly complete the chain")
 			}
 		}
 	}
@@ -765,25 +823,19 @@ release_task_blocks_in_uow :: proc(svc: ^Service, u: ^Uow, tasks: []domain.Task)
 after_chain_change :: proc(svc: ^Service, u: ^Uow, chain_id: domain.Task_Chain_ID, owner: domain.User_ID, trigger: Trigger) -> (bool, domain.Domain_Error) {
 	chain, ok, err := iface.taskchain_get_chain(svc.repo, chain_id)
 	if !ok do return false, err
-	tasks, rok, rerr := refold_chain(svc, u, chain)
-	if !rok do return false, rerr
-	if released, uok, uerr := release_task_blocks_in_uow(svc, u, tasks); !uok {
-		return false, uerr
-	} else if released {
-		tasks, rok, rerr = refold_chain(svc, u, chain)
+	// Settle run/task dependencies together; a successful run can release
+	// another run or a ticket in this same transaction.
+	for pass := 0; pass < 130; pass += 1 {
+		tasks, rok, rerr := refold_chain(svc, u, chain)
 		if !rok do return false, rerr
+		_, uok, uerr := release_task_blocks_in_uow(svc, u, tasks)
+		if !uok do return false, uerr
+		if tok, terr := trigger_on_output_workflows_in_uow(svc, u, chain, tasks); !tok do return false, terr
+		changed, wok, werr := workflow_reconcile_chain(svc, u, chain)
+		if !wok do return false, werr
+		if !changed do break
 	}
-	if chain.kind == domain.CHAIN_KIND_WORKFLOW && chain.workflow_snapshot_json != "" {
-		if mat_changed, mok, merr := materialize_ready_stages_in_uow(svc, u, chain); !mok {
-			return false, merr
-		} else if mat_changed {
-			tasks, rok, rerr = refold_chain(svc, u, chain)
-			if !rok do return false, rerr
-		}
-	}
-	if tok, terr := trigger_on_output_workflows_in_uow(svc, u, chain, tasks); !tok {
-		return false, terr
-	}
+	if _, ok, err := refold_chain(svc, u, chain); !ok do return false, err
 	#partial switch trigger {
 	case .Lease_Released, .Lease_Expired, .Review_Posted, .Task_Reopened, .Task_Cancelled, .Chain_Published, .Task_Published:
 		rebuild_chain_summary_in_uow(svc, u, chain)

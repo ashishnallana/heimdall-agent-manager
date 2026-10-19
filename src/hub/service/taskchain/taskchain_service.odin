@@ -438,10 +438,10 @@ create_chain :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, 
 	owner, ok, err := ownership.owner_from_auth(auth)
 	if !ok do return domain.Task_Chain{}, false, err
 	if input.title == "" do return domain.Task_Chain{}, false, domain.domain_error(.Validation_Failed, "chain title is required")
-	// `team_work` (pre-v2 default) is accepted as an alias for `ticket` at this
-	// boundary only, so older ctl binaries and fixtures keep working.
+	// Only mixed_work is accepted; an empty value uses that same default at this
+	// boundary. Deprecated execution types fail validation.
 	kind, kind_ok := domain.normalize_chain_kind(input.kind)
-	if !kind_ok do return domain.Task_Chain{}, false, domain.domain_error(.Validation_Failed, "chain kind must be ticket or workflow")
+	if !kind_ok do return domain.Task_Chain{}, false, domain.domain_error(.Validation_Failed, "all task chains use kind mixed_work; ticket/workflow chain types are unsupported")
 	now := platform.clock_now(service.clock)
 	coordinator_id := input.coordinator_agent_id
 	if auth.kind == .Instance_Token && coordinator_id == "" {
@@ -484,11 +484,19 @@ create_chain :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, 
 }
 
 update_chain :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, chain_id: domain.Task_Chain_ID, input: Update_Chain_Input) -> (domain.Task_Chain, bool, domain.Domain_Error) {
+ v := verb_begin(service)
+ out, ok, err := update_chain_impl(service, auth, chain_id, input)
+ if cerr := verb_end(&v, ok); cerr.code != .None do return {}, false, cerr
+ return out, ok, err
+}
+
+update_chain_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, chain_id: domain.Task_Chain_ID, input: Update_Chain_Input) -> (domain.Task_Chain, bool, domain.Domain_Error) {
 	chain, ok, err := get_chain(service, auth, chain_id)
 	if !ok do return domain.Task_Chain{}, false, err
 	if auth.kind == .Instance_Token && !is_chain_coordinator(service, chain, auth.agent_instance_id) {
 		return domain.Task_Chain{}, false, domain.domain_error(.Forbidden, "only chain coordinator can perform this action")
 	}
+	if input.status != "" && chain_status_from_string(input.status) == .Completed do return {}, false, domain.domain_error(.Validation_Failed, "use complete with expected_work_revision and final summary")
 	if input.title != "" do chain.title = input.title
 	if input.title_source == "agent" || input.title_source == "user" || input.title_source == "default" do chain.title_source = input.title_source
 	// has_description allows explicit clearing (pass ""); a bare non-empty
@@ -509,6 +517,9 @@ update_chain :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, 
 	closed_status: domain.Task_Chain_Status
 	if input.status != "" {
 		st := chain_status_from_string(input.status)
+        if st == .Cancelled && service.engine != nil {
+         if err := taskv2.work_require_chain_merges_settled(service.engine, chain); err.code != .None do return {}, false, err
+        }
 		if st != chain.status {
 			if !valid_chain_transition(chain.status, st) do return domain.Task_Chain{}, false, domain.domain_error(.Conflict, "invalid chain status transition")
 			chain.status = st
@@ -643,12 +654,16 @@ publish_chain_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Con
 }
 
 change_chain_status_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, chain_id: domain.Task_Chain_ID, next: domain.Task_Chain_Status) -> (domain.Task_Chain, bool, domain.Domain_Error) {
+	if next == .Completed do return {}, false, domain.domain_error(.Validation_Failed, "use complete with expected_work_revision and final summary")
 	chain, ok, err := get_chain(service, auth, chain_id)
 	if !ok do return domain.Task_Chain{}, false, err
 	if auth.kind == .Instance_Token && !is_chain_coordinator(service, chain, auth.agent_instance_id) {
 		return domain.Task_Chain{}, false, domain.domain_error(.Forbidden, "only chain coordinator can perform this action")
 	}
 	if chain.publish_state != .Published do return domain.Task_Chain{}, false, domain.domain_error(.Conflict, "draft chain has no execution status")
+ if next == .Cancelled && service.engine != nil {
+  if err := taskv2.work_require_chain_merges_settled(service.engine, chain); err.code != .None do return {}, false, err
+ }
 	if !valid_chain_transition(chain.status, next) do return domain.Task_Chain{}, false, domain.domain_error(.Conflict, "invalid chain status transition")
 	now := platform.clock_now(service.clock)
 	chain.status = next
@@ -770,70 +785,8 @@ sync_chain_status_from_tasks :: proc(service: ^Taskchain_Service, chain_id: doma
 	chain, chain_ok, chain_err := iface.taskchain_get_chain(service.repo, chain_id)
 	if !chain_ok do return domain.Task_Chain{}, false, chain_err
 
-	// Draft chains have no execution status; leave untouched
-	if chain.publish_state != .Published {
-		return chain, true, domain.Domain_Error{}
-	}
-
-	actual_owner := owner
-	if actual_owner == "" do actual_owner = chain.owner_user_id
-
-	tasks, tasks_err := iface.taskchain_list_tasks_by_chain(service.repo, chain_id, actual_owner)
-	if tasks_err.code != .None do return chain, false, tasks_err
-	defer delete(tasks)
-
-	non_terminal := 0
-	completed := 0
-	for t in tasks {
-		if !domain.task_state_is_terminal(t.state) {
-			non_terminal += 1
-		}
-		if t.state == .Done {
-			completed += 1
-		}
-	}
-
-	modified := false
-	now := platform.clock_now(service.clock)
-
-	if non_terminal > 0 {
-		if chain.status == .Completed {
-			chain.status = .Active
-			chain.completed_at = ""
-			modified = true
-		}
-	} else if non_terminal == 0 && len(tasks) > 0 && completed > 0 {
-		all_stages_done := true
-		if chain.kind == domain.CHAIN_KIND_WORKFLOW && chain.workflow_snapshot_json != "" && service.engine != nil {
-			all_stages_done = taskv2.workflow_all_stages_complete(service.engine, chain, tasks)
-		}
-		if chain.status == .Active && all_stages_done {
-			chain.status = .Completed
-			chain.completed_at = now
-			modified = true
-		}
-	}
-
-	if modified {
-		chain.updated_at = now
-		saved, save_ok, save_err := iface.taskchain_save_chain(service.repo, chain)
-		if !save_ok do return chain, false, save_err
-		chain = saved
-
-		if service.event_bus != nil && chain.owner_user_id != "" {
-			summary := fmt.aprintf("{{\"chain_id\":\"%s\"}}", chain.chain_id)
-			defer delete(summary)
-			events.publish_resource_changed(service.event_bus, string(chain.owner_user_id), "task_chain", string(chain.chain_id), "updated", summary)
-		}
-		// REQ-SHELL-9 trigger A, and THE ONE THAT MATTERS: this is the auto-complete,
-		// reached when the last task of a chain goes terminal. It is how a chain closes
-		// in the normal case, and it is the path REQ-SHELL-9's description did not name.
-		// `chain.status` rather than a `next` parameter because this block also handles
-		// the reopen (.Active at :679), which the reap refuses.
-		reap_chain_servers_on_close(service, chain, chain.status)
-		if chain.status != .Active do engine_chain_closed(service, contracts.Auth_Context{kind = .None}, chain, chain.status)
-	}
-
+	// Completion is explicit; an idle batch never closes the work container.
+	if owner != "" && chain.owner_user_id != owner do return {}, false, domain.domain_error(.Not_Found, "chain not found")
 	return chain, true, domain.Domain_Error{}
 }
 
@@ -1028,10 +981,8 @@ fleet_roles_with :: proc(roles_json, role: string) -> string {
 	return strings.to_string(b)
 }
 
-require_not_workflow_chain :: proc(chain: domain.Task_Chain) -> domain.Domain_Error {
-	if chain.kind == domain.CHAIN_KIND_WORKFLOW {
-		return domain.domain_error(.Forbidden, "workflow chain tasks are materialised by the hub; direct task mutations are forbidden", `{"code":"workflow_immutable"}`)
-	}
+require_manual_task :: proc(task: domain.Task) -> domain.Domain_Error {
+	if task.workflow_run_id != "" do return domain.domain_error(.Forbidden, "workflow task is engine-managed; use the run controls", `{"code":"workflow_task_managed"}`)
 	return domain.Domain_Error{}
 }
 
@@ -1041,7 +992,7 @@ create_task_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Conte
 	// get_chain_for_read (require_owner); a same-owner non-member is Forbidden.
 	chain, ok, err := get_chain_for_read(service, auth, input.chain_id)
 	if !ok do return domain.Task{}, false, err
-	if werr := require_not_workflow_chain(chain); werr.code != .None do return domain.Task{}, false, werr
+	if chain.status != .Active do return {}, false, domain.domain_error(.Conflict, "chain must be active")
 	// Task System v2: only the chain COORDINATOR (or the owner) shapes the
 	// ticket board; workers work their lease. (Ticket chains only — M3b.)
 	if auth.kind == .Instance_Token && !is_chain_coordinator(service, chain, auth.agent_instance_id) {
@@ -1142,9 +1093,9 @@ task_has_work_lease :: proc(service: ^Taskchain_Service, task_id: domain.Task_ID
 update_task_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, task_id: domain.Task_ID, input: Update_Task_Input) -> (domain.Task, bool, domain.Domain_Error) {
 	task, ok, err := get_task(service, auth, task_id)
 	if !ok do return domain.Task{}, false, err
+	if err := require_manual_task(task); err.code != .None do return {}, false, err
 	chain, chain_ok, chain_err := iface.taskchain_get_chain(service.repo, task.chain_id)
 	if !chain_ok do return domain.Task{}, false, chain_err
-	if werr := require_not_workflow_chain(chain); werr.code != .None do return domain.Task{}, false, werr
 
 	if auth.kind == .Instance_Token {
 		if !is_chain_coordinator(service, chain, auth.agent_instance_id) {
@@ -1201,16 +1152,16 @@ update_task_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Conte
 
 	if input.has_depends_on {
 		// clear existing deps and add new ones
-		existing_deps, _ := iface.taskchain_list_dependencies_by_chain(service.repo, chain.chain_id, chain.owner_user_id)
+		existing_deps, _ := list_chain_dependencies(service, auth, chain.chain_id)
 		for ed in existing_deps {
 			if ed.task_id == task.task_id {
-				if _, rem_err := remove_task_dependency(service, auth, task.task_id, ed.depends_on_task_id); rem_err.code != .None {
+				if _, rem_err := remove_task_dependency_impl(service, auth, task.task_id, ed.depends_on_task_id, reconcile = false); rem_err.code != .None {
 					return domain.Task{}, false, rem_err
 				}
 			}
 		}
 		for dep_id in input.depends_on {
-			if _, dep_ok, dep_err := add_task_dependency(service, auth, task.task_id, dep_id); !dep_ok {
+			if _, dep_ok, dep_err := add_task_dependency_row(service, auth, task.task_id, dep_id); !dep_ok {
 				return domain.Task{}, false, dep_err
 			}
 		}
@@ -1227,9 +1178,9 @@ update_task_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Conte
 publish_task_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, task_id: domain.Task_ID) -> (domain.Task, bool, domain.Domain_Error) {
 	task, ok, err := get_task(service, auth, task_id)
 	if !ok do return domain.Task{}, false, err
+	if err := require_manual_task(task); err.code != .None do return {}, false, err
 	chain, chain_ok, chain_err := iface.taskchain_get_chain(service.repo, task.chain_id)
 	if !chain_ok do return domain.Task{}, false, chain_err
-	if werr := require_not_workflow_chain(chain); werr.code != .None do return domain.Task{}, false, werr
 	if chain.publish_state != .Published do return domain.Task{}, false, domain.domain_error(.Conflict, "cannot publish task before chain is published")
 	if task.publish_state != .Draft do return domain.Task{}, false, domain.domain_error(.Conflict, "task is already published")
 	if auth.kind == .Instance_Token {
@@ -1570,71 +1521,50 @@ list_chain_members :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Con
 // create_task, whose engine notification covers the whole new task.
 add_task_dependency_row :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, task_id, depends_on_task_id: domain.Task_ID) -> (domain.Task_Dependency, bool, domain.Domain_Error) {
 	task, ok, err := get_task(service, auth, task_id)
-	if !ok do return domain.Task_Dependency{}, false, err
-	dep_task, dep_ok, dep_err := get_task(service, auth, depends_on_task_id)
-	if !dep_ok do return domain.Task_Dependency{}, false, dep_err
-
-	if task.chain_id != dep_task.chain_id do return domain.Task_Dependency{}, false, domain.domain_error(.Conflict, "dependencies must be in the same chain")
-	if task.task_id == dep_task.task_id do return domain.Task_Dependency{}, false, domain.domain_error(.Conflict, "task cannot depend on itself")
-
-	// Cycle detection
-	if has_dependency_cycle(service, task.chain_id, task.owner_user_id, task.task_id, dep_task.task_id) {
-		return domain.Task_Dependency{}, false, domain.domain_error(.Conflict, "circular dependency detected")
-	}
-
-	now := platform.clock_now(service.clock)
-	dep := domain.Task_Dependency{
-		task_id = task.task_id,
-		depends_on_task_id = dep_task.task_id,
-		chain_id = task.chain_id,
-		owner_user_id = task.owner_user_id,
-		created_at = now,
-	}
-	return iface.taskchain_save_dependency(service.repo, dep)
+	if !ok do return {}, false, err
+	if service.engine == nil do return {}, false, domain.domain_error(.Internal_Error, "task engine unavailable")
+	edge, saved, serr := taskv2.work_dependency_add(service.engine, task.owner_user_id, engine_actor(auth), task.chain_id,
+		domain.Work_Item_Ref{kind = domain.WORK_ITEM_TASK,id = string(task_id)}, domain.Work_Item_Ref{kind = domain.WORK_ITEM_TASK,id = string(depends_on_task_id)}, reconcile = false)
+	return domain.Task_Dependency{task_id = task_id, depends_on_task_id = depends_on_task_id, chain_id = task.chain_id, owner_user_id = task.owner_user_id, created_at = edge.created_at}, saved, serr
 }
 
-// add_task_dependency writes the edge and tells the engine: a dependency added to
-// a LEASED task expires its lease first (reason dep_added, non-counting), then
-// the chain is re-planned.
 add_task_dependency_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, task_id, depends_on_task_id: domain.Task_ID) -> (domain.Task_Dependency, bool, domain.Domain_Error) {
-	if ferr := require_coordinator_for_task(service, auth, task_id, "add a dependency"); ferr.code != .None do return domain.Task_Dependency{}, false, ferr
-	if t, tok, _ := iface.taskchain_get_task(service.repo, task_id); tok {
-		if c, cok, _ := iface.taskchain_get_chain(service.repo, t.chain_id); cok {
-			if werr := require_not_workflow_chain(c); werr.code != .None do return domain.Task_Dependency{}, false, werr
-		}
-	}
-	saved_dep, dep_save_ok, dep_save_err := add_task_dependency_row(service, auth, task_id, depends_on_task_id)
-	if !dep_save_ok do return domain.Task_Dependency{}, false, dep_save_err
-	if service.engine != nil {
-		if task, tok, _ := iface.taskchain_get_task(service.repo, task_id); tok {
-			if eng_err := taskv2.dep_added(service.engine, task, depends_on_task_id, engine_actor(auth)); eng_err.code != .None do return saved_dep, false, eng_err
-		}
-	}
-	return saved_dep, true, domain.Domain_Error{}
+    edge, ok, err := add_task_dependency_row(service, auth, task_id, depends_on_task_id)
+    if !ok do return {}, false, err
+    task, _, _ := get_task(service, auth, task_id)
+    if err := taskv2.dep_added(service.engine, task, depends_on_task_id, engine_actor(auth)); err.code != .None do return {}, false, err
+    return edge, true, domain.Domain_Error{}
 }
 
-remove_task_dependency_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, task_id, depends_on_task_id: domain.Task_ID) -> (bool, domain.Domain_Error) {
-	if ferr := require_coordinator_for_task(service, auth, task_id, "remove a dependency"); ferr.code != .None do return false, ferr
-	task, ok, err := get_task(service, auth, task_id)
+remove_task_dependency_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, task_id, depends_on_task_id: domain.Task_ID, reconcile := true) -> (bool, domain.Domain_Error) {
+	task, ok, err := get_task(service,auth,task_id)
 	if !ok do return false, err
-	if c, cok, _ := iface.taskchain_get_chain(service.repo, task.chain_id); cok {
-		if werr := require_not_workflow_chain(c); werr.code != .None do return false, werr
+	if err := require_manual_task(task); err.code != .None do return false, err
+	edges, eerr := iface.taskchain_list_work_dependencies(service.repo,task.chain_id,task.owner_user_id)
+	if eerr.code != .None do return false,eerr
+	for edge in edges {
+		if edge.removed_at == "" && edge.dependent.kind == domain.WORK_ITEM_TASK && edge.dependent.id == string(task_id) && edge.prerequisite.kind == domain.WORK_ITEM_TASK && edge.prerequisite.id == string(depends_on_task_id) {
+			return taskv2.work_dependency_remove(service.engine,task.owner_user_id,engine_actor(auth),task.chain_id,edge.dependency_id,"ticket dependency removed", reconcile = reconcile)
+		}
 	}
-	removed, remove_err := iface.taskchain_remove_dependency(service.repo, task.task_id, depends_on_task_id, task.owner_user_id)
-	if remove_err.code != .None do return removed, remove_err
-	// Removing a dependency can UNBLOCK the task: the engine refolds (→ ready)
-	// and the matcher grants it.
-	if removed && service.engine != nil {
-		if eng_err := taskv2.dep_removed(service.engine, task, depends_on_task_id, engine_actor(auth)); eng_err.code != .None do return removed, eng_err
-	}
-	return removed, remove_err
+	return false,domain.domain_error(.Not_Found,"dependency not found")
 }
 
 list_chain_dependencies :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, chain_id: domain.Task_Chain_ID) -> ([]domain.Task_Dependency, domain.Domain_Error) {
-	// READ: owner-scoped (REQ-SEC-3).
-	chain, ok, err := get_chain_for_read(service, auth, chain_id)
-	if !ok do return nil, err
-	return iface.taskchain_list_dependencies_by_chain(service.repo, chain.chain_id, chain.owner_user_id)
+	chain,ok,err := get_chain_for_read(service,auth,chain_id)
+	if !ok do return nil,err
+	out, ierr := iface.taskchain_list_dependencies_by_chain(service.repo,chain.chain_id,chain.owner_user_id)
+	if ierr.code != .None do return nil,ierr
+	edges,eerr := iface.taskchain_list_work_dependencies(service.repo,chain.chain_id,chain.owner_user_id)
+	if eerr.code != .None do return nil,eerr
+	result := make([dynamic]domain.Task_Dependency,context.allocator)
+	append(&result,..out)
+	for edge in edges {
+		if edge.removed_at == "" && edge.dependent.kind == domain.WORK_ITEM_TASK && edge.prerequisite.kind == domain.WORK_ITEM_TASK {
+			append(&result,domain.Task_Dependency{task_id=domain.Task_ID(edge.dependent.id),depends_on_task_id=domain.Task_ID(edge.prerequisite.id),chain_id=chain.chain_id,owner_user_id=chain.owner_user_id,created_at=edge.created_at})
+		}
+	}
+	return result[:],domain.Domain_Error{}
 }
 
 has_dependency_cycle :: proc(service: ^Taskchain_Service, chain_id: domain.Task_Chain_ID, owner: domain.User_ID, target_task_id, current_dep_id: domain.Task_ID) -> bool {
@@ -2087,6 +2017,7 @@ effective_placement :: proc(service: ^Taskchain_Service, chain: domain.Task_Chai
 cancel_task_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, task_id: domain.Task_ID, reason: string) -> (domain.Task, bool, domain.Domain_Error) {
 	task, ok, err := get_task(service, auth, task_id)
 	if !ok do return domain.Task{}, false, err
+	if err := require_manual_task(task); err.code != .None do return {}, false, err
 	if auth.kind == .Instance_Token {
 		chain, chain_ok, chain_err := iface.taskchain_get_chain(service.repo, task.chain_id)
 		if !chain_ok do return domain.Task{}, false, chain_err
@@ -2187,4 +2118,14 @@ require_coordinator_for_task :: proc(service: ^Taskchain_Service, auth: contract
 		return domain.domain_error(.Forbidden, fmt.tprintf("only the chain coordinator or the owner can %s", what))
 	}
 	return domain.Domain_Error{}
+}
+
+complete_chain :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, chain_id: domain.Task_Chain_ID, revision: i64, summary: string) -> (domain.Task_Chain, bool, domain.Domain_Error) {
+	if service.engine == nil do return {},false,domain.domain_error(.Internal_Error,"task engine unavailable")
+	chain,ok,err := taskv2.work_chain_complete(service.engine,domain.User_ID(auth.user_id),engine_actor(auth),chain_id,revision,summary)
+	if !ok do return {},false,err
+	reap_chain_servers_on_close(service,chain,.Completed)
+	engine_chain_closed(service,auth,chain,.Completed)
+	broadcast_chain_closed(service,auth,chain,.Completed)
+	return chain,true,domain.Domain_Error{}
 }

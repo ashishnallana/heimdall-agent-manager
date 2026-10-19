@@ -136,7 +136,8 @@ Task_Chain_Wire :: struct {
 	status:                        string     `json:"status"`,
 	kind:                          string     `json:"kind"`,
 	coordinator_agent_instance_id: string     `json:"coordinator_agent_instance_id"`,
-	workflow_def_ref:              string     `json:"workflow_def_ref"`,
+	work_revision: i64 `json:"work_revision"`,
+	completion_summary: string `json:"completion_summary"`,
 	defaults:                      json.Value `json:"defaults"`,
 	created_at:                    string     `json:"created_at"`,
 	updated_at:                    string     `json:"updated_at"`,
@@ -188,6 +189,8 @@ Simple_Task_Wire :: struct {
 	ready_since:            string     `json:"ready_since"`,
 	stage_key:              string     `json:"stage_key"`,
 	stage_index:            int        `json:"stage_index"`,
+	workflow_run_id: string `json:"workflow_run_id"`,
+	workflow_execution_no: int `json:"workflow_execution_no"`,
 	unblocks_dependents:    bool       `json:"unblocks_dependents"`,
 	updated_at:             string     `json:"updated_at"`,
 }
@@ -216,6 +219,8 @@ Task_Detail_Wire :: struct {
 	ready_since:            string                    `json:"ready_since"`,
 	stage_key:              string                    `json:"stage_key"`,
 	stage_index:            int                       `json:"stage_index"`,
+	workflow_run_id: string `json:"workflow_run_id"`,
+	workflow_execution_no: int `json:"workflow_execution_no"`,
 	// blocked: a dependency is not yet done (badge, not a state).
 	blocked:                bool                      `json:"blocked"`,
 	unblocks_dependents:    bool                      `json:"unblocks_dependents"`,
@@ -337,7 +342,8 @@ Task_Chain_Detail_Response_Wire :: struct {
 	status:                        string                      `json:"status"`,
 	kind:                          string                      `json:"kind"`,
 	coordinator_agent_instance_id: string                      `json:"coordinator_agent_instance_id"`,
-	workflow_def_ref:              string                      `json:"workflow_def_ref"`,
+	work_revision: i64 `json:"work_revision"`,
+	completion_summary: string `json:"completion_summary"`,
 	defaults:                      json.Value                  `json:"defaults"`,
 	created_at:                    string                      `json:"created_at"`,
 	updated_at:                    string                      `json:"updated_at"`,
@@ -361,7 +367,8 @@ make_chain_wire :: proc(c: domain.Task_Chain) -> Task_Chain_Wire {
 		status                        = chain_status_http(c.status),
 		kind                          = c.kind,
 		coordinator_agent_instance_id = c.coordinator_agent_instance_id,
-		workflow_def_ref              = c.workflow_def_ref,
+		work_revision = c.work_revision,
+		completion_summary = c.completion_summary,
 		defaults                      = json_value_or_empty_object(c.defaults_json),
 		created_at                    = c.created_at,
 		updated_at                    = c.updated_at,
@@ -435,6 +442,8 @@ make_simple_task_wire :: proc(t: domain.Task) -> Simple_Task_Wire {
 		ready_since            = t.ready_since,
 		stage_key              = t.stage_key,
 		stage_index            = t.stage_index,
+		workflow_run_id = string(t.workflow_run_id),
+		workflow_execution_no = t.workflow_execution_no,
 		unblocks_dependents    = domain.task_state_unblocks_dependents(t.state),
 		updated_at             = t.updated_at,
 	}
@@ -504,6 +513,8 @@ make_task_detail_wire :: proc(h: ^Taskchain_Handlers, auth_ctx: contracts.Auth_C
 		ready_since            = t.ready_since,
 		stage_key              = t.stage_key,
 		stage_index            = t.stage_index,
+		workflow_run_id = string(t.workflow_run_id),
+		workflow_execution_no = t.workflow_execution_no,
 		blocked                = is_blocked,
 		unblocks_dependents    = domain.task_state_unblocks_dependents(t.state),
 		depends_on             = dep_ids[:],
@@ -675,7 +686,8 @@ make_chain_detail_response_wire :: proc(
 		status                        = chain_status_http(chain.status),
 		kind                          = chain.kind,
 		coordinator_agent_instance_id = chain.coordinator_agent_instance_id,
-		workflow_def_ref              = chain.workflow_def_ref,
+		work_revision = chain.work_revision,
+		completion_summary = chain.completion_summary,
 		defaults                      = json_value_or_empty_object(chain.defaults_json),
 		created_at                    = chain.created_at,
 		updated_at                    = chain.updated_at,
@@ -2847,154 +2859,6 @@ workflow_define_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	strings.write_byte(&b, '}')
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 201)
 }
-
-extract_workflow_run_input :: proc(raw_body: string) -> taskv2.Workflow_Run_Input {
-	ref := json_string(raw_body, "ref")
-	if ref == "" do ref = json_string(raw_body, "workflow")
-	if ref == "" do ref = json_string(raw_body, "template")
-	if ref == "" do ref = json_string(raw_body, "name")
-	if ref == "" do ref = json_string(raw_body, "def_id")
-	inputs_json, has_in := jsonx.extract_raw_object(raw_body, "inputs", true, context.temp_allocator)
-	if !has_in || strings.trim_space(inputs_json) == "" {
-		if in_str := strings.trim_space(json_string(raw_body, "inputs_json")); strings.has_prefix(in_str, "{") {
-			inputs_json = in_str
-		} else {
-			inputs_json = "{}"
-		}
-	}
-	return taskv2.Workflow_Run_Input{
-		chain_id                      = json_string(raw_body, "chain_id"),
-		ref                           = ref,
-		title                         = json_string(raw_body, "title"),
-		description                   = json_string(raw_body, "description"),
-		inputs_json                   = inputs_json,
-		coordinator_agent_instance_id = json_string(raw_body, "coordinator_agent_instance_id"),
-		bridge_id                     = json_string(raw_body, "bridge_id"),
-		directory_path                = json_string(raw_body, "directory_path"),
-	}
-}
-
-// POST /api/v1/workflows/run
-workflow_run_handler :: proc(ctx: rawptr, req: Request) -> Response {
-	h := (^Taskchain_Handlers)(ctx)
-	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
-	if !ok do return auth_resp
-	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
-	run_in := extract_workflow_run_input(req.body)
-	chain, rok, rerr := taskv2.workflow_run(h.task_engine, domain.User_ID(auth_ctx.user_id), taskv2.actor_from_auth(auth_ctx), run_in)
-	if !rok do return respond_error(rerr, req.request_id)
-	publish_chain_changed(h, string(chain.owner_user_id), string(chain.chain_id), "created")
-	status_json, _, _ := taskv2.workflow_status_json(h.task_engine, chain.chain_id, chain.owner_user_id)
-	if status_json == "" do status_json = "{}"
-	cb := strings.builder_make(context.temp_allocator)
-	write_chain_json(&cb, chain)
-	return respond_success(fmt.tprintf(`{{"chain_id":"%s","chain":%s,"workflow":%s}}`, chain.chain_id, strings.to_string(cb), status_json), req.request_id, auth_ctx_server_time(req), 201)
-}
-
-// GET /api/v1/task-chains/{cid}/workflow/status  (or GET /api/v1/workflows/{cid}/status)
-workflow_status_handler :: proc(ctx: rawptr, req: Request) -> Response {
-	h := (^Taskchain_Handlers)(ctx)
-	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
-	if !ok do return auth_resp
-	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
-	chain_id := domain.Task_Chain_ID(path_part(req.path, 4))
-	status_json, sok, serr := taskv2.workflow_status_json(h.task_engine, chain_id, domain.User_ID(auth_ctx.user_id))
-	if !sok do return respond_error(serr, req.request_id)
-	return respond_success(status_json, req.request_id, auth_ctx_server_time(req))
-}
-
-// GET /api/v1/task-chains/{cid}/workflow/stages/{stage_key}/output  (or GET /api/v1/task-chains/{cid}/workflow/output?stage_key=...)
-workflow_output_handler :: proc(ctx: rawptr, req: Request) -> Response {
-	h := (^Taskchain_Handlers)(ctx)
-	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
-	if !ok do return auth_resp
-	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
-	chain_id := domain.Task_Chain_ID(path_part(req.path, 4))
-	stage_key := path_part(req.path, 7)
-	if stage_key == "" || stage_key == "output" {
-		stage_key = query_value(req.query, "stage_key")
-		if stage_key == "" do stage_key = query_value(req.query, "stage")
-	}
-	out_json, ook, oerr := taskv2.workflow_stage_output_json(h.task_engine, chain_id, domain.User_ID(auth_ctx.user_id), stage_key)
-	if !ook do return respond_error(oerr, req.request_id)
-	return respond_success(out_json, req.request_id, auth_ctx_server_time(req))
-}
-
-// POST /api/v1/task-chains/{cid}/workflow/retry
-workflow_retry_handler :: proc(ctx: rawptr, req: Request) -> Response {
-	h := (^Taskchain_Handlers)(ctx)
-	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
-	if !ok do return auth_resp
-	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
-	chain_id := domain.Task_Chain_ID(path_part(req.path, 4))
-	stage_key := json_string(req.body, "stage_key")
-	if stage_key == "" do stage_key = json_string(req.body, "stage")
-	task_id := json_string(req.body, "task_id")
-	if stage_key == "" && task_id == "" {
-		target := json_string(req.body, "target")
-		if strings.has_prefix(target, "task_") {
-			task_id = target
-		} else {
-			stage_key = target
-		}
-	}
-	cascade := jsonx.extract_bool(req.body, "cascade", false, true)
-	reason := json_string(req.body, "reason")
-	res, rok, rerr := taskv2.workflow_retry(h.task_engine, chain_id, domain.User_ID(auth_ctx.user_id), taskv2.actor_from_auth(auth_ctx), taskv2.Workflow_Retry_Input{
-		stage_key = stage_key,
-		task_id   = task_id,
-		cascade   = cascade,
-		reason    = reason,
-	})
-	if !rok do return respond_error(rerr, req.request_id)
-	publish_chain_changed(h, string(auth_ctx.user_id), string(chain_id), "updated")
-	return respond_success(marshal_workflow_retry_result(chain_id, res), req.request_id, auth_ctx_server_time(req))
-}
-
-marshal_workflow_retry_result :: proc(chain_id: domain.Task_Chain_ID, res: taskv2.Workflow_Retry_Result) -> string {
-	b := strings.builder_make(context.temp_allocator)
-	strings.write_string(&b, `{"chain_id":"`); write_handler_json_string(&b, string(chain_id))
-	strings.write_string(&b, `","reopened_task_ids":[`)
-	for tid, i in res.reopened_task_ids {
-		if i > 0 do strings.write_byte(&b, ',')
-		strings.write_byte(&b, '"'); write_handler_json_string(&b, string(tid)); strings.write_byte(&b, '"')
-	}
-	strings.write_string(&b, `],"cancelled_task_ids":[`)
-	for tid, i in res.cancelled_task_ids {
-		if i > 0 do strings.write_byte(&b, ',')
-		strings.write_byte(&b, '"'); write_handler_json_string(&b, string(tid)); strings.write_byte(&b, '"')
-	}
-	strings.write_string(&b, `],"carried_forward_keys":[`)
-	for k, i in res.carried_forward_keys {
-		if i > 0 do strings.write_byte(&b, ',')
-		strings.write_byte(&b, '"'); write_handler_json_string(&b, k); strings.write_byte(&b, '"')
-	}
-	strings.write_string(&b, `],"orphaned_task_ids":[`)
-	for tid, i in res.orphaned_task_ids {
-		if i > 0 do strings.write_byte(&b, ',')
-		strings.write_byte(&b, '"'); write_handler_json_string(&b, string(tid)); strings.write_byte(&b, '"')
-	}
-	strings.write_string(&b, `]}`)
-	return strings.to_string(b)
-}
-
-// POST /api/v1/task-chains/{cid}/workflow/cancel
-workflow_cancel_handler :: proc(ctx: rawptr, req: Request) -> Response {
-	h := (^Taskchain_Handlers)(ctx)
-	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
-	if !ok do return auth_resp
-	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
-	chain_id := domain.Task_Chain_ID(path_part(req.path, 4))
-	reason := json_string(req.body, "reason")
-	saved, cok, cerr := taskv2.workflow_cancel(h.task_engine, chain_id, domain.User_ID(auth_ctx.user_id), taskv2.actor_from_auth(auth_ctx), reason)
-	if !cok do return respond_error(cerr, req.request_id)
-	publish_chain_changed(h, string(saved.owner_user_id), string(saved.chain_id), "cancelled")
-	cb := strings.builder_make(context.temp_allocator)
-	write_chain_json(&cb, saved)
-	return respond_success(fmt.tprintf(`{{"chain_id":"%s","status":"cancelled","chain":%s}}`, saved.chain_id, strings.to_string(cb)), req.request_id, auth_ctx_server_time(req))
-}
-
-
 
 // ---- chain review roles (hybrid review model) ---------------------------------------
 

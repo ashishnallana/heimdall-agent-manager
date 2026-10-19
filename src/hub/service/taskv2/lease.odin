@@ -42,10 +42,48 @@ Grant_Request :: struct {
 // wake delivery) queues the wake effect. Errors are 409 Conflict for every
 // precondition that is a race rather than a caller bug.
 grant_in_uow :: proc(svc: ^Service, u: ^Uow, req: Grant_Request) -> (domain.Task_Lease, bool, domain.Domain_Error) {
+	if u == nil || !u.has_tx do return {}, false, domain.domain_error(.Internal_Error, "lease grants require a unit of work")
+	// Matcher callers deliberately skip a failed grant and keep their outer
+	// transaction. Isolate ALL grant writes, including consumption receipts,
+	// so a skipped candidate cannot leave a lease, event or attempt behind.
+	nested, nok, nerr := begin_uow(svc)
+	if !nok do return {}, false, nerr
+	lease, ok, err := grant_attempt_in_uow(svc, &nested, req)
+	if !ok {
+		_, _ = end_uow(svc, &nested, false)
+		return {}, false, err
+	}
+	committed, cerr := iface.unit_of_work_commit(&nested.tx)
+	nested.has_tx = false
+	if !committed {
+		cancel_reservations(svc, &nested.effects)
+		destroy_effects(&nested.effects)
+		return {}, false, cerr
+	}
+	// Transfer ownership directly to the parent, rather than registering a
+	// callback whose lifetime could outlast a parent transaction rollback.
+	move_effects(&u.effects, &nested.effects)
+	return lease, true, domain.Domain_Error{}
+}
+
+@(private = "file")
+grant_attempt_in_uow :: proc(svc: ^Service, u: ^Uow, req: Grant_Request) -> (domain.Task_Lease, bool, domain.Domain_Error) {
 	task := req.task
+	if task.workflow_run_id != "" {
+		wf, ok, err := workflow_context(svc, task.workflow_run_id, task.owner_user_id)
+		if !ok do return {}, false, err
+		if wf.execution.execution_no != task.workflow_execution_no || wf.execution.state != "running" {
+			return {}, false, domain.domain_error(.Conflict, "workflow execution is no longer running")
+		}
+	}
 	inst := req.instance
 	if task.kind == .Gate do return {}, false, domain.domain_error(.Conflict, "gates are never granted")
 	if req.kind == domain.LEASE_KIND_WORK && task.state != .Ready do return {}, false, domain.domain_error(.Conflict, "task is not ready")
+	if req.kind == domain.LEASE_KIND_WORK && task.stage_key == "" {
+		ready, err := work_dependencies_ready_in_uow(svc, task.chain_id, task.owner_user_id, domain.Work_Item_Ref{kind = domain.WORK_ITEM_TASK, id = string(task.task_id)})
+		if err.code != .None do return {}, false, err
+		if !ready do return {}, false, domain.domain_error(.Conflict, "work prerequisites have not succeeded", `{"code":"prerequisite_unsatisfied"}`)
+	}
 	if req.kind == domain.LEASE_KIND_REVIEW && task.state != .In_Review do return {}, false, domain.domain_error(.Conflict, "task is not in review")
 	if !instance_in_chain(svc, req.chain, inst) do return {}, false, domain.domain_error(.Conflict, "instance is not a member of the task's chain")
 	// The coordinator works only in a solo chain, and only by pulling
@@ -112,10 +150,11 @@ grant_in_uow :: proc(svc: ^Service, u: ^Uow, req: Grant_Request) -> (domain.Task
 		case .Replaced, .Dep_Added, .Reopened, .User_Stopped, .Released_Noncounting: counts = false
 		}
 		if pre.last_release != .Handoff {
-			_, _, _ = iface.taskchain_save_attempt(svc.repo, domain.Task_Attempt{
+			_, aok, aerr := iface.taskchain_save_attempt(svc.repo, domain.Task_Attempt{
 				task_id = task.task_id, attempt_no = view.attempt_no, chain_id = task.chain_id, owner_user_id = task.owner_user_id,
 				started_at = now, holder_instance_id = inst.agent_instance_id, counts_toward_budget = counts,
 			})
+			if !aok do return {}, false, aerr
 		} else if attempts, aerr := iface.taskchain_list_attempts_by_task(svc.repo, task.task_id, task.owner_user_id); aerr.code == .None {
 			// handoff continuation: the attempt row stays open, new holder recorded
 			for a in attempts {
@@ -127,6 +166,10 @@ grant_in_uow :: proc(svc: ^Service, u: ^Uow, req: Grant_Request) -> (domain.Task
 					_, _, _ = iface.taskchain_save_attempt(svc.repo, cont)
 				}
 			}
+		}
+		if task.stage_key == "" {
+			captured, cerr := work_capture_inputs_in_uow(svc, task.chain_id, task.owner_user_id, domain.Work_Item_Ref{kind = domain.WORK_ITEM_TASK, id = string(task.task_id)})
+			if !captured do return {}, false, cerr
 		}
 		rt := json_begin()
 		json_str(&rt, "bridge_id", saved.bridge_id if saved.bridge_id != "" else inst.bridge_id)
@@ -454,7 +497,7 @@ on_bridge_hello :: proc(svc: ^Service, bridge_id: string, active_instance_ids: [
 		if !iok || inst.chain_id == "" || inst.bridge_id != bridge_id do continue
 		chain, cok, _ := iface.taskchain_get_chain(svc.repo, domain.Task_Chain_ID(inst.chain_id))
 		if !cok || chain.status != .Active || chain.publish_state != .Published do continue
-		if chain.kind != domain.CHAIN_KIND_TICKET && chain.kind != domain.CHAIN_KIND_WORKFLOW do continue
+		if chain.kind != domain.CHAIN_KIND_MIXED_WORK do continue
 		if is_coordinator(svc, chain, id) do continue
 		if !instance_is_fleet_member(svc, chain, inst) do continue
 		effect_stop(&u, inst.bridge_id, inst.chain_id, id)
@@ -529,6 +572,18 @@ chain_closed :: proc(svc: ^Service, chain: domain.Task_Chain, actor: Actor, canc
 			}
 		}
 	}
+	if rok && cancel_tasks {
+		runs, err := iface.taskchain_list_workflow_runs(svc.repo,chain.chain_id,chain.owner_user_id)
+		if err.code != .None { rok=false; rerr=err } else {
+			for run in runs {
+				wf,ok,err := workflow_context(svc,run.run_id,chain.owner_user_id)
+				if !ok { rok=false;rerr=err;break }
+				if wf.execution.state == "draft" || wf.execution.state == "pending" || wf.execution.state == "running" {
+					if err := workflow_set_state(svc,&u,&wf,"cancelled","chain_cancelled"); err.code != .None {rok=false;rerr=err;break}
+				}
+			}
+		}
+	}
 	_, cerr := end_uow(svc, &u, rok)
 	if !rok do return rerr
 	return cerr
@@ -590,20 +645,18 @@ boot :: proc(svc: ^Service) {
 			if task, tok, _ := iface.taskchain_get_task(svc.repo, l.task_id); tok do effect_wake_lease(svc, &u, l, task)
 		}
 	}
-	chains, cerr := iface.taskchain_list_published_active_chains(svc.repo)
-	if cerr.code == .None {
-		for c in chains {
-			tasks, rok, _ := refold_chain(svc, &u, c)
-			if !rok do continue
-			// Blocks on a task that finished while the hub was down (or in
-			// another chain) are released before matching.
-			if released, _, _ := release_task_blocks_in_uow(svc, &u, tasks); released {
-				if _, rok, _ = refold_chain(svc, &u, c); !rok do continue
-			}
-			_, _ = match_chain_in_uow(svc, &u, c, .Boot)
-		}
-	}
-	_, _ = end_uow(svc, &u, true)
+    chains, cerr := iface.taskchain_list_published_active_chains(svc.repo)
+    all_ok := cerr.code == .None
+    if all_ok {
+        for chain in chains {
+            if ok, err := after_chain_change(svc, &u, chain.chain_id, chain.owner_user_id, .Boot); !ok {
+                fmt.eprintfln("[taskv2] mixed-work recovery failed for %s: %s", chain.chain_id, err.message)
+                all_ok = false
+                break
+            }
+        }
+    }
+	_, _ = end_uow(svc, &u, all_ok)
 }
 
 // ---- helpers ---------------------------------------------------------------------------

@@ -17,10 +17,12 @@ dep_facet :: proc(fx: ^Fixture, task: domain.Task, attempt: int, kind, body: str
 
 @(private = "file")
 dep_link :: proc(fx: ^Fixture, task, on: domain.Task) {
-	_, _, _ = iface.taskchain_save_dependency(&fx.repo, domain.Task_Dependency{
-		task_id = task.task_id, depends_on_task_id = on.task_id, chain_id = task.chain_id, owner_user_id = task.owner_user_id,
-		created_at = platform.clock_now(&fx.clock),
-	})
+    _, _, _ = iface.taskchain_insert_work_dependency(&fx.repo, domain.Work_Dependency{
+        dependency_id = platform.generate_id(&fx.ids, "wdep_"), chain_id = task.chain_id, owner_user_id = task.owner_user_id,
+        dependent = domain.Work_Item_Ref{kind = domain.WORK_ITEM_TASK, id = string(task.task_id)},
+        prerequisite = domain.Work_Item_Ref{kind = domain.WORK_ITEM_TASK, id = string(on.task_id)},
+        created_by_kind = "hub", created_by_id = "test", created_at = platform.clock_now(&fx.clock),
+    })
 }
 
 @(test)

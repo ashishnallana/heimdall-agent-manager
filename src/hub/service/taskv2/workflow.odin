@@ -596,33 +596,20 @@ validate_findings_v1_json :: proc(output_json: string) -> domain.Domain_Error {
 
 // ---- Workflow Snapshot Extraction ---------------------------------------------------
 
-extract_workflow_snapshot :: proc(chain: domain.Task_Chain, allocator := context.temp_allocator) -> (Workflow_Run_Snapshot, bool) {
-	snap_raw := strings.trim_space(chain.workflow_snapshot_json)
-	if snap_raw == "" || !strings.has_prefix(snap_raw, "{") do return {}, false
-	inputs_raw := "{}"
-	if in_obj, has_in := jsonx.extract_raw_object(snap_raw, "run_inputs", true, allocator); has_in {
-		inputs_raw = in_obj
-	} else if in_obj2, has_in2 := jsonx.extract_raw_object(chain.defaults_json, "workflow_inputs", true, allocator); has_in2 {
-		inputs_raw = in_obj2
-	}
-	spec_source := snap_raw
-	if nested_spec, has_nested := jsonx.extract_raw_object(snap_raw, "spec", true, allocator); has_nested {
-		if _, has_st := jsonx.extract_raw_array(nested_spec, "stages", true, allocator); has_st {
-			spec_source = nested_spec
-		}
-	}
-	parsed, ok, _ := parse_and_validate_workflow_spec(spec_source, "", 0, allocator)
-	if !ok do return {}, false
-	def_id := strings.trim_space(jsonx.extract_string(snap_raw, "def_id", chain.workflow_def_ref, true, allocator))
-	return Workflow_Run_Snapshot{
-		spec        = parsed,
-		inputs_json = inputs_raw,
-		def_id      = def_id,
-	}, true
+Workflow_Context :: struct {
+	using chain: domain.Task_Chain,
+	run: domain.Workflow_Run,
+	execution: domain.Workflow_Run_Execution,
 }
 
-workflow_stage_max_parallel :: proc(chain: domain.Task_Chain, stage_key: string) -> int {
-	if chain.kind != domain.CHAIN_KIND_WORKFLOW || chain.workflow_snapshot_json == "" do return 0
+extract_workflow_snapshot :: proc(chain: Workflow_Context, allocator := context.temp_allocator) -> (Workflow_Run_Snapshot, bool) {
+	parsed, ok, _ := parse_and_validate_workflow_spec(chain.run.spec_json, "", 0, allocator)
+	if !ok do return {}, false
+	return Workflow_Run_Snapshot{spec = parsed, inputs_json = chain.execution.resolved_inputs_json, def_id = chain.run.definition_ref}, true
+}
+
+workflow_stage_max_parallel :: proc(chain: Workflow_Context, stage_key: string) -> int {
+	if chain.run.run_id == "" do return 0
 	snap, ok := extract_workflow_snapshot(chain, context.temp_allocator)
 	if !ok do return 0
 	for st in snap.spec.stages {
@@ -638,11 +625,12 @@ workflow_stage_pack_json :: proc(svc: ^Service, chain: domain.Task_Chain, task: 
 	total := 1
 	if tasks, terr := iface.taskchain_list_tasks_by_chain(svc.repo, chain.chain_id, chain.owner_user_id); terr.code == .None {
 		count := 0
-		for t in tasks do if t.stage_key == task.stage_key do count += 1
+		for t in tasks do if t.workflow_run_id == task.workflow_run_id && t.workflow_execution_no == task.workflow_execution_no && t.stage_key == task.stage_key do count += 1
 		if count > 0 do total = count
 	}
 	json_int(&o, "stage_count", i64(total))
-	if chain.workflow_def_ref != "" do json_str(&o, "workflow_def_ref", chain.workflow_def_ref)
+	json_str(&o, "run_id", string(task.workflow_run_id))
+	json_int(&o, "execution_no", i64(task.workflow_execution_no))
 	if strings.has_prefix(strings.trim_space(task.generated_by_json), "{") && strings.trim_space(task.generated_by_json) != "{}" {
 		json_raw(&o, "generated_by", task.generated_by_json)
 	}
@@ -651,7 +639,7 @@ workflow_stage_pack_json :: proc(svc: ^Service, chain: domain.Task_Chain, task: 
 
 // ---- Stage Fold (`fold_stage`) & Completeness ---------------------------------------
 
-fold_stage :: proc(svc: ^Service, chain: domain.Task_Chain, stage_key: string, tasks: []domain.Task, stage_materialised: bool, allocator := context.temp_allocator) -> Stage_View {
+fold_stage :: proc(svc: ^Service, chain: Workflow_Context, stage_key: string, tasks: []domain.Task, stage_materialised: bool, allocator := context.temp_allocator) -> Stage_View {
 	instances := make([dynamic]domain.Task, 0, len(tasks), allocator)
 	for t in tasks {
 		if t.stage_key == stage_key do append(&instances, t)
@@ -672,11 +660,14 @@ fold_stage :: proc(svc: ^Service, chain: domain.Task_Chain, stage_key: string, t
 	for inst in instances {
 		if inst.state != .Done {
 			all_done = false
+		} else {
+			merge := task_merge_status(svc, inst)
+			if merge.state != "none" && merge.state != "merged" do all_done = false
 		}
 		if inst.state == .Cancelled {
 			any_failed = true
 		} else if inst.state == .Backlog && strings.trim_space(inst.blocked_on_json) != "" {
-			if strings.contains(inst.blocked_on_json, `"human"`) || strings.contains(inst.blocked_on_json, `"budget_exhausted"`) || strings.contains(inst.blocked_on_json, `"oscillation"`) {
+			if strings.contains(inst.blocked_on_json, `"budget_exhausted"`) || strings.contains(inst.blocked_on_json, `"oscillation"`) {
 				any_failed = true
 			}
 		}
@@ -705,42 +696,18 @@ fold_stage :: proc(svc: ^Service, chain: domain.Task_Chain, stage_key: string, t
 	}
 }
 
-is_stage_marked_empty_done :: proc(chain: domain.Task_Chain, stage_key: string) -> bool {
-	if strings.trim_space(chain.defaults_json) == "" do return false
-	arr := jsonx.extract_string_array(chain.defaults_json, "empty_stages", true, context.temp_allocator)
-	for s in arr do if s == stage_key do return true
+is_stage_marked_empty_done :: proc(svc: ^Service, chain: Workflow_Context, stage_key: string) -> bool {
+	stages, err := iface.taskchain_list_workflow_stage_executions(svc.repo, chain.run.run_id, chain.execution.execution_no, chain.owner_user_id)
+	if err.code != .None do return false
+	for stage in stages do if stage.stage_key == stage_key do return stage.item_count == 0
 	return false
 }
 
-mark_stage_empty_done :: proc(chain: ^domain.Task_Chain, stage_key: string) {
-	if is_stage_marked_empty_done(chain^, stage_key) do return
-	existing := jsonx.extract_string_array(chain.defaults_json, "empty_stages", true, context.temp_allocator)
-	append(&existing, stage_key)
-	b := strings.builder_make(context.temp_allocator)
-	strings.write_byte(&b, '[')
-	for s, idx in existing {
-		if idx > 0 do strings.write_byte(&b, ',')
-		strings.write_byte(&b, '"')
-		contracts.write_json_string(&b, s)
-		strings.write_byte(&b, '"')
-	}
-	strings.write_byte(&b, ']')
-	o := json_begin()
-	if strings.has_prefix(strings.trim_space(chain.defaults_json), "{") {
-		for k, v in jsonx_top_level_members(chain.defaults_json) {
-			if k == "empty_stages" do continue
-			json_raw(&o, k, v)
-		}
-	}
-	json_raw(&o, "empty_stages", strings.to_string(b))
-	chain.defaults_json = json_end(&o)
-}
-
-workflow_all_stages_complete :: proc(svc: ^Service, chain: domain.Task_Chain, tasks: []domain.Task) -> bool {
+workflow_all_stages_complete :: proc(svc: ^Service, chain: Workflow_Context, tasks: []domain.Task) -> bool {
 	snap, ok := extract_workflow_snapshot(chain, context.temp_allocator)
 	if !ok do return true
 	for st in snap.spec.stages {
-		sv := fold_stage(svc, chain, st.key, tasks, is_stage_marked_empty_done(chain, st.key), context.temp_allocator)
+		sv := fold_stage(svc, chain, st.key, tasks, is_stage_marked_empty_done(svc, chain, st.key), context.temp_allocator)
 		if !sv.complete do return false
 	}
 	return true
@@ -748,9 +715,9 @@ workflow_all_stages_complete :: proc(svc: ^Service, chain: domain.Task_Chain, ta
 
 // ---- Workflow Materializer (`materialize_ready_stages_in_uow`) ----------------------
 
-materialize_ready_stages_in_uow :: proc(svc: ^Service, u: ^Uow, chain_in: domain.Task_Chain) -> (changed_any: bool, ok: bool, err: domain.Domain_Error) {
+materialize_ready_stages_in_uow :: proc(svc: ^Service, u: ^Uow, chain_in: Workflow_Context) -> (changed_any: bool, ok: bool, err: domain.Domain_Error) {
 	chain := chain_in
-	if chain.kind != domain.CHAIN_KIND_WORKFLOW || chain.publish_state != .Published || chain.status != .Active {
+	if chain.execution.state != domain.WORKFLOW_EXECUTION_RUNNING || chain.publish_state != .Published || chain.status != .Active {
 		return false, true, domain.Domain_Error{}
 	}
 	snap, sok := extract_workflow_snapshot(chain, context.temp_allocator)
@@ -759,12 +726,12 @@ materialize_ready_stages_in_uow :: proc(svc: ^Service, u: ^Uow, chain_in: domain
 	// Loop so 0-item fan-out stages can immediately unblock their downstream stages in the same UoW
 	for pass := 0; pass < len(snap.spec.stages) + 1; pass += 1 {
 		pass_changed := false
-		tasks, terr := iface.taskchain_list_tasks_by_chain(svc.repo, chain.chain_id, chain.owner_user_id)
+		tasks, terr := workflow_execution_tasks(svc, chain)
 		if terr.code != .None do return changed_any, false, terr
 
 		stage_views := make(map[string]Stage_View, len(snap.spec.stages), context.temp_allocator)
 		for st in snap.spec.stages {
-			stage_views[st.key] = fold_stage(svc, chain, st.key, tasks, is_stage_marked_empty_done(chain, st.key), context.temp_allocator)
+			stage_views[st.key] = fold_stage(svc, chain, st.key, tasks, is_stage_marked_empty_done(svc, chain, st.key), context.temp_allocator)
 		}
 
 		for st in snap.spec.stages {
@@ -787,7 +754,7 @@ materialize_ready_stages_in_uow :: proc(svc: ^Service, u: ^Uow, chain_in: domain
 					break
 				}
 			}
-			if has_rows || is_stage_marked_empty_done(chain, st.key) do continue
+			if has_rows || is_stage_marked_empty_done(svc, chain, st.key) do continue
 
 			// Ready to materialise stage `st`!
 			mat_ok, mat_err := materialize_single_stage_in_uow(svc, u, &chain, snap, st, tasks, stage_views)
@@ -804,7 +771,7 @@ materialize_ready_stages_in_uow :: proc(svc: ^Service, u: ^Uow, chain_in: domain
 materialize_single_stage_in_uow :: proc(
 	svc: ^Service,
 	u: ^Uow,
-	chain: ^domain.Task_Chain,
+	chain: ^Workflow_Context,
 	snap: Workflow_Run_Snapshot,
 	st: Workflow_Stage_Spec,
 	existing_tasks: []domain.Task,
@@ -832,15 +799,13 @@ materialize_single_stage_in_uow :: proc(
 			for it in arr do append(&items_raw, it)
 		}
 		if len(items_raw) == 0 {
-			mark_stage_empty_done(chain, st.key)
-			chain.updated_at = platform.clock_now(svc.clock)
-			if saved_c, cok, cerr := iface.taskchain_save_chain(svc.repo, chain^); cok {
-				chain^ = saved_c
-			} else {
-				return false, cerr
-			}
-			return true, domain.Domain_Error{}
+			_, ok, err := iface.taskchain_insert_workflow_stage_execution(svc.repo, domain.Workflow_Stage_Execution{
+				run_id = chain.run.run_id, execution_no = chain.execution.execution_no, stage_key = st.key,
+				chain_id = chain.chain_id, owner_user_id = chain.owner_user_id, item_count = 0, expanded_at = platform.clock_now(svc.clock),
+			})
+			return ok, err
 		}
+
 	} else {
 		count_n := st.parallel if st.parallel > 1 else 1
 		for _ in 0..<count_n do append(&items_raw, "{}")
@@ -863,16 +828,6 @@ materialize_single_stage_in_uow :: proc(
 		}
 		if already_exists do continue
 
-		// Carry-forward check (after a `--cascade` retry): if an archived Done task for
-		// this stage has identical generated_by item JSON, restore it to active (st.key, idx)
-		// and wire any newly-materialised upstream dependencies without re-running it!
-		if st.for_each != "" {
-			if carried, cok := try_carry_forward_stage_item(svc, u, chain^, st.key, idx, item_json, existing_tasks, upstream_task_ids, now); cok {
-				_ = carried
-				continue
-			}
-		}
-
 		title_sub := substitute_workflow_placeholders(st.title, snap, st.key, idx, total_count, item_json, stage_views, false, context.temp_allocator)
 		desc_sub := substitute_workflow_placeholders(st.description, snap, st.key, idx, total_count, item_json, stage_views, false, context.temp_allocator)
 
@@ -892,15 +847,9 @@ materialize_single_stage_in_uow :: proc(
 			brief_json = substitute_workflow_placeholders(st.brief_raw, snap, st.key, idx, total_count, item_json, stage_views, true, context.temp_allocator)
 		}
 
-		// Ensure fleet roles for assignee and review_roles in brief_json
-		if assignee := brief_assignee(brief_json); assignee != "" {
-			ensure_workflow_fleet_role(svc, chain^, assignee, domain.FLEET_ROLE_WORKER)
-		}
-		for r in brief_review_roles(brief_json, context.temp_allocator) {
-			if r == domain.FLEET_ROLE_REVIEWER {
-				ensure_workflow_fleet_role(svc, chain^, "reviewer", domain.FLEET_ROLE_REVIEWER)
-			}
-		}
+        if st.kind != .Gate {
+            if err := workflow_validate_fleet(svc, chain.chain, brief_json); err.code != .None do return false, err
+        }
 
 		prio_str := st.priority
 		if prio_str == "" do prio_str = jsonx.extract_string(snap.spec.defaults_raw, "priority", "p2", true, context.temp_allocator)
@@ -928,7 +877,7 @@ materialize_single_stage_in_uow :: proc(
 			gen_by = json_end(&g)
 		}
 
-		req_user := solo_default_user_approval(svc, chain^, st.has_requires_user_approval, st.requires_user_approval)
+		req_user := solo_default_user_approval(svc, chain.chain, st.has_requires_user_approval, st.requires_user_approval)
 		if st.kind == .Gate && st.approver == "user" do req_user = true
 
 		tid := domain.Task_ID(platform.generate_id(svc.ids, "task_"))
@@ -947,6 +896,8 @@ materialize_single_stage_in_uow :: proc(
 			blocked_on_json        = "",
 			requires_user_approval = req_user,
 			ready_since            = "",
+			workflow_run_id        = chain.run.run_id,
+			workflow_execution_no  = chain.execution.execution_no,
 			stage_key              = st.key,
 			stage_index            = idx,
 			generated_by_json      = gen_by,
@@ -958,83 +909,36 @@ materialize_single_stage_in_uow :: proc(
 		if !tok do return false, terr
 
 		for up_tid in upstream_task_ids {
-			_, _, _ = iface.taskchain_save_dependency(svc.repo, domain.Task_Dependency{
+			if _, saved, err := iface.taskchain_save_dependency(svc.repo, domain.Task_Dependency{
 				task_id            = saved_t.task_id,
 				depends_on_task_id = up_tid,
 				chain_id           = chain.chain_id,
 				owner_user_id      = chain.owner_user_id,
 				created_at         = now,
-			})
+			}); !saved do return false, err
 		}
 
 		cp := json_begin()
 		json_raw(&cp, "brief", saved_t.brief_json)
 		json_str(&cp, "stage_key", st.key)
 		json_int(&cp, "stage_index", i64(idx))
-		_, _, _ = append_event(svc.repo, svc.clock, saved_t, hub_actor(), EV_CREATED, json_end(&cp))
-		_, _, _ = append_event(svc.repo, svc.clock, saved_t, hub_actor(), EV_PUBLISHED, "{}")
+		if _, saved, err := append_event(svc.repo, svc.clock, saved_t, hub_actor(), EV_CREATED, json_end(&cp)); !saved do return false, err
+		if _, saved, err := append_event(svc.repo, svc.clock, saved_t, hub_actor(), EV_PUBLISHED, "{}"); !saved do return false, err
 		if st.kind == .Gate {
 			sp := json_begin()
 			json_bool(&sp, "gate", true)
-			_, _, _ = append_event(svc.repo, svc.clock, saved_t, hub_actor(), EV_SUBMITTED, json_end(&sp))
-			effect_notify_coordinator(svc, u, chain.chain_id, chain.owner_user_id, "review_requested_from_user", fmt.tprintf("[taskv2] gate %s (%s) is awaiting approval on workflow chain %s", saved_t.task_id, saved_t.title, chain.chain_id))
+			if _, saved, err := append_event(svc.repo, svc.clock, saved_t, hub_actor(), EV_SUBMITTED, json_end(&sp)); !saved do return false, err
+			effect_notify_coordinator(svc, u, chain.chain_id, chain.owner_user_id, "review_requested_from_user", fmt.tprintf("[taskv2] gate %s (%s) is awaiting approval in workflow run %s", saved_t.task_id, saved_t.title, chain.run.run_id))
 		}
 		if u != nil do effect_publish_task(u, saved_t, "created")
 	}
-	return true, domain.Domain_Error{}
+	_, expanded, expansion_err := iface.taskchain_insert_workflow_stage_execution(svc.repo, domain.Workflow_Stage_Execution{
+		run_id = chain.run.run_id, execution_no = chain.execution.execution_no, stage_key = st.key,
+		chain_id = chain.chain_id, owner_user_id = chain.owner_user_id, item_count = total_count, expanded_at = now,
+	})
+	return expanded, expansion_err
 }
 
-@(private = "file")
-try_carry_forward_stage_item :: proc(
-	svc: ^Service,
-	u: ^Uow,
-	chain: domain.Task_Chain,
-	stage_key: string,
-	stage_index: int,
-	item_json: string,
-	existing_tasks: []domain.Task,
-	upstream_task_ids: []domain.Task_ID,
-	now: string,
-) -> (domain.Task, bool) {
-	prefix := fmt.tprintf("~carry~%s~", stage_key)
-	new_key := strings.trim_space(jsonx.extract_string(item_json, "key", "", true, context.temp_allocator))
-	if new_key == "" do new_key = strings.trim_space(jsonx.extract_string(item_json, "id", "", true, context.temp_allocator))
-
-	for t in existing_tasks {
-		if t.state != .Done || !strings.has_prefix(t.stage_key, prefix) do continue
-		old_item, has_old := jsonx.extract_raw_object(t.generated_by_json, "item", true, context.temp_allocator)
-		if !has_old do continue
-		old_key := strings.trim_space(jsonx.extract_string(t.generated_by_json, "item_key", "", true, context.temp_allocator))
-		if new_key != "" && old_key != "" && new_key != old_key do continue
-		if !json_strings_equal(old_item, item_json, context.temp_allocator) do continue
-
-		// Identical item found! Restore it to active stage_key and stage_index
-		restored := t
-		restored.stage_key = stage_key
-		restored.stage_index = stage_index
-		restored.updated_at = now
-		saved, sok, _ := iface.taskchain_save_task(svc.repo, restored)
-		if !sok do return {}, false
-		cfp := json_begin()
-		json_str(&cfp, "from_task_id", string(t.task_id))
-		json_int(&cfp, "from_attempt_no", i64(t.attempt_no))
-		_, _, _ = append_event(svc.repo, svc.clock, saved, hub_actor(), EV_CARRIED_FORWARD, json_end(&cfp))
-		for up_tid in upstream_task_ids {
-			_, _, _ = iface.taskchain_save_dependency(svc.repo, domain.Task_Dependency{
-				task_id            = saved.task_id,
-				depends_on_task_id = up_tid,
-				chain_id           = chain.chain_id,
-				owner_user_id      = chain.owner_user_id,
-				created_at         = now,
-			})
-		}
-		if u != nil do effect_publish_task(u, saved, "updated")
-		return saved, true
-	}
-	return {}, false
-}
-
-@(private = "file")
 json_values_equal :: proc(v1, v2: json.Value) -> bool {
 	#partial switch a in v1 {
 	case json.Null:
@@ -1127,27 +1031,41 @@ collect_upstream_stage_task_ids :: proc(
 	return out[:]
 }
 
-@(private = "file")
-ensure_workflow_fleet_role :: proc(svc: ^Service, chain: domain.Task_Chain, agent_id, role: string, bridge_id := "") {
-	if svc == nil || svc.repo == nil || strings.trim_space(agent_id) == "" do return
-	fleets, ferr := iface.taskchain_list_fleets_by_chain(svc.repo, chain.chain_id, chain.owner_user_id)
-	if ferr.code != .None do return
-	for f in fleets {
-		if f.agent_id == agent_id && fleet_row_has_role(f, role) do return
-	}
-	now := platform.clock_now(svc.clock)
-	roles_json := fmt.tprintf(`["%s"]`, role) if domain.fleet_role_name_valid(role) else `["worker"]`
-	_ = iface.taskchain_ensure_fleet(svc.repo, domain.Task_Chain_Fleet{
-		task_chain_id    = chain.chain_id,
-		agent_id         = agent_id,
-		capacity         = 4,
-		min_warm         = 0,
-		idle_ttl_seconds = 600,
-		roles_json       = roles_json,
-		bridge_id        = bridge_id,
-		created_at       = now,
-		updated_at       = now,
-	})
+// A workflow shares the chain fleet. It must never create or widen fleet rows.
+workflow_validate_fleet :: proc(svc: ^Service, chain: domain.Task_Chain, brief: string) -> domain.Domain_Error {
+ fleets, err := iface.taskchain_list_fleets_by_chain(svc.repo, chain.chain_id, chain.owner_user_id)
+ if err.code != .None do return err
+ if solo, implicit := implicit_solo_worker(svc, chain, fleets); implicit {
+  copy := make([dynamic]domain.Task_Chain_Fleet, context.temp_allocator)
+  append(&copy, ..fleets); append(&copy, solo); fleets = copy[:]
+ }
+ assignee := brief_assignee(brief)
+ worker := false
+ coordinator := chain_coordinator_agent_id(svc, chain)
+ for fleet in fleets {
+  if fleet.capacity <= 0 || !fleet_row_has_role(fleet, domain.FLEET_ROLE_WORKER) do continue
+  if fleet.agent_id == coordinator && !chain_is_solo(svc, chain) do continue
+  if assignee == "" || strings.contains(assignee, "{{") || fleet.agent_id == assignee do worker = true
+ }
+ if !worker do return domain.domain_error(.Validation_Failed, "configure an eligible worker fleet row with positive capacity before starting the run")
+ for reviewer in brief_named_reviewers(brief, context.temp_allocator) {
+  if strings.contains(reviewer, "{{") do continue
+  covered := false
+  for fleet in fleets do if fleet.agent_id == reviewer && fleet.agent_id != coordinator && fleet.capacity > 0 do covered = true
+  if !covered do return domain.domain_error(.Validation_Failed, fmt.tprintf("configure eligible fleet row for named workflow reviewer %s before starting the run", reviewer))
+ }
+ if assignee != "" && !strings.contains(assignee, "{{") {
+  covered := false
+  for fleet in fleets do if fleet.agent_id == assignee && fleet_row_has_role(fleet, domain.FLEET_ROLE_WORKER) do covered = true
+  if !covered do return domain.domain_error(.Validation_Failed, fmt.tprintf("configure worker fleet row for workflow assignee %s before starting the run", assignee))
+ }
+ for role in brief_review_roles(brief, context.temp_allocator) {
+  if strings.contains(role, "{{") do continue
+  covered := false
+  for fleet in fleets do if fleet.agent_id != coordinator && fleet.capacity > 0 && fleet_row_has_role(fleet, role) do covered = true
+  if !covered do return domain.domain_error(.Validation_Failed, fmt.tprintf("configure fleet review role %s before starting the run", role))
+ }
+ return domain.Domain_Error{}
 }
 
 @(private = "file")
@@ -1297,7 +1215,7 @@ resolve_workflow_input_value :: proc(snap: Workflow_Run_Snapshot, key: string, a
 	return ""
 }
 
-@(private = "file")
+@(private = "package")
 extract_scalar_or_raw_string :: proc(obj_json: string, key: string, allocator := context.temp_allocator) -> (string, bool) {
 	if s, ok := jsonx.extract_string_found(obj_json, key, true, allocator); ok do return s, true
 	if n, ok := jsonx.extract_int_found(obj_json, key, true); ok do return fmt.tprintf("%d", n), true
@@ -1357,212 +1275,6 @@ workflow_define :: proc(
 	return saved, true, domain.Domain_Error{}
 }
 
-Workflow_Run_Input :: struct {
-	chain_id:                      string, // optional existing unpublished chain to activate as a workflow
-	ref:                           string, // template name, def_id, or user workflow name
-	title:                         string,
-	description:                   string,
-	inputs_json:                   string,
-	coordinator_agent_instance_id: string,
-	bridge_id:                     string,
-	directory_path:                string,
-}
-
-activate_workflow_on_existing_chain_in_uow :: proc(
-	svc: ^Service,
-	u: ^Uow,
-	existing_chain: domain.Task_Chain,
-	actor: Actor,
-	ref: string,
-	inputs_json: string,
-) -> (domain.Task_Chain, bool, domain.Domain_Error) {
-	return workflow_run_in_uow(svc, u, existing_chain.owner_user_id, actor, Workflow_Run_Input{
-		chain_id                      = string(existing_chain.chain_id),
-		ref                           = ref,
-		title                         = existing_chain.title,
-		description                   = existing_chain.description,
-		inputs_json                   = inputs_json,
-		coordinator_agent_instance_id = existing_chain.coordinator_agent_instance_id,
-	})
-}
-
-workflow_run :: proc(
-	svc: ^Service,
-	owner_user_id: domain.User_ID,
-	actor: Actor,
-	input: Workflow_Run_Input,
-) -> (domain.Task_Chain, bool, domain.Domain_Error) {
-	u, uok, uerr := begin_uow(svc)
-	if !uok do return {}, false, uerr
-	chain, ok, err := workflow_run_in_uow(svc, &u, owner_user_id, actor, input)
-	_, cerr := end_uow(svc, &u, ok)
-	if !ok do return {}, false, err
-	if cerr.code != .None do return {}, false, cerr
-	fresh, fok, _ := iface.taskchain_get_chain(svc.repo, chain.chain_id)
-	if fok do return fresh, true, domain.Domain_Error{}
-	return chain, true, domain.Domain_Error{}
-}
-
-workflow_run_in_uow :: proc(
-	svc: ^Service,
-	u: ^Uow,
-	owner_user_id: domain.User_ID,
-	actor: Actor,
-	input: Workflow_Run_Input,
-) -> (domain.Task_Chain, bool, domain.Domain_Error) {
-	ref := strings.trim_space(input.ref)
-	if ref == "" {
-		return {}, false, domain.domain_error(.Validation_Failed, "workflow template or definition ref is required", `{"code":"workflow_invalid"}`)
-	}
-	def_ref, spec_json, found := resolve_workflow_ref(svc, owner_user_id, ref, context.temp_allocator)
-	if !found {
-		return {}, false, domain.domain_error(.Not_Found, fmt.tprintf("workflow definition or template not found: %s", ref))
-	}
-	parsed, pok, perr := parse_and_validate_workflow_spec(spec_json, "", 0, context.temp_allocator)
-	if !pok do return {}, false, perr
-
-	inputs_obj := strings.trim_space(input.inputs_json)
-	if inputs_obj == "" do inputs_obj = "{}"
-	if !strings.has_prefix(inputs_obj, "{") || !strings.has_suffix(inputs_obj, "}") {
-		return {}, false, domain.domain_error(.Validation_Failed, "workflow inputs must be a JSON object", `{"code":"workflow_invalid"}`)
-	}
-	// Validate required workflow inputs
-	for inp in parsed.inputs {
-		if !inp.required do continue
-		val, ok_v := extract_scalar_or_raw_string(inputs_obj, inp.name, context.temp_allocator)
-		if (!ok_v || strings.trim_space(val) == "") && !inp.has_default {
-			return {}, false, domain.domain_error(.Validation_Failed, fmt.tprintf("missing required workflow input: %s", inp.name), `{"code":"workflow_input_missing"}`)
-		}
-	}
-
-	// Build immutable snapshot JSON embedding spec + run_inputs
-	snap_builder := json_begin()
-	for k, v in jsonx_top_level_members(spec_json) {
-		if k == "run_inputs" || k == "def_id" do continue
-		json_raw(&snap_builder, k, v)
-	}
-	json_str(&snap_builder, "def_id", def_ref)
-	json_raw(&snap_builder, "run_inputs", inputs_obj)
-	snapshot_json := json_end(&snap_builder)
-
-	defaults_builder := json_begin()
-	for k, v in jsonx_top_level_members(parsed.defaults_raw) {
-		json_raw(&defaults_builder, k, v)
-	}
-	json_raw(&defaults_builder, "workflow_inputs", inputs_obj)
-	defaults_json := json_end(&defaults_builder)
-
-	now := platform.clock_now(svc.clock)
-	coord_id := strings.trim_space(input.coordinator_agent_instance_id)
-	if coord_id == "" && (actor.kind == ACTOR_AGENT || actor.kind == ACTOR_COORDINATOR) {
-		coord_id = actor.id
-	}
-
-	chain_title := strings.trim_space(input.title)
-	if chain_title == "" {
-		chain_title = substitute_workflow_placeholders(
-			parsed.title if parsed.title != "" else parsed.name,
-			Workflow_Run_Snapshot{spec = parsed, inputs_json = inputs_obj, def_id = def_ref},
-			"", 0, 1, "{}", nil, false, context.temp_allocator,
-		)
-	}
-	chain_desc := strings.trim_space(input.description)
-	if chain_desc == "" do chain_desc = parsed.description
-
-	target_cid := domain.Task_Chain_ID(strings.trim_space(input.chain_id))
-	created_at := now
-	if target_cid != "" {
-		ex_c, ex_ok, _ := iface.taskchain_get_chain(svc.repo, target_cid)
-		if !ex_ok || ex_c.owner_user_id != owner_user_id {
-			return {}, false, domain.domain_error(.Not_Found, "chain not found")
-		}
-		if ex_c.publish_state == .Published || strings.trim_space(ex_c.workflow_snapshot_json) != "" {
-			return {}, false, domain.domain_error(.Conflict, "chain is already published", `{"code":"already_published"}`)
-		}
-		created_at = ex_c.created_at
-		if coord_id == "" do coord_id = ex_c.coordinator_agent_instance_id
-		if strings.trim_space(input.title) == "" && ex_c.title != "" do chain_title = ex_c.title
-		if strings.trim_space(input.description) == "" && ex_c.description != "" do chain_desc = ex_c.description
-	} else {
-		target_cid = domain.Task_Chain_ID(platform.generate_id(svc.ids, "chain_"))
-	}
-
-	chain := domain.Task_Chain{
-		chain_id                      = target_cid,
-		owner_user_id                 = owner_user_id,
-		title                         = chain_title,
-		description                   = chain_desc,
-		publish_state                 = .Published,
-		status                        = .Active,
-		kind                          = domain.CHAIN_KIND_WORKFLOW,
-		coordinator_agent_instance_id = coord_id,
-		workflow_def_ref              = def_ref,
-		workflow_snapshot_json        = snapshot_json,
-		defaults_json                 = defaults_json,
-		created_at                    = created_at,
-		updated_at                    = now,
-		published_at                  = now,
-	}
-	saved_chain, sok, serr := iface.taskchain_save_chain(svc.repo, chain)
-	if !sok do return {}, false, serr
-
-	if coord_id != "" && !strings.has_prefix(coord_id, "agt_") {
-		_, _, _ = iface.taskchain_save_member(svc.repo, domain.Task_Chain_Member{
-			chain_id          = saved_chain.chain_id,
-			agent_instance_id = coord_id,
-			owner_user_id     = owner_user_id,
-			role              = "coordinator",
-			created_at        = now,
-		})
-	}
-	if strings.trim_space(input.directory_path) != "" {
-		_, _, _ = iface.taskchain_save_directory(svc.repo, domain.Task_Chain_Directory{
-			directory_id  = platform.generate_id(svc.ids, "dir_"),
-			chain_id      = saved_chain.chain_id,
-			owner_user_id = owner_user_id,
-			path          = strings.trim_space(input.directory_path),
-			bridge_id     = strings.trim_space(input.bridge_id),
-			vcs_kind      = "git",
-			vcs_info_json = "{}",
-			created_at    = now,
-			updated_at    = now,
-		})
-	}
-	// Ensure default worker fleet row so stages without explicit assignee can be matched
-	ensure_workflow_fleet_role(svc, saved_chain, "coder", domain.FLEET_ROLE_WORKER, strings.trim_space(input.bridge_id))
-	if svc.agents != nil {
-		if insts, ierr := iface.agent_list_instances_by_owner(svc.agents, owner_user_id, 1000, ""); ierr.code == .None {
-			for inst in insts {
-				if inst.agent_instance_id == coord_id || strings.trim_space(inst.chain_id) != "" do continue
-				bound := inst
-				bound.chain_id = string(saved_chain.chain_id)
-				_, _, _ = iface.agent_save_instance(svc.agents, bound)
-				_, _, _ = iface.taskchain_save_member(svc.repo, domain.Task_Chain_Member{
-					chain_id          = saved_chain.chain_id,
-					agent_instance_id = inst.agent_instance_id,
-					agent_id          = inst.agent_id,
-					owner_user_id     = owner_user_id,
-					role              = "worker",
-					created_at        = now,
-				})
-				if inst.agent_id != "" {
-					ensure_workflow_fleet_role(svc, saved_chain, inst.agent_id, domain.FLEET_ROLE_WORKER, inst.bridge_id)
-				}
-			}
-		}
-	}
-
-	if _, mok, merr := materialize_ready_stages_in_uow(svc, u, saved_chain); !mok {
-		return {}, false, merr
-	}
-	if aok, aerr := after_chain_change(svc, u, saved_chain.chain_id, owner_user_id, .Chain_Published); !aok {
-		return {}, false, aerr
-	}
-	if u != nil do effect_publish_chain(u, saved_chain.chain_id, owner_user_id, "created")
-	return saved_chain, true, domain.Domain_Error{}
-}
-
-@(private = "file")
 resolve_workflow_ref :: proc(svc: ^Service, owner_user_id: domain.User_ID, ref: string, allocator := context.temp_allocator) -> (def_ref: string, spec_json: string, ok: bool) {
 	// 1. Check user definitions by def_id or name (latest version wins)
 	if defs, derr := iface.taskchain_list_workflow_definitions_by_owner(svc.repo, owner_user_id); derr.code == .None {
@@ -1601,23 +1313,32 @@ chain_status_str :: proc(st: domain.Task_Chain_Status) -> string {
 
 // ---- Workflow Status & Output -------------------------------------------------------
 
-workflow_status_json_for_chain :: proc(svc: ^Service, chain: domain.Task_Chain, allocator := context.temp_allocator) -> (string, bool, domain.Domain_Error) {
-	if chain.kind != domain.CHAIN_KIND_WORKFLOW {
-		return "", false, domain.domain_error(.Validation_Failed, "chain is not a workflow chain")
+workflow_status_json_for_chain :: proc(svc: ^Service, chain: Workflow_Context, allocator := context.temp_allocator) -> (string, bool, domain.Domain_Error) {
+	if chain.run.run_id == "" {
+		return "", false, domain.domain_error(.Validation_Failed, "workflow run is required")
 	}
 	snap, sok := extract_workflow_snapshot(chain, allocator)
 	if !sok {
-		return "", false, domain.domain_error(.Validation_Failed, "workflow chain has no valid snapshot")
+		return "", false, domain.domain_error(.Validation_Failed, "workflow run has no valid snapshot")
 	}
-	tasks, terr := iface.taskchain_list_tasks_by_chain(svc.repo, chain.chain_id, chain.owner_user_id)
+	tasks, terr := workflow_execution_tasks(svc, chain)
 	if terr.code != .None do return "", false, terr
 
 	o := json_begin(allocator)
 	json_str(&o, "chain_id", string(chain.chain_id))
-	json_str(&o, "title", chain.title)
-	json_str(&o, "kind", chain.kind)
-	json_str(&o, "status", chain_status_str(chain.status))
-	json_str(&o, "workflow_def_ref", chain.workflow_def_ref)
+	json_str(&o, "title", chain.run.title)
+	json_str(&o, "run_id", string(chain.run.run_id))
+	json_int(&o, "execution_no", i64(chain.execution.execution_no))
+	json_int(&o, "revision", chain.run.revision)
+	json_str(&o, "status", chain.execution.state)
+	json_str(&o, "definition_ref", chain.run.definition_ref)
+	json_int(&o, "current_execution_no", i64(chain.run.current_execution_no))
+	json_int(&o, "execution_revision", chain.execution.revision)
+	json_str(&o, "failure_code", chain.execution.failure_code)
+	json_str(&o, "failure_detail", chain.execution.failure_detail)
+	json_str(&o, "started_at", chain.execution.started_at)
+	json_str(&o, "ended_at", chain.execution.ended_at)
+	json_raw(&o, "output_manifest", chain.execution.output_manifest_json)
 	json_str(&o, "workflow_name", snap.spec.name)
 	json_raw(&o, "inputs", snap.inputs_json)
 
@@ -1625,7 +1346,7 @@ workflow_status_json_for_chain :: proc(svc: ^Service, chain: domain.Task_Chain, 
 	strings.write_byte(&sb, '[')
 	for st, sidx in snap.spec.stages {
 		if sidx > 0 do strings.write_byte(&sb, ',')
-		sv := fold_stage(svc, chain, st.key, tasks, is_stage_marked_empty_done(chain, st.key), allocator)
+		sv := fold_stage(svc, chain, st.key, tasks, is_stage_marked_empty_done(svc, chain, st.key), allocator)
 		so := json_begin(allocator)
 		json_str(&so, "key", st.key)
 		json_str(&so, "kind", domain.task_kind_string(st.kind))
@@ -1693,32 +1414,25 @@ workflow_status_json_for_chain :: proc(svc: ^Service, chain: domain.Task_Chain, 
 	return json_end(&o), true, domain.Domain_Error{}
 }
 
-workflow_status_json_by_id :: proc(svc: ^Service, chain_id: domain.Task_Chain_ID, owner_user_id: domain.User_ID, allocator := context.temp_allocator) -> (string, bool, domain.Domain_Error) {
-	chain, ok, err := iface.taskchain_get_chain(svc.repo, chain_id)
-	if !ok do return "", false, err
-	if chain.owner_user_id != owner_user_id do return "", false, domain.domain_error(.Forbidden, "forbidden")
-	return workflow_status_json_for_chain(svc, chain, allocator)
-}
-
-workflow_status_json :: proc{workflow_status_json_for_chain, workflow_status_json_by_id}
-
-workflow_stage_output_json_for_chain :: proc(svc: ^Service, chain: domain.Task_Chain, stage_key: string, allocator := context.temp_allocator) -> (string, bool, domain.Domain_Error) {
-	if chain.kind != domain.CHAIN_KIND_WORKFLOW {
-		return "", false, domain.domain_error(.Validation_Failed, "chain is not a workflow chain")
+workflow_stage_output_json_for_chain :: proc(svc: ^Service, chain: Workflow_Context, stage_key: string, allocator := context.temp_allocator) -> (string, bool, domain.Domain_Error) {
+	if chain.run.run_id == "" {
+		return "", false, domain.domain_error(.Validation_Failed, "workflow run is required")
 	}
 	snap, sok := extract_workflow_snapshot(chain, allocator)
-	if !sok do return "", false, domain.domain_error(.Validation_Failed, "workflow chain has no valid snapshot")
+	if !sok do return "", false, domain.domain_error(.Validation_Failed, "workflow run has no valid snapshot")
 	found_stage := false
 	for st in snap.spec.stages do if st.key == stage_key { found_stage = true; break }
 	if !found_stage {
 		return "", false, domain.domain_error(.Not_Found, fmt.tprintf("stage not found in workflow: %s", stage_key))
 	}
-	tasks, terr := iface.taskchain_list_tasks_by_chain(svc.repo, chain.chain_id, chain.owner_user_id)
+	tasks, terr := workflow_execution_tasks(svc, chain)
 	if terr.code != .None do return "", false, terr
-	sv := fold_stage(svc, chain, stage_key, tasks, is_stage_marked_empty_done(chain, stage_key), allocator)
+	sv := fold_stage(svc, chain, stage_key, tasks, is_stage_marked_empty_done(svc, chain, stage_key), allocator)
 
 	o := json_begin(allocator)
 	json_str(&o, "chain_id", string(chain.chain_id))
+	json_str(&o, "run_id", string(chain.run.run_id))
+	json_int(&o, "execution_no", i64(chain.execution.execution_no))
 	json_str(&o, "stage_key", stage_key)
 	json_bool(&o, "complete", sv.complete)
 	json_bool(&o, "failed", sv.failed)
@@ -1738,434 +1452,6 @@ workflow_stage_output_json_for_chain :: proc(svc: ^Service, chain: domain.Task_C
 	return json_end(&o), true, domain.Domain_Error{}
 }
 
-workflow_stage_output_json_by_id :: proc(svc: ^Service, chain_id: domain.Task_Chain_ID, owner_user_id: domain.User_ID, stage_key: string, allocator := context.temp_allocator) -> (string, bool, domain.Domain_Error) {
-	chain, ok, err := iface.taskchain_get_chain(svc.repo, chain_id)
-	if !ok do return "", false, err
-	if chain.owner_user_id != owner_user_id do return "", false, domain.domain_error(.Forbidden, "forbidden")
-	return workflow_stage_output_json_for_chain(svc, chain, stage_key, allocator)
-}
-
-workflow_stage_output_json :: proc{workflow_stage_output_json_for_chain, workflow_stage_output_json_by_id}
-
-// ---- Workflow Retry (`--stage`, `--item`, `--cascade`) & Cancel ---------------------
-
-Workflow_Retry_Input :: struct {
-	stage_key:   string,
-	item_index:  int,
-	has_item:    bool,
-	task_id:     string,
-	cascade:     bool,
-	reason:      string,
-}
-
-Workflow_Retry_Result :: struct {
-	reopened_task_ids:    []domain.Task_ID,
-	cancelled_task_ids:   []domain.Task_ID,
-	carried_forward_keys: []string,
-	orphaned_task_ids:    []domain.Task_ID,
-}
-
-workflow_retry :: proc(
-	svc: ^Service,
-	chain_id: domain.Task_Chain_ID,
-	owner_user_id: domain.User_ID,
-	actor: Actor,
-	input: Workflow_Retry_Input,
-) -> (Workflow_Retry_Result, bool, domain.Domain_Error) {
-	in_mut := input
-	if in_mut.task_id != "" && in_mut.stage_key == "" {
-		if t, tok, _ := iface.taskchain_get_task(svc.repo, domain.Task_ID(in_mut.task_id)); tok {
-			in_mut.stage_key = t.stage_key
-			in_mut.item_index = t.stage_index
-			in_mut.has_item = true
-		}
-	}
-	skey := strings.trim_space(in_mut.stage_key)
-	if skey == "" {
-		return {}, false, domain.domain_error(.Validation_Failed, "stage is required for workflow retry")
-	}
-	u, uok, uerr := begin_uow(svc)
-	if !uok do return {}, false, uerr
-	res, ok, err := workflow_retry_in_uow(svc, &u, chain_id, owner_user_id, actor, in_mut)
-	_, cerr := end_uow(svc, &u, ok)
-	if !ok do return {}, false, err
-	if cerr.code != .None do return {}, false, cerr
-	return res, true, domain.Domain_Error{}
-}
-
-workflow_retry_in_uow :: proc(
-	svc: ^Service,
-	u: ^Uow,
-	chain_id: domain.Task_Chain_ID,
-	owner_user_id: domain.User_ID,
-	actor: Actor,
-	input: Workflow_Retry_Input,
-) -> (Workflow_Retry_Result, bool, domain.Domain_Error) {
-	res, ok, err := workflow_retry_core_in_uow(svc, u, chain_id, owner_user_id, actor, input)
-	if !ok do return {}, false, err
-	if aok, aerr := after_chain_change(svc, u, chain_id, owner_user_id, .Task_Reopened); !aok {
-		return {}, false, aerr
-	}
-	return res, true, domain.Domain_Error{}
-}
-
-// workflow_retry_core_in_uow reopens a stage (cascading downstream) WITHOUT
-// running after_chain_change, for callers that run it once themselves at the
-// end of their own unit of work (gate_replan_in_uow, F1).
-workflow_retry_core_in_uow :: proc(
-	svc: ^Service,
-	u: ^Uow,
-	chain_id: domain.Task_Chain_ID,
-	owner_user_id: domain.User_ID,
-	actor: Actor,
-	input: Workflow_Retry_Input,
-) -> (Workflow_Retry_Result, bool, domain.Domain_Error) {
-	chain, cok, _ := iface.taskchain_get_chain(svc.repo, chain_id)
-	if !cok || chain.owner_user_id != owner_user_id {
-		return {}, false, domain.domain_error(.Not_Found, "workflow chain not found")
-	}
-	if chain.kind != domain.CHAIN_KIND_WORKFLOW {
-		return {}, false, domain.domain_error(.Validation_Failed, "chain is not a workflow chain")
-	}
-	snap, sok := extract_workflow_snapshot(chain, context.temp_allocator)
-	if !sok do return {}, false, domain.domain_error(.Validation_Failed, "workflow chain has no valid snapshot")
-
-	found_stage := false
-	for st in snap.spec.stages {
-		if st.key == input.stage_key {
-			found_stage = true
-			break
-		}
-	}
-	if !found_stage {
-		return {}, false, domain.domain_error(.Not_Found, fmt.tprintf("stage not found: %s", input.stage_key))
-	}
-
-	tasks, terr := iface.taskchain_list_tasks_by_chain(svc.repo, chain.chain_id, owner_user_id)
-	if terr.code != .None do return {}, false, terr
-
-	// Compute transitive downstream stage keys of `input.stage_key`
-	downstream_stages := make(map[string]bool, len(snap.spec.stages), context.temp_allocator)
-	for pass := 0; pass < len(snap.spec.stages); pass += 1 {
-		for st in snap.spec.stages {
-			if downstream_stages[st.key] do continue
-			for dep in st.depends_on {
-				d := strings.trim_space(dep)
-				if d == input.stage_key || downstream_stages[d] {
-					downstream_stages[st.key] = true
-					break
-				}
-			}
-		}
-	}
-
-	// Collect materialised downstream tasks
-	downstream_tasks := make([dynamic]domain.Task, 0, len(tasks), context.temp_allocator)
-	for t in tasks {
-		if downstream_stages[t.stage_key] {
-			append(&downstream_tasks, t)
-		}
-	}
-
-	// Rule: if any downstream stage has materialised tasks and !cascade -> 409 downstream_materialised
-	if len(downstream_tasks) > 0 && !input.cascade {
-		b := strings.builder_make(context.temp_allocator)
-		strings.write_string(&b, `{"code":"downstream_materialised","downstream_tasks":[`)
-		for dt, idx in downstream_tasks {
-			if idx > 0 do strings.write_byte(&b, ',')
-			strings.write_byte(&b, '"')
-			contracts.write_json_string(&b, string(dt.task_id))
-			strings.write_byte(&b, '"')
-		}
-		strings.write_string(&b, "]}")
-		return {}, false, domain.domain_error(.Conflict, "downstream stages have already been materialised; pass --cascade to cancel and re-evaluate downstream work", strings.to_string(b))
-	}
-
-	reopened_ids := make([dynamic]domain.Task_ID, context.temp_allocator)
-	cancelled_ids := make([dynamic]domain.Task_ID, context.temp_allocator)
-	carried_keys := make([dynamic]string, context.temp_allocator)
-	orphaned_ids := make([dynamic]domain.Task_ID, context.temp_allocator)
-
-	// Target tasks in `input.stage_key`
-	target_tasks := make([dynamic]domain.Task, context.temp_allocator)
-	for t in tasks {
-		if t.stage_key != input.stage_key do continue
-		if input.has_item && t.stage_index != input.item_index do continue
-		append(&target_tasks, t)
-	}
-	if len(target_tasks) == 0 {
-		return {}, false, domain.domain_error(.Not_Found, "no matching materialised task for stage/item")
-	}
-
-	// Handle downstream tasks under --cascade
-	now := platform.clock_now(svc.clock)
-	existing_deps, _ := iface.taskchain_list_dependencies_by_chain(svc.repo, chain.chain_id, owner_user_id)
-
-	for dt in downstream_tasks {
-		orig_stage := dt.stage_key
-		orig_idx := dt.stage_index
-		item_key := jsonx.extract_string(dt.generated_by_json, "item_key", "", true, context.temp_allocator)
-		_, has_gen_item := jsonx.extract_raw_object(dt.generated_by_json, "item", true, context.temp_allocator)
-
-		// Remove dependency edges into/from `dt` so it doesn't block or get blocked while parked/cancelled
-		for ed in existing_deps {
-			if ed.task_id == dt.task_id || ed.depends_on_task_id == dt.task_id {
-				_, _ = iface.taskchain_remove_dependency(svc.repo, ed.task_id, ed.depends_on_task_id, owner_user_id)
-			}
-		}
-
-		// If `dt` is a Done fan-out item, park it as a carry-forward candidate!
-		// When the upstream stage finishes its retry, `try_carry_forward_stage_item` will restore it if its item JSON is unchanged.
-		if dt.state == .Done && has_gen_item {
-			parked := dt
-			parked.stage_key = fmt.tprintf("~carry~%s~%s", orig_stage, dt.task_id)
-			parked.updated_at = now
-			_, _, _ = iface.taskchain_save_task(svc.repo, parked)
-			if item_key != "" do append(&carried_keys, item_key)
-			continue
-		}
-
-		// Otherwise cancel `dt`, reclaim its leases, emit `orphaned_work` if it had VCS commits, and archive its stage_key
-		if leases, lerr := iface.taskchain_list_leases_by_task(svc.repo, dt.task_id); lerr.code == .None {
-			for l in leases {
-				_ = expire_lease_in_uow(svc, u, l, EXPIRE_CANCELLED, actor)
-			}
-		}
-		if vcs_head := latest_vcs_head_for_task(svc, dt); vcs_head != "" {
-			op := json_begin()
-			json_str(&op, "task_id", string(dt.task_id))
-			json_str(&op, "stage_key", orig_stage)
-			json_int(&op, "stage_index", i64(orig_idx))
-			json_str(&op, "head", vcs_head)
-			if item_key != "" do json_str(&op, "item_key", item_key)
-			_, _, _ = append_event(svc.repo, svc.clock, dt, actor, EV_ORPHANED_WORK, json_end(&op))
-			append(&orphaned_ids, dt.task_id)
-		}
-		dt_cur := dt
-		if dt_cur.state != .Cancelled {
-			cp := json_begin()
-			json_str(&cp, "reason", "cascade_retry")
-			json_str(&cp, "upstream_stage", input.stage_key)
-			refolded, _, rok, rerr := record_event(svc, u, dt_cur, actor, EV_CANCELLED, json_end(&cp))
-			if !rok do return {}, false, rerr
-			dt_cur = refolded
-			append(&cancelled_ids, dt_cur.task_id)
-		}
-		dt_cur.stage_key = fmt.tprintf("~cancelled~%s~%s", orig_stage, dt_cur.task_id)
-		dt_cur.updated_at = now
-		_, _, _ = iface.taskchain_save_task(svc.repo, dt_cur)
-	}
-
-	// Reopen target task(s)
-	for tt in target_tasks {
-		if leases, lerr := iface.taskchain_list_leases_by_task(svc.repo, tt.task_id); lerr.code == .None {
-			for l in leases {
-				_ = expire_lease_in_uow(svc, u, l, EXPIRE_REPLACED, actor)
-			}
-		}
-		rp := json_begin()
-		json_str(&rp, "stage_key", tt.stage_key)
-		json_int(&rp, "stage_index", i64(tt.stage_index))
-		if input.cascade do json_bool(&rp, "cascade", true)
-		refolded, _, rok, rerr := record_event(svc, u, tt, actor, EV_REOPENED, json_end(&rp))
-		if !rok do return {}, false, rerr
-		if refolded.kind == .Gate {
-			sp := json_begin()
-			json_bool(&sp, "gate", true)
-			_, _, _, _ = record_event(svc, u, refolded, actor, EV_SUBMITTED, json_end(&sp))
-		}
-		append(&reopened_ids, tt.task_id)
-	}
-
-	// If chain was Completed, reopen chain status to Active
-	if chain.status == .Completed {
-		chain.status = .Active
-		chain.completed_at = ""
-		chain.updated_at = now
-		_, _, _ = iface.taskchain_save_chain(svc.repo, chain)
-	}
-
-	return Workflow_Retry_Result{
-		reopened_task_ids    = reopened_ids[:],
-		cancelled_task_ids   = cancelled_ids[:],
-		carried_forward_keys = carried_keys[:],
-		orphaned_task_ids    = orphaned_ids[:],
-	}, true, domain.Domain_Error{}
-}
-
-@(private = "file")
-latest_vcs_head_for_task :: proc(svc: ^Service, task: domain.Task) -> string {
-	facets, ferr := iface.taskchain_list_facets_by_task(svc.repo, task.task_id, task.owner_user_id)
-	if ferr.code != .None do return ""
-	best_att := -1
-	head := ""
-	for f in facets {
-		if f.kind == FACET_VCS && f.attempt_no >= best_att {
-			if h := strings.trim_space(jsonx.extract_string(f.body_json, "head", "", true, context.temp_allocator)); h != "" {
-				best_att = f.attempt_no
-				head = h
-			}
-		}
-	}
-	return head
-}
-
-workflow_cancel :: proc(
-	svc: ^Service,
-	chain_id: domain.Task_Chain_ID,
-	owner_user_id: domain.User_ID,
-	actor: Actor,
-	reason := "workflow_cancelled",
-) -> (domain.Task_Chain, bool, domain.Domain_Error) {
-	u, uok, uerr := begin_uow(svc)
-	if !uok do return {}, false, uerr
-	chain, cok, _ := iface.taskchain_get_chain(svc.repo, chain_id)
-	if !cok || chain.owner_user_id != owner_user_id {
-		_, _ = end_uow(svc, &u, false)
-		return {}, false, domain.domain_error(.Not_Found, "workflow chain not found")
-	}
-	if chain.kind != domain.CHAIN_KIND_WORKFLOW {
-		_, _ = end_uow(svc, &u, false)
-		return {}, false, domain.domain_error(.Validation_Failed, "chain is not a workflow chain")
-	}
-	tasks, terr := iface.taskchain_list_tasks_by_chain(svc.repo, chain.chain_id, owner_user_id)
-	if terr.code != .None {
-		_, _ = end_uow(svc, &u, false)
-		return {}, false, terr
-	}
-	for t in tasks {
-		if domain.task_state_is_terminal(t.state) do continue
-		if leases, lerr := iface.taskchain_list_leases_by_task(svc.repo, t.task_id); lerr.code == .None {
-			for l in leases {
-				_ = expire_lease_in_uow(svc, &u, l, EXPIRE_CHAIN_CLOSED, actor)
-			}
-		}
-		cp := json_begin()
-		json_str(&cp, "reason", reason if strings.trim_space(reason) != "" else "workflow_cancelled")
-		_, _, _, _ = record_event(svc, &u, t, actor, EV_CANCELLED, json_end(&cp))
-	}
-	now := platform.clock_now(svc.clock)
-	chain.status = .Cancelled
-	chain.completed_at = now
-	chain.updated_at = now
-	saved, sok, serr := iface.taskchain_save_chain(svc.repo, chain)
-	if sok do effect_publish_chain(&u, saved.chain_id, owner_user_id, "cancelled")
-	_, cerr := end_uow(svc, &u, sok)
-	if !sok do return {}, false, serr
-	if cerr.code != .None do return {}, false, cerr
-	return saved, true, domain.Domain_Error{}
-}
-
-// ---- Ticket -> Workflow Trigger (`brief.on_output` = `start_workflow`) ---------------
-
-// trigger_on_output_workflows_in_uow inspects every Done task in `tasks` that
-// declares `brief.on_output` (`{"kind":"start_workflow", ...}` or `{"workflow":...}`).
-// If the task does not yet have an `EV_STARTED_WORKFLOW` event, it starts the
-// child workflow chain in the SAME UoW and records `EV_STARTED_WORKFLOW {chain_id}`.
-trigger_on_output_workflows_in_uow :: proc(
-	svc: ^Service,
-	u: ^Uow,
-	parent_chain: domain.Task_Chain,
-	tasks: []domain.Task,
-) -> (bool, domain.Domain_Error) {
-	for t in tasks {
-		if t.state != .Done do continue
-		on_out, has_on_out := jsonx.extract_raw_object(t.brief_json, "on_output", true, context.temp_allocator)
-		if !has_on_out || strings.trim_space(on_out) == "" do continue
-
-		kind_str := strings.trim_space(jsonx.extract_string(on_out, "kind", "start_workflow", true, context.temp_allocator))
-		if kind_str != "" && kind_str != "start_workflow" do continue
-
-		// Idempotency: check if EV_STARTED_WORKFLOW already exists on `t`
-		if event_exists(svc, t, EV_STARTED_WORKFLOW) do continue
-
-		wf_ref := strings.trim_space(jsonx.extract_string(on_out, "workflow", "", true, context.temp_allocator))
-		if wf_ref == "" do wf_ref = strings.trim_space(jsonx.extract_string(on_out, "start_workflow", "", true, context.temp_allocator))
-		if wf_ref == "" do wf_ref = strings.trim_space(jsonx.extract_string(on_out, "template", "", true, context.temp_allocator))
-		if wf_ref == "" do wf_ref = strings.trim_space(jsonx.extract_string(on_out, "def_id", "", true, context.temp_allocator))
-		if wf_ref == "" do continue
-
-		// Extract task's latest output facet
-		out_body := "{}"
-		if facets, ferr := iface.taskchain_list_facets_by_task(svc.repo, t.task_id, t.owner_user_id); ferr.code == .None {
-			best_att := -1
-			for f in facets {
-				if f.kind == FACET_OUTPUT && f.attempt_no >= best_att {
-					best_att = f.attempt_no
-					out_body = f.body_json
-				}
-			}
-		}
-
-		// Resolve inputs for the spawned workflow:
-		// If `on_output.inputs` is provided, substitute `{{output.<field>}}` or `{{output}}` in its values;
-		// otherwise pass `out_body` (or merge `on_output.inputs` with `out_body`).
-		wf_inputs_json := out_body
-		if raw_in, has_in := jsonx.extract_raw_object(on_out, "inputs", true, context.temp_allocator); has_in && strings.has_prefix(strings.trim_space(raw_in), "{") {
-			ib := json_begin()
-			raw_in_members := jsonx_top_level_members(raw_in)
-			// Also include top-level fields from out_body if not overridden by raw_in
-			for k, v in jsonx_top_level_members(out_body) {
-				if _, overridden := raw_in_members[k]; overridden do continue
-				json_raw(&ib, k, v)
-			}
-			for k, v in raw_in_members {
-				trimmed_v := strings.trim_space(v)
-				if strings.has_prefix(trimmed_v, `"`) && strings.has_suffix(trimmed_v, `"`) && strings.contains(trimmed_v, "{{") {
-					unquoted := trimmed_v[1 : len(trimmed_v) - 1]
-					resolved := substitute_on_output_placeholders(unquoted, out_body, context.temp_allocator)
-					json_str(&ib, k, resolved)
-				} else {
-					json_raw(&ib, k, trimmed_v)
-				}
-			}
-			wf_inputs_json = json_end(&ib)
-		}
-
-		wf_title := strings.trim_space(jsonx.extract_string(on_out, "title", "", true, context.temp_allocator))
-		if wf_title != "" {
-			wf_title = substitute_on_output_placeholders(wf_title, out_body, context.temp_allocator)
-		}
-
-		child_chain, cok, cerr := workflow_run_in_uow(svc, u, parent_chain.owner_user_id, hub_actor(), Workflow_Run_Input{
-			ref                           = wf_ref,
-			title                         = wf_title,
-			inputs_json                   = wf_inputs_json,
-			coordinator_agent_instance_id = parent_chain.coordinator_agent_instance_id,
-		})
-		if !cok do return false, cerr
-
-		// Copy fleet rows from parent chain to child workflow chain so reviewers/workers match seamlessly
-		if parent_fleets, pferr := iface.taskchain_list_fleets_by_chain(svc.repo, parent_chain.chain_id, parent_chain.owner_user_id); pferr.code == .None {
-			for pf in parent_fleets {
-				cf := pf
-				cf.task_chain_id = child_chain.chain_id
-				_, _ = iface.taskchain_upsert_fleet(svc.repo, cf)
-			}
-		}
-		// Copy directories from parent chain to child workflow chain
-		if parent_dirs, pderr := iface.taskchain_list_directories_by_chain(svc.repo, parent_chain.chain_id, parent_chain.owner_user_id); pderr.code == .None {
-			for pd in parent_dirs {
-				cd := pd
-				cd.directory_id = platform.generate_id(svc.ids, "dir_")
-				cd.chain_id = child_chain.chain_id
-				_, _, _ = iface.taskchain_save_directory(svc.repo, cd)
-			}
-		}
-
-		ep := json_begin()
-		json_str(&ep, "chain_id", string(child_chain.chain_id))
-		json_str(&ep, "workflow", wf_ref)
-		if _, aok, aerr := append_event(svc.repo, svc.clock, t, hub_actor(), EV_STARTED_WORKFLOW, json_end(&ep)); !aok {
-			return false, aerr
-		}
-		// Re-run matcher on child_chain now that fleets/directories are copied
-		_, _ = match_chain_in_uow(svc, u, child_chain, .Chain_Published)
-	}
-	return true, domain.Domain_Error{}
-}
-
-@(private = "file")
 substitute_on_output_placeholders :: proc(template: string, output_json: string, allocator := context.temp_allocator) -> string {
 	if !strings.contains(template, "{{") do return template
 	b := strings.builder_make(allocator)
@@ -2202,71 +1488,3 @@ substitute_on_output_placeholders :: proc(template: string, output_json: string,
 // ---- F1: a rejected gate re-plans -------------------------------------------------------
 
 GATE_MAX_REPLANS_DEFAULT :: 3
-
-// gate_replan_in_uow runs after an explicit verdict rejected a workflow gate
-// (evaluate_gate_in_uow → .Rejected; the gate is already cancelled). It
-// retries the gate stage's upstream stage(s) with cascade, so they run again
-// and the gate stage is re-materialised once they finish, and records the
-// rejection as gate_feedback on each reopened upstream task (pack → TASK.md).
-// No-op (the stage stays failed; "Retry stage" in the UI) when:
-//   - the gate says on_reject = "fail",
-//   - an upstream stage fans out (for_each) — only single-task upstreams re-plan,
-//   - max_replans (default 3) rejected gates already exist for this stage.
-// The caller runs after_chain_change once afterwards.
-gate_replan_in_uow :: proc(svc: ^Service, u: ^Uow, chain: domain.Task_Chain, gate: domain.Task, actor: Actor) -> (bool, domain.Domain_Error) {
-	if chain.kind != domain.CHAIN_KIND_WORKFLOW || gate.stage_key == "" do return true, domain.Domain_Error{}
-	gate_obj, _ := jsonx.extract_raw_object(gate.brief_json, "gate", true, context.temp_allocator)
-	on_reject := jsonx.extract_string(gate_obj, "on_reject", jsonx.extract_string(gate.brief_json, "on_reject", "replan", true, context.temp_allocator), true, context.temp_allocator)
-	if on_reject == "fail" do return true, domain.Domain_Error{}
-	max_replans := jsonx.extract_int(gate_obj, "max_replans", jsonx.extract_int(gate.brief_json, "max_replans", GATE_MAX_REPLANS_DEFAULT, true), true)
-
-	snap, sok := extract_workflow_snapshot(chain, context.temp_allocator)
-	if !sok do return true, domain.Domain_Error{}
-	stage_by_key := make(map[string]Workflow_Stage_Spec, len(snap.spec.stages), context.temp_allocator)
-	for st in snap.spec.stages do stage_by_key[st.key] = st
-	gate_stage, has_gate := stage_by_key[gate.stage_key]
-	if !has_gate || len(gate_stage.depends_on) == 0 do return true, domain.Domain_Error{}
-	for dep in gate_stage.depends_on {
-		up, has_up := stage_by_key[strings.trim_space(dep)]
-		if !has_up || strings.trim_space(up.for_each) != "" do return true, domain.Domain_Error{}
-	}
-
-	tasks, terr := iface.taskchain_list_tasks_by_chain(svc.repo, chain.chain_id, chain.owner_user_id)
-	if terr.code != .None do return false, terr
-	rejected := 0
-	cancelled_prefix := fmt.tprintf("~cancelled~%s~", gate.stage_key)
-	for t in tasks do if t.kind == .Gate && (t.task_id == gate.task_id || strings.has_prefix(t.stage_key, cancelled_prefix)) do rejected += 1
-	if rejected > max_replans {
-		effect_notify_coordinator(svc, u, chain.chain_id, chain.owner_user_id, "gate_rejected", fmt.tprintf("[taskv2] gate %s rejected %d times; not re-planning again (max_replans=%d). Retry the stage by hand.", gate.task_id, rejected, max_replans))
-		return true, domain.Domain_Error{}
-	}
-
-	// The rejection: the latest request_changes review_posted on the gate.
-	summary, findings := "", "[]"
-	if evs, eerr := iface.taskchain_list_events_by_task(svc.repo, gate.task_id, gate.owner_user_id); eerr.code == .None {
-		for i := len(evs) - 1; i >= 0; i -= 1 {
-			if evs[i].kind != EV_REVIEW_POSTED do continue
-			if jsonx.extract_string(evs[i].payload_json, "verdict", "", true, context.temp_allocator) != "request_changes" do continue
-			summary = jsonx.extract_string(evs[i].payload_json, "summary", "", true, context.temp_allocator)
-			if raw, ok := raw_value_field(evs[i].payload_json, "findings"); ok && strings.trim_space(raw) != "" do findings = raw
-			break
-		}
-	}
-
-	for dep in gate_stage.depends_on {
-		res, rok, rerr := workflow_retry_core_in_uow(svc, u, chain.chain_id, chain.owner_user_id, actor, Workflow_Retry_Input{stage_key = strings.trim_space(dep), cascade = true, reason = "gate_rejected"})
-		if !rok do return false, rerr
-		for tid in res.reopened_task_ids {
-			t, tok, _ := iface.taskchain_get_task(svc.repo, tid)
-			if !tok do continue
-			p := json_begin()
-			json_str(&p, "gate_task_id", string(gate.task_id))
-			json_int(&p, "round", i64(rejected))
-			if summary != "" do json_str(&p, "summary", summary)
-			json_raw(&p, "findings", findings)
-			json_str(&p, "rejected_at", platform.clock_now(svc.clock))
-			if _, _, eok, eerr := record_event(svc, u, t, actor, EV_GATE_FEEDBACK, json_end(&p)); !eok do return false, eerr
-		}
-	}
-	return true, domain.Domain_Error{}
-}

@@ -331,6 +331,7 @@ bridge_taskv2_maybe_enrich_verify_exit :: proc(event_json: string) -> string {
 BRIDGE_TASK_MD_MAX_BYTES :: 32_000 // ~8k tokens (@ 4 bytes/token)
 
 Bridge_Task_Md_Input :: struct {
+	fetch: string, // exact pinned generation command for mixed-work inputs
 	ref:      string,
 	resolved: bool,
 	body:     string,
@@ -558,6 +559,34 @@ bridge_taskv2_render_task_md :: proc(pack_json: string, max_bytes: int = BRIDGE_
 		}
 	}
 
+    // The receipt is scoped to a task attempt or parent run execution, so
+    // workers never accidentally fetch the newest output of a retried source.
+    if array, present := bridge_provider_json_extract_array(pack_json, "work_inputs"); present {
+        objects := bridge_provider_json_top_level_objects(array)
+        defer bridge_bootstrap_free_object_slice(objects)
+        for object in objects {
+            kind := jsonx.extract_string(object, "kind", "", true, context.temp_allocator)
+            id := jsonx.extract_string(object, "id", "", true, context.temp_allocator)
+            generation := jsonx.extract_int(object, "generation", 0, true)
+            manifest, has_manifest := jsonx.extract_raw_object(object, "output_manifest", true, context.temp_allocator)
+            append(&inputs, Bridge_Task_Md_Input{
+                ref = fmt.tprintf("%s:%s generation %d", kind, id, generation),
+                fetch = jsonx.extract_string(object, "fetch", "", true, context.temp_allocator),
+                resolved = true, dropped = !has_manifest,
+                body = bridge_taskv2_decrypt_field(manifest, context.temp_allocator),
+            })
+        }
+    }
+    if stage, present := jsonx.extract_raw_object(pack_json, "workflow_stage", true, context.temp_allocator); present {
+        notice := fmt.tprintf("\n## Workflow Run\nRun `%s`, execution `%d`, stage `%s` (item %d of %d). The same chain coordinator owns this run. Work only the task covered by your lease.\n",
+            jsonx.extract_string(stage, "run_id", "", true, context.temp_allocator),
+            jsonx.extract_int(stage, "execution_no", 0, true),
+            jsonx.extract_string(stage, "stage_key", "", true, context.temp_allocator),
+            jsonx.extract_int(stage, "stage_index", 0, true) + 1,
+            jsonx.extract_int(stage, "stage_count", 1, true))
+        gate_feedback = strings.concatenate({gate_feedback, notice}, context.temp_allocator)
+    }
+
 	deps := bridge_taskv2_parse_dependencies(pack_json)
 
 	// Where You Are (vcs)
@@ -684,7 +713,9 @@ bridge_taskv2_render_task_md :: proc(pack_json: string, max_bytes: int = BRIDGE_
 		if len(inputs) > 0 {
 			strings.write_string(&b, "\n## Resolved Inputs\n")
 			for inp in inputs {
-				if inp.dropped {
+                if inp.dropped && inp.fetch != "" {
+                    fmt.sbprintf(&b, "- `%s`: output omitted; fetch the pinned generation with `%s`\n", inp.ref, inp.fetch)
+                } else if inp.dropped {
 					fmt.sbprintf(&b, "- `%s`: omitted for size — fetch with `ham-ctl task fetch %s %s`\n", inp.ref, task_id, inp.ref)
 				} else if inp.resolved {
 					fmt.sbprintf(&b, "- `%s`: %s\n", inp.ref, inp.body)
@@ -1120,6 +1151,22 @@ bridge_taskv2_handle_command :: proc(conn: ^ws.Connection, type, text: string) -
 		_ = bridge_hub_send(conn, cached)
 		return true
 	}
+    // Hub uses one stable command identity per task attempt. Keep the settled
+    // result on disk as well as in the bounded runtime cache: a delayed replay
+    // must never re-run a previously conflicted branch after the run retries.
+    repo := jsonx.extract_string(text, "repo", "", true, context.temp_allocator)
+    if command_id == "" || strings.contains(command_id, "/") || strings.contains(command_id, "\\") || strings.contains(command_id, "..") {
+     out := bridge_taskv2_merge_result_json(command_id, Bridge_Taskv2_Merge_Result{detail = "invalid merge command identity"})
+     defer delete(out)
+     _ = bridge_hub_send(conn, out)
+     return true
+    }
+    receipt_dir := fmt.tprintf("%s/.heimdall/merge-results", strings.trim_right(repo, "/"))
+    receipt_path := fmt.tprintf("%s/%s.json", receipt_dir, command_id)
+    if stored, err := os.read_entire_file(receipt_path, context.temp_allocator); err == nil {
+     _ = bridge_hub_send(conn, string(stored))
+     return true
+    }
 	r := bridge_taskv2_merge_task_worktree(
 		jsonx.extract_string(text, "repo", "", true, context.temp_allocator),
 		jsonx.extract_string(text, "workdir", "", true, context.temp_allocator),
@@ -1128,6 +1175,14 @@ bridge_taskv2_handle_command :: proc(conn: ^ws.Connection, type, text: string) -
 	)
 	out := bridge_taskv2_merge_result_json(command_id, r)
 	defer delete(out)
+    // Do not acknowledge a settled merge until duplicate suppression is durable.
+    _ = bridge_make_directory_all(receipt_dir)
+    if err := os.write_entire_file(receipt_path, transmute([]byte)out); err != nil {
+     failure := bridge_taskv2_merge_result_json(command_id, Bridge_Taskv2_Merge_Result{detail = "merge outcome could not be persisted; settle before retry"})
+     defer delete(failure)
+     _ = bridge_hub_send(conn, failure)
+     return true
+    }
 	bridge_runtime_cache_command(command_id, out)
 	_ = bridge_hub_send(conn, out)
 	return true

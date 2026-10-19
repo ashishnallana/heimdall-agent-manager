@@ -37,8 +37,8 @@ match_chain_in_uow :: proc(svc: ^Service, u: ^Uow, chain: domain.Task_Chain, tri
 		if task.state != .Ready || task.kind == .Gate do continue
 		if task_has_live_lease(&ctx, task.task_id, domain.LEASE_KIND_WORK) do continue
 		if task.stage_key != "" {
-			if cap := workflow_stage_max_parallel(chain, task.stage_key); cap > 0 {
-				if stage_live_work_lease_count(&ctx, task.stage_key) >= cap do continue
+			if cap := workflow_task_max_parallel(svc, task); cap > 0 {
+				if stage_live_work_lease_count(&ctx, task.workflow_run_id, task.workflow_execution_no, task.stage_key) >= cap do continue
 			}
 		}
 		grant_work(svc, u, &ctx, task, trigger)
@@ -47,12 +47,12 @@ match_chain_in_uow :: proc(svc: ^Service, u: ^Uow, chain: domain.Task_Chain, tri
 }
 
 @(private = "file")
-stage_live_work_lease_count :: proc(ctx: ^Match_Context, stage_key: string) -> int {
+stage_live_work_lease_count :: proc(ctx: ^Match_Context, run_id: domain.Workflow_Run_ID, execution_no: int, stage_key: string) -> int {
 	count := 0
 	for l in ctx.leases {
 		if l.kind != domain.LEASE_KIND_WORK do continue
 		for t in ctx.tasks {
-			if t.task_id == l.task_id && t.stage_key == stage_key {
+			if t.task_id == l.task_id && t.workflow_run_id == run_id && t.workflow_execution_no == execution_no && t.stage_key == stage_key {
 				count += 1
 				break
 			}

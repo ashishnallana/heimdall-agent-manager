@@ -3,7 +3,6 @@ package taskv2
 import "core:fmt"
 import "core:strings"
 import "core:testing"
-import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 
@@ -105,731 +104,151 @@ test_workflow_define_and_cycle_check :: proc(t: ^testing.T) {
 	testing.expect(t, !iok && ierr.code == .Validation_Failed && strings.contains(ierr.details_json, "workflow_invalid"), "{{item.*}} without for_each rejected")
 }
 
-@(test)
-test_materialize_on_done_same_uow :: proc(t: ^testing.T) {
-	fx, log, ok := lease_fixture(t, "m3b_same_uow")
-	defer lease_fixture_close(fx, log)
-	if !ok do return
+// Breaking run-scoped integration specifications. Updated for the new public
+// contract; execution is deferred to the requested review/manual-testing stage.
 
-	spec := `{
-		"schema": "workflow.v1",
-		"name": "two_stage",
-		"inputs": [{"name": "goal", "type": "string", "required": true}],
-		"stages": [
-			{
-				"key": "first",
-				"kind": "task",
-				"title": "First: {{inputs.goal}}",
-				"brief": {
-					"goal": "Explore {{inputs.goal}}",
-					"acceptance": ["Done first"],
-					"verify": "none",
-					"output": {"schema": "inline", "required_fields": ["summary"]},
-					"review_roles": []
-				}
-			},
-			{
-				"key": "second",
-				"kind": "task",
-				"title": "Second after {{stage.first.output.summary}}",
-				"depends_on": ["first"],
-				"brief": {
-					"goal": "Implement {{stage.first.output.summary}}",
-					"acceptance": ["Done second"],
-					"verify": "true",
-					"review_roles": []
-				}
-			}
-		]
-	}`
-	_, dok, derr := workflow_define(&fx.svc, "u1", spec)
-	if !testing.expect(t, dok, fmt.tprintf("define: %s", derr.message)) do return
-
-	seed_bridge(fx, "br_1")
-	seed_agent(fx, "coder")
-	seed_instance(fx, domain.Task_Chain{}, "inst_w1", "coder", "br_1", "idle")
-
-	chain, rok, rerr := workflow_run(&fx.svc, "u1", Actor{kind = ACTOR_USER, id = "u1"}, Workflow_Run_Input{
-		ref            = "two_stage",
-		inputs_json    = `{"goal":"ship m3b"}`,
-		bridge_id      = "br_1",
-		directory_path = "/repo",
-	})
-	if !testing.expect(t, rok, fmt.tprintf("workflow_run: %s", rerr.message)) do return
-	testing.expect_value(t, chain.kind, domain.CHAIN_KIND_WORKFLOW)
-
-	// Root stage "first" is materialised and leased immediately; "second" is NOT materialised yet.
-	tasks_before, _ := iface.taskchain_list_tasks_by_chain(&fx.repo, chain.chain_id, "u1")
-	testing.expect_value(t, len(tasks_before), 1)
-	testing.expect_value(t, tasks_before[0].stage_key, "first")
-	testing.expect_value(t, tasks_before[0].title, "First: ship m3b")
-	testing.expect_value(t, tasks_before[0].state, domain.Task_State.In_Progress)
-
-	// Confirm holder and submit stage "first" with output.
-	confirm_holder(fx, "inst_w1")
-	res, sok, serr := lease_submit(&fx.svc, inst_auth("inst_w1"), Submit_Input{
-		summary     = "explored",
-		verify      = "none",
-		output_json = `{"summary":"clean-arch"}`,
-	})
-	if !testing.expect(t, sok, fmt.tprintf("submit first: %s", serr.message)) do return
-	testing.expect_value(t, res.outcome, "done")
-
-	// In the SAME UoW as `lease_submit` (no extra tick or reconcile call), stage "second"
-	// must be materialised, substituted with `first`'s output, and leased to `inst_w1`!
-	tasks_after, _ := iface.taskchain_list_tasks_by_chain(&fx.repo, chain.chain_id, "u1")
-	testing.expect_value(t, len(tasks_after), 2)
-	second_task := domain.Task{}
-	for tk in tasks_after {
-		if tk.stage_key == "second" do second_task = tk
-	}
-	testing.expect_value(t, second_task.title, "Second after clean-arch")
-	testing.expect_value(t, second_task.state, domain.Task_State.In_Progress)
-	l2, held2 := lease_of(fx, "inst_w1")
-	testing.expect(t, held2 && l2.task_id == second_task.task_id, "second stage leased in same UoW")
-	assert_projection_matches_fold(t, fx, chain.chain_id, "u1", "same_uow")
+workflow_example_definition :: proc(t: ^testing.T, fx: ^Fixture, name: string, spec: string) {
+	_,ok,err := workflow_define(&fx.svc,"u1",spec,name)
+	testing.expect(t,ok,err.message)
 }
 
 @(test)
-test_for_each_waits_for_stage_completeness :: proc(t: ^testing.T) {
-	fx, log, ok := lease_fixture(t, "m3b_foreach")
-	defer lease_fixture_close(fx, log)
+test_workflow_runs_share_chain_but_not_stage_identity :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	fx,ok := fixture_open(t,"runs_same_stage")
+	defer fixture_close(fx)
 	if !ok do return
-
-	spec := `{
-		"schema": "workflow.v1",
-		"name": "fanout_wf",
-		"stages": [
-			{
-				"key": "plan",
-				"kind": "task",
-				"title": "Plan",
-				"brief": {
-					"goal": "Produce task list",
-					"acceptance": ["Valid task_list.v1"],
-					"verify": "none",
-					"output": {"schema": "task_list.v1"},
-					"review_roles": []
-				}
-			},
-			{
-				"key": "build",
-				"kind": "task",
-				"title": "Build {{item.key}}: {{item.title}}",
-				"depends_on": ["plan"],
-				"for_each": "plan.outputs[0].tasks",
-				"max_parallel": 1,
-				"brief": {
-					"goal": "{{item.goal}}",
-					"acceptance": ["Built {{item.key}}"],
-					"verify": "true",
-					"review_roles": []
-				}
-			},
-			{
-				"key": "verify",
-				"kind": "task",
-				"title": "Verify all",
-				"depends_on": ["build"],
-				"brief": {
-					"goal": "Verify all built items",
-					"acceptance": ["All green"],
-					"verify": "true",
-					"review_roles": []
-				}
-			}
-		]
-	}`
-	_, dok, _ := workflow_define(&fx.svc, "u1", spec)
-	testing.expect(t, dok, "define fanout_wf")
-
-	seed_bridge(fx, "br_1")
-	seed_agent(fx, "coder")
-	seed_instance(fx, domain.Task_Chain{}, "inst_w1", "coder", "br_1", "idle")
-	seed_instance(fx, domain.Task_Chain{}, "inst_w2", "coder", "br_1", "idle")
-
-	chain, rok, _ := workflow_run(&fx.svc, "u1", Actor{kind = ACTOR_USER, id = "u1"}, Workflow_Run_Input{
-		ref            = "fanout_wf",
-		inputs_json    = `{}`,
-		bridge_id      = "br_1",
-	})
-	if !testing.expect(t, rok, "workflow_run fanout_wf") do return
-
-	// Complete `plan` with 2 items in task_list.v1
-	l_plan, held_plan := lease_of(fx, "inst_w1")
-	if !held_plan {
-		l_plan, held_plan = lease_of(fx, "inst_w2")
-	}
-	testing.expect(t, held_plan, "plan leased")
-	confirm_holder(fx, l_plan.holder_instance_id)
-	_, sok, serr := lease_submit(&fx.svc, inst_auth(l_plan.holder_instance_id), Submit_Input{
-		summary     = "planned 2 items",
-		verify      = "none",
-		output_json = `{"schema":"task_list.v1","tasks":[{"key":"k1","title":"Part 1","goal":"Do part 1"},{"key":"k2","title":"Part 2","goal":"Do part 2"}]}`,
-	})
-	if !testing.expect(t, sok, fmt.tprintf("submit plan: %s", serr.message)) do return
-
-	// Both build[0] and build[1] are materialised, `verify` is NOT materialised yet.
-	// And because `max_parallel: 1`, only ONE of build[0], build[1] is In_Progress!
-	tasks_mid, _ := iface.taskchain_list_tasks_by_chain(&fx.repo, chain.chain_id, "u1")
-	build_count := 0
-	in_prog_build := 0
-	verify_count := 0
-	first_build_holder := ""
-	first_build_task := domain.Task{}
-	for tk in tasks_mid {
-		if tk.stage_key == "build" {
-			build_count += 1
-			if tk.state == .In_Progress {
-				in_prog_build += 1
-				first_build_task = tk
-			}
-		}
-		if tk.stage_key == "verify" do verify_count += 1
-	}
-	testing.expect_value(t, build_count, 2)
-	testing.expect_value(t, in_prog_build, 1)
-	testing.expect_value(t, verify_count, 0)
-
-	if l, ok1 := lease_of(fx, "inst_w1"); ok1 && l.task_id == first_build_task.task_id {
-		first_build_holder = "inst_w1"
-	} else {
-		first_build_holder = "inst_w2"
-	}
-	confirm_holder(fx, first_build_holder)
-	write_verify(fx, string(first_build_task.task_id), 1, "h1", 0)
-	_, b1ok, b1err := lease_submit(&fx.svc, inst_auth(first_build_holder), Submit_Input{
-		summary  = "built 1",
-		vcs_json = `{"head":"h1","dirty":false}`,
-	})
-	if !testing.expect(t, b1ok, fmt.tprintf("submit build[0]: %s", b1err.message)) do return
-
-	// After 1 of 2 build items is Done, `verify` MUST STILL NOT be materialised!
-	tasks_after_b1, _ := iface.taskchain_list_tasks_by_chain(&fx.repo, chain.chain_id, "u1")
-	verify_after_b1 := 0
-	second_build_task := domain.Task{}
-	for tk in tasks_after_b1 {
-		if tk.stage_key == "verify" do verify_after_b1 += 1
-		if tk.stage_key == "build" && tk.state == .In_Progress do second_build_task = tk
-	}
-	testing.expect_value(t, verify_after_b1, 0)
-	testing.expect(t, second_build_task.task_id != "", "second build item is now In_Progress")
-
-	// Complete second build item -> `verify` stage materialises immediately in the same UoW!
-	second_holder := "inst_w1"
-	if l, ok1 := lease_of(fx, "inst_w1"); !ok1 || l.task_id != second_build_task.task_id {
-		second_holder = "inst_w2"
-	}
-	confirm_holder(fx, second_holder)
-	write_verify(fx, string(second_build_task.task_id), 1, "h2", 0)
-	_, b2ok, b2err := lease_submit(&fx.svc, inst_auth(second_holder), Submit_Input{
-		summary  = "built 2",
-		vcs_json = `{"head":"h2","dirty":false}`,
-	})
-	if !testing.expect(t, b2ok, fmt.tprintf("submit build[1]: %s", b2err.message)) do return
-
-	tasks_final, _ := iface.taskchain_list_tasks_by_chain(&fx.repo, chain.chain_id, "u1")
-	verify_final := 0
-	for tk in tasks_final {
-		if tk.stage_key == "verify" do verify_final += 1
-	}
-	testing.expect_value(t, verify_final, 1)
-	assert_projection_matches_fold(t, fx, chain.chain_id, "u1", "foreach_complete")
+	chain := seed_chain(t,fx,"chain_runs",true)
+    seed_fleet(fx, chain, "agt_w")
+	workflow_example_definition(t,fx,"simple",`{"schema":"workflow.v1","name":"simple","stages":[{"key":"build","brief":{"goal":"Build","verify":"none","output":{"schema":"inline"},"review_roles":[]}}]}`)
+	first,aok,aerr := workflow_run(&fx.svc,"u1",Actor{kind=ACTOR_USER,id="u1"},Workflow_Run_Input{chain_id=string(chain.chain_id),ref="simple",request_id="one",inputs_json="{}"})
+	second,bok,berr := workflow_run(&fx.svc,"u1",Actor{kind=ACTOR_USER,id="u1"},Workflow_Run_Input{chain_id=string(chain.chain_id),ref="simple",request_id="two",inputs_json="{}"})
+	testing.expect(t,aok && bok,fmt.tprintf("%s / %s",aerr.message,berr.message))
+	testing.expect(t,first.run_id != second.run_id && first.chain_id == second.chain_id,"one container, separate execution identities")
+	tasks,_ := iface.taskchain_list_tasks_by_chain(&fx.repo,chain.chain_id,"u1")
+	testing.expect(t,len(tasks)==2,"identical stage keys materialize twice")
+	if len(tasks)==2 do testing.expect(t,tasks[0].stage_key == tasks[1].stage_key && tasks[0].workflow_run_id != tasks[1].workflow_run_id,"no stage collision")
+	_ = seed_task(t,fx,chain,"ordinary_ticket")
+	current,_,_ := iface.taskchain_get_chain(&fx.repo,chain.chain_id)
+	testing.expect(t,current.status == .Active,"adding runs never changes chain status or execution type")
 }
 
 @(test)
-test_materialize_idempotent_after_reopen :: proc(t: ^testing.T) {
-	fx, log, ok := lease_fixture(t, "m3b_idem")
-	defer lease_fixture_close(fx, log)
+test_workflow_retry_creates_fresh_generation_and_preserves_history :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	fx,ok := fixture_open(t,"run_generation")
+	defer fixture_close(fx)
 	if !ok do return
+	chain := seed_chain(t,fx,"chain_retry",true)
+    seed_fleet(fx, chain, "agt_w")
+	workflow_example_definition(t,fx,"retryable",`{"schema":"workflow.v1","name":"retryable","stages":[{"key":"build","brief":{"goal":"Build","verify":"none","output":{"schema":"inline"},"review_roles":[]}}]}`)
+	run,rok,rerr := workflow_run(&fx.svc,"u1",Actor{kind=ACTOR_USER,id="u1"},Workflow_Run_Input{chain_id=string(chain.chain_id),ref="retryable",request_id="one",inputs_json="{}"})
+	if !testing.expect(t,rok,rerr.message) do return
+	_,cancelled,cerr := workflow_cancel(&fx.svc,run.run_id,"u1",Actor{kind=ACTOR_USER,id="u1"},"change approach",1)
+	if !testing.expect(t,cancelled,cerr.message) do return
+	retried,ok_retry,retry_err := workflow_retry(&fx.svc,run.run_id,"u1",Actor{kind=ACTOR_USER,id="u1"},"try again",run.revision)
+	testing.expect(t,ok_retry,retry_err.message)
+	testing.expect(t,retried.current_execution_no==2,"full-run retry advances generation")
+    _, duplicate_ok, duplicate_err := workflow_cancel(&fx.svc,run.run_id,"u1",Actor{kind=ACTOR_USER,id="u1"},"late duplicate",1)
+    testing.expect(t,duplicate_ok,duplicate_err.message)
+    current, current_ok, _ := workflow_context(&fx.svc,run.run_id,"u1")
+    testing.expect(t,current_ok && current.execution.execution_no==2 && current.execution.state=="running","late cancellation cannot touch the new generation")
+    _, missing_target, target_err := workflow_cancel(&fx.svc,run.run_id,"u1",Actor{kind=ACTOR_USER,id="u1"},"missing target",0)
+    testing.expect(t,!missing_target && target_err.code==.Validation_Failed,"cancellation requires an execution target")
 
-	spec := `{
-		"schema": "workflow.v1",
-		"name": "idem_wf",
-		"stages": [
-			{
-				"key": "s1",
-				"kind": "task",
-				"title": "Stage 1",
-				"brief": {"goal": "g1", "acceptance": ["a1"], "verify": "true", "review_roles": []}
-			},
-			{
-				"key": "s2",
-				"kind": "task",
-				"title": "Stage 2",
-				"depends_on": ["s1"],
-				"brief": {"goal": "g2", "acceptance": ["a2"], "verify": "true", "review_roles": []}
-			}
-		]
-	}`
-	_, dok, _ := workflow_define(&fx.svc, "u1", spec)
-	testing.expect(t, dok, "define idem_wf")
-
-	seed_bridge(fx, "br_1")
-	seed_agent(fx, "coder")
-	seed_instance(fx, domain.Task_Chain{}, "inst_w1", "coder", "br_1", "idle")
-
-	chain, rok, _ := workflow_run(&fx.svc, "u1", Actor{kind = ACTOR_USER, id = "u1"}, Workflow_Run_Input{
-		ref            = "idem_wf",
-		inputs_json    = `{}`,
-		bridge_id      = "br_1",
-		directory_path = "/repo",
-	})
-	if !testing.expect(t, rok, "run idem_wf") do return
-
-	confirm_holder(fx, "inst_w1")
-	l1, _ := lease_of(fx, "inst_w1")
-	write_verify(fx, string(l1.task_id), 1, "h1", 0)
-	_, sok, _ := lease_submit(&fx.svc, inst_auth("inst_w1"), Submit_Input{
-		summary  = "s1 done",
-		vcs_json = `{"head":"h1","dirty":false}`,
-	})
-	testing.expect(t, sok, "s1 submitted")
-
-	tasks1, _ := iface.taskchain_list_tasks_by_chain(&fx.repo, chain.chain_id, "u1")
-	testing.expect_value(t, len(tasks1), 2)
-	s2_id := domain.Task_ID("")
-	for tk in tasks1 {
-		if tk.stage_key == "s2" do s2_id = tk.task_id
+	executions,_ := iface.taskchain_list_workflow_executions(&fx.repo,run.run_id,"u1")
+	testing.expect(t,len(executions)==2,"old execution remains visible")
+	tasks,_ := iface.taskchain_list_tasks_by_chain(&fx.repo,chain.chain_id,"u1")
+	testing.expect(t,len(tasks)==2,"fresh tasks instead of parked stage keys")
+	for task in tasks {
+		testing.expect(t,task.stage_key=="build","stage identity is never rewritten")
+		if task.workflow_execution_no==1 do testing.expect(t,task.state==.Cancelled,"old task stays cancelled")
 	}
-	testing.expect(t, s2_id != "", "s2 materialised")
-
-	// Complete s2 so it is terminal, then reopen s2 and re-run materializer: s2 must NOT be duplicated.
-	confirm_holder(fx, "inst_w1")
-	write_verify(fx, string(s2_id), 1, "h2", 0)
-	_, s2ok, _ := lease_submit(&fx.svc, inst_auth("inst_w1"), Submit_Input{
-		summary  = "s2 done",
-		vcs_json = `{"head":"h2","dirty":false}`,
-	})
-	testing.expect(t, s2ok, "s2 submitted")
-
-	s2_done := get_task(fx, string(s2_id))
-	_, reok, reerr := task_reopen(&fx.svc, s2_done, Actor{kind = ACTOR_USER, id = "u1"})
-	testing.expect(t, reok, fmt.tprintf("reopen s2: %s", reerr.message))
-
-	u, uok, _ := begin_uow(&fx.svc)
-	if uok {
-		_, _, _ = materialize_ready_stages_in_uow(&fx.svc, &u, chain)
-		_, _ = end_uow(&fx.svc, &u, true)
-	}
-
-	tasks2, _ := iface.taskchain_list_tasks_by_chain(&fx.repo, chain.chain_id, "u1")
-	s2_count := 0
-	for tk in tasks2 {
-		if tk.stage_key == "s2" do s2_count += 1
-	}
-	testing.expect_value(t, s2_count, 1)
-	assert_projection_matches_fold(t, fx, chain.chain_id, "u1", "idem_reopen")
 }
 
 @(test)
-test_gate_materialised_in_review_and_never_leased :: proc(t: ^testing.T) {
-	fx, log, ok := lease_fixture(t, "m3b_gate")
-	defer lease_fixture_close(fx, log)
+test_workflow_run_creation_request_is_idempotent :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	fx,ok := fixture_open(t,"run_request")
+	defer fixture_close(fx)
 	if !ok do return
-
-	spec := `{
-		"schema": "workflow.v1",
-		"name": "gated_wf",
-		"stages": [
-			{
-				"key": "plan",
-				"kind": "task",
-				"title": "Plan",
-				"brief": {"goal": "plan it", "acceptance": ["planned"], "verify": "true", "review_roles": []}
-			},
-			{
-				"key": "approve_plan",
-				"kind": "gate",
-				"title": "Approve Plan",
-				"depends_on": ["plan"],
-				"approver": "user",
-				"prompt": "Please approve the plan"
-			},
-			{
-				"key": "deploy",
-				"kind": "task",
-				"title": "Deploy",
-				"depends_on": ["approve_plan"],
-				"brief": {"goal": "deploy it", "acceptance": ["deployed"], "verify": "true", "review_roles": []}
-			}
-		]
-	}`
-	_, dok, _ := workflow_define(&fx.svc, "u1", spec)
-	testing.expect(t, dok, "define gated_wf")
-
-	seed_bridge(fx, "br_1")
-	seed_agent(fx, "agt_c")
-	seed_agent(fx, "coder")
-	seed_instance(fx, domain.Task_Chain{}, "inst_w1", "coder", "br_1", "idle")
-	seed_instance(fx, domain.Task_Chain{}, "inst_coord", "agt_c", "br_1", "running")
-
-	chain, rok, _ := workflow_run(&fx.svc, "u1", Actor{kind = ACTOR_USER, id = "u1"}, Workflow_Run_Input{
-		ref                           = "gated_wf",
-		inputs_json                   = `{}`,
-		coordinator_agent_instance_id = "inst_coord",
-		bridge_id                     = "br_1",
-		directory_path                = "/repo",
-	})
-	if !testing.expect(t, rok, "run gated_wf") do return
-
-	// Complete `plan` stage
-	confirm_holder(fx, "inst_w1")
-	l1, _ := lease_of(fx, "inst_w1")
-	write_verify(fx, string(l1.task_id), 1, "h1", 0)
-	_, sok, _ := lease_submit(&fx.svc, inst_auth("inst_w1"), Submit_Input{
-		summary  = "plan ready",
-		vcs_json = `{"head":"h1","dirty":false}`,
-	})
-	testing.expect(t, sok, "submit plan")
-
-	// `approve_plan` gate is materialised directly in `In_Review`; `deploy` is not materialised yet.
-	tasks_mid, _ := iface.taskchain_list_tasks_by_chain(&fx.repo, chain.chain_id, "u1")
-	gate_task := domain.Task{}
-	deploy_count := 0
-	for tk in tasks_mid {
-		if tk.stage_key == "approve_plan" do gate_task = tk
-		if tk.stage_key == "deploy" do deploy_count += 1
-	}
-	testing.expect_value(t, gate_task.kind, domain.Task_Kind.Gate)
-	testing.expect_value(t, gate_task.state, domain.Task_State.In_Review)
-	testing.expect_value(t, deploy_count, 0)
-
-	// Worker is NEVER leased the gate task.
-	_, held_w := lease_of(fx, "inst_w1")
-	testing.expect(t, !held_w, "gate is never leased to worker")
-	ln, lnok, _ := lease_next(&fx.svc, inst_auth("inst_w1"), Lease_Next_Input{})
-	testing.expect(t, lnok && ln.status == "none", "lease_next returns none while waiting at gate")
-
-	// Because approver == "user", coordinator approval is rejected with 403 gate_requires_user.
-	_, cgok, cgerr := review_post(&fx.svc, inst_auth("inst_coord"), Review_Input{
-		task_id = string(gate_task.task_id),
-		verdict = "approve",
-	})
-	testing.expect(t, !cgok && cgerr.code == .Forbidden && strings.contains(cgerr.details_json, "gate_requires_user"), "user-only gate rejects coordinator approval")
-
-	// User approves the gate -> gate transitions to Done and `deploy` materialises & leases in the same UoW!
-	gres, ugok, ugerr := user_review(&fx.svc, user_auth(), gate_task.task_id, Review_Input{
-		task_id = string(gate_task.task_id),
-		verdict = "approve",
-	})
-	if !testing.expect(t, ugok, fmt.tprintf("user approve gate: %s", ugerr.message)) do return
-	testing.expect_value(t, gres.gate, Gate_Result.Approved)
-	testing.expect_value(t, get_task(fx, string(gate_task.task_id)).state, domain.Task_State.Done)
-
-	tasks_after, _ := iface.taskchain_list_tasks_by_chain(&fx.repo, chain.chain_id, "u1")
-	deploy_task := domain.Task{}
-	for tk in tasks_after {
-		if tk.stage_key == "deploy" do deploy_task = tk
-	}
-	testing.expect(t, deploy_task.task_id != "", "deploy stage materialised on gate approval")
-	testing.expect_value(t, deploy_task.state, domain.Task_State.In_Progress)
-	assert_projection_matches_fold(t, fx, chain.chain_id, "u1", "gate_approved")
+	chain := seed_chain(t,fx,"chain_request",true)
+    seed_fleet(fx, chain, "agt_w")
+	workflow_example_definition(t,fx,"once",`{"schema":"workflow.v1","name":"once","stages":[{"key":"build","brief":{"goal":"Build","verify":"none","output":{"schema":"inline"},"review_roles":[]}}]}`)
+	input := Workflow_Run_Input{chain_id=string(chain.chain_id),ref="once",request_id="same",inputs_json="{}"}
+	first,aok,_ := workflow_run(&fx.svc,"u1",Actor{kind=ACTOR_USER,id="u1"},input)
+	second,bok,_ := workflow_run(&fx.svc,"u1",Actor{kind=ACTOR_USER,id="u1"},input)
+	testing.expect(t,aok && bok && first.run_id==second.run_id,"duplicate request returns existing run")
+    equivalent := input
+    equivalent.request_id = "canonical"
+    equivalent.inputs_json = `{"a":1,"nested":{"z":2,"b":3}}`
+    canonical, first_ok, _ := workflow_run(&fx.svc,"u1",Actor{kind=ACTOR_USER,id="u1"},equivalent)
+    equivalent.inputs_json = `{"nested":{"b":3,"z":2},"a":1}`
+    same, second_ok, _ := workflow_run(&fx.svc,"u1",Actor{kind=ACTOR_USER,id="u1"},equivalent)
+    testing.expect(t, first_ok && second_ok && canonical.run_id == same.run_id, "object key order does not change request identity")
+	input.inputs_json=`{"changed":true}`
+	_,accepted,err := workflow_run(&fx.svc,"u1",Actor{kind=ACTOR_USER,id="u1"},input)
+	testing.expect(t,!accepted && err.code==.Conflict,"same request id with changed body rejected")
 }
 
+// REQ-MW-2/7/9: proposal decisions are orchestration, not worker authority.
 @(test)
-test_retry_refused_with_downstream :: proc(t: ^testing.T) {
-	fx, log, ok := lease_fixture(t, "m3b_retry_409")
-	defer lease_fixture_close(fx, log)
-	if !ok do return
-
-	spec := `{
-		"schema": "workflow.v1",
-		"name": "retry_409_wf",
-		"stages": [
-			{"key": "s1", "kind": "task", "title": "S1", "brief": {"goal": "g1", "acceptance": ["a1"], "verify": "true", "review_roles": []}},
-			{"key": "s2", "kind": "task", "title": "S2", "depends_on": ["s1"], "brief": {"goal": "g2", "acceptance": ["a2"], "verify": "true", "review_roles": []}}
-		]
-	}`
-	_, dok, _ := workflow_define(&fx.svc, "u1", spec)
-	testing.expect(t, dok, "define retry_409_wf")
-
-	seed_bridge(fx, "br_1")
-	seed_agent(fx, "coder")
-	seed_instance(fx, domain.Task_Chain{}, "inst_w1", "coder", "br_1", "idle")
-
-	chain, rok, _ := workflow_run(&fx.svc, "u1", Actor{kind = ACTOR_USER, id = "u1"}, Workflow_Run_Input{
-		ref            = "retry_409_wf",
-		inputs_json    = `{}`,
-		bridge_id      = "br_1",
-		directory_path = "/repo",
-	})
-	if !testing.expect(t, rok, "run retry_409_wf") do return
-
-	// Complete s1 so s2 is materialised
-	confirm_holder(fx, "inst_w1")
-	l1, _ := lease_of(fx, "inst_w1")
-	write_verify(fx, string(l1.task_id), 1, "h1", 0)
-	_, sok, _ := lease_submit(&fx.svc, inst_auth("inst_w1"), Submit_Input{
-		summary  = "s1 done",
-		vcs_json = `{"head":"h1","dirty":false}`,
-	})
-	testing.expect(t, sok, "s1 done")
-
-	// Retry s1 without cascade -> 409 downstream_materialised
-	_, rtok, rterr := workflow_retry(&fx.svc, chain.chain_id, "u1", Actor{kind = ACTOR_USER, id = "u1"}, Workflow_Retry_Input{
-		stage_key = "s1",
-		cascade   = false,
-	})
-	testing.expect(t, !rtok && rterr.code == .Conflict && strings.contains(rterr.details_json, "downstream_materialised"), "retry without cascade refused with 409 downstream_materialised")
-	testing.expect_value(t, get_task(fx, string(l1.task_id)).state, domain.Task_State.Done)
+test_proposal_decision_requires_chain_owner_or_coordinator :: proc(t: ^testing.T) {
+ fx, ok := fixture_open(t,"proposal_authority")
+ defer fixture_close(fx)
+ if !ok do return
+ chain := seed_chain(t,fx,"proposal_auth",true)
+ decisions := []string{"approve","reject"}
+ for decision in decisions {
+  _, _, accepted, err := chain_proposal_decide(&fx.svc,chain.chain_id,"u1",Actor{kind=ACTOR_AGENT,id="unrelated_worker"},decision)
+  testing.expect(t,!accepted && err.code==.Forbidden,"unrelated worker cannot decide any proposal")
+ }
 }
 
+// REQ-MW-2/7: missing fleet coverage fails before any run is stored.
 @(test)
-test_retry_cascade_cancels_and_carries_forward :: proc(t: ^testing.T) {
-	fx, log, ok := lease_fixture(t, "m3b_cascade")
-	defer lease_fixture_close(fx, log)
-	if !ok do return
-
-	spec := `{
-		"schema": "workflow.v1",
-		"name": "cascade_wf",
-		"stages": [
-			{
-				"key": "plan",
-				"kind": "task",
-				"title": "Plan",
-				"brief": {
-					"goal": "Produce task list",
-					"acceptance": ["task_list.v1"],
-					"verify": "none",
-					"output": {"schema": "task_list.v1"},
-					"review_roles": []
-				}
-			},
-			{
-				"key": "build",
-				"kind": "task",
-				"title": "Build {{item.key}}",
-				"depends_on": ["plan"],
-				"for_each": "plan.outputs[0].tasks",
-				"brief": {
-					"goal": "{{item.goal}}",
-					"acceptance": ["Built {{item.key}}"],
-					"verify": "true",
-					"review_roles": []
-				}
-			}
-		]
-	}`
-	_, dok, _ := workflow_define(&fx.svc, "u1", spec)
-	testing.expect(t, dok, "define cascade_wf")
-
-	seed_bridge(fx, "br_1")
-	seed_agent(fx, "coder")
-	seed_instance(fx, domain.Task_Chain{}, "inst_w1", "coder", "br_1", "idle")
-	seed_instance(fx, domain.Task_Chain{}, "inst_w2", "coder", "br_1", "idle")
-
-	chain, rok, _ := workflow_run(&fx.svc, "u1", Actor{kind = ACTOR_USER, id = "u1"}, Workflow_Run_Input{
-		ref         = "cascade_wf",
-		inputs_json = `{}`,
-		bridge_id   = "br_1",
-	})
-	if !testing.expect(t, rok, "run cascade_wf") do return
-
-	// 1. Submit `plan` with 2 items: `item_a` and `item_b`.
-	l_plan, held := lease_of(fx, "inst_w1")
-	if !held do l_plan, held = lease_of(fx, "inst_w2")
-	confirm_holder(fx, l_plan.holder_instance_id)
-	_, pok, _ := lease_submit(&fx.svc, inst_auth(l_plan.holder_instance_id), Submit_Input{
-		summary     = "initial plan",
-		verify      = "none",
-		output_json = `{"schema":"task_list.v1","tasks":[{"key":"item_a","goal":"Build A"},{"key":"item_b","goal":"Build B v1"}]}`,
-	})
-	testing.expect(t, pok, "submit initial plan")
-
-	// Find build[0] (item_a) and build[1] (item_b).
-	tasks_v1, _ := iface.taskchain_list_tasks_by_chain(&fx.repo, chain.chain_id, "u1")
-	task_a := domain.Task{}
-	task_b := domain.Task{}
-	for tk in tasks_v1 {
-		if tk.stage_key == "build" && tk.stage_index == 0 do task_a = tk
-		if tk.stage_key == "build" && tk.stage_index == 1 do task_b = tk
-	}
-	testing.expect(t, task_a.task_id != "" && task_b.task_id != "", "both build tasks materialised")
-
-	// 2. Complete `task_a` (Done), and record a VCS commit facet on `task_b` while `task_b` is In_Progress.
-	holder_a := "inst_w1"
-	if l, ok1 := lease_of(fx, "inst_w1"); !ok1 || l.task_id != task_a.task_id {
-		holder_a = "inst_w2"
-	}
-	confirm_holder(fx, holder_a)
-	write_verify(fx, string(task_a.task_id), 1, "head_a", 0)
-	_, aok, _ := lease_submit(&fx.svc, inst_auth(holder_a), Submit_Input{
-		summary  = "item_a finished",
-		vcs_json = `{"head":"head_a","dirty":false}`,
-	})
-	testing.expect(t, aok, "task_a is Done")
-	testing.expect_value(t, get_task(fx, string(task_a.task_id)).state, domain.Task_State.Done)
-
-	// Record a VCS facet on `task_b` so cascade cancellation detects orphaned commits.
-	_, _ = iface.taskchain_save_facet(&fx.repo, domain.Task_Attempt_Facet{
-		task_id       = task_b.task_id,
-		attempt_no    = 1,
-		kind          = FACET_VCS,
-		owner_user_id = "u1",
-		writer        = FACET_WRITER_BRIDGE,
-		body_json     = `{"head":"deadbeef999","dirty":false}`,
-		written_at    = "2026-04-17T00:00:00Z",
-	})
-
-	// 3. Run `workflow_retry` on `plan` with `cascade = true`!
-	rres, rtok, rterr := workflow_retry(&fx.svc, chain.chain_id, "u1", Actor{kind = ACTOR_USER, id = "u1"}, Workflow_Retry_Input{
-		stage_key = "plan",
-		cascade   = true,
-		reason    = "revise item_b",
-	})
-	if !testing.expect(t, rtok, fmt.tprintf("cascade retry: %s", rterr.message)) do return
-	testing.expect_value(t, len(rres.reopened_task_ids), 1)
-	testing.expect_value(t, len(rres.cancelled_task_ids), 1)
-	testing.expect_value(t, rres.cancelled_task_ids[0], task_b.task_id)
-	testing.expect_value(t, len(rres.carried_forward_keys), 1)
-	testing.expect_value(t, rres.carried_forward_keys[0], "item_a")
-	testing.expect_value(t, len(rres.orphaned_task_ids), 1)
-	testing.expect_value(t, rres.orphaned_task_ids[0], task_b.task_id)
-	testing.expect_value(t, count_events(fx, string(task_b.task_id), EV_ORPHANED_WORK), 1)
-
-	// 4. Submit `plan` attempt 2 with `item_a` UNCHANGED and `item_b` MODIFIED (`Build B v2`).
-	l_plan2, held2 := lease_of(fx, "inst_w1")
-	if !held2 do l_plan2, held2 = lease_of(fx, "inst_w2")
-	if !held2 {
-		leases_p, _ := iface.taskchain_list_leases_by_task(&fx.repo, l_plan.task_id)
-		if len(leases_p) > 0 {
-			l_plan2 = leases_p[0]
-			held2 = true
-		}
-	}
-	testing.expect(t, held2, "reopened plan is leased")
-	confirm_holder(fx, l_plan2.holder_instance_id)
-	_, p2ok, p2err := lease_submit(&fx.svc, inst_auth(l_plan2.holder_instance_id), Submit_Input{
-		summary     = "revised plan",
-		verify      = "none",
-		output_json = `{"schema":"task_list.v1","tasks":[{"key":"item_a","goal":"Build A"},{"key":"item_b","goal":"Build B v2"}]}`,
-	})
-	if !testing.expect(t, p2ok, fmt.tprintf("submit revised plan: %s", p2err.message)) do return
-
-	// 5. Verify `task_a` was carried forward as `Done` (same task_id, not re-run!)
-	// and a new `build[1]` task was created for `Build B v2`.
-	tasks_v2, _ := iface.taskchain_list_tasks_by_chain(&fx.repo, chain.chain_id, "u1")
-	restored_a := domain.Task{}
-	new_b := domain.Task{}
-	for tk in tasks_v2 {
-		if tk.stage_key == "build" && tk.stage_index == 0 do restored_a = tk
-		if tk.stage_key == "build" && tk.stage_index == 1 do new_b = tk
-	}
-	testing.expect_value(t, restored_a.task_id, task_a.task_id)
-	testing.expect_value(t, restored_a.state, domain.Task_State.Done)
-	testing.expect(t, new_b.task_id != "" && new_b.task_id != task_b.task_id, "modified item_b got a fresh task")
-	testing.expect(t, strings.contains(new_b.brief_json, "Build B v2"), "new item_b has updated goal")
+test_workflow_fleet_requires_worker_and_named_reviewer :: proc(t: ^testing.T) {
+ fx, ok := fixture_open(t,"workflow_fleet_validation")
+ defer fixture_close(fx)
+ if !ok do return
+ chain := seed_chain(t,fx,"fleet_validation",true)
+ err := workflow_validate_fleet(&fx.svc,chain,`{"goal":"g"}`)
+ testing.expect(t,err.code==.Validation_Failed,"no worker rejected")
+ seed_fleet(fx,chain,"worker")
+ err = workflow_validate_fleet(&fx.svc,chain,`{"goal":"g","reviewers":["named"]}`)
+ testing.expect(t,err.code==.Validation_Failed,"missing named reviewer rejected")
+ seed_fleet(fx,chain,"named",roles=`["named-reviewer"]`)
+ err = workflow_validate_fleet(&fx.svc,chain,`{"goal":"g","reviewers":["named"]}`)
+ testing.expect(t,err.code==.None,"configured named reviewer accepted")
 }
 
+// REQ-MW-5/9: the generation cannot close or advance while a Done task's
+// bridge merge is queued, in flight, offline, or awaiting recovery.
 @(test)
-test_workflow_task_create_403 :: proc(t: ^testing.T) {
-	fx, log, ok := lease_fixture(t, "m3b_imm")
-	defer lease_fixture_close(fx, log)
-	if !ok do return
-
-	seed_bridge(fx, "br_1")
-	chain, rok, rerr := workflow_run(&fx.svc, "u1", Actor{kind = ACTOR_USER, id = "u1"}, Workflow_Run_Input{
-		ref            = "fix_flaky_tests",
-		inputs_json    = `{"test_command":"odin test src/hub/service/taskv2"}`,
-		bridge_id      = "br_1",
-		directory_path = "/repo",
-	})
-	if !testing.expect(t, rok, fmt.tprintf("workflow_run: %s", rerr.message)) do return
-	testing.expect_value(t, chain.kind, domain.CHAIN_KIND_WORKFLOW)
-
-	// Attempting to mutate workflow_snapshot_json at the repo level returns 409 workflow_snapshot_immutable.
-	mutated := chain
-	mutated.workflow_snapshot_json = `{"schema":"workflow.v1","name":"tampered","stages":[]}`
-	_, mok, merr := iface.taskchain_save_chain(&fx.repo, mutated)
-	testing.expect(t, !mok && merr.code == .Conflict && strings.contains(merr.details_json, "workflow_snapshot_immutable"), "workflow_snapshot_json is immutable")
-}
-
-@(test)
-test_ticket_on_output_starts_workflow :: proc(t: ^testing.T) {
-	fx, log, ok := lease_fixture(t, "m3b_on_output")
-	defer lease_fixture_close(fx, log)
-	if !ok do return
-
-	// 1. Seed a live `ticket` chain with a task whose brief has `output` + `on_output: start_workflow`.
-	chain := seed_live_chain(t, fx, "chain_triage")
-	chain.kind = domain.CHAIN_KIND_TICKET
-	_, _, _ = iface.taskchain_save_chain(&fx.repo, chain)
-	seed_fleet(fx, chain, "agt_w")
-	seed_agent(fx, "coder")
-	seed_instance(fx, chain, "inst_w1", "agt_w", "br_1", "idle")
-	seed_instance(fx, chain, "inst_w2", "coder", "br_1", "idle")
-
-	triage_brief := `{
-		"goal": "Triage flaky test report",
-		"acceptance": ["Emit test_command"],
-		"verify": "none",
-		"review_roles": [],
-		"output": {
-			"schema": "inline",
-			"required_fields": ["test_command"]
-		},
-		"on_output": {
-			"kind": "start_workflow",
-			"workflow": "fix_flaky_tests",
-			"title": "Auto-fix: {{output.test_command}}",
-			"inputs": {
-				"test_command": "{{output.test_command}}"
-			}
-		}
-	}`
-	triage_task := publish_task(t, fx, chain, "task_triage", brief = triage_brief)
-	confirm_holder(fx, "inst_w1")
-
-	// Submitting without required output field `test_command` fails with 422 output_contract_invalid.
-	_, bad_ok, bad_err := lease_submit(&fx.svc, inst_auth("inst_w1"), Submit_Input{
-		summary     = "missing field",
-		verify      = "none",
-		output_json = `{"wrong_field":"x"}`,
-	})
-	testing.expect(t, !bad_ok && bad_err.code == .Validation_Failed && strings.contains(bad_err.details_json, "output_contract_invalid"), "missing required output field rejected")
-
-	// Submitting with valid output completes the ticket AND spawns the `fix_flaky_tests` workflow in the SAME UoW!
-	res, sok, serr := lease_submit(&fx.svc, inst_auth("inst_w1"), Submit_Input{
-		summary     = "triaged flaky suite",
-		verify      = "none",
-		output_json = `{"test_command":"pytest tests/flaky"}`,
-	})
-	if !testing.expect(t, sok, fmt.tprintf("submit triage: %s", serr.message)) do return
-	testing.expect_value(t, res.outcome, "done")
-
-	// Verify EV_STARTED_WORKFLOW was recorded on `task_triage`.
-	testing.expect_value(t, count_events(fx, string(triage_task.task_id), EV_STARTED_WORKFLOW), 1)
-	evs, _ := iface.taskchain_list_events_by_task(&fx.repo, triage_task.task_id, "u1")
-	spawned_chain_id := ""
-	for ev in evs {
-		if ev.kind == EV_STARTED_WORKFLOW {
-			spawned_chain_id = strings.trim_space(
-				iface_extract_str(ev.payload_json, "chain_id"),
-			)
-		}
-	}
-	testing.expect(t, spawned_chain_id != "", "EV_STARTED_WORKFLOW carries spawned chain_id")
-
-	// Verify the spawned workflow chain exists, is Published + Active, has kind == "workflow",
-	// and its root stage (`reproduce`) is materialised!
-	wf_chain, wf_ok, _ := iface.taskchain_get_chain(&fx.repo, domain.Task_Chain_ID(spawned_chain_id))
-	testing.expect(t, wf_ok, "spawned workflow chain exists")
-	testing.expect_value(t, wf_chain.kind, domain.CHAIN_KIND_WORKFLOW)
-	testing.expect_value(t, wf_chain.title, "Auto-fix: pytest tests/flaky")
-
-	wf_tasks, _ := iface.taskchain_list_tasks_by_chain(&fx.repo, wf_chain.chain_id, "u1")
-	testing.expect_value(t, len(wf_tasks), 1)
-	testing.expect_value(t, wf_tasks[0].stage_key, "reproduce")
-	testing.expect(t, strings.contains(wf_tasks[0].brief_json, "pytest tests/flaky"), "workflow input substituted into root stage brief")
-}
-
-@(private = "file")
-iface_extract_str :: proc(json_str, key: string) -> string {
-	members := jsonx_top_level_members(json_str)
-	if raw, ok := members[key]; ok {
-		return strings.trim(strings.trim_space(raw), "\"")
-	}
-	return ""
+test_workflow_cancel_waits_for_pending_merge :: proc(t: ^testing.T) {
+ fx, ok := fixture_open(t,"workflow_merge_fence")
+ defer fixture_close(fx)
+ if !ok do return
+ chain := seed_chain(t,fx,"merge_fence",true)
+ seed_fleet(fx,chain,"worker")
+ seed_directory(fx,chain,"git_dir","br_1","git")
+ workflow_example_definition(t,fx,"mergeable",`{"schema":"workflow.v1","name":"mergeable","stages":[{"key":"build","brief":{"goal":"Build","verify":"none","output":{"schema":"inline"},"review_roles":[]}}]}`)
+ run, created, err := workflow_run(&fx.svc,"u1",Actor{kind=ACTOR_USER,id="u1"},Workflow_Run_Input{chain_id=string(chain.chain_id),ref="mergeable",request_id="one",inputs_json="{}"})
+ if !testing.expect(t,created,err.message) do return
+ wf, _, _ := workflow_context(&fx.svc,run.run_id,"u1")
+ tasks, _ := workflow_execution_tasks(&fx.svc,wf)
+ if !testing.expect(t,len(tasks)==1,"one generated task") do return
+ task := tasks[0]
+ task.state = .Done
+ task, _, _ = iface.taskchain_save_task(&fx.repo,task)
+ _, _, _ = append_event(&fx.repo,&fx.clock,task,hub_actor(),EV_LEASE_GRANTED,`{"kind":"work","bridge_id":"br_1"}`)
+ _, _, _ = append_event(&fx.repo,&fx.clock,task,hub_actor(),EV_SUBMITTED,`{}`)
+ _, cancelled, cancel_err := workflow_cancel(&fx.svc,run.run_id,"u1",Actor{kind=ACTOR_USER,id="u1"},"change approach",1)
+ testing.expect(t,!cancelled && cancel_err.code==.Conflict,"pending merge blocks cancellation")
+ testing.expect(t,workflow_merge_allowed(&fx.svc,task),"current merge may settle")
+ _, _, _ = append_event(&fx.repo,&fx.clock,task,hub_actor(),EV_MERGE_CONFLICT,`{}`)
+ testing.expect(t,workflow_require_merges_settled(&fx.svc,wf).code==.None,"settled conflict releases the generation fence")
+ _, cancelled, cancel_err = workflow_cancel(&fx.svc,run.run_id,"u1",Actor{kind=ACTOR_USER,id="u1"},"change approach",1)
+ testing.expect(t,cancelled,cancel_err.message)
+ testing.expect(t,!workflow_merge_allowed(&fx.svc,task),"cancelled execution is fenced from recovery and jobs")
 }

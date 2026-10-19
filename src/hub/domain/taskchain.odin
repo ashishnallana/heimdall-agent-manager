@@ -57,11 +57,9 @@ task_state_is_terminal :: proc(state: Task_State) -> bool {
 	return state == .Done || state == .Cancelled
 }
 
-// task_state_unblocks_dependents: a dependency is satisfied once the task it
-// points at is Done or Cancelled (a cancelled prerequisite does not hold its
-// dependents hostage; the human decided it is out of scope).
+// Dependencies require success. Cancelling/excluding work never satisfies them.
 task_state_unblocks_dependents :: proc(state: Task_State) -> bool {
-	return task_state_is_terminal(state)
+	return state == .Done
 }
 
 // Task_Kind: `task` is granted to workers; `gate` is a human approval point in a
@@ -85,23 +83,12 @@ task_kind_from_string :: proc(value: string) -> Task_Kind {
 	return .Task
 }
 
-// Chain kinds (Task System v2 §0). `team_work` is the pre-v2 default and is
-// accepted as an alias for `ticket` at the create boundary only.
-CHAIN_KIND_TICKET :: "ticket"
-CHAIN_KIND_WORKFLOW :: "workflow"
-// CHAIN_KIND_PRIVATE_CONVERSATION labels the per-instance chat chain the agent
-// service creates; the engine treats it exactly like a ticket chain.
-CHAIN_KIND_PRIVATE_CONVERSATION :: "private_conversation"
+// Every task chain supports both ordinary tickets and workflow runs.
+CHAIN_KIND_MIXED_WORK :: "mixed_work"
 
-// normalize_chain_kind maps the accepted spellings onto the stored vocabulary.
-// Returns ok=false for an unknown kind so the caller can reject it.
 normalize_chain_kind :: proc(kind: string) -> (string, bool) {
-	switch kind {
-	case "", "ticket", "team_work": return CHAIN_KIND_TICKET, true
-	case "workflow": return CHAIN_KIND_WORKFLOW, true
-	case "private_conversation": return CHAIN_KIND_PRIVATE_CONVERSATION, true
-	}
-	return "", false
+ if kind == "" || kind == CHAIN_KIND_MIXED_WORK do return CHAIN_KIND_MIXED_WORK, true
+ return "", false
 }
 
 // Task_Priority orders tasks within the matcher's ready queue. Lower ordinal =
@@ -142,10 +129,10 @@ Task_Chain :: struct {
 	coordinator_agent_instance_id: string,
 	// Workflow chains (M3b): the definition reference and the immutable snapshot
 	// `(def_id, version, inputs)` written once at `workflow.run`.
-	workflow_def_ref:              string,
-	workflow_snapshot_json:        string,
 	// defaults_json: chain-level brief defaults (e.g. auto_submit), JSON object.
 	defaults_json:                 string,
+	work_revision:                 i64,
+	completion_summary:            string,
 	// Title-nudge tracking fields (persisted). See Chat_Conversation for semantics.
 	last_activity_at:              string,
 	last_title_nudge_at:           string,
@@ -200,7 +187,9 @@ Task :: struct {
 	// Empty = inherit: resolved at grant time task pin → fleet row → chain
 	// directory → coordinator bridge. A pin edit is a brief edit (409 while leased).
 	bridge_id:              string,
-	// stage_key/stage_index: workflow materialisation identity, UNIQUE per chain.
+	workflow_run_id:        Workflow_Run_ID,
+	workflow_execution_no:  int,
+	// Stage identity is unique within one run execution.
 	stage_key:              string,
 	stage_index:            int,
 	// generated_by_json: provenance only (never a dependency kind).

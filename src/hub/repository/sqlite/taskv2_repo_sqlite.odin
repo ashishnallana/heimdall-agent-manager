@@ -10,9 +10,9 @@ import domain "odin_test:hub/domain"
 // payloads are stored and returned VERBATIM — never re-marshalled.
 
 @(private = "file")
-CHAIN_COLS :: "chain_id, owner_user_id, title, description, publish_state, status, kind, coordinator_agent_instance_id, workflow_def_ref, workflow_snapshot_json, defaults_json, created_at, updated_at, published_at, completed_at, last_activity_at, last_title_nudge_at, title_source, is_pinned, pinned_at"
+CHAIN_COLS :: "chain_id, owner_user_id, title, description, publish_state, status, kind, coordinator_agent_instance_id, defaults_json, created_at, updated_at, published_at, completed_at, last_activity_at, last_title_nudge_at, title_source, is_pinned, pinned_at, work_revision, completion_summary"
 @(private = "file")
-TASK_COLS :: "task_id, chain_id, owner_user_id, title, description, publish_state, state, kind, priority, attempt_no, brief_json, blocked_on_json, requires_user_approval, ready_since, bridge_id, stage_key, stage_index, generated_by_json, created_at, updated_at, published_at, started_at, completed_at"
+TASK_COLS :: "task_id, chain_id, owner_user_id, title, description, publish_state, state, kind, priority, attempt_no, brief_json, blocked_on_json, requires_user_approval, ready_since, bridge_id, stage_key, stage_index, generated_by_json, created_at, updated_at, published_at, started_at, completed_at, workflow_run_id, workflow_execution_no"
 @(private = "file")
 EVENT_COLS :: "event_id, task_id, chain_id, owner_user_id, ts_ms, actor_kind, actor_id, kind, payload_json"
 @(private = "file")

@@ -50,14 +50,14 @@ Groups: `bridge`, `agents`, `task-chain`, `task`, `workflow`, `lease`, `verify`,
 - `task-chain summary set <text> [--chain <id>]` (or `--stdin`) — set the curated chain summary
   (`<= 60` lines; coordinator only; surfaced in every agent's `TASK.md` context pack).
 - `task-chain propose --file <proposal.json> [--auto-approve] [--chain <id>]` — create a chain
-  proposal (`kind: "ticket"|"workflow"`, `rationale`, `alternative`, `tasks` array or `workflow` + `inputs`) and its draft
+  proposal (`kind: "task"|"workflow_run"`, `rationale`, `alternative`, `tasks` array or `workflow` + `inputs`) and its draft
   tasks in a single transaction (coordinator only). With `--auto-approve`, validates briefs and
   publishes (or runs the proposed workflow) immediately.
 - `task-chain decide <chain-id> --decision approve|reject [--reason <text>]` — approve or reject
   a pending chain proposal (publishes all tasks or starts the proposed workflow atomically on `approve`).
 - `task-chain publish <chain-id>` — validate all task briefs and publish the chain (`422 brief_incomplete` lists missing fields per task, including `review_role:<r>` when no fleet row holds a requested role). `decide` and `publish` need the chain id (positional or `--chain`).
-- `task-chain set-status --status <active|completed|cancelled|archived> [--chain <id>]` — change
-  the chain status (coordinator only). This is how a coordinator completes a chain.
+- `task-chain set-status --status <active|cancelled|archived> [--chain <id>]` — change
+  the chain status (coordinator only). Completion uses `task-chain complete` with a work revision and final summary.
 - `task-chain archive [<chain-id>]` / `unarchive [<chain-id>]` — archive or restore a chain (coordinator only).
 - `task-chain pin <chain-id>` / `unpin <chain-id>` — pin a chain to the top of the sidebar.
 
@@ -193,32 +193,29 @@ A task carries a `state`: `backlog`, `ready`, `in_progress`, `in_review`, `done`
 State is driven by the hub (leases, reviews, dependencies); agents do not set it directly.
 The v1 verbs `task status`, `task vote`, `task nudge` and `task set-current` no longer exist.
 
-### Ticket chain or workflow?
-Default to a ticket chain when you can write every task now (1-5 known tasks). Use a workflow when
-the task list comes from an exploration or scan step and similar items run in parallel, or the recipe recurs
-(explore → plan → approve → build, scan → fix each). Details: `coordinator-task-management`.
+### Mixed work
+All chains have `kind: mixed_work`. Choose tickets or workflow runs per item while
+keeping the same chain, coordinator, team, and directories. See coordinator-task-management.
 
-## workflow — declarative workflow chains (M3b)
-Workflow chains (`kind == "workflow"`) execute a versioned `workflow.v1` stage pipeline with lazy stage materialisation, `parallel: N` or `for_each` expansion (`task_list.v1`, `findings.v1`), and human `gate` stages. Once running, the Hub owns the task graph (`task create`, `task update`, and `task depend` return `403 workflow_immutable`).
+## workflow ? runs inside a mixed-work task chain
+- `workflow templates` lists built-ins and owner definitions; `workflow define --file <definition.json>` saves a version.
+- `workflow run <ref> --chain <id> --request-id <stable-key> [--title <text>] [--input k=v ...] [--inputs-file <json>] [--after task:<id>|workflow_run:<id> ...]` snapshots a recipe into that chain. Reuse the request key on network retries.
+- `workflow list --chain <id>` lists runs and the chain work revision.
+- `workflow status <run-id> [--execution <n>]` inspects a current or historical execution.
+- `workflow output <run-id> <stage-key> [--execution <n>]` reads outputs.
+- `workflow history <run-id>` reads executions and lifecycle events.
+- `workflow retry <run-id> --expected-revision <n> --reason <text>` creates fresh execution/tasks for a terminal run. Consumed outputs block retry. Stage/cascade retry is unsupported.
+- `workflow cancel <run-id> --execution <number> [--reason <text>]` cancels only that run.
+- Agents may omit `--chain` on create/list to use their own chain; run IDs are explicit.
+- Configure the chain fleet before starting; recipes never create fleet rows.
 
-- `workflow templates` — list built-in templates (`explore_plan_build`, `fix_flaky_tests`, `security_audit`) and owner-defined `workflow.v1` definitions.
-- `workflow define --file <def.json> [--name <name>]` — validate a `workflow.v1` JSON definition (checking acyclic `needs`, fan-out rules, and output contracts) and store a new immutable version.
-- `workflow run <name> [--chain <cid>] [--input k=v ...] [--inputs-file <json>] [--file <def.json>] [--title <t>] [--description <d>] [--project <id>] [--bridge <id>] [--coordinator <agt_id>]` — snapshot `<name>` (or `--file <def.json>`) onto `<cid>` (or a new chain), validate required inputs, and materialise all root stages in one UoW.
-- `workflow status [<chain_id>]` — return chain metadata, `Stage_View[]` (`pending`, `active`, `complete`, `failed`), materialised task instances per stage, `orphaned_work`, and overall completion state.
-- `workflow output [<chain_id>] <stage_key>` — return ordered `output` facets across all instances of `<stage_key>`.
-- `workflow retry [<chain_id>] <stage_key_or_task_id> [--cascade] [--reason <text>]` — reopen a failed/cancelled stage (`counts_toward_budget = 0`). Refuses with `409 downstream_materialised` when downstream stages exist unless `--cascade` is passed; `--cascade` cancels downstream stages, reopens the target stage, and carries forward unchanged `.Done` items (`EV_CARRIED_FORWARD`) on re-expansion while recording removed items in `orphaned_work`.
-- `workflow cancel [<chain_id>] [--reason <text>]` — cancel the workflow chain and reclaim all live leases in one UoW.
-
-#### Command examples
-```bash
-ham-ctl workflow templates
-ham-ctl workflow define --file custom_workflow.json
-ham-ctl workflow run explore_plan_build --input goal="Add rate limiting" --input verify_cmd="make test"
-ham-ctl workflow status chain_18d711c5384a0119
-ham-ctl workflow output chain_18d711c5384a0119 plan
-ham-ctl workflow retry chain_18d711c5384a0119 plan --cascade
-ham-ctl workflow cancel chain_18d711c5384a0119
-```
+### Mixed-work graph, scope, and completion
+- `task-chain graph --chain <id>` reads dependency/scope history and `work_revision`.
+- `task-chain depend --chain <id> --item task:<id>|workflow_run:<id> --on task:<id>|workflow_run:<id>` adds an acyclic prerequisite before the consumer starts.
+- `task-chain remove-dependency --chain <id> --dependency <id> --reason <text>` explicitly removes an edge without erasing provenance or consumption receipts.
+- `task-chain scope --chain <id> --item task:<id>|workflow_run:<id> --action include|exclude --reason <text>` records a scope decision. Exclusion requires terminal work and does not unblock dependents.
+- `task-chain complete --chain <id> --expected-work-revision <n> --summary <text>` explicitly accepts the final result. Every included item must succeed, with no leases or pending proposal. Read a fresh graph revision first. Finishing a batch never closes the chain automatically.
+- Generated stage tasks cannot be manually created, edited, reopened, or cancelled; use run controls. Historical executions remain readable.
 
 ## issue — track, discuss, and vote on issues and blockers
 Manage defects, toolchain quirks, environment problems, and out-of-scope bugs across

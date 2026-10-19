@@ -23,6 +23,7 @@ package main
 import "core:encoding/json"
 import "core:fmt"
 import "core:os"
+import "core:strconv"
 import "core:strings"
 import vcs "odin_test:lib/vcs"
 
@@ -1165,131 +1166,83 @@ ctl_v2_workflow_inputs_json :: proc(args: []string, inputs_file_text := "") -> (
 	return json_object_from_slice(fields[:]), true
 }
 
+// Run identity is distinct from its containing chain. Creation requires a caller
+// request key so a network retry can never silently create duplicate work.
 ctl_v2_workflow_run_params :: proc(tokens, args: []string, inputs_file_text := "", def_file_text := "") -> (string, bool) {
-	name := strings.trim_space(option_value(args, "--template", option_value(args, "--workflow", option_value(args, "--name", pos(tokens, 1)))))
-	def_trimmed := strings.trim_space(def_file_text)
-	if name == "" && def_trimmed == "" do return "", false
-	if def_trimmed != "" {
-		if !strings.has_prefix(def_trimmed, "{") do return "", false
-		if _, perr := json.parse(transmute([]byte)def_trimmed, json.DEFAULT_SPECIFICATION, false, context.temp_allocator); perr != nil {
-			return "", false
-		}
-	}
-	inputs_json, iok := ctl_v2_workflow_inputs_json(args, inputs_file_text)
-	if !iok do return "", false
-
-	fields := make([dynamic]string)
-	defer delete(fields)
-	if name != "" {
-		append(&fields, json_kv("name", name))
-		append(&fields, json_kv("template", name))
-	}
-	if def_trimmed != "" {
-		append(&fields, json_kv_raw("definition", def_trimmed))
-	}
-	if cid := strings.trim_space(option_value(args, "--chain", option_value(args, "--chain-id", ""))); cid != "" {
-		append(&fields, json_kv("chain_id", cid))
-	}
-	if title := strings.trim_space(option_value(args, "--title", "")); title != "" {
-		append(&fields, json_kv("title", title))
-	}
-	if desc := strings.trim_space(option_value(args, "--description", "")); desc != "" {
-		append(&fields, json_kv("description", desc))
-	}
-	if pid := strings.trim_space(option_value(args, "--project", option_value(args, "--project-id", ""))); pid != "" {
-		append(&fields, json_kv("project_id", pid))
-	}
-	if bid := strings.trim_space(option_value(args, "--bridge", option_value(args, "--bridge-id", ""))); bid != "" {
-		append(&fields, json_kv("bridge_id", bid))
-	}
-	if coord := strings.trim_space(option_value(args, "--coordinator", option_value(args, "--coordinator-agent-id", ""))); coord != "" {
-		append(&fields, json_kv("coordinator_agent_id", coord))
-	}
-	if inputs_json != "" {
-		append(&fields, json_kv_raw("inputs", inputs_json))
-	}
-	return json_object_from_slice(fields[:]), true
+ ref := strings.trim_space(option_value(args, "--ref", pos(tokens, 1)))
+ request_id := strings.trim_space(option_value(args, "--request-id", ""))
+ if ref == "" || request_id == "" || def_file_text != "" do return "", false
+ for flag in ([?]string{"--file", "--template", "--workflow", "--name", "--project", "--bridge", "--coordinator", "--description"}) { if has_flag(args, flag) do return "", false }
+ inputs, ok := ctl_v2_workflow_inputs_json(args, inputs_file_text)
+ if !ok do return "", false
+ if inputs == "" do inputs = "{}"
+ fields := make([dynamic]string, context.temp_allocator)
+ append(&fields, json_kv("ref", ref), json_kv("request_id", request_id), json_kv_raw("inputs", inputs))
+ if cid := option_value(args, "--chain", ""); cid != "" do append(&fields, json_kv("chain_id", cid))
+ if title := option_value(args, "--title", ""); title != "" do append(&fields, json_kv("title", title))
+ prerequisites := ctl_collect_repeated(args, "--after")
+ defer delete(prerequisites)
+ refs := make([dynamic]string, context.temp_allocator)
+ for item in prerequisites {
+  ref_json, valid := ctl_work_ref_json(item)
+  if !valid do return "", false
+  append(&refs, ref_json)
+ }
+ append(&fields, json_kv_raw("prerequisites", fmt.tprintf("[%s]", strings.join(refs[:], ",", context.temp_allocator))))
+ return json_object_from_slice(fields[:]), true
 }
 
-ctl_v2_workflow_status_params :: proc(tokens, args: []string) -> (chain_id, params: string) {
-	cid := strings.trim_space(option_value(args, "--chain", option_value(args, "--chain-id", pos(tokens, 1))))
-	if cid == "" do return "", "{}"
-	return cid, json_object(json_kv("chain_id", cid))
+ctl_v2_workflow_status_params :: proc(tokens, args: []string) -> (run_id, params: string) {
+ id := strings.trim_space(option_value(args, "--run", pos(tokens, 1)))
+ fields := make([dynamic]string, context.temp_allocator)
+ append(&fields, json_kv("run_id", id))
+ if no := option_value(args, "--execution", ""); no != "" {
+  n, parsed := strconv.parse_int(no)
+  if !parsed || n <= 0 do return "", "{}"
+  append(&fields, json_kv_raw("execution_no", no))
+ }
+ return id, json_object_from_slice(fields[:])
 }
 
-ctl_v2_workflow_output_params :: proc(tokens, args: []string) -> (chain_id, stage_key, params: string, ok: bool) {
-	p1 := strings.trim_space(pos(tokens, 1))
-	p2 := strings.trim_space(pos(tokens, 2))
-	cid := strings.trim_space(option_value(args, "--chain", option_value(args, "--chain-id", "")))
-	stage := strings.trim_space(option_value(args, "--stage", ""))
-	if p1 != "" && p2 != "" {
-		if cid == "" do cid = p1
-		if stage == "" do stage = p2
-	} else if p1 != "" {
-		if stage != "" && cid == "" {
-			cid = p1
-		} else {
-			stage = p1
-		}
-	}
-	if stage == "" do return "", "", "", false
-	fields := make([dynamic]string)
-	defer delete(fields)
-	if cid != "" do append(&fields, json_kv("chain_id", cid))
-	append(&fields, json_kv("stage_key", stage))
-	return cid, stage, json_object_from_slice(fields[:]), true
+ctl_v2_workflow_output_params :: proc(tokens, args: []string) -> (run_id, stage_key, params: string, ok: bool) {
+ id, base := ctl_v2_workflow_status_params(tokens, args)
+ stage := option_value(args, "--stage", pos(tokens, 2))
+ if id == "" || stage == "" do return "", "", "", false
+ return id, stage, strings.clone(fmt.tprintf("%s,%s}", base[:len(base)-1], json_kv("stage_key", stage))), true
 }
 
-ctl_v2_workflow_retry_params :: proc(tokens, args: []string) -> (chain_id, target, params: string, ok: bool) {
-	p1 := strings.trim_space(pos(tokens, 1))
-	p2 := strings.trim_space(pos(tokens, 2))
-	cid := strings.trim_space(option_value(args, "--chain", option_value(args, "--chain-id", "")))
-	tgt := strings.trim_space(option_value(args, "--stage", option_value(args, "--task", option_value(args, "--task-id", ""))))
-	if p1 != "" && p2 != "" {
-		if cid == "" do cid = p1
-		if tgt == "" do tgt = p2
-	} else if p1 != "" {
-		if tgt != "" && cid == "" {
-			cid = p1
-		} else {
-			tgt = p1
-		}
-	}
-	if tgt == "" do return "", "", "", false
-	fields := make([dynamic]string)
-	defer delete(fields)
-	if cid != "" do append(&fields, json_kv("chain_id", cid))
-	append(&fields, json_kv("stage_key", tgt))
-	if strings.has_prefix(tgt, "task_") {
-		append(&fields, json_kv("task_id", tgt))
-	}
-	if has_flag(args, "--cascade") {
-		append(&fields, `"cascade":true`)
-	}
-	if reason := strings.trim_space(option_value(args, "--reason", "")); reason != "" {
-		append(&fields, json_kv("reason", reason))
-	}
-	return cid, tgt, json_object_from_slice(fields[:]), true
+ctl_v2_workflow_retry_params :: proc(tokens, args: []string) -> (run_id, target, params: string, ok: bool) {
+ id := strings.trim_space(option_value(args, "--run", pos(tokens, 1)))
+ reason := strings.trim_space(option_value(args, "--reason", ""))
+ revision := option_value(args, "--expected-revision", "")
+ n, parsed := strconv.parse_int(revision)
+ for flag in ([?]string{"--stage", "--task", "--task-id", "--cascade", "--chain", "--execution"}) { if has_flag(args, flag) do return "", "", "", false }
+ if id == "" || reason == "" || !parsed || n <= 0 || pos(tokens, 2) != "" do return "", "", "", false
+ return id, "", json_object(json_kv("run_id", id), json_kv("reason", reason), json_kv_raw("expected_revision", revision)), true
 }
 
-ctl_v2_workflow_cancel_params :: proc(tokens, args: []string) -> (chain_id, params: string) {
-	cid := strings.trim_space(option_value(args, "--chain", option_value(args, "--chain-id", pos(tokens, 1))))
-	fields := make([dynamic]string)
-	defer delete(fields)
-	if cid != "" do append(&fields, json_kv("chain_id", cid))
-	if reason := strings.trim_space(option_value(args, "--reason", "")); reason != "" {
-		append(&fields, json_kv("reason", reason))
-	}
-	return cid, json_object_from_slice(fields[:])
+ctl_v2_workflow_cancel_params :: proc(tokens, args: []string) -> (run_id, params: string) {
+ id := strings.trim_space(option_value(args, "--run", pos(tokens, 1)))
+ generation := option_value(args, "--execution", "0")
+ n, valid := strconv.parse_int(generation)
+ if !valid || n <= 0 do return "", "{}"
+ return id, json_object(json_kv("run_id", id), json_kv("reason", option_value(args, "--reason", "")), json_kv_raw("execution_no", generation))
 }
 
 ctl_v2_workflow :: proc(endpoint, token: string, tokens, args: []string) {
 	verb := pos(tokens, 0)
 	switch verb {
-	case "", "templates", "list":
+	case "", "templates":
 		ctl_agent_call_task(endpoint, token, "agent.workflow.templates", "{}", args)
-	case "define":
-		file_text := ""
+	case "list":
+        params := json_object(json_kv("chain_id", option_value(args, "--chain", "")))
+        ctl_agent_call_task(endpoint, token, "agent.workflow.runs", params, args)
+    case "history":
+        id, params := ctl_v2_workflow_status_params(tokens, args)
+        if id == "" { fmt.println(`{"ok":false,"message":"workflow history requires a run ID"}`); os.exit(1) }
+        ctl_agent_call_task(endpoint, token, "agent.workflow.history", params, args)
+    case "define":
+        file_text := ""
 		path := option_value(args, "--file", pos(tokens, 1))
 		if path != "" {
 			data, err := os.read_entire_file(path, context.allocator)
@@ -1314,7 +1267,7 @@ ctl_v2_workflow :: proc(endpoint, token: string, tokens, args: []string) {
 		def_text, _ := ctl_read_json_file_flag(args, "--file")
 		params, ok := ctl_v2_workflow_run_params(tokens, args, in_text, def_text)
 		if !ok {
-			fmt.println(`{"ok":false,"message":"workflow run requires <name> (or --file <def.json>) [--chain <cid>] [--input k=v ...] [--inputs-file <json>]"}`)
+			fmt.println(`{"ok":false,"message":"workflow run requires <ref> --request-id <key> [--chain <id>] [--input k=v] [--after task:<id>|workflow_run:<id>]"}`)
 			os.exit(1)
 		}
 		ctl_agent_call_task(endpoint, token, "agent.workflow.run", params, args)
@@ -1325,7 +1278,7 @@ ctl_v2_workflow :: proc(endpoint, token: string, tokens, args: []string) {
 	case "output":
 		_, _, params, ok := ctl_v2_workflow_output_params(tokens, args)
 		if !ok {
-			fmt.println(`{"ok":false,"message":"workflow output requires [<chain_id>] <stage_key>"}`)
+			fmt.println(`{"ok":false,"message":"workflow output requires <run_id> <stage_key>"}`)
 			os.exit(1)
 		}
 		defer delete(params)
@@ -1333,13 +1286,14 @@ ctl_v2_workflow :: proc(endpoint, token: string, tokens, args: []string) {
 	case "retry":
 		_, _, params, ok := ctl_v2_workflow_retry_params(tokens, args)
 		if !ok {
-			fmt.println(`{"ok":false,"message":"workflow retry requires [<chain_id>] <stage_key_or_task_id> [--cascade]"}`)
+			fmt.println(`{"ok":false,"message":"workflow retry requires <run_id> --expected-revision <n> --reason <text>"}`)
 			os.exit(1)
 		}
 		defer delete(params)
 		ctl_agent_call_task(endpoint, token, "agent.workflow.retry", params, args)
 	case "cancel":
-		_, params := ctl_v2_workflow_cancel_params(tokens, args)
+		id, params := ctl_v2_workflow_cancel_params(tokens, args)
+        if id == "" { fmt.println(`{"ok":false,"message":"workflow cancel requires <run_id> --execution <number>"}`); os.exit(1) }
 		defer delete(params)
 		ctl_agent_call_task(endpoint, token, "agent.workflow.cancel", params, args)
 	case:
@@ -1365,10 +1319,18 @@ ctl_workflow_user_mode :: proc(cmd, args: []string) {
 		os.exit(1)
 	}
 	switch verb {
-	case "", "templates", "list":
+	case "", "templates":
 		ctl_tasks_request_and_decrypt(transport, "GET", "/api/v1/workflows/templates", "", args)
-	case "define":
-		file_text := ""
+	case "list":
+        cid := option_value(args, "--chain", "")
+        if cid == "" { fmt.println(`{"ok":false,"message":"workflow list requires --chain"}`); os.exit(1) }
+        ctl_tasks_request_and_decrypt(transport, "GET", fmt.tprintf("/api/v1/task-chains/%s/workflow-runs", safe_path_part(cid)), "", args)
+    case "history":
+        id, _ := ctl_v2_workflow_status_params(tokens, args)
+        if id == "" { fmt.println(`{"ok":false,"message":"workflow history requires a run ID"}`); os.exit(1) }
+        ctl_tasks_request_and_decrypt(transport, "GET", fmt.tprintf("/api/v1/workflow-runs/%s/executions", safe_path_part(id)), "", args)
+    case "define":
+        file_text := ""
 		path := option_value(args, "--file", pos(tokens, 1))
 		if path != "" {
 			data, err := os.read_entire_file(path, context.allocator)
@@ -1393,68 +1355,57 @@ ctl_workflow_user_mode :: proc(cmd, args: []string) {
 		def_text, _ := ctl_read_json_file_flag(args, "--file")
 		params, ok := ctl_v2_workflow_run_params(tokens, args, in_text, def_text)
 		if !ok {
-			fmt.println(`{"ok":false,"message":"workflow run requires <name> (or --file <def.json>) [--chain <cid>] [--input k=v ...] [--inputs-file <json>]"}`)
+			fmt.println(`{"ok":false,"message":"workflow run requires <ref> --request-id <key> [--chain <id>] [--input k=v] [--after task:<id>|workflow_run:<id>]"}`)
 			os.exit(1)
 		}
-		ctl_tasks_request_and_decrypt(transport, "POST", "/api/v1/workflows/run", params, args)
+		cid := option_value(args, "--chain", "")
+        if cid == "" { fmt.println(`{"ok":false,"message":"workflow run in user mode requires --chain"}`); os.exit(1) }
+        ctl_tasks_request_and_decrypt(transport, "POST", fmt.tprintf("/api/v1/task-chains/%s/workflow-runs", safe_path_part(cid)), params, args)
 	case "status":
 		cid, _ := ctl_v2_workflow_status_params(tokens, args)
 		if cid == "" {
-			fmt.println(`{"ok":false,"message":"workflow status in user mode requires <chain_id> (or --chain <id>)"}`)
+			fmt.println(`{"ok":false,"message":"workflow status requires <run_id>"}`)
 			os.exit(1)
 		}
-		ctl_tasks_request_and_decrypt(transport, "GET", fmt.tprintf("/api/v1/task-chains/%s/workflow/status", safe_path_part(cid)), "", args)
+		ctl_tasks_request_and_decrypt(transport, "GET", fmt.tprintf("/api/v1/workflow-runs/%s?execution_no=%s", safe_path_part(cid), safe_path_part(option_value(args, "--execution", "0"))), "", args)
 	case "output":
 		cid, stage, _, ok := ctl_v2_workflow_output_params(tokens, args)
 		if !ok || cid == "" {
-			fmt.println(`{"ok":false,"message":"workflow output in user mode requires <chain_id> <stage_key> (or --chain <id>)"}`)
+			fmt.println(`{"ok":false,"message":"workflow output requires <run_id> <stage_key>"}`)
 			os.exit(1)
 		}
-		ctl_tasks_request_and_decrypt(transport, "GET", fmt.tprintf("/api/v1/task-chains/%s/workflow/stages/%s/output", safe_path_part(cid), safe_path_part(stage)), "", args)
+		ctl_tasks_request_and_decrypt(transport, "GET", fmt.tprintf("/api/v1/workflow-runs/%s/output?stage_key=%s&execution_no=%s", safe_path_part(cid), safe_path_part(stage), safe_path_part(option_value(args, "--execution", "0"))), "", args)
 	case "retry":
 		cid, _, params, ok := ctl_v2_workflow_retry_params(tokens, args)
 		if !ok || cid == "" {
-			fmt.println(`{"ok":false,"message":"workflow retry in user mode requires <chain_id> <stage_key_or_task_id> [--cascade]"}`)
+			fmt.println(`{"ok":false,"message":"workflow retry requires <run_id> --expected-revision <n> --reason <text>"}`)
 			os.exit(1)
 		}
 		defer delete(params)
-		ctl_tasks_request_and_decrypt(transport, "POST", fmt.tprintf("/api/v1/task-chains/%s/workflow/retry", safe_path_part(cid)), params, args)
+		ctl_tasks_request_and_decrypt(transport, "POST", fmt.tprintf("/api/v1/workflow-runs/%s/retry", safe_path_part(cid)), params, args)
 	case "cancel":
 		cid, params := ctl_v2_workflow_cancel_params(tokens, args)
 		defer delete(params)
 		if cid == "" {
-			fmt.println(`{"ok":false,"message":"workflow cancel in user mode requires <chain_id> (or --chain <id>)"}`)
+			fmt.println(`{"ok":false,"message":"workflow cancel requires <run_id> --execution <number>"}`)
 			os.exit(1)
 		}
-		ctl_tasks_request_and_decrypt(transport, "POST", fmt.tprintf("/api/v1/task-chains/%s/workflow/cancel", safe_path_part(cid)), params, args)
+		ctl_tasks_request_and_decrypt(transport, "POST", fmt.tprintf("/api/v1/workflow-runs/%s/cancel", safe_path_part(cid)), params, args)
 	case:
 		print_help_workflow()
 	}
 }
 
 print_help_workflow :: proc() {
-	fmt.println("ham-ctl workflow — workflow chains (Task System v2 M3b)")
-	fmt.println("")
-	fmt.println("VERBS")
-	fmt.println("  templates                                           List built-in and owner-defined workflow templates.")
-	fmt.println("  define --file <def.json> [--name <name>]            Validate and save a versioned workflow.v1 definition.")
-	fmt.println("  run <name> [--chain <cid>] [--input k=v ...] [--inputs-file <json>]")
-	fmt.println("                                                      Start a workflow run from a template or definition,")
-	fmt.println("                                                      snapshotting the workflow and materialising root stages.")
-	fmt.println("  status [<chain_id>]                                 Inspect per-stage views, materialised tasks, and orphaned_work.")
-	fmt.println("  output [<chain_id>] <stage_key>                     Fetch ordered output facets across all instances of a stage.")
-	fmt.println("  retry [<chain_id>] <stage_key_or_task_id> [--cascade]")
-	fmt.println("                                                      Reopen a failed/cancelled stage (refuses with 409")
-	fmt.println("                                                      downstream_materialised unless --cascade is given).")
-	fmt.println("  cancel [<chain_id>] [--reason <text>]               Cancel the workflow chain and reclaim all live leases.")
-	fmt.println("")
-	fmt.println("EXAMPLES")
-	fmt.println("  ham-ctl workflow templates")
-	fmt.println("  ham-ctl workflow define --file my_workflow.json")
-	fmt.println("  ham-ctl workflow run explore_plan_build --input goal='Add rate limiting' --input verify_cmd='make test'")
-	fmt.println("  ham-ctl workflow run fix_flaky_tests --chain chain_abc --inputs-file inputs.json")
-	fmt.println("  ham-ctl workflow status chain_abc")
-	fmt.println("  ham-ctl workflow output chain_abc reproduce")
-	fmt.println("  ham-ctl workflow retry chain_abc plan --cascade")
-	fmt.println("  ham-ctl workflow cancel chain_abc")
+ fmt.println("ham-ctl workflow: runs inside an existing task chain; owner or coordinator controls them")
+ fmt.println("  templates | define --file <definition.json>")
+ fmt.println("  run <ref> --chain <id> --request-id <key> [--title <text>] [--input k=v ...] [--inputs-file <json>] [--after task:<id>|workflow_run:<id> ...]")
+ fmt.println("  list --chain <id>")
+ fmt.println("  status <run_id> [--execution <n>]")
+ fmt.println("  output <run_id> <stage_key> [--execution <n>]")
+ fmt.println("  history <run_id>")
+ fmt.println("  retry <run_id> --expected-revision <n> --reason <text>")
+ fmt.println("  cancel <run_id> --execution <number> [--reason <text>]")
+ fmt.println("A retry creates a fresh execution. Consumed outputs block retry. Stage retry is unsupported.")
+ fmt.println("Agent mode may omit --chain when creating/listing runs; run IDs are always explicit.")
 }

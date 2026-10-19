@@ -123,6 +123,7 @@ build_pack_json :: proc(svc: ^Service, chain: domain.Task_Chain, task: domain.Ta
 
 	json_raw(&o, "inputs", resolve_brief_inputs_json(svc, task))
 	json_raw(&o, "dependencies", dependencies_pack_json(svc, task))
+	json_raw(&o, "work_inputs", work_inputs_pack_json(svc, task))
 
 	prev_json, where_vcs, prev_outcome := previous_attempt_and_vcs_json(svc, task, lease, pre.last_release == .Handoff, evs)
 	json_raw(&o, "where_you_are", where_vcs)
@@ -206,6 +207,23 @@ cap_pack_json_field_safe :: proc(pack_json: string, task_id: string, max_bytes: 
 		}
 	}
 	if len(cur) <= max_bytes do return cur
+
+    if raw, present := jsonx.extract_raw_array(cur, "work_inputs", true, context.temp_allocator); present {
+        compact := strings.builder_make(context.temp_allocator); strings.write_byte(&compact, '[')
+        for item, i in jsonx_top_level_array_items(raw) {
+            if i > 0 do strings.write_byte(&compact, ',')
+            o := json_begin()
+            json_str(&o, "kind", jsonx.extract_string(item, "kind", "", true, context.temp_allocator))
+            json_str(&o, "id", jsonx.extract_string(item, "id", "", true, context.temp_allocator))
+            json_int(&o, "generation", i64(jsonx.extract_int(item, "generation", 0, true)))
+            json_str(&o, "fetch", jsonx.extract_string(item, "fetch", "", true, context.temp_allocator))
+            json_bool(&o, "output_omitted", true)
+            strings.write_string(&compact, json_end(&o))
+        }
+        strings.write_byte(&compact, ']')
+        cur = replace_top_level_member_raw(cur, "work_inputs", strings.to_string(compact))
+    }
+    if len(cur) <= max_bytes do return cur
 
 	// Step 2: drop previous_attempt.verify body, replacing with ham-ctl task fetch pointer
 	if prev_raw, has_prev := jsonx.extract_raw_object(cur, "previous_attempt", true, context.temp_allocator); has_prev && strings.has_prefix(strings.trim_space(prev_raw), "{") {
@@ -730,8 +748,21 @@ DEP_OUTPUT_MAX_BYTES :: 2 * 1024
 dependencies_pack_json :: proc(svc: ^Service, task: domain.Task) -> string {
 	deps, derr := iface.taskchain_list_dependencies_by_chain(svc.repo, task.chain_id, task.owner_user_id)
 	if derr.code != .None do return "[]"
-	input_refs := jsonx.extract_string_array(task.brief_json, "inputs", true, context.temp_allocator)
-	b := strings.builder_make(context.temp_allocator)
+    if task.workflow_run_id == "" {
+        edges, err := iface.taskchain_list_work_dependencies(svc.repo, task.chain_id, task.owner_user_id)
+        if err.code == .None {
+            combined := make([dynamic]domain.Task_Dependency, context.temp_allocator)
+            append(&combined, ..deps)
+            for edge in edges {
+                if edge.removed_at == "" && edge.dependent.kind == domain.WORK_ITEM_TASK && edge.dependent.id == string(task.task_id) && edge.prerequisite.kind == domain.WORK_ITEM_TASK {
+                    append(&combined, domain.Task_Dependency{task_id = task.task_id, depends_on_task_id = domain.Task_ID(edge.prerequisite.id)})
+                }
+            }
+            deps = combined[:]
+        }
+    }
+    input_refs := jsonx.extract_string_array(task.brief_json, "inputs", true, context.temp_allocator)
+    b := strings.builder_make(context.temp_allocator)
 	strings.write_byte(&b, '[')
 	written := 0
 	for d in deps {
@@ -831,4 +862,36 @@ truncate_utf8 :: proc(s: string, max_bytes: int) -> string {
 	cut := max_bytes
 	for cut > 0 && (s[cut] & 0xC0) == 0x80 do cut -= 1
 	return fmt.tprintf("%s…", s[:cut])
+}
+
+// Immutable receipts pin the input generations actually consumed. A stage worker
+// receives the parent run's external inputs alongside its private stage inputs.
+work_inputs_pack_json :: proc(svc: ^Service, task: domain.Task) -> string {
+ item := domain.Work_Item_Ref{kind = domain.WORK_ITEM_TASK, id = string(task.task_id)}
+ generation := task.attempt_no
+ if task.workflow_run_id != "" {
+  item = domain.Work_Item_Ref{kind = domain.WORK_ITEM_WORKFLOW_RUN, id = string(task.workflow_run_id)}
+  generation = task.workflow_execution_no
+ }
+ receipts, err := iface.taskchain_list_work_receipts_by_dependent(svc.repo, task.chain_id, task.owner_user_id, item)
+ if err.code != .None do return "[]"
+ b := strings.builder_make(context.temp_allocator); strings.write_byte(&b, '[')
+ written := 0
+ for receipt in receipts {
+  if receipt.dependent_generation != generation do continue
+  if written > 0 do strings.write_byte(&b, ',')
+  entry := json_begin()
+  json_str(&entry, "kind", receipt.prerequisite.kind)
+  json_str(&entry, "id", receipt.prerequisite.id)
+  json_int(&entry, "generation", i64(receipt.prerequisite_generation))
+  if receipt.prerequisite.kind == domain.WORK_ITEM_WORKFLOW_RUN {
+   json_str(&entry, "fetch", fmt.tprintf("ham-ctl workflow status %s --execution %d", receipt.prerequisite.id, receipt.prerequisite_generation))
+  } else {
+   json_str(&entry, "fetch", fmt.tprintf("ham-ctl task fetch %s facet:%s:%d:output", receipt.prerequisite.id, receipt.prerequisite.id, receipt.prerequisite_generation))
+  }
+  if len(receipt.output_manifest_json) <= DEP_OUTPUT_MAX_BYTES do json_raw(&entry, "output_manifest", receipt.output_manifest_json)
+  else do json_bool(&entry, "output_omitted", true)
+  strings.write_string(&b, json_end(&entry)); written += 1
+ }
+ strings.write_byte(&b, ']'); return strings.to_string(b)
 }

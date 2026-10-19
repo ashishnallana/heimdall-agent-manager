@@ -73,7 +73,7 @@ fx9_chain :: proc(fx: ^Fx9, chain_id: string, status := domain.Task_Chain_Status
 		title         = "REQ-SHELL-9 chain",
 		publish_state = .Published,
 		status        = status,
-		kind          = domain.CHAIN_KIND_TICKET,
+		kind          = domain.CHAIN_KIND_MIXED_WORK,
 		created_at    = "2026-09-29T10:00:00Z",
 		updated_at    = "2026-09-29T10:00:00Z",
 	})
@@ -158,7 +158,7 @@ test_change_chain_status_completed_reaps_only_target_chain_servers :: proc(t: ^t
 }
 
 @(test)
-test_update_chain_status_completed_reaps_servers :: proc(t: ^testing.T) {
+test_update_chain_status_completed_cannot_bypass_acceptance :: proc(t: ^testing.T) {
 	fx: Fx9
 	if !fx9_make(&fx, t, "patch") do return
 	defer fx9_free(&fx)
@@ -166,10 +166,13 @@ test_update_chain_status_completed_reaps_servers :: proc(t: ^testing.T) {
 	fx9_chain(&fx, "chain_patch")
 	fx9_session(&fx, "srv_patch", domain.Shell_Session_Kind_Server, "chain_patch", "")
 
+    chain, _, _ := iface.taskchain_get_chain(&fx.tc_repo, "chain_patch")
+    chain.completion_summary = "previously accepted before reopening"
+    _, _, _ = iface.taskchain_save_chain(&fx.tc_repo, chain)
 	_, ok, _ := update_chain(&fx.svc, fx9_auth(), "chain_patch", Update_Chain_Input{status = "completed"})
 
-	testing.expect(t, ok, "update_chain ok")
-	testing.expect(t, fx9_intent(&fx, "srv_patch") != "", "a PATCH that closes a chain must reap too")
+	testing.expect(t, !ok, "generic PATCH cannot complete a reopened chain even with a retained summary")
+	testing.expect_value(t, fx9_intent(&fx, "srv_patch"), "")
 }
 
 @(test)
