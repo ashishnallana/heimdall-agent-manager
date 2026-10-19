@@ -262,6 +262,54 @@ ctl_vault_keyring_for_write :: proc(args: []string) -> ^vault.Vault_Keyring {
 	os.exit(1)
 }
 
+// CARD_OP_SEALED_FIELDS names, per card operation, the content fields the hub only
+// STORES when it executes the op (it copies them into the issue / memory / project it
+// creates), so they travel sealed. Everything else stays in clear because the hub
+// must read it to execute: ids (task_id, memory_id, chain_id, project_id, agent_id,
+// instance_id, target_id), status, result, attempt_no, scope/scope_type, type,
+// expires_at. agent.prompt's prompt is delivered to the agent sealed by the normal
+// chat path and agent.update edits identity metadata the hub indexes, so both are
+// left as they are.
+CARD_OP_SEALED_FIELDS :: [?][2]string{
+	{"issue.create", "title"}, {"issue.create", "description"},
+	{"memory.create", "title"}, {"memory.create", "body"}, {"memory.create", "description"}, {"memory.create", "evidence"},
+	{"memory.update", "title"}, {"memory.update", "body"}, {"memory.update", "description"}, {"memory.update", "evidence"},
+	{"project.update", "name"}, {"project.update", "description"},
+}
+
+@(private = "file")
+card_op_field_sealed :: proc(op, field: string) -> bool {
+	fields := CARD_OP_SEALED_FIELDS
+	for f in fields do if f[0] == op && f[1] == field do return true
+	return false
+}
+
+// ctl_seal_card_operations seals the store-only content fields of every operation in
+// a card's `operations` JSON array (top level and inside `args`). Returns false when
+// the value is not a JSON array of objects.
+ctl_seal_card_operations :: proc(ops_json: string, kr: ^vault.Vault_Keyring, allocator := context.allocator) -> (string, bool) {
+	value, err := json.parse_string(ops_json, json.DEFAULT_SPECIFICATION, true, context.temp_allocator)
+	if err != nil do return "", false
+	ops, is_arr := value.(json.Array)
+	if !is_arr do return "", false
+	seal_obj :: proc(op: string, obj: ^json.Object, kr: ^vault.Vault_Keyring) {
+		for k, v in obj^ {
+			s, is_str := v.(json.String)
+			if is_str && card_op_field_sealed(op, k) do obj^[k] = json.String(ctl_seal_if(string(s), kr))
+		}
+	}
+	for item in ops {
+		obj, is_obj := item.(json.Object)
+		if !is_obj do return "", false
+		op, _ := obj["op"].(json.String)
+		seal_obj(string(op), &obj, kr)
+		if args, has_args := obj["args"].(json.Object); has_args do seal_obj(string(op), &args, kr)
+	}
+	out, merr := json.marshal(value, allocator = allocator)
+	if merr != nil do return "", false
+	return string(out), true
+}
+
 // ctl_seal_if seals value unless it is empty or already a valid envelope.
 ctl_seal_if :: proc(value: string, kr: ^vault.Vault_Keyring) -> string {
 	if value == "" || is_vault_armored(value) do return value

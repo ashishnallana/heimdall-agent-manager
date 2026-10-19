@@ -1208,7 +1208,7 @@ test_fs_write_seal :: proc(plaintext, key_hex, root, path: string, epoch: u32 = 
 	nonce: [vault.NONCE_BYTES]byte
 	crypto.rand_bytes(nonce[:])
 	canonical_root, _ := bridge_fs_effective_root(root)
-	tok, _ := vault.fs_write_seal_with_nonce(transmute([]byte)plaintext, key[:], TEST_VAULT_ID, epoch, bridge_config.daemon_id, canonical_root, path, nonce[:], context.temp_allocator)
+	tok, _ := vault.fs_write_seal_with_nonce(transmute([]byte)plaintext, key[:], test_vault_id(), epoch, bridge_config.daemon_id, canonical_root, path, nonce[:], context.temp_allocator)
 	return tok
 }
 
@@ -1218,6 +1218,10 @@ fs_vault_write_file_requires_path_bound_ciphertext :: proc(t: ^testing.T) {
 	defer sync.mutex_unlock(&bridge_test_config_mutex)
 	sync.mutex_lock(&keystore_test_mutex)
 	defer sync.mutex_unlock(&keystore_test_mutex)
+	// Writes are sealed for THIS bridge id (the AAD binds it).
+	test_bridge_a, _ := keystore_test_bridge_ids()
+	prev_daemon := keystore_test_set_daemon_id(test_bridge_a)
+	defer bridge_config.daemon_id = prev_daemon
 
 	prev_key, had_key := os.lookup_env("HEIMDALL_VAULT_KEYRING", context.allocator)
 	defer {
@@ -1281,6 +1285,10 @@ fs_vault_batch_write_enforces_decryption_per_item :: proc(t: ^testing.T) {
 	defer sync.mutex_unlock(&bridge_test_config_mutex)
 	sync.mutex_lock(&keystore_test_mutex)
 	defer sync.mutex_unlock(&keystore_test_mutex)
+	// Writes are sealed for THIS bridge id (the AAD binds it).
+	test_bridge_a, _ := keystore_test_bridge_ids()
+	prev_daemon := keystore_test_set_daemon_id(test_bridge_a)
+	defer bridge_config.daemon_id = prev_daemon
 
 	prev_key, had_key := os.lookup_env("HEIMDALL_VAULT_KEYRING", context.allocator)
 	defer {

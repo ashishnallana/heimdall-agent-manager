@@ -197,3 +197,18 @@ test_ctl_card_title_and_rationale_are_sealed :: proc(t: ^testing.T) {
 	defer delete(cards)
 	testing.expect(t, !strings.contains(cards, "Secret card") && !strings.contains(cards, "because secret"), cards)
 }
+
+// Card operations: content the hub only stores is sealed; what it executes is not.
+@(test)
+test_ctl_card_operations_seal_store_only_fields :: proc(t: ^testing.T) {
+	kr := tkr("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	defer vault.keyring_wipe(kr)
+	ops := `[{"op":"issue.create","title":"leak me","description":"secret body","scope":"global"},{"op":"memory.approve","memory_id":"mem_1"},{"op":"memory.create","args":{"title":"t","body":"b","type":"fact"}}]`
+	out, ok := ctl_seal_card_operations(ops, kr, context.temp_allocator)
+	testing.expect(t, ok)
+	testing.expect(t, !strings.contains(out, "leak me") && !strings.contains(out, "secret body"), out)
+	testing.expect(t, strings.contains(out, `"scope":"global"`) && strings.contains(out, `"memory_id":"mem_1"`) && strings.contains(out, `"type":"fact"`), "fields the hub executes stay in clear")
+	testing.expect(t, strings.count(out, vault.VAULT_V2_PREFIX) == 4, out)
+	_, bad := ctl_seal_card_operations(`{"op":"issue.create"}`, kr, context.temp_allocator)
+	testing.expect(t, !bad, "operations must be an array of objects")
+}

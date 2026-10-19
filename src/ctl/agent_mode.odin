@@ -992,12 +992,16 @@ ctl_agentmode_action_create_params :: proc(args: []string, tokens: []string = ni
 
 	// Card title and rationale are vault content the UI decrypts (VaultText /
 	// DecryptedMarkdown); they are sealed, never sent in plaintext (finding N3).
-	// operations stay plaintext: the hub executes them.
+	// Operations stay readable to the hub (it executes them) EXCEPT the content
+	// fields it only stores (CARD_OP_SEALED_FIELDS: issue/memory titles and bodies,
+	// project name/description), which are sealed too.
 	kr := ctl_vault_keyring_for_write(args)
+	sealed_ops, ops_ok := ctl_seal_card_operations(ops_json, kr, context.temp_allocator)
+	if !ops_ok do return "", false
 	fields := make([dynamic]string)
 	defer delete(fields)
 	append(&fields, json_kv("title", ctl_seal_if(title, kr)))
-	append(&fields, json_kv_raw("operations", ops_json))
+	append(&fields, json_kv_raw("operations", sealed_ops))
 	if r := option_value(args, "--rationale", ""); r != "" do append(&fields, json_kv("rationale", ctl_seal_if(r, kr)))
 	if sc := option_value(args, "--scope", ""); sc != "" do append(&fields, json_kv("scope", sc))
 	if p := option_value(args, "--provider", ""); p != "" do append(&fields, json_kv("provider", p))
