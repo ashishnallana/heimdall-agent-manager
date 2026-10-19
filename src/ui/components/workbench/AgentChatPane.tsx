@@ -875,6 +875,10 @@ export function AgentChatPane({
   const [mentionIndex, setMentionIndex] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const composerContainerRef = useRef<HTMLFormElement | HTMLDivElement | null>(null);
+  // REQ-FROST-1: on mobile the composer dock floats over the transcript; its measured
+  // height becomes the transcript's bottom inset so the last message stays reachable.
+  const composerDockRef = useRef<HTMLDivElement | null>(null);
+  const [composerDockHeight, setComposerDockHeight] = useState(0);
   const [error, setError] = useState('');
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
   const [localMessages, setLocalMessages] = useState<Message[]>([]);
@@ -967,6 +971,19 @@ export function AgentChatPane({
     observer.observe(el);
     return () => observer.disconnect();
   }, [conversation?.conversation_id, conversation?.conversationId, agentInstanceId]);
+
+  useEffect(() => {
+    const el = composerDockRef.current;
+    if (!isMobile || !el || typeof ResizeObserver === 'undefined') {
+      setComposerDockHeight(0);
+      return;
+    }
+    const measure = () => setComposerDockHeight(Math.ceil(el.getBoundingClientRect().height));
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [isMobile, conversation?.conversation_id, conversation?.conversationId, agentInstanceId]);
 
   const [statusMenuOpen, setStatusMenuOpen] = useState(false);
   const [headerActionsOpen, setHeaderActionsOpen] = useState(false);
@@ -2112,7 +2129,11 @@ export function AgentChatPane({
         ref={composerContainerRef as any}
         onSubmit={submit}
         data-debug-id="conversation-composer-shell"
-        className="w-full max-w-4xl mx-auto px-3 sm:px-0 py-4"
+        className={
+          isMobile
+            ? 'w-full max-w-4xl mx-auto px-3 pt-2 pb-[max(env(safe-area-inset-bottom),0.75rem)]'
+            : 'w-full max-w-4xl mx-auto px-3 sm:px-0 py-4'
+        }
       >
         <div className="mx-auto w-full max-w-4xl">
           {error ? (
@@ -2237,8 +2258,21 @@ export function AgentChatPane({
           />
           <div
             data-debug-id="conversation-composer-card"
-            className="rounded-[22px] border border-subtle bg-surface px-3 py-2.5 focus-within:border-accent sm:px-4 sm:py-3"
+            className={
+              isMobile
+                ? 'ui-frost-card relative isolate rounded-[26px] border px-3 py-2.5 focus-within:border-accent'
+                : 'rounded-[22px] border border-subtle bg-surface px-3 py-2.5 focus-within:border-accent sm:px-4 sm:py-3'
+            }
           >
+            {isMobile ? (
+              // REQ-FROST-2: stacked backdrop layers, strongest behind the input row and
+              // fading toward the action row (see `.ui-frost-gradient` in styles.css).
+              <div data-debug-id="conversation-composer-frost" aria-hidden="true" className="ui-frost-gradient -z-10">
+                <span />
+                <span />
+                <span />
+              </div>
+            ) : null}
             <div
               data-debug-id="conversation-composer-context"
               className="mb-2 hidden min-w-0 items-center gap-x-2 sm:flex text-[12px] text-muted"
@@ -2903,7 +2937,7 @@ export function AgentChatPane({
       {/* Transcript + Composer Dock */}
       <div
         data-debug-id="conversation-thread-transcript"
-        className="flex w-full min-h-0 min-w-0 max-w-full flex-1 flex-col overflow-x-hidden p-0 sm:px-4 sm:py-3"
+        className={`${isMobile ? 'relative ' : ''}flex w-full min-h-0 min-w-0 max-w-full flex-1 flex-col overflow-x-hidden p-0 sm:px-4 sm:py-3`}
       >
         <ChatMessageList
           conversationKey={conversationId}
@@ -2917,6 +2951,7 @@ export function AgentChatPane({
           formatTimestamp={formatMessageTimestamp}
           getDeliveryStatus={deliveryStatusFor}
           agentIsWorking={isWorking}
+          bottomInset={isMobile ? composerDockHeight : 0}
           renderMessageBody={({ message }) => renderConversationMessageBody(message)}
           wrapperClassName="relative min-h-0 min-w-0 max-w-full flex-1 overflow-hidden overflow-x-hidden"
           scrollClassName="chat-scrollbar h-full min-h-0 max-w-full space-y-3 overflow-y-auto overflow-x-hidden rounded-none bg-canvas px-1 py-3 sm:space-y-4 sm:rounded-[18px] sm:px-4 sm:py-4"
@@ -2965,9 +3000,18 @@ export function AgentChatPane({
           }
         />
         <div
+          ref={composerDockRef}
           data-debug-id="conversation-thread-composer-dock"
-          className="mx-auto w-full max-w-4xl shrink-0"
+          data-floating={isMobile ? 'true' : undefined}
+          className={
+            isMobile
+              ? // REQ-FROST-1: float over the transcript. Touches in the gaps around the
+                // card fall through to the transcript (`.ui-float-dock`).
+                'ui-float-dock absolute inset-x-0 bottom-0 z-20 mx-auto w-full max-w-4xl'
+              : 'mx-auto w-full max-w-4xl shrink-0'
+          }
         >
+          {isMobile ? <div aria-hidden="true" className="ui-frost-tail" /> : null}
           <AgentActivityBubbles instanceId={agentInstanceId} />
           <PinnedShellRuns sessions={pinnedRuns} />
           {renderComposer()}
