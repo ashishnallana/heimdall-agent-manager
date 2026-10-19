@@ -235,11 +235,13 @@ print_task_chains_help :: proc(action: string) {
 	fmt.println("usage: ham-ctl task-chains <list|coordinated|create|show|update|members|fleet|directory|add-agent|publish|graph|depend|remove-dependency|scope|complete|reopen|archive|unarchive|pin|unpin>")
 	fmt.println("  coordinated [--agent-id <instance_id>]  list chains an agent coordinates (default: your own instance)")
 	fmt.println("  fleet <list|set>                        manage chain fleet capacities")
-    fmt.println("  graph --chain ID                       read dependencies, scope and current work_revision")
-    fmt.println("  depend --chain ID --item task:ID|workflow_run:ID --on task:ID|workflow_run:ID")
-    fmt.println("  remove-dependency --chain ID --dependency ID --reason TEXT")
-    fmt.println("  scope --chain ID --item REF --action include|exclude --reason TEXT")
-    fmt.println("  complete --chain ID --expected-work-revision N --summary TEXT")
+    fmt.println("  graph [<chain-id>]                     read dependencies (with ids), scope and current work_revision")
+    fmt.println("  depend [<chain-id>] --item task:ID|workflow_run:ID --on task:ID|workflow_run:ID")
+    fmt.println("  remove-dependency [<chain-id>] --dependency ID --reason TEXT")
+    fmt.println("  scope [<chain-id>] --item task:ID|workflow_run:ID --action include|exclude --reason TEXT")
+    fmt.println("  complete <chain-id> --expected-work-revision N --summary TEXT   (explicit chain required)")
+    fmt.println("  [<chain-id>] may also be given as --chain ID; graph/depend/remove-dependency/scope default to your chain.")
+    fmt.println("  Same verbs and flags in agent mode (`ham-ctl task-chain --help`); Hub enforces owner/coordinator.")
     fmt.println("All chains are mixed_work. Completing a batch does not complete the chain.")
 }
 
@@ -295,6 +297,7 @@ print_tasks_help :: proc(action: string) {
 	fmt.println("usage: ham-ctl tasks <list|show|create|update|depend|cancel|comment|comments|fetch>")
 	fmt.println("  create --chain <id> --title <title> [--assignee <agt_id>] [--reviewer <agt_id>]... [--require-user-approval]")
 	fmt.println("  update <task-id> [--assignee <agt_id>] [--reviewer <agt_id>]... [--require-user-approval | --no-require-user-approval]")
+	fmt.println("  depend <task-id> --chain <id> --on <task-id>|task:<id>|workflow_run:<run-id>   (workflow runs become chain-level graph edges)")
 	fmt.println("  --assignee/--reviewer take durable agent ids (agt_...) only; instance pins (inst_...) were removed in Task System v2")
 	fmt.println("  (status/done/vote/votes/nudge/subscribe/unsubscribe were removed in Task System v2; use lease/verify/review)")
 }
@@ -327,8 +330,8 @@ ctl_task_chains_command :: proc(cmd: []string, args: []string) {
 	transport, ok := resolve_ctl_transport(args)
 	if !ok do return
 
-	if action == "graph" || action == "depend" || action == "remove-dependency" || action == "scope" || action == "complete" {
-		ctl_mixed_work_command(transport, action, args)
+	if ctl_is_mixed_work_verb(action) {
+		ctl_mixed_work_command(transport, action, args, pos(cmd[idx:], 1))
 		return
 	}
 
@@ -706,19 +709,8 @@ ctl_tasks_command :: proc(cmd: []string, args: []string) {
 		// --reviewer is repeatable and/or comma-separated for multiple reviewers.
 		if has_flag(args, "--reviewer") || has_flag(args, "--reviewer-agent-id") do append(&fields, ctl_v2_reviewers_field(args))
 		if has_flag(args, "--require-user-approval") do append(&fields, `"requires_user_approval":true`)
-		if deps := option_value(args, "--depends-on", option_value(args, "--on", "")); deps != "" {
-			parts := strings.split(deps, ",")
-			defer delete(parts)
-			buf := strings.builder_make()
-			strings.write_string(&buf, "\"depends_on\":[")
-			for p, i in parts {
-				if i > 0 do strings.write_byte(&buf, ',')
-				strings.write_byte(&buf, '"')
-				strings.write_string(&buf, strings.trim_space(p))
-				strings.write_byte(&buf, '"')
-			}
-			strings.write_byte(&buf, ']')
-			append(&fields, strings.to_string(buf))
+		if deps, present := ctl_task_depends_on_flag(args, "--depends-on", "--on"); present && deps != "" {
+			append(&fields, ctl_v2_json_string_array("depends_on", deps))
 		}
 		if b := option_value(args, "--bridge", ""); b != "" do append(&fields, json_kv("bridge_id", b))
 		if brief, ok := ctl_task_brief_field(args); ok do append(&fields, brief)
@@ -806,8 +798,7 @@ ctl_tasks_command :: proc(cmd: []string, args: []string) {
 		if has_flag(args, "--no-require-user-approval") do append(&fields, `"requires_user_approval":false`)
 		// --bridge is presence-checked so `--bridge ""` clears the pin back to inherit.
 		if has_flag(args, "--bridge") do append(&fields, json_kv("bridge_id", option_value(args, "--bridge", "")))
-		if has_flag(args, "--depends-on") || has_flag(args, "--on") {
-			deps := option_value(args, "--depends-on", option_value(args, "--on", ""))
+		if deps, present := ctl_task_depends_on_flag(args, "--depends-on", "--on"); present {
 			append(&fields, ctl_v2_json_string_array("depends_on", deps))
 		}
 		if brief, ok := ctl_task_brief_field(args); ok do append(&fields, brief)
@@ -816,12 +807,16 @@ ctl_tasks_command :: proc(cmd: []string, args: []string) {
 	}
 
 	if action == "depend" {
-		on_id := option_value(args, "--on", option_value(args, "--depends-on", ""))
-		if on_id == "" {
-			fmt.println("usage: ham-ctl tasks depend --chain <id> --task <id> --depends-on <id>")
-			return
+		kind, prereq, msg := ctl_task_depend_target(option_value(args, "--on", option_value(args, "--depends-on", "")))
+		switch kind {
+		case .Invalid:
+			ctl_print_error_exit(msg)
+		case .Task:
+			ctl_tasks_request(transport, "PATCH", fmt.tprintf("/api/v1/task-chains/%s/tasks/%s", safe_path_part(chain_id), safe_path_part(task_id)), json_object(ctl_v2_json_string_array("depends_on", prereq)))
+		case .Workflow_Run:
+			// Whole-run prerequisites live in the chain-level work graph.
+			ctl_tasks_request_and_decrypt(transport, "POST", fmt.tprintf("/api/v1/task-chains/%s/work/depend", safe_path_part(chain_id)), ctl_task_depend_workflow_params(chain_id, task_id, prereq), args)
 		}
-		ctl_tasks_request(transport, "PATCH", fmt.tprintf("/api/v1/task-chains/%s/tasks/%s", safe_path_part(chain_id), safe_path_part(task_id)), json_object(strings.concatenate({"\"depends_on\":[\"", on_id, "\"]"})))
 		return
 	}
 
