@@ -130,3 +130,25 @@ test('M2: a recorded reset not yet due is still "vault missing"; a returning dir
   assert.deepEqual(await ident.loadPins(kv, USER), PINS);
   dv.stopDeviceVault();
 });
+
+// ── L1: hint revocations are retried until the verified log shows them revoked ─
+
+test('L1: an attempted hint is retried after backoff and dropped only once no longer trusted', () => {
+  const T0 = 1_000_000_000;
+  const trusted = new Set(['b1', 'b2']);
+  // Never attempted: picked.
+  assert.equal(dv.planHintRevocation(['b1'], trusted, {}, T0).target, 'b1');
+  // Attempted just now (revoke may have failed): not retried before the backoff...
+  const once = { b1: { attempts: 1, lastAt: T0 } };
+  assert.equal(dv.planHintRevocation(['b1'], trusted, once, T0 + 1000).target, null);
+  // ...but retried after it (the old code marked it handled forever).
+  assert.equal(dv.planHintRevocation(['b1'], trusted, once, T0 + dv.hintBackoffMs(1)).target, 'b1');
+  // Backoff grows and is capped.
+  assert.ok(dv.hintBackoffMs(3) > dv.hintBackoffMs(1));
+  assert.equal(dv.hintBackoffMs(50), dv.HINT_RETRY_MAX_MS);
+  // Another hinted id is not blocked by one in backoff.
+  assert.equal(dv.planHintRevocation(['b1', 'b2'], trusted, once, T0 + 1000).target, 'b2');
+  // Handled = the verified log no longer trusts it: its record is dropped.
+  const plan = dv.planHintRevocation([], new Set(['b2']), { ...once, b2: { attempts: 2, lastAt: T0 } }, T0);
+  assert.deepEqual(Object.keys(plan.attempts), ['b2']);
+});

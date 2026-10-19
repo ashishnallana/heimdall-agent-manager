@@ -667,19 +667,51 @@ export async function sendKeyToBridge(bridgeId: string): Promise<BridgeFanoutRes
 // An approved browser with its keyring installed turns a hint into a real signed
 // `revoke` (new epoch + wraps) — but only for an id the VERIFIED log trusts as a
 // bridge (the verifier drops every other hint), at most one automatic revocation per
-// AUTO_REVOKE_INTERVAL_MS per account on this browser (cross-tab, in localStorage),
-// and each id is attempted once (remembered in the device store). So junk hints
-// cause nothing, and a hostile hub cannot drive unbounded epoch growth.
+// AUTO_REVOKE_INTERVAL_MS per account on this browser (cross-tab, in localStorage).
+// Each attempt is recorded (count + time) in the device store and an id is retried
+// only after an exponential backoff; it counts as handled only once the VERIFIED log
+// no longer trusts it (revoked), never merely because a revoke was attempted. So junk
+// hints cause nothing, a failed revoke is retried, and a hostile hub cannot drive
+// unbounded epoch growth (a successful revoke ends the id's hints for good).
 
 export const AUTO_REVOKE_INTERVAL_MS = 10 * 60 * 1000;
+export const HINT_RETRY_MAX_MS = 24 * 60 * 60 * 1000;
 let hintTimer: ReturnType<typeof setTimeout> | null = null;
 let hintRunning = false;
 
-const handledHintsKey = (userId: string) => `handled-retired-hints:${userId}`;
+export interface HintAttempt { attempts: number; lastAt: number }
+export type HintAttempts = Record<string, HintAttempt>;
 
-async function handledHints(userId: string): Promise<string[]> {
-  const v = await d().kv.get(handledHintsKey(userId));
-  return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+const hintAttemptsKey = (userId: string) => `retired-hint-attempts:${userId}`;
+
+async function loadHintAttempts(userId: string): Promise<HintAttempts> {
+  const v = await d().kv.get(hintAttemptsKey(userId));
+  const out: HintAttempts = {};
+  if (v && typeof v === 'object') {
+    for (const [id, a] of Object.entries(v as Record<string, HintAttempt>)) {
+      if (a && Number.isSafeInteger(a.attempts) && Number.isFinite(a.lastAt)) out[id] = { attempts: a.attempts, lastAt: a.lastAt };
+    }
+  }
+  return out;
+}
+
+/** Wait before retrying an id after `attempts` failed/unconfirmed revokes. */
+export function hintBackoffMs(attempts: number): number {
+  return Math.min(AUTO_REVOKE_INTERVAL_MS * 2 ** Math.max(0, attempts - 1), HINT_RETRY_MAX_MS);
+}
+
+/**
+ * Pure: drop attempt records of ids the verified log no longer trusts (handled), and
+ * pick the first hinted id that was never attempted or whose backoff has elapsed.
+ */
+export function planHintRevocation(retiredHints: readonly string[], trusted: { has(id: string): boolean }, attempts: HintAttempts, now: number): { target: string | null; attempts: HintAttempts } {
+  const kept: HintAttempts = {};
+  for (const [id, a] of Object.entries(attempts)) if (trusted.has(id)) kept[id] = a;
+  const target = retiredHints.find((id) => {
+    const a = kept[id];
+    return !a || now - a.lastAt >= hintBackoffMs(a.attempts);
+  }) ?? null;
+  return { target, attempts: kept };
 }
 
 function takeAutoRevokeSlot(userId: string, now = Date.now()): boolean {
@@ -717,11 +749,16 @@ export async function revokeRetiredHint(): Promise<{ revoked: string | null }> {
   const c = ctx;
   if (!c?.identity) return { revoked: null };
   const { chain } = await fetchVerifiedChain();
-  const done = await handledHints(c.userId);
-  const target = chain.retiredHints.find((id) => !done.includes(id));
-  if (!target) return { revoked: null };
-  if (!takeAutoRevokeSlot(c.userId)) return { revoked: null };
-  await d().kv.put(handledHintsKey(c.userId), [...done, target].slice(-64));
+  const now = Date.now();
+  const plan = planHintRevocation(chain.retiredHints, chain.trusted, await loadHintAttempts(c.userId), now);
+  const save = () => d().kv.put(hintAttemptsKey(c.userId), plan.attempts);
+  if (!plan.target || !takeAutoRevokeSlot(c.userId, now)) {
+    await save();
+    return { revoked: null };
+  }
+  const target = plan.target;
+  plan.attempts[target] = { attempts: (plan.attempts[target]?.attempts ?? 0) + 1, lastAt: now };
+  await save();
   const { outcome } = await revokeDevice(target);
   return { revoked: outcome.kind === 'revoked' ? target : null };
 }
