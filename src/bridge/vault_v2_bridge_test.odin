@@ -7,6 +7,7 @@ package main
 
 import "core:crypto/ecdsa"
 import "core:fmt"
+import "core:os"
 import "core:strings"
 import "core:sync"
 import "core:testing"
@@ -404,4 +405,48 @@ test_v2_enc_spec_nonce_replay_rejected :: proc(t: ^testing.T) {
 	testing.expect(t, bridge_enc_spec_check_fresh(now, "m1_other_nonce_0123456789abcdef", now + 61_000) != "", "stale timestamp rejected")
 	testing.expect(t, bridge_enc_spec_check_fresh(now, "", now) != "", "a missing nonce is rejected")
 	testing.expect(t, bridge_enc_spec_check_fresh(now, "short", now) != "", "a short nonce is rejected")
+}
+
+@(test)
+test_v2_fs_read_uses_one_vault_snapshot :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
+	f := v2_open()
+	defer v2_close(&f)
+	env := test_env_set("HEIMDALL_VAULT_KEYRING", "")
+	defer test_env_restore(&env)
+	testing.expect(t, test_store_keyring(f.id_a, TEST_VAULT_KEY_HEX))
+
+	sb, sb_ok := bridge_vault_test_sandbox_open(t, "l2_snapshot")
+	defer bridge_vault_test_sandbox_close(&sb)
+	if !sb_ok do return
+	root := bridge_fs_canonicalize_existing(sb.dir)
+	defer delete(root)
+	testing.expect(t, os.write_entire_file(fmt.tprintf("%s/secret.txt", root), transmute([]byte)string("l2 secret line")) == nil)
+
+	// The vault locks right after the command's snapshot: the content must still
+	// leave encrypted under the snapshot's keyring, never in plaintext.
+	prev := bridge_fs_vault_snapshot
+	defer bridge_fs_vault_snapshot = prev
+	bridge_fs_vault_snapshot = proc() -> (Vault_Status, vault.Vault_Keyring) {
+		status, kr := bridge_vault_status_and_key()
+		keystore_lock_and_purge(bridge_config.daemon_id)
+		return status, kr
+	}
+	// read_file's per-file path check rejects Windows temp paths (pre-existing,
+	// unrelated to L2), so its half runs on unix; grep covers the same snapshot.
+	when ODIN_OS != .Windows {
+		res := bridge_fs_read_file("secret.txt", root)
+		defer delete(res.content)
+		testing.expectf(t, res.ok, "read ok: %s %s %s", res.error_code, res.message, root)
+		testing.expect(t, strings.has_prefix(res.content, vault.VAULT_V2_PREFIX), "content encrypted under the snapshot keyring")
+		testing.expect(t, !strings.contains(res.content, "l2 secret line"), "no plaintext")
+		_ = test_store_keyring(f.id_a, TEST_VAULT_KEY_HEX)
+	}
+	g := bridge_fs_grep("l2 secret", true, 10, root)
+	testing.expect(t, g.ok && len(g.matches) == 1, "grep found the line")
+	if len(g.matches) == 1 do testing.expect(t, strings.has_prefix(g.matches[0].line, vault.VAULT_V2_PREFIX), "grep line encrypted")
+	bridge_fs_grep_result_delete(&g)
 }
