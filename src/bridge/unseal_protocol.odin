@@ -378,19 +378,65 @@ bridge_unseal_write_hello_fields :: proc(b: ^strings.Builder, bridge_id: string)
 	strings.write_string(b, "\"")
 }
 
-// ── Sliding Nonce Deduplication Cache (60s TTL Ring Buffer) ──────────────────
+// ── Nonce replay cache ──────────────────────────────────────────────────────
+//
+// A fixed-capacity set of nonces, each live until its own expiry. A nonce is
+// recorded only after its message has authenticated (finding L1), so garbage
+// cannot fill the cache; and when every slot still holds a live nonce the insert
+// is REFUSED rather than evicting one, since an evicted nonce could be replayed
+// inside its window. Shared by bridge_unseal (60 s) and enc_spec (finding M1).
 
-Unseal_Nonce_Entry :: struct {
-	nonce_buf: [64]byte,
-	nonce_len: int,
-	timestamp_ms: i64,
+Nonce_Cache_Entry :: struct {
+	nonce_buf:  [64]byte,
+	nonce_len:  int,
+	expires_ms: i64,
 }
 
-Unseal_Nonce_Cache :: struct {
-	entries: [UNSEAL_NONCE_CACHE_CAPACITY]Unseal_Nonce_Entry,
-	head: int,
-	count: int,
-	mu: sync.Mutex,
+Nonce_Replay_Cache :: struct {
+	entries: [UNSEAL_NONCE_CACHE_CAPACITY]Nonce_Cache_Entry,
+	mu:      sync.Mutex,
+}
+
+Unseal_Nonce_Cache :: Nonce_Replay_Cache
+
+Nonce_Cache_Result :: enum {
+	Inserted,
+	Replay,
+	Full,
+	Invalid,
+}
+
+// nonce_cache_seen reports whether nonce is recorded and still live at now_ms.
+nonce_cache_seen :: proc(cache: ^Nonce_Replay_Cache, nonce: string, now_ms: i64) -> bool {
+	if nonce == "" || len(nonce) > 64 do return false
+	sync.mutex_lock(&cache.mu)
+	defer sync.mutex_unlock(&cache.mu)
+	for &e in cache.entries {
+		if e.nonce_len == len(nonce) && now_ms <= e.expires_ms && string(e.nonce_buf[:e.nonce_len]) == nonce do return true
+	}
+	return false
+}
+
+// nonce_cache_insert records nonce until now_ms + ttl_ms. Atomic with the replay
+// check, so two concurrent deliveries of one nonce cannot both be inserted.
+nonce_cache_insert :: proc(cache: ^Nonce_Replay_Cache, nonce: string, now_ms: i64, ttl_ms: i64) -> Nonce_Cache_Result {
+	if nonce == "" || len(nonce) > 64 || ttl_ms <= 0 do return .Invalid
+	sync.mutex_lock(&cache.mu)
+	defer sync.mutex_unlock(&cache.mu)
+	free: ^Nonce_Cache_Entry
+	for &e in cache.entries {
+		live := e.nonce_len > 0 && now_ms <= e.expires_ms
+		if live {
+			if e.nonce_len == len(nonce) && string(e.nonce_buf[:e.nonce_len]) == nonce do return .Replay
+		} else if free == nil {
+			free = &e
+		}
+	}
+	if free == nil do return .Full
+	copy(free.nonce_buf[:], nonce)
+	free.nonce_len = len(nonce)
+	free.expires_ms = now_ms + ttl_ms
+	return .Inserted
 }
 
 g_unseal_nonce_cache: Unseal_Nonce_Cache
@@ -419,41 +465,10 @@ bridge_enrollment_unseal_was_received :: proc() -> bool {
 	return g_enrollment_unseal_received
 }
 
-unseal_nonce_cache_check_and_insert :: proc(cache: ^Unseal_Nonce_Cache, nonce: string, now_ms: i64) -> bool {
-	if nonce == "" || len(nonce) > 64 do return false
-	sync.mutex_lock(&cache.mu)
-	defer sync.mutex_unlock(&cache.mu)
-
-	for i in 0 ..< cache.count {
-		entry := &cache.entries[i]
-		if entry.nonce_len == len(nonce) && (now_ms - entry.timestamp_ms) <= UNSEAL_NONCE_TTL_MS {
-			if string(entry.nonce_buf[:entry.nonce_len]) == nonce {
-				return false // Replay detected!
-			}
-		}
-	}
-
-	entry := &cache.entries[cache.head]
-	mem.copy(raw_data(entry.nonce_buf[:]), raw_data(nonce), len(nonce))
-	entry.nonce_len = len(nonce)
-	entry.timestamp_ms = now_ms
-
-	cache.head = (cache.head + 1) % UNSEAL_NONCE_CACHE_CAPACITY
-	if cache.count < UNSEAL_NONCE_CACHE_CAPACITY {
-		cache.count += 1
-	}
-	return true
-}
-
 unseal_nonce_cache_clear :: proc(cache: ^Unseal_Nonce_Cache) {
 	sync.mutex_lock(&cache.mu)
 	defer sync.mutex_unlock(&cache.mu)
-	for i in 0 ..< UNSEAL_NONCE_CACHE_CAPACITY {
-		cache.entries[i].nonce_len = 0
-		cache.entries[i].timestamp_ms = 0
-	}
-	cache.head = 0
-	cache.count = 0
+	for &e in cache.entries do e = {}
 }
 
 // bridge_unseal_signature_echo reads the payload's unseal_key_signature object and
@@ -514,7 +529,8 @@ bridge_unseal_decrypt_and_verify :: proc(
 	if bridge_id != local_bridge_id {
 		return false, "cross-bridge replay rejected: target bridge_id mismatch"
 	}
-	if !unseal_nonce_cache_check_and_insert(&g_unseal_nonce_cache, nonce, current_clock_ms) {
+	// Cheap early reject; the nonce is only RECORDED after the AEAD passes below.
+	if nonce_cache_seen(&g_unseal_nonce_cache, nonce, current_clock_ms) {
 		return false, "replay rejected: nonce already used"
 	}
 	if epoch_int < 1 || i64(epoch_int) > i64(vault.MAX_EPOCH) {
@@ -555,6 +571,18 @@ bridge_unseal_decrypt_and_verify :: proc(
 		return false, "decrypted payload is not a valid keyring"
 	case .Epoch_Mismatch:
 		return false, "keyring current epoch does not match the signed current_epoch"
+	}
+
+	// Authenticated: consume the nonce now (atomically re-checking for a racing
+	// duplicate). A full cache refuses rather than forgetting a live nonce.
+	switch nonce_cache_insert(&g_unseal_nonce_cache, nonce, current_clock_ms, UNSEAL_NONCE_TTL_MS) {
+	case .Inserted:
+	case .Replay:
+		return false, "replay rejected: nonce already used"
+	case .Full:
+		return false, "too many recent unseal attempts; retry shortly"
+	case .Invalid:
+		return false, "invalid nonce"
 	}
 
 	// ── Keyring authentication (plan §1, finding C1) ──────────────────────

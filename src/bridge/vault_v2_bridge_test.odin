@@ -6,6 +6,7 @@ package main
 //   odin test src/bridge -collection:odin_test=src -define:ODIN_TEST_NAMES=main.test_v2_...
 
 import "core:crypto/ecdsa"
+import "core:fmt"
 import "core:strings"
 import "core:sync"
 import "core:testing"
@@ -352,4 +353,43 @@ test_v2_unseal_keyring_owner_and_superset :: proc(t: ^testing.T) {
 	bridge_unseal_forget_identity()
 	keystore_lock_and_purge(f.id_a)
 	testing.expect(t, !try_unseal(f.id_a, &one, now, "n_c1_no_owner"), "unknown owner refused")
+}
+
+@(test)
+test_v2_nonce_cache_records_only_authenticated_and_never_evicts_live :: proc(t: ^testing.T) {
+	// Pure cache behaviour on a private cache and a fake clock.
+	cache := new(Nonce_Replay_Cache)
+	defer free(cache)
+	testing.expect_value(t, nonce_cache_insert(cache, "n0", 1_000, 60_000), Nonce_Cache_Result.Inserted)
+	testing.expect_value(t, nonce_cache_insert(cache, "n0", 61_000, 60_000), Nonce_Cache_Result.Replay)
+	testing.expect_value(t, nonce_cache_insert(cache, "n0", 61_001, 60_000), Nonce_Cache_Result.Inserted)
+	for i in 1 ..< UNSEAL_NONCE_CACHE_CAPACITY {
+		testing.expect_value(t, nonce_cache_insert(cache, fmt.tprintf("n%d", i), 61_001, 60_000), Nonce_Cache_Result.Inserted)
+	}
+	// Full of live nonces: refuse, and every recorded nonce is still a replay.
+	testing.expect_value(t, nonce_cache_insert(cache, "fresh", 61_002, 60_000), Nonce_Cache_Result.Full)
+	testing.expect(t, nonce_cache_seen(cache, "n0", 61_002) && nonce_cache_seen(cache, "n1", 61_002), "no live nonce evicted")
+	// Once they expire, slots free up again.
+	testing.expect_value(t, nonce_cache_insert(cache, "fresh", 121_002, 60_000), Nonce_Cache_Result.Inserted)
+
+	// End to end: a payload that fails the AEAD does not burn its nonce.
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
+	f := v2_open()
+	defer v2_close(&f)
+	kr := test_keyring_from_hex(TEST_VAULT_KEY_HEX)
+	defer vault.keyring_wipe(&kr)
+	now := v2_now()
+	bad := test_create_unseal_v2_payload(f.id_a, &kr, now, "n_l1_shared", {tamper_aad = true})
+	defer delete(bad)
+	bad_ok, _ := bridge_unseal_decrypt_and_verify(bad, f.id_a, now)
+	testing.expect(t, !bad_ok, "tampered payload rejected")
+	good := test_create_unseal_v2_payload(f.id_a, &kr, now, "n_l1_shared")
+	defer delete(good)
+	good_ok, msg := bridge_unseal_decrypt_and_verify(good, f.id_a, now)
+	testing.expectf(t, good_ok, "genuine payload with the same nonce still accepted: %s", msg)
+	again, _ := bridge_unseal_decrypt_and_verify(good, f.id_a, now + 1)
+	testing.expect(t, !again, "and now the nonce is consumed")
 }
