@@ -16,6 +16,7 @@
     "test:task-chain-search": "node --import ./tests/helpers/vaultEndpointHarness.ts --test tests/ui_task_chain_search_rpc_test.ts tests/ui_task_chain_selector_test.ts",
     "test:pane-transport": "bash scripts/test-pane-transport.sh",
     "test:e2e:vault": "node -e \"const w=process.platform==='win32';const r=require('child_process').spawnSync(w?'powershell':'bash',w?['-NoProfile','-ExecutionPolicy','Bypass','-File','scripts/e2e-vault-devices.ps1']:['scripts/e2e-vault-devices.sh'],{stdio:'inherit'});process.exit(r.status??1)\"",
+    "test:e2e:bridge-enroll": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/e2e-bridge-enroll.ps1",
     "build:electron": "tsc -p tsconfig.electron.json && node -e \"require('fs').copyFileSync('src/ui/electron/icon.png','electron-dist/icon.png')\"",
     "build": "npm run typecheck && vite build && npm run build:electron",
     "preview": "vite preview --host 127.0.0.1",
