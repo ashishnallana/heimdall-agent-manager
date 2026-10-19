@@ -407,14 +407,12 @@ ctl_task_chains_command :: proc(cmd: []string, args: []string) {
 			return
 		}
 		desc := option_value(args, "--description", "")
-		keyring, key_ok := ctl_vault_keyring_for_write(args, transport)
-		if key_ok {
-			if !is_vault_armored(title) {
-				title = ctl_seal_or_exit(title, keyring)
-			}
-			if desc != "" && !is_vault_armored(desc) {
-				desc = ctl_seal_or_exit(desc, keyring)
-			}
+		keyring := ctl_vault_keyring_for_write(args)
+		if !is_vault_armored(title) {
+			title = ctl_seal_or_exit(title, keyring)
+		}
+		if desc != "" && !is_vault_armored(desc) {
+			desc = ctl_seal_or_exit(desc, keyring)
 		}
 		fields := make([dynamic]string)
 		defer delete(fields)
@@ -458,15 +456,15 @@ ctl_task_chains_command :: proc(cmd: []string, args: []string) {
 	if action == "update" {
 		fields := make([dynamic]string)
 		defer delete(fields)
-		keyring, key_ok := ctl_vault_keyring_for_write(args, transport)
+		keyring := ctl_vault_keyring_for_write(args)
 		if title := option_value(args, "--title", ""); title != "" {
-			if key_ok && !is_vault_armored(title) {
+			if !is_vault_armored(title) {
 				title = ctl_seal_or_exit(title, keyring)
 			}
 			append(&fields, json_kv("title", title))
 		}
 		if desc := option_value(args, "--description", ""); desc != "" {
-			if key_ok && !is_vault_armored(desc) {
+			if !is_vault_armored(desc) {
 				desc = ctl_seal_or_exit(desc, keyring)
 			}
 			append(&fields, json_kv("description", desc))
@@ -675,14 +673,12 @@ ctl_tasks_command :: proc(cmd: []string, args: []string) {
 		}
 		if !ctl_task_reviewer_flags_valid(args, false) do return
 		desc := option_value(args, "--description", "")
-		keyring, key_ok := ctl_vault_keyring_for_write(args, transport)
-		if key_ok {
-			if !is_vault_armored(title) {
-				title = ctl_seal_or_exit(title, keyring)
-			}
-			if desc != "" && !is_vault_armored(desc) {
-				desc = ctl_seal_or_exit(desc, keyring)
-			}
+		keyring := ctl_vault_keyring_for_write(args)
+		if !is_vault_armored(title) {
+			title = ctl_seal_or_exit(title, keyring)
+		}
+		if desc != "" && !is_vault_armored(desc) {
+			desc = ctl_seal_or_exit(desc, keyring)
 		}
 		fields := make([dynamic]string)
 		append(&fields, json_kv("title", title))
@@ -781,14 +777,12 @@ ctl_tasks_command :: proc(cmd: []string, args: []string) {
 		if !ctl_task_reviewer_flags_valid(args, true) do return
 		title := option_value(args, "--title", "")
 		desc := option_value(args, "--description", "")
-		keyring, key_ok := ctl_vault_keyring_for_write(args, transport)
-		if key_ok {
-			if title != "" && !is_vault_armored(title) {
-				title = ctl_seal_or_exit(title, keyring)
-			}
-			if desc != "" && !is_vault_armored(desc) {
-				desc = ctl_seal_or_exit(desc, keyring)
-			}
+		keyring := ctl_vault_keyring_for_write(args)
+		if title != "" && !is_vault_armored(title) {
+			title = ctl_seal_or_exit(title, keyring)
+		}
+		if desc != "" && !is_vault_armored(desc) {
+			desc = ctl_seal_or_exit(desc, keyring)
 		}
 		fields := make([dynamic]string)
 		if title != "" do append(&fields, json_kv("title", title))
@@ -838,11 +832,9 @@ ctl_tasks_command :: proc(cmd: []string, args: []string) {
 			fmt.println("usage: ham-ctl tasks comment --chain <id> --task <id> --body <text> [--notify <id,id...>]")
 			return
 		}
-		keyring, key_ok := ctl_vault_keyring_for_write(args, transport)
-		if key_ok {
-			if !is_vault_armored(body) {
-				body = ctl_seal_or_exit(body, keyring)
-			}
+		keyring := ctl_vault_keyring_for_write(args)
+		if !is_vault_armored(body) {
+			body = ctl_seal_or_exit(body, keyring)
 		}
 		fields := make([dynamic]string)
 		append(&fields, json_kv("body", body))
@@ -881,11 +873,9 @@ ctl_tasks_command :: proc(cmd: []string, args: []string) {
 				fmt.println("usage: ham-ctl tasks comments --chain <id> --task <id> add --body <text> [--notify <id,id...>]")
 				return
 			}
-			keyring, key_ok := ctl_vault_keyring_for_write(args, transport)
-			if key_ok {
-				if !is_vault_armored(body) {
-					body = ctl_seal_or_exit(body, keyring)
-				}
+			keyring := ctl_vault_keyring_for_write(args)
+			if !is_vault_armored(body) {
+				body = ctl_seal_or_exit(body, keyring)
 			}
 			fields := make([dynamic]string)
 			append(&fields, json_kv("body", body))

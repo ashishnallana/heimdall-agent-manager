@@ -103,7 +103,9 @@ ctl_shell_rest_with_preview :: proc(endpoint, token, method, path, body: string)
 }
 
 ctl_shell_attach_enc_spec :: proc(args: []string, cmd_str, cwd_str: string, fields: ^[dynamic]string) {
-	if keyring, key_ok := ctl_read_vault_keyring(args, context.temp_allocator); key_ok {
+	// There is no plaintext shell start: without a keyring this exits.
+	{
+		keyring := ctl_vault_keyring_for_write(args)
 		now_ms := time.to_unix_nanoseconds(time.now()) / 1_000_000
 		nonce_bytes: [16]byte
 		if !os_random.fill(nonce_bytes[:]) {

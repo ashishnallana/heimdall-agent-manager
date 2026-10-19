@@ -135,12 +135,10 @@ ctl_issues_command :: proc(cmd: []string, args: []string) {
 		}
 		desc := option_value(args, "--description", option_value(args, "--desc", ""))
 
-		keyring, key_ok := ctl_vault_keyring_for_write(args, transport)
-		if key_ok {
-			title = ctl_seal_or_exit(title, keyring)
-			if desc != "" {
-				desc = ctl_seal_or_exit(desc, keyring)
-			}
+		keyring := ctl_vault_keyring_for_write(args)
+		title = ctl_seal_or_exit(title, keyring)
+		if desc != "" {
+			desc = ctl_seal_or_exit(desc, keyring)
 		}
 
 		fields := make([dynamic]string)
@@ -165,14 +163,12 @@ ctl_issues_command :: proc(cmd: []string, args: []string) {
 		t := option_value(args, "--title", "")
 		desc := option_value(args, "--description", option_value(args, "--desc", ""))
 
-		keyring, key_ok := ctl_vault_keyring_for_write(args, transport)
-		if key_ok {
-			if t != "" {
-				t = ctl_seal_or_exit(t, keyring)
-			}
-			if desc != "" {
-				desc = ctl_seal_or_exit(desc, keyring)
-			}
+		keyring := ctl_vault_keyring_for_write(args)
+		if t != "" {
+			t = ctl_seal_or_exit(t, keyring)
+		}
+		if desc != "" {
+			desc = ctl_seal_or_exit(desc, keyring)
 		}
 
 		fields := make([dynamic]string)
@@ -208,10 +204,8 @@ ctl_issues_command :: proc(cmd: []string, args: []string) {
 			return
 		}
 
-		keyring, key_ok := ctl_vault_keyring_for_write(args, transport)
-		if key_ok {
-			body = ctl_seal_or_exit(body, keyring)
-		}
+		keyring := ctl_vault_keyring_for_write(args)
+		body = ctl_seal_or_exit(body, keyring)
 
 		fields := make([dynamic]string)
 		defer delete(fields)

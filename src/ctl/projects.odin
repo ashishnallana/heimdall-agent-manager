@@ -66,14 +66,12 @@ ctl_projects_command :: proc(cmd: []string, args: []string) {
 		}
 		desc := option_value(args, "--description", option_value(args, "--desc", ""))
 
-		keyring, key_ok := ctl_vault_keyring_for_write(args, transport)
-		if key_ok {
-			if !is_vault_armored(name) {
-				name = ctl_seal_or_exit(name, keyring)
-			}
-			if desc != "" && !is_vault_armored(desc) {
-				desc = ctl_seal_or_exit(desc, keyring)
-			}
+		keyring := ctl_vault_keyring_for_write(args)
+		if !is_vault_armored(name) {
+			name = ctl_seal_or_exit(name, keyring)
+		}
+		if desc != "" && !is_vault_armored(desc) {
+			desc = ctl_seal_or_exit(desc, keyring)
 		}
 
 		fields := make([dynamic]string)
@@ -100,14 +98,12 @@ ctl_projects_command :: proc(cmd: []string, args: []string) {
 		name := option_value(args, "--name", "")
 		desc := option_value(args, "--description", option_value(args, "--desc", ""))
 
-		keyring, key_ok := ctl_vault_keyring_for_write(args, transport)
-		if key_ok {
-			if name != "" && !is_vault_armored(name) {
-				name = ctl_seal_or_exit(name, keyring)
-			}
-			if desc != "" && !is_vault_armored(desc) {
-				desc = ctl_seal_or_exit(desc, keyring)
-			}
+		keyring := ctl_vault_keyring_for_write(args)
+		if name != "" && !is_vault_armored(name) {
+			name = ctl_seal_or_exit(name, keyring)
+		}
+		if desc != "" && !is_vault_armored(desc) {
+			desc = ctl_seal_or_exit(desc, keyring)
 		}
 
 		fields := make([dynamic]string)

@@ -114,33 +114,18 @@ test('REQ-FIX-ENC-1: createShell encrypts enc_spec with the CryptoKey from getAc
   }
 });
 
-test('REQ-SHELL-ENC-8: createShell omits enc_spec and sends plaintext when the vault is locked', async () => {
+test('N2: createShell refuses without an active key and sends nothing', async () => {
   const store = await makeVaultStore();
   await unlockVault(store, TEST_VAULT_KEY_RAW);
   await lockVaultFully(store);
   try {
     assert.equal(getActiveVaultKey(), null, 'precondition: locking clears the active key');
-    const body = await captureCreateShell(store, { cmd: 'ls -la', cwd: '/tmp', kind: 'run' });
-
-    assert.strictEqual(body.enc_spec, undefined, 'enc_spec must be omitted when the vault is locked');
-    assert.equal(body.cmd, 'ls -la', 'cmd must pass through in plaintext');
-    assert.equal(body.cwd, '/tmp', 'cwd must pass through in plaintext');
-  } finally {
-    await clearActiveKey();
-  }
-});
-
-test('REQ-SHELL-ENC-8: createShell omits enc_spec when no key is active even though state says unlocked', async () => {
-  const store = await makeVaultStore();
-  await unlockVault(store, TEST_VAULT_KEY_RAW);
-  // The failure mode this guards: Redux still flags unlocked, but the key is gone (a
-  // reload, or a lock that did not propagate). Encryption must be skipped, not attempted.
-  await clearActiveKey();
-  try {
-    assert.equal(getActiveVaultKey(), null, 'precondition: no active key');
-    const body = await captureCreateShell(store, { cmd: 'cat /etc/hosts', cwd: '/', kind: 'run' });
-    assert.strictEqual(body.enc_spec, undefined, 'enc_spec must be omitted when no key is active');
-    assert.equal(body.cmd, 'cat /etc/hosts');
+    shellFetch.reset();
+    const res: any = await store.dispatch(
+      shellsApi.endpoints.createShell.initiate({ bridgeId: 'brg_test', cmd: 'ls -la', cwd: '/tmp', kind: 'run' } as any),
+    );
+    assert.ok(res?.error, 'createShell must fail without a key');
+    assert.equal(shellFetch.requests.length, 0, 'no request may reach the hub');
   } finally {
     await clearActiveKey();
   }
@@ -211,16 +196,17 @@ test('REQ-SHELL-ENC-10: sendShellInput puts a PTY v2 enc_b64 and NO plaintext on
   }
 });
 
-test('REQ-SHELL-ENC-10: sendShellInput omits enc_b64 and data_b64 when the vault is locked', async () => {
-  const data = 'ls -la\n';
+test('N2: sendShellInput refuses without an active key and sends nothing', async () => {
   const store = await makeVaultStore();
   await unlockVault(store, TEST_VAULT_KEY_RAW);
   await lockVaultFully(store);
   try {
-    const body = await captureSendShellInput(store, data);
-    assert.strictEqual(body.enc_b64, undefined, 'enc_b64 must not be set when the vault is locked');
-    assert.strictEqual(body.data_b64, undefined, 'data_b64 must not be set when the vault is locked');
-    assert.equal(body.data, data, 'the plaintext input still has to reach the bridge');
+    shellFetch.reset();
+    const res: any = await store.dispatch(
+      shellsApi.endpoints.sendShellInput.initiate({ sessionId: 'sh_test', data: 'ls -la' } as any),
+    );
+    assert.ok(res?.error, 'sendShellInput must fail without a key');
+    assert.equal(shellFetch.requests.length, 0, 'no plaintext input may reach the hub');
   } finally {
     await clearActiveKey();
   }
