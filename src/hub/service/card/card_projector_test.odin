@@ -68,7 +68,7 @@ ph_open :: proc(t: ^testing.T, h: ^Projector_Harness, name: string) {
 	}}
 	taskchain_service.set_attention_notifier(&h.taskchains, &h.svc.attention_notifier)
 	content_service.set_attention_notifier(&h.content_svc, &h.svc.attention_notifier)
-	_, chain_ok, _ := iface.taskchain_save_chain(&h.tasks, domain.Task_Chain{chain_id = PH_CHAIN, owner_user_id = PH_OWNER, title = "vault:v2:chain-title", status = .Active, publish_state = .Published, created_at = "2026-10-01T00:00:00Z", updated_at = "2026-10-01T00:00:00Z"})
+	_, chain_ok, _ := iface.taskchain_save_chain(&h.tasks, domain.Task_Chain{chain_id = PH_CHAIN, owner_user_id = PH_OWNER, title = "vault:v2:chain-title", status = .Active, kind = domain.CHAIN_KIND_MIXED_WORK, publish_state = .Published, created_at = "2026-10-01T00:00:00Z", updated_at = "2026-10-01T00:00:00Z"})
 	testing.expect(t, chain_ok, "seed chain")
 }
 

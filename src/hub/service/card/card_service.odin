@@ -125,6 +125,51 @@ validate_card_operations :: proc(ops_json: string) -> (bool, string) {
 	return true, ""
 }
 
+// op_review_input reads a task.review op's optional verdict (approve |
+// request_changes; default approve), summary and findings (a JSON array, inline
+// or as a string). request_changes needs a summary, matching reject_card. Used
+// by validate_op_required_args (create / update / accept) and the accept_card
+// executor so both read the op the same way. findings_json uses temp_allocator.
+op_review_input :: proc(op_obj: json.Object) -> (taskv2.Review_Input, bool, string) {
+	input := taskv2.Review_Input{
+		task_id       = op_arg_string(op_obj, "task_id"),
+		verdict       = strings.trim_space(op_arg_string(op_obj, "verdict")),
+		summary       = op_arg_string(op_obj, "summary"),
+		findings_json = "[]",
+	}
+	if op_has_arg(op_obj, "verdict") && input.verdict == "" do return {}, false, "\"verdict\" must be \"approve\" or \"request_changes\""
+	switch input.verdict {
+	case "": input.verdict = "approve"
+	case "approve", "request_changes":
+	case: return {}, false, fmt.tprintf("unknown verdict %q (want \"approve\" or \"request_changes\")", input.verdict)
+	}
+	if input.verdict == "request_changes" && strings.trim_space(input.summary) == "" {
+		return {}, false, "verdict \"request_changes\" requires a non-empty \"summary\" (say what needs to change)"
+	}
+	if op_has_arg(op_obj, "findings") {
+		v: json.Value
+		if args_obj, is_args := op_obj["args"].(json.Object); is_args {
+			if av, present := args_obj["findings"]; present do v = av
+		}
+		if v == nil do v = op_obj["findings"]
+		#partial switch f in v {
+		case json.Array:
+			data, merr := json.marshal(v, allocator = context.temp_allocator)
+			if merr != nil do return {}, false, "\"findings\" could not be encoded"
+			input.findings_json = string(data)
+		case json.String:
+			if strings.trim_space(string(f)) != "" {
+				if !is_valid_json_array(string(f)) do return {}, false, "\"findings\" must be a JSON array"
+				input.findings_json = string(f)
+			}
+		case json.Null:
+		case:
+			return {}, false, "\"findings\" must be a JSON array"
+		}
+	}
+	return input, true, ""
+}
+
 op_field_missing :: proc(field: string) -> string { return fmt.tprintf("missing required field \"%s\"", field) }
 
 // validate_op_required_args holds the per-op required-field rules. Every case here
@@ -135,6 +180,9 @@ validate_op_required_args :: proc(op_name: string, op_obj: json.Object) -> (bool
 	case "task.review", "task.answer":
 		if op_arg_string(op_obj, "task_id") == "" do return false, op_field_missing("task_id")
 		if !op_has_arg(op_obj, "attempt_no") do return false, op_field_missing("attempt_no")
+		if op_name == "task.review" {
+			if _, ok, reason := op_review_input(op_obj); !ok do return false, reason
+		}
 	case "memory.approve", "memory.reject", "memory.update", "memory.delete", "memory.archive":
 		if op_arg_string(op_obj, "memory_id") == "" && op_arg_string(op_obj, "id") == "" do return false, op_field_missing("memory_id")
 	case "memory.create":
@@ -861,7 +909,7 @@ accept_card :: proc(s: ^Card_Service, auth: contracts.Auth_Context, id: domain.C
 
 		switch op_name {
 		case "task.review", "task.answer":
-			// Task System v2: Approve is the user's review verdict; Answer clears the
+			// Task System v2: review posts the user's verdict; Answer clears the
 			// block (the agent's question, a merge conflict, an exhausted budget).
 			// The engine nests its unit of work inside this one.
 			if s.taskchains == nil || s.taskchains.engine == nil {
@@ -872,7 +920,14 @@ accept_card :: proc(s: ^Card_Service, auth: contracts.Auth_Context, id: domain.C
 			t_ok := false
 			t_err: domain.Domain_Error
 			if op_name == "task.review" {
-				_, t_ok, t_err = taskv2.user_review(s.taskchains.engine, user_auth, tid, taskv2.Review_Input{task_id = string(tid), verdict = "approve", findings_json = "[]"})
+				// args.verdict (default approve), args.summary and args.findings;
+				// validate_card_operations already rejected a bad verdict above.
+				review, r_ok, r_reason := op_review_input(op_obj)
+				if !r_ok {
+					t_err = domain.domain_error(.Validation_Failed, r_reason)
+				} else {
+					_, t_ok, t_err = taskv2.user_review(s.taskchains.engine, user_auth, tid, review)
+				}
 			} else {
 				task, found, gerr := iface.taskchain_get_task(s.taskchains.repo, tid)
 				if !found {
