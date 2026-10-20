@@ -149,4 +149,54 @@ test_scope_enroll_refuses_another_hubs_config :: proc(t: ^testing.T) {
 	// A second instance on the same lock file refuses.
 	lock := fmt.tprintf("%s/.config/heimdall/config.toml.lock", sb.dir)
 	testing.expect(t, bridge_instance_lock(lock), "first instance takes the lock")
+	bridge_instance_unlock(lock)
+}
+
+// The previous-enrollment backup (reenroll_identity.odin) lives in the same (hub,
+// bridge id) scope as the record it keeps: another hub never sees or restores it.
+@(test)
+test_scope_identity_backup_is_scoped_and_restores_verbatim :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
+	id, _ := keystore_test_bridge_ids()
+	scope_clean(id)
+	defer {
+		for hub in ([]string{SCOPE_HUB_A, SCOPE_HUB_B}) {
+			_ = bridge_keystore_set_hub(hub)
+			_ = keystore_identity_backup_drop(id)
+		}
+		scope_clean(id)
+	}
+
+	testing.expect(t, bridge_keystore_set_hub(SCOPE_HUB_A), "bind hub A")
+	testing.expect(t, !keystore_identity_backup_create(id), "nothing to back up before an enrollment")
+	testing.expect(t, test_provision_identity(id), "enroll on hub A")
+	bridge_unseal_forget_identity()
+	before := bridge_identity_public_key_hex(id)
+	testing.expect(t, keystore_identity_backup_create(id), "back up hub A's enrollment")
+	testing.expect_value(t, keystore_identity_backup_status(id), Keystore_Read_Status.Found)
+	testing.expect(t, !keystore_identity_backup_create(id), "an existing backup is never overwritten")
+
+	testing.expect(t, bridge_keystore_set_hub(SCOPE_HUB_B), "bind hub B")
+	testing.expect_value(t, keystore_identity_backup_status(id), Keystore_Read_Status.Not_Found)
+	testing.expect(t, keystore_identity_backup_restore(id), "restoring with no backup is a no-op")
+	rec: Bridge_Identity_Record
+	testing.expect_value(t, keystore_read_identity(id, &rec), Keystore_Read_Status.Not_Found)
+	crypto.zero_explicit(&rec, size_of(rec))
+
+	// Replace hub A's record (as a re-enrollment does), then restore it.
+	testing.expect(t, bridge_keystore_set_hub(SCOPE_HUB_A), "bind hub A again")
+	_ = keystore_delete_identity_key(id)
+	bridge_unseal_forget_identity()
+	testing.expect(t, test_provision_identity(id), "the new enrollment's identity")
+	bridge_unseal_forget_identity()
+	testing.expect(t, bridge_identity_public_key_hex(id) != before, "a new identity replaced the record")
+	testing.expect(t, keystore_identity_backup_restore(id), "restore")
+	bridge_unseal_forget_identity()
+	testing.expect_value(t, bridge_identity_public_key_hex(id), before)
+	_, floor_st := keystore_read_epoch_floor(id)
+	testing.expect_value(t, floor_st, Keystore_Read_Status.Found)
+	testing.expect_value(t, keystore_identity_backup_status(id), Keystore_Read_Status.Not_Found)
 }

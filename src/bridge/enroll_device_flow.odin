@@ -342,6 +342,10 @@ Bridge_Authorize_Request :: struct {
 	// whose UI is served on another origin derives with the same one).
 	pair_salt:                  string `json:"pair_salt,omitempty"`,
 	pair_hub_origin:            string `json:"pair_hub_origin,omitempty"`,
+	// The bridge id this machine was enrolled as before, offered for reuse. An
+	// UNTRUSTED hint: the hub shows it only to an approver who owns that bridge, and
+	// the approver decides whether to reuse it or register a new bridge.
+	previous_bridge_id:         string `json:"previous_bridge_id,omitempty"`,
 }
 
 // bridge_enroll_authorize_body builds the /device/authorize request body.
@@ -354,6 +358,7 @@ bridge_enroll_authorize_body :: proc(
 	pair_key_mac: string = "",
 	pair_salt: string = "",
 	pair_hub_origin: string = "",
+	previous_bridge_id: string = "",
 	allocator := context.allocator,
 ) -> string {
 	body := Bridge_Authorize_Request{
@@ -362,6 +367,7 @@ bridge_enroll_authorize_body :: proc(
 		bridge_identity_public_key = identity_public_key_hex,
 		code_challenge = code_challenge, code_challenge_method = "S256",
 		pair_lookup = pair_lookup, pair_key_mac = pair_key_mac, pair_salt = pair_salt, pair_hub_origin = pair_hub_origin,
+		previous_bridge_id = previous_bridge_id,
 	}
 	if identity_proof_json != "" {
 		if sw, ok := vault.signature_wire_from_text(identity_proof_json, context.temp_allocator); ok do body.bridge_identity_proof = sw
@@ -1006,6 +1012,58 @@ bridge_enroll_print_account_fingerprint :: proc(bridge_id: string) {
 	fmt.println("                  (verified with the pairing code; Settings → Devices shows the same value)")
 }
 
+// ===== Reusing the previous bridge identity =====
+
+BRIDGE_ENROLL_REUSE_FLAG :: "--reuse-bridge"
+BRIDGE_ENROLL_NEW_FLAG :: "--new-bridge"
+// The hub accepts a previous_bridge_id shaped brg_[A-Za-z0-9_-]{1,60} and refuses
+// anything else with a 400, so the bridge never sends one it would refuse.
+BRIDGE_ENROLL_HINT_MAX_SUFFIX :: 60
+
+// bridge_enroll_hint_shape_ok mirrors the hub's previous_bridge_id shape check.
+bridge_enroll_hint_shape_ok :: proc(id: string) -> bool {
+	if !strings.has_prefix(id, KEYSTORE_BRIDGE_ID_PREFIX) do return false
+	rest := id[len(KEYSTORE_BRIDGE_ID_PREFIX):]
+	if len(rest) < 1 || len(rest) > BRIDGE_ENROLL_HINT_MAX_SUFFIX do return false
+	for c in transmute([]byte)rest {
+		switch c {
+		case 'a'..='z', 'A'..='Z', '0'..='9', '_', '-':
+		case:
+			return false
+		}
+	}
+	return true
+}
+
+// bridge_enroll_reuse_hint resolves which previous bridge id `enroll` offers the
+// approver for reuse: --reuse-bridge <id> when given, none with --new-bridge, else
+// the id this config is enrolled as (config_bridge_id, "" for a first enrollment).
+// The two flags are mutually exclusive. err is set (and ok false) for a usage error.
+bridge_enroll_reuse_hint :: proc(args: []string, config_bridge_id: string) -> (hint: string, err: string, ok: bool) {
+	wants_new := has_flag(args, BRIDGE_ENROLL_NEW_FLAG)
+	if has_flag(args, BRIDGE_ENROLL_REUSE_FLAG) {
+		if wants_new do return "", "--reuse-bridge and --new-bridge are mutually exclusive", false
+		explicit := strings.trim_space(option_value(args, BRIDGE_ENROLL_REUSE_FLAG, ""))
+		if !bridge_enroll_hint_shape_ok(explicit) {
+			return "", "--reuse-bridge needs a bridge id (brg_…), as shown under Settings → Bridges", false
+		}
+		return explicit, "", true
+	}
+	if wants_new do return "", "", true
+	id := strings.trim_space(config_bridge_id)
+	if !bridge_enroll_hint_shape_ok(id) do return "", "", true
+	return id, "", true
+}
+
+// bridge_enroll_result_line is the one-line outcome: whether the approver reused
+// the offered id (a re-enrollment) or registered a new bridge. Temp-allocated.
+bridge_enroll_result_line :: proc(reuse_hint, bridge_id: string) -> string {
+	if reuse_hint != "" && bridge_id == reuse_hint {
+		return strings.concatenate({"Re-enrolled existing bridge ", bridge_id}, context.temp_allocator)
+	}
+	return strings.concatenate({"Registered new bridge ", bridge_id}, context.temp_allocator)
+}
+
 // ===== The command: `ham-bridge enroll --hub <origin>` =====
 
 // bridge_enroll_device_command runs the whole ceremony. Steps are numbered to the
@@ -1047,9 +1105,17 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 		return false
 	}
 	defer bridge_instance_unlock(enroll_config_lock)
+	// A re-enrollment of this config's bridge that a crash left unresolved is undone
+	// first (reenroll_identity.odin): its previous identity comes back.
+	bridge_reenroll_recover(cfg_lib.config_path_from_args(args))
 	replacing_bridge_id := bridge_enroll_config_bridge_id(cfg_lib.config_path_from_args(args))
+	reuse_hint, hint_err, hint_ok := bridge_enroll_reuse_hint(args, replacing_bridge_id)
+	if !hint_ok {
+		fmt.eprintfln("ham-bridge enroll: %s", hint_err)
+		return false
+	}
 	if explicit_token_file := bridge_enroll_token_file_from_args(args, "", "", context.temp_allocator); explicit_token_file != "" {
-		if reason, conflict := bridge_enroll_token_file_conflict(explicit_token_file, api_base, replacing_bridge_id); conflict {
+		if reason, conflict := bridge_enroll_token_file_conflict(explicit_token_file, api_base, replacing_bridge_id, reuse_hint); conflict {
 			fmt.eprintfln("ham-bridge enroll REFUSED: credential file %s is not this bridge's: %s.", explicit_token_file, reason)
 			fmt.eprintln("  Give this bridge its own --bridge-token-file, or omit it (the default credential path is per bridge).")
 			return false
@@ -1129,13 +1195,19 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 	defer bridge_pairing_disarm()
 
 	// Step 4 — the anonymous device-authorization request.
-	body := bridge_enroll_authorize_body(descriptor, public_key_hex, code_challenge, identity_hex, identity_proof, vault.pair_lookup_hex(&pair_keys, context.temp_allocator), pair_key_mac, pair_salt, pair_origin, context.temp_allocator)
+	body := bridge_enroll_authorize_body(descriptor, public_key_hex, code_challenge, identity_hex, identity_proof, vault.pair_lookup_hex(&pair_keys, context.temp_allocator), pair_key_mac, pair_salt, pair_origin, reuse_hint, context.temp_allocator)
 	if body == "" {
 		fmt.eprintln("ham-bridge enroll: could not encode the authorize request")
 		return false
 	}
 	fmt.printfln("bridge enroll: POST %s%s (no token — host=%s user=%s)",
 		api_base, BRIDGE_ENROLL_AUTHORIZE_PATH, descriptor.hostname, descriptor.os_user)
+	if reuse_hint != "" {
+		fmt.printfln("  asking to reuse bridge %s (%s); the approver chooses to reuse it or register a new bridge",
+			reuse_hint, "--reuse-bridge" if has_flag(args, BRIDGE_ENROLL_REUSE_FLAG) else "this config's previous enrollment")
+	} else if has_flag(args, BRIDGE_ENROLL_NEW_FLAG) {
+		fmt.println("  registering a new bridge (--new-bridge): no previous bridge id is offered for reuse")
+	}
 	resp, sent := http.request_with_headers_timeout(
 		"POST", api_base, BRIDGE_ENROLL_AUTHORIZE_PATH, body, nil, http.DEFAULT_TIMEOUT_MS)
 	if !sent {
@@ -1222,7 +1294,18 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 		switch status {
 		case .Approved:
 			token_file := bridge_enroll_token_file_from_args(args, api_base, cred.bridge_id)
-			if reason, conflict := bridge_enroll_token_file_conflict(token_file, api_base, replacing_bridge_id); conflict {
+			// Reuse only counts when the approver chose the id this process offered: an id
+			// the hub returns unasked is a new bridge and never replaces anything here.
+			reenroll := reuse_hint != "" && cred.bridge_id == reuse_hint
+			fmt.println("")
+			if reenroll {
+				fmt.printfln("Approved: re-enrolling existing bridge %s", cred.bridge_id)
+			} else if reuse_hint != "" {
+				fmt.printfln("Approved: the approver registered a NEW bridge %s instead of reusing %s (that bridge is left as it is)", cred.bridge_id, reuse_hint)
+			} else {
+				fmt.printfln("Approved: registering new bridge %s", cred.bridge_id)
+			}
+			if reason, conflict := bridge_enroll_token_file_conflict(token_file, api_base, replacing_bridge_id, cred.bridge_id if reenroll else ""); conflict {
 				fmt.eprintfln("bridge enroll FAILED: credential file %s is not this bridge's: %s. Nothing was written; enroll again with its own --bridge-token-file.", token_file, reason)
 				return false
 			}
@@ -1232,9 +1315,35 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 				return false
 			}
 			config_path := cfg_lib.config_path_from_args(args)
+			// A re-enrollment replaces this machine's previous identity of that id only
+			// once it is journaled and backed up, so a rollback restores it.
+			replace_previous := false
+			// Held until the service restart: no other instance may run as this bridge
+			// while its identity is being replaced.
+			scope_lock_path := ""
+			defer if scope_lock_path != "" do bridge_instance_unlock(scope_lock_path)
+			if reenroll {
+				scope_locked := true
+				if name, scoped := keystore_scope_name(cred.bridge_id); scoped do scope_lock_path, scope_locked = bridge_scope_lock(name)
+				if !scope_locked {
+					fmt.eprintfln("bridge enroll FAILED: another ham-bridge instance runs as %s on this machine; stop it and enroll again. Nothing was written.", cred.bridge_id)
+					return false
+				}
+				existing: Bridge_Identity_Record
+				existing_status := keystore_read_identity(cred.bridge_id, &existing)
+				crypto.zero_explicit(&existing, size_of(existing))
+				if existing_status != .Not_Found {
+					if !bridge_reenroll_begin(config_path, api_base, cred.bridge_id, token_file) {
+						fmt.eprintfln("bridge enroll FAILED: could not back up the previous identity of %s (or an earlier re-enrollment is unresolved). Nothing was written.", cred.bridge_id)
+						return false
+					}
+					replace_previous = true
+				}
+			}
 			// Pin the identity and the enrolled owner under the new bridge id before
 			// anything else: the unseal that follows is checked against both.
-			if !bridge_unseal_identity_commit_enrollment(cred.bridge_id, cred.owner_user_id) {
+			if !bridge_unseal_identity_commit_enrollment(cred.bridge_id, cred.owner_user_id, replace_previous) {
+				if replace_previous do _ = bridge_reenroll_resolve(config_path, cred.bridge_id, false)
 				if cred.owner_user_id == "" {
 					fmt.eprintln("bridge enroll FAILED: the hub did not report the approving account (owner_user_id); this bridge cannot pin its owner. Upgrade the hub and enroll again.")
 				} else {
@@ -1246,19 +1355,24 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 				// REQ-EA-4: write nothing until the vault key is delivered and the hub
 				// commits; enroll_atomic.odin owns the whole sequence.
 				if !bridge_enroll_atomic_run(args, cred, token_file, config_path, api_base) do return false
+				if bridge_enroll_atomic_state() == .Committed do fmt.println(bridge_enroll_result_line(reuse_hint, cred.bridge_id))
 				bridge_instance_unlock(enroll_config_lock) // the restarted service takes it
-			restart_ok, restarted := bridge_enroll_restart_service(args)
+				if reenroll do bridge_instance_unlock_scope(cred.bridge_id)
+				restart_ok, restarted := bridge_enroll_restart_service(args)
 				if !restart_ok do return false
 				if restarted do fmt.println("  registered bridge service restarted with the new credential")
 				return true
 			}
 			if !bridge_enroll_persist(cred, token_file, config_path, api_base) {
-				_ = keystore_delete_identity_key(cred.bridge_id)
+				bridge_enroll_discard_identity(config_path, cred.bridge_id)
 				bridge_unseal_forget_identity()
 				return false
 			}
+			// Without atomic enrollment (an older hub) the persist IS the commit.
+			_ = bridge_reenroll_resolve(config_path, cred.bridge_id, true)
 			fmt.println("")
 			fmt.printfln("bridge enroll SUCCESS: enrolled as bridge_id=%s", cred.bridge_id)
+			fmt.println(bridge_enroll_result_line(reuse_hint, cred.bridge_id))
 			if cred.approver_username != "" {
 				fmt.printfln("  approved by     {}", cred.approver_username)
 			} else {
@@ -1279,6 +1393,7 @@ bridge_enroll_device_command :: proc(args: []string) -> bool {
 				bridge_enroll_print_account_fingerprint(cred.bridge_id)
 			}
 			bridge_instance_unlock(enroll_config_lock) // the restarted service takes it
+			if reenroll do bridge_instance_unlock_scope(cred.bridge_id)
 			restart_ok, restarted := bridge_enroll_restart_service(args)
 			if !restart_ok {
 				// The key (when delivered) was verified persisted above; a restart
@@ -1438,6 +1553,8 @@ bridge_bind_runtime_hub :: proc(cfg: Bridge_Config, config_path: string) -> bool
 		fmt.eprintfln("ham-bridge REFUSING TO START: another ham-bridge instance is running with config %s. Each bridge needs its own --config/--bridge-token-file.", config_path)
 		return false
 	}
+	// Under the config lock: undo a re-enrollment a crash left before its ack.
+	if config_path != "" do bridge_reenroll_recover(config_path)
 	if !enrolled do return true
 	bridge_id := strings.trim_space(cfg.daemon_id)
 	rec: Bridge_Identity_Record
@@ -1462,7 +1579,7 @@ bridge_bind_runtime_hub :: proc(cfg: Bridge_Config, config_path: string) -> bool
 		fmt.eprintln("  Each bridge needs its own credential file; re-enroll: ham-bridge enroll --hub <url>")
 		return false
 	}
-	if name, scoped := keystore_scope_name(bridge_id); scoped && !bridge_scope_lock(name) {
+	if name, scoped := keystore_scope_name(bridge_id); scoped && !bridge_scope_lock_ok(name) {
 		fmt.eprintfln("ham-bridge REFUSING TO START: another ham-bridge instance already runs as %s for this hub.", bridge_id)
 		return false
 	}

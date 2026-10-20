@@ -61,15 +61,25 @@ enroll_atomic_fixture_open :: proc(t: ^testing.T, f: ^Enroll_Atomic_Fixture, lab
 	sb, ok := bridge_vault_test_sandbox_open(t, label)
 	f.sb = sb
 	if !ok do return false
+	// Bound like a real enrollment: recovery binds the keystore to the marker's hub,
+	// so an unbound fixture would look its key up in another scope.
+	if !bridge_keystore_set_hub("https://hub.example.test") {
+		testing.expect(t, false, "bind the test hub")
+		return false
+	}
 	f.bridge_id, _ = keystore_test_bridge_ids()
 	f.token_file = fmt.aprintf("%s/cred/bridge.token", sb.dir)
 	f.config_path = fmt.aprintf("%s/config.toml", sb.dir)
 	if os.write_entire_file(f.config_path, transmute([]byte)string(ENROLL_ATOMIC_TEST_OLD_CONFIG)) != nil {
-		testing.fail_now(t, "could not seed config.toml")
+		testing.expect(t, false, "could not seed config.toml")
+		return false
 	}
 	unseal_nonce_cache_clear(&g_unseal_nonce_cache)
 	bridge_unseal_init()
-	if !test_provision_identity(f.bridge_id) do testing.fail_now(t, "could not provision the enrollment identity")
+	if !test_provision_identity(f.bridge_id) {
+		testing.expect(t, false, "could not provision the enrollment identity")
+		return false
+	}
 	bridge_enroll_atomic_arm(enroll_atomic_test_cred(f.bridge_id), f.token_file, f.config_path, "https://hub.example.test")
 	return true
 }
@@ -83,6 +93,7 @@ enroll_atomic_fixture_close :: proc(f: ^Enroll_Atomic_Fixture) {
 	delete(f.token_file)
 	delete(f.config_path)
 	bridge_vault_test_sandbox_close(&f.sb)
+	_ = bridge_keystore_set_hub("")
 }
 
 @(private = "file")
@@ -354,4 +365,286 @@ test_enroll_stage_marker_is_valid_json :: proc(t: ^testing.T) {
 	testing.expectf(t, strings.has_prefix(marker, `{"bridge_id":"`), "marker is JSON, got %q", marker)
 	testing.expect_value(t, extract_json_string(marker, "bridge_id", "", context.temp_allocator), f.bridge_id)
 	testing.expect_value(t, extract_json_string(marker, "hub", "", context.temp_allocator), "https://hub.example.test")
+}
+
+// ===== Re-enrolling the SAME bridge id (reenroll_identity.odin) =====
+//
+// The approver reused this machine's previous bridge id: the new enrollment lands
+// in the same (hub, bridge id) scope. The previous identity, floor and credential
+// must survive until the hub commits, come back on every rollback, and a crash
+// before the ack must be undone at the next start.
+
+@(private = "file")
+REENROLL_TEST_HUB :: "https://hub.example.test"
+@(private = "file")
+REENROLL_TEST_OLD_TOKEN :: "hba_previous.secret"
+
+@(private = "file")
+Reenroll_Fixture :: struct {
+	using base: Enroll_Atomic_Fixture,
+	old_identity: string, // public key hex of the previous enrollment (temp-allocated)
+	new_identity: string,
+}
+
+// reenroll_fixture_open enrolls f.bridge_id once (the previous enrollment, with a
+// live owned credential), then runs the approval half of a re-enrollment of the
+// same id: journal + backup, new identity committed, state machine armed.
+@(private = "file")
+reenroll_fixture_open :: proc(t: ^testing.T, f: ^Reenroll_Fixture, label: string) -> bool {
+	if !bridge_keystore_set_hub(REENROLL_TEST_HUB) {
+		testing.expect(t, false, "bind the test hub")
+		return false
+	}
+	if !enroll_atomic_fixture_open(t, &f.base, label) do return false
+	bridge_enroll_atomic_disarm() // the fixture's own arm is replaced below
+	if !bridge_write_credential_file(f.token_file, REENROLL_TEST_HUB, f.bridge_id, REENROLL_TEST_OLD_TOKEN) {
+		testing.expect(t, false, "seed the previous credential")
+		return false
+	}
+	bridge_unseal_forget_identity()
+	f.old_identity = bridge_identity_public_key_hex(f.bridge_id)
+	if f.old_identity == "" {
+		testing.expect(t, false, "the previous enrollment has an identity")
+		return false
+	}
+
+	bridge_unseal_forget_identity()
+	if _, ok := bridge_unseal_identity_generate_for_enrollment(); !ok {
+		testing.expect(t, false, "generate the new identity")
+		return false
+	}
+	keys := test_pair_keys()
+	bridge_pairing_arm(&keys, bridge_now_unix_ms() + i64(vault.PAIR_CODE_TTL_SECONDS) * 1000)
+	vault.pair_keys_wipe(&keys)
+	if !bridge_reenroll_begin(f.config_path, REENROLL_TEST_HUB, f.bridge_id, f.token_file) {
+		testing.expect(t, false, "journal and back up the previous enrollment")
+		return false
+	}
+	if !bridge_unseal_identity_commit_enrollment(f.bridge_id, TEST_VAULT_USER_ID, true) {
+		testing.expect(t, false, "commit the re-enrollment's identity")
+		return false
+	}
+	f.new_identity = bridge_identity_public_key_hex(f.bridge_id)
+	bridge_enroll_atomic_arm(enroll_atomic_test_cred(f.bridge_id), f.token_file, f.config_path, REENROLL_TEST_HUB)
+	return true
+}
+
+@(private = "file")
+reenroll_fixture_close :: proc(f: ^Reenroll_Fixture) {
+	_ = keystore_identity_backup_drop(f.bridge_id)
+	enroll_atomic_fixture_close(&f.base)
+	_ = bridge_keystore_set_hub("")
+}
+
+// reenroll_identity_now reads bridge_id's identity back from the keystore, the way
+// a restarted service does.
+@(private = "file")
+reenroll_identity_now :: proc(bridge_id: string) -> string {
+	bridge_unseal_forget_identity()
+	return bridge_identity_public_key_hex(bridge_id)
+}
+
+@(private = "file")
+reenroll_journal_exists :: proc(f: ^Reenroll_Fixture) -> bool {
+	return enroll_atomic_test_file_exists(bridge_reenroll_journal_path(f.config_path))
+}
+
+@(test)
+test_reenroll_same_id_commit_replaces_identity_and_drops_backup :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
+	f: Reenroll_Fixture
+	defer reenroll_fixture_close(&f)
+	if !reenroll_fixture_open(t, &f, "re_commit") do return
+
+	testing.expect(t, f.new_identity != "" && f.new_identity != f.old_identity, "a re-enrollment uses a NEW identity key (the vault refuses a reused one)")
+	testing.expect_value(t, keystore_identity_backup_status(f.bridge_id), Keystore_Read_Status.Found)
+	testing.expect(t, reenroll_journal_exists(&f), "the re-enrollment is journaled until it resolves")
+	// Same id, same owner: the previous credential file is this bridge's to replace.
+	_, conflict := bridge_enroll_token_file_conflict(f.token_file, REENROLL_TEST_HUB, "", f.bridge_id)
+	testing.expect(t, !conflict, "the re-enrolled bridge's own credential file is not a conflict")
+
+	payload, now_ms := enroll_atomic_test_envelope(f.bridge_id, "nonce_re_commit")
+	defer delete(payload)
+	ok, err_msg := bridge_enroll_atomic_on_unseal(payload, now_ms)
+	testing.expect(t, ok, fmt.tprintf("delivery must succeed: %s", err_msg))
+	testing.expect(t, strings.contains(enroll_atomic_test_read(f.token_file), REENROLL_TEST_OLD_TOKEN), "the previous credential stays live until the commit")
+	testing.expect_value(t, keystore_identity_backup_status(f.bridge_id), Keystore_Read_Status.Found)
+
+	bridge_enroll_atomic_on_result(`{"type":"bridge_enrollment_result","committed":true}`)
+	testing.expect_value(t, bridge_enroll_atomic_state(), Bridge_Enroll_Atomic_State.Committed)
+	testing.expect(t, strings.contains(enroll_atomic_test_read(f.token_file), "hba_enrolltest.secret"), "the commit moves the new credential into place")
+	testing.expect(t, bridge_credential_file_belongs_to(f.token_file, REENROLL_TEST_HUB, f.bridge_id), "still owned by the same (hub, bridge)")
+	testing.expect_value(t, keystore_identity_backup_status(f.bridge_id), Keystore_Read_Status.Not_Found)
+	testing.expect(t, !reenroll_journal_exists(&f), "the journal is gone once committed")
+	testing.expect_value(t, reenroll_identity_now(f.bridge_id), f.new_identity)
+	testing.expect(t, strings.contains(enroll_atomic_test_read(f.config_path), f.bridge_id), "the config keeps the same daemon_id")
+}
+
+@(test)
+test_reenroll_same_id_hub_rollback_restores_previous_identity :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
+	f: Reenroll_Fixture
+	defer reenroll_fixture_close(&f)
+	if !reenroll_fixture_open(t, &f, "re_rollback") do return
+
+	payload, now_ms := enroll_atomic_test_envelope(f.bridge_id, "nonce_re_rb")
+	defer delete(payload)
+	ok, err_msg := bridge_enroll_atomic_on_unseal(payload, now_ms)
+	testing.expect(t, ok, fmt.tprintf("delivery must succeed: %s", err_msg))
+	bridge_enroll_atomic_on_result(`{"type":"bridge_enrollment_result","committed":false}`)
+	testing.expect_value(t, bridge_enroll_atomic_state(), Bridge_Enroll_Atomic_State.Rolled_Back)
+	testing.expect_value(t, reenroll_identity_now(f.bridge_id), f.old_identity)
+	testing.expect(t, strings.contains(enroll_atomic_test_read(f.token_file), REENROLL_TEST_OLD_TOKEN), "the previous credential is untouched")
+	testing.expect_value(t, enroll_atomic_test_read(f.config_path), ENROLL_ATOMIC_TEST_OLD_CONFIG)
+	testing.expect_value(t, keystore_identity_backup_status(f.bridge_id), Keystore_Read_Status.Not_Found)
+	testing.expect(t, !reenroll_journal_exists(&f), "the journal is resolved")
+	_, floor_status := keystore_read_epoch_floor(f.bridge_id)
+	testing.expect_value(t, floor_status, Keystore_Read_Status.Found)
+}
+
+@(test)
+test_reenroll_same_id_rollback_before_delivery_restores_previous_identity :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
+	f: Reenroll_Fixture
+	defer reenroll_fixture_close(&f)
+	if !reenroll_fixture_open(t, &f, "re_waiting") do return
+
+	// The hub cancels before any key was delivered (nothing staged yet).
+	bridge_enroll_atomic_on_result(`{"type":"bridge_enrollment_result","committed":false}`)
+	testing.expect_value(t, bridge_enroll_atomic_state(), Bridge_Enroll_Atomic_State.Rolled_Back)
+	testing.expect_value(t, reenroll_identity_now(f.bridge_id), f.old_identity)
+	testing.expect_value(t, keystore_identity_backup_status(f.bridge_id), Keystore_Read_Status.Not_Found)
+	// A duplicate verdict does not run the discard again (which would delete the
+	// restored identity).
+	bridge_enroll_atomic_on_result(`{"type":"bridge_enrollment_result","committed":false}`)
+	testing.expect_value(t, reenroll_identity_now(f.bridge_id), f.old_identity)
+}
+
+@(test)
+test_reenroll_crash_before_ack_is_undone_at_next_start :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
+	f: Reenroll_Fixture
+	defer reenroll_fixture_close(&f)
+	if !reenroll_fixture_open(t, &f, "re_crash") do return
+	bridge_enroll_atomic_disarm() // crash after the identity was replaced, before any ack
+
+	testing.expect_value(t, bridge_enroll_atomic_recover_paths(f.token_file, f.config_path, recovery_probe), Bridge_Enroll_Recovery.None)
+	bridge_reenroll_recover(f.config_path)
+	testing.expect_value(t, reenroll_identity_now(f.bridge_id), f.old_identity)
+	testing.expect_value(t, keystore_identity_backup_status(f.bridge_id), Keystore_Read_Status.Not_Found)
+	testing.expect(t, !reenroll_journal_exists(&f), "recovery resolves the journal")
+	testing.expect(t, strings.contains(enroll_atomic_test_read(f.token_file), REENROLL_TEST_OLD_TOKEN), "the previous credential is untouched")
+	bridge_reenroll_recover(f.config_path) // idempotent: nothing left to do
+	testing.expect_value(t, reenroll_identity_now(f.bridge_id), f.old_identity)
+}
+
+@(test)
+test_reenroll_crash_after_ack_is_resolved_by_the_hub :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
+	for outcome in ([]Bridge_Refresh_Outcome{.Revoked, .Rotated}) {
+		f: Reenroll_Fixture
+		if !reenroll_fixture_open(t, &f, "re_crash_ack_revoked" if outcome == .Revoked else "re_crash_ack_rotated") do return
+		enroll_atomic_stage_then_crash(t, &f.base, "nonce_re_crash_ack")
+		// Staged and acknowledged: only the hub knows whether it committed, so the
+		// journal-only recovery must leave it to the atomic recovery.
+		bridge_reenroll_recover(f.config_path)
+		testing.expect(t, reenroll_journal_exists(&f), "a journal with a staging marker is not guessed at")
+		testing.expect_value(t, reenroll_identity_now(f.bridge_id), f.new_identity)
+
+		g_recovery_probe_outcome = outcome
+		got := bridge_enroll_atomic_recover_paths(f.token_file, f.config_path, recovery_probe)
+		if outcome == .Revoked {
+			testing.expect_value(t, got, Bridge_Enroll_Recovery.Discarded)
+			testing.expect_value(t, reenroll_identity_now(f.bridge_id), f.old_identity)
+			testing.expect(t, strings.contains(enroll_atomic_test_read(f.token_file), REENROLL_TEST_OLD_TOKEN), "a rolled-back re-enrollment keeps the previous credential")
+		} else {
+			testing.expect_value(t, got, Bridge_Enroll_Recovery.Promoted)
+			testing.expect_value(t, reenroll_identity_now(f.bridge_id), f.new_identity)
+			testing.expect(t, strings.contains(enroll_atomic_test_read(f.token_file), "hba_rotated.secret"), "a committed re-enrollment promotes the rotated credential")
+		}
+		testing.expect_value(t, keystore_identity_backup_status(f.bridge_id), Keystore_Read_Status.Not_Found)
+		testing.expect(t, !reenroll_journal_exists(&f), "the journal is resolved with the staging")
+		reenroll_fixture_close(&f)
+	}
+}
+
+@(test)
+test_reenroll_identity_is_never_replaced_unasked_or_for_another_account :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
+	f: Enroll_Atomic_Fixture
+	defer enroll_atomic_fixture_close(&f)
+	if !enroll_atomic_fixture_open(t, &f, "re_refuse") do return
+	bridge_enroll_atomic_disarm()
+	bridge_unseal_forget_identity()
+	old := bridge_identity_public_key_hex(f.bridge_id)
+	pending :: proc() {
+		bridge_unseal_forget_identity()
+		_, _ = bridge_unseal_identity_generate_for_enrollment()
+	}
+
+	// The hub hands back the previous id although none was offered: not a re-enrollment.
+	pending()
+	testing.expect(t, !bridge_unseal_identity_commit_enrollment(f.bridge_id, TEST_VAULT_USER_ID), "an existing record is never overwritten unasked")
+	// Asked, but without the backup in place.
+	pending()
+	testing.expect(t, !bridge_unseal_identity_commit_enrollment(f.bridge_id, TEST_VAULT_USER_ID, true), "never replaced without a backup")
+	// Backed up, but approved by another account.
+	pending()
+	testing.expect(t, bridge_reenroll_begin(f.config_path, "https://hub.example.test", f.bridge_id, f.token_file), "backup")
+	testing.expect(t, !bridge_reenroll_begin(f.config_path, "https://hub.example.test", f.bridge_id, f.token_file), "an unresolved backup is never overwritten")
+	testing.expect(t, !bridge_unseal_identity_commit_enrollment(f.bridge_id, "usr_someone_else", true), "never replaced for another account")
+	testing.expect(t, bridge_reenroll_resolve(f.config_path, f.bridge_id, false), "the refused re-enrollment is rolled back")
+	testing.expect_value(t, reenroll_identity_now(f.bridge_id), old)
+	testing.expect_value(t, keystore_identity_backup_status(f.bridge_id), Keystore_Read_Status.Not_Found)
+}
+
+@(test)
+test_reuse_hint_declined_new_bridge_leaves_the_previous_one_untouched :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex)
+	defer sync.mutex_unlock(&bridge_test_config_mutex)
+	sync.mutex_lock(&keystore_test_mutex)
+	defer sync.mutex_unlock(&keystore_test_mutex)
+	f: Enroll_Atomic_Fixture
+	defer enroll_atomic_fixture_close(&f)
+	if !enroll_atomic_fixture_open(t, &f, "re_declined") do return
+	bridge_enroll_atomic_disarm()
+	_, new_id := keystore_test_bridge_ids()
+	defer {
+		keystore_lock_and_purge(new_id)
+		_ = keystore_delete_identity_key(new_id)
+	}
+	bridge_unseal_forget_identity()
+	old := bridge_identity_public_key_hex(f.bridge_id)
+	old_scope, _ := keystore_scope_name(f.bridge_id)
+	new_scope, _ := keystore_scope_name(new_id)
+	testing.expect(t, old_scope != new_scope, "a new bridge id has its own scope")
+
+	// Hint f.bridge_id was offered, the approver registered new_id instead: an
+	// ordinary fresh enrollment, with no journal or backup of the previous bridge.
+	testing.expect(t, test_provision_identity(new_id), "the new bridge enrolls into its own scope")
+	testing.expect(t, !enroll_atomic_test_file_exists(bridge_reenroll_journal_path(f.config_path)), "no journal for a new bridge")
+	testing.expect_value(t, keystore_identity_backup_status(f.bridge_id), Keystore_Read_Status.Not_Found)
+	bridge_enroll_atomic_arm(enroll_atomic_test_cred(new_id), f.token_file, f.config_path, "https://hub.example.test")
+	bridge_enroll_atomic_on_result(`{"type":"bridge_enrollment_result","committed":false}`)
+	testing.expect_value(t, reenroll_identity_now(f.bridge_id), old)
+	testing.expect_value(t, reenroll_identity_now(new_id), "")
+	testing.expect_value(t, bridge_enroll_result_line(f.bridge_id, new_id), strings.concatenate({"Registered new bridge ", new_id}, context.temp_allocator))
 }

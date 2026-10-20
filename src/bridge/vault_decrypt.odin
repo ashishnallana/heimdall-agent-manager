@@ -87,6 +87,7 @@ bridge_vault_lock :: proc() {
 bridge_vault_reset :: proc() {
 	bridge_vault_lock()
 	_ = keystore_delete_identity_key(bridge_config.daemon_id)
+	_ = keystore_identity_backup_drop(bridge_config.daemon_id)
 	bridge_unseal_forget_identity()
 	when ODIN_OS == .Linux {
 		if keystore_android_selected() do _ = keystore_android_delete_keystore_key(bridge_config.daemon_id)

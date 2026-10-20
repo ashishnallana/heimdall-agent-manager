@@ -65,6 +65,7 @@ bridge_prune_remove :: proc(bridge_id: string) -> bool {
 	if !scoped do return false
 	keystore_lock_and_purge(bridge_id)
 	ok := keystore_delete_identity_key(bridge_id)
+	ok = keystore_identity_backup_drop(bridge_id) && ok
 	when ODIN_OS == .Linux {
 		if keystore_android_selected() do _ = keystore_android_delete_keystore_key(bridge_id)
 	}

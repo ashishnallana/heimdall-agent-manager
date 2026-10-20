@@ -869,6 +869,18 @@ ham-bridge enroll \
 browser URL in the authorize response; clients never derive one hostname from the
 other. `HAM_BRIDGE_HUB_URL` sets the Hub origin from the environment.
 
+**Re-enrolling: reuse the bridge or register a new one.** When the config already
+records a bridge id (`daemon_id`) for this hub, `ham-bridge enroll` offers that id to
+the approver for reuse. The id is only a hint: the approval page shows it only to its
+owner, and the approver chooses. Reusing it keeps the bridge's id, name and history.
+The previous identity, credential and config stay in place until the hub commits the
+new enrollment, and a rollback (denied, expired, or the vault key was never
+delivered) restores them. `--reuse-bridge <brg_id>` offers another of your bridges.
+`--new-bridge` offers none. The two flags are mutually exclusive. The command prints
+the outcome as `Re-enrolled existing bridge <id>` or `Registered new bridge <id>`.
+`install.sh --re-enroll` keeps the config so the previous id is offered, and
+`install.sh --new-bridge` (or `enroll.sh --new-bridge`) registers a new bridge.
+
 **Credential shapes, because the distinction is a security decision and not a naming
 detail:** `hba_` is the expiring access credential and the only shape that
 authenticates. `hbf_` is a refresh credential, accepted at the refresh endpoint alone.

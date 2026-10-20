@@ -293,7 +293,11 @@ bridge_unseal_identity_enrollment_proof :: proc(ecdh_pub_hex, code_challenge: st
 // (the enrolled owner). Called once, right after approval and before any unseal.
 // Fails closed: no pending identity, an unusable owner, or a persistence failure
 // leaves NO identity.
-bridge_unseal_identity_commit_enrollment :: proc(bridge_id: string, owner_user_id: string) -> bool {
+//
+// replace_previous is a re-enrollment of the SAME bridge id (the approver reused
+// it): the existing record may then be replaced, but only once
+// bridge_reenroll_begin has backed it up, and only by the account that enrolled it.
+bridge_unseal_identity_commit_enrollment :: proc(bridge_id: string, owner_user_id: string, replace_previous := false) -> bool {
 	sync.mutex_lock(&g_bridge_identity_mu)
 	defer sync.mutex_unlock(&g_bridge_identity_mu)
 	if !g_bridge_identity_loaded || g_bridge_identity_owner_len != 0 do return false
@@ -308,8 +312,23 @@ bridge_unseal_identity_commit_enrollment :: proc(bridge_id: string, owner_user_i
 	{
 		existing: Bridge_Identity_Record
 		status := keystore_read_identity(bridge_id, &existing)
+		same_owner := status == .Found && bridge_identity_record_owner(&existing) == owner_user_id
 		crypto.zero_explicit(&existing, size_of(existing))
-		if status != .Not_Found {
+		if status != .Not_Found && replace_previous {
+			// A re-enrollment of this very bridge: the previous record is replaced only
+			// with its backup in place (restored on rollback), and never for another
+			// account (a hub handing one account's bridge id to another).
+			if keystore_identity_backup_status(bridge_id) != .Found {
+				fmt.eprintfln("ERROR: the previous enrollment of %s could not be backed up; refusing to replace it.", bridge_id)
+				bridge_unseal_forget_identity_locked()
+				return false
+			}
+			if status == .Found && !same_owner {
+				fmt.eprintfln("ERROR: %s was enrolled by another account than the one that approved this re-enrollment; refusing to replace it.", bridge_id)
+				bridge_unseal_forget_identity_locked()
+				return false
+			}
+		} else if status != .Not_Found {
 			fmt.eprintfln("ERROR: this machine already holds an enrollment of %s for this hub (or its record is unreadable); refusing to overwrite it. Remove that enrollment first, or enroll with a separate --config/--bridge-token-file.", bridge_id)
 			bridge_unseal_forget_identity_locked()
 			return false

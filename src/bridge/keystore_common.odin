@@ -31,6 +31,11 @@ Keystore_Slot :: enum {
 	Keyring,
 	Identity,
 	Epoch_Floor, // highest accepted current epoch + per-epoch key commitments
+	// The previous enrollment's .Identity / .Epoch_Floor, kept verbatim while a
+	// re-enrollment of the SAME bridge id is not yet committed (reenroll_identity.odin):
+	// restored if it rolls back, dropped once it commits.
+	Identity_Previous,
+	Epoch_Floor_Previous,
 }
 
 KEYSTORE_IDENTITY_KEY_BYTES :: vault.P256_PRIVATE_KEY_BYTES

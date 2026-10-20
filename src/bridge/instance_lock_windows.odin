@@ -1,6 +1,7 @@
 #+build windows
 package main
 
+import "base:runtime"
 import "core:strings"
 import "core:sync"
 import win "core:sys/windows"
@@ -30,6 +31,9 @@ bridge_instance_lock :: proc(path: string) -> bool {
 	}
 	sync.mutex_lock(&g_instance_lock_mu)
 	defer sync.mutex_unlock(&g_instance_lock_mu)
+	// Process-lifetime state: never on the caller's allocator (a test runner frees
+	// each test's allocator, leaving the map pointing at freed memory).
+	context.allocator = runtime.heap_allocator()
 	g_instance_locks[strings.clone(path)] = h
 	return true
 }
@@ -38,6 +42,7 @@ bridge_instance_lock :: proc(path: string) -> bool {
 bridge_instance_unlock :: proc(path: string) {
 	sync.mutex_lock(&g_instance_lock_mu)
 	defer sync.mutex_unlock(&g_instance_lock_mu)
+	context.allocator = runtime.heap_allocator()
 	if path not_in g_instance_locks do return
 	key, h := delete_key(&g_instance_locks, path)
 	win.CloseHandle(h)
