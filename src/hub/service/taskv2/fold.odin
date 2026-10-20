@@ -307,7 +307,7 @@ derive_state :: proc(v: Task_View, input: Fold_Input) -> domain.Task_State {
 	if v.cancelled do return .Cancelled
 	if v.done do return .Done
 	if v.has_work_lease do return .In_Progress
-	if jsonx.extract_string(v.blocked_on_json, "kind", "", true, context.temp_allocator) == "dispatch" do return .Backlog
+	if is_agent_not_running_block(v.blocked_on_json) do return .Backlog
 	if v.in_review do return .In_Review
 	if v.published && input.deps_done && v.blocked_on_json == "" && input.kind == .Task do return .Ready
 	return .Backlog

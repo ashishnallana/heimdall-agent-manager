@@ -328,12 +328,15 @@ test_bridge_pin_and_offline_hold_until_hello :: proc(t: ^testing.T) {
 	seed_instance(fx, chain, "inst_w1", "agt_w", "br_1", "idle")
 	seed_instance(fx, chain, "inst_w2", "agt_w", "br_2", "idle")
 	task := publish_task(t, fx, chain, "task_pinned", bridge_pin = "br_2")
-	testing.expect_value(t, task.state, domain.Task_State.Ready)
+	testing.expect_value(t, task.state, domain.Task_State.Backlog)
+	testing.expect(t, is_agent_not_running_block(task.blocked_on_json), "offline placement asks user")
 	_, h1 := lease_of(fx, "inst_w1")
 	testing.expect(t, !h1, "br_1 instance never gets a br_2-pinned task")
 	// bridge comes online → hello → match
 	set_bridge_status(fx, "br_2", true)
 	on_bridge_hello(&fx.svc, "br_2", []string{"inst_w2"})
+	started, _ := start_task_agent(&fx.svc, contracts.Auth_Context{kind = .User_Token, user_id = "u1"}, task.task_id)
+	testing.expect(t, started, "user retries repaired bridge")
 	testing.expect_value(t, get_task(fx, "task_pinned").state, domain.Task_State.In_Progress)
 	l2, h2 := lease_of(fx, "inst_w2")
 	testing.expect(t, h2 && l2.bridge_id == "br_2", "granted on hello to the br_2 instance")
@@ -373,8 +376,8 @@ test_expiry_noop_when_heartbeat_moved_deadline :: proc(t: ^testing.T) {
 	// (the idle worker is immediately re-granted a NEW lease: attempt 2)
 	after, after_held := lease_of(fx, "inst_w1")
 	testing.expect(t, !after_held || after.lease_id != lease.lease_id, "expired at the moved deadline")
-	testing.expect_value(t, count_events(fx, "task_1", EV_LEASE_EXPIRED), 1)
-	testing.expect(t, strings.contains(last_event_payload(fx, "task_1", EV_LEASE_EXPIRED), `"reason":"ttl"`), "reason ttl")
+	testing.expect_value(t, count_events(fx, "task_1", EV_BLOCKED), 1)
+	testing.expect(t, strings.contains(get_task(fx, "task_1").blocked_on_json, "ttl"), "lost heartbeat reason")
 	testing.expect(t, wake_log_has_stop(log, "inst_w1") || wake_log_has_run(log, "inst_w1"), "holder stopped (or re-granted) after expiry")
 	assert_projection_matches_fold(t, fx, chain.chain_id, "u1", "ttl")
 }
@@ -436,7 +439,7 @@ test_grant_unconfirmed_resends_once_then_blocks_dispatch :: proc(t: ^testing.T) 
 	_ = fire_due(&fx.svc, now_ms(&fx.clock))
 	blocked := get_task(fx, "task_1")
 	testing.expect_value(t, blocked.state, domain.Task_State.Backlog)
-	testing.expect(t, strings.contains(blocked.blocked_on_json, `"kind":"dispatch"`) && strings.contains(blocked.blocked_on_json, "startup was not confirmed"), "unconfirmed delivery blocks with a reason")
+	testing.expect(t, strings.contains(blocked.blocked_on_json, `"kind":"agent_not_running"`) && strings.contains(blocked.blocked_on_json, "startup was not confirmed"), "unconfirmed delivery blocks with a reason")
 	_, held_after_timeout := lease_of(fx, "inst_w1")
 	testing.expect(t, !held_after_timeout, "no automatic retry after failed startup")
 	attempts, _ := iface.taskchain_list_attempts_by_task(&fx.repo, blocked.task_id, "u1")
@@ -516,11 +519,9 @@ test_ready_unclaimed_alert_and_blocked_realert :: proc(t: ^testing.T) {
 
 // ---- chokepoints ------------------------------------------------------------------------
 
-// Ports test_fsm_watchdog_auto_recovery_crashed_worker_respawn: the instance
-// dies → on_instance_terminal expires (instance_lost) → the matcher re-grants to
-// the same (now stopped, warm) instance → wake re-bootstraps it.
+// A confirmed dead holder parks without spending the attempt budget.
 @(test)
-test_instance_terminal_expires_and_respawns_warm_instance :: proc(t: ^testing.T) {
+test_instance_terminal_blocks_until_explicit_retry :: proc(t: ^testing.T) {
 	fx, log, ok := lease_fixture(t, "c_term")
 	defer lease_fixture_close(fx, log)
 	if !ok do return
@@ -528,35 +529,21 @@ test_instance_terminal_expires_and_respawns_warm_instance :: proc(t: ^testing.T)
 	seed_fleet(fx, chain, "agt_w")
 	seed_instance(fx, chain, "inst_w1", "agt_w", "br_1", "idle")
 	_ = publish_task(t, fx, chain, "task_1")
-	lease, held := lease_of(fx, "inst_w1")
-	if !testing.expect(t, held, "leased") do return
-	// the bridge reports the instance stopped
 	confirm_holder(fx, "inst_w1")
 	inst, _, _ := iface.agent_get_instance(&fx.agents, "inst_w1")
 	inst.runtime_status = "stopped"
 	_, _, _ = iface.agent_save_instance(&fx.agents, inst)
 	wake_log_reset(log)
 	on_instance_terminal(&fx.svc, "inst_w1")
-	testing.expect(t, strings.contains(last_event_payload(fx, "task_1", EV_LEASE_EXPIRED), `"reason":"instance_lost"`), "instance_lost")
-	l2, held2 := lease_of(fx, "inst_w1")
-	testing.expect(t, held2 && l2.lease_id != lease.lease_id, "re-granted to the warm stopped instance")
-	testing.expect_value(t, l2.attempt_no, 2)
-	testing.expect(t, wake_log_has_run(log, "inst_w1"), "wake re-bootstraps the same instance id")
-	testing.expect(t, !wake_log_has_stop(log, "inst_w1"), "a dead instance is not stopped again")
-	testing.expect_value(t, get_task(fx, "task_1").attempt_no, 2)
-	// no-op for an instance holding nothing
-	on_instance_terminal(&fx.svc, "inst_coord")
-	on_instance_terminal(&fx.svc, "inst_unknown")
-	// budget: after 5 counting expiries the task parks in backlog blocked on human
-	for i in 0..<4 {
-		confirm_holder(fx, "inst_w1")
-		on_instance_terminal(&fx.svc, "inst_w1")
-	}
+	_, held := lease_of(fx, "inst_w1")
 	parked := get_task(fx, "task_1")
-	testing.expect_value(t, parked.state, domain.Task_State.Backlog)
-	testing.expect(t, strings.contains(parked.blocked_on_json, `"human"`), "budget exhausted → blocked on human")
-	_, held5 := lease_of(fx, "inst_w1")
-	testing.expect(t, !held5, "no grant after the budget")
+	testing.expect(t, !held && parked.state == .Backlog && is_agent_not_running_block(parked.blocked_on_json), "dead holder parks on user")
+	testing.expect(t, !wake_log_has_run(log, "inst_w1") && !wake_log_has_stop(log, "inst_w1"), "dead process is not automatically restarted or stopped")
+	testing.expect_value(t, parked.attempt_no, 1)
+	on_instance_terminal(&fx.svc, "inst_w1")
+	testing.expect_value(t, count_events(fx, "task_1", EV_BLOCKED), 1)
+	started, err := start_task_agent(&fx.svc, contracts.Auth_Context{kind = .User_Token, user_id = "u1"}, parked.task_id)
+	testing.expect(t, started && err.code == .None && wake_log_has_run(log, "inst_w1"), "explicit user retry dispatches warm instance")
 	assert_projection_matches_fold(t, fx, chain.chain_id, "u1", "term")
 }
 
@@ -582,8 +569,8 @@ test_bridge_hello_stops_orphan_without_lease :: proc(t: ^testing.T) {
 	fixture_advance(fx, LEASE_TTL_SECONDS + 1)
 	wake_log_reset(log)
 	_ = fire_due(&fx.svc, now_ms(&fx.clock))
-	testing.expect(t, strings.contains(last_event_payload(fx, "task_1", EV_LEASE_EXPIRED), `"reason":"ttl"`), "ttl expiry while away")
-	testing.expect_value(t, get_task(fx, "task_1").state, domain.Task_State.Ready)
+	testing.expect(t, strings.contains(get_task(fx, "task_1").blocked_on_json, "ttl"), "heartbeat loss while away")
+	testing.expect_value(t, get_task(fx, "task_1").state, domain.Task_State.Backlog)
 	leases_mid, _ := iface.taskchain_list_leases_by_chain(&fx.repo, chain.chain_id)
 	testing.expect_value(t, len(leases_mid), 0)
 	testing.expect_value(t, len(log.cmds), 0) // nothing can be sent to an offline bridge
@@ -591,6 +578,9 @@ test_bridge_hello_stops_orphan_without_lease :: proc(t: ^testing.T) {
 	wake_log_reset(log)
 	bridge_reconnect(fx, "br_1", []string{"inst_coord", "inst_w1", "inst_w2"})
 	on_bridge_hello(&fx.svc, "br_1", []string{"inst_coord", "inst_w1", "inst_w2"})
+	// Reconnection alone keeps the user block; explicit retry resumes dispatch.
+	started, _ := start_task_agent(&fx.svc, contracts.Auth_Context{kind = .User_Token, user_id = "u1"}, "task_1")
+	testing.expect(t, started, "retry repaired bridge")
 	// exactly one holder, the other stopped; never the coordinator
 	holder := ""
 	if l, h := lease_of(fx, "inst_w1"); h && l.task_id == "task_1" do holder = "inst_w1"
@@ -661,8 +651,8 @@ test_bridge_blip_under_ttl_keeps_lease :: proc(t: ^testing.T) {
 	inst.runtime_status = "unreachable" // heartbeat reconcile shape (bridge Online, instance gone)
 	_, _, _ = iface.agent_save_instance(&fx.agents, inst)
 	on_instance_terminal(&fx.svc, "inst_w1")
-	testing.expect_value(t, count_events(fx, "task_1", EV_LEASE_EXPIRED), 1)
-	testing.expect(t, strings.contains(last_event_payload(fx, "task_1", EV_LEASE_EXPIRED), `"reason":"instance_lost"`), "instance_lost when the bridge is online")
+	testing.expect_value(t, count_events(fx, "task_1", EV_BLOCKED), 1)
+	testing.expect(t, is_agent_not_running_block(get_task(fx, "task_1").blocked_on_json), "dead holder blocks when bridge is online")
 }
 
 // B3: cancelling a leased task reclaims the lease and never re-grants it.
@@ -838,9 +828,9 @@ test_lease_next_inline_grant_idempotent_and_coordinator_none :: proc(t: ^testing
 	defer lease_fixture_close(fx, log)
 	if !ok do return
 	chain := seed_live_chain(t, fx, "chain_next")
-	seed_fleet(fx, chain, "agt_w")
-	// no instance yet → the published task is held
+	// No automatic worker row yet; the pulling worker joins after publication.
 	task := publish_task(t, fx, chain, "task_1")
+	seed_fleet(fx, chain, "agt_w")
 	testing.expect_value(t, task.state, domain.Task_State.Ready)
 	// a worker appears and pulls
 	seed_instance(fx, chain, "inst_w1", "agt_w", "br_1", "running")

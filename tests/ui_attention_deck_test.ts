@@ -196,7 +196,7 @@ function jsonResponse(body: any) {
 
 type DeckHarness = { dom: any; store: any; scheduler: any; text: () => string; q: (sel: string) => any; act: any; closed: () => number; hits: string[]; setOpen: (open: boolean) => Promise<void>; serve: (items: any[]) => void; release: () => void; hold: () => void; holdRoutes: () => void; releaseRoutes: () => void };
 
-async function withDeck(initialItems: any[], run: (h: DeckHarness) => Promise<void>, opts: { unlocked?: boolean; routes?: Record<string, any> } = {}) {
+async function withDeck(initialItems: any[], run: (h: DeckHarness) => Promise<void>, opts: { unlocked?: boolean; routes?: Record<string, any>; acceptFailures?: number } = {}) {
   let items = initialItems;
   // hold() makes /attention responses wait until release(), to observe the deck mid-refetch.
   let gate: Promise<void> | null = null;
@@ -227,6 +227,10 @@ async function withDeck(initialItems: any[], run: (h: DeckHarness) => Promise<vo
   (globalThis as any).fetch = async (input: any, init: any = {}) => {
     const url = new URL(String(input?.url ?? input), 'http://localhost');
     hits.push(`${String(init?.method || 'GET').toUpperCase()} ${url.pathname}${url.search}`);
+    if (url.pathname.endsWith('/accept') && (opts.acceptFailures || 0) > 0) {
+      opts.acceptFailures! -= 1;
+      return { ok: false, status: 409, text: async () => JSON.stringify({ error: { message: 'Bridge refused: credentials missing' } }) };
+    }
     if (url.pathname.endsWith('/attention')) {
       if (gate) await gate;
       const live = items.filter((i) => !i.snoozed);
@@ -780,4 +784,22 @@ test('status bar: attention pill takes the left slot, rings for unseen items, re
   assert.match(renderToStaticMarkup(clear), />All clear</);
   assert.match(renderToStaticMarkup(render({ total: 12, unseen: true, onOpen: () => {} }, true)), />12</);
   assert.equal(render({ total: null, unseen: false, onOpen: () => {} }).props['data-state'], 'loading');
+});
+
+test('deck Start agent shows failed starts inline and permits retry', async () => {
+  const item = taskItem('start', {
+    primary_op: 'agent.start', operations: [{ op: 'agent.start', label: 'Start agent' }],
+    rationale: 'Agent worker (codex/model) on bridge b is not running: stopped',
+    details: { priority: 'p1', status: 'backlog', attention: 'blocked', badge: 'agent_not_running', block_id: 'block1', excerpt: null },
+  });
+  await withDeck([item], async ({ q, act, text, hits }) => {
+    assert.ok(q('[data-debug-id="attention-start-agent"]'));
+    assert.equal(q('[data-debug-id="attention-action-answer"]'), null);
+    await act(async () => { q('[data-debug-id="attention-start-agent"]').click(); });
+    assert.match(q('[data-debug-id="attention-start-agent-error"]').textContent, /credentials missing/);
+    assert.match(text(), /Start agent/);
+    await act(async () => { q('[data-debug-id="attention-start-agent"]').click(); });
+    assert.equal(q('[data-debug-id="attention-start-agent-error"]'), null);
+    assert.equal(hits.filter((h) => /POST .*\/cards\/.*\/accept/.test(h)).length, 2);
+  }, { acceptFailures: 1 });
 });

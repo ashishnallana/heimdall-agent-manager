@@ -20,7 +20,7 @@ test_dispatch_exit_blocks_notifies_refunds_and_unblocks :: proc(t: ^testing.T) {
 	notices := 0
 	fx.svc.notify_observer_ctx = &notices
 	fx.svc.notify_observer = proc(ctx: rawptr, coord_id, trigger, line: string) {
-		if trigger == "dispatch_failed" && coord_id == "inst_coord" && strings.contains(line, "claude/claude-opus-5-5 on br_1 failed to start: authentication failed") {
+		if trigger == "agent_not_running" && coord_id == "inst_coord" && strings.contains(line, "Agent agt_w (claude/claude-opus-5-5) on bridge br_1 is not running: authentication failed") {
 			(^int)(ctx)^ += 1
 		}
 	}
@@ -33,7 +33,7 @@ test_dispatch_exit_blocks_notifies_refunds_and_unblocks :: proc(t: ^testing.T) {
 	on_instance_terminal(&fx.svc, "inst_w1")
 	blocked := get_task(fx, "task_dispatch")
 	testing.expect_value(t, blocked.state, domain.Task_State.Backlog)
-	testing.expect_value(t, jsonx.extract_string(blocked.blocked_on_json, "kind", "", true, context.temp_allocator), "dispatch")
+	testing.expect_value(t, jsonx.extract_string(blocked.blocked_on_json, "kind", "", true, context.temp_allocator), "agent_not_running")
 	testing.expect_value(t, notices, 1)
 	_, held := lease_of(fx, "inst_w1")
 	testing.expect(t, !held && !wake_log_has_run(log, "inst_w1"), "no automatic redispatch")
@@ -47,7 +47,7 @@ test_dispatch_exit_blocks_notifies_refunds_and_unblocks :: proc(t: ^testing.T) {
 	set_bridge_status(fx, "br_1", false)
 	fresh, answered, err := task_answer(&fx.svc, blocked, Actor{kind = ACTOR_COORDINATOR, id = "inst_coord"}, "credentials repaired")
 	testing.expect(t, answered && err.code == .None, "coordinator may unblock")
-	testing.expect_value(t, fresh.state, domain.Task_State.Ready)
+	testing.expect_value(t, fresh.state, domain.Task_State.Backlog) // offline cause is immediately re-detected
 	inst.runtime_status = "stopped"
 	inst.last_error_json = ""
 	_, _, _ = iface.agent_save_instance(&fx.agents, inst)
@@ -60,7 +60,8 @@ test_dispatch_exit_blocks_notifies_refunds_and_unblocks :: proc(t: ^testing.T) {
 	// Editing the affected fleet row clears this dispatch block automatically.
 	set_bridge_status(fx, "br_1", false)
 	testing.expect_value(t, fleet_changed(&fx.svc, chain, "agt_w").code, domain.Error_Code.None)
-	testing.expect_value(t, get_task(fx, "task_dispatch").state, domain.Task_State.Ready)
+	testing.expect_value(t, get_task(fx, "task_dispatch").state, domain.Task_State.Backlog)
+	testing.expect(t, strings.contains(get_task(fx, "task_dispatch").blocked_on_json, "offline"), "fleet edit clears old block then detects remaining cause")
 	assert_projection_matches_fold(t, fx, chain.chain_id, "u1", "dispatch")
 }
 

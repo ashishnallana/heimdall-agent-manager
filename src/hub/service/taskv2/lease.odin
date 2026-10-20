@@ -234,6 +234,13 @@ release_in_uow :: proc(svc: ^Service, u: ^Uow, lease: domain.Task_Lease, actor: 
 Expire_Result :: enum { Expired, Gone, Failed }
 
 expire_lease_in_uow :: proc(svc: ^Service, u: ^Uow, lease: domain.Task_Lease, reason: string, actor: Actor) -> Expire_Result {
+	if reason == EXPIRE_INSTANCE_LOST do return agent_not_running_in_uow(svc, u, lease, "lease holder is no longer running")
+	if reason == EXPIRE_TTL {
+		inst, found, _ := iface.agent_get_instance(svc.agents, lease.holder_instance_id)
+		if !found || !instance_is_live(inst) || now_ms(svc.clock) - to_ms(inst.last_seen_at) >= LEASE_TTL_SECONDS * 1000 {
+			return agent_not_running_in_uow(svc, u, lease, "lease holder heartbeat lost: ttl")
+		}
+	}
 	task, tok, terr := iface.taskchain_get_task(svc.repo, lease.task_id)
 	if !tok do return .Gone if terr.code == .Not_Found || terr.code == .None else .Failed
 	// Event FIRST, then the row: an interrupted sequence leaves an event whose
@@ -334,7 +341,7 @@ on_dep_added_in_uow :: proc(svc: ^Service, u: ^Uow, task: domain.Task, actor: Ac
 
 // on_instance_terminal is the ONE chokepoint for every instance-death path
 // (runtime status stopped|unreachable|failed, reaper, bridge disconnect, delete,
-// member removal): expire(instance_lost) → match_chain. Safe to call for an
+// member removal): block(agent_not_running) → match_chain. Safe to call for an
 // instance holding nothing (no-op, no UoW).
 on_instance_terminal :: proc(svc: ^Service, instance_id: string) {
 	if svc == nil || svc.repo == nil || instance_id == "" do return
@@ -343,7 +350,7 @@ on_instance_terminal :: proc(svc: ^Service, instance_id: string) {
 	// `unreachable` because its bridge disconnected keeps its lease; the TTL
 	// expires it if the bridge stays away, and the hello-time heartbeat
 	// reconcile reports real deaths as not-active (→ this chokepoint again,
-	// with the bridge Online). stopped|failed always expire at once.
+	// with the bridge Online). stopped|failed always block at once.
 	if inst, iok, _ := iface.agent_get_instance(svc.agents, instance_id); iok {
 		if inst.runtime_status == "unreachable" && !bridge_online(svc, inst.bridge_id) do return
 	}
@@ -353,11 +360,7 @@ on_instance_terminal :: proc(svc: ^Service, instance_id: string) {
 	chain_id := domain.Task_Chain_ID("")
 	owner := domain.User_ID("")
 	if lease, held, _ := iface.taskchain_get_lease_by_holder(svc.repo, instance_id); held {
-		if lease.delivery == domain.LEASE_DELIVERY_WAKE && lease.confirmed_at == "" {
-			acted = dispatch_failed_in_uow(svc, &u, lease, "instance ended before confirming startup") == .Expired
-		} else {
-			acted = expire_lease_in_uow(svc, &u, lease, EXPIRE_INSTANCE_LOST, hub_actor()) == .Expired
-		}
+		acted = agent_not_running_in_uow(svc, &u, lease, "lease holder is no longer running") == .Expired
 		chain_id, owner = lease.chain_id, lease.owner_user_id
 	}
 	if acted do acted, _ = after_chain_change(svc, &u, chain_id, owner, .Instance_Terminal)

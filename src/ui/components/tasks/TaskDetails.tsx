@@ -197,8 +197,8 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
           Verify skipped: <VaultText value={handoff.skip_verify_reason} />
         </p>
       )}
-      {task.blocked_on?.kind === 'dispatch' && (
-        <Block title="Dispatch failed">
+      {(task.blocked_on?.kind === 'dispatch' || task.blocked_on?.kind === 'agent_not_running') && (
+        <Block title="Agent not running">
           <p className="leading-relaxed text-primary">{task.blocked_on.reason}</p>
           <Text as="p" role="body-sm" tone="muted">Check the agent’s bridge, provider, and model settings. Updating its fleet settings retries dispatch.</Text>
         </Block>

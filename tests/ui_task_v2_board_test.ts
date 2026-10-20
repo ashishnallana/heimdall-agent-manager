@@ -195,7 +195,7 @@ test('getTaskBadges derives bridge pin, attempt count, review roles, blocked on 
 
   const dispatchReason = 'codex/gpt-6.1-sol on br_1 failed to start: authentication failed';
   const dispatchBadges = getTaskBadges(makeTask({ state: 'backlog', blocked_on: { kind: 'dispatch', reason: dispatchReason } }), [], nowMs);
-  assert.ok(dispatchBadges.some((b) => b.label === 'Dispatch failed' && b.title === dispatchReason && b.tone === 'warn'));
+  assert.ok(dispatchBadges.some((b) => b.label === 'Agent not running' && b.title === dispatchReason && b.tone === 'danger'));
 
   // Done state
   const doneTask = makeTask({ state: 'done' });

@@ -176,3 +176,52 @@ test('handoffDecisions accepts strings and objects', () => {
   assert.deepEqual(tray.handoffDecisions({ decisions: ['use rejectCard', { decision: 'no Delegate on blocked' }, { text: '' }, 7] }), ['use rejectCard', 'no Delegate on blocked']);
   assert.deepEqual(tray.handoffDecisions(null), []);
 });
+
+test('chat tray Start agent stays visible with an inline failure and retry', async () => {
+  const React = await import('react');
+  const { act } = React;
+  const { JSDOM } = await import('jsdom');
+  const { createRoot } = await import('react-dom/client');
+  const { Provider } = await import('react-redux');
+  const { makeVaultStore } = await import('./helpers/vaultEndpointHarness.ts');
+  const { ActionTray } = await import('../src/ui/components/attention/ActionTray.tsx');
+  const { heimdallApi } = await import('../src/ui/api/heimdallApi.ts');
+  const dom = new JSDOM('<div id="root"></div>', { url: 'http://localhost/', pretendToBeVisual: true });
+  const saved: any = {};
+  for (const key of ['window', 'document', 'HTMLElement', 'Node', 'IS_REACT_ACT_ENVIRONMENT']) saved[key] = (globalThis as any)[key];
+  Object.assign(globalThis, { window: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement, Node: dom.window.Node, IS_REACT_ACT_ENVIRONMENT: true });
+  const previousFetch = globalThis.fetch;
+  let requests = 0;
+  globalThis.fetch = (async () => {
+    requests += 1;
+    return requests === 1
+      ? { ok: false, status: 409, text: async () => JSON.stringify({ error: { message: 'Launch refused: bridge offline' } }) }
+      : { ok: true };
+  }) as any;
+  const store = await makeVaultStore();
+  const root = createRoot(dom.window.document.getElementById('root')!);
+  const item = taskItem('start', { attention: 'blocked', badge: 'agent_not_running', block_id: 'b1' }, {
+    primary_op: 'agent.start', operations: [{ op: 'agent.start', label: 'Start agent' }], rationale: 'worker on bridge b is stopped',
+  });
+  const q = (id: string) => dom.window.document.querySelector('[data-debug-id="' + id + '"]') as HTMLElement | null;
+  try {
+    await act(async () => { root.render(React.createElement(Provider, { store, children: React.createElement(ActionTray, {
+      items: [item], mobile: true, onShowComposer: () => {}, onStartMode: () => { throw new Error('Start must not borrow composer'); },
+    }) })); });
+    assert.ok(q('action-tray-start-agent'));
+    assert.equal(q('action-tray-answer'), null);
+    assert.match(dom.window.document.body.textContent || '', /worker on bridge b is stopped/);
+    await act(async () => { q('action-tray-start-agent')!.click(); });
+    assert.match(q('action-tray-start-agent-error')!.textContent || '', /bridge offline/);
+    assert.ok(q('action-tray-card-blocked'));
+    await act(async () => { q('action-tray-start-agent')!.click(); });
+    assert.equal(q('action-tray-start-agent-error'), null);
+    assert.equal(requests, 2);
+  } finally {
+    await act(async () => root.unmount());
+    store.dispatch(heimdallApi.util.resetApiState());
+    globalThis.fetch = previousFetch;
+    for (const key of Object.keys(saved)) (globalThis as any)[key] = saved[key];
+    dom.window.close();
+  }
+});

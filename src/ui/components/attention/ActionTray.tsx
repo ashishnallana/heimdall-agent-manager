@@ -1,3 +1,4 @@
+import { StartAgentAction, needsAgentStart, useStartAgent } from './StartAgentAction';
 import { useCallback, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { useDispatch } from 'react-redux';
 import { Icon, Menu } from '@ui';
@@ -101,6 +102,7 @@ export function ActionTray({
 }) {
   const now = nowMs ?? Date.now();
   const invalidate = useInvalidateTaskLists();
+  const agentStart = useStartAgent(invalidate);
   const [page, setPage] = useState(0);
   const [panel, setPanel] = useState<Panel>(null);
   const safePage = clampIndex(page, items.length);
@@ -218,6 +220,7 @@ export function ActionTray({
         </div>
       );
     }
+    if (needsAgentStart(item)) return <StartAgentAction debugPrefix="action-tray" onStart={() => void agentStart.start(item)} {...agentStart.states[item.card_id]} />;
     return (
       <ActionRow
         item={item}

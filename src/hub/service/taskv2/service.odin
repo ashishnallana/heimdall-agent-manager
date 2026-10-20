@@ -584,9 +584,9 @@ nudge_idle_soloist :: proc(svc: ^Service, u: ^Uow, task: domain.Task) {
 check_coordinator_attention_on_refold :: proc(svc: ^Service, u: ^Uow, before, after: domain.Task, view: Task_View, all_tasks: []domain.Task) {
 	if u == nil do return
 	if after.blocked_on_json != before.blocked_on_json && after.blocked_on_json != "" {
-		if jsonx.extract_string(after.blocked_on_json, "kind", "", true, context.temp_allocator) == "dispatch" {
+		if is_agent_not_running_block(after.blocked_on_json) {
 			reason := jsonx.extract_string(after.blocked_on_json, "reason", "", true, context.temp_allocator)
-			effect_notify_coordinator(svc, u, after.chain_id, after.owner_user_id, "dispatch_failed", fmt.tprintf("[taskv2] dispatch_failed: task %s (%s): %s", after.task_id, after.title, reason))
+			effect_notify_coordinator(svc, u, after.chain_id, after.owner_user_id, "agent_not_running", fmt.tprintf("[taskv2] agent_not_running: task %s (%s): %s", after.task_id, after.title, reason))
 		} else if view.budget_exhausted || strings.contains(after.blocked_on_json, `"budget_exhausted"`) {
 			effect_notify_coordinator(svc, u, after.chain_id, after.owner_user_id, "budget_exhausted", fmt.tprintf("[taskv2] budget_exhausted: task %s (%s) exhausted attempt budget (#%d)", after.task_id, after.title, after.attempt_no))
 		} else if view.oscillating || strings.contains(after.blocked_on_json, `"oscillation"`) {
@@ -769,7 +769,7 @@ fleet_changed :: proc(svc: ^Service, chain: domain.Task_Chain, agent_id := "") -
 		tasks, terr := iface.taskchain_list_tasks_by_chain(svc.repo, chain.chain_id, chain.owner_user_id)
 		if terr.code != .None { _, _ = end_uow(svc, &u, false); return terr }
 		for task in tasks {
-			if jsonx.extract_string(task.blocked_on_json, "kind", "", true, context.temp_allocator) != "dispatch" do continue
+			if !is_agent_not_running_block(task.blocked_on_json) do continue
 			if jsonx.extract_string(task.blocked_on_json, "agent_id", "", true, context.temp_allocator) != agent_id do continue
 			if _, _, rok, rerr := record_event(svc, &u, task, hub_actor(), EV_ANSWERED, `{}`); !rok {
 				_, _ = end_uow(svc, &u, false); return rerr

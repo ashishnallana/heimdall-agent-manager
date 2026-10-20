@@ -200,6 +200,7 @@ blocked_on_user :: proc(task: domain.Task) -> (bool, string) {
 	raw := task.blocked_on_json
 	if len(raw) == 0 || domain.task_state_is_terminal(task.state) do return false, ""
 	if jsonx.extract_string(raw, "kind", "", true, context.temp_allocator) == "task" do return false, ""
+	if is_agent_not_running_block(raw) do return true, "agent_not_running"
 	reason := jsonx.extract_string(raw, "reason", "", true, context.temp_allocator)
 	switch reason {
 	case "paused_before_v2": return false, ""

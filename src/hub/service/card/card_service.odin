@@ -117,6 +117,7 @@ validate_card_operations :: proc(ops_json: string) -> (bool, string) {
 		op_obj, is_obj := elem.(json.Object)
 		if !is_obj do return false, fmt.tprintf("operation %d: must be a JSON object", idx + 1)
 		op_name := json_obj_string(op_obj, "op")
+		if op_name == "agent.start" && len(arr) != 1 do return false, "agent.start must be the only operation"
 		if op_name == "" do return false, fmt.tprintf("operation %d: missing required field \"op\"", idx + 1)
 		if ok, reason := validate_op_required_args(op_name, op_obj); !ok {
 			return false, fmt.tprintf("operation %d (%s): %s", idx + 1, op_name, reason)
@@ -177,6 +178,8 @@ op_field_missing :: proc(field: string) -> string { return fmt.tprintf("missing 
 // unrecognized op name is rejected so unknown ops are caught at create, not accept.
 validate_op_required_args :: proc(op_name: string, op_obj: json.Object) -> (bool, string) {
 	switch op_name {
+	case "agent.start":
+		if op_arg_string(op_obj, "task_id") == "" do return false, op_field_missing("task_id")
 	case "task.review", "task.answer":
 		if op_arg_string(op_obj, "task_id") == "" do return false, op_field_missing("task_id")
 		if !op_has_arg(op_obj, "attempt_no") do return false, op_field_missing("attempt_no")
@@ -781,6 +784,7 @@ Card_Decision :: struct {
 // task_card_op: the op a task card advertises (task.review | task.answer), "" for
 // a card from before Task System v2 (task.vote), which no longer executes.
 task_card_op :: proc(card: domain.Card) -> string {
+	if strings.contains(card.operations_json, `"op":"agent.start"`) do return "agent.start"
 	if strings.contains(card.operations_json, `"op":"task.answer"`) do return "task.answer"
 	if strings.contains(card.operations_json, `"op":"task.review"`) do return "task.review"
 	return ""
@@ -885,6 +889,23 @@ accept_card :: proc(s: ^Card_Service, auth: contracts.Auth_Context, id: domain.C
 		return domain.Card{}, false, domain.domain_error(.Validation_Failed, "operations must be a JSON array")
 	}
 
+	// Start runs its own transaction: failed launch reasons must survive.
+	if len(ops_arr) == 1 {
+		if obj, valid := ops_arr[0].(json.Object); valid && json_obj_string(obj, "op") == "agent.start" {
+			if auth.kind != .User_Token do return {}, false, domain.domain_error(.Forbidden, "only the user may start a task agent")
+			if s.taskchains == nil || s.taskchains.engine == nil do return {}, false, domain.domain_error(.Internal_Error, "task engine is not configured")
+			task, found, task_err := iface.taskchain_get_task(s.taskchains.repo, domain.Task_ID(op_arg_string(obj, "task_id")))
+			if !found do return {}, false, task_err
+			block_id := attention_block_id(task.blocked_on_json)
+			guard_block := jsonx.extract_string(card.guard_json, "expected_block", "", true, context.temp_allocator)
+			if (guard_block != "" && guard_block != block_id) || (decision.expected_block != "" && decision.expected_block != block_id) {
+				return {}, false, domain.domain_error(.Conflict, "the agent failure changed; reload the card")
+			}
+			started, start_err := taskv2.start_task_agent(s.taskchains.engine, auth, task.task_id, task.blocked_on_json)
+			if !started do return {}, false, start_err
+			return mark_card_accepted(s, card)
+		}
+	}
 	has_uow := s.uow_factory != nil
 	uow: iface.Unit_Of_Work
 	if has_uow {

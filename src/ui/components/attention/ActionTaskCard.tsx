@@ -68,6 +68,7 @@ function askClass(mobile: boolean): string {
 
 function BlockedAsk({ item, mobile }: { item: AttentionTaskItem; mobile: boolean }) {
   const excerpt = item.details.excerpt;
+  if (item.details.badge === 'agent_not_running') return <p role="alert" className="text-[15px] text-danger">{item.rationale}</p>;
   if (!excerpt?.body) {
     return (
       <p data-debug-id="action-tray-card-no-ask" className="text-[15px] text-muted">

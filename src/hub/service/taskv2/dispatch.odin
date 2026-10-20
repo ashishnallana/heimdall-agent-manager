@@ -2,6 +2,7 @@ package taskv2
 
 import "core:fmt"
 import "core:strings"
+import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 import jsonx "odin_test:lib/jsonx"
@@ -9,10 +10,18 @@ import jsonx "odin_test:lib/jsonx"
 // Dispatch is infrastructure failure, before work starts. Retain the attempt
 // and runtime history for diagnosis, but refund its budget and park the task.
 dispatch_failed_in_uow :: proc(svc: ^Service, u: ^Uow, lease: domain.Task_Lease, failure: string) -> Expire_Result {
+	return agent_not_running_in_uow(svc, u, lease, failure, true)
+}
+
+// A confirmed holder that exits or loses its heartbeat is infrastructure loss
+// too. Only send-failure callbacks require an unconfirmed wake (a late error
+// must never revoke an already confirmed lease).
+agent_not_running_in_uow :: proc(svc: ^Service, u: ^Uow, lease: domain.Task_Lease, failure: string, unconfirmed_only := false) -> Expire_Result {
 	detail := failure
 	current, held, err := iface.taskchain_get_lease(svc.repo, lease.lease_id)
 	if err.code != .None do return .Failed
-	if !held || current.confirmed_at != "" || current.delivery != domain.LEASE_DELIVERY_WAKE do return .Gone
+	if !held do return .Gone
+	if unconfirmed_only && (current.confirmed_at != "" || current.delivery != domain.LEASE_DELIVERY_WAKE) do return .Gone
 	// A failed wake of a handoff continuation did not create a new attempt.
 	// Keep the earlier worker's budget charge and resume that same attempt.
 	continuation := false
@@ -40,9 +49,12 @@ dispatch_failed_in_uow :: proc(svc: ^Service, u: ^Uow, lease: domain.Task_Lease,
 	}
 	if strings.trim_space(detail) == "" do detail = "launch failed before startup confirmation"
 	waiting := json_begin()
-	json_str(&waiting, "kind", "dispatch")
+	json_str(&waiting, "kind", "agent_not_running")
 	json_str(&waiting, "agent_id", agent_id)
-	json_str(&waiting, "reason", fmt.tprintf("%s/%s on %s failed to start: %s", provider, model, bridge, detail))
+	json_str(&waiting, "bridge_id", bridge)
+	json_str(&waiting, "provider", provider)
+	json_str(&waiting, "model", model)
+	json_str(&waiting, "reason", fmt.tprintf("Agent %s (%s/%s) on bridge %s is not running: %s", agent_id, provider, model, bridge, detail))
 	json_int(&waiting, "since_ms", now_ms(svc.clock))
 	p := json_begin()
 	json_str(&p, "lease_id", lease.lease_id)
@@ -51,7 +63,11 @@ dispatch_failed_in_uow :: proc(svc: ^Service, u: ^Uow, lease: domain.Task_Lease,
 	json_bool(&p, "dispatch_failed", true)
 	json_bool(&p, "continuation", continuation)
 	json_raw(&p, "waiting_on", json_end(&waiting))
-	if _, ok, _ := release_in_uow(svc, u, lease, hub_actor(), EV_BLOCKED, json_end(&p), "dispatch_failed"); !ok do return .Failed
+	stop_holder := false
+	if inst, found, _ := iface.agent_get_instance(svc.agents, lease.holder_instance_id); found {
+		stop_holder = bridge_online(svc, inst.bridge_id) && (instance_is_live(inst) || instance_is_pending(inst))
+	}
+	if _, ok, _ := release_in_uow(svc, u, lease, hub_actor(), EV_BLOCKED, json_end(&p), "dispatch_failed", stop_holder); !ok do return .Failed
 	if lease.kind == domain.LEASE_KIND_WORK && !continuation {
 		attempts, aerr := iface.taskchain_list_attempts_by_task(svc.repo, lease.task_id, lease.owner_user_id)
 		if aerr.code != .None do return .Failed
@@ -63,6 +79,90 @@ dispatch_failed_in_uow :: proc(svc: ^Service, u: ^Uow, lease: domain.Task_Lease,
 		}
 	}
 	return .Expired
+}
+
+// Read legacy dispatch blocks as the same recoverable infrastructure block.
+is_agent_not_running_block :: proc(raw: string) -> bool {
+	kind := jsonx.extract_string(raw, "kind", "", true, context.temp_allocator)
+	return kind == "agent_not_running" || kind == "dispatch"
+}
+
+block_ready_agent_in_uow :: proc(svc: ^Service, u: ^Uow, task: domain.Task, agent_id: string, placement_in: Placement, failure: string) -> bool {
+	placement := placement_in
+	if instances, err := iface.agent_list_instances_by_chain(svc.agents, task.owner_user_id, string(task.chain_id)); err.code == .None {
+		for inst in instances {
+			if inst.agent_id != agent_id || inst.bridge_id != placement.bridge_id do continue
+			if placement.provider == "" do placement.provider = inst.provider
+			if placement.model == "" && placement.provider == inst.provider do placement.model = inst.model
+			break
+		}
+	}
+	if placement.provider == "" do placement.provider = "unresolved"
+	if placement.model == "" do placement.model = "unresolved"
+	waiting := json_begin()
+	json_str(&waiting, "kind", "agent_not_running")
+	json_str(&waiting, "agent_id", agent_id)
+	json_str(&waiting, "bridge_id", placement.bridge_id)
+	json_str(&waiting, "provider", placement.provider)
+	json_str(&waiting, "model", placement.model)
+	json_str(&waiting, "reason", fmt.tprintf("Agent %s (%s/%s) on bridge %s is not running: %s", agent_id, placement.provider, placement.model, placement.bridge_id, failure))
+	json_int(&waiting, "since_ms", now_ms(svc.clock))
+	p := json_begin()
+	json_raw(&p, "waiting_on", json_end(&waiting))
+	// No lease or attempt was created; do not refund an earlier attempt.
+	json_bool(&p, "infrastructure", true)
+	_, _, ok, _ := record_event(svc, u, task, hub_actor(), EV_BLOCKED, json_end(&p))
+	return ok
+}
+
+// An explicit user retry makes failed/stopped instances eligible for the normal
+// wake path again. No bridge I/O occurs under the UoW; the matcher dispatches
+// after commit. Re-read afterwards so synchronous launch/send failures are
+// returned to the card as well as persisted in its newly projected reason.
+start_task_agent :: proc(svc: ^Service, auth: contracts.Auth_Context, task_id: domain.Task_ID, expected_waiting_on := "") -> (bool, domain.Domain_Error) {
+	if auth.kind != .User_Token do return false, domain.domain_error(.Forbidden, "only the user may start a task agent")
+	u, ok, err := begin_uow(svc)
+	if !ok do return false, err
+	task, found, terr := iface.taskchain_get_task(svc.repo, task_id)
+	if !found || string(task.owner_user_id) != auth.user_id {
+		_, _ = end_uow(svc, &u, false)
+		return false, domain.domain_error(.Not_Found, "task not found")
+	}
+	if expected_waiting_on != "" && expected_waiting_on != task.blocked_on_json {
+		_, _ = end_uow(svc, &u, false)
+		return false, domain.domain_error(.Conflict, "the agent failure changed; reload the card")
+	}
+	if !is_agent_not_running_block(task.blocked_on_json) {
+		_, _ = end_uow(svc, &u, false)
+		return false, domain.domain_error(.Conflict, "task is no longer waiting for its agent")
+	}
+	agent_id := jsonx.extract_string(task.blocked_on_json, "agent_id", "", true, context.temp_allocator)
+	bridge_id := jsonx.extract_string(task.blocked_on_json, "bridge_id", "", true, context.temp_allocator)
+	instances, ierr := iface.agent_list_instances_by_chain(svc.agents, task.owner_user_id, string(task.chain_id))
+	if ierr.code != .None { _, _ = end_uow(svc, &u, false); return false, ierr }
+	for inst in instances {
+		if inst.agent_id != agent_id || (bridge_id != "" && inst.bridge_id != bridge_id) do continue
+		if _, held, _ := iface.taskchain_get_lease_by_holder(svc.repo, inst.agent_instance_id); held do continue
+		if instance_is_live(inst) || instance_is_pending(inst) do continue
+		next := inst
+		next.runtime_status = "stopped"
+		next.stopped_by = ""
+		next.last_error_json = ""
+		if _, saved, serr := iface.agent_save_instance(svc.agents, next); !saved {
+			_, _ = end_uow(svc, &u, false); return false, serr
+		}
+	}
+	_, _, acted, aerr := record_event(svc, &u, task, actor_from_auth(auth), EV_ANSWERED, `{}`)
+	if acted do acted, aerr = after_chain_change(svc, &u, task.chain_id, task.owner_user_id, .Fleet_Changed)
+	_, cerr := end_uow(svc, &u, acted)
+	if !acted do return false, aerr
+	if cerr.code != .None do return false, cerr
+	fresh, fresh_found, fresh_err := iface.taskchain_get_task(svc.repo, task_id)
+	if !fresh_found || fresh_err.code != .None do return false, fresh_err
+	if is_agent_not_running_block(fresh.blocked_on_json) {
+		return false, domain.domain_error(.Conflict, jsonx.extract_string(fresh.blocked_on_json, "reason", "Agent failed to start", true, context.temp_allocator))
+	}
+	return true, terr
 }
 
 // Called after commit when the wake command could not even be sent. Re-read
