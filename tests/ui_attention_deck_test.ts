@@ -340,6 +340,37 @@ test('deck: locked vault shows the lock placeholder instead of ciphertext', asyn
   });
 });
 
+test('deck: review card displays a verify skip as a warning', async () => {
+  const item = taskItem('skip');
+  item.details.attention = 'review';
+  item.details.skip_verify_reason = 'Test runner unavailable; reviewer must run the suite.';
+  await withDeck([item], async ({ text, q }) => {
+    assert.match(text(), /Verify skipped: Test runner unavailable; reviewer must run the suite\./);
+    assert.ok(q('[data-debug-id="attention-card-verify-skipped"]')?.classList.contains('text-warning'));
+  });
+});
+
+test('task detail: skipped verify stays visible above prior passing evidence', async () => {
+  const { Provider } = await import('react-redux');
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  const { TaskDetails } = await import('../src/ui/components/tasks/TaskDetails.tsx');
+  const { tasksApi } = await import('../src/ui/api/endpoints/tasks.ts');
+  const store = await makeVaultStore();
+  const args = { chainId: 'chain_skip', taskId: 'task_skip', attemptNo: 2 };
+  await store.dispatch(tasksApi.util.upsertQueryData('fetchTaskFacet', { ...args, kind: 'handoff' }, { facet: { summary: 'ready', skip_verify_reason: 'Suite could not run on this host.' } }));
+  await store.dispatch(tasksApi.util.upsertQueryData('fetchTaskFacet', { ...args, kind: 'verify' }, { facet: { exit_code: 0, summary: 'old pass' } }));
+  const html = renderToStaticMarkup(React.createElement(Provider, { store, children: React.createElement(TaskDetails, {
+    chainId: args.chainId,
+    task: { task_id: args.taskId, chain_id: args.chainId, title: 'work', state: 'done', attempt_no: 2, brief: { verify: 'make test' } },
+    actions: { busy: false } as any,
+  }) }));
+  assert.match(html, /Verify skipped: .*Suite could not run on this host\./);
+  assert.match(html, /data-debug-id="task-details-verify-skipped" class="[^"]*text-warning/);
+  assert.match(html, /Skipped at submit/);
+  assert.doesNotMatch(html, />Passed</);
+  store.dispatch(tasksApi.util.resetApiState());
+});
+
 test('deck: unlocked vault decrypts the card title and excerpt', async () => {
   const { encryptVaultText } = await import('../src/ui/utils/vaultCrypto.ts');
   const key = await importRawKeyHex('00'.repeat(32));

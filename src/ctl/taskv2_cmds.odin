@@ -6,7 +6,7 @@ package main
 // the rest of agent mode uses (ctl_agent_local_call). The hub contract is the
 // M2 wire contract:
 //
-//   agent.lease.submit   {lease_id?, summary, handoff?, output?, verify?:"none"}   (bridge adds vcs)
+//   agent.lease.submit   {lease_id?, summary, handoff?, output?, verify?:"none", skip_verify?, skip_verify_reason?}   (bridge adds vcs)
 //   agent.lease.handoff  {lease_id?, summary, handoff?}                            (bridge adds vcs)
 //   agent.lease.block    {lease_id?, waiting_on:{kind, ref?, reason}, summary?}
 //   agent.review.post    {task_id?, verdict: approve|request_changes, findings?}
@@ -394,6 +394,13 @@ ctl_v2_lease_submit_params :: proc(args: []string, handoff_json := "", output_js
 		if v != "none" do return "", false
 		append(&fields, json_kv("verify", "none"))
 	}
+	skip_verify := has_flag(args, "--skip-verify")
+	skip_reason := strings.trim_space(option_value(args, "--skip-verify-reason", ""))
+	if skip_verify != (skip_reason != "") do return "", false
+	if has_flag(args, "--skip-verify-reason") && !skip_verify do return "", false
+	if skip_verify {
+		append(&fields, `"skip_verify":true`, json_kv("skip_verify_reason", skip_reason))
+	}
 	if has_flag(args, "--auto") do append(&fields, `"auto":true`)
 	if v := option_value(args, "--vcs-base", ""); v != "" do append(&fields, json_kv("vcs_base", v))
 	cwd := cwd_override if cwd_override != "" else ctl_agent_cwd()
@@ -405,7 +412,7 @@ ctl_v2_lease_submit :: proc(endpoint, token: string, args: []string) {
 	summary := strings.trim_space(option_value(args, "--summary", ""))
 	if summary == "" { fmt.println(`{"ok":false,"message":"lease submit requires --summary <text>"}`); os.exit(1) }
 	if v := strings.trim_space(option_value(args, "--verify", "")); v != "" && v != "none" {
-		fmt.println(`{"ok":false,"message":"lease submit --verify accepts only 'none' (only tasks without a configured verify command may skip verification)"}`)
+		fmt.println(`{"ok":false,"message":"lease submit --verify accepts only 'none'; to skip a configured command use --skip-verify --skip-verify-reason <why>"}`)
 		os.exit(1)
 	}
 	h, _ := ctl_handoff_flags(args)
@@ -421,7 +428,7 @@ ctl_v2_lease_submit :: proc(endpoint, token: string, args: []string) {
 		}
 	}
 	params, ok := ctl_v2_lease_submit_params(args, h, o, a, ctl_lease_work_dir(endpoint, token))
-	if !ok { fmt.println(`{"ok":false,"message":"lease submit invalid arguments"}`); os.exit(1) }
+	if !ok { fmt.println(`{"ok":false,"message":"lease submit invalid arguments: --skip-verify and a non-empty --skip-verify-reason must be used together"}`); os.exit(1) }
 	ctl_agent_call_task(endpoint, token, "agent.lease.submit", params, args)
 }
 
@@ -1073,7 +1080,8 @@ print_help_verify :: proc() {
 	fmt.println("labelled `verify <task_id> #<attempt_no> @<head>`, heartbeats your lease while it")
 	fmt.println("runs, prints the log tail and exits with the run's exit code. The hub records the")
 	fmt.println("exit (plus repo head/dirty state) as the attempt's verify facet; `lease submit`")
-	fmt.println("requires a passing verify at the current head unless the brief says verify: none.")
+	fmt.println("requires a passing verify at the current head unless no command is configured or an explicit")
+	fmt.println("--skip-verify --skip-verify-reason <why> is used (forbidden for independent-verify tasks).")
 	fmt.println("When brief.auto_submit is true and verify exits 0 on a clean tree at head,")
 	fmt.println("`ham-ctl verify` automatically submits the lease.")
 	fmt.println("  --independent   run brief.verify in an ephemeral detached git worktree at the")

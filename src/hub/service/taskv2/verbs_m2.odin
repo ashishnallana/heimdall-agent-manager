@@ -48,6 +48,8 @@ Submit_Input :: struct {
 	vcs_json:       string, // bridge .Local enrichment: {head, dirty, files:[…]}
 	artifacts_json: string, // optional object: {items:[{kind,title,uri?,path?,mime?,bytes?,sha256?}]}
 	verify:         string, // "" | "none"
+	skip_verify:    bool,   // explicit exception, always accompanied by a written reason
+	skip_verify_reason: string,
 	auto:           bool,   // true when submitted automatically by `ham-ctl verify` under `brief.auto_submit`
 }
 
@@ -89,6 +91,7 @@ lease_submit :: proc(svc: ^Service, auth: contracts.Auth_Context, input: Submit_
 	json_str(&p, "lease_id", c.lease.lease_id)
 	json_int(&p, "attempt_no", i64(c.lease.attempt_no))
 	if input.verify == "none" do json_str(&p, "verify", "none")
+	if input.skip_verify do json_str(&p, "skip_verify_reason", strings.trim_space(input.skip_verify_reason))
 	if input.auto do json_bool(&p, "auto", true)
 	task, rok, rerr := release_in_uow(svc, &u, c.lease, actor, EV_SUBMITTED, json_end(&p), "submitted")
 	if rok do rok, rerr = after_chain_change(svc, &u, c.task.chain_id, c.task.owner_user_id, .Lease_Released)
@@ -101,7 +104,14 @@ lease_submit :: proc(svc: ^Service, auth: contracts.Auth_Context, input: Submit_
 
 @(private = "file")
 write_submit_facets :: proc(svc: ^Service, u: ^Uow, task: domain.Task, attempt_no: int, input: Submit_Input) -> bool {
-	if ok, _ := save_facet_verbatim(svc, task, attempt_no, FACET_HANDOFF, handoff_body_json(input.summary, input.handoff_json), FACET_WRITER_AGENT); !ok do return false
+	// This field is authoritative submit metadata; don't accept a handoff object
+	// that claims a skip independently of the validated submit flags.
+	handoff := json_begin()
+	for key, raw in jsonx_top_level_members(input.handoff_json) {
+		if key != "skip_verify_reason" do json_raw(&handoff, key, raw)
+	}
+	if input.skip_verify do json_str(&handoff, "skip_verify_reason", strings.trim_space(input.skip_verify_reason))
+	if ok, _ := save_facet_verbatim(svc, task, attempt_no, FACET_HANDOFF, handoff_body_json(input.summary, json_end(&handoff)), FACET_WRITER_AGENT); !ok do return false
 	if strings.has_prefix(strings.trim_space(input.vcs_json), "{") {
 		if ok, _ := save_facet_verbatim(svc, task, attempt_no, FACET_VCS, input.vcs_json, FACET_WRITER_BRIDGE); !ok do return false
 	}
@@ -121,9 +131,22 @@ write_submit_facets :: proc(svc: ^Service, u: ^Uow, task: domain.Task, attempt_n
 // dirty==false (and submit's own working tree not dirty). `dirty` may be null
 // when the chain has no VCS directory; the facet must then postdate the
 // attempt's last handoff/note. Verification is optional when brief.verify is
-// omitted, blank, or "none"; a configured command still requires passing evidence.
+// omitted, blank, or "none"; an explicit skip requires a reason and is forbidden
+// for tasks whose review policy requires independent verification.
 @(private = "file")
 verify_gate :: proc(svc: ^Service, task: domain.Task, attempt_no: int, input: Submit_Input) -> domain.Domain_Error {
+	if input.skip_verify {
+		if strings.trim_space(input.skip_verify_reason) == "" {
+			return domain.domain_error(.Validation_Failed, "--skip-verify requires a non-empty --skip-verify-reason", `{"code":"verify_skip_reason_required"}`)
+		}
+		if brief_require_independent_verify(task.brief_json) {
+			return domain.domain_error(.Conflict, "tasks requiring independent verification cannot skip verify", `{"code":"verify_skip_forbidden"}`)
+		}
+		return domain.Domain_Error{}
+	}
+	if input.skip_verify_reason != "" {
+		return domain.domain_error(.Validation_Failed, "skip_verify_reason requires skip_verify", `{"code":"verify_skip_flag_required"}`)
+	}
 	bverify := strings.trim_space(jsonx.extract_string(task.brief_json, "verify", "", true, context.temp_allocator))
 	if bverify == "" || bverify == "none" do return domain.Domain_Error{}
 	if input.verify == "none" {

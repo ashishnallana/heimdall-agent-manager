@@ -1082,12 +1082,41 @@ create_task_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Conte
 }
 
 // task_has_work_lease reports whether the engine holds a live work lease on the
-// task (brief/pin edits are rejected while it does).
+// task (scope/placement edits are rejected while it does).
 task_has_work_lease :: proc(service: ^Taskchain_Service, task_id: domain.Task_ID) -> bool {
 	leases, err := iface.taskchain_list_leases_by_task(service.repo, task_id)
 	if err.code != .None do return false
 	for l in leases do if l.kind == domain.LEASE_KIND_WORK do return true
 	return false
+}
+
+// A verify/acceptance-only brief is a patch, not a replacement. In particular,
+// `task update --verify ...` must not erase the goal, assignee or review policy.
+// Keep this allowlist narrow while a holder is working from its context pack.
+verification_brief_patch :: proc(existing, incoming: string) -> (string, bool, domain.Domain_Error) {
+	parsed, err := json.parse_string(incoming, allocator = context.temp_allocator)
+	if err != nil do return "", false, domain.domain_error(.Validation_Failed, "brief must be a JSON object")
+	patch, ok := parsed.(json.Object)
+	if !ok do return "", false, domain.domain_error(.Validation_Failed, "brief must be a JSON object")
+	if len(patch) == 0 do return "", false, domain.Domain_Error{}
+	for key in patch do if key != "verify" && key != "acceptance" do return "", false, domain.Domain_Error{}
+	for key, value in patch {
+		if key == "verify" {
+			if _, valid := value.(json.String); !valid do return "", false, domain.domain_error(.Validation_Failed, "brief.verify must be a string")
+		} else {
+			items, valid := value.(json.Array)
+			if !valid do return "", false, domain.domain_error(.Validation_Failed, "brief.acceptance must be an array of strings")
+			for item in items do if _, valid := item.(json.String); !valid do return "", false, domain.domain_error(.Validation_Failed, "brief.acceptance must be an array of strings")
+		}
+	}
+	base, berr := json.parse_string(existing if strings.trim_space(existing) != "" else "{}", allocator = context.temp_allocator)
+	if berr != nil do return "", false, domain.domain_error(.Internal_Error, "stored brief is not valid JSON")
+	root, root_ok := base.(json.Object)
+	if !root_ok do return "", false, domain.domain_error(.Internal_Error, "stored brief is not an object")
+	for key, value in patch do root[key] = value
+	encoded, merr := json.marshal(root, allocator = context.temp_allocator)
+	if merr != nil do return "", false, domain.domain_error(.Internal_Error, "could not encode brief")
+	return string(encoded), true, domain.Domain_Error{}
 }
 
 update_task_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Context, task_id: domain.Task_ID, input: Update_Task_Input) -> (domain.Task, bool, domain.Domain_Error) {
@@ -1104,18 +1133,26 @@ update_task_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Conte
 	}
 
 	changed := make([dynamic]string, context.temp_allocator)
-	brief_edit := input.brief_json != "" || input.has_assignee || input.has_review_roles || len(input.reviewer_agent_ids) > 0 || input.bridge_id != nil || input.title != "" || input.description != ""
+	patched_brief := ""
+	verification_patch := false
+	if input.brief_json != "" {
+		patch_err: domain.Domain_Error
+		patched_brief, verification_patch, patch_err = verification_brief_patch(task.brief_json, input.brief_json)
+		if patch_err.code != .None do return {}, false, patch_err
+	}
+	brief_edit := (input.brief_json != "" && !verification_patch) || input.has_assignee || input.has_review_roles || input.has_reviewers || len(input.reviewer_agent_ids) > 0 || input.bridge_id != nil || input.title != "" || input.description != ""
 	if brief_edit && task_has_work_lease(service, task.task_id) {
-		// The holder is working off the brief in its pack; changing it under them
-		// is rejected. Priority and dependencies remain editable.
-		return domain.Task{}, false, domain.domain_error(.Conflict, "task is leased: cancel the lease or wait before editing its brief, assignee, reviewers, title or bridge pin")
+		return domain.Task{}, false, domain.domain_error(.Conflict, "task is leased: only verify/acceptance brief patches, priority and dependencies can be edited; cancel the lease or wait before editing scope or placement")
 	}
 
 	if input.title != "" { task.title = input.title; append(&changed, "title") }
 	if input.description != "" { task.description = input.description; append(&changed, "description") }
 	if input.brief_json != "" {
-		task.brief_json = input.brief_json
-		append(&changed, "brief")
+		task.brief_json = patched_brief if verification_patch else input.brief_json
+		if verification_patch {
+			if _, has := jsonx.extract_string_found(input.brief_json, "verify", true, context.temp_allocator); has do append(&changed, "brief.verify")
+			if _, has := jsonx.extract_raw_array(input.brief_json, "acceptance", true, context.temp_allocator); has do append(&changed, "brief.acceptance")
+		} else { append(&changed, "brief") }
 	}
 	review_roles := make([dynamic]string, context.temp_allocator)
 	for r in input.review_roles do append(&review_roles, r)

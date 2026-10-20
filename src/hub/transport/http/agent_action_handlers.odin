@@ -105,6 +105,7 @@ agent_action_lease_submit_handler :: proc(ctx: rawptr, req: Request) -> Response
 		lease_id = json_string(params, "lease_id"), summary = json_string(params, "summary"),
 		handoff_json = verbatim_field(params, "handoff"), output_json = verbatim_field(params, "output"),
 		vcs_json = verbatim_field(params, "vcs"), verify = json_string(params, "verify"),
+		skip_verify = jsonx.extract_bool(params, "skip_verify", false, true), skip_verify_reason = json_string(params, "skip_verify_reason"),
 		artifacts_json = verbatim_field(params, "artifacts"), auto = jsonx.extract_bool(params, "auto", false, true),
 	})
 	if !sok do return respond_error(err, req.request_id)

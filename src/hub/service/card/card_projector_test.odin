@@ -123,6 +123,27 @@ ph_card :: proc(t: ^testing.T, h: ^Projector_Harness, id: domain.Card_ID) -> (do
 }
 
 @(test)
+test_projector_review_card_surfaces_verify_skip_for_current_attempt :: proc(t: ^testing.T) {
+	h: Projector_Harness
+	ph_open(t, &h, "att_verify_skip")
+	defer ph_close(&h)
+	task := ph_task("task_skip", .In_Progress, "2026-10-01T02:00:00Z")
+	task.state = .In_Review
+	task.requires_user_approval = true
+	task.attempt_no = 2
+	_, _, _ = iface.taskchain_save_task(&h.tasks, task)
+	_, _ = taskv2.save_facet_verbatim(&h.engine, task, 1, taskv2.FACET_HANDOFF, `{"skip_verify_reason":"previous attempt"}`, taskv2.FACET_WRITER_AGENT)
+	ph_save_task(t, &h, task)
+	c, exists := ph_card(t, &h, attention_task_card_id(task.task_id))
+	testing.expect(t, exists && !strings.contains(c.details_json, "skip_verify_reason"), "old attempt skip must not leak into current review")
+	_, _ = taskv2.save_facet_verbatim(&h.engine, task, 2, taskv2.FACET_HANDOFF, `{"summary":"ready","skip_verify_reason":"runner says \"offline\""}`, taskv2.FACET_WRITER_AGENT)
+	task.updated_at = "2026-10-01T03:00:00Z"
+	ph_save_task(t, &h, task)
+	c, exists = ph_card(t, &h, attention_task_card_id(task.task_id))
+	testing.expect(t, exists && strings.contains(c.details_json, `"skip_verify_reason":"runner says \"offline\""`), "review card projects current attempt skip reason with correct JSON escaping")
+}
+
+@(test)
 test_projector_task_card_lifecycle :: proc(t: ^testing.T) {
 	h: Projector_Harness
 	ph_open(t, &h, "att_task_lifecycle")

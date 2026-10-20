@@ -14,7 +14,7 @@ import platform "odin_test:hub/platform"
 EV_MIGRATED          :: "migrated"           // {from_status, state, published, attempt_no, blocked_on?}
 EV_PUBLISHED         :: "published"          // {brief?}
 EV_LEASE_GRANTED     :: "lease_granted"      // {lease_id, kind, instance_id, attempt_no, bridge_id, provider, model, delivery, review_role?}
-EV_SUBMITTED         :: "submitted"          // {lease_id, attempt_no, auto?, gate?}
+EV_SUBMITTED         :: "submitted"          // {lease_id, attempt_no, auto?, gate?, skip_verify_reason?}
 EV_BLOCKED           :: "blocked"            // {lease_id?, attempt_no, waiting_on:{kind, ref?, reason?}}
 EV_HANDOFF           :: "handoff"            // {lease_id, attempt_no}
 EV_LEASE_EXPIRED     :: "lease_expired"      // {lease_id, kind, attempt_no, reason}
