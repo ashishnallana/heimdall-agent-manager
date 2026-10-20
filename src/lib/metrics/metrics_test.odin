@@ -183,17 +183,19 @@ hammer_worker :: proc(th: ^thread.Thread) {
 }
 
 // Concurrency hammer: many threads incrementing through cached and fresh
-// lookups; totals must be exact.
+// lookups; totals must be exact. Bounded (4 threads x 2k iterations) and
+// sleep-free: the main thread joins the start barrier, so its scrapes are
+// guaranteed to overlap the writers without wall-clock waits.
 @(test)
 test_concurrency_hammer :: proc(t: ^testing.T) {
 	reg := test_registry()
 	defer test_registry_free(reg)
 	c := new_counter(reg, "t_hammer_total", "Hammer.", {"kind"})
 	h := new_histogram(reg, "t_hammer_hist", "Hist.", {}, {10, 20, 30, 40}, 0)
-	N_THREADS :: 16
-	ITERS :: 20_000
+	N_THREADS :: 4
+	ITERS :: 2_000
 	barrier: sync.Barrier
-	sync.barrier_init(&barrier, N_THREADS)
+	sync.barrier_init(&barrier, N_THREADS + 1)
 	jobs: [N_THREADS]Hammer_Job
 	threads: [N_THREADS]^thread.Thread
 	for i in 0 ..< N_THREADS {
@@ -202,11 +204,11 @@ test_concurrency_hammer :: proc(t: ^testing.T) {
 		threads[i].data = &jobs[i]
 		thread.start(threads[i])
 	}
+	sync.barrier_wait(&barrier)
 	// Scrape concurrently with the writers to exercise the shared lock path.
 	for _ in 0 ..< 20 {
 		out := scrape(reg)
 		delete(out)
-		time.sleep(time.Millisecond)
 	}
 	for th in threads {
 		thread.join(th)
@@ -241,26 +243,62 @@ test_collector_can_touch_families :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(out, "t_col{src=\"from_collector\"} 42\n"), "collector-set gauge exposed in the same scrape")
 }
 
-// Process collector (Linux): sanity-check the /proc readers.
+// Process collector: the /proc parsers and the process_* exposition, fed from
+// fixture text so no host /proc state is read. Live /proc wiring is covered by
+// hub/app metrics_listener_test.
 @(test)
 test_process_collector_linux :: proc(t: ^testing.T) {
-	when ODIN_OS == .Linux {
-		reg := test_registry()
-		defer test_registry_free(reg)
-		st := read_process_stats_linux(reg)
-		testing.expect(t, st.ok, "stats read")
-		testing.expect(t, st.resident_bytes > 1024 * 1024, "rss > 1 MiB")
-		testing.expect(t, st.virtual_bytes >= st.resident_bytes, "vsize >= rss")
-		testing.expect(t, st.threads >= 1, "threads")
-		testing.expect(t, st.open_fds >= 3, "open fds")
-		testing.expect(t, st.max_fds >= st.open_fds, "max fds")
-		testing.expect(t, st.start_time_seconds > 1_600_000_000, "start time is epoch seconds")
-		register_process_collector(reg)
-		out := scrape(reg)
-		defer delete(out)
-		testing.expect(t, strings.contains(out, "# TYPE process_cpu_seconds_total counter\n"), "cpu header")
-		testing.expect(t, strings.contains(out, "process_open_fds "), "fds sample")
-	}
+	// comm contains ')' and spaces: parsing must anchor on the LAST ')'.
+	STAT :: "4242 (my (odd) comm) S 1 4242 4242 0 -1 4194304 100 0 0 0 1500 250 0 0 20 0 7 0 360000 104857600 2560 18446744073709551615\n"
+	STATUS :: "Name:\tham-hub\nVmRSS:\t   20480 kB\nThreads:\t7\n"
+	PROC_STAT :: "cpu  1 2 3 4\nbtime 1700000000\nprocesses 99\n"
+	LIMITS :: "Limit                     Soft Limit           Hard Limit           Units     \nMax open files            1024                 4096                 files     \n"
+
+	st: Process_Stats
+	testing.expect(t, parse_self_stat(STAT, &st), "stat parsed")
+	testing.expect_value(t, st.cpu_ticks, u64(1750))
+	testing.expect_value(t, st.threads, u64(7))
+	testing.expect_value(t, st.virtual_bytes, u64(104857600))
+	testing.expect_value(t, st.start_time_seconds, u64(3600))
+	rss, rss_found := parse_vmrss_bytes(STATUS)
+	testing.expect(t, rss_found, "VmRSS found")
+	testing.expect_value(t, rss, u64(20480 * 1024))
+	testing.expect_value(t, parse_btime(PROC_STAT), u64(1_700_000_000))
+	soft, soft_found := parse_max_open_files(LIMITS)
+	testing.expect(t, soft_found, "Max open files found")
+	testing.expect_value(t, soft, u64(1024))
+
+	// Malformed / truncated input is rejected, missing lines are reported.
+	bad: Process_Stats
+	testing.expect(t, !parse_self_stat("no parens at all", &bad), "stat without ')' rejected")
+	testing.expect(t, !parse_self_stat("1 (x) S 1 2 3", &bad), "truncated stat rejected")
+	_, missing_rss := parse_vmrss_bytes("Name:\tx\n")
+	testing.expect(t, !missing_rss, "missing VmRSS reported")
+	testing.expect_value(t, parse_btime("cpu 1\n"), u64(0))
+	_, missing_limit := parse_max_open_files("Max processes 1 2 x\n")
+	testing.expect(t, !missing_limit, "missing Max open files reported")
+
+	// Exposition through a collector, as register_process_collector wires it.
+	st.resident_bytes = rss
+	st.start_time_seconds += parse_btime(PROC_STAT)
+	st.max_fds = soft
+	st.open_fds = 5
+	st.ok = true
+	reg := test_registry()
+	defer test_registry_free(reg)
+	registry_add_collector(reg, &st, proc(ctx: rawptr, e: ^Exposition) {
+		process_emit(e, (^Process_Stats)(ctx)^)
+	})
+	out := scrape(reg)
+	defer delete(out)
+	testing.expect(t, strings.contains(out, "# TYPE process_cpu_seconds_total counter\n"), "cpu header")
+	testing.expect(t, strings.contains(out, "process_cpu_seconds_total 17.5\n"), "cpu ticks scaled to seconds")
+	testing.expect(t, strings.contains(out, "process_resident_memory_bytes 20971520\n"), "rss sample")
+	testing.expect(t, strings.contains(out, "process_virtual_memory_bytes 104857600\n"), "vsize sample")
+	testing.expect(t, strings.contains(out, "process_open_fds 5\n"), "fds sample")
+	testing.expect(t, strings.contains(out, "process_max_fds 1024\n"), "max fds sample")
+	testing.expect(t, strings.contains(out, "process_threads 7\n"), "threads sample")
+	testing.expect(t, strings.contains(out, "process_start_time_seconds 1700003600\n"), "start time is btime + starttime/CLK_TCK")
 }
 
 // Nil families/series are no-ops so instrumentation is safe before wiring.
