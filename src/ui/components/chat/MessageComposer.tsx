@@ -1,5 +1,5 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, type TextareaHTMLAttributes, type ReactNode } from 'react';
-import { Icon, Spinner, StatusDot, type StatusDotProps } from '@ui';
+import { Icon, StatusDot, type StatusDotProps } from '@ui';
 import ProviderIcon from '../providers/ProviderIcon';
 
 export const MessageComposerInput = forwardRef<HTMLTextAreaElement, TextareaHTMLAttributes<HTMLTextAreaElement> & { mobile: boolean; debugId: string }>(function MessageComposerInput({ mobile, debugId, ...props }, forwardedRef) {
@@ -61,15 +61,4 @@ export function MessageComposerStatus({ debugPrefix: p, tone, label }: { debugPr
   return <span data-debug-id={`${p}-composer-status`} className="inline-flex items-center">
     <StatusDot size="sm" tone={tone} label={label} />
   </span>;
-}
-
-/** Busy row between the input and the toolbar: a Spinner right-aligned over the send button
- *  while the agent is starting, stopping or working. The row always reserves its height and
- *  only toggles visibility, so the card never jumps when the agent starts or stops working. */
-export function MessageComposerSpinner({ debugPrefix: p, mobile, label, busy }: { debugPrefix: string; mobile?: boolean; label: string; busy: boolean }) {
-  return <div data-debug-id={`${p}-composer-spinner`} data-busy={busy} aria-hidden={!busy} className="-mb-1 mt-1 flex h-5 justify-end">
-    <span className={`grid ${mobile ? 'w-10' : 'w-9'} place-items-center ${busy ? '' : 'invisible'}`}>
-      {busy ? <Spinner size="sm" label={label} className="text-muted" /> : null}
-    </span>
-  </div>;
 }

@@ -89,7 +89,7 @@ import AgentActivityBubbles from '../chat/AgentActivityBubbles';
 import AtMentionPopup, { type MentionEntity } from '../chat/AtMentionPopup';
 import ChatMessageList from '../chat/ChatMessageList';
 import InstanceReconfigurationProgress from '../chat/InstanceReconfigurationProgress';
-import { MessageComposerInput, MessageComposerActions, MessageComposerStatus, MessageComposerSpinner } from '../chat/MessageComposer';
+import { MessageComposerInput, MessageComposerActions, MessageComposerStatus } from '../chat/MessageComposer';
 import RuntimeConfigurationOptions from '../chat/RuntimeConfigurationOptions';
 import { type TaskLike } from '../chat/chainTaskInference';
 import { groupTranscriptMessages, isAgentStartMessage } from '../chat/transcriptGrouping';
@@ -2138,7 +2138,6 @@ export function AgentChatPane({
       : isWorking
       ? 'Working…'
       : 'Running';
-    const runtimeBusy = !needsStart && (runtimeStopping || isStarting || isWorking);
     const runtimeStatusMenu = (
       <Menu
         side="top"
@@ -2323,44 +2322,49 @@ export function AgentChatPane({
               <span />
               <span />
             </div>
-            <div
-              data-debug-id="conversation-composer-context"
-              className="mb-2 hidden min-w-0 items-center gap-x-2 sm:flex text-[12px] text-muted"
-            >
-              <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden">
-                <button
-                  type="button"
-                  onClick={() => setRuntimeMenuOpen(true)}
-                  aria-haspopup="dialog"
-                  aria-label="Change bridge, provider or model"
-                  data-debug-id="conversation-composer-bridge-chip"
-                  className="inline-flex min-w-0 max-w-[50%] shrink items-center gap-1.5"
-                  title={`Bridge: ${bridgeLabel || '—'} (current location)`}
-                >
-                  <Icon name="device" size={12} className="shrink-0" />
-                  <span className="min-w-0 truncate font-semibold text-muted">
-                    {bridgeLabel || 'no bridge'}
-                  </span>
-                </button>
-                {projectId && !isAuxSubagent ? (
-                  <>
-                    <span className="shrink-0 opacity-40">·</span>
-                    <button
-                      type="button"
-                      data-debug-id="conversation-composer-project-chip"
-                      onClick={() => openAux({ type: 'files' })}
-                      title={`Open project files — ${projectName}`}
-                      className="inline-flex min-w-0 max-w-[50%] shrink items-center gap-1.5 rounded-md px-1 py-0.5 hover:bg-neutral-soft hover:text-primary"
-                    >
-                      <Icon name="folder" size={13} className="shrink-0" />
-                      <span className="min-w-0 truncate font-semibold text-muted">
-                        <VaultText value={projectName} fallback="Project" />
-                      </span>
-                    </button>
-                  </>
-                ) : null}
+            {/* REQ-LAY-2: desktop only (REQ-LAY-3: no chips row on mobile). Bridge/project chips,
+                then the runtime StatusDot (start/stop menu) at the right end of the row. */}
+            {!isMobile ? (
+              <div
+                data-debug-id="conversation-composer-context"
+                className="mb-2 flex min-w-0 items-center gap-x-2 text-[12px] text-muted"
+              >
+                <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden">
+                  <button
+                    type="button"
+                    onClick={() => setRuntimeMenuOpen(true)}
+                    aria-haspopup="dialog"
+                    aria-label="Change bridge, provider or model"
+                    data-debug-id="conversation-composer-bridge-chip"
+                    className="inline-flex min-w-0 max-w-[50%] shrink items-center gap-1.5"
+                    title={`Bridge: ${bridgeLabel || '—'} (current location)`}
+                  >
+                    <Icon name="device" size={12} className="shrink-0" />
+                    <span className="min-w-0 truncate font-semibold text-muted">
+                      {bridgeLabel || 'no bridge'}
+                    </span>
+                  </button>
+                  {projectId && !isAuxSubagent ? (
+                    <>
+                      <span className="shrink-0 opacity-40">·</span>
+                      <button
+                        type="button"
+                        data-debug-id="conversation-composer-project-chip"
+                        onClick={() => openAux({ type: 'files' })}
+                        title={`Open project files — ${projectName}`}
+                        className="inline-flex min-w-0 max-w-[50%] shrink items-center gap-1.5 rounded-md px-1 py-0.5 hover:bg-neutral-soft hover:text-primary"
+                      >
+                        <Icon name="folder" size={13} className="shrink-0" />
+                        <span className="min-w-0 truncate font-semibold text-muted">
+                          <VaultText value={projectName} fallback="Project" />
+                        </span>
+                      </button>
+                    </>
+                  ) : null}
+                </div>
+                {!conversationReadOnly ? <div className="ml-auto -my-1.5 shrink-0">{runtimeStatusMenu}</div> : null}
               </div>
-            </div>
+            ) : null}
 
             <div className="relative">
               {mentionQuery !== null && (
@@ -2464,24 +2468,18 @@ export function AgentChatPane({
                   </ul>
                 </div>
               ) : (
-                // REQ-DOTR-1: top row = input, then the runtime StatusDot (start/stop menu) at top right,
-                // in the same column as the send button below it.
-                <div className="flex items-start gap-1">
-                  <div className={`min-w-0 flex-1 ${isMobile ? 'pt-1.5' : 'pt-1'}`}>{composerInput}</div>
-                  {runtimeStatusMenu}
-                </div>
+                // REQ-LAY-3: mobile top row = input, then the runtime StatusDot (start/stop menu) at
+                // top right, in the same column as the send button below it. REQ-LAY-2: desktop = input only.
+                isMobile ? (
+                  <div className="flex items-start gap-1">
+                    <div className="min-w-0 flex-1 pt-1.5">{composerInput}</div>
+                    {runtimeStatusMenu}
+                  </div>
+                ) : (
+                  <div className="min-w-0">{composerInput}</div>
+                )
               )}
             </div>
-
-            {/* REQ-DOT-2: busy Spinner right-aligned above send; the row keeps its height when idle. */}
-            {!conversationReadOnly ? (
-              <MessageComposerSpinner
-                debugPrefix="conversation"
-                mobile={isMobile}
-                label={runtimeLabel}
-                busy={runtimeBusy}
-              />
-            ) : null}
 
             <MessageComposerActions
               {...composerActions}
