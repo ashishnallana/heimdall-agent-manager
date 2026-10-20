@@ -437,7 +437,11 @@ MIGRATION_098_MIXED_WORK_GRAPH :: #load("migrations/098_mixed_work_graph.sql", s
 
 MIGRATION_099_MIXED_WORK_EXECUTION :: #load("migrations/099_mixed_work_execution.sql", string)
 
-migration_order :: [102]string {
+// MIGRATION_100_DROP_BRIDGE_ENROLLMENTS drops the never-used bridge_enrollments
+// table from 002 and its owner trigger.
+MIGRATION_100_DROP_BRIDGE_ENROLLMENTS :: #load("migrations/100_drop_bridge_enrollments.sql", string)
+
+migration_order :: [103]string {
 	"001_foundation.sql",
 	"002_owner_scoped_core.sql",
 	"003_device_tokens.sql",
@@ -540,6 +544,7 @@ migration_order :: [102]string {
 	"097_workflow_runs.sql",
 	"098_mixed_work_graph.sql",
 	"099_mixed_work_execution.sql",
+	"100_drop_bridge_enrollments.sql",
 }
 
 // stop_before is a TEST SEAM: when non-empty, the apply loop stops in front of
@@ -1030,6 +1035,7 @@ migration_sql :: proc(name, migrations_dir: string) -> string {
 	if name == "097_workflow_runs.sql" do return strings.clone(MIGRATION_097_WORKFLOW_RUNS)
 	if name == "098_mixed_work_graph.sql" do return strings.clone(MIGRATION_098_MIXED_WORK_GRAPH)
 	if name == "099_mixed_work_execution.sql" do return strings.clone(MIGRATION_099_MIXED_WORK_EXECUTION)
+	if name == "100_drop_bridge_enrollments.sql" do return strings.clone(MIGRATION_100_DROP_BRIDGE_ENROLLMENTS)
 	if name == "081_antigravity_models.sql" do return strings.clone(MIGRATION_081_ANTIGRAVITY_MODELS)
 	if name == "080_copilot_launch_recipe.sql" do return strings.clone(MIGRATION_080_COPILOT_LAUNCH_RECIPE)
 	if name == "079_repair_provider_catalog_etag.sql" do return strings.clone(MIGRATION_079_REPAIR_PROVIDER_CATALOG_ETAG)
