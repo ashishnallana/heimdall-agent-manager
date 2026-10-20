@@ -35,9 +35,9 @@ test_dispatch_unblock_http_coordinator_and_owner_auth :: proc(t: ^testing.T) {
 	testing.expect_value(t, allowed.status, 200)
 	testing.expect(t, strings.contains(allowed.body, `"state":"ready"`) && strings.contains(allowed.body, `"blocked_on":null`), "coordinator route clears dispatch block")
 	// The same existing route remains available to the authenticated owner.
-	task.blocked_on_json = `{"kind":"dispatch","reason":"exit 2"}`
+	task.blocked_on_json = `{"kind":"agent_not_running","reason":"exit 2"}`
 	_, _, _ = iface.taskchain_save_task(&f.tc_repo, task)
-	_, _, _ = taskv2.append_event(&f.tc_repo, &f.clock, task, taskv2.hub_actor(), taskv2.EV_BLOCKED, `{"dispatch_failed":true,"waiting_on":{"kind":"dispatch","reason":"exit 2"}}`)
+	_, _, _ = taskv2.append_event(&f.tc_repo, &f.clock, task, taskv2.hub_actor(), taskv2.EV_BLOCKED, `{"dispatch_failed":true,"waiting_on":{"kind":"agent_not_running","reason":"exit 2"}}`)
 	owner_resp := answer_task_handler(&f.th, wire_cookie_request(f, "POST", path, `{}`))
 	testing.expect_value(t, owner_resp.status, 200)
 }

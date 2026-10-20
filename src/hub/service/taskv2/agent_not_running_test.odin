@@ -130,3 +130,71 @@ test_agent_not_running_unresolvable_provider_and_model :: proc(t: ^testing.T) {
 	attempts, _ := iface.taskchain_list_attempts_by_task(&fx.repo, task.task_id, "u1")
 	testing.expect_value(t, len(attempts), 0)
 }
+
+@(test)
+test_agent_not_running_solo_start_launches_only_on_user_action :: proc(t: ^testing.T) {
+	fx, log, ok := lease_fixture(t, "anr_solo")
+	defer lease_fixture_close(fx, log)
+	if !ok do return
+	chain := solo_chain(t, fx, "chain_anr_solo")
+	coord, _, _ := iface.agent_get_instance(&fx.agents, "inst_coord")
+	coord.runtime_status = "stopped"
+	_, _, _ = iface.agent_save_instance(&fx.agents, coord)
+	task := publish_solo_task(t, fx, chain, "task_solo_anr")
+	testing.expect(t, task.state == .Backlog && is_agent_not_running_block(task.blocked_on_json), "dead solo coordinator blocks ready work")
+	testing.expect(t, !wake_log_has_run(log, "inst_coord"), "no automatic coordinator wake")
+
+	pr_impl: sqlite.Project_Repo_SQLite
+	pr_repo := sqlite.new_project_repository(&pr_impl, &fx.conn)
+	co_impl: sqlite.Content_Repo_SQLite
+	co_repo := sqlite.new_content_repository(&co_impl, &fx.conn)
+	pv_impl: sqlite.Provider_Repo_SQLite
+	pv_repo := sqlite.new_provider_repository(&pv_impl, &fx.conn)
+	_, _ = iface.bridge_provider_status_upsert(&pv_repo, domain.Bridge_Provider_Status{bridge_id = "br_1", provider = "claude", state = "present"})
+	_, _ = iface.bridge_provider_setting_upsert(&pv_repo, domain.Bridge_Provider_Setting{bridge_id = "br_1", provider = "claude", enabled = true})
+	_, _, _ = iface.agent_save_support(&fx.agents, domain.Agent_Bridge_Support{agent_id = "agt_c", bridge_id = "br_1", owner_user_id = "u1", enabled = true})
+	registry := project.Bridge_Runtime_Registry{}
+	project.bridge_runtime_registry_mark_live(&registry, "br_1", false, "")
+	refuse := true
+	sink := project.Bridge_Command_Sink{ctx = &refuse, send_runtime_command = proc(ctx: rawptr, cmd: project.Runtime_Command) -> (bool, domain.Domain_Error) {
+		if (^bool)(ctx)^ do return false, domain.domain_error(.Internal_Error, "solo launch refused")
+		return true, domain.Domain_Error{}
+	}}
+	ag_service := agent.new_agent_service_with_runtime(&fx.agents, &fx.bridges, &pr_repo, &co_repo, &fx.repo, sink, &registry, &fx.clock, &fx.ids)
+	ag_service.providers = &pv_repo
+	fx.svc.agent_service = &ag_service
+	auth := contracts.Auth_Context{kind = .User_Token, user_id = "u1"}
+	started, err := start_task_agent(&fx.svc, auth, task.task_id)
+	testing.expect(t, !started && strings.contains(err.message, "solo launch refused"), "explicit failed launch returned")
+	task = get_task(fx, "task_solo_anr")
+	testing.expect(t, task.state == .Backlog && strings.contains(task.blocked_on_json, "solo launch refused"), "failed solo start remains blocked with updated reason")
+	refuse = false
+	started, err = start_task_agent(&fx.svc, auth, task.task_id)
+	testing.expect(t, started && err.code == .None, "explicit solo start succeeded")
+	coord, _, _ = iface.agent_get_instance(&fx.agents, "inst_coord")
+	testing.expect_value(t, coord.runtime_status, "launching")
+	task = get_task(fx, "task_solo_anr")
+	testing.expect(t, task.state == .Ready && task.blocked_on_json == "", "successful solo start clears block")
+	_, held := lease_of(fx, "inst_coord")
+	testing.expect(t, !held && !wake_log_has_run(log, "inst_coord"), "matcher remains pull-only")
+	coord.runtime_status = "running"
+	_, _, _ = iface.agent_save_instance(&fx.agents, coord)
+	res, pulled, _ := lease_next(&fx.svc, inst_auth("inst_coord"), Lease_Next_Input{})
+	testing.expect(t, pulled && res.status == "granted", "started solo coordinator pulls task")
+}
+
+@(test)
+test_agent_not_running_capacity_accounts_for_manual_extra_instances :: proc(t: ^testing.T) {
+	instances := make([dynamic]domain.Agent_Instance)
+	append(&instances,
+		domain.Agent_Instance{agent_instance_id = "held", agent_id = "agt", bridge_id = "br", runtime_status = "running"},
+		domain.Agent_Instance{agent_instance_id = "free", agent_id = "agt", bridge_id = "br", runtime_status = "running"},
+	)
+	held := make(map[string]bool)
+	defer delete(held)
+	defer delete(instances)
+	held["held"] = true
+	ctx := Match_Context{instances = instances, held = held}
+	testing.expect(t, fleet_row_full(&ctx, domain.Task_Chain_Fleet{agent_id = "agt", capacity = 1}, Placement{bridge_id = "br"}), "manual extra instance cannot bypass full capacity")
+	testing.expect(t, !fleet_row_full(&ctx, domain.Task_Chain_Fleet{agent_id = "agt", capacity = 2}, Placement{bridge_id = "br"}), "free capacity is available")
+}

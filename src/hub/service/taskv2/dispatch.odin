@@ -4,6 +4,7 @@ import "core:fmt"
 import "core:strings"
 import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
+import agent "odin_test:hub/service/agent"
 import iface "odin_test:hub/repository/iface"
 import jsonx "odin_test:lib/jsonx"
 
@@ -137,6 +138,13 @@ start_task_agent :: proc(svc: ^Service, auth: contracts.Auth_Context, task_id: d
 		return false, domain.domain_error(.Conflict, "task is no longer waiting for its agent")
 	}
 	agent_id := jsonx.extract_string(task.blocked_on_json, "agent_id", "", true, context.temp_allocator)
+	if chain, chain_found, _ := iface.taskchain_get_chain(svc.repo, task.chain_id); chain_found && chain_is_solo(svc, chain) {
+		if coord, coord_found, _ := iface.agent_get_instance(svc.agents, chain.coordinator_agent_instance_id); coord_found && coord.agent_id == agent_id {
+			_, cerr := end_uow(svc, &u, true)
+			if cerr.code != .None do return false, cerr
+			return start_solo_task_agent(svc, auth, task, coord)
+		}
+	}
 	bridge_id := jsonx.extract_string(task.blocked_on_json, "bridge_id", "", true, context.temp_allocator)
 	instances, ierr := iface.agent_list_instances_by_chain(svc.agents, task.owner_user_id, string(task.chain_id))
 	if ierr.code != .None { _, _ = end_uow(svc, &u, false); return false, ierr }
@@ -176,4 +184,41 @@ on_dispatch_failed :: proc(svc: ^Service, lease_id, detail: string) {
 	acted := result != .Failed
 	if result == .Expired do acted, _ = after_chain_change(svc, &u, lease.chain_id, lease.owner_user_id, .Instance_Terminal)
 	_, _ = end_uow(svc, &u, acted)
+}
+
+// Explicit user recovery for a pull-only solo coordinator. Launch outside the
+// transaction and clear its block only after the launch command succeeds.
+start_solo_task_agent :: proc(svc: ^Service, auth: contracts.Auth_Context, task: domain.Task, coord: domain.Agent_Instance) -> (bool, domain.Domain_Error) {
+	stale := instance_is_live(coord) && now_ms(svc.clock) - to_ms(coord.last_seen_at) >= LEASE_TTL_SECONDS * 1000
+	started := (instance_is_live(coord) && !stale) || instance_is_pending(coord)
+	start_err: domain.Domain_Error
+	if !started {
+		if svc.agent_service == nil {
+			start_err = domain.domain_error(.Internal_Error, "agent launch service is unavailable")
+		} else if stale {
+			_, started, start_err = agent.restart_instance(svc.agent_service, auth, coord.agent_instance_id)
+		} else {
+			_, started, start_err = agent.start_instance(svc.agent_service, auth, coord.agent_instance_id)
+		}
+	}
+	u, ok, err := begin_uow(svc)
+	if !ok do return false, err
+	current, found, read_err := iface.taskchain_get_task(svc.repo, task.task_id)
+	if !found { _, _ = end_uow(svc, &u, false); return false, read_err }
+	if current.blocked_on_json != task.blocked_on_json {
+		_, _ = end_uow(svc, &u, false)
+		return false, domain.domain_error(.Conflict, "the agent failure changed; reload the card")
+	}
+	acted := false
+	if !started {
+		acted = block_ready_agent_in_uow(svc, &u, current, coord.agent_id, Placement{bridge_id = coord.bridge_id, provider = coord.provider, model = coord.model}, start_err.message)
+	} else {
+		_, _, acted, err = record_event(svc, &u, current, actor_from_auth(auth), EV_ANSWERED, "{}")
+		if acted do acted, err = after_chain_change(svc, &u, task.chain_id, task.owner_user_id, .Fleet_Changed)
+	}
+	_, cerr := end_uow(svc, &u, acted)
+	if !acted do return false, err
+	if cerr.code != .None do return false, cerr
+	if !started do return false, start_err
+	return true, domain.Domain_Error{}
 }

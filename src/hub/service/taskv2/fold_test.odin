@@ -316,3 +316,24 @@ test_answered_question_is_the_active_block :: proc(t: ^testing.T) {
 	testing.expect_value(t, answered_question(b, 4, input_task()), "Your finished branch did not merge (conflicting files: README.md).")
 	testing.expect_value(t, answered_question(b, 7, input_task()), "Q2?")
 }
+
+@(test)
+test_fold_ready_infrastructure_block_preserves_handoff_budget :: proc(t: ^testing.T) {
+	input := input_task()
+	input.max_attempts = 1
+	events := []domain.Task_Event{
+		ev(1, EV_PUBLISHED), grant(2), ev(3, EV_HANDOFF),
+		ev(4, EV_BLOCKED, "{\"infrastructure\":true,\"waiting_on\":{\"kind\":\"agent_not_running\",\"reason\":\"offline\"}}"),
+	}
+	blocked := fold_task(events, input)
+	testing.expect(t, !blocked.budget_exhausted && blocked.last_release == .Handoff, "ready infrastructure preserves continuation, even at max_attempts")
+	testing.expect_value(t, blocked.counting_attempts, 1)
+	resumed := make([dynamic]domain.Task_Event)
+	defer delete(resumed)
+	append(&resumed, ..events)
+	append(&resumed, ev(5, EV_ANSWERED), grant(6))
+	view := fold_task(resumed[:], input)
+	testing.expect_value(t, view.attempt_no, 1)
+	testing.expect_value(t, view.counting_attempts, 1)
+	testing.expect_value(t, view.state, domain.Task_State.In_Progress)
+}

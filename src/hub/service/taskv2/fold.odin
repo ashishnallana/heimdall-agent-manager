@@ -152,6 +152,8 @@ fold_task :: proc(events: []domain.Task_Event, input: Fold_Input) -> Task_View {
 			}
 		case EV_BLOCKED:
 			dispatch := payload_bool(ev.payload_json, "dispatch_failed")
+			infrastructure := payload_bool(ev.payload_json, "infrastructure")
+			continuation := (dispatch && payload_bool(ev.payload_json, "continuation")) || (infrastructure && v.last_release == .Handoff)
 			review := jsonx.extract_string(ev.payload_json, "kind", "", true, context.temp_allocator) == domain.LEASE_KIND_REVIEW
 			if dispatch && review {
 				if v.review_lease_count > 0 do v.review_lease_count -= 1
@@ -163,7 +165,7 @@ fold_task :: proc(events: []domain.Task_Event, input: Fold_Input) -> Task_View {
 				}
 			}
 			v.last_release = .Blocked
-			if dispatch && payload_bool(ev.payload_json, "continuation") do v.last_release = .Handoff
+			if continuation do v.last_release = .Handoff
 			if raw, ok := raw_object_field(ev.payload_json, "waiting_on"); ok {
 				v.blocked_on_json = raw
 			} else {
@@ -171,7 +173,7 @@ fold_task :: proc(events: []domain.Task_Event, input: Fold_Input) -> Task_View {
 			}
 			// Budget is spent by ATTEMPTS, whatever ended them (review S1): a
 			// fifth block parks the task for a human exactly like a fifth expiry.
-			if !dispatch do apply_budget(&v, max_attempts, ev.ts_ms)
+			if !dispatch && !infrastructure do apply_budget(&v, max_attempts, ev.ts_ms)
 		case EV_HANDOFF:
 			v.has_work_lease = false
 			v.last_release = .Handoff

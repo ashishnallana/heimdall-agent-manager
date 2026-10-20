@@ -186,6 +186,16 @@ grant_work :: proc(svc: ^Service, u: ^Uow, ctx: ^Match_Context, task: domain.Tas
 	failure, failed_agent := "", ""
 	failed_placement: Placement
 	queued := false
+	// Solo coordinators still pull their work; only an explicit user Start may
+	// launch one. Their unavailable process nevertheless needs a user card.
+	if ctx.has_coordinator && chain_is_solo(svc, ctx.chain) && (assignee == "" || assignee == ctx.coordinator.agent_id) {
+		if instance_is_live(ctx.coordinator) || instance_is_pending(ctx.coordinator) {
+			queued = true
+		} else {
+			failure, failed_agent = fmt.tprintf("coordinator instance %s is %s", ctx.coordinator.agent_instance_id, ctx.coordinator.runtime_status), ctx.coordinator.agent_id
+			failed_placement = Placement{bridge_id = ctx.coordinator.bridge_id, provider = ctx.coordinator.provider, model = ctx.coordinator.model}
+		}
+	}
 	for fleet in ctx.fleets {
 		if ctx.has_coordinator && fleet.agent_id == ctx.coordinator.agent_id do continue
 		if !fleet_row_has_role(fleet, domain.FLEET_ROLE_WORKER) do continue
@@ -544,8 +554,7 @@ fleet_row_full :: proc(ctx: ^Match_Context, fleet: domain.Task_Chain_Fleet, plac
 	count := 0
 	for inst in ctx.instances {
 		if inst.agent_id != fleet.agent_id || inst.bridge_id != placement.bridge_id do continue
-		if ctx.held[inst.agent_instance_id] { count += 1; continue }
-		if instance_is_live(inst) || instance_is_pending(inst) do return false
+		if ctx.held[inst.agent_instance_id] do count += 1
 	}
 	return count >= max(1, fleet.capacity)
 }

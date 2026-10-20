@@ -142,6 +142,10 @@ test_solo_expiry_is_noncounting_and_repull_is_immediate :: proc(t: ^testing.T) {
 	// busy chatting with the user: no heartbeat past the TTL
 	wake_log_reset(log)
 	fixture_advance(fx, 3600)
+	// Runtime evidence is fresh even though the lease heartbeat was missed.
+	coord, _, _ := iface.agent_get_instance(&fx.agents, "inst_coord")
+	coord.last_seen_at = platform.clock_now(&fx.clock)
+	_, _, _ = iface.agent_save_instance(&fx.agents, coord)
 	_ = fire_due(&fx.svc, now_ms(&fx.clock))
 	testing.expect_value(t, count_events(fx, "task_1", EV_LEASE_EXPIRED), 1)
 	testing.expect(t, strings.contains(last_event_payload(fx, "task_1", EV_LEASE_EXPIRED), `"counting":false`), "coordinator expiry is non-counting")
@@ -156,6 +160,8 @@ test_solo_expiry_is_noncounting_and_repull_is_immediate :: proc(t: ^testing.T) {
 	// many idle expiries never exhaust the budget
 	for _ in 0 ..< 6 {
 		fixture_advance(fx, 3600)
+		coord.last_seen_at = platform.clock_now(&fx.clock)
+		_, _, _ = iface.agent_save_instance(&fx.agents, coord)
 		_ = fire_due(&fx.svc, now_ms(&fx.clock))
 		_, _, _ = lease_next(&fx.svc, auth, Lease_Next_Input{})
 	}
