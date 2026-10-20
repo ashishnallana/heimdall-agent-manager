@@ -423,7 +423,8 @@ test_agent_action_task_bridge_id_create_and_update :: proc(t: ^testing.T) {
 // Task System v2: the wire carries the five-state `state` projection (plus
 // cancelled) and the derived `unblocks_dependents` badge; there is no FSM
 // `allowed_transitions` / `next_states` / `allowed_actions` tail any more, and
-// the detail wire always carries a `leases` array.
+// the detail wire always carries a `leases` array. Only Done unblocks
+// dependents: a cancelled prerequisite keeps them blocked (mixed-work rule).
 @(test)
 test_write_task_json_and_detail_emit_v2_state :: proc(t: ^testing.T) {
 	State_Wire_Case :: struct {
@@ -438,7 +439,7 @@ test_write_task_json_and_detail_emit_v2_state :: proc(t: ^testing.T) {
 		{state = .In_Progress, wire = `"state":"in_progress"`, unblocks = false},
 		{state = .In_Review, wire = `"state":"in_review"`, unblocks = false},
 		{state = .Done, wire = `"state":"done"`, unblocks = true},
-		{state = .Cancelled, wire = `"state":"cancelled"`, unblocks = true},
+		{state = .Cancelled, wire = `"state":"cancelled"`, unblocks = false},
 	}
 
 	f := wire_setup(t, "state_wire")
