@@ -421,6 +421,17 @@ bridge_enroll_commit :: proc(h: ^Bridge_Handlers, bridge: domain.Bridge) -> (dom
 	}
 	defer { b := committed; domain.bridge_destroy(&b) }
 	fmt.eprintfln("hub: bridge %s enrollment committed (vault key delivered)", bridge.bridge_id)
+	// An attach supersedes the bridge's previous directory identity only NOW, once
+	// the swap is committed (REQ-EA-8): retiring it at approval would leave a
+	// rolled-back attach's still-working device with a retired entry. Idempotent, so
+	// a duplicate ok:true retries it. A failure cannot undo the commit; it is logged
+	// and the old identity stays live (inert: its credential died in the commit).
+	if h.vault != nil {
+		owner := string(committed.owner_user_id)
+		retired, rerr := vd.retire_bridge_attach_predecessors(h.vault, owner, committed.bridge_id)
+		if rerr.code != .None do fmt.eprintfln("hub: bridge %s attach committed, but its previous vault directory identity was not retired: %s", committed.bridge_id, rerr.message)
+		if h.event_bus != nil do for id in retired do events.publish_resource_changed(h.event_bus, owner, VAULT_DEVICES_RESOURCE, id, "retired", "{}")
+	}
 	publish_bridge_enrollment_changed(h, string(committed.owner_user_id), committed.bridge_id)
 	return domain.Domain_Error{}, true
 }
@@ -2595,13 +2606,14 @@ revoke_bridge_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	// already dead here, so a failure leaves the safe state; it is reported and a retry
 	// (revoke is idempotent) finishes it.
 	if h.vault != nil {
-		retired, rerr := vd.retire_bridge_entry(h.vault, string(bridge.owner_user_id), bridge.bridge_id)
+		// .All: a revoke during a pending attach leaves two live identities, both dead now.
+		retired, rerr := vd.retire_bridge_identities(h.vault, string(bridge.owner_user_id), bridge.bridge_id, .All)
 		if rerr.code != .None {
 			fmt.eprintfln("hub: bridge %s revoked, but its vault directory entry was not retired: %s", bridge.bridge_id, rerr.message)
 			return respond_error(domain.Domain_Error{code = rerr.code, cause = "vault_entry_not_retired", message = "the bridge was revoked, but its vault directory entry could not be retired; retry the revoke"}, req.request_id)
 		}
-		if retired != "" && h.event_bus != nil {
-			events.publish_resource_changed(h.event_bus, string(bridge.owner_user_id), VAULT_DEVICES_RESOURCE, retired, "retired", "{}")
+		if h.event_bus != nil {
+			for id in retired do events.publish_resource_changed(h.event_bus, string(bridge.owner_user_id), VAULT_DEVICES_RESOURCE, id, "retired", "{}")
 		}
 	}
 	// The live connection (if any) is being shut down and will tombstone on its

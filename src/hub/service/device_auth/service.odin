@@ -216,6 +216,9 @@ Device_Info :: struct {
 	code_challenge:         string,
 	pair_salt:              string,
 	pair_hub_origin:        string,
+	// REQ-BE-2: the RAW host-asserted hint, exactly as stored. Untrusted: the HTTP
+	// layer must check it against the approving user before showing it to anyone.
+	previous_bridge_id:     string,
 }
 
 // GENERIC_UNKNOWN_CODE_ERROR is the single error returned for an unknown,
@@ -278,6 +281,7 @@ verify_with_ip :: proc(service: ^Device_Auth_Service, user_code, request_ip: str
 		code_challenge = grant.code_challenge,
 		pair_salt = grant.pair_salt,
 		pair_hub_origin = grant.pair_hub_origin,
+		previous_bridge_id = grant.previous_bridge_id,
 	}, true, domain.Domain_Error{}
 }
 

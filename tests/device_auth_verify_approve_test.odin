@@ -239,6 +239,29 @@ main :: proc() {
 	assert_eq(binfo_later.server_time - binfo_later.requested_at, 42, "request age is computed from two hub values")
 	FAKE_NOW -= 42
 
+	// --- REQ-BE-2: the untrusted previous_bridge_id hint is stored and handed back
+	// RAW by verify (the HTTP layer filters it per approver). Shape is checked at
+	// authorize; a malformed hint, or one on a user-token grant, is refused. ---
+	hint_in := device_auth.Authorize_Input{
+		client = "ham-bridge", device_label = "dawnstar", os = "linux", app_version = "0.9.1",
+		bridge_public_key = BPK, bridge_identity_public_key = IDP, bridge_identity_proof = IDPROOF, pair_salt = "0123456789abcdef0123456789abcdef", pair_hub_origin = "https://hub.example.test:443", pair_lookup = "7777777777777777777777777777777777777777777777777777777777777777", pair_key_mac = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+		code_challenge = PKCE_CHALLENGE, code_challenge_method = "S256", previous_bridge_id = "brg_18e04a5cda39f2a6",
+	}
+	_, hint_ok, _ := device_auth.authorize(&svc, hint_in, "127.0.0.7:1", "")
+	assert_true(hint_ok, "bridge authorize with a previous_bridge_id hint succeeds")
+	hinfo, hvok, _ := device_auth.verify(&svc, hint_in.pair_lookup)
+	assert_true(hvok, "verify the hinted bridge grant")
+	assert_eq(hinfo.previous_bridge_id, "brg_18e04a5cda39f2a6", "verify returns the stored hint")
+	for bad in ([]string{"brg_", "dev_123", "brg_a\"b", "brg_<script>", "brg_0123456789012345678901234567890123456789012345678901234567890"}) {
+		bad_in := hint_in
+		bad_in.pair_lookup = "8888888888888888888888888888888888888888888888888888888888888888"
+		bad_in.previous_bridge_id = bad
+		_, bad_ok, bad_err := device_auth.authorize(&svc, bad_in, "127.0.0.7:1", "")
+		assert_true(!bad_ok && bad_err.code == .Validation_Failed, fmt.tprintf("malformed previous_bridge_id %q is refused", bad))
+	}
+	_, user_hint_ok, user_hint_err := device_auth.authorize(&svc, {client = "electron", previous_bridge_id = "brg_1"}, "127.0.0.7:1", "")
+	assert_true(!user_hint_ok && user_hint_err.code == .Validation_Failed, "previous_bridge_id on a user-token grant is refused")
+
 	// --- approval dispatches to the BRIDGE minter, and only to it ---
 	user_mints_before := len(MINT_CALLS)
 	bridge_mints_before := len(BRIDGE_MINT_CALLS)

@@ -58,6 +58,7 @@ grant_clone_strings :: proc(g: Grant, heap: runtime.Allocator) -> Grant {
 	c.pair_key_mac = strings.clone(g.pair_key_mac, heap)
 	c.pair_salt = strings.clone(g.pair_salt, heap)
 	c.pair_hub_origin = strings.clone(g.pair_hub_origin, heap)
+	c.previous_bridge_id = strings.clone(g.previous_bridge_id, heap)
 	return c
 }
 
@@ -88,6 +89,7 @@ grant_free_strings :: proc(g: Grant, heap: runtime.Allocator) {
 	delete(g.pair_key_mac, heap)
 	delete(g.pair_salt, heap)
 	delete(g.pair_hub_origin, heap)
+	delete(g.previous_bridge_id, heap)
 }
 
 // Grant_Kind is WHAT a grant will mint when it is approved, decided ONCE at
@@ -185,6 +187,12 @@ Grant :: struct {
 	pair_key_mac:                string,
 	pair_salt:                   string,
 	pair_hub_origin:             string,
+	// REQ-BE-2: the bridge id the machine says it was enrolled as before. An
+	// UNTRUSTED, host-asserted hint: it authorizes nothing. It is shown to the
+	// approver only after verify_handler re-checks that the approver owns that bridge
+	// and that it is live, and an attach still goes through the approver's explicit
+	// target_bridge_id choice (re-checked again by the bridge service).
+	previous_bridge_id:          string,
 }
 
 // Authorize_Input is the public /device/authorize request body (ELDA-1).
@@ -211,6 +219,8 @@ Authorize_Input :: struct {
 	pair_key_mac:               string,
 	pair_salt:                  string,
 	pair_hub_origin:            string,
+	// Bridge grants only, optional: an untrusted hint (see Grant.previous_bridge_id).
+	previous_bridge_id:         string,
 }
 
 // Authorize_Result is what /device/authorize hands back to the device (ELDA-1).
@@ -390,6 +400,7 @@ create_grant :: proc(store: ^Grant_Store, input: Authorize_Input, request_ip: st
 		pair_key_mac = input.pair_key_mac,
 		pair_salt = input.pair_salt,
 		pair_hub_origin = input.pair_hub_origin,
+		previous_bridge_id = input.previous_bridge_id,
 	}
 	if input.bridge_identity_public_key != "" {
 		// Validated by validate_bridge_authorize_input before we get here.

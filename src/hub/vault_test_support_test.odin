@@ -137,11 +137,12 @@ VT_ROOT_SEED :: 1
 vt_bridge_seed: u32 = 1000
 
 // vt_ensure_vault makes sure the account behind `headers` has a directory (the root
-// is vt_make_dev(VT_ROOT_SEED)) and returns its user id and current version.
-vt_ensure_vault :: proc(graph: ^app.App_Graph, headers: []contracts.HTTP_Header) -> (user_id: string, version: i64, ok: bool) {
+// is vt_make_dev(root_seed)) and returns its user id and current version. A second
+// account needs its own root_seed: vault device ids are unique across accounts.
+vt_ensure_vault :: proc(graph: ^app.App_Graph, headers: []contracts.HTTP_Header, root_seed: u16 = VT_ROOT_SEED) -> (user_id: string, version: i64, ok: bool) {
 	user_id = vt_user_id(graph, headers)
 	if user_id == "" do return "", 0, false
-	root := vt_make_dev(VT_ROOT_SEED)
+	root := vt_make_dev(root_seed)
 	view, err := vd.get_directory(&graph.vault_directory, user_id)
 	if err.code == .None do return user_id, view.directory.version, true
 	res := api_http.router_dispatch(&graph.router, api_http.Request{
@@ -159,11 +160,11 @@ vt_enroll_proof :: proc(br: ^Vt_Dev, ecdh_pub, code_challenge: string) -> string
 }
 
 // vt_bridge_approval returns a fresh bridge identity and the `vault_approval` JSON
-// object the root signs for it.
-vt_bridge_approval :: proc(graph: ^app.App_Graph, user_id: string, version: i64) -> (br: Vt_Dev, approval_json: string) {
+// object the root (vt_make_dev(root_seed)) signs for it.
+vt_bridge_approval :: proc(graph: ^app.App_Graph, user_id: string, version: i64, root_seed: u16 = VT_ROOT_SEED) -> (br: Vt_Dev, approval_json: string) {
 	seed := sync.atomic_add(&vt_bridge_seed, 1)
 	br = vt_make_dev(u16(seed), "bridge")
-	root := vt_make_dev(VT_ROOT_SEED)
+	root := vt_make_dev(root_seed)
 	view, _ := vd.get_directory(&graph.vault_directory, user_id)
 	st := vt_statement("approve", user_id, &root, &br, fmt.tprintf("%d", version + 1), "1", prev = view.directory.head_hash)
 	return br, strings.concatenate({`{"expected_version":`, fmt.tprintf("%d", version), `,"statement":"`, vt_escape(st), `","signature":`, vt_sign(&root, st), "}"})
