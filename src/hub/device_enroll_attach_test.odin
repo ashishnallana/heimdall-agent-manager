@@ -28,7 +28,6 @@ import bridge_service "odin_test:hub/service/bridge"
 @(private = "file")
 attach_test_cidrs := [?]string{"127.0.0.1/32"}
 
-@(private = "file")
 attach_test_graph :: proc(t: ^testing.T, graph: ^app.App_Graph, name: string) -> (db_path: string, ok: bool) {
 	db_path = fmt.tprintf("%s/heimdall-hub-test-attach-%s-%d.db", os.get_env("TEMP", context.temp_allocator) if ODIN_OS == .Windows else "/tmp", name, os.get_pid())
 	_ = os.remove(db_path)
@@ -47,8 +46,9 @@ attach_test_graph :: proc(t: ^testing.T, graph: ^app.App_Graph, name: string) ->
 	return db_path, built
 }
 
+// The attach_* helpers below are shared with device_enroll_reuse_integration_test.odin.
+
 // Attach_Enrollment is one device-flow enrollment driven up to the token poll.
-@(private = "file")
 Attach_Enrollment :: struct {
 	verify_status:  int,
 	verify_body:    string,
@@ -56,13 +56,13 @@ Attach_Enrollment :: struct {
 	approve_body:   string,
 	bridge_id:      string, // from the poll; "" when approval was refused
 	access_token:   string,
+	refresh_token:  string,
 	identity_id:    string, // the vault device id of the new bridge identity
 }
 
 // attach_enroll authorizes a bridge grant (optionally carrying a previous_bridge_id
 // hint), resolves it on /device/verify as the approver, approves it (optionally onto
 // target_bridge_id) and, if approved, polls its credential. Nothing is committed.
-@(private = "file")
 attach_enroll :: proc(graph: ^app.App_Graph, headers: []contracts.HTTP_Header, label: string, target_bridge_id := "", previous_bridge_id := "", root_seed: u16 = VT_ROOT_SEED) -> (out: Attach_Enrollment, ok: bool) {
 	user_id, version, vault_ok := vt_ensure_vault(graph, headers, root_seed)
 	if !vault_ok do return out, false
@@ -109,13 +109,13 @@ attach_enroll :: proc(graph: ^app.App_Graph, headers: []contracts.HTTP_Header, l
 	if issued.status != 200 do return out, false
 	out.bridge_id = device_test_json_string(issued.body, "bridge_id")
 	out.access_token = device_test_json_string(issued.body, "access_token")
+	out.refresh_token = device_test_json_string(issued.body, "refresh_token")
 	return out, out.bridge_id != "" && out.access_token != ""
 }
 
 // attach_commit commits the bridge's pending enrollment through the PRODUCTION commit
 // (api_http.bridge_enroll_commit, what the unseal relay calls on ok:true), with the
 // enroll-only socket's hello recorded as a connecting bridge would.
-@(private = "file")
 attach_commit :: proc(graph: ^app.App_Graph, bridge_id: string) -> bool {
 	family_id := ""
 	pending, err := iface.bridge_list_live_tokens_by_scope(graph.bridges.repo, bridge_service.BRIDGE_ENROLL_TOKEN_SCOPE)
@@ -132,7 +132,6 @@ attach_commit :: proc(graph: ^app.App_Graph, bridge_id: string) -> bool {
 	return committed && commit_err.code == .None
 }
 
-@(private = "file")
 attach_vault_row :: proc(graph: ^app.App_Graph, user_id, device_id: string) -> (domain.Vault_Device, bool) {
 	devices, err := iface.vault_list_devices(graph.vault_directory.repo, user_id)
 	if err.code != .None do return {}, false
@@ -140,7 +139,6 @@ attach_vault_row :: proc(graph: ^app.App_Graph, user_id, device_id: string) -> (
 	return {}, false
 }
 
-@(private = "file")
 attach_token_works :: proc(graph: ^app.App_Graph, token: string) -> bool {
 	_, ok, _ := bridge_service.verify_bridge_token(&graph.bridges, token)
 	return ok
