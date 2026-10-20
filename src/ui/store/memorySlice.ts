@@ -130,7 +130,5 @@ const memorySlice = createSlice({
   },
 });
 
-export const selectMemoryState = (state: any) => state.memory;
-
 export const { setMemoryFilters, resetMemoryFilters, memoryEventReceived, auditStartedReceived, auditEndedReceived, clearActiveAudit } = memorySlice.actions;
 export default memorySlice.reducer;

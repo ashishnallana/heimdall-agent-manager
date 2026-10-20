@@ -1,4 +1,4 @@
-import { useEffect, type ReactNode } from 'react';
+import { useEffect } from 'react';
 // UI-13: responsive/mobile primitives shared across the shell.
 // Breakpoints (approx, per arch doc §6D): <768px mobile, 768–1024px tablet,
 // >1024px desktop. The desktop "two panes side-by-side" collapses to mobile
@@ -21,23 +21,6 @@ export {
   TOUCH_TARGET_CLASS,
 } from '@ui/hooks/useViewport';
 export type { Viewport } from '@ui/hooks/useViewport';
-
-// UI-13: the mobile bottom tab bar. Home / Chains / (palette center) / Chats / Settings.
-// `onOpenPalette` opens the command palette from the center button. The four
-// outer tabs navigate; debug-ids are layout-independent (same as desktop nav).
-export type MobileTabBarProps = {
-  activePath: string;
-  onNavigate: (route: string) => void;
-  onOpenPalette: () => void;
-  onOpenSettings?: () => void;
-  isSettingsOpen?: boolean;
-  chatBadge?: number;
-  chainsBadge?: number;
-  // The center palette button's debug-id is owned by the shell so the palette
-  // entry point has one stable, layout-independent id (also satisfies UI-12).
-  paletteDebugId?: string;
-  className?: string;
-};
 
 /**
  * `--ui-bottom-chrome` — how much persistent chrome the app keeps pinned to the
@@ -72,34 +55,3 @@ export function useBottomChromeVar(ref: { current: HTMLElement | null }) {
     };
   }, [ref]);
 }
-
-// UI-13: mobile-only top bar that replaces desktop sidebar chrome. Carries the
-// drawer (off-canvas sidebar) toggle, the current title, and an optional
-// inspector toggle (conversation right inspector -> bottom sheet).
-export type MobileTopBarProps = {
-  title: string;
-  onOpenDrawer: () => void;
-  inspectorToggle?: { label?: string; badge?: number; open?: boolean; onToggle: () => void };
-};
-
-// UI-13: chain drill-down header. Desktop shows task list + detail side-by-side;
-// mobile drills down: list (full-screen) -> tap task -> detail (full-screen) with
-// a back affordance. This header provides that back navigation on mobile only.
-export type MobileBackHeaderProps = {
-  title: string;
-  onBack: () => void;
-  action?: ReactNode;
-};
-
-// UI-13: mobile bottom-sheet shell for the conversation right inspector. The
-// desktop right-aside inspector collapses to a slide-up sheet on mobile; tabs
-// render as a segmented control. Content/labels/debug-ids are supplied by the
-// caller (ContextInspector) so they stay layout-independent (arch doc §6D).
-export type MobileInspectorSheetProps = {
-  open: boolean;
-  onClose: () => void;
-  title?: ReactNode;
-  subtitle?: ReactNode;
-  headerActions?: ReactNode;
-  children: ReactNode;
-};

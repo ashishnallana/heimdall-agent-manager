@@ -26,12 +26,6 @@ export type Size = 'sm' | 'md' | 'lg';
 export type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger';
 
 /**
- * Semantic intent of a status-bearing surface. Never a raw color.
- * Used by: Badge, Alert, Banner, Callout, StatusPill.
- */
-export type StatusVariant = 'neutral' | 'info' | 'success' | 'warning' | 'danger';
-
-/**
  * Status semantics where there is no "weight", only meaning.
  * Used by: StatusPill, StatusDot. (Action buttons use `variant` instead.)
  */

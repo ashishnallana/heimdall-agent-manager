@@ -107,12 +107,6 @@ export {
   canPauseTask,
 } from './taskCardLegacy';
 
-export interface FleetSlotChipsProps {
-  chainId: string;
-  onOpenDrawer?: () => void;
-  className?: string;
-}
-
 interface BridgeRuntimeRowProps {
   agentId: string;
   roleName: string;

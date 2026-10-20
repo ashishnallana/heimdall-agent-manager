@@ -22,18 +22,7 @@ export {
   findVaultTokens,
 } from './vaultCrypto.ts';
 
-import {
-  isVaultArmored,
-  containsVaultArmored,
-  resolveKeyring,
-  encryptVaultText,
-  decryptVaultText,
-  getActiveVaultKey,
-  findVaultTokens,
-  replaceVaultTokens,
-  VAULT_LOCKED_MARKER,
-  type VaultKeyring,
-} from './vaultCrypto.ts';
+import { isVaultArmored, containsVaultArmored, resolveKeyring, decryptVaultText, getActiveVaultKey, findVaultTokens, replaceVaultTokens, VAULT_LOCKED_MARKER, type VaultKeyring } from './vaultCrypto.ts';
 
 /** Placeholder substituted for vault-armored text that is not available in plaintext. */
 export const VAULT_MASK_PLACEHOLDER = VAULT_LOCKED_MARKER;
@@ -128,36 +117,6 @@ export async function resolveCopyableVaultText(
     }
   }
   return maskVaultArmored(result);
-}
-
-/**
- * Declarative object transformer: encrypts specified string fields of an object in-place or clone.
- * Unencrypted/non-targeted fields and already-armored fields are preserved intact.
- *
- * @param data Target object.
- * @param fields List of keys to encrypt.
- * @param key The keyring, or fallback to the active keyring.
- */
-export async function encryptFields<T>(
-  data: T,
-  fields: (keyof T)[],
-  key?: VaultKeyring | null,
-): Promise<T> {
-  if (data == null || typeof data !== 'object') {
-    return data;
-  }
-
-  const cryptoKey = await resolveKeyring(key);
-  const result = (Array.isArray(data) ? [...data] : { ...data }) as T;
-
-  for (const field of fields) {
-    const val = (result as Record<string, unknown>)[field as string];
-    if (typeof val === 'string' && !isVaultArmored(val)) {
-      (result as Record<string, unknown>)[field as string] = await encryptVaultText(val, cryptoKey);
-    }
-  }
-
-  return result;
 }
 
 /**

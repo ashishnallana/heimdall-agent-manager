@@ -87,12 +87,6 @@ export type IssueListFilter = {
 
 export type ListIssuesQueryArg = IssueListFilter | void;
 
-export type IssuePage = {
-  items: Issue[];
-  has_more: boolean;
-  limit: number;
-};
-
 export function issueListPath(arg: IssueListFilter | void | null): string {
   const params = new URLSearchParams();
   if (arg) {

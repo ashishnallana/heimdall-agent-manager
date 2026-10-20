@@ -94,7 +94,7 @@ export function toggleFleetRole(currentRoles: string[] | undefined, role: string
   return normalizeFleetRoles([...normalized, target]);
 }
 
-/** Format a concise role badge label for FleetSlotChips and role cards (e.g. 'worker + reviewer', 'reviewer + security'). */
+/** Format a concise role badge label for role cards (e.g. 'worker + reviewer', 'reviewer + security'). */
 export function formatFleetRolesBadge(roles?: string[]): string {
   const norm = normalizeFleetRoles(roles);
   return norm.join(' + ') || 'worker';

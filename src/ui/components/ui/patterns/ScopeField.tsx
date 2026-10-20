@@ -7,7 +7,7 @@
 // the page, detail, and proposal surfaces all render targeting consistently.
 
 import { useMemo } from 'react';
-import { Combobox, type ComboboxOption } from '@ui';
+import { type ComboboxOption } from '@ui';
 import {
   useListAgentIdentitiesQuery,
   useListAgentTemplatesQuery,
@@ -318,42 +318,6 @@ export function ScopeChips({ targeting, catalog, debugId, max, variant = 'compac
           +{overflow}
         </span>
       ) : null}
-    </div>
-  );
-}
-
-// ScopeEditor renders the four targeting dimensions as multi-select Combobox
-// controls (empty = all). Shared by the create modal, proposal review, and the
-// detail edit surface so scope editing behaves identically everywhere.
-export function ScopeEditor({ targeting, catalog, onChange, debugId, disabled = false }: { targeting: Targeting; catalog: ScopeCatalog; onChange: (next: Targeting) => void; debugId: string; disabled?: boolean }) {
-  return (
-    <div data-debug-id={debugId} className="grid gap-4 sm:grid-cols-2">
-      {SCOPE_DIMS.map((dim) => {
-        const entry = catalog[dim.key];
-        const noun = dim.label.toLowerCase();
-        const state = scopeCatalogState(entry, noun);
-        return (
-          <div key={dim.key} className="block">
-            <div className="mb-1 text-label font-medium text-muted">{dim.label}</div>
-            <Combobox
-              multiple
-              options={entry.options}
-              value={targeting[dim.key]}
-              onChange={(next) => onChange({ ...targeting, [dim.key]: next })}
-              debugId={`${debugId}-${dim.debug}`}
-              placeholder={dim.allLabel}
-              chipClassName={dim.chip}
-              loading={entry.loading}
-              // The popup says which of the three states it is in, rather than
-              // showing an empty list that reads as "broken" whatever the cause.
-              emptyLabel={scopeCatalogEmptyLabel(entry, noun)}
-              disabled={disabled || state.kind === 'failed'}
-              searchPlaceholder={`Search ${noun}…`}
-            />
-            <ScopeCatalogNote entry={entry} noun={noun} debugId={`${debugId}-${dim.debug}-state`} />
-          </div>
-        );
-      })}
     </div>
   );
 }

@@ -33,16 +33,6 @@ export type ProjectAnchor = {
   note: string;
 };
 
-export type Project = {
-  projectId: string;
-  name: string;
-  description: string;
-  anchors: ProjectAnchor[];
-  createdUnixMs: number;
-  updatedUnixMs: number;
-  order: number;
-};
-
 type TaskAgentRequest = {
   daemonUrl: string;
   agentToken: string;
@@ -720,10 +710,6 @@ function taskMutationRequest({ daemonUrl, agentToken, clientInstanceId, clientTo
   return requestJson(joinUrl(daemonUrl, '/user-rpc'), { method: 'POST', body: { action, client_instance_id: clientInstanceId, client_token: clientToken, ...body } });
 }
 
-export async function createTask({ daemonUrl, agentToken, clientInstanceId, clientToken, ...task }: Partial<TaskAgentRequest & UserRpcRequest> & Record<string, any>) {
-  return taskMutationRequest({ daemonUrl, agentToken, clientInstanceId, clientToken, action: 'task_create', agentPath: '/tasks/create', body: task });
-}
-
 export async function createTaskChain({ daemonUrl, agentToken, clientInstanceId, clientToken, ...chain }: Partial<TaskAgentRequest & UserRpcRequest> & Record<string, any>) {
   return taskMutationRequest({ daemonUrl, agentToken, clientInstanceId, clientToken, action: 'task_chain_create', agentPath: '/task-chains/create', body: chain });
 }
@@ -776,26 +762,6 @@ function userRpcRequest({ daemonUrl, clientInstanceId, clientToken, action, body
     method: 'POST',
     body: { action, client_instance_id: clientInstanceId, client_token: clientToken, ...body },
   });
-}
-
-export function normalizeProject(project: any): Project {
-  return {
-    projectId: project.project_id || '',
-    name: project.name || '',
-    description: project.description || '',
-    anchors: (project.anchors ?? []).map((anchor: any) => ({
-      type: anchor.type || '',
-      value: anchor.value || '',
-      note: anchor.note || '',
-    })),
-    createdUnixMs: Number(project.created_unix_ms || 0),
-    updatedUnixMs: Number(project.updated_unix_ms || 0),
-    order: Number(project.order || 0),
-  };
-}
-
-export async function reorderAgents({ daemonUrl, clientInstanceId, clientToken, agentIds }: UserRpcRequest & { agentIds: string[] }) {
-  return userRpcRequest({ daemonUrl, clientInstanceId, clientToken, action: 'agent_reorder', body: { agent_ids: agentIds } });
 }
 
 export async function fetchPreferences({ daemonUrl, clientToken }: { daemonUrl: string; clientToken: string }) {
