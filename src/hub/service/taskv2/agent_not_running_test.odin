@@ -4,6 +4,8 @@ import "core:strings"
 import "core:testing"
 import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
+import platform "odin_test:hub/platform"
+import jsonx "odin_test:lib/jsonx"
 import iface "odin_test:hub/repository/iface"
 import agent "odin_test:hub/service/agent"
 import sqlite "odin_test:hub/repository/sqlite"
@@ -181,6 +183,21 @@ test_agent_not_running_solo_start_launches_only_on_user_action :: proc(t: ^testi
 	testing.expect(t, task.state == .Ready && task.blocked_on_json == "", "successful solo start clears block")
 	_, held := lease_of(fx, "inst_coord")
 	testing.expect(t, !held && !wake_log_has_run(log, "inst_coord"), "matcher remains pull-only")
+	coord.runtime_status = "failed"
+	coord.last_error_json = `{"code":"provider_error","class":"fatal","message":"provider credentials expired"}`
+	_, _, _ = iface.agent_save_instance(&fx.agents, coord)
+	u, begun, _ := begin_uow(&fx.svc)
+	if !testing.expect(t, begun, "rematch async solo failure") do return
+	matched, _ := match_chain_in_uow(&fx.svc, &u, chain, .Instance_Terminal)
+	_, _ = end_uow(&fx.svc, &u, matched)
+	task = get_task(fx, "task_solo_anr")
+	testing.expect(t, task.state == .Backlog, "async solo failure reblocks")
+	reason := jsonx.extract_string(task.blocked_on_json, "reason", "", true, context.temp_allocator)
+	testing.expect(t, strings.contains(reason, "provider credentials expired"), "async provider error visible")
+	testing.expect(t, !strings.contains(reason, "{"), "provider error is readable text")
+	started, err = start_task_agent(&fx.svc, auth, task.task_id)
+	testing.expect(t, started && err.code == .None, "solo retry after async failure")
+	coord, _, _ = iface.agent_get_instance(&fx.agents, "inst_coord")
 	coord.runtime_status = "running"
 	_, _, _ = iface.agent_save_instance(&fx.agents, coord)
 	res, pulled, _ := lease_next(&fx.svc, inst_auth("inst_coord"), Lease_Next_Input{})
@@ -201,4 +218,92 @@ test_agent_not_running_capacity_accounts_for_manual_extra_instances :: proc(t: ^
 	ctx := Match_Context{instances = instances, held = held}
 	testing.expect(t, fleet_row_full(&ctx, domain.Task_Chain_Fleet{agent_id = "agt", capacity = 1}, Placement{bridge_id = "br"}), "manual extra instance cannot bypass full capacity")
 	testing.expect(t, !fleet_row_full(&ctx, domain.Task_Chain_Fleet{agent_id = "agt", capacity = 2}, Placement{bridge_id = "br"}), "free capacity is available")
+}
+
+@(test)
+test_agent_not_running_retriable_failure_queues_until_backoff :: proc(t: ^testing.T) {
+	fx, log, ok := lease_fixture(t, "anr_backoff")
+	defer lease_fixture_close(fx, log)
+	if !ok do return
+	chain := seed_live_chain(t, fx, "chain_anr_backoff")
+	seed_fleet(fx, chain, "agt_w")
+	seed_instance(fx, chain, "inst_w1", "agt_w", "br_1", "failed")
+	inst, _, _ := iface.agent_get_instance(&fx.agents, "inst_w1")
+	inst.stopped_at = platform.clock_now(&fx.clock)
+	inst.last_error_json = `{"code":"bridge_busy","class":"retriable","message":"rate limited","retry_after_ms":120000,"attempt":1}`
+	_, _, _ = iface.agent_save_instance(&fx.agents, inst)
+	task := publish_task(t, fx, chain, "task_backoff")
+	testing.expect(t, task.state == .Ready && task.blocked_on_json == "", "retriable failure queues")
+	fixture_advance(fx, 119)
+	_ = fire_due(&fx.svc, now_ms(&fx.clock), false)
+	testing.expect_value(t, get_task(fx, string(task.task_id)).state, domain.Task_State.Ready)
+	fixture_advance(fx, REMATCH_DELAYS_SECONDS[1] + 1)
+	_ = fire_due(&fx.svc, now_ms(&fx.clock), false)
+	_, held := lease_of(fx, "inst_w1")
+	testing.expect(t, held && wake_log_has_run(log, "inst_w1"), "automatic grant after backoff")
+	testing.expect(t, get_task(fx, string(task.task_id)).blocked_on_json == "", "no user intervention")
+}
+
+@(test)
+test_agent_not_running_reviewer_restart_preserves_rounds :: proc(t: ^testing.T) {
+	fx, log, ok := lease_fixture(t, "anr_reviewer")
+	defer lease_fixture_close(fx, log)
+	if !ok do return
+	chain := seed_live_chain(t, fx, "chain_anr_reviewer")
+	seed_fleet(fx, chain, "agt_w")
+	seed_fleet(fx, chain, "agt_r", roles = `["reviewer"]`)
+	seed_instance(fx, chain, "inst_w1", "agt_w", "br_1", "idle")
+	seed_instance(fx, chain, "inst_r1", "agt_r", "br_1", "idle")
+	task := publish_task(t, fx, chain, "task_review_restart", brief = `{"goal":"g","acceptance":["a"],"verify":"true","review_roles":["reviewer"]}`)
+	confirm_holder(fx, "inst_w1")
+	write_verify(fx, string(task.task_id), 1, "h1", 0)
+	_, submitted, _ := lease_submit(&fx.svc, inst_auth("inst_w1"), Submit_Input{summary = "v1", vcs_json = `{"head":"h1","dirty":false}`})
+	if !testing.expect(t, submitted, "first submission") do return
+	_, reviewed, _ := review_post(&fx.svc, inst_auth("inst_r1"), Review_Input{verdict = "request_changes", findings_json = `[{"path":"a","line":1,"severity":"major","text":"fix"}]`})
+	if !testing.expect(t, reviewed, "first review") do return
+	confirm_holder(fx, "inst_w1")
+	write_verify(fx, string(task.task_id), 2, "h2", 0)
+	_, submitted, _ = lease_submit(&fx.svc, inst_auth("inst_w1"), Submit_Input{summary = "v2", vcs_json = `{"head":"h2","dirty":false}`})
+	if !testing.expect(t, submitted, "second submission") do return
+	confirm_holder(fx, "inst_r1")
+	inst, _, _ := iface.agent_get_instance(&fx.agents, "inst_r1")
+	inst.runtime_status = "failed"
+	_, _, _ = iface.agent_save_instance(&fx.agents, inst)
+	on_instance_terminal(&fx.svc, "inst_r1")
+	task = get_task(fx, string(task.task_id))
+	testing.expect(t, is_agent_not_running_block(task.blocked_on_json), "dead reviewer blocks")
+	evs, _ := iface.taskchain_list_events_by_task(&fx.repo, task.task_id, "u1")
+	testing.expect_value(t, fold_task(evs, fold_input_for_task(task, true)).review_rounds, 1)
+	started, err := start_task_agent(&fx.svc, user_auth(), task.task_id)
+	testing.expect(t, started && err.code == .None, "reviewer restart")
+	lease, held := lease_of(fx, "inst_r1")
+	testing.expect(t, held && lease.kind == domain.LEASE_KIND_REVIEW, "review regranted")
+	task = get_task(fx, string(task.task_id))
+	evs, _ = iface.taskchain_list_events_by_task(&fx.repo, task.task_id, "u1")
+	testing.expect_value(t, fold_task(evs, fold_input_for_task(task, true)).review_rounds, 1)
+	testing.expect_value(t, task.state, domain.Task_State.In_Review)
+	assert_projection_matches_fold(t, fx, chain.chain_id, "u1", "review restart")
+}
+
+@(test)
+test_agent_not_running_hello_only_answers_matching_offline_blocks :: proc(t: ^testing.T) {
+	fx, log, ok := lease_fixture(t, "anr_hello")
+	defer lease_fixture_close(fx, log)
+	if !ok do return
+	chain := seed_live_chain(t, fx, "chain_anr_hello")
+	seed_bridge(fx, "br_2", online = false)
+	seed_fleet(fx, chain, "agt_w")
+	seed_instance(fx, chain, "inst_w1", "agt_w", "br_1", "failed")
+	inst, _, _ := iface.agent_get_instance(&fx.agents, "inst_w1")
+	inst.last_error_json = `{"code":"provider_error","class":"fatal","message":"login required"}`
+	_, _, _ = iface.agent_save_instance(&fx.agents, inst)
+	provider_task := publish_task(t, fx, chain, "task_login")
+	offline_task := publish_task(t, fx, chain, "task_other_bridge", bridge_pin = "br_2")
+	testing.expect(t, is_agent_not_running_block(provider_task.blocked_on_json), "provider failure blocks")
+	testing.expect(t, is_agent_not_running_block(offline_task.blocked_on_json), "other bridge blocks")
+	on_bridge_hello(&fx.svc, "br_1", nil)
+	testing.expect_value(t, get_task(fx, "task_login").blocked_on_json, provider_task.blocked_on_json)
+	testing.expect_value(t, get_task(fx, "task_other_bridge").blocked_on_json, offline_task.blocked_on_json)
+	testing.expect_value(t, count_events(fx, "task_login", EV_ANSWERED), 0)
+	testing.expect_value(t, count_events(fx, "task_other_bridge", EV_ANSWERED), 0)
 }

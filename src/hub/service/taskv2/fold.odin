@@ -247,10 +247,11 @@ fold_task :: proc(events: []domain.Task_Event, input: Fold_Input) -> Task_View {
 			v.last_release = .Reopened
 			v.blocked_on_json = human_block("merge_conflict", ev.ts_ms)
 		case EV_ANSWERED:
+			infrastructure := is_agent_not_running_block(v.blocked_on_json)
 			v.blocked_on_json = ""
 			v.budget_exhausted = false
 			v.oscillating = false
-			v.review_rounds = 0
+			if !infrastructure do v.review_rounds = 0
 		case:
 			// audit-only kinds
 		}

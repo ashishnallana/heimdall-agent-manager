@@ -192,7 +192,7 @@ grant_work :: proc(svc: ^Service, u: ^Uow, ctx: ^Match_Context, task: domain.Tas
 		if instance_is_live(ctx.coordinator) || instance_is_pending(ctx.coordinator) {
 			queued = true
 		} else {
-			failure, failed_agent = fmt.tprintf("coordinator instance %s is %s", ctx.coordinator.agent_instance_id, ctx.coordinator.runtime_status), ctx.coordinator.agent_id
+			failure, failed_agent = instance_failure_reason(ctx.coordinator), ctx.coordinator.agent_id
 			failed_placement = Placement{bridge_id = ctx.coordinator.bridge_id, provider = ctx.coordinator.provider, model = ctx.coordinator.model}
 		}
 	}
@@ -294,6 +294,15 @@ review_lease_live_for :: proc(ctx: ^Match_Context, svc: ^Service, task_id: domai
 	return false
 }
 
+// Keep provider messages readable in both fleet and solo recovery cards.
+instance_failure_reason :: proc(inst: domain.Agent_Instance) -> string {
+	reason := fmt.tprintf("instance %s is %s", inst.agent_instance_id, inst.runtime_status)
+	if message := jsonx.extract_string(inst.last_error_json, "message", "", true, context.temp_allocator); message != "" {
+		return fmt.tprintf("%s: %s", reason, message)
+	}
+	return reason
+}
+
 // ---- instance selection --------------------------------------------------------------
 
 // pick_instance chooses WHO runs a grant for `fleet` on `placement.bridge_id`:
@@ -327,8 +336,14 @@ pick_instance :: proc(svc: ^Service, u: ^Uow, ctx: ^Match_Context, fleet: domain
 		}
 		if is_coordinator(svc, ctx.chain, inst.agent_instance_id) do continue
 		disposition := agent.failed_instance_disposition(inst, ctx.now_ms)
+		if disposition == .Hold {
+			if werr, typed := agent.instance_last_error(inst); typed && werr.class == .retriable {
+				live_count += 1
+				continue
+			}
+		}
 		if disposition == .Dead || disposition == .Hold {
-			failure = fmt.tprintf("instance %s is %s: %s", inst.agent_instance_id, inst.runtime_status, inst.last_error_json)
+			failure = instance_failure_reason(inst)
 			continue
 		}
 		free := !ctx.held[inst.agent_instance_id]

@@ -335,8 +335,6 @@ test_bridge_pin_and_offline_hold_until_hello :: proc(t: ^testing.T) {
 	// bridge comes online → hello → match
 	set_bridge_status(fx, "br_2", true)
 	on_bridge_hello(&fx.svc, "br_2", []string{"inst_w2"})
-	started, _ := start_task_agent(&fx.svc, contracts.Auth_Context{kind = .User_Token, user_id = "u1"}, task.task_id)
-	testing.expect(t, started, "user retries repaired bridge")
 	testing.expect_value(t, get_task(fx, "task_pinned").state, domain.Task_State.In_Progress)
 	l2, h2 := lease_of(fx, "inst_w2")
 	testing.expect(t, h2 && l2.bridge_id == "br_2", "granted on hello to the br_2 instance")

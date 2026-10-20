@@ -183,6 +183,10 @@ test_fold_changes_requested_and_oscillation :: proc(t: ^testing.T) {
 			testing.expect(t, v2.oscillating, "third round trips the oscillation guard")
 		}
 	}
+	append(&evs, ev(id, EV_ANSWERED))
+	answered := fold_task(evs[:], input_task(roles = 1))
+	testing.expect_value(t, answered.review_rounds, 0)
+	testing.expect(t, !answered.oscillating && answered.state == .Ready, "answering oscillation still resets review rounds")
 	// approval → done
 	evs2 := []domain.Task_Event{ev(1, EV_PUBLISHED), grant(2), ev(3, EV_SUBMITTED), ev(4, EV_APPROVED)}
 	testing.expect_value(t, fold_task(evs2, input_task(roles = 1)).state, domain.Task_State.Done)

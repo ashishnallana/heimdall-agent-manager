@@ -533,6 +533,15 @@ on_bridge_hello :: proc(svc: ^Service, bridge_id: string, active_instance_ids: [
 	requeue_pending_merges(svc, &u, bridge_id)
 	if cerr.code == .None {
 		for c in chains {
+			// Reconnect repairs bridge absence, never provider or deliberate-stop failures.
+			tasks, terr := iface.taskchain_list_tasks_by_chain(svc.repo, c.chain_id, c.owner_user_id)
+			if terr.code != .None { ok_all = false; continue }
+			for task in tasks {
+				if !is_agent_not_running_block(task.blocked_on_json) do continue
+				if jsonx.extract_string(task.blocked_on_json, "bridge_id", "", true, context.temp_allocator) != bridge_id do continue
+				if jsonx.extract_string(task.blocked_on_json, "cause", "", true, context.temp_allocator) != "bridge_offline" do continue
+				if _, _, answered, _ := record_event(svc, &u, task, hub_actor(), EV_ANSWERED, "{}"); !answered do ok_all = false
+			}
 			if chain_has_held_task(svc, c) {
 				if mok, _ := match_chain_in_uow(svc, &u, c, .Bridge_Hello); !mok do ok_all = false
 			}

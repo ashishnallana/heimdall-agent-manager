@@ -104,6 +104,7 @@ block_ready_agent_in_uow :: proc(svc: ^Service, u: ^Uow, task: domain.Task, agen
 	json_str(&waiting, "kind", "agent_not_running")
 	json_str(&waiting, "agent_id", agent_id)
 	json_str(&waiting, "bridge_id", placement.bridge_id)
+	if failure == "bridge is offline" do json_str(&waiting, "cause", "bridge_offline")
 	json_str(&waiting, "provider", placement.provider)
 	json_str(&waiting, "model", placement.model)
 	json_str(&waiting, "reason", fmt.tprintf("Agent %s (%s/%s) on bridge %s is not running: %s", agent_id, placement.provider, placement.model, placement.bridge_id, failure))
@@ -124,11 +125,13 @@ start_task_agent :: proc(svc: ^Service, auth: contracts.Auth_Context, task_id: d
 	if auth.kind != .User_Token do return false, domain.domain_error(.Forbidden, "only the user may start a task agent")
 	u, ok, err := begin_uow(svc)
 	if !ok do return false, err
-	task, found, terr := iface.taskchain_get_task(svc.repo, task_id)
+	task, found, _ := iface.taskchain_get_task(svc.repo, task_id)
 	if !found || string(task.owner_user_id) != auth.user_id {
 		_, _ = end_uow(svc, &u, false)
 		return false, domain.domain_error(.Not_Found, "task not found")
 	}
+	// Card validation happens before this transaction; this second read closes
+	// the race with a newly recorded failure between the two reads.
 	if expected_waiting_on != "" && expected_waiting_on != task.blocked_on_json {
 		_, _ = end_uow(svc, &u, false)
 		return false, domain.domain_error(.Conflict, "the agent failure changed; reload the card")
@@ -160,7 +163,7 @@ start_task_agent :: proc(svc: ^Service, auth: contracts.Auth_Context, task_id: d
 	if is_agent_not_running_block(fresh.blocked_on_json) {
 		return false, domain.domain_error(.Conflict, jsonx.extract_string(fresh.blocked_on_json, "reason", "Agent failed to start", true, context.temp_allocator))
 	}
-	return true, terr
+	return true, domain.Domain_Error{}
 }
 
 // Called after commit when the wake command could not even be sent. Re-read
