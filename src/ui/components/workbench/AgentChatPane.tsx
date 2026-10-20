@@ -89,7 +89,7 @@ import AgentActivityBubbles from '../chat/AgentActivityBubbles';
 import AtMentionPopup, { type MentionEntity } from '../chat/AtMentionPopup';
 import ChatMessageList from '../chat/ChatMessageList';
 import InstanceReconfigurationProgress from '../chat/InstanceReconfigurationProgress';
-import { MessageComposerInput, MessageComposerActions } from '../chat/MessageComposer';
+import { MessageComposerInput, MessageComposerActions, MessageComposerStatus } from '../chat/MessageComposer';
 import RuntimeConfigurationOptions from '../chat/RuntimeConfigurationOptions';
 import { type TaskLike } from '../chat/chainTaskInference';
 import { groupTranscriptMessages, isAgentStartMessage } from '../chat/transcriptGrouping';
@@ -974,7 +974,7 @@ export function AgentChatPane({
 
   useEffect(() => {
     const el = composerDockRef.current;
-    if (!isMobile || !el || typeof ResizeObserver === 'undefined') {
+    if (!el || typeof ResizeObserver === 'undefined') {
       setComposerDockHeight(0);
       return;
     }
@@ -2123,7 +2123,55 @@ export function AgentChatPane({
       sendDisabled,
       paneExpanded: false,
       onPaneToggle: handleOpenPtyTab,
+      onOpenTasks: chainId ? () => openAux({ type: 'tasks' }) : undefined,
     };
+    const runtimeLabel = needsStart
+      ? 'Stopped'
+      : runtimeStopping
+      ? 'Stopping…'
+      : isStarting
+      ? 'Starting…'
+      : isWorking
+      ? 'Working…'
+      : 'Running';
+    const runtimeStatusMenu = (
+      <Menu
+        side="top"
+        align="end"
+        label="Runtime status"
+        open={statusMenuOpen}
+        onOpenChange={setStatusMenuOpen}
+        trigger={
+          <button
+            type="button"
+            data-debug-id="conversation-runtime-status-chip"
+            data-status={runtimeStateFromStatus(runtimeStatus)}
+            aria-label={`Agent ${runtimeLabel.replace('…', '').toLowerCase()}. Start or stop the agent`}
+            title={`${runtimeLabel} — start/stop the agent`}
+            className={`grid shrink-0 place-items-center rounded-full px-2 hover:bg-neutral-soft ${isMobile ? '-mr-1.5 h-10 min-w-10' : '-mr-1 h-8 min-w-8'}`}
+          >
+            <MessageComposerStatus
+              debugPrefix="conversation"
+              tone={runtimeStatusToTone(runtimeStatus)}
+              label={runtimeLabel}
+              busy={!needsStart && (runtimeStopping || isStarting || isWorking)}
+            />
+          </button>
+        }
+      >
+        <Menu.Label>Runtime: {runtimeLabel}</Menu.Label>
+        <Menu.Item
+          data-debug-id="conversation-runtime-status-toggle-btn"
+          disabled={!agentInstanceId || runtimeActionBusy || runtimeStopping}
+          onClick={() => void toggleRuntime()}
+          className={needsStart ? 'text-success' : 'text-danger'}
+        >
+          <Icon name={needsStart ? 'play' : 'stop'} size={15} />
+          <span>{needsStart ? 'Start agent' : 'Stop agent'}</span>
+        </Menu.Item>
+        {reconfigStatus ? <Menu.Label>{reconfigStatus}</Menu.Label> : null}
+      </Menu>
+    );
     return (
       <form
         ref={composerContainerRef as any}
@@ -2132,7 +2180,7 @@ export function AgentChatPane({
         className={
           isMobile
             ? 'w-full max-w-4xl mx-auto px-3 pt-2 ui-float-dock-pad'
-            : 'w-full max-w-4xl mx-auto px-3 sm:px-0 py-4'
+            : 'w-full max-w-4xl mx-auto px-3 sm:px-0 pt-2 pb-4'
         }
       >
         <div className="mx-auto w-full max-w-4xl">
@@ -2261,18 +2309,16 @@ export function AgentChatPane({
             className={
               isMobile
                 ? 'ui-frost-card relative isolate rounded-[26px] border px-3 py-2.5 focus-within:border-accent'
-                : 'rounded-[22px] border border-subtle bg-surface px-3 py-2.5 focus-within:border-accent sm:px-4 sm:py-3'
+                : 'ui-frost-card relative isolate rounded-[22px] border px-3 py-2.5 focus-within:border-accent sm:px-4 sm:py-3'
             }
           >
-            {isMobile ? (
-              // REQ-FROST-2: stacked backdrop layers, strongest behind the input row and
-              // fading toward the action row (see `.ui-frost-gradient` in styles.css).
-              <div data-debug-id="conversation-composer-frost" aria-hidden="true" className="ui-frost-gradient -z-10">
-                <span />
-                <span />
-                <span />
-              </div>
-            ) : null}
+            {/* REQ-FROST-2: stacked backdrop layers, strongest behind the input row and
+                fading toward the action row (see `.ui-frost-gradient` in styles.css). */}
+            <div data-debug-id="conversation-composer-frost" aria-hidden="true" className="ui-frost-gradient -z-10">
+              <span />
+              <span />
+              <span />
+            </div>
             <div
               data-debug-id="conversation-composer-context"
               className="mb-2 hidden min-w-0 items-center gap-x-2 sm:flex text-[12px] text-muted"
@@ -2309,63 +2355,6 @@ export function AgentChatPane({
                     </button>
                   </>
                 ) : null}
-              </div>
-              <div className="ml-auto shrink-0">
-                <Menu
-                  side="top"
-                  align="end"
-                  label="Runtime status"
-                  open={statusMenuOpen}
-                  onOpenChange={setStatusMenuOpen}
-                  trigger={
-                    <button
-                      type="button"
-                      data-debug-id="conversation-runtime-status-chip"
-                      title="Runtime status — start/stop the agent"
-                      className="inline-flex items-center gap-1.5 rounded-full border border-subtle bg-surface-raised px-2.5 py-1 text-caption text-muted hover:bg-neutral-soft hover:text-primary"
-                    >
-                      <StatusDot
-                        size="sm"
-                        tone={runtimeStatusToTone(runtimeStatus)}
-                        label={
-                          needsStart
-                            ? 'Stopped'
-                            : runtimeStopping
-                            ? 'Stopping'
-                            : runtimeStateLabel(runtimeStateFromStatus(runtimeStatus))
-                        }
-                      />
-                      {needsStart
-                        ? 'Stopped'
-                        : runtimeStopping
-                        ? 'Stopping…'
-                        : runtimeStateFromStatus(runtimeStatus) === 'starting'
-                        ? 'Starting…'
-                        : 'Running'}
-                    </button>
-                  }
-                >
-                  <Menu.Label>
-                    Runtime:{' '}
-                    {needsStart
-                      ? 'Stopped'
-                      : runtimeStopping
-                      ? 'Stopping…'
-                      : runtimeStateFromStatus(runtimeStatus) === 'starting'
-                      ? 'Starting…'
-                      : 'Running'}
-                  </Menu.Label>
-                  <Menu.Item
-                    data-debug-id="conversation-runtime-status-toggle-btn"
-                    disabled={!agentInstanceId || runtimeActionBusy || runtimeStopping}
-                    onClick={() => void toggleRuntime()}
-                    className={needsStart ? 'text-success' : 'text-danger'}
-                  >
-                    <Icon name={needsStart ? 'play' : 'stop'} size={15} />
-                    <span>{needsStart ? 'Start agent' : 'Stop agent'}</span>
-                  </Menu.Item>
-                  {reconfigStatus ? <Menu.Label>{reconfigStatus}</Menu.Label> : null}
-                </Menu>
               </div>
             </div>
 
@@ -2470,51 +2459,48 @@ export function AgentChatPane({
                     ))}
                   </ul>
                 </div>
-              ) : isMobile && !pendingReconfig ? (
-                <div className="flex items-end gap-2">
-                  <div className="min-w-0 flex-1 py-2.5">{composerInput}</div>
-                  <MessageComposerActions {...composerActions} inline />
-                </div>
               ) : (
-                composerInput
+                // REQ-PORT-1: top row = input + runtime indicator (start/stop menu) at top right.
+                <div className="flex items-start gap-2">
+                  <div className={`min-w-0 flex-1 ${isMobile ? 'pl-1 pt-1.5' : ''}`}>{composerInput}</div>
+                  {runtimeStatusMenu}
+                </div>
               )}
             </div>
 
-            {!(isMobile && !pendingReconfig && !conversationReadOnly) ? (
-              <MessageComposerActions
-                {...composerActions}
-                readOnly={conversationReadOnly}
-                pendingActions={
-                  pendingReconfig ? (
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        data-debug-id="conversation-reconfigure-reset-btn"
-                        disabled={runtimeActionBusy || operationBlocksInput}
-                        onClick={resetRuntimeConfiguration}
-                        className="rounded-xl border border-subtle px-4 py-2 text-sm text-primary disabled:opacity-40"
-                      >
-                        Reset
-                      </button>
-                      <button
-                        type="button"
-                        data-debug-id="conversation-reconfigure-apply-btn"
-                        disabled={
-                          runtimeActionBusy ||
-                          (operation?.phase !== 'recovery_required' &&
-                            (isStarting || runtimeStopping)) ||
-                          stagedConfigurationIssues.length > 0
-                        }
-                        onClick={() => void applyReconfigure()}
-                        className="rounded-xl bg-accent px-4 py-2 text-sm font-semibold text-accent-fg disabled:opacity-40"
-                      >
-                        Apply
-                      </button>
-                    </div>
-                  ) : undefined
-                }
-              />
-            ) : null}
+            <MessageComposerActions
+              {...composerActions}
+              readOnly={conversationReadOnly}
+              pendingActions={
+                pendingReconfig ? (
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      data-debug-id="conversation-reconfigure-reset-btn"
+                      disabled={runtimeActionBusy || operationBlocksInput}
+                      onClick={resetRuntimeConfiguration}
+                      className="rounded-xl border border-subtle px-4 py-2 text-sm text-primary disabled:opacity-40"
+                    >
+                      Reset
+                    </button>
+                    <button
+                      type="button"
+                      data-debug-id="conversation-reconfigure-apply-btn"
+                      disabled={
+                        runtimeActionBusy ||
+                        (operation?.phase !== 'recovery_required' &&
+                          (isStarting || runtimeStopping)) ||
+                        stagedConfigurationIssues.length > 0
+                      }
+                      onClick={() => void applyReconfigure()}
+                      className="rounded-xl bg-accent px-4 py-2 text-sm font-semibold text-accent-fg disabled:opacity-40"
+                    >
+                      Apply
+                    </button>
+                  </div>
+                ) : undefined
+              }
+            />
           </div>
         </div>
       </form>
@@ -2721,19 +2707,22 @@ export function AgentChatPane({
                 }}
                 className={`flex min-w-0 items-center gap-1.5 rounded-md px-1.5 py-0.5 text-primary hover:bg-neutral-soft ${isMobile ? 'min-h-11 text-[15px]' : ''}`}
               >
-                <StatusDot
-                  size="sm"
-                  tone={runtimeStatusToTone(runtimeStatus)}
-                  label={
-                    needsStart
-                      ? 'Stopped'
-                      : runtimeStopping
-                      ? 'Stopping'
-                      : isStarting
-                      ? 'Starting'
-                      : 'Running'
-                  }
-                />
+                {/* REQ-PORT-5: on mobile the runtime dot lives in the composer card instead. */}
+                {!isMobile ? (
+                  <StatusDot
+                    size="sm"
+                    tone={runtimeStatusToTone(runtimeStatus)}
+                    label={
+                      needsStart
+                        ? 'Stopped'
+                        : runtimeStopping
+                        ? 'Stopping'
+                        : isStarting
+                        ? 'Starting'
+                        : 'Running'
+                    }
+                  />
+                ) : null}
                 <span className="truncate">
                   <VaultText
                     value={
@@ -2937,7 +2926,7 @@ export function AgentChatPane({
       {/* Transcript + Composer Dock */}
       <div
         data-debug-id="conversation-thread-transcript"
-        className={`${isMobile ? 'relative ' : ''}flex w-full min-h-0 min-w-0 max-w-full flex-1 flex-col overflow-x-hidden p-0 sm:px-4 sm:py-3`}
+        className={`relative flex w-full min-h-0 min-w-0 max-w-full flex-1 flex-col overflow-x-hidden p-0 sm:px-4 sm:py-3`}
       >
         <ChatMessageList
           conversationKey={conversationId}
@@ -2951,7 +2940,7 @@ export function AgentChatPane({
           formatTimestamp={formatMessageTimestamp}
           getDeliveryStatus={deliveryStatusFor}
           agentIsWorking={isWorking}
-          bottomInset={isMobile ? composerDockHeight : 0}
+          bottomInset={composerDockHeight}
           renderMessageBody={({ message }) => renderConversationMessageBody(message)}
           wrapperClassName="relative min-h-0 min-w-0 max-w-full flex-1 overflow-hidden overflow-x-hidden"
           scrollClassName="chat-scrollbar h-full min-h-0 max-w-full space-y-3 overflow-y-auto overflow-x-hidden rounded-none bg-canvas px-1 py-3 sm:space-y-4 sm:rounded-[18px] sm:px-4 sm:py-4"
@@ -3002,16 +2991,12 @@ export function AgentChatPane({
         <div
           ref={composerDockRef}
           data-debug-id="conversation-thread-composer-dock"
-          data-floating={isMobile ? 'true' : undefined}
-          className={
-            isMobile
-              ? // REQ-FROST-1: float over the transcript. Touches in the gaps around the
-                // card fall through to the transcript (`.ui-float-dock`).
-                'ui-float-dock absolute inset-x-0 bottom-0 z-20 mx-auto w-full max-w-4xl'
-              : 'mx-auto w-full max-w-4xl shrink-0'
-          }
+          data-floating="true"
+          // REQ-FROST-1 / REQ-PORT-4: float over the transcript on every form factor. Touches
+          // in the gaps around the card fall through to the transcript (`.ui-float-dock`).
+          className="ui-float-dock absolute inset-x-0 bottom-0 z-20 mx-auto w-full max-w-4xl"
         >
-          {isMobile ? <div aria-hidden="true" className="ui-frost-tail" /> : null}
+          <div aria-hidden="true" className="ui-frost-tail" />
           <AgentActivityBubbles instanceId={agentInstanceId} />
           <PinnedShellRuns sessions={pinnedRuns} />
           {renderComposer()}
