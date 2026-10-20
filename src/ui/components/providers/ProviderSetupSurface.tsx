@@ -6,20 +6,36 @@ import {
   providerSetupApi,
 } from './providerSetupApi';
 import ProviderTestRunModal, { type ProviderTestTarget } from './ProviderTestRunModal';
+import {
+  DISCOVERY_RETRY_MS,
+  DISCOVERY_RETRY_TIMEOUT_MS,
+  bridgeStatusPill,
+  checkedProviderCount,
+  defaultProviderSelection,
+  enableButtonLabel,
+  isRetriableDiscoveryError,
+  modelCountLabel,
+  notFoundSummary,
+  presentProviders,
+  providerEnableChanges,
+  providerStatus,
+} from './providerSummaryModel';
 
 export interface ProviderSetupSurfaceProps {
   bridgeId?: string;
   mode: 'enrollment' | 'settings';
+  /**
+   * 'full' (default): one card per provider whose Enable toggle saves at once.
+   * 'compact' (enrollment only, REQ-ENR-3/4): one short row per detected provider with
+   * a checkbox defaulted from what was found; the primary button saves the changes.
+   */
+  variant?: 'full' | 'compact';
   onApply?: () => void;
 }
 
-function providerStatus(provider: BridgeProviderStatus): { label: string; tone: 'success' | 'warning' | 'neutral' | 'danger' } {
-  if (provider.state === 'absent') return { label: 'Not detected', tone: 'neutral' };
-  if (provider.enabled) return { label: 'Enabled', tone: 'success' };
-  return { label: 'Detected', tone: 'neutral' };
-}
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-export function ProviderSetupSurface({ bridgeId, mode, onApply }: ProviderSetupSurfaceProps) {
+export function ProviderSetupSurface({ bridgeId, mode, variant = 'full', onApply }: ProviderSetupSurfaceProps) {
   const [payload, setPayload] = useState<ProviderSetupResponse | null>(null);
   const [loadError, setLoadError] = useState('');
   const [busy, setBusy] = useState('');
@@ -29,11 +45,26 @@ export function ProviderSetupSurface({ bridgeId, mode, onApply }: ProviderSetupS
   // and a provider is expanded only to look at or test its models.
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const autoScannedBridge = useRef('');
+  const mounted = useRef(true);
+  // Compact variant: the desired enable state per present provider, seeded from the
+  // discovery result, and the error of each PUT that failed.
+  const [selection, setSelection] = useState<Record<string, boolean> | null>(null);
+  const [rowErrors, setRowErrors] = useState<Record<string, string>>({});
+  const [discoveryFailed, setDiscoveryFailed] = useState(false);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
     setLoadError('');
-    void providerSetupApi.get(bridgeId || '').then(
+    if (!bridgeId) {
+      setLoadError('No bridge was named, so there are no providers to set up.');
+      return;
+    }
+    void providerSetupApi.get(bridgeId).then(
       (response) => { if (!cancelled) setPayload(response); },
       (error) => { if (!cancelled) setLoadError(String(error?.message || error)); },
     );
@@ -45,29 +76,79 @@ export function ProviderSetupSurface({ bridgeId, mode, onApply }: ProviderSetupS
     return payload.providers.filter((provider) => provider.enabled).length;
   }, [payload]);
 
+  // Enrollment mode retries while the hub still answers bridge_offline: a freshly
+  // enrolled bridge may not have its runtime socket up yet (REQ-ENR-3).
   async function rediscover() {
     if (!payload) return;
     setBusy('discovery');
+    setDiscoveryFailed(false);
     setNotice('Asking this bridge to scan for supported provider CLIs…');
+    const deadline = Date.now() + (mode === 'enrollment' ? DISCOVERY_RETRY_TIMEOUT_MS : 0);
     try {
-      setPayload(await providerSetupApi.discover(payload));
-      setNotice('Provider discovery completed on the bridge.');
-    } catch (error: any) {
-      setNotice(String(error?.message || error));
+      for (;;) {
+        try {
+          const next = await providerSetupApi.discover(payload);
+          if (!mounted.current) return;
+          setPayload(next);
+          setSelection(defaultProviderSelection(next.providers));
+          setRowErrors({});
+          setNotice(variant === 'compact' ? '' : 'Provider discovery completed on the bridge.');
+          return;
+        } catch (error: any) {
+          if (!mounted.current) return;
+          if (isRetriableDiscoveryError(error) && Date.now() + DISCOVERY_RETRY_MS < deadline) {
+            setNotice('Waiting for the bridge to come online before scanning…');
+            await sleep(DISCOVERY_RETRY_MS);
+            if (!mounted.current) return;
+            continue;
+          }
+          setDiscoveryFailed(true);
+          setNotice(String(error?.message || error));
+          return;
+        }
+      }
     } finally {
-      setBusy('');
+      if (mounted.current) setBusy('');
     }
+  }
+
+  // Compact variant (REQ-ENR-4): send only the changed enable states, each on its own,
+  // so one failing PUT shows on its row without stopping the others.
+  async function applySelection() {
+    if (!payload || !selection) return;
+    setBusy('apply');
+    setNotice('');
+    const changes = providerEnableChanges(payload.providers, selection);
+    const results = await Promise.allSettled(
+      changes.map((change) => providerSetupApi.setEnabled(payload, change.provider, change.enabled)),
+    );
+    if (!mounted.current) return;
+    const errors: Record<string, string> = {};
+    const saved = new Map<string, boolean>();
+    results.forEach((result, index) => {
+      const change = changes[index];
+      if (result.status === 'fulfilled') saved.set(change.provider, change.enabled);
+      else errors[change.provider] = String((result.reason as Error)?.message || result.reason);
+    });
+    setPayload({
+      ...payload,
+      providers: payload.providers.map((entry) => saved.has(entry.provider) ? { ...entry, enabled: Boolean(saved.get(entry.provider)) } : entry),
+    });
+    setRowErrors(errors);
+    setBusy('');
+    if (Object.keys(errors).length === 0) onApply?.();
+    else setNotice('Some providers could not be updated. Try again, or continue and fix them later in Settings → Providers.');
   }
 
   // A freshly enrolled bridge has never reported its CLIs, so scan once on
   // arrival instead of making the user click "Scan again" first.
   useEffect(() => {
-    if (mode !== 'enrollment' || !payload || busy !== '') return;
+    if ((mode !== 'enrollment' && variant !== 'compact') || !payload || busy !== '') return;
     const id = payload.bridge.bridge_id;
     if (autoScannedBridge.current === id) return;
     autoScannedBridge.current = id;
     void rediscover();
-  }, [mode, payload, busy]);
+  }, [mode, variant, payload, busy]);
 
   async function setProviderEnabled(provider: BridgeProviderStatus, enabled: boolean) {
     if (!payload) return;
@@ -97,6 +178,84 @@ export function ProviderSetupSurface({ bridgeId, mode, onApply }: ProviderSetupS
   }
 
   const { bridge, providers, discovery } = payload;
+  const bridgePill = bridgeStatusPill(bridge.status);
+
+  if (variant === 'compact') {
+    const present = presentProviders(providers);
+    const notFound = notFoundSummary(providers);
+    const scanning = busy === 'discovery' || (discovery.state !== 'complete' && !discoveryFailed);
+    const checked = selection ? checkedProviderCount(providers, selection) : 0;
+    const hasRowErrors = Object.keys(rowErrors).length > 0;
+    return (
+      <div data-debug-id="provider-summary" className="w-full">
+        <div className="flex flex-wrap items-center gap-2">
+          <h2 className="text-base font-semibold text-primary">
+            {scanning ? `Detecting providers on ${bridge.label}…` : `These providers will be enabled on ${bridge.label}`}
+          </h2>
+          <StatusPill tone={bridgePill.tone}>{bridgePill.label}</StatusPill>
+        </div>
+
+        {notice ? (
+          <p role="status" data-debug-id="provider-summary-notice" className="mt-2 text-sm text-muted">{notice}</p>
+        ) : null}
+
+        {scanning ? (
+          <div data-debug-id="provider-summary-scanning" className="mt-3 flex items-center gap-2 text-sm text-muted">
+            <Spinner size="sm" /> Scanning for installed provider CLIs…
+          </div>
+        ) : discoveryFailed ? (
+          <div className="mt-3">
+            <Button variant="secondary" data-debug-id="provider-setup-discover-btn" onClick={() => void rediscover()} leading={<Icon name="refresh" size={16} />}>
+              Scan again
+            </Button>
+          </div>
+        ) : (
+          <>
+            <ul data-debug-id="provider-summary-list" className="mt-3 divide-y divide-subtle rounded-xl border border-subtle">
+              {present.length === 0 ? (
+                <li className="px-3 py-2 text-sm text-muted">No supported provider CLI was found on this bridge.</li>
+              ) : present.map((provider) => (
+                <li key={provider.provider} data-debug-id={`provider-summary-row-${provider.provider}`} className="px-3 py-2">
+                  <label className="flex cursor-pointer items-center gap-3">
+                    <input
+                      data-debug-id={`provider-summary-enable-${provider.provider}`}
+                      type="checkbox"
+                      checked={Boolean(selection?.[provider.provider])}
+                      disabled={busy !== ''}
+                      onChange={(event) => {
+                        const value = event.target.checked;
+                        setSelection((prev) => ({ ...(prev || {}), [provider.provider]: value }));
+                      }}
+                    />
+                    <img src={provider.icon_url} alt="" className="h-6 w-6 shrink-0 rounded-md" />
+                    <span className="min-w-0 flex-1 truncate text-sm font-medium text-primary">{provider.display_name}</span>
+                    <span data-debug-id={`provider-summary-models-${provider.provider}`} className="shrink-0 text-xs text-muted">{modelCountLabel(provider.models.length)}</span>
+                  </label>
+                  {rowErrors[provider.provider] ? (
+                    <p role="alert" data-debug-id={`provider-summary-error-${provider.provider}`} className="mt-1 pl-7 text-xs text-danger">{rowErrors[provider.provider]}</p>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+            {notFound ? (
+              <details data-debug-id="provider-summary-not-found" className="mt-2 text-xs text-faint">
+                <summary className="cursor-pointer">{notFound}</summary>
+                <p className="mt-1">Install a provider CLI in the bridge service PATH, then scan again from Settings → Providers.</p>
+              </details>
+            ) : null}
+            <div className="mt-4 flex flex-wrap justify-end gap-2">
+              {hasRowErrors ? (
+                <Button variant="ghost" data-debug-id="provider-summary-continue-btn" disabled={busy !== ''} onClick={onApply}>Continue anyway</Button>
+              ) : null}
+              <Button variant="primary" data-debug-id="provider-setup-apply-btn" loading={busy === 'apply'} disabled={busy !== '' || !selection} onClick={() => void applySelection()}>
+                {enableButtonLabel(checked)}
+              </Button>
+            </div>
+          </>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div data-debug-id={`provider-setup-${mode}`} className="w-full">
@@ -106,7 +265,7 @@ export function ProviderSetupSurface({ bridgeId, mode, onApply }: ProviderSetupS
             <h1 className="text-xl font-semibold text-primary">
               {mode === 'enrollment' ? 'Choose providers for this bridge' : bridge.label}
             </h1>
-            <StatusPill tone="success">{mode === 'enrollment' ? 'Bridge connected' : 'Online'}</StatusPill>
+            <StatusPill tone={bridgePill.tone}>{bridgePill.label}</StatusPill>
           </div>
           <p className="mt-1 text-sm text-muted">
             {bridge.label} · {bridge.machine_hostname} · {bridge.status}
@@ -147,9 +306,7 @@ export function ProviderSetupSurface({ bridgeId, mode, onApply }: ProviderSetupS
           const providerBusy = busy === `provider:${provider.provider}`;
           const isExpanded = Boolean(expanded[provider.provider]);
           const detailsId = `provider-setup-details-${provider.provider}`;
-          const summary = available
-            ? `${provider.models.length} ${provider.models.length === 1 ? 'model' : 'models'}`
-            : 'Not installed';
+          const summary = available ? modelCountLabel(provider.models.length) : 'Not installed';
           return (
             <section key={provider.provider} data-debug-id={`provider-setup-card-${provider.provider}`} className={`overflow-hidden rounded-2xl border bg-surface ${provider.enabled ? 'border-accent/50 shadow-sm' : 'border-subtle'}`}>
               <div className="flex flex-col gap-4 p-4 sm:flex-row sm:items-center sm:justify-between">

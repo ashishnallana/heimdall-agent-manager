@@ -1878,9 +1878,8 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
 
   if (path === '/device/providers' || path.startsWith('/device/providers/')) {
     const encodedBridgeId = path.slice('/device/providers/'.length);
-    const providerBridgeId = encodedBridgeId
-      ? decodeURIComponent(encodedBridgeId)
-      : 'brg_mock_dawnstar';
+    // No mock fallback: without a bridge id the surface shows an error.
+    const providerBridgeId = encodedBridgeId ? decodeURIComponent(encodedBridgeId) : '';
     return (
       <main
         data-debug-id="provider-enrollment-standalone-page"

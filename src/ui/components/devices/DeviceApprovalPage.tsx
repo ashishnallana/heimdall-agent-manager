@@ -10,10 +10,12 @@
 //   browser → signed approval statement + keyring wrap + pair_mac;
 //   bridge  → signed approval of its identity key via /device/approve, then (once the
 //             enrolling process is connected) unseal v2 to an ephemeral key signed by
-//             exactly that identity, with the chain proof and the pair_mac.
+//             exactly that identity, with the chain proof and the pair_mac; then wait
+//             for the bridge to restart and reconnect, detect its providers and let the
+//             user pick which to enable (REQ-ENR-2..4).
 
-import React, { useCallback, useState } from 'react';
-import { Alert, Button, Icon, Input } from '@ui';
+import React, { useCallback, useEffect, useState } from 'react';
+import { Alert, Button, Icon, Input, Spinner } from '@ui';
 import { ApiError } from '../../api/cookieFetch';
 import {
   fetchPairCandidates,
@@ -26,8 +28,11 @@ import {
   type BrowserCodeInfo,
   type DeviceCodeInfo,
 } from '../../api/endpoints/vaultDevices';
-import { fetchBridgeEnrollmentStatus, fetchBridgeUnsealTarget, unsealBridge } from '../../api/endpoints/bridges';
+import { fetchBridgeEnrollmentStatus, fetchBridgeRow, fetchBridgeUnsealTarget, unsealBridge } from '../../api/endpoints/bridges';
+import { useListBridgesQuery } from '../../api/endpoints/bridgeSupport';
 import { enrollmentPendingOutcome, ENROLLMENT_PENDING_FALLBACK_SECONDS } from '../enrollment/bridgeEnrollmentCompletion';
+import ProviderSetupSurface from '../providers/ProviderSetupSurface';
+import { bridgeReconnectReady, reconnectSecondsLeft, reconnectStage, startReconnectWait } from '../providers/providerSummaryModel';
 import { fingerprintFor } from '../../utils/deviceIdentity';
 import { buildBridgeApproval, buildBrowserApproval, checkBridgeCodeInfo, checkBrowserCodeInfo, type PairedBrowser } from '../../utils/vaultDeviceFlows';
 import { acceptedPairOrigins, derivePairKeys, isPairHubOrigin, isPairSalt, normalizePairCode, pairApproveMac, type PairKeys } from '../../utils/vaultPairing';
@@ -65,6 +70,9 @@ type Phase =
   | { kind: 'loading' }
   | ({ kind: 'review' } & Review)
   | { kind: 'working'; message: string }
+  // Bridge only (REQ-ENR-2..4): after the unseal, wait for the restart, then providers.
+  | { kind: 'reconnecting'; bridgeId: string; label: string }
+  | { kind: 'providers'; bridgeId: string; label: string }
   | { kind: 'done'; message: string }
   | { kind: 'failed'; message: string };
 
@@ -171,12 +179,58 @@ async function waitForEnrollingBridge(bridgeId: string, onTick: (s: string) => v
   }
 }
 
+/**
+ * REQ-ENR-2: waits until the approved bridge is online and enrolled. The bridge list
+ * is patched live by the hub's bridge status_changed event; a GET /bridges/{id} poll
+ * covers a dropped event. Gives up after RECONNECT_TIMEOUT_MS with Retry and Skip.
+ */
+function BridgeReconnectWait({ bridgeId, label, onReady, onSkip }: { bridgeId: string; label: string; onReady: () => void; onSkip: () => void }) {
+  const [startedAt, setStartedAt] = useState(() => Date.now());
+  const [now, setNow] = useState(() => Date.now());
+  const [polledReady, setPolledReady] = useState(false);
+  const { data: bridgeList } = useListBridgesQuery();
+  const listedRow = (Array.isArray(bridgeList?.bridges) ? bridgeList.bridges : [])
+    .find((row: any) => String(row?.bridge_id || row?.id || '') === bridgeId);
+  const stage = reconnectStage(polledReady || bridgeReconnectReady(listedRow), startedAt, now);
+
+  useEffect(() => {
+    if (stage !== 'waiting') return;
+    // The countdown runs on its own clock, so a stalled GET cannot hide Retry/Skip.
+    return startReconnectWait({
+      poll: async (signal) => bridgeReconnectReady(await fetchBridgeRow(bridgeId, signal)),
+      onReady: () => setPolledReady(true),
+      onTick: setNow,
+    });
+  }, [bridgeId, startedAt, stage]);
+
+  useEffect(() => { if (stage === 'ready') onReady(); }, [stage, onReady]);
+
+  if (stage === 'timed-out') {
+    return (
+      <div data-debug-id="device-approval-reconnect-timeout" className="flex flex-col gap-3">
+        <Alert tone="warning" title="The bridge has not reconnected yet">
+          “{label}” was approved and given the vault key, but it has not come back online. Check that its service restarted.
+        </Alert>
+        <div className="flex flex-wrap gap-2">
+          <Button data-debug-id="device-approval-reconnect-retry-btn" variant="primary" onClick={() => { setPolledReady(false); setStartedAt(Date.now()); setNow(Date.now()); }}>Retry</Button>
+          <Button data-debug-id="device-approval-reconnect-skip-btn" variant="ghost" onClick={onSkip}>Skip — configure later in Settings → Providers</Button>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <p data-debug-id="device-approval-reconnecting" className="flex items-center gap-2 text-sm text-muted">
+      <Spinner size="sm" /> Waiting for the bridge to restart and reconnect… ({reconnectSecondsLeft(startedAt, now)} s)
+    </p>
+  );
+}
+
 export default function DeviceApprovalPage() {
   const [code, setCode] = useState('');
   const [phase, setPhase] = useState<Phase>({ kind: 'enter' });
   // The code input is locked once a lookup is in flight or succeeded: approve/deny always
   // act on the looked-up request, never on a later edit.
-  const codeLocked = phase.kind === 'loading' || phase.kind === 'review' || phase.kind === 'working';
+  const codeLocked = phase.kind === 'loading' || phase.kind === 'review' || phase.kind === 'working' || phase.kind === 'reconnecting' || phase.kind === 'providers';
   const [label, setLabel] = useState('');
 
   const lookUp = useCallback(async (raw: string) => {
@@ -228,7 +282,7 @@ export default function DeviceApprovalPage() {
         dispatch: unsealBridge,
         withKeyringBytes: (fn) => withKeyringBytes(fn, after),
       }, { enrollment: true, expectedPublicKey, extra: { enrollment: true, expected_public_key: expectedPublicKey.trim().toLowerCase(), pair_mac: pairMac } });
-      setPhase({ kind: 'done', message: `Bridge “${finalLabel}” approved and given the vault key. It restarts its service and comes online unsealed.` });
+      setPhase({ kind: 'reconnecting', bridgeId, label: finalLabel });
     } catch (err) {
       setPhase({ kind: 'failed', message: errText(err) });
     }
@@ -253,6 +307,9 @@ export default function DeviceApprovalPage() {
   }, [phase]);
 
   const reset = () => { setCode(''); setPhase({ kind: 'enter' }); };
+  const onBridgeReconnected = useCallback(() => {
+    setPhase((p) => p.kind === 'reconnecting' ? { kind: 'providers', bridgeId: p.bridgeId, label: p.label } : p);
+  }, []);
 
   return (
     <div data-debug-id="device-approval-page" className="mx-auto w-full max-w-xl p-4">
@@ -301,11 +358,29 @@ export default function DeviceApprovalPage() {
       ) : null}
 
       {phase.kind === 'working' ? <p data-debug-id="device-approval-progress" className="text-sm text-muted">{phase.message}</p> : null}
+      {phase.kind === 'reconnecting' ? (
+        <BridgeReconnectWait
+          bridgeId={phase.bridgeId}
+          label={phase.label}
+          onReady={onBridgeReconnected}
+          onSkip={() => setPhase({ kind: 'done', message: `Bridge “${phase.label}” approved and given the vault key. Choose its providers later in Settings → Providers once it is online.` })}
+        />
+      ) : null}
+      {phase.kind === 'providers' ? (
+        <div data-debug-id="device-approval-providers" className="rounded-2xl border border-subtle bg-surface p-4">
+          <ProviderSetupSurface
+            bridgeId={phase.bridgeId}
+            mode="enrollment"
+            variant="compact"
+            onApply={() => setPhase({ kind: 'done', message: `Bridge “${phase.label}” is online and its providers are set up.` })}
+          />
+        </div>
+      ) : null}
       {phase.kind === 'done' ? (
         <div data-debug-id="device-approval-done" className="flex flex-col gap-3">
           <Alert tone="success" title={phase.message.startsWith('Denied') ? 'Request denied' : 'Device approved'}>{phase.message}</Alert>
           <div className="flex flex-wrap gap-2">
-            <Button data-debug-id="device-approval-home-btn" variant="primary" onClick={() => { window.location.hash = '#/home'; }}>Back to Home</Button>
+            <Button data-debug-id="device-approval-home-btn" variant="primary" onClick={() => { window.location.hash = '#/home'; }}>Go to home</Button>
             <Button data-debug-id="device-approval-another-btn" variant="ghost" onClick={reset}>Add another device</Button>
           </div>
         </div>
