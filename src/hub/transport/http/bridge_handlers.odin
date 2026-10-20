@@ -1714,6 +1714,10 @@ bridge_ws_upgrade_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_Soc
 	// bridge may flush its bridge_log ring in the very next frame.
 	project_service.bridge_runtime_registry_set_telemetry_enabled(h.bridge_runtime_registry, bridge.bridge_id, bridge.telemetry_enabled != "disabled")
 	_ = write_ws_text_frame_locked(h, bridge.bridge_id, client, bridge_ready_payload(bridge.bridge_id, hello.generation, hello.replaced_existing, catalog_etag, bridge.telemetry_enabled != "disabled"))
+	// REQ-ENR-1: the disconnect path publishes offline; this is its counterpart, so
+	// the UI learns a bridge came (back) online — e.g. right after enrollment commit
+	// and service restart. The enroll-only socket returned long before this point.
+	bridge_publish_online_status(h, bridge)
 	if bridge.telemetry_enabled == "enabled" {
 		cmd_id := fmt.tprintf("cmd_tel_%d", time.to_unix_nanoseconds(time.now()))
 		payload := bridge_set_telemetry_payload(cmd_id, true)
@@ -2924,6 +2928,17 @@ bridge_status_summary_json :: proc(status: string) -> string {
 	strings.write_string(&b, "{\"status\":\""); write_handler_json_string(&b, status)
 	strings.write_string(&b, "\"}")
 	return strings.to_string(b)
+}
+
+// bridge_publish_online_status fans out the bridge `status_changed` invalidation for
+// a runtime connect (REQ-ENR-1), in the same summary format the disconnect path
+// uses. `bridge` is the row bridge_runtime_connect saved; anything but .Online (or a
+// row with no owner) publishes nothing.
+bridge_publish_online_status :: proc(h: ^Bridge_Handlers, bridge: domain.Bridge) {
+	if h == nil || bridge.status != .Online do return
+	summary := bridge_status_summary_json(domain.bridge_status_string(bridge.status))
+	defer delete(summary)
+	events.publish_resource_changed(h.event_bus, string(bridge.owner_user_id), "bridge", bridge.bridge_id, "status_changed", summary)
 }
 
 bridge_update_summary_json :: proc(status, message: string, progress: int, update_error: string) -> string {

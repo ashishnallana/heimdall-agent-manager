@@ -71,7 +71,9 @@ function proxyApi(req, res, targetPath) {
 }
 
 // Two URL traps the preview prefix creates (from preview-server.mjs / ham-ctl-reference):
-// 1. TRAILING SLASH: /api/v1/preview/<sid> must have trailing slash.
+// 1. TRAILING SLASH: /api/v1/preview/<sid> must have trailing slash. A path whose last
+//    segment has a file extension (e.g. the dev-only composer-demo.html) is left
+//    alone entirely: a slash would make Vite's SPA fallback serve index.html instead.
 // 2. EMPTY HASH: Routing is hash-based; with no hash getRoutePathname() falls back to
 //    window.location.pathname (/api/v1/preview/<sid>/) which matches no route.
 //    history.replaceState seeds #/ without aborting module parsing in the browser.
@@ -79,7 +81,8 @@ const SLASH_GUARD =
   '<script data-heimdall-preview-guard>(function(){' +
   'var p=location.pathname,q=location.search,h=location.hash;' +
   'var g=!h||h==="#";' +
-  'if(p.charAt(p.length-1)!=="/"){location.replace(p+"/"+q+(g?"#/":h));}' +
+  'if(/\\.[a-z0-9]+$/i.test(p)){}' +
+  'else if(p.charAt(p.length-1)!=="/"){location.replace(p+"/"+q+(g?"#/":h));}' +
   'else if(g&&history.replaceState){history.replaceState(null,"",p+q+"#/");}' +
   '})();</script>';
 

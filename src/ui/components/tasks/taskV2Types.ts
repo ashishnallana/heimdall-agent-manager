@@ -116,10 +116,10 @@ export function getTaskBadges(task: TaskWire, _chainFleets?: any[], nowMs: numbe
   if (task.blocked_on) {
     // Same rule as taskActions.blockedOnYou(): only a human/user blocker is on you.
     const waitingKind = String((task.blocked_on as any).kind || '');
-    const onYou = !waitingKind || waitingKind === 'human' || waitingKind === 'user';
+    const onYou = !waitingKind || waitingKind === 'human' || waitingKind === 'user' || waitingKind === 'agent_not_running' || waitingKind === 'dispatch';
     badges.push({
       kind: 'blocked',
-      label: onYou ? 'Blocked on you' : `Blocked: waiting on ${waitingKind.replace(/_/g, ' ')}`,
+      label: (waitingKind === 'dispatch' || waitingKind === 'agent_not_running') ? 'Agent not running' : onYou ? 'Blocked on you' : `Blocked: waiting on ${waitingKind.replace(/_/g, ' ')}`,
       tone: onYou ? 'danger' : 'warn',
       title: String(task.blocked_on.reason || (onYou ? 'Waiting for your answer' : 'Waiting on another task or system')),
     });
@@ -204,6 +204,9 @@ export function getTaskStatusLines(task: TaskWire, _chainFleets?: any[], nowMs: 
 
   if (state === 'backlog') {
     if (task.blocked_on) {
+      if (task.blocked_on.kind === 'dispatch' || task.blocked_on.kind === 'agent_not_running') {
+        return [`Agent not running — ${task.blocked_on.reason || 'Agent could not start'}`, 'Start the agent from its attention card, or update its fleet settings'];
+      }
       return [
         `Blocked on you — ${task.blocked_on.reason || 'Waiting for human input'}`,
         'Nothing will move until you answer',

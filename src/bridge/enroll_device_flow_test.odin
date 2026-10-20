@@ -81,11 +81,12 @@ enroll_authorize_body_carries_pairing_values_never_the_code :: proc(t: ^testing.
 	defer vault.pair_keys_wipe(&keys)
 	lookup := vault.pair_lookup_hex(&keys, context.temp_allocator)
 	d := Bridge_Machine_Descriptor{hostname = "dawnstar", os = "Linux", os_user = "tanmay", bridge_version = "1.2.3"}
-	body := bridge_enroll_authorize_body(d, TEST_PUBKEY_HEX, "challenge-value", pair_lookup = lookup, pair_key_mac = lookup, pair_salt = salt, allocator = context.temp_allocator)
+	body := bridge_enroll_authorize_body(d, TEST_PUBKEY_HEX, "challenge-value", pair_lookup = lookup, pair_key_mac = lookup, pair_salt = salt, pair_hub_origin = "https://hub.example.test:443", allocator = context.temp_allocator)
 	decoded: Bridge_Authorize_Request
 	testing.expect(t, json.unmarshal_string(body, &decoded, json.Specification.JSON, context.temp_allocator) == nil, "the body is valid JSON")
 	testing.expect_value(t, decoded.pair_lookup, lookup)
 	testing.expect_value(t, decoded.pair_salt, salt)
+	testing.expect_value(t, decoded.pair_hub_origin, "https://hub.example.test:443")
 	testing.expect_value(t, decoded.device_label, "dawnstar")
 	symbols, _ := vault.pair_code_symbols(code)
 	testing.expect(t, !strings.contains(body, string(symbols[:])) && !strings.contains(body, code), "the pairing code is never sent")

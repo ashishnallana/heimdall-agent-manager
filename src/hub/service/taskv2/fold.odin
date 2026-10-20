@@ -94,6 +94,7 @@ fold_task :: proc(events: []domain.Task_Event, input: Fold_Input) -> Task_View {
 	max_attempts := input.max_attempts
 	if max_attempts <= 0 do max_attempts = domain.TASK_MAX_ATTEMPTS
 
+	current_attempt_counted := false
 	for ev in events {
 		v.last_event_id = ev.event_id
 		switch ev.kind {
@@ -101,6 +102,7 @@ fold_task :: proc(events: []domain.Task_Event, input: Fold_Input) -> Task_View {
 			v.published = payload_bool(ev.payload_json, "published")
 			v.attempt_no = jsonx.extract_int(ev.payload_json, "attempt_no", 0, true)
 			v.counting_attempts = v.attempt_no
+			current_attempt_counted = v.attempt_no > 0
 			state_s := jsonx.extract_string(ev.payload_json, "state", "", true, context.temp_allocator)
 			state, _ := domain.task_state_from_string(state_s)
 			v.has_work_lease = false
@@ -134,7 +136,8 @@ fold_task :: proc(events: []domain.Task_Event, input: Fold_Input) -> Task_View {
 			v.holder_instance_id = jsonx.extract_string(ev.payload_json, "instance_id", "", true, context.temp_allocator)
 			if v.last_release != .Handoff {
 				v.attempt_no += 1
-				if attempt_counts(v.last_release) do v.counting_attempts += 1
+				current_attempt_counted = attempt_counts(v.last_release)
+				if current_attempt_counted do v.counting_attempts += 1
 			}
 			v.last_release = .None
 		case EV_SUBMITTED:
@@ -148,8 +151,21 @@ fold_task :: proc(events: []domain.Task_Event, input: Fold_Input) -> Task_View {
 				v.in_review = true
 			}
 		case EV_BLOCKED:
-			v.has_work_lease = false
+			dispatch := payload_bool(ev.payload_json, "dispatch_failed")
+			infrastructure := payload_bool(ev.payload_json, "infrastructure")
+			continuation := (dispatch && payload_bool(ev.payload_json, "continuation")) || (infrastructure && v.last_release == .Handoff)
+			review := jsonx.extract_string(ev.payload_json, "kind", "", true, context.temp_allocator) == domain.LEASE_KIND_REVIEW
+			if dispatch && review {
+				if v.review_lease_count > 0 do v.review_lease_count -= 1
+			} else {
+				v.has_work_lease = false
+				if dispatch && !payload_bool(ev.payload_json, "continuation") && current_attempt_counted {
+					v.counting_attempts -= 1
+					current_attempt_counted = false
+				}
+			}
 			v.last_release = .Blocked
+			if continuation do v.last_release = .Handoff
 			if raw, ok := raw_object_field(ev.payload_json, "waiting_on"); ok {
 				v.blocked_on_json = raw
 			} else {
@@ -157,7 +173,7 @@ fold_task :: proc(events: []domain.Task_Event, input: Fold_Input) -> Task_View {
 			}
 			// Budget is spent by ATTEMPTS, whatever ended them (review S1): a
 			// fifth block parks the task for a human exactly like a fifth expiry.
-			apply_budget(&v, max_attempts, ev.ts_ms)
+			if !dispatch && !infrastructure do apply_budget(&v, max_attempts, ev.ts_ms)
 		case EV_HANDOFF:
 			v.has_work_lease = false
 			v.last_release = .Handoff
@@ -231,10 +247,11 @@ fold_task :: proc(events: []domain.Task_Event, input: Fold_Input) -> Task_View {
 			v.last_release = .Reopened
 			v.blocked_on_json = human_block("merge_conflict", ev.ts_ms)
 		case EV_ANSWERED:
+			infrastructure := is_agent_not_running_block(v.blocked_on_json)
 			v.blocked_on_json = ""
 			v.budget_exhausted = false
 			v.oscillating = false
-			v.review_rounds = 0
+			if !infrastructure do v.review_rounds = 0
 		case:
 			// audit-only kinds
 		}
@@ -293,6 +310,7 @@ derive_state :: proc(v: Task_View, input: Fold_Input) -> domain.Task_State {
 	if v.cancelled do return .Cancelled
 	if v.done do return .Done
 	if v.has_work_lease do return .In_Progress
+	if is_agent_not_running_block(v.blocked_on_json) do return .Backlog
 	if v.in_review do return .In_Review
 	if v.published && input.deps_done && v.blocked_on_json == "" && input.kind == .Task do return .Ready
 	return .Backlog

@@ -89,6 +89,21 @@ export async function fetchBridgeEnrollmentStatus(bridgeId: string): Promise<Bri
   }
 }
 
+/**
+ * One bridge row (`GET /bridges/{id}`): status, enrollment_state, vault_status, ….
+ * Resolves `null` when the hub does not know the bridge (404).
+ */
+export async function fetchBridgeRow(bridgeId: string, signal?: AbortSignal): Promise<Record<string, any> | null> {
+  try {
+    const res = await cookieJsonFetch(`/bridges/${encodeURIComponent(bridgeId)}`, signal ? { signal } : undefined);
+    const data = (res as any)?.data ?? res;
+    return data && typeof data === 'object' ? data : null;
+  } catch (err: any) {
+    if (err instanceof ApiError && err.status === 404) return null;
+    throw err;
+  }
+}
+
 /** A bridge that is approved but not enrolled yet (REQ-EA-1). */
 export interface PendingBridgeEnrollment {
   bridge_id: string;

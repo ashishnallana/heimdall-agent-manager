@@ -44,6 +44,10 @@ Device_Auth_Handlers :: struct {
 	// session user by its pairing lookup.
 	vault:             ^vd.Service,
 	event_bus:         ^events.User_Event_Bus,
+	// --pairing-hub-origins (canonical): other hub addresses this deployment answers
+	// on. Served with the pair salts; the approver accepts a declared pairing origin
+	// only if it is its own API origin or one of these.
+	pairing_hub_origins: []string,
 }
 
 // ── POST /api/v1/device/authorize ───────────────────────────────────────────
@@ -69,8 +73,10 @@ Authorize_Request :: struct {
 	// Hub-blind pairing (bridge grants): derived by the bridge from a code the hub never sees.
 	pair_lookup:                string,
 	pair_key_mac:               string,
-	// The public, per-request salt of the pairing stretch (vault.Pair_Context).
+	// The public, per-request salt of the pairing stretch (vault.Pair_Context), and
+	// the canonical hub origin the bridge bound into it (declared; the approver derives with it).
 	pair_salt:                  string,
+	pair_hub_origin:            string,
 }
 
 Device_Authorize_Wire :: struct {
@@ -100,6 +106,7 @@ device_authorize_handler :: proc(ctx: rawptr, req: Request) -> Response {
 		bridge_identity_public_key = body.bridge_identity_public_key,
 		bridge_identity_proof = vault_sig_text(body.bridge_identity_proof),
 		pair_lookup = body.pair_lookup, pair_key_mac = body.pair_key_mac, pair_salt = body.pair_salt,
+		pair_hub_origin = body.pair_hub_origin,
 	}
 	xff := header_value(req.headers, "X-Forwarded-For")
 	result, ok, err := device_auth.authorize(handlers.service, input, req.remote_addr, xff)
@@ -206,8 +213,10 @@ Device_Verify_Grant_Wire :: struct {
 	// served the bridge's real keys.
 	pair_key_mac:                string,
 	code_challenge:              string,
-	// The pairing-stretch salt the approver derived the lookup with (it re-checks it).
+	// The pairing-stretch salt and declared hub origin the approver derived the lookup
+	// with (it re-checks both).
 	pair_salt:                   string,
+	pair_hub_origin:             string,
 	is_bridge_enrollment:        bool,
 	hub_observed:                Device_Verify_Hub_Observed,
 	host_asserted:               Device_Verify_Host_Asserted,
@@ -234,6 +243,7 @@ Device_Verify_Browser_Wire :: struct {
 	register_statement: string,
 	pair_key_mac:       string,
 	pair_salt:          string,
+	pair_hub_origin:    string,
 }
 
 device_verify_handler :: proc(ctx: rawptr, req: Request) -> Response {
@@ -272,7 +282,7 @@ device_verify_handler :: proc(ctx: rawptr, req: Request) -> Response {
 						sign_public_key = dev.sign_public_key, ecdh_public_key = dev.ecdh_public_key,
 						sign_alg = dev.sign_alg, wrap_alg = dev.wrap_alg,
 						created_at = dev.created_at, code_expires_at = dev.code_expires_at,
-						register_statement = dev.register_statement, pair_key_mac = dev.pair_key_mac, pair_salt = dev.pair_salt,
+						register_statement = dev.register_statement, pair_key_mac = dev.pair_key_mac, pair_salt = dev.pair_salt, pair_hub_origin = dev.pair_hub_origin,
 					}, req)
 				} else if derr.code != .Not_Found {
 					return respond_error(derr, req.request_id)
@@ -306,6 +316,7 @@ device_verify_handler :: proc(ctx: rawptr, req: Request) -> Response {
 		bridge_identity_public_key = info.bridge_identity_public_key,
 		bridge_identity_fingerprint = info.bridge_identity_fingerprint,
 		pair_key_mac = info.pair_key_mac, code_challenge = info.code_challenge, pair_salt = info.pair_salt,
+		pair_hub_origin = info.pair_hub_origin,
 		is_bridge_enrollment = info.is_bridge_enrollment,
 		hub_observed = {
 			bridge_key_fingerprint = info.bridge_key_fingerprint,
@@ -331,16 +342,32 @@ device_verify_handler :: proc(ctx: rawptr, req: Request) -> Response {
 // pending bridge grants (no owner before approval), newest first, at most
 // PAIR_CANDIDATES_MAX in all. It tries each with the code and resolves the matching
 // one through /device/verify. User session only; rate-limited per IP.
+//
+// Each candidate carries pair_hub_origin: the canonical hub origin the NEW device
+// declared it bound into its stretch (a bridge enrolled with `-Hub https://hub.x`
+// while the approving UI calls its API on its own origin). The approver derives with
+// the declared origin, never its page origin, and ACCEPTS it only if it is the
+// approver's own API origin or one of `pairing_hub_origins` (this hub's configured
+// aliases, served here). That keeps relay protection: a device tricked into
+// enrolling against https://evil.example (a transparent relay to this hub) declares
+// that origin and is refused, so the relay never sees an approved PKCE exchange.
+// The alias list is honest-hub configuration; a hostile hub gains nothing from
+// lying in it (it could mint bridge tokens itself), and altering a declared origin
+// only makes the derived lookup / key_mac miss (refusal); the code is still required.
 
 PAIR_CANDIDATES_MAX :: 8
 
 Device_Pair_Candidate_Wire :: struct {
-	kind:      string, // "browser" | "bridge"
-	pair_salt: string,
+	kind:            string, // "browser" | "bridge"
+	pair_salt:       string,
+	pair_hub_origin: string,
 }
 
 Device_Pair_Salts_Wire :: struct {
-	candidates: []Device_Pair_Candidate_Wire,
+	candidates:          []Device_Pair_Candidate_Wire,
+	// Canonical hub origins (besides the approver's own API origin) a declared
+	// pairing origin may name (--pairing-hub-origins).
+	pairing_hub_origins: []string,
 }
 
 device_pair_salts_handler :: proc(ctx: rawptr, req: Request) -> Response {
@@ -357,14 +384,15 @@ device_pair_salts_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	}
 	out := make([dynamic]Device_Pair_Candidate_Wire, 0, PAIR_CANDIDATES_MAX, context.temp_allocator)
 	if handlers.vault != nil {
-		salts, err := vd.pending_pair_salts(handlers.vault, auth_ctx.user_id, PAIR_CANDIDATES_MAX)
+		pairs, err := vd.pending_pair_salts(handlers.vault, auth_ctx.user_id, PAIR_CANDIDATES_MAX)
 		if err.code != .None do return respond_error(err, req.request_id)
-		for s in salts do append(&out, Device_Pair_Candidate_Wire{kind = "browser", pair_salt = s})
+		for p in pairs do append(&out, Device_Pair_Candidate_Wire{kind = "browser", pair_salt = p.pair_salt, pair_hub_origin = p.pair_hub_origin})
 	}
-	for s in device_auth.pending_bridge_pair_salts(handlers.service, PAIR_CANDIDATES_MAX - len(out)) {
-		append(&out, Device_Pair_Candidate_Wire{kind = "bridge", pair_salt = s})
+	for p in device_auth.pending_bridge_pair_salts(handlers.service, PAIR_CANDIDATES_MAX - len(out)) {
+		append(&out, Device_Pair_Candidate_Wire{kind = "bridge", pair_salt = p.pair_salt, pair_hub_origin = p.pair_hub_origin})
 	}
-	return vault_respond(Device_Pair_Salts_Wire{candidates = out[:]}, req)
+	origins := handlers.pairing_hub_origins if handlers.pairing_hub_origins != nil else []string{}
+	return vault_respond(Device_Pair_Salts_Wire{candidates = out[:], pairing_hub_origins = origins}, req)
 }
 
 // ── POST /api/v1/device/approve ─────────────────────────────────────────────

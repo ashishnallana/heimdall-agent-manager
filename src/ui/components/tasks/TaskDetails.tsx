@@ -13,6 +13,7 @@ import { awaitingYourReview, blockedOnYou } from './taskActions';
 import type { TaskActionsApi } from './useTaskActions';
 import { EMPTY_TASK_NAMES, instanceAgentsFromEvents, withInstanceAgents, type TaskNames } from './taskNames';
 import { describeTaskEvent } from './taskEvents';
+import { VaultText } from '../vault';
 import { HolderName } from './HolderName';
 import { describeEffectivePlacement, taskEffectivePlacement } from './fleetSelection';
 import { TaskComposer } from './TaskComposer';
@@ -191,6 +192,17 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
 
   return (
     <div data-debug-id={`task-details-${taskId}`} className="space-y-4 border-t border-subtle pb-4 pl-5 pr-3 pt-3 text-xs">
+      {handoff?.skip_verify_reason && (
+        <p data-debug-id="task-details-verify-skipped" className="rounded-md bg-warning-soft p-3 text-warning">
+          Verify skipped: <VaultText value={handoff.skip_verify_reason} />
+        </p>
+      )}
+      {(task.blocked_on?.kind === 'dispatch' || task.blocked_on?.kind === 'agent_not_running') && (
+        <Block title="Agent not running">
+          <p className="leading-relaxed text-primary">{task.blocked_on.reason}</p>
+          <Text as="p" role="body-sm" tone="muted">Check the agent’s bridge, provider, and model settings. Updating its fleet settings retries dispatch.</Text>
+        </Block>
+      )}
       {awaitingYourReview(task) && (
         <Block title="Your review" debugId="your-review-block">
           {handoff?.summary && <p className="leading-relaxed text-primary">{handoff.summary}</p>}
@@ -334,8 +346,8 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
           debugId="task-details-verify"
           aside={
             <div className="flex items-center gap-2">
-              <Badge tone={verify.exit_code === 0 ? 'success' : 'danger'}>
-                {verify.exit_code === 0 ? 'Passed' : `Failed (exit ${verify.exit_code})`}
+              <Badge tone={handoff?.skip_verify_reason ? 'warning' : verify.exit_code === 0 ? 'success' : 'danger'}>
+                {handoff?.skip_verify_reason ? 'Skipped at submit' : verify.exit_code === 0 ? 'Passed' : `Failed (exit ${verify.exit_code})`}
               </Badge>
               {state !== 'done' && state !== 'cancelled' && (
                 <Button size="sm" variant="ghost" disabled={actions.busy} onClick={() => void actions.rerunVerify()}>
@@ -422,22 +434,30 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
           </Text>
         ) : (
           <ol className="space-y-1">
-            {visibleEvents.map((e, i) => (
+            {visibleEvents.map((e, i) => {
+              const description = describeTaskEvent(e, names);
+              return (
               <li key={e.event_id ?? i} data-debug-id="task-timeline-event" className="flex gap-2">
                 <span className="shrink-0 whitespace-nowrap font-mono text-[11px] text-faint">
                   {e.ts_ms ? new Date(e.ts_ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}
                 </span>
                 <details className="min-w-0 flex-1">
                   <summary className="cursor-pointer list-none text-primary [&::-webkit-details-marker]:hidden">
-                    {describeTaskEvent(e, names).text}
+                    {description.text}
                     <span className="ml-1.5 text-[11px] text-faint underline decoration-dotted">Details</span>
+                    {description.verifySkipReason && (
+                      <span className="mt-1 block rounded-md bg-warning-soft p-2 text-warning">
+                        Verify skipped: <VaultText value={description.verifySkipReason} />
+                      </span>
+                    )}
                   </summary>
                   <pre className="mt-1 max-h-40 overflow-auto rounded-md bg-canvas p-2 font-mono text-[11px] text-muted">
                     {JSON.stringify({ kind: e.kind, actor: e.actor_kind, ...(e.payload && typeof e.payload === 'object' ? { payload: e.payload } : {}) }, null, 2)}
                   </pre>
                 </details>
               </li>
-            ))}
+              );
+            })}
           </ol>
         )}
       </Block>

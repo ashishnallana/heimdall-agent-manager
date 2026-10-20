@@ -58,3 +58,48 @@ test_provider_catalog_meta_etag_matches_canonical_body :: proc(t: ^testing.T) {
 	defer delete(derived)
 	testing.expect_value(t, stored, derived)
 }
+
+// Migration 101: Codex 0.162 ships the GPT-6 family. gpt-6.1-sol is the
+// default (lowest rank) for codex, Pi exposes the same ids under
+// openai-codex/, and the GPT-5.6 rows stay for history but are retired.
+@(test)
+test_codex_and_pi_catalog_select_gpt6_models :: proc(t: ^testing.T) {
+	conn, open_ok, _ := open(":memory:")
+	testing.expect(t, open_ok, "db open ok")
+	defer close(&conn)
+	mig_ok, _ := run_migrations(&conn)
+	testing.expect(t, mig_ok, "migrations ok")
+
+	impl := Provider_Repo_SQLite{conn = &conn}
+	expect_models :: proc(t: ^testing.T, impl: ^Provider_Repo_SQLite, provider: string, active: []string, deprecated: []string) {
+		models, err := provider_models_for_sqlite(impl, provider)
+		testing.expect_value(t, err.code, domain.Error_Code.None)
+		defer {
+			for model in models do domain.provider_model_destroy(model)
+			delete(models)
+		}
+		active_ids := make([dynamic]string, context.temp_allocator)
+		for model in models {
+			if model.state == "active" && strings.contains(model.model_id, "gpt-") do append(&active_ids, model.model_id)
+		}
+		testing.expect_value(t, len(active_ids), len(active))
+		for want, i in active {
+			if i < len(active_ids) do testing.expect_value(t, active_ids[i], want)
+		}
+		for want in deprecated {
+			found := false
+			for model in models {
+				if model.model_id != want do continue
+				found = true
+				testing.expect_value(t, model.state, "deprecated")
+			}
+			testing.expectf(t, found, "%s row kept", want)
+		}
+	}
+	expect_models(t, &impl, "codex",
+		{"gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna"},
+		{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"})
+	expect_models(t, &impl, "pi",
+		{"openai-codex/gpt-6.1-sol", "openai-codex/gpt-6-astra", "openai-codex/gpt-6-sol", "openai-codex/gpt-6-luna"},
+		{"openai-codex/gpt-5.6-sol", "openai-codex/gpt-5.6-luna"})
+}

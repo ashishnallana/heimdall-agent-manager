@@ -97,6 +97,13 @@ test('describeTaskEvent explains every lease-expiry reason in events.odin', () =
   }
 });
 
+test('submission timeline keeps the skip reason tied to its attempt', () => {
+  const d = describeTaskEvent({ kind: 'submitted', payload: { attempt_no: 2, skip_verify_reason: 'Runner unavailable' } }, names);
+  assert.match(d.text, /attempt 2/);
+  assert.equal(d.verifySkipReason, 'Runner unavailable');
+  assert.equal(describeTaskEvent({ kind: 'submitted', payload: {} }, names).verifySkipReason, undefined);
+});
+
 test('timeline sentences use names, never raw ids', () => {
   const granted = describeTaskEvent(
     { kind: 'lease_granted', actor_kind: 'hub', payload: { kind: 'work', instance_id: 'inst_member02', agent_id: 'agt_18df385deeb91f7c', bridge_id: 'brg_dawn01', attempt_no: 1 } },

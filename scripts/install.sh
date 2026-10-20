@@ -49,9 +49,21 @@ HELP
 prompt() {
   printf '%s' "$1" >&2
   if [ -t 0 ]; then IFS= read -r answer
-  elif [ -r /dev/tty ]; then IFS= read -r answer < /dev/tty
+  # -r /dev/tty also holds with no controlling terminal; the open then fails.
+  elif [ -r /dev/tty ] && { IFS= read -r answer < /dev/tty; } 2>/dev/null; then :
   else return 1
   fi
+}
+# A credential alone is not an enrollment: ham-bridge also needs the identity
+# record enrollment wrote, or it refuses to start ("holds no readable enrollment").
+# Linux keeps it as a file (keystore_linux.odin); Keychain/Android Keystore
+# entries cannot be checked from here, so those trust the credential.
+identity_missing() {
+  local config="$1" id
+  [ "$svc" = systemd ] && [ "$os" = linux ] && [ -f "$config" ] || return 1
+  id="$(sed -n 's/^[[:space:]]*daemon_id[[:space:]]*=[[:space:]]*"\(brg_[A-Za-z0-9_.-]*\)".*/\1/p' "$config" | head -n 1)"
+  [ -n "$id" ] || return 1
+  [ ! -s "$HOME/.config/heimdall/bridges/$id/identity_key" ]
 }
 download() {
   curl --fail --location --silent --show-error --connect-timeout 15 \
@@ -107,6 +119,16 @@ pathlib.Path(path).write_text('#!/bin/sh\n'+body+'exec '+shlex.quote(real)+' "$@
 pathlib.Path(path).chmod(0o700)
 PY
   done
+  # A credential from before owner headers makes `ham-bridge enroll` refuse
+  # ("no owner record"). Re-enrolling replaces it anyway; keep a backup.
+  local f stamp
+  if [ -s "$token_file" ] && ! head -n 1 "$token_file" | grep -q '^heimdall-bridge-credential/v1 '; then
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    for f in "$token_file" "$token_file.refresh"; do
+      [ ! -e "$f" ] || mv "$f" "$f.pre-reenroll-$stamp"
+    done
+    log INFO "Moved legacy credential aside: $token_file.pre-reenroll-$stamp"
+  fi
   local status=0
   # Same tool paths the service's unit/run file exports, so the enrolling
   # process can start the PTY host and ham-ctl too (it was "ham-pty-host Not_Exist").
@@ -283,6 +305,14 @@ PY
   then migrate=true; fi
   [ ! -s "$token_file" ] || existing=true
   if "$migrate" && [ -s "$HOME/.config/heimdall/bridge-token" ]; then existing=true; fi
+  if "$existing" && [ -s "$token_file" ] && identity_missing "$state_dir/config.toml"; then
+    if [ "$enrollment" = no ]; then
+      log WARN 'Existing credential has no identity record on this machine; the bridge will refuse to start until it is re-enrolled.'
+    else
+      log WARN 'Existing credential has no identity record on this machine (enrolled by an older release?); re-enrolling.'
+      existing=false
+    fi
+  fi
   if "$existing" && [ "$enrollment" = ask ]; then
     if "$noninteractive" || "$dry_run"; then enrollment=no
     elif prompt 'Existing enrollment found. Re-enroll this bridge? [y/N]: '; then
@@ -561,7 +591,18 @@ PY
   step '6 / 6 · Ready'
   case "$svc" in
     systemd)
-      systemctl --user is-active --quiet "$service_name" || fail "Service did not start. Inspect: journalctl --user -u $service_name"
+      # is-active also holds between Restart= attempts; watch for a crash loop.
+      local restarts tries=0
+      restarts="$(systemctl --user show -p NRestarts --value "$service_name" 2>/dev/null || echo 0)"
+      until [ "$tries" -ge "${HEIMDALL_READY_WAIT:-8}" ]; do
+        sleep 1; tries=$((tries+1))
+        systemctl --user is-active --quiet "$service_name" || break
+        [ "$(systemctl --user show -p NRestarts --value "$service_name" 2>/dev/null || echo 0)" = "$restarts" ] || break
+      done
+      if [ "$tries" -lt "${HEIMDALL_READY_WAIT:-8}" ]; then
+        journalctl --user -u "$service_name" -n 6 --no-pager -o cat >&2 2>/dev/null || true
+        fail "Service is not staying up. Inspect: journalctl --user -u $service_name (re-enroll: re-run with --re-enroll)"
+      fi
       log OK "Service active: $service_name"
       log INFO "Logs: journalctl --user -u $service_name -f" ;;
     launchd)

@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!--
+      DEV-ONLY composer demo (REQ-DEMO-1..5). Vite serves extra root HTML files in dev, but
+      vite.config.js has no rollupOptions.input, so `vite build` emits only index.html and
+      this page is never shipped. It renders the real mobile composer over a sample
+      transcript with no network, vault or auth. Entry: src/ui/dev/composerDemo.tsx.
+    -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, interactive-widget=resizes-content" />
+    <meta name="robots" content="noindex" />
+    <title>Composer demo</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/ui/dev/composerDemo.tsx"></script>
+  </body>
+</html>

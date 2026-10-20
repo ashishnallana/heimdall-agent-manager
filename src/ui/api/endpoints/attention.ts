@@ -29,11 +29,12 @@ export type AttentionTaskDetails = {
   excerpt: AttentionExcerpt | null;
   /** Task System v2: why the task needs the user. */
   attention?: 'review' | 'blocked';
-  /** review | gate | question | merge_conflict | budget_exhausted | oscillation */
+  /** review | gate | question | agent_not_running | merge_conflict | budget_exhausted | oscillation */
   badge?: string;
   state?: string;
   task_kind?: string;
   attempt_no?: number;
+  skip_verify_reason?: string;
   /** Identity of the block a blocked card shows; sent back with Answer. */
   block_id?: string;
   holder_instance_id?: string;

@@ -388,6 +388,119 @@ body {
     0 8px 24px rgb(0 0 0 / 0.28);
 }
 
+/* REQ-FROST-1..3: gradient frost for the floating mobile composer card. One
+   `backdrop-filter` cannot vary its blur across an element, so the card stacks three
+   backdrop layers and masks each with a vertical gradient: the heaviest, least
+   transparent layer sits behind the input row, lighter layers take over toward the
+   action row. Tints mix theme tokens, so every light and dark theme follows.
+   Markup: <div class="ui-frost-gradient"><span/><span/><span/></div> inside a
+   `relative isolate` card with the `ui-frost-card` rim. */
+.ui-frost-card {
+  background: transparent;
+  border-color: color-mix(in oklab, var(--color-text-primary), transparent 84%);
+  box-shadow:
+    inset 0 1px 0 color-mix(in oklab, var(--color-text-primary), transparent 86%),
+    0 10px 30px rgb(0 0 0 / 0.26);
+}
+
+.ui-frost-gradient {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.ui-frost-gradient > * {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+}
+
+/* Layer 1: input row. Strongest blur, least transparent. */
+.ui-frost-gradient > :nth-child(1) {
+  background: color-mix(in oklab, var(--color-surface-raised), transparent 22%);
+  -webkit-backdrop-filter: blur(28px) saturate(180%);
+  backdrop-filter: blur(28px) saturate(180%);
+  -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 40%, transparent 78%);
+  mask-image: linear-gradient(to bottom, #000 0%, #000 40%, transparent 78%);
+}
+
+/* Layer 2: the band between the rows. */
+.ui-frost-gradient > :nth-child(2) {
+  background: color-mix(in oklab, var(--color-surface-raised), transparent 42%);
+  -webkit-backdrop-filter: blur(14px) saturate(160%);
+  backdrop-filter: blur(14px) saturate(160%);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 25%, #000 55%, #000 72%, transparent 100%);
+  mask-image: linear-gradient(to bottom, transparent 25%, #000 55%, #000 72%, transparent 100%);
+}
+
+/* Layer 3: action row. Lightest blur, most transparent. */
+.ui-frost-gradient > :nth-child(3) {
+  background: color-mix(in oklab, var(--color-surface-raised), transparent 60%);
+  -webkit-backdrop-filter: blur(6px) saturate(140%);
+  backdrop-filter: blur(6px) saturate(140%);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 60%, #000 92%);
+  mask-image: linear-gradient(to bottom, transparent 60%, #000 92%);
+}
+
+/* REQ-FROST-2: frost continues beneath the card, edge to edge, and fades out at the
+   screen bottom, so the transcript dissolves into the dock instead of being cut off. */
+.ui-frost-tail {
+  position: absolute;
+  inset: 35% 0 0 0;
+  /* Behind every card in the dock (the dock's z-index makes it a stacking context). */
+  z-index: -1;
+  pointer-events: none;
+  background: color-mix(in oklab, var(--color-canvas), transparent 55%);
+  -webkit-backdrop-filter: blur(3px);
+  backdrop-filter: blur(3px);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, #000 45%, rgb(0 0 0 / 0.35) 100%);
+  mask-image: linear-gradient(to bottom, transparent 0%, #000 45%, rgb(0 0 0 / 0.35) 100%);
+}
+
+/* REQ-FROST-3: no backdrop-filter means no blur to fade, so fall back to a nearly solid
+   card that still darkens a little toward the action row. */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .ui-frost-gradient > :nth-child(1) {
+    background: linear-gradient(
+      to bottom,
+      color-mix(in oklab, var(--color-surface-raised), transparent 4%),
+      color-mix(in oklab, var(--color-surface-raised), transparent 12%)
+    );
+    -webkit-mask-image: none;
+    mask-image: none;
+  }
+
+  .ui-frost-gradient > :nth-child(n + 2) {
+    display: none;
+  }
+
+  .ui-frost-tail {
+    background: color-mix(in oklab, var(--color-canvas), transparent 15%);
+  }
+}
+
+/* REQ-FROST-1: bottom padding of the floating composer form. The dock itself is plain CSS
+   (`absolute bottom-0` in a shell sized `var(--app-viewport-height)`), so it already ends where
+   the software keyboard begins. The home-indicator safe area is only needed while the dock
+   sits at the screen edge: once a keyboard occludes `--app-viewport-bottom-offset` px, the
+   subtraction goes negative and the floor of 0.75rem wins, so no gap opens above the keys. */
+.ui-float-dock-pad {
+  padding-bottom: max(0.75rem, calc(env(safe-area-inset-bottom, 0px) - var(--app-viewport-bottom-offset)));
+}
+
+/* REQ-FROST-1: a floating dock passes touches in the gaps around its cards through to
+   the transcript underneath; only the cards themselves take input. */
+.ui-float-dock {
+  pointer-events: none;
+}
+
+.ui-float-dock > :not(form):not([aria-hidden='true']),
+.ui-float-dock > form > div > * {
+  pointer-events: auto;
+}
+
 /* REQ-MOB-8: chat (compact) markdown rhythm. Selectors are `.markdown.markdown-compact`
    (0,2,0)+ so they win over the inline `my-*` / `mt-*` utilities emitted by MarkdownBody. */
 .markdown.markdown-compact {

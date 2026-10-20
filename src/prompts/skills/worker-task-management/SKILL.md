@@ -19,7 +19,7 @@ All commands use `./.heimdall/bin/ham-ctl`. Exact flags: the `ham-ctl-reference`
 | Made a choice others might re-open, or hit a dead end | note it now; pass it at submit/handoff as `--decision` / `--dead-end` |
 | Work done, ready to prove it | commit everything in the Workdir, then `verify` |
 | `verify` passed on a clean tree | `lease submit --summary … [--decision …] [--dead-end …]` |
-| `verify` failed | fix, commit, `verify` again; never submit a failing head |
+| `verify` failed | fix, commit, `verify` again; fix the failure or submit with an explicit documented verify skip (unless independent verify is required) |
 | Submit refused (`409 verify_*`) | commit, `verify` at the new head, `lease submit` again |
 | Context or time running out, not finished | `lease handoff --summary … --next-steps … [--dead-end …]` |
 | Need a user decision or an external system | `lease block --waiting-on user --reason "<question>"` (or `--waiting-on <system>`) |
@@ -70,7 +70,7 @@ Every `ham-ctl` call heartbeats implicitly. During long stretches without CLI ca
 **`409 lease_lost`: stop immediately.** Do not edit, commit or build further; the Hub re-wakes you with a fresh pack if needed.
 
 ## 4. Verify
-Never submit without a passing verify at the exact commit you submit:
+Normally submit with a passing verify at the exact commit you submit. When verification cannot run, use the explicit skip flags described below and give the reason; independent-verify tasks remain strict:
 ```bash
 ./.heimdall/bin/ham-ctl verify
 ```
@@ -147,4 +147,8 @@ When `TASK.md` says `reviewer` (a review lease):
 ## 8. Solo mode
 When `TASK.md` has a **Solo Mode** section you are the coordinator and the worker; the user reviews. Pull work with `lease next` (nothing is pushed to you), submit, and pull the next task right away. To take an urgent task mid-way: `ham-ctl lease switch <task_id> --summary "<where you left the current one>"` (the current task returns to `ready`; the attempt is not counted). You never review your own work; the Hub refuses it.
 
-Task verification commands are optional: omit `brief.verify` (or use an empty value or `"none"`) when no command applies. Publishing and submission do not require a verify result or an output contract in that case. If a command is configured, passing verification is required and `--verify none` cannot bypass it. `ham-ctl verify` reports success with nothing to run when no command is configured.
+Task verification commands are optional: omit `brief.verify` (or use an empty value or `"none"`) when no command applies. Publishing and submission do not require a verify result or an output contract in that case. If a command is configured, run it before submitting, or explicitly use `lease submit --skip-verify --skip-verify-reason "<why>"` with a non-empty written reason. The skip is recorded on the attempt and shown as a warning to reviewers. Tasks with `require_independent_verify: true` cannot skip. `--verify none` alone does not bypass a configured command. The coordinator/owner can correct `verify` or `acceptance` on a leased task using a brief containing only those fields; other brief fields are preserved, and the next verify invocation uses the new command. `ham-ctl verify` reports success with nothing to run when no command is configured.
+
+### Unavailable fleet instances
+
+A user-stopped, terminated, or failed fleet instance prevents an automatic replacement launch when no eligible free instance exists on that bridge. Use the task’s **Start agent** card to retry after repairing the cause. Retriable provider errors remain queued during backoff and retry automatically; bridge-offline blocks clear when that bridge reconnects.

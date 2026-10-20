@@ -17,7 +17,7 @@ Every non-trivial unit of work is tracked in a Heimdall task and dispatched via 
   - The **only** free-form user channel for the chain (`chat send --to user`).
   - Triages incoming work (`ticket` vs `workflow`) and proposes the chain DAG with `ham-ctl task-chain propose --file <proposal.json> [--auto-approve]`.
   - Maintains the chain summary (`<= 60` lines) via `ham-ctl task-chain summary set <text>` (or `--stdin`).
-  - Reacts to one-line `[taskv2] <trigger>:` notifications (`proposal_decided`, `blocked_on human`, `budget_exhausted`, `oscillation`, `ready_unclaimed`, `review_requested_from_user`, `merge_conflict`, `merge_failed`, `gate_rejected`, `summary_overflow`, `chain_complete`; `solo` in solo mode).
+  - Reacts to one-line `[taskv2] <trigger>:` notifications (`proposal_decided`, `blocked_on human`, `dispatch_failed`, `budget_exhausted`, `oscillation`, `ready_unclaimed`, `review_requested_from_user`, `merge_conflict`, `merge_failed`, `gate_rejected`, `summary_overflow`, `chain_complete`; `solo` in solo mode).
   - Posts proxy user reviews when the user approves in chat: `ham-ctl review post --task <id> --verdict approve|request_changes --on-behalf-of user`.
 - **Worker** (assignee):
   - Executes the leased task described in `TASK.md`.

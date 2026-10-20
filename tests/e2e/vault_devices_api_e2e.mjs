@@ -37,7 +37,7 @@ import { verifyDirectory, wrapRecipients, buildBridgeChainProof, verifyBridgeCha
 import { openVerifiedWrap } from '../../src/ui/utils/vaultKeyringWrap.ts';
 import { deliverKeyringToBridge } from '../../src/ui/utils/vaultBridgeDelivery.ts';
 import { buildBridgeApproval, buildBrowserApproval, buildGenesis, buildPairedRegistration, buildRevocation, buildRotation, checkBridgeCodeInfo, checkBrowserCodeInfo } from '../../src/ui/utils/vaultDeviceFlows.ts';
-import { derivePairKeys, generatePairCode, generatePairSalt, pairApproveMac, pairBridgePayload, pairHubOrigin, pairKeyMac, verifyPairApproveMac } from '../../src/ui/utils/vaultPairing.ts';
+import { acceptedPairOrigins, derivePairKeys, generatePairCode, generatePairSalt, isPairHubOrigin, pairApproveMac, pairBridgePayload, pairHubOrigin, pairKeyMac, verifyPairApproveMac } from '../../src/ui/utils/vaultPairing.ts';
 import { asApproverIdentity, buildRecoveryKey, openRecoveryKey } from '../../src/ui/utils/vaultRecovery.ts';
 import { generate12RecoveryWords, recoveryWordsToEntropy } from '../../src/ui/utils/vaultCrypto.ts';
 
@@ -90,6 +90,8 @@ async function startHub() {
   const child = spawn(bin, [
     '--listen', `127.0.0.1:${port}`, '--db', dbPath, '--migrations-dir', migrations,
     '--trusted-proxy-cidr', '127.0.0.1/32',
+    // A configured hub alias (written non-canonically: the hub canonicalizes it).
+    '--pairing-hub-origins', 'https://Hub.Mundus.test/',
   ], { cwd: dir, env, stdio: ['ignore', log, log] });
   let exited = false;
   child.on('exit', () => { exited = true; });
@@ -232,8 +234,11 @@ async function fetchVerified(user, userId, pins) {
 // ── simulated bridge (no real ham-bridge on Windows without the OS keystore) ──
 
 class SimBridge {
-  static async create(userId) {
+  // hubOrigin: the canonical hub origin this bridge was enrolled against (`-Hub`); it
+  // binds it into its stretch and declares it (pair_hub_origin) next to its pair_salt.
+  static async create(userId, hubOrigin = pairHubOrigin(HUB.base)) {
     const b = new SimBridge();
+    b.pairHubOrigin = hubOrigin;
     b.identity = await SimDevice.create(userId, 'e2e-bridge', 'bridge');
     b.ecdh = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, false, ['deriveBits']);
     b.ecdhPub = await exportRawHex(b.ecdh.publicKey);
@@ -246,7 +251,7 @@ class SimBridge {
     // Hub-blind pairing: the code `ham-bridge enroll` prints; only derived values go to the hub.
     b.pairCode = generatePairCode();
     b.pairSalt = generatePairSalt();
-    b.pairKeys = await derivePairKeys(b.pairCode, { kind: 'bridge', userId: '', hubOrigin: pairHubOrigin(HUB.base), pairSalt: b.pairSalt });
+    b.pairKeys = await derivePairKeys(b.pairCode, { kind: 'bridge', userId: '', hubOrigin: hubOrigin, pairSalt: b.pairSalt });
     return b;
   }
   // POST /device/authorize body, with the identity-key proof of possession over the ECDH key + PKCE challenge.
@@ -259,6 +264,7 @@ class SimBridge {
       bridge_identity_proof: proof,
       pair_lookup: this.pairKeys.lookup,
       pair_salt: this.pairSalt,
+      pair_hub_origin: this.pairHubOrigin,
       pair_key_mac: await pairKeyMac(this.pairKeys, 'bridge', pairBridgePayload(this.identity.signPub, this.ecdhPub, this.challenge)),
     };
   }
@@ -328,21 +334,27 @@ async function register(dev, user, auth = { user }, now = Date.now()) {
   dev.pairSalt = generatePairSalt();
   dev.pairKeys = await derivePairKeys(dev.pairCode, browserPairCtx(dev));
   const r = await buildPairedRegistration(dev.identity, dev.label, dev.pairKeys, now);
-  dev.lastRegisterBody = { statement: r.statement, proof_signature: r.signature, pair_lookup: r.pairLookup, pair_key_mac: r.pairKeyMac, pair_salt: dev.pairSalt };
+  dev.lastRegisterBody = { statement: r.statement, proof_signature: r.signature, pair_lookup: r.pairLookup, pair_key_mac: r.pairKeyMac, pair_salt: dev.pairSalt, pair_hub_origin: pairHubOrigin(HUB.base) };
   return http('POST', '/api/v1/vault/devices/register', { ...auth, body: dev.lastRegisterBody });
 }
 
 // What the approval page does with a typed code (lookUpPairing): fetch the public
-// salts of the pending requests, run the stretch per candidate, resolve the lookup.
-async function approverLookup(code, user, uid) {
-  const salts = await http('POST', '/api/v1/device/pair-salts', { user, body: {} });
+// salts and DECLARED hub origins of the pending requests, run the stretch per
+// candidate with its declared origin (never the approver's own origin) when that origin
+// is the approver's own API origin or a hub-configured alias, resolve the lookup.
+// `tamper` rewrites candidates as a hostile hub would serve them.
+async function approverLookup(code, user, uid, tamper = (c) => c, headers = {}) {
+  const salts = await http('POST', '/api/v1/device/pair-salts', { user, body: {}, headers });
   if (salts.status !== 200) throw new CheckFailed(`pair-salts -> ${salts.status} ${salts.raw}`);
+  const accepted = acceptedPairOrigins(pairHubOrigin(HUB.base), salts.data.pairing_hub_origins);
   const tried = [];
-  for (const c of salts.data.candidates) {
-    tried.push({ ...c, keys: await derivePairKeys(code, { kind: c.kind, userId: c.kind === 'browser' ? uid : '', hubOrigin: pairHubOrigin(HUB.base), pairSalt: c.pair_salt }) });
+  for (const c of salts.data.candidates.map(tamper)) {
+    if (!isPairHubOrigin(c.pair_hub_origin) || !accepted.has(c.pair_hub_origin)) continue;
+    tried.push({ ...c, keys: await derivePairKeys(code, { kind: c.kind, userId: c.kind === 'browser' ? uid : '', hubOrigin: c.pair_hub_origin, pairSalt: c.pair_salt }) });
   }
-  const ver = await http('POST', '/api/v1/device/verify', { user, body: { pair_lookups: tried.map((c) => c.keys.lookup) } });
-  const match = tried.find((c) => ver.status === 200 && c.kind === ver.data.kind && c.pair_salt === ver.data.pair_salt);
+  if (tried.length === 0) throw new CheckFailed('no pairing candidate with a declared hub origin');
+  const ver = await http('POST', '/api/v1/device/verify', { user, body: { pair_lookups: tried.map((c) => c.keys.lookup) }, headers });
+  const match = tried.find((c) => ver.status === 200 && c.kind === ver.data.kind && c.pair_salt === ver.data.pair_salt && c.pair_hub_origin === ver.data.pair_hub_origin);
   if (!match) throw new CheckFailed(`verify(lookups) -> ${ver.status} ${ver.raw}`);
   return { keys: match.keys, ver };
 }
@@ -406,6 +418,11 @@ async function main() {
       // "New code": a newer register statement re-pairs; a replay of the old body cannot take it back.
       const reg = await register(S.B, ALICE);
       expect(reg.status === 201, `B draws a new code (newer register statement) -> 201 (${reg.status})`);
+      for (const bad of [undefined, 'https://hub.example.test', 'http://127.0.0.1:8081/api']) {
+        // From another client IP: the per-IP registration budget of the later steps is untouched.
+        const r = await http('POST', '/api/v1/vault/devices/register', { user: ALICE, body: { ...oldBody, pair_hub_origin: bad }, headers: { 'X-Forwarded-For': '203.0.113.7' } });
+        expect(r.status === 400, `register with pair_hub_origin ${bad} -> 400 (${r.status})`);
+      }
       const replay = await http('POST', '/api/v1/vault/devices/register', { user: ALICE, body: oldBody });
       expect(replay.status === 409, `a replayed older register body cannot replace the live pairing (${replay.status})`);
       const oldVer = await http('POST', '/api/v1/device/verify', { user: ALICE, body: { pair_lookup: oldLookup } });
@@ -547,6 +564,54 @@ async function main() {
       const mallory = await SimDevice.create(S.uid, 'mallory root');
       const evil = { ...captured, nonce: randHex(16), chain_proof: { ...captured.chain_proof, root_sign_pub: mallory.signPub, root_device_id: mallory.id } };
       await br.receiveUnseal(evil, S.uid).then(() => expect(false, 'swapped root accepted'), () => expect(true, 'bridge refuses a chain proof for a root other than the pinned one'));
+    });
+
+    await step('3c bridge enrolled against a configured hub alias pairs via its declared origin; a relay origin or a tampered origin is refused', async () => {
+      // Production shape: `ham-bridge enroll -Hub https://hub.mundus.in` while the UI runs at
+      // https://heimdall.mundus.in and calls its API on its own origin (here: HUB.base).
+      const declared = 'https://hub.mundus.test:443';
+      // Its lookups come from another client IP: the per-IP verify budget of later steps is untouched.
+      const xff = { 'X-Forwarded-For': '203.0.113.8' };
+      expect(declared !== pairHubOrigin(HUB.base), 'the bridge origin differs from the approver page origin');
+      const br = await SimBridge.create(S.uid, declared);
+      const noOrigin = await http('POST', '/api/v1/device/authorize', { body: { ...(await br.authorizeBody()), pair_hub_origin: undefined } });
+      expect(noOrigin.status === 400, `authorize without pair_hub_origin -> 400 (${noOrigin.status})`);
+      for (const bad of ['https://hub.mundus.test', 'https://Hub.mundus.test:443', 'https://hub.mundus.test:443/api', 'ftp://hub.mundus.test:21']) {
+        const r = await http('POST', '/api/v1/device/authorize', { body: { ...(await br.authorizeBody()), pair_hub_origin: bad } });
+        expect(r.status === 400, `authorize with a non-canonical pair_hub_origin ${bad} -> 400 (${r.status})`);
+      }
+      const authz = await http('POST', '/api/v1/device/authorize', { body: await br.authorizeBody() });
+      expect(authz.status === 200, `bridge /device/authorize with a declared origin -> 200 (${authz.status} ${authz.status !== 200 ? authz.raw : ''})`);
+      const salts = await http('POST', '/api/v1/device/pair-salts', { user: ALICE, body: {}, headers: xff });
+      expect(salts.data.candidates.some((c) => c.kind === 'bridge' && c.pair_salt === br.pairSalt && c.pair_hub_origin === declared), '/device/pair-salts lists the declared origin next to the salt');
+      expect(JSON.stringify(salts.data.pairing_hub_origins) === JSON.stringify([declared]), `/device/pair-salts serves the canonical configured aliases (${JSON.stringify(salts.data.pairing_hub_origins)})`);
+      // Old behaviour (derive with the approver's own origin): no device is waiting.
+      await approverLookup(br.pairCode, ALICE, S.uid, (c) => ({ ...c, pair_hub_origin: pairHubOrigin(HUB.base) }), xff)
+        .then(() => expect(false, 'page-origin derivation matched'), () => expect(true, 'deriving with the page origin finds nothing (the production bug)'));
+      // A hostile hub altering the declared origin: lookups miss, nothing to approve.
+      await approverLookup(br.pairCode, ALICE, S.uid, (c) => (c.pair_salt === br.pairSalt ? { ...c, pair_hub_origin: 'https://evil.example.test:443' } : c), xff)
+        .then(() => expect(false, 'tampered origin matched'), () => expect(true, 'a tampered declared origin is refused'));
+      const { keys, ver } = await approverLookup(br.pairCode, ALICE, S.uid, (c) => c, xff);
+      expect(ver.status === 200 && ver.data.kind === 'bridge' && ver.data.pair_salt === br.pairSalt && ver.data.pair_hub_origin === declared, '/device/verify resolves the bridge and echoes its declared origin');
+      await checkBridgeCodeInfo(ver.data, keys);
+      expect(true, 'key_mac verifies under the typed code with the declared origin');
+      // The served key_mac under keys stretched with another origin does not verify either.
+      const otherKeys = await derivePairKeys(br.pairCode, { kind: 'bridge', userId: '', hubOrigin: 'https://evil.example.test:443', pairSalt: br.pairSalt });
+      await checkBridgeCodeInfo(ver.data, otherKeys)
+        .then(() => expect(false, 'key_mac under another origin accepted'), () => expect(true, 'key_mac under another origin is refused'));
+      const deny = await http('POST', '/api/v1/device/approve', { user: ALICE, body: { pair_lookup: keys.lookup, approve: false }, headers: xff });
+      expect(deny.status === 200, `deny the extra bridge request -> 200 (${deny.status} ${deny.status !== 200 ? deny.raw : ''})`);
+
+      // Relay/phishing: a user tricked into `ham-bridge enroll -Hub https://evil.example`
+      // (a transparent relay to this hub). The bridge honestly declares the relay origin,
+      // which this hub does not list, so the approver never derives it: no match.
+      const relayed = await SimBridge.create(S.uid, 'https://evil.example.test:443');
+      const rAuthz = await http('POST', '/api/v1/device/authorize', { body: await relayed.authorizeBody() });
+      expect(rAuthz.status === 200, `relayed bridge /device/authorize -> 200 (${rAuthz.status})`);
+      await approverLookup(relayed.pairCode, ALICE, S.uid, (c) => c, xff)
+        .then(() => expect(false, 'relay-origin bridge matched'), () => expect(true, 'a bridge that declares a non-listed (relay) origin is refused'));
+      const rDeny = await http('POST', '/api/v1/device/approve', { user: ALICE, body: { pair_lookup: relayed.pairKeys.lookup, approve: false }, headers: xff });
+      expect(rDeny.status === 200, `deny the relayed bridge request -> 200 (${rDeny.status})`);
     });
 
     await step('4a last-approver guard; A creates a recovery key (signed approve op, wrap, sealed blob)', async () => {
@@ -717,7 +782,7 @@ async function main() {
       expect(bobDir.status === 200 && bobDir.data.devices.length === 1 && bobDir.data.devices[0].device_id === S.Bob.id && !bobDir.raw.includes(S.A.id), 'bob sees only his own directory');
       const F = await SimDevice.create(S.uid, 'e2e device F');
       const rf = await register(F, ALICE);
-      expect(rf.status === 201, 'F registered pending');
+      expect(rf.status === 201, `F registered pending (${rf.status} ${rf.status !== 201 ? rf.raw : ''})`);
       const bv = await http('POST', '/api/v1/device/verify', { user: BOB, body: { pair_lookup: F.pairKeys.lookup } });
       expect(bv.status === 404, `bob cannot resolve alice's pending lookup (${bv.status})`);
       const before = (await http('GET', '/api/v1/vault/directory', { user: ALICE })).data.version;
@@ -765,7 +830,7 @@ async function main() {
       // Deny: an approver removes a pending device; it cannot then use or be approved.
       const G = await SimDevice.create(S.uid, 'e2e device G');
       const rg = await register(G, ALICE);
-      expect(rg.status === 201, 'G registered pending');
+      expect(rg.status === 201, `G registered pending (${rg.status} ${rg.status !== 201 ? rg.raw : ''})`);
       const brVerify = await http('POST', '/api/v1/device/verify', { bearer: S.bridge.token, body: { pair_lookup: G.pairKeys.lookup } });
       expect(brVerify.status === 403, `a bridge credential cannot resolve a browser lookup (${brVerify.status})`);
       const pg = `/api/v1/vault/devices/${G.id}/deny`;

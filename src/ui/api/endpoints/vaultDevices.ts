@@ -21,16 +21,12 @@ export interface VaultSignerContext {
 const API = '/api/v1';
 
 /**
- * The hub origin pairing binds (pairing stretch, plan §1 "Pairing"): the origin of the
- * API base this page talks to. Throws outside an http(s) page.
+ * The hub origin a NEW browser binds into its own pairing stretch (plan §1 "Pairing"):
+ * the origin of the API base this page talks to. It is declared to the hub next to the
+ * pair_salt (pair_hub_origin); an approver derives with each candidate's DECLARED
+ * origin, never with its own page origin. Throws outside an http(s) page.
  */
 export function pairingHubOrigin(): string {
-  // Dev only: the Vite dev server serves the UI on its own port and proxies
-  // /api/v1 to the hub, so the page address is not the hub address a bridge
-  // enrolls against. VITE_PAIRING_HUB_ORIGIN names the real hub in that setup;
-  // production builds leave it unset and bind to the page's own API base.
-  const devHub = String((import.meta as any).env?.VITE_PAIRING_HUB_ORIGIN ?? '').trim();
-  if (devHub) return pairHubOrigin(new URL(`${API}/`, devHub).href);
   const here = (globalThis as { location?: { href?: string } }).location?.href;
   if (!here) throw new Error('No page address to bind the pairing to');
   return pairHubOrigin(new URL(apiUrl(`${API}/`), here).href);
@@ -38,6 +34,9 @@ export function pairingHubOrigin(): string {
 
 /** fetch is injectable for hermetic tests. */
 let fetchImpl: typeof fetch = (input, init) => fetch(input, init);
+export function setVaultDevicesFetch(f: typeof fetch | null): void {
+  fetchImpl = f ?? ((input, init) => fetch(input, init));
+}
 
 async function vaultRequest(method: string, path: string, opts: { body?: unknown; signed?: VaultSignerContext } = {}): Promise<any> {
   const fullPath = `${API}${path}`;
@@ -109,10 +108,11 @@ export interface RegisterResult {
 /**
  * Register this device as pending. `pairLookup` / `pairKeyMac` are derived from the
  * secret pairing code this device shows (the code never leaves the device);
- * `pairSalt` is the public salt of the pairing stretch.
+ * `pairSalt` is the public salt of the pairing stretch and `pairHubOrigin` the
+ * canonical hub origin this device bound into it (declared for the approver).
  */
-export async function postVaultRegister(statement: string, proofSignature: unknown, pairLookup: string, pairKeyMac: string, pairSalt: string): Promise<RegisterResult> {
-  return vaultRequest('POST', '/vault/devices/register', { body: { statement, proof_signature: proofSignature, pair_lookup: pairLookup, pair_key_mac: pairKeyMac, pair_salt: pairSalt } });
+export async function postVaultRegister(statement: string, proofSignature: unknown, pairLookup: string, pairKeyMac: string, pairSalt: string, pairHubOrigin: string): Promise<RegisterResult> {
+  return vaultRequest('POST', '/vault/devices/register', { body: { statement, proof_signature: proofSignature, pair_lookup: pairLookup, pair_key_mac: pairKeyMac, pair_salt: pairSalt, pair_hub_origin: pairHubOrigin } });
 }
 
 // ── approval surface (/device/add) ──────────────────────────────────────────
@@ -133,6 +133,7 @@ export interface BrowserCodeInfo {
   register_statement: string;
   pair_key_mac: string;
   pair_salt: string;
+  pair_hub_origin?: string;
 }
 
 export interface BridgeCodeInfo {
@@ -151,6 +152,7 @@ export interface BridgeCodeInfo {
   pair_key_mac: string;
   code_challenge: string;
   pair_salt: string;
+  pair_hub_origin?: string;
   [k: string]: unknown;
 }
 
@@ -159,15 +161,27 @@ export type DeviceCodeInfo = BrowserCodeInfo | BridgeCodeInfo;
 export interface PairCandidate {
   kind: 'browser' | 'bridge';
   pair_salt: string;
+  /** The canonical hub origin the NEW device declares it bound into its stretch. */
+  pair_hub_origin: string;
+}
+
+export interface PairCandidateList {
+  candidates: PairCandidate[];
+  /** Hub-configured aliases (besides this page's own API origin) a declared origin may name. */
+  pairingHubOrigins: string[];
 }
 
 /**
- * Public salts of the requests this user could approve (own pending browsers, then
- * pending bridges): the lookup is derived from the typed code AND a request's salt.
+ * Public salts and declared hub origins of the requests this user could approve (own
+ * pending browsers, then pending bridges): the lookup is derived from the typed code,
+ * a request's salt and the hub origin that request declared.
  */
-export async function fetchPairCandidates(): Promise<PairCandidate[]> {
+export async function fetchPairCandidates(): Promise<PairCandidateList> {
   const res = await vaultRequest('POST', '/device/pair-salts', { body: {} });
-  return Array.isArray(res?.candidates) ? res.candidates : [];
+  return {
+    candidates: Array.isArray(res?.candidates) ? res.candidates : [],
+    pairingHubOrigins: Array.isArray(res?.pairing_hub_origins) ? res.pairing_hub_origins.filter((o: unknown) => typeof o === 'string') : [],
+  };
 }
 
 /**

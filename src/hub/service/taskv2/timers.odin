@@ -354,7 +354,16 @@ fire_grant_unconfirmed :: proc(svc: ^Service, u: ^Uow, t: Timer) -> Fire_Result 
 		timers_arm(svc, .Grant_Unconfirmed, lease.lease_id, now_ms(svc.clock) + GRANT_UNCONFIRMED_SECONDS * 1000, lease.granted_at)
 		return .Acted
 	}
-	return expire_then_match(svc, u, lease, EXPIRE_UNCONFIRMED)
+	// After one delivery retry, missing startup confirmation is a dispatch
+	// failure. Park it with diagnostics instead of burning work attempts.
+	switch dispatch_failed_in_uow(svc, u, lease, "startup was not confirmed after retrying delivery") {
+	case .Gone: return .Noop
+	case .Failed: return .Failed
+	case .Expired:
+		if ok, _ := after_chain_change(svc, u, lease.chain_id, lease.owner_user_id, .Instance_Terminal); !ok do return .Failed
+		return .Acted
+	}
+	return .Noop
 }
 
 @(private = "file")

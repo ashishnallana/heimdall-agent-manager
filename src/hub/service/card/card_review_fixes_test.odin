@@ -1,11 +1,13 @@
 package card
 
 import "core:fmt"
+import "core:strings"
 import "core:testing"
 import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 import content_service "odin_test:hub/service/content"
+import taskv2 "odin_test:hub/service/taskv2"
 
 // Regressions for the codex-reviewer NGTM on the attention API.
 
@@ -145,4 +147,106 @@ test_review_fix_blocked_card_pins_the_block :: proc(t: ^testing.T) {
 	_, acc_ok, acc_err := accept_card(&h.svc, contracts.Auth_Context{kind = .User_Token, user_id = string(PH_OWNER)}, cid, Card_Decision{note = "answer to the old question", expected_block = old_block})
 	testing.expect(t, !acc_ok, "an Answer written for the old block is refused")
 	testing.expect_value(t, acc_err.code, domain.Error_Code.Conflict)
+}
+
+// ---- task.review verdict on an agent-made card (G2) ---------------------------
+// Accepting a task.review card used to always approve; it now honours
+// args.verdict / summary / findings (default approve).
+
+// ph_review_task saves a task awaiting the user's verdict (in_review, user
+// approval required, no agent review roles) and returns its id.
+ph_review_task :: proc(t: ^testing.T, h: ^Projector_Harness, id: string) -> domain.Task_ID {
+	task := domain.Task{task_id = domain.Task_ID(id), chain_id = PH_CHAIN, owner_user_id = PH_OWNER, title = "vault:v2:task-title", priority = .P1, publish_state = .Published, kind = .Task, state = .In_Review, attempt_no = 1, requires_user_approval = true, brief_json = `{"goal":"g","review_roles":[]}`, created_at = "2026-10-01T00:00:00Z", updated_at = "2026-10-01T01:00:00Z"}
+	_, ok, err := iface.taskchain_save_task(&h.tasks, task)
+	testing.expectf(t, ok, "save review task: %s", err.message)
+	// The engine folds state from events: seed one that puts attempt 1 in review.
+	_, ev_ok, ev_err := taskv2.append_event(&h.tasks, &h.clock, task, taskv2.Actor{kind = taskv2.ACTOR_USER, id = string(PH_OWNER)}, taskv2.EV_MIGRATED, `{"from_status":"in_review","state":"in_review","published":true,"attempt_no":1}`)
+	testing.expectf(t, ev_ok, "seed review event: %s", ev_err.message)
+	return task.task_id
+}
+
+// ph_review_card creates an agent card carrying one task.review op whose args
+// are `extra_args` (a JSON fragment, may be empty) plus task_id / attempt_no.
+ph_review_card :: proc(h: ^Projector_Harness, task_id: domain.Task_ID, extra_args: string) -> (domain.Card, bool, domain.Domain_Error) {
+	sep := "," if extra_args != "" else ""
+	// strings.concatenate, not fmt: fmt reads `{` as an argument-index brace.
+	ops := strings.concatenate({`[{"op":"task.review","label":"Review","args":{"task_id":"`, string(task_id), `","attempt_no":1`, sep, extra_args, `}}]`}, context.temp_allocator)
+	return create_card(&h.svc, ph_auth(), Card_Input{title = "Review it", provider = "agent", operations_json = ops})
+}
+
+@(test)
+test_card_task_review_request_changes_sends_task_back :: proc(t: ^testing.T) {
+	h: Projector_Harness
+	ph_open(t, &h, "att_review_request_changes")
+	defer ph_close(&h)
+	tid := ph_review_task(t, &h, "task_rc")
+	card, ok, err := ph_review_card(&h, tid, `"verdict":"request_changes","summary":"rename x","findings":[{"path":"a.odin","line":1,"severity":"minor","text":"rename x"}]`)
+	if !testing.expectf(t, ok, "create: %v %s", err.code, err.message) do return
+	accepted, acc_ok, acc_err := accept_card(&h.svc, ph_auth(), card.card_id)
+	if !testing.expectf(t, acc_ok, "accept: %v %s", acc_err.code, acc_err.message) do return
+	testing.expect_value(t, accepted.status, domain.CARD_STATUS_ACCEPTED)
+	task, _, _ := iface.taskchain_get_task(&h.tasks, tid)
+	testing.expect_value(t, task.state, domain.Task_State.Ready) // back for rework, not done
+	reviews, _ := iface.taskchain_list_reviews_by_task(&h.tasks, tid, PH_OWNER)
+	testing.expect_value(t, len(reviews), 1)
+	if len(reviews) == 1 {
+		testing.expect_value(t, reviews[0].verdict, "request_changes")
+		testing.expect(t, strings.contains(reviews[0].findings_json, "a.odin"), "findings reach the review")
+	}
+}
+
+@(test)
+test_card_task_review_without_verdict_approves :: proc(t: ^testing.T) {
+	h: Projector_Harness
+	ph_open(t, &h, "att_review_default_approve")
+	defer ph_close(&h)
+	tid := ph_review_task(t, &h, "task_ok")
+	card, ok, err := ph_review_card(&h, tid, "")
+	if !testing.expectf(t, ok, "create: %v %s", err.code, err.message) do return
+	_, acc_ok, acc_err := accept_card(&h.svc, ph_auth(), card.card_id)
+	if !testing.expectf(t, acc_ok, "accept: %v %s", acc_err.code, acc_err.message) do return
+	task, _, _ := iface.taskchain_get_task(&h.tasks, tid)
+	testing.expect_value(t, task.state, domain.Task_State.Done)
+}
+
+@(test)
+test_card_task_review_request_changes_needs_summary :: proc(t: ^testing.T) {
+	h: Projector_Harness
+	ph_open(t, &h, "att_review_rc_no_summary")
+	defer ph_close(&h)
+	tid := ph_review_task(t, &h, "task_nosum")
+	_, ok, err := ph_review_card(&h, tid, `"verdict":"request_changes","summary":"  "`)
+	testing.expect(t, !ok, "create refuses request_changes without a summary")
+	testing.expect_value(t, err.code, domain.Error_Code.Validation_Failed)
+	testing.expect(t, strings.contains(err.message, "summary"), "the error names the summary")
+
+	// A row that skipped create-time validation is still refused at accept,
+	// and the task is untouched.
+	bad := domain.Card{card_id = "crd_rc_nosum", owner_user_id = PH_OWNER, title = "Review it", provider = "agent", status = domain.CARD_STATUS_PENDING, scope = "global", source_refs_json = "[]", guard_json = "{}", operations_json = strings.concatenate({`[{"op":"task.review","args":{"task_id":"`, string(tid), `","attempt_no":1,"verdict":"request_changes"}}]`}, context.temp_allocator), created_at = "2026-10-01T01:00:00Z", updated_at = "2026-10-01T01:00:00Z"}
+	_, sok, serr := iface.card_create(&h.cards, bad)
+	if !testing.expectf(t, sok, "seed card: %s", serr.message) do return
+	_, acc_ok, acc_err := accept_card(&h.svc, ph_auth(), bad.card_id)
+	testing.expect(t, !acc_ok, "accept refuses request_changes without a summary")
+	testing.expect_value(t, acc_err.code, domain.Error_Code.Validation_Failed)
+	task, _, _ := iface.taskchain_get_task(&h.tasks, tid)
+	testing.expect_value(t, task.state, domain.Task_State.In_Review)
+}
+
+@(test)
+test_card_task_review_unknown_verdict_rejected :: proc(t: ^testing.T) {
+	h: Projector_Harness
+	ph_open(t, &h, "att_review_bad_verdict")
+	defer ph_close(&h)
+	tid := ph_review_task(t, &h, "task_bad")
+	_, ok, err := ph_review_card(&h, tid, `"verdict":"lgtm"`)
+	testing.expect(t, !ok, "create refuses an unknown verdict")
+	testing.expect_value(t, err.code, domain.Error_Code.Validation_Failed)
+	testing.expect(t, strings.contains(err.message, "lgtm"), "the error names the bad verdict")
+
+	ok2, reason2 := validate_card_operations(`[{"op":"task.review","args":{"task_id":"task_bad","attempt_no":1,"verdict":""}}]`)
+	testing.expect(t, !ok2 && strings.contains(reason2, "verdict"), "an empty verdict is refused")
+	ok3, reason3 := validate_card_operations(`[{"op":"task.review","args":{"task_id":"task_bad","attempt_no":1,"verdict":"approve","findings":"nope"}}]`)
+	testing.expect(t, !ok3 && strings.contains(reason3, "findings"), "findings must be a JSON array")
+	task, _, _ := iface.taskchain_get_task(&h.tasks, tid)
+	testing.expect_value(t, task.state, domain.Task_State.In_Review)
 }

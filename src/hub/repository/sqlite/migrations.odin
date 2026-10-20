@@ -437,11 +437,17 @@ MIGRATION_098_MIXED_WORK_GRAPH :: #load("migrations/098_mixed_work_graph.sql", s
 
 MIGRATION_099_MIXED_WORK_EXECUTION :: #load("migrations/099_mixed_work_execution.sql", string)
 
-// MIGRATION_100_DROP_BRIDGE_ENROLLMENTS drops the never-used bridge_enrollments
-// table from 002 and its owner trigger.
-MIGRATION_100_DROP_BRIDGE_ENROLLMENTS :: #load("migrations/100_drop_bridge_enrollments.sql", string)
+// 100: the pending device's declared pairing hub origin (vault_devices.pair_hub_origin).
+// An ALTER (keeps existing vault data); fresh databases get the column from 092.
+MIGRATION_100_VAULT_PAIR_HUB_ORIGIN :: #load("migrations/100_vault_pair_hub_origin.sql", string)
 
-migration_order :: [103]string {
+// 101: Codex/Pi GPT-6 models (codex-cli 0.162); retires the GPT-5.6 rows.
+MIGRATION_101_CODEX_GPT6_MODELS :: #load("migrations/101_codex_gpt6_models.sql", string)
+
+// 102: drops the never-used bridge_enrollments table from 002 and its owner trigger.
+MIGRATION_102_DROP_BRIDGE_ENROLLMENTS :: #load("migrations/102_drop_bridge_enrollments.sql", string)
+
+migration_order :: [105]string {
 	"001_foundation.sql",
 	"002_owner_scoped_core.sql",
 	"003_device_tokens.sql",
@@ -544,7 +550,9 @@ migration_order :: [103]string {
 	"097_workflow_runs.sql",
 	"098_mixed_work_graph.sql",
 	"099_mixed_work_execution.sql",
-	"100_drop_bridge_enrollments.sql",
+	"100_vault_pair_hub_origin.sql",
+	"101_codex_gpt6_models.sql",
+	"102_drop_bridge_enrollments.sql",
 }
 
 // stop_before is a TEST SEAM: when non-empty, the apply loop stops in front of
@@ -890,6 +898,13 @@ run_migrations :: proc(
 			mark_migration_applied(conn, name)
 			continue
 		}
+		// 095 drops the vault tables on a fresh database (092 is re-run after the loop
+		// with the column), and a database that already has the column needs nothing.
+		if name == "100_vault_pair_hub_origin.sql" &&
+		   (!sqlite_object_exists(conn, "vault_devices") || table_column_exists(conn, "vault_devices", "pair_hub_origin")) {
+			mark_migration_applied(conn, name)
+			continue
+		}
 		sql := migration_sql(name, migrations_dir)
 		if sql == "" {
 			return false, domain.domain_error(
@@ -1035,7 +1050,9 @@ migration_sql :: proc(name, migrations_dir: string) -> string {
 	if name == "097_workflow_runs.sql" do return strings.clone(MIGRATION_097_WORKFLOW_RUNS)
 	if name == "098_mixed_work_graph.sql" do return strings.clone(MIGRATION_098_MIXED_WORK_GRAPH)
 	if name == "099_mixed_work_execution.sql" do return strings.clone(MIGRATION_099_MIXED_WORK_EXECUTION)
-	if name == "100_drop_bridge_enrollments.sql" do return strings.clone(MIGRATION_100_DROP_BRIDGE_ENROLLMENTS)
+	if name == "102_drop_bridge_enrollments.sql" do return strings.clone(MIGRATION_102_DROP_BRIDGE_ENROLLMENTS)
+	if name == "100_vault_pair_hub_origin.sql" do return strings.clone(MIGRATION_100_VAULT_PAIR_HUB_ORIGIN)
+	if name == "101_codex_gpt6_models.sql" do return strings.clone(MIGRATION_101_CODEX_GPT6_MODELS)
 	if name == "081_antigravity_models.sql" do return strings.clone(MIGRATION_081_ANTIGRAVITY_MODELS)
 	if name == "080_copilot_launch_recipe.sql" do return strings.clone(MIGRATION_080_COPILOT_LAUNCH_RECIPE)
 	if name == "079_repair_provider_catalog_etag.sql" do return strings.clone(MIGRATION_079_REPAIR_PROVIDER_CATALOG_ETAG)
@@ -1523,7 +1540,12 @@ drop_legacy_column :: proc(conn: ^Conn, table, column: string) {
 // upgrade_vault_directory_schema is the idempotent self-heal twin of migration 092:
 // the file is written with IF NOT EXISTS throughout, so it is simply re-run.
 upgrade_vault_directory_schema :: proc(conn: ^Conn) -> bool {
-	return exec(conn, MIGRATION_092_VAULT_DEVICE_DIRECTORY)
+	if !exec(conn, MIGRATION_092_VAULT_DEVICE_DIRECTORY) do return false
+	// 100's column on a table 092 created before it existed (CREATE IF NOT EXISTS keeps the old shape).
+	if !table_column_exists(conn, "vault_devices", "pair_hub_origin") {
+		return exec(conn, MIGRATION_100_VAULT_PAIR_HUB_ORIGIN)
+	}
+	return true
 }
 
 

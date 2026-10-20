@@ -183,15 +183,48 @@ grant_work :: proc(svc: ^Service, u: ^Uow, ctx: ^Match_Context, task: domain.Tas
 	if view.last_release == .Changes_Requested || view.last_release == .Expired {
 		prefer = last_attempt_holder(svc, task)
 	}
+	failure, failed_agent, failure_cause := "", "", ""
+	failed_placement: Placement
+	queued := false
+	// Solo coordinators still pull their work; only an explicit user Start may
+	// launch one. Their unavailable process nevertheless needs a user card.
+	if ctx.has_coordinator && chain_is_solo(svc, ctx.chain) && (assignee == "" || assignee == ctx.coordinator.agent_id) {
+		if !bridge_online(svc, ctx.coordinator.bridge_id) {
+			failure, failed_agent, failure_cause = "bridge is offline", ctx.coordinator.agent_id, "bridge_offline"
+			failed_placement = Placement{bridge_id = ctx.coordinator.bridge_id, provider = ctx.coordinator.provider, model = ctx.coordinator.model}
+		} else if instance_is_live(ctx.coordinator) || instance_is_pending(ctx.coordinator) {
+			queued = true
+		} else {
+			failure, failed_agent = instance_failure_reason(ctx.coordinator), ctx.coordinator.agent_id
+			failed_placement = Placement{bridge_id = ctx.coordinator.bridge_id, provider = ctx.coordinator.provider, model = ctx.coordinator.model}
+		}
+	}
 	for fleet in ctx.fleets {
+		if ctx.has_coordinator && fleet.agent_id == ctx.coordinator.agent_id do continue
 		if !fleet_row_has_role(fleet, domain.FLEET_ROLE_WORKER) do continue
 		if assignee != "" && fleet.agent_id != assignee do continue
 		placement, pok := resolve_placement(ctx, task, fleet, true)
-		if !pok do continue
-		if !bridge_online(svc, placement.bridge_id) do continue // held: bridge offline
-		if placement.directory_id != "" && directory_has_work_lease_ctx(ctx, placement.directory_id) do continue
-		inst, found := pick_instance(svc, u, ctx, fleet, placement, domain.FLEET_ROLE_WORKER, prefer)
-		if !found do continue
+		if !pok { failure, failed_agent, failure_cause = "no bridge placement can be resolved", fleet.agent_id, ""; continue }
+		if placement.directory_id != "" && directory_has_work_lease_ctx(ctx, placement.directory_id) { queued = true; continue }
+		if fleet_row_full(ctx, fleet, placement) { queued = true; continue }
+		if !bridge_online(svc, placement.bridge_id) {
+			failure, failed_agent, failed_placement, failure_cause = "bridge is offline", fleet.agent_id, placement, "bridge_offline"
+			continue
+		}
+		if svc.agent_service != nil && svc.agent_service.providers != nil {
+			provider, model := resolve_launch_model(svc.agent_service, placement.bridge_id, placement.provider, placement.model)
+			defer delete(provider)
+			defer delete(model)
+			if _, valid, err := agent.validate_provider_model_intersection(svc.agent_service, placement.bridge_id, provider, model); !valid {
+				failure, failed_agent, failed_placement, failure_cause = err.message, fleet.agent_id, placement, ""
+				continue
+			}
+		}
+		inst, found, why := pick_instance(svc, u, ctx, task, fleet, placement, domain.FLEET_ROLE_WORKER, prefer)
+		if !found {
+			if why != "" { failure, failed_agent, failed_placement, failure_cause = why, fleet.agent_id, placement, "" } else { queued = true }
+			continue
+		}
 		lease, gok, gerr := grant_in_uow(svc, u, Grant_Request{
 			chain = ctx.chain, task = task, instance = inst,
 			kind = domain.LEASE_KIND_WORK, delivery = domain.LEASE_DELIVERY_WAKE,
@@ -205,6 +238,7 @@ grant_work :: proc(svc: ^Service, u: ^Uow, ctx: ^Match_Context, task: domain.Tas
 		ctx.held[inst.agent_instance_id] = true
 		return
 	}
+	if failure != "" && !queued do block_ready_agent_in_uow(svc, u, task, failed_agent, failed_placement, failure, failure_cause)
 }
 
 // ---- review pass ---------------------------------------------------------------------
@@ -229,7 +263,7 @@ grant_reviews :: proc(svc: ^Service, u: ^Uow, ctx: ^Match_Context, task: domain.
 		placement, pok := resolve_placement(ctx, task, fleet, false)
 		if !pok do continue
 		if !bridge_online(svc, placement.bridge_id) do continue
-		inst, found := pick_instance(svc, u, ctx, fleet, placement, domain.FLEET_ROLE_REVIEWER, "")
+		inst, found, _ := pick_instance(svc, u, ctx, task, fleet, placement, domain.FLEET_ROLE_REVIEWER, "")
 		if !found do continue
 		lease, gok, gerr := grant_in_uow(svc, u, Grant_Request{
 			chain = ctx.chain, task = task, instance = inst,
@@ -263,6 +297,15 @@ review_lease_live_for :: proc(ctx: ^Match_Context, svc: ^Service, task_id: domai
 	return false
 }
 
+// Keep provider messages readable in both fleet and solo recovery cards.
+instance_failure_reason :: proc(inst: domain.Agent_Instance) -> string {
+	reason := fmt.tprintf("instance %s is %s", inst.agent_instance_id, inst.runtime_status)
+	if message := jsonx.extract_string(inst.last_error_json, "message", "", true, context.temp_allocator); message != "" {
+		return fmt.tprintf("%s: %s", reason, message)
+	}
+	return reason
+}
+
 // ---- instance selection --------------------------------------------------------------
 
 // pick_instance chooses WHO runs a grant for `fleet` on `placement.bridge_id`:
@@ -272,11 +315,12 @@ review_lease_live_for :: proc(ctx: ^Match_Context, svc: ^Service, task_id: domai
 //   4. JIT: a new instance when live count < fleet capacity (default 1).
 // Coordinators are never candidates.
 @(private = "file")
-pick_instance :: proc(svc: ^Service, u: ^Uow, ctx: ^Match_Context, fleet: domain.Task_Chain_Fleet, placement: Placement, role: string, prefer: string) -> (domain.Agent_Instance, bool) {
+pick_instance :: proc(svc: ^Service, u: ^Uow, ctx: ^Match_Context, task: domain.Task, fleet: domain.Task_Chain_Fleet, placement: Placement, role: string, prefer: string) -> (domain.Agent_Instance, bool, string) {
 	// The coordinator's own fleet row (solo mode) is pull-only: its agent
 	// takes work through `lease next`, never by a wake grant, and a JIT copy of
 	// it is never spawned (REQ-SOLO-2).
-	if ctx.has_coordinator && fleet.agent_id == ctx.coordinator.agent_id do return {}, false
+	if ctx.has_coordinator && fleet.agent_id == ctx.coordinator.agent_id do return {}, false, ""
+	failure := ""
 	live_count := 0
 	live_free := domain.Agent_Instance{}
 	stopping_free := domain.Agent_Instance{}
@@ -287,12 +331,28 @@ pick_instance :: proc(svc: ^Service, u: ^Uow, ctx: ^Match_Context, fleet: domain
 		if inst.agent_id != fleet.agent_id || inst.bridge_id != placement.bridge_id do continue
 		// F4: a person stopped this instance — never re-wake or re-grant it
 		// (whatever its runtime state, including as prefer=last holder), and
-		// do not count it toward capacity: a fresh instance takes the work.
-		if inst.stopped_by == agent.STOPPED_BY_USER do continue
+		// do not count it toward capacity. Without another free instance, ask
+		// the user to restart it instead of creating an unsolicited replacement.
+		if inst.stopped_by == agent.STOPPED_BY_USER {
+			failure = fmt.tprintf("instance %s was stopped by the user", inst.agent_instance_id)
+			continue
+		}
 		if is_coordinator(svc, ctx.chain, inst.agent_instance_id) do continue
 		disposition := agent.failed_instance_disposition(inst, ctx.now_ms)
-		if disposition == .Dead do continue
-		if disposition == .Hold { live_count += 1; continue }
+		if disposition == .Hold {
+			if werr, typed := agent.instance_last_error(inst); typed && werr.class == .retriable {
+				// Standard rematches end at ten minutes; provider backoff may be
+				// longer. Recheck this task just after the actual retry deadline.
+				due := to_ms(inst.stopped_at) + agent.instance_retry_delay_ms(agent.instance_last_error_attempt(inst), werr.retry_after_ms)
+				timers_arm(svc, .Rematch, string(task.task_id), due + 1000, domain.task_state_string(task.state))
+				live_count += 1
+				continue
+			}
+		}
+		if disposition == .Dead || disposition == .Hold {
+			failure = instance_failure_reason(inst)
+			continue
+		}
 		free := !ctx.held[inst.agent_instance_id]
 		stopping := u != nil && effect_has_stop(u, inst.bridge_id, string(ctx.chain.chain_id), inst.agent_instance_id)
 		// An instance granted earlier in this pass is about to run even if it is a
@@ -319,13 +379,14 @@ pick_instance :: proc(svc: ^Service, u: ^Uow, ctx: ^Match_Context, fleet: domain
 		}
 		if free && prefer != "" && inst.agent_instance_id == prefer { preferred = inst; have_pref = true }
 	}
-	if have_pref do return preferred, true
-	if have_live do return live_free, true
-	if have_warm do return warm, true
-	if have_stopping do return stopping_free, true
+	if have_pref do return preferred, true, ""
+	if have_live do return live_free, true, ""
+	if have_warm do return warm, true, ""
+	if have_stopping do return stopping_free, true, ""
 	capacity := fleet.capacity
 	if capacity < 1 do capacity = 1
-	if live_count >= capacity do return {}, false
+	if live_count >= capacity do return {}, false, ""
+	if failure != "" do return {}, false, failure
 	return jit_prepare(svc, u, ctx, fleet, placement, role)
 }
 
@@ -333,8 +394,8 @@ pick_instance :: proc(svc: ^Service, u: ^Uow, ctx: ^Match_Context, fleet: domain
 // wake run[] entry after commit). The registry reservation is cancelled on
 // rollback (Effects.reservations).
 @(private = "file")
-jit_prepare :: proc(svc: ^Service, u: ^Uow, ctx: ^Match_Context, fleet: domain.Task_Chain_Fleet, placement: Placement, role: string) -> (domain.Agent_Instance, bool) {
-	if svc.agent_service == nil do return {}, false
+jit_prepare :: proc(svc: ^Service, u: ^Uow, ctx: ^Match_Context, fleet: domain.Task_Chain_Fleet, placement: Placement, role: string) -> (domain.Agent_Instance, bool, string) {
+	if svc.agent_service == nil do return {}, false, "agent launch service is unavailable"
 	provider, model := resolve_launch_model(svc.agent_service, placement.bridge_id, placement.provider, placement.model)
 	defer delete(provider)
 	defer delete(model)
@@ -350,11 +411,11 @@ jit_prepare :: proc(svc: ^Service, u: ^Uow, ctx: ^Match_Context, fleet: domain.T
 	inst, generation, ok, err := agent.prepare_instance(svc.agent_service, auth, input)
 	if !ok {
 		fmt.eprintfln("[taskv2] match: JIT %s for agent %s on bridge %s failed: %s", role, fleet.agent_id, placement.bridge_id, err.message)
-		return {}, false
+		return {}, false, err.message
 	}
 	if u != nil do append(&u.effects.reservations, Jit_Reservation{bridge_id = inst.bridge_id, generation = generation, instance_id = inst.agent_instance_id})
 	append(&ctx.instances, inst)
-	return inst, true
+	return inst, true, ""
 }
 
 // ---- inline grant for a pulling instance (lease.next) ------------------------------
@@ -509,3 +570,13 @@ directory_has_work_lease_ctx :: proc(ctx: ^Match_Context, directory_id: string) 
 }
 
 _ :: platform
+
+// A full row is queueing even when its bridge is offline.
+fleet_row_full :: proc(ctx: ^Match_Context, fleet: domain.Task_Chain_Fleet, placement: Placement) -> bool {
+	count := 0
+	for inst in ctx.instances {
+		if inst.agent_id != fleet.agent_id || inst.bridge_id != placement.bridge_id do continue
+		if ctx.held[inst.agent_instance_id] do count += 1
+	}
+	return count >= max(1, fleet.capacity)
+}

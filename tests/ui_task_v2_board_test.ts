@@ -193,6 +193,10 @@ test('getTaskBadges derives bridge pin, attempt count, review roles, blocked on 
   const blockedBadges = getTaskBadges(blockedTask, [], nowMs);
   assert.ok(blockedBadges.some((b) => b.label === 'Blocked on you' && b.tone === 'danger'));
 
+  const dispatchReason = 'codex/gpt-6.1-sol on br_1 failed to start: authentication failed';
+  const dispatchBadges = getTaskBadges(makeTask({ state: 'backlog', blocked_on: { kind: 'dispatch', reason: dispatchReason } }), [], nowMs);
+  assert.ok(dispatchBadges.some((b) => b.label === 'Agent not running' && b.title === dispatchReason && b.tone === 'danger'));
+
   // Done state
   const doneTask = makeTask({ state: 'done' });
   const doneBadges = getTaskBadges(doneTask, [], nowMs);
@@ -245,6 +249,10 @@ test('getTaskStatusLines generates human-readable status sentences for each stat
   const [bLine1, bLine2] = getTaskStatusLines(blockedTask, [], nowMs);
   assert.match(bLine1, /Blocked on you — Missing API key/);
   assert.equal(bLine2, 'Nothing will move until you answer');
+
+  const [dispatchLine, dispatchHint] = getTaskStatusLines(makeTask({ state: 'backlog', blocked_on: { kind: 'dispatch', reason: 'Provider could not start' } }), [], nowMs);
+  assert.equal(dispatchLine, 'Agent not running — Provider could not start');
+  assert.match(dispatchHint, /Start the agent from its attention card/);
 
   // Done
   const doneTask = makeTask({ state: 'done', attempt_no: 1 });

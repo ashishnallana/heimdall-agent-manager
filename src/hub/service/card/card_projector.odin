@@ -141,6 +141,8 @@ build_task_card :: proc(s: ^Card_Service, task: domain.Task, kind: taskv2.User_A
 	ops := strings.builder_make(context.temp_allocator)
 	if kind == .Review {
 		strings.write_string(&ops, `[{"op":"task.review","label":"Approve","args":{"task_id":"`)
+	} else if taskv2.is_agent_not_running_block(task.blocked_on_json) {
+		strings.write_string(&ops, `[{"op":"agent.start","label":"Start agent","args":{"task_id":"`)
 	} else {
 		strings.write_string(&ops, `[{"op":"task.answer","label":"Answer","args":{"task_id":"`)
 	}
@@ -215,6 +217,15 @@ build_task_card :: proc(s: ^Card_Service, task: domain.Task, kind: taskv2.User_A
 	} else {
 		strings.write_string(&details, `null`)
 	}
+	if kind == .Review && s.taskchains.engine != nil {
+		if handoff, ok := taskv2.get_facet(s.taskchains.engine, task, task.attempt_no, taskv2.FACET_HANDOFF); ok {
+			if reason := jsonx.extract_string(handoff.body_json, "skip_verify_reason", "", true, context.temp_allocator); reason != "" {
+				strings.write_string(&details, `,"skip_verify_reason":"`)
+				contracts.write_json_string(&details, reason)
+				strings.write_byte(&details, '"')
+			}
+		}
+	}
 	strings.write_string(&details, `}`)
 
 	rationale := "Waiting on your review"
@@ -223,6 +234,7 @@ build_task_card :: proc(s: ^Card_Service, task: domain.Task, kind: taskv2.User_A
 	case kind == .Blocked && badge == "merge_conflict": rationale = "Merge conflict needs you"
 	case kind == .Blocked && badge == "budget_exhausted": rationale = "Out of attempts — needs you"
 	case kind == .Blocked && badge == "oscillation": rationale = "Stuck in review rounds — needs you"
+	case kind == .Blocked && badge == "agent_not_running": rationale = jsonx.extract_string(task.blocked_on_json, "reason", "Agent is not running", true, context.temp_allocator)
 	case kind == .Blocked: rationale = "Agent is asking you"
 	}
 

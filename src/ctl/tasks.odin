@@ -294,7 +294,8 @@ is_destructive_chain_verb :: proc(action: string) -> bool {
 
 print_tasks_help :: proc(action: string) {
 	_ = action
-	fmt.println("usage: ham-ctl tasks <list|show|create|update|depend|cancel|comment|comments|fetch>")
+	fmt.println("usage: ham-ctl tasks <list|show|create|update|depend|cancel|comment|comments|fetch|unblock>")
+	fmt.println("  unblock <task-id> --chain <id> [--note <reason>]  (retry a dispatch block after fixing placement)")
 	fmt.println("  create --chain <id> --title <title> [--assignee <agt_id>] [--reviewer <agt_id>]... [--require-user-approval]")
 	fmt.println("  update <task-id> [--assignee <agt_id>] [--reviewer <agt_id>]... [--require-user-approval | --no-require-user-approval]")
 	fmt.println("  depend <task-id> --chain <id> --on <task-id>|task:<id>|workflow_run:<run-id>   (workflow runs become chain-level graph edges)")
@@ -757,6 +758,11 @@ ctl_tasks_command :: proc(cmd: []string, args: []string) {
 
 	if action == "show" {
 		ctl_tasks_request_and_decrypt(transport, "GET", fmt.tprintf("/api/v1/task-chains/%s/tasks/%s", safe_path_part(chain_id), safe_path_part(task_id)), "", args)
+		return
+	}
+	if action == "unblock" {
+		body := json_object(json_kv("note", option_value(args, "--note", "")))
+		ctl_tasks_request_and_decrypt(transport, "POST", fmt.tprintf("/api/v1/task-chains/%s/tasks/%s/answer", safe_path_part(chain_id), safe_path_part(task_id)), body, args)
 		return
 	}
 

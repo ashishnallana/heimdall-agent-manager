@@ -262,7 +262,7 @@ validate_bridge_authorize_input :: proc(input: Authorize_Input, allocator := con
 		if input.bridge_identity_public_key != "" || input.bridge_identity_proof != "" {
 			return "", kind, false, domain.domain_error(.Validation_Failed, "bridge_identity_public_key requires bridge_public_key")
 		}
-		if input.pair_lookup != "" || input.pair_key_mac != "" || input.pair_salt != "" {
+		if input.pair_lookup != "" || input.pair_key_mac != "" || input.pair_salt != "" || input.pair_hub_origin != "" {
 			return "", kind, false, domain.domain_error(.Validation_Failed, "pair_lookup requires bridge_public_key")
 		}
 		return "", kind, true, domain.Domain_Error{}
@@ -291,9 +291,13 @@ validate_bridge_authorize_input :: proc(input: Authorize_Input, allocator := con
 	// Hub-blind pairing (plan §1 "Pairing"): the bridge derived both from a secret code
 	// it shows its operator. The hub can check only their shape; the approver checks
 	// pair_key_mac with the code the operator types. pair_salt is the public salt of
-	// the pairing stretch (vault.Pair_Context), random per request.
+	// the pairing stretch (vault.Pair_Context), random per request; pair_hub_origin the
+	// canonical hub origin the bridge bound into it (the approver derives with it).
 	if !vault.valid_pair_hex(input.pair_lookup) || !vault.valid_pair_hex(input.pair_key_mac) || !vault.valid_pair_salt_hex(input.pair_salt) {
 		return "", kind, false, domain.domain_error(.Validation_Failed, "bridge enrollment requires pair_lookup, pair_key_mac (64 lowercase hex) and pair_salt (32 lowercase hex); update ham-bridge")
+	}
+	if !vault.valid_pair_hub_origin(input.pair_hub_origin) {
+		return "", kind, false, domain.domain_error(.Validation_Failed, "bridge enrollment requires pair_hub_origin (canonical scheme://host:port); update ham-bridge")
 	}
 	fingerprint, fok := bridge_key_fingerprint_for(input.bridge_public_key, allocator)
 	if !fok {

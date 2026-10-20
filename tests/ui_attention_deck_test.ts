@@ -196,7 +196,7 @@ function jsonResponse(body: any) {
 
 type DeckHarness = { dom: any; store: any; scheduler: any; text: () => string; q: (sel: string) => any; act: any; closed: () => number; hits: string[]; setOpen: (open: boolean) => Promise<void>; serve: (items: any[]) => void; release: () => void; hold: () => void; holdRoutes: () => void; releaseRoutes: () => void };
 
-async function withDeck(initialItems: any[], run: (h: DeckHarness) => Promise<void>, opts: { unlocked?: boolean; routes?: Record<string, any> } = {}) {
+async function withDeck(initialItems: any[], run: (h: DeckHarness) => Promise<void>, opts: { unlocked?: boolean; routes?: Record<string, any>; acceptFailures?: number } = {}) {
   let items = initialItems;
   // hold() makes /attention responses wait until release(), to observe the deck mid-refetch.
   let gate: Promise<void> | null = null;
@@ -227,6 +227,10 @@ async function withDeck(initialItems: any[], run: (h: DeckHarness) => Promise<vo
   (globalThis as any).fetch = async (input: any, init: any = {}) => {
     const url = new URL(String(input?.url ?? input), 'http://localhost');
     hits.push(`${String(init?.method || 'GET').toUpperCase()} ${url.pathname}${url.search}`);
+    if (url.pathname.endsWith('/accept') && (opts.acceptFailures || 0) > 0) {
+      opts.acceptFailures! -= 1;
+      return { ok: false, status: 409, text: async () => JSON.stringify({ error: { message: 'Bridge refused: credentials missing' } }) };
+    }
     if (url.pathname.endsWith('/attention')) {
       if (gate) await gate;
       const live = items.filter((i) => !i.snoozed);
@@ -338,6 +342,37 @@ test('deck: locked vault shows the lock placeholder instead of ciphertext', asyn
     assert.doesNotMatch(text(), /vault:v2:7e57000000000001:e1:/, 'ciphertext is never painted');
     assert.ok(q('[data-debug-id="vault-locked-placeholder"]'), 'lock placeholder shown');
   });
+});
+
+test('deck: review card displays a verify skip as a warning', async () => {
+  const item = taskItem('skip');
+  item.details.attention = 'review';
+  item.details.skip_verify_reason = 'Test runner unavailable; reviewer must run the suite.';
+  await withDeck([item], async ({ text, q }) => {
+    assert.match(text(), /Verify skipped: Test runner unavailable; reviewer must run the suite\./);
+    assert.ok(q('[data-debug-id="attention-card-verify-skipped"]')?.classList.contains('text-warning'));
+  });
+});
+
+test('task detail: skipped verify stays visible above prior passing evidence', async () => {
+  const { Provider } = await import('react-redux');
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  const { TaskDetails } = await import('../src/ui/components/tasks/TaskDetails.tsx');
+  const { tasksApi } = await import('../src/ui/api/endpoints/tasks.ts');
+  const store = await makeVaultStore();
+  const args = { chainId: 'chain_skip', taskId: 'task_skip', attemptNo: 2 };
+  await store.dispatch(tasksApi.util.upsertQueryData('fetchTaskFacet', { ...args, kind: 'handoff' }, { facet: { summary: 'ready', skip_verify_reason: 'Suite could not run on this host.' } }));
+  await store.dispatch(tasksApi.util.upsertQueryData('fetchTaskFacet', { ...args, kind: 'verify' }, { facet: { exit_code: 0, summary: 'old pass' } }));
+  const html = renderToStaticMarkup(React.createElement(Provider, { store, children: React.createElement(TaskDetails, {
+    chainId: args.chainId,
+    task: { task_id: args.taskId, chain_id: args.chainId, title: 'work', state: 'done', attempt_no: 2, brief: { verify: 'make test' } },
+    actions: { busy: false } as any,
+  }) }));
+  assert.match(html, /Verify skipped: .*Suite could not run on this host\./);
+  assert.match(html, /data-debug-id="task-details-verify-skipped" class="[^"]*text-warning/);
+  assert.match(html, /Skipped at submit/);
+  assert.doesNotMatch(html, />Passed</);
+  store.dispatch(tasksApi.util.resetApiState());
 });
 
 test('deck: unlocked vault decrypts the card title and excerpt', async () => {
@@ -749,4 +784,24 @@ test('status bar: attention pill takes the left slot, rings for unseen items, re
   assert.match(renderToStaticMarkup(clear), />All clear</);
   assert.match(renderToStaticMarkup(render({ total: 12, unseen: true, onOpen: () => {} }, true)), />12</);
   assert.equal(render({ total: null, unseen: false, onOpen: () => {} }).props['data-state'], 'loading');
+});
+
+test('deck Start agent shows failed starts inline and permits retry', async () => {
+  const item = taskItem('start', {
+    primary_op: 'agent.start', operations: [{ op: 'agent.start', label: 'Start agent' }],
+    rationale: 'Agent worker (codex/model) on bridge b is not running: stopped',
+    details: { priority: 'p1', status: 'backlog', attention: 'blocked', badge: 'agent_not_running', block_id: 'block1', excerpt: null },
+  });
+  await withDeck([item], async ({ q, act, text, hits }) => {
+    assert.ok(q('[data-debug-id="attention-start-agent"]'));
+    assert.match(q('[data-debug-id="attention-card-badge"]').textContent, /Agent not running/);
+    assert.match(text(), /on bridge b is not running: stopped/);
+    assert.equal(q('[data-debug-id="attention-action-answer"]'), null);
+    await act(async () => { q('[data-debug-id="attention-start-agent"]').click(); });
+    assert.match(q('[data-debug-id="attention-start-agent-error"]').textContent, /credentials missing/);
+    assert.match(text(), /Start agent/);
+    await act(async () => { q('[data-debug-id="attention-start-agent"]').click(); });
+    assert.equal(q('[data-debug-id="attention-start-agent-error"]'), null);
+    assert.equal(hits.filter((h) => /POST .*\/cards\/.*\/accept/.test(h)).length, 2);
+  }, { acceptFailures: 1 });
 });

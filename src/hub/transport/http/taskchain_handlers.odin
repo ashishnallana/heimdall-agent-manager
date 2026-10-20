@@ -1576,7 +1576,7 @@ reopen_task_handler :: proc(ctx: rawptr, req: Request) -> Response {
 // POST …/tasks/{id}/answer  {note?}
 answer_task_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Taskchain_Handlers)(ctx)
-	auth_ctx, ok, auth_resp := require_auth(h.auth, req)
+	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
 	if !ok do return auth_resp
 	if h.task_engine == nil do return respond_error(domain.domain_error(.Internal_Error, "task engine is not configured"), req.request_id)
 	chain_id := domain.Task_Chain_ID(path_part(req.path, 4))

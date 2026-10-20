@@ -3,6 +3,7 @@ package app
 import "core:strings"
 import "core:strconv"
 import "core:net"
+import vault "odin_test:lib/vault"
 
 Hub_Config :: struct {
 	paddle_environment: string,
@@ -73,6 +74,15 @@ Hub_Config :: struct {
 	// `<url>/insert/loki/api/v1/push`. Empty (the default) disables the push;
 	// the SQLite ring and the owner API work regardless.
 	log_push_url: string,
+	// --pairing-hub-origins / HEIMDALL_PAIRING_HUB_ORIGINS (comma-separated): the
+	// OTHER hub addresses a new device may have enrolled against and still be
+	// approved here (an API alias such as https://hub.example next to the UI's own
+	// origin). The approver accepts a pending device's declared pairing origin only
+	// if it is its own API origin or one of these. Raw value; main canonicalizes it
+	// into pairing_hub_origin_list (parse_pairing_hub_origins) and refuses to start
+	// on a malformed entry.
+	pairing_hub_origins: string,
+	pairing_hub_origin_list: []string,
 }
 
 // vapid_is_configured reports whether a usable VAPID keypair is present. Push
@@ -112,6 +122,51 @@ default_config :: proc() -> Hub_Config {
 		metrics_addr = "",
 		log_push_url = "",
 	}
+}
+
+// canonical_pair_hub_origin turns an operator-written origin ("https://Hub.Example/",
+// "http://127.0.0.1:8081") into the canonical pairing form "scheme://host:port"
+// (lowercase, explicit default port, no trailing slash) and validates it with
+// vault.valid_pair_hub_origin. The result is temp-allocated.
+canonical_pair_hub_origin :: proc(value: string) -> (string, bool) {
+	s := strings.to_lower(strings.trim_space(value), context.temp_allocator)
+	if strings.has_suffix(s, "/") do s = s[:len(s) - 1]
+	scheme_end := strings.index(s, "://")
+	if scheme_end < 0 do return "", false
+	scheme := s[:scheme_end]
+	if scheme != "https" && scheme != "http" do return "", false
+	rest := s[scheme_end + 3:]
+	has_port := false
+	if strings.has_prefix(rest, "[") {
+		close_br := strings.index_byte(rest, ']')
+		if close_br < 0 do return "", false
+		has_port = close_br + 1 < len(rest) && rest[close_br + 1] == ':'
+	} else {
+		has_port = strings.index_byte(rest, ':') >= 0
+	}
+	if !has_port do s = strings.concatenate({s, ":443" if scheme == "https" else ":80"}, context.temp_allocator)
+	if !vault.valid_pair_hub_origin(s) do return "", false
+	return s, true
+}
+
+// parse_pairing_hub_origins validates the comma-separated --pairing-hub-origins
+// value into canonical pairing origins (duplicates dropped). Empty is valid (no
+// aliases: approvers accept only their own API origin). Any malformed entry fails.
+parse_pairing_hub_origins :: proc(raw: string, allocator := context.allocator) -> ([]string, bool, string) {
+	out := make([dynamic]string, 0, 4, allocator)
+	for part in strings.split(raw, ",", context.temp_allocator) {
+		if strings.trim_space(part) == "" do continue
+		origin, ok := canonical_pair_hub_origin(part)
+		if !ok {
+			for o in out do delete(o, allocator)
+			delete(out)
+			return nil, false, strings.concatenate({"--pairing-hub-origins: not an http(s) origin (scheme://host[:port], no path): ", strings.trim_space(part)}, context.temp_allocator)
+		}
+		dup := false
+		for o in out do if o == origin do dup = true
+		if !dup do append(&out, strings.clone(origin, allocator))
+	}
+	return out[:], true, ""
 }
 
 // parse_metrics_addr validates a `host:port` for the metrics listener. Only

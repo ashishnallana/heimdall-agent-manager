@@ -37,6 +37,12 @@ main :: proc() {
 		os.exit(2)
 	}
 	config.preview_origin = normalized_preview_origin
+	pairing_origins, pairing_ok, pairing_error := app.parse_pairing_hub_origins(config.pairing_hub_origins)
+	if !pairing_ok {
+		fmt.eprintln(pairing_error)
+		os.exit(2)
+	}
+	config.pairing_hub_origin_list = pairing_origins
 	if config.metrics_addr != "" {
 		if _, _, metrics_ok, metrics_error := app.parse_metrics_addr(config.metrics_addr); !metrics_ok {
 			fmt.eprintln(metrics_error)
@@ -229,6 +235,10 @@ parse_args :: proc(config: ^app.Hub_Config) {
 	if v := os.get_env_alloc("HEIMDALL_LOG_PUSH_URL", context.allocator); v != "" {
 		config.log_push_url = v
 	}
+	// pairing_hub_origins resolves default (none) -> env -> flag.
+	if v := os.get_env_alloc("HEIMDALL_PAIRING_HUB_ORIGINS", context.allocator); v != "" {
+		config.pairing_hub_origins = v
+	}
 	for i := 1; i < len(os.args); i += 1 {
 		arg := os.args[i]
 		if arg == "--listen" && i + 1 < len(os.args) {
@@ -269,6 +279,8 @@ parse_args :: proc(config: ^app.Hub_Config) {
 				os.exit(2)
 			}
 			i += 1
+		} else if arg == "--pairing-hub-origins" && i + 1 < len(os.args) {
+			config.pairing_hub_origins = strings.clone(os.args[i + 1]); i += 1
 		} else if arg == "--public-app-origin" && i + 1 < len(os.args) {
 			config.public_app_origin = strings.clone(os.args[i + 1]); i += 1
 		} else if arg == "--metrics-addr" && i + 1 < len(os.args) {

@@ -84,13 +84,14 @@ test('an approval naming the root as issuer but signed by another key is refused
 test('a revoked issuer cannot approve, even with an approval backdated before its revocation', async () => {
   const { hub, a, b } = await baseHub();
   const issuedBeforeRevoke = Date.now() - 60_000;
-  await hub.revoke(a, b.deviceId); // seq 4, epoch 2
+  await hub.addBrowser(a, await newBrowser(), 'Desk'); // seq 4: keeps a second approver besides A
+  await hub.revoke(a, b.deviceId); // seq 5, epoch 2
   const victim = await newBrowser();
   // B signs at the next slot, claiming an issue time before it was revoked.
   const op = await hub.forgeOp(b, { ...(await hub.subjectOf(victim)), issued_at_ms: String(issuedBeforeRevoke) });
   await hub.append(op.statement, op.signature);
   hub.rows.set(victim.deviceId, browserRow(victim, 'approved'));
-  await assert.rejects(hub.chain(), refused(/log op 5 is signed by a device that was not a trusted approver/));
+  await assert.rejects(hub.chain(), refused(/log op 6 is signed by a device that was not a trusted approver/));
 });
 
 test('a bridge identity can never sign log ops', async () => {
@@ -135,10 +136,11 @@ test('fork: a different op at the pinned seq is refused', async () => {
 
 test('deleting a revocation from the middle of the log breaks it', async () => {
   const { hub, a, b } = await baseHub();
-  await hub.revoke(a, b.deviceId); // seq 4
-  await hub.addBrowser(a, await newBrowser(), 'Tablet'); // seq 5
+  await hub.addBrowser(a, await newBrowser(), 'Desk'); // seq 4: keeps a second approver besides A
+  await hub.revoke(a, b.deviceId); // seq 5
+  await hub.addBrowser(a, await newBrowser(), 'Tablet'); // seq 6
   const dir = hub.dir();
-  dir.log.splice(3, 1);
+  dir.log.splice(4, 1);
   dir.version -= 1;
   await assert.rejects(verifyDirectory(dir, USER), refused(/missing or out of order/));
   // Renumbering does not help: the signed seq / prev_hash no longer match.
@@ -148,6 +150,7 @@ test('deleting a revocation from the middle of the log breaks it', async () => {
 
 test('deleting the latest revocation is a rollback for a pinned device, and the hub row contradicts it', async () => {
   const { hub, a, b } = await baseHub();
+  await hub.addBrowser(a, await newBrowser(), 'Desk'); // keeps a second approver besides A
   await hub.revoke(a, b.deviceId);
   const pins = await hub.pins();
   hub.log.pop();

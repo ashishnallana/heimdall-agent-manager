@@ -1,3 +1,4 @@
+import { StartAgentAction, needsAgentStart, useStartAgent } from './StartAgentAction';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 import { useDispatch } from 'react-redux';
@@ -257,6 +258,8 @@ export function AttentionDeck({
     ]) as any);
   }, [dispatch]);
 
+  const agentStart = useStartAgent(invalidate);
+
   const schedule = (item: AttentionItem, label: string, send: (keepalive: boolean) => Promise<void>) => {
     scheduler.schedule({ cardId: hideKey(item), label, run: async (keepalive) => { await send(keepalive); invalidate(); } });
     setSlide('right');
@@ -373,7 +376,7 @@ export function AttentionDeck({
   type DockAction = { key: string; label: string; icon: IconName; tone?: 'success' | 'danger'; run: () => void; debug: string };
   // Snoozed cards keep their original actions: acting settles them in place.
   const dock: DockAction[] = !current ? [] : current.kind === 'task' && current.details.attention === 'blocked' ? [
-    { key: 'a', label: 'Answer', icon: 'chat', tone: 'success', debug: 'answer', run: () => { setPopover(null); setComposer(composer === 'answer' ? null : 'answer'); } },
+    { key: 'a', label: needsAgentStart(current) ? 'Start agent' : 'Answer', icon: 'chat', tone: 'success', debug: 'answer', run: () => { if (needsAgentStart(current)) { void agentStart.start(current); return; } setPopover(null); setComposer(composer === 'answer' ? null : 'answer'); } },
     { key: 'c', label: 'Comment', icon: 'chat', debug: 'comment', run: () => { setPopover(null); setComposer(composer === 'comment' ? null : 'comment'); } },
     { key: 's', label: 'Snooze', icon: 'clock', debug: 'snooze', run: () => { setComposer(null); setPopover(popover === 'snooze' ? null : 'snooze'); } },
     { key: 'x', label: 'Cancel task', icon: 'stop', tone: 'danger', debug: 'cancel-task', run: () => schedule(current, 'Task cancelled', (k) => cancelTask((current as AttentionTaskItem).action_refs, k)) },
@@ -694,7 +697,9 @@ export function AttentionDeck({
         {notice ? <p role="status" data-debug-id="attention-deck-notice" className="px-4 pb-1 text-center text-[12px] text-success">{notice}</p> : null}
 
         <nav aria-label="Card actions" data-debug-id="attention-deck-dock" data-attention-dock className="mx-4 mb-4 flex justify-around rounded-[var(--radius-lg)] border border-subtle bg-surface-raised px-1 py-1.5" style={{ visibility: current ? 'visible' : 'hidden' }}>
-          {dock.map((d) => (
+          {dock.map((d) => current && needsAgentStart(current) && d.debug === 'answer' ? (
+            <StartAgentAction key={current.card_id} debugPrefix="attention" onStart={() => void agentStart.start(current)} {...agentStart.states[current.card_id]} />
+          ) : (
             <button
               key={d.debug}
               type="button"

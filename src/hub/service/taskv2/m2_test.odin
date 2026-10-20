@@ -476,7 +476,7 @@ test_m3_r1_r2_r3_end_to_end :: proc(t: ^testing.T) {
 
 	// R3: chain_propose + chain_proposal_decide(approve) transitions Draft -> Published
 	prop_chain, pok, perr := chain_propose(&fx.svc, chain.chain_id, "u1", Actor{kind = ACTOR_AGENT, id = "inst_coord"}, Propose_Input{
-		kind        = "ticket",
+		kind        = "task",
 		rationale   = "initial 2-task plan",
 		alternative = "single monolith task",
 		tasks_json  = `[{"id":"t_base","title":"Base task","brief":{"goal":"produce output","acceptance":["ok"],"verify":"make test","output":{"v":1},"review_roles":[]}},{"id":"t_indep","title":"Indep verify task","depends_on":["t_base"],"brief":{"goal":"verify indep","acceptance":["ok"],"verify":"make test","require_independent_verify":true,"requires_user_approval":true,"inputs":["output:t_base","src/main.odin@abc1234"],"review_roles":[]}}]`,
@@ -510,6 +510,15 @@ test_m3_r1_r2_r3_end_to_end :: proc(t: ^testing.T) {
 		artifacts_json = `{"items":[{"kind":"file","ref":"out/report.txt","label":"Report"},{"kind":"url","ref":"https://example.com/ci","label":"CI"},{"kind":"preview_port","ref":3000,"label":"Preview"}]}`,
 	})
 	if !testing.expect(t, sok1 && sub1.outcome == "done", fmt.tprintf("submit t_base: %s", serr1.message)) do return
+	// Mixed-work prerequisites require the bridge merge to settle, in addition
+	// to a successful submit. Simulate that acknowledgement in this fixture.
+	merge_uow, merge_began, _ := begin_uow(&fx.svc)
+	if !testing.expect(t, merge_began, "merge acknowledgement uow") do return
+	fresh_base := get_task(fx, string(t_base.task_id))
+	_, _, merge_ok, merge_err := record_event(&fx.svc, &merge_uow, fresh_base, hub_actor(), EV_MERGED, `{"head":"abc1234","branch":"task/base","into":"main"}`)
+	if merge_ok do merge_ok, merge_err = after_chain_change(&fx.svc, &merge_uow, chain.chain_id, "u1", .Task_Updated)
+	_, _ = end_uow(&fx.svc, &merge_uow, merge_ok)
+	if !testing.expect(t, merge_ok, merge_err.message) do return
 	art_f, has_art := get_facet(&fx.svc, t_base, 1, FACET_ARTIFACTS)
 	testing.expect(t, has_art && strings.contains(art_f.body_json, `"label":"Report"`) && strings.contains(art_f.body_json, `"preview_port"`), "artifacts facet stored with {kind, ref, label}")
 	rt_after, _ := get_facet(&fx.svc, t_base, 1, FACET_RUNTIME)
@@ -571,6 +580,13 @@ test_m3_r1_r2_r3_end_to_end :: proc(t: ^testing.T) {
 		independent   = true,
 	})
 	testing.expect_value(t, get_task(fx, string(t_indep.task_id)).state, domain.Task_State.Done)
+	// Settle the last bridge merge before expecting the batch-finished notice.
+	final_uow, final_began, _ := begin_uow(&fx.svc)
+	if !testing.expect(t, final_began, "final merge acknowledgement uow") do return
+	_, _, final_ok, final_err := record_event(&fx.svc, &final_uow, get_task(fx, string(t_indep.task_id)), hub_actor(), EV_MERGED, `{"head":"def5678","branch":"task/indep","into":"main"}`)
+	if final_ok do final_ok, final_err = after_chain_change(&fx.svc, &final_uow, chain.chain_id, "u1", .Task_Updated)
+	_, _ = end_uow(&fx.svc, &final_uow, final_ok)
+	if !testing.expect(t, final_ok, final_err.message) do return
 
 	// R1: verify coordinator-curated note survived rebuild_chain_summary_in_uow on t_indep completion AND mechanical completed task lines are present!
 	cs_after, cs_after_ok, _ := iface.taskchain_get_chain_summary(&fx.repo, chain.chain_id, "u1")
@@ -580,13 +596,13 @@ test_m3_r1_r2_r3_end_to_end :: proc(t: ^testing.T) {
 	_, bad_sum, bad_sum_err := chain_summary_set(&fx.svc, inst_auth("inst_coord"), chain.chain_id, too_many)
 	testing.expect(t, !bad_sum && bad_sum_err.code == .Validation_Failed, ">60 line summary rejected")
 
-	// R3: verify coordinator notifications fired (proposal_decided and chain_complete)
+	// R3: verify coordinator notifications fired (proposal_decided and work_batch_finished)
 	has_prop_notif, has_complete_notif := false, false
 	for trig in nc.triggers {
 		if trig == "proposal_decided" do has_prop_notif = true
-		if trig == "chain_complete" do has_complete_notif = true
+		if trig == "work_batch_finished" do has_complete_notif = true
 	}
-	testing.expect(t, has_prop_notif && has_complete_notif, "coordinator notified on proposal_decided and chain_complete")
+	testing.expect(t, has_prop_notif && has_complete_notif, "coordinator notified on proposal_decided and work_batch_finished")
 	assert_projection_matches_fold(t, fx, chain.chain_id, "u1", "m3_e2e")
 }
 
@@ -612,7 +628,7 @@ test_chain_propose_validation_and_auto_approve :: proc(t: ^testing.T) {
 
 	// 1. Non-coordinator agent rejected with 403 Forbidden (not_coordinator)
 	_, pok1, perr1 := chain_propose(&fx.svc, chain.chain_id, "u1", Actor{kind = ACTOR_AGENT, id = "inst_worker"}, Propose_Input{
-		kind       = "ticket",
+		kind       = "task",
 		rationale  = "worker try",
 		tasks_json = valid_tasks,
 	})
@@ -620,7 +636,7 @@ test_chain_propose_validation_and_auto_approve :: proc(t: ^testing.T) {
 
 	// 2. Incomplete brief rejected with 400 Validation_Failed (brief_incomplete)
 	_, pok2, perr2 := chain_propose(&fx.svc, chain.chain_id, "u1", Actor{kind = ACTOR_AGENT, id = "inst_coord"}, Propose_Input{
-		kind       = "ticket",
+		kind       = "task",
 		rationale  = "bad brief",
 		tasks_json = `[{"id":"tp_bad","title":"Bad task","brief":{"goal":"","acceptance":[],"verify":""}}]`,
 	})
@@ -628,7 +644,7 @@ test_chain_propose_validation_and_auto_approve :: proc(t: ^testing.T) {
 
 	// 3. Valid proposal preserves existing defaults_json keys
 	prop_chain, pok3, perr3 := chain_propose(&fx.svc, chain.chain_id, "u1", Actor{kind = ACTOR_AGENT, id = "inst_coord"}, Propose_Input{
-		kind       = "ticket",
+		kind       = "task",
 		rationale  = "good plan",
 		tasks_json = valid_tasks,
 	})
@@ -641,7 +657,7 @@ test_chain_propose_validation_and_auto_approve :: proc(t: ^testing.T) {
 
 	// 5. auto_approve = true immediately publishes chain and tasks in one UoW
 	auto_chain, pok4, perr4 := chain_propose(&fx.svc, chain.chain_id, "u1", Actor{kind = ACTOR_AGENT, id = "inst_coord"}, Propose_Input{
-		kind         = "ticket",
+		kind         = "task",
 		rationale    = "auto-approved plan",
 		auto_approve = true,
 		tasks_json   = valid_tasks,
@@ -650,13 +666,13 @@ test_chain_propose_validation_and_auto_approve :: proc(t: ^testing.T) {
 	testing.expect_value(t, auto_chain.publish_state, domain.Publish_State.Published)
 	testing.expect_value(t, get_task(fx, "tp_1").state, domain.Task_State.Ready)
 
-	// 6. Proposing again on already-published chain is rejected with 409 Conflict (already_published)
+	// 6. A published mixed-work chain can propose another batch without changing its type.
 	_, pok5, perr5 := chain_propose(&fx.svc, chain.chain_id, "u1", Actor{kind = ACTOR_AGENT, id = "inst_coord"}, Propose_Input{
-		kind       = "ticket",
+		kind       = "task",
 		rationale  = "late propose",
 		tasks_json = valid_tasks,
 	})
-	testing.expect(t, !pok5 && perr5.code == .Conflict && strings.contains(perr5.details_json, "already_published"), "already-published chain rejected with 409 already_published")
+	testing.expect(t, pok5 && perr5.code == .None, "published mixed-work chain accepts a new proposal")
 }
 
 @(test)

@@ -17,6 +17,7 @@ export interface TaskEventWire {
 
 export interface DescribedEvent {
   text: string;
+  verifySkipReason?: string;
   /** false when the kind is unknown and the text is a humanised kind name. */
   known: boolean;
 }
@@ -133,6 +134,7 @@ export function describeTaskEvent(ev: TaskEventWire, names: TaskNames): Describe
       return known(s(p.note) ? `${who}: ${s(p.note)}` : `${who} is still working`);
     case 'submitted':
       if (p.gate) return known(`Gate is waiting for a decision${attempt(p)}`);
+      if (s(p.skip_verify_reason)) return { ...known(`${who} submitted the work for review${attempt(p)}`), verifySkipReason: s(p.skip_verify_reason) };
       if (p.auto) return known(`Verify passed, submitted for review automatically${attempt(p)}`);
       return known(`${who} submitted the work for review${attempt(p)}`);
     case 'blocked': {

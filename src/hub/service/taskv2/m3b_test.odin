@@ -240,13 +240,19 @@ test_workflow_cancel_waits_for_pending_merge :: proc(t: ^testing.T) {
  if !testing.expect(t,len(tasks)==1,"one generated task") do return
  task := tasks[0]
  task.state = .Done
+ task.attempt_no = 1
  task, _, _ = iface.taskchain_save_task(&fx.repo,task)
  _, _, _ = append_event(&fx.repo,&fx.clock,task,hub_actor(),EV_LEASE_GRANTED,`{"kind":"work","bridge_id":"br_1"}`)
  _, _, _ = append_event(&fx.repo,&fx.clock,task,hub_actor(),EV_SUBMITTED,`{}`)
  _, cancelled, cancel_err := workflow_cancel(&fx.svc,run.run_id,"u1",Actor{kind=ACTOR_USER,id="u1"},"change approach",1)
  testing.expect(t,!cancelled && cancel_err.code==.Conflict,"pending merge blocks cancellation")
  testing.expect(t,workflow_merge_allowed(&fx.svc,task),"current merge may settle")
- _, _, _ = append_event(&fx.repo,&fx.clock,task,hub_actor(),EV_MERGE_CONFLICT,`{}`)
+ // Keep the cached projection in sync before cancellation freezes history.
+ u, began, _ := begin_uow(&fx.svc)
+ if !testing.expect(t,began,"merge-conflict uow") do return
+ _, _, recorded, record_err := record_event(&fx.svc,&u,task,hub_actor(),EV_MERGE_CONFLICT,`{}`)
+ _, _ = end_uow(&fx.svc,&u,recorded)
+ if !testing.expect(t,recorded,record_err.message) do return
  testing.expect(t,workflow_require_merges_settled(&fx.svc,wf).code==.None,"settled conflict releases the generation fence")
  _, cancelled, cancel_err = workflow_cancel(&fx.svc,run.run_id,"u1",Actor{kind=ACTOR_USER,id="u1"},"change approach",1)
  testing.expect(t,cancelled,cancel_err.message)

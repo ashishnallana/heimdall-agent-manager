@@ -7,11 +7,11 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { FakeHub, USER, newBrowser } from './helpers/vaultDirectoryFixture.ts';
+import { FakeHub, USER, browserPairCtx, newBrowser } from './helpers/vaultDirectoryFixture.ts';
 import { asApproverIdentity, buildRecoveryKey, openRecoveryKey, RecoveryKeyError } from '../src/ui/utils/vaultRecovery.ts';
 import { generate12RecoveryWords, recoveryWordsToEntropy } from '../src/ui/utils/vaultCrypto.ts';
 import { buildBrowserApproval, buildPairedRegistration, buildRevocation, FlowRefused } from '../src/ui/utils/vaultDeviceFlows.ts';
-import { derivePairKeys, generatePairCode } from '../src/ui/utils/vaultPairing.ts';
+import { derivePairKeys, generatePairCode, generatePairSalt } from '../src/ui/utils/vaultPairing.ts';
 import { openVerifiedWrap } from '../src/ui/utils/vaultKeyringWrap.ts';
 import { serializeKeyringBytes } from '../src/ui/utils/vaultKeyring.ts';
 import type { DeviceIdentity } from '../src/ui/utils/deviceIdentity.ts';
@@ -65,9 +65,10 @@ test('create -> restore: a new browser is approved AS the recovery key and opens
   // A fresh browser C (pending, holding its own pairing code) restores.
   const c = await newBrowser();
   const code = generatePairCode();
-  const keys = await derivePairKeys(code);
+  const salt = generatePairSalt();
+  const keys = await derivePairKeys(code, browserPairCtx(salt));
   const reg = await buildPairedRegistration(c, 'New laptop', keys);
-  await hub.register(reg.statement, reg.pairLookup, reg.pairKeyMac);
+  await hub.register(reg.statement, reg.pairLookup, reg.pairKeyMac, salt);
   const parsed = await openVerifiedWrap(hub.wraps.get(rid), { userId: USER, recipientDeviceId: rid, recipientEcdhPrivate: cred.ecdhPrivateKey, chain });
   const kr = serializeKeyringBytes(parsed);
   for (const e of parsed.entries) e.key.fill(0);

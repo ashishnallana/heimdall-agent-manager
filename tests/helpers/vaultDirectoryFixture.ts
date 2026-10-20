@@ -63,6 +63,7 @@ interface RegisteredBrowser {
   statement: string;
   pair_key_mac: string;
   pair_salt: string;
+  pair_hub_origin: string;
 }
 
 export class FakeHub {
@@ -154,14 +155,14 @@ export class FakeHub {
   }
 
   /** POST /vault/devices/register as the hub stores it (pending row + pairing lookup). */
-  async register(statement: string, pairLookup: string, pairKeyMac: string, pairSalt: string): Promise<{ device_id: string; fingerprint: string; status: string; code_expires_at: string }> {
+  async register(statement: string, pairLookup: string, pairKeyMac: string, pairSalt: string, pairHubOrigin: string = FIXTURE_HUB_ORIGIN): Promise<{ device_id: string; fingerprint: string; status: string; code_expires_at: string }> {
     const st = parseStatement(statement)!;
     const fingerprint = await fingerprintFor(st.subject_sign_pub, st.subject_ecdh_pub);
     this.rows.set(st.subject_device_id, {
       device_id: st.subject_device_id, kind: 'browser', label: '', fingerprint, status: 'pending',
       sign_alg: st.subject_sign_alg, wrap_alg: st.subject_wrap_alg, sign_public_key: st.subject_sign_pub, ecdh_public_key: st.subject_ecdh_pub,
     });
-    this.registered.set(pairLookup, { statement, pair_key_mac: pairKeyMac, pair_salt: pairSalt });
+    this.registered.set(pairLookup, { statement, pair_key_mac: pairKeyMac, pair_salt: pairSalt, pair_hub_origin: pairHubOrigin });
     return { device_id: st.subject_device_id, fingerprint, status: 'pending', code_expires_at: new Date(Date.now() + 600_000).toISOString() };
   }
 
@@ -174,16 +175,17 @@ export class FakeHub {
     return {
       kind: 'browser', device_id: row.device_id, device_kind: 'browser', fingerprint: row.fingerprint, label: '',
       sign_public_key: row.sign_public_key, ecdh_public_key: row.ecdh_public_key, sign_alg: row.sign_alg, wrap_alg: row.wrap_alg,
-      register_statement: reg.statement, pair_key_mac: reg.pair_key_mac, pair_salt: reg.pair_salt,
+      register_statement: reg.statement, pair_key_mac: reg.pair_key_mac, pair_salt: reg.pair_salt, pair_hub_origin: reg.pair_hub_origin,
     };
   }
 
   /** The approver typed `code`: verify the pairing, sign the approval, wrap, commit. */
   async approveByCode(approver: DeviceIdentity, code: string, label = 'Browser'): Promise<{ deviceId: string; pairMac: string }> {
-    // As the approval page does: stretch the code with each pending request's public salt.
+    // As the approval page does: stretch the code with each pending request's public
+    // salt and the hub origin that request declared.
     let keys: PairKeys | null = null;
     for (const reg of this.registered.values()) {
-      const k = await derivePairKeys(code, browserPairCtx(reg.pair_salt, this.userId));
+      const k = await derivePairKeys(code, { ...browserPairCtx(reg.pair_salt, this.userId), hubOrigin: reg.pair_hub_origin });
       if (this.registered.has(k.lookup)) { keys = k; break; }
     }
     if (!keys) throw new Error('no pending request matches the code');
@@ -311,7 +313,7 @@ export function hubApi(hub: FakeHub, overrides: Record<string, (...args: any[]) 
       if (!row) return null;
       return { device_id: id, status: row.status, directory_version: hub.version, wrap: hub.wraps.get(id) ?? null, pair_mac: hub.pairMacs.get(id) ?? '' };
     },
-    postVaultRegister: async (statement: string, _sig: unknown, lookup: string, mac: string, salt: string) => hub.register(statement, lookup, mac, salt),
+    postVaultRegister: async (statement: string, _sig: unknown, lookup: string, mac: string, salt: string, origin: string) => hub.register(statement, lookup, mac, salt, origin),
     pairingHubOrigin: (() => FIXTURE_HUB_ORIGIN) as any,
     ...overrides,
   };

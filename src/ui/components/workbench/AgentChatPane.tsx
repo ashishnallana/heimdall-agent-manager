@@ -4,6 +4,7 @@ import React, {
   useCallback,
   useEffect,
   useMemo,
+  useReducer,
   useRef,
   useState,
 } from 'react';
@@ -89,13 +90,22 @@ import AgentActivityBubbles from '../chat/AgentActivityBubbles';
 import AtMentionPopup, { type MentionEntity } from '../chat/AtMentionPopup';
 import ChatMessageList from '../chat/ChatMessageList';
 import InstanceReconfigurationProgress from '../chat/InstanceReconfigurationProgress';
-import { MessageComposerInput, MessageComposerActions } from '../chat/MessageComposer';
+import { MessageComposerInput, MessageComposerActions, MessageComposerStatus } from '../chat/MessageComposer';
 import RuntimeConfigurationOptions from '../chat/RuntimeConfigurationOptions';
 import { type TaskLike } from '../chat/chainTaskInference';
 import { groupTranscriptMessages, isAgentStartMessage } from '../chat/transcriptGrouping';
 import type { ChatDeliveryStatus, ChatMessage, ChatTimestamp } from '../chat/types';
 import type { SplitDirection } from '../../tiling/types';
 import { replaceVaultTokens } from '../../utils/vaultCrypto.ts';
+import { appendArtifactLinks } from '../../utils/artifactUpload';
+import { ActionTray, NeedYouPill, useActionTrayItems, useSendTrayMode } from '../attention/ActionTray';
+import {
+  INITIAL_TRAY_STATE,
+  TRAY_MODE_COPY,
+  needYouPillVisible,
+  trayReducer,
+  trayVisible,
+} from '../attention/actionTrayModel';
 
 export const COMPOSER_DRAFT_KEY = 'heimdall:composer:draft';
 
@@ -211,6 +221,8 @@ function errMsg(err: any, fallback: string): string {
 
 const EMPTY_TIMESTAMP: ChatTimestamp = { label: '', iso: '' };
 const EMPTY_DELIVERY: ChatDeliveryStatus = { glyph: '', label: '', tone: '' };
+/** Composer width below which the model pill shows only the provider icon. */
+const COMPACT_MODEL_PILL_WIDTH = 300;
 
 function bridgeId(bridge: any): string {
   return String(bridge?.bridge_id || bridge?.bridgeId || bridge?.id || '');
@@ -851,6 +863,39 @@ export function AgentChatPane({
     [routeInstanceId],
   );
 
+  // REQ-AT-1: task items waiting on the user in this conversation (its chain, or
+  // the agent instance without one) replace the composer with the action tray.
+  // Answer / Request changes borrow the composer with their own draft
+  // (`trayDraft`), so the persisted chat draft is never touched.
+  const trayItemList = useActionTrayItems(
+    { chainId, agentInstanceId },
+    { skip: isAuxSubagent || !agentInstanceId },
+  );
+  const [trayState, dispatchTray] = useReducer(trayReducer, INITIAL_TRAY_STATE);
+  const [trayDraft, setTrayDraft] = useState('');
+  const [trayNotice, setTrayNotice] = useState('');
+  const sendTrayMode = useSendTrayMode();
+  const trayItemIds = useMemo(() => trayItemList.map((item) => item.card_id), [trayItemList]);
+  const trayItemIdsKey = trayItemIds.join('\n');
+  const draftEmpty = !draft.trim();
+  useEffect(() => {
+    dispatchTray({ type: 'items', ids: trayItemIds, draftEmpty });
+  }, [trayItemIdsKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  const trayMode = trayState.mode;
+  const trayModeItem = trayMode
+    ? trayItemList.find((item) => item.card_id === trayMode.cardId)
+    : undefined;
+  const showTray = trayVisible(trayState, trayItemList.length);
+  useEffect(() => {
+    if (!trayNotice) return;
+    const id = setTimeout(() => setTrayNotice(''), 3500);
+    return () => clearTimeout(id);
+  }, [trayNotice]);
+  // Leaving a mode clears its draft.
+  useEffect(() => {
+    if (!trayMode) setTrayDraft('');
+  }, [trayMode]);
+
   // Context surfaces (files, terminal, ...) open as tabs in the aux dock.
   const openAux = useCallback(
     (content: AuxContent, auxTitle?: string) => {
@@ -868,6 +913,10 @@ export function AgentChatPane({
   const [mentionIndex, setMentionIndex] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const composerContainerRef = useRef<HTMLFormElement | HTMLDivElement | null>(null);
+  // REQ-FROST-1: on mobile the composer dock floats over the transcript; its measured
+  // height becomes the transcript's bottom inset so the last message stays reachable.
+  const composerDockRef = useRef<HTMLDivElement | null>(null);
+  const [composerDockHeight, setComposerDockHeight] = useState(0);
   const [error, setError] = useState('');
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
   const [localMessages, setLocalMessages] = useState<Message[]>([]);
@@ -941,25 +990,41 @@ export function AgentChatPane({
     setError('');
   }, [routeInstanceId]);
 
+  // The model pill keeps its label down to phone widths (it truncates); only a composer
+  // narrower than a small phone collapses it to the provider icon.
   useEffect(() => {
     const el = composerContainerRef.current;
     if (!el || typeof ResizeObserver === 'undefined') return;
     const checkWidth = () => {
       if (typeof el.getBoundingClientRect === 'function') {
         const rect = el.getBoundingClientRect();
-        setIsSmallComposer(rect.width > 0 && rect.width < 540);
+        setIsSmallComposer(rect.width > 0 && rect.width < COMPACT_MODEL_PILL_WIDTH);
       }
     };
     checkWidth();
     const observer = new ResizeObserver((entries) => {
       for (const entry of entries) {
         const width = entry.contentRect.width;
-        setIsSmallComposer(width > 0 && width < 540);
+        setIsSmallComposer(width > 0 && width < COMPACT_MODEL_PILL_WIDTH);
       }
     });
     observer.observe(el);
     return () => observer.disconnect();
-  }, [conversation?.conversation_id, conversation?.conversationId, agentInstanceId]);
+    // showTray: the composer form unmounts while the action tray has the dock.
+  }, [conversation?.conversation_id, conversation?.conversationId, agentInstanceId, showTray]);
+
+  useEffect(() => {
+    const el = composerDockRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') {
+      setComposerDockHeight(0);
+      return;
+    }
+    const measure = () => setComposerDockHeight(Math.ceil(el.getBoundingClientRect().height));
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [isMobile, conversation?.conversation_id, conversation?.conversationId, agentInstanceId]);
 
   const [statusMenuOpen, setStatusMenuOpen] = useState(false);
   const [headerActionsOpen, setHeaderActionsOpen] = useState(false);
@@ -1347,11 +1412,14 @@ export function AgentChatPane({
     runtimeStopping ||
     isStarting;
   configurationInputBlockedRef.current = Boolean(configurationInputBlocked);
-  const sendDisabled =
-    configurationInputBlocked ||
-    hasUploadingAttachments ||
-    hasFailedAttachments ||
-    (!draft.trim() && uploadedAttachments.length === 0);
+  // A borrowed composer (Answer / Request changes) talks to the hub, not the
+  // agent runtime, so runtime state does not block it.
+  const sendDisabled = trayModeItem
+    ? hasUploadingAttachments || hasFailedAttachments || !trayDraft.trim()
+    : configurationInputBlocked ||
+      hasUploadingAttachments ||
+      hasFailedAttachments ||
+      (!draft.trim() && uploadedAttachments.length === 0);
 
   async function saveConversationTitle() {
     const next = titleDraft.trim();
@@ -1473,9 +1541,35 @@ export function AgentChatPane({
     files.forEach((file) => void uploadAttachment(file));
   }
 
+  async function submitTrayMode() {
+    if (!trayMode || !trayModeItem) return;
+    const text = appendArtifactLinks(
+      trayDraft.trim(),
+      uploadedAttachments.map((a) => `artifact://${a.id}`),
+    ).trim();
+    const item = trayModeItem;
+    const { kind } = trayMode;
+    const typed = trayDraft;
+    setError('');
+    dispatchTray({ type: 'mode_sent' });
+    setAttachments([]);
+    try {
+      setTrayNotice(await sendTrayMode(item, kind, text));
+    } catch (err: any) {
+      // The card is back (unsettled): reopen the mode with what was typed.
+      dispatchTray({ type: 'start_mode', kind, cardId: item.card_id });
+      setTrayDraft(typed);
+      setError(errMsg(err, kind === 'answer' ? 'Answer failed' : 'Request changes failed'));
+    }
+  }
+
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (sendDisabled) return;
+    if (trayModeItem) {
+      await submitTrayMode();
+      return;
+    }
     const body = draft.trim();
     const attachmentIds = uploadedAttachments.map((a) => a.id);
     const sendBody = body || (attachmentIds.length ? 'Uploaded file' : '');
@@ -2029,14 +2123,19 @@ export function AgentChatPane({
 
   function renderComposer() {
     const activeProvider = instanceProvider || provider;
+    const showNeedYouPill = needYouPillVisible(trayState, trayItemList.length);
     const composerInput = (
       <MessageComposerInput
         mobile={isMobile}
         debugId="conversation-composer-input"
         ref={textareaRef}
-        value={draft}
-        disabled={configurationInputBlocked}
+        value={trayModeItem ? trayDraft : draft}
+        disabled={trayModeItem ? false : configurationInputBlocked}
         onChange={(e) => {
+          if (trayModeItem) {
+            setTrayDraft(e.target.value);
+            return;
+          }
           updateDraft(e.target.value);
           const val = e.target.value;
           const pos = e.target.selectionStart ?? val.length;
@@ -2078,10 +2177,16 @@ export function AgentChatPane({
             e.preventDefault();
             void submit(e as any);
           }
+          if (e.key === 'Escape' && trayModeItem) {
+            e.preventDefault();
+            dispatchTray({ type: 'cancel_mode' });
+          }
         }}
         onPaste={handleComposerPaste}
         placeholder={
-          isMobile
+          trayMode && trayModeItem
+            ? TRAY_MODE_COPY[trayMode.kind].placeholder
+            : isMobile
             ? 'Message the agent…'
             : 'Message the agent… (Cmd/Ctrl+Enter to send)'
         }
@@ -2095,17 +2200,66 @@ export function AgentChatPane({
       model: instanceModel,
       onSettings: () => setRuntimeMenuOpen(true),
       onUpload: openAttachmentPicker,
-      uploadDisabled: configurationInputBlocked,
+      uploadDisabled: trayModeItem ? false : configurationInputBlocked,
       sendDisabled,
       paneExpanded: false,
       onPaneToggle: handleOpenPtyTab,
+      onOpenTasks: chainId ? () => openAux({ type: 'tasks' }) : undefined,
     };
+    const runtimeLabel = needsStart
+      ? 'Stopped'
+      : runtimeStopping
+      ? 'Stopping…'
+      : isStarting
+      ? 'Starting…'
+      : isWorking
+      ? 'Working…'
+      : 'Running';
+    const runtimeStatusMenu = (
+      <Menu
+        side="top"
+        align="end"
+        label="Runtime status"
+        open={statusMenuOpen}
+        onOpenChange={setStatusMenuOpen}
+        trigger={
+          <button
+            type="button"
+            data-debug-id="conversation-runtime-status-chip"
+            data-status={runtimeStateFromStatus(runtimeStatus)}
+            aria-label={`Agent ${runtimeLabel.replace('…', '').toLowerCase()}. Start or stop the agent`}
+            title={`${runtimeLabel} — start/stop the agent`}
+            className={`grid shrink-0 place-items-center rounded-full hover:bg-neutral-soft ${isMobile ? 'h-10 w-10' : 'h-9 w-9'}`}
+          >
+            <MessageComposerStatus
+              debugPrefix="conversation"
+              tone={runtimeStatusToTone(runtimeStatus)}
+              label={runtimeLabel}
+            />
+          </button>
+        }
+      >
+        <Menu.Label>Runtime: {runtimeLabel}</Menu.Label>
+        <Menu.Item
+          data-debug-id="conversation-runtime-status-toggle-btn"
+          disabled={!agentInstanceId || runtimeActionBusy || runtimeStopping}
+          onClick={() => void toggleRuntime()}
+          className={needsStart ? 'text-success' : 'text-danger'}
+        >
+          <Icon name={needsStart ? 'play' : 'stop'} size={15} />
+          <span>{needsStart ? 'Start agent' : 'Stop agent'}</span>
+        </Menu.Item>
+        {reconfigStatus ? <Menu.Label>{reconfigStatus}</Menu.Label> : null}
+      </Menu>
+    );
     return (
       <form
         ref={composerContainerRef as any}
         onSubmit={submit}
         data-debug-id="conversation-composer-shell"
-        className="w-full max-w-4xl mx-auto px-3 sm:px-0 py-4"
+        className={`w-full max-w-4xl mx-auto ${showNeedYouPill ? 'pt-5' : 'pt-2'} ${
+          isMobile ? 'px-3 ui-float-dock-pad' : 'px-3 sm:px-0 pb-4'
+        }`}
       >
         <div className="mx-auto w-full max-w-4xl">
           {error ? (
@@ -2230,103 +2384,94 @@ export function AgentChatPane({
           />
           <div
             data-debug-id="conversation-composer-card"
-            className="rounded-[22px] border border-subtle bg-surface px-3 py-2.5 focus-within:border-accent sm:px-4 sm:py-3"
+            className={
+              isMobile
+                ? 'ui-frost-card relative isolate rounded-[26px] border px-3 py-2.5 focus-within:border-accent'
+                : 'ui-frost-card relative isolate rounded-[22px] border px-3 py-2.5 focus-within:border-accent sm:px-4 sm:py-3'
+            }
           >
-            <div
-              data-debug-id="conversation-composer-context"
-              className="mb-2 hidden min-w-0 items-center gap-x-2 sm:flex text-[12px] text-muted"
-            >
-              <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden">
+            {/* REQ-FROST-2: stacked backdrop layers, strongest behind the input row and
+                fading toward the action row (see `.ui-frost-gradient` in styles.css). */}
+            <div data-debug-id="conversation-composer-frost" aria-hidden="true" className="ui-frost-gradient -z-10">
+              <span />
+              <span />
+              <span />
+            </div>
+            {/* REQ-AT-1: rides on the card's top edge, so it costs the composer no height. */}
+            {showNeedYouPill ? (
+              <div className="absolute -top-4 right-4 z-10">
+                <NeedYouPill
+                  count={trayItemList.length}
+                  onClick={() => dispatchTray({ type: 'show_items' })}
+                />
+              </div>
+            ) : null}
+            {trayMode && trayModeItem ? (
+              <div
+                data-debug-id="conversation-composer-tray-mode"
+                className="mb-2 flex min-w-0 items-center gap-2 rounded-xl bg-warning-soft py-1 pl-2.5 pr-1 text-[13px] text-warning"
+              >
+                <Icon name={trayMode.kind === 'answer' ? 'chat' : 'pencil'} size={14} className="shrink-0" />
+                <span className="min-w-0 flex-1 truncate">
+                  {TRAY_MODE_COPY[trayMode.kind].banner}{' '}
+                  <strong className="font-semibold">
+                    <VaultText value={trayModeItem.title} fallback="this task" />
+                  </strong>
+                </span>
                 <button
                   type="button"
-                  onClick={() => setRuntimeMenuOpen(true)}
-                  aria-haspopup="dialog"
-                  aria-label="Change bridge, provider or model"
-                  data-debug-id="conversation-composer-bridge-chip"
-                  className="inline-flex min-w-0 max-w-[50%] shrink items-center gap-1.5"
-                  title={`Bridge: ${bridgeLabel || '—'} (current location)`}
+                  aria-label="Cancel"
+                  data-debug-id="conversation-composer-tray-mode-cancel"
+                  onClick={() => dispatchTray({ type: 'cancel_mode' })}
+                  className="grid h-8 w-8 shrink-0 place-items-center rounded-full hover:bg-surface-raised"
                 >
-                  <Icon name="device" size={12} className="shrink-0" />
-                  <span className="min-w-0 truncate font-semibold text-muted">
-                    {bridgeLabel || 'no bridge'}
-                  </span>
+                  <Icon name="close" size={14} />
                 </button>
-                {projectId && !isAuxSubagent ? (
-                  <>
-                    <span className="shrink-0 opacity-40">·</span>
-                    <button
-                      type="button"
-                      data-debug-id="conversation-composer-project-chip"
-                      onClick={() => openAux({ type: 'files' })}
-                      title={`Open project files — ${projectName}`}
-                      className="inline-flex min-w-0 max-w-[50%] shrink items-center gap-1.5 rounded-md px-1 py-0.5 hover:bg-neutral-soft hover:text-primary"
-                    >
-                      <Icon name="folder" size={13} className="shrink-0" />
-                      <span className="min-w-0 truncate font-semibold text-muted">
-                        <VaultText value={projectName} fallback="Project" />
-                      </span>
-                    </button>
-                  </>
-                ) : null}
               </div>
-              <div className="ml-auto shrink-0">
-                <Menu
-                  side="top"
-                  align="end"
-                  label="Runtime status"
-                  open={statusMenuOpen}
-                  onOpenChange={setStatusMenuOpen}
-                  trigger={
-                    <button
-                      type="button"
-                      data-debug-id="conversation-runtime-status-chip"
-                      title="Runtime status — start/stop the agent"
-                      className="inline-flex items-center gap-1.5 rounded-full border border-subtle bg-surface-raised px-2.5 py-1 text-caption text-muted hover:bg-neutral-soft hover:text-primary"
-                    >
-                      <StatusDot
-                        size="sm"
-                        tone={runtimeStatusToTone(runtimeStatus)}
-                        label={
-                          needsStart
-                            ? 'Stopped'
-                            : runtimeStopping
-                            ? 'Stopping'
-                            : runtimeStateLabel(runtimeStateFromStatus(runtimeStatus))
-                        }
-                      />
-                      {needsStart
-                        ? 'Stopped'
-                        : runtimeStopping
-                        ? 'Stopping…'
-                        : runtimeStateFromStatus(runtimeStatus) === 'starting'
-                        ? 'Starting…'
-                        : 'Running'}
-                    </button>
-                  }
-                >
-                  <Menu.Label>
-                    Runtime:{' '}
-                    {needsStart
-                      ? 'Stopped'
-                      : runtimeStopping
-                      ? 'Stopping…'
-                      : runtimeStateFromStatus(runtimeStatus) === 'starting'
-                      ? 'Starting…'
-                      : 'Running'}
-                  </Menu.Label>
-                  <Menu.Item
-                    data-debug-id="conversation-runtime-status-toggle-btn"
-                    disabled={!agentInstanceId || runtimeActionBusy || runtimeStopping}
-                    onClick={() => void toggleRuntime()}
-                    className={needsStart ? 'text-success' : 'text-danger'}
+            ) : null}
+            {/* REQ-LAY-2: desktop only (REQ-LAY-3: no chips row on mobile). Bridge/project chips,
+                then the runtime StatusDot (start/stop menu) at the right end of the row. */}
+            {!isMobile ? (
+              <div
+                data-debug-id="conversation-composer-context"
+                className="mb-2 flex min-w-0 items-center gap-x-2 text-[12px] text-muted"
+              >
+                <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden">
+                  <button
+                    type="button"
+                    onClick={() => setRuntimeMenuOpen(true)}
+                    aria-haspopup="dialog"
+                    aria-label="Change bridge, provider or model"
+                    data-debug-id="conversation-composer-bridge-chip"
+                    className="inline-flex min-w-0 max-w-[50%] shrink items-center gap-1.5"
+                    title={`Bridge: ${bridgeLabel || '—'} (current location)`}
                   >
-                    <Icon name={needsStart ? 'play' : 'stop'} size={15} />
-                    <span>{needsStart ? 'Start agent' : 'Stop agent'}</span>
-                  </Menu.Item>
-                  {reconfigStatus ? <Menu.Label>{reconfigStatus}</Menu.Label> : null}
-                </Menu>
+                    <Icon name="device" size={12} className="shrink-0" />
+                    <span className="min-w-0 truncate font-semibold text-muted">
+                      {bridgeLabel || 'no bridge'}
+                    </span>
+                  </button>
+                  {projectId && !isAuxSubagent ? (
+                    <>
+                      <span className="shrink-0 opacity-40">·</span>
+                      <button
+                        type="button"
+                        data-debug-id="conversation-composer-project-chip"
+                        onClick={() => openAux({ type: 'files' })}
+                        title={`Open project files — ${projectName}`}
+                        className="inline-flex min-w-0 max-w-[50%] shrink items-center gap-1.5 rounded-md px-1 py-0.5 hover:bg-neutral-soft hover:text-primary"
+                      >
+                        <Icon name="folder" size={13} className="shrink-0" />
+                        <span className="min-w-0 truncate font-semibold text-muted">
+                          <VaultText value={projectName} fallback="Project" />
+                        </span>
+                      </button>
+                    </>
+                  ) : null}
+                </div>
+                {!conversationReadOnly ? <div className="ml-auto -my-1.5 shrink-0">{runtimeStatusMenu}</div> : null}
               </div>
-            </div>
+            ) : null}
 
             <div className="relative">
               {mentionQuery !== null && (
@@ -2429,51 +2574,53 @@ export function AgentChatPane({
                     ))}
                   </ul>
                 </div>
-              ) : isMobile && !pendingReconfig ? (
-                <div className="flex items-end gap-2">
-                  <div className="min-w-0 flex-1 py-2.5">{composerInput}</div>
-                  <MessageComposerActions {...composerActions} inline />
-                </div>
               ) : (
-                composerInput
+                // REQ-LAY-3: mobile top row = input, then the runtime StatusDot (start/stop menu) at
+                // top right, in the same column as the send button below it. REQ-LAY-2: desktop = input only.
+                isMobile ? (
+                  <div className="flex items-start gap-1">
+                    <div className="min-w-0 flex-1 pt-1.5">{composerInput}</div>
+                    {runtimeStatusMenu}
+                  </div>
+                ) : (
+                  <div className="min-w-0">{composerInput}</div>
+                )
               )}
             </div>
 
-            {!(isMobile && !pendingReconfig && !conversationReadOnly) ? (
-              <MessageComposerActions
-                {...composerActions}
-                readOnly={conversationReadOnly}
-                pendingActions={
-                  pendingReconfig ? (
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        data-debug-id="conversation-reconfigure-reset-btn"
-                        disabled={runtimeActionBusy || operationBlocksInput}
-                        onClick={resetRuntimeConfiguration}
-                        className="rounded-xl border border-subtle px-4 py-2 text-sm text-primary disabled:opacity-40"
-                      >
-                        Reset
-                      </button>
-                      <button
-                        type="button"
-                        data-debug-id="conversation-reconfigure-apply-btn"
-                        disabled={
-                          runtimeActionBusy ||
-                          (operation?.phase !== 'recovery_required' &&
-                            (isStarting || runtimeStopping)) ||
-                          stagedConfigurationIssues.length > 0
-                        }
-                        onClick={() => void applyReconfigure()}
-                        className="rounded-xl bg-accent px-4 py-2 text-sm font-semibold text-accent-fg disabled:opacity-40"
-                      >
-                        Apply
-                      </button>
-                    </div>
-                  ) : undefined
-                }
-              />
-            ) : null}
+            <MessageComposerActions
+              {...composerActions}
+              readOnly={conversationReadOnly}
+              pendingActions={
+                pendingReconfig ? (
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      data-debug-id="conversation-reconfigure-reset-btn"
+                      disabled={runtimeActionBusy || operationBlocksInput}
+                      onClick={resetRuntimeConfiguration}
+                      className="rounded-xl border border-subtle px-4 py-2 text-sm text-primary disabled:opacity-40"
+                    >
+                      Reset
+                    </button>
+                    <button
+                      type="button"
+                      data-debug-id="conversation-reconfigure-apply-btn"
+                      disabled={
+                        runtimeActionBusy ||
+                        (operation?.phase !== 'recovery_required' &&
+                          (isStarting || runtimeStopping)) ||
+                        stagedConfigurationIssues.length > 0
+                      }
+                      onClick={() => void applyReconfigure()}
+                      className="rounded-xl bg-accent px-4 py-2 text-sm font-semibold text-accent-fg disabled:opacity-40"
+                    >
+                      Apply
+                    </button>
+                  </div>
+                ) : undefined
+              }
+            />
           </div>
         </div>
       </form>
@@ -2680,19 +2827,22 @@ export function AgentChatPane({
                 }}
                 className={`flex min-w-0 items-center gap-1.5 rounded-md px-1.5 py-0.5 text-primary hover:bg-neutral-soft ${isMobile ? 'min-h-11 text-[15px]' : ''}`}
               >
-                <StatusDot
-                  size="sm"
-                  tone={runtimeStatusToTone(runtimeStatus)}
-                  label={
-                    needsStart
-                      ? 'Stopped'
-                      : runtimeStopping
-                      ? 'Stopping'
-                      : isStarting
-                      ? 'Starting'
-                      : 'Running'
-                  }
-                />
+                {/* REQ-PORT-5: on mobile the runtime dot lives in the composer card instead. */}
+                {!isMobile ? (
+                  <StatusDot
+                    size="sm"
+                    tone={runtimeStatusToTone(runtimeStatus)}
+                    label={
+                      needsStart
+                        ? 'Stopped'
+                        : runtimeStopping
+                        ? 'Stopping'
+                        : isStarting
+                        ? 'Starting'
+                        : 'Running'
+                    }
+                  />
+                ) : null}
                 <span className="truncate">
                   <VaultText
                     value={
@@ -2896,7 +3046,7 @@ export function AgentChatPane({
       {/* Transcript + Composer Dock */}
       <div
         data-debug-id="conversation-thread-transcript"
-        className="flex w-full min-h-0 min-w-0 max-w-full flex-1 flex-col overflow-x-hidden p-0 sm:px-4 sm:py-3"
+        className={`relative flex w-full min-h-0 min-w-0 max-w-full flex-1 flex-col overflow-x-hidden p-0 sm:px-4 sm:py-3`}
       >
         <ChatMessageList
           conversationKey={conversationId}
@@ -2910,6 +3060,7 @@ export function AgentChatPane({
           formatTimestamp={formatMessageTimestamp}
           getDeliveryStatus={deliveryStatusFor}
           agentIsWorking={isWorking}
+          bottomInset={composerDockHeight}
           renderMessageBody={({ message }) => renderConversationMessageBody(message)}
           wrapperClassName="relative min-h-0 min-w-0 max-w-full flex-1 overflow-hidden overflow-x-hidden"
           scrollClassName="chat-scrollbar h-full min-h-0 max-w-full space-y-3 overflow-y-auto overflow-x-hidden rounded-none bg-canvas px-1 py-3 sm:space-y-4 sm:rounded-[18px] sm:px-4 sm:py-4"
@@ -2958,12 +3109,49 @@ export function AgentChatPane({
           }
         />
         <div
+          ref={composerDockRef}
           data-debug-id="conversation-thread-composer-dock"
-          className="mx-auto w-full max-w-4xl shrink-0"
+          data-floating="true"
+          // REQ-FROST-1 / REQ-PORT-4: float over the transcript on every form factor. Touches
+          // in the gaps around the card fall through to the transcript (`.ui-float-dock`).
+          className="ui-float-dock absolute inset-x-0 bottom-0 z-20 mx-auto w-full max-w-4xl"
         >
+          <div aria-hidden="true" className="ui-frost-tail" />
           <AgentActivityBubbles instanceId={agentInstanceId} />
           <PinnedShellRuns sessions={pinnedRuns} />
-          {renderComposer()}
+          {trayNotice ? (
+            <div className="pointer-events-none mb-2 flex justify-center px-3">
+              <div
+                role="status"
+                data-debug-id="conversation-tray-notice"
+                className="ui-liquid-glass max-w-full truncate rounded-full px-4 py-1.5 text-[13px] text-primary"
+              >
+                {trayNotice}
+              </div>
+            </div>
+          ) : null}
+          {showTray ? (
+            <div
+              data-debug-id="conversation-action-tray"
+              className={isMobile ? 'w-full px-3 pt-2 ui-float-dock-pad' : 'mx-auto w-full max-w-4xl px-3 pt-2 pb-4 sm:px-0'}
+            >
+              <ActionTray
+                items={trayItemList}
+                mobile={isMobile}
+                onShowComposer={() => {
+                  dispatchTray({ type: 'show_composer' });
+                  requestAnimationFrame(() => textareaRef.current?.focus());
+                }}
+                onStartMode={(kind, item) => {
+                  setError('');
+                  dispatchTray({ type: 'start_mode', kind, cardId: item.card_id });
+                  requestAnimationFrame(() => textareaRef.current?.focus());
+                }}
+              />
+            </div>
+          ) : (
+            renderComposer()
+          )}
         </div>
       </div>
 

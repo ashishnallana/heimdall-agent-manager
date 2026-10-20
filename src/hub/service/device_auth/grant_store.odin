@@ -57,6 +57,7 @@ grant_clone_strings :: proc(g: Grant, heap: runtime.Allocator) -> Grant {
 	c.bridge_identity_fingerprint = strings.clone(g.bridge_identity_fingerprint, heap)
 	c.pair_key_mac = strings.clone(g.pair_key_mac, heap)
 	c.pair_salt = strings.clone(g.pair_salt, heap)
+	c.pair_hub_origin = strings.clone(g.pair_hub_origin, heap)
 	return c
 }
 
@@ -86,6 +87,7 @@ grant_free_strings :: proc(g: Grant, heap: runtime.Allocator) {
 	delete(g.bridge_identity_fingerprint, heap)
 	delete(g.pair_key_mac, heap)
 	delete(g.pair_salt, heap)
+	delete(g.pair_hub_origin, heap)
 }
 
 // Grant_Kind is WHAT a grant will mint when it is approved, decided ONCE at
@@ -177,9 +179,12 @@ Grant :: struct {
 	// pair_lookup the bridge derived from its secret code (the hub never sees the
 	// code), and pair_key_mac is the bridge's MAC over its keys that the approver checks.
 	// pair_salt is the bridge's public per-request salt of the pairing stretch; the
-	// approver fetches it (pending_bridge_pair_salts) before it can derive the lookup.
+	// approver fetches it (pending_bridge_pair_salts) before it can derive the lookup,
+	// with pair_hub_origin: the canonical hub origin the bridge declares it bound into
+	// the stretch (the approver derives with it, not with its own page origin).
 	pair_key_mac:                string,
 	pair_salt:                   string,
+	pair_hub_origin:             string,
 }
 
 // Authorize_Input is the public /device/authorize request body (ELDA-1).
@@ -205,6 +210,7 @@ Authorize_Input :: struct {
 	pair_lookup:                string,
 	pair_key_mac:               string,
 	pair_salt:                  string,
+	pair_hub_origin:            string,
 }
 
 // Authorize_Result is what /device/authorize hands back to the device (ELDA-1).
@@ -383,6 +389,7 @@ create_grant :: proc(store: ^Grant_Store, input: Authorize_Input, request_ip: st
 		bridge_identity_public_key = input.bridge_identity_public_key,
 		pair_key_mac = input.pair_key_mac,
 		pair_salt = input.pair_salt,
+		pair_hub_origin = input.pair_hub_origin,
 	}
 	if input.bridge_identity_public_key != "" {
 		// Validated by validate_bridge_authorize_input before we get here.
