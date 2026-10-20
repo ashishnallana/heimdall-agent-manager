@@ -35,24 +35,24 @@ function WorkflowRunCard({ run, focusTaskId }: { run: WorkflowRunView; focusTask
       <button type="button" data-debug-id={`workflow-run-toggle-${run.run_id}`} aria-expanded={expanded} aria-controls={detailsId} onClick={() => setExpanded((value) => !value)} className="flex w-full items-start gap-2.5 rounded-xl py-4 pl-6 pr-4 text-left focus-visible:outline-none focus-visible:shadow-focus">
         <Icon name="chevron-right" size="sm" className={`mt-0.5 shrink-0 text-faint transition-transform motion-reduce:transition-none ${expanded ? 'rotate-90' : ''}`} />
         <span className="min-w-0 flex-1">
-          <VaultText value={run.title || run.workflow_name} fallback="Untitled workflow" className="block break-words text-sm font-semibold text-primary" />
+          <VaultText value={run.title || run.workflow_name} fallback="Untitled workflow" className="block break-words text-sm font-semibold text-primary [overflow-wrap:anywhere]" />
           <span className="mt-2 block text-caption text-muted">Workflow · Execution {run.execution_no} · {stages.filter((stage) => stage.complete).length} of {stages.length} stages done</span>
         </span>
         <Badge tone={statusTone(run.status)}>{LABELS[run.status] || run.status}</Badge>
       </button>
-      {run.failure_detail && <VaultText as="p" value={run.failure_detail} className="px-6 pb-3 text-caption text-danger" />}
+      {run.failure_detail && <VaultText as="p" value={run.failure_detail} className="break-words px-6 pb-3 text-caption text-danger [overflow-wrap:anywhere]" />}
       {expanded && (
         <div id={detailsId} className="flex flex-col gap-3 border-t border-subtle px-5 py-4">
           <Text role="caption" tone="muted">Read-only · Managed by this chain’s coordinator</Text>
           {stages.map((stage) => (
             <section key={stage.key} data-debug-id={`workflow-run-stage-${run.run_id}-${stage.key}`} className="flex flex-col gap-2 border-l border-subtle pl-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <Text role="caption" tone="muted">{stage.key}{stage.kind === 'gate' ? ' · Approval gate' : ''}</Text>
+                <Text role="caption" tone="muted" className="min-w-0 break-words [overflow-wrap:anywhere]">{stage.key}{stage.kind === 'gate' ? ' · Approval gate' : ''}</Text>
                 <Badge tone={statusTone(stage.state)}>{LABELS[stage.state] || stage.state}</Badge>
               </div>
               {stage.tasks?.map((task) => (
                 <div key={task.task_id} data-debug-id={`workflow-run-task-${task.task_id}`} className={`flex flex-wrap items-center justify-between gap-2 rounded-lg border px-3 py-2 ${task.task_id === focusTaskId ? 'border-accent bg-accent-soft' : 'border-subtle bg-canvas'}`}>
-                  <VaultText value={task.title} fallback="Untitled task" className="min-w-0 flex-1 break-words text-caption text-primary" />
+                  <VaultText value={task.title} fallback="Untitled task" className="min-w-0 flex-1 break-words text-caption text-primary [overflow-wrap:anywhere]" />
                   <span className="text-caption text-faint">{LABELS[task.state] || task.state}{task.attempt_no > 0 ? ` · Attempt ${task.attempt_no}` : ''}</span>
                 </div>
               ))}
