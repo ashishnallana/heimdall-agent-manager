@@ -21,6 +21,7 @@ package http
 // what this socket's hello said, so the session records it in g_enroll_hellos for its
 // lifetime.
 
+import "base:runtime"
 import "core:fmt"
 import "core:net"
 import "core:strings"
@@ -50,6 +51,9 @@ Bridge_Enroll_Hello :: struct {
 	public_key: string,
 }
 
+// Process-lifetime state: every proc that grows, overwrites or frees an entry runs on
+// the heap allocator, never the caller's (a request arena, or a test's tracking
+// allocator that is freed when that test ends while the map outlives it).
 @(private = "file")
 g_enroll_hellos: map[string]Bridge_Enroll_Hello
 @(private = "file")
@@ -67,6 +71,7 @@ bridge_enroll_hello_free :: proc(e: Bridge_Enroll_Hello) {
 bridge_enroll_hello_store :: proc(bridge_id: string, e: Bridge_Enroll_Hello) {
 	sync.lock(&g_enroll_hellos_mu)
 	defer sync.unlock(&g_enroll_hellos_mu)
+	context.allocator = runtime.heap_allocator()
 	owned := Bridge_Enroll_Hello{
 		generation = e.generation,
 		family_id = strings.clone(e.family_id),
@@ -118,6 +123,7 @@ bridge_enroll_hello_destroy :: proc(e: ^Bridge_Enroll_Hello) {
 bridge_enroll_hello_forget :: proc(bridge_id: string, generation: int) {
 	sync.lock(&g_enroll_hellos_mu)
 	defer sync.unlock(&g_enroll_hellos_mu)
+	context.allocator = runtime.heap_allocator()
 	k, e, found := map_entry_lookup(bridge_id)
 	if !found || e.generation != generation do return
 	delete_key(&g_enroll_hellos, k)
