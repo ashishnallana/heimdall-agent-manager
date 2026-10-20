@@ -505,7 +505,7 @@ test_write_chain_json_pinned :: proc(t: ^testing.T) {
 	out := strings.to_string(b)
 	testing.expect(t, strings.contains(out, `"is_pinned":true`), "must serialize is_pinned true")
 	testing.expect(t, strings.contains(out, `"pinned_at":"2026-09-21T09:10:00Z"`), "must serialize pinned_at")
-	testing.expect(t, strings.contains(out, `"kind":"ticket"`), "must serialize kind")
+	testing.expect(t, strings.contains(out, `"kind":"mixed_work"`), "must serialize kind")
 	testing.expect(t, strings.contains(out, `"defaults":{"auto_submit":false}`), "must splice defaults as an object")
 	testing.expect(t, !strings.contains(out, `default_reviewer_refs`), "v2 chain wire must not carry default_reviewer_refs")
 }
