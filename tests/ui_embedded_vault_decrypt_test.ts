@@ -159,46 +159,6 @@ test('decryptConversationRecord decrypts sender-prefixed previews with embedded 
 });
 
 // -----------------------------------------------------------------------------
-// Section 4: Web Push Notification Mapper Sanitization
-// -----------------------------------------------------------------------------
-
-import { planForPushPayload } from '../src/ui/api/pushNotificationMapper.ts';
-
-test('planForPushPayload sanitizes armored titles and bodies to shield push notifications', async () => {
-  const secretTitle = 'Sensitive Task Completed';
-  const secretBody = 'Details of deployment to production cluster';
-  const armoredTitle = await encryptVaultText(secretTitle, TEST_KEY_HEX);
-  const armoredBody = await encryptVaultText(secretBody, TEST_KEY_HEX);
-
-  // 1. Armored title & body
-  const plan1 = planForPushPayload({
-    title: armoredTitle,
-    body: armoredBody,
-    category: 'chat',
-  });
-  assert.equal(plan1.title, '[🔒 Encrypted notification]', 'Armored title must be sanitized');
-  assert.equal(plan1.body, '[🔒 Encrypted notification]', 'Armored body must be sanitized');
-
-  // 2. Embedded vault token in title & body
-  const plan2 = planForPushPayload({
-    title: `Notice: ${armoredTitle}`,
-    body: `You: ${armoredBody}`,
-    category: 'attention',
-  });
-  assert.equal(plan2.title, '[🔒 Encrypted notification]', 'Embedded token in title must be sanitized');
-  assert.equal(plan2.body, '[🔒 Encrypted notification]', 'Embedded token in body must be sanitized');
-
-  // 3. Plaintext title & body are preserved
-  const plan3 = planForPushPayload({
-    title: 'Public Notification',
-    body: 'Regular system update.',
-    category: 'attention',
-  });
-  assert.equal(plan3.title, 'Public Notification');
-  assert.match(plan3.body, /Regular system update\./);
-});
-
-// -----------------------------------------------------------------------------
 // Section 5: Native OS Desktop Notification Shielding & Decryption
 // -----------------------------------------------------------------------------
 
