@@ -16,12 +16,18 @@ billing_metrics: Billing_Metrics
 
 billing_metrics_init :: proc(reg: ^metrics.Registry) {
 	if reg == nil do return
-	billing_metrics.webhooks_total = metrics.new_counter(reg, "heimdall_billing_webhooks_total",
-		"Paddle webhook deliveries by event family and outcome.", {"event", "result"})
+	billing_metrics = billing_metrics_build(reg)
 }
 
-billing_metrics_record_webhook :: proc(event_type, result: string) {
-	metrics.counter_inc(metrics.with(billing_metrics.webhooks_total, billing_webhook_event_enum(event_type), billing_webhook_result_enum(result)))
+// billing_metrics_build registers the family on reg; tests inject the result
+// through Service.metrics instead of touching the process-wide registry.
+billing_metrics_build :: proc(reg: ^metrics.Registry) -> Billing_Metrics {
+	return Billing_Metrics{webhooks_total = metrics.new_counter(reg, "heimdall_billing_webhooks_total",
+		"Paddle webhook deliveries by event family and outcome.", {"event", "result"})}
+}
+
+billing_metrics_record_webhook :: proc(m: ^Billing_Metrics, event_type, result: string) {
+	metrics.counter_inc(metrics.with(m.webhooks_total, billing_webhook_event_enum(event_type), billing_webhook_result_enum(result)))
 }
 
 // billing_webhook_event_enum maps "subscription.<x>" onto a fixed set; an

@@ -37,7 +37,9 @@ verify_signature :: proc(secret, signature, body: string, now_seconds: i64) -> b
 
 receive_webhook :: proc(service: ^Service, signature, body: string) -> domain.Domain_Error {
 	event_type, result, err := receive_webhook_classified(service, signature, body)
-	billing_metrics_record_webhook(event_type, result)
+	m := service.metrics
+	if m == nil do m = &billing_metrics
+	billing_metrics_record_webhook(m, event_type, result)
 	return err
 }
 

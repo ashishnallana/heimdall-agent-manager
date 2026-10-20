@@ -22,6 +22,9 @@ Service :: struct {
 	clock: ^platform.Clock,
 	config: Config,
 	request: proc(config: Config, method, path, body: string) -> (string, domain.Domain_Error),
+	// Optional seams; nil keeps production behavior (global metrics, OS CSPRNG).
+	metrics: ^Billing_Metrics,
+	new_reference: proc() -> (string, bool),
 }
 Offer :: struct {
 	offer_id: string,
@@ -89,7 +92,9 @@ start_checkout :: proc(service: ^Service, user_id, offer_id: string) -> (Checkou
 	selected: domain.Billing_Plan
 	for plan in plans { if plan.plan_id == offer_id && plan.plan_id != "free" && plan.price_id != "" do selected = plan }
 	if selected.price_id == "" do return {}, domain.domain_error(.Validation_Failed, "this subscription offer is not available")
-	reference, random_ok := device_auth.generate_device_code()
+	generate := service.new_reference
+	if generate == nil do generate = device_auth.generate_device_code
+	reference, random_ok := generate()
 	if !random_ok do return {}, domain.domain_error(.Internal_Error, "could not prepare checkout reference")
 	now := platform.clock_now(service.clock)
 	parsed_now, _ := platform.parse_rfc3339_utc(now)
