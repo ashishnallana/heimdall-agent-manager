@@ -1,7 +1,5 @@
-import TaskChainsPage from '../taskchain/TaskChainsPage';
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
-import NewConversationPage from '../chat/NewConversationPage';
 import ConversationsHomePage from '../chat/ConversationsHomePage';
 import ConversationSelectorModal from '../chat/ConversationSelectorModal';
 import RunningShellSelectorModal from '../chat/RunningShellSelectorModal';
@@ -50,43 +48,13 @@ import {
   writeLastSeenUserId,
 } from '../../utils/clientPersistence';
 import { Workspace } from '../mainWorkspace/Workspace';
-import DeviceApprovalPage from '../devices/DeviceApprovalPage';
 import { DeviceVaultGate } from '../devices/DeviceVaultScreens';
 import { VaultResetBanner } from '../devices/VaultResetBanner';
-import DevicesPanel from '../settings/DevicesPanel';
 import { bootDeviceVault, autoUnsealLockedBridges } from '../../services/deviceVault';
-import ProviderEnrollmentSetupPage from '../providers/ProviderEnrollmentSetupPage';
-import BridgesPanel from '../settings/BridgesPanel';
-import ProjectsPanel from '../settings/ProjectsPanel';
-import TemplatesPanel from '../settings/TemplatesPanel';
-import AppearanceSettings from '../settings/AppearanceSettings';
 import { setTheme } from '../../store/themeSlice';
-import ProjectListPage from '../projects/ProjectListPage';
-import ProjectViewPage from '../projects/ProjectViewPage';
-import ProjectFormPage from '../projects/ProjectFormPage';
 import ProjectLaunchModal from '../projects/ProjectLaunchModal';
-import CardsPanel from '../cards/CardsPanel';
 import HomePage from '../home/HomePage';
 import ErrorBoundary from './ErrorBoundary';
-import ActionListPage from '../actions/ActionListPage';
-import ActionViewPage from '../actions/ActionViewPage';
-import ActionFormPage from '../actions/ActionFormPage';
-import ShellListPage from '../shells/ShellListPage';
-import ShellViewPage from '../shells/ShellViewPage';
-import AgentListPage from '../agents/AgentListPage';
-import AgentViewPage from '../agents/AgentViewPage';
-import AgentFormPage from '../agents/AgentFormPage';
-import { ProviderEditorPage, ProvidersPanel } from '../settings/ProvidersPanel';
-import UserTokensPanel from '../settings/UserTokensPanel';
-import MemoryListPage from '../memory/MemoryListPage';
-import MemoryViewPage from '../memory/MemoryViewPage';
-import MemoryFormPage from '../memory/MemoryFormPage';
-import IssueListPage from '../issues/IssueListPage';
-import IssueFormPage from '../issues/IssueFormPage';
-import SkillViewerPage from '../skills/SkillViewerPage';
-import NotificationsPanel from '../settings/NotificationsPanel';
-import ExperimentalPanel from '../settings/ExperimentalPanel';
-import SettingsModal from '../settings/SettingsModal';
 import { resolveSettingsTab } from '../../utils/settingsRouting';
 import { useShortcuts } from '../../services/shortcuts/ShortcutContext';
 import { useRegisterActions } from '../../services/shortcuts/useRegisterActions';
@@ -101,16 +69,51 @@ import {
 import { isVaultArmored } from '../../utils/vaultContent';
 import { VaultText } from '../vault/VaultText';
 import { batchDecryptTitles, type RawSearchItemInput } from '../../utils/vaultSearch';
-import LspPanel from '../settings/LspPanel';
 import { useFetchExperimentsQuery } from '../../api/endpoints/settings';
-import LibraryPage from '../LibraryPage';
-import ArtifactViewer from '../ArtifactViewer';
 import { clearUserClientState } from '../../store/chatSlice';
 import { priorUserClientStateCleared } from '../../store/store';
 import { selectAuxOpen, selectCurrentAuxTreeId } from '../../store/auxPanesSlice';
 import { selectOnlineLockedBridgeIds } from '../../utils/bridgeVaultStatus';
 import TaskChainSelectorModal from '../chains/TaskChainSelectorModal';
 import type { LauncherIntent } from '../../store/workspaceLayoutSlice';
+
+// Pages off the boot path (home, conversations and the workspace stay eager) load
+// on first visit, so they stay out of the entry chunk.
+const TaskChainsPage = lazy(() => import('../taskchain/TaskChainsPage'));
+const NewConversationPage = lazy(() => import('../chat/NewConversationPage'));
+const DeviceApprovalPage = lazy(() => import('../devices/DeviceApprovalPage'));
+const DevicesPanel = lazy(() => import('../settings/DevicesPanel'));
+const ProviderEnrollmentSetupPage = lazy(() => import('../providers/ProviderEnrollmentSetupPage'));
+const BridgesPanel = lazy(() => import('../settings/BridgesPanel'));
+const ProjectsPanel = lazy(() => import('../settings/ProjectsPanel'));
+const TemplatesPanel = lazy(() => import('../settings/TemplatesPanel'));
+const AppearanceSettings = lazy(() => import('../settings/AppearanceSettings'));
+const ProjectListPage = lazy(() => import('../projects/ProjectListPage'));
+const ProjectViewPage = lazy(() => import('../projects/ProjectViewPage'));
+const ProjectFormPage = lazy(() => import('../projects/ProjectFormPage'));
+const ActionListPage = lazy(() => import('../actions/ActionListPage'));
+const ActionViewPage = lazy(() => import('../actions/ActionViewPage'));
+const ActionFormPage = lazy(() => import('../actions/ActionFormPage'));
+const ShellListPage = lazy(() => import('../shells/ShellListPage'));
+const ShellViewPage = lazy(() => import('../shells/ShellViewPage'));
+const AgentListPage = lazy(() => import('../agents/AgentListPage'));
+const AgentViewPage = lazy(() => import('../agents/AgentViewPage'));
+const AgentFormPage = lazy(() => import('../agents/AgentFormPage'));
+const UserTokensPanel = lazy(() => import('../settings/UserTokensPanel'));
+const MemoryListPage = lazy(() => import('../memory/MemoryListPage'));
+const MemoryViewPage = lazy(() => import('../memory/MemoryViewPage'));
+const MemoryFormPage = lazy(() => import('../memory/MemoryFormPage'));
+const IssueListPage = lazy(() => import('../issues/IssueListPage'));
+const IssueFormPage = lazy(() => import('../issues/IssueFormPage'));
+const SkillViewerPage = lazy(() => import('../skills/SkillViewerPage'));
+const NotificationsPanel = lazy(() => import('../settings/NotificationsPanel'));
+const ExperimentalPanel = lazy(() => import('../settings/ExperimentalPanel'));
+const SettingsModal = lazy(() => import('../settings/SettingsModal'));
+const LspPanel = lazy(() => import('../settings/LspPanel'));
+const LibraryPage = lazy(() => import('../LibraryPage'));
+const ArtifactViewer = lazy(() => import('../ArtifactViewer'));
+const ProvidersPanel = lazy(() => import('../settings/ProvidersPanel'));
+const ProviderEditorPage = lazy(() => import('../settings/ProvidersPanel').then((m) => ({ default: m.ProviderEditorPage })));
 
 type ShellRoute = {
   path: string;
@@ -1213,6 +1216,7 @@ function RouteOutlet({
         {/* Do not render SettingsSubNav when SettingsModal is active */}
         {!path.startsWith('/settings') && path.startsWith('/settings') ? <SettingsSubNav path={path} /> : null}
         <ErrorBoundary resetKey={path} label={routeTitle(path)}>
+        <Suspense fallback={<p data-debug-id="shell-route-loading" className="text-sm text-muted">Loading…</p>}>
         {lspFlagPending ? (
           <p data-debug-id="settings-lsp-gate-pending" className="text-sm text-muted">Loading…</p>
         ) : path.startsWith('/settings') ? (
@@ -1315,6 +1319,7 @@ function RouteOutlet({
             <p className="mt-3 text-sm leading-6 text-muted">{isKnownRoute ? description : 'Use the left sidebar to navigate to a v1 route. Legacy workspace, guide, attention-badge, and inspector routes are intentionally not mounted in this shell.'}</p>
           </div>
         )}
+        </Suspense>
         </ErrorBoundary>
       </section>
     </main>
@@ -1373,6 +1378,10 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [launchModalProject, setLaunchModalProject] = useState<{ projectId: string; name: string } | null>(null);
   const [settingsModalOpen, setSettingsModalOpenState] = useState<boolean>(() => routeFromLocation().startsWith('/settings'));
+  // SettingsModal is lazy: mount it on first open, then keep it mounted so closing
+  // behaves exactly as before.
+  const [settingsModalLoaded, setSettingsModalLoaded] = useState(settingsModalOpen);
+  if (settingsModalOpen && !settingsModalLoaded) setSettingsModalLoaded(true);
   const [settingsModalTab, setSettingsModalTab] = useState<string>(() => resolveSettingsTab(routeFromLocation()));
   // Opens Workspace Settings and scrolls to the Bridge's Update button once the
   // modal has rendered it (the modal mounts asynchronously after opening).
@@ -1871,7 +1880,9 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
         data-debug-id="enrollment-standalone-page"
         className="fixed inset-x-0 top-0 app-viewport-height w-full overflow-auto bg-canvas text-primary"
       >
-        <DeviceApprovalPage />
+        <Suspense fallback={null}>
+          <DeviceApprovalPage />
+        </Suspense>
       </main>
     );
   }
@@ -1885,7 +1896,9 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
         data-debug-id="provider-enrollment-standalone-page"
         className="fixed inset-x-0 top-0 app-viewport-height w-full overflow-auto bg-canvas text-primary"
       >
-        <ProviderEnrollmentSetupPage bridgeId={providerBridgeId} />
+        <Suspense fallback={null}>
+          <ProviderEnrollmentSetupPage bridgeId={providerBridgeId} />
+        </Suspense>
       </main>
     );
   }
@@ -2085,12 +2098,16 @@ function AuthenticatedShell({ user, logoutUrl }: { user: AuthUser; logoutUrl: st
         }}
       />
       <VaultResetBanner />
-      <SettingsModal
-        open={settingsModalOpen}
-        onOpenChange={setSettingsModalOpen}
-        initialTab={settingsModalTab}
-        user={user}
-      />
+      {settingsModalLoaded && (
+        <Suspense fallback={null}>
+          <SettingsModal
+            open={settingsModalOpen}
+            onOpenChange={setSettingsModalOpen}
+            initialTab={settingsModalTab}
+            user={user}
+          />
+        </Suspense>
+      )}
     </div>
   );
 }
