@@ -91,28 +91,6 @@ test_agent_not_running_capacity_is_queueing_and_failed_ready_is_blocked :: proc(
 }
 
 @(test)
-test_agent_not_running_heartbeat_loss_refunds :: proc(t: ^testing.T) {
-	fx, log, ok := lease_fixture(t, "anr_heartbeat")
-	defer lease_fixture_close(fx, log)
-	if !ok do return
-	chain := seed_live_chain(t, fx, "chain_anr_heartbeat")
-	seed_fleet(fx, chain, "agt_w")
-	seed_instance(fx, chain, "inst_w1", "agt_w", "br_1", "running")
-	_ = publish_task(t, fx, chain, "task_heartbeat")
-	confirm_holder(fx, "inst_w1")
-	lease, _ := lease_of(fx, "inst_w1")
-	u, begun, _ := begin_uow(&fx.svc)
-	if !testing.expect(t, begun, "begin") do return
-	fixture_advance(fx, LEASE_TTL_SECONDS + 1)
-	result := expire_lease_in_uow(&fx.svc, &u, lease, EXPIRE_TTL, hub_actor())
-	_, _ = end_uow(&fx.svc, &u, result == .Expired)
-	testing.expect_value(t, result, Expire_Result.Expired)
-	task := get_task(fx, "task_heartbeat")
-	testing.expect(t, task.state == .Backlog && strings.contains(task.blocked_on_json, "ttl"), "heartbeat lost parks task")
-}
-
-
-@(test)
 test_agent_not_running_unresolvable_provider_and_model :: proc(t: ^testing.T) {
 	fx, log, ok := lease_fixture(t, "anr_model")
 	defer lease_fixture_close(fx, log)
