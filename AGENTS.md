@@ -108,8 +108,6 @@ src/
   lib/
     config/           config parser/defaults
     http_client/      local HTTP client helpers
-    message_provider/ agent-to-agent message provider interface + impl
-    router_envelope/  router envelope helpers
     tmux/             tmux launch/control helpers
     vcs/              git/jj workspace helpers
     ws/               WebSocket client helpers
@@ -205,8 +203,6 @@ Shared libraries used by daemon/wrapper/ctl.
 
 - `config` — config structs/defaults/parser for daemon data dirs, wrapper launch/bootstrap settings, provider/model tiers, startup/activity detection, guide agent, and ctl defaults
 - `http_client` — local daemon HTTP calls
-- `message_provider` — agent-to-agent provider interface plus current in-memory implementation
-- `router_envelope` — router envelope helpers
 - `tmux` — tmux lifecycle helpers
 - `vcs` — git/jj workspace helpers
 - `ws` — wrapper-side WebSocket client
@@ -255,10 +251,6 @@ Defined primarily in `src/daemon/task_store.odin`.
 
 - Shared wire/data types live in `src/contracts/message_provider.odin`:
   - `Message`, `Message_Status`, `Message_Direction`, `Send_Message_Request`, `Fetch_Messages_Request`, `Mark_Read_Request`, read receipts.
-- The provider interface lives in `src/lib/message_provider/provider.odin`.
-- The current default provider implementation is `src/lib/message_provider/memory.odin`.
-  - This is a **real** provider, but it is process-memory only today.
-  - That is separate from user/agent chat, which is durable.
 
 ### User/agent chat
 

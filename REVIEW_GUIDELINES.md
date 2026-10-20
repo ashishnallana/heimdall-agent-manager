@@ -204,35 +204,7 @@ src/daemon/agent_rpc.odin    RPC action dispatch
 
 If `server.odin` starts accumulating message/provider/WS formatting logic again, flag it.
 
-### 8. MessageProvider Structure
-
-Provider abstraction should live under:
-
-```text
-src/lib/message_provider/
-```
-
-Expected:
-
-```text
-provider.odin  interface/facade functions
-memory.odin    in-memory implementation
-```
-
-Daemon should preferably call facade helpers:
-
-```odin
-mp.send_message(&message_provider, req)
-mp.fetch_messages(&message_provider, req)
-mp.unread_count(&message_provider, req)
-mp.mark_read(&message_provider, req)
-```
-
-rather than directly invoking function pointers everywhere.
-
-Provider should not directly send WS events.
-
-### 9. Message Bus Direction
+### 8. Message Bus Direction
 
 Planned architecture is in `message-bus-plan.md`.
 
@@ -249,7 +221,7 @@ If reviewing message bus work, ensure:
 - plugin/event hooks can be added later
 - actual message bodies are internal only and never serialized over WS
 
-### 10. Thread Safety
+### 9. Thread Safety
 
 Daemon handles clients in threads.
 
@@ -262,7 +234,7 @@ At minimum, TODO comments should exist. Do not treat this as production-safe.
 
 For larger testing, expect races until locks are added.
 
-### 11. JSON Parser Limitations
+### 10. JSON Parser Limitations
 
 Current JSON parsing is string-search based and not robust.
 
