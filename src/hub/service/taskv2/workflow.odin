@@ -105,6 +105,12 @@ Workflow_Parsed_Spec :: struct {
 Workflow_Run_Snapshot :: struct {
 	spec:        Workflow_Parsed_Spec,
 	inputs_json: string,
+	// inputs_members: key → raw value text of inputs_json, scanned once when
+	// the snapshot is built. Every {{inputs.*}} placeholder and input fan-out
+	// reads it; re-extracting each key from the JSON text cost a full parse of
+	// the whole input snapshot per lookup (multi-second for MB-sized inputs,
+	// inside the UoW).
+	inputs_members: map[string]string,
 	def_id:      string,
 }
 
@@ -419,8 +425,8 @@ validate_for_each_input_declaration :: proc(stage_key, field: string, inputs: []
 
 // workflow_input_raw_member returns the raw JSON text of a top-level member.
 @(private = "file")
-workflow_input_raw_member :: proc(obj: string, key: string) -> (string, bool) {
-	raw, ok := jsonx_top_level_members(obj)[key]
+workflow_input_raw_member :: proc(members: map[string]string, key: string) -> (string, bool) {
+	raw, ok := members[key]
 	if !ok do return "", false
 	return strings.trim_space(raw), true
 }
@@ -429,8 +435,8 @@ workflow_input_raw_member :: proc(obj: string, key: string) -> (string, bool) {
 // execution's immutable input snapshot (falling back to the declared default).
 // Items keep array order, so stage indexes are deterministic across
 // reconciliation passes and retries. An empty array is valid (zero items).
-resolve_for_each_input_items :: proc(stage_key, field: string, inputs_json: string, inputs: []Workflow_Input_Spec, allocator := context.temp_allocator) -> ([]string, domain.Domain_Error) {
-	raw, supplied := workflow_input_raw_member(inputs_json, field)
+resolve_for_each_input_items :: proc(stage_key, field: string, inputs_members: map[string]string, inputs: []Workflow_Input_Spec, allocator := context.temp_allocator) -> ([]string, domain.Domain_Error) {
+	raw, supplied := workflow_input_raw_member(inputs_members, field)
 	if !supplied || raw == "null" {
 		raw, supplied = "", false
 		for inp in inputs {
@@ -470,10 +476,11 @@ workflow_check_fan_out_size :: proc(stage_key, source: string, count: int, from_
 // validate_workflow_run_inputs checks every input fan-out before a run is
 // created, so a missing or non-array input never dispatches part of a run.
 validate_workflow_run_inputs :: proc(parsed: Workflow_Parsed_Spec, inputs_json: string) -> domain.Domain_Error {
+	members := jsonx_top_level_members(inputs_json)
 	for st in parsed.stages {
 		field, is_input := parse_for_each_input_expr(st.for_each)
 		if !is_input do continue
-		if _, err := resolve_for_each_input_items(st.key, field, inputs_json, parsed.inputs); err.code != .None do return err
+		if _, err := resolve_for_each_input_items(st.key, field, members, parsed.inputs); err.code != .None do return err
 	}
 	return domain.Domain_Error{}
 }
@@ -566,7 +573,7 @@ parse_workflow_inputs_spec :: proc(raw_spec: string, allocator := context.temp_a
 				itype := strings.trim_space(jsonx.extract_string(obj, "type", "string", true, allocator))
 				req := jsonx.extract_bool(obj, "required", true, true)
 				def_val, has_def := jsonx.extract_string_found(obj, "default", true, allocator)
-				def_raw, has_def_raw := workflow_input_raw_member(obj, "default")
+				def_raw, has_def_raw := workflow_input_raw_member(jsonx_top_level_members(obj), "default")
 				_, type_declared := jsonx_top_level_members(obj)["type"]
 				desc := strings.trim_space(jsonx.extract_string(obj, "description", "", true, allocator))
 				append(&out, Workflow_Input_Spec{
@@ -590,7 +597,7 @@ parse_workflow_inputs_spec :: proc(raw_spec: string, allocator := context.temp_a
 				itype := strings.trim_space(jsonx.extract_string(trimmed_v, "type", "string", true, allocator))
 				req := jsonx.extract_bool(trimmed_v, "required", true, true)
 				def_val, has_def := jsonx.extract_string_found(trimmed_v, "default", true, allocator)
-				def_raw, has_def_raw := workflow_input_raw_member(trimmed_v, "default")
+				def_raw, has_def_raw := workflow_input_raw_member(jsonx_top_level_members(trimmed_v), "default")
 				_, type_declared := jsonx_top_level_members(trimmed_v)["type"]
 				desc := strings.trim_space(jsonx.extract_string(trimmed_v, "description", "", true, allocator))
 				append(&out, Workflow_Input_Spec{
@@ -743,7 +750,8 @@ Workflow_Context :: struct {
 extract_workflow_snapshot :: proc(chain: Workflow_Context, allocator := context.temp_allocator) -> (Workflow_Run_Snapshot, bool) {
 	parsed, ok, _ := parse_and_validate_workflow_spec(chain.run.spec_json, "", 0, allocator)
 	if !ok do return {}, false
-	return Workflow_Run_Snapshot{spec = parsed, inputs_json = chain.execution.resolved_inputs_json, def_id = chain.run.definition_ref}, true
+	inputs := chain.execution.resolved_inputs_json
+	return Workflow_Run_Snapshot{spec = parsed, inputs_json = inputs, inputs_members = jsonx_top_level_members(inputs), def_id = chain.run.definition_ref}, true
 }
 
 workflow_stage_max_parallel :: proc(chain: Workflow_Context, stage_key: string) -> int {
@@ -919,7 +927,7 @@ materialize_single_stage_in_uow :: proc(
 	source_task_id := ""
 	input_field, input_fan_out := parse_for_each_input_expr(st.for_each)
 	if input_fan_out {
-		items, ierr := resolve_for_each_input_items(st.key, input_field, snap.inputs_json, snap.spec.inputs)
+		items, ierr := resolve_for_each_input_items(st.key, input_field, snap.inputs_members, snap.spec.inputs)
 		if ierr.code != .None do return false, ierr
 		for it in items do append(&items_raw, it)
 		if len(items_raw) == 0 {
@@ -1373,7 +1381,7 @@ resolve_placeholder_token :: proc(
 @(private = "file")
 resolve_workflow_input_value :: proc(snap: Workflow_Run_Snapshot, key: string, allocator := context.temp_allocator) -> string {
 	// A supplied null falls back to the declared default, as fan-out does.
-	supplied, found := extract_scalar_or_raw_string(snap.inputs_json, key, allocator)
+	supplied, found := scalar_or_raw_member(snap.inputs_members, key, allocator)
 	if found && supplied != "null" do return supplied
 	for inp in snap.spec.inputs {
 		if inp.name != key || !inp.has_default do continue
@@ -1387,14 +1395,30 @@ resolve_workflow_input_value :: proc(snap: Workflow_Run_Snapshot, key: string, a
 
 @(private = "package")
 extract_scalar_or_raw_string :: proc(obj_json: string, key: string, allocator := context.temp_allocator) -> (string, bool) {
-	if s, ok := jsonx.extract_string_found(obj_json, key, true, allocator); ok do return s, true
-	if n, ok := jsonx.extract_int_found(obj_json, key, true); ok do return fmt.tprintf("%d", n), true
-	if b, ok := jsonx.extract_bool_literal(obj_json, key, true); ok do return "true" if b else "false", true
-	members := jsonx_top_level_members(obj_json)
-	if raw, ok := members[key]; ok {
-		return strings.trim_space(raw), true
+	return scalar_or_raw_member(jsonx_top_level_members(obj_json), key, allocator)
+}
+
+// scalar_or_raw_member renders one top-level member the way placeholders want
+// it: strings decoded, numbers and booleans as their text, objects/arrays (and
+// null) as raw trimmed JSON. Only the member's own text is parsed, never the
+// whole object, so a lookup costs O(member) instead of O(object).
+@(private = "package")
+scalar_or_raw_member :: proc(members: map[string]string, key: string, allocator := context.temp_allocator) -> (string, bool) {
+	raw, ok := members[key]
+	if !ok do return "", false
+	raw = strings.trim_space(raw)
+	if raw == "" || raw[0] == '{' || raw[0] == '[' do return raw, true
+	// Scalars are small: parse just this value with the same decoder the
+	// whole-object path used, so formatting (e.g. floats as %f) is unchanged.
+	value, err := json.parse(transmute([]u8)raw, parse_integers = true, allocator = allocator)
+	if err != nil do return raw, true
+	#partial switch v in value {
+	case json.String:  return string(v), true
+	case json.Integer: return fmt.tprintf("%d", v), true
+	case json.Float:   return fmt.tprintf("%f", v), true
+	case json.Boolean: return "true" if v else "false", true
 	}
-	return "", false
+	return raw, true
 }
 
 // ---- Workflow Service Entry Points (Templates, Define, List, Run, Status, Output, Retry, Cancel) ----

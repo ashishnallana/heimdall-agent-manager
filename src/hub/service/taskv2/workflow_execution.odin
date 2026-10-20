@@ -460,10 +460,23 @@ trigger_on_output_workflows_in_uow :: proc(svc: ^Service, u: ^Uow, chain: domain
 	return true, domain.Domain_Error{}
 }
 
-workflow_task_max_parallel :: proc(svc: ^Service, task: domain.Task) -> int {
-	wf, ok, _ := workflow_context(svc, task.workflow_run_id, task.owner_user_id)
-	if !ok || wf.execution.execution_no != task.workflow_execution_no do return 0
-	return workflow_stage_max_parallel(wf, task.stage_key)
+// workflow_task_max_parallel_cached returns a workflow task's stage
+// max_parallel (0 = unlimited) for a loop over many tasks (the matcher's work pass, inside the UoW): each run's spec is
+// parsed once per `cache` (key run_id#execution_no → stage_key → max_parallel)
+// instead of once per Ready task — a large spec costs ~0.35 s per parse.
+workflow_task_max_parallel_cached :: proc(svc: ^Service, cache: ^map[string]map[string]int, task: domain.Task) -> int {
+	key := fmt.tprintf("%s#%d", task.workflow_run_id, task.workflow_execution_no)
+	caps, cached := cache[key]
+	if !cached {
+		caps = make(map[string]int, context.temp_allocator)
+		if wf, ok, _ := workflow_context(svc, task.workflow_run_id, task.owner_user_id); ok && wf.execution.execution_no == task.workflow_execution_no {
+			if snap, sok := extract_workflow_snapshot(wf, context.temp_allocator); sok {
+				for st in snap.spec.stages do caps[st.key] = st.max_parallel
+			}
+		}
+		cache[key] = caps
+	}
+	return caps[task.stage_key]
 }
 workflow_proposal_run_in_uow :: proc(svc: ^Service, u: ^Uow, chain_in: domain.Task_Chain, actor: Actor, ref, inputs: string) -> (domain.Task_Chain, bool, domain.Domain_Error) {
  chain := chain_in

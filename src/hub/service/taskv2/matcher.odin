@@ -33,11 +33,12 @@ match_chain_in_uow :: proc(svc: ^Service, u: ^Uow, chain: domain.Task_Chain, tri
 		grant_reviews(svc, u, &ctx, task, trigger)
 	}
 	// Work pass.
+	stage_caps := make(map[string]map[string]int, context.temp_allocator)
 	for task in ctx.sorted {
 		if task.state != .Ready || task.kind == .Gate do continue
 		if task_has_live_lease(&ctx, task.task_id, domain.LEASE_KIND_WORK) do continue
 		if task.stage_key != "" {
-			if cap := workflow_task_max_parallel(svc, task); cap > 0 {
+			if cap := workflow_task_max_parallel_cached(svc, &stage_caps, task); cap > 0 {
 				if stage_live_work_lease_count(&ctx, task.workflow_run_id, task.workflow_execution_no, task.stage_key) >= cap do continue
 			}
 		}
