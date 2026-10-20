@@ -4,6 +4,7 @@ import React, {
   useCallback,
   useEffect,
   useMemo,
+  useReducer,
   useRef,
   useState,
 } from 'react';
@@ -96,6 +97,15 @@ import { groupTranscriptMessages, isAgentStartMessage } from '../chat/transcript
 import type { ChatDeliveryStatus, ChatMessage, ChatTimestamp } from '../chat/types';
 import type { SplitDirection } from '../../tiling/types';
 import { replaceVaultTokens } from '../../utils/vaultCrypto.ts';
+import { appendArtifactLinks } from '../../utils/artifactUpload';
+import { ActionTray, NeedYouPill, useActionTrayItems, useSendTrayMode } from '../attention/ActionTray';
+import {
+  INITIAL_TRAY_STATE,
+  TRAY_MODE_COPY,
+  needYouPillVisible,
+  trayReducer,
+  trayVisible,
+} from '../attention/actionTrayModel';
 
 export const COMPOSER_DRAFT_KEY = 'heimdall:composer:draft';
 
@@ -860,6 +870,39 @@ export function AgentChatPane({
     [routeInstanceId],
   );
 
+  // REQ-AT-1: task items waiting on the user in this conversation (its chain, or
+  // the agent instance without one) replace the composer with the action tray.
+  // Answer / Request changes borrow the composer with their own draft
+  // (`trayDraft`), so the persisted chat draft is never touched.
+  const trayItemList = useActionTrayItems(
+    { chainId, agentInstanceId },
+    { skip: isAuxSubagent || !agentInstanceId },
+  );
+  const [trayState, dispatchTray] = useReducer(trayReducer, INITIAL_TRAY_STATE);
+  const [trayDraft, setTrayDraft] = useState('');
+  const [trayNotice, setTrayNotice] = useState('');
+  const sendTrayMode = useSendTrayMode();
+  const trayItemIds = useMemo(() => trayItemList.map((item) => item.card_id), [trayItemList]);
+  const trayItemIdsKey = trayItemIds.join('\n');
+  const draftEmpty = !draft.trim();
+  useEffect(() => {
+    dispatchTray({ type: 'items', ids: trayItemIds, draftEmpty });
+  }, [trayItemIdsKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  const trayMode = trayState.mode;
+  const trayModeItem = trayMode
+    ? trayItemList.find((item) => item.card_id === trayMode.cardId)
+    : undefined;
+  const showTray = trayVisible(trayState, trayItemList.length);
+  useEffect(() => {
+    if (!trayNotice) return;
+    const id = setTimeout(() => setTrayNotice(''), 3500);
+    return () => clearTimeout(id);
+  }, [trayNotice]);
+  // Leaving a mode clears its draft.
+  useEffect(() => {
+    if (!trayMode) setTrayDraft('');
+  }, [trayMode]);
+
   // Context surfaces (files, terminal, ...) open as tabs in the aux dock.
   const openAux = useCallback(
     (content: AuxContent, auxTitle?: string) => {
@@ -974,7 +1017,8 @@ export function AgentChatPane({
     });
     observer.observe(el);
     return () => observer.disconnect();
-  }, [conversation?.conversation_id, conversation?.conversationId, agentInstanceId]);
+    // showTray: the composer form unmounts while the action tray has the dock.
+  }, [conversation?.conversation_id, conversation?.conversationId, agentInstanceId, showTray]);
 
   useEffect(() => {
     const el = composerDockRef.current;
@@ -1375,11 +1419,14 @@ export function AgentChatPane({
     runtimeStopping ||
     isStarting;
   configurationInputBlockedRef.current = Boolean(configurationInputBlocked);
-  const sendDisabled =
-    configurationInputBlocked ||
-    hasUploadingAttachments ||
-    hasFailedAttachments ||
-    (!draft.trim() && uploadedAttachments.length === 0);
+  // A borrowed composer (Answer / Request changes) talks to the hub, not the
+  // agent runtime, so runtime state does not block it.
+  const sendDisabled = trayModeItem
+    ? hasUploadingAttachments || hasFailedAttachments || !trayDraft.trim()
+    : configurationInputBlocked ||
+      hasUploadingAttachments ||
+      hasFailedAttachments ||
+      (!draft.trim() && uploadedAttachments.length === 0);
 
   async function saveConversationTitle() {
     const next = titleDraft.trim();
@@ -1501,9 +1548,35 @@ export function AgentChatPane({
     files.forEach((file) => void uploadAttachment(file));
   }
 
+  async function submitTrayMode() {
+    if (!trayMode || !trayModeItem) return;
+    const text = appendArtifactLinks(
+      trayDraft.trim(),
+      uploadedAttachments.map((a) => `artifact://${a.id}`),
+    ).trim();
+    const item = trayModeItem;
+    const { kind } = trayMode;
+    const typed = trayDraft;
+    setError('');
+    dispatchTray({ type: 'mode_sent' });
+    setAttachments([]);
+    try {
+      setTrayNotice(await sendTrayMode(item, kind, text));
+    } catch (err: any) {
+      // The card is back (unsettled): reopen the mode with what was typed.
+      dispatchTray({ type: 'start_mode', kind, cardId: item.card_id });
+      setTrayDraft(typed);
+      setError(errMsg(err, kind === 'answer' ? 'Answer failed' : 'Request changes failed'));
+    }
+  }
+
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (sendDisabled) return;
+    if (trayModeItem) {
+      await submitTrayMode();
+      return;
+    }
     const body = draft.trim();
     const attachmentIds = uploadedAttachments.map((a) => a.id);
     const sendBody = body || (attachmentIds.length ? 'Uploaded file' : '');
@@ -2057,14 +2130,19 @@ export function AgentChatPane({
 
   function renderComposer() {
     const activeProvider = instanceProvider || provider;
+    const showNeedYouPill = needYouPillVisible(trayState, trayItemList.length);
     const composerInput = (
       <MessageComposerInput
         mobile={isMobile}
         debugId="conversation-composer-input"
         ref={textareaRef}
-        value={draft}
-        disabled={configurationInputBlocked}
+        value={trayModeItem ? trayDraft : draft}
+        disabled={trayModeItem ? false : configurationInputBlocked}
         onChange={(e) => {
+          if (trayModeItem) {
+            setTrayDraft(e.target.value);
+            return;
+          }
           updateDraft(e.target.value);
           const val = e.target.value;
           const pos = e.target.selectionStart ?? val.length;
@@ -2106,10 +2184,16 @@ export function AgentChatPane({
             e.preventDefault();
             void submit(e as any);
           }
+          if (e.key === 'Escape' && trayModeItem) {
+            e.preventDefault();
+            dispatchTray({ type: 'cancel_mode' });
+          }
         }}
         onPaste={handleComposerPaste}
         placeholder={
-          isMobile
+          trayMode && trayModeItem
+            ? TRAY_MODE_COPY[trayMode.kind].placeholder
+            : isMobile
             ? 'Message the agent…'
             : 'Message the agent… (Cmd/Ctrl+Enter to send)'
         }
@@ -2123,7 +2207,7 @@ export function AgentChatPane({
       model: instanceModel,
       onSettings: () => setRuntimeMenuOpen(true),
       onUpload: openAttachmentPicker,
-      uploadDisabled: configurationInputBlocked,
+      uploadDisabled: trayModeItem ? false : configurationInputBlocked,
       sendDisabled,
       paneExpanded: false,
       onPaneToggle: handleOpenPtyTab,
@@ -2180,11 +2264,9 @@ export function AgentChatPane({
         ref={composerContainerRef as any}
         onSubmit={submit}
         data-debug-id="conversation-composer-shell"
-        className={
-          isMobile
-            ? 'w-full max-w-4xl mx-auto px-3 pt-2 ui-float-dock-pad'
-            : 'w-full max-w-4xl mx-auto px-3 sm:px-0 pt-2 pb-4'
-        }
+        className={`w-full max-w-4xl mx-auto ${showNeedYouPill ? 'pt-5' : 'pt-2'} ${
+          isMobile ? 'px-3 ui-float-dock-pad' : 'px-3 sm:px-0 pb-4'
+        }`}
       >
         <div className="mx-auto w-full max-w-4xl">
           {error ? (
@@ -2322,6 +2404,38 @@ export function AgentChatPane({
               <span />
               <span />
             </div>
+            {/* REQ-AT-1: rides on the card's top edge, so it costs the composer no height. */}
+            {showNeedYouPill ? (
+              <div className="absolute -top-4 right-4 z-10">
+                <NeedYouPill
+                  count={trayItemList.length}
+                  onClick={() => dispatchTray({ type: 'show_items' })}
+                />
+              </div>
+            ) : null}
+            {trayMode && trayModeItem ? (
+              <div
+                data-debug-id="conversation-composer-tray-mode"
+                className="mb-2 flex min-w-0 items-center gap-2 rounded-xl bg-warning-soft py-1 pl-2.5 pr-1 text-[13px] text-warning"
+              >
+                <Icon name={trayMode.kind === 'answer' ? 'chat' : 'pencil'} size={14} className="shrink-0" />
+                <span className="min-w-0 flex-1 truncate">
+                  {TRAY_MODE_COPY[trayMode.kind].banner}{' '}
+                  <strong className="font-semibold">
+                    <VaultText value={trayModeItem.title} fallback="this task" />
+                  </strong>
+                </span>
+                <button
+                  type="button"
+                  aria-label="Cancel"
+                  data-debug-id="conversation-composer-tray-mode-cancel"
+                  onClick={() => dispatchTray({ type: 'cancel_mode' })}
+                  className="grid h-8 w-8 shrink-0 place-items-center rounded-full hover:bg-surface-raised"
+                >
+                  <Icon name="close" size={14} />
+                </button>
+              </div>
+            ) : null}
             {/* REQ-LAY-2: desktop only (REQ-LAY-3: no chips row on mobile). Bridge/project chips,
                 then the runtime StatusDot (start/stop menu) at the right end of the row. */}
             {!isMobile ? (
@@ -3012,7 +3126,39 @@ export function AgentChatPane({
           <div aria-hidden="true" className="ui-frost-tail" />
           <AgentActivityBubbles instanceId={agentInstanceId} />
           <PinnedShellRuns sessions={pinnedRuns} />
-          {renderComposer()}
+          {trayNotice ? (
+            <div className="pointer-events-none mb-2 flex justify-center px-3">
+              <div
+                role="status"
+                data-debug-id="conversation-tray-notice"
+                className="ui-liquid-glass max-w-full truncate rounded-full px-4 py-1.5 text-[13px] text-primary"
+              >
+                {trayNotice}
+              </div>
+            </div>
+          ) : null}
+          {showTray ? (
+            <div
+              data-debug-id="conversation-action-tray"
+              className={isMobile ? 'w-full px-3 pt-2 ui-float-dock-pad' : 'mx-auto w-full max-w-4xl px-3 pt-2 pb-4 sm:px-0'}
+            >
+              <ActionTray
+                items={trayItemList}
+                mobile={isMobile}
+                onShowComposer={() => {
+                  dispatchTray({ type: 'show_composer' });
+                  requestAnimationFrame(() => textareaRef.current?.focus());
+                }}
+                onStartMode={(kind, item) => {
+                  setError('');
+                  dispatchTray({ type: 'start_mode', kind, cardId: item.card_id });
+                  requestAnimationFrame(() => textareaRef.current?.focus());
+                }}
+              />
+            </div>
+          ) : (
+            renderComposer()
+          )}
         </div>
       </div>
 
