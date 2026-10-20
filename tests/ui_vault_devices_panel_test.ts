@@ -65,14 +65,18 @@ test('the last approver cannot be revoked; a device the log revoked has no revok
   const hub = new FakeHub();
   const a = await newBrowser();
   const b = await newBrowser();
+  const c = await newBrowser();
   await hub.genesis(a, 'Laptop');
   await hub.addBrowser(a, b, 'Phone');
-  const bridge = await hub.addBridge(a, 'brg_1', 'build-box');
+  await hub.addBrowser(a, c, 'Tablet');
+  await hub.addBridge(a, 'brg_1', 'build-box');
+  // A revokes B; C remains, so the last-approver guard allows it.
   await hub.revoke(a, b.deviceId);
-  const rows = await buildDeviceRows(await hub.chain(), bridge.deviceId);
+  // Seen from C, revoking A would leave C as the only approver.
+  const rows = await buildDeviceRows(await hub.chain(), c.deviceId);
   const rowA = rows.find((r) => r.deviceId === a.deviceId)!;
   assert.equal(rowA.canRevoke, false);
-  assert.match(rowA.revokeBlockedReason, /Last approver/);
+  assert.match(rowA.revokeBlockedReason, /Only other approver/);
   const rowB = rows.find((r) => r.deviceId === b.deviceId)!;
   assert.equal(rowB.status, 'revoked');
   assert.doesNotMatch(html(rows), new RegExp(`settings-device-revoke-btn-${b.deviceId}`));
