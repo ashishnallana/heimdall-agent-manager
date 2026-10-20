@@ -24,7 +24,7 @@
  * **There is no create or edit route to reach from here (REQ-UI-15).** The single
  * mutable field, `server_port`, is a menu verb plus the existing `SetShellPortDialog`.
  */
-import React from 'react';
+import React, { Suspense } from 'react';
 import {
   ActionButton,
   Alert,
@@ -49,7 +49,6 @@ import {
   type ShellSession,
 } from '../../api/endpoints/shells';
 import { ShellLogViewer } from './ShellLogViewer';
-import { ShellTerminalPane } from './ShellTerminalPane';
 import { SetShellPortDialog } from './SetShellPortDialog';
 import { buildRouteHash } from '../../utils/appLocation';
 // Reused rather than duplicated: `useActionCatalog` resolves instance / agent /
@@ -88,6 +87,9 @@ import {
   verbsForSession,
   type ShellVerb,
 } from './shellModel';
+
+// xterm stays out of the entry chunk until a shell pane mounts.
+const ShellTerminalPane = React.lazy(() => import('./ShellTerminalPane').then((m) => ({ default: m.ShellTerminalPane })));
 
 /* ------------------------------------------------------------------ *
  * ResizeObserver-based wide detection (same as ActionDetail)
@@ -735,7 +737,9 @@ export function ShellDetailBody({
                 In the desktop two-pane layout ShellListPage renders <ShellDetailPane
                 sessionId={selectedId}> unkeyed, so selecting a different row swaps `record`
                 through this component instead of remounting it. */}
-            <ShellTerminalPane key={record.session_id} session={record} />
+            <Suspense fallback={null}>
+              <ShellTerminalPane key={record.session_id} session={record} />
+            </Suspense>
           </div>
         ) : (
           /* showSessionVerbs={false}: this page's header already carries Restart and

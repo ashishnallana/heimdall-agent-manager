@@ -1,7 +1,9 @@
-import { useEffect, useRef, useState } from 'react';
+import { Suspense, lazy, useEffect, useRef, useState } from 'react';
 import { Button, Modal, ModalBody, ModalFooter, Spinner, StatusPill } from '@ui';
-import AgentPaneComposerPanel from '../chat/AgentPaneComposerPanel';
 import { type ProviderSetupResponse, type ProviderTestRunResponse, providerSetupApi } from './providerSetupApi';
+
+// xterm stays out of the entry chunk until the test-run terminal mounts.
+const AgentPaneComposerPanel = lazy(() => import('../chat/AgentPaneComposerPanel'));
 
 export interface ProviderTestTarget { provider: string; providerLabel: string; modelId: string; modelLabel: string; binaryPath: string }
 export interface ProviderTestRunModalProps { setup: ProviderSetupResponse; target: ProviderTestTarget; onClose: () => void }
@@ -66,7 +68,9 @@ export function ProviderTestRunModal({ setup, target, onClose }: ProviderTestRun
         </div>
         {run?.agent_instance_id ? (
           <div data-debug-id="provider-test-run-output" className="h-80 overflow-hidden rounded-xl border border-subtle bg-black">
-            <AgentPaneComposerPanel agentInstanceId={run.agent_instance_id} isExpanded isActiveTab runtimeStatus={state === 'detecting' ? 'running' : state} hideHeader className="h-full" />
+            <Suspense fallback={null}>
+              <AgentPaneComposerPanel agentInstanceId={run.agent_instance_id} isExpanded isActiveTab runtimeStatus={state === 'detecting' ? 'running' : state} hideHeader className="h-full" />
+            </Suspense>
           </div>
         ) : <div className="flex h-80 items-center justify-center rounded-xl border border-subtle bg-black text-sm text-muted"><Spinner size="sm" />&nbsp; Waiting for bridge…</div>}
         {state === 'awaiting_validation' ? <div data-debug-id="provider-test-awaiting-validation" className="rounded-xl border border-success/30 bg-success-soft p-3 text-sm text-primary">The agent called <code className="font-mono text-success">start-success</code>. Inspect the live terminal, then validate the run. It remains alive until you do.</div> : null}
