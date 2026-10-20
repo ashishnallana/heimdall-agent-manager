@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 test('REQ-EXPIRY-UI-3: isMemoryExpired accurately detects past ISO timestamps', async () => {
-  const { isMemoryExpired } = await import('../src/ui/utils/expiry.ts');
+  const { isMemoryExpired } = await import('../src/ui/components/memory/memoryModel.ts');
 
   // Past timestamp -> true
   assert.equal(isMemoryExpired({ expires_at: '2020-01-01T00:00:00.000Z' }), true);
@@ -33,7 +33,7 @@ test('REQ-EXPIRY-UI-3: isMemoryExpired accurately detects past ISO timestamps', 
 });
 
 test('REQ-EXPIRY-UI-3: isCardExpired accurately detects past ISO timestamps', async () => {
-  const { isCardExpired } = await import('../src/ui/utils/expiry.ts');
+  const { isCardExpired } = await import('../src/ui/components/cards/CardsPanel.tsx');
 
   // Past timestamp -> true
   assert.equal(isCardExpired({ ttl_at: '2020-01-01T00:00:00.000Z' }), true);
@@ -56,7 +56,7 @@ test('REQ-EXPIRY-UI-3: isCardExpired accurately detects past ISO timestamps', as
 });
 
 test('REQ-EXPIRY-UI-3: Expired pending memories are excluded from proposals list and count, unexpired remain visible', async () => {
-  const { isMemoryExpired } = await import('../src/ui/utils/expiry.ts');
+  const { isMemoryExpired } = await import('../src/ui/components/memory/memoryModel.ts');
 
   const memories = [
     {
@@ -130,7 +130,7 @@ test('REQ-EXPIRY-UI-3: Expired pending memories are excluded from proposals list
 });
 
 test('REQ-EXPIRY-UI-3: Expired pending action cards are excluded from pending cards list and pendingCount, unexpired remain visible', async () => {
-  const { isCardExpired } = await import('../src/ui/utils/expiry.ts');
+  const { isCardExpired } = await import('../src/ui/components/cards/CardsPanel.tsx');
 
   const cards = [
     {

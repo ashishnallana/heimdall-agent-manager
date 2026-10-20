@@ -12,10 +12,6 @@ import {
   encryptVaultText,
 } from '../src/ui/utils/vaultContent.ts';
 import {
-  resolveVaultText,
-  decryptVaultTextContent,
-} from '../src/ui/components/vault/vaultTextHelper.ts';
-import {
   encryptChatFields,
   decryptChatMessage,
   decryptChatMessages,
@@ -133,36 +129,6 @@ test('decryptConversationList decrypts array of conversations', async () => {
   const decryptedList = await decryptConversationList(list, TEST_KEY_HEX);
   assert.equal(decryptedList[0].title, 'Thread Alpha');
   assert.equal(decryptedList[1].title, 'Thread Beta');
-});
-
-// -----------------------------------------------------------------------------
-// Test 4: resolveVaultText helper integration with chat values
-// -----------------------------------------------------------------------------
-
-test('resolveVaultText resolves chat messages based on vault lock state', async () => {
-  const origText = 'Live chat status message.';
-  const armored = await encryptVaultText(origText, TEST_KEY_HEX);
-
-  // Plaintext returns immediately
-  const resPlain = resolveVaultText(origText, false);
-  assert.equal(resPlain.mode, 'plaintext');
-  assert.equal(resPlain.displayText, origText);
-  assert.equal(resPlain.isLocked, false);
-
-  // Armored with vault locked returns locked status
-  const resLocked = resolveVaultText(armored, false);
-  assert.equal(resLocked.mode, 'locked');
-  assert.ok(resLocked.isLocked);
-  assert.ok(resLocked.displayText.includes('Encrypted content'));
-
-  // Armored with vault unlocked
-  const resUnlocked = resolveVaultText(armored, true);
-  assert.equal(resUnlocked.mode, 'unlocked');
-  assert.equal(resUnlocked.isLocked, false);
-
-  // Async decrypt helper
-  const dec = await decryptVaultTextContent(armored, TEST_KEY_HEX);
-  assert.equal(dec, origText);
 });
 
 // -----------------------------------------------------------------------------

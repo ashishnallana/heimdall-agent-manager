@@ -51,7 +51,7 @@ test('Command Palette: group headers and hints correctly format with VaultText',
 // Section 3: Issues Page & Hub issue_description_preview
 // -----------------------------------------------------------------------------
 
-import { decryptIssueRecord, type IssuePayload } from '../src/ui/utils/vaultIssues.ts';
+import { decryptIssueRecord, type Issue as IssuePayload } from '../src/ui/api/endpoints/issues.ts';
 
 test('Hub issue_description_preview logic preserves full vault armored ciphertext', async () => {
   const secretDescription = 'Very long secret description explaining the defect in extreme detail with steps to reproduce.';
