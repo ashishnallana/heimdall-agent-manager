@@ -1,9 +1,11 @@
 package taskv2
 
+import "base:runtime"
+import "core:c"
 import "core:fmt"
 import "core:mem"
-import "core:os"
 import "core:strings"
+import "core:sync"
 import "core:testing"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
@@ -44,29 +46,88 @@ fixture_advance :: proc(fx: ^Fixture, seconds: i64) {
 	fx.clock_state.unix_seconds += seconds
 }
 
-test_db_path :: proc(tag: string) -> string {
-	// Windows does not normally define HOME. Use its existing temporary
-	// directory so the engine's file-backed fixtures can run there too.
-	when ODIN_OS == .Windows {
-		temp_dir := os.get_env("TEMP", context.temp_allocator)
-		return fmt.aprintf("%s/taskv2_%s_%d.db", temp_dir, tag, os.get_pid())
-	}
-	home := os.get_env("HOME", context.temp_allocator)
-	dir := fmt.tprintf("%s/.cache/heimdall-tests", home)
-	os.make_directory(dir)
-	return fmt.aprintf("%s/taskv2_%s_%d.db", dir, tag, os.get_pid())
+// SQLite online-backup binding (test-only; mirrors the sqlite3 foreign import in
+// hub/repository/sqlite/conn.odin) used to clone the migrated template.
+when ODIN_OS == .Windows {
+	foreign import sqlite3_backup_lib "system:sqlite3.lib"
+} else {
+	foreign import sqlite3_backup_lib "system:sqlite3"
 }
 
-// fixture_open opens a fresh migrated database (or one stopped before `stop_before`).
+@(default_calling_convention="c")
+foreign sqlite3_backup_lib {
+	sqlite3_backup_init :: proc(dst: sqlite.sqlite3, dname: cstring, src: sqlite.sqlite3, sname: cstring) -> rawptr ---
+	sqlite3_backup_step :: proc(b: rawptr, n: c.int) -> c.int ---
+	sqlite3_backup_finish :: proc(b: rawptr) -> c.int ---
+}
+
+// Process-global migrated template: the REAL migrations run once per process
+// (a schema/migration error still fails every DB test); each test then gets an
+// independent private copy via the SQLite backup API.
+fixture_template_once:  sync.Once
+fixture_template_conn:  sqlite.Conn
+fixture_template_ok:    bool
+fixture_template_err:   string
+fixture_template_mutex: sync.Mutex
+
+fixture_template_build :: proc() {
+	context.allocator = runtime.heap_allocator()
+	conn, ok, err := sqlite.open(":memory:")
+	if !ok {
+		fixture_template_err = fmt.aprintf("open: %s", err.message)
+		return
+	}
+	fixture_template_conn = conn
+	mig_ok, mig_err := sqlite.run_migrations(&fixture_template_conn)
+	if !mig_ok {
+		fixture_template_err = fmt.aprintf("%s", mig_err.message)
+		return
+	}
+	fixture_template_ok = true
+}
+
+// fixture_clone_migrated_into copies the migrated template into an open `dst`.
+fixture_clone_migrated_into :: proc(t: ^testing.T, dst: ^sqlite.Conn) -> bool {
+	sync.once_do(&fixture_template_once, fixture_template_build)
+	if !testing.expect(t, fixture_template_ok, fmt.tprintf("fixture template migrations: %s", fixture_template_err)) do return false
+	sync.mutex_guard(&fixture_template_mutex)
+	b := sqlite3_backup_init(dst.db, "main", fixture_template_conn.db, "main")
+	if !testing.expect(t, b != nil, "backup init") do return false
+	step_rc := sqlite3_backup_step(b, -1)
+	fin_rc := sqlite3_backup_finish(b)
+	ok := testing.expect(t, step_rc == sqlite.SQLITE_DONE, "backup step")
+	ok = testing.expect(t, fin_rc == sqlite.SQLITE_OK, "backup finish") && ok
+	return ok
+}
+
+// fixture_clone_migrated returns a private in-memory migrated database.
+fixture_clone_migrated :: proc(t: ^testing.T) -> (sqlite.Conn, bool) {
+	conn, ok, err := sqlite.open(":memory:")
+	if !testing.expect(t, ok, fmt.tprintf("open: %s", err.message)) do return conn, false
+	if !fixture_clone_migrated_into(t, &conn) {
+		sqlite.close(&conn)
+		return sqlite.Conn{}, false
+	}
+	return conn, true
+}
+
+// fixture_open opens a fresh migrated database (a private clone of the migrated
+// template) or, when `stop_before` is set, a fresh database that really runs the
+// migrations up to `stop_before`.
 fixture_open :: proc(t: ^testing.T, tag: string, stop_before := "") -> (^Fixture, bool) {
 	fx := new(Fixture)
-	fx.path = test_db_path(tag)
-	os.remove(fx.path)
-	conn, ok, err := sqlite.open(fx.path)
-	if !testing.expect(t, ok, fmt.tprintf("open: %s", err.message)) do return fx, false
-	fx.conn = conn
-	mig_ok, mig_err := sqlite.run_migrations(&fx.conn, stop_before = stop_before)
-	if !testing.expect(t, mig_ok, fmt.tprintf("migrations: %s", mig_err.message)) do return fx, false
+	fx.path = ""
+	if stop_before == "" {
+		conn, ok := fixture_clone_migrated(t)
+		if !ok do return fx, false
+		fx.conn = conn
+	} else {
+		conn, ok, err := sqlite.open(":memory:")
+		if !testing.expect(t, ok, fmt.tprintf("open: %s", err.message)) do return fx, false
+		fx.conn = conn
+		mig_ok, mig_err := sqlite.run_migrations(&fx.conn, stop_before = stop_before)
+		if !testing.expect(t, mig_ok, fmt.tprintf("migrations: %s", mig_err.message)) do return fx, false
+	}
 	fixture_wire(fx)
 	return fx, true
 }
@@ -88,8 +149,6 @@ fixture_wire :: proc(fx: ^Fixture) {
 
 fixture_close :: proc(fx: ^Fixture) {
 	sqlite.close(&fx.conn)
-	os.remove(fx.path)
-	delete(fx.path)
 	free(fx)
 	if context.allocator.procedure == mem.tracking_allocator_proc && context.allocator.data != nil {
 		track := (^mem.Tracking_Allocator)(context.allocator.data)
@@ -171,8 +230,8 @@ INSERT INTO task_votes(task_id, reviewer_agent_instance_id, chain_id, owner_user
 
 // test_migration_round_trip: a fixture DB with EVERY legacy status, a `user`
 // reviewer ref, an instance reviewer ref (chain default) and vault-armored text
-// migrates to the v2 schema exactly as plan §1 lists, the legacy columns/tables
-// are gone, and every task's cached state equals the fold of its events.
+// is seeded on a fresh, really-migrated-to-089 database; the 090 cutover REFUSES
+// legacy dependency data (never reinterprets it) and installs nothing partially.
 @(test)
 test_migration_round_trip :: proc(t: ^testing.T) {
  fx, ok := fixture_open(t, "legacy_cutover", stop_before = "090_task_v2.sql")
@@ -183,7 +242,6 @@ test_migration_round_trip :: proc(t: ^testing.T) {
  testing.expect(t, !migrated && err.code != .None, "legacy dependency data requires an explicit reset; never reinterpret it")
  _ = sqlite.exec(&fx.conn, "ROLLBACK;")
  testing.expect(t, !sqlite.table_column_exists(&fx.conn, "tasks", "workflow_run_id"), "cutover did not partly install generated task identity")
-
 }
 
 // test_owner_immutable_on_v2_tables: every new table refuses an owner change.
