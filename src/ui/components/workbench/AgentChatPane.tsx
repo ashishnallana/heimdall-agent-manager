@@ -218,6 +218,8 @@ function errMsg(err: any, fallback: string): string {
 
 const EMPTY_TIMESTAMP: ChatTimestamp = { label: '', iso: '' };
 const EMPTY_DELIVERY: ChatDeliveryStatus = { glyph: '', label: '', tone: '' };
+/** Composer width below which the model pill shows only the provider icon. */
+const COMPACT_MODEL_PILL_WIDTH = 300;
 
 function bridgeId(bridge: any): string {
   return String(bridge?.bridge_id || bridge?.bridgeId || bridge?.id || '');
@@ -952,20 +954,22 @@ export function AgentChatPane({
     setError('');
   }, [routeInstanceId]);
 
+  // The model pill keeps its label down to phone widths (it truncates); only a composer
+  // narrower than a small phone collapses it to the provider icon.
   useEffect(() => {
     const el = composerContainerRef.current;
     if (!el || typeof ResizeObserver === 'undefined') return;
     const checkWidth = () => {
       if (typeof el.getBoundingClientRect === 'function') {
         const rect = el.getBoundingClientRect();
-        setIsSmallComposer(rect.width > 0 && rect.width < 540);
+        setIsSmallComposer(rect.width > 0 && rect.width < COMPACT_MODEL_PILL_WIDTH);
       }
     };
     checkWidth();
     const observer = new ResizeObserver((entries) => {
       for (const entry of entries) {
         const width = entry.contentRect.width;
-        setIsSmallComposer(width > 0 && width < 540);
+        setIsSmallComposer(width > 0 && width < COMPACT_MODEL_PILL_WIDTH);
       }
     });
     observer.observe(el);
