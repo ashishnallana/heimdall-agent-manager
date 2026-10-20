@@ -398,12 +398,41 @@ on_instance_activity :: proc(svc: ^Service, instance_id, activity_status: string
 }
 
 // touch_instance is the implicit heartbeat for ANY instance-token API call.
-// Cheap when the instance holds nothing (one read, no UoW).
+// Cheap when the instance holds nothing (one read, no UoW). With the timer
+// thread running, a due heartbeat is only queued here and written by
+// drain_pending_touches: the write needs the global UoW mutex, and taking it on
+// the auth path made every agent call (even chat.read) queue behind whatever
+// long transaction held it — and while it was held no heartbeat landed, so
+// every call passed the 30 s throttle and joined the queue.
 touch_instance :: proc(svc: ^Service, instance_id: string) {
 	if svc == nil || svc.repo == nil || instance_id == "" do return
 	lease, held, _ := iface.taskchain_get_lease_by_holder(svc.repo, instance_id)
 	if !held do return
+	if now_ms(svc.clock) - to_ms(lease.last_beat_at) < IMPLICIT_HEARTBEAT_MIN_SECONDS * 1000 do return
+	if sync.atomic_load(&svc.touch_async) {
+		sync.mutex_lock(&svc.state_mutex)
+		defer sync.mutex_unlock(&svc.state_mutex)
+		if svc.pending_touches == nil do svc.pending_touches = make(map[string]struct{}, runtime.heap_allocator())
+		if instance_id not_in svc.pending_touches do svc.pending_touches[strings.clone(instance_id, runtime.heap_allocator())] = {}
+		return
+	}
 	touch_lease(svc, lease)
+}
+
+// drain_pending_touches writes the heartbeats touch_instance queued (timer
+// thread, once per tick). The set is swapped out under state_mutex and the
+// UoWs run after it is released, so state_mutex is never held across one.
+drain_pending_touches :: proc(svc: ^Service) {
+	sync.mutex_lock(&svc.state_mutex)
+	pending := svc.pending_touches
+	svc.pending_touches = nil
+	sync.mutex_unlock(&svc.state_mutex)
+	if pending == nil do return
+	for instance_id in pending {
+		if lease, held, _ := iface.taskchain_get_lease_by_holder(svc.repo, instance_id); held do touch_lease(svc, lease)
+		delete(instance_id, runtime.heap_allocator())
+	}
+	delete(pending)
 }
 
 // IMPLICIT_HEARTBEAT_MIN_SECONDS throttles implicit heartbeats (review S3): a

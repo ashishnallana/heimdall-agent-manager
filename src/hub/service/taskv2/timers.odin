@@ -454,6 +454,7 @@ fire_blocked_realert :: proc(svc: ^Service, u: ^Uow, t: Timer) -> Fire_Result {
 start_timer_thread :: proc(svc: ^Service) -> ^thread.Thread {
 	t := thread.create(timer_thread_proc)
 	t.data = rawptr(svc)
+	sync.atomic_store(&svc.touch_async, true)
 	thread.start(t)
 	return t
 }
@@ -475,6 +476,7 @@ timer_thread_proc :: proc(t: ^thread.Thread) {
 		jump := now - last_tick > LEASE_TTL_SECONDS * 1000
 		last_tick = now
 		_ = fire_due(svc, now, jump)
+		drain_pending_touches(svc)
 		// Per-tick scratch (wake keys, JSON) lives on the temp allocator.
 		free_all(context.temp_allocator)
 	}

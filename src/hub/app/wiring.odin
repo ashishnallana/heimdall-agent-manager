@@ -190,6 +190,13 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 	graph.db = db
 	// Billing uses its own transactional connection; tolerate brief writer contention.
 	if !sqlite.exec(&graph.db, "PRAGMA busy_timeout = 5000;") do return false, "failed to configure database busy timeout"
+	// WAL (persistent, per database file): readers on the other connections no
+	// longer block on — or get SQLITE_BUSY from — a committing writer, and a
+	// commit is one WAL append instead of journal + db fsyncs. NORMAL is
+	// durable across process crashes in WAL mode; only an OS crash can drop
+	// the last commits. An in-memory test db reports "memory" and is unaffected.
+	if !sqlite.exec(&graph.db, "PRAGMA journal_mode = WAL;") do return false, "failed to enable WAL journal mode"
+	if !sqlite.exec(&graph.db, "PRAGMA synchronous = NORMAL;") do return false, "failed to configure database synchronous mode"
 
 	migrations_ok, migration_err := sqlite.run_migrations(&graph.db, config.migrations_dir)
 	if !migrations_ok do return false, migration_err.message
