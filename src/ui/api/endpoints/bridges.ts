@@ -93,9 +93,9 @@ export async function fetchBridgeEnrollmentStatus(bridgeId: string): Promise<Bri
  * One bridge row (`GET /bridges/{id}`): status, enrollment_state, vault_status, ….
  * Resolves `null` when the hub does not know the bridge (404).
  */
-export async function fetchBridgeRow(bridgeId: string): Promise<Record<string, any> | null> {
+export async function fetchBridgeRow(bridgeId: string, signal?: AbortSignal): Promise<Record<string, any> | null> {
   try {
-    const res = await cookieJsonFetch(`/bridges/${encodeURIComponent(bridgeId)}`);
+    const res = await cookieJsonFetch(`/bridges/${encodeURIComponent(bridgeId)}`, signal ? { signal } : undefined);
     const data = (res as any)?.data ?? res;
     return data && typeof data === 'object' ? data : null;
   } catch (err: any) {

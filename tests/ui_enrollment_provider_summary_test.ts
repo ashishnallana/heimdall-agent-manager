@@ -10,6 +10,7 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import {
+  RECONNECT_REQUEST_TIMEOUT_MS,
   RECONNECT_TIMEOUT_MS,
   bridgeReconnectReady,
   bridgeStatusPill,
@@ -22,7 +23,9 @@ import {
   providerEnableChanges,
   reconnectSecondsLeft,
   reconnectStage,
+  startReconnectWait,
   type ProviderSummaryInput,
+  type ReconnectTimers,
 } from '../src/ui/components/providers/providerSummaryModel.ts';
 
 const read = (rel: string) => fs.readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
@@ -30,6 +33,92 @@ const read = (rel: string) => fs.readFileSync(fileURLToPath(new URL(rel, import.
 function provider(name: string, over: Partial<ProviderSummaryInput> = {}): ProviderSummaryInput {
   return { provider: name, display_name: name[0].toUpperCase() + name.slice(1), state: 'present', enabled: false, models: [{ state: 'active' }], ...over };
 }
+
+/** Timers driven by hand: advance(ms) fires due callbacks in time order. */
+function fakeTimers(): ReconnectTimers & { advance(ms: number): Promise<void>; pending(): number } {
+  let clock = 0;
+  let seq = 0;
+  const due = new Map<number, { at: number; fn: () => void; every: number }>();
+  const add = (fn: () => void, ms: number, every: number) => { due.set(++seq, { at: clock + ms, fn, every }); return seq; };
+  const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
+  return {
+    now: () => clock,
+    setTimeout: (fn, ms) => add(fn, ms, 0),
+    clearTimeout: (h) => { due.delete(h as number); },
+    setInterval: (fn, ms) => add(fn, ms, ms),
+    clearInterval: (h) => { due.delete(h as number); },
+    pending: () => due.size,
+    async advance(ms) {
+      const end = clock + ms;
+      for (;;) {
+        await flush();
+        const next = [...due.entries()].filter(([, t]) => t.at <= end).sort((a, b) => a[1].at - b[1].at || a[0] - b[0])[0];
+        if (!next) break;
+        const [id, t] = next;
+        clock = t.at;
+        if (t.every) t.at += t.every; else due.delete(id);
+        t.fn();
+      }
+      clock = end;
+      await flush();
+    },
+  };
+}
+
+test('reconnect wait: a GET that never settles cannot freeze the deadline, and only one is ever in flight', async () => {
+  const timers = fakeTimers();
+  let started = 0;
+  let inFlight = 0;
+  let maxInFlight = 0;
+  let aborted = 0;
+  let now = 0;
+  let ready = false;
+  const stop = startReconnectWait({
+    timers,
+    poll: (signal) => {
+      started += 1;
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      signal.addEventListener('abort', () => { aborted += 1; inFlight -= 1; });
+      return new Promise<boolean>(() => {}); // stalled connection: never settles, even on abort
+    },
+    onReady: () => { ready = true; },
+    onTick: (ms) => { now = ms; },
+  });
+  await timers.advance(RECONNECT_TIMEOUT_MS + 2000);
+  assert.equal(now, RECONNECT_TIMEOUT_MS + 2000, 'the clock kept ticking while every GET hung');
+  assert.equal(reconnectStage(ready, 0, now), 'timed-out', 'Retry/Skip become available after ~90 s');
+  assert.equal(maxInFlight, 1, 'polls are serialized');
+  assert.ok(started >= 2 && started <= Math.ceil(RECONNECT_TIMEOUT_MS / RECONNECT_REQUEST_TIMEOUT_MS) + 1, `bounded poll count, got ${started}`);
+  assert.equal(aborted, started - inFlight, 'every stalled GET but the current one was aborted');
+  stop();
+  assert.equal(inFlight, 0, 'stop() aborts the in-flight GET');
+  assert.equal(timers.pending(), 0, 'stop() clears the clock and the poll timers');
+});
+
+test('reconnect wait: a ready poll wins, failed polls retry, and nothing runs after stop()', async () => {
+  const timers = fakeTimers();
+  const answers: Array<boolean | Error> = [new Error('offline'), false, true];
+  let polls = 0;
+  let readyCalls = 0;
+  const stop = startReconnectWait({
+    timers,
+    poll: async () => {
+      const answer = answers[polls++];
+      if (answer instanceof Error) throw answer;
+      return answer;
+    },
+    onReady: () => { readyCalls += 1; },
+    onTick: () => {},
+  });
+  await timers.advance(10_000);
+  assert.equal(polls, 3);
+  assert.equal(readyCalls, 1);
+  stop();
+  await timers.advance(10_000);
+  assert.equal(polls, 3, 'no polls after ready + stop');
+  assert.equal(timers.pending(), 0);
+});
 
 test('reconnect is ready only when the bridge is online AND enrolled', () => {
   assert.equal(bridgeReconnectReady({ status: 'online', enrollment_state: 'enrolled' }), true);
@@ -125,6 +214,8 @@ test('DeviceApprovalPage: bridge approvals wait for reconnect, then the compact 
   assert.match(source, /Skip — configure later in Settings → Providers/);
   assert.match(source, /variant="compact"/);
   assert.match(source, /useListBridgesQuery\(\)/);
+  assert.match(source, /startReconnectWait\(\{/, 'the countdown does not wait on the poll');
+  assert.match(source, /fetchBridgeRow\(bridgeId, signal\)/, 'reconnect GETs are abortable');
   assert.match(source, /data-debug-id="device-approval-home-btn"[\s\S]*Go to home/);
   assert.match(source, /data-debug-id="device-approval-another-btn"[^>]*onClick=\{reset\}/);
   const browserBranch = source.slice(source.indexOf('if (browser) {'), source.indexOf('const bridgeInfo = info as BridgeCodeInfo;'));

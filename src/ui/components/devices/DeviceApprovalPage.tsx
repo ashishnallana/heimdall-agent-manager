@@ -32,7 +32,7 @@ import { fetchBridgeEnrollmentStatus, fetchBridgeRow, fetchBridgeUnsealTarget, u
 import { useListBridgesQuery } from '../../api/endpoints/bridgeSupport';
 import { enrollmentPendingOutcome, ENROLLMENT_PENDING_FALLBACK_SECONDS } from '../enrollment/bridgeEnrollmentCompletion';
 import ProviderSetupSurface from '../providers/ProviderSetupSurface';
-import { RECONNECT_POLL_MS, bridgeReconnectReady, reconnectSecondsLeft, reconnectStage } from '../providers/providerSummaryModel';
+import { bridgeReconnectReady, reconnectSecondsLeft, reconnectStage, startReconnectWait } from '../providers/providerSummaryModel';
 import { fingerprintFor } from '../../utils/deviceIdentity';
 import { buildBridgeApproval, buildBrowserApproval, checkBridgeCodeInfo, checkBrowserCodeInfo, type PairedBrowser } from '../../utils/vaultDeviceFlows';
 import { acceptedPairOrigins, derivePairKeys, isPairHubOrigin, isPairSalt, normalizePairCode, pairApproveMac, type PairKeys } from '../../utils/vaultPairing';
@@ -195,19 +195,12 @@ function BridgeReconnectWait({ bridgeId, label, onReady, onSkip }: { bridgeId: s
 
   useEffect(() => {
     if (stage !== 'waiting') return;
-    let cancelled = false;
-    const tick = async () => {
-      try {
-        const row = await fetchBridgeRow(bridgeId);
-        if (!cancelled && bridgeReconnectReady(row)) setPolledReady(true);
-      } catch {
-        // transient; the WS event or the next poll still applies
-      }
-      if (!cancelled) setNow(Date.now());
-    };
-    void tick();
-    const timer = setInterval(() => void tick(), RECONNECT_POLL_MS);
-    return () => { cancelled = true; clearInterval(timer); };
+    // The countdown runs on its own clock, so a stalled GET cannot hide Retry/Skip.
+    return startReconnectWait({
+      poll: async (signal) => bridgeReconnectReady(await fetchBridgeRow(bridgeId, signal)),
+      onReady: () => setPolledReady(true),
+      onTick: setNow,
+    });
   }, [bridgeId, startedAt, stage]);
 
   useEffect(() => { if (stage === 'ready') onReady(); }, [stage, onReady]);

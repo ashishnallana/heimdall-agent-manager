@@ -78,8 +78,9 @@ export function apiUrl(path: string): string {
 // GET `/api/v1/...` with cookie auth. Returns the unwrapped `data` array if the
 // response is a list, otherwise the parsed body. Throws on non-2xx so RTK Query
 // queryFn maps it to an error state.
-export async function cookieJsonFetch(path: string): Promise<any> {
-  const res = await fetch(apiUrl(path), { credentials: 'include' });
+// `init` carries an optional AbortSignal so a caller can bound a request that stalls.
+export async function cookieJsonFetch(path: string, init?: RequestInit): Promise<any> {
+  const res = await fetch(apiUrl(path), { ...init, credentials: 'include' });
   if (!res.ok) throw await errorFromResponse(res);
   let rawText: string;
   try {

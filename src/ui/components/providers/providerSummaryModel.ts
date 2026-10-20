@@ -6,6 +6,10 @@
 export const RECONNECT_TIMEOUT_MS = 90_000;
 /** Polling fallback for the reconnect wait, next to the bridge status_changed WS event. */
 export const RECONNECT_POLL_MS = 2000;
+/** A reconnect poll that has not settled by then is aborted and counted as "not yet". */
+export const RECONNECT_REQUEST_TIMEOUT_MS = 5000;
+/** The countdown clock ticks on its own, never waiting for a poll to settle. */
+export const RECONNECT_CLOCK_MS = 1000;
 /** How long enrollment-mode discovery keeps retrying while the bridge is still offline. */
 export const DISCOVERY_RETRY_TIMEOUT_MS = 90_000;
 export const DISCOVERY_RETRY_MS = 2000;
@@ -46,6 +50,91 @@ export function reconnectStage(ready: boolean, startedAtMs: number, nowMs: numbe
 /** Whole seconds left in the reconnect wait (never negative). */
 export function reconnectSecondsLeft(startedAtMs: number, nowMs: number, timeoutMs = RECONNECT_TIMEOUT_MS): number {
   return Math.max(0, Math.ceil((startedAtMs + timeoutMs - nowMs) / 1000));
+}
+
+/** The timers startReconnectWait uses; injectable so tests can drive time by hand. */
+export interface ReconnectTimers {
+  now(): number;
+  setTimeout(fn: () => void, ms: number): unknown;
+  clearTimeout(handle: unknown): void;
+  setInterval(fn: () => void, ms: number): unknown;
+  clearInterval(handle: unknown): void;
+}
+
+const realTimers: ReconnectTimers = {
+  now: () => Date.now(),
+  setTimeout: (fn, ms) => setTimeout(fn, ms),
+  clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+  setInterval: (fn, ms) => setInterval(fn, ms),
+  clearInterval: (handle) => clearInterval(handle as ReturnType<typeof setInterval>),
+};
+
+export interface ReconnectWaitOptions {
+  /** One readiness check (GET /bridges/{id}); must honour the signal. Rejections count as "not yet". */
+  poll: (signal: AbortSignal) => Promise<boolean>;
+  onReady: () => void;
+  /** Called on every clock tick, independent of the network, so the deadline always advances. */
+  onTick: (nowMs: number) => void;
+  timers?: ReconnectTimers;
+  pollMs?: number;
+  requestTimeoutMs?: number;
+  clockMs?: number;
+}
+
+/**
+ * REQ-ENR-2: drives the reconnect wait. The clock and the polls are independent: a
+ * stalled GET can never freeze the countdown. Polls are serialized (the next starts
+ * pollMs after the previous settles) and each is aborted after requestTimeoutMs, so
+ * at most one request is ever in flight. Returns stop(), which cancels everything.
+ */
+export function startReconnectWait(options: ReconnectWaitOptions): () => void {
+  const timers = options.timers ?? realTimers;
+  const pollMs = options.pollMs ?? RECONNECT_POLL_MS;
+  const requestTimeoutMs = options.requestTimeoutMs ?? RECONNECT_REQUEST_TIMEOUT_MS;
+  let stopped = false;
+  let inFlight: AbortController | null = null;
+  let expiry: unknown = null;
+  let nextPoll: unknown = null;
+
+  const clock = timers.setInterval(() => { if (!stopped) options.onTick(timers.now()); }, options.clockMs ?? RECONNECT_CLOCK_MS);
+
+  const runPoll = async () => {
+    nextPoll = null;
+    if (stopped) return;
+    const controller = new AbortController();
+    inFlight = controller;
+    let ready = false;
+    try {
+      // The race settles even if the poll ignores its abort signal.
+      ready = await Promise.race([
+        options.poll(controller.signal),
+        new Promise<boolean>((resolve) => {
+          expiry = timers.setTimeout(() => { controller.abort(); resolve(false); }, requestTimeoutMs);
+        }),
+      ]);
+    } catch {
+      // transient; the WS event or the next poll still applies
+    } finally {
+      timers.clearTimeout(expiry);
+      expiry = null;
+      inFlight = null;
+    }
+    if (stopped) return;
+    if (ready) {
+      options.onReady();
+      return;
+    }
+    nextPoll = timers.setTimeout(() => void runPoll(), pollMs);
+  };
+
+  void runPoll();
+  return () => {
+    stopped = true;
+    timers.clearInterval(clock);
+    if (nextPoll !== null) timers.clearTimeout(nextPoll);
+    if (expiry !== null) timers.clearTimeout(expiry);
+    inFlight?.abort();
+  };
 }
 
 /**
