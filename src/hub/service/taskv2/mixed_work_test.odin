@@ -38,7 +38,7 @@ graph_run :: proc(t: ^testing.T, fx: ^Fixture, id: string) -> domain.Work_Item_R
 	now := platform.clock_now(&fx.clock)
 	_, rok, rerr := iface.taskchain_insert_workflow_run(&fx.repo, domain.Workflow_Run{
 		run_id = domain.Workflow_Run_ID(id), chain_id = "mixed_chain", owner_user_id = "u1",
-		title = "Audit", definition_ref = "audit@1", spec_json = `{"name":"audit","stages":[]}`,
+		title = "Audit", definition_ref = "audit@1", spec_json = `{"schema":"workflow.v1","name":"audit","stages":[{"key":"review","kind":"gate","approver":"user"}]}`,
 		inputs_json = "{}", current_execution_no = 1, request_id = id, request_hash = "hash",
 		created_by_kind = "user", created_by_id = "u1", created_at = now, updated_at = now, revision = 1,
 	})

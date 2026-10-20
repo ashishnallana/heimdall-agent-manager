@@ -302,8 +302,9 @@ test_hello_stop_scope_bridge_and_fleet_only :: proc(t: ^testing.T) {
 	testing.expect(t, !wake_log_has_stop(log, "inst_coord"), "coordinator untouched")
 	// a completed chain's workers are not touched either
 	wake_log_reset(log)
-	chain.status = .Completed
-	_, _, _ = iface.taskchain_save_chain(&fx.repo, chain)
+	chain, _, _ = iface.taskchain_get_chain(&fx.repo, chain.chain_id)
+	saved, save_err := iface.taskchain_complete_work_chain(&fx.repo, chain.chain_id, chain.owner_user_id, chain.work_revision, "No work remains in this fixture", platform.clock_now(&fx.clock))
+	if !testing.expect(t, saved, save_err.message) do return
 	on_bridge_hello(&fx.svc, "br_1", []string{"inst_w1"})
 	testing.expect(t, !wake_log_has_stop(log, "inst_w1"), "closed chain: nothing stopped")
 }

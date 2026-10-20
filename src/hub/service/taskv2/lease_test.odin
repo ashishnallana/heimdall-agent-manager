@@ -239,9 +239,17 @@ test_gate_never_granted :: proc(t: ^testing.T) {
 	chain := seed_live_chain(t, fx, "chain_g")
 	seed_fleet(fx, chain, "agt_w")
 	inst := seed_instance(fx, chain, "inst_w1", "agt_w", "br_1", "idle")
-	gate := publish_task(t, fx, chain, "gate_1", kind = .Gate)
-	// The fold never makes a gate `ready` (gates are decided, not worked — M2).
-	testing.expect_value(t, gate.state, domain.Task_State.Backlog)
+	// Gates are workflow-generated; manual tickets cannot change kind.
+	_, defined, define_err := workflow_define(&fx.svc, "u1", `{"schema":"workflow.v1","name":"gate_fixture","stages":[{"key":"approve","kind":"gate","approver":"user"}]}`)
+	if !testing.expect(t, defined, define_err.message) do return
+	run, ran, run_err := workflow_run(&fx.svc, "u1", Actor{kind = ACTOR_USER, id = "u1"}, Workflow_Run_Input{chain_id = string(chain.chain_id), ref = "gate_fixture", request_id = "gate_fixture"})
+	if !testing.expect(t, ran, run_err.message) do return
+	wf, _, _ := workflow_context(&fx.svc, run.run_id, "u1")
+	tasks, _ := workflow_execution_tasks(&fx.svc, wf)
+	if !testing.expect(t, len(tasks) == 1, "one generated gate") do return
+	gate := tasks[0]
+	// A gate awaits a decision and is never ready or leased to a worker.
+	testing.expect_value(t, gate.state, domain.Task_State.In_Review)
 	_, held := lease_of(fx, "inst_w1")
 	testing.expect(t, !held, "matcher skips gates")
 	// a direct grant is refused even for a (hypothetically) ready gate
