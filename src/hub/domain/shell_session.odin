@@ -1,26 +1,5 @@
 package domain
 
-// Shell_Session is the hub-side record for a bridge-managed shell session.
-// It is THE unified session concept per REQ-SH-CONTRACT §1. (It superseded a
-// Shell_Job record, whose stack REQ-SHELL-7 deleted outright — named here only so
-// the lineage is not a mystery, not as a type you can still find.)
-//
-// REQ-SHELL-1 collapsed the model to exactly THREE kinds, sharing ONE lifecycle:
-//
-//   run    — a one-shot command with captured stdout. Agent-triggered only.
-//   shell  — an interactive PTY. User only; no stdout capture, it is a terminal.
-//   server — a long-running process with stdout and an optional exposable port.
-//
-// The former `agent` kind is GONE, not renamed. It only ever meant "key the
-// pty-host daemon by agent_instance_id instead of session_id", and agent
-// terminal panes are served by a different mechanism entirely
-// (capture_agent_pane / get_agent_pane in src/bridge/hub_runtime_client.odin),
-// so nothing consumed it. `command` became `run` and `interactive` became
-// `shell` as HARD renames — there is no back-compat requirement here, so there
-// are deliberately no alias values and no dual-accept parsing. Migration
-// 048_shell_sessions_kind_and_key.sql rewrites the stored rows.
-Shell_Session_ID :: distinct string
-
 Shell_Session_Kind :: enum {
 	Run,
 	Shell,

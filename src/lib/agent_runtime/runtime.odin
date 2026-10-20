@@ -19,8 +19,6 @@ Agent_Profile :: struct {
 	activity_detection: cfg_lib.Activity_Detection_Config,
 }
 
-Startup_Probe_Result :: struct { status: string, detail: string }
-Activity_Sample :: struct { status: string, source: string }
 
 build_agent_command :: proc(profile: Agent_Profile, model, daemon_url, agent_token, agent_instance_id: string) -> []string {
 	if strings.trim_space(model) == "" do return nil
@@ -63,77 +61,4 @@ render_starter_prompt_for_agent :: proc(profile: Agent_Profile, daemon_url, agen
 	out, _ = strings.replace_all(out, "ham-ctl start-success", "./.heimdall/bin/ham-ctl agent start-success")
 	out = strings.concatenate({out, "\n\nHeimdall runtime: use `./.heimdall/bin/ham-ctl` for CLI actions. Your agent token is `", agent_token, "` and your agent instance id is `", agent_instance_id, "`; they are also available in HEIMDALL_AGENT_TOKEN and HEIMDALL_AGENT_INSTANCE_ID."})
 	return out
-}
-
-deliver_tmux_starter_prompt :: proc(profile: Agent_Profile, daemon_url, agent_token, agent_instance_id, pane_id: string) -> bool {
-	if prompt_delivery(profile) != "tmux" do return false
-	prompt := render_starter_prompt_for_agent(profile, daemon_url, agent_token, agent_instance_id)
-	if strings.trim_space(prompt) == "" do return false
-	delay := profile.prompt_tmux_delay_ms
-	if delay <= 0 do delay = 1500
-	if delay > 0 do time.sleep(time.Duration(delay) * time.Millisecond)
-	return tmux.send_text(pane_id, prompt, profile.prompt_tmux_enter)
-}
-
-startup_probe_agent :: proc(cfg: cfg_lib.Startup_Detection_Config, pane_id: string) -> Startup_Probe_Result {
-	if !cfg.enabled do return Startup_Probe_Result{status = "ready", detail = "startup detection disabled"}
-	probe_seconds := cfg.startup_probe_seconds
-	if probe_seconds <= 0 do probe_seconds = 20
-	interval_ms := cfg.capture_interval_ms
-	if interval_ms <= 0 do interval_ms = 500
-	deadline := time.to_unix_nanoseconds(time.now()) + i64(time.Duration(probe_seconds) * time.Second)
-	last_auto_enter := i64(0)
-	for time.to_unix_nanoseconds(time.now()) < deadline {
-		if !tmux.pane_exists(pane_id) do return Startup_Probe_Result{status = "startup_failed", detail = "agent pane exited during startup"}
-		pane_text, ok := tmux.capture_pane_text(pane_id, 80)
-		if ok {
-			if idx := first_pattern(pane_text, cfg.blocked_patterns); idx >= 0 do return Startup_Probe_Result{status = "startup_blocked", detail = startup_reason(cfg, idx, "startup blocked")}
-			now := time.to_unix_nanoseconds(time.now())
-			if now - last_auto_enter >= i64(2 * time.Second) {
-				if idx := first_pattern(pane_text, cfg.auto_enter_patterns); idx >= 0 {
-					if idx < len(cfg.auto_enter_pre_keys) && strings.trim_space(cfg.auto_enter_pre_keys[idx]) != "" {
-						// pre-keys are tmux NAMED keys (e.g. "Down", "Tab Tab") used to
-						// navigate the prompt off its default option BEFORE confirming.
-						// They must be sent as key presses, not literal text: send_text
-						// would type the word "Down" into the prompt instead of pressing
-						// the arrow, leaving the wrong option selected and the launch
-						// stuck at the trust/ToS/bypass screen (startup_blocked).
-						_ = tmux.send_named_keys(pane_id, cfg.auto_enter_pre_keys[idx], true)
-					} else {
-						_ = tmux.send_named_keys(pane_id, "Enter", false)
-					}
-					last_auto_enter = now
-					deadline = now + i64(time.Duration(probe_seconds) * time.Second)
-				}
-			}
-		}
-		time.sleep(time.Duration(interval_ms) * time.Millisecond)
-	}
-	if cfg.startup_unknown_is_blocked do return Startup_Probe_Result{status = "startup_blocked", detail = "startup readiness unknown"}
-	return Startup_Probe_Result{status = "ready", detail = "startup probe completed"}
-}
-
-sample_activity_status :: proc(pane_id: string, cfg: cfg_lib.Activity_Detection_Config) -> Activity_Sample {
-	status := "idle"
-	source := "pane_alive"
-	line_count := cfg.sample_line_count
-	if line_count <= 0 do line_count = 20
-	if text, ok := tmux.capture_pane_text(pane_id, line_count); ok {
-		if strings.trim_space(text) != "" { status = "active"; source = "pane_output" }
-	}
-	return Activity_Sample{status = status, source = source}
-}
-
-first_pattern :: proc(text: string, patterns: []string) -> int {
-	lower_text := strings.to_lower(text)
-	for pattern, i in patterns {
-		p := strings.to_lower(strings.trim_space(pattern))
-		if p != "" && strings.contains(lower_text, p) do return i
-	}
-	return -1
-}
-
-startup_reason :: proc(cfg: cfg_lib.Startup_Detection_Config, idx: int, fallback: string) -> string {
-	if idx >= 0 && idx < len(cfg.sanitized_reason_mapping) && strings.trim_space(cfg.sanitized_reason_mapping[idx]) != "" do return cfg.sanitized_reason_mapping[idx]
-	return fallback
 }

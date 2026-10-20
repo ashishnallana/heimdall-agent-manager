@@ -36,7 +36,6 @@ Auth_Metrics :: struct {
 auth_metrics: Auth_Metrics
 
 RATE_LIMIT_ENDPOINT_DEVICE_AUTH :: "device_auth"
-RATE_LIMIT_ENDPOINT_OTHER :: "other"
 
 auth_metrics_init :: proc(reg: ^metrics.Registry) {
 	if reg == nil do return

@@ -24,14 +24,6 @@ Action_Repository :: struct {
 	max_updated_at_for_bridge: Action_Max_Updated_Proc,
 }
 
-Scheduled_Prompt_Save_Proc :: Action_Save_Proc
-Scheduled_Prompt_Get_Proc :: Action_Get_Proc
-Scheduled_Prompt_Delete_Proc :: Action_Delete_Proc
-Scheduled_Prompt_List_Proc :: Action_List_Proc
-Scheduled_Prompt_List_By_Instance_Proc :: Action_List_By_Instance_Proc
-Scheduled_Prompt_List_By_Bridge_Proc :: Action_List_By_Bridge_Proc
-Scheduled_Prompt_CAS_Lease_Proc :: Action_CAS_Lease_Proc
-Scheduled_Prompt_Max_Updated_Proc :: Action_Max_Updated_Proc
 
 Scheduled_Prompt_Repository :: Action_Repository
 

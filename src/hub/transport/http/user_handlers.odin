@@ -295,11 +295,6 @@ user_ws_accept_key :: proc(key: string) -> string {
 	return base64.encode(digest[:])
 }
 
-read_user_ws_text_blocking :: proc(client: net.TCP_Socket, timeout: time.Duration) -> (string, bool) {
-	text, ok, _ := read_user_ws_text_blocking_reason(client, timeout)
-	return text, ok
-}
-
 // read_user_ws_text_blocking_reason is read_user_ws_text_blocking plus WHY the read
 // ended, in heimdall_ws_disconnects_total vocabulary. The returned string aliases a
 // stack buffer and is only valid until the next call (as before).

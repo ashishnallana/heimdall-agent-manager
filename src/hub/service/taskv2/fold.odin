@@ -326,11 +326,6 @@ brief_require_independent_verify :: proc(brief_json: string) -> bool {
 	return false
 }
 
-brief_auto_submit :: proc(brief_json: string) -> bool {
-	if b, ok := jsonx.extract_bool_literal(brief_json, "auto_submit", true); ok do return b
-	return false
-}
-
 // brief_review_roles_count: how many agent review requirements the brief has,
 // counting review roles AND named reviewers (hybrid review model). 0 means no
 // agent reviews the task, so a submit with no user approval goes straight to done.

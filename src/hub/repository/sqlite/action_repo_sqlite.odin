@@ -27,8 +27,6 @@ new_action_repository :: proc(impl: ^Action_Repo_SQLite, conn: ^Conn) -> iface.A
 	}
 }
 
-new_scheduled_prompt_repository :: new_action_repository
-
 action_from_stmt :: proc(stmt: sqlite3_stmt) -> domain.Action {
 	action: domain.Action
 	action.id = domain.Action_ID(column_text(stmt, 0))

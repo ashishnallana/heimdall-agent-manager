@@ -279,12 +279,6 @@ remove_where :: proc(f: ^Family, label_index: int, value: string) -> int {
 	return n
 }
 
-// remove_series tombstones through a cached pointer.
-remove_series :: proc(s: ^Series) {
-	if s == nil do return
-	sync.atomic_store(&s.dead, 1)
-}
-
 series_is_dead :: proc(s: ^Series) -> bool {
 	return s == nil || sync.atomic_load(&s.dead) != 0
 }
@@ -368,16 +362,6 @@ gauge_dec :: proc(s: ^Series) { gauge_sub(s, 1) }
 gauge_value :: proc(s: ^Series) -> i64 {
 	if s == nil do return 0
 	return sync.atomic_load(&s.gauge)
-}
-
-// gauge_set_seconds stores a duration as integer units of the family's decimals
-// (e.g. decimals=9 → nanoseconds). Negative durations clamp to 0.
-gauge_set_duration :: proc(s: ^Series, d: time.Duration) {
-	if s == nil do return
-	v := i64(d)
-	if v < 0 do v = 0
-	if s.family.decimals != 9 do v = rescale(v, 9, s.family.decimals)
-	sync.atomic_store(&s.gauge, v)
 }
 
 // observe records one histogram observation in the family's integer units.

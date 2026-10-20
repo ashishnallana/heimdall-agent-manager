@@ -10,7 +10,6 @@ import "core:testing"
 // ── REQ-VAULT-CHAINS-1 Unit Tests for CLI Task Chains Encryption & Decryption ──
 
 TEST_CHAIN_VAULT_KEY :: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-ALT_CHAIN_VAULT_KEY  :: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
 
 @(test)
 test_chain_show_transparent_decryption :: proc(t: ^testing.T) {

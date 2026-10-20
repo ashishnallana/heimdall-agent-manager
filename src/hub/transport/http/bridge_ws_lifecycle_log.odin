@@ -136,13 +136,6 @@ Bridge_WS_Log_Limiter :: struct {
 // make and nothing to free.
 bridge_ws_log_limiter: Bridge_WS_Log_Limiter
 
-// bridge_ws_log_admit decides whether this bridge may log a lifecycle line now.
-// Returns allow=true to log, plus `suppressed` = how many lines were dropped since the
-// last allowed one (report it in the line so the gap is self-describing).
-bridge_ws_log_admit :: proc(bridge_id: string, now_ns: i64) -> (allow: bool, suppressed: int) {
-	return bridge_ws_log_admit_in(&bridge_ws_log_limiter, bridge_id, now_ns)
-}
-
 // bridge_ws_log_admit_in is the same decision taken against an EXPLICIT limiter.
 // Production always goes through the wrapper above and therefore always uses the
 // process-wide global; the limiter is a parameter here purely so that a TEST can own a

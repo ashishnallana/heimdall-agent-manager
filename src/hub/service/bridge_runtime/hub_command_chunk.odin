@@ -45,12 +45,6 @@ import "core:time"
 import "odin_test:contracts"
 import ws "odin_test:lib/ws"
 
-// hub_chunk_next_id returns a process-unique chunk stream id. Heap-allocated; the
-// caller owns it.
-hub_chunk_next_id :: proc() -> string {
-	return ws.chunk_next_id("hubcmd")
-}
-
 // hub_command_chunk_count is the number of chunks `total` bytes needs at `payload`
 // bytes each.
 hub_command_chunk_count :: proc(total, payload: int) -> int {
@@ -61,11 +55,6 @@ hub_command_chunk_count :: proc(total, payload: int) -> int {
 // or nil when `text` already fits in one frame (send it whole).
 hub_command_chunk_frames :: proc(text: string, payload: int) -> []string {
 	return ws.chunk_frames(text, payload)
-}
-
-// hub_command_chunk_json builds one chunk frame.
-hub_command_chunk_json :: proc(chunk_id: string, chunk_index, chunk_count, total_bytes: int, fragment: string) -> string {
-	return ws.chunk_json(chunk_id, chunk_index, chunk_count, total_bytes, fragment)
 }
 
 // hub_command_is_chunkable reports whether `text` can be carried at all.

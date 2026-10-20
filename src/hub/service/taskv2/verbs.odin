@@ -118,10 +118,3 @@ record_attempt_started :: proc(svc: ^Service, task: domain.Task, lease: domain.T
 	json_str(&p, "vcs_base", strings.trim_space(vcs_base))
 	_, _, _ = append_event(svc.repo, svc.clock, task, Actor{kind = ACTOR_AGENT, id = lease.holder_instance_id}, EV_ATTEMPT_STARTED, json_end(&p))
 }
-
-@(private = "file")
-int_string :: proc(n: int) -> string {
-	b := strings.builder_make(context.temp_allocator)
-	strings.write_int(&b, n)
-	return strings.to_string(b)
-}

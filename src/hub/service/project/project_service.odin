@@ -68,10 +68,6 @@ Update_Project_Input :: struct {
 Bridge_Path_Input :: struct { path: string }
 Validation_Result :: struct { path: domain.Project_Bridge_Path, effective_path: string }
 
-new_project_service :: proc(projects: ^iface.Project_Repository, bridges: ^iface.Bridge_Repository, clock: ^platform.Clock, ids: ^platform.ID_Generator) -> Project_Service {
-	return Project_Service{projects = projects, bridges = bridges, clock = clock, ids = ids}
-}
-
 new_project_service_with_command_sink :: proc(projects: ^iface.Project_Repository, bridges: ^iface.Bridge_Repository, sink: Bridge_Command_Sink, clock: ^platform.Clock, ids: ^platform.ID_Generator) -> Project_Service {
 	return Project_Service{projects = projects, bridges = bridges, bridge_command_sink = sink, clock = clock, ids = ids}
 }

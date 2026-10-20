@@ -1539,13 +1539,6 @@ shell_session_list :: proc(svc: ^Shell_Session_Service, auth: contracts.Auth_Con
 	return iface.shell_session_list_by_owner(svc.repo, string(owner), filter, cursor, limit)
 }
 
-// SHELL_OUTPUT_RECLAIMED_CODE is the bridge's machine-readable marker for "the
-// retention window took this output" (BRIDGE_SHELL_OUTPUT_RECLAIMED_CODE in
-// src/bridge/shell_output_retention.odin — one wire string, two processes). It is
-// matched on rather than the human message, so the message can be reworded for a
-// user without silently reclassifying the error as a generic bridge failure.
-SHELL_OUTPUT_RECLAIMED_CODE :: "output_reclaimed"
-
 Shell_Session_Log_Result :: struct {
 	lines_raw:   string, // raw JSON array (caller must delete)
 	truncated:   bool,

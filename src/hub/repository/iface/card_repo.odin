@@ -36,11 +36,6 @@ card_list :: proc(repo: ^Card_Repository, owner_user_id: domain.User_ID) -> ([]d
 	return repo.list(repo.ctx, owner_user_id)
 }
 
-card_list_by_project :: proc(repo: ^Card_Repository, project_id: domain.Project_ID) -> ([]domain.Card, domain.Domain_Error) {
-	if repo == nil || repo.list_by_project == nil do return nil, domain.domain_error(.Internal_Error, "card repository is not configured")
-	return repo.list_by_project(repo.ctx, project_id)
-}
-
 card_update_status :: proc(repo: ^Card_Repository, id: domain.Card_ID, status: string, updated_at: string) -> (bool, domain.Domain_Error) {
 	if repo == nil || repo.update_status == nil do return false, domain.domain_error(.Internal_Error, "card repository is not configured")
 	return repo.update_status(repo.ctx, id, status, updated_at)

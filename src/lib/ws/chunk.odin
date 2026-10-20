@@ -16,7 +16,6 @@ import "core:sync"
 import "core:time"
 import jsonx "../jsonx"
 
-CHUNK_THRESHOLD_BYTES   :: 32 * 1024
 CHUNK_RAW_BYTES         :: 24 * 1024
 CHUNK_MAX_BUFFERED_BYTES :: 16 * 1024 * 1024
 CHUNK_MAX_MESSAGE_BYTES :: 16 * 1024 * 1024

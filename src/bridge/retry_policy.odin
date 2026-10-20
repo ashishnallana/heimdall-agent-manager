@@ -53,8 +53,6 @@ Bridge_Backoff_Policy :: struct {
 	jitter_pct: int, // delay is spread uniformly over +-jitter_pct% (0 = exact)
 }
 
-BRIDGE_BACKOFF_DEFAULT :: Bridge_Backoff_Policy{base_ms = 1_000, max_ms = 300_000, jitter_pct = 20}
-
 // bridge_backoff_delay_ms is the wait before retry number `failures` (>= 1):
 // base * 2^(failures-1), capped at max_ms, then spread by +-jitter_pct% using
 // jitter_seed (any value; callers pass a random one, tests a fixed one).

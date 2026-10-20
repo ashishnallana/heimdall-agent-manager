@@ -22,7 +22,6 @@ FACET_ARTIFACTS :: "artifacts"
 FACET_WRITER_AGENT  :: "agent"
 FACET_WRITER_BRIDGE :: "bridge"
 FACET_WRITER_HUB    :: "hub"
-FACET_WRITER_USER   :: "user"
 
 // Write-time caps (plan §4c): the brief and findings are capped when written
 // so the pack never has to cut them; longer free text is truncated with

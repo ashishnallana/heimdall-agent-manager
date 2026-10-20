@@ -41,12 +41,6 @@ card_kind_for_provider :: proc(provider: string) -> string {
 	return CARD_KIND_APPROVAL
 }
 
-// card_status_is_user_terminal: a decision the user made. For an unchanged
-// source_marker the system never overwrites it with resolved.
-card_status_is_user_terminal :: proc(status: string) -> bool {
-	return status == CARD_STATUS_ACCEPTED || status == CARD_STATUS_REJECTED || status == CARD_STATUS_DISCARDED
-}
-
 Card :: struct {
 	card_id:          Card_ID,
 	owner_user_id:    User_ID,

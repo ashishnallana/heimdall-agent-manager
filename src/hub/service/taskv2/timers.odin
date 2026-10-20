@@ -470,7 +470,3 @@ timer_thread_proc :: proc(t: ^thread.Thread) {
 		free_all(context.temp_allocator)
 	}
 }
-
-stop_timer_thread :: proc(svc: ^Service) {
-	sync.atomic_store(&svc.timers.stop, true)
-}

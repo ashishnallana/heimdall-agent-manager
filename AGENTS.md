@@ -124,21 +124,15 @@ src/
 Shared contracts used across binaries.
 
 - `identity.odin`
-  - Core identity/token types such as `Agent_Instance_ID`, `Conversation_ID`, `Ws_Token`, and `Agent_Token`.
+  - Core identity types such as `Agent_Instance_ID`, `Agent_Class`, and the client kind/access-mode/capability enums.
 - `lifecycle.odin`
-  - `/register` and `/reconnect` request/response types, including `conversation_id`, `ws_url`, `ws_token`, and `agent_token`.
+  - The `/register` request type.
 - `protocol.odin`
-  - Base protocol constants (`/health`, `/register`, `/heartbeat`, `/ws`, `/agent-rpc`, `/agents/start`).
-- `messages.odin`
-  - Agent WS/message event types such as `Messages_Available` and `Messages_Read`.
-- `message_provider.odin`
-  - Shared `Message`, status/read receipt, fetch, unread-count, and mark-read contracts.
+  - Build/version constants (`APP_VERSION`, `GIT_COMMIT`, `BUILD_TIMESTAMP`, `PROTOCOL_VERSION`).
 - `memory_provider.odin`
-  - Shared `Memory_Record`, `Memory_Event`, type/status enums, and replay/list/history contracts.
+  - The shared `Memory_Type` enum.
 - `artifacts.odin`
-  - Artifact metadata types, supported kinds, and artifact routes.
-
-`src/contracts/agent_rpc.odin` still covers the minimal shared agent RPC surface. Modern task/chat/memory/project/team flows also go through daemon REST endpoints and `/user-rpc`; do not treat `agent_rpc.odin` as the whole product surface.
+  - The `Artifact_ID` type.
 
 ### `src/daemon`
 
@@ -246,11 +240,6 @@ Defined primarily in `src/daemon/task_store.odin`.
 - Storage model
   - Tasks are event-shaped and projected into in-memory arrays plus SQLite tables (`task_db_service.odin`).
   - The daemon also keeps a durable task notification outbox for retryable per-agent notifications.
-
-### Agent-to-agent inbox messages
-
-- Shared wire/data types live in `src/contracts/message_provider.odin`:
-  - `Message`, `Message_Status`, `Message_Direction`, `Send_Message_Request`, `Fetch_Messages_Request`, `Mark_Read_Request`, read receipts.
 
 ### User/agent chat
 

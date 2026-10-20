@@ -382,41 +382,6 @@ lsp_ws_take_frame :: proc(reader: ^Lsp_WS_Reader) -> (text: string, ok: bool, fa
 	return payload, true, false
 }
 
-lsp_ws_take_one_frame :: proc(
-	reader: ^Lsp_WS_Reader,
-) -> (
-	text: string,
-	ok: bool,
-	fatal: bool,
-	consumed: bool,
-) {
-	op, fin, payload, has_frame, res_ok := ws.take_one_frame(reader)
-	if !res_ok {
-		return "", false, true, false
-	}
-	if !has_frame {
-		return "", false, false, false
-	}
-	if op == 0x8 {
-		delete(payload)
-		return "", false, true, false
-	}
-	if (op == 0x1 && fin && !reader.assembling) || (op == 0x0 && fin) {
-		return payload, true, false, true
-	}
-	if op == 0x1 {
-		reader.assembling = true
-		append(&reader.message, ..transmute([]u8)payload)
-		delete(payload)
-		return "", true, false, false
-	} else if op == 0x0 {
-		append(&reader.message, ..transmute([]u8)payload)
-		delete(payload)
-		return "", true, false, false
-	}
-	return payload, true, false, true
-}
-
 lsp_read_ws_text_blocking :: proc(reader: ^Lsp_WS_Reader, timeout: time.Duration) -> (string, bool) {
 	return ws.read_text_blocking(reader.socket, reader, timeout)
 }

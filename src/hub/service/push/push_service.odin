@@ -82,14 +82,6 @@ save_subscription :: proc(service: ^Push_Service, input: Save_Subscription_Input
 	return iface.push_subscription_upsert(service.subscriptions, sub)
 }
 
-// list_subscriptions returns all subscriptions owned by a user.
-list_subscriptions :: proc(service: ^Push_Service, owner_user_id: domain.User_ID) -> ([]domain.Push_Subscription, domain.Domain_Error) {
-	if service == nil || service.subscriptions == nil {
-		return nil, domain.domain_error(.Internal_Error, "push service is not configured")
-	}
-	return iface.push_subscription_list_by_owner(service.subscriptions, owner_user_id)
-}
-
 // delete_subscription removes a subscription owned by the caller, identified by
 // endpoint. It returns true when a row was removed.
 delete_subscription :: proc(service: ^Push_Service, owner_user_id: domain.User_ID, endpoint: string) -> (bool, domain.Domain_Error) {

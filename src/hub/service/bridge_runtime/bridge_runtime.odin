@@ -238,37 +238,6 @@ validate_project_path :: proc(ctx: rawptr, command: project_service.Validate_Pro
 	return parse_validation_result(command, reply), true, {}
 }
 
-send_validate_project_path_command :: proc(ws_url: string, command: project_service.Validate_Project_Path_Command) -> (project_service.Project_Path_Validation_Result, bool, domain.Domain_Error) {
-	conn, conn_ok := ws.connect(ws_url)
-	if !conn_ok do return project_service.Project_Path_Validation_Result{}, false, domain.domain_error(.Bridge_Offline, "bridge websocket command connect failed")
-	defer ws.close(&conn)
-	// REQ-SHELL-36 AC4 audit: `body` leaked on every path validation — built here,
-	// handed to ws.send_text (which only borrows it) and never freed. Same class as the
-	// frame leak below: a persistent/background path with no per-request arena behind it.
-	body := strings.concatenate({"{\"type\":\"validate_project_path\",\"command_id\":\"", command.command_id, "\",\"project_id\":\"", string(command.project_id), "\",\"bridge_id\":\"", command.bridge_id, "\",\"path\":\"", command.path, "\",\"vcs_kind\":\"", command.vcs_kind, "\",\"repo_url\":\"", command.repo_url, "\"}"})
-	defer delete(body)
-	if !ws.send_text(&conn, body) do return project_service.Project_Path_Validation_Result{}, false, domain.domain_error(.Bridge_Offline, "bridge websocket command send failed")
-	deadline := time.to_unix_nanoseconds(time.now()) + i64(3 * time.Second)
-	for time.to_unix_nanoseconds(time.now()) < deadline {
-		if text, ok := ws.poll_text(&conn); ok {
-			defer delete(text)
-			msg_type := json_string(text, "type")
-			defer delete(msg_type)
-			cmd_id := json_string(text, "command_id")
-			defer delete(cmd_id)
-			if msg_type == "project_path_validation_result" && cmd_id == command.command_id {
-				return parse_validation_result(command, text), true, domain.Domain_Error{}
-			}
-		}
-		time.sleep(25 * time.Millisecond)
-	}
-	return project_service.Project_Path_Validation_Result{}, false, domain.domain_error(.Bridge_Offline, "bridge websocket validation timed out")
-}
-
-validation_result_json :: proc(result: project_service.Project_Path_Validation_Result) -> string {
-	return strings.concatenate({"{\"type\":\"project_path_validation_result\",\"command_id\":\"", result.command_id, "\",\"ok\":", "true" if result.ok else "false", ",\"validation_error\":\"", result.validation_error, "\",\"details\":", result.details_json, "}"})
-}
-
 parse_validation_result :: proc(command: project_service.Validate_Project_Path_Command, text: string) -> project_service.Project_Path_Validation_Result {
 	if json_bool(text, "ok") do return validation_result(command, true, "", "")
 	// The fine-grained cause (path_not_found, git_root_not_found, ...) is what the

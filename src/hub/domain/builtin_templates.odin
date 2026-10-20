@@ -62,14 +62,3 @@ builtin_template :: proc(id: string) -> (Template, bool) {
 	}
 	return {}, false
 }
-
-// is_builtin_template_id reports whether id is reserved for a built-in template
-// (including curator, which has no compiled body). Built-ins are always available
-// and can never be edited or deleted.
-is_builtin_template_id :: proc(id: string) -> bool {
-	switch id {
-	case TEMPLATE_EMPTY_ID, TEMPLATE_COORDINATOR_ID, TEMPLATE_WORKER_ID, TEMPLATE_REVIEWER_ID, TEMPLATE_SOLOIST_ID, TEMPLATE_CURATOR_ID:
-		return true
-	}
-	return false
-}

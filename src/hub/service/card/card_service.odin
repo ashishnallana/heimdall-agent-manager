@@ -622,38 +622,6 @@ list_cards :: proc(s: ^Card_Service, auth: contracts.Auth_Context, filter: Card_
 	return out, domain.Domain_Error{}
 }
 
-list_cards_by_project :: proc(s: ^Card_Service, auth: contracts.Auth_Context, project_id: domain.Project_ID) -> ([]domain.Card, domain.Domain_Error) {
-	owner, ok, err := ownership.owner_from_auth(auth)
-	if !ok do return nil, err
-
-	sync_projected_cards(s, owner)
-
-	all, list_err := iface.card_list_by_project(s.cards, project_id)
-	if list_err.code != .None do return nil, list_err
-	defer delete(all)
-
-	filtered := make([dynamic]domain.Card, 0, len(all))
-	defer delete(filtered)
-	now := platform.clock_now(s.clock)
-
-	for c in all {
-		if c.owner_user_id != owner do continue
-		card := c
-		if card.status == domain.CARD_STATUS_PENDING {
-			guard_ok, _ := evaluate_guard(s, owner, card)
-			if !guard_ok {
-				_, _ = iface.card_update_status(s.cards, card.card_id, domain.CARD_STATUS_RESOLVED, now)
-				notify_card_changed(s, owner, card.kind)
-				continue
-			}
-		}
-		append(&filtered, card)
-	}
-	out := make([]domain.Card, len(filtered))
-	copy(out, filtered[:])
-	return out, domain.Domain_Error{}
-}
-
 update_card_status :: proc(s: ^Card_Service, auth: contracts.Auth_Context, id: domain.Card_ID, status: string) -> (domain.Card, bool, domain.Domain_Error) {
 	card, ok, err := get_card(s, auth, id)
 	if !ok do return domain.Card{}, false, err

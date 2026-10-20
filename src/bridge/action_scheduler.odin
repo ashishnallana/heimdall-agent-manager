@@ -56,9 +56,6 @@ Action_Queue_Item :: struct {
 	last_spawned_instance_id: string,
 }
 
-// Backward-compatibility alias
-Prompt_Queue_Item :: Action_Queue_Item
-
 Bridge_Action_Scheduler_State :: struct {
 	mutex:                  sync.Mutex,
 	queue:                  [dynamic]Action_Queue_Item,
@@ -445,16 +442,6 @@ action_queue_item_free :: proc(item: ^Action_Queue_Item) {
 	delete(item.last_spawned_instance_id)
 }
 
-// Backward-compatibility procedure aliases
-prompt_scheduler_days_from_civil :: action_scheduler_days_from_civil
-prompt_scheduler_parse_rfc3339_ms :: action_scheduler_parse_rfc3339_ms
-prompt_scheduler_parse_interval_seconds :: action_scheduler_parse_interval_seconds
-prompt_scheduler_is_due :: action_scheduler_is_due
-prompt_scheduler_can_claim :: action_scheduler_can_claim
-prompt_scheduler_claim :: action_scheduler_claim
-prompt_scheduler_recover_lease :: action_scheduler_recover_lease
-prompt_scheduler_advance_ms :: action_scheduler_advance_interval_ms
-prompt_queue_item_free :: action_queue_item_free
 
 // --- Bridge runtime scheduling engine ---
 
@@ -477,9 +464,6 @@ bridge_action_scheduler_start :: proc() {
 	thread.run(bridge_action_scheduler_worker)
 }
 
-// Backward-compatibility alias
-bridge_prompt_scheduler_start :: bridge_action_scheduler_start
-
 bridge_action_scheduler_worker :: proc() {
 	for bridge_action_sched_state.running {
 		bridge_action_scheduler_tick()
@@ -495,9 +479,6 @@ bridge_action_scheduler_notify_version :: proc(version: int) {
 		bridge_action_sched_state.known_actions_version = version
 	}
 }
-
-// Backward-compatibility alias
-bridge_prompt_scheduler_notify_version :: bridge_action_scheduler_notify_version
 
 bridge_action_scheduler_sync :: proc() -> bool {
 	if strings.trim_space(bridge_config.bridge_token) == "" || strings.trim_space(bridge_config.daemon_url) == "" do return false

@@ -60,11 +60,6 @@ taskchain_list_events_by_task :: proc(repo: ^Taskchain_Repository, task_id: doma
 	return repo.list_events_by_task(repo.ctx, task_id, owner_user_id)
 }
 
-taskchain_list_events_by_chain :: proc(repo: ^Taskchain_Repository, chain_id: domain.Task_Chain_ID, owner_user_id: domain.User_ID) -> ([]domain.Task_Event, domain.Domain_Error) {
-	if repo == nil || repo.list_events_by_chain == nil do return nil, domain.domain_error(.Internal_Error, NOT_CONFIGURED)
-	return repo.list_events_by_chain(repo.ctx, chain_id, owner_user_id)
-}
-
 taskchain_save_attempt :: proc(repo: ^Taskchain_Repository, attempt: domain.Task_Attempt) -> (domain.Task_Attempt, bool, domain.Domain_Error) {
 	if repo == nil || repo.save_attempt == nil do return domain.Task_Attempt{}, false, domain.domain_error(.Internal_Error, NOT_CONFIGURED)
 	return repo.save_attempt(repo.ctx, attempt)
@@ -143,11 +138,6 @@ taskchain_save_chain_summary :: proc(repo: ^Taskchain_Repository, summary: domai
 taskchain_save_workflow_definition :: proc(repo: ^Taskchain_Repository, def: domain.Workflow_Definition) -> (domain.Workflow_Definition, bool, domain.Domain_Error) {
 	if repo == nil || repo.save_workflow_definition == nil do return domain.Workflow_Definition{}, false, domain.domain_error(.Internal_Error, NOT_CONFIGURED)
 	return repo.save_workflow_definition(repo.ctx, def)
-}
-
-taskchain_get_workflow_definition :: proc(repo: ^Taskchain_Repository, def_id: string, owner_user_id: domain.User_ID) -> (domain.Workflow_Definition, bool, domain.Domain_Error) {
-	if repo == nil || repo.get_workflow_definition == nil do return domain.Workflow_Definition{}, false, domain.domain_error(.Internal_Error, NOT_CONFIGURED)
-	return repo.get_workflow_definition(repo.ctx, def_id, owner_user_id)
 }
 
 taskchain_list_workflow_definitions_by_owner :: proc(repo: ^Taskchain_Repository, owner_user_id: domain.User_ID) -> ([]domain.Workflow_Definition, domain.Domain_Error) {
