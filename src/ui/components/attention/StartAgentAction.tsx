@@ -28,16 +28,17 @@ export function useStartAgent(invalidate: () => void) {
   return { start, states };
 }
 
-export function StartAgentAction({ onStart, busy = false, error = '', debugPrefix }: {
-  onStart: () => void; busy?: boolean; error?: string; debugPrefix: string;
+export function StartAgentAction({ onStart, busy = false, error = '', debugPrefix, cardId = '' }: {
+  onStart: () => void; busy?: boolean; error?: string; debugPrefix: string; cardId?: string;
 }) {
+  const suffix = cardId ? '-' + cardId : '';
   return (
     <div className="min-w-0 space-y-1">
-      <button type="button" data-debug-id={`${debugPrefix}-start-agent`} disabled={busy} onClick={onStart}
+      <button type="button" data-debug-id={debugPrefix + "-start-agent" + suffix} disabled={busy} onClick={onStart}
         className="inline-flex min-h-10 items-center justify-center rounded-full bg-accent px-3.5 text-[14px] font-medium text-accent-fg disabled:opacity-50">
         {busy ? 'Starting…' : 'Start agent'}
       </button>
-      {error ? <p role="alert" data-debug-id={`${debugPrefix}-start-agent-error`} className="max-w-sm whitespace-normal text-[13px] text-danger">{error}</p> : null}
+      {error ? <p role="alert" data-debug-id={debugPrefix + "-start-agent-error" + suffix} className="max-w-sm whitespace-normal text-[13px] text-danger">{error}</p> : null}
     </div>
   );
 }

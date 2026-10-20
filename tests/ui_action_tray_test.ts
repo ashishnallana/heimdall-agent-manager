@@ -209,14 +209,14 @@ test('chat tray Start agent stays visible with an inline failure and retry', asy
     await act(async () => { root.render(React.createElement(Provider, { store, children: React.createElement(ActionTray, {
       items: [item], mobile: true, onShowComposer: () => {}, onStartMode: () => { throw new Error('Start must not borrow composer'); },
     }) })); });
-    assert.ok(q('action-tray-start-agent'));
+    assert.ok(q('action-tray-start-agent-crd_start'));
     assert.equal(q('action-tray-answer'), null);
     assert.match(dom.window.document.body.textContent || '', /worker on bridge b is stopped/);
-    await act(async () => { q('action-tray-start-agent')!.click(); });
-    assert.match(q('action-tray-start-agent-error')!.textContent || '', /bridge offline/);
+    await act(async () => { q('action-tray-start-agent-crd_start')!.click(); });
+    assert.match(q('action-tray-start-agent-error-crd_start')!.textContent || '', /bridge offline/);
     assert.ok(q('action-tray-card-blocked'));
-    await act(async () => { q('action-tray-start-agent')!.click(); });
-    assert.equal(q('action-tray-start-agent-error'), null);
+    await act(async () => { q('action-tray-start-agent-crd_start')!.click(); });
+    assert.equal(q('action-tray-start-agent-error-crd_start'), null);
     assert.equal(requests, 2);
   } finally {
     await act(async () => root.unmount());

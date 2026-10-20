@@ -220,7 +220,7 @@ export function ActionTray({
         </div>
       );
     }
-    if (needsAgentStart(item)) return <StartAgentAction debugPrefix="action-tray" onStart={() => void agentStart.start(item)} {...agentStart.states[item.card_id]} />;
+    if (needsAgentStart(item)) return <StartAgentAction debugPrefix="action-tray" cardId={item.card_id} onStart={() => void agentStart.start(item)} {...agentStart.states[item.card_id]} />;
     return (
       <ActionRow
         item={item}
