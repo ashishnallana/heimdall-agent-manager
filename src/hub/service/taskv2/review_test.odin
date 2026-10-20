@@ -92,8 +92,12 @@ test_timer_fire_after_release_is_noop :: proc(t: ^testing.T) {
 	_, _ = end_uow(&fx.svc, &u, false)
 }
 
-// S10: an orphan whose lease just expired gets 409 lease_lost from lease.next
-// (it is being stopped and re-woken), not a fresh inline grant.
+// S10 (narrowed by 4f4b00d3): a TTL expiry of a holder the bridge still reports
+// alive (last_seen within the TTL) expires the lease (reason ttl), re-wakes the
+// instance, and opens an IDLE_GRACE window measured from that expiry in which
+// lease.next from an instance holding nothing is 409 lease_lost — never `none`
+// or an inline grant. (A heartbeat-lost holder is parked agent_not_running
+// instead; see lease_test.odin test_expiry_noop_when_heartbeat_moved_deadline.)
 @(test)
 test_lease_next_after_expiry_409 :: proc(t: ^testing.T) {
 	fx, log, ok := lease_fixture(t, "s10_next409")
@@ -106,31 +110,37 @@ test_lease_next_after_expiry_409 :: proc(t: ^testing.T) {
 	confirm_holder(fx, "inst_w1")
 	lease, held := lease_of(fx, "inst_w1")
 	if !testing.expect(t, held, "leased") do return
-	// expire by TTL; the matcher re-grants to the same warm instance (new lease)
+	// The TTL passes with no lease heartbeat while the instance is still seen alive.
 	fixture_advance(fx, LEASE_TTL_SECONDS + 1)
+	inst, _, _ := iface.agent_get_instance(&fx.agents, "inst_w1")
+	inst.last_seen_at = platform.clock_now(&fx.clock)
+	_, _, _ = iface.agent_save_instance(&fx.agents, inst)
+	wake_log_reset(log)
 	_ = fire_due(&fx.svc, now_ms(&fx.clock))
+	testing.expect_value(t, count_events(fx, "task_1", EV_LEASE_EXPIRED), 1)
+	testing.expect(t, strings.contains(last_event_payload(fx, "task_1", EV_LEASE_EXPIRED), `"reason":"ttl"`), "live holder: ttl expiry")
+	testing.expect_value(t, count_events(fx, "task_1", EV_BLOCKED), 0)
+	// The matcher re-wakes the same warm instance with a NEW lease.
+	l2, h2 := lease_of(fx, "inst_w1")
+	if !testing.expect(t, h2 && l2.lease_id != lease.lease_id && l2.attempt_no == 2, "re-granted a new lease (attempt 2)") do return
+	testing.expect(t, wake_log_has_run(log, "inst_w1"), "re-woken with a fresh pack")
 	auth := contracts.Auth_Context{kind = .Instance_Token, user_id = "u1", agent_instance_id = "inst_w1"}
-	if l2, h2 := lease_of(fx, "inst_w1"); h2 {
-		// re-granted: lease.next returns the NEW lease (current), never the old one
-		res, nok, _ := lease_next(&fx.svc, auth, Lease_Next_Input{})
-		testing.expect(t, nok && res.status == "current" && res.lease.lease_id == l2.lease_id && l2.lease_id != lease.lease_id, "current = the re-granted lease")
-		// the old process heartbeating the OLD lease id is lost
-		_, hok, herr := lease_heartbeat(&fx.svc, auth, Lease_Heartbeat_Input{lease_id = lease.lease_id})
-		testing.expect(t, !hok && herr.code == .Conflict, "old lease id → lease_lost")
-	}
-	// Without a re-grant available (no task), an expired holder is refused inline work.
-	_ = cancel_task(&fx.svc, get_task(fx, "task_1"), Actor{kind = ACTOR_USER, id = "u1"}, "drop")
-	_ = publish_task(t, fx, chain, "task_2") // ready, nobody granted (inst_w1 just expired → recently_expired)
-	res2, ok2, err2 := lease_next(&fx.svc, auth, Lease_Next_Input{})
-	if ok2 {
-		testing.expect(t, res2.status != "granted", "no inline grant for a just-expired holder")
-	} else {
-		testing.expect(t, err2.code == .Conflict, "409 lease_lost for a just-expired holder")
-	}
-	// after idle_grace the instance is a normal pull caller again
-	fixture_advance(fx, IDLE_GRACE_SECONDS + 1)
-	res3, ok3, _ := lease_next(&fx.svc, auth, Lease_Next_Input{})
-	testing.expect(t, ok3 && (res3.status == "granted" || res3.status == "current"), "pull allowed after the grace window")
+	res, nok, _ := lease_next(&fx.svc, auth, Lease_Next_Input{})
+	testing.expect(t, nok && res.status == "current" && res.lease.lease_id == l2.lease_id, "current = the re-granted lease")
+	_, hok, herr := lease_heartbeat(&fx.svc, auth, Lease_Heartbeat_Input{lease_id = lease.lease_id})
+	testing.expect(t, !hok && herr.code == .Conflict, "old lease id → lease_lost")
+	// Release the new lease normally (release does not touch the expiry window).
+	submit_via_release(t, fx, l2)
+	_, still := lease_of(fx, "inst_w1")
+	testing.expect(t, !still, "holds nothing after release")
+	// Inside the window (just before IDLE_GRACE elapses since the ttl expiry): 409.
+	fixture_advance(fx, IDLE_GRACE_SECONDS - 2)
+	_, ok2, err2 := lease_next(&fx.svc, auth, Lease_Next_Input{})
+	testing.expect(t, !ok2 && err2.code == .Conflict && strings.contains(err2.details_json, `"lease_lost"`), "409 lease_lost for a just-expired holder")
+	// Past the window: a normal pull caller again (nothing ready → none, not 409).
+	fixture_advance(fx, 2)
+	res3, ok3, err3 := lease_next(&fx.svc, auth, Lease_Next_Input{})
+	testing.expect(t, ok3 && err3.code == .None && res3.status == "none", "after the grace window: none")
 }
 
 // S10: the DB uniques are the backstop — a second work grant on a task whose
