@@ -766,13 +766,21 @@ fleet_changed :: proc(svc: ^Service, chain: domain.Task_Chain, agent_id := "") -
 	u, ok, err := begin_uow(svc)
 	if !ok do return err
 	if agent_id != "" {
+		retry_agent := false
 		tasks, terr := iface.taskchain_list_tasks_by_chain(svc.repo, chain.chain_id, chain.owner_user_id)
 		if terr.code != .None { _, _ = end_uow(svc, &u, false); return terr }
 		for task in tasks {
 			if !is_agent_not_running_block(task.blocked_on_json) do continue
 			if jsonx.extract_string(task.blocked_on_json, "agent_id", "", true, context.temp_allocator) != agent_id do continue
+			retry_agent = true
 			if _, _, rok, rerr := record_event(svc, &u, task, hub_actor(), EV_ANSWERED, `{}`); !rok {
 				_, _ = end_uow(svc, &u, false); return rerr
+			}
+		}
+		if retry_agent {
+			if reset, reset_err := reset_idle_agent_instances(svc, chain.owner_user_id, chain.chain_id, agent_id); !reset {
+				_, _ = end_uow(svc, &u, false)
+				return reset_err
 			}
 		}
 	}

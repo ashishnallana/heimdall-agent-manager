@@ -20,8 +20,8 @@ dispatch_failed_in_uow :: proc(svc: ^Service, u: ^Uow, lease: domain.Task_Lease,
 agent_not_running_in_uow :: proc(svc: ^Service, u: ^Uow, lease: domain.Task_Lease, failure: string, unconfirmed_only := false) -> Expire_Result {
 	detail := failure
 	current, held, err := iface.taskchain_get_lease(svc.repo, lease.lease_id)
+	if !held do return .Gone if err.code == .None || err.code == .Not_Found else .Failed
 	if err.code != .None do return .Failed
-	if !held do return .Gone
 	if unconfirmed_only && (current.confirmed_at != "" || current.delivery != domain.LEASE_DELIVERY_WAKE) do return .Gone
 	// A failed wake of a handoff continuation did not create a new attempt.
 	// Keep the earlier worker's budget charge and resume that same attempt.
@@ -146,19 +146,9 @@ start_task_agent :: proc(svc: ^Service, auth: contracts.Auth_Context, task_id: d
 		}
 	}
 	bridge_id := jsonx.extract_string(task.blocked_on_json, "bridge_id", "", true, context.temp_allocator)
-	instances, ierr := iface.agent_list_instances_by_chain(svc.agents, task.owner_user_id, string(task.chain_id))
-	if ierr.code != .None { _, _ = end_uow(svc, &u, false); return false, ierr }
-	for inst in instances {
-		if inst.agent_id != agent_id || (bridge_id != "" && inst.bridge_id != bridge_id) do continue
-		if _, held, _ := iface.taskchain_get_lease_by_holder(svc.repo, inst.agent_instance_id); held do continue
-		if instance_is_live(inst) || instance_is_pending(inst) do continue
-		next := inst
-		next.runtime_status = "stopped"
-		next.stopped_by = ""
-		next.last_error_json = ""
-		if _, saved, serr := iface.agent_save_instance(svc.agents, next); !saved {
-			_, _ = end_uow(svc, &u, false); return false, serr
-		}
+	if reset, reset_err := reset_idle_agent_instances(svc, task.owner_user_id, task.chain_id, agent_id, bridge_id, true); !reset {
+		_, _ = end_uow(svc, &u, false)
+		return false, reset_err
 	}
 	_, _, acted, aerr := record_event(svc, &u, task, actor_from_auth(auth), EV_ANSWERED, `{}`)
 	if acted do acted, aerr = after_chain_change(svc, &u, task.chain_id, task.owner_user_id, .Fleet_Changed)
@@ -220,5 +210,26 @@ start_solo_task_agent :: proc(svc: ^Service, auth: contracts.Auth_Context, task:
 	if !acted do return false, err
 	if cerr.code != .None do return false, cerr
 	if !started do return false, start_err
+	return true, domain.Domain_Error{}
+}
+
+// A fleet edit retries infrastructure failures using its new launch selection.
+// Instances holding another lease and deliberate user stops remain protected.
+reset_idle_agent_instances :: proc(svc: ^Service, owner: domain.User_ID, chain_id: domain.Task_Chain_ID, agent_id: string, bridge_id := "", clear_user_stop := false) -> (bool, domain.Domain_Error) {
+	instances, ierr := iface.agent_list_instances_by_chain(svc.agents, owner, string(chain_id))
+	if ierr.code != .None do return false, ierr
+	for inst in instances {
+		if inst.agent_id != agent_id || (bridge_id != "" && inst.bridge_id != bridge_id) do continue
+		if _, held, _ := iface.taskchain_get_lease_by_holder(svc.repo, inst.agent_instance_id); held do continue
+		if instance_is_live(inst) || instance_is_pending(inst) do continue
+		if !clear_user_stop && inst.stopped_by != "" do continue
+		next := inst
+		next.runtime_status = "stopped"
+		next.stopped_by = ""
+		next.last_error_json = ""
+		if _, saved, serr := iface.agent_save_instance(svc.agents, next); !saved {
+			return false, serr
+		}
+	}
 	return true, domain.Domain_Error{}
 }

@@ -81,6 +81,10 @@ test_agent_not_running_capacity_is_queueing_and_failed_ready_is_blocked :: proc(
 	testing.expect(t, queued.state == .Backlog && strings.contains(queued.blocked_on_json, "provider authentication failed"), "failed free instance blocks ready task")
 	attempts, _ := iface.taskchain_list_attempts_by_task(&fx.repo, queued.task_id, "u1")
 	testing.expect_value(t, len(attempts), 0)
+	testing.expect_value(t, fleet_changed(&fx.svc, chain, "agt_w").code, domain.Error_Code.None)
+	_, held := lease_of(fx, "inst_w1")
+	testing.expect(t, held, "fleet repair resets idle failed instance and retries dispatch")
+	testing.expect(t, get_task(fx, "task_queued").blocked_on_json == "", "fleet edit clears affected agent blocks")
 }
 
 @(test)
