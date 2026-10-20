@@ -27,6 +27,73 @@ export interface SummaryMenuItem {
   debugId?: string;
 }
 
+const INPUT_PREVIEW_CHARS = 80;
+
+export interface WorkflowInputEntry {
+  label: string;
+  /** Complete value; objects are pretty-printed so expanded JSON stays readable. */
+  full: string;
+  /** One-line, length-capped value for the collapsed preview. */
+  preview: string;
+}
+
+/** Splits workflow inputs into entries with a compact preview and the intact full text. */
+export function summarizeWorkflowInputs(inputs: unknown): WorkflowInputEntry[] {
+  if (!inputs || typeof inputs !== 'object') return [];
+  return Object.entries(inputs as Record<string, unknown>).map(([k, v]) => {
+    const full = typeof v === 'string' ? v : v !== null && typeof v === 'object' ? JSON.stringify(v, null, 2) : String(v);
+    const flat = full.replace(/\s+/g, ' ').trim();
+    const preview = flat.length > INPUT_PREVIEW_CHARS ? `${flat.slice(0, INPUT_PREVIEW_CHARS)}…` : flat;
+    return { label: k.replace(/_/g, ' '), full, preview };
+  });
+}
+
+/**
+ * Workflow name plus a one-line input preview. Long inputs (e.g. a JSON context)
+ * stay collapsed behind a disclosure; expanded values scroll inside a bounded box.
+ */
+export const WorkflowInputsSummary: React.FC<{ name: string; inputs?: unknown }> = ({ name, inputs }) => {
+  const [open, setOpen] = React.useState(false);
+  const panelId = React.useId();
+  const entries = summarizeWorkflowInputs(inputs);
+  const truncated = entries.some((e) => e.preview !== e.full);
+  const expandable = truncated || entries.some((e) => e.full.includes('\n'));
+  return (
+    <div data-debug-id="workflow-inputs-summary" className="min-w-0 max-w-full space-y-1.5">
+      <div className="flex min-w-0 items-start gap-2">
+        <Text as="p" role="body-sm" tone="muted" className="min-w-0 flex-1 break-words [overflow-wrap:anywhere]">
+          <span className="font-semibold text-primary">{name}</span>
+          {entries.length > 0 && !open ? ` · ${entries.map((e) => `${e.label}: ${e.preview}`).join(' · ')}` : ''}
+        </Text>
+        {expandable && (
+          <button
+            type="button"
+            data-debug-id="workflow-inputs-toggle"
+            aria-expanded={open}
+            aria-controls={panelId}
+            onClick={() => setOpen((v) => !v)}
+            className="shrink-0 rounded-sm text-caption text-accent focus-visible:outline-none focus-visible:shadow-focus"
+          >
+            {open ? 'Show less' : 'Show details'}
+          </button>
+        )}
+      </div>
+      {open && (
+        <dl id={panelId} data-debug-id="workflow-inputs-detail" className="max-h-64 min-w-0 space-y-2 overflow-y-auto rounded-md bg-subtle p-2">
+          {entries.map((e) => (
+            <div key={e.label} className="min-w-0">
+              <dt className="text-caption uppercase text-faint">{e.label}</dt>
+              <dd className="m-0 min-w-0 max-w-full overflow-x-auto whitespace-pre-wrap break-words text-caption text-muted [overflow-wrap:anywhere]">
+                {e.full}
+              </dd>
+            </div>
+          ))}
+        </dl>
+      )}
+    </div>
+  );
+};
+
 const UNCLAIMED_AFTER_MINS = 10;
 const EXPIRING_WITHIN_MINS = 3;
 
@@ -130,14 +197,7 @@ export const TaskSummaryBar: React.FC<TaskSummaryBarProps> = ({
   return (
     <div data-debug-id="task-summary-bar" className="space-y-3 text-left">
       {isWorkflow && workflowStatus && (
-        <Text as="p" role="body-sm" tone="muted">
-          <span className="font-semibold text-primary">{workflowStatus.workflow_name || 'Workflow'}</span>
-          {workflowStatus.inputs && typeof workflowStatus.inputs === 'object'
-            ? ` · ${Object.entries(workflowStatus.inputs)
-                .map(([k, v]) => `${k.replace(/_/g, ' ')}: ${String(v)}`)
-                .join(' · ')}`
-            : ''}
-        </Text>
+        <WorkflowInputsSummary name={workflowStatus.workflow_name || 'Workflow'} inputs={workflowStatus.inputs} />
       )}
 
       {/* One row that never wraps its controls: what needs you on the left, the

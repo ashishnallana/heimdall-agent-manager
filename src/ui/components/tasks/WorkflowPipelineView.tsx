@@ -234,7 +234,7 @@ export const WorkflowPipelineView: React.FC<WorkflowPipelineViewProps> = ({
                     Step {idx + 1}
                     {isGate ? ' · Gate' : ''}
                   </Text>
-                  {!single && <span className="min-w-0 truncate text-title text-primary">{title}</span>}
+                  {!single && <span className="min-w-0 max-w-full flex-1 break-words text-title text-primary [overflow-wrap:anywhere]">{title}</span>}
                   <span className={`shrink-0 text-caption ${awaitingDecision ? 'text-accent' : STAGE_TEXT_TONE[status]}`}>
                     {awaitingDecision ? 'Waiting for your decision' : progress}
                   </span>
