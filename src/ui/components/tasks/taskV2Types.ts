@@ -204,8 +204,8 @@ export function getTaskStatusLines(task: TaskWire, _chainFleets?: any[], nowMs: 
 
   if (state === 'backlog') {
     if (task.blocked_on) {
-      if ((task.blocked_on.kind === 'dispatch' || task.blocked_on.kind === 'agent_not_running')) {
-        return [`Dispatch failed — ${task.blocked_on.reason || 'Agent could not start'}`, 'Update the agent’s fleet settings or retry dispatch'];
+      if (task.blocked_on.kind === 'dispatch' || task.blocked_on.kind === 'agent_not_running') {
+        return [`Agent not running — ${task.blocked_on.reason || 'Agent could not start'}`, 'Start the agent from its attention card, or update its fleet settings'];
       }
       return [
         `Blocked on you — ${task.blocked_on.reason || 'Waiting for human input'}`,

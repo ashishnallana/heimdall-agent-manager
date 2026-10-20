@@ -57,7 +57,9 @@ function TaskBody({ item, now }: { item: AttentionTaskItem; now: number }) {
           Verify skipped: <VaultText value={d.skip_verify_reason} />
         </p>
       ) : null}
-      {d.excerpt ? (
+      {d.badge === 'agent_not_running' ? (
+        <p role="alert" className="mt-3 text-[13px] text-danger">{item.rationale}</p>
+      ) : d.excerpt ? (
         <blockquote data-debug-id="attention-card-excerpt" className="mt-3 border-l-2 border-subtle pl-3 text-[13px] text-primary">
           <span className="mb-1 block text-[11px] text-faint">
             {d.excerpt.author_name || (d.attention === 'blocked' ? 'The agent asks' : 'Latest comment')}

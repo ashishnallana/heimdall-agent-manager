@@ -50,7 +50,7 @@ export function awaitingYourReview(task: TaskWire): boolean {
 export function blockedOnYou(task: TaskWire): boolean {
   const b: any = task.blocked_on;
   if (!b) return false;
-  return !b.kind || b.kind === 'human' || b.kind === 'user';
+  return !b.kind || b.kind === 'human' || b.kind === 'user' || b.kind === 'agent_not_running' || b.kind === 'dispatch';
 }
 
 /** True when nothing moves on this task until the user acts. */

@@ -105,6 +105,7 @@ export function formatAge(sinceIso: string, now: number): string {
 export function taskReason(d: { attention?: string; badge?: string }): string {
   if (d.attention === 'blocked') {
     switch (d.badge) {
+      case 'agent_not_running': return 'Start the agent to continue';
       case 'merge_conflict': return 'Merge conflict needs you';
       case 'budget_exhausted': return 'Out of attempts, needs you';
       case 'oscillation': return 'Stuck in review rounds, needs you';
@@ -119,6 +120,7 @@ export const TASK_BADGE_LABELS: Record<string, string> = {
   review: 'Waiting on review',
   gate: 'Plan gate',
   question: 'Question',
+  agent_not_running: 'Agent not running',
   merge_conflict: 'Merge conflict',
   budget_exhausted: 'Out of attempts',
   oscillation: 'Review rounds',

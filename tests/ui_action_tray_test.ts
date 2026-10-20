@@ -82,6 +82,7 @@ test('trayItems without a chain matches the task holder instance instead', () =>
 test('needLabel and needYouLabel', () => {
   assert.equal(tray.needLabel(taskItem('a', { attention: 'blocked' })), 'Needs your answer');
   assert.equal(tray.needLabel(taskItem('b')), 'Needs your approval');
+  assert.equal(tray.needLabel(taskItem('c', { attention: 'blocked', badge: 'agent_not_running' })), 'Needs you to start the agent');
   assert.equal(tray.needYouLabel(3), '3 need you');
 });
 

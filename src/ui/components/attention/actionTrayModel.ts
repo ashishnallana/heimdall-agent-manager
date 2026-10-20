@@ -32,6 +32,7 @@ export function isBlockedItem(item: AttentionTaskItem): boolean {
 
 /** "Needs your answer" (blocked) / "Needs your approval" (review). */
 export function needLabel(item: AttentionTaskItem): string {
+  if (item.details.badge === 'agent_not_running') return 'Needs you to start the agent';
   return isBlockedItem(item) ? 'Needs your answer' : 'Needs your approval';
 }
 

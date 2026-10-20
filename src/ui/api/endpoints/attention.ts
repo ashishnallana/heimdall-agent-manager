@@ -29,7 +29,7 @@ export type AttentionTaskDetails = {
   excerpt: AttentionExcerpt | null;
   /** Task System v2: why the task needs the user. */
   attention?: 'review' | 'blocked';
-  /** review | gate | question | merge_conflict | budget_exhausted | oscillation */
+  /** review | gate | question | agent_not_running | merge_conflict | budget_exhausted | oscillation */
   badge?: string;
   state?: string;
   task_kind?: string;

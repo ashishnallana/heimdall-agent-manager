@@ -794,6 +794,8 @@ test('deck Start agent shows failed starts inline and permits retry', async () =
   });
   await withDeck([item], async ({ q, act, text, hits }) => {
     assert.ok(q('[data-debug-id="attention-start-agent"]'));
+    assert.match(q('[data-debug-id="attention-card-badge"]').textContent, /Agent not running/);
+    assert.match(text(), /on bridge b is not running: stopped/);
     assert.equal(q('[data-debug-id="attention-action-answer"]'), null);
     await act(async () => { q('[data-debug-id="attention-start-agent"]').click(); });
     assert.match(q('[data-debug-id="attention-start-agent-error"]').textContent, /credentials missing/);

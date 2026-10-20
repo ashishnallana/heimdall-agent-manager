@@ -251,8 +251,8 @@ test('getTaskStatusLines generates human-readable status sentences for each stat
   assert.equal(bLine2, 'Nothing will move until you answer');
 
   const [dispatchLine, dispatchHint] = getTaskStatusLines(makeTask({ state: 'backlog', blocked_on: { kind: 'dispatch', reason: 'Provider could not start' } }), [], nowMs);
-  assert.equal(dispatchLine, 'Dispatch failed — Provider could not start');
-  assert.match(dispatchHint, /fleet settings or retry dispatch/);
+  assert.equal(dispatchLine, 'Agent not running — Provider could not start');
+  assert.match(dispatchHint, /Start the agent from its attention card/);
 
   // Done
   const doneTask = makeTask({ state: 'done', attempt_no: 1 });
