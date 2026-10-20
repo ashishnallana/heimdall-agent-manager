@@ -6,7 +6,7 @@ import "core:testing"
 import jsonx "odin_test:lib/jsonx"
 
 // Facet fixtures (plan §4b): the same JSON files are decoded by Odin (#load,
-// here) and by node (tests/facets_fixtures_conformance.test.mjs); unknown
+// here); unknown
 // fields must survive the hub verbatim.
 FIXTURE_HANDOFF   :: #load("../../../../tests/fixtures/facets/handoff.json", string)
 FIXTURE_VCS       :: #load("../../../../tests/fixtures/facets/vcs.json", string)
