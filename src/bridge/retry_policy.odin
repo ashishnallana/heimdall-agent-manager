@@ -149,11 +149,6 @@ bridge_http_retry_metrics_json :: proc() -> string {
 	return fmt.aprintf("{{\"retry\":%d,\"recovered\":%d,\"gave_up\":%d,\"deferred\":%d}}", sync.atomic_load(&m.retry), sync.atomic_load(&m.recovered), sync.atomic_load(&m.gave_up), sync.atomic_load(&m.deferred))
 }
 
-// bridge_http_is_terminal reports whether an HTTP response is terminal (not retriable).
-bridge_http_is_terminal :: proc(status: int, ok: bool) -> bool {
-	return !bridge_http_is_retriable(status, ok)
-}
-
 // bridge_http_backoff_sleep sleeps for base_ms * 2^(attempt-1).
 bridge_http_backoff_sleep :: proc(attempt: int, base_ms: int = BRIDGE_RETRY_BASE_BACKOFF_MS) {
 	ms := bridge_backoff_delay_ms(Bridge_Backoff_Policy{base_ms = i64(base_ms)}, attempt)
