@@ -9,6 +9,9 @@ import { DecryptedMarkdown, VaultText } from '../vault';
 import { formatAge } from './attentionModel';
 import { artifactIdsFrom, artifactLinksFrom, handoffDecisions, isBlockedItem, needLabel } from './actionTrayModel';
 
+/** Same-origin cookie auth, like the chat pane's attachments (the store's legacy session is not the v1 hub). */
+const ARTIFACT_SESSION = { daemonUrl: '', clientToken: '' };
+
 /** Files listed on a review card before "+N more". */
 const MAX_FILES = 6;
 
@@ -178,7 +181,7 @@ function ReviewResult({ item, mobile, active }: { item: AttentionTaskItem; mobil
 }
 
 function ShotThumb({ artifactId, index, onOpen }: { artifactId: string; index: number; onOpen: () => void }) {
-  const preview = useArtifactPreview({ artifactId });
+  const preview = useArtifactPreview({ artifactId, session: ARTIFACT_SESSION });
   const name = String(preview.meta?.name || artifactId);
   // Not an image (a log, a JSON file): no thumbnail, the task page lists it.
   if (preview.meta && !preview.isImage) return null;
@@ -203,7 +206,7 @@ function ShotThumb({ artifactId, index, onOpen }: { artifactId: string; index: n
 
 /** Full-size screenshot over everything; the backdrop, the close button or Esc dismiss it. */
 function ShotLightbox({ artifactId, onClose }: { artifactId: string; onClose: () => void }) {
-  const preview = useArtifactPreview({ artifactId });
+  const preview = useArtifactPreview({ artifactId, session: ARTIFACT_SESSION });
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.stopPropagation(); onClose(); } };
     window.addEventListener('keydown', onKey, true);
