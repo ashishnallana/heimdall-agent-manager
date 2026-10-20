@@ -2142,7 +2142,7 @@ export function AgentChatPane({
     const runtimeStatusMenu = (
       <Menu
         side="top"
-        align="start"
+        align="end"
         label="Runtime status"
         open={statusMenuOpen}
         onOpenChange={setStatusMenuOpen}
@@ -2153,7 +2153,7 @@ export function AgentChatPane({
             data-status={runtimeStateFromStatus(runtimeStatus)}
             aria-label={`Agent ${runtimeLabel.replace('…', '').toLowerCase()}. Start or stop the agent`}
             title={`${runtimeLabel} — start/stop the agent`}
-            className={`grid shrink-0 place-items-center rounded-full hover:bg-neutral-soft ${isMobile ? '-ml-1.5 h-10 w-10' : '-ml-1.5 h-9 w-9'}`}
+            className={`grid shrink-0 place-items-center rounded-full hover:bg-neutral-soft ${isMobile ? 'h-10 w-10' : 'h-9 w-9'}`}
           >
             <MessageComposerStatus
               debugPrefix="conversation"
@@ -2464,10 +2464,11 @@ export function AgentChatPane({
                   </ul>
                 </div>
               ) : (
-                // REQ-DOT-1: top row = runtime StatusDot (start/stop menu) at top left, then the input.
+                // REQ-DOTR-1: top row = input, then the runtime StatusDot (start/stop menu) at top right,
+                // in the same column as the send button below it.
                 <div className="flex items-start gap-1">
-                  {runtimeStatusMenu}
                   <div className={`min-w-0 flex-1 ${isMobile ? 'pt-1.5' : 'pt-1'}`}>{composerInput}</div>
+                  {runtimeStatusMenu}
                 </div>
               )}
             </div>

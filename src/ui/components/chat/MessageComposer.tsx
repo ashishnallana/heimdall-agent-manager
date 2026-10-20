@@ -55,7 +55,7 @@ export function MessageComposerActions({ debugPrefix: p, mobile, compactModel, p
   </div>;
 }
 
-/** Runtime indicator for the composer card's top-left corner: the real StatusDot only.
+/** Runtime indicator for the composer card's top-right corner: the real StatusDot only.
  *  Rendered inside a button by the caller (which owns the start/stop menu). */
 export function MessageComposerStatus({ debugPrefix: p, tone, label }: { debugPrefix: string; tone: StatusDotProps['tone']; label: string }) {
   return <span data-debug-id={`${p}-composer-status`} className="inline-flex items-center">
