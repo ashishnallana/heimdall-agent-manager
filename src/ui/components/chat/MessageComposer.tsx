@@ -55,12 +55,21 @@ export function MessageComposerActions({ debugPrefix: p, mobile, compactModel, p
   </div>;
 }
 
-/** Runtime indicator for the composer card's top-right corner: the real StatusDot, plus a
- *  Spinner while the agent is starting, stopping or working. Rendered inside a button by the
- *  caller (which owns the start/stop menu). */
-export function MessageComposerStatus({ debugPrefix: p, tone, label, busy }: { debugPrefix: string; tone: StatusDotProps['tone']; label: string; busy: boolean }) {
-  return <span data-debug-id={`${p}-composer-status`} className="inline-flex items-center gap-1.5">
-    {busy ? <Spinner size="sm" label={label} className="text-muted" /> : null}
+/** Runtime indicator for the composer card's top-left corner: the real StatusDot only.
+ *  Rendered inside a button by the caller (which owns the start/stop menu). */
+export function MessageComposerStatus({ debugPrefix: p, tone, label }: { debugPrefix: string; tone: StatusDotProps['tone']; label: string }) {
+  return <span data-debug-id={`${p}-composer-status`} className="inline-flex items-center">
     <StatusDot size="sm" tone={tone} label={label} />
   </span>;
+}
+
+/** Busy row between the input and the toolbar: a Spinner right-aligned over the send button
+ *  while the agent is starting, stopping or working. The row always reserves its height and
+ *  only toggles visibility, so the card never jumps when the agent starts or stops working. */
+export function MessageComposerSpinner({ debugPrefix: p, mobile, label, busy }: { debugPrefix: string; mobile?: boolean; label: string; busy: boolean }) {
+  return <div data-debug-id={`${p}-composer-spinner`} data-busy={busy} aria-hidden={!busy} className="-mb-1 mt-1 flex h-5 justify-end">
+    <span className={`grid ${mobile ? 'w-10' : 'w-9'} place-items-center ${busy ? '' : 'invisible'}`}>
+      {busy ? <Spinner size="sm" label={label} className="text-muted" /> : null}
+    </span>
+  </div>;
 }

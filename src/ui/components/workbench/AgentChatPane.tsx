@@ -89,7 +89,7 @@ import AgentActivityBubbles from '../chat/AgentActivityBubbles';
 import AtMentionPopup, { type MentionEntity } from '../chat/AtMentionPopup';
 import ChatMessageList from '../chat/ChatMessageList';
 import InstanceReconfigurationProgress from '../chat/InstanceReconfigurationProgress';
-import { MessageComposerInput, MessageComposerActions, MessageComposerStatus } from '../chat/MessageComposer';
+import { MessageComposerInput, MessageComposerActions, MessageComposerStatus, MessageComposerSpinner } from '../chat/MessageComposer';
 import RuntimeConfigurationOptions from '../chat/RuntimeConfigurationOptions';
 import { type TaskLike } from '../chat/chainTaskInference';
 import { groupTranscriptMessages, isAgentStartMessage } from '../chat/transcriptGrouping';
@@ -2138,10 +2138,11 @@ export function AgentChatPane({
       : isWorking
       ? 'Working…'
       : 'Running';
+    const runtimeBusy = !needsStart && (runtimeStopping || isStarting || isWorking);
     const runtimeStatusMenu = (
       <Menu
         side="top"
-        align="end"
+        align="start"
         label="Runtime status"
         open={statusMenuOpen}
         onOpenChange={setStatusMenuOpen}
@@ -2152,13 +2153,12 @@ export function AgentChatPane({
             data-status={runtimeStateFromStatus(runtimeStatus)}
             aria-label={`Agent ${runtimeLabel.replace('…', '').toLowerCase()}. Start or stop the agent`}
             title={`${runtimeLabel} — start/stop the agent`}
-            className={`grid shrink-0 place-items-center rounded-full px-2 hover:bg-neutral-soft ${isMobile ? '-mr-1.5 h-10 min-w-10' : '-mr-1 h-8 min-w-8'}`}
+            className={`grid shrink-0 place-items-center rounded-full hover:bg-neutral-soft ${isMobile ? '-ml-1.5 h-10 w-10' : '-ml-1.5 h-9 w-9'}`}
           >
             <MessageComposerStatus
               debugPrefix="conversation"
               tone={runtimeStatusToTone(runtimeStatus)}
               label={runtimeLabel}
-              busy={!needsStart && (runtimeStopping || isStarting || isWorking)}
             />
           </button>
         }
@@ -2464,13 +2464,23 @@ export function AgentChatPane({
                   </ul>
                 </div>
               ) : (
-                // REQ-PORT-1: top row = input + runtime indicator (start/stop menu) at top right.
-                <div className="flex items-start gap-2">
-                  <div className={`min-w-0 flex-1 ${isMobile ? 'pl-1 pt-1.5' : ''}`}>{composerInput}</div>
+                // REQ-DOT-1: top row = runtime StatusDot (start/stop menu) at top left, then the input.
+                <div className="flex items-start gap-1">
                   {runtimeStatusMenu}
+                  <div className={`min-w-0 flex-1 ${isMobile ? 'pt-1.5' : 'pt-1'}`}>{composerInput}</div>
                 </div>
               )}
             </div>
+
+            {/* REQ-DOT-2: busy Spinner right-aligned above send; the row keeps its height when idle. */}
+            {!conversationReadOnly ? (
+              <MessageComposerSpinner
+                debugPrefix="conversation"
+                mobile={isMobile}
+                label={runtimeLabel}
+                busy={runtimeBusy}
+              />
+            ) : null}
 
             <MessageComposerActions
               {...composerActions}
