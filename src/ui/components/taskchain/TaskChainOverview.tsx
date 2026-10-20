@@ -18,6 +18,15 @@ import { useFetchAgentInstanceQuery, useFetchAgentIdentityQuery, useListAgentIde
 import { buildTaskNames } from '../tasks/taskNames';
 import { actionErrorMessage } from '../tasks/useTaskActions';
 import { useIsMobile } from '../shell/responsive';
+import type { WorkflowRunView } from '../../api/endpoints/workflowRuns';
+
+/** Run title + status. The title wraps (long IDs/URLs included) so the badge stays inside the card. */
+export const WorkflowRunHeader: React.FC<{ run: Pick<WorkflowRunView, 'title' | 'workflow_name' | 'status' | 'execution_no'> }> = ({ run }) => (
+  <div className="flex min-w-0 flex-wrap items-start gap-x-2 gap-y-1 px-4 pt-4">
+    <VaultText value={run.title || run.workflow_name} fallback="Untitled workflow" className="block min-w-0 max-w-full flex-1 break-words text-sm font-semibold text-primary [overflow-wrap:anywhere]" />
+    <Badge tone="neutral">{run.status} · Execution {run.execution_no}</Badge>
+  </div>
+);
 
 function shellHash(path: string): string {
   return `#${path.startsWith('/') ? path : `/${path}`}`;
@@ -224,8 +233,8 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
               <div className="flex flex-col gap-4">
                 {workflowRunsQuery.error && <Text role="caption" tone="danger">Could not refresh workflows.</Text>}
                 {workflowRuns.map((run) => (
-                  <section key={run.run_id} data-debug-id={`workflow-run-card-${run.run_id}`} className="rounded-xl border border-subtle bg-surface">
-                    <div className="px-4 pt-4"><VaultText value={run.title || run.workflow_name} fallback="Untitled workflow" className="text-sm font-semibold text-primary" /><Badge tone="neutral">{run.status} ? Execution {run.execution_no}</Badge></div>
+                  <section key={run.run_id} data-debug-id={`workflow-run-card-${run.run_id}`} className="min-w-0 rounded-xl border border-subtle bg-surface">
+                    <WorkflowRunHeader run={run} />
                     <WorkflowPipelineView
                       chainId={chainId} chain={chain} run={run}
                       tasks={tasks.filter((task) => task.workflow_run_id === run.run_id && task.workflow_execution_no === run.execution_no)}

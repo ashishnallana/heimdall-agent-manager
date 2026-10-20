@@ -480,3 +480,29 @@ test('TaskChainOverview is keyed by chain at both mount points', () => {
     assert.match(tag, /key=\{(selectedChainId|ctx\.chainId)\}/, `${rel} keys TaskChainOverview by chain id`);
   }
 });
+
+test('workflow inputs: long context is previewed, full text stays intact, disclosure starts collapsed', async () => {
+  const React = (await import('react')).default;
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  const { summarizeWorkflowInputs, WorkflowInputsSummary } = await import('../src/ui/components/tasks/TaskSummaryBar.tsx');
+
+  const context = JSON.stringify({ id: 'x'.repeat(300), url: 'https://example.com/' + 'a'.repeat(200) });
+  const inputs = { audit_context: context, short: 'ok', nested: { a: 1 } };
+  const entries = summarizeWorkflowInputs(inputs);
+  const ctx = entries.find((e) => e.label === 'audit context')!;
+  assert.equal(ctx.full, context, 'full value is preserved byte-for-byte');
+  assert.ok(ctx.preview.length <= 81 && ctx.preview.endsWith('…'), 'preview is capped');
+  assert.equal(entries.find((e) => e.label === 'short')!.preview, 'ok', 'short values are not truncated');
+  assert.match(entries.find((e) => e.label === 'nested')!.full, /\n/, 'objects are pretty-printed');
+  assert.deepEqual(summarizeWorkflowInputs(undefined), []);
+
+  const html = renderToStaticMarkup(React.createElement(WorkflowInputsSummary, { name: 'Router audit', inputs }));
+  assert.match(html, /aria-expanded="false"/);
+  assert.match(html, /aria-controls="[^"]+"/);
+  assert.match(html, /Show details/);
+  assert.ok(!html.includes(context), 'collapsed render does not dump the full context');
+  assert.ok(!html.includes('workflow-inputs-detail'), 'detail panel is not rendered while collapsed');
+
+  const small = renderToStaticMarkup(React.createElement(WorkflowInputsSummary, { name: 'W', inputs: { a: 'b' } }));
+  assert.ok(!small.includes('Show details'), 'no toggle when nothing is hidden');
+});

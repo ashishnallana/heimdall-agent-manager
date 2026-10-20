@@ -274,7 +274,7 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
 
       <Block title="Brief" collapsible debugId="task-details-brief">
         {task.brief?.goal || task.description ? (
-          <p className="leading-relaxed text-primary">{task.brief?.goal || task.description}</p>
+          <p className="min-w-0 break-words leading-relaxed text-primary [overflow-wrap:anywhere]">{task.brief?.goal || task.description}</p>
         ) : (
           <Text role="caption" tone="faint">
             No goal yet.
