@@ -124,6 +124,7 @@ Routine events stay quiet. You get one line, `[taskv2] <trigger>: …`, only whe
 | `budget_exhausted` | read the attempts (`task fetch <id> facet:<id>:<n>:handoff` and `…:verify`), then sharpen or split the brief (`task update`) or `workflow retry` |
 | `oscillation` | review rounds keep bouncing: read the open findings (`task show`) and the handoff, make `acceptance` unambiguous |
 | `ready_unclaimed` | no eligible worker: check `task-chain fleet list` and `bridge list`, fix capacity, roles or bridge |
+| `dispatch_failed` | the bridge could not launch a leased worker/reviewer, or it exited before confirming startup. `task show <id>` shows `blocked_on.kind=dispatch` and the provider/model/bridge/error. Fix placement or credentials, then `task unblock <id> [--note <reason>]`; editing that agent's fleet row also clears its dispatch blocks. Failed dispatches do not spend a work attempt |
 | `review_requested_from_user` | summarise the evidence for the user (`chat send --options "Approve,Request changes"`), then record their verdict (§6) |
 | `merge_conflict` / `merge_failed` | a done task's branch did not merge; the task returns to its worker with a Merge Conflict section. For `merge_failed` (merge never ran, e.g. bridge offline) check the bridge |
 | `gate_rejected` | a workflow gate was rejected: inspect the feedback, talk to the user, and retry the whole run if appropriate |

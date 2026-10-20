@@ -78,6 +78,11 @@ grant_attempt_in_uow :: proc(svc: ^Service, u: ^Uow, req: Grant_Request) -> (dom
 		}
 	}
 	inst := req.instance
+	// Resolve the actual wake selection once, so lease history, runtime facets
+	// and the bridge command agree even when reusing an older warm instance.
+	provider, model := lease_launch_model(svc, req.placement, inst)
+	defer delete(provider)
+	defer delete(model)
 	if task.kind == .Gate do return {}, false, domain.domain_error(.Conflict, "gates are never granted")
 	if req.kind == domain.LEASE_KIND_WORK && task.state != .Ready do return {}, false, domain.domain_error(.Conflict, "task is not ready")
 	if req.kind == domain.LEASE_KIND_WORK && task.stage_key == "" {
@@ -109,8 +114,8 @@ grant_attempt_in_uow :: proc(svc: ^Service, u: ^Uow, req: Grant_Request) -> (dom
 		kind = req.kind,
 		review_role = req.review_role,
 		bridge_id = req.placement.bridge_id,
-		provider = req.placement.provider,
-		model = req.placement.model,
+		provider = strings.clone(provider, context.temp_allocator),
+		model = strings.clone(model, context.temp_allocator),
 		granted_at = now,
 		confirmed_at = now if req.delivery == domain.LEASE_DELIVERY_INLINE else "",
 		expires_at = add_seconds(now, ttl),
@@ -174,8 +179,8 @@ grant_attempt_in_uow :: proc(svc: ^Service, u: ^Uow, req: Grant_Request) -> (dom
 		}
 		rt := json_begin()
 		json_str(&rt, "bridge_id", saved.bridge_id if saved.bridge_id != "" else inst.bridge_id)
-		json_str(&rt, "provider", saved.provider if saved.provider != "" else inst.provider)
-		json_str(&rt, "model", saved.model if saved.model != "" else inst.model)
+		json_str(&rt, "provider", saved.provider)
+		json_str(&rt, "model", saved.model)
 		json_str(&rt, "started_at", now)
 		json_str(&rt, "ended_at", "")
 		_, _ = save_facet_verbatim(svc, refolded, view.attempt_no, FACET_RUNTIME, json_end(&rt), FACET_WRITER_HUB)
@@ -348,7 +353,11 @@ on_instance_terminal :: proc(svc: ^Service, instance_id: string) {
 	chain_id := domain.Task_Chain_ID("")
 	owner := domain.User_ID("")
 	if lease, held, _ := iface.taskchain_get_lease_by_holder(svc.repo, instance_id); held {
-		acted = expire_lease_in_uow(svc, &u, lease, EXPIRE_INSTANCE_LOST, hub_actor()) == .Expired
+		if lease.delivery == domain.LEASE_DELIVERY_WAKE && lease.confirmed_at == "" {
+			acted = dispatch_failed_in_uow(svc, &u, lease, "instance ended before confirming startup") == .Expired
+		} else {
+			acted = expire_lease_in_uow(svc, &u, lease, EXPIRE_INSTANCE_LOST, hub_actor()) == .Expired
+		}
 		chain_id, owner = lease.chain_id, lease.owner_user_id
 	}
 	if acted do acted, _ = after_chain_change(svc, &u, chain_id, owner, .Instance_Terminal)
@@ -694,7 +703,7 @@ close_attempt :: proc(svc: ^Service, lease: domain.Task_Lease, outcome: string) 
 		provider, model := lease.provider, lease.model
 		if inst, iok, _ := iface.agent_get_instance(svc.agents, lease.holder_instance_id); iok {
 			if provider == "" do provider = inst.provider
-			if model == "" do model = inst.model
+			if model == "" && (lease.provider == "" || lease.provider == inst.provider) do model = inst.model
 		}
 		rt := json_begin()
 		json_str(&rt, "bridge_id", lease.bridge_id)

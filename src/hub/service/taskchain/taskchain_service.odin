@@ -1950,7 +1950,7 @@ upsert_fleet_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Cont
 	if save_err.code != .None do return saved, save_err
 	// Editing a row never touches live leases; the next grant uses the new
 	// placement. The engine re-evaluates review gates and ready tasks.
-	if service.engine != nil do _ = taskv2.fleet_changed(service.engine, chain)
+	if service.engine != nil do _ = taskv2.fleet_changed(service.engine, chain, trimmed_agent)
 	return saved, domain.Domain_Error{}
 }
 
@@ -1965,7 +1965,7 @@ delete_fleet_impl :: proc(service: ^Taskchain_Service, auth: contracts.Auth_Cont
 	deleted, del_err := iface.taskchain_delete_fleet(service.repo, chain.chain_id, trimmed_agent, chain.owner_user_id)
 	if del_err.code != .None do return false, del_err
 	if !deleted do return false, domain.domain_error(.Not_Found, "fleet not found")
-	if service.engine != nil do _ = taskv2.fleet_changed(service.engine, chain)
+	if service.engine != nil do _ = taskv2.fleet_changed(service.engine, chain, trimmed_agent)
 	return true, domain.Domain_Error{}
 }
 

@@ -269,7 +269,7 @@ ctl_publish_print_and_exit :: proc(response: string) {
 // ctl_v2_task_publish publishes ONE task (coordinator only). The hub route is
 // chain-scoped, so the chain is taken from --chain, else this agent's own chain
 // (context), else the task itself (task show).
-ctl_v2_task_publish :: proc(endpoint, token, tid: string, args: []string) {
+ctl_v2_task_publish :: proc(endpoint, token, tid: string, args: []string, unblock := false) {
 	chain_id := option_value(args, "--chain", "")
 	if chain_id == "" {
 		if res, ok := ctl_agent_local_call(endpoint, token, "agent.task.show", json_object(json_kv("task_id", tid))); ok {
@@ -282,13 +282,13 @@ ctl_v2_task_publish :: proc(endpoint, token, tid: string, args: []string) {
 		}
 	}
 	if chain_id == "" {
-		fmt.println(`{"ok":false,"message":"task publish could not resolve the task's chain; pass --chain <id>"}`)
+		fmt.println(`{"ok":false,"message":"could not resolve the task's chain; pass --chain <id>"}`)
 		os.exit(1)
 	}
 	params := json_object(
 		json_kv("http_method", "POST"),
-		json_kv("path", fmt.tprintf("/api/v1/task-chains/%s/tasks/%s/publish", safe_path_part(chain_id), safe_path_part(tid))),
-		json_kv("body", "{}"),
+		json_kv("path", fmt.tprintf("/api/v1/task-chains/%s/tasks/%s/%s", safe_path_part(chain_id), safe_path_part(tid), "answer" if unblock else "publish")),
+		json_kv("body", json_object(json_kv("note", option_value(args, "--note", ""))) if unblock else "{}"),
 	)
 	response, ok := ctl_agent_local_call(endpoint, token, "agent.rest.request", params)
 	if !ok { fmt.println(`{"ok":false,"message":"local Bridge endpoint is not reachable"}`); os.exit(1) }

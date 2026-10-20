@@ -142,6 +142,8 @@ Effects :: struct {
 	// keys owns the (bridge × chain) map keys of runs/stops (heap-cloned per
 	// UoW, freed in destroy_effects — never the request's temp allocator).
 	keys: [dynamic]string,
+	// Resolved wake selections must survive until the outer commit flushes.
+	owned_strings: [dynamic]string,
 }
 
 Coordinator_Notification :: struct {
@@ -307,6 +309,7 @@ move_effects :: proc(dst, src: ^Effects) {
 	append(&dst.nudges, ..src.nudges[:]); delete(src.nudges)
 	append(&dst.attention_tasks, ..src.attention_tasks[:]); delete(src.attention_tasks)
 	append(&dst.keys, ..src.keys[:]); delete(src.keys)
+	append(&dst.owned_strings, ..src.owned_strings[:]); delete(src.owned_strings)
 	src^ = Effects{}
 }
 
@@ -353,6 +356,8 @@ destroy_effects :: proc(e: ^Effects) {
 	delete(e.attention_tasks)
 	for k in e.keys do delete(k)
 	delete(e.keys)
+	for s in e.owned_strings do delete(s)
+	delete(e.owned_strings)
 }
 
 // agent_notice_command_json: a one-line notice for an agent's terminal, sent as
@@ -444,7 +449,7 @@ effect_nudge_instance :: proc(u: ^Uow, instance_id, bridge_id, line: string) {
 
 // effect_notify_coordinator queues a 1-line coordinator attention notification
 // (plan §3c: proposal_decided, blocked_on human, budget_exhausted, oscillation,
-// ready_unclaimed, chain_complete, review_requested_from_user, summary_overflow).
+// dispatch_failed, ready_unclaimed, chain_complete, review_requested_from_user, summary_overflow).
 effect_notify_coordinator :: proc(svc: ^Service, u: ^Uow, chain_id: domain.Task_Chain_ID, owner: domain.User_ID, trigger, line: string) {
 	if svc == nil || svc.repo == nil || u == nil || strings.trim_space(line) == "" do return
 	chain, cok, _ := iface.taskchain_get_chain(svc.repo, chain_id)
@@ -579,7 +584,10 @@ nudge_idle_soloist :: proc(svc: ^Service, u: ^Uow, task: domain.Task) {
 check_coordinator_attention_on_refold :: proc(svc: ^Service, u: ^Uow, before, after: domain.Task, view: Task_View, all_tasks: []domain.Task) {
 	if u == nil do return
 	if after.blocked_on_json != before.blocked_on_json && after.blocked_on_json != "" {
-		if view.budget_exhausted || strings.contains(after.blocked_on_json, `"budget_exhausted"`) {
+		if jsonx.extract_string(after.blocked_on_json, "kind", "", true, context.temp_allocator) == "dispatch" {
+			reason := jsonx.extract_string(after.blocked_on_json, "reason", "", true, context.temp_allocator)
+			effect_notify_coordinator(svc, u, after.chain_id, after.owner_user_id, "dispatch_failed", fmt.tprintf("[taskv2] dispatch_failed: task %s (%s): %s", after.task_id, after.title, reason))
+		} else if view.budget_exhausted || strings.contains(after.blocked_on_json, `"budget_exhausted"`) {
 			effect_notify_coordinator(svc, u, after.chain_id, after.owner_user_id, "budget_exhausted", fmt.tprintf("[taskv2] budget_exhausted: task %s (%s) exhausted attempt budget (#%d)", after.task_id, after.title, after.attempt_no))
 		} else if view.oscillating || strings.contains(after.blocked_on_json, `"oscillation"`) {
 			effect_notify_coordinator(svc, u, after.chain_id, after.owner_user_id, "oscillation", fmt.tprintf("[taskv2] oscillation: task %s (%s) parked after %d review rounds", after.task_id, after.title, view.review_rounds))
@@ -754,9 +762,20 @@ dep_removed :: proc(svc: ^Service, task: domain.Task, depends_on: domain.Task_ID
 }
 
 // fleet_changed re-evaluates the chain after a fleet row upsert/delete.
-fleet_changed :: proc(svc: ^Service, chain: domain.Task_Chain) -> domain.Domain_Error {
+fleet_changed :: proc(svc: ^Service, chain: domain.Task_Chain, agent_id := "") -> domain.Domain_Error {
 	u, ok, err := begin_uow(svc)
 	if !ok do return err
+	if agent_id != "" {
+		tasks, terr := iface.taskchain_list_tasks_by_chain(svc.repo, chain.chain_id, chain.owner_user_id)
+		if terr.code != .None { _, _ = end_uow(svc, &u, false); return terr }
+		for task in tasks {
+			if jsonx.extract_string(task.blocked_on_json, "kind", "", true, context.temp_allocator) != "dispatch" do continue
+			if jsonx.extract_string(task.blocked_on_json, "agent_id", "", true, context.temp_allocator) != agent_id do continue
+			if _, _, rok, rerr := record_event(svc, &u, task, hub_actor(), EV_ANSWERED, `{}`); !rok {
+				_, _ = end_uow(svc, &u, false); return rerr
+			}
+		}
+	}
 	// A fleet row added/removed changes who must review: re-evaluate the gate
 	// of every in_review task before matching (plan §2.4).
 	rok, rerr := reevaluate_gates_in_uow(svc, &u, chain)

@@ -119,7 +119,7 @@ export function getTaskBadges(task: TaskWire, _chainFleets?: any[], nowMs: numbe
     const onYou = !waitingKind || waitingKind === 'human' || waitingKind === 'user';
     badges.push({
       kind: 'blocked',
-      label: onYou ? 'Blocked on you' : `Blocked: waiting on ${waitingKind.replace(/_/g, ' ')}`,
+      label: waitingKind === 'dispatch' ? 'Dispatch failed' : onYou ? 'Blocked on you' : `Blocked: waiting on ${waitingKind.replace(/_/g, ' ')}`,
       tone: onYou ? 'danger' : 'warn',
       title: String(task.blocked_on.reason || (onYou ? 'Waiting for your answer' : 'Waiting on another task or system')),
     });
@@ -204,6 +204,9 @@ export function getTaskStatusLines(task: TaskWire, _chainFleets?: any[], nowMs: 
 
   if (state === 'backlog') {
     if (task.blocked_on) {
+      if (task.blocked_on.kind === 'dispatch') {
+        return [`Dispatch failed — ${task.blocked_on.reason || 'Agent could not start'}`, 'Update the agent’s fleet settings or retry dispatch'];
+      }
       return [
         `Blocked on you — ${task.blocked_on.reason || 'Waiting for human input'}`,
         'Nothing will move until you answer',

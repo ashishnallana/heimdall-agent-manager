@@ -33,6 +33,33 @@ test_fold_empty_is_backlog :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_fold_dispatch_refunds_only_new_work_attempts :: proc(t: ^testing.T) {
+	dispatch := `{"dispatch_failed":true,"kind":"work","waiting_on":{"kind":"dispatch","reason":"codex/model on bridge failed to start: exit 1"}}`
+	evs := []domain.Task_Event{ev(1, EV_PUBLISHED), grant(2), ev(3, EV_BLOCKED, dispatch)}
+	input := input_task()
+	input.max_attempts = 1
+	v := fold_task(evs, input)
+	testing.expect_value(t, v.state, domain.Task_State.Backlog)
+	testing.expect_value(t, v.counting_attempts, 0)
+	testing.expect(t, !v.budget_exhausted && budget_allows_grant(v, 1), "dispatch preserves the final available attempt")
+	continued := []domain.Task_Event{ev(1, EV_PUBLISHED), grant(2), ev(3, EV_HANDOFF), grant(4), ev(5, EV_BLOCKED, `{"dispatch_failed":true,"continuation":true,"kind":"work","waiting_on":{"kind":"dispatch"}}`), ev(6, EV_ANSWERED), grant(7)}
+	v2 := fold_task(continued, input)
+	testing.expect_value(t, v2.attempt_no, 1)
+	testing.expect_value(t, v2.counting_attempts, 1)
+	testing.expect_value(t, v2.state, domain.Task_State.In_Progress)
+	review := []domain.Task_Event{ev(1, EV_PUBLISHED), grant(2), ev(3, EV_SUBMITTED), ev(4, EV_LEASE_GRANTED, `{"kind":"review"}`), ev(5, EV_BLOCKED, `{"dispatch_failed":true,"kind":"review","waiting_on":{"kind":"dispatch"}}`)}
+	v3 := fold_task(review, input_task(roles = 1))
+	testing.expect_value(t, v3.state, domain.Task_State.Backlog)
+	testing.expect_value(t, v3.counting_attempts, 1)
+	testing.expect_value(t, v3.review_lease_count, 0)
+	after_answer := make([dynamic]domain.Task_Event)
+	defer delete(after_answer)
+	append(&after_answer, ..review)
+	append(&after_answer, ev(6, EV_ANSWERED))
+	testing.expect_value(t, fold_task(after_answer[:], input_task(roles = 1)).state, domain.Task_State.In_Review)
+}
+
+@(test)
 test_fold_published_with_deps_is_ready_only_when_unblocked :: proc(t: ^testing.T) {
 	evs := []domain.Task_Event{ev(1, EV_PUBLISHED)}
 	testing.expect_value(t, fold_task(evs, input_task(deps_done = true)).state, domain.Task_State.Ready)

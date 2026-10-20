@@ -38,3 +38,14 @@ resolve_launch_model :: proc(agent_service: ^agent.Agent_Service, bridge_id, pro
 	}
 	return strings.clone(provider), strings.clone(model)
 }
+
+// A provider override deliberately discards the instance's old model. Empty
+// provider/model together retain the catalog-default fleet inheritance rule.
+lease_launch_model :: proc(svc: ^Service, placement: Placement, inst: domain.Agent_Instance) -> (string, string) {
+	provider, model := resolve_launch_model(svc.agent_service, placement.bridge_id, placement.provider, placement.model)
+	if provider == "" { delete(provider); provider = strings.clone(inst.provider) }
+	if model == "" && placement.provider == "" {
+		delete(model); model = strings.clone(inst.model)
+	}
+	return provider, model
+}

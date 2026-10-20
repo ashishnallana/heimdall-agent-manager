@@ -33,9 +33,8 @@ effect_wake_lease :: proc(svc: ^Service, u: ^Uow, lease: domain.Task_Lease, task
 	if ag, aok, _ := iface.agent_get(svc.agents, inst.agent_id); aok do agent_name = ag.name
 	role := "worker"
 	if lease.kind == domain.LEASE_KIND_REVIEW do role = "reviewer"
-	provider, model := lease.provider, lease.model
-	if provider == "" do provider = inst.provider
-	if model == "" do model = inst.model
+	provider, model := lease_launch_model(svc, Placement{bridge_id = bridge_id, provider = lease.provider, model = lease.model}, inst)
+	append(&u.effects.owned_strings, provider, model)
 	entry := agent.Wake_Agent_Run_Entry{
 		agent_instance_id = inst.agent_instance_id,
 		task_id           = string(task.task_id),
@@ -137,6 +136,7 @@ flush_wakes :: proc(svc: ^Service, e: ^Effects) {
 		}
 		if sent, err := project.bridge_command_send_runtime(svc.bridge_command_sink, project.Runtime_Command{bridge_id = bridge_id, command_id = cmd_id, body_json = body}); !sent && svc.bridge_command_sink.send_runtime_command != nil {
 			fmt.eprintfln("[taskv2] wake_agent to bridge %s failed: %s", bridge_id, err.message)
+			for run in runs do on_dispatch_failed(svc, run.lease_id, err.message)
 		}
 	}
 }

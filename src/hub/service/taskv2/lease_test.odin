@@ -404,7 +404,7 @@ test_hard_cap_ignores_heartbeat :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_grant_unconfirmed_resends_once_then_expires :: proc(t: ^testing.T) {
+test_grant_unconfirmed_resends_once_then_blocks_dispatch :: proc(t: ^testing.T) {
 	fx, log, ok := lease_fixture(t, "t_unconf")
 	defer lease_fixture_close(fx, log)
 	if !ok do return
@@ -423,11 +423,19 @@ test_grant_unconfirmed_resends_once_then_expires :: proc(t: ^testing.T) {
 	testing.expect_value(t, count_events(fx, "task_1", EV_LEASE_RESENT), 1)
 	l, still := lease_of(fx, "inst_w1")
 	testing.expect(t, still && l.lease_id == lease.lease_id, "lease kept after resend")
-	// another 180 s: still unconfirmed → expire(grant_unconfirmed), non-counting? (counts: it is an expiry of a work lease)
+	// another 180 s: still unconfirmed → dispatch block, without spending work budget
 	fixture_advance(fx, GRANT_UNCONFIRMED_SECONDS + 1)
 	_ = fire_due(&fx.svc, now_ms(&fx.clock))
-	testing.expect(t, strings.contains(last_event_payload(fx, "task_1", EV_LEASE_EXPIRED), `"reason":"grant_unconfirmed"`), "expired grant_unconfirmed")
-	// start-success confirms a fresh grant and stops the clock
+	blocked := get_task(fx, "task_1")
+	testing.expect_value(t, blocked.state, domain.Task_State.Backlog)
+	testing.expect(t, strings.contains(blocked.blocked_on_json, `"kind":"dispatch"`) && strings.contains(blocked.blocked_on_json, "startup was not confirmed"), "unconfirmed delivery blocks with a reason")
+	_, held_after_timeout := lease_of(fx, "inst_w1")
+	testing.expect(t, !held_after_timeout, "no automatic retry after failed startup")
+	attempts, _ := iface.taskchain_list_attempts_by_task(&fx.repo, blocked.task_id, "u1")
+	testing.expect(t, len(attempts) == 1 && !attempts[0].counts_toward_budget, "unconfirmed startup is non-counting")
+	// Explicit retry grants again; start-success confirms it and stops the clock.
+	_, answered, _ := task_answer(&fx.svc, blocked, Actor{kind = ACTOR_USER, id = "u1"}, "fixed startup")
+	testing.expect(t, answered, "explicit retry unblocks")
 	l2, held2 := lease_of(fx, "inst_w1")
 	if testing.expect(t, held2 && l2.lease_id != lease.lease_id, "re-granted a new lease") {
 		inst, _, _ := iface.agent_get_instance(&fx.agents, "inst_w1")
@@ -515,6 +523,7 @@ test_instance_terminal_expires_and_respawns_warm_instance :: proc(t: ^testing.T)
 	lease, held := lease_of(fx, "inst_w1")
 	if !testing.expect(t, held, "leased") do return
 	// the bridge reports the instance stopped
+	confirm_holder(fx, "inst_w1")
 	inst, _, _ := iface.agent_get_instance(&fx.agents, "inst_w1")
 	inst.runtime_status = "stopped"
 	_, _, _ = iface.agent_save_instance(&fx.agents, inst)
@@ -532,6 +541,7 @@ test_instance_terminal_expires_and_respawns_warm_instance :: proc(t: ^testing.T)
 	on_instance_terminal(&fx.svc, "inst_unknown")
 	// budget: after 5 counting expiries the task parks in backlog blocked on human
 	for i in 0..<4 {
+		confirm_holder(fx, "inst_w1")
 		on_instance_terminal(&fx.svc, "inst_w1")
 	}
 	parked := get_task(fx, "task_1")

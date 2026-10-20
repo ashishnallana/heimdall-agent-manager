@@ -476,6 +476,10 @@ ctl_v2_task :: proc(endpoint, token: string, tokens, args: []string) {
 		tid := pos(tokens, 1)
 		if tid == "" { print_agent_help([]string{"task"}); return }
 		ctl_v2_task_publish(endpoint, token, tid, args)
+	case "unblock":
+		tid := pos(tokens, 1)
+		if tid == "" { print_agent_help([]string{"task"}); return }
+		ctl_v2_task_publish(endpoint, token, tid, args, unblock = true)
 	case "fetch":
 		ctl_v2_task_fetch(endpoint, token, tokens, args)
 	case:
@@ -1951,6 +1955,8 @@ print_help_task :: proc() {
 	fmt.println("  list                                    List your chain's tasks; each carries a comment_summary")
 	fmt.println("                                          (count, last_comment_at, author, preview) — not bodies.")
 	fmt.println("  show <task-id>                          Show a task + brief + comment_summary (no bodies).")
+	fmt.println("  unblock <task-id> [--note <reason>]     Coordinator/owner clears a blocker and retries matching.")
+	fmt.println("                                          Dispatch failures do not spend attempts; fix the cause first.")
 	fmt.println("  comments <task-id> [--last N]           Fetch comment bodies; --last N = newest N (max 100).")
 	fmt.println("  fetch <task-id> <ref>                   Fetch one event (#<event_id>), output (output:<task_id>),")
 	fmt.println("                                          facet (facet:<task_id>:<attempt_no>:<kind>), or file at commit")
@@ -1994,6 +2000,7 @@ print_help_task :: proc() {
 	fmt.println("  ham-ctl task update task_1 --verify \"nix develop . --command odin test src/hub/service/taskv2\"")
 	fmt.println("  ham-ctl task update task_1 --assignee agt_worker --reviewer agt_a --reviewer agt_b")
 	fmt.println("  ham-ctl task publish task_1")
+	fmt.println("  ham-ctl task unblock task_1 [--note <reason>]  (coordinator/owner; retry a dispatch block after fixing placement)")
 	fmt.println("  ham-ctl task fetch task_1 facet:task_1:2:handoff")
 	fmt.println("  ham-ctl task fetch task_1 src/main.odin@HEAD")
 	fmt.println("  ham-ctl task comment task_1 --body 'pushed fix' --notify inst_rev")
