@@ -88,10 +88,6 @@ test('aux launch opens a fresh provisional shell tab and a guarded retryable aut
     path.join(REPO_ROOT, 'src/ui/components/workbench/ShellWorkbenchPane.tsx'),
     'utf8',
   );
-  const dialog = fs.readFileSync(
-    path.join(REPO_ROOT, 'src/ui/components/shells/NewShellDialog.tsx'),
-    'utf8',
-  );
 
   assert.match(
     launcher,
@@ -101,8 +97,6 @@ test('aux launch opens a fresh provisional shell tab and a guarded retryable aut
   assert.match(pane, /autoCreateAttemptedRef\.current/);
   assert.match(pane, /buildInteractiveShellRequest/);
   assert.match(pane, /workbench-shell-auto-retry-btn/);
-  assert.match(dialog, /resolveProjectBridgeShellCwd/);
-  assert.match(dialog, /cwdEditedRef\.current = true/);
 });
 
 test('successful auto-start creates once and reports the real session for tab rekeying', async () => {

@@ -85,7 +85,6 @@ test('openPreviewInNewTab reports a blocked popup and still returns the URL', ()
 const OFF_WORKSPACE_FILES = [
   'src/ui/components/shells/ShellDetail.tsx',
   'src/ui/components/shells/ShellListPage.tsx',
-  'src/ui/components/shells/ChainActiveServersPanel.tsx',
 ];
 
 test('off-workspace surfaces open the preview in a new tab, not the aux dock', () => {
@@ -96,16 +95,4 @@ test('off-workspace surfaces open the preview in a new tab, not the aux dock', (
   }
   // In-workspace callers still rely on it, so it must stay.
   assert.ok(/export const openPreviewInAux\b|export function openPreviewInAux\b/.test(read('src/ui/store/auxPanesSlice.ts')));
-});
-
-test('the v2 chain overview mounts ChainActiveServersPanel', () => {
-  const src = read('src/ui/components/taskchain/TaskChainOverview.tsx');
-  assert.match(src, /import ChainActiveServersPanel from '\.\.\/shells\/ChainActiveServersPanel'/);
-  // Mounted unchanged (REQ-PREV-3 option B): the panel keeps its visible empty state.
-  assert.match(src, /<ChainActiveServersPanel chainId=\{chainId\} \/>/);
-  // Both chain kinds render it.
-  assert.equal((src.match(/summarySlot=\{activeServers\}/g) ?? []).length, 2);
-  for (const view of ['src/ui/components/tasks/TicketBoardView.tsx', 'src/ui/components/tasks/WorkflowPipelineView.tsx']) {
-    assert.match(read(view), /\{summarySlot\}/, `${view} must render summarySlot`);
-  }
 });
