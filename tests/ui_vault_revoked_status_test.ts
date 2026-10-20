@@ -65,6 +65,8 @@ test('the hub alone saying "revoked" drops in-memory keys but keeps the identity
 
 test('a revocation in the verified log marks the device revoked; only then may it re-enroll', async () => {
   const { hub, root, kv, rec, deviceId, pins } = await readyBrowser({ revoked: false });
+  // The last-approver guard refuses to leave the root as the only approver.
+  await hub.addBrowser(root, await newBrowser(), 'Tablet');
   await hub.revoke(root, deviceId);
   await dv.refreshDeviceVault('revoked');
   assert.equal(rec.last('deviceVault/deviceVaultStatusChanged').status, 'revoked');
