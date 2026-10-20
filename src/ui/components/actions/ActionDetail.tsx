@@ -714,4 +714,4 @@ export function ActionDetailPaneSkeleton() {
   );
 }
 
-export { actionTitle, Card as ActionDetailCard };
+export { actionTitle };

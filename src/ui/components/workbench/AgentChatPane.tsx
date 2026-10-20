@@ -148,13 +148,6 @@ export interface AgentChatPaneProps {
   headerEnd?: React.ReactNode;
 }
 
-export function stripArtifactLinks(text: string): string {
-  return String(text || '')
-    .replace(/https?:\/\/[^\s)]+\/api\/v1\/artifacts\/[A-Za-z0-9_-]+\/download/g, '')
-    .replace(/\/api\/v1\/artifacts\/[A-Za-z0-9_-]+\/download/g, '')
-    .trim();
-}
-
 type Message = {
   message_id?: string;
   messageId?: string;

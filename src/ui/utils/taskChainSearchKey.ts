@@ -67,23 +67,6 @@ export function clearActiveTaskChainSearchKey(): void {
   setActiveTaskChainSearchKey(null);
 }
 
-export function beginTaskChainSearchKeyDerivation(epochKey: string | Uint8Array, epoch: number): Promise<TaskChainSearchKey> {
-  const generation = ++keyGeneration;
-  activeTaskChainSearchKey = null;
-  const pending = deriveTaskChainSearchKey(epochKey, epoch).then((key) => {
-    if (keyGeneration === generation) {
-      activeTaskChainSearchKey = key;
-      pendingTaskChainSearchKey = null;
-    }
-    return key;
-  }, (error) => {
-    if (keyGeneration === generation) pendingTaskChainSearchKey = null;
-    throw error;
-  });
-  pendingTaskChainSearchKey = pending;
-  return pending;
-}
-
 export async function waitForActiveTaskChainSearchKey(): Promise<TaskChainSearchKey | null> {
   if (activeTaskChainSearchKey) return activeTaskChainSearchKey;
   if (!pendingTaskChainSearchKey) return null;

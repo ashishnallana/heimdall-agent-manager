@@ -1,5 +1,5 @@
 import type { VaultKeyring } from '../../utils/vaultKeyring';
-import { apiErrorText, cookieJsonFetch, cookieJsonFetchEnvelope, cookieMutation } from '../cookieFetch';
+import { cookieJsonFetch, cookieJsonFetchEnvelope, cookieMutation } from '../cookieFetch';
 import { heimdallApi } from '../heimdallApi';
 import { encryptVaultText, decryptVaultText, isVaultArmored, getActiveVaultKey } from '../../utils/vaultContent';
 
@@ -186,25 +186,6 @@ export function normalizeIssueVote(record: any): IssueVote {
     createdAt: String(record?.created_at || record?.createdAt || ''),
     created_at: String(record?.created_at || record?.createdAt || ''),
   };
-}
-
-export async function fetchIssuePage(
-  args: IssueListFilter & { signal?: AbortSignal },
-): Promise<IssuePage> {
-  const { signal, ...arg } = args;
-  const body = await cookieJsonFetchEnvelope(issueListPath(arg), { signal });
-  const data = body?.data ?? body;
-  const page = body?.page ?? {};
-  const rawItems = Array.isArray(data) ? data : data?.items || [];
-  return {
-    items: rawItems.map(normalizeIssue),
-    has_more: Boolean(page?.has_more),
-    limit: Number(page?.limit || 50),
-  };
-}
-
-export function issueErrorText(err: unknown, fallback = 'Something went wrong'): string {
-  return apiErrorText(err, fallback);
 }
 
 export type CreateIssueInput = {
@@ -554,7 +535,6 @@ export const {
   useListIssueCommentsQuery,
   useAddIssueCommentMutation,
   useDeleteIssueCommentMutation,
-  useListIssueVotesQuery,
   useVoteIssueMutation,
   useUnvoteIssueMutation,
 } = issuesApi;

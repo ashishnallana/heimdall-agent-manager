@@ -308,13 +308,6 @@ export const {
 } = lspApi;
 
 export const {
-  useFetchPreferencesQuery,
-  useSavePreferenceMutation,
-  useFetchAgentDefaultsQuery,
-  useSaveAgentDefaultMutation,
-  useFetchSettingsCatalogQuery,
-  useFetchAgentTemplateQuery,
-  useLazyFetchAgentTemplateQuery,
   useFetchExperimentsQuery,
   useSetExperimentMutation,
   useFetchTelemetryDefaultEnabledQuery,

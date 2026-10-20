@@ -77,7 +77,5 @@ export const bridgeFsApi = heimdallApi.injectEndpoints({
 export const {
   useListBridgeDirQuery,
   useLazyListBridgeDirQuery,
-  useLazyStatBridgePathQuery,
-  useStatBridgePathQuery,
   useMkdirBridgePathMutation,
 } = bridgeFsApi;

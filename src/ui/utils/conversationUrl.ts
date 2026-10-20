@@ -69,11 +69,6 @@ export function parseConversationIdsFromRoute(
   return { ids, focused };
 }
 
-/** True when the route explicitly carried a `?focused=` param. */
-export function routeHasFocusedParam(search: string): boolean {
-  return new URLSearchParams(search.startsWith('?') ? search.slice(1) : search).has('focused');
-}
-
 /**
  * Builds the `#`-prefixed hash for a pane set. A single view omits `focused`
  * (canonical legacy shape); split views always carry it.

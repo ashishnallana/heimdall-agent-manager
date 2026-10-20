@@ -966,4 +966,4 @@ export function ShellDetailPaneSkeleton() {
   );
 }
 
-export { shellTitle, Card as ShellDetailCard };
+export { shellTitle };

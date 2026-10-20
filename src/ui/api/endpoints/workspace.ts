@@ -192,18 +192,3 @@ export const workspaceApi = heimdallApi.injectEndpoints({
     }),
   }),
 });
-
-export const {
-  useListChainsQuery,
-  useFetchChainsPageQuery,
-  useLazyFetchChainsPageQuery,
-  useFetchChainQuery,
-  useFocusChainMutation,
-  useUpdateChainMutation,
-  useUpdateChainStatusMutation,
-  useFetchWorkspaceQuery,
-  usePreviewWorkspaceMergeQuery,
-  useLazyPreviewWorkspaceMergeQuery,
-  useFetchWorkspaceDiffQuery,
-  useLazyFetchWorkspaceDiffQuery,
-} = workspaceApi;

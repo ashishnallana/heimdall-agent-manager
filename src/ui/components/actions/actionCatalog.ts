@@ -53,8 +53,6 @@ function sliceFrom(entries: CatalogEntry[], loading: boolean, failed: boolean): 
   return { state, byId, all: entries };
 }
 
-const EMPTY_SLICE: CatalogSlice = { state: 'empty', byId: new Map(), all: [] };
-
 export interface ActionCatalog {
   instances: CatalogSlice;
   agents: CatalogSlice;
@@ -184,16 +182,6 @@ export function useActionCatalog(): ActionCatalog {
     [instances, agents, bridges, projects],
   );
 }
-
-/** A catalog shaped like the real one but resolving nothing — for a row rendered
- *  before the lookups land, so a name never flickers in from `undefined`. */
-export const EMPTY_CATALOG: ActionCatalog = {
-  instances: EMPTY_SLICE,
-  agents: EMPTY_SLICE,
-  bridges: EMPTY_SLICE,
-  projects: EMPTY_SLICE,
-  loading: false,
-};
 
 /**
  * The target's human name. Falls back to the raw id — never to blank, so a failed

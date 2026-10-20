@@ -150,11 +150,6 @@ export async function signP256(privateKey: CryptoKey, msg: Uint8Array): Promise<
 
 export const STATEMENT_HEADER = 'heimdall-vault-statement/v2';
 export const STATEMENT_TYPES = ['genesis', 'approve', 'revoke', 'rotate', 'wrap', 'register'] as const;
-/** Statement types that occupy a slot in the signed directory log. */
-export const LOG_OP_TYPES = ['genesis', 'approve', 'revoke', 'rotate'] as const;
-/** Log ops that introduce a new current epoch (their epoch + epoch_commit). */
-export const EPOCH_INTRODUCING_TYPES = ['genesis', 'revoke', 'rotate'] as const;
-export type StatementType = (typeof STATEMENT_TYPES)[number];
 
 export const STATEMENT_FIELDS = [
   'type', 'user_id', 'seq', 'prev_hash', 'issuer_device_id', 'issued_at_ms',

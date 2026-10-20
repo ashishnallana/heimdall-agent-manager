@@ -143,7 +143,6 @@ export const FS_ERROR_CODES = [
   'move_failed',
   'delete_failed',
 ] as const;
-export type FsErrorCode = (typeof FS_ERROR_CODES)[number] | '';
 
 // ---- Cache key helpers ------------------------------------------------------
 
@@ -567,7 +566,6 @@ async function decryptSearchMatches(rawMatches: any[], activeKey?: VaultKeyring 
 }
 
 export const {
-  useListProjectDirQuery,
   useLazyListProjectDirQuery,
   useReadProjectFileQuery,
   useLazyReadProjectFileQuery,
@@ -577,12 +575,7 @@ export const {
   useDeleteProjectPathMutation,
   useWriteProjectFileMutation,
   useBatchWriteProjectFilesMutation,
-  useQuickOpenProjectFilesQuery,
   useLazyQuickOpenProjectFilesQuery,
-  useSearchProjectFilesQuery,
-  useLazySearchProjectFilesQuery,
-  useSearchInstanceFilesQuery,
-  useLazySearchInstanceFilesQuery,
 } = projectFsApi;
 
 // ---- Multi-scope search orchestration & deduplication helpers ----------------

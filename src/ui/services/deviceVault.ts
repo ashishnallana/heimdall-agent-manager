@@ -35,7 +35,7 @@ import {
 import { isVaultSupported } from '../utils/vaultCrypto';
 import { pinsFromChain, trustedBridgeById, verifyDirectory, type VaultDirectory, type VerifiedChain } from '../utils/vaultDirectoryVerify';
 import { clearKeyringSession, getKeyringSession, installKeyringFromWrap, withKeyringBytes } from '../utils/vaultKeyringSession';
-import { buildBrowserApproval, buildGenesis, buildPairedRegistration, revokeWithRetry, rotateWithRetry, type RevokeOutcome, type RotateOutcome } from '../utils/vaultDeviceFlows';
+import { buildBrowserApproval, buildGenesis, buildPairedRegistration, revokeWithRetry, type RevokeOutcome } from '../utils/vaultDeviceFlows';
 import { derivePairKeys, generatePairCode, generatePairSalt, isPairHubOrigin, isPairSalt, pairCodeSymbols, PAIR_CODE_TTL_MS, verifyPairApproveMac, type PairContext } from '../utils/vaultPairing';
 import { asApproverIdentity, buildRecoveryKey, openRecoveryKey, RecoveryKeyError } from '../utils/vaultRecovery';
 import { openVerifiedWrap } from '../utils/vaultKeyringWrap';
@@ -513,14 +513,6 @@ function noticePending(c: Ctx, chain: VerifiedChain): void {
   c.lastPendingIds = new Set(chain.pending.map((p) => p.device_id));
 }
 
-/** Pending devices that appeared since the last refresh (for the approval toast). */
-export function takeNewPendingDevices(chain: VerifiedChain): string[] {
-  if (!ctx) return [];
-  const fresh = chain.pending.map((p) => p.device_id).filter((id) => !ctx!.lastPendingIds.has(id));
-  noticePending(ctx, chain);
-  return fresh;
-}
-
 async function runGenesis(c: Ctx): Promise<void> {
   const dispatch = c.dispatch;
   const kv = d().kv;
@@ -893,29 +885,6 @@ export async function revokeRetiredHint(): Promise<{ revoked: string | null }> {
   await save();
   const { outcome } = await revokeDevice(target);
   return { revoked: outcome.kind === 'revoked' ? target : null };
-}
-
-/** Explicit user rotation: a signed `rotate` to a new epoch, then re-unseal every approved online bridge. */
-export async function rotateKeys(): Promise<{ outcome: RotateOutcome; bridges: BridgeFanoutResult }> {
-  const c = ctx;
-  if (!c?.identity) throw new Error('This device cannot sign');
-  let bridges: BridgeFanoutResult = { succeeded: [], failed: [] };
-  const outcome = await rotateWithRetry(c.identity, {
-    fetchChain: async () => {
-      const { chain } = await fetchVerifiedChain();
-      await ensureKeyringCurrent(chain);
-      return chain;
-    },
-    withKeyringBytes: (chain, fn) => withKeyringBytes(fn, chain),
-    post: (body) => d().api.postRotateDirectory(body, deviceSignerContext()!),
-    isConflict: (err) => isStatus(err, 409),
-    afterRotation: async () => {
-      await refreshDeviceVault('rotated');
-      bridges = await unsealApprovedBridges();
-      ctx?.dispatch(bridgeKeyDeliveryReported(bridges));
-    },
-  });
-  return { outcome, bridges };
 }
 
 /** Revoke a device (never this one): new epoch, wraps to the rest, re-unseal bridges. */

@@ -334,50 +334,6 @@ export const sendGuideMessage = createAsyncThunk('chat/sendGuideMessage', async 
   return { messageId: res.messageId };
 });
 
-export const startAgentInstance = createAsyncThunk('chat/startAgentInstance', async (agent: any, { dispatch, getState }) => {
-  const { session } = (getState() as any).chat;
-  await daemonApi.startAgent({
-    daemonUrl: session.daemonUrl,
-    agentInstanceId: agent.id,
-    provider: agent.providerProfile || agent.agent_class || '',
-    templateId: agent.templateId,
-    projectId: agent.projectId,
-    model: agent.model,
-  });
-  dispatch(refreshAgents());
-});
-
-export const stopAgentInstance = createAsyncThunk('chat/stopAgentInstance', async (agentInstanceId: string, { dispatch, getState }) => {
-  const { session } = (getState() as any).chat;
-  await daemonApi.stopAgent({
-    daemonUrl: session.daemonUrl,
-    agentInstanceId,
-  });
-  dispatch(refreshAgents());
-});
-
-export const reorderAgentsFromUi = createAsyncThunk(
-  'chat/reorderAgentsFromUi',
-  async (agentIds: string[], { dispatch, getState }) => {
-    const state = getState() as any;
-    const { session } = state.chat;
-    try {
-      const result = await daemonApi.reorderAgents({
-        daemonUrl: session.daemonUrl,
-        clientInstanceId: session.clientInstanceId,
-        clientToken: session.clientToken,
-        agentIds,
-      });
-      await (dispatch as any)(refreshAgents());
-      return result;
-    } catch (err) {
-      await (dispatch as any)(refreshAgents());
-      throw err;
-    }
-  }
-);
-
-
 function getAgentIdFromPayload(payload: any, selectedAgentId: string): string {
   if (typeof payload === 'string') return payload;
   if (payload && typeof payload === 'object') return payload.agentId || selectedAgentId;
@@ -418,7 +374,6 @@ const initialState = {
   fetchingChatsByAgentId: {} as Record<string, boolean>,
   activeView: 'chat' as 'chat' | 'settings' | 'tasks' | 'memory' | 'memoryAudit' | 'projects' | 'agents' | 'startAgent',
 };
-
 
 const chatSlice = createSlice({
   name: 'chat',
@@ -773,21 +728,4 @@ const chatSlice = createSlice({
 });
 
 export const { selectAgent, setView, setDaemonUrl, addDaemonProfile, renameDaemonProfile, removeDaemonProfile, updateSessionConfig, clearUserClientState, userWsConnecting, userWsConnected, userWsDisconnected, userWsError, chatEventReceived, testStartReceived, testDoneReceived, setTestRuns, appendMessage, patchChatMessageStatus, receiveChatPage, openGuidePanel, closeGuidePanel, toggleGuidePanel } = chatSlice.actions;
-
-export const markCoordinatorRead = createAsyncThunk('chat/markCoordinatorRead', async (agentInstanceId: string, { getState }) => {
-  const state = getState() as any;
-  const { session } = state.chat;
-  if (!agentInstanceId || !session.clientToken || !session.clientInstanceId) return { agentInstanceId, ok: false };
-  try {
-    await daemonApi.markChatRead({
-      daemonUrl: session.daemonUrl,
-      clientInstanceId: session.clientInstanceId,
-      clientToken: session.clientToken,
-      agentInstanceId,
-    });
-    return { agentInstanceId, ok: true };
-  } catch (_err) {
-    return { agentInstanceId, ok: false };
-  }
-});
 export default chatSlice.reducer;

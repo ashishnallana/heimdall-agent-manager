@@ -44,10 +44,6 @@ export type ChainLike = {
   default_reviewer_agent_instance_id?: string;
 };
 
-export function taskIdOf(task: TaskLike | null | undefined): string {
-  return String(task?.taskId || task?.task_id || '');
-}
-
 export function chainIdOfTask(task: TaskLike | null | undefined): string {
   // TODO(FIX): Replace loose fallback chain with canonical typed schema property
   return String(task?.chainId || task?.chain_id || '');
@@ -111,67 +107,10 @@ export function isInstanceCoordinatorOf(chain: ChainLike | null | undefined, age
   return String(chain?.coordinatorAgentInstanceId || chain?.coordinator_agent_instance_id || '') === agentInstanceId;
 }
 
-// Tasks belonging to a specific chain.
-// TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
-export function chainTasks(tasksById: Record<string, any>, chainId: string): TaskLike[] {
-  if (!chainId || !tasksById) return [];
-  return Object.values(tasksById)
-    // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
-    .filter((task: any) => chainIdOfTask(task) === chainId)
-    .filter(Boolean);
-}
-
-// Tasks needing the user's review in this chain: review_ready + user is effective reviewer.
-// Ordered oldest-first (oldest is the one the review chip opens).
-export function deriveReviewNeededTasks(tasks: TaskLike[]): TaskLike[] {
-  return tasks
-    .filter((task) => taskStatusOf(task) === 'review_ready' && isUserEffectiveReviewer(task))
-    .sort((a, b) => taskCreatedMs(a) - taskCreatedMs(b));
-}
-
 export type CurrentTaskPick = {
   task: TaskLike;
   role: 'assignee' | 'reviewer' | 'coordinator' | 'assigned' | 'observer';
 };
-
-// Derive the single current actionable task for an agent instance, following the
-// design-doc selection order:
-//   1. task where effective assignee is this instance and status is in_progress
-//   2. else task where this instance is effective reviewer and status is review_ready
-//   3. else next assigned/unblocked task for this instance
-//   4. else null
-export function deriveCurrentTask(tasks: TaskLike[], agentInstanceId: string): CurrentTaskPick | null {
-  if (!agentInstanceId || !tasks.length) return null;
-
-  // 1. in_progress assigned to this instance
-  const inProgressAssigned = tasks.find(
-    (task) => taskAssigneeOf(task) === agentInstanceId && taskStatusOf(task) === 'in_progress',
-  );
-  if (inProgressAssigned) return { task: inProgressAssigned, role: 'assignee' };
-
-  // 2. review_ready where this instance is effective reviewer
-  const reviewing = tasks.find(
-    (task) => taskStatusOf(task) === 'review_ready' && isInstanceEffectiveReviewer(task, agentInstanceId),
-  );
-  if (reviewing) return { task: reviewing, role: 'reviewer' };
-
-  // 3. next assigned/unblocked task for this instance (active statuses)
-  const activeStatuses = new Set(['in_progress', 'review_ready', 'queued', 'ready', 'planning', 'blocked']);
-  const queued = tasks
-    .filter((task) => taskAssigneeOf(task) === agentInstanceId && activeStatuses.has(taskStatusOf(task)))
-    .sort((a, b) => assignmentRank(taskStatusOf(a)) - assignmentRank(taskStatusOf(b)) || taskCreatedMs(a) - taskCreatedMs(b));
-  if (queued.length > 0) return { task: queued[0], role: 'assigned' };
-
-  return null;
-}
-
-function assignmentRank(status: string): number {
-  if (status === 'in_progress') return 0;
-  if (status === 'blocked') return 1;
-  if (status === 'review_ready') return 2;
-  if (status === 'queued' || status === 'ready' || status === 'planning') return 3;
-  return 4;
-}
 
 export type ChainProgressInfo = {
   total: number;
@@ -179,38 +118,3 @@ export type ChainProgressInfo = {
   inProgress: number;
   reviewReady: number;
 };
-
-export function deriveChainProgress(tasks: TaskLike[]): ChainProgressInfo {
-  const live = tasks.filter((task) => !CHAIN_PROGRESS_EXCLUDED_STATUSES.has(taskStatusOf(task)));
-  return {
-    total: live.length,
-    completed: live.filter((task) => taskStatusOf(task) === 'approved' || taskStatusOf(task) === 'completed' || taskStatusOf(task) === 'done').length,
-    inProgress: live.filter((task) => taskStatusOf(task) === 'in_progress').length,
-    reviewReady: live.filter((task) => taskStatusOf(task) === 'review_ready').length,
-  };
-}
-
-// CT-9: tasks an instance can be MANUALLY switched to as its current task — those
-// it is the assignee of (any non-terminal work status) or an effective reviewer of
-// (awaiting validation). Ordered oldest-first for a stable dropdown.
-const SWITCHABLE_TERMINAL_STATUSES = new Set(['completed', 'approved', 'done', 'cancelled', 'archived', 'abandoned']);
-export function switchableTasksFor(tasks: TaskLike[], agentInstanceId: string): TaskLike[] {
-  if (!agentInstanceId || !tasks?.length) return [];
-  return tasks
-    .filter((task) => {
-      const status = taskStatusOf(task);
-      if (SWITCHABLE_TERMINAL_STATUSES.has(status)) return false;
-      const isAssignee = taskAssigneeOf(task) === agentInstanceId;
-      const isReviewer = isInstanceEffectiveReviewer(task, agentInstanceId) && (status === 'in_validation' || status === 'review_ready');
-      return isAssignee || isReviewer;
-    })
-    .sort((a, b) => taskCreatedMs(a) - taskCreatedMs(b));
-}
-
-// Role label for the current actor relative to a task.
-export function taskRoleLabel(task: TaskLike, agentInstanceId: string, chain?: ChainLike | null): 'assignee' | 'reviewer' | 'coordinator' | 'observer' {
-  if (chain && isInstanceCoordinatorOf(chain, agentInstanceId)) return 'coordinator';
-  if (taskAssigneeOf(task) === agentInstanceId) return 'assignee';
-  if (isInstanceEffectiveReviewer(task, agentInstanceId) || isUserEffectiveReviewer(task)) return 'reviewer';
-  return 'observer';
-}

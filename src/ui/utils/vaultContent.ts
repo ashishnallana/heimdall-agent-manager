@@ -208,22 +208,3 @@ export async function decryptList<T>(
   const cryptoKey = await resolveKeyring(key);
   return await Promise.all(items.map((item) => decryptFields(item, fields, cryptoKey)));
 }
-
-/**
- * Declarative array transformer: encrypts specified string fields for each object in an array.
- *
- * @param items Array of target objects.
- * @param fields List of keys to encrypt on each item.
- * @param key The keyring, or fallback to the active keyring.
- */
-export async function encryptList<T>(
-  items: T[],
-  fields: (keyof T)[],
-  key?: VaultKeyring | null,
-): Promise<T[]> {
-  if (!Array.isArray(items)) {
-    return [];
-  }
-  const cryptoKey = await resolveKeyring(key);
-  return await Promise.all(items.map((item) => encryptFields(item, fields, cryptoKey)));
-}

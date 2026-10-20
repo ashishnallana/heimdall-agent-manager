@@ -78,11 +78,6 @@ function clipboardPngFromEvent(event: any): { file: File | null; hasImage: boole
   return { file: null, hasImage, unsupportedImage: hasImage };
 }
 
-export function appendArtifactLink(current: string, link: string) {
-  const trimmed = String(current || '').replace(/\s+$/, '');
-  return trimmed ? `${trimmed}\n${link}` : link;
-}
-
 export type ArtifactUploadContext = {
   projectId?: string;
   originRef?: string;

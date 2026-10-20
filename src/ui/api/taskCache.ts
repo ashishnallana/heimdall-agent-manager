@@ -129,13 +129,3 @@ export const selectTaskCacheProjection = createSelector([selectApiQueries], (que
 export function selectCachedTaskById(state: any, taskId: string) {
   return taskId ? selectTaskCacheProjection(state).tasksById?.[taskId] || null : null;
 }
-
-export function selectCachedChainTasks(state: any, chainId: string) {
-  const projection = selectTaskCacheProjection(state);
-  const taskIds = projection.chainTaskIds?.[chainId] || [];
-  return taskIds.map((taskId: string) => projection.tasksById?.[taskId]).filter(Boolean);
-}
-
-export function selectCachedTaskLog(state: any, taskId: string) {
-  return taskId ? selectTaskCacheProjection(state).taskLogsByTaskId?.[taskId] || [] : [];
-}

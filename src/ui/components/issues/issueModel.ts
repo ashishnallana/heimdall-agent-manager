@@ -100,25 +100,6 @@ export interface IssueListUrlState {
   q: string;
 }
 
-export const EMPTY_ISSUE_LIST_URL_STATE: IssueListUrlState = {
-  status: '',
-  scope: '',
-  target: '',
-  chain: '',
-  q: '',
-};
-
-export function parseIssueListUrl(search: string): IssueListUrlState {
-  const params = new URLSearchParams(search.startsWith('?') ? search.slice(1) : search);
-  return {
-    status: String(params.get('status') || ''),
-    scope: String(params.get('scope') || ''),
-    target: String(params.get('target') || ''),
-    chain: String(params.get('chain') || ''),
-    q: String(params.get('q') || ''),
-  };
-}
-
 export function issueListSearch(state: IssueListUrlState): string {
   const params = new URLSearchParams();
   if (state.status) params.set('status', state.status);
@@ -155,14 +136,6 @@ export function navigateTo(href: string): void {
   window.location.hash = href.startsWith('#') ? href.slice(1) : href;
 }
 
-export function replaceIssueListSearch(state: IssueListUrlState): void {
-  window.history.replaceState(
-    window.history.state,
-    '',
-    buildRouteHash(ISSUES_LIST_PATH, issueListSearch(state)),
-  );
-}
-
 export interface IssueCrumb {
   label: string;
   href?: string;
@@ -176,14 +149,6 @@ export function newCrumbs(): IssueCrumb[] {
   return [
     { label: 'Issues', href: issuesListHref() },
     { label: 'New Issue' },
-  ];
-}
-
-export function viewCrumbs(issue: any): IssueCrumb[] {
-  const title = issue ? issueTitle(issue) : 'Issue';
-  return [
-    { label: 'Issues', href: issuesListHref() },
-    { label: title },
   ];
 }
 

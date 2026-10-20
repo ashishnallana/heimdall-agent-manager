@@ -38,9 +38,6 @@ export function pairingHubOrigin(): string {
 
 /** fetch is injectable for hermetic tests. */
 let fetchImpl: typeof fetch = (input, init) => fetch(input, init);
-export function setVaultDevicesFetch(f: typeof fetch | null): void {
-  fetchImpl = f ?? ((input, init) => fetch(input, init));
-}
 
 async function vaultRequest(method: string, path: string, opts: { body?: unknown; signed?: VaultSignerContext } = {}): Promise<any> {
   const fullPath = `${API}${path}`;

@@ -66,8 +66,6 @@ export const SCOPE_DIMS: {
   { key: 'templateIds', label: 'Templates', allLabel: 'All templates', debug: 'template', chip: 'border-warning/30 bg-warning-soft text-warning' },
 ];
 
-export const MEMORY_TYPES = ['fact', 'habit', 'episode', 'expertise', 'skill'];
-
 export function emptyTargeting(): Targeting {
   return { agentIds: [], projectIds: [], bridgeIds: [], templateIds: [] };
 }
@@ -359,6 +357,3 @@ export function ScopeEditor({ targeting, catalog, onChange, debugId, disabled = 
     </div>
   );
 }
-
-/** EL-023: the unified scope selector, named for the design system. `ScopeField` === `ScopeEditor`. */
-export { ScopeEditor as ScopeField };

@@ -96,7 +96,6 @@ async function requestFormJson(url: string, { method = 'POST', body, headers, ti
   }
 }
 
-
 function joinUrl(baseUrl: string, path: string) {
   return `${baseUrl.replace(/\/$/, '')}${path}`;
 }
@@ -126,30 +125,11 @@ export async function listAgentTemplates({ daemonUrl }: { daemonUrl: string }) {
   return data.templates ?? [];
 }
 
-export async function saveAgentTemplate({ daemonUrl, template }: { daemonUrl: string; template: any }) {
-  return requestJson(joinUrl(daemonUrl, template?.update ? '/agents/templates/update' : '/agents/templates/create'), {
-    method: 'POST',
-    body: template || {},
-  });
-}
-
 export async function showAgentTemplate({ daemonUrl, templateId }: { daemonUrl: string; templateId: string }) {
   return requestJson(joinUrl(daemonUrl, '/agents/templates/show'), {
     method: 'POST',
     body: { template_id: templateId },
   });
-}
-
-export async function archiveAgentTemplate({ daemonUrl, templateId }: { daemonUrl: string; templateId: string }) {
-  return requestJson(joinUrl(daemonUrl, '/agents/templates/archive'), {
-    method: 'POST',
-    body: { template_id: templateId },
-  });
-}
-
-export async function listKnownAgents({ daemonUrl, projectId = '' }: { daemonUrl: string; projectId?: string }) {
-  const data = await listKnownAgentsCatalog({ daemonUrl, projectId });
-  return data.agents;
 }
 
 export async function listKnownAgentsCatalog({
@@ -187,18 +167,6 @@ export async function listKnownAgentsCatalog({
     limit: Number(data.limit || 0),
     offset: Number(data.offset || 0),
     hasMore: Boolean(data.has_more || data.hasMore),
-  };
-}
-
-export async function listKnownAgentsPage({ daemonUrl, projectId = '', limit = 20, offset = 0 }: { daemonUrl: string; projectId?: string; limit?: number; offset?: number }) {
-  const data = await listKnownAgentsCatalog({ daemonUrl, projectId, limit, offset });
-  return {
-    agents: data.agents,
-    limit: data.limit,
-    offset: data.offset,
-    nextOffset: data.offset + data.agents.length,
-    hasMore: data.hasMore,
-    total: data.total,
   };
 }
 
@@ -245,76 +213,10 @@ export async function startAgent({ daemonUrl, agentId, agentInstanceId = '', pro
   });
 }
 
-// UI-8: Add agent to chain. Creates a new AgentInstance bound to an EXISTING
-// chain_id via POST /api/v1/agent-instances (the rewrite API), as documented in
-// the architecture doc and confirmed ready in the gap analysis. This never
-// attaches an unrelated live instance from another chain — it hydrates a fresh
-// instance into the current chain and creates its 1:1 conversation.
-export async function createAgentInstanceInChain({ daemonUrl, clientToken, agentId, chainId, bridgeId, providerProfile, model, projectId, displayName, templateId }: { daemonUrl: string; clientToken: string; agentId: string; chainId: string; bridgeId?: string; providerProfile?: string; model?: string; projectId?: string; displayName?: string; templateId?: string }) {
-  if (!agentId || !chainId) throw new Error('agentId and chainId are required to add an agent to a chain');
-  return requestJson(joinUrl(daemonUrl, '/api/v1/agent-instances'), {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${clientToken}` },
-    body: {
-      agent_id: agentId,
-      chain_id: chainId,
-      // The hub's instance_input_from_body honors bridge_id on create, so the
-      // popup's chosen bridge is respected (falls back to bridge default when omitted).
-      ...(bridgeId ? { bridge_id: bridgeId } : {}),
-      ...(providerProfile ? { provider_profile: providerProfile } : {}),
-      ...(model ? { model: model } : {}),
-      ...(projectId ? { project_id: projectId } : {}),
-      ...(displayName ? { display_name: displayName } : {}),
-      ...(templateId ? { template_id: templateId } : {}),
-    },
-    timeoutMs: 10000,
-  });
-}
-
 export async function showAgent({ daemonUrl, agentRecordId, agentInstanceId }: { daemonUrl: string; agentRecordId?: string; agentInstanceId?: string }) {
   return requestJson(joinUrl(daemonUrl, '/agents/show'), {
     method: 'POST',
     body: { agent_record_id: agentRecordId || '', agent_instance_id: agentInstanceId || '' },
-  });
-}
-
-// UI-9: agent bridge-support config (which bridges this agent may run on).
-// Rewrite /api/v1 routes with Bearer clientToken (see gap analysis lines 59-62).
-export type AgentBridgeSupportEntry = {
-  bridgeId: string;
-  enabled: boolean;
-  providerProfile?: string;
-  model?: string;
-  priority?: number;
-  maxInstances?: number;
-};
-
-export async function listAgentBridgeSupport({ daemonUrl, clientToken, agentId }: { daemonUrl: string; clientToken: string; agentId: string }) {
-  return requestJson(joinUrl(daemonUrl, `/api/v1/agents/${encodeURIComponent(agentId)}/bridge-support`), {
-    method: 'GET',
-    headers: { Authorization: `Bearer ${clientToken}` },
-  });
-}
-
-export async function patchAgentBridgeSupport({ daemonUrl, clientToken, agentId, bridgeId, enabled, providerProfile, model, priority, maxInstances }: { daemonUrl: string; clientToken: string; agentId: string; bridgeId: string; enabled?: boolean; providerProfile?: string; model?: string; priority?: number; maxInstances?: number }) {
-  return requestJson(joinUrl(daemonUrl, `/api/v1/agents/${encodeURIComponent(agentId)}/bridge-support/${encodeURIComponent(bridgeId)}`), {
-    method: 'PATCH',
-    headers: { Authorization: `Bearer ${clientToken}` },
-    body: {
-      ...(enabled !== undefined ? { enabled } : {}),
-      ...(providerProfile !== undefined ? { provider_profile: providerProfile } : {}),
-      ...(model !== undefined ? { model: model } : {}),
-      ...(priority !== undefined ? { priority } : {}),
-      ...(maxInstances !== undefined ? { max_instances: maxInstances } : {}),
-    },
-  });
-}
-
-// UI-9: Bridges list (all known bridges the user owns / can use).
-export async function listBridges({ daemonUrl, clientToken }: { daemonUrl: string; clientToken: string }) {
-  return requestJson(joinUrl(daemonUrl, '/api/v1/bridges'), {
-    method: 'GET',
-    headers: { Authorization: `Bearer ${clientToken}` },
   });
 }
 
@@ -327,22 +229,6 @@ export async function fetchBridgeDetail({ daemonUrl, clientToken, bridgeId, expa
   const suffix = params.toString() ? `?${params.toString()}` : '';
   return requestJson(joinUrl(daemonUrl, `/api/v1/bridges/${encodeURIComponent(bridgeId)}${suffix}`), {
     method: 'GET',
-    headers: { Authorization: `Bearer ${clientToken}` },
-  });
-}
-
-export async function renameBridge({ daemonUrl, clientToken, bridgeId, label }: { daemonUrl: string; clientToken: string; bridgeId: string; label: string }) {
-  return requestJson(joinUrl(daemonUrl, `/api/v1/bridges/${encodeURIComponent(bridgeId)}`), {
-    method: 'PATCH',
-    headers: { Authorization: `Bearer ${clientToken}` },
-    body: { label },
-  });
-}
-
-// Revoke = "remove": invalidates token, disconnects live WS, marks revoked.
-export async function revokeBridge({ daemonUrl, clientToken, bridgeId }: { daemonUrl: string; clientToken: string; bridgeId: string }) {
-  return requestJson(joinUrl(daemonUrl, `/api/v1/bridges/${encodeURIComponent(bridgeId)}/revoke`), {
-    method: 'POST',
     headers: { Authorization: `Bearer ${clientToken}` },
   });
 }
@@ -376,64 +262,12 @@ export async function validateProjectBridgePath({ daemonUrl, clientToken, projec
   });
 }
 
-export async function createAgent({ daemonUrl, agentId, agentInstanceId, displayName, providerProfile, templateId, projectId, model, start }: { daemonUrl: string; agentId?: string; agentInstanceId?: string; displayName?: string; providerProfile?: string; templateId?: string; projectId?: string; model?: string; start?: boolean }) {
-  return requestJson(joinUrl(daemonUrl, '/agents/create'), {
-    method: 'POST',
-    body: {
-      agent_id: agentId || '',
-      agent_instance_id: agentInstanceId || '',
-      display_name: displayName || '',
-      provider_profile: providerProfile || '',
-      template_id: templateId || '',
-      project_id: sanitizeProjectId(projectId),
-      model: model || 'normal',
-      start: Boolean(start),
-    },
-  });
-}
-
-export async function updateAgent({ daemonUrl, agentRecordId, agentInstanceId, displayName, templateId, providerProfile, projectId, runDir, model, updateAgentIdDefaults }: { daemonUrl: string; agentRecordId?: string; agentInstanceId?: string; displayName?: string; templateId?: string; providerProfile?: string; projectId?: string; runDir?: string; model?: string; updateAgentIdDefaults?: boolean }) {
-  const body: any = { agent_record_id: agentRecordId || '', agent_instance_id: agentInstanceId || '' };
-  if (displayName !== undefined) body.display_name = displayName;
-  if (templateId !== undefined) body.template_id = templateId;
-  if (providerProfile !== undefined) body.provider_profile = providerProfile;
-  if (projectId !== undefined) body.project_id = sanitizeProjectId(projectId);
-  if (runDir !== undefined) body.run_dir = runDir;
-  if (model !== undefined) body.model = model;
-  if (updateAgentIdDefaults) body.update_agent_id_defaults = true;
-  return requestJson(joinUrl(daemonUrl, '/agents/update'), {
-    method: 'POST',
-    body,
-  });
-}
-
-export async function archiveAgent({ daemonUrl, agentRecordId, agentInstanceId }: { daemonUrl: string; agentRecordId?: string; agentInstanceId?: string }) {
-  return requestJson(joinUrl(daemonUrl, '/agents/archive'), {
-    method: 'POST',
-    body: { agent_record_id: agentRecordId || '', agent_instance_id: agentInstanceId || '' },
-  });
-}
-
 export async function stopAgent({ daemonUrl, agentInstanceId, timeInSec }: { daemonUrl: string; agentInstanceId: string; timeInSec?: number }) {
   const body: any = { agent_instance_id: agentInstanceId };
   if (timeInSec !== undefined) body.time_in_sec = timeInSec;
   return requestJson(joinUrl(daemonUrl, '/agents/stop'), {
     method: 'POST',
     body,
-  });
-}
-
-export async function associateAgentWithProject({ daemonUrl, agentRecordId, agentInstanceId, projectId }: { daemonUrl: string; agentRecordId?: string; agentInstanceId?: string; projectId: string }) {
-  return requestJson(joinUrl(daemonUrl, '/agents/associate'), {
-    method: 'POST',
-    body: { agent_record_id: agentRecordId || '', agent_instance_id: agentInstanceId || '', project_id: sanitizeProjectId(projectId) },
-  });
-}
-
-export async function disassociateAgentFromProject({ daemonUrl, agentRecordId, agentInstanceId }: { daemonUrl: string; agentRecordId?: string; agentInstanceId?: string }) {
-  return requestJson(joinUrl(daemonUrl, '/agents/disassociate'), {
-    method: 'POST',
-    body: { agent_record_id: agentRecordId || '', agent_instance_id: agentInstanceId || '' },
   });
 }
 
@@ -471,7 +305,6 @@ export async function fetchChatMessage({ daemonUrl, clientToken, messageId }: { 
     headers: { 'Authorization': `Bearer ${clientToken || ''}` }
   });
 }
-
 
 export async function sendToAgent({ daemonUrl, clientInstanceId, clientToken, agentInstanceId, body, interrupt, artifactIds }: AgentRequest & { body: string; interrupt?: boolean; artifactIds?: string[] }) {
   const attachments = (artifactIds || []).filter(Boolean);
@@ -866,27 +699,6 @@ export async function deleteArtifact({ daemonUrl, clientToken, artifactId }: { d
   });
 }
 
-export async function deleteAgentId({ daemonUrl, clientToken, agentId }: { daemonUrl: string; clientToken: string; agentId: string }) {
-  return requestJson(joinUrl(daemonUrl, '/agent-ids/delete'), {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${clientToken}` },
-    body: JSON.stringify({ agent_id: agentId }),
-  });
-}
-
-export async function listTasks({ daemonUrl, clientToken, chainId = '', createdAfter = 0, createdBefore = 0, limit = 50, offset = 0 }: Omit<UserRpcRequest, 'clientInstanceId'> & { chainId?: string; createdAfter?: number; createdBefore?: number; limit?: number; offset?: number }) {
-  let path = `/tasks?limit=${limit}&offset=${offset}`;
-  if (chainId) path += `&chain_id=${encodeURIComponent(chainId)}`;
-  if (createdAfter > 0) path += `&created_after=${createdAfter}`;
-  if (createdBefore > 0) path += `&created_before=${createdBefore}`;
-
-  return requestJson(joinUrl(daemonUrl, path), {
-    method: 'GET',
-    headers: { 'Authorization': `Bearer ${clientToken}` }
-  });
-}
-
-
 export async function fetchTaskLog({ daemonUrl, clientInstanceId, clientToken, taskId, limit = 50, cursor = 0 }: UserRpcRequest & { taskId: string; limit?: number; cursor?: number }) {
   return requestJson(joinUrl(daemonUrl, '/user-rpc'), {
     method: 'POST',
@@ -916,18 +728,6 @@ export async function createTaskChain({ daemonUrl, agentToken, clientInstanceId,
   return taskMutationRequest({ daemonUrl, agentToken, clientInstanceId, clientToken, action: 'task_chain_create', agentPath: '/task-chains/create', body: chain });
 }
 
-export async function addTaskComment({ daemonUrl, agentToken, clientInstanceId, clientToken, taskId, chainId, body, artifactContentBase64, artifactName, artifactKind }: Partial<TaskAgentRequest & UserRpcRequest> & { taskId: string; chainId?: string; body: string; artifactContentBase64?: string; artifactName?: string; artifactKind?: string }) {
-  const requestBody: any = { task_id: taskId, chain_id: chainId || '', body };
-  if (artifactContentBase64 !== undefined) requestBody.artifact_content_base64 = artifactContentBase64;
-  if (artifactName !== undefined) requestBody.artifact_name = artifactName;
-  if (artifactKind !== undefined) requestBody.artifact_kind = artifactKind;
-  return taskMutationRequest({ daemonUrl, agentToken, clientInstanceId, clientToken, action: 'task_comment', agentPath: '/tasks/comment', body: requestBody });
-}
-
-export async function updateTaskStatus({ daemonUrl, agentToken, clientInstanceId, clientToken, taskId, chainId, status, body }: Partial<TaskAgentRequest & UserRpcRequest> & { taskId: string; chainId?: string; status: string; body: string }) {
-  return taskMutationRequest({ daemonUrl, agentToken, clientInstanceId, clientToken, action: 'task_status', agentPath: '/tasks/status', body: { task_id: taskId, chain_id: chainId || '', status, body } });
-}
-
 export async function updateTask({ daemonUrl, agentToken, clientInstanceId, clientToken, taskId, chainId, title, description, acceptanceCriteria, dependsOn }: Partial<TaskAgentRequest & UserRpcRequest> & { taskId: string; chainId?: string; title?: string; description?: string; acceptanceCriteria?: string; dependsOn?: string }) {
   const body: any = { task_id: taskId, chain_id: chainId || '' };
   if (title !== undefined) body.title = title;
@@ -951,14 +751,6 @@ export async function addTaskParticipant({ daemonUrl, agentToken, clientInstance
 
 export async function removeTaskParticipant({ daemonUrl, agentToken, clientInstanceId, clientToken, taskId, chainId, agentInstanceId, role }: Partial<TaskAgentRequest & UserRpcRequest> & { taskId: string; chainId?: string; agentInstanceId: string; role: string }) {
   return taskMutationRequest({ daemonUrl, agentToken, clientInstanceId, clientToken, action: 'task_participant_remove', agentPath: '/tasks/participant/remove', body: { task_id: taskId, chain_id: chainId || '', agent_instance_id: agentInstanceId, role } });
-}
-
-export async function voteTask({ daemonUrl, agentToken, clientInstanceId, clientToken, taskId, chainId, approved, comment }: Partial<TaskAgentRequest & UserRpcRequest> & { taskId: string; chainId?: string; approved: boolean; comment: string }) {
-  return taskMutationRequest({ daemonUrl, agentToken, clientInstanceId, clientToken, action: 'task_review_vote', agentPath: '/tasks/vote', body: { task_id: taskId, chain_id: chainId || '', result: approved ? 'lgtm' : 'ngtm', comment } });
-}
-
-export async function nudgeTask({ daemonUrl, agentToken, clientInstanceId, clientToken, taskId, chainId, body, interrupt }: Partial<TaskAgentRequest & UserRpcRequest> & { taskId: string; chainId?: string; body: string; interrupt?: boolean }) {
-  return taskMutationRequest({ daemonUrl, agentToken, clientInstanceId, clientToken, action: 'task_nudge', agentPath: '/tasks/nudge', body: { task_id: taskId, chain_id: chainId || '', body, interrupt: Boolean(interrupt) } });
 }
 
 export async function resolveTaskComment({ daemonUrl, agentToken, clientInstanceId, clientToken, taskId, chainId, commentId }: Partial<TaskAgentRequest & UserRpcRequest> & { taskId: string; chainId?: string; commentId: string }) {
@@ -986,72 +778,6 @@ function userRpcRequest({ daemonUrl, clientInstanceId, clientToken, action, body
   });
 }
 
-function normalizeMemoryTargetValue(value: any): string {
-  if (value == null) return '';
-  return String(value).trim();
-}
-
-function normalizeMemoryMutationBody(body: Record<string, any>) {
-  const normalized = { ...body };
-  if (normalized.memory_id == null && normalized.memoryId != null) normalized.memory_id = normalized.memoryId;
-  if (normalized.expected_version == null && normalized.expectedVersion != null) normalized.expected_version = normalized.expectedVersion;
-  if (normalized.target_agent_id == null && normalized.targetAgentId != null) normalized.target_agent_id = normalizeMemoryTargetValue(normalized.targetAgentId);
-  if (normalized.target_project_id == null && normalized.targetProjectId != null) normalized.target_project_id = normalizeMemoryTargetValue(normalized.targetProjectId);
-  if (normalized.target_template_id == null && normalized.targetTemplateId != null) normalized.target_template_id = normalizeMemoryTargetValue(normalized.targetTemplateId);
-  if (normalized.target_bridge_id == null && normalized.targetBridgeId != null) normalized.target_bridge_id = normalizeMemoryTargetValue(normalized.targetBridgeId);
-  if (normalized.source_task_id == null && normalized.sourceTaskId != null) normalized.source_task_id = normalized.sourceTaskId;
-  if (normalized.metadata_json == null && normalized.metadataJson != null) normalized.metadata_json = normalized.metadataJson;
-  return normalized;
-}
-
-export async function listMemory({ daemonUrl, clientInstanceId, clientToken, type, status, targetProjectId, targetBridgeId, includeAllStatuses = true }: UserRpcRequest & { type?: string; status?: string; targetProjectId?: string; targetBridgeId?: string; includeAllStatuses?: boolean }) {
-  return userRpcRequest({
-    daemonUrl,
-    clientInstanceId,
-    clientToken,
-    action: 'memory_list',
-    body: {
-      type: type || '',
-      status: status || '',
-      target_project_id: normalizeMemoryTargetValue(targetProjectId),
-      target_bridge_id: normalizeMemoryTargetValue(targetBridgeId),
-      include_all_statuses: includeAllStatuses,
-    }
-  });
-}
-
-export async function listApplicableMemory({ daemonUrl, clientInstanceId, clientToken, targetAgentId, targetProjectId, targetBridgeId }: UserRpcRequest & { targetAgentId?: string; targetProjectId?: string; targetBridgeId?: string }) {
-  return requestJson(joinUrl(daemonUrl, '/memory/applicable'), { method: 'POST', body: { client_instance_id: clientInstanceId, client_token: clientToken, target_agent_id: normalizeMemoryTargetValue(targetAgentId), target_project_id: normalizeMemoryTargetValue(targetProjectId), target_bridge_id: normalizeMemoryTargetValue(targetBridgeId) } });
-}
-
-export async function showMemory({ daemonUrl, clientInstanceId, clientToken, memoryId }: UserRpcRequest & { memoryId: string }) {
-  return userRpcRequest({ daemonUrl, clientInstanceId, clientToken, action: 'memory_show', body: { memory_id: memoryId } });
-}
-
-export async function memoryHistory({ daemonUrl, clientInstanceId, clientToken, memoryId }: UserRpcRequest & { memoryId: string }) {
-  return userRpcRequest({ daemonUrl, clientInstanceId, clientToken, action: 'memory_history', body: { memory_id: memoryId } });
-}
-
-export async function proposeMemory({ daemonUrl, clientInstanceId, clientToken, proposalAction, ...body }: UserRpcRequest & { proposalAction: 'new' | 'edit' | 'archive' | 'rollback' } & Record<string, any>) {
-  return userRpcRequest({ daemonUrl, clientInstanceId, clientToken, action: `memory_propose_${proposalAction}`, body: normalizeMemoryMutationBody(body) });
-}
-
-export async function decideMemory({ daemonUrl, clientInstanceId, clientToken, proposalId, decision, reason }: UserRpcRequest & { proposalId: string; decision: 'approve' | 'reject'; reason?: string }) {
-  return userRpcRequest({ daemonUrl, clientInstanceId, clientToken, action: 'memory_decide', body: { proposal_id: proposalId, decision, reason: reason || '' } });
-}
-
-export async function testLaunch({ daemonUrl, provider, model }: { daemonUrl: string; provider: string; model: string }) {
-  return requestJson(joinUrl(daemonUrl, '/agents/test-launch'), { method: 'POST', body: { provider, model } });
-}
-
-export async function getTestStatus({ daemonUrl, testRunId }: { daemonUrl: string; testRunId: string }) {
-  return requestJson(joinUrl(daemonUrl, `/agents/test-status?test_run_id=${encodeURIComponent(testRunId)}`));
-}
-
-export async function getTestHistory({ daemonUrl }: { daemonUrl: string }) {
-  return requestJson(joinUrl(daemonUrl, '/agents/test-history'));
-}
-
 export function normalizeProject(project: any): Project {
   return {
     projectId: project.project_id || '',
@@ -1066,32 +792,6 @@ export function normalizeProject(project: any): Project {
     updatedUnixMs: Number(project.updated_unix_ms || 0),
     order: Number(project.order || 0),
   };
-}
-
-export async function listProjects({ daemonUrl, clientInstanceId, clientToken }: UserRpcRequest) {
-  const data = await userRpcRequest({ daemonUrl, clientInstanceId, clientToken, action: 'project_list' });
-  return { ...data, projects: (data.projects ?? []).map(normalizeProject) };
-}
-
-export async function showProject({ daemonUrl, clientInstanceId, clientToken, projectId }: UserRpcRequest & { projectId: string }) {
-  const data = await userRpcRequest({ daemonUrl, clientInstanceId, clientToken, action: 'project_show', body: { project_id: projectId } });
-  return { ...data, project: data.project ? normalizeProject(data.project) : null };
-}
-
-export async function createProject({ daemonUrl, clientInstanceId, clientToken, name, description, anchors }: UserRpcRequest & { name: string; description?: string; anchors?: ProjectAnchor[] }) {
-  return userRpcRequest({ daemonUrl, clientInstanceId, clientToken, action: 'project_create', body: { name, description: description || '', anchors: anchors || [] } });
-}
-
-export async function updateProject({ daemonUrl, clientInstanceId, clientToken, projectId, name, description, anchors }: UserRpcRequest & { projectId: string; name?: string; description?: string; anchors?: ProjectAnchor[] }) {
-  return userRpcRequest({ daemonUrl, clientInstanceId, clientToken, action: 'project_update', body: { project_id: projectId, name: name || '', description: description || '', anchors: anchors || [] } });
-}
-
-export async function deleteProject({ daemonUrl, clientInstanceId, clientToken, projectId }: UserRpcRequest & { projectId: string }) {
-  return userRpcRequest({ daemonUrl, clientInstanceId, clientToken, action: 'project_delete', body: { project_id: projectId } });
-}
-
-export async function reorderProjects({ daemonUrl, clientInstanceId, clientToken, projectIds }: UserRpcRequest & { projectIds: string[] }) {
-  return userRpcRequest({ daemonUrl, clientInstanceId, clientToken, action: 'project_reorder', body: { project_ids: projectIds } });
 }
 
 export async function reorderAgents({ daemonUrl, clientInstanceId, clientToken, agentIds }: UserRpcRequest & { agentIds: string[] }) {
@@ -1110,13 +810,6 @@ export async function savePreference({ daemonUrl, clientToken, key, value, inter
     method: 'POST',
     headers: { 'Authorization': `Bearer ${clientToken || ''}` },
     body: { key, value, interrupt }
-  });
-}
-
-export async function resetPreference({ daemonUrl, clientToken, key }: { daemonUrl: string; clientToken: string; key: string }) {
-  return requestJson(joinUrl(daemonUrl, `/preferences/${encodeURIComponent(key)}`), {
-    method: 'DELETE',
-    headers: { 'Authorization': `Bearer ${clientToken || ''}` }
   });
 }
 
@@ -1142,89 +835,5 @@ export async function triggerMemoryAudit({
       target_chains: targetChains,
       auditor_instructions: auditorInstructions,
     }
-  });
-}
-
-export async function testAgentConnectivity({ daemonUrl, clientToken, providers }: { daemonUrl: string; clientToken: string; providers?: string }) {
-  return requestJson(joinUrl(daemonUrl, '/agents/test-connectivity'), {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${clientToken || ''}` },
-    body: providers ? { providers } : undefined
-  });
-}
-
-export async function fetchTaskChains({
-  daemonUrl,
-  clientToken,
-  status,
-  evaluation,
-  limit = 100,
-}: {
-  daemonUrl: string;
-  clientToken: string;
-  status?: string;
-  evaluation?: string;
-  limit?: number;
-}) {
-  let path = `/task-chains?limit=${limit}`;
-  if (status) path += `&status=${encodeURIComponent(status)}`;
-  if (evaluation) path += `&evaluation=${encodeURIComponent(evaluation)}`;
-  return requestJson(joinUrl(daemonUrl, path), {
-    method: 'GET',
-    headers: { 'Authorization': `Bearer ${clientToken}` },
-  });
-}
-
-export async function fetchTaskChainDetail({ daemonUrl, clientToken, chainId }: { daemonUrl: string; clientToken: string; chainId: string }) {
-  return requestJson(joinUrl(daemonUrl, `/api/v1/task-chains/${encodeURIComponent(chainId)}`), {
-    method: 'GET',
-    headers: { 'Authorization': `Bearer ${clientToken}` },
-  });
-}
-
-export async function createTaskChainRest({ daemonUrl, clientToken, title, description, kind, coordinatorAgentId }: { daemonUrl: string; clientToken: string; title: string; description?: string; kind?: string; coordinatorAgentId?: string }) {
-  return requestJson(joinUrl(daemonUrl, '/api/v1/task-chains'), {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${clientToken}` },
-    body: { title, description: description || '', kind: kind || 'team_work', coordinator_agent_id: coordinatorAgentId || '' },
-  });
-}
-
-export async function updateTaskChainRest({ daemonUrl, clientToken, chainId, title, description, status }: { daemonUrl: string; clientToken: string; chainId: string; title?: string; description?: string; status?: string }) {
-  return requestJson(joinUrl(daemonUrl, `/api/v1/task-chains/${encodeURIComponent(chainId)}`), {
-    method: 'PATCH',
-    headers: { 'Authorization': `Bearer ${clientToken}` },
-    body: { title, description, status },
-  });
-}
-
-export async function updateTaskDetail({ daemonUrl, clientToken, chainId, taskId, title, description, assigneeRef, reviewerRefs }: { daemonUrl: string; clientToken: string; chainId: string; taskId: string; title?: string; description?: string; assigneeRef?: any; reviewerRefs?: any[] }) {
-  return requestJson(joinUrl(daemonUrl, `/api/v1/task-chains/${encodeURIComponent(chainId)}/tasks/${encodeURIComponent(taskId)}`), {
-    method: 'PATCH',
-    headers: { 'Authorization': `Bearer ${clientToken}` },
-    body: { title, description, assignee_ref: assigneeRef, reviewer_refs: reviewerRefs },
-  });
-}
-
-export async function cancelTaskDetail({ daemonUrl, clientToken, chainId, taskId }: { daemonUrl: string; clientToken: string; chainId: string; taskId: string }) {
-  return requestJson(joinUrl(daemonUrl, `/api/v1/task-chains/${encodeURIComponent(chainId)}/tasks/${encodeURIComponent(taskId)}/cancel`), {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${clientToken}` },
-    body: {},
-  });
-}
-
-export async function addChainMember({ daemonUrl, clientToken, chainId, agentInstanceId, role }: { daemonUrl: string; clientToken: string; chainId: string; agentInstanceId: string; role?: string }) {
-  return requestJson(joinUrl(daemonUrl, `/api/v1/task-chains/${encodeURIComponent(chainId)}/members`), {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${clientToken}` },
-    body: { agent_instance_id: agentInstanceId, role: role || 'assignee' },
-  });
-}
-
-export async function removeChainMember({ daemonUrl, clientToken, chainId, agentInstanceId }: { daemonUrl: string; clientToken: string; chainId: string; agentInstanceId: string }) {
-  return requestJson(joinUrl(daemonUrl, `/api/v1/task-chains/${encodeURIComponent(chainId)}/members/${encodeURIComponent(agentInstanceId)}`), {
-    method: 'DELETE',
-    headers: { 'Authorization': `Bearer ${clientToken}` },
   });
 }

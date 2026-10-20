@@ -38,8 +38,6 @@ export const vaultSlice = createSlice({
 });
 
 export const { keyringInstalled, keyringCleared } = vaultSlice.actions;
-
-export const selectVaultState = (state: { vault?: VaultState }) => state?.vault;
 export const selectIsVaultUnlocked = (state: { vault?: VaultState }) => Boolean(state?.vault?.isUnlocked);
 export const selectVaultEpoch = (state: { vault?: VaultState }) => state?.vault?.currentEpoch ?? 0;
 /** Not reactive: read the module-level keyring. Pair with selectIsVaultUnlocked for re-renders. */

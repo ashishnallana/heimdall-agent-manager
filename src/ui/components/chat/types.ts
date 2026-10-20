@@ -1,4 +1,4 @@
-import type { KeyboardEvent, ReactNode, RefObject } from 'react';
+import type { ReactNode } from 'react';
 import { containsVaultArmored, isVaultArmored } from '../../utils/vaultContent.ts';
 
 export type ChatMessage = {
@@ -72,41 +72,6 @@ export type ChatComposerRuntimeControlsProps = {
   restarting?: boolean;
   showProject?: boolean;
   onRestart: (next: { provider: string; model: string; projectId: string }) => void | Promise<void>;
-};
-
-export type ChatComposerProps = {
-  shellDebugId: string;
-  inputDebugId: string;
-  sendButtonDebugId: string;
-  sendAriaLabel: string;
-  value: string;
-  onValueChange: (value: string) => void;
-  onSubmit: (payload?: ChatComposerSubmitPayload) => void | Promise<void>;
-  onPaste?: (event: any) => void | Promise<void>;
-  onKeyDown?: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
-  inputRef?: RefObject<HTMLTextAreaElement | null>;
-  placeholder: string;
-  rows?: number;
-  autoFocus?: boolean;
-  sendTitle?: string;
-  sendDisabled?: boolean;
-  sendLabel?: ReactNode;
-  sendError?: string;
-  sendErrorDebugId?: string;
-  uploadErrorDebugId?: string;
-  upload?: ChatComposerUploadProps | null;
-  runtimeControls?: ChatComposerRuntimeControlsProps | null;
-  notices?: ChatComposerNotice[];
-  leftAdornment?: ReactNode;
-  footer?: ReactNode;
-  keyboardHint?: ReactNode;
-  shellClassName?: string;
-  textareaClassName?: string;
-  controlsClassName?: string;
-  footerClassName?: string;
-  // UI-13: when true, the composer is bottom-pinned on mobile and lifts above
-  // the soft keyboard via safe-area + visualViewport insets. No effect on desktop.
-  mobileBottomPinned?: boolean;
 };
 
 export function extractMessageOptions(message: { metadata?: any; metadata_json?: string }): string[] {

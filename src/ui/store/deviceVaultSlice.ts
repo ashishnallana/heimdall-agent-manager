@@ -160,14 +160,5 @@ export const {
 type WithDeviceVault = { deviceVault?: DeviceVaultState };
 
 export const selectDeviceVault = (state: WithDeviceVault): DeviceVaultState => state?.deviceVault ?? initialDeviceVaultState;
-export const selectDeviceVaultStatus = (state: WithDeviceVault): DeviceVaultStatus => selectDeviceVault(state).status;
-/** True only when this device's keyring is installed. Every decrypted surface requires it. */
-export const selectDeviceVaultReady = (state: WithDeviceVault): boolean => selectDeviceVault(state).status === 'ready';
-export const selectCurrentDeviceId = (state: WithDeviceVault): string => selectDeviceVault(state).deviceId;
-
-/** Whether the app (decrypted surfaces) may render for this status. */
-export function deviceVaultAllowsApp(status: DeviceVaultStatus): boolean {
-  return status === 'ready';
-}
 
 export default deviceVaultSlice.reducer;

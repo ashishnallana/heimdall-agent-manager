@@ -106,20 +106,6 @@ export interface ShellRunMarker {
 }
 
 /**
- * REQ-SHELL-6 §4 — the ACTIVE servers of a chain-scoped page of sessions.
- *
- * A chain-narrowed query returns servers AND chain-attached shells (`chain_id` is an
- * optional scope column for `shell`, shell_session.odin SHELL_SESSION_SCOPE_RULES), but
- * never runs. This keeps only servers, and drops terminal rows for a reason the server
- * cannot cover: the cached page and the live rows can legitimately disagree for one
- * render, when a session exits between the fetch and the repaint. §4 requires a terminal
- * server to drop OFF the panel, so the guard closes that window.
- */
-export function activeServersOf(sessions: ShellSession[]): ShellSession[] {
-  return sessions.filter((session) => session.kind === 'server' && !isTerminal(session));
-}
-
-/**
  * REQ-SHELL-6 §2 — which runs are PINNED above the composer.
  *
  * The user's sequencing is easy to implement backwards, so it is spelled out:
@@ -304,10 +290,6 @@ export const SHELL_TABS: { value: ShellTab; label: string }[] = [
   { value: 'live', label: 'Live' },
   { value: 'finished', label: 'Finished' },
 ];
-
-export function matchesTab(session: ShellSession, tab: ShellTab): boolean {
-  return isTerminal(session) === (tab === 'finished');
-}
 
 /**
  * The statuses a tab can contain. The Status filter offers only these, because a

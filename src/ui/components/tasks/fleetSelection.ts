@@ -61,7 +61,6 @@ export function fleetProviderCapabilities(providersPayload: any): FleetProviderC
 }
 
 export const FLEET_ROLES = ['worker', 'reviewer'] as const;
-export type FleetRole = (typeof FLEET_ROLES)[number];
 
 /**
  * A fleet role name: `worker` is the work role; any other name is a REVIEW role a
