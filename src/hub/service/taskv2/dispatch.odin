@@ -88,7 +88,7 @@ is_agent_not_running_block :: proc(raw: string) -> bool {
 	return kind == "agent_not_running" || kind == "dispatch"
 }
 
-block_ready_agent_in_uow :: proc(svc: ^Service, u: ^Uow, task: domain.Task, agent_id: string, placement_in: Placement, failure: string) -> bool {
+block_ready_agent_in_uow :: proc(svc: ^Service, u: ^Uow, task: domain.Task, agent_id: string, placement_in: Placement, failure: string, cause := "") -> bool {
 	placement := placement_in
 	if instances, err := iface.agent_list_instances_by_chain(svc.agents, task.owner_user_id, string(task.chain_id)); err.code == .None {
 		for inst in instances {
@@ -104,7 +104,7 @@ block_ready_agent_in_uow :: proc(svc: ^Service, u: ^Uow, task: domain.Task, agen
 	json_str(&waiting, "kind", "agent_not_running")
 	json_str(&waiting, "agent_id", agent_id)
 	json_str(&waiting, "bridge_id", placement.bridge_id)
-	if failure == "bridge is offline" do json_str(&waiting, "cause", "bridge_offline")
+	if cause != "" do json_str(&waiting, "cause", cause)
 	json_str(&waiting, "provider", placement.provider)
 	json_str(&waiting, "model", placement.model)
 	json_str(&waiting, "reason", fmt.tprintf("Agent %s (%s/%s) on bridge %s is not running: %s", agent_id, placement.provider, placement.model, placement.bridge_id, failure))

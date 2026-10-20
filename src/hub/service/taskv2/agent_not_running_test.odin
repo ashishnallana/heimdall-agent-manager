@@ -1,6 +1,7 @@
 package taskv2
 
 import "core:strings"
+import "core:fmt"
 import "core:testing"
 import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
@@ -306,4 +307,104 @@ test_agent_not_running_hello_only_answers_matching_offline_blocks :: proc(t: ^te
 	testing.expect_value(t, get_task(fx, "task_other_bridge").blocked_on_json, offline_task.blocked_on_json)
 	testing.expect_value(t, count_events(fx, "task_login", EV_ANSWERED), 0)
 	testing.expect_value(t, count_events(fx, "task_other_bridge", EV_ANSWERED), 0)
+}
+
+// Covers bridge retry floors and exponential backoff beyond the last rematch,
+// including failures after the task's standard rematch timers have expired.
+@(test)
+test_agent_not_running_long_backoff_retries_at_deadline :: proc(t: ^testing.T) {
+	for attempt in ([]int{1, 5, 50}) {
+		fx, log, ok := lease_fixture(t, fmt.tprintf("anr_long_%d", attempt))
+		defer lease_fixture_close(fx, log)
+		if !ok do return
+		chain := seed_live_chain(t, fx, "chain_anr_long")
+		seed_fleet(fx, chain, "agt_w")
+		seed_instance(fx, chain, "inst_w1", "agt_w", "br_1", "running")
+		task: domain.Task
+		if attempt != 1 {
+			_ = publish_task(t, fx, chain, "task_occupied")
+			confirm_holder(fx, "inst_w1")
+			task = publish_task(t, fx, chain, "task_long")
+			fixture_advance(fx, 601)
+			_ = fire_due(&fx.svc, now_ms(&fx.clock), false)
+		}
+		inst, _, _ := iface.agent_get_instance(&fx.agents, "inst_w1")
+		inst.runtime_status = "failed"
+		inst.stopped_at = platform.clock_now(&fx.clock)
+		inst.last_error_json = fmt.tprintf(`{{"code":"bridge_busy","class":"retriable","message":"rate limited","retry_after_ms":900000,"attempt":%d}}`, attempt)
+		_, saved, save_err := iface.agent_save_instance(&fx.agents, inst)
+		testing.expect(t, saved, save_err.message)
+		stored, _, _ := iface.agent_get_instance(&fx.agents, "inst_w1")
+		testing.expect(t, agent.failed_instance_disposition(stored, now_ms(&fx.clock)) == .Hold, fmt.tprintf("typed failure stored: %s", stored.last_error_json))
+		if attempt == 1 {
+			task = publish_task(t, fx, chain, "task_long")
+		} else {
+			on_instance_terminal(&fx.svc, "inst_w1")
+		}
+		task = get_task(fx, "task_long")
+		testing.expect(t, task.state == .Ready && task.blocked_on_json == "", fmt.tprintf("late failure queues task: %v %s", task.state, task.blocked_on_json))
+		wake_log_reset(log)
+		delay := agent.instance_retry_delay_ms(attempt, 900000)
+		fixture_advance(fx, delay / 1000 - 1)
+		_ = fire_due(&fx.svc, now_ms(&fx.clock), false)
+		_, held := lease_of(fx, "inst_w1")
+		testing.expect(t, !held && !wake_log_has_run(log, "inst_w1"), "no retry before deadline")
+		fixture_advance(fx, 2)
+		_ = fire_due(&fx.svc, now_ms(&fx.clock), false)
+		lease, granted := lease_of(fx, "inst_w1")
+		testing.expect(t, granted && lease.task_id == task.task_id && wake_log_has_run(log, "inst_w1"), "long backoff grants without external trigger")
+	}
+}
+
+@(test)
+test_agent_not_running_reviewer_long_backoff_retries :: proc(t: ^testing.T) {
+	fx, log, ok := lease_fixture(t, "anr_review_backoff")
+	defer lease_fixture_close(fx, log)
+	if !ok do return
+	chain := seed_live_chain(t, fx, "chain_review_backoff")
+	seed_fleet(fx, chain, "agt_w")
+	seed_fleet(fx, chain, "agt_r", roles = `["reviewer"]`)
+	seed_instance(fx, chain, "inst_w1", "agt_w", "br_1", "idle")
+	seed_instance(fx, chain, "inst_r1", "agt_r", "br_1", "failed")
+	inst, _, _ := iface.agent_get_instance(&fx.agents, "inst_r1")
+	inst.stopped_at = platform.clock_now(&fx.clock)
+	inst.last_error_json = `{"code":"bridge_busy","class":"retriable","message":"rate limited","retry_after_ms":900000,"attempt":1}`
+	_, _, _ = iface.agent_save_instance(&fx.agents, inst)
+	task := publish_task(t, fx, chain, "task_review_backoff", brief = `{"goal":"g","verify":"true","review_roles":["reviewer"]}`)
+	confirm_holder(fx, "inst_w1")
+	write_verify(fx, string(task.task_id), 1, "h1", 0)
+	_, submitted, _ := lease_submit(&fx.svc, inst_auth("inst_w1"), Submit_Input{summary = "v1", vcs_json = `{"head":"h1","dirty":false}`})
+	if !testing.expect(t, submitted, "submit for review") do return
+	fixture_advance(fx, 899)
+	_ = fire_due(&fx.svc, now_ms(&fx.clock), false)
+	_, held := lease_of(fx, "inst_r1")
+	testing.expect(t, !held, "review waits for backoff")
+	fixture_advance(fx, 2)
+	_ = fire_due(&fx.svc, now_ms(&fx.clock), false)
+	lease, granted := lease_of(fx, "inst_r1")
+	testing.expect(t, granted && lease.kind == domain.LEASE_KIND_REVIEW && wake_log_has_run(log, "inst_r1"), "review retries after long backoff")
+}
+
+@(test)
+test_agent_not_running_solo_hello_recovers_offline_coordinator :: proc(t: ^testing.T) {
+	fx, log, ok := lease_fixture(t, "anr_solo_hello")
+	defer lease_fixture_close(fx, log)
+	if !ok do return
+	chain := solo_chain(t, fx, "chain_solo_hello")
+	coord, _, _ := iface.agent_get_instance(&fx.agents, "inst_coord")
+	coord.runtime_status = "unreachable"
+	_, _, _ = iface.agent_save_instance(&fx.agents, coord)
+	set_bridge_status(fx, "br_1", false)
+	task := publish_solo_task(t, fx, chain, "task_solo_hello")
+	testing.expect(t, task.state == .Backlog && jsonx.extract_string(task.blocked_on_json, "cause", "", true, context.temp_allocator) == "bridge_offline", "solo bridge absence tagged explicitly")
+	set_bridge_status(fx, "br_1", true)
+	coord.runtime_status = "running"
+	_, _, _ = iface.agent_save_instance(&fx.agents, coord)
+	on_bridge_hello(&fx.svc, "br_1", []string{"inst_coord"})
+	task = get_task(fx, "task_solo_hello")
+	testing.expect(t, task.state == .Ready && task.blocked_on_json == "", "hello clears solo offline block")
+	testing.expect_value(t, count_events(fx, "task_solo_hello", EV_ANSWERED), 1)
+	testing.expect(t, !wake_log_has_run(log, "inst_coord") && !wake_log_has_stop(log, "inst_coord"), "solo remains pull-only")
+	res, pulled, _ := lease_next(&fx.svc, inst_auth("inst_coord"), Lease_Next_Input{})
+	testing.expect(t, pulled && res.status == "granted", "reconnected coordinator pulls without Start")
 }
