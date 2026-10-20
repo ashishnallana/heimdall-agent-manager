@@ -271,7 +271,7 @@ action_scheduler_eval_next_cron_slot :: proc(
 	active_until_ms: i64,
 	after_ms: i64,
 ) -> (next_ms: i64, ok: bool) {
-	cron, cron_ok := action_scheduler_parse_cron(cron_expr)
+	_, cron_ok := action_scheduler_parse_cron(cron_expr)
 	if !cron_ok do return 0, false
 
 	tz_clean := strings.trim_space(tz_name)
@@ -285,6 +285,22 @@ action_scheduler_eval_next_cron_slot :: proc(
 			timezone.region_destroy(reg)
 		}
 	}
+
+	return action_scheduler_eval_next_cron_slot_region(cron_expr, reg, blackout_json, active_from_ms, active_until_ms, after_ms)
+}
+
+// Same as action_scheduler_eval_next_cron_slot but with an already-loaded timezone region
+// (nil = UTC); the caller owns reg. Lets tests inject an embedded TZif instead of host tzdata.
+action_scheduler_eval_next_cron_slot_region :: proc(
+	cron_expr: string,
+	reg: ^datetime.TZ_Region,
+	blackout_json: string,
+	active_from_ms: i64,
+	active_until_ms: i64,
+	after_ms: i64,
+) -> (next_ms: i64, ok: bool) {
+	cron, cron_ok := action_scheduler_parse_cron(cron_expr)
+	if !cron_ok do return 0, false
 
 	ref_ms := after_ms
 	if active_from_ms > 0 && active_from_ms > ref_ms {
