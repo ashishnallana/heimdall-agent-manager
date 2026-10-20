@@ -21,6 +21,11 @@ export interface BridgeDeliveryDeps {
 export interface BridgeDeliveryOptions {
   /** Deliver to the enrolling process of a pending enrollment. */
   enrollment?: boolean;
+  /**
+   * The identity key just approved for this bridge. Required to target the right identity
+   * when a reused bridge id still has its old identity live (until the attach commits).
+   */
+  identityPublicKey?: string;
   /** The ephemeral key the operator saw; a different current key is refused. */
   expectedPublicKey?: string;
   /** Extra payload fields (e.g. `enrollment`, `expected_public_key`). */
@@ -40,7 +45,7 @@ export async function deliverKeyringToBridge(
   deps: BridgeDeliveryDeps,
   opts: BridgeDeliveryOptions = {},
 ): Promise<BridgeUnsealResult> {
-  const identity = trustedBridgeById(chain, bridgeId);
+  const identity = trustedBridgeById(chain, bridgeId, opts.identityPublicKey);
   if (!identity) throw new BridgeDeliveryRefused(`Bridge ${bridgeId} has no chain-approved identity; approve it on /device/add first`);
   const served = await deps.fetchTarget(bridgeId, Boolean(opts.enrollment));
   const servedIdentity = String(served.identityPublicKey || '').trim().toLowerCase();

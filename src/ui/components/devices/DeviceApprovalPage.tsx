@@ -10,12 +10,14 @@
 //   browser → signed approval statement + keyring wrap + pair_mac;
 //   bridge  → signed approval of its identity key via /device/approve, then (once the
 //             enrolling process is connected) unseal v2 to an ephemeral key signed by
-//             exactly that identity, with the chain proof and the pair_mac; then wait
-//             for the bridge to restart and reconnect, detect its providers and let the
-//             user pick which to enable (REQ-ENR-2..4).
+//             exactly that identity, with the chain proof and the pair_mac. The approver
+//             picks whether it registers as a NEW bridge or reuses one of their existing
+//             bridge identities (bridgeReuseChoice.ts); then wait for the bridge to restart
+//             and reconnect, detect its providers and let the user pick which to enable
+//             (REQ-ENR-2..4).
 
 import React, { useCallback, useEffect, useState } from 'react';
-import { Alert, Button, Icon, Input, Spinner } from '@ui';
+import { Alert, Button, Icon, Input, Radio, Spinner } from '@ui';
 import { ApiError } from '../../api/cookieFetch';
 import {
   fetchPairCandidates,
@@ -33,6 +35,18 @@ import { useListBridgesQuery } from '../../api/endpoints/bridgeSupport';
 import { enrollmentPendingOutcome, ENROLLMENT_PENDING_FALLBACK_SECONDS } from '../enrollment/bridgeEnrollmentCompletion';
 import ProviderSetupSurface from '../providers/ProviderSetupSurface';
 import { bridgeReconnectReady, reconnectSecondsLeft, reconnectStage, startReconnectWait } from '../providers/providerSummaryModel';
+import {
+  approvalLabel,
+  bridgeApproveBody,
+  bridgeApprovedMessage,
+  initialBridgeChoice,
+  REUSE_WARNING,
+  reusableBridgesOf,
+  reusableBridgeStatusText,
+  reuseTarget,
+  type BridgeChoice,
+} from './bridgeReuseChoice';
+import { sanitizeForDisplay } from '../../utils/deviceApprovalSafety';
 import { fingerprintFor } from '../../utils/deviceIdentity';
 import { buildBridgeApproval, buildBrowserApproval, checkBridgeCodeInfo, checkBrowserCodeInfo, type PairedBrowser } from '../../utils/vaultDeviceFlows';
 import { acceptedPairOrigins, derivePairKeys, isPairHubOrigin, isPairSalt, normalizePairCode, pairApproveMac, type PairKeys } from '../../utils/vaultPairing';
@@ -71,8 +85,9 @@ type Phase =
   | ({ kind: 'review' } & Review)
   | { kind: 'working'; message: string }
   // Bridge only (REQ-ENR-2..4): after the unseal, wait for the restart, then providers.
-  | { kind: 'reconnecting'; bridgeId: string; label: string }
-  | { kind: 'providers'; bridgeId: string; label: string }
+  // `approved` is the new-vs-reuse outcome (bridgeApprovedMessage), shown until done.
+  | { kind: 'reconnecting'; bridgeId: string; label: string; approved: string }
+  | { kind: 'providers'; bridgeId: string; label: string; approved: string }
   | { kind: 'done'; message: string }
   | { kind: 'failed'; message: string };
 
@@ -232,6 +247,7 @@ export default function DeviceApprovalPage() {
   // act on the looked-up request, never on a later edit.
   const codeLocked = phase.kind === 'loading' || phase.kind === 'review' || phase.kind === 'working' || phase.kind === 'reconnecting' || phase.kind === 'providers';
   const [label, setLabel] = useState('');
+  const [bridgeChoice, setBridgeChoice] = useState<BridgeChoice>({ mode: 'new', targetBridgeId: '' });
 
   const lookUp = useCallback(async (raw: string) => {
     if (!raw.trim()) return;
@@ -239,6 +255,7 @@ export default function DeviceApprovalPage() {
     try {
       const review = await lookUpPairing(raw, deviceVaultUserId());
       setLabel(review.label);
+      setBridgeChoice(initialBridgeChoice(review.browser ? null : (review.info as BridgeCodeInfo)));
       setPhase({ kind: 'review', ...review });
     } catch (err) {
       setPhase({ kind: 'failed', message: errText(err) });
@@ -266,10 +283,14 @@ export default function DeviceApprovalPage() {
         return;
       }
       const bridgeInfo = info as BridgeCodeInfo;
-      const { vault_approval, statement } = await buildBridgeApproval(identity, chain, bridgeInfo, finalLabel);
-      const res = await postApproveBridge({ pair_lookup: keys.lookup, approve: true, vault_approval, new_bridge_label: finalLabel });
+      const target = reuseTarget(reusableBridgesOf(bridgeInfo), bridgeChoice);
+      if (bridgeChoice.mode === 'reuse' && !target) throw new Error('Pick the bridge identity to reuse.');
+      const bridgeLabel = approvalLabel(target, finalLabel);
+      const { vault_approval, statement } = await buildBridgeApproval(identity, chain, bridgeInfo, bridgeLabel);
+      const res = await postApproveBridge(bridgeApproveBody(keys.lookup, vault_approval, target, finalLabel));
       const bridgeId = String(res?.hub_observed?.bridge_id || '');
       if (!bridgeId) throw new Error('The hub did not report the approved bridge id.');
+      if (target && bridgeId !== target.bridge_id) throw new Error(`The hub approved ${bridgeId}, not the bridge you chose to reuse (${target.bridge_id}). The vault key was not delivered.`);
       const expectedPublicKey = String(bridgeInfo.bridge_public_key || '');
       await waitForEnrollingBridge(bridgeId, (message) => setPhase({ kind: 'working', message }));
       setPhase({ kind: 'working', message: 'Delivering the vault key to the bridge…' });
@@ -281,12 +302,12 @@ export default function DeviceApprovalPage() {
         fetchTarget: (id) => fetchBridgeUnsealTarget(id, true),
         dispatch: unsealBridge,
         withKeyringBytes: (fn) => withKeyringBytes(fn, after),
-      }, { enrollment: true, expectedPublicKey, extra: { enrollment: true, expected_public_key: expectedPublicKey.trim().toLowerCase(), pair_mac: pairMac } });
-      setPhase({ kind: 'reconnecting', bridgeId, label: finalLabel });
+      }, { enrollment: true, identityPublicKey: bridgeInfo.bridge_identity_public_key, expectedPublicKey, extra: { enrollment: true, expected_public_key: expectedPublicKey.trim().toLowerCase(), pair_mac: pairMac } });
+      setPhase({ kind: 'reconnecting', bridgeId, label: bridgeLabel, approved: bridgeApprovedMessage(target, bridgeLabel, bridgeId) });
     } catch (err) {
       setPhase({ kind: 'failed', message: errText(err) });
     }
-  }, [phase, label]);
+  }, [phase, label, bridgeChoice]);
 
   const deny = useCallback(async () => {
     if (phase.kind !== 'review') return;
@@ -308,7 +329,7 @@ export default function DeviceApprovalPage() {
 
   const reset = () => { setCode(''); setPhase({ kind: 'enter' }); };
   const onBridgeReconnected = useCallback(() => {
-    setPhase((p) => p.kind === 'reconnecting' ? { kind: 'providers', bridgeId: p.bridgeId, label: p.label } : p);
+    setPhase((p) => p.kind === 'reconnecting' ? { kind: 'providers', bridgeId: p.bridgeId, label: p.label, approved: p.approved } : p);
   }, []);
 
   return (
@@ -348,8 +369,11 @@ export default function DeviceApprovalPage() {
               <dd data-debug-id="device-approval-requested-at" className="text-primary">{new Date(String((phase.info as BrowserCodeInfo).created_at)).toLocaleString()}</dd>
             </>) : null}
           </dl>
-          <label className="mb-1 block text-xs font-medium text-muted" htmlFor="device-approval-label">Name it (signed into the approval)</label>
-          <Input id="device-approval-label" data-debug-id="device-approval-label-input" value={label} onChange={setLabel} className="mb-3" />
+          {phase.browser ? null : <BridgeIdentityChoice info={phase.info as BridgeCodeInfo} choice={bridgeChoice} onChange={setBridgeChoice} />}
+          {phase.browser || bridgeChoice.mode === 'new' ? (<>
+            <label className="mb-1 block text-xs font-medium text-muted" htmlFor="device-approval-label">Name it (signed into the approval)</label>
+            <Input id="device-approval-label" data-debug-id="device-approval-label-input" value={label} onChange={setLabel} className="mb-3" />
+          </>) : null}
           <div className="flex flex-wrap gap-2">
             <Button data-debug-id="device-approval-approve-btn" variant="primary" onClick={() => void approve()}>Approve</Button>
             <Button data-debug-id="device-approval-deny-btn" variant="danger" onClick={() => void deny()}>Deny</Button>
@@ -358,12 +382,15 @@ export default function DeviceApprovalPage() {
       ) : null}
 
       {phase.kind === 'working' ? <p data-debug-id="device-approval-progress" className="text-sm text-muted">{phase.message}</p> : null}
+      {phase.kind === 'reconnecting' || phase.kind === 'providers' ? (
+        <p data-debug-id="device-approval-bridge-outcome" className="mb-3 text-sm">{phase.approved}</p>
+      ) : null}
       {phase.kind === 'reconnecting' ? (
         <BridgeReconnectWait
           bridgeId={phase.bridgeId}
           label={phase.label}
           onReady={onBridgeReconnected}
-          onSkip={() => setPhase({ kind: 'done', message: `Bridge “${phase.label}” approved and given the vault key. Choose its providers later in Settings → Providers once it is online.` })}
+          onSkip={() => setPhase({ kind: 'done', message: `${phase.approved} Choose its providers later in Settings → Providers once it is online.` })}
         />
       ) : null}
       {phase.kind === 'providers' ? (
@@ -372,7 +399,7 @@ export default function DeviceApprovalPage() {
             bridgeId={phase.bridgeId}
             mode="enrollment"
             variant="compact"
-            onApply={() => setPhase({ kind: 'done', message: `Bridge “${phase.label}” is online and its providers are set up.` })}
+            onApply={() => setPhase({ kind: 'done', message: `${phase.approved} Bridge “${phase.label}” is online and its providers are set up.` })}
           />
         </div>
       ) : null}
@@ -387,5 +414,47 @@ export default function DeviceApprovalPage() {
       ) : null}
       {phase.kind === 'failed' ? <div data-debug-id="device-approval-error"><Alert tone="danger">{phase.message}</Alert></div> : null}
     </div>
+  );
+}
+
+/** New vs Reuse for a bridge grant; Reuse is hidden when the approver has no reusable bridge. */
+export function BridgeIdentityChoice({ info, choice, onChange }: { info: BridgeCodeInfo; choice: BridgeChoice; onChange: (c: BridgeChoice) => void }) {
+  const list = reusableBridgesOf(info);
+  if (list.length === 0) return null;
+  const hinted = typeof info.previous_bridge_id === 'string' ? info.previous_bridge_id : '';
+  const targetId = choice.targetBridgeId || list[0].bridge_id;
+  return (
+    <fieldset data-debug-id="device-approval-bridge-mode" className="mb-3 flex flex-col gap-2">
+      <legend className="mb-1 text-xs font-medium text-muted">Bridge identity</legend>
+      <Radio name="device-approval-bridge-mode" value="new" data-debug-id="device-approval-mode-new" checked={choice.mode === 'new'} onChange={() => onChange({ mode: 'new', targetBridgeId: targetId })} label="Register as a new bridge" />
+      <Radio name="device-approval-bridge-mode" value="reuse" data-debug-id="device-approval-mode-reuse" checked={choice.mode === 'reuse'} onChange={() => onChange({ mode: 'reuse', targetBridgeId: targetId })} label="Reuse an existing bridge identity" />
+      {choice.mode === 'reuse' ? (<>
+        <div data-debug-id="device-approval-reuse-list" role="radiogroup" aria-label="Bridge to reuse" className="ml-6 flex flex-col gap-1">
+          {list.map((b) => {
+            const name = sanitizeForDisplay(b.label || b.bridge_id).text;
+            const host = sanitizeForDisplay(b.machine_hostname).text;
+            return (
+              <Radio
+                key={b.bridge_id}
+                name="device-approval-reuse-target"
+                value={b.bridge_id}
+                data-debug-id={`device-approval-reuse-${b.bridge_id}`}
+                checked={choice.targetBridgeId === b.bridge_id}
+                onChange={() => onChange({ mode: 'reuse', targetBridgeId: b.bridge_id })}
+                label={(
+                  <span className="text-sm">
+                    <span className="text-primary">{name}</span>
+                    {host ? <span className="text-muted"> · {host}</span> : null}
+                    <span className={b.status === 'online' ? 'text-success' : 'text-muted'}> · {reusableBridgeStatusText(b)}</span>
+                    {b.bridge_id === hinted ? <span className="text-muted"> · this machine says it was this bridge</span> : null}
+                  </span>
+                )}
+              />
+            );
+          })}
+        </div>
+        <div data-debug-id="device-approval-reuse-warning"><Alert tone="warning">{REUSE_WARNING}</Alert></div>
+      </>) : null}
+    </fieldset>
   );
 }

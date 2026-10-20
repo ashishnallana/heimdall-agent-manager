@@ -136,8 +136,25 @@ export interface BrowserCodeInfo {
   pair_hub_origin?: string;
 }
 
+/** An approver-owned, non-revoked, non-pending bridge a bridge grant may reuse (most recently seen first). */
+export interface ReusableBridge {
+  bridge_id: string;
+  label: string;
+  machine_hostname: string;
+  status: 'online' | 'offline' | string;
+  /** RFC 3339. */
+  last_seen: string;
+}
+
 export interface BridgeCodeInfo {
   kind: 'bridge';
+  /**
+   * The enrolling bridge's untrusted hint at the identity it used before. The hub
+   * returns it only when it names an entry of `reusable_bridges`, else ''.
+   */
+  previous_bridge_id?: string;
+  /** Bridges this approval may reuse instead of registering a new one; [] when none. */
+  reusable_bridges?: ReusableBridge[];
   device_label?: string;
   os?: string;
   client?: string;
@@ -223,6 +240,7 @@ export interface BridgeApprovalBody {
   pair_lookup: string;
   approve: boolean;
   vault_approval?: { expected_version: number; statement: string; signature: unknown };
+  /** Reuse this existing bridge identity. Mutually exclusive with `new_bridge_label`. */
   target_bridge_id?: string;
   new_bridge_label?: string;
 }

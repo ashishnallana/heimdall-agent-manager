@@ -607,10 +607,17 @@ export async function verifyBridgeChainProof(proof: BridgeChainProof, keyringCom
   return proof.root_sign_pub;
 }
 
-/** Find the chain-trusted, non-retired bridge identity bound to hub `bridge_id`. */
-export function trustedBridgeById(chain: VerifiedChain, bridgeId: string): VerifiedDevice | null {
+/**
+ * Find the chain-trusted, non-retired bridge identity bound to hub `bridge_id`. While a
+ * reused bridge id is being re-enrolled, BOTH its old and its newly approved identity
+ * are live until the hub retires the old one at commit: pass `identityPub` to pick the
+ * one a delivery is meant for instead of whichever was approved first.
+ */
+export function trustedBridgeById(chain: VerifiedChain, bridgeId: string, identityPub = ''): VerifiedDevice | null {
+  const wanted = identityPub.trim().toLowerCase();
   for (const d of chain.trusted.values()) {
-    if (d.kind === 'bridge' && d.row.bridge_id === bridgeId && !chain.retiredHints.includes(d.device_id)) return d;
+    if (d.kind !== 'bridge' || d.row.bridge_id !== bridgeId || chain.retiredHints.includes(d.device_id)) continue;
+    if (!wanted || d.sign_public_key === wanted) return d;
   }
   return null;
 }
