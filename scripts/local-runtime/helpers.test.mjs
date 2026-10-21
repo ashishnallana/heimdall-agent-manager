@@ -2,7 +2,8 @@
 // Run: node --test scripts/local-runtime/helpers.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -117,4 +118,18 @@ test('bridge config keeps the daemon_id that enrollment wrote', () => {
   const existing = 'daemon_id = "brg_abc"\n';
   const out = renderBridgeConfig(template, { dir: '/s', hubUrl: 'http://h:1', port: 2000, name: 'x', existing });
   assert.match(out, /^daemon_id = "brg_abc"$/m);
+});
+
+test('CLI entry points run when the checkout is reached through a symlink', () => {
+  // /home -> /var/home on Fedora Atomic hosts: a URL comparison of import.meta.url
+  // with argv[1] skipped main there and seeding silently did nothing.
+  const dir = mkdtempSync(join(tmpdir(), 'lr-link-'));
+  try {
+    symlinkSync(join(ROOT, 'scripts'), join(dir, 'scripts'));
+    const out = join(dir, 'config.toml');
+    const r = spawnSync(process.execPath, [join(dir, 'scripts/local-runtime/bridge-config.mjs'), '--template', join(ROOT, 'config.toml'),
+      '--out', out, '--dir', join(dir, 'b'), '--hub-url', 'http://127.0.0.1:1', '--port', '2000', '--name', 'l'], { encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(readFileSync(out, 'utf8'), /^port = 2000$/m);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

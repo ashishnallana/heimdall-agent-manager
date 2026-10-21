@@ -6,8 +6,8 @@
 
 | Script | Verbs | Options that must behave identically |
 |---|---|---|
-| `local-hub` | `start`, `stop`, `status`, `help` | `--name`, `--hub-port`, `--proxy-port`, `--ui-port`, `--user`, `--build nix\|odin\|none`, `--bin-dir`, `--no-ui`, `--no-seed` |
-| `local-bridge` | `start`, `enroll`, `stop`, `status`, `help` | `--name`, `--hub-url`, `--hub <hub-instance>`, `--port`, `--local-endpoint-port`, `--auto-enroll`, `--approve-url`, `--build`, `--bin-dir`, `--pty-host-bin` |
+| `local-hub` | `start`, `stop`, `status`, `approve-device`, `help` | `--name`, `--hub-port`, `--proxy-port`, `--ui-port`, `--user`, `--build nix\|odin\|none`, `--bin-dir`, `--no-ui`, `--no-seed`, `--code` |
+| `local-bridge` | `start`, `enroll`, `stop`, `status`, `help` | `--name`, `--hub-url`, `--hub <hub-instance>`, `--port`, `--local-endpoint-port`, `--auto-enroll`, `--build`, `--bin-dir`, `--pty-host-bin` |
 
 PowerShell spells the options the same way (`-Name` aliases are optional). Exit code 0 means success, and anything else means the launcher refused or failed. The reason goes on stderr.
 
@@ -20,6 +20,7 @@ The state root is `$HEIMDALL_LOCAL_STATE_ROOT`. When that is unset, it is `${XDG
   instance.env      KEY=VALUE record (below)
   hub.db            the hub database (plus -wal/-shm)
   seed.json         seed record: {"version":1,"seeded":{"<fixture-key>":"<id>"}}
+  approver/         device.json: the seed approver's PKCS#8 keys (0700 dir, file 0600)
   bin/              build outputs (nix result-* links or odin binaries)
   logs/             hub.log dev-proxy.log ui.log
   run/<svc>.pid     process records: hub proxy ui
@@ -31,7 +32,7 @@ The state root is `$HEIMDALL_LOCAL_STATE_ROOT`. When that is unset, it is `${XDG
   data/             bridge data_dir (provider_paths.json, caches, artifacts)
   agent-runs/       agent working directories
   endpoint/         --local-run-dir (local endpoint sockets)
-  bin/ logs/ run/bridge.pid enroll-bin/
+  bin/ logs/ run/bridge.pid enroll-bin/ (logs/enroll-shims.log records intercepted service calls)
 ```
 
 Instance names match `^[a-z0-9][a-z0-9-]{0,39}$`.
@@ -40,8 +41,8 @@ Instance names match `^[a-z0-9][a-z0-9-]{0,39}$`.
 
 The file has one `KEY=VALUE` per line with no quoting. Write it atomically: write a temporary file, then rename it.
 
-- **Hub:** `KIND=hub NAME HUB_PORT PROXY_PORT UI_PORT HUB_URL PROXY_URL UI_URL UI_ORIGIN DEV_USER CHECKOUT`
-- **Bridge:** `KIND=bridge NAME HUB_URL APPROVE_URL BRIDGE_PORT LOCAL_ENDPOINT_PORT CONFIG TOKEN_FILE CHECKOUT`
+- **Hub:** `KIND=hub NAME HUB_PORT PROXY_PORT UI_PORT HUB_URL PROXY_URL UI_URL UI_ORIGIN DEV_USER APPROVER_KEY CHECKOUT`
+- **Bridge:** `KIND=bridge NAME HUB_URL HUB_NAME BRIDGE_PORT LOCAL_ENDPOINT_PORT CONFIG TOKEN_FILE CHECKOUT`
 
 The preview integration finds a hub's UI, proxy and API URLs here. Ports are recorded on the first start and reused after that. An explicit port that differs from the recorded one is refused, and so is a bridge `--hub-url` that differs from the one it was enrolled with.
 
@@ -68,7 +69,7 @@ A launcher holds `<instance>/.lock/` (created with `mkdir`, holder PID inside) f
 
 1. Hub with `--db <dir>/hub.db`, `--migrations-dir <checkout>/src/hub/repository/sqlite/migrations`, `--trusted-proxy-cidr 127.0.0.1/32` and `--ui-origin http://127.0.0.1:<ui-port>`. Health is `/api/v1/health`.
 2. `ham-dev-proxy --listen 127.0.0.1:<proxy> --hub-url <hub> --default-user <user>`.
-3. Seed: `node scripts/local-runtime/seed.mjs --api <proxy-url> --record <dir>/seed.json`.
+3. Seed: `node scripts/local-runtime/seed.mjs --api <proxy-url> --record <dir>/seed.json`, then the seed approver (below): `approver.mjs init`. Exit 3 from `init` means the vault was already rooted by another device; warn and continue.
 4. UI: `vite <checkout> --host 127.0.0.1 --port <ui> --strictPort` with `HEIMDALL_DEV_PROXY_URL=<proxy-url>` and `HEIMDALL_HUB_API_URL=<hub-url>`. If `node_modules` is missing, run `npm ci --legacy-peer-deps` first.
 
 If any step fails, stop what has already started and exit non-zero.
@@ -86,7 +87,11 @@ A fixture is skipped when `seed.json` records its key, or when an item with the 
 ## Bridge
 
 - **Config.** `node scripts/local-runtime/bridge-config.mjs --template <checkout>/config.toml --out <dir>/config.toml --dir <dir> --hub-url <url> --port <port> --name <name>` rewrites `data_dir`, `credentials_path`, `agent_run_dir`, `tmux_session`, `[wrapper].daemon_url` (this bridge) and `[ctl].daemon_url` (the hub). It drops `[[peer]]` blocks and keeps an enrolled `daemon_id`.
-- **Enrollment.** Only the supported device flow is used: `ham-bridge enroll --hub <url> --headless --config <cfg> --bridge-token-file <dir>/credentials/bridge-token`. Read the code from the line containing `enter (the|device) code`. With `--auto-enroll`, POST `{"user_code":..,"approve":true}` to `<approve-url>/api/v1/device/approve`. Otherwise a human approves the code in the UI. **`ham-bridge enroll` ends by restarting the installed bridge service** (`systemctl --user restart heimdall-bridge`, `sv`, or `launchctl`). Launchers must put no-op `systemctl`/`sv`/`launchctl` shims first on `PATH`, and unset `PREFIX`, for the enroll process only. Windows has no such call.
+- **Enrollment.** Only the supported device flow is used: `ham-bridge enroll --hub <url> --headless --config <cfg> --bridge-token-file <dir>/credentials/bridge-token`. Pairing is hub-blind: the hub cannot approve a bridge, a trusted vault device of the hub's user must sign the approval and unseal the keyring to the enrolling process. The bridge prints (src/bridge/enroll_device_flow.odin, "Enroll this machine") an indented approval URL ending in `/api/v1/device/add` and, after `and type this pairing code once:`, the pairing code alone on an indented line: 14 symbols of `A-Z2-7` grouped `XXXX-XXXX-XXXX-XX` (src/lib/vault/pairing.odin). Match both lines with those patterns (bash: `lr_enroll_prompt`), never by the surrounding prose.
+  - Without `--auto-enroll`, show the URL and code and wait for `ham-bridge enroll` to exit; a human approves on that hub's UI.
+  - With `--auto-enroll` and `--hub <name>` whose `APPROVER_KEY` exists, run `approver.mjs bridge --api <proxy-url> --key <APPROVER_KEY> --code <code> --label local-<name>`, then wait for `ham-bridge enroll` (it prints `bridge enroll SUCCESS`). Without a seed approver fall back to the human path.
+  - **`ham-bridge enroll` ends by restarting the installed bridge service** (`systemctl --user restart heimdall-bridge`, `sv`, or `launchctl`). Launchers must put no-op `systemctl`/`sv`/`launchctl` shims first on `PATH`, and unset `PREFIX`, for the enroll process only. Windows has no such call.
+- **Seed approver (`approver.mjs`, shared).** Run with `node --import <checkout>/tests/helpers/vaultEndpointHarness.ts scripts/local-runtime/approver.mjs <init|bridge|device> --api <proxy-url> --key <hub>/approver/device.json [--code C] [--label L]` from the checkout (needs `node_modules`, for esbuild). It uses the UI's vault modules and the public API only (`/vault/directory/genesis`, `/device/pair-salts`, `/device/verify`, `/device/approve`, `/bridges/<id>/unseal`, `/vault/devices/<id>/approve`); it never writes the database. `init` creates the vault genesis once and is idempotent (`kept`). `device` approves a browser's pairing code from the UI, because on a seeded hub the browser joins the vault as a second device rather than being its root. Exit 0 success, 3 vault rooted by another device, 1 anything else. The key file is the local hub's account root: keep it in the instance directory, never copy it.
 - **Run.** `HEIMDALL_HAM_CTL_BIN=<ham-ctl> HEIMDALL_BRIDGE_PTY_HOST=1 HEIMDALL_HAM_PTY_HOST_BIN=<pty-host> ham-bridge --config <cfg> --bind-host 127.0.0.1 --port <p> --hub <url> --bridge-token-file <tok> --local-endpoint-port <ep> --local-run-dir <dir>/endpoint`. It is ready when `bridge hub runtime ready` appears in its log.
 - **Providers.** Providers are real installed CLIs, discovered by the bridge's own probe when the hub requests it, and recorded in `data/bridge/provider_paths.json`. The bridge keeps the real `HOME` so provider logins work. Never copy installed bridge credentials, keyrings or provider tokens.
 

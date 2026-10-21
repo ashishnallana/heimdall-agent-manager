@@ -10,7 +10,8 @@
 // name/title already exists. Nothing is ever updated, and no agent is launched:
 // agents are created as definitions and chains without a coordinator.
 // Shared by local-hub.sh and local-hub.ps1 (see CONTRACT.md).
-import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, renameSync, existsSync, realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 export const FIXTURES = {
   agents: [
@@ -107,7 +108,9 @@ export async function seed({ api, record, user = '', fetchImpl = fetch, log = co
   return counts;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Compared by real path: the checkout is often reached through a symlink
+// (/home -> /var/home), and a plain URL comparison then silently skips main.
+if (process.argv[1] && realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1])) {
   seed(parseArgs(process.argv.slice(2))).catch((err) => {
     console.error(`seed: ${err.message}`);
     process.exit(1);

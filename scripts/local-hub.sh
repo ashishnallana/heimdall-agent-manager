@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # local-hub.sh — run an isolated, named local Heimdall hub with its browser UI.
 #
-# Usage: scripts/local-hub.sh <start|stop|status|help> [options]
+# Usage: scripts/local-hub.sh <start|stop|status|approve-device|help> [options]
 #
 #   --name NAME        instance name (default: default). State lives in
 #                      $HEIMDALL_LOCAL_STATE_ROOT/hubs/NAME (default root:
@@ -13,7 +13,14 @@
 #   --build MODE       nix | odin | none       (default: nix; none = use --bin-dir as is)
 #   --bin-dir DIR      take ham-hub/ham-dev-proxy from DIR instead of building
 #   --no-ui            do not start the browser UI
-#   --no-seed          do not seed sample agents, chains and memories
+#   --no-seed          do not seed sample agents, chains, memories or the approver
+#   --code CODE        (approve-device) pairing code the hub UI shows a new browser
+#
+# Seeding also creates the hub user's vault with a SEED APPROVER device whose key
+# stays in approver/device.json (0600) of this instance. It lets
+# `local-bridge.sh start --hub NAME --auto-enroll` approve bridges headlessly. The
+# browser is therefore not the vault root of a local hub: when the UI asks to pair
+# this browser, approve it with `approve-device --code <code>`.
 #
 # Ports are recorded on first start and reused afterwards; passing a different
 # port for an existing instance is refused (stop it and use a new --name instead).
@@ -26,11 +33,11 @@ LR_TAG=local-hub
 # shellcheck source=local-runtime/lib.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/local-runtime/lib.sh"
 
-usage() { sed -n '2,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 CMD="${1:-help}"; [ $# -gt 0 ] && shift
 NAME=default HUB_PORT="" PROXY_PORT="" UI_PORT="" DEV_USER="${USER:-local}"
-BUILD="${HEIMDALL_LOCAL_BUILD:-nix}" BIN_DIR="" UI=1 SEED=1
+BUILD="${HEIMDALL_LOCAL_BUILD:-nix}" BIN_DIR="" UI=1 SEED=1 CODE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --name) NAME="$2"; shift 2 ;;
@@ -42,6 +49,7 @@ while [ $# -gt 0 ]; do
     --bin-dir) BIN_DIR="$2"; BUILD=none; shift 2 ;;
     --no-ui) UI=0; shift ;;
     --no-seed) SEED=0; shift ;;
+    --code) CODE="$2"; shift 2 ;;
     -h|--help) CMD=help; shift ;;
     *) lr_die "unknown option $1 (see: $0 help)" ;;
   esac
@@ -49,6 +57,21 @@ done
 lr_valid_name "$NAME" || lr_die "invalid --name '$NAME' (lowercase letters, digits, dashes)"
 DIR="$(lr_instance_dir hub "$NAME")"
 ENV_FILE="$DIR/instance.env"
+APPROVER_KEY="$DIR/approver/device.json"
+
+# node_modules carries Vite for the UI and esbuild for the approver's UI modules.
+ensure_node_modules() {
+  [ -x "$LR_ROOT/node_modules/.bin/vite" ] && [ -d "$LR_ROOT/node_modules/esbuild" ] && return 0
+  lr_log "installing UI dependencies (npm ci --legacy-peer-deps)"
+  (cd "$LR_ROOT" && npm ci --legacy-peer-deps --no-audit --no-fund)
+}
+
+# approver <verb> [args]: scripts/local-runtime/approver.mjs against this hub's proxy.
+approver() {
+  local verb="$1"; shift
+  (cd "$LR_ROOT" && node --import ./tests/helpers/vaultEndpointHarness.ts "$LR_HELPERS/approver.mjs" \
+    "$verb" --api "http://127.0.0.1:$PROXY_PORT" --key "$APPROVER_KEY" "$@")
+}
 
 # Recorded ports win; a conflicting explicit port is an error, not a silent change.
 resolve_port() { # <var> <key> <default>
@@ -73,7 +96,7 @@ start() {
   lr_env_write "$ENV_FILE" \
     "KIND=hub" "NAME=$NAME" "HUB_PORT=$HUB_PORT" "PROXY_PORT=$PROXY_PORT" "UI_PORT=$UI_PORT" \
     "HUB_URL=http://127.0.0.1:$HUB_PORT" "PROXY_URL=http://127.0.0.1:$PROXY_PORT" \
-    "UI_URL=$ui_origin" "UI_ORIGIN=$ui_origin" "DEV_USER=$DEV_USER" "CHECKOUT=$LR_ROOT"
+    "UI_URL=$ui_origin" "UI_ORIGIN=$ui_origin" "DEV_USER=$DEV_USER" "APPROVER_KEY=$APPROVER_KEY" "CHECKOUT=$LR_ROOT"
 
   local bin="${BIN_DIR:-$DIR/bin}"
   [ -z "$BIN_DIR" ] && HEIMDALL_LOCAL_BUILD="$BUILD" lr_build "$bin" hub dev-proxy
@@ -107,13 +130,20 @@ start() {
     command -v node >/dev/null || { stop_all; lr_die "node is required for seeding (or pass --no-seed)"; }
     node "$LR_HELPERS/seed.mjs" --api "http://127.0.0.1:$PROXY_PORT" --record "$DIR/seed.json" \
       | sed "s/^/[$LR_TAG] /" || { stop_all; lr_die "seeding failed"; }
+    ensure_node_modules || { stop_all; lr_die "npm ci failed"; }
+    # Exit 3: the vault was rooted by another device (a browser) first. The hub is
+    # still usable; bridges are then approved in the UI instead of automatically.
+    local rc=0
+    approver init 2>&1 | sed "s/^/[$LR_TAG] /" || rc="${PIPESTATUS[0]}"
+    case "$rc" in
+      0) ;;
+      3) lr_log "WARN: no seed approver; --auto-enroll is unavailable for this hub" ;;
+      *) stop_all; lr_die "seed approver failed" ;;
+    esac
   fi
 
   if [ "$UI" = 1 ]; then
-    [ -x "$LR_ROOT/node_modules/.bin/vite" ] || {
-      lr_log "installing UI dependencies (npm ci --legacy-peer-deps)"
-      (cd "$LR_ROOT" && npm ci --legacy-peer-deps --no-audit --no-fund) || { stop_all; lr_die "npm ci failed"; }
-    }
+    ensure_node_modules || { stop_all; lr_die "npm ci failed"; }
     lr_log "starting browser UI on $ui_origin"
     lr_spawn "$DIR" ui "$DIR/logs/ui.log" env \
       "HEIMDALL_DEV_PROXY_URL=http://127.0.0.1:$PROXY_PORT" "HEIMDALL_HUB_API_URL=http://127.0.0.1:$HUB_PORT" \
@@ -139,12 +169,23 @@ status() {
   echo "  hub api : $(lr_env_get "$ENV_FILE" HUB_URL)"
   echo "  proxy   : $(lr_env_get "$ENV_FILE" PROXY_URL)  (bridge enrollment approvals)"
   echo "  ui      : $(lr_env_get "$ENV_FILE" UI_URL)"
+  if [ -s "$APPROVER_KEY" ]; then echo "  approver: $APPROVER_KEY"; else echo "  approver: none (approve bridges in the UI)"; fi
+}
+
+# approve-device: let a browser join this hub's vault (the UI shows it a pairing code).
+approve_device() {
+  [ -n "$CODE" ] || lr_die "approve-device needs --code <pairing code shown by the UI>"
+  [ -f "$ENV_FILE" ] || lr_die "no hub instance '$NAME'"
+  lr_owned_pid "$DIR" proxy >/dev/null || lr_die "hub '$NAME' is not running"
+  PROXY_PORT="$(lr_env_get "$ENV_FILE" PROXY_PORT)"
+  approver device --code "$CODE" || lr_die "browser approval failed"
 }
 
 case "$CMD" in
   start) start ;;
   stop) stop ;;
   status) status ;;
+  approve-device) approve_device ;;
   help) usage ;;
   *) usage; exit 2 ;;
 esac

@@ -161,6 +161,10 @@ lr_lock() {
 # lr_build <out-dir> <component...>; components: hub bridge ctl dev-proxy pty-host.
 # Mode from HEIMDALL_LOCAL_BUILD: nix (default; pinned toolchain), odin (compiler on
 # PATH; pty-host needs cargo) or none (use --bin-dir binaries as they are).
+# lr_nix_portable: true when `nix` exists but the host has no /nix/store, i.e. a
+# rootless nix-portable whose store is only mounted inside its own namespace.
+lr_nix_portable() { command -v nix >/dev/null && [ ! -d /nix/store ]; }
+
 lr_build() {
   local out="$1"; shift
   local mode="${HEIMDALL_LOCAL_BUILD:-nix}" c pkg src
@@ -177,6 +181,7 @@ lr_build() {
     case "$mode" in
       nix)
         command -v nix >/dev/null || lr_die "nix not found; use --build odin or --bin-dir <dir>"
+        lr_nix_portable && lr_die "nix is nix-portable: its outputs only run inside its own user namespace, where the bridge keystore's kernel keyring is not the host's; pass --bin-dir <host-runnable binaries>"
         lr_log "nix build .#$pkg"
         nix build "$LR_ROOT#$pkg" -o "$out/result-$pkg" || lr_die "nix build $pkg failed"
         ln -sfn "result-$pkg/bin/$pkg" "$out/$pkg"
@@ -202,4 +207,17 @@ lr_build() {
 lr_bin() {
   [ -x "$1/$2" ] || lr_die "$2 not found in $1 (build it, or pass --bin-dir)"
   printf '%s\n' "$1/$2"
+}
+
+# lr_enroll_prompt <enroll.log> prints "<approval-url> <pairing-code>" once
+# `ham-bridge enroll` has printed both (src/bridge/enroll_device_flow.odin "Enroll
+# this machine"): the URL ends in /api/v1/device/add and the pairing code
+# (src/lib/vault/pairing.odin, 14 symbols of A-Z2-7 grouped 4-4-4-2) sits alone on
+# its line. Prints nothing while either is missing.
+lr_enroll_prompt() {
+  local url code
+  url="$(grep -aoE '^[[:space:]]+https?://[^[:space:]]+/api/v1/device/add[[:space:]]*$' "$1" 2>/dev/null | tail -1 | tr -d '[:space:]' || true)"
+  code="$(grep -aoE '^[[:space:]]+[A-Z2-7]{4}-[A-Z2-7]{4}-[A-Z2-7]{4}-[A-Z2-7]{2}[[:space:]]*$' "$1" 2>/dev/null | tail -1 | tr -d '[:space:]' || true)"
+  [ -n "$url" ] && [ -n "$code" ] && printf '%s %s\n' "$url" "$code"
+  return 0
 }

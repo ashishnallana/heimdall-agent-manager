@@ -6,20 +6,24 @@
 #   --name NAME                 instance name (default: default). State lives in
 #                               $HEIMDALL_LOCAL_STATE_ROOT/bridges/NAME
 #   --hub-url URL               hub API URL, e.g. http://127.0.0.1:18081
-#   --hub NAME                  take --hub-url (and --approve-url) from a local-hub.sh instance
+#   --hub NAME                  take --hub-url (and the seed approver) from a local-hub.sh instance
 #   --port N                    bridge port                 (default 49427)
 #   --local-endpoint-port N     agent-facing endpoint port  (default 49428)
-#   --auto-enroll               if not enrolled yet, run the device flow and approve
-#                               it through --approve-url (the hub's dev proxy, which
-#                               signs the request in as the local user)
-#   --approve-url URL           dev-proxy URL that approves the device code
+#   --auto-enroll               if not enrolled yet, enroll first and approve it
+#                               headlessly with the seed approver of the --hub
+#                               instance (local-hub.sh seeds it), then start. Without
+#                               a seed approver the approval waits for the hub UI.
 #   --build MODE                nix | odin | none (default nix)
 #   --bin-dir DIR               take ham-bridge/ham-ctl/ham-pty-host from DIR
 #   --pty-host-bin PATH         ham-pty-host to run agents with (default: built, else PATH)
 #
-# `enroll` runs the device flow in the foreground: it prints the code, and a human
-# approves it in the hub UI (or it is approved automatically with --approve-url).
-# `start` without a credential starts nothing unless --auto-enroll is given.
+# `enroll` runs the device flow (`ham-bridge enroll --headless`) in the foreground. It
+# prints the hub's approval link and a pairing code; a trusted device of the hub's
+# user (the browser on that hub's UI) opens the link, types the code once and
+# approves, which also delivers the vault keyring to this bridge. The hub cannot
+# approve a bridge by itself (hub-blind pairing). `enroll --auto-enroll` and
+# `start --auto-enroll` let the seed approver do that instead. `start` without a
+# credential starts nothing unless --auto-enroll is given.
 #
 # Providers (claude, codex, ...) are the real installed CLIs: the bridge discovers
 # them with its normal probe when the hub asks, and agents inherit your real HOME so
@@ -30,10 +34,10 @@ LR_TAG=local-bridge
 # shellcheck source=local-runtime/lib.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/local-runtime/lib.sh"
 
-usage() { sed -n '2,28p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,31p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 CMD="${1:-help}"; [ $# -gt 0 ] && shift
-NAME=default HUB_URL="" HUB_NAME="" PORT="" EP_PORT="" AUTO=0 APPROVE_URL=""
+NAME=default HUB_URL="" HUB_NAME="" PORT="" EP_PORT="" AUTO=0 APPROVE_URL="" APPROVER_KEY=""
 BUILD="${HEIMDALL_LOCAL_BUILD:-nix}" BIN_DIR="" PTY_BIN=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -43,7 +47,6 @@ while [ $# -gt 0 ]; do
     --port) PORT="$2"; shift 2 ;;
     --local-endpoint-port) EP_PORT="$2"; shift 2 ;;
     --auto-enroll) AUTO=1; shift ;;
-    --approve-url) APPROVE_URL="$2"; shift 2 ;;
     --build) BUILD="$2"; shift 2 ;;
     --bin-dir) BIN_DIR="$2"; BUILD=none; shift 2 ;;
     --pty-host-bin) PTY_BIN="$2"; shift 2 ;;
@@ -58,11 +61,13 @@ CFG="$DIR/config.toml"
 TOKEN="$DIR/credentials/bridge-token"   # the refresh token is $TOKEN.refresh
 
 resolve() {
+  HUB_NAME="${HUB_NAME:-$(lr_env_get "$ENV_FILE" HUB_NAME)}"
   if [ -n "$HUB_NAME" ]; then
     local henv; henv="$(lr_instance_dir hub "$HUB_NAME")/instance.env"
     [ -f "$henv" ] || lr_die "no local hub instance '$HUB_NAME'"
     HUB_URL="${HUB_URL:-$(lr_env_get "$henv" HUB_URL)}"
-    APPROVE_URL="${APPROVE_URL:-$(lr_env_get "$henv" PROXY_URL)}"
+    APPROVE_URL="$(lr_env_get "$henv" PROXY_URL)"
+    APPROVER_KEY="$(lr_env_get "$henv" APPROVER_KEY)"
   fi
   local rec
   rec="$(lr_env_get "$ENV_FILE" HUB_URL)"
@@ -72,7 +77,6 @@ resolve() {
   HUB_URL="${HUB_URL:-$rec}"
   [ -n "$HUB_URL" ] || lr_die "--hub-url or --hub is required"
   [[ "$HUB_URL" =~ ^https?://[^/]+$ ]] || lr_die "--hub-url must be scheme://host:port with no path"
-  APPROVE_URL="${APPROVE_URL:-$(lr_env_get "$ENV_FILE" APPROVE_URL)}"
   rec="$(lr_env_get "$ENV_FILE" BRIDGE_PORT)"
   [ -n "$rec" ] && [ -n "$PORT" ] && [ "$PORT" != "$rec" ] && lr_die "bridge '$NAME' is recorded with port $rec"
   PORT="${PORT:-${rec:-49427}}"
@@ -84,7 +88,7 @@ resolve() {
 prepare() {
   mkdir -p "$DIR"/{bin,logs,run,data,credentials,agent-runs,endpoint,enroll-bin}
   chmod 700 "$DIR/credentials"
-  lr_env_write "$ENV_FILE" "KIND=bridge" "NAME=$NAME" "HUB_URL=$HUB_URL" "APPROVE_URL=$APPROVE_URL" \
+  lr_env_write "$ENV_FILE" "KIND=bridge" "NAME=$NAME" "HUB_URL=$HUB_URL" "HUB_NAME=$HUB_NAME" \
     "BRIDGE_PORT=$PORT" "LOCAL_ENDPOINT_PORT=$EP_PORT" "CONFIG=$CFG" "TOKEN_FILE=$TOKEN" "CHECKOUT=$LR_ROOT"
   node "$LR_HELPERS/bridge-config.mjs" --template "$LR_ROOT/config.toml" --out "$CFG" \
     --dir "$DIR" --hub-url "$HUB_URL" --port "$PORT" --name "$NAME"
@@ -104,9 +108,22 @@ prepare() {
 
 enrolled() { [ -s "$TOKEN" ] && [ -s "$TOKEN.refresh" ]; }
 
+# seed_approve <code>: headless approval by the hub instance's seed approver
+# (scripts/local-runtime/approver.mjs: the UI's vault modules, real API calls).
+seed_approve() {
+  lr_log "approving pairing code with the seed approver of hub '$HUB_NAME'"
+  (cd "$LR_ROOT" && node --import ./tests/helpers/vaultEndpointHarness.ts "$LR_HELPERS/approver.mjs" bridge \
+    --api "$APPROVE_URL" --key "$APPROVER_KEY" --code "$1" --label "local-$NAME") 2>&1 | sed 's/^/  /'
+  return "${PIPESTATUS[0]}"
+}
+
 # enroll_flow <auto 0|1>: the supported device flow (ham-bridge enroll --headless).
 enroll_flow() {
   local auto="$1" log="$DIR/logs/enroll.log"
+  if [ "$auto" = 1 ] && { [ -z "$HUB_NAME" ] || [ ! -s "$APPROVER_KEY" ]; }; then
+    lr_log "no seed approver (needs --hub NAME of a seeded local-hub.sh instance); approve in the hub UI"
+    auto=0
+  fi
   rm -f "$log"
   # `ham-bridge enroll` finishes by restarting the INSTALLED bridge service
   # (systemctl --user restart heimdall-bridge / sv / launchctl). A local instance
@@ -114,32 +131,37 @@ enroll_flow() {
   # process only; this launcher starts the bridge itself afterwards.
   local shim
   for shim in systemctl sv launchctl; do
-    printf '#!/bin/sh\necho "local-bridge: skipped installed-service call: %s $*"\nexit 0\n' "$shim" > "$DIR/enroll-bin/$shim"
+    # enroll captures the command's stdout, so the record goes to a log file.
+    printf '#!/bin/sh\necho "local-bridge: skipped installed-service call: %s $*" >> "%s"\nexit 0\n' \
+      "$shim" "$DIR/logs/enroll-shims.log" > "$DIR/enroll-bin/$shim"
     chmod 0755 "$DIR/enroll-bin/$shim"
   done
   lr_log "device-flow enrollment against $HUB_URL"
-  env -u PREFIX PATH="$DIR/enroll-bin:$PATH" "$BRIDGE_BIN" enroll --hub "$HUB_URL" --headless \
+  # Own session, so giving up reaches every process a wrapper started.
+  setsid env -u PREFIX PATH="$DIR/enroll-bin:$PATH" "$BRIDGE_BIN" enroll --hub "$HUB_URL" --headless \
     --config "$CFG" --bridge-token-file "$TOKEN" > "$log" 2>&1 &
-  local pid=$! code="" i
+  local pid=$! prompt="" i
   for i in $(seq 1 60); do
-    code="$(grep -aiE 'enter (the|device) code' "$log" 2>/dev/null | tail -1 | awk '{print $NF}' || true)"
-    [ -n "$code" ] && break
+    prompt="$(lr_enroll_prompt "$log")"
+    [ -n "$prompt" ] && break
     kill -0 "$pid" 2>/dev/null || break
     sleep 0.5
   done
-  if [ -z "$code" ]; then
-    kill "$pid" 2>/dev/null || true
-    sed 's/^/  /' "$log" >&2; lr_die "enrollment printed no device code"
+  if [ -z "$prompt" ]; then
+    kill -- "-$pid" 2>/dev/null || true
+    sed 's/^/  /' "$log" >&2; lr_die "ham-bridge enroll printed no approval link and pairing code"
   fi
+  local url="${prompt% *}" code="${prompt#* }"
   if [ "$auto" = 1 ]; then
-    [ -n "$APPROVE_URL" ] || { kill "$pid" 2>/dev/null || true; lr_die "--auto-enroll needs --approve-url or --hub NAME"; }
-    lr_log "approving device code $code via $APPROVE_URL"
-    local resp
-    resp="$(curl -s -m 10 -X POST "$APPROVE_URL/api/v1/device/approve" -H 'Content-Type: application/json' \
-      -d "{\"user_code\":\"$code\",\"approve\":true}")" || resp='{"error":"approve request failed"}'
-    case "$resp" in *'"error"'*) kill "$pid" 2>/dev/null || true; lr_die "approval failed: $resp" ;; esac
+    seed_approve "$code" || { kill -- "-$pid" 2>/dev/null || true; sed 's/^/  /' "$log" >&2; lr_die "headless approval failed"; }
   else
-    lr_log "approve device code $code in the hub UI (Bridges -> enroll); waiting..."
+    # Hub-blind pairing: the hub cannot approve a bridge by itself. A trusted vault
+    # device of the hub's user (the browser on this hub's UI) types the code once,
+    # signs the approval and hands the bridge its keyring; this process waits.
+    lr_log "approve this bridge in the hub UI: open $url"
+    lr_log "and type the pairing code once: $code"
+    lr_log "(a seeded local hub first asks that browser to pair: local-hub.sh approve-device --code ...)"
+    lr_log "waiting for approval (ham-bridge enroll gives up when the code expires)..."
   fi
   if ! wait "$pid"; then sed 's/^/  /' "$log" >&2; lr_die "enrollment failed"; fi
   enrolled || { sed 's/^/  /' "$log" >&2; lr_die "enrollment wrote no access/refresh token pair"; }
@@ -154,7 +176,7 @@ start() {
   prepare
   if ! enrolled; then
     [ "$AUTO" = 1 ] || lr_die "bridge '$NAME' is not enrolled; run '$0 enroll --name $NAME' or pass --auto-enroll"
-    enroll_flow 1
+    enroll_flow "$AUTO"
   fi
   lr_log "starting bridge on 127.0.0.1:$PORT -> $HUB_URL"
   lr_spawn "$DIR" bridge "$DIR/logs/bridge.log" env \

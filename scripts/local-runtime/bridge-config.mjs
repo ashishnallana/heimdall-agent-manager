@@ -9,7 +9,8 @@
 // bridge writes itself (daemon_id after enrollment) are preserved when <cfg>
 // already exists, so re-running never undoes an enrollment. [[peer]] blocks are
 // dropped: a local bridge federates with nothing. Shared by local-bridge.sh/.ps1.
-import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { dirname } from 'node:path';
 
 export function renderBridgeConfig(template, { dir, hubUrl, port, name, existing = '' }) {
@@ -67,6 +68,8 @@ function main(argv) {
   renameSync(`${a.out}.tmp`, a.out);
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Compared by real path: the checkout is often reached through a symlink
+// (/home -> /var/home), and a plain URL comparison then silently skips main.
+if (process.argv[1] && realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1])) {
   try { main(process.argv.slice(2)); } catch (err) { console.error(`bridge-config: ${err.message}`); process.exit(1); }
 }
